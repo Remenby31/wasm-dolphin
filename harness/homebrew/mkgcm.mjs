@@ -5,7 +5,7 @@
 // disc header + bi2 + a tiny apploader (apploader/apploader.c) whose section
 // table is patched here, the DOL, an empty FST, and padding to 17 MiB
 // (the app ignores images smaller than 16 MiB).
-import { readFileSync, writeFileSync } from "node:fs";
+import { readFileSync, truncateSync, writeFileSync } from "node:fs";
 import { parseArgs } from "node:util";
 import { pathToFileURL } from "node:url";
 
@@ -111,7 +111,12 @@ function main() {
     gameId: values.id,
     name: values.name
   });
-  writeFileSync(values.out, img);
+  // Write the data part only, then extend with truncate: the zero padding
+  // becomes a hole, so a 17 MiB image takes ~1 MiB on disk.
+  let end = img.byteLength;
+  while (end > 0 && img[end - 1] === 0) end -= 1;
+  writeFileSync(values.out, img.subarray(0, end));
+  truncateSync(values.out, img.byteLength);
   console.log(`${values.out}: ${img.byteLength} bytes`);
 }
 

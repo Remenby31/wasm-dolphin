@@ -17,6 +17,7 @@ harness/run diff --iso harness/homebrew/out/gxscene.iso   # software vs wgpu, sa
 harness/run matrix harness/matrices/ci-homebrew.json      # games × configs × N runs
 harness/run measure --iso disc.iso --config rec --runs 3  # one cell
 harness/run savestate --iso disc.iso --steps steps.json --to state.sav
+harness/run clean                          # old results, temp profiles, stopped containers
 ```
 
 Every command starts `tools/serve.mjs` on `127.0.0.1:8082` (`--port`, or
@@ -27,7 +28,10 @@ or infrastructure error.
 
 ## Outputs
 
-Results go to `harness/results/<command>-<time>/` (git-ignored). A run whose
+Results go to `harness/results/<command>-<time>/` (git-ignored; only the newest
+8 are kept, `HARNESS_KEEP_RESULTS` to change; `harness/run clean [--keep N] [--all]`
+also removes leftover Chrome profiles and stopped containers labelled
+`gc-harness=1`). A run whose
 disc is not one of the homebrews (a commercial game) writes to
 `$HARNESS_PRIVATE_OUT`, by default `../measures/harness/` next to the checkout,
 so captures of commercial games never land in the repo.
@@ -62,6 +66,11 @@ candidate against the reference on a 160×120 grid:
 | `lostDetail` | share of reference blocks with detail that are flat in the candidate |
 | `extent` / `extentDelta` | horizontal and vertical span of non-black content |
 | `verdict` | `match` (ssim ≥ 0.9), `missing-detail` (lostDetail ≥ 0.3: overlay drawn, 3D missing), `blank`, `geometry-mismatch` (span differs > 2 %), `different` |
+
+Frame grabs prefer `captureStream()`. A canvas that has not repainted since the
+stream opened yields no frame (seen with wgpu on XFB-only homebrews); the grab
+then falls back to an element screenshot with the HUD hidden, which is scaled
+to the page layout and less exact.
 
 It writes `ref.png`, `cand.png`, `diff.png` (reference | candidate | block heat
 map) and `diff.json`, and exits 1 on any verdict listed in `--fail-on`
