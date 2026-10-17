@@ -72,6 +72,7 @@ let a stale archive win (issue #13, R6a).
 | committed `cores/dolphin` | `d7395b3a…` | 15,175,335 |
 | macOS arm64, native | `83514d0e…` | 12,950,792 |
 | Docker linux/arm64 | `6eed0799…` | 12,950,791 |
+| GitHub Actions linux/x64 (reference) | `046badc7…` | 12,950,793 |
 
 - **macOS vs Linux.** The JS glue is identical. Relinking the macOS build
   against the Linux Naga archive gives `6eed0799…`, byte for byte the Docker
@@ -79,7 +80,9 @@ let a stale archive win (issue #13, R6a).
   across hosts. The one remaining byte is in the Rust archive. Cargo hashes
   the `rustc -vV` output, host triple included, into each crate's metadata
   (`naga_spirv_wgsl-87cb3c…` on macOS, `-5dee1c…` on Linux), which changes
-  symbol hashes. Treat the Linux build (Docker, CI) as the reference.
+  symbol hashes. linux/x64 and linux/arm64 differ the same way, for the same
+reason. The CI build (linux/x64, `tools/toolchain/Dockerfile`) is the
+reference; `--docker-platform linux/amd64` reproduces it locally.
 - **Rebuilt vs committed.** Not byte-identical, and cannot be:
   1. the committed core carries a 2.2 MB `name` section (it was built with
      `PROFILING_FUNCS=1`); a default build has none;
@@ -152,6 +155,9 @@ parentheses. Docker Desktop VM: 14 CPUs, 29 GB.
 | macOS, nothing changed, `--no-sync` (19) | 7.5 s | |
 | macOS, one `.cpp` changed (shim or Dolphin), `--no-sync` (13 to 19) | 80 s | 75 s is the LTO link |
 | macOS, Naga rebuilt, with sync (22) | 154 s | sync 37 s, configure 37 s, link 78 s |
+| GitHub Actions `ubuntu-24.04`, 4 vCPU, clean | 1,419 s | sync 59 s, configure 252 s, compile and link 1,105 s |
+| GitHub Actions, one `.cpp` touched | 151 s | link 146 s |
+| GitHub Actions, whole workflow (cached image) | 32 min | build, incremental, check, test, test:contract, dist:source |
 
 Rebuilding after touching a source without changing it produces the same
 `.wasm` hash. For C++ work, edit `vendor/dolphin` or `core/upstream`, iterate
