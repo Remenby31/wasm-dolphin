@@ -158,8 +158,8 @@
     {
       "path": "src/upstream-worker-adapter.js",
       "hashMode": "lf-normalized",
-      "size": 41782,
-      "sha256": "59668683f8e9d9b25fe16403775bc8139fd2c2b8b07b59558f8df06d7e43b92e"
+      "size": 42005,
+      "sha256": "102277062746e5c1eede541e1833daeab4cb0b6e00adf898ccb76e69f9a710e9"
     },
     {
       "path": "src/upstream-worker-protocol.js",

@@ -1,10 +1,9 @@
 // Copyright 2026 wasm-dolphin contributors
 // SPDX-License-Identifier: MIT
 // Matrix spec → ordered list of runs, URL building, and per-cell summaries.
-import { describe, finite, mean, median, percentile } from "./stats.mjs";
-
-const minOf = (v) => (finite(v).length ? Math.min(...finite(v)) : null);
-const maxOf = (v) => (finite(v).length ? Math.max(...finite(v)) : null);
+import { cellChecks, runChecks } from "./correctness.mjs";
+import { describe } from "./stats.mjs";
+import { classify } from "./verdict.mjs";
 
 // Named URL configs. "rec" is the repo's recommended playable preset as
 // quoted in REPORT.md; the others are the variants the evaluation compared.
@@ -30,10 +29,14 @@ export const FRAME_FIELDS = Object.freeze({
   long: "presentationLongFrameCount",
   p95: "presentationP95IntervalMs",
   max: "presentationMaxIntervalMs",
-  pc: "ppcPc"
+  pc: "ppcPc",
+  audioUnderruns: "causalTelemetry.audio.underrunCount"
 });
 
-export const SUMMARY_FIELDS = Object.freeze(["speed", "pres", "vis", "core", "p95", "max", "cpuTotal", "cpuRenderer", "cpuGpu"]);
+export const SUMMARY_FIELDS = Object.freeze([
+  "speed", "speedP5", "speedMin", "vis", "pres", "frameP50", "frameP95", "frameP99", "frameMax",
+  "hitchesPerMin", "audioUnderrunsPerMin", "audioPeak", "errorCount", "cpuTotal", "cpuRenderer", "cpuGpu", "loadAvg"
+]);
 
 export function resolveQuery(config) {
   const raw = config.preset ? PRESETS[config.preset] : config.query;
@@ -82,55 +85,40 @@ export function expandMatrix(spec, { env = process.env } = {}) {
   return out;
 }
 
-// Reduce one run's 1 Hz samples to scalar metrics.
-export function summarizeRun(samples, cpuSamples = []) {
-  const pick = (k) => samples.map((s) => s[k]);
-  const last = samples.at(-1) ?? {};
-  const first = samples[0] ?? {};
-  return {
-    speed: mean(pick("speed")),
-    speedMin: minOf(pick("speed")),
-    pres: mean(pick("pres")),
-    vis: mean(pick("vis")),
-    core: mean(pick("core")),
-    p95: mean(pick("p95")),
-    max: maxOf(pick("max")),
-    frameAdvance: Number.isFinite(last.frame) && Number.isFinite(first.frame) ? last.frame - first.frame : null,
-    jitc: last.jitc ?? null,
-    cpuTotal: median(cpuSamples.map((c) => c.total)),
-    cpuRenderer: median(cpuSamples.map((c) => c.rendererMax)),
-    cpuGpu: median(cpuSamples.map((c) => c.gpu)),
-    cpuTotalP90: percentile(cpuSamples.map((c) => c.total), 90),
-    // presentationFps stayed 0 while the core advanced. Usually a frozen
-    // picture; check the capture, the counter also misses some wgpu XFB paths.
-    zeroPresents: samples.length > 0 && pick("pres").every((p) => !p) && (last.frame ?? 0) > (first.frame ?? 0)
-  };
-}
+export { summarizeRun } from "./metrics.mjs";
 
 export function runFlags(record) {
   const flags = [];
-  if (record.crashed || record.errors?.length) flags.push("crash");
-  if (record.summary?.zeroPresents) flags.push("zero-presents");
+  const checks = record.checks ?? runChecks(record);
+  for (const [k, c] of Object.entries(checks)) if (c.status === "fail") flags.push(`fail:${k}`);
+  if (record.summary?.presentFreezes?.length) flags.push("present-freeze");
+  if (record.overloaded) flags.push("overloaded");
   return flags;
 }
 
-// Group per-run summaries by (game, config) → median/stdev across runs.
-export function summarizeMatrix(results) {
+// Group per-run records by (game, config): correctness checks (what the gate
+// judges), performance medians ± stdev and IQR across runs (a report), and
+// the §1 classification (a report).
+export function summarizeMatrix(results, { games = [] } = {}) {
   const cells = new Map();
   for (const r of results) {
     const key = `${r.game}\u0000${r.config}`;
     if (!cells.has(key)) cells.set(key, { game: r.game, config: r.config, url: r.url, runs: [] });
     cells.get(key).runs.push(r);
   }
+  const byGame = new Map(games.map((g) => [g.id, g]));
   return [...cells.values()].map((cell) => {
     const metrics = {};
     for (const f of SUMMARY_FIELDS) metrics[f] = describe(cell.runs.map((r) => r.summary?.[f]));
+    const checks = cellChecks(cell.runs);
     return {
       game: cell.game,
       config: cell.config,
       url: cell.url,
       runs: cell.runs.length,
-      failedRuns: cell.runs.filter((r) => runFlags(r).length).length,
+      overloadedRuns: cell.runs.filter((r) => r.overloaded).length,
+      checks,
+      classification: classify({ runs: cell.runs, checks, game: byGame.get(cell.game) ?? {} }),
       flags: [...new Set(cell.runs.flatMap(runFlags))],
       metrics
     };
@@ -138,17 +126,31 @@ export function summarizeMatrix(results) {
 }
 
 export function matrixMarkdown(cells, meta = {}) {
-  const fmt = (d) => (d?.median == null ? "–" : d.n > 1 ? `${d.median} ±${d.stdev}` : `${d.median}`);
+  const fmt = (d, digits = 1) => {
+    if (d?.median == null) return "–";
+    const r = (v) => Math.round(v * 10 ** digits) / 10 ** digits;
+    return d.n > 1 ? `${r(d.median)} ±${r(d.stdev)}` : `${r(d.median)}`;
+  };
+  const mark = (c) => ({ pass: "ok", fail: "FAIL", unjudged: "?" })[c?.status] ?? "?";
   const lines = [];
   if (meta.title) lines.push(`# ${meta.title}`, "");
-  if (meta.machine) lines.push(`Machine: ${meta.machine}`, "");
-  lines.push("| Game | Config | Runs | Speed % | Pres/s | Unique/s | p95 ms | CPU % (total / renderer / gpu) | Failed |");
-  lines.push("|---|---|---|---|---|---|---|---|---|");
+  for (const line of meta.env ?? []) lines.push(line);
+  if (meta.env?.length) lines.push("");
+  lines.push("## Correctness (what the gate judges)", "", "| Game | Config | Runs | Crash | Errors | Core freeze | Render |", "|---|---|---|---|---|---|---|");
+  for (const c of cells) lines.push(`| ${c.game} | ${c.config} | ${c.runs} | ${mark(c.checks.crash)} | ${mark(c.checks.errors)} | ${mark(c.checks.coreFreeze)} | ${mark(c.checks.render)} |`);
+  lines.push("", "## Performance (report)", "", "| Game | Config | Class | Speed % (p5) | Unique/s | Frame p95/p99 ms | Hitches/min | Underruns/min | CPU % | Load | Flags |", "|---|---|---|---|---|---|---|---|---|---|---|");
   for (const c of cells) {
     const m = c.metrics;
-    lines.push(`| ${c.game} | ${c.config} | ${c.runs} | ${fmt(m.speed)} | ${fmt(m.pres)} | ${fmt(m.vis)} | ${fmt(m.p95)} | ${fmt(m.cpuTotal)} / ${fmt(m.cpuRenderer)} / ${fmt(m.cpuGpu)} | ${c.failedRuns}${c.flags?.length ? ` (${c.flags.join(", ")})` : ""} |`);
+    lines.push(`| ${c.game} | ${c.config} | ${c.classification.verdict} | ${fmt(m.speed)} (${fmt(m.speedP5)}) | ${fmt(m.vis)} | ${fmt(m.frameP95)} / ${fmt(m.frameP99)} | ${fmt(m.hitchesPerMin)} | ${fmt(m.audioUnderrunsPerMin)} | ${fmt(m.cpuTotal, 0)} | ${fmt(m.loadAvg, 0)} | ${c.flags.join(", ") || "–"} |`);
   }
-  lines.push("", "Values: median ± sample stdev across runs of the per-run mean (1 sample/s).");
+  lines.push("", "Medians ± sample stdev across runs. Unjudged checks and classes:", "");
+  for (const c of cells) {
+    const notes = [
+      ...Object.entries(c.checks).filter(([, x]) => x.status !== "pass").map(([k, x]) => `${k} ${x.status}: ${typeof x.detail === "string" ? x.detail : JSON.stringify(x.detail)}`),
+      ...c.classification.reasons
+    ];
+    if (notes.length) lines.push(`- **${c.game} / ${c.config}**: ${notes.join("; ")}`);
+  }
   return lines.join("\n");
 }
 
@@ -177,4 +179,19 @@ export function forCrossRenderer(query) {
   const p = new URLSearchParams(query);
   p.set("cpu", "single");
   return p.toString();
+}
+
+// Extra A/B items to confirm flagged cells, numbered after the last planned
+// run so every pair stays distinct.
+export function confirmationItems(plan, flagged, { rounds = 2 } = {}) {
+  const wanted = new Set(flagged.map((r) => `${r.game}\u0000${r.config}`));
+  const lastRun = Math.max(...plan.map((p) => p.run));
+  const extra = [];
+  for (let k = 1; k <= rounds; k += 1) {
+    for (const item of plan.filter((p) => p.run === 1 && wanted.has(`${p.game.id}\u0000${p.config.id}`))) {
+      const run = lastRun + k;
+      extra.push({ ...item, run, label: `${item.game.id}__${item.config.id}__r${run}` });
+    }
+  }
+  return extra;
 }

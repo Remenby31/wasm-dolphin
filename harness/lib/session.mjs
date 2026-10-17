@@ -6,6 +6,7 @@ import os from "node:os";
 import path from "node:path";
 import { bootIso, captureAtVi, grabFrame, launchChrome, readCoreProgress, readFrameInfo, readTimeline, REPO_ROOT, watchPage } from "./browser.mjs";
 import { addGamepadMock } from "./gamepad-mock.mjs";
+import { installMonitor } from "./monitor.mjs";
 import { encodePng } from "./png.mjs";
 import { claim } from "./ownership.mjs";
 import { machineSnapshot, sampleChromeCpu } from "./system.mjs";
@@ -14,6 +15,7 @@ export async function openSession({ base, query, iso, headed = true, gamepads = 
   const profileDir = mkdtempSync(path.join(os.tmpdir(), "gc-harness-profile-"));
   const releaseProfile = claim(profileDir, REPO_ROOT, "chrome-profile");
   const context = await launchChrome({ profileDir, headed });
+  await context.addInitScript(installMonitor);
   if (gamepads) await addGamepadMock(context, gamepads);
   const page = context.pages()[0] ?? (await context.newPage());
   for (const [pattern, file] of Object.entries(routes)) {
@@ -42,6 +44,14 @@ export async function openSession({ base, query, iso, headed = true, gamepads = 
   };
 }
 
+export async function monitorSnapshot(session, reset = false) {
+  return session.page.evaluate((r) => window.__harnessMonitor?.snapshot(r) ?? null, reset).catch(() => null);
+}
+
+export async function attachAudio(session) {
+  return session.page.evaluate(() => window.__harnessMonitor?.attachAudio()).catch((e) => ({ attached: false, reason: String(e.message || e) }));
+}
+
 export function savePng(frame, file) {
   mkdirSync(path.dirname(file), { recursive: true });
   writeFileSync(file, encodePng(frame));
@@ -49,7 +59,7 @@ export function savePng(frame, file) {
 }
 
 // Sample __lastFrameInfo and Chrome CPU once per second for `seconds`.
-export async function sample(session, { seconds, shotEvery = 0, shotPrefix = null, stopOnFatal = true }) {
+export async function sample(session, { seconds, shotEvery = 0, shotPrefix = null, stopOnFatal = true, everySecond = null }) {
   const samples = [];
   const cpu = [];
   const shots = [];
@@ -60,6 +70,7 @@ export async function sample(session, { seconds, shotEvery = 0, shotPrefix = nul
     if (shotEvery && shotPrefix && (i + 1) % shotEvery === 0) {
       shots.push(savePng(await grabFrame(session.page), `${shotPrefix}-t${String(i + 1).padStart(3, "0")}.png`));
     }
+    if (everySecond) await everySecond(i);
     if (stopOnFatal && session.watch.fatal().length) break;
   }
   return { samples, cpu, shots };

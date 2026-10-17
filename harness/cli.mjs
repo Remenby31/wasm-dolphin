@@ -3,7 +3,7 @@
 // QA harness entry point. Usage: harness/run <command> [options]; see harness/README.md.
 import { execFileSync } from "node:child_process";
 import { randomBytes } from "node:crypto";
-import { existsSync, mkdirSync, readdirSync, readFileSync, rmSync, statSync, writeFileSync } from "node:fs";
+import { existsSync, mkdirSync, mkdtempSync, readdirSync, readFileSync, rmSync, statSync, writeFileSync } from "node:fs";
 import os from "node:os";
 import path from "node:path";
 import { parseArgs } from "node:util";
@@ -12,9 +12,15 @@ import { analyzeDifferential, INTERP_QUERY, JIT_QUERY } from "./lib/fuzz.mjs";
 import { releaseAll, setPad } from "./lib/gamepad-mock.mjs";
 import { compareFrames, diffImage, identical } from "./lib/image-diff.mjs";
 import { decodePadRow, decodeRows, hex } from "./lib/markers.mjs";
-import { captureSourceOk, captureSupported, expandMatrix, forCrossRenderer, matrixMarkdown, PRESETS, resolveQuery, runFlags, summarizeMatrix, summarizeRun } from "./lib/matrix.mjs";
+import { captureSourceOk, captureSupported, confirmationItems, expandEnv, expandMatrix, forCrossRenderer, matrixMarkdown, PRESETS, resolveQuery, runFlags, summarizeMatrix, summarizeRun } from "./lib/matrix.mjs";
+import { runChecks } from "./lib/correctness.mjs";
+import { browserInfo, isOverloaded, waitForLoad } from "./lib/env.mjs";
+import { correctnessGate, decide, findingsGate, gateMarkdown, mergeGates, perfReport, runsByCell } from "./lib/gate.mjs";
+import { renderChecks } from "./lib/render-check.mjs";
+import { IDENTITY_FILE } from "./lib/server.mjs";
+import { mergeTimeline } from "./lib/timeline.mjs";
 import { decodePng } from "./lib/png.mjs";
-import { captureInSession, grabFrame, openSession, sample, savePng, waitSeconds } from "./lib/session.mjs";
+import { attachAudio, captureInSession, grabFrame, monitorSnapshot, openSession, readTimeline, sample, savePng, waitSeconds } from "./lib/session.mjs";
 import { runSteps, validateSteps } from "./lib/steps.mjs";
 import { machineSnapshot } from "./lib/system.mjs";
 import { claim, deletable, removeIfDeletable } from "./lib/ownership.mjs";
@@ -90,8 +96,8 @@ function configFromArg(arg) {
   return PRESETS[arg] ? { id: arg, preset: arg } : { id: "custom", query: arg };
 }
 
-async function withServer(values, fn) {
-  const server = await ensureServer({ port: Number(values.port) });
+async function withServer(values, fn, root = REPO_ROOT) {
+  const server = await ensureServer({ port: Number(values.port), root });
   try {
     return await fn(server);
   } finally {
@@ -100,30 +106,72 @@ async function withServer(values, fn) {
 }
 
 // ---------------------------------------------------------------- measure
-async function measureOne(server, values, { iso, query, label, warmup, secs, shotEvery, dir, steps }) {
-  const session = await openSession({ base: server.base, query, iso, headed: !values.headless, keepProfile: values["keep-profiles"] });
+// One run: boot, play steps, warm up, then over the measured window drain
+// the complete timeline, sample the counters the timeline lacks, and finish
+// with the exact capture the render check uses.
+async function measureOne(server, values, { iso, query, label, warmup, secs, shotEvery, dir, steps, game = {}, spec = {}, statePath = null }) {
+  const loadGate = await waitForLoad({
+    maxLoad: Number(spec.maxLoad),
+    waitSec: Number(spec.loadWaitSec ?? 60),
+    log: (m) => console.log(`[harness] ${label}: ${m}`)
+  });
+  const routes = statePath ? { "**/__harness_state.sav": statePath } : {};
+  const session = await openSession({ base: server.base, query, iso, headed: !values.headless, keepProfile: values["keep-profiles"], routes });
   try {
+    // Games that boot deterministically (no scripted inputs, no savestate)
+    // are captured at VI output N from boot, before anything else runs.
+    const bootCapture = !statePath && !steps ? await renderCapture(session, { game, spec, query, statePath, dir, label }) : null;
     if (steps) await runSteps(session.page, steps);
+    const audio = game.audio === false ? { attached: false, reason: "disabled in spec" } : await attachAudio(session);
     await waitSeconds(session, warmup);
-    const { samples, cpu, shots } = await sample(session, { seconds: secs, shotEvery, shotPrefix: path.join(dir, label) });
+    const env = await browserInfo(session.page).catch((e) => ({ error: e.message }));
+    await monitorSnapshot(session, true);
+    const chunks = [];
+    const start = await readTimeline(session.page); // discards the warmup
+    const { samples, cpu, shots } = await sample(session, {
+      seconds: secs, shotEvery, shotPrefix: path.join(dir, label),
+      // Drain often enough that no ring can overflow between two reads.
+      everySecond: async (i) => { if (i % 10 === 9) chunks.push(await readTimeline(session.page)); }
+    });
+    chunks.push(await readTimeline(session.page));
+    const monitor = await monitorSnapshot(session);
+    const progress = await readCoreProgress(session.page);
+    const timeline = mergeTimeline(chunks);
     const finalShot = savePng(await grabFrame(session.page), path.join(dir, `${label}.png`));
+    const capture = bootCapture ?? (await renderCapture(session, { game, spec, query, statePath, dir, label }));
     const fatal = session.watch.fatal();
     const record = {
       label,
       url: session.url,
       iso: path.resolve(iso),
+      served: server.identity,
       steps,
       warmupSec: warmup,
       sampleSec: secs,
+      env,
+      loadGate,
       machineBefore: session.machineBefore,
       machineAfter: machineSnapshot(),
-      summary: summarizeRun(samples, cpu),
+      audio,
+      monitor: monitor && { errors: monitor.errors, transport: monitor.transport, audio: monitor.audio, audioTelemetry: monitor.audioTelemetry },
+      summary: summarizeRun({
+        samples, cpu, timeline, windowEnd: chunks.at(-1)?.now ?? null,
+        ticksPerSecond: progress?.coreTicksPerSecond,
+        monitor: monitor && { ...monitor, audioAttached: Boolean(audio?.attached) }
+      }),
+      timelineStart: start?.error ? { error: start.error } : { now: start?.now },
+      ticksPerSecond: progress?.coreTicksPerSecond ?? null,
+      windowEnd: chunks.at(-1)?.now ?? null,
       crashed: fatal.length > 0,
       errors: fatal,
-      events: session.watch.events.slice(0, 50),
+      overloaded: !loadGate.ok || isOverloaded(cpu, Number(spec.maxLoad)),
+      capture,
+      finalShot,
       screenshots: [...shots, finalShot],
+      events: session.watch.events.slice(0, 50),
       samples,
-      cpu
+      cpu,
+      timeline
     };
     writeJson(path.join(dir, `${label}.json`), record);
     return record;
@@ -132,26 +180,43 @@ async function measureOne(server, values, { iso, query, label, warmup, secs, sho
   }
 }
 
+// Render evidence: VI output `renderFrame` after loading the game's
+// savestate, or after boot for games without steps (homebrews boot
+// deterministically). Anything else cannot be judged, and says why.
+async function renderCapture(session, { game, spec, query, statePath, dir, label }) {
+  const supported = captureSupported(query);
+  if (!supported.ok) return { error: supported.why };
+  if (!statePath && game.steps) return { error: "scripted inputs and no savestate: no exact frame to compare" };
+  if (statePath) {
+    const loaded = await pageCall(session.page, "__loadStateFile", new URL("__harness_state.sav", session.url).href, 120000);
+    if (!loaded?.loaded) return { error: `savestate load failed: ${JSON.stringify(loaded)}` };
+  }
+  const index = Number(spec.renderFrame ?? (statePath ? 120 : 300));
+  const c = await captureInSession(session, { index, fromLoad: Boolean(statePath) });
+  if (c.error) return { error: c.error };
+  const file = savePng(c, path.join(dir, `${label}-capture.png`));
+  return { file, index: c.index, fromLoad: c.fromLoad, ticks: c.ticks, source: c.source };
+}
+
 function brief(r) {
   const s = r.summary;
   const f = (v) => (v == null ? "–" : Math.round(v));
   const flags = runFlags(r);
-  return `${r.label}: speed ${f(s.speed)}% pres ${f(s.pres)} vis ${f(s.vis)} p95 ${s.p95?.toFixed?.(1) ?? "–"}ms cpu ${f(s.cpuTotal)}% jitc ${s.jitc ?? "–"} load ${r.machineBefore.loadavg[0]}${flags.length ? ` [${flags.join(", ")}]` : ""}`;
+  return `${r.label}: speed ${f(s.speed)}% (p5 ${f(s.speedP5)}, ${s.speedSource}) unique ${f(s.vis)}/s frame p95 ${s.frameP95 == null ? "–" : s.frameP95.toFixed(1)}ms errors ${s.errorCount} cpu ${f(s.cpuTotal)}% load ${f(s.loadAvg)}${flags.length ? ` [${flags.join(", ")}]` : ""}`;
 }
 
-async function cmdMatrix(argv) {
-  const { values, positionals } = parse(argv, { runs: { type: "string" } });
-  if (!positionals[0]) throw new Error("usage: harness/run matrix <spec.json> [--runs N] [--out dir]");
-  const spec = JSON.parse(readFileSync(positionals[0], "utf8"));
-  if (values.runs) spec.runs = Number(values.runs);
-  const plan = expandMatrix(spec);
-  const isPrivate = spec.games.some((g) => g.localOnly);
-  const dir = outDir(values, spec.name ?? path.basename(positionals[0], ".json"), { private: isPrivate });
-  console.log(`[harness] ${plan.length} runs → ${dir}`);
-  const machine = machineSnapshot();
-  const results = await withServer(values, async (server) => {
-    const out = [];
-    for (const item of plan) {
+// Records keep only what the summary and the gate need; each run's file
+// has the rest.
+const slimRecord = (item, r) => ({
+  game: item.game.id, config: item.config.id, run: item.run, label: r.label, url: r.url, served: r.served,
+  summary: r.summary, crashed: r.crashed, errors: r.errors, overloaded: r.overloaded, capture: r.capture
+});
+
+export async function runPlan(plan, { values, spec, dir, specDir, root = REPO_ROOT, log = console.log }) {
+  const records = [];
+  for (const item of plan) {
+    const server = await ensureServer({ port: Number(values.port), root });
+    try {
       const r = await measureOne(server, values, {
         iso: path.resolve(REPO_ROOT, item.game.iso),
         query: item.query,
@@ -159,20 +224,68 @@ async function cmdMatrix(argv) {
         warmup: Number(spec.warmupSec ?? 15),
         secs: Number(spec.sampleSec ?? 20),
         shotEvery: Number(spec.shotEverySec ?? 0),
-        steps: loadSteps(item.game.steps, path.dirname(path.resolve(positionals[0]))),
+        steps: loadSteps(item.game.steps, specDir),
+        statePath: item.game.state ? path.resolve(specDir, expandEnv(item.game.state)) : null,
+        game: item.game,
+        spec,
         dir
       });
-      console.log(`[harness] ${brief(r)}`);
-      out.push({ game: item.game.id, config: item.config.id, run: item.run, url: r.url, summary: r.summary, crashed: r.crashed, errors: r.errors });
+      log(`[harness] ${brief(r)}`);
+      records.push(slimRecord(item, r));
+    } finally {
+      await server.stop();
     }
-    return out;
-  });
-  const cells = summarizeMatrix(results);
-  writeJson(path.join(dir, "summary.json"), { spec, machine, machineAfter: machineSnapshot(), cells, results });
-  const md = matrixMarkdown(cells, { title: spec.name ?? "matrix", machine: `${machine.cpuModel}, ${machine.cpus} CPUs, ${machine.platform}; ${machine.uptime}` });
+  }
+  return records;
+}
+
+function finishRecords(records, spec) {
+  renderChecks(records, spec.reference);
+  for (const r of records) {
+    r.checks = runChecks(r);
+    r.flags = runFlags(r);
+  }
+  return records;
+}
+
+function envLines(records, dir) {
+  const first = records[0] && JSON.parse(readFileSync(path.join(dir, `${records[0].label}.json`), "utf8"));
+  if (!first) return [];
+  const e = first.env ?? {};
+  const loads = records.map((r) => r.summary?.loadAvg).filter(Number.isFinite);
+  return [
+    `Served snapshot ${first.served?.snapshot?.slice(0, 12) ?? "?"} (commit ${first.served?.commit?.slice(0, 10) ?? "?"}${first.served?.dirty ? ", local changes" : ""}) · Chrome ${e.chrome ?? "?"} · GPU ${e.gpu?.vendor ?? "?"} ${e.gpu?.architecture ?? ""}`,
+    `Machine ${first.machineBefore.cpuModel}, ${first.machineBefore.cpus} CPUs, ${first.machineBefore.platform}; load during runs ${loads.length ? `${Math.min(...loads)}-${Math.max(...loads)}` : "?"} (limit ${first.loadGate?.limit ?? "?"})`
+  ];
+}
+
+export function writeSummary(dir, { spec, records, title }) {
+  const cells = summarizeMatrix(records, { games: spec.games });
+  writeJson(path.join(dir, "summary.json"), { spec, machine: machineSnapshot(), cells, results: records });
+  const md = matrixMarkdown(cells, { title: title ?? spec.name ?? "matrix", env: envLines(records, dir) });
   writeFileSync(path.join(dir, "summary.md"), md + "\n");
+  return { cells, md };
+}
+
+function readSpec(file, values) {
+  const spec = JSON.parse(readFileSync(file, "utf8"));
+  if (values.runs) spec.runs = Number(values.runs);
+  if (values["max-load"]) spec.maxLoad = Number(values["max-load"]);
+  return spec;
+}
+
+async function cmdMatrix(argv) {
+  const { values, positionals } = parse(argv, { runs: { type: "string" }, "max-load": { type: "string" } });
+  if (!positionals[0]) throw new Error("usage: harness/run matrix <spec.json> [--runs N] [--max-load L] [--out dir]");
+  const spec = readSpec(positionals[0], values);
+  const plan = expandMatrix(spec);
+  const dir = outDir(values, spec.name ?? path.basename(positionals[0], ".json"), { private: spec.games.some((g) => g.localOnly) });
+  console.log(`[harness] ${plan.length} runs → ${dir}`);
+  const records = finishRecords(await runPlan(plan, { values, spec, dir, specDir: path.dirname(path.resolve(positionals[0])) }), spec);
+  const { cells, md } = writeSummary(dir, { spec, records });
   console.log("\n" + md);
-  return 0;
+  // Exit status reflects correctness only; performance is a report.
+  return cells.some((c) => Object.values(c.checks).some((x) => x.status === "fail")) ? 1 : 0;
 }
 
 async function cmdMeasure(argv) {
@@ -187,9 +300,14 @@ async function cmdMeasure(argv) {
   if (!values.iso) throw new Error("usage: harness/run measure --iso disc.iso [--config rec|<query>] [--runs 3]");
   const game = { id: values.label ?? path.basename(values.iso).replace(/\.\w+$/, ""), iso: path.resolve(values.iso), localOnly: !values.iso.includes(HOMEBREW_OUT) };
   const spec = { name: `measure-${game.id}`, runs: Number(values.runs), warmupSec: Number(values.warmup), sampleSec: Number(values.secs), games: [game], configs: [configFromArg(values.config)] };
-  const file = path.join(outDir(values, "spec", { private: game.localOnly }), "spec.json");
+  const tmp = mkdtempSync(path.join(os.tmpdir(), "gc-harness-spec-"));
+  const file = path.join(tmp, "spec.json");
   writeJson(file, spec);
-  return cmdMatrix([file, "--out", path.dirname(file), "--port", values.port, ...(values.headless ? ["--headless"] : [])]);
+  try {
+    return await cmdMatrix([file, "--port", values.port, ...(values.out ? ["--out", values.out] : []), ...(values.headless ? ["--headless"] : [])]);
+  } finally {
+    rmSync(tmp, { recursive: true, force: true });
+  }
 }
 
 // ---------------------------------------------------------------- diff
@@ -278,13 +396,35 @@ async function cmdDiff(argv) {
 async function observe(server, values, iso, query, dir, label, index) {
   const session = await openSession({ base: server.base, query, iso, headed: !values.headless, keepProfile: values["keep-profiles"] });
   try {
-    const capture = await captureInSession(session, { index, timeoutMs: Number(values.timeout) * 1000 });
+    const capture = await captureInSession(session, { index, timeoutMs: Number(values.timeout ?? 90) * 1000 });
     const info = await readFrameInfo(session.page).catch(() => null);
     if (!capture.error) savePng(capture, path.join(dir, `${label}.png`));
     return { url: session.url, capture, info, fatal: session.watch.fatal() };
   } finally {
     await session.close();
   }
+}
+
+// build.sh writes <name>.symbols.json next to each cpufuzz image (PC → program mapping).
+const symbolsFor = (iso) => {
+  const file = iso.replace(/\.\w+$/, ".symbols.json");
+  return existsSync(file) ? JSON.parse(readFileSync(file, "utf8")) : null;
+};
+
+async function runFuzz(server, values, { isos, dir, frame = 1700, interp = INTERP_QUERY, jit = JIT_QUERY }) {
+  for (const iso of isos) if (!existsSync(iso)) throw new Error(`${iso} missing: run harness/run build-iso first`);
+  const report = { machine: machineSnapshot(), served: server.identity, frame, interpQuery: interp, jitQuery: jit, results: [] };
+  for (const iso of isos) {
+    const name = path.basename(iso).replace(/\.\w+$/, "");
+    const a = await observe(server, values, iso, interp, dir, `${name}-interp`, frame);
+    const b = await observe(server, values, iso, jit, dir, `${name}-jit`, frame);
+    const verdict = analyzeDifferential({ interp: a, jit: b, symbols: symbolsFor(iso) });
+    const slim = (r) => ({ url: r.url, capture: r.capture.error ? { error: r.capture.error } : { viOutput: r.capture.index, ticks: r.capture.ticks }, jitc: r.info?.jitc, jitr: r.info?.jitr, pc: hex(r.info?.pc ?? 0), fatal: r.fatal?.slice(0, 3) });
+    report.results.push({ iso: name, ...verdict, interp: slim(a), jit: slim(b) });
+    console.log(`[fuzz] ${name}: ${verdict.ok ? "OK" : "FAIL"} ${verdict.findings.map((f) => `${f.kind}${f.program != null ? ` (program ${f.program} word ${f.word}, ${f.group})` : ""}${f.error ? `: ${f.error}` : ""}`).join("; ")}`);
+  }
+  writeJson(path.join(dir, "fuzz.json"), report);
+  return report;
 }
 
 async function cmdFuzz(argv) {
@@ -297,27 +437,8 @@ async function cmdFuzz(argv) {
     jit: { type: "string", default: JIT_QUERY }
   });
   const isos = positionals.length ? positionals : ["cpufuzz", "cpufuzz-nomcrf", "consoletest", "padtest"].map((n) => path.join(HOMEBREW_OUT, `${n}.iso`));
-  for (const iso of isos) if (!existsSync(iso)) throw new Error(`${iso} missing: run harness/run build-iso first`);
-  // build.sh writes <name>.symbols.json next to each cpufuzz image (PC → program mapping).
-  const symbolsFor = (iso) => {
-    const file = iso.replace(/\.\w+$/, ".symbols.json");
-    return existsSync(file) ? JSON.parse(readFileSync(file, "utf8")) : null;
-  };
   const dir = outDir(values, "fuzz");
-  const report = { machine: machineSnapshot(), frame: Number(values.frame), interpQuery: values.interp, jitQuery: values.jit, results: [] };
-  await withServer(values, async (server) => {
-    report.served = server.identity;
-    for (const iso of isos) {
-      const name = path.basename(iso).replace(/\.\w+$/, "");
-      const interp = await observe(server, values, iso, values.interp, dir, `${name}-interp`, Number(values.frame));
-      const jit = await observe(server, values, iso, values.jit, dir, `${name}-jit`, Number(values.frame));
-      const verdict = analyzeDifferential({ interp, jit, symbols: symbolsFor(iso) });
-      const slim = (r) => ({ url: r.url, capture: r.capture.error ? { error: r.capture.error } : { viOutput: r.capture.index, ticks: r.capture.ticks }, jitc: r.info?.jitc, jitr: r.info?.jitr, pc: hex(r.info?.pc ?? 0), fatal: r.fatal?.slice(0, 3) });
-      report.results.push({ iso: name, ...verdict, interp: slim(interp), jit: slim(jit) });
-      console.log(`[fuzz] ${name}: ${verdict.ok ? "OK" : "FAIL"} ${verdict.findings.map((f) => `${f.kind}${f.program != null ? ` (program ${f.program} word ${f.word}, ${f.group})` : ""}${f.error ? `: ${f.error}` : ""}`).join("; ")}`);
-    }
-  });
-  writeJson(path.join(dir, "fuzz.json"), report);
+  const report = await withServer(values, (server) => runFuzz(server, values, { isos, dir, frame: Number(values.frame), interp: values.interp, jit: values.jit }));
   console.log(`[fuzz] report: ${path.join(dir, "fuzz.json")}`);
   return report.results.every((r) => r.ok) ? 0 : 1;
 }
@@ -337,26 +458,24 @@ const EXPECTED_BITS = (s) => {
   return out.sort();
 };
 
-async function cmdPads(argv) {
-  const { values } = parse(argv, {
-    iso: { type: "string", default: path.join(HOMEBREW_OUT, "padtest.iso") },
-    // padtest crashes the WASM JIT today (see `fuzz`), so pads run interpreted.
-    query: { type: "string", default: "core=upstream&video=software&cpu=dual&speed=1&wasmjit=0&metrics=1" }
-  });
-  const dir = outDir(values, "pads");
-  const report = await withServer(values, async (server) => {
-    const session = await openSession({ base: server.base, query: values.query, iso: values.iso, headed: !values.headless, gamepads: { count: 4 }, keepProfile: values["keep-profiles"] });
+// padtest crashes the WASM JIT today (see `fuzz`), so pads run interpreted.
+const PADS_QUERY = "core=upstream&video=software&cpu=dual&speed=1&wasmjit=0&metrics=1";
+
+async function runPads(server, values, { iso, query, dir }) {
+  const session = await openSession({ base: server.base, query, iso, headed: !values.headless, gamepads: { count: 4 }, keepProfile: values["keep-profiles"] });
+  let report;
+  try {
+    // Inputs reach the game within a few frames; 30 VI outputs later the
+    // picture reflects them. The checksum row makes a misread impossible.
+    const read = async (label) => {
+      const capture = await captureInSession(session, { ahead: 30 });
+      if (capture.error) throw new Error(`${label}: ${capture.error}`);
+      savePng(capture, path.join(dir, `pads-${label}.png`));
+      const decoded = decodeRows(capture);
+      if (!decoded.ok) throw new Error(`${label}: padtest rows unreadable (checksum mismatch)`);
+      return decoded.rows.map((v) => decodePadRow(v));
+    };
     try {
-      // Inputs reach the game within a few frames; 30 VI outputs later the
-      // picture reflects them. The checksum row makes a misread impossible.
-      const read = async (label) => {
-        const capture = await captureInSession(session, { ahead: 30 });
-        if (capture.error) throw new Error(`${label}: ${capture.error}`);
-        savePng(capture, path.join(dir, `${label}.png`));
-        const decoded = decodeRows(capture);
-        if (!decoded.ok) throw new Error(`${label}: padtest rows unreadable (checksum mismatch)`);
-        return decoded.rows.map((v) => decodePadRow(v));
-      };
       const warm = await captureInSession(session, { index: 120 });
       if (warm.error) throw new Error(warm.error);
       const ports = [];
@@ -374,15 +493,43 @@ async function cmdPads(argv) {
       await session.page.keyboard.down("KeyX");
       const kb = await read("keyboard-x");
       await session.page.keyboard.up("KeyX");
-      return { url: session.url, served: server.identity, ports, released, keyboardP1A: Boolean(kb[0]?.pressed.includes("A")), fatal: session.watch.fatal() };
-    } finally {
-      await session.close();
+      report = { url: session.url, served: server.identity, ports, released, keyboardP1A: Boolean(kb[0]?.pressed.includes("A")), fatal: session.watch.fatal() };
+    } catch (e) {
+      // Not judgeable is a result too, never a silent pass.
+      report = { url: session.url, served: server.identity, error: e.message, fatal: session.watch.fatal() };
     }
-  });
+  } finally {
+    await session.close();
+  }
   writeJson(path.join(dir, "pads.json"), { machine: machineSnapshot(), ...report });
+  return report;
+}
+
+// pads report → findings, for the gate.
+export function padFindings(report) {
+  if (report.error) return [{ kind: "unjudged", error: report.error }];
+  return [
+    ...report.ports.filter((p) => !p.ok).map((p) => ({ kind: `port-${p.port}`, error: `expected [${p.expected}] got [${p.got}]` })),
+    ...(report.released ? [] : [{ kind: "release" }]),
+    ...(report.keyboardP1A ? [] : [{ kind: "keyboard-p1" }]),
+    ...(report.fatal?.length ? [{ kind: "crash", error: report.fatal[0].text }] : [])
+  ];
+}
+
+async function cmdPads(argv) {
+  const { values } = parse(argv, {
+    iso: { type: "string", default: path.join(HOMEBREW_OUT, "padtest.iso") },
+    query: { type: "string", default: PADS_QUERY }
+  });
+  const dir = outDir(values, "pads");
+  const report = await withServer(values, (server) => runPads(server, values, { iso: values.iso, query: values.query, dir }));
+  if (report.error) {
+    console.log(`[pads] not judged: ${report.error}`);
+    return 2;
+  }
   for (const p of report.ports) console.log(`[pads] P${p.port}: ${p.ok ? "OK" : "KO"} expected [${p.expected}] got [${p.got}]`);
   console.log(`[pads] released → all neutral: ${report.released}; keyboard X → P1 A: ${report.keyboardP1A}; report ${dir}`);
-  return report.ports.every((p) => p.ok) && report.released && report.keyboardP1A && !report.fatal.length ? 0 : 1;
+  return padFindings(report).length ? 1 : 0;
 }
 
 // ---------------------------------------------------------------- savestate
@@ -414,27 +561,124 @@ async function cmdSavestate(argv) {
 }
 
 // ---------------------------------------------------------------- report
+function loadRunFiles(dir) {
+  return readdirSync(dir)
+    .filter((f) => f.endsWith(".json") && !["summary.json", "spec.json", "gate.json"].includes(f))
+    .map((f) => JSON.parse(readFileSync(path.join(dir, f), "utf8")))
+    .filter((r) => r.samples && r.label)
+    .map((r) => {
+      const [game, config, run] = r.label.split("__");
+      const monitor = r.monitor && { ...r.monitor, audioAttached: Boolean(r.audio?.attached) };
+      return {
+        game, config, run: Number(run?.slice(1)), label: r.label, url: r.url, served: r.served,
+        summary: summarizeRun({ samples: r.samples, cpu: r.cpu, monitor, timeline: r.timeline, ticksPerSecond: r.ticksPerSecond, windowEnd: r.windowEnd }),
+        crashed: r.crashed, errors: r.errors, overloaded: r.overloaded ?? false, capture: r.capture
+      };
+    });
+}
+
 // Rebuild summary.json/summary.md from the per-run JSON files of a result dir.
 function cmdReport(argv) {
   const { positionals } = parse(argv, {});
   const dir = positionals[0];
   if (!dir) throw new Error("usage: harness/run report <result-dir>");
   const old = existsSync(path.join(dir, "summary.json")) ? JSON.parse(readFileSync(path.join(dir, "summary.json"), "utf8")) : {};
-  const results = readdirSync(dir)
-    .filter((f) => f.endsWith(".json") && f !== "summary.json" && f !== "spec.json")
-    .map((f) => JSON.parse(readFileSync(path.join(dir, f), "utf8")))
-    .filter((r) => r.samples && r.label)
-    .map((r) => {
-      const [game, config, run] = r.label.split("__");
-      return { game, config, run: Number(run?.slice(1)), url: r.url, summary: summarizeRun(r.samples, r.cpu), crashed: r.crashed, errors: r.errors };
-    });
-  const cells = summarizeMatrix(results);
-  const machine = old.machine ?? results[0]?.machineBefore;
-  writeJson(path.join(dir, "summary.json"), { ...old, cells, results });
-  const md = matrixMarkdown(cells, { title: old.spec?.name ?? path.basename(dir), machine: machine ? `${machine.cpuModel}, ${machine.cpus} CPUs, ${machine.platform}; ${machine.uptime}` : undefined });
-  writeFileSync(path.join(dir, "summary.md"), md + "\n");
+  const spec = old.spec ?? { games: [] };
+  const { md } = writeSummary(dir, { spec, records: finishRecords(loadRunFiles(dir), spec), title: spec.name ?? path.basename(dir) });
   console.log(md);
   return 0;
+}
+
+// ---------------------------------------------------------------- gate / ab
+// Export the served part of a git ref (page, app, core, server) to a temp dir.
+function exportRef(ref) {
+  const dir = mkdtempSync(path.join(os.tmpdir(), "gc-harness-baseline-"));
+  claim(dir, REPO_ROOT, "baseline-export");
+  const commit = execFileSync("git", ["-C", REPO_ROOT, "rev-parse", ref], { encoding: "utf8" }).trim();
+  const tar = execFileSync("git", ["-C", REPO_ROOT, "archive", commit, "index.html", "src", "cores", "tools"], { maxBuffer: 1 << 30 });
+  execFileSync("tar", ["-x", "-C", dir], { input: tar });
+  writeFileSync(path.join(dir, IDENTITY_FILE), JSON.stringify({ ref, commit, dirty: false }));
+  return dir;
+}
+
+// The gate, from persisted results only, so `harness/run gate` on the same
+// directories always decides what `ab` decided.
+function gateFromDirs(baseDir, candDir) {
+  const read = (d) => JSON.parse(readFileSync(path.join(d, "summary.json"), "utf8"));
+  const optional = (d, f) => (existsSync(path.join(d, f)) ? JSON.parse(readFileSync(path.join(d, f), "utf8")) : null);
+  const base = read(baseDir), cand = read(candDir);
+  const gates = [correctnessGate(base.cells, cand.cells)];
+  for (const [name, file, pick] of [["fuzz", "fuzz.json", (r) => r.results.flatMap((x) => x.findings.map((f) => ({ ...f, iso: x.iso })))], ["pads", "pads.json", (r) => padFindings(r)]]) {
+    const b = optional(baseDir, file), c = optional(candDir, file);
+    if (b || c) gates.push(findingsGate(name, b ? pick(b) : [], c ? pick(c) : null));
+  }
+  const correctness = mergeGates(...gates);
+  const perf = perfReport(runsByCell(base.results), runsByCell(cand.results));
+  return { correctness, perf, decision: decide({ correctness, perf }) };
+}
+
+function cmdGate(argv) {
+  const { values } = parse(argv, { baseline: { type: "string" }, candidate: { type: "string" } });
+  if (!values.baseline || !values.candidate) throw new Error("usage: harness/run gate --baseline <dir> --candidate <dir>");
+  const g = gateFromDirs(values.baseline, values.candidate);
+  console.log(gateMarkdown(g));
+  return g.decision.ok ? 0 : 1;
+}
+
+// Baseline (a git ref, default origin/main) vs this tree: the spec's matrix,
+// plus fuzz and pads if the spec asks, A/B alternated run by run. Cells
+// whose performance regressed are replayed (`--confirm` more pairs, both
+// sides) before the gate decides; everything the decision uses is written
+// to baseline/ and candidate/ so `harness/run gate` reproduces it.
+async function cmdAb(argv) {
+  const { values, positionals } = parse(argv, { runs: { type: "string" }, "max-load": { type: "string" }, confirm: { type: "string", default: "2" }, "baseline-ref": { type: "string", default: "origin/main" } });
+  if (!positionals[0]) throw new Error("usage: harness/run ab <spec.json> [--baseline-ref origin/main] [--runs N] [--max-load L] [--confirm N]");
+  const spec = readSpec(positionals[0], values);
+  const plan = expandMatrix(spec);
+  const specDir = path.dirname(path.resolve(positionals[0]));
+  const dir = outDir(values, `ab-${spec.name ?? "matrix"}`, { private: spec.games.some((g) => g.localOnly) });
+  const baseRoot = exportRef(values["baseline-ref"]);
+  const sides = { baseline: { root: baseRoot, records: [] }, candidate: { root: REPO_ROOT, records: [] } };
+  for (const side of Object.keys(sides)) mkdirSync(path.join(dir, side));
+  console.log(`[harness] A/B ${values["baseline-ref"]} vs working tree, ${plan.length} runs each → ${dir}`);
+  const play = async (items) => {
+    for (const item of items) {
+      // Alternate which side goes first so slow drift does not favour one.
+      const order = item.run % 2 ? ["baseline", "candidate"] : ["candidate", "baseline"];
+      for (const side of order) {
+        const [r] = await runPlan([item], { values, spec, dir: path.join(dir, side), specDir, root: sides[side].root, log: (m) => console.log(m.replace("[harness]", `[${side}]`)) });
+        sides[side].records.push(r);
+      }
+    }
+  };
+  const persist = () => {
+    for (const [side, { records }] of Object.entries(sides)) writeSummary(path.join(dir, side), { spec, records: finishRecords(records, spec), title: `${spec.name ?? "matrix"} (${side})` });
+  };
+  try {
+    await play(plan);
+    for (const [side, { root }] of Object.entries(sides)) {
+      const sideValues = { ...values };
+      if (spec.fuzz?.length) await withServer(sideValues, (server) => runFuzz(server, sideValues, { isos: spec.fuzz.map((f) => path.resolve(REPO_ROOT, f)), dir: path.join(dir, side) }), root);
+      if (spec.pads) await withServer(sideValues, (server) => runPads(server, sideValues, { iso: path.join(HOMEBREW_OUT, "padtest.iso"), query: PADS_QUERY, dir: path.join(dir, side) }), root);
+    }
+    persist();
+    let g = gateFromDirs(path.join(dir, "baseline"), path.join(dir, "candidate"));
+    const flagged = g.perf.filter((r) => r.regressed);
+    if (flagged.length && Number(values.confirm) > 0) {
+      const extra = confirmationItems(plan, flagged, { rounds: Number(values.confirm) });
+      console.log(`[harness] performance regression in ${new Set(flagged.map((r) => `${r.game}/${r.config}`)).size} cell(s), confirming with ${extra.length} more A/B pairs`);
+      await play(extra);
+      persist();
+      g = gateFromDirs(path.join(dir, "baseline"), path.join(dir, "candidate"));
+    }
+    writeJson(path.join(dir, "gate.json"), { baselineRef: values["baseline-ref"], ...g });
+    const md = gateMarkdown(g);
+    writeFileSync(path.join(dir, "gate.md"), md + "\n");
+    console.log(md);
+    return g.decision.ok ? 0 : 1;
+  } finally {
+    rmSync(baseRoot, { recursive: true, force: true });
+  }
 }
 
 // ---------------------------------------------------------------- clean
@@ -476,7 +720,7 @@ function cmdBuildIso() {
   return 0;
 }
 
-const COMMANDS = { matrix: cmdMatrix, measure: cmdMeasure, diff: cmdDiff, fuzz: cmdFuzz, pads: cmdPads, savestate: cmdSavestate, report: cmdReport, clean: cmdClean, "build-iso": cmdBuildIso };
+const COMMANDS = { matrix: cmdMatrix, measure: cmdMeasure, diff: cmdDiff, fuzz: cmdFuzz, pads: cmdPads, savestate: cmdSavestate, report: cmdReport, gate: cmdGate, ab: cmdAb, clean: cmdClean, "build-iso": cmdBuildIso };
 
 const [command, ...rest] = process.argv.slice(2);
 if (!COMMANDS[command]) {

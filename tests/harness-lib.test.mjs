@@ -16,7 +16,7 @@ test("stats: median, sample stdev and nearest-rank percentile ignore non-numbers
   assert.equal(stdev([2, 4, 4, 4, 5, 5, 7, 9]).toFixed(3), "2.138");
   assert.equal(stdev([5]), 0);
   assert.equal(percentile([1, 2, 3, 4, 5, 6, 7, 8, 9, 10], 95), 10);
-  assert.deepEqual(describe([]), { n: 0, median: null, mean: null, stdev: null, min: null, max: null });
+  assert.deepEqual(describe([]), { n: 0, median: null, mean: null, stdev: null, iqr: null, min: null, max: null });
 });
 
 test("matrix: presets resolve to URLs with metrics=1 and per-config overrides", () => {
@@ -40,23 +40,20 @@ test("matrix: runs are interleaved across cells and local-only games never run i
   assert.throws(() => expandMatrix(spec, { env: {} }), /HB is not set/);
 });
 
-// One run sampled twice at a constant speed, 60 presents/s, 150 % CPU.
-const run = (speed) => ({ game: "g", config: "c", summary: summarizeRun([{ speed, pres: 60, frame: 0 }, { speed, pres: 60, frame: 60 }], [{ total: 150, rendererMax: 100, gpu: 20 }]) });
+// One run sampled twice at a constant speed (no VI timeline: the app's
+// sampled gameSpeed is used and labelled as such), 150 % CPU.
+const run = (speed) => ({ game: "g", config: "c", summary: summarizeRun({ samples: [{ t: 0, speed, frame: 0 }, { t: 1000, speed, frame: 60 }], cpu: [{ total: 150, rendererMax: 100, gpu: 20 }] }) });
 
-test("matrix: per-run means then median ± stdev across runs", () => {
+test("matrix: per-run medians then median ± stdev across runs", () => {
   assert.equal(run(100).summary.frameAdvance, 60);
+  assert.equal(run(100).summary.speedSource, "sampled gameSpeed");
   const [cell] = summarizeMatrix([run(90), run(100), run(110)]);
   assert.equal(cell.runs, 3);
   assert.equal(cell.metrics.speed.median, 100);
   assert.equal(cell.metrics.speed.stdev, 10);
   assert.equal(cell.metrics.cpuTotal.median, 150);
-});
-
-test("matrix: zero presents while the core runs is flagged", () => {
-  const frozen = { game: "g", config: "wgpu", summary: summarizeRun([{ pres: 0, frame: 10 }, { pres: 0, frame: 70 }]) };
-  const [cell] = summarizeMatrix([frozen, run(100)]);
-  assert.equal(cell.failedRuns, 1);
-  assert.deepEqual(cell.flags, ["zero-presents"]);
+  // Without a VI timeline the core-freeze check cannot be judged.
+  assert.equal(cell.checks.coreFreeze.status, "unjudged");
 });
 
 test("png: encode/decode round trip", () => {

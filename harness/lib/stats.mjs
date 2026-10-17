@@ -48,6 +48,7 @@ export function describe(values, digits = 1) {
     median: round(median(v), digits),
     mean: round(mean(v), digits),
     stdev: round(stdev(v), digits),
+    iqr: v.length ? round(percentile(v, 75) - percentile(v, 25), digits) : null,
     min: v.length ? round(Math.min(...v), digits) : null,
     max: v.length ? round(Math.max(...v), digits) : null
   };

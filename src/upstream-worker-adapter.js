@@ -226,7 +226,10 @@ export class UpstreamWorkerAdapter {
       oneWayRequestsPosted: 0,
       requestMessagesPosted: 0,
       unmatchedSuccessRepliesReceived: 0,
-      unmatchedErrorRepliesReceived: 0
+      unmatchedErrorRepliesReceived: 0,
+      // Worker messages with neither a known type nor a pending request id;
+      // they used to be dropped without a trace.
+      unknownMessagesReceived: 0
     };
     this.loaded = false;
     this.framePending = false;
@@ -920,6 +923,7 @@ export class UpstreamWorkerAdapter {
 
     const pending = this.pending.get(message?.id);
     if (!pending) {
+      this.workerTransportStats.unknownMessagesReceived += 1;
       return;
     }
 

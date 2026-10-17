@@ -42,7 +42,7 @@ export function parsePsForProfile(psOutput, profileDir) {
 export function sampleChromeCpu(profileDir) {
   try {
     const out = execFileSync("ps", ["-A", "-o", "%cpu=,command="], { encoding: "utf8", maxBuffer: 32 << 20 });
-    return { t: Date.now(), ...parsePsForProfile(out, profileDir) };
+    return { t: Date.now(), load1: Math.round(os.loadavg()[0] * 100) / 100, ...parsePsForProfile(out, profileDir) };
   } catch (error) {
     return { t: Date.now(), error: String(error.message || error) };
   }

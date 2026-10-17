@@ -4,12 +4,35 @@
   "warmupSec": 8,
   "sampleSec": 15,
   "games": [
-    { "id": "gxscene", "iso": "harness/homebrew/out/gxscene.iso" },
-    { "id": "cpufuzz-nomcrf", "iso": "harness/homebrew/out/cpufuzz-nomcrf.iso" }
+    {
+      "id": "gxscene",
+      "iso": "harness/homebrew/out/gxscene.iso",
+      "static": true
+    },
+    {
+      "id": "cpufuzz-nomcrf",
+      "iso": "harness/homebrew/out/cpufuzz-nomcrf.iso",
+      "static": true
+    }
   ],
   "configs": [
-    { "id": "sw-interp", "preset": "sw-interp" },
-    { "id": "sw-jit", "preset": "sw-fast-jit" },
-    { "id": "wgpu-interp", "preset": "wgpu-nojit" }
-  ]
+    {
+      "id": "sw-interp",
+      "preset": "sw-interp"
+    },
+    {
+      "id": "sw-jit",
+      "preset": "sw-fast-jit"
+    },
+    {
+      "id": "wgpu-interp",
+      "preset": "wgpu-nojit"
+    }
+  ],
+  "reference": "sw-interp",
+  "fuzz": [
+    "harness/homebrew/out/cpufuzz-nomcrf.iso",
+    "harness/homebrew/out/consoletest.iso"
+  ],
+  "pads": true
 }

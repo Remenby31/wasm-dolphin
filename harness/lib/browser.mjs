@@ -50,7 +50,8 @@ export async function launchChrome({ profileDir, headed = true, channel = "chrom
     channel,
     headless: !headed,
     viewport: { width: 1280, height: 900 },
-    args: ["--no-first-run", "--no-default-browser-check", ...args]
+    // Audio must run without a user gesture so underruns and silence can be measured.
+    args: ["--no-first-run", "--no-default-browser-check", "--autoplay-policy=no-user-gesture-required", ...args]
   });
 }
 

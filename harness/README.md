@@ -1,9 +1,12 @@
 # QA harness
 
-Drives the emulator in a real Chrome and turns what it sees into JSON verdicts. It
-replaces the evaluation's ad hoc scripts (`pw/`, `mkgcm.py`, `padtest`) and is the
-judge for the other workstreams: perf claims, renderer correctness, JIT
-correctness, multi-pad input.
+Drives the emulator in a real Chrome and turns what it sees into JSON. It
+replaces the evaluation's ad hoc scripts (`pw/`, `mkgcm.py`, `padtest`) and is
+the judge for the other workstreams. The **gate** judges correctness only
+(crash, swallowed errors, core freeze, rendering at an exact emulated frame,
+interpreter vs JIT, controller ports). **Performance is a report**: on this
+shared, loaded machine it only blocks on a clear, confirmed regression
+against the baseline, never through thresholds.
 
 Needs Node ≥ 22, Google Chrome, and Playwright (the one bundled with
 `@playwright/cli` is found automatically, or set `PLAYWRIGHT_MODULE`). Building the
@@ -16,6 +19,9 @@ harness/run pads                           # 4 virtual gamepads → padtest port
 harness/run diff --iso harness/homebrew/out/gxscene.iso   # two configs, same emulated frame
 harness/run matrix harness/matrices/ci-homebrew.json      # games × configs × N runs
 harness/run measure --iso disc.iso --config rec --runs 3  # one cell
+harness/run ab harness/matrices/ci-homebrew.json        # origin/main vs this tree: the gate
+harness/run gate --baseline A --candidate B             # the gate on two existing results
+harness/run report <result-dir>            # rebuild a summary from its run files
 harness/run savestate --iso disc.iso --steps steps.json --to state.sav
 harness/run clean                          # old results, temp profiles, stopped containers
 ```
@@ -82,35 +88,87 @@ Frame identity is the VI output index; `ticks` is informational.
 
 ## Outputs
 
-Results go to `harness/results/<command>-<time>/` (git-ignored; only the newest
-8 are kept, `HARNESS_KEEP_RESULTS` to change; `harness/run clean [--keep N] [--all]`
-also removes leftover Chrome profiles and stopped containers labelled
-`gc-harness=1`). A run whose
-disc is not one of the homebrews (a commercial game) writes to
-`$HARNESS_PRIVATE_OUT`, by default `../measures/harness/` next to the checkout,
-so captures of commercial games never land in the repo.
+Results go to `harness/results/<command>-<time>-<pid>-<nonce>/` (git-ignored).
+The directory is created atomically and claimed with an owner marker
+(`.harness-owner.json`, created with O_EXCL): a directory that exists is never
+reused, and two processes cannot own one. Only the newest 8 finished result
+directories of this checkout are kept (`HARNESS_KEEP_RESULTS`);
+`harness/run clean [--keep N] [--all]` also removes leftover temp dirs whose
+owner process is gone and stopped containers labelled with this checkout's
+path. It never touches what another checkout made or a live run, and never
+kills processes. A run whose disc is not one of the homebrews (a commercial
+game) writes to `$HARNESS_PRIVATE_OUT`, by default `../measures/harness/` next
+to the checkout, so captures of commercial games never land in the repo.
 
-Each measured run records the full URL, the disc path, machine load before
-and after (`uptime`, load average), 1 Hz samples of `window.__lastFrameInfo`
-(speed, presentations/s, unique visual frames/s, p95/max present interval,
-JIT blocks compiled, PC), Chrome CPU for that profile only (total, busiest
-renderer, GPU process; 100 % = one core), console/page/worker errors, and
-screenshots. `matrix` adds `summary.json` and `summary.md`: per cell, the
-median ± sample stdev across runs of each run's mean, and the runs flagged
-`crash` or `zero-presents` (presentationFps 0 throughout while the core
-advances: a frozen picture, or a wgpu XFB-only path the counter does not see;
-the capture tells which). `harness/run report <dir>` rebuilds the summary from
-the per-run files.
+Each measured run records the served snapshot hash, the full URL, the disc,
+machine load before, during and after, Chrome and GPU adapter, the complete
+timeline of the measured window (every presentation and every VI output),
+the counters the timeline lacks sampled at 1 Hz (unique visual frames, audio
+underruns, JIT blocks, PC), Chrome CPU for that profile only (100 % = one
+core), every swallowed error, the exact render capture, and screenshots for
+people. `matrix` adds `summary.json` and `summary.md`.
+
+## Gate and report
+
+Per (game, config) cell, the **correctness checks** (`lib/correctness.mjs`):
+
+| Check | Fails when |
+|---|---|
+| crash | the worker or page died, a WebAssembly compile/link/runtime error |
+| errors | any swallowed error: uncaught, unhandled rejection, `console.error`, a worker message nobody handles, an unmatched worker error reply |
+| coreFreeze | no VI output for 2 s while the run went on (from the VI timeline) |
+| render | the exact capture is blank, or differs from the reference config's capture of the same run at the same emulated frame: byte-identical required for the same renderer, otherwise `match` (no missing detail, no squeezed picture) |
+
+Each check of each run is pass, fail or **unjudged** (with the reason: no VI
+timeline in this core, capture refused for a hardware renderer, scripted
+inputs without a savestate, …). Machine load changes none of them.
+
+**`harness/run ab <spec>`** exports the served files of `--baseline-ref`
+(default `origin/main`) with `git archive`, runs the matrix (and the spec's
+`fuzz` discs and `pads`) on both sides, alternating which side goes first on
+each run, and gates:
+
+- correctness: a check the baseline passes and the candidate fails is a
+  regression; a check the candidate cannot judge while the baseline could is
+  INCONCLUSIF; a vanished cell is missing; an empty comparison is INCONCLUSIF.
+  All of these block. A failure both sides share is reported as known.
+- performance: for speed, unique frames/s and frame p95, the median of the
+  paired relative changes (run k of the baseline vs run k of the candidate).
+  A median 15 % worse or more triggers `--confirm` more pairs (default 2) of
+  those cells; if it is still 15 % worse over all pairs, the gate fails.
+  Anything less is reported, never blocking.
+
+Everything the decision uses is written to `baseline/` and `candidate/`, and
+`gate.json`/`gate.md` hold it; `harness/run gate --baseline … --candidate …`
+recomputes the same decision from those directories.
+
+The **performance report** per cell (median ± stdev and IQR across runs):
+emulated speed per second from the VI timeline (median, p5, min, dated dips
+under 90 %; the app's sampled `gameSpeed` when the core has no VI timeline,
+and labelled so), unique visual frames/s, frame time p50/p95/p99/max and
+hitches over 2 frames per minute from every presentation, presentation freezes
+of 500 ms or more while VI outputs kept coming, audio underruns per minute
+(worst run) and peak/RMS, CPU, load. Runs above the load limit (`maxLoad`,
+default the number of cores) are marked `overloaded`. It also gives the
+QA-CHECKLIST §1 class (TEMPS RÉEL / JOUABLE / LENT / CASSÉ / INCONCLUSIF,
+`lib/verdict.mjs`) as information: any correctness failure is CASSÉ, any class
+above LENT needs a proven render, and the native cadence comes from the
+game's `nativeFps`.
 
 ## Commands
 
-**matrix** `<spec.json> [--runs N]`. Spec: `runs`, `warmupSec`, `sampleSec`,
-`shotEverySec`, `games` (`id`, `iso`, optional `steps`, `localOnly`) and
-`configs` (`id`, and `preset` or `query`, optional `set` overrides). `iso` may
-use `${ENV}`. Presets live in `lib/matrix.mjs` (`rec`, `rec-nojit`, `wgpu`,
-`wgpu-nojit`, `sw-interp`, `sw-fast-jit`, `unlimited`); `metrics=1` is always
-added. Runs are interleaved (run 1 of every cell, then run 2, …) so load drift
-does not bias one cell. A `localOnly` game refuses to run when `CI` is set.
+**matrix** `<spec.json> [--runs N] [--max-load L]`. Spec: `runs`, `warmupSec`,
+`sampleSec`, `shotEverySec`, `reference` (the config every render capture is
+compared with), `renderFrame` (VI output of the render capture: after boot,
+default 300, or after loading `state`, default 120), `maxLoad`, `loadWaitSec`,
+`fuzz` (discs for `ab`), `pads` (true: `ab` runs pads too), `games` (`id`,
+`iso`, optional `steps`, `state` (savestate for the render capture),
+`localOnly`, `nativeFps`, `static` for still pictures, `audio: true` to require
+sound) and `configs` (`id`, and `preset` or `query`, optional `set` overrides).
+`iso` and `state` may use `${ENV}`. Presets live in `lib/matrix.mjs`;
+`metrics=1` is always added. Runs are interleaved (run 1 of every cell, then
+run 2, …). A `localOnly` game refuses to run when `CI` is set. Exit 1 when a
+correctness check fails.
 
 **diff** `--iso X [--ref cfg] [--cand cfg] [--frame N] [--state s.sav] [--steps f]`
 or `--ref-png a.png --cand-png b.png`. Boots the same disc twice, captures VI

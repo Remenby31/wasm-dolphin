@@ -5,10 +5,24 @@
   "sampleSec": 30,
   "shotEverySec": 15,
   "games": [
-    { "id": "kart-race", "iso": "${KART_ISO}", "localOnly": true, "steps": "local-kart-race-steps.json" }
+    {
+      "id": "kart-race",
+      "iso": "${KART_ISO}",
+      "localOnly": true,
+      "steps": "local-kart-race-steps.json",
+      "audio": true
+    }
   ],
   "configs": [
-    { "id": "rec", "preset": "rec" },
-    { "id": "wgpu", "preset": "wgpu" }
-  ]
+    {
+      "id": "rec",
+      "preset": "rec"
+    },
+    {
+      "id": "wgpu",
+      "preset": "wgpu"
+    }
+  ],
+  "reference": "rec",
+  "loadWaitSec": 90
 }
