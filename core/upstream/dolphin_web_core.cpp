@@ -674,6 +674,7 @@ void EnsureRuntime()
                                    std::memory_order_relaxed);
     s_last_loaded_ppc_pc.store(system.GetPPCState().pc, std::memory_order_relaxed);
     s_last_loaded_checkpoint_generation.fetch_add(1, std::memory_order_release);
+    DolphinWeb_HarnessOnStateLoaded();
     // Publish the semantic epoch only after State::Load has applied and the
     // checkpoint is observable. The GPU wake below then guarantees that the
     // first producer command in the new epoch belongs to the restored state.

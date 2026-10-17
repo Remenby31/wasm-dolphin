@@ -4,7 +4,7 @@
 import assert from "node:assert/strict";
 import test from "node:test";
 
-import { compareAtFrames, compareFrames, PHASE_TOLERANCE } from "../harness/lib/image-diff.mjs";
+import { compareFrames, differingPixels, identical } from "../harness/lib/image-diff.mjs";
 
 const W = 640, H = 480;
 
@@ -71,20 +71,12 @@ test("a squeezed picture is a geometry mismatch even when SSIM is high", () => {
   assert.equal(r.verdict, "geometry-mismatch");
 });
 
-// Review round 2: a correct animation captured a frame apart (4 px of motion)
-// was rejected; captures too far apart must not be judged at all.
-test("round 2: a small animation phase is tolerated, a large frame gap is not judged", () => {
-  const shifted = (dx) => {
-    const data = new Uint8Array(W * H * 4);
-    for (let y = 0; y < H; y += 1) for (let x = 0; x < W; x += 1) {
-      const v = (((x - dx) >> 5) + (y >> 5)) & 1 ? 220 : 40;
-      data.set([v, v, v, 255], (y * W + x) * 4);
-    }
-    return { width: W, height: H, data };
-  };
-  assert.equal(compareFrames(shifted(0), shifted(4)).verdict, "different");
-  assert.equal(compareAtFrames(shifted(0), shifted(4), 1).verdict, "match");
-  assert.equal(compareAtFrames(shifted(0), shifted(16), 1).verdict, "different");
-  assert.equal(compareAtFrames(shifted(0), shifted(4), PHASE_TOLERANCE.maxFrameGap + 1).verdict, "frames-differ");
-  assert.equal(compareAtFrames(shifted(0), { width: W, height: H, data: new Uint8Array(W * H * 4) }, 1).verdict, "blank");
+// Round 3: captures are exact, so equality is exact too (no spatial tolerance).
+test("exact equality: one pixel or a 4 px shift of a still scene is not identical", () => {
+  const a = scene(), b = scene();
+  assert.equal(identical(a, b), true);
+  b.data[(100 * W + 100) * 4] ^= 1;
+  assert.equal(identical(a, b), false);
+  assert.equal(differingPixels(a, b), 1);
+  assert.equal(identical(scene(), scene({ squeeze: 4 })), false);
 });

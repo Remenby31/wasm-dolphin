@@ -1,86 +1,59 @@
 // Copyright 2026 wasm-dolphin contributors
 // SPDX-License-Identifier: MIT
-// Decoder for the homebrew marker protocol (harness/homebrew/common/marker.h).
-// Coordinates are in the 640x480 XFB space and scaled to the captured frame.
+// Decoder for the marker rows of harness/homebrew/common/marker.h, read from
+// an exact native-size XFB capture (no scaling). The checksum row decides:
+// rows are returned only when it matches, otherwise the capture is
+// unreadable. Nothing is guessed from colours.
 
-export const XFB_W = 640;
-export const XFB_H = 480;
-export const STATUS_RECT = Object.freeze({ x: 576, y: 16, w: 48, h: 32 });
 export const ROWS = 4;
 
-// RGB the decoder expects for each status (from the BT.601 YUV in marker.h).
-export const STATUS_COLORS = Object.freeze({
-  idle: [0, 0, 255],
-  running: [255, 255, 0],
-  pass: [0, 255, 0],
-  fail: [255, 0, 0]
-});
-
-function sampleRect(frame, x, y, w, h) {
-  const sx = frame.width / XFB_W, sy = frame.height / XFB_H;
-  // Sample the inner half of the rect to stay clear of filtering at the edges.
-  const x0 = Math.round((x + w / 4) * sx), x1 = Math.max(x0 + 1, Math.round((x + (3 * w) / 4) * sx));
-  const y0 = Math.round((y + h / 4) * sy), y1 = Math.max(y0 + 1, Math.round((y + (3 * h) / 4) * sy));
-  let r = 0, g = 0, b = 0, n = 0;
-  for (let py = y0; py < y1; py += 1) for (let px = x0; px < x1; px += 1) {
-    const i = (py * frame.width + px) * 4;
-    r += frame.data[i]; g += frame.data[i + 1]; b += frame.data[i + 2]; n += 1;
-  }
-  return [r / n, g / n, b / n];
-}
-
-// Spread of luma inside a rect: a painted marker is flat, a game picture
-// that happens to be yellow or green there usually is not.
-function rectSpread(frame, x, y, w, h) {
-  const sx = frame.width / XFB_W, sy = frame.height / XFB_H;
-  let min = 255, max = 0;
-  for (let py = Math.round((y + h / 4) * sy); py < Math.round((y + (3 * h) / 4) * sy); py += 1) {
-    for (let px = Math.round((x + w / 4) * sx); px < Math.round((x + (3 * w) / 4) * sx); px += 1) {
-      const i = (py * frame.width + px) * 4;
-      const l = 0.299 * frame.data[i] + 0.587 * frame.data[i + 1] + 0.114 * frame.data[i + 2];
-      if (l < min) min = l;
-      if (l > max) max = l;
+function fnv(values) {
+  let h = 2166136261;
+  for (const v of values) {
+    for (const shift of [24, 16, 8, 0]) {
+      h ^= (v >>> shift) & 0xff;
+      h = Math.imul(h, 16777619) >>> 0;
     }
   }
-  return max - min;
+  return h >>> 0;
 }
 
-export function decodeStatus(frame) {
-  if (rectSpread(frame, STATUS_RECT.x, STATUS_RECT.y, STATUS_RECT.w, STATUS_RECT.h) > 24) return null;
-  const rgb = sampleRect(frame, STATUS_RECT.x, STATUS_RECT.y, STATUS_RECT.w, STATUS_RECT.h);
-  let best = null, bestDist = Infinity;
-  for (const [name, ref] of Object.entries(STATUS_COLORS)) {
-    const d = Math.hypot(rgb[0] - ref[0], rgb[1] - ref[1], rgb[2] - ref[2]);
-    if (d < bestDist) { best = name; bestDist = d; }
+function cellLuma(frame, x, y) {
+  let sum = 0;
+  for (let dy = 3; dy < 9; dy += 1) for (let dx = 4; dx < 10; dx += 1) {
+    const i = ((y + dy) * frame.width + (x + dx)) * 4;
+    sum += 0.299 * frame.data[i] + 0.587 * frame.data[i + 1] + 0.114 * frame.data[i + 2];
   }
-  // 120 ≈ well inside the gap between any two reference colours.
-  return bestDist < 120 ? best : null;
+  return sum / 36;
 }
 
-export function decodeRow(frame, row) {
+function readRow(frame, row) {
   let value = 0;
-  let confident = true;
-  for (let i = 0; i < 32; i += 1) {
-    const [r, g, b] = sampleRect(frame, 32 + i * 18, 384 + row * 20, 14, 14);
-    const luma = 0.299 * r + 0.587 * g + 0.114 * b;
-    if (luma > 70 && luma < 185) confident = false;
-    // Cells are flat and grey: anything coloured or textured is not a marker.
-    if (Math.max(r, g, b) - Math.min(r, g, b) > 40 || rectSpread(frame, 32 + i * 18, 384 + row * 20, 14, 14) > 40) confident = false;
-    if (luma >= 128) value |= 1 << (31 - i);
-  }
-  return { value: value >>> 0, confident };
+  for (let i = 0; i < 32; i += 1) if (cellLuma(frame, 32 + i * 18, 384 + row * 16) >= 128) value |= 1 << (31 - i);
+  return value >>> 0;
 }
 
-export function decodeMarkers(frame) {
-  const status = decodeStatus(frame);
-  const rows = [];
-  let confident = status !== null;
-  for (let r = 0; r < ROWS; r += 1) {
-    const row = decodeRow(frame, r);
-    rows.push(row.value);
-    confident &&= row.confident;
-  }
-  return { status, rows, confident };
+// { ok, rows } with ok === false when the frame is too small or the checksum
+// row does not match.
+export function decodeRows(frame) {
+  if (!frame || frame.width < 32 + 32 * 18 || frame.height < 384 + (ROWS + 1) * 16) return { ok: false, rows: null };
+  const rows = Array.from({ length: ROWS }, (_, r) => readRow(frame, r));
+  const ok = readRow(frame, ROWS) === fnv(rows);
+  return { ok, rows: ok ? rows : null };
+}
+
+// Paint rows exactly like marker.h (white / black cells), for tests.
+export function paintRows(frame, rows) {
+  const all = [...rows, fnv(rows)];
+  all.forEach((value, r) => {
+    for (let i = 0; i < 32; i += 1) {
+      const v = (value >>> (31 - i)) & 1 ? 255 : 0;
+      for (let y = 384 + r * 16; y < 384 + r * 16 + 12; y += 1) for (let x = 32 + i * 18; x < 32 + i * 18 + 14; x += 1) {
+        frame.data.set([v, v, v, 255], (y * frame.width + x) * 4);
+      }
+    }
+  });
+  return frame;
 }
 
 export const hex = (v) => `0x${(v >>> 0).toString(16).padStart(8, "0")}`;

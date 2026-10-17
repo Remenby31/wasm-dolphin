@@ -13,18 +13,41 @@ test discs needs Docker. No npm dependencies.
 harness/run build-iso                      # rebuild the homebrew discs from source
 harness/run fuzz                           # interpreter vs JIT on every homebrew
 harness/run pads                           # 4 virtual gamepads → padtest ports 1-4
-harness/run diff --iso harness/homebrew/out/gxscene.iso   # software vs wgpu, same frame
+harness/run diff --iso harness/homebrew/out/gxscene.iso   # two configs, same emulated frame
 harness/run matrix harness/matrices/ci-homebrew.json      # games × configs × N runs
 harness/run measure --iso disc.iso --config rec --runs 3  # one cell
 harness/run savestate --iso disc.iso --steps steps.json --to state.sav
 harness/run clean                          # old results, temp profiles, stopped containers
 ```
 
-Every command starts `tools/serve.mjs` on `127.0.0.1:8082` (`--port`, or
-`HARNESS_PORT`) unless this tree is already served there, launches Chrome
+Every command serves the tree on `127.0.0.1:8082` (`--port`, or
+`HARNESS_PORT`) from an **immutable in-memory snapshot**: at start, every file
+the tree's own `tools/serve.mjs` allowlist would serve (ignored files
+included) is read and hashed, and requests are answered from that snapshot
+only. Results record the snapshot hash. The server belongs to the harness
+process; a busy port is an error, never a server to reuse. Chrome runs
 **headed** with a fresh `user-data-dir` per run (no JIT cache or IndexedDB
-carried over), and stops both at the end. Exit code: 0 pass, 1 finding, 2 usage
-or infrastructure error.
+carried over). Exit code: 0 pass, 1 finding, 2 usage or infrastructure error.
+
+## Exact frames
+
+Rendering is judged on pictures the **core** captures at an exact VI output
+(one per emulated field the game scans out), counted from boot or from the
+last savestate load: `validationCaptureAtVi` in the worker arms
+`DolphinWeb_HarnessArmCapture` in `core/upstream/dolphin_web_discio.cpp`, which
+decodes the guest XFB at native size at that output, or reports the output as
+missed. A capture that is not exactly the requested output is an error, never
+a picture; the emulated tick count of each capture proves two captures are the
+same frame. Every VI output and every presentation also go into rings the
+worker drains completely (`validationReadTimeline`), so timing is not sampled.
+
+Limits: the capture is the guest XFB, which is what the software renderer
+outputs. Hardware renderers (`video=wgpu`, `ogl`) keep their picture on the
+GPU, so their exact capture needs a present-side hook (present tagged with the
+VI output, read back in the worker); until then the harness refuses to judge
+them rather than compare something else. The hooks need the core rebuilt
+(`docs/repro-build.md`); a core without them makes every capture fail with
+"core has no harness capture hook".
 
 ## Outputs
 
@@ -58,53 +81,43 @@ use `${ENV}`. Presets live in `lib/matrix.mjs` (`rec`, `rec-nojit`, `wgpu`,
 added. Runs are interleaved (run 1 of every cell, then run 2, …) so load drift
 does not bias one cell. A `localOnly` game refuses to run when `CI` is set.
 
-**diff** `--iso X [--ref cfg] [--cand cfg] [--frame N] [--state s.sav] [--steps f] [--running]`
-or `--ref-png a.png --cand-png b.png`. Boots the same disc twice, waits for core
-frame N (or loads the savestate, then N more frames), pauses the core (the
-pause must be confirmed by the worker, or the command fails; `--running` skips
-it), grabs the frame through `canvas.captureStream()` (falls back to an element
-screenshot), and scores the candidate against the reference on a 160×120 grid:
+**diff** `--iso X [--ref cfg] [--cand cfg] [--frame N] [--state s.sav] [--steps f]`
+or `--ref-png a.png --cand-png b.png`. Boots the same disc twice, captures VI
+output N (from boot, or from loading `--state`) in each, checks that both
+captures carry the same emulated tick count, and compares them:
+`identical` (byte for byte), else scored on a 160×120 grid:
 
 | Field | Meaning |
 |---|---|
 | `ssim` | mean 8×8-block SSIM on luma |
 | `lostDetail` | share of reference blocks with detail that are flat in the candidate |
 | `extent` / `extentDelta` | horizontal and vertical span of non-black content |
-| `frameGap` | emulated frames between the two captures (the pause is not atomic) |
-| `verdict` | `blank`, `missing-detail` (lostDetail ≥ 0.3: overlay drawn, 3D missing), `geometry-mismatch` (span differs > 2 %), `match` (ssim ≥ 0.9), `different`, or `frames-differ` |
+| `verdict` | `identical`, `blank`, `missing-detail` (lostDetail ≥ 0.3: overlay drawn, 3D missing), `geometry-mismatch` (span differs > 2 %), `match` (ssim ≥ 0.9), `different` |
 
-Render verdicts are only given at the same emulated frame. The pause lands a
-frame or two late, so captures up to `PHASE_TOLERANCE.maxFrameGap` (2) frames
-apart are compared again on a coarse 48×36 grid with a match bar of 0.8: a
-few pixels of animation pass (a 4 px shift scores ~0.90), a real difference
-does not (8 px ~0.66). Further apart: `frames-differ`, no verdict.
-
-Frame grabs prefer `captureStream()`. A canvas that has not repainted since the
-stream opened yields no frame (seen with wgpu on XFB-only homebrews); the grab
-then falls back to an element screenshot with the HUD hidden, which is scaled
-to the page layout and less exact.
-
+No spatial or temporal tolerance: both pictures are the same emulated frame.
 It writes `ref.png`, `cand.png`, `diff.png` (reference | candidate | block heat
-map) and `diff.json`, and exits 1 on any verdict listed in `--fail-on`
-(default: everything but `match`).
+map) and `diff.json`, and exits 1 on any verdict in `--fail-on` (default:
+everything but `identical` and `match`).
 
-**fuzz** `[disc.iso …] [--interp q] [--jit q] [--timeout s]`. Runs each disc
-with `wasmjit=0` and with `wasmjit=1&jitwarmup=120&forcejit=1`, each until the
-homebrew reports done, the worker dies, the core stalls, or the timeout. Then
-compares (a fallback to final frames for discs without markers, where a black
-frame on either side is a failure): JIT crash (with the first error and the PC, mapped to the cpufuzz
-program and word; that PC is the last one the page received before the worker
-died, so it can be stale and the mapping is then absent), each side's self-check, the final result hash across the
-two runs, or for discs without markers the final frames. `jit-not-engaged` is a
-warning: the JIT compiled nothing, so the run proved nothing.
+**fuzz** `[disc.iso …] [--interp q] [--jit q] [--frame N] [--timeout s]`.
+Runs each disc with `wasmjit=0` and with `wasmjit=1&jitwarmup=120&forcejit=1`
+and captures VI output N (default 1700, after every homebrew has frozen its
+output). Failures: a crash on either side (JIT crash with the first error and
+the PC, mapped to the cpufuzz program and word; that PC is the last one the
+page received before the worker died, so it can be stale), a missing capture,
+a JIT that compiled or ran no block, captures of different emulated frames, a
+black capture, and any byte of difference between the two captures. The
+checksum-verified marker rows are then decoded to name the diverging check or
+program.
 
 **pads**. Boots `padtest` with the [gamepad mock](lib/gamepad-mock.mjs), holds a
-different combination on each of the 4 virtual pads, and decodes what each
-console port sees; then releases everything and checks keyboard X → port 1 A.
+different combination on each of the 4 virtual pads, captures the picture 30
+VI outputs later and decodes what each console port sees (checksum-verified);
+then releases everything and checks keyboard X → port 1 A.
 
 **savestate** `--iso X --to out.sav [--config c] [--steps f] [--wait s]`. Boots,
 plays `steps`, waits, saves a version-matched state through `__saveStateFile`.
-Feed it to `diff --state` to compare backends on the exact same scene.
+Feed it to `diff --state` to compare configs on the exact same scene.
 
 Steps (`lib/steps.mjs`) are a JSON list: `{"wait": s}`, `{"tap": "KeyX",
 "repeat": n, "every": s}`, `{"down": k}`, `{"up": k}`, `{"click": [x, y]}`,
@@ -126,9 +139,10 @@ is identical across rebuilds.
 | `cpufuzz` | 384 random PowerPC programs (integer, rotates, XER/CR, branches, CTR loops, loads/stores, FP) run every frame, self-checked against frame 0 |
 | `cpufuzz-nomcrf` | the same without `mcrf`, which currently crashes the JIT, so the fuzz can go further |
 
-Homebrews talk to the harness through **markers** painted into the XFB
-(`homebrew/common/marker.h`, decoded by `lib/markers.mjs`): a status block
-(blue idle, yellow running, green pass, red fail) and four rows of 32 bits.
+Homebrews draw their results as **marker rows** in the XFB
+(`homebrew/common/marker.h`, decoded by `lib/markers.mjs`): four rows of 32
+bits plus a checksum row, read from exact captures only. Rows whose checksum
+does not match are unreadable; nothing is decided from colours.
 Build cpufuzz with `-DONLY_PROGRAM=n` to run a single program while reducing a
 finding; `out/cpufuzz*.symbols.json` maps a PC back to a program.
 

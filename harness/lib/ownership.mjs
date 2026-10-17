@@ -22,13 +22,18 @@ export function pidAlive(pid) {
 const active = new Set();
 let exitHookInstalled = false;
 
-// Mark `dir` as owned by this process and checkout until release() (or exit).
+// Mark `dir` as owned by this process and checkout until release() (or
+// exit). The marker is created with O_EXCL: if it exists, someone else owns
+// or owned the directory and the claim fails. A directory is claimed once.
 export function claim(dir, root, kind) {
-  const existing = readOwner(dir);
-  if (existing?.pid && existing.pid !== process.pid && pidAlive(existing.pid)) {
-    throw new Error(`${dir} is already owned by live pid ${existing.pid}`);
+  const file = path.join(dir, OWNER_FILE);
+  try {
+    writeFileSync(file, JSON.stringify({ pid: process.pid, root, kind, startedAt: Date.now() }), { flag: "wx" });
+  } catch (e) {
+    if (e.code !== "EEXIST") throw e;
+    const owner = readOwner(dir);
+    throw new Error(`${dir} is already claimed (pid ${owner?.pid ?? "?"}, ${owner?.root ?? "unknown checkout"})`);
   }
-  writeFileSync(path.join(dir, OWNER_FILE), JSON.stringify({ pid: process.pid, root, kind, startedAt: Date.now() }));
   active.add(dir);
   if (!exitHookInstalled) {
     exitHookInstalled = true;

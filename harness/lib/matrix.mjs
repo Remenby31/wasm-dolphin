@@ -151,3 +151,11 @@ export function matrixMarkdown(cells, meta = {}) {
   lines.push("", "Values: median ± sample stdev across runs of the per-run mean (1 sample/s).");
   return lines.join("\n");
 }
+
+// The exact capture is the guest XFB the core scans out. Hardware renderers
+// keep their picture on the GPU, so their guest XFB is not what they show:
+// refuse rather than compare something else.
+export function captureSupported(query) {
+  const video = new URLSearchParams(query).get("video") ?? "software";
+  return video === "software" || video === "null" ? { ok: true } : { ok: false, why: `video=${video}: exact capture covers the guest XFB only; hardware renderers need a present-side hook in the core` };
+}

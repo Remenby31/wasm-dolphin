@@ -7,14 +7,14 @@ import { existsSync, mkdirSync, readdirSync, readFileSync, rmSync, statSync, wri
 import os from "node:os";
 import path from "node:path";
 import { parseArgs } from "node:util";
-import { ensureServer, pageCall, readCoreProgress, REPO_ROOT, waitForCoreFrame } from "./lib/browser.mjs";
+import { ensureServer, pageCall, readFrameInfo, REPO_ROOT } from "./lib/browser.mjs";
 import { analyzeDifferential, INTERP_QUERY, JIT_QUERY } from "./lib/fuzz.mjs";
 import { releaseAll, setPad } from "./lib/gamepad-mock.mjs";
-import { compareAtFrames, compareFrames, diffImage } from "./lib/image-diff.mjs";
-import { decodeMarkers, decodePadRow, hex } from "./lib/markers.mjs";
-import { expandMatrix, matrixMarkdown, PRESETS, resolveQuery, runFlags, summarizeMatrix, summarizeRun } from "./lib/matrix.mjs";
+import { compareFrames, diffImage, identical } from "./lib/image-diff.mjs";
+import { decodePadRow, decodeRows, hex } from "./lib/markers.mjs";
+import { captureSupported, expandMatrix, matrixMarkdown, PRESETS, resolveQuery, runFlags, summarizeMatrix, summarizeRun } from "./lib/matrix.mjs";
 import { decodePng } from "./lib/png.mjs";
-import { assertPaused, grabFrame, openSession, runUntilDone, sample, savePng, setCorePaused, waitSeconds } from "./lib/session.mjs";
+import { captureInSession, grabFrame, openSession, sample, savePng, waitSeconds } from "./lib/session.mjs";
 import { runSteps, validateSteps } from "./lib/steps.mjs";
 import { machineSnapshot } from "./lib/system.mjs";
 import { claim, deletable, removeIfDeletable } from "./lib/ownership.mjs";
@@ -62,7 +62,15 @@ function outDir(values, name, { private: isPrivate = false } = {}) {
       // Results that may contain commercial-game captures never land in the repo.
       ? path.resolve(process.env.HARNESS_PRIVATE_OUT || path.join(REPO_ROOT, "..", "measures", "harness"), `${name}-${stamp()}`)
       : path.join(REPO_ROOT, "harness", "results", `${name}-${stamp()}`);
-  mkdirSync(base, { recursive: true });
+  mkdirSync(path.dirname(base), { recursive: true });
+  // mkdir of the final component is atomic: an existing directory (another
+  // run's, or an --out reused by mistake) is refused, never shared.
+  try {
+    mkdirSync(base);
+  } catch (e) {
+    if (e.code === "EEXIST") throw new Error(`${base} already exists; results never go into an existing directory`);
+    throw e;
+  }
   // Released when this process exits; until then rotation and clean skip it.
   claim(base, REPO_ROOT, "results");
   return base;
@@ -93,7 +101,7 @@ async function withServer(values, fn) {
 
 // ---------------------------------------------------------------- measure
 async function measureOne(server, values, { iso, query, label, warmup, secs, shotEvery, dir, steps }) {
-  const session = await openSession({ base: server.base, server, query, iso, headed: !values.headless, keepProfile: values["keep-profiles"] });
+  const session = await openSession({ base: server.base, query, iso, headed: !values.headless, keepProfile: values["keep-profiles"] });
   try {
     if (steps) await runSteps(session.page, steps);
     await waitSeconds(session, warmup);
@@ -185,29 +193,21 @@ async function cmdMeasure(argv) {
 }
 
 // ---------------------------------------------------------------- diff
-async function captureScene(server, values, { iso, query, frame, settle, pause, state, steps, label, dir }) {
+async function captureScene(server, values, { iso, query, index, state, steps, label, dir }) {
+  const supported = captureSupported(query);
+  if (!supported.ok) throw new Error(`${label}: ${supported.why}`);
   const routes = state ? { "**/__harness_state.sav": path.resolve(state) } : {};
-  const session = await openSession({ base: server.base, server, query, iso, headed: !values.headless, keepProfile: values["keep-profiles"], routes });
+  const session = await openSession({ base: server.base, query, iso, headed: !values.headless, keepProfile: values["keep-profiles"], routes });
   try {
     if (steps) await runSteps(session.page, steps);
-    let progress = await waitForCoreFrame(session.page, state ? 60 : frame, 120000);
     if (state) {
       const loaded = await pageCall(session.page, "__loadStateFile", new URL("__harness_state.sav", session.url).href, 120000);
       if (!loaded?.loaded) throw new Error(`savestate load failed: ${JSON.stringify(loaded)}`);
-      progress = await waitForCoreFrame(session.page, (progress.frame ?? 0) + frame, 60000);
     }
-    // Pause as soon as frame N is reached, then let the picture settle; with
-    // --running the core keeps running through the settle time.
-    if (pause) {
-      // The pause must be confirmed: a refused pause leaves the core running
-      // and the capture at an unknown frame.
-      assertPaused(await setCorePaused(session.page, true));
-    }
-    await session.page.waitForTimeout(settle * 1000);
-    const atGrab = await readCoreProgress(session.page);
-    const image = await grabFrame(session.page);
-    savePng(image, path.join(dir, `${label}.png`));
-    return { label, url: session.url, requestedFrame: frame, progress: atGrab, source: image.source, image, fatal: session.watch.fatal() };
+    const capture = await captureInSession(session, { index, fromLoad: Boolean(state) });
+    if (capture.error) throw new Error(`${label}: ${capture.error}`);
+    savePng(capture, path.join(dir, `${label}.png`));
+    return { label, url: session.url, capture, fatal: session.watch.fatal() };
   } finally {
     await session.close();
   }
@@ -217,16 +217,13 @@ async function cmdDiff(argv) {
   const { values } = parse(argv, {
     iso: { type: "string" },
     ref: { type: "string", default: "sw-interp" },
-    cand: { type: "string", default: "core=upstream&video=wgpu&presenter=webgpu&cpu=dual&speed=1&wasmjit=0" },
+    cand: { type: "string", default: "sw-fast-jit" },
     frame: { type: "string", default: "300" },
-    settle: { type: "string", default: "1" },
-    // Pausing is the default: render verdicts need a known emulated frame.
-    running: { type: "boolean", default: false },
     state: { type: "string" },
     steps: { type: "string" },
     "ref-png": { type: "string" },
     "cand-png": { type: "string" },
-    "fail-on": { type: "string", default: "missing-detail,blank,geometry-mismatch,different,frames-differ" }
+    "fail-on": { type: "string", default: "missing-detail,blank,geometry-mismatch,different" }
   });
   const isPrivate = Boolean(values.iso && !path.resolve(values.iso).startsWith(HOMEBREW_OUT));
   const dir = outDir(values, "diff", { private: isPrivate });
@@ -237,21 +234,19 @@ async function cmdDiff(argv) {
     meta = { ref: values["ref-png"], cand: values["cand-png"] };
   } else {
     if (!values.iso) throw new Error("usage: harness/run diff --iso disc.iso [--ref q] [--cand q] [--frame N] [--state file.sav] | --ref-png a --cand-png b");
-    const opts = { iso: values.iso, frame: Number(values.frame), settle: Number(values.settle), pause: !values.running, state: values.state, steps: loadSteps(values.steps), dir };
+    const opts = { iso: values.iso, index: Number(values.frame), state: values.state, steps: loadSteps(values.steps), dir };
     const shots = await withServer(values, async (server) => [
       await captureScene(server, values, { ...opts, query: resolveQuery(configFromArg(values.ref)), label: "ref" }),
       await captureScene(server, values, { ...opts, query: resolveQuery(configFromArg(values.cand)), label: "cand" })
     ]);
-    [ref, cand] = shots.map((s) => s.image);
-    meta = Object.fromEntries(shots.map((s) => [s.label, { url: s.url, requestedFrame: s.requestedFrame, frame: s.progress?.frame ?? null, source: s.source, fatal: s.fatal }]));
-    // The frame actually captured, not the one asked for: a gap means the two
-    // pictures may show different moments of an animated scene.
-    meta.frameGap = Math.abs((meta.ref.frame ?? NaN) - (meta.cand.frame ?? NaN));
-    if (!(meta.frameGap <= 2)) console.warn(`[diff] captured frames differ (ref ${meta.ref.frame}, cand ${meta.cand.frame}): no render verdict`);
+    [ref, cand] = shots.map((s) => s.capture);
+    meta = Object.fromEntries(shots.map((s) => [s.label, { url: s.url, viOutput: s.capture.index, fromLoad: s.capture.fromLoad, ticks: s.capture.ticks, fatal: s.fatal }]));
+    // Same output index from the same start is the same emulated frame; the
+    // emulated tick count proves it.
+    if (meta.ref.ticks !== meta.cand.ticks) throw new Error(`captures are not the same emulated frame (ticks ${meta.ref.ticks} vs ${meta.cand.ticks})`);
   }
-  // Offline PNGs carry no frame numbers: compare them as they are.
-  const result = meta.frameGap === undefined ? compareFrames(ref, cand) : compareAtFrames(ref, cand, meta.frameGap);
-  savePng(diffImage(ref, cand, result.blockMap ? result : compareFrames(ref, cand)), path.join(dir, "diff.png"));
+  const result = identical(ref, cand) ? { ...compareFrames(ref, cand), verdict: "identical" } : compareFrames(ref, cand);
+  savePng(diffImage(ref, cand, result), path.join(dir, "diff.png"));
   const { blockMap, ...score } = result;
   writeJson(path.join(dir, "diff.json"), { ...meta, machine: machineSnapshot(), score, blockMap });
   console.log(JSON.stringify({ dir, ...score }, null, 2));
@@ -259,12 +254,14 @@ async function cmdDiff(argv) {
 }
 
 // ---------------------------------------------------------------- fuzz
-async function observe(server, values, iso, query, dir, label, timeoutSec) {
-  const session = await openSession({ base: server.base, server, query, iso, headed: !values.headless, keepProfile: values["keep-profiles"] });
+// Run a disc to VI output `index` and capture that exact output.
+async function observe(server, values, iso, query, dir, label, index) {
+  const session = await openSession({ base: server.base, query, iso, headed: !values.headless, keepProfile: values["keep-profiles"] });
   try {
-    const r = await runUntilDone(session, { timeoutSec });
-    if (r.frame) savePng(r.frame, path.join(dir, `${label}.png`));
-    return { ...r, url: session.url };
+    const capture = await captureInSession(session, { index, timeoutMs: Number(values.timeout) * 1000 });
+    const info = await readFrameInfo(session.page).catch(() => null);
+    if (!capture.error) savePng(capture, path.join(dir, `${label}.png`));
+    return { url: session.url, capture, info, fatal: session.watch.fatal() };
   } finally {
     await session.close();
   }
@@ -273,6 +270,9 @@ async function observe(server, values, iso, query, dir, label, timeoutSec) {
 async function cmdFuzz(argv) {
   const { values, positionals } = parse(argv, {
     timeout: { type: "string", default: "90" },
+    // Every homebrew here freezes its output by VI output 1600 (cpufuzz's
+    // DONE_FRAME is 1500 iterations of one VI each).
+    frame: { type: "string", default: "1700" },
     interp: { type: "string", default: INTERP_QUERY },
     jit: { type: "string", default: JIT_QUERY }
   });
@@ -284,14 +284,15 @@ async function cmdFuzz(argv) {
     return existsSync(file) ? JSON.parse(readFileSync(file, "utf8")) : null;
   };
   const dir = outDir(values, "fuzz");
-  const report = { machine: machineSnapshot(), interpQuery: values.interp, jitQuery: values.jit, results: [] };
+  const report = { machine: machineSnapshot(), frame: Number(values.frame), interpQuery: values.interp, jitQuery: values.jit, results: [] };
   await withServer(values, async (server) => {
+    report.served = server.identity;
     for (const iso of isos) {
       const name = path.basename(iso).replace(/\.\w+$/, "");
-      const interp = await observe(server, values, iso, values.interp, dir, `${name}-interp`, Number(values.timeout));
-      const jit = await observe(server, values, iso, values.jit, dir, `${name}-jit`, Number(values.timeout));
+      const interp = await observe(server, values, iso, values.interp, dir, `${name}-interp`, Number(values.frame));
+      const jit = await observe(server, values, iso, values.jit, dir, `${name}-jit`, Number(values.frame));
       const verdict = analyzeDifferential({ interp, jit, symbols: symbolsFor(iso) });
-      const slim = (r) => ({ url: r.url, outcome: r.outcome, frame: r.info?.frame, jitc: r.info?.jitc, jitr: r.info?.jitr, pc: hex(r.info?.pc ?? 0), status: r.markers?.status, rows: r.markers?.rows?.map(hex), fatal: r.fatal?.slice(0, 3) });
+      const slim = (r) => ({ url: r.url, capture: r.capture.error ? { error: r.capture.error } : { viOutput: r.capture.index, ticks: r.capture.ticks }, jitc: r.info?.jitc, jitr: r.info?.jitr, pc: hex(r.info?.pc ?? 0), fatal: r.fatal?.slice(0, 3) });
       report.results.push({ iso: name, ...verdict, interp: slim(interp), jit: slim(jit) });
       console.log(`[fuzz] ${name}: ${verdict.ok ? "OK" : "FAIL"} ${verdict.findings.map((f) => `${f.kind}${f.program != null ? ` (program ${f.program} word ${f.word}, ${f.group})` : ""}${f.error ? `: ${f.error}` : ""}`).join("; ")}`);
     }
@@ -324,16 +325,20 @@ async function cmdPads(argv) {
   });
   const dir = outDir(values, "pads");
   const report = await withServer(values, async (server) => {
-    const session = await openSession({ base: server.base, server, query: values.query, iso: values.iso, headed: !values.headless, gamepads: { count: 4 }, keepProfile: values["keep-profiles"] });
+    const session = await openSession({ base: server.base, query: values.query, iso: values.iso, headed: !values.headless, gamepads: { count: 4 }, keepProfile: values["keep-profiles"] });
     try {
-      await waitForCoreFrame(session.page, 120, 60000);
+      // Inputs reach the game within a few frames; 30 VI outputs later the
+      // picture reflects them. The checksum row makes a misread impossible.
       const read = async (label) => {
-        await session.page.waitForTimeout(700);
-        const frame = await grabFrame(session.page);
-        savePng(frame, path.join(dir, `${label}.png`));
-        const m = decodeMarkers(frame);
-        return m.rows.map((v) => decodePadRow(v));
+        const capture = await captureInSession(session, { ahead: 30 });
+        if (capture.error) throw new Error(`${label}: ${capture.error}`);
+        savePng(capture, path.join(dir, `${label}.png`));
+        const decoded = decodeRows(capture);
+        if (!decoded.ok) throw new Error(`${label}: padtest rows unreadable (checksum mismatch)`);
+        return decoded.rows.map((v) => decodePadRow(v));
       };
+      const warm = await captureInSession(session, { index: 120 });
+      if (warm.error) throw new Error(warm.error);
       const ports = [];
       for (let i = 0; i < 4; i += 1) await setPad(session.page, i, PAD_SCENARIO[i]);
       const seen = await read("four-pads");
@@ -349,7 +354,7 @@ async function cmdPads(argv) {
       await session.page.keyboard.down("KeyX");
       const kb = await read("keyboard-x");
       await session.page.keyboard.up("KeyX");
-      return { url: session.url, ports, released, keyboardP1A: Boolean(kb[0]?.pressed.includes("A")), fatal: session.watch.fatal() };
+      return { url: session.url, served: server.identity, ports, released, keyboardP1A: Boolean(kb[0]?.pressed.includes("A")), fatal: session.watch.fatal() };
     } finally {
       await session.close();
     }
@@ -357,7 +362,7 @@ async function cmdPads(argv) {
   writeJson(path.join(dir, "pads.json"), { machine: machineSnapshot(), ...report });
   for (const p of report.ports) console.log(`[pads] P${p.port}: ${p.ok ? "OK" : "KO"} expected [${p.expected}] got [${p.got}]`);
   console.log(`[pads] released → all neutral: ${report.released}; keyboard X → P1 A: ${report.keyboardP1A}; report ${dir}`);
-  return report.ports.every((p) => p.ok) && report.released && report.keyboardP1A ? 0 : 1;
+  return report.ports.every((p) => p.ok) && report.released && report.keyboardP1A && !report.fatal.length ? 0 : 1;
 }
 
 // ---------------------------------------------------------------- savestate
@@ -371,7 +376,7 @@ async function cmdSavestate(argv) {
   });
   if (!values.iso || !values.to) throw new Error("usage: harness/run savestate --iso disc.iso --to out.sav [--config rec] [--steps steps.json] [--wait 5]");
   return withServer(values, async (server) => {
-    const session = await openSession({ base: server.base, server, query: resolveQuery(configFromArg(values.config)), iso: values.iso, headed: !values.headless, keepProfile: values["keep-profiles"] });
+    const session = await openSession({ base: server.base, query: resolveQuery(configFromArg(values.config)), iso: values.iso, headed: !values.headless, keepProfile: values["keep-profiles"] });
     try {
       if (values.steps) await runSteps(session.page, loadSteps(values.steps));
       await waitSeconds(session, Number(values.wait));

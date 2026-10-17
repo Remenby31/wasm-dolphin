@@ -103,28 +103,41 @@ export async function workerRequest(page, type, payload = {}, timeoutMs = 10000)
 }
 
 export const readCoreProgress = (page) => workerRequest(page, "validationReadCoreProgress");
-export const setCorePaused = (page, paused) => workerRequest(page, "validationSetCorePaused", { paused });
+
+// The XFB the core scanned out at VI output `index` (since boot, or since
+// the last savestate load), captured by the core itself at that output.
+// Returns { index, ticks, width, height, data, source } or { error }: an
+// output that passed, never comes, or a core without the hook is an error,
+// never a picture.
+export async function captureAtVi(page, { index, ahead, fromLoad = false, timeoutMs = 60000 }) {
+  const call = page.evaluate(async ([payload]) => {
+    try {
+      const r = await window.__host.adapter.request("validationCaptureAtVi", payload);
+      const u8 = new Uint8Array(r.pixels.buffer ?? r.pixels);
+      let bin = "";
+      for (let i = 0; i < u8.length; i += 0x8000) bin += String.fromCharCode.apply(null, u8.subarray(i, i + 0x8000));
+      return { index: r.index, fromLoad: r.fromLoad, ticks: r.ticks, width: r.width, height: r.height, source: r.source, b64: btoa(bin) };
+    } catch (e) {
+      return { error: String(e?.message || e) };
+    }
+  }, [{ index, ahead, fromLoad, timeoutMs }]);
+  const r = await withTimeout(call, timeoutMs + 15000, "validationCaptureAtVi").catch((e) => ({ error: e.message }));
+  if (r.error) return r;
+  const { b64, ...rest } = r;
+  return { ...rest, data: new Uint8Array(Buffer.from(b64, "base64")) };
+}
+
+// Everything the worker and the core recorded since the previous read:
+// every presentation and every VI output, nothing sampled.
+export const readTimeline = (page) => workerRequest(page, "validationReadTimeline", {}, 30000);
 
 export async function pageCall(page, fnName, arg, timeoutMs = 60000) {
   const call = page.evaluate(([name, a]) => window[name](a), [fnName, arg]);
   return withTimeout(call, timeoutMs, fnName).catch((e) => ({ error: e.message }));
 }
 
-// Wait until the core has run at least `frames` frames (or timeout).
-export async function waitForCoreFrame(page, frames, timeoutMs) {
-  const end = Date.now() + timeoutMs;
-  let last = null;
-  while (Date.now() < end) {
-    last = await readCoreProgress(page);
-    if (last?.error && /no answer/.test(last.error)) return { ...last, timedOut: true };
-    if (last?.frame >= frames) return last;
-    // Poll tightly: every 30 ms is ~2 frames of overshoot at most.
-    await page.waitForTimeout(30);
-  }
-  return { ...last, timedOut: true };
-}
-
-// Grab the displayed frame as RGBA. Primary path is canvas.captureStream()
+// Grab the displayed frame as RGBA, for pictures people look at. Never
+// used to judge rendering: that is captureAtVi's job. Primary path is canvas.captureStream()
 // (the same path a WebRTC host would use); fallback is an element screenshot.
 export async function grabFrame(page) {
   const grabbed = await withTimeout(page.evaluate(async () => {
