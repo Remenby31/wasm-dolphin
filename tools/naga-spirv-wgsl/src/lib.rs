@@ -133,13 +133,94 @@ fn sanitize_function_names(module: &mut naga::Module) {
     }
 }
 
+// Dual-source blending. Dolphin declares its two blend outputs as
+// `layout(location = 0, index = 0/1)`. Naga's SPIR-V frontend ignores the
+// Index decoration, sees two outputs at location 0 and fails validation. So
+// park the Index-1 output on a location no Dolphin shader uses before parsing,
+// then turn the pair into @location(0) @blend_src(0) / @blend_src(1) in the IR.
+const OP_DECORATE: u32 = 71;
+const DECORATION_LOCATION: u32 = 30;
+const DECORATION_INDEX: u32 = 32;
+const PARKED_LOCATION: u32 = 31;
+
+fn park_dual_source_output(words: &[u32]) -> Option<Vec<u32>> {
+    let decorations = |w: &[u32]| {
+        let mut out = Vec::new();
+        let mut i = 5;
+        while i < w.len() {
+            let count = (w[i] >> 16) as usize;
+            if count == 0 || i + count > w.len() {
+                break;
+            }
+            if w[i] & 0xffff == OP_DECORATE && count >= 4 {
+                out.push(i);
+            }
+            i += count;
+        }
+        out
+    };
+    let at = decorations(words);
+    let second: Vec<u32> = at
+        .iter()
+        .filter(|&&i| words[i + 2] == DECORATION_INDEX && words[i + 3] == 1)
+        .map(|&i| words[i + 1])
+        .collect();
+    if second.is_empty() {
+        return None;
+    }
+    let mut out = words.to_vec();
+    for i in at {
+        if out[i + 2] == DECORATION_LOCATION && out[i + 3] == 0 && second.contains(&out[i + 1]) {
+            out[i + 3] = PARKED_LOCATION;
+        }
+    }
+    Some(out)
+}
+
+fn restore_dual_source_outputs(module: &mut naga::Module) {
+    use naga::{Binding, TypeInner};
+    for ep in module.entry_points.iter() {
+        if ep.stage != naga::ShaderStage::Fragment {
+            continue;
+        }
+        let Some(result) = ep.function.result.as_ref() else { continue };
+        let ty = module.types[result.ty].clone();
+        let TypeInner::Struct { mut members, span } = ty.inner else { continue };
+        let parked = |b: &Option<Binding>| {
+            matches!(b, Some(Binding::Location { location: PARKED_LOCATION, .. }))
+        };
+        if !members.iter().any(|m| parked(&m.binding)) {
+            continue;
+        }
+        for m in members.iter_mut() {
+            if let Some(Binding::Location { ref mut location, ref mut blend_src, .. }) = m.binding {
+                if *location == PARKED_LOCATION {
+                    *location = 0;
+                    *blend_src = Some(1);
+                } else if *location == 0 {
+                    *blend_src = Some(0);
+                }
+            }
+        }
+        module.types.replace(
+            result.ty,
+            naga::Type { name: ty.name, inner: TypeInner::Struct { members, span } },
+        );
+    }
+}
+
 fn translate(words: &[u32]) -> Result<String, String> {
     let options = naga::front::spv::Options::default();
+    let parked = park_dual_source_output(words);
+    let words = parked.as_deref().unwrap_or(words);
     let mut module = naga::front::spv::Frontend::new(words.iter().copied(), &options)
         .parse()
         .map_err(|e| chain("spv-frontend", &e))?;
 
     sanitize_function_names(&mut module);
+    if parked.is_some() {
+        restore_dual_source_outputs(&mut module);
+    }
 
     // The WGSL backend needs validation info. Allow the full
     // capability set — Dolphin emits a wide range of features and we

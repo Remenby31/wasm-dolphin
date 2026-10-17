@@ -10,6 +10,7 @@ import {
 } from "./upstream-worker-protocol.js";
 import { parseDolHeader } from "./dol.js";
 import { decodeWgpuSamplerState } from "./wgpu-sampler-state.js";
+import { gxClearDepthToStored, gxDepthState } from "./wgpu-depth-state.js";
 import { decodePrebuiltCache } from "./prebuilt-jit-cache-format.js";
 import {
   JIT_CACHE_ENTRY_KEY_SCHEMA,
@@ -2105,10 +2106,17 @@ async function loadCore({
   // unconditionally so the active configuration is visible in the status log
   // rather than implied.
   const RENDERER_FEATURE_SCISSORED_CLEAR_RECT = 1 << 0;
+  // Only the host sees the device, so this bit is the one the backend leaves
+  // OFF by default: a shader that enables dual_source_blending on a device
+  // without the feature fails to compile. Cores that predate the bit ignore it.
+  const RENDERER_FEATURE_DUAL_SOURCE_BLEND = 1 << 1;
   let rendererFeatureMask = RENDERER_FEATURE_SCISSORED_CLEAR_RECT;
   if (!wgpuScissoredClearRect) {
     rendererFeatureMask =
       (rendererFeatureMask & ~RENDERER_FEATURE_SCISSORED_CLEAR_RECT) >>> 0;
+  }
+  if (renderGpu?.device?.features?.has?.("dual-source-blending")) {
+    rendererFeatureMask = (rendererFeatureMask | RENDERER_FEATURE_DUAL_SOURCE_BLEND) >>> 0;
   }
 
   // Cores built before the capability existed read the ClearRect enable out of
@@ -4646,7 +4654,9 @@ async function createWebGpuPresenter(canvas) {
   // current environment", which surfaces as missing pipelines and a black
   // frame rather than an error. depth-clip-control is what turns clipping
   // into clamping.
-  const wantFeatures = ["clip-distances", "depth-clip-control"];
+  // dual-source-blending lets GX destination alpha and source-alpha blending
+  // coexist in one draw (see RENDERER_FEATURE_DUAL_SOURCE_BLEND).
+  const wantFeatures = ["clip-distances", "depth-clip-control", "dual-source-blending"];
   const haveFeatures = wantFeatures.filter((f) => adapter.features && adapter.features.has(f));
   console.log("[wgpu-features] got=" + (haveFeatures.join(",") || "none") +
               " missing=" + (wantFeatures.filter((f) => !haveFeatures.includes(f)).join(",") || "none"));
@@ -11934,15 +11944,14 @@ function drainWebGpuCmdRing(source = "presentation") {
           const cw = Math.max(1, Math.min(u32[recWord + 3], passW - cx));
           const ch = Math.max(1, Math.min(u32[recWord + 4], passH - cy));
           const crgba = u32[recWord + 5] >>> 0;
-          // The producer sends the game's clear depth (~1.0), but this backend
-          // runs the reverse-Z convention: BeginPass clears depth to dcv = 0.0
+          // The producer sends the game's GX clear depth (z / 2^24, far ~1.0),
+          // but the buffer holds 1 - z: BeginPass clears depth to dcv = 0.0
           // and every flippable pipeline compare is inverted to the greater
-          // family. Writing 1.0 here means a fragment must reach depth >= 1.0
+          // family. Writing the raw 1.0 means a fragment must reach depth >= 1.0
           // to pass, so every draw after the clear is rejected and the frame
-          // goes black -- which is why this path was left off by default.
-          // Use the same value the loadOp path uses.
+          // goes black.
           const cdepthRaw = f32[recWord + 6];
-          const cdepth = GX_NATIVE_DEPTH ? cdepthRaw : 0.0;
+          const cdepth = GX_NATIVE_DEPTH ? cdepthRaw : gxClearDepthToStored(cdepthRaw);
           const cflags = u32[recWord + 7] >>> 0;
           // New records carry independent RGB/alpha enables. Legacy records
           // used bit 0 for all four color channels. Alpha-only clears build
@@ -13347,7 +13356,9 @@ const WGPU_COMPARE = [
 const WGPU_BLEND_FACTOR = [
   "zero", "one", "src", "one-minus-src",
   "src-alpha", "one-minus-src-alpha", "dst", "one-minus-dst",
-  "dst-alpha", "one-minus-dst-alpha"
+  "dst-alpha", "one-minus-dst-alpha",
+  // Sent only when the core runs with dual-source blending.
+  "src1-alpha", "one-minus-src1-alpha"
 ];
 const WGPU_BLEND_OP = ["add", "subtract", "reverse-subtract"];
 
@@ -13532,9 +13543,7 @@ function replayCreatePipelineCfg(pipelineId, blobPtr, blobLen) {
   if (hasDepth) {
     desc.depthStencil = {
       format: depthFmt === 1 ? "depth32float" : "depth24plus",
-      depthWriteEnabled: !!depthWrite,
-      depthCompare: depthTest ? (WGPU_COMPARE[depthCompare] || "always")
-                              : "always"
+      ...gxDepthState(depthTest, depthWrite, WGPU_COMPARE[depthCompare])
     };
   }
 
@@ -13545,9 +13554,7 @@ function replayCreatePipelineCfg(pipelineId, blobPtr, blobLen) {
   // attachment match. Pipeline *variants* keyed on the live pass
   // formats eliminate the whole attachment-mismatch class.
   const depthBase = hasDepth
-    ? { depthWriteEnabled: !!depthWrite,
-        depthCompare: depthTest ? (WGPU_COMPARE[depthCompare] || "always")
-                                : "always" }
+    ? gxDepthState(depthTest, depthWrite, WGPU_COMPARE[depthCompare])
     : null;
   // §28: persist a compact pipeline-state summary so the EFB-draw
   // tally can report why the backdrop draw produces black (writeMask
