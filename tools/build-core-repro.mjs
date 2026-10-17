@@ -48,6 +48,20 @@ function capture(command, args) {
   return result.status === 0 ? result.stdout.trim() : null;
 }
 
+// CMake runs SPIRV-Tools' Python generators inside vendor/dolphin; bytecode
+// caches they leave behind make the next fetch:dolphin reject the checkout as
+// drifted from the locked snapshot.
+process.env.PYTHONDONTWRITEBYTECODE = "1";
+
+function removeBytecodeCaches(directory) {
+  if (!existsSync(directory)) return;
+  for (const entry of readdirSync(directory, { recursive: true, withFileTypes: true })) {
+    if (entry.isDirectory() && entry.name === "__pycache__") {
+      rmSync(join(entry.parentPath, entry.name), { recursive: true, force: true });
+    }
+  }
+}
+
 const seconds = (start) => Math.round((performance.now() - start) / 100) / 10;
 
 // ---------------------------------------------------------------- docker ---
@@ -217,6 +231,7 @@ function buildNative() {
 
   start = performance.now();
   if (!flag("--no-sync")) {
+    removeBytecodeCaches(join(root, "vendor/dolphin/Externals/glslang"));
     run(process.execPath, ["tools/fetch-dolphin.mjs"]);
     run(process.execPath, ["tools/patch-upstream-wasm.mjs"]);
   }
