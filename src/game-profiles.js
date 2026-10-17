@@ -18,17 +18,32 @@
 //
 // Titles with a big FPS win but no verified screenshot are deliberately left
 // out. Being absent costs a little speed; being wrong ships a broken picture.
+//
+// A "hardware" verdict is only as wide as the GPUs it was checked on. Every one
+// below comes from the same rig, an AMD Radeon (RDNA 4) under Windows, so it is
+// keyed to that adapter family. The same build on an Apple GPU drew GM4E01's
+// menus correctly and then raced with no 3D world at all (gc-web-emu REPORT §7):
+// Metal is a different driver stack, not a slower copy. Outside a validated
+// (game, family) pair a hardware profile resolves to software. Extending one
+// to a new family takes the same screenshot check on that family.
 
-/** @type {Record<string, {renderer: "hardware"|"software", why: string}>} */
+/** Adapter families the hardware sweeps were run on. */
+const RDNA4_SWEEP = Object.freeze(["amd"]);
+
+/**
+ * @type {Record<string, {renderer: "hardware", validatedOn: readonly string[], why: string}
+ *                     | {renderer: "software", why: string}>}
+ */
 export const GAME_PROFILES = {
   // --- hardware: verified correct by screenshot, and much faster -----------
-  GWWE01: { renderer: "hardware", why: "60 vs 7 fps; throne room verified" },
-  GFZE01: { renderer: "hardware", why: "60 vs 8 fps; was the software path's worst case" },
-  GM4E01: { renderer: "hardware", why: "60 vs 18 fps; mode select verified" },
-  GPVE01: { renderer: "hardware", why: "60 vs 10 fps; memory-card screen verified" },
-  GKYE01: { renderer: "hardware", why: "60 vs 10 fps; race scene verified against software" },
-  GLME01: { renderer: "hardware", why: "20.5 vs 6 fps; full colour verified (was sepia pre-fix)" },
-  GALE01: { renderer: "hardware", why: "60 vs 22 fps; character select verified" },
+  GWWE01: { renderer: "hardware", validatedOn: RDNA4_SWEEP, why: "60 vs 7 fps; throne room verified" },
+  GFZE01: { renderer: "hardware", validatedOn: RDNA4_SWEEP, why: "60 vs 8 fps; was the software path's worst case" },
+  // Not on Apple: correct menus, but no 3D geometry in a race (REPORT §7).
+  GM4E01: { renderer: "hardware", validatedOn: RDNA4_SWEEP, why: "60 vs 18 fps; mode select verified" },
+  GPVE01: { renderer: "hardware", validatedOn: RDNA4_SWEEP, why: "60 vs 10 fps; memory-card screen verified" },
+  GKYE01: { renderer: "hardware", validatedOn: RDNA4_SWEEP, why: "60 vs 10 fps; race scene verified against software" },
+  GLME01: { renderer: "hardware", validatedOn: RDNA4_SWEEP, why: "20.5 vs 6 fps; full colour verified (was sepia pre-fix)" },
+  GALE01: { renderer: "hardware", validatedOn: RDNA4_SWEEP, why: "60 vs 22 fps; character select verified" },
 
   // --- software: hardware path broken or worse -----------------------------
   GMSE01: { renderer: "software", why: "background missing on hardware (issue #8)" },
@@ -111,4 +126,56 @@ export async function readGameId(file) {
 export function lookupGameProfile(gameId) {
   if (!gameId) return null;
   return GAME_PROFILES[gameId.toUpperCase()] ?? null;
+}
+
+// GPUAdapterInfo.vendor is a short lowercase id in Chrome ("apple", "amd",
+// "nvidia", "intel", ...), but older builds and some drivers leave it empty or
+// put the marketing name in description, so match on both.
+const ADAPTER_FAMILIES = [
+  ["apple", /\bapple\b/],
+  ["amd", /\b(amd|ati|radeon)\b/],
+  ["nvidia", /\bnvidia\b/],
+  ["intel", /\bintel\b/],
+  ["qualcomm", /\b(qualcomm|adreno)\b/],
+  ["arm", /\b(arm|mali)\b/]
+];
+
+/** Normalize a GPUAdapterInfo-like object to a family id, or null. */
+export function adapterFamilyFromInfo(info) {
+  if (!info) return null;
+  const text = `${info.vendor ?? ""} ${info.description ?? ""}`.toLowerCase();
+  for (const [family, pattern] of ADAPTER_FAMILIES) {
+    if (pattern.test(text)) return family;
+  }
+  return null;
+}
+
+/**
+ * Family of the WebGPU adapter the core will get, or null when there is none
+ * or it cannot be identified. Ask with the same power preference the core uses,
+ * or a dual-GPU machine could answer for the wrong one.
+ */
+export async function detectAdapterFamily(gpu = globalThis.navigator?.gpu, powerPreference = "high-performance") {
+  try {
+    const adapter = await gpu?.requestAdapter?.({ powerPreference });
+    if (!adapter) return null;
+    const info = adapter.info ?? (await adapter.requestAdapterInfo?.());
+    return adapterFamilyFromInfo(info);
+  } catch {
+    return null;
+  }
+}
+
+/**
+ * Renderer to use for a game on an adapter family, or null to keep the
+ * shipping default. `validated` says whether a hardware verdict covers this
+ * family; a hardware profile outside its validated families falls back to
+ * software rather than shipping a picture nobody has checked.
+ */
+export function resolveRendererProfile(gameId, adapterFamily) {
+  const profile = lookupGameProfile(gameId);
+  if (!profile) return null;
+  if (profile.renderer === "software") return { renderer: "software", validated: true };
+  const validated = Boolean(adapterFamily) && profile.validatedOn.includes(adapterFamily);
+  return { renderer: validated ? "hardware" : "software", validated };
 }
