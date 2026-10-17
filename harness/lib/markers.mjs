@@ -29,7 +29,24 @@ function sampleRect(frame, x, y, w, h) {
   return [r / n, g / n, b / n];
 }
 
+// Spread of luma inside a rect: a painted marker is flat, a game picture
+// that happens to be yellow or green there usually is not.
+function rectSpread(frame, x, y, w, h) {
+  const sx = frame.width / XFB_W, sy = frame.height / XFB_H;
+  let min = 255, max = 0;
+  for (let py = Math.round((y + h / 4) * sy); py < Math.round((y + (3 * h) / 4) * sy); py += 1) {
+    for (let px = Math.round((x + w / 4) * sx); px < Math.round((x + (3 * w) / 4) * sx); px += 1) {
+      const i = (py * frame.width + px) * 4;
+      const l = 0.299 * frame.data[i] + 0.587 * frame.data[i + 1] + 0.114 * frame.data[i + 2];
+      if (l < min) min = l;
+      if (l > max) max = l;
+    }
+  }
+  return max - min;
+}
+
 export function decodeStatus(frame) {
+  if (rectSpread(frame, STATUS_RECT.x, STATUS_RECT.y, STATUS_RECT.w, STATUS_RECT.h) > 24) return null;
   const rgb = sampleRect(frame, STATUS_RECT.x, STATUS_RECT.y, STATUS_RECT.w, STATUS_RECT.h);
   let best = null, bestDist = Infinity;
   for (const [name, ref] of Object.entries(STATUS_COLORS)) {
@@ -47,6 +64,8 @@ export function decodeRow(frame, row) {
     const [r, g, b] = sampleRect(frame, 32 + i * 18, 384 + row * 20, 14, 14);
     const luma = 0.299 * r + 0.587 * g + 0.114 * b;
     if (luma > 70 && luma < 185) confident = false;
+    // Cells are flat and grey: anything coloured or textured is not a marker.
+    if (Math.max(r, g, b) - Math.min(r, g, b) > 40 || rectSpread(frame, 32 + i * 18, 384 + row * 20, 14, 14) > 40) confident = false;
     if (luma >= 128) value |= 1 << (31 - i);
   }
   return { value: value >>> 0, confident };

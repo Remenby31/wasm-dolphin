@@ -24,6 +24,10 @@ let exitHookInstalled = false;
 
 // Mark `dir` as owned by this process and checkout until release() (or exit).
 export function claim(dir, root, kind) {
+  const existing = readOwner(dir);
+  if (existing?.pid && existing.pid !== process.pid && pidAlive(existing.pid)) {
+    throw new Error(`${dir} is already owned by live pid ${existing.pid}`);
+  }
   writeFileSync(path.join(dir, OWNER_FILE), JSON.stringify({ pid: process.pid, root, kind, startedAt: Date.now() }));
   active.add(dir);
   if (!exitHookInstalled) {
@@ -40,6 +44,8 @@ export function release(dir) {
   if (!existsSync(file)) return;
   try {
     const m = JSON.parse(readFileSync(file, "utf8"));
+    // Only the owner releases: never clear another live process's claim.
+    if (m.pid !== process.pid) return;
     writeFileSync(file, JSON.stringify({ ...m, pid: null, finishedAt: Date.now() }));
   } catch {}
 }

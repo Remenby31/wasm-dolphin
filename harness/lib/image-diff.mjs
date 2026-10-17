@@ -14,6 +14,7 @@
 export const GRID_W = 160;
 export const GRID_H = 120;
 const BLOCK = 8;
+const DEFAULT_BLOCK = BLOCK;
 const DETAIL_SIGMA = 6; // luma stdev (0-255) above which a block "has detail"
 const C1 = (0.01 * 255) ** 2;
 const C2 = (0.03 * 255) ** 2;
@@ -65,23 +66,23 @@ export function resample(frame, w = GRID_W, h = GRID_H, crop = null) {
   return { rgb, luma, w, h };
 }
 
-function blockStats(luma, w, bx, by) {
+function blockStats(luma, w, bx, by, block = BLOCK) {
   let s = 0, s2 = 0;
-  for (let y = by; y < by + BLOCK; y += 1) for (let x = bx; x < bx + BLOCK; x += 1) { const v = luma[y * w + x]; s += v; s2 += v * v; }
-  const n = BLOCK * BLOCK, m = s / n;
+  for (let y = by; y < by + block; y += 1) for (let x = bx; x < bx + block; x += 1) { const v = luma[y * w + x]; s += v; s2 += v * v; }
+  const n = block * block, m = s / n;
   return { mean: m, variance: Math.max(0, s2 / n - m * m) };
 }
 
-export function compareFrames(reference, candidate, { thresholds = DEFAULT_THRESHOLDS, crop = null } = {}) {
-  const a = resample(reference, GRID_W, GRID_H, crop);
-  const b = resample(candidate, GRID_W, GRID_H, crop);
-  const w = GRID_W, h = GRID_H;
+export function compareFrames(reference, candidate, { thresholds = DEFAULT_THRESHOLDS, crop = null, grid = null } = {}) {
+  const w = grid?.width ?? GRID_W, h = grid?.height ?? GRID_H, BLOCK = grid?.block ?? DEFAULT_BLOCK;
+  const a = resample(reference, w, h, crop);
+  const b = resample(candidate, w, h, crop);
   let ssimSum = 0, blocks = 0, detailed = 0, lost = 0;
   const blockMap = [];
   for (let by = 0; by < h; by += BLOCK) {
     for (let bx = 0; bx < w; bx += BLOCK) {
-      const sa = blockStats(a.luma, w, bx, by);
-      const sb = blockStats(b.luma, w, bx, by);
+      const sa = blockStats(a.luma, w, bx, by, BLOCK);
+      const sb = blockStats(b.luma, w, bx, by, BLOCK);
       let cov = 0;
       for (let y = by; y < by + BLOCK; y += 1) for (let x = bx; x < bx + BLOCK; x += 1) {
         cov += (a.luma[y * w + x] - sa.mean) * (b.luma[y * w + x] - sb.mean);
@@ -134,6 +135,24 @@ export function compareFrames(reference, candidate, { thresholds = DEFAULT_THRES
 }
 
 // Side-by-side visual: reference | candidate | per-block heat (red = lost, yellow = low SSIM).
+// Two captures of an animated scene taken a frame or two apart differ by a
+// small motion. When the captured emulated frames are at most
+// PHASE_TOLERANCE.maxFrameGap apart, compare on a coarse 48×36 grid (cells of
+// ~13 px at 640×480), where a few pixels of motion barely move the blocks,
+// with a lower match bar. Gross faults (blank, missing detail, squeezed) keep
+// their normal thresholds. Beyond the gap, no render verdict is possible.
+export const PHASE_TOLERANCE = Object.freeze({ maxFrameGap: 2, grid: { width: 48, height: 36, block: 4 }, match: 0.8 });
+
+export function compareAtFrames(reference, candidate, frameGap) {
+  if (!Number.isFinite(frameGap) || frameGap > PHASE_TOLERANCE.maxFrameGap) {
+    return { verdict: "frames-differ", frameGap: Number.isFinite(frameGap) ? frameGap : null };
+  }
+  const exact = compareFrames(reference, candidate);
+  if (frameGap === 0 || exact.verdict !== "different") return { ...exact, frameGap };
+  const coarse = compareFrames(reference, candidate, { grid: PHASE_TOLERANCE.grid, thresholds: { ...DEFAULT_THRESHOLDS, match: PHASE_TOLERANCE.match } });
+  return { ...exact, frameGap, coarseSsim: coarse.ssim, verdict: coarse.verdict === "match" ? "match" : "different" };
+}
+
 export function diffImage(reference, candidate, result) {
   const a = resample(reference), b = resample(candidate);
   const W = GRID_W * 3, H = GRID_H;

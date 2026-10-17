@@ -2,7 +2,7 @@
 // SPDX-License-Identifier: MIT
 // Interpreter-vs-JIT differential verdicts. Pure: takes the observations of
 // two runs of the same homebrew and returns findings.
-import { compareFrames } from "./image-diff.mjs";
+import { compareFrames, DEFAULT_THRESHOLDS } from "./image-diff.mjs";
 import { hex } from "./markers.mjs";
 
 export const INTERP_QUERY = "core=upstream&video=software&presenter=webgpu&cpu=dual&speed=1&wasmjit=0&fastsw=1&metrics=1";
@@ -68,6 +68,11 @@ export function analyzeDifferential({ interp, jit, symbols = null, frameMatch = 
     } else if (im?.confident !== jm?.confident) {
       add("error", "markers-unreadable", { interp: Boolean(im?.confident), jit: Boolean(jm?.confident) });
     } else if (interp.frame && jit.frame) {
+      // Two black screens are equal and prove nothing.
+      for (const [name, run] of [["interp", interp], ["jit", jit]]) {
+        const { candidateSigma } = compareFrames(run.frame, run.frame);
+        if (candidateSigma < DEFAULT_THRESHOLDS.blankSigma) add("error", `${name}-blank-frame`, { candidateSigma });
+      }
       const d = compareFrames(interp.frame, jit.frame);
       if (d.ssim < frameMatch) add("error", "frame-divergence", { ssim: d.ssim, meanAbs: d.meanAbs });
     }
