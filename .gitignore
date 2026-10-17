@@ -52,3 +52,5 @@ dist/
 
 # Pinned macOS/Linux core toolchain (tools/toolchain/bootstrap.sh)
 .tools/
+# A worktree may link vendor/ to a shared checkout (docs/repro-build.md)
+/vendor
