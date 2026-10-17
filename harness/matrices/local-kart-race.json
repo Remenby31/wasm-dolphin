@@ -1,11 +1,11 @@
 {
-  "name": "mkdd-race",
+  "name": "kart-race",
   "runs": 3,
   "warmupSec": 10,
   "sampleSec": 30,
   "shotEverySec": 15,
   "games": [
-    { "id": "mkdd-race", "iso": "${MKDD_ISO}", "localOnly": true, "steps": "local-mkdd-race-steps.json" }
+    { "id": "kart-race", "iso": "${KART_ISO}", "localOnly": true, "steps": "local-kart-race-steps.json" }
   ],
   "configs": [
     { "id": "rec", "preset": "rec" },
