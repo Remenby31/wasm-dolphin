@@ -6,6 +6,18 @@ function sectionMap(info) {
   return new Map((info.artifacts?.wasmSections ?? []).map((section) => [section.id, section]));
 }
 
+// Fields that identify the toolchain independently of the host it runs on. A
+// macOS build and a Linux build share these but not the binary hashes.
+const HOST_INDEPENDENT_TOOLCHAIN = [
+  "emsdkCommit", "emscriptenVersion", "emscriptenTreeSha256", "clangVersion",
+  "cmakeVersion", "ninjaVersion", "rustcVersion", "rustcCommit"
+];
+
+const declaredToolchain = (info) => {
+  const { observed, ...declared } = info.toolchain ?? {};
+  return declared;
+};
+
 export function compareCoreBuildInfo(left, right) {
   const leftSections = sectionMap(left);
   const rightSections = sectionMap(right);
@@ -17,7 +29,19 @@ export function compareCoreBuildInfo(left, right) {
   const report = {
     schemaVersion: 1,
     sourceEqual: JSON.stringify(left.source) === JSON.stringify(right.source),
-    toolchainEqual: JSON.stringify(left.toolchain) === JSON.stringify(right.toolchain),
+    toolchainEqual: JSON.stringify(declaredToolchain(left)) === JSON.stringify(declaredToolchain(right)),
+    // Reported, not gated: only builds that recorded an observed toolchain
+    // (macOS/Linux) can be compared this way.
+    observedToolchain: Object.fromEntries(HOST_INDEPENDENT_TOOLCHAIN.map((field) => [field, {
+      left: left.toolchain?.observed?.[field] ?? null,
+      right: right.toolchain?.observed?.[field] ?? null,
+      equal: (left.toolchain?.observed?.[field] ?? null) === (right.toolchain?.observed?.[field] ?? null)
+    }])),
+    // Environment-shaped configure inputs (issue #13, R3): reported per field.
+    configure: Object.fromEntries(["nagaLibrarySha256", "wasmCompileFlags", "cmakeCacheSha256"].map((field) => [
+      field,
+      (left.configure?.[field] ?? null) === (right.configure?.[field] ?? null)
+    ])),
     wasmExact: left.artifacts?.wasm?.sha256 === right.artifacts?.wasm?.sha256,
     jsNormalizedExact: left.artifacts?.js?.sha256 === right.artifacts?.js?.sha256,
     codeSection: section(10),

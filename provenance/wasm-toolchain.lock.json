@@ -83,5 +83,28 @@
         "sha256": "8e1957b21099a570a8de30a6574bd200f87f79bce15959bac1a9d85c6d6c8b0d"
       }
     ]
+  },
+  "posix": {
+    "toolchainDir": ".tools",
+    "emsdk": {
+      "repository": "https://github.com/emscripten-core/emsdk.git",
+      "commit": "bafd64c26bdaf10bd829163d1575b50b759a72d8",
+      "releasesHash": "6cd98e86d7749ff98b82b7f2ae78eb4f01942788"
+    },
+    "rust": {
+      "toolchain": "nightly-2026-05-15"
+    },
+    "emscriptenTreeSha256": "ed41ee8626124ebd6339088a058cd6f4e6736265597b16fc49633e0217f56dd5",
+    "platforms": {
+      "darwin-arm64": {
+        "clangSha256": "0c9a70e819c9b2a4c8adae45d47e870ef4cff4796bdb97b996d960c877d38045",
+        "wasmLdSha256": "9646a72a224d5b6509b58493235ce83460683d1fc6e4eb79c11a2c84d15cedea",
+        "wasmOptSha256": "b6d5131b4e0bf9545776dbff9d9b643fa43596a24901e54d91ba18aff900c9a2",
+        "rustcSha256": "3b16d63c2722cd9e3c4c2217d8b46fef82086614b24ea20fc0b27c0f87dcef7d",
+        "cargoSha256": "b9fdbb154619344ad0c883debe6d50b72c56b6782cad4cddf41206cdf8cd9d7e",
+        "cmakeSha256": "1b1667330498dc023eaeb0b0521ea105e1943d019d44bef909f0dad81844d5e1",
+        "ninjaSha256": "ad44480e2ba27be95a4850720983fd1b123728bb8a45c6c90670f5aa0d3e0069"
+      }
+    }
   }
 }

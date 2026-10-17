@@ -1,0 +1,95 @@
+name: core build (Linux, reproducible)
+
+# Rebuilds the WASM core from pinned inputs in tools/toolchain/Dockerfile,
+# runs the JS checks and tests against the patched tree, and publishes the GPL
+# corresponding source next to the rebuilt core. No ROM is used anywhere.
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: core-build-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  build:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 300
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 24.12.0
+
+      - uses: docker/setup-buildx-action@v3
+
+      # The image tag is the same content hash build-core-repro.mjs computes, so
+      # the run step below finds the image and does not rebuild it.
+      - name: Image tag
+        id: image
+        run: echo "tag=$(node tools/build-core-repro.mjs --docker-context)" >> "$GITHUB_OUTPUT"
+
+      - name: Toolchain image
+        uses: docker/build-push-action@v6
+        with:
+          context: build/docker-context
+          file: build/docker-context/tools/toolchain/Dockerfile
+          tags: ${{ steps.image.outputs.tag }}
+          load: true
+          cache-from: type=gha,scope=toolchain
+          cache-to: type=gha,mode=max,scope=toolchain
+
+      - name: Rebuild the core from scratch
+        run: |
+          start=$(date +%s)
+          npm run build:core:repro -- --docker --bind-mounts --clean --jobs "$(nproc)"
+          echo "CLEAN_BUILD_SECONDS=$(( $(date +%s) - start ))" >> "$GITHUB_ENV"
+
+      - name: Incremental rebuild (one shim file touched)
+        run: |
+          touch core/upstream/dolphin_web_discio.cpp
+          start=$(date +%s)
+          npm run build:core:repro -- --docker --bind-mounts --no-sync --jobs "$(nproc)"
+          echo "INCREMENTAL_BUILD_SECONDS=$(( $(date +%s) - start ))" >> "$GITHUB_ENV"
+
+      - name: npm run check
+        run: npm run check
+
+      - name: npm test
+        run: npm test
+
+      - name: GPL corresponding source
+        run: npm run dist:source
+
+      - name: Summary
+        run: |
+          {
+            echo "### Core rebuild (linux-x64)"
+            echo "- clean build: ${CLEAN_BUILD_SECONDS}s, incremental: ${INCREMENTAL_BUILD_SECONDS}s"
+            node -e "
+              const p=require('./build/repro/linux-x64/parity.json');
+              console.log('- rebuilt wasm: \`sha256:'+p.rebuilt.wasmSha256+'\` ('+p.rebuilt.wasmBytes+' bytes)');
+              console.log('- committed wasm: \`sha256:'+p.committed.wasmSha256+'\`');
+              console.log('- sections equal: '+p.sections.filter(s=>s.equal).map(s=>s.label).join(', '));"
+          } >> "$GITHUB_STEP_SUMMARY"
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: corresponding-source
+          path: dist/*.tar.gz
+          if-no-files-found: error
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: core-linux-x64
+          path: |
+            build/repro/linux-x64/core/
+            build/repro/linux-x64/parity.json
+          if-no-files-found: error

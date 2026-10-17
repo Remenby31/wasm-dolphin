@@ -1,6 +1,7 @@
 import { existsSync, mkdirSync, writeFileSync } from "node:fs";
 import { spawnSync } from "node:child_process";
-import { dirname, resolve } from "node:path";
+import { homedir } from "node:os";
+import { delimiter, dirname, relative, resolve } from "node:path";
 import { sha256File, verifyWasmToolchain } from "./wasm-toolchain.mjs";
 
 const root = process.cwd();
@@ -11,8 +12,6 @@ const sharedSourceDir = dirname(bridgeSource);
 const coreSource = resolve(root, "core/upstream/dolphin_web_core.cpp");
 const outputDir = resolve(process.env.DOLPHIN_WASM_OUTPUT_DIR ?? resolve(root, "cores/dolphin"));
 const nagaDir = resolve(root, "tools/naga-spirv-wgsl");
-const nagaLibrary = resolve(nagaDir, "target/wasm32-unknown-emscripten/release/naga_spirv_wgsl.a");
-const nagaLibraryAlternate = resolve(nagaDir, "target/wasm32-unknown-emscripten/release/libnaga_spirv_wgsl.a");
 const jitCachePreJs = resolve(root, "tools/jit-cache-prejs.js");
 const wasmMemoryPages = 24576;
 const fastBranchInline = String(
@@ -78,21 +77,66 @@ const toolchain = verifyWasmToolchain();
 const { emcc, emcmake, cmake, ninja, cargo, rustc } = toolchain.paths;
 const nagaEnvironment = {
   ...process.env,
-  PATH: `${dirname(rustc)};${dirname(emcc)};${process.env.PATH ?? ""}`,
+  PATH: [dirname(rustc), dirname(emcc), process.env.PATH ?? ""].join(delimiter),
   RUSTC: rustc,
   CARGO: cargo
 };
 
+// Absolute checkout, build and toolchain paths reach the binary through
+// __FILE__ (Dolphin asserts) and Rust panic locations (std rebuilt from
+// rust-src, crates from the cargo registry). Map them onto fixed virtual roots
+// so the core depends on the sources, not on where they sit: a macOS checkout,
+// a Docker container and a CI runner then produce the same bytes.
+const forwardSlashes = (path) => path.replaceAll("\\", "/");
+const virtualRoot = "/wasm-dolphin";
+for (const path of [root, buildDir]) {
+  if (/\s/.test(path)) {
+    throw new Error(`Build paths must not contain whitespace (CMake flag lists split on it): ${path}`);
+  }
+}
+const sourcePathFlags = [`-ffile-prefix-map=${forwardSlashes(root)}=${virtualRoot}`];
+if (relative(root, buildDir).startsWith("..")) {
+  sourcePathFlags.push(`-ffile-prefix-map=${forwardSlashes(buildDir)}=${virtualRoot}/build/dolphin-wasm`);
+}
+const rustSysroot = spawnSync(rustc, ["--print", "sysroot"], { encoding: "utf8" }).stdout.trim();
+if (!rustSysroot) {
+  throw new Error(`Could not query the sysroot of ${rustc}`);
+}
+const rustRemapFlags = [
+  [resolve(process.env.CARGO_HOME ?? resolve(homedir(), ".cargo")), "/cargo"],
+  [resolve(rustSysroot, "lib/rustlib/src/rust"), `/rustc/${toolchain.lock.rust.rustcCommit}`],
+  [root, virtualRoot]
+].map(([from, to]) => `--remap-path-prefix=${from}=${to}`);
+
 console.log("Building the pinned Naga SPIR-V to WGSL bridge");
-run(cargo, ["build", "--locked", "--release", "--target", toolchain.lock.rust.target], {
+// Take the archive cargo reports for this build. Picking whichever of the two
+// possible file names exists let a stale archive from an older toolchain win
+// (issue #13, naga hash drift under an identical record).
+const nagaBuild = spawnSync(cargo, [
+  "build", "--locked", "--release", "--target", toolchain.lock.rust.target,
+  "--message-format=json-render-diagnostics",
+  "--config", `target.${toolchain.lock.rust.target}.rustflags=${JSON.stringify(rustRemapFlags)}`
+], {
   cwd: nagaDir,
-  env: nagaEnvironment
+  env: nagaEnvironment,
+  encoding: "utf8",
+  stdio: ["ignore", "pipe", "inherit"],
+  maxBuffer: 64 * 1024 * 1024
 });
-const resolvedNagaLibrary = existsSync(nagaLibrary) ? nagaLibrary : nagaLibraryAlternate;
-if (!existsSync(resolvedNagaLibrary)) {
-  console.error(`Pinned Naga build did not produce ${nagaLibrary} or ${nagaLibraryAlternate}`);
+if (nagaBuild.error || nagaBuild.status !== 0) {
+  process.exit(nagaBuild.status || 1);
+}
+const nagaArtifacts = nagaBuild.stdout.split("\n")
+  .filter((line) => line.startsWith("{"))
+  .map((line) => JSON.parse(line))
+  .filter((message) => message.reason === "compiler-artifact" && message.target?.name === "naga_spirv_wgsl")
+  .flatMap((message) => message.filenames)
+  .filter((file) => file.endsWith(".a"));
+if (nagaArtifacts.length !== 1 || !existsSync(nagaArtifacts[0])) {
+  console.error(`Pinned Naga build reported ${nagaArtifacts.length} static archives: ${nagaArtifacts.join(", ")}`);
   process.exit(1);
 }
+const resolvedNagaLibrary = nagaArtifacts[0];
 
 // CMake runs hundreds of feature probes. Keep the original global production
 // flags so subprojects that replace their Release flags still retain LTO, but
@@ -103,7 +147,8 @@ const wasmCompileFlags =
   `-DDOLPHIN_WEB_INLINE_FAST_BRANCH=${fastBranchInline} ` +
   `-DDOLPHIN_WEB_FALLBACK_MAP_DIAGNOSTICS=${fallbackMapDiagnostics} ` +
   `-DDOLPHIN_WEB_FALLBACK_MAP_BITS=${fallbackMapBits} ` +
-  `-DDOLPHIN_WEB_DIRECT_WASM_BLOCK_DISPATCH=${directWasmBlockDispatch}`;
+  `-DDOLPHIN_WEB_DIRECT_WASM_BLOCK_DISPATCH=${directWasmBlockDispatch} ` +
+  sourcePathFlags.join(" ");
 const wasmDebugProbeFlags = "-O0 -fno-lto";
 const cmakeArgs = [
   cmake,
@@ -207,6 +252,8 @@ writeFileSync(resolve(buildDir, "wasm-dolphin-configure.json"), `${JSON.stringif
   fallbackMapBits,
   directWasmBlockDispatch,
   wasmCompileFlags,
+  sourcePathFlags,
+  rustRemapFlags,
   cmakeArgs,
   toolchainLockSha256: toolchain.hashes.lock,
   cargoLockSha256: toolchain.hashes.cargoLock

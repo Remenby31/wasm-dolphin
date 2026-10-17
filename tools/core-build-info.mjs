@@ -119,7 +119,11 @@ export function unexpectedDirtyPaths(status) {
   return dirtyPathsFromStatus(status).filter((path) => !CANONICAL_BUILD_OUTPUTS.has(path));
 }
 
-export function writeCoreBuildInfo({ buildDir, outputPath = process.env.DOLPHIN_BUILD_INFO_PATH } = {}) {
+export function writeCoreBuildInfo({
+  buildDir,
+  outputPath = process.env.DOLPHIN_BUILD_INFO_PATH,
+  observedToolchain = null
+} = {}) {
   const absoluteBuildDir = resolve(buildDir ?? process.env.DOLPHIN_WASM_BUILD_DIR ?? resolve(root, "build/dolphin-wasm"));
   const configurePath = resolve(absoluteBuildDir, "wasm-dolphin-configure.json");
   if (!existsSync(configurePath)) throw new Error(`Missing configure record ${configurePath}`);
@@ -196,7 +200,11 @@ export function writeCoreBuildInfo({ buildDir, outputPath = process.env.DOLPHIN_
       rustcCommit: toolchain.rust.rustcCommit,
       cargoVersion: toolchain.rust.cargoVersion,
       nagaDependencyVersion: toolchain.naga.dependencyVersion,
-      cargoLockSha256: sha256NormalizedTextFile(cargoLockPath)
+      cargoLockSha256: sha256NormalizedTextFile(cargoLockPath),
+      // What verify:toolchain found on disk (macOS/Linux), as opposed to the
+      // lock transcription above. Absent for the Windows path, which checks
+      // the same hashes but does not report them.
+      observed: observedToolchain ? observedToolchainRecord(observedToolchain) : undefined
     },
     configure: {
       buildDir: configure.buildDir,
@@ -208,6 +216,8 @@ export function writeCoreBuildInfo({ buildDir, outputPath = process.env.DOLPHIN_
       fallbackMapBits: configure.fallbackMapBits,
       directWasmBlockDispatch: configure.directWasmBlockDispatch,
       wasmCompileFlags: configure.wasmCompileFlags,
+      sourcePathFlags: configure.sourcePathFlags,
+      rustRemapFlags: configure.rustRemapFlags,
       cmakeArgs: configure.cmakeArgs,
       cmakeCacheSha256: sha256File(resolve(absoluteBuildDir, "CMakeCache.txt"))
     },
@@ -221,6 +231,11 @@ export function writeCoreBuildInfo({ buildDir, outputPath = process.env.DOLPHIN_
   const destination = resolve(outputPath ?? resolve(configure.outputDir, `${basename(wasmPath, ".wasm")}.build.json`));
   writeFileSync(destination, `${JSON.stringify(info, null, 2)}\n`);
   return { destination, info };
+}
+
+function observedToolchainRecord(observed) {
+  const { paths, ...record } = observed;
+  return { ...record, toolchainDir: paths?.toolchainDir };
 }
 
 export function packageCoreCandidate(buildInfoPath) {

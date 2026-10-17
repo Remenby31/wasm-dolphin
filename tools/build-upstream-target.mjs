@@ -25,7 +25,7 @@ if (result.error || result.status !== 0) {
 }
 
 if (target === "dolphin_web_core") {
-  const buildInfo = writeCoreBuildInfo({ buildDir });
+  const buildInfo = writeCoreBuildInfo({ buildDir, observedToolchain: toolchain.observed });
   console.log(`Wrote core build evidence to ${buildInfo.destination}`);
   const candidate = packageCoreCandidate(buildInfo.destination);
   console.log(`Packaged content-addressed core candidate at ${candidate.destination}`);

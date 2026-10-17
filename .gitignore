@@ -49,3 +49,6 @@ vendor/dolphin/
 
 # Release artifacts (GPL corresponding-source archives are built, not tracked)
 dist/
+
+# Pinned macOS/Linux core toolchain (tools/toolchain/bootstrap.sh)
+.tools/

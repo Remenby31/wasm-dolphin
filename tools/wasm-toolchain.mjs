@@ -1,6 +1,6 @@
 import { createHash } from "node:crypto";
-import { existsSync, readFileSync } from "node:fs";
-import { dirname, resolve } from "node:path";
+import { existsSync, readdirSync, readFileSync, realpathSync, statSync } from "node:fs";
+import { dirname, join, relative, resolve } from "node:path";
 import { spawnSync } from "node:child_process";
 import { fileURLToPath } from "node:url";
 
@@ -81,10 +81,16 @@ export function loadWasmToolchainLock() {
   return JSON.parse(readFileSync(lockPath, "utf8"));
 }
 
+export const hostPlatform = `${process.platform}-${process.arch}`;
+
 export function verifyWasmToolchain() {
   const lock = loadWasmToolchainLock();
   invariant(lock.schemaVersion === 1, `Unsupported toolchain lock schema ${lock.schemaVersion}`);
-  invariant(`${process.platform}-${process.arch}` === lock.platform, `Toolchain lock requires ${lock.platform}`);
+  if (hostPlatform !== lock.platform && lock.posix?.platforms?.[hostPlatform]) {
+    return verifyPosixToolchain(lock);
+  }
+  const supported = [lock.platform, ...Object.keys(lock.posix?.platforms ?? {})];
+  invariant(hostPlatform === lock.platform, `Toolchain lock supports ${supported.join(", ")}, not ${hostPlatform}`);
 
   const node = resolveTool("Node", "DOLPHIN_NODE", lock.node.candidates, lock.node.sha256, "node.exe");
   const emcc = resolveTool("emcc", "EMCC", lock.emscripten.emccCandidates, lock.emscripten.emccSha256, "emcc.bat");
@@ -120,6 +126,20 @@ export function verifyWasmToolchain() {
     invariant(installed.split(/\r?\n/).some((line) => line.startsWith("rust-src")), `${lock.rust.toolchain} is missing rust-src`);
   }
 
+  verifyNagaSources(lock);
+
+  return {
+    lock,
+    platform: hostPlatform,
+    paths: { node, emcc, emcmake, cmake, ninja, rustc, cargo, rustup, clangxx },
+    hashes: {
+      lock: sha256File(lockPath),
+      cargoLock: sha256NormalizedTextFile(resolve(root, "tools/naga-spirv-wgsl/Cargo.lock"))
+    }
+  };
+}
+
+function verifyNagaSources(lock) {
   const cargoLock = resolve(root, "tools/naga-spirv-wgsl/Cargo.lock");
   invariant(lock.naga.cargoLockHashMode === "lf-normalized", "Unsupported Naga Cargo.lock hash mode");
   invariant(sha256NormalizedTextFile(cargoLock) === lock.naga.cargoLockSha256, "Naga Cargo.lock hash mismatch");
@@ -137,15 +157,165 @@ export function verifyWasmToolchain() {
     invariant(createHash("sha256").update(bytes).digest("hex") === record.sha256,
       `Naga source hash mismatch for ${record.path}`);
   }
+}
 
+// macOS and Linux: every tool lives in one directory populated by
+// tools/toolchain/bootstrap.sh from pinned sources (emsdk commit + release,
+// a dated Rust nightly, hash-locked CMake/Ninja wheels). Nothing is taken from
+// PATH, so a stray Homebrew cmake or a second emsdk cannot slip in.
+export function posixToolchainDir() {
+  return resolve(root, process.env.WASM_TOOLCHAIN_DIR ?? loadWasmToolchainLock().posix.toolchainDir);
+}
+
+// The Emscripten layer that decides what the JS glue contains (src/lib/*.js,
+// settings, link.py, emcc.py) is plain text and identical on every host, so one
+// digest pins it everywhere. This is the input that issue #13 showed the
+// version string alone does not pin (FS.filesystems differed under an
+// identical version record).
+const EMSCRIPTEN_TREE_ROOTS = ["emcc.py", "emcmake.py", "src", "tools", "system/include", "system/lib"];
+
+export function emscriptenTreeSha256(emscriptenDir) {
+  const files = [];
+  const walk = (path) => {
+    const stats = statSync(path);
+    if (stats.isDirectory()) {
+      for (const name of readdirSync(path).sort()) {
+        if (name === "__pycache__" || name === "node_modules" || name.endsWith(".pyc")) continue;
+        walk(join(path, name));
+      }
+    } else if (stats.isFile()) {
+      files.push(path);
+    }
+  };
+  for (const entry of EMSCRIPTEN_TREE_ROOTS) {
+    const path = join(emscriptenDir, entry);
+    if (existsSync(path)) walk(path);
+  }
+  const hash = createHash("sha256");
+  for (const file of files) {
+    hash.update(`${relative(emscriptenDir, file).split("\\").join("/")}\0${sha256File(file)}\n`);
+  }
+  return { sha256: hash.digest("hex"), files: files.length };
+}
+
+function rustHostTriple() {
   return {
-    lock,
-    paths: { node, emcc, emcmake, cmake, ninja, rustc, cargo, rustup, clangxx },
+    "darwin-arm64": "aarch64-apple-darwin",
+    "darwin-x64": "x86_64-apple-darwin",
+    "linux-x64": "x86_64-unknown-linux-gnu",
+    "linux-arm64": "aarch64-unknown-linux-gnu"
+  }[hostPlatform];
+}
+
+export function posixToolPaths(lock = loadWasmToolchainLock()) {
+  const dir = posixToolchainDir();
+  const emsdkRoot = join(dir, "emsdk");
+  const emscriptenDir = join(emsdkRoot, "upstream/emscripten");
+  const rustupHome = process.env.RUSTUP_HOME ?? join(process.env.HOME ?? "", ".rustup");
+  const rustToolchain = join(rustupHome, "toolchains", `${lock.posix.rust.toolchain}-${rustHostTriple()}`);
+  const pythonBin = join(dir, "python/bin");
+  return {
+    toolchainDir: dir,
+    emsdkRoot,
+    emscriptenDir,
+    emcc: join(emscriptenDir, "emcc"),
+    emcmake: join(emscriptenDir, "emcmake"),
+    clang: join(emsdkRoot, "upstream/bin/clang"),
+    wasmLd: join(emsdkRoot, "upstream/bin/wasm-ld"),
+    wasmOpt: join(emsdkRoot, "upstream/bin/wasm-opt"),
+    cmake: join(pythonBin, "cmake"),
+    ninja: join(pythonBin, "ninja"),
+    rustToolchain,
+    rustc: join(rustToolchain, "bin/rustc"),
+    cargo: join(rustToolchain, "bin/cargo")
+  };
+}
+
+// The Ninja wheel installs its binary straight into bin/; the CMake wheel puts
+// a Python launcher there and the binary under site-packages. Hash the binary.
+function wheelBinary(paths, name) {
+  const launcher = join(paths.toolchainDir, "python/bin", name);
+  if (existsSync(launcher) && readFileSync(launcher).subarray(0, 2).toString() !== "#!") return launcher;
+  const lib = join(paths.toolchainDir, "python/lib");
+  invariant(existsSync(lib), `Missing Python environment in ${paths.toolchainDir}`);
+  for (const version of readdirSync(lib)) {
+    const candidate = join(lib, version, `site-packages/${name}/data/bin/${name}`);
+    if (existsSync(candidate)) return candidate;
+  }
+  throw new Error(`Could not find the ${name} wheel binary under ${lib}`);
+}
+
+export function observePosixToolchain(lock = loadWasmToolchainLock()) {
+  const paths = posixToolPaths(lock);
+  const missing = ["emcc", "emcmake", "clang", "wasmLd", "wasmOpt", "cmake", "ninja", "rustc", "cargo"]
+    .filter((key) => !existsSync(paths[key]));
+  invariant(missing.length === 0,
+    `Pinned toolchain is incomplete in ${paths.toolchainDir} (missing ${missing.join(", ")}). ` +
+    "Run npm run toolchain:bootstrap first.");
+  const real = (path) => realpathSync(path);
+  const emccVersion = runVersion(paths.emcc, ["--version"]);
+  const rustcVersion = runVersion(paths.rustc, ["--version", "--verbose"]);
+  const rustSrc = join(paths.rustToolchain, "lib/rustlib/src/rust/library/Cargo.lock");
+  const emscriptenTree = emscriptenTreeSha256(paths.emscriptenDir);
+  return {
+    platform: hostPlatform,
+    paths,
+    emsdkCommit: runVersion("git", ["-C", paths.emsdkRoot, "rev-parse", "HEAD"]),
+    emscriptenVersion: readFileSync(join(paths.emscriptenDir, "emscripten-version.txt"), "utf8").trim().replaceAll('"', ""),
+    emccVersion: emccVersion.split("\n")[0],
+    emscriptenTreeSha256: emscriptenTree.sha256,
+    emscriptenTreeFiles: emscriptenTree.files,
+    clangVersion: runVersion(paths.clang, ["--version"]).split("\n")[0],
+    cmakeVersion: runVersion(paths.cmake, ["--version"]).split("\n")[0],
+    ninjaVersion: runVersion(paths.ninja, ["--version"]),
+    rustcVersion: rustcVersion.split("\n")[0],
+    rustcCommit: /commit-hash: ([0-9a-f]+)/.exec(rustcVersion)?.[1] ?? null,
+    rustSrcPresent: existsSync(rustSrc),
     hashes: {
-      lock: sha256File(lockPath),
-      cargoLock: sha256NormalizedTextFile(cargoLock)
+      clangSha256: sha256File(real(paths.clang)),
+      wasmLdSha256: sha256File(real(paths.wasmLd)),
+      wasmOptSha256: sha256File(real(paths.wasmOpt)),
+      rustcSha256: sha256File(real(paths.rustc)),
+      cargoSha256: sha256File(real(paths.cargo)),
+      cmakeSha256: sha256File(wheelBinary(paths, "cmake")),
+      ninjaSha256: sha256File(wheelBinary(paths, "ninja"))
     }
   };
 }
 
-export { lockPath, sha256File, sha256NormalizedTextFile };
+function verifyPosixToolchain(lock) {
+  const expected = lock.posix.platforms[hostPlatform];
+  const observed = observePosixToolchain(lock);
+  const { paths } = observed;
+  invariant(observed.emsdkCommit === lock.posix.emsdk.commit,
+    `emsdk commit mismatch: expected ${lock.posix.emsdk.commit}, got ${observed.emsdkCommit}`);
+  requireText("Emscripten", observed.emccVersion, lock.emscripten.version);
+  requireText("Emscripten compiler", runVersion(paths.emcc, ["--version"]), lock.emscripten.compilerCommit);
+  invariant(observed.emscriptenTreeSha256 === lock.posix.emscriptenTreeSha256,
+    `Emscripten source tree mismatch in ${paths.emscriptenDir}: expected ${lock.posix.emscriptenTreeSha256}, ` +
+    `got ${observed.emscriptenTreeSha256}`);
+  requireText("CMake", observed.cmakeVersion, lock.cmake.version);
+  requireText("Ninja", observed.ninjaVersion, lock.ninja.version);
+  requireText("rustc", observed.rustcVersion, lock.rust.rustcVersion);
+  invariant(observed.rustcCommit === lock.rust.rustcCommit,
+    `rustc commit mismatch: expected ${lock.rust.rustcCommit}, got ${observed.rustcCommit}`);
+  invariant(!lock.rust.rustSrcRequired || observed.rustSrcPresent,
+    `${lock.posix.rust.toolchain} is missing rust-src`);
+  for (const [key, value] of Object.entries(expected)) {
+    invariant(observed.hashes[key] === value,
+      `${key.replace(/Sha256$/, "")} hash mismatch on ${hostPlatform}: expected ${value}, got ${observed.hashes[key]}`);
+  }
+  verifyNagaSources(lock);
+  return {
+    lock,
+    platform: hostPlatform,
+    observed,
+    paths: { ...paths, clangxx: paths.clang, rustup: null, node: process.execPath },
+    hashes: {
+      lock: sha256File(lockPath),
+      cargoLock: sha256NormalizedTextFile(resolve(root, "tools/naga-spirv-wgsl/Cargo.lock"))
+    }
+  };
+}
+
+export { lockPath, root as repositoryRoot, sha256File, sha256NormalizedTextFile };
