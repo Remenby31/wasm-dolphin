@@ -3,10 +3,10 @@
  * consoletest: deterministic printf/console workload. The formatted text is
  * also rendered with snprintf and hashed into marker row 0, so an
  * interpreter run and a JIT run can be compared bit for bit.
- * Status: yellow while running, green once DONE_FRAME frames have passed.
  * Row 0: FNV-1a of every line formatted on the last frame.
  * Row 1: FNV-1a of the lines formatted on the first frame.
  * Row 2: number of frames whose hash differed from frame 0 (saturating).
+ * Row 3: 1 once DONE_FRAME frames have passed (output is frozen from then on).
  */
 #include <stdio.h>
 #include <string.h>
@@ -51,10 +51,8 @@ int main(void) {
 			if (frame == 0) first = last;
 			else if (last != first && diverged < 0xffffffffu) diverged++;
 		}
-		mk_row(xfb, rmode, 0, last);
-		mk_row(xfb, rmode, 1, first);
-		mk_row(xfb, rmode, 2, diverged);
-		mk_status(xfb, rmode, frame < DONE_FRAME ? MK_RUNNING : (diverged ? MK_FAIL : MK_PASS));
+		const u32 rows[MK_ROWS] = {last, first, diverged, frame < DONE_FRAME ? 0 : 1};
+		mk_rows(xfb, rmode, rows);
 	}
 	return 0;
 }

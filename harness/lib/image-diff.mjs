@@ -135,22 +135,18 @@ export function compareFrames(reference, candidate, { thresholds = DEFAULT_THRES
 }
 
 // Side-by-side visual: reference | candidate | per-block heat (red = lost, yellow = low SSIM).
-// Two captures of an animated scene taken a frame or two apart differ by a
-// small motion. When the captured emulated frames are at most
-// PHASE_TOLERANCE.maxFrameGap apart, compare on a coarse 48×36 grid (cells of
-// ~13 px at 640×480), where a few pixels of motion barely move the blocks,
-// with a lower match bar. Gross faults (blank, missing detail, squeezed) keep
-// their normal thresholds. Beyond the gap, no render verdict is possible.
-export const PHASE_TOLERANCE = Object.freeze({ maxFrameGap: 2, grid: { width: 48, height: 36, block: 4 }, match: 0.8 });
+// Byte-for-byte equality of two RGBA frames of the same size.
+export function identical(a, b) {
+  if (!a || !b || a.width !== b.width || a.height !== b.height || a.data.length !== b.data.length) return false;
+  return Buffer.compare(Buffer.from(a.data.buffer, a.data.byteOffset, a.data.length), Buffer.from(b.data.buffer, b.data.byteOffset, b.data.length)) === 0;
+}
 
-export function compareAtFrames(reference, candidate, frameGap) {
-  if (!Number.isFinite(frameGap) || frameGap > PHASE_TOLERANCE.maxFrameGap) {
-    return { verdict: "frames-differ", frameGap: Number.isFinite(frameGap) ? frameGap : null };
-  }
-  const exact = compareFrames(reference, candidate);
-  if (frameGap === 0 || exact.verdict !== "different") return { ...exact, frameGap };
-  const coarse = compareFrames(reference, candidate, { grid: PHASE_TOLERANCE.grid, thresholds: { ...DEFAULT_THRESHOLDS, match: PHASE_TOLERANCE.match } });
-  return { ...exact, frameGap, coarseSsim: coarse.ssim, verdict: coarse.verdict === "match" ? "match" : "different" };
+// Pixels that differ (any channel), for reports.
+export function differingPixels(a, b) {
+  if (!a || !b || a.width !== b.width || a.height !== b.height) return null;
+  let n = 0;
+  for (let i = 0; i < a.data.length; i += 4) if (a.data[i] !== b.data[i] || a.data[i + 1] !== b.data[i + 1] || a.data[i + 2] !== b.data[i + 2]) n += 1;
+  return n;
 }
 
 export function diffImage(reference, candidate, result) {

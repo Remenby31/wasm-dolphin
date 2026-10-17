@@ -1,7 +1,8 @@
 /* Copyright 2026 wasm-dolphin contributors
  * SPDX-License-Identifier: MIT
  * padtest: prints the state of the 4 controller ports and mirrors it in the
- * harness marker rows (row = port), so tests can check ports 2-4 end to end.
+ * harness marker rows (row = port, plus a checksum row), so tests can check
+ * ports 2-4 end to end.
  * Row bits (LSB first): 0-12 PAD_ButtonsHeld, 13/14 stick X +/-, 15/16 stick Y +/-,
  * 17/18 C-stick X +/-, 19/20 C-stick Y +/-, 21 L analog, 22 R analog,
  * 23 port reported connected, 31 always set (row valid).
@@ -52,8 +53,9 @@ int main(void) {
 			       PAD_StickX(c), PAD_StickY(c), PAD_SubStickX(c), PAD_SubStickY(c),
 			       PAD_TriggerL(c), PAD_TriggerR(c));
 		}
-		for (int c = 0; c < 4; c++) mk_row(xfb, rmode, c, encode(c, connected));
-		mk_status(xfb, rmode, MK_IDLE);
+		u32 rows[MK_ROWS];
+		for (int c = 0; c < 4; c++) rows[c] = encode(c, connected);
+		mk_rows(xfb, rmode, rows);
 	}
 	return 0;
 }

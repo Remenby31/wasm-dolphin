@@ -21,9 +21,11 @@
 #include "DiscIO/Filesystem.h"
 #include "DiscIO/Volume.h"
 #include "DiscIO/VolumeDisc.h"
+#include "Core/CoreTiming.h"
 #include "Core/HW/VideoInterface.h"
 #include "Core/System.h"
 #include "InputCommon/GCPadStatus.h"
+#include "VideoCommon/Fifo.h"
 #include "VideoCommon/TextureDecoder.h"
 #include "VideoCommon/Statistics.h"
 
@@ -896,6 +898,119 @@ std::uint32_t* GetFrameSignalPtr()
   return &s_frame_signal;
 }
 
+// ---- QA harness hooks (harness/README.md) --------------------------------
+// Every VI output (one per emulated field the game scans out, on the CPU
+// thread, in emulated time) gets an index counted from boot and from the
+// last savestate load, and lands in a ring the worker drains: the emulated
+// timeline, complete, with the host time of each output. A capture can be
+// armed for one exact output index; the XFB is decoded at native size into a
+// separate buffer at that output, or the capture is marked missed. The
+// harness never infers the frame from wall-clock time.
+struct DolphinWebHarnessViEntry
+{
+  double host_ms;
+  std::uint64_t ticks;
+  std::uint32_t vi_since_boot;
+  std::uint32_t vi_since_load;
+};
+static_assert(sizeof(DolphinWebHarnessViEntry) == 24, "harness VI entry layout is read from JS");
+
+constexpr std::uint32_t HARNESS_VI_RING_CAPACITY = 8192;  // > 2 min at 60 Hz between drains
+static std::array<DolphinWebHarnessViEntry, HARNESS_VI_RING_CAPACITY> s_harness_vi_ring{};
+static std::atomic<std::uint32_t> s_harness_vi_head{0};
+static std::uint32_t s_harness_vi_since_boot = 0;
+static std::uint32_t s_harness_vi_since_load = 0;
+static std::atomic<std::uint32_t> s_harness_load_generation{0};
+
+// 0 idle, 1 armed, 2 ready, 3 missed
+static std::atomic<int> s_harness_capture_state{0};
+static std::uint32_t s_harness_capture_target = 0;
+static int s_harness_capture_from_load = 0;
+static std::vector<std::uint32_t> s_harness_capture_pixels;
+static std::uint32_t s_harness_capture_width = 0;
+static std::uint32_t s_harness_capture_height = 0;
+static std::uint32_t s_harness_capture_index = 0;
+static std::uint64_t s_harness_capture_ticks = 0;
+
+// Called on the CPU thread at the end of a savestate load.
+void DolphinWeb_HarnessOnStateLoaded()
+{
+  s_harness_vi_since_load = 0;
+  s_harness_load_generation.fetch_add(1, std::memory_order_release);
+}
+
+static void HarnessOnViOutput(const std::uint8_t* xfb, std::uint32_t width, std::uint32_t stride,
+                              std::uint32_t height)
+{
+  ++s_harness_vi_since_boot;
+  ++s_harness_vi_since_load;
+  const std::uint64_t ticks = Core::System::GetInstance().GetCoreTiming().GetTicks();
+  const std::uint32_t head = s_harness_vi_head.load(std::memory_order_relaxed);
+  #ifdef __EMSCRIPTEN__
+  const double host_ms = emscripten_get_now();
+#else
+  const double host_ms = 0.0;
+#endif
+  s_harness_vi_ring[head % HARNESS_VI_RING_CAPACITY] = {host_ms, ticks,
+                                                         s_harness_vi_since_boot,
+                                                         s_harness_vi_since_load};
+  s_harness_vi_head.store(head + 1, std::memory_order_release);
+
+  if (s_harness_capture_state.load(std::memory_order_acquire) != 1)
+    return;
+  const std::uint32_t index = s_harness_capture_from_load ? s_harness_vi_since_load : s_harness_vi_since_boot;
+  if (index < s_harness_capture_target)
+    return;
+  if (index > s_harness_capture_target)
+  {
+    s_harness_capture_state.store(3, std::memory_order_release);
+    return;
+  }
+  // With immediate XFB the GPU may still be writing this XFB: wait for it,
+  // only on the captured output, so the capture is the finished picture.
+  Core::System::GetInstance().GetFifo().SyncGPU(Fifo::SyncGPUReason::Swap);
+  s_harness_capture_pixels.resize(static_cast<std::size_t>(width) * height);
+  for (std::uint32_t y = 0; y < height; ++y)
+  {
+    const std::uint8_t* row = xfb + static_cast<std::size_t>(y) * stride;
+    for (std::uint32_t x = 0; x < width; ++x)
+    {
+      const std::uint8_t* pair = row + static_cast<std::size_t>(x & ~1u) * 2;
+      s_harness_capture_pixels[static_cast<std::size_t>(y) * width + x] =
+          YuvToRgba((x & 1u) ? pair[2] : pair[0], pair[1], pair[3]);
+    }
+  }
+  s_harness_capture_width = width;
+  s_harness_capture_height = height;
+  s_harness_capture_index = index;
+  s_harness_capture_ticks = ticks;
+  s_harness_capture_state.store(2, std::memory_order_release);
+}
+
+// Arm a capture of VI output `index` (counted from boot, or from the last
+// load when from_load != 0). Returns 0 when that output has already passed.
+EMSCRIPTEN_KEEPALIVE int DolphinWeb_HarnessArmCapture(std::uint32_t index, int from_load)
+{
+  const std::uint32_t now = from_load ? s_harness_vi_since_load : s_harness_vi_since_boot;
+  if (index <= now)
+    return 0;
+  s_harness_capture_target = index;
+  s_harness_capture_from_load = from_load;
+  s_harness_capture_state.store(1, std::memory_order_release);
+  return 1;
+}
+EMSCRIPTEN_KEEPALIVE void DolphinWeb_HarnessDisarmCapture() { s_harness_capture_state.store(0, std::memory_order_release); }
+EMSCRIPTEN_KEEPALIVE int DolphinWeb_HarnessCaptureState() { return s_harness_capture_state.load(std::memory_order_acquire); }
+EMSCRIPTEN_KEEPALIVE std::uint32_t* DolphinWeb_HarnessCapturePixels() { return s_harness_capture_pixels.data(); }
+EMSCRIPTEN_KEEPALIVE std::uint32_t DolphinWeb_HarnessCaptureWidth() { return s_harness_capture_width; }
+EMSCRIPTEN_KEEPALIVE std::uint32_t DolphinWeb_HarnessCaptureHeight() { return s_harness_capture_height; }
+EMSCRIPTEN_KEEPALIVE std::uint32_t DolphinWeb_HarnessCaptureIndex() { return s_harness_capture_index; }
+EMSCRIPTEN_KEEPALIVE double DolphinWeb_HarnessCaptureTicks() { return static_cast<double>(s_harness_capture_ticks); }
+EMSCRIPTEN_KEEPALIVE DolphinWebHarnessViEntry* DolphinWeb_HarnessViRing() { return s_harness_vi_ring.data(); }
+EMSCRIPTEN_KEEPALIVE std::uint32_t DolphinWeb_HarnessViRingCapacity() { return HARNESS_VI_RING_CAPACITY; }
+EMSCRIPTEN_KEEPALIVE std::uint32_t DolphinWeb_HarnessViRingHead() { return s_harness_vi_head.load(std::memory_order_acquire); }
+EMSCRIPTEN_KEEPALIVE std::uint32_t DolphinWeb_HarnessLoadGeneration() { return s_harness_load_generation.load(std::memory_order_acquire); }
+
 void DolphinWeb_OnXfb(const std::uint8_t* xfb, std::uint32_t width, std::uint32_t stride,
                       std::uint32_t height)
 {
@@ -914,6 +1029,7 @@ void DolphinWeb_OnXfb(const std::uint8_t* xfb, std::uint32_t width, std::uint32_
   {
     return;
   }
+  HarnessOnViOutput(xfb, width, stride, height);
 
   const int presentation_width = ScaledPresentationDimension(width);
   const int presentation_height = ScaledPresentationDimension(height);

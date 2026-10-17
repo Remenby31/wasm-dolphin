@@ -13,8 +13,8 @@
  * final hash across a wasmjit=0 and a wasmjit=1 run.
  *
  * No printf/console on purpose: the libogc console path currently crashes the
- * WASM JIT, and this program must keep fuzzing anyway. Output is markers only:
- *   status: yellow running, green done/no mismatch, red mismatch
+ * WASM JIT, and this program must keep fuzzing anyway. Output is marker rows
+ * (with their checksum row) only; from DONE_FRAME on the picture is frozen:
  *   row 0: combined hash of the last frame
  *   row 1: combined hash of frame 0
  *   row 2: bits 24-27 = mismatching groups (bit g = group g),
@@ -275,11 +275,8 @@ int main(void) {
 			last = all;
 			if (frame == 0) first = all;
 		}
-		mk_row(xfb, rmode, 0, last);
-		mk_row(xfb, rmode, 1, first);
-		mk_row(xfb, rmode, 2, (groups << 24) | (mismatches & 0xffffff));
-		mk_row(xfb, rmode, 3, first_bad);
-		mk_status(xfb, rmode, frame < DONE_FRAME ? MK_RUNNING : (mismatches ? MK_FAIL : MK_PASS));
+		const u32 rows[MK_ROWS] = {last, first, (groups << 24) | (mismatches & 0xffffff), first_bad};
+		mk_rows(xfb, rmode, rows);
 		VIDEO_WaitVSync();
 	}
 	return 0;

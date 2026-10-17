@@ -4,17 +4,13 @@
 import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import os from "node:os";
 import path from "node:path";
-import { bootIso, REPO_ROOT, grabFrame, launchChrome, readCoreProgress, readFrameInfo, setCorePaused, watchPage } from "./browser.mjs";
+import { bootIso, captureAtVi, grabFrame, launchChrome, readCoreProgress, readFrameInfo, readTimeline, REPO_ROOT, watchPage } from "./browser.mjs";
 import { addGamepadMock } from "./gamepad-mock.mjs";
-import { decodeMarkers } from "./markers.mjs";
 import { encodePng } from "./png.mjs";
 import { claim } from "./ownership.mjs";
 import { machineSnapshot, sampleChromeCpu } from "./system.mjs";
 
-export async function openSession({ base, server = null, query, iso, headed = true, gamepads = null, keepProfile = false, routes = {} }) {
-  // The served tree is checked before the page loads and again when the
-  // session closes; a run whose server changed in between is an error.
-  await server?.verify?.();
+export async function openSession({ base, query, iso, headed = true, gamepads = null, keepProfile = false, routes = {} }) {
   const profileDir = mkdtempSync(path.join(os.tmpdir(), "gc-harness-profile-"));
   const releaseProfile = claim(profileDir, REPO_ROOT, "chrome-profile");
   const context = await launchChrome({ profileDir, headed });
@@ -41,7 +37,6 @@ export async function openSession({ base, server = null, query, iso, headed = tr
       await context.close().catch(() => {});
       releaseProfile();
       if (!keepProfile) rmSync(profileDir, { recursive: true, force: true });
-      await server?.verify?.();
     }
   };
 }
@@ -73,46 +68,22 @@ export async function waitSeconds(session, seconds) {
   for (let i = 0; i < seconds * 4 && !session.watch.fatal().length; i += 1) await session.page.waitForTimeout(250);
 }
 
-// The worker answers validationSetCorePaused with the core state it observed.
-export function assertPaused(response) {
-  if (response?.paused !== true) throw new Error(`core did not pause: ${JSON.stringify({ ...response, id: undefined })}`);
-  return response;
-}
-
-// A self-checking homebrew is done when its status says pass/fail. padtest
-// (idle marker) and discs without markers never say so: they are done once
-// they ran minFrames frames.
-export function isDone(markers, info, minFrames) {
-  // A status only counts when the whole marker area decodes cleanly; a game
-  // picture that is yellow or green in that corner is not a marker.
-  const status = markers?.confident ? markers.status : null;
-  if (status === "pass" || status === "fail") return true;
-  return (status === "idle" || status == null) && info?.frame >= minFrames;
-}
-
-// Poll a marker-speaking homebrew until it reports done (pass/fail), the
-// worker dies, the core stops advancing, or the timeout hits.
-export async function runUntilDone(session, { timeoutSec = 90, minFrames = 600, stallSec = 8 } = {}) {
-  const end = Date.now() + timeoutSec * 1000;
-  let lastFrame = -1, stalledSince = Date.now();
-  let info = null, markers = null, frame = null;
-  let outcome = "timeout";
-  while (Date.now() < end) {
-    await session.page.waitForTimeout(1000);
-    info = await readFrameInfo(session.page);
-    if (session.watch.fatal().length) { outcome = "fatal"; break; }
-    frame = await grabFrame(session.page);
-    markers = decodeMarkers(frame);
-    if (isDone(markers, info, minFrames)) { outcome = "done"; break; }
-    if (info.frame !== lastFrame) { lastFrame = info.frame; stalledSince = Date.now(); }
-    else if (Date.now() - stalledSince > stallSec * 1000) { outcome = "stalled"; break; }
+// captureAtVi, cut short when the worker dies: a crash then reports as a
+// crash at once instead of a capture timeout.
+export async function captureInSession(session, options) {
+  let stop = false;
+  const died = (async () => {
+    while (!stop) {
+      if (session.watch.fatal().length) return { error: "worker died before the capture" };
+      await new Promise((r) => setTimeout(r, 250));
+    }
+    return null;
+  })();
+  try {
+    return await Promise.race([captureAtVi(session.page, options), died]);
+  } finally {
+    stop = true;
   }
-  if (!frame || outcome === "fatal") {
-    frame = await grabFrame(session.page).catch(() => null);
-    markers = frame ? decodeMarkers(frame) : null;
-  }
-  const progress = await readCoreProgress(session.page);
-  return { outcome, info, markers, frame, progress, fatal: session.watch.fatal() };
 }
 
-export { grabFrame, readCoreProgress, setCorePaused };
+export { captureAtVi, grabFrame, readCoreProgress, readTimeline };

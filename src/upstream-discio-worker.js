@@ -210,6 +210,14 @@ let presentationIntervalCount = 0;
 // distribution shape (bimodal, periodic jitter) that p95 alone misses.
 // Buckets: 0-8, 8-12, 12-16, 16-20, 20-24, 24-33, 33-50, 50-100, 100-200, 200+
 const PRESENTATION_HISTOGRAM_BUCKETS_MS = [8, 12, 16, 20, 24, 33, 50, 100, 200];
+// QA harness timeline: every fresh presentation (host time, host frame
+// counter, VI outputs since boot at that moment), drained completely by
+// validationReadTimeline. Overflow between two reads is counted, never
+// silently dropped.
+const HARNESS_PRESENT_RING = 16384;
+const harnessPresentRing = new Float64Array(HARNESS_PRESENT_RING * 3);
+let harnessPresentHead = 0;
+let harnessPresentRead = 0;
 const presentationIntervalHistogram = new Uint32Array(
   PRESENTATION_HISTOGRAM_BUCKETS_MS.length + 1
 );
@@ -807,6 +815,95 @@ self.addEventListener("message", async (event) => {
   }
 });
 
+// Drain both harness rings since the previous read: presentations (worker)
+// and VI outputs (core). Every entry is returned; `lost` counts entries
+// overwritten before they could be read.
+function readHarnessTimeline() {
+  const presents = { t: [], frame: [], vi: [] };
+  const firstPresent = Math.max(harnessPresentRead, harnessPresentHead - HARNESS_PRESENT_RING);
+  for (let n = firstPresent; n < harnessPresentHead; n += 1) {
+    const slot = (n % HARNESS_PRESENT_RING) * 3;
+    presents.t.push(harnessPresentRing[slot]);
+    presents.frame.push(harnessPresentRing[slot + 1]);
+    presents.vi.push(harnessPresentRing[slot + 2]);
+  }
+  const presentsLost = firstPresent - harnessPresentRead;
+  harnessPresentRead = harnessPresentHead;
+
+  const m = moduleInstance;
+  const vi = { t: [], ticks: [], sinceBoot: [], sinceLoad: [], lost: 0, supported: Boolean(m?._DolphinWeb_HarnessViRing) };
+  if (vi.supported) {
+    const ptr = m._DolphinWeb_HarnessViRing();
+    const capacity = m._DolphinWeb_HarnessViRingCapacity() >>> 0;
+    const head = m._DolphinWeb_HarnessViRingHead() >>> 0;
+    const read = harnessViRead ?? head;
+    const first = Math.max(read, head - capacity);
+    vi.lost = first - read;
+    const f64 = new Float64Array(m.HEAPU8.buffer);
+    const u32 = new Uint32Array(m.HEAPU8.buffer);
+    for (let n = first; n < head; n += 1) {
+      const base = ptr + (n % capacity) * 24;
+      vi.t.push(f64[base >> 3]);
+      vi.ticks.push(u32[(base + 8) >> 2] + u32[(base + 12) >> 2] * 2 ** 32);
+      vi.sinceBoot.push(u32[(base + 16) >> 2]);
+      vi.sinceLoad.push(u32[(base + 20) >> 2]);
+    }
+    harnessViRead = head;
+  }
+  return { presents: { ...presents, lost: presentsLost }, vi, now: performance.now() };
+}
+let harnessViRead = null;
+
+// Capture the XFB the core scans out at VI output `index` (from boot, or
+// from the last savestate load). Fails explicitly if that output has passed,
+// never arrives within the timeout, or the core has no capture hook.
+// `ahead` instead of `index`: that many outputs after the latest one.
+async function captureAtViOutput({ index, ahead, fromLoad = false, timeoutMs = 60000 }) {
+  const m = moduleInstance;
+  if (!m?._DolphinWeb_HarnessArmCapture) throw new Error("core has no harness capture hook (rebuild the core)");
+  if (ahead > 0) {
+    const head = m._DolphinWeb_HarnessViRingHead() >>> 0;
+    let current = head;
+    if (fromLoad) {
+      const ptr = m._DolphinWeb_HarnessViRing();
+      const capacity = m._DolphinWeb_HarnessViRingCapacity() >>> 0;
+      current = head ? new Uint32Array(m.HEAPU8.buffer)[(ptr + ((head - 1) % capacity) * 24 + 20) >> 2] : 0;
+    }
+    index = current + ahead;
+  }
+  if (!(index > 0)) throw new Error("capture index must be ≥ 1");
+  if (!m._DolphinWeb_HarnessArmCapture(index >>> 0, fromLoad ? 1 : 0)) {
+    throw new Error(`VI output ${index} (${fromLoad ? "since load" : "since boot"}) has already passed`);
+  }
+  const end = performance.now() + timeoutMs;
+  while (performance.now() < end) {
+    const state = m._DolphinWeb_HarnessCaptureState();
+    if (state === 2) {
+      const width = m._DolphinWeb_HarnessCaptureWidth() >>> 0;
+      const height = m._DolphinWeb_HarnessCaptureHeight() >>> 0;
+      const ptr = m._DolphinWeb_HarnessCapturePixels();
+      const pixels = m.HEAPU8.slice(ptr, ptr + width * height * 4);
+      m._DolphinWeb_HarnessDisarmCapture();
+      return {
+        index: m._DolphinWeb_HarnessCaptureIndex() >>> 0,
+        fromLoad: Boolean(fromLoad),
+        ticks: m._DolphinWeb_HarnessCaptureTicks(),
+        width,
+        height,
+        pixels,
+        source: "guest-xfb"
+      };
+    }
+    if (state === 3) {
+      m._DolphinWeb_HarnessDisarmCapture();
+      throw new Error(`VI output ${index} was skipped`);
+    }
+    await new Promise((resolve) => setTimeout(resolve, 2));
+  }
+  m._DolphinWeb_HarnessDisarmCapture();
+  throw new Error(`VI output ${index} never reached within ${timeoutMs} ms`);
+}
+
 async function handleMessage(type, payload) {
   switch (type) {
     case "load":
@@ -1097,6 +1194,10 @@ async function handleMessage(type, payload) {
         ppcWasmJitTimingSuspensions -= 1;
       }
     }
+    case "validationReadTimeline":
+      return readHarnessTimeline();
+    case "validationCaptureAtVi":
+      return captureAtViOutput(payload);
     case "validationReadCoreProgress": {
       const loadedCheckpoint = readLastLoadedCheckpoint();
       return {
@@ -4174,6 +4275,13 @@ function recordVisualFrameHash(hash, sampledSourceFrame = false) {
 }
 
 function recordPresentedFrame(coreFrame) {
+  {
+    const slot = (harnessPresentHead % HARNESS_PRESENT_RING) * 3;
+    harnessPresentRing[slot] = performance.now();
+    harnessPresentRing[slot + 1] = coreFrame;
+    harnessPresentRing[slot + 2] = moduleInstance?._DolphinWeb_HarnessViRingHead?.() ?? -1;
+    harnessPresentHead += 1;
+  }
   presentedFrame += 1;
   framesSincePresentationFps += 1;
   presentationLifetimeFrameCount += 1;
