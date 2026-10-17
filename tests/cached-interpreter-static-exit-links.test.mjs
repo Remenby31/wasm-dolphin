@@ -8,7 +8,7 @@ import { readFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { basename, dirname, join, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
-import test from "node:test";
+import { sourceContractTest } from "./helpers/source-contract.mjs";
 
 const directory = dirname(fileURLToPath(import.meta.url));
 let root = directory;
@@ -42,7 +42,7 @@ const nativeSkip = !existsSync(join(sourceDirectory, "CachedInterpreter.cpp"))
       ? "existing Python 3/emsdk runtime is unavailable; 52 native groups were not run"
       : false;
 
-test("actual promoted static-exit links preserve native behavior across all 52 groups", {
+sourceContractTest("actual promoted static-exit links preserve native behavior across all 52 groups", {
   skip: nativeSkip,
   timeout: 600000,
 }, async (t) => {

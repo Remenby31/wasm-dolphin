@@ -4,6 +4,7 @@
 import assert from "node:assert/strict";
 import { readFile } from "node:fs/promises";
 import test from "node:test";
+import { sourceContractTest } from "./helpers/source-contract.mjs";
 
 const root = new URL("../", import.meta.url);
 
@@ -23,7 +24,7 @@ test("direct and generic callback arms retain identical distance-or-break behavi
   }
 });
 
-test("direct RunWasmBlock dispatch is compile-time gated and default off", async () => {
+sourceContractTest("direct RunWasmBlock dispatch is compile-time gated and default off", async () => {
   const [implementation, configure, buildInfo, patch] = await Promise.all([
     source("vendor/dolphin/Source/Core/Core/PowerPC/CachedInterpreter/CachedInterpreter.cpp"),
     source("tools/configure-upstream-wasm.mjs"),
@@ -55,7 +56,7 @@ test("direct RunWasmBlock dispatch is compile-time gated and default off", async
   assert.match(patch, /DOLPHIN_WEB_DIRECT_WASM_BLOCK_DISPATCH/);
 });
 
-test("direct arm preserves RunWasmBlock semantics and the generic fallback", async () => {
+sourceContractTest("direct arm preserves RunWasmBlock semantics and the generic fallback", async () => {
   const implementation = await source(
     "vendor/dolphin/Source/Core/Core/PowerPC/CachedInterpreter/CachedInterpreter.cpp"
   );

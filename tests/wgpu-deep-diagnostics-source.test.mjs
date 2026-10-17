@@ -5,7 +5,7 @@ import { readFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { dirname, join, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
-import test from "node:test";
+import { sourceContractTest } from "./helpers/source-contract.mjs";
 
 const root = resolve(dirname(fileURLToPath(import.meta.url)), "..");
 const patchUrl = new URL(
@@ -13,7 +13,7 @@ const patchUrl = new URL(
   import.meta.url
 );
 
-test("deep WGPU diagnostics default off while failure signals remain unconditional", async () => {
+sourceContractTest("deep WGPU diagnostics default off while failure signals remain unconditional", async () => {
   const [patch, gfx, vertexManager, fifo, commandProcessor] = await Promise.all([
     readFile(patchUrl, "utf8"),
     readFile(new URL(
@@ -80,7 +80,7 @@ test("deep WGPU diagnostics default off while failure signals remain uncondition
 const pinnedClang = join(process.env.USERPROFILE ?? "", "emsdk", "upstream", "bin", "clang++.exe");
 const compiler = process.platform === "win32" ? pinnedClang : "clang++";
 
-test("native deep-diagnostic switch is default-off and reversible", {
+sourceContractTest("native deep-diagnostic switch is default-off and reversible", {
   skip: process.platform === "win32" && !existsSync(compiler),
 }, () => {
   const directory = mkdtempSync(join(tmpdir(), "wgpu-deep-diag-"));

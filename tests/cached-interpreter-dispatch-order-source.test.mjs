@@ -3,7 +3,7 @@
 
 import assert from "node:assert/strict";
 import { readFile } from "node:fs/promises";
-import test from "node:test";
+import { sourceContractTest } from "./helpers/source-contract.mjs";
 
 const sourceUrl = new URL(
   "../vendor/dolphin/Source/Core/Core/PowerPC/CachedInterpreter/CachedInterpreter.cpp",
@@ -66,7 +66,7 @@ function callbackBranches(source) {
   return branches;
 }
 
-test("release WASM selects the measured callback identity order", async () => {
+sourceContractTest("release WASM selects the measured callback identity order", async () => {
   const source = (await readFile(sourceUrl, "utf8")).replaceAll("\r\n", "\n");
 
   assert.match(
@@ -79,7 +79,7 @@ test("release WASM selects the measured callback identity order", async () => {
   assert.deepEqual([...callbackBranches(candidate).keys()], CANDIDATE_ORDER);
 });
 
-test("candidate and rollback orders preserve identical callback bodies", async () => {
+sourceContractTest("candidate and rollback orders preserve identical callback bodies", async () => {
   const source = (await readFile(sourceUrl, "utf8")).replaceAll("\r\n", "\n");
   const candidate = callbackBranches(markedBlock(source, "DOLPHIN_WEB_HOT_DISPATCH_ORDER"));
   const legacy = callbackBranches(markedBlock(source, "DOLPHIN_WEB_LEGACY_DISPATCH_ORDER"));

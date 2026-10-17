@@ -4,6 +4,7 @@
 import assert from "node:assert/strict";
 import { readFile } from "node:fs/promises";
 import test from "node:test";
+import { sourceContractTest } from "./helpers/source-contract.mjs";
 
 const root = new URL("../", import.meta.url);
 const allowedBits = [16, 18, 20];
@@ -55,7 +56,7 @@ test("invalidating an aliased old block cannot clear the replacement slot", () =
   assert.equal(slots[index], undefined);
 });
 
-test("fallback map bits are compile-time constrained and recorded in provenance", async () => {
+sourceContractTest("fallback map bits are compile-time constrained and recorded in provenance", async () => {
   const [header, implementation, configure, buildInfo, patch] = await Promise.all([
     source("vendor/dolphin/Source/Core/Core/PowerPC/JitCommon/JitCache.h"),
     source("vendor/dolphin/Source/Core/Core/PowerPC/JitCommon/JitCache.cpp"),

@@ -6,14 +6,14 @@ import { readFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { dirname, join, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
-import test from "node:test";
+import { sourceContractTest } from "./helpers/source-contract.mjs";
 
 const root = resolve(dirname(fileURLToPath(import.meta.url)), "..");
 const compiler = process.platform === "win32"
   ? join(process.env.USERPROFILE ?? "", "emsdk", "upstream", "bin", "clang++.exe")
   : "clang++";
 
-test("draw profile source preserves separate default-off sampled contract", async () => {
+sourceContractTest("draw profile source preserves separate default-off sampled contract", async () => {
   const header = await readFile(
     new URL("../vendor/dolphin/Source/Core/VideoCommon/WasmWebGpuDrawProfile.h", import.meta.url),
     "utf8"
@@ -44,7 +44,7 @@ test("draw profile source preserves separate default-off sampled contract", asyn
     assert.match(gfx, new RegExp(`append_draw_phase_values\\("${tag}"`));
 });
 
-test("locked vendor snapshot contains the complete draw profiler header", async () => {
+sourceContractTest("locked vendor snapshot contains the complete draw profiler header", async () => {
   const sourceLock = JSON.parse(await readFile(
     new URL("../provenance/dolphin-source.lock.json", import.meta.url),
     "utf8"
@@ -75,7 +75,7 @@ test("locked vendor snapshot contains the complete draw profiler header", async 
   assert.match(header, /};\n}  \/\/ namespace DolphinWeb::WebGpuDrawProfile\n$/);
 });
 
-test("native draw profiler cadence harness compiles and runs", {
+sourceContractTest("native draw profiler cadence harness compiles and runs", {
   skip: process.platform === "win32" && !existsSync(compiler),
 }, () => {
   const outputDirectory = mkdtempSync(join(tmpdir(), "wgpu-draw-profile-"));

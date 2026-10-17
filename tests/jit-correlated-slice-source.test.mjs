@@ -1,10 +1,10 @@
-import test from "node:test";
+import { sourceContractTest } from "./helpers/source-contract.mjs";
 import assert from "node:assert/strict";
 import { readFile } from "node:fs/promises";
 
 const vendorRoot = new URL("../vendor/dolphin/Source/Core/", import.meta.url);
 
-test("correlated timing retains coherent VI throttle and DVD completion ownership", async () => {
+sourceContractTest("correlated timing retains coherent VI throttle and DVD completion ownership", async () => {
   const [profile, cachedInterpreter, coreTiming, dvdThread, videoInterface, basePatch, phasePatch,
     validationTemplate, validationHarness, perfGate] =
     await Promise.all([

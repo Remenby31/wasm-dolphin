@@ -1,10 +1,11 @@
 import assert from "node:assert/strict";
 import { readFile } from "node:fs/promises";
 import test from "node:test";
+import { sourceContractTest } from "./helpers/source-contract.mjs";
 
 const read = (path) => readFile(new URL(path, import.meta.url), "utf8");
 
-test("TEV specialization is exact, batch-classified, default-off, and shadow-latched", async () => {
+sourceContractTest("TEV specialization is exact, batch-classified, default-off, and shadow-latched", async () => {
   const [hot, tevHeader, tev, raster, loader, profile, bridge, cmake, worker] = await Promise.all([
     read("../vendor/dolphin/Source/Core/VideoBackends/Software/TevHotCase.h"),
     read("../vendor/dolphin/Source/Core/VideoBackends/Software/Tev.h"),

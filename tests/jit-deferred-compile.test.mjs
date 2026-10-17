@@ -8,7 +8,7 @@ import { readFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { basename, dirname, join, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
-import test from "node:test";
+import { sourceContractTest } from "./helpers/source-contract.mjs";
 
 const directory = dirname(fileURLToPath(import.meta.url));
 let root = directory;
@@ -71,7 +71,7 @@ function compileAndRun(name, source) {
   }
 }
 
-test("actual deferred queue and retry helper preserve replacement blocks and bound each drain", {
+sourceContractTest("actual deferred queue and retry helper preserve replacement blocks and bound each drain", {
   skip: nativeSkip,
 }, async () => {
   const source = await interpreterSource();
@@ -207,7 +207,7 @@ int main() {
 `);
 });
 
-test("actual policy setter defers cache changes to the CPU between callbacks", {
+sourceContractTest("actual policy setter defers cache changes to the CPU between callbacks", {
   skip: nativeSkip,
 }, async () => {
   const source = await interpreterSource();
@@ -295,7 +295,7 @@ int main() {
 `);
 });
 
-test("actual helper-stat cache refreshes tier text with every activity counter unchanged", {
+sourceContractTest("actual helper-stat cache refreshes tier text with every activity counter unchanged", {
   skip: nativeSkip,
 }, async () => {
   const source = await interpreterSource();
