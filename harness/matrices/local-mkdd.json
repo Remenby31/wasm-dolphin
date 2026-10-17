@@ -1,0 +1,14 @@
+{
+  "name": "mkdd-race",
+  "runs": 3,
+  "warmupSec": 10,
+  "sampleSec": 30,
+  "shotEverySec": 15,
+  "games": [
+    { "id": "mkdd-race", "iso": "${MKDD_ISO}", "localOnly": true, "steps": "local-mkdd-race-steps.json" }
+  ],
+  "configs": [
+    { "id": "rec", "preset": "rec" },
+    { "id": "wgpu", "preset": "wgpu" }
+  ]
+}
