@@ -1,0 +1,329 @@
+diff --git a/Source/Core/VideoBackends/WebGPU/VideoBackend.cpp b/Source/Core/VideoBackends/WebGPU/VideoBackend.cpp
+--- a/Source/Core/VideoBackends/WebGPU/VideoBackend.cpp
++++ b/Source/Core/VideoBackends/WebGPU/VideoBackend.cpp
+@@ -17,6 +17,10 @@
+ 
+ #include "VideoBackends/WebGPU/VideoBackend.h"
+ 
++extern "C" unsigned int DolphinWeb_GetRendererFeatureMask();
++// Mirrors the bit in WebGPUGfx.cpp.
++static constexpr unsigned int DOLPHIN_WEB_RENDERER_FEATURE_DUAL_SOURCE_BLEND = 1u << 1;
++
+ #include "Common/Common.h"
+ #include "Common/Logging/Log.h"
+ 
+@@ -69,13 +73,15 @@ void VideoBackend::InitBackendInfo(const WindowSystemInfo& /* wsi */)
+   g_backend_info.MaxTextureSize = 16384;
+   g_backend_info.bUsesLowerLeftOrigin = false;
+   g_backend_info.bSupports3DVision = false;
+-  // Day-30: WebGPU/WGSL has no dual-source blend. With this true,
+-  // Dolphin emits a second blend output at `location=0, index=1`;
+-  // Naga's validator then rejects the fragment entry point
+-  // ("Multiple bindings at location 0 are present"). False ⇒ Dolphin
+-  // uses the single-output path. (Was copied true from Software's
+-  // InitBackendInfo; wrong for WebGPU.)
+-  g_backend_info.bSupportsDualSourceBlend = false;
++  // Dual-source blending is a WebGPU feature ("dual-source-blending"), so
++  // only the host knows whether the device has it; it says so through renderer
++  // feature bit 1. Without it, a draw that both blends with source alpha and
++  // writes the destination-alpha constant (GX dst alpha) blends with the
++  // constant instead of the TEV alpha -- Mario Kart: Double Dash!!'s race
++  // overlay then veils the whole course. naga-spirv-wgsl maps the SPIR-V
++  // Index decoration of ocol0/ocol1 to @blend_src(0)/@blend_src(1).
++  g_backend_info.bSupportsDualSourceBlend =
++      (DolphinWeb_GetRendererFeatureMask() & DOLPHIN_WEB_RENDERER_FEATURE_DUAL_SOURCE_BLEND) != 0;
+   g_backend_info.bSupportsEarlyZ = true;
+   g_backend_info.bSupportsPrimitiveRestart = false;
+   g_backend_info.bSupportsMultithreading = false;
+diff --git a/Source/Core/VideoBackends/WebGPU/WebGPUGfx.cpp b/Source/Core/VideoBackends/WebGPU/WebGPUGfx.cpp
+--- a/Source/Core/VideoBackends/WebGPU/WebGPUGfx.cpp
++++ b/Source/Core/VideoBackends/WebGPU/WebGPUGfx.cpp
+@@ -50,6 +50,11 @@
+ // solid-quad draw inside the open pass (CmdOp::ClearRect) instead of a
+ // whole-attachment loadOp clear. Mario Kart Wii does not render without it.
+ static constexpr unsigned int DOLPHIN_WEB_RENDERER_FEATURE_SCISSORED_CLEAR_RECT = 1u << 0;
++// Bit 1: the host device has the "dual-source-blending" feature, so pixel
++// shaders may emit ocol1 and blend factors may name SRC1. Off by default: only
++// the host can see the device, and a WGSL module that enables the extension
++// on a device without it fails to compile. Read once, in InitBackendInfo.
++static constexpr unsigned int DOLPHIN_WEB_RENDERER_FEATURE_DUAL_SOURCE_BLEND = 1u << 1;
+ static constexpr unsigned int DOLPHIN_WEB_RENDERER_FEATURE_DEFAULT =
+     DOLPHIN_WEB_RENDERER_FEATURE_SCISSORED_CLEAR_RECT;
+ 
+@@ -904,7 +909,8 @@ u32 VarToWgpuVertexFormat(ComponentFormat t, int comps, bool integer)
+ // DESIGN doc blend-factor mapping. WebGPU code list (consumer):
+ // 0 zero,1 one,2 src,3 1-src,4 src-alpha,5 1-src-alpha,6 dst,
+ // 7 1-dst,8 dst-alpha,9 1-dst-alpha.
+-u32 MapSrcFactor(SrcBlendFactor f)
++// Factor codes 10/11 are WebGPU "src1-alpha" / "one-minus-src1-alpha".
++u32 MapSrcFactor(SrcBlendFactor f, bool dual_src)
+ {
+   switch (f)
+   {
+@@ -912,14 +918,14 @@ u32 MapSrcFactor(SrcBlendFactor f)
+   case SrcBlendFactor::One: return 1;
+   case SrcBlendFactor::DstClr: return 6;
+   case SrcBlendFactor::InvDstClr: return 7;
+-  case SrcBlendFactor::SrcAlpha: return 4;
+-  case SrcBlendFactor::InvSrcAlpha: return 5;
++  case SrcBlendFactor::SrcAlpha: return dual_src ? 10 : 4;
++  case SrcBlendFactor::InvSrcAlpha: return dual_src ? 11 : 5;
+   case SrcBlendFactor::DstAlpha: return 8;
+   case SrcBlendFactor::InvDstAlpha: return 9;
+   default: return 1;
+   }
+ }
+-u32 MapDstFactor(DstBlendFactor f)
++u32 MapDstFactor(DstBlendFactor f, bool dual_src)
+ {
+   switch (f)
+   {
+@@ -927,8 +933,8 @@ u32 MapDstFactor(DstBlendFactor f)
+   case DstBlendFactor::One: return 1;
+   case DstBlendFactor::SrcClr: return 2;
+   case DstBlendFactor::InvSrcClr: return 3;
+-  case DstBlendFactor::SrcAlpha: return 4;
+-  case DstBlendFactor::InvSrcAlpha: return 5;
++  case DstBlendFactor::SrcAlpha: return dual_src ? 10 : 4;
++  case DstBlendFactor::InvSrcAlpha: return dual_src ? 11 : 5;
+   case DstBlendFactor::DstAlpha: return 8;
+   case DstBlendFactor::InvDstAlpha: return 9;
+   default: return 0;
+@@ -1026,11 +1032,15 @@ std::vector<u8> SerializePipelineConfig(const AbstractPipelineConfig& cfg, u32 v
+   PutU32(b, write_mask);
+   // op: 0 add, 2 reverse-subtract (DESIGN: subtract → reverse-sub).
+   PutU32(b, bs.subtract ? 2u : 0u);
+-  PutU32(b, MapSrcFactor(bs.src_factor));
+-  PutU32(b, MapDstFactor(bs.dst_factor));
++  // With dual-source blending the source alpha factors read ocol1 (the real
++  // TEV alpha) while ocol0.a carries the destination-alpha constant -- the
++  // same SRC1 substitution VKPipeline makes.
++  const bool dual_src = bs.use_dual_src && g_backend_info.bSupportsDualSourceBlend;
++  PutU32(b, MapSrcFactor(bs.src_factor, dual_src));
++  PutU32(b, MapDstFactor(bs.dst_factor, dual_src));
+   PutU32(b, bs.subtract_alpha ? 2u : 0u);
+-  PutU32(b, MapSrcFactor(bs.src_factor_alpha));
+-  PutU32(b, MapDstFactor(bs.dst_factor_alpha));
++  PutU32(b, MapSrcFactor(bs.src_factor_alpha, dual_src));
++  PutU32(b, MapDstFactor(bs.dst_factor_alpha, dual_src));
+ 
+   // Raw .hex for consumer-side debugging.
+   PutU32(b, bs.hex);
+diff --git a/Source/Core/VideoCommon/AbstractGfx.cpp b/Source/Core/VideoCommon/AbstractGfx.cpp
+--- a/Source/Core/VideoCommon/AbstractGfx.cpp
++++ b/Source/Core/VideoCommon/AbstractGfx.cpp
+@@ -81,12 +81,7 @@ void AbstractGfx::ClearRegion(const MathUtil::Rectangle<int>& target_rc, bool co
+                         static_cast<float>((color >> 0) & 0xFF) / 255.0f,
+                         static_cast<float>((color >> 24) & 0xFF) / 255.0f},
+                        static_cast<float>(z & 0xFFFFFF) / 16777216.0f};
+-  // §28at: WebGPU/Vulkan keeps the non-inverted [0,1] clear-depth
+-  // convention (the EFB clear utility draw must agree with the
+-  // flag-independent VS geometry depth + the de-inverted EFB
+-  // peek/poke). NO-OP at flag=true. OGL/D3D/SW untouched.
+-  if (!g_backend_info.bSupportsReversedDepthRange &&
+-      g_backend_info.api_type != APIType::Vulkan)
++  if (!g_backend_info.bSupportsReversedDepthRange)
+     uniforms.clear_depth = 1.0f - uniforms.clear_depth;
+   g_vertex_manager->UploadUtilityUniforms(&uniforms, sizeof(uniforms));
+ 
+diff --git a/Source/Core/VideoCommon/EFBInterface.cpp b/Source/Core/VideoCommon/EFBInterface.cpp
+--- a/Source/Core/VideoCommon/EFBInterface.cpp
++++ b/Source/Core/VideoCommon/EFBInterface.cpp
+@@ -96,15 +96,7 @@ u32 HardwareEFBInterface::PeekDepthInternal(u16 x, u16 y)
+   });
+ 
+   // Depth buffer is inverted for improved precision near far plane.
+-  // §28at: the WebGPU/Vulkan path keeps ONE non-inverted [0,1] depth
+-  // convention. The VS depth output is NOT keyed on the depth-range
+-  // flag (VertexShaderGen has no such branch, UseVertexDepthRange()==
+-  // false), so flipping the flag must not invert the C++ readback
+-  // either — under flag=false that split the convention and HUNG the
+-  // core on this PushBlockingEvent peek (frozen ~frame 781, §28as).
+-  // NO-OP at flag=true (branch not taken). OGL/D3D/SW untouched.
+-  if (!g_backend_info.bSupportsReversedDepthRange &&
+-      g_backend_info.api_type != APIType::Vulkan)
++  if (!g_backend_info.bSupportsReversedDepthRange)
+     depth = 1.0f - depth;
+ 
+   // Convert to 24bit depth
+@@ -158,11 +150,7 @@ void HardwareEFBInterface::PokeDepth(u16 x, u16 y, u32 poke_data)
+ 
+   // Convert to floating-point depth.
+   float depth = float(poke_data & 0xFFFFFF) / 16777216.0f;
+-  // §28at: keep the WebGPU/Vulkan non-inverted depth convention
+-  // (matches the de-inverted PeekDepth above + the flag-independent
+-  // VS). NO-OP at flag=true. OGL/D3D/SW untouched.
+-  if (!g_backend_info.bSupportsReversedDepthRange &&
+-      g_backend_info.api_type != APIType::Vulkan)
++  if (!g_backend_info.bSupportsReversedDepthRange)
+     depth = 1.0f - depth;
+ 
+   AsyncRequests::GetInstance()->PushEvent([x, y, depth] {
+diff --git a/Source/Core/VideoCommon/FramebufferManager.cpp b/Source/Core/VideoCommon/FramebufferManager.cpp
+--- a/Source/Core/VideoCommon/FramebufferManager.cpp
++++ b/Source/Core/VideoCommon/FramebufferManager.cpp
+@@ -290,14 +290,9 @@ bool FramebufferManager::CreateEFBFramebuffer(int efb_scale)
+   }
+ 
+   // Clear the renderable textures out.
+-  // §28at: WebGPU/Vulkan keeps the non-inverted far=1.0 EFB depth
+-  // clear regardless of the depth-range flag (NO-OP at flag=true).
+   g_gfx->SetAndClearFramebuffer(
+       m_efb_framebuffer.get(), {{0.0f, 0.0f, 0.0f, 0.0f}},
+-      (g_backend_info.bSupportsReversedDepthRange ||
+-       g_backend_info.api_type == APIType::Vulkan)
+-          ? 1.0f
+-          : 0.0f);
++      g_backend_info.bSupportsReversedDepthRange ? 1.0f : 0.0f);
+ 
+   // Pixel Shader uses EFB scale as a constant, dirty that in case it changed
+   Core::System::GetInstance().GetPixelShaderManager().Dirty();
+@@ -1154,14 +1149,9 @@ void FramebufferManager::DoLoadState(PointerWrap& p)
+       color_tex->texture->GetLayers() != m_efb_color_texture->GetLayers())
+   {
+     WARN_LOG_FMT(VIDEO, "Failed to deserialize EFB contents. Clearing instead.");
+-    // §28at: WebGPU/Vulkan keeps non-inverted far=1.0 EFB depth clear
+-    // regardless of the depth-range flag (NO-OP at flag=true).
+     g_gfx->SetAndClearFramebuffer(
+         m_efb_framebuffer.get(), {{0.0f, 0.0f, 0.0f, 0.0f}},
+-        (g_backend_info.bSupportsReversedDepthRange ||
+-         g_backend_info.api_type == APIType::Vulkan)
+-            ? 1.0f
+-            : 0.0f);
++        g_backend_info.bSupportsReversedDepthRange ? 1.0f : 0.0f);
+     return;
+   }
+ 
+diff --git a/Source/Core/VideoCommon/PipelineUtils.cpp b/Source/Core/VideoCommon/PipelineUtils.cpp
+--- a/Source/Core/VideoCommon/PipelineUtils.cpp
++++ b/Source/Core/VideoCommon/PipelineUtils.cpp
+@@ -103,6 +103,16 @@ GXPipelineUid ApplyDriverBugs(const GXPipelineUid& in)
+     blend.use_dual_src = false;
+   }
+ 
++  // WebGPU (the only Vulkan-typed backend in the browser build): WGSL allows
++  // blend_src outputs only as the sole two members of the fragment output, so a
++  // shader that also writes depth cannot emit ocol1. Such draws fall back to
++  // single-source blending.
++  if (g_backend_info.api_type == APIType::Vulkan && ps->per_pixel_depth)
++  {
++    ps->no_dual_src = true;
++    blend.use_dual_src = false;
++  }
++
+   if (ps->ztest == EmulatedZ::ForcedEarly && !g_backend_info.bSupportsEarlyZ)
+   {
+     // These things should be false
+diff --git a/Source/Core/VideoCommon/PixelShaderGen.cpp b/Source/Core/VideoCommon/PixelShaderGen.cpp
+--- a/Source/Core/VideoCommon/PixelShaderGen.cpp
++++ b/Source/Core/VideoCommon/PixelShaderGen.cpp
+@@ -1159,16 +1159,7 @@ ShaderCode GeneratePixelShaderCode(APIType api_type, const ShaderHostConfig& hos
+   }
+   else
+   {
+-    // §28as: WebGPU/Vulkan emits native [0,1] clip-control window
+-    // depth (rawpos.z = projected depth, NOT GL-inverted) — true
+-    // whether or not the depth RANGE is reversed (reversal is a
+-    // viewport/compare concern, independent of the fog zCoord
+-    // formula). Decouple from bSupportsReversedDepthRange for
+-    // api_type Vulkan so flag=false (the single non-reverse
+-    // convention that kills the mixed-pass flicker, §28aq/ar)
+-    // keeps fog correct instead of saturating to the black fog
+-    // colour (the §28b regression). OGL/D3D/SW untouched.
+-    if (!host_config.backend_reversed_depth_range && api_type != APIType::Vulkan)
++    if (!host_config.backend_reversed_depth_range)
+       out.Write("\tint zCoord = int((1.0 - rawpos.z) * 16777216.0);\n");
+     else
+       out.Write("\tint zCoord = int(rawpos.z * 16777216.0);\n");
+@@ -1185,7 +1176,7 @@ ShaderCode GeneratePixelShaderCode(APIType api_type, const ShaderHostConfig& hos
+                            uid_data->ztest == EmulatedZ::EarlyWithZComplocHack;
+   if (uid_data->per_pixel_depth && early_ztest)
+   {
+-    if (!host_config.backend_reversed_depth_range && api_type != APIType::Vulkan)  // §28as
++    if (!host_config.backend_reversed_depth_range)
+       out.Write("\tdepth = 1.0 - float(zCoord) / 16777216.0;\n");
+     else
+       out.Write("\tdepth = float(zCoord) / 16777216.0;\n");
+@@ -1207,7 +1198,7 @@ ShaderCode GeneratePixelShaderCode(APIType api_type, const ShaderHostConfig& hos
+ 
+   if (uid_data->per_pixel_depth && uid_data->ztest == EmulatedZ::Late)
+   {
+-    if (!host_config.backend_reversed_depth_range && api_type != APIType::Vulkan)  // §28as
++    if (!host_config.backend_reversed_depth_range)
+       out.Write("\tdepth = 1.0 - float(zCoord) / 16777216.0;\n");
+     else
+       out.Write("\tdepth = float(zCoord) / 16777216.0;\n");
+@@ -1763,12 +1754,7 @@ static void WriteAlphaTest(ShaderCode& out, const pixel_shader_uid_data* uid_dat
+   }
+   if (per_pixel_depth)
+   {
+-    // §28as: Vulkan/WebGPU non-reverse [0,1] convention → a
+-    // discarded fragment writes the FAR plane (1.0) so it can't
+-    // occlude, independent of bSupportsReversedDepthRange.
+-    out.Write("\t\tdepth = {};\n",
+-              (!g_backend_info.bSupportsReversedDepthRange &&
+-               api_type != APIType::Vulkan) ? "0.0" : "1.0");
++    out.Write("\t\tdepth = {};\n", !g_backend_info.bSupportsReversedDepthRange ? "0.0" : "1.0");
+   }
+ 
+   // ZCOMPLOC HACK:
+diff --git a/Source/Core/VideoCommon/TextureConversionShader.cpp b/Source/Core/VideoCommon/TextureConversionShader.cpp
+--- a/Source/Core/VideoCommon/TextureConversionShader.cpp
++++ b/Source/Core/VideoCommon/TextureConversionShader.cpp
+@@ -137,11 +137,7 @@ static void WriteSampleFunction(ShaderCode& code, const EFBCopyParams& params, A
+ 
+   if (params.depth)
+   {
+-    // §28at: WebGPU/Vulkan EFB-copy depth stays non-inverted to match
+-    // the flag-independent VS + de-inverted peek/clear. NO-OP at
+-    // flag=true. OGL/D3D/SW untouched.
+-    if (!g_backend_info.bSupportsReversedDepthRange &&
+-        g_backend_info.api_type != APIType::Vulkan)
++    if (!g_backend_info.bSupportsReversedDepthRange)
+       code.Write("  tex_sample.x = 1.0 - tex_sample.x;\n");
+ 
+     code.Write("  uint depth = uint(tex_sample.x * 16777216.0);\n"
+diff --git a/Source/Core/VideoCommon/TextureConverterShaderGen.cpp b/Source/Core/VideoCommon/TextureConverterShaderGen.cpp
+--- a/Source/Core/VideoCommon/TextureConverterShaderGen.cpp
++++ b/Source/Core/VideoCommon/TextureConverterShaderGen.cpp
+@@ -122,11 +122,7 @@ ShaderCode GeneratePixelShader(APIType api_type, const UidData* uid_data)
+             mono_depth ? "0.0" : "uv.z");
+   if (uid_data->is_depth_copy)
+   {
+-    // §28at: WebGPU/Vulkan EFB-copy depth stays non-inverted to match
+-    // the flag-independent VS + de-inverted peek/clear. NO-OP at
+-    // flag=true. OGL/D3D/SW untouched.
+-    if (!g_backend_info.bSupportsReversedDepthRange &&
+-        g_backend_info.api_type != APIType::Vulkan)
++    if (!g_backend_info.bSupportsReversedDepthRange)
+       out.Write("  tex_sample.x = 1.0 - tex_sample.x;\n");
+ 
+     out.Write("  uint depth = uint(tex_sample.x * 16777216.0);\n"
+diff --git a/Source/Core/VideoCommon/UberShaderPixel.cpp b/Source/Core/VideoCommon/UberShaderPixel.cpp
+--- a/Source/Core/VideoCommon/UberShaderPixel.cpp
++++ b/Source/Core/VideoCommon/UberShaderPixel.cpp
+@@ -951,11 +951,7 @@ ShaderCode GenPixelShader(APIType api_type, const ShaderHostConfig& host_config,
+ 
+   if (host_config.fast_depth_calc)
+   {
+-    // §28at: mirror the §28as PixelShaderGen fog/depth decouple in
+-    // the ubershader fast-depth path — WebGPU/Vulkan emits native
+-    // [0,1] clip-control window depth, independent of the depth-range
+-    // flag. NO-OP at flag=true (else branch). OGL/D3D/SW untouched.
+-    if (!host_config.backend_reversed_depth_range && api_type != APIType::Vulkan)
++    if (!host_config.backend_reversed_depth_range)
+       out.Write("  int zCoord = int((1.0 - rawpos.z) * 16777216.0);\n");
+     else
+       out.Write("  int zCoord = int(rawpos.z * 16777216.0);\n");
+@@ -1011,10 +1007,7 @@ ShaderCode GenPixelShader(APIType api_type, const ShaderHostConfig& host_config,
+     out.Write("  // If early depth is enabled, write to zbuffer before depth textures\n"
+               "  // If early depth isn't enabled, we write to the zbuffer here\n"
+               "  int zbuffer_zCoord = bpmem_late_ztest ? zCoord : early_zCoord;\n");
+-    // §28at: WebGPU/Vulkan per-pixel depth stays non-inverted
+-    // (matches the flag-independent VS + de-inverted peek/clear).
+-    // NO-OP at flag=true. OGL/D3D/SW untouched.
+-    if (!host_config.backend_reversed_depth_range && api_type != APIType::Vulkan)
++    if (!host_config.backend_reversed_depth_range)
+       out.Write("  depth = 1.0 - float(zbuffer_zCoord) / 16777216.0;\n");
+     else
+       out.Write("  depth = float(zbuffer_zCoord) / 16777216.0;\n");

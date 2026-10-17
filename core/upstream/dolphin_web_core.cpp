@@ -623,6 +623,10 @@ void EnsureRuntime()
   Config::SetBase(Config::MAIN_AUDIO_MUTED, false);
   Config::SetBase(Config::GFX_HACK_SKIP_XFB_COPY_TO_RAM, s_video_backend == "OGL");
   Config::SetBase(Config::GFX_HACK_COPY_EFB_SCALED, false);
+  // Fill the canvas with the XFB, as the software presenter does. Dolphin's
+  // default analog aspect pillarboxes a 640-wide XFB to ~583 pixels, so the
+  // hardware path showed every game narrower than the software one.
+  Config::SetBase(Config::GFX_ASPECT_RATIO, AspectMode::Stretch);
   // §28cx: ubershaders DISCRIMINATOR (May-30). The UBO const-index fix made the
   // uber pixel shaders translate (fail 27->0) and 7195 draws execute, but the EFB
   // is still all-zero (nz=0/max=0) => draws write nothing. Flip WebGPU back to

@@ -79,8 +79,8 @@
       {
         "path": "tools/naga-spirv-wgsl/src/lib.rs",
         "hashMode": "lf-normalized",
-        "size": 6080,
-        "sha256": "8e1957b21099a570a8de30a6574bd200f87f79bce15959bac1a9d85c6d6c8b0d"
+        "size": 8950,
+        "sha256": "b3f2bfa6f0f497d887cda931d8010127a2a4d450b6ec2b9a7ecda7afbc23aae5"
       }
     ]
   },

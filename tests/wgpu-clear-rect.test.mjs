@@ -6,6 +6,8 @@ import { readFile } from "node:fs/promises";
 import test from "node:test";
 import vm from "node:vm";
 
+import { gxClearDepthToStored } from "../src/wgpu-depth-state.js";
+
 const worker = await readFile(
   new URL("../src/upstream-discio-worker.js", import.meta.url), "utf8"
 );
@@ -38,7 +40,7 @@ function clearRect(viewport, scissor = [4, 4, 4, 4], flags = 3, onPipeline = () 
       pass, passW: 8, passH: 8, passColorFmt: "rgba8unorm", passDepthFmt: "depth32float",
       u32, f32, recWord: 0, WGPU_CMD_OP_CLEAR_RECT: 25,
       dev: {}, ensureClearPipeline: (...args) => { onPipeline(args); return pipeline; },
-      GX_NATIVE_DEPTH: false, CLEARRECT_FULL_VIEWPORT: true,
+      GX_NATIVE_DEPTH: false, CLEARRECT_FULL_VIEWPORT: true, gxClearDepthToStored,
       DIAG_DEPTH_TRACE: false, vpDiagDone: true,
       lastAppliedViewport: viewport, lastAppliedScissor: scissor, self,
       recordRendererError: (...args) => errors.push(args),
@@ -105,6 +107,7 @@ for (const [name, flags, colorWriteMask, writeDepth] of [
       pipelineCalls++;
       assert.equal(args[3], colorWriteMask, "exact GPU color write mask");
       assert.equal(args[4], writeDepth, "depth writes stay independent of alpha");
+      assert.equal(args[6], 0.75, "GX clear depth 0.25 is stored as 1 - z");
     });
     assert.equal(pipelineCalls, 1);
   });
