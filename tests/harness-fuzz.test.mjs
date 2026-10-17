@@ -7,7 +7,7 @@ import test from "node:test";
 import { analyzeDifferential, mapPcToProgram } from "../harness/lib/fuzz.mjs";
 
 const symbols = { cpufuzz_code_pool: "0x8003b860", words_per_program: 128, programs: 384 };
-const done = (rows, extra = {}) => ({ outcome: "done", info: { jitc: 50, pc: 0x80003000 }, markers: { status: "pass", rows, confident: true }, fatal: [], ...extra });
+const done = (rows, extra = {}) => ({ outcome: "done", info: { jitc: 50, jitr: 9000, pc: 0x80003000 }, markers: { status: "pass", rows, confident: true }, fatal: [], ...extra });
 
 test("a crashing PC maps back to the generated program and word", () => {
   // The crash the first harness run found: program 244, word 14.
@@ -30,9 +30,24 @@ test("different final hashes are a divergence; the JIT self-check is reported", 
   assert.deepEqual(kinds, [["jit-self-mismatch", 226], ["divergence", null]]);
 });
 
-test("same results pass; a JIT that never engaged is only a warning", () => {
+test("same results with the JIT exercised pass", () => {
   assert.deepEqual(analyzeDifferential({ interp: done([1, 1, 0, 0]), jit: done([1, 1, 0, 0]) }), { ok: true, findings: [] });
-  const r = analyzeDifferential({ interp: done([1, 1, 0, 0]), jit: done([1, 1, 0, 0], { info: { jitc: 0 } }) });
-  assert.equal(r.ok, true);
-  assert.equal(r.findings[0].kind, "jit-not-engaged");
+});
+
+// Review 2026-10-17: a JIT that compiled nothing, or compiled but never ran,
+// used to pass.
+test("no JIT block compiled AND run fails the fuzz", () => {
+  for (const info of [{ jitc: 0, jitr: 0 }, { jitc: 12, jitr: 0 }]) {
+    const r = analyzeDifferential({ interp: done([1, 1, 0, 0]), jit: done([1, 1, 0, 0], { info }) });
+    assert.equal(r.ok, false);
+    assert.equal(r.findings[0].kind, "jit-not-exercised");
+  }
+});
+
+// Review: only rows[0] was compared; a JIT adding A on port 4 passed.
+test("every marker row is compared", () => {
+  const port4 = (0x80800000 | 0x100) >>> 0;
+  const r = analyzeDifferential({ interp: done([0x80800000, 0x80000000, 0x80000000, 0x80000000]), jit: done([0x80800000, 0x80000000, 0x80000000, port4]) });
+  assert.equal(r.ok, false);
+  assert.deepEqual(r.findings.map((f) => [f.kind, f.rows]), [["divergence", [3]]]);
 });

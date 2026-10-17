@@ -6,7 +6,7 @@ import { existsSync, mkdirSync, readdirSync, readFileSync, rmSync, statSync, wri
 import os from "node:os";
 import path from "node:path";
 import { parseArgs } from "node:util";
-import { ensureServer, pageCall, REPO_ROOT, waitForCoreFrame } from "./lib/browser.mjs";
+import { ensureServer, pageCall, readCoreProgress, REPO_ROOT, waitForCoreFrame } from "./lib/browser.mjs";
 import { analyzeDifferential, INTERP_QUERY, JIT_QUERY } from "./lib/fuzz.mjs";
 import { releaseAll, setPad } from "./lib/gamepad-mock.mjs";
 import { compareFrames, diffImage } from "./lib/image-diff.mjs";
@@ -16,6 +16,7 @@ import { decodePng } from "./lib/png.mjs";
 import { grabFrame, openSession, runUntilDone, sample, savePng, setCorePaused, waitSeconds } from "./lib/session.mjs";
 import { runSteps, validateSteps } from "./lib/steps.mjs";
 import { machineSnapshot } from "./lib/system.mjs";
+import { claim, deletable, removeIfDeletable } from "./lib/ownership.mjs";
 
 const HOMEBREW_OUT = path.join(REPO_ROOT, "harness", "homebrew", "out");
 const stamp = () => new Date().toISOString().replace(/[:.]/g, "-").slice(0, 19);
@@ -34,14 +35,18 @@ function parse(argv, options) {
 const RESULTS = path.join(REPO_ROOT, "harness", "results");
 const KEEP_RESULTS = Number(process.env.HARNESS_KEEP_RESULTS || 8);
 
-// Disk is shared and tight: keep only the newest result directories.
+// Disk is shared and tight: keep only the newest finished result
+// directories of this checkout. A campaign that is still running (live owner
+// pid) or that another checkout made is never touched.
 function rotateResults(dir = RESULTS, keep = KEEP_RESULTS) {
   if (!existsSync(dir)) return [];
-  const entries = readdirSync(dir)
+  const finished = readdirSync(dir)
     .map((name) => path.join(dir, name))
     .filter((p) => statSync(p).isDirectory())
-    .sort((a, b) => statSync(b).mtimeMs - statSync(a).mtimeMs);
-  const removed = entries.slice(keep);
+    .map((p) => ({ p, d: deletable(p, REPO_ROOT) }))
+    .filter((e) => e.d.ok)
+    .sort((a, b) => b.d.startedAt - a.d.startedAt);
+  const removed = finished.slice(keep).map((e) => e.p);
   for (const p of removed) rmSync(p, { recursive: true, force: true });
   return removed;
 }
@@ -55,6 +60,8 @@ function outDir(values, name, { private: isPrivate = false } = {}) {
       ? path.resolve(process.env.HARNESS_PRIVATE_OUT || path.join(REPO_ROOT, "..", "measures", "harness"), `${name}-${stamp()}`)
       : path.join(REPO_ROOT, "harness", "results", `${name}-${stamp()}`);
   mkdirSync(base, { recursive: true });
+  // Released when this process exits; until then rotation and clean skip it.
+  claim(base, REPO_ROOT, "results");
   return base;
 }
 
@@ -186,11 +193,14 @@ async function captureScene(server, values, { iso, query, frame, settle, pause, 
       if (!loaded?.loaded) throw new Error(`savestate load failed: ${JSON.stringify(loaded)}`);
       progress = await waitForCoreFrame(session.page, (progress.frame ?? 0) + frame, 60000);
     }
-    await session.page.waitForTimeout(settle * 1000);
+    // Pause as soon as frame N is reached, then let the picture settle; without
+    // --pause the core keeps running through the settle time.
     if (pause) await setCorePaused(session.page, true);
+    await session.page.waitForTimeout(settle * 1000);
+    const atGrab = await readCoreProgress(session.page);
     const image = await grabFrame(session.page);
     savePng(image, path.join(dir, `${label}.png`));
-    return { label, url: session.url, progress, source: image.source, image, fatal: session.watch.fatal() };
+    return { label, url: session.url, requestedFrame: frame, progress: atGrab, source: image.source, image, fatal: session.watch.fatal() };
   } finally {
     await session.close();
   }
@@ -208,7 +218,7 @@ async function cmdDiff(argv) {
     steps: { type: "string" },
     "ref-png": { type: "string" },
     "cand-png": { type: "string" },
-    "fail-on": { type: "string", default: "missing-detail,blank,geometry-mismatch,different" }
+    "fail-on": { type: "string", default: "missing-detail,blank,geometry-mismatch,different,frames-differ" }
   });
   const isPrivate = Boolean(values.iso && !path.resolve(values.iso).startsWith(HOMEBREW_OUT));
   const dir = outDir(values, "diff", { private: isPrivate });
@@ -225,9 +235,15 @@ async function cmdDiff(argv) {
       await captureScene(server, values, { ...opts, query: resolveQuery(configFromArg(values.cand)), label: "cand" })
     ]);
     [ref, cand] = shots.map((s) => s.image);
-    meta = Object.fromEntries(shots.map((s) => [s.label, { url: s.url, frame: s.progress?.frame, source: s.source, fatal: s.fatal }]));
+    meta = Object.fromEntries(shots.map((s) => [s.label, { url: s.url, requestedFrame: s.requestedFrame, frame: s.progress?.frame ?? null, source: s.source, fatal: s.fatal }]));
+    // The frame actually captured, not the one asked for: a gap means the two
+    // pictures may show different moments of an animated scene.
+    meta.frameGap = Math.abs((meta.ref.frame ?? NaN) - (meta.cand.frame ?? NaN));
+    if (!(meta.frameGap <= 2)) console.warn(`[diff] captured frames differ (ref ${meta.ref.frame}, cand ${meta.cand.frame}); use --pause or --state for animated scenes`);
   }
   const result = compareFrames(ref, cand);
+  // Two different moments of an animated scene are not a rendering verdict.
+  if (meta.frameGap > 2 && result.verdict !== "match") result.verdict = "frames-differ";
   savePng(diffImage(ref, cand, result), path.join(dir, "diff.png"));
   const { blockMap, ...score } = result;
   writeJson(path.join(dir, "diff.json"), { ...meta, machine: machineSnapshot(), score, blockMap });
@@ -268,7 +284,7 @@ async function cmdFuzz(argv) {
       const interp = await observe(server, values, iso, values.interp, dir, `${name}-interp`, Number(values.timeout));
       const jit = await observe(server, values, iso, values.jit, dir, `${name}-jit`, Number(values.timeout));
       const verdict = analyzeDifferential({ interp, jit, symbols: symbolsFor(iso) });
-      const slim = (r) => ({ url: r.url, outcome: r.outcome, frame: r.info?.frame, jitc: r.info?.jitc, pc: hex(r.info?.pc ?? 0), status: r.markers?.status, rows: r.markers?.rows?.map(hex), fatal: r.fatal?.slice(0, 3) });
+      const slim = (r) => ({ url: r.url, outcome: r.outcome, frame: r.info?.frame, jitc: r.info?.jitc, jitr: r.info?.jitr, pc: hex(r.info?.pc ?? 0), status: r.markers?.status, rows: r.markers?.rows?.map(hex), fatal: r.fatal?.slice(0, 3) });
       report.results.push({ iso: name, ...verdict, interp: slim(interp), jit: slim(jit) });
       console.log(`[fuzz] ${name}: ${verdict.ok ? "OK" : "FAIL"} ${verdict.findings.map((f) => `${f.kind}${f.program != null ? ` (program ${f.program} word ${f.word}, ${f.group})` : ""}${f.error ? `: ${f.error}` : ""}`).join("; ")}`);
     }
@@ -393,23 +409,30 @@ function cmdReport(argv) {
 function cmdClean(argv) {
   const { values } = parse(argv, { keep: { type: "string", default: "0" }, all: { type: "boolean", default: false } });
   const removed = rotateResults(RESULTS, Number(values.keep));
-  // Profiles of runs that crashed before close() (normal runs delete theirs).
+  // Temp dirs of runs that died before cleaning up after themselves. Only
+  // those this checkout made and whose owner process is gone: other agents
+  // share the temp dir, and a live run must keep its profile.
+  const skipped = [];
   for (const name of readdirSync(os.tmpdir())) {
-    if (name.startsWith("gc-harness-profile-")) {
-      rmSync(path.join(os.tmpdir(), name), { recursive: true, force: true });
-      removed.push(path.join(os.tmpdir(), name));
-    }
+    if (!name.startsWith("gc-harness-")) continue;
+    const dir = path.join(os.tmpdir(), name);
+    const d = removeIfDeletable(dir, REPO_ROOT);
+    if (d.ok) removed.push(dir);
+    else skipped.push(`${dir} (${d.why})`);
   }
   if (values.all) {
     rmSync(HOMEBREW_OUT, { recursive: true, force: true });
     removed.push(HOMEBREW_OUT);
   }
   try {
-    // Only containers this harness labelled; never images, volumes or other projects.
-    const ids = execFileSync("docker", ["ps", "-aq", "--filter", "label=gc-harness=1", "--filter", "status=exited"], { encoding: "utf8" }).split("\n").filter(Boolean);
+    // Only stopped containers that this checkout's build.sh labelled; never
+    // images, volumes, or other projects' containers.
+    const label = `gc-harness.root=${path.join(REPO_ROOT, "harness", "homebrew")}`;
+    const ids = execFileSync("docker", ["ps", "-aq", "--filter", `label=${label}`, "--filter", "status=exited"], { encoding: "utf8" }).split("\n").filter(Boolean);
     if (ids.length) execFileSync("docker", ["rm", ...ids]);
     removed.push(...ids.map((id) => `container ${id}`));
   } catch {}
+  for (const p of skipped) console.log(`[clean] kept ${p}`);
   for (const p of removed) console.log(`[clean] removed ${p}`);
   console.log(`[clean] ${removed.length} item(s)`);
   return 0;

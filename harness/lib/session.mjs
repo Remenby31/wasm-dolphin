@@ -4,14 +4,16 @@
 import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import os from "node:os";
 import path from "node:path";
-import { bootIso, grabFrame, launchChrome, readCoreProgress, readFrameInfo, setCorePaused, watchPage } from "./browser.mjs";
+import { bootIso, REPO_ROOT, grabFrame, launchChrome, readCoreProgress, readFrameInfo, setCorePaused, watchPage } from "./browser.mjs";
 import { addGamepadMock } from "./gamepad-mock.mjs";
 import { decodeMarkers } from "./markers.mjs";
 import { encodePng } from "./png.mjs";
+import { claim } from "./ownership.mjs";
 import { machineSnapshot, sampleChromeCpu } from "./system.mjs";
 
 export async function openSession({ base, query, iso, headed = true, gamepads = null, keepProfile = false, routes = {} }) {
   const profileDir = mkdtempSync(path.join(os.tmpdir(), "gc-harness-profile-"));
+  const releaseProfile = claim(profileDir, REPO_ROOT, "chrome-profile");
   const context = await launchChrome({ profileDir, headed });
   if (gamepads) await addGamepadMock(context, gamepads);
   const page = context.pages()[0] ?? (await context.newPage());
@@ -34,6 +36,7 @@ export async function openSession({ base, query, iso, headed = true, gamepads = 
     startedAt,
     async close() {
       await context.close().catch(() => {});
+      releaseProfile();
       if (!keepProfile) rmSync(profileDir, { recursive: true, force: true });
     }
   };
@@ -66,6 +69,14 @@ export async function waitSeconds(session, seconds) {
   for (let i = 0; i < seconds * 4 && !session.watch.fatal().length; i += 1) await session.page.waitForTimeout(250);
 }
 
+// A self-checking homebrew is done when its status says pass/fail. padtest
+// (idle marker) and discs without markers never say so: they are done once
+// they ran minFrames frames.
+export function isDone(markers, info, minFrames) {
+  if (markers?.status === "pass" || markers?.status === "fail") return true;
+  return (markers?.status === "idle" || markers?.status == null) && info?.frame >= minFrames;
+}
+
 // Poll a marker-speaking homebrew until it reports done (pass/fail), the
 // worker dies, the core stops advancing, or the timeout hits.
 export async function runUntilDone(session, { timeoutSec = 90, minFrames = 600, stallSec = 8 } = {}) {
@@ -79,8 +90,7 @@ export async function runUntilDone(session, { timeoutSec = 90, minFrames = 600, 
     if (session.watch.fatal().length) { outcome = "fatal"; break; }
     frame = await grabFrame(session.page);
     markers = decodeMarkers(frame);
-    if (markers.status === "pass" || markers.status === "fail") { outcome = "done"; break; }
-    if (markers.status === "idle" && info.frame >= minFrames) { outcome = "done"; break; }
+    if (isDone(markers, info, minFrames)) { outcome = "done"; break; }
     if (info.frame !== lastFrame) { lastFrame = info.frame; stalledSince = Date.now(); }
     else if (Date.now() - stalledSince > stallSec * 1000) { outcome = "stalled"; break; }
   }
