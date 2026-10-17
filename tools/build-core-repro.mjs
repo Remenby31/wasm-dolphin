@@ -126,10 +126,17 @@ function runInDocker() {
   const platformDir = `/wasm-dolphin/build/repro/linux-${volumeSuffix}`;
   // --bind-mounts (CI): everything on the checkout, so later host steps
   // (npm test, dist:source) see the patched vendor/dolphin.
-  const volumes = flag("--bind-mounts") ? [] : [
-    "-v", "wasm-dolphin-vendor:/wasm-dolphin/vendor",
-    "-v", `wasm-dolphin-cmake-${volumeSuffix}:${platformDir}/dolphin-wasm`
-  ];
+  // Emscripten builds some system libraries and ports lazily and guards its
+  // cache with flock(), which fails on a macOS bind mount: keep the cache in
+  // a volume there, and next to the CMake tree on a Linux host.
+  const volumes = flag("--bind-mounts")
+    ? ["-e", `EM_CACHE=${platformDir}/em-cache`]
+    : [
+      "-v", "wasm-dolphin-vendor:/wasm-dolphin/vendor",
+      "-v", `wasm-dolphin-cmake-${volumeSuffix}:${platformDir}/dolphin-wasm`,
+      "-v", `wasm-dolphin-emcache-${volumeSuffix}:/opt/em-cache`,
+      "-e", "EM_CACHE=/opt/em-cache"
+    ];
   run("docker", [
     "run", "--rm", ...platformArgs,
     "-v", `${root}:/wasm-dolphin`,
@@ -138,9 +145,6 @@ function runInDocker() {
     // a macOS bind mount, and the container fetches its own sources instead of
     // reusing the host checkout.
     ...volumes,
-    // Emscripten builds some system libraries lazily; keep them with the
-    // CMake tree so --rm containers do not rebuild them every run.
-    "-e", `EM_CACHE=${platformDir}/em-cache`,
     "-e", `HOST_UID=${process.getuid?.() ?? 0}`,
     "-e", `HOST_GID=${process.getgid?.() ?? 0}`,
     tag,
