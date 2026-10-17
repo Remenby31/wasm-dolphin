@@ -170,22 +170,28 @@ export async function grabFrame(page) {
         video.muted = true;
         video.playsInline = true;
         video.srcObject = canvas.captureStream(60);
-        await video.play();
         window.__harnessCaptureVideo = video;
       }
-      await new Promise((resolve, reject) => {
-        const timer = setTimeout(() => reject(new Error("no video frame within 3 s")), 3000);
-        video.requestVideoFrameCallback(() => { clearTimeout(timer); resolve(); });
+      if (video.paused) {
+        // play() only resolves once the stream has produced a frame.
+        await Promise.race([video.play(), new Promise((r) => setTimeout(r, 3000))]);
+      }
+      // A canvas only feeds the stream when it repaints. A static picture
+      // (e.g. an XFB-only homebrew) sends no new frame, so after a short wait
+      // the last frame the stream delivered is the current one.
+      const fresh = await new Promise((resolve) => {
+        const timer = setTimeout(() => resolve(false), 1500);
+        video.requestVideoFrameCallback(() => { clearTimeout(timer); resolve(true); });
       });
       const w = video.videoWidth, h = video.videoHeight;
-      if (!w || !h) throw new Error("empty capture");
+      if (!w || !h || video.readyState < 2) throw new Error("no frame captured yet");
       const c = new OffscreenCanvas(w, h);
       const g = c.getContext("2d", { willReadFrequently: true });
       g.drawImage(video, 0, 0);
       const data = g.getImageData(0, 0, w, h).data;
       let bin = "";
       for (let i = 0; i < data.length; i += 0x8000) bin += String.fromCharCode.apply(null, data.subarray(i, i + 0x8000));
-      return { width: w, height: h, b64: btoa(bin), source: "captureStream" };
+      return { width: w, height: h, b64: btoa(bin), source: fresh ? "captureStream" : "captureStream (no repaint in 1.5 s, last frame)" };
     } catch (e) {
       return { error: String(e?.message || e) };
     }
@@ -193,6 +199,11 @@ export async function grabFrame(page) {
   if (!grabbed.error) {
     return { width: grabbed.width, height: grabbed.height, data: new Uint8Array(Buffer.from(grabbed.b64, "base64")), source: grabbed.source };
   }
-  const png = await page.locator("#screen").screenshot({ timeout: 15000 });
+  // Last resort (the canvas has not repainted since the stream was opened):
+  // an element screenshot, with the HUD and notices over the canvas hidden.
+  const png = await page.locator("#screen").screenshot({
+    timeout: 15000,
+    style: ".screen-viewport > :not(canvas), .screen-osd { visibility: hidden !important; }"
+  });
   return { ...decodePng(png), source: `screenshot (captureStream failed: ${grabbed.error})` };
 }

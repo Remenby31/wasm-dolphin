@@ -2,7 +2,8 @@
 // SPDX-License-Identifier: MIT
 // QA harness entry point. Usage: harness/run <command> [options]; see harness/README.md.
 import { execFileSync } from "node:child_process";
-import { existsSync, mkdirSync, readFileSync, writeFileSync } from "node:fs";
+import { existsSync, mkdirSync, readdirSync, readFileSync, rmSync, statSync, writeFileSync } from "node:fs";
+import os from "node:os";
 import path from "node:path";
 import { parseArgs } from "node:util";
 import { ensureServer, pageCall, REPO_ROOT, waitForCoreFrame } from "./lib/browser.mjs";
@@ -30,7 +31,23 @@ function parse(argv, options) {
   return parseArgs({ args: argv, options: { ...COMMON, ...options }, allowPositionals: true });
 }
 
+const RESULTS = path.join(REPO_ROOT, "harness", "results");
+const KEEP_RESULTS = Number(process.env.HARNESS_KEEP_RESULTS || 8);
+
+// Disk is shared and tight: keep only the newest result directories.
+function rotateResults(dir = RESULTS, keep = KEEP_RESULTS) {
+  if (!existsSync(dir)) return [];
+  const entries = readdirSync(dir)
+    .map((name) => path.join(dir, name))
+    .filter((p) => statSync(p).isDirectory())
+    .sort((a, b) => statSync(b).mtimeMs - statSync(a).mtimeMs);
+  const removed = entries.slice(keep);
+  for (const p of removed) rmSync(p, { recursive: true, force: true });
+  return removed;
+}
+
 function outDir(values, name, { private: isPrivate = false } = {}) {
+  rotateResults();
   const base = values.out
     ? path.resolve(values.out)
     : isPrivate
@@ -347,13 +364,39 @@ async function cmdSavestate(argv) {
   });
 }
 
+// ---------------------------------------------------------------- clean
+function cmdClean(argv) {
+  const { values } = parse(argv, { keep: { type: "string", default: "0" }, all: { type: "boolean", default: false } });
+  const removed = rotateResults(RESULTS, Number(values.keep));
+  // Profiles of runs that crashed before close() (normal runs delete theirs).
+  for (const name of readdirSync(os.tmpdir())) {
+    if (name.startsWith("gc-harness-profile-")) {
+      rmSync(path.join(os.tmpdir(), name), { recursive: true, force: true });
+      removed.push(path.join(os.tmpdir(), name));
+    }
+  }
+  if (values.all) {
+    rmSync(HOMEBREW_OUT, { recursive: true, force: true });
+    removed.push(HOMEBREW_OUT);
+  }
+  try {
+    // Only containers this harness labelled; never images, volumes or other projects.
+    const ids = execFileSync("docker", ["ps", "-aq", "--filter", "label=gc-harness=1", "--filter", "status=exited"], { encoding: "utf8" }).split("\n").filter(Boolean);
+    if (ids.length) execFileSync("docker", ["rm", ...ids]);
+    removed.push(...ids.map((id) => `container ${id}`));
+  } catch {}
+  for (const p of removed) console.log(`[clean] removed ${p}`);
+  console.log(`[clean] ${removed.length} item(s)`);
+  return 0;
+}
+
 // ---------------------------------------------------------------- build-iso
 function cmdBuildIso() {
   execFileSync("sh", [path.join(REPO_ROOT, "harness", "homebrew", "build.sh")], { stdio: "inherit" });
   return 0;
 }
 
-const COMMANDS = { matrix: cmdMatrix, measure: cmdMeasure, diff: cmdDiff, fuzz: cmdFuzz, pads: cmdPads, savestate: cmdSavestate, "build-iso": cmdBuildIso };
+const COMMANDS = { matrix: cmdMatrix, measure: cmdMeasure, diff: cmdDiff, fuzz: cmdFuzz, pads: cmdPads, savestate: cmdSavestate, clean: cmdClean, "build-iso": cmdBuildIso };
 
 const [command, ...rest] = process.argv.slice(2);
 if (!COMMANDS[command]) {
