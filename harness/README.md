@@ -42,7 +42,11 @@ and after (`uptime`, load average), 1 Hz samples of `window.__lastFrameInfo`
 JIT blocks compiled, PC), Chrome CPU for that profile only (total, busiest
 renderer, GPU process; 100 % = one core), console/page/worker errors, and
 screenshots. `matrix` adds `summary.json` and `summary.md`: per cell, the
-median ± sample stdev across runs of each run's mean.
+median ± sample stdev across runs of each run's mean, and the runs flagged
+`crash` or `zero-presents` (presentationFps 0 throughout while the core
+advances: a frozen picture, or a wgpu XFB-only path the counter does not see;
+the capture tells which). `harness/run report <dir>` rebuilds the summary from
+the per-run files.
 
 ## Commands
 

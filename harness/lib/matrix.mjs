@@ -101,15 +101,16 @@ export function summarizeRun(samples, cpuSamples = []) {
     cpuRenderer: median(cpuSamples.map((c) => c.rendererMax)),
     cpuGpu: median(cpuSamples.map((c) => c.gpu)),
     cpuTotalP90: percentile(cpuSamples.map((c) => c.total), 90),
-    // Core advancing while nothing reaches the screen: a frozen picture.
-    presentationStalled: samples.length > 0 && pick("pres").every((p) => !p) && (last.frame ?? 0) > (first.frame ?? 0)
+    // presentationFps stayed 0 while the core advanced. Usually a frozen
+    // picture; check the capture, the counter also misses some wgpu XFB paths.
+    zeroPresents: samples.length > 0 && pick("pres").every((p) => !p) && (last.frame ?? 0) > (first.frame ?? 0)
   };
 }
 
 export function runFlags(record) {
   const flags = [];
   if (record.crashed || record.errors?.length) flags.push("crash");
-  if (record.summary?.presentationStalled) flags.push("presentation-stalled");
+  if (record.summary?.zeroPresents) flags.push("zero-presents");
   return flags;
 }
 
