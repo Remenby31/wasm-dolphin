@@ -40,14 +40,23 @@ test("matrix: runs are interleaved across cells and local-only games never run i
   assert.throws(() => expandMatrix(spec, { env: {} }), /HB is not set/);
 });
 
+// One run sampled twice at a constant speed, 60 presents/s, 150 % CPU.
+const run = (speed) => ({ game: "g", config: "c", summary: summarizeRun([{ speed, pres: 60, frame: 0 }, { speed, pres: 60, frame: 60 }], [{ total: 150, rendererMax: 100, gpu: 20 }]) });
+
 test("matrix: per-run means then median ± stdev across runs", () => {
-  const run = (speed) => ({ game: "g", config: "c", summary: summarizeRun([{ speed, pres: 60, frame: 0 }, { speed, pres: 60, frame: 60 }], [{ total: 150, rendererMax: 100, gpu: 20 }]) });
   assert.equal(run(100).summary.frameAdvance, 60);
   const [cell] = summarizeMatrix([run(90), run(100), run(110)]);
   assert.equal(cell.runs, 3);
   assert.equal(cell.metrics.speed.median, 100);
   assert.equal(cell.metrics.speed.stdev, 10);
   assert.equal(cell.metrics.cpuTotal.median, 150);
+});
+
+test("matrix: a frozen picture with a running core is flagged", () => {
+  const frozen = { game: "g", config: "wgpu", summary: summarizeRun([{ pres: 0, frame: 10 }, { pres: 0, frame: 70 }]) };
+  const [cell] = summarizeMatrix([frozen, run(100)]);
+  assert.equal(cell.failedRuns, 1);
+  assert.deepEqual(cell.flags, ["presentation-stalled"]);
 });
 
 test("png: encode/decode round trip", () => {

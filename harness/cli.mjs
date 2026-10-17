@@ -11,7 +11,7 @@ import { analyzeDifferential, INTERP_QUERY, JIT_QUERY } from "./lib/fuzz.mjs";
 import { releaseAll, setPad } from "./lib/gamepad-mock.mjs";
 import { compareFrames, diffImage } from "./lib/image-diff.mjs";
 import { decodeMarkers, decodePadRow, hex } from "./lib/markers.mjs";
-import { expandMatrix, matrixMarkdown, PRESETS, resolveQuery, summarizeMatrix, summarizeRun } from "./lib/matrix.mjs";
+import { expandMatrix, matrixMarkdown, PRESETS, resolveQuery, runFlags, summarizeMatrix, summarizeRun } from "./lib/matrix.mjs";
 import { decodePng } from "./lib/png.mjs";
 import { grabFrame, openSession, runUntilDone, sample, savePng, setCorePaused, waitSeconds } from "./lib/session.mjs";
 import { runSteps, validateSteps } from "./lib/steps.mjs";
@@ -117,7 +117,8 @@ async function measureOne(server, values, { iso, query, label, warmup, secs, sho
 function brief(r) {
   const s = r.summary;
   const f = (v) => (v == null ? "–" : Math.round(v));
-  return `${r.label}: speed ${f(s.speed)}% pres ${f(s.pres)} vis ${f(s.vis)} p95 ${s.p95?.toFixed?.(1) ?? "–"}ms cpu ${f(s.cpuTotal)}% jitc ${s.jitc ?? "–"} load ${r.machineBefore.loadavg[0]}${r.crashed ? " CRASHED" : ""}`;
+  const flags = runFlags(r);
+  return `${r.label}: speed ${f(s.speed)}% pres ${f(s.pres)} vis ${f(s.vis)} p95 ${s.p95?.toFixed?.(1) ?? "–"}ms cpu ${f(s.cpuTotal)}% jitc ${s.jitc ?? "–"} load ${r.machineBefore.loadavg[0]}${flags.length ? ` [${flags.join(", ")}]` : ""}`;
 }
 
 async function cmdMatrix(argv) {
