@@ -104,6 +104,15 @@
         "cargoSha256": "b9fdbb154619344ad0c883debe6d50b72c56b6782cad4cddf41206cdf8cd9d7e",
         "cmakeSha256": "1b1667330498dc023eaeb0b0521ea105e1943d019d44bef909f0dad81844d5e1",
         "ninjaSha256": "ad44480e2ba27be95a4850720983fd1b123728bb8a45c6c90670f5aa0d3e0069"
+      },
+      "linux-arm64": {
+        "clangSha256": "6622fda056a8c518f31ed587ae7ee33f5683fbe035c82e3593b3d2496beb6ccd",
+        "wasmLdSha256": "056233b51fff01420340aa0c53e6d2b4a0ce0b36cb814502947cea058e5e9620",
+        "wasmOptSha256": "f697d0085c681cdd278e4b3c56d21969e54dfe8faf1a10d9619e6adc1f925b43",
+        "rustcSha256": "0ca9f5ed09851e68d0fcaf816b6a370482a4b8964882421b5380c964e9f5538f",
+        "cargoSha256": "8cc1dd13e0b4baf36547ceaa4b98be622ef0a97263dcddf92874f02c8c8cd2d6",
+        "cmakeSha256": "e2fedfca09764eae13d19af0d5a519c6756cab595c1597aebb0137761bf0a189",
+        "ninjaSha256": "abf714870db6db3de512100023d26db0b2750d6afffe96cdde5513564e3d910b"
       }
     }
   }

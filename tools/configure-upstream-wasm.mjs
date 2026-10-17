@@ -1,4 +1,4 @@
-import { existsSync, mkdirSync, writeFileSync } from "node:fs";
+import { existsSync, mkdirSync, readdirSync, writeFileSync } from "node:fs";
 import { spawnSync } from "node:child_process";
 import { homedir } from "node:os";
 import { delimiter, dirname, relative, resolve } from "node:path";
@@ -102,8 +102,20 @@ const rustSysroot = spawnSync(rustc, ["--print", "sysroot"], { encoding: "utf8" 
 if (!rustSysroot) {
   throw new Error(`Could not query the sysroot of ${rustc}`);
 }
+// Crate sources are unpacked under registry/src/<source-name>-<hash>, and the
+// source name follows the host's cargo configuration (a crates.io mirror gets
+// its own directory). Cargo.lock checksums already pin the content, so fold
+// every registry directory onto one virtual name. Fetch first so the
+// directories exist before they are enumerated.
+const cargoHome = resolve(process.env.CARGO_HOME ?? resolve(homedir(), ".cargo"));
+run(cargo, ["fetch", "--locked"], { cwd: nagaDir, env: nagaEnvironment });
+const registrySources = existsSync(resolve(cargoHome, "registry/src"))
+  ? readdirSync(resolve(cargoHome, "registry/src")).sort()
+  : [];
+// rustc applies the last matching mapping, so the most specific come last.
 const rustRemapFlags = [
-  [resolve(process.env.CARGO_HOME ?? resolve(homedir(), ".cargo")), "/cargo"],
+  [cargoHome, "/cargo"],
+  ...registrySources.map((name) => [resolve(cargoHome, "registry/src", name), "/cargo/registry/src/crates.io"]),
   [resolve(rustSysroot, "lib/rustlib/src/rust"), `/rustc/${toolchain.lock.rust.rustcCommit}`],
   [root, virtualRoot]
 ].map(([from, to]) => `--remap-path-prefix=${from}=${to}`);
