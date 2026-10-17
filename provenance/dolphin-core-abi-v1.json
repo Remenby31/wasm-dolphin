@@ -20,8 +20,8 @@
     {
       "path": "core/upstream/dolphin_web_discio.cpp",
       "hashMode": "lf-normalized",
-      "size": 51385,
-      "sha256": "01997e8f466e2657f2eea1ca60afab8587f3e7c59f455974906b5c4245a5c3fc"
+      "size": 52690,
+      "sha256": "67c9fd565c9e6ce03bde35f2a723de6f8ef4bd97196a53ece922ec8b1e94cc3c"
     },
     {
       "path": "core/upstream/dolphin_web_raster_profile.h",
@@ -134,8 +134,8 @@
     {
       "path": "src/upstream-discio-worker.js",
       "hashMode": "lf-normalized",
-      "size": 622314,
-      "sha256": "9a3a73f4959d31b4a7967bd3aa32e6b18ec0673af9de5f5ad155885426205c36"
+      "size": 623899,
+      "sha256": "b662e5f4e4e84d6680f50657a834f994107aee07980debcdcc23c7d08404ae27"
     },
     {
       "path": "src/wgpu-renderer-worker-probe.js",
@@ -527,6 +527,7 @@
       "setInputState",
       "validationBeginWgpuRendererProbeMeasurement",
       "validationCaptureAtVi",
+      "validationEnableHarness",
       "validationFinalizeWgpuMappedDrain",
       "validationFinalizeWgpuRendererProbe",
       "validationFinalizeWgpuReplay",
