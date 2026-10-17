@@ -100,8 +100,17 @@ export function summarizeRun(samples, cpuSamples = []) {
     cpuTotal: median(cpuSamples.map((c) => c.total)),
     cpuRenderer: median(cpuSamples.map((c) => c.rendererMax)),
     cpuGpu: median(cpuSamples.map((c) => c.gpu)),
-    cpuTotalP90: percentile(cpuSamples.map((c) => c.total), 90)
+    cpuTotalP90: percentile(cpuSamples.map((c) => c.total), 90),
+    // Core advancing while nothing reaches the screen: a frozen picture.
+    presentationStalled: samples.length > 0 && pick("pres").every((p) => !p) && (last.frame ?? 0) > (first.frame ?? 0)
   };
+}
+
+export function runFlags(record) {
+  const flags = [];
+  if (record.crashed || record.errors?.length) flags.push("crash");
+  if (record.summary?.presentationStalled) flags.push("presentation-stalled");
+  return flags;
 }
 
 // Group per-run summaries by (game, config) → median/stdev across runs.
@@ -120,7 +129,8 @@ export function summarizeMatrix(results) {
       config: cell.config,
       url: cell.url,
       runs: cell.runs.length,
-      failedRuns: cell.runs.filter((r) => r.errors?.length || r.crashed).length,
+      failedRuns: cell.runs.filter((r) => runFlags(r).length).length,
+      flags: [...new Set(cell.runs.flatMap(runFlags))],
       metrics
     };
   });
@@ -135,7 +145,7 @@ export function matrixMarkdown(cells, meta = {}) {
   lines.push("|---|---|---|---|---|---|---|---|---|");
   for (const c of cells) {
     const m = c.metrics;
-    lines.push(`| ${c.game} | ${c.config} | ${c.runs} | ${fmt(m.speed)} | ${fmt(m.pres)} | ${fmt(m.vis)} | ${fmt(m.p95)} | ${fmt(m.cpuTotal)} / ${fmt(m.cpuRenderer)} / ${fmt(m.cpuGpu)} | ${c.failedRuns} |`);
+    lines.push(`| ${c.game} | ${c.config} | ${c.runs} | ${fmt(m.speed)} | ${fmt(m.pres)} | ${fmt(m.vis)} | ${fmt(m.p95)} | ${fmt(m.cpuTotal)} / ${fmt(m.cpuRenderer)} / ${fmt(m.cpuGpu)} | ${c.failedRuns}${c.flags?.length ? ` (${c.flags.join(", ")})` : ""} |`);
   }
   lines.push("", "Values: median ± sample stdev across runs of the per-run mean (1 sample/s).");
   return lines.join("\n");

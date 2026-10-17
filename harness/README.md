@@ -80,7 +80,8 @@ map) and `diff.json`, and exits 1 on any verdict listed in `--fail-on`
 with `wasmjit=0` and with `wasmjit=1&jitwarmup=120&forcejit=1`, each until the
 homebrew reports done, the worker dies, the core stalls, or the timeout. Then
 compares: JIT crash (with the first error and the PC, mapped to the cpufuzz
-program and word), each side's self-check, the final result hash across the
+program and word; that PC is the last one the page received before the worker
+died, so it can be stale and the mapping is then absent), each side's self-check, the final result hash across the
 two runs, or for discs without markers the final frames. `jit-not-engaged` is a
 warning: the JIT compiled nothing, so the run proved nothing.
 
