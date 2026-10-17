@@ -136,7 +136,7 @@ function runInDocker() {
 
 // ---------------------------------------------------------------- parity ---
 
-function glueFacts(jsPath) {
+export function glueFacts(jsPath) {
   const glue = readFileSync(jsPath, "utf8");
   return {
     filesystems: /FS\.filesystems=\{([^}]*)\}/.exec(glue)?.[1].split(",").sort() ?? null,
