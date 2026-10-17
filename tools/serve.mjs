@@ -1,13 +1,12 @@
 import { spawn } from "node:child_process";
-import { createReadStream, statSync } from "node:fs";
+import { createReadStream, realpathSync, statSync } from "node:fs";
 import { createServer } from "node:http";
-import { extname, join, normalize, resolve } from "node:path";
+import { extname, isAbsolute, join, relative, resolve, sep } from "node:path";
 import { fileURLToPath } from "node:url";
 
 const args = process.argv.slice(2);
 const shouldOpen = args.includes("--open");
 const portArgument = args.find((argument) => /^\d+$/.test(argument));
-const root = resolve(process.cwd());
 const preferredPort = Number(process.env.PORT || portArgument || 8080);
 const host = process.env.HOST || "127.0.0.1";
 
@@ -22,45 +21,94 @@ const mimeTypes = new Map([
   [".svg", "image/svg+xml"]
 ]);
 
-function resolveRequestPath(url) {
-  const parsed = new URL(url, "http://localhost");
-  const pathname = decodeURIComponent(parsed.pathname);
-  const normalized = normalize(pathname).replace(/^(\.\.[/\\])+/, "");
-  const candidate = resolve(join(root, normalized));
+// Dot-prefixed paths (.git, .env, .omx scratch, ...) are never served, with
+// these exceptions. The perf gate stages its save-state fixture here and loads
+// it over HTTP (tools/perf-regression-gate.mjs).
+const defaultAllowedDotPaths = [".omx/perf-fixtures"];
 
-  if (!candidate.startsWith(root)) {
-    return null;
-  }
-
-  try {
-    const stats = statSync(candidate);
-    if (stats.isDirectory()) {
-      return join(candidate, "index.html");
-    }
-    return candidate;
-  } catch {
-    return null;
-  }
+// The path of `target` inside `base`, as forward-slash segments, or null when
+// it lies outside. A bare startsWith(base) is wrong: "/srv/app-secrets" starts
+// with "/srv/app".
+function containedPath(base, target) {
+  const rel = relative(base, target);
+  if (rel === "") return "";
+  if (rel === ".." || rel.startsWith(`..${sep}`) || isAbsolute(rel)) return null;
+  return rel.split(sep).join("/");
 }
 
-const server = createServer((request, response) => {
-  const filePath = resolveRequestPath(request.url || "/");
+function isHiddenPath(rel, allowedDotPaths) {
+  if (!rel.split("/").some((segment) => segment.startsWith("."))) return false;
+  return !allowedDotPaths.some((allowed) => rel.startsWith(`${allowed}/`));
+}
 
-  if (!filePath) {
-    response.writeHead(404, { "content-type": "text/plain; charset=utf-8" });
-    response.end("Not found");
-    return;
-  }
+/**
+ * Map a request URL to a regular file under `root`, or null for anything that
+ * must be a 404: malformed encoding, traversal, a symlink leaving the root,
+ * hidden files, directories without an index, or anything that is not a file.
+ */
+export function createPathResolver(root, { allowedDotPaths = defaultAllowedDotPaths } = {}) {
+  const realRoot = realpathSync(resolve(root));
 
-  const contentType = mimeTypes.get(extname(filePath)) ?? "application/octet-stream";
-  response.writeHead(200, {
-    "content-type": contentType,
-    "cache-control": "no-store",
-    "cross-origin-opener-policy": "same-origin",
-    "cross-origin-embedder-policy": "require-corp"
-  });
-  createReadStream(filePath).pipe(response);
-});
+  // Both the requested path and its canonical target must stay inside the
+  // root and be visible: the first catches "..", the second catches symlinks.
+  const visible = (path) => {
+    const rel = containedPath(realRoot, path);
+    return rel !== null && !isHiddenPath(rel, allowedDotPaths);
+  };
+
+  return function resolveRequestPath(url) {
+    try {
+      const pathname = decodeURIComponent(new URL(url, "http://localhost").pathname);
+      if (pathname.includes("\0")) return null;
+      let candidate = resolve(realRoot, `.${pathname}`);
+      if (!visible(candidate)) return null;
+      if (statSync(candidate).isDirectory()) candidate = join(candidate, "index.html");
+      const real = realpathSync(candidate);
+      if (!visible(candidate) || !visible(real) || !statSync(real).isFile()) return null;
+      return real;
+    } catch {
+      // URIError, missing file, permission denied, ELOOP: all plain 404s.
+      return null;
+    }
+  };
+}
+
+export function createRequestHandler(root, options) {
+  const resolveRequestPath = createPathResolver(root, options);
+  return (request, response) => {
+    if (request.method !== "GET" && request.method !== "HEAD") {
+      response.writeHead(405, { allow: "GET, HEAD", "content-type": "text/plain; charset=utf-8" });
+      response.end("Method not allowed");
+      return;
+    }
+
+    const filePath = resolveRequestPath(request.url || "/");
+    if (!filePath) {
+      response.writeHead(404, { "content-type": "text/plain; charset=utf-8" });
+      response.end("Not found");
+      return;
+    }
+
+    const contentType = mimeTypes.get(extname(filePath)) ?? "application/octet-stream";
+    response.writeHead(200, {
+      "content-type": contentType,
+      "cache-control": "no-store",
+      "cross-origin-opener-policy": "same-origin",
+      "cross-origin-embedder-policy": "require-corp"
+    });
+    if (request.method === "HEAD") {
+      response.end();
+      return;
+    }
+    // A read error after the headers went out cannot become a 404 any more;
+    // drop the connection instead of letting the error take the server down.
+    createReadStream(filePath)
+      .on("error", () => response.destroy())
+      .pipe(response);
+  };
+}
+
+const server = createServer(createRequestHandler(process.cwd()));
 
 // Open the page in the user's browser. Best effort by design: a failure here
 // must not take the server down, because the printed URL still works.
