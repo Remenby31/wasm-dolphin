@@ -262,15 +262,18 @@ export function fetchPinnedExternalRepositories(dolphinDir, lock) {
     const directory = resolve(dolphinDir, cwd);
     const created = !existsSync(directory);
     if (created) {
-      run("git", ["clone", "--filter=blob:none", "--no-checkout", repository.repository, directory], {
-        stdio: "inherit"
-      });
+      // Only the pinned commit is ever checked out, and it is fetched shallowly
+      // below. A full partial clone is refused for anonymous clients on some
+      // of these repositories (GitHub answers with a credential prompt), which
+      // broke clean container and CI builds.
+      run("git", ["init", "--quiet", directory], { stdio: "inherit" });
+      git(directory, ["remote", "add", "origin", repository.repository]);
     }
     invariant(existsSync(resolve(directory, ".git")), `${directory} exists but is not a Git checkout`);
     const origin = gitText(directory, ["remote", "get-url", "origin"]);
     invariant(origin === repository.repository,
       `External repository origin mismatch for ${cwd}: expected ${repository.repository}, got ${origin}`);
-    const current = gitText(directory, ["rev-parse", "--verify", "HEAD"]);
+    const current = created ? null : gitText(directory, ["rev-parse", "--verify", "HEAD"]);
     if (current !== repository.commit) {
       if (!created) {
         const expected = new Map(externalDescendants(lock, cwd, dolphinDir, true)
