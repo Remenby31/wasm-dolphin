@@ -16,15 +16,27 @@ const base = mkdtempSync(join(tmpdir(), "serve-test-"));
 const root = join(base, "site");
 const files = {
   "index.html": "<!doctype html>home",
-  "app.js": "export {};",
-  "core.wasm": "\0asm",
+  "src/app.js": "export {};",
+  "src/panel/index.html": "panel",
+  "src/readme.txt": "plain",
+  "src/.DS_Store": "finder",
+  "cores/dolphin/core.wasm": "\0asm",
+  "__battle.sav": "battle",
+  "notes.sav": "not a fixture",
+  "package.json": "{}",
+  "README.md": "readme",
+  "tools/serve.mjs": "source",
   "docs/index.html": "docs",
-  "assets/readme.txt": "plain",
   ".env": "SECRET=1",
   ".git/config": "[core]",
-  "assets/.hidden": "hidden",
   ".omx/perf-fixtures/state.sav": "fixture",
-  ".omx/notes.md": "scratch"
+  ".omx/notes.md": "scratch",
+  // NTFS 8.3 aliases cannot be created here, so stand in with real entries
+  // carrying those names. Like Windows realpath, resolving them keeps the
+  // short name, so the request and its canonical path both look dot-free.
+  "GIT~1/config": "[core] via short name",
+  "src/APP~1.JS": "short-name alias inside a served directory",
+  "cores/DOLPHI~1/core.wasm": "short-name alias of a served directory"
 };
 for (const [path, body] of Object.entries(files)) {
   mkdirSync(join(root, path, ".."), { recursive: true });
@@ -36,10 +48,11 @@ writeFileSync(join(base, "outside.txt"), "outside");
 
 let symlinks = true;
 try {
-  symlinkSync(join(base, "outside.txt"), join(root, "escape.txt"));
-  symlinkSync(join(base, "site-secrets"), join(root, "escape-dir"));
-  symlinkSync(join(root, ".env"), join(root, "env.txt"));
-  symlinkSync(join(root, "app.js"), join(root, "alias.js"));
+  symlinkSync(join(base, "outside.txt"), join(root, "src/escape.txt"));
+  symlinkSync(join(base, "site-secrets"), join(root, "src/escape-dir"));
+  symlinkSync(join(root, ".env"), join(root, "src/env.txt"));
+  symlinkSync(join(root, "package.json"), join(root, "src/package.json"));
+  symlinkSync(join(root, "src/app.js"), join(root, "src/alias.js"));
 } catch {
   symlinks = false; // Windows without developer mode.
 }
@@ -74,10 +87,11 @@ function get(path, method = "GET") {
 test("serves assets with their MIME type and cross-origin isolation headers", async () => {
   for (const [path, type, body] of [
     ["/", "text/html; charset=utf-8", files["index.html"]],
-    ["/app.js", "text/javascript; charset=utf-8", files["app.js"]],
-    ["/core.wasm", "application/wasm", files["core.wasm"]],
-    ["/docs/", "text/html; charset=utf-8", files["docs/index.html"]],
-    ["/assets/read%6De.txt", "application/octet-stream", files["assets/readme.txt"]]
+    ["/src/app.js", "text/javascript; charset=utf-8", files["src/app.js"]],
+    ["/cores/dolphin/core.wasm", "application/wasm", files["cores/dolphin/core.wasm"]],
+    ["/src/panel/", "text/html; charset=utf-8", files["src/panel/index.html"]],
+    ["/src/read%6De.txt", "application/octet-stream", files["src/readme.txt"]],
+    ["/__battle.sav", "application/octet-stream", files["__battle.sav"]]
   ]) {
     const response = await get(path);
     assert.equal(response.status, 200, path);
@@ -94,7 +108,7 @@ test("traversal out of the root is a 404, encoded or not", async () => {
     "/..%2foutside.txt",
     "/%2e%2e/outside.txt",
     "/%2e%2e%2foutside.txt",
-    "/docs/..%2f..%2foutside.txt",
+    "/src/..%2f..%2foutside.txt",
     "/..%5coutside.txt",
     "/../site-secrets/key.txt",
     "/..%2fsite-secrets%2fkey.txt"
@@ -105,8 +119,14 @@ test("traversal out of the root is a 404, encoded or not", async () => {
   }
 });
 
+test("only allowlisted paths are served", async () => {
+  for (const path of ["/package.json", "/README.md", "/tools/serve.mjs", "/docs/", "/docs/index.html", "/notes.sav"]) {
+    assert.equal((await get(path)).status, 404, path);
+  }
+});
+
 test("dotfiles and dot-directories are never served", async () => {
-  for (const path of ["/.env", "/.git/config", "/assets/.hidden", "/%2eenv", "/.omx/notes.md", "/.git/"]) {
+  for (const path of ["/.env", "/.git/config", "/src/.DS_Store", "/%2eenv", "/.omx/notes.md", "/.git/"]) {
     assert.equal((await get(path)).status, 404, path);
   }
 });
@@ -117,32 +137,41 @@ test("the perf gate's staged fixture directory stays reachable", async () => {
   assert.equal(response.body, "fixture");
 });
 
-test("malformed URLs are a 404 and the server keeps running", async () => {
-  for (const path of ["/%", "/%E0%A4%A", "/app.js%00.html", "/%ZZ"]) {
-    assert.equal((await get(path)).status, 404, path);
+test("8.3 short-name aliases cannot reach hidden or unlisted files", async () => {
+  for (const path of ["/GIT~1/config", "/git~1/config", "/src/APP~1.JS", "/cores/DOLPHI~1/core.wasm", "/GIT%7E1/config"]) {
+    const response = await get(path);
+    assert.equal(response.status, 404, path);
+    assert.doesNotMatch(response.body, /core|alias/, path);
   }
-  assert.equal((await get("/app.js")).status, 200);
 });
 
-test("symlinks may not leave the root or unmask a dotfile", { skip: !symlinks && "symlinks unavailable" }, async () => {
-  assert.equal((await get("/escape.txt")).status, 404);
-  assert.equal((await get("/escape-dir/key.txt")).status, 404);
-  assert.equal((await get("/env.txt")).status, 404);
-  const alias = await get("/alias.js");
+test("malformed URLs are a 404 and the server keeps running", async () => {
+  for (const path of ["/%", "/%E0%A4%A", "/src/app.js%00.html", "/%ZZ"]) {
+    assert.equal((await get(path)).status, 404, path);
+  }
+  assert.equal((await get("/src/app.js")).status, 200);
+});
+
+test("symlinks may not leave the root or unmask a hidden or unlisted file", { skip: !symlinks && "symlinks unavailable" }, async () => {
+  assert.equal((await get("/src/escape.txt")).status, 404);
+  assert.equal((await get("/src/escape-dir/key.txt")).status, 404);
+  assert.equal((await get("/src/env.txt")).status, 404);
+  assert.equal((await get("/src/package.json")).status, 404);
+  const alias = await get("/src/alias.js");
   assert.equal(alias.status, 200);
-  assert.equal(alias.body, files["app.js"]);
+  assert.equal(alias.body, files["src/app.js"]);
 });
 
 test("a directory without an index is a 404, not a crash", async () => {
-  assert.equal((await get("/assets/")).status, 404);
+  assert.equal((await get("/cores/")).status, 404);
 });
 
 test("HEAD has headers and no body; other methods are refused", async () => {
-  const head = await get("/app.js", "HEAD");
+  const head = await get("/src/app.js", "HEAD");
   assert.equal(head.status, 200);
   assert.equal(head.headers["content-type"], "text/javascript; charset=utf-8");
   assert.equal(head.body, "");
-  const post = await get("/app.js", "POST");
+  const post = await get("/src/app.js", "POST");
   assert.equal(post.status, 405);
   assert.equal(post.headers.allow, "GET, HEAD");
 });

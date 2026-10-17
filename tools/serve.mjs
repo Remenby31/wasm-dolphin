@@ -21,10 +21,32 @@ const mimeTypes = new Map([
   [".svg", "image/svg+xml"]
 ]);
 
-// Dot-prefixed paths (.git, .env, .omx scratch, ...) are never served, with
-// these exceptions. The perf gate stages its save-state fixture here and loads
-// it over HTTP (tools/perf-regression-gate.mjs).
-const defaultAllowedDotPaths = [".omx/perf-fixtures"];
+// What the server exposes, as an allowlist rather than a denylist: the page,
+// the app's modules and the core build it loads, and the save-state fixtures
+// the perf tooling fetches. Everything else in the checkout (tools/, docs/,
+// package.json, .git, ...) is a 404.
+//
+// A denylist of "hidden" names cannot be complete. On NTFS, GET /GIT~1/config
+// is .git/config under its 8.3 short name: no dot anywhere in the path, and
+// realpath keeps the alias, so a dotfile rule never fires. An allowlist fails
+// closed on every such alias instead.
+//
+// Entries are a file ("index.html"), a directory prefix ending in "/", or a
+// RegExp for a whole path. Under a directory prefix, dot-prefixed names stay
+// hidden (src/.DS_Store), unless the prefix itself names them.
+const defaultServedPaths = Object.freeze([
+  "index.html",
+  "src/",
+  "cores/",
+  // Staged by tools/perf-regression-gate.mjs, then fetched over HTTP.
+  ".omx/perf-fixtures/",
+  // SAVE_STATE_URL defaults of the tools/_run-*.mjs drivers (/__battle.sav, ...).
+  /^__[\w.-]+\.sav$/
+]);
+
+// "GIT~1", "PROGRA~2": the shape of a Windows 8.3 short name. No served file
+// is named like this, and resolving one would bypass the allowlist below it.
+const SHORT_NAME_SEGMENT = /~\d/;
 
 // The path of `target` inside `base`, as forward-slash segments, or null when
 // it lies outside. A bare startsWith(base) is wrong: "/srv/app-secrets" starts
@@ -36,24 +58,34 @@ function containedPath(base, target) {
   return rel.split(sep).join("/");
 }
 
-function isHiddenPath(rel, allowedDotPaths) {
-  if (!rel.split("/").some((segment) => segment.startsWith("."))) return false;
-  return !allowedDotPaths.some((allowed) => rel.startsWith(`${allowed}/`));
+function isServedPath(rel, servedPaths) {
+  const segments = rel.split("/");
+  if (segments.some((segment) => SHORT_NAME_SEGMENT.test(segment))) return false;
+  return servedPaths.some((entry) => {
+    if (entry instanceof RegExp) return entry.test(rel);
+    if (!entry.endsWith("/")) return rel === entry;
+    if (!rel.startsWith(entry)) return false;
+    return !rel.slice(entry.length).split("/").some((segment) => segment.startsWith("."));
+  });
 }
 
 /**
  * Map a request URL to a regular file under `root`, or null for anything that
  * must be a 404: malformed encoding, traversal, a symlink leaving the root,
- * hidden files, directories without an index, or anything that is not a file.
+ * anything outside the served allowlist, or anything that is not a file.
  */
-export function createPathResolver(root, { allowedDotPaths = defaultAllowedDotPaths } = {}) {
-  const realRoot = realpathSync(resolve(root));
+export function createPathResolver(root, { servedPaths = defaultServedPaths } = {}) {
+  // The native realpath expands 8.3 short names on Windows; the JS one keeps
+  // them. The allowlist does not depend on it, but canonical names are what
+  // it should be compared against.
+  const canonical = realpathSync.native;
+  const realRoot = canonical(resolve(root));
 
-  // Both the requested path and its canonical target must stay inside the
-  // root and be visible: the first catches "..", the second catches symlinks.
-  const visible = (path) => {
+  // Both the requested path and its canonical target must be served: the
+  // first catches ".." and aliases, the second catches symlinks.
+  const served = (path) => {
     const rel = containedPath(realRoot, path);
-    return rel !== null && !isHiddenPath(rel, allowedDotPaths);
+    return rel !== null && isServedPath(rel, servedPaths);
   };
 
   return function resolveRequestPath(url) {
@@ -61,10 +93,11 @@ export function createPathResolver(root, { allowedDotPaths = defaultAllowedDotPa
       const pathname = decodeURIComponent(new URL(url, "http://localhost").pathname);
       if (pathname.includes("\0")) return null;
       let candidate = resolve(realRoot, `.${pathname}`);
-      if (!visible(candidate)) return null;
+      if (containedPath(realRoot, candidate) === null) return null;
       if (statSync(candidate).isDirectory()) candidate = join(candidate, "index.html");
-      const real = realpathSync(candidate);
-      if (!visible(candidate) || !visible(real) || !statSync(real).isFile()) return null;
+      if (!served(candidate)) return null;
+      const real = canonical(candidate);
+      if (!served(real) || !statSync(real).isFile()) return null;
       return real;
     } catch {
       // URIError, missing file, permission denied, ELOOP: all plain 404s.
