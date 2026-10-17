@@ -136,8 +136,8 @@ export function matrixMarkdown(cells, meta = {}) {
   if (meta.title) lines.push(`# ${meta.title}`, "");
   for (const line of meta.env ?? []) lines.push(line);
   if (meta.env?.length) lines.push("");
-  lines.push("## Correctness (what the gate judges)", "", "| Game | Config | Runs | Crash | Errors | Core freeze | Render |", "|---|---|---|---|---|---|---|");
-  for (const c of cells) lines.push(`| ${c.game} | ${c.config} | ${c.runs} | ${mark(c.checks.crash)} | ${mark(c.checks.errors)} | ${mark(c.checks.coreFreeze)} | ${mark(c.checks.render)} |`);
+  lines.push("## Correctness (what the gate judges)", "", "| Game | Config | Runs | Crash | Errors | Core freeze | Render | Audio |", "|---|---|---|---|---|---|---|---|");
+  for (const c of cells) lines.push(`| ${c.game} | ${c.config} | ${c.runs} | ${mark(c.checks.crash)} | ${mark(c.checks.errors)} | ${mark(c.checks.coreFreeze)} | ${mark(c.checks.render)} | ${mark(c.checks.audio)} |`);
   lines.push("", "## Performance (report)", "", "| Game | Config | Class | Speed % (p5) | Unique/s | Frame p95/p99 ms | Hitches/min | Underruns/min | CPU % | Load | Flags |", "|---|---|---|---|---|---|---|---|---|---|---|");
   for (const c of cells) {
     const m = c.metrics;
@@ -181,10 +181,12 @@ export function forCrossRenderer(query) {
   return p.toString();
 }
 
-// Extra A/B items to confirm flagged cells, numbered after the last planned
-// run so every pair stays distinct.
-export function confirmationItems(plan, flagged, { rounds = 2 } = {}) {
+// Extra A/B items to confirm flagged cells, and the reference config of the
+// same games (render checks pair runs by index), numbered after the last
+// planned run so every pair stays distinct.
+export function confirmationItems(plan, flagged, { rounds = 2, reference = null } = {}) {
   const wanted = new Set(flagged.map((r) => `${r.game}\u0000${r.config}`));
+  if (reference) for (const r of flagged) wanted.add(`${r.game}\u0000${reference}`);
   const lastRun = Math.max(...plan.map((p) => p.run));
   const extra = [];
   for (let k = 1; k <= rounds; k += 1) {

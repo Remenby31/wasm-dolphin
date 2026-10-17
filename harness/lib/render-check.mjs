@@ -3,8 +3,7 @@
 // Render check on exact captures only (core-side capture at a VI output,
 // see browser.mjs captureAtVi). Each run's capture is compared with the
 // reference config's capture of the same game and the same run, and must be
-// the same emulated frame (same tick count). Wall-clock screenshots are
-// never judged.
+// the same VI output. Wall-clock screenshots are never judged.
 import { existsSync, readFileSync } from "node:fs";
 import { compareFrames, DEFAULT_THRESHOLDS, identical } from "./image-diff.mjs";
 import { decodePng } from "./png.mjs";
@@ -38,8 +37,8 @@ export function renderChecks(records, reference, loadFrame = (file) => (existsSy
     const refFrame = ref?.capture?.file && load(ref.capture.file);
     if (!refFrame) { r.render = { status: "unjudged", detail: `no reference capture for run ${r.run}` }; continue; }
     if (isBlank(refFrame)) { r.render = { status: "unjudged", detail: `reference ${ref.label} is blank` }; continue; }
-    if (ref.capture.ticks !== cap.ticks) {
-      r.render = { status: "unjudged", detail: `not the same emulated frame as ${ref.label} (ticks ${cap.ticks} vs ${ref.capture.ticks})` };
+    if (ref.capture.index !== cap.index || Boolean(ref.capture.fromLoad) !== Boolean(cap.fromLoad)) {
+      r.render = { status: "unjudged", detail: `not the same VI output as ${ref.label}` };
       continue;
     }
     const { blockMap, ...score } = compareFrames(refFrame, frame);
@@ -52,4 +51,27 @@ export function renderChecks(records, reference, loadFrame = (file) => (existsSy
     r.render = { status: ok ? "pass" : "fail", detail: verdict, exact: sameRenderer, ssim: score.ssim, lostDetail: score.lostDetail, extentDelta: score.extentDelta, against: ref.label };
   }
   return records;
+}
+
+// Cross-commit check (ab): the candidate's capture of a cell must be the
+// same bytes as the baseline's capture of the same cell, run and VI output.
+// This catches what both configs of one commit get wrong together (e.g.
+// geometry gone from the software raster under interpreter and JIT alike).
+// An intended change is accepted only explicitly (`accept`: "game/config").
+export function renderVsBaseline(baseRecords, candRecords, { accept = [], loadFrame = (file) => (existsSync(file ?? "") ? decodePng(readFileSync(file)) : null) } = {}) {
+  for (const c of candRecords) {
+    const b = baseRecords.find((x) => x.game === c.game && x.config === c.config && x.run === c.run);
+    // Nothing to compare when the baseline has no capture either; the
+    // candidate losing a capture the baseline had cannot be judged (blocks).
+    if (!b?.capture?.file) { c.renderVsBaseline = { status: "not-covered", detail: b ? b.capture?.error ?? "baseline has no capture" : "no baseline run" }; continue; }
+    if (!c.capture?.file) { c.renderVsBaseline = { status: "unjudged", detail: c.capture?.error ?? "no exact capture" }; continue; }
+    if (b.capture.index !== c.capture.index || Boolean(b.capture.fromLoad) !== Boolean(c.capture.fromLoad)) {
+      c.renderVsBaseline = { status: "unjudged", detail: "not the same VI output as the baseline" };
+      continue;
+    }
+    const same = identical(loadFrame(b.capture.file), loadFrame(c.capture.file));
+    const accepted = accept.includes(`${c.game}/${c.config}`);
+    c.renderVsBaseline = same ? { status: "pass" } : { status: accepted ? "pass" : "fail", detail: accepted ? "changed (accepted)" : "different from the baseline at the same VI output" };
+  }
+  return candRecords;
 }

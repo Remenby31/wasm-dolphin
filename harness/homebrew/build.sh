@@ -12,7 +12,7 @@ docker run --rm --label "gc-harness.root=$here" --platform linux/amd64 -v "$here
     for f in cpufuzz cpufuzz-nomcrf; do
       /opt/devkitpro/devkitPPC/bin/powerpc-eabi-nm out/$f.elf | awk '"'"'$3=="cpufuzz_code_pool"{printf "{\"cpufuzz_code_pool\":\"0x%s\",\"words_per_program\":128,\"programs\":384}\n",$1}'"'"' > out/$f.symbols.json; done &&
     chown -R '"$(id -u):$(id -g)"' out'
-for p in padtest consoletest gxscene cpufuzz cpufuzz-nomcrf; do
+for p in padtest consoletest gxscene cpufuzz cpufuzz-nomcrf tonetest gxscene-nocubes gxscene-color; do
   node "$here/mkgcm.mjs" --dol "$here/out/$p.dol" --apploader "$here/out/apploader.bin" \
     --out "$here/out/$p.iso" --id "$(printf 'HB%s' "$(echo "$p" | cut -c1-2 | tr a-z A-Z)")" --name "harness $p"
 done

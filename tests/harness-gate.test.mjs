@@ -74,10 +74,10 @@ test("round 3: render is judged on exact captures only, and a failed capture is 
   const img = (dx) => ({ width: W, height: H, data: new Uint8Array(W * H * 4).map((_, i) => (((((i >> 2) % W) - dx) >> 3) & 1 ? 200 : 30)) });
   const frames = { ref: img(0), same: img(0), shifted: img(4), black: { width: W, height: H, data: new Uint8Array(W * H * 4) } };
   const recs = [
-    { ...record(), config: "sw", label: "a", capture: { file: "ref", ticks: 100 }, finalShot: "black" },
-    { ...record(), config: "jit", label: "b", capture: { file: "same", ticks: 100 } },
-    { ...record(), config: "fast", label: "c", capture: { file: "shifted", ticks: 100 } },
-    { ...record(), config: "late", label: "d", capture: { file: "same", ticks: 101 } },
+    { ...record(), config: "sw", label: "a", capture: { file: "ref", index: 300, ticks: 100 }, finalShot: "black" },
+    { ...record(), config: "jit", label: "b", capture: { file: "same", index: 300, ticks: 107 } },
+    { ...record(), config: "fast", label: "c", capture: { file: "shifted", index: 300, ticks: 100 } },
+    { ...record(), config: "late", label: "d", capture: { file: "same", index: 301, ticks: 101 } },
     { ...record(), config: "timeout", label: "e", capture: { error: "VI output 600 never reached within 60000 ms" } }
   ];
   renderChecks(recs, "sw", (f) => frames[f]);
@@ -89,7 +89,7 @@ test("round 3: render is judged on exact captures only, and a failed capture is 
 });
 
 const cells = (checksByCell) => checksByCell.map(([config, checks]) => ({ game: "g", config, checks }));
-const ok = { crash: { status: "pass" }, errors: { status: "pass" }, coreFreeze: { status: "pass" }, render: { status: "pass" } };
+const ok = { crash: { status: "pass" }, errors: { status: "pass" }, coreFreeze: { status: "pass" }, render: { status: "pass" }, audio: { status: "pass" } };
 
 test("correctness gate: regressions and unjudgeable candidates block, shared failures do not", () => {
   assert.equal(correctnessGate(cells([["c", ok]]), cells([["c", ok]])).ok, true);
@@ -119,14 +119,25 @@ test("fuzz and pads findings: new kinds regress, a missing result is inconclusiv
 // Performance is compared run against run, not through verdict classes.
 test("round 3: a clear paired performance regression blocks, noise does not", () => {
   const runAt = (config, run, speed) => ({ game: "g", config, run, summary: { speed, vis: 30, frameP95: 17 } });
-  const base = [1, 2, 3].map((r) => runAt("c", r, 100));
-  const slow = [1, 2, 3].map((r) => runAt("c", r, 20));
-  const noisy = [1, 2, 3].map((r, i) => runAt("c", r, [92, 104, 95][i]));
-  const perf = perfReport(runsByCell(base), runsByCell(slow));
+  const base = [1, 2, 3, 4, 5].map((r) => runAt("c", r, 100));
+  const slow = [1, 2, 3, 4, 5].map((r) => runAt("c", r, 20));
+  const noisy = [1, 2, 3, 4, 5].map((r, i) => runAt("c", r, [92, 104, 95, 99, 101][i]));
+  const perf = perfReport(runsByCell(base), runsByCell(slow), { initialRuns: 3 });
   assert.equal(perf.find((p) => p.metric === "speed").regressed, true);
   const correctness = correctnessGate(cells([["c", ok]]), cells([["c", ok]]));
   assert.deepEqual(decide({ correctness, perf }), { ok: false, reason: "performance" });
-  assert.equal(perfReport(runsByCell(base), runsByCell(noisy)).some((p) => p.regressed), false);
+  assert.equal(perfReport(runsByCell(base), runsByCell(noisy), { initialRuns: 3 }).some((p) => p.regressed), false);
+});
+
+// Review round 4: 3 runs at 80 % vs 100 % blocked as "confirmed" with no
+// confirmation run at all.
+test("round 4: a perf drop without confirmation runs is reported, never blocking", () => {
+  const runAt = (run, speed) => ({ game: "g", config: "c", run, summary: { speed, vis: 30, frameP95: 17 } });
+  const perf = perfReport(runsByCell([1, 2, 3].map((r) => runAt(r, 100))), runsByCell([1, 2, 3].map((r) => runAt(r, 80))), { initialRuns: 3 });
+  const speed = perf.find((p) => p.metric === "speed");
+  assert.equal(speed.worse, true);
+  assert.equal(speed.regressed, false);
+  assert.equal(decide({ correctness: correctnessGate(cells([["c", ok]]), cells([["c", ok]])), perf }).ok, true);
 });
 
 // Review round 3: `ab` said FAIL and `gate` on its own output said PASS.
@@ -134,10 +145,11 @@ test("round 3: a clear paired performance regression blocks, noise does not", ()
 test("round 3: `harness/run gate` on persisted results gives the persisted decision", (t) => {
   const root = mkdtempSync(path.join(os.tmpdir(), "harness-test-gate-"));
   t.after(() => rmSync(root, { recursive: true, force: true }));
+  // 3 planned runs + 2 confirmation runs, as ab persists them.
   const write = (side, speed, render) => {
-    const records = [1, 2, 3].map((run) => ({ ...record(), run, label: `g__c__r${run}`, summary: { ...record().summary, speed }, checks: { ...ok, render: { status: render } } }));
+    const records = [1, 2, 3, 4, 5].map((run) => ({ ...record(), run, label: `g__c__r${run}`, summary: { ...record().summary, speed }, checks: { ...ok, render: { status: render } } }));
     mkdirSync(path.join(root, side));
-    writeFileSync(path.join(root, side, "summary.json"), JSON.stringify({ cells: summarizeMatrix(records), results: records }));
+    writeFileSync(path.join(root, side, "summary.json"), JSON.stringify({ spec: { runs: 3 }, cells: summarizeMatrix(records), results: records }));
   };
   write("base", 100, "pass");
   write("same", 99, "pass");

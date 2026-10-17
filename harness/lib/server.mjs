@@ -39,8 +39,27 @@ function walk(root, rel, out) {
   else if (st.isFile()) out.push(rel);
 }
 
-// Content-addressed snapshot of what `root` serves.
-export async function snapshotTree(root) {
+// Apply in-memory patches to served text files (the selftest's mutants):
+// { file, find, replace } must match exactly once; { file, append } appends.
+export function applyPatches(files, patches = []) {
+  for (const p of patches) {
+    const key = `/${p.file}`;
+    const text = files.get(key)?.toString("utf8");
+    if (text == null) throw new Error(`patch target ${p.file} is not served`);
+    let next;
+    if (p.append != null) next = text + p.append;
+    else {
+      const at = text.indexOf(p.find);
+      if (at === -1 || text.indexOf(p.find, at + 1) !== -1) throw new Error(`patch for ${p.file} must match exactly once: ${JSON.stringify(p.find).slice(0, 80)}`);
+      next = text.slice(0, at) + p.replace + text.slice(at + p.find.length);
+    }
+    files.set(key, Buffer.from(next, "utf8"));
+  }
+  return files;
+}
+
+// Content-addressed snapshot of what `root` serves (after `patches`).
+export async function snapshotTree(root, { patches = [] } = {}) {
   const resolved = path.resolve(root);
   const { createPathResolver } = await import(pathToFileURL(path.join(resolved, "tools", "serve.mjs")).href);
   if (typeof createPathResolver !== "function") throw new Error(`${resolved}/tools/serve.mjs has no createPathResolver (tree too old for the harness)`);
@@ -55,10 +74,13 @@ export async function snapshotTree(root) {
     if (!real) continue;
     const bytes = readFileSync(real);
     files.set(`/${rel}`, bytes);
-    hash.update(`${rel}\0${createHash("sha256").update(bytes).digest("hex")}\n`);
+  }
+  applyPatches(files, patches);
+  for (const [key, bytes] of [...files].sort(([a], [b]) => (a < b ? -1 : 1))) {
+    hash.update(`${key.slice(1)}\0${createHash("sha256").update(bytes).digest("hex")}\n`);
   }
   if (!files.has("/index.html")) throw new Error(`${resolved} serves no index.html`);
-  return { root: resolved, files, hash: hash.digest("hex"), source: sourceInfo(resolved) };
+  return { root: resolved, files, hash: hash.digest("hex"), source: { ...sourceInfo(resolved), ...(patches.length ? { patches: patches.length } : {}) } };
 }
 
 // Where the snapshot came from, for the record only (identity is the hash).
@@ -105,8 +127,8 @@ export function snapshotHandler(snapshot) {
   };
 }
 
-export async function ensureServer({ port, root }) {
-  const snapshot = await snapshotTree(root);
+export async function ensureServer({ port, root, patches = [] }) {
+  const snapshot = await snapshotTree(root, { patches });
   const server = createServer(snapshotHandler(snapshot));
   await new Promise((resolve, reject) => {
     server.once("error", (e) =>

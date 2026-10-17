@@ -39,8 +39,8 @@ export function withTimeout(promise, ms, what) {
 }
 
 // Served in-process with an identity check: see server.mjs.
-export async function ensureServer({ port, root = REPO_ROOT }) {
-  return serveTree({ port, root });
+export async function ensureServer({ port, root = REPO_ROOT, patches = [] }) {
+  return serveTree({ port, root, patches });
 }
 
 export async function launchChrome({ profileDir, headed = true, channel = "chrome", args = [] }) {

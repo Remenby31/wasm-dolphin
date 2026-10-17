@@ -16,7 +16,7 @@ static void vtx(f32 x, f32 y, f32 z, u32 rgba) {
 	GX_Color1u32(rgba);
 }
 
-static void cube(Mtx view, f32 tx, f32 ty, f32 tz, f32 rx, f32 ry, f32 s) {
+__attribute__((unused)) static void cube(Mtx view, f32 tx, f32 ty, f32 tz, f32 rx, f32 ry, f32 s) {
 	static const u32 face_rgba[6] = {0xe04040ff, 0x40c040ff, 0x4060e0ff, 0xe0c040ff, 0xc040c0ff, 0x40c0c0ff};
 	static const s8 v[8][3] = {{-1,-1,-1},{1,-1,-1},{1,1,-1},{-1,1,-1},{-1,-1,1},{1,-1,1},{1,1,1},{-1,1,1}};
 	static const u8 f[6][4] = {{0,1,2,3},{5,4,7,6},{4,0,3,7},{1,5,6,2},{3,2,6,7},{4,5,1,0}};
@@ -43,7 +43,12 @@ static void floor_tiles(Mtx view) {
 	for (int i = 0; i < 12; i++)
 		for (int j = 0; j < 12; j++) {
 			f32 x = -12 + i * 2, z = -16 + j * 2;
+#ifdef MUTATE_COLOR
+			/* selftest mutant: one dark-tile colour off by 3 in blue */
+			u32 c = ((i + j) & 1) ? 0xd8d8d8ff : 0x305833ff;
+#else
 			u32 c = ((i + j) & 1) ? 0xd8d8d8ff : 0x305830ff;
+#endif
 			vtx(x, 0, z, c);
 			vtx(x + 2, 0, z, c);
 			vtx(x + 2, 0, z + 2, c);
@@ -121,8 +126,10 @@ int main(void) {
 		GX_SetZMode(GX_TRUE, GX_LEQUAL, GX_TRUE);
 		GX_LoadProjectionMtx(persp, GX_PERSPECTIVE);
 		floor_tiles(view);
+#ifndef MUTATE_NO_CUBES /* selftest mutant: the 3D objects are gone */
 		cube(view, -1.5f, 2.0f, -2.0f, 25, 35, 2.0f);
 		cube(view, 1.2f, 1.6f, -1.0f, -15, 60, 1.6f);
+#endif
 		GX_SetZMode(GX_FALSE, GX_ALWAYS, GX_FALSE);
 		GX_LoadProjectionMtx(ortho, GX_ORTHOGRAPHIC);
 		overlay();

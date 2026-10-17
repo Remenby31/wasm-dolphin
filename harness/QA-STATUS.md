@@ -18,7 +18,7 @@ what blocks a PR; everything else is a report.
 | 2 | Frame time p50/p95/p99/max, hitches > 2 frames/min | done | every presentation from the worker's presentation ring (`validationReadTimeline`), no sampling |
 | 2 | Presentation freeze > 500 ms while the core advances | done (report) / needs rebuild | gaps between consecutive presentations with VI outputs inside (VI timeline needs the rebuild) |
 | 3 | Audio underruns per minute, buffer level drift | partial | legacy transport `underrunCount` (verdict uses the worst run), schedule lead min/max. Worklet ring underruns not read yet |
-| 3 | Audio not silent (peak, RMS) | partial | AnalyserNode on the output gain, after unmuting with autoplay allowed. Checked when the game spec says `"audio": true`. Worklet transport untested |
+| 3 | Audio not silent (peak, RMS) | done (gate) | AnalyserNode on the output gain after unmuting (autoplay allowed); `audio` check when the game spec says `audio: true`; `tonetest` disc. Worklet transport untested |
 | 4 | Fixed frames (savestate + frame N) vs reference | needs rebuild (gate) | core-side capture at an exact VI output (`DolphinWeb_HarnessArmCapture`); same tick count required; byte-identical for the same renderer. **Hardware renderers: todo**, their picture is on the GPU, the core must tag presents with the VI output |
 | 4 | Black / white / uniform, missing geometry, squeezed picture | done on exact captures | `lib/image-diff.mjs`; wall-clock screenshots are never judged |
 | 4 | Frame-to-frame flicker | todo | needs consecutive captures of a static scene |
@@ -41,7 +41,8 @@ what blocks a PR; everything else is a report.
 | 11 | Same scene via savestate | partial | `diff --state`; matrices reach scenes through scripted `steps` |
 | 11 | Commit, full URL, Chrome version, GPU adapter | done | served snapshot hash (+ commit) per run, `url`, `env` |
 | 11 | Regression gate against main | done | `harness/run ab <spec>`: correctness regressions and INCONCLUSIF block; performance blocks only on a confirmed ≥ 15 % paired regression; `harness/run gate` recomputes the decision from the persisted results |
-| 12 | CI corpus: free homebrews only | partial | 3D + depth (`gxscene`), console, 4 pads, CPU fuzz. Missing: 2D sprites, transparency/dst-alpha, audio |
+| 12 | CI corpus: free homebrews only | partial | 3D + depth (`gxscene`), console, 4 pads, CPU fuzz, audio (`tonetest`). Missing: 2D sprites, transparency/dst-alpha |
+| – | Gate acceptance (mutation selftest) | needs rebuild | `harness/selftest/run.mjs`: 8 mutants must block, N clean runs must pass |
 
 ## P1 / P2
 

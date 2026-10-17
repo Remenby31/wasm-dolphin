@@ -117,7 +117,9 @@ Per (game, config) cell, the **correctness checks** (`lib/correctness.mjs`):
 | crash | the worker or page died, a WebAssembly compile/link/runtime error |
 | errors | any swallowed error: uncaught, unhandled rejection, `console.error`, a worker message nobody handles, an unmatched worker error reply |
 | coreFreeze | no VI output for 2 s while the run went on (from the VI timeline) |
-| render | the exact capture is blank, or differs from the reference config's capture of the same run at the same emulated frame: byte-identical required for the same renderer, otherwise `match` (no missing detail, no squeezed picture) |
+| render | the exact capture is blank, or differs from the reference config's capture of the same run at the same VI output: byte-identical required for the same renderer, otherwise `match` (no missing detail, no squeezed picture) |
+| audio | the game spec says `audio: true` and the output peak stays under 1e-3 |
+| renderVsBaseline (ab) | the candidate's capture differs from the baseline's capture of the same cell, run and VI output; catches what all configs of one commit get wrong together. Intended changes: `--accept game/config` |
 
 Each check of each run is pass, fail or **unjudged** (with the reason: no VI
 timeline in this core, capture refused for a hardware renderer, scripted
@@ -132,15 +134,27 @@ each run, and gates:
   regression; a check the candidate cannot judge while the baseline could is
   INCONCLUSIF; a vanished cell is missing; an empty comparison is INCONCLUSIF.
   All of these block. A failure both sides share is reported as known.
+- crashes are compared by signature (first line, numbers blanked): a
+  candidate crash is "known" only if the baseline crashed the same way.
 - performance: for speed, unique frames/s and frame p95, the median of the
   paired relative changes (run k of the baseline vs run k of the candidate).
   A median 15 % worse or more triggers `--confirm` more pairs (default 2) of
-  those cells; if it is still 15 % worse over all pairs, the gate fails.
-  Anything less is reported, never blocking.
+  those cells and of the reference config; it blocks only if confirmation
+  pairs exist and the median over all pairs is still 15 % worse. A drop
+  without confirmation runs is reported, never blocking.
 
 Everything the decision uses is written to `baseline/` and `candidate/`, and
 `gate.json`/`gate.md` hold it; `harness/run gate --baseline … --candidate …`
 recomputes the same decision from those directories.
+
+**Selftest** (`node harness/selftest/run.mjs [--only id,…] [--clean N]`): the
+gate's acceptance test. Eight known regressions are applied to the candidate
+side only, as in-memory patches of the served app or mutant homebrew discs
+(geometry removed, one colour off by 3/255, JIT crash, gamepads cut from
+port 1, core stopped 3 s, a swallowed worker message, output muted, emulation
+at 70 %); the gate must block each. Then N clean runs of this tree against
+itself; the gate must pass each. It writes `selftest.md` with the table.
+Ports 2-4 do not work on main yet, so the port mutant cuts port 1.
 
 The **performance report** per cell (median ± stdev and IQR across runs):
 emulated speed per second from the VI timeline (median, p5, min, dated dips
@@ -227,6 +241,8 @@ is identical across rebuilds.
 | `gxscene` | static depth-tested 3D scene (floor + 2 cubes) under a 2D overlay, for backend diffs |
 | `cpufuzz` | 384 random PowerPC programs (integer, rotates, XER/CR, branches, CTR loops, loads/stores, FP) run every frame, self-checked against frame 0 |
 | `cpufuzz-nomcrf` | the same without `mcrf`, which currently crashes the JIT, so the fuzz can go further |
+| `tonetest` | a continuous 440 Hz tone through the audio DMA, for the audio check |
+| `gxscene-nocubes`, `gxscene-color` | selftest mutants of `gxscene` (`-DMUTATE_NO_CUBES`, `-DMUTATE_COLOR`) |
 
 Homebrews draw their results as **marker rows** in the XFB
 (`homebrew/common/marker.h`, decoded by `lib/markers.mjs`): four rows of 32

@@ -12,7 +12,7 @@
 // clear, confirmed regression: the median of the paired (same run index,
 // alternated) relative changes is worse by PERF_REGRESSION or more, and still
 // is after the confirmation pairs.
-import { CHECKS } from "./correctness.mjs";
+import { CHECKS, crashSignature } from "./correctness.mjs";
 import { median } from "./stats.mjs";
 
 export const PERF_REGRESSION = 0.15;
@@ -31,7 +31,11 @@ export function correctnessGate(baselineCells, candidateCells) {
       const bs = b?.checks?.[check]?.status ?? null;
       const cs = cand.checks?.[check]?.status ?? "unjudged";
       let status;
-      if (cs === "fail") status = bs === "fail" ? "known-failure" : "regressed";
+      // A failure is "known" only if the baseline failed the same way: a new
+      // crash signature where the baseline crashed differently, or could not
+      // be judged, is a regression.
+      const same = check !== "crash" || b?.checks?.crash?.detail === cand.checks?.crash?.detail;
+      if (cs === "fail") status = bs === "fail" && same ? "known-failure" : "regressed";
       else if (cs === "unjudged") status = bs === "unjudged" ? "not-covered" : "inconclusive";
       else status = bs === "fail" ? "fixed" : "ok";
       rows.push({ game: cand.game, config: cand.config, check, baseline: bs, candidate: cs, status, detail: cand.checks?.[check]?.detail ?? null });
@@ -46,10 +50,13 @@ export function correctnessGate(baselineCells, candidateCells) {
 // that produced no result at all is inconclusive.
 export function findingsGate(name, baselineFindings, candidateFindings) {
   if (!candidateFindings) return summarize([{ game: name, config: "-", check: name, baseline: "ran", candidate: null, status: "inconclusive" }]);
-  const known = new Set((baselineFindings ?? []).map((f) => `${f.iso ?? ""}:${f.kind}`));
+  // Crash findings are keyed by their signature too, so a different crash is
+  // never "known".
+  const keyOf = (f) => `${f.iso ?? ""}:${f.kind}${/crash/.test(f.kind) ? `:${crashSignature(f.error)}` : ""}`;
+  const known = new Set((baselineFindings ?? []).map(keyOf));
   const rows = candidateFindings.map((f) => ({
     game: f.iso ?? name, config: "-", check: `${name}:${f.kind}`, baseline: null, candidate: "fail",
-    status: known.has(`${f.iso ?? ""}:${f.kind}`) ? "known-failure" : "regressed", detail: f.error ?? f.rows ?? null
+    status: known.has(keyOf(f)) ? "known-failure" : "regressed", detail: f.error ?? f.rows ?? null
   }));
   return summarize(rows.length ? rows : [{ game: name, config: "-", check: name, baseline: null, candidate: "pass", status: "ok" }]);
 }
@@ -62,6 +69,19 @@ function summarize(rows) {
     rows,
     blocking
   };
+}
+
+// Rows from renderVsBaseline (render-check.mjs) on the candidate records.
+export function crossCommitGate(candRecords) {
+  const rows = candRecords.map((r) => {
+    const st = r.renderVsBaseline?.status ?? "unjudged";
+    return {
+      game: r.game, config: r.config, check: `renderVsBaseline r${r.run}`, baseline: "capture", candidate: st,
+      status: st === "fail" ? "regressed" : st === "pass" ? "ok" : st === "not-covered" ? "not-covered" : "inconclusive",
+      detail: r.renderVsBaseline?.detail ?? null
+    };
+  });
+  return summarize(rows);
 }
 
 export function mergeGates(...gates) {
@@ -83,15 +103,20 @@ export function pairedChange(baseRuns, candRuns, metric) {
   return { pairs: changes.length, median: median(changes) };
 }
 
-// runsByCell: Map("game\0config" → runs). One row per cell and metric.
-export function perfReport(baseRunsByCell, candRunsByCell) {
+// runsByCell: Map("game\0config" → runs). One row per cell and metric. A
+// regression only counts as confirmed when confirmation pairs (run index
+// above `initialRuns`) exist and the median over all pairs is still worse
+// by PERF_REGRESSION: three noisy runs alone never block.
+export function perfReport(baseRunsByCell, candRunsByCell, { initialRuns = Infinity } = {}) {
   const rows = [];
   for (const [k, candRuns] of candRunsByCell) {
     const baseRuns = baseRunsByCell.get(k) ?? [];
     const [game, config] = k.split("\u0000");
+    const confirmations = candRuns.filter((r) => r.run > initialRuns && baseRuns.some((b) => b.run === r.run)).length;
     for (const metric of Object.keys(PERF_METRICS)) {
       const ch = pairedChange(baseRuns, candRuns, metric);
-      rows.push({ game, config, metric, ...ch, regressed: ch.pairs > 0 && ch.median <= -PERF_REGRESSION });
+      const worse = ch.pairs > 0 && ch.median <= -PERF_REGRESSION;
+      rows.push({ game, config, metric, ...ch, confirmations, worse, regressed: worse && confirmations > 0 });
     }
   }
   return rows;
@@ -121,7 +146,7 @@ export function gateMarkdown({ correctness, perf = [] }) {
   for (const r of correctness.rows) if (r.status !== "ok") lines.push(`| ${r.game} | ${r.config} | ${r.check} | ${r.baseline ?? "–"} | ${r.candidate ?? "–"} | ${r.status} |`);
   lines.push("", `${correctness.rows.filter((r) => r.status === "ok").length} check(s) ok.`, "");
   lines.push("## Performance (paired; blocks only a confirmed ≥ 15 % regression)", "", "| Game | Config | Metric | Pairs | Median change | Regressed |", "|---|---|---|---|---|---|");
-  for (const r of perf) lines.push(`| ${r.game} | ${r.config} | ${r.metric} | ${r.pairs} | ${r.median == null ? "–" : `${Math.round(r.median * 1000) / 10} %`} | ${r.regressed ? "yes" : "no"} |`);
+  for (const r of perf) lines.push(`| ${r.game} | ${r.config} | ${r.metric} | ${r.pairs} (${r.confirmations ?? 0} confirmation) | ${r.median == null ? "–" : `${Math.round(r.median * 1000) / 10} %`} | ${r.regressed ? "yes, confirmed" : r.worse ? "worse, not confirmed" : "no"} |`);
   const d = decide({ correctness, perf });
   const text = d.ok
     ? "Gate: PASS."

@@ -6,6 +6,7 @@ import { randomBytes } from "node:crypto";
 import { existsSync, mkdirSync, mkdtempSync, readdirSync, readFileSync, rmSync, statSync, writeFileSync } from "node:fs";
 import os from "node:os";
 import path from "node:path";
+import { pathToFileURL } from "node:url";
 import { parseArgs } from "node:util";
 import { ensureServer, pageCall, readCoreProgress, readFrameInfo, REPO_ROOT } from "./lib/browser.mjs";
 import { analyzeDifferential, INTERP_QUERY, JIT_QUERY } from "./lib/fuzz.mjs";
@@ -15,8 +16,8 @@ import { decodePadRow, decodeRows, hex } from "./lib/markers.mjs";
 import { captureSourceOk, captureSupported, confirmationItems, expandEnv, expandMatrix, forCrossRenderer, matrixMarkdown, PRESETS, resolveQuery, runFlags, summarizeMatrix, summarizeRun } from "./lib/matrix.mjs";
 import { runChecks } from "./lib/correctness.mjs";
 import { browserInfo, isOverloaded, waitForLoad } from "./lib/env.mjs";
-import { correctnessGate, decide, findingsGate, gateMarkdown, mergeGates, perfReport, runsByCell } from "./lib/gate.mjs";
-import { renderChecks } from "./lib/render-check.mjs";
+import { correctnessGate, crossCommitGate, decide, findingsGate, gateMarkdown, mergeGates, perfReport, runsByCell } from "./lib/gate.mjs";
+import { renderChecks, renderVsBaseline } from "./lib/render-check.mjs";
 import { IDENTITY_FILE } from "./lib/server.mjs";
 import { mergeTimeline } from "./lib/timeline.mjs";
 import { decodePng } from "./lib/png.mjs";
@@ -96,8 +97,10 @@ function configFromArg(arg) {
   return PRESETS[arg] ? { id: arg, preset: arg } : { id: "custom", query: arg };
 }
 
-async function withServer(values, fn, root = REPO_ROOT) {
-  const server = await ensureServer({ port: Number(values.port), root });
+// `tree`: a checkout root, or { root, patches } (patched in memory).
+async function withServer(values, fn, tree = REPO_ROOT) {
+  const { root, patches = [] } = typeof tree === "string" ? { root: tree } : tree;
+  const server = await ensureServer({ port: Number(values.port), root, patches });
   try {
     return await fn(server);
   } finally {
@@ -125,7 +128,9 @@ async function measureOne(server, values, { iso, query, label, warmup, secs, sho
     const audio = game.audio === false ? { attached: false, reason: "disabled in spec" } : await attachAudio(session);
     await waitSeconds(session, warmup);
     const env = await browserInfo(session.page).catch((e) => ({ error: e.message }));
-    await monitorSnapshot(session, true);
+    // Errors are never reset: startup and warmup errors count like the
+    // others. The measured window start is recorded to classify them.
+    const measureStartedAt = await session.page.evaluate(() => performance.now()).catch(() => null);
     const chunks = [];
     const start = await readTimeline(session.page); // discards the warmup
     const { samples, cpu, shots } = await sample(session, {
@@ -154,6 +159,7 @@ async function measureOne(server, values, { iso, query, label, warmup, secs, sho
       machineAfter: machineSnapshot(),
       audio,
       monitor: monitor && { errors: monitor.errors, transport: monitor.transport, audio: monitor.audio, audioTelemetry: monitor.audioTelemetry },
+      measureStartedAt,
       summary: summarizeRun({
         samples, cpu, timeline, windowEnd: chunks.at(-1)?.now ?? null,
         ticksPerSecond: progress?.coreTicksPerSecond,
@@ -165,6 +171,7 @@ async function measureOne(server, values, { iso, query, label, warmup, secs, sho
       crashed: fatal.length > 0,
       errors: fatal,
       overloaded: !loadGate.ok || isOverloaded(cpu, Number(spec.maxLoad)),
+      audioRequired: game.audio === true,
       capture,
       finalShot,
       screenshots: [...shots, finalShot],
@@ -209,16 +216,19 @@ function brief(r) {
 // has the rest.
 const slimRecord = (item, r) => ({
   game: item.game.id, config: item.config.id, run: item.run, label: r.label, url: r.url, served: r.served,
-  summary: r.summary, crashed: r.crashed, errors: r.errors, overloaded: r.overloaded, capture: r.capture
+  summary: r.summary, crashed: r.crashed, errors: r.errors, overloaded: r.overloaded, capture: r.capture,
+  audioRequired: item.game.audio === true
 });
 
-export async function runPlan(plan, { values, spec, dir, specDir, root = REPO_ROOT, log = console.log }) {
+// `tree`: { root, patches, discs } — discs maps a game's iso path to the one
+// this side uses (the selftest's mutant discs).
+export async function runPlan(plan, { values, spec, dir, specDir, tree = { root: REPO_ROOT }, log = console.log }) {
   const records = [];
   for (const item of plan) {
-    const server = await ensureServer({ port: Number(values.port), root });
+    const server = await ensureServer({ port: Number(values.port), root: tree.root, patches: tree.patches ?? [] });
     try {
       const r = await measureOne(server, values, {
-        iso: path.resolve(REPO_ROOT, item.game.iso),
+        iso: path.resolve(REPO_ROOT, tree.discs?.[item.game.iso] ?? item.game.iso),
         query: item.query,
         label: item.label,
         warmup: Number(spec.warmupSec ?? 15),
@@ -411,11 +421,11 @@ const symbolsFor = (iso) => {
   return existsSync(file) ? JSON.parse(readFileSync(file, "utf8")) : null;
 };
 
-async function runFuzz(server, values, { isos, dir, frame = 1700, interp = INTERP_QUERY, jit = JIT_QUERY }) {
+async function runFuzz(server, values, { isos, names = null, dir, frame = 1700, interp = INTERP_QUERY, jit = JIT_QUERY }) {
   for (const iso of isos) if (!existsSync(iso)) throw new Error(`${iso} missing: run harness/run build-iso first`);
   const report = { machine: machineSnapshot(), served: server.identity, frame, interpQuery: interp, jitQuery: jit, results: [] };
-  for (const iso of isos) {
-    const name = path.basename(iso).replace(/\.\w+$/, "");
+  for (const [i, iso] of isos.entries()) {
+    const name = names?.[i] ?? path.basename(iso).replace(/\.\w+$/, "");
     const a = await observe(server, values, iso, interp, dir, `${name}-interp`, frame);
     const b = await observe(server, values, iso, jit, dir, `${name}-jit`, frame);
     const verdict = analyzeDifferential({ interp: a, jit: b, symbols: symbolsFor(iso) });
@@ -507,12 +517,15 @@ async function runPads(server, values, { iso, query, dir }) {
 
 // pads report → findings, for the gate.
 export function padFindings(report) {
-  if (report.error) return [{ kind: "unjudged", error: report.error }];
+  // A crash is reported as a crash (with its signature), never hidden behind
+  // "could not be judged".
+  const crash = report.fatal?.length ? [{ kind: "crash", error: report.fatal.find((e) => e.text !== "ErrorEvent")?.text ?? report.fatal[0].text }] : [];
+  if (report.error) return crash.length ? crash : [{ kind: "unjudged", error: report.error }];
   return [
     ...report.ports.filter((p) => !p.ok).map((p) => ({ kind: `port-${p.port}`, error: `expected [${p.expected}] got [${p.got}]` })),
     ...(report.released ? [] : [{ kind: "release" }]),
     ...(report.keyboardP1A ? [] : [{ kind: "keyboard-p1" }]),
-    ...(report.fatal?.length ? [{ kind: "crash", error: report.fatal[0].text }] : [])
+    ...crash
   ];
 }
 
@@ -572,7 +585,7 @@ function loadRunFiles(dir) {
       return {
         game, config, run: Number(run?.slice(1)), label: r.label, url: r.url, served: r.served,
         summary: summarizeRun({ samples: r.samples, cpu: r.cpu, monitor, timeline: r.timeline, ticksPerSecond: r.ticksPerSecond, windowEnd: r.windowEnd }),
-        crashed: r.crashed, errors: r.errors, overloaded: r.overloaded ?? false, capture: r.capture
+        crashed: r.crashed, errors: r.errors, overloaded: r.overloaded ?? false, capture: r.capture, audioRequired: r.audioRequired ?? false
       };
     });
 }
@@ -603,50 +616,43 @@ function exportRef(ref) {
 
 // The gate, from persisted results only, so `harness/run gate` on the same
 // directories always decides what `ab` decided.
-function gateFromDirs(baseDir, candDir) {
+function gateFromDirs(baseDir, candDir, { accept = [] } = {}) {
   const read = (d) => JSON.parse(readFileSync(path.join(d, "summary.json"), "utf8"));
   const optional = (d, f) => (existsSync(path.join(d, f)) ? JSON.parse(readFileSync(path.join(d, f), "utf8")) : null);
   const base = read(baseDir), cand = read(candDir);
-  const gates = [correctnessGate(base.cells, cand.cells)];
+  const gates = [correctnessGate(base.cells, cand.cells), crossCommitGate(renderVsBaseline(base.results, cand.results, { accept }))];
   for (const [name, file, pick] of [["fuzz", "fuzz.json", (r) => r.results.flatMap((x) => x.findings.map((f) => ({ ...f, iso: x.iso })))], ["pads", "pads.json", (r) => padFindings(r)]]) {
     const b = optional(baseDir, file), c = optional(candDir, file);
     if (b || c) gates.push(findingsGate(name, b ? pick(b) : [], c ? pick(c) : null));
   }
   const correctness = mergeGates(...gates);
-  const perf = perfReport(runsByCell(base.results), runsByCell(cand.results));
+  const perf = perfReport(runsByCell(base.results), runsByCell(cand.results), { initialRuns: Number(cand.spec?.runs ?? base.spec?.runs ?? 3) });
   return { correctness, perf, decision: decide({ correctness, perf }) };
 }
 
 function cmdGate(argv) {
-  const { values } = parse(argv, { baseline: { type: "string" }, candidate: { type: "string" } });
-  if (!values.baseline || !values.candidate) throw new Error("usage: harness/run gate --baseline <dir> --candidate <dir>");
-  const g = gateFromDirs(values.baseline, values.candidate);
+  const { values } = parse(argv, { baseline: { type: "string" }, candidate: { type: "string" }, accept: { type: "string", multiple: true, default: [] } });
+  if (!values.baseline || !values.candidate) throw new Error("usage: harness/run gate --baseline <dir> --candidate <dir> [--accept game/config …]");
+  const g = gateFromDirs(values.baseline, values.candidate, { accept: values.accept });
   console.log(gateMarkdown(g));
   return g.decision.ok ? 0 : 1;
 }
 
-// Baseline (a git ref, default origin/main) vs this tree: the spec's matrix,
-// plus fuzz and pads if the spec asks, A/B alternated run by run. Cells
-// whose performance regressed are replayed (`--confirm` more pairs, both
-// sides) before the gate decides; everything the decision uses is written
-// to baseline/ and candidate/ so `harness/run gate` reproduces it.
-async function cmdAb(argv) {
-  const { values, positionals } = parse(argv, { runs: { type: "string" }, "max-load": { type: "string" }, confirm: { type: "string", default: "2" }, "baseline-ref": { type: "string", default: "origin/main" } });
-  if (!positionals[0]) throw new Error("usage: harness/run ab <spec.json> [--baseline-ref origin/main] [--runs N] [--max-load L] [--confirm N]");
-  const spec = readSpec(positionals[0], values);
+// A/B of two trees on one spec: the matrix A/B alternated run by run, plus
+// the spec's fuzz discs and pads on both sides, everything persisted to
+// <dir>/baseline and <dir>/candidate. Cells whose performance got worse by
+// the threshold are replayed (both sides and the reference config, `confirm`
+// more pairs) before the gate decides. Returns the gate (also gate.json).
+export async function abCompare({ spec, specDir, values, dir, baseline, candidate, accept = [] }) {
   const plan = expandMatrix(spec);
-  const specDir = path.dirname(path.resolve(positionals[0]));
-  const dir = outDir(values, `ab-${spec.name ?? "matrix"}`, { private: spec.games.some((g) => g.localOnly) });
-  const baseRoot = exportRef(values["baseline-ref"]);
-  const sides = { baseline: { root: baseRoot, records: [] }, candidate: { root: REPO_ROOT, records: [] } };
+  const sides = { baseline: { tree: baseline, records: [] }, candidate: { tree: candidate, records: [] } };
   for (const side of Object.keys(sides)) mkdirSync(path.join(dir, side));
-  console.log(`[harness] A/B ${values["baseline-ref"]} vs working tree, ${plan.length} runs each → ${dir}`);
   const play = async (items) => {
     for (const item of items) {
       // Alternate which side goes first so slow drift does not favour one.
       const order = item.run % 2 ? ["baseline", "candidate"] : ["candidate", "baseline"];
       for (const side of order) {
-        const [r] = await runPlan([item], { values, spec, dir: path.join(dir, side), specDir, root: sides[side].root, log: (m) => console.log(m.replace("[harness]", `[${side}]`)) });
+        const [r] = await runPlan([item], { values, spec, dir: path.join(dir, side), specDir, tree: sides[side].tree, log: (m) => console.log(m.replace("[harness]", `[${side}]`)) });
         sides[side].records.push(r);
       }
     }
@@ -654,27 +660,39 @@ async function cmdAb(argv) {
   const persist = () => {
     for (const [side, { records }] of Object.entries(sides)) writeSummary(path.join(dir, side), { spec, records: finishRecords(records, spec), title: `${spec.name ?? "matrix"} (${side})` });
   };
-  try {
-    await play(plan);
-    for (const [side, { root }] of Object.entries(sides)) {
-      const sideValues = { ...values };
-      if (spec.fuzz?.length) await withServer(sideValues, (server) => runFuzz(server, sideValues, { isos: spec.fuzz.map((f) => path.resolve(REPO_ROOT, f)), dir: path.join(dir, side) }), root);
-      if (spec.pads) await withServer(sideValues, (server) => runPads(server, sideValues, { iso: path.join(HOMEBREW_OUT, "padtest.iso"), query: PADS_QUERY, dir: path.join(dir, side) }), root);
-    }
+  await play(plan);
+  for (const [side, { tree }] of Object.entries(sides)) {
+    const disc = (p) => path.resolve(REPO_ROOT, tree.discs?.[p] ?? p);
+    if (spec.fuzz?.length) await withServer(values, (server) => runFuzz(server, values, { isos: spec.fuzz.map(disc), names: spec.fuzz.map((f) => path.basename(f).replace(/\.\w+$/, "")), dir: path.join(dir, side) }), tree);
+    if (spec.pads) await withServer(values, (server) => runPads(server, values, { iso: disc("harness/homebrew/out/padtest.iso"), query: PADS_QUERY, dir: path.join(dir, side) }), tree);
+  }
+  persist();
+  let g = gateFromDirs(path.join(dir, "baseline"), path.join(dir, "candidate"), { accept });
+  const flagged = g.perf.filter((r) => r.worse);
+  if (flagged.length && Number(values.confirm ?? 2) > 0) {
+    const extra = confirmationItems(plan, flagged, { rounds: Number(values.confirm ?? 2), reference: spec.reference });
+    console.log(`[harness] performance worse in ${new Set(flagged.map((r) => `${r.game}/${r.config}`)).size} cell(s), confirming with ${extra.length} more A/B pairs`);
+    await play(extra);
     persist();
-    let g = gateFromDirs(path.join(dir, "baseline"), path.join(dir, "candidate"));
-    const flagged = g.perf.filter((r) => r.regressed);
-    if (flagged.length && Number(values.confirm) > 0) {
-      const extra = confirmationItems(plan, flagged, { rounds: Number(values.confirm) });
-      console.log(`[harness] performance regression in ${new Set(flagged.map((r) => `${r.game}/${r.config}`)).size} cell(s), confirming with ${extra.length} more A/B pairs`);
-      await play(extra);
-      persist();
-      g = gateFromDirs(path.join(dir, "baseline"), path.join(dir, "candidate"));
-    }
-    writeJson(path.join(dir, "gate.json"), { baselineRef: values["baseline-ref"], ...g });
-    const md = gateMarkdown(g);
-    writeFileSync(path.join(dir, "gate.md"), md + "\n");
-    console.log(md);
+    g = gateFromDirs(path.join(dir, "baseline"), path.join(dir, "candidate"), { accept });
+  }
+  writeJson(path.join(dir, "gate.json"), g);
+  writeFileSync(path.join(dir, "gate.md"), gateMarkdown(g) + "\n");
+  return g;
+}
+
+// Baseline (a git ref, default origin/main) vs this tree. `harness/run gate`
+// on the two result directories reproduces the decision.
+async function cmdAb(argv) {
+  const { values, positionals } = parse(argv, { runs: { type: "string" }, "max-load": { type: "string" }, confirm: { type: "string", default: "2" }, "baseline-ref": { type: "string", default: "origin/main" }, accept: { type: "string", multiple: true, default: [] } });
+  if (!positionals[0]) throw new Error("usage: harness/run ab <spec.json> [--baseline-ref origin/main] [--runs N] [--max-load L] [--confirm N] [--accept game/config …]");
+  const spec = readSpec(positionals[0], values);
+  const dir = outDir(values, `ab-${spec.name ?? "matrix"}`, { private: spec.games.some((g) => g.localOnly) });
+  const baseRoot = exportRef(values["baseline-ref"]);
+  console.log(`[harness] A/B ${values["baseline-ref"]} vs working tree → ${dir}`);
+  try {
+    const g = await abCompare({ spec, specDir: path.dirname(path.resolve(positionals[0])), values, dir, baseline: { root: baseRoot }, candidate: { root: REPO_ROOT }, accept: values.accept });
+    console.log(gateMarkdown(g));
     return g.decision.ok ? 0 : 1;
   } finally {
     rmSync(baseRoot, { recursive: true, force: true });
@@ -722,14 +740,19 @@ function cmdBuildIso() {
 
 const COMMANDS = { matrix: cmdMatrix, measure: cmdMeasure, diff: cmdDiff, fuzz: cmdFuzz, pads: cmdPads, savestate: cmdSavestate, report: cmdReport, gate: cmdGate, ab: cmdAb, clean: cmdClean, "build-iso": cmdBuildIso };
 
-const [command, ...rest] = process.argv.slice(2);
-if (!COMMANDS[command]) {
-  console.error(`usage: harness/run <${Object.keys(COMMANDS).join("|")}> [options]  (see harness/README.md)`);
-  process.exit(2);
+async function main() {
+  const [command, ...rest] = process.argv.slice(2);
+  if (!COMMANDS[command]) {
+    console.error(`usage: harness/run <${Object.keys(COMMANDS).join("|")}> [options]  (see harness/README.md)`);
+    process.exit(2);
+  }
+  try {
+    process.exitCode = await COMMANDS[command](rest);
+  } catch (error) {
+    console.error(`[harness] ${error.stack || error.message}`);
+    process.exitCode = 2;
+  }
 }
-try {
-  process.exitCode = await COMMANDS[command](rest);
-} catch (error) {
-  console.error(`[harness] ${error.stack || error.message}`);
-  process.exitCode = 2;
-}
+
+// Importable (the selftest uses abCompare) without running a command.
+if (import.meta.url === pathToFileURL(process.argv[1] ?? "").href) await main();

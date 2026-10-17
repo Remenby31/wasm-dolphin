@@ -12,15 +12,26 @@ export const HITCH_MS = 1000 / 60 * 2; // more than 2 frames at 60 Hz
 
 // Concatenate drained chunks; `lost` > 0 means a ring overflowed between
 // two reads and the window is not complete.
+// A chunk that could not be read makes the timeline incomplete: a missing
+// final read would otherwise hide a core that stopped at the end.
 export function mergeTimeline(chunks) {
-  const out = { presents: [], vi: [], lost: { presents: 0, vi: 0 }, viSupported: true };
+  const out = { presents: [], vi: [], lost: { presents: 0, vi: 0 }, viSupported: true, viWhy: null, failedReads: 0, complete: true };
+  if (!chunks.length) out.complete = false;
   for (const c of chunks) {
-    if (!c || c.error) continue;
+    if (!c || c.error) { out.failedReads += 1; out.complete = false; continue; }
     c.presents.t.forEach((t, i) => out.presents.push({ t, vi: c.presents.vi[i] }));
     out.lost.presents += c.presents.lost ?? 0;
-    if (!c.vi?.supported) out.viSupported = false;
+    if (!c.vi?.supported) { out.viSupported = false; out.viWhy = c.vi?.why ?? out.viWhy; }
     c.vi?.t?.forEach((t, i) => out.vi.push({ t, ticks: c.vi.ticks[i], sinceBoot: c.vi.sinceBoot[i], sinceLoad: c.vi.sinceLoad[i] }));
     out.lost.vi += c.vi?.lost ?? 0;
+  }
+  if (out.lost.presents || out.lost.vi) out.complete = false;
+  // Both rings must be on one clock (timeOrigin + now). Presentations and VI
+  // outputs of one run cannot be minutes apart; if they are, the timeline is
+  // unusable rather than silently wrong.
+  if (out.presents.length && out.vi.length) {
+    const p = out.presents[out.presents.length >> 1].t, v = out.vi[out.vi.length >> 1].t;
+    if (Math.abs(p - v) > 60000) { out.complete = false; out.clockMismatch = Math.round(p - v); }
   }
   return out;
 }
