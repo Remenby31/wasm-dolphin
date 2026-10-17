@@ -121,8 +121,11 @@ export function stampBuildTree(buildDir, identity) {
 export function prepareDockerContext() {
   const context = join(root, "build/docker-context");
   rmSync(context, { recursive: true, force: true });
+  // Only the files the image installs from, so the tag covers the whole context.
   for (const path of [
-    "tools/toolchain",
+    "tools/toolchain/Dockerfile",
+    "tools/toolchain/bootstrap.sh",
+    "tools/toolchain/requirements.txt",
     "tools/naga-spirv-wgsl/Cargo.toml",
     "tools/naga-spirv-wgsl/Cargo.lock"
   ]) {
