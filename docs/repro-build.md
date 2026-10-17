@@ -141,7 +141,22 @@ unconfirmed; it should be re-measured on a quiet machine.
 
 ### Build times
 
-TIMES_PLACEHOLDER
+Measured on the shared Apple M4 Pro (14 cores), `--jobs 10`, load average in
+parentheses. Docker Desktop VM: 14 CPUs, 29 GB.
+
+| Run | Total | Detail |
+| --- | ---: | --- |
+| macOS, clean (toolchain present, sources fetched) (80 to 107) | 1,205 s | sync 117 s, configure 610 s, compile and link 471 s |
+| Docker linux/arm64, clean (25) | 534 s | configure 134 s, compile and link 392 s |
+| Docker toolchain image, first build | 714 s | once per toolchain change; content-addressed tag |
+| macOS, nothing changed, `--no-sync` (19) | 7.5 s | |
+| macOS, one `.cpp` changed (shim or Dolphin), `--no-sync` (13 to 19) | 80 s | 75 s is the LTO link |
+| macOS, Naga rebuilt, with sync (22) | 154 s | sync 37 s, configure 37 s, link 78 s |
+
+Rebuilding after touching a source without changing it produces the same
+`.wasm` hash. For C++ work, edit `vendor/dolphin` or `core/upstream`, iterate
+with `--no-sync`, then regenerate the patch and lock (`npm run update:provenance`)
+and run once without `--no-sync`.
 
 ### Sharing one toolchain and one Dolphin tree between worktrees
 
