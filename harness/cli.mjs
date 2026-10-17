@@ -365,6 +365,30 @@ async function cmdSavestate(argv) {
   });
 }
 
+// ---------------------------------------------------------------- report
+// Rebuild summary.json/summary.md from the per-run JSON files of a result dir.
+function cmdReport(argv) {
+  const { positionals } = parse(argv, {});
+  const dir = positionals[0];
+  if (!dir) throw new Error("usage: harness/run report <result-dir>");
+  const old = existsSync(path.join(dir, "summary.json")) ? JSON.parse(readFileSync(path.join(dir, "summary.json"), "utf8")) : {};
+  const results = readdirSync(dir)
+    .filter((f) => f.endsWith(".json") && f !== "summary.json" && f !== "spec.json")
+    .map((f) => JSON.parse(readFileSync(path.join(dir, f), "utf8")))
+    .filter((r) => r.samples && r.label)
+    .map((r) => {
+      const [game, config, run] = r.label.split("__");
+      return { game, config, run: Number(run?.slice(1)), url: r.url, summary: summarizeRun(r.samples, r.cpu), crashed: r.crashed, errors: r.errors };
+    });
+  const cells = summarizeMatrix(results);
+  const machine = old.machine ?? results[0]?.machineBefore;
+  writeJson(path.join(dir, "summary.json"), { ...old, cells, results });
+  const md = matrixMarkdown(cells, { title: old.spec?.name ?? path.basename(dir), machine: machine ? `${machine.cpuModel}, ${machine.cpus} CPUs, ${machine.platform}; ${machine.uptime}` : undefined });
+  writeFileSync(path.join(dir, "summary.md"), md + "\n");
+  console.log(md);
+  return 0;
+}
+
 // ---------------------------------------------------------------- clean
 function cmdClean(argv) {
   const { values } = parse(argv, { keep: { type: "string", default: "0" }, all: { type: "boolean", default: false } });
@@ -397,7 +421,7 @@ function cmdBuildIso() {
   return 0;
 }
 
-const COMMANDS = { matrix: cmdMatrix, measure: cmdMeasure, diff: cmdDiff, fuzz: cmdFuzz, pads: cmdPads, savestate: cmdSavestate, clean: cmdClean, "build-iso": cmdBuildIso };
+const COMMANDS = { matrix: cmdMatrix, measure: cmdMeasure, diff: cmdDiff, fuzz: cmdFuzz, pads: cmdPads, savestate: cmdSavestate, report: cmdReport, clean: cmdClean, "build-iso": cmdBuildIso };
 
 const [command, ...rest] = process.argv.slice(2);
 if (!COMMANDS[command]) {
