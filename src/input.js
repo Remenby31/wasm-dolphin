@@ -148,6 +148,11 @@ export function buttonMaskFromPressed(pressed) {
 // screen and up-button stuck pressed at rest — both fixed by raising the
 // digital threshold past typical Xbox drift.
 const DEFAULT_GAMEPAD_ANALOG_DEADZONE = 0.18;
+
+// Full-tilt stick deflection in pad-byte steps from the 0x80 centre. Not 0x7f
+// on purpose: genuine controllers stop at their gate near 100 (main) and 92
+// (C-stick); Dolphin's measured gate radii are 0.794 and 0.722 of 127.
+const STICK_FULL_TILT = 0x60;
 const DEFAULT_GAMEPAD_DIGITAL_DEADZONE = 0.55;
 
 export function selectPreferredGamepad(gamepads) {
@@ -298,7 +303,7 @@ function applyDigitalAxis(state, pressed, negativeButton, positiveButton, field)
     return;
   }
 
-  state[field] = positive ? 0xe0 : 0x20;
+  state[field] = 0x80 + (positive ? STICK_FULL_TILT : -STICK_FULL_TILT);
 }
 
 function axisToPadByte(axis, invert, deadzone) {
@@ -313,7 +318,7 @@ function axisToPadByte(axis, invert, deadzone) {
   if (mag < deadzone) return clampByte(0x80);
   const scaled = ((mag - deadzone) / (1 - deadzone)) * Math.sign(axis);
   const oriented = invert ? -scaled : scaled;
-  return clampByte(Math.round(0x80 + oriented * 0x60));
+  return clampByte(Math.round(0x80 + oriented * STICK_FULL_TILT));
 }
 
 function unitToByte(value) {
