@@ -1,4 +1,4 @@
-import { lookupGameProfile, readGameId } from "./game-profiles.js";
+import { detectAdapterFamily, readGameId, resolveRendererProfile } from "./game-profiles.js";
 import { AudioController } from "./audio.js";
 import { EmulatorHost } from "./core-host.js";
 import { startMainThreadProfiler } from "./main-profiler.js";
@@ -839,9 +839,15 @@ function updateScreenHud(info) {
 // because by the time the core can report it the backend is already fixed --
 // changing it then would mean a restart, and the file selection is gone.
 //
+// A hardware verdict holds only for the GPU family it was checked on, so the
+// adapter is identified first; elsewhere the game gets software.
+//
 // Only applies when the user has not chosen a renderer explicitly, either by
 // URL flag or in the settings panel. A measured default is a good guess, not a
 // reason to override someone who has already decided.
+//
+// The status line names neither the disc nor the measurement behind the
+// choice: it says which path was picked and why, in generic terms.
 async function applyGameProfile(file) {
   if (!elements.autoProfile?.checked) return;
   if (new URLSearchParams(window.location.search).has("video")) return;
@@ -851,11 +857,15 @@ async function applyGameProfile(file) {
   } catch {
     return;  // unreadable header is not a reason to fail the mount
   }
-  const profile = lookupGameProfile(gameId);
+  if (!gameId) return;
+  const family = await detectAdapterFamily(navigator.gpu, host.wgpuPowerPreference);
+  const profile = resolveRendererProfile(gameId, family);
   if (!profile) return;
   const backend = profile.renderer === "hardware" ? "WebGPU-Real" : "Software Renderer";
   if (host.applyVideoBackend(backend)) {
-    setStatus(`${gameId}: ${profile.renderer} renderer (${profile.why})`);
+    setStatus(profile.validated
+      ? `Auto per-game: ${profile.renderer} renderer`
+      : "Auto per-game: software renderer (hardware not validated on this GPU)");
   }
 }
 
