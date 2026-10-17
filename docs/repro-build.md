@@ -4,6 +4,161 @@ The repository fetches upstream Dolphin into the gitignored `vendor/dolphin/`
 tree, verifies and applies the browser patch snapshot, configures an
 Emscripten/Ninja build, and writes the browser core into `cores/dolphin/`.
 
+## macOS, Linux and Docker: one command
+
+```sh
+npm run build:core:repro                      # native macOS (Apple Silicon) or Linux
+npm run build:core:repro -- --docker          # same build in tools/toolchain/Dockerfile
+npm run build:core:repro -- --clean           # discard the CMake tree first
+npm run build:core:repro -- --install         # also replace cores/dolphin and the ABI manifest
+```
+
+The command installs the pinned toolchain if it is missing
+(`tools/toolchain/bootstrap.sh`), verifies it, fetches and patches
+`vendor/dolphin` from the source lock, configures, builds `dolphin_web_core`,
+and compares the result with the committed core. Per host platform `P`
+(`darwin-arm64`, `linux-x64`, `linux-arm64`) it writes:
+
+| Path | Content |
+| --- | --- |
+| `build/repro/P/dolphin-wasm/` | CMake/Ninja tree, reused by the next run |
+| `build/repro/P/core/` | `dolphin-core-upstream.{js,wasm,build.json}` |
+| `build/repro/P/parity.json` | toolchain observed, timings, section and glue diff against `cores/dolphin` |
+| `build/core-candidates/<sha256>/` | the candidate, loadable with `?coreid=sha256:<sha256>` |
+
+Other flags: `--no-sync` builds `vendor/dolphin` as it stands (while you edit
+it before regenerating a patch), `--allow-dirty` records a build from an
+uncommitted tree, `--jobs N`. Docker only: `--docker-platform linux/amd64`,
+`--bind-mounts` (no named volumes, used by CI), `--image-only`.
+
+### What is pinned on macOS/Linux
+
+`provenance/wasm-toolchain.lock.json` keeps the Windows record and adds a
+`posix` block. Everything comes from it; nothing is taken from `PATH`.
+
+| Input | Pin |
+| --- | --- |
+| emsdk | commit `bafd64c`, `emsdk install 5.0.7`, checked to resolve to emscripten-releases `6cd98e86` |
+| Emscripten JS/Python layer | `emscriptenTreeSha256`: one digest over `emcc.py`, `src/`, `tools/`, `system/include`, `system/lib` (6,043 files). Identical on every host. This is the layer that decides what the JS glue contains (issue #13). |
+| clang, wasm-ld, wasm-opt, rustc, cargo, cmake, ninja | SHA-256 of each binary, per platform |
+| Rust | `nightly-2026-05-15` (rustc `7c3c88f`, the commit the Windows lock records), with `rust-src` |
+| CMake 4.3.2, Ninja 1.13.0 | PyPI wheels installed with `--require-hashes` (`tools/toolchain/requirements.txt`) |
+| Docker base | `node:24.12.0-bookworm` by digest, `rustup-init` 1.29.0 by SHA-256 |
+| Naga crates | `Cargo.lock` checksums, `cargo build --locked` |
+
+The `emdawnwebgpu` port is downloaded by Emscripten during the build; its
+version and SHA-512 are part of the hashed Emscripten tree.
+
+`npm run verify:toolchain` fails closed on any mismatch. After a deliberate
+toolchain change, `npm run toolchain:record -- --write` records the current
+host; review and commit the diff.
+
+### Making the binary independent of where it is built
+
+Absolute paths reached the core in three places: `__FILE__` in Dolphin
+(about 300 strings), Rust panic locations from `rust-src`, and crate sources
+under `$CARGO_HOME/registry/src/<source>-<hash>`. The last one even depends
+on the host's cargo configuration (a crates.io mirror gets its own directory
+name). `configure-upstream-wasm.mjs` now maps the checkout onto
+`/wasm-dolphin`, `rust-src` onto `/rustc/<commit>` and every registry source
+onto `/cargo/registry/src/crates.io`. It also takes the Naga archive cargo
+reports for the build instead of whichever of two file names exists, which
+let a stale archive win (issue #13, R6a).
+
+### Results (2026-10-17)
+
+| Build | `.wasm` SHA-256 | Bytes |
+| --- | --- | ---: |
+| committed `cores/dolphin` | `d7395b3a…` | 15,175,335 |
+| macOS arm64, native | `83514d0e…` | 12,950,792 |
+| Docker linux/arm64 | `6eed0799…` | 12,950,791 |
+
+- **macOS vs Linux.** The JS glue is identical. Relinking the macOS build
+  against the Linux Naga archive gives `6eed0799…`, byte for byte the Docker
+  core: all C++ and everything Emscripten contributes is bit-reproducible
+  across hosts. The one remaining byte is in the Rust archive. Cargo hashes
+  the `rustc -vV` output, host triple included, into each crate's metadata
+  (`naga_spirv_wgsl-87cb3c…` on macOS, `-5dee1c…` on Linux), which changes
+  symbol hashes. Treat the Linux build (Docker, CI) as the reference.
+- **Rebuilt vs committed.** Not byte-identical, and cannot be:
+  1. the committed core carries a 2.2 MB `name` section (it was built with
+     `PROFILING_FUNCS=1`); a default build has none;
+  2. it embeds 360 Windows paths (`G:/wasm-dolphin/.claude/worktrees/…`,
+     `C:\Users\…\.cargo\registry\…`, `G:\home\…\rustup\…`) with mixed
+     separators; the data section is 18 KB smaller once they are mapped;
+  3. its glue has `FS.filesystems={MEMFS}` where a macOS/Linux build has
+     `{MEMFS,NODEFS,WORKERFS}`. Emscripten builds that registry from
+     `LibraryManager.has('libworkerfs.js')`, an exact string comparison of
+     library paths (`src/modules.mjs:248`). On Windows the path forms differ
+     and the test fails; on macOS/Linux it passes. This is the issue #13
+     symptom seen from the other side. It is harmless: the worker reaches
+     WORKERFS through `Module.WORKERFS`, which patch 0052 exports and both
+     builds have. Exports and runtime methods are identical.
+
+  Type, import, function, global and export sections have identical sizes;
+  the code section differs by 13 bytes. Behaviour and performance parity are
+  measured below.
+
+### Behaviour parity, committed vs rebuilt (macOS build `83514d0e…`)
+
+Headed Chrome 155 on an Apple M4 Pro, 3 alternating runs per pair, served by
+`tools/serve.mjs` on 127.0.0.1. Load average 11 to 32 during the runs (shared
+machine). The rebuilt core is loaded with `&coreid=sha256:83514d0e…`; the
+network log confirms the candidate JS and WASM were the ones executed. REC
+config: `core=upstream&video=software&presenter=webgpu&cpu=dual&speed=1&wasmjit=1&jitwarmup=700&oc=1&pacing=tick&fastsw=1&metrics=1`.
+Mean (min to max) of 1 s samples after a fixed warm-up (25 s homebrew, 70 s
+MKDD).
+
+| Disc | Core | Speed % | Presented/s | Unique visuals/s | JIT blocks |
+| --- | --- | --- | --- | --- | --- |
+| acube | committed | 99.9 (97.6–101.5) | 54.9 | 35.7 (35.3–36.4) | 267 |
+| acube | rebuilt | 100.5 (97.5–102.4) | 55.3 | 35.1 (34.1–36.4) | 267 |
+| gxSprites | committed | 100.6 (100.0–101.0) | 57.8 | 48.5 (41.1–52.4) | 230–231 |
+| gxSprites | rebuilt | 98.2 (96.7–100.7) | 58.5 | 51.3 (49.2–55.2) | 230 |
+| lesson10 | committed | 99.4 (97.1–100.9) | 59.5 | static | 340–341 |
+| lesson10 | rebuilt | 97.4 (97.0–97.8) | 59.7 | static | 340 |
+| commercial disc (intro to title) | committed | 100.1 (99.4–101.0) | 56.4 | 18.3 (17.4–19.3) | 4,059–4,112 |
+| commercial disc (intro to title) | rebuilt | 100.4 (99.6–101.0) | 57.1 | 18.0 (17.2–18.8) | 4,068–4,097 |
+
+Same behaviour in every case: the discs boot, the JIT engages and compiles
+the same number of blocks, frames are visually correct. Homebrew images are
+the devkitPro examples wrapped by `homebrew/gcm/mkgcm.py`; the commercial
+disc is the user's own and is not part of the repository or CI.
+
+Unlimited-speed throughput, lesson10, `speed=unlimited&video=null&wasmjit=N&jitwarmup=700&metrics=1`,
+6 pairs without JIT (3 in each order) and 3 with JIT:
+
+| Config | committed (mean) | rebuilt (mean) |
+| --- | ---: | ---: |
+| `wasmjit=0` (CachedInterpreter) | 1,848 % | 1,758 % |
+| `wasmjit=1` | 1,081 % | 1,059 % |
+
+Without the JIT the rebuilt core was slower in 5 of 6 pairs (mean −4.9 %,
+paired t ≈ 2.5, n = 6), inside the ±10 % run-to-run spread of this loaded
+machine. It is not visible at `speed=1` nor with the JIT. Treat it as
+unconfirmed; it should be re-measured on a quiet machine.
+
+
+### Build times
+
+TIMES_PLACEHOLDER
+
+### Sharing one toolchain and one Dolphin tree between worktrees
+
+The toolchain (2 GB) and the patched `vendor/dolphin` (1.3 GB) do not need a
+copy per worktree:
+
+```sh
+export WASM_TOOLCHAIN_DIR=/path/to/shared-checkout/.tools
+ln -s /path/to/shared-checkout/vendor vendor     # ignored by git
+npm run build:core:repro
+```
+
+The sync step verifies that the shared tree is exactly the locked snapshot
+and leaves it alone. Each worktree keeps its own `build/repro/` (0.5 to 0.7
+GB), because the CMake flags embed the checkout path. A worktree that edits
+Dolphin itself (patch work) needs its own `vendor/`.
+
 ## Toolchain record
 
 The committed `provenance/wasm-toolchain.lock.json` pins the exact local
@@ -121,7 +276,8 @@ The current parity and gameplay evidence are summarized in the
 
 ## Known local assumptions
 
-The current lock is deliberately Windows x64-specific. Scripts resolve common
+The top-level lock record is Windows x64-specific; macOS and Linux use the
+`posix` block described above. On Windows, scripts resolve common
 Windows locations and accept `EMCC`, `EMCMAKE`, `CMAKE`, `NINJA`, `RUSTC`,
 `CARGO`, and `RUSTUP` overrides only when the selected file still matches the
 locked hash. `DOLPHIN_WASM_BUILD_DIR`, `DOLPHIN_WASM_OUTPUT_DIR`, and

@@ -1,0 +1,212 @@
+- generic [ref=e2]:
+  - banner [ref=e3]:
+    - generic [ref=e6]:
+      - heading "wasm-dolphin" [level=1] [ref=e7]
+      - paragraph [ref=e8]: WebAssembly host
+    - generic [ref=e9]:
+      - generic [ref=e10]: Booting
+      - button "FPS" [pressed] [ref=e11] [cursor=pointer]
+      - button "DBG" [ref=e12] [cursor=pointer]
+      - button "Hide side panel" [expanded] [ref=e13] [cursor=pointer]: PANEL Show or hide the side panel
+      - button "Fullscreen" [ref=e14] [cursor=pointer]: "[]"
+  - main [ref=e15]:
+    - region "Emulator" [ref=e16]:
+      - generic [ref=e17]:
+        - generic [ref=e19]: NO DISC
+        - generic [ref=e21]:
+          - generic "Emulator screen" [ref=e22]
+          - generic:
+            - generic:
+              - strong: "0"
+              - text: present
+            - generic:
+              - strong: "0"
+              - text: visual
+            - generic:
+              - strong: 0%
+              - text: speed
+            - generic:
+              - strong: 0f
+              - text: lag
+            - generic:
+              - strong: JIT off
+            - generic: 640x480
+            - generic:
+              - strong: "0"
+              - text: core
+            - generic:
+              - strong: "0"
+              - text: frame
+            - generic:
+              - strong: "0"
+              - text: gl
+            - generic:
+              - strong: "-"
+            - generic:
+              - strong: 0/0
+              - text: wd
+            - generic:
+              - strong: 0/0
+              - text: ms gap
+            - generic:
+              - strong: "0x0"
+              - text: glerr
+            - generic:
+              - strong: 0/0
+              - text: draw
+            - generic:
+              - strong: "0"
+              - text: nz
+            - generic:
+              - strong: 0/0
+              - text: u/d
+            - generic:
+              - strong: 0/0
+              - text: q
+            - generic:
+              - strong: 0/0
+              - text: jitc
+            - generic:
+              - strong: "-/-"
+              - text: us runloop
+            - generic:
+              - strong: "-"
+              - text: wgx
+          - generic: Drop disc
+        - generic [ref=e23]:
+          - generic "Playback controls" [ref=e25]:
+            - generic [ref=e26] [cursor=pointer]:
+              - generic [ref=e27]: ⏏
+              - generic [ref=e28]: Open disc
+              - button "Open disc Open a GameCube disc image"
+              - text: Open a GameCube disc image
+            - button "Pause" [ref=e29] [cursor=pointer]:
+              - generic [ref=e30]: ⏸
+              - text: Pause or resume emulation
+            - button "Reset" [ref=e31] [cursor=pointer]:
+              - generic [ref=e32]: ↻
+              - text: Reset the console
+            - button "Muted" [ref=e33] [cursor=pointer]:
+              - generic [ref=e34]: 🔇
+              - text: Mute or unmute audio
+            - button "Save state" [ref=e36] [cursor=pointer]:
+              - generic [ref=e37]: 💾
+              - text: Save state to a slot
+            - button "Load state" [ref=e38] [cursor=pointer]:
+              - generic [ref=e39]: ↺
+              - text: Load state from a slot
+            - button "Download state" [ref=e40] [cursor=pointer]:
+              - generic [ref=e41]: ⬇
+              - text: Download the current save state
+            - generic "Upload state" [ref=e42] [cursor=pointer]:
+              - generic [ref=e43]: ⬆
+              - button "Upload state"
+              - text: Upload a save state file
+          - generic [ref=e44]:
+            - generic [ref=e45]: Aspect ratio
+            - combobox "Aspect ratio Screen aspect ratio" [ref=e46] [cursor=pointer]:
+              - option "4:3" [selected]
+              - option "16:9"
+            - text: Screen aspect ratio
+          - generic [ref=e47]:
+            - slider "Volume" [ref=e48]: "100"
+            - text: Volume
+    - complementary "Emulator controls" [ref=e51]:
+      - generic [ref=e52]:
+        - generic [ref=e53]:
+          - heading "Game" [level=2] [ref=e54]
+          - generic [ref=e55]: No file
+        - paragraph [ref=e56]: Demo scene
+        - paragraph [ref=e57]: Demo WASM core active
+      - generic [ref=e58]:
+        - generic [ref=e59]:
+          - heading "Settings" [level=2] [ref=e60]
+          - generic [ref=e61]: Startup
+        - generic [ref=e62]:
+          - generic [ref=e63]:
+            - generic [ref=e64]: Core
+            - combobox "Core" [ref=e65]:
+              - option "Native" [selected]
+              - option "Upstream"
+          - generic [ref=e66]:
+            - generic [ref=e67]: Renderer
+            - combobox "Renderer" [ref=e68]:
+              - option "Software" [selected]
+              - option "WebGPU hardware (experimental)"
+              - option "OpenGL GPU"
+              - option "Null video"
+          - generic [ref=e69]:
+            - generic [ref=e70]: GPU path
+            - combobox "GPU path" [ref=e71]:
+              - option "Compatible GL" [selected]
+              - option "Direct worker GL"
+              - option "Main thread GL"
+              - option "Readback debug"
+          - generic [ref=e72]:
+            - generic [ref=e73]: Resolution
+            - combobox "Resolution" [ref=e74]:
+              - option "Full 640x480" [selected]
+              - option "75% present"
+              - option "Half 320x240"
+          - generic [ref=e75]:
+            - generic [ref=e76]: Speed
+            - combobox "Speed" [ref=e77]:
+              - option "0.5x" [selected]
+              - option "0.75x"
+              - option "1x"
+              - option "1.25x"
+              - option "1.5x"
+              - option "Unlimited"
+          - generic [ref=e78]:
+            - generic [ref=e79]: CPU
+            - combobox "CPU" [ref=e80]:
+              - option "Auto" [selected]
+              - option "Single thread"
+              - option "Dual core"
+          - generic [ref=e81]:
+            - generic [ref=e82]: Presenter
+            - combobox "Presenter" [ref=e83]:
+              - option "WebGPU" [selected]
+              - option "WebGL"
+              - option "Canvas 2D"
+          - generic [ref=e84]:
+            - generic [ref=e85]: Frame queue
+            - combobox "Frame queue" [ref=e86]:
+              - option "2 frames" [selected]
+              - option "4 frames"
+              - option "8 frames"
+              - option "12 frames"
+          - generic [ref=e87]:
+            - generic [ref=e88]: Pacing
+            - combobox "Pacing" [ref=e89]:
+              - option "Tick" [selected]
+              - option "Smooth"
+              - option "Direct"
+          - generic [ref=e90]:
+            - generic [ref=e91]: Raster quality
+            - combobox "Raster quality" [ref=e92]:
+              - option "Full quality" [selected]
+              - option "Balanced"
+              - option "Emergency speed"
+          - generic [ref=e93]:
+            - generic [ref=e94]: JIT tier
+            - combobox "JIT tier" [ref=e95]:
+              - option "Guarded" [selected]
+              - option "Mixed experimental"
+        - generic [ref=e96]:
+          - generic [ref=e97]:
+            - checkbox "WASM JIT" [ref=e98]
+            - generic [ref=e99]: WASM JIT
+          - generic [ref=e100]:
+            - checkbox "Force JIT" [ref=e101]
+            - generic [ref=e102]: Force JIT
+          - generic [ref=e103]:
+            - checkbox "Collect Metrics" [ref=e104]
+            - generic [ref=e105]: Collect Metrics
+          - generic [ref=e106]:
+            - checkbox "Auto per-game Pick the renderer from measured per-game results" [checked] [ref=e107]
+            - generic [ref=e108]: Auto per-game
+            - text: Pick the renderer from measured per-game results
+        - generic [ref=e109]:
+          - button "Apply restart" [ref=e110] [cursor=pointer]
+          - button "Melee preset" [ref=e111] [cursor=pointer]
