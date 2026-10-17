@@ -4,9 +4,13 @@ import { tmpdir } from "node:os";
 import path from "node:path";
 import test from "node:test";
 
-import { glueFacts } from "../tools/build-core-repro.mjs";
+import {
+  buildIdentity, glueFacts, installCore, installRefusal, INSTALLED_FILES, resetStaleBuildTree, stampBuildTree
+} from "../tools/build-core-repro.mjs";
+import { readFileSync, existsSync } from "node:fs";
+import { rustRemapFlags, sourcePathFlags, vendoredCargoArgs } from "../tools/toolchain/path-maps.mjs";
 import { compareCoreBuildInfo } from "../tools/compare-core-builds.mjs";
-import { emscriptenTreeSha256, loadWasmToolchainLock } from "../tools/wasm-toolchain.mjs";
+import { emscriptenTreeSha256, loadWasmToolchainLock, toolchainEnvironmentOverrides } from "../tools/wasm-toolchain.mjs";
 
 test("a macOS and a Linux build compare equal on the declared and host-independent toolchain", () => {
   const build = (platform, clangSha256) => ({
@@ -79,4 +83,119 @@ test("every macOS/Linux platform in the toolchain lock pins the same tool set", 
     assert.deepEqual(Object.keys(hashes).sort(), [...keys].sort(), platform);
     for (const value of Object.values(hashes)) assert.match(value, /^[0-9a-f]{64}$/, platform);
   }
+});
+
+test("checkout and build paths are mapped, except those CMake flags cannot carry", () => {
+  assert.deepEqual(sourcePathFlags({ root: "/src/wd", buildDir: "/src/wd/build/x" }),
+    { flags: ["-ffile-prefix-map=/src/wd=/wasm-dolphin"], unmapped: [] });
+  assert.deepEqual(sourcePathFlags({ root: "C:\\wd", buildDir: "D:\\out" }).flags, [
+    "-ffile-prefix-map=C:/wd=/wasm-dolphin",
+    "-ffile-prefix-map=D:/out=/wasm-dolphin/build/dolphin-wasm"
+  ]);
+  // A Windows build directory with a space used to work; it must still build.
+  const spaced = sourcePathFlags({ root: "C:\\wd", buildDir: "C:\\build output\\dolphin" });
+  assert.deepEqual(spaced.flags, ["-ffile-prefix-map=C:/wd=/wasm-dolphin"]);
+  assert.deepEqual(spaced.unmapped, ["C:\\build output\\dolphin"]);
+});
+
+test("vendored crates map onto the registry's virtual root, after the checkout mapping", () => {
+  const flags = rustRemapFlags({
+    cargoHome: "/home/u/.cargo", registryDirs: ["/home/u/.cargo/registry/src/mirror-1"],
+    rustSrc: "/rs", rustcCommit: "abc", root: "/wd", vendoredCrates: "/wd/tools/naga-spirv-wgsl/vendor"
+  });
+  assert.deepEqual(flags, [
+    "--remap-path-prefix=/home/u/.cargo=/cargo",
+    "--remap-path-prefix=/home/u/.cargo/registry/src/mirror-1=/cargo/registry/src/crates.io",
+    "--remap-path-prefix=/rs=/rustc/abc",
+    "--remap-path-prefix=/wd=/wasm-dolphin",
+    "--remap-path-prefix=/wd/tools/naga-spirv-wgsl/vendor=/cargo/registry/src/crates.io"
+  ]);
+  assert.deepEqual(vendoredCargoArgs("/v").slice(0, 2), ["--offline", "--config"]);
+});
+
+test("variables that redirect emcc or cargo are refused, cache relocation is not", () => {
+  assert.deepEqual(toolchainEnvironmentOverrides({
+    EM_BINARYEN_ROOT: "/elsewhere", RUSTFLAGS: "-C x", CARGO_TARGET_WASM32_UNKNOWN_EMSCRIPTEN_LINKER: "ld",
+    EM_CACHE: "/c", CARGO_TARGET_DIR: "/t", CARGO_HOME: "/h", EMCC_CFLAGS: "", PATH: "/bin"
+  }), ["CARGO_TARGET_WASM32_UNKNOWN_EMSCRIPTEN_LINKER", "EM_BINARYEN_ROOT", "RUSTFLAGS"]);
+});
+
+test("a CMake tree built from another checkout or patch series is emptied", () => {
+  const dir = mkdtempSync(path.join(tmpdir(), "cmake-tree-"));
+  try {
+    const a = buildIdentity({ checkout: "/a", sourceLockSha256: "s", toolchainLockSha256: "t" });
+    const b = buildIdentity({ checkout: "/b", sourceLockSha256: "s", toolchainLockSha256: "t" });
+    const a2 = buildIdentity({ checkout: "/a", sourceLockSha256: "s2", toolchainLockSha256: "t" });
+    assert.notEqual(a.key, b.key);
+    assert.notEqual(a.key, a2.key);
+    writeFileSync(path.join(dir, "core.o"), "objects of a");
+    stampBuildTree(dir, a);
+    assert.equal(resetStaleBuildTree(dir, a), false);
+    assert.ok(existsSync(path.join(dir, "core.o")));
+    assert.equal(resetStaleBuildTree(dir, b), true);
+    assert.ok(!existsSync(path.join(dir, "core.o")));
+    writeFileSync(path.join(dir, "core.o"), "unstamped");
+    assert.equal(resetStaleBuildTree(dir, a), true, "an unstamped tree is not trusted");
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+function installFixture() {
+  const base = mkdtempSync(path.join(tmpdir(), "install-"));
+  const out = path.join(base, "out");
+  mkdirSync(out);
+  for (const file of INSTALLED_FILES) {
+    mkdirSync(path.dirname(path.join(base, file)), { recursive: true });
+    writeFileSync(path.join(base, file), `old ${file}`);
+  }
+  for (const name of ["dolphin-core-upstream.js", "dolphin-core-upstream.wasm", "dolphin-core-upstream.build.json"]) {
+    writeFileSync(path.join(out, name), `new ${name}`);
+  }
+  return { base, out };
+}
+
+test("a failed install restores every file it touched", () => {
+  const { base, out } = installFixture();
+  try {
+    assert.throws(() => installCore({
+      root: base,
+      outputDir: out,
+      validate: () => {
+        writeFileSync(path.join(base, "provenance/dolphin-core-abi-v1.json"), "half-written");
+        throw new Error("ABI rejected");
+      }
+    }), /rolled back.*ABI rejected/);
+    for (const file of INSTALLED_FILES) {
+      assert.equal(readFileSync(path.join(base, file), "utf8"), `old ${file}`, file);
+      assert.ok(!existsSync(path.join(base, `${file}.install-tmp`)));
+    }
+  } finally {
+    rmSync(base, { recursive: true, force: true });
+  }
+});
+
+test("a validated install replaces the core artifacts", () => {
+  const { base, out } = installFixture();
+  try {
+    installCore({ root: base, outputDir: out, validate: () => {} });
+    assert.equal(readFileSync(path.join(base, "cores/dolphin/dolphin-core-upstream.wasm"), "utf8"),
+      "new dolphin-core-upstream.wasm");
+  } finally {
+    rmSync(base, { recursive: true, force: true });
+  }
+});
+
+test("install refuses a core that loses exports, runtime methods or WORKERFS", () => {
+  const parity = (glue) => ({ glue: {
+    exports: { onlyCommitted: [], onlyRebuilt: [] },
+    runtimeMethods: { onlyCommitted: [], onlyRebuilt: [] },
+    runtimeMethodsRebuilt: ["FS", "WORKERFS"],
+    filesystems: { committed: ["MEMFS"], rebuilt: ["MEMFS"] },
+    ...glue
+  } });
+  assert.equal(installRefusal(parity({})), null);
+  assert.match(installRefusal(parity({ exports: { onlyCommitted: ["_Boot"], onlyRebuilt: [] } })), /_Boot/);
+  assert.match(installRefusal(parity({ runtimeMethods: { onlyCommitted: ["PThread"], onlyRebuilt: [] } })), /PThread/);
+  assert.match(installRefusal(parity({ runtimeMethodsRebuilt: ["FS"] })), /WORKERFS/);
 });

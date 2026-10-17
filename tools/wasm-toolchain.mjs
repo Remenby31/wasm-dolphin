@@ -83,9 +83,36 @@ export function loadWasmToolchainLock() {
 
 export const hostPlatform = `${process.platform}-${process.arch}`;
 
+// Environment variables that make emcc or cargo use a tool, configuration or
+// flag other than the verified ones, so the hashes checked here would not
+// describe what built the core. EM_CACHE is allowed: it only relocates the
+// cache, and the build scripts set it.
+const OVERRIDE_PATTERNS = [
+  /^EM_(CONFIG|LLVM_ROOT|BINARYEN_ROOT|NODE_JS|EMSCRIPTEN_ROOT|PYTHON)$/,
+  /^EMSDK_PYTHON$/,
+  /^EMCC_(CFLAGS|FORCE_STDLIBS|ONLY_FORCED_STDLIBS|LOCAL_PORTS|STRICT|CLOSURE_ARGS)$/,
+  /^RUSTFLAGS$/, /^CARGO_ENCODED_RUSTFLAGS$/, /^RUSTC_(WRAPPER|WORKSPACE_WRAPPER|BOOTSTRAP)$/,
+  /^CARGO_BUILD_/, /^CARGO_PROFILE_/, /^CARGO_TARGET_[A-Z0-9_]+_(RUSTFLAGS|LINKER|RUNNER)$/
+];
+
+export function toolchainEnvironmentOverrides(env = process.env) {
+  return Object.keys(env)
+    .filter((name) => env[name] !== undefined && env[name] !== "")
+    .filter((name) => OVERRIDE_PATTERNS.some((pattern) => pattern.test(name)))
+    .sort();
+}
+
+function assertNoEnvironmentOverrides() {
+  const overrides = toolchainEnvironmentOverrides();
+  invariant(overrides.length === 0,
+    `Unset ${overrides.join(", ")}: they change which tools or flags build the core, ` +
+    "so the verified toolchain would not be the one used.");
+}
+
 export function verifyWasmToolchain() {
   const lock = loadWasmToolchainLock();
   invariant(lock.schemaVersion === 1, `Unsupported toolchain lock schema ${lock.schemaVersion}`);
+  assertNoEnvironmentOverrides();
   if (hostPlatform !== lock.platform && lock.posix?.platforms?.[hostPlatform]) {
     return verifyPosixToolchain(lock);
   }
@@ -301,6 +328,17 @@ function verifyPosixToolchain(lock) {
     `rustc commit mismatch: expected ${lock.rust.rustcCommit}, got ${observed.rustcCommit}`);
   invariant(!lock.rust.rustSrcRequired || observed.rustSrcPresent,
     `${lock.posix.rust.toolchain} is missing rust-src`);
+  // Ask Emscripten which LLVM and Binaryen it will run: its configuration
+  // file can point elsewhere than the binaries hashed above.
+  const emConfig = join(paths.emscriptenDir, "em-config");
+  for (const [key, expectedPath] of [
+    ["LLVM_ROOT", join(paths.emsdkRoot, "upstream/bin")],
+    ["BINARYEN_ROOT", join(paths.emsdkRoot, "upstream")]
+  ]) {
+    const actual = runVersion(emConfig, [key]);
+    invariant(existsSync(actual) && realpathSync(actual) === realpathSync(expectedPath),
+      `Emscripten ${key} is ${actual}, not the verified ${expectedPath}`);
+  }
   for (const [key, value] of Object.entries(expected)) {
     invariant(observed.hashes[key] === value,
       `${key.replace(/Sha256$/, "")} hash mismatch on ${hostPlatform}: expected ${value}, got ${observed.hashes[key]}`);

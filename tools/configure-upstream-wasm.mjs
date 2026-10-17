@@ -1,8 +1,9 @@
 import { existsSync, mkdirSync, readdirSync, writeFileSync } from "node:fs";
 import { spawnSync } from "node:child_process";
 import { homedir } from "node:os";
-import { delimiter, dirname, relative, resolve } from "node:path";
+import { delimiter, dirname, resolve } from "node:path";
 import { sha256File, verifyWasmToolchain } from "./wasm-toolchain.mjs";
+import { rustRemapFlags as remapFlags, sourcePathFlags as pathFlags, vendoredCargoArgs } from "./toolchain/path-maps.mjs";
 
 const root = process.cwd();
 const sourceDir = resolve(root, "vendor/dolphin");
@@ -82,43 +83,38 @@ const nagaEnvironment = {
   CARGO: cargo
 };
 
-// Absolute checkout, build and toolchain paths reach the binary through
-// __FILE__ (Dolphin asserts) and Rust panic locations (std rebuilt from
-// rust-src, crates from the cargo registry). Map them onto fixed virtual roots
-// so the core depends on the sources, not on where they sit: a macOS checkout,
-// a Docker container and a CI runner then produce the same bytes.
-const forwardSlashes = (path) => path.replaceAll("\\", "/");
-const virtualRoot = "/wasm-dolphin";
-for (const path of [root, buildDir]) {
-  if (/\s/.test(path)) {
-    throw new Error(`Build paths must not contain whitespace (CMake flag lists split on it): ${path}`);
-  }
-}
-const sourcePathFlags = [`-ffile-prefix-map=${forwardSlashes(root)}=${virtualRoot}`];
-if (relative(root, buildDir).startsWith("..")) {
-  sourcePathFlags.push(`-ffile-prefix-map=${forwardSlashes(buildDir)}=${virtualRoot}/build/dolphin-wasm`);
+// Absolute checkout, build and toolchain paths reach the binary; map them onto
+// fixed virtual roots (tools/toolchain/path-maps.mjs) so a macOS checkout, a
+// Docker container and a CI runner produce the same bytes.
+const { flags: sourcePathFlags, unmapped: unmappedPaths } = pathFlags({ root, buildDir });
+for (const path of unmappedPaths) {
+  console.warn(`Not remapping ${path}: it contains whitespace; the core will embed this path.`);
 }
 const rustSysroot = spawnSync(rustc, ["--print", "sysroot"], { encoding: "utf8" }).stdout.trim();
 if (!rustSysroot) {
   throw new Error(`Could not query the sysroot of ${rustc}`);
 }
-// Crate sources are unpacked under registry/src/<source-name>-<hash>, and the
-// source name follows the host's cargo configuration (a crates.io mirror gets
-// its own directory). Cargo.lock checksums already pin the content, so fold
-// every registry directory onto one virtual name. Fetch first so the
-// directories exist before they are enumerated.
+// The GPL source archive carries every crate (Naga's and std's) vendored here
+// and builds offline from them.
+const vendoredCrates = resolve(nagaDir, "vendor");
+const useVendoredCrates = existsSync(resolve(vendoredCrates, "naga-26.0.0"));
+const cargoSourceArgs = useVendoredCrates ? vendoredCargoArgs(vendoredCrates) : [];
 const cargoHome = resolve(process.env.CARGO_HOME ?? resolve(homedir(), ".cargo"));
-run(cargo, ["fetch", "--locked"], { cwd: nagaDir, env: nagaEnvironment });
+if (!useVendoredCrates) {
+  // Fetch first so the registry directories exist before they are enumerated.
+  run(cargo, ["fetch", "--locked"], { cwd: nagaDir, env: nagaEnvironment });
+}
 const registrySources = existsSync(resolve(cargoHome, "registry/src"))
   ? readdirSync(resolve(cargoHome, "registry/src")).sort()
   : [];
-// rustc applies the last matching mapping, so the most specific come last.
-const rustRemapFlags = [
-  [cargoHome, "/cargo"],
-  ...registrySources.map((name) => [resolve(cargoHome, "registry/src", name), "/cargo/registry/src/crates.io"]),
-  [resolve(rustSysroot, "lib/rustlib/src/rust"), `/rustc/${toolchain.lock.rust.rustcCommit}`],
-  [root, virtualRoot]
-].map(([from, to]) => `--remap-path-prefix=${from}=${to}`);
+const rustRemapFlags = remapFlags({
+  cargoHome,
+  registryDirs: registrySources.map((name) => resolve(cargoHome, "registry/src", name)),
+  rustSrc: resolve(rustSysroot, "lib/rustlib/src/rust"),
+  rustcCommit: toolchain.lock.rust.rustcCommit,
+  root,
+  vendoredCrates: useVendoredCrates ? vendoredCrates : null
+});
 
 console.log("Building the pinned Naga SPIR-V to WGSL bridge");
 // Take the archive cargo reports for this build. Picking whichever of the two
@@ -127,6 +123,7 @@ console.log("Building the pinned Naga SPIR-V to WGSL bridge");
 const nagaBuild = spawnSync(cargo, [
   "build", "--locked", "--release", "--target", toolchain.lock.rust.target,
   "--message-format=json-render-diagnostics",
+  ...cargoSourceArgs,
   "--config", `target.${toolchain.lock.rust.target}.rustflags=${JSON.stringify(rustRemapFlags)}`
 ], {
   cwd: nagaDir,
@@ -265,6 +262,8 @@ writeFileSync(resolve(buildDir, "wasm-dolphin-configure.json"), `${JSON.stringif
   directWasmBlockDispatch,
   wasmCompileFlags,
   sourcePathFlags,
+  unmappedPaths,
+  useVendoredCrates,
   rustRemapFlags,
   cmakeArgs,
   toolchainLockSha256: toolchain.hashes.lock,

@@ -1,0 +1,56 @@
+// Path remapping for the core build. Absolute checkout, build and toolchain
+// paths reach the binary through __FILE__ (Dolphin asserts) and Rust panic
+// locations; these helpers map them onto fixed virtual roots so the bytes
+// depend on the sources, not on where they sit. Pure functions, unit-tested.
+
+export const VIRTUAL_ROOT = "/wasm-dolphin";
+export const VIRTUAL_CRATES = "/cargo/registry/src/crates.io";
+
+const forwardSlashes = (path) => path.replaceAll("\\", "/");
+const isInside = (parent, child) => {
+  const p = forwardSlashes(parent).replace(/\/$/, "");
+  const c = forwardSlashes(child);
+  return c === p || c.startsWith(`${p}/`);
+};
+
+// Clang prefix maps travel inside CMAKE_<LANG>_FLAGS, a whitespace-separated
+// string, so a path containing whitespace cannot be expressed there portably.
+// Such a path is left unmapped (the build still works, as it did before the
+// maps existed) and reported, so the record says the result is path-dependent.
+export function sourcePathFlags({ root, buildDir }) {
+  const flags = [];
+  const unmapped = [];
+  const map = (from, to) => {
+    if (/\s/.test(from)) unmapped.push(from);
+    else flags.push(`-ffile-prefix-map=${forwardSlashes(from)}=${to}`);
+  };
+  map(root, VIRTUAL_ROOT);
+  if (!isInside(root, buildDir)) map(buildDir, `${VIRTUAL_ROOT}/build/dolphin-wasm`);
+  return { flags, unmapped };
+}
+
+// rustc applies the last matching --remap-path-prefix, so the most specific
+// prefixes come last. Registry directories are named after the host's cargo
+// source configuration (a crates.io mirror gets its own name), and a GPL
+// source archive builds from vendored crates instead: all of them fold onto
+// one virtual directory. Vendored crates sit under the checkout, so they must
+// come after the checkout mapping.
+export function rustRemapFlags({ cargoHome, registryDirs = [], rustSrc, rustcCommit, root, vendoredCrates = null }) {
+  return [
+    [cargoHome, "/cargo"],
+    ...registryDirs.map((dir) => [dir, VIRTUAL_CRATES]),
+    [rustSrc, `/rustc/${rustcCommit}`],
+    [root, VIRTUAL_ROOT],
+    ...(vendoredCrates ? [[vendoredCrates, VIRTUAL_CRATES]] : [])
+  ].map(([from, to]) => `--remap-path-prefix=${from}=${to}`);
+}
+
+// Cargo options that make the Naga build use crates vendored in the source
+// archive, offline, instead of the registry.
+export function vendoredCargoArgs(vendoredCrates) {
+  return [
+    "--offline",
+    "--config", 'source.crates-io.replace-with="vendored-sources"',
+    "--config", `source.vendored-sources.directory=${JSON.stringify(vendoredCrates)}`
+  ];
+}

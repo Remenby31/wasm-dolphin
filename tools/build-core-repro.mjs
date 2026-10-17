@@ -20,7 +20,11 @@
 
 import { spawnSync } from "node:child_process";
 import { createHash } from "node:crypto";
-import { copyFileSync, cpSync, existsSync, mkdirSync, readdirSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import {
+  copyFileSync, cpSync, existsSync, mkdirSync, mkdtempSync, readdirSync, readFileSync, realpathSync,
+  renameSync, rmSync, writeFileSync
+} from "node:fs";
+import { tmpdir } from "node:os";
 import { dirname, join, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 
@@ -63,6 +67,51 @@ function removeBytecodeCaches(directory) {
 }
 
 const seconds = (start) => Math.round((performance.now() - start) / 100) / 10;
+
+// -------------------------------------------------------------- identity ---
+
+const hashText = (text) => createHash("sha256").update(text).digest("hex");
+
+// What a CMake tree was built from. Ninja trusts timestamps, so a tree reused
+// across checkouts, or across a change of patch series or toolchain, can link
+// objects compiled from other sources under this checkout's provenance. The
+// identity keys Docker volumes and is stamped into every CMake tree; a tree
+// whose stamp differs is emptied before configuring.
+export function buildIdentity({ checkout, sourceLockSha256, toolchainLockSha256 }) {
+  const fields = { checkout, sourceLockSha256, toolchainLockSha256 };
+  return { ...fields, key: hashText(JSON.stringify(fields)).slice(0, 16) };
+}
+
+function currentIdentity() {
+  return buildIdentity({
+    // Inside the container every checkout is /wasm-dolphin; the host path is
+    // passed in so two checkouts never share a tree.
+    checkout: process.env.WASM_DOLPHIN_CHECKOUT ?? realpathSync(root),
+    sourceLockSha256: sha256File(join(root, "provenance/dolphin-source.lock.json")),
+    toolchainLockSha256: sha256File(lockPath)
+  });
+}
+
+const IDENTITY_STAMP = ".wasm-dolphin-build-identity.json";
+
+// Returns true when the tree was emptied.
+export function resetStaleBuildTree(buildDir, identity) {
+  const stamp = join(buildDir, IDENTITY_STAMP);
+  if (!existsSync(buildDir) || readdirSync(buildDir).length === 0) return false;
+  let previous = null;
+  try {
+    previous = JSON.parse(readFileSync(stamp, "utf8")).key;
+  } catch {
+    previous = null;
+  }
+  if (previous === identity.key) return false;
+  for (const entry of readdirSync(buildDir)) rmSync(join(buildDir, entry), { recursive: true, force: true });
+  return true;
+}
+
+export function stampBuildTree(buildDir, identity) {
+  writeFileSync(join(buildDir, IDENTITY_STAMP), `${JSON.stringify(identity, null, 2)}\n`);
+}
 
 // ---------------------------------------------------------------- docker ---
 
@@ -129,11 +178,15 @@ function runInDocker() {
   // Emscripten builds some system libraries and ports lazily and guards its
   // cache with flock(), which fails on a macOS bind mount: keep the cache in
   // a volume there, and next to the CMake tree on a Linux host.
+  // Volumes are keyed by build identity (checkout, source lock, toolchain
+  // lock); the vendor tree by the source lock alone, since sync verifies it.
+  const identity = currentIdentity();
+  const sourceKey = identity.sourceLockSha256.slice(0, 16);
   const volumes = flag("--bind-mounts")
     ? ["-e", `EM_CACHE=${platformDir}/em-cache`]
     : [
-      "-v", "wasm-dolphin-vendor:/wasm-dolphin/vendor",
-      "-v", `wasm-dolphin-cmake-${volumeSuffix}:${platformDir}/dolphin-wasm`,
+      "-v", `wasm-dolphin-vendor-${sourceKey}:/wasm-dolphin/vendor`,
+      "-v", `wasm-dolphin-cmake-${volumeSuffix}-${identity.key}:${platformDir}/dolphin-wasm`,
       "-v", `wasm-dolphin-emcache-${volumeSuffix}:/opt/em-cache`,
       "-e", "EM_CACHE=/opt/em-cache"
     ];
@@ -145,6 +198,7 @@ function runInDocker() {
     // a macOS bind mount, and the container fetches its own sources instead of
     // reusing the host checkout.
     ...volumes,
+    "-e", `WASM_DOLPHIN_CHECKOUT=${identity.checkout}`,
     "-e", `HOST_UID=${process.getuid?.() ?? 0}`,
     "-e", `HOST_GID=${process.getgid?.() ?? 0}`,
     tag,
@@ -198,9 +252,68 @@ export function compareWithCommitted(outputDir) {
     glue: {
       filesystems: { committed: committedGlue.filesystems, rebuilt: rebuiltGlue.filesystems },
       runtimeMethods: setDiff(committedGlue.runtimeMethods, rebuiltGlue.runtimeMethods),
+      runtimeMethodsRebuilt: rebuiltGlue.runtimeMethods,
       exports: setDiff(committedGlue.exports, rebuiltGlue.exports)
     }
   };
+}
+
+// --------------------------------------------------------------- install ---
+
+// A rebuilt core that drops an export, a runtime method or WORKERFS would break
+// the worker; refuse it before touching cores/dolphin.
+export function installRefusal(parity) {
+  const { exports, runtimeMethods, filesystems } = parity.glue;
+  if (exports.onlyCommitted.length > 0) return `missing exports ${exports.onlyCommitted.join(", ")}`;
+  if (runtimeMethods.onlyCommitted.length > 0) {
+    return `missing runtime methods ${runtimeMethods.onlyCommitted.join(", ")}`;
+  }
+  const reachable = new Set([...(filesystems.rebuilt ?? []), ...(parity.glue.runtimeMethodsRebuilt ?? [])]);
+  if (!reachable.has("WORKERFS")) return "WORKERFS is not reachable from the rebuilt glue";
+  return null;
+}
+
+// Files a core installation rewrites: the artifacts, and what update:core-abi
+// derives from them.
+export const INSTALLED_FILES = [
+  "cores/dolphin/dolphin-core-upstream.js",
+  "cores/dolphin/dolphin-core-upstream.wasm",
+  "cores/dolphin/dolphin-core-upstream.build.json",
+  "provenance/dolphin-core-abi-v1.json",
+  "src/upstream-worker-protocol.js"
+];
+
+// Swap the candidate in, validate, and restore every installed file if the
+// validation fails, so cores/dolphin is never left half-replaced. Each file is
+// staged next to its destination and renamed into place.
+export function installCore({ root: base, outputDir, validate }) {
+  const backup = mkdtempSync(join(tmpdir(), "wasm-dolphin-install-"));
+  const saved = [];
+  try {
+    for (const path of INSTALLED_FILES) {
+      if (!existsSync(join(base, path))) continue;
+      mkdirSync(dirname(join(backup, path)), { recursive: true });
+      copyFileSync(join(base, path), join(backup, path));
+      saved.push(path);
+    }
+    for (const name of ["dolphin-core-upstream.js", "dolphin-core-upstream.wasm", "dolphin-core-upstream.build.json"]) {
+      const destination = join(base, "cores/dolphin", name);
+      copyFileSync(join(outputDir, name), `${destination}.install-tmp`);
+      renameSync(`${destination}.install-tmp`, destination);
+    }
+    validate();
+  } catch (error) {
+    for (const path of INSTALLED_FILES) {
+      rmSync(join(base, `${path}.install-tmp`), { force: true });
+      if (saved.includes(path)) {
+        copyFileSync(join(backup, path), join(base, `${path}.install-tmp`));
+        renameSync(join(base, `${path}.install-tmp`), join(base, path));
+      }
+    }
+    throw new Error(`Install rolled back, cores/dolphin is unchanged: ${error.message}`, { cause: error });
+  } finally {
+    rmSync(backup, { recursive: true, force: true });
+  }
 }
 
 // ----------------------------------------------------------------- build ---
@@ -249,10 +362,15 @@ function buildNative() {
       }
     }
   }
+  const identity = currentIdentity();
+  if (resetStaleBuildTree(buildDir, identity)) {
+    console.log(`Emptied ${buildDir}: it was built from another checkout, patch series or toolchain.`);
+  }
   mkdirSync(outputDir, { recursive: true });
 
   start = performance.now();
   run(process.execPath, ["tools/configure-upstream-wasm.mjs"], { env });
+  stampBuildTree(buildDir, identity);
   timings.configure = seconds(start);
 
   start = performance.now();
@@ -271,10 +389,19 @@ function buildNative() {
   writeFileSync(join(platformDir, "parity.json"), `${JSON.stringify(parity, null, 2)}\n`);
 
   if (flag("--install")) {
-    for (const file of ["dolphin-core-upstream.js", "dolphin-core-upstream.wasm", "dolphin-core-upstream.build.json"]) {
-      copyFileSync(join(outputDir, file), join(root, "cores/dolphin", file));
+    const refusal = installRefusal(parity);
+    if (refusal && !flag("--force-install")) {
+      throw new Error(`Not installing: ${refusal} (--force-install overrides)`);
     }
-    run(process.execPath, ["tools/update-core-abi.mjs", "--write"]);
+    installCore({
+      root,
+      outputDir,
+      validate: () => {
+        run(process.execPath, ["tools/update-core-abi.mjs", "--write"]);
+        run(process.execPath, ["tools/verify-dolphin-provenance.mjs"]);
+      }
+    });
+    console.log("Installed the rebuilt core into cores/dolphin.");
   }
 
   if (process.env.HOST_UID) {

@@ -54,3 +54,5 @@ dist/
 .tools/
 # A worktree may link vendor/ to a shared checkout (docs/repro-build.md)
 /vendor
+# Crates vendored for the GPL source archive (tools/build-corresponding-source.mjs)
+tools/naga-spirv-wgsl/vendor/

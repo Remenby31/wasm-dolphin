@@ -31,6 +31,30 @@ it before regenerating a patch), `--allow-dirty` records a build from an
 uncommitted tree, `--jobs N`. Docker only: `--docker-platform linux/amd64`,
 `--bind-mounts` (no named volumes, used by CI), `--image-only`.
 
+Safety rails:
+
+- **One CMake tree per build identity.** The identity is the checkout path,
+  the source lock and the toolchain lock. It is stamped into the CMake tree,
+  and a tree with another stamp (or none) is emptied before configuring:
+  Ninja trusts timestamps and would otherwise link objects compiled from other
+  sources under this checkout's provenance. Docker volumes are named after it
+  (`wasm-dolphin-cmake-<arch>-<identity>`, `wasm-dolphin-vendor-<source lock>`).
+- **`--install` cannot leave `cores/dolphin` half-replaced.** It refuses a
+  core whose glue loses an export, a runtime method or WORKERFS
+  (`--force-install` overrides). It then backs up the five files it rewrites
+  (the three artifacts, the ABI manifest and the worker's pinned hash), renames
+  the new artifacts into place, and runs `update:core-abi` and
+  `verify:provenance`. On any failure every file is restored.
+- **`verify:toolchain` checks the tools actually used.** It refuses
+  variables that redirect emcc or cargo (`EM_CONFIG`, `EM_LLVM_ROOT`,
+  `EM_BINARYEN_ROOT`, `EMCC_CFLAGS`, `RUSTFLAGS`, `RUSTC_WRAPPER`,
+  `CARGO_BUILD_*`, `CARGO_PROFILE_*`, ...). It also asks `em-config` for
+  `LLVM_ROOT` and `BINARYEN_ROOT` and requires the hashed emsdk directories.
+- **Paths with whitespace** (possible on Windows) cannot be carried by the
+  CMake flag string. They are left unmapped with a warning, as before the maps
+  existed, so the build still works but embeds that path
+  (`unmappedPaths` in the configure record).
+
 ### What is pinned on macOS/Linux
 
 `provenance/wasm-toolchain.lock.json` keeps the Windows record and adds a
@@ -64,6 +88,21 @@ name). `configure-upstream-wasm.mjs` now maps the checkout onto
 onto `/cargo/registry/src/crates.io`. It also takes the Naga archive cargo
 reports for the build instead of whichever of two file names exists, which
 let a stale archive win (issue #13, R6a).
+
+### GPL corresponding source
+
+`npm run dist:source` writes `dist/wasm-dolphin-corresponding-source-v<version>.tar.gz`
+(about 220 MB). It holds every tracked file of the repository (the browser
+front end included), the patched `vendor/dolphin` without history, and
+`tools/naga-spirv-wgsl/vendor/`: every crate linked into the core through
+Naga, std's own dependencies included (std is rebuilt from `rust-src`). It
+keeps the repository layout. Extract it and run
+`npm run build:core:repro -- --no-sync`: the crates build offline from the
+vendored copy, and their paths map onto the same virtual root as registry
+crates. A rebuild from the archive gives the same bytes as a rebuild from the
+checkout (checked on macOS: `83514d0e…` both ways). CI rebuilds the core from
+the published archive alone and fails if its hash differs from the checkout
+build.
 
 ### Results (2026-10-17)
 
@@ -158,6 +197,8 @@ parentheses. Docker Desktop VM: 14 CPUs, 29 GB.
 | GitHub Actions `ubuntu-24.04`, 4 vCPU, clean | 1,419 s | sync 59 s, configure 252 s, compile and link 1,105 s |
 | GitHub Actions, one `.cpp` touched | 151 s | link 146 s |
 | GitHub Actions, whole workflow (cached image) | 32 min | build, incremental, check, test, test:contract, dist:source |
+
+CI fails if the incremental rebuild's hash differs from the clean build's.
 
 Rebuilding after touching a source without changing it produces the same
 `.wasm` hash. For C++ work, edit `vendor/dolphin` or `core/upstream`, iterate
