@@ -4,6 +4,7 @@
 import assert from "node:assert/strict";
 import { readFile } from "node:fs/promises";
 import test from "node:test";
+import { sourceContractTest } from "./helpers/source-contract.mjs";
 
 import {
   WGPU_DRAW_PROFILE_PHASE_ORDER,
@@ -426,7 +427,7 @@ test("worker integrates the cache without crossing pass, load, or destroy bounda
   assert.match(worker, /if \(needsApply\)/);
 });
 
-test("producer suppresses exact state only after successful records and skips draws after state failure", async () => {
+sourceContractTest("producer suppresses exact state only after successful records and skips draws after state failure", async () => {
   const [streamHeader, gfxHeader, gfxSource, coreCmake] = await Promise.all([
     readFile(new URL(
       "../vendor/dolphin/Source/Core/VideoBackends/WebGPU/WebGPUCommandStream.h",
@@ -467,7 +468,7 @@ test("producer suppresses exact state only after successful records and skips dr
   assert.match(coreCmake, /'_GetWebGpuStateCacheStats'/);
 });
 
-test("opt-in UBO cache is exact, two-entry MRU, serial-bounded, and load-invalidated", async () => {
+sourceContractTest("opt-in UBO cache is exact, two-entry MRU, serial-bounded, and load-invalidated", async () => {
   const [gfxHeader, gfxSource, coreCmake, worker] = await Promise.all([
     readFile(new URL(
       "../vendor/dolphin/Source/Core/VideoBackends/WebGPU/WebGPUGfx.h",
@@ -574,7 +575,7 @@ test("opt-in UBO cache is exact, two-entry MRU, serial-bounded, and load-invalid
   assert.match(gfxSource, /ulook:[\s\S]*?uhit:[\s\S]*?uexp:[\s\S]*?usupcall:[\s\S]*?usupbyte:/);
 });
 
-test("opt-in geometry packing uses one transactional upload and a published-submit reuse barrier", async () => {
+sourceContractTest("opt-in geometry packing uses one transactional upload and a published-submit reuse barrier", async () => {
   const [streamHeader, streamSource, vertexHeader, vertexSource, gfxSource, coreCmake, worker] =
     await Promise.all([
       readFile(new URL("../vendor/dolphin/Source/Core/VideoBackends/WebGPU/WebGPUCommandStream.h", import.meta.url), "utf8"),

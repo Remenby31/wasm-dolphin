@@ -6,6 +6,7 @@ import { tmpdir } from "node:os";
 import { dirname, join, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 import test from "node:test";
+import { sourceContractTest } from "./helpers/source-contract.mjs";
 
 const root = resolve(dirname(fileURLToPath(import.meta.url)), "..");
 const patchUrl = new URL(
@@ -40,7 +41,7 @@ test("idle FIFO tail elision is default-off and uses exact independent dirty pre
 const pinnedClang = join(process.env.USERPROFILE ?? "", "emsdk", "upstream", "bin", "clang++.exe");
 const compiler = process.platform === "win32" ? pinnedClang : "clang++";
 
-test(
+sourceContractTest(
   "native idle-tail gate policy keeps stable enable epochs and period-256 samples",
   { skip: process.platform === "win32" && !existsSync(compiler) },
   () => {

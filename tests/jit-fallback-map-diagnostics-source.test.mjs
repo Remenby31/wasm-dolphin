@@ -3,7 +3,7 @@
 
 import assert from "node:assert/strict";
 import { readFile } from "node:fs/promises";
-import test from "node:test";
+import { sourceContractTest } from "./helpers/source-contract.mjs";
 
 const root = new URL("../", import.meta.url);
 
@@ -11,7 +11,7 @@ async function source(path) {
   return readFile(new URL(path, root), "utf8");
 }
 
-test("fallback block-map diagnostics are compile-time gated and default off", async () => {
+sourceContractTest("fallback block-map diagnostics are compile-time gated and default off", async () => {
   const [header, implementation, configure, buildInfo] = await Promise.all([
     source("vendor/dolphin/Source/Core/Core/PowerPC/JitCommon/JitCache.h"),
     source("vendor/dolphin/Source/Core/Core/PowerPC/JitCommon/JitCache.cpp"),
@@ -40,7 +40,7 @@ test("fallback block-map diagnostics are compile-time gated and default off", as
   assert.match(buildInfo, /fallbackMapDiagnostics: configure\.fallbackMapDiagnostics/);
 });
 
-test("diagnostic counters classify every fallback dispatch and reach JIT metrics", async () => {
+sourceContractTest("diagnostic counters classify every fallback dispatch and reach JIT metrics", async () => {
   const [cacheSource, cachedInterpreter, patch] = await Promise.all([
     source("vendor/dolphin/Source/Core/Core/PowerPC/JitCommon/JitCache.cpp"),
     source("vendor/dolphin/Source/Core/Core/PowerPC/CachedInterpreter/CachedInterpreter.cpp"),

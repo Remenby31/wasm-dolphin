@@ -1,6 +1,7 @@
 import assert from "node:assert/strict";
 import { readFile } from "node:fs/promises";
 import test from "node:test";
+import { sourceContractTest } from "./helpers/source-contract.mjs";
 
 import {
   WGPU_CONSUMER_ERROR_HEADER_INDEX,
@@ -57,7 +58,7 @@ test("publishing ring progress stores and notifies the producer-facing index", (
   assert.equal(Atomics.load(ring.headerI32, 1) >>> 0, 123);
 });
 
-test("C++ protocol v3 blocks without fixed drop timeout and fails closed", async () => {
+sourceContractTest("C++ protocol v3 blocks without fixed drop timeout and fails closed", async () => {
   const [header, source] = await Promise.all([
     readFile(new URL(
       "../vendor/dolphin/Source/Core/VideoBackends/WebGPU/WebGPUCommandStream.h",

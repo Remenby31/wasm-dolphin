@@ -391,7 +391,8 @@ changes to the rasterizer, JIT, or shaders are baked into the committed core
 ## Testing & validation
 
 ```bash
-npm test          # Node unit tests (tests/*.test.mjs)
+npm test          # Node unit tests (tests/*.test.mjs); no vendor/ needed
+npm run test:contract # source-contract tests; need the patched vendor/ tree
 npm run check     # syntax-check all JS entry points
 npm run perf:gate # perf regression gate
 ```

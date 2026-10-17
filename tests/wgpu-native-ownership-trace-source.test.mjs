@@ -4,11 +4,12 @@
 import assert from "node:assert/strict";
 import { readFile } from "node:fs/promises";
 import test from "node:test";
+import { sourceContractTest } from "./helpers/source-contract.mjs";
 
 const root = new URL("../", import.meta.url);
 const read = (path) => readFile(new URL(path, root), "utf8");
 
-test("native ownership trace keeps a separate fixed ABI and explicit allocation gate", async () => {
+sourceContractTest("native ownership trace keeps a separate fixed ABI and explicit allocation gate", async () => {
   const [header, source] = await Promise.all([
     read("vendor/dolphin/Source/Core/VideoBackends/WebGPU/WebGPUCommandStream.h"),
     read("vendor/dolphin/Source/Core/VideoBackends/WebGPU/WebGPUCommandStream.cpp"),
@@ -53,7 +54,7 @@ test("native ownership trace keeps a separate fixed ABI and explicit allocation 
   assert.match(source, /PushBatch\([\s\S]*?WaitForOwnershipTraceCaptureAck\(\)/);
 });
 
-test("native ownership trace records transaction outcomes without widening replay commands", async () => {
+sourceContractTest("native ownership trace records transaction outcomes without widening replay commands", async () => {
   const [source, vertexManager] = await Promise.all([
     read("vendor/dolphin/Source/Core/VideoBackends/WebGPU/WebGPUCommandStream.cpp"),
     read("vendor/dolphin/Source/Core/VideoBackends/WebGPU/WebGPUVertexManager.cpp"),
@@ -88,7 +89,7 @@ test("native ownership trace records transaction outcomes without widening repla
   assert.match(source, /m_header->write\.store\(w \+ count, std::memory_order_release\)/);
 });
 
-test("the applied save callback publishes the ownership epoch before GPU wake", async () => {
+sourceContractTest("the applied save callback publishes the ownership epoch before GPU wake", async () => {
   const [wrapper, gfx, cmake] = await Promise.all([
     read("core/upstream/dolphin_web_core.cpp"),
     read("vendor/dolphin/Source/Core/VideoBackends/WebGPU/WebGPUGfx.cpp"),

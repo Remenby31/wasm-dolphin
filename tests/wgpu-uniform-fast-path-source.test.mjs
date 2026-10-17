@@ -8,13 +8,13 @@ import { readFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { dirname, join, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
-import test from "node:test";
+import { sourceContractTest } from "./helpers/source-contract.mjs";
 
 const root = resolve(dirname(fileURLToPath(import.meta.url)), "..");
 const pinnedClang = join(process.env.USERPROFILE ?? "", "emsdk", "upstream", "bin", "clang++.exe");
 const compiler = process.platform === "win32" ? pinnedClang : "clang++";
 
-test("uniform fast path is default-off, normal-path-only, and keeps exact live comparisons", async () => {
+sourceContractTest("uniform fast path is default-off, normal-path-only, and keeps exact live comparisons", async () => {
   const [patch, gfx] = await Promise.all([
     readFile(new URL(
       "../patches/dolphin-wasm/snapshot/0038-webgpu-guarded-uniform-compare.patch",
@@ -52,7 +52,7 @@ test("uniform fast path is default-off, normal-path-only, and keeps exact live c
     /entry\.size != size \|\| std::memcmp\(entry\.bytes\.data\(\), data, size\) != 0/);
 });
 
-test("native uniform comparison plan exhaustively preserves the mandatory-upload invariant", {
+sourceContractTest("native uniform comparison plan exhaustively preserves the mandatory-upload invariant", {
   skip: process.platform === "win32" && !existsSync(compiler),
 }, () => {
   const directory = mkdtempSync(join(tmpdir(), "wgpu-uniform-fast-"));

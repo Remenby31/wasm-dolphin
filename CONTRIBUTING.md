@@ -57,7 +57,8 @@ in a pull request description, so the next person can re-read them.
 
 ```bash
 npm run play      # serve the app and open it
-npm test          # Node unit tests
+npm test          # Node unit tests; pass on a fresh clone, no vendor/ needed
+npm run test:contract # source-contract tests against the patched vendor/ tree
 npm run check     # syntax-check every JS entry point
 npm run perf:gate # perf regression gate
 ```

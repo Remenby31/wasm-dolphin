@@ -3,12 +3,12 @@
 
 import assert from "node:assert/strict";
 import { readFile } from "node:fs/promises";
-import test from "node:test";
+import { sourceContractTest } from "./helpers/source-contract.mjs";
 
 const root = new URL("../", import.meta.url);
 const source = (path) => readFile(new URL(path, root), "utf8");
 
-test("producer tags only the WebGPU UBO ring with a stable resource role", async () => {
+sourceContractTest("producer tags only the WebGPU UBO ring with a stable resource role", async () => {
   const [header, stream, gfx, patch] = await Promise.all([
     source("vendor/dolphin/Source/Core/VideoBackends/WebGPU/WebGPUCommandStream.h"),
     source("vendor/dolphin/Source/Core/VideoBackends/WebGPU/WebGPUCommandStream.cpp"),

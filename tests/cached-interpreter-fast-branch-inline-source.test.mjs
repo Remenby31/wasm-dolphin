@@ -3,14 +3,14 @@
 
 import assert from "node:assert/strict";
 import { readFile } from "node:fs/promises";
-import test from "node:test";
+import { sourceContractTest } from "./helpers/source-contract.mjs";
 
 const sourceUrl = new URL(
   "../vendor/dolphin/Source/Core/Core/PowerPC/CachedInterpreter/CachedInterpreter.cpp",
   import.meta.url,
 );
 
-test("release WASM requests direct FastBranch inlining with a compile-time rollback", async () => {
+sourceContractTest("release WASM requests direct FastBranch inlining with a compile-time rollback", async () => {
   const source = (await readFile(sourceUrl, "utf8")).replaceAll("\r\n", "\n");
 
   assert.match(
@@ -32,7 +32,7 @@ test("release WASM requests direct FastBranch inlining with a compile-time rollb
   );
 });
 
-test("FastBranch keeps one address-taken callback and its existing record payload", async () => {
+sourceContractTest("FastBranch keeps one address-taken callback and its existing record payload", async () => {
   const source = (await readFile(sourceUrl, "utf8")).replaceAll("\r\n", "\n");
 
   assert.match(source, /callback == AnyCallbackCast\(FastBranch\)/);

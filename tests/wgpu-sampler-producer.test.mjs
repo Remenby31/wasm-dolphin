@@ -6,7 +6,7 @@ import { spawnSync } from "node:child_process";
 import { existsSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join, resolve } from "node:path";
-import test from "node:test";
+import { sourceContractTest } from "./helpers/source-contract.mjs";
 
 const root = resolve(import.meta.dirname, "..");
 const compiler = process.platform === "win32"
@@ -33,7 +33,7 @@ function between(source, startMarker, endMarker) {
   return source.slice(start, end);
 }
 
-test("native sampler records preserve independent slots, reuse, failure recovery, and shader bindings", {
+sourceContractTest("native sampler records preserve independent slots, reuse, failure recovery, and shader bindings", {
   skip: nativeSkipReason,
 }, () => {
   const [gfx, header, pixel] = requiredNativeFiles.map(readNative);
@@ -262,7 +262,7 @@ const shaderSkipReason = nativeSkipReason ||
     "requires patched vendor source: VideoCommon/UberShaderPixel.cpp") ||
   (!existsSync(join(fmtInclude, "fmt/format.h")) && "requires vendored fmt headers");
 
-test("native hardware sample helpers keep global pairs and preserve generic and manual dispatch", {
+sourceContractTest("native hardware sample helpers keep global pairs and preserve generic and manual dispatch", {
   skip: shaderSkipReason,
 }, () => {
   const pixel = readNative("VideoCommon/PixelShaderGen.cpp");

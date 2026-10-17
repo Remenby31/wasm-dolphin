@@ -6,6 +6,7 @@ import { tmpdir } from "node:os";
 import { dirname, join, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 import test from "node:test";
+import { sourceContractTest } from "./helpers/source-contract.mjs";
 
 const patchPath = new URL(
   "../patches/dolphin-wasm/snapshot/0033-webgpu-producer-phase-profile.patch",
@@ -45,7 +46,7 @@ test("WebGPU producer profiler has a stable default-off sampled wire contract", 
     assert.match(patch, new RegExp(`append_phase_values\\("${field}"`));
 });
 
-test("producer waits remain outside sampled ring and upload-copy scopes", async () => {
+sourceContractTest("producer waits remain outside sampled ring and upload-copy scopes", async () => {
   const source = await readFile(
     new URL("../vendor/dolphin/Source/Core/VideoBackends/WebGPU/WebGPUCommandStream.cpp", import.meta.url),
     "utf8"
@@ -75,7 +76,7 @@ const root = resolve(dirname(fileURLToPath(import.meta.url)), "..");
 const pinnedClang = join(process.env.USERPROFILE ?? "", "emsdk", "upstream", "bin", "clang++.exe");
 const compiler = process.platform === "win32" ? pinnedClang : "clang++";
 
-test(
+sourceContractTest(
   "native producer profiler harness compiles and runs",
   { skip: process.platform === "win32" && !existsSync(compiler) },
   () => {

@@ -6,12 +6,12 @@ import { spawnSync } from "node:child_process";
 import { existsSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { dirname, join, resolve } from "node:path";
-import test from "node:test";
+import { readVendorFileSync, sourceContractTest } from "./helpers/source-contract.mjs";
 
 const root = resolve(import.meta.dirname, "..");
 const nativeRoot = join(root, "vendor/dolphin/Source/Core");
 const nativeFile = "VideoBackends/WebGPU/WebGPUGfx.cpp";
-const gfx = readFileSync(join(nativeRoot, nativeFile), "utf8").replace(/\r\n/g, "\n");
+const gfx = readVendorFileSync(join(nativeRoot, nativeFile)).replace(/\r\n/g, "\n");
 const patch = readFileSync(join(root,
   "patches/dolphin-wasm/snapshot/0065-webgpu-select-uniforms-by-pipeline-usage.patch"), "utf8");
 const compiler = process.platform === "win32"
@@ -243,7 +243,7 @@ int main() {
 `;
 }
 
-test("native pipeline usage owns uniform selection across empty and repeated utility draws", {
+sourceContractTest("native pipeline usage owns uniform selection across empty and repeated utility draws", {
   skip: process.platform === "win32" && !existsSync(compiler),
 }, (t) => {
   assert.match(gfx, /return std::make_unique<WebGPUPipeline>\(config, bridge_id\);/);

@@ -4,6 +4,7 @@
 import assert from "node:assert/strict";
 import { readFile } from "node:fs/promises";
 import test from "node:test";
+import { sourceContractTest } from "./helpers/source-contract.mjs";
 
 import {
   buildDenseUboSourcePacket,
@@ -193,7 +194,7 @@ test("wgpuubopack is default-off and explicitly selectable", () => {
   assert.equal(requestedWgpuUboPack("?wgpuubopack=0", true), false);
 });
 
-test("patch 0029 integrates one transactional UBO upload with cache fallback", async () => {
+sourceContractTest("patch 0029 integrates one transactional UBO upload with cache fallback", async () => {
   const [patch, coreCmake, worker, gfx, abi] = await Promise.all([
     readFile(new URL("../patches/dolphin-wasm/snapshot/0029-webgpu-dense-ubo-packets.patch", import.meta.url), "utf8"),
     readFile(new URL("../vendor/dolphin/Source/Core/Core/CMakeLists.txt", import.meta.url), "utf8"),
@@ -257,7 +258,7 @@ test("patch 0029 integrates one transactional UBO upload with cache fallback", a
   }
 });
 
-test("save-state loads force dense UBO classes to republish before drawing", async () => {
+sourceContractTest("save-state loads force dense UBO classes to republish before drawing", async () => {
   const [worker, videoState, vertexShader, pixelShader, geometryShader, gfx] = await Promise.all([
     readFile(new URL("../src/upstream-discio-worker.js", import.meta.url), "utf8"),
     readFile(new URL("../vendor/dolphin/Source/Core/VideoCommon/VideoState.cpp", import.meta.url), "utf8"),
