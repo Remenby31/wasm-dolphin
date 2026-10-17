@@ -58,18 +58,26 @@ use `${ENV}`. Presets live in `lib/matrix.mjs` (`rec`, `rec-nojit`, `wgpu`,
 added. Runs are interleaved (run 1 of every cell, then run 2, …) so load drift
 does not bias one cell. A `localOnly` game refuses to run when `CI` is set.
 
-**diff** `--iso X [--ref cfg] [--cand cfg] [--frame N] [--state s.sav] [--steps f] [--pause]`
+**diff** `--iso X [--ref cfg] [--cand cfg] [--frame N] [--state s.sav] [--steps f] [--running]`
 or `--ref-png a.png --cand-png b.png`. Boots the same disc twice, waits for core
-frame N (or loads the savestate, then N more frames), grabs the frame through
-`canvas.captureStream()` (falls back to an element screenshot), and scores the
-candidate against the reference on a 160×120 grid:
+frame N (or loads the savestate, then N more frames), pauses the core (the
+pause must be confirmed by the worker, or the command fails; `--running` skips
+it), grabs the frame through `canvas.captureStream()` (falls back to an element
+screenshot), and scores the candidate against the reference on a 160×120 grid:
 
 | Field | Meaning |
 |---|---|
 | `ssim` | mean 8×8-block SSIM on luma |
 | `lostDetail` | share of reference blocks with detail that are flat in the candidate |
 | `extent` / `extentDelta` | horizontal and vertical span of non-black content |
-| `verdict` | `match` (ssim ≥ 0.9), `missing-detail` (lostDetail ≥ 0.3: overlay drawn, 3D missing), `blank`, `geometry-mismatch` (span differs > 2 %), `different` |
+| `frameGap` | emulated frames between the two captures (the pause is not atomic) |
+| `verdict` | `blank`, `missing-detail` (lostDetail ≥ 0.3: overlay drawn, 3D missing), `geometry-mismatch` (span differs > 2 %), `match` (ssim ≥ 0.9), `different`, or `frames-differ` |
+
+Render verdicts are only given at the same emulated frame. The pause lands a
+frame or two late, so captures up to `PHASE_TOLERANCE.maxFrameGap` (2) frames
+apart are compared again on a coarse 48×36 grid with a match bar of 0.8: a
+few pixels of animation pass (a 4 px shift scores ~0.90), a real difference
+does not (8 px ~0.66). Further apart: `frames-differ`, no verdict.
 
 Frame grabs prefer `captureStream()`. A canvas that has not repainted since the
 stream opened yields no frame (seen with wgpu on XFB-only homebrews); the grab
@@ -83,7 +91,8 @@ map) and `diff.json`, and exits 1 on any verdict listed in `--fail-on`
 **fuzz** `[disc.iso …] [--interp q] [--jit q] [--timeout s]`. Runs each disc
 with `wasmjit=0` and with `wasmjit=1&jitwarmup=120&forcejit=1`, each until the
 homebrew reports done, the worker dies, the core stalls, or the timeout. Then
-compares: JIT crash (with the first error and the PC, mapped to the cpufuzz
+compares (a fallback to final frames for discs without markers, where a black
+frame on either side is a failure): JIT crash (with the first error and the PC, mapped to the cpufuzz
 program and word; that PC is the last one the page received before the worker
 died, so it can be stale and the mapping is then absent), each side's self-check, the final result hash across the
 two runs, or for discs without markers the final frames. `jit-not-engaged` is a

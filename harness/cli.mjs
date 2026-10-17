@@ -2,6 +2,7 @@
 // SPDX-License-Identifier: MIT
 // QA harness entry point. Usage: harness/run <command> [options]; see harness/README.md.
 import { execFileSync } from "node:child_process";
+import { randomBytes } from "node:crypto";
 import { existsSync, mkdirSync, readdirSync, readFileSync, rmSync, statSync, writeFileSync } from "node:fs";
 import os from "node:os";
 import path from "node:path";
@@ -9,17 +10,19 @@ import { parseArgs } from "node:util";
 import { ensureServer, pageCall, readCoreProgress, REPO_ROOT, waitForCoreFrame } from "./lib/browser.mjs";
 import { analyzeDifferential, INTERP_QUERY, JIT_QUERY } from "./lib/fuzz.mjs";
 import { releaseAll, setPad } from "./lib/gamepad-mock.mjs";
-import { compareFrames, diffImage } from "./lib/image-diff.mjs";
+import { compareAtFrames, compareFrames, diffImage } from "./lib/image-diff.mjs";
 import { decodeMarkers, decodePadRow, hex } from "./lib/markers.mjs";
 import { expandMatrix, matrixMarkdown, PRESETS, resolveQuery, runFlags, summarizeMatrix, summarizeRun } from "./lib/matrix.mjs";
 import { decodePng } from "./lib/png.mjs";
-import { grabFrame, openSession, runUntilDone, sample, savePng, setCorePaused, waitSeconds } from "./lib/session.mjs";
+import { assertPaused, grabFrame, openSession, runUntilDone, sample, savePng, setCorePaused, waitSeconds } from "./lib/session.mjs";
 import { runSteps, validateSteps } from "./lib/steps.mjs";
 import { machineSnapshot } from "./lib/system.mjs";
 import { claim, deletable, removeIfDeletable } from "./lib/ownership.mjs";
 
 const HOMEBREW_OUT = path.join(REPO_ROOT, "harness", "homebrew", "out");
-const stamp = () => new Date().toISOString().replace(/[:.]/g, "-").slice(0, 19);
+// Campaign ids are unique per process, not per second: two runs started in
+// the same second must never share (and clean up) one directory.
+const stamp = () => `${new Date().toISOString().replace(/[:.]/g, "-").slice(0, 19)}-${process.pid}-${randomBytes(3).toString("hex")}`;
 
 const COMMON = {
   port: { type: "string", default: process.env.HARNESS_PORT || "8082" },
@@ -90,7 +93,7 @@ async function withServer(values, fn) {
 
 // ---------------------------------------------------------------- measure
 async function measureOne(server, values, { iso, query, label, warmup, secs, shotEvery, dir, steps }) {
-  const session = await openSession({ base: server.base, query, iso, headed: !values.headless, keepProfile: values["keep-profiles"] });
+  const session = await openSession({ base: server.base, server, query, iso, headed: !values.headless, keepProfile: values["keep-profiles"] });
   try {
     if (steps) await runSteps(session.page, steps);
     await waitSeconds(session, warmup);
@@ -184,7 +187,7 @@ async function cmdMeasure(argv) {
 // ---------------------------------------------------------------- diff
 async function captureScene(server, values, { iso, query, frame, settle, pause, state, steps, label, dir }) {
   const routes = state ? { "**/__harness_state.sav": path.resolve(state) } : {};
-  const session = await openSession({ base: server.base, query, iso, headed: !values.headless, keepProfile: values["keep-profiles"], routes });
+  const session = await openSession({ base: server.base, server, query, iso, headed: !values.headless, keepProfile: values["keep-profiles"], routes });
   try {
     if (steps) await runSteps(session.page, steps);
     let progress = await waitForCoreFrame(session.page, state ? 60 : frame, 120000);
@@ -193,9 +196,13 @@ async function captureScene(server, values, { iso, query, frame, settle, pause, 
       if (!loaded?.loaded) throw new Error(`savestate load failed: ${JSON.stringify(loaded)}`);
       progress = await waitForCoreFrame(session.page, (progress.frame ?? 0) + frame, 60000);
     }
-    // Pause as soon as frame N is reached, then let the picture settle; without
-    // --pause the core keeps running through the settle time.
-    if (pause) await setCorePaused(session.page, true);
+    // Pause as soon as frame N is reached, then let the picture settle; with
+    // --running the core keeps running through the settle time.
+    if (pause) {
+      // The pause must be confirmed: a refused pause leaves the core running
+      // and the capture at an unknown frame.
+      assertPaused(await setCorePaused(session.page, true));
+    }
     await session.page.waitForTimeout(settle * 1000);
     const atGrab = await readCoreProgress(session.page);
     const image = await grabFrame(session.page);
@@ -213,7 +220,8 @@ async function cmdDiff(argv) {
     cand: { type: "string", default: "core=upstream&video=wgpu&presenter=webgpu&cpu=dual&speed=1&wasmjit=0" },
     frame: { type: "string", default: "300" },
     settle: { type: "string", default: "1" },
-    pause: { type: "boolean", default: false },
+    // Pausing is the default: render verdicts need a known emulated frame.
+    running: { type: "boolean", default: false },
     state: { type: "string" },
     steps: { type: "string" },
     "ref-png": { type: "string" },
@@ -229,7 +237,7 @@ async function cmdDiff(argv) {
     meta = { ref: values["ref-png"], cand: values["cand-png"] };
   } else {
     if (!values.iso) throw new Error("usage: harness/run diff --iso disc.iso [--ref q] [--cand q] [--frame N] [--state file.sav] | --ref-png a --cand-png b");
-    const opts = { iso: values.iso, frame: Number(values.frame), settle: Number(values.settle), pause: values.pause, state: values.state, steps: loadSteps(values.steps), dir };
+    const opts = { iso: values.iso, frame: Number(values.frame), settle: Number(values.settle), pause: !values.running, state: values.state, steps: loadSteps(values.steps), dir };
     const shots = await withServer(values, async (server) => [
       await captureScene(server, values, { ...opts, query: resolveQuery(configFromArg(values.ref)), label: "ref" }),
       await captureScene(server, values, { ...opts, query: resolveQuery(configFromArg(values.cand)), label: "cand" })
@@ -239,12 +247,11 @@ async function cmdDiff(argv) {
     // The frame actually captured, not the one asked for: a gap means the two
     // pictures may show different moments of an animated scene.
     meta.frameGap = Math.abs((meta.ref.frame ?? NaN) - (meta.cand.frame ?? NaN));
-    if (!(meta.frameGap <= 2)) console.warn(`[diff] captured frames differ (ref ${meta.ref.frame}, cand ${meta.cand.frame}); use --pause or --state for animated scenes`);
+    if (!(meta.frameGap <= 2)) console.warn(`[diff] captured frames differ (ref ${meta.ref.frame}, cand ${meta.cand.frame}): no render verdict`);
   }
-  const result = compareFrames(ref, cand);
-  // Two different moments of an animated scene are not a rendering verdict.
-  if (meta.frameGap > 2 && result.verdict !== "match") result.verdict = "frames-differ";
-  savePng(diffImage(ref, cand, result), path.join(dir, "diff.png"));
+  // Offline PNGs carry no frame numbers: compare them as they are.
+  const result = meta.frameGap === undefined ? compareFrames(ref, cand) : compareAtFrames(ref, cand, meta.frameGap);
+  savePng(diffImage(ref, cand, result.blockMap ? result : compareFrames(ref, cand)), path.join(dir, "diff.png"));
   const { blockMap, ...score } = result;
   writeJson(path.join(dir, "diff.json"), { ...meta, machine: machineSnapshot(), score, blockMap });
   console.log(JSON.stringify({ dir, ...score }, null, 2));
@@ -253,7 +260,7 @@ async function cmdDiff(argv) {
 
 // ---------------------------------------------------------------- fuzz
 async function observe(server, values, iso, query, dir, label, timeoutSec) {
-  const session = await openSession({ base: server.base, query, iso, headed: !values.headless, keepProfile: values["keep-profiles"] });
+  const session = await openSession({ base: server.base, server, query, iso, headed: !values.headless, keepProfile: values["keep-profiles"] });
   try {
     const r = await runUntilDone(session, { timeoutSec });
     if (r.frame) savePng(r.frame, path.join(dir, `${label}.png`));
@@ -317,7 +324,7 @@ async function cmdPads(argv) {
   });
   const dir = outDir(values, "pads");
   const report = await withServer(values, async (server) => {
-    const session = await openSession({ base: server.base, query: values.query, iso: values.iso, headed: !values.headless, gamepads: { count: 4 }, keepProfile: values["keep-profiles"] });
+    const session = await openSession({ base: server.base, server, query: values.query, iso: values.iso, headed: !values.headless, gamepads: { count: 4 }, keepProfile: values["keep-profiles"] });
     try {
       await waitForCoreFrame(session.page, 120, 60000);
       const read = async (label) => {
@@ -364,7 +371,7 @@ async function cmdSavestate(argv) {
   });
   if (!values.iso || !values.to) throw new Error("usage: harness/run savestate --iso disc.iso --to out.sav [--config rec] [--steps steps.json] [--wait 5]");
   return withServer(values, async (server) => {
-    const session = await openSession({ base: server.base, query: resolveQuery(configFromArg(values.config)), iso: values.iso, headed: !values.headless, keepProfile: values["keep-profiles"] });
+    const session = await openSession({ base: server.base, server, query: resolveQuery(configFromArg(values.config)), iso: values.iso, headed: !values.headless, keepProfile: values["keep-profiles"] });
     try {
       if (values.steps) await runSteps(session.page, loadSteps(values.steps));
       await waitSeconds(session, Number(values.wait));

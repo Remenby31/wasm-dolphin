@@ -22,8 +22,18 @@ export function treeIdentity(root) {
   if (existsSync(file)) return { root: resolved, ...JSON.parse(readFileSync(file, "utf8")) };
   const git = (...args) => execFileSync("git", ["-C", resolved, ...args], { encoding: "utf8", maxBuffer: 1 << 28 });
   const commit = git("rev-parse", "HEAD").trim();
-  const changes = git("diff", "HEAD", "--", "index.html", "src", "cores", "tools");
-  return { root: resolved, commit, dirty: changes ? createHash("sha256").update(changes).digest("hex").slice(0, 16) : null };
+  const served = ["index.html", "src", "cores", "tools"];
+  const hash = createHash("sha256");
+  const changes = git("diff", "HEAD", "--", ...served);
+  hash.update(changes);
+  // Untracked files are served too (a new src/helper.js imported by app.js):
+  // their content is part of the identity.
+  const untracked = git("ls-files", "--others", "--exclude-standard", "-z", "--", ...served).split("\0").filter(Boolean).sort();
+  for (const file of untracked) {
+    hash.update(`\0${file}\0`);
+    hash.update(readFileSync(path.join(resolved, file)));
+  }
+  return { root: resolved, commit, dirty: changes || untracked.length ? hash.digest("hex").slice(0, 16) : null };
 }
 
 export function sameIdentity(a, b) {
@@ -37,6 +47,17 @@ async function probeIdentity(base) {
   } catch {
     return null;
   }
+}
+
+// A reused server is not ours: its owner may stop it and serve another tree
+// on the same port at any time. Callers check before and after every
+// measurement and throw away a run whose server changed.
+export async function verifyServer(base, identity) {
+  const now = await probeIdentity(base);
+  if (!sameIdentity(now, identity)) {
+    throw new Error(`server identity changed on ${base}: expected ${identity.root}@${identity.commit}, got ${now ? `${now.root}@${now.commit}` : "nothing"}`);
+  }
+  return true;
 }
 
 export async function ensureServer({ port, root }) {
@@ -63,13 +84,14 @@ export async function ensureServer({ port, root }) {
     if (!sameIdentity(other, identity)) {
       throw new Error(`port ${port} is in use by another server (${other?.foreign ? "not the harness" : `${other?.root}@${other?.commit}`}); stop it or pick another --port`);
     }
-    return { base, root: identity.root, identity, owned: false, stop: async () => {} };
+    return { base, root: identity.root, identity, owned: false, verify: () => verifyServer(base, identity), stop: async () => {} };
   }
   return {
     base,
     root: identity.root,
     identity,
     owned: true,
+    verify: () => verifyServer(base, identity),
     stop: () => new Promise((resolve) => {
       server.closeAllConnections?.();
       server.close(() => resolve());

@@ -11,7 +11,10 @@ import { encodePng } from "./png.mjs";
 import { claim } from "./ownership.mjs";
 import { machineSnapshot, sampleChromeCpu } from "./system.mjs";
 
-export async function openSession({ base, query, iso, headed = true, gamepads = null, keepProfile = false, routes = {} }) {
+export async function openSession({ base, server = null, query, iso, headed = true, gamepads = null, keepProfile = false, routes = {} }) {
+  // The served tree is checked before the page loads and again when the
+  // session closes; a run whose server changed in between is an error.
+  await server?.verify?.();
   const profileDir = mkdtempSync(path.join(os.tmpdir(), "gc-harness-profile-"));
   const releaseProfile = claim(profileDir, REPO_ROOT, "chrome-profile");
   const context = await launchChrome({ profileDir, headed });
@@ -38,6 +41,7 @@ export async function openSession({ base, query, iso, headed = true, gamepads = 
       await context.close().catch(() => {});
       releaseProfile();
       if (!keepProfile) rmSync(profileDir, { recursive: true, force: true });
+      await server?.verify?.();
     }
   };
 }
@@ -69,12 +73,21 @@ export async function waitSeconds(session, seconds) {
   for (let i = 0; i < seconds * 4 && !session.watch.fatal().length; i += 1) await session.page.waitForTimeout(250);
 }
 
+// The worker answers validationSetCorePaused with the core state it observed.
+export function assertPaused(response) {
+  if (response?.paused !== true) throw new Error(`core did not pause: ${JSON.stringify({ ...response, id: undefined })}`);
+  return response;
+}
+
 // A self-checking homebrew is done when its status says pass/fail. padtest
 // (idle marker) and discs without markers never say so: they are done once
 // they ran minFrames frames.
 export function isDone(markers, info, minFrames) {
-  if (markers?.status === "pass" || markers?.status === "fail") return true;
-  return (markers?.status === "idle" || markers?.status == null) && info?.frame >= minFrames;
+  // A status only counts when the whole marker area decodes cleanly; a game
+  // picture that is yellow or green in that corner is not a marker.
+  const status = markers?.confident ? markers.status : null;
+  if (status === "pass" || status === "fail") return true;
+  return (status === "idle" || status == null) && info?.frame >= minFrames;
 }
 
 // Poll a marker-speaking homebrew until it reports done (pass/fail), the

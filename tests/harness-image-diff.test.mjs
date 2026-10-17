@@ -4,7 +4,7 @@
 import assert from "node:assert/strict";
 import test from "node:test";
 
-import { compareFrames } from "../harness/lib/image-diff.mjs";
+import { compareAtFrames, compareFrames, PHASE_TOLERANCE } from "../harness/lib/image-diff.mjs";
 
 const W = 640, H = 480;
 
@@ -69,4 +69,22 @@ test("a squeezed picture is a geometry mismatch even when SSIM is high", () => {
   const r = compareFrames(bands(0), bands(20));
   assert.ok(r.ssim >= 0.9, `ssim ${r.ssim}`);
   assert.equal(r.verdict, "geometry-mismatch");
+});
+
+// Review round 2: a correct animation captured a frame apart (4 px of motion)
+// was rejected; captures too far apart must not be judged at all.
+test("round 2: a small animation phase is tolerated, a large frame gap is not judged", () => {
+  const shifted = (dx) => {
+    const data = new Uint8Array(W * H * 4);
+    for (let y = 0; y < H; y += 1) for (let x = 0; x < W; x += 1) {
+      const v = (((x - dx) >> 5) + (y >> 5)) & 1 ? 220 : 40;
+      data.set([v, v, v, 255], (y * W + x) * 4);
+    }
+    return { width: W, height: H, data };
+  };
+  assert.equal(compareFrames(shifted(0), shifted(4)).verdict, "different");
+  assert.equal(compareAtFrames(shifted(0), shifted(4), 1).verdict, "match");
+  assert.equal(compareAtFrames(shifted(0), shifted(16), 1).verdict, "different");
+  assert.equal(compareAtFrames(shifted(0), shifted(4), PHASE_TOLERANCE.maxFrameGap + 1).verdict, "frames-differ");
+  assert.equal(compareAtFrames(shifted(0), { width: W, height: H, data: new Uint8Array(W * H * 4) }, 1).verdict, "blank");
 });

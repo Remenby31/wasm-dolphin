@@ -51,3 +51,14 @@ test("every marker row is compared", () => {
   assert.equal(r.ok, false);
   assert.deepEqual(r.findings.map((f) => [f.kind, f.rows]), [["divergence", [3]]]);
 });
+
+// Review round 2: with the no-marker fallback reachable, two black captures
+// compared equal and passed.
+test("round 2: black captures never pass the frame comparison", () => {
+  const W = 64, H = 48;
+  const black = { width: W, height: H, data: new Uint8Array(W * H * 4) };
+  const run = { outcome: "done", info: { jitc: 50, jitr: 9000 }, markers: { status: null, rows: [0, 0, 0, 0], confident: false }, frame: black, fatal: [] };
+  const r = analyzeDifferential({ interp: run, jit: run });
+  assert.equal(r.ok, false);
+  assert.deepEqual(r.findings.map((f) => f.kind), ["interp-blank-frame", "jit-blank-frame"]);
+});
