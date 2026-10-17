@@ -53,12 +53,20 @@ export function analyzeDifferential({ interp, jit, symbols = null, frameMatch = 
       });
     }
   }
-  if (jit.outcome === "done" && !(jit.info?.jitc > 0)) add("warn", "jit-not-engaged", { note: "0 JIT blocks compiled: the JIT side tested nothing" });
+  // A JIT that compiled or ran nothing compared nothing: that is a failure,
+  // not a pass.
+  if (jit.outcome === "done" && !(jit.info?.jitc > 0 && jit.info?.jitr > 0)) {
+    add("error", "jit-not-exercised", { jitBlocksCompiled: jit.info?.jitc ?? null, jitBlocksRun: jit.info?.jitr ?? null });
+  }
 
   if (interp.outcome === "done" && jit.outcome === "done") {
     const im = interp.markers, jm = jit.markers;
     if (im?.confident && jm?.confident) {
-      if (im.rows[0] !== jm.rows[0]) add("error", "divergence", { interp: hex(im.rows[0]), jit: hex(jm.rows[0]) });
+      // Every row: padtest has one row per port, cpufuzz one per check.
+      const rows = im.rows.map((v, i) => i).filter((i) => im.rows[i] !== jm.rows[i]);
+      if (rows.length) add("error", "divergence", { rows, interp: im.rows.map(hex), jit: jm.rows.map(hex) });
+    } else if (im?.confident !== jm?.confident) {
+      add("error", "markers-unreadable", { interp: Boolean(im?.confident), jit: Boolean(jm?.confident) });
     } else if (interp.frame && jit.frame) {
       const d = compareFrames(interp.frame, jit.frame);
       if (d.ssim < frameMatch) add("error", "frame-divergence", { ssim: d.ssim, meanAbs: d.meanAbs });

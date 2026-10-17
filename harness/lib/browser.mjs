@@ -1,12 +1,13 @@
 // Copyright 2026 wasm-dolphin contributors
 // SPDX-License-Identifier: MIT
 // Chrome (headed, isolated profile) + local server plumbing for the harness.
-import { execFileSync, spawn } from "node:child_process";
+import { execFileSync } from "node:child_process";
 import { existsSync, readFileSync } from "node:fs";
 import path from "node:path";
 import { pathToFileURL } from "node:url";
 import { FRAME_FIELDS } from "./matrix.mjs";
 import { decodePng } from "./png.mjs";
+import { ensureServer as serveTree } from "./server.mjs";
 
 export const REPO_ROOT = path.resolve(path.dirname(new URL(import.meta.url).pathname), "..", "..");
 
@@ -37,45 +38,9 @@ export function withTimeout(promise, ms, what) {
   ]);
 }
 
-// Start tools/serve.mjs on 127.0.0.1:port unless this worktree is already
-// served there. Refuses to reuse a server whose app differs from this tree.
+// Served in-process with an identity check: see server.mjs.
 export async function ensureServer({ port, root = REPO_ROOT }) {
-  const base = `http://127.0.0.1:${port}/`;
-  const probePath = "src/app.js"; // serve.mjs only serves an allowlist (index.html, src/, cores/)
-  const expected = readFileSync(path.join(root, probePath), "utf8");
-  const probe = async () => {
-    try {
-      const res = await fetch(base + probePath);
-      return { up: true, ours: res.ok && (await res.text()) === expected };
-    } catch {
-      return { up: false, ours: false };
-    }
-  };
-  let state = await probe();
-  if (state.up && !state.ours) throw new Error(`port ${port} is served from another tree; stop it or pick another --port`);
-  if (state.ours) return { base, stop: async () => {}, owned: false };
-  const child = spawn(process.execPath, ["tools/serve.mjs"], {
-    cwd: root,
-    env: { ...process.env, HOST: "127.0.0.1", PORT: String(port) },
-    stdio: ["ignore", "pipe", "pipe"]
-  });
-  let log = "";
-  child.stdout.on("data", (d) => { log += d; });
-  child.stderr.on("data", (d) => { log += d; });
-  for (let i = 0; i < 50 && !(state = await probe()).ours; i += 1) await new Promise((r) => setTimeout(r, 100));
-  if (!state.ours) {
-    child.kill();
-    throw new Error(`server did not come up on ${base}: ${log}`);
-  }
-  return {
-    base,
-    owned: true,
-    stop: () => new Promise((resolve) => {
-      if (child.exitCode !== null) return resolve();
-      child.once("exit", resolve);
-      child.kill();
-    })
-  };
+  return serveTree({ port, root });
 }
 
 export async function launchChrome({ profileDir, headed = true, channel = "chrome", args = [] }) {
@@ -153,7 +118,8 @@ export async function waitForCoreFrame(page, frames, timeoutMs) {
     last = await readCoreProgress(page);
     if (last?.error && /no answer/.test(last.error)) return { ...last, timedOut: true };
     if (last?.frame >= frames) return last;
-    await page.waitForTimeout(250);
+    // Poll tightly: every 30 ms is ~2 frames of overshoot at most.
+    await page.waitForTimeout(30);
   }
   return { ...last, timedOut: true };
 }

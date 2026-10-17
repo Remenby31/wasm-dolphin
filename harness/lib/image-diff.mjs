@@ -115,8 +115,10 @@ export function compareFrames(reference, candidate, { thresholds = DEFAULT_THRES
   let verdict = "different";
   if (candSigma < thresholds.blankSigma) verdict = "blank";
   else if (lostDetail >= thresholds.lostDetail) verdict = "missing-detail";
-  else if (ssim >= thresholds.match) verdict = "match";
+  // Geometry before SSIM: a picture squeezed by a few percent can still score
+  // a high SSIM on smooth content.
   else if (extentDelta > thresholds.extent) verdict = "geometry-mismatch";
+  else if (ssim >= thresholds.match) verdict = "match";
   return {
     verdict,
     ssim: Math.round(ssim * 1000) / 1000,

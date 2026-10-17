@@ -54,3 +54,19 @@ test("resolution differences alone do not fail the comparison", () => {
   }
   assert.equal(compareFrames(small, big).verdict, "match");
 });
+
+// Review 2026-10-17: smooth content squeezed between two 20 px margins scored
+// SSIM 0.927 and came out "match".
+test("a squeezed picture is a geometry mismatch even when SSIM is high", () => {
+  const bands = (margin) => {
+    const data = new Uint8Array(W * H * 4);
+    for (let y = 0; y < H; y += 1) for (let x = margin; x < W - margin; x += 1) {
+      const v = 60 + ((y >> 5) & 1) * 120;
+      data.set([v, v, v, 255], (y * W + x) * 4);
+    }
+    return { width: W, height: H, data };
+  };
+  const r = compareFrames(bands(0), bands(20));
+  assert.ok(r.ssim >= 0.9, `ssim ${r.ssim}`);
+  assert.equal(r.verdict, "geometry-mismatch");
+});
