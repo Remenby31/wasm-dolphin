@@ -1,0 +1,15 @@
+{
+  "name": "homebrew",
+  "runs": 3,
+  "warmupSec": 8,
+  "sampleSec": 15,
+  "games": [
+    { "id": "gxscene", "iso": "harness/homebrew/out/gxscene.iso" },
+    { "id": "cpufuzz-nomcrf", "iso": "harness/homebrew/out/cpufuzz-nomcrf.iso" }
+  ],
+  "configs": [
+    { "id": "sw-interp", "preset": "sw-interp" },
+    { "id": "sw-jit", "preset": "sw-fast-jit" },
+    { "id": "wgpu-interp", "preset": "wgpu-nojit" }
+  ]
+}
