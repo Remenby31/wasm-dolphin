@@ -906,6 +906,9 @@ std::uint32_t* GetFrameSignalPtr()
 // armed for one exact output index; the XFB is decoded at native size into a
 // separate buffer at that output, or the capture is marked missed. The
 // harness never infers the frame from wall-clock time.
+#ifndef EMSCRIPTEN_KEEPALIVE
+#define EMSCRIPTEN_KEEPALIVE
+#endif
 struct DolphinWebHarnessViEntry
 {
   double host_ms;
