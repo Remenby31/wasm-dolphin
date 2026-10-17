@@ -65,6 +65,10 @@ jobs:
       - name: npm test
         run: npm test
 
+      # Source-contract tests read the patched vendor/dolphin the build left.
+      - name: npm run test:contract
+        run: npm run test:contract
+
       - name: GPL corresponding source
         run: npm run dist:source
 
