@@ -1,3 +1,4 @@
+import { widenU32Counter } from "./u32-counter.js";
 import {
   DEFAULT_UPSTREAM_CORE_SHA256,
   DEFAULT_UPSTREAM_CORE_URL,
@@ -265,6 +266,7 @@ export class UpstreamWorkerAdapter {
     this.cpuCoreName = "";
     this.ppcWasmBlockCompileCount = 0;
     this.ppcWasmBlockRunCount = 0;
+    this.widenBlockRunCount = widenU32Counter();
     this.ppcWasmHelperStats = "";
     this.frameProfileStats = "-";
     this.frameData = null;
@@ -969,7 +971,7 @@ export class UpstreamWorkerAdapter {
       this.ppcWasmBlockCompileCount = response.ppcWasmBlockCompileCount;
     }
     if (Number.isFinite(response.ppcWasmBlockRunCount)) {
-      this.ppcWasmBlockRunCount = response.ppcWasmBlockRunCount;
+      this.ppcWasmBlockRunCount = this.widenBlockRunCount(response.ppcWasmBlockRunCount);
     }
     if (typeof response.ppcWasmHelperStats === "string") {
       this.ppcWasmHelperStats = response.ppcWasmHelperStats;

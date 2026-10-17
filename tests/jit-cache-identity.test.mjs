@@ -1,6 +1,7 @@
 import assert from "node:assert/strict";
 import { readFile } from "node:fs/promises";
 import test from "node:test";
+import { sourceContractTest } from "./helpers/source-contract.mjs";
 
 import {
   JIT_CACHE_ENTRY_KEY_SCHEMA,
@@ -111,7 +112,7 @@ test("worker source locks v3 migration and reconcile-before-seed ordering", asyn
   assert.match(source, /verifyCanonicalWasmBlockKey\(String\(data\.hash\), bytes\)/);
 });
 
-test("native compile path supplies the same canonical SHA-256 key domain", async () => {
+sourceContractTest("native compile path supplies the same canonical SHA-256 key domain", async () => {
   const source = await readFile(
     new URL(
       "../vendor/dolphin/Source/Core/Core/PowerPC/CachedInterpreter/CachedInterpreter.cpp",

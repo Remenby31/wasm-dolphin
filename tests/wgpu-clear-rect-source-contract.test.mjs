@@ -44,6 +44,7 @@ import { existsSync } from "node:fs";
 import { readFile } from "node:fs/promises";
 import { fileURLToPath } from "node:url";
 import test from "node:test";
+import { sourceContractTest } from "./helpers/source-contract.mjs";
 
 const gfxUrl = new URL(
   "../vendor/dolphin/Source/Core/VideoBackends/WebGPU/WebGPUGfx.cpp",
@@ -80,7 +81,7 @@ function clearRegionBody(source) {
   throw new Error("unbalanced braces in WebGPUGfx::ClearRegion");
 }
 
-test("the scissored clear is a renderer capability that defaults ON", { skip }, async () => {
+sourceContractTest("the scissored clear is a renderer capability that defaults ON", { skip }, async () => {
   const source = await read(gfxUrl);
 
   const bit = /DOLPHIN_WEB_RENDERER_FEATURE_SCISSORED_CLEAR_RECT\s*=\s*1u\s*<<\s*(\d+)\s*;/.exec(
@@ -114,7 +115,7 @@ test("the scissored clear is a renderer capability that defaults ON", { skip }, 
   assert.match(cmake, /'_GetRendererFeatureMask'/, "getter is not in EXPORTED_FUNCTIONS");
 });
 
-test("ClearRegion emits ClearRect off the renderer mask, not the CPU mask", { skip }, async () => {
+sourceContractTest("ClearRegion emits ClearRect off the renderer mask, not the CPU mask", { skip }, async () => {
   const body = clearRegionBody(await read(gfxUrl));
 
   // The regression this exists to catch: gating renderer behaviour on the
@@ -170,7 +171,7 @@ test("ClearRegion emits ClearRect off the renderer mask, not the CPU mask", { sk
   assert.match(body, /z & 0xFFFFFF\) \/ 16777216\.0f/, "depth normalisation changed");
 });
 
-test("native and JS agree on the ClearRect opcode number", { skip }, async () => {
+sourceContractTest("native and JS agree on the ClearRect opcode number", { skip }, async () => {
   const header = await read(streamHeaderUrl);
   const nativeOp = /ClearRect\s*=\s*(\d+)\s*,/.exec(header);
   assert.ok(nativeOp, "CmdOp::ClearRect is not declared in WebGPUCommandStream.h");

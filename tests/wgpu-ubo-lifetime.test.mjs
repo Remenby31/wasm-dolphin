@@ -3,17 +3,17 @@
 
 import assert from "node:assert/strict";
 import { spawnSync } from "node:child_process";
-import { existsSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import { existsSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { dirname, join, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
-import test from "node:test";
+import { readVendorFileSync, sourceContractTest } from "./helpers/source-contract.mjs";
 
 const root = resolve(dirname(fileURLToPath(import.meta.url)), "..");
 const nativeRoot = join(root, "vendor/dolphin/Source/Core");
 const sourcePath = join(nativeRoot, "VideoBackends/WebGPU/WebGPUGfx.cpp");
-const source = readFileSync(sourcePath, "utf8");
-const header = readFileSync(join(nativeRoot, "VideoBackends/WebGPU/WebGPUGfx.h"), "utf8");
+const source = readVendorFileSync(sourcePath);
+const header = readVendorFileSync(join(nativeRoot, "VideoBackends/WebGPU/WebGPUGfx.h"));
 const pinnedClang = join(process.env.USERPROFILE ?? "", "emsdk/upstream/bin/clang++.exe");
 const compiler = process.platform === "win32" ? pinnedClang : "clang++";
 
@@ -176,7 +176,7 @@ int main() {
 `;
 }
 
-test("retained native UBO slices survive ring wrap with content caching off or on", {
+sourceContractTest("retained native UBO slices survive ring wrap with content caching off or on", {
   skip: process.platform === "win32" && !existsSync(compiler),
 }, (t) => {
   const directory = mkdtempSync(join(tmpdir(), "wgpu-ubo-lifetime-"));

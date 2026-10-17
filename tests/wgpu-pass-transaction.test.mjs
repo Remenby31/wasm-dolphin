@@ -4,6 +4,7 @@
 import assert from "node:assert/strict";
 import { readFile } from "node:fs/promises";
 import test from "node:test";
+import { sourceContractTest } from "./helpers/source-contract.mjs";
 
 import { selectAtomicReplayLimit } from "../src/wgpu-replay-diagnostics.js";
 
@@ -114,7 +115,7 @@ test("a failed required resource publication poisons the whole pass", () => {
   assert.equal(ring.batchAborts, 1);
 });
 
-test("producer source stages passes, publishes batches once, and resets cached state on abort", async () => {
+sourceContractTest("producer source stages passes, publishes batches once, and resets cached state on abort", async () => {
   const [header, stream, gfx] = await Promise.all([
     readFile(new URL(
       "../vendor/dolphin/Source/Core/VideoBackends/WebGPU/WebGPUCommandStream.h",
@@ -173,7 +174,7 @@ test("worker publishes the actual consumed index and uses 16K only as a work bud
     /selectAtomicReplayLimit\(\{[\s\S]*?maxRecords:\s*WGPU_REPLAY_WINDOW_RECORDS/);
 });
 
-test("buffer uploads carry stable producer roles without widening the wire record", async () => {
+sourceContractTest("buffer uploads carry stable producer roles without widening the wire record", async () => {
   const [header, stream, gfxHeader, gfx, vertex] = await Promise.all([
     readFile(new URL(
       "../vendor/dolphin/Source/Core/VideoBackends/WebGPU/WebGPUCommandStream.h",

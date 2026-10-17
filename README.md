@@ -201,13 +201,20 @@ scene-, cache-, browser-, and machine-dependent.
 
 | Input | Keys |
 |-------|------|
-| A / B / X / Y | `X`, `Z`, `S`, `A` |
+| A / B / X / Y | `X`, `Z`, `V`, `B` |
 | Start | `Enter` |
 | L / R / Z | `Q`, `E`, `C` |
 | D-pad | Arrow keys |
 | Main stick | `W`, `A`, `S`, `D` |
+| C-stick | `I`, `J`, `K`, `L` |
 
 Standard browser gamepads are also polled. Wii Remote input is not implemented.
+
+A stick key, or a gamepad axis at full tilt, moves the emulated stick 96 steps
+from centre (`0x80 ± 0x60`), not the full 127 a byte allows. That is deliberate:
+genuine GameCube sticks stop at their gate around ±100 (main) and ±92 (C-stick),
+per the averages Dolphin uses for its own emulated gate. Games are tuned for that
+travel, so 127 would be a deflection no real controller produces.
 
 ---
 
@@ -391,7 +398,8 @@ changes to the rasterizer, JIT, or shaders are baked into the committed core
 ## Testing & validation
 
 ```bash
-npm test          # Node unit tests (tests/*.test.mjs)
+npm test          # Node unit tests (tests/*.test.mjs); no vendor/ needed
+npm run test:contract # source-contract tests; need the patched vendor/ tree
 npm run check     # syntax-check all JS entry points
 npm run perf:gate # perf regression gate
 ```

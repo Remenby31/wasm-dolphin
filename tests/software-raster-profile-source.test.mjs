@@ -1,6 +1,7 @@
 import assert from "node:assert/strict";
 import { readFile } from "node:fs/promises";
 import test from "node:test";
+import { sourceContractTest } from "./helpers/source-contract.mjs";
 
 test("software raster profiling is metrics-gated and explicitly sampled", async () => {
   const header = await readFile(
@@ -36,7 +37,7 @@ test("software raster profiling is metrics-gated and explicitly sampled", async 
   assert.match(header, /PublishGeneratedFrame/);
 });
 
-test("applied software sources keep measured CMPR and I4 specializations exact", async () => {
+sourceContractTest("applied software sources keep measured CMPR and I4 specializations exact", async () => {
   const [texture, hotCase, tev, bridge, hotPatch, i4Patch, parityHarness] = await Promise.all([
     readFile(
       new URL(
@@ -157,7 +158,7 @@ test("the locked Dolphin patch reaches each measured phase without changing rend
   assert.doesNotMatch(patch, /fast_software_raster\s*[=+\-]/);
 });
 
-test("sampled one-stage TEV cases retain an exact canonical tuple without a fast path", async () => {
+sourceContractTest("sampled one-stage TEV cases retain an exact canonical tuple without a fast path", async () => {
   const [header, tev, bridge, patch] = await Promise.all([
     readFile(new URL("../core/upstream/dolphin_web_raster_profile.h", import.meta.url), "utf8"),
     readFile(

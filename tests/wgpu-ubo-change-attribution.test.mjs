@@ -4,6 +4,7 @@
 import assert from "node:assert/strict";
 import { readFile } from "node:fs/promises";
 import test from "node:test";
+import { sourceContractTest } from "./helpers/source-contract.mjs";
 
 import { parseWgpuProducerStateStats } from "../src/wgpu-pass-state-cache.js";
 
@@ -57,7 +58,7 @@ test("missing or malformed UBO change vectors fail closed to zero triples", () =
   }
 });
 
-test("native UBO change instrumentation is metrics-gated and bounded to payload bytes", async () => {
+sourceContractTest("native UBO change instrumentation is metrics-gated and bounded to payload bytes", async () => {
   const [source, applied] = await Promise.all([
     readFile(patchPath, "utf8"),
     readFile(new URL(

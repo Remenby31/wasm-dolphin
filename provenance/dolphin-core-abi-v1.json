@@ -44,8 +44,8 @@
     {
       "path": "src/app.js",
       "hashMode": "lf-normalized",
-      "size": 48697,
-      "sha256": "0a6c2ffeda21cf0966b37292c39848848198127b83e059c61bb4d03d9e9e6cfc"
+      "size": 49228,
+      "sha256": "1c9eb9d2eb66783f10c665b77fa864049900ab7ac21f6e9d95cbeb29f71de2be"
     },
     {
       "path": "src/audio.js",
@@ -152,14 +152,14 @@
     {
       "path": "src/upstream-main-thread-adapter.js",
       "hashMode": "lf-normalized",
-      "size": 20246,
-      "sha256": "bd719473098f192545148df4733ec9539bd4300e19753c5e04098d1484312133"
+      "size": 20372,
+      "sha256": "2ca797e1c716fc4aa0f10580115d972217450e2ebd64343093046a9455a79c2c"
     },
     {
       "path": "src/upstream-worker-adapter.js",
       "hashMode": "lf-normalized",
-      "size": 41656,
-      "sha256": "de15d26f0586ad7864472fdea784d934d63f2790993967780cccf2a7ae638aa4"
+      "size": 41782,
+      "sha256": "59668683f8e9d9b25fe16403775bc8139fd2c2b8b07b59558f8df06d7e43b92e"
     },
     {
       "path": "src/upstream-worker-protocol.js",
