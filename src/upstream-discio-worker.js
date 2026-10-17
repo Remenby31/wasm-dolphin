@@ -1,3 +1,4 @@
+import { readViRing } from "./harness-vi-ring.js";
 import {
   DEFAULT_UPSTREAM_CORE_SHA256,
   DEFAULT_UPSTREAM_CORE_URL,
@@ -845,35 +846,15 @@ function readHarnessTimeline() {
         : null;
   const vi = { t: [], ticks: [], sinceBoot: [], sinceLoad: [], lost: 0, supported: why === null, why };
   if (vi.supported) {
-    const ptr = m._DolphinWeb_HarnessViRing();
-    const capacity = m._DolphinWeb_HarnessViRingCapacity() >>> 0;
     const head = m._DolphinWeb_HarnessViRingHead() >>> 0;
-    const read = harnessViRead ?? head;
-    const first = Math.max(read, head - capacity);
-    const f64 = new Float64Array(m.HEAPU8.buffer);
-    const u32 = new Uint32Array(m.HEAPU8.buffer);
-    // sinceBoot is each entry's sequence number: entries must be
-    // consecutive, and re-reading the sequence after the fields catches a
-    // slot overwritten while it was being read. Anything else is lost.
-    let expected = null;
-    for (let n = first; n < head; n += 1) {
-      const base = ptr + (n % capacity) * 24;
-      const seq = u32[(base + 16) >> 2];
-      const t = f64[base >> 3];
-      const ticks = u32[(base + 8) >> 2] + u32[(base + 12) >> 2] * 2 ** 32;
-      const sinceLoad = u32[(base + 20) >> 2];
-      if (u32[(base + 16) >> 2] !== seq || (expected !== null && seq !== expected)) {
-        vi.lost += 1;
-        expected = null;
-        continue;
-      }
-      expected = seq + 1;
-      vi.t.push(t);
-      vi.ticks.push(ticks);
-      vi.sinceBoot.push(seq);
-      vi.sinceLoad.push(sinceLoad);
-    }
-    vi.lost += first - read;
+    const ring = readViRing({
+      buffer: m.HEAPU8.buffer,
+      ptr: m._DolphinWeb_HarnessViRing(),
+      capacity: m._DolphinWeb_HarnessViRingCapacity() >>> 0,
+      head,
+      read: harnessViRead
+    });
+    Object.assign(vi, ring);
     harnessViRead = head;
   }
   return { presents: { ...presents, lost: presentsLost }, vi, now: harnessNow() };
