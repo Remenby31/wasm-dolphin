@@ -1,9 +1,9 @@
-import { existsSync, mkdirSync, readdirSync, writeFileSync } from "node:fs";
+import { chmodSync, existsSync, mkdirSync, readdirSync, readFileSync, writeFileSync } from "node:fs";
 import { spawnSync } from "node:child_process";
 import { homedir } from "node:os";
 import { delimiter, dirname, resolve } from "node:path";
 import { sha256File, verifyWasmToolchain } from "./wasm-toolchain.mjs";
-import { rustRemapFlags as remapFlags, sourcePathFlags as pathFlags, vendoredCargoArgs } from "./toolchain/path-maps.mjs";
+import { rustRemapFlags as remapFlags, scmGitShim, sourcePathFlags as pathFlags, vendoredCargoArgs } from "./toolchain/path-maps.mjs";
 
 const root = process.cwd();
 const sourceDir = resolve(root, "vendor/dolphin");
@@ -216,6 +216,16 @@ const cmakeArgs = [
 // Dolphin tree, not this repo. It can derive the root from the core source
 // path, but pass it explicitly so a clone at any path links correctly.
 cmakeArgs.push(`-DDOLPHIN_WASM_PROJECT_ROOT=${root.replace(/\\/g, "/")}`);
+
+// scmrev.h from the source lock, not from vendor/dolphin/.git (absent in the
+// GPL source archive). POSIX shell only; Windows keeps asking git.
+if (process.platform !== "win32") {
+  const lockedCommit = JSON.parse(readFileSync(resolve(root, "provenance/dolphin-source.lock.json"), "utf8")).upstream.commit;
+  const shim = resolve(buildDir, "scm-git.sh");
+  writeFileSync(shim, scmGitShim(lockedCommit));
+  chmodSync(shim, 0o755);
+  cmakeArgs.push("-DCMAKE_DISABLE_FIND_PACKAGE_Git=ON", "-DGIT_FOUND=ON", `-DGIT_EXECUTABLE=${shim}`);
+}
 
 // PROFILING_FUNCS=1 adds a wasm name section to the core so CPU profiles show
 // real symbols instead of wasm-function[N]. Name section only — no codegen or

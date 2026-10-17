@@ -8,7 +8,8 @@ import {
   buildIdentity, glueFacts, installCore, installRefusal, INSTALLED_FILES, resetStaleBuildTree, stampBuildTree
 } from "../tools/build-core-repro.mjs";
 import { readFileSync, existsSync } from "node:fs";
-import { rustRemapFlags, sourcePathFlags, vendoredCargoArgs } from "../tools/toolchain/path-maps.mjs";
+import { rustRemapFlags, scmGitShim, sourcePathFlags, vendoredCargoArgs } from "../tools/toolchain/path-maps.mjs";
+import { spawnSync } from "node:child_process";
 import { compareCoreBuildInfo } from "../tools/compare-core-builds.mjs";
 import { emscriptenTreeSha256, loadWasmToolchainLock, toolchainEnvironmentOverrides } from "../tools/wasm-toolchain.mjs";
 
@@ -198,4 +199,21 @@ test("install refuses a core that loses exports, runtime methods or WORKERFS", (
   assert.match(installRefusal(parity({ exports: { onlyCommitted: ["_Boot"], onlyRebuilt: [] } })), /_Boot/);
   assert.match(installRefusal(parity({ runtimeMethods: { onlyCommitted: ["PThread"], onlyRebuilt: [] } })), /PThread/);
   assert.match(installRefusal(parity({ runtimeMethodsRebuilt: ["FS"] })), /WORKERFS/);
+});
+
+test("the scmrev git shim answers like git on the locked, patched checkout", { skip: process.platform === "win32" }, () => {
+  const dir = mkdtempSync(path.join(tmpdir(), "scm-shim-"));
+  try {
+    const shim = path.join(dir, "git.sh");
+    const commit = "e22551eae1c84a7e4d0b6a5c519ef4ed4ef69df1";
+    writeFileSync(shim, scmGitShim(commit), { mode: 0o755 });
+    const ask = (...args) => spawnSync(shim, args, { encoding: "utf8" });
+    assert.equal(ask("rev-parse", "HEAD").stdout.trim(), commit);
+    assert.equal(ask("describe", "--always", "--long", "--dirty").stdout.trim(), "e22551eae1-dirty");
+    assert.equal(ask("rev-parse", "--abbrev-ref", "HEAD").stdout.trim(), "HEAD");
+    assert.equal(ask("rev-list", "--count", "HEAD", "^master").stdout.trim(), "0");
+    assert.notEqual(ask("describe", "--exact-match", "HEAD").status, 0, "no tag, like git");
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
 });

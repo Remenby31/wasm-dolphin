@@ -100,7 +100,10 @@ keeps the repository layout. Extract it and run
 `npm run build:core:repro -- --no-sync`: the crates build offline from the
 vendored copy, and their paths map onto the same virtual root as registry
 crates. A rebuild from the archive gives the same bytes as a rebuild from the
-checkout (checked on macOS: `83514d0e…` both ways). CI rebuilds the core from
+checkout (checked on macOS: `83514d0e…` both ways). Dolphin bakes the
+output of `git rev-parse`/`git describe` on `vendor/dolphin` into `scmrev.h`;
+the archive has no `.git`, so on macOS/Linux configure points Dolphin at a
+shim that answers with the locked commit, exactly as git does on a checkout. CI rebuilds the core from
 the published archive alone and fails if its hash differs from the checkout
 build.
 
