@@ -1,3 +1,4 @@
+import { widenU32Counter } from "./u32-counter.js";
 import { parseDolHeader } from "./dol.js";
 import {
   DEFAULT_UPSTREAM_CORE_SHA256,
@@ -75,6 +76,7 @@ export class UpstreamMainThreadAdapter {
     this.cpuCoreName = "";
     this.ppcWasmBlockCompileCount = 0;
     this.ppcWasmBlockRunCount = 0;
+    this.widenBlockRunCount = widenU32Counter();
     this.ppcWasmHelperStats = "";
     this.frameProfileStats = "-";
     this.coreBoot = { attempted: false, accepted: false, path: "", skippedReason: "" };
@@ -401,7 +403,7 @@ export class UpstreamMainThreadAdapter {
     this.ppcPc = this.api.getPpcPc?.() ?? 0;
     this.cpuCoreName = this.api.getCpuCoreName?.() ?? "";
     this.ppcWasmBlockCompileCount = this.api.getPpcWasmBlockCompileCount?.() ?? 0;
-    this.ppcWasmBlockRunCount = this.api.getPpcWasmBlockRunCount?.() ?? 0;
+    this.ppcWasmBlockRunCount = this.widenBlockRunCount(this.api.getPpcWasmBlockRunCount?.() ?? 0);
     this.ppcWasmHelperStats = joinedStats(
       this.api.getPpcWasmHelperStats?.(),
       this.api.getPpcProfileStats?.(),
