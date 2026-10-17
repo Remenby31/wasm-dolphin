@@ -899,13 +899,18 @@ std::uint32_t* GetFrameSignalPtr()
 }
 
 // ---- QA harness hooks (harness/README.md) --------------------------------
+// Off unless the harness turns them on (DolphinWeb_HarnessEnable, sent by the
+// worker on validationEnableHarness): production pays two counter
+// increments and one relaxed atomic load per VI output, nothing else.
+//
 // Every VI output (one per emulated field the game scans out, on the CPU
-// thread, in emulated time) gets an index counted from boot and from the
-// last savestate load, and lands in a ring the worker drains: the emulated
-// timeline, complete, with the host time of each output. A capture can be
-// armed for one exact output index; the XFB is decoded at native size into a
-// separate buffer at that output, or the capture is marked missed. The
-// harness never infers the frame from wall-clock time.
+// thread) is counted from boot and from the last savestate load; those
+// indices are the frame identity the harness uses. When enabled, each output
+// is logged in a ring with its emulated ticks and host time
+// (emscripten_get_now: timeOrigin + performance.now(), the same clock the
+// worker uses for presentations), and a capture can be armed for one exact
+// output: after a GPU fence, the guest XFB is decoded at native size, or the
+// capture is marked missed. The harness never infers a frame from wall time.
 #ifndef EMSCRIPTEN_KEEPALIVE
 #define EMSCRIPTEN_KEEPALIVE
 #endif
@@ -924,6 +929,7 @@ static std::atomic<std::uint32_t> s_harness_vi_head{0};
 static std::uint32_t s_harness_vi_since_boot = 0;
 static std::uint32_t s_harness_vi_since_load = 0;
 static std::atomic<std::uint32_t> s_harness_load_generation{0};
+static std::atomic<int> s_harness_enabled{0};
 
 // 0 idle, 1 armed, 2 ready, 3 missed
 static std::atomic<int> s_harness_capture_state{0};
@@ -947,13 +953,19 @@ static void HarnessOnViOutput(const std::uint8_t* xfb, std::uint32_t width, std:
 {
   ++s_harness_vi_since_boot;
   ++s_harness_vi_since_load;
+  if (!s_harness_enabled.load(std::memory_order_relaxed))
+    return;
+  // Informational: GetTicks() includes the event's lateness, so ticks are
+  // not a frame identity; the VI indices are.
   const std::uint64_t ticks = Core::System::GetInstance().GetCoreTiming().GetTicks();
   const std::uint32_t head = s_harness_vi_head.load(std::memory_order_relaxed);
-  #ifdef __EMSCRIPTEN__
+#ifdef __EMSCRIPTEN__
   const double host_ms = emscripten_get_now();
 #else
   const double host_ms = 0.0;
 #endif
+  // sinceBoot doubles as the slot's sequence number: the reader checks it
+  // to detect an entry overwritten (or being written) while it reads.
   s_harness_vi_ring[head % HARNESS_VI_RING_CAPACITY] = {host_ms, ticks,
                                                          s_harness_vi_since_boot,
                                                          s_harness_vi_since_load};
@@ -969,9 +981,11 @@ static void HarnessOnViOutput(const std::uint8_t* xfb, std::uint32_t width, std:
     s_harness_capture_state.store(3, std::memory_order_release);
     return;
   }
-  // With immediate XFB the GPU may still be writing this XFB: wait for it,
-  // only on the captured output, so the capture is the finished picture.
-  Core::System::GetInstance().GetFifo().SyncGPU(Fifo::SyncGPUReason::Swap);
+  // Fence: in dual core the video thread may still be writing this XFB
+  // (SyncGPU only waits in deterministic-GPU mode). FlushGpu blocks until
+  // the video thread has drained everything the CPU sent before this output.
+  // Only on the captured output.
+  Core::System::GetInstance().GetFifo().FlushGpu();
   s_harness_capture_pixels.resize(static_cast<std::size_t>(width) * height);
   for (std::uint32_t y = 0; y < height; ++y)
   {
@@ -990,10 +1004,17 @@ static void HarnessOnViOutput(const std::uint8_t* xfb, std::uint32_t width, std:
   s_harness_capture_state.store(2, std::memory_order_release);
 }
 
+EMSCRIPTEN_KEEPALIVE void DolphinWeb_HarnessEnable(int enabled) { s_harness_enabled.store(enabled ? 1 : 0, std::memory_order_relaxed); }
+EMSCRIPTEN_KEEPALIVE int DolphinWeb_HarnessEnabled() { return s_harness_enabled.load(std::memory_order_relaxed); }
+EMSCRIPTEN_KEEPALIVE std::uint32_t DolphinWeb_HarnessViSinceBoot() { return s_harness_vi_since_boot; }
+EMSCRIPTEN_KEEPALIVE std::uint32_t DolphinWeb_HarnessViSinceLoad() { return s_harness_vi_since_load; }
+
 // Arm a capture of VI output `index` (counted from boot, or from the last
 // load when from_load != 0). Returns 0 when that output has already passed.
 EMSCRIPTEN_KEEPALIVE int DolphinWeb_HarnessArmCapture(std::uint32_t index, int from_load)
 {
+  if (!s_harness_enabled.load(std::memory_order_relaxed))
+    return 0;
   const std::uint32_t now = from_load ? s_harness_vi_since_load : s_harness_vi_since_boot;
   if (index <= now)
     return 0;

@@ -23,7 +23,7 @@ export async function openSession({ base, query, iso, headed = true, gamepads = 
   const url = `${base}?${query}`;
   const machineBefore = machineSnapshot();
   const startedAt = Date.now();
-  await bootIso(page, { url, iso });
+  const boot = await bootIso(page, { url, iso });
   return {
     page,
     context,
@@ -33,6 +33,7 @@ export async function openSession({ base, query, iso, headed = true, gamepads = 
     watch,
     machineBefore,
     startedAt,
+    harness: boot.harness,
     async close() {
       await context.close().catch(() => {});
       releaseProfile();

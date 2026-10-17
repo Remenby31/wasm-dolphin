@@ -70,13 +70,19 @@ export function watchPage(page) {
   };
 }
 
-export async function bootIso(page, { url, iso }) {
+// Boot a disc and return once the core is loaded, with the harness hooks
+// enabled from the start (they are off in normal use). Nothing is asked of
+// the worker before it exists: the app creates it asynchronously.
+export async function bootIso(page, { url, iso, timeoutMs = 60000 }) {
   if (!existsSync(iso)) throw new Error(`disc image not found: ${iso}`);
   await page.goto(url, { waitUntil: "domcontentloaded" });
   await page.locator("#romInput").waitFor({ state: "attached", timeout: 30000 });
-  // Give the worker a moment to finish module init, as the manual runs did.
-  await page.waitForFunction(() => window.__host?.adapter || window.__lastFrameInfo, null, { timeout: 30000 }).catch(() => {});
+  await page.waitForFunction(() => window.__host?.adapter, null, { timeout: 30000 });
   await page.locator("#romInput").setInputFiles(iso);
+  await page.waitForFunction(() => Boolean(window.__host?.adapter?.worker), null, { timeout: timeoutMs });
+  const enabled = await workerRequest(page, "validationEnableHarness", {}, timeoutMs);
+  await page.waitForFunction(() => window.__host?.adapter?.loaded === true, null, { timeout: timeoutMs });
+  return { harness: enabled };
 }
 
 export async function readFrameInfo(page) {

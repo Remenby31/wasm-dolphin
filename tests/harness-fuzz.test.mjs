@@ -68,7 +68,7 @@ test("round 3: black captures, missing captures and different frames all fail", 
   const missing = run(ROWS, { capture: { error: "VI output 1700 has already passed" } });
   assert.equal(analyzeDifferential({ interp: missing, jit: run(ROWS) }).findings[0].kind, "interp-no-capture");
   const later = run(ROWS);
-  later.capture.ticks += 8100000;
+  later.capture.index += 1;
   assert.equal(analyzeDifferential({ interp: run(ROWS), jit: later }).findings[0].kind, "capture-frame-mismatch");
 });
 
@@ -76,4 +76,12 @@ test("round 3: exact capture is refused for hardware renderers instead of compar
   assert.equal(captureSupported("video=software&wasmjit=1").ok, true);
   assert.equal(captureSupported("video=wgpu").ok, false);
   assert.match(captureSupported("video=wgpu").why, /present-side hook/);
+});
+
+// Review round 4: ticks include the VI event's lateness, so two captures of
+// the same output can carry different ticks. The output index is the identity.
+test("round 4: same VI output with different ticks is the same frame", () => {
+  const late = run(ROWS);
+  late.capture.ticks += 37;
+  assert.deepEqual(analyzeDifferential({ interp: run(ROWS), jit: late }), { ok: true, findings: [] });
 });

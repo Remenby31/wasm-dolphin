@@ -241,9 +241,9 @@ async function cmdDiff(argv) {
     ]);
     [ref, cand] = shots.map((s) => s.capture);
     meta = Object.fromEntries(shots.map((s) => [s.label, { url: s.url, viOutput: s.capture.index, fromLoad: s.capture.fromLoad, ticks: s.capture.ticks, fatal: s.fatal }]));
-    // Same output index from the same start is the same emulated frame; the
-    // emulated tick count proves it.
-    if (meta.ref.ticks !== meta.cand.ticks) throw new Error(`captures are not the same emulated frame (ticks ${meta.ref.ticks} vs ${meta.cand.ticks})`);
+    // The core counted the outputs: same index from the same start is the
+    // same emulated frame. Ticks are recorded for information only.
+    if (meta.ref.viOutput !== meta.cand.viOutput || meta.ref.fromLoad !== meta.cand.fromLoad) throw new Error("captures are not the same VI output");
   }
   const result = identical(ref, cand) ? { ...compareFrames(ref, cand), verdict: "identical" } : compareFrames(ref, cand);
   savePng(diffImage(ref, cand, result), path.join(dir, "diff.png"));

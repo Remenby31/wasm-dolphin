@@ -33,13 +33,22 @@ carried over). Exit code: 0 pass, 1 finding, 2 usage or infrastructure error.
 
 Rendering is judged on pictures the **core** captures at an exact VI output
 (one per emulated field the game scans out), counted from boot or from the
-last savestate load: `validationCaptureAtVi` in the worker arms
-`DolphinWeb_HarnessArmCapture` in `core/upstream/dolphin_web_discio.cpp`, which
-decodes the guest XFB at native size at that output, or reports the output as
+last savestate load. The output index is the frame identity (emulated ticks
+are recorded for information; they include the VI event's lateness).
+`validationCaptureAtVi` in the worker arms `DolphinWeb_HarnessArmCapture` in
+`core/upstream/dolphin_web_discio.cpp`, which, at that output, waits for the
+video thread to drain (`FlushGpu`: in dual core it may still be writing the
+XFB) and decodes the guest XFB at native size, or reports the output as
 missed. A capture that is not exactly the requested output is an error, never
-a picture; the emulated tick count of each capture proves two captures are the
-same frame. Every VI output and every presentation also go into rings the
-worker drains completely (`validationReadTimeline`), so timing is not sampled.
+a picture. Every VI output and every presentation also go into rings the
+worker drains completely (`validationReadTimeline`), on one clock
+(`timeOrigin + performance.now()`), with a sequence number per VI entry so an
+overwritten entry counts as lost instead of being read.
+
+The hooks are off in normal use (two counter increments and one atomic load
+per VI output); `bootIso` turns them on with `validationEnableHarness` as soon
+as the worker exists, before the core loads. OGL does not go through the VI
+hook: its timeline and captures are reported as unjudged, not as frozen.
 
 Limits: the capture is the guest XFB, which is what the software renderer
 outputs. Hardware renderers (`video=wgpu`, `ogl`) keep their picture on the

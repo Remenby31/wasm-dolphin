@@ -3,8 +3,9 @@
 // Interpreter-vs-JIT differential verdicts. Pure: takes what two runs of
 // the same homebrew produced and returns findings.
 //
-// Each run is captured by the core at the same VI output (same emulated
-// frame, proven by the emulated tick count). The two captures must then be
+// Each run is captured by the core at the same VI output index (the frame
+// identity; emulated ticks are informational, they include the event's
+// lateness). The two captures must then be
 // byte-identical: there is no tolerance and no heuristic. Marker rows
 // (checksum-verified) are only decoded to say *which* program diverged.
 import { compareFrames, DEFAULT_THRESHOLDS, differingPixels, identical } from "./image-diff.mjs";
@@ -57,7 +58,7 @@ export function analyzeDifferential({ interp, jit, symbols = null }) {
   const a = interp.capture, b = jit.capture;
   if (findings.length || !a?.data || !b?.data) return { ok: findings.length === 0 && Boolean(a?.data && b?.data), findings };
 
-  if (a.index !== b.index || a.ticks !== b.ticks) add("capture-frame-mismatch", { interp: [a.index, a.ticks], jit: [b.index, b.ticks] });
+  if (a.index !== b.index || Boolean(a.fromLoad) !== Boolean(b.fromLoad)) add("capture-frame-mismatch", { interp: [a.index, a.fromLoad], jit: [b.index, b.fromLoad] });
   for (const [name, c] of [["interp", a], ["jit", b]]) {
     if (compareFrames(c, c).candidateSigma < DEFAULT_THRESHOLDS.blankSigma) add(`${name}-blank-capture`);
   }
