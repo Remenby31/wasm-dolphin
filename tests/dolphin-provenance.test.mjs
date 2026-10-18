@@ -302,9 +302,10 @@ test("committed Dolphin provenance and ABI manifests verify", () => {
   // FPCC update in Interpreter_FloatingPoint.cpp: 114. 0072 hooks state loads
   // in JitInterface.cpp (the JIT warmup restarts from the loaded field): 115.
   // The GPU-sync diagnostics (0080) add WasmGpuSyncDiag.h and touch
-  // PixelEngine.cpp/.h: 118. Update deliberately when the series changes what
-  // it modifies.
-  assert.equal(result.vendorSnapshot.rootPaths, 118);
+  // PixelEngine.cpp/.h: 118. 0070 (memory card flush on request) adds three:
+  // GCMemcardBase.h, GCMemcardDirectory.h and EXI_DeviceMemoryCard.h, so 121.
+  // Update deliberately when the series changes what it modifies.
+  assert.equal(result.vendorSnapshot.rootPaths, 121);
   assert.equal(result.vendorSnapshot.submodulePaths, 2);
   assert.equal(result.core.abiVersion, 1);
   assert.equal(result.core.memoryContract.jsGlue.initialPages, 24576);
