@@ -12,6 +12,7 @@ import {
 import { parseDolHeader } from "./dol.js";
 import { decodeWgpuSamplerState } from "./wgpu-sampler-state.js";
 import { gxClearDepthToStored, gxDepthState } from "./wgpu-depth-state.js";
+import { createWgpuExactCapture, packReadbackRows } from "./wgpu-exact-capture.js";
 import { decodePrebuiltCache } from "./prebuilt-jit-cache-format.js";
 import {
   JIT_CACHE_ENTRY_KEY_SCHEMA,
@@ -220,6 +221,8 @@ const PRESENTATION_HISTOGRAM_BUCKETS_MS = [8, 12, 16, 20, 24, 33, 50, 100, 200];
 const harnessNow = () => performance.timeOrigin + performance.now();
 let harnessEnabled = false;
 let harnessVideoBackend = null;
+// Exact capture for video=wgpu: presents tagged with VI outputs (ViTag records).
+const wgpuExactCapture = createWgpuExactCapture();
 const HARNESS_PRESENT_RING = 16384;
 const harnessPresentRing = new Float64Array(HARNESS_PRESENT_RING * 3);
 let harnessPresentHead = 0;
@@ -872,6 +875,7 @@ async function captureAtViOutput({ index, ahead, fromLoad = false, timeoutMs = 6
   if (harnessVideoBackend === "OGL") throw new Error("OGL does not report VI outputs");
   if (ahead > 0) index = (fromLoad ? m._DolphinWeb_HarnessViSinceLoad() : m._DolphinWeb_HarnessViSinceBoot()) + ahead;
   if (!(index > 0)) throw new Error("capture index must be ≥ 1");
+  if (harnessVideoBackend === "WebGPU-Real" || harnessVideoBackend === "WebGPU") return captureAtViOutputWgpu(index >>> 0, Boolean(fromLoad), timeoutMs);
   if (!m._DolphinWeb_HarnessArmCapture(index >>> 0, fromLoad ? 1 : 0)) {
     throw new Error(`VI output ${index} (${fromLoad ? "since load" : "since boot"}) has already passed`);
   }
@@ -902,6 +906,49 @@ async function captureAtViOutput({ index, ahead, fromLoad = false, timeoutMs = 6
   }
   m._DolphinWeb_HarnessDisarmCapture();
   throw new Error(`VI output ${index} never reached within ${timeoutMs} ms`);
+}
+
+// video=wgpu: the picture is on the GPU. The core does not arm its XFB capture
+// (the guest XFB is not what this backend draws); the replay matches the
+// request to the PRESENT tagged with that VI output and reads it back.
+async function captureAtViOutputWgpu(index, fromLoad, timeoutMs) {
+  const capture = wgpuExactCapture.arm(index, fromLoad);
+  const timer = setTimeout(() => wgpuExactCapture.cancel(new Error(
+    wgpuExactCapture.tagsSeen === 0
+      ? "core does not tag WebGPU presents with VI outputs (rebuild the core)"
+      : `VI output ${index} never reached within ${timeoutMs} ms`)), timeoutMs);
+  try {
+    return await capture;
+  } finally {
+    clearTimeout(timer);
+  }
+}
+
+// Reads back the texture the last hardware present showed, at its own size.
+// Its own submission, queued right after the present's, so it sees exactly
+// what was presented and nothing recorded later.
+function readbackWgpuPresentSource() {
+  const id = wgpuLastBackbufferSourceTextureId;
+  const entry = id ? webGpuObjects.textures.get(id) : null;
+  if (!entry || !renderGpu) throw new Error("no presented WebGPU texture to read back");
+  if (!(entry.format === "rgba8unorm" || entry.format === "bgra8unorm")) {
+    throw new Error(`presented texture format ${entry.format} cannot be captured`);
+  }
+  const dev = renderGpu.device;
+  const width = entry.tex.width, height = entry.tex.height;
+  const bytesPerRow = Math.ceil(width * 4 / 256) * 256;
+  const buffer = dev.createBuffer({ size: bytesPerRow * height, usage: 0x1 | 0x8 });
+  const encoder = dev.createCommandEncoder({ label: "harness-wgpu-capture" });
+  encoder.copyTextureToBuffer({ texture: entry.tex },
+    { buffer, bytesPerRow, rowsPerImage: height }, { width, height, depthOrArrayLayers: 1 });
+  dev.queue.submit([encoder.finish()]);
+  return buffer.mapAsync(0x1).then(() => {
+    const pixels = packReadbackRows(new Uint8Array(buffer.getMappedRange()), width, height,
+                                    bytesPerRow, entry.format === "bgra8unorm");
+    buffer.unmap();
+    buffer.destroy();
+    return { width, height, pixels };
+  });
 }
 
 async function handleMessage(type, payload) {
@@ -6396,6 +6443,7 @@ const WGPU_CMD_OP_SUBMIT_PRESENT = 22;
 const WGPU_CMD_OP_DESTROY = 23;
 const WGPU_CMD_OP_BLIT_TEXTURE = 24;
 const WGPU_CMD_OP_CLEAR_RECT = 25;
+const WGPU_CMD_OP_VI_TAG = 26;
 // ClearRect uses the full attachment viewport and [0,1] depth range, so its
 // scissor alone determines coverage and its depth is independent of game state.
 // A/B switch: false restores the original game-viewport-dependent clear.
@@ -11241,7 +11289,8 @@ function drainWebGpuCmdRing(source = "presentation") {
               // unreliable twice; reading the actual texels replaces the whole
               // inference chain with a direct observation.
               format: fmt,
-              usage: u32[recWord + 5] | ((DIAG_TEX_READBACK || DIAG_DEPTH_READBACK || DIAG_DEPTH_TRACE) ? 0x1 : 0)
+              usage: u32[recWord + 5] |
+                ((harnessEnabled || DIAG_TEX_READBACK || DIAG_DEPTH_READBACK || DIAG_DEPTH_TRACE) ? 0x1 : 0)
             });
             webGpuObjects.textures.set(id,
               { tex, format: fmt, layers, view2dArray: null,
@@ -13086,6 +13135,7 @@ function drainWebGpuCmdRing(source = "presentation") {
           // the current command-ring drain returns.
           cmdRingOwnsCanvas = true;
           recordPresentedFrame(api?.getFrame?.() ?? 0);
+          wgpuExactCapture.onPresent(readbackWgpuPresentSource);
           scheduleDetachedWgpuBitmap(q);
           webGpuExecStats.present++;
           if (webGpuExecStats.present - webGpuExecStats.lastLog >= 120) {
@@ -13163,6 +13213,13 @@ function drainWebGpuCmdRing(source = "presentation") {
           }
           break;
         }
+        case WGPU_CMD_OP_VI_TAG:
+          // Harness only: the VI output the next ViSwap shows.
+          wgpuExactCapture.onViTag({
+            boot: u32[recWord + 1], load: u32[recWord + 2],
+            ticks: u32[recWord + 3] + u32[recWord + 4] * 4294967296
+          }, readbackWgpuPresentSource);
+          break;
         default:
           break;
       }
