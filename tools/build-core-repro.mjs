@@ -109,6 +109,20 @@ export function resetStaleBuildTree(buildDir, identity) {
   return true;
 }
 
+// Before configuring: empty the CMake tree and the output directory if either
+// belongs to another identity. The output directory needs its own check: a
+// Docker CMake volume keyed by identity can come back (patch series A, then
+// B, then A again) while the outputs on the checkout still hold B's link,
+// newer than A's objects, so Ninja would not relink and B's binary would be
+// recorded as A's. The output stamp is removed before building and written
+// back only after a successful build. Returns the directories emptied.
+export function prepareBuildDirectories({ buildDir, outputDir, identity }) {
+  const emptied = [buildDir, outputDir].filter((dir) => resetStaleBuildTree(dir, identity));
+  mkdirSync(buildDir, { recursive: true });
+  mkdirSync(outputDir, { recursive: true });
+  return emptied;
+}
+
 export function stampBuildTree(buildDir, identity) {
   writeFileSync(join(buildDir, IDENTITY_STAMP), `${JSON.stringify(identity, null, 2)}\n`);
 }
@@ -311,6 +325,9 @@ export function installCore({ root: base, outputDir, validate }) {
       if (saved.includes(path)) {
         copyFileSync(join(backup, path), join(base, `${path}.install-tmp`));
         renameSync(join(base, `${path}.install-tmp`), join(base, path));
+      } else {
+        // Absent before the install: absent after the rollback.
+        rmSync(join(base, path), { force: true });
       }
     }
     throw new Error(`Install rolled back, cores/dolphin is unchanged: ${error.message}`, { cause: error });
@@ -366,18 +383,19 @@ function buildNative() {
     }
   }
   const identity = currentIdentity();
-  if (resetStaleBuildTree(buildDir, identity)) {
-    console.log(`Emptied ${buildDir}: it was built from another checkout, patch series or toolchain.`);
+  for (const emptied of prepareBuildDirectories({ buildDir, outputDir, identity })) {
+    console.log(`Emptied ${emptied}: it came from another checkout, patch series or toolchain.`);
   }
-  mkdirSync(outputDir, { recursive: true });
 
   start = performance.now();
   run(process.execPath, ["tools/configure-upstream-wasm.mjs"], { env });
   stampBuildTree(buildDir, identity);
+  rmSync(join(outputDir, IDENTITY_STAMP), { force: true });
   timings.configure = seconds(start);
 
   start = performance.now();
   run(process.execPath, ["tools/build-upstream-target.mjs", "dolphin_web_core"], { env });
+  stampBuildTree(outputDir, identity);
   timings.build = seconds(start);
 
   const parity = {

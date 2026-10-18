@@ -39,16 +39,21 @@ Safety rails:
   Ninja trusts timestamps and would otherwise link objects compiled from other
   sources under this checkout's provenance. Docker volumes are named after it
   (`wasm-dolphin-cmake-<arch>-<identity>`, `wasm-dolphin-vendor-<source lock>`).
+  The output directory carries its own stamp, written only after a successful
+  build, so going from patch series A to B and back to A relinks A instead of
+  keeping B's binary under A's record.
 - **`--install` cannot leave `cores/dolphin` half-replaced.** It refuses a
   core whose glue loses an export, a runtime method or WORKERFS
   (`--force-install` overrides). It then backs up the five files it rewrites
   (the three artifacts, the ABI manifest and the worker's pinned hash), renames
   the new artifacts into place, and runs `update:core-abi` and
-  `verify:provenance`. On any failure every file is restored.
+  `verify:provenance`. On any failure every file is restored, and files that
+  did not exist before are removed.
 - **`verify:toolchain` checks the tools actually used.** It refuses
   variables that redirect emcc or cargo (`EM_CONFIG`, `EM_LLVM_ROOT`,
   `EM_BINARYEN_ROOT`, `EMCC_CFLAGS`, `RUSTFLAGS`, `RUSTC_WRAPPER`,
-  `CARGO_BUILD_*`, `CARGO_PROFILE_*`, ...). It also asks `em-config` for
+  `CARGO_BUILD_*`, `CARGO_PROFILE_*`, ...; `EMSDK_PYTHON` only when it points
+  outside the locked SDK, since activating the SDK sets it). It also asks `em-config` for
   `LLVM_ROOT` and `BINARYEN_ROOT` and requires the hashed emsdk directories.
 - **Paths with whitespace** (possible on Windows) cannot be carried by the
   CMake flag string. They are left unmapped with a warning, as before the maps

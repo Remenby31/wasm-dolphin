@@ -89,21 +89,48 @@ export const hostPlatform = `${process.platform}-${process.arch}`;
 // cache, and the build scripts set it.
 const OVERRIDE_PATTERNS = [
   /^EM_(CONFIG|LLVM_ROOT|BINARYEN_ROOT|NODE_JS|EMSCRIPTEN_ROOT|PYTHON)$/,
-  /^EMSDK_PYTHON$/,
+  /^EMSDK_PYTHON$/,  // allowed when it points into the locked SDK, see below
   /^EMCC_(CFLAGS|FORCE_STDLIBS|ONLY_FORCED_STDLIBS|LOCAL_PORTS|STRICT|CLOSURE_ARGS)$/,
   /^RUSTFLAGS$/, /^CARGO_ENCODED_RUSTFLAGS$/, /^RUSTC_(WRAPPER|WORKSPACE_WRAPPER|BOOTSTRAP)$/,
   /^CARGO_BUILD_/, /^CARGO_PROFILE_/, /^CARGO_TARGET_[A-Z0-9_]+_(RUSTFLAGS|LINKER|RUNNER)$/
 ];
 
-export function toolchainEnvironmentOverrides(env = process.env) {
+// Activating the locked SDK (emsdk_env.sh) exports EMSDK_PYTHON pointing at
+// the SDK's own Python; that is the toolchain, not an override of it.
+export function toolchainEnvironmentOverrides(env = process.env, { emsdkRoot = null } = {}) {
+  const insideSdk = (value) => {
+    if (!emsdkRoot) return false;
+    try {
+      const real = realpathSync(value);
+      const sdk = realpathSync(emsdkRoot);
+      return real === sdk || real.startsWith(`${sdk}/`) || real.startsWith(`${sdk}\\`);
+    } catch {
+      return false;
+    }
+  };
   return Object.keys(env)
     .filter((name) => env[name] !== undefined && env[name] !== "")
     .filter((name) => OVERRIDE_PATTERNS.some((pattern) => pattern.test(name)))
+    .filter((name) => !(name === "EMSDK_PYTHON" && insideSdk(env[name])))
     .sort();
 }
 
-function assertNoEnvironmentOverrides() {
-  const overrides = toolchainEnvironmentOverrides();
+function lockedEmsdkRoot(lock) {
+  if (hostPlatform !== lock.platform && lock.posix?.platforms?.[hostPlatform]) {
+    return join(posixToolchainDir(), "emsdk");
+  }
+  const emcc = process.env.EMCC ?? lock.emscripten.emccCandidates.map((candidate) => {
+    try {
+      return expandCandidate(candidate);
+    } catch {
+      return null;
+    }
+  }).find((candidate) => candidate && existsSync(candidate));
+  return emcc ? resolve(dirname(emcc), "../..") : null;
+}
+
+function assertNoEnvironmentOverrides(lock) {
+  const overrides = toolchainEnvironmentOverrides(process.env, { emsdkRoot: lockedEmsdkRoot(lock) });
   invariant(overrides.length === 0,
     `Unset ${overrides.join(", ")}: they change which tools or flags build the core, ` +
     "so the verified toolchain would not be the one used.");
@@ -112,7 +139,7 @@ function assertNoEnvironmentOverrides() {
 export function verifyWasmToolchain() {
   const lock = loadWasmToolchainLock();
   invariant(lock.schemaVersion === 1, `Unsupported toolchain lock schema ${lock.schemaVersion}`);
-  assertNoEnvironmentOverrides();
+  assertNoEnvironmentOverrides(lock);
   if (hostPlatform !== lock.platform && lock.posix?.platforms?.[hostPlatform]) {
     return verifyPosixToolchain(lock);
   }

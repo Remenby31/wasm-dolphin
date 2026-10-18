@@ -103,6 +103,17 @@ from \`${VENDORED_CRATES}/\`. The result is written to
 `;
 }
 
+// Put every entry under one top-level directory. The trailing S keeps
+// symlink targets as they are: a relative target (miniupnpc's LICENSE ->
+// ../LICENSE) is relative to the link, and prefixing it would leave the link
+// dangling after extraction. GNU tar and bsdtar spell the rename differently
+// but share the flag.
+export function tarPrefixArgs(gnu, stem) {
+  return gnu
+    ? ["--transform", `s,^,${stem}/,S`, "--force-local", "--show-transformed-names"]
+    : ["-s", `,^,${stem}/,S`];
+}
+
 // Vendor the bridge's crates and std's dependencies with the pinned cargo,
 // in the registry layout (name-version) so the path remapping in
 // configure-upstream-wasm.mjs gives the same bytes as a registry build.
@@ -153,12 +164,8 @@ export function buildCorrespondingSource({ outputDir = join(root, "dist") } = {}
   rmSync(archive, { force: true });
 
   const posix = (value) => value.split("\\").join("/");
-  // Everything goes under one top-level directory. GNU tar and bsdtar spell
-  // the rename differently.
   const gnu = /GNU tar/.test(run("tar", ["--version"]));
-  const prefix = gnu
-    ? ["--transform", `s,^,${stem}/,`, "--force-local", "--show-transformed-names"]
-    : ["-s", `,^,${stem}/,`];
+  const prefix = tarPrefixArgs(gnu, stem);
   // Two passes, because GNU tar and bsdtar order -C and -T differently:
   // the tree from the repository root, then the manifest from the staging
   // directory, then gzip.

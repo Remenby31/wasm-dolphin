@@ -5,13 +5,15 @@ import path from "node:path";
 import test from "node:test";
 
 import {
-  buildIdentity, glueFacts, installCore, installRefusal, INSTALLED_FILES, resetStaleBuildTree, stampBuildTree
+  buildIdentity, glueFacts, installCore, prepareBuildDirectories, installRefusal, INSTALLED_FILES, resetStaleBuildTree, stampBuildTree
 } from "../tools/build-core-repro.mjs";
 import { readFileSync, existsSync } from "node:fs";
 import { rustRemapFlags, scmGitShim, sourcePathFlags, vendoredCargoArgs } from "../tools/toolchain/path-maps.mjs";
 import { spawnSync } from "node:child_process";
 import { compareCoreBuildInfo } from "../tools/compare-core-builds.mjs";
 import { emscriptenTreeSha256, loadWasmToolchainLock, toolchainEnvironmentOverrides } from "../tools/wasm-toolchain.mjs";
+import { tarPrefixArgs } from "../tools/build-corresponding-source.mjs";
+import { readlinkSync, symlinkSync } from "node:fs";
 
 test("a macOS and a Linux build compare equal on the declared and host-independent toolchain", () => {
   const build = (platform, clangSha256) => ({
@@ -213,6 +215,80 @@ test("the scmrev git shim answers like git on the locked, patched checkout", { s
     assert.equal(ask("rev-parse", "--abbrev-ref", "HEAD").stdout.trim(), "HEAD");
     assert.equal(ask("rev-list", "--count", "HEAD", "^master").stdout.trim(), "0");
     assert.notEqual(ask("describe", "--exact-match", "HEAD").status, 0, "no tag, like git");
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test("patch series A, then B, then A again never leaves B's link in A's output", () => {
+  const dir = mkdtempSync(path.join(tmpdir(), "abA-"));
+  try {
+    const out = path.join(dir, "core");
+    const volume = (id) => path.join(dir, `cmake-${id.key}`);  // Docker volumes, one per identity
+    const A = buildIdentity({ checkout: "/c", sourceLockSha256: "A", toolchainLockSha256: "t" });
+    const B = buildIdentity({ checkout: "/c", sourceLockSha256: "B", toolchainLockSha256: "t" });
+    const build = (id, wasm) => {
+      prepareBuildDirectories({ buildDir: volume(id), outputDir: out, identity: id });
+      stampBuildTree(volume(id), id);
+      // Ninja links only when the output is missing (objects unchanged here).
+      if (!existsSync(path.join(out, "core.wasm"))) writeFileSync(path.join(out, "core.wasm"), wasm);
+      stampBuildTree(out, id);
+    };
+    build(A, "A");
+    build(B, "B");
+    assert.equal(readFileSync(path.join(out, "core.wasm"), "utf8"), "B");
+    build(A, "A");
+    assert.equal(readFileSync(path.join(out, "core.wasm"), "utf8"), "A", "A's tree must relink A");
+    assert.ok(existsSync(path.join(volume(A), ".wasm-dolphin-build-identity.json")), "A's tree is reused");
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test("an install rollback removes files that did not exist before", () => {
+  const { base, out } = installFixture();
+  const buildJson = "cores/dolphin/dolphin-core-upstream.build.json";
+  try {
+    rmSync(path.join(base, buildJson));
+    assert.throws(() => installCore({ root: base, outputDir: out, validate: () => { throw new Error("no"); } }));
+    assert.ok(!existsSync(path.join(base, buildJson)), "the new build record must not survive the rollback");
+    assert.equal(readFileSync(path.join(base, "cores/dolphin/dolphin-core-upstream.wasm"), "utf8"),
+      "old cores/dolphin/dolphin-core-upstream.wasm");
+  } finally {
+    rmSync(base, { recursive: true, force: true });
+  }
+});
+
+test("EMSDK_PYTHON is accepted inside the locked SDK and refused outside it", () => {
+  const sdk = mkdtempSync(path.join(tmpdir(), "emsdk-"));
+  try {
+    mkdirSync(path.join(sdk, "python/bin"), { recursive: true });
+    writeFileSync(path.join(sdk, "python/bin/python3"), "");
+    assert.deepEqual(toolchainEnvironmentOverrides({ EMSDK_PYTHON: path.join(sdk, "python/bin/python3") },
+      { emsdkRoot: sdk }), []);
+    assert.deepEqual(toolchainEnvironmentOverrides({ EMSDK_PYTHON: "/usr/bin/python3" }, { emsdkRoot: sdk }),
+      ["EMSDK_PYTHON"]);
+  } finally {
+    rmSync(sdk, { recursive: true, force: true });
+  }
+});
+
+test("the archive prefix leaves relative symlink targets intact", { skip: process.platform === "win32" }, () => {
+  const dir = mkdtempSync(path.join(tmpdir(), "tar-links-"));
+  try {
+    const src = path.join(dir, "src");
+    mkdirSync(path.join(src, "pkg/sub"), { recursive: true });
+    writeFileSync(path.join(src, "pkg/LICENSE"), "license");
+    symlinkSync("../LICENSE", path.join(src, "pkg/sub/LICENSE"));
+    const gnu = /GNU tar/.test(spawnSync("tar", ["--version"], { encoding: "utf8" }).stdout);
+    const archive = path.join(dir, "a.tar");
+    const created = spawnSync("tar", ["-c", ...tarPrefixArgs(gnu, "stem"), "-f", archive, "pkg"], { cwd: src, encoding: "utf8" });
+    assert.equal(created.status, 0, created.stderr);
+    const out = path.join(dir, "out");
+    mkdirSync(out);
+    assert.equal(spawnSync("tar", ["-x", "-f", archive, "-C", out]).status, 0);
+    assert.equal(readlinkSync(path.join(out, "stem/pkg/sub/LICENSE")), "../LICENSE");
+    assert.equal(readFileSync(path.join(out, "stem/pkg/sub/LICENSE"), "utf8"), "license");
   } finally {
     rmSync(dir, { recursive: true, force: true });
   }
