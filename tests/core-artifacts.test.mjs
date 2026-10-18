@@ -293,16 +293,25 @@ test("publishing decides on content, and refuses a build of other sources before
       },
       commit: (message) => commits.push(message)
     });
-    assert.deepEqual(await run(() => ({ current: true })), { schemaVersion: 1, action: "none" });
+    const buildRecord = path.join(dir, CORE_BINARY_FILES[2]);
+    const committedOn = (platform) => writeFileSync(buildRecord, JSON.stringify({ toolchain: { observed: { platform } } }));
+    committedOn("linux-x64");
+    const none = await run(() => ({ current: true, coreId: "sha256:committed" }));
+    assert.equal(none.action, "none");
+    assert.equal(none.coreId, "sha256:committed");
+    assert.equal(commits.length, 0);
+    committedOn("linux-x64");
 
     identity.same = false;
     const handedOver = await run(() => ({ current: false, reasons: ["stale"] }));
-    assert.deepEqual(handedOver, { schemaVersion: 1, action: "dispatch", reasons: ["source.patchSeriesSha256 differs"] });
+    assert.equal(handedOver.action, "dispatch");
+    assert.deepEqual(handedOver.reasons, ["source.patchSeriesSha256 differs"]);
     assert.equal(readFileSync(path.join(dir, CORE_BINARY_FILES[1]), "utf8"), "committed", "nothing installed");
 
     identity.same = true;
     const committed = await run((wasm) => ({ current: wasm === "built", coreId: "sha256:built", reasons: [] }));
-    assert.deepEqual(committed, { schemaVersion: 1, action: "commit", coreId: "sha256:built" });
+    assert.equal(committed.action, "commit");
+    assert.equal(committed.coreId, "sha256:built");
     assert.equal(commits.length, 1);
 
     for (const file of CORE_DERIVED_FILES) writeFileSync(path.join(dir, file), "committed");
@@ -313,16 +322,40 @@ test("publishing decides on content, and refuses a build of other sources before
   }
 });
 
+test("a current core built on another platform is replaced by CI's build of the same sources", async () => {
+  const { dir, artifact } = publishFixture();
+  try {
+    writeFileSync(path.join(dir, CORE_BINARY_FILES[2]),
+      JSON.stringify({ toolchain: { observed: { platform: "darwin-arm64" } } }));
+    const commits = [];
+    const plan = await publishPlan({
+      artifactDir: artifact, cwd: dir,
+      // The darwin core is the build of the sources; so is CI's.
+      status: async () => ({ current: true, coreId: "sha256:x", reasons: [] }),
+      identityDifferences: () => [], regenerate: () => {}, commit: (message) => commits.push(message)
+    });
+    assert.equal(plan.action, "commit");
+    assert.match(plan.reason, /darwin-arm64 build of the same sources with the linux-x64 build/);
+    assert.equal(readFileSync(path.join(dir, CORE_BINARY_FILES[1]), "utf8"), "built");
+    assert.equal(commits.length, 1);
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
 test("publish-plan writes one validated JSON plan and fails without one", () => {
   const cli = (args) => spawnSync(process.execPath, [path.join(repoRoot, "tools/core-artifacts.mjs"), "publish-plan", ...args],
     { cwd: repoRoot, encoding: "utf8" });
   assert.notEqual(cli(["--artifact", "/nonexistent"]).status, 0, "--out is required");
   const out = path.join(mkdtempSync(path.join(tmpdir(), "plan-")), "plan.json");
-  // This checkout's committed core is current on main and on this branch, so
-  // the plan is "none" without touching anything.
+  // With a current linux-x64 core committed, the plan is "none" without
+  // reading the artifact. Otherwise (a core built elsewhere) it needs the
+  // artifact, which does not exist here: planning fails and writes nothing.
   const result = cli(["--artifact", "/nonexistent", "--out", out]);
   if (result.status === 0) {
-    assert.deepEqual(JSON.parse(readFileSync(out, "utf8")), { schemaVersion: 1, action: "none" });
+    const plan = JSON.parse(readFileSync(out, "utf8"));
+    assert.equal(plan.action, "none");
+    assert.match(plan.coreId, /^sha256:[0-9a-f]{64}$/);
     assert.equal(result.stdout, "", "stdout carries nothing besides the plan file");
   } else {
     assert.ok(!existsSync(out), "no plan is written when planning fails");

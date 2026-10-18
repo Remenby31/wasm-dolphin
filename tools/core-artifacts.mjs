@@ -234,6 +234,19 @@ export function buildIdentityDifferences(buildInfo, cwd = root) {
   return reasons;
 }
 
+// The platform whose build main commits: CI's. A core built elsewhere from the
+// same sources is current (core:status) but has other bytes (the Rust part
+// depends on the build host, docs/repro-build.md), so publishing replaces it.
+export const REFERENCE_PLATFORM = "linux-x64";
+
+function committedPlatform(cwd) {
+  try {
+    return JSON.parse(readFileSync(join(cwd, BUILD_JSON), "utf8")).toolchain?.observed?.platform ?? null;
+  } catch {
+    return null;
+  }
+}
+
 export async function publishPlan({
   artifactDir,
   cwd = root,
@@ -253,18 +266,29 @@ export async function publishPlan({
   },
   message = "Build the core"
 }) {
-  if ((await status(cwd)).current) return { schemaVersion: 1, action: "none" };
+  const before = await status(cwd);
+  const platform = committedPlatform(cwd);
+  if (before.current && platform === REFERENCE_PLATFORM) {
+    return { schemaVersion: 1, action: "none", coreId: before.coreId,
+      reason: `the committed core is the ${REFERENCE_PLATFORM} build of these sources` };
+  }
   const built = JSON.parse(readFileSync(join(artifactDir, "dolphin-core-upstream.build.json"), "utf8"));
   const differences = identityDifferences(built);
-  if (differences.length > 0) return { schemaVersion: 1, action: "dispatch", reasons: differences };
+  if (differences.length > 0) {
+    return { schemaVersion: 1, action: "dispatch", reasons: differences,
+      reason: "the core was built from other sources than main's current tip" };
+  }
   for (const path of CORE_DERIVED_FILES) {
     writeFileSync(join(cwd, path), readFileSync(join(artifactDir, path.split("/").pop())));
   }
   regenerate();
   const after = await status(cwd);
   if (!after.current) throw new Error(`installed core is not current: ${after.reasons.join("; ")}`);
-  commit(`${message}\n\n${after.coreId}`);
-  return { schemaVersion: 1, action: "commit", coreId: after.coreId };
+  const reason = before.current
+    ? `replaces the committed ${platform ?? "unrecorded-platform"} build of the same sources with the ${REFERENCE_PLATFORM} build`
+    : "the committed core is not the build of these sources";
+  commit(`${message}\n\n${after.coreId}: ${reason}.`);
+  return { schemaVersion: 1, action: "commit", coreId: after.coreId, reason };
 }
 
 // ------------------------------------------------------------------- fetch ---

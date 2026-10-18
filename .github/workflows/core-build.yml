@@ -447,6 +447,7 @@ jobs:
           fi
           echo "action=$action" >> "$GITHUB_OUTPUT"
           echo "base=$base" >> "$GITHUB_OUTPUT"
+          jq -r '"::notice title=Core publication::\(.action): \(.coreId // "(no core)") - \(.reason // "")"' "$OUT/plan.json"
           cat "$OUT/plan.json"
 
       - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
