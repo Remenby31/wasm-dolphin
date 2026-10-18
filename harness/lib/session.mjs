@@ -8,7 +8,7 @@ import { bootIso, captureAtVi, grabFrame, launchChrome, readCoreProgress, readFr
 import { addGamepadMock } from "./gamepad-mock.mjs";
 import { installMonitor } from "./monitor.mjs";
 import { encodePng } from "./png.mjs";
-import { checkCore } from "./core-identity.mjs";
+import { checkCore, recordCoreFetches } from "./core-identity.mjs";
 import { claim } from "./ownership.mjs";
 import { machineSnapshot, sampleChromeCpu } from "./system.mjs";
 
@@ -47,14 +47,14 @@ async function startSession({ context, profileDir, base, server, query, iso, gam
   const url = `${base}?${query}`;
   const machineBefore = machineSnapshot();
   const startedAt = Date.now();
-  const fetchedBefore = server?.coreFetches.length ?? 0;
+  const coreFetches = server ? recordCoreFetches(context, server) : [];
   const boot = await bootIso(page, { url, iso });
   await context.assertInvisible?.("after boot");
   // The core really loaded must be the one asked for (core-identity.mjs).
   let core = null;
   if (server) {
     const selection = await page.evaluate(() => window.__host?.adapter?.coreSelectionTelemetry?.() ?? null).catch(() => null);
-    core = checkCore({ url, defaultSha256: server.defaultCoreSha256, fetches: server.coreFetches.slice(fetchedBefore), selection });
+    core = checkCore({ url, defaultSha256: server.defaultCoreSha256, fetches: coreFetches.slice(), selection });
     if (!core.ok) throw new Error(core.error);
   }
   return {
@@ -68,6 +68,7 @@ async function startSession({ context, profileDir, base, server, query, iso, gam
     startedAt,
     harness: boot.harness,
     core,
+    coreFetches,
     rendererCrashed: () => watch.events.some((e) => e.type === "crash"),
     // Keep Chrome's log and crash dumps (Crashpad) of this profile in `dir`.
     keepCrashEvidence(dir) {
@@ -88,10 +89,10 @@ async function startSession({ context, profileDir, base, server, query, iso, gam
 // Boot the disc again in the same session (same profile and caches), and
 // check again which core it loaded: a reboot fetches the core anew.
 export async function rebootSession(session, server) {
-  const before = server.coreFetches.length;
+  const before = session.coreFetches.length;
   await bootIso(session.page, { url: session.url, iso: session.iso });
   const selection = await session.page.evaluate(() => window.__host?.adapter?.coreSelectionTelemetry?.() ?? null).catch(() => null);
-  const core = checkCore({ url: session.url, defaultSha256: server.defaultCoreSha256, fetches: server.coreFetches.slice(before), selection });
+  const core = checkCore({ url: session.url, defaultSha256: server.defaultCoreSha256, fetches: session.coreFetches.slice(before), selection });
   if (!core.ok) throw new Error(core.error);
   session.core = core;
   return core;
