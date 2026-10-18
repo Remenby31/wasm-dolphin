@@ -45,3 +45,14 @@ test("imported bytes are transferred, not copied", () => {
   );
   assert.equal(posted[1].transfer[0], state.buffer);
 });
+
+test("the page names every saves state but the normal one, and says Saved only when stored", async () => {
+  const { describeUserDataStatus, describeSlotSave } = await import("../src/upstream-worker-adapter.js");
+  assert.equal(describeUserDataStatus({ mode: "writer" }), "");
+  assert.match(describeUserDataStatus({ mode: "read-only", reason: "read-only: another tab is already playing with these saves" }), /^Saves are read-only in this tab \(another tab/);
+  assert.match(describeUserDataStatus({ mode: "failed", reason: "x.gci: no valid copy" }), /games will not start: x\.gci/);
+  assert.match(describeUserDataStatus({ mode: "unavailable", reason: "no OPFS" }), /will not survive a reload: no OPFS/);
+  assert.equal(describeSlotSave(1, { saved: true, persisted: { persistent: true } }), "Saved slot 1");
+  assert.equal(describeSlotSave(1, { saved: true, persisted: { persistent: false, error: "quota" } }), "Saved slot 1 for this session only: quota");
+  assert.equal(describeSlotSave(1, { saved: false }), "Save slot 1 failed");
+});

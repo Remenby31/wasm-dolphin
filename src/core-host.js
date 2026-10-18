@@ -1,7 +1,7 @@
 import { DolphinCoreAdapter, dolphinBundleAvailable } from "./dolphin-adapter.js";
 import { buttonMaskFromPressed } from "./input.js";
 import { UpstreamMainThreadAdapter } from "./upstream-main-thread-adapter.js";
-import { UpstreamWorkerAdapter, upstreamBundleAvailable } from "./upstream-worker-adapter.js";
+import { UpstreamWorkerAdapter, describeUserDataStatus, upstreamBundleAvailable } from "./upstream-worker-adapter.js";
 import {
   DEFAULT_UPSTREAM_CORE_URL,
   requestedLegacyOneWayAck,
@@ -576,7 +576,8 @@ export class EmulatorHost {
         this.coreFps = 0;
         this.presentationFps = 0;
         this.resetVisibleSampler();
-        this.onStatus(`${this.adapterLabel} mounted`);
+        // A saves warning (read-only tab, saves off) outlives the mount.
+        this.onStatus(describeUserDataStatus(this.adapter.userData) || `${this.adapterLabel} mounted`);
         this.onMode(this.adapterLabel);
         return this.game;
       } catch (error) {
