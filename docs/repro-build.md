@@ -124,12 +124,47 @@ build.
 - **macOS vs Linux.** The JS glue is identical. Relinking the macOS build
   against the Linux Naga archive gives `6eed0799…`, byte for byte the Docker
   core: all C++ and everything Emscripten contributes is bit-reproducible
-  across hosts. The one remaining byte is in the Rust archive. Cargo hashes
-  the `rustc -vV` output, host triple included, into each crate's metadata
-  (`naga_spirv_wgsl-87cb3c…` on macOS, `-5dee1c…` on Linux), which changes
-  symbol hashes. linux/x64 and linux/arm64 differ the same way, for the same
-reason. The CI build (linux/x64, `tools/toolchain/Dockerfile`) is the
-reference; `--docker-platform linux/amd64` reproduces it locally.
+  across hosts. What differs is the Rust part (Naga and the std it rebuilds);
+  see "The Rust part depends on the build host" below. The CI build
+  (linux/x64, `tools/toolchain/Dockerfile`) is the reference;
+  `--docker-platform linux/amd64` reproduces it locally.
+
+### The Rust part depends on the build host
+
+Cargo hashes the output of `rustc -vV`, host triple included, into each
+crate's metadata (`naga_spirv_wgsl-87cb3c…` on macOS, `-5dee1c…` on Linux).
+That hash is part of every Rust symbol name, and symbol names decide the order
+in which LTO lays out Rust functions and constants. So a core whose Naga was
+built on macOS and one whose Naga was built on Linux, from identical sources
+and toolchain versions:
+
+- **differ in layout, not in content.** Comparing `83514d0e…` (macOS) with
+  `6eed0799…` (same C++, Linux Naga): type, import, export, global and
+  element-count sections are identical. The code section is 1 byte shorter
+  and the data section is the same size with the same strings, but functions
+  and constants sit in a different order, so most aligned byte positions of
+  the code section differ. The function and element sections differ only by
+  the resulting index shifts. The JS glue is identical. This is not a 1 or
+  2 byte patch: the hashes differ completely;
+- **behave the same.** Naga runs only in the WebGPU renderer, where it turns
+  Dolphin's SPIR-V into WGSL. In `video=wgpu` on acube, gxSprites and lesson10
+  (headed Chrome 155, Apple M4 Pro, load average 20 to 34, 3 alternating runs
+  per core, `core=upstream&video=wgpu&presenter=webgpu&cpu=dual&speed=1&wasmjit=1&jitwarmup=700&metrics=1`):
+  speed 96–107 % on both, unique visuals ~60/s on both, same JIT block
+  counts, no shader, WGSL or WebGPU validation error on either. The static
+  lesson10 frame is pixel-identical between the two cores in all three pairs.
+  The software renderer does not call Naga at all;
+- **change which hash is canonical.** A core is reproducible on the platform
+  it was built on, so the canonical core is the one CI builds
+  (linux/x64). A macOS build of the same sources gets another hash, and
+  `core:fetch` and `?coreid=` must use the hash of the build in question.
+  CI rebuilding from the source archive, the incremental-equals-clean check,
+  and `commit-core` all run on linux/x64, so main never mixes the two.
+
+Removing the dependency would need Cargo not to hash the host into crate
+metadata (no stable switch for that today) or building Naga in the pinned
+Linux image on every host. Neither is done here.
+
 - **Rebuilt vs committed.** Not byte-identical, and cannot be:
   1. the committed core carries a 2.2 MB `name` section (it was built with
      `PROFILING_FUNCS=1`); a default build has none;
