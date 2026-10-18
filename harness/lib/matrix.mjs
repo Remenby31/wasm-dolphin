@@ -152,10 +152,29 @@ export function matrixMarkdown(cells, meta = {}) {
   return lines.join("\n");
 }
 
-// The exact capture is the guest XFB the core scans out. Hardware renderers
-// keep their picture on the GPU, so their guest XFB is not what they show:
-// refuse rather than compare something else.
+// Exact captures come from the core (guest XFB, software renderer) or, for
+// video=wgpu, from the worker's GPU readback of the present tagged with the
+// VI output (source "wgpu-present"). A hardware renderer that answers with
+// the guest XFB would be judged on a picture it does not show: rejected.
+// OGL has no exact capture.
 export function captureSupported(query) {
   const video = new URLSearchParams(query).get("video") ?? "software";
-  return video === "software" || video === "null" ? { ok: true } : { ok: false, why: `video=${video}: exact capture covers the guest XFB only; hardware renderers need a present-side hook in the core` };
+  if (video === "ogl") return { ok: false, why: "video=ogl: no exact capture (OGL does not report VI outputs)" };
+  return { ok: true };
+}
+
+export function captureSourceOk(query, source) {
+  const video = new URLSearchParams(query).get("video") ?? "software";
+  if (video === "software" || video === "null") return source === "guest-xfb";
+  if (video === "wgpu") return source === "wgpu-present";
+  return false;
+}
+
+// Across renderers, the same VI output is only the same emulated frame with
+// a single CPU thread: in dual core, a slower GPU thread makes each frame
+// consume more emulated time, so poses differ at equal VI index.
+export function forCrossRenderer(query) {
+  const p = new URLSearchParams(query);
+  p.set("cpu", "single");
+  return p.toString();
 }
