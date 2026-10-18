@@ -25,7 +25,7 @@
       "commit": "01e0577914a75a2569c846778c2f93aa8e6feddd"
     }
   },
-  "patchSeriesSha256": "24f8809cbf3cddcc0ffe67a684551c0a6759caae109f41c5000744a18d67a74d",
+  "patchSeriesSha256": "4415610e7650d06ea76a23866a84bd9b2ed3e64bbb7f387e62acfdf1005ba94e",
   "patches": [
     {
       "order": 1,
@@ -573,6 +573,14 @@
     },
     {
       "order": 69,
+      "cwd": ".",
+      "hashMode": "lf-normalized",
+      "path": "patches/dolphin-wasm/snapshot/0073-jit-fast-exact-fma-inline-frsqrte.patch",
+      "size": 18106,
+      "sha256": "854d3083f7b0c141c6491ba847985dc07dc1020ec05664a11c1621a951684996"
+    },
+    {
+      "order": 70,
       "cwd": "Externals/SFML/SFML",
       "hashMode": "lf-normalized",
       "path": "patches/dolphin-wasm/submodules/0001-sfml-emscripten-config.patch",
@@ -580,7 +588,7 @@
       "sha256": "f82197a21fe982ad83f6ee7bbf5a03839b1cebd4d64da3eab11263842bf61d89"
     },
     {
-      "order": 70,
+      "order": 71,
       "cwd": "Externals/xxhash/xxHash",
       "hashMode": "lf-normalized",
       "path": "patches/dolphin-wasm/submodules/0002-xxhash-wasm-simd-scalar.patch",

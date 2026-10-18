@@ -1,0 +1,406 @@
+diff --git a/Source/Core/Core/PowerPC/CachedInterpreter/CachedInterpreter.cpp b/Source/Core/Core/PowerPC/CachedInterpreter/CachedInterpreter.cpp
+--- a/Source/Core/Core/PowerPC/CachedInterpreter/CachedInterpreter.cpp
++++ b/Source/Core/Core/PowerPC/CachedInterpreter/CachedInterpreter.cpp
+@@ -312,6 +312,9 @@ constexpr u32 DOLPHIN_WEB_DISABLE_COMPILE_THROTTLE = 1u << 22; // §28ce cap JIT
+ // mask 0 → feature OFF → byte-identical codegen to today. ?fastmemhoist=1 opts
+ // in. Scoped to 32-bit D-form int load/store (lwz/lwzu/stw/stwu, OPCD 32/33/36/37).
+ constexpr u32 DOLPHIN_WEB_ENABLE_FASTMEM_HOIST = 1u << 23;
++// Inline exact FMA (TwoProduct + round-to-odd sum). Set: every FMA-family op
++// calls the `fma` import (the interpreter's NI_madd_msub) instead.
++constexpr u32 DOLPHIN_WEB_DISABLE_INLINE_FMA = 1u << 24;
+ // §28ce burst smearing: when ENABLED (gate bit CLEARED), TryWriteWasmBlock
+ // returns false (falls to interpret) once this many compiles OR this much
+ // compile wall time have happened in the current CoreTiming slice. Smears
+@@ -2240,8 +2243,10 @@ extern "C" int DolphinWeb_CachedInterpreterFpOp(int state_ptr, u32 inst_hex, u32
+ // JIT only keeps zero or normal results; for anything else it re-runs the
+ // instruction through the interpreter, so the NaN/infinity side effects that
+ // land in this scratch state are never needed.
++static std::array<u32, 4> s_wasm_fma_import_counts{};
+ extern "C" double DolphinWeb_CachedInterpreterFma(double a, double c, double b, u32 flags)
+ {
++  ++s_wasm_fma_import_counts[flags & 3];
+   static PowerPC::PowerPCState scratch;
+   switch (flags & 3)
+   {
+@@ -4670,109 +4675,189 @@ enum class FpArithKind
+ };
+ 
+ // [f64 a] -> [f64]: a * frC +/- frB rounded once, as NI_madd_msub computes it
+-// (before ForceSingle). When the product is exact in double (the significant
+-// bits of a and of frC, Force25Bit-rounded for single ops, fit in 53, and it
+-// neither underflows nor overflows), a * c +/- b rounds once in plain WASM,
+-// which is what std::fma gives. Otherwise, and on the single-precision
+-// rounding tie that NI_madd_msub corrects, it calls the interpreter's own
+-// arithmetic through the fma import. Uses local 2 and f64 scratch 3..5.
++// (before ForceSingle), with plain f64 operations only (identical on every
++// machine: no hardware or relaxed FMA).
++//
++// Error-free transforms: p + e = a * c exactly (Dekker's product with
++// Veltkamp splitting), s + t = p + b and u + v = t + e exactly (TwoSum), so
++// a * c + b = s + u + v exactly. When v == 0 the exact value is s + u and
++// RN(s + u) is the correctly rounded result. A zero operand gives RN(p + b)
++// directly (IEEE zero signs). Anything else (v != 0, magnitudes where the
++// transforms could overflow or lose bits to underflow, non-normal operands)
++// and the single-precision rounding tie NI_madd_msub corrects call the
++// interpreter's own arithmetic through the fma import.
++// Uses locals 2, 4, 5 and f64 scratch 3..14.
+ void EmitExactMulAddSub(std::vector<u8>& body, const WasmStateLayout& layout,
+                         UGeckoInstruction inst, bool sub, bool single, u32 lane, u32 c_lane,
+                         u32 dst)
+ {
+   const u32 a = WasmFpScratchLocal(3), c = WasmFpScratchLocal(4), p = WasmFpScratchLocal(5);
++  const u32 b = WasmFpScratchLocal(6), e = WasmFpScratchLocal(7), sx = WasmFpScratchLocal(8);
++  const u32 t = WasmFpScratchLocal(9), u = WasmFpScratchLocal(10), ah = WasmFpScratchLocal(11);
++  const u32 al = WasmFpScratchLocal(12), ch = WasmFpScratchLocal(13), cl = WasmFpScratchLocal(14);
++  const auto get = [&](u32 l) { EmitLocalGet(body, l); };
++  const auto set = [&](u32 l) { EmitLocalSet(body, l); };
++  const auto op = [&](u8 code) { body.push_back(code); };
++  constexpr u8 ADD = 0xa0, SUB = 0xa1, MUL = 0xa2, ABS = 0x99, EQ = 0x61, NE = 0x62, LT = 0x63,
++               LE = 0x65, GE = 0x66, AND = 0x71, OR = 0x72;
+   const auto emit_import = [&] {
+-    EmitLocalGet(body, a);
++    get(a);
+     EmitStateLoadF64(body, PsOffset(layout, inst.FC, c_lane));
+     EmitStateLoadF64(body, PsOffset(layout, inst.FB, lane));
+     EmitI32Const(body, (sub ? 1u : 0u) | (single ? 2u : 0u));
+-    body.push_back(0x10);
++    op(0x10);
+     EmitU32Leb(body, WASM_IMPORT_FMA_INDEX);
+   };
+-  // significant bits of x <= 53 - ctz(frac(x) | 2^52) for a normal x
+-  const auto emit_ctz = [&](u32 x) {
+-    EmitLocalGet(body, x);
+-    body.push_back(0xbd);
+-    EmitI64Const(body, 0x000fffffffffffffull);
+-    body.push_back(0x83);
+-    EmitI64Const(body, u64{1} << 52);
+-    body.push_back(0x84);
+-    body.push_back(0x7a);  // i64.ctz
++  const auto f64const = [&](double v) { EmitF64ConstBits(body, std::bit_cast<u64>(v)); };
++  // TwoSum(x, y) -> hi in `hi`, lo in `lo` (Knuth; exact barring overflow).
++  const auto two_sum = [&](u32 x, u32 y, u32 hi, u32 lo, u32 tmp) {
++    get(x); get(y); op(ADD); set(hi);
++    get(hi); get(x); op(SUB); set(tmp);                          // z = hi - x
++    get(x); get(hi); get(tmp); op(SUB); op(SUB);                 // x - (hi - z)
++    get(y); get(tmp); op(SUB);                                   // y - z
++    op(ADD); set(lo);
++  };
++  // Veltkamp split of x into hi + lo (26 + 27 bits).
++  const auto split = [&](u32 x, u32 hi, u32 lo) {
++    f64const(134217729.0); get(x); op(MUL); set(hi);             // g = (2^27 + 1) x
++    get(hi); get(hi); get(x); op(SUB); op(SUB); set(hi);         // hi = g - (g - x)
++    get(x); get(hi); op(SUB); set(lo);
++  };
++
++  // Moves f64 local `x` one ulp: away from zero when `toward` has x's sign,
++  // toward zero otherwise, if `cond` (an i32 left on the stack) holds.
++  const auto nudge = [&](u32 x, u32 toward, const auto& cond) {
++    get(x); op(0xbd);                                           // i64.reinterpret_f64
++    get(x); op(0xbd); get(toward); op(0xbd); op(0x85);          // i64.xor
++    EmitI64Const(body, 63); op(0x87);                           // i64.shr_s
++    EmitI64Const(body, 1); op(0x84);                            // i64.or: -1 or 1
++    EmitI64Const(body, 0);
++    cond();
++    op(0x1b);                                                   // select
++    op(0x7c);                                                   // i64.add
++    op(0xbf);                                                   // f64.reinterpret_i64
+   };
+-  EmitLocalSet(body, a);
++  // RN(p + e + y) for the exact product p + e: TwoSum, TwoSum, then round
++  // to odd (RO): u + v = t + e exactly; when v != 0 and u is even, RO is u's
++  // neighbour toward v. Boldo & Melquiond prove RN(hi + RO(lo + e)) rounds
++  // p + e + y once, in binary64 without underflow or overflow.
++  const auto sum_round_once = [&](u32 y, u32 hi, u32 lo, u32 u_, u32 v_, u32 tmp) {
++    two_sum(p, y, hi, lo, tmp);
++    two_sum(lo, e, u_, v_, tmp);
++    nudge(u_, v_, [&] {
++      get(v_); f64const(0.0); op(NE);
++      get(u_); op(0xbd); EmitI64Const(body, 1); op(0x83); op(0x50);  // u even
++      op(AND);
++    });
++    get(hi); op(ADD);
++  };
++  set(a);
++  if ((s_dolphin_web_disable_mask.load(std::memory_order_relaxed) &
++       DOLPHIN_WEB_DISABLE_INLINE_FMA) != 0)
++  {
++    emit_import();
++    return;
++  }
+   EmitStateLoadF64(body, PsOffset(layout, inst.FC, c_lane));
+-  EmitLocalSet(body, c);
+-  // exact = a, c zero or normal ...
+-  EmitLocalGet(body, a);
++  set(c);
++  EmitStateLoadF64(body, PsOffset(layout, inst.FB, lane));
++  if (sub)
++    op(0x9a);  // f64.neg
++  set(b);
++  // a, c zero or normal (Force25Bit needs a non-denormal c)
++  get(a);
+   EmitIsZeroOrNormalDouble(body);
+-  EmitLocalGet(body, c);
++  get(c);
+   EmitIsZeroOrNormalDouble(body);
+-  body.push_back(0x71);
+-  EmitLocalSet(body, 2);
++  op(AND);
++  set(2);
+   if (single)
+   {
+-    EmitLocalGet(body, c);
++    get(c);
+     EmitForce25BitNonDenormal(body);
+-    EmitLocalSet(body, c);
+-  }
+-  // ... and (53 - ctz(a)) + (53 - ctz(c)) <= 53 significant bits ...
+-  emit_ctz(a);
+-  emit_ctz(c);
+-  body.push_back(0x7c);  // i64.add
+-  EmitI64Const(body, 53);
+-  body.push_back(0x5a);  // i64.ge_u
+-  EmitLocalGet(body, 2);
+-  body.push_back(0x71);
+-  EmitLocalSet(body, 2);
+-  // ... and the product normal, or exactly zero because an operand is.
+-  EmitLocalGet(body, a);
+-  EmitLocalGet(body, c);
+-  body.push_back(0xa2);
+-  body.push_back(0x22);
+-  EmitU32Leb(body, p);
+-  body.push_back(0x99);  // f64.abs
+-  EmitF64ConstBits(body, 0x0010000000000000ull);
+-  body.push_back(0x66);  // f64.ge (false for NaN)
+-  EmitLocalGet(body, p);
+-  body.push_back(0x99);
+-  EmitF64ConstBits(body, 0x7ff0000000000000ull);
+-  body.push_back(0x63);  // f64.lt
+-  body.push_back(0x71);
+-  EmitLocalGet(body, a);
+-  EmitF64ConstBits(body, 0);
+-  body.push_back(0x61);
+-  EmitLocalGet(body, c);
+-  EmitF64ConstBits(body, 0);
+-  body.push_back(0x61);
+-  body.push_back(0x72);
+-  body.push_back(0x72);
+-  EmitLocalGet(body, 2);
+-  body.push_back(0x71);
+-  body.push_back(0x04);
+-  body.push_back(0x7c);  // if (result f64)
+-  EmitLocalGet(body, p);
+-  EmitStateLoadF64(body, PsOffset(layout, inst.FB, lane));
+-  body.push_back(sub ? 0xa1 : 0xa0);
+-  body.push_back(0x05);
+-  emit_import();
+-  body.push_back(0x0b);
+-  if (!single)
+-    return;
+-  // NI_madd_msub's tie correction applies when the 29 bits below single
+-  // precision are exactly a half: leave that case to it.
+-  body.push_back(0x22);
+-  EmitU32Leb(body, dst);
+-  body.push_back(0xbd);
+-  EmitI64Const(body, 0x1fffffff);
+-  body.push_back(0x83);
+-  EmitI64Const(body, 0x10000000);
+-  body.push_back(0x51);  // i64.eq
+-  body.push_back(0x04);
+-  body.push_back(0x7c);
++    set(c);
++  }
++  get(a); get(c); op(MUL); set(p);
++  // Exact product: a*c is a double when the significands need 53 bits or
++  // fewer together (trailing zeros of both add up to 53 or more; frC keeps
++  // 25 bits in single forms, so a single a always fits) and the product is
++  // zero or normal; a zero a or frC gives an exact signed zero. Then
++  // a*c + b rounds once as p + b. Local 2 first: a denormal frC rounds to
++  // zero above, its product does not.
++  get(a); op(0xbd); EmitI64Const(body, 1ull << 52); op(0x84); op(0x7a);  // i64.ctz
++  get(c); op(0xbd); EmitI64Const(body, 1ull << 52); op(0x84); op(0x7a);
++  op(0x7c); EmitI64Const(body, 53); op(0x59);                  // i64.ge_s
++  get(a); f64const(0.0); op(EQ); op(OR);
++  get(c); f64const(0.0); op(EQ); op(OR);
++  get(p); EmitIsZeroOrNormalDouble(body); op(AND);
++  get(2); op(AND);
++  op(0x04); op(0x7c);  // if (result f64)
++  get(p); get(b); op(ADD);
++  if (single)
++  {
++    // NI_madd_msub's tie fix (see below), with fma(a, c, a') = p + a'.
++    op(0x22); EmitU32Leb(body, dst);
++    op(0xbd); EmitI64Const(body, 0x1fffffff); op(0x83);
++    EmitI64Const(body, 0x10000000); op(0x51);
++    op(0x04); op(0x7c);
++    get(b); get(dst); op(SUB); set(ah);
++    get(dst); get(ah); op(ADD); set(al);
++    get(p); get(ah); op(ADD);
++    get(b); get(al); op(SUB);
++    op(ADD); set(ch);
++    nudge(dst, ch, [&] { get(ch); f64const(0.0); op(NE); });
++    op(0x05);
++    get(dst);
++    op(0x0b);
++  }
++  op(0x05);
++  // Range where the transforms are exact: |a|, |c|, |b| <= 2^995 and
++  // 2^-900 <= |p| (b may be zero or normal at any size below the cap).
++  get(a); op(ABS); f64const(0x1p995); op(LE);
++  get(c); op(ABS); f64const(0x1p995); op(LE); op(AND);
++  get(b); op(ABS); f64const(0x1p995); op(LE); op(AND);
++  get(p); op(ABS); f64const(0x1p-900); op(GE); op(AND);
++  get(2); op(AND);
++  set(2);
++  get(2);
++  op(0x04); op(0x7c);  // if (result f64)
++  split(a, ah, al);
++  split(c, ch, cl);
++  // e = ((ah*ch - p) + ah*cl + al*ch) + al*cl
++  get(ah); get(ch); op(MUL); get(p); op(SUB);
++  get(ah); get(cl); op(MUL); op(ADD);
++  get(al); get(ch); op(MUL); op(ADD);
++  get(al); get(cl); op(MUL); op(ADD);
++  set(e);
++  // Boldo & Melquiond (IEEE TC 2008): RN(sx + RO(t + e)) = RN(a*c + b).
++  sum_round_once(b, sx, t, u, al, ch);                          // r = RN(a*c + b)
++  if (single)
++  {
++    // NI_madd_msub's tie fix, computed as it does: when r sits exactly on a
++    // single-precision midpoint (29 low bits = 0x10000000), a' = b - r,
++    // b' = r + a', error = fma(a, c, a') + (b - b'), and r moves one ulp
++    // toward the side `error` points to. fma(a, c, a') reuses the exact
++    // product p + e.
++    const u32 ap = a, bp = c, err = ch;
++    op(0x22); EmitU32Leb(body, dst);
++    op(0xbd); EmitI64Const(body, 0x1fffffff); op(0x83);
++    EmitI64Const(body, 0x10000000); op(0x51);                   // i64.eq
++    op(0x04); op(0x7c);
++    get(b); get(dst); op(SUB); set(ap);
++    get(dst); get(ap); op(ADD); set(bp);
++    sum_round_once(ap, sx, t, u, al, cl);                       // fma(a, c, a')
++    get(b); get(bp); op(SUB);
++    op(ADD); set(err);
++    nudge(dst, err, [&] { get(err); f64const(0.0); op(NE); });
++    op(0x05);
++    get(dst);
++    op(0x0b);
++  }
++  op(0x05);
+   emit_import();
+-  body.push_back(0x05);
+-  EmitLocalGet(body, dst);
+-  body.push_back(0x0b);
++  op(0x0b);
++  op(0x0b);
++  (void)LT;
+ }
+ 
+ // Computes one lane into f64 local `dst` (rounded to single when `single`,
+@@ -5644,9 +5729,81 @@ void EmitDoublePrecisionArithmetic(std::vector<u8>& body, const WasmStateLayout&
+ void EmitFrsqrte(std::vector<u8>& body, const WasmStateLayout& layout,
+                  const PPCAnalyst::CodeOp& op, u32 downcount)
+ {
+-  // The interpreter uses Gekko's estimate tables; 1/sqrt would be too exact.
+-  (void)layout;
++  // Gekko's estimate (Common::ApproximateReciprocalSquareRoot) inline for a
++  // positive normal operand, the only case where the interpreter touches no
++  // FPSCR bit but FPRF: integer arithmetic on the bits and the 32-entry
++  // frsqrte_expected table, read in place from the core's memory. Zero,
++  // negative, denormal, infinity and NaN take the helper.
++  const UGeckoInstruction inst = op.inst;
++  const u32 table = static_cast<u32>(reinterpret_cast<std::uintptr_t>(Common::frsqrte_expected.data()));
++  static_assert(sizeof(Common::BaseAndDec) == 8);
++  const u32 result = WasmFpScratchLocal(0);
++  EmitFpFastPathMsrCondition(body, layout);
++  // b - 2^52 < 0x7ff0000000000000 - 2^52 (unsigned): positive and normal
++  EmitStateLoadF64(body, PsOffset(layout, inst.FB, 0));
++  body.push_back(0xbd);
++  body.push_back(0x22);
++  EmitU32Leb(body, 4);  // local 4 = bits(b)
++  EmitI64Const(body, u64{1} << 52);
++  body.push_back(0x7d);
++  EmitI64Const(body, 0x7ff0000000000000ull - (u64{1} << 52));
++  body.push_back(0x54);  // i64.lt_u
++  body.push_back(0x71);
++  body.push_back(0x04);
++  body.push_back(0x40);
++  // i = ((exponent & 2^52) | mantissa) >> 37, a 16-bit index
++  EmitLocalGet(body, 4);
++  EmitI64Const(body, (u64{1} << 53) - 1);
++  body.push_back(0x83);
++  EmitI64Const(body, 37);
++  body.push_back(0x88);
++  body.push_back(0xa7);
++  EmitLocalSet(body, 2);
++  // entry = &table[i >> 11]; value = base + dec * (i & 2047)
++  EmitLocalGet(body, 2);
++  EmitI32Const(body, 11);
++  body.push_back(0x76);
++  EmitI32Const(body, 3);
++  body.push_back(0x74);
++  EmitI32Const(body, table);
++  body.push_back(0x6a);
++  EmitLocalSet(body, 3);
++  EmitLocalGet(body, 3);
++  body.push_back(0x28);  // i32.load base
++  body.push_back(0x02);
++  EmitU32Leb(body, 0);
++  EmitLocalGet(body, 3);
++  body.push_back(0x28);  // i32.load dec
++  body.push_back(0x02);
++  EmitU32Leb(body, 4);
++  EmitLocalGet(body, 2);
++  EmitI32Const(body, 2047);
++  body.push_back(0x71);
++  body.push_back(0x6c);  // i32.mul
++  body.push_back(0x6a);  // i32.add
++  body.push_back(0xac);  // i64.extend_i32_s
++  EmitI64Const(body, 26);
++  body.push_back(0x86);  // i64.shl
++  // exponent = ((0x3ff << 52) - ((exponent - (0x3fe << 52)) / 2)) & (0x7ff << 52)
++  EmitI64Const(body, u64{0x3ff} << 52);
++  EmitLocalGet(body, 4);
++  EmitI64Const(body, u64{0x7ff} << 52);
++  body.push_back(0x83);
++  EmitI64Const(body, u64{0x3fe} << 52);
++  body.push_back(0x7d);
++  EmitI64Const(body, 2);
++  body.push_back(0x7f);  // i64.div_s (truncating, as in C++)
++  body.push_back(0x7d);
++  EmitI64Const(body, u64{0x7ff} << 52);
++  body.push_back(0x83);
++  body.push_back(0x84);  // i64.or
++  body.push_back(0xbf);
++  EmitLocalSet(body, result);
++  EmitStoreFprLaneFromLocal(body, layout, inst.FD, 0, result);
++  EmitSetFprfZeroOrNormal(body, layout, result, 0, op.wantsFPRF);
++  body.push_back(0x05);
+   EmitFpCall(body, op, downcount);
++  body.push_back(0x0b);
+ }
+ 
+ 
+@@ -8174,11 +8331,11 @@ std::vector<u8> BuildWasmCachedInterpreterBlock(std::span<const PPCAnalyst::Code
+   // group `0x01, 0x7f` (one i32 at index WASM_FMH_FLAG_LOCAL=40, the per-group
+   // range-check flag) and bump the leading group count 5 → 6. When the plan is
+   // inactive the locals section is byte-identical to today (no extra local).
+-  // A last group of six f64 locals follows: WasmFpScratchLocal(0..5).
++  // A last group of sixteen f64 locals follows: WasmFpScratchLocal(0..15).
+   std::vector<u8> body = s_fmh_plan.active
+       ? std::vector<u8>{0x07, 0x03, 0x7f, 0x02, 0x7e, 0x01, 0x7c, 0x01, 0x7f, 0x20, 0x7f, 0x01, 0x7f,
+-                        0x06, 0x7c}
+-      : std::vector<u8>{0x06, 0x03, 0x7f, 0x02, 0x7e, 0x01, 0x7c, 0x01, 0x7f, 0x20, 0x7f, 0x06, 0x7c};
++                        0x10, 0x7c}
++      : std::vector<u8>{0x06, 0x03, 0x7f, 0x02, 0x7e, 0x01, 0x7c, 0x01, 0x7f, 0x20, 0x7f, 0x10, 0x7c};
+ 
+   // §28cx C1: set up the GPR register cache for this block, then eagerly load
+   // every GPR the block reads or writes into its local. Eager (not lazy) load
+@@ -12235,6 +12392,8 @@ extern "C" const char* GetPpcWasmHelperStats()
+       << " blacklisthit:" << s_wasm_blacklist_hit_count
+       << " transientreject:" << s_wasm_transient_reject_count.load(std::memory_order_relaxed)
+       << " tablefull:" << (s_wasm_table_full.load(std::memory_order_relaxed) ? 1 : 0)
++      << " fmad:" << s_wasm_fma_import_counts[0] + s_wasm_fma_import_counts[1]
++      << " fmas:" << s_wasm_fma_import_counts[2] + s_wasm_fma_import_counts[3]
+       << " pre:" << average_prefix << "/" << s_wasm_prefix_instruction_max
+       << " hist:" << s_wasm_prefix_histogram[0] << "," << s_wasm_prefix_histogram[1] << ","
+       << s_wasm_prefix_histogram[2] << "," << s_wasm_prefix_histogram[3] << ","
