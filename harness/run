@@ -1,0 +1,3 @@
+#!/bin/sh
+# QA harness: harness/run <matrix|measure|diff|fuzz|pads|build-iso> [options]
+exec node "$(dirname "$0")/cli.mjs" "$@"
