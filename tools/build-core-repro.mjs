@@ -24,7 +24,7 @@
 import { spawnSync } from "node:child_process";
 import { createHash } from "node:crypto";
 import {
-  copyFileSync, cpSync, existsSync, mkdirSync, mkdtempSync, readdirSync, readFileSync, realpathSync,
+  chmodSync, copyFileSync, cpSync, existsSync, mkdirSync, mkdtempSync, readdirSync, readFileSync, realpathSync,
   renameSync, rmSync, writeFileSync
 } from "node:fs";
 import { tmpdir } from "node:os";
@@ -325,6 +325,9 @@ export function installCore({ root: base, outputDir, validate }) {
       for (const name of ["dolphin-core-upstream.js", "dolphin-core-upstream.wasm", "dolphin-core-upstream.build.json"]) {
         const destination = join(base, "cores/dolphin", name);
         copyFileSync(join(outputDir, name), `${destination}.install-tmp`);
+        // Emscripten marks its output executable; the committed core files
+        // are plain 0644 data (push-core accepts only 100644 blobs).
+        chmodSync(`${destination}.install-tmp`, 0o644);
         renameSync(`${destination}.install-tmp`, destination);
       }
       validate();

@@ -1,7 +1,7 @@
 import assert from "node:assert/strict";
 import { spawnSync } from "node:child_process";
 import { createHash } from "node:crypto";
-import { cpSync, existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import { chmodSync, cpSync, existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import path from "node:path";
 import test from "node:test";
@@ -391,6 +391,35 @@ test("publish-plan writes one validated JSON plan and fails without one", () => 
   } finally {
     rmSync(dir, { recursive: true, force: true });
     rmSync(artifact, { recursive: true, force: true });
+  }
+});
+
+test("the core commit records 100644 even when main's files are executable", async () => {
+  const f = fixture();
+  try {
+    f.installCore("core-A", ["_Boot"]);
+    for (const file of CORE_DERIVED_FILES) chmodSync(path.join(f.dir, file), 0o755);
+    f.commit("main with an executable core");
+    assert.match(f.git("ls-tree", "HEAD", "--", CORE_BINARY_FILES[1]), /^100755 /);
+    const artifact = mkdtempSync(path.join(tmpdir(), "mode-artifact-"));
+    for (const file of CORE_DERIVED_FILES) {
+      writeFileSync(path.join(artifact, path.basename(file)), `new ${file}`, { mode: 0o755 });
+    }
+    writeFileSync(path.join(artifact, "dolphin-core-upstream.build.json"), "{}", { mode: 0o755 });
+    const wasm = readFileSync(path.join(artifact, "dolphin-core-upstream.wasm"));
+    const plan = await publishPlan({
+      artifactDir: artifact, cwd: f.dir, builtSha256: sha256(wasm),
+      status: async (cwd) => ({ current: readFileSync(path.join(cwd, CORE_BINARY_FILES[1]), "utf8").startsWith("new "),
+        coreId: "sha256:x", reasons: ["stale"] }),
+      identityDifferences: () => [], regenerate: () => {}
+    });
+    assert.equal(plan.action, "commit");
+    for (const file of [...CORE_DERIVED_FILES, ABI_PATH]) {
+      assert.match(f.git("ls-tree", "HEAD", "--", file), /^100644 blob /, file);
+    }
+    rmSync(artifact, { recursive: true, force: true });
+  } finally {
+    rmSync(f.dir, { recursive: true, force: true });
   }
 });
 

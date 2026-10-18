@@ -21,7 +21,7 @@
 
 import { spawnSync } from "node:child_process";
 import { createHash } from "node:crypto";
-import { existsSync, mkdirSync, mkdtempSync, readdirSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import { chmodSync, existsSync, mkdirSync, mkdtempSync, readdirSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { dirname, join, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
@@ -267,7 +267,12 @@ export async function publishPlan({
     if (result.status !== 0) throw new Error("update-core-abi failed");
   },
   commit = (message) => {
-    for (const args of [["add", ...CORE_DERIVED_FILES, ABI_PATH], ["commit", "-q", "-m", message]]) {
+    // Recorded as 100644 whatever the checkout's modes: core files that
+    // arrived executable on main are corrected, not kept (push-core refuses
+    // anything but 100644 blobs).
+    for (const args of [["add", ...CORE_DERIVED_FILES, ABI_PATH],
+      ["update-index", "--chmod=-x", "--", ...CORE_DERIVED_FILES, ABI_PATH],
+      ["commit", "-q", "-m", message]]) {
       const result = spawnSync("git", args, { cwd, stdio: ["ignore", process.stderr, process.stderr] });
       if (result.status !== 0) throw new Error(`git ${args[0]} failed`);
     }
@@ -292,6 +297,7 @@ export async function publishPlan({
   }
   for (const path of CORE_DERIVED_FILES) {
     writeFileSync(join(cwd, path), readFileSync(join(artifactDir, path.split("/").pop())));
+    chmodSync(join(cwd, path), 0o644);
   }
   regenerate();
   const after = await status(cwd);
