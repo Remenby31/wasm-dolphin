@@ -208,13 +208,23 @@ jobs:
           test "$rebuilt" = "${{ needs.build.outputs.wasm_sha256 }}"
 
   # After a merge: commit main's core, built and checked above, if it differs
-  # from the committed one. Only a core that the published source archive
-  # rebuilds byte for byte is committed. The push uses GITHUB_TOKEN, which does
-  # not start another workflow run; it fails, harmlessly, if main moved while
-  # this ran, and the run for the newer commit takes over.
+  # from the committed one.
+  # - Only on a push to main, so only merged code runs here; this is the one
+  #   job with contents: write, and the token is used for the final push only.
+  # - Only a core that the published source archive rebuilds byte for byte
+  #   (needs: rebuild-from-source-archive), that the incremental rebuild
+  #   matched (build job), and that core:status and verify:provenance accept.
+  # - No loop: a push made with GITHUB_TOKEN starts no workflow run, and the
+  #   condition below skips the bot's own commits should that ever change.
+  # - Two close merges: the workflow-level concurrency cancels the older run;
+  #   if the older one is already pushing, the newer push is rejected as
+  #   non-fast-forward, or the newer run finds the core already committed.
+  #   A rejected push leaves main for the run of the commit that moved it.
   commit-core:
     needs: [build, rebuild-from-source-archive]
-    if: github.event_name == 'push' && github.ref == 'refs/heads/main'
+    if: >-
+      github.event_name == 'push' && github.ref == 'refs/heads/main' &&
+      github.event.head_commit.author.name != 'github-actions[bot]'
     runs-on: ubuntu-24.04
     timeout-minutes: 15
     permissions:
@@ -224,6 +234,8 @@ jobs:
       cancel-in-progress: false
     steps:
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+        with:
+          persist-credentials: false
 
       - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4
         with:
@@ -234,7 +246,8 @@ jobs:
           name: core-${{ needs.build.outputs.wasm_sha256 }}
           path: core-artifact
 
-      - name: Commit the core if it changed
+      - name: Verify and commit the core if it changed
+        id: commit
         env:
           SHA256: ${{ needs.build.outputs.wasm_sha256 }}
         run: |
@@ -242,10 +255,12 @@ jobs:
           cp core-artifact/dolphin-core-abi-v1.json provenance/
           cp core-artifact/upstream-worker-protocol.js src/
           rm -rf core-artifact
+          test "$(sha256sum cores/dolphin/dolphin-core-upstream.wasm | cut -d' ' -f1)" = "$SHA256"
           node tools/core-artifacts.mjs status --require-current
           node tools/verify-dolphin-provenance.mjs > /dev/null
           if git diff --quiet; then
             echo "The committed core is already sha256:$SHA256."
+            echo "changed=false" >> "$GITHUB_OUTPUT"
             exit 0
           fi
           git config user.name "github-actions[bot]"
@@ -253,4 +268,14 @@ jobs:
           git add cores/dolphin provenance/dolphin-core-abi-v1.json src/upstream-worker-protocol.js
           git commit -m "Build the core for $(git rev-parse --short HEAD)" \
             -m "sha256:$SHA256, built by ${GITHUB_SERVER_URL}/${GITHUB_REPOSITORY}/actions/runs/${GITHUB_RUN_ID} from the sources of ${GITHUB_SHA} and rebuilt identically from its GPL source archive."
-          git push origin HEAD:main
+          echo "changed=true" >> "$GITHUB_OUTPUT"
+
+      # The write token exists only in this step, which runs git and nothing
+      # from the repository.
+      - name: Push
+        if: steps.commit.outputs.changed == 'true'
+        env:
+          TOKEN: ${{ github.token }}
+        run: |
+          git -c "http.https://github.com/.extraheader=AUTHORIZATION: basic $(printf 'x-access-token:%s' "$TOKEN" | base64 -w0)" \
+            push origin HEAD:main
