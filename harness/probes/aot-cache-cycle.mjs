@@ -3,15 +3,16 @@
 // SPDX-License-Identifier: MIT
 // Region cache cycle (plan piste 3, P6, lane 10). Headless only.
 //
-// Three launches of the engine on ONE profile, each booting the disc and then
+// Four launches of the engine on ONE profile, each booting the disc and then
 // asking the discio worker (validationAotCacheProbe) to store what is missing
 // from a set of region-shaped modules and load them all back:
 //   1. cold: nothing present, everything compiled and stored, run hot so V8
 //      tiers up and writes its code cache;
 //   2. same core: everything present, nothing compiled from scratch, first
 //      call already fast;
-//   3. another core hash: nothing present (everything recompiled), and the
-//      stale cache of this disc is pruned.
+//   3. another core hash: nothing present (everything recompiled); the first
+//      core's cache is kept (two identities per disc);
+//   4. a third core hash: everything recompiled, the oldest cache pruned.
 // The modules are synthetic (no imports): until the region compiler (P4)
 // exists, this checks the storage, keys, Service Worker and code cache path.
 //
@@ -79,6 +80,7 @@ const modules = Array.from({ length: Number(values.regions) }, (_, i) => {
   return { key: `probe-region:${createHash("sha256").update(bytes).digest("hex")}`, b64: bytes.toString("base64") };
 });
 const OTHER_CORE = "c".repeat(64);
+const THIRD_CORE = "d".repeat(64);
 const out = values.out;
 mkdirSync(out, { recursive: true });
 const profileDir = mkdtempSync(path.join(os.tmpdir(), "gc-aot-cycle-"));
@@ -88,7 +90,9 @@ try {
   const launches = [
     { name: "launch1", hot: Number(values.hot), settleMs: 6000 },
     { name: "launch2", hot: 0, settleMs: 0 },
-    { name: "launch3-other-core", hot: 0, settleMs: 0, coreHash: OTHER_CORE }
+    { name: "launch3-other-core", hot: 0, settleMs: 0, coreHash: OTHER_CORE },
+    // Two identities per disc live side by side; a third drops the oldest.
+    { name: "launch4-third-core", hot: 0, settleMs: 0, coreHash: THIRD_CORE }
   ];
   for (const launch of launches) {
     const context = await launchChrome({ profileDir });
@@ -125,9 +129,10 @@ try {
   rmSync(profileDir, { recursive: true, force: true });
 }
 writeFileSync(path.join(out, "cycle.json"), JSON.stringify(results, null, 1));
-const [l1, l2, l3] = results;
+const [l1, l2, l3, l4] = results;
 const pass = l1?.present === 0 && l1?.stored === modules.length &&
   l2?.present === modules.length && l2?.stored === 0 &&
-  l3?.present === 0 && l3?.stored === modules.length && l3?.pruned?.length >= 1;
-log(`verdict: ${pass ? "PASS" : "FAIL"} (launch 2 compiled ${l2?.stored} of ${modules.length} from scratch, launch 3 recompiled ${l3?.stored})`);
+  l3?.present === 0 && l3?.stored === modules.length && l3?.pruned?.length === 0 &&
+  l4?.present === 0 && l4?.stored === modules.length && l4?.pruned?.length === 1;
+log(`verdict: ${pass ? "PASS" : "FAIL"} (launch 2 compiled ${l2?.stored} of ${modules.length} from scratch, launch 3 recompiled ${l3?.stored}, launch 4 pruned ${l4?.pruned?.length})`);
 process.exit(pass ? 0 : 1);
