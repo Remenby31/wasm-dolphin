@@ -80,6 +80,20 @@ async function open({ tree, profileDir }) {
   };
 }
 
+// Resident memory of this profile's Chrome processes (MB): total and the
+// largest renderer (the tab, with its workers).
+function sampleRss(profileDir) {
+  const out = execFileSync("ps", ["-A", "-o", "rss=,command="], { encoding: "utf8", maxBuffer: 32 << 20 });
+  let total = 0, renderer = 0;
+  for (const line of out.split("\n")) {
+    const m = line.match(/^\s*(\d+)\s+(.*)$/);
+    if (!m || !m[2].includes(profileDir)) continue;
+    total += Number(m[1]);
+    if (m[2].includes("--type=renderer")) renderer = Math.max(renderer, Number(m[1]));
+  }
+  return { totalMB: Math.round(total / 1024), rendererMB: Math.round(renderer / 1024) };
+}
+
 async function readiness(page) {
   return workerRequest(page, "validationReadJitCacheReadiness", {}, 15000).catch((e) => ({ error: String(e.message || e) }));
 }
@@ -118,9 +132,11 @@ async function measureOne(name, tree, runDir, profileDir) {
     result.readinessAtLoad = await readiness(s.page);
     // Drain the rings every second, from load to the end of the window.
     let draining = true;
+    const rss = [];
     const drain = (async () => {
-      while (draining) {
+      for (let i = 0; draining; i += 1) {
         chunks.push(await readTimeline(s.page).catch((e) => ({ error: String(e.message || e) })));
+        if (i % 5 === 0) rss.push(sampleRss(profileDir));
         await s.page.waitForTimeout(1000);
       }
     })();
@@ -141,6 +157,12 @@ async function measureOne(name, tree, runDir, profileDir) {
       return { frameP50: p.frameP50, frameP95: p.frameP95, frameP99: p.frameP99, frameMax: p.frameMax, hitchesPerMin: p.hitchesPerMin, presentFreezes: p.freezes.length, coreFreezes: c.freezes?.length ?? null, speed: c.speed ?? null, speedP5: c.speedP5 ?? null };
     };
     result.timelineComplete = timeline.complete;
+    result.rss = {
+      peakTotalMB: Math.max(...rss.map((r) => r.totalMB)),
+      peakRendererMB: Math.max(...rss.map((r) => r.rendererMB)),
+      endTotalMB: rss.at(-1)?.totalMB ?? null,
+      endRendererMB: rss.at(-1)?.rendererMB ?? null
+    };
     // The JIT engages at a fixed emulated field: that is when the cached
     // modules are first instantiated and called.
     const progress = await workerRequest(s.page, "validationReadCoreProgress", {}, 15000).catch(() => null);
@@ -200,7 +222,7 @@ async function measure() {
       r.launch = launch;
       all.push(r);
       writeFileSync(path.join(runDir, `${tag}.json`), JSON.stringify(r, null, 1));
-      log(`  ${tag}: ${r.error ? "ERROR " + r.error.split("\n")[0] : `full-speed=${r.timeToFullSpeedSec}s engage p99=${r.engage?.frameP99?.toFixed?.(1)} max=${r.engage?.frameMax?.toFixed?.(0)} race p99=${r.race?.frameP99?.toFixed?.(1)} menus p99=${r.menus?.frameP99?.toFixed?.(1)} speed=${r.race?.speed?.toFixed?.(1)} core=${JSON.stringify(r.coreModules)}`}`);
+      log(`  ${tag}: ${r.error ? "ERROR " + r.error.split("\n")[0] : `rss=${r.rss?.peakTotalMB}/${r.rss?.peakRendererMB}MB full-speed=${r.timeToFullSpeedSec}s engage p99=${r.engage?.frameP99?.toFixed?.(1)} max=${r.engage?.frameMax?.toFixed?.(0)} race p99=${r.race?.frameP99?.toFixed?.(1)} menus p99=${r.menus?.frameP99?.toFixed?.(1)} speed=${r.race?.speed?.toFixed?.(1)} core=${JSON.stringify(r.coreModules)}`}`);
       }
       rmSync(profileDir, { recursive: true, force: true });
     }
