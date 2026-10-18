@@ -1516,3 +1516,5 @@ int ReadDiscFile(const char* path, double offset, int length, std::uint8_t* buff
              static_cast<int>(read);
 }
 }
+
+// CI measurement: a one-line shim change (never merged).
