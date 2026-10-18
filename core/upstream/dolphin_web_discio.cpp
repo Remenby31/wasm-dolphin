@@ -22,11 +22,15 @@
 #include "DiscIO/Volume.h"
 #include "DiscIO/VolumeDisc.h"
 #include "Core/CoreTiming.h"
+#include "Core/HW/ProcessorInterface.h"
 #include "Core/HW/VideoInterface.h"
 #include "Core/PowerPC/PowerPC.h"
 #include "Core/System.h"
 #include "InputCommon/GCPadStatus.h"
+#include "VideoCommon/CommandProcessor.h"
 #include "VideoCommon/Fifo.h"
+#include "VideoCommon/PixelEngine.h"
+#include "VideoCommon/WasmGpuSyncDiag.h"
 #include "VideoCommon/TextureDecoder.h"
 #include "VideoCommon/Statistics.h"
 
@@ -1053,7 +1057,65 @@ static void HarnessOnViOutput(const std::uint8_t* xfb, std::uint32_t width, std:
   s_harness_capture_state.store(2, std::memory_order_release);
 }
 
-EMSCRIPTEN_KEEPALIVE void DolphinWeb_HarnessEnable(int enabled) { s_harness_enabled.store(enabled ? 1 : 0, std::memory_order_relaxed); }
+EMSCRIPTEN_KEEPALIVE void DolphinWeb_HarnessEnable(int enabled)
+{
+  s_harness_enabled.store(enabled ? 1 : 0, std::memory_order_relaxed);
+}
+
+// The GPU-sync counters have a switch of their own, turned on only by the
+// freeze probe (validationEnableGpuSyncDiag): other harness sessions, the
+// perf gate among them, never count.
+EMSCRIPTEN_KEEPALIVE void DolphinWeb_GpuSyncDiagEnable(int enabled)
+{
+  DolphinWeb::GpuSyncDiag::s_enabled.store(enabled != 0, std::memory_order_relaxed);
+}
+
+// Harness diagnostics for a dual-core GPU stall (validationReadWgpuReplayState):
+// the CP FIFO as the GPU thread sees it, the pixel engine's token/finish
+// handshake, and the counters of VideoCommon/WasmGpuSyncDiag.h. JSON.
+// Read from the worker while the CPU and GPU threads run: each field is one
+// atomic load, but the fields are not one snapshot (the read pointer can
+// move between "read" and "rwDistance"). Good for a stall, where nothing
+// moves; not for arithmetic between fields of a running FIFO.
+EMSCRIPTEN_KEEPALIVE const char* DolphinWeb_GpuSyncDiag()
+{
+  static std::string out;
+  auto& system = Core::System::GetInstance();
+  auto& command_processor = system.GetCommandProcessor();
+  auto& fifo = command_processor.GetFifo();
+  const auto pe = system.GetPixelEngine().GetSyncState();
+  const auto& c = DolphinWeb::GpuSyncDiag::s_counters;
+  const auto load = [](const auto& a) { return static_cast<unsigned long long>(a.load(std::memory_order_relaxed)); };
+  std::ostringstream o;
+  o << "{\"enabled\":" << (DolphinWeb::GpuSyncDiag::Enabled() ? 1 : 0)
+    << ",\"fifo\":{\"base\":" << load(fifo.CPBase) << ",\"end\":" << load(fifo.CPEnd)
+    << ",\"rwDistance\":" << load(fifo.CPReadWriteDistance)
+    << ",\"read\":" << load(fifo.CPReadPointer) << ",\"write\":" << load(fifo.CPWritePointer)
+    << ",\"safeRead\":" << load(fifo.SafeCPReadPointer)
+    << ",\"breakpoint\":" << load(fifo.CPBreakpoint)
+    << ",\"gpLink\":" << load(fifo.bFF_GPLinkEnable) << ",\"gpRead\":" << load(fifo.bFF_GPReadEnable)
+    << ",\"bpEnable\":" << load(fifo.bFF_BPEnable) << ",\"bpInt\":" << load(fifo.bFF_BPInt)
+    << ",\"atBreakpoint\":" << load(fifo.bFF_Breakpoint)
+    << ",\"hiWatermark\":" << load(fifo.bFF_HiWatermark) << ",\"loWatermark\":" << load(fifo.bFF_LoWatermark)
+    << ",\"interruptWaiting\":" << (command_processor.IsInterruptWaiting() ? 1 : 0) << "}"
+    << ",\"pe\":{\"token\":" << pe.token << ",\"tokenPending\":" << pe.token_pending
+    << ",\"tokenInterruptPending\":" << pe.token_interrupt_pending
+    << ",\"finishInterruptPending\":" << pe.finish_interrupt_pending
+    << ",\"eventRaised\":" << pe.event_raised
+    << ",\"signalToken\":" << pe.signal_token_interrupt
+    << ",\"signalFinish\":" << pe.signal_finish_interrupt << "}"
+    << ",\"piCause\":" << system.GetProcessorInterface().GetCause()
+    << ",\"counters\":{\"gpuLoop\":" << load(c.gpu_loop_iterations)
+    << ",\"fifoChunks\":" << load(c.fifo_chunks_decoded)
+    << ",\"tokenRequests\":" << load(c.pe_token_requests)
+    << ",\"finishRequests\":" << load(c.pe_finish_requests)
+    << ",\"eventsScheduled\":" << load(c.pe_events_scheduled)
+    << ",\"eventsRun\":" << load(c.pe_events_run)
+    << ",\"finishSignalled\":" << load(c.pe_finish_signalled)
+    << ",\"tokenSignalled\":" << load(c.pe_token_signalled) << "}}";
+  out = o.str();
+  return out.c_str();
+}
 EMSCRIPTEN_KEEPALIVE int DolphinWeb_HarnessEnabled() { return s_harness_enabled.load(std::memory_order_relaxed); }
 EMSCRIPTEN_KEEPALIVE std::uint32_t DolphinWeb_HarnessViSinceBoot() { return s_harness_vi_since_boot; }
 EMSCRIPTEN_KEEPALIVE std::uint32_t DolphinWeb_HarnessViSinceLoad() { return s_harness_vi_since_load; }

@@ -20,8 +20,8 @@
     {
       "path": "core/upstream/dolphin_web_discio.cpp",
       "hashMode": "lf-normalized",
-      "size": 55180,
-      "sha256": "0afdf1dbe3e4582ec391f204f4119f8c8bbaf99bfa40e72fd8164d291498302b"
+      "size": 58548,
+      "sha256": "37c21df203e97d71ef25f04b4a42853c86a855a8f462f02e66c2a8cd5990cfa7"
     },
     {
       "path": "core/upstream/dolphin_web_raster_profile.h",
@@ -134,8 +134,8 @@
     {
       "path": "src/upstream-discio-worker.js",
       "hashMode": "lf-normalized",
-      "size": 621639,
-      "sha256": "75ec207f0bbe0adb6d607638e60a74fba8d119d3f7019dec3914c70b8250012a"
+      "size": 626175,
+      "sha256": "2a63602ddbbdd6bf34793ff928469a2cc5ea43c3c88bb2198bbaf4bf28c0454d"
     },
     {
       "path": "src/wgpu-renderer-worker-probe.js",
@@ -560,6 +560,7 @@
       "setInputState",
       "validationBeginWgpuRendererProbeMeasurement",
       "validationCaptureAtVi",
+      "validationEnableGpuSyncDiag",
       "validationEnableHarness",
       "validationFinalizeWgpuMappedDrain",
       "validationFinalizeWgpuRendererProbe",
@@ -567,7 +568,9 @@
       "validationReadCoreProgress",
       "validationReadJitCacheReadiness",
       "validationReadTimeline",
-      "validationSetCorePaused"
+      "validationReadWgpuReplayState",
+      "validationSetCorePaused",
+      "validationSetWgpuPerturbation"
     ],
     "notificationFields": {
       "detachedOglFrame": [

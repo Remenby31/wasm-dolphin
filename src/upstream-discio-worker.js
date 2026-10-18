@@ -623,6 +623,82 @@ function webGpuUboPackMode() {
   return wgpuUboPackEnabled && !wgpuUboCacheEnabled ? 1 : 0;
 }
 
+// Harness-only timing perturbations, to reproduce in headless Chrome the
+// backpressure a visible canvas puts on the replay (validationSetWgpuPerturbation).
+// Both zero by default: nothing changes unless the harness asks.
+const wgpuDiagPerturb = { presentDelayMs: 0, drainEveryMs: 0 };
+let wgpuDiagLastDrainAt = 0;
+// The core's GPU-sync counters (patch 0080), on only for the freeze probe.
+let gpuSyncDiagEnabled = false;
+
+// Milliseconds before the next drain the drainEveryMs perturbation allows (0:
+// drain now). The replay pump sleeps that long instead of polling.
+function wgpuDiagDrainWaitMs(now = performance.now()) {
+  if (!(wgpuDiagPerturb.drainEveryMs > 0)) return 0;
+  return Math.max(0, wgpuDiagLastDrainAt + wgpuDiagPerturb.drainEveryMs - now);
+}
+
+// The core's FIFO / pixel-engine handshake snapshot (WasmGpuSyncDiag.h).
+function readGpuSyncDiag() {
+  const m = moduleInstance;
+  if (!m?._DolphinWeb_GpuSyncDiag) return null;
+  try {
+    return JSON.parse(m.UTF8ToString(m._DolphinWeb_GpuSyncDiag()));
+  } catch (error) {
+    return { error: String(error?.message || error) };
+  }
+}
+
+// Harness diagnostics for a hardware-renderer presentation freeze: where the
+// consumer side of the WebGPU command ring stands, and every gate that can
+// keep it from replaying or presenting. Read-only.
+function readWgpuReplayState() {
+  const ring = webGpuCmdRing;
+  let write = null, read = null, nextOp = null;
+  try {
+    if (ring) {
+      write = Atomics.load(ring.headerI32, 0) >>> 0;
+      read = currentWgpuReadIndex(ring);
+      if (write !== read && moduleInstance) {
+        const u32 = new Uint32Array(moduleInstance.HEAPU8.buffer);
+        nextOp = u32[(ring.slotsBase + (read % ring.capacity) * 32) >>> 2];
+      }
+    }
+  } catch (error) {
+    nextOp = `unreadable: ${error?.message || error}`;
+  }
+  const now = performance.now();
+  return {
+    now,
+    coreState: api?.getCoreStateName?.() ?? null,
+    coreFrame: api?.getFrame?.() ?? null,
+    videoStats: String(api?.getVideoStats?.() ?? "").slice(0, 600),
+    gpuSync: readGpuSyncDiag(),
+    ring: ring ? { write, read, backlog: write !== null ? (write - read) >>> 0 : null, nextOp } : null,
+    fatal: wgpuReplayFatal,
+    mappedCapacityBlocked: wgpuMappedCapacityBlocked,
+    mappedRemapPending: wgpuMappedRemapPromises.size,
+    uploadTransport: wgpuUploadTransport,
+    loadFenceActive: wgpuLoadFenceActive,
+    replayYieldPending: wgpuReplayYieldPending,
+    presentationLoopActive,
+    frameSignalWaitPending,
+    cmdRingOwnsCanvas,
+    sinceLastPresentMs: lastPresentedAt > 0 ? now - lastPresentedAt : null,
+    presents: webGpuExecStats.present,
+    skipDraw: webGpuExecStats.skipDraw || 0,
+    drainCount: webGpuCausalStats.drainCount,
+    readbacksPending: {
+      classifierEfb: wgpuClassifierEfbReadbackPending,
+      classifierBackbuffer: wgpuClassifierBackbufferReadbackPending,
+      classifierXfb: wgpuClassifierXfbReadbackPending,
+      inputBackbuffer: wgpuInputBackbufferReadbackPending,
+    },
+    presentRejected: self._wgPresentRejectedLogCount || 0,
+    lastErrors: rendererDiagnostics.errors.slice(-8),
+  };
+}
+
 function recordRendererError(kind, message) {
   const entry = {
     atMs: Number(performance.now().toFixed(3)),
@@ -1233,6 +1309,17 @@ async function handleMessage(type, payload) {
       return harnessPcSampler(payload);
     case "validationCaptureAtVi":
       return captureAtViOutput(payload);
+    case "validationReadWgpuReplayState":
+      return readWgpuReplayState();
+    case "validationEnableGpuSyncDiag":
+      // Applied now if the core is loaded, and again when it loads.
+      gpuSyncDiagEnabled = payload.enabled !== false;
+      moduleInstance?._DolphinWeb_GpuSyncDiagEnable?.(gpuSyncDiagEnabled ? 1 : 0);
+      return { enabled: gpuSyncDiagEnabled, coreDiag: Boolean(moduleInstance?._DolphinWeb_GpuSyncDiagEnable && moduleInstance?._DolphinWeb_GpuSyncDiag), coreLoaded: Boolean(moduleInstance) };
+    case "validationSetWgpuPerturbation":
+      wgpuDiagPerturb.presentDelayMs = Math.max(0, Math.min(100, Number(payload.presentDelayMs) || 0));
+      wgpuDiagPerturb.drainEveryMs = Math.max(0, Math.min(200, Number(payload.drainEveryMs) || 0));
+      return { ...wgpuDiagPerturb };
     case "validationReadCoreProgress": {
       const loadedCheckpoint = readLastLoadedCheckpoint();
       return {
@@ -2098,6 +2185,7 @@ async function loadCore({
   api = bindApi(moduleInstance);
   harnessVideoBackend = videoBackend;
   if (harnessEnabled) moduleInstance._DolphinWeb_HarnessEnable?.(1);
+  if (gpuSyncDiagEnabled) moduleInstance._DolphinWeb_GpuSyncDiagEnable?.(1);
   const ownershipTraceSetterAvailable = Boolean(
     api.setWebGpuOwnershipTraceEnabled &&
     api.getWebGpuOwnershipTracePtr &&
@@ -6826,9 +6914,11 @@ function startWgpuReplayPump() {
     } else {
       webGpuCausalStats.replayPumpEmptyPollCount += 1;
     }
+    // A backlog the drainEveryMs perturbation holds back waits for its next
+    // drain instead of rescheduling at 0 ms.
     scheduleWgpuReplayPump(
       pump,
-      write === read || wgpuMappedCapacityBlocked ? 4 : 0
+      write === read || wgpuMappedCapacityBlocked ? 4 : wgpuDiagDrainWaitMs()
     );
   };
   scheduleWgpuReplayPump(pump, 0);
@@ -9936,6 +10026,11 @@ function recordBoundedHistogram(values, bounds, value) {
 
 function drainWebGpuCmdRing(source = "presentation") {
   if (wgpuReplayFatal) return;
+  if (wgpuDiagPerturb.drainEveryMs > 0) {
+    const now = performance.now();
+    if (wgpuDiagDrainWaitMs(now) > 0) return;
+    wgpuDiagLastDrainAt = now;
+  }
   const ring = webGpuCmdRing;
   if (!ring || !renderGpu) return;
   if (wgpuSemanticRuntimeActive) drainWgpuSemanticOwnership();
@@ -11521,6 +11616,10 @@ function drainWebGpuCmdRing(source = "presentation") {
                   } catch (e) {}
                 }
               }
+            }
+            if (wgpuDiagPerturb.presentDelayMs > 0) {
+              const until = performance.now() + wgpuDiagPerturb.presentDelayMs;
+              while (performance.now() < until) { /* harness perturbation: a blocking present */ }
             }
             const cur = renderGpu.context.getCurrentTexture();
             lastBackbufferTexture = cur;
