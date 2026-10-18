@@ -116,7 +116,7 @@ const stamp = () => new Date().toISOString().replace(/[:.]/g, "-").slice(0, 19);
 
 async function main() {
   const { values } = parseArgs({
-    options: { only: { type: "string" }, clean: { type: "string", default: "5" }, port: { type: "string", default: process.env.HARNESS_PORT || "8082" }, headless: { type: "boolean", default: false } }
+    options: { only: { type: "string" }, clean: { type: "string", default: "5" }, port: { type: "string", default: process.env.HARNESS_PORT || "8082" }, display: { type: "string", default: "headless" } }
   });
   const dir = path.join(REPO_ROOT, "harness", "results", `selftest-${stamp()}-${process.pid}`);
   mkdirSync(dir, { recursive: true });
@@ -127,7 +127,7 @@ async function main() {
   const runOne = async (id, kind, spec, candidate, baseline = {}, known = []) => {
     const sub = path.join(dir, id);
     mkdirSync(sub);
-    const opts = { port: values.port, headless: values.headless, confirm: "2" };
+    const opts = { port: values.port, display: values.display, confirm: "2" };
     let gate, error = null;
     try {
       gate = await abCompare({ spec, specDir: REPO_ROOT, values: opts, dir: sub, baseline: { ...base, ...baseline }, candidate: { root: REPO_ROOT, ...candidate }, known });

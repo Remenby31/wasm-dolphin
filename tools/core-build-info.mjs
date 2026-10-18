@@ -143,6 +143,7 @@ export function writeCoreBuildInfo({
   const localInputs = [
     "core/upstream/dolphin_web_core.cpp",
     "core/upstream/dolphin_web_discio.cpp",
+    "core/upstream/dolphin_web_pad_latch.h",
     "core/upstream/dolphin_web_raster_profile.h",
     "core/upstream/dolphin_web_xfb_fastpaths.h",
     "tools/jit-cache-prejs.js"

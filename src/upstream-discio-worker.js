@@ -12,6 +12,7 @@ import {
 import { parseDolHeader } from "./dol.js";
 import { decodeWgpuSamplerState } from "./wgpu-sampler-state.js";
 import { gxClearDepthToStored, gxDepthState } from "./wgpu-depth-state.js";
+import { clampSourceRect, createWgpuExactCapture, packReadbackRows } from "./wgpu-exact-capture.js";
 import { decodePrebuiltCache } from "./prebuilt-jit-cache-format.js";
 import {
   JIT_CACHE_ENTRY_KEY_SCHEMA,
@@ -63,6 +64,7 @@ import {
 } from "./input-visual-marker.js";
 import {
   compareInputGenerations,
+  INPUT_PORT_COUNT,
   readInputStateSnapshot
 } from "./input-transport.js";
 import {
@@ -220,6 +222,8 @@ const PRESENTATION_HISTOGRAM_BUCKETS_MS = [8, 12, 16, 20, 24, 33, 50, 100, 200];
 const harnessNow = () => performance.timeOrigin + performance.now();
 let harnessEnabled = false;
 let harnessVideoBackend = null;
+// Exact capture for video=wgpu: presents tagged with VI outputs (ViTag records).
+const wgpuExactCapture = createWgpuExactCapture();
 const HARNESS_PRESENT_RING = 16384;
 const harnessPresentRing = new Float64Array(HARNESS_PRESENT_RING * 3);
 let harnessPresentHead = 0;
@@ -462,7 +466,9 @@ let pacedPresentationStartedAt = 0;
 let presentationPacingMode = "smooth";
 let legacyTickQueue = false;
 let inputStateSabView = null;
-let lastInputStateGeneration = 0;
+// Per port; the SAB and postMessage paths share them, so a port's state is
+// applied once whichever path delivers it first.
+const lastInputStateGenerations = new Array(INPUT_PORT_COUNT).fill(0);
 // Detached OGL mode: worker owns a standalone OffscreenCanvas for the GL
 // backend (no transferControlToOffscreen, no compositor binding). After
 // each GL swap the worker transferToImageBitmap()s the canvas and posts
@@ -872,6 +878,7 @@ async function captureAtViOutput({ index, ahead, fromLoad = false, timeoutMs = 6
   if (harnessVideoBackend === "OGL") throw new Error("OGL does not report VI outputs");
   if (ahead > 0) index = (fromLoad ? m._DolphinWeb_HarnessViSinceLoad() : m._DolphinWeb_HarnessViSinceBoot()) + ahead;
   if (!(index > 0)) throw new Error("capture index must be ≥ 1");
+  if (harnessVideoBackend === "WebGPU-Real" || harnessVideoBackend === "WebGPU") return captureAtViOutputWgpu(index >>> 0, Boolean(fromLoad), timeoutMs);
   if (!m._DolphinWeb_HarnessArmCapture(index >>> 0, fromLoad ? 1 : 0)) {
     throw new Error(`VI output ${index} (${fromLoad ? "since load" : "since boot"}) has already passed`);
   }
@@ -902,6 +909,61 @@ async function captureAtViOutput({ index, ahead, fromLoad = false, timeoutMs = 6
   }
   m._DolphinWeb_HarnessDisarmCapture();
   throw new Error(`VI output ${index} never reached within ${timeoutMs} ms`);
+}
+
+// video=wgpu: the picture is on the GPU. The core does not arm its XFB capture
+// (the guest XFB is not what this backend draws); the replay matches the
+// request to the PRESENT tagged with that VI output and reads it back.
+async function captureAtViOutputWgpu(index, fromLoad, timeoutMs) {
+  const generation = moduleInstance?._DolphinWeb_HarnessLoadGeneration?.() >>> 0;
+  const { id, promise } = wgpuExactCapture.arm(index, fromLoad, generation);
+  const timer = setTimeout(() => wgpuExactCapture.cancel(id, new Error(
+    wgpuExactCapture.tagsSeen === 0
+      ? "core does not tag WebGPU presents with VI outputs (rebuild the core)"
+      : `VI output ${index} never reached within ${timeoutMs} ms`)), timeoutMs);
+  try {
+    return await promise;
+  } finally {
+    clearTimeout(timer);
+  }
+}
+
+// Reads back the texture the last hardware present showed, at its own size.
+// Its own submission, queued right after the present's, so it sees exactly
+// what was presented and nothing recorded later.
+// The XFB rectangle the next backbuffer blit samples (PresentSource), and
+// what the last hardware present showed: that rectangle of that texture.
+let wgpuNextPresentSource = null;
+let wgpuPresentedSource = null;
+
+// Reads back exactly what the last hardware present showed: the presenter's
+// source rectangle of the XFB texture, at native size. Its own submission,
+// queued right after the present's, so nothing recorded later can reach it.
+function readbackWgpuPresentSource() {
+  const shown = wgpuPresentedSource;
+  const entry = shown?.textureId ? webGpuObjects.textures.get(shown.textureId) : null;
+  if (!entry || !renderGpu) throw new Error("no presented WebGPU texture to read back");
+  if (!shown.rect) throw new Error("core does not report the presented rectangle (rebuild the core)");
+  if (!(entry.format === "rgba8unorm" || entry.format === "bgra8unorm")) {
+    throw new Error(`presented texture format ${entry.format} cannot be captured`);
+  }
+  const rect = clampSourceRect(shown.rect, entry.tex.width, entry.tex.height);
+  if (!rect) throw new Error("presented rectangle lies outside its texture");
+  const dev = renderGpu.device;
+  const { w: width, h: height } = rect;
+  const bytesPerRow = Math.ceil(width * 4 / 256) * 256;
+  const buffer = dev.createBuffer({ size: bytesPerRow * height, usage: 0x1 | 0x8 });
+  const encoder = dev.createCommandEncoder({ label: "harness-wgpu-capture" });
+  encoder.copyTextureToBuffer({ texture: entry.tex, origin: { x: rect.x, y: rect.y, z: 0 } },
+    { buffer, bytesPerRow, rowsPerImage: height }, { width, height, depthOrArrayLayers: 1 });
+  dev.queue.submit([encoder.finish()]);
+  return buffer.mapAsync(0x1).then(() => {
+    const pixels = packReadbackRows(new Uint8Array(buffer.getMappedRange()), width, height,
+                                    bytesPerRow, entry.format === "bgra8unorm");
+    buffer.unmap();
+    buffer.destroy();
+    return { width, height, pixels };
+  });
 }
 
 async function handleMessage(type, payload) {
@@ -987,7 +1049,7 @@ async function handleMessage(type, payload) {
       workerTransportStats.legacyOneWayAck = legacyOneWayAck;
       if (payload.inputStateSab instanceof SharedArrayBuffer) {
         inputStateSabView = new Int32Array(payload.inputStateSab);
-        lastInputStateGeneration = 0;
+        lastInputStateGenerations.fill(0);
       }
       // SAB pixel transport: set up shared views once. The worker's
       // presentation loop will copy s_framebuffer bytes into oglPixelSabView
@@ -1087,8 +1149,9 @@ async function handleMessage(type, payload) {
         triggerRight: payload.triggerRight,
         analogA: payload.analogA,
         analogB: payload.analogB,
+        connected: payload.connected !== false,
         inputGeneration: payload.inputGeneration
-      }, payload.inputSentAtEpochMs, "post");
+      }, payload.inputSentAtEpochMs, "post", payload.port ?? 0);
       return {};
     case "runFrame":
       if (!presentationLoopActive) {
@@ -1142,6 +1205,7 @@ async function handleMessage(type, payload) {
       api?.setWebGpuGeometryPackEnabled?.(wgpuGeometryPackEnabled ? 1 : 0);
       api?.setWebGpuGeometryRangeEnabled?.(wgpuGeometryRangeEnabled ? 1 : 0);
       let loaded = false;
+      wgpuExactCapture.onLoad();
       ppcWasmJitTimingSuspensions += 1;
       try {
         loaded = Boolean(api?.loadState(payload.slot | 0));
@@ -1368,6 +1432,7 @@ async function handleMessage(type, payload) {
       api?.setWebGpuUboPackEnabled?.(webGpuUboPackMode());
       api?.setWebGpuGeometryPackEnabled?.(wgpuGeometryPackEnabled ? 1 : 0);
       api?.setWebGpuGeometryRangeEnabled?.(wgpuGeometryRangeEnabled ? 1 : 0);
+      wgpuExactCapture.onLoad();
       let rc = 0;
       ppcWasmJitTimingSuspensions += 1;
       try {
@@ -2513,6 +2578,31 @@ function bindApi(module) {
               ]
             )
         : null,
+    // Ports 0-3 with hot-plug; absent from cores built before multi-port.
+    setPadState:
+      typeof module._SetPadState === "function"
+        ? (port, state) =>
+            ccall(
+              "SetPadState",
+              "number",
+              ["number", "number", "number", "number", "number", "number", "number", "number", "number", "number", "number", "number"],
+              [
+                port | 0,
+                state.connected === false ? 0 : 1,
+                state.mask >>> 0,
+                state.stickX | 0,
+                state.stickY | 0,
+                state.cStickX | 0,
+                state.cStickY | 0,
+                state.triggerLeft | 0,
+                state.triggerRight | 0,
+                state.analogA | 0,
+                state.analogB | 0,
+                state.inputGeneration >>> 0
+              ]
+            )
+        : null,
+    getPadConnectedMask: optionalCwrap("GetPadConnectedMask", "number", []),
     runFrame: cwrap("RunFrame", null, []),
     frameWidth: cwrap("FrameWidth", "number", []),
     frameHeight: cwrap("FrameHeight", "number", []),
@@ -3467,33 +3557,27 @@ function scheduleFrameSignalWait() {
     });
 }
 
-function applyInputStateSnapshot(state, sentAtEpochMs, source) {
-  if (!api?.setInputState || !state) return false;
+// Latency telemetry (generations, ages, causal counters) follows port 0 only,
+// as before multi-port; other ports are applied without it.
+function applyInputStateSnapshot(state, sentAtEpochMs, source, port = 0) {
+  if (!state || !Number.isInteger(port) || port < 0 || port >= INPUT_PORT_COUNT) return false;
+  if (port !== 0 ? !api?.setPadState : !api?.setInputState && !api?.setPadState) return false;
   const generation = Number(state.inputGeneration) >>> 0;
   if (!generation) return false;
-  const order = compareInputGenerations(generation, lastInputStateGeneration);
-  if (order === 0) {
-    causalInputStats.duplicateGenerationCount += 1;
-    return false;
-  }
-  if (order < 0) {
-    causalInputStats.staleGenerationCount += 1;
+  const order = compareInputGenerations(generation, lastInputStateGenerations[port]);
+  if (order <= 0) {
+    if (port === 0) {
+      if (order === 0) causalInputStats.duplicateGenerationCount += 1;
+      else causalInputStats.staleGenerationCount += 1;
+    }
     return false;
   }
 
-  lastInputStateGeneration = generation;
-  const mask = Number(state.mask) >>> 0;
-  inputMask = mask;
-  const wrappedSentAt = source === "sab"
-    ? wrappedEpochMilliseconds(Number(sentAtEpochMs) >>> 0)
-    : Number(sentAtEpochMs);
-  recordInputApplied({
-    generation,
-    inputMask: mask,
-    sentAtEpochMs: wrappedSentAt,
-    source
-  });
-  api.setInputState({
+  lastInputStateGenerations[port] = generation;
+  const connected = state.connected !== false;
+  const mask = connected ? Number(state.mask) >>> 0 : 0;
+  const padState = {
+    connected,
     mask,
     stickX: Number(state.stickX) | 0,
     stickY: Number(state.stickY) | 0,
@@ -3504,7 +3588,27 @@ function applyInputStateSnapshot(state, sentAtEpochMs, source) {
     analogA: Number(state.analogA) | 0,
     analogB: Number(state.analogB) | 0,
     inputGeneration: generation
+  };
+  if (port !== 0) {
+    api.setPadState(port, padState);
+    return true;
+  }
+
+  inputMask = mask;
+  const wrappedSentAt = source === "sab"
+    ? wrappedEpochMilliseconds(Number(sentAtEpochMs) >>> 0)
+    : Number(sentAtEpochMs);
+  recordInputApplied({
+    generation,
+    inputMask: mask,
+    sentAtEpochMs: wrappedSentAt,
+    source
   });
+  if (api.setPadState) {
+    api.setPadState(0, padState);
+  } else {
+    api.setInputState(padState);
+  }
   recordInputAge(sentAtEpochMs, source === "sab");
   if (source === "sab") {
     causalInputStats.workerSabApplyCount += 1;
@@ -3516,16 +3620,20 @@ function applyInputStateSnapshot(state, sentAtEpochMs, source) {
 }
 
 function pollInputStateFromSab() {
-  if (!inputStateSabView || !api?.setInputState) {
+  if (!inputStateSabView || (!api?.setInputState && !api?.setPadState)) {
     return;
   }
-  const result = readInputStateSnapshot(inputStateSabView);
-  causalInputStats.sabSnapshotRetryCount += Math.max(0, result.attempts - 1);
-  if (!result.snapshot) {
-    causalInputStats.sabSnapshotRetryCount += 1;
-    return;
+  for (let port = 0; port < INPUT_PORT_COUNT; port += 1) {
+    const result = readInputStateSnapshot(inputStateSabView, { port });
+    if (port === 0) {
+      causalInputStats.sabSnapshotRetryCount += Math.max(0, result.attempts - 1);
+    }
+    if (!result.snapshot) {
+      if (port === 0) causalInputStats.sabSnapshotRetryCount += 1;
+      continue;
+    }
+    applyInputStateSnapshot(result.snapshot, result.snapshot.sentAtEpochMsLow, "sab", port);
   }
-  applyInputStateSnapshot(result.snapshot, result.snapshot.sentAtEpochMsLow, "sab");
 }
 
 function runPresentationLoop() {
@@ -6396,6 +6504,8 @@ const WGPU_CMD_OP_SUBMIT_PRESENT = 22;
 const WGPU_CMD_OP_DESTROY = 23;
 const WGPU_CMD_OP_BLIT_TEXTURE = 24;
 const WGPU_CMD_OP_CLEAR_RECT = 25;
+const WGPU_CMD_OP_VI_TAG = 26;
+const WGPU_CMD_OP_PRESENT_SOURCE = 27;
 // ClearRect uses the full attachment viewport and [0,1] depth range, so its
 // scissor alone determines coverage and its depth is independent of game state.
 // A/B switch: false restores the original game-viewport-dependent clear.
@@ -11241,7 +11351,8 @@ function drainWebGpuCmdRing(source = "presentation") {
               // unreliable twice; reading the actual texels replaces the whole
               // inference chain with a direct observation.
               format: fmt,
-              usage: u32[recWord + 5] | ((DIAG_TEX_READBACK || DIAG_DEPTH_READBACK || DIAG_DEPTH_TRACE) ? 0x1 : 0)
+              usage: u32[recWord + 5] |
+                ((harnessEnabled || DIAG_TEX_READBACK || DIAG_DEPTH_READBACK || DIAG_DEPTH_TRACE) ? 0x1 : 0)
             });
             webGpuObjects.textures.set(id,
               { tex, format: fmt, layers, view2dArray: null,
@@ -13086,6 +13197,11 @@ function drainWebGpuCmdRing(source = "presentation") {
           // the current command-ring drain returns.
           cmdRingOwnsCanvas = true;
           recordPresentedFrame(api?.getFrame?.() ?? 0);
+          wgpuPresentedSource = {
+            textureId: wgpuLastBackbufferSourceTextureId, rect: wgpuNextPresentSource
+          };
+          wgpuNextPresentSource = null;
+          wgpuExactCapture.onPresent(readbackWgpuPresentSource);
           scheduleDetachedWgpuBitmap(q);
           webGpuExecStats.present++;
           if (webGpuExecStats.present - webGpuExecStats.lastLog >= 120) {
@@ -13163,6 +13279,20 @@ function drainWebGpuCmdRing(source = "presentation") {
           }
           break;
         }
+        case WGPU_CMD_OP_VI_TAG:
+          // Harness only: the VI output the next ViSwap shows.
+          wgpuExactCapture.onViTag({
+            boot: u32[recWord + 1], load: u32[recWord + 2],
+            ticks: u32[recWord + 3] + u32[recWord + 4] * 4294967296,
+            generation: u32[recWord + 5]
+          }, readbackWgpuPresentSource);
+          break;
+        case WGPU_CMD_OP_PRESENT_SOURCE:
+          // Harness only: the XFB rectangle the coming backbuffer blit samples.
+          wgpuNextPresentSource = {
+            x: u32[recWord + 1], y: u32[recWord + 2], w: u32[recWord + 3], h: u32[recWord + 4]
+          };
+          break;
         default:
           break;
       }

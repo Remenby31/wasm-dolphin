@@ -11,10 +11,11 @@ import { encodePng } from "./png.mjs";
 import { claim } from "./ownership.mjs";
 import { machineSnapshot, sampleChromeCpu } from "./system.mjs";
 
-export async function openSession({ base, query, iso, headed = true, gamepads = null, keepProfile = false, routes = {} }) {
+export async function openSession({ base, query, iso, display = "headless", gamepads = null, keepProfile = false, routes = {} }) {
   const profileDir = mkdtempSync(path.join(os.tmpdir(), "gc-harness-profile-"));
   const releaseProfile = claim(profileDir, REPO_ROOT, "chrome-profile");
-  const context = await launchChrome({ profileDir, headed });
+  const context = await launchChrome({ profileDir, display });
+  await context.assertInvisible?.("after launch");
   await context.addInitScript(installMonitor);
   if (gamepads) await addGamepadMock(context, gamepads);
   const page = context.pages()[0] ?? (await context.newPage());
@@ -26,6 +27,7 @@ export async function openSession({ base, query, iso, headed = true, gamepads = 
   const machineBefore = machineSnapshot();
   const startedAt = Date.now();
   const boot = await bootIso(page, { url, iso });
+  await context.assertInvisible?.("after boot");
   return {
     page,
     context,

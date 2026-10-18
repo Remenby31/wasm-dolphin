@@ -1,27 +1,27 @@
 {
   "schemaVersion": 1,
   "abiVersion": 1,
-  "coreId": "sha256:b1279fd3bc9cabc879d40a34237ef8a5d8da34ee146f499a6d72958df49d6b47",
+  "coreId": "sha256:7ddfba4dfb25966c3c2a983e360b24065642f7eb250277eaf0da57a40e223a35",
   "upstreamCommit": "e22551eae1c84a7e4d0b6a5c519ef4ed4ef69df1",
   "artifacts": [
     {
       "path": "cores/dolphin/dolphin-core-upstream.js",
       "hashMode": "lf-normalized",
-      "size": 268922,
-      "sha256": "f0f47ee8f9ea2ffd5311280a7fc46ef00cb32c0aa252430b8acdcaedd972ec2f"
+      "size": 269080,
+      "sha256": "6fcd157ec3936dabb5854872a58bc2784e698be2937706ca16c4c8491254acc3"
     },
     {
       "path": "cores/dolphin/dolphin-core-upstream.wasm",
-      "size": 12953837,
-      "sha256": "b1279fd3bc9cabc879d40a34237ef8a5d8da34ee146f499a6d72958df49d6b47"
+      "size": 12955639,
+      "sha256": "7ddfba4dfb25966c3c2a983e360b24065642f7eb250277eaf0da57a40e223a35"
     }
   ],
   "contractSources": [
     {
       "path": "core/upstream/dolphin_web_discio.cpp",
       "hashMode": "lf-normalized",
-      "size": 53073,
-      "sha256": "9f324e1d6e9d15d2223fa7c51f3126329a095410c05f6ed59d3445fea49dcd55"
+      "size": 55180,
+      "sha256": "0afdf1dbe3e4582ec391f204f4119f8c8bbaf99bfa40e72fd8164d291498302b"
     },
     {
       "path": "core/upstream/dolphin_web_raster_profile.h",
@@ -38,14 +38,14 @@
     {
       "path": "core/upstream/dolphin_web_core.cpp",
       "hashMode": "lf-normalized",
-      "size": 45131,
-      "sha256": "8a57b506e697c79ea0b5c97584c8710404a2f02efe056a8a3d215c9694aa2593"
+      "size": 45437,
+      "sha256": "8363bedba96d754f7c066f88e411469718124725e1e648576d50566932a91377"
     },
     {
       "path": "src/app.js",
       "hashMode": "lf-normalized",
-      "size": 49228,
-      "sha256": "1c9eb9d2eb66783f10c665b77fa864049900ab7ac21f6e9d95cbeb29f71de2be"
+      "size": 50202,
+      "sha256": "ddb35fcaf38055a7cf181c912d2b838ed96ec0767204f70c6719bca727912c55"
     },
     {
       "path": "src/audio.js",
@@ -80,8 +80,8 @@
     {
       "path": "src/core-host.js",
       "hashMode": "lf-normalized",
-      "size": 65547,
-      "sha256": "9b40c4f53484b1cc0ba8a87d52de9d14be357cbf41e887fb9984bb9beeb3ef72"
+      "size": 66529,
+      "sha256": "8a978b73c309bb7029fe526eff9cad967989c886ce406125d5e410668e7bb44d"
     },
     {
       "path": "src/diagnostic-log-filter.js",
@@ -104,8 +104,8 @@
     {
       "path": "src/input-transport.js",
       "hashMode": "lf-normalized",
-      "size": 2802,
-      "sha256": "4890d0a507543bf0e8d2f71ad10b72fa2775fb1b571b13e05f2225127a6facfa"
+      "size": 7310,
+      "sha256": "1f687cf5aadc5bbff75b071e6347eb9f3b52f0a9ae79ee2639b669176e27db49"
     },
     {
       "path": "src/input-visual-marker.js",
@@ -134,8 +134,8 @@
     {
       "path": "src/upstream-discio-worker.js",
       "hashMode": "lf-normalized",
-      "size": 623577,
-      "sha256": "c6f60bda93de643b0e9c783c857e2a5c6718cdae1d29a19c505618f517e1613f"
+      "size": 629919,
+      "sha256": "c8f50d0ccf8de9e85aa0e2ee8be218d758ca7c3000bf7aaec5450ea96b132b1f"
     },
     {
       "path": "src/wgpu-renderer-worker-probe.js",
@@ -152,20 +152,20 @@
     {
       "path": "src/upstream-main-thread-adapter.js",
       "hashMode": "lf-normalized",
-      "size": 20372,
-      "sha256": "2ca797e1c716fc4aa0f10580115d972217450e2ebd64343093046a9455a79c2c"
+      "size": 22584,
+      "sha256": "a5c3586d826400c06ef200002fe810997ae1f886003982c17e20b667d1de7dff"
     },
     {
       "path": "src/upstream-worker-adapter.js",
       "hashMode": "lf-normalized",
-      "size": 42005,
-      "sha256": "102277062746e5c1eede541e1833daeab4cb0b6e00adf898ccb76e69f9a710e9"
+      "size": 41922,
+      "sha256": "06d553af53cb6b0e4a67fa2f92cacf5025caf6fed4baf092b8659c49f3c19edd"
     },
     {
       "path": "src/upstream-worker-protocol.js",
       "hashMode": "lf-normalized",
       "size": 5096,
-      "sha256": "939eebb24504342239990e81aa3084be05cdb8dd59d5c389eb8f55cae2f74bc2"
+      "sha256": "dfd21a2e924cf48c9c200b4cb7e5566d5cb65b00e51b488c5b0cf20e203372f5"
     },
     {
       "path": "src/wgpu-pass-state-cache.js",
@@ -414,6 +414,7 @@
     "_GetLastLoadedPPCPC",
     "_GetMakerId",
     "_GetPPCPC",
+    "_GetPadConnectedMask",
     "_GetPlatform",
     "_GetPpcProfileStats",
     "_GetPpcWasmBlockCompileCount",
@@ -477,6 +478,7 @@
     "_SetFastSoftwareRaster",
     "_SetInputMask",
     "_SetInputState",
+    "_SetPadState",
     "_SetPpcProfileEnabled",
     "_SetPpcWasmJitEnabled",
     "_SetPresentationScale",

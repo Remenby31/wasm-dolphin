@@ -34,9 +34,17 @@ const stamp = () => `${new Date().toISOString().replace(/[:.]/g, "-").slice(0, 1
 const COMMON = {
   port: { type: "string", default: process.env.HARNESS_PORT || "8082" },
   out: { type: "string" },
+  // Only headless exists (PROGRAM.md); kept so scripts can say it, and --headless as an alias.
+  display: { type: "string" },
   headless: { type: "boolean", default: false },
   "keep-profiles": { type: "boolean", default: false }
 };
+
+// Never a visible window unless asked: headless by default for every
+// command (PROGRAM.md).
+function displayOf(values) {
+  return values.display ?? "headless";
+}
 
 function parse(argv, options) {
   return parseArgs({ args: argv, options: { ...COMMON, ...options }, allowPositionals: true });
@@ -119,7 +127,7 @@ async function measureOne(server, values, { iso, query, label, warmup, secs, sho
     log: (m) => console.log(`[harness] ${label}: ${m}`)
   });
   const routes = statePath ? { "**/__harness_state.sav": statePath } : {};
-  const session = await openSession({ base: server.base, query, iso, headed: !values.headless, keepProfile: values["keep-profiles"], routes });
+  const session = await openSession({ base: server.base, query, iso, display: displayOf(values), keepProfile: values["keep-profiles"], routes });
   try {
     // Games that boot deterministically (no scripted inputs, no savestate)
     // are captured at VI output N from boot, before anything else runs.
@@ -316,7 +324,7 @@ async function cmdMeasure(argv) {
   const file = path.join(tmp, "spec.json");
   writeJson(file, spec);
   try {
-    return await cmdMatrix([file, "--port", values.port, ...(values.out ? ["--out", values.out] : []), ...(values.headless ? ["--headless"] : [])]);
+    return await cmdMatrix([file, "--port", values.port, ...(values.out ? ["--out", values.out] : []), ...(values.display ? ["--display", values.display] : [])]);
   } finally {
     rmSync(tmp, { recursive: true, force: true });
   }
@@ -337,7 +345,7 @@ async function captureScene(server, values, { iso, query, index, state, steps, l
   const supported = captureSupported(query);
   if (!supported.ok) throw new Error(`${label}: ${supported.why}`);
   const routes = state ? { "**/__harness_state.sav": path.resolve(state) } : {};
-  const session = await openSession({ base: server.base, query, iso, headed: !values.headless, keepProfile: values["keep-profiles"], routes });
+  const session = await openSession({ base: server.base, query, iso, display: displayOf(values), keepProfile: values["keep-profiles"], routes });
   try {
     if (steps) await runSteps(session.page, steps);
     if (state) {
@@ -406,7 +414,7 @@ async function cmdDiff(argv) {
 // ---------------------------------------------------------------- fuzz
 // Run a disc to VI output `index` and capture that exact output.
 async function observe(server, values, iso, query, dir, label, index) {
-  const session = await openSession({ base: server.base, query, iso, headed: !values.headless, keepProfile: values["keep-profiles"] });
+  const session = await openSession({ base: server.base, query, iso, display: displayOf(values), keepProfile: values["keep-profiles"] });
   try {
     const capture = await captureInSession(session, { index, timeoutMs: Number(values.timeout ?? 90) * 1000 });
     const info = await readFrameInfo(session.page).catch(() => null);
@@ -474,7 +482,7 @@ const EXPECTED_BITS = (s) => {
 const PADS_QUERY = "core=upstream&video=software&cpu=dual&speed=1&wasmjit=0&metrics=1";
 
 async function runPads(server, values, { iso, query, dir }) {
-  const session = await openSession({ base: server.base, query, iso, headed: !values.headless, gamepads: { count: 4 }, keepProfile: values["keep-profiles"] });
+  const session = await openSession({ base: server.base, query, iso, display: displayOf(values), gamepads: { count: 4 }, keepProfile: values["keep-profiles"] });
   let report;
   try {
     // Inputs reach the game within a few frames; 30 VI outputs later the
@@ -558,7 +566,7 @@ async function cmdSavestate(argv) {
   });
   if (!values.iso || !values.to) throw new Error("usage: harness/run savestate --iso disc.iso --to out.sav [--config rec] [--steps steps.json] [--wait 5]");
   return withServer(values, async (server) => {
-    const session = await openSession({ base: server.base, query: resolveQuery(configFromArg(values.config)), iso: values.iso, headed: !values.headless, keepProfile: values["keep-profiles"] });
+    const session = await openSession({ base: server.base, query: resolveQuery(configFromArg(values.config)), iso: values.iso, display: displayOf(values), keepProfile: values["keep-profiles"] });
     try {
       if (values.steps) await runSteps(session.page, loadSteps(values.steps));
       await waitSeconds(session, Number(values.wait));
