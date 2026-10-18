@@ -45,11 +45,10 @@ export const MUTANTS = [
     candidate: { discs: { [`${HB}/cpufuzz-nomcrf.iso`]: `${HB}/cpufuzz.iso` } }
   },
   {
-    // Ports 2-4 do not work on main yet (phase 1), so "port 2 cut" cannot be
-    // a regression today; the working port is cut instead.
-    id: "port", what: "gamepads no longer reach port 1 (ports 2-4 are already dead on main)",
+    // All four ports work on main: pads no longer reach port 2.
+    id: "port", what: "gamepads no longer reach port 2",
     spec: scene({ configs: [{ id: "sw-interp", preset: "sw-interp" }], pads: true }),
-    candidate: { patches: [{ file: "src/app.js", find: "const firstPad = selectPreferredGamepad(pads);", replace: "const firstPad = null;" }] }
+    candidate: { patches: [{ file: "src/app.js", find: "    const nextPorts = assignGamepadPorts(gamepadPorts, pads);", replace: "    const nextPorts = assignGamepadPorts(gamepadPorts, pads);\n    nextPorts[1] = null;" }] }
   },
   {
     id: "core-freeze", what: "the core stops for 3 s in the measured window",
