@@ -1,0 +1,620 @@
+// Off-thread compile of JIT modules (plan piste 3, P5).
+//
+// One file, two roles:
+//   - loaded as a module Worker named AOT_COMPILER_WORKER_NAME, it compiles
+//     WASM bytes, warms every entry point once so V8's lazy Liftoff code
+//     exists, and posts the WebAssembly.Module back. The Module shares its
+//     compiled code with every thread it is cloned to, so the CPU thread only
+//     instantiates it.
+//   - imported, it gives createAotCompilerClient(), the side that owns the
+//     worker, queues jobs, and kills and respawns a worker stuck in a warm-up.
+//
+// Warm-up never touches real memory. The worker is never given the emulator's
+// Memory: every memory, table and global a module imports is a scratch object
+// created here, and every imported function is a stub returning 0. A trap or a
+// stub of the wrong type ends that call, which is fine: V8 compiles a function
+// before its first instruction runs.
+
+export const AOT_COMPILER_WORKER_NAME = "salon-aot-compiler";
+export const AOT_COMPILER_PROTOCOL = 1;
+
+// Where the warm-up call points its state argument in scratch memory, and how
+// much of it is zeroed before each call so every warm run starts from the same
+// state (downcount 0, CTR 0, ...).
+export const WARM_STATE_PTR = 0x10000;
+const WARM_STATE_CLEAR_BYTES = 0x10000;
+// An imported table can be the size of the core's whole function table. Only
+// the first entries a module's own segments fill are worth calling.
+const WARM_TABLE_SCAN_MAX = 4096;
+const SCRATCH_MEMORY_SHAPES_MAX = 2;
+
+const PAGE = 65536;
+
+function readU32Leb(bytes, state) {
+  let result = 0;
+  let shift = 0;
+  for (;;) {
+    if (state.pos >= bytes.length) throw new RangeError("truncated LEB128");
+    const byte = bytes[state.pos++];
+    result |= (byte & 0x7f) << shift;
+    if (!(byte & 0x80)) return result >>> 0;
+    shift += 7;
+    if (shift > 35) throw new RangeError("LEB128 too long");
+  }
+}
+
+function readName(bytes, state) {
+  const len = readU32Leb(bytes, state);
+  const name = new TextDecoder().decode(bytes.subarray(state.pos, state.pos + len));
+  state.pos += len;
+  return name;
+}
+
+function readLimits(bytes, state) {
+  const flags = bytes[state.pos++];
+  if (flags & 0x04) return { memory64: true };
+  const initial = readU32Leb(bytes, state);
+  const maximum = flags & 0x01 ? readU32Leb(bytes, state) : undefined;
+  return { initial, maximum, shared: Boolean(flags & 0x02) };
+}
+
+const VALTYPES = new Map([[0x7f, "i32"], [0x7e, "i64"], [0x7d, "f32"], [0x7c, "f64"]]);
+
+// The descriptors WebAssembly.Module.imports() leaves out: limits of memories
+// and tables, value types of globals. Only the import section is read.
+export function parseWasmImports(input) {
+  const bytes = input instanceof Uint8Array ? input : new Uint8Array(input);
+  if (bytes.length < 8 || bytes[0] !== 0x00 || bytes[1] !== 0x61 || bytes[2] !== 0x73 || bytes[3] !== 0x6d) {
+    throw new TypeError("not a WebAssembly binary");
+  }
+  const state = { pos: 8 };
+  while (state.pos < bytes.length) {
+    const id = bytes[state.pos++];
+    const size = readU32Leb(bytes, state);
+    const end = state.pos + size;
+    if (id !== 2) {
+      state.pos = end;
+      continue;
+    }
+    const imports = [];
+    const count = readU32Leb(bytes, state);
+    for (let i = 0; i < count; i++) {
+      const module = readName(bytes, state);
+      const name = readName(bytes, state);
+      const kind = bytes[state.pos++];
+      if (kind === 0x00) {
+        readU32Leb(bytes, state);
+        imports.push({ module, name, kind: "function" });
+      } else if (kind === 0x01) {
+        const element = bytes[state.pos++];
+        imports.push({ module, name, kind: "table", element, ...readLimits(bytes, state) });
+      } else if (kind === 0x02) {
+        imports.push({ module, name, kind: "memory", ...readLimits(bytes, state) });
+      } else if (kind === 0x03) {
+        const value = VALTYPES.get(bytes[state.pos++]) || "unsupported";
+        const mutable = bytes[state.pos++] === 1;
+        imports.push({ module, name, kind: "global", value, mutable });
+      } else {
+        imports.push({ module, name, kind: "unsupported" });
+        return imports;
+      }
+    }
+    return imports;
+  }
+  return [];
+}
+
+const stub = () => 0;
+
+// Scratch objects outlive one module: a shared memory of the JIT's shape is
+// 1.5 GiB of address space, reserved once per shape, not per block.
+export function createWarmer() {
+  const memories = new Map();
+  const stats = { modules: 0, warmed: 0, calls: 0, traps: 0, skipped: 0 };
+
+  function scratchMemory(desc) {
+    const shapeKey = `${desc.initial}:${desc.maximum ?? ""}:${desc.shared ? 1 : 0}`;
+    let memory = memories.get(shapeKey);
+    if (!memory) {
+      if (memories.size >= SCRATCH_MEMORY_SHAPES_MAX) memories.delete(memories.keys().next().value);
+      memory = new WebAssembly.Memory({
+        initial: desc.initial,
+        ...(desc.maximum !== undefined ? { maximum: desc.maximum } : {}),
+        ...(desc.shared ? { shared: true } : {})
+      });
+      memories.set(shapeKey, memory);
+    }
+    return memory;
+  }
+
+  function buildImports(imports) {
+    const importObject = {};
+    let memory = null;
+    const tables = [];
+    for (const desc of imports) {
+      let value;
+      if (desc.kind === "function") value = stub;
+      else if (desc.kind === "memory") {
+        if (desc.memory64) return null;
+        value = memory = scratchMemory(desc);
+      } else if (desc.kind === "table") {
+        if (desc.memory64 || desc.element !== 0x70) return null;
+        value = new WebAssembly.Table({
+          element: "anyfunc",
+          initial: desc.initial,
+          ...(desc.maximum !== undefined ? { maximum: desc.maximum } : {})
+        });
+        tables.push(value);
+      } else if (desc.kind === "global") {
+        if (desc.value === "unsupported") return null;
+        value = new WebAssembly.Global(
+          { value: desc.value, mutable: desc.mutable },
+          desc.value === "i64" ? 0n : 0
+        );
+      } else {
+        return null;
+      }
+      (importObject[desc.module] ??= {})[desc.name] = value;
+    }
+    return { importObject, memory, tables };
+  }
+
+  // The core may hand over the bytes of a state that makes every entry point
+  // leave at its first downcount test (downcount INT32_MIN). Without it the
+  // state is zeroed, and the owner's watchdog covers a block that loops.
+  let warmState = null;
+  function setWarmState(next) {
+    warmState = next && Number.isInteger(next.statePtr) && next.state instanceof Uint8Array
+      ? { statePtr: next.statePtr, state: next.state.slice() }
+      : null;
+  }
+
+  function callOnce(fn, memory) {
+    const statePtr = warmState ? warmState.statePtr : WARM_STATE_PTR;
+    if (memory) {
+      const bytes = warmState ? warmState.state : null;
+      const len = bytes ? bytes.length : WARM_STATE_CLEAR_BYTES;
+      if (statePtr >= 0 && memory.buffer.byteLength >= statePtr + len) {
+        const view = new Uint8Array(memory.buffer, statePtr, len);
+        if (bytes) view.set(bytes);
+        else view.fill(0);
+      }
+    }
+    stats.calls += 1;
+    try {
+      fn(statePtr);
+    } catch {
+      stats.traps += 1;
+    }
+  }
+
+  // Instantiate on scratch imports and call every reachable entry point once:
+  // exported functions, then the entries of imported and exported tables.
+  function warm(module, bytes) {
+    stats.modules += 1;
+    let built;
+    try {
+      built = buildImports(parseWasmImports(bytes));
+    } catch {
+      built = null;
+    }
+    if (!built) {
+      stats.skipped += 1;
+      return { warmed: false, calls: 0 };
+    }
+    let instance;
+    try {
+      instance = new WebAssembly.Instance(module, built.importObject);
+    } catch {
+      stats.skipped += 1;
+      return { warmed: false, calls: 0 };
+    }
+    const callsBefore = stats.calls;
+    const seen = new Set();
+    const visit = (fn) => {
+      if (typeof fn !== "function" || seen.has(fn)) return;
+      seen.add(fn);
+      callOnce(fn, built.memory);
+    };
+    const tables = [...built.tables];
+    for (const value of Object.values(instance.exports)) {
+      if (typeof value === "function") visit(value);
+      else if (value instanceof WebAssembly.Table) tables.push(value);
+    }
+    for (const table of tables) {
+      const n = Math.min(table.length, WARM_TABLE_SCAN_MAX);
+      for (let i = 0; i < n; i++) {
+        let fn = null;
+        try {
+          fn = table.get(i);
+        } catch {
+          fn = null;
+        }
+        visit(fn);
+      }
+    }
+    stats.warmed += 1;
+    return { warmed: true, calls: stats.calls - callsBefore };
+  }
+
+  return { warm, setWarmState, stats, scratchMemories: () => [...memories.values()] };
+}
+
+
+const now = () => (typeof performance !== "undefined" ? performance.now() : Date.now());
+
+export async function compileAndWarm(bytes, { warm = true } = {}, warmer = null) {
+  const t0 = now();
+  const module = await WebAssembly.compile(bytes);
+  const t1 = now();
+  let warmResult = { warmed: false, calls: 0 };
+  if (warm && warmer) warmResult = warmer.warm(module, bytes);
+  const t2 = now();
+  return { module, compileMs: t1 - t0, warmMs: t2 - t1, ...warmResult };
+}
+
+// When the Module goes back to the owner, relative to its warm-up:
+//   "after-warm"  a thread is about to call it (a deferred block, a region the
+//                 CPU thread asked for): Liftoff code must exist first.
+//   "before-warm" nothing calls it soon (cache loaded at boot): deliver at
+//                 once and warm in the background. The code V8 compiles then
+//                 lands in the same shared NativeModule.
+export const DELIVER_AFTER_WARM = "after-warm";
+export const DELIVER_BEFORE_WARM = "before-warm";
+
+// Worker side. Compiles run concurrently (V8 validates on its own threads)
+// and each module is answered as soon as it is ready to be delivered.
+// Warm-ups run one at a time from a queue, in slices that yield to the event
+// loop so compiles keep being answered; modules someone waits for (after-warm)
+// go first. The id of the warm-up running is published in a SharedArrayBuffer
+// so the owner can tell which job a stuck one holds without a message per job.
+const WARM_SLICE_MS = 4;
+
+export function installAotCompilerWorker(scope) {
+  const warmer = createWarmer();
+  let status = null; // Int32Array [warming job id]
+  const urgent = [];
+  const background = [];
+  let pumping = false;
+  let flushes = [];
+  let inFlight = 0;
+  const totals = { warmed: 0, warmCalls: 0, warmMs: 0, maxWarmMs: 0 };
+
+  function runWarm(job, module) {
+    Atomics.store(status, 0, job.id);
+    const t0 = now();
+    const result = warmer.warm(module, job.bytes);
+    const warmMs = now() - t0;
+    Atomics.store(status, 0, 0);
+    if (result.warmed) totals.warmed += 1;
+    totals.warmCalls += result.calls;
+    totals.warmMs += warmMs;
+    totals.maxWarmMs = Math.max(totals.maxWarmMs, warmMs);
+    return { ...result, warmMs };
+  }
+
+  function reply(job, fields) {
+    scope.postMessage({ type: "aot-compiled", id: job.id, totals: { ...totals }, ...fields });
+  }
+
+  function pump() {
+    const sliceEnd = now() + WARM_SLICE_MS;
+    while (urgent.length || background.length) {
+      const item = urgent.length ? urgent.shift() : background.shift();
+      const w = runWarm(item.job, item.module);
+      if (item.replyAfter) {
+        reply(item.job, { module: item.module, compileMs: item.compileMs, warmed: w.warmed, warmMs: w.warmMs, calls: w.calls });
+      }
+      if (now() >= sliceEnd) break;
+    }
+    if (urgent.length || background.length) setTimeout(pump, 0);
+    else {
+      pumping = false;
+      answerFlushes();
+    }
+  }
+
+  // Answered once nothing is compiling or waiting for its warm-up.
+  function answerFlushes() {
+    if (inFlight || pumping || !flushes.length) return;
+    for (const id of flushes) scope.postMessage({ type: "aot-flushed", id, totals: { ...totals } });
+    flushes = [];
+  }
+
+  function enqueueWarm(item) {
+    (item.replyAfter ? urgent : background).push(item);
+    if (!pumping) {
+      pumping = true;
+      setTimeout(pump, 0);
+    }
+  }
+
+  scope.addEventListener("message", (event) => {
+    const msg = event.data;
+    if (!msg) return;
+    if (msg.type === "aot-init") {
+      status = msg.status instanceof SharedArrayBuffer ? new Int32Array(msg.status) : null;
+      return;
+    }
+    if (msg.type === "aot-warm-state") {
+      warmer.setWarmState(msg);
+      return;
+    }
+    if (msg.type === "aot-flush") {
+      flushes.push(msg.id);
+      answerFlushes();
+      return;
+    }
+    if (msg.type !== "aot-compile") return;
+    const job = msg;
+    const t0 = now();
+    inFlight += 1;
+    WebAssembly.compile(job.bytes).then((module) => {
+      inFlight -= 1;
+      const compileMs = now() - t0;
+      const warm = job.warm !== false && Boolean(status);
+      if (!warm) {
+        reply(job, { module, compileMs, warmed: false, warmMs: 0, calls: 0 });
+      } else if (job.deliver === DELIVER_BEFORE_WARM) {
+        reply(job, { module, compileMs, warmed: false, warmMs: 0, calls: 0, warmQueued: true });
+        enqueueWarm({ job, module, compileMs, replyAfter: false });
+      } else {
+        enqueueWarm({ job, module, compileMs, replyAfter: true });
+      }
+      answerFlushes();
+    }, (error) => {
+      inFlight -= 1;
+      reply(job, { error: { name: error?.name || "Error", message: String(error?.message || error) } });
+      answerFlushes();
+    });
+  });
+  scope.postMessage({ type: "aot-compiler-ready", protocol: AOT_COMPILER_PROTOCOL });
+}
+
+if (
+  typeof self !== "undefined" &&
+  typeof self.postMessage === "function" &&
+  typeof window === "undefined" &&
+  self.name === AOT_COMPILER_WORKER_NAME
+) {
+  installAotCompilerWorker(self);
+}
+
+function rebuildError(error) {
+  const ctor = { CompileError: WebAssembly.CompileError, LinkError: WebAssembly.LinkError, RangeError }[error?.name];
+  return ctor ? new ctor(error.message) : Object.assign(new Error(error?.message || "compile failed"), { name: error?.name || "Error" });
+}
+
+// The reason the JIT owner's pthreads act on: a compile or link error is a
+// property of the bytes (blacklist), anything else is transient.
+export function compileFailureReason(error) {
+  if (error instanceof WebAssembly.CompileError || error?.name === "CompileError") return "compile";
+  if (error instanceof WebAssembly.LinkError || error?.name === "LinkError") return "link";
+  return "oom";
+}
+
+// Owner side. `createWorker` returns a fresh worker (browser Worker, or a Node
+// worker_threads adapter in tests). If it throws, or the worker fails to load,
+// every job is compiled in place without warm-up: never slower than before,
+// never fatal. Without SharedArrayBuffer there is no watchdog, so no warm-up.
+export function createAotCompilerClient({
+  createWorker,
+  warmTimeoutMs = 2000,
+  pollMs = Math.max(50, Math.floor(warmTimeoutMs / 4)),
+  setTimer = (fn, ms) => setTimeout(fn, ms),
+  clearTimer = (id) => clearTimeout(id),
+  onEvent = () => {}
+} = {}) {
+  const pending = new Map(); // id -> {bytes, warm, deliver, resolve, reject}
+  let worker = null;
+  let workerBroken = !createWorker;
+  let workersStarted = 0;
+  let nextId = 1;
+  let warmState = null;
+  const canWatch = typeof SharedArrayBuffer === "function" && typeof Atomics === "object";
+  let status = null;
+  let poll = null;
+  let stuckId = 0;
+  let stuckSince = 0;
+  const stats = {
+    jobs: 0, done: 0, failed: 0, inPlace: 0, timeouts: 0, respawns: 0,
+    compileMs: 0, warmed: 0, warmCalls: 0, warmMs: 0, maxWarmMs: 0
+  };
+  let carried = { warmed: 0, warmCalls: 0, warmMs: 0, maxWarmMs: 0 }; // from killed workers
+  let current = { warmed: 0, warmCalls: 0, warmMs: 0, maxWarmMs: 0 };
+
+  function foldTotals() {
+    stats.warmed = carried.warmed + current.warmed;
+    stats.warmCalls = carried.warmCalls + current.warmCalls;
+    stats.warmMs = carried.warmMs + current.warmMs;
+    stats.maxWarmMs = Math.max(carried.maxWarmMs, current.maxWarmMs);
+  }
+
+  // Background warm-ups go on after every job is answered, so the watchdog
+  // runs for as long as the worker lives: one Atomics.load per poll.
+  function schedulePoll() {
+    if (poll !== null || !status || !worker) return;
+    poll = setTimer(onPoll, pollMs);
+    poll?.unref?.();
+  }
+
+  function onPoll() {
+    poll = null;
+    if (!status || !worker) return;
+    const id = Atomics.load(status, 0);
+    const t = now();
+    if (id === 0 || id !== stuckId) {
+      stuckId = id;
+      stuckSince = t;
+    } else if (t - stuckSince >= warmTimeoutMs) {
+      onStuck(id);
+    }
+    schedulePoll();
+  }
+
+  function onStuck(id) {
+    stats.timeouts += 1;
+    onEvent({ type: "warm-timeout", id });
+    // V8 compiled the looping function before running it; only the worker is
+    // lost. The stuck job, if not delivered yet, is compiled again without
+    // warm-up; every other undelivered job goes to the new worker.
+    const job = pending.get(id);
+    if (job) job.warm = false;
+    killWorker();
+    for (const pendingId of [...pending.keys()]) send(pendingId);
+  }
+
+  function killWorker() {
+    if (!worker) return;
+    try {
+      worker.terminate();
+    } catch {
+      // already gone
+    }
+    worker = null;
+    carried = {
+      warmed: carried.warmed + current.warmed,
+      warmCalls: carried.warmCalls + current.warmCalls,
+      warmMs: carried.warmMs + current.warmMs,
+      maxWarmMs: Math.max(carried.maxWarmMs, current.maxWarmMs)
+    };
+    current = { warmed: 0, warmCalls: 0, warmMs: 0, maxWarmMs: 0 };
+    stuckId = 0;
+    for (const resolve of flushWaiters.values()) resolve();
+    flushWaiters.clear();
+    if (poll !== null) clearTimer(poll);
+    poll = null;
+  }
+
+  const flushWaiters = new Map();
+  function onMessage(event) {
+    const data = event.data;
+    if (data?.type === "aot-flushed") {
+      current = data.totals;
+      foldTotals();
+      flushWaiters.get(data.id)?.();
+      flushWaiters.delete(data.id);
+      return;
+    }
+    if (!data || data.type !== "aot-compiled") return;
+    if (data.totals) {
+      current = data.totals;
+      foldTotals();
+    }
+    const job = pending.get(data.id);
+    if (!job) return;
+    pending.delete(data.id);
+    if (data.error) {
+      stats.failed += 1;
+      job.reject(rebuildError(data.error));
+      return;
+    }
+    stats.done += 1;
+    stats.compileMs += data.compileMs || 0;
+    job.resolve({
+      module: data.module,
+      compileMs: data.compileMs,
+      warmMs: data.warmMs,
+      warmed: Boolean(data.warmed),
+      warmQueued: Boolean(data.warmQueued),
+      offThread: true
+    });
+  }
+
+  function ensureWorker() {
+    if (worker || workerBroken) return worker;
+    try {
+      worker = createWorker();
+      if (workersStarted++ > 0) stats.respawns += 1;
+      worker.addEventListener("message", onMessage);
+      worker.addEventListener("error", () => {
+        // A worker that fails to load is not retried: fall back for good.
+        workerBroken = true;
+        killWorker();
+        for (const id of [...pending.keys()]) send(id);
+      });
+      if (canWatch) {
+        status = new Int32Array(new SharedArrayBuffer(4));
+        worker.postMessage({ type: "aot-init", status: status.buffer });
+      } else {
+        status = null;
+      }
+      if (warmState) worker.postMessage({ type: "aot-warm-state", ...warmState });
+    } catch {
+      workerBroken = true;
+      worker = null;
+    }
+    return worker;
+  }
+
+  function compileInPlace(id) {
+    const job = pending.get(id);
+    pending.delete(id);
+    stats.inPlace += 1;
+    const t0 = now();
+    WebAssembly.compile(job.bytes).then((module) => {
+      stats.done += 1;
+      job.resolve({ module, compileMs: now() - t0, warmMs: 0, warmed: false, warmQueued: false, offThread: false });
+    }, (error) => {
+      stats.failed += 1;
+      job.reject(error);
+    });
+  }
+
+  function send(id) {
+    const job = pending.get(id);
+    if (!job) return;
+    const target = ensureWorker();
+    if (!target) {
+      compileInPlace(id);
+      return;
+    }
+    // Bytes are copied, never transferred: callers keep theirs for storage.
+    target.postMessage({ type: "aot-compile", id, bytes: job.bytes, warm: job.warm && Boolean(status), deliver: job.deliver });
+    schedulePoll();
+  }
+
+  return {
+    compile(bytes, { warm = true, deliver = DELIVER_AFTER_WARM } = {}) {
+      const view = bytes instanceof Uint8Array ? bytes : new Uint8Array(bytes);
+      const id = nextId++;
+      stats.jobs += 1;
+      const job = { bytes: view, warm, deliver };
+      job.promise = new Promise((resolve, reject) => {
+        job.resolve = resolve;
+        job.reject = reject;
+      });
+      pending.set(id, job);
+      send(id);
+      return job.promise;
+    },
+    // {statePtr, state: Uint8Array}: copied at statePtr in scratch memory
+    // before every warm call. Kept across worker restarts.
+    setWarmState(next) {
+      warmState = next && next.state instanceof Uint8Array ? { statePtr: next.statePtr, state: next.state.slice() } : null;
+      if (worker && warmState) worker.postMessage({ type: "aot-warm-state", ...warmState });
+    },
+    // Resolves once every job sent so far is delivered and warmed (or the
+    // worker was lost, which ends its warm-ups too).
+    async drain() {
+      while (pending.size) {
+        await Promise.allSettled([...pending.values()].map((job) => job.promise));
+      }
+      if (!worker) return;
+      const id = nextId++;
+      await new Promise((resolve) => {
+        flushWaiters.set(id, resolve);
+        worker.postMessage({ type: "aot-flush", id });
+      });
+    },
+    stats: () => ({ ...stats, pending: pending.size, offThread: !workerBroken, watchdog: canWatch }),
+    terminate() {
+      killWorker();
+      workerBroken = true;
+      for (const [id, job] of pending) {
+        pending.delete(id);
+        job.reject(new Error("aot compiler terminated"));
+      }
+    }
+  };
+}

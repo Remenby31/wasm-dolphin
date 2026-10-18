@@ -15,6 +15,12 @@ import { gxClearDepthToStored, gxDepthState } from "./wgpu-depth-state.js";
 import { clampSourceRect, createWgpuExactCapture, packReadbackRows } from "./wgpu-exact-capture.js";
 import { decodePrebuiltCache } from "./prebuilt-jit-cache-format.js";
 import {
+  AOT_COMPILER_WORKER_NAME,
+  DELIVER_BEFORE_WARM,
+  compileFailureReason,
+  createAotCompilerClient
+} from "./aot-compiler-worker.js";
+import {
   JIT_CACHE_ENTRY_KEY_SCHEMA,
   canonicalCoreFingerprint,
   classifyJitCacheIdentity,
@@ -1255,6 +1261,10 @@ async function handleMessage(type, payload) {
         newCompileCount: dolphinJitNewCompileCount,
         verificationPending: dolphinJitVerificationPending.size,
         compilePending: dolphinJitCompilePending,
+        // P5: modules compiled and warmed in the dedicated compiler worker.
+        offThreadCompiler: dolphinAotCompiler ? dolphinAotCompiler.stats() : null,
+        compileRequests: dolphinJitCompileRequestCount,
+        compileRequestFailures: dolphinJitCompileRequestFailures,
         idbWritesPending: dolphinJitIdbWritesPending,
         idbWriteCount: dolphinJitIdbWriteCount,
         pthreadWorkerCount: dolphinJitPthreadWorkers.length,
@@ -5641,7 +5651,7 @@ async function loadDolphinJitCacheFromIdb(db) {
     })));
     const batch = verified
       .filter(({ valid }) => valid)
-      .map(({ key, buf }) => ({ key, p: WebAssembly.compile(buf) }));
+      .map(({ key, buf }) => ({ key, p: compileDolphinJitModuleOffThread(buf, DELIVER_BEFORE_WARM) }));
     const res = await Promise.allSettled(batch.map((b) => b.p));
     for (let k = 0; k < res.length; k++) {
       if (res[k].status === "fulfilled") {
@@ -5882,6 +5892,85 @@ async function reconcileJitCacheWithBuild(fingerprint) {
   }
   return loaded;
 }
+// P5 (plan piste 3): cached and requested modules are compiled in a
+// dedicated worker that also runs every entry point once on scratch memory, so
+// V8's lazy Liftoff code exists before a pthread instantiates the Module. The
+// CPU thread is left with instantiation only. No worker: compile in place.
+// Modules loaded at boot are handed over at once and warmed in the background
+// (nothing calls them before the JIT engages); requested ones after warm-up.
+let dolphinAotCompiler = null;
+function getDolphinAotCompiler() {
+  if (!dolphinAotCompiler) {
+    dolphinAotCompiler = createAotCompilerClient({
+      createWorker: () => new Worker(new URL("./aot-compiler-worker.js", import.meta.url), {
+        type: "module",
+        name: AOT_COMPILER_WORKER_NAME
+      }),
+      onEvent: (event) => {
+        if (event.type === "warm-timeout") {
+          postStatus("jit-cache: compiler worker warm-up timed out; worker restarted");
+        }
+      }
+    });
+  }
+  return dolphinAotCompiler;
+}
+function compileDolphinJitModuleOffThread(bytes, deliver) {
+  return getDolphinAotCompiler().compile(bytes, { deliver }).then((result) => result.module);
+}
+// Contract with the JIT owner (CPU pthread side):
+//   {type: "dolphin-jit-compile-request", key, bytes, kind} a deferred miss;
+//     answered by "dolphin-jit-cache-add" {hash: key, module} to every pthread,
+//     or "dolphin-jit-compile-failed" {key, reason: compile|link|oom}.
+//   {type: "dolphin-jit-warm-state", statePtr, state} the scratch state that
+//     makes every entry point leave at its first downcount test.
+// The key is the core's, used as is: block keys are also the IndexedDB keys,
+// so only a key that matches its bytes is persisted.
+let dolphinJitCompileRequestCount = 0;
+let dolphinJitCompileRequestFailures = 0;
+const dolphinJitCompileRequestsInFlight = new Set();
+async function handleDolphinJitCompileRequest(event) {
+  const data = event.data;
+  if (data?.type === "dolphin-jit-warm-state") {
+    if (data.state instanceof Uint8Array) getDolphinAotCompiler().setWarmState(data);
+    return;
+  }
+  if (!data || data.type !== "dolphin-jit-compile-request") return;
+  const key = data.key ?? data.hash;
+  if (!key || !data.bytes) return;
+  const bytes = data.bytes instanceof ArrayBuffer ? new Uint8Array(data.bytes) : data.bytes;
+  if (!(bytes instanceof Uint8Array)) return;
+  dolphinJitCompileRequestCount += 1;
+  const cached = dolphinJitCacheMap.get(key);
+  if (cached) {
+    broadcastDolphinJitPthreads({ type: "dolphin-jit-cache-add", hash: key, module: cached });
+    return;
+  }
+  if (dolphinJitCompileRequestsInFlight.has(key)) return;
+  dolphinJitCompileRequestsInFlight.add(key);
+  try {
+    const mod = await getDolphinAotCompiler().compile(bytes).then((result) => result.module);
+    if (dolphinJitCacheMap.size < DOLPHIN_JIT_CACHE_MAX) dolphinJitCacheMap.set(key, mod);
+    broadcastDolphinJitPthreads({ type: "dolphin-jit-cache-add", hash: key, module: mod });
+    if (dolphinJitCachePersistenceEnabled && await verifyCanonicalWasmBlockKey(String(key), bytes)) {
+      void writeDolphinJitEntryToIdb(key, bytes);
+    }
+  } catch (err) {
+    dolphinJitCompileRequestFailures += 1;
+    broadcastDolphinJitPthreads({ type: "dolphin-jit-compile-failed", key, reason: compileFailureReason(err) });
+  } finally {
+    dolphinJitCompileRequestsInFlight.delete(key);
+  }
+}
+function broadcastDolphinJitPthreads(message) {
+  for (const w of dolphinJitPthreadWorkers) {
+    try {
+      w.postMessage(message);
+    } catch {
+      // A pthread that cannot receive it compiles the block itself.
+    }
+  }
+}
 let dolphinJitNewCompileCount = 0;
 let dolphinJitCompilePending = 0;
 const dolphinJitVerificationPending = new Set();
@@ -6000,6 +6089,7 @@ function ensureDolphinJitPthreadListeners(worker) {
   }
   if (!dolphinJitPthreadCompileListeners.has(worker)) {
     worker.addEventListener("message", handleDolphinJitNewCompile);
+    worker.addEventListener("message", handleDolphinJitCompileRequest);
     dolphinJitPthreadCompileListeners.add(worker);
   }
 }
@@ -6221,7 +6311,7 @@ async function startLazyJitCacheFill() {
       const { entry, buf } = verified;
       // Only carry bytes through when sourced from the overflow buffer —
       // those need IDB write-back. IDB-sourced entries are already there.
-      return { key: entry.key, p: WebAssembly.compile(buf), bytes: fromOverflow ? buf : null };
+      return { key: entry.key, p: compileDolphinJitModuleOffThread(buf, DELIVER_BEFORE_WARM), bytes: fromOverflow ? buf : null };
     }).filter(Boolean);
     dolphinJitLazyFillFailureCount += verifiedSlice.length - compiles.length;
     const settled = await Promise.allSettled(compiles.map((c) => c.p));
