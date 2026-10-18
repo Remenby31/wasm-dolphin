@@ -6,12 +6,20 @@ import { createHash } from "node:crypto";
 import os from "node:os";
 import { existsSync, readdirSync, readFileSync } from "node:fs";
 import path from "node:path";
-import { pathToFileURL } from "node:url";
+import { fileURLToPath, pathToFileURL } from "node:url";
 import { FRAME_FIELDS } from "./matrix.mjs";
 import { decodePng } from "./png.mjs";
 import { ensureServer as serveTree } from "./server.mjs";
 
-export const REPO_ROOT = path.resolve(path.dirname(new URL(import.meta.url).pathname), "..", "..");
+// The checkout root two levels above a module, as a file system path. A URL's
+// pathname is not one: on Windows it reads /C:/…, and spaces or accents stay
+// percent-encoded on every system.
+export function repoRootOf(moduleUrl, { windows = process.platform === "win32" } = {}) {
+  const root = fileURLToPath(new URL("../..", moduleUrl), { windows });
+  return (windows ? path.win32 : path.posix).resolve(root);
+}
+
+export const REPO_ROOT = repoRootOf(import.meta.url);
 
 // Messages that mean the emulator is dead or the JIT emitted bad code.
 export const FATAL_PATTERN = /CompileError|LinkError|RuntimeError|WebAssembly\.Module|unreachable executed|Aborted\(|out of memory|worker (?:error|crashed)|memory access out of bounds/i;
@@ -22,7 +30,8 @@ export async function importPlaywright() {
     return await import("playwright");
   } catch {}
   // playwright-cli (the browser driver used for the evaluation) ships playwright.
-  const globalRoot = execFileSync("npm", ["root", "-g"], { encoding: "utf8" }).trim();
+  // npm is npm.cmd on Windows, which only runs through a shell.
+  const globalRoot = execFileSync("npm", ["root", "-g"], { encoding: "utf8", shell: process.platform === "win32" }).trim();
   for (const candidate of [
     path.join(globalRoot, "@playwright", "cli", "node_modules", "playwright", "index.mjs"),
     path.join(globalRoot, "playwright", "index.mjs")
@@ -82,7 +91,9 @@ export async function launchChrome({ profileDir, display = "headless", args = []
     viewport: { width: 1280, height: 800 },
     // Chrome's log and crash dumps stay in the profile; a session whose
     // renderer crashed copies them out as evidence (session.mjs).
-    args: [...opts.args, "--enable-logging", "--v=0", `--log-file=${path.join(profileDir, "chrome.log")}`, `--crash-dumps-dir=${path.join(profileDir, "crash-dumps")}`, ...args]
+    // HARNESS_CHROME_ARGS: extra flags for one machine (e.g. Linux WebGPU:
+    // "--enable-features=Vulkan --use-angle=vulkan"), space-separated.
+    args: [...opts.args, ...(process.env.HARNESS_CHROME_ARGS ?? "").split(/\s+/).filter(Boolean), "--enable-logging", "--v=0", `--log-file=${path.join(profileDir, "chrome.log")}`, `--crash-dumps-dir=${path.join(profileDir, "crash-dumps")}`, ...args]
   });
   context.assertInvisible = (when) => assertNoWindow(profileDir, when, () => context.close());
   return context;

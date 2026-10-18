@@ -1,0 +1,9 @@
+[
+  { "click": [400, 500] },
+  { "wait": 25 },
+  { "tap": "Enter" },
+  { "wait": 3 },
+  { "tap": "KeyX", "repeat": 24, "every": 2.0 },
+  { "wait": 12 },
+  { "down": "KeyX" }
+]

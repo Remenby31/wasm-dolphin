@@ -109,14 +109,17 @@ function release(dir, owner) {
     // Only our own lock: never remove one somebody else took meanwhile.
     if (now?.pid === owner.pid && now?.nonce === owner.nonce) rmSync(dir, { recursive: true, force: true });
   };
-  const onSignal = (sig) => { free(); process.exit(sig === "SIGINT" ? 130 : 143); };
+  // SIGHUP: the SSH session that started the run closed.
+  const onSignal = (sig) => { free(); process.exit({ SIGINT: 130, SIGTERM: 143, SIGHUP: 129 }[sig] ?? 1); };
   process.once("exit", free);
   process.once("SIGINT", onSignal);
   process.once("SIGTERM", onSignal);
+  process.once("SIGHUP", onSignal);
   return () => {
     free();
     process.off("exit", free);
     process.off("SIGINT", onSignal);
     process.off("SIGTERM", onSignal);
+    process.off("SIGHUP", onSignal);
   };
 }
