@@ -132,8 +132,9 @@ test("a deferred compile request is answered to every pthread, a rejected one to
     if (originalSelf === undefined) delete globalThis.self;
     else globalThis.self = originalSelf;
   });
+  const stamp = Date.now();
   const { installDolphinPthreadChannels } = await import(
-    `${workerUrl.href}?compile-request-test=${Date.now()}`
+    `${workerUrl.href}?compile-request-test=${stamp}`
   );
   const { canonicalWasmBlockKey } = await import("../src/jit-cache-identity.js");
   const cpu = fakePthreadWorker();
@@ -172,6 +173,14 @@ test("a deferred compile request is answered to every pthread, a rejected one to
   await request({ currentTarget: cpu, data: { type: "dolphin-jit-compile-request", key: forged, bytes: plusOne, kind: "block" } });
   assert.equal(cpu.messages.some((m) => m.type === "dolphin-jit-cache-add" && m.hash === forged), false);
   assert.deepEqual(cpu.messages.find((m) => m.type === "dolphin-jit-compile-failed" && m.key === forged), { type: "dolphin-jit-compile-failed", key: forged, reason: "compile" });
+
+  // ahead-of-time callers: the Module is kept alive under its key, so a later
+  // synchronous compile of the same bytes on the CPU thread hits V8's cache
+  const { precompileDolphinJitModule } = await import(`${workerUrl.href}?compile-request-test=${stamp}`);
+  const kept = await precompileDolphinJitModule(plusKey, plusOne);
+  assert.ok(kept.module instanceof WebAssembly.Module);
+  assert.equal((await precompileDolphinJitModule(plusKey, plusOne)).module, kept.module);
+  assert.deepEqual(await precompileDolphinJitModule(forged, plusOne), { reason: "key-mismatch" });
 
   const bad = new Uint8Array([0, 0x61, 0x73, 0x6d, 1, 0, 0, 0, 0x0a, 1]);
   await request({ currentTarget: cpu, data: { type: "dolphin-jit-compile-request", key: "k-bad", bytes: bad, kind: "block" } });

@@ -6628,17 +6628,68 @@ function compileDolphinJitModuleOffThread(bytes, deliver) {
   if (!dolphinAotCompilerEnabled) return WebAssembly.compile(bytes);
   return getDolphinAotCompiler().compile(bytes, { deliver }).then((result) => result.module);
 }
+// How a Module reaches the CPU thread. That pthread never returns to its
+// event loop while it emulates, so a message to it lands only before boot
+// (the pre-boot fence of installDolphinPthreadChannels). During a session the
+// way in is V8's native module cache, keyed by the module's bytes: a Module
+// compiled here (and warmed by the compiler worker) that stays alive in
+// dolphinJitCacheMap turns the CPU thread's own synchronous
+// `new WebAssembly.Module(bytes)` of the same bytes into a cache hit, Liftoff
+// code included (3 000 blocks: compile 70 -> 33 ms, first call 89 -> 5 ms;
+// measures/aot/q8). So the work here is: precompile, warm, keep alive.
+//
 // Contract with the JIT owner (CPU pthread side):
-//   {type: "dolphin-jit-compile-request", key, bytes, kind} a deferred miss;
-//     answered by "dolphin-jit-cache-add" {hash: key, module} to every pthread,
-//     or "dolphin-jit-compile-failed" {key, reason: compile|link|oom}.
+//   {type: "dolphin-jit-compile-request", key, bytes, kind} asks for that
+//     precompilation; the answer, "dolphin-jit-cache-add" {hash: key, module}
+//     or "dolphin-jit-compile-failed" {key, reason: compile|link|oom}, goes to
+//     every pthread and is read by those that yield.
 //   {type: "dolphin-jit-warm-state", statePtr, state} the scratch state that
 //     makes every entry point leave at its first downcount test.
 // The key is the core's, used as is: block keys are also the IndexedDB keys,
 // so only a key that matches its bytes is persisted.
 let dolphinJitCompileRequestCount = 0;
 let dolphinJitCompileRequestFailures = 0;
-const dolphinJitCompileRequestsInFlight = new Set();
+const dolphinJitCompileRequestsInFlight = new Map(); // key -> Promise of the outcome
+
+// Compile and warm `bytes` off the CPU thread and keep the Module alive under
+// `key`. Resolves {module} or {reason} (compile, link, oom, key-mismatch,
+// cache-full); never rejects. Also the entry point for ahead-of-time callers.
+export function precompileDolphinJitModule(key, input) {
+  key = String(key ?? "");
+  let bytes = input instanceof ArrayBuffer ? new Uint8Array(input) : input;
+  if (!key || !(bytes instanceof Uint8Array)) return Promise.resolve({ reason: "compile" });
+  const cached = dolphinJitCacheMap.get(key);
+  if (cached) return Promise.resolve({ module: cached });
+  const inFlight = dolphinJitCompileRequestsInFlight.get(key);
+  if (inFlight) return inFlight;
+  // A view of the wasm heap: copy the module out (digest and worker transfer
+  // need its own buffer, and the heap must never be handed over).
+  if (bytes.buffer instanceof SharedArrayBuffer) bytes = bytes.slice();
+  const outcome = (async () => {
+    // A block key names the SHA-256 of its bytes: one that does not match is
+    // never cached under that name (as for every other cache entry).
+    const blockKey = key.startsWith(`${JIT_CACHE_ENTRY_KEY_SCHEMA}:`);
+    if (blockKey && !(await verifyCanonicalWasmBlockKey(key, bytes))) {
+      postStatus("jit-cache: rejected compile request with mismatched block identity");
+      return { reason: "key-mismatch" };
+    }
+    let mod;
+    try {
+      mod = dolphinAotCompilerEnabled
+        ? await getDolphinAotCompiler().compile(bytes).then((result) => result.module)
+        : await WebAssembly.compile(bytes);
+    } catch (err) {
+      return { reason: compileFailureReason(err) };
+    }
+    if (dolphinJitCacheMap.size >= DOLPHIN_JIT_CACHE_MAX) return { reason: "cache-full", module: mod };
+    dolphinJitCacheMap.set(key, mod);
+    if (blockKey && dolphinJitCachePersistenceEnabled) void writeDolphinJitEntryToIdb(key, bytes);
+    return { module: mod };
+  })().finally(() => dolphinJitCompileRequestsInFlight.delete(key));
+  dolphinJitCompileRequestsInFlight.set(key, outcome);
+  return outcome;
+}
+
 async function handleDolphinJitCompileRequest(event) {
   const data = event.data;
   if (data?.type === "dolphin-jit-warm-state") {
@@ -6648,44 +6699,16 @@ async function handleDolphinJitCompileRequest(event) {
   if (!data || data.type !== "dolphin-jit-compile-request") return;
   const key = String(data.key ?? data.hash ?? "");
   if (!key || !data.bytes) return;
-  let bytes = data.bytes instanceof ArrayBuffer ? new Uint8Array(data.bytes) : data.bytes;
-  if (!(bytes instanceof Uint8Array)) return;
-  // A view of the wasm heap: copy the module out (digest and worker transfer
-  // need its own buffer, and the heap must never be handed over).
-  if (bytes.buffer instanceof SharedArrayBuffer) bytes = bytes.slice();
   dolphinJitCompileRequestCount += 1;
-  const cached = dolphinJitCacheMap.get(key);
-  if (cached) {
-    broadcastDolphinJitPthreads({ type: "dolphin-jit-cache-add", hash: key, module: cached });
-    return;
-  }
-  if (dolphinJitCompileRequestsInFlight.has(key)) return;
-  dolphinJitCompileRequestsInFlight.add(key);
-  let mod = null;
-  try {
-    // A block key names the SHA-256 of its bytes: one that does not match is
-    // never cached under that name (as for every other cache entry).
-    const blockKey = key.startsWith(`${JIT_CACHE_ENTRY_KEY_SCHEMA}:`);
-    if (blockKey && !(await verifyCanonicalWasmBlockKey(key, bytes))) {
-      dolphinJitCompileRequestFailures += 1;
-      postStatus("jit-cache: rejected compile request with mismatched block identity");
-      broadcastDolphinJitPthreads({ type: "dolphin-jit-compile-failed", key, reason: "compile" });
-      return;
-    }
-    try {
-      mod = dolphinAotCompilerEnabled
-        ? await getDolphinAotCompiler().compile(bytes).then((result) => result.module)
-        : await WebAssembly.compile(bytes);
-    } catch (err) {
-      dolphinJitCompileRequestFailures += 1;
-      broadcastDolphinJitPthreads({ type: "dolphin-jit-compile-failed", key, reason: compileFailureReason(err) });
-      return;
-    }
-    if (dolphinJitCacheMap.size < DOLPHIN_JIT_CACHE_MAX) dolphinJitCacheMap.set(key, mod);
-    broadcastDolphinJitPthreads({ type: "dolphin-jit-cache-add", hash: key, module: mod });
-    if (blockKey && dolphinJitCachePersistenceEnabled) void writeDolphinJitEntryToIdb(key, bytes);
-  } finally {
-    dolphinJitCompileRequestsInFlight.delete(key);
+  const firstAsk = !dolphinJitCompileRequestsInFlight.has(key);
+  const outcome = await precompileDolphinJitModule(key, data.bytes);
+  if (!firstAsk) return; // the first request's answer covers this one
+  if (outcome.module && outcome.reason !== "cache-full") {
+    broadcastDolphinJitPthreads({ type: "dolphin-jit-cache-add", hash: key, module: outcome.module });
+  } else {
+    dolphinJitCompileRequestFailures += 1;
+    const reason = outcome.reason === "key-mismatch" ? "compile" : outcome.reason === "cache-full" ? "oom" : outcome.reason;
+    broadcastDolphinJitPthreads({ type: "dolphin-jit-compile-failed", key, reason });
   }
 }
 function broadcastDolphinJitPthreads(message) {
