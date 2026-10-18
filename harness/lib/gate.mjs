@@ -112,11 +112,20 @@ export function perfReport(baseRunsByCell, candRunsByCell, { initialRuns = Infin
   for (const [k, candRuns] of candRunsByCell) {
     const baseRuns = baseRunsByCell.get(k) ?? [];
     const [game, config] = k.split("\u0000");
-    const confirmations = candRuns.filter((r) => r.run > initialRuns && baseRuns.some((b) => b.run === r.run)).length;
+    const confirmationRuns = candRuns.filter((r) => r.run > initialRuns);
     for (const metric of Object.keys(PERF_METRICS)) {
       const ch = pairedChange(baseRuns, candRuns, metric);
       const worse = ch.pairs > 0 && ch.median <= -PERF_REGRESSION;
-      rows.push({ game, config, metric, ...ch, confirmations, worse, regressed: worse && confirmations > 0 });
+      // A confirmation counts only if both sides of the pair measured this
+      // metric: an unmeasured run (null) confirms nothing.
+      const measured = (r) => Number.isFinite(r?.summary?.[metric]);
+      const confirmations = confirmationRuns.filter((r) => measured(r) && measured(baseRuns.find((b) => b.run === r.run))).length;
+      rows.push({
+        game, config, metric, ...ch, confirmations, worse,
+        regressed: worse && confirmations > 0,
+        // Replays happened but none measured it: neither pass nor fail.
+        inconclusive: worse && confirmationRuns.length > 0 && confirmations === 0
+      });
     }
   }
   return rows;
@@ -138,6 +147,7 @@ export function runsByCell(records) {
 export function decide({ correctness, perf = [] }) {
   if (!correctness.ok) return { ok: false, reason: correctness.inconclusive ? "inconclusive" : "correctness" };
   if (perf.some((r) => r.regressed)) return { ok: false, reason: "performance" };
+  if (perf.some((r) => r.inconclusive)) return { ok: false, reason: "inconclusive" };
   return { ok: true, reason: null };
 }
 
@@ -146,12 +156,12 @@ export function gateMarkdown({ correctness, perf = [] }) {
   for (const r of correctness.rows) if (r.status !== "ok") lines.push(`| ${r.game} | ${r.config} | ${r.check} | ${r.baseline ?? "–"} | ${r.candidate ?? "–"} | ${r.status} |`);
   lines.push("", `${correctness.rows.filter((r) => r.status === "ok").length} check(s) ok.`, "");
   lines.push("## Performance (paired; blocks only a confirmed ≥ 15 % regression)", "", "| Game | Config | Metric | Pairs | Median change | Regressed |", "|---|---|---|---|---|---|");
-  for (const r of perf) lines.push(`| ${r.game} | ${r.config} | ${r.metric} | ${r.pairs} (${r.confirmations ?? 0} confirmation) | ${r.median == null ? "–" : `${Math.round(r.median * 1000) / 10} %`} | ${r.regressed ? "yes, confirmed" : r.worse ? "worse, not confirmed" : "no"} |`);
+  for (const r of perf) lines.push(`| ${r.game} | ${r.config} | ${r.metric} | ${r.pairs} (${r.confirmations ?? 0} confirmation) | ${r.median == null ? "–" : `${Math.round(r.median * 1000) / 10} %`} | ${r.regressed ? "yes, confirmed" : r.inconclusive ? "worse, confirmations unmeasured" : r.worse ? "worse, not confirmed" : "no"} |`);
   const d = decide({ correctness, perf });
   const text = d.ok
     ? "Gate: PASS."
     : d.reason === "inconclusive"
-      ? "Gate: INCONCLUSIF, blocking (a check could not be judged on the candidate)."
+      ? "Gate: INCONCLUSIF, blocking (a check, or a performance confirmation, could not be judged on the candidate)."
       : d.reason === "correctness"
         ? `Gate: FAIL (${correctness.blocking.length} correctness regression(s)).`
         : `Gate: FAIL (confirmed performance regression: ${perf.filter((r) => r.regressed).map((r) => `${r.game}/${r.config} ${r.metric}`).join(", ")}).`;

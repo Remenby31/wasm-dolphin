@@ -105,3 +105,19 @@ test("cross-renderer render check: unjudged in dual core, judged single-threaded
   const single = renderChecks(recs("single"), "sw", (f) => frames[f]);
   assert.equal(single[1].render.status, "pass");
 });
+
+// Final review: confirmation runs with speed: null counted as confirmations
+// and produced a "confirmed" FAIL. Unmeasured replays are INCONCLUSIF.
+test("final review: unmeasured confirmation runs confirm nothing", async () => {
+  const { perfReport, runsByCell, decide, correctnessGate } = await import("../harness/lib/gate.mjs");
+  const at = (run, speed) => ({ game: "g", config: "c", run, summary: { speed, vis: 30, frameP95: 17 } });
+  const base = [1, 2, 3, 4, 5].map((r) => at(r, 100));
+  const cand = [at(1, 70), at(2, 70), at(3, 70), at(4, null), at(5, null)];
+  const speed = perfReport(runsByCell(base), runsByCell(cand), { initialRuns: 3 }).find((r) => r.metric === "speed");
+  assert.equal(speed.confirmations, 0);
+  assert.equal(speed.regressed, false);
+  assert.equal(speed.inconclusive, true);
+  const ok = { crash: { status: "pass" }, errors: { status: "pass" }, coreFreeze: { status: "pass" }, render: { status: "pass" }, audio: { status: "pass" } };
+  const correctness = correctnessGate([{ game: "g", config: "c", checks: ok }], [{ game: "g", config: "c", checks: ok }]);
+  assert.deepEqual(decide({ correctness, perf: [speed] }), { ok: false, reason: "inconclusive" });
+});
