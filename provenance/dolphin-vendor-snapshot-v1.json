@@ -3,8 +3,8 @@
   "normalization": "git-blob-lf",
   "root": {
     "baseCommit": "e22551eae1c84a7e4d0b6a5c519ef4ed4ef69df1",
-    "resultTree": "86c78d05b8ce03989ac67e506214d5dd44a63815",
-    "changedPathCount": 118,
+    "resultTree": "391c05bc6881b16794dd4c72ad9498e56a7517b6",
+    "changedPathCount": 121,
     "records": [
       {
         "path": "CMakeLists.txt",
@@ -236,9 +236,36 @@
         "status": "M",
         "mode": "100644",
         "baseBlob": "73ff1d616c5df5c5a5464b0dec8482f258e102a9",
-        "resultBlob": "7cddbee872da31140711f8f89c5edc2076d5b95f",
-        "size": 16913,
-        "sha256": "d13a35180542854f23cd2bc90a3cf9d475af2a0ea1664caf58f696c5fbc4986e"
+        "resultBlob": "ca4be74568d34efadd191250a40d8045cec8f609",
+        "size": 17000,
+        "sha256": "071adedf60db1cf9b9a96355e06788ecfae11b3c8852038ce8810f0779ac0e86"
+      },
+      {
+        "path": "Source/Core/Core/HW/EXI/EXI_DeviceMemoryCard.h",
+        "status": "M",
+        "mode": "100644",
+        "baseBlob": "db9c013671575799ee780b71325501c7cd779fa5",
+        "resultBlob": "a2239854ca7b57e99b2886a37f585bc70feee4a0",
+        "size": 3310,
+        "sha256": "9f5001dc99879efba5546e4527cce8ea68beaba0dc7b0a43cc834ad56fc681df"
+      },
+      {
+        "path": "Source/Core/Core/HW/GCMemcard/GCMemcardBase.h",
+        "status": "M",
+        "mode": "100644",
+        "baseBlob": "5805b9056040a98783bc2fcabd1e0496f55ad990",
+        "resultBlob": "42d63078986eb365eea99c0fa4c29f59076708c4",
+        "size": 1083,
+        "sha256": "4ede5641f589897f7c5715351148e7c9f7a8ad8cf7edf74a3c6cae1a5867b535"
+      },
+      {
+        "path": "Source/Core/Core/HW/GCMemcard/GCMemcardDirectory.h",
+        "status": "M",
+        "mode": "100644",
+        "baseBlob": "27e45b317df852fa250b3b86a0198055c489048d",
+        "resultBlob": "fa8c1dd1d62c20cdceafbc84fcbf671e55f8b6a4",
+        "size": 2337,
+        "sha256": "a1692a11b699d3396366a573cf1482b67bd26066d8830a50c13c263fa323912e"
       },
       {
         "path": "Source/Core/Core/HW/GCPad.cpp",
@@ -1104,5 +1131,5 @@
       ]
     }
   ],
-  "contentSha256": "b51166c9e2146d459e48d1a49a7c686ca3097db7d710953603b0b927c57831db"
+  "contentSha256": "0d40756005efe9c02551deae2f288489a65d21b52d0504d1e502b5c51e1b21c2"
 }
