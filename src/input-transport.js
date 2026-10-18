@@ -82,3 +82,93 @@ function requireInputStateView(view, port) {
   }
   return port * INPUT_PORT_SLOT_COUNT;
 }
+
+export const NEUTRAL_PAD_STATE = Object.freeze({
+  mask: 0,
+  stickX: 0x80,
+  stickY: 0x80,
+  cStickX: 0x80,
+  cStickY: 0x80,
+  triggerLeft: 0,
+  triggerRight: 0,
+  analogA: 0,
+  analogB: 0
+});
+
+// A pad state from outside (site, netplay) → the exact bytes the core gets.
+// A field that is absent or undefined is neutral; a byte field is rounded and
+// clamped to 0-255; anything else that is not a finite number throws, so a
+// NaN stick can never reach the core as a full deflection.
+export function normalizePadState(state) {
+  if (state === null || typeof state !== "object") {
+    throw new TypeError(`pad state must be an object, got ${state === null ? "null" : typeof state}`);
+  }
+  const normalized = {};
+  for (const [field, neutral] of Object.entries(NEUTRAL_PAD_STATE)) {
+    const value = state[field];
+    if (value === undefined) {
+      normalized[field] = neutral;
+      continue;
+    }
+    if (typeof value !== "number" || !Number.isFinite(value)) {
+      throw new TypeError(`pad state ${field} must be a finite number, got ${String(value)}`);
+    }
+    if (field === "mask") {
+      if (!Number.isInteger(value) || value < 0 || value > 0xffff_ffff) {
+        throw new RangeError(`pad state mask must be an integer in 0..0xffffffff, got ${value}`);
+      }
+      normalized.mask = value >>> 0;
+    } else {
+      normalized[field] = Math.min(0xff, Math.max(0, Math.round(value)));
+    }
+  }
+  return normalized;
+}
+
+// What the host asked for on each port, so an adapter can publish only
+// changes and replay requests made before its core was loaded. Port 0 starts
+// plugged in (the core's default); the others start unplugged.
+export class PadPortRequests {
+  constructor() {
+    this.ports = Array.from({ length: INPUT_PORT_COUNT }, (_, port) => ({
+      connected: port === 0,
+      state: NEUTRAL_PAD_STATE,
+      requested: false,
+      generation: 0
+    }));
+  }
+
+  // connected = true with a state (validated, may throw), or false to unplug.
+  // Returns the port's record when it changed, null when it did not or the
+  // port is not 0-3.
+  request(port, state, connected = true) {
+    const slot = Number.isInteger(port) ? this.ports[port] : null;
+    if (!slot) return null;
+    const next = connected ? normalizePadState(state ?? {}) : NEUTRAL_PAD_STATE;
+    const unchanged = slot.requested && slot.connected === Boolean(connected) &&
+      Object.keys(NEUTRAL_PAD_STATE).every((field) => slot.state[field] === next[field]);
+    if (unchanged) return null;
+    slot.connected = Boolean(connected);
+    slot.state = next;
+    slot.requested = true;
+    return slot;
+  }
+
+  // Plug in keeps the last state (neutral after an unplug).
+  connect(port, connected) {
+    const slot = Number.isInteger(port) ? this.ports[port] : null;
+    if (!slot) return null;
+    return this.request(port, connected ? slot.state : null, connected);
+  }
+
+  // A new generation for one publication of this port.
+  nextGeneration(port) {
+    const slot = this.ports[port];
+    slot.generation = ((slot.generation + 1) >>> 0) || 1;
+    return slot.generation;
+  }
+
+  requestedPorts() {
+    return this.ports.flatMap((slot, port) => (slot.requested ? [port] : []));
+  }
+}

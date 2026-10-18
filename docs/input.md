@@ -22,8 +22,12 @@ host.connectPad(port, connected); // true plugs the port in, false unplugs it
 - `connectPad(port, false)` unplugs the port and forgets its state; a pad
   plugged back in starts neutral.
 - Both can be called before a game is loaded: the last request per port is
-  applied as soon as the worker is up.
-- Fields left out of `state` are neutral (sticks centred, nothing pressed).
+  applied as soon as the core is up. This holds for the worker adapter and for
+  the main-thread one (`video=ogl&oglproxy=main`).
+- Fields left out of `state` (or `undefined`) are neutral (sticks centred,
+  nothing pressed). Byte fields are rounded and clamped to 0-255. A field that
+  is not a finite number (`NaN`, `Infinity`, a string) throws a `TypeError`,
+  and a `mask` outside 0..0xffffffff a `RangeError`; nothing is sent then.
 - Repeating an unchanged state costs nothing (it is deduplicated per port).
 
 `state` is the layout of `src/input.js`:
@@ -54,7 +58,8 @@ rescaled from the centre).
   phantom HID device).
 - The keyboard (and the touch controls) drive port 1 together with the first
   pad. `?keyboardport=2` (1-4) moves them to another port; `?keyboardport=none`
-  detaches them.
+  detaches them. At start the page plugs and unplugs ports to match its
+  devices, so with the keyboard off port 1 and no pad, port 1 is empty.
 - Sticks use a 0.18 radial deadzone (worn sticks drift up to ~0.45, but only
   the digital `STICK_*` directions used for menus use the larger 0.55
   threshold).

@@ -76,3 +76,45 @@ test("states set before the worker is loaded are published once it is", () => {
   adapter.setInputState(state(16));
   assert.deepEqual([posted.at(-1).payload.port, posted.at(-1).payload.mask], [0, 16]);
 });
+
+test("a pad state that is not finite numbers is rejected before it reaches the core", () => {
+  const { adapter, posted } = adapterWithWorker();
+  adapter.loaded = true;
+  for (const bad of [{ stickX: NaN }, { cStickY: Infinity }, { triggerLeft: "255" }, { mask: -1 }, { mask: 1.5 }]) {
+    assert.throws(() => adapter.setPadState(1, bad), /pad state (\w+) must be/);
+  }
+  assert.throws(() => adapter.setPadState(1, 7), TypeError);
+  assert.equal(posted.length, 0);
+  // undefined is "left out": neutral, never a full deflection; bytes are clamped.
+  adapter.setPadState(1, { stickX: undefined, stickY: 300, cStickX: -4, triggerLeft: 12.6 });
+  const p1 = readInputStateSnapshot(adapter.inputStateView, { port: 1 }).snapshot;
+  assert.deepEqual([p1.stickX, p1.stickY, p1.cStickX, p1.triggerLeft], [0x80, 0xff, 0, 13]);
+});
+
+test("the main-thread adapter (ogl proxy) drives all four ports and unplugs them", async () => {
+  const { UpstreamMainThreadAdapter } = await import("../src/upstream-main-thread-adapter.js");
+  const adapter = new UpstreamMainThreadAdapter({ canvas: null });
+  const calls = [];
+  // Requests before the core is loaded are kept, then applied on load.
+  adapter.setPadState(2, state(4));
+  adapter.connectPad(0, false);
+  adapter.api = { setPadState: (port, s) => calls.push([port, s.connected, s.mask, s.inputGeneration]) };
+  for (const port of adapter.padPorts.requestedPorts()) adapter.applyPadState(port);
+  adapter.setPadState(3, state(8));
+  adapter.connectPad(3, false);
+  adapter.setInputState(state(1));
+  assert.deepEqual(calls, [
+    [0, false, 0, 1],
+    [2, true, 4, 1],
+    [3, true, 8, 1],
+    [3, false, 0, 2],
+    [0, true, 1, 2]
+  ]);
+  assert.throws(() => adapter.setPadState(1, { stickY: NaN }), TypeError);
+  // A core without SetPadState still gets port 1 through SetInputState.
+  const legacy = [];
+  adapter.api = { setInputState: (s) => legacy.push(s.mask) };
+  adapter.setPadState(0, state(2));
+  adapter.setPadState(1, state(2));
+  assert.deepEqual(legacy, [2]);
+});

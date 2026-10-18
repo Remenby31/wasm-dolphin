@@ -30,6 +30,7 @@
 #include "VideoCommon/Statistics.h"
 
 #include "dolphin_web_xfb_fastpaths.h"
+#include "dolphin_web_pad_latch.h"
 #include "dolphin_web_raster_profile.h"
 
 #ifdef __EMSCRIPTEN__
@@ -138,6 +139,13 @@ constexpr int PAD_PORT_COUNT = 4;
 std::mutex s_input_state_mutex;
 std::array<InputStateSnapshot, PAD_PORT_COUNT> s_input_states{};
 std::array<bool, PAD_PORT_COUNT> s_pad_connected{true, false, false, false};
+struct PadPoll
+{
+  InputStateSnapshot input;
+  bool connected = false;
+};
+// Guarded by s_input_state_mutex. See dolphin_web_pad_latch.h.
+std::array<DolphinWeb::PadLatch<PadPoll>, PAD_PORT_COUNT> s_pad_latches{};
 std::mutex s_pad_poll_mutex;
 PadPollSnapshot s_pad_poll;
 bool s_using_xfb_frame = false;
@@ -1271,13 +1279,16 @@ int DolphinWeb_GetPadStatus(int pad_num, GCPadStatus* status)
   if (!status || pad_num < 0 || pad_num >= PAD_PORT_COUNT)
     return 0;
 
-  InputStateSnapshot input;
-  bool connected;
+  const std::uint64_t ticks = Core::System::GetInstance().GetCoreTiming().GetTicks();
+  PadPoll poll;
   {
     const std::lock_guard<std::mutex> lock(s_input_state_mutex);
-    input = s_input_states[pad_num];
-    connected = s_pad_connected[pad_num];
+    poll = s_pad_latches[pad_num].Poll(ticks, [pad_num] {
+      return PadPoll{s_input_states[pad_num], s_pad_connected[pad_num]};
+    });
   }
+  const InputStateSnapshot& input = poll.input;
+  const bool connected = poll.connected;
 
   *status = {};
   status->isConnected = connected;

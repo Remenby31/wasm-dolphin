@@ -108,3 +108,17 @@ test("input SAB refuses ports outside 0-3 and a view too small for four ports", 
   assert.throws(() => readInputStateSnapshot(view, { port: -1 }), RangeError);
   assert.throws(() => readInputStateSnapshot(new Int32Array(new SharedArrayBuffer(48))), TypeError);
 });
+
+test("pad states are validated, clamped and deduplicated per port", async () => {
+  const { PadPortRequests, normalizePadState, NEUTRAL_PAD_STATE } = await import("../src/input-transport.js");
+  assert.deepEqual(normalizePadState({}), NEUTRAL_PAD_STATE);
+  assert.throws(() => normalizePadState({ analogA: NaN }), /analogA must be a finite number, got NaN/);
+  assert.throws(() => normalizePadState({ mask: 2 ** 32 }), RangeError);
+  assert.throws(() => normalizePadState(null), TypeError);
+  const pads = new PadPortRequests();
+  assert.ok(pads.request(1, { mask: 1 }));
+  assert.equal(pads.request(1, { mask: 1, stickX: 0x80 }), null);
+  assert.equal(pads.request(4, {}), null);
+  assert.deepEqual(pads.requestedPorts(), [1]);
+  assert.equal(pads.nextGeneration(1), 1);
+});

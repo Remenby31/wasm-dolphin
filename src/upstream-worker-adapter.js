@@ -6,8 +6,8 @@ import {
   verifyUpstreamCoreWasm
 } from "./upstream-worker-protocol.js";
 import {
-  INPUT_PORT_COUNT,
   INPUT_STATE_SLOT_COUNT,
+  PadPortRequests,
   writeInputStateSnapshot
 } from "./input-transport.js";
 import {
@@ -18,18 +18,6 @@ import {
 } from "./causal-telemetry.js";
 
 const DEFAULT_WORKER_URL = new URL("./upstream-discio-worker.js", import.meta.url).href;
-
-const NEUTRAL_PAD_STATE = Object.freeze({
-  mask: 0,
-  stickX: 0x80,
-  stickY: 0x80,
-  cStickX: 0x80,
-  cStickY: 0x80,
-  triggerLeft: 0,
-  triggerRight: 0,
-  analogA: 0,
-  analogB: 0
-});
 
 export async function upstreamBundleAvailable(coreUrl = DEFAULT_UPSTREAM_CORE_URL) {
   try {
@@ -286,15 +274,9 @@ export class UpstreamWorkerAdapter {
     this.ppcWasmHelperStats = "";
     this.frameProfileStats = "-";
     this.frameData = null;
-    // What the host asked for on each port, kept so a request made before the
-    // worker is loaded is published once it is. Port 0 starts plugged in (the
-    // core's default); the others start unplugged.
-    this.padPorts = Array.from({ length: INPUT_PORT_COUNT }, (_, port) => ({
-      connected: port === 0,
-      state: NEUTRAL_PAD_STATE,
-      signature: "",
-      generation: 0
-    }));
+    // What the host asked for on each port; a request made before the worker
+    // is loaded is published once it is.
+    this.padPorts = new PadPortRequests();
     this.workerCausalTelemetry = null;
     this.causalTelemetry = null;
     this.trafficStats = {
@@ -478,9 +460,7 @@ export class UpstreamWorkerAdapter {
 
   // Ports the host set before the worker was loaded.
   publishRequestedPadStates() {
-    for (let port = 0; port < INPUT_PORT_COUNT; port += 1) {
-      if (this.padPorts[port].signature) this.publishPadState(port);
-    }
+    for (const port of this.padPorts.requestedPorts()) this.publishPadState(port);
   }
 
   async mountGame(file) {
@@ -546,53 +526,26 @@ export class UpstreamWorkerAdapter {
   }
 
   // port 0-3. A state plugs the port in unless connected is false; an
-  // unplugged port reads as neutral.
+  // unplugged port reads as neutral. Throws on an invalid state
+  // (normalizePadState).
   setPadState(port, state, { connected = true } = {}) {
-    const slot = Number.isInteger(port) ? this.padPorts[port] : null;
-    if (!slot || (!state && connected)) {
-      return;
-    }
-    // Missing fields read as neutral (a stick left out stays centred).
-    const source = connected ? { ...NEUTRAL_PAD_STATE, ...state } : NEUTRAL_PAD_STATE;
-    const next = {
-      mask: source.mask >>> 0,
-      stickX: source.stickX | 0,
-      stickY: source.stickY | 0,
-      cStickX: source.cStickX | 0,
-      cStickY: source.cStickY | 0,
-      triggerLeft: source.triggerLeft | 0,
-      triggerRight: source.triggerRight | 0,
-      analogA: source.analogA | 0,
-      analogB: source.analogB | 0
-    };
-    const signature = `${connected ? 1 : 0}:${next.mask}:${next.stickX}:${next.stickY}:${next.cStickX}:${next.cStickY}:${next.triggerLeft}:${next.triggerRight}:${next.analogA}:${next.analogB}`;
-    if (signature === slot.signature) {
-      return;
-    }
-    slot.signature = signature;
-    slot.connected = Boolean(connected);
-    slot.state = next;
-    if (this.loaded) {
+    if (connected && !state) return;
+    if (this.padPorts.request(port, state, connected) && this.loaded) {
       this.publishPadState(port);
     }
   }
 
   connectPad(port, connected) {
-    const slot = Number.isInteger(port) ? this.padPorts[port] : null;
-    if (!slot || (slot.connected === Boolean(connected) && slot.signature)) {
-      return;
+    if (this.padPorts.connect(port, Boolean(connected)) && this.loaded) {
+      this.publishPadState(port);
     }
-    this.setPadState(port, connected ? slot.state : null, { connected: Boolean(connected) });
   }
 
   publishPadState(port) {
-    const slot = this.padPorts[port];
-    const { connected, state } = slot;
+    const { connected, state } = this.padPorts.ports[port];
     const inputSentAtEpochMs = Date.now();
     // Generations are per port; input telemetry follows port 0 only.
-    let inputGeneration = (slot.generation + 1) >>> 0;
-    if (inputGeneration === 0) inputGeneration = 1;
-    slot.generation = inputGeneration;
+    const inputGeneration = this.padPorts.nextGeneration(port);
     if (port === 0) {
       this.inputTelemetry.mainStateChangeCount += 1;
       this.inputTelemetry.mainGeneration = inputGeneration;

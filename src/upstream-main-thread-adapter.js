@@ -1,5 +1,6 @@
 import { widenU32Counter } from "./u32-counter.js";
 import { parseDolHeader } from "./dol.js";
+import { PadPortRequests } from "./input-transport.js";
 import {
   DEFAULT_UPSTREAM_CORE_SHA256,
   DEFAULT_UPSTREAM_CORE_URL,
@@ -51,6 +52,8 @@ export class UpstreamMainThreadAdapter {
     this.xfbFastPaths = (Number(xfbFastPaths) || 0) & 3;
     this.module = null;
     this.api = null;
+    // Requests made before the core is loaded are applied once it is.
+    this.padPorts = new PadPortRequests();
     this.loaded = false;
     this.mounted = false;
     this.width = 640;
@@ -120,6 +123,7 @@ export class UpstreamMainThreadAdapter {
     });
 
     this.api = this.bindApi(this.module);
+    for (const port of this.padPorts.requestedPorts()) this.applyPadState(port);
     this.api.setVideoBackend?.(this.videoBackend);
     this.api.setCpuThread?.(Boolean(this.cpuThread));
     this.api.setCpuCore?.(this.cpuCore);
@@ -190,6 +194,30 @@ export class UpstreamMainThreadAdapter {
                 null,
                 ["number", "number", "number", "number", "number", "number", "number", "number", "number", "number"],
                 [
+                  state.mask >>> 0,
+                  state.stickX | 0,
+                  state.stickY | 0,
+                  state.cStickX | 0,
+                  state.cStickY | 0,
+                  state.triggerLeft | 0,
+                  state.triggerRight | 0,
+                  state.analogA | 0,
+                  state.analogB | 0,
+                  state.inputGeneration >>> 0
+                ]
+              )
+          : null,
+      // Ports 0-3 with hot-plug; absent from cores built before multi-port.
+      setPadState:
+        typeof module._SetPadState === "function"
+          ? (port, state) =>
+              ccall(
+                "SetPadState",
+                "number",
+                ["number", "number", "number", "number", "number", "number", "number", "number", "number", "number", "number", "number"],
+                [
+                  port | 0,
+                  state.connected === false ? 0 : 1,
                   state.mask >>> 0,
                   state.stickX | 0,
                   state.stickY | 0,
@@ -441,7 +469,28 @@ export class UpstreamMainThreadAdapter {
   }
 
   setInputState(state) {
-    this.api?.setInputState?.(state);
+    this.setPadState(0, state);
+  }
+
+  // Same contract as UpstreamWorkerAdapter.setPadState, applied directly.
+  setPadState(port, state, { connected = true } = {}) {
+    if (connected && !state) return;
+    if (this.padPorts.request(port, state, connected) && this.api) this.applyPadState(port);
+  }
+
+  connectPad(port, connected) {
+    if (this.padPorts.connect(port, Boolean(connected)) && this.api) this.applyPadState(port);
+  }
+
+  applyPadState(port) {
+    const { connected, state } = this.padPorts.ports[port];
+    const padState = { ...state, connected, inputGeneration: this.padPorts.nextGeneration(port) };
+    if (this.api.setPadState) {
+      this.api.setPadState(port, padState);
+    } else if (port === 0 && connected) {
+      // A core without SetPadState drives port 1 only.
+      this.api.setInputState?.(padState);
+    }
   }
 
   readFrameRgba() {

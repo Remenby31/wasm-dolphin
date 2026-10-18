@@ -4,11 +4,13 @@ import test from "node:test";
 
 import {
   BUTTONS,
+  CORE_DEFAULT_PLUGGED,
   C_STICK_GATE_RADIUS,
   DEFAULT_PAD_STATE,
   MAIN_STICK_GATE_RADIUS,
   assignGamepadPorts,
   composePortInputs,
+  portUpdates,
   stickToPadBytes,
   buttonMaskFromPressed,
   formatControlLabel,
@@ -244,4 +246,20 @@ test("each port carries its own pad; the keyboard joins P1; empty ports are unpl
   assert.deepEqual(keyboardOnly.map((input) => input.connected), [true, false, false, false]);
   const moved = composePortInputs({ ports: [null, null, null, null], gamepadInputs: new Map(), keyboardPort: 2 });
   assert.deepEqual(moved.map((input) => input.connected), [false, false, true, false]);
+});
+
+test("at start the page unplugs P1 when the keyboard is elsewhere and no pad is there", () => {
+  const none = composePortInputs({ ports: [null, null, null, null], gamepadInputs: new Map(), keyboardPort: null });
+  assert.deepEqual(portUpdates(CORE_DEFAULT_PLUGGED, none), [{ port: 0, action: "unplug" }]);
+  const second = composePortInputs({ ports: [null, null, null, null], gamepadInputs: new Map(), keyboardPort: 1 });
+  assert.deepEqual(portUpdates(CORE_DEFAULT_PLUGGED, second).map(({ port, action }) => [port, action]), [[0, "unplug"], [1, "set"]]);
+  // Default: P1 keyboard, nothing to unplug.
+  const p1 = composePortInputs({ ports: [null, null, null, null], gamepadInputs: new Map() });
+  assert.deepEqual(portUpdates(CORE_DEFAULT_PLUGGED, p1).map(({ port, action }) => [port, action]), [[0, "set"]]);
+});
+
+test("the page syncs its ports with the core before the first input", async () => {
+  const source = await readFile(new URL("../src/app.js", import.meta.url), "utf8");
+  assert.match(source, /const pluggedPorts = \[\.\.\.CORE_DEFAULT_PLUGGED\];/);
+  assert.match(source, /wireGamepadPolling\(\);\n[^\n]*\nsyncPorts\(\);/);
 });

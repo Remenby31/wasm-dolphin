@@ -5,12 +5,14 @@ import { startMainThreadProfiler } from "./main-profiler.js";
 import { createCausalTelemetry, deepMerge } from "./causal-telemetry.js";
 import {
   CONTROL_LABELS,
+  CORE_DEFAULT_PLUGGED,
   PAD_PORT_COUNT,
   assignGamepadPorts,
   composePortInputs,
   formatControlLabel,
   gamepadInputsEqual,
   mergePressedSets,
+  portUpdates,
   readGamepadInput,
   resolveKeyboardButton,
   updatePressedSet
@@ -133,7 +135,7 @@ let touchPressed = new Set();
 // read from each assigned pad, and which ports this page has plugged in.
 let gamepadPorts = new Array(PAD_PORT_COUNT).fill(null);
 const lastGamepadInputs = new Map();
-const pluggedPorts = new Array(PAD_PORT_COUNT).fill(false);
+const pluggedPorts = [...CORE_DEFAULT_PLUGGED];
 // ?keyboardport=1-4 moves the keyboard (and touch) off P1; =none detaches it.
 const keyboardPort = readKeyboardPort(new URLSearchParams(window.location.search).get("keyboardport"));
 let combinedPressed = new Set();
@@ -257,6 +259,8 @@ wireTransport();
 wireKeyboard();
 wireTouchControls();
 wireGamepadPolling();
+// Match the core's ports to this page's devices before the first input.
+syncPorts();
 
 // §28cx main-thread profiler — activates only with ?mainprof=1. Diagnoses
 // what eats main-thread time (LoAF script attribution) and whether the audio
@@ -1119,21 +1123,7 @@ function wireGamepadPolling() {
 }
 
 function syncInput(source) {
-  const inputs = composePortInputs({
-    ports: gamepadPorts,
-    gamepadInputs: lastGamepadInputs,
-    keyboardPressed: mergePressedSets(keyboardPressed, touchPressed),
-    keyboardPort
-  });
-  for (let port = 0; port < PAD_PORT_COUNT; port += 1) {
-    const { connected, state } = inputs[port];
-    if (connected) {
-      host.setPad(port, state);
-    } else if (pluggedPorts[port]) {
-      host.connectPad(port, false);
-    }
-    pluggedPorts[port] = connected;
-  }
+  const inputs = syncPorts();
   // The control chips show P1.
   combinedPressed = inputs[0].pressed;
   elements.inputSource.textContent = source;
@@ -1141,6 +1131,23 @@ function syncInput(source) {
   for (const chip of elements.controlGrid.children) {
     chip.classList.toggle("active", combinedPressed.has(chip.dataset.control));
   }
+}
+
+function syncPorts() {
+  const inputs = composePortInputs({
+    ports: gamepadPorts,
+    gamepadInputs: lastGamepadInputs,
+    keyboardPressed: mergePressedSets(keyboardPressed, touchPressed),
+    keyboardPort
+  });
+  for (const { port, action, state } of portUpdates(pluggedPorts, inputs)) {
+    if (action === "set") host.setPad(port, state);
+    else host.connectPad(port, false);
+  }
+  inputs.forEach(({ connected }, port) => {
+    pluggedPorts[port] = connected;
+  });
+  return inputs;
 }
 
 function readKeyboardPort(value) {

@@ -400,3 +400,19 @@ export function composePortInputs({ ports, gamepadInputs, keyboardPressed = new 
     return { connected: true, state: inputStateFromPressed(pressed, gamepadInput?.state ?? null), pressed };
   });
 }
+
+// Ports the core plugs in at boot: P1 only.
+export const CORE_DEFAULT_PLUGGED = Object.freeze([true, false, false, false]);
+
+// What to tell the host so its ports match `inputs` (composePortInputs), given
+// which ports are plugged in now: setPad for each plugged port, unplug for a
+// port that goes away. Start from CORE_DEFAULT_PLUGGED so a page whose keyboard
+// is not on P1 unplugs P1 at once instead of leaving it to the game.
+export function portUpdates(plugged, inputs) {
+  const updates = [];
+  inputs.forEach(({ connected, state }, port) => {
+    if (connected) updates.push({ port, action: "set", state });
+    else if (plugged[port]) updates.push({ port, action: "unplug" });
+  });
+  return updates;
+}

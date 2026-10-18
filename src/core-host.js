@@ -642,7 +642,8 @@ export class EmulatorHost {
 
   // Public input API (docs/input.md). port is 0-3 (GameCube ports 1-4); state
   // uses the src/input.js layout (mask of BUTTONS, sticks and triggers as
-  // bytes, 0x80 = centre). setPad plugs the port in if needed.
+  // bytes, 0x80 = centre). setPad plugs the port in if needed, and throws a
+  // TypeError/RangeError on a field that is not a finite number.
   setPad(port, state) {
     if (!isPadPort(port) || !state) return false;
     if (port === 0) this.buttonMask = state.mask >>> 0;
