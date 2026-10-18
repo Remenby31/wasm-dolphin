@@ -68,6 +68,7 @@ export class UpstreamWorkerAdapter {
     videoBackend = "Software Renderer",
     cpuThread = false,
     cpuCore = "cached",
+    customRtc = null,
     ppcWasmJit = false,
     ppcWasmJitTier = "guarded",
     ppcWasmJitForce = false,
@@ -165,6 +166,7 @@ export class UpstreamWorkerAdapter {
     this.videoBackend = videoBackend;
     this.cpuThread = cpuThread;
     this.cpuCore = cpuCore;
+    this.customRtc = customRtc;
     this.ppcWasmJit = ppcWasmJit;
     this.ppcWasmJitTier = ppcWasmJitTier === "mixed" ? "mixed" : "guarded";
     this.ppcWasmJitForce = Boolean(ppcWasmJitForce);
@@ -369,6 +371,7 @@ export class UpstreamWorkerAdapter {
       videoBackend: this.videoBackend,
       cpuThread: this.cpuThread,
       cpuCore: this.cpuCore,
+      customRtc: this.customRtc,
       ppcWasmJit: this.ppcWasmJit,
       ppcWasmJitTier: this.ppcWasmJitTier,
       ppcWasmJitForce: this.ppcWasmJitForce,

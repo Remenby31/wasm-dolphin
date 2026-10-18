@@ -1,0 +1,95 @@
+#!/usr/bin/env node
+// Copyright 2026 wasm-dolphin contributors
+// SPDX-License-Identifier: MIT
+//
+// Does one emulated CPU thread repeat a boot exactly? Boots a disc N times in
+// cpu=single with the CoreTiming trace on (patch 0081), optionally with the
+// host's CPUs busy, and compares the runs: the hash of every CoreTiming event
+// (name, emulated time, lateness) and of emulated RAM at each VI output, and
+// the picture at --vi. Exit 1 on any difference, naming the first one and the
+// events around it.
+//
+//   node harness/probes/determinism.mjs --port N [--iso disc.iso] [--runs 3]
+//     [--vi 120] [--stress 8] [--query "..."] [--host-clock]
+//
+// The harness runs cpu=single on a fixed console clock (?rtc=, matrix.mjs);
+// --host-clock runs on the host's instead, as the app does for players, and is
+// expected to fail: the clock sets the time base at boot and formats the
+// memory cards, so RAM differs from the first frames.
+import { createHash } from "node:crypto";
+import { existsSync } from "node:fs";
+import path from "node:path";
+import { parseArgs } from "node:util";
+import { Worker } from "node:worker_threads";
+
+import { ensureServer, REPO_ROOT, workerRequest } from "../lib/browser.mjs";
+import { captureInSession, openSession } from "../lib/session.mjs";
+
+const { values } = parseArgs({
+  options: {
+    iso: { type: "string", default: path.join(REPO_ROOT, "harness", "homebrew", "out", "gxscene.iso") },
+    runs: { type: "string", default: "3" },
+    vi: { type: "string", default: "120" },
+    stress: { type: "string", default: "0" },
+    query: { type: "string", default: "core=upstream&video=software&presenter=webgpu&cpu=single&speed=1&oc=1&fastsw=1&wasmjit=0&metrics=1" },
+    "host-clock": { type: "boolean", default: false },
+    port: { type: "string", default: process.env.HARNESS_PORT },
+  },
+});
+if (!values.port) throw new Error("usage: determinism.mjs --port N [--iso disc.iso] [--runs 3] [--vi 120] [--stress 8] [--host-clock]");
+const iso = path.resolve(values.iso);
+if (!existsSync(iso)) throw new Error(`disc image not found: ${iso}`);
+if (new URLSearchParams(values.query).get("cpu") !== "single") throw new Error("determinism is only defined for cpu=single");
+const query = values["host-clock"] ? `${values.query}&rtc=host` : values.query;
+
+// Busy host CPUs, so host timing has every chance to leak in.
+const stress = Array.from({ length: Number(values.stress) }, () => new Worker("let x = 0; for (;;) x = (x * 1103515245 + 12345) | 0;", { eval: true }));
+const server = await ensureServer({ port: Number(values.port) });
+const runs = [];
+try {
+  for (let run = 1; run <= Number(values.runs); run += 1) {
+    const session = await openSession({ base: server.base, server, query, iso, harness: { detTrace: true } });
+    try {
+      const capture = await captureInSession(session, { index: Number(values.vi), timeoutMs: 180000 });
+      if (capture.error) throw new Error(`capture: ${capture.error}`);
+      const trace = await workerRequest(session.page, "validationReadDetTrace", { fromLog: 0, maxLog: 1 << 18 }, 120000);
+      if (!trace?.supported) throw new Error(`no determinism trace: ${trace?.why ?? trace?.error}`);
+      if (trace.startVi !== 0) throw new Error(`the trace started at VI ${trace.startVi}, after the boot began`);
+      runs.push({ run, url: session.url, picture: createHash("sha256").update(capture.data).digest("hex").slice(0, 12), ...trace });
+      console.log(`[determinism] run ${run}: picture ${runs.at(-1).picture}, ${trace.checkpoints.length} checkpoints`);
+    } finally {
+      await session.close();
+    }
+  }
+} finally {
+  await server.stop();
+  await Promise.all(stress.map((w) => w.terminate()));
+}
+
+// Compare every run with the first, up to the VI output both reached.
+const ref = runs[0];
+let differs = false;
+for (const r of runs.slice(1)) {
+  const n = Math.min(r.checkpoints.length, ref.checkpoints.length, Number(values.vi));
+  const at = (k) => r.checkpoints.slice(0, n).findIndex((c, i) => c[k] !== ref.checkpoints[i][k] && (k !== 1 || c[1] !== "0"));
+  const events = at(0), ram = at(1);
+  const picture = r.picture !== ref.picture;
+  if (events < 0 && ram < 0 && !picture) {
+    console.log(`[determinism] run ${r.run} = run 1`);
+    continue;
+  }
+  differs = true;
+  console.log(`[determinism] run ${r.run} differs from run 1: events from VI ${events < 0 ? "-" : events + 1}, RAM from VI ${ram < 0 ? "-" : ram + 1}, picture ${picture ? "different" : "same"}`);
+  if (events >= 0) {
+    const from = events > 0 ? ref.checkpoints[events - 1][4] : 0;
+    let k = from;
+    while (k < Math.min(r.log.length, ref.log.length) && JSON.stringify(r.log[k]) === JSON.stringify(ref.log[k])) k += 1;
+    console.log(`  first differing event #${k} [time, late, name, kind]: run 1 ${JSON.stringify(ref.log[k])} | run ${r.run} ${JSON.stringify(r.log[k])}`);
+  }
+  if (ram >= 0 && r.ramChunks?.length) {
+    const chunks = r.ramChunks.map((h, i) => (h !== ref.ramChunks[i] ? `0x${(0x80000000 + i * 65536).toString(16)}` : null)).filter(Boolean);
+    console.log(`  RAM at VI 30 differs in 64 KiB chunks: ${chunks.join(" ") || "none (later)"}`);
+  }
+}
+console.log(`[determinism] ${differs ? "NOT deterministic" : `${runs.length} identical runs`} (${values["host-clock"] ? "host clock" : "fixed clock"}, stress ${values.stress}) on ${path.basename(iso)}`);
+process.exitCode = differs ? 1 : 0;

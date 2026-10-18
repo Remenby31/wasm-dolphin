@@ -175,6 +175,18 @@ export function captureSourceOk(query, source) {
 // Across renderers, the same VI output is only the same emulated frame with
 // a single CPU thread: in dual core, a slower GPU thread makes each frame
 // consume more emulated time, so poses differ at equal VI index.
+// One emulated CPU thread repeats a run exactly only on a fixed clock: the
+// console's real-time clock otherwise comes from the host, sets the time base
+// at boot and formats the memory cards, so two boots of one disc part from the
+// first frames (patch 0081, ?rtc=). 2001-09-09: any fixed value works.
+export const HARNESS_RTC = 1000000000;
+export function withDeterministicClock(query) {
+  const p = new URLSearchParams(query);
+  if (p.get("cpu") !== "single" || p.has("rtc")) return query;
+  p.set("rtc", String(HARNESS_RTC));
+  return p.toString();
+}
+
 export function forCrossRenderer(query) {
   const p = new URLSearchParams(query);
   p.set("cpu", "single");

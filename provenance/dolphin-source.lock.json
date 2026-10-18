@@ -25,7 +25,7 @@
       "commit": "01e0577914a75a2569c846778c2f93aa8e6feddd"
     }
   },
-  "patchSeriesSha256": "e6cb56048ffc5d304ae7f16a25969d45f746c2559a8c526f65b28531607cb050",
+  "patchSeriesSha256": "666368017e71e72ac79bb349d7432a3853e5efa8aee4c3e472d47fd1fb6196c6",
   "patches": [
     {
       "order": 1,
@@ -589,6 +589,14 @@
     },
     {
       "order": 71,
+      "cwd": ".",
+      "hashMode": "lf-normalized",
+      "path": "patches/dolphin-wasm/snapshot/0081-deterministic-clock-and-coretiming-trace.patch",
+      "size": 7232,
+      "sha256": "78a806e7c296d272eec469e26a822f9e4c03b85ed3db7c81432d46ae742c6423"
+    },
+    {
+      "order": 72,
       "cwd": "Externals/SFML/SFML",
       "hashMode": "lf-normalized",
       "path": "patches/dolphin-wasm/submodules/0001-sfml-emscripten-config.patch",
@@ -596,7 +604,7 @@
       "sha256": "f82197a21fe982ad83f6ee7bbf5a03839b1cebd4d64da3eab11263842bf61d89"
     },
     {
-      "order": 72,
+      "order": 73,
       "cwd": "Externals/xxhash/xxHash",
       "hashMode": "lf-normalized",
       "path": "patches/dolphin-wasm/submodules/0002-xxhash-wasm-simd-scalar.patch",
