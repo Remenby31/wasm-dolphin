@@ -61,8 +61,16 @@ test("adapter accounts for legacy acknowledgements and preserved one-way errors"
     oneWayRequestsPosted: 0,
     requestMessagesPosted: 0,
     unmatchedSuccessRepliesReceived: 1,
-    unmatchedErrorRepliesReceived: 1
+    unmatchedErrorRepliesReceived: 1,
+    unknownMessagesReceived: 0
   });
+});
+
+test("adapter counts worker messages nobody handles instead of dropping them silently", () => {
+  const adapter = new UpstreamWorkerAdapter();
+  adapter.handleMessage({ type: "somethingNew", payload: {} });
+  adapter.handleMessage({ id: 99, ok: true });
+  assert.equal(adapter.transportTelemetry().unknownMessagesReceived, 2);
 });
 
 test("adapter forwards WebGPU runtime options in the load payload", async (t) => {
