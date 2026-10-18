@@ -1,19 +1,19 @@
 {
   "schemaVersion": 1,
   "abiVersion": 1,
-  "coreId": "sha256:154390fc95e45b9a0ee645ed3a5ac9456a61c56720e582f4049525b39b5d0bde",
+  "coreId": "sha256:d77c33630880aa8b433d0a28bbc180d4cb305377d994391f08330661213a0587",
   "upstreamCommit": "e22551eae1c84a7e4d0b6a5c519ef4ed4ef69df1",
   "artifacts": [
     {
       "path": "cores/dolphin/dolphin-core-upstream.js",
       "hashMode": "lf-normalized",
-      "size": 271117,
-      "sha256": "977f14dc52eb16307f0d8c24241a968246bc238014457e73dbde803e64cb788e"
+      "size": 272025,
+      "sha256": "b3efeddcb87e8f528f9a143505156e36031dd37a144431cf58524a93142457fb"
     },
     {
       "path": "cores/dolphin/dolphin-core-upstream.wasm",
-      "size": 12997669,
-      "sha256": "154390fc95e45b9a0ee645ed3a5ac9456a61c56720e582f4049525b39b5d0bde"
+      "size": 12997997,
+      "sha256": "d77c33630880aa8b433d0a28bbc180d4cb305377d994391f08330661213a0587"
     }
   ],
   "contractSources": [
@@ -134,8 +134,8 @@
     {
       "path": "src/upstream-discio-worker.js",
       "hashMode": "lf-normalized",
-      "size": 621263,
-      "sha256": "5499ac06c1bc314a8de8fa92e26b238a232c81a87c8ec36b7febb33f06aef2ed"
+      "size": 621639,
+      "sha256": "75ec207f0bbe0adb6d607638e60a74fba8d119d3f7019dec3914c70b8250012a"
     },
     {
       "path": "src/wgpu-renderer-worker-probe.js",
@@ -165,7 +165,7 @@
       "path": "src/upstream-worker-protocol.js",
       "hashMode": "lf-normalized",
       "size": 5096,
-      "sha256": "3a60c783d0c835021af7e01a29aad2e4a3ab96587258eea379facf3d7ed22ffa"
+      "sha256": "cc639d051aa450029abd2aaead019354a0f27a0afdcc8eda6c6e58d2ab747746"
     },
     {
       "path": "src/wgpu-pass-state-cache.js",
@@ -375,12 +375,16 @@
     "_DolphinWeb_HarnessViRingHead",
     "_DolphinWeb_HarnessViSinceBoot",
     "_DolphinWeb_HarnessViSinceLoad",
+    "_DolphinWeb_JitArmedStepForTest",
     "_DolphinWeb_JitCompileBytesForTest",
     "_DolphinWeb_JitEngineRejectCount",
+    "_DolphinWeb_JitFailNextInstance",
     "_DolphinWeb_JitFailNextTableGrow",
+    "_DolphinWeb_JitOnStateLoaded",
     "_DolphinWeb_JitOracleBuffer",
     "_DolphinWeb_JitOracleMessage",
     "_DolphinWeb_JitOracleRun",
+    "_DolphinWeb_JitTableFull",
     "_DolphinWeb_JitTransientRejectCount",
     "_DolphinWeb_RecordCacheHit",
     "_DolphinWeb_RecordCacheMiss",
