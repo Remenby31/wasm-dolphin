@@ -59,6 +59,10 @@
           globalThis._dolphinPendingJitCache;
         if (target && target.set) {
           target.set(data.hash, data.module);
+          // Off-thread compiles (jitoffthread=1): the CPU thread retries its
+          // deferred blocks only when this epoch moved.
+          globalThis._dolphinJitCacheEpoch = ((globalThis._dolphinJitCacheEpoch | 0) + 1) | 0;
+          globalThis._dolphinJitInflight?.delete(data.hash);
           globalThis._dolphinJitCacheAddCount =
             (globalThis._dolphinJitCacheAddCount || 0) + 1;
           // Log every 1000th add so we know lazy fill is making progress
@@ -73,6 +77,13 @@
             );
           }
         }
+      } else if (data.type === "dolphin-jit-compile-failed" && data.key) {
+        // The compiler worker could not build a module this pthread asked
+        // for: "compile"/"link" (the engine rejects these bytes: blacklist)
+        // or "oom" (transient). Read and cleared by the compile EM_JS.
+        (globalThis._dolphinJitCompileFailures ??= new Map()).set(data.key, data.reason);
+        globalThis._dolphinJitInflight?.delete(data.key);
+        globalThis._dolphinJitCacheEpoch = ((globalThis._dolphinJitCacheEpoch | 0) + 1) | 0;
       } else if (data.type === "dolphin-jit-cache-barrier") {
         // Worker messages are processed in FIFO order. Acknowledging this
         // marker proves that the initial cache and every preceding lazy add

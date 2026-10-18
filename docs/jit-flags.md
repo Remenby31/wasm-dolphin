@@ -22,6 +22,7 @@ correctness is established.
 | `fastmemhoist=1` | Hoist per-block fastmem bounds checks. Default-off because a bad proof could permit an out-of-bounds access. |
 | `disable=...` | Disable named JIT helper/optimization categories, or pass a decimal/hex mask, for bisection. |
 | `nojitcache=1` | Skip the browser-side compiled JIT cache/prewarm path for a cold-cache comparison. |
+| `jitoffthread=1` | The CPU thread never compiles a JIT module: on a cache miss it posts `dolphin-jit-compile-request {key, bytes, kind}`, interprets the block, and retries it once a module (`dolphin-jit-cache-add`) or a failure (`dolphin-jit-compile-failed {key, reason}`, compile/link blacklists, oom is transient) has reached its pthread. Needs the JIT cache (ignored with `nojitcache=1`). |
 | `metrics=1` | Enable on-screen and validation metrics used to judge behavior and performance. |
 
 ## Defaults and safety
@@ -159,3 +160,14 @@ counts value divergences (`divergent`) and FPSCR-status-only ones
 fixed-seed slice (`tests/jit-oracle.test.mjs`). The browser-side check is the
 harness's `cpufuzz` discs, which compare interpreter and JIT runs at the same
 VI output.
+
+## Executed-block export
+
+The first-launch profile (docs/aot-plan.md) reads the blocks the CPU thread
+has run without a sampler: `DolphinWeb_JitDumpBlocksRequest()` returns a
+sequence number, the CPU thread serves it at its next slice boundary, and
+once `DolphinWeb_JitDumpBlocksDone()` reaches that number,
+`DolphinWeb_JitDumpBlocksCount()` triplets `{effective address, PPC byte
+length, flags}` sit at `DolphinWeb_JitDumpBlocksBuffer()` (flags: bit 0
+executed, bit 1 reserved, bit 2 real mode). The block cache is cleared on
+icbi floods and state loads, so callers dump periodically and merge.

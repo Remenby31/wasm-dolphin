@@ -1157,6 +1157,7 @@ async function handleMessage(type, payload) {
         cachedInterpreterDisableMask: payload.cachedInterpreterDisableMask,
         wgpuScissoredClearRect: payload.wgpuScissoredClearRect,
         noJitCache: payload.noJitCache,
+        jitOffThread: payload.jitOffThread,
         reportedCoreSelection: payload.coreSelection,
         wgpuReplayDiagnostics: payload.wgpuReplayDiagnostics,
         wgpuDeepReplayDiagnostics: payload.wgpuDeepReplayDiagnostics,
@@ -1732,6 +1733,7 @@ async function loadCore({
   cachedInterpreterDisableMask = 0,
   wgpuScissoredClearRect = true,
   noJitCache = false,
+  jitOffThread = false,
   reportedCoreSelection = null,
   wgpuReplayDiagnostics = false,
   wgpuDeepReplayDiagnostics: requestedWgpuDeepReplayDiagnostics = false,
@@ -2365,6 +2367,9 @@ async function loadCore({
   } else {
     api.setPpcWasmJitEnabled?.(0);
   }
+  // Off-thread compiles need the pthread cache map the persistent cache
+  // installs; without it the core compiles in place as before.
+  api.setPpcWasmJitOffThread?.(jitOffThread && !noJitCache ? 1 : 0);
   api.setPpcProfileEnabled?.(ppcProfile ? 1 : 0);
   api.setWebGpuUploadArenaMiB?.(wgpuUploadArenaMiB, collectMetrics ? 1 : 0);
   api.setWebGpuProducerProfileEnabled?.(wgpuProducerProfileRequested ? 1 : 0);
@@ -2487,6 +2492,7 @@ function bindApi(module) {
         ? (core) => ccall("SetCpuCore", "number", ["string"], [core])
         : null,
     setPpcWasmJitWarmup: optionalCwrap("SetPpcWasmJitWarmup", null, ["number", "number"]),
+    setPpcWasmJitOffThread: optionalCwrap("SetPpcWasmJitOffThread", null, ["number"]),
     getPpcWasmJitEngagedFrame: optionalCwrap("GetPpcWasmJitEngagedFrame", "number", []),
     getPpcWasmJitArmStartFrame: optionalCwrap("GetPpcWasmJitArmStartFrame", "number", []),
     setPpcWasmJitEnabled:

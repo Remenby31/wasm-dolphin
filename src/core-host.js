@@ -115,6 +115,10 @@ export class EmulatorHost {
     );
     this.noJitCache =
       new URLSearchParams(window.location.search).get("nojitcache") === "1";
+    // ?jitoffthread=1: the CPU thread never compiles a JIT module itself; it
+    // posts the bytes to the compiler worker and interprets until it arrives.
+    this.jitOffThread =
+      new URLSearchParams(window.location.search).get("jitoffthread") === "1";
     this.collectMetrics = requestedCollectMetrics();
     this.legacyOneWayAck = requestedLegacyOneWayAck(window.location.search);
     this.wgpuReplayDiagnostics = requestedWgpuReplayDiagnostics(window.location.search);
@@ -397,6 +401,7 @@ export class EmulatorHost {
             cachedInterpreterDisableMask: this.cachedInterpreterDisableMask,
             wgpuScissoredClearRect: this.wgpuScissoredClearRect,
             noJitCache: this.noJitCache,
+            jitOffThread: this.jitOffThread,
             collectMetrics: this.collectMetrics,
             legacyOneWayAck: this.legacyOneWayAck,
             wgpuReplayDiagnostics: this.wgpuReplayDiagnostics,
