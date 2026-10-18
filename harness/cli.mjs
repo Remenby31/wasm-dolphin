@@ -7,12 +7,12 @@ import { existsSync, mkdirSync, readdirSync, readFileSync, rmSync, statSync, wri
 import os from "node:os";
 import path from "node:path";
 import { parseArgs } from "node:util";
-import { ensureServer, pageCall, readFrameInfo, REPO_ROOT } from "./lib/browser.mjs";
+import { ensureServer, pageCall, readCoreProgress, readFrameInfo, REPO_ROOT } from "./lib/browser.mjs";
 import { analyzeDifferential, INTERP_QUERY, JIT_QUERY } from "./lib/fuzz.mjs";
 import { releaseAll, setPad } from "./lib/gamepad-mock.mjs";
 import { compareFrames, diffImage, identical } from "./lib/image-diff.mjs";
 import { decodePadRow, decodeRows, hex } from "./lib/markers.mjs";
-import { captureSupported, expandMatrix, matrixMarkdown, PRESETS, resolveQuery, runFlags, summarizeMatrix, summarizeRun } from "./lib/matrix.mjs";
+import { captureSourceOk, captureSupported, expandMatrix, forCrossRenderer, matrixMarkdown, PRESETS, resolveQuery, runFlags, summarizeMatrix, summarizeRun } from "./lib/matrix.mjs";
 import { decodePng } from "./lib/png.mjs";
 import { captureInSession, grabFrame, openSession, sample, savePng, waitSeconds } from "./lib/session.mjs";
 import { runSteps, validateSteps } from "./lib/steps.mjs";
@@ -193,6 +193,16 @@ async function cmdMeasure(argv) {
 }
 
 // ---------------------------------------------------------------- diff
+async function waitRunning(page, timeoutMs = 60000) {
+  const end = Date.now() + timeoutMs;
+  while (Date.now() < end) {
+    const p = await readCoreProgress(page);
+    if ((p?.frame ?? 0) > 0) return; // frames only advance once Running
+    await page.waitForTimeout(100);
+  }
+  throw new Error("core never reached Running");
+}
+
 async function captureScene(server, values, { iso, query, index, state, steps, label, dir }) {
   const supported = captureSupported(query);
   if (!supported.ok) throw new Error(`${label}: ${supported.why}`);
@@ -201,11 +211,14 @@ async function captureScene(server, values, { iso, query, index, state, steps, l
   try {
     if (steps) await runSteps(session.page, steps);
     if (state) {
+      // A load sent before the core is Running is refused ("Starting").
+      await waitRunning(session.page);
       const loaded = await pageCall(session.page, "__loadStateFile", new URL("__harness_state.sav", session.url).href, 120000);
       if (!loaded?.loaded) throw new Error(`savestate load failed: ${JSON.stringify(loaded)}`);
     }
     const capture = await captureInSession(session, { index, fromLoad: Boolean(state) });
     if (capture.error) throw new Error(`${label}: ${capture.error}`);
+    if (!captureSourceOk(query, capture.source)) throw new Error(`${label}: capture source ${capture.source} is not what this renderer shows`);
     savePng(capture, path.join(dir, `${label}.png`));
     return { label, url: session.url, capture, fatal: session.watch.fatal() };
   } finally {
@@ -235,9 +248,16 @@ async function cmdDiff(argv) {
   } else {
     if (!values.iso) throw new Error("usage: harness/run diff --iso disc.iso [--ref q] [--cand q] [--frame N] [--state file.sav] | --ref-png a --cand-png b");
     const opts = { iso: values.iso, index: Number(values.frame), state: values.state, steps: loadSteps(values.steps), dir };
+    let refQuery = resolveQuery(configFromArg(values.ref)), candQuery = resolveQuery(configFromArg(values.cand));
+    const video = (q) => new URLSearchParams(q).get("video") ?? "software";
+    if (video(refQuery) !== video(candQuery)) {
+      refQuery = forCrossRenderer(refQuery);
+      candQuery = forCrossRenderer(candQuery);
+      console.log("[diff] different renderers: both run with cpu=single so VI output N is the same emulated frame");
+    }
     const shots = await withServer(values, async (server) => [
-      await captureScene(server, values, { ...opts, query: resolveQuery(configFromArg(values.ref)), label: "ref" }),
-      await captureScene(server, values, { ...opts, query: resolveQuery(configFromArg(values.cand)), label: "cand" })
+      await captureScene(server, values, { ...opts, query: refQuery, label: "ref" }),
+      await captureScene(server, values, { ...opts, query: candQuery, label: "cand" })
     ]);
     [ref, cand] = shots.map((s) => s.capture);
     meta = Object.fromEntries(shots.map((s) => [s.label, { url: s.url, viOutput: s.capture.index, fromLoad: s.capture.fromLoad, ticks: s.capture.ticks, fatal: s.fatal }]));

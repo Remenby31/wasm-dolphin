@@ -72,10 +72,9 @@ test("round 3: black captures, missing captures and different frames all fail", 
   assert.equal(analyzeDifferential({ interp: run(ROWS), jit: later }).findings[0].kind, "capture-frame-mismatch");
 });
 
-test("round 3: exact capture is refused for hardware renderers instead of comparing something else", () => {
+test("round 3 (updated for #7): OGL has no exact capture; wgpu is checked by source", () => {
   assert.equal(captureSupported("video=software&wasmjit=1").ok, true);
-  assert.equal(captureSupported("video=wgpu").ok, false);
-  assert.match(captureSupported("video=wgpu").why, /present-side hook/);
+  assert.equal(captureSupported("video=ogl").ok, false);
 });
 
 // Review round 4: ticks include the VI event's lateness, so two captures of
@@ -84,4 +83,15 @@ test("round 4: same VI output with different ticks is the same frame", () => {
   const late = run(ROWS);
   late.capture.ticks += 37;
   assert.deepEqual(analyzeDifferential({ interp: run(ROWS), jit: late }), { ok: true, findings: [] });
+});
+
+// wgpu exact capture (PR #7): accepted only with its own source; across
+// renderers the comparison runs single-threaded so VI N is the same frame.
+test("capture sources and cross-renderer queries", async () => {
+  const { captureSourceOk, forCrossRenderer } = await import("../harness/lib/matrix.mjs");
+  assert.equal(captureSourceOk("video=wgpu", "wgpu-present"), true);
+  assert.equal(captureSourceOk("video=wgpu", "guest-xfb"), false);
+  assert.equal(captureSourceOk("video=software", "guest-xfb"), true);
+  assert.equal(captureSupported("video=ogl").ok, false);
+  assert.equal(new URLSearchParams(forCrossRenderer("video=wgpu&cpu=dual")).get("cpu"), "single");
 });

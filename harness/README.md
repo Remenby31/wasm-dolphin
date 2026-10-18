@@ -50,13 +50,16 @@ per VI output); `bootIso` turns them on with `validationEnableHarness` as soon
 as the worker exists, before the core loads. OGL does not go through the VI
 hook: its timeline and captures are reported as unjudged, not as frozen.
 
-Limits: the capture is the guest XFB, which is what the software renderer
-outputs. Hardware renderers (`video=wgpu`, `ogl`) keep their picture on the
-GPU, so their exact capture needs a present-side hook (present tagged with the
-VI output, read back in the worker); until then the harness refuses to judge
-them rather than compare something else. The hooks need the core rebuilt
-(`docs/repro-build.md`); a core without them makes every capture fail with
-"core has no harness capture hook".
+Sources: the software renderer is captured from the guest XFB
+(`source: "guest-xfb"`). `video=wgpu` is captured by the worker from the
+present tagged with that VI output (`source: "wgpu-present"`, PR #7); a
+hardware renderer answering with the guest XFB is rejected, since that is
+not what it shows. OGL has no exact capture.
+
+Across renderers, VI output N is the same emulated frame only with one CPU
+thread: in dual core a slower GPU thread makes each frame consume more
+emulated time. `diff` between two renderers therefore runs both sides with
+`cpu=single`.
 
 ## Worker API for exact frames (stable contract)
 
