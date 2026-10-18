@@ -28,8 +28,12 @@ and compares the result with the committed core. Per host platform `P`
 
 Other flags: `--no-sync` builds `vendor/dolphin` as it stands (while you edit
 it before regenerating a patch), `--allow-dirty` records a build from an
-uncommitted tree, `--jobs N`. Docker only: `--docker-platform linux/amd64`,
-`--bind-mounts` (no named volumes, used by CI), `--image-only`.
+uncommitted tree, `--jobs N`, `--ccache` (compile through the pinned ccache,
+see "Pull request CI"), `--reset-vendor` (discard every change under
+`vendor/dolphin` before syncing; needed once main's patch series has changed
+under an already patched tree, which `fetch:dolphin` otherwise refuses).
+Docker only: `--docker-platform linux/amd64`, `--bind-mounts` (no named
+volumes, used by CI), `--image-only`.
 
 Safety rails:
 
@@ -276,8 +280,8 @@ binary and can be merged in any order.
 
 | Where | What happens |
 | --- | --- |
-| Pull request CI | Builds the core from the branch's sources, installs it in the workspace, and runs `check`, `test` and `test:contract` on it. Publishes it as the artifact `core-<sha256>`, with the GPL source archive, and rebuilds it from that archive alone. |
-| Merge to main | The build job builds **main's tip as it is when the run starts** (so re-running an old run builds the current HEAD). Two jobs then publish it, see below. |
+| Pull request CI | If the pull request changes a core input, builds the core from the branch's sources (through ccache, see "Pull request CI" below), installs it in the workspace, runs `check`, `test` and `test:contract` on it, and publishes it as the artifact `core-<sha256>`. Otherwise runs the same tests on main's committed core. |
+| Merge to main | The build job builds **main's tip as it is when the run starts** (so re-running an old run builds the current HEAD), with no cache, checks it against a ccache build and an incremental rebuild, publishes the GPL source archive, and rebuilds the core from that archive alone. Two jobs then publish it, see below. |
 | Locally | `npm run build:core:repro -- --install` installs a core for testing. Do not commit it; `npm run core:restore -- --base origin/main` puts main's back. |
 
 Why commit the core on main instead of keeping only a signed build record and
@@ -372,6 +376,64 @@ From then on the "No core binaries in the pull request" step fails instead of
 warning. `gh variable delete CORE_ARTIFACTS_GUARD -R Remenby31/wasm-dolphin`
 turns it back to warnings. The local hook (`npm run hooks:install`) is
 optional and per clone.
+
+## Pull request CI
+
+A pull request is tested in the cheapest way that still tests what it changes;
+main keeps every check.
+
+| Pull request changes | CI path | Before | After |
+| --- | --- | ---: | ---: |
+| JavaScript, tests, docs only | `fast-tests`: no Docker, no core build | MEASURE_JS_BEFORE | MEASURE_JS_AFTER |
+| a shim `.cpp` | `build`, everything cached | MEASURE_CPP_BEFORE | MEASURE_CPP_AFTER |
+| a Dolphin patch | `build`, ccache warm, CMake tree rebuilt | MEASURE_PATCH_BEFORE | MEASURE_PATCH_AFTER |
+
+MEASURE_NOTES
+
+**Which path.** `tools/ci-changes.mjs` lists the paths that can change the
+core, its build or CI: `core/`, `patches/`, `cores/`, `.github/`, the locks
+under `provenance/` (not the ABI manifest, whose contract hashes follow
+`src/`), `tools/toolchain/`, `tools/naga-spirv-wgsl/` and the build tools
+themselves. A pull request touching none of them takes `fast-tests`, but only
+if `core:status` also says main's committed core is the build of the pull
+request's sources; otherwise (for instance right after a C++ merge, before CI
+has committed main's new core) it builds. So the fast path can never test
+against a core that does not match the sources.
+
+**What is cached, and why the bytes cannot change.**
+
+- ccache 4.14.1, pinned by SHA-256 in the toolchain lock and installed by
+  `bootstrap.sh`, wraps `em++`. Its entries are keyed on the pinned toolchain
+  (`CCACHE_COMPILERCHECK`), not on `em++`, a script that does not change when
+  the compiler behind it does. `CCACHE_BASEDIR` is deliberately not set: it
+  rewrites absolute paths in the compiler's arguments as relative ones,
+  `-ffile-prefix-map` then no longer matches them, and 284 `__FILE__` strings
+  and the core's hash changed (found on macOS: `57a375d2…` instead of
+  `aa9e3e89…`).
+- The CMake tree, keyed by build identity (checkout path, source lock,
+  toolchain lock), so a C++ pull request skips the CMake probes. Every source
+  is checked out fresh, so Ninja still recompiles everything, through ccache.
+  A Dolphin patch changes the source lock, hence the identity: that pull
+  request configures from scratch.
+- Emscripten's cache (system libraries) and Naga's Cargo target directory,
+  keyed by the toolchain and Naga's lock files.
+- Only runs on main write these caches; pull requests only read them.
+
+On main, a ccache build from a clean tree, a reference build with no cache of
+any kind (no ccache, clean CMake tree, fresh Emscripten cache and Naga
+target), and an incremental rebuild must all give the same bytes, or the run
+fails before anything is published. The published core is the reference
+build. Locally: two ccache builds of main's sources on macOS, one cold and one
+warm (1,306 of 1,306 hits), both gave `aa9e3e89…`, main's committed core,
+built without ccache.
+
+| macOS, from a clean tree, `--jobs 10` | configure | compile and link | total |
+| --- | ---: | ---: | ---: |
+| `--ccache`, cold | 240 s | 361 s | 633 s |
+| `--ccache`, warm (100 % hits) | 239 s | 90 s | 364 s |
+
+The remaining cost of a cached build is the CMake probes (skipped when the
+tree is restored) and the LTO link, which no cache helps.
 
 ## Toolchain record
 
