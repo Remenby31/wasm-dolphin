@@ -66,7 +66,7 @@ const server = await ensureServer({ port: Number(values.port) });
 const summary = [];
 try {
   for (let run = 1; run <= Number(values.runs); run += 1) {
-    const session = await openSession({ base: server.base, query, iso });
+    const session = await openSession({ base: server.base, server, query, iso });
     const { page } = session;
     let lastPresentT = null;
     let lastVi = null; // VI output since boot, from the core's own counter
@@ -128,7 +128,7 @@ try {
     // A crash is a crash, and a run whose timeline could not be read is
     // unjudged: neither may count as "not frozen".
     const verdict = fatal.length ? "crash" : freeze ? "frozen" : unjudged.length ? "unjudged" : "ok";
-    const record = { run, url: session.url, verdict, freeze, presents, viEntries, lastVi, unjudged: unjudged.slice(0, 20), fatal, states };
+    const record = { run, url: session.url, core: session.core, verdict, freeze, presents, viEntries, lastVi, unjudged: unjudged.slice(0, 20), fatal, states };
     writeFileSync(path.join(outDir, `run${run}.json`), JSON.stringify(record, null, 1) + "\n");
     summary.push({ run, verdict, presents, viEntries, lastVi });
     console.log(JSON.stringify(summary.at(-1)));
