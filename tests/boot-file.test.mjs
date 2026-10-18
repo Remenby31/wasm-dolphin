@@ -42,3 +42,10 @@ test("an ELF must be 32-bit big-endian PowerPC", () => {
   assert.throws(() => checkExecutable("elf", elf({ data: 1 }), 0x1000), /32-bit big-endian/);
   assert.throws(() => checkExecutable("elf", dol(), 0x1000), /bad magic/);
 });
+
+test("an executable gets Dolphin's file-name game ID", async () => {
+  const { executableGameId } = await import("../src/boot-file.js");
+  assert.equal(executableGameId("/workerfs/gxSprites.dol"), "ID-gxSprites");
+  assert.equal(executableGameId("demo.v2.elf"), "ID-demo.v2");
+  assert.equal(executableGameId("noext"), "ID-noext");
+});

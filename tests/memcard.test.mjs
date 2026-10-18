@@ -120,8 +120,8 @@ test("a save state is refused for another game or another state version", () => 
     savedAt: 1234.5
   });
   assert.equal(checkSaveState(stateBytes(), "GTST01").gameId, "GTST01");
-  // A .dol boots as game "00000000"; the header keeps six characters.
-  assert.equal(checkSaveState(stateBytes({ gameId: "000000" }), "00000000").gameId, "000000");
+  // A .dol boots as game "ID-<file name>"; the header keeps six characters.
+  assert.equal(checkSaveState(stateBytes({ gameId: "ID-gxS" }), "ID-gxSprites").gameId, "ID-gxS");
   assert.throws(() => checkSaveState(stateBytes(), "GOTH01"), /belongs to game GTST01, the running game is GOTH01/);
   assert.throws(() => checkSaveState(stateBytes({ version: 188 }), "GTST01"), /version 188 \(Dolphin web\) does not match/);
   assert.throws(() => checkSaveState(new Uint8Array(10), "GTST01"), /too short/);

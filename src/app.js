@@ -378,11 +378,11 @@ function wireTransport() {
     syncGameInfo(host.game);
   });
 
-  // Working save-state path (the slot Save/Load above are stubbed in
-  // the discio core): DL State captures a version-matched .sav via
-  // SaveStateFile and downloads it; UL State loads a .sav via
-  // LoadStateFile. Both go through the real State::SaveToFileSync /
-  // State::LoadAs path that §24 made functional.
+  // DL State captures a version-matched .sav via SaveStateFile and
+  // downloads it. The upload input takes a .sav (checked against the running
+  // game and the core's state version, then loaded) or a memory card file
+  // (.gci/.raw, saves of the running game copied onto card A; Dolphin reads
+  // the card at boot, so they show up after the next boot).
   elements.dlStateButton.addEventListener("click", async () => {
     const btn = elements.dlStateButton;
     const old = btn.textContent;
@@ -412,17 +412,17 @@ function wireTransport() {
     try {
       const bytes = new Uint8Array(await file.arrayBuffer());
       const a = host.adapter;
-      if (!a || typeof a.loadStateFile !== "function") {
-        setStatus("Upload state: adapter has no loadStateFile", "error");
+      if (!a?.importSaveState) {
+        setStatus("Upload: no Dolphin core loaded", "error");
         return;
       }
-      const r = await a.loadStateFile(bytes);
-      setStatus(
-        r && r.loaded
-          ? `Save state loaded (${r.afterState || "running"})`
-          : `Save state load failed (rc=${r?.rc ?? "?"}${
-              r?.error ? " " + r.error : ""})`,
-        r && r.loaded ? undefined : "error");
+      if (/\.(gci|raw)$/i.test(file.name)) {
+        const r = await a.importMemcard(bytes, { slot: "A" });
+        setStatus(`Memory card: ${r.imported.length} save(s) imported${r.restartRequired ? ", boot again to see them" : ""}`);
+        return;
+      }
+      const r = await a.importSaveState(bytes);
+      setStatus(`Save state loaded (${r.afterState || "running"})`);
     } catch (e) {
       setStatus(`Upload state failed: ${e?.message || e}`, "error");
     }

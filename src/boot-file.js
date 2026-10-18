@@ -49,3 +49,11 @@ export function checkExecutable(kind, head, size) {
   }
   throw new Error(`${kind} is not an executable`);
 }
+
+// SConfig::MakeGameID: the game ID Dolphin gives an executable, which names
+// its save states (header and "<id>.sNN" slots).
+export function executableGameId(fileName) {
+  const base = String(fileName).split("/").pop();
+  const dot = base.lastIndexOf(".");
+  return `ID-${dot < 0 ? base : base.slice(0, dot)}`;
+}

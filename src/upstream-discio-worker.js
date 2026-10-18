@@ -138,7 +138,7 @@ import {
   hashWgpuVisualSample
 } from "./wgpu-visual-cadence.js";
 import { createCoreLifecycle } from "./core-lifecycle.js";
-import { BOOT_FILE_HEAD_BYTES, bootFileKind, checkExecutable } from "./boot-file.js";
+import { BOOT_FILE_HEAD_BYTES, bootFileKind, checkExecutable, executableGameId } from "./boot-file.js";
 import {
   USER_DATA_ROOT,
   createRecordStore,
@@ -2394,6 +2394,7 @@ function bindApi(module) {
         ? (path) => ccall("BootDisc", "number", ["string"], [path])
         : null,
     stopCore: optionalCwrap("StopCore", null, []),
+    resetCore: optionalCwrap("ResetCore", "number", []),
     setCorePaused: optionalCwrap("SetCorePaused", "number", ["number"]),
     pumpHostJobs: optionalCwrap("PumpHostJobs", null, []),
     getCoreState: optionalCwrap("GetCoreState", "number", []),
@@ -2492,8 +2493,8 @@ function bindApi(module) {
 const USER_DATA_SYNC_INTERVAL_MS = 1000;
 let userDataMirror = null;
 const userDataStatus = { persistent: false, reason: "not started", restored: 0, restoredBytes: 0 };
-// What is running, as Dolphin names it: the disc's game ID, or "00000000"
-// for a bare executable (SConfig::SetRunningGameMetadata).
+// What is running, as Dolphin names it: the disc's game ID, or "ID-<file>"
+// for a bare executable (SConfig::MakeGameID).
 let bootedGame = { kind: "", gameId: "", region: "" };
 const SAVES_REQUEST_TYPES = new Set([
   "flushUserData",
@@ -2829,7 +2830,7 @@ async function mountFile(file) {
       throw new Error(`Dolphin refused the ${bootKind}: ${api.getCoreStatus?.() || "no status"}`);
     }
     bootedGame = executable
-      ? { kind: bootKind, gameId: "00000000", region: "Unknown" }
+      ? { kind: bootKind, gameId: executableGameId(path), region: "Unknown" }
       : { kind: "disc", gameId: api.getGameId() || "", region: api.getRegion() || "" };
     const _t_pump = performance.now();
     api.pumpHostJobs?.();
