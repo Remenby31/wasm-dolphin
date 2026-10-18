@@ -32,7 +32,7 @@ const { values } = parseArgs({
     tree: { type: "string", default: "." },
     iso: { type: "string" },
     port: { type: "string", default: process.env.HARNESS_PORT || "8090" },
-    query: { type: "string", default: "core=upstream&video=software&cpu=dual&wasmjit=1" },
+    query: { type: "string", default: "core=upstream&video=software&cpu=dual&wasmjit=1&aotsw=1" },
     regions: { type: "string", default: "60" },
     functions: { type: "string", default: "80" },
     hot: { type: "string", default: "2500" },
