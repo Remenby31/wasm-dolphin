@@ -71,13 +71,33 @@ function summarize(rows) {
   };
 }
 
+// Chrome renderer crashes that did not happen again when the cell was run
+// once more (runPlan): "infra-crash", reported, not blocking. Crashes that
+// did happen again are in the crash check. One exception: renderer crashes
+// only on the candidate, twice or more in one comparison, are a regression
+// (a rare crash the candidate makes less rare).
+export function infraCrashGate(baseRecords, candRecords) {
+  const infra = (records) => records.filter((r) => r.infraCrash);
+  const b = infra(baseRecords), c = infra(candRecords);
+  const rows = [
+    ...b.map((r) => ({ game: r.game, config: r.config, check: `infraCrash r${r.run}`, baseline: "renderer crash, not again", candidate: null, status: "infra-crash", detail: r.infraCrash.evidence })),
+    ...c.map((r) => ({ game: r.game, config: r.config, check: `infraCrash r${r.run}`, baseline: null, candidate: "renderer crash, not again", status: "infra-crash", detail: r.infraCrash.evidence }))
+  ];
+  if (c.length >= 2 && b.length === 0) {
+    rows.push({ game: "*", config: "*", check: "infraCrash", baseline: "0", candidate: String(c.length), status: "regressed", detail: "renderer crashes on the candidate only, twice or more" });
+  }
+  // No rows is fine here (no crash), unlike the other gates.
+  const g = summarize(rows);
+  return { ...g, ok: g.blocking.length === 0, inconclusive: false, infraCrashes: { baseline: b.length, candidate: c.length } };
+}
+
 // Rows from renderVsBaseline (render-check.mjs) on the candidate records.
 export function crossCommitGate(candRecords) {
   const rows = candRecords.map((r) => {
     const st = r.renderVsBaseline?.status ?? "unjudged";
     return {
       game: r.game, config: r.config, check: `renderVsBaseline r${r.run}`, baseline: "capture", candidate: st,
-      status: st === "fail" ? "regressed" : st === "pass" ? "ok" : st === "not-covered" ? "not-covered" : "inconclusive",
+      status: st === "fail" ? "regressed" : st === "pass" ? "ok" : st === "known" ? "known-failure" : st === "not-covered" ? "not-covered" : "inconclusive",
       detail: r.renderVsBaseline?.detail ?? null
     };
   });
@@ -154,7 +174,8 @@ export function decide({ correctness, perf = [] }) {
 export function gateMarkdown({ correctness, perf = [] }) {
   const lines = ["## Correctness (blocking)", "", "| Game | Config | Check | Baseline | Candidate | Status |", "|---|---|---|---|---|---|"];
   for (const r of correctness.rows) if (r.status !== "ok") lines.push(`| ${r.game} | ${r.config} | ${r.check} | ${r.baseline ?? "–"} | ${r.candidate ?? "–"} | ${r.status} |`);
-  lines.push("", `${correctness.rows.filter((r) => r.status === "ok").length} check(s) ok.`, "");
+  const infra = correctness.rows.filter((r) => r.status === "infra-crash");
+  lines.push("", `${correctness.rows.filter((r) => r.status === "ok").length} check(s) ok.${infra.length ? ` ${infra.length} infra crash(es): a Chrome renderer crash that did not happen again on a second run (not blocking; counted in harness/results/infra-crashes.jsonl).` : ""}`, "");
   lines.push("## Performance (paired; blocks only a confirmed ≥ 15 % regression)", "", "| Game | Config | Metric | Pairs | Median change | Regressed |", "|---|---|---|---|---|---|");
   for (const r of perf) lines.push(`| ${r.game} | ${r.config} | ${r.metric} | ${r.pairs} (${r.confirmations ?? 0} confirmation) | ${r.median == null ? "–" : `${Math.round(r.median * 1000) / 10} %`} | ${r.regressed ? "yes, confirmed" : r.inconclusive ? "worse, confirmations unmeasured" : r.worse ? "worse, not confirmed" : "no"} |`);
   const d = decide({ correctness, perf });

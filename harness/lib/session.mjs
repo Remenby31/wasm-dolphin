@@ -1,17 +1,18 @@
 // Copyright 2026 wasm-dolphin contributors
 // SPDX-License-Identifier: MIT
 // One emulator session = fresh Chrome profile + boot one disc + observe.
-import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
+import { cpSync, existsSync, mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import os from "node:os";
 import path from "node:path";
 import { bootIso, captureAtVi, grabFrame, launchChrome, readCoreProgress, readFrameInfo, readTimeline, REPO_ROOT, watchPage } from "./browser.mjs";
 import { addGamepadMock } from "./gamepad-mock.mjs";
 import { installMonitor } from "./monitor.mjs";
 import { encodePng } from "./png.mjs";
+import { checkCore } from "./core-identity.mjs";
 import { claim } from "./ownership.mjs";
 import { machineSnapshot, sampleChromeCpu } from "./system.mjs";
 
-export async function openSession({ base, query, iso, display = "headless", gamepads = null, keepProfile = false, routes = {} }) {
+export async function openSession({ base, server = null, query, iso, display = "headless", gamepads = null, keepProfile = false, routes = {} }) {
   const profileDir = mkdtempSync(path.join(os.tmpdir(), "gc-harness-profile-"));
   const releaseProfile = claim(profileDir, REPO_ROOT, "chrome-profile");
   const context = await launchChrome({ profileDir, display });
@@ -26,8 +27,21 @@ export async function openSession({ base, query, iso, display = "headless", game
   const url = `${base}?${query}`;
   const machineBefore = machineSnapshot();
   const startedAt = Date.now();
+  const fetchedBefore = server?.coreFetches.length ?? 0;
   const boot = await bootIso(page, { url, iso });
   await context.assertInvisible?.("after boot");
+  // The core really loaded must be the one asked for (core-identity.mjs).
+  let core = null;
+  if (server) {
+    const selection = await page.evaluate(() => window.__host?.adapter?.coreSelectionTelemetry?.() ?? null).catch(() => null);
+    core = checkCore({ url, defaultSha256: server.defaultCoreSha256, fetches: server.coreFetches.slice(fetchedBefore), selection });
+    if (!core.ok) {
+      await context.close().catch(() => {});
+      releaseProfile();
+      if (!keepProfile) rmSync(profileDir, { recursive: true, force: true });
+      throw new Error(core.error);
+    }
+  }
   return {
     page,
     context,
@@ -38,6 +52,20 @@ export async function openSession({ base, query, iso, display = "headless", game
     machineBefore,
     startedAt,
     harness: boot.harness,
+    core,
+    rendererCrashed: () => watch.events.some((e) => e.type === "crash"),
+    // Keep Chrome's log and crash dumps (Crashpad) of this profile in `dir`.
+    keepCrashEvidence(dir) {
+      mkdirSync(dir, { recursive: true });
+      const kept = [];
+      for (const name of ["chrome.log", "crash-dumps", "Crashpad"]) {
+        const from = path.join(profileDir, name);
+        if (!existsSync(from)) continue;
+        cpSync(from, path.join(dir, name), { recursive: true });
+        kept.push(name);
+      }
+      return { dir, kept };
+    },
     async close() {
       await context.close().catch(() => {});
       releaseProfile();

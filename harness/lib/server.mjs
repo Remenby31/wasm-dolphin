@@ -59,7 +59,7 @@ export function applyPatches(files, patches = []) {
 }
 
 // Content-addressed snapshot of what `root` serves (after `patches`).
-export async function snapshotTree(root, { patches = [] } = {}) {
+export async function snapshotTree(root, { patches = [], coreCandidates = [] } = {}) {
   const resolved = path.resolve(root);
   const { createPathResolver } = await import(pathToFileURL(path.join(resolved, "tools", "serve.mjs")).href);
   if (typeof createPathResolver !== "function") throw new Error(`${resolved}/tools/serve.mjs has no createPathResolver (tree too old for the harness)`);
@@ -75,12 +75,42 @@ export async function snapshotTree(root, { patches = [] } = {}) {
     const bytes = readFileSync(real);
     files.set(`/${rel}`, bytes);
   }
+  for (const dir of coreCandidateDirs(resolved, coreCandidates)) addCoreCandidate(files, dir);
   applyPatches(files, patches);
   for (const [key, bytes] of [...files].sort(([a], [b]) => (a < b ? -1 : 1))) {
     hash.update(`${key.slice(1)}\0${createHash("sha256").update(bytes).digest("hex")}\n`);
   }
   if (!files.has("/index.html")) throw new Error(`${resolved} serves no index.html`);
   return { root: resolved, files, hash: hash.digest("hex"), source: { ...sourceInfo(resolved), ...(patches.length ? { patches: patches.length } : {}) } };
+}
+
+// Candidate cores (?coreid=sha256:…) are served from
+// /build/core-candidates/<sha>/: the tree's own build/core-candidates/*/
+// and any directory passed explicitly (--core-candidate). The app's server
+// allowlist does not cover them, so the harness adds them itself, and only
+// when the directory's wasm hashes to its name.
+const CANDIDATE_FILES = /^dolphin-core-upstream\.(?:js|wasm|build\.json)$/;
+function coreCandidateDirs(root, explicit) {
+  const base = path.join(root, "build", "core-candidates");
+  const own = existsSync(base) ? readdirSync(base).map((d) => path.join(base, d)).filter((d) => existsSync(path.join(d, "dolphin-core-upstream.wasm"))) : [];
+  return [...own, ...explicit.map((d) => path.resolve(d))];
+}
+
+export function addCoreCandidate(files, dir) {
+  const wasm = path.join(dir, "dolphin-core-upstream.wasm");
+  if (!existsSync(wasm)) throw new Error(`core candidate ${dir} has no dolphin-core-upstream.wasm`);
+  const sha = createHash("sha256").update(readFileSync(wasm)).digest("hex");
+  const name = path.basename(dir).toLowerCase().replace(/^sha256:/, "");
+  if (/^[0-9a-f]{64}$/.test(name) && name !== sha) throw new Error(`core candidate ${dir}: its wasm hashes to ${sha}, not to its directory name`);
+  for (const f of readdirSync(dir)) if (CANDIDATE_FILES.test(f)) files.set(`/build/core-candidates/${sha}/${f}`, readFileSync(path.join(dir, f)));
+  return sha;
+}
+
+// sha256 of every core wasm in the snapshot, by served path.
+export function coreHashes(files) {
+  const out = new Map();
+  for (const [key, bytes] of files) if (key.endsWith("/dolphin-core-upstream.wasm")) out.set(key, createHash("sha256").update(bytes).digest("hex"));
+  return out;
 }
 
 // Where the snapshot came from, for the record only (identity is the hash).
@@ -96,7 +126,7 @@ function sourceInfo(root) {
   }
 }
 
-export function snapshotHandler(snapshot) {
+export function snapshotHandler(snapshot, { onServe = null } = {}) {
   return (req, res) => {
     if (req.method !== "GET" && req.method !== "HEAD") {
       res.writeHead(405, { allow: "GET, HEAD" });
@@ -116,6 +146,7 @@ export function snapshotHandler(snapshot) {
       res.end("Not found");
       return;
     }
+    if (req.method === "GET") onServe?.(pathname);
     res.writeHead(200, {
       "content-type": MIME.get(path.extname(pathname)) ?? "application/octet-stream",
       "content-length": bytes.length,
@@ -127,9 +158,12 @@ export function snapshotHandler(snapshot) {
   };
 }
 
-export async function ensureServer({ port, root, patches = [] }) {
-  const snapshot = await snapshotTree(root, { patches });
-  const server = createServer(snapshotHandler(snapshot));
+export async function ensureServer({ port, root, patches = [], coreCandidates = [] }) {
+  const snapshot = await snapshotTree(root, { patches, coreCandidates });
+  const cores = coreHashes(snapshot.files);
+  // Every core wasm this server handed out, in order (what was really loaded).
+  const coreFetches = [];
+  const server = createServer(snapshotHandler(snapshot, { onServe: (p) => { if (cores.has(p)) coreFetches.push({ path: p, sha256: cores.get(p) }); } }));
   await new Promise((resolve, reject) => {
     server.once("error", (e) =>
       reject(e.code === "EADDRINUSE" ? new Error(`port ${port} is busy; the harness never shares a server, stop the other one or pick another --port`) : e)
@@ -140,6 +174,8 @@ export async function ensureServer({ port, root, patches = [] }) {
     base: `http://127.0.0.1:${port}/`,
     root: snapshot.root,
     identity: { snapshot: snapshot.hash, files: snapshot.files.size, ...snapshot.source },
+    defaultCoreSha256: cores.get("/cores/dolphin/dolphin-core-upstream.wasm") ?? null,
+    coreFetches,
     stop: () => new Promise((resolve) => {
       server.closeAllConnections?.();
       server.close(() => resolve());

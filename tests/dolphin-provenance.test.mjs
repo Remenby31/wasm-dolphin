@@ -299,11 +299,12 @@ test("committed Dolphin provenance and ABI manifests verify", () => {
   // earlier patch touched -- CachedInterpreterBlockCache.cpp/.h,
   // CachedInterpreterLink.h and WasmDeferredCompileQueue.h -- taking it to
   // 113. The exact-floating-point JIT patch (0071) also fixes the interpreter's
-  // FPCC update in Interpreter_FloatingPoint.cpp: 114. The GPU-sync
-  // diagnostics (0080) add WasmGpuSyncDiag.h and the first patch to
-  // PixelEngine.cpp/.h: 117. Update deliberately when the series changes what
+  // FPCC update in Interpreter_FloatingPoint.cpp: 114. 0072 hooks state loads
+  // in JitInterface.cpp (the JIT warmup restarts from the loaded field): 115.
+  // The GPU-sync diagnostics (0080) add WasmGpuSyncDiag.h and touch
+  // PixelEngine.cpp/.h: 118. Update deliberately when the series changes what
   // it modifies.
-  assert.equal(result.vendorSnapshot.rootPaths, 117);
+  assert.equal(result.vendorSnapshot.rootPaths, 118);
   assert.equal(result.vendorSnapshot.submodulePaths, 2);
   assert.equal(result.core.abiVersion, 1);
   assert.equal(result.core.memoryContract.jsGlue.initialPages, 24576);

@@ -37,6 +37,41 @@ machine, which people use while it runs) with a fresh `user-data-dir` per run
 (no JIT cache or IndexedDB
 carried over). Exit code: 0 pass, 1 finding, 2 usage or infrastructure error.
 
+## Which core a run used
+
+Every run checks, once the core is loaded, that the bytes the harness server
+handed out for `dolphin-core-upstream.wasm` hash to the core the run asked
+for: the URL's `coreid=sha256:…`, or else the served tree's own
+`cores/dolphin` core. Any other core, or a fallback reported by the app,
+fails the run with `core-mismatch` (the app falls back to main's core when a
+candidate is missing; a judge never measures that). The loaded hash is in
+every run's JSON (`core`). Candidate cores are served from
+`build/core-candidates/<sha>/` of the tree, or from directories passed with
+`--core-candidate <dir>`, and only when their wasm hashes to that sha.
+
+## Freeze probes
+
+During the measured window the timeline is drained every second. When it
+shows a freeze starting (no VI output for 2 s: core; or no presentation for
+2 s while VI outputs go on: present), the harness reads the worker's WebGPU
+replay and GPU sync state (`validationReadWgpuReplayState`) 4 times, 500 ms
+apart, and stores it in the run's JSON as `freezeProbes` (at most 3
+episodes per run, each state cut at 64 KB). A served worker without that
+message gets none and the episode is recorded as `unsupported`. Evidence
+only: freezes are judged by coreFreeze as before.
+
+## Renderer crashes
+
+A Chrome renderer crash ("Target crashed") in a matrix cell is run once
+more, on the same side. If it does not happen again it is an **infra
+crash**: shown in the gate report, appended to
+`harness/results/infra-crashes.jsonl` (a cumulative counter), not blocking.
+If it happens again the cell crashed: the crash check fails and blocks,
+unless the baseline crashed the same way twice too. Renderer crashes on the
+candidate only, twice or more in one comparison, are a regression. Chrome's
+log (`--enable-logging --log-file`) and crash dumps of each crashed run are
+kept in `<results>/<run>-crash/`.
+
 ## No windows
 
 The harness never shows a browser window: people work on the machine it
@@ -133,7 +168,7 @@ Per (game, config) cell, the **correctness checks** (`lib/correctness.mjs`):
 | coreFreeze | no VI output for 2 s while the run went on (from the VI timeline) |
 | render | the exact capture is blank, or differs from the reference config's capture of the same run at the same VI output: byte-identical required for the same renderer, otherwise `match` (no missing detail, no squeezed picture) |
 | audio | the game spec says `audio: true` and the output peak stays under 1e-3 |
-| renderVsBaseline (ab) | the candidate's capture differs from the baseline's capture of the same cell, run and VI output; catches what all configs of one commit get wrong together. Intended changes: `--accept game/config` |
+| renderVsBaseline (ab) | per cell, the candidate's capture differs from the baseline's at the same VI output; catches what all configs of one commit get wrong together. Intended changes: `--accept game/config`. Each side must first agree with itself across runs. Baseline nondeterministic, candidate stable: known (not blocking) if the candidate's picture is one of the baseline's; otherwise, for a cell listed in `harness/known-failures.json`, known only if it differs from the closest baseline picture by no more pixels than the baseline's pictures differ from each other, else it blocks. Candidate nondeterministic, baseline stable: blocks. Both: blocks unless listed |
 
 Each check of each run is pass, fail or **unjudged** (with the reason: no VI
 timeline in this core, capture refused for a hardware renderer, scripted
@@ -166,7 +201,10 @@ gate's acceptance test. Eight known regressions are applied to the candidate
 side only, as in-memory patches of the served app or mutant homebrew discs
 (geometry removed, one colour off by 3/255, JIT crash, gamepads cut from
 port 1, core stopped 3 s, a swallowed worker message, output muted, emulation
-at 70 %); the gate must block each. Then N clean runs of this tree against
+at 70 %, a picture that changes from run to run); the gate must block each.
+A mutant makes the baseline's picture vary (declared known) while the
+candidate stably loses its geometry: blocks. A control makes the baseline's
+picture vary against a stable, right candidate: the gate must pass it. Then N clean runs of this tree against
 itself; the gate must pass each. It writes `selftest.md` with the table.
 Ports 2-4 do not work on main yet, so the port mutant cuts port 1.
 

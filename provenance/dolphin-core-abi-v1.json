@@ -134,8 +134,8 @@
     {
       "path": "src/upstream-discio-worker.js",
       "hashMode": "lf-normalized",
-      "size": 623339,
-      "sha256": "f685ad62f7a8ec9e9f3892da78d5dbde3d0a4ce9073378777cf82573461102fe"
+      "size": 625098,
+      "sha256": "3fc31a51afd82c0fc9ced22dd8e0de53d49c1b201c079d9f8e2bf72c8bf37cec"
     },
     {
       "path": "src/wgpu-renderer-worker-probe.js",
@@ -350,7 +350,17 @@
     }
   },
   "memoryContractStatus": "consistent",
-  "sourceOnlyExportsPendingRebuild": [],
+  "sourceOnlyExportsPendingRebuild": [
+    "_DolphinWeb_JitArmedStepForTest",
+    "_DolphinWeb_JitFailNextInstance",
+    "_DolphinWeb_JitFailNextTableGrow",
+    "_DolphinWeb_JitOnStateLoaded",
+    "_DolphinWeb_JitTableFull",
+    "_DolphinWeb_JitTransientRejectCount",
+    "_GetPpcWasmJitArmStartFrame",
+    "_GetPpcWasmJitEngagedFrame",
+    "_SetPpcWasmJitWarmup"
+  ],
   "moduleExports": [
     "_AcknowledgeWebGpuOwnershipTraceCapture",
     "_AudioBuffer",

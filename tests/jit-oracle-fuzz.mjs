@@ -46,7 +46,7 @@ const only = opt("only", null)?.split(",") ?? null;
 
 const core = await loadOracleCore(coreDir ? pathToFileURL(path.resolve(coreDir) + "/") : undefined);
 if (!core) {
-  console.error("this core has no DolphinWeb_JitOracleRun (rebuild it)");
+  console.error("this core has no JIT oracle or predates these sources (npm run build:core:repro -- --install)");
   process.exit(2);
 }
 const masks = { both: [0, REGALLOC_OFF], on: [0], off: [REGALLOC_OFF] }[regalloc];
@@ -79,10 +79,11 @@ function check(name, program, state, mask) {
     return;
   }
   if (result.code === 2) { notCompiled += 1; return; }
-  if (result.code === 3) { raisedException += 1; return; }
+
   if (result.code === -3) { rejected += 1; record("engine-reject", name, mask, program, state, result); return; }
   if (result.code < 0) throw new Error(`oracle setup error ${result.code} (${name}): ${result.message}`);
   compared += 1;
+  if (result.message.startsWith("exception")) raisedException += 1;
   if (result.code === 1) {
     const kind = result.message.startsWith("memory") ? "values" : classifyDifference(result.interp, result.jit);
     record(kind === "fpscr-status" ? "fpscr-status" : "divergence", name, mask, program, state, result);
@@ -118,7 +119,8 @@ function reduce(example) {
   const diverges = (p) => {
     try {
       const res = core.run(p, state, mask);
-      return res.code === 1 && (res.message.startsWith("memory") || classifyDifference(res.interp, res.jit) === "values");
+      if (res.code !== 1 || res.message === "step limit reached") return false; // a reduction can loop forever
+      return res.message.startsWith("memory") || classifyDifference(res.interp, res.jit) === "values";
     } catch {
       return false;
     }
@@ -154,8 +156,13 @@ for (const f of list) {
 const summary = {
   seed, perInstruction, programs, length, masks: masks.map((m) => hex(baseMask | m)),
   compared, notCompiled, raisedException, rejected, divergent: list.filter((f) => f.kind === "divergence").reduce((n, f) => n + f.count, 0),
+  fpscrStatus: list.filter((f) => f.kind === "fpscr-status").reduce((n, f) => n + f.count, 0),
   seconds: (Date.now() - started) / 1000
 };
 console.log(JSON.stringify(summary));
 if (jsonOut) writeFileSync(jsonOut, JSON.stringify({ summary, findings: list }, null, 2));
-process.exit(list.length ? 1 : 0);
+// Random programs set FE0/FE1 in one state in six: none raising means the
+// exception paths silently went uncompared.
+const noExceptions = programs > 0 && raisedException === 0;
+if (noExceptions) console.log("no program raised an exception: exception paths were not compared");
+process.exit(list.length || noExceptions ? 1 : 0);
