@@ -1,18 +1,18 @@
 {
   "schemaVersion": 1,
-  "createdAt": "2026-10-18T06:46:39.783Z",
-  "coreId": "sha256:df80b13fe3b3c52f139c2aecc32523e471783057537a084ee838ec8f0a56ddd0",
+  "createdAt": "2026-10-18T07:48:57.237Z",
+  "coreId": "sha256:7ddfba4dfb25966c3c2a983e360b24065642f7eb250277eaf0da57a40e223a35",
   "repository": {
-    "commit": "a6457bb8fa7094b8e3956fc1cce1df3c4921225f",
+    "commit": "061df4ecc243810253e2dc9b1b51e960b3758e87",
     "status": "",
     "cleanTree": true
   },
   "source": {
     "upstreamCommit": "e22551eae1c84a7e4d0b6a5c519ef4ed4ef69df1",
-    "patchSeriesSha256": "4700cf245598e9a274ac7fc2a3348570eaf7ae7480cfb512fc05498b442aed3a",
-    "vendorResultTree": "687a58a3c2314e88399db77e653945b10849be6f",
-    "sourceLockSha256": "3c3e5924dd02b38fc08596b959de38ba2c8703b1b5598ecc50cbf728240f7541",
-    "vendorSnapshotSha256": "e281c6341ece6a3dc84dcbbbb3a58284797bc3e564fa02a564156668dc644c23",
+    "patchSeriesSha256": "02d818dd2a864ea9ff15df534e2ba2341d8ec0f296500e308493c3b4473bac6b",
+    "vendorResultTree": "27c4314b80ad5db9c1877d0432335cf01a2bb1c5",
+    "sourceLockSha256": "e2794244fd583d65d6ad5ba9f76252e765d732577bd82887ae8217b60ea1bf71",
+    "vendorSnapshotSha256": "1f1ab323ae039edf3e79e9fff1a314d416acca3db7b7320e41d29aee4fe2dcd6",
     "localInputsSha256": "d2ba15e02858d410e104d342e2dfa5b5bfe26190ff968929395d8686d588ff75",
     "localInputs": [
       {
@@ -170,7 +170,7 @@
       "-DDOLPHIN_WASM_CORE_SOURCE=/Users/baptistec/projects/gc-web-emu/wt-wgpu-apple/core/upstream/dolphin_web_core.cpp",
       "-DDOLPHIN_WASM_OUTPUT_DIR=/Users/baptistec/projects/gc-web-emu/wt-wgpu-apple/build/repro/darwin-arm64/core"
     ],
-    "cmakeCacheSha256": "b73eb370a6609dd39ae25705b09b13517bfdb66a900eafcc98816b046727004c"
+    "cmakeCacheSha256": "8de916cbf79768cdbc6a96f5a1987ea43aa6c6b941d74e1428cb868786f64066"
   },
   "artifacts": {
     "js": {
@@ -181,25 +181,25 @@
     },
     "wasm": {
       "path": "/Users/baptistec/projects/gc-web-emu/wt-wgpu-apple/build/repro/darwin-arm64/core/dolphin-core-upstream.wasm",
-      "size": 12955481,
-      "sha256": "df80b13fe3b3c52f139c2aecc32523e471783057537a084ee838ec8f0a56ddd0",
+      "size": 12955639,
+      "sha256": "7ddfba4dfb25966c3c2a983e360b24065642f7eb250277eaf0da57a40e223a35",
       "hashMode": "raw"
     },
     "wasmSections": [
       {
         "id": 1,
         "size": 2005,
-        "sha256": "69efe147d818b73418ca9f01d3b6ea40ba3b5e4b9c823dde9fd960148fc678fe"
+        "sha256": "9db5a10fb6cd852cf4372364267084c66ad7b61752db0f9df119ba1bb6137d3b"
       },
       {
         "id": 2,
         "size": 2420,
-        "sha256": "44e58ce7857ff23a5f9af9b33d5e6930b7d9617a23a0acb71bea82269d8afa84"
+        "sha256": "945c91d38deaf5893bf0165c2c8a63a6df723495f1af8a3daa0f18492acff318"
       },
       {
         "id": 3,
-        "size": 12464,
-        "sha256": "dfd3b5c05cea0b28ae48286313850319031210a26a2b6cdaf38c2b7693ac3045"
+        "size": 12465,
+        "sha256": "3f4a8936a440405c50552d6883564ad90aecd64197d1ef75ff4a1d8db7163d28"
       },
       {
         "id": 4,
@@ -214,17 +214,17 @@
       {
         "id": 7,
         "size": 1177,
-        "sha256": "4acc1ca3a988773d309377f69a26864f33284268c8e58ae929d20607f258375b"
+        "sha256": "5a1996cfe4658ff3f1a5217c93469ba5a8407df53be5833d715dd0673d7ebf56"
       },
       {
         "id": 8,
         "size": 2,
-        "sha256": "3aa9029cec05e2ee3a9aef5e6380162f81516f7ad1af2e0ded80098d7da3a687"
+        "sha256": "a213e4c3ea4247ba8cdd67b03022a08f166f099fa0a5f9eafe2ea879a78fb378"
       },
       {
         "id": 9,
         "size": 22563,
-        "sha256": "181845e3cc78f07f84bd9a559714561dc9b311070afbd11a02e15d620e7d8af9"
+        "sha256": "002f2e36f777670e671dba84b32445876824eeea98c45f6ed3f60b0b14c69c7c"
       },
       {
         "id": 12,
@@ -233,8 +233,8 @@
       },
       {
         "id": 10,
-        "size": 10468437,
-        "sha256": "f6056395f860f281d89568a716352c2a61b203924f2d823c9976afae2fdbe824"
+        "size": 10468594,
+        "sha256": "f13cbec738d8fcbf1c1383d0bdc2d38e6c09f0a5e90e8ddb6daf7441051e9551"
       },
       {
         "id": 11,
