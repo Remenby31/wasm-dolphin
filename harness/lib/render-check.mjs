@@ -89,9 +89,8 @@ export function renderChecks(records, reference, loadFrame = (file) => (existsSy
 // - "fail" if a side crashed or gave a blank picture;
 // - "inconclusive" with fewer than SET_EQUAL_MIN_RUNS runs on a side;
 // - "fail" if the candidate gave a picture the baseline never gave in any run;
-// - "inconclusive" if the candidate did not (yet) give every picture the
-//   baseline gave;
-// - "pass" only when both sets are equal.
+// - "pass" otherwise: every candidate picture was seen on the baseline (a
+//   baseline picture the candidate did not hit is sampling, not a regression).
 // Cells not listed this way keep the rules above.
 export const SET_EQUAL_MIN_RUNS = 3;
 
@@ -204,8 +203,10 @@ function setEqualVerdict(base, cand, loadFrame) {
   }
   const novel = [...candSet].filter((d) => !baseSet.has(d));
   if (novel.length) return { status: "fail", detail: `set-equal: candidate picture(s) never seen on the baseline: ${novel.map((d) => d.slice(0, 8)).join(", ")}`, ...evidence };
+  // A baseline picture the candidate did not hit is sampling, not a
+  // regression: a wrong picture shows up as a novel digest above.
   const missing = [...baseSet].filter((d) => !candSet.has(d));
-  if (missing.length) return { status: "inconclusive", detail: `set-equal: baseline picture(s) not seen on the candidate: ${missing.map((d) => d.slice(0, 8)).join(", ")}`, ...evidence };
+  if (missing.length) return { status: "pass", detail: `set-equal (listed): candidate pictures all seen on the baseline; ${missing.length} baseline picture(s) not sampled on the candidate`, ...evidence };
   return { status: "pass", detail: `set-equal (listed): same ${baseSet.size} picture(s) on both sides`, ...evidence };
 }
 

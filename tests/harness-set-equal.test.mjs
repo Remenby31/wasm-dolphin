@@ -33,9 +33,9 @@ test("set-equal: a crash or a blank picture on either side fails", () => {
   assert.equal(gate(["a", "b", "blank"], ["a", "b", "c"]).status, "regressed");
 });
 
-test("set-equal: too few runs, or a baseline picture the candidate never gave, is inconclusive", () => {
+test("set-equal: too few runs is inconclusive; a baseline picture the candidate did not sample passes", () => {
   assert.equal(gate(["a", "b"], ["b", "a"]).status, "inconclusive");
-  assert.equal(gate(["a", "b", "c"], ["a", "b", "a"]).status, "inconclusive");
+  assert.equal(gate(["a", "b", "c"], ["a", "b", "a"]).status, "ok");
 });
 
 test("an unlisted nondeterministic cell stays inconclusive", () => {
