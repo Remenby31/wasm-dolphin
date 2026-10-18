@@ -132,8 +132,8 @@ test("host and adapter carry the independent readback rollback bit", async () =>
 test("worker uses one newest-generation gate for SAB and post delivery", async () => {
   const source = await readFile(new URL("../src/upstream-discio-worker.js", import.meta.url), "utf8");
   assert.match(source, /case "setInputState":[\s\S]*?applyInputStateSnapshot\(/);
-  assert.match(source, /applyInputStateSnapshot\(result\.snapshot, result\.snapshot\.sentAtEpochMsLow, "sab"\)/);
-  assert.match(source, /compareInputGenerations\(generation, lastInputStateGeneration\)/);
+  assert.match(source, /applyInputStateSnapshot\(result\.snapshot, result\.snapshot\.sentAtEpochMsLow, "sab", port\)/);
+  assert.match(source, /compareInputGenerations\(generation, lastInputStateGenerations\[port\]\)/);
   assert.match(source, /staleGenerationCount \+= 1;[\s\S]*?return false;/);
 });
 
@@ -147,7 +147,7 @@ test("causal marker carries the input generation through the core poll and prese
   assert.match(core, /std::mutex s_input_state_mutex;/);
   assert.match(core, /std::mutex s_pad_poll_mutex;/);
   assert.match(core, /std::uint32_t generation\)/);
-  assert.match(core, /s_input_state = next;/);
+  assert.match(core, /s_input_states\[port\] = next;/);
   assert.match(core, /s_pad_poll\.input_generation = input\.generation;/);
   assert.match(core, /" gen:" << poll\.input_generation/);
   assert.match(worker, /state\.inputGeneration >>> 0/);

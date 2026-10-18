@@ -31,6 +31,7 @@
 #include "Core/Config/MainSettings.h"
 #include "Core/ConfigLoaders/BaseConfigLoader.h"
 #include "Core/ConfigManager.h"
+#include "Core/HW/SI/SI_Device.h"
 #include "Core/Core.h"
 #include "Core/CoreTiming.h"
 #include "Core/HW/GBAPad.h"
@@ -619,6 +620,10 @@ void EnsureRuntime()
   Config::SetBase(Config::MAIN_OSD_MESSAGES, false);
   Config::SetBase(Config::MAIN_SLOT_A, ExpansionInterface::EXIDeviceType::MemoryCardFolder);
   Config::SetBase(Config::MAIN_SLOT_B, ExpansionInterface::EXIDeviceType::None);
+  // A controller sits on all four ports; DolphinWeb_GetPadStatus reports which
+  // ones are plugged in, so the host can hot-plug them.
+  for (int port = 0; port < 4; ++port)
+    Config::SetBase(Config::GetInfoForSIDevice(port), SerialInterface::SIDEVICE_GC_CONTROLLER);
   Config::SetBase(Config::MAIN_AUDIO_BACKEND, std::string("Web Audio"));
   Config::SetBase(Config::MAIN_AUDIO_MUTED, false);
   Config::SetBase(Config::GFX_HACK_SKIP_XFB_COPY_TO_RAM, s_video_backend == "OGL");

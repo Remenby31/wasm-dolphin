@@ -149,11 +149,19 @@ export function buttonMaskFromPressed(pressed) {
 // digital threshold past typical Xbox drift.
 const DEFAULT_GAMEPAD_ANALOG_DEADZONE = 0.18;
 
-// Full-tilt stick deflection in pad-byte steps from the 0x80 centre. Not 0x7f
-// on purpose: genuine controllers stop at their gate near 100 (main) and 92
-// (C-stick); Dolphin's measured gate radii are 0.794 and 0.722 of 127.
-const STICK_FULL_TILT = 0x60;
+// Stick geometry of a genuine controller, as Dolphin emulates it
+// (Core/HW/GCPadEmu.h, InputCommon OctagonStickGate): an octagonal gate whose
+// vertices (cardinals and diagonals) sit at 0.794 (main) and 0.722 (C-stick)
+// of the 127 steps around the 0x80 centre, i.e. ±101 and ±92 at full tilt.
+export const MAIN_STICK_GATE_RADIUS = 0.7937125;
+export const C_STICK_GATE_RADIUS = 0.7221375;
 const DEFAULT_GAMEPAD_DIGITAL_DEADZONE = 0.55;
+
+export const PAD_PORT_COUNT = 4;
+
+export function isPadPort(port) {
+  return Number.isInteger(port) && port >= 0 && port < PAD_PORT_COUNT;
+}
 
 export function selectPreferredGamepad(gamepads) {
   let fallback = null;
@@ -246,10 +254,9 @@ export function readGamepadInput(
   if (gamepad.buttons[1]?.pressed) state.analogB = 0xff;
 
   const [leftX = 0, leftY = 0, rightX = 0, rightY = 0] = gamepad.axes;
-  state.stickX = axisToPadByte(leftX, false, analogDeadzone);
-  state.stickY = axisToPadByte(leftY, true, analogDeadzone);
-  state.cStickX = axisToPadByte(rightX, false, analogDeadzone);
-  state.cStickY = axisToPadByte(rightY, true, analogDeadzone);
+  // Standard mapping has +y down; the GameCube has +y up.
+  [state.stickX, state.stickY] = stickToPadBytes(leftX, -leftY, MAIN_STICK_GATE_RADIUS, analogDeadzone);
+  [state.cStickX, state.cStickY] = stickToPadBytes(rightX, -rightY, C_STICK_GATE_RADIUS, analogDeadzone);
 
   if (leftX <= -digitalThreshold) pressed.add("STICK_LEFT");
   if (leftX >= digitalThreshold) pressed.add("STICK_RIGHT");
@@ -283,10 +290,8 @@ export function inputStateFromPressed(pressed, analogState = null) {
   const state = analogState ? { ...DEFAULT_PAD_STATE, ...analogState } : { ...DEFAULT_PAD_STATE };
   state.mask = buttonMaskFromPressed(pressed) | (state.mask >>> 0);
 
-  applyDigitalAxis(state, pressed, "STICK_LEFT", "STICK_RIGHT", "stickX");
-  applyDigitalAxis(state, pressed, "STICK_DOWN", "STICK_UP", "stickY");
-  applyDigitalAxis(state, pressed, "C_STICK_LEFT", "C_STICK_RIGHT", "cStickX");
-  applyDigitalAxis(state, pressed, "C_STICK_DOWN", "C_STICK_UP", "cStickY");
+  applyDigitalStick(state, pressed, "STICK", "stickX", "stickY", MAIN_STICK_GATE_RADIUS);
+  applyDigitalStick(state, pressed, "C_STICK", "cStickX", "cStickY", C_STICK_GATE_RADIUS);
 
   if (pressed.has("L")) state.triggerLeft = 0xff;
   if (pressed.has("R")) state.triggerRight = 0xff;
@@ -296,29 +301,47 @@ export function inputStateFromPressed(pressed, analogState = null) {
   return state;
 }
 
-function applyDigitalAxis(state, pressed, negativeButton, positiveButton, field) {
-  const negative = pressed.has(negativeButton);
-  const positive = pressed.has(positiveButton);
-  if (negative === positive) {
+// Digital directions (keys, touch) drive a stick only while its analog axes
+// rest, so they never clobber a real stick; two keys make a diagonal.
+function applyDigitalStick(state, pressed, prefix, fieldX, fieldY, gateRadius) {
+  if (state[fieldX] !== 0x80 || state[fieldY] !== 0x80) {
     return;
   }
-
-  state[field] = 0x80 + (positive ? STICK_FULL_TILT : -STICK_FULL_TILT);
+  const x = digitalAxis(pressed, `${prefix}_LEFT`, `${prefix}_RIGHT`);
+  const y = digitalAxis(pressed, `${prefix}_DOWN`, `${prefix}_UP`);
+  if (x || y) {
+    [state[fieldX], state[fieldY]] = stickToPadBytes(x, y, gateRadius, 0);
+  }
 }
 
-function axisToPadByte(axis, invert, deadzone) {
-  // §28ci post-deadzone scaling. Without it, axis values just past the
-  // deadzone jump to ~deadzone%-of-full immediately, so stick-drift at
-  // 0.3-0.4 magnitude that barely clears a 0.2 deadzone still produces
-  // a 20%-off-center byte → visible camera drift. Subtract the deadzone
-  // and re-scale the surviving 0..1-deadzone range to 0..1 so the byte
-  // starts at center and only moves smoothly with real input.
-  if (!Number.isFinite(axis)) return clampByte(0x80);
-  const mag = Math.abs(axis);
-  if (mag < deadzone) return clampByte(0x80);
-  const scaled = ((mag - deadzone) / (1 - deadzone)) * Math.sign(axis);
-  const oriented = invert ? -scaled : scaled;
-  return clampByte(Math.round(0x80 + oriented * STICK_FULL_TILT));
+function digitalAxis(pressed, negativeButton, positiveButton) {
+  return (pressed.has(positiveButton) ? 1 : 0) - (pressed.has(negativeButton) ? 1 : 0);
+}
+
+// Host stick (x right, y up, unit square) → GameCube stick bytes, as Dolphin
+// reshapes it: clamp to the unit circle, radial deadzone with the remaining
+// travel rescaled to 0..1 (so drift past the deadzone starts at the centre),
+// then scale to the octagonal gate at that angle.
+export function stickToPadBytes(x, y, gateRadius, deadzone = 0) {
+  if (!Number.isFinite(x) || !Number.isFinite(y)) return [0x80, 0x80];
+  const distance = Math.min(1, Math.hypot(x, y));
+  if (distance === 0 || distance <= deadzone) return [0x80, 0x80];
+  const travel = (distance - deadzone) / (1 - deadzone);
+  const angle = Math.atan2(y, x);
+  const radius = travel * gateRadius * octagonGateRadiusAtAngle(angle);
+  return [stickByte(radius * Math.cos(angle)), stickByte(radius * Math.sin(angle))];
+}
+
+// 1 at the vertices (every 45°), cos(22.5°) mid-edge.
+function octagonGateRadiusAtAngle(angle) {
+  const side = Math.PI / 4;
+  const halfInteriorAngle = (3 * Math.PI) / 8;
+  const local = ((angle % side) + side) % side;
+  return Math.sin(halfInteriorAngle) / Math.sin(Math.PI - local - halfInteriorAngle);
+}
+
+function stickByte(unit) {
+  return clampByte(Math.round(0x80 + unit * 127));
 }
 
 function unitToByte(value) {
@@ -327,4 +350,69 @@ function unitToByte(value) {
 
 function clampByte(value) {
   return Math.max(0, Math.min(0xff, value | 0));
+}
+
+// Gamepad API pads → GameCube ports, in connection order. `ports` is the
+// previous assignment (array of PAD_PORT_COUNT gamepad indexes or null). A pad
+// keeps its port while it stays connected; a new pad takes the lowest free
+// port, so a pad unplugged and plugged back in finds its port again if nobody
+// took it. Pads with the W3C "standard" mapping are the ones assigned; a
+// non-standard device only gets a port when no standard pad is present (it may
+// be a phantom HID device with pinned axes, see selectPreferredGamepad).
+export function assignGamepadPorts(ports, gamepads) {
+  const present = [];
+  const length = Number(gamepads?.length) || 0;
+  for (let index = 0; index < length; index += 1) {
+    const gamepad = gamepads[index];
+    if (gamepad && gamepad.connected !== false) present.push(gamepad);
+  }
+  const standard = present.filter((gamepad) => gamepad.mapping === "standard");
+  const eligible = new Set((standard.length ? standard : present).map((gamepad) => gamepad.index));
+
+  const next = Array.from({ length: PAD_PORT_COUNT }, (_, port) =>
+    eligible.has(ports?.[port]) ? ports[port] : null
+  );
+  // Chrome gives a new pad the lowest free index, so index order is the
+  // connection order among the pads not yet assigned.
+  for (const index of [...eligible].sort((a, b) => a - b)) {
+    if (next.includes(index)) continue;
+    const free = next.indexOf(null);
+    if (free < 0) break;
+    next[free] = index;
+  }
+  return next;
+}
+
+// What each port should send: { connected, state, pressed }. `gamepadInputs`
+// maps a gamepad index to readGamepadInput(); the keyboard (and touch) pressed
+// set drives `keyboardPort` (P1 by default, null for none) on top of whatever
+// pad shares it. A port with neither is unplugged.
+export function composePortInputs({ ports, gamepadInputs, keyboardPressed = new Set(), keyboardPort = 0 }) {
+  return Array.from({ length: PAD_PORT_COUNT }, (_, port) => {
+    const gamepadInput = ports[port] == null ? null : gamepadInputs.get(ports[port]) ?? null;
+    const hasKeyboard = port === keyboardPort;
+    if (!gamepadInput && !hasKeyboard) {
+      return { connected: false, state: { ...DEFAULT_PAD_STATE }, pressed: new Set() };
+    }
+    const pressed = hasKeyboard
+      ? mergePressedSets(keyboardPressed, gamepadInput?.pressed ?? [])
+      : new Set(gamepadInput.pressed);
+    return { connected: true, state: inputStateFromPressed(pressed, gamepadInput?.state ?? null), pressed };
+  });
+}
+
+// Ports the core plugs in at boot: P1 only.
+export const CORE_DEFAULT_PLUGGED = Object.freeze([true, false, false, false]);
+
+// What to tell the host so its ports match `inputs` (composePortInputs), given
+// which ports are plugged in now: setPad for each plugged port, unplug for a
+// port that goes away. Start from CORE_DEFAULT_PLUGGED so a page whose keyboard
+// is not on P1 unplugs P1 at once instead of leaving it to the game.
+export function portUpdates(plugged, inputs) {
+  const updates = [];
+  inputs.forEach(({ connected, state }, port) => {
+    if (connected) updates.push({ port, action: "set", state });
+    else if (plugged[port]) updates.push({ port, action: "unplug" });
+  });
+  return updates;
 }
