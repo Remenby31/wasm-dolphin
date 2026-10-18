@@ -44,7 +44,10 @@ handed out for `dolphin-core-upstream.wasm` hash to the core the run asked
 for: the URL's `coreid=sha256:…`, or else the served tree's own
 `cores/dolphin` core. Any other core, or a fallback reported by the app,
 fails the run with `core-mismatch` (the app falls back to main's core when a
-candidate is missing; a judge never measures that). The loaded hash is in
+candidate is missing; a judge never measures that). Fetches are attributed
+per request, through the run's own browser context (the emulator worker's
+requests included), so several sessions on one server, with different
+`coreid`s, each check only their own core. The loaded hash is in
 every run's JSON (`core`). Candidate cores are served from
 `build/core-candidates/<sha>/` of the tree, or from directories passed with
 `--core-candidate <dir>`, and only when their wasm hashes to that sha.
