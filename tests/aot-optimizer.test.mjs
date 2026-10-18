@@ -65,7 +65,7 @@ test("aot optimizer: cancel keeps what was compiled and a restart resumes", asyn
 test("aot optimizer: refused regions are not fatal and progress still ends at 1", async () => {
   const p = plan();
   const refuse = new Set([p.modules[0].functions[3].hash]);
-  const quota = new Set([p.modules[0].functions[5].hash]);
+  const quota = new Set([p.modules[0].functions[5].sha256]);
   const { o, events } = optimizer({ translator: fakeTranslator({ refuse }), cache: fakeCache({ quotaKeys: quota }) });
   await o.start();
   const errors = events.filter(([t]) => t === "optimization-error").map(([, d]) => d);
@@ -98,8 +98,8 @@ test("aot optimizer: a compiler that cannot open is a fatal error, never a throw
 
 test("aot optimizer: core slices (budget), waits before boot (not-ready), skips blacklisted keys", async () => {
   const p = plan();
-  const black = p.modules[0].functions[2].hash;
-  const keyOf = (h) => `k-${h}`;
+  const keyOf = (f) => `k-${f.sha256}`;
+  const black = p.modules[0].functions[2];
   let sleeps = 0;
   const cache = fakeCache({ blacklist: new Set([keyOf(black)]) });
   const { o, events } = optimizer({ cache, keyOf, translator: fakeTranslator({ perCall: 3, notReadyCalls: 2 }), sleep: async () => { sleeps++; } });
@@ -114,5 +114,6 @@ test("aot optimizer: core slices (budget), waits before boot (not-ready), skips 
 
 test("aot optimizer: region cache key follows the core formula", async () => {
   const { regionKeyOf } = await import("../src/aot-optimizer.js");
-  assert.equal(regionKeyOf({ compilerVersion: 3, codegenMask: 0x10 })("0123456789abcdef"), "region:0123456789abcdef:00000003:00000010");
+  const sha = "ab".repeat(32);
+  assert.equal(regionKeyOf({ compilerVersion: 3, codegenMask: 0x10 })({ sha256: sha }), `region-v1:00000003:00000010:${sha}`);
 });

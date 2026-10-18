@@ -26,9 +26,9 @@ const regionWeight = (f) => f.ranges.reduce((n, [s, e]) => n + e - s, 0);
 export class AotOptimizer extends EventTarget {
   // buildPlan: () => Promise<plan> (planDisc over the user's disc, with its profile)
   // planStore: { load(discKey) -> plan|null, save(discKey, plan) } (optional)
-  // keyOf(regionHash): cache key (region fingerprint, compiler version, JIT
-  // flags mask), the same computation the core uses; defaults to the hash.
-  constructor({ discKey, buildPlan, translator, openCache, cacheIdentity = {}, keyOf = (h) => h, planStore = null, batchSize = BATCH,
+  // keyOf(region function): cache key of a compiled region, see regionKeyOf;
+  // defaults to the region's SHA-256.
+  constructor({ discKey, buildPlan, translator, openCache, cacheIdentity = {}, keyOf = (f) => f.sha256, planStore = null, batchSize = BATCH,
     notReadyDelayMs = 1000, sleep = (ms) => new Promise((r) => setTimeout(r, ms)), now = () => performance.now() }) {
     super();
     this.discKey = discKey;
@@ -63,7 +63,7 @@ export class AotOptimizer extends EventTarget {
       await this.planStore?.save(this.discKey, plan).catch(() => {});
     }
     this.plan = plan;
-    this.regions = orderedRegions(plan).filter((r) => r.f.hash).map((r) => ({ ...r, key: this.keyOf(r.f.hash) }));
+    this.regions = orderedRegions(plan).filter((r) => r.f.hash && r.f.sha256).map((r) => ({ ...r, key: this.keyOf(r.f) }));
     this.totalWeight = this.regions.reduce((n, r) => n + regionWeight(r.f), 0);
     return plan;
   }
@@ -241,10 +241,10 @@ export function fakeCache({ persisted = new Map(), quotaKeys = new Set(), blackl
   return open;
 }
 
-// Cache key of a region, the core's formula (P4): parts come from the pure
-// export _DolphinWeb_AotKeyParts (compilerVersion, codegenMask), callable at
-// module init without the CPU thread.
+// Cache key of a compiled region (docs/aot-plan.md): ends in ":" + the
+// SHA-256 of the region's guest code, as the cache requires. The parts come
+// from the core's pure export _DolphinWeb_AotKeyParts.
 export function regionKeyOf({ compilerVersion, codegenMask }) {
   const hex8 = (v) => (v >>> 0).toString(16).padStart(8, "0");
-  return (regionHash) => `region:${regionHash}:${hex8(compilerVersion)}:${hex8(codegenMask)}`;
+  return (f) => `region-v1:${hex8(compilerVersion)}:${hex8(codegenMask)}:${f.sha256}`;
 }
