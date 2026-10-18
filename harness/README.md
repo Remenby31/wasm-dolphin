@@ -133,7 +133,7 @@ Per (game, config) cell, the **correctness checks** (`lib/correctness.mjs`):
 | coreFreeze | no VI output for 2 s while the run went on (from the VI timeline) |
 | render | the exact capture is blank, or differs from the reference config's capture of the same run at the same VI output: byte-identical required for the same renderer, otherwise `match` (no missing detail, no squeezed picture) |
 | audio | the game spec says `audio: true` and the output peak stays under 1e-3 |
-| renderVsBaseline (ab) | the candidate's capture differs from the baseline's capture of the same cell, run and VI output; catches what all configs of one commit get wrong together. Intended changes: `--accept game/config` |
+| renderVsBaseline (ab) | per cell, the candidate's capture differs from the baseline's at the same VI output; catches what all configs of one commit get wrong together. Intended changes: `--accept game/config`. Each side must first agree with itself across runs. Baseline nondeterministic, candidate stable: known (not blocking) if the candidate's picture is one of the baseline's; otherwise, for a cell listed in `harness/known-failures.json`, known only if it differs from the closest baseline picture by no more pixels than the baseline's pictures differ from each other, else it blocks. Candidate nondeterministic, baseline stable: blocks. Both: blocks unless listed |
 
 Each check of each run is pass, fail or **unjudged** (with the reason: no VI
 timeline in this core, capture refused for a hardware renderer, scripted
@@ -166,7 +166,10 @@ gate's acceptance test. Eight known regressions are applied to the candidate
 side only, as in-memory patches of the served app or mutant homebrew discs
 (geometry removed, one colour off by 3/255, JIT crash, gamepads cut from
 port 1, core stopped 3 s, a swallowed worker message, output muted, emulation
-at 70 %); the gate must block each. Then N clean runs of this tree against
+at 70 %, a picture that changes from run to run); the gate must block each.
+A mutant makes the baseline's picture vary (declared known) while the
+candidate stably loses its geometry: blocks. A control makes the baseline's
+picture vary against a stable, right candidate: the gate must pass it. Then N clean runs of this tree against
 itself; the gate must pass each. It writes `selftest.md` with the table.
 Ports 2-4 do not work on main yet, so the port mutant cuts port 1.
 
