@@ -147,6 +147,20 @@ async function measureOne(name, tree, runDir, profileDir) {
     result.jitEngagedField = progress?.jitEngagedField ?? null;
     const engage = result.jitEngagedField > 0 ? timeline.vi.find((v) => v.sinceBoot >= result.jitEngagedField) : null;
     if (engage) result.engage = win(engage.t - 1000, engage.t + 10000);
+    // Seconds from load until the core holds >= 95 % speed for 5 s in a row
+    // (VI ticks over host time, one sample per wall-clock second).
+    if (tps > 0) {
+      const vi = timeline.vi.filter((v) => v.t >= loadedAt);
+      const speeds = [];
+      for (let i = 1, start = 0; i < vi.length; i += 1) {
+        if (vi[i].t - vi[start].t >= 1000) {
+          speeds.push({ t: vi[start].t, speed: (100 * (vi[i].ticks - vi[start].ticks) / tps * 1000) / (vi[i].t - vi[start].t) });
+          start = i;
+        }
+      }
+      const at = speeds.findIndex((_, i) => speeds.slice(i, i + 5).length === 5 && speeds.slice(i, i + 5).every((x) => x.speed >= 95));
+      result.timeToFullSpeedSec = at >= 0 ? (speeds[at].t - loadedAt) / 1000 : null;
+    }
     result.menus = win(loadedAt, raceAt);
     result.race = win(raceAt, endAt);
     result.whole = win(loadedAt, endAt);
@@ -186,7 +200,7 @@ async function measure() {
       r.launch = launch;
       all.push(r);
       writeFileSync(path.join(runDir, `${tag}.json`), JSON.stringify(r, null, 1));
-      log(`  ${tag}: ${r.error ? "ERROR " + r.error.split("\n")[0] : `engage p99=${r.engage?.frameP99?.toFixed?.(1)} max=${r.engage?.frameMax?.toFixed?.(0)} race p99=${r.race?.frameP99?.toFixed?.(1)} menus p99=${r.menus?.frameP99?.toFixed?.(1)} speed=${r.race?.speed?.toFixed?.(1)} core=${JSON.stringify(r.coreModules)}`}`);
+      log(`  ${tag}: ${r.error ? "ERROR " + r.error.split("\n")[0] : `full-speed=${r.timeToFullSpeedSec}s engage p99=${r.engage?.frameP99?.toFixed?.(1)} max=${r.engage?.frameMax?.toFixed?.(0)} race p99=${r.race?.frameP99?.toFixed?.(1)} menus p99=${r.menus?.frameP99?.toFixed?.(1)} speed=${r.race?.speed?.toFixed?.(1)} core=${JSON.stringify(r.coreModules)}`}`);
       }
       rmSync(profileDir, { recursive: true, force: true });
     }
