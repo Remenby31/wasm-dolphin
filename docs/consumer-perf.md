@@ -18,8 +18,9 @@ adapter Chrome found. It drives the same harness as on the development Mac
   runs it in CI (PROGRAM.md). The savestate the script makes contains game
   memory: it is written to a fresh temporary directory and deleted at the end.
 - Nothing else running: the run waits for the 1-minute load average to drop
-  under a quarter of the cores (Windows reports no load average, so keep the
-  machine idle).
+  under a quarter of the cores. Windows has no load average: there the guard
+  is inactive, the report says so and gives the CPU busy measured before each
+  backend; keep the machine idle.
 
 ## Run it
 
@@ -37,19 +38,32 @@ node harness\probes\consumer-perf.mjs --iso C:\path\to\disc.iso --label <machine
   non-fallback adapter with the features it needs (`clip-distances`,
   `depth-clip-control`, `dual-source-blending`), the software renderer
   otherwise. `both`, `wgpu` and `soft` force the choice.
+- The steps into the race (`harness/probes/local-race-steps.json`) are timed
+  in emulated frames, not host seconds: a slower machine reaches the same
+  scene, later.
+- Before measuring a backend, a renderer check loads the state and captures
+  an exact frame 3 s later: a blank picture or the wrong capture source means
+  no numbers for that backend. The capture, `<backend>-check.png`, stays with
+  the local results: look at it, it must show the race.
 - `--runs 4 --warmup 25 --secs 20` (defaults): each run boots, loads the
   race, holds the accelerator, waits 25 s and measures 20 s, then reboots in
   the same profile and measures again (warm JIT and shader caches).
+- Ctrl-C or a closed SSH session stops the runs and deletes the savestate and
+  the Chrome profiles.
+- The perf lock: on macOS the shared one of the development Mac
+  (`~/projects/gc-web-emu/.perf-lock`, PROGRAM.md), a private one elsewhere;
+  `--private-lock` / `--shared-lock` override.
 - About 25 minutes for one backend at the defaults, 45 for `both`.
 - Results go to `../measures/harness/consumer-<label>-<date>/` (or `--out`):
-  `report.md`, `report.json`, and race-perf's per-run JSON per backend.
+  `report.md`, `report.json` (adapter features, presenter, Chrome flags,
+  load), the renderer-check captures, and race-perf's per-run JSON per backend.
 
 ## Machine-specific notes
 
 - **Linux.** Headless Chrome needs access to the GPU (`/dev/dri`, user in the
   `video`/`render` groups). If the adapter comes out as fallback or missing,
   try `HARNESS_CHROME_ARGS="--enable-features=Vulkan --use-angle=vulkan"`.
-  Per-thread CPU comes from `ps -L`.
+  Per-thread CPU comes from `/proc/<pid>/task` over 500 ms.
 - **Windows.** An SSH session (OpenSSH runs as a service) may not see the
   GPU: if `report.md` shows a fallback or missing adapter, run the same
   command from the logged-in user's session. There is no per-thread CPU on
@@ -71,5 +85,6 @@ node harness\probes\consumer-perf.mjs --iso C:\path\to\disc.iso --label <machine
   `report.md` table, the commit, and anything unusual (load, throttling,
   power plan, laptop on battery).
 
-Check the script on the development Mac first (headless, in a CORRECTION
-slot, with a private lock): `--backend both --runs 2 --max-load 100`.
+Check the script on the development Mac first, headless, in a CORRECTION
+slot with a private lock (the shared one is for MEASURE slots):
+`--backend both --runs 2 --max-load 100 --private-lock`.

@@ -6,12 +6,20 @@ import { createHash } from "node:crypto";
 import os from "node:os";
 import { existsSync, readdirSync, readFileSync } from "node:fs";
 import path from "node:path";
-import { pathToFileURL } from "node:url";
+import { fileURLToPath, pathToFileURL } from "node:url";
 import { FRAME_FIELDS } from "./matrix.mjs";
 import { decodePng } from "./png.mjs";
 import { ensureServer as serveTree } from "./server.mjs";
 
-export const REPO_ROOT = path.resolve(path.dirname(new URL(import.meta.url).pathname), "..", "..");
+// The checkout root two levels above a module, as a file system path. A URL's
+// pathname is not one: on Windows it reads /C:/…, and spaces or accents stay
+// percent-encoded on every system.
+export function repoRootOf(moduleUrl, { windows = process.platform === "win32" } = {}) {
+  const root = fileURLToPath(new URL("../..", moduleUrl), { windows });
+  return (windows ? path.win32 : path.posix).resolve(root);
+}
+
+export const REPO_ROOT = repoRootOf(import.meta.url);
 
 // Messages that mean the emulator is dead or the JIT emitted bad code.
 export const FATAL_PATTERN = /CompileError|LinkError|RuntimeError|WebAssembly\.Module|unreachable executed|Aborted\(|out of memory|worker (?:error|crashed)|memory access out of bounds/i;

@@ -37,7 +37,7 @@
 //   measures again: cold and warm caches on the same run.
 import { execFileSync } from "node:child_process";
 import { randomBytes } from "node:crypto";
-import { existsSync, mkdirSync, readFileSync, rmSync, statSync, writeFileSync } from "node:fs";
+import { existsSync, mkdirSync, readdirSync, readFileSync, rmSync, statSync, writeFileSync } from "node:fs";
 import os from "node:os";
 import path from "node:path";
 import { pathToFileURL } from "node:url";
@@ -79,16 +79,34 @@ export function pairedSpeedChange(runs, { metric = "speed", minPairs = 4 } = {})
   return out;
 }
 
-// %CPU of each thread of `pid`: ps -M on macOS (the first row is the process
-// total), ps -L on Linux; null where ps has no per-thread view (Windows).
+// user + system clock ticks of every thread of `pid` (Linux /proc).
+function linuxThreadTicks(pid) {
+  const out = new Map();
+  for (const tid of readdirSync(`/proc/${pid}/task`)) {
+    try {
+      const stat = readFileSync(`/proc/${pid}/task/${tid}/stat`, "utf8");
+      const f = stat.slice(stat.lastIndexOf(")") + 2).split(" "); // fields from 3 (state) on
+      out.set(tid, Number(f[11]) + Number(f[12])); // utime, stime (fields 14, 15)
+    } catch {} // the thread ended meanwhile
+  }
+  return out;
+}
+let clockTicks = null;
+
+// %CPU of each thread of `pid` now: ps -M on macOS (the first row is the
+// process total); on Linux, /proc over 500 ms (ps -L reports a lifetime
+// average); null where there is no per-thread view (Windows).
 function threadCpus(pid) {
   if (process.platform === "darwin") {
     return execFileSync("ps", ["-M", "-o", "%cpu=", "-p", pid], { encoding: "utf8" })
       .split("\n").map((l) => Number(l.trim().split(/\s+/).at(-1))).filter(Number.isFinite).slice(1);
   }
   if (process.platform === "linux") {
-    return execFileSync("ps", ["-L", "-o", "pcpu=", "-p", pid], { encoding: "utf8" })
-      .split("\n").map((l) => Number(l.trim())).filter(Number.isFinite);
+    clockTicks ??= Number(execFileSync("getconf", ["CLK_TCK"], { encoding: "utf8" }).trim()) || 100;
+    const a = linuxThreadTicks(pid);
+    Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, 500);
+    const b = linuxThreadTicks(pid);
+    return [...b].filter(([tid]) => a.has(tid)).map(([tid, t]) => Math.round((1000 * (t - a.get(tid))) / clockTicks / 0.5) / 10);
   }
   return null;
 }

@@ -12,17 +12,28 @@ import { checkCore } from "./core-identity.mjs";
 import { claim } from "./ownership.mjs";
 import { machineSnapshot, sampleChromeCpu } from "./system.mjs";
 
+// Profiles of the sessions still open in this process. A process that ends
+// without closing them (a signal handler calling process.exit, Ctrl-C, an SSH
+// session closing) still removes them on its way out: Chrome, launched over a
+// pipe, goes with its parent.
+const liveProfiles = new Set();
+process.on("exit", () => {
+  for (const dir of liveProfiles) rmSync(dir, { recursive: true, force: true });
+});
+
 // `launch` is a seam for tests; it defaults to the headless launchChrome.
 export async function openSession({ base, server = null, query, iso, display = "headless", gamepads = null, keepProfile = false, routes = {}, launch = launchChrome }) {
   // Fail before Chrome exists: a missing disc must not cost a browser.
   if (!iso || !existsSync(iso)) throw new Error(`disc image not found: ${iso}`);
   const profileDir = mkdtempSync(path.join(os.tmpdir(), "gc-harness-profile-"));
   const releaseProfile = claim(profileDir, REPO_ROOT, "chrome-profile");
+  if (!keepProfile) liveProfiles.add(profileDir);
   let context = null;
   const discard = async () => {
     await context?.close().catch(() => {});
     releaseProfile();
     if (!keepProfile) rmSync(profileDir, { recursive: true, force: true });
+    liveProfiles.delete(profileDir);
   };
   try {
     context = await launch({ profileDir, display });
