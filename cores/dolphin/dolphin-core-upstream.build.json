@@ -1,18 +1,18 @@
 {
   "schemaVersion": 1,
-  "createdAt": "2026-10-18T05:41:25.130Z",
-  "coreId": "sha256:1248b723ed1460af3f039938eccd596f81b1641080e21dbbe45c55c91d3f6b3b",
+  "createdAt": "2026-10-18T07:20:01.626Z",
+  "coreId": "sha256:955d01bd041f2b76f67af0e64c9dee60521399155e44eb4ef27fba31b9d299f0",
   "repository": {
-    "commit": "a35b6de1de90f5b3fff992dc645554a2e261c111",
+    "commit": "83bce6df37aa2cb4931df99495a7b0af713584d1",
     "status": "",
     "cleanTree": true
   },
   "source": {
     "upstreamCommit": "e22551eae1c84a7e4d0b6a5c519ef4ed4ef69df1",
-    "patchSeriesSha256": "a4afb0f750c2ec7f3bcbd597f93c0d19748cae086f2c9dfc8a6ffd87a141b1c3",
-    "vendorResultTree": "8c7331c382f890a2e2298ef6981a268d3a8a3273",
-    "sourceLockSha256": "1a296a9df232b56455cafb737a303ea7504913794189f115fb0e5555c9a87832",
-    "vendorSnapshotSha256": "1dde46a0806bd79a8e694ae779dd04e1f70452e9ca2df5b85feb62d8c7475c18",
+    "patchSeriesSha256": "1684bb866c7e44035ca43f4b3ce107d7afc7333ab40ce34178fd481d65fbef50",
+    "vendorResultTree": "c9214bc4fe1cef64c375dfbd2334ba96207928ce",
+    "sourceLockSha256": "841dd23789536755aa47bd3b5394f1bcdfd3647cba2d751570cb5c5b8d9acb8c",
+    "vendorSnapshotSha256": "9f91d3608fe9d60485d6c5159e5f118c02d03a5158eef0581ce8f00c262ba96d",
     "localInputsSha256": "d2ba15e02858d410e104d342e2dfa5b5bfe26190ff968929395d8686d588ff75",
     "localInputs": [
       {
@@ -91,31 +91,31 @@
     }
   },
   "configure": {
-    "buildDir": "/Users/baptistec/projects/gc-web-emu/wt-input/build/repro/darwin-arm64/dolphin-wasm",
-    "outputDir": "/Users/baptistec/projects/gc-web-emu/wt-input/build/repro/darwin-arm64/core",
+    "buildDir": "/Users/baptistec/projects/gc-web-emu/wt-jit-pr/build/repro/darwin-arm64/dolphin-wasm",
+    "outputDir": "/Users/baptistec/projects/gc-web-emu/wt-jit-pr/build/repro/darwin-arm64/core",
     "nagaLibrarySha256": "1a17c332115d4c4a87872a6203f2ea62abea54ac75242541f57b52b059e893d7",
     "wasmMemoryPages": 24576,
     "fastBranchInline": "1",
     "fallbackMapDiagnostics": "0",
     "fallbackMapBits": "16",
     "directWasmBlockDispatch": "0",
-    "wasmCompileFlags": "-O3 -pthread -msimd128 -flto -DXXH_VECTOR=0 -DDOLPHIN_WEB_HOT_COUNTERS=0 -DDOLPHIN_WEB_INLINE_FAST_BRANCH=1 -DDOLPHIN_WEB_FALLBACK_MAP_DIAGNOSTICS=0 -DDOLPHIN_WEB_FALLBACK_MAP_BITS=16 -DDOLPHIN_WEB_DIRECT_WASM_BLOCK_DISPATCH=0 -ffile-prefix-map=/Users/baptistec/projects/gc-web-emu/wt-input=/wasm-dolphin",
+    "wasmCompileFlags": "-O3 -pthread -msimd128 -flto -DXXH_VECTOR=0 -DDOLPHIN_WEB_HOT_COUNTERS=0 -DDOLPHIN_WEB_INLINE_FAST_BRANCH=1 -DDOLPHIN_WEB_FALLBACK_MAP_DIAGNOSTICS=0 -DDOLPHIN_WEB_FALLBACK_MAP_BITS=16 -DDOLPHIN_WEB_DIRECT_WASM_BLOCK_DISPATCH=0 -ffile-prefix-map=/Users/baptistec/projects/gc-web-emu/wt-jit-pr=/wasm-dolphin",
     "sourcePathFlags": [
-      "-ffile-prefix-map=/Users/baptistec/projects/gc-web-emu/wt-input=/wasm-dolphin"
+      "-ffile-prefix-map=/Users/baptistec/projects/gc-web-emu/wt-jit-pr=/wasm-dolphin"
     ],
     "rustRemapFlags": [
       "--remap-path-prefix=/Users/baptistec/.cargo=/cargo",
       "--remap-path-prefix=/Users/baptistec/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f=/cargo/registry/src/crates.io",
       "--remap-path-prefix=/Users/baptistec/.cargo/registry/src/socket-registry.mistralai.com-fba0917c93a2a475=/cargo/registry/src/crates.io",
       "--remap-path-prefix=/Users/baptistec/.rustup/toolchains/nightly-2026-05-15-aarch64-apple-darwin/lib/rustlib/src/rust=/rustc/7c3c88f42ad444f4688b865591d84660be4ece2f",
-      "--remap-path-prefix=/Users/baptistec/projects/gc-web-emu/wt-input=/wasm-dolphin"
+      "--remap-path-prefix=/Users/baptistec/projects/gc-web-emu/wt-jit-pr=/wasm-dolphin"
     ],
     "cmakeArgs": [
       "/Users/baptistec/projects/gc-web-emu/wt-build/.tools/python/bin/cmake",
       "-S",
-      "/Users/baptistec/projects/gc-web-emu/wt-input/vendor/dolphin",
+      "/Users/baptistec/projects/gc-web-emu/wt-jit-pr/vendor/dolphin",
       "-B",
-      "/Users/baptistec/projects/gc-web-emu/wt-input/build/repro/darwin-arm64/dolphin-wasm",
+      "/Users/baptistec/projects/gc-web-emu/wt-jit-pr/build/repro/darwin-arm64/dolphin-wasm",
       "-GNinja",
       "-DCMAKE_MAKE_PROGRAM=/Users/baptistec/projects/gc-web-emu/wt-build/.tools/python/bin/ninja",
       "-DCMAKE_BUILD_TYPE=Release",
@@ -153,93 +153,93 @@
       "-DWITH_AVX512=OFF",
       "-DWITH_AVX512VNNI=OFF",
       "-DWITH_VPCLMULQDQ=OFF",
-      "-DCMAKE_C_FLAGS:STRING=-O3 -pthread -msimd128 -flto -DXXH_VECTOR=0 -DDOLPHIN_WEB_HOT_COUNTERS=0 -DDOLPHIN_WEB_INLINE_FAST_BRANCH=1 -DDOLPHIN_WEB_FALLBACK_MAP_DIAGNOSTICS=0 -DDOLPHIN_WEB_FALLBACK_MAP_BITS=16 -DDOLPHIN_WEB_DIRECT_WASM_BLOCK_DISPATCH=0 -ffile-prefix-map=/Users/baptistec/projects/gc-web-emu/wt-input=/wasm-dolphin",
-      "-DCMAKE_CXX_FLAGS:STRING=-O3 -pthread -msimd128 -flto -DXXH_VECTOR=0 -DDOLPHIN_WEB_HOT_COUNTERS=0 -DDOLPHIN_WEB_INLINE_FAST_BRANCH=1 -DDOLPHIN_WEB_FALLBACK_MAP_DIAGNOSTICS=0 -DDOLPHIN_WEB_FALLBACK_MAP_BITS=16 -DDOLPHIN_WEB_DIRECT_WASM_BLOCK_DISPATCH=0 -ffile-prefix-map=/Users/baptistec/projects/gc-web-emu/wt-input=/wasm-dolphin",
+      "-DCMAKE_C_FLAGS:STRING=-O3 -pthread -msimd128 -flto -DXXH_VECTOR=0 -DDOLPHIN_WEB_HOT_COUNTERS=0 -DDOLPHIN_WEB_INLINE_FAST_BRANCH=1 -DDOLPHIN_WEB_FALLBACK_MAP_DIAGNOSTICS=0 -DDOLPHIN_WEB_FALLBACK_MAP_BITS=16 -DDOLPHIN_WEB_DIRECT_WASM_BLOCK_DISPATCH=0 -ffile-prefix-map=/Users/baptistec/projects/gc-web-emu/wt-jit-pr=/wasm-dolphin",
+      "-DCMAKE_CXX_FLAGS:STRING=-O3 -pthread -msimd128 -flto -DXXH_VECTOR=0 -DDOLPHIN_WEB_HOT_COUNTERS=0 -DDOLPHIN_WEB_INLINE_FAST_BRANCH=1 -DDOLPHIN_WEB_FALLBACK_MAP_DIAGNOSTICS=0 -DDOLPHIN_WEB_FALLBACK_MAP_BITS=16 -DDOLPHIN_WEB_DIRECT_WASM_BLOCK_DISPATCH=0 -ffile-prefix-map=/Users/baptistec/projects/gc-web-emu/wt-jit-pr=/wasm-dolphin",
       "-DCMAKE_C_FLAGS_DEBUG:STRING=-O0 -fno-lto",
       "-DCMAKE_CXX_FLAGS_DEBUG:STRING=-O0 -fno-lto",
-      "-DDOLPHIN_WASM_NAGA_WGSL_LIB=/Users/baptistec/projects/gc-web-emu/wt-input/build/repro/darwin-arm64/naga-target/wasm32-unknown-emscripten/release/libnaga_spirv_wgsl.a",
-      "-DDOLPHIN_WASM_JIT_CACHE_PRE_JS=/Users/baptistec/projects/gc-web-emu/wt-input/tools/jit-cache-prejs.js",
+      "-DDOLPHIN_WASM_NAGA_WGSL_LIB=/Users/baptistec/projects/gc-web-emu/wt-jit-pr/build/repro/darwin-arm64/naga-target/wasm32-unknown-emscripten/release/libnaga_spirv_wgsl.a",
+      "-DDOLPHIN_WASM_JIT_CACHE_PRE_JS=/Users/baptistec/projects/gc-web-emu/wt-jit-pr/tools/jit-cache-prejs.js",
       "-DDOLPHIN_WASM_MEMORY_PAGES=24576",
-      "-DDOLPHIN_WASM_PROJECT_ROOT=/Users/baptistec/projects/gc-web-emu/wt-input",
+      "-DDOLPHIN_WASM_PROJECT_ROOT=/Users/baptistec/projects/gc-web-emu/wt-jit-pr",
       "-DCMAKE_DISABLE_FIND_PACKAGE_Git=ON",
       "-DGIT_FOUND=ON",
-      "-DGIT_EXECUTABLE=/Users/baptistec/projects/gc-web-emu/wt-input/build/repro/darwin-arm64/dolphin-wasm/scm-git.sh",
-      "-DDOLPHIN_WASM_BRIDGE_SOURCE=/Users/baptistec/projects/gc-web-emu/wt-input/core/upstream/dolphin_web_discio.cpp",
-      "-DDOLPHIN_WASM_SHARED_SOURCE_DIR=/Users/baptistec/projects/gc-web-emu/wt-input/core/upstream",
-      "-DDOLPHIN_WASM_OUTPUT_DIR=/Users/baptistec/projects/gc-web-emu/wt-input/build/repro/darwin-arm64/core",
-      "-DDOLPHIN_WASM_CORE_SOURCE=/Users/baptistec/projects/gc-web-emu/wt-input/core/upstream/dolphin_web_core.cpp",
-      "-DDOLPHIN_WASM_OUTPUT_DIR=/Users/baptistec/projects/gc-web-emu/wt-input/build/repro/darwin-arm64/core"
+      "-DGIT_EXECUTABLE=/Users/baptistec/projects/gc-web-emu/wt-jit-pr/build/repro/darwin-arm64/dolphin-wasm/scm-git.sh",
+      "-DDOLPHIN_WASM_BRIDGE_SOURCE=/Users/baptistec/projects/gc-web-emu/wt-jit-pr/core/upstream/dolphin_web_discio.cpp",
+      "-DDOLPHIN_WASM_SHARED_SOURCE_DIR=/Users/baptistec/projects/gc-web-emu/wt-jit-pr/core/upstream",
+      "-DDOLPHIN_WASM_OUTPUT_DIR=/Users/baptistec/projects/gc-web-emu/wt-jit-pr/build/repro/darwin-arm64/core",
+      "-DDOLPHIN_WASM_CORE_SOURCE=/Users/baptistec/projects/gc-web-emu/wt-jit-pr/core/upstream/dolphin_web_core.cpp",
+      "-DDOLPHIN_WASM_OUTPUT_DIR=/Users/baptistec/projects/gc-web-emu/wt-jit-pr/build/repro/darwin-arm64/core"
     ],
-    "cmakeCacheSha256": "ec0eb8caca6791c5820396328136c227c0240a5d55bffe8c19626ecc2232cebd"
+    "cmakeCacheSha256": "3babe52f6ae7c20cb152f57c3eeaf3d551eb7ca9c73930b066ee83cfefe446de"
   },
   "artifacts": {
     "js": {
-      "path": "/Users/baptistec/projects/gc-web-emu/wt-input/build/repro/darwin-arm64/core/dolphin-core-upstream.js",
-      "size": 269080,
-      "sha256": "6fcd157ec3936dabb5854872a58bc2784e698be2937706ca16c4c8491254acc3",
+      "path": "/Users/baptistec/projects/gc-web-emu/wt-jit-pr/build/repro/darwin-arm64/core/dolphin-core-upstream.js",
+      "size": 270148,
+      "sha256": "0df84d85ac9f5194fcecaea1a1cef7d27f363c2b1871321affaff7896de5e2ac",
       "hashMode": "lf-normalized"
     },
     "wasm": {
-      "path": "/Users/baptistec/projects/gc-web-emu/wt-input/build/repro/darwin-arm64/core/dolphin-core-upstream.wasm",
-      "size": 12954677,
-      "sha256": "1248b723ed1460af3f039938eccd596f81b1641080e21dbbe45c55c91d3f6b3b",
+      "path": "/Users/baptistec/projects/gc-web-emu/wt-jit-pr/build/repro/darwin-arm64/core/dolphin-core-upstream.wasm",
+      "size": 12988186,
+      "sha256": "955d01bd041f2b76f67af0e64c9dee60521399155e44eb4ef27fba31b9d299f0",
       "hashMode": "raw"
     },
     "wasmSections": [
       {
         "id": 1,
-        "size": 2005,
-        "sha256": "69efe147d818b73418ca9f01d3b6ea40ba3b5e4b9c823dde9fd960148fc678fe"
+        "size": 1987,
+        "sha256": "ece41f08d4fd43b794a9b7dfcefdda8878aee7fbaf57a46b0c04ef4e13e4622d"
       },
       {
         "id": 2,
         "size": 2420,
-        "sha256": "44e58ce7857ff23a5f9af9b33d5e6930b7d9617a23a0acb71bea82269d8afa84"
+        "sha256": "9d05ae371accfaa476b1dd1b9e633dfb96625ac6089292d0272a5e4ac33da0cf"
       },
       {
         "id": 3,
-        "size": 12464,
-        "sha256": "96dcbc3b80af42de2ea6c3fe5b4a62f4452cd413e9a2f000d67289c14d2bd06b"
+        "size": 12480,
+        "sha256": "0b5f2a090a4737dfc5312664851ad97f82dedccaa87c530b772eb8a96797ef1c"
       },
       {
         "id": 4,
         "size": 5,
-        "sha256": "0acc3f6bce7ac99b9cc92f1cb3ed9fe909743d212794c05cd0b5d5cef65b1ca3"
+        "sha256": "4ded0ef96155c41534594cedc58d57e53ae6b2620851233414b7e137c656c736"
       },
       {
         "id": 6,
         "size": 49,
-        "sha256": "8eaa9ea39881c9b249a8c7cad35c191bf8d5e5d3ff880dd8e6fdda501c400f7c"
+        "sha256": "8411a47ba4d6be24af001e50b644d52fac1857cd9002826f4a83d5593d33a835"
       },
       {
         "id": 7,
-        "size": 1177,
-        "sha256": "46a6f863b42121b3e42fe5158572c1ce38f3e481cfe2223dda2dddb0f6290d56"
+        "size": 1213,
+        "sha256": "e667c313a7028727e7e6e8d550d97a7dfcf0fb42a11c4e44946e103896f028e1"
       },
       {
         "id": 8,
         "size": 2,
-        "sha256": "3aa9029cec05e2ee3a9aef5e6380162f81516f7ad1af2e0ded80098d7da3a687"
+        "sha256": "e32a6896456639a11454a31d8cdf86251c716e6280d506d4502efe30ea43f31a"
       },
       {
         "id": 9,
-        "size": 22563,
-        "sha256": "cac01bff8b7876de3eac713e21780d88807161eadb910f086b86a15ca99c9379"
+        "size": 22565,
+        "sha256": "7e6a90fcbbe25b92e2eef0f7a059a936ead49e60eb39335568b8ded6cc7db920"
       },
       {
         "id": 12,
         "size": 2,
-        "sha256": "2903a4c0e97343e728bf895ee01659ab596e6978adac4ff392d203cb711dadc5"
+        "sha256": "581a227d8b8c5cdccd8975eb2a5bde033aa3cd94d200c054edd17a01a6fc8219"
       },
       {
         "id": 10,
-        "size": 10467633,
-        "sha256": "a4ce05bac2628d82173dfe1000432dc1ffcfc3529af23bd48418d8a3f0664989"
+        "size": 10500746,
+        "sha256": "9b328249e982653a30a7941905c1e2159d7b078ef71ac3206312a714de9e6fbc"
       },
       {
         "id": 11,
-        "size": 2446315,
-        "sha256": "71b127d4b2f5a5e6acf4f47bdad3296d0b54041dc1b583b949fd9a8e1b083379"
+        "size": 2446675,
+        "sha256": "58d738a2a5ffc0f0b5b4aa41b7c5e046654088881844adc23e989e03f08298ff"
       }
     ]
   }
