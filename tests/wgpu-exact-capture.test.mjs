@@ -103,7 +103,7 @@ test("readback rows drop the 256-byte padding and swap BGRA", () => {
 
 test("the worker routes video=wgpu captures to the tagged presents", async () => {
   const worker = await readFile(new URL("../src/upstream-discio-worker.js", import.meta.url), "utf8");
-  assert.match(worker, /if \(harnessVideoBackend === "WebGPU"\) return captureAtViOutputWgpu\(/);
+  assert.match(worker, /if \(harnessVideoBackend === "WebGPU-Real" \|\| harnessVideoBackend === "WebGPU"\) return captureAtViOutputWgpu\(/);
   assert.match(worker, /const WGPU_CMD_OP_VI_TAG = 26;/);
   assert.match(worker, /case WGPU_CMD_OP_VI_TAG:\n\s*\/\/[^\n]*\n\s*wgpuExactCapture\.onViTag\(/);
   assert.match(worker, /recordPresentedFrame\(api\?\.getFrame\?\.\(\) \?\? 0\);\n\s*wgpuExactCapture\.onPresent\(readbackWgpuPresentSource\);/);
