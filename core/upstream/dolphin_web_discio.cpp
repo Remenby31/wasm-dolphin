@@ -131,8 +131,13 @@ struct PadPollSnapshot
   std::uint8_t stick_y = GCPadStatus::MAIN_STICK_CENTER_Y;
 };
 
+// One snapshot and one connection flag per GameCube port. Port 1 (index 0)
+// starts connected: the keyboard drives it by default. A disconnected port
+// answers "no controller" to the SI poll, so a game never sees a phantom pad.
+constexpr int PAD_PORT_COUNT = 4;
 std::mutex s_input_state_mutex;
-InputStateSnapshot s_input_state;
+std::array<InputStateSnapshot, PAD_PORT_COUNT> s_input_states{};
+std::array<bool, PAD_PORT_COUNT> s_pad_connected{true, false, false, false};
 std::mutex s_pad_poll_mutex;
 PadPollSnapshot s_pad_poll;
 bool s_using_xfb_frame = false;
@@ -665,7 +670,7 @@ void RenderMetadataFrame()
   std::uint32_t input_mask = 0;
   {
     const std::lock_guard<std::mutex> lock(s_input_state_mutex);
-    input_mask = s_input_state.mask;
+    input_mask = s_input_states[0].mask;
   }
 
   for (int y = 0; y < METADATA_FRAME_HEIGHT; ++y)
@@ -810,40 +815,66 @@ void SetInputMask(std::uint32_t mask)
 {
   {
     const std::lock_guard<std::mutex> lock(s_input_state_mutex);
-    s_input_state.mask = mask;
-    s_input_state.generation = 0;
-    s_input_state.stick_x = GCPadStatus::MAIN_STICK_CENTER_X;
-    s_input_state.stick_y = GCPadStatus::MAIN_STICK_CENTER_Y;
-    s_input_state.c_stick_x = GCPadStatus::C_STICK_CENTER_X;
-    s_input_state.c_stick_y = GCPadStatus::C_STICK_CENTER_Y;
-    s_input_state.trigger_left = 0;
-    s_input_state.trigger_right = 0;
-    s_input_state.analog_a = 0;
-    s_input_state.analog_b = 0;
+    s_input_states[0] = {};
+    s_input_states[0].mask = mask;
   }
   s_input_update_count.fetch_add(1, std::memory_order_relaxed);
+}
+
+// Port 0-3. connected = 0 unplugs the port (its state returns to neutral).
+// Returns 0 for a port out of range.
+#ifdef __EMSCRIPTEN__
+EMSCRIPTEN_KEEPALIVE
+#endif
+int SetPadState(int port, int connected, std::uint32_t mask, int stick_x, int stick_y,
+                int c_stick_x, int c_stick_y, int trigger_left, int trigger_right, int analog_a,
+                int analog_b, std::uint32_t generation)
+{
+  if (port < 0 || port >= PAD_PORT_COUNT)
+    return 0;
+
+  InputStateSnapshot next;
+  next.generation = generation;
+  if (connected)
+  {
+    next.mask = mask;
+    next.stick_x = ClampPadByte(stick_x);
+    next.stick_y = ClampPadByte(stick_y);
+    next.c_stick_x = ClampPadByte(c_stick_x);
+    next.c_stick_y = ClampPadByte(c_stick_y);
+    next.trigger_left = ClampPadByte(trigger_left);
+    next.trigger_right = ClampPadByte(trigger_right);
+    next.analog_a = ClampPadByte(analog_a);
+    next.analog_b = ClampPadByte(analog_b);
+  }
+  {
+    const std::lock_guard<std::mutex> lock(s_input_state_mutex);
+    s_input_states[port] = next;
+    s_pad_connected[port] = connected != 0;
+  }
+  s_input_update_count.fetch_add(1, std::memory_order_relaxed);
+  return 1;
 }
 
 void SetInputState(std::uint32_t mask, int stick_x, int stick_y, int c_stick_x, int c_stick_y,
                    int trigger_left, int trigger_right, int analog_a, int analog_b,
                    std::uint32_t generation)
 {
-  InputStateSnapshot next;
-  next.mask = mask;
-  next.generation = generation;
-  next.stick_x = ClampPadByte(stick_x);
-  next.stick_y = ClampPadByte(stick_y);
-  next.c_stick_x = ClampPadByte(c_stick_x);
-  next.c_stick_y = ClampPadByte(c_stick_y);
-  next.trigger_left = ClampPadByte(trigger_left);
-  next.trigger_right = ClampPadByte(trigger_right);
-  next.analog_a = ClampPadByte(analog_a);
-  next.analog_b = ClampPadByte(analog_b);
-  {
-    const std::lock_guard<std::mutex> lock(s_input_state_mutex);
-    s_input_state = next;
-  }
-  s_input_update_count.fetch_add(1, std::memory_order_relaxed);
+  SetPadState(0, 1, mask, stick_x, stick_y, c_stick_x, c_stick_y, trigger_left, trigger_right,
+              analog_a, analog_b, generation);
+}
+
+// Bit n set when port n is connected.
+#ifdef __EMSCRIPTEN__
+EMSCRIPTEN_KEEPALIVE
+#endif
+int GetPadConnectedMask()
+{
+  const std::lock_guard<std::mutex> lock(s_input_state_mutex);
+  int mask = 0;
+  for (int port = 0; port < PAD_PORT_COUNT; ++port)
+    mask |= s_pad_connected[port] ? 1 << port : 0;
+  return mask;
 }
 
 int SetPresentationScale(float scale)
@@ -1234,19 +1265,25 @@ const char* GetVideoStats()
   return current_video_stats.c_str();
 }
 
+// Answers every port, so Dolphin's own controller config is never consulted.
 int DolphinWeb_GetPadStatus(int pad_num, GCPadStatus* status)
 {
-  if (!status || pad_num != 0)
+  if (!status || pad_num < 0 || pad_num >= PAD_PORT_COUNT)
     return 0;
 
   InputStateSnapshot input;
+  bool connected;
   {
     const std::lock_guard<std::mutex> lock(s_input_state_mutex);
-    input = s_input_state;
+    input = s_input_states[pad_num];
+    connected = s_pad_connected[pad_num];
   }
 
   *status = {};
-  status->isConnected = true;
+  status->isConnected = connected;
+  if (!connected)
+    return 1;
+
   status->stickX = input.stick_x;
   status->stickY = input.stick_y;
   status->substickX = input.c_stick_x;
@@ -1294,26 +1331,27 @@ int DolphinWeb_GetPadStatus(int pad_num, GCPadStatus* status)
   if (mask & INPUT_D_RIGHT)
     status->button |= PAD_BUTTON_RIGHT;
 
-  if ((mask & INPUT_STICK_LEFT) && !(mask & INPUT_STICK_RIGHT))
-    status->stickX = 0x20;
-  else if ((mask & INPUT_STICK_RIGHT) && !(mask & INPUT_STICK_LEFT))
-    status->stickX = 0xe0;
+  // Digital directions (mask-only callers) drive a stick axis only while it
+  // rests, at the gate of a genuine controller (Dolphin: 0.794 and 0.722 of
+  // 127 around the centre), so they never clobber analog input.
+  constexpr int MAIN_FULL_TILT = 101;
+  constexpr int C_FULL_TILT = 92;
+  const auto digital_axis = [mask](std::uint8_t& axis, std::uint8_t center, int tilt,
+                                   std::uint32_t negative, std::uint32_t positive) {
+    if (axis != center || !(mask & negative) == !(mask & positive))
+      return;
+    axis = static_cast<std::uint8_t>(center + ((mask & positive) ? tilt : -tilt));
+  };
+  digital_axis(status->stickX, GCPadStatus::MAIN_STICK_CENTER_X, MAIN_FULL_TILT,
+               INPUT_STICK_LEFT, INPUT_STICK_RIGHT);
+  digital_axis(status->stickY, GCPadStatus::MAIN_STICK_CENTER_Y, MAIN_FULL_TILT,
+               INPUT_STICK_DOWN, INPUT_STICK_UP);
+  digital_axis(status->substickX, GCPadStatus::C_STICK_CENTER_X, C_FULL_TILT,
+               INPUT_C_STICK_LEFT, INPUT_C_STICK_RIGHT);
+  digital_axis(status->substickY, GCPadStatus::C_STICK_CENTER_Y, C_FULL_TILT,
+               INPUT_C_STICK_DOWN, INPUT_C_STICK_UP);
 
-  if ((mask & INPUT_STICK_UP) && !(mask & INPUT_STICK_DOWN))
-    status->stickY = 0xe0;
-  else if ((mask & INPUT_STICK_DOWN) && !(mask & INPUT_STICK_UP))
-    status->stickY = 0x20;
-
-  if ((mask & INPUT_C_STICK_LEFT) && !(mask & INPUT_C_STICK_RIGHT))
-    status->substickX = 0x20;
-  else if ((mask & INPUT_C_STICK_RIGHT) && !(mask & INPUT_C_STICK_LEFT))
-    status->substickX = 0xe0;
-
-  if ((mask & INPUT_C_STICK_UP) && !(mask & INPUT_C_STICK_DOWN))
-    status->substickY = 0xe0;
-  else if ((mask & INPUT_C_STICK_DOWN) && !(mask & INPUT_C_STICK_UP))
-    status->substickY = 0x20;
-
+  if (pad_num == 0)
   {
     const std::lock_guard<std::mutex> lock(s_pad_poll_mutex);
     ++s_pad_poll.poll_count;
