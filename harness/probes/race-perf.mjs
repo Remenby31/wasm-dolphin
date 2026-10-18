@@ -40,6 +40,7 @@ import { randomBytes } from "node:crypto";
 import { existsSync, mkdirSync, readFileSync, rmSync, statSync, writeFileSync } from "node:fs";
 import os from "node:os";
 import path from "node:path";
+import { pathToFileURL } from "node:url";
 import { parseArgs } from "node:util";
 
 import { exportRef } from "../cli.mjs";
@@ -78,16 +79,29 @@ export function pairedSpeedChange(runs, { metric = "speed", minPairs = 4 } = {})
   return out;
 }
 
-// The renderer of this profile and the CPU of its busiest threads (ps -M).
+// %CPU of each thread of `pid`: ps -M on macOS (the first row is the process
+// total), ps -L on Linux; null where ps has no per-thread view (Windows).
+function threadCpus(pid) {
+  if (process.platform === "darwin") {
+    return execFileSync("ps", ["-M", "-o", "%cpu=", "-p", pid], { encoding: "utf8" })
+      .split("\n").map((l) => Number(l.trim().split(/\s+/).at(-1))).filter(Number.isFinite).slice(1);
+  }
+  if (process.platform === "linux") {
+    return execFileSync("ps", ["-L", "-o", "pcpu=", "-p", pid], { encoding: "utf8" })
+      .split("\n").map((l) => Number(l.trim())).filter(Number.isFinite);
+  }
+  return null;
+}
+
+// The renderer of this profile and the CPU of its busiest threads.
 function rendererThreads(profileDir) {
+  if (!["darwin", "linux"].includes(process.platform)) return { error: `no per-thread CPU on ${process.platform}` };
   try {
     const ps = execFileSync("ps", ["-A", "-o", "pid=,command="], { encoding: "utf8", maxBuffer: 32 << 20 });
     const pids = ps.split("\n").filter((l) => l.includes(profileDir) && l.includes("--type=renderer")).map((l) => l.trim().split(/\s+/)[0]);
     let best = null;
     for (const pid of pids) {
-      const rows = execFileSync("ps", ["-M", "-o", "%cpu=", "-p", pid], { encoding: "utf8" })
-        .split("\n").map((l) => Number(l.trim().split(/\s+/).at(-1))).filter(Number.isFinite);
-      const threads = rows.slice(1).sort((a, b) => b - a); // first row is the process total
+      const threads = threadCpus(pid).sort((a, b) => b - a);
       if (!best || (threads[0] ?? 0) > best.busiest) best = { pid: Number(pid), busiest: threads[0] ?? null, next: threads.slice(1, 4) };
     }
     return best;
@@ -304,4 +318,4 @@ async function main() {
   process.exitCode = failed.length || summary.change?.withheld ? 1 : 0;
 }
 
-if (import.meta.url === `file://${process.argv[1]}`) await main();
+if (import.meta.url === pathToFileURL(process.argv[1] ?? "").href) await main();

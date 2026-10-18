@@ -22,7 +22,8 @@ export async function importPlaywright() {
     return await import("playwright");
   } catch {}
   // playwright-cli (the browser driver used for the evaluation) ships playwright.
-  const globalRoot = execFileSync("npm", ["root", "-g"], { encoding: "utf8" }).trim();
+  // npm is npm.cmd on Windows, which only runs through a shell.
+  const globalRoot = execFileSync("npm", ["root", "-g"], { encoding: "utf8", shell: process.platform === "win32" }).trim();
   for (const candidate of [
     path.join(globalRoot, "@playwright", "cli", "node_modules", "playwright", "index.mjs"),
     path.join(globalRoot, "playwright", "index.mjs")
@@ -82,7 +83,9 @@ export async function launchChrome({ profileDir, display = "headless", args = []
     viewport: { width: 1280, height: 800 },
     // Chrome's log and crash dumps stay in the profile; a session whose
     // renderer crashed copies them out as evidence (session.mjs).
-    args: [...opts.args, "--enable-logging", "--v=0", `--log-file=${path.join(profileDir, "chrome.log")}`, `--crash-dumps-dir=${path.join(profileDir, "crash-dumps")}`, ...args]
+    // HARNESS_CHROME_ARGS: extra flags for one machine (e.g. Linux WebGPU:
+    // "--enable-features=Vulkan --use-angle=vulkan"), space-separated.
+    args: [...opts.args, ...(process.env.HARNESS_CHROME_ARGS ?? "").split(/\s+/).filter(Boolean), "--enable-logging", "--v=0", `--log-file=${path.join(profileDir, "chrome.log")}`, `--crash-dumps-dir=${path.join(profileDir, "crash-dumps")}`, ...args]
   });
   context.assertInvisible = (when) => assertNoWindow(profileDir, when, () => context.close());
   return context;
