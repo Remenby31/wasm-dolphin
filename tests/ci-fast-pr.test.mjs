@@ -62,7 +62,9 @@ test("ccache entries are keyed on the pinned toolchain, not on em++", () => {
   }
   const env = ccacheEnvironment(lock, {});
   assert.match(env.CCACHE_COMPILERCHECK, new RegExp(`^string:${lock.emscripten.version}-${lock.emscripten.compilerCommit}-${lock.posix.emscriptenTreeSha256}-`));
-  assert.equal(env.CCACHE_BASEDIR, root);
+  // CCACHE_BASEDIR would rewrite paths -ffile-prefix-map relies on, and
+  // change the core's bytes.
+  assert.ok(!("CCACHE_BASEDIR" in env));
   assert.equal(env.CCACHE_NOHASHDIR, "1");
   assert.equal(env.CCACHE_DIR, path.join(root, "build/ccache"));
 });

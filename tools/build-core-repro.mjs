@@ -371,8 +371,12 @@ export function resetVendor(dolphinDir) {
 }
 
 // ccache keyed on the pinned toolchain rather than on em++ (a shell script
-// whose bytes do not change with the compiler behind it), with paths made
-// relative to the checkout so two checkouts share entries.
+// whose bytes do not change with the compiler behind it). No CCACHE_BASEDIR:
+// it rewrites absolute paths in the compiler's arguments as relative ones,
+// which -ffile-prefix-map then no longer matches, so __FILE__ strings and the
+// core's bytes change (measured: 284 strings became ../../../../vendor/...).
+// Entries are therefore shared only between builds at the same path, which CI
+// (always /wasm-dolphin in the container) is.
 export function ccacheEnvironment(lock = loadWasmToolchainLock(), env = process.env) {
   const binary = join(posixToolchainDir(), "ccache/ccache");
   if (!existsSync(binary)) {
@@ -386,7 +390,6 @@ export function ccacheEnvironment(lock = loadWasmToolchainLock(), env = process.
     DOLPHIN_WASM_CCACHE: binary,
     CCACHE_DIR: env.CCACHE_DIR ?? join(root, "build/ccache"),
     CCACHE_COMPILERCHECK: `string:${compiler}`,
-    CCACHE_BASEDIR: root,
     CCACHE_NOHASHDIR: "1",
     CCACHE_MAXSIZE: env.CCACHE_MAXSIZE ?? "2G"
   };
