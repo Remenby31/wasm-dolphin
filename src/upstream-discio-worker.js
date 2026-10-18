@@ -3333,14 +3333,15 @@ async function mountFile(file) {
   const _t_workerfs = performance.now();
   fs.mount(resolveWorkerFs(moduleInstance), { blobs: [{ name: safeName, data: file }] }, WORKERFS_MOUNT_DIR);
   mounted = true;
-  // P6: the disc's key for the region cache, read from the File off the boot path.
-  // A generation per mount: a slow read for a previous disc never lands.
-  const discGeneration = ++aotDiscGeneration;
+  // P6: the disc's key for the region cache is read from this File only when
+  // a region cache is first opened, never during boot: this worker serves the
+  // core's file reads, and extra work here while the core boots shifts what
+  // the emulated game shows. A generation per mount keeps a slow read for a
+  // previous disc from landing.
+  aotDiscGeneration += 1;
   aotDiscKey = null;
-  aotDiscKeyPromise = readDiscKeyFromFile(file).then(
-    (key) => (discGeneration === aotDiscGeneration ? (aotDiscKey = key) : null),
-    () => null
-  );
+  aotDiscKeyPromise = null;
+  aotDiscFile = file;
   console.log(`[boot-phase] fs.mount(WORKERFS) took ${(performance.now() - _t_workerfs).toFixed(1)}ms (${(file.size / 1048576).toFixed(1)}MiB image)`);
 
   // A .dol/.elf is no disc: DiscIO cannot open it, and BootDisc's
@@ -6687,11 +6688,22 @@ async function reconcileJitCacheWithBuild(fingerprint) {
 const AOT_BASE_URL = new URL("../", import.meta.url).href;
 let aotDiscKey = null;
 let aotDiscGeneration = 0;
-let aotDiscKeyPromise = Promise.resolve(null);
+let aotDiscKeyPromise = null;
+let aotDiscFile = null;
+function readMountedDiscKey() {
+  if (!aotDiscKeyPromise) {
+    const generation = aotDiscGeneration;
+    aotDiscKeyPromise = readDiscKeyFromFile(aotDiscFile).then(
+      (key) => (generation === aotDiscGeneration ? (aotDiscKey = key) : null),
+      () => null
+    );
+  }
+  return aotDiscKeyPromise;
+}
 let aotCoreFingerprint = null;
 export async function openDolphinAotCache({ compilerVersion, flagsMask = 0, coreHash = null, onProgress = null }) {
   const generation = aotDiscGeneration;
-  const discKey = aotDiscKey ?? await aotDiscKeyPromise;
+  const discKey = aotDiscKey ?? await readMountedDiscKey();
   if (generation !== aotDiscGeneration) return null;
   const core = coreHash ?? aotCoreFingerprint;
   if (!discKey || !core) return null;
