@@ -298,7 +298,7 @@ test("committed Dolphin provenance and ABI manifests verify", () => {
   // patch, then 109. The cached-interpreter JIT patches added four paths no
   // earlier patch touched -- CachedInterpreterBlockCache.cpp/.h,
   // CachedInterpreterLink.h and WasmDeferredCompileQueue.h -- taking it to
-  // 113. 0069 (memory card flush on request) adds three: GCMemcardBase.h,
+  // 113. 0070 (memory card flush on request) adds three: GCMemcardBase.h,
   // GCMemcardDirectory.h and EXI_DeviceMemoryCard.h, so 116. Update
   // deliberately when the series changes what it modifies.
   assert.equal(result.vendorSnapshot.rootPaths, 116);

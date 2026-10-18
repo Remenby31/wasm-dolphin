@@ -25,7 +25,7 @@
       "commit": "01e0577914a75a2569c846778c2f93aa8e6feddd"
     }
   },
-  "patchSeriesSha256": "1cbf121d0f7f2d05ed5ba2d478e8cc1dd5a2d9c5c6d7b4aaa3d62e317871e101",
+  "patchSeriesSha256": "afa7eb3f56778ffe11e4b0f5bbf80d7fa64d80b118b3e0aae254fac1c6990649",
   "patches": [
     {
       "order": 1,
@@ -551,7 +551,7 @@
       "order": 66,
       "cwd": ".",
       "hashMode": "lf-normalized",
-      "path": "patches/dolphin-wasm/snapshot/0069-memcard-flush-on-request.patch",
+      "path": "patches/dolphin-wasm/snapshot/0070-memcard-flush-on-request.patch",
       "size": 2177,
       "sha256": "b9983c06f12084212c9b128d03858cc3d4cd836c19e8b7f4d693ff3f17ea9a6b"
     },
