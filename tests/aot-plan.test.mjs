@@ -1,4 +1,5 @@
 import assert from "node:assert/strict";
+import { createHash } from "node:crypto";
 import test from "node:test";
 
 import { CONF_POINTER, CONF_PROFILE } from "../src/aot-discovery.js";
@@ -42,6 +43,8 @@ test("aot plan: regions carry ranges and a fingerprint that follows the code", (
   const f = m.functions.find((x) => x.entry === l.f);
   assert.deepEqual(f.ranges, [[l.f, l.f + 8]]);
   assert.equal(f.hash, regionHash((a) => image.read32(a), f.ranges));
+  assert.match(f.sha256, /^[0-9a-f]{64}$/);
+  assert.equal(f.sha256, createHash("sha256").update(Buffer.from([0x38, 0x60, 0x00, 0x01, 0x4e, 0x80, 0x00, 0x20])).digest("hex"), "sha256 of li r3,1; blr");
   // Same ranges over modified memory: another fingerprint, so the region is dropped.
   const patched = (a) => (a === l.f ? asm.li(3, 2) : image.read32(a));
   assert.notEqual(regionHash(patched, f.ranges), f.hash);

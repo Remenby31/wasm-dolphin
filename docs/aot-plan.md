@@ -93,7 +93,7 @@ JSON. Columns are flat arrays (one entry per block/edge) to keep it small.
       blocks: { start: [u32], end: [u32], func: [i32] },   // [start, end), end exclusive
       edges:  { from: [blockIdx], to: [blockIdx], kind: [EDGE] },
       functions: [{ entry, confidence, sources: [str], flags, ranges: [[start, end]],
-                    extraEntries: [u32], profileHits, hash }],
+                    extraEntries: [u32], profileHits, hash, sha256 }],
       jumpTables: [{ site, table, count, kind: "abs"|"rel", targets: [u32], bound: "cmplwi"|"scan"|"hint" }],
       indirectSites: [{ site, kind: "bctr"|"bctrl"|"bcctr"|"blrl", resolved: [u32] | null }],
       stats: { blocks, functions, codeBytes, execBytes, rejectedCandidates }
@@ -136,6 +136,14 @@ JSON. Columns are flat arrays (one entry per block/edge) to keep it small.
 order, ranges ascending: offset basis `0xcbf29ce484222325`, prime
 `0x100000001b3`, as 16 lowercase hex digits. Reference values are in
 `tests/aot-plan.test.mjs`.
+
+`sha256` = SHA-256 of the same bytes in the same order (64 lowercase hex).
+It is the identity of the region in the persistent cache: FNV-1a 64 is the
+fast check, not collision resistant across disc revisions, and the disc key
+does not cover RELs. Cache key of a compiled region (worker side, from
+`_DolphinWeb_AotKeyParts`):
+`region-v1:<compilerVersion, 8 hex>:<codegenMask, 8 hex>:<sha256>`, which
+ends in `:` + 64 hex as the cache requires (`isHashedAotKey`).
 
 Before compiling a region ahead of time, and before reusing a cached module
 for it, the compiler re-hashes guest memory over `ranges`. Different hash:
