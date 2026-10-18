@@ -49,6 +49,17 @@ every run's JSON (`core`). Candidate cores are served from
 `build/core-candidates/<sha>/` of the tree, or from directories passed with
 `--core-candidate <dir>`, and only when their wasm hashes to that sha.
 
+## Freeze probes
+
+During the measured window the timeline is drained every second. When it
+shows a freeze starting (no VI output for 2 s: core; or no presentation for
+2 s while VI outputs go on: present), the harness reads the worker's WebGPU
+replay and GPU sync state (`validationReadWgpuReplayState`) 4 times, 500 ms
+apart, and stores it in the run's JSON as `freezeProbes` (at most 3
+episodes per run, each state cut at 64 KB). A served worker without that
+message gets none and the episode is recorded as `unsupported`. Evidence
+only: freezes are judged by coreFreeze as before.
+
 ## Renderer crashes
 
 A Chrome renderer crash ("Target crashed") in a matrix cell is run once
