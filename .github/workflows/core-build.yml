@@ -1,15 +1,27 @@
 name: core build (Linux, reproducible)
 
-# Rebuilds the WASM core from pinned inputs in tools/toolchain/Dockerfile,
-# installs it in the workspace, runs the JS checks and tests on it, and
-# publishes it (artifact core-<sha256>) with the GPL corresponding source. A
-# second job rebuilds the core from that source archive alone and must get the
-# same bytes. On main, two more jobs publish the core: prepare-core-commit
-# (read-only) turns it into one validated commit, and push-core (the only job
-# that can write) pushes that commit without running any code from the
-# repository. Pull requests change sources only; the committed core always
-# comes from here (docs/repro-build.md, "Who builds the committed core").
-# No ROM is used anywhere.
+# Pull requests change sources only; the committed core always comes from this
+# workflow (docs/repro-build.md, "Who builds the committed core"). No ROM is
+# used anywhere.
+#
+# Pull requests take the fastest path that still tests what they change:
+# - changes: classifies the pull request. A pull request that touches no core
+#   input (tools/ci-changes.mjs) is tested by fast-tests against main's
+#   committed core, after core:status confirms that core is the build of the
+#   pull request's sources.
+# - build, on a pull request that touches a core input: builds the core through
+#   ccache, with the CMake tree, Emscripten cache and Naga target restored from
+#   main, installs it, and tests on it.
+#
+# main (and workflow_dispatch) keeps every guarantee:
+# - build: a ccache build from a clean tree (it refreshes the caches pull
+#   requests use), then a reference build with no cache of any kind, which
+#   must give the same bytes, then an incremental rebuild, which must too. The
+#   reference build is the one tested and published, with the GPL source.
+# - rebuild-from-source-archive: the published source archive alone must
+#   rebuild the same bytes.
+# - prepare-core-commit (read-only) and push-core (the only writer, which runs
+#   no repository code) commit the core on main.
 #
 # Third-party actions are pinned by commit SHA (the tag is in the comment):
 # re-running a commit runs the same code.
@@ -36,30 +48,19 @@ concurrency:
   cancel-in-progress: ${{ github.event_name == 'pull_request' }}
 
 jobs:
-  build:
+  changes:
     runs-on: ubuntu-24.04
-    timeout-minutes: 300
+    timeout-minutes: 10
     permissions:
       contents: read
     outputs:
-      wasm_sha256: ${{ steps.clean.outputs.wasm_sha256 }}
-      image_tag: ${{ steps.image.outputs.tag }}
+      core: ${{ steps.classify.outputs.core }}
     steps:
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
         with:
           persist-credentials: false
-          # On main: the tip at the time the run starts, not the commit that
-          # triggered it.
-          ref: ${{ github.ref == 'refs/heads/main' && 'refs/heads/main' || '' }}
-          # The guard below needs the merge base with the target branch.
+          # Merge base with the target branch, for both steps below.
           fetch-depth: 0
-
-      # The toolchain image (~5 GB), vendor/dolphin and the CMake tree do not
-      # fit next to the preinstalled SDKs.
-      - name: Free disk space
-        run: |
-          sudo rm -rf /usr/share/dotnet /usr/local/lib/android /opt/ghc /opt/hostedtoolcache/CodeQL
-          df -h /
 
       - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4
         with:
@@ -74,13 +75,100 @@ jobs:
           MODE: ${{ vars.CORE_ARTIFACTS_GUARD == 'enforce' && 'enforce' || 'warn' }}
         run: node tools/core-artifacts.mjs check --base "$BASE" --mode "$MODE"
 
+      - name: Does this need a core build?
+        id: classify
+        env:
+          EVENT: ${{ github.event_name }}
+          BASE: origin/${{ github.base_ref }}
+        run: |
+          if [ "$EVENT" != pull_request ]; then
+            echo "core=true" >> "$GITHUB_OUTPUT"
+          elif ! node tools/core-artifacts.mjs status --require-current; then
+            # Main's core for these sources is not committed yet (a C++ merge
+            # whose core CI has not published): build it here.
+            echo "core=true" >> "$GITHUB_OUTPUT"
+          else
+            node tools/ci-changes.mjs --base "$BASE"
+          fi
+
+  # A pull request with no core input: main's committed core is the build of
+  # its sources (core:status fails otherwise), so test on it.
+  fast-tests:
+    needs: changes
+    if: needs.changes.outputs.core != 'true'
+    runs-on: ubuntu-24.04
+    timeout-minutes: 20
+    permissions:
+      contents: read
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+        with:
+          persist-credentials: false
+
+      - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4
+        with:
+          node-version: 24.12.0
+
+      - name: The committed core is the build of these sources
+        run: node tools/core-artifacts.mjs status --require-current
+
+      # Source-contract tests read the patched Dolphin tree.
+      - name: Patched Dolphin sources
+        run: |
+          node tools/fetch-dolphin.mjs
+          node tools/patch-upstream-wasm.mjs
+
+      - name: npm run check
+        run: npm run check
+
+      - name: npm test
+        run: npm test
+
+      - name: npm run test:contract
+        run: npm run test:contract
+
+  build:
+    needs: changes
+    if: needs.changes.outputs.core == 'true'
+    runs-on: ubuntu-24.04
+    timeout-minutes: 300
+    permissions:
+      contents: read
+    outputs:
+      wasm_sha256: ${{ steps.result.outputs.wasm_sha256 }}
+      image_tag: ${{ steps.image.outputs.tag }}
+    env:
+      PR: ${{ github.event_name == 'pull_request' }}
+      REPRO: build/repro/linux-x64
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+        with:
+          persist-credentials: false
+          # On main: the tip at the time the run starts, not the commit that
+          # triggered it.
+          ref: ${{ github.ref == 'refs/heads/main' && 'refs/heads/main' || '' }}
+
+      - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4
+        with:
+          node-version: 24.12.0
+
       - uses: docker/setup-buildx-action@8d2750c68a42422c14e847fe6c8ac0403b4cbd6f # v3
 
       # The image tag is the content hash build-core-repro.mjs computes, so the
-      # run step below finds the image and does not rebuild it.
-      - name: Image tag
+      # build steps find the image and do not rebuild it. Cache keys derive
+      # from the same inputs.
+      - name: Image tag and cache keys
         id: image
-        run: echo "tag=$(node tools/build-core-repro.mjs --docker-context)" >> "$GITHUB_OUTPUT"
+        env:
+          TOOLCHAIN: ${{ hashFiles('provenance/wasm-toolchain.lock.json', 'tools/toolchain/**') }}
+          NAGA: ${{ hashFiles('tools/naga-spirv-wgsl/Cargo.lock', 'tools/naga-spirv-wgsl/Cargo.toml', 'tools/naga-spirv-wgsl/.cargo/**') }}
+        run: |
+          {
+            echo "tag=$(node tools/build-core-repro.mjs --docker-context)"
+            echo "toolchain=$TOOLCHAIN"
+            echo "naga=$NAGA"
+            echo "identity=$(node tools/build-core-repro.mjs --print-identity)"
+          } >> "$GITHUB_OUTPUT"
 
       - name: Toolchain image
         uses: docker/build-push-action@10e90e3645eae34f1e60eeb005ba3a3d33f178e8 # v6
@@ -92,37 +180,113 @@ jobs:
           cache-from: type=gha,scope=toolchain
           cache-to: type=gha,mode=max,scope=toolchain
 
-      - name: Rebuild the core from scratch
-        id: clean
+      # ccache: the newest main entry for this toolchain. On a pull request,
+      # also main's CMake tree for this build identity (same checkout path,
+      # source lock and toolchain lock; any other tree is emptied by
+      # build-core-repro.mjs), Emscripten's cache and Naga's target directory.
+      - name: Restore ccache
+        uses: actions/cache/restore@0057852bfaa89a56745cba8c7296529d2fc39830 # v4
+        with:
+          path: build/ccache
+          key: ccache-linux-x64-${{ steps.image.outputs.toolchain }}-${{ github.run_id }}
+          restore-keys: ccache-linux-x64-${{ steps.image.outputs.toolchain }}-
+
+      - name: Restore the CMake tree
+        if: env.PR == 'true'
+        uses: actions/cache/restore@0057852bfaa89a56745cba8c7296529d2fc39830 # v4
+        with:
+          path: ${{ env.REPRO }}/dolphin-wasm
+          key: cmake-linux-x64-${{ steps.image.outputs.identity }}
+
+      - name: Restore the Emscripten cache and Naga target
+        if: env.PR == 'true'
+        uses: actions/cache/restore@0057852bfaa89a56745cba8c7296529d2fc39830 # v4
+        with:
+          path: |
+            ${{ env.REPRO }}/em-cache
+            ${{ env.REPRO }}/naga-target
+          key: emcc-naga-linux-x64-${{ steps.image.outputs.toolchain }}-${{ steps.image.outputs.naga }}
+
+      # Pull request: one build, through every cache, installed for the tests.
+      - name: Build and install the core (cached)
+        if: env.PR == 'true'
+        run: node tools/build-core-repro.mjs --docker --bind-mounts --ccache --install --jobs "$(nproc)"
+
+      # main: a ccache build from a clean tree first; it refreshes the caches.
+      - name: Build the core through ccache from a clean tree
+        id: cached
+        if: env.PR != 'true'
         run: |
+          node tools/build-core-repro.mjs --docker --bind-mounts --ccache --clean --jobs "$(nproc)"
+          echo "wasm_sha256=$(node -p "require('./$REPRO/parity.json').rebuilt.wasmSha256")" >> "$GITHUB_OUTPUT"
+
+      - name: Save ccache
+        if: env.PR != 'true'
+        uses: actions/cache/save@0057852bfaa89a56745cba8c7296529d2fc39830 # v4
+        with:
+          path: build/ccache
+          key: ccache-linux-x64-${{ steps.image.outputs.toolchain }}-${{ github.run_id }}
+
+      - name: Save the CMake tree
+        if: env.PR != 'true'
+        continue-on-error: true  # already saved for this identity
+        uses: actions/cache/save@0057852bfaa89a56745cba8c7296529d2fc39830 # v4
+        with:
+          path: ${{ env.REPRO }}/dolphin-wasm
+          key: cmake-linux-x64-${{ steps.image.outputs.identity }}
+
+      - name: Save the Emscripten cache and Naga target
+        if: env.PR != 'true'
+        continue-on-error: true  # already saved for this toolchain
+        uses: actions/cache/save@0057852bfaa89a56745cba8c7296529d2fc39830 # v4
+        with:
+          path: |
+            ${{ env.REPRO }}/em-cache
+            ${{ env.REPRO }}/naga-target
+          key: emcc-naga-linux-x64-${{ steps.image.outputs.toolchain }}-${{ steps.image.outputs.naga }}
+
+      # main: the reference. No ccache, a clean CMake tree, a fresh Emscripten
+      # cache and Naga target. It must give the ccache build's bytes.
+      - name: Reference build, with no cache, must match the ccache build
+        id: reference
+        if: env.PR != 'true'
+        env:
+          CACHED_SHA256: ${{ steps.cached.outputs.wasm_sha256 }}
+        run: |
+          sudo rm -rf "$REPRO/em-cache" "$REPRO/naga-target"
           start=$(date +%s)
-          npm run build:core:repro -- --docker --bind-mounts --clean --jobs "$(nproc)"
+          node tools/build-core-repro.mjs --docker --bind-mounts --clean --jobs "$(nproc)"
           echo "CLEAN_BUILD_SECONDS=$(( $(date +%s) - start ))" >> "$GITHUB_ENV"
-          echo "wasm_sha256=$(node -p "require('./build/repro/linux-x64/parity.json').rebuilt.wasmSha256")" >> "$GITHUB_OUTPUT"
+          reference=$(node -p "require('./$REPRO/parity.json').rebuilt.wasmSha256")
+          echo "reference build $reference, ccache build $CACHED_SHA256"
+          test "$reference" = "$CACHED_SHA256"
+          echo "wasm_sha256=$reference" >> "$GITHUB_OUTPUT"
 
       # Recompiling one translation unit and relinking must give the same
       # bytes: anything else is non-determinism in the build.
-      - name: Incremental rebuild must match the clean build
+      - name: Incremental rebuild must match the reference build
+        if: env.PR != 'true'
         env:
-          CLEAN_SHA256: ${{ steps.clean.outputs.wasm_sha256 }}
+          REFERENCE_SHA256: ${{ steps.reference.outputs.wasm_sha256 }}
         run: |
           touch core/upstream/dolphin_web_discio.cpp
           start=$(date +%s)
-          npm run build:core:repro -- --docker --bind-mounts --no-sync --jobs "$(nproc)"
+          node tools/build-core-repro.mjs --docker --bind-mounts --no-sync --install --jobs "$(nproc)"
           echo "INCREMENTAL_BUILD_SECONDS=$(( $(date +%s) - start ))" >> "$GITHUB_ENV"
-          incremental=$(node -p "require('./build/repro/linux-x64/parity.json').rebuilt.wasmSha256")
-          if [ "$incremental" != "$CLEAN_SHA256" ]; then
-            echo "::error::incremental build $incremental differs from clean build $CLEAN_SHA256"
+          incremental=$(node -p "require('./$REPRO/parity.json').rebuilt.wasmSha256")
+          if [ "$incremental" != "$REFERENCE_SHA256" ]; then
+            echo "::error::incremental build $incremental differs from the reference build $REFERENCE_SHA256"
             exit 1
           fi
 
       # Tests run on the core built here, not on the committed one, so a pull
       # request that changes the C++ is tested against its own core.
-      - name: Install the rebuilt core in the workspace
+      - name: The installed core is the build of these sources
+        id: result
         run: |
-          npm run build:core:repro -- --docker --bind-mounts --no-sync --install --jobs "$(nproc)"
-          sudo chown -R "$(id -u):$(id -g)" cores provenance src
+          sudo chown -R "$(id -u):$(id -g)" cores provenance src build
           node tools/core-artifacts.mjs status --require-current
+          echo "wasm_sha256=$(node -p "require('./$REPRO/parity.json').rebuilt.wasmSha256")" >> "$GITHUB_OUTPUT"
           git status --short
 
       - name: npm run check
@@ -137,23 +301,26 @@ jobs:
 
       # Vendoring the crates needs the pinned cargo, which lives in the image.
       - name: GPL corresponding source
+        if: env.PR != 'true'
+        env:
+          IMAGE_TAG: ${{ steps.image.outputs.tag }}
         run: |
-          docker run --rm -v "$PWD:/wasm-dolphin" "${{ steps.image.outputs.tag }}" \
+          docker run --rm -v "$PWD:/wasm-dolphin" "$IMAGE_TAG" \
             sh -c 'npm run dist:source && chown -R "$0" dist tools/naga-spirv-wgsl/vendor' "$(id -u):$(id -g)"
 
       - name: Summary
         run: |
           {
-            echo "### Core rebuild (linux-x64)"
-            echo "- clean build: ${CLEAN_BUILD_SECONDS}s, incremental: ${INCREMENTAL_BUILD_SECONDS}s (same hash)"
+            echo "### Core build (linux-x64, $([ "$PR" = true ] && echo "pull request, cached" || echo "reference"))"
+            [ "$PR" = true ] || echo "- reference build: ${CLEAN_BUILD_SECONDS}s, incremental: ${INCREMENTAL_BUILD_SECONDS}s; ccache build, reference build and incremental build give the same bytes"
             node -e "
-              const p=require('./build/repro/linux-x64/parity.json');
-              console.log('- rebuilt wasm: \`sha256:'+p.rebuilt.wasmSha256+'\` ('+p.rebuilt.wasmBytes+' bytes)');
-              console.log('- committed wasm: \`sha256:'+p.committed.wasmSha256+'\`');
-              console.log('- sections equal: '+p.sections.filter(s=>s.equal).map(s=>s.label).join(', '));"
+              const p=require('./$REPRO/parity.json');
+              console.log('- wasm: \`sha256:'+p.rebuilt.wasmSha256+'\` ('+p.rebuilt.wasmBytes+' bytes)');
+              console.log('- timings (s): '+JSON.stringify(p.timingsSeconds));"
           } >> "$GITHUB_STEP_SUMMARY"
 
       - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        if: env.PR != 'true'
         with:
           name: corresponding-source
           path: dist/*.tar.gz
@@ -165,27 +332,25 @@ jobs:
         run: |
           mkdir -p build/core-artifact
           cp cores/dolphin/dolphin-core-upstream.* cores/dolphin/core.lock.json \
-            provenance/dolphin-core-abi-v1.json build/repro/linux-x64/parity.json build/core-artifact/
+            provenance/dolphin-core-abi-v1.json "$REPRO/parity.json" build/core-artifact/
 
       - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
         with:
-          name: core-${{ steps.clean.outputs.wasm_sha256 }}
+          name: core-${{ steps.result.outputs.wasm_sha256 }}
           path: build/core-artifact/
           if-no-files-found: error
           retention-days: 90
 
-  # The published archive must be enough to rebuild the core: no checkout, no
-  # git, no network for sources (the Rust crates are vendored in it). Only the
-  # toolchain is installed, from the lock inside the archive.
+  # main only: the published archive must be enough to rebuild the core: no
+  # checkout, no git, no network for sources (the Rust crates are vendored in
+  # it). Only the toolchain is installed, from the lock inside the archive.
   rebuild-from-source-archive:
     needs: build
+    if: github.event_name != 'pull_request'
     runs-on: ubuntu-24.04
     timeout-minutes: 300
     permissions: {}
     steps:
-      - name: Free disk space
-        run: sudo rm -rf /usr/share/dotnet /usr/local/lib/android /opt/ghc /opt/hostedtoolcache/CodeQL
-
       - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4
         with:
           node-version: 24.12.0
@@ -222,7 +387,7 @@ jobs:
         env:
           CHECKOUT_SHA256: ${{ needs.build.outputs.wasm_sha256 }}
         run: |
-          npm run build:core:repro -- --docker --bind-mounts --no-sync --clean --jobs "$(nproc)"
+          node tools/build-core-repro.mjs --docker --bind-mounts --no-sync --clean --jobs "$(nproc)"
           rebuilt=$(node -p "require('./build/repro/linux-x64/parity.json').rebuilt.wasmSha256")
           echo "archive build: $rebuilt, checkout build: $CHECKOUT_SHA256"
           test "$rebuilt" = "$CHECKOUT_SHA256"
