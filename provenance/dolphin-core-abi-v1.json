@@ -1,27 +1,27 @@
 {
   "schemaVersion": 1,
   "abiVersion": 1,
-  "coreId": "sha256:aa9e3e896e38673dffa52b555178809b0aebe943418cc1b956fbc8994a6580c6",
+  "coreId": "sha256:4057670b9bf8db271ee5a047ca4ca6d17b2d86477fd3d8a4623bdf47fd3e399a",
   "upstreamCommit": "e22551eae1c84a7e4d0b6a5c519ef4ed4ef69df1",
   "artifacts": [
     {
       "path": "cores/dolphin/dolphin-core-upstream.js",
       "hashMode": "lf-normalized",
-      "size": 270148,
-      "sha256": "0df84d85ac9f5194fcecaea1a1cef7d27f363c2b1871321affaff7896de5e2ac"
+      "size": 272025,
+      "sha256": "b3efeddcb87e8f528f9a143505156e36031dd37a144431cf58524a93142457fb"
     },
     {
       "path": "cores/dolphin/dolphin-core-upstream.wasm",
-      "size": 12989148,
-      "sha256": "aa9e3e896e38673dffa52b555178809b0aebe943418cc1b956fbc8994a6580c6"
+      "size": 12997998,
+      "sha256": "4057670b9bf8db271ee5a047ca4ca6d17b2d86477fd3d8a4623bdf47fd3e399a"
     }
   ],
   "contractSources": [
     {
       "path": "core/upstream/dolphin_web_discio.cpp",
       "hashMode": "lf-normalized",
-      "size": 55180,
-      "sha256": "0afdf1dbe3e4582ec391f204f4119f8c8bbaf99bfa40e72fd8164d291498302b"
+      "size": 59098,
+      "sha256": "640c5272dce7ca14b6abf93cf0ce696330daca359792d6ee9a18fa51188bff23"
     },
     {
       "path": "core/upstream/dolphin_web_raster_profile.h",
@@ -134,8 +134,8 @@
     {
       "path": "src/upstream-discio-worker.js",
       "hashMode": "lf-normalized",
-      "size": 627030,
-      "sha256": "a70bf3c59e8ef8b69f2bc8cbd3646c296bc5df27c933ab19a376ccdf171ed5c8"
+      "size": 632521,
+      "sha256": "46d9fec618f4e6d13017a56baff9505c8d0b43db390069ed82245c3fa4937965"
     },
     {
       "path": "src/wgpu-renderer-worker-probe.js",
@@ -350,17 +350,7 @@
     }
   },
   "memoryContractStatus": "consistent",
-  "sourceOnlyExportsPendingRebuild": [
-    "_DolphinWeb_JitArmedStepForTest",
-    "_DolphinWeb_JitFailNextInstance",
-    "_DolphinWeb_JitFailNextTableGrow",
-    "_DolphinWeb_JitOnStateLoaded",
-    "_DolphinWeb_JitTableFull",
-    "_DolphinWeb_JitTransientRejectCount",
-    "_GetPpcWasmJitArmStartFrame",
-    "_GetPpcWasmJitEngagedFrame",
-    "_SetPpcWasmJitWarmup"
-  ],
+  "sourceOnlyExportsPendingRebuild": [],
   "moduleExports": [
     "_AcknowledgeWebGpuOwnershipTraceCapture",
     "_AudioBuffer",
@@ -385,11 +375,17 @@
     "_DolphinWeb_HarnessViRingHead",
     "_DolphinWeb_HarnessViSinceBoot",
     "_DolphinWeb_HarnessViSinceLoad",
+    "_DolphinWeb_JitArmedStepForTest",
     "_DolphinWeb_JitCompileBytesForTest",
     "_DolphinWeb_JitEngineRejectCount",
+    "_DolphinWeb_JitFailNextInstance",
+    "_DolphinWeb_JitFailNextTableGrow",
+    "_DolphinWeb_JitOnStateLoaded",
     "_DolphinWeb_JitOracleBuffer",
     "_DolphinWeb_JitOracleMessage",
     "_DolphinWeb_JitOracleRun",
+    "_DolphinWeb_JitTableFull",
+    "_DolphinWeb_JitTransientRejectCount",
     "_DolphinWeb_RecordCacheHit",
     "_DolphinWeb_RecordCacheMiss",
     "_DolphinWeb_RecordInstanceUs",
@@ -436,6 +432,8 @@
     "_GetPpcWasmBlockCompileCount",
     "_GetPpcWasmBlockRunCount",
     "_GetPpcWasmHelperStats",
+    "_GetPpcWasmJitArmStartFrame",
+    "_GetPpcWasmJitEngagedFrame",
     "_GetRawSize",
     "_GetRegion",
     "_GetRendererFeatureMask",
@@ -497,6 +495,7 @@
     "_SetPadState",
     "_SetPpcProfileEnabled",
     "_SetPpcWasmJitEnabled",
+    "_SetPpcWasmJitWarmup",
     "_SetPresentationScale",
     "_SetRendererFeatureMask",
     "_SetSoftwareRasterProfileEnabled",
@@ -561,14 +560,18 @@
       "setInputState",
       "validationBeginWgpuRendererProbeMeasurement",
       "validationCaptureAtVi",
+      "validationEnableGpuSyncDiag",
       "validationEnableHarness",
       "validationFinalizeWgpuMappedDrain",
       "validationFinalizeWgpuRendererProbe",
       "validationFinalizeWgpuReplay",
+      "validationPcSampler",
       "validationReadCoreProgress",
       "validationReadJitCacheReadiness",
       "validationReadTimeline",
-      "validationSetCorePaused"
+      "validationReadWgpuReplayState",
+      "validationSetCorePaused",
+      "validationSetWgpuPerturbation"
     ],
     "notificationFields": {
       "detachedOglFrame": [
