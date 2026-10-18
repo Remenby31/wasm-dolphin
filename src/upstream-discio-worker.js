@@ -659,6 +659,67 @@ function webGpuUboPackMode() {
   return wgpuUboPackEnabled && !wgpuUboCacheEnabled ? 1 : 0;
 }
 
+// The core's FIFO / pixel-engine handshake snapshot (WasmGpuSyncDiag.h).
+function readGpuSyncDiag() {
+  const m = moduleInstance;
+  if (!m?._DolphinWeb_GpuSyncDiag) return null;
+  try {
+    return JSON.parse(m.UTF8ToString(m._DolphinWeb_GpuSyncDiag()));
+  } catch (error) {
+    return { error: String(error?.message || error) };
+  }
+}
+
+// Harness diagnostics for a hardware-renderer presentation freeze: where the
+// consumer side of the WebGPU command ring stands, and every gate that can
+// keep it from replaying or presenting. Read-only.
+function readWgpuReplayState() {
+  const ring = webGpuCmdRing;
+  let write = null, read = null, nextOp = null;
+  try {
+    if (ring) {
+      write = Atomics.load(ring.headerI32, 0) >>> 0;
+      read = currentWgpuReadIndex(ring);
+      if (write !== read && moduleInstance) {
+        const u32 = new Uint32Array(moduleInstance.HEAPU8.buffer);
+        nextOp = u32[(ring.slotsBase + (read % ring.capacity) * 32) >>> 2];
+      }
+    }
+  } catch (error) {
+    nextOp = `unreadable: ${error?.message || error}`;
+  }
+  const now = performance.now();
+  return {
+    now,
+    coreState: api?.getCoreStateName?.() ?? null,
+    coreFrame: api?.getFrame?.() ?? null,
+    videoStats: String(api?.getVideoStats?.() ?? "").slice(0, 600),
+    gpuSync: readGpuSyncDiag(),
+    ring: ring ? { write, read, backlog: write !== null ? (write - read) >>> 0 : null, nextOp } : null,
+    fatal: wgpuReplayFatal,
+    mappedCapacityBlocked: wgpuMappedCapacityBlocked,
+    mappedRemapPending: wgpuMappedRemapPromises.size,
+    uploadTransport: wgpuUploadTransport,
+    loadFenceActive: wgpuLoadFenceActive,
+    replayYieldPending: wgpuReplayYieldPending,
+    presentationLoopActive,
+    frameSignalWaitPending,
+    cmdRingOwnsCanvas,
+    sinceLastPresentMs: lastPresentedAt > 0 ? now - lastPresentedAt : null,
+    presents: webGpuExecStats.present,
+    skipDraw: webGpuExecStats.skipDraw || 0,
+    drainCount: webGpuCausalStats.drainCount,
+    readbacksPending: {
+      classifierEfb: wgpuClassifierEfbReadbackPending,
+      classifierBackbuffer: wgpuClassifierBackbufferReadbackPending,
+      classifierXfb: wgpuClassifierXfbReadbackPending,
+      inputBackbuffer: wgpuInputBackbufferReadbackPending,
+    },
+    presentRejected: self._wgPresentRejectedLogCount || 0,
+    lastErrors: rendererDiagnostics.errors.slice(-8),
+  };
+}
+
 function recordRendererError(kind, message) {
   const entry = {
     atMs: Number(performance.now().toFixed(3)),
@@ -1267,6 +1328,8 @@ async function handleMessage(type, payload) {
       return readHarnessTimeline();
     case "validationCaptureAtVi":
       return captureAtViOutput(payload);
+    case "validationReadWgpuReplayState":
+      return readWgpuReplayState();
     case "validationReadCoreProgress": {
       const loadedCheckpoint = readLastLoadedCheckpoint();
       return {

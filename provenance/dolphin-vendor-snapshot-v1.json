@@ -3,8 +3,8 @@
   "normalization": "git-blob-lf",
   "root": {
     "baseCommit": "e22551eae1c84a7e4d0b6a5c519ef4ed4ef69df1",
-    "resultTree": "27c4314b80ad5db9c1877d0432335cf01a2bb1c5",
-    "changedPathCount": 113,
+    "resultTree": "c0710587d416a709f4fd917738c60a15386e3a6e",
+    "changedPathCount": 116,
     "records": [
       {
         "path": "CMakeLists.txt",
@@ -803,9 +803,9 @@
         "status": "M",
         "mode": "100644",
         "baseBlob": "f183c9365514cc908bbc3641d55ff8db8c3acfe9",
-        "resultBlob": "b44544f10225c8b6f670c0cf6a4095efa489b808",
-        "size": 26167,
-        "sha256": "5ecc0251aff884fbe699c03df128cdeaa67482babce9097f28cfdca0ca9819d3"
+        "resultBlob": "86281c79032a6cedb381b13b74a6220c2d022f39",
+        "size": 26406,
+        "sha256": "baeeb5ec53001315cc3fd34b975960223ef5a5ff18545b58448ef1e644c540c7"
       },
       {
         "path": "Source/Core/VideoCommon/FramebufferManager.cpp",
@@ -842,6 +842,24 @@
         "resultBlob": "1e41235d86e1ed7b3b6bddf56834d61cc3c2c0b4",
         "size": 7252,
         "sha256": "64e44c83b46279abebaabc9f4656657219c08e97f94c43b155ae9e61d8819448"
+      },
+      {
+        "path": "Source/Core/VideoCommon/PixelEngine.cpp",
+        "status": "M",
+        "mode": "100644",
+        "baseBlob": "63642d017d91c00f7f4668a59eccdbe45db8ee8b",
+        "resultBlob": "f8c96880a359281a71a8b9a7001cbc88a0b9de04",
+        "size": 8694,
+        "sha256": "de328492784c81134afa57d69cb92a8a6c540738952038d4e3bc642be68d51d7"
+      },
+      {
+        "path": "Source/Core/VideoCommon/PixelEngine.h",
+        "status": "M",
+        "mode": "100644",
+        "baseBlob": "6dfc8556c5d6a67a1e37819a534501f2528d2d53",
+        "resultBlob": "0ea3ad256a75d75eee71cb533494ba9915018622",
+        "size": 5642,
+        "sha256": "17e5547b161cbc9d79db56bec1d77c3e6d866dccbb85035dd9bde6166ef57321"
       },
       {
         "path": "Source/Core/VideoCommon/PixelShaderGen.cpp",
@@ -979,6 +997,15 @@
         "sha256": "67933a1263d910d81c22c3f70c7b1b4226aa80f3055228762c3e8666aedbc9c7"
       },
       {
+        "path": "Source/Core/VideoCommon/WasmGpuSyncDiag.h",
+        "status": "A",
+        "mode": "100644",
+        "baseBlob": null,
+        "resultBlob": "051f4c330178d294f83655443ad36da30b2a3f70",
+        "size": 1424,
+        "sha256": "6d0bdd682a6dfacc34e3f02c664bb2f2f475cd05ac0f63bcf84f2191c942e7cb"
+      },
+      {
         "path": "Source/Core/VideoCommon/WasmWebGpuDrawProfile.h",
         "status": "A",
         "mode": "100644",
@@ -1059,5 +1086,5 @@
       ]
     }
   ],
-  "contentSha256": "bf51490556082eec2e4754c8422f059b13a636d77f4c05ce73b2e1d9a7eb8ce8"
+  "contentSha256": "4ced7ed2e4ebc2d3824a24b604d840d8040981aebc2ed17b2f88a4d43bf533e2"
 }
