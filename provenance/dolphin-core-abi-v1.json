@@ -1,19 +1,19 @@
 {
   "schemaVersion": 1,
   "abiVersion": 1,
-  "coreId": "sha256:d7395b3a94080f5b7d08a0522f59096007419d117b7b0eb868246429adee6f5c",
+  "coreId": "sha256:fe2b64356b49bdf119bc2f36b403bb9b8683d64081c05570d8ac3681fd04cdc2",
   "upstreamCommit": "e22551eae1c84a7e4d0b6a5c519ef4ed4ef69df1",
   "artifacts": [
     {
       "path": "cores/dolphin/dolphin-core-upstream.js",
       "hashMode": "lf-normalized",
-      "size": 266970,
-      "sha256": "7c78f3fc2207daab059af3b15c230c23d11205584cf1dfe89c65f66996e18b99"
+      "size": 266986,
+      "sha256": "76243921ad9c958f3991f94c133d3ebd641d073463b878b189ae737f06c717ba"
     },
     {
       "path": "cores/dolphin/dolphin-core-upstream.wasm",
-      "size": 15175335,
-      "sha256": "d7395b3a94080f5b7d08a0522f59096007419d117b7b0eb868246429adee6f5c"
+      "size": 12952784,
+      "sha256": "fe2b64356b49bdf119bc2f36b403bb9b8683d64081c05570d8ac3681fd04cdc2"
     }
   ],
   "contractSources": [
@@ -38,8 +38,8 @@
     {
       "path": "core/upstream/dolphin_web_core.cpp",
       "hashMode": "lf-normalized",
-      "size": 44803,
-      "sha256": "0b7220487717ebed29695b031e8779c218771926e12ffe0c102675aba7ad803f"
+      "size": 45092,
+      "sha256": "3695be93a742747dca588958d8f734fd1d8469b569e6d519a00d5975fb5f7f4d"
     },
     {
       "path": "src/app.js",
@@ -134,8 +134,8 @@
     {
       "path": "src/upstream-discio-worker.js",
       "hashMode": "lf-normalized",
-      "size": 617538,
-      "sha256": "681a26e5aebedf3eb054c5ca8ec5a8b66445b15873c155e30e0b62ad3e0626a0"
+      "size": 618089,
+      "sha256": "cf740f5189e99017bff516fdfffe8454e1ffd1c5d126c24b8e7afb85d9c35742"
     },
     {
       "path": "src/wgpu-renderer-worker-probe.js",
@@ -165,7 +165,7 @@
       "path": "src/upstream-worker-protocol.js",
       "hashMode": "lf-normalized",
       "size": 5096,
-      "sha256": "bedcdd1912ba1d19a6d75b785ed4cc689dfb502cd2c9754366cb14cbe6999f4b"
+      "sha256": "2b51dcdc0108b30eccbb8d0efa481848bbfd47da603e929a9da92f76acfcd1e4"
     },
     {
       "path": "src/wgpu-pass-state-cache.js",
