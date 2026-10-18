@@ -878,7 +878,7 @@ async function captureAtViOutput({ index, ahead, fromLoad = false, timeoutMs = 6
   if (harnessVideoBackend === "OGL") throw new Error("OGL does not report VI outputs");
   if (ahead > 0) index = (fromLoad ? m._DolphinWeb_HarnessViSinceLoad() : m._DolphinWeb_HarnessViSinceBoot()) + ahead;
   if (!(index > 0)) throw new Error("capture index must be ≥ 1");
-  if (harnessVideoBackend === "WebGPU") return captureAtViOutputWgpu(index >>> 0, Boolean(fromLoad), timeoutMs);
+  if (harnessVideoBackend === "WebGPU-Real" || harnessVideoBackend === "WebGPU") return captureAtViOutputWgpu(index >>> 0, Boolean(fromLoad), timeoutMs);
   if (!m._DolphinWeb_HarnessArmCapture(index >>> 0, fromLoad ? 1 : 0)) {
     throw new Error(`VI output ${index} (${fromLoad ? "since load" : "since boot"}) has already passed`);
   }
