@@ -512,3 +512,29 @@ test("real JIT blocks: compiled and warmed off-thread, real memory untouched, no
   assert.ok(stats.warmCalls >= 48);
   assert.equal(createHash("sha256").update(new Uint8Array(real.buffer, 0, 1 << 20)).digest("hex"), before);
 });
+
+test("a worker that keeps losing replies is replaced, so the boot never waits a deadline per job", async (t) => {
+  const { factory, made } = fakeWorkerFactory();
+  const clock = manualClock();
+  let time = 0;
+  const realNow = performance.now;
+  performance.now = () => time;
+  t.after(() => {
+    performance.now = realNow;
+  });
+  const client = createAotCompilerClient({ createWorker: factory, jobTimeoutMs: 100, maxConsecutiveLost: 3, retryAfterMs: 1000, ...clock });
+  t.after(() => client.terminate());
+  const bytes = buildModule({ memory: MEMORY, bodies: [[...i32const(1)]] });
+  const jobs = [client.compile(bytes), client.compile(bytes), client.compile(bytes)];
+  await settle();
+  time = 200; // the worker never answers
+  clock.fire();
+  const results = await Promise.all(jobs);
+  assert.ok(results.every((r) => r.offThread === false));
+  assert.equal(client.stats().lost, 3);
+  assert.equal(client.stats().workerFailures, 1);
+  assert.equal(made[0].terminated, true);
+  // within the back-off, new jobs compile in place at once
+  assert.equal((await client.compile(bytes)).offThread, false);
+  assert.equal(made.length, 1);
+});

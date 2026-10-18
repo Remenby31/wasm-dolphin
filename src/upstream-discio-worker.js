@@ -1421,6 +1421,7 @@ async function handleMessage(type, payload) {
         compileRequests: dolphinJitCompileRequestCount,
         compileRequestFailures: dolphinJitCompileRequestFailures,
         compileReadyMarks: dolphinJitReadyMarks,
+        compileReadyRejected: dolphinJitReadyRejected,
         idbWritesPending: dolphinJitIdbWritesPending,
         idbWriteCount: dolphinJitIdbWriteCount,
         pthreadWorkerCount: dolphinJitPthreadWorkers.length,
@@ -1744,7 +1745,7 @@ async function loadCore({
   cachedInterpreterDisableMask = 0,
   wgpuScissoredClearRect = true,
   noJitCache = false,
-  aotCompiler = true,
+  aotCompiler = false,
   reportedCoreSelection = null,
   wgpuReplayDiagnostics = false,
   wgpuDeepReplayDiagnostics: requestedWgpuDeepReplayDiagnostics = false,
@@ -2150,7 +2151,7 @@ async function loadCore({
   // killing the menu-nav interpret stall measured in §28bz/§28cf.
   const _t_idb = performance.now();
   dolphinJitCachePersistenceEnabled = !noJitCache;
-  dolphinAotCompilerEnabled = aotCompiler !== false;
+  dolphinAotCompilerEnabled = aotCompiler === true;
   dolphinJitBootLoadComplete = false;
   dolphinJitBootLoadedEntries = 0;
   if (!noJitCache) {
@@ -6214,6 +6215,9 @@ const DOLPHIN_JIT_CACHE_MAX = 49152; // hard cap on in-memory entries
 // extensions, GC. ALWAYS validate in real browser before shipping changes
 // to PTHREAD_POOL_SIZE.
 const DOLPHIN_JIT_IDB_BOOT_LOAD_MAX = 8192;
+// Upper bound on each pre-boot compile pass over the cache (boot load, then
+// lazy fill), whatever compiles the modules.
+const DOLPHIN_JIT_BOOT_COMPILE_BUDGET_MS = 30_000;
 const DOLPHIN_JIT_FINGERPRINT_KEY = "buildFingerprint";
 const DOLPHIN_JIT_ENTRY_KEY_SCHEMA_KEY = "entryKeySchema";
 let dolphinJitIdb = null;
@@ -6342,8 +6346,12 @@ async function loadDolphinJitCacheFromIdb(db) {
   // warm-boot compile drops to ~1-3 s. Module is structured-cloneable
   // so each pthread still receives ready-to-instantiate Modules.
   const COMPILE_BATCH = 64;
+  const compileStartedAt = performance.now();
   for (let i = 0; i < entries.length; i += COMPILE_BATCH) {
     if (dolphinJitCacheMap.size >= DOLPHIN_JIT_IDB_BOOT_LOAD_MAX) break;
+    // The boot never waits longer than this on the cache; what is left is
+    // compiled when the game asks for it.
+    if (performance.now() - compileStartedAt > DOLPHIN_JIT_BOOT_COMPILE_BUDGET_MS) break;
     const candidates = [];
     for (const { key, value } of entries.slice(i, i + COMPILE_BATCH)) {
       if (!(value instanceof Uint8Array) && !(value instanceof ArrayBuffer)) continue;
@@ -6609,10 +6617,10 @@ let dolphinAotCompiler = null;
 function getDolphinAotCompiler() {
   if (!dolphinAotCompiler) {
     dolphinAotCompiler = createAotCompilerClient({
-      createWorker: () => new Worker(new URL("./aot-compiler-worker.js", import.meta.url), {
+      createWorker: dolphinAotCompilerWorkerFactoryForTest ?? (() => new Worker(new URL("./aot-compiler-worker.js", import.meta.url), {
         type: "module",
         name: AOT_COMPILER_WORKER_NAME
-      }),
+      })),
       onEvent: (event) => {
         if (event.type === "warm-timeout") {
           postStatus("jit-cache: compiler worker warm-up timed out; worker restarted");
@@ -6622,9 +6630,16 @@ function getDolphinAotCompiler() {
   }
   return dolphinAotCompiler;
 }
-// ?aotcompiler=0: compile in place as before this worker existed (A/B and
-// escape hatch); compile requests are then compiled in place too.
-let dolphinAotCompilerEnabled = true;
+// Off by default (?aotcompiler=1 turns it on): without it, cached and
+// requested modules compile in place on this worker, as before.
+let dolphinAotCompilerEnabled = false;
+export function setDolphinAotCompilerForTest({ enabled, createWorker } = {}) {
+  dolphinAotCompilerEnabled = enabled === true;
+  dolphinAotCompiler?.terminate();
+  dolphinAotCompiler = null;
+  dolphinAotCompilerWorkerFactoryForTest = createWorker ?? null;
+}
+let dolphinAotCompilerWorkerFactoryForTest = null;
 function compileDolphinJitModuleOffThread(bytes, deliver) {
   if (!dolphinAotCompilerEnabled) return WebAssembly.compile(bytes);
   return getDolphinAotCompiler().compile(bytes, { deliver }).then((result) => result.module);
@@ -6653,7 +6668,8 @@ function compileDolphinJitModuleOffThread(bytes, deliver) {
 //     compile its own bytes on retry; a collision then costs one synchronous
 //     compile that misses V8's cache, never a wrong module.
 //   {type: "dolphin-jit-warm-state", statePtr, state} the scratch state that
-//     makes every entry point leave at its first downcount test.
+//     makes every entry point leave at its first downcount test. No core
+//     sends it yet (regions, P4, will); blocks warm on a zeroed state.
 // The key is the core's, used as is: block keys are also the IndexedDB keys,
 // so only a key that matches its bytes is persisted.
 let dolphinJitCompileRequestCount = 0;
@@ -6676,9 +6692,12 @@ export function precompileDolphinJitModule(key, input) {
   if (bytes.buffer instanceof SharedArrayBuffer) bytes = bytes.slice();
   const outcome = (async () => {
     // A block key names the SHA-256 of its bytes: one that does not match is
-    // never cached under that name (as for every other cache entry).
+    // never cached under that name (as for every other cache entry). Keys of
+    // any other schema are refused until regions (P4) define how theirs are
+    // checked.
     const blockKey = key.startsWith(`${JIT_CACHE_ENTRY_KEY_SCHEMA}:`);
-    if (blockKey && !(await verifyCanonicalWasmBlockKey(key, bytes))) {
+    if (!blockKey) return { reason: "bad-key" };
+    if (!(await verifyCanonicalWasmBlockKey(key, bytes))) {
       postStatus("jit-cache: rejected compile request with mismatched block identity");
       return { reason: "key-mismatch" };
     }
@@ -6692,7 +6711,7 @@ export function precompileDolphinJitModule(key, input) {
     }
     if (dolphinJitCacheMap.size >= DOLPHIN_JIT_CACHE_MAX) return { reason: "cache-full", module: mod };
     dolphinJitCacheMap.set(key, mod);
-    if (blockKey && dolphinJitCachePersistenceEnabled) void writeDolphinJitEntryToIdb(key, bytes);
+    if (dolphinJitCachePersistenceEnabled) void writeDolphinJitEntryToIdb(key, bytes);
     return { module: mod };
   })().finally(() => dolphinJitCompileRequestsInFlight.delete(key));
   dolphinJitCompileRequestsInFlight.set(key, outcome);
@@ -6709,20 +6728,36 @@ async function handleDolphinJitCompileRequest(event) {
   const key = String(data.key ?? data.hash ?? "");
   if (!key || !data.bytes) return;
   dolphinJitCompileRequestCount += 1;
+  const firstAsk = !dolphinJitCompileRequestsInFlight.has(key);
   const outcome = await precompileDolphinJitModule(key, data.bytes);
+  if (!firstAsk) return; // the first request marks the slot
   if (!outcome.module || outcome.reason) dolphinJitCompileRequestFailures += 1;
   markDolphinJitModuleReady(data.readyPtr, data.readySlot);
 }
 
 const DOLPHIN_JIT_READY_SLOTS = 1 << 16;
 let dolphinJitReadyHeapForTest = null;
-export function setDolphinJitReadyHeapForTest(heap) {
+let dolphinJitReadyTablePtrForTest = null;
+let dolphinJitReadyRejected = 0;
+export function dolphinJitReadyStatsForTest() {
+  return { marks: dolphinJitReadyMarks, rejected: dolphinJitReadyRejected };
+}
+export function setDolphinJitReadyHeapForTest(heap, tablePtr = null) {
   dolphinJitReadyHeapForTest = heap;
+  dolphinJitReadyTablePtrForTest = tablePtr;
 }
 let dolphinJitReadyMarks = 0;
+// The only byte ever written into the core's heap from here: a slot of the
+// table the core itself reports (_DolphinWeb_JitReadyBitsPtr); a request
+// naming any other address is ignored.
 function markDolphinJitModuleReady(readyPtr, readySlot) {
   if (!Number.isInteger(readyPtr) || !Number.isInteger(readySlot)) return;
   if (readyPtr <= 0 || readySlot < 0 || readySlot >= DOLPHIN_JIT_READY_SLOTS) return;
+  const tablePtr = dolphinJitReadyTablePtrForTest ?? moduleInstance?._DolphinWeb_JitReadyBitsPtr?.();
+  if (!Number.isInteger(tablePtr) || readyPtr !== tablePtr) {
+    dolphinJitReadyRejected += 1;
+    return;
+  }
   const buffer = (dolphinJitReadyHeapForTest ?? moduleInstance?.HEAPU8)?.buffer;
   if (!(buffer instanceof SharedArrayBuffer) || readyPtr + readySlot >= buffer.byteLength) return;
   Atomics.store(new Uint8Array(buffer), readyPtr + readySlot, 1);
@@ -7053,6 +7088,7 @@ async function startLazyJitCacheFill() {
   let added = 0;
   for (let i = 0; i < remaining.length; i += LAZY_BATCH) {
     if (dolphinJitCacheMap.size >= HARD_CAP) break;
+    if (performance.now() - startedAt > DOLPHIN_JIT_BOOT_COMPILE_BUDGET_MS) break;
     const slice = remaining.slice(i, i + LAZY_BATCH);
     const verifiedSlice = await Promise.all(slice.map(async (entry) => {
       if (!(entry.value instanceof Uint8Array) && !(entry.value instanceof ArrayBuffer)) {

@@ -16,6 +16,13 @@
 // before its first instruction runs.
 
 export const AOT_COMPILER_WORKER_NAME = "salon-aot-compiler";
+
+// Off by default until its memory cost is measured on mainstream machines
+// (a scratch Memory of the JIT's shape reserves 1.5 GiB of address space,
+// and warmed code is retained): ?aotcompiler=1 turns it on.
+export function aotCompilerRequested(search = "") {
+  return new URLSearchParams(search).get("aotcompiler") === "1";
+}
 export const AOT_COMPILER_PROTOCOL = 1;
 
 // Where the warm-up call points its state argument in scratch memory, and how
@@ -27,6 +34,9 @@ const WARM_STATE_CLEAR_BYTES = 0x10000;
 // the first entries a module's own segments fill are worth calling.
 const WARM_TABLE_SCAN_MAX = 4096;
 const SCRATCH_MEMORY_SHAPES_MAX = 2;
+// Scratch memories are dropped once warm-ups have been idle this long; the
+// next warm-up allocates again.
+const SCRATCH_IDLE_RELEASE_MS = 5000;
 
 const PAGE = 65536;
 
@@ -248,7 +258,7 @@ export function createWarmer() {
     return { warmed: true, calls: stats.calls - callsBefore };
   }
 
-  return { warm, setWarmState, stats, scratchMemories: () => [...memories.values()] };
+  return { warm, setWarmState, stats, scratchMemories: () => [...memories.values()], releaseScratch: () => memories.clear() };
 }
 
 
@@ -287,6 +297,7 @@ export function installAotCompilerWorker(scope) {
   const urgent = [];
   const background = [];
   let pumping = false;
+  let idleRelease = null;
   let flushes = [];
   let inFlight = 0;
   const totals = { warmed: 0, warmCalls: 0, warmMs: 0, maxWarmMs: 0, scratchFailures: 0, traps: 0 };
@@ -332,6 +343,8 @@ export function installAotCompilerWorker(scope) {
     if (urgent.length || background.length) setTimeout(pump, 0);
     else {
       pumping = false;
+      clearTimeout(idleRelease);
+      idleRelease = setTimeout(() => warmer.releaseScratch(), SCRATCH_IDLE_RELEASE_MS);
       answerFlushes();
     }
   }
@@ -441,6 +454,7 @@ export function createAotCompilerClient({
   jobTimeoutMs = 15000,
   maxWarmTimeouts = 5,
   maxWorkerFailures = 3,
+  maxConsecutiveLost = 3,
   retryAfterMs = 30000,
   pollMs = Math.max(50, Math.floor(warmTimeoutMs / 4)),
   setTimer = (fn, ms) => setTimeout(fn, ms),
@@ -450,6 +464,7 @@ export function createAotCompilerClient({
   const pending = new Map(); // id -> {bytes, warm, deliver, sentAt, promise, resolve, reject}
   let worker = null;
   let workerFailures = 0;
+  let consecutiveLost = 0;
   let brokenUntil = createWorker ? 0 : Infinity;
   let workersStarted = 0;
   let nextId = 1;
@@ -506,9 +521,17 @@ export function createAotCompilerClient({
     for (const [id, job] of pending) {
       if (job.sentAt !== null && t - job.sentAt >= jobTimeoutMs) {
         stats.lost += 1;
+        consecutiveLost += 1;
         onEvent({ type: "job-timeout", id });
         compileInPlace(id);
       }
+    }
+    // A worker that keeps losing replies is replaced (with the load-failure
+    // back-off), so a boot never waits a deadline per job.
+    if (consecutiveLost >= maxConsecutiveLost) {
+      consecutiveLost = 0;
+      onWorkerFailure();
+      return;
     }
     schedulePoll();
   }
@@ -584,6 +607,7 @@ export function createAotCompilerClient({
     const job = pending.get(result.id);
     if (!job) return; // answered already (in place, after a timeout)
     pending.delete(result.id);
+    consecutiveLost = 0;
     if (result.error) {
       stats.failed += 1;
       job.reject(rebuildError(result.error));

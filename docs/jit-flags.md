@@ -22,7 +22,7 @@ correctness is established.
 | `fastmemhoist=1` | Hoist per-block fastmem bounds checks. Default-off because a bad proof could permit an out-of-bounds access. |
 | `disable=...` | Disable named JIT helper/optimization categories, or pass a decimal/hex mask, for bisection. |
 | `nojitcache=1` | Skip the browser-side compiled JIT cache/prewarm path for a cold-cache comparison. |
-| `aotcompiler=0` | Compile cached and requested JIT modules in place on the discio worker instead of in the compiler worker (`src/aot-compiler-worker.js`), without the scratch-memory warm-up. A/B and escape hatch. |
+| `aotcompiler=1` | Compile cached and requested JIT modules in a dedicated compiler worker (`src/aot-compiler-worker.js`) that warms them on scratch memory, and keep them alive so the CPU thread's own compile of the same bytes hits V8's cache. Off by default until its memory cost is measured. |
 | `metrics=1` | Enable on-screen and validation metrics used to judge behavior and performance. |
 
 ## Defaults and safety

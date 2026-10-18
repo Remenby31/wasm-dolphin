@@ -1,3 +1,4 @@
+import { aotCompilerRequested } from "./aot-compiler-worker.js";
 import { DolphinCoreAdapter, dolphinBundleAvailable } from "./dolphin-adapter.js";
 import { buttonMaskFromPressed, isPadPort } from "./input.js";
 import { UpstreamMainThreadAdapter } from "./upstream-main-thread-adapter.js";
@@ -115,9 +116,9 @@ export class EmulatorHost {
     );
     this.noJitCache =
       new URLSearchParams(window.location.search).get("nojitcache") === "1";
-    // ?aotcompiler=0: compile JIT modules in place, without the compiler worker.
-    this.aotCompiler =
-      new URLSearchParams(window.location.search).get("aotcompiler") !== "0";
+    // ?aotcompiler=1: compile cached/requested JIT modules in the compiler
+    // worker (off by default until its memory cost is measured).
+    this.aotCompiler = aotCompilerRequested(window.location.search);
     this.collectMetrics = requestedCollectMetrics();
     this.legacyOneWayAck = requestedLegacyOneWayAck(window.location.search);
     this.wgpuReplayDiagnostics = requestedWgpuReplayDiagnostics(window.location.search);
