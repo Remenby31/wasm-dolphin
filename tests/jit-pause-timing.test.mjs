@@ -14,9 +14,7 @@ function extractFunction(name, optional = false) {
 }
 const jitSource = [
   extractFunction("resetPpcWasmJitTiming", true),
-  extractFunction("sampleCoreFpsRolling"),
   extractFunction("maybeEnablePpcWasmJit"),
-  extractFunction("maybeDisablePpcWasmJit"),
 ].join("\n");
 const thresholds = [...new Set(jitSource.match(/\bWASM_JIT_[A-Z_]+\b/g))]
   .map((name) => {
@@ -49,21 +47,12 @@ function createHarness() {
     ppcWasmJitActive: true,
     ppcWasmJitRequested: true,
     ppcWasmJitForce: false,
-    ppcWasmJitDisabledForSession: false,
     ppcWasmJitCorePaused: false,
     ppcWasmJitTimingSuspensions: 0,
-    ppcWasmJitCooldownUntilFrame: 0,
     ppcWasmJitEnabledAtFrame: 60,
     ppcWasmJitWarmupFrames: 60,
     ppcWasmJitTier: "guarded",
     dolphinJitCachePreWarmed: false,
-    ppcWasmJitPreEngageFps: 57,
-    ppcWasmJitPreEngageCoreFps: 60,
-    ppcWasmJitCoreSampleFrame: 600,
-    ppcWasmJitCoreSampleTime: 10000,
-    ppcWasmJitCoreFpsRolling: 60,
-    ppcWasmJitFuseLastFrame: 600,
-    ppcWasmJitFuseLastTime: 10000,
     presentationFps: 57,
     presentationMaxIntervalMs: 16,
     maxIntervalSincePresentationFps: 16,
@@ -100,7 +89,7 @@ function createHarness() {
   return {
     context, api, modes, statuses,
     advance: (ms, frames = 0) => { now += ms; frame += frames; },
-    tick: () => { context.maybeEnablePpcWasmJit(); context.maybeDisablePpcWasmJit(); },
+    tick: () => context.maybeEnablePpcWasmJit(),
     request: (type, payload = {}) => context.handleMessage(type, payload),
     finishTimer: async (request) => {
       assert.equal(timers.length, 1, "one asynchronous operation should be pending");
@@ -110,7 +99,7 @@ function createHarness() {
   };
 }
 
-test("explicit pause longer than five seconds preserves active JIT and rearms running timing", async () => {
+test("explicit pause longer than five seconds keeps the JIT and restarts interval statistics", async () => {
   const h = createHarness();
   const pause = h.request("validationSetCorePaused", { paused: true });
   h.advance(100);
@@ -121,20 +110,15 @@ test("explicit pause longer than five seconds preserves active JIT and rearms ru
   h.tick();
   assert.deepEqual(h.modes, []);
   assert.equal(h.context.ppcWasmJitActive, true);
-  assert.equal(h.context.ppcWasmJitPreEngageCoreFps, 60, "pause preserves the same-scene baseline");
 
   await h.request("validationSetCorePaused", { paused: false });
   assert.equal(h.context.presentationMaxIntervalMs, 0);
   assert.equal(h.context.maxIntervalSincePresentationFps, 0);
   assert.equal(h.context.lastPresentedAt, 16100, "next interval starts at resume");
-  assert.equal(h.context.ppcWasmJitCoreFpsRolling, 0);
-  h.tick();
   h.advance(1600, 96);
   h.tick();
   assert.deepEqual(h.modes, []);
   assert.deepEqual(h.statuses, []);
-  assert.equal(h.context.ppcWasmJitCooldownUntilFrame, 0);
-  assert.equal(h.context.ppcWasmJitCoreFpsRolling, 60);
 });
 
 test("a paused core cannot engage an inactive JIT", async () => {
@@ -149,89 +133,84 @@ test("a paused core cannot engage an inactive JIT", async () => {
   assert.deepEqual(h.modes, [1]);
 });
 
-test("genuine running stalls still trip after an intentional pause", async () => {
-  for (const presentationStall of [false, true]) {
-    const h = createHarness();
-    await h.finishTimer(h.request("validationSetCorePaused", { paused: true }));
-    h.advance(6000);
-    await h.request("validationSetCorePaused", { paused: false });
-    h.tick();
-    if (presentationStall) {
-      h.context.ppcWasmJitEnabledAtFrame = 600;
-      h.context.presentationMaxIntervalMs = 6001;
-    } else {
-      h.advance(1600);
-    }
-    h.tick();
-    assert.deepEqual(h.modes, [0]);
-    assert.equal(h.context.ppcWasmJitDisabledForSession, presentationStall);
-    assert.match(h.statuses[0], presentationStall ? /post-activation stall/ : /catastrophic/);
-  }
+test("no wall-clock fuse: running stalls never turn an engaged JIT off", async () => {
+  assert.doesNotMatch(source, /function maybeDisablePpcWasmJit\(/);
+  const h = createHarness();
+  h.advance(60000);
+  h.context.presentationMaxIntervalMs = 60000;
+  h.tick();
+  h.advance(1600, 1);
+  h.tick();
+  assert.deepEqual(h.modes, []);
+  assert.equal(h.context.ppcWasmJitActive, true);
 });
 
+// After a guarded operation the JIT gate must work again: an inactive JIT
+// engages on the next tick.
+function assertGateOperational(h) {
+  assert.equal(h.context.ppcWasmJitTimingSuspensions, 0);
+  h.context.ppcWasmJitActive = false;
+  h.modes.length = 0;
+  h.tick();
+  assert.deepEqual(h.modes, [1]);
+}
+
 for (const accepted of [true, false]) {
-  test(`${accepted ? "accepted" : "rejected"} file load suspends timing and cleans up`, async () => {
+  test(`${accepted ? "accepted" : "rejected"} file load suspends the gate and cleans up`, async () => {
     const h = createHarness();
+    h.context.ppcWasmJitActive = false;
     h.api.loadStateFile = () => accepted ? 1 : 0;
     const load = h.request("loadStateFile", { fsPath: "/test.sav" });
     h.advance(6000);
     h.context.presentationMaxIntervalMs = 6000;
     h.tick();
-    assert.deepEqual(h.modes, []);
+    assert.deepEqual(h.modes, [], "no engage while a load is in flight");
     const result = await h.finishTimer(load);
     assert.equal(result.loaded, accepted);
-    assert.equal(h.context.ppcWasmJitTimingSuspensions, 0);
-    assert.equal(h.context.ppcWasmJitPreEngageCoreFps, accepted ? 0 : 60);
-    assert.equal(h.context.ppcWasmJitPreEngageFps, accepted ? 0 : 57);
     assert.equal(h.context.presentationMaxIntervalMs, 0);
-    h.tick();
-    assert.deepEqual(h.modes, []);
-    assert.equal(h.context.ppcWasmJitActive, true);
+    assertGateOperational(h);
   });
 }
 
-test("throwing or unavailable file loads cannot leave the JIT guard suspended", async () => {
+test("throwing or unavailable file loads cannot leave the JIT gate suspended", async () => {
   const h = createHarness();
   h.api.loadStateFile = () => { throw new Error("native load failed"); };
   await assert.rejects(h.request("loadStateFile", { fsPath: "/test.sav" }), /native load failed/);
   assert.equal(h.context.ppcWasmJitTimingSuspensions, 0);
-  assert.equal(h.context.ppcWasmJitPreEngageCoreFps, 60);
   h.api.loadStateFile = null;
   assert.equal((await h.request("loadStateFile", {})).loaded, false);
-  assert.equal(h.context.ppcWasmJitTimingSuspensions, 0);
-  h.context.presentationMaxIntervalMs = 6001;
-  h.tick();
-  assert.deepEqual(h.modes, [0]);
+  assertGateOperational(h);
 });
 
 test("load cleanup preserves an enclosing native pause", async () => {
   const h = createHarness();
+  h.context.ppcWasmJitActive = false;
   await h.finishTimer(h.request("validationSetCorePaused", { paused: true }));
   await h.finishTimer(h.request("loadStateFile", { fsPath: "/test.sav" }));
   h.advance(6000);
-  h.context.presentationMaxIntervalMs = 6001;
   h.tick();
   assert.deepEqual(h.modes, []);
   assert.equal(h.context.ppcWasmJitCorePaused, true);
 });
 
-test("slot loads use the same suspension and baseline cleanup", async () => {
+test("slot loads use the same suspension and cleanup", async () => {
   for (const accepted of [true, false]) {
     const h = createHarness();
+    h.context.ppcWasmJitActive = false;
+    let modesDuringLoad = null;
     h.api.loadState = () => {
       h.advance(6000);
-      h.context.presentationMaxIntervalMs = 6001;
       h.tick();
+      modesDuringLoad = [...h.modes];
       return accepted ? 1 : 0;
     };
     assert.equal((await h.request("loadState", { slot: 1 })).loaded, accepted);
-    assert.deepEqual(h.modes, []);
-    assert.equal(h.context.ppcWasmJitTimingSuspensions, 0);
-    assert.equal(h.context.ppcWasmJitPreEngageCoreFps, accepted ? 0 : 60);
+    assert.deepEqual(modesDuringLoad, [], "no engage while a load is in flight");
+    assertGateOperational(h);
   }
 });
 
-test("failed pause requests preserve guard operation", async () => {
+test("failed pause requests preserve the gate", async () => {
   for (const throws of [true, false]) {
     const h = createHarness();
     h.api.setCorePaused = () => {
@@ -241,10 +220,7 @@ test("failed pause requests preserve guard operation", async () => {
     const pause = h.request("validationSetCorePaused", { paused: true });
     if (throws) await assert.rejects(pause, /pause failed/);
     else assert.equal((await h.finishTimer(pause)).paused, false);
-    assert.equal(h.context.ppcWasmJitTimingSuspensions, 0);
     assert.equal(h.context.ppcWasmJitCorePaused, false);
-    h.context.presentationMaxIntervalMs = 6001;
-    h.tick();
-    assert.deepEqual(h.modes, [0]);
+    assertGateOperational(h);
   }
 });

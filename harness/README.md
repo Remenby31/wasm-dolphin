@@ -32,8 +32,22 @@ the tree's own `tools/serve.mjs` allowlist would serve (ignored files
 included) is read and hashed, and requests are answered from that snapshot
 only. Results record the snapshot hash. The server belongs to the harness
 process; a busy port is an error, never a server to reuse. Chrome runs
-**headed** with a fresh `user-data-dir` per run (no JIT cache or IndexedDB
+**headless** (`--headless=new`, the only mode: no window ever appears on the
+machine, which people use while it runs) with a fresh `user-data-dir` per run
+(no JIT cache or IndexedDB
 carried over). Exit code: 0 pass, 1 finding, 2 usage or infrastructure error.
+
+## No windows
+
+The harness never shows a browser window: people work on the machine it
+runs on. Chrome runs `--headless=new` with the anti-throttling flags; after
+launch and after boot, `lib/onscreen-windows.swift` (CGWindowList) checks
+that no window of that Chrome is on screen, and a run that has one is closed
+and fails. Checked on Apple M4 Pro: WebGPU gives the Apple metal-3 adapter
+headless, and exact captures at VI 300 are byte-identical headless and
+windowed, software (`a81fbfff…`) and wgpu (`b864c264…`). Windowed variants
+were tried and all showed a window (an off-screen position is moved back on
+screen; `open -j -g` still shows the window Chrome opens), so there is none.
 
 ## Exact frames
 
@@ -254,13 +268,13 @@ finding; `out/cpufuzz*.symbols.json` maps a PC back to a program.
 ## CI
 
 What CI can run without a GPU or a commercial disc (the first two run as is;
-the browser steps have only been run headed on macOS so far, Xvfb is untested):
+the browser steps run headless, so no display server is needed):
 
 ```sh
 harness/homebrew/build.sh                 # Docker only
 node --test tests/harness-*.test.mjs      # pure logic, no browser
-xvfb-run harness/run fuzz                 # headed Chrome under Xvfb, software renderer
-xvfb-run harness/run pads
+harness/run fuzz                          # headless Chrome, software renderer
+harness/run pads
 ```
 
 Measurements on commercial games (`matrices/local-*.json`) stay local:

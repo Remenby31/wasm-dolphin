@@ -76,3 +76,12 @@ test("a claimed directory is never claimed again, and only its owner releases it
   release(dir); // not ours: must not clear another live pid
   assert.equal(deletable(dir, REPO).ok, false);
 });
+
+// PROGRAM.md: no window may appear on the user's Mac.
+test("the harness only launches headless Chrome, never full screen or in front", async () => {
+  const { chromeLaunchOptions } = await import("../harness/lib/browser.mjs");
+  const o = chromeLaunchOptions();
+  assert.equal(o.headless, true);
+  assert.equal(o.args.some((a) => /fullscreen|kiosk|maximized|window-position|start-/.test(a)), false);
+  for (const d of ["headed", "offscreen", "hidden"]) assert.throws(() => chromeLaunchOptions(d), /only runs headless/);
+});

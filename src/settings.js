@@ -10,7 +10,7 @@ export const PLAYABLE_PRESET = Object.freeze({
   wasmjit: "1",
   jittier: "guarded",
   forcejit: "0",
-  jitwarmup: "700",
+  jitwarmup: "60",
   oc: "1",
   queue: "4",
   fastsw: "1",
