@@ -464,8 +464,10 @@ export class UpstreamMainThreadAdapter {
     return high * 4294967296 + (low >>> 0);
   }
 
+  // A mask with neutral analog state, through the same per-port cache as
+  // setPadState, so a later identical state is not wrongly deduplicated.
   setInputMask(mask) {
-    this.api?.setInputMask(mask >>> 0);
+    this.setPadState(0, { mask: mask >>> 0 });
   }
 
   setInputState(state) {
@@ -489,7 +491,8 @@ export class UpstreamMainThreadAdapter {
       this.api.setPadState(port, padState);
     } else if (port === 0 && connected) {
       // A core without SetPadState drives port 1 only.
-      this.api.setInputState?.(padState);
+      if (this.api.setInputState) this.api.setInputState(padState);
+      else this.api.setInputMask?.(padState.mask);
     }
   }
 

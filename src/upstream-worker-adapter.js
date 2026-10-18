@@ -514,11 +514,10 @@ export class UpstreamWorkerAdapter {
     return response.bootProbe;
   }
 
+  // A mask with neutral analog state, through the same per-port cache as
+  // setPadState, so a later identical state is not wrongly deduplicated.
   setInputMask(mask) {
-    if (!this.loaded) {
-      return;
-    }
-    this.post("setInputMask", { mask: mask >>> 0 });
+    this.setPadState(0, { mask: mask >>> 0 });
   }
 
   setInputState(state) {

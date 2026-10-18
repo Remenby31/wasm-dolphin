@@ -118,3 +118,27 @@ test("the main-thread adapter (ogl proxy) drives all four ports and unplugs them
   adapter.setPadState(1, state(2));
   assert.deepEqual(legacy, [2]);
 });
+
+test("setInputMask goes through the port cache, so a release after it is not dropped", async () => {
+  const { UpstreamMainThreadAdapter } = await import("../src/upstream-main-thread-adapter.js");
+  const main = new UpstreamMainThreadAdapter({ canvas: null });
+  const masks = [];
+  main.api = { setPadState: (port, s) => masks.push(s.mask) };
+  main.setInputState(state(0));
+  main.setInputMask(1);
+  main.setInputState(state(0));
+  assert.deepEqual(masks, [0, 1, 0]);
+
+  const { adapter, posted } = adapterWithWorker();
+  adapter.loaded = true;
+  adapter.setInputState(state(0));
+  adapter.setInputMask(1);
+  adapter.setInputState(state(0));
+  assert.deepEqual(posted.map((m) => [m.type, m.payload.port, m.payload.mask]), [
+    ["setInputState", 0, 0],
+    ["setInputState", 0, 1],
+    ["setInputState", 0, 0]
+  ]);
+  const p0 = readInputStateSnapshot(adapter.inputStateView, { port: 0 }).snapshot;
+  assert.equal(p0.mask, 0);
+});
