@@ -26,7 +26,9 @@ import {
 
 const coreWasm = new URL("../cores/dolphin/dolphin-core-upstream.wasm", import.meta.url);
 const core = existsSync(coreWasm) ? await loadOracleCore() : null;
-const skip = core ? false : "the committed core has no JIT oracle";
+// Pull requests carry sources only (docs/repro-build.md): locally the core can
+// be main's, older than these sources. CI builds and tests the branch's core.
+const skip = core ? false : "the core in cores/dolphin predates these oracle sources (CI builds this branch's core)";
 
 function assertSame(result, label) {
   assert.ok(result.code === 0 || result.code === 2, `${label}: ${result.code === 1

@@ -34,7 +34,10 @@ export async function loadOracleCore(coreDir = new URL("../../cores/dolphin/", i
     print: () => {},
     printErr: () => {}
   });
-  if (typeof module._DolphinWeb_JitOracleRun !== "function") return null;
+  // The 248-word state (exception registers) ships with the armed warmup in
+  // patch 0072: an older core cannot run these programs.
+  if (typeof module._DolphinWeb_JitOracleRun !== "function" ||
+      typeof module._DolphinWeb_JitArmedStepForTest !== "function") return null;
   const base = module._DolphinWeb_JitOracleBuffer() >>> 0;
   const view = () => new Uint32Array(module.HEAPU8.buffer, base, MAX_WORDS + 3 * STATE_WORDS + 4);
   return {

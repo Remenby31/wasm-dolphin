@@ -46,7 +46,7 @@ const only = opt("only", null)?.split(",") ?? null;
 
 const core = await loadOracleCore(coreDir ? pathToFileURL(path.resolve(coreDir) + "/") : undefined);
 if (!core) {
-  console.error("this core has no DolphinWeb_JitOracleRun (rebuild it)");
+  console.error("this core has no JIT oracle or predates these sources (npm run build:core:repro -- --install)");
   process.exit(2);
 }
 const masks = { both: [0, REGALLOC_OFF], on: [0], off: [REGALLOC_OFF] }[regalloc];
