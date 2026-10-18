@@ -277,7 +277,7 @@ binary and can be merged in any order.
 | Where | What happens |
 | --- | --- |
 | Pull request CI | Builds the core from the branch's sources, installs it in the workspace, and runs `check`, `test` and `test:contract` on it. Publishes it as the artifact `core-<sha256>`, with the GPL source archive, and rebuilds it from that archive alone. |
-| Merge to main | The same build. Then the `commit-core` job commits the core as `github-actions[bot]` if it differs from the committed one. It commits only a core that the source archive rebuilds byte for byte and that `core:status` and `verify:provenance` accept. The commit message names the run and the source commit. |
+| Merge to main | The same build. Then `commit-core` publishes the core of **main's current HEAD**, deciding on content (`core-artifacts.mjs publish-plan`): nothing if HEAD's committed core is already the build of HEAD's sources; commit this core (as `github-actions[bot]`) if it is; otherwise, or if the push is rejected because main moved, dispatch a new run on main. Only a core that the source archive rebuilds byte for byte and that `core:status` and `verify:provenance` accept is committed. Runs on main queue rather than cancel each other, so re-running an old run cannot stop a newer core from being published. The write token is used in one step that runs only `git` and `gh`. |
 | Locally | `npm run build:core:repro -- --install` installs a core for testing. Do not commit it; `npm run core:restore -- --base origin/main` puts main's back. |
 
 Why commit the core on main instead of keeping only a signed build record and
@@ -295,6 +295,11 @@ Commands (`tools/core-artifacts.mjs`):
 | `npm run core:restore -- --base origin/main` | Puts main's core back on a branch and keeps the branch's source-side ABI changes. Exports the branch's own build added move to `sourceOnlyExportsPendingRebuild` (the existing mechanism for sources ahead of the core), and contract-source hashes are recomputed. |
 | `npm run core:fetch -- <sha256> [--repo owner/name]` | Writes an exact core to `build/core-candidates/<sha256>/`, loadable with `?coreid=sha256:<sha256>`. It looks in local builds, then in every commit of git history, then in the `core-<sha256>` Actions artifact (needs `gh`). The `.wasm` hash is checked. |
 | `npm run hooks:install` | Installs `tools/hooks/pre-commit`, which refuses a commit that stages core-derived content (`CORE_ARTIFACTS_ALLOW=1` overrides). Git keeps hooks per clone, so every worktree of the clone gets it. |
+
+The pinned hash is read by evaluating `src/upstream-worker-protocol.js`
+(`tools/core-pin.mjs`), as the browser does, so a commented-out copy of the
+declaration cannot stand in for it; rewriting the pin requires exactly one
+top-level declaration whose value is the export.
 
 The pull-request guard warns until the repository variable
 `CORE_ARTIFACTS_GUARD` is `enforce`. After that, a pull request carrying a

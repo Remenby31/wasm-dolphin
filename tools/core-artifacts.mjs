@@ -14,6 +14,8 @@
 //       The same, for the index against HEAD (tools/hooks/pre-commit).
 //   node tools/core-artifacts.mjs restore --base <ref>
 //       Put <ref>'s core back, keeping this branch's source-side ABI changes.
+//   node tools/core-artifacts.mjs publish-plan --artifact <dir>
+//       CI on main: commit a built core onto main's current HEAD, or say why not.
 //   node tools/core-artifacts.mjs fetch <sha256> [--repo owner/name]
 //       Materialise an exact core under build/core-candidates/<sha256>/.
 
@@ -25,6 +27,7 @@ import { dirname, join, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 
 import { coreSourceRecord } from "./core-build-info.mjs";
+import { pinnedCoreHash, withPinnedCoreHash } from "./core-pin.mjs";
 import { fileRecord } from "./dolphin-provenance.mjs";
 
 const root = resolve(dirname(fileURLToPath(import.meta.url)), "..");
@@ -44,7 +47,15 @@ const BUILD_JSON = CORE_BINARY_FILES[2];
 export const ABI_BINARY_FIELDS = Object.freeze([
   "coreId", "artifacts", "moduleExports", "runtimeMethods", "memoryContract", "memoryContractStatus"
 ]);
-const CORE_HASH_LINE = /(DEFAULT_UPSTREAM_CORE_SHA256\s*=\s*")([0-9a-f]{64})(";)/;
+// A source that does not evaluate or declares the pin ambiguously reads as
+// "no pin": it then differs from every valid one, so the guard flags it.
+const pinOf = async (bytes) => {
+  try {
+    return bytes ? await pinnedCoreHash(bytes.toString("utf8")) : null;
+  } catch {
+    return "unreadable";
+  }
+};
 
 const sha256 = (bytes) => createHash("sha256").update(bytes).digest("hex");
 
@@ -63,7 +74,7 @@ function readAt(ref, path, cwd = root) {
 // Compare the committed build record with the checkout. Reasons are short,
 // human-readable mismatches; an empty list means the committed core is the
 // build of these sources with this toolchain lock.
-export function coreStatus(base = root) {
+export async function coreStatus(base = root) {
   const reasons = [];
   const info = JSON.parse(readFileSync(join(base, BUILD_JSON), "utf8"));
   const wasm = readFileSync(join(base, CORE_BINARY_FILES[1]));
@@ -83,7 +94,7 @@ export function coreStatus(base = root) {
     .replaceAll("\r\n", "\n")));
   if (info.toolchain?.cargoLockSha256 !== cargoLock) reasons.push("Naga Cargo.lock differs");
 
-  const protocolHash = CORE_HASH_LINE.exec(readFileSync(join(base, PROTOCOL_PATH), "utf8"))?.[2];
+  const protocolHash = await pinOf(readFileSync(join(base, PROTOCOL_PATH)));
   if (protocolHash !== sha256(wasm)) reasons.push(`${PROTOCOL_PATH} pins another core`);
   const abi = JSON.parse(readFileSync(join(base, ABI_PATH), "utf8"));
   if (abi.coreId !== `sha256:${sha256(wasm)}`) reasons.push(`${ABI_PATH} describes another core`);
@@ -96,23 +107,25 @@ export function coreStatus(base = root) {
 // differs both from the merge base (so the branch changed it) and from the tip
 // of base (so it is not simply main's current core, which is what
 // `core:restore` puts back and what merges cleanly).
-export function coreArtifactChanges({ base, head = "HEAD", cwd = root }) {
+export async function coreArtifactChanges({ base, head = "HEAD", cwd = root }) {
   const mergeBase = git(["merge-base", base, head], { cwd });
   if (!mergeBase) throw new Error(`${base} and ${head} have no merge base`);
   const refs = [mergeBase, base];
-  const changed = (valueAt) => {
-    const value = valueAt(head);
-    return refs.every((ref) => valueAt(ref) !== value);
+  const changed = async (valueAt) => {
+    const value = await valueAt(head);
+    for (const ref of refs) if (await valueAt(ref) === value) return false;
+    return true;
   };
   const changes = [];
   for (const path of CORE_BINARY_FILES) {
-    if (changed((ref) => git(["rev-parse", `${ref}:${path}`], { cwd }))) changes.push(path);
+    if (await changed((ref) => git(["rev-parse", `${ref}:${path}`], { cwd }))) changes.push(path);
   }
-  const hashAt = (ref) => CORE_HASH_LINE.exec(readAt(ref, PROTOCOL_PATH, cwd)?.toString("utf8") ?? "")?.[2] ?? null;
-  if (changed(hashAt)) changes.push(`${PROTOCOL_PATH} (DEFAULT_UPSTREAM_CORE_SHA256)`);
+  if (await changed((ref) => pinOf(readAt(ref, PROTOCOL_PATH, cwd)))) {
+    changes.push(`${PROTOCOL_PATH} (DEFAULT_UPSTREAM_CORE_SHA256)`);
+  }
   const abiAt = (ref) => JSON.parse(readAt(ref, ABI_PATH, cwd)?.toString("utf8") ?? "{}");
   for (const field of ABI_BINARY_FIELDS) {
-    if (changed((ref) => JSON.stringify(abiAt(ref)[field] ?? null))) changes.push(`${ABI_PATH} (${field})`);
+    if (await changed((ref) => JSON.stringify(abiAt(ref)[field] ?? null))) changes.push(`${ABI_PATH} (${field})`);
   }
   return changes;
 }
@@ -121,14 +134,13 @@ const pick = (object, fields) => Object.fromEntries(fields.map((field) => [field
 
 // The same question for a commit about to be made: core-derived content in
 // the index that differs from HEAD. Used by tools/hooks/pre-commit.
-export function stagedCoreArtifactChanges({ cwd = root } = {}) {
+export async function stagedCoreArtifactChanges({ cwd = root } = {}) {
   const at = (ref, path) => readAt(ref, path, cwd);  // ref "" is the index
   const changes = [];
   for (const path of CORE_BINARY_FILES) {
     if (git(["rev-parse", `HEAD:${path}`], { cwd }) !== git(["rev-parse", `:${path}`], { cwd })) changes.push(path);
   }
-  const hashAt = (ref) => CORE_HASH_LINE.exec(at(ref, PROTOCOL_PATH)?.toString("utf8") ?? "")?.[2] ?? null;
-  if (hashAt("HEAD") !== hashAt("")) changes.push(`${PROTOCOL_PATH} (DEFAULT_UPSTREAM_CORE_SHA256)`);
+  if (await pinOf(at("HEAD", PROTOCOL_PATH)) !== await pinOf(at("", PROTOCOL_PATH))) changes.push(`${PROTOCOL_PATH} (DEFAULT_UPSTREAM_CORE_SHA256)`);
   const abiAt = (ref) => JSON.parse(at(ref, ABI_PATH)?.toString("utf8") ?? "{}");
   const [head, index] = [abiAt("HEAD"), abiAt("")];
   for (const field of ABI_BINARY_FIELDS) {
@@ -144,16 +156,15 @@ export function stagedCoreArtifactChanges({ cwd = root } = {}) {
 // binary fields come from base, exports the branch's own build added become
 // "pending rebuild" (the existing mechanism for sources ahead of the core),
 // and contract-source hashes are recomputed for the restored files.
-export function restoreCoreFromBase({ base, cwd = root }) {
+export async function restoreCoreFromBase({ base, cwd = root }) {
   for (const path of CORE_BINARY_FILES) {
     const bytes = readAt(base, path, cwd);
     if (!bytes) throw new Error(`${base} has no ${path}`);
     writeFileSync(join(cwd, path), bytes);
   }
-  const baseProtocol = readAt(base, PROTOCOL_PATH, cwd).toString("utf8");
-  const baseHash = CORE_HASH_LINE.exec(baseProtocol)?.[2];
+  const baseHash = await pinnedCoreHash(readAt(base, PROTOCOL_PATH, cwd).toString("utf8"));
   const protocolPath = join(cwd, PROTOCOL_PATH);
-  writeFileSync(protocolPath, readFileSync(protocolPath, "utf8").replace(CORE_HASH_LINE, `$1${baseHash}$3`));
+  writeFileSync(protocolPath, await withPinnedCoreHash(readFileSync(protocolPath, "utf8"), baseHash));
 
   const baseAbi = JSON.parse(readAt(base, ABI_PATH, cwd).toString("utf8"));
   const headAbi = JSON.parse(readFileSync(join(cwd, ABI_PATH), "utf8"));
@@ -171,6 +182,48 @@ export function restoreCoreFromBase({ base, cwd = root }) {
   };
   writeFileSync(join(cwd, ABI_PATH), `${JSON.stringify(restored, null, 2)}\n`);
   return { coreId: baseAbi.coreId, pendingExports: pending };
+}
+
+// ----------------------------------------------------------------- publish ---
+
+// What CI does with a core it built for main. The checkout is main's current
+// HEAD, which may be newer than the commit the core was built from:
+//   "none"     HEAD's committed core is already the build of HEAD's sources;
+//   "commit"   the built core matches HEAD's sources and locks: it is
+//              installed, the ABI manifest and pin regenerated for HEAD, and
+//              committed (the caller pushes);
+//   "dispatch" HEAD's sources differ from the build's: a new run must build
+//              HEAD (the caller dispatches one). The tree is left unchanged.
+// Decided on content only, never on who made a commit.
+export async function publishPlan({
+  artifactDir,
+  cwd = root,
+  status = coreStatus,
+  regenerate = () => {
+    const result = spawnSync(process.execPath, ["tools/update-core-abi.mjs", "--write"], { cwd, stdio: "inherit" });
+    if (result.status !== 0) throw new Error("update-core-abi failed");
+  },
+  commit = (message) => {
+    for (const args of [["add", ...CORE_BINARY_FILES, ABI_PATH, PROTOCOL_PATH], ["commit", "-q", "-m", message]]) {
+      if (spawnSync("git", args, { cwd, stdio: "inherit" }).status !== 0) throw new Error(`git ${args[0]} failed`);
+    }
+  },
+  message = "Build the core"
+}) {
+  if ((await status(cwd)).current) return { action: "none" };
+  for (const path of CORE_BINARY_FILES) {
+    writeFileSync(join(cwd, path), readFileSync(join(artifactDir, path.split("/").pop())));
+  }
+  regenerate();
+  const after = await status(cwd);
+  if (!after.current) {
+    for (const path of [...CORE_BINARY_FILES, ABI_PATH, PROTOCOL_PATH]) {
+      git(["checkout", "--", path], { cwd });
+    }
+    return { action: "dispatch", reasons: after.reasons };
+  }
+  commit(`${message}\n\n${after.coreId}`);
+  return { action: "commit", coreId: after.coreId };
 }
 
 // ------------------------------------------------------------------- fetch ---
@@ -240,7 +293,7 @@ if (process.argv[1] === fileURLToPath(import.meta.url)) {
   };
   try {
     if (command === "status") {
-      const status = coreStatus();
+      const status = await coreStatus();
       console.log(status.current
         ? `cores/dolphin (${status.coreId}) is the build of these sources.`
         : `cores/dolphin (${status.coreId}) is not the build of these sources:\n  ${status.reasons.join("\n  ")}`);
@@ -249,7 +302,7 @@ if (process.argv[1] === fileURLToPath(import.meta.url)) {
       const base = option("--base");
       if (!base) throw new Error("check needs --base <ref>");
       const mode = option("--mode", "enforce");
-      const changes = coreArtifactChanges({ base });
+      const changes = await coreArtifactChanges({ base });
       if (changes.length === 0) {
         console.log(`No core-derived changes relative to ${base}.`);
       } else {
@@ -263,7 +316,7 @@ if (process.argv[1] === fileURLToPath(import.meta.url)) {
         }
       }
     } else if (command === "check-staged") {
-      const changes = process.env.CORE_ARTIFACTS_ALLOW === "1" ? [] : stagedCoreArtifactChanges();
+      const changes = process.env.CORE_ARTIFACTS_ALLOW === "1" ? [] : await stagedCoreArtifactChanges();
       if (changes.length > 0) {
         console.error(`Refusing to commit core-derived content (CI builds and commits the core):\n  ` +
           `${changes.join("\n  ")}\nUnstage it with: npm run core:restore -- --base HEAD\n` +
@@ -273,9 +326,15 @@ if (process.argv[1] === fileURLToPath(import.meta.url)) {
     } else if (command === "restore") {
       const base = option("--base");
       if (!base) throw new Error("restore needs --base <ref>");
-      const result = restoreCoreFromBase({ base });
+      const result = await restoreCoreFromBase({ base });
       console.log(`Restored ${base}'s core (${result.coreId}).` +
         (result.pendingExports.length ? ` Pending rebuild: ${result.pendingExports.join(", ")}` : ""));
+    } else if (command === "publish-plan") {
+      const artifactDir = option("--artifact");
+      if (!artifactDir) throw new Error("publish-plan needs --artifact <dir>");
+      const plan = await publishPlan({ artifactDir: resolve(artifactDir), message: option("--message", "Build the core") });
+      console.log(JSON.stringify(plan));
+      if (process.env.GITHUB_OUTPUT) writeFileSync(process.env.GITHUB_OUTPUT, `action=${plan.action}\n`, { flag: "a" });
     } else if (command === "fetch") {
       const hash = (rest.find((arg) => !arg.startsWith("--") && arg !== option("--repo")) ?? "").replace(/^sha256:/, "");
       const result = fetchCore(hash, { repo: option("--repo") });
