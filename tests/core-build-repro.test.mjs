@@ -1,5 +1,5 @@
 import assert from "node:assert/strict";
-import { mkdtempSync, mkdirSync, rmSync, writeFileSync } from "node:fs";
+import { chmodSync, mkdtempSync, mkdirSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import path from "node:path";
 import test from "node:test";
@@ -255,6 +255,23 @@ test("an install rollback removes files that did not exist before", () => {
     assert.equal(readFileSync(path.join(base, "cores/dolphin/dolphin-core-upstream.wasm"), "utf8"),
       "old cores/dolphin/dolphin-core-upstream.wasm");
   } finally {
+    rmSync(base, { recursive: true, force: true });
+  }
+});
+
+test("a failed backup leaves every installed file untouched", () => {
+  const { base, out } = installFixture();
+  const abi = path.join(base, "provenance/dolphin-core-abi-v1.json");
+  try {
+    const before = Object.fromEntries(INSTALLED_FILES.map((file) => [file, readFileSync(path.join(base, file), "utf8")]));
+    chmodSync(abi, 0o000);
+    assert.throws(() => installCore({ root: base, outputDir: out, validate: () => {} }));
+    chmodSync(abi, 0o644);
+    for (const file of INSTALLED_FILES) {
+      assert.equal(readFileSync(path.join(base, file), "utf8"), before[file], `${file} must survive a failed backup`);
+    }
+  } finally {
+    try { chmodSync(abi, 0o644); } catch {}
     rmSync(base, { recursive: true, force: true });
   }
 });

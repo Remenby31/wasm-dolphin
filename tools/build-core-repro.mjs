@@ -305,32 +305,35 @@ export const INSTALLED_FILES = [
 // staged next to its destination and renamed into place.
 export function installCore({ root: base, outputDir, validate }) {
   const backup = mkdtempSync(join(tmpdir(), "wasm-dolphin-install-"));
-  const saved = [];
   try {
+    // Record what exists and back it up before touching anything. A failure
+    // here leaves cores/dolphin untouched, so there is nothing to roll back.
+    const absent = new Set(INSTALLED_FILES.filter((path) => !existsSync(join(base, path))));
     for (const path of INSTALLED_FILES) {
-      if (!existsSync(join(base, path))) continue;
+      if (absent.has(path)) continue;
       mkdirSync(dirname(join(backup, path)), { recursive: true });
       copyFileSync(join(base, path), join(backup, path));
-      saved.push(path);
     }
-    for (const name of ["dolphin-core-upstream.js", "dolphin-core-upstream.wasm", "dolphin-core-upstream.build.json"]) {
-      const destination = join(base, "cores/dolphin", name);
-      copyFileSync(join(outputDir, name), `${destination}.install-tmp`);
-      renameSync(`${destination}.install-tmp`, destination);
-    }
-    validate();
-  } catch (error) {
-    for (const path of INSTALLED_FILES) {
-      rmSync(join(base, `${path}.install-tmp`), { force: true });
-      if (saved.includes(path)) {
-        copyFileSync(join(backup, path), join(base, `${path}.install-tmp`));
-        renameSync(join(base, `${path}.install-tmp`), join(base, path));
-      } else {
-        // Absent before the install: absent after the rollback.
-        rmSync(join(base, path), { force: true });
+    try {
+      for (const name of ["dolphin-core-upstream.js", "dolphin-core-upstream.wasm", "dolphin-core-upstream.build.json"]) {
+        const destination = join(base, "cores/dolphin", name);
+        copyFileSync(join(outputDir, name), `${destination}.install-tmp`);
+        renameSync(`${destination}.install-tmp`, destination);
       }
+      validate();
+    } catch (error) {
+      for (const path of INSTALLED_FILES) {
+        rmSync(join(base, `${path}.install-tmp`), { force: true });
+        if (absent.has(path)) {
+          // Absent before the install: absent after the rollback.
+          rmSync(join(base, path), { force: true });
+        } else {
+          copyFileSync(join(backup, path), join(base, `${path}.install-tmp`));
+          renameSync(join(base, `${path}.install-tmp`), join(base, path));
+        }
+      }
+      throw new Error(`Install rolled back, cores/dolphin is unchanged: ${error.message}`, { cause: error });
     }
-    throw new Error(`Install rolled back, cores/dolphin is unchanged: ${error.message}`, { cause: error });
   } finally {
     rmSync(backup, { recursive: true, force: true });
   }
