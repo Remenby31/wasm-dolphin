@@ -23,7 +23,7 @@ export const REGALLOC_OFF = 1 << 20;
 const SCRATCH = 0x80100000;
 const SENTINEL = 0x80002000;
 const BLR = 0x4e800020;
-const STATE_WORDS = 240;
+const STATE_WORDS = 248;
 const MAX_WORDS = 256;
 
 export async function loadOracleCore(coreDir = new URL("../../cores/dolphin/", import.meta.url)) {
@@ -34,7 +34,10 @@ export async function loadOracleCore(coreDir = new URL("../../cores/dolphin/", i
     print: () => {},
     printErr: () => {}
   });
-  if (typeof module._DolphinWeb_JitOracleRun !== "function") return null;
+  // The 248-word state (exception registers) ships with the armed warmup in
+  // patch 0072: an older core cannot run these programs.
+  if (typeof module._DolphinWeb_JitOracleRun !== "function" ||
+      typeof module._DolphinWeb_JitArmedStepForTest !== "function") return null;
   const base = module._DolphinWeb_JitOracleBuffer() >>> 0;
   const view = () => new Uint32Array(module.HEAPU8.buffer, base, MAX_WORDS + 3 * STATE_WORDS + 4);
   return {
@@ -81,14 +84,14 @@ const SPR = (n) => ((n & 0x1f) << 5) | (n >> 5);
 const PSQ = (op, t, a, w, i, d) => u((op << 26) | (t << 21) | (a << 16) | (w << 15) | (i << 12) | (d & 0xfff));
 const PSQX = (t, a, b, w, i, xo) => u((4 << 26) | (t << 21) | (a << 16) | (b << 11) | (w << 10) | (i << 7) | (xo << 1));
 
-// Destination GPRs: r0, r3..r29 and r31 (r1/r2 are the scratch base and
-// index, r30 the base of update forms).
+// Destination GPRs: r0, r3..r27, r29 and r31 (r1/r2 are the scratch base and
+// index, r28 a base no BAT maps, r30 the base of update forms).
 // Half of the picks come from r3..r6, so sources and destinations alias and
 // instructions depend on each other far more often than with uniform picks.
 const dst = (r) => {
   if (r.below(2)) return 3 + r.below(4);
-  const v = r.below(29);
-  return v === 0 ? 0 : v === 28 ? 31 : v + 2;
+  const v = r.below(28);
+  return v === 0 ? 0 : v === 26 ? 29 : v === 27 ? 31 : v + 2;
 };
 const X_STORES = new Set([215, 407, 151, 918, 662]);
 const src = (r) => (r.below(2) ? 3 + r.below(4) : r.below(32));
@@ -149,11 +152,17 @@ export const CATALOG = [
     .map(([xo, n]) => [n, (r) => X(31, n.startsWith("st") ? src(r) : updDst(r), 30, 2, xo)]),
   ...[[567, "lfsux"], [631, "lfdux"], [695, "stfsux"], [759, "stfdux"]].map(([xo, n]) =>
     [n, (r) => X(31, fpr(r), 30, 2, xo)]),
-  ["lswi", (r) => X(31, 26, 1, 1 + r.below(16), 597)], // fills at most r26..r29
+  ["lswi", (r) => X(31, 26, 1, 1 + r.below(8), 597)], // fills at most r26..r27
   ["stswi", (r) => X(31, src(r), 1, 1 + r.below(16), 725)],
   ["lmw", (r) => D(46, 31, 1, disp(r, 4))],
   ["stmw", (r) => D(47, 20 + r.below(12), 1, -64)],
   ["dcbz", (r) => X(31, 0, 1, 2, 1014)],
+  // Addresses no BAT maps (r28) and a misaligned lmw. Without MMU emulation
+  // the core does not vector these; both sides must still agree (MMU helper
+  // path, no direct RAM access).
+  ...[[32, "lwz-unmapped"], [36, "stw-unmapped"], [48, "lfs-unmapped"], [52, "stfs-unmapped"], [34, "lbz-unmapped"]].map(([op, n]) =>
+    [n, (r) => D(op, n.startsWith("st") ? src(r) : dst(r), 28, r.below(8) * 4)]),
+  ["lmw-misaligned", (r) => D(46, 31, 1, 2)],
   ["dcbst", (r) => X(31, 0, 1, 2, 54)],
   ["dcbf", (r) => X(31, 0, 1, 2, 86)],
   ["sync", () => X(31, 0, 0, 0, 598)],
@@ -251,13 +260,23 @@ export function randomState(r) {
   s[1] = SCRATCH + 0x80;
   s[2] = r.below(16) * 8;
   s[30] = SCRATCH + 0x80;
+  // No BAT maps it and, without MMU emulation, nothing backs it: stores are
+  // dropped and loads read 0. (0x4xxxxxxx and 0x7exxxxxx are backed by
+  // memory the oracle does not reset between its two runs: not usable.)
+  s[28] = 0x00100080;
   s[32] = r.next();
   s[33] = r.next() & 0xe000007f;
   s[34] = SENTINEL;
   s[35] = r.chance(0.5) ? r.below(8) : r.next();
   // RN, NI and the exception enables random; sticky bits random too.
   s[36] = r.next() & ~0x00000800; // bit 20 is reserved
-  s[37] = 0x00002032; // FP, IR, DR, RI; FE0 = FE1 = 0
+  // FP, IR, DR, RI; one state in six also sets FE0/FE1 so an enabled FP
+  // exception becomes a program exception.
+  s[37] = r.chance(1 / 6) ? 0x00002932 : 0x00002032;
+  s[240] = r.next(); // SRR0, SRR1, DAR, DSISR: overwritten by any exception
+  s[241] = r.next() & 0x87c0ffff;
+  s[242] = r.next();
+  s[243] = r.next();
   for (let i = 0; i < 8; i++) {
     // GQR halves: float, the forms the JIT inlines (s16 load with scale 0,
     // u8 store with scale 61), or any valid type (0, 4-7) with any scale.
@@ -331,7 +350,7 @@ const FIELDS = [
   ...Array.from({ length: 32 }, (_, i) => [`r${i}`, i]),
   ["cr", 32], ["xer", 33], ["lr", 34], ["ctr", 35], ["fpscr", 36], ["msr", 37],
   ...Array.from({ length: 8 }, (_, i) => [`gqr${i}`, 38 + i]),
-  ["exceptions", 46], ["pc", 47]
+  ["exceptions", 46], ["pc", 47], ["srr0", 240], ["srr1", 241], ["dar", 242], ["dsisr", 243]
 ];
 
 // FPSCR: the low byte is control (RN, NI, exception enables); the rest is

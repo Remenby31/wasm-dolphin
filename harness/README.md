@@ -37,6 +37,41 @@ machine, which people use while it runs) with a fresh `user-data-dir` per run
 (no JIT cache or IndexedDB
 carried over). Exit code: 0 pass, 1 finding, 2 usage or infrastructure error.
 
+## Which core a run used
+
+Every run checks, once the core is loaded, that the bytes the harness server
+handed out for `dolphin-core-upstream.wasm` hash to the core the run asked
+for: the URL's `coreid=sha256:…`, or else the served tree's own
+`cores/dolphin` core. Any other core, or a fallback reported by the app,
+fails the run with `core-mismatch` (the app falls back to main's core when a
+candidate is missing; a judge never measures that). The loaded hash is in
+every run's JSON (`core`). Candidate cores are served from
+`build/core-candidates/<sha>/` of the tree, or from directories passed with
+`--core-candidate <dir>`, and only when their wasm hashes to that sha.
+
+## Freeze probes
+
+During the measured window the timeline is drained every second. When it
+shows a freeze starting (no VI output for 2 s: core; or no presentation for
+2 s while VI outputs go on: present), the harness reads the worker's WebGPU
+replay and GPU sync state (`validationReadWgpuReplayState`) 4 times, 500 ms
+apart, and stores it in the run's JSON as `freezeProbes` (at most 3
+episodes per run, each state cut at 64 KB). A served worker without that
+message gets none and the episode is recorded as `unsupported`. Evidence
+only: freezes are judged by coreFreeze as before.
+
+## Renderer crashes
+
+A Chrome renderer crash ("Target crashed") in a matrix cell is run once
+more, on the same side. If it does not happen again it is an **infra
+crash**: shown in the gate report, appended to
+`harness/results/infra-crashes.jsonl` (a cumulative counter), not blocking.
+If it happens again the cell crashed: the crash check fails and blocks,
+unless the baseline crashed the same way twice too. Renderer crashes on the
+candidate only, twice or more in one comparison, are a regression. Chrome's
+log (`--enable-logging --log-file`) and crash dumps of each crashed run are
+kept in `<results>/<run>-crash/`.
+
 ## No windows
 
 The harness never shows a browser window: people work on the machine it
