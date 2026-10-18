@@ -1,27 +1,27 @@
 {
   "schemaVersion": 1,
   "abiVersion": 1,
-  "coreId": "sha256:7ddfba4dfb25966c3c2a983e360b24065642f7eb250277eaf0da57a40e223a35",
+  "coreId": "sha256:f4501b20d5503817fc28c382ece038c45888566c3c0de6f741ca20b27f97eaa7",
   "upstreamCommit": "e22551eae1c84a7e4d0b6a5c519ef4ed4ef69df1",
   "artifacts": [
     {
       "path": "cores/dolphin/dolphin-core-upstream.js",
       "hashMode": "lf-normalized",
-      "size": 269080,
-      "sha256": "6fcd157ec3936dabb5854872a58bc2784e698be2937706ca16c4c8491254acc3"
+      "size": 269180,
+      "sha256": "f13699c37ec0454cfde20045bac6b8bb6a08a5d0856bbdafa5bcb3752d7cda8e"
     },
     {
       "path": "cores/dolphin/dolphin-core-upstream.wasm",
-      "size": 12955639,
-      "sha256": "7ddfba4dfb25966c3c2a983e360b24065642f7eb250277eaf0da57a40e223a35"
+      "size": 12958569,
+      "sha256": "f4501b20d5503817fc28c382ece038c45888566c3c0de6f741ca20b27f97eaa7"
     }
   ],
   "contractSources": [
     {
       "path": "core/upstream/dolphin_web_discio.cpp",
       "hashMode": "lf-normalized",
-      "size": 55180,
-      "sha256": "0afdf1dbe3e4582ec391f204f4119f8c8bbaf99bfa40e72fd8164d291498302b"
+      "size": 57999,
+      "sha256": "a047b98f42d5b423498f0902819b812d8adad2c658ef5e813703d5b696bc4412"
     },
     {
       "path": "core/upstream/dolphin_web_raster_profile.h",
@@ -134,8 +134,8 @@
     {
       "path": "src/upstream-discio-worker.js",
       "hashMode": "lf-normalized",
-      "size": 629919,
-      "sha256": "c8f50d0ccf8de9e85aa0e2ee8be218d758ca7c3000bf7aaec5450ea96b132b1f"
+      "size": 633378,
+      "sha256": "7dad8b1a44c8a42150addc06df7a67004f71f24abf16215266b613b6e514f05c"
     },
     {
       "path": "src/wgpu-renderer-worker-probe.js",
@@ -165,7 +165,7 @@
       "path": "src/upstream-worker-protocol.js",
       "hashMode": "lf-normalized",
       "size": 5096,
-      "sha256": "dfd21a2e924cf48c9c200b4cb7e5566d5cb65b00e51b488c5b0cf20e203372f5"
+      "sha256": "da7c7ac5abf6d81bd6720f6dc3a17aa6a0e401a5c43ef6adb132432741022cb6"
     },
     {
       "path": "src/wgpu-pass-state-cache.js",
@@ -359,6 +359,7 @@
     "_AudioSampleRate",
     "_BootDisc",
     "_CoreInit",
+    "_DolphinWeb_GpuSyncDiag",
     "_DolphinWeb_HarnessArmCapture",
     "_DolphinWeb_HarnessCaptureHeight",
     "_DolphinWeb_HarnessCaptureIndex",
@@ -552,7 +553,9 @@
       "validationReadCoreProgress",
       "validationReadJitCacheReadiness",
       "validationReadTimeline",
-      "validationSetCorePaused"
+      "validationReadWgpuReplayState",
+      "validationSetCorePaused",
+      "validationSetWgpuPerturbation"
     ],
     "notificationFields": {
       "detachedOglFrame": [

@@ -1,19 +1,19 @@
 {
   "schemaVersion": 1,
-  "createdAt": "2026-10-18T07:48:57.237Z",
-  "coreId": "sha256:7ddfba4dfb25966c3c2a983e360b24065642f7eb250277eaf0da57a40e223a35",
+  "createdAt": "2026-10-18T11:34:06.436Z",
+  "coreId": "sha256:f4501b20d5503817fc28c382ece038c45888566c3c0de6f741ca20b27f97eaa7",
   "repository": {
-    "commit": "061df4ecc243810253e2dc9b1b51e960b3758e87",
+    "commit": "4b438e0489a7b26a433e32cca59362a9cf992875",
     "status": "",
     "cleanTree": true
   },
   "source": {
     "upstreamCommit": "e22551eae1c84a7e4d0b6a5c519ef4ed4ef69df1",
-    "patchSeriesSha256": "02d818dd2a864ea9ff15df534e2ba2341d8ec0f296500e308493c3b4473bac6b",
-    "vendorResultTree": "27c4314b80ad5db9c1877d0432335cf01a2bb1c5",
-    "sourceLockSha256": "e2794244fd583d65d6ad5ba9f76252e765d732577bd82887ae8217b60ea1bf71",
-    "vendorSnapshotSha256": "1f1ab323ae039edf3e79e9fff1a314d416acca3db7b7320e41d29aee4fe2dcd6",
-    "localInputsSha256": "d2ba15e02858d410e104d342e2dfa5b5bfe26190ff968929395d8686d588ff75",
+    "patchSeriesSha256": "6d21bcfa4e71ca2c630b98606a91e1f84e54375f66ad75dbc8bfa447f8a54fde",
+    "vendorResultTree": "c0710587d416a709f4fd917738c60a15386e3a6e",
+    "sourceLockSha256": "dba4fd9799a50eabac665aed5e338225df4d886e8be7c97c128c7afbeccdd85e",
+    "vendorSnapshotSha256": "08d2eeef8db80f7a87042b5cd270ca687d3a3e70bb44d539d8f948be89ede014",
+    "localInputsSha256": "c3cdcca3c61732e5dea70f4c2faf7f3ba79a2f633dd344e523222f58a50e17d0",
     "localInputs": [
       {
         "path": "core/upstream/dolphin_web_core.cpp",
@@ -23,8 +23,8 @@
       },
       {
         "path": "core/upstream/dolphin_web_discio.cpp",
-        "size": 55180,
-        "sha256": "0afdf1dbe3e4582ec391f204f4119f8c8bbaf99bfa40e72fd8164d291498302b",
+        "size": 57999,
+        "sha256": "a047b98f42d5b423498f0902819b812d8adad2c658ef5e813703d5b696bc4412",
         "hashMode": "lf-normalized"
       },
       {
@@ -170,19 +170,19 @@
       "-DDOLPHIN_WASM_CORE_SOURCE=/Users/baptistec/projects/gc-web-emu/wt-wgpu-apple/core/upstream/dolphin_web_core.cpp",
       "-DDOLPHIN_WASM_OUTPUT_DIR=/Users/baptistec/projects/gc-web-emu/wt-wgpu-apple/build/repro/darwin-arm64/core"
     ],
-    "cmakeCacheSha256": "8de916cbf79768cdbc6a96f5a1987ea43aa6c6b941d74e1428cb868786f64066"
+    "cmakeCacheSha256": "b73eb370a6609dd39ae25705b09b13517bfdb66a900eafcc98816b046727004c"
   },
   "artifacts": {
     "js": {
       "path": "/Users/baptistec/projects/gc-web-emu/wt-wgpu-apple/build/repro/darwin-arm64/core/dolphin-core-upstream.js",
-      "size": 269080,
-      "sha256": "6fcd157ec3936dabb5854872a58bc2784e698be2937706ca16c4c8491254acc3",
+      "size": 269180,
+      "sha256": "f13699c37ec0454cfde20045bac6b8bb6a08a5d0856bbdafa5bcb3752d7cda8e",
       "hashMode": "lf-normalized"
     },
     "wasm": {
       "path": "/Users/baptistec/projects/gc-web-emu/wt-wgpu-apple/build/repro/darwin-arm64/core/dolphin-core-upstream.wasm",
-      "size": 12955639,
-      "sha256": "7ddfba4dfb25966c3c2a983e360b24065642f7eb250277eaf0da57a40e223a35",
+      "size": 12958569,
+      "sha256": "f4501b20d5503817fc28c382ece038c45888566c3c0de6f741ca20b27f97eaa7",
       "hashMode": "raw"
     },
     "wasmSections": [
@@ -198,8 +198,8 @@
       },
       {
         "id": 3,
-        "size": 12465,
-        "sha256": "3f4a8936a440405c50552d6883564ad90aecd64197d1ef75ff4a1d8db7163d28"
+        "size": 12466,
+        "sha256": "1bd76f50eaa84c7381a45cc0a56ae8fd2b0d7b54c44452375395d6a6efa3daba"
       },
       {
         "id": 4,
@@ -209,22 +209,22 @@
       {
         "id": 6,
         "size": 49,
-        "sha256": "8eaa9ea39881c9b249a8c7cad35c191bf8d5e5d3ff880dd8e6fdda501c400f7c"
+        "sha256": "32094855764513855149aa2a3a8fcc904a89c1f3ec017a612d25b4d8539e36fc"
       },
       {
         "id": 7,
-        "size": 1177,
-        "sha256": "5a1996cfe4658ff3f1a5217c93469ba5a8407df53be5833d715dd0673d7ebf56"
+        "size": 1183,
+        "sha256": "e72f6f99960c6ba5f17e482d4c96a377517f9b6fdbef07aae8fdc749f1896215"
       },
       {
         "id": 8,
         "size": 2,
-        "sha256": "a213e4c3ea4247ba8cdd67b03022a08f166f099fa0a5f9eafe2ea879a78fb378"
+        "sha256": "3049c6771566b4fda01056b0932a61f9f7e61f1e3cf2a16cfb2fedd6d053c66f"
       },
       {
         "id": 9,
         "size": 22563,
-        "sha256": "002f2e36f777670e671dba84b32445876824eeea98c45f6ed3f60b0b14c69c7c"
+        "sha256": "56b926bbab5e8c49bc59ac34c338d439cb0d88367217de60fc627de5777955e7"
       },
       {
         "id": 12,
@@ -233,13 +233,13 @@
       },
       {
         "id": 10,
-        "size": 10468594,
-        "sha256": "f13cbec738d8fcbf1c1383d0bdc2d38e6c09f0a5e90e8ddb6daf7441051e9551"
+        "size": 10471005,
+        "sha256": "fd4c83242163fc41b5715e69fb649b6f1f6989b6c8bce9340caad6d72776698f"
       },
       {
         "id": 11,
-        "size": 2446315,
-        "sha256": "71b127d4b2f5a5e6acf4f47bdad3296d0b54041dc1b583b949fd9a8e1b083379"
+        "size": 2446827,
+        "sha256": "b99e0768a3f55af8c8f720a525788d1dc78a99e8366efcd428f25e9f5d2f7fed"
       }
     ]
   }
