@@ -13,7 +13,7 @@ correctness is established.
 | `jittier=guarded` | Use conservative guarded compilation. This is the default tier. |
 | `jittier=mixed` | Use the broader experimental mixed tier. Treat it as a bisection setting. |
 | `forcejit=1` | Keep/force JIT use past normal safety decisions. It can bypass protective behavior and is opt-in. |
-| `jitwarmup=N` | Wait for `N` stable video frames before engaging the JIT (`0`-`60000`; the recommended URL uses `700`). |
+| `jitwarmup=N` | Engage the JIT once the core has output `N` XFB frames (`0`-`60000`, default `60`). Emulated frames, not wall-clock time: the engage point does not depend on machine load or on a warm JIT cache. |
 | `unsafejitwarmup=1` | Bypass staged-warmup and OGL warmup protections. Diagnostic only. |
 | `regalloc=0` | Disable the default-on GPR register cache/register allocation and return to the baseline path. |
 | `smearcompile=0` | Disable default-on compile smearing and compile eagerly. |
@@ -36,6 +36,10 @@ correctness is established.
 - Compile smearing is default-on. `smearcompile=0` restores eager compilation.
 - `forcejit`, mixed-tier selection, and unsafe warmup are experimental
   diagnostics, not implied by the recommended URL.
+- There is no wall-clock fuse: once engaged, the JIT stays on. A block the
+  browser engine rejects (`CompileError`/`LinkError`) is blacklisted by its
+  exact bytes and interpreted instead; the helper stats count these
+  (`enginereject`, `blacklisthit`).
 
 The OGL path has stricter defaults. If neither `wasmjit` nor `forcejit=1` is
 specified, JIT use defaults off for OGL. When JIT is explicitly enabled, a
@@ -78,3 +82,29 @@ bursts, low block reuse, helper overhead, renderer bottlenecks, browser codegen,
 and backend-specific synchronization can hide or reverse a CPU-side gain. Use
 same-machine A/B runs and distinguish emulation progress from presentation and
 unique-frame cadence.
+
+## Correctness contract and the oracle
+
+A compiled block must leave exactly the state the interpreter leaves: GPRs,
+CR, XER, LR, CTR, FPRs bit for bit (NaN payloads, signalling bits, denormals,
+Gekko's single rounding of frC), FPSCR including FPRF/FI/FR and the sticky
+exception bits, and memory. The direct tier computes zero and normal results
+in WASM; NaN, infinity, denormal results, a denormal frC, FMA-family
+instructions, the reciprocal estimates and `MSR.FE0/FE1` set all re-run the
+instruction through the interpreter helper before anything is written.
+
+`tests/jit-oracle-fuzz.mjs` checks this in Node against the built core
+(`DolphinWeb_JitOracleRun` runs the same program from the same state through
+the interpreter, then through the CPU thread's block pipeline):
+
+```sh
+node tests/jit-oracle-fuzz.mjs --per-instruction 300          # every instruction class
+node tests/jit-oracle-fuzz.mjs --programs 20000 --length 48 --seed 2 --reduce
+node tests/jit-oracle-fuzz.mjs --programs 10000 --mask 0x20000  # shortprefix on
+```
+
+Both modes run with the GPR register cache on and off; `--reduce` shrinks a
+diverging program to the instructions that matter. `npm test` runs a small
+fixed-seed slice (`tests/jit-oracle.test.mjs`). The browser-side check is the
+harness's `cpufuzz` discs, which compare interpreter and JIT runs at the same
+VI output.

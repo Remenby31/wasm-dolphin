@@ -64,6 +64,7 @@ const VISIBLE_SAMPLE_WIDTH = 96;
 const VISIBLE_SAMPLE_HEIGHT = 72;
 const VISIBLE_SAMPLE_INTERVAL_MS = 250;
 const SAFE_JIT_WARMUP_FRAMES = 5000;
+const DEFAULT_JIT_WARMUP_FRAMES = 60;
 
 export class EmulatorHost {
   constructor({ canvas, onFrame = () => {}, onStatus = () => {}, onMode = () => {} }) {
@@ -1246,11 +1247,11 @@ function requestedPpcWasmJitWarmupFrames(videoBackend) {
       );
     }
   } else {
-    // §28bq: REVERTED §28bo (3600→300). Early engage into the huge
-    // initial compile burst, combined with §28bp removing the
-    // post-engage stall guard, froze the core at boot ("core not
-    // advancing" regression). Back to the verified-good 3600.
-    effective = forceJit ? Math.max(minimumWarmup, 700) : Math.max(minimumWarmup, 3600);
+    // Short and counted in emulated XFB frames, so the JIT engages at the
+    // same point on every run. The core spreads the first compile burst
+    // over CPU slices (compile smearing), which is what the old minute-long
+    // wait was covering for.
+    effective = Math.max(minimumWarmup, DEFAULT_JIT_WARMUP_FRAMES);
   }
   return effective;
 }

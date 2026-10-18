@@ -91,7 +91,7 @@ test("builds a minimal href by omitting playable default settings", () => {
     metrics: "0"
   });
 
-  assert.equal(href, "http://localhost:5173/?jitwarmup=700#play");
+  assert.equal(href, "http://localhost:5173/?jitwarmup=60#play");
 });
 
 test("writes explicit params when settings differ from playable defaults", () => {
@@ -135,7 +135,7 @@ test("builds the playable Melee preset href", () => {
   assert.equal(url.searchParams.get("wasmjit"), null);
   assert.equal(url.searchParams.get("jittier"), null);
   assert.equal(url.searchParams.get("forcejit"), null);
-  assert.equal(url.searchParams.get("jitwarmup"), "700");
+  assert.equal(url.searchParams.get("jitwarmup"), "60");
   assert.equal(url.searchParams.get("presenter"), null);
   assert.equal(url.searchParams.get("oglproxy"), null);
   assert.equal(url.searchParams.get("queue"), null);
