@@ -301,7 +301,7 @@ test("committed Dolphin provenance and ABI manifests verify", () => {
   // 113. The exact-floating-point JIT patch (0071) also fixes the interpreter's
   // FPCC update in Interpreter_FloatingPoint.cpp: 114. Update deliberately
   // when the series changes what it modifies.
-  assert.equal(result.vendorSnapshot.rootPaths, 114);
+  assert.equal(result.vendorSnapshot.rootPaths, 115);
   assert.equal(result.vendorSnapshot.submodulePaths, 2);
   assert.equal(result.core.abiVersion, 1);
   assert.equal(result.core.memoryContract.jsGlue.initialPages, 24576);
