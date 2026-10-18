@@ -17,6 +17,7 @@ import { captureSourceOk, captureSupported, confirmationItems, expandEnv, expand
 import { runChecks } from "./lib/correctness.mjs";
 import { browserInfo, isOverloaded, waitForLoad } from "./lib/env.mjs";
 import { createFreezeWatch, probeWorker } from "./lib/freeze-probe.mjs";
+import { acquirePerfLock } from "./lib/perf-lock.mjs";
 import { correctnessGate, crossCommitGate, decide, infraCrashGate, findingsGate, gateMarkdown, mergeGates, perfReport, runsByCell } from "./lib/gate.mjs";
 import { renderChecks, renderVsBaseline } from "./lib/render-check.mjs";
 import { IDENTITY_FILE } from "./lib/server.mjs";
@@ -734,6 +735,17 @@ function cmdGate(argv) {
 // `known`: extra known-failure entries (the selftest's), on top of the file.
 export async function abCompare({ spec, specDir, values, dir, baseline, candidate, accept = [], known = [] }) {
   const plan = expandMatrix(spec);
+  // ab measures speed (the performance report): one campaign at a time on
+  // this machine, under the shared perf lock (PROGRAM.md).
+  const releaseLock = await acquirePerfLock({ name: `harness ab ${spec.name ?? "matrix"} (${REPO_ROOT})`, waitSec: Number(values["lock-wait"] ?? 1800), log: (m) => console.log(`[harness] ${m}`) });
+  try {
+    return await abCompareLocked({ spec, specDir, values, dir, baseline, candidate, accept, known, plan });
+  } finally {
+    releaseLock();
+  }
+}
+
+async function abCompareLocked({ spec, specDir, values, dir, baseline, candidate, accept, known, plan }) {
   const sides = { baseline: { tree: baseline, records: [] }, candidate: { tree: candidate, records: [] } };
   for (const side of Object.keys(sides)) mkdirSync(path.join(dir, side));
   const play = async (items) => {
@@ -773,7 +785,7 @@ export async function abCompare({ spec, specDir, values, dir, baseline, candidat
 // Baseline (a git ref, default origin/main) vs this tree. `harness/run gate`
 // on the two result directories reproduces the decision.
 async function cmdAb(argv) {
-  const { values, positionals } = parse(argv, { runs: { type: "string" }, "max-load": { type: "string" }, confirm: { type: "string", default: "2" }, "baseline-ref": { type: "string", default: "origin/main" }, accept: { type: "string", multiple: true, default: [] } });
+  const { values, positionals } = parse(argv, { runs: { type: "string" }, "max-load": { type: "string" }, "lock-wait": { type: "string", default: "1800" }, confirm: { type: "string", default: "2" }, "baseline-ref": { type: "string", default: "origin/main" }, accept: { type: "string", multiple: true, default: [] } });
   if (!positionals[0]) throw new Error("usage: harness/run ab <spec.json> [--baseline-ref origin/main] [--runs N] [--max-load L] [--confirm N] [--accept game/config …]");
   const spec = readSpec(positionals[0], values);
   const dir = outDir(values, `ab-${spec.name ?? "matrix"}`, { private: spec.games.some((g) => g.localOnly) });

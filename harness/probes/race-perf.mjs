@@ -10,8 +10,9 @@
 //
 //   node harness/probes/race-perf.mjs --iso disc.iso --state scene.sav --port N
 //     [--baseline <git ref | dir>] [--candidate <git ref | dir>]   (default: this tree)
-//     [--config wgpu | --query "..."] [--runs 3] [--warmup 25] [--secs 20]
-//     [--hold KeyX] [--warm] [--max-load L] [--lock-wait 1800]
+//     [--config wgpu | --query "..."] [--warmup 25] [--secs 20]
+//     [--runs 4 (even with --baseline)] [--min-pairs 4] [--hold KeyX] [--warm]
+//     [--max-load L] [--load-wait 300] [--lock-wait 1800]
 //     [--pcsample [periodMs]] [--symbols functions.json] [--out dir]
 //
 // - Pairing and interleaving: run i measures both sides back to back, the
@@ -19,8 +20,12 @@
 //   hits both sides alike; the change is the median of per-run ratios.
 // - Speed is the core's own (VI ticks over host time from the VI timeline),
 //   never the page's gameSpeed (5-8 points higher): one measure only.
-// - Machine load (1-minute average) is recorded through every window; a
-//   window above --max-load (default: a quarter of the cores) fails.
+// - Machine load: as in the matrix (env.mjs), each side first waits up to
+//   --load-wait s for the 1-minute load to drop under --max-load (default: a
+//   quarter of the cores); a window whose median load is above it fails.
+// - The runs are even and the pairs balanced in order (trunk first as often
+//   as head first), with at least --min-pairs valid pairs; otherwise the
+//   change is withheld and the probe exits non-zero.
 // - The shared perf lock (~/projects/gc-web-emu/.perf-lock) is taken before
 //   the first launch and released on every exit path.
 // - Every run checks that the core it loaded is the one asked for (coreid in
@@ -38,11 +43,12 @@ import path from "node:path";
 import { parseArgs } from "node:util";
 
 import { exportRef } from "../cli.mjs";
-import { bootIso, ensureServer, loadHarnessState, readCoreProgress, readFrameInfo, readTimeline, REPO_ROOT, workerRequest } from "../lib/browser.mjs";
+import { ensureServer, loadHarnessState, readCoreProgress, readFrameInfo, readTimeline, REPO_ROOT, workerRequest } from "../lib/browser.mjs";
 import { PRESETS } from "../lib/matrix.mjs";
 import { claim, release } from "../lib/ownership.mjs";
 import { acquirePerfLock } from "../lib/perf-lock.mjs";
-import { openSession } from "../lib/session.mjs";
+import { openSession, rebootSession } from "../lib/session.mjs";
+import { waitForLoad } from "../lib/env.mjs";
 import { describe, median, percentile, round } from "../lib/stats.mjs";
 import { coreStats, mergeTimeline, presentationStats } from "../lib/timeline.mjs";
 import { summarizePcSamples } from "../../src/harness-pc-sampler.js";
@@ -54,14 +60,22 @@ export function sideOrder(run) {
   return run % 2 === 1 ? ["baseline", "candidate"] : ["candidate", "baseline"];
 }
 
-// Paired change of `metric` (candidate over baseline, per run index).
-export function pairedSpeedChange(runs, metric = "speed") {
-  const ratios = [];
+// Paired change of `metric` (candidate over baseline, per run index). A
+// pair counts only when both sides measured; the conclusion needs at least
+// `minPairs` pairs, as many with trunk first as with head first (drift over
+// a campaign then hits both sides alike), otherwise it is withheld.
+export function pairedSpeedChange(runs, { metric = "speed", minPairs = 4 } = {}) {
+  const pairs = [];
   for (const r of runs) {
     const b = r.baseline?.cold?.[metric], c = r.candidate?.cold?.[metric];
-    if (Number.isFinite(b) && Number.isFinite(c) && b > 0) ratios.push(c / b - 1);
+    if (Number.isFinite(b) && Number.isFinite(c) && b > 0) pairs.push({ run: r.run, first: sideOrder(r.run)[0], ratio: c / b - 1 });
   }
-  return { pairs: ratios.length, median: ratios.length ? round(median(ratios) * 100, 1) : null, perRun: ratios.map((x) => round(x * 100, 1)) };
+  const baseFirst = pairs.filter((p) => p.first === "baseline").length;
+  const out = { pairs: pairs.length, baselineFirst: baseFirst, candidateFirst: pairs.length - baseFirst, perRun: pairs.map((p) => round(p.ratio * 100, 1)), median: null, withheld: null };
+  if (pairs.length < minPairs) out.withheld = `${pairs.length} valid pair(s), at least ${minPairs} needed`;
+  else if (baseFirst !== pairs.length - baseFirst) out.withheld = `order unbalanced: trunk first in ${baseFirst} pair(s), head first in ${pairs.length - baseFirst}`;
+  else out.median = round(median(pairs.map((p) => p.ratio)) * 100, 1);
+  return out;
 }
 
 // The renderer of this profile and the CPU of its busiest threads (ps -M).
@@ -115,11 +129,11 @@ async function measure(session, o) {
     const pres = presentationStats(timeline);
     const viMs = timeline.vi.slice(1).map((v, i) => v.t - timeline.vi[i].t);
     const xfbDt = /xfb_dt:([\d.]+) avg:([\d.]+) max:([\d.]+)/.exec(String(info?.ppcWasmHelperStats ?? ""));
-    const maxLoad = Math.max(...loads);
+    const medianLoad = median(loads);
     return {
       windowMs: Math.round(t1 - t0),
-      load1: { min: round(Math.min(...loads), 2), median: round(median(loads), 2), max: round(maxLoad, 2), limit: o.maxLoad },
-      overloaded: maxLoad > o.maxLoad,
+      load1: { min: round(Math.min(...loads), 2), median: round(medianLoad, 2), max: round(Math.max(...loads), 2), limit: o.maxLoad },
+      overloaded: medianLoad > o.maxLoad,
       complete: timeline.complete,
       speed: round(core.speed), speedP5: round(core.speedP5), speedMin: round(core.speedMin),
       gameFps: info?.vis ?? null,
@@ -138,14 +152,17 @@ async function measure(session, o) {
 }
 
 async function measureSide(side, o) {
+  // As the matrix does (env.mjs): wait for the machine to calm down first,
+  // then judge the window on its median load.
+  const loadGate = await waitForLoad({ maxLoad: o.maxLoad, waitSec: o.loadWait, log: (m) => console.log(`[race-perf] ${side.name}: ${m}`) });
   const server = await ensureServer({ port: o.port, root: side.root, coreCandidates: o.coreCandidates });
   try {
     const session = await openSession({ base: server.base, server, query: o.query, iso: o.iso, routes: { [STATE_ROUTE]: o.state } });
-    const record = { url: session.url, served: server.identity, core: session.core };
+    const record = { url: session.url, served: server.identity, core: session.core, loadGate };
     try {
       record.cold = await measure(session, o);
       if (o.warm) {
-        await bootIso(session.page, { url: session.url, iso: o.iso });
+        record.warmCore = await rebootSession(session, server);
         record.warm = await measure(session, o);
       }
     } catch (error) {
@@ -162,6 +179,15 @@ async function measureSide(side, o) {
   }
 }
 
+// A numeric option, rejected unless it is a finite number in range.
+export function num(values, name, { min = -Infinity, int = false } = {}) {
+  const v = Number(values[name]);
+  if (values[name] == null || values[name] === "" || !Number.isFinite(v) || v < min || (int && !Number.isInteger(v))) {
+    throw new Error(`--${name} ${values[name]}: expected ${int ? "an integer" : "a number"}${min > -Infinity ? ` ≥ ${min}` : ""}`);
+  }
+  return v;
+}
+
 // A side: a directory served as is, or a git ref exported to a temporary dir.
 function resolveSide(name, spec) {
   if (!spec) return { name, label: "this tree", root: REPO_ROOT, temp: false };
@@ -169,7 +195,7 @@ function resolveSide(name, spec) {
   return { name, label: spec, root: exportRef(spec), temp: true };
 }
 
-const brief = (m) => m && `speed ${m.speed} % (p5 ${m.speedP5}) game ${m.gameFps} fps vi p99 ${m.viIntervalMs.p99} ms hitches ${m.hitchesPerMin}/min busiest thread ${m.rendererThreads.at(-1)?.busiest} % load ${m.load1.max}${m.overloaded ? " OVERLOADED" : ""}${m.pc?.samples ? ` pc ${m.pc.samples} samples` : ""}`;
+const brief = (m) => m && `speed ${m.speed} % (p5 ${m.speedP5}) game ${m.gameFps} fps vi p99 ${m.viIntervalMs.p99} ms hitches ${m.hitchesPerMin}/min busiest thread ${m.rendererThreads.at(-1)?.busiest} % load ${m.load1.median}${m.overloaded ? " OVERLOADED" : ""}${m.pc?.samples ? ` pc ${m.pc.samples} samples` : ""}`;
 
 async function main() {
   const { values } = parseArgs({
@@ -177,7 +203,7 @@ async function main() {
       iso: { type: "string" }, state: { type: "string" },
       baseline: { type: "string" }, candidate: { type: "string" },
       config: { type: "string", default: "wgpu" }, query: { type: "string" },
-      runs: { type: "string", default: "3" }, warmup: { type: "string", default: "25" }, secs: { type: "string", default: "20" },
+      runs: { type: "string", default: "4" }, "min-pairs": { type: "string" }, "load-wait": { type: "string", default: "300" }, warmup: { type: "string", default: "25" }, secs: { type: "string", default: "20" },
       hold: { type: "string", default: "KeyX" }, warm: { type: "boolean", default: false },
       "max-load": { type: "string" }, "lock-wait": { type: "string", default: "1800" },
       pcsample: { type: "string" }, symbols: { type: "string" },
@@ -187,23 +213,39 @@ async function main() {
     allowPositionals: false
   });
   if (!values.iso || !values.state || !values.port) {
-    throw new Error("usage: race-perf.mjs --iso disc.iso --state scene.sav --port N (or HARNESS_PORT) [--baseline ref|dir] [--candidate ref|dir] [--runs 3] [--warmup 25] [--secs 20] [--warm] [--max-load L] [--pcsample 0.25]");
+    throw new Error("usage: race-perf.mjs --iso disc.iso --state scene.sav --port N (or HARNESS_PORT) [--baseline ref|dir] [--candidate ref|dir] [--runs 4] [--warmup 25] [--secs 20] [--warm] [--max-load L] [--pcsample 0.25]");
   }
   const iso = path.resolve(values.iso), state = path.resolve(values.state);
   for (const f of [iso, state]) if (!existsSync(f)) throw new Error(`not found: ${f}`);
   const localOnly = !iso.startsWith(HOMEBREW_OUT);
   if (localOnly && process.env.CI) throw new Error("this disc is local-only and must never run in CI");
+  const query = `${values.query ?? PRESETS[values.config] ?? values.config}&metrics=1`;
+  // A coreid would pin both sides to one core: trunk against head would
+  // then compare a core with itself.
+  if (values.baseline && new URLSearchParams(query).has("coreid")) throw new Error("--baseline compares the two sides' own cores: no coreid in --query");
+  const runs = num(values, "runs", { min: 1, int: true });
+  if (values.baseline && runs % 2) throw new Error(`--runs ${runs}: with --baseline the runs must be even, so trunk goes first as often as head`);
   const o = {
-    iso, state, port: Number(values.port),
-    query: `${values.query ?? PRESETS[values.config] ?? values.config}&metrics=1`,
-    runs: Number(values.runs), warmup: Number(values.warmup), secs: Number(values.secs),
+    iso, state, port: num(values, "port", { min: 1, int: true }), query, runs,
+    minPairs: values["min-pairs"] ? num(values, "min-pairs", { min: 2, int: true }) : Math.min(runs, 4),
+    warmup: num(values, "warmup", { min: 0 }), secs: num(values, "secs", { min: 2, int: true }),
     hold: values.hold || null, warm: values.warm,
-    maxLoad: values["max-load"] ? Number(values["max-load"]) : Math.max(2, os.cpus().length / 4),
-    pcsample: values.pcsample ? Number(values.pcsample) || 0.25 : null,
+    maxLoad: values["max-load"] ? num(values, "max-load", { min: 0.1 }) : Math.max(2, os.cpus().length / 4),
+    loadWait: num(values, "load-wait", { min: 0 }),
+    pcsample: values.pcsample ? num(values, "pcsample", { min: 0.05 }) : null,
     functions: values.symbols ? JSON.parse(readFileSync(values.symbols, "utf8")).sort((a, b) => a[0] - b[0]) : null,
     coreCandidates: values["core-candidate"]
   };
+  const lockWait = num(values, "lock-wait", { min: 0 });
 
+  const sides = {};
+  // Exported refs are removed on every exit, Ctrl-C included (the perf
+  // lock's signal handler exits the process, which runs this).
+  const dropExports = () => { for (const s of Object.values(sides)) if (s.temp && existsSync(s.root)) { release(s.root); rmSync(s.root, { recursive: true, force: true }); } };
+  process.once("exit", dropExports);
+  sides.candidate = resolveSide("candidate", values.candidate);
+  if (values.baseline) sides.baseline = resolveSide("baseline", values.baseline);
+  const releaseLock = await acquirePerfLock({ name: `harness race-perf (${REPO_ROOT})`, waitSec: lockWait, log: (m) => console.log(`[race-perf] ${m}`) });
   // A local-only disc never writes into the repo.
   const stamp = `${new Date().toISOString().replace(/[:.]/g, "-").slice(0, 19)}-${process.pid}-${randomBytes(3).toString("hex")}`;
   const outDir = values.out ? path.resolve(values.out) : localOnly
@@ -213,10 +255,7 @@ async function main() {
   mkdirSync(outDir);
   claim(outDir, REPO_ROOT, "results");
 
-  const sides = { candidate: resolveSide("candidate", values.candidate) };
-  if (values.baseline) sides.baseline = resolveSide("baseline", values.baseline);
-  const releaseLock = await acquirePerfLock({ name: `harness race-perf (${REPO_ROOT})`, waitSec: Number(values["lock-wait"]), log: (m) => console.log(`[race-perf] ${m}`) });
-  const runs = [];
+  const records = [];
   try {
     for (let run = 1; run <= o.runs; run += 1) {
       const record = { run };
@@ -226,16 +265,17 @@ async function main() {
         console.log(`[race-perf] run ${run} ${name}: ${r.error ?? brief(r.cold)}${r.warm ? ` | warm: ${brief(r.warm)}` : ""}`);
       }
       writeFileSync(path.join(outDir, `run${run}.json`), JSON.stringify(record, null, 1) + "\n");
-      runs.push(record);
+      records.push(record);
     }
   } finally {
     releaseLock();
-    for (const s of Object.values(sides)) if (s.temp) { release(s.root); rmSync(s.root, { recursive: true, force: true }); }
+    dropExports();
   }
+  const runsDone = records;
 
   const good = (r) => r && !r.error && !r.fatal?.length && !r.cold?.overloaded && !r.warm?.overloaded;
   const summarize = (name, phase) => {
-    const m = runs.map((r) => r[name]).filter(good).map((r) => r[phase]).filter(Boolean);
+    const m = runsDone.map((r) => r[name]).filter(good).map((r) => r[phase]).filter(Boolean);
     if (!m.length) return null;
     return {
       speed: describe(m.map((x) => x.speed)), gameFps: describe(m.map((x) => x.gameFps)),
@@ -243,19 +283,25 @@ async function main() {
       hitchesPerMin: describe(m.map((x) => x.hitchesPerMin)), busiestThread: describe(m.map((x) => x.rendererThreads.at(-1)?.busiest))
     };
   };
-  const failed = Object.keys(sides).flatMap((n) => runs.filter((r) => !good(r[n])).map((r) => ({ run: r.run, side: n, why: r[n]?.error ?? (r[n]?.fatal?.length ? "crash" : "overloaded") })));
+  // The PC histogram exists on one side only when the other side's core
+  // lacks the export (an older trunk): say so, it is not a comparison.
+  const pcSides = o.pcsample ? Object.keys(sides).filter((n) => runsDone.some((r) => r[n]?.cold?.pc?.samples)) : [];
+  const pcNote = o.pcsample && pcSides.length < Object.keys(sides).length ? `guest PC sampled on ${pcSides.join(", ") || "no side"} only` : null;
+  if (pcNote) console.warn(`[race-perf] warning: ${pcNote}`);
+  const failed = Object.keys(sides).flatMap((n) => runsDone.filter((r) => !good(r[n])).map((r) => ({ run: r.run, side: n, why: r[n]?.error ?? (r[n]?.fatal?.length ? "crash" : "overloaded") })));
   const summary = {
     iso: path.basename(iso), state: path.basename(state), query: o.query, warmupSec: o.warmup, secs: o.secs, hold: o.hold, maxLoad: o.maxLoad,
     sides: Object.fromEntries(Object.entries(sides).map(([n, s]) => [n, s.label])),
-    runs: runs.length, failed,
+    runs: runsDone.length, failed,
     candidate: { cold: summarize("candidate", "cold"), warm: summarize("candidate", "warm") },
     baseline: sides.baseline ? { cold: summarize("baseline", "cold"), warm: summarize("baseline", "warm") } : null,
-    change: sides.baseline ? pairedSpeedChange(runs.filter((r) => good(r.baseline) && good(r.candidate))) : null
+    change: sides.baseline ? pairedSpeedChange(runsDone.filter((r) => good(r.baseline) && good(r.candidate)), { minPairs: o.minPairs }) : null,
+    pcsample: pcNote
   };
   writeFileSync(path.join(outDir, "summary.json"), JSON.stringify(summary, null, 1) + "\n");
   const med = (n) => summary[n]?.cold?.speed?.median ?? "-";
-  console.log(`[race-perf] ${sides.baseline ? `baseline ${med("baseline")} % → candidate ${med("candidate")} %, paired change ${summary.change.median ?? "-"} % over ${summary.change.pairs} pairs` : `speed median ${med("candidate")} %`}${failed.length ? `; ${failed.length} failed run(s): ${failed.map((f) => `r${f.run} ${f.side} ${f.why}`).join(", ")}` : ""} -> ${outDir}`);
-  process.exitCode = failed.length ? 1 : 0;
+  console.log(`[race-perf] ${sides.baseline ? `baseline ${med("baseline")} % → candidate ${med("candidate")} %, paired change ${summary.change.median ?? `withheld (${summary.change.withheld})`}${summary.change.median != null ? ` % over ${summary.change.pairs} pairs` : ""}` : `speed median ${med("candidate")} %`}${failed.length ? `; ${failed.length} failed run(s): ${failed.map((f) => `r${f.run} ${f.side} ${f.why}`).join(", ")}` : ""} -> ${outDir}`);
+  process.exitCode = failed.length || summary.change?.withheld ? 1 : 0;
 }
 
 if (import.meta.url === `file://${process.argv[1]}`) await main();
