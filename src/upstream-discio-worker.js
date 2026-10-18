@@ -12,7 +12,7 @@ import {
 import { parseDolHeader } from "./dol.js";
 import { decodeWgpuSamplerState } from "./wgpu-sampler-state.js";
 import { gxClearDepthToStored, gxDepthState } from "./wgpu-depth-state.js";
-import { createWgpuExactCapture, packReadbackRows } from "./wgpu-exact-capture.js";
+import { clampSourceRect, createWgpuExactCapture, packReadbackRows } from "./wgpu-exact-capture.js";
 import { decodePrebuiltCache } from "./prebuilt-jit-cache-format.js";
 import {
   JIT_CACHE_ENTRY_KEY_SCHEMA,
@@ -915,13 +915,14 @@ async function captureAtViOutput({ index, ahead, fromLoad = false, timeoutMs = 6
 // (the guest XFB is not what this backend draws); the replay matches the
 // request to the PRESENT tagged with that VI output and reads it back.
 async function captureAtViOutputWgpu(index, fromLoad, timeoutMs) {
-  const capture = wgpuExactCapture.arm(index, fromLoad);
-  const timer = setTimeout(() => wgpuExactCapture.cancel(new Error(
+  const generation = moduleInstance?._DolphinWeb_HarnessLoadGeneration?.() >>> 0;
+  const { id, promise } = wgpuExactCapture.arm(index, fromLoad, generation);
+  const timer = setTimeout(() => wgpuExactCapture.cancel(id, new Error(
     wgpuExactCapture.tagsSeen === 0
       ? "core does not tag WebGPU presents with VI outputs (rebuild the core)"
       : `VI output ${index} never reached within ${timeoutMs} ms`)), timeoutMs);
   try {
-    return await capture;
+    return await promise;
   } finally {
     clearTimeout(timer);
   }
@@ -930,19 +931,30 @@ async function captureAtViOutputWgpu(index, fromLoad, timeoutMs) {
 // Reads back the texture the last hardware present showed, at its own size.
 // Its own submission, queued right after the present's, so it sees exactly
 // what was presented and nothing recorded later.
+// The XFB rectangle the next backbuffer blit samples (PresentSource), and
+// what the last hardware present showed: that rectangle of that texture.
+let wgpuNextPresentSource = null;
+let wgpuPresentedSource = null;
+
+// Reads back exactly what the last hardware present showed: the presenter's
+// source rectangle of the XFB texture, at native size. Its own submission,
+// queued right after the present's, so nothing recorded later can reach it.
 function readbackWgpuPresentSource() {
-  const id = wgpuLastBackbufferSourceTextureId;
-  const entry = id ? webGpuObjects.textures.get(id) : null;
+  const shown = wgpuPresentedSource;
+  const entry = shown?.textureId ? webGpuObjects.textures.get(shown.textureId) : null;
   if (!entry || !renderGpu) throw new Error("no presented WebGPU texture to read back");
+  if (!shown.rect) throw new Error("core does not report the presented rectangle (rebuild the core)");
   if (!(entry.format === "rgba8unorm" || entry.format === "bgra8unorm")) {
     throw new Error(`presented texture format ${entry.format} cannot be captured`);
   }
+  const rect = clampSourceRect(shown.rect, entry.tex.width, entry.tex.height);
+  if (!rect) throw new Error("presented rectangle lies outside its texture");
   const dev = renderGpu.device;
-  const width = entry.tex.width, height = entry.tex.height;
+  const { w: width, h: height } = rect;
   const bytesPerRow = Math.ceil(width * 4 / 256) * 256;
   const buffer = dev.createBuffer({ size: bytesPerRow * height, usage: 0x1 | 0x8 });
   const encoder = dev.createCommandEncoder({ label: "harness-wgpu-capture" });
-  encoder.copyTextureToBuffer({ texture: entry.tex },
+  encoder.copyTextureToBuffer({ texture: entry.tex, origin: { x: rect.x, y: rect.y, z: 0 } },
     { buffer, bytesPerRow, rowsPerImage: height }, { width, height, depthOrArrayLayers: 1 });
   dev.queue.submit([encoder.finish()]);
   return buffer.mapAsync(0x1).then(() => {
@@ -1193,6 +1205,7 @@ async function handleMessage(type, payload) {
       api?.setWebGpuGeometryPackEnabled?.(wgpuGeometryPackEnabled ? 1 : 0);
       api?.setWebGpuGeometryRangeEnabled?.(wgpuGeometryRangeEnabled ? 1 : 0);
       let loaded = false;
+      wgpuExactCapture.onLoad();
       ppcWasmJitTimingSuspensions += 1;
       try {
         loaded = Boolean(api?.loadState(payload.slot | 0));
@@ -1419,6 +1432,7 @@ async function handleMessage(type, payload) {
       api?.setWebGpuUboPackEnabled?.(webGpuUboPackMode());
       api?.setWebGpuGeometryPackEnabled?.(wgpuGeometryPackEnabled ? 1 : 0);
       api?.setWebGpuGeometryRangeEnabled?.(wgpuGeometryRangeEnabled ? 1 : 0);
+      wgpuExactCapture.onLoad();
       let rc = 0;
       ppcWasmJitTimingSuspensions += 1;
       try {
@@ -6491,6 +6505,7 @@ const WGPU_CMD_OP_DESTROY = 23;
 const WGPU_CMD_OP_BLIT_TEXTURE = 24;
 const WGPU_CMD_OP_CLEAR_RECT = 25;
 const WGPU_CMD_OP_VI_TAG = 26;
+const WGPU_CMD_OP_PRESENT_SOURCE = 27;
 // ClearRect uses the full attachment viewport and [0,1] depth range, so its
 // scissor alone determines coverage and its depth is independent of game state.
 // A/B switch: false restores the original game-viewport-dependent clear.
@@ -13182,6 +13197,10 @@ function drainWebGpuCmdRing(source = "presentation") {
           // the current command-ring drain returns.
           cmdRingOwnsCanvas = true;
           recordPresentedFrame(api?.getFrame?.() ?? 0);
+          wgpuPresentedSource = {
+            textureId: wgpuLastBackbufferSourceTextureId, rect: wgpuNextPresentSource
+          };
+          wgpuNextPresentSource = null;
           wgpuExactCapture.onPresent(readbackWgpuPresentSource);
           scheduleDetachedWgpuBitmap(q);
           webGpuExecStats.present++;
@@ -13264,8 +13283,15 @@ function drainWebGpuCmdRing(source = "presentation") {
           // Harness only: the VI output the next ViSwap shows.
           wgpuExactCapture.onViTag({
             boot: u32[recWord + 1], load: u32[recWord + 2],
-            ticks: u32[recWord + 3] + u32[recWord + 4] * 4294967296
+            ticks: u32[recWord + 3] + u32[recWord + 4] * 4294967296,
+            generation: u32[recWord + 5]
           }, readbackWgpuPresentSource);
+          break;
+        case WGPU_CMD_OP_PRESENT_SOURCE:
+          // Harness only: the XFB rectangle the coming backbuffer blit samples.
+          wgpuNextPresentSource = {
+            x: u32[recWord + 1], y: u32[recWord + 2], w: u32[recWord + 3], h: u32[recWord + 4]
+          };
           break;
         default:
           break;
