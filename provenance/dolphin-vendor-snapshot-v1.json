@@ -3,8 +3,8 @@
   "normalization": "git-blob-lf",
   "root": {
     "baseCommit": "e22551eae1c84a7e4d0b6a5c519ef4ed4ef69df1",
-    "resultTree": "0011aa30da61b1674ebe4ce18cf8d44fdfe9f911",
-    "changedPathCount": 114,
+    "resultTree": "23a47adb5946ec8ac3ece0d74a8810e975b530e5",
+    "changedPathCount": 115,
     "records": [
       {
         "path": "CMakeLists.txt",
@@ -113,6 +113,15 @@
         "resultBlob": "7e6264c0692d48d294bfe4209351a1e805448046",
         "size": 1306,
         "sha256": "9149c8f784e1b8b07ec64897dd52dead84e16f6c682c29ea9779deb6217a0197"
+      },
+      {
+        "path": "Source/Core/Common/Hash.cpp",
+        "status": "M",
+        "mode": "100644",
+        "baseBlob": "a3984745f549141f513e784f4d18f047d21e7ec0",
+        "resultBlob": "2cfb0ee59bf0c7abc6e5d4e3e7b3845eff4f0ec8",
+        "size": 8677,
+        "sha256": "6ffbdaa3222111a22b5ee02d20511bd58e0d8880943e68654f90a9789e9909b7"
       },
       {
         "path": "Source/Core/Common/MemoryUtil.cpp",
@@ -1068,5 +1077,5 @@
       ]
     }
   ],
-  "contentSha256": "29907b3ddc992372b12b48d84aa95233a6370fed5bd594f7880abd5d5d968115"
+  "contentSha256": "77d45d3e7d19f73b7bc97ff541a1c8ce92d0c8273078be9703afc008d7cf5d84"
 }

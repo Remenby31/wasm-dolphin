@@ -1,0 +1,9 @@
+--- a/Source/Core/Common/Hash.cpp
++++ b/Source/Core/Common/Hash.cpp
+@@ -1,5 +1,6 @@
+ // Copyright 2008 Dolphin Emulator Project
+ // SPDX-License-Identifier: GPL-2.0-or-later
++// CI measurement: a one-line Dolphin patch (never merged).
+ 
+ #include "Common/Hash.h"
+ 
