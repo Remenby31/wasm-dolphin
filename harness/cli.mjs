@@ -625,11 +625,11 @@ function knownFailures() {
   return existsSync(file) ? JSON.parse(readFileSync(file, "utf8")) : [];
 }
 
-function gateFromDirs(baseDir, candDir, { accept = [] } = {}) {
+function gateFromDirs(baseDir, candDir, { accept = [], known = [] } = {}) {
   const read = (d) => JSON.parse(readFileSync(path.join(d, "summary.json"), "utf8"));
   const optional = (d, f) => (existsSync(path.join(d, f)) ? JSON.parse(readFileSync(path.join(d, f), "utf8")) : null);
   const base = read(baseDir), cand = read(candDir);
-  const gates = [correctnessGate(base.cells, cand.cells), crossCommitGate(renderVsBaseline(base.results, cand.results, { accept, known: knownFailures() }))];
+  const gates = [correctnessGate(base.cells, cand.cells), crossCommitGate(renderVsBaseline(base.results, cand.results, { accept, known: [...knownFailures(), ...known] }))];
   for (const [name, file, pick] of [["fuzz", "fuzz.json", (r) => r.results.flatMap((x) => x.findings.map((f) => ({ ...f, iso: x.iso })))], ["pads", "pads.json", (r) => padFindings(r)]]) {
     const b = optional(baseDir, file), c = optional(candDir, file);
     if (b || c) gates.push(findingsGate(name, b ? pick(b) : [], c ? pick(c) : null));
@@ -652,7 +652,8 @@ function cmdGate(argv) {
 // <dir>/baseline and <dir>/candidate. Cells whose performance got worse by
 // the threshold are replayed (both sides and the reference config, `confirm`
 // more pairs) before the gate decides. Returns the gate (also gate.json).
-export async function abCompare({ spec, specDir, values, dir, baseline, candidate, accept = [] }) {
+// `known`: extra known-failure entries (the selftest's), on top of the file.
+export async function abCompare({ spec, specDir, values, dir, baseline, candidate, accept = [], known = [] }) {
   const plan = expandMatrix(spec);
   const sides = { baseline: { tree: baseline, records: [] }, candidate: { tree: candidate, records: [] } };
   for (const side of Object.keys(sides)) mkdirSync(path.join(dir, side));
@@ -676,14 +677,14 @@ export async function abCompare({ spec, specDir, values, dir, baseline, candidat
     if (spec.pads) await withServer(values, (server) => runPads(server, values, { iso: disc("harness/homebrew/out/padtest.iso"), query: PADS_QUERY, dir: path.join(dir, side) }), tree);
   }
   persist();
-  let g = gateFromDirs(path.join(dir, "baseline"), path.join(dir, "candidate"), { accept });
+  let g = gateFromDirs(path.join(dir, "baseline"), path.join(dir, "candidate"), { accept, known });
   const flagged = g.perf.filter((r) => r.worse);
   if (flagged.length && Number(values.confirm ?? 2) > 0) {
     const extra = confirmationItems(plan, flagged, { rounds: Number(values.confirm ?? 2), reference: spec.reference });
     console.log(`[harness] performance worse in ${new Set(flagged.map((r) => `${r.game}/${r.config}`)).size} cell(s), confirming with ${extra.length} more A/B pairs`);
     await play(extra);
     persist();
-    g = gateFromDirs(path.join(dir, "baseline"), path.join(dir, "candidate"), { accept });
+    g = gateFromDirs(path.join(dir, "baseline"), path.join(dir, "candidate"), { accept, known });
   }
   writeJson(path.join(dir, "gate.json"), g);
   writeFileSync(path.join(dir, "gate.md"), gateMarkdown(g) + "\n");

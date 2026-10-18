@@ -93,10 +93,20 @@ MUTANTS.push({
   spec: repeated, candidate: { patches: NONDETERMINISTIC }
 });
 
+// Main's nondeterminism on this cell is declared known, as
+// harness/known-failures.json does for cpufuzz-nomcrf/sw-jit.
+const KNOWN_NONDETERMINISTIC = [{ cell: "gxscene/sw-interp", check: "renderVsBaseline", reason: "selftest: main made nondeterministic" }];
+
+MUTANTS.push({
+  id: "nondeterministic-base-broken", what: "main's picture changes from run to run (known) and the candidate stably loses its geometry",
+  spec: repeated, baseline: { patches: NONDETERMINISTIC }, known: KNOWN_NONDETERMINISTIC,
+  candidate: { discs: { [`${HB}/gxscene.iso`]: `${HB}/gxscene-nocubes.iso` } }
+});
+
 // Controls: known trouble on the baseline side that must NOT block a sound candidate.
 export const CONTROLS = [{
-  id: "baseline-nondeterministic", what: "main's picture changes from run to run, the candidate's is stable",
-  spec: repeated, baseline: { patches: NONDETERMINISTIC }
+  id: "baseline-nondeterministic", what: "main's picture changes from run to run (known), the candidate's is stable and right",
+  spec: repeated, baseline: { patches: NONDETERMINISTIC }, known: KNOWN_NONDETERMINISTIC
 }];
 
 // The clean comparison covers every check the mutants use.
@@ -114,13 +124,13 @@ async function main() {
   const only = values.only ? new Set(values.only.split(",")) : null;
   const base = { root: REPO_ROOT };
   const rows = [];
-  const runOne = async (id, kind, spec, candidate, baseline = {}) => {
+  const runOne = async (id, kind, spec, candidate, baseline = {}, known = []) => {
     const sub = path.join(dir, id);
     mkdirSync(sub);
     const opts = { port: values.port, headless: values.headless, confirm: "2" };
     let gate, error = null;
     try {
-      gate = await abCompare({ spec, specDir: REPO_ROOT, values: opts, dir: sub, baseline: { ...base, ...baseline }, candidate: { root: REPO_ROOT, ...candidate } });
+      gate = await abCompare({ spec, specDir: REPO_ROOT, values: opts, dir: sub, baseline: { ...base, ...baseline }, candidate: { root: REPO_ROOT, ...candidate }, known });
     } catch (e) {
       error = e.message;
     }
@@ -137,8 +147,8 @@ async function main() {
     rows.push(row);
     console.log(`[selftest] ${id}: ${error ? `ERROR ${error}` : blocked ? `blocked (${row.by.join("; ")})` : "passed"} → ${row.ok ? "OK" : "WRONG"}`);
   };
-  for (const m of MUTANTS) if (!only || only.has(m.id)) await runOne(m.id, "mutant", m.spec, m.candidate);
-  for (const c of CONTROLS) if (!only || only.has(c.id)) await runOne(c.id, "control", c.spec, {}, c.baseline);
+  for (const m of MUTANTS) if (!only || only.has(m.id)) await runOne(m.id, "mutant", m.spec, m.candidate, m.baseline, m.known);
+  for (const c of CONTROLS) if (!only || only.has(c.id)) await runOne(c.id, "control", c.spec, {}, c.baseline, c.known);
   for (let i = 1; i <= Number(values.clean); i += 1) if (!only || only.has("clean")) await runOne(`clean-${i}`, "clean", CLEAN_SPEC, {});
   const md = [
     "| Case | Kind | What | Gate | Blocked by | Expected |",
