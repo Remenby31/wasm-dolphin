@@ -100,7 +100,17 @@ test("reset taps the reset button; stop persists before and after the core goes 
     afterStop: async () => order.push(`after:${core.state}`)
   });
   assert.equal((await life.reset()).changed, true);
-  assert.deepEqual(await life.stop(), { state: "Uninitialized", changed: true });
+  assert.deepEqual(await life.stop(), { state: "Uninitialized", changed: true, persistError: "" });
   assert.deepEqual(order, ["before:Running", "after:Uninitialized"]);
   assert.deepEqual(core.calls, [["resetCore"], ["stopCore"]]);
+});
+
+test("a full quota while saving never keeps the core from stopping", async () => {
+  const core = fakeCore();
+  const quota = () => Promise.reject(Object.assign(new Error("QuotaExceededError: quota exceeded"), { name: "QuotaExceededError" }));
+  const life = lifecycle(core, { beforeStop: quota, afterStop: quota });
+  const result = await life.stop();
+  assert.equal(result.state, "Uninitialized");
+  assert.match(result.persistError, /quota exceeded; .*quota exceeded/);
+  assert.deepEqual(core.calls, [["stopCore"]]);
 });

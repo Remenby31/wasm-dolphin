@@ -30,6 +30,31 @@ export async function upstreamBundleAvailable(coreUrl = DEFAULT_UPSTREAM_CORE_UR
   }
 }
 
+// What the page should say about saves at load, or "" when all is well.
+export function describeUserDataStatus(status) {
+  if (!status) return "";
+  switch (status.mode) {
+    case "writer":
+      return "";
+    case "read-only":
+      return `Saves are read-only in this tab (${status.reason.replace(/^read-only: /, "")}): progress here will not be kept`;
+    case "failed":
+      return `Saves could not be restored, games will not start: ${status.reason}`;
+    case "off":
+      return "Saves are off for this page";
+    default:
+      return `Saves will not survive a reload: ${status.reason}`;
+  }
+}
+
+// "Saved" only when the slot holds the new state and OPFS holds it too.
+export function describeSlotSave(slot, response) {
+  if (!response?.saved) return `Save slot ${slot} failed`;
+  if (response.persisted?.persistent) return `Saved slot ${slot}`;
+  const why = response.persisted?.error || response.persisted?.reason || "saves are not stored";
+  return `Saved slot ${slot} for this session only: ${why}`;
+}
+
 export class UpstreamWorkerAdapter {
   constructor({
     coreUrl = DEFAULT_UPSTREAM_CORE_URL,
@@ -62,6 +87,7 @@ export class UpstreamWorkerAdapter {
     correctTimeDrift = false,
     coreLog = false,
     memcardSlotB = false,
+    savesMode = "",
     efbDiag = false,
     jitVerbose = false,
     frameCap = 0,
@@ -158,6 +184,7 @@ export class UpstreamWorkerAdapter {
     this.correctTimeDrift = Boolean(correctTimeDrift);
     this.coreLog = Boolean(coreLog);
     this.memcardSlotB = Boolean(memcardSlotB);
+    this.savesMode = String(savesMode || "");
     this.userData = null;
     this.efbDiag = Boolean(efbDiag);
     this.jitVerbose = Boolean(jitVerbose);
@@ -362,6 +389,7 @@ export class UpstreamWorkerAdapter {
       correctTimeDrift: this.correctTimeDrift,
       coreLog: this.coreLog,
       memcardSlotB: this.memcardSlotB,
+      savesMode: this.savesMode,
       efbDiag: this.efbDiag,
       jitVerbose: this.jitVerbose,
       frameCap: this.frameCap,
@@ -460,9 +488,8 @@ export class UpstreamWorkerAdapter {
     this.applyMetadata(response);
     this.loaded = true;
     this.userData = response.userData ?? null;
-    if (this.userData && !this.userData.persistent) {
-      this.onStatus(`Saves will not survive a reload: ${this.userData.reason}`);
-    }
+    const saveWarning = describeUserDataStatus(this.userData);
+    if (saveWarning) this.onStatus(saveWarning);
     // Memory cards are copied to OPFS a second after they stop changing;
     // a tab going to the background gets them copied now.
     if (typeof document !== "undefined") {
@@ -673,7 +700,10 @@ export class UpstreamWorkerAdapter {
       return;
     }
     this.request("pause")
-      .then((response) => this.applyFrame(response))
+      .then((response) => {
+        this.applyFrame(response);
+        if (response.persisted?.error) this.onStatus(`Paused; saves not stored: ${response.persisted.error}`);
+      })
       .catch((error) => this.onStatus(error.message));
   }
 
@@ -690,8 +720,10 @@ export class UpstreamWorkerAdapter {
     return this.lifecycle("resume");
   }
 
-  stop() {
-    return this.lifecycle("stop");
+  async stop() {
+    const response = await this.lifecycle("stop");
+    if (response.persistError) this.onStatus(`Stopped; saves not stored: ${response.persistError}`);
+    return response;
   }
 
   // Saves. Every call resolves with the worker's answer or rejects with
@@ -747,7 +779,7 @@ export class UpstreamWorkerAdapter {
       return;
     }
     this.request("saveState", { slot })
-      .then((response) => this.onStatus(`Saved slot ${slot} (${response.size} bytes)`))
+      .then((response) => this.onStatus(describeSlotSave(slot, response)))
       .catch((error) => this.onStatus(error.message));
   }
 

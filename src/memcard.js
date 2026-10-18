@@ -17,6 +17,10 @@ export const DIRECTORY_ENTRIES = 127;
 export const SYSTEM_BLOCKS = 5;
 export const MBIT_TO_BLOCKS = 16;
 export const DEFAULT_CARD_MBITS = 16; // "Memory Card 251"
+// Card sizes a GameCube knows, Memory Card 59 to 2043 (4 to 128 Mbit).
+export const CARD_MBITS = Object.freeze([4, 8, 16, 32, 64, 128]);
+export const MAX_CARD_BYTES = 128 * MBIT_TO_BLOCKS * BLOCK_SIZE;
+export const MAX_SAVE_BLOCKS = 128 * MBIT_TO_BLOCKS - SYSTEM_BLOCKS;
 const UNINITIALIZED = 0xffffffff;
 
 const HEADER_CHECKSUM_END = 0x1fc;
@@ -80,7 +84,8 @@ export function parseGci(bytes) {
   if (!/^[\x20-\x7e]{4}$/.test(info.gameCode) || !/^[\x20-\x7e]{2}$/.test(info.makerCode)) {
     throw new Error("Not a GCI file: game or maker code is not printable");
   }
-  if (info.blockCount === 0 || bytes.byteLength !== DENTRY_SIZE + info.blockCount * BLOCK_SIZE) {
+  if (info.blockCount === 0 || info.blockCount > MAX_SAVE_BLOCKS ||
+      bytes.byteLength !== DENTRY_SIZE + info.blockCount * BLOCK_SIZE) {
     throw new Error(
       `Not a GCI file: entry announces ${info.blockCount} blocks, file holds ${(bytes.byteLength - DENTRY_SIZE) / BLOCK_SIZE}`
     );
@@ -88,11 +93,20 @@ export function parseGci(bytes) {
   return info;
 }
 
-// Dolphin's GenerateDefaultGCIFilename, minus its escaping of the rare
-// characters a file name cannot hold (we replace them).
+// What tells two saves apart on a card: game code, maker code and the
+// 32-byte file name field (Dolphin refuses two entries that share them).
+export function saveIdentity(info) {
+  return `${info.gameCode}\u0000${info.makerCode}\u0000${info.fileName}`;
+}
+
+// A file name for a save, one-to-one with its identity: every character
+// outside [A-Za-z0-9._ ] (the "-" separator and "%" included) is written as
+// %XX of its byte, so "a/b" and "a:b" stay two files. The layout follows
+// Dolphin's GenerateDefaultGCIFilename (maker-game-name.gci).
 export function gciFileName(info) {
-  const clean = (s) => s.replace(/[^A-Za-z0-9._ -]/g, "_");
-  return `${clean(info.makerCode)}-${clean(info.gameCode)}-${clean(info.fileName) || "save"}.gci`;
+  const escape = (text) =>
+    [...text].map((ch) => (/[A-Za-z0-9._ ]/.test(ch) ? ch : `%${ch.charCodeAt(0).toString(16).toUpperCase().padStart(2, "0")}`)).join("");
+  return `${escape(info.makerCode)}-${escape(info.gameCode)}-${escape(info.fileName)}.gci`;
 }
 
 function activeCopy(card, first, second, counterOffset) {
@@ -101,13 +115,19 @@ function activeCopy(card, first, second, counterOffset) {
   return s16(a, counterOffset) >= s16(b, counterOffset) ? [a, b] : [b, a];
 }
 
-// Every save on a raw card image, as .gci bytes.
+// Every save on a raw card image, as .gci bytes. The whole card is checked
+// before anything is allocated: a known card size, checksums, entries whose
+// block chains stay on the card, end exactly at their announced length and
+// share no block with another chain (which also rules out cycles).
 export function parseRawCard(card) {
+  if (card.byteLength > MAX_CARD_BYTES) {
+    throw new Error(`Not a raw memory card: ${card.byteLength} bytes is larger than any card`);
+  }
   if (card.byteLength < SYSTEM_BLOCKS * BLOCK_SIZE || card.byteLength % BLOCK_SIZE !== 0) {
     throw new Error("Not a raw memory card: size is not a whole number of 8 KiB blocks");
   }
   const sizeMbits = u16(card, 0x22);
-  if (sizeMbits * MBIT_TO_BLOCKS * BLOCK_SIZE !== card.byteLength) {
+  if (!CARD_MBITS.includes(sizeMbits) || sizeMbits * MBIT_TO_BLOCKS * BLOCK_SIZE !== card.byteLength) {
     throw new Error(`Not a raw memory card: header says ${sizeMbits} Mbit, file is ${card.byteLength} bytes`);
   }
   if (!checksumsMatch(card, 0, HEADER_CHECKSUM_END, HEADER_CHECKSUM_END)) {
@@ -120,23 +140,45 @@ export function parseRawCard(card) {
   if (!dir || !bat) throw new Error("Raw memory card directory or allocation table is corrupt");
 
   const totalBlocks = card.byteLength / BLOCK_SIZE;
-  const saves = [];
+  const owner = new Map();
+  const identities = new Set();
+  const entries = [];
   for (let index = 0; index < DIRECTORY_ENTRIES; index += 1) {
     const entry = dir.subarray(index * DENTRY_SIZE, (index + 1) * DENTRY_SIZE);
     if (u32(entry, 0) === UNINITIALIZED) continue;
     const info = describeDentry(entry);
-    const gci = new Uint8Array(DENTRY_SIZE + info.blockCount * BLOCK_SIZE);
-    gci.set(entry, 0);
+    const label = `Save ${index} (${info.gameCode} "${info.fileName}")`;
+    if (info.blockCount === 0 || info.blockCount > totalBlocks - SYSTEM_BLOCKS) {
+      throw new Error(`${label} announces ${info.blockCount} blocks on a ${totalBlocks - SYSTEM_BLOCKS}-block card`);
+    }
+    const identity = saveIdentity(info);
+    if (identities.has(identity)) throw new Error(`${label} appears twice in the directory`);
+    identities.add(identity);
+    const chain = [];
     let block = info.firstBlock;
     for (let i = 0; i < info.blockCount; i += 1) {
       if (block < SYSTEM_BLOCKS || block >= totalBlocks) {
-        throw new Error(`Save ${info.gameCode} "${info.fileName}" points outside the card (block ${block})`);
+        throw new Error(`${label} points outside the card (block ${block})`);
       }
-      gci.set(card.subarray(block * BLOCK_SIZE, (block + 1) * BLOCK_SIZE), DENTRY_SIZE + i * BLOCK_SIZE);
+      if (owner.has(block)) {
+        throw new Error(`${label} reuses block ${block} (already in save ${owner.get(block)}): the allocation table loops or cross-links`);
+      }
+      owner.set(block, index);
+      chain.push(block);
       block = u16(bat, BAT_MAP + (block - SYSTEM_BLOCKS) * 2);
     }
-    saves.push({ ...info, bytes: gci });
+    if (block !== 0xffff) {
+      throw new Error(`${label} does not end after its ${info.blockCount} blocks (next ${block})`);
+    }
+    entries.push({ info, entry, chain });
   }
+
+  const saves = entries.map(({ info, entry, chain }) => {
+    const gci = new Uint8Array(DENTRY_SIZE + chain.length * BLOCK_SIZE);
+    gci.set(entry, 0);
+    chain.forEach((b, i) => gci.set(card.subarray(b * BLOCK_SIZE, (b + 1) * BLOCK_SIZE), DENTRY_SIZE + i * BLOCK_SIZE));
+    return { ...info, bytes: gci };
+  });
   return { sizeMbits, saves };
 }
 
@@ -239,6 +281,92 @@ export function parseSaveStateHeader(bytes) {
     // two saves of the same machine state.
     savedAt: view.getFloat64(16, true)
   };
+}
+
+export const MAX_STATE_BYTES = 256 * 1024 * 1024;
+const EXTENDED_HEADER_VERSION = 1;
+const LZ4_MAX_INPUT_SIZE = 0x7e000000;
+
+// LZ4 block decoding into dst[at..limit), bounds-checked on both sides.
+// Returns the bytes written, or throws on a malformed block.
+function lz4DecodeBlock(src, dst, at, limit) {
+  let s = 0;
+  let d = at;
+  const fail = (why) => {
+    throw new Error(`Save state data is corrupt (LZ4: ${why})`);
+  };
+  while (s < src.length) {
+    const token = src[s++];
+    let literals = token >> 4;
+    if (literals === 15) {
+      let b;
+      do {
+        if (s >= src.length) fail("literal length runs past the block");
+        b = src[s++];
+        literals += b;
+      } while (b === 255);
+    }
+    if (s + literals > src.length || d + literals > limit) fail("literals run past a buffer");
+    dst.set(src.subarray(s, s + literals), d);
+    s += literals;
+    d += literals;
+    if (s === src.length) break;
+    if (s + 2 > src.length) fail("match offset runs past the block");
+    const offset = src[s] | (src[s + 1] << 8);
+    s += 2;
+    if (offset === 0 || d - offset < at) fail("match offset points before the output");
+    let length = token & 15;
+    if (length === 15) {
+      let b;
+      do {
+        if (s >= src.length) fail("match length runs past the block");
+        b = src[s++];
+        length += b;
+      } while (b === 255);
+    }
+    length += 4;
+    if (d + length > limit) fail("match runs past the output");
+    for (let i = 0; i < length; i += 1, d += 1) dst[d] = dst[d - offset];
+  }
+  return d - at;
+}
+
+// Everything Dolphin's LoadFileStateData checks before using a state, done
+// here first: headers, the extended header, and the payload decompressed
+// to exactly the announced size. Returns the header and payload size.
+export function validateSaveStateData(bytes) {
+  if (bytes.byteLength > MAX_STATE_BYTES) throw new Error(`Save state is larger than ${MAX_STATE_BYTES} bytes`);
+  const header = parseSaveStateHeader(bytes);
+  const view = new DataView(bytes.buffer, bytes.byteOffset, bytes.byteLength);
+  const versionLength = view.getUint32(28, true);
+  const base = 32 + versionLength;
+  if (base + 16 > bytes.byteLength) throw new Error("Save state ends inside its extended header");
+  const headerVersion = view.getUint16(base, true);
+  const compression = view.getUint16(base + 2, true);
+  const payloadOffset = view.getUint32(base + 4, true);
+  const size = Number(view.getBigUint64(base + 8, true));
+  if (headerVersion !== EXTENDED_HEADER_VERSION) throw new Error(`Save state extended header version ${headerVersion} is unknown`);
+  if (payloadOffset !== 0) throw new Error(`Save state payload offset ${payloadOffset} is not supported`);
+  let at = base + 16;
+  if (compression === 0) {
+    if (bytes.byteLength - at === 0) throw new Error("Save state has no data");
+    return { ...header, compression: "none", payloadBytes: bytes.byteLength - at };
+  }
+  if (compression !== 1) throw new Error(`Save state compression ${compression} is unknown`);
+  if (!(size > 0) || size > MAX_STATE_BYTES * 4) throw new Error(`Save state announces ${size} bytes of data`);
+  const out = new Uint8Array(size);
+  let produced = 0;
+  while (produced < size) {
+    if (at + 4 > bytes.byteLength) throw new Error(`Save state data ends after ${produced} of ${size} bytes`);
+    const length = view.getInt32(at, true);
+    at += 4;
+    if (length <= 0 || at + length > bytes.byteLength) throw new Error(`Save state chunk of ${length} bytes runs past the file`);
+    const limit = produced + Math.min(LZ4_MAX_INPUT_SIZE, size - produced);
+    produced += lz4DecodeBlock(bytes.subarray(at, at + length), out, produced, limit);
+    at += length;
+  }
+  if (at !== bytes.byteLength) throw new Error(`Save state has ${bytes.byteLength - at} bytes after its data`);
+  return { ...header, compression: "lz4", payloadBytes: size };
 }
 
 // Throws unless `bytes` is a state Dolphin will accept for `gameId`.

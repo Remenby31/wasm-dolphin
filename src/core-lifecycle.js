@@ -105,10 +105,18 @@ export function createCoreLifecycle({
       if (!resetCore()) throw new Error(`reset: ResetCore refused (core ${state})`);
       return { state: stateName(), changed: true };
     },
+    // Saving the user's data around a stop can fail (a full quota); the
+    // stop happens anyway, and the failure comes back in persistError for
+    // the page to show.
     async stop() {
       const core = requireCore("stop");
       const stopCore = requireExport(core, "stopCore", "stop");
-      await beforeStop();
+      const persistErrors = [];
+      try {
+        await beforeStop();
+      } catch (error) {
+        persistErrors.push(String(error?.message || error));
+      }
       stopCore();
       const state = await waitFor(
         (s) => s === CORE_STATES.uninitialized,
@@ -116,8 +124,12 @@ export function createCoreLifecycle({
         "stop",
         CORE_STATES.uninitialized
       );
-      await afterStop();
-      return { state, changed: true };
+      try {
+        await afterStop();
+      } catch (error) {
+        persistErrors.push(String(error?.message || error));
+      }
+      return { state, changed: true, persistError: persistErrors.join("; ") };
     }
   };
 }

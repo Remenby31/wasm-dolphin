@@ -25,7 +25,7 @@
       "commit": "01e0577914a75a2569c846778c2f93aa8e6feddd"
     }
   },
-  "patchSeriesSha256": "a4afb0f750c2ec7f3bcbd597f93c0d19748cae086f2c9dfc8a6ffd87a141b1c3",
+  "patchSeriesSha256": "1cbf121d0f7f2d05ed5ba2d478e8cc1dd5a2d9c5c6d7b4aaa3d62e317871e101",
   "patches": [
     {
       "order": 1,
@@ -549,6 +549,14 @@
     },
     {
       "order": 66,
+      "cwd": ".",
+      "hashMode": "lf-normalized",
+      "path": "patches/dolphin-wasm/snapshot/0069-memcard-flush-on-request.patch",
+      "size": 2177,
+      "sha256": "b9983c06f12084212c9b128d03858cc3d4cd836c19e8b7f4d693ff3f17ea9a6b"
+    },
+    {
+      "order": 67,
       "cwd": "Externals/SFML/SFML",
       "hashMode": "lf-normalized",
       "path": "patches/dolphin-wasm/submodules/0001-sfml-emscripten-config.patch",
@@ -556,7 +564,7 @@
       "sha256": "f82197a21fe982ad83f6ee7bbf5a03839b1cebd4d64da3eab11263842bf61d89"
     },
     {
-      "order": 67,
+      "order": 68,
       "cwd": "Externals/xxhash/xxHash",
       "hashMode": "lf-normalized",
       "path": "patches/dolphin-wasm/submodules/0002-xxhash-wasm-simd-scalar.patch",

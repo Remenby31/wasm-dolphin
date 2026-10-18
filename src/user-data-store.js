@@ -7,29 +7,42 @@
 // parts worth keeping (memory cards, save states) to the Origin Private File
 // System and puts them back before the next boot.
 //
+// One writer. Every tab of the origin shares one OPFS directory, so the
+// worker that holds the Web Lock WRITER_LOCK_NAME is the only one that
+// writes. A second tab restores the saves and plays, read-only, and says so.
+//
 // Crash safety. Each file is stored as a record: a header with a generation
 // number, the payload length and its SHA-256, then the payload. A new
-// version is written in full to "<name>.next", flushed, and only then moved
-// over "<name>". Reading takes the valid record with the highest
-// generation among the two names. If the tab dies while "<name>.next" is
-// being written, its hash does not match and the previous version wins; if
-// it dies after the write but before the move, the complete new version
-// wins. A card is never read back half written.
+// version is written in full under a fresh "<name>.next-<nonce>", read back
+// and checked, and only then moved over "<name>". Reading takes the valid
+// record with the highest generation among "<name>" and its ".next-*"
+// siblings. A tab closed during the write leaves a record that fails its
+// hash and loses to the previous version; closed between write and move, it
+// leaves a complete record that wins. A card is never read back half
+// written.
 //
-// Torn sources. Dolphin writes a GCI save with several write() calls from
-// its flush thread, so a scan can land between two of them. A file is only
-// copied once two consecutive scans saw the same size and mtime, and a GCI
-// file must also be as long as its own directory entry says.
+// All or nothing. A restore reads and checks every stored file before it
+// writes any of them into MEMFS: a file that exists but has no valid copy
+// fails the whole restore, so a game never boots on a card with saves
+// missing (it would treat them as absent and could overwrite them).
+//
+// Fresh copies. Before each copy the core is asked to write its memory
+// cards out (FlushMemoryCards); without that, a save the game has just made
+// reaches MEMFS only when Dolphin's flush thread gets to it, up to a second
+// later. A core without the export falls back to copying a file once two
+// consecutive scans saw the same size and mtime.
 
 export const USER_DATA_ROOT = "/dolphin-user";
 export const USER_DATA_INCLUDE = Object.freeze(["GC", "StateSaves"]);
+export const WRITER_LOCK_NAME = "wasm-dolphin.user-data.writer.v1";
 export const RECORD_MAGIC = "SLNUSR01";
 export const RECORD_HEADER_BYTES = 48;
-export const NEXT_SUFFIX = ".next";
+export const NEXT_INFIX = ".next-";
 
 const MAGIC_BYTES = new TextEncoder().encode(RECORD_MAGIC);
 const GCI_HEADER_BYTES = 0x40;
 const GCI_BLOCK_BYTES = 0x2000;
+const NEXT_PATTERN = /\.next-[0-9a-z]+$/;
 
 export async function sha256(bytes) {
   return new Uint8Array(await globalThis.crypto.subtle.digest("SHA-256", bytes));
@@ -74,70 +87,109 @@ export function pathFromRecordName(name) {
   return decodeURIComponent(name);
 }
 
+function defaultNonce() {
+  const bytes = new Uint8Array(8);
+  globalThis.crypto.getRandomValues(bytes);
+  return [...bytes].map((b) => b.toString(36)).join("");
+}
+
 // Records on top of five primitives: list() -> names, read(name) -> bytes
 // or null, write(name, bytes) (durable when it resolves), move(from, to)
 // (replaces `to`), remove(name). The OPFS implementation is below; tests use
-// one in memory that can fail half way.
-export function createRecordStore(primitives) {
+// one in memory that can fail half way. A read-only store never writes,
+// moves or removes: it only reads the best record.
+export function createRecordStore(primitives, { readOnly = false, nonce = defaultNonce } = {}) {
   const generations = new Map();
 
-  async function readBest(name) {
-    const [current, next] = await Promise.all([
-      primitives.read(name).then(decodeRecord),
-      primitives.read(name + NEXT_SUFFIX).then(decodeRecord)
-    ]);
-    if (next && (!current || next.generation > current.generation)) {
-      return { ...next, from: "next" };
+  async function candidates(name) {
+    const names = (await primitives.list()).filter(
+      (entry) => entry === name || (entry.startsWith(name + NEXT_INFIX) && NEXT_PATTERN.test(entry))
+    );
+    const records = [];
+    for (const entry of names) {
+      const record = await decodeRecord(await primitives.read(entry));
+      records.push({ entry, record });
     }
-    return current ? { ...current, from: "current" } : null;
+    return records;
+  }
+
+  function best(records) {
+    let winner = null;
+    for (const { entry, record } of records) {
+      if (record && (!winner || record.generation > winner.generation)) {
+        winner = { entry, ...record };
+      }
+    }
+    return winner;
+  }
+
+  function refuseWrites(action) {
+    if (readOnly) throw new Error(`${action}: saves are read-only in this tab`);
   }
 
   return {
+    readOnly,
     async keys() {
       const names = new Set();
-      for (const name of await primitives.list()) {
-        names.add(name.endsWith(NEXT_SUFFIX) ? name.slice(0, -NEXT_SUFFIX.length) : name);
+      for (const entry of await primitives.list()) {
+        names.add(NEXT_PATTERN.test(entry) ? entry.replace(NEXT_PATTERN, "") : entry);
       }
       return [...names].sort();
     },
 
+    // The best payload stored under `name`, or null when nothing is stored.
+    // Throws when entries exist but none of them is a valid record: that is
+    // damage, and must not read as "no save".
     async load(name) {
-      const best = await readBest(name);
-      if (!best) {
+      const records = await candidates(name);
+      if (records.length === 0) {
         generations.delete(name);
         return null;
       }
-      generations.set(name, best.generation);
-      // Finish an interrupted save, or drop a torn one, so the next write
-      // starts from a single valid record.
-      if (best.from === "next") {
-        await primitives.move(name + NEXT_SUFFIX, name);
-      } else {
-        await primitives.remove(name + NEXT_SUFFIX);
+      const winner = best(records);
+      if (!winner) throw new Error(`${pathFromRecordName(name)}: no valid copy among ${records.length} stored`);
+      generations.set(name, winner.generation);
+      if (!readOnly) {
+        // Finish an interrupted save, drop torn or superseded ones.
+        if (winner.entry !== name) await primitives.move(winner.entry, name);
+        for (const { entry } of records) {
+          if (entry !== winner.entry && entry !== name) await primitives.remove(entry);
+        }
       }
-      return best.payload;
+      return winner.payload;
     },
 
+    // Resolves once the new version is stored, read back and checked.
     async save(name, payload) {
+      refuseWrites("save");
       let generation = generations.get(name);
-      if (generation === undefined) generation = (await readBest(name))?.generation ?? 0;
+      if (generation === undefined) generation = best(await candidates(name))?.generation ?? 0;
       generation += 1;
-      await primitives.write(name + NEXT_SUFFIX, await encodeRecord(generation, payload));
-      await primitives.move(name + NEXT_SUFFIX, name);
+      const next = `${name}${NEXT_INFIX}${nonce()}`;
+      const record = await encodeRecord(generation, payload);
+      await primitives.write(next, record);
+      const written = await decodeRecord(await primitives.read(next));
+      if (!written || written.generation !== generation) {
+        await primitives.remove(next).catch(() => {});
+        throw new Error(`${pathFromRecordName(name)}: the copy read back does not match what was written`);
+      }
+      await primitives.move(next, name);
       generations.set(name, generation);
       return generation;
     },
 
     async remove(name) {
-      await primitives.remove(name);
-      await primitives.remove(name + NEXT_SUFFIX);
+      refuseWrites("remove");
+      for (const { entry } of await candidates(name)) await primitives.remove(entry);
       generations.delete(name);
     }
   };
 }
 
-// OPFS primitives with synchronous access handles, which only exist in a
-// dedicated worker: write -> truncate, write, flush, close.
+// OPFS primitives. Writes go through synchronous access handles, which only
+// exist in a dedicated worker: truncate, write, flush, close. Reads take a
+// File snapshot instead, so a read-only tab never opens a handle that would
+// block the writer.
 export async function openOpfsPrimitives(directoryName = "dolphin-user-v1") {
   const storage = globalThis.navigator?.storage;
   if (typeof storage?.getDirectory !== "function") {
@@ -166,13 +218,11 @@ export async function openOpfsPrimitives(directoryName = "dolphin-user-v1") {
     async read(name) {
       const handle = await fileHandle(name, false);
       if (!handle) return null;
-      const access = await handle.createSyncAccessHandle();
       try {
-        const bytes = new Uint8Array(access.getSize());
-        access.read(bytes, { at: 0 });
-        return bytes;
-      } finally {
-        access.close();
+        return new Uint8Array(await (await handle.getFile()).arrayBuffer());
+      } catch (error) {
+        if (error?.name === "NotFoundError") return null;
+        throw error;
       }
     },
     async write(name, bytes) {
@@ -196,8 +246,8 @@ export async function openOpfsPrimitives(directoryName = "dolphin-user-v1") {
         await handle.move(dir, to);
       } catch (error) {
         // Older engines refuse to move onto an existing entry. The record
-        // stays readable under `from` until the move lands, so removing
-        // `to` first loses nothing.
+        // stays readable under `from` until the move lands, and a reader
+        // takes the best of both, so removing `to` first loses nothing.
         if (error?.name !== "InvalidModificationError" && error?.name !== "NoModificationAllowedError") {
           throw error;
         }
@@ -213,13 +263,35 @@ export async function openOpfsPrimitives(directoryName = "dolphin-user-v1") {
   };
 }
 
+// The exclusive writer lock, held until the worker goes away. Resolves to
+// { granted } at once: a second tab is not queued behind the first.
+export async function acquireWriterLock(locks = globalThis.navigator?.locks, name = WRITER_LOCK_NAME) {
+  if (typeof locks?.request !== "function") {
+    return { granted: false, reason: "Web Locks are unavailable, so this tab cannot know it is the only writer" };
+  }
+  return new Promise((resolve, reject) => {
+    locks
+      .request(name, { mode: "exclusive", ifAvailable: true }, (lock) => {
+        if (!lock) {
+          resolve({ granted: false, reason: "another tab is already playing with these saves" });
+          return undefined;
+        }
+        resolve({ granted: true, reason: "" });
+        return new Promise(() => {});
+      })
+      .catch(reject);
+  });
+}
+
 // Dolphin's own temporaries and backups, never worth a copy: save-state
-// temp files ("x.s01.tmp1234"), the undo backup, DTM movies.
+// temp files ("x.s01.tmp1234"), the undo backup, DTM movies, and the
+// worker's own staging names.
 export function isPersistentUserPath(relativePath) {
   const base = relativePath.split("/").pop() ?? "";
   if (/\.tmp\d*$/.test(base)) return false;
   if (base.startsWith("lastState.sav")) return false;
   if (base.endsWith(".dtm")) return false;
+  if (base.startsWith(".staging")) return false;
   return true;
 }
 
@@ -230,11 +302,24 @@ export function gciLooksComplete(bytes) {
   return bytes.byteLength === GCI_HEADER_BYTES + blockCount * GCI_BLOCK_BYTES;
 }
 
+export class RestoreError extends Error {
+  constructor(message, failures) {
+    super(message);
+    this.name = "RestoreError";
+    this.failures = failures;
+  }
+}
+
 export function createUserDataMirror({
   fs,
   store,
   root = USER_DATA_ROOT,
   include = USER_DATA_INCLUDE,
+  // () => number: cards flushed (>= 0), or a negative/absent result when the
+  // core cannot flush now (then the two-scan rule applies).
+  flushNative = null,
+  restoreAttempts = 3,
+  sleep = (ms) => new Promise((resolve) => setTimeout(resolve, ms)),
   log = () => {}
 }) {
   // Persisted signature per relative path: size and mtime of the MEMFS file
@@ -243,7 +328,15 @@ export function createUserDataMirror({
   // What the previous scan saw, to require two identical scans in a row.
   let previousScan = new Map();
   let chain = Promise.resolve();
-  const stats = { restored: 0, written: 0, removed: 0, skippedTorn: 0, bytesWritten: 0, lastError: "" };
+  const stats = {
+    restored: 0,
+    written: 0,
+    removed: 0,
+    skippedTorn: 0,
+    bytesWritten: 0,
+    nativeFlushes: 0,
+    lastError: ""
+  };
 
   function mkdirTree(dir) {
     let current = "";
@@ -282,12 +375,25 @@ export function createUserDataMirror({
     return seen;
   }
 
+  function nativeFlush() {
+    if (!flushNative) return false;
+    const flushed = flushNative();
+    if (typeof flushed === "number" && flushed >= 0) {
+      stats.nativeFlushes += 1;
+      return true;
+    }
+    return false;
+  }
+
   async function persist({ force }) {
+    if (store.readOnly) return 0;
+    // The core's cards first, so the scan sees what the game wrote.
+    const fresh = nativeFlush() || force;
     const current = scan();
     let changed = 0;
     for (const [relative, signature] of current) {
       if (persisted.get(relative) === signature) continue;
-      if (!force && previousScan.get(relative) !== signature) continue;
+      if (!fresh && previousScan.get(relative) !== signature) continue;
       const bytes = fs.readFile(`${root}/${relative}`);
       if (relative.toLowerCase().endsWith(".gci") && !gciLooksComplete(bytes)) {
         stats.skippedTorn += 1;
@@ -307,48 +413,83 @@ export function createUserDataMirror({
       changed += 1;
     }
     previousScan = current;
+    stats.lastError = "";
     return changed;
   }
 
+  // Every task runs after the previous one; its error goes to its caller
+  // and into stats.lastError, and does not poison the next task.
   function serialized(task) {
     const run = chain.then(task, task);
-    chain = run.catch((error) => {
-      stats.lastError = String(error?.message || error);
-      log(`[user-data] ${stats.lastError}`);
-    });
+    chain = run.then(
+      () => {},
+      (error) => {
+        stats.lastError = String(error?.message || error);
+        log(`[user-data] ${stats.lastError}`);
+      }
+    );
     return run;
+  }
+
+  async function readAll() {
+    const staged = [];
+    const failures = [];
+    for (const name of await store.keys()) {
+      const relative = pathFromRecordName(name);
+      if (!include.some((dir) => relative.startsWith(`${dir}/`)) || !isPersistentUserPath(relative)) {
+        continue;
+      }
+      try {
+        const payload = await store.load(name);
+        if (payload) staged.push({ relative, payload });
+      } catch (error) {
+        failures.push(`${relative}: ${error?.message || error}`);
+      }
+    }
+    return { staged, failures };
   }
 
   return {
     stats,
-    // Copy every stored file back into MEMFS. Call before the core boots:
-    // Dolphin reads the GCI folder once, when the memory card is inserted.
+    // Copy every stored file back into MEMFS, or none of them. Call before
+    // the core boots: Dolphin reads the GCI folder when the card goes in.
+    // Transient failures (the writer tab moving a record while this one
+    // reads it) are retried; damage is not.
     restore: () =>
       serialized(async () => {
-        let restored = 0;
-        let bytes = 0;
-        for (const name of await store.keys()) {
-          const relative = pathFromRecordName(name);
-          if (!include.some((dir) => relative.startsWith(`${dir}/`)) || !isPersistentUserPath(relative)) {
-            continue;
+        let result = null;
+        for (let attempt = 1; attempt <= restoreAttempts; attempt += 1) {
+          try {
+            result = await readAll();
+          } catch (error) {
+            result = { staged: [], failures: [String(error?.message || error)] };
           }
-          const payload = await store.load(name);
-          if (!payload) continue;
+          if (result.failures.length === 0) break;
+          if (attempt < restoreAttempts) await sleep(100 * attempt);
+        }
+        if (result.failures.length) {
+          throw new RestoreError(
+            `Saves could not be restored (${result.failures.length} file(s)): ${result.failures.join("; ")}`,
+            result.failures
+          );
+        }
+        let bytes = 0;
+        for (const { relative, payload } of result.staged) {
           const path = `${root}/${relative}`;
           mkdirTree(path.slice(0, path.lastIndexOf("/")));
           fs.writeFile(path, payload);
-          restored += 1;
           bytes += payload.byteLength;
         }
         const now = scan();
         for (const [relative, signature] of now) persisted.set(relative, signature);
         previousScan = now;
-        stats.restored = restored;
-        return { restored, bytes };
+        stats.restored = result.staged.length;
+        return { restored: result.staged.length, bytes };
       }),
-    // Periodic: copy files that stopped changing, drop deleted ones.
+    // Periodic: copy files that changed, drop deleted ones.
     sync: () => serialized(() => persist({ force: false })),
-    // Before pause/stop/hide: copy everything that differs now.
+    // Before pause/stop/hide and after a save: copy everything that differs
+    // now. Resolves once every copy is stored and checked.
     flush: () => serialized(() => persist({ force: true })),
     list() {
       return [...scan().keys()].sort();

@@ -418,7 +418,8 @@ function wireTransport() {
       }
       if (/\.(gci|raw)$/i.test(file.name)) {
         const r = await a.importMemcard(bytes, { slot: "A" });
-        setStatus(`Memory card: ${r.imported.length} save(s) imported${r.restartRequired ? ", boot again to see them" : ""}`);
+        const stored = r.persisted?.persistent ? "" : ` (not stored: ${r.persisted?.error || r.persisted?.reason || "saves off"})`;
+        setStatus(`Memory card: ${r.imported.length} save(s) imported${r.restartRequired ? ", boot again to see them" : ""}${stored}`);
         return;
       }
       const r = await a.importSaveState(bytes);

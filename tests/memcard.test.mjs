@@ -13,6 +13,8 @@ import {
   parseGci,
   parseRawCard,
   parseSaveStateHeader,
+  saveIdentity,
+  validateSaveStateData,
   sniffMemcardFile,
   STATE_COOKIE_BASE,
   STATE_VERSION
@@ -52,7 +54,7 @@ test("a GCI is checked against its own directory entry", () => {
   );
   assert.throws(() => parseGci(gci().subarray(0, DENTRY_SIZE + BLOCK_SIZE)), /announces 2 blocks, file holds 1/);
   assert.throws(() => parseGci(new Uint8Array(DENTRY_SIZE + BLOCK_SIZE).fill(0xff)), /empty directory entry/);
-  assert.equal(gciFileName(parseGci(gci({ name: "a/b:c" }))), "01-GTST-a_b_c.gci");
+  assert.equal(gciFileName(parseGci(gci({ name: "a/b:c" }))), "01-GTST-a%2Fb%3Ac.gci");
 });
 
 test("raw card export and import round-trip every save, block chains included", () => {
@@ -135,4 +137,84 @@ sourceContractTest("memcard.js layouts match the vendored Dolphin", () => {
   assert.match(memcard, /constexpr u32 BLOCK_SIZE = 0x2000;/);
   assert.match(memcard, /constexpr u8 DIRLEN = 0x7F;/);
   assert.match(memcard, /constexpr u32 MC_FST_BLOCKS = 0x05;/);
+});
+
+test("two saves whose names differ only in unusual characters get two files", () => {
+  const names = ["a/b", "a:b", "a_b", "a%2Fb", "a-b"].map((name) => gciFileName(parseGci(gci({ name }))));
+  assert.equal(new Set(names).size, names.length, names.join(" "));
+  assert.notEqual(saveIdentity(parseGci(gci({ name: "a/b" }))), saveIdentity(parseGci(gci({ name: "a:b" }))));
+});
+
+// A card whose single save's BAT entries are rewritten after the fact.
+function cardWithChain(blocks, rewrite) {
+  const card = buildRawCard([gci({ blocks })]);
+  for (const copy of [3, 4]) {
+    const bat = card.subarray(copy * BLOCK_SIZE, (copy + 1) * BLOCK_SIZE);
+    rewrite(bat);
+    // Re-sign the table so only the chain is wrong.
+    let sum = 0;
+    let inv = 0;
+    for (let i = 4; i < BLOCK_SIZE; i += 2) {
+      const w = (bat[i] << 8) | bat[i + 1];
+      sum = (sum + w) & 0xffff;
+      inv = (inv + (w ^ 0xffff)) & 0xffff;
+    }
+    bat[0] = sum >> 8; bat[1] = sum & 0xff; bat[2] = inv >> 8; bat[3] = inv & 0xff;
+  }
+  return card;
+}
+const setBat = (bat, block, next) => { bat[10 + (block - 5) * 2] = next >> 8; bat[11 + (block - 5) * 2] = next & 0xff; };
+
+test("a raw card whose allocation table loops is refused before anything is allocated", () => {
+  const looping = cardWithChain(3, (bat) => setBat(bat, 6, 5)); // 5 -> 6 -> 5
+  assert.throws(() => parseRawCard(looping), /reuses block 5 .*loops or cross-links/);
+  const short = cardWithChain(3, (bat) => setBat(bat, 6, 0xffff)); // ends after 2 of 3
+  assert.throws(() => parseRawCard(short), /reuses block|points outside|does not end/);
+  const long = cardWithChain(2, (bat) => setBat(bat, 6, 7)); // does not stop after 2
+  assert.throws(() => parseRawCard(long), /does not end after its 2 blocks \(next 7\)/);
+});
+
+const MAX_RAW_TOO_BIG = 128 * 16 * BLOCK_SIZE + BLOCK_SIZE;
+
+test("a directory entry announcing more blocks than the card holds is refused", () => {
+  const card = buildRawCard([gci({ blocks: 1 })]);
+  for (const copy of [1, 2]) {
+    const dir = card.subarray(copy * BLOCK_SIZE, (copy + 1) * BLOCK_SIZE);
+    dir[0x38] = 0xff; dir[0x39] = 0xff;
+    const [sum, inv] = memcardChecksums(dir, 0, 0x1ffc);
+    dir[0x1ffc] = sum >> 8; dir[0x1ffd] = sum & 0xff; dir[0x1ffe] = inv >> 8; dir[0x1fff] = inv & 0xff;
+  }
+  assert.throws(() => parseRawCard(card), /announces 65535 blocks on a 251-block card/);
+  assert.throws(() => parseRawCard(new Uint8Array(MAX_RAW_TOO_BIG)), /larger than any card/);
+});
+
+// A state with an LZ4 payload of literals only (token = length << 4).
+function lz4State({ payload = new Uint8Array([1, 2, 3, 4, 5]), announced = payload.length, gameId = "GTST01" } = {}) {
+  const head = stateBytes({ gameId }).subarray(0, 32 + "Dolphin web".length);
+  const ext = new Uint8Array(16);
+  const ev = new DataView(ext.buffer);
+  ev.setUint16(0, 1, true);
+  ev.setUint16(2, 1, true);
+  ev.setBigUint64(8, BigInt(announced), true);
+  const block = new Uint8Array([payload.length << 4, ...payload]);
+  const len = new Uint8Array(4);
+  new DataView(len.buffer).setInt32(0, block.length, true);
+  return new Uint8Array([...head, ...ext, ...len, ...block]);
+}
+
+test("a save state is decompressed in full before it is trusted", () => {
+  assert.equal(validateSaveStateData(lz4State()).payloadBytes, 5);
+  // The review's case: right game and version, 48 bytes of nothing.
+  const tiny = stateBytes({ versionString: "" }).subarray(0, 48);
+  assert.equal(tiny.byteLength, 48);
+  assert.doesNotThrow(() => checkSaveState(tiny, "GTST01"), "the header alone looks fine");
+  assert.throws(() => validateSaveStateData(tiny), /extended header version 0 is unknown/);
+  assert.throws(() => validateSaveStateData(lz4State({ announced: 9 })), /data ends after 5 of 9 bytes/);
+  const truncated = lz4State();
+  assert.throws(() => validateSaveStateData(truncated.subarray(0, truncated.length - 2)), /runs past the file/);
+  const badOffset = lz4State({ payload: new Uint8Array([1, 2, 3]) });
+  badOffset[badOffset.length - 4] = 0x11; // token: 1 literal then a match
+  badOffset[badOffset.length - 2] = 0x09; // offset 9: before the output
+  badOffset[badOffset.length - 1] = 0x00;
+  assert.throws(() => validateSaveStateData(badOffset), /LZ4/);
 });

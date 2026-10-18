@@ -141,18 +141,23 @@ import { createCoreLifecycle } from "./core-lifecycle.js";
 import { BOOT_FILE_HEAD_BYTES, bootFileKind, checkExecutable, executableGameId } from "./boot-file.js";
 import {
   USER_DATA_ROOT,
+  acquireWriterLock,
   createRecordStore,
   createUserDataMirror,
   openOpfsPrimitives
 } from "./user-data-store.js";
 import {
+  MAX_CARD_BYTES,
+  MAX_STATE_BYTES,
   buildRawCard,
   checkSaveState,
   gciFileName,
   gciFolderPath,
   parseGci,
   parseRawCard,
-  sniffMemcardFile
+  saveIdentity as memcardSaveIdentity,
+  sniffMemcardFile,
+  validateSaveStateData
 } from "./memcard.js";
 
 // Day-25: mark this thread. The discio worker owns the WebGPU device
@@ -991,7 +996,7 @@ async function handleMessage(type, payload) {
         oglSabEnabled: oglPixelSabView !== null
       });
       // Before any boot: Dolphin opens the GCI folder when the card goes in.
-      return { ...metadataPayload(), userData: await startUserDataPersistence() };
+      return { ...metadataPayload(), userData: await startUserDataPersistence(payload.savesMode) };
     case "mountFile":
       return mountFile(payload.file);
     case "flushUserData":
@@ -1032,10 +1037,13 @@ async function handleMessage(type, payload) {
       return { ...(await coreLifecycle[type]()), ...framePayload() };
     case "pause": {
       const result = await coreLifecycle.pause();
-      return { ...result, persisted: await flushUserData(), ...framePayload() };
+      return { ...result, persisted: await flushUserDataReported(), ...framePayload() };
     }
-    case "stop":
-      return { ...(await coreLifecycle.stop()), ...framePayload() };
+    case "stop": {
+      const result = await coreLifecycle.stop();
+      if (result.persistError) reportUserDataError("Stopped, but saves were not stored", result.persistError);
+      return { ...result, ...framePayload() };
+    }
     case "reset": {
       // The console's reset button; the rest re-arms the renderer state the
       // way it always did after a reset.
@@ -1066,7 +1074,7 @@ async function handleMessage(type, payload) {
     case "bootProbe":
       return { bootProbe: bootProbePayload(metadataPayload()) };
     case "saveState":
-      return { saved: Boolean(api?.saveState(payload.slot | 0)) };
+      return saveStateToSlot(payload.slot);
     case "loadState": {
       forceWgpuMappedDrainLifecycle(WGPU_MAPPED_DRAIN_FORCE_REASONS.LOAD);
       wgpuSparseUbo?.reset("slot-state-load");
@@ -2453,8 +2461,9 @@ function bindApi(module) {
     frameBuffer: cwrap("FrameBuffer", "number", []),
     // The bridge's SaveState/LoadState are placeholders that save nothing;
     // slots are Dolphin's own files, <game id>.sNN in StateSaves.
-    saveState: (slot) => saveStateSlot(slot),
+    saveState: (slot) => saveStateToSlot(slot),
     loadState: (slot) => loadStateSlot(slot),
+    flushMemoryCards: optionalCwrap("FlushMemoryCards", "number", []),
     loadStateFile: optionalCwrap("LoadStateFile", "number", ["string"]),
     saveStateFile: optionalCwrap("SaveStateFile", "number", ["string"]),
     getFrame: cwrap("GetFrame", "number", []),
@@ -2494,13 +2503,29 @@ function bindApi(module) {
 // Saves: /dolphin-user kept in OPFS, memory cards and save states in and out.
 // The pure parts live in user-data-store.js and memcard.js; this section
 // only binds them to the core's FS and exports.
+//
+// Every write path follows the same order: validate everything, write to a
+// staging name outside the persisted folders, read back, switch (MEMFS
+// rename) only then, and copy to OPFS. A failure before the switch leaves the
+// previous save in place; a failed OPFS copy is reported, never hidden.
 
 const USER_DATA_SYNC_INTERVAL_MS = 1000;
+const USER_DATA_STAGING = `${USER_DATA_ROOT}/.staging`;
 let userDataMirror = null;
-const userDataStatus = { persistent: false, reason: "not started", restored: 0, restoredBytes: 0 };
+let userDataLastReportedError = "";
+// mode: "starting" | "writer" | "read-only" | "unavailable" | "off" | "failed"
+const userDataStatus = {
+  mode: "starting",
+  persistent: false,
+  readOnly: false,
+  reason: "not started",
+  restored: 0,
+  restoredBytes: 0
+};
 // What is running, as Dolphin names it: the disc's game ID, or "ID-<file>"
 // for a bare executable (SConfig::MakeGameID).
 let bootedGame = { kind: "", gameId: "", region: "" };
+let coreStopping = false;
 
 const coreLifecycle = createCoreLifecycle({
   api: () => api,
@@ -2516,38 +2541,125 @@ const coreLifecycle = createCoreLifecycle({
     resetPpcWasmJitTiming();
     ppcWasmJitTimingSuspensions -= 1;
   },
-  beforeStop: () => flushUserData(),
+  beforeStop: async () => {
+    try {
+      await flushUserData();
+    } finally {
+      // From here the cards are being torn down: no native flush.
+      coreStopping = true;
+    }
+  },
   afterStop: async () => {
     coreBoot = { ...coreBoot, accepted: false };
     // Shutting the memory card down flushes its GCI files; keep them.
-    await flushUserData();
+    try {
+      await flushUserData();
+    } finally {
+      coreStopping = false;
+    }
   }
 });
 
-async function startUserDataPersistence() {
+function setUserDataStatus(fields) {
+  Object.assign(userDataStatus, fields);
+  return { ...userDataStatus };
+}
+
+function reportUserDataError(prefix, error) {
+  const message = `${prefix}: ${error?.message || error}`;
+  if (message !== userDataLastReportedError) {
+    userDataLastReportedError = message;
+    postStatus(message);
+  }
+  console.warn(`[user-data] ${message}`);
+}
+
+// Called once, at load, before any boot. "off" (?saves=off) plays without
+// touching stored saves. A restore failure leaves the mode "failed": the
+// next mountFile retries it and refuses to boot if it fails again.
+async function startUserDataPersistence(savesMode = "") {
   if (userDataMirror || !moduleInstance?.FS) return { ...userDataStatus };
+  if (savesMode === "off") {
+    return setUserDataStatus({ mode: "off", reason: "saves disabled for this page (?saves=off)" });
+  }
+  let primitives;
   try {
-    const mirror = createUserDataMirror({
-      fs: moduleInstance.FS,
-      store: createRecordStore(await openOpfsPrimitives()),
-      log: (message) => console.warn(message)
-    });
-    const { restored, bytes } = await mirror.restore();
-    userDataMirror = mirror;
-    Object.assign(userDataStatus, { persistent: true, reason: "", restored, restoredBytes: bytes });
-    setInterval(() => userDataMirror.sync().catch(() => {}), USER_DATA_SYNC_INTERVAL_MS);
-    console.log(`[user-data] restored ${restored} file(s), ${bytes} bytes from OPFS`);
+    primitives = await openOpfsPrimitives();
   } catch (error) {
-    Object.assign(userDataStatus, { persistent: false, reason: String(error?.message || error) });
-    console.warn(`[user-data] saves will not survive a reload: ${userDataStatus.reason}`);
+    return setUserDataStatus({ mode: "unavailable", reason: String(error?.message || error) });
+  }
+  const lock = await acquireWriterLock().catch((error) => ({ granted: false, reason: String(error?.message || error) }));
+  const readOnly = !lock.granted;
+  userDataMirror = createUserDataMirror({
+    fs: moduleInstance.FS,
+    store: createRecordStore(primitives, { readOnly }),
+    flushNative: () => (coreStopping || !api?.flushMemoryCards ? -1 : api.flushMemoryCards()),
+    log: (message) => console.warn(message)
+  });
+  setUserDataStatus({ readOnly, reason: readOnly ? `read-only: ${lock.reason}` : "" });
+  await restoreUserData();
+  if (!readOnly) {
+    setInterval(() => {
+      if (userDataStatus.mode !== "writer") return;
+      userDataMirror.sync().then(
+        () => {
+          userDataLastReportedError = "";
+        },
+        (error) => reportUserDataError("Saves are not being stored", error)
+      );
+    }, USER_DATA_SYNC_INTERVAL_MS);
   }
   return { ...userDataStatus };
 }
 
+async function restoreUserData() {
+  try {
+    const { restored, bytes } = await userDataMirror.restore();
+    console.log(`[user-data] restored ${restored} file(s), ${bytes} bytes from OPFS`);
+    return setUserDataStatus({
+      mode: userDataStatus.readOnly ? "read-only" : "writer",
+      persistent: !userDataStatus.readOnly,
+      reason: userDataStatus.readOnly ? userDataStatus.reason : "",
+      restored,
+      restoredBytes: bytes
+    });
+  } catch (error) {
+    reportUserDataError("Saves could not be restored", error);
+    return setUserDataStatus({ mode: "failed", persistent: false, reason: String(error?.message || error) });
+  }
+}
+
+// mountFile's gate: a game never boots on a card whose restore failed.
+async function ensureUserDataReady() {
+  if (userDataStatus.mode !== "failed") return;
+  await restoreUserData();
+  if (userDataStatus.mode === "failed") {
+    throw new Error(
+      `${userDataStatus.reason}. The game was not started, so it cannot overwrite them. ` +
+        "Reload to try again, or open the page with ?saves=off to play without saves."
+    );
+  }
+}
+
+// Resolves once every changed file is stored in OPFS and read back.
+// Throws when a copy fails (a full quota, for instance).
 async function flushUserData() {
-  if (!userDataMirror) return { persistent: false, reason: userDataStatus.reason, written: 0 };
+  if (!userDataMirror || userDataStatus.mode !== "writer") {
+    return { persistent: false, readOnly: userDataStatus.readOnly, mode: userDataStatus.mode, reason: userDataStatus.reason, written: 0 };
+  }
   const written = await userDataMirror.flush();
-  return { persistent: true, written, stats: { ...userDataMirror.stats } };
+  return { persistent: true, mode: "writer", written, stats: { ...userDataMirror.stats } };
+}
+
+// For paths where the save itself succeeded: the OPFS copy's outcome is
+// part of the answer, and a failure is also posted as a status.
+async function flushUserDataReported() {
+  try {
+    return await flushUserData();
+  } catch (error) {
+    reportUserDataError("Saved for this session only, not stored", error);
+    return { persistent: false, mode: userDataStatus.mode, error: String(error?.message || error) };
+  }
 }
 
 // The game saves belong to: the booted one, or the one the caller names
@@ -2573,8 +2685,9 @@ function listCardSaves(folder) {
   return names.sort().map((fileName) => {
     const bytes = fs.readFile(`${folder}/${fileName}`);
     try {
-      const { gameCode, makerCode, fileName: saveName, blockCount } = parseGci(bytes);
-      return { fileName, gameCode, makerCode, saveName, blockCount, size: bytes.byteLength };
+      const info = parseGci(bytes);
+      const { gameCode, makerCode, fileName: saveName, blockCount } = info;
+      return { fileName, gameCode, makerCode, saveName, blockCount, size: bytes.byteLength, identity: memcardSaveIdentity(info) };
     } catch (error) {
       return { fileName, error: String(error.message || error), size: bytes.byteLength };
     }
@@ -2601,51 +2714,141 @@ function mkdirTreeFs(dir) {
   }
 }
 
-// Slot saves: queued on the CPU thread like SaveStateFile; the mirror copies
-// the file to OPFS once it has landed.
-function saveStateSlot(slot) {
-  if (!api?.saveStateFile) throw new Error("This core build cannot write save states");
-  const path = stateSlotPath(saveIdentity(), slot);
-  mkdirTreeFs(path.slice(0, path.lastIndexOf("/")));
-  return api.saveStateFile(path);
+function fsExists(path) {
+  return moduleInstance.FS.analyzePath(path).exists;
 }
 
+function fsRemove(path) {
+  try {
+    moduleInstance.FS.unlink(path);
+  } catch {
+    // Already gone.
+  }
+}
+
+function stagingPath(name) {
+  mkdirTreeFs(USER_DATA_STAGING);
+  return `${USER_DATA_STAGING}/${Date.now().toString(36)}-${Math.random().toString(36).slice(2)}-${name}`;
+}
+
+// Writes `bytes` to a staging name and reads them back.
+function stageBytes(name, bytes) {
+  const path = stagingPath(name);
+  moduleInstance.FS.writeFile(path, bytes);
+  const back = moduleInstance.FS.readFile(path);
+  if (back.byteLength !== bytes.byteLength || back.some((value, i) => value !== bytes[i])) {
+    fsRemove(path);
+    throw new Error(`${name}: the staged copy does not match`);
+  }
+  return path;
+}
+
+// Legacy slot API (api.loadState) used by the JIT timing paths.
 function loadStateSlot(slot) {
   if (!api?.loadStateFile) throw new Error("This core build cannot load save states");
   const path = stateSlotPath(saveIdentity(), slot);
-  if (!moduleInstance.FS.analyzePath(path).exists) throw new Error(`Save state slot ${slot} is empty`);
+  if (!fsExists(path)) throw new Error(`Save state slot ${slot} is empty`);
   return api.loadStateFile(path);
 }
 
-// Dolphin writes the state to a temporary name and renames it, so the file
-// appears whole. SaveToFileSync runs on the CPU thread: wait for it.
+// Asks the CPU thread for a state at `path` (a fresh staging name) and
+// waits for it. Dolphin writes a temporary file and renames it, so the file
+// appears whole; it is then checked like an imported one.
 async function writeSaveState(path) {
   if (!api?.saveStateFile) throw new Error("This core build cannot write save states");
   if (!coreBoot.accepted) throw new Error("No game is booted");
   const fs = moduleInstance.FS;
   mkdirTreeFs(path.slice(0, path.lastIndexOf("/")) || "/");
-  try {
-    fs.unlink(path);
-  } catch {
-    // Nothing to replace.
-  }
+  fsRemove(path);
   if (!api.saveStateFile(path)) {
     throw new Error(`SaveStateFile refused (core ${api.getCoreStateName?.() || "unknown"})`);
   }
   for (let i = 0; i < 150; i += 1) {
     await new Promise((resolve) => setTimeout(resolve, 100));
+    let bytes = null;
     try {
-      if (fs.stat(path).size > 0) return fs.readFile(path);
+      if (fs.stat(path).size > 0) bytes = fs.readFile(path);
     } catch {
       // Not written yet.
     }
+    if (bytes) {
+      validateSaveStateData(bytes);
+      return bytes;
+    }
   }
+  fsRemove(path);
   throw new Error("The save state was not written within 15 s");
+}
+
+// A slot save: written and checked under a staging name, then switched
+// over the slot, then stored. "saved" means the slot holds the new state.
+async function saveStateToSlot(slot) {
+  const identity = saveIdentity();
+  const slotPath = stateSlotPath(identity, slot);
+  const staged = stagingPath(`slot${slot}.sav`);
+  let bytes;
+  try {
+    bytes = await writeSaveState(staged);
+    checkSaveState(bytes, identity.gameId);
+  } catch (error) {
+    fsRemove(staged);
+    throw error;
+  }
+  mkdirTreeFs(slotPath.slice(0, slotPath.lastIndexOf("/")));
+  moduleInstance.FS.rename(staged, slotPath);
+  return { saved: true, slot, path: slotPath, size: bytes.byteLength, persisted: await flushUserDataReported() };
 }
 
 function transferable(bytes) {
   const buffer = bytes.buffer.slice(bytes.byteOffset, bytes.byteOffset + bytes.byteLength);
   return { buffer, transfer: [buffer] };
+}
+
+function importBytes(payload, limit, what) {
+  const bytes = new Uint8Array(payload.bytes ?? []);
+  if (bytes.byteLength === 0) throw new Error(`${what}: no bytes`);
+  if (bytes.byteLength > limit) throw new Error(`${what}: ${bytes.byteLength} bytes is more than ${limit}`);
+  return bytes;
+}
+
+// Moves staged GCI files onto the card, all or none. `plan` entries are
+// { staged, target, replaces } (replaces: an existing file of the same save).
+function commitCardFiles(plan) {
+  const done = [];
+  try {
+    for (const step of plan) {
+      if (step.replaces) {
+        const backup = stagingPath("replaced.gci");
+        moduleInstance.FS.rename(step.replaces, backup);
+        done.push({ from: backup, to: step.replaces });
+      }
+      if (fsExists(step.target)) throw new Error(`${step.target} appeared on the card during the import`);
+      moduleInstance.FS.rename(step.staged, step.target);
+      done.push({ from: step.target, to: step.staged });
+    }
+  } catch (error) {
+    for (const { from, to } of done.reverse()) {
+      try {
+        moduleInstance.FS.rename(from, to);
+      } catch {
+        // Best effort: the error below names the import as failed.
+      }
+    }
+    throw new Error(`Import rolled back: ${error?.message || error}`);
+  }
+  // Committed: drop the backups of replaced saves.
+  for (const { from } of done) {
+    if (from.startsWith(USER_DATA_STAGING)) fsRemove(from);
+  }
+}
+
+async function waitForLoadedCheckpoint(generationBefore, timeoutMs = 5000) {
+  const deadline = Date.now() + timeoutMs;
+  while (Date.now() < deadline) {
+    if (readLastLoadedCheckpoint().generation !== generationBefore) return true;
+    await new Promise((resolve) => setTimeout(resolve, 50));
+  }
+  return false;
 }
 
 async function handleSavesMessage(type, payload) {
@@ -2677,10 +2880,7 @@ async function handleSavesMessage(type, payload) {
         })(),
         // Dolphin creates a slot's folder when it inserts the card there.
         inserted: identity
-          ? {
-              A: moduleInstance.FS.analyzePath(cardFolder(identity, "A")).exists,
-              B: moduleInstance.FS.analyzePath(cardFolder(identity, "B")).exists
-            }
+          ? { A: fsExists(cardFolder(identity, "A")), B: fsExists(cardFolder(identity, "B")) }
           : null,
         states: states.sort()
       };
@@ -2691,9 +2891,7 @@ async function handleSavesMessage(type, payload) {
       if (payload.format === "gci") {
         const name = String(payload.fileName || "");
         if (!name || name.includes("/")) throw new Error("exportMemcard gci: fileName is required");
-        if (!moduleInstance.FS.analyzePath(`${folder}/${name}`).exists) {
-          throw new Error(`${name} is not on memory card ${payload.slot || "A"}`);
-        }
+        if (!fsExists(`${folder}/${name}`)) throw new Error(`${name} is not on memory card ${payload.slot || "A"}`);
         const bytes = moduleInstance.FS.readFile(`${folder}/${name}`);
         parseGci(bytes);
         const { buffer, transfer } = transferable(bytes);
@@ -2707,12 +2905,12 @@ async function handleSavesMessage(type, payload) {
     }
     case "importMemcard": {
       const identity = saveIdentity(payload);
-      const folder = cardFolder(identity, payload.slot || "A");
-      const bytes = new Uint8Array(payload.bytes);
+      const slot = payload.slot || "A";
+      const folder = cardFolder(identity, slot);
+      // 1. Validate everything: size, structure, game, collisions.
+      const bytes = importBytes(payload, MAX_CARD_BYTES, "importMemcard");
       const kind = sniffMemcardFile(bytes);
-      const incoming = kind === "gci"
-        ? [{ ...parseGci(bytes), bytes }]
-        : parseRawCard(bytes).saves;
+      const incoming = kind === "gci" ? [{ ...parseGci(bytes), bytes }] : parseRawCard(bytes).saves;
       const gameCode = identity.gameId.slice(0, 4);
       const accepted = payload.anyGame ? incoming : incoming.filter((save) => save.gameCode === gameCode);
       if (accepted.length === 0) {
@@ -2720,49 +2918,95 @@ async function handleSavesMessage(type, payload) {
           `No save for game ${gameCode} in this ${kind} file (found ${[...new Set(incoming.map((s) => s.gameCode))].join(", ") || "none"})`
         );
       }
-      mkdirTreeFs(folder);
-      const written = [];
-      for (const save of accepted) {
-        const fileName = gciFileName(save);
-        const path = `${folder}/${fileName}`;
-        if (!payload.replace && moduleInstance.FS.analyzePath(path).exists) {
-          throw new Error(`${fileName} is already on the card; pass replace to overwrite it`);
-        }
-        moduleInstance.FS.writeFile(path, save.bytes);
-        written.push(fileName);
+      const existing = new Map();
+      for (const save of listCardSaves(folder)) if (save.identity) existing.set(save.identity, save.fileName);
+      const clashes = accepted.filter((save) => existing.has(memcardSaveIdentity(save)));
+      if (clashes.length && !payload.replace) {
+        throw new Error(
+          `Already on card ${slot}: ${clashes.map((s) => `${s.gameCode} "${s.fileName}"`).join(", ")}. Nothing was imported; pass replace to overwrite.`
+        );
       }
-      const persisted = await flushUserData();
-      // Dolphin reads the GCI folder when the card is inserted, at boot.
-      return { kind, imported: written, skipped: incoming.length - accepted.length, restartRequired: coreBoot.accepted, persisted };
+      // 2. Stage and read back; 3. switch all or none.
+      const plan = [];
+      try {
+        for (const save of accepted) {
+          const replaced = existing.get(memcardSaveIdentity(save));
+          plan.push({
+            staged: stageBytes("import.gci", save.bytes),
+            target: replaced ? `${folder}/${replaced}` : `${folder}/${gciFileName(save)}`,
+            replaces: replaced ? `${folder}/${replaced}` : null,
+            fileName: replaced || gciFileName(save)
+          });
+        }
+        mkdirTreeFs(folder);
+        commitCardFiles(plan);
+      } catch (error) {
+        for (const step of plan) fsRemove(step.staged);
+        throw error;
+      }
+      // 4. Store. Dolphin reads the GCI folder when the card goes in, at boot.
+      return {
+        kind,
+        imported: plan.map((step) => step.fileName),
+        replaced: plan.filter((step) => step.replaces).map((step) => step.fileName),
+        skipped: incoming.length - accepted.length,
+        restartRequired: coreBoot.accepted,
+        persisted: await flushUserDataReported()
+      };
     }
     case "exportSaveState": {
       const identity = saveIdentity();
       const slotPath = payload.slot ? stateSlotPath(identity, payload.slot) : "";
-      if (slotPath && !moduleInstance.FS.analyzePath(slotPath).exists) {
-        throw new Error(`Save state slot ${payload.slot} is empty`);
+      if (slotPath && !fsExists(slotPath)) throw new Error(`Save state slot ${payload.slot} is empty`);
+      let bytes;
+      if (slotPath) {
+        bytes = moduleInstance.FS.readFile(slotPath);
+      } else {
+        const staged = stagingPath("export.sav");
+        try {
+          bytes = await writeSaveState(staged);
+        } finally {
+          fsRemove(staged);
+        }
       }
-      const bytes = slotPath
-        ? moduleInstance.FS.readFile(slotPath)
-        : await writeSaveState("/savestate_export.sav");
       const header = checkSaveState(bytes, identity.gameId);
       const { buffer, transfer } = transferable(bytes);
       return { ...header, fileName: `${identity.gameId}.${payload.slot ? `s${String(payload.slot).padStart(2, "0")}` : "sav"}`, bytes: buffer, transfer };
     }
     case "importSaveState": {
       const identity = saveIdentity();
-      const bytes = new Uint8Array(payload.bytes);
+      // 1. Validate: game, state version, and the whole payload.
+      const bytes = importBytes(payload, MAX_STATE_BYTES, "importSaveState");
       const header = checkSaveState(bytes, identity.gameId);
-      let path = "/savestate_import.sav";
-      if (payload.slot) {
-        path = stateSlotPath(identity, payload.slot);
-        mkdirTreeFs(path.slice(0, path.lastIndexOf("/")));
+      validateSaveStateData(bytes);
+      const slotPath = payload.slot ? stateSlotPath(identity, payload.slot) : "";
+      if (slotPath && fsExists(slotPath) && !payload.replace && payload.load === false) {
+        throw new Error(`Save state slot ${payload.slot} is in use; pass replace to overwrite it`);
       }
-      moduleInstance.FS.writeFile(path, bytes);
-      const persisted = payload.slot ? await flushUserData() : null;
-      if (payload.load === false) return { ...header, path, loaded: false, persisted };
-      const result = await handleMessage("loadStateFile", { fsPath: path });
-      if (!result.loaded) throw new Error(`The core refused the save state (rc=${result.rc})`);
-      return { ...result, ...header, path, persisted };
+      // 2. Stage and read back.
+      const staged = stageBytes("import.sav", bytes);
+      let result = { loaded: false };
+      try {
+        // 3. Dolphin's own check: load it, from the staging name.
+        if (payload.load !== false) {
+          const generation = readLastLoadedCheckpoint().generation;
+          result = await handleMessage("loadStateFile", { fsPath: staged });
+          if (!result.loaded || !(await waitForLoadedCheckpoint(generation))) {
+            throw new Error(`The core did not load the save state (rc=${result.rc}); slot ${payload.slot || "-"} is unchanged`);
+          }
+        }
+      } catch (error) {
+        fsRemove(staged);
+        throw error;
+      }
+      if (!slotPath) {
+        fsRemove(staged);
+        return { ...result, ...header, path: "", persisted: null };
+      }
+      // 4. Switch the slot, then store.
+      mkdirTreeFs(slotPath.slice(0, slotPath.lastIndexOf("/")));
+      moduleInstance.FS.rename(staged, slotPath);
+      return { ...result, ...header, path: slotPath, persisted: await flushUserDataReported() };
     }
     default:
       throw new Error(`Unknown saves message: ${type}`);
@@ -2777,6 +3021,7 @@ async function mountFile(file) {
   if (!file) {
     throw new Error("No disc file was provided to the upstream worker");
   }
+  await ensureUserDataReady();
 
   const fs = moduleInstance.FS;
   const safeName = sanitizeDiscFileName(file.name);
