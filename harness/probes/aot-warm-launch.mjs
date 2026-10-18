@@ -41,6 +41,7 @@ const { positionals, values } = parseArgs({
     play: { type: "string", default: "60" },
     sec: { type: "string", default: "60" },
     runs: { type: "string", default: "3" },
+    launches: { type: "string", default: "1" },
     query: { type: "string", default: PRESET },
     out: { type: "string" }
   }
@@ -104,10 +105,7 @@ async function seed() {
   }
 }
 
-async function measureOne(name, tree, runDir) {
-  const profileDir = mkdtempSync(path.join(os.tmpdir(), "gc-aot-probe-"));
-  rmSync(profileDir, { recursive: true, force: true });
-  execFileSync("cp", ["-c", "-R", values["seed-profile"], profileDir]);
+async function measureOne(name, tree, runDir, profileDir) {
   const machineBefore = machineSnapshot();
   const s = await open({ tree, profileDir });
   const chunks = [];
@@ -162,7 +160,6 @@ async function measureOne(name, tree, runDir) {
     result.error = String(e.stack || e);
   } finally {
     await s.close();
-    rmSync(profileDir, { recursive: true, force: true });
   }
   return result;
 }
@@ -176,12 +173,22 @@ async function measure() {
     const runDir = path.join(values.out, `run${run + 1}`);
     mkdirSync(runDir, { recursive: true });
     for (const [name, tree] of order) {
-      log(`run ${run + 1} ${name}`);
-      const r = await measureOne(name, tree, runDir);
+      // --launches N: N boots on one clone of the seeded profile (launch 2+
+      // sees what launch 1 left: migrated or repacked caches).
+      const profileDir = mkdtempSync(path.join(os.tmpdir(), "gc-aot-probe-"));
+      rmSync(profileDir, { recursive: true, force: true });
+      execFileSync("cp", ["-c", "-R", values["seed-profile"], profileDir]);
+      for (let launch = 1; launch <= Number(values.launches); launch += 1) {
+      const tag = Number(values.launches) > 1 ? `${name}-launch${launch}` : name;
+      log(`run ${run + 1} ${tag}`);
+      const r = await measureOne(tag, tree, runDir, profileDir);
       r.run = run + 1;
+      r.launch = launch;
       all.push(r);
-      writeFileSync(path.join(runDir, `${name}.json`), JSON.stringify(r, null, 1));
-      log(`  ${name}: ${r.error ? "ERROR " + r.error.split("\n")[0] : `engage p99=${r.engage?.frameP99?.toFixed?.(1)} max=${r.engage?.frameMax?.toFixed?.(0)} race p99=${r.race?.frameP99?.toFixed?.(1)} menus p99=${r.menus?.frameP99?.toFixed?.(1)} speed=${r.race?.speed?.toFixed?.(1)} core=${JSON.stringify(r.coreModules)}`}`);
+      writeFileSync(path.join(runDir, `${tag}.json`), JSON.stringify(r, null, 1));
+      log(`  ${tag}: ${r.error ? "ERROR " + r.error.split("\n")[0] : `engage p99=${r.engage?.frameP99?.toFixed?.(1)} max=${r.engage?.frameMax?.toFixed?.(0)} race p99=${r.race?.frameP99?.toFixed?.(1)} menus p99=${r.menus?.frameP99?.toFixed?.(1)} speed=${r.race?.speed?.toFixed?.(1)} core=${JSON.stringify(r.coreModules)}`}`);
+      }
+      rmSync(profileDir, { recursive: true, force: true });
     }
   }
   writeFileSync(path.join(values.out, "all.json"), JSON.stringify(all, null, 1));
