@@ -88,3 +88,15 @@ test("steps go through the wait they are given, and the race steps are valid", a
   assert.deepEqual(waited, [2000, 120, 880, 120, 880]);
   validateSteps(JSON.parse(readFileSync(new URL("../harness/probes/local-race-steps.json", import.meta.url), "utf8")));
 });
+
+test("projected speed is proportional to the single-core score, ranged and capped at 100 %", async () => {
+  const { projectSpeed, speedClass } = await import("../harness/lib/consumer.mjs");
+  const ref = { refScore: 3000, refSpeed: 90 };
+  assert.deepEqual(projectSpeed(1500, ref), { low: 36, mid: 45, high: 54 });
+  assert.deepEqual(projectSpeed(6000, ref), { low: 100, mid: 100, high: 100 });
+  assert.deepEqual(projectSpeed(3000, { ...ref, spread: 0 }), { low: 90, mid: 90, high: 90 });
+  assert.throws(() => projectSpeed(0, ref), /positive/);
+  assert.equal(speedClass({ low: 96, mid: 100 }), "real time");
+  assert.equal(speedClass({ low: 50, mid: 70 }), "playable");
+  assert.equal(speedClass({ low: 30, mid: 40 }), "slow");
+});

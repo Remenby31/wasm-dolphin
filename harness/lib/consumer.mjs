@@ -55,3 +55,26 @@ export function presenterOf(helperStats) {
 export function isBlankFrame(frame) {
   return compareFrames(frame, frame).candidateSigma < DEFAULT_THRESHOLDS.blankSigma;
 }
+
+// Projected race speed (%) of a machine from its single-core score, by
+// proportionality to a calibration point measured on the development Mac
+// (the emulated CPU thread is saturated, so speed follows single-core
+// performance). `spread` widens the range for everything a single score does
+// not capture (memory, browser engine, thermals). Speed never exceeds 100 %:
+// the emulator does not run the game faster than the console.
+export function projectSpeed(score, { refScore, refSpeed, spread = 0.2 }) {
+  if (!(score > 0) || !(refScore > 0) || !(refSpeed > 0)) throw new Error("projectSpeed: scores and speed must be positive");
+  const mid = (refSpeed * score) / refScore;
+  const cap = (v) => Math.round(Math.min(100, v));
+  return { low: cap(mid * (1 - spread)), mid: cap(mid), high: cap(mid * (1 + spread)) };
+}
+
+// real-time: full speed even at the low end of the range; playable: the
+// middle reaches PLAYABLE_SPEED; slow otherwise.
+export const REALTIME_SPEED = 95;
+export const PLAYABLE_SPEED = 60;
+export function speedClass({ low, mid }) {
+  if (low >= REALTIME_SPEED) return "real time";
+  if (mid >= PLAYABLE_SPEED) return "playable";
+  return "slow";
+}
