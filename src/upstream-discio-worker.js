@@ -802,9 +802,7 @@ self.addEventListener("message", async (event) => {
   }
 
   try {
-    const result = SAVES_REQUEST_TYPES.has(type)
-      ? await handleSavesMessage(type, payload)
-      : await handleMessage(type, payload);
+    const result = await handleMessage(type, payload);
     postResult(data, result);
   } catch (error) {
     const errorName = error?.name || error?.constructor?.name || "Error";
@@ -996,6 +994,13 @@ async function handleMessage(type, payload) {
       return { ...metadataPayload(), userData: await startUserDataPersistence() };
     case "mountFile":
       return mountFile(payload.file);
+    case "flushUserData":
+    case "listUserData":
+    case "exportMemcard":
+    case "importMemcard":
+    case "exportSaveState":
+    case "importSaveState":
+      return handleSavesMessage(type, payload);
     case "setInputMask":
       inputMask = payload.mask >>> 0;
       api?.setInputMask(inputMask);
@@ -2496,14 +2501,6 @@ const userDataStatus = { persistent: false, reason: "not started", restored: 0, 
 // What is running, as Dolphin names it: the disc's game ID, or "ID-<file>"
 // for a bare executable (SConfig::MakeGameID).
 let bootedGame = { kind: "", gameId: "", region: "" };
-const SAVES_REQUEST_TYPES = new Set([
-  "flushUserData",
-  "listUserData",
-  "exportMemcard",
-  "importMemcard",
-  "exportSaveState",
-  "importSaveState"
-]);
 
 const coreLifecycle = createCoreLifecycle({
   api: () => api,
