@@ -1,19 +1,19 @@
 {
   "schemaVersion": 1,
   "abiVersion": 1,
-  "coreId": "sha256:d77c33630880aa8b433d0a28bbc180d4cb305377d994391f08330661213a0587",
+  "coreId": "sha256:aa9e3e896e38673dffa52b555178809b0aebe943418cc1b956fbc8994a6580c6",
   "upstreamCommit": "e22551eae1c84a7e4d0b6a5c519ef4ed4ef69df1",
   "artifacts": [
     {
       "path": "cores/dolphin/dolphin-core-upstream.js",
       "hashMode": "lf-normalized",
-      "size": 272025,
-      "sha256": "b3efeddcb87e8f528f9a143505156e36031dd37a144431cf58524a93142457fb"
+      "size": 270148,
+      "sha256": "0df84d85ac9f5194fcecaea1a1cef7d27f363c2b1871321affaff7896de5e2ac"
     },
     {
       "path": "cores/dolphin/dolphin-core-upstream.wasm",
-      "size": 12997997,
-      "sha256": "d77c33630880aa8b433d0a28bbc180d4cb305377d994391f08330661213a0587"
+      "size": 12989148,
+      "sha256": "aa9e3e896e38673dffa52b555178809b0aebe943418cc1b956fbc8994a6580c6"
     }
   ],
   "contractSources": [
@@ -164,8 +164,8 @@
     {
       "path": "src/upstream-worker-protocol.js",
       "hashMode": "lf-normalized",
-      "size": 5096,
-      "sha256": "cc639d051aa450029abd2aaead019354a0f27a0afdcc8eda6c6e58d2ab747746"
+      "size": 5226,
+      "sha256": "78bd3c731113df4da93fcb066d2283358a7f8112236e2bc3e330e049135662bf"
     },
     {
       "path": "src/wgpu-pass-state-cache.js",
@@ -350,7 +350,17 @@
     }
   },
   "memoryContractStatus": "consistent",
-  "sourceOnlyExportsPendingRebuild": [],
+  "sourceOnlyExportsPendingRebuild": [
+    "_DolphinWeb_JitArmedStepForTest",
+    "_DolphinWeb_JitFailNextInstance",
+    "_DolphinWeb_JitFailNextTableGrow",
+    "_DolphinWeb_JitOnStateLoaded",
+    "_DolphinWeb_JitTableFull",
+    "_DolphinWeb_JitTransientRejectCount",
+    "_GetPpcWasmJitArmStartFrame",
+    "_GetPpcWasmJitEngagedFrame",
+    "_SetPpcWasmJitWarmup"
+  ],
   "moduleExports": [
     "_AcknowledgeWebGpuOwnershipTraceCapture",
     "_AudioBuffer",
@@ -375,17 +385,11 @@
     "_DolphinWeb_HarnessViRingHead",
     "_DolphinWeb_HarnessViSinceBoot",
     "_DolphinWeb_HarnessViSinceLoad",
-    "_DolphinWeb_JitArmedStepForTest",
     "_DolphinWeb_JitCompileBytesForTest",
     "_DolphinWeb_JitEngineRejectCount",
-    "_DolphinWeb_JitFailNextInstance",
-    "_DolphinWeb_JitFailNextTableGrow",
-    "_DolphinWeb_JitOnStateLoaded",
     "_DolphinWeb_JitOracleBuffer",
     "_DolphinWeb_JitOracleMessage",
     "_DolphinWeb_JitOracleRun",
-    "_DolphinWeb_JitTableFull",
-    "_DolphinWeb_JitTransientRejectCount",
     "_DolphinWeb_RecordCacheHit",
     "_DolphinWeb_RecordCacheMiss",
     "_DolphinWeb_RecordInstanceUs",
@@ -432,8 +436,6 @@
     "_GetPpcWasmBlockCompileCount",
     "_GetPpcWasmBlockRunCount",
     "_GetPpcWasmHelperStats",
-    "_GetPpcWasmJitArmStartFrame",
-    "_GetPpcWasmJitEngagedFrame",
     "_GetRawSize",
     "_GetRegion",
     "_GetRendererFeatureMask",
@@ -495,7 +497,6 @@
     "_SetPadState",
     "_SetPpcProfileEnabled",
     "_SetPpcWasmJitEnabled",
-    "_SetPpcWasmJitWarmup",
     "_SetPresentationScale",
     "_SetRendererFeatureMask",
     "_SetSoftwareRasterProfileEnabled",

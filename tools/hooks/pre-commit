@@ -1,0 +1,4 @@
+#!/bin/sh
+# Refuse to commit core binaries: CI builds and commits the core after a merge
+# (docs/repro-build.md). Installed by `npm run hooks:install`.
+exec node "$(git rev-parse --show-toplevel)/tools/core-artifacts.mjs" check-staged
