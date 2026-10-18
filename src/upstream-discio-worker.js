@@ -659,6 +659,12 @@ function webGpuUboPackMode() {
   return wgpuUboPackEnabled && !wgpuUboCacheEnabled ? 1 : 0;
 }
 
+// Harness-only timing perturbations, to reproduce in headless Chrome the
+// backpressure a visible canvas puts on the replay (validationSetWgpuPerturbation).
+// Both zero by default: nothing changes unless the harness asks.
+const wgpuDiagPerturb = { presentDelayMs: 0, drainEveryMs: 0 };
+let wgpuDiagLastDrainAt = 0;
+
 // The core's FIFO / pixel-engine handshake snapshot (WasmGpuSyncDiag.h).
 function readGpuSyncDiag() {
   const m = moduleInstance;
@@ -1330,6 +1336,10 @@ async function handleMessage(type, payload) {
       return captureAtViOutput(payload);
     case "validationReadWgpuReplayState":
       return readWgpuReplayState();
+    case "validationSetWgpuPerturbation":
+      wgpuDiagPerturb.presentDelayMs = Math.max(0, Math.min(100, Number(payload.presentDelayMs) || 0));
+      wgpuDiagPerturb.drainEveryMs = Math.max(0, Math.min(200, Number(payload.drainEveryMs) || 0));
+      return { ...wgpuDiagPerturb };
     case "validationReadCoreProgress": {
       const loadedCheckpoint = readLastLoadedCheckpoint();
       return {
@@ -10164,6 +10174,11 @@ function recordBoundedHistogram(values, bounds, value) {
 
 function drainWebGpuCmdRing(source = "presentation") {
   if (wgpuReplayFatal) return;
+  if (wgpuDiagPerturb.drainEveryMs > 0) {
+    const now = performance.now();
+    if (now - wgpuDiagLastDrainAt < wgpuDiagPerturb.drainEveryMs) return;
+    wgpuDiagLastDrainAt = now;
+  }
   const ring = webGpuCmdRing;
   if (!ring || !renderGpu) return;
   if (wgpuSemanticRuntimeActive) drainWgpuSemanticOwnership();
@@ -11749,6 +11764,10 @@ function drainWebGpuCmdRing(source = "presentation") {
                   } catch (e) {}
                 }
               }
+            }
+            if (wgpuDiagPerturb.presentDelayMs > 0) {
+              const until = performance.now() + wgpuDiagPerturb.presentDelayMs;
+              while (performance.now() < until) { /* harness perturbation: a blocking present */ }
             }
             const cur = renderGpu.context.getCurrentTexture();
             lastBackbufferTexture = cur;
