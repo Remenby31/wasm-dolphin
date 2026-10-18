@@ -1,0 +1,53 @@
+diff --git a/Source/Core/Core/HW/EXI/EXI_DeviceMemoryCard.cpp b/Source/Core/Core/HW/EXI/EXI_DeviceMemoryCard.cpp
+--- a/Source/Core/Core/HW/EXI/EXI_DeviceMemoryCard.cpp
++++ b/Source/Core/Core/HW/EXI/EXI_DeviceMemoryCard.cpp
+@@ -170,6 +170,12 @@
+   }
+ 
+   return {Config::GetGCIFolderPath(card_slot, region), true};
++}
++
++void CEXIMemoryCard::FlushCard()
++{
++  if (m_memory_card)
++    m_memory_card->Flush();
+ }
+ 
+ void CEXIMemoryCard::SetupGciFolder(const Memcard::HeaderData& header_data)
+diff --git a/Source/Core/Core/HW/EXI/EXI_DeviceMemoryCard.h b/Source/Core/Core/HW/EXI/EXI_DeviceMemoryCard.h
+--- a/Source/Core/Core/HW/EXI/EXI_DeviceMemoryCard.h
++++ b/Source/Core/Core/HW/EXI/EXI_DeviceMemoryCard.h
+@@ -54,6 +54,8 @@
+   void DoState(PointerWrap& p) override;
+   void DMARead(u32 addr, u32 size) override;
+   void DMAWrite(u32 addr, u32 size) override;
++  // See MemoryCardBase::Flush.
++  void FlushCard();
+ 
+   // CoreTiming events need to be registered during boot since CoreTiming is DoState()-ed
+   // before ExpansionInterface so we'll lose the save stated events if the callbacks are
+diff --git a/Source/Core/Core/HW/GCMemcard/GCMemcardBase.h b/Source/Core/Core/HW/GCMemcard/GCMemcardBase.h
+--- a/Source/Core/Core/HW/GCMemcard/GCMemcardBase.h
++++ b/Source/Core/Core/HW/GCMemcard/GCMemcardBase.h
+@@ -23,6 +23,10 @@
+   virtual void ClearBlock(u32 address) = 0;
+   virtual void ClearAll() = 0;
+   virtual void DoState(PointerWrap& p) = 0;
++  // Writes pending changes to the host now instead of on the flush thread's
++  // schedule. The browser port copies the card to persistent storage after
++  // this returns.
++  virtual void Flush() {}
+   u32 GetCardId() const { return m_nintendo_card_id; }
+ 
+ protected:
+diff --git a/Source/Core/Core/HW/GCMemcard/GCMemcardDirectory.h b/Source/Core/Core/HW/GCMemcard/GCMemcardDirectory.h
+--- a/Source/Core/Core/HW/GCMemcard/GCMemcardDirectory.h
++++ b/Source/Core/Core/HW/GCMemcard/GCMemcardDirectory.h
+@@ -40,6 +40,7 @@
+   void ClearBlock(u32 address) override;
+   void ClearAll() override {}
+   void DoState(PointerWrap& p) override;
++  void Flush() override { FlushToFile(); }
+ 
+ private:
+   bool LoadGCI(Memcard::GCIFile gci);
