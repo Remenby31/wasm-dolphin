@@ -304,18 +304,22 @@ function pushFixture() {
     writeFileSync(path.join(work, relative), content);
   };
   write("src/app.js", "1");
-  write(CORE_BINARY_FILES[1], "old core");
+  for (const file of [...CORE_DERIVED_FILES, ABI_PATH]) write(file, "old");
   sh(work, "add", "-A");
   sh(work, "commit", "-q", "-m", "main");
   sh(work, "push", "-q", `file://${remote}`, "main");
   const base = sh(work, "rev-parse", "HEAD");
   const publish = path.join(dir, "publish");
   mkdirSync(publish);
-  const prepare = (files, action = "commit") => {
+  const prepare = (files, action = "commit", { modes = {}, bundleRefs = [`${base}..HEAD`] } = {}) => {
     for (const [relative, content] of Object.entries(files)) write(relative, content);
     sh(work, "add", "-A");
+    for (const [relative, mode] of Object.entries(modes)) {
+      const blob = sh(work, "hash-object", "-w", path.join(work, relative));
+      sh(work, "update-index", "--cacheinfo", `${mode},${blob},${relative}`);
+    }
     sh(work, "commit", "-q", "-m", "core");
-    sh(work, "bundle", "create", path.join(publish, "core.bundle"), `${base}..HEAD`);
+    sh(work, "bundle", "create", path.join(publish, "core.bundle"), ...bundleRefs);
     writeFileSync(path.join(publish, "plan.json"), JSON.stringify({ schemaVersion: 1, action }));
   };
   const bin = path.join(dir, "bin");
@@ -365,6 +369,54 @@ test("push-core refuses a bundle that touches other files or carries another cor
       f.prepare(files);
       assert.notEqual(f.run({ sha }).status, 0);
       assert.equal(f.remoteHead(), before, "nothing pushed");
+    } finally {
+      rmSync(f.dir, { recursive: true, force: true });
+    }
+  }
+});
+
+test("push-core refuses core files that are not plain 100644 blobs", () => {
+  const files = { [CORE_BINARY_FILES[1]]: "new core", [CORE_LOCK_PATH]: formatCoreLock(sha256("new core")) };
+  for (const modes of [
+    { [CORE_BINARY_FILES[0]]: "100755" },
+    { [CORE_BINARY_FILES[2]]: "120000" },
+    { [ABI_PATH]: "160000" }
+  ]) {
+    const f = pushFixture();
+    try {
+      const before = f.remoteHead();
+      f.prepare(files, "commit", { modes });
+      assert.notEqual(f.run({ sha: sha256("new core") }).status, 0, JSON.stringify(modes));
+      assert.equal(f.remoteHead(), before, "nothing pushed");
+    } finally {
+      rmSync(f.dir, { recursive: true, force: true });
+    }
+  }
+});
+
+test("push-core refuses a missing bundle or one with other refs than HEAD", () => {
+  const files = { [CORE_BINARY_FILES[1]]: "new core", [CORE_LOCK_PATH]: formatCoreLock(sha256("new core")) };
+  for (const variant of ["missing", "extra-ref", "branch-only"]) {
+    const f = pushFixture();
+    try {
+      const before = f.remoteHead();
+      if (variant === "extra-ref") {
+        // A second ref with content of its own: an empty range would be
+        // dropped by git bundle create and prove nothing.
+        f.sh(f.work, "checkout", "-q", "-b", "smuggled");
+        f.sh(f.work, "commit", "-q", "--allow-empty", "-m", "smuggled");
+        f.sh(f.work, "checkout", "-q", "main");
+        f.prepare(files, "commit", { bundleRefs: [`${f.base}..HEAD`, `${f.base}..smuggled`] });
+      } else if (variant === "branch-only") {
+        f.prepare(files, "commit", { bundleRefs: [`${f.base}..main`] });
+      } else {
+        f.prepare(files);
+        rmSync(path.join(f.dir, "publish/core.bundle"));
+      }
+      const result = f.run({ sha: sha256("new core") });
+      assert.notEqual(result.status, 0, variant);
+      assert.equal(f.remoteHead(), before, `${variant}: nothing pushed`);
+      assert.equal(f.ghCalls(), "", `${variant}: no hand-over either`);
     } finally {
       rmSync(f.dir, { recursive: true, force: true });
     }

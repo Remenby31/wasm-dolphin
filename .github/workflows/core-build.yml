@@ -103,14 +103,16 @@ jobs:
       # Recompiling one translation unit and relinking must give the same
       # bytes: anything else is non-determinism in the build.
       - name: Incremental rebuild must match the clean build
+        env:
+          CLEAN_SHA256: ${{ steps.clean.outputs.wasm_sha256 }}
         run: |
           touch core/upstream/dolphin_web_discio.cpp
           start=$(date +%s)
           npm run build:core:repro -- --docker --bind-mounts --no-sync --jobs "$(nproc)"
           echo "INCREMENTAL_BUILD_SECONDS=$(( $(date +%s) - start ))" >> "$GITHUB_ENV"
           incremental=$(node -p "require('./build/repro/linux-x64/parity.json').rebuilt.wasmSha256")
-          if [ "$incremental" != "${{ steps.clean.outputs.wasm_sha256 }}" ]; then
-            echo "::error::incremental build $incremental differs from clean build ${{ steps.clean.outputs.wasm_sha256 }}"
+          if [ "$incremental" != "$CLEAN_SHA256" ]; then
+            echo "::error::incremental build $incremental differs from clean build $CLEAN_SHA256"
             exit 1
           fi
 
@@ -196,13 +198,15 @@ jobs:
           path: archive
 
       - name: Extract
+        env:
+          IMAGE_TAG: ${{ needs.build.outputs.image_tag }}
         run: |
           mkdir source
           tar -xzf archive/*.tar.gz -C source --strip-components=1
           test ! -e source/.git
           test -f source/src/app.js
           test -d source/tools/naga-spirv-wgsl/vendor/naga-26.0.0
-          test "$(cd source && node tools/build-core-repro.mjs --docker-context)" = "${{ needs.build.outputs.image_tag }}"
+          test "$(cd source && node tools/build-core-repro.mjs --docker-context)" = "$IMAGE_TAG"
 
       - name: Toolchain image
         uses: docker/build-push-action@10e90e3645eae34f1e60eeb005ba3a3d33f178e8 # v6
@@ -215,11 +219,13 @@ jobs:
 
       - name: Rebuild from the archive and compare
         working-directory: source
+        env:
+          CHECKOUT_SHA256: ${{ needs.build.outputs.wasm_sha256 }}
         run: |
           npm run build:core:repro -- --docker --bind-mounts --no-sync --clean --jobs "$(nproc)"
           rebuilt=$(node -p "require('./build/repro/linux-x64/parity.json').rebuilt.wasmSha256")
-          echo "archive build: $rebuilt, checkout build: ${{ needs.build.outputs.wasm_sha256 }}"
-          test "$rebuilt" = "${{ needs.build.outputs.wasm_sha256 }}"
+          echo "archive build: $rebuilt, checkout build: $CHECKOUT_SHA256"
+          test "$rebuilt" = "$CHECKOUT_SHA256"
 
   # On main: turn the core into one commit on top of main's current tip.
   # Read-only; runs the repository's code (publish-plan, update-core-abi,
@@ -347,15 +353,28 @@ jobs:
             handover "main moved after the core commit was prepared"
             exit 0
           fi
+          # The bundle holds exactly one ref, HEAD (git bundle create
+          # <base>..HEAD); anything else is refused before fetching.
+          test -f "$PUBLISH/core.bundle"
+          git bundle verify -q "$PUBLISH/core.bundle"
+          heads=$(git bundle list-heads "$PUBLISH/core.bundle")
+          test "$(wc -l <<< "$heads")" -eq 1
+          test "$(cut -d' ' -f2 <<< "$heads")" = HEAD
           git -c core.hooksPath=/dev/null fetch -q "$PUBLISH/core.bundle" HEAD
           commit=$(git rev-parse FETCH_HEAD)
+          test "$(cut -d' ' -f1 <<< "$heads")" = "$commit"
           test "$(git rev-list --parents -n 1 "$commit")" = "$commit $BASE"
-          changed=$(git diff-tree --no-commit-id --name-only -r "$BASE" "$commit" | sort)
           allowed=$(printf '%s\n' cores/dolphin/core.lock.json cores/dolphin/dolphin-core-upstream.build.json \
             cores/dolphin/dolphin-core-upstream.js cores/dolphin/dolphin-core-upstream.wasm \
             provenance/dolphin-core-abi-v1.json | sort)
+          changed=$(git diff-tree --no-commit-id --name-only -r "$BASE" "$commit" | sort)
           test -n "$changed"
           test -z "$(comm -23 <(echo "$changed") <(echo "$allowed"))"
+          # Each of the five is a regular, non-executable file: no symlink,
+          # gitlink or executable bit can ride along.
+          modes=$(git ls-tree "$commit" -- $allowed | cut -f1 | cut -d' ' -f1,2 | sort -u)
+          test "$(git ls-tree "$commit" -- $allowed | wc -l)" -eq 5
+          test "$modes" = "100644 blob"
           test "$(git cat-file blob "$commit:cores/dolphin/dolphin-core-upstream.wasm" | sha256sum | cut -d' ' -f1)" = "$SHA256"
           test "$(git cat-file blob "$commit:cores/dolphin/core.lock.json" | jq -er .sha256)" = "$SHA256"
 
