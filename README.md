@@ -138,7 +138,7 @@ configuration.
 | Raster quality | Balanced | How much the software rasterizer and XFB encode are thinned. **Balanced** shades one sample per 2×2 cell; see [Raster quality](#raster-quality-fastsw). | `fastsw=1` |
 | JIT tier | Guarded | Which PPC→WASM blocks the JIT is allowed to emit. **Guarded** is the conservative set; *Mixed experimental* widens it (same as `wasmjit=2`). | `jittier=guarded` |
 | WASM JIT | on | The PPC→WASM JIT itself. Off falls back to Dolphin's `CachedInterpreter`. | `wasmjit=1` |
-| Force JIT | off | Bypasses the JIT's safety gates — the warmup-frame floor, and the JIT-off default on the OpenGL path. | `forcejit=1` to enable |
+| Force JIT | off | Bypasses the JIT-off default and the 5000-frame warmup floor on the OpenGL path. | `forcejit=1` to enable |
 | Collect Metrics | off | Turns on the telemetry counters behind the HUD and profiler. Off by default because the counting itself costs time. | `metrics=1` to enable |
 | Auto per-game | on | Picks the renderer from measured per-game results — see [per-game renderer defaults](#per-game-renderer-defaults). | — |
 
@@ -181,7 +181,7 @@ The defaults already select the software-hybrid path. This URL pins every knob,
 for reproducible measurements:
 
 ```text
-/?core=upstream&video=software&presenter=webgpu&cpu=dual&speed=1&wasmjit=1&jitwarmup=700&oc=1&pacing=tick&fastsw=1&metrics=1
+/?core=upstream&video=software&presenter=webgpu&cpu=dual&speed=1&wasmjit=1&jitwarmup=60&oc=1&pacing=tick&fastsw=1&metrics=1
 ```
 
 - `video=software` + `presenter=webgpu` — software rasterizer, presented to the

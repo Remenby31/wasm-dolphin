@@ -1,0 +1,1905 @@
+diff --git a/Source/Core/Core/PowerPC/CachedInterpreter/CachedInterpreter.cpp b/Source/Core/Core/PowerPC/CachedInterpreter/CachedInterpreter.cpp
+--- a/Source/Core/Core/PowerPC/CachedInterpreter/CachedInterpreter.cpp
++++ b/Source/Core/Core/PowerPC/CachedInterpreter/CachedInterpreter.cpp
+@@ -12,6 +12,7 @@
+ #include <chrono>
+ #include <cmath>
+ #include <cstdint>
++#include <cstring>
+ #include <initializer_list>
+ #include <limits>
+ #include <optional>
+@@ -21,6 +22,7 @@
+ #include <string_view>
+ #include <type_traits>
+ #include <unordered_map>
++#include <unordered_set>
+ #include <utility>
+ #include <vector>
+ 
+@@ -131,7 +133,7 @@ EM_JS(int, DolphinWeb_CachedInterpreterCompileWasmBlock,
+        int lfs_index, int stfs_index, int lfd_index, int fmr_index, int system_index,
+        int fp_index, int fctiwz_index, int interpret_index, int fastcheck_gpfifo_index,
+        int fast_os_interrupt_call_index, int fast_melee_input_status_call_index,
+-       int fast_melee_status_call_index, int fast_melee_service_poll_call_index), {
++       int fast_melee_status_call_index, int fast_melee_service_poll_call_index, int fma_index), {
+   // Day-7 Phase B: cache lookup before WebAssembly.Module compilation.
+   // Module._dolphinJitCache is populated on each pthread by the pre-js
+   // receiver (tools/jit-cache-prejs.js) when the discio worker sends a
+@@ -153,6 +155,9 @@ EM_JS(int, DolphinWeb_CachedInterpreterCompileWasmBlock,
+   // (not Module._foo) because main-thread GetPpcWasmHelperStats and the
+   // CPU-pthread compile path are different pthreads with different Module
+   // contexts — JS-side state would never be visible across.
++  // A module the engine rejects (CompileError, LinkError) must never take the
++  // CPU thread down: the caller treats handle 0 as "interpret this block".
++  try {
+   if (!mod) {
+     const bytes = Module.HEAPU8.slice(bytes_ptr, bytes_ptr + bytes_len);
+     const t0 = (typeof performance !== "undefined" && performance.now) ? performance.now() : 0;
+@@ -201,7 +206,8 @@ EM_JS(int, DolphinWeb_CachedInterpreterCompileWasmBlock,
+           fast_os_interrupt_call: wasmTable.get(fast_os_interrupt_call_index),
+           fast_melee_input_status_call: wasmTable.get(fast_melee_input_status_call_index),
+           fast_melee_status_call: wasmTable.get(fast_melee_status_call_index),
+-          fast_melee_service_poll_call: wasmTable.get(fast_melee_service_poll_call_index)
++          fast_melee_service_poll_call: wasmTable.get(fast_melee_service_poll_call_index),
++          fma: wasmTable.get(fma_index)
+         }
+       }).exports.f;
+   const inst_t1 = (typeof performance !== "undefined" && performance.now) ? performance.now() : 0;
+@@ -211,6 +217,16 @@ EM_JS(int, DolphinWeb_CachedInterpreterCompileWasmBlock,
+   wasmTable.grow(1);
+   wasmTable.set(index, fn);
+   return index | 0;
++  } catch (e) {
++    if (cacheKey && Module._dolphinJitCache) Module._dolphinJitCache.delete(cacheKey);
++    // The C++ side counts it, blacklists the bytes and logs the block; the
++    // engine's message only exists here.
++    if ((_DolphinWeb_RecordWasmCompileError(bytes_len) | 0) <= 8) {
++      console.warn("[ppc-wasm-jit] block rejected by the engine, interpreting it: " +
++                   String((e && e.message) || e));
++    }
++    return 0;
++  }
+ });
+ 
+ static std::array<char, 86> DolphinWeb_MakeWasmBlockCacheKey(std::span<const u8> bytes)
+@@ -434,6 +450,19 @@ extern "C" void DolphinWeb_RecordCacheHit()
+ {
+   s_wasm_cache_hit_count.fetch_add(1, std::memory_order_relaxed);
+ }
++// Engine-rejected modules (CompileError/LinkError caught in the compile
++// EM_JS). Their exact bytes are blacklisted so the block is never handed to
++// the engine again; it stays on the interpreter path.
++static std::atomic<u32> s_wasm_engine_reject_count{0};
++static u32 s_wasm_blacklist_hit_count = 0;
++static std::unordered_set<std::string> s_wasm_rejected_block_keys;
++
++extern "C" EMSCRIPTEN_KEEPALIVE int DolphinWeb_RecordWasmCompileError(int bytes_len)
++{
++  (void)bytes_len;
++  return static_cast<int>(s_wasm_engine_reject_count.fetch_add(1, std::memory_order_relaxed) + 1);
++}
++
+ extern "C" void DolphinWeb_RecordCacheMiss()
+ {
+   s_wasm_cache_miss_count.fetch_add(1, std::memory_order_relaxed);
+@@ -1044,12 +1073,18 @@ bool VerifyMeleeStatusFunction()
+   return true;
+ }
+ 
++// Same mapping as EmitMem1ViewOffset: only the 0x8 and 0xC views are RAM.
++static u32 Mem1ViewOffset(u32 address)
++{
++  return (address ^ 0x80000000u) & 0xbfffffffu;
++}
++
+ bool TryReadFastRamU32Address(u32 address, u32* value)
+ {
+   auto& memory = Core::System::GetInstance().GetMemory();
+   u8* ram = memory.GetRAM();
+   const u32 ram_size = memory.GetRamSizeReal();
+-  const u32 offset = address & 0x3fffffff;
++  const u32 offset = Mem1ViewOffset(address);
+   if (ram == nullptr || offset >= ram_size || ram_size - offset < sizeof(u32))
+     return false;
+ 
+@@ -2025,7 +2060,7 @@ bool TryFastPairedQuantizedMemory(Core::System& system, PowerPC::PowerPCState& p
+ 
+   const u32 element_bytes = PairedQuantizedElementBytes(type);
+   const u32 bytes = inst.W ? element_bytes : element_bytes * 2;
+-  const u32 offset = address & 0x3fffffff;
++  const u32 offset = Mem1ViewOffset(address);
+   const u32 ram_size = system.GetMemory().GetRamSizeReal();
+   if (offset > ram_size - bytes)
+     return false;
+@@ -2168,6 +2203,28 @@ extern "C" int DolphinWeb_CachedInterpreterFpOp(int state_ptr, u32 inst_hex, u32
+   return DolphinWeb_CachedInterpreterCheckProgramOrDsi(ppc_state, current_pc, downcount) ? 1 : 0;
+ }
+ 
++// The arithmetic of the FMA family exactly as the interpreter does it
++// (NI_madd_msub: one rounding, Gekko's frC rounding and single-precision tie
++// fix), for the JIT's fast path. flags: bit 0 subtract, bit 1 single. The
++// JIT only keeps zero or normal results; for anything else it re-runs the
++// instruction through the interpreter, so the NaN/infinity side effects that
++// land in this scratch state are never needed.
++extern "C" double DolphinWeb_CachedInterpreterFma(double a, double c, double b, u32 flags)
++{
++  static PowerPC::PowerPCState scratch;
++  switch (flags & 3)
++  {
++  case 0:
++    return NI_madd_msub<false, false>(scratch, a, c, b).value;
++  case 1:
++    return NI_madd_msub<true, false>(scratch, a, c, b).value;
++  case 2:
++    return NI_madd_msub<false, true>(scratch, a, c, b).value;
++  default:
++    return NI_madd_msub<true, true>(scratch, a, c, b).value;
++  }
++}
++
+ extern "C" int DolphinWeb_CachedInterpreterSystem(int state_ptr, u32 inst_hex, u32 current_pc,
+                                                    u32 downcount, u32 unused)
+ {
+@@ -2519,6 +2576,7 @@ constexpr u32 WASM_IMPORT_FAST_OS_INTERRUPT_CALL_INDEX = 15;
+ constexpr u32 WASM_IMPORT_FAST_MELEE_INPUT_STATUS_CALL_INDEX = 16;
+ constexpr u32 WASM_IMPORT_FAST_MELEE_STATUS_CALL_INDEX = 17;
+ constexpr u32 WASM_IMPORT_FAST_MELEE_SERVICE_POLL_CALL_INDEX = 18;
++constexpr u32 WASM_IMPORT_FMA_INDEX = 19;
+ constexpr u32 WASM_GATHER_PIPE_FLUSH_THRESHOLD =
+     GPFifo::GATHER_PIPE_EXTRA_SIZE - GPFifo::GATHER_PIPE_SIZE;
+ 
+@@ -3184,7 +3242,9 @@ void EmitCrLogical(std::vector<u8>& body, const WasmStateLayout& layout, UGeckoI
+     body.push_back(0x72);
+     break;
+   default:
+-    EmitI32Const(body, 0);
++    // Unreachable: the caller only routes the eight CR-logical SUBOP10s
++    // here. Keep the stack balanced (two bits in, one out) regardless.
++    body.push_back(0x1a);  // drop
+     break;
+   }
+   EmitLocalSet(body, 2);
+@@ -3204,6 +3264,14 @@ void EmitCrLogical(std::vector<u8>& body, const WasmStateLayout& layout, UGeckoI
+   EmitStoreCrFieldFromPpcLocal(body, layout, inst.CRBD >> 2, 2);
+ }
+ 
++// mcrf crfD, crfS: the same as ConditionRegister::SetField(D, GetField(S)).
++void EmitMcrf(std::vector<u8>& body, const WasmStateLayout& layout, UGeckoInstruction inst)
++{
++  EmitCrFieldToPpcBits(body, layout, inst.CRFS);
++  EmitLocalSet(body, 2);
++  EmitStoreCrFieldFromPpcLocal(body, layout, inst.CRFD, 2);
++}
++
+ void EmitSystemCall(std::vector<u8>& body, const PPCAnalyst::CodeOp& op, u32 downcount);
+ void EmitFastOsInterruptCall(std::vector<u8>& body, u32 current_pc,
+                              const OsInterruptInlineTarget& target);
+@@ -3525,11 +3593,23 @@ void EmitSetEffectiveAddressXLocal(std::vector<u8>& body, const WasmStateLayout&
+   EmitLocalSet(body, 1);
+ }
+ 
++// [i32 address] -> [i32 offset]: the MEM1 offset of an address in the
++// 0x80000000 (cached) or 0xC0000000 (uncached) view, the only ones the
++// standard BATs map; any other address yields a value >= 0x3fffffff, so the
++// caller's "offset < RAM size" test sends it to the MMU helper, as the
++// interpreter does (0x0xxxxxxx and 0x4xxxxxxx are not RAM).
++void EmitMem1ViewOffset(std::vector<u8>& body)
++{
++  EmitI32Const(body, 0x80000000);
++  body.push_back(0x73);  // i32.xor: the 0x8 and 0xC views lose bit 31
++  EmitI32Const(body, 0xbfffffff);
++  body.push_back(0x71);  // i32.and: the 0xC view folds onto 0x8; others keep bit 31
++}
++
+ void EmitIsMem1Address(std::vector<u8>& body, const WasmStateLayout& layout)
+ {
+   EmitLocalGet(body, 1);
+-  EmitI32Const(body, 0x3fffffff);
+-  body.push_back(0x71);
++  EmitMem1ViewOffset(body);
+   EmitI32Const(body, layout.ram_size_real - sizeof(u32));
+   body.push_back(0x4d);
+ }
+@@ -3537,8 +3617,7 @@ void EmitIsMem1Address(std::vector<u8>& body, const WasmStateLayout& layout)
+ void EmitIsMem1AddressForSize(std::vector<u8>& body, const WasmStateLayout& layout, u32 bytes)
+ {
+   EmitLocalGet(body, 1);
+-  EmitI32Const(body, 0x3fffffff);
+-  body.push_back(0x71);
++  EmitMem1ViewOffset(body);
+   EmitI32Const(body, layout.ram_size_real - bytes);
+   body.push_back(0x4d);
+ }
+@@ -3557,8 +3636,7 @@ void EmitIsL1CacheAddressForSize(std::vector<u8>& body, const WasmStateLayout& l
+ void EmitIsMem1LineAddress(std::vector<u8>& body, const WasmStateLayout& layout)
+ {
+   EmitLocalGet(body, 1);
+-  EmitI32Const(body, 0x3fffffff);
+-  body.push_back(0x71);
++  EmitMem1ViewOffset(body);
+   EmitI32Const(body, layout.ram_size_real - 32);
+   body.push_back(0x4d);
+ }
+@@ -3793,8 +3871,7 @@ void EmitStoreZeroU32ToRamAddress(std::vector<u8>& body, const WasmStateLayout&
+ void EmitReadU32MaybeDirect(std::vector<u8>& body, const WasmStateLayout& layout)
+ {
+   EmitLocalGet(body, 1);
+-  EmitI32Const(body, 0x3fffffff);
+-  body.push_back(0x71);
++  EmitMem1ViewOffset(body);
+   body.push_back(0x22);
+   EmitU32Leb(body, 3);
+   EmitI32Const(body, layout.ram_size_real - sizeof(u32));
+@@ -3820,8 +3897,7 @@ void EmitReadU32MaybeDirect(std::vector<u8>& body, const WasmStateLayout& layout
+ void EmitReadU8MaybeDirect(std::vector<u8>& body, const WasmStateLayout& layout)
+ {
+   EmitLocalGet(body, 1);
+-  EmitI32Const(body, 0x3fffffff);
+-  body.push_back(0x71);
++  EmitMem1ViewOffset(body);
+   body.push_back(0x22);
+   EmitU32Leb(body, 3);
+   EmitI32Const(body, layout.ram_size_real - sizeof(u8));
+@@ -3845,8 +3921,7 @@ void EmitReadU8MaybeDirect(std::vector<u8>& body, const WasmStateLayout& layout)
+ void EmitReadU16MaybeDirect(std::vector<u8>& body, const WasmStateLayout& layout)
+ {
+   EmitLocalGet(body, 1);
+-  EmitI32Const(body, 0x3fffffff);
+-  body.push_back(0x71);
++  EmitMem1ViewOffset(body);
+   body.push_back(0x22);
+   EmitU32Leb(body, 3);
+   EmitI32Const(body, layout.ram_size_real - sizeof(u16));
+@@ -3886,8 +3961,7 @@ void EmitReadS16MaybeDirect(std::vector<u8>& body, const WasmStateLayout& layout
+ void EmitWriteU32MaybeDirect(std::vector<u8>& body, const WasmStateLayout& layout)
+ {
+   EmitLocalGet(body, 1);
+-  EmitI32Const(body, 0x3fffffff);
+-  body.push_back(0x71);
++  EmitMem1ViewOffset(body);
+   body.push_back(0x22);
+   EmitU32Leb(body, 3);
+   EmitI32Const(body, layout.ram_size_real - sizeof(u32));
+@@ -3915,8 +3989,7 @@ void EmitWriteU32MaybeDirect(std::vector<u8>& body, const WasmStateLayout& layou
+ void EmitWriteU8MaybeDirect(std::vector<u8>& body, const WasmStateLayout& layout)
+ {
+   EmitLocalGet(body, 1);
+-  EmitI32Const(body, 0x3fffffff);
+-  body.push_back(0x71);
++  EmitMem1ViewOffset(body);
+   body.push_back(0x22);
+   EmitU32Leb(body, 3);
+   EmitI32Const(body, layout.ram_size_real - sizeof(u8));
+@@ -3942,8 +4015,7 @@ void EmitWriteU8MaybeDirect(std::vector<u8>& body, const WasmStateLayout& layout
+ void EmitWriteU16MaybeDirect(std::vector<u8>& body, const WasmStateLayout& layout)
+ {
+   EmitLocalGet(body, 1);
+-  EmitI32Const(body, 0x3fffffff);
+-  body.push_back(0x71);
++  EmitMem1ViewOffset(body);
+   body.push_back(0x22);
+   EmitU32Leb(body, 3);
+   EmitI32Const(body, layout.ram_size_real - sizeof(u16));
+@@ -3980,18 +4052,16 @@ void EmitWriteU16MaybeDirect(std::vector<u8>& body, const WasmStateLayout& layou
+ void EmitFmhRangeCheck(std::vector<u8>& body, const WasmStateLayout& layout, int base, s32 omin,
+                        s32 omax, u32 maxsize)
+ {
+-  // lo = (gpr[base] + omin) & 0x3FFFFFFF  -> leave on stack
++  // lo = MEM1 view offset of gpr[base] + omin  -> leave on stack
+   EmitGprOrZero(body, layout, static_cast<u32>(base));
+   EmitI32Const(body, static_cast<u32>(omin));
+   body.push_back(0x6a);  // i32.add
+-  EmitI32Const(body, 0x3fffffff);
+-  body.push_back(0x71);  // i32.and
+-  // hi = (gpr[base] + omax) & 0x3FFFFFFF  -> local 3
++  EmitMem1ViewOffset(body);
++  // hi = MEM1 view offset of gpr[base] + omax  -> local 3
+   EmitGprOrZero(body, layout, static_cast<u32>(base));
+   EmitI32Const(body, static_cast<u32>(omax));
+   body.push_back(0x6a);  // i32.add
+-  EmitI32Const(body, 0x3fffffff);
+-  body.push_back(0x71);  // i32.and
++  EmitMem1ViewOffset(body);
+   EmitLocalSet(body, 3);
+   // (lo <= hi)
+   EmitLocalGet(body, 3);
+@@ -4221,88 +4291,687 @@ void EmitFctiwzImportCall(std::vector<u8>& body, const PPCAnalyst::CodeOp& op, u
+   EmitImportedHaltCheck(body);
+ }
+ 
+-void EmitFctiwzFast(std::vector<u8>& body, const WasmStateLayout& layout,
+-                    const PPCAnalyst::CodeOp& op, u32 downcount)
++// ---- Exact floating-point fast paths ----------------------------------------
++// The direct tier computes the common case in WASM and must leave exactly the
++// state the interpreter leaves. Results that are zero or normal (single range
++// for single-precision ops) are computed bit-exactly here, FPSCR included
++// (FPRF, and FI/FR/XX where the interpreter sets them). Anything else (NaN,
++// infinity, denormal, a denormal frC, FE0/FE1 set) re-executes the
++// instruction through the interpreter helper before anything is written, so
++// NaN propagation, VE/ZE suppression, NI flushing and sticky exception bits
++// stay the interpreter's. FMA-family ops always take the helper: the
++// interpreter rounds them once (std::fma plus its single-precision tie fix),
++// which plain WASM arithmetic cannot reproduce.
++
++// Three f64 scratch locals appended after the GPR locals (and the fastmem
++// flag local when that plan is active).
++u32 WasmFpScratchLocal(u32 n)
+ {
+-  const UGeckoInstruction inst = op.inst;
+-  if (inst.Rc)
++  return (s_fmh_plan.active ? WASM_FMH_FLAG_LOCAL + 1 : WASM_FMH_FLAG_LOCAL) + n;
++}
++
++void EmitI64Const(std::vector<u8>& body, u64 value)
++{
++  body.push_back(0x42);
++  s64 v = static_cast<s64>(value);
++  bool more = true;
++  while (more)
+   {
+-    EmitFctiwzImportCall(body, op, downcount);
+-    return;
++    u8 byte = v & 0x7f;
++    v >>= 7;
++    const bool sign_bit = (byte & 0x40) != 0;
++    if ((v == 0 && !sign_bit) || (v == -1 && sign_bit))
++      more = false;
++    else
++      byte |= 0x80;
++    body.push_back(byte);
+   }
++}
+ 
++// MSR.FP set and FE0 = FE1 = 0: only then can the fast paths skip the
++// interpreter's floating-point exception check.
++void EmitFpFastPathMsrCondition(std::vector<u8>& body, const WasmStateLayout& layout)
++{
+   EmitStateLoadU32(body, layout.msr_offset);
++  EmitI32Const(body, (1u << 13) | (1u << 11) | (1u << 8));
++  body.push_back(0x71);  // i32.and
+   EmitI32Const(body, 1u << 13);
++  body.push_back(0x46);  // i32.eq
++}
++
++// [f64] -> [i32]: 1 when the value is +-0 or a normal double.
++void EmitIsZeroOrNormalDouble(std::vector<u8>& body)
++{
++  body.push_back(0xbd);  // i64.reinterpret_f64
++  EmitI64Const(body, 1);
++  body.push_back(0x86);  // i64.shl (drop the sign)
++  body.push_back(0x22);  // local.tee
++  EmitU32Leb(body, 5);
++  body.push_back(0x50);  // i64.eqz
++  EmitLocalGet(body, 5);
++  EmitI64Const(body, u64{1} << 53);
++  body.push_back(0x7d);  // i64.sub
++  EmitI64Const(body, 0xffe0000000000000ull - (u64{1} << 53));
++  body.push_back(0x54);  // i64.lt_u
++  body.push_back(0x72);  // i32.or
++}
++
++// [f64 d] -> [i32]: 1 when d is +-0, or rounds to a normal single without
++// having been below the smallest normal single (the NI flush quirk) and
++// without overflowing.
++void EmitIsZeroOrNormalSingleResult(std::vector<u8>& body)
++{
++  body.push_back(0xbd);
++  EmitI64Const(body, 1);
++  body.push_back(0x86);
++  body.push_back(0x22);
++  EmitU32Leb(body, 5);
++  body.push_back(0x50);
++  EmitLocalGet(body, 5);
++  EmitI64Const(body, 0x3810000000000000ull << 1);
++  body.push_back(0x7d);
++  // Below the halfway point between FLT_MAX and 2^128, which rounds to inf.
++  EmitI64Const(body, (0x47effffff0000000ull << 1) - (0x3810000000000000ull << 1));
++  body.push_back(0x54);
++  body.push_back(0x72);
++}
++
++// [f64] -> [i32]: 1 unless the value is a (nonzero) denormal double.
++void EmitIsNotDenormalDouble(std::vector<u8>& body)
++{
++  body.push_back(0xbd);
++  EmitI64Const(body, 1);
++  body.push_back(0x86);
++  EmitI64Const(body, 1);
++  body.push_back(0x7d);  // t - 1: zero wraps high, denormals land below 2^53 - 1
++  EmitI64Const(body, (u64{1} << 53) - 1);
++  body.push_back(0x5a);  // i64.ge_u
++}
++
++// [f64] -> [f64]: Force25Bit for a value that is not a denormal (the caller
++// sends denormal frC to the helper).
++void EmitForce25BitNonDenormal(std::vector<u8>& body)
++{
++  body.push_back(0xbd);
++  body.push_back(0x22);
++  EmitU32Leb(body, 4);
++  EmitI64Const(body, 0xfffffffff8000000ull);
++  body.push_back(0x83);  // i64.and
++  EmitLocalGet(body, 4);
++  EmitI64Const(body, 0x8000000);
++  body.push_back(0x83);
++  body.push_back(0x7c);  // i64.add
++  body.push_back(0xbf);  // f64.reinterpret_i64
++}
++
++// Rewrites FPSCR.FPRF (and clears `clear_extra`) from the zero-or-normal
++// value in f64 local `value_local`; ClassifyDouble and ClassifyFloat agree on
++// such values.
++void EmitSetFprfZeroOrNormal(std::vector<u8>& body, const WasmStateLayout& layout,
++                             u32 value_local, u32 clear_extra = 0, bool wanted = true)
++{
++  if (!wanted)
++  {
++    // The analyzer proved a later op of this block rewrites FPRF before
++    // anything reads it or the block can exit. That op always does so unless
++    // VE or ZE is set (the interpreter then keeps FPRF on an invalid or
++    // divide-by-zero result), and only mtfsf/mtfsb, which read FPRF and so
++    // keep this op wanted, can change those bits in between.
++    if (clear_extra)
++    {
++      EmitStateStoreU32Prefix(body);
++      EmitStateLoadU32(body, layout.fpscr_offset);
++      EmitI32Const(body, ~clear_extra);
++      body.push_back(0x71);
++      EmitStateStoreU32Suffix(body, layout.fpscr_offset);
++    }
++    EmitStateLoadU32(body, layout.fpscr_offset);
++    EmitI32Const(body, 0x80u | 0x10u);  // VE | ZE
++    body.push_back(0x71);
++    body.push_back(0x04);
++    body.push_back(0x40);
++    EmitSetFprfZeroOrNormal(body, layout, value_local, 0, true);
++    body.push_back(0x0b);
++    return;
++  }
++  EmitStateStoreU32Prefix(body);
++  EmitStateLoadU32(body, layout.fpscr_offset);
++  EmitI32Const(body, ~(static_cast<u32>(FPRF_MASK) | clear_extra));
++  body.push_back(0x71);
++  // zero: sign ? NZ : PZ
++  EmitI32Const(body, 0x12u << FPRF_SHIFT);
++  EmitI32Const(body, 0x02u << FPRF_SHIFT);
++  EmitLocalGet(body, value_local);
++  body.push_back(0xbd);
++  EmitI64Const(body, 63);
++  body.push_back(0x88);  // i64.shr_u
++  body.push_back(0xa7);  // i32.wrap_i64
++  body.push_back(0x1b);  // select
++  // normal: sign ? NN : PN
++  EmitI32Const(body, 0x08u << FPRF_SHIFT);
++  EmitI32Const(body, 0x04u << FPRF_SHIFT);
++  EmitLocalGet(body, value_local);
++  body.push_back(0xbd);
++  EmitI64Const(body, 63);
++  body.push_back(0x88);
++  body.push_back(0xa7);
++  body.push_back(0x1b);
++  EmitLocalGet(body, value_local);
++  EmitF64ConstBits(body, 0);
++  body.push_back(0x61);  // f64.eq
++  body.push_back(0x1b);
++  body.push_back(0x72);  // i32.or
++  EmitStateStoreU32Suffix(body, layout.fpscr_offset);
++}
++
++// SetFPException(FPSCR_XX) as the interpreter's SetFI(1) does it: FX when XX
++// was clear, XX, then the VX and FEX summaries. FE0/FE1 are known clear, so
++// CheckFPExceptions has nothing to raise.
++void EmitSetFpExceptionXX(std::vector<u8>& body, const WasmStateLayout& layout)
++{
++  EmitStateLoadU32(body, layout.fpscr_offset);
++  EmitLocalSet(body, 2);
++  // FX |= !(fpscr & XX)
++  EmitLocalGet(body, 2);
++  EmitI32Const(body, FPSCR_XX);
++  EmitLocalGet(body, 2);
++  EmitI32Const(body, FPSCR_XX);
+   body.push_back(0x71);
++  body.push_back(0x45);  // i32.eqz
++  EmitI32Const(body, 31);
++  body.push_back(0x74);  // i32.shl -> FX
++  body.push_back(0x72);
++  body.push_back(0x72);
++  EmitI32Const(body, ~static_cast<u32>(FPSCR_VX | FPSCR_FEX));
++  body.push_back(0x71);
++  EmitLocalSet(body, 2);
++  // VX = (fpscr & VX_ANY) != 0
++  EmitLocalGet(body, 2);
++  EmitLocalGet(body, 2);
++  EmitI32Const(body, FPSCR_VX_ANY);
++  body.push_back(0x71);
++  EmitI32Const(body, 0);
++  body.push_back(0x47);  // i32.ne
++  EmitI32Const(body, 29);
++  body.push_back(0x74);
++  body.push_back(0x72);
++  EmitLocalSet(body, 2);
++  // FEX = ((fpscr >> 22) & (fpscr & ANY_E)) != 0
++  EmitStateStoreU32Prefix(body);
++  EmitLocalGet(body, 2);
++  EmitLocalGet(body, 2);
++  EmitI32Const(body, 22);
++  body.push_back(0x76);
++  EmitLocalGet(body, 2);
++  EmitI32Const(body, FPSCR_ANY_E);
++  body.push_back(0x71);
++  body.push_back(0x71);
++  EmitI32Const(body, 0);
++  body.push_back(0x47);
++  EmitI32Const(body, 30);
++  body.push_back(0x74);
++  body.push_back(0x72);
++  EmitStateStoreU32Suffix(body, layout.fpscr_offset);
++}
++
++// [i32 single bits in local `bits_local`] -> [f64]: ConvertToDouble, bit-exact
++// (a NaN keeps its payload and signalling bit; f64.promote would quiet it).
++void EmitConvertToDouble(std::vector<u8>& body, u32 bits_local)
++{
++  EmitLocalGet(body, bits_local);
++  EmitI32Const(body, 0x7fffffff);
++  body.push_back(0x71);
++  EmitI32Const(body, 0x7f800000);
++  body.push_back(0x4b);  // i32.gt_u: NaN
++  body.push_back(0x04);
++  body.push_back(0x7c);  // if (result f64)
++  EmitLocalGet(body, bits_local);
++  body.push_back(0xad);  // i64.extend_i32_u
++  body.push_back(0x22);
++  EmitU32Leb(body, 4);
++  EmitI64Const(body, 0xc0000000);
++  body.push_back(0x83);
++  EmitI64Const(body, 32);
++  body.push_back(0x86);
++  EmitI64Const(body, u64{7} << 59);
++  body.push_back(0x84);  // i64.or
++  EmitLocalGet(body, 4);
++  EmitI64Const(body, 0x3fffffff);
++  body.push_back(0x83);
++  EmitI64Const(body, 29);
++  body.push_back(0x86);
++  body.push_back(0x84);
++  body.push_back(0xbf);
++  body.push_back(0x05);
++  EmitLocalGet(body, bits_local);
++  body.push_back(0xbe);  // f32.reinterpret_i32
++  body.push_back(0xbb);  // f64.promote_f32 (exact for zero, normal, denormal, inf)
++  body.push_back(0x0b);
++}
++
++// [f64] -> [i32]: ConvertToSingle (stfs) or ConvertToSingleFTZ (psq_st),
++// bit-exact: truncating, with the hardware's denormal shift.
++void EmitConvertToSingle(std::vector<u8>& body, bool ftz)
++{
++  body.push_back(0xbd);
++  EmitLocalSet(body, 4);
++  // exp = (x >> 52) & 0x7ff
++  EmitLocalGet(body, 4);
++  EmitI64Const(body, 52);
++  body.push_back(0x88);
++  body.push_back(0xa7);
++  EmitI32Const(body, 0x7ff);
++  body.push_back(0x71);
++  EmitLocalSet(body, 3);
++  const auto emit_common = [&] {
++    // (x >> 32) & 0xc0000000 | (x >> 29) & 0x3fffffff
++    EmitLocalGet(body, 4);
++    EmitI64Const(body, 32);
++    body.push_back(0x88);
++    EmitI64Const(body, 0xc0000000);
++    body.push_back(0x83);
++    EmitLocalGet(body, 4);
++    EmitI64Const(body, 29);
++    body.push_back(0x88);
++    EmitI64Const(body, 0x3fffffff);
++    body.push_back(0x83);
++    body.push_back(0x84);
++    body.push_back(0xa7);
++  };
++  const auto emit_sign = [&] {
++    EmitLocalGet(body, 4);
++    EmitI64Const(body, 32);
++    body.push_back(0x88);
++    body.push_back(0xa7);
++    EmitI32Const(body, 0x80000000);
++    body.push_back(0x71);
++  };
++  if (ftz)
++  {
++    // exp > 896 keeps the bits; anything smaller (zero included, where both
++    // give the sign alone) flushes to a signed zero.
++    EmitLocalGet(body, 3);
++    EmitI32Const(body, 896);
++    body.push_back(0x4b);  // i32.gt_u
++    body.push_back(0x04);
++    body.push_back(0x7f);  // if (result i32)
++    emit_common();
++    body.push_back(0x05);
++    emit_sign();
++    body.push_back(0x0b);
++    return;
++  }
++  // 874 <= exp <= 896: (0x80000000 | frac >> 21) >> (905 - exp) | sign
++  EmitLocalGet(body, 3);
++  EmitI32Const(body, 874);
++  body.push_back(0x6b);
++  EmitI32Const(body, 23);
++  body.push_back(0x49);  // i32.lt_u
++  body.push_back(0x04);
++  body.push_back(0x7f);  // if (result i32)
++  EmitI32Const(body, 0x80000000);
++  EmitLocalGet(body, 4);
++  EmitI64Const(body, 0x000fffffffffffffull);
++  body.push_back(0x83);
++  EmitI64Const(body, 21);
++  body.push_back(0x88);
++  body.push_back(0xa7);
++  body.push_back(0x72);
++  EmitI32Const(body, 905);
++  EmitLocalGet(body, 3);
++  body.push_back(0x6b);
++  body.push_back(0x76);  // i32.shr_u
++  emit_sign();
++  body.push_back(0x72);
++  body.push_back(0x05);
++  emit_common();
++  body.push_back(0x0b);
++}
++
++enum class FpArithKind
++{
++  Add,
++  Sub,
++  Mul,
++  Div,
++  MulAdd,  // a * c + b
++  MulSub,  // a * c - b
++};
++
++// Computes one lane into f64 local `dst` (rounded to single when `single`,
++// then negated when `negate`) and ANDs its fast-path condition into i32
++// local 3. `unrounded`, when given, receives the value before rounding.
++void EmitFpArithLane(std::vector<u8>& body, const WasmStateLayout& layout, UGeckoInstruction inst,
++                     FpArithKind kind, bool single, u32 lane, u32 c_lane, u32 dst,
++                     bool negate = false, u32 unrounded = UINT32_MAX)
++{
++  EmitStateLoadF64(body, PsOffset(layout, inst.FA, lane));
++  if (kind == FpArithKind::MulAdd || kind == FpArithKind::MulSub)
++  {
++    // The interpreter's own NI_madd_msub (frC rounding and the single tie fix
++    // included) through an import: plain WASM would round twice.
++    EmitStateLoadF64(body, PsOffset(layout, inst.FC, c_lane));
++    EmitStateLoadF64(body, PsOffset(layout, inst.FB, lane));
++    EmitI32Const(body, (kind == FpArithKind::MulSub ? 1u : 0u) | (single ? 2u : 0u));
++    body.push_back(0x10);
++    EmitU32Leb(body, WASM_IMPORT_FMA_INDEX);
++  }
++  else if (kind == FpArithKind::Mul)
++  {
++    EmitStateLoadF64(body, PsOffset(layout, inst.FC, c_lane));
++    if (single)
++    {
++      // Single-precision multiplies round frC to 25 bits first (Force25Bit).
++      body.push_back(0x22);  // local.tee
++      EmitU32Leb(body, dst);
++      EmitIsNotDenormalDouble(body);
++      EmitLocalGet(body, 3);
++      body.push_back(0x71);
++      EmitLocalSet(body, 3);
++      EmitLocalGet(body, dst);
++      EmitForce25BitNonDenormal(body);
++    }
++    body.push_back(0xa2);  // f64.mul
++  }
++  else
++  {
++    EmitStateLoadF64(body, PsOffset(layout, inst.FB, lane));
++    body.push_back(kind == FpArithKind::Add ? 0xa0 : kind == FpArithKind::Sub ? 0xa1 : 0xa3);
++  }
++  body.push_back(0x22);
++  EmitU32Leb(body, dst);
++  if (single)
++    EmitIsZeroOrNormalSingleResult(body);
++  else
++    EmitIsZeroOrNormalDouble(body);
++  EmitLocalGet(body, 3);
++  body.push_back(0x71);
++  EmitLocalSet(body, 3);
++  if (unrounded != UINT32_MAX)
++  {
++    EmitLocalGet(body, dst);
++    EmitLocalSet(body, unrounded);
++  }
++  if (single || negate)
++  {
++    EmitLocalGet(body, dst);
++    if (single)
++    {
++      body.push_back(0xb6);  // f32.demote_f64
++      body.push_back(0xbb);  // f64.promote_f32
++    }
++    if (negate)
++      body.push_back(0x9a);  // f64.neg (the result is not NaN on this path)
++    EmitLocalSet(body, dst);
++  }
++}
++
++void EmitStoreFprLaneFromLocal(std::vector<u8>& body, const WasmStateLayout& layout, u32 fd,
++                               u32 lane, u32 local)
++{
++  EmitStateStoreU32Prefix(body);
++  EmitLocalGet(body, local);
++  EmitStateStoreF64Suffix(body, PsOffset(layout, fd, lane));
++}
++
++// fadd/fsub/fmul/fdiv (63), their single forms (59), ps_add/ps_sub/ps_mul/
++// ps_muls0/ps_muls1 (4). FMA-family subops go to the interpreter helper.
++void EmitExactFpArithmetic(std::vector<u8>& body, const WasmStateLayout& layout,
++                           const PPCAnalyst::CodeOp& op, u32 downcount)
++{
++  const UGeckoInstruction inst = op.inst;
++  const bool paired = inst.OPCD == 4;
++  const bool single = inst.OPCD != 63;
++  FpArithKind kind;
++  u32 c_lane0 = 0, c_lane1 = 1;
++  bool negate = false;
++  switch (inst.SUBOP5)
++  {
++  case 29:  // fmadd(s), ps_madd
++    kind = FpArithKind::MulAdd;
++    break;
++  case 28:  // fmsub(s), ps_msub
++    kind = FpArithKind::MulSub;
++    break;
++  case 31:  // fnmadd(s), ps_nmadd
++    kind = FpArithKind::MulAdd;
++    negate = true;
++    break;
++  case 30:  // fnmsub(s), ps_nmsub
++    kind = FpArithKind::MulSub;
++    negate = true;
++    break;
++  case 14:  // ps_madds0
++  case 15:  // ps_madds1
++    if (!paired)
++    {
++      EmitFpCall(body, op, downcount);
++      return;
++    }
++    kind = FpArithKind::MulAdd;
++    c_lane0 = c_lane1 = inst.SUBOP5 - 14;
++    break;
++  case 21:
++    kind = FpArithKind::Add;
++    break;
++  case 20:
++    kind = FpArithKind::Sub;
++    break;
++  case 18:
++    kind = FpArithKind::Div;
++    break;
++  case 25:
++    kind = FpArithKind::Mul;
++    break;
++  case 12:  // ps_muls0
++  case 13:  // ps_muls1
++    kind = FpArithKind::Mul;
++    c_lane0 = c_lane1 = inst.SUBOP5 - 12;
++    break;
++  default:
++    EmitFpCall(body, op, downcount);
++    return;
++  }
++
++  EmitFpFastPathMsrCondition(body, layout);
++  body.push_back(0x04);
++  body.push_back(0x40);
++  EmitI32Const(body, 1);
++  EmitLocalSet(body, 3);
++  const u32 r0 = WasmFpScratchLocal(0), r1 = WasmFpScratchLocal(1), raw = WasmFpScratchLocal(2);
++  // fmadds alone sets FI from the rounding (FI = unrounded != result).
++  const bool fmadds_fi = inst.OPCD == 59 && inst.SUBOP5 == 29;
++  EmitFpArithLane(body, layout, inst, kind, single, 0, c_lane0, r0, negate,
++                  fmadds_fi ? raw : UINT32_MAX);
++  if (paired)
++    EmitFpArithLane(body, layout, inst, kind, single, 1, c_lane1, r1, negate);
++  EmitLocalGet(body, 3);
+   body.push_back(0x04);
+   body.push_back(0x40);
++  EmitStoreFprLaneFromLocal(body, layout, inst.FD, 0, r0);
++  if (paired)
++    EmitStoreFprLaneFromLocal(body, layout, inst.FD, 1, r1);
++  else if (single)
++    EmitStoreFprLaneFromLocal(body, layout, inst.FD, 1, r0);
++  // fmul and fmuls also clear FI/FR, fmadds sets FI and clears FR; the
++  // paired forms leave both.
++  const bool clears_fi_fr = !paired && (kind == FpArithKind::Mul || fmadds_fi);
++  EmitSetFprfZeroOrNormal(body, layout, r0, clears_fi_fr ? (0x00020000u | 0x00040000u) : 0,
++                          op.wantsFPRF);
++  if (fmadds_fi)
++  {
++    EmitStateStoreU32Prefix(body);
++    EmitStateLoadU32(body, layout.fpscr_offset);
++    EmitLocalGet(body, raw);
++    EmitLocalGet(body, r0);
++    body.push_back(0x62);  // f64.ne
++    EmitI32Const(body, 17);
++    body.push_back(0x74);
++    body.push_back(0x72);
++    EmitStateStoreU32Suffix(body, layout.fpscr_offset);
++  }
++  body.push_back(0x05);
++  EmitFpCall(body, op, downcount);
++  body.push_back(0x0b);
++  body.push_back(0x05);
++  EmitFpCall(body, op, downcount);
++  body.push_back(0x0b);
++}
+ 
++// frsp: ForceSingle, FI/FR (with SetFI's XX), FPRF, both lanes.
++void EmitExactFrsp(std::vector<u8>& body, const WasmStateLayout& layout,
++                   const PPCAnalyst::CodeOp& op, u32 downcount)
++{
++  const UGeckoInstruction inst = op.inst;
++  const u32 b = WasmFpScratchLocal(0), rounded = WasmFpScratchLocal(1);
++  EmitFpFastPathMsrCondition(body, layout);
++  body.push_back(0x04);
++  body.push_back(0x40);
+   EmitStateLoadF64(body, PsOffset(layout, inst.FB, 0));
+-  EmitLocalSet(body, 6);
++  body.push_back(0x22);
++  EmitU32Leb(body, b);
++  EmitIsZeroOrNormalSingleResult(body);
++  body.push_back(0x04);
++  body.push_back(0x40);
++  EmitLocalGet(body, b);
++  body.push_back(0xb6);
++  body.push_back(0xbb);
++  EmitLocalSet(body, rounded);
++  // FI = rounded != b
++  EmitLocalGet(body, rounded);
++  EmitLocalGet(body, b);
++  body.push_back(0x62);  // f64.ne
++  EmitLocalSet(body, 7);
++  EmitLocalGet(body, 7);
++  body.push_back(0x04);
++  body.push_back(0x40);
++  EmitSetFpExceptionXX(body, layout);
++  body.push_back(0x0b);
++  // fpscr = fpscr & ~(FI|FR) | FI << 17 | (|rounded| > |b|) << 18
++  EmitStateStoreU32Prefix(body);
++  EmitStateLoadU32(body, layout.fpscr_offset);
++  EmitI32Const(body, ~(0x00020000u | 0x00040000u));
++  body.push_back(0x71);
++  EmitLocalGet(body, 7);
++  EmitI32Const(body, 17);
++  body.push_back(0x74);
++  body.push_back(0x72);
++  EmitLocalGet(body, rounded);
++  body.push_back(0x99);  // f64.abs
++  EmitLocalGet(body, b);
++  body.push_back(0x99);
++  body.push_back(0x64);  // f64.gt
++  EmitI32Const(body, 18);
++  body.push_back(0x74);
++  body.push_back(0x72);
++  EmitStateStoreU32Suffix(body, layout.fpscr_offset);
++  EmitSetFprfZeroOrNormal(body, layout, rounded, 0, op.wantsFPRF);
++  EmitStoreFprLaneFromLocal(body, layout, inst.FD, 0, rounded);
++  EmitStoreFprLaneFromLocal(body, layout, inst.FD, 1, rounded);
++  body.push_back(0x05);
++  EmitFpCall(body, op, downcount);
++  body.push_back(0x0b);
++  body.push_back(0x05);
++  EmitFpCall(body, op, downcount);
++  body.push_back(0x0b);
++}
+ 
+-  EmitLocalGet(body, 6);
+-  EmitLocalGet(body, 6);
+-  body.push_back(0x61);
+-  EmitLocalGet(body, 6);
++// fctiwz: in-range operands inline (FI/FR/XX exactly as ConvertToInteger sets
++// them, the -0 marker bit in the high word); NaN and out-of-range operands go
++// to the helper, which owns VXCVI/VXSNAN and the VE rule.
++void EmitExactFctiwz(std::vector<u8>& body, const WasmStateLayout& layout,
++                     const PPCAnalyst::CodeOp& op, u32 downcount)
++{
++  const UGeckoInstruction inst = op.inst;
++  const u32 b = WasmFpScratchLocal(0);
++  EmitFpFastPathMsrCondition(body, layout);
++  body.push_back(0x04);
++  body.push_back(0x40);
++  EmitStateLoadF64(body, PsOffset(layout, inst.FB, 0));
++  EmitLocalSet(body, b);
++  // -2^31 <= b < 2^31 (false for NaN)
++  EmitLocalGet(body, b);
+   EmitF64ConstBits(body, std::bit_cast<u64>(-2147483648.0));
+-  body.push_back(0x66);
+-  body.push_back(0x71);
+-  EmitLocalGet(body, 6);
++  body.push_back(0x66);  // f64.ge
++  EmitLocalGet(body, b);
+   EmitF64ConstBits(body, std::bit_cast<u64>(2147483648.0));
+-  body.push_back(0x63);
++  body.push_back(0x63);  // f64.lt
+   body.push_back(0x71);
+-
+   body.push_back(0x04);
+   body.push_back(0x40);
+-  EmitLocalGet(body, 6);
++  EmitLocalGet(body, b);
+   body.push_back(0xfc);
+-  EmitU32Leb(body, 2);
+-  EmitLocalSet(body, 2);
+-
++  EmitU32Leb(body, 2);  // i32.trunc_sat_f64_s
++  EmitLocalSet(body, 7);
++  // inexact = f64(value) != b; SetFI(1) on inexact, FR stays 0 (truncation
++  // never grows the magnitude), ClearFIFR otherwise.
++  EmitLocalGet(body, 7);
++  body.push_back(0xb7);  // f64.convert_i32_s
++  EmitLocalGet(body, b);
++  body.push_back(0x62);
++  body.push_back(0x04);
++  body.push_back(0x40);
++  EmitSetFpExceptionXX(body, layout);
+   EmitStateStoreU32Prefix(body);
+-  EmitLocalGet(body, 2);
++  EmitStateLoadU32(body, layout.fpscr_offset);
++  EmitI32Const(body, ~(0x00020000u | 0x00040000u));
++  body.push_back(0x71);
++  EmitI32Const(body, 0x00020000u);
++  body.push_back(0x72);
++  EmitStateStoreU32Suffix(body, layout.fpscr_offset);
++  body.push_back(0x05);
++  EmitStateStoreU32Prefix(body);
++  EmitStateLoadU32(body, layout.fpscr_offset);
++  EmitI32Const(body, ~(0x00020000u | 0x00040000u));
++  body.push_back(0x71);
++  EmitStateStoreU32Suffix(body, layout.fpscr_offset);
++  body.push_back(0x0b);
++  // fd = 0xfff80000'value, plus bit 32 for a zero result from a negative b
++  EmitStateStoreU32Prefix(body);
++  EmitLocalGet(body, 7);
+   EmitStateStoreU32Suffix(body, PsOffset(layout, inst.FD, 0));
+-
+   EmitStateStoreU32Prefix(body);
+   EmitI32Const(body, 0xfff80000);
++  EmitLocalGet(body, 7);
++  body.push_back(0x45);  // i32.eqz
++  EmitLocalGet(body, b);
++  body.push_back(0xbd);
++  EmitI64Const(body, 63);
++  body.push_back(0x88);
++  body.push_back(0xa7);
++  body.push_back(0x71);
++  body.push_back(0x72);
+   EmitStateStoreU32Suffix(body, PsOffset(layout, inst.FD, 0) + sizeof(u32));
+-
+   body.push_back(0x05);
+   EmitFctiwzImportCall(body, op, downcount);
+   body.push_back(0x0b);
+-
+   body.push_back(0x05);
+   EmitFctiwzImportCall(body, op, downcount);
+   body.push_back(0x0b);
+ }
+ 
++void EmitFctiwzFast(std::vector<u8>& body, const WasmStateLayout& layout,
++                    const PPCAnalyst::CodeOp& op, u32 downcount)
++{
++  if (op.inst.Rc)
++  {
++    EmitFctiwzImportCall(body, op, downcount);
++    return;
++  }
++  EmitExactFctiwz(body, layout, op, downcount);
++}
++
++
+ void EmitFpuAvailableOrFallback(std::vector<u8>& body, const PPCAnalyst::CodeOp& op,
+                                 const WasmStateLayout& layout, u32 downcount);
+ 
+ void EmitFrsp(std::vector<u8>& body, const WasmStateLayout& layout, const PPCAnalyst::CodeOp& op,
+               u32 downcount)
+ {
+-  const UGeckoInstruction inst = op.inst;
+-
+-  EmitFpuAvailableOrFallback(body, op, layout, downcount);
+-  EmitStateLoadF64(body, PsOffset(layout, inst.FB, 0));
+-  body.push_back(0xb6);
+-  body.push_back(0xbb);
+-  EmitLocalSet(body, 6);
+-
+-  EmitStateStoreU32Prefix(body);
+-  EmitLocalGet(body, 6);
+-  EmitStateStoreF64Suffix(body, PsOffset(layout, inst.FD, 0));
+-
+-  EmitStateStoreU32Prefix(body);
+-  EmitLocalGet(body, 6);
+-  EmitStateStoreF64Suffix(body, PsOffset(layout, inst.FD, 1));
+-
+-  body.push_back(0x05);
+-  EmitFpCall(body, op, downcount);
+-  body.push_back(0x0b);
++  EmitExactFrsp(body, layout, op, downcount);
+ }
+ 
++
+ void EmitUnaryFpBitExact(std::vector<u8>& body, const WasmStateLayout& layout,
+                          const PPCAnalyst::CodeOp& op, u32 downcount)
+ {
+@@ -4346,7 +5015,7 @@ void EmitFloatCompareResult(std::vector<u8>& body, const WasmStateLayout& layout
+ 
+   EmitStateStoreU32Prefix(body);
+   EmitStateLoadU32(body, layout.fpscr_offset);
+-  EmitI32Const(body, ~static_cast<u32>(FPRF_MASK));
++  EmitI32Const(body, ~static_cast<u32>(FPCC_MASK));  // FPRF's C bit is kept
+   body.push_back(0x71);
+   EmitI32Const(body, compare_value << FPRF_SHIFT);
+   body.push_back(0x72);
+@@ -4464,8 +5133,8 @@ void EmitDirectLfs(std::vector<u8>& body, const WasmStateLayout& layout, UGeckoI
+     EmitLoadU32BigEndianFromL1AddressOffset(body, layout, 0);
+   else
+     EmitLoadU32BigEndianFromRamAddressOffset(body, layout, 0);
+-  body.push_back(0xbe);
+-  body.push_back(0xbb);
++  EmitLocalSet(body, 2);
++  EmitConvertToDouble(body, 2);
+   EmitLocalSet(body, 6);
+ 
+   EmitStateStoreU32Prefix(body);
+@@ -4477,12 +5146,12 @@ void EmitDirectLfs(std::vector<u8>& body, const WasmStateLayout& layout, UGeckoI
+   EmitStateStoreF64Suffix(body, PsOffset(layout, inst.FD, 1));
+ }
+ 
++
+ void EmitDirectStfs(std::vector<u8>& body, const WasmStateLayout& layout, UGeckoInstruction inst,
+                     bool l1_cache)
+ {
+   EmitStateLoadF64(body, PsOffset(layout, inst.FS, 0));
+-  body.push_back(0xb6);
+-  body.push_back(0xbc);
++  EmitConvertToSingle(body, false);
+   EmitLocalSet(body, 2);
+   if (l1_cache)
+     EmitStoreU32BigEndianToL1AddressOffset(body, layout, 0);
+@@ -4490,17 +5159,18 @@ void EmitDirectStfs(std::vector<u8>& body, const WasmStateLayout& layout, UGecko
+     EmitStoreU32BigEndianToRamAddressOffset(body, layout, 0);
+ }
+ 
++
+ void EmitDirectStfsToGatherPipe(std::vector<u8>& body, const WasmStateLayout& layout,
+                                 UGeckoInstruction inst)
+ {
+   EmitStateLoadF64(body, PsOffset(layout, inst.FS, 0));
+-  body.push_back(0xb6);
+-  body.push_back(0xbc);
++  EmitConvertToSingle(body, false);
+   EmitLocalSet(body, 2);
+   EmitStoreU32BigEndianToGatherPipe(body, layout);
+   EmitFastCheckGatherPipeIfFull(body, layout);
+ }
+ 
++
+ void EmitDirectLfdFromRam(std::vector<u8>& body, const WasmStateLayout& layout,
+                           UGeckoInstruction inst)
+ {
+@@ -4783,90 +5453,24 @@ void EmitPairedSingleMerge(std::vector<u8>& body, const WasmStateLayout& layout,
+ void EmitPairedSingleAddSub(std::vector<u8>& body, const WasmStateLayout& layout,
+                             const PPCAnalyst::CodeOp& op, u32 downcount)
+ {
+-  const UGeckoInstruction inst = op.inst;
+-  const u8 opcode = inst.SUBOP5 == 21 ? 0xa0 : 0xa1;
+-
+-  EmitFpuAvailableOrFallback(body, op, layout, downcount);
+-
+-  for (u32 lane = 0; lane < 2; ++lane)
+-  {
+-    EmitStateStoreU32Prefix(body);
+-    EmitStateLoadF64(body, PsOffset(layout, inst.FA, lane));
+-    EmitStateLoadF64(body, PsOffset(layout, inst.FB, lane));
+-    body.push_back(opcode);
+-    body.push_back(0xb6);
+-    body.push_back(0xbb);
+-    EmitStateStoreF64Suffix(body, PsOffset(layout, inst.FD, lane));
+-  }
+-
+-  body.push_back(0x05);
+-  EmitFpCall(body, op, downcount);
+-  body.push_back(0x0b);
++  EmitExactFpArithmetic(body, layout, op, downcount);
+ }
+ 
++
+ void EmitPairedSingleMulAddSub(std::vector<u8>& body, const WasmStateLayout& layout,
+                                const PPCAnalyst::CodeOp& op, u32 downcount)
+ {
+-  const UGeckoInstruction inst = op.inst;
+-  const bool multiply_only = inst.SUBOP5 == 25;
+-  const bool add = inst.SUBOP5 == 29 || inst.SUBOP5 == 31;
+-  const bool negate = inst.SUBOP5 == 30 || inst.SUBOP5 == 31;
+-
+-  EmitFpuAvailableOrFallback(body, op, layout, downcount);
+-
+-  for (u32 lane = 0; lane < 2; ++lane)
+-  {
+-    EmitStateStoreU32Prefix(body);
+-    EmitStateLoadF64(body, PsOffset(layout, inst.FA, lane));
+-    EmitStateLoadF64(body, PsOffset(layout, inst.FC, lane));
+-    body.push_back(0xa2);
+-    if (!multiply_only)
+-    {
+-      EmitStateLoadF64(body, PsOffset(layout, inst.FB, lane));
+-      body.push_back(add ? 0xa0 : 0xa1);
+-    }
+-    body.push_back(0xb6);
+-    body.push_back(0xbb);
+-    if (negate)
+-      body.push_back(0x9a);
+-    EmitStateStoreF64Suffix(body, PsOffset(layout, inst.FD, lane));
+-  }
+-
+-  body.push_back(0x05);
+-  EmitFpCall(body, op, downcount);
+-  body.push_back(0x0b);
++  EmitExactFpArithmetic(body, layout, op, downcount);
+ }
+ 
++
+ void EmitPairedSingleScalarMulAdd(std::vector<u8>& body, const WasmStateLayout& layout,
+                                   const PPCAnalyst::CodeOp& op, u32 downcount)
+ {
+-  const UGeckoInstruction inst = op.inst;
+-  const u32 scalar_lane = (inst.SUBOP5 == 13 || inst.SUBOP5 == 15) ? 1 : 0;
+-  const bool add = inst.SUBOP5 == 14 || inst.SUBOP5 == 15;
+-
+-  EmitFpuAvailableOrFallback(body, op, layout, downcount);
+-
+-  for (u32 lane = 0; lane < 2; ++lane)
+-  {
+-    EmitStateStoreU32Prefix(body);
+-    EmitStateLoadF64(body, PsOffset(layout, inst.FA, lane));
+-    EmitStateLoadF64(body, PsOffset(layout, inst.FC, scalar_lane));
+-    body.push_back(0xa2);
+-    if (add)
+-    {
+-      EmitStateLoadF64(body, PsOffset(layout, inst.FB, lane));
+-      body.push_back(0xa0);
+-    }
+-    body.push_back(0xb6);
+-    body.push_back(0xbb);
+-    EmitStateStoreF64Suffix(body, PsOffset(layout, inst.FD, lane));
+-  }
+-
+-  body.push_back(0x05);
+-  EmitFpCall(body, op, downcount);
+-  body.push_back(0x0b);
++  EmitExactFpArithmetic(body, layout, op, downcount);
+ }
+ 
++
+ bool IsPairedSingleMergeSubop(u32 subop10)
+ {
+   return subop10 == 528 || subop10 == 560 || subop10 == 592 || subop10 == 624;
+@@ -4894,119 +5498,26 @@ bool IsDoublePrecisionArithmeticSubop(u32 subop5)
+ void EmitSinglePrecisionArithmetic(std::vector<u8>& body, const WasmStateLayout& layout,
+                                    const PPCAnalyst::CodeOp& op, u32 downcount)
+ {
+-  const UGeckoInstruction inst = op.inst;
+-  const bool divide = inst.SUBOP5 == 18;
+-  const bool multiply_only = inst.SUBOP5 == 25;
+-  const bool add_or_madd = inst.SUBOP5 == 21 || inst.SUBOP5 == 29 || inst.SUBOP5 == 31;
+-  const bool negative = inst.SUBOP5 == 30 || inst.SUBOP5 == 31;
+-
+-  EmitFpuAvailableOrFallback(body, op, layout, downcount);
+-
+-  EmitStateLoadF64(body, PsOffset(layout, inst.FA, 0));
+-  if (divide)
+-  {
+-    EmitStateLoadF64(body, PsOffset(layout, inst.FB, 0));
+-    body.push_back(0xa3);
+-  }
+-  else
+-  {
+-    if (multiply_only || inst.SUBOP5 >= 28)
+-    {
+-      EmitStateLoadF64(body, PsOffset(layout, inst.FC, 0));
+-      body.push_back(0xa2);
+-    }
+-    if (!multiply_only)
+-    {
+-      EmitStateLoadF64(body, PsOffset(layout, inst.FB, 0));
+-      body.push_back(add_or_madd ? 0xa0 : 0xa1);
+-    }
+-  }
+-  body.push_back(0xb6);
+-  body.push_back(0xbb);
+-  if (negative)
+-    body.push_back(0x9a);
+-  EmitLocalSet(body, 6);
+-
+-  EmitStateStoreU32Prefix(body);
+-  EmitLocalGet(body, 6);
+-  EmitStateStoreF64Suffix(body, PsOffset(layout, inst.FD, 0));
+-
+-  EmitStateStoreU32Prefix(body);
+-  EmitLocalGet(body, 6);
+-  EmitStateStoreF64Suffix(body, PsOffset(layout, inst.FD, 1));
+-
+-  body.push_back(0x05);
+-  EmitFpCall(body, op, downcount);
+-  body.push_back(0x0b);
++  EmitExactFpArithmetic(body, layout, op, downcount);
+ }
+ 
++
+ void EmitDoublePrecisionArithmetic(std::vector<u8>& body, const WasmStateLayout& layout,
+                                    const PPCAnalyst::CodeOp& op, u32 downcount)
+ {
+-  const UGeckoInstruction inst = op.inst;
+-  const bool divide = inst.SUBOP5 == 18;
+-  const bool multiply_only = inst.SUBOP5 == 25;
+-  const bool add_or_madd = inst.SUBOP5 == 21 || inst.SUBOP5 == 29 || inst.SUBOP5 == 31;
+-  const bool negative = inst.SUBOP5 == 30 || inst.SUBOP5 == 31;
+-
+-  EmitFpuAvailableOrFallback(body, op, layout, downcount);
+-
+-  EmitStateLoadF64(body, PsOffset(layout, inst.FA, 0));
+-  if (divide)
+-  {
+-    EmitStateLoadF64(body, PsOffset(layout, inst.FB, 0));
+-    body.push_back(0xa3);
+-  }
+-  else if (multiply_only || inst.SUBOP5 >= 28)
+-  {
+-    EmitStateLoadF64(body, PsOffset(layout, inst.FC, 0));
+-    body.push_back(0xa2);
+-    if (!multiply_only)
+-    {
+-      EmitStateLoadF64(body, PsOffset(layout, inst.FB, 0));
+-      body.push_back(add_or_madd ? 0xa0 : 0xa1);
+-    }
+-  }
+-  else
+-  {
+-    EmitStateLoadF64(body, PsOffset(layout, inst.FB, 0));
+-    body.push_back(add_or_madd ? 0xa0 : 0xa1);
+-  }
+-  if (negative)
+-    body.push_back(0x9a);
+-  EmitLocalSet(body, 6);
+-
+-  EmitStateStoreU32Prefix(body);
+-  EmitLocalGet(body, 6);
+-  EmitStateStoreF64Suffix(body, PsOffset(layout, inst.FD, 0));
+-
+-  body.push_back(0x05);
+-  EmitFpCall(body, op, downcount);
+-  body.push_back(0x0b);
++  EmitExactFpArithmetic(body, layout, op, downcount);
+ }
+ 
++
+ void EmitFrsqrte(std::vector<u8>& body, const WasmStateLayout& layout,
+                  const PPCAnalyst::CodeOp& op, u32 downcount)
+ {
+-  const UGeckoInstruction inst = op.inst;
+-
+-  EmitFpuAvailableOrFallback(body, op, layout, downcount);
+-
+-  EmitF64ConstBits(body, std::bit_cast<u64>(1.0));
+-  EmitStateLoadF64(body, PsOffset(layout, inst.FB, 0));
+-  body.push_back(0x9f);  // f64.sqrt
+-  body.push_back(0xa3);  // f64.div
+-  EmitLocalSet(body, 6);
+-
+-  EmitStateStoreU32Prefix(body);
+-  EmitLocalGet(body, 6);
+-  EmitStateStoreF64Suffix(body, PsOffset(layout, inst.FD, 0));
+-
+-  body.push_back(0x05);
++  // The interpreter uses Gekko's estimate tables; 1/sqrt would be too exact.
++  (void)layout;
+   EmitFpCall(body, op, downcount);
+-  body.push_back(0x0b);
+ }
+ 
++
+ bool IsPairedQuantizedFloatMemoryCandidate(UGeckoInstruction inst)
+ {
+   switch (inst.OPCD)
+@@ -5249,33 +5760,34 @@ void EmitPsqGatherPipeFloatStoreCondition(std::vector<u8>& body, const WasmState
+ void EmitLoadPsqFloatLane(std::vector<u8>& body, const WasmStateLayout& layout, u32 fd, u32 lane,
+                           u32 byte_offset)
+ {
+-  EmitStateStoreU32Prefix(body);
+   EmitLoadU32BigEndianFromRamAddressOffset(body, layout, byte_offset);
+-  body.push_back(0xbe);
+-  body.push_back(0xbb);
++  EmitLocalSet(body, 2);
++  EmitStateStoreU32Prefix(body);
++  EmitConvertToDouble(body, 2);
+   EmitStateStoreF64Suffix(body, PsOffset(layout, fd, lane));
+ }
+ 
++
+ void EmitStorePsqFloatLane(std::vector<u8>& body, const WasmStateLayout& layout, u32 fs, u32 lane,
+                            u32 byte_offset)
+ {
+   EmitStateLoadF64(body, PsOffset(layout, fs, lane));
+-  body.push_back(0xb6);
+-  body.push_back(0xbc);
++  EmitConvertToSingle(body, true);
+   EmitLocalSet(body, 2);
+   EmitStoreU32BigEndianToRamAddressOffset(body, layout, byte_offset);
+ }
+ 
++
+ void EmitStorePsqFloatToGatherPipeLane(std::vector<u8>& body, const WasmStateLayout& layout,
+                                        u32 fs, u32 lane)
+ {
+   EmitStateLoadF64(body, PsOffset(layout, fs, lane));
+-  body.push_back(0xb6);
+-  body.push_back(0xbc);
++  EmitConvertToSingle(body, true);
+   EmitLocalSet(body, 2);
+   EmitStoreU32BigEndianToGatherPipe(body, layout);
+ }
+ 
++
+ void EmitLoadPsqS16Scale0Lane(std::vector<u8>& body, const WasmStateLayout& layout, u32 fd,
+                               u32 lane, u32 byte_offset)
+ {
+@@ -5896,9 +6408,16 @@ bool EmitWasmSupportedIntegerInstruction(std::vector<u8>& body, const WasmStateL
+     }
+     if (inst.SUBOP10 == 150)
+       return true;
++    if (inst.SUBOP10 == 0)
++    {
++      // mcrf copies a whole field. It used to fall into EmitCrLogical, whose
++      // operand-less default case left both source bits on the stack (an
++      // invalid module: "expected 1 elements on the stack for fallthru").
++      EmitMcrf(body, layout, inst);
++      return true;
++    }
+     switch (inst.SUBOP10)
+     {
+-    case 0:
+     case 33:
+     case 129:
+     case 193:
+@@ -6874,13 +7393,11 @@ bool EmitWasmSupportedIntegerInstruction(std::vector<u8>& body, const WasmStateL
+     }
+     if (inst.SUBOP10 == 824)
+     {
++      // XER.CA is computed from rS before rA is written: rA may be rS.
+       EmitStateLoadU32(body, GprOffset(layout, inst.RS));
+       EmitI32Const(body, inst.SH);
+       body.push_back(0x75);
+       EmitLocalSet(body, 3);
+-      EmitStateStoreU32Prefix(body);
+-      EmitLocalGet(body, 3);
+-      EmitStateStoreU32Suffix(body, GprOffset(layout, inst.RA));
+ 
+       EmitStateStoreU32Prefix(body);
+       if (inst.SH == 0)
+@@ -6898,6 +7415,9 @@ bool EmitWasmSupportedIntegerInstruction(std::vector<u8>& body, const WasmStateL
+         body.push_back(0x47);
+       }
+       EmitStateStoreU8Suffix(body, layout.xer_ca_offset);
++      EmitStateStoreU32Prefix(body);
++      EmitLocalGet(body, 3);
++      EmitStateStoreU32Suffix(body, GprOffset(layout, inst.RA));
+       if (inst.Rc)
+         EmitUpdateCr0FromLocal(body, layout, 3);
+       return true;
+@@ -7457,15 +7977,16 @@ std::vector<u8> BuildWasmCachedInterpreterBlock(std::span<const PPCAnalyst::Code
+   std::vector<u8> bytes = {0x00, 0x61, 0x73, 0x6d, 0x01, 0x00, 0x00, 0x00};
+ 
+   std::vector<u8> types;
+-  types.push_back(0x04);
++  types.push_back(0x05);
+   types.insert(types.end(), {0x60, 0x01, 0x7f, 0x01, 0x7f});
+   types.insert(types.end(), {0x60, 0x02, 0x7f, 0x7f, 0x01, 0x7f});
+   types.insert(types.end(), {0x60, 0x03, 0x7f, 0x7f, 0x7f, 0x00});
+   types.insert(types.end(), {0x60, 0x05, 0x7f, 0x7f, 0x7f, 0x7f, 0x7f, 0x01, 0x7f});
++  types.insert(types.end(), {0x60, 0x04, 0x7c, 0x7c, 0x7c, 0x7f, 0x01, 0x7c});  // fma
+   EmitSection(bytes, 1, types);
+ 
+   std::vector<u8> imports;
+-  imports.push_back(0x14);
++  imports.push_back(0x15);
+   EmitEnvFunctionImport(imports, "read_u32", 1);
+   EmitEnvFunctionImport(imports, "write_u32", 2);
+   EmitEnvFunctionImport(imports, "read_u8", 1);
+@@ -7485,6 +8006,7 @@ std::vector<u8> BuildWasmCachedInterpreterBlock(std::span<const PPCAnalyst::Code
+   EmitEnvFunctionImport(imports, "fast_melee_input_status_call", 1);
+   EmitEnvFunctionImport(imports, "fast_melee_status_call", 3);
+   EmitEnvFunctionImport(imports, "fast_melee_service_poll_call", 3);
++  EmitEnvFunctionImport(imports, "fma", 4);
+   EmitName(imports, "env");
+   EmitName(imports, "memory");
+   imports.push_back(0x02);
+@@ -7508,7 +8030,7 @@ std::vector<u8> BuildWasmCachedInterpreterBlock(std::span<const PPCAnalyst::Code
+   exports.push_back(0x01);
+   EmitName(exports, "f");
+   exports.push_back(0x00);
+-  EmitU32Leb(exports, WASM_IMPORT_FAST_MELEE_SERVICE_POLL_CALL_INDEX + 1);
++  EmitU32Leb(exports, WASM_IMPORT_FMA_INDEX + 1);
+   EmitSection(bytes, 7, exports);
+ 
+   // §28by — `0x01, 0x7f` group adds a 4th i32 local at index 7 (regalloc
+@@ -7520,9 +8042,11 @@ std::vector<u8> BuildWasmCachedInterpreterBlock(std::span<const PPCAnalyst::Code
+   // group `0x01, 0x7f` (one i32 at index WASM_FMH_FLAG_LOCAL=40, the per-group
+   // range-check flag) and bump the leading group count 5 → 6. When the plan is
+   // inactive the locals section is byte-identical to today (no extra local).
++  // A last group of three f64 locals follows: WasmFpScratchLocal(0..2).
+   std::vector<u8> body = s_fmh_plan.active
+-      ? std::vector<u8>{0x06, 0x03, 0x7f, 0x02, 0x7e, 0x01, 0x7c, 0x01, 0x7f, 0x20, 0x7f, 0x01, 0x7f}
+-      : std::vector<u8>{0x05, 0x03, 0x7f, 0x02, 0x7e, 0x01, 0x7c, 0x01, 0x7f, 0x20, 0x7f};
++      ? std::vector<u8>{0x07, 0x03, 0x7f, 0x02, 0x7e, 0x01, 0x7c, 0x01, 0x7f, 0x20, 0x7f, 0x01, 0x7f,
++                        0x03, 0x7c}
++      : std::vector<u8>{0x06, 0x03, 0x7f, 0x02, 0x7e, 0x01, 0x7c, 0x01, 0x7f, 0x20, 0x7f, 0x03, 0x7c};
+ 
+   // §28cx C1: set up the GPR register cache for this block, then eagerly load
+   // every GPR the block reads or writes into its local. Eager (not lazy) load
+@@ -7653,7 +8177,8 @@ int CompileWasmCachedInterpreterBlockForTest(const std::vector<u8>& bytes)
+       write_u32_index, read_u8_index, write_u8_index, read_u16_index, write_u16_index, lfs_index,
+       stfs_index, lfd_index, fmr_index, system_index, fp_index, fctiwz_index, interpret_index,
+       fastcheck_gpfifo_index, fast_os_interrupt_call_index, fast_melee_input_status_call_index,
+-      fast_melee_status_call_index, fast_melee_service_poll_call_index);
++      fast_melee_status_call_index, fast_melee_service_poll_call_index,
++      static_cast<int>(reinterpret_cast<std::uintptr_t>(&DolphinWeb_CachedInterpreterFma)));
+ }
+ 
+ WasmStateLayout MakeWasmBlockTestLayout(PowerPC::PowerPCState& state, u8* ram, u32 ram_size)
+@@ -9061,7 +9586,7 @@ static bool TryFastRamWordLoadStore(Core::System& system, PowerPC::PowerPCState&
+                                        u32(inst.SIMM_16));
+ 
+   u8* ram = system.GetMemory().GetRAM();
+-  const u32 offset = address & 0x3fffffff;
++  const u32 offset = Mem1ViewOffset(address);
+   const u32 ram_size = system.GetMemory().GetRamSizeReal();
+   const bool in_ram = !ppc_state.msr.LE && ram != nullptr && offset < ram_size &&
+                       ram_size - offset >= sizeof(u32);
+@@ -9138,7 +9663,7 @@ static bool TryFastRamByteHalfLoadStore(Core::System& system, PowerPC::PowerPCSt
+                                        u32(inst.SIMM_16));
+ 
+   u8* ram = system.GetMemory().GetRAM();
+-  const u32 offset = address & 0x3fffffff;
++  const u32 offset = Mem1ViewOffset(address);
+   const u32 ram_size = system.GetMemory().GetRamSizeReal();
+   const u32 bytes = (load_half || store_half) ? sizeof(u16) : sizeof(u8);
+   const bool in_ram = !ppc_state.msr.LE && ram != nullptr && offset < ram_size &&
+@@ -9210,7 +9735,7 @@ static bool TryFastRamMultiwordLoadStore(Core::System& system, PowerPC::PowerPCS
+   const u32 register_count = 32 - inst.RD;
+   const u32 bytes = register_count * sizeof(u32);
+   u8* ram = system.GetMemory().GetRAM();
+-  const u32 offset = start_address & 0x3fffffff;
++  const u32 offset = Mem1ViewOffset(start_address);
+   const u32 ram_size = system.GetMemory().GetRamSizeReal();
+   const bool in_ram = !ppc_state.msr.LE && ram != nullptr && offset < ram_size &&
+                       ram_size - offset >= bytes;
+@@ -9572,7 +10097,7 @@ static bool TryFastRamFloatLoadStore(Core::System& system, PowerPC::PowerPCState
+   }
+ 
+   u8* ram = system.GetMemory().GetRAM();
+-  const u32 offset = address & 0x3fffffff;
++  const u32 offset = Mem1ViewOffset(address);
+   const u32 ram_size = system.GetMemory().GetRamSizeReal();
+   const u32 bytes = load_double ? sizeof(u64) : sizeof(u32);
+   const bool in_ram =
+@@ -9866,7 +10391,7 @@ static bool TryFastAlignedRamOffset(const PowerPC::PowerPCState& ppc_state, cons
+   if (ppc_state.msr.LE || ram == nullptr || (address & 0b11) != 0)
+     return false;
+ 
+-  const u32 candidate = address & 0x3fffffff;
++  const u32 candidate = Mem1ViewOffset(address);
+   if (candidate >= ram_size || ram_size - candidate < bytes)
+     return false;
+ 
+@@ -11070,15 +11595,37 @@ bool CachedInterpreter::TryWriteWasmBlock(u32 nextPC)
+   const auto fast_melee_service_poll_call_index = static_cast<int>(
+       reinterpret_cast<std::uintptr_t>(&DolphinWeb_CachedInterpreterFastMeleeServicePollCall));
+   const auto cache_key = DolphinWeb_MakeWasmBlockCacheKey(bytes);
++  if (s_wasm_rejected_block_keys.contains(cache_key.data()))
++  {
++    ++s_wasm_blacklist_hit_count;
++    LogWasmBlockReject("blacklisted", nullptr, 0, js.blockStart, code_block.m_num_instructions);
++    return false;
++  }
+   const int handle = DolphinWeb_CachedInterpreterCompileWasmBlock(
+       bytes.data(), static_cast<int>(bytes.size()), cache_key.data(), read_u32_index,
+       write_u32_index, read_u8_index, write_u8_index, read_u16_index, write_u16_index, lfs_index,
+       stfs_index, lfd_index, fmr_index, system_index, fp_index, fctiwz_index, interpret_index,
+       fastcheck_gpfifo_index, fast_os_interrupt_call_index, fast_melee_input_status_call_index,
+-      fast_melee_status_call_index, fast_melee_service_poll_call_index);
++      fast_melee_status_call_index, fast_melee_service_poll_call_index,
++      static_cast<int>(reinterpret_cast<std::uintptr_t>(&DolphinWeb_CachedInterpreterFma)));
+   if (handle <= 0)
+   {
+     ++s_wasm_block_compile_fail_count;
++    s_wasm_rejected_block_keys.emplace(cache_key.data());
++    if (s_wasm_block_compile_fail_count <= 8)
++    {
++      const PPCAnalyst::CodeOp& first = ops.front();
++      const PPCAnalyst::CodeOp& last = ops.back();
++      WARN_LOG_FMT(POWERPC,
++                   "ppc-wasm-jit: engine rejected block {:#010x} ({} ops, {:#010x}..{:#010x}, "
++                   "{} bytes, {}); interpreting it",
++                   js.blockStart, ops.size(), first.address, last.address, bytes.size(),
++                   cache_key.data());
++      EM_ASM({ console.warn(UTF8ToString($0)); },
++             fmt::format("[ppc-wasm-jit] blacklisted block pc=0x{:08x} ops={} key={}",
++                         js.blockStart, ops.size(), cache_key.data())
++                 .c_str());
++    }
+     LogWasmBlockReject("compile", nullptr, 0, js.blockStart, code_block.m_num_instructions);
+     return false;
+   }
+@@ -11439,6 +11986,8 @@ extern "C" const char* GetPpcWasmHelperStats()
+       << " regalloc:" << s_wasm_regalloc_dead_store_skip_count
+       << " emitfail:" << s_wasm_block_emit_fail_count
+       << " compilefail:" << s_wasm_block_compile_fail_count
++      << " enginereject:" << s_wasm_engine_reject_count.load(std::memory_order_relaxed)
++      << " blacklisthit:" << s_wasm_blacklist_hit_count
+       << " pre:" << average_prefix << "/" << s_wasm_prefix_instruction_max
+       << " hist:" << s_wasm_prefix_histogram[0] << "," << s_wasm_prefix_histogram[1] << ","
+       << s_wasm_prefix_histogram[2] << "," << s_wasm_prefix_histogram[3] << ","
+@@ -12166,7 +12715,8 @@ extern "C" int RunPpcWasmDoublePrecisionArithmeticSmoke()
+ 
+   if (run_op(EncodeAFormForWasmBlockTest(63, 10, 0, 2, 0, 26), 0x80003618, 0x8000361c) != 0)
+     return 70;
+-  if (!NearlyEqualForWasmBlockTest(state.ps[10].PS0AsDouble(), 1.0 / 3.0) ||
++  // frsqrte is Gekko's table estimate, as the interpreter computes it.
++  if (state.ps[10].PS0AsDouble() != Common::ApproximateReciprocalSquareRoot(9.0) ||
+       !NearlyEqualForWasmBlockTest(state.ps[10].PS1AsDouble(), 110.0))
+   {
+     return 71;
+@@ -12269,6 +12819,314 @@ extern "C" int RunPpcWasmPairedQuantizedMemorySmoke()
+   return state.npc == 0x80003414 ? 1 : 60;
+ }
+ 
++// Interpreter-vs-JIT differential oracle. One program (PowerPC words placed at
++// 0x80003000, ending in a return to the sentinel held in LR) and one input
++// state go in; the program then runs twice from that state: once with the
++// interpreter, once through the same block pipeline as the CPU thread
++// (analyzer, direct-candidate prefix, BuildWasmCachedInterpreterBlock, engine
++// compile, RunWasmBlock semantics, interpreter for what is not compiled). Both
++// final states are written out for the caller to compare. Used by
++// tests/jit-oracle.test.mjs in Node, where the same engine as Chrome runs the
++// generated modules.
++namespace
++{
++constexpr u32 JIT_ORACLE_CODE_VA = 0x80003000;
++constexpr u32 JIT_ORACLE_SENTINEL_VA = 0x80002000;
++constexpr u32 JIT_ORACLE_SCRATCH_VA = 0x80100000;
++constexpr u32 JIT_ORACLE_SCRATCH_BYTES = 256;
++constexpr u32 JIT_ORACLE_MAX_WORDS = 256;
++constexpr u32 JIT_ORACLE_STATE_WORDS = 240;
++constexpr u32 JIT_ORACLE_STEP_LIMIT = 20000;
++// Memory both runs start from and are compared on, beyond the scratch bytes
++// that travel in the state words: update forms drift their base around it.
++constexpr u32 JIT_ORACLE_WINDOW_VA = JIT_ORACLE_SCRATCH_VA - 0x800;
++constexpr u32 JIT_ORACLE_WINDOW_BYTES = 0x1000;
++
++struct JitOracleBuffer
++{
++  u32 program[JIT_ORACLE_MAX_WORDS];
++  u32 input[JIT_ORACLE_STATE_WORDS];
++  u32 interp[JIT_ORACLE_STATE_WORDS];
++  u32 jit[JIT_ORACLE_STATE_WORDS];
++  // compiled blocks, compiled ops, interpreted blocks, engine rejects
++  u32 stats[4];
++};
++JitOracleBuffer s_jit_oracle{};
++std::array<u8, JIT_ORACLE_WINDOW_BYTES> s_jit_oracle_window_start{};
++std::array<u8, JIT_ORACLE_WINDOW_BYTES> s_jit_oracle_window_interp{};
++// SPRs outside the state words (SPRG, SRR, HID, ...) restart from this copy
++// for each run, so the JIT run never sees what the interpreter run wrote.
++std::array<u32, 1024> s_jit_oracle_spr{};
++std::string s_jit_oracle_message;
++
++// State words: 0-31 GPR, 32 CR, 33 XER, 34 LR, 35 CTR, 36 FPSCR, 37 MSR,
++// 38-45 GQR0-7, 46 pending exceptions, 47 PC, 48-175 PS0/PS1 bits per FPR
++// (low word first), 176-239 the scratch bytes at JIT_ORACLE_SCRATCH_VA.
++void JitOracleLoadState(Core::System& system, const u32* in)
++{
++  auto& ppc = system.GetPPCState();
++  std::copy(s_jit_oracle_spr.begin(), s_jit_oracle_spr.end(), ppc.spr);
++  for (u32 i = 0; i < 32; ++i)
++    ppc.gpr[i] = in[i];
++  ppc.cr.Set(in[32]);
++  ppc.SetXER(UReg_XER{in[33]});
++  LR(ppc) = in[34];
++  CTR(ppc) = in[35];
++  ppc.fpscr.Hex = in[36];
++  ppc.msr.Hex = in[37];
++  for (u32 i = 0; i < 8; ++i)
++    ppc.spr[SPR_GQR0 + i] = in[38 + i];
++  ppc.Exceptions = 0;
++  ppc.pc = JIT_ORACLE_CODE_VA;
++  ppc.npc = JIT_ORACLE_CODE_VA;
++  for (u32 i = 0; i < 32; ++i)
++  {
++    const u32* w = &in[48 + i * 4];
++    ppc.ps[i].SetBoth(u64{w[0]} | (u64{w[1]} << 32), u64{w[2]} | (u64{w[3]} << 32));
++  }
++  std::memcpy(system.GetMemory().GetRAM() + (JIT_ORACLE_SCRATCH_VA & 0x01ffffff), &in[176],
++              JIT_ORACLE_SCRATCH_BYTES);
++  ppc.downcount = 0x7fffffff;
++}
++
++void JitOracleSaveState(Core::System& system, u32* out)
++{
++  auto& ppc = system.GetPPCState();
++  for (u32 i = 0; i < 32; ++i)
++    out[i] = ppc.gpr[i];
++  out[32] = ppc.cr.Get();
++  out[33] = ppc.GetXER().Hex;
++  out[34] = LR(ppc);
++  out[35] = CTR(ppc);
++  out[36] = ppc.fpscr.Hex;
++  out[37] = ppc.msr.Hex;
++  for (u32 i = 0; i < 8; ++i)
++    out[38 + i] = ppc.spr[SPR_GQR0 + i];
++  out[46] = ppc.Exceptions;
++  out[47] = ppc.pc;
++  for (u32 i = 0; i < 32; ++i)
++  {
++    const u64 a = ppc.ps[i].PS0AsU64(), b = ppc.ps[i].PS1AsU64();
++    u32* w = &out[48 + i * 4];
++    w[0] = static_cast<u32>(a);
++    w[1] = static_cast<u32>(a >> 32);
++    w[2] = static_cast<u32>(b);
++    w[3] = static_cast<u32>(b >> 32);
++  }
++  std::memcpy(&out[176], system.GetMemory().GetRAM() + (JIT_ORACLE_SCRATCH_VA & 0x01ffffff),
++              JIT_ORACLE_SCRATCH_BYTES);
++}
++
++bool JitOracleSetUp(Core::System& system)
++{
++  // The interpreter's FPSCR writes assert they run on the CPU thread.
++  Core::DeclareAsCPUThread();
++  auto& memory = system.GetMemory();
++  if (!memory.GetRAM())
++    memory.Init();
++  if (!memory.GetRAM())
++    return false;
++  auto& ppc = system.GetPPCState();
++  // The BATs libogc programs run under: 0x80000000 cached and 0xC0000000
++  // uncached views of MEM1, translation on, paired singles enabled.
++  for (const u32 base : {SPR_IBAT0U, SPR_DBAT0U})
++  {
++    ppc.spr[base] = 0x80001fff;
++    ppc.spr[base + 1] = 0x00000002;
++  }
++  ppc.spr[SPR_DBAT1U] = 0xc0001fff;
++  ppc.spr[SPR_DBAT1U + 1] = 0x0000002a;
++  ppc.spr[SPR_HID2] = 0xa0000000;
++  HID0(ppc).DCE = 1;  // as libogc leaves it; dcbz raises an alignment exception otherwise
++  system.GetMMU().DBATUpdated();
++  system.GetMMU().IBATUpdated();
++  std::copy(ppc.spr, ppc.spr + s_jit_oracle_spr.size(), s_jit_oracle_spr.begin());
++  return true;
++}
++
++// Returns false when the program raised an exception: pending exceptions, or
++// a pc outside the program (the interpreter vectors DSI itself).
++bool JitOracleInterpretSteps(Core::System& system, u32 steps, u32* budget, u32 word_count)
++{
++  auto& ppc = system.GetPPCState();
++  auto& interpreter = system.GetInterpreter();
++  for (u32 i = 0; i < steps && ppc.pc != JIT_ORACLE_SENTINEL_VA && *budget; ++i, --*budget)
++  {
++    interpreter.SingleStepInner();
++    if (ppc.Exceptions || (ppc.pc != JIT_ORACLE_SENTINEL_VA &&
++                           (ppc.pc - JIT_ORACLE_CODE_VA) >= word_count * 4))
++    {
++      return false;
++    }
++  }
++  return true;
++}
++}  // namespace
++
++// Hands raw bytes to the block compile path (as TryWriteWasmBlock would) and
++// returns the handle: 0 when the engine rejects the module. Lets a test prove
++// that a CompileError/LinkError is contained instead of killing the thread.
++extern "C" EMSCRIPTEN_KEEPALIVE int DolphinWeb_JitCompileBytesForTest(const u8* bytes, u32 size)
++{
++  return CompileWasmCachedInterpreterBlockForTest(std::vector<u8>(bytes, bytes + size));
++}
++
++extern "C" EMSCRIPTEN_KEEPALIVE u32 DolphinWeb_JitEngineRejectCount()
++{
++  return s_wasm_engine_reject_count.load(std::memory_order_relaxed);
++}
++
++extern "C" EMSCRIPTEN_KEEPALIVE u32* DolphinWeb_JitOracleBuffer()
++{
++  return &s_jit_oracle.program[0];
++}
++
++extern "C" EMSCRIPTEN_KEEPALIVE const char* DolphinWeb_JitOracleMessage()
++{
++  return s_jit_oracle_message.c_str();
++}
++
++// Returns 0 when both runs produced the same state words, 1 when they differ,
++// 2 when no block compiled (nothing was compared), 3 when the interpreter run
++// raised an exception (not compared), negative on a setup error.
++// disable_mask is the CachedInterpreter mask the run uses (production default:
++// blockmerge|shortprefix disabled, 0x220000).
++extern "C" EMSCRIPTEN_KEEPALIVE int DolphinWeb_JitOracleRun(u32 word_count, u32 disable_mask)
++{
++  auto& system = Core::System::GetInstance();
++  s_jit_oracle_message.clear();
++  s_jit_oracle.stats[0] = s_jit_oracle.stats[1] = s_jit_oracle.stats[2] = s_jit_oracle.stats[3] = 0;
++  if (word_count == 0 || word_count > JIT_ORACLE_MAX_WORDS || !JitOracleSetUp(system))
++    return -1;
++  auto& memory = system.GetMemory();
++  for (u32 i = 0; i < word_count; ++i)
++  {
++    const u32 w = s_jit_oracle.program[i];
++    u8* p = memory.GetRAM() + ((JIT_ORACLE_CODE_VA & 0x01ffffff) + i * 4);
++    p[0] = static_cast<u8>(w >> 24);
++    p[1] = static_cast<u8>(w >> 16);
++    p[2] = static_cast<u8>(w >> 8);
++    p[3] = static_cast<u8>(w);
++  }
++  system.GetPowerPC().GetBreakPoints().Clear();
++  auto& ppc = system.GetPPCState();
++  u8* const window = memory.GetRAM() + (JIT_ORACLE_WINDOW_VA & 0x01ffffff);
++
++  JitOracleLoadState(system, s_jit_oracle.input);
++  std::memcpy(s_jit_oracle_window_start.data(), window, JIT_ORACLE_WINDOW_BYTES);
++  u32 budget = JIT_ORACLE_STEP_LIMIT;
++  if (!JitOracleInterpretSteps(system, JIT_ORACLE_STEP_LIMIT, &budget, word_count))
++  {
++    // Exception paths are not compared: the oracle has no vectors to run.
++    s_jit_oracle_message = fmt::format("interpreter raised an exception near {:#010x}", ppc.pc);
++    return 3;
++  }
++  JitOracleSaveState(system, s_jit_oracle.interp);
++  std::memcpy(s_jit_oracle_window_interp.data(), window, JIT_ORACLE_WINDOW_BYTES);
++  std::memcpy(window, s_jit_oracle_window_start.data(), JIT_ORACLE_WINDOW_BYTES);
++
++  const u32 saved_mask = s_dolphin_web_disable_mask.exchange(disable_mask);
++  const u32 min_prefix = DolphinWebHelperDisabled(DOLPHIN_WEB_DISABLE_SHORT_PREFIX) ? 4u : 2u;
++  PPCAnalyst::PPCAnalyzer analyzer;
++  analyzer.SetBranchFollowingEnabled(Config::Get(Config::MAIN_JIT_FOLLOW_BRANCH));
++  PPCAnalyst::CodeBuffer buffer(JIT_ORACLE_MAX_WORDS + 8);
++  JitOracleLoadState(system, s_jit_oracle.input);
++  budget = JIT_ORACLE_STEP_LIMIT;
++  const auto state_base = reinterpret_cast<std::uintptr_t>(&ppc);
++  const auto offset = [&](const void* field) {
++    return static_cast<u32>(reinterpret_cast<std::uintptr_t>(field) - state_base);
++  };
++  const WasmStateLayout layout = {
++      offset(&ppc.npc), offset(ppc.gpr), offset(ppc.ps), offset(ppc.cr.fields),
++      offset(ppc.spr), offset(&ppc.msr), offset(&ppc.fpscr), offset(&ppc.feature_flags),
++      offset(&ppc.pagetable_update_pending), offset(&ppc.xer_ca), offset(&ppc.xer_so_ov),
++      offset(&ppc.xer_stringctrl), offset(&ppc.m_enable_dcache), offset(&ppc.gather_pipe_ptr),
++      offset(&ppc.gather_pipe_base_ptr),
++      static_cast<u32>(reinterpret_cast<std::uintptr_t>(memory.GetRAM())),
++      memory.GetRamSizeReal(),
++      static_cast<u32>(reinterpret_cast<std::uintptr_t>(memory.GetL1Cache())),
++      memory.GetL1CacheSize(),
++  };
++  int result = 0;
++  while (budget && ppc.pc != JIT_ORACLE_SENTINEL_VA && !ppc.Exceptions)
++  {
++    PPCAnalyst::CodeBlock block;
++    const u32 next_pc = analyzer.Analyze(ppc.pc, &block, &buffer, buffer.size());
++    if (block.m_memory_exception || block.m_num_instructions == 0)
++    {
++      result = -2;
++      break;
++    }
++    u32 prefix = 0;
++    for (; prefix < block.m_num_instructions; ++prefix)
++    {
++      const PPCAnalyst::CodeOp& op = buffer[prefix];
++      if (op.branchIsIdleLoop || !IsPpcWasmDirectInstructionCandidate(op) ||
++          ((op.opinfo->flags & FL_USE_FPU) != 0 && !ppc.msr.FP))
++        break;
++      if (op.canEndBlock)
++      {
++        ++prefix;
++        break;
++      }
++    }
++    std::vector<u8> bytes;
++    if (prefix >= min_prefix)
++    {
++      const bool entire = prefix == block.m_num_instructions;
++      const bool ends_with_branch = buffer[prefix - 1].canEndBlock;
++      const u32 resume_pc = entire ? next_pc : buffer[prefix].address;
++      // A partial prefix does not write npc on the CPU thread (the cached
++      // interpreter continues with the next op); here the loop resumes there.
++      bytes = BuildWasmCachedInterpreterBlock(
++          std::span<const PPCAnalyst::CodeOp>{buffer.data(), prefix}, layout, resume_pc,
++          !ends_with_branch, false, false);
++    }
++    if (bytes.empty())
++    {
++      ++s_jit_oracle.stats[2];
++      if (!JitOracleInterpretSteps(system, block.m_num_instructions, &budget, word_count))
++        break;
++      continue;
++    }
++    const int handle = CompileWasmCachedInterpreterBlockForTest(bytes);
++    if (handle <= 0)
++    {
++      ++s_jit_oracle.stats[3];
++      s_jit_oracle_message = fmt::format("engine rejected block at {:#010x} ({} ops)", ppc.pc, prefix);
++      result = -3;
++      break;
++    }
++    ++s_jit_oracle.stats[0];
++    s_jit_oracle.stats[1] += prefix;
++    budget = budget > prefix ? budget - prefix : 0;
++    const int halted = DolphinWeb_CachedInterpreterRunWasmBlockForTest(
++        handle, static_cast<int>(state_base));
++    if (halted)
++      break;
++    ppc.pc = ppc.npc;
++  }
++  s_dolphin_web_disable_mask.store(saved_mask);
++  JitOracleSaveState(system, s_jit_oracle.jit);
++  if (result < 0)
++    return result;
++  if (budget == 0)
++    s_jit_oracle_message = "step limit reached";
++  if (s_jit_oracle.stats[0] == 0)
++    return 2;
++  for (u32 i = 0; i < JIT_ORACLE_WINDOW_BYTES; ++i)
++  {
++    if (window[i] != s_jit_oracle_window_interp[i])
++    {
++      s_jit_oracle_message = fmt::format("memory at {:#010x}: interp {:#04x} jit {:#04x}",
++                                         JIT_ORACLE_WINDOW_VA + i, s_jit_oracle_window_interp[i],
++                                         window[i]);
++      return 1;
++    }
++  }
++  return std::memcmp(s_jit_oracle.interp, s_jit_oracle.jit, sizeof s_jit_oracle.jit) == 0 ? 0 : 1;
++}
++
+ extern "C" int RunPpcWasmFloatCompareSmoke()
+ {
+   auto& state = Core::System::GetInstance().GetPPCState();
+diff --git a/Source/Core/Core/PowerPC/Interpreter/Interpreter_FloatingPoint.cpp b/Source/Core/Core/PowerPC/Interpreter/Interpreter_FloatingPoint.cpp
+--- a/Source/Core/Core/PowerPC/Interpreter/Interpreter_FloatingPoint.cpp
++++ b/Source/Core/Core/PowerPC/Interpreter/Interpreter_FloatingPoint.cpp
+@@ -181,7 +181,9 @@ void Interpreter::Helper_FloatCompareOrdered(PowerPC::PowerPCState& ppc_state,
+   const u32 compare_value = static_cast<u32>(compare_result);
+ 
+   // Clear and set the FPCC bits accordingly.
+-  ppc_state.fpscr.FPRF = (ppc_state.fpscr.FPRF & ~FPCC_MASK) | compare_value;
++  // FPRF is the unshifted 5-bit field: FPCC_MASK (0xF << FPRF_SHIFT) would
++  // clear nothing in it and the old FPCC bits would accumulate.
++  ppc_state.fpscr.FPRF = (ppc_state.fpscr.FPRF & ~(FPCC_MASK >> FPRF_SHIFT)) | compare_value;
+ 
+   ppc_state.cr.SetField(inst.CRFD, compare_value);
+ }
+@@ -216,7 +218,9 @@ void Interpreter::Helper_FloatCompareUnordered(PowerPC::PowerPCState& ppc_state,
+   const u32 compare_value = static_cast<u32>(compare_result);
+ 
+   // Clear and set the FPCC bits accordingly.
+-  ppc_state.fpscr.FPRF = (ppc_state.fpscr.FPRF & ~FPCC_MASK) | compare_value;
++  // FPRF is the unshifted 5-bit field: FPCC_MASK (0xF << FPRF_SHIFT) would
++  // clear nothing in it and the old FPCC bits would accumulate.
++  ppc_state.fpscr.FPRF = (ppc_state.fpscr.FPRF & ~(FPCC_MASK >> FPRF_SHIFT)) | compare_value;
+ 
+   ppc_state.cr.SetField(inst.CRFD, compare_value);
+ }

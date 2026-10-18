@@ -45,6 +45,13 @@ function run(cmd, args, env) {
   });
 }
 
+// The validator plays a disc; there is no default one (the cache is derived
+// from the game's code, so it is built locally from the user's own disc).
+if (!process.env.ROM) {
+  console.error("ROM=<path to your disc image> is required.");
+  process.exit(2);
+}
+
 console.log(`[build-prebuilt] persistDir=${persistDir}`);
 console.log(`[build-prebuilt] duration=${duration}s`);
 console.log(`[build-prebuilt] baseUrl=${baseUrl}`);
@@ -70,5 +77,8 @@ await run("node", ["tools/export-prebuilt-jit-cache.mjs"], {
   PROBE_PERSIST_DIR: persistDir,
   BASE_URL: baseUrl
 });
+
+console.log("[build-prebuilt] step 3: check the cache against the committed core");
+await run("node", ["tools/check-prebuilt-jit-cache.mjs"], {});
 
 console.log("[build-prebuilt] DONE");

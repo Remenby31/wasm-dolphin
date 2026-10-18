@@ -408,52 +408,11 @@ let frameSignalWaitPending = false;
 let ppcWasmJitRequested = false;
 let ppcWasmJitForce = false;
 let ppcWasmJitActive = false;
-let ppcWasmJitDisabledForSession = false;
-let ppcWasmJitCooldownUntilFrame = 0;
 let ppcWasmJitEnabledAtFrame = 0;
-// Day-21: presentation fps captured immediately before the JIT
-// engaged. The disable guard fuses the JIT only if presentation
-// regressed materially below this baseline (i.e. the JIT itself hurt),
-// not merely because the renderer is slow.
-let ppcWasmJitPreEngageFps = 0;
-// Core-fps (emulation throughput) baseline captured just before the JIT
-// engages. presentationFps cannot serve this role: it tracks how expensive the
-// SCENE is to draw, so a menu-time baseline compared against an in-game frame
-// reads as a huge "regression" that the JIT had nothing to do with. Observed on
-// Mario Kart Wii as "fps:15 baseline:29" and "fps:6 baseline:46" -- the JIT was
-// switched off on entering a race, i.e. exactly when it was needed.
-let ppcWasmJitPreEngageCoreFps = 0;
-let ppcWasmJitCoreSampleFrame = -1;
-let ppcWasmJitCoreSampleTime = 0;
-let ppcWasmJitCoreFpsRolling = 0;
 let ppcWasmJitCorePaused = false;
 let ppcWasmJitTimingSuspensions = 0;
-function sampleCoreFpsRolling(coreFrame) {
-  const now = (typeof performance !== "undefined" ? performance.now() : Date.now());
-  const cf = coreFrame >>> 0;
-  if (ppcWasmJitCoreSampleFrame < 0) {
-    ppcWasmJitCoreSampleFrame = cf;
-    ppcWasmJitCoreSampleTime = now;
-    return;
-  }
-  const dt = now - ppcWasmJitCoreSampleTime;
-  if (dt >= 1000) {
-    ppcWasmJitCoreFpsRolling = (((cf - ppcWasmJitCoreSampleFrame) >>> 0) * 1000) / dt;
-    ppcWasmJitCoreSampleFrame = cf;
-    ppcWasmJitCoreSampleTime = now;
-  }
-}
-// §28s: renderer-agnostic core-liveness tracker for the JIT fuse.
-// presentationFps is structurally ~0 in the WebGPU-presenter path
-// (it counts the legacy canvas-blit, not DIAG_EFB_TO_CANVAS), so the
-// old `catastrophic = presentationFps < FLOOR` net mis-fired every
-// fuse window even at a healthy 60 coreFps → JIT thrash → cutscene
-// black-flash. The real "JIT froze emulation" signal is the core
-// frame counter not advancing in wall-clock time.
-let ppcWasmJitFuseLastFrame = -1;
-let ppcWasmJitFuseLastTime = 0;
 let ppcWasmJitTier = "guarded";
-let ppcWasmJitWarmupFrames = 3600;
+let ppcWasmJitWarmupFrames = 0; // set by every load (normalizePpcWasmJitWarmupFrames)
 let pacedPresentationActive = false;
 let nextPacedPresentationTime = 0;
 let pacedPresentationTimer = 0;
@@ -545,30 +504,14 @@ const DEFAULT_PRESENTATION_QUEUE = 4;
 const MIN_PRESENTATION_QUEUE = 2;
 const MAX_PRESENTATION_QUEUE = 12;
 const VISUAL_HASH_SAMPLE_STRIDE_BYTES = 256;
-// §28ao: was 3600 (=60 s @60fps) → the JIT stayed OFF for the first
-// minute of a cold run, executing all PPC on the slow interpreter —
-// the dominant "not smooth / slow boot" cause (agent-confirmed). 300
-// (~5 s) front-loads the one-time compile burst to the GC IPL screen
-// (player just watching) instead of the menus. The post-activation
-// stall fuse + cooldown already guard against JIT destabilisation.
-const DEFAULT_WASM_JIT_WARMUP_XFB_FRAMES = 300;
-const WASM_JIT_MIN_STABLE_PRESENTATION_FPS = 25;
-const WASM_JIT_MAX_STABLE_PRESENTATION_GAP_MS = 80;
-const WASM_JIT_MIN_ACTIVE_FRAMES_BEFORE_FUSE = 240;
-// Day-21: regression-relative fuse. Keep the JIT unless presentation
-// fell to < 65% of its pre-engage rate (a regression the JIT itself
-// introduced) and the baseline was high enough to trust, OR fps is
-// catastrophically low in absolute terms (a real freeze). The old
-// absolute fps/gap floor mis-fused the JIT whenever the CPU software
-// rasteriser — not the JIT — was the fps bottleneck.
-const WASM_JIT_REGRESSION_FRACTION = 0.65;
-const WASM_JIT_REGRESSION_MIN_BASELINE_FPS = 18;
-const WASM_JIT_ABSOLUTE_FLOOR_FPS = 6;
-const WASM_JIT_POST_ACTIVATION_STALL_THRESHOLD_MS = 5000;
+// The JIT engages once the core has output this many XFB frames: emulated
+// time, so a run engages at the same point whatever the machine load. There
+// is no wall-clock fuse after engage: a JIT bug must be fixed (or its block
+// blacklisted by the core), not hidden by switching emulation paths on timing.
+const DEFAULT_WASM_JIT_WARMUP_XFB_FRAMES = 60;
+// Boot-stall watchdog grace after engage: the first compile burst can hold
+// the CPU thread briefly.
 const WASM_JIT_POST_ACTIVATION_GRACE_FRAMES = 300;
-// After a temporary degraded-presentation disable, wait this many video frames
-// before allowing the JIT to re-engage. ~5 seconds at 60fps.
-const WASM_JIT_DEGRADED_COOLDOWN_FRAMES = 300;
 
 function createRendererDiagnostics() {
   return {
@@ -2240,8 +2183,6 @@ async function loadCore({
   ppcWasmJitRequested = Boolean(ppcWasmJit);
   ppcWasmJitForce = Boolean(requestedPpcWasmJitForce);
   ppcWasmJitActive = false;
-  ppcWasmJitDisabledForSession = false;
-  ppcWasmJitCooldownUntilFrame = 0;
   ppcWasmJitEnabledAtFrame = 0;
   ppcWasmJitCorePaused = false;
   ppcWasmJitTimingSuspensions = 0;
@@ -3104,13 +3045,7 @@ function framePayload({ forceCausalTelemetry = false } = {}) {
   }
 
   maybeEnablePpcWasmJit();
-  const jitState = !ppcWasmJitRequested
-    ? "off"
-    : ppcWasmJitDisabledForSession
-      ? "disabled"
-      : ppcWasmJitActive
-        ? "on"
-        : "warmup";
+  const jitState = !ppcWasmJitRequested ? "off" : ppcWasmJitActive ? "on" : "warmup";
 
   const width = api.frameWidth();
   const height = api.frameHeight();
@@ -3714,7 +3649,6 @@ function runPresentationLoop() {
       }
       stages.present = collectMetrics ? performance.now() - presentStartedAt : 0;
       updatePresentationFps();
-      maybeDisablePpcWasmJit(coreFrame);
       const loopMs = performance.now() - loopStartedAt;
       stages.loop = loopMs;
       addProfileTime("loop", loopMs);
@@ -3746,186 +3680,34 @@ function runPresentationLoop() {
 }
 
 function resetPpcWasmJitTiming(invalidateBaseline = false) {
-  // Intentional pauses and loads are not emulation stalls. Keep JIT mode,
-  // cooldown, presentation resources, and lifetime metrics unchanged.
-  ppcWasmJitCoreSampleFrame = -1;
-  ppcWasmJitCoreSampleTime = 0;
-  ppcWasmJitCoreFpsRolling = 0;
-  ppcWasmJitFuseLastFrame = -1;
-  ppcWasmJitFuseLastTime = 0;
+  // Intentional pauses and loads are not presentation stalls: restart the
+  // interval statistics. JIT mode is unaffected (it no longer depends on
+  // timing); the argument is kept for the load/pause call sites.
+  void invalidateBaseline;
   presentationMaxIntervalMs = 0;
   maxIntervalSincePresentationFps = 0;
   lastPresentedAt = performance.now();
-  if (invalidateBaseline) {
-    ppcWasmJitPreEngageFps = 0;
-    ppcWasmJitPreEngageCoreFps = 0;
-  }
 }
 
 function maybeEnablePpcWasmJit(coreFrame = api?.getFrame?.() ?? 0) {
   if (ppcWasmJitCorePaused || ppcWasmJitTimingSuspensions > 0) return;
-  // Keep a pre-engage core-fps estimate warm. This runs every tick while the
-  // JIT is still off, which is the only window in which an honest "before"
-  // baseline can be taken.
-  sampleCoreFpsRolling(coreFrame);
-  if (
-    !ppcWasmJitRequested ||
-    ppcWasmJitActive ||
-    ppcWasmJitDisabledForSession ||
-    !api?.setPpcWasmJitEnabled
-  ) {
+  if (!ppcWasmJitRequested || ppcWasmJitActive || !api?.setPpcWasmJitEnabled) {
     return;
   }
-
-  // Warm-cache fast path. When Day-9 fingerprint matched and Day-7 loaded
-  // enough cached modules to cover the initial compile burst, skip the
-  // long warmup gate — there's no stability concern because the JIT
-  // doesn't have to actually compile anything; it just instantiates from
-  // cache. The MINIMUM_PRE_JIT_FRAMES floor is still respected so the
-  // emulator gets through the first few video frames stably before we
-  // change its compilation behavior.
-  const MINIMUM_PRE_JIT_FRAMES = 30;
-  const effectiveWarmup =
-    dolphinJitCachePreWarmed && coreFrame >= MINIMUM_PRE_JIT_FRAMES
-      ? MINIMUM_PRE_JIT_FRAMES
-      : ppcWasmJitWarmupFrames;
-  if ((coreFrame >>> 0) < effectiveWarmup) {
+  // Deterministic gate: emulated XFB frames only. A warm cache changes how
+  // fast blocks compile, never when the JIT engages.
+  if ((coreFrame >>> 0) < ppcWasmJitWarmupFrames) {
     return;
   }
-
-  if ((coreFrame >>> 0) < ppcWasmJitCooldownUntilFrame) {
-    return;
-  }
-
-  // Engage after warmup regardless of momentary presentation rate. Single-
-  // window samples drop to 0 during multi-second core stalls and would
-  // indefinitely block engage even when long-term throughput is healthy. The
-  // post-engage guard (maybeDisablePpcWasmJit, ACTIVE_* thresholds) handles
-  // catastrophic regression.
-
-  // Day-21: snapshot the pre-engage presentation rate. The disable
-  // guard judges the JIT by *regression vs this baseline*, not an
-  // absolute fps floor. A heavy renderer (fastsw=0 full-res CPU
-  // raster) caps present fps far below the old absolute threshold;
-  // the JIT still speeds up PPC emulation in that regime, so fusing
-  // it off there was strictly counterproductive (and flapped every
-  // cooldown). Record the baseline so we only fuse when the JIT
-  // itself made presentation worse.
-  ppcWasmJitPreEngageFps = presentationFps;
-  ppcWasmJitPreEngageCoreFps = ppcWasmJitCoreFpsRolling;
 
   console.log(`[s28-jittier] ENGAGE: setPpcWasmJitEnabled(${ppcWasmJitTier === "mixed" ? 2 : 1}) ` +
     `(ppcWasmJitTier=${ppcWasmJitTier}) @frame ${coreFrame}`);
   api.setPpcWasmJitEnabled(ppcWasmJitTier === "mixed" ? 2 : 1);
   ppcWasmJitActive = true;
   ppcWasmJitEnabledAtFrame = coreFrame >>> 0;
-  // §28s: re-arm the core-liveness tracker on every (re)engage so a
-  // pre-cooldown (frame,time) pair can't compute a bogus low coreFps
-  // across the cooldown gap on the first post-re-engage fuse check.
-  ppcWasmJitFuseLastFrame = -1;
-  const reason = dolphinJitCachePreWarmed && effectiveWarmup === MINIMUM_PRE_JIT_FRAMES
-    ? `pre-warmed cache hit, JIT engaged at frame ${coreFrame}`
-    : `JIT enabled after ${coreFrame} stable video frames`;
-  postStatus(`Experimental WASM ${reason}`);
-}
-
-function maybeDisablePpcWasmJit(coreFrame = api?.getFrame?.() ?? 0) {
-  if (ppcWasmJitCorePaused || ppcWasmJitTimingSuspensions > 0) return;
-  if (!ppcWasmJitActive || ppcWasmJitForce || !api?.setPpcWasmJitEnabled) {
-    return;
-  }
-
-  const framesSinceActivation = (coreFrame >>> 0) - ppcWasmJitEnabledAtFrame;
-
-  // Detect multi-second post-activation stalls even during the grace period.
-  // A stall exceeding WASM_JIT_POST_ACTIVATION_STALL_THRESHOLD_MS (5s) means the
-  // compile burst blocked presentation long enough to produce a visible freeze.
-  // §28bq: REVERTED §28bp. Gating this stall guard off for the
-  // webgpu presenter removed the ONLY post-engage grace-period
-  // protection, so a compile-burst freeze went uncaught → boot
-  // stall regression ("core not advancing"). Restored original
-  // (presentation-interval) stall guard; the §28bp sawtooth concern
-  // needs a core-liveness redesign, not removal of protection.
-  if (presentationMaxIntervalMs > WASM_JIT_POST_ACTIVATION_STALL_THRESHOLD_MS) {
-    api.setPpcWasmJitEnabled(0);
-    ppcWasmJitActive = false;
-    ppcWasmJitDisabledForSession = true;
-    postStatus(
-      `Experimental WASM JIT disabled after post-activation stall ` +
-        `(max_interval:${presentationMaxIntervalMs}ms at frame ${coreFrame})`
-    );
-    return;
-  }
-
-  if (framesSinceActivation < WASM_JIT_MIN_ACTIVE_FRAMES_BEFORE_FUSE) {
-    return;
-  }
-
-  // Day-21: judge the JIT by regression vs the pre-engage baseline,
-  // not an absolute fps floor. The absolute floor (fps>=25, gap<=40ms)
-  // assumed a GPU-class renderer; with the CPU software rasteriser
-  // (especially fastsw=0 full-res) present fps is renderer-capped well
-  // below that even though the JIT is *helping* PPC throughput. The
-  // old logic disabled the JIT every cooldown, making emulation slower
-  // for no benefit — exactly the "feels slower" the user hit.
-  //
-  // Keep the JIT unless presentation dropped materially below where it
-  // was right before the JIT engaged (a regression the JIT caused),
-  // OR it's catastrophically slow in absolute terms (sub-floor — a
-  // genuine freeze, not just a heavy renderer). The 5s post-activation
-  // stall check above already handles compile-burst freezes.
-  // §28bq: REVERTED §28bp `regressed` gating (see above).
-  // Judge the JIT by EMULATION THROUGHPUT, not presentation rate. The JIT
-  // affects how fast PowerPC executes; it does not make a scene cheaper to
-  // draw. Comparing a light-screen presentation baseline against a heavy scene
-  // fused the JIT off on every menu->gameplay transition. Core fps is the same
-  // signal the catastrophic check below already uses, measured over one shared
-  // window.
-
-  // §28s: "catastrophic" = the JIT genuinely FROZE emulation, judged
-  // by the core frame counter vs wall-clock — NOT presentationFps
-  // (structurally ~0 in the WebGPU presenter, which made the old
-  // floor fire every window at a healthy 60 coreFps and thrash the
-  // JIT, collapsing the intro cutscene into a black flash). Only
-  // trip when ≥1.5 s of wall time elapsed AND effective core fps is
-  // sub-floor (a true freeze; healthy ≈ 60).
-  const nowMs = (typeof performance !== "undefined" ? performance.now()
-                 : Date.now());
-  const cf = coreFrame >>> 0;
-  let catastrophic = false;
-  let regressed = false;
-  if (ppcWasmJitFuseLastFrame >= 0) {
-    const dtMs = nowMs - ppcWasmJitFuseLastTime;
-    if (dtMs >= 1500) {
-      const dFrames = (cf - ppcWasmJitFuseLastFrame) >>> 0;
-      const coreFps = (dFrames * 1000) / dtMs;
-      catastrophic = coreFps < WASM_JIT_ABSOLUTE_FLOOR_FPS;
-      regressed =
-        ppcWasmJitPreEngageCoreFps >= WASM_JIT_REGRESSION_MIN_BASELINE_FPS &&
-        coreFps < ppcWasmJitPreEngageCoreFps * WASM_JIT_REGRESSION_FRACTION;
-      ppcWasmJitFuseLastFrame = cf;
-      ppcWasmJitFuseLastTime = nowMs;
-    }
-  } else {
-    ppcWasmJitFuseLastFrame = cf;
-    ppcWasmJitFuseLastTime = nowMs;
-  }
-
-  if (!regressed && !catastrophic) {
-    return;
-  }
-
-  api.setPpcWasmJitEnabled(0);
-  ppcWasmJitActive = false;
-  // Cooldown rather than permanent disable: degraded presentation often
-  // recovers (post-cutscene transition, post-shader-compile spike). After the
-  // cooldown frames pass the engage check can re-fire.
-  ppcWasmJitCooldownUntilFrame = (coreFrame >>> 0) + WASM_JIT_DEGRADED_COOLDOWN_FRAMES;
   postStatus(
-    `Experimental WASM JIT temporarily off ` +
-      `(fps:${presentationFps} baseline:${ppcWasmJitPreEngageCoreFps} ` +
-      `${catastrophic ? "catastrophic" : "regressed"}; cooldown ` +
-      `${WASM_JIT_DEGRADED_COOLDOWN_FRAMES} frames)`
+    `Experimental WASM JIT enabled at frame ${coreFrame} (warmup ${ppcWasmJitWarmupFrames}` +
+      `${dolphinJitCachePreWarmed ? ", pre-warmed cache" : ""})`
   );
 }
 
