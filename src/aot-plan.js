@@ -5,6 +5,7 @@
 // plan does not.
 import { CONF_POINTER, CONF_PROFILE, CONF_ROOT, EDGE, discover } from "./aot-discovery.js";
 import { PROFILE_REAL_MODE } from "./aot-profile.js";
+import { IncrementalSha256 } from "./incremental-sha256.js";
 
 export const PLAN_SCHEMA = "salon-aot-plan/1";
 export const ANALYZER_VERSION = 1;
@@ -54,6 +55,24 @@ export function regionHash(read32, ranges) {
   return h.hex();
 }
 
+// SHA-256 of the same bytes, for the persistent cache key: FNV-1a 64 is a
+// fast check, not collision resistant across disc revisions.
+export function regionSha256(read32, ranges) {
+  let size = 0;
+  for (const [s, e] of ranges) size += e - s;
+  const bytes = new Uint8Array(size);
+  const view = new DataView(bytes.buffer);
+  let o = 0;
+  for (const [s, e] of ranges) {
+    for (let a = s; a < e; a += 4, o += 4) {
+      const w = read32(a);
+      if (w === undefined) return null;
+      view.setUint32(o, w, false);
+    }
+  }
+  return new IncrementalSha256().update(bytes).digestHex();
+}
+
 // Merge sorted block ranges into maximal contiguous ranges.
 export function mergeRanges(ranges) {
   const sorted = [...ranges].sort((a, b) => a[0] - b[0]);
@@ -95,7 +114,8 @@ export function planModule(result, { id = 0, kind = "dol", read32, profile = nul
       ranges,
       extraEntries,
       profileHits,
-      hash: read32 ? regionHash(read32, ranges) : null
+      hash: read32 ? regionHash(read32, ranges) : null,
+      sha256: read32 ? regionSha256(read32, ranges) : null
     };
   });
   return {
@@ -219,6 +239,7 @@ export function validatePlan(plan) {
       checkRanges(f.ranges, "function");
       if (!within(f.ranges, f.entry)) fail("entry outside its ranges");
       if (f.hash !== null && !/^[0-9a-f]{16}$/.test(f.hash)) fail("bad hash");
+      if (f.sha256 != null && !/^[0-9a-f]{64}$/.test(f.sha256)) fail("bad sha256");
       if (!isU32(f.flags ?? 0)) fail("bad flags");
       for (const x of f.extraEntries ?? []) if (!isWord(x) || !within(f.ranges, x)) fail("extra entry outside its region");
     }

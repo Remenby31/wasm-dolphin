@@ -227,6 +227,20 @@ if (process.platform !== "win32") {
   cmakeArgs.push("-DCMAKE_DISABLE_FIND_PACKAGE_Git=ON", "-DGIT_FOUND=ON", `-DGIT_EXECUTABLE=${shim}`);
 }
 
+// DOLPHIN_WASM_CCACHE=<path to ccache> compiles through ccache (set by
+// build-core-repro.mjs --ccache). The launcher does not change the compiler's
+// arguments; CI checks that a ccache build gives the same core as one without.
+if (process.env.DOLPHIN_WASM_CCACHE) {
+  cmakeArgs.push(
+    `-DCMAKE_C_COMPILER_LAUNCHER=${process.env.DOLPHIN_WASM_CCACHE}`,
+    `-DCMAKE_CXX_COMPILER_LAUNCHER=${process.env.DOLPHIN_WASM_CCACHE}`
+  );
+} else {
+  // A tree configured with ccache keeps the launcher in CMakeCache.txt unless
+  // it is cleared explicitly.
+  cmakeArgs.push("-UCMAKE_C_COMPILER_LAUNCHER", "-UCMAKE_CXX_COMPILER_LAUNCHER");
+}
+
 // PROFILING_FUNCS=1 adds a wasm name section to the core so CPU profiles show
 // real symbols instead of wasm-function[N]. Name section only — no codegen or
 // optimisation change, so timings stay representative. Off by default.

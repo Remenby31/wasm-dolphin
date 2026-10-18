@@ -93,7 +93,7 @@ JSON. Columns are flat arrays (one entry per block/edge) to keep it small.
       blocks: { start: [u32], end: [u32], func: [i32] },   // [start, end), end exclusive
       edges:  { from: [blockIdx], to: [blockIdx], kind: [EDGE] },
       functions: [{ entry, confidence, sources: [str], flags, ranges: [[start, end]],
-                    extraEntries: [u32], profileHits, hash }],
+                    extraEntries: [u32], profileHits, hash, sha256 }],
       jumpTables: [{ site, table, count, kind: "abs"|"rel", targets: [u32], bound: "cmplwi"|"scan"|"hint" }],
       indirectSites: [{ site, kind: "bctr"|"bctrl"|"bcctr"|"blrl", resolved: [u32] | null }],
       stats: { blocks, functions, codeBytes, execBytes, rejectedCandidates }
@@ -136,6 +136,14 @@ JSON. Columns are flat arrays (one entry per block/edge) to keep it small.
 order, ranges ascending: offset basis `0xcbf29ce484222325`, prime
 `0x100000001b3`, as 16 lowercase hex digits. Reference values are in
 `tests/aot-plan.test.mjs`.
+
+`sha256` = SHA-256 of the same bytes in the same order (64 lowercase hex).
+It is the identity of the region in the persistent cache: FNV-1a 64 is the
+fast check, not collision resistant across disc revisions, and the disc key
+does not cover RELs. Cache key of a compiled region (worker side, from
+`_DolphinWeb_AotKeyParts`):
+`region-v1:<compilerVersion, 8 hex>:<codegenMask, 8 hex>:<sha256>`, which
+ends in `:` + 64 hex as the cache requires (`isHashedAotKey`).
 
 Before compiling a region ahead of time, and before reusing a cached module
 for it, the compiler re-hashes guest memory over `ranges`. Different hash:
@@ -243,8 +251,8 @@ of its 13,434 functions found as entries, 123 more as block starts, 1 missing;
 its 299 jump tables all found with the same size.
 
 Coverage of the code actually run, measured with
-`harness/probes/aot-coverage.mjs` (a worker spinning on the shared wasm
-heap, reading `PowerPCState.pc` where `GetPPCPC` reads it). It sees the PC
+`harness/probes/aot-coverage.mjs`, through the harness's guest-PC sampler
+(`src/harness-pc-sampler.js`, PowerPCState.pc read from the shared heap). It sees the PC
 where the core stores it, at block dispatch, so the unit that counts is the
 **distinct PC**, an entry into compiled code. Time shares are dominated by
 hot and idle loops and only given as a secondary figure.

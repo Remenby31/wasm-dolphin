@@ -6,7 +6,7 @@
 // relocateModulePlan() with the real section addresses.
 import { CONF_ROOT, discover } from "./aot-discovery.js";
 import { GuestImage } from "./aot-image.js";
-import { Fnv1a64, mergeRanges, regionHash } from "./aot-plan.js";
+import { Fnv1a64, mergeRanges, regionHash, regionSha256 } from "./aot-plan.js";
 
 export const SYNTH_BASE = 0xa0000000;
 export const SYNTH_STRIDE = 0x01000000;
@@ -240,7 +240,7 @@ export function relocateModulePlan(modulePlan, linked, read32) {
   const abs = (section, off) => (base(section) + off) >>> 0;
   const functions = modulePlan.functions.map((f) => {
     const ranges = f.ranges.map(([sect, s, e]) => [abs(sect, s), abs(sect, e)]).sort((a, b) => a[0] - b[0]);
-    return { entry: abs(f.section, f.entry), confidence: f.confidence, sources: f.sources, ranges, hash: regionHash(read32, ranges) };
+    return { entry: abs(f.section, f.entry), confidence: f.confidence, sources: f.sources, ranges, hash: regionHash(read32, ranges), sha256: regionSha256(read32, ranges) };
   });
   return {
     id: modulePlan.relId,

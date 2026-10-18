@@ -8,7 +8,7 @@ import os from "node:os";
 import path from "node:path";
 import { pathToFileURL } from "node:url";
 import { parseArgs } from "node:util";
-import { ensureServer, pageCall, readCoreProgress, readFrameInfo, REPO_ROOT, workerRequest } from "./lib/browser.mjs";
+import { ensureServer, loadHarnessState, pageCall, readCoreProgress, readFrameInfo, REPO_ROOT, workerRequest } from "./lib/browser.mjs";
 import { analyzeDifferential, INTERP_QUERY, JIT_QUERY } from "./lib/fuzz.mjs";
 import { releaseAll, setPad } from "./lib/gamepad-mock.mjs";
 import { compareFrames, diffImage, identical } from "./lib/image-diff.mjs";
@@ -17,6 +17,7 @@ import { captureSourceOk, captureSupported, confirmationItems, expandEnv, expand
 import { runChecks } from "./lib/correctness.mjs";
 import { browserInfo, isOverloaded, waitForLoad } from "./lib/env.mjs";
 import { createFreezeWatch, probeWorker } from "./lib/freeze-probe.mjs";
+import { acquirePerfLock } from "./lib/perf-lock.mjs";
 import { correctnessGate, crossCommitGate, decide, infraCrashGate, findingsGate, gateMarkdown, mergeGates, perfReport, runsByCell } from "./lib/gate.mjs";
 import { renderChecks, renderVsBaseline } from "./lib/render-check.mjs";
 import { IDENTITY_FILE } from "./lib/server.mjs";
@@ -157,6 +158,12 @@ async function measureInSession(session, server, { iso, label, warmup, secs, sho
     // Games that boot deterministically (no scripted inputs, no savestate)
     // are captured at VI output N from boot, before anything else runs.
     const bootCapture = !statePath && !steps ? await renderCapture(session, { game, spec, query, statePath, dir, label }) : null;
+    // measureFromState: the measured window starts from the savestate (a
+    // scene mid-race), not from boot; the steps then only hold inputs.
+    if (statePath && game.measureFromState) {
+      const loaded = await loadHarnessState(session.page, session.url);
+      if (!loaded?.loaded) throw new Error(`savestate load failed: ${JSON.stringify(loaded)}`);
+    }
     if (steps) await runSteps(session.page, steps);
     const audio = game.audio === false ? { attached: false, reason: "disabled in spec" } : await attachAudio(session);
     await waitSeconds(session, warmup);
@@ -252,8 +259,7 @@ async function renderCapture(session, { game, spec, query, statePath, dir, label
   if (!supported.ok) return { error: supported.why };
   if (!statePath && game.steps) return { error: "scripted inputs and no savestate: no exact frame to compare" };
   if (statePath) {
-    await waitRunning(session.page);
-    const loaded = await pageCall(session.page, "__loadStateFile", new URL("__harness_state.sav", session.url).href, 120000);
+    const loaded = await loadHarnessState(session.page, session.url);
     if (!loaded?.loaded) return { error: `savestate load failed: ${JSON.stringify(loaded)}` };
   }
   const index = Number(spec.renderFrame ?? (statePath ? 120 : 300));
@@ -409,16 +415,6 @@ async function cmdMeasure(argv) {
 }
 
 // ---------------------------------------------------------------- diff
-async function waitRunning(page, timeoutMs = 60000) {
-  const end = Date.now() + timeoutMs;
-  while (Date.now() < end) {
-    const p = await readCoreProgress(page);
-    if ((p?.frame ?? 0) > 0) return; // frames only advance once Running
-    await page.waitForTimeout(100);
-  }
-  throw new Error("core never reached Running");
-}
-
 async function captureScene(server, values, { iso, query, index, state, steps, label, dir }) {
   const supported = captureSupported(query);
   if (!supported.ok) throw new Error(`${label}: ${supported.why}`);
@@ -427,9 +423,7 @@ async function captureScene(server, values, { iso, query, index, state, steps, l
   try {
     if (steps) await runSteps(session.page, steps);
     if (state) {
-      // A load sent before the core is Running is refused ("Starting").
-      await waitRunning(session.page);
-      const loaded = await pageCall(session.page, "__loadStateFile", new URL("__harness_state.sav", session.url).href, 120000);
+      const loaded = await loadHarnessState(session.page, session.url);
       if (!loaded?.loaded) throw new Error(`savestate load failed: ${JSON.stringify(loaded)}`);
     }
     const capture = await captureInSession(session, { index, fromLoad: Boolean(state) });
@@ -692,7 +686,7 @@ function cmdReport(argv) {
 
 // ---------------------------------------------------------------- gate / ab
 // Export the served part of a git ref (page, app, core, server) to a temp dir.
-function exportRef(ref) {
+export function exportRef(ref) {
   const dir = mkdtempSync(path.join(os.tmpdir(), "gc-harness-baseline-"));
   claim(dir, REPO_ROOT, "baseline-export");
   const commit = execFileSync("git", ["-C", REPO_ROOT, "rev-parse", ref], { encoding: "utf8" }).trim();
@@ -741,6 +735,17 @@ function cmdGate(argv) {
 // `known`: extra known-failure entries (the selftest's), on top of the file.
 export async function abCompare({ spec, specDir, values, dir, baseline, candidate, accept = [], known = [] }) {
   const plan = expandMatrix(spec);
+  // ab measures speed (the performance report): one campaign at a time on
+  // this machine, under the shared perf lock (PROGRAM.md).
+  const releaseLock = await acquirePerfLock({ name: `harness ab ${spec.name ?? "matrix"} (${REPO_ROOT})`, waitSec: Number(values["lock-wait"] ?? 1800), log: (m) => console.log(`[harness] ${m}`) });
+  try {
+    return await abCompareLocked({ spec, specDir, values, dir, baseline, candidate, accept, known, plan });
+  } finally {
+    releaseLock();
+  }
+}
+
+async function abCompareLocked({ spec, specDir, values, dir, baseline, candidate, accept, known, plan }) {
   const sides = { baseline: { tree: baseline, records: [] }, candidate: { tree: candidate, records: [] } };
   for (const side of Object.keys(sides)) mkdirSync(path.join(dir, side));
   const play = async (items) => {
@@ -780,7 +785,7 @@ export async function abCompare({ spec, specDir, values, dir, baseline, candidat
 // Baseline (a git ref, default origin/main) vs this tree. `harness/run gate`
 // on the two result directories reproduces the decision.
 async function cmdAb(argv) {
-  const { values, positionals } = parse(argv, { runs: { type: "string" }, "max-load": { type: "string" }, confirm: { type: "string", default: "2" }, "baseline-ref": { type: "string", default: "origin/main" }, accept: { type: "string", multiple: true, default: [] } });
+  const { values, positionals } = parse(argv, { runs: { type: "string" }, "max-load": { type: "string" }, "lock-wait": { type: "string", default: "1800" }, confirm: { type: "string", default: "2" }, "baseline-ref": { type: "string", default: "origin/main" }, accept: { type: "string", multiple: true, default: [] } });
   if (!positionals[0]) throw new Error("usage: harness/run ab <spec.json> [--baseline-ref origin/main] [--runs N] [--max-load L] [--confirm N] [--accept game/config …]");
   const spec = readSpec(positionals[0], values);
   const dir = outDir(values, `ab-${spec.name ?? "matrix"}`, { private: spec.games.some((g) => g.localOnly) });
