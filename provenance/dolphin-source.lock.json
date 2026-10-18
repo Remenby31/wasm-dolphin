@@ -25,7 +25,7 @@
       "commit": "01e0577914a75a2569c846778c2f93aa8e6feddd"
     }
   },
-  "patchSeriesSha256": "4415610e7650d06ea76a23866a84bd9b2ed3e64bbb7f387e62acfdf1005ba94e",
+  "patchSeriesSha256": "990c7d477102517c03fa45edb60fe8439576465c21d6c8ad225b230a6fa0f631",
   "patches": [
     {
       "order": 1,
@@ -559,12 +559,20 @@
       "order": 67,
       "cwd": ".",
       "hashMode": "lf-normalized",
+      "path": "patches/dolphin-wasm/snapshot/0070-memcard-flush-on-request.patch",
+      "size": 2177,
+      "sha256": "b9983c06f12084212c9b128d03858cc3d4cd836c19e8b7f4d693ff3f17ea9a6b"
+    },
+    {
+      "order": 68,
+      "cwd": ".",
+      "hashMode": "lf-normalized",
       "path": "patches/dolphin-wasm/snapshot/0071-jit-exact-fp-and-engine-reject-guard.patch",
       "size": 73833,
       "sha256": "811fb8d6286866908897cc61966eb26af70eb73d0e0704a6717fd686ff235b7f"
     },
     {
-      "order": 68,
+      "order": 69,
       "cwd": ".",
       "hashMode": "lf-normalized",
       "path": "patches/dolphin-wasm/snapshot/0072-jit-deterministic-engage-exception-oracle-inline-fma.patch",
@@ -572,7 +580,7 @@
       "sha256": "81fa851dbd433dedc987ca06bbb59bf51b35443a86e1a8202d72b7e745fc030e"
     },
     {
-      "order": 69,
+      "order": 70,
       "cwd": ".",
       "hashMode": "lf-normalized",
       "path": "patches/dolphin-wasm/snapshot/0073-jit-fast-exact-fma-inline-frsqrte.patch",
@@ -580,7 +588,15 @@
       "sha256": "854d3083f7b0c141c6491ba847985dc07dc1020ec05664a11c1621a951684996"
     },
     {
-      "order": 70,
+      "order": 71,
+      "cwd": ".",
+      "hashMode": "lf-normalized",
+      "path": "patches/dolphin-wasm/snapshot/0080-gpu-sync-diagnostics.patch",
+      "size": 6519,
+      "sha256": "0b8142c819403ed8518459c1993189eb78891fda254ebebf44de549164fef0ff"
+    },
+    {
+      "order": 72,
       "cwd": "Externals/SFML/SFML",
       "hashMode": "lf-normalized",
       "path": "patches/dolphin-wasm/submodules/0001-sfml-emscripten-config.patch",
@@ -588,7 +604,7 @@
       "sha256": "f82197a21fe982ad83f6ee7bbf5a03839b1cebd4d64da3eab11263842bf61d89"
     },
     {
-      "order": 71,
+      "order": 73,
       "cwd": "Externals/xxhash/xxHash",
       "hashMode": "lf-normalized",
       "path": "patches/dolphin-wasm/submodules/0002-xxhash-wasm-simd-scalar.patch",

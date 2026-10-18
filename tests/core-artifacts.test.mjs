@@ -1,7 +1,7 @@
 import assert from "node:assert/strict";
 import { spawnSync } from "node:child_process";
 import { createHash } from "node:crypto";
-import { cpSync, existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import { chmodSync, cpSync, existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import path from "node:path";
 import test from "node:test";
@@ -12,6 +12,7 @@ import {
   resolvePinConflict, restoreCoreFromBase, stagedCoreArtifactChanges
 } from "../tools/core-artifacts.mjs";
 import { CORE_LOCK_PATH, formatCoreLock } from "../tools/core-lock.mjs";
+import { coreSourceRecord } from "../tools/core-build-info.mjs";
 import { DEFAULT_UPSTREAM_CORE_SHA256 } from "../src/upstream-worker-protocol.js";
 
 const PROTOCOL_PATH = "src/upstream-worker-protocol.js";
@@ -277,13 +278,15 @@ function publishFixture() {
   return { dir, artifact };
 }
 
+const BUILT = sha256("built");
+
 test("publishing decides on content, and refuses a build of other sources before installing anything", async () => {
   const { dir, artifact } = publishFixture();
   try {
     const commits = [];
     const identity = { same: true };
-    const run = (statusFor) => publishPlan({
-      artifactDir: artifact, cwd: dir,
+    const run = (statusFor, builtSha256 = BUILT) => publishPlan({
+      artifactDir: artifact, cwd: dir, builtSha256,
       status: async (cwd) => statusFor(readFileSync(path.join(cwd, CORE_BINARY_FILES[1]), "utf8")),
       identityDifferences: () => (identity.same ? [] : ["source.patchSeriesSha256 differs"]),
       regenerate: () => {
@@ -293,16 +296,24 @@ test("publishing decides on content, and refuses a build of other sources before
       },
       commit: (message) => commits.push(message)
     });
-    assert.deepEqual(await run(() => ({ current: true })), { schemaVersion: 1, action: "none" });
+    await assert.rejects(run(() => ({ current: true }), "0".repeat(64)), /not the core this run built/);
+
+    // none: the committed .wasm is the very core this run built.
+    writeFileSync(path.join(dir, CORE_BINARY_FILES[1]), "built");
+    const none = await run(() => ({ current: true, coreId: `sha256:${BUILT}` }));
+    assert.equal(none.action, "none");
+    assert.equal(commits.length, 0);
+    writeFileSync(path.join(dir, CORE_BINARY_FILES[1]), "committed");
 
     identity.same = false;
     const handedOver = await run(() => ({ current: false, reasons: ["stale"] }));
-    assert.deepEqual(handedOver, { schemaVersion: 1, action: "dispatch", reasons: ["source.patchSeriesSha256 differs"] });
+    assert.equal(handedOver.action, "dispatch");
+    assert.deepEqual(handedOver.reasons, ["source.patchSeriesSha256 differs"]);
     assert.equal(readFileSync(path.join(dir, CORE_BINARY_FILES[1]), "utf8"), "committed", "nothing installed");
 
     identity.same = true;
-    const committed = await run((wasm) => ({ current: wasm === "built", coreId: "sha256:built", reasons: [] }));
-    assert.deepEqual(committed, { schemaVersion: 1, action: "commit", coreId: "sha256:built" });
+    const committed = await run((wasm) => ({ current: wasm === "built", coreId: `sha256:${BUILT}`, reasons: [] }));
+    assert.equal(committed.action, "commit");
     assert.equal(commits.length, 1);
 
     for (const file of CORE_DERIVED_FILES) writeFileSync(path.join(dir, file), "committed");
@@ -313,19 +324,102 @@ test("publishing decides on content, and refuses a build of other sources before
   }
 });
 
+test("none needs the committed bytes to be this run's build, whatever the build record declares", async () => {
+  for (const platform of ["darwin-arm64", "linux-x64"]) {
+    const { dir, artifact } = publishFixture();
+    try {
+      // A current core of other bytes, even one whose record claims linux-x64.
+      writeFileSync(path.join(dir, CORE_BINARY_FILES[2]), JSON.stringify({ toolchain: { observed: { platform } } }));
+      const commits = [];
+      const plan = await publishPlan({
+        artifactDir: artifact, cwd: dir, builtSha256: BUILT,
+        status: async () => ({ current: true, coreId: "sha256:x", reasons: [] }),
+        identityDifferences: () => [], regenerate: () => {}, commit: (message) => commits.push(message)
+      });
+      assert.equal(plan.action, "commit", platform);
+      assert.match(plan.reason, new RegExp(`replaces the committed ${platform} build of the same sources`));
+      assert.equal(readFileSync(path.join(dir, CORE_BINARY_FILES[1]), "utf8"), "built");
+      assert.equal(commits.length, 1);
+    } finally {
+      rmSync(dir, { recursive: true, force: true });
+    }
+  }
+});
+
 test("publish-plan writes one validated JSON plan and fails without one", () => {
-  const cli = (args) => spawnSync(process.execPath, [path.join(repoRoot, "tools/core-artifacts.mjs"), "publish-plan", ...args],
-    { cwd: repoRoot, encoding: "utf8" });
-  assert.notEqual(cli(["--artifact", "/nonexistent"]).status, 0, "--out is required");
-  const out = path.join(mkdtempSync(path.join(tmpdir(), "plan-")), "plan.json");
-  // This checkout's committed core is current on main and on this branch, so
-  // the plan is "none" without touching anything.
-  const result = cli(["--artifact", "/nonexistent", "--out", out]);
-  if (result.status === 0) {
-    assert.deepEqual(JSON.parse(readFileSync(out, "utf8")), { schemaVersion: 1, action: "none" });
-    assert.equal(result.stdout, "", "stdout carries nothing besides the plan file");
-  } else {
+  // A checkout whose committed core is "current" by construction: its build
+  // record states exactly the sources and locks the checkout holds.
+  const dir = mkdtempSync(path.join(tmpdir(), "plan-checkout-"));
+  const artifact = mkdtempSync(path.join(tmpdir(), "plan-artifact-"));
+  try {
+    for (const relative of [...CORE_DERIVED_FILES, ABI_PATH, "core/upstream", "tools/jit-cache-prejs.js",
+      "provenance/dolphin-source.lock.json", "provenance/dolphin-vendor-snapshot-v1.json",
+      "provenance/wasm-toolchain.lock.json", "tools/naga-spirv-wgsl/Cargo.lock"]) {
+      cpSync(path.join(repoRoot, relative), path.join(dir, relative), { recursive: true });
+    }
+    const wasm = readFileSync(path.join(dir, CORE_BINARY_FILES[1]));
+    const hash = sha256(wasm);
+    const js = readFileSync(path.join(dir, CORE_BINARY_FILES[0]), "utf8").replaceAll("\r\n", "\n");
+    const info = JSON.parse(readFileSync(path.join(dir, CORE_BINARY_FILES[2]), "utf8"));
+    info.source = coreSourceRecord(dir);
+    info.toolchain = { ...info.toolchain,
+      lockSha256: sha256(readFileSync(path.join(dir, "provenance/wasm-toolchain.lock.json"))),
+      cargoLockSha256: sha256(readFileSync(path.join(dir, "tools/naga-spirv-wgsl/Cargo.lock"), "utf8").replaceAll("\r\n", "\n")) };
+    info.artifacts = { ...info.artifacts, wasm: { ...info.artifacts.wasm, sha256: hash }, js: { ...info.artifacts.js, sha256: sha256(js) } };
+    info.coreId = `sha256:${hash}`;
+    writeFileSync(path.join(dir, CORE_BINARY_FILES[2]), JSON.stringify(info, null, 2));
+    writeFileSync(path.join(dir, CORE_LOCK_PATH), formatCoreLock(hash));
+    const abi = JSON.parse(readFileSync(path.join(dir, ABI_PATH), "utf8"));
+    writeFileSync(path.join(dir, ABI_PATH), JSON.stringify({ ...abi, coreId: `sha256:${hash}` }, null, 2));
+    // The artifact of a run that built exactly the committed core.
+    for (const file of CORE_DERIVED_FILES) {
+      writeFileSync(path.join(artifact, path.basename(file)), readFileSync(path.join(dir, file)));
+    }
+
+    const cli = (args) => spawnSync(process.execPath, [path.join(repoRoot, "tools/core-artifacts.mjs"), "publish-plan",
+      "--checkout", dir, ...args], { cwd: dir, encoding: "utf8" });
+    const out = path.join(dir, "plan.json");
+    assert.notEqual(cli(["--artifact", artifact, "--built-sha256", hash]).status, 0, "--out is required");
+    assert.notEqual(cli(["--artifact", artifact, "--out", out]).status, 0, "--built-sha256 is required");
     assert.ok(!existsSync(out), "no plan is written when planning fails");
+    const result = cli(["--artifact", artifact, "--built-sha256", hash, "--out", out]);
+    assert.equal(result.status, 0, result.stderr);
+    const plan = JSON.parse(readFileSync(out, "utf8"));
+    assert.equal(plan.action, "none");
+    assert.equal(plan.coreId, `sha256:${hash}`);
+    assert.equal(result.stdout, "", "stdout carries nothing besides the plan file");
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+    rmSync(artifact, { recursive: true, force: true });
+  }
+});
+
+test("the core commit records 100644 even when main's files are executable", async () => {
+  const f = fixture();
+  try {
+    f.installCore("core-A", ["_Boot"]);
+    for (const file of CORE_DERIVED_FILES) chmodSync(path.join(f.dir, file), 0o755);
+    f.commit("main with an executable core");
+    assert.match(f.git("ls-tree", "HEAD", "--", CORE_BINARY_FILES[1]), /^100755 /);
+    const artifact = mkdtempSync(path.join(tmpdir(), "mode-artifact-"));
+    for (const file of CORE_DERIVED_FILES) {
+      writeFileSync(path.join(artifact, path.basename(file)), `new ${file}`, { mode: 0o755 });
+    }
+    writeFileSync(path.join(artifact, "dolphin-core-upstream.build.json"), "{}", { mode: 0o755 });
+    const wasm = readFileSync(path.join(artifact, "dolphin-core-upstream.wasm"));
+    const plan = await publishPlan({
+      artifactDir: artifact, cwd: f.dir, builtSha256: sha256(wasm),
+      status: async (cwd) => ({ current: readFileSync(path.join(cwd, CORE_BINARY_FILES[1]), "utf8").startsWith("new "),
+        coreId: "sha256:x", reasons: ["stale"] }),
+      identityDifferences: () => [], regenerate: () => {}
+    });
+    assert.equal(plan.action, "commit");
+    for (const file of [...CORE_DERIVED_FILES, ABI_PATH]) {
+      assert.match(f.git("ls-tree", "HEAD", "--", file), /^100644 blob /, file);
+    }
+    rmSync(artifact, { recursive: true, force: true });
+  } finally {
+    rmSync(f.dir, { recursive: true, force: true });
   }
 });
 

@@ -1,27 +1,27 @@
 {
   "schemaVersion": 1,
   "abiVersion": 1,
-  "coreId": "sha256:aa9e3e896e38673dffa52b555178809b0aebe943418cc1b956fbc8994a6580c6",
+  "coreId": "sha256:4057670b9bf8db271ee5a047ca4ca6d17b2d86477fd3d8a4623bdf47fd3e399a",
   "upstreamCommit": "e22551eae1c84a7e4d0b6a5c519ef4ed4ef69df1",
   "artifacts": [
     {
       "path": "cores/dolphin/dolphin-core-upstream.js",
       "hashMode": "lf-normalized",
-      "size": 270148,
-      "sha256": "0df84d85ac9f5194fcecaea1a1cef7d27f363c2b1871321affaff7896de5e2ac"
+      "size": 272025,
+      "sha256": "b3efeddcb87e8f528f9a143505156e36031dd37a144431cf58524a93142457fb"
     },
     {
       "path": "cores/dolphin/dolphin-core-upstream.wasm",
-      "size": 12989148,
-      "sha256": "aa9e3e896e38673dffa52b555178809b0aebe943418cc1b956fbc8994a6580c6"
+      "size": 12997998,
+      "sha256": "4057670b9bf8db271ee5a047ca4ca6d17b2d86477fd3d8a4623bdf47fd3e399a"
     }
   ],
   "contractSources": [
     {
       "path": "core/upstream/dolphin_web_discio.cpp",
       "hashMode": "lf-normalized",
-      "size": 55180,
-      "sha256": "0afdf1dbe3e4582ec391f204f4119f8c8bbaf99bfa40e72fd8164d291498302b"
+      "size": 59098,
+      "sha256": "640c5272dce7ca14b6abf93cf0ce696330daca359792d6ee9a18fa51188bff23"
     },
     {
       "path": "core/upstream/dolphin_web_raster_profile.h",
@@ -38,14 +38,14 @@
     {
       "path": "core/upstream/dolphin_web_core.cpp",
       "hashMode": "lf-normalized",
-      "size": 45437,
-      "sha256": "8363bedba96d754f7c066f88e411469718124725e1e648576d50566932a91377"
+      "size": 47298,
+      "sha256": "b6281cf58785f673408bea2a0513b43f330c811b3a03276f004a8108070eb8d5"
     },
     {
       "path": "src/app.js",
       "hashMode": "lf-normalized",
-      "size": 50202,
-      "sha256": "ddb35fcaf38055a7cf181c912d2b838ed96ec0767204f70c6719bca727912c55"
+      "size": 50421,
+      "sha256": "403e892c103cfd214dd41df68bded99043818369a663b4260045c35c938a76cc"
     },
     {
       "path": "src/audio.js",
@@ -80,8 +80,8 @@
     {
       "path": "src/core-host.js",
       "hashMode": "lf-normalized",
-      "size": 66536,
-      "sha256": "8280a86af296d04668f7ed527a28371ce0f369c156ba4edf0a324d2539a2d428"
+      "size": 67006,
+      "sha256": "5437d1b9db741a78ae6eff6081ac2297af4cdfbdcd4425c0d0678dfef015d20e"
     },
     {
       "path": "src/diagnostic-log-filter.js",
@@ -134,8 +134,8 @@
     {
       "path": "src/upstream-discio-worker.js",
       "hashMode": "lf-normalized",
-      "size": 621639,
-      "sha256": "75ec207f0bbe0adb6d607638e60a74fba8d119d3f7019dec3914c70b8250012a"
+      "size": 650616,
+      "sha256": "65d0d94e8eae940c6e651cff0ed40288f774f37f53f230081e7abab8ec570879"
     },
     {
       "path": "src/wgpu-renderer-worker-probe.js",
@@ -158,8 +158,8 @@
     {
       "path": "src/upstream-worker-adapter.js",
       "hashMode": "lf-normalized",
-      "size": 41920,
-      "sha256": "c1f7543c35124d4ed7c3eabdf26dd0d185f5e0a2575611dd8146f14c99b2ae04"
+      "size": 45774,
+      "sha256": "524fb35d4d8c0b18b60772bdb1b990ee9c88fc22178bbf5af1f1f821379abefd"
     },
     {
       "path": "src/upstream-worker-protocol.js",
@@ -350,17 +350,7 @@
     }
   },
   "memoryContractStatus": "consistent",
-  "sourceOnlyExportsPendingRebuild": [
-    "_DolphinWeb_JitArmedStepForTest",
-    "_DolphinWeb_JitFailNextInstance",
-    "_DolphinWeb_JitFailNextTableGrow",
-    "_DolphinWeb_JitOnStateLoaded",
-    "_DolphinWeb_JitTableFull",
-    "_DolphinWeb_JitTransientRejectCount",
-    "_GetPpcWasmJitArmStartFrame",
-    "_GetPpcWasmJitEngagedFrame",
-    "_SetPpcWasmJitWarmup"
-  ],
+  "sourceOnlyExportsPendingRebuild": [],
   "moduleExports": [
     "_AcknowledgeWebGpuOwnershipTraceCapture",
     "_AudioBuffer",
@@ -385,11 +375,17 @@
     "_DolphinWeb_HarnessViRingHead",
     "_DolphinWeb_HarnessViSinceBoot",
     "_DolphinWeb_HarnessViSinceLoad",
+    "_DolphinWeb_JitArmedStepForTest",
     "_DolphinWeb_JitCompileBytesForTest",
     "_DolphinWeb_JitEngineRejectCount",
+    "_DolphinWeb_JitFailNextInstance",
+    "_DolphinWeb_JitFailNextTableGrow",
+    "_DolphinWeb_JitOnStateLoaded",
     "_DolphinWeb_JitOracleBuffer",
     "_DolphinWeb_JitOracleMessage",
     "_DolphinWeb_JitOracleRun",
+    "_DolphinWeb_JitTableFull",
+    "_DolphinWeb_JitTransientRejectCount",
     "_DolphinWeb_RecordCacheHit",
     "_DolphinWeb_RecordCacheMiss",
     "_DolphinWeb_RecordInstanceUs",
@@ -436,6 +432,8 @@
     "_GetPpcWasmBlockCompileCount",
     "_GetPpcWasmBlockRunCount",
     "_GetPpcWasmHelperStats",
+    "_GetPpcWasmJitArmStartFrame",
+    "_GetPpcWasmJitEngagedFrame",
     "_GetRawSize",
     "_GetRegion",
     "_GetRendererFeatureMask",
@@ -497,6 +495,7 @@
     "_SetPadState",
     "_SetPpcProfileEnabled",
     "_SetPpcWasmJitEnabled",
+    "_SetPpcWasmJitWarmup",
     "_SetPresentationScale",
     "_SetRendererFeatureMask",
     "_SetSoftwareRasterProfileEnabled",
@@ -546,29 +545,43 @@
     "requestTypes": [
       "bootProbe",
       "configureAudioWorklet",
+      "exportMemcard",
+      "exportSaveState",
+      "flushUserData",
+      "importMemcard",
+      "importSaveState",
+      "listUserData",
       "load",
       "loadState",
       "loadStateFile",
       "mixAudio",
       "mountFile",
+      "pause",
       "rendererDiagnostics",
       "reset",
+      "resume",
       "runFrame",
       "saveState",
       "saveStateFile",
       "setAudioMuted",
       "setInputMask",
       "setInputState",
+      "start",
+      "stop",
       "validationBeginWgpuRendererProbeMeasurement",
       "validationCaptureAtVi",
+      "validationEnableGpuSyncDiag",
       "validationEnableHarness",
       "validationFinalizeWgpuMappedDrain",
       "validationFinalizeWgpuRendererProbe",
       "validationFinalizeWgpuReplay",
+      "validationPcSampler",
       "validationReadCoreProgress",
       "validationReadJitCacheReadiness",
       "validationReadTimeline",
-      "validationSetCorePaused"
+      "validationReadWgpuReplayState",
+      "validationSetCorePaused",
+      "validationSetWgpuPerturbation"
     ],
     "notificationFields": {
       "detachedOglFrame": [

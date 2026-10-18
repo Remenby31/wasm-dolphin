@@ -3,8 +3,8 @@
   "normalization": "git-blob-lf",
   "root": {
     "baseCommit": "e22551eae1c84a7e4d0b6a5c519ef4ed4ef69df1",
-    "resultTree": "5fca665e0d1b6ae147e47e8cfc7259656b6d0fce",
-    "changedPathCount": 115,
+    "resultTree": "19a42c212487bbd0c7eec808e4551712296b388a",
+    "changedPathCount": 121,
     "records": [
       {
         "path": "CMakeLists.txt",
@@ -236,9 +236,36 @@
         "status": "M",
         "mode": "100644",
         "baseBlob": "73ff1d616c5df5c5a5464b0dec8482f258e102a9",
-        "resultBlob": "7cddbee872da31140711f8f89c5edc2076d5b95f",
-        "size": 16913,
-        "sha256": "d13a35180542854f23cd2bc90a3cf9d475af2a0ea1664caf58f696c5fbc4986e"
+        "resultBlob": "ca4be74568d34efadd191250a40d8045cec8f609",
+        "size": 17000,
+        "sha256": "071adedf60db1cf9b9a96355e06788ecfae11b3c8852038ce8810f0779ac0e86"
+      },
+      {
+        "path": "Source/Core/Core/HW/EXI/EXI_DeviceMemoryCard.h",
+        "status": "M",
+        "mode": "100644",
+        "baseBlob": "db9c013671575799ee780b71325501c7cd779fa5",
+        "resultBlob": "a2239854ca7b57e99b2886a37f585bc70feee4a0",
+        "size": 3310,
+        "sha256": "9f5001dc99879efba5546e4527cce8ea68beaba0dc7b0a43cc834ad56fc681df"
+      },
+      {
+        "path": "Source/Core/Core/HW/GCMemcard/GCMemcardBase.h",
+        "status": "M",
+        "mode": "100644",
+        "baseBlob": "5805b9056040a98783bc2fcabd1e0496f55ad990",
+        "resultBlob": "42d63078986eb365eea99c0fa4c29f59076708c4",
+        "size": 1083,
+        "sha256": "4ede5641f589897f7c5715351148e7c9f7a8ad8cf7edf74a3c6cae1a5867b535"
+      },
+      {
+        "path": "Source/Core/Core/HW/GCMemcard/GCMemcardDirectory.h",
+        "status": "M",
+        "mode": "100644",
+        "baseBlob": "27e45b317df852fa250b3b86a0198055c489048d",
+        "resultBlob": "fa8c1dd1d62c20cdceafbc84fcbf671e55f8b6a4",
+        "size": 2337,
+        "sha256": "a1692a11b699d3396366a573cf1482b67bd26066d8830a50c13c263fa323912e"
       },
       {
         "path": "Source/Core/Core/HW/GCPad.cpp",
@@ -821,9 +848,9 @@
         "status": "M",
         "mode": "100644",
         "baseBlob": "f183c9365514cc908bbc3641d55ff8db8c3acfe9",
-        "resultBlob": "b44544f10225c8b6f670c0cf6a4095efa489b808",
-        "size": 26167,
-        "sha256": "5ecc0251aff884fbe699c03df128cdeaa67482babce9097f28cfdca0ca9819d3"
+        "resultBlob": "86281c79032a6cedb381b13b74a6220c2d022f39",
+        "size": 26406,
+        "sha256": "baeeb5ec53001315cc3fd34b975960223ef5a5ff18545b58448ef1e644c540c7"
       },
       {
         "path": "Source/Core/VideoCommon/FramebufferManager.cpp",
@@ -860,6 +887,24 @@
         "resultBlob": "1e41235d86e1ed7b3b6bddf56834d61cc3c2c0b4",
         "size": 7252,
         "sha256": "64e44c83b46279abebaabc9f4656657219c08e97f94c43b155ae9e61d8819448"
+      },
+      {
+        "path": "Source/Core/VideoCommon/PixelEngine.cpp",
+        "status": "M",
+        "mode": "100644",
+        "baseBlob": "63642d017d91c00f7f4668a59eccdbe45db8ee8b",
+        "resultBlob": "f8c96880a359281a71a8b9a7001cbc88a0b9de04",
+        "size": 8694,
+        "sha256": "de328492784c81134afa57d69cb92a8a6c540738952038d4e3bc642be68d51d7"
+      },
+      {
+        "path": "Source/Core/VideoCommon/PixelEngine.h",
+        "status": "M",
+        "mode": "100644",
+        "baseBlob": "6dfc8556c5d6a67a1e37819a534501f2528d2d53",
+        "resultBlob": "0ea3ad256a75d75eee71cb533494ba9915018622",
+        "size": 5642,
+        "sha256": "17e5547b161cbc9d79db56bec1d77c3e6d866dccbb85035dd9bde6166ef57321"
       },
       {
         "path": "Source/Core/VideoCommon/PixelShaderGen.cpp",
@@ -997,6 +1042,15 @@
         "sha256": "67933a1263d910d81c22c3f70c7b1b4226aa80f3055228762c3e8666aedbc9c7"
       },
       {
+        "path": "Source/Core/VideoCommon/WasmGpuSyncDiag.h",
+        "status": "A",
+        "mode": "100644",
+        "baseBlob": null,
+        "resultBlob": "051f4c330178d294f83655443ad36da30b2a3f70",
+        "size": 1424,
+        "sha256": "6d0bdd682a6dfacc34e3f02c664bb2f2f475cd05ac0f63bcf84f2191c942e7cb"
+      },
+      {
         "path": "Source/Core/VideoCommon/WasmWebGpuDrawProfile.h",
         "status": "A",
         "mode": "100644",
@@ -1077,5 +1131,5 @@
       ]
     }
   ],
-  "contentSha256": "61d7095b58bfd8e19a1cc9eaad01f3bfdce2762f39604d2836f9fd3f85617a61"
+  "contentSha256": "5089d90351b348b983b0173154485923afcd220c47831f01e1524ed7a7e4e7a8"
 }

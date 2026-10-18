@@ -76,6 +76,14 @@ export const MUTANTS = [
   }
 ];
 
+// The Chrome renderer process dies (JS heap exhausted on the page) 10 s
+// after load, on every run: the cell is run again, crashes again, blocks.
+MUTANTS.push({
+  id: "renderer-crash", what: "the Chrome renderer crashes on every run (candidate only)",
+  spec: scene({ configs: [{ id: "sw-interp", preset: "sw-interp" }] }),
+  candidate: { patches: [{ file: "src/app.js", append: "\n;setTimeout(() => { const hog = []; for (;;) hog.push(new Array(1 << 20).fill(hog.length)); }, 10000);\n" }] }
+});
+
 // Nondeterministic output: one random byte of each exact capture flipped, so
 // every run of the patched side shows a different picture (like the JIT
 // nondeterminism found on main). Single-config spec: only renderVsBaseline

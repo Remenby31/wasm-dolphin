@@ -37,7 +37,9 @@
 #include "Core/CoreTiming.h"
 #include "Core/HW/GBAPad.h"
 #include "Core/HW/ProcessorInterface.h"
+#include "Core/HW/EXI/EXI.h"
 #include "Core/HW/EXI/EXI_Device.h"
+#include "Core/HW/EXI/EXI_DeviceMemoryCard.h"
 #include "Core/HW/GCKeyboard.h"
 #include "Core/HW/GCPad.h"
 #include "Core/HW/SystemTimers.h"
@@ -620,7 +622,15 @@ void EnsureRuntime()
   Config::SetBase(Config::MAIN_ENABLE_CHEATS, false);
   Config::SetBase(Config::MAIN_OSD_MESSAGES, false);
   Config::SetBase(Config::MAIN_SLOT_A, ExpansionInterface::EXIDeviceType::MemoryCardFolder);
-  Config::SetBase(Config::MAIN_SLOT_B, ExpansionInterface::EXIDeviceType::None);
+  // A second GCI-folder card in slot B only when the page asks for it
+  // (?memcardb=1 sets Module['dolphinMemcardSlotB']): with a card in each
+  // slot, some games stop to ask which one to use.
+  const bool memcard_slot_b =
+      EM_ASM_INT({ return (typeof Module !== 'undefined' &&
+                           Module['dolphinMemcardSlotB']) ? 1 : 0; }) != 0;
+  Config::SetBase(Config::MAIN_SLOT_B, memcard_slot_b ?
+                                           ExpansionInterface::EXIDeviceType::MemoryCardFolder :
+                                           ExpansionInterface::EXIDeviceType::None);
   // A controller sits on all four ports; DolphinWeb_GetPadStatus reports which
   // ones are plugged in, so the host can hot-plug them.
   for (int port = 0; port < 4; ++port)
@@ -1032,6 +1042,38 @@ int SetCorePaused(int paused)
   Core::HostDispatchJobs(Core::System::GetInstance());
   s_core_status = paused ? "Paused" : "Running";
   return 1;
+}
+
+// Writes every inserted memory card's pending saves to /dolphin-user now,
+// so the page copies what the game has written instead of what Dolphin's
+// flush thread last wrote (up to a second earlier). Runs on the calling
+// (runtime main) thread: GCMemcardDirectory::FlushToFile takes the card's
+// write mutex, and the card's own flush thread proxies its file writes here.
+// Returns the number of cards flushed, or -1 when no game is running.
+#ifdef __EMSCRIPTEN__
+EMSCRIPTEN_KEEPALIVE
+#endif
+int FlushMemoryCards()
+{
+  if (!s_runtime_initialized)
+    return -1;
+  auto& system = Core::System::GetInstance();
+  const Core::State state = Core::GetState(system);
+  if (state != Core::State::Running && state != Core::State::Paused)
+    return -1;
+  int flushed = 0;
+  for (const auto slot : {ExpansionInterface::Slot::A, ExpansionInterface::Slot::B})
+  {
+    auto* device = system.GetExpansionInterface().GetDevice(slot);
+    if (device == nullptr)
+      continue;
+    if (device->m_device_type != ExpansionInterface::EXIDeviceType::MemoryCard &&
+        device->m_device_type != ExpansionInterface::EXIDeviceType::MemoryCardFolder)
+      continue;
+    static_cast<ExpansionInterface::CEXIMemoryCard*>(device)->FlushCard();
+    ++flushed;
+  }
+  return flushed;
 }
 
 int ResetCore()
