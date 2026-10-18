@@ -1,5 +1,7 @@
 export const DEFAULT_UPSTREAM_CORE_URL = "./cores/dolphin/dolphin-core-upstream.js";
-export const DEFAULT_UPSTREAM_CORE_SHA256 = "fe2b64356b49bdf119bc2f36b403bb9b8683d64081c05570d8ac3681fd04cdc2";
+// The default core's hash lives in a data file that CI rewrites with each core (docs/repro-build.md).
+import coreLock from "../cores/dolphin/core.lock.json" with { type: "json" };
+export const DEFAULT_UPSTREAM_CORE_SHA256 = coreLock.sha256;
 export const DISCIO_UPSTREAM_CORE_URL = "./cores/dolphin/dolphin-upstream.js";
 export const WORKERFS_MOUNT_DIR = "/workerfs";
 export const XFB_FAST_PATH_FLAGS = Object.freeze({

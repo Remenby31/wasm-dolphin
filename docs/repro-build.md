@@ -45,7 +45,7 @@ Safety rails:
 - **`--install` cannot leave `cores/dolphin` half-replaced.** It refuses a
   core whose glue loses an export, a runtime method or WORKERFS
   (`--force-install` overrides). It then backs up the five files it rewrites
-  (the three artifacts, the ABI manifest and the worker's pinned hash), renames
+  (the three artifacts, `core.lock.json` and the ABI manifest), renames
   the new artifacts into place, and runs `update:core-abi` and
   `verify:provenance`. On any failure every file is restored, and files that
   did not exist before are removed.
@@ -159,7 +159,7 @@ and toolchain versions:
   (linux/x64). A macOS build of the same sources gets another hash, and
   `core:fetch` and `?coreid=` must use the hash of the build in question.
   CI rebuilding from the source archive, the incremental-equals-clean check,
-  and `commit-core` all run on linux/x64, so main never mixes the two.
+  and the publishing jobs all run on linux/x64, so main never mixes the two.
 
 Removing the dependency would need Cargo not to hash the host into crate
 metadata (no stable switch for that today) or building Naga in the pinned
@@ -267,8 +267,8 @@ Dolphin itself (patch work) needs its own `vendor/`.
 ## Who builds the committed core
 
 Pull requests change sources and patches only. They never carry
-`cores/dolphin/dolphin-core-upstream.{js,wasm,build.json}`, the core hash
-pinned in `src/upstream-worker-protocol.js`, or the binary-derived fields of
+`cores/dolphin/dolphin-core-upstream.{js,wasm,build.json}`, the default-core
+hash in `cores/dolphin/core.lock.json`, or the binary-derived fields of
 `provenance/dolphin-core-abi-v1.json` (`coreId`, `artifacts`, `moduleExports`,
 `runtimeMethods`, `memoryContract`, `memoryContractStatus`). CI owns all of
 these, so C++ pull requests no longer conflict with each other on a 13 MB
@@ -277,7 +277,7 @@ binary and can be merged in any order.
 | Where | What happens |
 | --- | --- |
 | Pull request CI | Builds the core from the branch's sources, installs it in the workspace, and runs `check`, `test` and `test:contract` on it. Publishes it as the artifact `core-<sha256>`, with the GPL source archive, and rebuilds it from that archive alone. |
-| Merge to main | The same build. Then `commit-core` publishes the core of **main's current HEAD**, deciding on content (`core-artifacts.mjs publish-plan`): nothing if HEAD's committed core is already the build of HEAD's sources; commit this core (as `github-actions[bot]`) if it is; otherwise, or if the push is rejected because main moved, dispatch a new run on main. Only a core that the source archive rebuilds byte for byte and that `core:status` and `verify:provenance` accept is committed. Runs on main queue rather than cancel each other, so re-running an old run cannot stop a newer core from being published. The write token is used in one step that runs only `git` and `gh`. |
+| Merge to main | The build job builds **main's tip as it is when the run starts** (so re-running an old run builds the current HEAD). Two jobs then publish it, see below. |
 | Locally | `npm run build:core:repro -- --install` installs a core for testing. Do not commit it; `npm run core:restore -- --base origin/main` puts main's back. |
 
 Why commit the core on main instead of keeping only a signed build record and
@@ -296,10 +296,23 @@ Commands (`tools/core-artifacts.mjs`):
 | `npm run core:fetch -- <sha256> [--repo owner/name]` | Writes an exact core to `build/core-candidates/<sha256>/`, loadable with `?coreid=sha256:<sha256>`. It looks in local builds, then in every commit of git history, then in the `core-<sha256>` Actions artifact (needs `gh`). The `.wasm` hash is checked. |
 | `npm run hooks:install` | Installs `tools/hooks/pre-commit`, which refuses a commit that stages core-derived content (`CORE_ARTIFACTS_ALLOW=1` overrides). Git keeps hooks per clone, so every worktree of the clone gets it. |
 
-The pinned hash is read by evaluating `src/upstream-worker-protocol.js`
-(`tools/core-pin.mjs`), as the browser does, so a commented-out copy of the
-declaration cannot stand in for it; rewriting the pin requires exactly one
-top-level declaration whose value is the export.
+The hash of the core the browser accepts by default is data:
+`cores/dolphin/core.lock.json` (`{"schemaVersion":1,"sha256":"…"}`), which
+`src/upstream-worker-protocol.js` imports as a JSON module. Only
+`update:core-abi` writes it (`tools/core-lock.mjs`), and no tool parses or
+evaluates JavaScript to find it.
+
+Publishing on main is split so that the job able to write runs no code from
+the repository:
+
+| Job | Can write | What it does |
+| --- | --- | --- |
+| `prepare-core-commit` | no | Checks out main's current tip and runs `publish-plan`, which decides on content: `none` (HEAD's committed core is already the build of HEAD's sources), `dispatch` (the build's sources or locks are not HEAD's; decided before anything is installed, so it cannot fail on a core HEAD no longer accepts), or `commit` (installs the core, regenerates the ABI manifest, commits; any inconsistency fails the job). The plan is one JSON file checked with `jq -e` under `set -euo pipefail`. For `commit` it also runs `core:status` and `verify:provenance`, and bundles exactly that commit. |
+| `push-core` | yes | No checkout, no Node. A fresh `--no-checkout` clone of main with user and system git configuration off and `core.hooksPath=/dev/null`. It checks the bundle with git plumbing: one commit, parent = the planned base = main's tip, only the five core files changed, `.wasm` blob hash = the hash built = `core.lock.json`. Then it pushes. If main moved, or the plan is `dispatch`, it starts a new run on main with an `attempt` counter; after 3 hand-overs it fails the job instead. The token is passed only to `git push` and `gh workflow run`. |
+
+Runs on main queue instead of cancelling each other. A push made with
+`GITHUB_TOKEN` starts no new run, and the next run on main finds the core
+current.
 
 The pull-request guard warns until the repository variable
 `CORE_ARTIFACTS_GUARD` is `enforce`. After that, a pull request carrying a

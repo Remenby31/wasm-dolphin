@@ -77,6 +77,7 @@ const CANONICAL_BUILD_OUTPUTS = new Set([
   "cores/dolphin/dolphin-core-upstream.js",
   "cores/dolphin/dolphin-core-upstream.wasm",
   "cores/dolphin/dolphin-core-upstream.build.json",
+  "cores/dolphin/core.lock.json",
   "provenance/dolphin-core-abi-v1.json"
 ]);
 

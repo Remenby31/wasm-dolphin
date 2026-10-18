@@ -4,10 +4,12 @@ name: core build (Linux, reproducible)
 # installs it in the workspace, runs the JS checks and tests on it, and
 # publishes it (artifact core-<sha256>) with the GPL corresponding source. A
 # second job rebuilds the core from that source archive alone and must get the
-# same bytes. On main, a third job commits the core: pull requests change
-# sources only, and the committed core always comes from here
-# (docs/repro-build.md, "Who builds the committed core"). No ROM is used
-# anywhere.
+# same bytes. On main, two more jobs publish the core: prepare-core-commit
+# (read-only) turns it into one validated commit, and push-core (the only job
+# that can write) pushes that commit without running any code from the
+# repository. Pull requests change sources only; the committed core always
+# comes from here (docs/repro-build.md, "Who builds the committed core").
+# No ROM is used anywhere.
 #
 # Third-party actions are pinned by commit SHA (the tag is in the comment):
 # re-running a commit runs the same code.
@@ -17,12 +19,18 @@ on:
     branches: [main]
   pull_request:
   workflow_dispatch:
+    inputs:
+      attempt:
+        description: Publication attempt for main's HEAD (set by push-core; 3 at most)
+        type: number
+        default: 0
 
 permissions: {}
 
 # Pull requests: a new push supersedes the running build. main: runs queue
-# instead, so re-running an old run can never cancel the run that publishes
-# a newer core (commit-core also always targets main's current HEAD).
+# instead of cancelling each other, and every run on main builds and
+# publishes main's tip as it is when the run starts, so a re-run of an old
+# run publishes the current HEAD rather than an old commit.
 concurrency:
   group: core-build-${{ github.ref }}
   cancel-in-progress: ${{ github.event_name == 'pull_request' }}
@@ -40,6 +48,9 @@ jobs:
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
         with:
           persist-credentials: false
+          # On main: the tip at the time the run starts, not the commit that
+          # triggered it.
+          ref: ${{ github.ref == 'refs/heads/main' && 'refs/heads/main' || '' }}
           # The guard below needs the merge base with the target branch.
           fetch-depth: 0
 
@@ -151,8 +162,8 @@ jobs:
       - name: Stage the core artifact
         run: |
           mkdir -p build/core-artifact
-          cp cores/dolphin/dolphin-core-upstream.* provenance/dolphin-core-abi-v1.json \
-            src/upstream-worker-protocol.js build/repro/linux-x64/parity.json build/core-artifact/
+          cp cores/dolphin/dolphin-core-upstream.* cores/dolphin/core.lock.json \
+            provenance/dolphin-core-abi-v1.json build/repro/linux-x64/parity.json build/core-artifact/
 
       - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
         with:
@@ -210,41 +221,24 @@ jobs:
           echo "archive build: $rebuilt, checkout build: ${{ needs.build.outputs.wasm_sha256 }}"
           test "$rebuilt" = "${{ needs.build.outputs.wasm_sha256 }}"
 
-  # After a merge: publish the core of main's current HEAD.
-  # - Only on main (push or a dispatched run), so only merged code runs here.
-  #   This is the one job that can write; the token appears only in the last
-  #   step, which runs git and gh and nothing from the repository.
-  # - Only a core that the published source archive rebuilds byte for byte
-  #   (needs: rebuild-from-source-archive), that the incremental rebuild
-  #   matched (build job), and that core:status and verify:provenance accept.
-  # - It works on main's current HEAD, not on the commit that started the run,
-  #   and decides on content (tools/core-artifacts.mjs publish-plan):
-  #   nothing to do if HEAD's core is already current; commit this core if it
-  #   is the build of HEAD's sources; otherwise dispatch a new run on main.
-  #   A push rejected because main moved also dispatches a new run. So the
-  #   current HEAD always ends up published, whatever order runs finish in.
-  # - No loop: a push made with GITHUB_TOKEN starts no workflow run; a push
-  #   run whose actor is the bot is skipped (github.actor is the pusher, which
-  #   a commit's author name cannot fake; dispatched runs also have the bot as
-  #   actor and must run); and on content the next run finds the core current.
-  commit-core:
+  # On main: turn the core into one commit on top of main's current tip.
+  # Read-only; runs the repository's code (publish-plan, update-core-abi,
+  # core:status, verify:provenance). Its only output is a validated plan and,
+  # for "commit", a git bundle holding exactly that commit.
+  prepare-core-commit:
     needs: [build, rebuild-from-source-archive]
-    if: >-
-      github.ref == 'refs/heads/main' &&
-      ((github.event_name == 'push' && github.actor != 'github-actions[bot]') ||
-       github.event_name == 'workflow_dispatch')
+    if: github.ref == 'refs/heads/main' && github.event_name != 'pull_request'
     runs-on: ubuntu-24.04
     timeout-minutes: 15
     permissions:
-      contents: write
-      actions: write
-    concurrency:
-      group: commit-core
-      cancel-in-progress: false
+      contents: read
+    outputs:
+      action: ${{ steps.plan.outputs.action }}
+      base: ${{ steps.plan.outputs.base }}
     steps:
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
         with:
-          ref: main
+          ref: refs/heads/main
           persist-credentials: false
 
       - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4
@@ -256,35 +250,118 @@ jobs:
           name: core-${{ needs.build.outputs.wasm_sha256 }}
           path: ${{ runner.temp }}/core-artifact
 
-      - name: Plan
+      - name: Plan and commit
         id: plan
+        shell: bash
         env:
           SHA256: ${{ needs.build.outputs.wasm_sha256 }}
           ARTIFACT: ${{ runner.temp }}/core-artifact
+          OUT: ${{ runner.temp }}/publish
         run: |
+          set -euo pipefail
+          mkdir -p "$OUT"
           test "$(sha256sum "$ARTIFACT/dolphin-core-upstream.wasm" | cut -d' ' -f1)" = "$SHA256"
+          base=$(git rev-parse HEAD)
           git config user.name "github-actions[bot]"
           git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
-          plan=$(node tools/core-artifacts.mjs publish-plan --artifact "$ARTIFACT" --message \
-            "Build the core for $(git rev-parse --short HEAD) (run ${GITHUB_RUN_ID}, sources of ${GITHUB_SHA}, rebuilt identically from its GPL source archive)")
-          echo "$plan"
-          if [ "$(node -p "JSON.parse(process.argv[1]).action" "$plan")" = commit ]; then
+          node tools/core-artifacts.mjs publish-plan --artifact "$ARTIFACT" --out "$OUT/plan.json" \
+            --message "Build the core for ${base:0:7} (run ${GITHUB_RUN_ID}, rebuilt identically from its GPL source archive)"
+          action=$(jq -er '.action | select(. == "none" or . == "dispatch" or . == "commit")' "$OUT/plan.json")
+          jq -e '.schemaVersion == 1' "$OUT/plan.json" > /dev/null
+          if [ "$action" = commit ]; then
+            test "$(git rev-parse HEAD^)" = "$base"
             node tools/core-artifacts.mjs status --require-current
             node tools/verify-dolphin-provenance.mjs > /dev/null
+            git bundle create "$OUT/core.bundle" "$base..HEAD"
           fi
+          echo "action=$action" >> "$GITHUB_OUTPUT"
+          echo "base=$base" >> "$GITHUB_OUTPUT"
+          cat "$OUT/plan.json"
 
-      # The write token exists only in this step, which runs git and gh and
-      # nothing from the repository.
-      - name: Push, or hand over to a run for main's HEAD
-        if: steps.plan.outputs.action != 'none'
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        with:
+          name: core-commit
+          path: ${{ runner.temp }}/publish/
+          if-no-files-found: error
+          retention-days: 7
+
+  # The only job that can write. It runs no code from the repository: a fresh
+  # clone, git plumbing checks on the bundle, and git/gh with hooks disabled.
+  # The token is in the environment of the commands that use it only.
+  # - commit: the bundle must be one commit whose parent is the planned base
+  #   and still main's tip, touching only the core files, with a .wasm whose
+  #   hash is the one built and the one in core.lock.json. Push; if main moved
+  #   meanwhile, hand over to a new run.
+  # - dispatch (main's sources moved during the build): hand over to a new run.
+  # Hand-overs carry an attempt counter; after 3, the job fails instead.
+  push-core:
+    needs: [build, prepare-core-commit]
+    if: needs.prepare-core-commit.outputs.action == 'commit' || needs.prepare-core-commit.outputs.action == 'dispatch'
+    runs-on: ubuntu-24.04
+    timeout-minutes: 10
+    permissions:
+      contents: write
+      actions: write
+    concurrency:
+      group: push-core
+      cancel-in-progress: false
+    steps:
+      - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4
+        with:
+          name: core-commit
+          path: ${{ runner.temp }}/publish
+
+      - name: Push the core commit, or hand over to a new run (3 attempts at most)
+        shell: bash
         env:
-          ACTION: ${{ steps.plan.outputs.action }}
+          ACTION: ${{ needs.prepare-core-commit.outputs.action }}
+          BASE: ${{ needs.prepare-core-commit.outputs.base }}
+          SHA256: ${{ needs.build.outputs.wasm_sha256 }}
+          ATTEMPT: ${{ inputs.attempt || 0 }}
+          PUBLISH: ${{ runner.temp }}/publish
+          REMOTE: https://github.com/${{ github.repository }}.git
           TOKEN: ${{ github.token }}
-          GH_TOKEN: ${{ github.token }}
         run: |
-          auth="http.https://github.com/.extraheader=AUTHORIZATION: basic $(printf 'x-access-token:%s' "$TOKEN" | base64 -w0)"
-          if [ "$ACTION" = commit ] && git -c "$auth" push origin HEAD:main; then
+          set -euo pipefail
+          handover() {
+            if [ "$ATTEMPT" -ge 3 ]; then
+              echo "::error::main's core is still not published after $ATTEMPT hand-overs: $1"
+              exit 1
+            fi
+            echo "$1; handing over to attempt $((ATTEMPT + 1))"
+            GH_TOKEN="$TOKEN" gh workflow run core-build.yml -R "$GITHUB_REPOSITORY" --ref main -f attempt=$((ATTEMPT + 1))
+          }
+          jq -e --arg action "$ACTION" '.schemaVersion == 1 and .action == $action' "$PUBLISH/plan.json" > /dev/null
+          if [ "$ACTION" = dispatch ]; then
+            handover "main's sources changed during the build"
             exit 0
           fi
-          echo "main moved or needs a newer build: dispatching a run for main's HEAD"
-          gh workflow run core-build.yml -R "$GITHUB_REPOSITORY" --ref main
+
+          # A fresh clone without a working tree: no checkout, so no filters
+          # or hooks; no user or system git configuration either.
+          export GIT_CONFIG_GLOBAL=/dev/null GIT_CONFIG_NOSYSTEM=1
+          git -c core.hooksPath=/dev/null clone -q --no-checkout --depth 1 --branch main \
+            "$REMOTE" repo
+          cd repo
+          if [ "$(git rev-parse HEAD)" != "$BASE" ]; then
+            handover "main moved after the core commit was prepared"
+            exit 0
+          fi
+          git -c core.hooksPath=/dev/null fetch -q "$PUBLISH/core.bundle" HEAD
+          commit=$(git rev-parse FETCH_HEAD)
+          test "$(git rev-list --parents -n 1 "$commit")" = "$commit $BASE"
+          changed=$(git diff-tree --no-commit-id --name-only -r "$BASE" "$commit" | sort)
+          allowed=$(printf '%s\n' cores/dolphin/core.lock.json cores/dolphin/dolphin-core-upstream.build.json \
+            cores/dolphin/dolphin-core-upstream.js cores/dolphin/dolphin-core-upstream.wasm \
+            provenance/dolphin-core-abi-v1.json | sort)
+          test -n "$changed"
+          test -z "$(comm -23 <(echo "$changed") <(echo "$allowed"))"
+          test "$(git cat-file blob "$commit:cores/dolphin/dolphin-core-upstream.wasm" | sha256sum | cut -d' ' -f1)" = "$SHA256"
+          test "$(git cat-file blob "$commit:cores/dolphin/core.lock.json" | jq -er .sha256)" = "$SHA256"
+
+          auth="http.https://github.com/.extraheader=AUTHORIZATION: basic $(printf 'x-access-token:%s' "$TOKEN" | base64 -w0)"
+          if git -c core.hooksPath=/dev/null -c "$auth" push "$REMOTE" "$commit:refs/heads/main"; then
+            echo "Published sha256:$SHA256 as $commit"
+          else
+            handover "main moved before the push"
+          fi

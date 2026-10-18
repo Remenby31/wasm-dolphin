@@ -291,13 +291,13 @@ export function installRefusal(parity) {
 }
 
 // Files a core installation rewrites: the artifacts, and what update:core-abi
-// derives from them.
+// derives from them (the default-core lock and the ABI manifest).
 export const INSTALLED_FILES = [
   "cores/dolphin/dolphin-core-upstream.js",
   "cores/dolphin/dolphin-core-upstream.wasm",
   "cores/dolphin/dolphin-core-upstream.build.json",
-  "provenance/dolphin-core-abi-v1.json",
-  "src/upstream-worker-protocol.js"
+  "cores/dolphin/core.lock.json",
+  "provenance/dolphin-core-abi-v1.json"
 ];
 
 // Swap the candidate in, validate, and restore every installed file if the

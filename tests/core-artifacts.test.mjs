@@ -8,10 +8,13 @@ import test from "node:test";
 import { fileURLToPath } from "node:url";
 
 import {
-  ABI_PATH, CORE_BINARY_FILES, coreArtifactChanges, coreStatus, fetchCore, PROTOCOL_PATH, publishPlan,
+  ABI_PATH, CORE_BINARY_FILES, CORE_DERIVED_FILES, coreArtifactChanges, coreStatus, fetchCore, publishPlan,
   restoreCoreFromBase, stagedCoreArtifactChanges
 } from "../tools/core-artifacts.mjs";
-import { evaluatedCoreHash, pinnedCoreHash, withPinnedCoreHash } from "../tools/core-pin.mjs";
+import { CORE_LOCK_PATH, formatCoreLock } from "../tools/core-lock.mjs";
+import { DEFAULT_UPSTREAM_CORE_SHA256 } from "../src/upstream-worker-protocol.js";
+
+const PROTOCOL_PATH = "src/upstream-worker-protocol.js";
 
 const repoRoot = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..");
 const sha256 = (text) => createHash("sha256").update(text).digest("hex");
@@ -37,10 +40,8 @@ function fixture() {
     write(CORE_BINARY_FILES[0], `// glue for ${wasm}\n`);
     write(CORE_BINARY_FILES[1], wasm);
     write(CORE_BINARY_FILES[2], JSON.stringify({ coreId: `sha256:${hash}` }, null, 2));
-    const protocol = existsSync(path.join(dir, PROTOCOL_PATH))
-      ? readFileSync(path.join(dir, PROTOCOL_PATH), "utf8")
-      : 'export const DEFAULT_UPSTREAM_CORE_SHA256 = "";\nexport const other = 1;\n';
-    write(PROTOCOL_PATH, protocol.replace(/(DEFAULT_UPSTREAM_CORE_SHA256 = ")[0-9a-f]*(")/, `$1${hash}$2`));
+    write(CORE_LOCK_PATH, formatCoreLock(hash));
+    if (!existsSync(path.join(dir, PROTOCOL_PATH))) write(PROTOCOL_PATH, "export const other = 1;\n");
     const abi = existsSync(path.join(dir, ABI_PATH))
       ? JSON.parse(readFileSync(path.join(dir, ABI_PATH), "utf8"))
       : { schemaVersion: 1, contractSources: [{ path: PROTOCOL_PATH, size: 0, sha256: "" }], workerProtocol: { a: 1 } };
@@ -72,7 +73,7 @@ test("a branch that rebuilds the core is flagged; one that only changes sources 
     f.commit("rebuild the core");
     const changes = await coreArtifactChanges({ base: "main", cwd: f.dir });
     assert.ok(changes.includes("cores/dolphin/dolphin-core-upstream.wasm"));
-    assert.ok(changes.includes(`${PROTOCOL_PATH} (DEFAULT_UPSTREAM_CORE_SHA256)`));
+    assert.ok(changes.includes(CORE_LOCK_PATH));
     assert.ok(changes.includes(`${ABI_PATH} (moduleExports)`));
   } finally {
     rmSync(f.dir, { recursive: true, force: true });
@@ -112,12 +113,12 @@ test("restore drops the branch's core but keeps its new exports as pending rebui
 
     const result = await restoreCoreFromBase({ base: "main", cwd: f.dir });
     assert.deepEqual(result.pendingExports, ["_SetPadState"]);
-    for (const file of CORE_BINARY_FILES) {
+    for (const file of CORE_DERIVED_FILES) {
       assert.equal(f.git("diff", "--quiet", "main", "--", file), "", file);
     }
+    assert.equal(JSON.parse(readFileSync(path.join(f.dir, CORE_LOCK_PATH), "utf8")).sha256, mainHash);
     const protocol = readFileSync(path.join(f.dir, PROTOCOL_PATH), "utf8");
-    assert.match(protocol, new RegExp(mainHash), "pinned hash is main's");
-    assert.match(protocol, /other = 2/, "the branch's own protocol change stays");
+    assert.match(protocol, /other = 2/, "the branch's own source change stays");
     const abi = JSON.parse(readFileSync(path.join(f.dir, ABI_PATH), "utf8"));
     assert.deepEqual(abi.moduleExports, ["_Boot"]);
     assert.equal(abi.contractSources[0].sha256, sha256(protocol), "contract hashes follow the restored file");
@@ -166,7 +167,7 @@ test("status: a copy of a current core is current, and a changed shim makes it s
   const dir = mkdtempSync(path.join(tmpdir(), "core-status-"));
   try {
     for (const relative of [
-      ...CORE_BINARY_FILES, ABI_PATH, PROTOCOL_PATH, "core/upstream", "tools/jit-cache-prejs.js",
+      ...CORE_DERIVED_FILES, ABI_PATH, "core/upstream", "tools/jit-cache-prejs.js",
       "provenance/dolphin-source.lock.json", "provenance/dolphin-vendor-snapshot-v1.json",
       "provenance/wasm-toolchain.lock.json", "tools/naga-spirv-wgsl/Cargo.lock"
     ]) {
@@ -183,86 +184,243 @@ test("status: a copy of a current core is current, and a changed shim makes it s
   }
 });
 
-test("the core pin is read from the module's export, not from a comment that looks like it", async () => {
-  const real = "a".repeat(64);
-  const decoy = "b".repeat(64);
-  const source = `// export const DEFAULT_UPSTREAM_CORE_SHA256 = "${decoy}";\n` +
-    `/* DEFAULT_UPSTREAM_CORE_SHA256 = "${decoy}"; */\n` +
-    `export const DEFAULT_UPSTREAM_CORE_SHA256 = "${real}";\n`;
-  assert.equal(await evaluatedCoreHash(source), real);
-  assert.equal(await pinnedCoreHash(source), real);
-  const updated = await withPinnedCoreHash(source, "c".repeat(64));
-  assert.equal(await evaluatedCoreHash(updated), "c".repeat(64));
-  assert.ok(updated.includes(`// export const DEFAULT_UPSTREAM_CORE_SHA256 = "${decoy}";`), "the comment is left alone");
-
-  // A declaration hidden in a block comment, at the start of a line, is refused.
-  const ambiguous = `/*\nexport const DEFAULT_UPSTREAM_CORE_SHA256 = "${decoy}";\n*/\n` +
-    `export const DEFAULT_UPSTREAM_CORE_SHA256 = "${real}";\n`;
-  await assert.rejects(pinnedCoreHash(ambiguous), /exactly one/);
-  await assert.rejects(withPinnedCoreHash(ambiguous, "c".repeat(64)), /exactly one/);
-});
-
-test("the guard sees through a branch that hides its pin change behind a comment", async () => {
-  const f = fixture();
-  try {
-    f.installCore("core-A", ["_Boot"]);
-    f.commit("core A");
-    f.git("checkout", "-q", "-b", "sneaky");
-    const protocol = path.join(f.dir, PROTOCOL_PATH);
-    const mainPin = sha256("core-A");
-    // Comment carries main's value; the real export is changed.
-    writeFileSync(protocol, `// export const DEFAULT_UPSTREAM_CORE_SHA256 = "${mainPin}";\n` +
-      readFileSync(protocol, "utf8").replace(mainPin, "d".repeat(64)));
-    f.commit("pin the next build");
-    assert.ok((await coreArtifactChanges({ base: "main", cwd: f.dir }))
-      .includes(`${PROTOCOL_PATH} (DEFAULT_UPSTREAM_CORE_SHA256)`));
-  } finally {
-    rmSync(f.dir, { recursive: true, force: true });
+test("the default core hash is data: the module exports core.lock.json, and tools never parse JavaScript", async () => {
+  const lock = JSON.parse(readFileSync(path.join(repoRoot, CORE_LOCK_PATH), "utf8"));
+  assert.deepEqual(Object.keys(lock).sort(), ["schemaVersion", "sha256"]);
+  assert.equal(DEFAULT_UPSTREAM_CORE_SHA256, lock.sha256);
+  for (const tool of ["tools/core-artifacts.mjs", "tools/update-core-abi.mjs", "tools/core-lock.mjs"]) {
+    assert.doesNotMatch(readFileSync(path.join(repoRoot, tool), "utf8"), /DEFAULT_UPSTREAM_CORE_SHA256|import\(`data:/, tool);
   }
-});
-
-test("publishing on main decides on content: nothing, commit, or a new run for HEAD", async () => {
-  const dir = mkdtempSync(path.join(tmpdir(), "publish-"));
+  assert.ok(!existsSync(path.join(repoRoot, "tools/core-pin.mjs")));
+  // A malformed lock makes the core not current instead of being guessed at.
+  const dir = mkdtempSync(path.join(tmpdir(), "lock-"));
   try {
-    const artifact = path.join(dir, "artifact");
-    mkdirSync(artifact);
-    for (const file of CORE_BINARY_FILES) {
-      mkdirSync(path.dirname(path.join(dir, file)), { recursive: true });
-      writeFileSync(path.join(dir, file), "committed");
-      writeFileSync(path.join(artifact, path.basename(file)), "built");
+    for (const relative of [...CORE_DERIVED_FILES, ABI_PATH, "core/upstream", "tools/jit-cache-prejs.js",
+      "provenance/dolphin-source.lock.json", "provenance/dolphin-vendor-snapshot-v1.json",
+      "provenance/wasm-toolchain.lock.json", "tools/naga-spirv-wgsl/Cargo.lock"]) {
+      cpSync(path.join(repoRoot, relative), path.join(dir, relative), { recursive: true });
     }
-    const commits = [];
-    const run = (statusFor) => publishPlan({
-      artifactDir: artifact, cwd: dir,
-      status: async (cwd) => statusFor(readFileSync(path.join(cwd, CORE_BINARY_FILES[1]), "utf8")),
-      regenerate: () => {}, commit: (message) => commits.push(message)
-    });
-    // HEAD's committed core is already current: whatever this run built, nothing to do.
-    assert.deepEqual(await run(() => ({ current: true })), { action: "none" });
-    assert.equal(readFileSync(path.join(dir, CORE_BINARY_FILES[1]), "utf8"), "committed");
-    // The built core is the build of HEAD's sources: commit it.
-    const committed = await run((wasm) => ({ current: wasm === "built", coreId: "sha256:built", reasons: [] }));
-    assert.equal(committed.action, "commit");
-    assert.equal(commits.length, 1);
-    // HEAD moved to other sources: leave the tree alone and ask for a new run.
-    for (const file of CORE_BINARY_FILES) writeFileSync(path.join(dir, file), "committed");
-    const handedOver = await run(() => ({ current: false, reasons: ["source.patchSeriesSha256 differs"] }));
-    assert.equal(handedOver.action, "dispatch");
-    assert.equal(commits.length, 1);
+    writeFileSync(path.join(dir, CORE_LOCK_PATH), JSON.stringify({ schemaVersion: 1, sha256: lock.sha256, note: "x" }));
+    assert.ok((await coreStatus(dir)).reasons.some((reason) => reason.includes("core.lock.json")));
   } finally {
     rmSync(dir, { recursive: true, force: true });
   }
 });
 
-test("main's publishing never keys on a commit author, and runs on main queue instead of cancelling", () => {
-  const workflow = readFileSync(path.join(repoRoot, ".github/workflows/core-build.yml"), "utf8");
+function publishFixture() {
+  const dir = mkdtempSync(path.join(tmpdir(), "publish-"));
+  const artifact = path.join(dir, "artifact");
+  mkdirSync(artifact);
+  for (const file of CORE_DERIVED_FILES) {
+    mkdirSync(path.dirname(path.join(dir, file)), { recursive: true });
+    writeFileSync(path.join(dir, file), "committed");
+    writeFileSync(path.join(artifact, path.basename(file)), "built");
+  }
+  writeFileSync(path.join(artifact, "dolphin-core-upstream.build.json"), "{}");
+  return { dir, artifact };
+}
+
+test("publishing decides on content, and refuses a build of other sources before installing anything", async () => {
+  const { dir, artifact } = publishFixture();
+  try {
+    const commits = [];
+    const identity = { same: true };
+    const run = (statusFor) => publishPlan({
+      artifactDir: artifact, cwd: dir,
+      status: async (cwd) => statusFor(readFileSync(path.join(cwd, CORE_BINARY_FILES[1]), "utf8")),
+      identityDifferences: () => (identity.same ? [] : ["source.patchSeriesSha256 differs"]),
+      regenerate: () => {
+        // A core that HEAD's sources no longer accept makes update-core-abi
+        // throw; that must never be reached when the sources differ.
+        if (!identity.same) throw new Error("regenerate ran on a core built from other sources");
+      },
+      commit: (message) => commits.push(message)
+    });
+    assert.deepEqual(await run(() => ({ current: true })), { schemaVersion: 1, action: "none" });
+
+    identity.same = false;
+    const handedOver = await run(() => ({ current: false, reasons: ["stale"] }));
+    assert.deepEqual(handedOver, { schemaVersion: 1, action: "dispatch", reasons: ["source.patchSeriesSha256 differs"] });
+    assert.equal(readFileSync(path.join(dir, CORE_BINARY_FILES[1]), "utf8"), "committed", "nothing installed");
+
+    identity.same = true;
+    const committed = await run((wasm) => ({ current: wasm === "built", coreId: "sha256:built", reasons: [] }));
+    assert.deepEqual(committed, { schemaVersion: 1, action: "commit", coreId: "sha256:built" });
+    assert.equal(commits.length, 1);
+
+    for (const file of CORE_DERIVED_FILES) writeFileSync(path.join(dir, file), "committed");
+    await assert.rejects(run(() => ({ current: false, reasons: ["abi"] })), /not current/,
+      "an inconsistency after install fails loudly");
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test("publish-plan writes one validated JSON plan and fails without one", () => {
+  const cli = (args) => spawnSync(process.execPath, [path.join(repoRoot, "tools/core-artifacts.mjs"), "publish-plan", ...args],
+    { cwd: repoRoot, encoding: "utf8" });
+  assert.notEqual(cli(["--artifact", "/nonexistent"]).status, 0, "--out is required");
+  const out = path.join(mkdtempSync(path.join(tmpdir(), "plan-")), "plan.json");
+  // This checkout's committed core is current on main and on this branch, so
+  // the plan is "none" without touching anything.
+  const result = cli(["--artifact", "/nonexistent", "--out", out]);
+  if (result.status === 0) {
+    assert.deepEqual(JSON.parse(readFileSync(out, "utf8")), { schemaVersion: 1, action: "none" });
+    assert.equal(result.stdout, "", "stdout carries nothing besides the plan file");
+  } else {
+    assert.ok(!existsSync(out), "no plan is written when planning fails");
+  }
+});
+
+// The privileged step, run for real: its shell, against a local bare
+// repository standing in for GitHub, with gh replaced by a recorder.
+const workflow = readFileSync(path.join(repoRoot, ".github/workflows/core-build.yml"), "utf8");
+function pushStepScript() {
+  const start = workflow.indexOf("      - name: Push the core commit");
+  const body = workflow.slice(workflow.indexOf("        run: |\n", start) + "        run: |\n".length);
+  const lines = [];
+  for (const line of body.split("\n")) {
+    if (line.trim() && !line.startsWith("          ")) break;
+    lines.push(line.slice(10));
+  }
+  return lines.join("\n");
+}
+
+function pushFixture() {
+  const dir = mkdtempSync(path.join(tmpdir(), "push-core-"));
+  const sh = (cwd, ...args) => {
+    const result = spawnSync("git", args, { cwd, encoding: "utf8" });
+    assert.equal(result.status, 0, result.stderr);
+    return result.stdout.trim();
+  };
+  const remote = path.join(dir, "remote.git");
+  const work = path.join(dir, "work");
+  sh(dir, "init", "-q", "--bare", "-b", "main", remote);
+  sh(dir, "init", "-q", "-b", "main", work);
+  sh(work, "config", "user.email", "t@example.invalid");
+  sh(work, "config", "user.name", "t");
+  const write = (relative, content) => {
+    mkdirSync(path.dirname(path.join(work, relative)), { recursive: true });
+    writeFileSync(path.join(work, relative), content);
+  };
+  write("src/app.js", "1");
+  write(CORE_BINARY_FILES[1], "old core");
+  sh(work, "add", "-A");
+  sh(work, "commit", "-q", "-m", "main");
+  sh(work, "push", "-q", `file://${remote}`, "main");
+  const base = sh(work, "rev-parse", "HEAD");
+  const publish = path.join(dir, "publish");
+  mkdirSync(publish);
+  const prepare = (files, action = "commit") => {
+    for (const [relative, content] of Object.entries(files)) write(relative, content);
+    sh(work, "add", "-A");
+    sh(work, "commit", "-q", "-m", "core");
+    sh(work, "bundle", "create", path.join(publish, "core.bundle"), `${base}..HEAD`);
+    writeFileSync(path.join(publish, "plan.json"), JSON.stringify({ schemaVersion: 1, action }));
+  };
+  const bin = path.join(dir, "bin");
+  mkdirSync(bin);
+  writeFileSync(path.join(bin, "gh"), `#!/bin/sh\necho "$@" >> "${path.join(dir, "gh.log")}"\n`, { mode: 0o755 });
+  // A hook a hostile earlier step might have planted in the global config.
+  const hooks = path.join(dir, "hooks");
+  mkdirSync(hooks);
+  writeFileSync(path.join(hooks, "pre-push"), `#!/bin/sh\ntouch "${path.join(dir, "hook-ran")}"\n`, { mode: 0o755 });
+  writeFileSync(path.join(dir, "gitconfig"), `[core]\n\thooksPath = ${hooks}\n`);
+  const run = ({ action = "commit", attempt = 0, sha }) => spawnSync("bash", ["-c", pushStepScript()], {
+    cwd: dir, encoding: "utf8",
+    env: { ...process.env, PATH: `${bin}:${process.env.PATH}`, HOME: dir, GIT_CONFIG_GLOBAL: path.join(dir, "gitconfig"),
+      ACTION: action, BASE: base, SHA256: sha, ATTEMPT: String(attempt), PUBLISH: publish,
+      REMOTE: `file://${remote}`, TOKEN: "dummy-token", GITHUB_REPOSITORY: "o/r" }
+  });
+  const ghCalls = () => (existsSync(path.join(dir, "gh.log")) ? readFileSync(path.join(dir, "gh.log"), "utf8") : "");
+  const remoteHead = () => sh(remote, "rev-parse", "main");
+  return { dir, base, work, sh, write, prepare, run, ghCalls, remoteHead, remote };
+}
+
+test("push-core pushes a valid core commit with hooks off, and nothing else", () => {
+  const f = pushFixture();
+  try {
+    const hash = sha256("new core");
+    f.prepare({ [CORE_BINARY_FILES[1]]: "new core", [CORE_LOCK_PATH]: formatCoreLock(hash) });
+    const ok = f.run({ sha: hash });
+    assert.equal(ok.status, 0, ok.stderr + ok.stdout);
+    assert.equal(f.remoteHead(), f.sh(f.work, "rev-parse", "HEAD"));
+    assert.ok(!existsSync(path.join(f.dir, "hook-ran")), "no hook ran with the token");
+    assert.equal(f.ghCalls(), "");
+  } finally {
+    rmSync(f.dir, { recursive: true, force: true });
+  }
+});
+
+test("push-core refuses a bundle that touches other files or carries another core", () => {
+  for (const [files, sha] of [
+    [{ [CORE_BINARY_FILES[1]]: "new core", [CORE_LOCK_PATH]: formatCoreLock(sha256("new core")), "src/app.js": "2" },
+      sha256("new core")],
+    [{ [CORE_BINARY_FILES[1]]: "new core", [CORE_LOCK_PATH]: formatCoreLock(sha256("other")) }, sha256("new core")],
+    [{ [CORE_BINARY_FILES[1]]: "new core", [CORE_LOCK_PATH]: formatCoreLock(sha256("new core")) }, sha256("other")]
+  ]) {
+    const f = pushFixture();
+    try {
+      const before = f.remoteHead();
+      f.prepare(files);
+      assert.notEqual(f.run({ sha }).status, 0);
+      assert.equal(f.remoteHead(), before, "nothing pushed");
+    } finally {
+      rmSync(f.dir, { recursive: true, force: true });
+    }
+  }
+});
+
+test("push-core hands over when main moved or sources changed, at most 3 times", () => {
+  const f = pushFixture();
+  try {
+    const hash = sha256("new core");
+    f.prepare({ [CORE_BINARY_FILES[1]]: "new core", [CORE_LOCK_PATH]: formatCoreLock(hash) });
+    // main moves after the commit was prepared.
+    const other = path.join(f.dir, "other");
+    f.sh(f.dir, "clone", "-q", `file://${f.remote}`, other);
+    f.sh(other, "-c", "user.email=t@x", "-c", "user.name=t", "commit", "-q", "--allow-empty", "-m", "moved");
+    f.sh(other, "push", "-q", "origin", "main");
+    const moved = f.run({ sha: hash, attempt: 1 });
+    assert.equal(moved.status, 0, moved.stderr);
+    assert.match(f.ghCalls(), /workflow run core-build\.yml .*--ref main -f attempt=2/);
+
+    // A plan that disagrees with the job's input is refused, not acted on.
+    assert.notEqual(f.run({ sha: hash, action: "dispatch", attempt: 2 }).status, 0);
+    assert.doesNotMatch(f.ghCalls(), /attempt=3/);
+    writeFileSync(path.join(f.dir, "publish/plan.json"), JSON.stringify({ schemaVersion: 1, action: "dispatch" }));
+    const sources = f.run({ sha: hash, action: "dispatch", attempt: 2 });
+    assert.equal(sources.status, 0, sources.stderr);
+    assert.match(f.ghCalls(), /attempt=3/);
+
+    const exhausted = f.run({ sha: hash, action: "dispatch", attempt: 3 });
+    assert.notEqual(exhausted.status, 0, "the fourth hand-over fails the job instead");
+    assert.doesNotMatch(f.ghCalls(), /attempt=4/);
+  } finally {
+    rmSync(f.dir, { recursive: true, force: true });
+  }
+});
+
+test("main's runs build main's tip, queue, and keep the token out of every job that runs repository code", () => {
   assert.doesNotMatch(workflow, /head_commit\.author|github\.event\.commits/);
   assert.match(workflow, /cancel-in-progress: \$\{\{ github\.event_name == 'pull_request' \}\}/);
-  const job = workflow.slice(workflow.indexOf("  commit-core:"));
-  assert.match(job, /github\.event_name == 'workflow_dispatch'/, "dispatched runs for main's HEAD must publish");
-  assert.match(job, /ref: main/, "publishing targets main's current HEAD");
-  assert.match(job, /gh workflow run core-build\.yml/, "a rejected push hands over to a new run");
-  // The write token appears in one step only.
-  assert.equal(job.match(/github\.token/g).length, 2);
-  assert.equal(job.split("\n      - ").filter((step) => step.includes("github.token")).length, 1);
+  assert.match(workflow.slice(workflow.indexOf("  build:"), workflow.indexOf("  rebuild-from-source-archive:")),
+    /ref: \$\{\{ github\.ref == 'refs\/heads\/main' && 'refs\/heads\/main' \|\| '' \}\}/);
+  const jobs = workflow.split(/\n  (?=[a-z-]+:\n)/);
+  for (const job of jobs) {
+    const writes = /contents: write|actions: write/.test(job);
+    const name = job.split(":")[0].trim();
+    if (name === "push-core") {
+      assert.ok(writes);
+      assert.doesNotMatch(job, /actions\/checkout|node |npm /, "push-core runs no repository code");
+      assert.match(job, /core\.hooksPath=\/dev\/null/);
+      assert.match(job, /set -euo pipefail/);
+    } else {
+      assert.ok(!writes, `${name} must not be able to write`);
+    }
+  }
+  const prepare = jobs.find((job) => job.startsWith("prepare-core-commit:"));
+  assert.match(prepare, /set -euo pipefail/);
+  assert.match(prepare, /jq -er '\.action/);
+  assert.doesNotMatch(prepare, /github\.token|secrets\./);
 });

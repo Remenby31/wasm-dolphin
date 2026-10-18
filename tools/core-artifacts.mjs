@@ -14,7 +14,7 @@
 //       The same, for the index against HEAD (tools/hooks/pre-commit).
 //   node tools/core-artifacts.mjs restore --base <ref>
 //       Put <ref>'s core back, keeping this branch's source-side ABI changes.
-//   node tools/core-artifacts.mjs publish-plan --artifact <dir>
+//   node tools/core-artifacts.mjs publish-plan --artifact <dir> --out <plan.json>
 //       CI on main: commit a built core onto main's current HEAD, or say why not.
 //   node tools/core-artifacts.mjs fetch <sha256> [--repo owner/name]
 //       Materialise an exact core under build/core-candidates/<sha256>/.
@@ -27,7 +27,7 @@ import { dirname, join, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 
 import { coreSourceRecord } from "./core-build-info.mjs";
-import { pinnedCoreHash, withPinnedCoreHash } from "./core-pin.mjs";
+import { CORE_LOCK_PATH, parseCoreLock } from "./core-lock.mjs";
 import { fileRecord } from "./dolphin-provenance.mjs";
 
 const root = resolve(dirname(fileURLToPath(import.meta.url)), "..");
@@ -37,8 +37,9 @@ export const CORE_BINARY_FILES = Object.freeze([
   "cores/dolphin/dolphin-core-upstream.wasm",
   "cores/dolphin/dolphin-core-upstream.build.json"
 ]);
+// Whole files CI owns: the artifacts and the default-core lock.
+export const CORE_DERIVED_FILES = Object.freeze([...CORE_BINARY_FILES, CORE_LOCK_PATH]);
 export const ABI_PATH = "provenance/dolphin-core-abi-v1.json";
-export const PROTOCOL_PATH = "src/upstream-worker-protocol.js";
 const BUILD_JSON = CORE_BINARY_FILES[2];
 
 // ABI manifest fields read off the built artifacts. Everything else in the
@@ -47,16 +48,6 @@ const BUILD_JSON = CORE_BINARY_FILES[2];
 export const ABI_BINARY_FIELDS = Object.freeze([
   "coreId", "artifacts", "moduleExports", "runtimeMethods", "memoryContract", "memoryContractStatus"
 ]);
-// A source that does not evaluate or declares the pin ambiguously reads as
-// "no pin": it then differs from every valid one, so the guard flags it.
-const pinOf = async (bytes) => {
-  try {
-    return bytes ? await pinnedCoreHash(bytes.toString("utf8")) : null;
-  } catch {
-    return "unreadable";
-  }
-};
-
 const sha256 = (bytes) => createHash("sha256").update(bytes).digest("hex");
 
 function git(args, { cwd = root, encoding = "utf8" } = {}) {
@@ -94,8 +85,13 @@ export async function coreStatus(base = root) {
     .replaceAll("\r\n", "\n")));
   if (info.toolchain?.cargoLockSha256 !== cargoLock) reasons.push("Naga Cargo.lock differs");
 
-  const protocolHash = await pinOf(readFileSync(join(base, PROTOCOL_PATH)));
-  if (protocolHash !== sha256(wasm)) reasons.push(`${PROTOCOL_PATH} pins another core`);
+  let pinned = null;
+  try {
+    pinned = parseCoreLock(readFileSync(join(base, CORE_LOCK_PATH), "utf8")).sha256;
+  } catch (error) {
+    reasons.push(error.message);
+  }
+  if (pinned && pinned !== sha256(wasm)) reasons.push(`${CORE_LOCK_PATH} pins another core`);
   const abi = JSON.parse(readFileSync(join(base, ABI_PATH), "utf8"));
   if (abi.coreId !== `sha256:${sha256(wasm)}`) reasons.push(`${ABI_PATH} describes another core`);
   return { coreId: `sha256:${sha256(wasm)}`, current: reasons.length === 0, reasons };
@@ -117,11 +113,8 @@ export async function coreArtifactChanges({ base, head = "HEAD", cwd = root }) {
     return true;
   };
   const changes = [];
-  for (const path of CORE_BINARY_FILES) {
+  for (const path of CORE_DERIVED_FILES) {
     if (await changed((ref) => git(["rev-parse", `${ref}:${path}`], { cwd }))) changes.push(path);
-  }
-  if (await changed((ref) => pinOf(readAt(ref, PROTOCOL_PATH, cwd)))) {
-    changes.push(`${PROTOCOL_PATH} (DEFAULT_UPSTREAM_CORE_SHA256)`);
   }
   const abiAt = (ref) => JSON.parse(readAt(ref, ABI_PATH, cwd)?.toString("utf8") ?? "{}");
   for (const field of ABI_BINARY_FIELDS) {
@@ -137,10 +130,9 @@ const pick = (object, fields) => Object.fromEntries(fields.map((field) => [field
 export async function stagedCoreArtifactChanges({ cwd = root } = {}) {
   const at = (ref, path) => readAt(ref, path, cwd);  // ref "" is the index
   const changes = [];
-  for (const path of CORE_BINARY_FILES) {
+  for (const path of CORE_DERIVED_FILES) {
     if (git(["rev-parse", `HEAD:${path}`], { cwd }) !== git(["rev-parse", `:${path}`], { cwd })) changes.push(path);
   }
-  if (await pinOf(at("HEAD", PROTOCOL_PATH)) !== await pinOf(at("", PROTOCOL_PATH))) changes.push(`${PROTOCOL_PATH} (DEFAULT_UPSTREAM_CORE_SHA256)`);
   const abiAt = (ref) => JSON.parse(at(ref, ABI_PATH)?.toString("utf8") ?? "{}");
   const [head, index] = [abiAt("HEAD"), abiAt("")];
   for (const field of ABI_BINARY_FIELDS) {
@@ -157,14 +149,11 @@ export async function stagedCoreArtifactChanges({ cwd = root } = {}) {
 // "pending rebuild" (the existing mechanism for sources ahead of the core),
 // and contract-source hashes are recomputed for the restored files.
 export async function restoreCoreFromBase({ base, cwd = root }) {
-  for (const path of CORE_BINARY_FILES) {
+  for (const path of CORE_DERIVED_FILES) {
     const bytes = readAt(base, path, cwd);
     if (!bytes) throw new Error(`${base} has no ${path}`);
     writeFileSync(join(cwd, path), bytes);
   }
-  const baseHash = await pinnedCoreHash(readAt(base, PROTOCOL_PATH, cwd).toString("utf8"));
-  const protocolPath = join(cwd, PROTOCOL_PATH);
-  writeFileSync(protocolPath, await withPinnedCoreHash(readFileSync(protocolPath, "utf8"), baseHash));
 
   const baseAbi = JSON.parse(readAt(base, ABI_PATH, cwd).toString("utf8"));
   const headAbi = JSON.parse(readFileSync(join(cwd, ABI_PATH), "utf8"));
@@ -186,44 +175,65 @@ export async function restoreCoreFromBase({ base, cwd = root }) {
 
 // ----------------------------------------------------------------- publish ---
 
-// What CI does with a core it built for main. The checkout is main's current
-// HEAD, which may be newer than the commit the core was built from:
+// What CI does with a core it built, in the unprivileged job that prepares
+// main's core commit. The checkout is main's current HEAD, possibly newer than
+// the commit the core was built from. Decided on content only:
 //   "none"     HEAD's committed core is already the build of HEAD's sources;
-//   "commit"   the built core matches HEAD's sources and locks: it is
-//              installed, the ABI manifest and pin regenerated for HEAD, and
-//              committed (the caller pushes);
-//   "dispatch" HEAD's sources differ from the build's: a new run must build
-//              HEAD (the caller dispatches one). The tree is left unchanged.
-// Decided on content only, never on who made a commit.
+//   "dispatch" the build's sources or locks are not HEAD's: a run must build
+//              HEAD. Checked before anything is installed, so this outcome
+//              cannot fail on a core that HEAD's sources no longer accept;
+//   "commit"   same sources and locks: the core is installed, the ABI
+//              manifest regenerated for HEAD, and committed (the privileged
+//              job pushes that commit). Any inconsistency after install throws.
+export const PUBLISH_ACTIONS = Object.freeze(["none", "dispatch", "commit"]);
+
+export function buildIdentityDifferences(buildInfo, cwd = root) {
+  const reasons = [];
+  const current = coreSourceRecord(cwd);
+  for (const field of ["upstreamCommit", "patchSeriesSha256", "vendorResultTree", "sourceLockSha256",
+    "vendorSnapshotSha256", "localInputsSha256"]) {
+    if (buildInfo.source?.[field] !== current[field]) reasons.push(`source.${field} differs`);
+  }
+  if (buildInfo.toolchain?.lockSha256 !== sha256(readFileSync(join(cwd, "provenance/wasm-toolchain.lock.json")))) {
+    reasons.push("toolchain lock differs");
+  }
+  const cargoLock = sha256(Buffer.from(readFileSync(join(cwd, "tools/naga-spirv-wgsl/Cargo.lock"), "utf8")
+    .replaceAll("\r\n", "\n")));
+  if (buildInfo.toolchain?.cargoLockSha256 !== cargoLock) reasons.push("Naga Cargo.lock differs");
+  return reasons;
+}
+
 export async function publishPlan({
   artifactDir,
   cwd = root,
   status = coreStatus,
+  identityDifferences = (built) => buildIdentityDifferences(built, cwd),
   regenerate = () => {
-    const result = spawnSync(process.execPath, ["tools/update-core-abi.mjs", "--write"], { cwd, stdio: "inherit" });
+    // Logs go to stderr: stdout carries the plan only.
+    const result = spawnSync(process.execPath, ["tools/update-core-abi.mjs", "--write"],
+      { cwd, stdio: ["ignore", process.stderr, process.stderr] });
     if (result.status !== 0) throw new Error("update-core-abi failed");
   },
   commit = (message) => {
-    for (const args of [["add", ...CORE_BINARY_FILES, ABI_PATH, PROTOCOL_PATH], ["commit", "-q", "-m", message]]) {
-      if (spawnSync("git", args, { cwd, stdio: "inherit" }).status !== 0) throw new Error(`git ${args[0]} failed`);
+    for (const args of [["add", ...CORE_DERIVED_FILES, ABI_PATH], ["commit", "-q", "-m", message]]) {
+      const result = spawnSync("git", args, { cwd, stdio: ["ignore", process.stderr, process.stderr] });
+      if (result.status !== 0) throw new Error(`git ${args[0]} failed`);
     }
   },
   message = "Build the core"
 }) {
-  if ((await status(cwd)).current) return { action: "none" };
-  for (const path of CORE_BINARY_FILES) {
+  if ((await status(cwd)).current) return { schemaVersion: 1, action: "none" };
+  const built = JSON.parse(readFileSync(join(artifactDir, "dolphin-core-upstream.build.json"), "utf8"));
+  const differences = identityDifferences(built);
+  if (differences.length > 0) return { schemaVersion: 1, action: "dispatch", reasons: differences };
+  for (const path of CORE_DERIVED_FILES) {
     writeFileSync(join(cwd, path), readFileSync(join(artifactDir, path.split("/").pop())));
   }
   regenerate();
   const after = await status(cwd);
-  if (!after.current) {
-    for (const path of [...CORE_BINARY_FILES, ABI_PATH, PROTOCOL_PATH]) {
-      git(["checkout", "--", path], { cwd });
-    }
-    return { action: "dispatch", reasons: after.reasons };
-  }
+  if (!after.current) throw new Error(`installed core is not current: ${after.reasons.join("; ")}`);
   commit(`${message}\n\n${after.coreId}`);
-  return { action: "commit", coreId: after.coreId };
+  return { schemaVersion: 1, action: "commit", coreId: after.coreId };
 }
 
 // ------------------------------------------------------------------- fetch ---
@@ -332,9 +342,11 @@ if (process.argv[1] === fileURLToPath(import.meta.url)) {
     } else if (command === "publish-plan") {
       const artifactDir = option("--artifact");
       if (!artifactDir) throw new Error("publish-plan needs --artifact <dir>");
+      const out = option("--out");
+      if (!out) throw new Error("publish-plan needs --out <plan.json>");
       const plan = await publishPlan({ artifactDir: resolve(artifactDir), message: option("--message", "Build the core") });
-      console.log(JSON.stringify(plan));
-      if (process.env.GITHUB_OUTPUT) writeFileSync(process.env.GITHUB_OUTPUT, `action=${plan.action}\n`, { flag: "a" });
+      if (!PUBLISH_ACTIONS.includes(plan.action)) throw new Error(`invalid plan ${JSON.stringify(plan)}`);
+      writeFileSync(out, `${JSON.stringify(plan)}\n`);
     } else if (command === "fetch") {
       const hash = (rest.find((arg) => !arg.startsWith("--") && arg !== option("--repo")) ?? "").replace(/^sha256:/, "");
       const result = fetchCore(hash, { repo: option("--repo") });
