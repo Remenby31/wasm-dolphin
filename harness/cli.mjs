@@ -195,12 +195,14 @@ async function renderCapture(session, { game, spec, query, statePath, dir, label
   if (!supported.ok) return { error: supported.why };
   if (!statePath && game.steps) return { error: "scripted inputs and no savestate: no exact frame to compare" };
   if (statePath) {
+    await waitRunning(session.page);
     const loaded = await pageCall(session.page, "__loadStateFile", new URL("__harness_state.sav", session.url).href, 120000);
     if (!loaded?.loaded) return { error: `savestate load failed: ${JSON.stringify(loaded)}` };
   }
   const index = Number(spec.renderFrame ?? (statePath ? 120 : 300));
   const c = await captureInSession(session, { index, fromLoad: Boolean(statePath) });
   if (c.error) return { error: c.error };
+  if (!captureSourceOk(query, c.source)) return { error: `capture source ${c.source} is not what this renderer shows` };
   const file = savePng(c, path.join(dir, `${label}-capture.png`));
   return { file, index: c.index, fromLoad: c.fromLoad, ticks: c.ticks, source: c.source };
 }

@@ -88,3 +88,20 @@ test("silent output fails when the game must make sound", () => {
   assert.equal(runChecks({ summary: {}, errors: [], audioRequired: true }).audio.status, "unjudged");
   assert.equal(runChecks({ summary: {}, errors: [] }).audio.status, "pass");
 });
+
+// From the wgpu workstream: in dual core, software and wgpu reach VI N at
+// different emulated moments. Cross-renderer render checks need cpu=single.
+test("cross-renderer render check: unjudged in dual core, judged single-threaded", async () => {
+  const { renderChecks } = await import("../harness/lib/render-check.mjs");
+  const W = 64, H = 48;
+  const img = () => ({ width: W, height: H, data: new Uint8Array(W * H * 4).map((_, i) => ((i >> 2) % 7) * 30) });
+  const frames = { a: img(), b: img() };
+  const recs = (cpu) => [
+    { game: "g", config: "sw", run: 1, label: "a", url: `http://x/?video=software&cpu=${cpu}`, capture: { file: "a", index: 300 } },
+    { game: "g", config: "wgpu", run: 1, label: "b", url: `http://x/?video=wgpu&cpu=${cpu}`, capture: { file: "b", index: 300 } }
+  ];
+  const dual = renderChecks(recs("dual"), "sw", (f) => frames[f]);
+  assert.equal(dual[1].render.status, "unjudged");
+  const single = renderChecks(recs("single"), "sw", (f) => frames[f]);
+  assert.equal(single[1].render.status, "pass");
+});

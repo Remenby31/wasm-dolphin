@@ -9,6 +9,13 @@ import { compareFrames, DEFAULT_THRESHOLDS, identical } from "./image-diff.mjs";
 import { decodePng } from "./png.mjs";
 
 const PASS = new Set(["identical", "match"]);
+const cpuOf = (url) => {
+  try {
+    return new URL(url).searchParams.get("cpu") ?? "dual";
+  } catch {
+    return null;
+  }
+};
 const videoOf = (url) => {
   try {
     return new URL(url).searchParams.get("video") ?? "software";
@@ -47,6 +54,11 @@ export function renderChecks(records, reference, loadFrame = (file) => (existsSy
     // bytes (a still scene shifted by 4 px is a failure, not a "match").
     // Only different renderers may legitimately differ in detail.
     const sameRenderer = videoOf(r.url) === videoOf(ref.url);
+    // Across renderers, VI N is the same emulated frame only single-threaded.
+    if (!sameRenderer && !(cpuOf(r.url) === "single" && cpuOf(ref.url) === "single")) {
+      r.render = { status: "unjudged", detail: "different renderers in dual core: VI output N is not the same emulated frame (use cpu=single)" };
+      continue;
+    }
     const ok = sameRenderer ? verdict === "identical" : PASS.has(verdict);
     r.render = { status: ok ? "pass" : "fail", detail: verdict, exact: sameRenderer, ssim: score.ssim, lostDetail: score.lostDetail, extentDelta: score.extentDelta, against: ref.label };
   }
