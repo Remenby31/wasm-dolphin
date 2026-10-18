@@ -131,10 +131,14 @@ export class AotOptimizer extends EventTarget {
         if (this.cancelled) break;
         let consumed = 0, wait = false;
         const ok = [], failed = [];
-        for (const t of translated) {
-          if (t.reason === "budget") break;
-          if (t.reason === "not-ready") { wait = true; break; }
+        // Results come in batch order, each echoing its region's entry; the
+        // cache key is the worker's (the core does not compute it).
+        for (const [n, r] of translated.entries()) {
+          if (r.reason === "budget") break;
+          if (r.reason === "not-ready") { wait = true; break; }
+          if (n >= batch.length || (r.entry !== undefined && r.entry !== batch[n].entry)) throw new Error("translator results out of order");
           consumed++;
+          const t = { ...r, key: batch[n].key };
           if (t.bytes) ok.push(t); else failed.push(t);
         }
         const stored = ok.length ? await session.put(ok.map((t) => ({ key: t.key, bytes: t.bytes, meta: t.meta ?? null }))) : { failed: [] };
@@ -200,15 +204,14 @@ export function fakeTranslator({ msPerKiB = 0, refuse = new Set(), perCall = Inf
   return {
     async translate(regions) {
       calls++;
-      if (calls <= notReadyCalls) return regions.map((r) => ({ key: r.key ?? r.hash, reason: "not-ready" }));
+      if (calls <= notReadyCalls) return regions.map((r) => ({ entry: r.entry, reason: "not-ready" }));
       const out = [];
       for (const [n, r] of regions.entries()) {
-        const key = r.key ?? r.hash;
-        if (n >= perCall) { out.push({ key, reason: "budget" }); break; }
-        if (refuse.has(r.hash)) { out.push({ key, reason: "untranslatable" }); continue; }
+        if (n >= perCall) { out.push({ entry: r.entry, reason: "budget" }); break; }
+        if (refuse.has(r.hash)) { out.push({ entry: r.entry, reason: "untranslatable" }); continue; }
         const bytes = r.ranges.reduce((t, [s, e]) => t + e - s, 0);
         if (msPerKiB) await sleep((bytes / 1024) * msPerKiB);
-        out.push({ key, bytes: new Uint8Array(8) });
+        out.push({ entry: r.entry, bytes: new Uint8Array(8) });
       }
       return out;
     }

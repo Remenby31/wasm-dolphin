@@ -117,3 +117,12 @@ test("aot optimizer: region cache key follows the core formula", async () => {
   const sha = "ab".repeat(32);
   assert.equal(regionKeyOf({ compilerVersion: 3, codegenMask: 0x10 })({ sha256: sha }), `region-v1:00000003:00000010:${sha}`);
 });
+
+test("aot optimizer: translator results out of batch order are a fatal error, nothing stored", async () => {
+  const cache = fakeCache();
+  const translator = { translate: async (regions) => regions.map((r, i) => ({ entry: regions[(i + 1) % regions.length].entry, bytes: new Uint8Array(4) })) };
+  const { o, events } = optimizer({ cache, translator });
+  await o.start();
+  assert.deepEqual(events.at(-1), ["optimization-error", { message: "translator results out of order", fatal: true }]);
+  assert.equal(cache.persisted.size, 0);
+});
