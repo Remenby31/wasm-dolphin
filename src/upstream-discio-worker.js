@@ -610,6 +610,15 @@ function webGpuUboPackMode() {
 // Both zero by default: nothing changes unless the harness asks.
 const wgpuDiagPerturb = { presentDelayMs: 0, drainEveryMs: 0 };
 let wgpuDiagLastDrainAt = 0;
+// The core's GPU-sync counters (patch 0080), on only for the freeze probe.
+let gpuSyncDiagEnabled = false;
+
+// Milliseconds before the next drain the drainEveryMs perturbation allows (0:
+// drain now). The replay pump sleeps that long instead of polling.
+function wgpuDiagDrainWaitMs(now = performance.now()) {
+  if (!(wgpuDiagPerturb.drainEveryMs > 0)) return 0;
+  return Math.max(0, wgpuDiagLastDrainAt + wgpuDiagPerturb.drainEveryMs - now);
+}
 
 // The core's FIFO / pixel-engine handshake snapshot (WasmGpuSyncDiag.h).
 function readGpuSyncDiag() {
@@ -1282,6 +1291,11 @@ async function handleMessage(type, payload) {
       return captureAtViOutput(payload);
     case "validationReadWgpuReplayState":
       return readWgpuReplayState();
+    case "validationEnableGpuSyncDiag":
+      // Applied now if the core is loaded, and again when it loads.
+      gpuSyncDiagEnabled = payload.enabled !== false;
+      moduleInstance?._DolphinWeb_GpuSyncDiagEnable?.(gpuSyncDiagEnabled ? 1 : 0);
+      return { enabled: gpuSyncDiagEnabled, coreDiag: Boolean(moduleInstance?._DolphinWeb_GpuSyncDiagEnable && moduleInstance?._DolphinWeb_GpuSyncDiag), coreLoaded: Boolean(moduleInstance) };
     case "validationSetWgpuPerturbation":
       wgpuDiagPerturb.presentDelayMs = Math.max(0, Math.min(100, Number(payload.presentDelayMs) || 0));
       wgpuDiagPerturb.drainEveryMs = Math.max(0, Math.min(200, Number(payload.drainEveryMs) || 0));
@@ -2151,6 +2165,7 @@ async function loadCore({
   api = bindApi(moduleInstance);
   harnessVideoBackend = videoBackend;
   if (harnessEnabled) moduleInstance._DolphinWeb_HarnessEnable?.(1);
+  if (gpuSyncDiagEnabled) moduleInstance._DolphinWeb_GpuSyncDiagEnable?.(1);
   const ownershipTraceSetterAvailable = Boolean(
     api.setWebGpuOwnershipTraceEnabled &&
     api.getWebGpuOwnershipTracePtr &&
@@ -6879,9 +6894,11 @@ function startWgpuReplayPump() {
     } else {
       webGpuCausalStats.replayPumpEmptyPollCount += 1;
     }
+    // A backlog the drainEveryMs perturbation holds back waits for its next
+    // drain instead of rescheduling at 0 ms.
     scheduleWgpuReplayPump(
       pump,
-      write === read || wgpuMappedCapacityBlocked ? 4 : 0
+      write === read || wgpuMappedCapacityBlocked ? 4 : wgpuDiagDrainWaitMs()
     );
   };
   scheduleWgpuReplayPump(pump, 0);
@@ -9991,7 +10008,7 @@ function drainWebGpuCmdRing(source = "presentation") {
   if (wgpuReplayFatal) return;
   if (wgpuDiagPerturb.drainEveryMs > 0) {
     const now = performance.now();
-    if (now - wgpuDiagLastDrainAt < wgpuDiagPerturb.drainEveryMs) return;
+    if (wgpuDiagDrainWaitMs(now) > 0) return;
     wgpuDiagLastDrainAt = now;
   }
   const ring = webGpuCmdRing;

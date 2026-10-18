@@ -1059,12 +1059,23 @@ static void HarnessOnViOutput(const std::uint8_t* xfb, std::uint32_t width, std:
 EMSCRIPTEN_KEEPALIVE void DolphinWeb_HarnessEnable(int enabled)
 {
   s_harness_enabled.store(enabled ? 1 : 0, std::memory_order_relaxed);
+}
+
+// The GPU-sync counters have a switch of their own, turned on only by the
+// freeze probe (validationEnableGpuSyncDiag): other harness sessions, the
+// perf gate among them, never count.
+EMSCRIPTEN_KEEPALIVE void DolphinWeb_GpuSyncDiagEnable(int enabled)
+{
   DolphinWeb::GpuSyncDiag::s_enabled.store(enabled != 0, std::memory_order_relaxed);
 }
 
 // Harness diagnostics for a dual-core GPU stall (validationReadWgpuReplayState):
 // the CP FIFO as the GPU thread sees it, the pixel engine's token/finish
 // handshake, and the counters of VideoCommon/WasmGpuSyncDiag.h. JSON.
+// Read from the worker while the CPU and GPU threads run: each field is one
+// atomic load, but the fields are not one snapshot (the read pointer can
+// move between "read" and "rwDistance"). Good for a stall, where nothing
+// moves; not for arithmetic between fields of a running FIFO.
 EMSCRIPTEN_KEEPALIVE const char* DolphinWeb_GpuSyncDiag()
 {
   static std::string out;
