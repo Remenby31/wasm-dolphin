@@ -25,7 +25,7 @@
       "commit": "01e0577914a75a2569c846778c2f93aa8e6feddd"
     }
   },
-  "patchSeriesSha256": "1684bb866c7e44035ca43f4b3ce107d7afc7333ab40ce34178fd481d65fbef50",
+  "patchSeriesSha256": "d0b301685e4404fcee588e818393913b7254c8707c39ad0ff312d0248ff81adb",
   "patches": [
     {
       "order": 1,
@@ -551,12 +551,20 @@
       "order": 66,
       "cwd": ".",
       "hashMode": "lf-normalized",
+      "path": "patches/dolphin-wasm/snapshot/0069-webgpu-tag-presents-with-vi-output.patch",
+      "size": 10489,
+      "sha256": "3ede2b12fbec43f5061bfeee5a87f57e7e49dc0da815b963ccfa74fd1a76571e"
+    },
+    {
+      "order": 67,
+      "cwd": ".",
+      "hashMode": "lf-normalized",
       "path": "patches/dolphin-wasm/snapshot/0071-jit-exact-fp-and-engine-reject-guard.patch",
       "size": 73833,
       "sha256": "811fb8d6286866908897cc61966eb26af70eb73d0e0704a6717fd686ff235b7f"
     },
     {
-      "order": 67,
+      "order": 68,
       "cwd": "Externals/SFML/SFML",
       "hashMode": "lf-normalized",
       "path": "patches/dolphin-wasm/submodules/0001-sfml-emscripten-config.patch",
@@ -564,7 +572,7 @@
       "sha256": "f82197a21fe982ad83f6ee7bbf5a03839b1cebd4d64da3eab11263842bf61d89"
     },
     {
-      "order": 68,
+      "order": 69,
       "cwd": "Externals/xxhash/xxHash",
       "hashMode": "lf-normalized",
       "path": "patches/dolphin-wasm/submodules/0002-xxhash-wasm-simd-scalar.patch",
