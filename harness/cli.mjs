@@ -8,7 +8,7 @@ import os from "node:os";
 import path from "node:path";
 import { pathToFileURL } from "node:url";
 import { parseArgs } from "node:util";
-import { ensureServer, pageCall, readCoreProgress, readFrameInfo, REPO_ROOT } from "./lib/browser.mjs";
+import { ensureServer, pageCall, readCoreProgress, readFrameInfo, REPO_ROOT, workerRequest } from "./lib/browser.mjs";
 import { analyzeDifferential, INTERP_QUERY, JIT_QUERY } from "./lib/fuzz.mjs";
 import { releaseAll, setPad } from "./lib/gamepad-mock.mjs";
 import { compareFrames, diffImage, identical } from "./lib/image-diff.mjs";
@@ -16,6 +16,7 @@ import { decodePadRow, decodeRows, hex } from "./lib/markers.mjs";
 import { captureSourceOk, captureSupported, confirmationItems, expandEnv, expandMatrix, forCrossRenderer, matrixMarkdown, PRESETS, resolveQuery, runFlags, summarizeMatrix, summarizeRun } from "./lib/matrix.mjs";
 import { runChecks } from "./lib/correctness.mjs";
 import { browserInfo, isOverloaded, waitForLoad } from "./lib/env.mjs";
+import { createFreezeWatch, probeWorker } from "./lib/freeze-probe.mjs";
 import { correctnessGate, crossCommitGate, decide, infraCrashGate, findingsGate, gateMarkdown, mergeGates, perfReport, runsByCell } from "./lib/gate.mjs";
 import { renderChecks, renderVsBaseline } from "./lib/render-check.mjs";
 import { IDENTITY_FILE } from "./lib/server.mjs";
@@ -165,10 +166,21 @@ async function measureInSession(session, server, { iso, label, warmup, secs, sho
     const measureStartedAt = await session.page.evaluate(() => performance.now()).catch(() => null);
     const chunks = [];
     const start = await readTimeline(session.page); // discards the warmup
+    // Drained every second: no ring can overflow, and a freeze is seen while
+    // it happens, so the worker's GPU state can be read during it.
+    const freezeWatch = createFreezeWatch();
+    const freezeProbes = [];
+    const probeSupported = await workerKnows(server, "validationReadWgpuReplayState");
     const { samples, cpu, shots } = await sample(session, {
       seconds: secs, shotEvery, shotPrefix: path.join(dir, label),
-      // Drain often enough that no ring can overflow between two reads.
-      everySecond: async (i) => { if (i % 10 === 9) chunks.push(await readTimeline(session.page)); }
+      everySecond: async () => {
+        const chunk = await readTimeline(session.page);
+        chunks.push(chunk);
+        const episode = freezeWatch.observe(chunk);
+        if (!episode) return;
+        if (!probeSupported) { if (!freezeProbes.length) freezeProbes.push({ ...episode, unsupported: true }); return; }
+        freezeProbes.push({ ...episode, ...(await probeWorker((t, p) => workerRequest(session.page, t, p, 3000))) });
+      }
     });
     chunks.push(await readTimeline(session.page));
     const monitor = await monitorSnapshot(session);
@@ -212,11 +224,24 @@ async function measureInSession(session, server, { iso, label, warmup, secs, sho
       events: session.watch.events.slice(0, 50),
       samples,
       cpu,
-      timeline
+      timeline,
+      freezeProbes
     };
     writeJson(path.join(dir, `${label}.json`), record);
     return record;
   }
+}
+
+// Whether the served worker handles a message type (read from the served
+// worker source, so an older tree is never sent a message it would reject).
+const workerKnowsCache = new Map();
+async function workerKnows(server, type) {
+  const key = `${server.identity.snapshot}:${type}`;
+  if (!workerKnowsCache.has(key)) {
+    const text = await fetch(new URL("src/upstream-discio-worker.js", server.base)).then((r) => r.text()).catch(() => "");
+    workerKnowsCache.set(key, text.includes(`"${type}"`));
+  }
+  return workerKnowsCache.get(key);
 }
 
 // Render evidence: VI output `renderFrame` after loading the game's
