@@ -240,3 +240,11 @@ export function fakeCache({ persisted = new Map(), quotaKeys = new Set(), blackl
   open.persisted = persisted;
   return open;
 }
+
+// Cache key of a region, the core's formula (P4): parts come from the pure
+// export _DolphinWeb_AotKeyParts (compilerVersion, codegenMask), callable at
+// module init without the CPU thread.
+export function regionKeyOf({ compilerVersion, codegenMask }) {
+  const hex8 = (v) => (v >>> 0).toString(16).padStart(8, "0");
+  return (regionHash) => `region:${regionHash}:${hex8(compilerVersion)}:${hex8(codegenMask)}`;
+}

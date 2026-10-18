@@ -111,3 +111,8 @@ test("aot optimizer: core slices (budget), waits before boot (not-ready), skips 
   assert.equal(cache.persisted.size, o.regions.length - 1);
   assert.deepEqual(await o.status(), { state: "complete", fraction: 1 });
 });
+
+test("aot optimizer: region cache key follows the core formula", async () => {
+  const { regionKeyOf } = await import("../src/aot-optimizer.js");
+  assert.equal(regionKeyOf({ compilerVersion: 3, codegenMask: 0x10 })("0123456789abcdef"), "region:0123456789abcdef:00000003:00000010");
+});
