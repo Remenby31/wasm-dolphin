@@ -5,13 +5,16 @@ import { startMainThreadProfiler } from "./main-profiler.js";
 import { createCausalTelemetry, deepMerge } from "./causal-telemetry.js";
 import {
   CONTROL_LABELS,
+  CORE_DEFAULT_PLUGGED,
+  PAD_PORT_COUNT,
+  assignGamepadPorts,
+  composePortInputs,
   formatControlLabel,
   gamepadInputsEqual,
-  inputStateFromPressed,
   mergePressedSets,
+  portUpdates,
   readGamepadInput,
   resolveKeyboardButton,
-  selectPreferredGamepad,
   updatePressedSet
 } from "./input.js";
 import {
@@ -128,9 +131,13 @@ const OSD_PREF_KEY = "wasm-dolphin.osd-visible";
 
 const keyboardPressed = new Set();
 let touchPressed = new Set();
-let gamepadPressed = new Set();
-let gamepadInputState = null;
-let lastGamepadInput = null;
+// Gamepad API index on each GameCube port (connection order), the last input
+// read from each assigned pad, and which ports this page has plugged in.
+let gamepadPorts = new Array(PAD_PORT_COUNT).fill(null);
+const lastGamepadInputs = new Map();
+const pluggedPorts = [...CORE_DEFAULT_PLUGGED];
+// ?keyboardport=1-4 moves the keyboard (and touch) off P1; =none detaches it.
+const keyboardPort = readKeyboardPort(new URLSearchParams(window.location.search).get("keyboardport"));
 let combinedPressed = new Set();
 let lastFrameInfo = null;
 let lastCausalTelemetry = null;
@@ -252,6 +259,8 @@ wireTransport();
 wireKeyboard();
 wireTouchControls();
 wireGamepadPolling();
+// Match the core's ports to this page's devices before the first input.
+syncPorts();
 
 // §28cx main-thread profiler — activates only with ?mainprof=1. Diagnoses
 // what eats main-thread time (LoAF script attribution) and whether the audio
@@ -1046,16 +1055,14 @@ function wireGamepadPolling() {
   // gamepad input. setInterval at 2ms cuts that floor to ~2ms.
   const poll = () => {
     const pads = navigator.getGamepads?.() ?? [];
-    // §28ck device selection. `pads.find(Boolean)` (the old code) picked
-    // index [0] regardless of whether it was a real controller or a
-    // phantom HID device with empty mapping and axes stuck at extremes
-    // (e.g. Xbox accessory at Product 0x03c3 with all axes pinned to -1).
-    // Prefer pads with W3C `mapping === "standard"` — those are real
-    // controllers whose button/axis indexes match our STANDARD_GAMEPAD_*
-    // assumptions. Fall back to first non-null only if no standard pad
-    // is present. Among multiple standard pads, the one with the highest
-    // button count usually wins (Xbox Wireless = 17, generic = fewer).
-    const firstPad = selectPreferredGamepad(pads);
+    // Every pad gets its own port, in connection order (see
+    // assignGamepadPorts for the phantom-device rule).
+    const nextPorts = assignGamepadPorts(gamepadPorts, pads);
+    let changed = nextPorts.some((index, port) => index !== gamepadPorts[port]);
+    gamepadPorts = nextPorts;
+    for (const index of [...lastGamepadInputs.keys()]) {
+      if (!gamepadPorts.includes(index)) lastGamepadInputs.delete(index);
+    }
 
     if (debugGamepad) {
       const now = performance.now();
@@ -1091,16 +1098,21 @@ function wireGamepadPolling() {
       }
     }
 
-    const nextGamepadInput = firstPad ? readGamepadInput(firstPad) : null;
-    if (!legacyGamepadPoll && gamepadInputsEqual(lastGamepadInput, nextGamepadInput)) {
+    let anyPressed = false;
+    for (const gamepad of pads) {
+      const index = gamepad?.index;
+      if (index == null || !gamepadPorts.includes(index)) continue;
+      const input = readGamepadInput(gamepad);
+      anyPressed ||= input.pressed.size > 0;
+      if (!legacyGamepadPoll && gamepadInputsEqual(lastGamepadInputs.get(index), input)) continue;
+      lastGamepadInputs.set(index, input);
+      changed = true;
+    }
+    if (!changed) {
       return;
     }
 
-    lastGamepadInput = nextGamepadInput;
-    gamepadPressed = nextGamepadInput?.pressed ?? new Set();
-    gamepadInputState = nextGamepadInput?.state ?? null;
-
-    if (gamepadPressed.size > 0) {
+    if (anyPressed) {
       syncInput("Gamepad");
     } else {
       syncInput(elements.inputSource.textContent === "Gamepad" ? "Keyboard" : elements.inputSource.textContent);
@@ -1111,13 +1123,37 @@ function wireGamepadPolling() {
 }
 
 function syncInput(source) {
-  combinedPressed = mergePressedSets(keyboardPressed, touchPressed, gamepadPressed);
-  host.setInputState(inputStateFromPressed(combinedPressed, gamepadInputState));
+  const inputs = syncPorts();
+  // The control chips show P1.
+  combinedPressed = inputs[0].pressed;
   elements.inputSource.textContent = source;
 
   for (const chip of elements.controlGrid.children) {
     chip.classList.toggle("active", combinedPressed.has(chip.dataset.control));
   }
+}
+
+function syncPorts() {
+  const inputs = composePortInputs({
+    ports: gamepadPorts,
+    gamepadInputs: lastGamepadInputs,
+    keyboardPressed: mergePressedSets(keyboardPressed, touchPressed),
+    keyboardPort
+  });
+  for (const { port, action, state } of portUpdates(pluggedPorts, inputs)) {
+    if (action === "set") host.setPad(port, state);
+    else host.connectPad(port, false);
+  }
+  inputs.forEach(({ connected }, port) => {
+    pluggedPorts[port] = connected;
+  });
+  return inputs;
+}
+
+function readKeyboardPort(value) {
+  if (value === "none") return null;
+  const port = Number(value) - 1;
+  return Number.isInteger(port) && port >= 0 && port < PAD_PORT_COUNT ? port : 0;
 }
 
 function renderControlGrid() {

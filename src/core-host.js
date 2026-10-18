@@ -1,5 +1,5 @@
 import { DolphinCoreAdapter, dolphinBundleAvailable } from "./dolphin-adapter.js";
-import { buttonMaskFromPressed } from "./input.js";
+import { buttonMaskFromPressed, isPadPort } from "./input.js";
 import { UpstreamMainThreadAdapter } from "./upstream-main-thread-adapter.js";
 import { UpstreamWorkerAdapter, upstreamBundleAvailable } from "./upstream-worker-adapter.js";
 import {
@@ -639,6 +639,31 @@ export class EmulatorHost {
   setInputState(inputState) {
     this.buttonMask = inputState?.mask >>> 0;
     this.adapter.setInputState?.(inputState);
+  }
+
+  // Public input API (docs/input.md). port is 0-3 (GameCube ports 1-4); state
+  // uses the src/input.js layout (mask of BUTTONS, sticks and triggers as
+  // bytes, 0x80 = centre). setPad plugs the port in if needed, and throws a
+  // TypeError/RangeError on a field that is not a finite number.
+  setPad(port, state) {
+    if (!isPadPort(port) || !state) return false;
+    if (port === 0) this.buttonMask = state.mask >>> 0;
+    if (this.adapter.setPadState) {
+      this.adapter.setPadState(port, state);
+      return true;
+    }
+    if (port !== 0) return false;
+    this.adapter.setInputState?.(state);
+    return true;
+  }
+
+  // Plugs (true) or unplugs (false) the controller on a port. An unplugged
+  // port answers "no controller" to the game.
+  connectPad(port, connected) {
+    if (!isPadPort(port) || !this.adapter.connectPad) return false;
+    if (port === 0) this.buttonMask = 0;
+    this.adapter.connectPad(port, Boolean(connected));
+    return true;
   }
 
   saveState() {
