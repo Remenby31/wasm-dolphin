@@ -24,7 +24,8 @@ test("pull requests that touch no core input skip the core build", () => {
     ["harness/run.mjs", "README.md", "package.json"],
     // Contract hashes follow src/; the binary fields are guarded separately.
     ["src/upstream-worker-adapter.js", "provenance/dolphin-core-abi-v1.json"],
-    ["tools/serve.mjs", "tools/perf-ab.mjs"]
+    ["tools/serve.mjs", "tools/perf-ab.mjs", "tools/_run-jitsplit-on.mjs", "tools/ab-fmh.ps1",
+      "tools/perf-configs/mkwii.json"]
   ]) {
     assert.deepEqual(needsCoreBuild(paths), { core: false, inputs: [] }, paths.join(" "));
   }
@@ -50,6 +51,13 @@ test("anything the core is built from, or CI itself, needs the core build", () =
     const result = needsCoreBuild(["src/app.js", path]);
     assert.equal(result.core, true, path);
     assert.deepEqual(result.inputs, [path]);
+  }
+});
+
+test("a tool nobody classified counts as a core input", () => {
+  for (const path of ["tools/new-helper.mjs", "tools/sub/dir/thing.js", "tools/hooks/pre-commit",
+    "tools/xfb-fastpaths-parity.cpp", "tools/update-dolphin-provenance.mjs", "tools/check-prebuilt-jit-cache.mjs"]) {
+    assert.equal(needsCoreBuild([path]).core, true, path);
   }
 });
 
@@ -109,8 +117,10 @@ test("the fast path only runs on main's core when that core is current", () => {
 test("main keeps every guarantee; pull requests only read caches", () => {
   const build = job("build");
   // main: ccache build from a clean tree, then a reference build with no
-  // cache that must match it, then an incremental rebuild that must match too.
-  const order = ["--ccache --clean", "Save ccache", "Reference build, with no cache", "Incremental rebuild must match"]
+  // cache that must match it; only then are the caches saved (a cache that
+  // changes the bytes is never kept), then the incremental check.
+  const order = ["--ccache --clean", "Reference build, with no cache", "Save ccache", "Save the CMake tree",
+    "Save the Emscripten cache and Naga target", "Incremental rebuild must match"]
     .map((marker) => build.indexOf(marker));
   assert.ok(order.every((index, i) => index > 0 && (i === 0 || index > order[i - 1])), JSON.stringify(order));
   assert.match(build, /rm -rf "\$REPRO\/em-cache" "\$REPRO\/naga-target"[\s\S]*--docker --bind-mounts --clean --jobs[\s\S]*test "\$reference" = "\$CACHED_SHA256"/);

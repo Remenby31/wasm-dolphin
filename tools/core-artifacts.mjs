@@ -14,7 +14,7 @@
 //       The same, for the index against HEAD (tools/hooks/pre-commit).
 //   node tools/core-artifacts.mjs restore --base <ref>
 //       Put <ref>'s core back, keeping this branch's source-side ABI changes.
-//   node tools/core-artifacts.mjs publish-plan --artifact <dir> --out <plan.json>
+//   node tools/core-artifacts.mjs publish-plan --artifact <dir> --built-sha256 <sha> --out <plan.json>
 //       CI on main: commit a built core onto main's current HEAD, or say why not.
 //   node tools/core-artifacts.mjs fetch <sha256> [--repo owner/name]
 //       Materialise an exact core under build/core-candidates/<sha256>/.
@@ -234,10 +234,17 @@ export function buildIdentityDifferences(buildInfo, cwd = root) {
   return reasons;
 }
 
-// The platform whose build main commits: CI's. A core built elsewhere from the
-// same sources is current (core:status) but has other bytes (the Rust part
-// depends on the build host, docs/repro-build.md), so publishing replaces it.
-export const REFERENCE_PLATFORM = "linux-x64";
+// main commits CI's build. A core built elsewhere from the same sources is
+// current (core:status) but has other bytes (the Rust part depends on the
+// build host, docs/repro-build.md), so "none" requires the committed .wasm to
+// be byte for byte the one this run built, not a declared platform.
+function committedWasmSha256(cwd) {
+  try {
+    return sha256(readFileSync(join(cwd, CORE_BINARY_FILES[1])));
+  } catch {
+    return null;
+  }
+}
 
 function committedPlatform(cwd) {
   try {
@@ -249,6 +256,7 @@ function committedPlatform(cwd) {
 
 export async function publishPlan({
   artifactDir,
+  builtSha256,
   cwd = root,
   status = coreStatus,
   identityDifferences = (built) => buildIdentityDifferences(built, cwd),
@@ -266,11 +274,15 @@ export async function publishPlan({
   },
   message = "Build the core"
 }) {
+  if (!/^[0-9a-f]{64}$/.test(builtSha256 ?? "")) throw new Error("publishPlan needs the built core's SHA-256");
+  if (sha256(readFileSync(join(artifactDir, "dolphin-core-upstream.wasm"))) !== builtSha256) {
+    throw new Error("the artifact's .wasm is not the core this run built");
+  }
   const before = await status(cwd);
   const platform = committedPlatform(cwd);
-  if (before.current && platform === REFERENCE_PLATFORM) {
+  if (before.current && committedWasmSha256(cwd) === builtSha256) {
     return { schemaVersion: 1, action: "none", coreId: before.coreId,
-      reason: `the committed core is the ${REFERENCE_PLATFORM} build of these sources` };
+      reason: "the committed core is byte for byte the core this run built" };
   }
   const built = JSON.parse(readFileSync(join(artifactDir, "dolphin-core-upstream.build.json"), "utf8"));
   const differences = identityDifferences(built);
@@ -285,7 +297,7 @@ export async function publishPlan({
   const after = await status(cwd);
   if (!after.current) throw new Error(`installed core is not current: ${after.reasons.join("; ")}`);
   const reason = before.current
-    ? `replaces the committed ${platform ?? "unrecorded-platform"} build of the same sources with the ${REFERENCE_PLATFORM} build`
+    ? `replaces the committed ${platform ?? "unrecorded-platform"} build of the same sources with CI's build`
     : "the committed core is not the build of these sources";
   commit(`${message}\n\n${after.coreId}: ${reason}.`);
   return { schemaVersion: 1, action: "commit", coreId: after.coreId, reason };
@@ -399,7 +411,8 @@ if (process.argv[1] === fileURLToPath(import.meta.url)) {
       if (!artifactDir) throw new Error("publish-plan needs --artifact <dir>");
       const out = option("--out");
       if (!out) throw new Error("publish-plan needs --out <plan.json>");
-      const plan = await publishPlan({ artifactDir: resolve(artifactDir), message: option("--message", "Build the core") });
+      const plan = await publishPlan({ artifactDir: resolve(artifactDir), builtSha256: option("--built-sha256"),
+        cwd: resolve(option("--checkout", root)), message: option("--message", "Build the core") });
       if (!PUBLISH_ACTIONS.includes(plan.action)) throw new Error(`invalid plan ${JSON.stringify(plan)}`);
       writeFileSync(out, `${JSON.stringify(plan)}\n`);
     } else if (command === "fetch") {

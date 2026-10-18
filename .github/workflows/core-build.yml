@@ -220,6 +220,27 @@ jobs:
           node tools/build-core-repro.mjs --docker --bind-mounts --ccache --clean --jobs "$(nproc)"
           echo "wasm_sha256=$(node -p "require('./$REPRO/parity.json').rebuilt.wasmSha256")" >> "$GITHUB_OUTPUT"
 
+      # main: the reference. No ccache, a clean CMake tree, a fresh Emscripten
+      # cache and Naga target. It must give the ccache build's bytes.
+      - name: Reference build, with no cache, must match the ccache build
+        id: reference
+        if: env.PR != 'true'
+        env:
+          CACHED_SHA256: ${{ steps.cached.outputs.wasm_sha256 }}
+        run: |
+          sudo rm -rf "$REPRO/em-cache" "$REPRO/naga-target"
+          start=$(date +%s)
+          node tools/build-core-repro.mjs --docker --bind-mounts --clean --jobs "$(nproc)"
+          echo "CLEAN_BUILD_SECONDS=$(( $(date +%s) - start ))" >> "$GITHUB_ENV"
+          reference=$(node -p "require('./$REPRO/parity.json').rebuilt.wasmSha256")
+          echo "reference build $reference, ccache build $CACHED_SHA256"
+          test "$reference" = "$CACHED_SHA256"
+          echo "wasm_sha256=$reference" >> "$GITHUB_OUTPUT"
+
+      # Caches are saved only once the reference build has matched the
+      # ccache build: a cache that changes the bytes is never kept. ccache
+      # holds the ccache build's entries; the CMake tree, Emscripten cache and
+      # Naga target are the reference build's, made with no cache at all.
       - name: Save ccache
         if: env.PR != 'true'
         uses: actions/cache/save@0057852bfaa89a56745cba8c7296529d2fc39830 # v4
@@ -244,23 +265,6 @@ jobs:
             ${{ env.REPRO }}/em-cache
             ${{ env.REPRO }}/naga-target
           key: emcc-naga-linux-x64-${{ steps.image.outputs.toolchain }}-${{ steps.image.outputs.naga }}
-
-      # main: the reference. No ccache, a clean CMake tree, a fresh Emscripten
-      # cache and Naga target. It must give the ccache build's bytes.
-      - name: Reference build, with no cache, must match the ccache build
-        id: reference
-        if: env.PR != 'true'
-        env:
-          CACHED_SHA256: ${{ steps.cached.outputs.wasm_sha256 }}
-        run: |
-          sudo rm -rf "$REPRO/em-cache" "$REPRO/naga-target"
-          start=$(date +%s)
-          node tools/build-core-repro.mjs --docker --bind-mounts --clean --jobs "$(nproc)"
-          echo "CLEAN_BUILD_SECONDS=$(( $(date +%s) - start ))" >> "$GITHUB_ENV"
-          reference=$(node -p "require('./$REPRO/parity.json').rebuilt.wasmSha256")
-          echo "reference build $reference, ccache build $CACHED_SHA256"
-          test "$reference" = "$CACHED_SHA256"
-          echo "wasm_sha256=$reference" >> "$GITHUB_OUTPUT"
 
       # Recompiling one translation unit and relinking must give the same
       # bytes: anything else is non-determinism in the build.
@@ -435,7 +439,7 @@ jobs:
           base=$(git rev-parse HEAD)
           git config user.name "github-actions[bot]"
           git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
-          node tools/core-artifacts.mjs publish-plan --artifact "$ARTIFACT" --out "$OUT/plan.json" \
+          node tools/core-artifacts.mjs publish-plan --artifact "$ARTIFACT" --built-sha256 "$SHA256" --out "$OUT/plan.json" \
             --message "Build the core for ${base:0:7} (run ${GITHUB_RUN_ID}, rebuilt identically from its GPL source archive)"
           action=$(jq -er '.action | select(. == "none" or . == "dispatch" or . == "commit")' "$OUT/plan.json")
           jq -e '.schemaVersion == 1' "$OUT/plan.json" > /dev/null
