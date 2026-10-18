@@ -74,6 +74,18 @@ export async function openSession({ base, server = null, query, iso, display = "
   };
 }
 
+// Boot the disc again in the same session (same profile and caches), and
+// check again which core it loaded: a reboot fetches the core anew.
+export async function rebootSession(session, server) {
+  const before = server.coreFetches.length;
+  await bootIso(session.page, { url: session.url, iso: session.iso });
+  const selection = await session.page.evaluate(() => window.__host?.adapter?.coreSelectionTelemetry?.() ?? null).catch(() => null);
+  const core = checkCore({ url: session.url, defaultSha256: server.defaultCoreSha256, fetches: server.coreFetches.slice(before), selection });
+  if (!core.ok) throw new Error(core.error);
+  session.core = core;
+  return core;
+}
+
 export async function monitorSnapshot(session, reset = false) {
   return session.page.evaluate((r) => window.__harnessMonitor?.snapshot(r) ?? null, reset).catch(() => null);
 }

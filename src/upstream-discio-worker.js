@@ -1,4 +1,5 @@
 import { readViRing } from "./harness-vi-ring.js";
+import { startPcSampler } from "./harness-pc-sampler.js";
 import {
   DEFAULT_UPSTREAM_CORE_SHA256,
   DEFAULT_UPSTREAM_CORE_URL,
@@ -221,6 +222,23 @@ const PRESENTATION_HISTOGRAM_BUCKETS_MS = [8, 12, 16, 20, 24, 33, 50, 100, 200];
 // clock emscripten_get_now() gives the core's VI ring.
 const harnessNow = () => performance.timeOrigin + performance.now();
 let harnessEnabled = false;
+let harnessPcSamplerRun = null;
+
+// QA harness only: start / stop the guest-PC sampler (harness-pc-sampler.js).
+async function harnessPcSampler({ action, periodMs } = {}) {
+  if (action === "stop") {
+    if (!harnessPcSamplerRun) return { error: "pc sampler not running" };
+    const run = harnessPcSamplerRun;
+    harnessPcSamplerRun = null;
+    return run.stop();
+  }
+  if (!harnessEnabled) return { error: "harness hooks are off" };
+  const pcAddress = moduleInstance?._DolphinWeb_HarnessPcAddress?.() ?? 0;
+  if (!pcAddress) return { error: "core has no DolphinWeb_HarnessPcAddress" };
+  harnessPcSamplerRun?.stop();
+  harnessPcSamplerRun = startPcSampler({ buffer: moduleInstance.HEAPU8.buffer, pcAddress, periodMs: Number(periodMs) || 0.25 });
+  return { started: true, pcAddress, pcNow: api?.getPpcPc?.() ?? null };
+}
 let harnessVideoBackend = null;
 // Exact capture for video=wgpu: presents tagged with VI outputs (ViTag records).
 const wgpuExactCapture = createWgpuExactCapture();
@@ -1211,6 +1229,8 @@ async function handleMessage(type, payload) {
       return { enabled: true, coreHooks: Boolean(moduleInstance?._DolphinWeb_HarnessEnable), coreLoaded: Boolean(moduleInstance) };
     case "validationReadTimeline":
       return readHarnessTimeline();
+    case "validationPcSampler":
+      return harnessPcSampler(payload);
     case "validationCaptureAtVi":
       return captureAtViOutput(payload);
     case "validationReadCoreProgress": {

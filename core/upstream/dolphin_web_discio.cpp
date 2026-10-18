@@ -23,6 +23,7 @@
 #include "DiscIO/VolumeDisc.h"
 #include "Core/CoreTiming.h"
 #include "Core/HW/VideoInterface.h"
+#include "Core/PowerPC/PowerPC.h"
 #include "Core/System.h"
 #include "InputCommon/GCPadStatus.h"
 #include "VideoCommon/Fifo.h"
@@ -1079,6 +1080,16 @@ EMSCRIPTEN_KEEPALIVE std::uint32_t DolphinWeb_HarnessCaptureHeight() { return s_
 EMSCRIPTEN_KEEPALIVE std::uint32_t DolphinWeb_HarnessCaptureIndex() { return s_harness_capture_index; }
 EMSCRIPTEN_KEEPALIVE double DolphinWeb_HarnessCaptureTicks() { return static_cast<double>(s_harness_capture_ticks); }
 EMSCRIPTEN_KEEPALIVE DolphinWebHarnessViEntry* DolphinWeb_HarnessViRing() { return s_harness_vi_ring.data(); }
+// Address of PowerPCState::pc in the wasm heap, for the harness's guest-PC
+// sampler (src/harness-pc-sampler.js): a worker of its own reads the u32 there
+// every fraction of a millisecond, without stopping the CPU thread. 0 until
+// the runtime is up. Read-only use; harness only.
+EMSCRIPTEN_KEEPALIVE std::uintptr_t DolphinWeb_HarnessPcAddress()
+{
+  if (!s_harness_enabled.load(std::memory_order_acquire))
+    return 0;
+  return reinterpret_cast<std::uintptr_t>(&Core::System::GetInstance().GetPPCState().pc);
+}
 EMSCRIPTEN_KEEPALIVE std::uint32_t DolphinWeb_HarnessViRingCapacity() { return HARNESS_VI_RING_CAPACITY; }
 EMSCRIPTEN_KEEPALIVE std::uint32_t DolphinWeb_HarnessViRingHead() { return s_harness_vi_head.load(std::memory_order_acquire); }
 EMSCRIPTEN_KEEPALIVE std::uint32_t DolphinWeb_HarnessLoadGeneration() { return s_harness_load_generation.load(std::memory_order_acquire); }
