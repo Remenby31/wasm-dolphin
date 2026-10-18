@@ -2668,6 +2668,20 @@ async function handleSavesMessage(type, payload) {
         cards: identity
           ? { A: listCardSaves(cardFolder(identity, "A")), B: listCardSaves(cardFolder(identity, "B")) }
           : null,
+        regions: (() => {
+          try {
+            return moduleInstance.FS.readdir(`${USER_DATA_ROOT}/GC`).filter((name) => !name.startsWith("."));
+          } catch {
+            return [];
+          }
+        })(),
+        // Dolphin creates a slot's folder when it inserts the card there.
+        inserted: identity
+          ? {
+              A: moduleInstance.FS.analyzePath(cardFolder(identity, "A")).exists,
+              B: moduleInstance.FS.analyzePath(cardFolder(identity, "B")).exists
+            }
+          : null,
         states: states.sort()
       };
     }
@@ -2827,7 +2841,9 @@ async function mountFile(file) {
       throw new Error(`Dolphin refused the ${bootKind}: ${api.getCoreStatus?.() || "no status"}`);
     }
     bootedGame = executable
-      ? { kind: bootKind, gameId: executableGameId(path), region: "Unknown" }
+      // An executable has no region: Dolphin falls back to its default one,
+      // PAL in the browser (no host locale; observed as GC/EUR).
+      ? { kind: bootKind, gameId: executableGameId(path), region: "PAL" }
       : { kind: "disc", gameId: api.getGameId() || "", region: api.getRegion() || "" };
     const _t_pump = performance.now();
     api.pumpHostJobs?.();
