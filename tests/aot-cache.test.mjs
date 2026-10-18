@@ -370,7 +370,7 @@ test("aot-sw.js answers only its own URLs, from CacheStorage, and is importScrip
   standalone.install[0]({ addRoutes: (r) => { routes = r; } });
   assert.equal(routes?.length, 2);
   assert.equal(routes[0].source, "fetch-event");
-  assert.deepEqual(routes[0].condition.or.map((c) => c.urlPattern.pathname), ["/__salon-aot/*", "/*/__salon-aot/*"]);
+  assert.equal(JSON.stringify(routes[0].condition.or.map((c) => c.urlPattern.pathname)), JSON.stringify(["/__salon-aot/*", "/*/__salon-aot/*"]));
   assert.equal(routes[1].source, "network");
 
   const hit = await fetchThrough(imported, aotEntryUrl(BASE, cache.cacheName, k(1)));
