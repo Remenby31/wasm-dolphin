@@ -63,7 +63,31 @@
     standalone = false;
   }
   if (standalone) {
-    self.addEventListener("install", function () {
+    self.addEventListener("install", function (event) {
+      // Static routing (Chrome 123+): only this worker's URLs reach the fetch
+      // handler; every other request of a controlled client goes straight to
+      // the network, as if no Service Worker were there. Without it, each
+      // fetch of the engine's workers waits on a fetch event, which shifts
+      // the core's boot timing. (A site that imports this script owns its
+      // routes.)
+      if (typeof event.addRoutes === "function" && typeof URLPattern === "function") {
+        try {
+          event.addRoutes([
+            {
+              condition: {
+                or: [
+                  { urlPattern: new URLPattern({ pathname: "/__salon-aot/*" }) },
+                  { urlPattern: new URLPattern({ pathname: "/*/__salon-aot/*" }) }
+                ]
+              },
+              source: "fetch-event"
+            },
+            { condition: { urlPattern: new URLPattern({}) }, source: "network" }
+          ]);
+        } catch (e) {
+          // older engine: every request takes the fetch handler, as before
+        }
+      }
       self.skipWaiting();
     });
     self.addEventListener("activate", function (event) {

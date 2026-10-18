@@ -343,7 +343,7 @@ test("aot-sw.js answers only its own URLs, from CacheStorage, and is importScrip
 
   function load(location) {
     const listeners = {};
-    const context = { self: null, caches: storage, URL, Response, Promise };
+    const context = { self: null, caches: storage, URL, Response, Promise, URLPattern: class { constructor(init) { this.pathname = init.pathname ?? "*"; } } };
     context.self = {
       location: { href: location, origin: new URL(location).origin },
       addEventListener: (type, fn) => {
@@ -365,6 +365,13 @@ test("aot-sw.js answers only its own URLs, from CacheStorage, and is importScrip
   assert.deepEqual(Object.keys(imported), ["fetch"], "no install/activate when imported by a site");
   const standalone = load("http://127.0.0.1:8090/src/aot-sw.js?standalone=1");
   assert.deepEqual(Object.keys(standalone).sort(), ["activate", "fetch", "install"]);
+  // standalone: static routes send everything but its own URLs straight to the network
+  let routes = null;
+  standalone.install[0]({ addRoutes: (r) => { routes = r; } });
+  assert.equal(routes?.length, 2);
+  assert.equal(routes[0].source, "fetch-event");
+  assert.deepEqual(routes[0].condition.or.map((c) => c.urlPattern.pathname), ["/__salon-aot/*", "/*/__salon-aot/*"]);
+  assert.equal(routes[1].source, "network");
 
   const hit = await fetchThrough(imported, aotEntryUrl(BASE, cache.cacheName, k(1)));
   assert.equal(hit.status, 200);
