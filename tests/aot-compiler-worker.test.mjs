@@ -215,12 +215,19 @@ test("the compiler worker receives bytes only and hands back a Module the caller
   assert.equal(result.warmed, true);
   assert.ok(result.module instanceof WebAssembly.Module);
   // Nothing but plain data crossed to the worker: no Memory, no Table, no function.
-  for (const message of posted) {
-    for (const value of Object.values(message)) {
-      assert.ok(!(value instanceof WebAssembly.Memory) && !(value instanceof WebAssembly.Table));
+  const seen = [];
+  const walk = (value) => {
+    if (value === null || typeof value !== "object") {
       assert.notEqual(typeof value, "function");
+      return;
     }
-  }
+    assert.ok(!(value instanceof WebAssembly.Memory) && !(value instanceof WebAssembly.Table) && !(value instanceof WebAssembly.Instance));
+    if (ArrayBuffer.isView(value) || value instanceof SharedArrayBuffer) return seen.push(value);
+    for (const v of Object.values(value)) walk(v);
+  };
+  posted.forEach(walk);
+  // the job's bytes and the watchdog's 4-byte status word, nothing else
+  assert.ok(seen.every((v) => v instanceof Uint8Array || (v instanceof SharedArrayBuffer && v.byteLength === 4)));
   assert.equal(digest(real), before);
   const instance = new WebAssembly.Instance(result.module, { env: { memory: real, h0: () => 0 } });
   assert.equal(instance.exports.f(0x40) >>> 0, 0x80003000);

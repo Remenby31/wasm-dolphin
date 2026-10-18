@@ -293,8 +293,17 @@ export function installAotCompilerWorker(scope) {
     return { ...result, warmMs };
   }
 
+  // Replies are coalesced: thousands of cached blocks load at boot, and one
+  // message per module costs more than compiling it.
+  let outbox = [];
+  function flushReplies() {
+    const results = outbox;
+    outbox = [];
+    scope.postMessage({ type: "aot-compiled", results, totals: { ...totals } });
+  }
   function reply(job, fields) {
-    scope.postMessage({ type: "aot-compiled", id: job.id, totals: { ...totals }, ...fields });
+    if (!outbox.length) setTimeout(flushReplies, 0);
+    outbox.push({ id: job.id, ...fields });
   }
 
   function pump() {
@@ -317,6 +326,7 @@ export function installAotCompilerWorker(scope) {
   // Answered once nothing is compiling or waiting for its warm-up.
   function answerFlushes() {
     if (inFlight || pumping || !flushes.length) return;
+    if (outbox.length) flushReplies();
     for (const id of flushes) scope.postMessage({ type: "aot-flushed", id, totals: { ...totals } });
     flushes = [];
   }
@@ -346,29 +356,37 @@ export function installAotCompilerWorker(scope) {
       return;
     }
     if (msg.type !== "aot-compile") return;
-    const job = msg;
-    const t0 = now();
+    startBatch(msg.jobs);
+  });
+  scope.postMessage({ type: "aot-compiler-ready", protocol: AOT_COMPILER_PROTOCOL });
+
+  // Everything a message brought that can be delivered without waiting for
+  // its warm-up is answered in one reply as soon as the whole message is
+  // compiled: the boot load waits on batches, so a batch's latency is what
+  // counts. Modules delivered after their warm-up are answered one by one.
+  function startBatch(jobs) {
+    const now0 = now();
     inFlight += 1;
-    WebAssembly.compile(job.bytes).then((module) => {
-      inFlight -= 1;
-      const compileMs = now() - t0;
+    const ready = [];
+    Promise.all(jobs.map((job) => WebAssembly.compile(job.bytes).then((module) => {
+      const compileMs = now() - now0;
       const warm = job.warm !== false && Boolean(status);
       if (!warm) {
-        reply(job, { module, compileMs, warmed: false, warmMs: 0, calls: 0 });
+        ready.push({ id: job.id, module, compileMs, warmed: false, warmMs: 0, calls: 0 });
       } else if (job.deliver === DELIVER_BEFORE_WARM) {
-        reply(job, { module, compileMs, warmed: false, warmMs: 0, calls: 0, warmQueued: true });
+        ready.push({ id: job.id, module, compileMs, warmed: false, warmMs: 0, calls: 0, warmQueued: true });
         enqueueWarm({ job, module, compileMs, replyAfter: false });
       } else {
         enqueueWarm({ job, module, compileMs, replyAfter: true });
       }
-      answerFlushes();
     }, (error) => {
+      ready.push({ id: job.id, error: { name: error?.name || "Error", message: String(error?.message || error) } });
+    }))).then(() => {
       inFlight -= 1;
-      reply(job, { error: { name: error?.name || "Error", message: String(error?.message || error) } });
+      if (ready.length) scope.postMessage({ type: "aot-compiled", results: ready, totals: { ...totals } });
       answerFlushes();
     });
-  });
-  scope.postMessage({ type: "aot-compiler-ready", protocol: AOT_COMPILER_PROTOCOL });
+  }
 }
 
 if (
@@ -472,6 +490,7 @@ export function createAotCompilerClient({
       // already gone
     }
     worker = null;
+    outgoing = [];
     carried = {
       warmed: carried.warmed + current.warmed,
       warmCalls: carried.warmCalls + current.warmCalls,
@@ -501,22 +520,26 @@ export function createAotCompilerClient({
       current = data.totals;
       foldTotals();
     }
-    const job = pending.get(data.id);
+    for (const result of data.results) settle(result);
+  }
+
+  function settle(result) {
+    const job = pending.get(result.id);
     if (!job) return;
-    pending.delete(data.id);
-    if (data.error) {
+    pending.delete(result.id);
+    if (result.error) {
       stats.failed += 1;
-      job.reject(rebuildError(data.error));
+      job.reject(rebuildError(result.error));
       return;
     }
     stats.done += 1;
-    stats.compileMs += data.compileMs || 0;
+    stats.compileMs += result.compileMs || 0;
     job.resolve({
-      module: data.module,
-      compileMs: data.compileMs,
-      warmMs: data.warmMs,
-      warmed: Boolean(data.warmed),
-      warmQueued: Boolean(data.warmQueued),
+      module: result.module,
+      compileMs: result.compileMs,
+      warmMs: result.warmMs,
+      warmed: Boolean(result.warmed),
+      warmQueued: Boolean(result.warmQueued),
       offThread: true
     });
   }
@@ -570,8 +593,22 @@ export function createAotCompilerClient({
       return;
     }
     // Bytes are copied, never transferred: callers keep theirs for storage.
-    target.postMessage({ type: "aot-compile", id, bytes: job.bytes, warm: job.warm && Boolean(status), deliver: job.deliver });
+    // Jobs sent in the same turn go in one message.
+    if (!outgoing.length) queueMicrotask(flushOutgoing);
+    outgoing.push({ id, bytes: job.bytes, warm: job.warm && Boolean(status), deliver: job.deliver });
     schedulePoll();
+  }
+
+  let outgoing = [];
+  function flushOutgoing() {
+    const jobs = outgoing;
+    outgoing = [];
+    if (!jobs.length) return;
+    if (!worker) {
+      for (const job of jobs) send(job.id);
+      return;
+    }
+    worker.postMessage({ type: "aot-compile", jobs });
   }
 
   return {
