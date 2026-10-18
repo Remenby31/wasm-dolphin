@@ -77,7 +77,7 @@ export function crossCommitGate(candRecords) {
     const st = r.renderVsBaseline?.status ?? "unjudged";
     return {
       game: r.game, config: r.config, check: `renderVsBaseline r${r.run}`, baseline: "capture", candidate: st,
-      status: st === "fail" ? "regressed" : st === "pass" ? "ok" : st === "not-covered" ? "not-covered" : "inconclusive",
+      status: st === "fail" ? "regressed" : st === "pass" ? "ok" : st === "known" ? "known-failure" : st === "not-covered" ? "not-covered" : "inconclusive",
       detail: r.renderVsBaseline?.detail ?? null
     };
   });
