@@ -11,7 +11,7 @@
 //
 //   node harness/probes/wgpu-freeze.mjs --iso disc.iso [--runs 10]
 //     [--config wgpu | --query "..."] [--steps steps.json] [--hold 30]
-//     [--perturb '{"presentDelayMs":12,"drainEveryMs":60}'] [--port 8084]
+//     [--perturb '{"presentDelayMs":12,"drainEveryMs":60}'] --port N
 //
 // --perturb uses the harness-only replay perturbations: a blocking present and
 // spaced ring drains reproduce, in headless Chrome, the backpressure a visible
@@ -39,11 +39,13 @@ const { values } = parseArgs({
     steps: { type: "string" },
     hold: { type: "string", default: "30" },
     perturb: { type: "string" },
-    port: { type: "string", default: process.env.HARNESS_PORT || "8082" },
+    port: { type: "string", default: process.env.HARNESS_PORT },
     out: { type: "string" },
   },
 });
-if (!values.iso) throw new Error("usage: wgpu-freeze.mjs --iso disc.iso [--runs N] [--steps steps.json] [--perturb json]");
+if (!values.iso || !values.port) {
+  throw new Error("usage: wgpu-freeze.mjs --iso disc.iso --port N (or HARNESS_PORT) [--runs N] [--steps steps.json] [--perturb json]");
+}
 const iso = path.resolve(values.iso);
 const localOnly = !iso.startsWith(HOMEBREW_OUT);
 if (localOnly && process.env.CI) throw new Error("this disc is local-only and must never run in CI");
@@ -67,28 +69,46 @@ try {
     const session = await openSession({ base: server.base, query, iso });
     const { page } = session;
     let lastPresentT = null;
-    let vi = 0;
+    let lastVi = null; // VI output since boot, from the core's own counter
+    let viEntries = 0;
     let presents = 0;
     let freeze = null;
+    const unjudged = [];
     const states = [];
+    let firstNow = null; // page clock (timeOrigin + now) at the first read
     const poll = async () => {
       const tl = await readTimeline(page);
-      if (tl?.presents?.t?.length) {
+      if (tl?.error || !tl?.vi?.supported) {
+        unjudged.push(tl?.error ?? tl?.vi?.why ?? "no VI timeline");
+        return;
+      }
+      if (tl.vi.lost || tl.presents.lost) unjudged.push(`timeline entries lost (vi ${tl.vi.lost}, presents ${tl.presents.lost})`);
+      if (tl.presents.t.length) {
         lastPresentT = tl.presents.t.at(-1);
         presents += tl.presents.t.length;
       }
-      const newVi = tl?.vi?.t?.length ?? 0;
-      vi += newVi;
-      const now = tl?.now;
-      if (!freeze && now && lastPresentT && now - lastPresentT > FREEZE_MS && newVi > 0) {
-        freeze = { t: now, viSinceBoot: vi, lastPresentAgeMs: Math.round(now - lastPresentT) };
+      const newVi = tl.vi.t.length;
+      viEntries += newVi;
+      if (newVi) lastVi = tl.vi.sinceBoot.at(-1);
+      const now = tl.now;
+      firstNow ??= now;
+      // Before the first present, the reference is the first timeline read.
+      const reference = lastPresentT ?? firstNow;
+      if (!freeze && now && now - reference > FREEZE_MS && newVi > 0) {
+        freeze = { t: now, viSinceBoot: lastVi, lastPresentAgeMs: Math.round(now - reference),
+                   beforeFirstPresent: lastPresentT === null };
       }
       if (freeze && states.length < 8) {
         states.push({ t: Date.now(), state: await workerRequest(page, "validationReadWgpuReplayState", {}, 3000) });
       }
     };
     try {
-      if (perturb) await workerRequest(page, "validationSetWgpuPerturbation", perturb, 10000);
+      if (perturb) {
+        const applied = await workerRequest(page, "validationSetWgpuPerturbation", perturb, 10000);
+        if (applied?.error || Object.entries(perturb).some(([k, v]) => applied?.[k] !== v)) {
+          throw new Error(`perturbation refused: ${JSON.stringify(applied)}`);
+        }
+      }
       let stepsDone = false;
       const script = runSteps(page, steps).finally(() => { stepsDone = true; });
       while (!stepsDone) {
@@ -101,13 +121,16 @@ try {
         if (s % 2 === 1 || freeze) await poll();
       }
     } catch (error) {
-      freeze = freeze ?? { error: String(error?.message || error).slice(0, 300) };
-    } finally {
-      await session.close();
+      unjudged.push(String(error?.message || error).slice(0, 300));
     }
-    const record = { run, url: session.url, frozen: Boolean(freeze && !freeze.error), freeze, presents, vi, states };
+    const fatal = session.watch?.fatal?.() ?? [];
+    await session.close();
+    // A crash is a crash, and a run whose timeline could not be read is
+    // unjudged: neither may count as "not frozen".
+    const verdict = fatal.length ? "crash" : freeze ? "frozen" : unjudged.length ? "unjudged" : "ok";
+    const record = { run, url: session.url, verdict, freeze, presents, viEntries, lastVi, unjudged: unjudged.slice(0, 20), fatal, states };
     writeFileSync(path.join(outDir, `run${run}.json`), JSON.stringify(record, null, 1) + "\n");
-    summary.push({ run, frozen: record.frozen, presents, vi, error: freeze?.error ?? null });
+    summary.push({ run, verdict, presents, viEntries, lastVi });
     console.log(JSON.stringify(summary.at(-1)));
   }
 } finally {
@@ -115,4 +138,5 @@ try {
 }
 writeFileSync(path.join(outDir, "summary.json"),
   JSON.stringify({ iso: path.basename(iso), query, perturb, runs: summary }, null, 1) + "\n");
-console.log(`[wgpu-freeze] frozen ${summary.filter((r) => r.frozen).length}/${summary.length} -> ${outDir}`);
+const count = (v) => summary.filter((r) => r.verdict === v).length;
+console.log(`[wgpu-freeze] frozen ${count("frozen")}, crash ${count("crash")}, unjudged ${count("unjudged")}, ok ${count("ok")} of ${summary.length} -> ${outDir}`);
