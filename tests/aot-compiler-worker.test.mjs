@@ -483,3 +483,32 @@ test("bytes viewed on a SharedArrayBuffer are copied before they leave", async (
   assert.equal(job.bytes.buffer.byteLength, bytes.length);
   assert.deepEqual(job.bytes, bytes);
 });
+
+// 48 real blocks the core's JIT emitted for the cpufuzz homebrew (MIT, ours),
+// read back from the IndexedDB JIT cache of a headless session.
+test("real JIT blocks: compiled and warmed off-thread, real memory untouched, no stuck warm-up", async (t) => {
+  const { decodePrebuiltCache } = await import("../src/prebuilt-jit-cache-format.js");
+  const { verifyCanonicalWasmBlockKey } = await import("../src/jit-cache-identity.js");
+  const { readFileSync } = await import("node:fs");
+  const { entries } = decodePrebuiltCache(readFileSync(new URL("./fixtures/jit-blocks-cpufuzz.bin", import.meta.url)));
+  assert.equal(entries.length, 48);
+  for (const { hash, bytes } of entries) assert.equal(await verifyCanonicalWasmBlockKey(hash, bytes), true);
+  const memoryDesc = parseWasmImports(entries[0].bytes).find((i) => i.kind === "memory");
+  assert.deepEqual(memoryDesc, { module: "env", name: "memory", kind: "memory", initial: 24576, maximum: 24576, shared: true });
+  // the emulator's memory: same shape, a known pattern in the first pages
+  const real = new WebAssembly.Memory({ initial: 24576, maximum: 24576, shared: true });
+  const probe = new Uint8Array(real.buffer, 0, 1 << 20);
+  probe.fill(0x5a);
+  const before = createHash("sha256").update(probe).digest("hex");
+
+  const client = createAotCompilerClient({ createWorker: nodeWorkerFactory(), warmTimeoutMs: 2000 });
+  t.after(() => client.terminate());
+  const results = await Promise.all(entries.map(({ bytes }) => client.compile(bytes)));
+  await client.drain();
+  assert.ok(results.every((r) => r.module instanceof WebAssembly.Module && r.offThread));
+  const stats = client.stats();
+  assert.equal(stats.timeouts, 0);
+  assert.equal(stats.warmed, 48);
+  assert.ok(stats.warmCalls >= 48);
+  assert.equal(createHash("sha256").update(new Uint8Array(real.buffer, 0, 1 << 20)).digest("hex"), before);
+});
