@@ -176,6 +176,21 @@ test("a compile request is precompiled, kept alive and marked ready in the core'
   await request({ currentTarget: cpu, data: { type: "dolphin-jit-compile-request", key: "k-bad", bytes: bad, kind: "block", readyPtr: READY, readySlot: 9 } });
   assert.equal(Atomics.load(heap, READY + 9), 1);
   assert.deepEqual(await precompileDolphinJitModule("k-bad", bad), { reason: "compile" });
+  // two keys sharing a slot (16 bits of SHA-256): the slot says "something
+  // finished", never "this key's Module is here". Each key keeps its own
+  // Module; the core always compiles its own bytes, so a collision costs one
+  // synchronous compile, never a wrong module.
+  const identity = Uint8Array.from(Buffer.from("0061736d0100000001060160017f017f03020100070501016600000a0601040020000b", "hex"));
+  const identityKey = await canonicalWasmBlockKey(identity);
+  heap[READY + 3] = 0;
+  await request({ currentTarget: cpu, data: { type: "dolphin-jit-compile-request", key: identityKey, bytes: identity, kind: "block", readyPtr: READY, readySlot: 3 } });
+  assert.equal(Atomics.load(heap, READY + 3), 1);
+  const otherKeyOnSameSlot = `wasm-block-sha256-v1:${"f".repeat(64)}`; // never asked for
+  assert.notEqual((await precompileDolphinJitModule(identityKey, identity)).module, kept.module);
+  assert.equal(new WebAssembly.Instance((await precompileDolphinJitModule(identityKey, identity)).module).exports.f(7), 7);
+  assert.equal(new WebAssembly.Instance(kept.module).exports.f(7), 8);
+  assert.deepEqual(await precompileDolphinJitModule(otherKeyOnSameSlot, identity), { reason: "key-mismatch" });
+
   // out-of-range table addresses are ignored, never written
   await request({ currentTarget: cpu, data: { type: "dolphin-jit-compile-request", key: plusKey, bytes: plusOne, kind: "block", readyPtr: 0x1ffff, readySlot: 5 } });
   setDolphinJitReadyHeapForTest(null);

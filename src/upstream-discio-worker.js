@@ -6811,8 +6811,11 @@ function compileDolphinJitModuleOffThread(bytes, deliver) {
 //     the Module is compiled, warmed and kept alive, or once compiling failed,
 //     the slot is set to 1 here (Atomics.store); the core then compiles the
 //     bytes itself, synchronously: a cache hit, or the engine's own verdict
-//     (CompileError: blacklist; out of memory: transient). A slot collision
-//     costs one more synchronous compile, never a wrong result.
+//     (CompileError: blacklist; out of memory: transient). A slot is shared
+//     by every key with the same 16 bits: 1 means "some request of this slot
+//     finished", never "this key's Module is here". The core must always
+//     compile its own bytes on retry; a collision then costs one synchronous
+//     compile that misses V8's cache, never a wrong module.
 //   {type: "dolphin-jit-warm-state", statePtr, state} the scratch state that
 //     makes every entry point leave at its first downcount test.
 // The key is the core's, used as is: block keys are also the IndexedDB keys,
