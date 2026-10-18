@@ -1,8 +1,10 @@
 // Copyright 2026 wasm-dolphin contributors
 // SPDX-License-Identifier: MIT
-// Chrome (headed, isolated profile) + local server plumbing for the harness.
+// Chrome (isolated profile, headless by default) + local server plumbing for the harness.
 import { execFileSync } from "node:child_process";
-import { existsSync, readFileSync } from "node:fs";
+import { createHash } from "node:crypto";
+import os from "node:os";
+import { existsSync, readdirSync, readFileSync } from "node:fs";
 import path from "node:path";
 import { pathToFileURL } from "node:url";
 import { FRAME_FIELDS } from "./matrix.mjs";
@@ -43,16 +45,71 @@ export async function ensureServer({ port, root = REPO_ROOT, patches = [] }) {
   return serveTree({ port, root, patches });
 }
 
-export async function launchChrome({ profileDir, headed = true, channel = "chrome", args = [] }) {
+// The browser never shows up on this Mac (PROGRAM.md, "ne jamais gêner
+// l'utilisateur"): Chrome --headless=new only. Captures are made by the core
+// at an exact VI output, so the compositor does not matter, and WebGPU
+// (Apple metal-3) works there; captures were checked byte-identical to a
+// windowed Chrome, for software and wgpu. Every windowed variant was tried
+// and showed a window (window-position off screen: moved back on screen;
+// open -j -g: shown when Chrome opens it), so none is offered. As a guard,
+// after launch and after boot no window of our Chrome may be on screen;
+// otherwise it is closed and the run fails.
+export const DISPLAYS = Object.freeze(["headless"]);
+
+const ARGS = [
+  "--no-first-run",
+  "--no-default-browser-check",
+  "--enable-unsafe-webgpu",
+  // Audio must run without a user gesture so underruns and silence can be measured.
+  "--autoplay-policy=no-user-gesture-required",
+  // No background throttling of timers, rAF or renderers.
+  "--disable-backgrounding-occluded-windows",
+  "--disable-renderer-backgrounding",
+  "--disable-background-timer-throttling"
+];
+
+export function chromeLaunchOptions(display = "headless") {
+  if (!DISPLAYS.includes(display)) throw new Error(`--display ${display}: the harness only runs headless (no window may appear on this Mac)`);
+  return { headless: true, args: ARGS };
+}
+
+export async function launchChrome({ profileDir, display = "headless", args = [] }) {
+  const opts = chromeLaunchOptions(display);
   const { chromium } = await importPlaywright();
-  if (!headed) console.warn("[harness] headless: rendering numbers are not valid (PROGRAM.md rule 4)");
-  return chromium.launchPersistentContext(profileDir, {
-    channel,
-    headless: !headed,
-    viewport: { width: 1280, height: 900 },
-    // Audio must run without a user gesture so underruns and silence can be measured.
-    args: ["--no-first-run", "--no-default-browser-check", "--autoplay-policy=no-user-gesture-required", ...args]
+  const context = await chromium.launchPersistentContext(profileDir, {
+    channel: "chrome",
+    headless: opts.headless,
+    viewport: { width: 1280, height: 800 },
+    args: [...opts.args, ...args]
   });
+  context.assertInvisible = (when) => assertNoWindow(profileDir, when, () => context.close());
+  return context;
+}
+
+let windowTool = null;
+// Compile onscreen-windows.swift once per checkout version.
+function onScreenWindows(pids) {
+  if (!windowTool) {
+    const src = path.join(REPO_ROOT, "harness", "lib", "onscreen-windows.swift");
+    const bin = path.join(os.tmpdir(), `gc-harness-wins-${createHash("sha256").update(readFileSync(src)).digest("hex").slice(0, 12)}`);
+    if (!existsSync(bin)) execFileSync("swiftc", ["-O", "-o", bin, src], { stdio: "ignore" });
+    windowTool = bin;
+  }
+  return execFileSync(windowTool, pids.map(String), { encoding: "utf8" }).split("\n").filter(Boolean);
+}
+
+function profilePids(profileDir) {
+  const out = execFileSync("ps", ["-A", "-o", "pid=,command="], { encoding: "utf8", maxBuffer: 32 << 20 });
+  return out.split("\n").filter((l) => l.includes(profileDir)).map((l) => Number(l.trim().split(/\s+/)[0])).filter(Boolean);
+}
+
+async function assertNoWindow(profileDir, when, close) {
+  if (process.platform !== "darwin") return;
+  const visible = onScreenWindows(profilePids(profileDir));
+  if (visible.length) {
+    await close().catch(() => {});
+    throw new Error(`our Chrome has a window on screen ${when} (${visible.join("; ")}): closed`);
+  }
 }
 
 export function watchPage(page) {
