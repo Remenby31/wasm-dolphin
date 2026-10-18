@@ -36,6 +36,12 @@
       "sha256": "a0262feec1d2044dc576b6f67240a8a99b36a4ba27cf37013cc99d855f3c755e"
     },
     {
+      "path": "core/upstream/dolphin_web_fma.h",
+      "hashMode": "lf-normalized",
+      "size": 6279,
+      "sha256": "f2b13956b48b67b5013e5d62608a362159273ce15e66ed59c45640affa850054"
+    },
+    {
       "path": "core/upstream/dolphin_web_core.cpp",
       "hashMode": "lf-normalized",
       "size": 47327,
@@ -81,7 +87,7 @@
       "path": "src/core-host.js",
       "hashMode": "lf-normalized",
       "size": 67113,
-      "sha256": "087c566c437d7441eae3624460d6531140a6226adca85894682a6dc791109b79"
+      "sha256": "ff78f385996180dcdda0ba05162a9f2eb2225b10c9e0f2b94ff061818e7a61c9"
     },
     {
       "path": "src/diagnostic-log-filter.js",
@@ -350,7 +356,9 @@
     }
   },
   "memoryContractStatus": "consistent",
-  "sourceOnlyExportsPendingRebuild": [],
+  "sourceOnlyExportsPendingRebuild": [
+    "_DolphinWeb_FmaIsMusl"
+  ],
   "moduleExports": [
     "_AcknowledgeWebGpuOwnershipTraceCapture",
     "_AudioBuffer",

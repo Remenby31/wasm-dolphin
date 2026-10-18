@@ -137,12 +137,22 @@ function fmaOperands(r) {
     case 3: b = r.pick([[0, 0], [0, 0x80000000], [1, 0], [0, 0x00080000]]); break; // zeros, subnormals
     default: b = r.chance(0.5) ? single() : full();
   }
-  const extreme = r.below(10);
+  const extreme = r.below(12);
   if (extreme === 0) return { a: scaled(a, 990 + r.below(10)), c, b };
   if (extreme === 1) return { a: scaled(a, -460 - r.below(30)), c: scaled(c, -440 - r.below(30)), b };
   if (extreme === 2) return { a: scaled(a, 520), c: scaled(c, 500), b };       // overflow
   if (extreme === 3) return { a: r.pick([[0, 0], [0, 0x80000000]]), c, b };
   if (extreme === 4) return { a, c: r.pick([[1, 0], [0, 0x80000], [0x10000000, 0x80000000], [0, 0]]), b }; // denormal frC
+  if (extreme === 5) {
+    // Products at the bottom of the range: exact-looking significands whose
+    // product underflows to a subnormal or a zero (±0 b included).
+    const k = r.below(60);
+    // b: ±0, or a normal at the bottom of the range where the lost product
+    // decides the rounding (ulp(b) = 2^-1074).
+    const bottom = [r.below(4), (r.chance(0.5) ? 0x80000000 : 0) | 0x00100000 | r.below(2)];
+    return { a: d(r.pick([1, -1, 1.5, -1.25]) * 2 ** -(480 + k)), c: d(r.pick([1, -1, 1.5]) * 2 ** -(540 + r.below(60))), b: r.chance(0.4) ? r.pick([[0, 0], [0, 0x80000000]]) : r.chance(0.7) ? bottom : b };
+  }
+  if (extreme === 6) return { a: r.pick([[1, 0], [0, 0x80000], [0, 0x80080000]]), c, b }; // denormal a
   return { a, c, b };
 }
 const FMA_NAMES = ["fmadd", "fmsub", "fnmadd", "fnmsub", "fmadds", "fmsubs", "fnmadds", "fnmsubs", "ps_madd", "ps_msub", "ps_nmadd", "ps_nmsub", "ps_madds0", "ps_madds1"];

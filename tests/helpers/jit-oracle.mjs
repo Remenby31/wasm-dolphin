@@ -392,8 +392,8 @@ export const hex = (v) => `0x${(v >>> 0).toString(16).padStart(8, "0")}`;
 
 // a*c + b rounded once to nearest-even (to single precision when `single`,
 // returned as the double of that single), from exact integer arithmetic, as
-// [lo, hi] words; null when an operand is not finite or the result is zero,
-// subnormal or overflows (the cases the exact sum alone does not settle).
+// [lo, hi] words; null when an operand is not finite or the result is
+// subnormal or overflows.
 export function exactFmaDouble(a, c, b, single = false) {
   const words = (x) => new BigUint64Array(new Float64Array([x]).buffer)[0];
   const parts = (x) => {
@@ -409,7 +409,13 @@ export function exactFmaDouble(a, c, b, single = false) {
   const [mp, ep] = [pa[0] * pc[0], pa[1] + pc[1]];
   const e0 = Math.min(ep, pb[1]);
   const sum = (mp << BigInt(ep - e0)) + (pb[0] << BigInt(pb[1] - e0));
-  if (sum === 0n) return null;
+  if (sum === 0n) {
+    // Exact zero: -0 only when both terms are zeros of negative sign (round
+    // to nearest), else +0.
+    const negP = (a < 0 || Object.is(a, -0)) !== (c < 0 || Object.is(c, -0));
+    const negB = b < 0 || Object.is(b, -0);
+    return [0, mp === 0n && pb[0] === 0n && negP && negB ? 0x80000000 : 0];
+  }
   const sign = sum < 0n ? 1n : 0n;
   const mag = sum < 0n ? -sum : sum;
   const precision = single ? 24 : 53;

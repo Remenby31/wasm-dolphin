@@ -10,6 +10,8 @@
 import assert from "node:assert/strict";
 import { existsSync } from "node:fs";
 import test from "node:test";
+import { fileURLToPath } from "node:url";
+import { coreStatus } from "../tools/core-artifacts.mjs";
 import {
   PRODUCTION_DISABLE_MASK,
   REGALLOC_OFF,
@@ -269,9 +271,14 @@ test("double FMA with wide significands matches std::fma", { skip }, () => {
   }
 });
 
-const fmaSkip = skip || (core.has("DolphinWeb_FmaIsMusl") ? false : "the core predates the strong musl fma (CI builds this branch's core)");
+// Skipped only on a core older than these sources (main's, restored on a
+// branch): a core built from this tree without the marker fails the test.
+const repoRoot = fileURLToPath(new URL("..", import.meta.url));
+const fmaSkip = skip || (core.has("DolphinWeb_FmaIsMusl") || (await coreStatus(repoRoot)).current
+  ? false : "the core predates the strong musl fma (CI builds this branch's core)");
 
 test("FMA rounds once on double-rounding traps, interpreter and JIT (correct fma linked)", { skip: fmaSkip }, () => {
+  assert.ok(core.has("DolphinWeb_FmaIsMusl"), "this core links no strong fma (core/upstream/dolphin_web_fma.h)");
   // c has 24 bits, a = 1/c: a*c rounds to exactly 2^m with a tiny error e.
   // b's ulp is 2^(m+1), so p + b is an exact tie in double and only e
   // decides the rounding; ignoring e rounds to even, wrongly half the time.
@@ -313,6 +320,29 @@ test("FMA rounds once on double-rounding traps, interpreter and JIT (correct fma
     }
   }
   assert.ok(checked >= 1600);
+});
+
+test("an underflowed product is never taken as exact (signed zero, ties at the bottom)", { skip }, () => {
+  // Review of #27: a*c = ±2^-1075 or less rounds to ±0 although neither
+  // operand is zero; p + b would then lose the sign of zero or a tie.
+  const A = (op, t, a, b, c, xo) => ((op << 26) | (t << 21) | (a << 16) | (b << 11) | (c << 6) | (xo << 1)) >>> 0;
+  const state = randomState(makeRng(0x0f1));
+  state[36] = 0;
+  state[37] = 0x00002032;
+  const setF = (i, hi, lo = 0) => state.set([lo, hi, lo, hi], 48 + i * 4);
+  for (const [a, c, [bhi, blo]] of [
+    [0x9a700000, 0x1a700000, [0, 0]], [0x9a700000, 0x1a700000, [0x80000000, 0]],
+    [0x20b00000, 0x1c000000, [0x00100000, 1]], [0x1a700000, 0x1a700000, [0x80000000, 0]]
+  ]) {
+    setF(2, a);
+    setF(3, c);
+    setF(4, bhi, blo);
+    for (const xo of [28, 29, 30, 31]) {
+      for (const op of [63, 59, 4]) {
+        assertSame(core.run(Uint32Array.from([A(op, 1, 2, 4, 3, xo), 0x4e800020]), state, SHORT_PREFIX_MASK), `op ${op} xo ${xo} a ${hex(a)} c ${hex(c)}`);
+      }
+    }
+  }
 });
 
 test("single FMA with a denormal frC is not mistaken for a zero product", { skip }, () => {

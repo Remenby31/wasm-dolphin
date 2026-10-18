@@ -100,8 +100,9 @@ the WASM code does it without a hardware or relaxed-SIMD FMA, so the result is
 the same on every machine. Inline, frC is first rounded to 25 bits for single
 ops. When a·c is exact in double (the significands need 53 bits or fewer
 together, counted with `i64.ctz`; always the case for a single-precision a in
-single and paired-single forms) and the product is zero or normal, the result
-is simply p + b. Otherwise TwoProduct (Veltkamp split) gives a·c = p + e exactly, TwoSum gives
+single and paired-single forms) and the product is normal (a zero or
+subnormal product of nonzero operands underflowed and is not exact), or when a
+or frC is zero, the result is simply p + b. Otherwise TwoProduct (Veltkamp split) gives a·c = p + e exactly, TwoSum gives
 p ± b = s + t, and the result is RN(s + RO(t + e)), RO rounding to odd
 (u + v = t + e by TwoSum; when v ≠ 0 and u is even, u moves one ulp toward
 v). Boldo and Melquiond prove this rounds a·c ± b once, in binary64, without
