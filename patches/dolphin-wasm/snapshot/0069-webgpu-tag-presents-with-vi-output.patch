@@ -1,0 +1,144 @@
+diff --git a/Source/Core/VideoBackends/WebGPU/WebGPUCommandStream.cpp b/Source/Core/VideoBackends/WebGPU/WebGPUCommandStream.cpp
+--- a/Source/Core/VideoBackends/WebGPU/WebGPUCommandStream.cpp
++++ b/Source/Core/VideoBackends/WebGPU/WebGPUCommandStream.cpp
+@@ -1422,6 +1422,19 @@ bool WebGPUCommandStream::PushSubmitPresent()
+   return true;
+ }
+ 
++bool WebGPUCommandStream::PushViTag(u32 vi_since_boot, u32 vi_since_load, u64 ticks)
++{
++  if (!m_header)
++    return false;
++  CmdRecord rec{};
++  rec.op = static_cast<u32>(CmdOp::ViTag);
++  rec.arg.u[0] = vi_since_boot;
++  rec.arg.u[1] = vi_since_load;
++  rec.arg.u[2] = static_cast<u32>(ticks);
++  rec.arg.u[3] = static_cast<u32>(ticks >> 32);
++  return Push(rec);
++}
++
+ bool WebGPUCommandStream::PushDestroy(u32 class_tag, u32 id)
+ {
+   if (!m_header || id == 0)
+diff --git a/Source/Core/VideoBackends/WebGPU/WebGPUCommandStream.h b/Source/Core/VideoBackends/WebGPU/WebGPUCommandStream.h
+--- a/Source/Core/VideoBackends/WebGPU/WebGPUCommandStream.h
++++ b/Source/Core/VideoBackends/WebGPU/WebGPUCommandStream.h
+@@ -137,6 +137,12 @@ enum class CmdOp : u32
+   //   flags: 8=explicit channel mask, 1=RGB, 2=depth, 4=alpha.
+   //   Without flag 8, legacy flag 1 enables all RGBA channels.
+   ClearRect = 25,
++  // Harness only (harness/README.md, exact frames): the VI output the next
++  // ViSwap shows, counted from boot and from the last savestate load. Emitted
++  // outside any pass. No PRESENT before the next ViTag means a duplicate XFB
++  // the presenter did not redraw.
++  //   u0=vi_since_boot u1=vi_since_load u2=ticks_lo u3=ticks_hi
++  ViTag = 26,
+ };
+ 
+ // Stable producer attribution for UploadBuffer records. The value is carried
+@@ -389,6 +395,7 @@ public:
+   bool PushDrawIndexed(u32 idx_count, u32 inst_count, u32 first_idx, u32 base_vtx);
+   bool PushEndPass();
+   bool PushSubmitPresent();
++  bool PushViTag(u32 vi_since_boot, u32 vi_since_load, u64 ticks);
+   bool PushDestroy(u32 class_tag, u32 id);
+   // GPU texture blit. Coords/dims are clamped to 16 bits (EFB/XFB
+   // never exceed that); layers/levels to 8 bits. No-op if either id
+diff --git a/Source/Core/VideoBackends/WebGPU/WebGPUGfx.cpp b/Source/Core/VideoBackends/WebGPU/WebGPUGfx.cpp
+--- a/Source/Core/VideoBackends/WebGPU/WebGPUGfx.cpp
++++ b/Source/Core/VideoBackends/WebGPU/WebGPUGfx.cpp
+@@ -610,17 +610,34 @@ static u32 PackSamplerState(const SamplerState& state)
+          (((state.tm0.hex >> 25) & 0xfu) << 7) | ((state.tm1.hex & 0xffffu) << 11);
+ }
+ 
++// The live backend, for DolphinWeb_WebGpuTagViOutput (called from
++// VideoBackendBase, which does not know the backend type).
++static WebGPUGfx* s_active_gfx = nullptr;
++
+ WebGPUGfx::WebGPUGfx()
+ {
+   m_sampler_states.fill(PackSamplerState(RenderState::GetPointSamplerState()));
+   UpdateActiveConfig();
++  s_active_gfx = this;
+ }
+ 
+ WebGPUGfx::~WebGPUGfx()
+ {
++  if (s_active_gfx == this)
++    s_active_gfx = nullptr;
+   UpdateActiveConfig();
+ }
+ 
++void WebGPUGfx::TagViOutput(u32 vi_since_boot, u32 vi_since_load, u64 ticks)
++{
++  if (!m_cmd_stream.ready())
++    return;
++  // Keep the tag out of any pass, so it orders cleanly against the
++  // presenter's backbuffer pass.
++  EndPassIfOpen();
++  m_cmd_stream.PushViTag(vi_since_boot, vi_since_load, ticks);
++}
++
+ void WebGPUGfx::EnsureDevice()
+ {
+   // Already resolved (acquired or permanently failed) → nothing to do.
+@@ -2676,3 +2693,10 @@ u32 WebGPUEFBInterface::PeekDepthInternal(u16 /* x */, u16 /* y */)
+ }
+ 
+ }  // namespace WebGPU
++
++// Called on the video thread right before ViSwap when the harness hooks are on.
++extern "C" void DolphinWeb_WebGpuTagViOutput(u32 vi_since_boot, u32 vi_since_load, u64 ticks)
++{
++  if (WebGPU::s_active_gfx)
++    WebGPU::s_active_gfx->TagViOutput(vi_since_boot, vi_since_load, ticks);
++}
+diff --git a/Source/Core/VideoBackends/WebGPU/WebGPUGfx.h b/Source/Core/VideoBackends/WebGPU/WebGPUGfx.h
+--- a/Source/Core/VideoBackends/WebGPU/WebGPUGfx.h
++++ b/Source/Core/VideoBackends/WebGPU/WebGPUGfx.h
+@@ -79,6 +79,8 @@ public:
+ 
+   bool BindBackbuffer(const ClearColor& clear_color = {}) override;
+   void PresentBackbuffer() override;
++  // Harness exact capture: tag the next ViSwap with its VI output.
++  void TagViOutput(u32 vi_since_boot, u32 vi_since_load, u64 ticks);
+   void ShowImage(const AbstractTexture* source_texture,
+                  const MathUtil::Rectangle<int>& source_rc) override;
+   void ClearRegion(const MathUtil::Rectangle<int>& target_rc, bool colorEnable, bool alphaEnable,
+diff --git a/Source/Core/VideoCommon/VideoBackendBase.cpp b/Source/Core/VideoCommon/VideoBackendBase.cpp
+--- a/Source/Core/VideoCommon/VideoBackendBase.cpp
++++ b/Source/Core/VideoCommon/VideoBackendBase.cpp
+@@ -78,6 +78,12 @@ VideoBackendBase* g_video_backend = nullptr;
+ 
+ #ifdef __EMSCRIPTEN__
+ extern "C" void DolphinWeb_OnXfb(const u8* xfb, u32 width, u32 stride, u32 height);
++// Harness exact frames (harness/README.md): VI output counters advanced by
++// DolphinWeb_OnXfb, and the WebGPU hook that tags the matching present.
++extern "C" int DolphinWeb_HarnessEnabled();
++extern "C" std::uint32_t DolphinWeb_HarnessViSinceBoot();
++extern "C" std::uint32_t DolphinWeb_HarnessViSinceLoad();
++extern "C" void DolphinWeb_WebGpuTagViOutput(u32 vi_since_boot, u32 vi_since_load, u64 ticks);
+ extern "C" void DolphinWeb_RecordVideoOutputProfile(u32 sync_us, u32 publish_us, u32 total_us);
+ extern "C" int DolphinWeb_UseWorkerOwnedWebGL();
+ #endif
+@@ -149,7 +155,19 @@ void VideoBackendBase::Video_OutputXFB(u32 xfb_addr, u32 fb_width, u32 fb_stride
+ #endif
+ 
+     const TimePoint presentation_time = core_timing.GetTargetHostTime(ticks);
++#ifdef __EMSCRIPTEN__
++    // Read on this (CPU) thread, after publish_xfb_to_web counted the output:
++    // in dual core the video thread presents later, when the counters have
++    // moved on.
++    const bool harness_tag = DolphinWeb_HarnessEnabled() != 0;
++    const u32 vi_since_boot = harness_tag ? DolphinWeb_HarnessViSinceBoot() : 0;
++    const u32 vi_since_load = harness_tag ? DolphinWeb_HarnessViSinceLoad() : 0;
++#endif
+     AsyncRequests::GetInstance()->PushEvent([=] {
++#ifdef __EMSCRIPTEN__
++      if (harness_tag)
++        DolphinWeb_WebGpuTagViOutput(vi_since_boot, vi_since_load, ticks);
++#endif
+       g_presenter->ViSwap(xfb_addr, fb_width, fb_stride, fb_height, ticks, presentation_time);
+     });
+   }
