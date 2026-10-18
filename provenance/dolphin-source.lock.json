@@ -25,7 +25,7 @@
       "commit": "01e0577914a75a2569c846778c2f93aa8e6feddd"
     }
   },
-  "patchSeriesSha256": "dd0c39a5f895e99912b4979caabce97fb6dd02e020661b1ee59a751d7e1d927a",
+  "patchSeriesSha256": "df7c5e2edfa8df0d5d07ee43dac00445244a9153706de5fed37d7e00e4b6b72d",
   "patches": [
     {
       "order": 1,
@@ -568,8 +568,8 @@
       "cwd": ".",
       "hashMode": "lf-normalized",
       "path": "patches/dolphin-wasm/snapshot/0072-jit-deterministic-engage-exception-oracle-inline-fma.patch",
-      "size": 21706,
-      "sha256": "13049a0dfcfb7643da370c610177674f8ce0687eee79d7abfc5bcbeace933f08"
+      "size": 22383,
+      "sha256": "9639cb4b41f4cc26d399d7193d6d42d32ba631ff63b1813ee7ccfba8d8c17de5"
     },
     {
       "order": 69,

@@ -48,28 +48,18 @@ diff --git a/Source/Core/Core/PowerPC/CachedInterpreter/CachedInterpreter.cpp b/
  }
  
  extern "C" void DolphinWeb_RecordCacheMiss()
-@@ -474,6 +481,20 @@ bool s_wasm_jit_enabled = false;
- // Requested by the host; effective code-generation policy is owned by the CPU.
- std::atomic<int> s_requested_wasm_policy{0};
+@@ -476,6 +483,10 @@ std::atomic<int> s_requested_wasm_policy{0};
  std::atomic<int> s_applied_wasm_policy{0};
-+// Deterministic engage (SetPpcWasmJitWarmup): the CPU thread switches to the
-+// armed policy once the emulated field counter (MovieManager's, advanced by
-+// VI on this thread and saved in states) reaches start + `fields`. The start
-+// is field 0 when armed for a boot, and the loaded field after a state load
-+// (taken on the CPU thread before the loaded state runs), so the engage
-+// field depends on emulated time only, never on when the worker armed it.
-+// s_wasm_engaged_frame reports it (UINT64_MAX until engaged).
-+std::atomic<int> s_wasm_armed_policy{-1};
-+std::atomic<u32> s_wasm_armed_fields{0};
-+std::atomic<bool> s_wasm_arm_restart{false};
-+std::atomic<bool> s_wasm_arm_from_boot{false};
-+u64 s_wasm_arm_start_frame = 0;
-+bool s_wasm_arm_started = false;
-+std::atomic<u64> s_wasm_engaged_frame{UINT64_MAX};
  const CachedInterpreter* s_wasm_policy_owner = nullptr;
  void ApplyRequestedWasmPolicy(CachedInterpreter& cpu);
++}  // namespace
++void ApplyArmedWasmPolicy();
++namespace
++{
  
-@@ -4638,6 +4659,112 @@ enum class FpArithKind
+ // All accesses are on the owning CPU thread. Do not erase cached callbacks
+ // until the previous timing slice has finished executing them.
+@@ -4638,6 +4649,112 @@ enum class FpArithKind
    MulSub,  // a * c - b
  };
  
@@ -182,7 +172,7 @@ diff --git a/Source/Core/Core/PowerPC/CachedInterpreter/CachedInterpreter.cpp b/
  // Computes one lane into f64 local `dst` (rounded to single when `single`,
  // then negated when `negate`) and ANDs its fast-path condition into i32
  // local 3. `unrounded`, when given, receives the value before rounding.
-@@ -4648,13 +4775,8 @@ void EmitFpArithLane(std::vector<u8>& body, const WasmStateLayout& layout, UGeck
+@@ -4648,13 +4765,8 @@ void EmitFpArithLane(std::vector<u8>& body, const WasmStateLayout& layout, UGeck
    EmitStateLoadF64(body, PsOffset(layout, inst.FA, lane));
    if (kind == FpArithKind::MulAdd || kind == FpArithKind::MulSub)
    {
@@ -198,7 +188,7 @@ diff --git a/Source/Core/Core/PowerPC/CachedInterpreter/CachedInterpreter.cpp b/
    }
    else if (kind == FpArithKind::Mul)
    {
-@@ -8042,11 +8164,11 @@ std::vector<u8> BuildWasmCachedInterpreterBlock(std::span<const PPCAnalyst::Code
+@@ -8042,11 +8154,11 @@ std::vector<u8> BuildWasmCachedInterpreterBlock(std::span<const PPCAnalyst::Code
    // group `0x01, 0x7f` (one i32 at index WASM_FMH_FLAG_LOCAL=40, the per-group
    // range-check flag) and bump the leading group count 5 → 6. When the plan is
    // inactive the locals section is byte-identical to today (no extra local).
@@ -213,7 +203,23 @@ diff --git a/Source/Core/Core/PowerPC/CachedInterpreter/CachedInterpreter.cpp b/
  
    // §28cx C1: set up the GPR register cache for this block, then eagerly load
    // every GPR the block reads or writes into its local. Eager (not lazy) load
-@@ -11608,7 +11730,14 @@ bool CachedInterpreter::TryWriteWasmBlock(u32 nextPC)
+@@ -8631,6 +8743,7 @@ void CachedInterpreter::Run()
+   while (*state_ptr == CPU::State::Running)
+   {
+ #ifdef __EMSCRIPTEN__
++    ApplyArmedWasmPolicy();
+     ApplyRequestedWasmPolicy(*this);
+ #endif
+     // §28cn metrics-gated per-slice wall-time profiling. The timestamp below
+@@ -8739,6 +8852,7 @@ void CachedInterpreter::SingleStep()
+   // Enter new timing slice
+   m_system.GetCoreTiming().Advance();
+ #ifdef __EMSCRIPTEN__
++  ApplyArmedWasmPolicy();
+   ApplyRequestedWasmPolicy(*this);
+ #endif
+   ExecuteOneBlock(false);  // §28bt: never chain blocks under the debugger step
+@@ -11608,7 +11722,14 @@ bool CachedInterpreter::TryWriteWasmBlock(u32 nextPC)
        fastcheck_gpfifo_index, fast_os_interrupt_call_index, fast_melee_input_status_call_index,
        fast_melee_status_call_index, fast_melee_service_poll_call_index,
        static_cast<int>(reinterpret_cast<std::uintptr_t>(&DolphinWeb_CachedInterpreterFma)));
@@ -229,10 +235,30 @@ diff --git a/Source/Core/Core/PowerPC/CachedInterpreter/CachedInterpreter.cpp b/
    {
      ++s_wasm_block_compile_fail_count;
      s_wasm_rejected_block_keys.emplace(cache_key.data());
-@@ -11782,8 +11911,30 @@ extern "C" u32 GetPpcWasmBlockRunCount()
+@@ -11831,6 +11952,87 @@ extern "C" void SetPpcProfileEnabled(int enabled)
+   DolphinWeb::WasmTimingProfile::SetEnabled(next_enabled);
+ }
  
- namespace
- {
++namespace
++{
++// Deterministic engage (SetPpcWasmJitWarmup): the CPU thread switches to the
++// armed policy once the emulated field counter (MovieManager's, advanced by
++// VI on this thread and saved in states) reaches start + `fields`. The start
++// is field 0 when armed for a boot, and the loaded field after a state load
++// (taken on the CPU thread before the loaded state runs), so the engage
++// field depends on emulated time only, never on when the worker armed it.
++// s_wasm_engaged_frame reports it (UINT64_MAX until engaged).
++std::atomic<int> s_wasm_armed_policy{-1};
++std::atomic<u32> s_wasm_armed_fields{0};
++std::atomic<bool> s_wasm_arm_restart{false};
++std::atomic<bool> s_wasm_arm_from_boot{false};
++u64 s_wasm_arm_start_frame = 0;
++bool s_wasm_arm_started = false;
++std::atomic<u64> s_wasm_engaged_frame{UINT64_MAX};
++}  // namespace
++
++// Runs on the CPU thread before ApplyRequestedWasmPolicy: turns an armed
++// warmup into a policy request at the exact emulated field.
 +void ApplyArmedWasmPolicy()
 +{
 +  const int armed = s_wasm_armed_policy.load(std::memory_order_acquire);
@@ -254,21 +280,6 @@ diff --git a/Source/Core/Core/PowerPC/CachedInterpreter/CachedInterpreter.cpp b/
 +  }
 +}
 +
- void ApplyRequestedWasmPolicy(CachedInterpreter& cpu)
- {
-+  ApplyArmedWasmPolicy();
-   const int requested = s_requested_wasm_policy.load(std::memory_order_acquire);
-   if (s_wasm_policy_owner == &cpu &&
-       requested == s_applied_wasm_policy.load(std::memory_order_relaxed))
-@@ -11818,10 +11969,49 @@ void ApplyRequestedWasmPolicy(CachedInterpreter& cpu)
- 
- extern "C" void SetPpcWasmJitEnabled(int enabled)
- {
-+  s_wasm_armed_policy.store(-1, std::memory_order_release);
-   s_requested_wasm_policy.store(enabled <= 0 ? 0 : enabled < 2 ? 1 : 2,
-                                 std::memory_order_release);
- }
- 
 +// Arms the JIT to engage `fields` emulated fields from now (or from the next
 +// state load), decided on the CPU thread. policy: 1 guarded, 2 mixed; 0
 +// disarms and turns the JIT off.
@@ -276,6 +287,7 @@ diff --git a/Source/Core/Core/PowerPC/CachedInterpreter/CachedInterpreter.cpp b/
 +{
 +  if (policy <= 0)
 +  {
++    s_wasm_armed_policy.store(-1, std::memory_order_release);
 +    SetPpcWasmJitEnabled(0);
 +    return;
 +  }
@@ -307,10 +319,11 @@ diff --git a/Source/Core/Core/PowerPC/CachedInterpreter/CachedInterpreter.cpp b/
 +    s_wasm_arm_restart.store(true, std::memory_order_release);
 +}
 +
- extern "C" void SetPpcProfileEnabled(int enabled)
++
+ extern "C" const char* GetPpcProfileStats()
  {
-   const bool next_enabled = enabled != 0;
-@@ -11988,6 +12178,7 @@ extern "C" const char* GetPpcWasmHelperStats()
+   static std::string stats;
+@@ -11988,6 +12190,7 @@ extern "C" const char* GetPpcWasmHelperStats()
        << " compilefail:" << s_wasm_block_compile_fail_count
        << " enginereject:" << s_wasm_engine_reject_count.load(std::memory_order_relaxed)
        << " blacklisthit:" << s_wasm_blacklist_hit_count
@@ -318,7 +331,7 @@ diff --git a/Source/Core/Core/PowerPC/CachedInterpreter/CachedInterpreter.cpp b/
        << " pre:" << average_prefix << "/" << s_wasm_prefix_instruction_max
        << " hist:" << s_wasm_prefix_histogram[0] << "," << s_wasm_prefix_histogram[1] << ","
        << s_wasm_prefix_histogram[2] << "," << s_wasm_prefix_histogram[3] << ","
-@@ -12835,7 +13026,7 @@ constexpr u32 JIT_ORACLE_SENTINEL_VA = 0x80002000;
+@@ -12835,7 +13038,7 @@ constexpr u32 JIT_ORACLE_SENTINEL_VA = 0x80002000;
  constexpr u32 JIT_ORACLE_SCRATCH_VA = 0x80100000;
  constexpr u32 JIT_ORACLE_SCRATCH_BYTES = 256;
  constexpr u32 JIT_ORACLE_MAX_WORDS = 256;
@@ -327,7 +340,7 @@ diff --git a/Source/Core/Core/PowerPC/CachedInterpreter/CachedInterpreter.cpp b/
  constexpr u32 JIT_ORACLE_STEP_LIMIT = 20000;
  // Memory both runs start from and are compared on, beyond the scratch bytes
  // that travel in the state words: update forms drift their base around it.
-@@ -12861,7 +13052,8 @@ std::string s_jit_oracle_message;
+@@ -12861,7 +13064,8 @@ std::string s_jit_oracle_message;
  
  // State words: 0-31 GPR, 32 CR, 33 XER, 34 LR, 35 CTR, 36 FPSCR, 37 MSR,
  // 38-45 GQR0-7, 46 pending exceptions, 47 PC, 48-175 PS0/PS1 bits per FPR
@@ -337,7 +350,7 @@ diff --git a/Source/Core/Core/PowerPC/CachedInterpreter/CachedInterpreter.cpp b/
  void JitOracleLoadState(Core::System& system, const u32* in)
  {
    auto& ppc = system.GetPPCState();
-@@ -12886,6 +13078,10 @@ void JitOracleLoadState(Core::System& system, const u32* in)
+@@ -12886,6 +13090,10 @@ void JitOracleLoadState(Core::System& system, const u32* in)
    }
    std::memcpy(system.GetMemory().GetRAM() + (JIT_ORACLE_SCRATCH_VA & 0x01ffffff), &in[176],
                JIT_ORACLE_SCRATCH_BYTES);
@@ -348,7 +361,7 @@ diff --git a/Source/Core/Core/PowerPC/CachedInterpreter/CachedInterpreter.cpp b/
    ppc.downcount = 0x7fffffff;
  }
  
-@@ -12915,6 +13111,11 @@ void JitOracleSaveState(Core::System& system, u32* out)
+@@ -12915,6 +13123,11 @@ void JitOracleSaveState(Core::System& system, u32* out)
    }
    std::memcpy(&out[176], system.GetMemory().GetRAM() + (JIT_ORACLE_SCRATCH_VA & 0x01ffffff),
                JIT_ORACLE_SCRATCH_BYTES);
@@ -360,7 +373,7 @@ diff --git a/Source/Core/Core/PowerPC/CachedInterpreter/CachedInterpreter.cpp b/
  }
  
  bool JitOracleSetUp(Core::System& system)
-@@ -12944,20 +13145,25 @@ bool JitOracleSetUp(Core::System& system)
+@@ -12944,20 +13157,25 @@ bool JitOracleSetUp(Core::System& system)
    return true;
  }
  
@@ -391,7 +404,7 @@ diff --git a/Source/Core/Core/PowerPC/CachedInterpreter/CachedInterpreter.cpp b/
    }
    return true;
  }
-@@ -12976,6 +13182,26 @@ extern "C" EMSCRIPTEN_KEEPALIVE u32 DolphinWeb_JitEngineRejectCount()
+@@ -12976,6 +13194,26 @@ extern "C" EMSCRIPTEN_KEEPALIVE u32 DolphinWeb_JitEngineRejectCount()
    return s_wasm_engine_reject_count.load(std::memory_order_relaxed);
  }
  
@@ -418,7 +431,7 @@ diff --git a/Source/Core/Core/PowerPC/CachedInterpreter/CachedInterpreter.cpp b/
  extern "C" EMSCRIPTEN_KEEPALIVE u32* DolphinWeb_JitOracleBuffer()
  {
    return &s_jit_oracle.program[0];
-@@ -12987,8 +13213,8 @@ extern "C" EMSCRIPTEN_KEEPALIVE const char* DolphinWeb_JitOracleMessage()
+@@ -12987,8 +13225,8 @@ extern "C" EMSCRIPTEN_KEEPALIVE const char* DolphinWeb_JitOracleMessage()
  }
  
  // Returns 0 when both runs produced the same state words, 1 when they differ,
@@ -429,7 +442,7 @@ diff --git a/Source/Core/Core/PowerPC/CachedInterpreter/CachedInterpreter.cpp b/
  // disable_mask is the CachedInterpreter mask the run uses (production default:
  // blockmerge|shortprefix disabled, 0x220000).
  extern "C" EMSCRIPTEN_KEEPALIVE int DolphinWeb_JitOracleRun(u32 word_count, u32 disable_mask)
-@@ -13015,12 +13241,9 @@ extern "C" EMSCRIPTEN_KEEPALIVE int DolphinWeb_JitOracleRun(u32 word_count, u32
+@@ -13015,12 +13253,9 @@ extern "C" EMSCRIPTEN_KEEPALIVE int DolphinWeb_JitOracleRun(u32 word_count, u32
    JitOracleLoadState(system, s_jit_oracle.input);
    std::memcpy(s_jit_oracle_window_start.data(), window, JIT_ORACLE_WINDOW_BYTES);
    u32 budget = JIT_ORACLE_STEP_LIMIT;
@@ -445,7 +458,7 @@ diff --git a/Source/Core/Core/PowerPC/CachedInterpreter/CachedInterpreter.cpp b/
    JitOracleSaveState(system, s_jit_oracle.interp);
    std::memcpy(s_jit_oracle_window_interp.data(), window, JIT_ORACLE_WINDOW_BYTES);
    std::memcpy(window, s_jit_oracle_window_start.data(), JIT_ORACLE_WINDOW_BYTES);
-@@ -13048,7 +13271,8 @@ extern "C" EMSCRIPTEN_KEEPALIVE int DolphinWeb_JitOracleRun(u32 word_count, u32
+@@ -13048,7 +13283,8 @@ extern "C" EMSCRIPTEN_KEEPALIVE int DolphinWeb_JitOracleRun(u32 word_count, u32
        memory.GetL1CacheSize(),
    };
    int result = 0;
@@ -455,7 +468,7 @@ diff --git a/Source/Core/Core/PowerPC/CachedInterpreter/CachedInterpreter.cpp b/
    {
      PPCAnalyst::CodeBlock block;
      const u32 next_pc = analyzer.Analyze(ppc.pc, &block, &buffer, buffer.size());
-@@ -13112,6 +13336,8 @@ extern "C" EMSCRIPTEN_KEEPALIVE int DolphinWeb_JitOracleRun(u32 word_count, u32
+@@ -13112,6 +13348,8 @@ extern "C" EMSCRIPTEN_KEEPALIVE int DolphinWeb_JitOracleRun(u32 word_count, u32
      return result;
    if (budget == 0)
      s_jit_oracle_message = "step limit reached";
@@ -464,6 +477,14 @@ diff --git a/Source/Core/Core/PowerPC/CachedInterpreter/CachedInterpreter.cpp b/
    if (s_jit_oracle.stats[0] == 0)
      return 2;
    for (u32 i = 0; i < JIT_ORACLE_WINDOW_BYTES; ++i)
+@@ -13296,6 +13534,7 @@ void CachedInterpreter::Jit(u32 em_address, bool clear_cache_and_retry_on_failur
+ {
+ #ifdef __EMSCRIPTEN__
+   // Called only with no cached callback active (cache miss or debugger guard).
++  ApplyArmedWasmPolicy();
+   ApplyRequestedWasmPolicy(*this);
+ #endif
+   if (IsAlmostFull() || SConfig::GetInstance().bJITNoBlockCache)
 diff --git a/Source/Core/Core/PowerPC/JitInterface.cpp b/Source/Core/Core/PowerPC/JitInterface.cpp
 --- a/Source/Core/Core/PowerPC/JitInterface.cpp
 +++ b/Source/Core/Core/PowerPC/JitInterface.cpp
