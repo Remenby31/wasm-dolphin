@@ -21,8 +21,33 @@ const F_CODE = 1, F_LEADER = 2, F_ENTRY = 4, F_TABLE = 8;
 const SLICE_WINDOW = 40; // instructions scanned backward by a slice
 const WIDE_WINDOW = 256; // second chance for a table base kept in a saved register
 // r0 and r3-r12 do not survive a call (PowerPC EABI).
+// Sorted, merged copy of [start, end) ranges, and a binary-search membership test.
+export function mergeSorted(ranges) {
+  const out = [];
+  for (const [a, b] of [...ranges].sort((x, y) => x[0] - y[0])) {
+    const last = out[out.length - 1];
+    if (last && a <= last[1]) last[1] = Math.max(last[1], b);
+    else out.push([a, b]);
+  }
+  return out;
+}
+export function inRanges(sorted, a) {
+  let lo = 0, hi = sorted.length - 1;
+  while (lo <= hi) {
+    const m = (lo + hi) >> 1;
+    if (a < sorted[m][0]) hi = m - 1;
+    else if (a >= sorted[m][1]) lo = m + 1;
+    else return true;
+  }
+  return false;
+}
+
 const isVolatile = (r) => r === 0 || (r >= 3 && r <= 12);
 const SCAN_TABLE_MAX = 512;
+// Speculative walks share a budget of instructions proportional to the size
+// of the executable sections: total work stays linear on hostile or
+// degenerate images. Real discs use a fraction of it (stats.trialSteps).
+const TRIAL_BUDGET_PER_WORD = 32;
 
 class Flags {
   constructor(image) {
@@ -44,7 +69,7 @@ class Flags {
 }
 
 export function discover(image, {
-  entryPoints = [], // [{ addr, source, confidence? }]
+  entryPoints = [], // [{ addr, source, confidence?, trial? }]; trial roots (profile, hints) are walked on trial
   pointerScan = true,
   constScan = true,
   gapFill = true,
@@ -56,12 +81,18 @@ export function discover(image, {
   const entries = new Map(); // addr -> { confidence, sources:Set }
   const jumpTables = new Map(); // site -> table
   const indirectSites = new Map(); // site -> { kind, resolved }
-  const tableData = []; // [start, end) of jump table words in data
+  const doomed = new Set(); // addresses whose straight-line walk ends on invalid code
+  const tableWords = new Set(); // jump table words in data, not code pointers
+  const codePointers = new Set(); // code addresses taken as values (entries from outside)
   const badStops = new Set();
-  const stats = { rejectedCandidates: 0 };
+  const stats = { rejectedCandidates: 0, budgetExhausted: false };
+  const execWords = image.execSegments.reduce((n, s) => n + ((s.end - s.start) >>> 2), 0);
+  const trialBudgetTotal = execWords * TRIAL_BUDGET_PER_WORD;
+  let trialBudget = trialBudgetTotal;
 
   const read = (a) => image.read32(a);
-  const excluded = (a) => exclude.some(([s, e]) => a >= s && a < e);
+  const excludeRanges = mergeSorted(exclude);
+  const excluded = (a) => inRanges(excludeRanges, a);
   const isCodeAddr = (a) => image.isExec(a) && !excluded(a);
 
   function addEntry(addr, confidence, source) {
@@ -234,17 +265,24 @@ export function discover(image, {
     const indirect = [];
     const stack = [...starts];
     let bad = false;
+    // Straight-line prefix of the first start: if the walk fails inside it,
+    // every address of the prefix leads to the failure, whatever comes later.
+    const prefix = [];
+    let inPrefix = true;
     const committed = (a) => (flags.get(a) & F_CODE) !== 0;
-    while (stack.length) {
+    walking: while (stack.length) {
       let a = stack.pop();
       for (;;) {
-        if (!isCodeAddr(a)) { bad = true; break; }
+        if (!isCodeAddr(a) || doomed.has(a)) { bad = true; break; }
         if (committed(a) || local.has(a)) break;
         const w = read(a);
         if (!isValidInstruction(w)) { bad = true; if (commit) badStops.add(a); break; }
         local.add(a);
+        if (!commit && --trialBudget < 0) { bad = true; stats.budgetExhausted = true; break walking; }
+        if (inPrefix) prefix.push(a);
         const flow = decodeFlow(w, a);
         if (!flow) { a += 4; continue; }
+        inPrefix = false;
         if (flow.kind === FLOW_BRANCH) {
           if (isCodeAddr(flow.target)) {
             leaders.add(flow.target);
@@ -280,7 +318,10 @@ export function discover(image, {
         if (fallsThrough(flow)) { leaders.add(a + 4); a += 4; continue; }
         break;
       }
+      if (bad && !commit) break;
+      inPrefix = false;
     }
+    if (bad && inPrefix) for (const a of prefix) doomed.add(a);
     if (!commit && bad) return false;
     for (const a of local) flags.set(a, F_CODE);
     for (const a of leaders) flags.set(a, F_LEADER);
@@ -289,7 +330,7 @@ export function discover(image, {
     for (const t of tables) {
       if (jumpTables.has(t.site)) continue;
       jumpTables.set(t.site, t);
-      tableData.push([t.table, t.table + t.count * 4]);
+      for (let i = 0; i < t.count; i++) tableWords.add((t.table + i * 4) >>> 0);
     }
     for (const s of indirect) if (!indirectSites.has(s.site)) indirectSites.set(s.site, s);
     return true;
@@ -305,14 +346,17 @@ export function discover(image, {
     if (targets.length) jumpTables.set(k.site, { site: k.site, table: k.table, count: targets.length, targets, bound: "hint", kind: k.kind ?? "abs" });
   }
 
-  // Wave 0: roots.
+  // Wave 0: roots. Trial roots (profile, hint sheets) wait until static
+  // discovery is done, so that they only add code it did not find.
   const roots = entryPoints.filter((e) => isCodeAddr(e.addr));
-  for (const e of roots) walk([e.addr], e.confidence ?? CONF_ROOT, e.source || "root", true);
+  for (const e of roots) if (!e.trial) walk([e.addr], e.confidence ?? CONF_ROOT, e.source || "root", true);
 
-  const inTableData = (a) => tableData.some(([s, e]) => a >= s && a < e);
+  const inTableData = (a) => tableWords.has(a);
+  const rejected = new Set();
   const tryCandidate = (addr, confidence, source) => {
-    if (!isCodeAddr(addr) || (flags.get(addr) & F_CODE)) return false;
+    if (!isCodeAddr(addr) || (flags.get(addr) & F_CODE) || rejected.has(addr) || trialBudget < 0) return false;
     if (walk([addr], confidence, source, false)) return true;
+    rejected.add(addr);
     stats.rejectedCandidates++;
     return false;
   };
@@ -328,7 +372,9 @@ export function discover(image, {
           const step = constStep(read(a));
           if (!step || step.op === "mr" || step.op === "addis" && step.src === 0) continue;
           const value = resolveConst(step.dst, a + 4);
-          if (value !== null && image.isExec(value) && tryCandidate(value, CONF_POINTER, "const")) added++;
+          if (value === null || !isCodeAddr(value)) continue;
+          codePointers.add(value);
+          if (tryCandidate(value, CONF_POINTER, "const")) added++;
         }
       }
     }
@@ -337,7 +383,8 @@ export function discover(image, {
         if (s.exec) continue;
         for (let off = 0; off + 4 <= s.bytes.byteLength; off += 4) {
           const v = s.view.getUint32(off, false);
-          if (!image.isExec(v) || inTableData(s.start + off)) continue;
+          if (!isCodeAddr(v) || inTableData(s.start + off)) continue;
+          codePointers.add(v);
           if (tryCandidate(v, CONF_POINTER, "data")) added++;
         }
       }
@@ -371,13 +418,33 @@ export function discover(image, {
     return added;
   }
 
-  for (let round = 0; round < 8; round++) {
-    let added = pointerScan || constScan ? pointerWave() : 0;
-    if (gapFill) added += gapWave();
-    if (!added) break;
-  }
+  const speculate = () => {
+    for (let round = 0; round < 8; round++) {
+      let added = pointerScan || constScan ? pointerWave() : 0;
+      if (gapFill) added += gapWave();
+      if (!added) break;
+    }
+  };
+  speculate();
 
-  return buildResult({ image, flags, entries, jumpTables, indirectSites, badStops, stats });
+  // Trial roots: an address already inside known code adds nothing (a
+  // profile block in the middle of a function must not split it), except a
+  // hint that explicitly names a function entry.
+  let trialAdded = 0;
+  for (const e of roots) {
+    if (!e.trial) continue;
+    if (flags.get(e.addr) & F_CODE) {
+      if (e.forceEntry) { flags.set(e.addr, F_ENTRY | F_LEADER); addEntry(e.addr, e.confidence ?? CONF_POINTER, e.source); }
+      continue;
+    }
+    if (tryCandidate(e.addr, e.confidence ?? CONF_PROFILE, e.source || "trial")) trialAdded++;
+  }
+  if (trialAdded) speculate();
+
+  stats.trialSteps = trialBudgetTotal - Math.max(trialBudget, 0);
+  // Pointers kept are those to accepted code (a rejected guess is not code).
+  const pointers = [...codePointers].filter((a) => flags.get(a) & F_CODE).sort((a, b) => a - b);
+  return { ...buildResult({ image, flags, entries, jumpTables, indirectSites, badStops, stats }), codePointers: pointers };
 }
 
 const EDGE_KIND = ["fall", "branch", "cond", "call", "tail", "table", "indirect"];

@@ -15,8 +15,9 @@ misses or gets wrong stays the JIT's job**: a region whose fingerprint does
 not match guest memory is ignored, an address absent from the plan is
 compiled on the fly as today.
 
-Status of the interface: v1 proposed by discovery, consumer side pending in
-the region compiler. Open points at the end.
+Status of the interface: v1 agreed with the region compiler (2026-10-18). The
+compiler re-decodes guest memory itself and only takes the plan as advice:
+region entries, outside entries, compile order. Consumer side pending.
 
 ## Pipeline
 
@@ -38,10 +39,23 @@ disc File ──► aot-disc.js   DOL, apploader, RELs (FST)       no copy, read
 `planDisc(read, { profile, hints })` in `src/aot-recomp.js` runs it all;
 `tools/aot-plan.mjs` runs the same code from the command line.
 
-Speculative candidates (waves 1 and 2) are walked on trial first and kept only
-if every instruction reached is a valid Gekko instruction inside an executable
-section and no branch leaves the image. A wrong guess costs a useless compile,
-never a wrong execution: the guest decides what runs.
+Speculative candidates (waves 1 and 2), hint-sheet entries and profile
+blocks are walked on trial first and kept only if every instruction reached
+is a valid Gekko instruction inside an executable section and no branch
+leaves the image. Hint and profile roots are tried after static discovery
+and only where it found no code: a profile block inside a known function
+adds nothing (it does not split the function), it only counts toward that
+region's `profileHits`. A wrong guess costs a useless compile, never a wrong
+execution: the guest decides what runs.
+
+Bounds, so a hostile disc cannot make the analysis allocate or loop without
+limit: executables (DOL, apploader, each REL) ≤ 24 MiB, ≤ 256 RELs and
+64 MiB of RELs in total, FST ≤ 16 MiB with its entry count capped by its
+size, names ≤ 255 bytes, directory depth ≤ 32; REL relocation records read
+in total ≤ file size / 8 (imports sharing a run are refused). Speculative
+walks share a budget of 32 instructions per executable word (a real disc
+uses under one); addresses whose straight-line walk ends on invalid code and
+rejected candidates are remembered.
 
 ### Jump tables
 
@@ -78,20 +92,22 @@ JSON. Columns are flat arrays (one entry per block/edge) to keep it small.
       id: 0, kind: "dol" | "apploader" | "rel",
       blocks: { start: [u32], end: [u32], func: [i32] },   // [start, end), end exclusive
       edges:  { from: [blockIdx], to: [blockIdx], kind: [EDGE] },
-      functions: [{ entry, confidence, sources: [str], ranges: [[start, end]], hash }],
+      functions: [{ entry, confidence, sources: [str], flags, ranges: [[start, end]],
+                    extraEntries: [u32], profileHits, hash }],
       jumpTables: [{ site, table, count, kind: "abs"|"rel", targets: [u32], bound: "cmplwi"|"scan"|"hint" }],
       indirectSites: [{ site, kind: "bctr"|"bctrl"|"bcctr"|"blrl", resolved: [u32] | null }],
       stats: { blocks, functions, codeBytes, execBytes, rejectedCandidates }
     }
   ],
   rels: [ /* REL modules not linked yet, see below */ ],
-  dynamic: [{ start, end, source: "profile"|"hint" }]  // code seen outside any module
+  dynamic: [{ start, end, mode: "virt"|"real", source: "profile"|"hint" }]  // code outside any module
 }
 ```
 
 - **Addresses** are effective addresses (`0x8xxxxxxx`, BAT-mapped as games
   use them). Code the profile saw in real mode (exception vectors at
-  `0x00000500`...) is kept under `dynamic` with its physical address.
+  `0x00000500`...) is kept under `dynamic` with `mode: "real"`; the mode is
+  recorded, never inferred from the address.
 - **Blocks** end after every branch, including `bl` (the return address
   starts a block), `sc`, `rfi` and traps, and before every branch target.
   Sorted, disjoint, per module.
@@ -100,11 +116,19 @@ JSON. Columns are flat arrays (one entry per block/edge) to keep it small.
   `5 table`, `6 indirect` (resolved constant `bctr`).
 - **Functions = regions**, the unit of compilation: one entry, the blocks
   reachable from it without crossing a call or another entry, their merged
-  `ranges`, and `hash`.
+  `ranges`, and `hash`. The compiler may split or merge them.
+- **`extraEntries`**: addresses inside the region reached from outside it
+  that the compiler cannot infer from the code: jump-table targets, resolved
+  indirect targets, code pointers (data words, lis/addi constants). Return
+  points after an internal `bl` are not listed.
+- **`flags`**: bit0 real mode (IR=0), others reserved.
+- **`profileHits`**: profile blocks inside the region, weighted by the number
+  of sessions that ran them.
 - **Confidence** (lower is surer): `0` root (entry point, call target,
-  jump-table target, hint), `1` code pointer (data word or lis/addi constant),
-  `2` gap filling, `3` profile only. A consumer short on time compiles by
-  confidence then size.
+  jump-table target), `1` code pointer (data word or lis/addi constant) or
+  hint-sheet entry, `2` gap filling, `3` profile only.
+- **Compile order** (`orderedRegions`): `profileHits` descending, then
+  confidence, then size ascending. The binary is written in that order.
 
 ### Fingerprint
 
@@ -125,9 +149,17 @@ the regions:
 
 ```
 "SAOTPLN1", u32 version = 1, u32 regionCount, u32 reserved
-per region: u32 module, u32 entry, u32 confidence, u32 hashHi, u32 hashLo,
-            u32 rangeCount, rangeCount x (u32 start, u32 end)
+per region, in compile order:
+  u32 module, u32 entry, u32 confidence, u32 flags, u32 hashHi, u32 hashLo,
+  u32 rangeCount, rangeCount x (u32 start, u32 end),
+  u32 extraEntryCount, extraEntryCount x u32
 ```
+
+The worker passes it to the core through `_DolphinWeb_AotLoadPlan(ptr, len)`
+(region compiler); the core compiles in buffer order under its budget. The
+worker keeps the rest: JSON, REL relocation, profile order. Jump-table
+contents are never baked into compiled code (`bctr` reads CTR at run time),
+so the fingerprint covers `ranges` only.
 
 ## REL modules (OSLink)
 
@@ -157,20 +189,31 @@ are computed from guest memory right after linking. When to poll the list
 
 ## Profile of earlier sessions
 
-`aot-profile.js`. Per disc key, OPFS file `aot-profile/<key>.bin`:
-`"SAOTPRF1"`, u32 version, u32 sessions, u32 count, count x (u32 start,
-u32 end), sorted. Overlapping blocks merge; adjacent blocks keep their own
-start, since each start is an entry. At plan time, profile blocks inside a
-module become roots (confidence 3 when nothing else found them), the others
-go to `dynamic`.
+`aot-profile.js`. Per disc key, OPFS file `aot-profile/<key>.bin`
+(little-endian):
 
-Sources of blocks: `blocksFromCoreDump(u32 pairs start, length)` for a dump
-of the JIT block cache (to be exposed by the core, see open points), or
-`blocksFromPcSamples(pcs)` for a PC sampler.
+```
+"SAOTPRF2", u32 version = 2, u32 sessions, 8 bytes gameId, 8 bytes dolHash,
+u32 count, count x (u32 start, u32 end, u16 seen, u16 flags)
+```
+
+`seen` counts the sessions that ran the block, `flags` bit0 = real mode. A
+profile recorded for another DOL under the same key is ignored on load and
+replaced on record. Writes go through `navigator.locks`
+(`salon-aot-profile:<key>.bin`) so two tabs do not lose a session. Overlapping
+blocks of the same mode merge; adjacent blocks keep their own start, since
+each start is an entry. Past 1 M blocks the least seen are dropped.
+
+Sources of blocks: `blocksFromCoreDump(u32 triplets)` for
+`_DolphinWeb_JitDumpBlocks(out, capacity)` (start, PPC byte length, flags:
+bit0 executed, bit1 compiled, bit2 real mode; region compiler PR), called
+periodically and at pause/exit since the block cache is cleared on some
+events; or `blocksFromPcSamples(pcs)` for a PC sampler.
 
 ## Per-game hint sheets `salon-aot-hints/1`
 
-Optional, data only, for one exact DOL. **No sheet for a commercial game is
+Optional, data only, for one exact DOL. Entries are walked on trial like
+code pointers (confidence 1) and can mark an entry inside code already found. **No sheet for a commercial game is
 published in this repository**: users load their own (file picker, URL).
 
 ```json
@@ -199,33 +242,43 @@ in Node on an M4 Pro (1-2.6 s with the machine loaded, hashing included),
 of its 13,434 functions found as entries, 123 more as block starts, 1 missing;
 its 299 jump tables all found with the same size.
 
-Coverage of the code actually run, measured with a dense sampler of the
-emulated PC (a worker reading `PowerPCState.pc` from the shared heap in a
-tight loop, ~150 M reads/s; it sees the PC where the core stores it, at block
-dispatch):
+Coverage of the code actually run, measured with
+`harness/probes/aot-coverage.mjs` (a worker spinning on the shared wasm
+heap, reading `PowerPCState.pc` where `GetPPCPC` reads it). It sees the PC
+where the core stores it, at block dispatch, so the unit that counts is the
+**distinct PC**, an entry into compiled code. Time shares are dominated by
+hot and idle loops and only given as a secondary figure.
 
-| Scene | Static only (time / distinct PCs) | Static + profile of other runs |
-| --- | --- | --- |
-| Race, 20 s, JIT on (3 runs) | 99.81-99.83 % / 99.96 % | 100 % |
-| Race, 20 s, interpreter | 99.88 % / 99.96 % | 100 % |
-| Boot to attract mode, 70 s | 99.75 % / 99.87 % | 100 % |
-| Homebrew GX scene, 25 s | 99.79 % / 99.20 % | — |
-| Homebrew CPU fuzzer, 25 s | 95.2 % / 26.9 % | — (code generated at run time) |
+| Scene recorded | Static only, distinct PCs (time) | Profile from | With profile |
+| --- | --- | --- | --- |
+| Race A, 20 s (26,570 PCs) | 99.959 % (99.84 %) | boot + attract mode | 100 % |
+| Race B, other window, 30 s (28,926 PCs) | 99.962 % (99.84 %) | boot + attract mode | 100 % |
+| Race B | | race A | 100 % |
+| Attract mode, 40 s (12,599 PCs) | 99.913 % (99.90 %) | races A + B | 100 % |
+| Early boot, 25 s (9,388 PCs) | 99.851 % (99.87 %) | attract mode + race A | 99.968 % |
+| Homebrew GX scene, 25 s | 99.20 % (99.79 %) | | |
+| Homebrew CPU fuzzer, 25 s | 26.9 % (95.2 %) | | (code generated at run time) |
 
-What static discovery misses is code that is not in the disc's executables:
-exception vectors the OS copies to low memory (run in real mode), a boot
-stub the emulator writes, code generated at run time. The profile catches
-the first two; the JIT handles all of it.
+Every PC the static plan misses on the commercial disc is in low memory:
+exception vectors the OS copies there (run in real mode), plus 3 boot-time
+PCs no other scene runs. The profile is applied across scenes (recorded on
+menus, measured on a race and the other way round), so the 100 % is not the
+profile replaying its own scene; on this disc its only contribution is those
+vectors. Only one race savestate exists locally: the second race window is
+the same track later in the race, not another track.
 
 Precision: a race runs ~2,400 of the ~14,200 planned functions (~19,700 of
 151,000 blocks). Compiling the whole plan ahead of time is ~6x the work the
-race needs; the profile is the natural priority order.
+race needs; the profile gives the compile order.
 
-## Open points with the region compiler
+## Agreed with the region compiler
 
-1. A core export listing the blocks compiled/executed (start, length), to feed
-   the profile without a sampler.
-2. Region unit: the plan offers functions; the compiler may split or merge
-   (superblocks along `fall`/`branch` edges) as it likes.
-3. Plan transport: JSON in the worker, or the binary regions passed to the
-   core.
+1. Region unit: the plan's function; the compiler splits very large ones and
+   may merge. It always re-decodes guest memory.
+2. Addresses: effective, plus an explicit real-mode flag.
+3. Transport: binary regions to the core (`_DolphinWeb_AotLoadPlan`), the
+   rest in the worker.
+4. Fingerprint per region over `ranges`; run-time invalidation (icbi, writes
+   to a 32-byte line of a region) is the compiler's.
+5. Profile source: `_DolphinWeb_JitDumpBlocks`, delivered with the region
+   compiler.

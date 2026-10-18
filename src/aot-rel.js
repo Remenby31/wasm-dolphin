@@ -67,11 +67,16 @@ export function parseRel(bytes) {
   // Import table: per referenced module, a run of relocations.
   const imports = [];
   if (header.impOffset + header.impSize > u8.byteLength) throw new Error("REL import table out of range");
+  // In a well-formed module each relocation record belongs to one import, so
+  // the records read in total cannot exceed the file: imports sharing a run
+  // without END would otherwise cost quadratic time and memory.
+  let budget = Math.floor(u8.byteLength / 8);
   for (let o = header.impOffset; o + 8 <= header.impOffset + header.impSize; o += 8) {
     const moduleId = be32(v, o);
     const relocs = [];
     let section = 0, offset = 0;
     for (let r = be32(v, o + 4); r + 8 <= u8.byteLength; r += 8) {
+      if (--budget < 0) throw new Error("REL relocation tables overlap");
       const delta = v.getUint16(r, false), type = u8[r + 2], sect = u8[r + 3], addend = be32(v, r + 4);
       if (type === R_DOLPHIN_END) break;
       if (type === R_DOLPHIN_SECTION) { section = sect; offset = 0; continue; }

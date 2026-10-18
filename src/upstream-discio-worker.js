@@ -2138,6 +2138,10 @@ async function loadCore({
   // core that predates the producer export.
   wgpuConsumerStateCacheEnabled =
     wgpuStateCacheEnabled && !wgpuProducerStateCacheAvailable;
+  // Coverage probe (harness/probes/aot-coverage.mjs): a sampler in another
+  // worker reads the emulated PC from the shared heap. Visible only to this
+  // worker's global (and a debugger), never to the page.
+  self.__aotPcSampleHeap = moduleInstance.HEAPU8.buffer;
   // Renderer transport is required even when persistent JIT caching is not.
   // ?nojitcache=1 gates only the optional cache channel below.
   await installDolphinPthreadChannels(moduleInstance, {

@@ -170,3 +170,55 @@ test("aot discovery: relative tables (entries are offsets from the table)", () =
   const [t] = discover(image, { entryPoints: [{ addr: l.entry, source: "t" }], gapFill: false }).jumpTables;
   assert.deepEqual([t.kind, t.bound, t.targets], ["rel", "cmplwi", [l.c0, l.c1]]);
 });
+
+test("aot discovery: outside entries of a region (table targets, code pointers)", async () => {
+  const { planModule } = await import("../src/aot-plan.js");
+  const { r, labels: l, image } = run();
+  const m = planModule(r, { read32: (a) => image.read32(a) });
+  const sw = m.functions.find((f) => f.entry === l.switcher);
+  assert.deepEqual(sw.extraEntries, [l.case0, l.case1, l.case2]);
+  assert.deepEqual(m.functions.find((f) => f.entry === l.func_a).extraEntries, []);
+});
+
+// Performance guards (review P2-3, P2-4): hostile shapes must stay linear.
+test("aot discovery: many code pointers into a run that ends on junk stay linear", () => {
+  const N = 50000;
+  const text = [asm.blr()];
+  for (let i = 0; i < N; i++) text.push(asm.nop());
+  text.push(0);
+  const data = Array.from({ length: N }, (_, i) => TEXT + 4 + i * 4);
+  const { image, entryPoint } = imageFromDol(buildDol({ textAddr: TEXT, text, dataAddr: DATA, data, entry: TEXT }));
+  const t0 = performance.now();
+  const r = discover(image, { entryPoints: [{ addr: entryPoint, source: "t" }] });
+  const ms = performance.now() - t0;
+  assert.equal(r.functions.length, 1);
+  assert.ok(ms < 2000, `took ${Math.round(ms)} ms`);
+});
+
+test("aot discovery: a branchy region ending on junk is bounded by the trial budget", () => {
+  // Each pointer targets a nop chain with a conditional branch (not straight
+  // line), all ending on junk: only the shared budget bounds the work.
+  const N = 20000;
+  const text = [asm.blr()];
+  for (let i = 0; i < N; i++) text.push((pc) => asm.beq(pc, pc + 8));
+  text.push(0, 0);
+  const t = assemble(TEXT, text);
+  const data = Array.from({ length: N }, (_, i) => TEXT + 4 + i * 4);
+  const { image, entryPoint } = imageFromDol(buildDol({ textAddr: TEXT, text: t.words, dataAddr: DATA, data, entry: TEXT }));
+  const t0 = performance.now();
+  const r = discover(image, { entryPoints: [{ addr: entryPoint, source: "t" }], gapFill: false });
+  assert.equal(r.functions.length, 1);
+  assert.ok(performance.now() - t0 < 5000);
+});
+
+test("aot discovery: 65,536 notCode ranges are searched, not scanned", () => {
+  const text = [];
+  for (let i = 0; i < 20000; i++) text.push(asm.nop());
+  text.push(asm.blr());
+  const { image, entryPoint } = imageFromDol(buildDol({ textAddr: TEXT, text, entry: TEXT }));
+  const exclude = Array.from({ length: 65536 }, (_, i) => [0x90000000 + i * 8, 0x90000004 + i * 8]);
+  const t0 = performance.now();
+  const r = discover(image, { entryPoints: [{ addr: entryPoint, source: "t" }], exclude });
+  assert.equal(r.stats.codeBytes, 20001 * 4);
+  assert.ok(performance.now() - t0 < 1000);
+});

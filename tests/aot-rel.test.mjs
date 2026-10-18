@@ -96,3 +96,15 @@ test("aot rel: a corrupt module list ends the walk without throwing", () => {
   assert.equal(readLinkedModules((a) => loop.get(a) ?? 0).length, 1);
   assert.deepEqual(readLinkedModules(() => 0), []);
 });
+
+test("aot rel: imports sharing a relocation run without END are refused, not quadratic (review P1-2)", () => {
+  const S = 1 << 20, u = new Uint8Array(S), v = new DataView(u.buffer), half = S / 2;
+  v.setUint32(0x10, 0x40);
+  v.setUint32(0x28, 0x40);
+  v.setUint32(0x2c, half - 0x40);
+  for (let o = 0x40; o + 8 <= half; o += 8) { v.setUint32(o, 1); v.setUint32(o + 4, half); }
+  for (let r = half; r + 8 <= S; r += 8) u[r + 2] = 1;
+  const t0 = performance.now();
+  assert.throws(() => parseRel(u), /overlap/);
+  assert.ok(performance.now() - t0 < 1000);
+});

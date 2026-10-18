@@ -6,6 +6,13 @@
 const be32 = (b, o) => ((b[o] << 24) | (b[o + 1] << 16) | (b[o + 2] << 8) | b[o + 3]) >>> 0;
 
 export const APPLOADER_ADDRESS = 0x81200000;
+// Everything read from the disc is bounded: a hostile image must not make the
+// analysis allocate or loop without limit. Main RAM is 24 MiB, so no
+// executable of a real disc is larger.
+export const MAX_EXECUTABLE_BYTES = 24 << 20;
+export const MAX_FST_BYTES = 16 << 20;
+export const MAX_RELS = 256;
+export const MAX_REL_TOTAL_BYTES = 64 << 20;
 
 export async function readDiscExecutables(read, { relFilter = (name) => /\.rel$/i.test(name) } = {}) {
   const header = await read(0, 0x440);
@@ -20,6 +27,7 @@ export async function readDiscExecutables(read, { relFilter = (name) => /\.rel$/
     const off = be32(dolHeader, i * 4), size = be32(dolHeader, 0x90 + i * 4);
     if (size) dolSize = Math.max(dolSize, off + size);
   }
+  if (dolSize > MAX_EXECUTABLE_BYTES) throw new Error(`boot DOL larger than ${MAX_EXECUTABLE_BYTES} bytes`);
   const dol = await read(dolOffset, dolSize);
 
   // Apploader: run by the boot sequence before the DOL, loaded at 0x81200000.
@@ -31,22 +39,33 @@ export async function readDiscExecutables(read, { relFilter = (name) => /\.rel$/
   }
 
   const rels = [];
-  if (fstSize > 12 && fstSize < 64 << 20) {
+  if (fstSize > 12 && fstSize <= MAX_FST_BYTES) {
     const fst = await read(fstOffset, fstSize);
+    let total = 0;
     for (const file of walkFst(fst)) {
-      if (relFilter(file.path)) rels.push({ ...file, bytes: await read(file.offset, file.size) });
+      if (!relFilter(file.path)) continue;
+      // Oversized or excess modules are left to the JIT.
+      if (rels.length >= MAX_RELS || file.size > MAX_EXECUTABLE_BYTES || total + file.size > MAX_REL_TOTAL_BYTES) continue;
+      total += file.size;
+      rels.push({ ...file, bytes: await read(file.offset, file.size) });
     }
   }
   return { gameId, dol, apploader, rels };
 }
 
+const MAX_NAME = 255;
+const MAX_DEPTH = 32;
+
 // Files of an FST: { path, offset, size }.
 export function walkFst(fst) {
-  const count = be32(fst, 8);
+  if (fst.length < 12) return [];
+  // The entry count is bounded by the table that has to hold the entries.
+  const count = Math.min(be32(fst, 8), Math.floor(fst.length / 12));
   const stringBase = count * 12;
   const name = (off) => {
     let end = stringBase + off;
-    while (end < fst.length && fst[end] !== 0) end++;
+    const limit = Math.min(fst.length, end + MAX_NAME);
+    while (end < limit && fst[end] !== 0) end++;
     return new TextDecoder("latin1").decode(fst.subarray(stringBase + off, end));
   };
   const out = [];
@@ -57,7 +76,11 @@ export function walkFst(fst) {
     const word = be32(fst, e);
     const prefix = dirs[dirs.length - 1].prefix;
     const path = prefix + name(word & 0xffffff);
-    if (word >>> 24) dirs.push({ end: be32(fst, e + 8), prefix: `${path}/` });
+    if (word >>> 24) {
+      // A directory ends after itself and inside its parent; depth is bounded.
+      const end = Math.min(be32(fst, e + 8), dirs[dirs.length - 1].end);
+      if (end > i + 1 && dirs.length < MAX_DEPTH) dirs.push({ end, prefix: `${path}/` });
+    }
     else out.push({ path, offset: be32(fst, e + 4), size: be32(fst, e + 8) });
   }
   return out;
