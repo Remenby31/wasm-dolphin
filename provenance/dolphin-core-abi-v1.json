@@ -1,7 +1,7 @@
 {
   "schemaVersion": 1,
   "abiVersion": 1,
-  "coreId": "sha256:1248b723ed1460af3f039938eccd596f81b1641080e21dbbe45c55c91d3f6b3b",
+  "coreId": "sha256:7ddfba4dfb25966c3c2a983e360b24065642f7eb250277eaf0da57a40e223a35",
   "upstreamCommit": "e22551eae1c84a7e4d0b6a5c519ef4ed4ef69df1",
   "artifacts": [
     {
@@ -12,8 +12,8 @@
     },
     {
       "path": "cores/dolphin/dolphin-core-upstream.wasm",
-      "size": 12954677,
-      "sha256": "1248b723ed1460af3f039938eccd596f81b1641080e21dbbe45c55c91d3f6b3b"
+      "size": 12955639,
+      "sha256": "7ddfba4dfb25966c3c2a983e360b24065642f7eb250277eaf0da57a40e223a35"
     }
   ],
   "contractSources": [
@@ -134,8 +134,8 @@
     {
       "path": "src/upstream-discio-worker.js",
       "hashMode": "lf-normalized",
-      "size": 625529,
-      "sha256": "b521e705923d97c6a3853d01f29d2e0a04d456d845bddcf50843ff174abc1e9e"
+      "size": 629919,
+      "sha256": "c8f50d0ccf8de9e85aa0e2ee8be218d758ca7c3000bf7aaec5450ea96b132b1f"
     },
     {
       "path": "src/wgpu-renderer-worker-probe.js",
