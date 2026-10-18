@@ -45,7 +45,7 @@ export class UpstreamWorkerAdapter {
     ppcWasmJit = false,
     ppcWasmJitTier = "guarded",
     ppcWasmJitForce = false,
-    ppcWasmJitWarmupFrames = 3600,
+    ppcWasmJitWarmupFrames = 60,
     ppcProfile = false,
     cpuOverclock = 1,
     emulationSpeed = 1,
