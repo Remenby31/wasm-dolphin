@@ -318,3 +318,168 @@ test("a background warm-up that hangs is caught too, and later jobs still comple
   assert.equal(later.warmed, true);
   assert.equal(client.stats().respawns, 1);
 });
+
+// A Worker under the test's control: what it was sent, and replies on demand.
+function fakeWorkerFactory({ failToLoad = false } = {}) {
+  const made = [];
+  const factory = () => {
+    const listeners = {};
+    const w = {
+      sent: [],
+      terminated: false,
+      addEventListener(type, fn) {
+        (listeners[type] ??= []).push(fn);
+      },
+      emit(type, data) {
+        for (const fn of listeners[type] ?? []) fn({ data });
+      },
+      postMessage(m) {
+        w.sent.push(m);
+      },
+      terminate() {
+        w.terminated = true;
+      }
+    };
+    made.push(w);
+    if (failToLoad) queueMicrotask(() => w.emit("error"));
+    return w;
+  };
+  return { factory, made };
+}
+const settle = () => new Promise((r) => setTimeout(r, 0));
+const manualClock = () => {
+  const timers = [];
+  return {
+    timers,
+    setTimer: (fn) => (timers.push(fn), timers.length),
+    clearTimer: () => {},
+    fire: () => timers.splice(0).forEach((fn) => fn())
+  };
+};
+
+test("a reply that never comes is compiled in place after the job's deadline", async (t) => {
+  const { factory, made } = fakeWorkerFactory();
+  const clock = manualClock();
+  const client = createAotCompilerClient({ createWorker: factory, jobTimeoutMs: 0, ...clock });
+  t.after(() => client.terminate());
+  const bytes = buildModule({ memory: MEMORY, funcImports: 1, bodies: [WRITER_BODY] });
+  const pending = client.compile(bytes);
+  await settle();
+  assert.equal(made[0].sent.find((m) => m.type === "aot-compile").jobs.length, 1);
+  made[0].emit("messageerror"); // the reply could not be read
+  clock.fire(); // the watchdog's next poll
+  const result = await pending;
+  assert.equal(result.offThread, false);
+  assert.ok(result.module instanceof WebAssembly.Module);
+  assert.equal(client.stats().lost, 1);
+  assert.equal(client.stats().messageErrors, 1);
+});
+
+test("replies settle by id whatever their order, and a replaced worker's messages are ignored", async (t) => {
+  const { factory, made } = fakeWorkerFactory();
+  const clock = manualClock();
+  const client = createAotCompilerClient({ createWorker: factory, warmTimeoutMs: 0, ...clock });
+  t.after(() => client.terminate());
+  const a = buildModule({ memory: MEMORY, bodies: [[...i32const(1)]] });
+  const b = buildModule({ memory: MEMORY, bodies: [[...i32const(2)]] });
+  const pa = client.compile(a);
+  const pb = client.compile(b);
+  await settle();
+  const [ja, jb] = made[0].sent.find((m) => m.type === "aot-compile").jobs;
+  const mb = new WebAssembly.Module(b);
+  made[0].emit("message", { type: "aot-compiled", results: [{ id: jb.id, module: mb, warmed: true }], totals: { warmed: 1, warmCalls: 1, warmMs: 1, maxWarmMs: 1 } });
+  assert.equal((await pb).module, mb);
+  // the worker gets stuck warming job a: replaced, a goes to the new worker
+  const statusBuffer = made[0].sent.find((m) => m.type === "aot-init").status;
+  Atomics.store(new Int32Array(statusBuffer), 0, ja.id);
+  clock.fire();
+  clock.fire();
+  assert.equal(made[0].terminated, true);
+  assert.equal(made.length, 2);
+  // the dead worker's late reply and totals change nothing
+  made[0].emit("message", { type: "aot-compiled", results: [{ id: ja.id, module: mb }], totals: { warmed: 99, warmCalls: 99, warmMs: 99, maxWarmMs: 99 } });
+  assert.equal(client.stats().warmed, 1);
+  await settle();
+  const resent = made[1].sent.find((m) => m.type === "aot-compile").jobs;
+  assert.deepEqual(resent.map((j) => [j.id, j.warm]), [[ja.id, false]]);
+  const ma = new WebAssembly.Module(a);
+  made[1].emit("message", { type: "aot-compiled", results: [{ id: ja.id, module: ma }], totals: {} });
+  assert.equal((await pa).module, ma);
+});
+
+test("a worker that fails to load: compile in place, try again later, give up after a few failures", async (t) => {
+  const { factory, made } = fakeWorkerFactory({ failToLoad: true });
+  let time = 0;
+  const realNow = performance.now;
+  performance.now = () => time;
+  t.after(() => {
+    performance.now = realNow;
+  });
+  const client = createAotCompilerClient({ createWorker: factory, retryAfterMs: 1000, maxWorkerFailures: 2, ...manualClock() });
+  t.after(() => client.terminate());
+  const bytes = buildModule({ memory: MEMORY, bodies: [[...i32const(1)]] });
+  const first = client.compile(bytes);
+  await settle();
+  assert.equal((await first).offThread, false);
+  assert.equal(made.length, 1);
+  // within the back-off: no new worker
+  assert.equal((await client.compile(bytes)).offThread, false);
+  assert.equal(made.length, 1);
+  // after it: one more try, which fails too, and that is final
+  time = 2000;
+  const third = client.compile(bytes);
+  await settle();
+  assert.equal((await third).offThread, false);
+  assert.equal(made.length, 2);
+  time = 10_000;
+  assert.equal((await client.compile(bytes)).offThread, false);
+  assert.equal(made.length, 2);
+  assert.equal(client.stats().offThread, false);
+  assert.equal(client.stats().workerFailures, 2);
+});
+
+test("after a few stuck warm-ups, warm-ups stop for the session", async (t) => {
+  const client = createAotCompilerClient({ createWorker: nodeWorkerFactory(), warmTimeoutMs: 200, maxWarmTimeouts: 1 });
+  t.after(() => client.terminate());
+  const hang = buildModule({ memory: MEMORY, bodies: [INFINITE_LOOP_BODY] });
+  await client.compile(hang);
+  assert.equal(client.stats().timeouts, 1);
+  const again = await client.compile(hang); // would hang again: not warmed at all
+  assert.equal(again.warmed, false);
+  assert.equal(client.stats().timeouts, 1);
+  assert.equal(client.stats().warmDisabled, true);
+});
+
+test("the warm state reaches the worker's scratch memory end to end", async (t) => {
+  // traps unless state[4] holds the magic: warmed without a trap only if the
+  // state the client was given was copied before the call
+  const MAGIC = 0x5a17;
+  const body = [0x20, 0, 0x28, 2, 4, ...i32const(MAGIC), 0x47, 0x04, 0x40, 0x00, 0x0b, ...i32const(0)];
+  const bytes = buildModule({ memory: MEMORY, bodies: [body] });
+  const client = createAotCompilerClient({ createWorker: nodeWorkerFactory() });
+  t.after(() => client.terminate());
+  await client.compile(bytes);
+  await client.drain();
+  assert.equal(client.stats().warmTraps, 1, "zeroed state: the check traps");
+  const state = new Uint8Array(8);
+  new DataView(state.buffer).setInt32(4, MAGIC, true);
+  client.setWarmState({ statePtr: 0x3000, state });
+  await client.compile(buildModule({ memory: MEMORY, bodies: [body, [...i32const(3)]] }));
+  await client.drain();
+  assert.equal(client.stats().warmTraps, 1, "with the core's state: no new trap");
+});
+
+test("bytes viewed on a SharedArrayBuffer are copied before they leave", async (t) => {
+  const { factory, made } = fakeWorkerFactory();
+  const client = createAotCompilerClient({ createWorker: factory, ...manualClock() });
+  t.after(() => client.terminate());
+  const bytes = buildModule({ memory: MEMORY, bodies: [[...i32const(1)]] });
+  const heap = new Uint8Array(new SharedArrayBuffer(4096));
+  heap.set(bytes, 100);
+  void client.compile(heap.subarray(100, 100 + bytes.length)).catch(() => {});
+  await settle();
+  const job = made[0].sent.find((m) => m.type === "aot-compile").jobs[0];
+  assert.ok(!(job.bytes.buffer instanceof SharedArrayBuffer));
+  assert.equal(job.bytes.buffer.byteLength, bytes.length);
+  assert.deepEqual(job.bytes, bytes);
+});

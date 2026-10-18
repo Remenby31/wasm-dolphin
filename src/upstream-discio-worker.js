@@ -1,4 +1,5 @@
 import { readViRing } from "./harness-vi-ring.js";
+import { startPcSampler } from "./harness-pc-sampler.js";
 import {
   DEFAULT_UPSTREAM_CORE_SHA256,
   DEFAULT_UPSTREAM_CORE_URL,
@@ -228,6 +229,23 @@ const PRESENTATION_HISTOGRAM_BUCKETS_MS = [8, 12, 16, 20, 24, 33, 50, 100, 200];
 // clock emscripten_get_now() gives the core's VI ring.
 const harnessNow = () => performance.timeOrigin + performance.now();
 let harnessEnabled = false;
+let harnessPcSamplerRun = null;
+
+// QA harness only: start / stop the guest-PC sampler (harness-pc-sampler.js).
+async function harnessPcSampler({ action, periodMs } = {}) {
+  if (action === "stop") {
+    if (!harnessPcSamplerRun) return { error: "pc sampler not running" };
+    const run = harnessPcSamplerRun;
+    harnessPcSamplerRun = null;
+    return run.stop();
+  }
+  if (!harnessEnabled) return { error: "harness hooks are off" };
+  const pcAddress = moduleInstance?._DolphinWeb_HarnessPcAddress?.() ?? 0;
+  if (!pcAddress) return { error: "core has no DolphinWeb_HarnessPcAddress" };
+  harnessPcSamplerRun?.stop();
+  harnessPcSamplerRun = startPcSampler({ buffer: moduleInstance.HEAPU8.buffer, pcAddress, periodMs: Number(periodMs) || 0.25 });
+  return { started: true, pcAddress, pcNow: api?.getPpcPc?.() ?? null };
+}
 let harnessVideoBackend = null;
 // Exact capture for video=wgpu: presents tagged with VI outputs (ViTag records).
 const wgpuExactCapture = createWgpuExactCapture();
@@ -610,6 +628,82 @@ function webGpuUboPackMode() {
   // The exact-slice cache owns independent class lifetimes. Dense packets use
   // one shared publication serial, so cache mode deliberately forces legacy.
   return wgpuUboPackEnabled && !wgpuUboCacheEnabled ? 1 : 0;
+}
+
+// Harness-only timing perturbations, to reproduce in headless Chrome the
+// backpressure a visible canvas puts on the replay (validationSetWgpuPerturbation).
+// Both zero by default: nothing changes unless the harness asks.
+const wgpuDiagPerturb = { presentDelayMs: 0, drainEveryMs: 0 };
+let wgpuDiagLastDrainAt = 0;
+// The core's GPU-sync counters (patch 0080), on only for the freeze probe.
+let gpuSyncDiagEnabled = false;
+
+// Milliseconds before the next drain the drainEveryMs perturbation allows (0:
+// drain now). The replay pump sleeps that long instead of polling.
+function wgpuDiagDrainWaitMs(now = performance.now()) {
+  if (!(wgpuDiagPerturb.drainEveryMs > 0)) return 0;
+  return Math.max(0, wgpuDiagLastDrainAt + wgpuDiagPerturb.drainEveryMs - now);
+}
+
+// The core's FIFO / pixel-engine handshake snapshot (WasmGpuSyncDiag.h).
+function readGpuSyncDiag() {
+  const m = moduleInstance;
+  if (!m?._DolphinWeb_GpuSyncDiag) return null;
+  try {
+    return JSON.parse(m.UTF8ToString(m._DolphinWeb_GpuSyncDiag()));
+  } catch (error) {
+    return { error: String(error?.message || error) };
+  }
+}
+
+// Harness diagnostics for a hardware-renderer presentation freeze: where the
+// consumer side of the WebGPU command ring stands, and every gate that can
+// keep it from replaying or presenting. Read-only.
+function readWgpuReplayState() {
+  const ring = webGpuCmdRing;
+  let write = null, read = null, nextOp = null;
+  try {
+    if (ring) {
+      write = Atomics.load(ring.headerI32, 0) >>> 0;
+      read = currentWgpuReadIndex(ring);
+      if (write !== read && moduleInstance) {
+        const u32 = new Uint32Array(moduleInstance.HEAPU8.buffer);
+        nextOp = u32[(ring.slotsBase + (read % ring.capacity) * 32) >>> 2];
+      }
+    }
+  } catch (error) {
+    nextOp = `unreadable: ${error?.message || error}`;
+  }
+  const now = performance.now();
+  return {
+    now,
+    coreState: api?.getCoreStateName?.() ?? null,
+    coreFrame: api?.getFrame?.() ?? null,
+    videoStats: String(api?.getVideoStats?.() ?? "").slice(0, 600),
+    gpuSync: readGpuSyncDiag(),
+    ring: ring ? { write, read, backlog: write !== null ? (write - read) >>> 0 : null, nextOp } : null,
+    fatal: wgpuReplayFatal,
+    mappedCapacityBlocked: wgpuMappedCapacityBlocked,
+    mappedRemapPending: wgpuMappedRemapPromises.size,
+    uploadTransport: wgpuUploadTransport,
+    loadFenceActive: wgpuLoadFenceActive,
+    replayYieldPending: wgpuReplayYieldPending,
+    presentationLoopActive,
+    frameSignalWaitPending,
+    cmdRingOwnsCanvas,
+    sinceLastPresentMs: lastPresentedAt > 0 ? now - lastPresentedAt : null,
+    presents: webGpuExecStats.present,
+    skipDraw: webGpuExecStats.skipDraw || 0,
+    drainCount: webGpuCausalStats.drainCount,
+    readbacksPending: {
+      classifierEfb: wgpuClassifierEfbReadbackPending,
+      classifierBackbuffer: wgpuClassifierBackbufferReadbackPending,
+      classifierXfb: wgpuClassifierXfbReadbackPending,
+      inputBackbuffer: wgpuInputBackbufferReadbackPending,
+    },
+    presentRejected: self._wgPresentRejectedLogCount || 0,
+    lastErrors: rendererDiagnostics.errors.slice(-8),
+  };
 }
 
 function recordRendererError(kind, message) {
@@ -1047,6 +1141,7 @@ async function handleMessage(type, payload) {
         cachedInterpreterDisableMask: payload.cachedInterpreterDisableMask,
         wgpuScissoredClearRect: payload.wgpuScissoredClearRect,
         noJitCache: payload.noJitCache,
+        aotCompiler: payload.aotCompiler,
         reportedCoreSelection: payload.coreSelection,
         wgpuReplayDiagnostics: payload.wgpuReplayDiagnostics,
         wgpuDeepReplayDiagnostics: payload.wgpuDeepReplayDiagnostics,
@@ -1218,8 +1313,21 @@ async function handleMessage(type, payload) {
       return { enabled: true, coreHooks: Boolean(moduleInstance?._DolphinWeb_HarnessEnable), coreLoaded: Boolean(moduleInstance) };
     case "validationReadTimeline":
       return readHarnessTimeline();
+    case "validationPcSampler":
+      return harnessPcSampler(payload);
     case "validationCaptureAtVi":
       return captureAtViOutput(payload);
+    case "validationReadWgpuReplayState":
+      return readWgpuReplayState();
+    case "validationEnableGpuSyncDiag":
+      // Applied now if the core is loaded, and again when it loads.
+      gpuSyncDiagEnabled = payload.enabled !== false;
+      moduleInstance?._DolphinWeb_GpuSyncDiagEnable?.(gpuSyncDiagEnabled ? 1 : 0);
+      return { enabled: gpuSyncDiagEnabled, coreDiag: Boolean(moduleInstance?._DolphinWeb_GpuSyncDiagEnable && moduleInstance?._DolphinWeb_GpuSyncDiag), coreLoaded: Boolean(moduleInstance) };
+    case "validationSetWgpuPerturbation":
+      wgpuDiagPerturb.presentDelayMs = Math.max(0, Math.min(100, Number(payload.presentDelayMs) || 0));
+      wgpuDiagPerturb.drainEveryMs = Math.max(0, Math.min(200, Number(payload.drainEveryMs) || 0));
+      return { ...wgpuDiagPerturb };
     case "validationReadCoreProgress": {
       const loadedCheckpoint = readLastLoadedCheckpoint();
       return {
@@ -1594,6 +1702,7 @@ async function loadCore({
   cachedInterpreterDisableMask = 0,
   wgpuScissoredClearRect = true,
   noJitCache = false,
+  aotCompiler = true,
   reportedCoreSelection = null,
   wgpuReplayDiagnostics = false,
   wgpuDeepReplayDiagnostics: requestedWgpuDeepReplayDiagnostics = false,
@@ -2000,6 +2109,7 @@ async function loadCore({
   // killing the menu-nav interpret stall measured in §28bz/§28cf.
   const _t_idb = performance.now();
   dolphinJitCachePersistenceEnabled = !noJitCache;
+  dolphinAotCompilerEnabled = aotCompiler !== false;
   dolphinJitBootLoadComplete = false;
   dolphinJitBootLoadedEntries = 0;
   if (!noJitCache) {
@@ -2096,6 +2206,7 @@ async function loadCore({
   api = bindApi(moduleInstance);
   harnessVideoBackend = videoBackend;
   if (harnessEnabled) moduleInstance._DolphinWeb_HarnessEnable?.(1);
+  if (gpuSyncDiagEnabled) moduleInstance._DolphinWeb_GpuSyncDiagEnable?.(1);
   const ownershipTraceSetterAvailable = Boolean(
     api.setWebGpuOwnershipTraceEnabled &&
     api.getWebGpuOwnershipTracePtr &&
@@ -6054,7 +6165,11 @@ function getDolphinAotCompiler() {
   }
   return dolphinAotCompiler;
 }
+// ?aotcompiler=0: compile in place as before this worker existed (A/B and
+// escape hatch); compile requests are then compiled in place too.
+let dolphinAotCompilerEnabled = true;
 function compileDolphinJitModuleOffThread(bytes, deliver) {
+  if (!dolphinAotCompilerEnabled) return WebAssembly.compile(bytes);
   return getDolphinAotCompiler().compile(bytes, { deliver }).then((result) => result.module);
 }
 // Contract with the JIT owner (CPU pthread side):
@@ -6071,14 +6186,17 @@ const dolphinJitCompileRequestsInFlight = new Set();
 async function handleDolphinJitCompileRequest(event) {
   const data = event.data;
   if (data?.type === "dolphin-jit-warm-state") {
-    if (data.state instanceof Uint8Array) getDolphinAotCompiler().setWarmState(data);
+    if (data.state instanceof Uint8Array && dolphinAotCompilerEnabled) getDolphinAotCompiler().setWarmState(data);
     return;
   }
   if (!data || data.type !== "dolphin-jit-compile-request") return;
-  const key = data.key ?? data.hash;
+  const key = String(data.key ?? data.hash ?? "");
   if (!key || !data.bytes) return;
-  const bytes = data.bytes instanceof ArrayBuffer ? new Uint8Array(data.bytes) : data.bytes;
+  let bytes = data.bytes instanceof ArrayBuffer ? new Uint8Array(data.bytes) : data.bytes;
   if (!(bytes instanceof Uint8Array)) return;
+  // A view of the wasm heap: copy the module out (digest and worker transfer
+  // need its own buffer, and the heap must never be handed over).
+  if (bytes.buffer instanceof SharedArrayBuffer) bytes = bytes.slice();
   dolphinJitCompileRequestCount += 1;
   const cached = dolphinJitCacheMap.get(key);
   if (cached) {
@@ -6087,16 +6205,29 @@ async function handleDolphinJitCompileRequest(event) {
   }
   if (dolphinJitCompileRequestsInFlight.has(key)) return;
   dolphinJitCompileRequestsInFlight.add(key);
+  let mod = null;
   try {
-    const mod = await getDolphinAotCompiler().compile(bytes).then((result) => result.module);
+    // A block key names the SHA-256 of its bytes: one that does not match is
+    // never cached under that name (as for every other cache entry).
+    const blockKey = key.startsWith(`${JIT_CACHE_ENTRY_KEY_SCHEMA}:`);
+    if (blockKey && !(await verifyCanonicalWasmBlockKey(key, bytes))) {
+      dolphinJitCompileRequestFailures += 1;
+      postStatus("jit-cache: rejected compile request with mismatched block identity");
+      broadcastDolphinJitPthreads({ type: "dolphin-jit-compile-failed", key, reason: "compile" });
+      return;
+    }
+    try {
+      mod = dolphinAotCompilerEnabled
+        ? await getDolphinAotCompiler().compile(bytes).then((result) => result.module)
+        : await WebAssembly.compile(bytes);
+    } catch (err) {
+      dolphinJitCompileRequestFailures += 1;
+      broadcastDolphinJitPthreads({ type: "dolphin-jit-compile-failed", key, reason: compileFailureReason(err) });
+      return;
+    }
     if (dolphinJitCacheMap.size < DOLPHIN_JIT_CACHE_MAX) dolphinJitCacheMap.set(key, mod);
     broadcastDolphinJitPthreads({ type: "dolphin-jit-cache-add", hash: key, module: mod });
-    if (dolphinJitCachePersistenceEnabled && await verifyCanonicalWasmBlockKey(String(key), bytes)) {
-      void writeDolphinJitEntryToIdb(key, bytes);
-    }
-  } catch (err) {
-    dolphinJitCompileRequestFailures += 1;
-    broadcastDolphinJitPthreads({ type: "dolphin-jit-compile-failed", key, reason: compileFailureReason(err) });
+    if (blockKey && dolphinJitCachePersistenceEnabled) void writeDolphinJitEntryToIdb(key, bytes);
   } finally {
     dolphinJitCompileRequestsInFlight.delete(key);
   }
@@ -7038,9 +7169,11 @@ function startWgpuReplayPump() {
     } else {
       webGpuCausalStats.replayPumpEmptyPollCount += 1;
     }
+    // A backlog the drainEveryMs perturbation holds back waits for its next
+    // drain instead of rescheduling at 0 ms.
     scheduleWgpuReplayPump(
       pump,
-      write === read || wgpuMappedCapacityBlocked ? 4 : 0
+      write === read || wgpuMappedCapacityBlocked ? 4 : wgpuDiagDrainWaitMs()
     );
   };
   scheduleWgpuReplayPump(pump, 0);
@@ -10148,6 +10281,11 @@ function recordBoundedHistogram(values, bounds, value) {
 
 function drainWebGpuCmdRing(source = "presentation") {
   if (wgpuReplayFatal) return;
+  if (wgpuDiagPerturb.drainEveryMs > 0) {
+    const now = performance.now();
+    if (wgpuDiagDrainWaitMs(now) > 0) return;
+    wgpuDiagLastDrainAt = now;
+  }
   const ring = webGpuCmdRing;
   if (!ring || !renderGpu) return;
   if (wgpuSemanticRuntimeActive) drainWgpuSemanticOwnership();
@@ -11733,6 +11871,10 @@ function drainWebGpuCmdRing(source = "presentation") {
                   } catch (e) {}
                 }
               }
+            }
+            if (wgpuDiagPerturb.presentDelayMs > 0) {
+              const until = performance.now() + wgpuDiagPerturb.presentDelayMs;
+              while (performance.now() < until) { /* harness perturbation: a blocking present */ }
             }
             const cur = renderGpu.context.getCurrentTexture();
             lastBackbufferTexture = cur;

@@ -110,18 +110,28 @@ const stub = () => 0;
 // 1.5 GiB of address space, reserved once per shape, not per block.
 export function createWarmer() {
   const memories = new Map();
-  const stats = { modules: 0, warmed: 0, calls: 0, traps: 0, skipped: 0 };
+  const stats = { modules: 0, warmed: 0, calls: 0, traps: 0, skipped: 0, scratchFailures: 0 };
 
+  // A shape the engine could not allocate is not tried again: those modules
+  // are delivered unwarmed.
+  const failedShapes = new Set();
   function scratchMemory(desc) {
     const shapeKey = `${desc.initial}:${desc.maximum ?? ""}:${desc.shared ? 1 : 0}`;
+    if (failedShapes.has(shapeKey)) return null;
     let memory = memories.get(shapeKey);
     if (!memory) {
       if (memories.size >= SCRATCH_MEMORY_SHAPES_MAX) memories.delete(memories.keys().next().value);
-      memory = new WebAssembly.Memory({
-        initial: desc.initial,
-        ...(desc.maximum !== undefined ? { maximum: desc.maximum } : {}),
-        ...(desc.shared ? { shared: true } : {})
-      });
+      try {
+        memory = new WebAssembly.Memory({
+          initial: desc.initial,
+          ...(desc.maximum !== undefined ? { maximum: desc.maximum } : {}),
+          ...(desc.shared ? { shared: true } : {})
+        });
+      } catch {
+        failedShapes.add(shapeKey);
+        stats.scratchFailures += 1;
+        return null;
+      }
       memories.set(shapeKey, memory);
     }
     return memory;
@@ -137,6 +147,7 @@ export function createWarmer() {
       else if (desc.kind === "memory") {
         if (desc.memory64) return null;
         value = memory = scratchMemory(desc);
+        if (!value) return null;
       } else if (desc.kind === "table") {
         if (desc.memory64 || desc.element !== 0x70) return null;
         value = new WebAssembly.Table({
@@ -278,7 +289,7 @@ export function installAotCompilerWorker(scope) {
   let pumping = false;
   let flushes = [];
   let inFlight = 0;
-  const totals = { warmed: 0, warmCalls: 0, warmMs: 0, maxWarmMs: 0 };
+  const totals = { warmed: 0, warmCalls: 0, warmMs: 0, maxWarmMs: 0, scratchFailures: 0, traps: 0 };
 
   function runWarm(job, module) {
     Atomics.store(status, 0, job.id);
@@ -290,6 +301,8 @@ export function installAotCompilerWorker(scope) {
     totals.warmCalls += result.calls;
     totals.warmMs += warmMs;
     totals.maxWarmMs = Math.max(totals.maxWarmMs, warmMs);
+    totals.scratchFailures = warmer.stats.scratchFailures;
+    totals.traps = warmer.stats.traps;
     return { ...result, warmMs };
   }
 
@@ -412,20 +425,32 @@ export function compileFailureReason(error) {
 }
 
 // Owner side. `createWorker` returns a fresh worker (browser Worker, or a Node
-// worker_threads adapter in tests). If it throws, or the worker fails to load,
-// every job is compiled in place without warm-up: never slower than before,
-// never fatal. Without SharedArrayBuffer there is no watchdog, so no warm-up.
+// worker_threads adapter in tests). Nothing it does can hang or fail a job
+// that compiling in place would not:
+//   - no worker, or one that fails to load: jobs compile in place, without
+//     warm-up; the worker is tried again after `retryAfterMs`, at most
+//     `maxWorkerFailures` times;
+//   - a job unanswered after `jobTimeoutMs` (lost or unreadable reply) is
+//     compiled in place;
+//   - a warm-up stuck for `warmTimeoutMs` costs a worker restart; after
+//     `maxWarmTimeouts` of them, warm-ups stop for the session.
+// Without SharedArrayBuffer there is no watchdog, so no warm-up.
 export function createAotCompilerClient({
   createWorker,
   warmTimeoutMs = 2000,
+  jobTimeoutMs = 15000,
+  maxWarmTimeouts = 5,
+  maxWorkerFailures = 3,
+  retryAfterMs = 30000,
   pollMs = Math.max(50, Math.floor(warmTimeoutMs / 4)),
   setTimer = (fn, ms) => setTimeout(fn, ms),
   clearTimer = (id) => clearTimeout(id),
   onEvent = () => {}
 } = {}) {
-  const pending = new Map(); // id -> {bytes, warm, deliver, resolve, reject}
+  const pending = new Map(); // id -> {bytes, warm, deliver, sentAt, promise, resolve, reject}
   let worker = null;
-  let workerBroken = !createWorker;
+  let workerFailures = 0;
+  let brokenUntil = createWorker ? 0 : Infinity;
   let workersStarted = 0;
   let nextId = 1;
   let warmState = null;
@@ -434,38 +459,56 @@ export function createAotCompilerClient({
   let poll = null;
   let stuckId = 0;
   let stuckSince = 0;
+  let outgoing = [];
+  const flushWaiters = new Map();
   const stats = {
-    jobs: 0, done: 0, failed: 0, inPlace: 0, timeouts: 0, respawns: 0,
-    compileMs: 0, warmed: 0, warmCalls: 0, warmMs: 0, maxWarmMs: 0
+    jobs: 0, done: 0, failed: 0, inPlace: 0, lost: 0, messageErrors: 0, timeouts: 0, respawns: 0,
+    workerFailures: 0, compileMs: 0, warmed: 0, warmCalls: 0, warmMs: 0, maxWarmMs: 0
   };
-  let carried = { warmed: 0, warmCalls: 0, warmMs: 0, maxWarmMs: 0 }; // from killed workers
-  let current = { warmed: 0, warmCalls: 0, warmMs: 0, maxWarmMs: 0 };
+  const zero = () => ({ warmed: 0, warmCalls: 0, warmMs: 0, maxWarmMs: 0, scratchFailures: 0, traps: 0 });
+  let carried = zero(); // totals of workers that are gone
+  let current = zero();
+
+  const warmAllowed = () => Boolean(status) && stats.timeouts < maxWarmTimeouts;
 
   function foldTotals() {
     stats.warmed = carried.warmed + current.warmed;
     stats.warmCalls = carried.warmCalls + current.warmCalls;
     stats.warmMs = carried.warmMs + current.warmMs;
     stats.maxWarmMs = Math.max(carried.maxWarmMs, current.maxWarmMs);
+    stats.scratchFailures = (carried.scratchFailures || 0) + (current.scratchFailures || 0);
+    stats.warmTraps = (carried.traps || 0) + (current.traps || 0);
   }
 
-  // Background warm-ups go on after every job is answered, so the watchdog
-  // runs for as long as the worker lives: one Atomics.load per poll.
+  // The watchdog runs for as long as a worker lives (background warm-ups go
+  // on after every job is answered): one Atomics.load and a scan of the
+  // pending jobs per poll.
   function schedulePoll() {
-    if (poll !== null || !status || !worker) return;
+    if (poll !== null || !worker) return;
     poll = setTimer(onPoll, pollMs);
     poll?.unref?.();
   }
 
   function onPoll() {
     poll = null;
-    if (!status || !worker) return;
-    const id = Atomics.load(status, 0);
+    if (!worker) return;
     const t = now();
-    if (id === 0 || id !== stuckId) {
-      stuckId = id;
-      stuckSince = t;
-    } else if (t - stuckSince >= warmTimeoutMs) {
-      onStuck(id);
+    if (status) {
+      const id = Atomics.load(status, 0);
+      if (id === 0 || id !== stuckId) {
+        stuckId = id;
+        stuckSince = t;
+      } else if (t - stuckSince >= warmTimeoutMs) {
+        onStuck(id);
+        return;
+      }
+    }
+    for (const [id, job] of pending) {
+      if (job.sentAt !== null && t - job.sentAt >= jobTimeoutMs) {
+        stats.lost += 1;
+        onEvent({ type: "job-timeout", id });
+        compileInPlace(id);
+      }
     }
     schedulePoll();
   }
@@ -479,7 +522,11 @@ export function createAotCompilerClient({
     const job = pending.get(id);
     if (job) job.warm = false;
     killWorker();
-    for (const pendingId of [...pending.keys()]) send(pendingId);
+    resendAll();
+  }
+
+  function resendAll() {
+    for (const id of [...pending.keys()]) send(id);
   }
 
   function killWorker() {
@@ -490,14 +537,17 @@ export function createAotCompilerClient({
       // already gone
     }
     worker = null;
+    status = null;
     outgoing = [];
     carried = {
       warmed: carried.warmed + current.warmed,
       warmCalls: carried.warmCalls + current.warmCalls,
       warmMs: carried.warmMs + current.warmMs,
-      maxWarmMs: Math.max(carried.maxWarmMs, current.maxWarmMs)
+      maxWarmMs: Math.max(carried.maxWarmMs, current.maxWarmMs),
+      scratchFailures: (carried.scratchFailures || 0) + (current.scratchFailures || 0),
+      traps: (carried.traps || 0) + (current.traps || 0)
     };
-    current = { warmed: 0, warmCalls: 0, warmMs: 0, maxWarmMs: 0 };
+    current = zero();
     stuckId = 0;
     for (const resolve of flushWaiters.values()) resolve();
     flushWaiters.clear();
@@ -505,9 +555,16 @@ export function createAotCompilerClient({
     poll = null;
   }
 
-  const flushWaiters = new Map();
-  function onMessage(event) {
-    const data = event.data;
+  function onWorkerFailure() {
+    stats.workerFailures += 1;
+    workerFailures += 1;
+    brokenUntil = workerFailures >= maxWorkerFailures ? Infinity : now() + retryAfterMs;
+    onEvent({ type: "worker-failure", permanent: brokenUntil === Infinity });
+    killWorker();
+    resendAll();
+  }
+
+  function onMessage(data) {
     if (data?.type === "aot-flushed") {
       current = data.totals;
       foldTotals();
@@ -525,7 +582,7 @@ export function createAotCompilerClient({
 
   function settle(result) {
     const job = pending.get(result.id);
-    if (!job) return;
+    if (!job) return; // answered already (in place, after a timeout)
     pending.delete(result.id);
     if (result.error) {
       stats.failed += 1;
@@ -545,33 +602,39 @@ export function createAotCompilerClient({
   }
 
   function ensureWorker() {
-    if (worker || workerBroken) return worker;
+    if (worker) return worker;
+    if (now() < brokenUntil) return null;
+    let created;
     try {
-      worker = createWorker();
-      if (workersStarted++ > 0) stats.respawns += 1;
-      worker.addEventListener("message", onMessage);
-      worker.addEventListener("error", () => {
-        // A worker that fails to load is not retried: fall back for good.
-        workerBroken = true;
-        killWorker();
-        for (const id of [...pending.keys()]) send(id);
-      });
-      if (canWatch) {
-        status = new Int32Array(new SharedArrayBuffer(4));
-        worker.postMessage({ type: "aot-init", status: status.buffer });
-      } else {
-        status = null;
-      }
-      if (warmState) worker.postMessage({ type: "aot-warm-state", ...warmState });
+      created = createWorker();
     } catch {
-      workerBroken = true;
-      worker = null;
+      onWorkerFailure();
+      return null;
     }
+    worker = created;
+    if (workersStarted++ > 0) stats.respawns += 1;
+    // Events of a worker that was replaced are ignored: its replies are
+    // stale and its totals already counted.
+    created.addEventListener("message", (event) => {
+      if (created === worker) onMessage(event.data);
+    });
+    created.addEventListener("messageerror", () => {
+      if (created === worker) stats.messageErrors += 1; // the job's deadline covers it
+    });
+    created.addEventListener("error", () => {
+      if (created === worker) onWorkerFailure();
+    });
+    if (canWatch) {
+      status = new Int32Array(new SharedArrayBuffer(4));
+      created.postMessage({ type: "aot-init", status: status.buffer });
+    }
+    if (warmState) created.postMessage({ type: "aot-warm-state", ...warmState });
     return worker;
   }
 
   function compileInPlace(id) {
     const job = pending.get(id);
+    if (!job) return;
     pending.delete(id);
     stats.inPlace += 1;
     const t0 = now();
@@ -595,11 +658,11 @@ export function createAotCompilerClient({
     // Bytes are copied, never transferred: callers keep theirs for storage.
     // Jobs sent in the same turn go in one message.
     if (!outgoing.length) queueMicrotask(flushOutgoing);
-    outgoing.push({ id, bytes: job.bytes, warm: job.warm && Boolean(status), deliver: job.deliver });
+    job.sentAt = now();
+    outgoing.push({ id, bytes: job.bytes, warm: job.warm && warmAllowed(), deliver: job.deliver });
     schedulePoll();
   }
 
-  let outgoing = [];
   function flushOutgoing() {
     const jobs = outgoing;
     outgoing = [];
@@ -608,15 +671,22 @@ export function createAotCompilerClient({
       for (const job of jobs) send(job.id);
       return;
     }
-    worker.postMessage({ type: "aot-compile", jobs });
+    try {
+      worker.postMessage({ type: "aot-compile", jobs });
+    } catch {
+      onWorkerFailure();
+    }
   }
 
   return {
     compile(bytes, { warm = true, deliver = DELIVER_AFTER_WARM } = {}) {
-      const view = bytes instanceof Uint8Array ? bytes : new Uint8Array(bytes);
+      let view = bytes instanceof Uint8Array ? bytes : new Uint8Array(bytes);
+      // A view of the emulator's heap (a SharedArrayBuffer) would hand the
+      // worker the whole heap: copy the module's bytes out.
+      if (typeof SharedArrayBuffer === "function" && view.buffer instanceof SharedArrayBuffer) view = view.slice();
       const id = nextId++;
       stats.jobs += 1;
-      const job = { bytes: view, warm, deliver };
+      const job = { bytes: view, warm, deliver, sentAt: null };
       job.promise = new Promise((resolve, reject) => {
         job.resolve = resolve;
         job.reject = reject;
@@ -644,10 +714,10 @@ export function createAotCompilerClient({
         worker.postMessage({ type: "aot-flush", id });
       });
     },
-    stats: () => ({ ...stats, pending: pending.size, offThread: !workerBroken, watchdog: canWatch }),
+    stats: () => ({ ...stats, pending: pending.size, offThread: brokenUntil !== Infinity, watchdog: canWatch, warmDisabled: !warmAllowed() && canWatch }),
     terminate() {
       killWorker();
-      workerBroken = true;
+      brokenUntil = Infinity;
       for (const [id, job] of pending) {
         pending.delete(id);
         job.reject(new Error("aot compiler terminated"));

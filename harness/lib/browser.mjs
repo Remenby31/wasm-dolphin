@@ -170,6 +170,30 @@ export async function workerRequest(page, type, payload = {}, timeoutMs = 10000)
 
 export const readCoreProgress = (page) => workerRequest(page, "validationReadCoreProgress");
 
+export async function waitRunning(page, timeoutMs = 60000) {
+  const end = Date.now() + timeoutMs;
+  while (Date.now() < end) {
+    const p = await readCoreProgress(page);
+    if ((p?.frame ?? 0) > 0) return; // frames only advance once Running
+    await page.waitForTimeout(100);
+  }
+  throw new Error("core never reached Running");
+}
+
+// Load the savestate the session routes at /__harness_state.sav. VI outputs
+// start before the core leaves "Starting", and a load sent then is refused:
+// retry for up to `retrySec` while the core says Starting.
+export async function loadHarnessState(page, url, { retrySec = 60 } = {}) {
+  await waitRunning(page);
+  let loaded;
+  for (let tries = 0; tries < retrySec; tries += 1) {
+    loaded = await pageCall(page, "__loadStateFile", new URL("__harness_state.sav", url).href, 120000);
+    if (loaded?.loaded || loaded?.beforeState !== "Starting") break;
+    await page.waitForTimeout(1000);
+  }
+  return loaded;
+}
+
 // The XFB the core scanned out at VI output `index` (since boot, or since
 // the last savestate load), captured by the core itself at that output.
 // Returns { index, ticks, width, height, data, source } or { error }: an
