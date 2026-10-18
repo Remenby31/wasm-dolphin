@@ -13,7 +13,35 @@ export function expectedCore(url, defaultSha256) {
   return { sha256: requested.toLowerCase().replace(/^sha256:/, ""), source: "coreid" };
 }
 
-// fetches: core wasm the server handed out during the session (path, sha256);
+// The core wasm a request of one page fetched from `server`, or null. Fetches
+// are attributed per request, through the browser context that made them, never
+// by their order in the server's log: sessions running at the same time on one
+// server each see only their own core.
+export function coreFetchOf(url, server) {
+  let u;
+  try {
+    u = new URL(url);
+  } catch {
+    return null;
+  }
+  if (u.origin !== new URL(server.base).origin) return null;
+  const sha256 = server.coreSha256?.(u.pathname) ?? null;
+  return sha256 ? { path: u.pathname, sha256 } : null;
+}
+
+// Every core wasm the pages and workers of `context` (a Playwright browser
+// context) fetched from `server`, in order. Dedicated workers' requests (the
+// emulator worker loads the core) belong to their page's context.
+export function recordCoreFetches(context, server) {
+  const fetches = [];
+  context.on("requestfinished", (request) => {
+    const fetched = coreFetchOf(request.url(), server);
+    if (fetched) fetches.push(fetched);
+  });
+  return fetches;
+}
+
+// fetches: core wasm this session fetched (path, sha256);
 // selection: the adapter's coreSelectionTelemetry() (may be null).
 export function checkCore({ url, defaultSha256, fetches, selection = null }) {
   const expected = expectedCore(url, defaultSha256);
