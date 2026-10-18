@@ -1,7 +1,9 @@
-import { existsSync, mkdirSync, writeFileSync } from "node:fs";
+import { chmodSync, existsSync, mkdirSync, readdirSync, readFileSync, writeFileSync } from "node:fs";
 import { spawnSync } from "node:child_process";
-import { dirname, resolve } from "node:path";
+import { homedir } from "node:os";
+import { delimiter, dirname, resolve } from "node:path";
 import { sha256File, verifyWasmToolchain } from "./wasm-toolchain.mjs";
+import { rustRemapFlags as remapFlags, scmGitShim, sourcePathFlags as pathFlags, vendoredCargoArgs } from "./toolchain/path-maps.mjs";
 
 const root = process.cwd();
 const sourceDir = resolve(root, "vendor/dolphin");
@@ -11,8 +13,6 @@ const sharedSourceDir = dirname(bridgeSource);
 const coreSource = resolve(root, "core/upstream/dolphin_web_core.cpp");
 const outputDir = resolve(process.env.DOLPHIN_WASM_OUTPUT_DIR ?? resolve(root, "cores/dolphin"));
 const nagaDir = resolve(root, "tools/naga-spirv-wgsl");
-const nagaLibrary = resolve(nagaDir, "target/wasm32-unknown-emscripten/release/naga_spirv_wgsl.a");
-const nagaLibraryAlternate = resolve(nagaDir, "target/wasm32-unknown-emscripten/release/libnaga_spirv_wgsl.a");
 const jitCachePreJs = resolve(root, "tools/jit-cache-prejs.js");
 const wasmMemoryPages = 24576;
 const fastBranchInline = String(
@@ -78,21 +78,74 @@ const toolchain = verifyWasmToolchain();
 const { emcc, emcmake, cmake, ninja, cargo, rustc } = toolchain.paths;
 const nagaEnvironment = {
   ...process.env,
-  PATH: `${dirname(rustc)};${dirname(emcc)};${process.env.PATH ?? ""}`,
+  PATH: [dirname(rustc), dirname(emcc), process.env.PATH ?? ""].join(delimiter),
   RUSTC: rustc,
   CARGO: cargo
 };
 
-console.log("Building the pinned Naga SPIR-V to WGSL bridge");
-run(cargo, ["build", "--locked", "--release", "--target", toolchain.lock.rust.target], {
-  cwd: nagaDir,
-  env: nagaEnvironment
+// Absolute checkout, build and toolchain paths reach the binary; map them onto
+// fixed virtual roots (tools/toolchain/path-maps.mjs) so a macOS checkout, a
+// Docker container and a CI runner produce the same bytes.
+const { flags: sourcePathFlags, unmapped: unmappedPaths } = pathFlags({ root, buildDir });
+for (const path of unmappedPaths) {
+  console.warn(`Not remapping ${path}: it contains whitespace; the core will embed this path.`);
+}
+const rustSysroot = spawnSync(rustc, ["--print", "sysroot"], { encoding: "utf8" }).stdout.trim();
+if (!rustSysroot) {
+  throw new Error(`Could not query the sysroot of ${rustc}`);
+}
+// The GPL source archive carries every crate (Naga's and std's) vendored here
+// and builds offline from them.
+const vendoredCrates = resolve(nagaDir, "vendor");
+const useVendoredCrates = existsSync(resolve(vendoredCrates, "naga-26.0.0"));
+const cargoSourceArgs = useVendoredCrates ? vendoredCargoArgs(vendoredCrates) : [];
+const cargoHome = resolve(process.env.CARGO_HOME ?? resolve(homedir(), ".cargo"));
+if (!useVendoredCrates) {
+  // Fetch first so the registry directories exist before they are enumerated.
+  run(cargo, ["fetch", "--locked"], { cwd: nagaDir, env: nagaEnvironment });
+}
+const registrySources = existsSync(resolve(cargoHome, "registry/src"))
+  ? readdirSync(resolve(cargoHome, "registry/src")).sort()
+  : [];
+const rustRemapFlags = remapFlags({
+  cargoHome,
+  registryDirs: registrySources.map((name) => resolve(cargoHome, "registry/src", name)),
+  rustSrc: resolve(rustSysroot, "lib/rustlib/src/rust"),
+  rustcCommit: toolchain.lock.rust.rustcCommit,
+  root,
+  vendoredCrates: useVendoredCrates ? vendoredCrates : null
 });
-const resolvedNagaLibrary = existsSync(nagaLibrary) ? nagaLibrary : nagaLibraryAlternate;
-if (!existsSync(resolvedNagaLibrary)) {
-  console.error(`Pinned Naga build did not produce ${nagaLibrary} or ${nagaLibraryAlternate}`);
+
+console.log("Building the pinned Naga SPIR-V to WGSL bridge");
+// Take the archive cargo reports for this build. Picking whichever of the two
+// possible file names exists let a stale archive from an older toolchain win
+// (issue #13, naga hash drift under an identical record).
+const nagaBuild = spawnSync(cargo, [
+  "build", "--locked", "--release", "--target", toolchain.lock.rust.target,
+  "--message-format=json-render-diagnostics",
+  ...cargoSourceArgs,
+  "--config", `target.${toolchain.lock.rust.target}.rustflags=${JSON.stringify(rustRemapFlags)}`
+], {
+  cwd: nagaDir,
+  env: nagaEnvironment,
+  encoding: "utf8",
+  stdio: ["ignore", "pipe", "inherit"],
+  maxBuffer: 64 * 1024 * 1024
+});
+if (nagaBuild.error || nagaBuild.status !== 0) {
+  process.exit(nagaBuild.status || 1);
+}
+const nagaArtifacts = nagaBuild.stdout.split("\n")
+  .filter((line) => line.startsWith("{"))
+  .map((line) => JSON.parse(line))
+  .filter((message) => message.reason === "compiler-artifact" && message.target?.name === "naga_spirv_wgsl")
+  .flatMap((message) => message.filenames)
+  .filter((file) => file.endsWith(".a"));
+if (nagaArtifacts.length !== 1 || !existsSync(nagaArtifacts[0])) {
+  console.error(`Pinned Naga build reported ${nagaArtifacts.length} static archives: ${nagaArtifacts.join(", ")}`);
   process.exit(1);
 }
+const resolvedNagaLibrary = nagaArtifacts[0];
 
 // CMake runs hundreds of feature probes. Keep the original global production
 // flags so subprojects that replace their Release flags still retain LTO, but
@@ -103,7 +156,8 @@ const wasmCompileFlags =
   `-DDOLPHIN_WEB_INLINE_FAST_BRANCH=${fastBranchInline} ` +
   `-DDOLPHIN_WEB_FALLBACK_MAP_DIAGNOSTICS=${fallbackMapDiagnostics} ` +
   `-DDOLPHIN_WEB_FALLBACK_MAP_BITS=${fallbackMapBits} ` +
-  `-DDOLPHIN_WEB_DIRECT_WASM_BLOCK_DISPATCH=${directWasmBlockDispatch}`;
+  `-DDOLPHIN_WEB_DIRECT_WASM_BLOCK_DISPATCH=${directWasmBlockDispatch} ` +
+  sourcePathFlags.join(" ");
 const wasmDebugProbeFlags = "-O0 -fno-lto";
 const cmakeArgs = [
   cmake,
@@ -163,6 +217,16 @@ const cmakeArgs = [
 // path, but pass it explicitly so a clone at any path links correctly.
 cmakeArgs.push(`-DDOLPHIN_WASM_PROJECT_ROOT=${root.replace(/\\/g, "/")}`);
 
+// scmrev.h from the source lock, not from vendor/dolphin/.git (absent in the
+// GPL source archive). POSIX shell only; Windows keeps asking git.
+if (process.platform !== "win32") {
+  const lockedCommit = JSON.parse(readFileSync(resolve(root, "provenance/dolphin-source.lock.json"), "utf8")).upstream.commit;
+  const shim = resolve(buildDir, "scm-git.sh");
+  writeFileSync(shim, scmGitShim(lockedCommit));
+  chmodSync(shim, 0o755);
+  cmakeArgs.push("-DCMAKE_DISABLE_FIND_PACKAGE_Git=ON", "-DGIT_FOUND=ON", `-DGIT_EXECUTABLE=${shim}`);
+}
+
 // PROFILING_FUNCS=1 adds a wasm name section to the core so CPU profiles show
 // real symbols instead of wasm-function[N]. Name section only — no codegen or
 // optimisation change, so timings stay representative. Off by default.
@@ -207,6 +271,10 @@ writeFileSync(resolve(buildDir, "wasm-dolphin-configure.json"), `${JSON.stringif
   fallbackMapBits,
   directWasmBlockDispatch,
   wasmCompileFlags,
+  sourcePathFlags,
+  unmappedPaths,
+  useVendoredCrates,
+  rustRemapFlags,
   cmakeArgs,
   toolchainLockSha256: toolchain.hashes.lock,
   cargoLockSha256: toolchain.hashes.cargoLock

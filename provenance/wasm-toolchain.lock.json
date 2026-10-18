@@ -83,5 +83,46 @@
         "sha256": "8e1957b21099a570a8de30a6574bd200f87f79bce15959bac1a9d85c6d6c8b0d"
       }
     ]
+  },
+  "posix": {
+    "toolchainDir": ".tools",
+    "emsdk": {
+      "repository": "https://github.com/emscripten-core/emsdk.git",
+      "commit": "bafd64c26bdaf10bd829163d1575b50b759a72d8",
+      "releasesHash": "6cd98e86d7749ff98b82b7f2ae78eb4f01942788"
+    },
+    "rust": {
+      "toolchain": "nightly-2026-05-15"
+    },
+    "emscriptenTreeSha256": "ed41ee8626124ebd6339088a058cd6f4e6736265597b16fc49633e0217f56dd5",
+    "platforms": {
+      "darwin-arm64": {
+        "clangSha256": "0c9a70e819c9b2a4c8adae45d47e870ef4cff4796bdb97b996d960c877d38045",
+        "wasmLdSha256": "9646a72a224d5b6509b58493235ce83460683d1fc6e4eb79c11a2c84d15cedea",
+        "wasmOptSha256": "b6d5131b4e0bf9545776dbff9d9b643fa43596a24901e54d91ba18aff900c9a2",
+        "rustcSha256": "3b16d63c2722cd9e3c4c2217d8b46fef82086614b24ea20fc0b27c0f87dcef7d",
+        "cargoSha256": "b9fdbb154619344ad0c883debe6d50b72c56b6782cad4cddf41206cdf8cd9d7e",
+        "cmakeSha256": "1b1667330498dc023eaeb0b0521ea105e1943d019d44bef909f0dad81844d5e1",
+        "ninjaSha256": "ad44480e2ba27be95a4850720983fd1b123728bb8a45c6c90670f5aa0d3e0069"
+      },
+      "linux-arm64": {
+        "clangSha256": "6622fda056a8c518f31ed587ae7ee33f5683fbe035c82e3593b3d2496beb6ccd",
+        "wasmLdSha256": "056233b51fff01420340aa0c53e6d2b4a0ce0b36cb814502947cea058e5e9620",
+        "wasmOptSha256": "f697d0085c681cdd278e4b3c56d21969e54dfe8faf1a10d9619e6adc1f925b43",
+        "rustcSha256": "0ca9f5ed09851e68d0fcaf816b6a370482a4b8964882421b5380c964e9f5538f",
+        "cargoSha256": "8cc1dd13e0b4baf36547ceaa4b98be622ef0a97263dcddf92874f02c8c8cd2d6",
+        "cmakeSha256": "e2fedfca09764eae13d19af0d5a519c6756cab595c1597aebb0137761bf0a189",
+        "ninjaSha256": "abf714870db6db3de512100023d26db0b2750d6afffe96cdde5513564e3d910b"
+      },
+      "linux-x64": {
+        "clangSha256": "1b251c7453ba8f7c7d751151f98ca35637493d9092209d8b4ebcf296728b9a00",
+        "wasmLdSha256": "c041439a76fd714e5343eb10d962ed90f2028244cb954076ad3a2560f8f7459b",
+        "wasmOptSha256": "879bd5d240e97b0d3d4cfeac430f0a0f096f0490c3c3236cd3a5e1d8c62d88bd",
+        "rustcSha256": "e3eb90defdeb5c84d4431f5697925d13274d2b22a8acaa4363e7c952061115d6",
+        "cargoSha256": "4915338d52569f9f4c8af911c50af943a87e99256ccaa6f5977fbb97551abbf5",
+        "cmakeSha256": "2cb2b2ed8a79eb5612bd611d010c882bf467feb51ad69dac288a245519080408",
+        "ninjaSha256": "696f9628a79d9ce50314cf9556d7cd1a1d1ec52b8fd52828f6f9db1719565b67"
+      }
+    }
   }
 }

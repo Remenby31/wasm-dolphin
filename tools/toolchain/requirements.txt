@@ -1,0 +1,12 @@
+# CMake and Ninja for the macOS/Linux core build, installed by bootstrap.sh into
+# an isolated virtualenv with --require-hashes. These are the same versions the
+# Windows lock records (Ninja's Kitware wheel reports
+# "1.13.0.git.kitware.jobserver-pipe-1").
+cmake==4.3.2 \
+    --hash=sha256:f8f570813753ed4564928cf45c4c13c31e46b3e66b1a07fe695cb9f7b7af185e \
+    --hash=sha256:ca739ab0d8960261fdb1bb6e1e6c16b9cd033ae0a98341483cc233ba7c81b22b \
+    --hash=sha256:339655b93289c1b03c6a72523d46d3b0d19dc51406d3a90f8eefcbec525cb271
+ninja==1.13.0 \
+    --hash=sha256:fa2a8bfc62e31b08f83127d1613d10821775a0eb334197154c4d6067b7068ff1 \
+    --hash=sha256:3d00c692fb717fd511abeb44b8c5d00340c36938c12d6538ba989fe764e79630 \
+    --hash=sha256:fb46acf6b93b8dd0322adc3a4945452a4e774b75b91293bafcc7b7f8e6517dfa
