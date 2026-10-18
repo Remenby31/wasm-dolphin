@@ -25,7 +25,7 @@
       "commit": "01e0577914a75a2569c846778c2f93aa8e6feddd"
     }
   },
-  "patchSeriesSha256": "990c7d477102517c03fa45edb60fe8439576465c21d6c8ad225b230a6fa0f631",
+  "patchSeriesSha256": "df898348c9f32b9dd18bb650f81798cda2f33f897389d8950b2a76f84a188522",
   "patches": [
     {
       "order": 1,
@@ -584,8 +584,8 @@
       "cwd": ".",
       "hashMode": "lf-normalized",
       "path": "patches/dolphin-wasm/snapshot/0073-jit-fast-exact-fma-inline-frsqrte.patch",
-      "size": 18106,
-      "sha256": "854d3083f7b0c141c6491ba847985dc07dc1020ec05664a11c1621a951684996"
+      "size": 18877,
+      "sha256": "7c5f94301940d3fbe5e87e77e4627f5f972780430779ebb0cec3b60fc8f77c89"
     },
     {
       "order": 71,

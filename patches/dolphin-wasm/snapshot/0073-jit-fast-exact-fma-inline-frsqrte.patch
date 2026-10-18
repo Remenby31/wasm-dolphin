@@ -22,7 +22,7 @@ diff --git a/Source/Core/Core/PowerPC/CachedInterpreter/CachedInterpreter.cpp b/
    static PowerPC::PowerPCState scratch;
    switch (flags & 3)
    {
-@@ -4670,109 +4675,189 @@ enum class FpArithKind
+@@ -4670,109 +4675,213 @@ enum class FpArithKind
  };
  
  // [f64 a] -> [f64]: a * frC +/- frB rounded once, as NI_madd_msub computes it
@@ -44,6 +44,11 @@ diff --git a/Source/Core/Core/PowerPC/CachedInterpreter/CachedInterpreter.cpp b/
 +// and the single-precision rounding tie NI_madd_msub corrects call the
 +// interpreter's own arithmetic through the fma import.
 +// Uses locals 2, 4, 5 and f64 scratch 3..14.
++// The non-exact-product path (TwoProduct + round-to-odd) and the single tie
++// fix inline cost ~75 WASM ops per FMA lane; off, they call the import
++// (measured the same speed on the race; kept for A/B).
++constexpr bool kInlineFmaSlowPaths = true;
++
  void EmitExactMulAddSub(std::vector<u8>& body, const WasmStateLayout& layout,
                          UGeckoInstruction inst, bool sub, bool single, u32 lane, u32 c_lane,
                          u32 dst)
@@ -104,8 +109,7 @@ diff --git a/Source/Core/Core/PowerPC/CachedInterpreter/CachedInterpreter.cpp b/
 +    op(0x1b);                                                   // select
 +    op(0x7c);                                                   // i64.add
 +    op(0xbf);                                                   // f64.reinterpret_i64
-   };
--  EmitLocalSet(body, a);
++  };
 +  // RN(p + e + y) for the exact product p + e: TwoSum, TwoSum, then round
 +  // to odd (RO): u + v = t + e exactly; when v != 0 and u is even, RO is u's
 +  // neighbour toward v. Boldo & Melquiond prove RN(hi + RO(lo + e)) rounds
@@ -119,7 +123,8 @@ diff --git a/Source/Core/Core/PowerPC/CachedInterpreter/CachedInterpreter.cpp b/
 +      op(AND);
 +    });
 +    get(hi); op(ADD);
-+  };
+   };
+-  EmitLocalSet(body, a);
 +  set(a);
 +  if ((s_dolphin_web_disable_mask.load(std::memory_order_relaxed) &
 +       DOLPHIN_WEB_DISABLE_INLINE_FMA) != 0)
@@ -152,7 +157,37 @@ diff --git a/Source/Core/Core/PowerPC/CachedInterpreter/CachedInterpreter.cpp b/
 +    get(c);
      EmitForce25BitNonDenormal(body);
 -    EmitLocalSet(body, c);
--  }
++    set(c);
++  }
++  get(a); get(c); op(MUL); set(p);
++  // Exact product: a*c is a double when the significands need 53 bits or
++  // fewer together (trailing zeros of both add up to 53 or more; frC keeps
++  // 25 bits in single forms, so a single a always fits) and the product is
++  // zero or normal; a zero a or frC gives an exact signed zero. Then
++  // a*c + b rounds once as p + b. Local 2 first: a denormal frC rounds to
++  // zero above, its product does not.
++  get(a); op(0xbd); EmitI64Const(body, 1ull << 52); op(0x84); op(0x7a);  // i64.ctz
++  get(c); op(0xbd); EmitI64Const(body, 1ull << 52); op(0x84); op(0x7a);
++  op(0x7c); EmitI64Const(body, 53); op(0x59);                  // i64.ge_s
++  get(a); f64const(0.0); op(EQ); op(OR);
++  get(c); f64const(0.0); op(EQ); op(OR);
++  get(p); EmitIsZeroOrNormalDouble(body); op(AND);
++  get(2); op(AND);
++  op(0x04); op(0x7c);  // if (result f64)
++  get(p); get(b); op(ADD);
++  if (single && !kInlineFmaSlowPaths)
++  {
++    // NI_madd_msub's tie fix applies when the 29 bits below single precision
++    // are exactly a half: leave it to the import (rare, and keeps blocks small).
++    op(0x22); EmitU32Leb(body, dst);
++    op(0xbd); EmitI64Const(body, 0x1fffffff); op(0x83);
++    EmitI64Const(body, 0x10000000); op(0x51);
++    op(0x04); op(0x7c);
++    emit_import();
++    op(0x05);
++    get(dst);
++    op(0x0b);
+   }
 -  // ... and (53 - ctz(a)) + (53 - ctz(c)) <= 53 significant bits ...
 -  emit_ctz(a);
 -  emit_ctz(c);
@@ -195,37 +230,7 @@ diff --git a/Source/Core/Core/PowerPC/CachedInterpreter/CachedInterpreter.cpp b/
 -  emit_import();
 -  body.push_back(0x0b);
 -  if (!single)
--    return;
--  // NI_madd_msub's tie correction applies when the 29 bits below single
--  // precision are exactly a half: leave that case to it.
--  body.push_back(0x22);
--  EmitU32Leb(body, dst);
--  body.push_back(0xbd);
--  EmitI64Const(body, 0x1fffffff);
--  body.push_back(0x83);
--  EmitI64Const(body, 0x10000000);
--  body.push_back(0x51);  // i64.eq
--  body.push_back(0x04);
--  body.push_back(0x7c);
-+    set(c);
-+  }
-+  get(a); get(c); op(MUL); set(p);
-+  // Exact product: a*c is a double when the significands need 53 bits or
-+  // fewer together (trailing zeros of both add up to 53 or more; frC keeps
-+  // 25 bits in single forms, so a single a always fits) and the product is
-+  // zero or normal; a zero a or frC gives an exact signed zero. Then
-+  // a*c + b rounds once as p + b. Local 2 first: a denormal frC rounds to
-+  // zero above, its product does not.
-+  get(a); op(0xbd); EmitI64Const(body, 1ull << 52); op(0x84); op(0x7a);  // i64.ctz
-+  get(c); op(0xbd); EmitI64Const(body, 1ull << 52); op(0x84); op(0x7a);
-+  op(0x7c); EmitI64Const(body, 53); op(0x59);                  // i64.ge_s
-+  get(a); f64const(0.0); op(EQ); op(OR);
-+  get(c); f64const(0.0); op(EQ); op(OR);
-+  get(p); EmitIsZeroOrNormalDouble(body); op(AND);
-+  get(2); op(AND);
-+  op(0x04); op(0x7c);  // if (result f64)
-+  get(p); get(b); op(ADD);
-+  if (single)
++  else if (single)
 +  {
 +    // NI_madd_msub's tie fix (see below), with fma(a, c, a') = p + a'.
 +    op(0x22); EmitU32Leb(body, dst);
@@ -243,6 +248,23 @@ diff --git a/Source/Core/Core/PowerPC/CachedInterpreter/CachedInterpreter.cpp b/
 +    op(0x0b);
 +  }
 +  op(0x05);
++  if (!kInlineFmaSlowPaths)
++  {
++    emit_import();
++    op(0x0b);
+     return;
+-  // NI_madd_msub's tie correction applies when the 29 bits below single
+-  // precision are exactly a half: leave that case to it.
+-  body.push_back(0x22);
+-  EmitU32Leb(body, dst);
+-  body.push_back(0xbd);
+-  EmitI64Const(body, 0x1fffffff);
+-  body.push_back(0x83);
+-  EmitI64Const(body, 0x10000000);
+-  body.push_back(0x51);  // i64.eq
+-  body.push_back(0x04);
+-  body.push_back(0x7c);
++  }
 +  // Range where the transforms are exact: |a|, |c|, |b| <= 2^995 and
 +  // 2^-900 <= |p| (b may be zero or normal at any size below the cap).
 +  get(a); op(ABS); f64const(0x1p995); op(LE);
@@ -296,7 +318,7 @@ diff --git a/Source/Core/Core/PowerPC/CachedInterpreter/CachedInterpreter.cpp b/
  }
  
  // Computes one lane into f64 local `dst` (rounded to single when `single`,
-@@ -5644,9 +5729,81 @@ void EmitDoublePrecisionArithmetic(std::vector<u8>& body, const WasmStateLayout&
+@@ -5644,9 +5753,81 @@ void EmitDoublePrecisionArithmetic(std::vector<u8>& body, const WasmStateLayout&
  void EmitFrsqrte(std::vector<u8>& body, const WasmStateLayout& layout,
                   const PPCAnalyst::CodeOp& op, u32 downcount)
  {
@@ -380,7 +402,7 @@ diff --git a/Source/Core/Core/PowerPC/CachedInterpreter/CachedInterpreter.cpp b/
  }
  
  
-@@ -8174,11 +8331,11 @@ std::vector<u8> BuildWasmCachedInterpreterBlock(std::span<const PPCAnalyst::Code
+@@ -8174,11 +8355,11 @@ std::vector<u8> BuildWasmCachedInterpreterBlock(std::span<const PPCAnalyst::Code
    // group `0x01, 0x7f` (one i32 at index WASM_FMH_FLAG_LOCAL=40, the per-group
    // range-check flag) and bump the leading group count 5 → 6. When the plan is
    // inactive the locals section is byte-identical to today (no extra local).
@@ -395,7 +417,7 @@ diff --git a/Source/Core/Core/PowerPC/CachedInterpreter/CachedInterpreter.cpp b/
  
    // §28cx C1: set up the GPR register cache for this block, then eagerly load
    // every GPR the block reads or writes into its local. Eager (not lazy) load
-@@ -12235,6 +12392,8 @@ extern "C" const char* GetPpcWasmHelperStats()
+@@ -12235,6 +12416,8 @@ extern "C" const char* GetPpcWasmHelperStats()
        << " blacklisthit:" << s_wasm_blacklist_hit_count
        << " transientreject:" << s_wasm_transient_reject_count.load(std::memory_order_relaxed)
        << " tablefull:" << (s_wasm_table_full.load(std::memory_order_relaxed) ? 1 : 0)

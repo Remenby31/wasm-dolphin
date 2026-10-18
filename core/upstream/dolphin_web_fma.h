@@ -35,6 +35,8 @@
 #include <cmath>
 #include <cstdint>
 
+#include <emscripten/emscripten.h>
+
 #pragma clang fp contract(off)
 
 #define ASUINT64(x) (__builtin_bit_cast(uint64_t, (double)(x)))
@@ -217,3 +219,9 @@ extern "C" double fma(double x, double y, double z)
 
 #undef ASUINT64
 #undef ZEROINFNAN
+
+// Lets tests tell a core with this fma from an older one.
+extern "C" EMSCRIPTEN_KEEPALIVE int DolphinWeb_FmaIsMusl()
+{
+  return 1;
+}

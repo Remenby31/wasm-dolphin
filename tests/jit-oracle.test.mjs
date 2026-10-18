@@ -269,7 +269,9 @@ test("double FMA with wide significands matches std::fma", { skip }, () => {
   }
 });
 
-test("FMA rounds once on double-rounding traps, interpreter and JIT (correct fma linked)", { skip }, () => {
+const fmaSkip = skip || (core.has("DolphinWeb_FmaIsMusl") ? false : "the core predates the strong musl fma (CI builds this branch's core)");
+
+test("FMA rounds once on double-rounding traps, interpreter and JIT (correct fma linked)", { skip: fmaSkip }, () => {
   // c has 24 bits, a = 1/c: a*c rounds to exactly 2^m with a tiny error e.
   // b's ulp is 2^(m+1), so p + b is an exact tie in double and only e
   // decides the rounding; ignoring e rounds to even, wrongly half the time.
