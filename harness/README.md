@@ -49,6 +49,41 @@ every run's JSON (`core`). Candidate cores are served from
 `build/core-candidates/<sha>/` of the tree, or from directories passed with
 `--core-candidate <dir>`, and only when their wasm hashes to that sha.
 
+## Race performance probe
+
+`harness/probes/race-perf.mjs` measures the steady-state speed of one scene
+(a savestate, a held key), trunk against head:
+
+```sh
+node harness/probes/race-perf.mjs --iso ../roms/<disc>.iso --state ../measures/harness/<race>.sav \
+  --port 8082 --baseline origin/main [--candidate <ref|dir>] --runs 3 --warmup 25 --secs 20 [--warm] [--pcsample 0.25]
+```
+
+- Headless; the measured window makes no page call at all (no CDP), the
+  rings are read once it ends. Speed is the core's VI timeline only.
+- Trunk and head run back to back for each run, the order alternating; the
+  change is the median of per-run ratios.
+- The 1-minute load is recorded through each window; a window above
+  `--max-load` (default: a quarter of the cores) fails the run.
+- The shared perf lock (`~/projects/gc-web-emu/.perf-lock`, PROGRAM.md) is
+  taken before the first launch and released on every exit; `--lock-wait`
+  bounds the wait (60 s polls).
+- Each run checks the core it loaded (core-mismatch otherwise) and records
+  its hash.
+- `--pcsample [ms]`: a worker of its own reads the guest PC in the shared
+  heap (`DolphinWeb_HarnessPcAddress`, `validationPcSampler`) every `ms`
+  during the window: a histogram of guest PCs (~3 kHz), per function with
+  `--symbols functions.json` (`[[start, end, name], …]`, local only for a
+  commercial disc). Real-time sampling: "more work" and "the same work,
+  slower" look alike. Host-side shares (the dispatcher's) are not guest PCs
+  and need a counter in the core.
+- A local-only disc is refused when `CI` is set; its results go to
+  `../measures/harness` (or `HARNESS_PRIVATE_OUT`), never into the repo.
+
+`harness/matrices/local-kart-race.json` runs the same race through `ab`
+(`KART_ISO`, `KART_STATE`; `measureFromState` starts the measured window
+from the savestate; local only).
+
 ## Freeze probes
 
 During the measured window the timeline is drained every second. When it

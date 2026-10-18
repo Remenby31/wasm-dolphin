@@ -8,7 +8,7 @@ import os from "node:os";
 import path from "node:path";
 import { pathToFileURL } from "node:url";
 import { parseArgs } from "node:util";
-import { ensureServer, pageCall, readCoreProgress, readFrameInfo, REPO_ROOT, workerRequest } from "./lib/browser.mjs";
+import { ensureServer, loadHarnessState, pageCall, readCoreProgress, readFrameInfo, REPO_ROOT, workerRequest } from "./lib/browser.mjs";
 import { analyzeDifferential, INTERP_QUERY, JIT_QUERY } from "./lib/fuzz.mjs";
 import { releaseAll, setPad } from "./lib/gamepad-mock.mjs";
 import { compareFrames, diffImage, identical } from "./lib/image-diff.mjs";
@@ -157,6 +157,12 @@ async function measureInSession(session, server, { iso, label, warmup, secs, sho
     // Games that boot deterministically (no scripted inputs, no savestate)
     // are captured at VI output N from boot, before anything else runs.
     const bootCapture = !statePath && !steps ? await renderCapture(session, { game, spec, query, statePath, dir, label }) : null;
+    // measureFromState: the measured window starts from the savestate (a
+    // scene mid-race), not from boot; the steps then only hold inputs.
+    if (statePath && game.measureFromState) {
+      const loaded = await loadHarnessState(session.page, session.url);
+      if (!loaded?.loaded) throw new Error(`savestate load failed: ${JSON.stringify(loaded)}`);
+    }
     if (steps) await runSteps(session.page, steps);
     const audio = game.audio === false ? { attached: false, reason: "disabled in spec" } : await attachAudio(session);
     await waitSeconds(session, warmup);
@@ -252,8 +258,7 @@ async function renderCapture(session, { game, spec, query, statePath, dir, label
   if (!supported.ok) return { error: supported.why };
   if (!statePath && game.steps) return { error: "scripted inputs and no savestate: no exact frame to compare" };
   if (statePath) {
-    await waitRunning(session.page);
-    const loaded = await pageCall(session.page, "__loadStateFile", new URL("__harness_state.sav", session.url).href, 120000);
+    const loaded = await loadHarnessState(session.page, session.url);
     if (!loaded?.loaded) return { error: `savestate load failed: ${JSON.stringify(loaded)}` };
   }
   const index = Number(spec.renderFrame ?? (statePath ? 120 : 300));
@@ -409,16 +414,6 @@ async function cmdMeasure(argv) {
 }
 
 // ---------------------------------------------------------------- diff
-async function waitRunning(page, timeoutMs = 60000) {
-  const end = Date.now() + timeoutMs;
-  while (Date.now() < end) {
-    const p = await readCoreProgress(page);
-    if ((p?.frame ?? 0) > 0) return; // frames only advance once Running
-    await page.waitForTimeout(100);
-  }
-  throw new Error("core never reached Running");
-}
-
 async function captureScene(server, values, { iso, query, index, state, steps, label, dir }) {
   const supported = captureSupported(query);
   if (!supported.ok) throw new Error(`${label}: ${supported.why}`);
@@ -427,9 +422,7 @@ async function captureScene(server, values, { iso, query, index, state, steps, l
   try {
     if (steps) await runSteps(session.page, steps);
     if (state) {
-      // A load sent before the core is Running is refused ("Starting").
-      await waitRunning(session.page);
-      const loaded = await pageCall(session.page, "__loadStateFile", new URL("__harness_state.sav", session.url).href, 120000);
+      const loaded = await loadHarnessState(session.page, session.url);
       if (!loaded?.loaded) throw new Error(`savestate load failed: ${JSON.stringify(loaded)}`);
     }
     const capture = await captureInSession(session, { index, fromLoad: Boolean(state) });
@@ -692,7 +685,7 @@ function cmdReport(argv) {
 
 // ---------------------------------------------------------------- gate / ab
 // Export the served part of a git ref (page, app, core, server) to a temp dir.
-function exportRef(ref) {
+export function exportRef(ref) {
   const dir = mkdtempSync(path.join(os.tmpdir(), "gc-harness-baseline-"));
   claim(dir, REPO_ROOT, "baseline-export");
   const commit = execFileSync("git", ["-C", REPO_ROOT, "rev-parse", ref], { encoding: "utf8" }).trim();
