@@ -914,14 +914,20 @@ std::uint32_t* GetFrameSignalPtr()
 #ifndef EMSCRIPTEN_KEEPALIVE
 #define EMSCRIPTEN_KEEPALIVE
 #endif
+// Per-entry seqlock: `seq` is odd while the entry is being written and
+// 2 * (n + 1) once entry n is complete. The reader (src/harness-vi-ring.js)
+// accepts an entry only if seq is even, is the value expected for that
+// slot, and is unchanged after reading the fields.
 struct DolphinWebHarnessViEntry
 {
+  std::atomic<std::uint32_t> seq;
+  std::uint32_t vi_since_boot;
   double host_ms;
   std::uint64_t ticks;
-  std::uint32_t vi_since_boot;
   std::uint32_t vi_since_load;
+  std::uint32_t pad;
 };
-static_assert(sizeof(DolphinWebHarnessViEntry) == 24, "harness VI entry layout is read from JS");
+static_assert(sizeof(DolphinWebHarnessViEntry) == 32, "harness VI entry layout is read from JS");
 
 constexpr std::uint32_t HARNESS_VI_RING_CAPACITY = 8192;  // > 2 min at 60 Hz between drains
 static std::array<DolphinWebHarnessViEntry, HARNESS_VI_RING_CAPACITY> s_harness_vi_ring{};
@@ -964,11 +970,14 @@ static void HarnessOnViOutput(const std::uint8_t* xfb, std::uint32_t width, std:
 #else
   const double host_ms = 0.0;
 #endif
-  // sinceBoot doubles as the slot's sequence number: the reader checks it
-  // to detect an entry overwritten (or being written) while it reads.
-  s_harness_vi_ring[head % HARNESS_VI_RING_CAPACITY] = {host_ms, ticks,
-                                                         s_harness_vi_since_boot,
-                                                         s_harness_vi_since_load};
+  DolphinWebHarnessViEntry& e = s_harness_vi_ring[head % HARNESS_VI_RING_CAPACITY];
+  e.seq.store(2 * head + 1, std::memory_order_relaxed);  // odd: being written
+  std::atomic_thread_fence(std::memory_order_release);
+  e.vi_since_boot = s_harness_vi_since_boot;
+  e.host_ms = host_ms;
+  e.ticks = ticks;
+  e.vi_since_load = s_harness_vi_since_load;
+  e.seq.store(2 * head + 2, std::memory_order_release);  // even: entry `head` complete
   s_harness_vi_head.store(head + 1, std::memory_order_release);
 
   if (s_harness_capture_state.load(std::memory_order_acquire) != 1)

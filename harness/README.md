@@ -42,11 +42,15 @@ XFB) and decodes the guest XFB at native size, or reports the output as
 missed. A capture that is not exactly the requested output is an error, never
 a picture. Every VI output and every presentation also go into rings the
 worker drains completely (`validationReadTimeline`), on one clock
-(`timeOrigin + performance.now()`), with a sequence number per VI entry so an
-overwritten entry counts as lost instead of being read.
+(`timeOrigin + performance.now()`), with a per-entry seqlock (sequence odd while written,
+checked before and after reading) so an overwritten or half-written entry
+counts as lost instead of being read.
 
-The hooks are off in normal use (two counter increments and one atomic load
-per VI output); `bootIso` turns them on with `validationEnableHarness` as soon
+The hooks are off in normal use. What remains in production is two counter
+increments and one relaxed atomic load per VI output: a reviewed decision
+(about 120 cheap operations per second, nothing allocated, no timestamp), kept
+so the VI indices exist from boot and stay correct when the harness enables the
+rings later; `bootIso` turns them on with `validationEnableHarness` as soon
 as the worker exists, before the core loads. OGL does not go through the VI
 hook: its timeline and captures are reported as unjudged, not as frozen.
 
