@@ -1423,6 +1423,7 @@ async function handleMessage(type, payload) {
         offThreadCompiler: dolphinAotCompiler ? dolphinAotCompiler.stats() : null,
         compileRequests: dolphinJitCompileRequestCount,
         compileRequestFailures: dolphinJitCompileRequestFailures,
+        compileReadyMarks: dolphinJitReadyMarks,
         aotDiscKey,
         blockStore: dolphinJitBlockStore ? dolphinJitBlockStore.stats() : null,
         legacyIdbMigration: dolphinJitLegacyMigration,
@@ -6803,10 +6804,15 @@ function compileDolphinJitModuleOffThread(bytes, deliver) {
 // measures/aot/q8). So the work here is: precompile, warm, keep alive.
 //
 // Contract with the JIT owner (CPU pthread side):
-//   {type: "dolphin-jit-compile-request", key, bytes, kind} asks for that
-//     precompilation; the answer, "dolphin-jit-cache-add" {hash: key, module}
-//     or "dolphin-jit-compile-failed" {key, reason: compile|link|oom}, goes to
-//     every pthread and is read by those that yield.
+//   {type: "dolphin-jit-compile-request", key, bytes, kind, readyPtr, readySlot}
+//     asks for that precompilation. The core owns a byte table in its heap at
+//     readyPtr (one byte per slot, slot = first 16 bits of the key's SHA-256),
+//     zeroes the slot before asking and interprets the block meanwhile. Once
+//     the Module is compiled, warmed and kept alive, or once compiling failed,
+//     the slot is set to 1 here (Atomics.store); the core then compiles the
+//     bytes itself, synchronously: a cache hit, or the engine's own verdict
+//     (CompileError: blacklist; out of memory: transient). A slot collision
+//     costs one more synchronous compile, never a wrong result.
 //   {type: "dolphin-jit-warm-state", statePtr, state} the scratch state that
 //     makes every entry point leave at its first downcount test.
 // The key is the core's, used as is: block keys are also the IndexedDB keys,
@@ -6864,26 +6870,26 @@ async function handleDolphinJitCompileRequest(event) {
   const key = String(data.key ?? data.hash ?? "");
   if (!key || !data.bytes) return;
   dolphinJitCompileRequestCount += 1;
-  const firstAsk = !dolphinJitCompileRequestsInFlight.has(key);
   const outcome = await precompileDolphinJitModule(key, data.bytes);
-  if (!firstAsk) return; // the first request's answer covers this one
-  if (outcome.module && outcome.reason !== "cache-full") {
-    broadcastDolphinJitPthreads({ type: "dolphin-jit-cache-add", hash: key, module: outcome.module });
-  } else {
-    dolphinJitCompileRequestFailures += 1;
-    const reason = outcome.reason === "key-mismatch" ? "compile" : outcome.reason === "cache-full" ? "oom" : outcome.reason;
-    broadcastDolphinJitPthreads({ type: "dolphin-jit-compile-failed", key, reason });
-  }
+  if (!outcome.module || outcome.reason) dolphinJitCompileRequestFailures += 1;
+  markDolphinJitModuleReady(data.readyPtr, data.readySlot);
 }
-function broadcastDolphinJitPthreads(message) {
-  for (const w of dolphinJitPthreadWorkers) {
-    try {
-      w.postMessage(message);
-    } catch {
-      // A pthread that cannot receive it compiles the block itself.
-    }
-  }
+
+const DOLPHIN_JIT_READY_SLOTS = 1 << 16;
+let dolphinJitReadyHeapForTest = null;
+export function setDolphinJitReadyHeapForTest(heap) {
+  dolphinJitReadyHeapForTest = heap;
 }
+let dolphinJitReadyMarks = 0;
+function markDolphinJitModuleReady(readyPtr, readySlot) {
+  if (!Number.isInteger(readyPtr) || !Number.isInteger(readySlot)) return;
+  if (readyPtr <= 0 || readySlot < 0 || readySlot >= DOLPHIN_JIT_READY_SLOTS) return;
+  const buffer = (dolphinJitReadyHeapForTest ?? moduleInstance?.HEAPU8)?.buffer;
+  if (!(buffer instanceof SharedArrayBuffer) || readyPtr + readySlot >= buffer.byteLength) return;
+  Atomics.store(new Uint8Array(buffer), readyPtr + readySlot, 1);
+  dolphinJitReadyMarks += 1;
+}
+
 let dolphinJitNewCompileCount = 0;
 let dolphinJitCompilePending = 0;
 const dolphinJitVerificationPending = new Set();
