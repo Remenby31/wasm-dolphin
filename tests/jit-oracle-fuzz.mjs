@@ -79,10 +79,11 @@ function check(name, program, state, mask) {
     return;
   }
   if (result.code === 2) { notCompiled += 1; return; }
-  if (result.code === 3) { raisedException += 1; return; }
+
   if (result.code === -3) { rejected += 1; record("engine-reject", name, mask, program, state, result); return; }
   if (result.code < 0) throw new Error(`oracle setup error ${result.code} (${name}): ${result.message}`);
   compared += 1;
+  if (result.message.startsWith("exception")) raisedException += 1;
   if (result.code === 1) {
     const kind = result.message.startsWith("memory") ? "values" : classifyDifference(result.interp, result.jit);
     record(kind === "fpscr-status" ? "fpscr-status" : "divergence", name, mask, program, state, result);
@@ -118,7 +119,8 @@ function reduce(example) {
   const diverges = (p) => {
     try {
       const res = core.run(p, state, mask);
-      return res.code === 1 && (res.message.startsWith("memory") || classifyDifference(res.interp, res.jit) === "values");
+      if (res.code !== 1 || res.message === "step limit reached") return false; // a reduction can loop forever
+      return res.message.startsWith("memory") || classifyDifference(res.interp, res.jit) === "values";
     } catch {
       return false;
     }
@@ -154,6 +156,7 @@ for (const f of list) {
 const summary = {
   seed, perInstruction, programs, length, masks: masks.map((m) => hex(baseMask | m)),
   compared, notCompiled, raisedException, rejected, divergent: list.filter((f) => f.kind === "divergence").reduce((n, f) => n + f.count, 0),
+  fpscrStatus: list.filter((f) => f.kind === "fpscr-status").reduce((n, f) => n + f.count, 0),
   seconds: (Date.now() - started) / 1000
 };
 console.log(JSON.stringify(summary));

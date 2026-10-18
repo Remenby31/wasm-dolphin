@@ -408,6 +408,9 @@ let frameSignalWaitPending = false;
 let ppcWasmJitRequested = false;
 let ppcWasmJitForce = false;
 let ppcWasmJitActive = false;
+// The core engages the JIT itself at an exact emulated field (armed once per
+// load with SetPpcWasmJitWarmup); this worker only arms it and reports.
+let ppcWasmJitArmed = false;
 let ppcWasmJitEnabledAtFrame = 0;
 let ppcWasmJitCorePaused = false;
 let ppcWasmJitTimingSuspensions = 0;
@@ -1220,6 +1223,9 @@ async function handleMessage(type, payload) {
         loadedCheckpointGeneration: loadedCheckpoint.generation,
         loadedCheckpointTicks: loadedCheckpoint.ticks,
         loadedCheckpointPpcPc: loadedCheckpoint.ppcPc,
+        // Emulated field at which the core engaged the JIT (-1: not yet).
+        jitEngagedField: api?.getPpcWasmJitEngagedFrame?.() ?? null,
+        jitArmStartField: api?.getPpcWasmJitArmStartFrame?.() ?? null,
         observedAtMs: performance.now(),
       };
     }
@@ -2183,6 +2189,7 @@ async function loadCore({
   ppcWasmJitRequested = Boolean(ppcWasmJit);
   ppcWasmJitForce = Boolean(requestedPpcWasmJitForce);
   ppcWasmJitActive = false;
+  ppcWasmJitArmed = false;
   ppcWasmJitEnabledAtFrame = 0;
   ppcWasmJitCorePaused = false;
   ppcWasmJitTimingSuspensions = 0;
@@ -2314,6 +2321,9 @@ function bindApi(module) {
       typeof module._SetCpuCore === "function"
         ? (core) => ccall("SetCpuCore", "number", ["string"], [core])
         : null,
+    setPpcWasmJitWarmup: optionalCwrap("SetPpcWasmJitWarmup", null, ["number", "number"]),
+    getPpcWasmJitEngagedFrame: optionalCwrap("GetPpcWasmJitEngagedFrame", "number", []),
+    getPpcWasmJitArmStartFrame: optionalCwrap("GetPpcWasmJitArmStartFrame", "number", []),
     setPpcWasmJitEnabled:
       typeof module._SetPpcWasmJitEnabled === "function"
         ? (enabled) =>
@@ -3690,6 +3700,21 @@ function resetPpcWasmJitTiming(invalidateBaseline = false) {
 }
 
 function maybeEnablePpcWasmJit(coreFrame = api?.getFrame?.() ?? 0) {
+  if (ppcWasmJitRequested && api?.setPpcWasmJitWarmup) {
+    // Core-side gate: same engage field on every run, cpu=dual included, and
+    // re-armed by the core from the loaded field after a state load.
+    if (!ppcWasmJitArmed) {
+      api.setPpcWasmJitWarmup(ppcWasmJitTier === "mixed" ? 2 : 1, ppcWasmJitWarmupFrames);
+      ppcWasmJitArmed = true;
+    }
+    const engaged = api.getPpcWasmJitEngagedFrame?.() ?? -1;
+    if (engaged >= 0 && !ppcWasmJitActive) {
+      ppcWasmJitEnabledAtFrame = coreFrame >>> 0;
+      postStatus(`Experimental WASM JIT engaged at emulated field ${engaged} (warmup ${ppcWasmJitWarmupFrames})`);
+    }
+    ppcWasmJitActive = engaged >= 0;
+    return;
+  }
   if (ppcWasmJitCorePaused || ppcWasmJitTimingSuspensions > 0) return;
   if (!ppcWasmJitRequested || ppcWasmJitActive || !api?.setPpcWasmJitEnabled) {
     return;

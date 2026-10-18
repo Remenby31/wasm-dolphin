@@ -70,3 +70,37 @@ test("the default warmup is short and the same on every layer", () => {
   assert.match(adapter, /ppcWasmJitWarmupFrames = 60,/);
   assert.doesNotMatch(host, /3600/);
 });
+
+test("with the core gate, the worker arms once and only reports the core's engage field", () => {
+  const calls = [];
+  let engaged = -1;
+  const statuses = [];
+  const context = vm.createContext({
+    api: {
+      setPpcWasmJitWarmup: (policy, fields) => calls.push([policy, fields]),
+      getPpcWasmJitEngagedFrame: () => engaged,
+      setPpcWasmJitEnabled: () => { throw new Error("the worker must not engage the JIT itself"); }
+    },
+    console: { log: () => {} },
+    postStatus: (s) => statuses.push(s),
+    ppcWasmJitRequested: true,
+    ppcWasmJitActive: false,
+    ppcWasmJitArmed: false,
+    ppcWasmJitCorePaused: true, // pauses and loads no longer matter: the core counts fields
+    ppcWasmJitTimingSuspensions: 1,
+    ppcWasmJitEnabledAtFrame: 0,
+    ppcWasmJitWarmupFrames: 60,
+    ppcWasmJitTier: "guarded",
+    dolphinJitCachePreWarmed: false
+  });
+  vm.runInContext(extractFunction(worker, "maybeEnablePpcWasmJit"), context);
+  for (let frame = 0; frame < 5; frame++) context.maybeEnablePpcWasmJit(frame);
+  assert.deepEqual(calls, [[1, 60]]);
+  assert.equal(context.ppcWasmJitActive, false);
+  engaged = 61;
+  context.maybeEnablePpcWasmJit(70);
+  context.maybeEnablePpcWasmJit(71);
+  assert.equal(context.ppcWasmJitActive, true);
+  assert.equal(statuses.length, 1);
+  assert.match(statuses[0], /field 61/);
+});

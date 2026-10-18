@@ -13,7 +13,7 @@ correctness is established.
 | `jittier=guarded` | Use conservative guarded compilation. This is the default tier. |
 | `jittier=mixed` | Use the broader experimental mixed tier. Treat it as a bisection setting. |
 | `forcejit=1` | Keep/force JIT use past normal safety decisions. It can bypass protective behavior and is opt-in. |
-| `jitwarmup=N` | Engage the JIT once the core has output `N` XFB frames (`0`-`60000`, default `60`). Emulated frames, not wall-clock time: the engage point does not depend on machine load or on a warm JIT cache. |
+| `jitwarmup=N` | Engage the JIT `N` emulated VI fields after boot or after a state load (`0`-`60000`, default `60`). The CPU thread decides on its own field counter (the one saved in states), so the engage field is the same on every run, `cpu=dual` included, whatever the machine load, pauses or JIT cache state. |
 | `unsafejitwarmup=1` | Bypass staged-warmup and OGL warmup protections. Diagnostic only. |
 | `regalloc=0` | Disable the default-on GPR register cache/register allocation and return to the baseline path. |
 | `smearcompile=0` | Disable default-on compile smearing and compile eagerly. |
@@ -88,10 +88,16 @@ unique-frame cadence.
 A compiled block must leave exactly the state the interpreter leaves: GPRs,
 CR, XER, LR, CTR, FPRs bit for bit (NaN payloads, signalling bits, denormals,
 Gekko's single rounding of frC), FPSCR including FPRF/FI/FR and the sticky
-exception bits, and memory. The direct tier computes zero and normal results
-in WASM; NaN, infinity, denormal results, a denormal frC, FMA-family
-instructions, the reciprocal estimates and `MSR.FE0/FE1` set all re-run the
-instruction through the interpreter helper before anything is written.
+exception bits, memory, and on an exception SRR0/SRR1/DAR/DSISR and the MSR.
+The direct tier computes zero and normal results in WASM. The FMA family
+(`fmadd`, `fmsub`, `fnmadd`, `fnmsub`, their single forms and `ps_madd*`,
+`ps_msub`, `ps_nmadd`, `ps_nmsub`) calls the interpreter's own
+`NI_madd_msub` through the `fma` import for the single rounding, then keeps
+the result inline under the same zero-or-normal rule. NaN, infinity,
+denormal results, a denormal frC, the reciprocal estimates and
+`MSR.FE0/FE1` set re-run the instruction through the interpreter helper
+before anything is written. FPRF is skipped only when the analyzer proves a
+later op of the block rewrites it and FPSCR.VE = ZE = 0.
 
 `tests/jit-oracle-fuzz.mjs` checks this in Node against the built core
 (`DolphinWeb_JitOracleRun` runs the same program from the same state through
@@ -104,7 +110,14 @@ node tests/jit-oracle-fuzz.mjs --programs 10000 --mask 0x20000  # shortprefix on
 ```
 
 Both modes run with the GPR register cache on and off; `--reduce` shrinks a
-diverging program to the instructions that matter. `npm test` runs a small
+diverging program to the instructions that matter. Programs that raise (FP
+program exceptions: one state in six sets FE0/FE1) are compared at the
+exception vector (SRR0/SRR1/MSR included), counted as `raisedException`.
+Accesses through a base no BAT maps and misaligned `lmw` are generated too;
+without MMU emulation the core does not vector them, and both sides must
+still agree. The summary
+counts value divergences (`divergent`) and FPSCR-status-only ones
+(`fpscrStatus`) separately; either makes the run fail. `npm test` runs a small
 fixed-seed slice (`tests/jit-oracle.test.mjs`). The browser-side check is the
 harness's `cpufuzz` discs, which compare interpreter and JIT runs at the same
 VI output.
