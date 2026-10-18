@@ -3,7 +3,7 @@
 // QA harness entry point. Usage: harness/run <command> [options]; see harness/README.md.
 import { execFileSync } from "node:child_process";
 import { randomBytes } from "node:crypto";
-import { existsSync, mkdirSync, mkdtempSync, readdirSync, readFileSync, rmSync, statSync, writeFileSync } from "node:fs";
+import { appendFileSync, existsSync, mkdirSync, mkdtempSync, readdirSync, readFileSync, rmSync, statSync, writeFileSync } from "node:fs";
 import os from "node:os";
 import path from "node:path";
 import { pathToFileURL } from "node:url";
@@ -16,7 +16,7 @@ import { decodePadRow, decodeRows, hex } from "./lib/markers.mjs";
 import { captureSourceOk, captureSupported, confirmationItems, expandEnv, expandMatrix, forCrossRenderer, matrixMarkdown, PRESETS, resolveQuery, runFlags, summarizeMatrix, summarizeRun } from "./lib/matrix.mjs";
 import { runChecks } from "./lib/correctness.mjs";
 import { browserInfo, isOverloaded, waitForLoad } from "./lib/env.mjs";
-import { correctnessGate, crossCommitGate, decide, findingsGate, gateMarkdown, mergeGates, perfReport, runsByCell } from "./lib/gate.mjs";
+import { correctnessGate, crossCommitGate, decide, infraCrashGate, findingsGate, gateMarkdown, mergeGates, perfReport, runsByCell } from "./lib/gate.mjs";
 import { renderChecks, renderVsBaseline } from "./lib/render-check.mjs";
 import { IDENTITY_FILE } from "./lib/server.mjs";
 import { mergeTimeline } from "./lib/timeline.mjs";
@@ -37,7 +37,9 @@ const COMMON = {
   // Only headless exists (PROGRAM.md); kept so scripts can say it, and --headless as an alias.
   display: { type: "string" },
   headless: { type: "boolean", default: false },
-  "keep-profiles": { type: "boolean", default: false }
+  "keep-profiles": { type: "boolean", default: false },
+  // Extra candidate cores to serve under /build/core-candidates/<sha>/ (?coreid=).
+  "core-candidate": { type: "string", multiple: true, default: [] }
 };
 
 // Never a visible window unless asked: headless by default for every
@@ -108,7 +110,7 @@ function configFromArg(arg) {
 // `tree`: a checkout root, or { root, patches } (patched in memory).
 async function withServer(values, fn, tree = REPO_ROOT) {
   const { root, patches = [] } = typeof tree === "string" ? { root: tree } : tree;
-  const server = await ensureServer({ port: Number(values.port), root, patches });
+  const server = await ensureServer({ port: Number(values.port), root, patches, coreCandidates: values["core-candidate"] ?? [] });
   try {
     return await fn(server);
   } finally {
@@ -127,8 +129,30 @@ async function measureOne(server, values, { iso, query, label, warmup, secs, sho
     log: (m) => console.log(`[harness] ${label}: ${m}`)
   });
   const routes = statePath ? { "**/__harness_state.sav": statePath } : {};
-  const session = await openSession({ base: server.base, query, iso, display: displayOf(values), keepProfile: values["keep-profiles"], routes });
+  const session = await openSession({ base: server.base, server, query, iso, display: displayOf(values), keepProfile: values["keep-profiles"], routes });
   try {
+    return await measureInSession(session, server, { iso, label, warmup, secs, shotEvery, dir, steps, game, spec, statePath, query, loadGate });
+  } catch (e) {
+    // A renderer crash (Target crashed) breaks every later page call: it is
+    // reported as a crash record, never as a harness error.
+    if (!session.rendererCrashed()) throw e;
+    const record = {
+      label, url: session.url, iso: path.resolve(iso), served: server.identity, core: session.core, loadGate,
+      machineBefore: session.machineBefore, machineAfter: machineSnapshot(),
+      summary: {}, crashed: true, rendererCrash: true, errors: session.watch.fatal(), overloaded: false,
+      audioRequired: game.audio === true, capture: { error: "renderer crashed" }, events: session.watch.events.slice(0, 50),
+      harnessError: e.message
+    };
+    writeJson(path.join(dir, `${label}.json`), record);
+    return record;
+  } finally {
+    if (session.rendererCrashed()) session.crashEvidence = session.keepCrashEvidence(path.join(dir, `${label}-crash`));
+    await session.close();
+  }
+}
+
+async function measureInSession(session, server, { iso, label, warmup, secs, shotEvery, dir, steps, game, spec, statePath, query, loadGate }) {
+  {
     // Games that boot deterministically (no scripted inputs, no savestate)
     // are captured at VI output N from boot, before anything else runs.
     const bootCapture = !statePath && !steps ? await renderCapture(session, { game, spec, query, statePath, dir, label }) : null;
@@ -158,6 +182,7 @@ async function measureOne(server, values, { iso, query, label, warmup, secs, sho
       url: session.url,
       iso: path.resolve(iso),
       served: server.identity,
+      core: session.core,
       steps,
       warmupSec: warmup,
       sampleSec: secs,
@@ -177,6 +202,7 @@ async function measureOne(server, values, { iso, query, label, warmup, secs, sho
       ticksPerSecond: progress?.coreTicksPerSecond ?? null,
       windowEnd: chunks.at(-1)?.now ?? null,
       crashed: fatal.length > 0,
+      rendererCrash: session.rendererCrashed(),
       errors: fatal,
       overloaded: !loadGate.ok || isOverloaded(cpu, Number(spec.maxLoad)),
       audioRequired: game.audio === true,
@@ -190,8 +216,6 @@ async function measureOne(server, values, { iso, query, label, warmup, secs, sho
     };
     writeJson(path.join(dir, `${label}.json`), record);
     return record;
-  } finally {
-    await session.close();
   }
 }
 
@@ -225,22 +249,30 @@ function brief(r) {
 // Records keep only what the summary and the gate need; each run's file
 // has the rest.
 const slimRecord = (item, r) => ({
-  game: item.game.id, config: item.config.id, run: item.run, label: r.label, url: r.url, served: r.served,
+  game: item.game.id, config: item.config.id, run: item.run, label: r.label, url: r.url, served: r.served, core: r.core ?? null,
   summary: r.summary, crashed: r.crashed, errors: r.errors, overloaded: r.overloaded, capture: r.capture,
-  audioRequired: item.game.audio === true
+  audioRequired: item.game.audio === true,
+  rendererCrash: r.rendererCrash ?? false, infraCrash: r.infraCrash ?? null, rendererCrashRepeated: r.rendererCrashRepeated ?? false
 });
 
 // `tree`: { root, patches, discs } — discs maps a game's iso path to the one
 // this side uses (the selftest's mutant discs).
-export async function runPlan(plan, { values, spec, dir, specDir, tree = { root: REPO_ROOT }, log = console.log }) {
+// A Chrome renderer crash in a cell is run again once, on the same side:
+// - not again: "infra-crash" (rare, outside the emulator: seen once under
+//   repeated launches, never reproduced). Kept in the report and in the
+//   cumulative counter harness/results/infra-crashes.jsonl, not blocking.
+// - again: the cell crashed; the crash check fails (and blocks unless the
+//   baseline crashed the same way twice too).
+// The evidence (Chrome log, crash dumps) is kept next to each crashed run.
+export async function runPlan(plan, { values, spec, dir, specDir, tree = { root: REPO_ROOT }, log = console.log, measure = null, infraLog = INFRA_LOG }) {
   const records = [];
-  for (const item of plan) {
-    const server = await ensureServer({ port: Number(values.port), root: tree.root, patches: tree.patches ?? [] });
+  const run = measure ?? (async (item, label) => {
+    const server = await ensureServer({ port: Number(values.port), root: tree.root, patches: tree.patches ?? [], coreCandidates: values["core-candidate"] ?? [] });
     try {
-      const r = await measureOne(server, values, {
+      return await measureOne(server, values, {
         iso: path.resolve(REPO_ROOT, tree.discs?.[item.game.iso] ?? item.game.iso),
         query: item.query,
-        label: item.label,
+        label,
         warmup: Number(spec.warmupSec ?? 15),
         secs: Number(spec.sampleSec ?? 20),
         shotEvery: Number(spec.shotEverySec ?? 0),
@@ -250,13 +282,34 @@ export async function runPlan(plan, { values, spec, dir, specDir, tree = { root:
         spec,
         dir
       });
-      log(`[harness] ${brief(r)}`);
-      records.push(slimRecord(item, r));
     } finally {
       await server.stop();
     }
+  });
+  for (const item of plan) {
+    let r = await run(item, item.label);
+    if (r.rendererCrash) {
+      log(`[harness] ${item.label}: Chrome renderer crashed; running the cell once more`);
+      const first = { label: r.label, evidence: path.join(dir, `${item.label}-crash`), errors: r.errors?.slice(0, 3) ?? [] };
+      const retry = await run(item, `${item.label}-retry`);
+      if (retry.rendererCrash) {
+        r = { ...retry, rendererCrashRepeated: true, firstCrash: first };
+      } else {
+        r = { ...retry, infraCrash: first };
+        noteInfraCrash(infraLog, dir, { label: item.label, game: item.game.id, config: item.config.id, run: item.run, ...first });
+      }
+    }
+    log(`[harness] ${brief(r)}`);
+    records.push(slimRecord(item, r));
   }
   return records;
+}
+
+// Cumulative infra-crash counter, kept across runs in harness/results.
+const INFRA_LOG = path.join(REPO_ROOT, "harness", "results", "infra-crashes.jsonl");
+function noteInfraCrash(file, dir, entry) {
+  mkdirSync(path.dirname(file), { recursive: true });
+  appendFileSync(file, JSON.stringify({ at: new Date().toISOString(), results: dir, ...entry }) + "\n");
 }
 
 function finishRecords(records, spec) {
@@ -275,7 +328,7 @@ function envLines(records, dir) {
   const loads = records.map((r) => r.summary?.loadAvg).filter(Number.isFinite);
   return [
     `Served snapshot ${first.served?.snapshot?.slice(0, 12) ?? "?"} (commit ${first.served?.commit?.slice(0, 10) ?? "?"}${first.served?.dirty ? ", local changes" : ""}) · Chrome ${e.chrome ?? "?"} · GPU ${e.gpu?.vendor ?? "?"} ${e.gpu?.architecture ?? ""}`,
-    `Machine ${first.machineBefore.cpuModel}, ${first.machineBefore.cpus} CPUs, ${first.machineBefore.platform}; load during runs ${loads.length ? `${Math.min(...loads)}-${Math.max(...loads)}` : "?"} (limit ${first.loadGate?.limit ?? "?"})`
+    `Machine ${first.machineBefore?.cpuModel ?? "?"}, ${first.machineBefore?.cpus ?? "?"} CPUs, ${first.machineBefore?.platform ?? "?"}; load during runs ${loads.length ? `${Math.min(...loads)}-${Math.max(...loads)}` : "?"} (limit ${first.loadGate?.limit ?? "?"})`
   ];
 }
 
@@ -324,7 +377,7 @@ async function cmdMeasure(argv) {
   const file = path.join(tmp, "spec.json");
   writeJson(file, spec);
   try {
-    return await cmdMatrix([file, "--port", values.port, ...(values.out ? ["--out", values.out] : []), ...(values.display ? ["--display", values.display] : [])]);
+    return await cmdMatrix([file, "--port", values.port, ...(values.out ? ["--out", values.out] : []), ...(values.display ? ["--display", values.display] : []), ...(values["core-candidate"] ?? []).flatMap((c) => ["--core-candidate", c])]);
   } finally {
     rmSync(tmp, { recursive: true, force: true });
   }
@@ -345,7 +398,7 @@ async function captureScene(server, values, { iso, query, index, state, steps, l
   const supported = captureSupported(query);
   if (!supported.ok) throw new Error(`${label}: ${supported.why}`);
   const routes = state ? { "**/__harness_state.sav": path.resolve(state) } : {};
-  const session = await openSession({ base: server.base, query, iso, display: displayOf(values), keepProfile: values["keep-profiles"], routes });
+  const session = await openSession({ base: server.base, server, query, iso, display: displayOf(values), keepProfile: values["keep-profiles"], routes });
   try {
     if (steps) await runSteps(session.page, steps);
     if (state) {
@@ -414,7 +467,7 @@ async function cmdDiff(argv) {
 // ---------------------------------------------------------------- fuzz
 // Run a disc to VI output `index` and capture that exact output.
 async function observe(server, values, iso, query, dir, label, index) {
-  const session = await openSession({ base: server.base, query, iso, display: displayOf(values), keepProfile: values["keep-profiles"] });
+  const session = await openSession({ base: server.base, server, query, iso, display: displayOf(values), keepProfile: values["keep-profiles"] });
   try {
     const capture = await captureInSession(session, { index, timeoutMs: Number(values.timeout ?? 90) * 1000 });
     const info = await readFrameInfo(session.page).catch(() => null);
@@ -482,7 +535,7 @@ const EXPECTED_BITS = (s) => {
 const PADS_QUERY = "core=upstream&video=software&cpu=dual&speed=1&wasmjit=0&metrics=1";
 
 async function runPads(server, values, { iso, query, dir }) {
-  const session = await openSession({ base: server.base, query, iso, display: displayOf(values), gamepads: { count: 4 }, keepProfile: values["keep-profiles"] });
+  const session = await openSession({ base: server.base, server, query, iso, display: displayOf(values), gamepads: { count: 4 }, keepProfile: values["keep-profiles"] });
   let report;
   try {
     // Inputs reach the game within a few frames; 30 VI outputs later the
@@ -566,7 +619,7 @@ async function cmdSavestate(argv) {
   });
   if (!values.iso || !values.to) throw new Error("usage: harness/run savestate --iso disc.iso --to out.sav [--config rec] [--steps steps.json] [--wait 5]");
   return withServer(values, async (server) => {
-    const session = await openSession({ base: server.base, query: resolveQuery(configFromArg(values.config)), iso: values.iso, display: displayOf(values), keepProfile: values["keep-profiles"] });
+    const session = await openSession({ base: server.base, server, query: resolveQuery(configFromArg(values.config)), iso: values.iso, display: displayOf(values), keepProfile: values["keep-profiles"] });
     try {
       if (values.steps) await runSteps(session.page, loadSteps(values.steps));
       await waitSeconds(session, Number(values.wait));
@@ -637,7 +690,7 @@ function gateFromDirs(baseDir, candDir, { accept = [], known = [] } = {}) {
   const read = (d) => JSON.parse(readFileSync(path.join(d, "summary.json"), "utf8"));
   const optional = (d, f) => (existsSync(path.join(d, f)) ? JSON.parse(readFileSync(path.join(d, f), "utf8")) : null);
   const base = read(baseDir), cand = read(candDir);
-  const gates = [correctnessGate(base.cells, cand.cells), crossCommitGate(renderVsBaseline(base.results, cand.results, { accept, known: [...knownFailures(), ...known] }))];
+  const gates = [correctnessGate(base.cells, cand.cells), infraCrashGate(base.results, cand.results), crossCommitGate(renderVsBaseline(base.results, cand.results, { accept, known: [...knownFailures(), ...known] }))];
   for (const [name, file, pick] of [["fuzz", "fuzz.json", (r) => r.results.flatMap((x) => x.findings.map((f) => ({ ...f, iso: x.iso })))], ["pads", "pads.json", (r) => padFindings(r)]]) {
     const b = optional(baseDir, file), c = optional(candDir, file);
     if (b || c) gates.push(findingsGate(name, b ? pick(b) : [], c ? pick(c) : null));
