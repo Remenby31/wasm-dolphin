@@ -1046,6 +1046,7 @@ async function handleMessage(type, payload) {
         cachedInterpreterDisableMask: payload.cachedInterpreterDisableMask,
         wgpuScissoredClearRect: payload.wgpuScissoredClearRect,
         noJitCache: payload.noJitCache,
+        aotCompiler: payload.aotCompiler,
         reportedCoreSelection: payload.coreSelection,
         wgpuReplayDiagnostics: payload.wgpuReplayDiagnostics,
         wgpuDeepReplayDiagnostics: payload.wgpuDeepReplayDiagnostics,
@@ -1587,6 +1588,7 @@ async function loadCore({
   cachedInterpreterDisableMask = 0,
   wgpuScissoredClearRect = true,
   noJitCache = false,
+  aotCompiler = true,
   reportedCoreSelection = null,
   wgpuReplayDiagnostics = false,
   wgpuDeepReplayDiagnostics: requestedWgpuDeepReplayDiagnostics = false,
@@ -1992,6 +1994,7 @@ async function loadCore({
   // killing the menu-nav interpret stall measured in §28bz/§28cf.
   const _t_idb = performance.now();
   dolphinJitCachePersistenceEnabled = !noJitCache;
+  dolphinAotCompilerEnabled = aotCompiler !== false;
   dolphinJitBootLoadComplete = false;
   dolphinJitBootLoadedEntries = 0;
   if (!noJitCache) {
@@ -5915,7 +5918,11 @@ function getDolphinAotCompiler() {
   }
   return dolphinAotCompiler;
 }
+// ?aotcompiler=0: compile in place as before this worker existed (A/B and
+// escape hatch); compile requests are then compiled in place too.
+let dolphinAotCompilerEnabled = true;
 function compileDolphinJitModuleOffThread(bytes, deliver) {
+  if (!dolphinAotCompilerEnabled) return WebAssembly.compile(bytes);
   return getDolphinAotCompiler().compile(bytes, { deliver }).then((result) => result.module);
 }
 // Contract with the JIT owner (CPU pthread side):
@@ -5932,14 +5939,17 @@ const dolphinJitCompileRequestsInFlight = new Set();
 async function handleDolphinJitCompileRequest(event) {
   const data = event.data;
   if (data?.type === "dolphin-jit-warm-state") {
-    if (data.state instanceof Uint8Array) getDolphinAotCompiler().setWarmState(data);
+    if (data.state instanceof Uint8Array && dolphinAotCompilerEnabled) getDolphinAotCompiler().setWarmState(data);
     return;
   }
   if (!data || data.type !== "dolphin-jit-compile-request") return;
-  const key = data.key ?? data.hash;
+  const key = String(data.key ?? data.hash ?? "");
   if (!key || !data.bytes) return;
-  const bytes = data.bytes instanceof ArrayBuffer ? new Uint8Array(data.bytes) : data.bytes;
+  let bytes = data.bytes instanceof ArrayBuffer ? new Uint8Array(data.bytes) : data.bytes;
   if (!(bytes instanceof Uint8Array)) return;
+  // A view of the wasm heap: copy the module out (digest and worker transfer
+  // need its own buffer, and the heap must never be handed over).
+  if (bytes.buffer instanceof SharedArrayBuffer) bytes = bytes.slice();
   dolphinJitCompileRequestCount += 1;
   const cached = dolphinJitCacheMap.get(key);
   if (cached) {
@@ -5948,16 +5958,29 @@ async function handleDolphinJitCompileRequest(event) {
   }
   if (dolphinJitCompileRequestsInFlight.has(key)) return;
   dolphinJitCompileRequestsInFlight.add(key);
+  let mod = null;
   try {
-    const mod = await getDolphinAotCompiler().compile(bytes).then((result) => result.module);
+    // A block key names the SHA-256 of its bytes: one that does not match is
+    // never cached under that name (as for every other cache entry).
+    const blockKey = key.startsWith(`${JIT_CACHE_ENTRY_KEY_SCHEMA}:`);
+    if (blockKey && !(await verifyCanonicalWasmBlockKey(key, bytes))) {
+      dolphinJitCompileRequestFailures += 1;
+      postStatus("jit-cache: rejected compile request with mismatched block identity");
+      broadcastDolphinJitPthreads({ type: "dolphin-jit-compile-failed", key, reason: "compile" });
+      return;
+    }
+    try {
+      mod = dolphinAotCompilerEnabled
+        ? await getDolphinAotCompiler().compile(bytes).then((result) => result.module)
+        : await WebAssembly.compile(bytes);
+    } catch (err) {
+      dolphinJitCompileRequestFailures += 1;
+      broadcastDolphinJitPthreads({ type: "dolphin-jit-compile-failed", key, reason: compileFailureReason(err) });
+      return;
+    }
     if (dolphinJitCacheMap.size < DOLPHIN_JIT_CACHE_MAX) dolphinJitCacheMap.set(key, mod);
     broadcastDolphinJitPthreads({ type: "dolphin-jit-cache-add", hash: key, module: mod });
-    if (dolphinJitCachePersistenceEnabled && await verifyCanonicalWasmBlockKey(String(key), bytes)) {
-      void writeDolphinJitEntryToIdb(key, bytes);
-    }
-  } catch (err) {
-    dolphinJitCompileRequestFailures += 1;
-    broadcastDolphinJitPthreads({ type: "dolphin-jit-compile-failed", key, reason: compileFailureReason(err) });
+    if (blockKey && dolphinJitCachePersistenceEnabled) void writeDolphinJitEntryToIdb(key, bytes);
   } finally {
     dolphinJitCompileRequestsInFlight.delete(key);
   }

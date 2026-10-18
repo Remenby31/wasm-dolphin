@@ -153,11 +153,31 @@ test("a deferred compile request is answered to every pthread, a rejected one to
     assert.ok(add.module instanceof WebAssembly.Module);
     assert.equal(new WebAssembly.Instance(add.module).exports.f(7), 7);
   }
+  // the same block asked twice while in flight: compiled and sent once
+  const cpuAdds = () => cpu.messages.filter((m) => m.type === "dolphin-jit-cache-add").length;
+  const before = cpuAdds();
+  const plusOne = Uint8Array.from(Buffer.from("0061736d0100000001060160017f017f03020100070501016600000a09010700200041016a0b", "hex"));
+  const plusKey = await canonicalWasmBlockKey(plusOne);
+  // as the core sends it: a view of its shared heap
+  const heap = new Uint8Array(new SharedArrayBuffer(256));
+  heap.set(plusOne, 64);
+  const view = heap.subarray(64, 64 + plusOne.length);
+  await Promise.all([
+    request({ currentTarget: cpu, data: { type: "dolphin-jit-compile-request", key: plusKey, bytes: view, kind: "block" } }),
+    request({ currentTarget: cpu, data: { type: "dolphin-jit-compile-request", key: plusKey, bytes: view, kind: "block" } })
+  ]);
+  assert.equal(cpuAdds() - before, 1);
+  // a block key that does not name its bytes is refused, never cached under that name
+  const forged = `wasm-block-sha256-v1:${"0".repeat(64)}`;
+  await request({ currentTarget: cpu, data: { type: "dolphin-jit-compile-request", key: forged, bytes: plusOne, kind: "block" } });
+  assert.equal(cpu.messages.some((m) => m.type === "dolphin-jit-cache-add" && m.hash === forged), false);
+  assert.deepEqual(cpu.messages.find((m) => m.type === "dolphin-jit-compile-failed" && m.key === forged), { type: "dolphin-jit-compile-failed", key: forged, reason: "compile" });
+
   const bad = new Uint8Array([0, 0x61, 0x73, 0x6d, 1, 0, 0, 0, 0x0a, 1]);
   await request({ currentTarget: cpu, data: { type: "dolphin-jit-compile-request", key: "k-bad", bytes: bad, kind: "block" } });
   for (const worker of [cpu, other]) {
     assert.deepEqual(
-      worker.messages.find((m) => m.type === "dolphin-jit-compile-failed"),
+      worker.messages.find((m) => m.type === "dolphin-jit-compile-failed" && m.key === "k-bad"),
       { type: "dolphin-jit-compile-failed", key: "k-bad", reason: "compile" }
     );
   }

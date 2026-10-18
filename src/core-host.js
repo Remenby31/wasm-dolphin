@@ -113,6 +113,9 @@ export class EmulatorHost {
     );
     this.noJitCache =
       new URLSearchParams(window.location.search).get("nojitcache") === "1";
+    // ?aotcompiler=0: compile JIT modules in place, without the compiler worker.
+    this.aotCompiler =
+      new URLSearchParams(window.location.search).get("aotcompiler") !== "0";
     this.collectMetrics = requestedCollectMetrics();
     this.legacyOneWayAck = requestedLegacyOneWayAck(window.location.search);
     this.wgpuReplayDiagnostics = requestedWgpuReplayDiagnostics(window.location.search);
@@ -393,6 +396,7 @@ export class EmulatorHost {
             cachedInterpreterDisableMask: this.cachedInterpreterDisableMask,
             wgpuScissoredClearRect: this.wgpuScissoredClearRect,
             noJitCache: this.noJitCache,
+            aotCompiler: this.aotCompiler,
             collectMetrics: this.collectMetrics,
             legacyOneWayAck: this.legacyOneWayAck,
             wgpuReplayDiagnostics: this.wgpuReplayDiagnostics,
