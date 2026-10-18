@@ -102,6 +102,7 @@ export class EmulatorHost {
     this.xfbFastPaths = requestedXfbFastPaths(window.location.search);
     this.correctTimeDrift = requestedCorrectTimeDrift();
     this.coreLog = requestedCoreLog();
+    this.memcardSlotB = new URLSearchParams(window.location.search).get("memcardb") === "1";
     this.efbDiag = requestedEfbDiag();
     this.jitVerbose = new URLSearchParams(window.location.search).get("jitverbose") === "1";
     this.frameCap = Number.parseInt(
@@ -386,6 +387,7 @@ export class EmulatorHost {
             xfbFastPaths: this.xfbFastPaths,
             correctTimeDrift: this.correctTimeDrift,
             coreLog: this.coreLog,
+            memcardSlotB: this.memcardSlotB,
             efbDiag: this.efbDiag,
             jitVerbose: this.jitVerbose,
             frameCap: this.frameCap,
@@ -642,8 +644,9 @@ export class EmulatorHost {
 
   saveState() {
     if (this.mode === "dolphin") {
-      this.adapter.saveState(0);
-      this.onStatus("Save slot 0 requested");
+      // Dolphin numbers its slots from 1 (<game id>.s01).
+      this.adapter.saveState(1);
+      this.onStatus("Saving slot 1");
       return;
     }
 
@@ -660,8 +663,8 @@ export class EmulatorHost {
 
   loadState() {
     if (this.mode === "dolphin") {
-      this.adapter.loadState(0);
-      this.onStatus("Load slot 0 requested");
+      this.adapter.loadState(1);
+      this.onStatus("Loading slot 1");
       return;
     }
 

@@ -137,6 +137,23 @@ import {
   createWgpuVisualCadenceTelemetry,
   hashWgpuVisualSample
 } from "./wgpu-visual-cadence.js";
+import { createCoreLifecycle } from "./core-lifecycle.js";
+import { BOOT_FILE_HEAD_BYTES, bootFileKind, checkExecutable } from "./boot-file.js";
+import {
+  USER_DATA_ROOT,
+  createRecordStore,
+  createUserDataMirror,
+  openOpfsPrimitives
+} from "./user-data-store.js";
+import {
+  buildRawCard,
+  checkSaveState,
+  gciFileName,
+  gciFolderPath,
+  parseGci,
+  parseRawCard,
+  sniffMemcardFile
+} from "./memcard.js";
 
 // Day-25: mark this thread. The discio worker owns the WebGPU device
 // (createWebGpuPresenter runs here). WebGPU objects aren't shareable
@@ -785,7 +802,9 @@ self.addEventListener("message", async (event) => {
   }
 
   try {
-    const result = await handleMessage(type, payload);
+    const result = SAVES_REQUEST_TYPES.has(type)
+      ? await handleSavesMessage(type, payload)
+      : await handleMessage(type, payload);
     postResult(data, result);
   } catch (error) {
     const errorName = error?.name || error?.constructor?.name || "Error";
@@ -929,6 +948,7 @@ async function handleMessage(type, payload) {
         xfbFastPaths: payload.xfbFastPaths,
         correctTimeDrift: payload.correctTimeDrift,
         coreLog: payload.coreLog,
+        memcardSlotB: payload.memcardSlotB,
         efbDiag: payload.efbDiag,
         jitVerbose: payload.jitVerbose,
         frameCap: payload.frameCap,
@@ -972,7 +992,8 @@ async function handleMessage(type, payload) {
         wgpuSemanticRuntime: payload.wgpuSemanticRuntime,
         oglSabEnabled: oglPixelSabView !== null
       });
-      return metadataPayload();
+      // Before any boot: Dolphin opens the GCI folder when the card goes in.
+      return { ...metadataPayload(), userData: await startUserDataPersistence() };
     case "mountFile":
       return mountFile(payload.file);
     case "setInputMask":
@@ -1001,7 +1022,19 @@ async function handleMessage(type, payload) {
         api?.runFrame();
       }
       return framePayload();
-    case "reset":
+    case "start":
+    case "resume":
+      return { ...(await coreLifecycle[type]()), ...framePayload() };
+    case "pause": {
+      const result = await coreLifecycle.pause();
+      return { ...result, persisted: await flushUserData(), ...framePayload() };
+    }
+    case "stop":
+      return { ...(await coreLifecycle.stop()), ...framePayload() };
+    case "reset": {
+      // The console's reset button; the rest re-arms the renderer state the
+      // way it always did after a reset.
+      const resetResult = await coreLifecycle.reset();
       forceWgpuMappedDrainLifecycle(WGPU_MAPPED_DRAIN_FORCE_REASONS.RESET);
       wgpuSparseUbo?.reset("core-reset");
       if (wgpuUboComputeProjectionActive) {
@@ -1023,7 +1056,8 @@ async function handleMessage(type, payload) {
         verifyWgpuProducerProfileActivation("core reset");
       }
       api?.setInputMask(inputMask);
-      return framePayload();
+      return { ...resetResult, ...framePayload() };
+    }
     case "bootProbe":
       return { bootProbe: bootProbePayload(metadataPayload()) };
     case "saveState":
@@ -1451,6 +1485,7 @@ async function loadCore({
   xfbFastPaths = 0,
   correctTimeDrift = false,
   coreLog = false,
+  memcardSlotB = false,
   efbDiag = false,
   jitVerbose = false,
   frameCap = 0,
@@ -1913,6 +1948,7 @@ async function loadCore({
     // false, so the shipping page load is unchanged.
     dolphinCorrectTimeDrift: Boolean(correctTimeDrift),
     dolphinCoreLog: Boolean(coreLog),
+    dolphinMemcardSlotB: Boolean(memcardSlotB),
     // Ranks the instructions that block JIT compilation (?jitverbose=1).
     dolphinWebVerbosePpcJit: Boolean(jitVerbose),
     dolphinFrameCap: (frameCapTarget = Number(frameCap) || 0),
@@ -2409,8 +2445,10 @@ function bindApi(module) {
     frameWidth: cwrap("FrameWidth", "number", []),
     frameHeight: cwrap("FrameHeight", "number", []),
     frameBuffer: cwrap("FrameBuffer", "number", []),
-    saveState: cwrap("SaveState", "number", ["number"]),
-    loadState: cwrap("LoadState", "number", ["number"]),
+    // The bridge's SaveState/LoadState are placeholders that save nothing;
+    // slots are Dolphin's own files, <game id>.sNN in StateSaves.
+    saveState: (slot) => saveStateSlot(slot),
+    loadState: (slot) => loadStateSlot(slot),
     loadStateFile: optionalCwrap("LoadStateFile", "number", ["string"]),
     saveStateFile: optionalCwrap("SaveStateFile", "number", ["string"]),
     getFrame: cwrap("GetFrame", "number", []),
@@ -2446,6 +2484,279 @@ function bindApi(module) {
   };
 }
 
+// ---------------------------------------------------------------------------
+// Saves: /dolphin-user kept in OPFS, memory cards and save states in and out.
+// The pure parts live in user-data-store.js and memcard.js; this section
+// only binds them to the core's FS and exports.
+
+const USER_DATA_SYNC_INTERVAL_MS = 1000;
+let userDataMirror = null;
+const userDataStatus = { persistent: false, reason: "not started", restored: 0, restoredBytes: 0 };
+// What is running, as Dolphin names it: the disc's game ID, or "00000000"
+// for a bare executable (SConfig::SetRunningGameMetadata).
+let bootedGame = { kind: "", gameId: "", region: "" };
+const SAVES_REQUEST_TYPES = new Set([
+  "flushUserData",
+  "listUserData",
+  "exportMemcard",
+  "importMemcard",
+  "exportSaveState",
+  "importSaveState"
+]);
+
+const coreLifecycle = createCoreLifecycle({
+  api: () => api,
+  isBooted: () => coreBoot.accepted,
+  // Same JIT bookkeeping as validationSetCorePaused: wall-clock pacing must
+  // not count the time spent paused.
+  beforeTransition: () => {
+    ppcWasmJitTimingSuspensions += 1;
+    resetPpcWasmJitTiming();
+  },
+  afterTransition: (paused) => {
+    ppcWasmJitCorePaused = paused;
+    resetPpcWasmJitTiming();
+    ppcWasmJitTimingSuspensions -= 1;
+  },
+  beforeStop: () => flushUserData(),
+  afterStop: async () => {
+    coreBoot = { ...coreBoot, accepted: false };
+    // Shutting the memory card down flushes its GCI files; keep them.
+    await flushUserData();
+  }
+});
+
+async function startUserDataPersistence() {
+  if (userDataMirror || !moduleInstance?.FS) return { ...userDataStatus };
+  try {
+    const mirror = createUserDataMirror({
+      fs: moduleInstance.FS,
+      store: createRecordStore(await openOpfsPrimitives()),
+      log: (message) => console.warn(message)
+    });
+    const { restored, bytes } = await mirror.restore();
+    userDataMirror = mirror;
+    Object.assign(userDataStatus, { persistent: true, reason: "", restored, restoredBytes: bytes });
+    setInterval(() => userDataMirror.sync().catch(() => {}), USER_DATA_SYNC_INTERVAL_MS);
+    console.log(`[user-data] restored ${restored} file(s), ${bytes} bytes from OPFS`);
+  } catch (error) {
+    Object.assign(userDataStatus, { persistent: false, reason: String(error?.message || error) });
+    console.warn(`[user-data] saves will not survive a reload: ${userDataStatus.reason}`);
+  }
+  return { ...userDataStatus };
+}
+
+async function flushUserData() {
+  if (!userDataMirror) return { persistent: false, reason: userDataStatus.reason, written: 0 };
+  const written = await userDataMirror.flush();
+  return { persistent: true, written, stats: { ...userDataMirror.stats } };
+}
+
+// The game saves belong to: the booted one, or the one the caller names
+// (importing a save before booting, so the card holds it at insertion).
+function saveIdentity(payload = {}) {
+  if (coreBoot.accepted && bootedGame.gameId) return bootedGame;
+  if (payload.gameId) return { kind: "named", gameId: String(payload.gameId), region: String(payload.region || "") };
+  throw new Error("No game is booted; pass gameId and region to address its saves");
+}
+
+function cardFolder(identity, slot = "A") {
+  return gciFolderPath(USER_DATA_ROOT, identity.region, slot);
+}
+
+function listCardSaves(folder) {
+  const fs = moduleInstance.FS;
+  let names = [];
+  try {
+    names = fs.readdir(folder).filter((name) => name.toLowerCase().endsWith(".gci"));
+  } catch {
+    return [];
+  }
+  return names.sort().map((fileName) => {
+    const bytes = fs.readFile(`${folder}/${fileName}`);
+    try {
+      const { gameCode, makerCode, fileName: saveName, blockCount } = parseGci(bytes);
+      return { fileName, gameCode, makerCode, saveName, blockCount, size: bytes.byteLength };
+    } catch (error) {
+      return { fileName, error: String(error.message || error), size: bytes.byteLength };
+    }
+  });
+}
+
+function stateSlotPath(identity, slot) {
+  const number = Number(slot);
+  if (!Number.isInteger(number) || number < 1 || number > 99) {
+    throw new Error(`Save state slot must be 1-99, got ${slot}`);
+  }
+  return `${USER_DATA_ROOT}/StateSaves/${identity.gameId}.s${String(number).padStart(2, "0")}`;
+}
+
+function mkdirTreeFs(dir) {
+  let current = "";
+  for (const part of dir.split("/").filter(Boolean)) {
+    current += `/${part}`;
+    try {
+      moduleInstance.FS.mkdir(current);
+    } catch {
+      // Already there.
+    }
+  }
+}
+
+// Slot saves: queued on the CPU thread like SaveStateFile; the mirror copies
+// the file to OPFS once it has landed.
+function saveStateSlot(slot) {
+  if (!api?.saveStateFile) throw new Error("This core build cannot write save states");
+  const path = stateSlotPath(saveIdentity(), slot);
+  mkdirTreeFs(path.slice(0, path.lastIndexOf("/")));
+  return api.saveStateFile(path);
+}
+
+function loadStateSlot(slot) {
+  if (!api?.loadStateFile) throw new Error("This core build cannot load save states");
+  const path = stateSlotPath(saveIdentity(), slot);
+  if (!moduleInstance.FS.analyzePath(path).exists) throw new Error(`Save state slot ${slot} is empty`);
+  return api.loadStateFile(path);
+}
+
+// Dolphin writes the state to a temporary name and renames it, so the file
+// appears whole. SaveToFileSync runs on the CPU thread: wait for it.
+async function writeSaveState(path) {
+  if (!api?.saveStateFile) throw new Error("This core build cannot write save states");
+  if (!coreBoot.accepted) throw new Error("No game is booted");
+  const fs = moduleInstance.FS;
+  mkdirTreeFs(path.slice(0, path.lastIndexOf("/")) || "/");
+  try {
+    fs.unlink(path);
+  } catch {
+    // Nothing to replace.
+  }
+  if (!api.saveStateFile(path)) {
+    throw new Error(`SaveStateFile refused (core ${api.getCoreStateName?.() || "unknown"})`);
+  }
+  for (let i = 0; i < 150; i += 1) {
+    await new Promise((resolve) => setTimeout(resolve, 100));
+    try {
+      if (fs.stat(path).size > 0) return fs.readFile(path);
+    } catch {
+      // Not written yet.
+    }
+  }
+  throw new Error("The save state was not written within 15 s");
+}
+
+function transferable(bytes) {
+  const buffer = bytes.buffer.slice(bytes.byteOffset, bytes.byteOffset + bytes.byteLength);
+  return { buffer, transfer: [buffer] };
+}
+
+async function handleSavesMessage(type, payload) {
+  switch (type) {
+    case "flushUserData":
+      return flushUserData();
+    case "listUserData": {
+      const identity = coreBoot.accepted ? bootedGame : null;
+      const states = [];
+      try {
+        for (const name of moduleInstance.FS.readdir(`${USER_DATA_ROOT}/StateSaves`)) {
+          if (/\.s\d\d$/.test(name)) states.push(name);
+        }
+      } catch {
+        // No state yet.
+      }
+      return {
+        userData: { ...userDataStatus, stats: userDataMirror ? { ...userDataMirror.stats } : null },
+        game: identity,
+        cards: identity
+          ? { A: listCardSaves(cardFolder(identity, "A")), B: listCardSaves(cardFolder(identity, "B")) }
+          : null,
+        states: states.sort()
+      };
+    }
+    case "exportMemcard": {
+      const identity = saveIdentity(payload);
+      const folder = cardFolder(identity, payload.slot || "A");
+      if (payload.format === "gci") {
+        const name = String(payload.fileName || "");
+        if (!name || name.includes("/")) throw new Error("exportMemcard gci: fileName is required");
+        if (!moduleInstance.FS.analyzePath(`${folder}/${name}`).exists) {
+          throw new Error(`${name} is not on memory card ${payload.slot || "A"}`);
+        }
+        const bytes = moduleInstance.FS.readFile(`${folder}/${name}`);
+        parseGci(bytes);
+        const { buffer, transfer } = transferable(bytes);
+        return { format: "gci", fileName: name, bytes: buffer, transfer };
+      }
+      if (payload.format !== "raw") throw new Error(`exportMemcard: format must be gci or raw, got ${payload.format}`);
+      const saves = listCardSaves(folder).filter((save) => !save.error);
+      const card = buildRawCard(saves.map((save) => moduleInstance.FS.readFile(`${folder}/${save.fileName}`)));
+      const { buffer, transfer } = transferable(card);
+      return { format: "raw", saves: saves.length, fileName: `MemoryCard${payload.slot || "A"}.raw`, bytes: buffer, transfer };
+    }
+    case "importMemcard": {
+      const identity = saveIdentity(payload);
+      const folder = cardFolder(identity, payload.slot || "A");
+      const bytes = new Uint8Array(payload.bytes);
+      const kind = sniffMemcardFile(bytes);
+      const incoming = kind === "gci"
+        ? [{ ...parseGci(bytes), bytes }]
+        : parseRawCard(bytes).saves;
+      const gameCode = identity.gameId.slice(0, 4);
+      const accepted = payload.anyGame ? incoming : incoming.filter((save) => save.gameCode === gameCode);
+      if (accepted.length === 0) {
+        throw new Error(
+          `No save for game ${gameCode} in this ${kind} file (found ${[...new Set(incoming.map((s) => s.gameCode))].join(", ") || "none"})`
+        );
+      }
+      mkdirTreeFs(folder);
+      const written = [];
+      for (const save of accepted) {
+        const fileName = gciFileName(save);
+        const path = `${folder}/${fileName}`;
+        if (!payload.replace && moduleInstance.FS.analyzePath(path).exists) {
+          throw new Error(`${fileName} is already on the card; pass replace to overwrite it`);
+        }
+        moduleInstance.FS.writeFile(path, save.bytes);
+        written.push(fileName);
+      }
+      const persisted = await flushUserData();
+      // Dolphin reads the GCI folder when the card is inserted, at boot.
+      return { kind, imported: written, skipped: incoming.length - accepted.length, restartRequired: coreBoot.accepted, persisted };
+    }
+    case "exportSaveState": {
+      const identity = saveIdentity();
+      const slotPath = payload.slot ? stateSlotPath(identity, payload.slot) : "";
+      if (slotPath && !moduleInstance.FS.analyzePath(slotPath).exists) {
+        throw new Error(`Save state slot ${payload.slot} is empty`);
+      }
+      const bytes = slotPath
+        ? moduleInstance.FS.readFile(slotPath)
+        : await writeSaveState("/savestate_export.sav");
+      const header = checkSaveState(bytes, identity.gameId);
+      const { buffer, transfer } = transferable(bytes);
+      return { ...header, fileName: `${identity.gameId}.${payload.slot ? `s${String(payload.slot).padStart(2, "0")}` : "sav"}`, bytes: buffer, transfer };
+    }
+    case "importSaveState": {
+      const identity = saveIdentity();
+      const bytes = new Uint8Array(payload.bytes);
+      const header = checkSaveState(bytes, identity.gameId);
+      let path = "/savestate_import.sav";
+      if (payload.slot) {
+        path = stateSlotPath(identity, payload.slot);
+        mkdirTreeFs(path.slice(0, path.lastIndexOf("/")));
+      }
+      moduleInstance.FS.writeFile(path, bytes);
+      const persisted = payload.slot ? await flushUserData() : null;
+      if (payload.load === false) return { ...header, path, loaded: false, persisted };
+      const result = await handleMessage("loadStateFile", { fsPath: path });
+      if (!result.loaded) throw new Error(`The core refused the save state (rc=${result.rc})`);
+      return { ...result, ...header, path, persisted };
+    }
+    default:
+      throw new Error(`Unknown saves message: ${type}`);
+  }
+}
+
 async function mountFile(file) {
   if (!moduleInstance) {
     throw new Error("Upstream core must be loaded before mounting a disc");
@@ -2475,11 +2786,21 @@ async function mountFile(file) {
   mounted = true;
   console.log(`[boot-phase] fs.mount(WORKERFS) took ${(performance.now() - _t_workerfs).toFixed(1)}ms (${(file.size / 1048576).toFixed(1)}MiB image)`);
 
-  const _t_mount = performance.now();
-  const accepted = api.mountDisc(path);
-  console.log(`[boot-phase] api.mountDisc() took ${(performance.now() - _t_mount).toFixed(1)}ms`);
-  if (!accepted) {
-    throw new Error("Upstream Dolphin DiscIO rejected the selected disc");
+  // A .dol/.elf is no disc: DiscIO cannot open it, and BootDisc's
+  // GenerateFromFile boots it directly, whatever its size.
+  const bootKind = bootFileKind(safeName);
+  let executable = null;
+  if (bootKind === "disc") {
+    const _t_mount = performance.now();
+    const accepted = api.mountDisc(path);
+    console.log(`[boot-phase] api.mountDisc() took ${(performance.now() - _t_mount).toFixed(1)}ms`);
+    if (!accepted) {
+      throw new Error("Upstream Dolphin DiscIO rejected the selected disc");
+    }
+  } else {
+    const head = new Uint8Array(await file.slice(0, BOOT_FILE_HEAD_BYTES).arrayBuffer());
+    executable = checkExecutable(bootKind, head, file.size);
+    if (!api.bootDisc) throw new Error("This core build cannot boot executables (no BootDisc export)");
   }
 
   coreBoot = {
@@ -2495,7 +2816,7 @@ async function mountFile(file) {
   lastPresentedAt = 0;
   presentedFrame = 0;
 
-  if (api.bootDisc && file.size >= MIN_FULL_BOOT_BYTES) {
+  if (api.bootDisc && (executable || file.size >= MIN_FULL_BOOT_BYTES)) {
     coreBoot.attempted = true;
     const _t_boot = performance.now();
     coreBoot.accepted = Boolean(api.bootDisc(path));
@@ -2504,6 +2825,12 @@ async function mountFile(file) {
       rendererDiagnostics.videoBackendEvidence = "SetVideoBackend invoked and BootDisc accepted";
     }
     console.log(`[boot-phase] api.bootDisc() took ${(performance.now() - _t_boot).toFixed(1)}ms`);
+    if (executable && !coreBoot.accepted) {
+      throw new Error(`Dolphin refused the ${bootKind}: ${api.getCoreStatus?.() || "no status"}`);
+    }
+    bootedGame = executable
+      ? { kind: bootKind, gameId: "00000000", region: "Unknown" }
+      : { kind: "disc", gameId: api.getGameId() || "", region: api.getRegion() || "" };
     const _t_pump = performance.now();
     api.pumpHostJobs?.();
     console.log(`[boot-phase] api.pumpHostJobs() took ${(performance.now() - _t_pump).toFixed(1)}ms`);
@@ -2514,6 +2841,9 @@ async function mountFile(file) {
   const metadata = metadataPayload();
   return {
     ...metadata,
+    ...(executable
+      ? { title: file.name, gameId: "", platform: "GameCube", region: "", bootKind, entryPoint: executable.entryPoint }
+      : { bootKind }),
     bootProbe: bootProbePayload(metadata),
     path,
     ...framePayload()
