@@ -82,7 +82,34 @@ export function renderChecks(records, reference, loadFrame = (file) => (existsSy
 //   harness/known-failures.json, otherwise "inconclusive" (blocks).
 // This catches what all configs of one commit get wrong together (e.g.
 // geometry gone under interpreter and JIT alike).
+//
+// A cell listed with `"mode": "set-equal"` (and a mandatory `reason`) is one
+// whose picture order is known to vary between runs (e.g. a dual-core race
+// state). It is judged on the sets of pictures instead, both sides together:
+// - "fail" if a side crashed or gave a blank picture;
+// - "inconclusive" with fewer than SET_EQUAL_MIN_RUNS runs on a side;
+// - "fail" if the candidate gave a picture the baseline never gave in any run;
+// - "inconclusive" if the candidate did not (yet) give every picture the
+//   baseline gave;
+// - "pass" only when both sets are equal.
+// Cells not listed this way keep the rules above.
+export const SET_EQUAL_MIN_RUNS = 3;
+
+export function setEqualCells(known) {
+  const cells = new Set();
+  for (const x of known) {
+    if (x.check !== "renderVsBaseline" || x.mode == null) continue;
+    if (x.mode !== "set-equal") throw new Error(`known-failures: unknown mode "${x.mode}" for ${x.cell}`);
+    if (typeof x.reason !== "string" || !x.reason.trim()) throw new Error(`known-failures: set-equal cell ${x.cell} needs a reason`);
+    cells.add(x.cell);
+  }
+  return cells;
+}
+
+const crashedRun = (r) => Boolean(r.crashed || r.rendererCrash || r.errors?.length);
+
 export function renderVsBaseline(baseRecords, candRecords, { accept = [], known = [], loadFrame = defaultLoad } = {}) {
+  const setEqual = setEqualCells(known);
   const digests = new Map();
   const digestOf = (file) => {
     if (!digests.has(file)) {
@@ -100,6 +127,7 @@ export function renderVsBaseline(baseRecords, candRecords, { accept = [], known 
   for (const [cell, cand] of cells) {
     const base = baseRecords.filter((b) => `${b.game}/${b.config}` === cell);
     const set = (c) => (r) => (r.renderVsBaseline = c);
+    if (setEqual.has(cell)) { cand.forEach(set(setEqualVerdict(base, cand, loadFrame))); continue; }
     // Nothing to compare when the baseline has no capture either; the
     // candidate losing a capture the baseline had cannot be judged (blocks).
     if (!base.some((b) => b.capture?.file)) { cand.forEach(set({ status: "not-covered", detail: base[0]?.capture?.error ?? "baseline has no capture" })); continue; }
@@ -148,6 +176,37 @@ export function renderVsBaseline(baseRecords, candRecords, { accept = [], known 
     cand.forEach(set(result));
   }
   return candRecords;
+}
+
+function setEqualVerdict(base, cand, loadFrame) {
+  const sides = [["baseline", base], ["candidate", cand]];
+  for (const [side, runs] of sides) {
+    const bad = runs.find(crashedRun);
+    if (bad) return { status: "fail", detail: `set-equal: ${side} run ${bad.run} crashed` };
+  }
+  const frames = new Map();
+  for (const [side, runs] of sides) {
+    for (const r of runs) {
+      if (!r.capture?.file) return { status: "unjudged", detail: `set-equal: ${side} run ${r.run} has no exact capture` };
+      const f = loadFrame(r.capture.file);
+      if (!f) return { status: "unjudged", detail: `set-equal: ${side} run ${r.run} capture file missing` };
+      if (compareFrames(f, f).candidateSigma < DEFAULT_THRESHOLDS.blankSigma) return { status: "fail", detail: `set-equal: ${side} run ${r.run} is blank` };
+      frames.set(r.capture.file, createHash("sha256").update(`${f.width}x${f.height}`).update(f.data).digest("hex"));
+    }
+  }
+  const vi = (r) => `${r.capture.index}/${Boolean(r.capture.fromLoad)}`;
+  if (new Set([...base, ...cand].map(vi)).size !== 1) return { status: "unjudged", detail: "set-equal: not the same VI output on every run" };
+  const baseSet = new Set(base.map((r) => frames.get(r.capture.file)));
+  const candSet = new Set(cand.map((r) => frames.get(r.capture.file)));
+  const evidence = { baselineDigests: [...baseSet].map((d) => d.slice(0, 8)), candidateDigests: [...candSet].map((d) => d.slice(0, 8)) };
+  if (base.length < SET_EQUAL_MIN_RUNS || cand.length < SET_EQUAL_MIN_RUNS) {
+    return { status: "inconclusive", detail: `set-equal: ${base.length} baseline / ${cand.length} candidate run(s), ${SET_EQUAL_MIN_RUNS} needed per side`, ...evidence };
+  }
+  const novel = [...candSet].filter((d) => !baseSet.has(d));
+  if (novel.length) return { status: "fail", detail: `set-equal: candidate picture(s) never seen on the baseline: ${novel.map((d) => d.slice(0, 8)).join(", ")}`, ...evidence };
+  const missing = [...baseSet].filter((d) => !candSet.has(d));
+  if (missing.length) return { status: "inconclusive", detail: `set-equal: baseline picture(s) not seen on the candidate: ${missing.map((d) => d.slice(0, 8)).join(", ")}`, ...evidence };
+  return { status: "pass", detail: `set-equal (listed): same ${baseSet.size} picture(s) on both sides`, ...evidence };
 }
 
 const defaultLoad = (file) => (existsSync(file ?? "") ? decodePng(readFileSync(file)) : null);
