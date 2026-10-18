@@ -198,3 +198,5 @@ function writeSetting(params, key, value, defaultValue) {
 
   params.set(key, value);
 }
+
+// CI measurement: a JavaScript-only change (never merged).
