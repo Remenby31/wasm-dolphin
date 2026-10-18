@@ -1,19 +1,19 @@
 {
   "schemaVersion": 1,
   "abiVersion": 1,
-  "coreId": "sha256:d7395b3a94080f5b7d08a0522f59096007419d117b7b0eb868246429adee6f5c",
+  "coreId": "sha256:230f25cbc0dc1e3dea34aad27c42fa5eab00ed420a2564f71ad3a4aed7864b18",
   "upstreamCommit": "e22551eae1c84a7e4d0b6a5c519ef4ed4ef69df1",
   "artifacts": [
     {
       "path": "cores/dolphin/dolphin-core-upstream.js",
       "hashMode": "lf-normalized",
-      "size": 266970,
-      "sha256": "7c78f3fc2207daab059af3b15c230c23d11205584cf1dfe89c65f66996e18b99"
+      "size": 268922,
+      "sha256": "6fa604a7f82366f2ee426263bff95e575af35e4921bdbca45a4b42cee567ef81"
     },
     {
       "path": "cores/dolphin/dolphin-core-upstream.wasm",
-      "size": 15175335,
-      "sha256": "d7395b3a94080f5b7d08a0522f59096007419d117b7b0eb868246429adee6f5c"
+      "size": 12951812,
+      "sha256": "230f25cbc0dc1e3dea34aad27c42fa5eab00ed420a2564f71ad3a4aed7864b18"
     }
   ],
   "contractSources": [
@@ -165,7 +165,7 @@
       "path": "src/upstream-worker-protocol.js",
       "hashMode": "lf-normalized",
       "size": 5096,
-      "sha256": "bedcdd1912ba1d19a6d75b785ed4cc689dfb502cd2c9754366cb14cbe6999f4b"
+      "sha256": "455d78b2cb248faa3a186b7dea98d6d865cfe3d065fe05907f60fe97108ff06e"
     },
     {
       "path": "src/wgpu-pass-state-cache.js",
@@ -359,6 +359,22 @@
     "_AudioSampleRate",
     "_BootDisc",
     "_CoreInit",
+    "_DolphinWeb_HarnessArmCapture",
+    "_DolphinWeb_HarnessCaptureHeight",
+    "_DolphinWeb_HarnessCaptureIndex",
+    "_DolphinWeb_HarnessCapturePixels",
+    "_DolphinWeb_HarnessCaptureState",
+    "_DolphinWeb_HarnessCaptureTicks",
+    "_DolphinWeb_HarnessCaptureWidth",
+    "_DolphinWeb_HarnessDisarmCapture",
+    "_DolphinWeb_HarnessEnable",
+    "_DolphinWeb_HarnessEnabled",
+    "_DolphinWeb_HarnessLoadGeneration",
+    "_DolphinWeb_HarnessViRing",
+    "_DolphinWeb_HarnessViRingCapacity",
+    "_DolphinWeb_HarnessViRingHead",
+    "_DolphinWeb_HarnessViSinceBoot",
+    "_DolphinWeb_HarnessViSinceLoad",
     "_DolphinWeb_RecordCacheHit",
     "_DolphinWeb_RecordCacheMiss",
     "_DolphinWeb_RecordInstanceUs",

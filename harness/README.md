@@ -58,6 +58,21 @@ them rather than compare something else. The hooks need the core rebuilt
 (`docs/repro-build.md`); a core without them makes every capture fail with
 "core has no harness capture hook".
 
+## Worker API for exact frames (stable contract)
+
+Harness-only worker messages, sent through `window.__host.adapter.request(type, payload)`.
+They are the interface other workstreams implement against (the wgpu exact
+capture must answer `validationCaptureAtVi` the same way). Changing a field is
+a breaking change: add, don't rename.
+
+| Message | Payload | Answer |
+|---|---|---|
+| `validationEnableHarness` | `{}` | `{ enabled: true, coreHooks, coreLoaded }`. Turns the hooks on (also applied when the core loads). Send before anything else. |
+| `validationCaptureAtVi` | `{ index?, ahead?, fromLoad = false, timeoutMs = 60000 }` | `{ index, fromLoad, ticks, width, height, pixels: Uint8Array RGBA (width×height×4), source }`. `index`: VI output to capture, counted from boot (or from the last savestate load if `fromLoad`); `ahead`: that many outputs after the latest one. Rejects (never answers with another frame) when the output has passed, was skipped, never arrives within `timeoutMs`, the hooks are off, or the backend cannot capture. `source` names what was captured (`"guest-xfb"` today; a GPU implementation must use its own value). |
+| `validationReadTimeline` | `{}` | `{ presents: { t[], frame[], vi[], lost }, vi: { t[], ticks[], sinceBoot[], sinceLoad[], lost, supported, why }, now }`. Everything recorded since the previous read. Times are `performance.timeOrigin + performance.now()` (ms) on both rings. `presents.vi` is the VI output count at each presentation; `lost` counts entries overwritten before they were read; `supported: false` comes with `why`. |
+
+Frame identity is the VI output index; `ticks` is informational.
+
 ## Outputs
 
 Results go to `harness/results/<command>-<time>/` (git-ignored; only the newest
