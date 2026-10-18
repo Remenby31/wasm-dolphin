@@ -26,7 +26,10 @@ const regionWeight = (f) => f.ranges.reduce((n, [s, e]) => n + e - s, 0);
 export class AotOptimizer extends EventTarget {
   // buildPlan: () => Promise<plan> (planDisc over the user's disc, with its profile)
   // planStore: { load(discKey) -> plan|null, save(discKey, plan) } (optional)
-  constructor({ discKey, buildPlan, translator, openCache, cacheIdentity = {}, planStore = null, batchSize = BATCH, now = () => performance.now() }) {
+  // keyOf(regionHash): cache key (region fingerprint, compiler version, JIT
+  // flags mask), the same computation the core uses; defaults to the hash.
+  constructor({ discKey, buildPlan, translator, openCache, cacheIdentity = {}, keyOf = (h) => h, planStore = null, batchSize = BATCH,
+    notReadyDelayMs = 1000, sleep = (ms) => new Promise((r) => setTimeout(r, ms)), now = () => performance.now() }) {
     super();
     this.discKey = discKey;
     this.buildPlan = buildPlan;
@@ -36,6 +39,9 @@ export class AotOptimizer extends EventTarget {
     this.planStore = planStore;
     this.now = now;
     this.batchSize = batchSize;
+    this.keyOf = keyOf;
+    this.notReadyDelayMs = notReadyDelayMs;
+    this.sleep = sleep;
     this.plan = null;
     this.session = null;
     this.running = null;
@@ -57,7 +63,7 @@ export class AotOptimizer extends EventTarget {
       await this.planStore?.save(this.discKey, plan).catch(() => {});
     }
     this.plan = plan;
-    this.regions = orderedRegions(plan).filter((r) => r.f.hash);
+    this.regions = orderedRegions(plan).filter((r) => r.f.hash).map((r) => ({ ...r, key: this.keyOf(r.f.hash) }));
     this.totalWeight = this.regions.reduce((n, r) => n + regionWeight(r.f), 0);
     return plan;
   }
@@ -70,7 +76,7 @@ export class AotOptimizer extends EventTarget {
   // Weighted by region size: a 10 KiB region counts more than a 40-byte one.
   progress(doneSet) {
     let doneWeight = 0, done = 0;
-    for (const r of this.regions) if (doneSet.has(r.f.hash)) { done++; doneWeight += regionWeight(r.f); }
+    for (const r of this.regions) if (doneSet.has(r.key)) { done++; doneWeight += regionWeight(r.f); }
     const fraction = this.totalWeight ? doneWeight / this.totalWeight : 1;
     return { fraction, done, total: this.regions.length, unit: "regions" };
   }
@@ -78,7 +84,8 @@ export class AotOptimizer extends EventTarget {
   async status() {
     await this.getPlan();
     const session = await this.openSession();
-    const doneSet = await session.has(this.regions.map((r) => r.f.hash));
+    const doneSet = await session.has(this.regions.map((r) => r.key));
+    for (const r of this.regions) if (session.isBlacklisted?.(r.key)) doneSet.add(r.key); // left to the JIT
     const p = this.progress(doneSet);
     return { state: p.done === 0 ? "none" : p.done >= p.total ? "complete" : "partial", fraction: p.fraction };
   }
@@ -105,19 +112,31 @@ export class AotOptimizer extends EventTarget {
     try {
       await this.getPlan();
       const session = await this.openSession();
-      const doneSet = await session.has(this.regions.map((r) => r.f.hash));
-      // Regions refused once (hash mismatch, engine reject) are left to the JIT.
+      const doneSet = await session.has(this.regions.map((r) => r.key));
+      // Regions refused (hash mismatch, untranslatable, too large, quota) are
+      // left to the JIT; keys the cache blacklisted are skipped.
       const refused = new Set();
-      const todo = this.regions.filter((r) => !doneSet.has(r.f.hash));
+      const todo = this.regions.filter((r) => !doneSet.has(r.key) && !session.isBlacklisted?.(r.key));
+      for (const r of this.regions) if (session.isBlacklisted?.(r.key)) { refused.add(r.key); doneSet.add(r.key); }
       this.emit("optimization-progress", this.progress(doneSet));
-      for (let i = 0; i < todo.length && !this.cancelled; i += this.batchSize) {
-        const batch = todo.slice(i, i + this.batchSize).map(({ module, f }) => ({
-          module, entry: f.entry, flags: f.flags ?? 0, hash: f.hash, ranges: f.ranges, extraEntries: f.extraEntries ?? []
+      // The core translates in slices: "budget" means resume at that region,
+      // "not-ready" (before boot) means wait and retry.
+      let i = 0;
+      while (i < todo.length && !this.cancelled) {
+        const slice = todo.slice(i, i + this.batchSize);
+        const batch = slice.map(({ module, f, key }) => ({
+          module, entry: f.entry, flags: f.flags ?? 0, hash: f.hash, key, ranges: f.ranges, extraEntries: f.extraEntries ?? []
         }));
         const translated = await this.translator.translate(batch);
         if (this.cancelled) break;
-        const failed = translated.filter((t) => !t.bytes);
-        const ok = translated.filter((t) => t.bytes);
+        let consumed = 0, wait = false;
+        const ok = [], failed = [];
+        for (const t of translated) {
+          if (t.reason === "budget") break;
+          if (t.reason === "not-ready") { wait = true; break; }
+          consumed++;
+          if (t.bytes) ok.push(t); else failed.push(t);
+        }
         const stored = ok.length ? await session.put(ok.map((t) => ({ key: t.key, bytes: t.bytes, meta: t.meta ?? null }))) : { failed: [] };
         if (this.cancelled) break;
         failed.push(...(stored.failed ?? []));
@@ -128,7 +147,9 @@ export class AotOptimizer extends EventTarget {
           doneSet.add(x.key); // handled (left to the JIT): progress must reach 100 %
           this.emit("optimization-error", { message: `region ${x.key}: ${x.reason}`, fatal: false });
         }
-        this.emit("optimization-progress", this.progress(doneSet));
+        i += consumed;
+        if (consumed) this.emit("optimization-progress", this.progress(doneSet));
+        if (wait || !consumed) await this.sleep(wait ? this.notReadyDelayMs : 0);
       }
       if (!this.cancelled) this.emit("optimization-done", { total: this.regions.length, refused: refused.size, ms: Math.round(this.now() - t0) });
     } catch (error) {
@@ -170,25 +191,35 @@ export class OpfsPlanStore {
 // Stand-ins with the agreed shapes, for tests and the site's simulated flow.
 // fakeTranslator: "translates" in `msPerKiB` per KiB of guest code, refuses
 // keys listed in `refuse`. fakeCache: an in-memory cache session factory.
-export function fakeTranslator({ msPerKiB = 0, refuse = new Set(), sleep = (ms) => new Promise((r) => setTimeout(r, ms)) } = {}) {
+// Reasons follow _DolphinWeb_AotTranslate: hash-mismatch, untranslatable,
+// budget (stop, resume here), too-large, not-ready (before boot).
+// `perCall`: regions translated per call before "budget"; `notReadyCalls`:
+// first calls answer "not-ready".
+export function fakeTranslator({ msPerKiB = 0, refuse = new Set(), perCall = Infinity, notReadyCalls = 0, sleep = (ms) => new Promise((r) => setTimeout(r, ms)) } = {}) {
+  let calls = 0;
   return {
     async translate(regions) {
+      calls++;
+      if (calls <= notReadyCalls) return regions.map((r) => ({ key: r.key ?? r.hash, reason: "not-ready" }));
       const out = [];
-      for (const r of regions) {
-        if (refuse.has(r.hash)) { out.push({ key: r.hash, reason: "engine-reject" }); continue; }
-        const bytes = r.ranges.reduce((n, [s, e]) => n + e - s, 0);
+      for (const [n, r] of regions.entries()) {
+        const key = r.key ?? r.hash;
+        if (n >= perCall) { out.push({ key, reason: "budget" }); break; }
+        if (refuse.has(r.hash)) { out.push({ key, reason: "untranslatable" }); continue; }
+        const bytes = r.ranges.reduce((t, [s, e]) => t + e - s, 0);
         if (msPerKiB) await sleep((bytes / 1024) * msPerKiB);
-        out.push({ key: r.hash, bytes: new Uint8Array(8) });
+        out.push({ key, bytes: new Uint8Array(8) });
       }
       return out;
     }
   };
 }
 
-export function fakeCache({ persisted = new Map(), quotaKeys = new Set() } = {}) {
+export function fakeCache({ persisted = new Map(), quotaKeys = new Set(), blacklist = new Set() } = {}) {
   const open = async () => {
     let cancelled = false;
     return {
+      isBlacklisted: (key) => blacklist.has(key),
       async has(keys) {
         return new Set(keys.filter((k) => persisted.has(k)));
       },

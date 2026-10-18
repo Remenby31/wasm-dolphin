@@ -95,3 +95,19 @@ test("aot optimizer: a compiler that cannot open is a fatal error, never a throw
   await o.start();
   assert.deepEqual(events.at(-1), ["optimization-error", { message: "no worker", fatal: true }]);
 });
+
+test("aot optimizer: core slices (budget), waits before boot (not-ready), skips blacklisted keys", async () => {
+  const p = plan();
+  const black = p.modules[0].functions[2].hash;
+  const keyOf = (h) => `k-${h}`;
+  let sleeps = 0;
+  const cache = fakeCache({ blacklist: new Set([keyOf(black)]) });
+  const { o, events } = optimizer({ cache, keyOf, translator: fakeTranslator({ perCall: 3, notReadyCalls: 2 }), sleep: async () => { sleeps++; } });
+  await o.start();
+  assert.equal(events.at(-1)[0], "optimization-done");
+  assert.equal(events.at(-1)[1].refused, 1, "the blacklisted key is skipped, not retried");
+  assert.ok(sleeps >= 2, "not-ready waits before retrying");
+  assert.ok([...cache.persisted.keys()].every((k) => k.startsWith("k-")), "the cache sees the core's keys");
+  assert.equal(cache.persisted.size, o.regions.length - 1);
+  assert.deepEqual(await o.status(), { state: "complete", fraction: 1 });
+});
