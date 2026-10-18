@@ -44,7 +44,10 @@ handed out for `dolphin-core-upstream.wasm` hash to the core the run asked
 for: the URL's `coreid=sha256:…`, or else the served tree's own
 `cores/dolphin` core. Any other core, or a fallback reported by the app,
 fails the run with `core-mismatch` (the app falls back to main's core when a
-candidate is missing; a judge never measures that). The loaded hash is in
+candidate is missing; a judge never measures that). Fetches are attributed
+per request, through the run's own browser context (the emulator worker's
+requests included), so several sessions on one server, with different
+`coreid`s, each check only their own core. The loaded hash is in
 every run's JSON (`core`). Candidate cores are served from
 `build/core-candidates/<sha>/` of the tree, or from directories passed with
 `--core-candidate <dir>`, and only when their wasm hashes to that sha.
@@ -210,7 +213,7 @@ Per (game, config) cell, the **correctness checks** (`lib/correctness.mjs`):
 | coreFreeze | no VI output for 2 s while the run went on (from the VI timeline) |
 | render | the exact capture is blank, or differs from the reference config's capture of the same run at the same VI output: byte-identical required for the same renderer, otherwise `match` (no missing detail, no squeezed picture) |
 | audio | the game spec says `audio: true` and the output peak stays under 1e-3 |
-| renderVsBaseline (ab) | per cell, the candidate's capture differs from the baseline's at the same VI output; catches what all configs of one commit get wrong together. Intended changes: `--accept game/config`. Each side must first agree with itself across runs. Baseline nondeterministic, candidate stable: known (not blocking) if the candidate's picture is one of the baseline's; otherwise, for a cell listed in `harness/known-failures.json`, known only if it differs from the closest baseline picture by no more pixels than the baseline's pictures differ from each other, else it blocks. Candidate nondeterministic, baseline stable: blocks. Both: blocks unless listed |
+| renderVsBaseline (ab) | per cell, the candidate's capture differs from the baseline's at the same VI output; catches what all configs of one commit get wrong together. Intended changes: `--accept game/config`. Each side must first agree with itself across runs. Baseline nondeterministic, candidate stable: known (not blocking) if the candidate's picture is one of the baseline's; otherwise, for a cell listed in `harness/known-failures.json`, known only if it differs from the closest baseline picture by no more pixels than the baseline's pictures differ from each other, else it blocks. Candidate nondeterministic, baseline stable: blocks. Both: blocks unless listed. A cell listed with `"mode": "set-equal"` (a `reason` is mandatory) is judged on picture sets instead: fail on a crash, a blank picture or a candidate picture the baseline never gave; inconclusive under 3 runs a side; pass when every candidate picture was seen on the baseline (a baseline picture the candidate did not sample is sampling, not a regression) |
 
 Each check of each run is pass, fail or **unjudged** (with the reason: no VI
 timeline in this core, capture refused for a hardware renderer, scripted
