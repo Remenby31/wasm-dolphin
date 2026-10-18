@@ -384,11 +384,33 @@ main keeps every check.
 
 | Pull request changes | CI path | Before | After |
 | --- | --- | ---: | ---: |
-| JavaScript, tests, docs only | `fast-tests`: no Docker, no core build | MEASURE_JS_BEFORE | MEASURE_JS_AFTER |
-| a shim `.cpp` | `build`, everything cached | MEASURE_CPP_BEFORE | MEASURE_CPP_AFTER |
-| a Dolphin patch | `build`, ccache warm, CMake tree rebuilt | MEASURE_PATCH_BEFORE | MEASURE_PATCH_AFTER |
+| JavaScript, tests, docs only | `fast-tests`: no Docker, no core build | 41-53 min | **2.4 min** |
+| a shim `.cpp` | `build`, everything cached | 46-57 min | **7.8 min** |
+| a Dolphin patch | `build`, ccache warm, CMake tree rebuilt | 57 min | **9.6 min** |
 
-MEASURE_NOTES
+Wall time from the pull request event to the last job, GitHub-hosted
+`ubuntu-24.04` (4 vCPU), 2026-10-18. Before: the last green run of #10 and
+#12 (JavaScript and harness), #9 (tools, workflow) and #11 (JIT, patch 0071),
+each a full build plus a rebuild from the source archive. After: throwaway
+pull requests #18 (one line in `src/settings.js`), #19 (one line in
+`core/upstream/dolphin_web_discio.cpp`) and #20 (patch 0072, one comment line
+in `Source/Core/Common/Hash.cpp`), with caches from a run of the new
+workflow. Breakdown:
+
+| | image | Dolphin sources | configure | compile and link | ccache hits | tests |
+| --- | ---: | ---: | ---: | ---: | ---: | ---: |
+| JavaScript | none | 83 s | none | none | none | 26 s |
+| `.cpp` | 99 s | 100 s | 8.5 s | 155 s | 1,304 / 1,306 | 40 s |
+| Dolphin patch | 100 s | 106 s | 152 s | 126 s | 1,303 / 1,306 | 31 s |
+
+What is left is mostly fixed cost: loading the 5 GB toolchain image, cloning
+Dolphin, and the LTO link. Caching `vendor/dolphin` would save about a minute
+more on every path; not done here.
+
+main pays for the guarantees instead: the ccache build from a clean tree
+(about 8 minutes once ccache is warm; 25 minutes on the first, cold run), the
+reference build (21 minutes), the incremental rebuild (2.5 minutes), then the
+rebuild from the source archive (about 20 minutes).
 
 **Which path.** `tools/ci-changes.mjs` lists the paths that can change the
 core, its build or CI: `core/`, `patches/`, `cores/`, `.github/`, the locks
