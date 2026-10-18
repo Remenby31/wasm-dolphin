@@ -20,6 +20,7 @@ import {
   compileFailureReason,
   createAotCompilerClient
 } from "./aot-compiler-worker.js";
+import { openAotCache, readDiscKeyFromFile } from "./aot-cache.js";
 import {
   JIT_CACHE_ENTRY_KEY_SCHEMA,
   canonicalCoreFingerprint,
@@ -1235,6 +1236,8 @@ async function handleMessage(type, payload) {
         observedAtMs: performance.now(),
       };
     }
+    case "validationAotCacheProbe":
+      return runAotCacheProbe(payload);
     case "validationReadJitCacheReadiness": {
       const requiredWorkers = dolphinJitPthreadRuntime
         ? [...new Set(dolphinJitPthreadRuntime.runningWorkers || [])]
@@ -1265,6 +1268,7 @@ async function handleMessage(type, payload) {
         offThreadCompiler: dolphinAotCompiler ? dolphinAotCompiler.stats() : null,
         compileRequests: dolphinJitCompileRequestCount,
         compileRequestFailures: dolphinJitCompileRequestFailures,
+        aotDiscKey,
         idbWritesPending: dolphinJitIdbWritesPending,
         idbWriteCount: dolphinJitIdbWriteCount,
         pthreadWorkerCount: dolphinJitPthreadWorkers.length,
@@ -1969,6 +1973,7 @@ async function loadCore({
   const _t_fetch = performance.now();
   const { wasmBinary, fingerprint: buildFingerprint } =
       await fetchWasmAndFingerprint(coreUrl, expectedCoreSha256);
+  aotCoreFingerprint = buildFingerprint;
   console.log(`[boot-phase] fetchWasmAndFingerprint took ${(performance.now() - _t_fetch).toFixed(1)}ms (${(wasmBinary.byteLength / 1048576).toFixed(2)}MiB)`);
   const _t_import = performance.now();
   const imported = await import(coreUrl);
@@ -2640,6 +2645,9 @@ async function mountFile(file) {
   const _t_workerfs = performance.now();
   fs.mount(resolveWorkerFs(moduleInstance), { blobs: [{ name: safeName, data: file }] }, WORKERFS_MOUNT_DIR);
   mounted = true;
+  // P6: the disc's key for the region cache, read from the File off the boot path.
+  aotDiscKey = null;
+  aotDiscKeyPromise = readDiscKeyFromFile(file).then((key) => (aotDiscKey = key), () => null);
   console.log(`[boot-phase] fs.mount(WORKERFS) took ${(performance.now() - _t_workerfs).toFixed(1)}ms (${(file.size / 1048576).toFixed(1)}MiB image)`);
 
   const _t_mount = performance.now();
@@ -5891,6 +5899,72 @@ async function reconcileJitCacheWithBuild(fingerprint) {
     );
   }
   return loaded;
+}
+// P6 (plan piste 3): the region cache of the mounted disc under this core.
+// Entries are keyed by region fingerprint and stored under
+// (disc, core, compiler version, JIT flags); see src/aot-cache.js.
+const AOT_BASE_URL = new URL("../", import.meta.url).href;
+let aotDiscKey = null;
+let aotDiscKeyPromise = Promise.resolve(null);
+let aotCoreFingerprint = null;
+export async function openDolphinAotCache({ compilerVersion, flagsMask = 0, coreHash = null, onProgress = null }) {
+  const discKey = aotDiscKey ?? await aotDiscKeyPromise;
+  const core = coreHash ?? aotCoreFingerprint;
+  if (!discKey || !core) return null;
+  return openAotCache({ discKey, coreHash: core, compilerVersion, flagsMask, baseUrl: AOT_BASE_URL, onProgress });
+}
+// Harness probe of the whole cache path with modules the caller provides:
+// store what is missing, load everything back (through the Service Worker
+// when it controls this worker), then time calls. `coreHash` stands in for
+// another core to check invalidation. Self-contained modules only (no
+// imports): the probe never touches the emulator's memory.
+async function runAotCacheProbe({ modules = [], compilerVersion = "probe-1", flagsMask = 0, coreHash = null, arg = 64, hotRounds = 0, settleMs = 0 } = {}) {
+  const cache = await openDolphinAotCache({ compilerVersion, flagsMask, coreHash });
+  if (!cache) return { error: "no-aot-cache", discKey: aotDiscKey, core: aotCoreFingerprint };
+  const keys = modules.map((m) => m.key);
+  const present = await cache.has(keys);
+  const missing = modules.filter((m) => !present.has(m.key)).map((m) => ({ key: m.key, bytes: new Uint8Array(m.bytes) }));
+  const { failed } = await cache.put(missing);
+  const t0 = performance.now();
+  const loaded = await cache.load(keys);
+  const loadMs = performance.now() - t0;
+  const fns = [];
+  const reasons = {};
+  for (const [key, entry] of loaded) {
+    if (!entry.module) {
+      reasons[entry.reason] = (reasons[entry.reason] || 0) + 1;
+      continue;
+    }
+    for (const value of Object.values(new WebAssembly.Instance(entry.module).exports)) {
+      if (typeof value === "function") fns.push(value);
+    }
+    void key;
+  }
+  const round = () => {
+    const start = performance.now();
+    for (const fn of fns) fn(arg);
+    return performance.now() - start;
+  };
+  const rounds = [round(), round()];
+  for (let i = 0; i < hotRounds; i += 1) rounds.push(round());
+  if (settleMs > 0) await new Promise((resolve) => setTimeout(resolve, settleMs));
+  return {
+    discKey: aotDiscKey,
+    cacheName: cache.cacheName,
+    reset: cache.reset,
+    pruned: cache.pruned,
+    viaServiceWorker: await cache.viaServiceWorker(),
+    present: present.size,
+    stored: missing.length - failed.length,
+    failed,
+    loadReasons: reasons,
+    functions: fns.length,
+    loadMs,
+    firstRoundMs: rounds[0],
+    secondRoundMs: rounds[1],
+    lastRoundMs: rounds[rounds.length - 1],
+    stats: cache.stats()
+  };
 }
 // P5 (plan piste 3): cached and requested modules are compiled in a
 // dedicated worker that also runs every entry point once on scratch memory, so
