@@ -425,7 +425,8 @@ function buildNative() {
         run(process.execPath, ["tools/verify-dolphin-provenance.mjs"]);
       }
     });
-    console.log("Installed the rebuilt core into cores/dolphin.");
+    console.log("Installed the rebuilt core into cores/dolphin for local testing. Do not commit it:");
+    console.log("CI builds and commits the core after a merge. `npm run core:restore -- --base origin/main` puts main's back.");
   }
 
   if (process.env.HOST_UID) {

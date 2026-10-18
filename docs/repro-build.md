@@ -229,6 +229,59 @@ and leaves it alone. Each worktree keeps its own `build/repro/` (0.5 to 0.7
 GB), because the CMake flags embed the checkout path. A worktree that edits
 Dolphin itself (patch work) needs its own `vendor/`.
 
+## Who builds the committed core
+
+Pull requests change sources and patches only. They never carry
+`cores/dolphin/dolphin-core-upstream.{js,wasm,build.json}`, the core hash
+pinned in `src/upstream-worker-protocol.js`, or the binary-derived fields of
+`provenance/dolphin-core-abi-v1.json` (`coreId`, `artifacts`, `moduleExports`,
+`runtimeMethods`, `memoryContract`, `memoryContractStatus`). CI owns all of
+these, so C++ pull requests no longer conflict with each other on a 13 MB
+binary and can be merged in any order.
+
+| Where | What happens |
+| --- | --- |
+| Pull request CI | Builds the core from the branch's sources, installs it in the workspace, and runs `check`, `test` and `test:contract` on it. Publishes it as the artifact `core-<sha256>`, with the GPL source archive, and rebuilds it from that archive alone. |
+| Merge to main | The same build. Then the `commit-core` job commits the core as `github-actions[bot]` if it differs from the committed one. It commits only a core that the source archive rebuilds byte for byte and that `core:status` and `verify:provenance` accept. The commit message names the run and the source commit. |
+| Locally | `npm run build:core:repro -- --install` installs a core for testing. Do not commit it; `npm run core:restore -- --base origin/main` puts main's back. |
+
+Why commit the core on main instead of keeping only a signed build record and
+downloading the binary: the site and the agents serve the core from the
+repository, same origin, under COOP/COEP. Actions artifacts expire after 90
+days. And main's history is then the complete index from a core hash to its
+exact bytes, with its build record next to it.
+
+Commands (`tools/core-artifacts.mjs`):
+
+| Command | What it does |
+| --- | --- |
+| `npm run core:status` | Says whether `cores/dolphin` is the build of this checkout's sources and locks: the build record's source identity, toolchain lock and Cargo lock against the tree, and the artifacts, ABI manifest and pinned hash against each other. On a branch that changes the C++ it is expected to say no. CI requires yes after installing its build and before committing on main. |
+| `npm run core:check` | Lists core-derived content this branch changes. A file counts when it differs from both the merge base and `origin/main`, so a branch started before main's newer core is not flagged, and main's current core is allowed. |
+| `npm run core:restore -- --base origin/main` | Puts main's core back on a branch and keeps the branch's source-side ABI changes. Exports the branch's own build added move to `sourceOnlyExportsPendingRebuild` (the existing mechanism for sources ahead of the core), and contract-source hashes are recomputed. |
+| `npm run core:fetch -- <sha256> [--repo owner/name]` | Writes an exact core to `build/core-candidates/<sha256>/`, loadable with `?coreid=sha256:<sha256>`. It looks in local builds, then in every commit of git history, then in the `core-<sha256>` Actions artifact (needs `gh`). The `.wasm` hash is checked. |
+| `npm run hooks:install` | Installs `tools/hooks/pre-commit`, which refuses a commit that stages core-derived content (`CORE_ARTIFACTS_ALLOW=1` overrides). Git keeps hooks per clone, so every worktree of the clone gets it. |
+
+The pull-request guard warns until the repository variable
+`CORE_ARTIFACTS_GUARD` is `enforce`. After that, a pull request carrying a
+core fails:
+
+```sh
+gh variable set CORE_ARTIFACTS_GUARD --body enforce -R Remenby31/wasm-dolphin
+```
+
+### Moving an open pull request to this scheme
+
+```sh
+git fetch origin && git merge origin/main
+npm run core:restore -- --base origin/main
+git commit -am "Leave the core to CI"
+```
+
+The branch then carries only its sources; its CI builds and tests its own
+core, and the merge commits it. Tests that read the binary run in CI on the
+branch's core. Locally they run on main's core unless you
+`npm run build:core:repro -- --install` first.
+
 ## Toolchain record
 
 The committed `provenance/wasm-toolchain.lock.json` pins the exact local

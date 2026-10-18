@@ -1,9 +1,12 @@
 name: core build (Linux, reproducible)
 
 # Rebuilds the WASM core from pinned inputs in tools/toolchain/Dockerfile,
-# runs the JS checks and tests against the patched tree, and publishes the GPL
-# corresponding source next to the rebuilt core. A second job rebuilds the core
-# from that source archive alone and must get the same bytes. No ROM is used
+# installs it in the workspace, runs the JS checks and tests on it, and
+# publishes it (artifact core-<sha256>) with the GPL corresponding source. A
+# second job rebuilds the core from that source archive alone and must get the
+# same bytes. On main, a third job commits the core: pull requests change
+# sources only, and the committed core always comes from here
+# (docs/repro-build.md, "Who builds the committed core"). No ROM is used
 # anywhere.
 #
 # Third-party actions are pinned by commit SHA (the tag is in the comment):
@@ -34,6 +37,8 @@ jobs:
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
         with:
           persist-credentials: false
+          # The guard below needs the merge base with the target branch.
+          fetch-depth: 0
 
       # The toolchain image (~5 GB), vendor/dolphin and the CMake tree do not
       # fit next to the preinstalled SDKs.
@@ -45,6 +50,15 @@ jobs:
       - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4
         with:
           node-version: 24.12.0
+
+      # Pull requests must not carry a rebuilt core. Warns until the repository
+      # variable CORE_ARTIFACTS_GUARD is set to "enforce".
+      - name: No core binaries in the pull request
+        if: github.event_name == 'pull_request'
+        env:
+          BASE: origin/${{ github.base_ref }}
+          MODE: ${{ vars.CORE_ARTIFACTS_GUARD == 'enforce' && 'enforce' || 'warn' }}
+        run: node tools/core-artifacts.mjs check --base "$BASE" --mode "$MODE"
 
       - uses: docker/setup-buildx-action@8d2750c68a42422c14e847fe6c8ac0403b4cbd6f # v3
 
@@ -86,6 +100,15 @@ jobs:
             exit 1
           fi
 
+      # Tests run on the core built here, not on the committed one, so a pull
+      # request that changes the C++ is tested against its own core.
+      - name: Install the rebuilt core in the workspace
+        run: |
+          npm run build:core:repro -- --docker --bind-mounts --no-sync --install --jobs "$(nproc)"
+          sudo chown -R "$(id -u):$(id -g)" cores provenance src
+          node tools/core-artifacts.mjs status --require-current
+          git status --short
+
       - name: npm run check
         run: npm run check
 
@@ -120,13 +143,20 @@ jobs:
           path: dist/*.tar.gz
           if-no-files-found: error
 
+      # Everything a core install rewrites, under the core's hash:
+      # `npm run core:fetch -- <sha256> --repo <owner/name>` finds it.
+      - name: Stage the core artifact
+        run: |
+          mkdir -p build/core-artifact
+          cp cores/dolphin/dolphin-core-upstream.* provenance/dolphin-core-abi-v1.json \
+            src/upstream-worker-protocol.js build/repro/linux-x64/parity.json build/core-artifact/
+
       - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
         with:
-          name: core-linux-x64
-          path: |
-            build/repro/linux-x64/core/
-            build/repro/linux-x64/parity.json
+          name: core-${{ steps.clean.outputs.wasm_sha256 }}
+          path: build/core-artifact/
           if-no-files-found: error
+          retention-days: 90
 
   # The published archive must be enough to rebuild the core: no checkout, no
   # git, no network for sources (the Rust crates are vendored in it). Only the
@@ -176,3 +206,51 @@ jobs:
           rebuilt=$(node -p "require('./build/repro/linux-x64/parity.json').rebuilt.wasmSha256")
           echo "archive build: $rebuilt, checkout build: ${{ needs.build.outputs.wasm_sha256 }}"
           test "$rebuilt" = "${{ needs.build.outputs.wasm_sha256 }}"
+
+  # After a merge: commit main's core, built and checked above, if it differs
+  # from the committed one. Only a core that the published source archive
+  # rebuilds byte for byte is committed. The push uses GITHUB_TOKEN, which does
+  # not start another workflow run; it fails, harmlessly, if main moved while
+  # this ran, and the run for the newer commit takes over.
+  commit-core:
+    needs: [build, rebuild-from-source-archive]
+    if: github.event_name == 'push' && github.ref == 'refs/heads/main'
+    runs-on: ubuntu-24.04
+    timeout-minutes: 15
+    permissions:
+      contents: write
+    concurrency:
+      group: commit-core
+      cancel-in-progress: false
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+
+      - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4
+        with:
+          node-version: 24.12.0
+
+      - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4
+        with:
+          name: core-${{ needs.build.outputs.wasm_sha256 }}
+          path: core-artifact
+
+      - name: Commit the core if it changed
+        env:
+          SHA256: ${{ needs.build.outputs.wasm_sha256 }}
+        run: |
+          cp core-artifact/dolphin-core-upstream.* cores/dolphin/
+          cp core-artifact/dolphin-core-abi-v1.json provenance/
+          cp core-artifact/upstream-worker-protocol.js src/
+          rm -rf core-artifact
+          node tools/core-artifacts.mjs status --require-current
+          node tools/verify-dolphin-provenance.mjs > /dev/null
+          if git diff --quiet; then
+            echo "The committed core is already sha256:$SHA256."
+            exit 0
+          fi
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git add cores/dolphin provenance/dolphin-core-abi-v1.json src/upstream-worker-protocol.js
+          git commit -m "Build the core for $(git rev-parse --short HEAD)" \
+            -m "sha256:$SHA256, built by ${GITHUB_SERVER_URL}/${GITHUB_REPOSITORY}/actions/runs/${GITHUB_RUN_ID} from the sources of ${GITHUB_SHA} and rebuilt identically from its GPL source archive."
+          git push origin HEAD:main

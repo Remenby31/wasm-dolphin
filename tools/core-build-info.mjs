@@ -30,13 +30,6 @@ function fileInfo(path, hashMode = "raw") {
   };
 }
 
-function repositoryTextFileInfo(relativePath) {
-  return {
-    ...fileInfo(resolve(root, relativePath), "lf-normalized"),
-    path: relativePath
-  };
-}
-
 function readUleb(bytes, start) {
   let value = 0;
   let shift = 0;
@@ -119,6 +112,46 @@ export function unexpectedDirtyPaths(status) {
   return dirtyPathsFromStatus(status).filter((path) => !CANONICAL_BUILD_OUTPUTS.has(path));
 }
 
+// Local files compiled into the core besides the patched Dolphin tree.
+export const CORE_LOCAL_INPUTS = Object.freeze([
+  "core/upstream/dolphin_web_core.cpp",
+  "core/upstream/dolphin_web_discio.cpp",
+  "core/upstream/dolphin_web_raster_profile.h",
+  "core/upstream/dolphin_web_xfb_fastpaths.h",
+  "tools/jit-cache-prejs.js"
+]);
+
+// The source identity a core build records. Recomputing it on a checkout and
+// comparing it with a committed build record says whether that core was built
+// from these sources (tools/core-artifacts.mjs status).
+export function coreSourceRecord(base = root) {
+  const sourceLockPath = resolve(base, "provenance/dolphin-source.lock.json");
+  const vendorSnapshotPath = resolve(base, "provenance/dolphin-vendor-snapshot-v1.json");
+  const sourceLock = JSON.parse(readFileSync(sourceLockPath, "utf8"));
+  const vendorSnapshot = JSON.parse(readFileSync(vendorSnapshotPath, "utf8"));
+  const localInputs = CORE_LOCAL_INPUTS.map((relativePath) => ({
+    ...fileInfo(resolve(base, relativePath), "lf-normalized"),
+    path: relativePath
+  }));
+  const localInputsSha256 = sha256(Buffer.from(JSON.stringify(
+    localInputs.map(({ path, size, sha256: fileSha256, hashMode }) => ({
+      path,
+      size,
+      sha256: fileSha256,
+      hashMode
+    }))
+  )));
+  return {
+    upstreamCommit: sourceLock.upstream.commit,
+    patchSeriesSha256: sourceLock.patchSeriesSha256,
+    vendorResultTree: vendorSnapshot.root.resultTree,
+    sourceLockSha256: sha256File(sourceLockPath),
+    vendorSnapshotSha256: sha256File(vendorSnapshotPath),
+    localInputsSha256,
+    localInputs
+  };
+}
+
 export function writeCoreBuildInfo({
   buildDir,
   outputPath = process.env.DOLPHIN_BUILD_INFO_PATH,
@@ -132,29 +165,10 @@ export function writeCoreBuildInfo({
   const wasmPath = resolve(configure.outputDir, "dolphin-core-upstream.wasm");
   if (!existsSync(jsPath) || !existsSync(wasmPath)) throw new Error("Core build did not produce both JS and WASM artifacts");
 
-  const sourceLockPath = resolve(root, "provenance/dolphin-source.lock.json");
-  const vendorSnapshotPath = resolve(root, "provenance/dolphin-vendor-snapshot-v1.json");
   const toolchainLockPath = resolve(root, "provenance/wasm-toolchain.lock.json");
   const cargoLockPath = resolve(root, "tools/naga-spirv-wgsl/Cargo.lock");
-  const sourceLock = JSON.parse(readFileSync(sourceLockPath, "utf8"));
-  const vendorSnapshot = JSON.parse(readFileSync(vendorSnapshotPath, "utf8"));
   const toolchain = loadWasmToolchainLock();
   const wasm = fileInfo(wasmPath);
-  const localInputs = [
-    "core/upstream/dolphin_web_core.cpp",
-    "core/upstream/dolphin_web_discio.cpp",
-    "core/upstream/dolphin_web_raster_profile.h",
-    "core/upstream/dolphin_web_xfb_fastpaths.h",
-    "tools/jit-cache-prejs.js"
-  ].map(repositoryTextFileInfo);
-  const localInputsSha256 = sha256(Buffer.from(JSON.stringify(
-    localInputs.map(({ path, size, sha256: fileSha256, hashMode }) => ({
-      path,
-      size,
-      sha256: fileSha256,
-      hashMode
-    }))
-  )));
 
   // Refuse to stamp a canonical build with a dirty tree. DOLPHIN_ALLOW_DIRTY_BUILD=1
   // is the deliberate escape hatch for local experiments; it also records the
@@ -180,15 +194,7 @@ export function writeCoreBuildInfo({
       cleanTree: dirty.length === 0,
       dirtyBuildOverride: dirty.length > 0 && allowDirty ? dirty : undefined
     },
-    source: {
-      upstreamCommit: sourceLock.upstream.commit,
-      patchSeriesSha256: sourceLock.patchSeriesSha256,
-      vendorResultTree: vendorSnapshot.root.resultTree,
-      sourceLockSha256: sha256File(sourceLockPath),
-      vendorSnapshotSha256: sha256File(vendorSnapshotPath),
-      localInputsSha256,
-      localInputs
-    },
+    source: coreSourceRecord(),
     toolchain: {
       lockSha256: sha256File(toolchainLockPath),
       emscriptenVersion: toolchain.emscripten.version,
