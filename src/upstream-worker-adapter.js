@@ -31,6 +31,31 @@ export async function upstreamBundleAvailable(coreUrl = DEFAULT_UPSTREAM_CORE_UR
   }
 }
 
+// What the page should say about saves at load, or "" when all is well.
+export function describeUserDataStatus(status) {
+  if (!status) return "";
+  switch (status.mode) {
+    case "writer":
+      return "";
+    case "read-only":
+      return `Saves are read-only in this tab (${status.reason.replace(/^read-only: /, "")}): progress here will not be kept`;
+    case "failed":
+      return `Saves could not be restored, games will not start: ${status.reason}`;
+    case "off":
+      return "Saves are off for this page";
+    default:
+      return `Saves will not survive a reload: ${status.reason}`;
+  }
+}
+
+// "Saved" only when the slot holds the new state and OPFS holds it too.
+export function describeSlotSave(slot, response) {
+  if (!response?.saved) return `Save slot ${slot} failed`;
+  if (response.persisted?.persistent) return `Saved slot ${slot}`;
+  const why = response.persisted?.error || response.persisted?.reason || "saves are not stored";
+  return `Saved slot ${slot} for this session only: ${why}`;
+}
+
 export class UpstreamWorkerAdapter {
   constructor({
     coreUrl = DEFAULT_UPSTREAM_CORE_URL,
@@ -62,6 +87,8 @@ export class UpstreamWorkerAdapter {
     xfbFastPaths = 0,
     correctTimeDrift = false,
     coreLog = false,
+    memcardSlotB = false,
+    savesMode = "",
     efbDiag = false,
     jitVerbose = false,
     frameCap = 0,
@@ -158,6 +185,9 @@ export class UpstreamWorkerAdapter {
     this.xfbFastPaths = (Number(xfbFastPaths) || 0) & 3;
     this.correctTimeDrift = Boolean(correctTimeDrift);
     this.coreLog = Boolean(coreLog);
+    this.memcardSlotB = Boolean(memcardSlotB);
+    this.savesMode = String(savesMode || "");
+    this.userData = null;
     this.efbDiag = Boolean(efbDiag);
     this.jitVerbose = Boolean(jitVerbose);
     this.frameCap = Number(frameCap) || 0;
@@ -360,6 +390,8 @@ export class UpstreamWorkerAdapter {
       xfbFastPaths: this.xfbFastPaths,
       correctTimeDrift: this.correctTimeDrift,
       coreLog: this.coreLog,
+      memcardSlotB: this.memcardSlotB,
+      savesMode: this.savesMode,
       efbDiag: this.efbDiag,
       jitVerbose: this.jitVerbose,
       frameCap: this.frameCap,
@@ -458,6 +490,18 @@ export class UpstreamWorkerAdapter {
     }
     this.applyMetadata(response);
     this.loaded = true;
+    this.userData = response.userData ?? null;
+    const saveWarning = describeUserDataStatus(this.userData);
+    if (saveWarning) this.onStatus(saveWarning);
+    // Memory cards are copied to OPFS a second after they stop changing;
+    // a tab going to the background gets them copied now.
+    if (typeof document !== "undefined") {
+      const flush = () => {
+        if (document.visibilityState === "hidden") this.flushUserData().catch(() => {});
+      };
+      document.addEventListener("visibilitychange", flush);
+      globalThis.addEventListener?.("pagehide", () => this.flushUserData().catch(() => {}));
+    }
     this.publishRequestedPadStates();
   }
 
@@ -494,6 +538,8 @@ export class UpstreamWorkerAdapter {
       fstSize: response.fstSize,
       rawSize: response.rawSize,
       dataSize: response.dataSize,
+      bootKind: response.bootKind,
+      entryPoint: response.entryPoint,
       rootEntryCount: response.rootEntryCount,
       rootEntries: response.rootEntries ?? [],
       bootProbe: response.bootProbe ?? null,
@@ -659,8 +705,66 @@ export class UpstreamWorkerAdapter {
       return;
     }
     this.request("pause")
-      .then((response) => this.applyFrame(response))
+      .then((response) => {
+        this.applyFrame(response);
+        if (response.persisted?.error) this.onStatus(`Paused; saves not stored: ${response.persisted.error}`);
+      })
       .catch((error) => this.onStatus(error.message));
+  }
+
+  // Promise forms of the lifecycle: resolve once the core reports the
+  // state, reject with the worker's reason.
+  async lifecycle(type) {
+    if (!this.loaded) throw new Error(`${type}: the core is not loaded`);
+    const response = await this.request(type);
+    this.applyFrame(response);
+    return response;
+  }
+
+  resume() {
+    return this.lifecycle("resume");
+  }
+
+  async stop() {
+    const response = await this.lifecycle("stop");
+    if (response.persistError) this.onStatus(`Stopped; saves not stored: ${response.persistError}`);
+    return response;
+  }
+
+  // Saves. Every call resolves with the worker's answer or rejects with
+  // its error; bytes come back as ArrayBuffers.
+  async saves(type, payload = {}, transfer = []) {
+    if (!this.loaded) throw new Error(`${type}: the core is not loaded`);
+    return this.request(type, payload, transfer);
+  }
+
+  flushUserData() {
+    return this.saves("flushUserData");
+  }
+
+  listUserData() {
+    return this.saves("listUserData");
+  }
+
+  exportMemcard({ slot = "A", format = "raw", fileName = "", gameId, region } = {}) {
+    return this.saves("exportMemcard", { slot, format, fileName, gameId, region });
+  }
+
+  importMemcard(bytes, { slot = "A", replace = false, anyGame = false, gameId, region } = {}) {
+    const u8 = bytes instanceof Uint8Array ? bytes : new Uint8Array(bytes);
+    return this.saves("importMemcard", { bytes: u8, slot, replace, anyGame, gameId, region }, [u8.buffer]);
+  }
+
+  exportSaveState({ slot = 0 } = {}) {
+    return this.saves("exportSaveState", { slot });
+  }
+
+  importSaveState(bytes, { slot = 0, load = true } = {}) {
+    const u8 = bytes instanceof Uint8Array ? bytes : new Uint8Array(bytes);
+    return this.saves("importSaveState", { bytes: u8, slot, load }, [u8.buffer]).then((response) => {
+      if (response.loaded) this.applyFrame(response);
+      return response;
+    });
   }
 
   reset() {
@@ -680,7 +784,7 @@ export class UpstreamWorkerAdapter {
       return;
     }
     this.request("saveState", { slot })
-      .then((response) => this.onStatus(response.saved ? `Save slot ${slot} requested` : `Save slot ${slot} unavailable`))
+      .then((response) => this.onStatus(describeSlotSave(slot, response)))
       .catch((error) => this.onStatus(error.message));
   }
 
@@ -691,7 +795,7 @@ export class UpstreamWorkerAdapter {
     this.request("loadState", { slot })
       .then((response) => {
         this.applyFrame(response);
-        this.onStatus(response.loaded ? `Load slot ${slot} requested` : `Load slot ${slot} unavailable`);
+        this.onStatus(`Loaded slot ${slot}`);
       })
       .catch((error) => this.onStatus(error.message));
   }

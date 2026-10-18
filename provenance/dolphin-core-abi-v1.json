@@ -38,14 +38,14 @@
     {
       "path": "core/upstream/dolphin_web_core.cpp",
       "hashMode": "lf-normalized",
-      "size": 45437,
-      "sha256": "8363bedba96d754f7c066f88e411469718124725e1e648576d50566932a91377"
+      "size": 47298,
+      "sha256": "b6281cf58785f673408bea2a0513b43f330c811b3a03276f004a8108070eb8d5"
     },
     {
       "path": "src/app.js",
       "hashMode": "lf-normalized",
-      "size": 50202,
-      "sha256": "ddb35fcaf38055a7cf181c912d2b838ed96ec0767204f70c6719bca727912c55"
+      "size": 50421,
+      "sha256": "403e892c103cfd214dd41df68bded99043818369a663b4260045c35c938a76cc"
     },
     {
       "path": "src/audio.js",
@@ -80,8 +80,8 @@
     {
       "path": "src/core-host.js",
       "hashMode": "lf-normalized",
-      "size": 66762,
-      "sha256": "82c7d690e55902eb500a5ff3f2bc8ed30bdec57862a396478551a034a8ca4e31"
+      "size": 67232,
+      "sha256": "9e6f7fac138e094fe23ad1fbe3abe5fc570cf2c0f6887c50668a89ff2dec42ce"
     },
     {
       "path": "src/diagnostic-log-filter.js",
@@ -134,8 +134,8 @@
     {
       "path": "src/upstream-discio-worker.js",
       "hashMode": "lf-normalized",
-      "size": 639887,
-      "sha256": "87b2fc1e404a501aca79c2e8bb8a7a1ecd70d5af74d5ee70def01e09c0d2feca"
+      "size": 663373,
+      "sha256": "bdae9429d1d81c83ef9fd3e068ac4167da60c7f54b65a5b4d83ae2b5e1654d9c"
     },
     {
       "path": "src/wgpu-renderer-worker-probe.js",
@@ -158,8 +158,8 @@
     {
       "path": "src/upstream-worker-adapter.js",
       "hashMode": "lf-normalized",
-      "size": 42027,
-      "sha256": "4eac6631253c7fc614c0c8ecc9a866acc6cdfb7617d42a3bb1749a36bbaaacb8"
+      "size": 45881,
+      "sha256": "79fd0666dd7c0e69c0b6d2f724ef9d1c5a78f3e112193c01a8cdba1a1e0f560a"
     },
     {
       "path": "src/upstream-worker-protocol.js",
@@ -545,19 +545,29 @@
     "requestTypes": [
       "bootProbe",
       "configureAudioWorklet",
+      "exportMemcard",
+      "exportSaveState",
+      "flushUserData",
+      "importMemcard",
+      "importSaveState",
+      "listUserData",
       "load",
       "loadState",
       "loadStateFile",
       "mixAudio",
       "mountFile",
+      "pause",
       "rendererDiagnostics",
       "reset",
+      "resume",
       "runFrame",
       "saveState",
       "saveStateFile",
       "setAudioMuted",
       "setInputMask",
       "setInputState",
+      "start",
+      "stop",
       "validationAotCacheProbe",
       "validationBeginWgpuRendererProbeMeasurement",
       "validationCaptureAtVi",

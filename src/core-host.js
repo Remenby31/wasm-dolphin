@@ -1,7 +1,7 @@
 import { DolphinCoreAdapter, dolphinBundleAvailable } from "./dolphin-adapter.js";
 import { buttonMaskFromPressed, isPadPort } from "./input.js";
 import { UpstreamMainThreadAdapter } from "./upstream-main-thread-adapter.js";
-import { UpstreamWorkerAdapter, upstreamBundleAvailable } from "./upstream-worker-adapter.js";
+import { UpstreamWorkerAdapter, describeUserDataStatus, upstreamBundleAvailable } from "./upstream-worker-adapter.js";
 import {
   DEFAULT_UPSTREAM_CORE_URL,
   requestedLegacyOneWayAck,
@@ -103,6 +103,8 @@ export class EmulatorHost {
     this.xfbFastPaths = requestedXfbFastPaths(window.location.search);
     this.correctTimeDrift = requestedCorrectTimeDrift();
     this.coreLog = requestedCoreLog();
+    this.memcardSlotB = new URLSearchParams(window.location.search).get("memcardb") === "1";
+    this.savesMode = new URLSearchParams(window.location.search).get("saves") === "off" ? "off" : "";
     this.efbDiag = requestedEfbDiag();
     this.jitVerbose = new URLSearchParams(window.location.search).get("jitverbose") === "1";
     this.frameCap = Number.parseInt(
@@ -390,6 +392,8 @@ export class EmulatorHost {
             xfbFastPaths: this.xfbFastPaths,
             correctTimeDrift: this.correctTimeDrift,
             coreLog: this.coreLog,
+            memcardSlotB: this.memcardSlotB,
+            savesMode: this.savesMode,
             efbDiag: this.efbDiag,
             jitVerbose: this.jitVerbose,
             frameCap: this.frameCap,
@@ -577,7 +581,8 @@ export class EmulatorHost {
         this.coreFps = 0;
         this.presentationFps = 0;
         this.resetVisibleSampler();
-        this.onStatus(`${this.adapterLabel} mounted`);
+        // A saves warning (read-only tab, saves off) outlives the mount.
+        this.onStatus(describeUserDataStatus(this.adapter.userData) || `${this.adapterLabel} mounted`);
         this.onMode(this.adapterLabel);
         return this.game;
       } catch (error) {
@@ -672,8 +677,9 @@ export class EmulatorHost {
 
   saveState() {
     if (this.mode === "dolphin") {
-      this.adapter.saveState(0);
-      this.onStatus("Save slot 0 requested");
+      // Dolphin numbers its slots from 1 (<game id>.s01).
+      this.adapter.saveState(1);
+      this.onStatus("Saving slot 1");
       return;
     }
 
@@ -690,8 +696,8 @@ export class EmulatorHost {
 
   loadState() {
     if (this.mode === "dolphin") {
-      this.adapter.loadState(0);
-      this.onStatus("Load slot 0 requested");
+      this.adapter.loadState(1);
+      this.onStatus("Loading slot 1");
       return;
     }
 
