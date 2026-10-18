@@ -324,16 +324,54 @@ gh variable set CORE_ARTIFACTS_GUARD --body enforce -R Remenby31/wasm-dolphin
 
 ### Moving an open pull request to this scheme
 
+Once this scheme is on main, for each open pull request that carries a core
+(or simply predates `core.lock.json`):
+
 ```sh
-git fetch origin && git merge origin/main
+git fetch origin
+git merge origin/main
+# 1. Resolve your own source conflicts as usual (patches, src/, package.json).
+#    Leave cores/dolphin/*, provenance/dolphin-core-abi-v1.json and the
+#    DEFAULT_UPSTREAM_CORE_SHA256 hunk of src/upstream-worker-protocol.js alone.
+# 2. Then, last:
 npm run core:restore -- --base origin/main
-git commit -am "Leave the core to CI"
+git status                     # nothing left unmerged
+npm run core:check             # "No core-derived changes"
+git commit --no-edit           # or git commit -am "Leave the core to CI" outside a merge
+git push
 ```
+
+`core:restore` puts main's core files and `core.lock.json` back, resolves
+the one conflict this scheme creates in `src/upstream-worker-protocol.js`
+(the branch's old hash line against main's `core.lock.json` import; any
+other hunk there is left to you), and rebuilds the ABI manifest from the
+branch's side: main's binary fields, the branch's source-side fields,
+contract hashes recomputed, and exports the branch's own build added listed
+as `sourceOnlyExportsPendingRebuild`. Run it after your own conflicts are
+resolved, so contract hashes describe the final files. Checked on a copy of
+#11 (JIT, patch 0071) merged with this branch: only an unrelated
+`package.json` hunk remained, `verify:provenance` passed, and the guard was
+clean after the commit.
 
 The branch then carries only its sources; its CI builds and tests its own
 core, and the merge commits it. Tests that read the binary run in CI on the
 branch's core. Locally they run on main's core unless you
-`npm run build:core:repro -- --install` first.
+`npm run build:core:repro -- --install` first; `core:status` saying "not
+the build of these sources" on such a branch is expected.
+
+### Turning the guard on
+
+When no open pull request carries a core any more
+(`npm run core:check` on each, or the warning in its CI log):
+
+```sh
+gh variable set CORE_ARTIFACTS_GUARD --body enforce -R Remenby31/wasm-dolphin
+```
+
+From then on the "No core binaries in the pull request" step fails instead of
+warning. `gh variable delete CORE_ARTIFACTS_GUARD -R Remenby31/wasm-dolphin`
+turns it back to warnings. The local hook (`npm run hooks:install`) is
+optional and per clone.
 
 ## Toolchain record
 

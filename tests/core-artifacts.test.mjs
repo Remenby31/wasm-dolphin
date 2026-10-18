@@ -9,7 +9,7 @@ import { fileURLToPath } from "node:url";
 
 import {
   ABI_PATH, CORE_BINARY_FILES, CORE_DERIVED_FILES, coreArtifactChanges, coreStatus, fetchCore, publishPlan,
-  restoreCoreFromBase, stagedCoreArtifactChanges
+  resolvePinConflict, restoreCoreFromBase, stagedCoreArtifactChanges
 } from "../tools/core-artifacts.mjs";
 import { CORE_LOCK_PATH, formatCoreLock } from "../tools/core-lock.mjs";
 import { DEFAULT_UPSTREAM_CORE_SHA256 } from "../src/upstream-worker-protocol.js";
@@ -129,6 +129,57 @@ test("restore drops the branch's core but keeps its new exports as pending rebui
   }
 });
 
+test("a branch from before core.lock.json migrates in one merge with core:restore", async () => {
+  const f = fixture();
+  try {
+    // main before the scheme: the pin is a JavaScript declaration.
+    const oldPin = (hash) => `export const DEFAULT_UPSTREAM_CORE_SHA256 = "${hash}";\nexport const other = 1;\n`;
+    f.installCore("core-A", ["_Boot"]);
+    f.write(PROTOCOL_PATH, oldPin(sha256("core-A")));
+    f.commit("old main");
+    // A feature branch rebuilds the core and changes the ABI's sources.
+    f.git("checkout", "-q", "-b", "feature");
+    f.installCore("core-B", ["_Boot", "_New"]);
+    f.write(PROTOCOL_PATH, oldPin(sha256("core-B")));
+    f.write("src/feature.js", "export const feature = 1;\n");
+    const abi = JSON.parse(readFileSync(path.join(f.dir, ABI_PATH), "utf8"));
+    abi.workerProtocol = { a: 2 };
+    f.write(ABI_PATH, JSON.stringify(abi, null, 2));
+    f.commit("feature with its own core");
+    // main adopts the scheme and gets a newer core.
+    f.git("checkout", "-q", "main");
+    const mainHash = f.installCore("core-C", ["_Boot"]);
+    f.write(PROTOCOL_PATH, '// comment\nimport coreLock from "../cores/dolphin/core.lock.json" with { type: "json" };\n' +
+      "export const DEFAULT_UPSTREAM_CORE_SHA256 = coreLock.sha256;\nexport const other = 1;\n");
+    f.commit("main: core.lock.json");
+
+    f.git("checkout", "-q", "feature");
+    spawnSync("git", ["merge", "-q", "main"], { cwd: f.dir });  // conflicts expected
+    const result = await restoreCoreFromBase({ base: "main", cwd: f.dir });
+    assert.deepEqual(result.pendingExports, ["_New"]);
+    assert.equal(f.git("diff", "--name-only", "--diff-filter=U"), "", "every conflict is resolved");
+    f.git("commit", "-q", "--no-edit");
+    assert.deepEqual(await coreArtifactChanges({ base: "main", cwd: f.dir }), []);
+    const merged = JSON.parse(readFileSync(path.join(f.dir, ABI_PATH), "utf8"));
+    assert.deepEqual(merged.workerProtocol, { a: 2 }, "the branch's source-side ABI change is kept");
+    assert.equal(merged.coreId, `sha256:${mainHash}`);
+    assert.match(readFileSync(path.join(f.dir, PROTOCOL_PATH), "utf8"), /coreLock\.sha256/);
+  } finally {
+    rmSync(f.dir, { recursive: true, force: true });
+  }
+});
+
+test("only the pin hunk is resolved; any other protocol conflict is left to the user", () => {
+  const pin = `export const DEFAULT_UPSTREAM_CORE_SHA256 = "${"a".repeat(64)}";\n`;
+  const lock = 'import coreLock from "../cores/dolphin/core.lock.json" with { type: "json" };\n';
+  const resolved = resolvePinConflict(`x\n<<<<<<< HEAD\n${pin}=======\n${lock}>>>>>>> main\ny\n`);
+  assert.equal(resolved, `x\n${lock}y\n`);
+  const other = `<<<<<<< HEAD\nexport const a = 1;\n=======\nexport const a = 2;\n>>>>>>> main\n`;
+  assert.equal(resolvePinConflict(other), other);
+  const mixed = `<<<<<<< HEAD\n${pin}export const a = 1;\n=======\n${lock}>>>>>>> main\n`;
+  assert.equal(resolvePinConflict(mixed), mixed, "a hunk with more than the pin is not touched");
+});
+
 test("the pre-commit check sees a staged core, not an unstaged one", async () => {
   const f = fixture();
   try {
@@ -188,8 +239,14 @@ test("the default core hash is data: the module exports core.lock.json, and tool
   const lock = JSON.parse(readFileSync(path.join(repoRoot, CORE_LOCK_PATH), "utf8"));
   assert.deepEqual(Object.keys(lock).sort(), ["schemaVersion", "sha256"]);
   assert.equal(DEFAULT_UPSTREAM_CORE_SHA256, lock.sha256);
+  // No tool reads or writes the pin through JavaScript. (core:restore
+  // recognises the old declaration only inside a merge-conflict hunk, to
+  // migrate a branch; see the next tests.)
+  for (const tool of ["tools/update-core-abi.mjs", "tools/core-lock.mjs"]) {
+    assert.doesNotMatch(readFileSync(path.join(repoRoot, tool), "utf8"), /DEFAULT_UPSTREAM_CORE_SHA256/, tool);
+  }
   for (const tool of ["tools/core-artifacts.mjs", "tools/update-core-abi.mjs", "tools/core-lock.mjs"]) {
-    assert.doesNotMatch(readFileSync(path.join(repoRoot, tool), "utf8"), /DEFAULT_UPSTREAM_CORE_SHA256|import\(`data:/, tool);
+    assert.doesNotMatch(readFileSync(path.join(repoRoot, tool), "utf8"), /import\(`data:|\beval\(|new Function/, tool);
   }
   assert.ok(!existsSync(path.join(repoRoot, "tools/core-pin.mjs")));
   // A malformed lock makes the core not current instead of being guessed at.

@@ -148,15 +148,42 @@ export async function stagedCoreArtifactChanges({ cwd = root } = {}) {
 // binary fields come from base, exports the branch's own build added become
 // "pending rebuild" (the existing mechanism for sources ahead of the core),
 // and contract-source hashes are recomputed for the restored files.
+// Also usable in the middle of `git merge <base>`: the ABI manifest is then
+// read from the branch's side of the conflict (index stage 2), and the one
+// conflict this scheme itself creates in src/upstream-worker-protocol.js --
+// the branch's old hash declaration against base's core.lock.json import --
+// is resolved to base's side. Any other conflict there is left to the user.
+export const PROTOCOL_PATH = "src/upstream-worker-protocol.js";
+const OLD_PIN = /^export const DEFAULT_UPSTREAM_CORE_SHA256 = "[0-9a-f]{64}";\n$/;
+
+export function resolvePinConflict(text) {
+  return text.replace(/^<<<<<<< [^\n]*\n([\s\S]*?)^=======\n([\s\S]*?)^>>>>>>> [^\n]*\n/gm, (hunk, ours, theirs) =>
+    OLD_PIN.test(ours) && theirs.includes('from "../cores/dolphin/core.lock.json" with { type: "json" }')
+      ? theirs
+      : hunk);
+}
+
 export async function restoreCoreFromBase({ base, cwd = root }) {
+  const stagedPaths = [];
   for (const path of CORE_DERIVED_FILES) {
     const bytes = readAt(base, path, cwd);
     if (!bytes) throw new Error(`${base} has no ${path}`);
     writeFileSync(join(cwd, path), bytes);
+    stagedPaths.push(path);
+  }
+  const protocolPath = join(cwd, PROTOCOL_PATH);
+  if (existsSync(protocolPath)) {
+    const before = readFileSync(protocolPath, "utf8");
+    const after = resolvePinConflict(before);
+    if (after !== before) {
+      writeFileSync(protocolPath, after);
+      if (!after.includes("<<<<<<<")) stagedPaths.push(PROTOCOL_PATH);
+    }
   }
 
   const baseAbi = JSON.parse(readAt(base, ABI_PATH, cwd).toString("utf8"));
-  const headAbi = JSON.parse(readFileSync(join(cwd, ABI_PATH), "utf8"));
+  const abiConflicted = Boolean(git(["ls-files", "-u", "--", ABI_PATH], { cwd }));
+  const headAbi = JSON.parse((abiConflicted ? readAt(":2", ABI_PATH, cwd) : readFileSync(join(cwd, ABI_PATH))).toString("utf8"));
   const baseExports = new Set(baseAbi.moduleExports ?? []);
   const pending = [...new Set([
     ...(headAbi.sourceOnlyExportsPendingRebuild ?? []),
@@ -170,6 +197,10 @@ export async function restoreCoreFromBase({ base, cwd = root }) {
     sourceOnlyExportsPendingRebuild: pending
   };
   writeFileSync(join(cwd, ABI_PATH), `${JSON.stringify(restored, null, 2)}\n`);
+  stagedPaths.push(ABI_PATH);
+  // During a merge, mark what was resolved here; outside a merge, add is a
+  // no-op for unchanged files and stages the restored ones.
+  if (git(["rev-parse", "-q", "--verify", "MERGE_HEAD"], { cwd })) git(["add", "--", ...stagedPaths], { cwd });
   return { coreId: baseAbi.coreId, pendingExports: pending };
 }
 
