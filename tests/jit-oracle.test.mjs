@@ -443,10 +443,22 @@ test("jitoffthread: a miss is posted once and deferred, compiled once its ready 
     // The block's bytes changed before its retry: compiled in place, not deferred.
     assert.ok(compile(b, true) > 0, "changed bytes compile in place");
     assert.equal(posted.length, 1, "nothing posted for the in-place retry");
+    // A 1 left in a slot by another key is read while clearing it (-4: the
+    // caller lets that slot's waiters retry), never silently lost.
+    const c = Uint8Array.from([...head, 0x06, 0x01, 0x04, 0x00, 0x41, 0x0b, 0x0b]);
+    const posts = posted.length;
+    // c's slot from its request; then a colliding key's 1 lands there and c
+    // is posted again (fresh in-flight set, as after a cache clear).
+    assert.equal(compile(c), -3);
+    const slotOfC = posted[posts].readySlot;
+    globalThis._dolphinJitInflight?.clear();
+    Atomics.store(module.HEAPU8, request.readyPtr + slotOfC, 1);
+    assert.equal(compile(c), -4, "the cleared 1 is reported");
+    assert.equal(module.HEAPU8[request.readyPtr + slotOfC], 0);
     // Off: compiled in place as before.
     module._SetPpcWasmJitOffThread(0);
     assert.ok(compile(Uint8Array.from([...head, 0x06, 0x01, 0x04, 0x00, 0x41, 0x09, 0x0b])) > 0);
-    assert.equal(posted.length, 1);
+    assert.equal(posted.length, posts + 2);
   } finally {
     module._SetPpcWasmJitOffThread(0);
     globalThis.self = savedSelf;

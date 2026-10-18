@@ -11,7 +11,7 @@ diff --git a/Source/Core/Core/PowerPC/CachedInterpreter/CachedInterpreter.cpp b/
    // Day-7 Phase B: cache lookup before WebAssembly.Module compilation.
    // Module._dolphinJitCache is populated on each pthread by the pre-js
    // receiver (tools/jit-cache-prejs.js) when the discio worker sends a
-@@ -158,6 +159,40 @@ EM_JS(int, DolphinWeb_CachedInterpreterCompileWasmBlock,
+@@ -158,6 +159,43 @@ EM_JS(int, DolphinWeb_CachedInterpreterCompileWasmBlock,
    // contexts — JS-side state would never be visible across.
    // A module the engine rejects (CompileError, LinkError) must never take the
    // CPU thread down: the caller treats handle 0 as "interpret this block".
@@ -27,9 +27,12 @@ diff --git a/Source/Core/Core/PowerPC/CachedInterpreter/CachedInterpreter.cpp b/
 +    const slot = parseInt(cacheKey.slice(-64, -60), 16);
 +    const inflight = (globalThis._dolphinJitInflight ??= new Set());
 +    if (!inflight.has(cacheKey) || !Atomics.load(HEAPU8, ready_bits_ptr + slot)) {
++      let released = false;
 +      if (!inflight.has(cacheKey)) {
 +        inflight.add(cacheKey);
-+        Atomics.store(HEAPU8, ready_bits_ptr + slot, 0);
++        // Read while clearing: a 1 left by another key of this slot must
++        // not be lost (-4 tells the caller to retry that slot's waiters).
++        released = Atomics.exchange(HEAPU8, ready_bits_ptr + slot, 0) !== 0;
 +        try {
 +          self.postMessage({
 +            type: "dolphin-jit-compile-request",
@@ -44,7 +47,7 @@ diff --git a/Source/Core/Core/PowerPC/CachedInterpreter/CachedInterpreter.cpp b/
 +          return -1;
 +        }
 +      }
-+      return -3;
++      return released ? -4 : -3;
 +    }
 +    inflight.delete(cacheKey);  // ready: compile synchronously below
 +  }
@@ -52,7 +55,7 @@ diff --git a/Source/Core/Core/PowerPC/CachedInterpreter/CachedInterpreter.cpp b/
    try {
    if (!mod) {
      const bytes = Module.HEAPU8.slice(bytes_ptr, bytes_ptr + bytes_len);
-@@ -479,6 +514,107 @@ static std::atomic<u32> s_wasm_transient_reject_count{0};
+@@ -479,6 +517,107 @@ static std::atomic<u32> s_wasm_transient_reject_count{0};
  
  static std::atomic<bool> s_wasm_table_full{false};
  
@@ -160,7 +163,7 @@ diff --git a/Source/Core/Core/PowerPC/CachedInterpreter/CachedInterpreter.cpp b/
  // kind: 0 the engine rejected the bytes, 1 transient (out of memory while
  // compiling or instantiating), 2 the function table cannot grow.
  extern "C" EMSCRIPTEN_KEEPALIVE int DolphinWeb_RecordWasmCompileError(int bytes_len, int kind)
-@@ -515,8 +651,42 @@ namespace
+@@ -515,8 +654,42 @@ namespace
  // until the previous timing slice has finished executing them.
  std::unordered_map<const CachedInterpreter*, DeferredJit::Queue> s_deferred_wasm_queues;
  
@@ -203,7 +206,7 @@ diff --git a/Source/Core/Core/PowerPC/CachedInterpreter/CachedInterpreter.cpp b/
    if (!s_wasm_jit_enabled)
    {
      s_deferred_wasm_queues.erase(&cpu);
-@@ -8445,7 +8615,7 @@ std::vector<u8> BuildWasmCachedInterpreterBlock(std::span<const PPCAnalyst::Code
+@@ -8445,7 +8618,7 @@ std::vector<u8> BuildWasmCachedInterpreterBlock(std::span<const PPCAnalyst::Code
    return bytes;
  }
  
@@ -212,7 +215,7 @@ diff --git a/Source/Core/Core/PowerPC/CachedInterpreter/CachedInterpreter.cpp b/
  {
    const auto read_u32_index = static_cast<int>(
        reinterpret_cast<std::uintptr_t>(&DolphinWeb_CachedInterpreterReadU32));
-@@ -8492,7 +8662,10 @@ int CompileWasmCachedInterpreterBlockForTest(const std::vector<u8>& bytes)
+@@ -8492,7 +8665,10 @@ int CompileWasmCachedInterpreterBlockForTest(const std::vector<u8>& bytes)
        stfs_index, lfd_index, fmr_index, system_index, fp_index, fctiwz_index, interpret_index,
        fastcheck_gpfifo_index, fast_os_interrupt_call_index, fast_melee_input_status_call_index,
        fast_melee_status_call_index, fast_melee_service_poll_call_index,
@@ -224,7 +227,7 @@ diff --git a/Source/Core/Core/PowerPC/CachedInterpreter/CachedInterpreter.cpp b/
  }
  
  WasmStateLayout MakeWasmBlockTestLayout(PowerPC::PowerPCState& state, u8* ram, u32 ram_size)
-@@ -8947,6 +9120,7 @@ void CachedInterpreter::Run()
+@@ -8947,6 +9123,7 @@ void CachedInterpreter::Run()
  #ifdef __EMSCRIPTEN__
      ApplyArmedWasmPolicy();
      ApplyRequestedWasmPolicy(*this);
@@ -232,7 +235,7 @@ diff --git a/Source/Core/Core/PowerPC/CachedInterpreter/CachedInterpreter.cpp b/
  #endif
      // §28cn metrics-gated per-slice wall-time profiling. The timestamp below
      // spans Advance + ExecuteOneBlock; >16000us means the CPU pthread crossed
-@@ -11917,13 +12091,28 @@ bool CachedInterpreter::TryWriteWasmBlock(u32 nextPC)
+@@ -11917,13 +12094,39 @@ bool CachedInterpreter::TryWriteWasmBlock(u32 nextPC)
      LogWasmBlockReject("blacklisted", nullptr, 0, js.blockStart, code_block.m_num_instructions);
      return false;
    }
@@ -251,18 +254,29 @@ diff --git a/Source/Core/Core/PowerPC/CachedInterpreter/CachedInterpreter.cpp b/
 -      static_cast<int>(reinterpret_cast<std::uintptr_t>(&DolphinWeb_CachedInterpreterFma)));
 +      static_cast<int>(reinterpret_cast<std::uintptr_t>(&DolphinWeb_CachedInterpreterFma)),
 +      off_thread ? static_cast<int>(DolphinWeb_JitReadyBitsPtr()) : 0);
-+  if (handle == -3)
++  if (handle == -3 || handle == -4)
 +  {
-+    // Posted to the compiler worker: interpret now, retry once its bit is set.
++    // Posted to the compiler worker: interpret now, retry once its byte is set.
 +    ++s_wasm_off_thread_defer_count;
++    const u32 slot = ReadyBitOfKey(cache_key);
++    if (handle == -4)
++    {
++      // This post cleared a 1 another key of the slot was waiting for: let
++      // those blocks retry now (each recompiles its own bytes).
++      for (auto& waiting : s_wasm_off_thread_waiting)
++      {
++        if (waiting.bit == slot)
++          waiting.checks = UINT32_MAX - 1;
++      }
++    }
 +    s_wasm_off_thread_waiting.push_back({js.blockStart, static_cast<u32>(m_ppc_state.feature_flags),
-+                                         js.curBlock->normalEntry, ReadyBitOfKey(cache_key), 0});
++                                         js.curBlock->normalEntry, slot, 0});
 +    return false;
 +  }
    if (handle == -2)
    {
      // Function table full: no block can be installed any more this session.
-@@ -12208,6 +12397,19 @@ void ApplyArmedWasmPolicy()
+@@ -12208,6 +12411,19 @@ void ApplyArmedWasmPolicy()
  
  // Drives the armed warmup with a synthetic field counter, as the CPU thread
  // would at the start of each slice; returns the engaged field or -1.
@@ -282,7 +296,7 @@ diff --git a/Source/Core/Core/PowerPC/CachedInterpreter/CachedInterpreter.cpp b/
  extern "C" EMSCRIPTEN_KEEPALIVE double DolphinWeb_JitArmedStepForTest(double frame)
  {
    ApplyArmedWasmPolicyAt(static_cast<u64>(frame));
-@@ -12416,6 +12618,7 @@ extern "C" const char* GetPpcWasmHelperStats()
+@@ -12416,6 +12632,7 @@ extern "C" const char* GetPpcWasmHelperStats()
        << " enginereject:" << s_wasm_engine_reject_count.load(std::memory_order_relaxed)
        << " blacklisthit:" << s_wasm_blacklist_hit_count
        << " transientreject:" << s_wasm_transient_reject_count.load(std::memory_order_relaxed)
@@ -290,7 +304,7 @@ diff --git a/Source/Core/Core/PowerPC/CachedInterpreter/CachedInterpreter.cpp b/
        << " tablefull:" << (s_wasm_table_full.load(std::memory_order_relaxed) ? 1 : 0)
        << " fmad:" << s_wasm_fma_import_counts[0].load(std::memory_order_relaxed) +
                           s_wasm_fma_import_counts[1].load(std::memory_order_relaxed)
-@@ -13419,6 +13622,12 @@ extern "C" EMSCRIPTEN_KEEPALIVE int DolphinWeb_JitCompileBytesForTest(const u8*
+@@ -13419,6 +13636,12 @@ extern "C" EMSCRIPTEN_KEEPALIVE int DolphinWeb_JitCompileBytesForTest(const u8*
    return CompileWasmCachedInterpreterBlockForTest(std::vector<u8>(bytes, bytes + size));
  }
  
@@ -303,7 +317,7 @@ diff --git a/Source/Core/Core/PowerPC/CachedInterpreter/CachedInterpreter.cpp b/
  extern "C" EMSCRIPTEN_KEEPALIVE u32 DolphinWeb_JitEngineRejectCount()
  {
    return s_wasm_engine_reject_count.load(std::memory_order_relaxed);
-@@ -14011,6 +14220,7 @@ void CachedInterpreter::ClearCache()
+@@ -14011,6 +14234,7 @@ void CachedInterpreter::ClearCache()
  #line 12477
  #ifdef __EMSCRIPTEN__
    s_deferred_wasm_queues.erase(this);
