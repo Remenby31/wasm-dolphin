@@ -2199,7 +2199,15 @@ async function loadCore({
   console.log(`[s28-jittier] worker init: requested=${JSON.stringify(requestedPpcWasmJitTier)} ` +
     `→ resolved ppcWasmJitTier=${ppcWasmJitTier} (engage will call ` +
     `setPpcWasmJitEnabled(${ppcWasmJitTier === "mixed" ? 2 : 1}))`);
-  api.setPpcWasmJitEnabled?.(0);
+  if (ppcWasmJitRequested && api.setPpcWasmJitWarmup) {
+    // Armed before bootDisc: the core counts the warmup from field 0 of this
+    // boot whatever the worker's timing (a late first poll, a state loaded
+    // before the first frame).
+    api.setPpcWasmJitWarmup(ppcWasmJitTier === "mixed" ? 2 : 1, ppcWasmJitWarmupFrames);
+    ppcWasmJitArmed = true;
+  } else {
+    api.setPpcWasmJitEnabled?.(0);
+  }
   api.setPpcProfileEnabled?.(ppcProfile ? 1 : 0);
   api.setWebGpuUploadArenaMiB?.(wgpuUploadArenaMiB, collectMetrics ? 1 : 0);
   api.setWebGpuProducerProfileEnabled?.(wgpuProducerProfileRequested ? 1 : 0);

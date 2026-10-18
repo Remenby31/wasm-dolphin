@@ -38,8 +38,12 @@ correctness is established.
   diagnostics, not implied by the recommended URL.
 - There is no wall-clock fuse: once engaged, the JIT stays on. A block the
   browser engine rejects (`CompileError`/`LinkError`) is blacklisted by its
-  exact bytes and interpreted instead; the helper stats count these
-  (`enginereject`, `blacklisthit`).
+  exact bytes and interpreted instead. An out-of-memory while compiling or
+  instantiating is transient: that attempt is interpreted, the block is tried
+  again after the next cache clear. A function table that cannot grow stops
+  new compiles for the session (the table never shrinks). The helper stats
+  count these (`enginereject`, `blacklisthit`, `transientreject`,
+  `tablefull`).
 
 The OGL path has stricter defaults. If neither `wasmjit` nor `forcejit=1` is
 specified, JIT use defaults off for OGL. When JIT is explicitly enabled, a
@@ -91,9 +95,13 @@ Gekko's single rounding of frC), FPSCR including FPRF/FI/FR and the sticky
 exception bits, memory, and on an exception SRR0/SRR1/DAR/DSISR and the MSR.
 The direct tier computes zero and normal results in WASM. The FMA family
 (`fmadd`, `fmsub`, `fnmadd`, `fnmsub`, their single forms and `ps_madd*`,
-`ps_msub`, `ps_nmadd`, `ps_nmsub`) calls the interpreter's own
-`NI_madd_msub` through the `fma` import for the single rounding, then keeps
-the result inline under the same zero-or-normal rule. NaN, infinity,
+`ps_msub`, `ps_nmadd`, `ps_nmsub`) must round once. When the product a·frC
+is exact in double (their significant bits add up to 53 or fewer, frC
+rounded to 25 bits first for single ops, the product normal or an operand
+zero), `a·c ± b` is computed inline and rounds once like `std::fma`; on the
+single-precision tie that the interpreter corrects, and whenever the product
+is not exact, it calls the interpreter's own `NI_madd_msub` through the `fma`
+import. Either way the result stays inline under the zero-or-normal rule. NaN, infinity,
 denormal results, a denormal frC, the reciprocal estimates and
 `MSR.FE0/FE1` set re-run the instruction through the interpreter helper
 before anything is written. FPRF is skipped only when the analyzer proves a

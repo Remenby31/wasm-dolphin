@@ -129,11 +129,10 @@ test("addresses outside the 0x8/0xC views go through the MMU, as in the interpre
   }
 });
 
-test("a transient install failure is interpreted once, never blacklisted", { skip }, async () => {
+test("install failures: out of memory is transient, a full table stops compiling, neither is blacklisted", { skip }, async () => {
   const { default: createDolphinCore } = await import(new URL("../cores/dolphin/dolphin-core-upstream.js", import.meta.url));
   const { readFileSync } = await import("node:fs");
   const module = await createDolphinCore({ wasmBinary: readFileSync(coreWasm), noInitialRun: true, printErr: () => {} });
-  if (typeof module._DolphinWeb_JitFailNextTableGrow !== "function") return;
   // (func (param i32) (result i32) local.get 0), exported as "f"
   const ok = Uint8Array.from([0x00, 0x61, 0x73, 0x6d, 0x01, 0x00, 0x00, 0x00, 0x01, 0x06, 0x01, 0x60, 0x01, 0x7f, 0x01, 0x7f,
     0x03, 0x02, 0x01, 0x00, 0x07, 0x05, 0x01, 0x01, 0x66, 0x00, 0x00, 0x0a, 0x06, 0x01, 0x04, 0x00, 0x20, 0x00, 0x0b]);
@@ -143,15 +142,49 @@ test("a transient install failure is interpreted once, never blacklisted", { ski
   const warn = console.warn;
   console.warn = () => {};
   try {
-    module._DolphinWeb_JitFailNextTableGrow();
-    assert.equal(module._DolphinWeb_JitCompileBytesForTest(ptr, ok.length), -1);
+    module._DolphinWeb_JitFailNextInstance();
+    assert.equal(module._DolphinWeb_JitCompileBytesForTest(ptr, ok.length), -1, "out of memory: transient");
     assert.equal(module._DolphinWeb_JitTransientRejectCount(), 1);
-    assert.equal(module._DolphinWeb_JitEngineRejectCount(), rejects, "not counted as an engine reject");
     assert.ok(module._DolphinWeb_JitCompileBytesForTest(ptr, ok.length) > 0, "the same bytes install next time");
+    assert.equal(module._DolphinWeb_JitTableFull(), 0);
+    module._DolphinWeb_JitFailNextTableGrow();
+    assert.equal(module._DolphinWeb_JitCompileBytesForTest(ptr, ok.length), -2, "table full: not transient");
+    assert.equal(module._DolphinWeb_JitTableFull(), 1, "the JIT stops compiling for the session");
+    assert.equal(module._DolphinWeb_JitTransientRejectCount(), 1);
+    assert.equal(module._DolphinWeb_JitEngineRejectCount(), rejects, "never an engine reject");
   } finally {
     console.warn = warn;
     module._free(ptr);
   }
+});
+
+test("armed warmup engages at the same field: late first step, state loaded before the first slice", { skip }, async () => {
+  const { default: createDolphinCore } = await import(new URL("../cores/dolphin/dolphin-core-upstream.js", import.meta.url));
+  const { readFileSync } = await import("node:fs");
+  const fresh = async () => createDolphinCore({ wasmBinary: readFileSync(coreWasm), noInitialRun: true, printErr: () => {} });
+  const engageField = (m, fields) => { for (const f of fields) { const e = m._DolphinWeb_JitArmedStepForTest(f); if (e >= 0) return e; } return -1; };
+  const range = (a, b) => Array.from({ length: b - a }, (_, k) => a + k);
+
+  // Armed before boot (the worker does it in loadCore): field 60, whether the
+  // CPU thread's first slice comes at field 0 or later.
+  for (const firstStep of [0, 1, 7, 59]) {
+    const m = await fresh();
+    m._SetPpcWasmJitWarmup(1, 60);
+    assert.equal(engageField(m, range(firstStep, 200)), 60, `first step at field ${firstStep}`);
+  }
+  // A state loaded before the first slice: counted from the loaded field.
+  for (const loaded of [0, 349, 1000]) {
+    const m = await fresh();
+    m._SetPpcWasmJitWarmup(1, 60);
+    m._DolphinWeb_JitOnStateLoaded();
+    assert.equal(engageField(m, range(loaded, loaded + 200)), loaded + 60, `loaded at ${loaded}`);
+  }
+  // A load after engage re-arms from the loaded field.
+  const m = await fresh();
+  m._SetPpcWasmJitWarmup(1, 60);
+  assert.equal(engageField(m, range(0, 100)), 60);
+  m._DolphinWeb_JitOnStateLoaded();
+  assert.equal(engageField(m, range(500, 700)), 560);
 });
 
 test("FP program exceptions (FE0/FE1, enabled invalid or zero-divide) end in the same state", { skip }, () => {

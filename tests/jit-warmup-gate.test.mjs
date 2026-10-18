@@ -104,3 +104,10 @@ test("with the core gate, the worker arms once and only reports the core's engag
   assert.equal(statuses.length, 1);
   assert.match(statuses[0], /field 61/);
 });
+
+test("the worker arms the core-side warmup in loadCore, before bootDisc", () => {
+  const arm = worker.indexOf("api.setPpcWasmJitWarmup(ppcWasmJitTier");
+  const boot = worker.indexOf("api.bootDisc(path)");
+  assert.ok(arm > 0 && boot > 0 && arm < boot, "armed before the disc boots");
+  assert.match(worker.slice(arm - 400, arm), /if \(ppcWasmJitRequested && api\.setPpcWasmJitWarmup\)/);
+});

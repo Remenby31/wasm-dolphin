@@ -161,4 +161,8 @@ const summary = {
 };
 console.log(JSON.stringify(summary));
 if (jsonOut) writeFileSync(jsonOut, JSON.stringify({ summary, findings: list }, null, 2));
-process.exit(list.length ? 1 : 0);
+// Random programs set FE0/FE1 in one state in six: none raising means the
+// exception paths silently went uncompared.
+const noExceptions = programs > 0 && raisedException === 0;
+if (noExceptions) console.log("no program raised an exception: exception paths were not compared");
+process.exit(list.length || noExceptions ? 1 : 0);
