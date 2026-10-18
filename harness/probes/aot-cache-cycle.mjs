@@ -16,6 +16,7 @@
 // exists, this checks the storage, keys, Service Worker and code cache path.
 //
 // node harness/probes/aot-cache-cycle.mjs --iso disc.iso [--tree .] [--port 8090] [--out dir]
+import { createHash } from "node:crypto";
 import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import os from "node:os";
 import path from "node:path";
@@ -71,10 +72,12 @@ function regionModule(seed, count) {
   return Buffer.from(o);
 }
 
-const modules = Array.from({ length: Number(values.regions) }, (_, i) => ({
-  key: `probe-region:${i}`,
-  b64: regionModule(0x9e3779b9 ^ (i + 1), Number(values.functions)).toString("base64")
-}));
+// Keys end with a SHA-256, as region keys must (the hash of the guest code;
+// here, of the synthetic module).
+const modules = Array.from({ length: Number(values.regions) }, (_, i) => {
+  const bytes = regionModule(0x9e3779b9 ^ (i + 1), Number(values.functions));
+  return { key: `probe-region:${createHash("sha256").update(bytes).digest("hex")}`, b64: bytes.toString("base64") };
+});
 const OTHER_CORE = "c".repeat(64);
 const out = values.out;
 mkdirSync(out, { recursive: true });

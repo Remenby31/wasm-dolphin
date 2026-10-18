@@ -2760,8 +2760,13 @@ async function mountFile(file) {
   fs.mount(resolveWorkerFs(moduleInstance), { blobs: [{ name: safeName, data: file }] }, WORKERFS_MOUNT_DIR);
   mounted = true;
   // P6: the disc's key for the region cache, read from the File off the boot path.
+  // A generation per mount: a slow read for a previous disc never lands.
+  const discGeneration = ++aotDiscGeneration;
   aotDiscKey = null;
-  aotDiscKeyPromise = readDiscKeyFromFile(file).then((key) => (aotDiscKey = key), () => null);
+  aotDiscKeyPromise = readDiscKeyFromFile(file).then(
+    (key) => (discGeneration === aotDiscGeneration ? (aotDiscKey = key) : null),
+    () => null
+  );
   console.log(`[boot-phase] fs.mount(WORKERFS) took ${(performance.now() - _t_workerfs).toFixed(1)}ms (${(file.size / 1048576).toFixed(1)}MiB image)`);
 
   const _t_mount = performance.now();
@@ -6012,10 +6017,15 @@ async function reconcileJitCacheWithBuild(fingerprint) {
     }
   }
   if (dolphinJitBlockStore) {
-    if (dolphinJitBlockStore.reset && dolphinJitBlockStore.reset !== "missing-stored-identity") {
+    if (dolphinJitBlockStore.reset) {
       postStatus(`jit-cache: identity reset (${dolphinJitBlockStore.reset}); cleared unverified modules`);
     }
-    dolphinJitLegacyMigration = await migrateLegacyJitIdb({ store: dolphinJitBlockStore, coreFingerprint: fingerprint });
+    try {
+      dolphinJitLegacyMigration = await migrateLegacyJitIdb({ store: dolphinJitBlockStore, coreFingerprint: fingerprint });
+    } catch (err) {
+      // The old database stays for the next boot; this one starts without it.
+      dolphinJitLegacyMigration = { found: true, moved: 0, dropped: 0, reason: `error: ${err?.message || err}` };
+    }
     if (dolphinJitLegacyMigration.found) {
       postStatus(
         `jit-cache: IndexedDB cache migrated (${dolphinJitLegacyMigration.reason}: ` +
@@ -6081,10 +6091,13 @@ async function reconcileJitCacheWithBuild(fingerprint) {
 // (disc, core, compiler version, JIT flags); see src/aot-cache.js.
 const AOT_BASE_URL = new URL("../", import.meta.url).href;
 let aotDiscKey = null;
+let aotDiscGeneration = 0;
 let aotDiscKeyPromise = Promise.resolve(null);
 let aotCoreFingerprint = null;
 export async function openDolphinAotCache({ compilerVersion, flagsMask = 0, coreHash = null, onProgress = null }) {
+  const generation = aotDiscGeneration;
   const discKey = aotDiscKey ?? await aotDiscKeyPromise;
+  if (generation !== aotDiscGeneration) return null;
   const core = coreHash ?? aotCoreFingerprint;
   if (!discKey || !core) return null;
   return openAotCache({ discKey, coreHash: core, compilerVersion, flagsMask, baseUrl: AOT_BASE_URL, onProgress });

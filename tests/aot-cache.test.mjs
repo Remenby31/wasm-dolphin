@@ -8,7 +8,9 @@ import {
   AOT_SW_SEGMENT,
   aotEntryUrl,
   openAotCache,
-  pruneAotCaches
+  pruneAotCaches,
+  readDiscKeyFromFile,
+  registerAotServiceWorker
 } from "../src/aot-cache.js";
 import {
   AOT_ANY_DISC_KEY,
@@ -107,155 +109,229 @@ test("identity: every field is part of the cache name, and bad identities are re
   assert.equal(classifyAotCacheIdentity({ stored: null, current }).reason, "missing-stored-identity");
 });
 
+// Region keys end with the SHA-256 of the guest code they were compiled from.
+const k = (n) => `r:${String(n).padStart(64, "0")}`;
+let tick = 1000;
+const clock = () => (tick += 1000);
+
 test("put, has and load round-trip; the loaded module runs", async () => {
   const storage = fakeCacheStorage();
   const cache = await open(storage);
-  const events = [];
-  const { failed } = await cache.put([{ key: "r:1", bytes: MOD_A }, { key: "r:2", bytes: MOD_B }]);
+  const { failed } = await cache.put([{ key: k(1), bytes: MOD_A }, { key: k(2), bytes: MOD_B }]);
   assert.deepEqual(failed, []);
-  assert.deepEqual(await cache.has(["r:1", "r:2", "r:3"]), new Set(["r:1", "r:2"]));
-  const loaded = await cache.load(["r:1", "r:2", "r:3"]);
-  assert.equal(new WebAssembly.Instance(loaded.get("r:1").module).exports.f(5), 5);
-  assert.equal(new WebAssembly.Instance(loaded.get("r:2").module).exports.f(5), 6);
-  assert.deepEqual(loaded.get("r:3"), { reason: "missing" });
+  assert.deepEqual(await cache.has([k(1), k(2), k(3)]), new Set([k(1), k(2)]));
+  const loaded = await cache.load([k(1), k(2), k(3)]);
+  assert.equal(new WebAssembly.Instance(loaded.get(k(1)).module).exports.f(5), 5);
+  assert.equal(new WebAssembly.Instance(loaded.get(k(2)).module).exports.f(5), 6);
+  assert.deepEqual(loaded.get(k(3)), { reason: "missing" });
   // the stored entry carries the hash of its bytes, and the headers the SW serves
-  const stored = await (await storage.open(cache.cacheName)).match(aotEntryUrl(BASE, cache.cacheName, "r:1"));
+  const stored = await (await storage.open(cache.cacheName)).match(aotEntryUrl(BASE, cache.cacheName, k(1)));
   assert.equal(stored.headers.get(AOT_HASH_HEADER), await sha256Hex(MOD_A));
   assert.equal(stored.headers.get("content-type"), "application/wasm");
   assert.equal(stored.headers.get("cross-origin-resource-policy"), "same-origin");
-  void events;
 });
 
-test("a key mismatch never reaches the entry: other core, compiler or flags means another cache, and the stale one is dropped", async () => {
-  const storage = fakeCacheStorage();
-  const first = await open(storage);
-  await first.put([{ key: "r:1", bytes: MOD_A }]);
-  const otherDisc = await open(storage, { discKey: OTHER_DISC });
-  await otherDisc.put([{ key: "r:1", bytes: MOD_B }]);
+test("a region key must name the guest code's hash", async () => {
+  const cache = await open(fakeCacheStorage());
+  const { failed } = await cache.put([{ key: "r:1", bytes: MOD_A }, { key: `r:${"g".repeat(64)}`, bytes: MOD_A }]);
+  assert.deepEqual(failed.map((f) => f.reason), ["bad-key", "bad-key"]);
+  assert.deepEqual(await cache.load(["r:1"]), new Map([["r:1", { reason: "bad-key" }]]));
+});
 
-  const newCore = await open(storage, { coreHash: "b".repeat(64) });
-  assert.notEqual(newCore.cacheName, first.cacheName);
-  assert.deepEqual(await newCore.has(["r:1"]), new Set());
-  // the same disc's cache under the old core is gone, the other disc's is kept
+test("a key mismatch never reaches the entry: another core, compiler or flags is another cache; the oldest of a disc's are dropped", async () => {
+  const storage = fakeCacheStorage();
+  const first = await open(storage, {}, { clock });
+  await first.put([{ key: k(1), bytes: MOD_A }]);
+  const otherDisc = await open(storage, { discKey: OTHER_DISC }, { clock });
+  const otherFlags = await open(storage, { flagsMask: 4 }, { clock });
+  assert.notEqual(otherFlags.cacheName, first.cacheName);
+  assert.deepEqual(await otherFlags.has([k(1)]), new Set());
+  // two identities of one disc live side by side (tabs, flag sets in turn)
+  assert.deepEqual(otherFlags.pruned, []);
+  const newCore = await open(storage, { coreHash: "b".repeat(64) }, { clock });
+  // a third: the least recently opened of the disc goes, the other disc stays
   assert.deepEqual(newCore.pruned, [first.cacheName]);
-  assert.equal(storage.caches.has(first.cacheName), false);
+  assert.equal(storage.caches.has(otherFlags.cacheName), true);
   assert.equal(storage.caches.has(otherDisc.cacheName), true);
 });
 
-test("a cache whose stored identity is missing or differs is started over", async () => {
+test("an edited stored identity starts the cache over; a missing one (a cache being created) does not", async () => {
   const storage = fakeCacheStorage();
   const cache = await open(storage);
-  await cache.put([{ key: "r:1", bytes: MOD_A }]);
+  await cache.put([{ key: k(1), bytes: MOD_A }]);
   const raw = await storage.open(cache.cacheName);
   const idUrl = new URL(`${AOT_SW_SEGMENT}/${cache.cacheName}/identity.json`, BASE).href;
+  raw.entries.delete(idUrl);
+  const reopened = await open(storage);
+  assert.equal(reopened.reset, null);
+  assert.deepEqual(await reopened.has([k(1)]), new Set([k(1)]));
   await raw.put(idUrl, new Response(JSON.stringify({ ...cache.identity, flagsMask: 9 })));
   const again = await open(storage);
   assert.equal(again.reset, "flagsMask-mismatch");
-  assert.deepEqual(await again.has(["r:1"]), new Set());
+  assert.deepEqual(await again.has([k(1)]), new Set());
 });
 
 test("corrupt entries are deleted and reported, never compiled", async () => {
   const storage = fakeCacheStorage();
   const cache = await open(storage);
-  await cache.put([{ key: "flip", bytes: MOD_A }, { key: "nohash", bytes: MOD_A }, { key: "junk", bytes: MOD_A }]);
+  await cache.put([{ key: k(1), bytes: MOD_A }, { key: k(2), bytes: MOD_A }, { key: k(3), bytes: MOD_A }]);
   const raw = await storage.open(cache.cacheName);
-  // one flipped byte under the old hash
-  const flip = raw.entries.get(aotEntryUrl(BASE, cache.cacheName, "flip"));
-  flip.body[flip.body.length - 2] ^= 1;
-  // an entry written without its hash
-  raw.entries.get(aotEntryUrl(BASE, cache.cacheName, "nohash")).headers = [["content-type", "application/wasm"]];
-  // bytes that hash right but the engine rejects
-  const junk = new Uint8Array([0, 0x61, 0x73, 0x6d, 1, 0, 0, 0, 0x0a, 1]);
-  raw.entries.set(aotEntryUrl(BASE, cache.cacheName, "junk"), {
+  const flip = raw.entries.get(aotEntryUrl(BASE, cache.cacheName, k(1)));
+  flip.body[flip.body.length - 2] ^= 1; // one flipped byte under the old hash
+  raw.entries.get(aotEntryUrl(BASE, cache.cacheName, k(2))).headers = [["content-type", "application/wasm"]]; // no hash
+  const junk = new Uint8Array([0, 0x61, 0x73, 0x6d, 1, 0, 0, 0, 0x0a, 1]); // hashes right, engine rejects
+  raw.entries.set(aotEntryUrl(BASE, cache.cacheName, k(3)), {
     body: junk,
     headers: [["content-type", "application/wasm"], [AOT_HASH_HEADER, await sha256Hex(junk)]]
   });
-  const loaded = await cache.load(["flip", "nohash", "junk"]);
-  assert.deepEqual(loaded.get("flip"), { reason: "corrupt" });
-  assert.deepEqual(loaded.get("nohash"), { reason: "corrupt" });
-  assert.deepEqual(loaded.get("junk"), { reason: "engine-reject" });
-  assert.deepEqual(await cache.has(["flip", "nohash", "junk"]), new Set());
-  assert.deepEqual(cache.stats().corrupt, 2);
+  const loaded = await cache.load([k(1), k(2), k(3)]);
+  assert.deepEqual(loaded.get(k(1)), { reason: "corrupt" });
+  assert.deepEqual(loaded.get(k(2)), { reason: "corrupt" });
+  assert.deepEqual(loaded.get(k(3)), { reason: "engine-reject" });
+  assert.deepEqual(await cache.has([k(1), k(2), k(3)]), new Set());
+  assert.equal(cache.stats().corrupt, 2);
 });
 
-test("quota full: stale caches go first, then the entry fails with reason quota", async () => {
+test("a CacheStorage that fails to read never fails the launch: the entry is dropped and reported", async () => {
   const storage = fakeCacheStorage();
-  const old = await open(storage, { compilerVersion: "region-0" });
-  await old.put([{ key: "r:1", bytes: MOD_A }]);
   const cache = await open(storage);
-  // the stale one was pruned at open; make a new stale cache appear later
-  const stale = await open(storage, { compilerVersion: "region-9" });
-  await stale.put([{ key: "r:9", bytes: MOD_B }]);
-  let freed = false;
-  storage.failPut = (name) => {
-    if (name !== cache.cacheName || freed) return null;
-    if (!storage.caches.has(stale.cacheName)) {
-      freed = true;
-      return null;
-    }
-    return Object.assign(new Error("Quota exceeded"), { name: "QuotaExceededError" });
-  };
-  assert.deepEqual((await cache.put([{ key: "r:1", bytes: MOD_A }])).failed, []);
-  assert.equal(storage.caches.has(stale.cacheName), false, "the stale cache made room");
+  await cache.put([{ key: k(1), bytes: MOD_A }]);
+  const raw = await storage.open(cache.cacheName);
+  const match = raw.match;
+  raw.match = async () => { throw new Error("UnknownError: read failed"); };
+  raw.keys = async () => { throw new Error("UnknownError: read failed"); };
+  assert.deepEqual(await cache.load([k(1)]), new Map([[k(1), { reason: "read-error" }]]));
+  assert.deepEqual(await cache.has([k(1)]), new Set());
+  raw.match = match;
+  assert.deepEqual(await cache.load([k(1)]), new Map([[k(1), { reason: "missing" }]]));
+  // a cache deleted while in use: misses, no throw
+  await storage.delete(cache.cacheName);
+  assert.equal((await cache.load([k(1)])).get(k(1)).reason, "missing");
+});
 
-  storage.failPut = () => Object.assign(new Error("Quota exceeded"), { name: "QuotaExceededError" });
-  const result = await cache.put([{ key: "r:2", bytes: MOD_B }, { key: "bad/key", bytes: MOD_B }, { key: "r:3", bytes: new Uint8Array([1, 2]) }]);
+test("quota full: the least recently opened caches are evicted first, then the entry fails with reason quota", async () => {
+  const storage = fakeCacheStorage();
+  const oldDisc = await open(storage, { discKey: OTHER_DISC }, { clock });
+  await oldDisc.put([{ key: k(9), bytes: MOD_B }]);
+  const recentDisc = await open(storage, { discKey: `disc-sha256-v1:${"3".repeat(64)}` }, { clock });
+  const cache = await open(storage, {}, { clock });
+  let failures = 1;
+  storage.failPut = (name) => (name === cache.cacheName && failures-- > 0 ? Object.assign(new Error("Quota exceeded"), { name: "QuotaExceededError" }) : null);
+  assert.deepEqual((await cache.put([{ key: k(1), bytes: MOD_A }])).failed, []);
+  assert.equal(storage.caches.has(oldDisc.cacheName), false, "the least recently opened went first");
+  assert.equal(storage.caches.has(recentDisc.cacheName), true);
+
+  storage.failPut = (name) => (name === cache.cacheName ? Object.assign(new Error("Quota exceeded"), { name: "QuotaExceededError" }) : null);
+  const result = await cache.put([{ key: k(2), bytes: MOD_B }, { key: "bad/key", bytes: MOD_B }, { key: k(3), bytes: new Uint8Array([1, 2]) }]);
   assert.deepEqual(result.failed, [
-    { key: "r:2", reason: "quota" },
+    { key: k(2), reason: "quota" },
     { key: "bad/key", reason: "bad-key" },
-    { key: "r:3", reason: "engine-reject" }
+    { key: k(3), reason: "engine-reject" }
   ]);
-  // what was written before stays valid
-  assert.deepEqual(await cache.has(["r:1", "r:2"]), new Set(["r:1"]));
+  assert.equal(storage.caches.has(recentDisc.cacheName), false, "everything else was evicted before giving up");
+  storage.failPut = null;
+  assert.deepEqual(await cache.has([k(1), k(2)]), new Set([k(1)]), "what was written before stays valid");
 });
 
 test("cancel stops at the next entry; put resolves only once entries are written", async () => {
   const storage = fakeCacheStorage();
   const cache = await open(storage);
-  const pending = cache.put([{ key: "a", bytes: MOD_A }, { key: "b", bytes: MOD_B }]);
+  const pending = cache.put([{ key: k(1), bytes: MOD_A }, { key: k(2), bytes: MOD_B }]);
   cache.cancel();
   const { failed } = await pending;
-  // the first entry was already started when cancel() came
-  assert.deepEqual(failed, [{ key: "b", reason: "cancelled" }]);
+  assert.deepEqual(failed, [{ key: k(2), reason: "cancelled" }]);
   await cache.drain();
-  assert.deepEqual(await cache.has(["a", "b"]), new Set(["a"]));
+  assert.deepEqual(await cache.has([k(1), k(2)]), new Set([k(1)]));
 });
 
-test("with the Service Worker, modules come from compileStreaming(fetch) of an untouched response", async () => {
+test("with the Service Worker, modules come from compileStreaming(fetch) of an untouched response; a 'no' is asked again later", async () => {
   const storage = fakeCacheStorage();
   const fetched = [];
-  const streamed = [];
+  let controlled = false;
   let cacheName = null;
   const fetchImpl = async (url) => {
     fetched.push(url);
+    if (url.endsWith("/ping")) return new Response(null, { status: controlled ? 204 : 404, headers: controlled ? { "x-salon-aot-sw": "1" } : {} });
     const hit = await (await storage.open(cacheName)).match(url);
     return hit ?? new Response(null, { status: 404 });
   };
-  const cache = await open(storage, {}, {
-    serviceWorker: true,
-    fetchImpl,
-    compileStreaming: async (response) => {
-      streamed.push(response.url ?? "");
-      return WebAssembly.compile(await response.arrayBuffer());
-    }
-  });
-  cacheName = cache.cacheName;
-  await cache.put([{ key: "r:1", bytes: MOD_A }]);
-  const loaded = await cache.load(["r:1"]);
-  assert.equal(loaded.get("r:1").streamed, true);
-  assert.deepEqual(fetched, [aotEntryUrl(BASE, cacheName, "r:1")]);
-  assert.equal(streamed.length, 1);
-  assert.equal(cache.stats().streamed, 1);
+  const realNow = Date.now;
+  let now = 0;
+  Date.now = () => now;
+  try {
+    const cache = await openAotCache({ ...ident(), baseUrl: BASE, cacheStorage: storage, fetchImpl,
+      compileStreaming: async (response) => WebAssembly.compile(await response.arrayBuffer()) });
+    cacheName = cache.cacheName;
+    await cache.put([{ key: k(1), bytes: MOD_A }]);
+    assert.equal((await cache.load([k(1)])).get(k(1)).streamed, false);
+    controlled = true; // the Service Worker took control meanwhile
+    assert.equal((await cache.load([k(1)])).get(k(1)).streamed, false, "not asked again so soon");
+    now = 20_000;
+    assert.equal((await cache.load([k(1)])).get(k(1)).streamed, true);
+    assert.equal(fetched.filter((u) => u.endsWith("/ping")).length, 2);
+    assert.equal(cache.stats().streamed, 1);
+  } finally {
+    Date.now = realNow;
+  }
 });
 
-test("pruneAotCaches leaves other discs and foreign caches alone", async () => {
+test("pruneAotCaches leaves other discs, foreign caches and caches being created alone", async () => {
   const storage = fakeCacheStorage();
-  const a = await open(storage);
-  const b = await open(storage, { discKey: OTHER_DISC });
+  const a = await open(storage, {}, { clock });
+  const b = await open(storage, { discKey: OTHER_DISC }, { clock });
   await storage.open("someone-else");
-  const removed = await pruneAotCaches({ cacheStorage: storage, keep: "salon-aot-v1-none", baseUrl: BASE, discKey: DISC });
+  await storage.open("salon-aot-v1-" + "f".repeat(40)); // no identity yet: another tab is creating it
+  const removed = await pruneAotCaches({ cacheStorage: storage, keep: "salon-aot-v1-none", baseUrl: BASE, discKey: DISC, keepPerDisc: 1 });
   assert.deepEqual(removed, [a.cacheName]);
-  assert.ok(storage.caches.has(b.cacheName) && storage.caches.has("someone-else"));
+  assert.ok(storage.caches.has(b.cacheName) && storage.caches.has("someone-else") && storage.caches.has("salon-aot-v1-" + "f".repeat(40)));
+});
+
+test("readDiscKeyFromFile: header, boot DOL and FST of a raw image; anything else gets no key", async () => {
+  const image = new Uint8Array(0x10000);
+  const view = new DataView(image.buffer);
+  view.setUint32(0x1c, 0xc2339f3d);
+  view.setUint32(0x420, 0x2000); // DOL
+  view.setUint32(0x424, 0x8000); // FST
+  view.setUint32(0x428, 0x40);
+  view.setUint32(0x2000 + 0x00, 0x100); // text0 file offset
+  view.setUint32(0x2000 + 0x90, 0x200); // text0 size
+  image.fill(7, 0x2100, 0x2300);
+  image.fill(9, 0x8000, 0x8040);
+  const key = await readDiscKeyFromFile(new Blob([image]));
+  const expected = await canonicalDiscKey({ header: image.slice(0, 0x440), dol: image.slice(0x2000, 0x2300), fst: image.slice(0x8000, 0x8040) });
+  assert.equal(key, expected);
+  image[0x2150] ^= 1; // a change in the DOL changes the key
+  assert.notEqual(await readDiscKeyFromFile(new Blob([image])), expected);
+  const notGc = image.slice();
+  new DataView(notGc.buffer).setUint32(0x1c, 0);
+  assert.equal(await readDiscKeyFromFile(new Blob([notGc])), null);
+  const truncated = image.slice(0, 0x2100);
+  assert.equal(await readDiscKeyFromFile(new Blob([truncated])), null);
+});
+
+test("registerAotServiceWorker: registers standalone, or clears it when a site manages its own", async () => {
+  const registered = [];
+  const unregistered = [];
+  const container = {
+    controller: null,
+    register: async (url) => (registered.push(url), { url }),
+    getRegistrations: async () => [
+      { active: { scriptURL: "http://x/engine/src/aot-sw.js?standalone=1" }, unregister: async () => unregistered.push("aot") },
+      { active: { scriptURL: "http://x/sw.js?engine=1" }, unregister: async () => unregistered.push("site") }
+    ]
+  };
+  await registerAotServiceWorker({ container, scriptUrl: new URL("http://x/src/aot-sw.js?standalone=1") });
+  assert.deepEqual(registered, ["http://x/src/aot-sw.js?standalone=1"]);
+  globalThis.__salonAotServiceWorkerManaged = true;
+  try {
+    assert.equal(await registerAotServiceWorker({ container }), null);
+    assert.deepEqual(unregistered, ["aot"]);
+    assert.equal(registered.length, 1);
+  } finally {
+    delete globalThis.__salonAotServiceWorkerManaged;
+  }
+  // another Service Worker already controls the page: leave it be
+  assert.equal(await registerAotServiceWorker({ container: { ...container, controller: { scriptURL: "http://x/sw.js" } } }), null);
 });
 
 test("aot-sw.js answers only its own URLs, from CacheStorage, and is importScripts-safe", async () => {
@@ -263,17 +339,11 @@ test("aot-sw.js answers only its own URLs, from CacheStorage, and is importScrip
   assert.doesNotMatch(source, /^\s*(import|export)\s/m, "classic script");
   const storage = fakeCacheStorage();
   const cache = await openAotCache({ ...ident(), baseUrl: BASE, cacheStorage: storage, serviceWorker: false });
-  await cache.put([{ key: "r:1", bytes: MOD_A }]);
+  await cache.put([{ key: k(1), bytes: MOD_A }]);
 
   function load(location) {
     const listeners = {};
-    const context = {
-      self: null,
-      caches: storage,
-      URL,
-      Response,
-      Promise
-    };
+    const context = { self: null, caches: storage, URL, Response, Promise };
     context.self = {
       location: { href: location, origin: new URL(location).origin },
       addEventListener: (type, fn) => {
@@ -296,19 +366,19 @@ test("aot-sw.js answers only its own URLs, from CacheStorage, and is importScrip
   const standalone = load("http://127.0.0.1:8090/src/aot-sw.js?standalone=1");
   assert.deepEqual(Object.keys(standalone).sort(), ["activate", "fetch", "install"]);
 
-  const hit = await fetchThrough(imported, aotEntryUrl(BASE, cache.cacheName, "r:1"));
+  const hit = await fetchThrough(imported, aotEntryUrl(BASE, cache.cacheName, k(1)));
   assert.equal(hit.status, 200);
   assert.equal(hit.headers.get(AOT_HASH_HEADER), await sha256Hex(MOD_A));
   assert.deepEqual(new Uint8Array(await hit.arrayBuffer()), MOD_A);
   const ping = await fetchThrough(imported, `${BASE}engine/${AOT_SW_SEGMENT}/ping`);
   assert.equal(ping.status, 204);
   assert.equal(ping.headers.get("x-salon-aot-sw"), "1");
-  assert.equal((await fetchThrough(imported, aotEntryUrl(BASE, cache.cacheName, "nope"))).status, 404);
+  assert.equal((await fetchThrough(imported, aotEntryUrl(BASE, cache.cacheName, k(2)))).status, 404);
   assert.equal((await fetchThrough(imported, `${BASE}${AOT_SW_SEGMENT}/not-a-cache/x.wasm`)).status, 404);
   // everything else goes to the network untouched
   assert.equal(await fetchThrough(imported, `${BASE}cores/dolphin/dolphin-core-upstream.wasm`), null);
   assert.equal(await fetchThrough(imported, "https://example.com/__salon-aot/ping"), null);
-  assert.equal(await fetchThrough(imported, aotEntryUrl(BASE, cache.cacheName, "r:1"), "POST"), null);
+  assert.equal(await fetchThrough(imported, aotEntryUrl(BASE, cache.cacheName, k(1)), "POST"), null);
 });
 
 // ---- block store (the IndexedDB block cache, moved) ----
@@ -346,7 +416,7 @@ test("block store: a corrupt pack is dropped, another core starts empty and prun
   await store.appendMany([{ key: await canonicalWasmBlockKey(MOD_A), bytes: MOD_A }]);
   await store.appendMany([{ key: await canonicalWasmBlockKey(MOD_B), bytes: MOD_B }]);
   const raw = await storage.open(store.cacheName);
-  const firstPack = [...raw.entries.keys()].find((u) => u.endsWith("00000000.pack"));
+  const firstPack = [...raw.entries.keys()].find((u) => u.includes("/blocks-00000000-"));
   raw.entries.get(firstPack).body[30] ^= 0xff;
   const entries = await store.entries();
   assert.deepEqual(entries.map((e) => e.key), [await canonicalWasmBlockKey(MOD_B)]);
@@ -452,4 +522,52 @@ test("the IndexedDB block cache moves into the store under the same core, and is
   const none = fakeIndexedDb();
   assert.equal((await migrateLegacyJitIdb({ store: store2, coreFingerprint: fingerprint, idb: none })).found, false);
   assert.equal(none.exists, false);
+});
+
+test("block store: two tabs write packs side by side without overwriting each other", async () => {
+  const storage = fakeCacheStorage();
+  const [tabA, tabB] = await Promise.all([
+    openAotBlockStore({ coreHash: CORE, baseUrl: BASE, cacheStorage: storage }),
+    openAotBlockStore({ coreHash: CORE, baseUrl: BASE, cacheStorage: storage })
+  ]);
+  assert.equal(tabA.cacheName, tabB.cacheName);
+  const keyA = await canonicalWasmBlockKey(MOD_A);
+  const keyB = await canonicalWasmBlockKey(MOD_B);
+  await Promise.all([tabA.appendMany([{ key: keyA, bytes: MOD_A }]), tabB.appendMany([{ key: keyB, bytes: MOD_B }])]);
+  const keys = (await tabA.entries()).map((e) => e.key).sort();
+  assert.deepEqual(keys, [keyA, keyB].sort());
+});
+
+test("block store: a pack that cannot be read is dropped, and a failed write does not block the next", async () => {
+  const storage = fakeCacheStorage();
+  const store = await openAotBlockStore({ coreHash: CORE, baseUrl: BASE, cacheStorage: storage });
+  const keyA = await canonicalWasmBlockKey(MOD_A);
+  assert.equal(await store.appendMany([{ key: keyA, bytes: MOD_A }]), true);
+  // a block the pack format refuses: encoding throws, the write fails
+  assert.equal(await store.appendMany([{ key: "not-a-block-key", bytes: MOD_A }]), false);
+  assert.equal(await store.appendMany([{ key: await canonicalWasmBlockKey(MOD_B), bytes: MOD_B }]), true);
+  const raw = await storage.open(store.cacheName);
+  const match = raw.match;
+  raw.match = async (url) => (String(url).includes("/blocks-00000000-") ? Promise.reject(new Error("UnknownError")) : match(url));
+  const entries = await store.entries();
+  assert.deepEqual(entries.map((e) => e.key), [await canonicalWasmBlockKey(MOD_B)]);
+  assert.equal(store.stats().readErrors, 1);
+});
+
+test("migration keeps the IndexedDB database when the store cannot take it (quota)", async () => {
+  const fingerprint = `dolphin-core-sha256-v1:${CORE}`;
+  const keyA = await canonicalWasmBlockKey(MOD_A);
+  const idb = fakeIndexedDb({
+    metadata: new Map([["buildFingerprint", fingerprint], ["entryKeySchema", "wasm-block-sha256-v1"]]),
+    modules: new Map([[keyA, MOD_A]])
+  });
+  const storage = fakeCacheStorage();
+  const store = await openAotBlockStore({ coreHash: CORE, baseUrl: BASE, cacheStorage: storage });
+  storage.failPut = () => Object.assign(new Error("full"), { name: "QuotaExceededError" });
+  const result = await migrateLegacyJitIdb({ store, coreFingerprint: fingerprint, idb });
+  assert.equal(result.reason, "store-write-failed");
+  assert.equal(idb.exists, true, "nothing lost: the next boot tries again");
+  storage.failPut = null;
+  assert.equal((await migrateLegacyJitIdb({ store, coreFingerprint: fingerprint, idb })).reason, "moved");
+  assert.equal(idb.exists, false);
 });
