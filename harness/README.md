@@ -239,6 +239,21 @@ then releases everything and checks keyboard X → port 1 A.
 plays `steps`, waits, saves a version-matched state through `__saveStateFile`.
 Feed it to `diff --state` to compare configs on the exact same scene.
 
+**probes/race-perf.mjs** `--iso X --state s.sav --port N [--config c] [--runs 3]
+[--warmup 25] [--secs 20] [--hold KeyX] [--warm]`. Steady-state speed of one
+scene, for any change to the core: loads the state, holds `--hold` (the
+accelerator in a race), waits `--warmup` s, then measures `--secs` s with no
+profiler attached (a CDP sampling profiler costs 15-20 points of speed). Per
+run, in a fresh profile: speed from the core's VI timeline (ticks over host
+time), game frame rate (`visualChangeFps`: a game that drops frames under a
+slow renderer shows it here, not in the speed), VI and present interval
+p50/p99/max, hitches per minute, the core's `coreprof` max XFB interval, and
+the CPU of the renderer's busiest thread (a saturated emulated CPU thread
+reads ~100 %). `--warm` boots again in the same profile and measures again
+(cold vs warm JIT and shader caches). A window where the 1-minute load average
+exceeds a quarter of the cores is marked `noisy`: rerun it. Local discs write
+to `../measures/harness`; compare cores by running it once per core.
+
 Steps (`lib/steps.mjs`) are a JSON list: `{"wait": s}`, `{"tap": "KeyX",
 "repeat": n, "every": s}`, `{"down": k}`, `{"up": k}`, `{"click": [x, y]}`,
 `{"pad": i, "state": {...}}`.
