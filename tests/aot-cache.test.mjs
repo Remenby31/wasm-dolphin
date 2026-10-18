@@ -310,3 +310,146 @@ test("aot-sw.js answers only its own URLs, from CacheStorage, and is importScrip
   assert.equal(await fetchThrough(imported, "https://example.com/__salon-aot/ping"), null);
   assert.equal(await fetchThrough(imported, aotEntryUrl(BASE, cache.cacheName, "r:1"), "POST"), null);
 });
+
+// ---- block store (the IndexedDB block cache, moved) ----
+import { LEGACY_JIT_IDB_NAME, migrateLegacyJitIdb, openAotBlockStore } from "../src/aot-cache.js";
+import { canonicalWasmBlockKey } from "../src/jit-cache-identity.js";
+
+const manualTimer = () => {
+  const timers = [];
+  return { timers, setTimer: (fn) => (timers.push(fn), timers.length), clearTimer: () => {} };
+};
+
+test("block store: packs of blocks, read back in order, reopened by the next session", async () => {
+  const storage = fakeCacheStorage();
+  const t = manualTimer();
+  const store = await openAotBlockStore({ coreHash: CORE, baseUrl: BASE, cacheStorage: storage, packSize: 2, ...t });
+  const blocks = await Promise.all([MOD_A, MOD_B, MOD_A.slice()].map(async (bytes) => ({ key: await canonicalWasmBlockKey(bytes), bytes })));
+  await store.append(blocks[0].key, blocks[0].bytes);
+  await store.append(blocks[1].key, blocks[1].bytes); // fills a pack
+  store.append(blocks[2].key, blocks[2].bytes); // waits for the timer
+  assert.equal(store.stats().packsWritten, 1);
+  assert.equal(store.stats().buffered, 1);
+  t.timers.at(-1)();
+  await store.flush();
+  assert.equal(store.stats().packsWritten, 2);
+  const again = await openAotBlockStore({ coreHash: CORE, baseUrl: BASE, cacheStorage: storage, packSize: 2, ...t });
+  assert.equal(again.cacheName, store.cacheName);
+  assert.deepEqual((await again.entries()).map((e) => e.key), blocks.map((b) => b.key));
+  await again.appendMany([blocks[1]]);
+  assert.equal((await again.entries()).length, 4, "new packs follow the old ones");
+});
+
+test("block store: a corrupt pack is dropped, another core starts empty and prunes the old store", async () => {
+  const storage = fakeCacheStorage();
+  const store = await openAotBlockStore({ coreHash: CORE, baseUrl: BASE, cacheStorage: storage });
+  await store.appendMany([{ key: await canonicalWasmBlockKey(MOD_A), bytes: MOD_A }]);
+  await store.appendMany([{ key: await canonicalWasmBlockKey(MOD_B), bytes: MOD_B }]);
+  const raw = await storage.open(store.cacheName);
+  const firstPack = [...raw.entries.keys()].find((u) => u.endsWith("00000000.pack"));
+  raw.entries.get(firstPack).body[30] ^= 0xff;
+  const entries = await store.entries();
+  assert.deepEqual(entries.map((e) => e.key), [await canonicalWasmBlockKey(MOD_B)]);
+  assert.equal(store.stats().corruptPacks, 1);
+  assert.equal(raw.entries.has(firstPack), false);
+
+  const regions = await open(storage); // a disc's region cache is not a block store
+  const next = await openAotBlockStore({ coreHash: "b".repeat(64), baseUrl: BASE, cacheStorage: storage });
+  assert.deepEqual(next.pruned, [store.cacheName]);
+  assert.deepEqual(await next.entries(), []);
+  assert.ok(storage.caches.has(regions.cacheName));
+});
+
+test("block store: quota full loses the pack, not the session", async () => {
+  const storage = fakeCacheStorage();
+  const store = await openAotBlockStore({ coreHash: CORE, baseUrl: BASE, cacheStorage: storage });
+  storage.failPut = () => Object.assign(new Error("full"), { name: "QuotaExceededError" });
+  await store.appendMany([{ key: await canonicalWasmBlockKey(MOD_A), bytes: MOD_A }]);
+  assert.equal(store.stats().quota, 1);
+  storage.failPut = null;
+  assert.deepEqual(await store.entries(), []);
+});
+
+// IndexedDB as the legacy cache used it: open (with upgrade abort), cursor,
+// databases(), deleteDatabase.
+function fakeIndexedDb(initial = null) {
+  let db = initial ? { stores: new Map(Object.entries(initial)) } : null;
+  const later = (fn) => setTimeout(fn, 0);
+  return {
+    get exists() {
+      return db !== null;
+    },
+    async databases() {
+      return db ? [{ name: LEGACY_JIT_IDB_NAME, version: 3 }] : [];
+    },
+    open() {
+      const request = {};
+      later(() => {
+        if (!db) {
+          request.transaction = { abort() { request.aborted = true; } };
+          request.onupgradeneeded?.();
+          if (request.aborted) return request.onerror?.();
+          db = { stores: new Map() };
+        }
+        request.result = {
+          objectStoreNames: [...db.stores.keys()],
+          close() {},
+          transaction: (name) => ({
+            objectStore: () => ({
+              openCursor() {
+                const cursorRequest = {};
+                const rows = [...db.stores.get(name).entries()];
+                let i = 0;
+                const step = () => later(() => cursorRequest.onsuccess({
+                  target: { result: i < rows.length ? { key: rows[i][0], value: rows[i][1], continue() { i += 1; step(); } } : null }
+                }));
+                step();
+                return cursorRequest;
+              }
+            })
+          })
+        };
+        request.onsuccess?.();
+      });
+      return request;
+    },
+    deleteDatabase() {
+      const request = {};
+      later(() => {
+        db = null;
+        request.onsuccess?.();
+      });
+      return request;
+    }
+  };
+}
+
+test("the IndexedDB block cache moves into the store under the same core, and is deleted", async () => {
+  const fingerprint = `dolphin-core-sha256-v1:${CORE}`;
+  const keyA = await canonicalWasmBlockKey(MOD_A);
+  const keyB = await canonicalWasmBlockKey(MOD_B);
+  const idb = fakeIndexedDb({
+    metadata: new Map([["buildFingerprint", fingerprint], ["entryKeySchema", "wasm-block-sha256-v1"]]),
+    modules: new Map([[keyA, MOD_A], [keyB, MOD_B.buffer.slice(0)]])
+  });
+  const store = await openAotBlockStore({ coreHash: CORE, baseUrl: BASE, cacheStorage: fakeCacheStorage() });
+  const result = await migrateLegacyJitIdb({ store, coreFingerprint: fingerprint, idb });
+  assert.deepEqual(result, { found: true, moved: 2, dropped: 0, reason: "moved" });
+  assert.equal(idb.exists, false);
+  assert.deepEqual((await store.entries()).map((e) => e.key).sort(), [keyA, keyB].sort());
+
+  // another core's rows are dropped with the database
+  const stale = fakeIndexedDb({
+    metadata: new Map([["buildFingerprint", "dolphin-core-sha256-v1:" + "f".repeat(64)], ["entryKeySchema", "wasm-block-sha256-v1"]]),
+    modules: new Map([[keyA, MOD_A]])
+  });
+  const store2 = await openAotBlockStore({ coreHash: CORE, baseUrl: BASE, cacheStorage: fakeCacheStorage() });
+  assert.deepEqual(await migrateLegacyJitIdb({ store: store2, coreFingerprint: fingerprint, idb: stale }), { found: true, moved: 0, dropped: 1, reason: "other-core" });
+  assert.equal(stale.exists, false);
+  assert.deepEqual(await store2.entries(), []);
+
+  // no database: nothing created
+  const none = fakeIndexedDb();
+  assert.equal((await migrateLegacyJitIdb({ store: store2, coreFingerprint: fingerprint, idb: none })).found, false);
+  assert.equal(none.exists, false);
+});

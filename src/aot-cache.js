@@ -13,8 +13,11 @@
 // bytes it holds hash to it. A missing hash, a wrong hash, bytes the engine
 // rejects: the entry is deleted and reported, the region stays with the JIT.
 import { parseDolHeader } from "./dol.js";
+import { decodePrebuiltCache, encodePrebuiltCache } from "./prebuilt-jit-cache-format.js";
 import {
+  AOT_ANY_DISC_KEY,
   AOT_CACHE_NAME_PREFIX,
+  JIT_CACHE_ENTRY_KEY_SCHEMA,
   aotCacheIdentity,
   aotCacheName,
   canonicalDiscKey,
@@ -317,4 +320,254 @@ export async function openAotCache({
 
     stats: () => ({ ...stats })
   };
+}
+
+// Block store: the per-block JIT cache that lived in IndexedDB
+// ("dolphin-jit-cache"), moved under the same CacheStorage identity scheme.
+// Blocks are content-addressed (key = SHA-256 of their bytes), so the store
+// is shared by every disc of one core (disc key AOT_ANY_DISC_KEY). Thousands
+// of small entries are written as packs of up to `packSize` blocks in the
+// prebuilt-cache format, so a boot reads a few dozen entries, not 20 000.
+// The caller still verifies every block key against its bytes.
+export const BLOCK_STORE_COMPILER_VERSION = JIT_CACHE_ENTRY_KEY_SCHEMA;
+const PACK_PREFIX = "blocks-";
+
+export async function openAotBlockStore({
+  coreHash,
+  baseUrl,
+  cacheStorage = globalThis.caches,
+  packSize = 512,
+  flushMs = 2000,
+  setTimer = (fn, ms) => setTimeout(fn, ms),
+  clearTimer = (id) => clearTimeout(id)
+}) {
+  if (!cacheStorage) return null;
+  const identity = aotCacheIdentity({
+    discKey: AOT_ANY_DISC_KEY,
+    coreHash,
+    compilerVersion: BLOCK_STORE_COMPILER_VERSION,
+    flagsMask: 0
+  });
+  const cacheName = await aotCacheName(identity);
+  let cache = await cacheStorage.open(cacheName);
+  const stored = await (await cache.match(identityUrl(baseUrl, cacheName)))?.json().catch(() => null);
+  const check = classifyAotCacheIdentity({ stored: stored ?? null, current: identity });
+  if (check.reset) {
+    await cacheStorage.delete(cacheName);
+    cache = await cacheStorage.open(cacheName);
+    await cache.put(identityUrl(baseUrl, cacheName), new Response(JSON.stringify(identity), {
+      headers: { "content-type": "application/json" }
+    }));
+  }
+  // Another core's block store is stale: blocks of one core never run on another.
+  const pruned = await pruneAotCaches({ cacheStorage, keep: cacheName, baseUrl, discKey: AOT_ANY_DISC_KEY });
+  const packUrl = (seq) => new URL(`${AOT_SW_SEGMENT}/${cacheName}/${PACK_PREFIX}${String(seq).padStart(8, "0")}.pack`, baseUrl).href;
+  const stats = { packsRead: 0, packsWritten: 0, blocksWritten: 0, corruptPacks: 0, quota: 0, writeErrors: 0 };
+  let nextSeq = 0;
+  let buffered = [];
+  let timer = null;
+  let writing = Promise.resolve();
+
+  async function packRequests() {
+    const urls = (await cache.keys()).map((r) => r.url).filter((u) => u.includes(`/${PACK_PREFIX}`) && u.endsWith(".pack"));
+    urls.sort();
+    return urls;
+  }
+  for (const url of await packRequests()) {
+    const seq = Number(url.slice(url.lastIndexOf(PACK_PREFIX) + PACK_PREFIX.length, -".pack".length));
+    if (Number.isInteger(seq)) nextSeq = Math.max(nextSeq, seq + 1);
+  }
+
+  async function writePack(entries) {
+    if (!entries.length) return true;
+    const bytes = encodePrebuiltCache({
+      fingerprint: identity.coreFingerprint,
+      entryKeySchema: JIT_CACHE_ENTRY_KEY_SCHEMA,
+      entries: entries.map(({ key, bytes: b }) => [key, b])
+    });
+    const url = packUrl(nextSeq++);
+    const put = async () => cache.put(url, new Response(bytes, {
+      headers: { "content-type": "application/octet-stream", [AOT_HASH_HEADER]: await sha256Hex(bytes) }
+    }));
+    try {
+      await put();
+    } catch (error) {
+      if (!isQuotaError(error)) {
+        stats.writeErrors += 1;
+        return false;
+      }
+      await pruneAotCaches({ cacheStorage, keep: cacheName, baseUrl, discKey: AOT_ANY_DISC_KEY });
+      try {
+        await put();
+      } catch {
+        stats.quota += 1;
+        return false;
+      }
+    }
+    stats.packsWritten += 1;
+    stats.blocksWritten += entries.length;
+    return true;
+  }
+
+  function flush() {
+    if (timer !== null) clearTimer(timer);
+    timer = null;
+    const chunk = buffered;
+    buffered = [];
+    writing = writing.then(async () => {
+      for (let i = 0; i < chunk.length; i += packSize) await writePack(chunk.slice(i, i + packSize));
+    });
+    return writing;
+  }
+
+  return {
+    identity,
+    cacheName,
+    reset: check.reset ? check.reason : null,
+    pruned,
+
+    // Every stored block, packs in write order. A pack whose bytes do not
+    // hash to its header, or that does not decode for this core, is deleted.
+    async entries() {
+      await writing;
+      const out = [];
+      for (const url of await packRequests()) {
+        const response = await cache.match(url);
+        if (!response) continue;
+        const claimed = response.headers.get(AOT_HASH_HEADER);
+        const bytes = new Uint8Array(await response.arrayBuffer());
+        let decoded = null;
+        if (claimed && claimed === await sha256Hex(bytes)) {
+          try {
+            decoded = decodePrebuiltCache(bytes);
+          } catch {
+            decoded = null;
+          }
+        }
+        if (!decoded || decoded.fingerprint !== identity.coreFingerprint) {
+          stats.corruptPacks += 1;
+          await cache.delete(url).catch(() => {});
+          continue;
+        }
+        stats.packsRead += 1;
+        for (const { hash, bytes: b } of decoded.entries) out.push({ key: hash, bytes: b });
+      }
+      return out;
+    },
+
+    async count() {
+      return (await this.entries()).length;
+    },
+
+    // Buffered: a pack is written once `packSize` blocks wait, or `flushMs`
+    // after the last one.
+    append(key, bytes) {
+      buffered.push({ key, bytes });
+      if (buffered.length >= packSize) return flush();
+      if (timer === null) {
+        timer = setTimer(() => {
+          timer = null;
+          flush();
+        }, flushMs);
+        timer?.unref?.();
+      }
+      return writing;
+    },
+
+    async appendMany(list) {
+      buffered.push(...list);
+      await flush();
+    },
+
+    flush,
+
+    async clear() {
+      buffered = [];
+      if (timer !== null) clearTimer(timer);
+      timer = null;
+      await writing;
+      for (const url of await packRequests()) await cache.delete(url);
+      nextSeq = 0;
+    },
+
+    stats: () => ({ ...stats, buffered: buffered.length })
+  };
+}
+
+// The IndexedDB block cache this store replaces, read once and deleted:
+// its rows under the current core move into the store, anything else is
+// dropped. `indexedDB` is injectable for tests.
+export const LEGACY_JIT_IDB_NAME = "dolphin-jit-cache";
+export async function migrateLegacyJitIdb({ store, coreFingerprint, idb = globalThis.indexedDB }) {
+  const result = { found: false, moved: 0, dropped: 0, reason: "none" };
+  if (!idb || !store) return result;
+  if (typeof idb.databases === "function") {
+    try {
+      const dbs = await idb.databases();
+      if (!dbs.some((d) => d.name === LEGACY_JIT_IDB_NAME)) return result;
+    } catch {
+      // fall through and open it
+    }
+  }
+  const db = await new Promise((resolve) => {
+    let request;
+    try {
+      request = idb.open(LEGACY_JIT_IDB_NAME);
+    } catch {
+      resolve(null);
+      return;
+    }
+    request.onupgradeneeded = () => {
+      // It did not exist: nothing to migrate. Abort the creation.
+      request.transaction?.abort();
+    };
+    request.onsuccess = () => resolve(request.result);
+    request.onerror = () => resolve(null);
+  });
+  if (!db) return result;
+  result.found = true;
+  const stores = [...db.objectStoreNames];
+  const readAll = (name) => new Promise((resolve) => {
+    const out = [];
+    try {
+      const cursor = db.transaction(name, "readonly").objectStore(name).openCursor();
+      cursor.onsuccess = (event) => {
+        const c = event.target.result;
+        if (!c) return resolve(out);
+        out.push({ key: c.key, value: c.value });
+        c.continue();
+      };
+      cursor.onerror = () => resolve(out);
+    } catch {
+      resolve(out);
+    }
+  });
+  const meta = stores.includes("metadata") ? await readAll("metadata") : [];
+  const fingerprint = meta.find((m) => m.key === "buildFingerprint")?.value ?? null;
+  const schema = meta.find((m) => m.key === "entryKeySchema")?.value ?? null;
+  const rows = stores.includes("modules") ? await readAll("modules") : [];
+  if (fingerprint === coreFingerprint && schema === JIT_CACHE_ENTRY_KEY_SCHEMA) {
+    const moved = [];
+    for (const { key, value } of rows) {
+      const bytes = value instanceof ArrayBuffer ? new Uint8Array(value) : value;
+      if (typeof key === "string" && bytes instanceof Uint8Array) moved.push({ key, bytes });
+    }
+    await store.appendMany(moved);
+    result.moved = moved.length;
+    result.dropped = rows.length - moved.length;
+    result.reason = "moved";
+  } else {
+    result.dropped = rows.length;
+    result.reason = fingerprint ? "other-core" : "no-identity";
+  }
+  db.close();
+  await new Promise((resolve) => {
+    try {
+      const del = idb.deleteDatabase(LEGACY_JIT_IDB_NAME);
+      del.onsuccess = del.onerror = del.onblocked = () => resolve();
+    } catch {
+      resolve();
+    }
+  });
+  return result;
 }
