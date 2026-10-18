@@ -25,7 +25,7 @@
       "commit": "01e0577914a75a2569c846778c2f93aa8e6feddd"
     }
   },
-  "patchSeriesSha256": "4700cf245598e9a274ac7fc2a3348570eaf7ae7480cfb512fc05498b442aed3a",
+  "patchSeriesSha256": "02d818dd2a864ea9ff15df534e2ba2341d8ec0f296500e308493c3b4473bac6b",
   "patches": [
     {
       "order": 1,
@@ -552,8 +552,8 @@
       "cwd": ".",
       "hashMode": "lf-normalized",
       "path": "patches/dolphin-wasm/snapshot/0069-webgpu-tag-presents-with-vi-output.patch",
-      "size": 10041,
-      "sha256": "9d7d724a8f25d0a1223b73a614bd6e51960f77ed33b38ba5c699ea368ee541c3"
+      "size": 10489,
+      "sha256": "3ede2b12fbec43f5061bfeee5a87f57e7e49dc0da815b963ccfa74fd1a76571e"
     },
     {
       "order": 67,

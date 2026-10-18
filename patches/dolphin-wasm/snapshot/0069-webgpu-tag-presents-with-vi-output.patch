@@ -72,25 +72,23 @@ diff --git a/Source/Core/VideoBackends/WebGPU/WebGPUCommandStream.h b/Source/Cor
 diff --git a/Source/Core/VideoBackends/WebGPU/WebGPUGfx.cpp b/Source/Core/VideoBackends/WebGPU/WebGPUGfx.cpp
 --- a/Source/Core/VideoBackends/WebGPU/WebGPUGfx.cpp
 +++ b/Source/Core/VideoBackends/WebGPU/WebGPUGfx.cpp
-@@ -615,17 +615,46 @@ static u32 PackSamplerState(const SamplerState& state)
-          (((state.tm0.hex >> 25) & 0xfu) << 7) | ((state.tm1.hex & 0xffffu) << 11);
- }
+@@ -7,6 +7,7 @@
+ #include "VideoBackends/Software/Rasterizer.h"
+ #include "VideoBackends/Software/SWTexture.h"
  
-+// The live backend, for DolphinWeb_WebGpuTagViOutput (called from
-+// VideoBackendBase, which does not know the backend type).
-+static WebGPUGfx* s_active_gfx = nullptr;
-+
- WebGPUGfx::WebGPUGfx()
- {
-   m_sampler_states.fill(PackSamplerState(RenderState::GetPointSamplerState()));
-   UpdateActiveConfig();
-+  s_active_gfx = this;
- }
++#include "VideoBackends/WebGPU/VideoBackend.h"
+ #include "VideoBackends/WebGPU/WebGPUShaderTranslator.h"
+ #include "VideoBackends/WebGPU/WebGPUTexture.h"
+ #include "VideoBackends/WebGPU/WebGPUVertexManager.h"
+@@ -22,6 +23,7 @@
+ #include "VideoCommon/PixelShaderManager.h"
+ #include "VideoCommon/VertexManagerBase.h"
+ #include "VideoCommon/VertexShaderManager.h"
++#include "VideoCommon/VideoBackendBase.h"
  
- WebGPUGfx::~WebGPUGfx()
- {
-+  if (s_active_gfx == this)
-+    s_active_gfx = nullptr;
+ #include "VideoCommon/AbstractPipeline.h"
+ #include "VideoCommon/AbstractShader.h"
+@@ -626,6 +628,28 @@ WebGPUGfx::~WebGPUGfx()
    UpdateActiveConfig();
  }
  
@@ -119,25 +117,37 @@ diff --git a/Source/Core/VideoBackends/WebGPU/WebGPUGfx.cpp b/Source/Core/VideoB
  void WebGPUGfx::EnsureDevice()
  {
    // Already resolved (acquired or permanently failed) → nothing to do.
-@@ -2686,3 +2715,19 @@ u32 WebGPUEFBInterface::PeekDepthInternal(u16 /* x */, u16 /* y */)
+@@ -2686,3 +2710,31 @@ u32 WebGPUEFBInterface::PeekDepthInternal(u16 /* x */, u16 /* y */)
  }
  
  }  // namespace WebGPU
++
++// The live WebGPU backend, for the harness hooks below (called from
++// VideoCommon, which does not know the backend type); null under any other.
++static WebGPU::WebGPUGfx* ActiveWebGpuGfx()
++{
++  if (!g_video_backend || !g_gfx ||
++      g_video_backend->GetConfigName() != WebGPU::VideoBackend::CONFIG_NAME)
++  {
++    return nullptr;
++  }
++  return static_cast<WebGPU::WebGPUGfx*>(g_gfx.get());
++}
 +
 +// Called on the video thread right before ViSwap when the harness hooks are on.
 +extern "C" void DolphinWeb_WebGpuTagViOutput(u32 vi_since_boot, u32 vi_since_load, u64 ticks,
 +                                             u32 load_generation)
 +{
-+  if (WebGPU::s_active_gfx)
-+    WebGPU::s_active_gfx->TagViOutput(vi_since_boot, vi_since_load, ticks, load_generation);
++  if (auto* gfx = ActiveWebGpuGfx())
++    gfx->TagViOutput(vi_since_boot, vi_since_load, ticks, load_generation);
 +}
 +
 +// Called by the Presenter before it binds the backbuffer, with the source
 +// rectangle its blit will sample, when the harness hooks are on.
 +extern "C" void DolphinWeb_WebGpuTagPresentSource(int left, int top, int right, int bottom)
 +{
-+  if (WebGPU::s_active_gfx)
-+    WebGPU::s_active_gfx->TagPresentSource(MathUtil::Rectangle<int>(left, top, right, bottom));
++  if (auto* gfx = ActiveWebGpuGfx())
++    gfx->TagPresentSource(MathUtil::Rectangle<int>(left, top, right, bottom));
 +}
 diff --git a/Source/Core/VideoBackends/WebGPU/WebGPUGfx.h b/Source/Core/VideoBackends/WebGPU/WebGPUGfx.h
 --- a/Source/Core/VideoBackends/WebGPU/WebGPUGfx.h
