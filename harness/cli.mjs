@@ -618,11 +618,18 @@ function exportRef(ref) {
 
 // The gate, from persisted results only, so `harness/run gate` on the same
 // directories always decides what `ab` decided.
+// Failures main is known to have (harness/known-failures.json), read from
+// the checkout running the gate.
+function knownFailures() {
+  const file = path.join(REPO_ROOT, "harness", "known-failures.json");
+  return existsSync(file) ? JSON.parse(readFileSync(file, "utf8")) : [];
+}
+
 function gateFromDirs(baseDir, candDir, { accept = [] } = {}) {
   const read = (d) => JSON.parse(readFileSync(path.join(d, "summary.json"), "utf8"));
   const optional = (d, f) => (existsSync(path.join(d, f)) ? JSON.parse(readFileSync(path.join(d, f), "utf8")) : null);
   const base = read(baseDir), cand = read(candDir);
-  const gates = [correctnessGate(base.cells, cand.cells), crossCommitGate(renderVsBaseline(base.results, cand.results, { accept }))];
+  const gates = [correctnessGate(base.cells, cand.cells), crossCommitGate(renderVsBaseline(base.results, cand.results, { accept, known: knownFailures() }))];
   for (const [name, file, pick] of [["fuzz", "fuzz.json", (r) => r.results.flatMap((x) => x.findings.map((f) => ({ ...f, iso: x.iso })))], ["pads", "pads.json", (r) => padFindings(r)]]) {
     const b = optional(baseDir, file), c = optional(candDir, file);
     if (b || c) gates.push(findingsGate(name, b ? pick(b) : [], c ? pick(c) : null));

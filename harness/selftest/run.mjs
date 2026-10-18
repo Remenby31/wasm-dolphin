@@ -77,6 +77,28 @@ export const MUTANTS = [
   }
 ];
 
+// Nondeterministic output: one random byte of each exact capture flipped, so
+// every run of the patched side shows a different picture (like the JIT
+// nondeterminism found on main). Single-config spec: only renderVsBaseline
+// can see it.
+const NONDETERMINISTIC = [{
+  file: WORKER,
+  find: "      const pixels = m.HEAPU8.slice(ptr, ptr + width * height * 4);",
+  replace: "      const pixels = m.HEAPU8.slice(ptr, ptr + width * height * 4);\n      pixels[(Math.random() * width * height * 4) & ~3] ^= 0x5a;"
+}];
+const repeated = scene({ runs: 3, configs: [{ id: "sw-interp", preset: "sw-interp" }] });
+
+MUTANTS.push({
+  id: "nondeterministic", what: "the candidate's picture changes from run to run (main's is stable)",
+  spec: repeated, candidate: { patches: NONDETERMINISTIC }
+});
+
+// Controls: known trouble on the baseline side that must NOT block a sound candidate.
+export const CONTROLS = [{
+  id: "baseline-nondeterministic", what: "main's picture changes from run to run, the candidate's is stable",
+  spec: repeated, baseline: { patches: NONDETERMINISTIC }
+}];
+
 // The clean comparison covers every check the mutants use.
 export const CLEAN_SPEC = scene({ games: [scene().games[0], tone], pads: true, fuzz: [`${HB}/cpufuzz-nomcrf.iso`], runs: 2 });
 
@@ -92,13 +114,13 @@ async function main() {
   const only = values.only ? new Set(values.only.split(",")) : null;
   const base = { root: REPO_ROOT };
   const rows = [];
-  const runOne = async (id, kind, spec, candidate) => {
+  const runOne = async (id, kind, spec, candidate, baseline = {}) => {
     const sub = path.join(dir, id);
     mkdirSync(sub);
     const opts = { port: values.port, headless: values.headless, confirm: "2" };
     let gate, error = null;
     try {
-      gate = await abCompare({ spec, specDir: REPO_ROOT, values: opts, dir: sub, baseline: base, candidate: { root: REPO_ROOT, ...candidate } });
+      gate = await abCompare({ spec, specDir: REPO_ROOT, values: opts, dir: sub, baseline: { ...base, ...baseline }, candidate: { root: REPO_ROOT, ...candidate } });
     } catch (e) {
       error = e.message;
     }
@@ -116,13 +138,14 @@ async function main() {
     console.log(`[selftest] ${id}: ${error ? `ERROR ${error}` : blocked ? `blocked (${row.by.join("; ")})` : "passed"} → ${row.ok ? "OK" : "WRONG"}`);
   };
   for (const m of MUTANTS) if (!only || only.has(m.id)) await runOne(m.id, "mutant", m.spec, m.candidate);
+  for (const c of CONTROLS) if (!only || only.has(c.id)) await runOne(c.id, "control", c.spec, {}, c.baseline);
   for (let i = 1; i <= Number(values.clean); i += 1) if (!only || only.has("clean")) await runOne(`clean-${i}`, "clean", CLEAN_SPEC, {});
   const md = [
     "| Case | Kind | What | Gate | Blocked by | Expected |",
     "|---|---|---|---|---|---|",
-    ...rows.map((r) => `| ${r.id} | ${r.kind} | ${MUTANTS.find((m) => m.id === r.id)?.what ?? "this tree vs itself"} | ${r.error ? `error: ${r.error}` : r.blocked ? "BLOCK" : "PASS"} | ${r.by.join("<br>") || "–"} | ${r.ok ? "yes" : "**NO**"} |`),
+    ...rows.map((r) => `| ${r.id} | ${r.kind} | ${[...MUTANTS, ...CONTROLS].find((m) => m.id === r.id)?.what ?? "this tree vs itself"} | ${r.error ? `error: ${r.error}` : r.blocked ? "BLOCK" : "PASS"} | ${r.by.join("<br>") || "–"} | ${r.ok ? "yes" : "**NO**"} |`),
     "",
-    `${rows.filter((r) => r.kind === "mutant" && r.ok).length}/${rows.filter((r) => r.kind === "mutant").length} mutants blocked, ${rows.filter((r) => r.kind === "clean" && r.ok).length}/${rows.filter((r) => r.kind === "clean").length} clean runs passed.`
+    `${rows.filter((r) => r.kind === "mutant" && r.ok).length}/${rows.filter((r) => r.kind === "mutant").length} mutants blocked, ${rows.filter((r) => r.kind === "control" && r.ok).length}/${rows.filter((r) => r.kind === "control").length} controls passed, ${rows.filter((r) => r.kind === "clean" && r.ok).length}/${rows.filter((r) => r.kind === "clean").length} clean runs passed.`
   ].join("\n");
   writeFileSync(path.join(dir, "selftest.json"), JSON.stringify(rows, null, 2));
   writeFileSync(path.join(dir, "selftest.md"), md + "\n");
