@@ -121,7 +121,7 @@ test("pthread renderer transport is independent of the optional JIT cache channe
   ]);
 });
 
-test("a deferred compile request is answered to every pthread, a rejected one too", async (t) => {
+test("a compile request is precompiled, kept alive and marked ready in the core's table, never posted to the CPU thread", async (t) => {
   const originalSelf = globalThis.self;
   globalThis.self = {
     location: { href: "http://127.0.0.1:8080/" },
@@ -133,63 +133,52 @@ test("a deferred compile request is answered to every pthread, a rejected one to
     else globalThis.self = originalSelf;
   });
   const stamp = Date.now();
-  const { installDolphinPthreadChannels } = await import(
+  const { installDolphinPthreadChannels, precompileDolphinJitModule, setDolphinJitReadyHeapForTest } = await import(
     `${workerUrl.href}?compile-request-test=${stamp}`
   );
   const { canonicalWasmBlockKey } = await import("../src/jit-cache-identity.js");
   const cpu = fakePthreadWorker();
-  const other = fakePthreadWorker();
   await installDolphinPthreadChannels(
-    { PThread: { runningWorkers: [cpu, other], unusedWorkers: [] } },
+    { PThread: { runningWorkers: [cpu], unusedWorkers: [] } },
     { jitCacheEnabled: true }
   );
   const request = cpu.listeners.find(({ name }) => name === "handleDolphinJitCompileRequest").listener;
-  // (i32) -> i32 identity, the smallest valid module
-  const bytes = Uint8Array.from(Buffer.from("0061736d0100000001060160017f017f03020100070501016600000a0601040020000b", "hex"));
-  const key = await canonicalWasmBlockKey(bytes);
-  await request({ currentTarget: cpu, data: { type: "dolphin-jit-compile-request", key, bytes, kind: "block" } });
-  for (const worker of [cpu, other]) {
-    const add = worker.messages.find((m) => m.type === "dolphin-jit-cache-add");
-    assert.equal(add.hash, key);
-    assert.ok(add.module instanceof WebAssembly.Module);
-    assert.equal(new WebAssembly.Instance(add.module).exports.f(7), 7);
-  }
-  // the same block asked twice while in flight: compiled and sent once
-  const cpuAdds = () => cpu.messages.filter((m) => m.type === "dolphin-jit-cache-add").length;
-  const before = cpuAdds();
+  // the core's heap: shared, with the ready table at 0x1000 and the block bytes elsewhere
+  const heap = new Uint8Array(new SharedArrayBuffer(0x20000));
+  setDolphinJitReadyHeapForTest(heap);
+  const READY = 0x1000;
   const plusOne = Uint8Array.from(Buffer.from("0061736d0100000001060160017f017f03020100070501016600000a09010700200041016a0b", "hex"));
   const plusKey = await canonicalWasmBlockKey(plusOne);
-  // as the core sends it: a view of its shared heap
-  const heap = new Uint8Array(new SharedArrayBuffer(256));
-  heap.set(plusOne, 64);
-  const view = heap.subarray(64, 64 + plusOne.length);
+  const slot = parseInt(plusKey.split(":")[1].slice(0, 4), 16);
+  heap.set(plusOne, 0x18000);
+  const view = heap.subarray(0x18000, 0x18000 + plusOne.length);
+  const before = cpu.messages.length;
   await Promise.all([
-    request({ currentTarget: cpu, data: { type: "dolphin-jit-compile-request", key: plusKey, bytes: view, kind: "block" } }),
-    request({ currentTarget: cpu, data: { type: "dolphin-jit-compile-request", key: plusKey, bytes: view, kind: "block" } })
+    request({ currentTarget: cpu, data: { type: "dolphin-jit-compile-request", key: plusKey, bytes: view, kind: "block", readyPtr: READY, readySlot: slot } }),
+    request({ currentTarget: cpu, data: { type: "dolphin-jit-compile-request", key: plusKey, bytes: view, kind: "block", readyPtr: READY, readySlot: slot } })
   ]);
-  assert.equal(cpuAdds() - before, 1);
-  // a block key that does not name its bytes is refused, never cached under that name
-  const forged = `wasm-block-sha256-v1:${"0".repeat(64)}`;
-  await request({ currentTarget: cpu, data: { type: "dolphin-jit-compile-request", key: forged, bytes: plusOne, kind: "block" } });
-  assert.equal(cpu.messages.some((m) => m.type === "dolphin-jit-cache-add" && m.hash === forged), false);
-  assert.deepEqual(cpu.messages.find((m) => m.type === "dolphin-jit-compile-failed" && m.key === forged), { type: "dolphin-jit-compile-failed", key: forged, reason: "compile" });
-
-  // ahead-of-time callers: the Module is kept alive under its key, so a later
-  // synchronous compile of the same bytes on the CPU thread hits V8's cache
-  const { precompileDolphinJitModule } = await import(`${workerUrl.href}?compile-request-test=${stamp}`);
+  assert.equal(Atomics.load(heap, READY + slot), 1);
+  assert.equal(cpu.messages.length, before, "nothing is posted to the CPU thread");
+  // kept alive: the same Module comes back, so the CPU thread's own compile of these bytes hits V8's cache
   const kept = await precompileDolphinJitModule(plusKey, plusOne);
   assert.ok(kept.module instanceof WebAssembly.Module);
+  assert.equal(new WebAssembly.Instance(kept.module).exports.f(7), 8);
   assert.equal((await precompileDolphinJitModule(plusKey, plusOne)).module, kept.module);
-  assert.deepEqual(await precompileDolphinJitModule(forged, plusOne), { reason: "key-mismatch" });
 
+  // a forged block key or bytes the engine rejects: not cached, still marked done
+  const forged = `wasm-block-sha256-v1:${"0".repeat(64)}`;
+  heap[READY + 7] = 0;
+  await request({ currentTarget: cpu, data: { type: "dolphin-jit-compile-request", key: forged, bytes: plusOne, kind: "block", readyPtr: READY, readySlot: 7 } });
+  assert.equal(Atomics.load(heap, READY + 7), 1);
+  assert.deepEqual(await precompileDolphinJitModule(forged, plusOne), { reason: "key-mismatch" });
   const bad = new Uint8Array([0, 0x61, 0x73, 0x6d, 1, 0, 0, 0, 0x0a, 1]);
-  await request({ currentTarget: cpu, data: { type: "dolphin-jit-compile-request", key: "k-bad", bytes: bad, kind: "block" } });
-  for (const worker of [cpu, other]) {
-    assert.deepEqual(
-      worker.messages.find((m) => m.type === "dolphin-jit-compile-failed" && m.key === "k-bad"),
-      { type: "dolphin-jit-compile-failed", key: "k-bad", reason: "compile" }
-    );
-  }
+  heap[READY + 9] = 0;
+  await request({ currentTarget: cpu, data: { type: "dolphin-jit-compile-request", key: "k-bad", bytes: bad, kind: "block", readyPtr: READY, readySlot: 9 } });
+  assert.equal(Atomics.load(heap, READY + 9), 1);
+  assert.deepEqual(await precompileDolphinJitModule("k-bad", bad), { reason: "compile" });
+  // out-of-range table addresses are ignored, never written
+  await request({ currentTarget: cpu, data: { type: "dolphin-jit-compile-request", key: plusKey, bytes: plusOne, kind: "block", readyPtr: 0x1ffff, readySlot: 5 } });
+  setDolphinJitReadyHeapForTest(null);
 });
 
 test("loadCore awaits pthread cache installation before returning", async () => {
