@@ -618,7 +618,15 @@ void EnsureRuntime()
   Config::SetBase(Config::MAIN_ENABLE_CHEATS, false);
   Config::SetBase(Config::MAIN_OSD_MESSAGES, false);
   Config::SetBase(Config::MAIN_SLOT_A, ExpansionInterface::EXIDeviceType::MemoryCardFolder);
-  Config::SetBase(Config::MAIN_SLOT_B, ExpansionInterface::EXIDeviceType::None);
+  // A second GCI-folder card in slot B only when the page asks for it
+  // (?memcardb=1 sets Module['dolphinMemcardSlotB']): with a card in each
+  // slot, some games stop to ask which one to use.
+  const bool memcard_slot_b =
+      EM_ASM_INT({ return (typeof Module !== 'undefined' &&
+                           Module['dolphinMemcardSlotB']) ? 1 : 0; }) != 0;
+  Config::SetBase(Config::MAIN_SLOT_B, memcard_slot_b ?
+                                           ExpansionInterface::EXIDeviceType::MemoryCardFolder :
+                                           ExpansionInterface::EXIDeviceType::None);
   Config::SetBase(Config::MAIN_AUDIO_BACKEND, std::string("Web Audio"));
   Config::SetBase(Config::MAIN_AUDIO_MUTED, false);
   Config::SetBase(Config::GFX_HACK_SKIP_XFB_COPY_TO_RAM, s_video_backend == "OGL");
