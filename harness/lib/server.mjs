@@ -175,6 +175,9 @@ export async function ensureServer({ port, root, patches = [], coreCandidates = 
     root: snapshot.root,
     identity: { snapshot: snapshot.hash, files: snapshot.files.size, ...snapshot.source },
     defaultCoreSha256: cores.get("/cores/dolphin/dolphin-core-upstream.wasm") ?? null,
+    // sha256 of the core wasm served at `pathname`, or null: the snapshot is
+    // immutable, so a path names one binary for the server's whole life.
+    coreSha256: (pathname) => cores.get(pathname) ?? null,
     coreFetches,
     stop: () => new Promise((resolve) => {
       server.closeAllConnections?.();
