@@ -37,6 +37,30 @@ machine, which people use while it runs) with a fresh `user-data-dir` per run
 (no JIT cache or IndexedDB
 carried over). Exit code: 0 pass, 1 finding, 2 usage or infrastructure error.
 
+## Which core a run used
+
+Every run checks, once the core is loaded, that the bytes the harness server
+handed out for `dolphin-core-upstream.wasm` hash to the core the run asked
+for: the URL's `coreid=sha256:…`, or else the served tree's own
+`cores/dolphin` core. Any other core, or a fallback reported by the app,
+fails the run with `core-mismatch` (the app falls back to main's core when a
+candidate is missing; a judge never measures that). The loaded hash is in
+every run's JSON (`core`). Candidate cores are served from
+`build/core-candidates/<sha>/` of the tree, or from directories passed with
+`--core-candidate <dir>`, and only when their wasm hashes to that sha.
+
+## Renderer crashes
+
+A Chrome renderer crash ("Target crashed") in a matrix cell is run once
+more, on the same side. If it does not happen again it is an **infra
+crash**: shown in the gate report, appended to
+`harness/results/infra-crashes.jsonl` (a cumulative counter), not blocking.
+If it happens again the cell crashed: the crash check fails and blocks,
+unless the baseline crashed the same way twice too. Renderer crashes on the
+candidate only, twice or more in one comparison, are a regression. Chrome's
+log (`--enable-logging --log-file`) and crash dumps of each crashed run are
+kept in `<results>/<run>-crash/`.
+
 ## No windows
 
 The harness never shows a browser window: people work on the machine it
