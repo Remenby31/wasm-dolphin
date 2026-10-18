@@ -63,6 +63,7 @@ import {
 } from "./input-visual-marker.js";
 import {
   compareInputGenerations,
+  INPUT_PORT_COUNT,
   readInputStateSnapshot
 } from "./input-transport.js";
 import {
@@ -462,7 +463,9 @@ let pacedPresentationStartedAt = 0;
 let presentationPacingMode = "smooth";
 let legacyTickQueue = false;
 let inputStateSabView = null;
-let lastInputStateGeneration = 0;
+// Per port; the SAB and postMessage paths share them, so a port's state is
+// applied once whichever path delivers it first.
+const lastInputStateGenerations = new Array(INPUT_PORT_COUNT).fill(0);
 // Detached OGL mode: worker owns a standalone OffscreenCanvas for the GL
 // backend (no transferControlToOffscreen, no compositor binding). After
 // each GL swap the worker transferToImageBitmap()s the canvas and posts
@@ -987,7 +990,7 @@ async function handleMessage(type, payload) {
       workerTransportStats.legacyOneWayAck = legacyOneWayAck;
       if (payload.inputStateSab instanceof SharedArrayBuffer) {
         inputStateSabView = new Int32Array(payload.inputStateSab);
-        lastInputStateGeneration = 0;
+        lastInputStateGenerations.fill(0);
       }
       // SAB pixel transport: set up shared views once. The worker's
       // presentation loop will copy s_framebuffer bytes into oglPixelSabView
@@ -1087,8 +1090,9 @@ async function handleMessage(type, payload) {
         triggerRight: payload.triggerRight,
         analogA: payload.analogA,
         analogB: payload.analogB,
+        connected: payload.connected !== false,
         inputGeneration: payload.inputGeneration
-      }, payload.inputSentAtEpochMs, "post");
+      }, payload.inputSentAtEpochMs, "post", payload.port ?? 0);
       return {};
     case "runFrame":
       if (!presentationLoopActive) {
@@ -2513,6 +2517,31 @@ function bindApi(module) {
               ]
             )
         : null,
+    // Ports 0-3 with hot-plug; absent from cores built before multi-port.
+    setPadState:
+      typeof module._SetPadState === "function"
+        ? (port, state) =>
+            ccall(
+              "SetPadState",
+              "number",
+              ["number", "number", "number", "number", "number", "number", "number", "number", "number", "number", "number", "number"],
+              [
+                port | 0,
+                state.connected === false ? 0 : 1,
+                state.mask >>> 0,
+                state.stickX | 0,
+                state.stickY | 0,
+                state.cStickX | 0,
+                state.cStickY | 0,
+                state.triggerLeft | 0,
+                state.triggerRight | 0,
+                state.analogA | 0,
+                state.analogB | 0,
+                state.inputGeneration >>> 0
+              ]
+            )
+        : null,
+    getPadConnectedMask: optionalCwrap("GetPadConnectedMask", "number", []),
     runFrame: cwrap("RunFrame", null, []),
     frameWidth: cwrap("FrameWidth", "number", []),
     frameHeight: cwrap("FrameHeight", "number", []),
@@ -3467,33 +3496,27 @@ function scheduleFrameSignalWait() {
     });
 }
 
-function applyInputStateSnapshot(state, sentAtEpochMs, source) {
-  if (!api?.setInputState || !state) return false;
+// Latency telemetry (generations, ages, causal counters) follows port 0 only,
+// as before multi-port; other ports are applied without it.
+function applyInputStateSnapshot(state, sentAtEpochMs, source, port = 0) {
+  if (!state || !Number.isInteger(port) || port < 0 || port >= INPUT_PORT_COUNT) return false;
+  if (port !== 0 ? !api?.setPadState : !api?.setInputState && !api?.setPadState) return false;
   const generation = Number(state.inputGeneration) >>> 0;
   if (!generation) return false;
-  const order = compareInputGenerations(generation, lastInputStateGeneration);
-  if (order === 0) {
-    causalInputStats.duplicateGenerationCount += 1;
-    return false;
-  }
-  if (order < 0) {
-    causalInputStats.staleGenerationCount += 1;
+  const order = compareInputGenerations(generation, lastInputStateGenerations[port]);
+  if (order <= 0) {
+    if (port === 0) {
+      if (order === 0) causalInputStats.duplicateGenerationCount += 1;
+      else causalInputStats.staleGenerationCount += 1;
+    }
     return false;
   }
 
-  lastInputStateGeneration = generation;
-  const mask = Number(state.mask) >>> 0;
-  inputMask = mask;
-  const wrappedSentAt = source === "sab"
-    ? wrappedEpochMilliseconds(Number(sentAtEpochMs) >>> 0)
-    : Number(sentAtEpochMs);
-  recordInputApplied({
-    generation,
-    inputMask: mask,
-    sentAtEpochMs: wrappedSentAt,
-    source
-  });
-  api.setInputState({
+  lastInputStateGenerations[port] = generation;
+  const connected = state.connected !== false;
+  const mask = connected ? Number(state.mask) >>> 0 : 0;
+  const padState = {
+    connected,
     mask,
     stickX: Number(state.stickX) | 0,
     stickY: Number(state.stickY) | 0,
@@ -3504,7 +3527,27 @@ function applyInputStateSnapshot(state, sentAtEpochMs, source) {
     analogA: Number(state.analogA) | 0,
     analogB: Number(state.analogB) | 0,
     inputGeneration: generation
+  };
+  if (port !== 0) {
+    api.setPadState(port, padState);
+    return true;
+  }
+
+  inputMask = mask;
+  const wrappedSentAt = source === "sab"
+    ? wrappedEpochMilliseconds(Number(sentAtEpochMs) >>> 0)
+    : Number(sentAtEpochMs);
+  recordInputApplied({
+    generation,
+    inputMask: mask,
+    sentAtEpochMs: wrappedSentAt,
+    source
   });
+  if (api.setPadState) {
+    api.setPadState(0, padState);
+  } else {
+    api.setInputState(padState);
+  }
   recordInputAge(sentAtEpochMs, source === "sab");
   if (source === "sab") {
     causalInputStats.workerSabApplyCount += 1;
@@ -3516,16 +3559,20 @@ function applyInputStateSnapshot(state, sentAtEpochMs, source) {
 }
 
 function pollInputStateFromSab() {
-  if (!inputStateSabView || !api?.setInputState) {
+  if (!inputStateSabView || (!api?.setInputState && !api?.setPadState)) {
     return;
   }
-  const result = readInputStateSnapshot(inputStateSabView);
-  causalInputStats.sabSnapshotRetryCount += Math.max(0, result.attempts - 1);
-  if (!result.snapshot) {
-    causalInputStats.sabSnapshotRetryCount += 1;
-    return;
+  for (let port = 0; port < INPUT_PORT_COUNT; port += 1) {
+    const result = readInputStateSnapshot(inputStateSabView, { port });
+    if (port === 0) {
+      causalInputStats.sabSnapshotRetryCount += Math.max(0, result.attempts - 1);
+    }
+    if (!result.snapshot) {
+      if (port === 0) causalInputStats.sabSnapshotRetryCount += 1;
+      continue;
+    }
+    applyInputStateSnapshot(result.snapshot, result.snapshot.sentAtEpochMsLow, "sab", port);
   }
-  applyInputStateSnapshot(result.snapshot, result.snapshot.sentAtEpochMsLow, "sab");
 }
 
 function runPresentationLoop() {

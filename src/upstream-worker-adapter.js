@@ -6,6 +6,7 @@ import {
   verifyUpstreamCoreWasm
 } from "./upstream-worker-protocol.js";
 import {
+  INPUT_PORT_COUNT,
   INPUT_STATE_SLOT_COUNT,
   writeInputStateSnapshot
 } from "./input-transport.js";
@@ -17,6 +18,18 @@ import {
 } from "./causal-telemetry.js";
 
 const DEFAULT_WORKER_URL = new URL("./upstream-discio-worker.js", import.meta.url).href;
+
+const NEUTRAL_PAD_STATE = Object.freeze({
+  mask: 0,
+  stickX: 0x80,
+  stickY: 0x80,
+  cStickX: 0x80,
+  cStickY: 0x80,
+  triggerLeft: 0,
+  triggerRight: 0,
+  analogA: 0,
+  analogB: 0
+});
 
 export async function upstreamBundleAvailable(coreUrl = DEFAULT_UPSTREAM_CORE_URL) {
   try {
@@ -273,7 +286,15 @@ export class UpstreamWorkerAdapter {
     this.ppcWasmHelperStats = "";
     this.frameProfileStats = "-";
     this.frameData = null;
-    this.lastInputStateSignature = "";
+    // What the host asked for on each port, kept so a request made before the
+    // worker is loaded is published once it is. Port 0 starts plugged in (the
+    // core's default); the others start unplugged.
+    this.padPorts = Array.from({ length: INPUT_PORT_COUNT }, (_, port) => ({
+      connected: port === 0,
+      state: NEUTRAL_PAD_STATE,
+      signature: "",
+      generation: 0
+    }));
     this.workerCausalTelemetry = null;
     this.causalTelemetry = null;
     this.trafficStats = {
@@ -287,14 +308,8 @@ export class UpstreamWorkerAdapter {
       mainGeneration: 0,
       mainSabGeneration: 0
     };
-    // SharedArrayBuffer-backed input state. Bypasses postMessage queue.
-    // Slots: 0=mask, 1=stickX, 2=stickY, 3=cStickX, 4=cStickY,
-    //        5=triggerLeft, 6=triggerRight, 7=analogA, 8=analogB,
-    //        9=generation (incremented on every changed state),
-    //        10=Date.now() low 32 bits for input-age telemetry,
-    //        11=odd/even seqlock. The writer publishes odd before changing
-    //           fields and even after generation, so the worker cannot pair
-    //           a generation with fields from a concurrent later write.
+    // SharedArrayBuffer-backed input state, one seqlock block per port (layout
+    // in input-transport.js). Bypasses the postMessage queue.
     if (typeof SharedArrayBuffer === "function") {
       this.inputStateSab = new SharedArrayBuffer(INPUT_STATE_SLOT_COUNT * Int32Array.BYTES_PER_ELEMENT);
       this.inputStateView = new Int32Array(this.inputStateSab);
@@ -458,6 +473,14 @@ export class UpstreamWorkerAdapter {
     }
     this.applyMetadata(response);
     this.loaded = true;
+    this.publishRequestedPadStates();
+  }
+
+  // Ports the host set before the worker was loaded.
+  publishRequestedPadStates() {
+    for (let port = 0; port < INPUT_PORT_COUNT; port += 1) {
+      if (this.padPorts[port].signature) this.publishPadState(port);
+    }
   }
 
   async mountGame(file) {
@@ -519,45 +542,73 @@ export class UpstreamWorkerAdapter {
   }
 
   setInputState(state) {
-    if (!this.loaded || !state) {
+    this.setPadState(0, state);
+  }
+
+  // port 0-3. A state plugs the port in unless connected is false; an
+  // unplugged port reads as neutral.
+  setPadState(port, state, { connected = true } = {}) {
+    const slot = Number.isInteger(port) ? this.padPorts[port] : null;
+    if (!slot || (!state && connected)) {
       return;
     }
-    const mask = state.mask >>> 0;
-    const stickX = state.stickX | 0;
-    const stickY = state.stickY | 0;
-    const cStickX = state.cStickX | 0;
-    const cStickY = state.cStickY | 0;
-    const triggerLeft = state.triggerLeft | 0;
-    const triggerRight = state.triggerRight | 0;
-    const analogA = state.analogA | 0;
-    const analogB = state.analogB | 0;
-    const signature = `${mask}:${stickX}:${stickY}:${cStickX}:${cStickY}:${triggerLeft}:${triggerRight}:${analogA}:${analogB}`;
-    if (signature === this.lastInputStateSignature) {
+    // Missing fields read as neutral (a stick left out stays centred).
+    const source = connected ? { ...NEUTRAL_PAD_STATE, ...state } : NEUTRAL_PAD_STATE;
+    const next = {
+      mask: source.mask >>> 0,
+      stickX: source.stickX | 0,
+      stickY: source.stickY | 0,
+      cStickX: source.cStickX | 0,
+      cStickY: source.cStickY | 0,
+      triggerLeft: source.triggerLeft | 0,
+      triggerRight: source.triggerRight | 0,
+      analogA: source.analogA | 0,
+      analogB: source.analogB | 0
+    };
+    const signature = `${connected ? 1 : 0}:${next.mask}:${next.stickX}:${next.stickY}:${next.cStickX}:${next.cStickY}:${next.triggerLeft}:${next.triggerRight}:${next.analogA}:${next.analogB}`;
+    if (signature === slot.signature) {
       return;
     }
-    this.lastInputStateSignature = signature;
-    this.inputTelemetry.mainStateChangeCount += 1;
+    slot.signature = signature;
+    slot.connected = Boolean(connected);
+    slot.state = next;
+    if (this.loaded) {
+      this.publishPadState(port);
+    }
+  }
+
+  connectPad(port, connected) {
+    const slot = Number.isInteger(port) ? this.padPorts[port] : null;
+    if (!slot || (slot.connected === Boolean(connected) && slot.signature)) {
+      return;
+    }
+    this.setPadState(port, connected ? slot.state : null, { connected: Boolean(connected) });
+  }
+
+  publishPadState(port) {
+    const slot = this.padPorts[port];
+    const { connected, state } = slot;
     const inputSentAtEpochMs = Date.now();
-    let inputGeneration = (this.inputTelemetry.mainGeneration + 1) >>> 0;
+    // Generations are per port; input telemetry follows port 0 only.
+    let inputGeneration = (slot.generation + 1) >>> 0;
     if (inputGeneration === 0) inputGeneration = 1;
-    this.inputTelemetry.mainGeneration = inputGeneration;
+    slot.generation = inputGeneration;
+    if (port === 0) {
+      this.inputTelemetry.mainStateChangeCount += 1;
+      this.inputTelemetry.mainGeneration = inputGeneration;
+    }
 
     if (this.inputStateView) {
       writeInputStateSnapshot(this.inputStateView, {
-        mask,
-        stickX,
-        stickY,
-        cStickX,
-        cStickY,
-        triggerLeft,
-        triggerRight,
-        analogA,
-        analogB,
+        ...state,
+        connected,
         inputGeneration,
         sentAtEpochMs: inputSentAtEpochMs
-      });
-      this.inputTelemetry.mainSabGeneration = inputGeneration;
-      this.inputTelemetry.mainSabWriteCount += 1;
+      }, port);
+      if (port === 0) {
+        this.inputTelemetry.mainSabGeneration = inputGeneration;
+        this.inputTelemetry.mainSabWriteCount += 1;
+      }
     }
     // Always also send via postMessage. Belt-and-suspenders: if the worker
     // is between SAB-poll iterations when an input arrives (e.g. it's
@@ -565,19 +616,15 @@ export class UpstreamWorkerAdapter {
     // path will deliver the update on the next event-loop tick. SAB is
     // strictly faster when the loop is healthy; postMessage is the floor.
     this.post("setInputState", {
-      mask,
-      stickX,
-      stickY,
-      cStickX,
-      cStickY,
-      triggerLeft,
-      triggerRight,
-      analogA,
-      analogB,
+      port,
+      connected,
+      ...state,
       inputSentAtEpochMs,
       inputGeneration
     });
-    this.inputTelemetry.mainPostCount += 1;
+    if (port === 0) {
+      this.inputTelemetry.mainPostCount += 1;
+    }
   }
 
   runFrame() {
