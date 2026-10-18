@@ -1,15 +1,17 @@
 {
   "name": "kart-race",
   "runs": 3,
-  "warmupSec": 10,
-  "sampleSec": 30,
-  "shotEverySec": 15,
+  "warmupSec": 25,
+  "sampleSec": 20,
+  "shotEverySec": 0,
   "games": [
     {
       "id": "kart-race",
       "iso": "${KART_ISO}",
+      "state": "${KART_STATE}",
+      "measureFromState": true,
       "localOnly": true,
-      "steps": "local-kart-race-steps.json",
+      "steps": "local-kart-race-hold.json",
       "audio": true
     }
   ],

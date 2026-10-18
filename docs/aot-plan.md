@@ -243,8 +243,8 @@ of its 13,434 functions found as entries, 123 more as block starts, 1 missing;
 its 299 jump tables all found with the same size.
 
 Coverage of the code actually run, measured with
-`harness/probes/aot-coverage.mjs` (a worker spinning on the shared wasm
-heap, reading `PowerPCState.pc` where `GetPPCPC` reads it). It sees the PC
+`harness/probes/aot-coverage.mjs`, through the harness's guest-PC sampler
+(`src/harness-pc-sampler.js`, PowerPCState.pc read from the shared heap). It sees the PC
 where the core stores it, at block dispatch, so the unit that counts is the
 **distinct PC**, an entry into compiled code. Time shares are dominated by
 hot and idle loops and only given as a secondary figure.

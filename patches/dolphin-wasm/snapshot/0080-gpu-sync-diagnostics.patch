@@ -1,0 +1,178 @@
+diff --git a/Source/Core/VideoCommon/Fifo.cpp b/Source/Core/VideoCommon/Fifo.cpp
+--- a/Source/Core/VideoCommon/Fifo.cpp
++++ b/Source/Core/VideoCommon/Fifo.cpp
+@@ -2,6 +2,7 @@
+ // SPDX-License-Identifier: GPL-2.0-or-later
+ 
+ #include "VideoCommon/Fifo.h"
++#include "VideoCommon/WasmGpuSyncDiag.h"
+ 
+ #include <atomic>
+ #include <cstring>
+@@ -308,6 +309,7 @@ void FifoManager::RunGpuLoop()
+       [this] {
+         // Run events from the CPU thread.
+         AsyncRequests::GetInstance()->PullEvents();
++        DolphinWeb::GpuSyncDiag::Count(DolphinWeb::GpuSyncDiag::s_counters.gpu_loop_iterations);
+ 
+ #ifdef __EMSCRIPTEN__
+         // §27 diag: is the GPU mainloop body running post-load, and
+@@ -414,6 +416,7 @@ void FifoManager::RunGpuLoop()
+               m_video_buffer_read_ptr = OpcodeDecoder::RunFifo(
+                   DataReader(m_video_buffer_read_ptr, write_ptr), &cyclesExecuted);
+             }
++            DolphinWeb::GpuSyncDiag::Count(DolphinWeb::GpuSyncDiag::s_counters.fifo_chunks_decoded);
+ 
+ #ifdef __EMSCRIPTEN__
+             // §27d: does the GPU thread actually DECODE FIFO chunks
+diff --git a/Source/Core/VideoCommon/PixelEngine.cpp b/Source/Core/VideoCommon/PixelEngine.cpp
+--- a/Source/Core/VideoCommon/PixelEngine.cpp
++++ b/Source/Core/VideoCommon/PixelEngine.cpp
+@@ -2,6 +2,7 @@
+ // SPDX-License-Identifier: GPL-2.0-or-later
+ 
+ #include "VideoCommon/PixelEngine.h"
++#include "VideoCommon/WasmGpuSyncDiag.h"
+ 
+ #include <mutex>
+ 
+@@ -179,6 +180,7 @@ void PixelEngineManager::SetTokenFinish_OnMainThread_Static(Core::System& system
+ 
+ void PixelEngineManager::SetTokenFinish_OnMainThread(u64 userdata, s64 cycles_late)
+ {
++  DolphinWeb::GpuSyncDiag::Count(DolphinWeb::GpuSyncDiag::s_counters.pe_events_run);
+   std::unique_lock lk(m_token_finish_mutex);
+   m_event_raised = false;
+ 
+@@ -188,6 +190,7 @@ void PixelEngineManager::SetTokenFinish_OnMainThread(u64 userdata, s64 cycles_la
+   {
+     m_token_interrupt_pending = false;
+     m_signal_token_interrupt = true;
++    DolphinWeb::GpuSyncDiag::Count(DolphinWeb::GpuSyncDiag::s_counters.pe_token_signalled);
+     UpdateInterrupts();
+   }
+ 
+@@ -195,6 +198,7 @@ void PixelEngineManager::SetTokenFinish_OnMainThread(u64 userdata, s64 cycles_la
+   {
+     m_finish_interrupt_pending = false;
+     m_signal_finish_interrupt = true;
++    DolphinWeb::GpuSyncDiag::Count(DolphinWeb::GpuSyncDiag::s_counters.pe_finish_signalled);
+     UpdateInterrupts();
+     lk.unlock();
+     Core::FrameUpdateOnCPUThread();
+@@ -210,6 +214,7 @@ void PixelEngineManager::RaiseEvent(int cycles_into_future)
+     return;
+ 
+   m_event_raised = true;
++  DolphinWeb::GpuSyncDiag::Count(DolphinWeb::GpuSyncDiag::s_counters.pe_events_scheduled);
+ 
+   CoreTiming::FromThread from = CoreTiming::FromThread::NON_CPU;
+   s64 cycles = 0;  // we don't care about timings for dual core mode.
+@@ -230,6 +235,7 @@ void PixelEngineManager::SetToken(const u16 token, const bool interrupt, int cyc
+ {
+   DEBUG_LOG_FMT(PIXELENGINE, "VIDEO Backend raises INT_CAUSE_PE_TOKEN (btw, token: {:04x})", token);
+ 
++  DolphinWeb::GpuSyncDiag::Count(DolphinWeb::GpuSyncDiag::s_counters.pe_token_requests);
+   std::lock_guard lk(m_token_finish_mutex);
+ 
+   m_token_pending = token;
+@@ -244,6 +250,7 @@ void PixelEngineManager::SetFinish(int cycles_into_future)
+ {
+   DEBUG_LOG_FMT(PIXELENGINE, "VIDEO Set Finish");
+ 
++  DolphinWeb::GpuSyncDiag::Count(DolphinWeb::GpuSyncDiag::s_counters.pe_finish_requests);
+   std::lock_guard lk(m_token_finish_mutex);
+ 
+   m_finish_interrupt_pending |= true;
+@@ -251,4 +258,16 @@ void PixelEngineManager::SetFinish(int cycles_into_future)
+   RaiseEvent(cycles_into_future);
+ }
+ 
++PixelEngineManager::SyncState PixelEngineManager::GetSyncState()
++{
++  std::lock_guard lk(m_token_finish_mutex);
++  return {m_token,
++          m_token_pending,
++          m_token_interrupt_pending,
++          m_finish_interrupt_pending,
++          m_event_raised,
++          m_signal_token_interrupt,
++          m_signal_finish_interrupt};
++}
++
+ }  // namespace PixelEngine
+diff --git a/Source/Core/VideoCommon/PixelEngine.h b/Source/Core/VideoCommon/PixelEngine.h
+--- a/Source/Core/VideoCommon/PixelEngine.h
++++ b/Source/Core/VideoCommon/PixelEngine.h
+@@ -191,6 +191,20 @@ public:
+   void SetFinish(int cycle_delay);
+   AlphaReadMode GetAlphaReadMode() const { return m_alpha_read.read_mode; }
+ 
++  // Harness diagnostics (WasmGpuSyncDiag.h): the handshake state as the CPU
++  // thread would see it. Takes the token/finish mutex.
++  struct SyncState
++  {
++    u16 token;
++    u16 token_pending;
++    bool token_interrupt_pending;
++    bool finish_interrupt_pending;
++    bool event_raised;
++    bool signal_token_interrupt;
++    bool signal_finish_interrupt;
++  };
++  SyncState GetSyncState();
++
+ private:
+   void RaiseEvent(int cycles_into_future);
+   void UpdateInterrupts();
+diff --git a/Source/Core/VideoCommon/WasmGpuSyncDiag.h b/Source/Core/VideoCommon/WasmGpuSyncDiag.h
+new file mode 100644
+index 0000000000..051f4c3301
+--- /dev/null
++++ b/Source/Core/VideoCommon/WasmGpuSyncDiag.h
+@@ -0,0 +1,45 @@
++// Copyright 2026 Dolphin Emulator Project (wasm-dolphin fork)
++// SPDX-License-Identifier: GPL-2.0-or-later
++
++#pragma once
++
++// Harness diagnostics for a dual-core GPU stall: the GPU thread's FIFO loop
++// and the pixel engine's token/finish handshake with the CPU thread. Off unless
++// the harness hooks are on (DolphinWeb_HarnessEnable): every hook is one
++// relaxed load of `s_enabled`, then nothing.
++
++#include <atomic>
++#include <cstdint>
++
++namespace DolphinWeb::GpuSyncDiag
++{
++inline std::atomic<bool> s_enabled{false};
++
++struct Counters
++{
++  std::atomic<std::uint64_t> gpu_loop_iterations{0};
++  std::atomic<std::uint64_t> fifo_chunks_decoded{0};
++  // PixelEngine: SetToken/SetFinish calls (video thread), the ones that
++  // actually scheduled the CPU-thread event (m_event_raised was clear), and
++  // the event runs on the CPU thread.
++  std::atomic<std::uint64_t> pe_token_requests{0};
++  std::atomic<std::uint64_t> pe_finish_requests{0};
++  std::atomic<std::uint64_t> pe_events_scheduled{0};
++  std::atomic<std::uint64_t> pe_events_run{0};
++  std::atomic<std::uint64_t> pe_finish_signalled{0};
++  std::atomic<std::uint64_t> pe_token_signalled{0};
++};
++
++inline Counters s_counters{};
++
++inline bool Enabled()
++{
++  return s_enabled.load(std::memory_order_relaxed);
++}
++
++inline void Count(std::atomic<std::uint64_t>& counter)
++{
++  if (Enabled())
++    counter.fetch_add(1, std::memory_order_relaxed);
++}
++}  // namespace DolphinWeb::GpuSyncDiag

@@ -12,10 +12,30 @@ import { checkCore } from "./core-identity.mjs";
 import { claim } from "./ownership.mjs";
 import { machineSnapshot, sampleChromeCpu } from "./system.mjs";
 
-export async function openSession({ base, server = null, query, iso, display = "headless", gamepads = null, keepProfile = false, routes = {} }) {
+// `launch` is a seam for tests; it defaults to the headless launchChrome.
+export async function openSession({ base, server = null, query, iso, display = "headless", gamepads = null, keepProfile = false, routes = {}, launch = launchChrome }) {
+  // Fail before Chrome exists: a missing disc must not cost a browser.
+  if (!iso || !existsSync(iso)) throw new Error(`disc image not found: ${iso}`);
   const profileDir = mkdtempSync(path.join(os.tmpdir(), "gc-harness-profile-"));
   const releaseProfile = claim(profileDir, REPO_ROOT, "chrome-profile");
-  const context = await launchChrome({ profileDir, display });
+  let context = null;
+  const discard = async () => {
+    await context?.close().catch(() => {});
+    releaseProfile();
+    if (!keepProfile) rmSync(profileDir, { recursive: true, force: true });
+  };
+  try {
+    context = await launch({ profileDir, display });
+    return await startSession({ context, profileDir, base, server, query, iso, gamepads, routes, discard });
+  } catch (e) {
+    // Any failure after the profile is claimed: close Chrome, free the
+    // profile, then rethrow, so node does not hang on a live browser.
+    await discard();
+    throw e;
+  }
+}
+
+async function startSession({ context, profileDir, base, server, query, iso, gamepads, routes, discard }) {
   await context.assertInvisible?.("after launch");
   await context.addInitScript(installMonitor);
   if (gamepads) await addGamepadMock(context, gamepads);
@@ -35,12 +55,7 @@ export async function openSession({ base, server = null, query, iso, display = "
   if (server) {
     const selection = await page.evaluate(() => window.__host?.adapter?.coreSelectionTelemetry?.() ?? null).catch(() => null);
     core = checkCore({ url, defaultSha256: server.defaultCoreSha256, fetches: server.coreFetches.slice(fetchedBefore), selection });
-    if (!core.ok) {
-      await context.close().catch(() => {});
-      releaseProfile();
-      if (!keepProfile) rmSync(profileDir, { recursive: true, force: true });
-      throw new Error(core.error);
-    }
+    if (!core.ok) throw new Error(core.error);
   }
   return {
     page,
@@ -66,12 +81,20 @@ export async function openSession({ base, server = null, query, iso, display = "
       }
       return { dir, kept };
     },
-    async close() {
-      await context.close().catch(() => {});
-      releaseProfile();
-      if (!keepProfile) rmSync(profileDir, { recursive: true, force: true });
-    }
+    close: discard
   };
+}
+
+// Boot the disc again in the same session (same profile and caches), and
+// check again which core it loaded: a reboot fetches the core anew.
+export async function rebootSession(session, server) {
+  const before = server.coreFetches.length;
+  await bootIso(session.page, { url: session.url, iso: session.iso });
+  const selection = await session.page.evaluate(() => window.__host?.adapter?.coreSelectionTelemetry?.() ?? null).catch(() => null);
+  const core = checkCore({ url: session.url, defaultSha256: server.defaultCoreSha256, fetches: server.coreFetches.slice(before), selection });
+  if (!core.ok) throw new Error(core.error);
+  session.core = core;
+  return core;
 }
 
 export async function monitorSnapshot(session, reset = false) {

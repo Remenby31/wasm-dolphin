@@ -1,5 +1,5 @@
 import assert from "node:assert/strict";
-import { chmodSync, mkdtempSync, mkdirSync, rmSync, writeFileSync } from "node:fs";
+import { chmodSync, mkdtempSync, mkdirSync, rmSync, statSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import path from "node:path";
 import test from "node:test";
@@ -172,6 +172,21 @@ test("a failed install restores every file it touched", () => {
     for (const file of INSTALLED_FILES) {
       assert.equal(readFileSync(path.join(base, file), "utf8"), `old ${file}`, file);
       assert.ok(!existsSync(path.join(base, `${file}.install-tmp`)));
+    }
+  } finally {
+    rmSync(base, { recursive: true, force: true });
+  }
+});
+
+test("an installed core is never executable, though Emscripten writes it so", () => {
+  const { base, out } = installFixture();
+  try {
+    for (const name of ["dolphin-core-upstream.js", "dolphin-core-upstream.wasm", "dolphin-core-upstream.build.json"]) {
+      chmodSync(path.join(out, name), 0o755);
+    }
+    installCore({ root: base, outputDir: out, validate: () => {} });
+    for (const name of ["dolphin-core-upstream.js", "dolphin-core-upstream.wasm", "dolphin-core-upstream.build.json"]) {
+      assert.equal(statSync(path.join(base, "cores/dolphin", name)).mode & 0o777, 0o644, name);
     }
   } finally {
     rmSync(base, { recursive: true, force: true });
