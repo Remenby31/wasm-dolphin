@@ -5921,6 +5921,8 @@ async function reconcileJitCacheWithBuild(fingerprint) {
     }
     return loadedFromStore;
   }
+  // No block store after all (CacheStorage refused): the IndexedDB path.
+  if (!dolphinJitIdb) dolphinJitIdb = await openDolphinJitIdb();
   if (!dolphinJitIdb) return 0;
   const [storedFingerprint, storedEntryKeySchema] = await Promise.all([
     readDolphinJitMetadata(dolphinJitIdb, DOLPHIN_JIT_FINGERPRINT_KEY),
