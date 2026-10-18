@@ -31,6 +31,7 @@
 #include "Core/Config/MainSettings.h"
 #include "Core/ConfigLoaders/BaseConfigLoader.h"
 #include "Core/ConfigManager.h"
+#include "Core/HW/SI/SI_Device.h"
 #include "Core/Core.h"
 #include "Core/CoreTiming.h"
 #include "Core/HW/GBAPad.h"
@@ -629,6 +630,10 @@ void EnsureRuntime()
   Config::SetBase(Config::MAIN_SLOT_B, memcard_slot_b ?
                                            ExpansionInterface::EXIDeviceType::MemoryCardFolder :
                                            ExpansionInterface::EXIDeviceType::None);
+  // A controller sits on all four ports; DolphinWeb_GetPadStatus reports which
+  // ones are plugged in, so the host can hot-plug them.
+  for (int port = 0; port < 4; ++port)
+    Config::SetBase(Config::GetInfoForSIDevice(port), SerialInterface::SIDEVICE_GC_CONTROLLER);
   Config::SetBase(Config::MAIN_AUDIO_BACKEND, std::string("Web Audio"));
   Config::SetBase(Config::MAIN_AUDIO_MUTED, false);
   Config::SetBase(Config::GFX_HACK_SKIP_XFB_COPY_TO_RAM, s_video_backend == "OGL");
@@ -688,6 +693,7 @@ void EnsureRuntime()
                                    std::memory_order_relaxed);
     s_last_loaded_ppc_pc.store(system.GetPPCState().pc, std::memory_order_relaxed);
     s_last_loaded_checkpoint_generation.fetch_add(1, std::memory_order_release);
+    DolphinWeb_HarnessOnStateLoaded();
     // Publish the semantic epoch only after State::Load has applied and the
     // checkpoint is observable. The GPU wake below then guarantees that the
     // first producer command in the new epoch belongs to the restored state.

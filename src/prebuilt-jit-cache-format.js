@@ -28,7 +28,11 @@
 export const PREBUILT_CACHE_MAGIC = new Uint8Array([
   0x44, 0x4f, 0x4c, 0x50, 0x43, 0x41, 0x43, 0x48
 ]);
-import { JIT_CACHE_ENTRY_KEY_SCHEMA } from "./jit-cache-identity.js";
+import {
+  JIT_CACHE_ENTRY_KEY_SCHEMA,
+  canonicalCoreFingerprint,
+  verifyCanonicalWasmBlockKey
+} from "./jit-cache-identity.js";
 
 export const PREBUILT_CACHE_VERSION = 2;
 
@@ -133,4 +137,40 @@ export function decodePrebuiltCache(buffer) {
     throw new Error("prebuilt-jit-cache: trailing payload bytes");
   }
   return { fingerprint, entryKeySchema, entries };
+}
+
+// Checks a prebuilt cache against the core it would be served with, the way
+// the worker would judge it, so a stale or broken file fails loudly at build
+// time instead of being skipped in silence at boot (issue #18): format
+// version, core fingerprint, entry keys (SHA-256 of the exact bytes) and
+// module validity. Returns { ok, reason, entries, invalidModules }.
+export async function verifyPrebuiltCache(buffer, coreSha256, {
+  validateModule = (bytes) => WebAssembly.validate(bytes)
+} = {}) {
+  let decoded;
+  try {
+    decoded = decodePrebuiltCache(buffer);
+  } catch (error) {
+    return { ok: false, reason: error.message, entries: 0, invalidModules: 0 };
+  }
+  const expected = canonicalCoreFingerprint(coreSha256);
+  if (decoded.fingerprint !== expected) {
+    return {
+      ok: false,
+      reason: `fingerprint ${decoded.fingerprint || "<empty>"} does not match the core (${expected})`,
+      entries: decoded.entries.length,
+      invalidModules: 0
+    };
+  }
+  let invalidModules = 0;
+  for (const { hash, bytes } of decoded.entries) {
+    if (!(await verifyCanonicalWasmBlockKey(hash, bytes))) {
+      return { ok: false, reason: `entry ${hash} does not match its bytes`, entries: decoded.entries.length, invalidModules };
+    }
+    if (!validateModule(bytes)) invalidModules += 1;
+  }
+  if (invalidModules) {
+    return { ok: false, reason: `${invalidModules} module(s) the engine rejects`, entries: decoded.entries.length, invalidModules };
+  }
+  return { ok: true, reason: "ok", entries: decoded.entries.length, invalidModules: 0 };
 }

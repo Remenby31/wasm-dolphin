@@ -8,9 +8,12 @@
 //
 // Other flags: --no-sync (build vendor/dolphin as it is, e.g. while editing
 // it before regenerating a patch), --allow-dirty (record a build from an
-// uncommitted tree), --jobs N. Docker only: --docker-platform linux/amd64,
+// uncommitted tree), --reset-vendor (discard vendor/dolphin changes, e.g. an
+// older patch series, before syncing), --jobs N, --ccache (compile through the pinned ccache;
+// cache in build/ccache, or CCACHE_DIR). Docker only: --docker-platform linux/amd64,
 // --bind-mounts (no named volumes; what CI uses), --image-only, and
-// --docker-context (stage the image context, print its tag).
+// --docker-context (stage the image context, print its tag). --print-identity
+// prints the build identity CI keys the CMake-tree cache on.
 //
 // Outputs, per host platform P (darwin-arm64, linux-x64, linux-arm64):
 //   build/repro/P/dolphin-wasm/   CMake/Ninja tree (incremental between runs)
@@ -21,7 +24,7 @@
 import { spawnSync } from "node:child_process";
 import { createHash } from "node:crypto";
 import {
-  copyFileSync, cpSync, existsSync, mkdirSync, mkdtempSync, readdirSync, readFileSync, realpathSync,
+  chmodSync, copyFileSync, cpSync, existsSync, mkdirSync, mkdtempSync, readdirSync, readFileSync, realpathSync,
   renameSync, rmSync, writeFileSync
 } from "node:fs";
 import { tmpdir } from "node:os";
@@ -29,7 +32,9 @@ import { dirname, join, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 
 import { wasmSectionInfo } from "./core-build-info.mjs";
-import { hostPlatform, lockPath, sha256File, verifyWasmToolchain } from "./wasm-toolchain.mjs";
+import {
+  hostPlatform, loadWasmToolchainLock, lockPath, posixToolchainDir, sha256File, verifyWasmToolchain
+} from "./wasm-toolchain.mjs";
 
 const root = resolve(dirname(fileURLToPath(import.meta.url)), "..");
 const argv = process.argv.slice(2);
@@ -205,7 +210,9 @@ function runInDocker() {
       "-v", `wasm-dolphin-vendor-${sourceKey}:/wasm-dolphin/vendor`,
       "-v", `wasm-dolphin-cmake-${volumeSuffix}-${identity.key}:${platformDir}/dolphin-wasm`,
       "-v", `wasm-dolphin-emcache-${volumeSuffix}:/opt/em-cache`,
-      "-e", "EM_CACHE=/opt/em-cache"
+      "-e", "EM_CACHE=/opt/em-cache",
+      // ccache locks its files, like the Emscripten cache: keep it in a volume.
+      ...(flag("--ccache") ? ["-v", `wasm-dolphin-ccache-${volumeSuffix}:/opt/ccache`, "-e", "CCACHE_DIR=/opt/ccache"] : [])
     ];
   run("docker", [
     "run", "--rm", ...platformArgs,
@@ -291,13 +298,13 @@ export function installRefusal(parity) {
 }
 
 // Files a core installation rewrites: the artifacts, and what update:core-abi
-// derives from them.
+// derives from them (the default-core lock and the ABI manifest).
 export const INSTALLED_FILES = [
   "cores/dolphin/dolphin-core-upstream.js",
   "cores/dolphin/dolphin-core-upstream.wasm",
   "cores/dolphin/dolphin-core-upstream.build.json",
-  "provenance/dolphin-core-abi-v1.json",
-  "src/upstream-worker-protocol.js"
+  "cores/dolphin/core.lock.json",
+  "provenance/dolphin-core-abi-v1.json"
 ];
 
 // Swap the candidate in, validate, and restore every installed file if the
@@ -318,6 +325,9 @@ export function installCore({ root: base, outputDir, validate }) {
       for (const name of ["dolphin-core-upstream.js", "dolphin-core-upstream.wasm", "dolphin-core-upstream.build.json"]) {
         const destination = join(base, "cores/dolphin", name);
         copyFileSync(join(outputDir, name), `${destination}.install-tmp`);
+        // Emscripten marks its output executable; the committed core files
+        // are plain 0644 data (push-core accepts only 100644 blobs).
+        chmodSync(`${destination}.install-tmp`, 0o644);
         renameSync(`${destination}.install-tmp`, destination);
       }
       validate();
@@ -341,6 +351,53 @@ export function installCore({ root: base, outputDir, validate }) {
 
 // ----------------------------------------------------------------- build ---
 
+// After main's patch series changes, vendor/dolphin still carries the old one
+// and fetch:dolphin refuses it: it is neither pristine nor the locked snapshot.
+// --reset-vendor discards every change in the tree, its submodules and its
+// pinned external repositories, so that sync can re-apply the current series.
+// Opt-in, because a vendor tree may hold uncommitted patch work.
+export function resetVendor(dolphinDir) {
+  if (!existsSync(join(dolphinDir, ".git"))) return;
+  const sourceLock = JSON.parse(readFileSync(join(root, "provenance/dolphin-source.lock.json"), "utf8"));
+  const git = (cwd, args) => run("git", ["-C", cwd, ...args]);
+  git(dolphinDir, ["reset", "-q", "--hard"]);
+  git(dolphinDir, ["clean", "-q", "-fd"]);
+  git(dolphinDir, ["submodule", "foreach", "--quiet", "--recursive", "git reset -q --hard && git clean -q -fd"]);
+  for (const cwd of Object.keys(sourceLock.externalRepositories ?? {})) {
+    const directory = join(dolphinDir, cwd);
+    if (existsSync(join(directory, ".git"))) {
+      git(directory, ["reset", "-q", "--hard"]);
+      git(directory, ["clean", "-q", "-fd"]);
+    }
+  }
+  console.log(`Reset ${dolphinDir} to its pristine checkout`);
+}
+
+// ccache keyed on the pinned toolchain rather than on em++ (a shell script
+// whose bytes do not change with the compiler behind it). No CCACHE_BASEDIR:
+// it rewrites absolute paths in the compiler's arguments as relative ones,
+// which -ffile-prefix-map then no longer matches, so __FILE__ strings and the
+// core's bytes change (measured: 284 strings became ../../../../vendor/...).
+// Entries are therefore shared only between builds at the same path, which CI
+// (always /wasm-dolphin in the container) is.
+export function ccacheEnvironment(lock = loadWasmToolchainLock(), env = process.env) {
+  const binary = join(posixToolchainDir(), "ccache/ccache");
+  if (!existsSync(binary)) {
+    throw new Error(`--ccache needs ${binary}; run npm run toolchain:bootstrap`);
+  }
+  const compiler = [
+    lock.emscripten.version, lock.emscripten.compilerCommit, lock.posix.emscriptenTreeSha256,
+    lock.posix.platforms[hostPlatform]?.clangSha256 ?? "unrecorded-host"
+  ].join("-");
+  return {
+    DOLPHIN_WASM_CCACHE: binary,
+    CCACHE_DIR: env.CCACHE_DIR ?? join(root, "build/ccache"),
+    CCACHE_COMPILERCHECK: `string:${compiler}`,
+    CCACHE_NOHASHDIR: "1",
+    CCACHE_MAXSIZE: env.CCACHE_MAXSIZE ?? "2G"
+  };
+}
+
 function buildNative() {
   const platformDir = join(root, "build/repro", hostPlatform);
   const buildDir = join(platformDir, "dolphin-wasm");
@@ -354,7 +411,8 @@ function buildNative() {
     // same checkout must not overwrite each other's Naga archive.
     CARGO_TARGET_DIR: join(platformDir, "naga-target"),
     BUILD_PARALLELISM: option("--jobs", process.env.BUILD_PARALLELISM ?? "8"),
-    ...(flag("--allow-dirty") ? { DOLPHIN_ALLOW_DIRTY_BUILD: "1" } : {})
+    ...(flag("--allow-dirty") ? { DOLPHIN_ALLOW_DIRTY_BUILD: "1" } : {}),
+    ...(flag("--ccache") ? ccacheEnvironment() : { DOLPHIN_WASM_CCACHE: "" })
   };
 
   let start = performance.now();
@@ -371,8 +429,14 @@ function buildNative() {
 
   start = performance.now();
   if (!flag("--no-sync")) {
+    if (flag("--reset-vendor")) resetVendor(join(root, "vendor/dolphin"));
     removeBytecodeCaches(join(root, "vendor/dolphin/Externals/glslang"));
-    run(process.execPath, ["tools/fetch-dolphin.mjs"]);
+    try {
+      run(process.execPath, ["tools/fetch-dolphin.mjs"]);
+    } catch (error) {
+      throw new Error(`${error.message}\nIf vendor/dolphin carries an older patch series (main's changed), ` +
+        "rerun with --reset-vendor; it discards every change under vendor/dolphin.", { cause: error });
+    }
     run(process.execPath, ["tools/patch-upstream-wasm.mjs"]);
   }
   timings.sources = seconds(start);
@@ -396,6 +460,7 @@ function buildNative() {
   rmSync(join(outputDir, IDENTITY_STAMP), { force: true });
   timings.configure = seconds(start);
 
+  if (env.DOLPHIN_WASM_CCACHE) spawnSync(env.DOLPHIN_WASM_CCACHE, ["--zero-stats"], { env, stdio: "ignore" });
   start = performance.now();
   run(process.execPath, ["tools/build-upstream-target.mjs", "dolphin_web_core"], { env });
   stampBuildTree(outputDir, identity);
@@ -425,7 +490,8 @@ function buildNative() {
         run(process.execPath, ["tools/verify-dolphin-provenance.mjs"]);
       }
     });
-    console.log("Installed the rebuilt core into cores/dolphin.");
+    console.log("Installed the rebuilt core into cores/dolphin for local testing. Do not commit it:");
+    console.log("CI builds and commits the core after a merge. `npm run core:restore -- --base origin/main` puts main's back.");
   }
 
   if (process.env.HOST_UID) {
@@ -441,11 +507,16 @@ function buildNative() {
     `Differs from cores/dolphin; see ${join(platformDir, "parity.json")} and docs/repro-build.md.`);
   console.log(`Load it with ?coreid=sha256:${parity.rebuilt.wasmSha256}`);
   console.log(`Timings (s): ${JSON.stringify(timings)}`);
+  if (env.DOLPHIN_WASM_CCACHE) {
+    const stats = spawnSync(env.DOLPHIN_WASM_CCACHE, ["--show-stats"], { env, encoding: "utf8" }).stdout;
+    console.log(`ccache:\n${stats.split("\n").filter((line) => /Hits|Misses|Cacheable|Cache size/.test(line)).join("\n")}`);
+  }
 }
 
 if (process.argv[1] === fileURLToPath(import.meta.url)) {
   try {
     if (flag("--docker-context")) console.log(prepareDockerContext().tag);
+    else if (flag("--print-identity")) console.log(currentIdentity().key);
     else if (flag("--docker")) runInDocker();
     else buildNative();
   } catch (error) {

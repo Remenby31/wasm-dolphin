@@ -56,3 +56,6 @@ dist/
 /vendor
 # Crates vendored for the GPL source archive (tools/build-corresponding-source.mjs)
 tools/naga-spirv-wgsl/vendor/
+
+# playwright-cli page snapshots
+.playwright-cli/

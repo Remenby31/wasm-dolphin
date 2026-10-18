@@ -1,5 +1,5 @@
 import { DolphinCoreAdapter, dolphinBundleAvailable } from "./dolphin-adapter.js";
-import { buttonMaskFromPressed } from "./input.js";
+import { buttonMaskFromPressed, isPadPort } from "./input.js";
 import { UpstreamMainThreadAdapter } from "./upstream-main-thread-adapter.js";
 import { UpstreamWorkerAdapter, describeUserDataStatus, upstreamBundleAvailable } from "./upstream-worker-adapter.js";
 import {
@@ -64,6 +64,7 @@ const VISIBLE_SAMPLE_WIDTH = 96;
 const VISIBLE_SAMPLE_HEIGHT = 72;
 const VISIBLE_SAMPLE_INTERVAL_MS = 250;
 const SAFE_JIT_WARMUP_FRAMES = 5000;
+const DEFAULT_JIT_WARMUP_FRAMES = 60;
 
 export class EmulatorHost {
   constructor({ canvas, onFrame = () => {}, onStatus = () => {}, onMode = () => {} }) {
@@ -643,6 +644,31 @@ export class EmulatorHost {
   setInputState(inputState) {
     this.buttonMask = inputState?.mask >>> 0;
     this.adapter.setInputState?.(inputState);
+  }
+
+  // Public input API (docs/input.md). port is 0-3 (GameCube ports 1-4); state
+  // uses the src/input.js layout (mask of BUTTONS, sticks and triggers as
+  // bytes, 0x80 = centre). setPad plugs the port in if needed, and throws a
+  // TypeError/RangeError on a field that is not a finite number.
+  setPad(port, state) {
+    if (!isPadPort(port) || !state) return false;
+    if (port === 0) this.buttonMask = state.mask >>> 0;
+    if (this.adapter.setPadState) {
+      this.adapter.setPadState(port, state);
+      return true;
+    }
+    if (port !== 0) return false;
+    this.adapter.setInputState?.(state);
+    return true;
+  }
+
+  // Plugs (true) or unplugs (false) the controller on a port. An unplugged
+  // port answers "no controller" to the game.
+  connectPad(port, connected) {
+    if (!isPadPort(port) || !this.adapter.connectPad) return false;
+    if (port === 0) this.buttonMask = 0;
+    this.adapter.connectPad(port, Boolean(connected));
+    return true;
   }
 
   saveState() {
@@ -1227,11 +1253,11 @@ function requestedPpcWasmJitWarmupFrames(videoBackend) {
       );
     }
   } else {
-    // §28bq: REVERTED §28bo (3600→300). Early engage into the huge
-    // initial compile burst, combined with §28bp removing the
-    // post-engage stall guard, froze the core at boot ("core not
-    // advancing" regression). Back to the verified-good 3600.
-    effective = forceJit ? Math.max(minimumWarmup, 700) : Math.max(minimumWarmup, 3600);
+    // Short and counted in emulated XFB frames, so the JIT engages at the
+    // same point on every run. The core spreads the first compile burst
+    // over CPU slices (compile smearing), which is what the old minute-long
+    // wait was covering for.
+    effective = Math.max(minimumWarmup, DEFAULT_JIT_WARMUP_FRAMES);
   }
   return effective;
 }

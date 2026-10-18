@@ -54,4 +54,24 @@ fi
 "$dir/python/bin/python" -m pip install --quiet --disable-pip-version-check \
   --require-hashes --only-binary=:all: -r "$root/tools/toolchain/requirements.txt"
 
+echo "== ccache (hash-locked release archive)"
+platform="$(node -p "process.platform + '-' + process.arch")"
+ccache_version="$(field posix.ccache.version)"
+ccache_name="$(node -p "require('$lock').posix.ccache.archives['$platform']?.name ?? ''")"
+ccache_sha="$(node -p "require('$lock').posix.ccache.archives['$platform']?.sha256 ?? ''")"
+if [ -z "$ccache_name" ]; then
+  echo "no pinned ccache for $platform; --ccache will be unavailable"
+elif [ ! -x "$dir/ccache/ccache" ] || ! "$dir/ccache/ccache" --version | grep -q "ccache version $ccache_version"; then
+  tmp="$(mktemp -d)"
+  curl -fsSL -o "$tmp/$ccache_name" "https://github.com/ccache/ccache/releases/download/v$ccache_version/$ccache_name"
+  actual="$(node -e "process.stdout.write(require('crypto').createHash('sha256').update(require('fs').readFileSync('$tmp/$ccache_name')).digest('hex'))")"
+  if [ "$actual" != "$ccache_sha" ]; then
+    echo "ccache archive hash mismatch: expected $ccache_sha, got $actual" >&2
+    exit 1
+  fi
+  rm -rf "$dir/ccache" && mkdir -p "$dir/ccache"
+  tar -xzf "$tmp/$ccache_name" -C "$dir/ccache" --strip-components=1
+  rm -rf "$tmp"
+fi
+
 echo "Toolchain ready in $dir"

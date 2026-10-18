@@ -1,27 +1,27 @@
 {
   "schemaVersion": 1,
   "abiVersion": 1,
-  "coreId": "sha256:fe2b64356b49bdf119bc2f36b403bb9b8683d64081c05570d8ac3681fd04cdc2",
+  "coreId": "sha256:4057670b9bf8db271ee5a047ca4ca6d17b2d86477fd3d8a4623bdf47fd3e399a",
   "upstreamCommit": "e22551eae1c84a7e4d0b6a5c519ef4ed4ef69df1",
   "artifacts": [
     {
       "path": "cores/dolphin/dolphin-core-upstream.js",
       "hashMode": "lf-normalized",
-      "size": 266986,
-      "sha256": "76243921ad9c958f3991f94c133d3ebd641d073463b878b189ae737f06c717ba"
+      "size": 272025,
+      "sha256": "b3efeddcb87e8f528f9a143505156e36031dd37a144431cf58524a93142457fb"
     },
     {
       "path": "cores/dolphin/dolphin-core-upstream.wasm",
-      "size": 12952784,
-      "sha256": "fe2b64356b49bdf119bc2f36b403bb9b8683d64081c05570d8ac3681fd04cdc2"
+      "size": 12997998,
+      "sha256": "4057670b9bf8db271ee5a047ca4ca6d17b2d86477fd3d8a4623bdf47fd3e399a"
     }
   ],
   "contractSources": [
     {
       "path": "core/upstream/dolphin_web_discio.cpp",
       "hashMode": "lf-normalized",
-      "size": 45448,
-      "sha256": "2815c46b414ff4b67a58cd55d714e1b41f9b38984023e5a0dca29a71d2a4206b"
+      "size": 59098,
+      "sha256": "640c5272dce7ca14b6abf93cf0ce696330daca359792d6ee9a18fa51188bff23"
     },
     {
       "path": "core/upstream/dolphin_web_raster_profile.h",
@@ -38,14 +38,14 @@
     {
       "path": "core/upstream/dolphin_web_core.cpp",
       "hashMode": "lf-normalized",
-      "size": 46953,
-      "sha256": "53bbe6af6761db37463fe71a515c47b550ae8dc04584383faef3338e14df51f5"
+      "size": 47298,
+      "sha256": "b6281cf58785f673408bea2a0513b43f330c811b3a03276f004a8108070eb8d5"
     },
     {
       "path": "src/app.js",
       "hashMode": "lf-normalized",
-      "size": 49447,
-      "sha256": "dd0651cce21563495413c23174e080b05164a83a6c7f5f073fec4449c3768861"
+      "size": 50421,
+      "sha256": "403e892c103cfd214dd41df68bded99043818369a663b4260045c35c938a76cc"
     },
     {
       "path": "src/audio.js",
@@ -80,8 +80,8 @@
     {
       "path": "src/core-host.js",
       "hashMode": "lf-normalized",
-      "size": 66017,
-      "sha256": "ad269ffe80dee62736b7f56db71a0266824ec5243b30a1edbd59504188a8f387"
+      "size": 67006,
+      "sha256": "5437d1b9db741a78ae6eff6081ac2297af4cdfbdcd4425c0d0678dfef015d20e"
     },
     {
       "path": "src/diagnostic-log-filter.js",
@@ -104,8 +104,8 @@
     {
       "path": "src/input-transport.js",
       "hashMode": "lf-normalized",
-      "size": 2802,
-      "sha256": "4890d0a507543bf0e8d2f71ad10b72fa2775fb1b571b13e05f2225127a6facfa"
+      "size": 7310,
+      "sha256": "1f687cf5aadc5bbff75b071e6347eb9f3b52f0a9ae79ee2639b669176e27db49"
     },
     {
       "path": "src/input-visual-marker.js",
@@ -134,8 +134,8 @@
     {
       "path": "src/upstream-discio-worker.js",
       "hashMode": "lf-normalized",
-      "size": 641575,
-      "sha256": "8cf0c72046b9523c3d8b21e58728159d8cfa8f9016e92814fec02197ae52b11b"
+      "size": 650616,
+      "sha256": "65d0d94e8eae940c6e651cff0ed40288f774f37f53f230081e7abab8ec570879"
     },
     {
       "path": "src/wgpu-renderer-worker-probe.js",
@@ -152,20 +152,20 @@
     {
       "path": "src/upstream-main-thread-adapter.js",
       "hashMode": "lf-normalized",
-      "size": 20372,
-      "sha256": "2ca797e1c716fc4aa0f10580115d972217450e2ebd64343093046a9455a79c2c"
+      "size": 22584,
+      "sha256": "a5c3586d826400c06ef200002fe810997ae1f886003982c17e20b667d1de7dff"
     },
     {
       "path": "src/upstream-worker-adapter.js",
       "hashMode": "lf-normalized",
-      "size": 45636,
-      "sha256": "e682bad9524798efb9590de1bdca3f0570d2c45d655e576cfbfd2e55f7b159cc"
+      "size": 45774,
+      "sha256": "524fb35d4d8c0b18b60772bdb1b990ee9c88fc22178bbf5af1f1f821379abefd"
     },
     {
       "path": "src/upstream-worker-protocol.js",
       "hashMode": "lf-normalized",
-      "size": 5096,
-      "sha256": "2b51dcdc0108b30eccbb8d0efa481848bbfd47da603e929a9da92f76acfcd1e4"
+      "size": 5226,
+      "sha256": "78bd3c731113df4da93fcb066d2283358a7f8112236e2bc3e330e049135662bf"
     },
     {
       "path": "src/wgpu-pass-state-cache.js",
@@ -359,10 +359,38 @@
     "_AudioSampleRate",
     "_BootDisc",
     "_CoreInit",
+    "_DolphinWeb_HarnessArmCapture",
+    "_DolphinWeb_HarnessCaptureHeight",
+    "_DolphinWeb_HarnessCaptureIndex",
+    "_DolphinWeb_HarnessCapturePixels",
+    "_DolphinWeb_HarnessCaptureState",
+    "_DolphinWeb_HarnessCaptureTicks",
+    "_DolphinWeb_HarnessCaptureWidth",
+    "_DolphinWeb_HarnessDisarmCapture",
+    "_DolphinWeb_HarnessEnable",
+    "_DolphinWeb_HarnessEnabled",
+    "_DolphinWeb_HarnessLoadGeneration",
+    "_DolphinWeb_HarnessViRing",
+    "_DolphinWeb_HarnessViRingCapacity",
+    "_DolphinWeb_HarnessViRingHead",
+    "_DolphinWeb_HarnessViSinceBoot",
+    "_DolphinWeb_HarnessViSinceLoad",
+    "_DolphinWeb_JitArmedStepForTest",
+    "_DolphinWeb_JitCompileBytesForTest",
+    "_DolphinWeb_JitEngineRejectCount",
+    "_DolphinWeb_JitFailNextInstance",
+    "_DolphinWeb_JitFailNextTableGrow",
+    "_DolphinWeb_JitOnStateLoaded",
+    "_DolphinWeb_JitOracleBuffer",
+    "_DolphinWeb_JitOracleMessage",
+    "_DolphinWeb_JitOracleRun",
+    "_DolphinWeb_JitTableFull",
+    "_DolphinWeb_JitTransientRejectCount",
     "_DolphinWeb_RecordCacheHit",
     "_DolphinWeb_RecordCacheMiss",
     "_DolphinWeb_RecordInstanceUs",
     "_DolphinWeb_RecordModuleUs",
+    "_DolphinWeb_RecordWasmCompileError",
     "_FrameBuffer",
     "_FrameHeight",
     "_FrameWidth",
@@ -398,11 +426,14 @@
     "_GetLastLoadedPPCPC",
     "_GetMakerId",
     "_GetPPCPC",
+    "_GetPadConnectedMask",
     "_GetPlatform",
     "_GetPpcProfileStats",
     "_GetPpcWasmBlockCompileCount",
     "_GetPpcWasmBlockRunCount",
     "_GetPpcWasmHelperStats",
+    "_GetPpcWasmJitArmStartFrame",
+    "_GetPpcWasmJitEngagedFrame",
     "_GetRawSize",
     "_GetRegion",
     "_GetRendererFeatureMask",
@@ -461,8 +492,10 @@
     "_SetFastSoftwareRaster",
     "_SetInputMask",
     "_SetInputState",
+    "_SetPadState",
     "_SetPpcProfileEnabled",
     "_SetPpcWasmJitEnabled",
+    "_SetPpcWasmJitWarmup",
     "_SetPresentationScale",
     "_SetRendererFeatureMask",
     "_SetSoftwareRasterProfileEnabled",
@@ -536,12 +569,19 @@
       "start",
       "stop",
       "validationBeginWgpuRendererProbeMeasurement",
+      "validationCaptureAtVi",
+      "validationEnableGpuSyncDiag",
+      "validationEnableHarness",
       "validationFinalizeWgpuMappedDrain",
       "validationFinalizeWgpuRendererProbe",
       "validationFinalizeWgpuReplay",
+      "validationPcSampler",
       "validationReadCoreProgress",
       "validationReadJitCacheReadiness",
-      "validationSetCorePaused"
+      "validationReadTimeline",
+      "validationReadWgpuReplayState",
+      "validationSetCorePaused",
+      "validationSetWgpuPerturbation"
     ],
     "notificationFields": {
       "detachedOglFrame": [

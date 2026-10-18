@@ -9,6 +9,7 @@ import {
   REQUIRED_WGPU_OWNERSHIP_TRACE_EXPORTS,
   verifyCoreAbiManifest,
 } from "./dolphin-provenance.mjs";
+import { CORE_LOCK_PATH, readCoreLock, writeCoreLock } from "./core-lock.mjs";
 
 const root = process.cwd();
 const manifestPath = resolve(root, "provenance/dolphin-core-abi-v1.json");
@@ -21,24 +22,14 @@ const artifacts = previous.artifacts.map((artifact) => ({
 }));
 const wasm = artifacts.find((artifact) => artifact.path.endsWith(".wasm"));
 if (!wasm) throw new Error("Core ABI manifest has no WASM artifact");
-const protocolPath = resolve(root, "src/upstream-worker-protocol.js");
-const coreHashPattern = /(DEFAULT_UPSTREAM_CORE_SHA256\s*=\s*")[0-9a-f]{64}(";)/;
-const protocolSource = readFileSync(protocolPath, "utf8");
-const protocolMatch = coreHashPattern.exec(protocolSource);
-if (!protocolMatch) {
-  throw new Error("Unable to locate DEFAULT_UPSTREAM_CORE_SHA256 in worker protocol");
-}
-const pinnedCoreSha256 = protocolMatch[0].slice(protocolMatch[1].length, -protocolMatch[2].length);
+const pinnedCoreSha256 = readCoreLock(root);
 if (pinnedCoreSha256 !== wasm.sha256) {
   if (!write) {
     throw new Error(
-      `Default worker core SHA-256 is stale: ${pinnedCoreSha256}; expected ${wasm.sha256}`
+      `Default core SHA-256 in ${CORE_LOCK_PATH} is stale: ${pinnedCoreSha256}; expected ${wasm.sha256}`
     );
   }
-  writeFileSync(
-    protocolPath,
-    protocolSource.replace(coreHashPattern, `$1${wasm.sha256}$2`)
-  );
+  writeCoreLock(root, wasm.sha256);
 }
 const contractSourceDeclarations = [...previous.contractSources];
 for (const requiredPath of [

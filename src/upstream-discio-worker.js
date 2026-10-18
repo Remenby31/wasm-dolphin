@@ -1,3 +1,5 @@
+import { readViRing } from "./harness-vi-ring.js";
+import { startPcSampler } from "./harness-pc-sampler.js";
 import {
   DEFAULT_UPSTREAM_CORE_SHA256,
   DEFAULT_UPSTREAM_CORE_URL,
@@ -11,6 +13,7 @@ import {
 import { parseDolHeader } from "./dol.js";
 import { decodeWgpuSamplerState } from "./wgpu-sampler-state.js";
 import { gxClearDepthToStored, gxDepthState } from "./wgpu-depth-state.js";
+import { clampSourceRect, createWgpuExactCapture, packReadbackRows } from "./wgpu-exact-capture.js";
 import { decodePrebuiltCache } from "./prebuilt-jit-cache-format.js";
 import {
   JIT_CACHE_ENTRY_KEY_SCHEMA,
@@ -62,6 +65,7 @@ import {
 } from "./input-visual-marker.js";
 import {
   compareInputGenerations,
+  INPUT_PORT_COUNT,
   readInputStateSnapshot
 } from "./input-transport.js";
 import {
@@ -232,6 +236,38 @@ let presentationIntervalCount = 0;
 // distribution shape (bimodal, periodic jitter) that p95 alone misses.
 // Buckets: 0-8, 8-12, 12-16, 16-20, 20-24, 24-33, 33-50, 50-100, 100-200, 200+
 const PRESENTATION_HISTOGRAM_BUCKETS_MS = [8, 12, 16, 20, 24, 33, 50, 100, 200];
+// QA harness timeline: every fresh presentation (host time, host frame
+// counter, VI outputs since boot at that moment), drained completely by
+// validationReadTimeline. Overflow between two reads is counted, never
+// silently dropped. Off (one boolean test per presentation) until the
+// harness sends validationEnableHarness. Times are timeOrigin + now, the
+// clock emscripten_get_now() gives the core's VI ring.
+const harnessNow = () => performance.timeOrigin + performance.now();
+let harnessEnabled = false;
+let harnessPcSamplerRun = null;
+
+// QA harness only: start / stop the guest-PC sampler (harness-pc-sampler.js).
+async function harnessPcSampler({ action, periodMs } = {}) {
+  if (action === "stop") {
+    if (!harnessPcSamplerRun) return { error: "pc sampler not running" };
+    const run = harnessPcSamplerRun;
+    harnessPcSamplerRun = null;
+    return run.stop();
+  }
+  if (!harnessEnabled) return { error: "harness hooks are off" };
+  const pcAddress = moduleInstance?._DolphinWeb_HarnessPcAddress?.() ?? 0;
+  if (!pcAddress) return { error: "core has no DolphinWeb_HarnessPcAddress" };
+  harnessPcSamplerRun?.stop();
+  harnessPcSamplerRun = startPcSampler({ buffer: moduleInstance.HEAPU8.buffer, pcAddress, periodMs: Number(periodMs) || 0.25 });
+  return { started: true, pcAddress, pcNow: api?.getPpcPc?.() ?? null };
+}
+let harnessVideoBackend = null;
+// Exact capture for video=wgpu: presents tagged with VI outputs (ViTag records).
+const wgpuExactCapture = createWgpuExactCapture();
+const HARNESS_PRESENT_RING = 16384;
+const harnessPresentRing = new Float64Array(HARNESS_PRESENT_RING * 3);
+let harnessPresentHead = 0;
+let harnessPresentRead = 0;
 const presentationIntervalHistogram = new Uint32Array(
   PRESENTATION_HISTOGRAM_BUCKETS_MS.length + 1
 );
@@ -412,52 +448,14 @@ let frameSignalWaitPending = false;
 let ppcWasmJitRequested = false;
 let ppcWasmJitForce = false;
 let ppcWasmJitActive = false;
-let ppcWasmJitDisabledForSession = false;
-let ppcWasmJitCooldownUntilFrame = 0;
+// The core engages the JIT itself at an exact emulated field (armed once per
+// load with SetPpcWasmJitWarmup); this worker only arms it and reports.
+let ppcWasmJitArmed = false;
 let ppcWasmJitEnabledAtFrame = 0;
-// Day-21: presentation fps captured immediately before the JIT
-// engaged. The disable guard fuses the JIT only if presentation
-// regressed materially below this baseline (i.e. the JIT itself hurt),
-// not merely because the renderer is slow.
-let ppcWasmJitPreEngageFps = 0;
-// Core-fps (emulation throughput) baseline captured just before the JIT
-// engages. presentationFps cannot serve this role: it tracks how expensive the
-// SCENE is to draw, so a menu-time baseline compared against an in-game frame
-// reads as a huge "regression" that the JIT had nothing to do with. Observed on
-// Mario Kart Wii as "fps:15 baseline:29" and "fps:6 baseline:46" -- the JIT was
-// switched off on entering a race, i.e. exactly when it was needed.
-let ppcWasmJitPreEngageCoreFps = 0;
-let ppcWasmJitCoreSampleFrame = -1;
-let ppcWasmJitCoreSampleTime = 0;
-let ppcWasmJitCoreFpsRolling = 0;
 let ppcWasmJitCorePaused = false;
 let ppcWasmJitTimingSuspensions = 0;
-function sampleCoreFpsRolling(coreFrame) {
-  const now = (typeof performance !== "undefined" ? performance.now() : Date.now());
-  const cf = coreFrame >>> 0;
-  if (ppcWasmJitCoreSampleFrame < 0) {
-    ppcWasmJitCoreSampleFrame = cf;
-    ppcWasmJitCoreSampleTime = now;
-    return;
-  }
-  const dt = now - ppcWasmJitCoreSampleTime;
-  if (dt >= 1000) {
-    ppcWasmJitCoreFpsRolling = (((cf - ppcWasmJitCoreSampleFrame) >>> 0) * 1000) / dt;
-    ppcWasmJitCoreSampleFrame = cf;
-    ppcWasmJitCoreSampleTime = now;
-  }
-}
-// §28s: renderer-agnostic core-liveness tracker for the JIT fuse.
-// presentationFps is structurally ~0 in the WebGPU-presenter path
-// (it counts the legacy canvas-blit, not DIAG_EFB_TO_CANVAS), so the
-// old `catastrophic = presentationFps < FLOOR` net mis-fired every
-// fuse window even at a healthy 60 coreFps → JIT thrash → cutscene
-// black-flash. The real "JIT froze emulation" signal is the core
-// frame counter not advancing in wall-clock time.
-let ppcWasmJitFuseLastFrame = -1;
-let ppcWasmJitFuseLastTime = 0;
 let ppcWasmJitTier = "guarded";
-let ppcWasmJitWarmupFrames = 3600;
+let ppcWasmJitWarmupFrames = 0; // set by every load (normalizePpcWasmJitWarmupFrames)
 let pacedPresentationActive = false;
 let nextPacedPresentationTime = 0;
 let pacedPresentationTimer = 0;
@@ -470,7 +468,9 @@ let pacedPresentationStartedAt = 0;
 let presentationPacingMode = "smooth";
 let legacyTickQueue = false;
 let inputStateSabView = null;
-let lastInputStateGeneration = 0;
+// Per port; the SAB and postMessage paths share them, so a port's state is
+// applied once whichever path delivers it first.
+const lastInputStateGenerations = new Array(INPUT_PORT_COUNT).fill(0);
 // Detached OGL mode: worker owns a standalone OffscreenCanvas for the GL
 // backend (no transferControlToOffscreen, no compositor binding). After
 // each GL swap the worker transferToImageBitmap()s the canvas and posts
@@ -547,30 +547,14 @@ const DEFAULT_PRESENTATION_QUEUE = 4;
 const MIN_PRESENTATION_QUEUE = 2;
 const MAX_PRESENTATION_QUEUE = 12;
 const VISUAL_HASH_SAMPLE_STRIDE_BYTES = 256;
-// §28ao: was 3600 (=60 s @60fps) → the JIT stayed OFF for the first
-// minute of a cold run, executing all PPC on the slow interpreter —
-// the dominant "not smooth / slow boot" cause (agent-confirmed). 300
-// (~5 s) front-loads the one-time compile burst to the GC IPL screen
-// (player just watching) instead of the menus. The post-activation
-// stall fuse + cooldown already guard against JIT destabilisation.
-const DEFAULT_WASM_JIT_WARMUP_XFB_FRAMES = 300;
-const WASM_JIT_MIN_STABLE_PRESENTATION_FPS = 25;
-const WASM_JIT_MAX_STABLE_PRESENTATION_GAP_MS = 80;
-const WASM_JIT_MIN_ACTIVE_FRAMES_BEFORE_FUSE = 240;
-// Day-21: regression-relative fuse. Keep the JIT unless presentation
-// fell to < 65% of its pre-engage rate (a regression the JIT itself
-// introduced) and the baseline was high enough to trust, OR fps is
-// catastrophically low in absolute terms (a real freeze). The old
-// absolute fps/gap floor mis-fused the JIT whenever the CPU software
-// rasteriser — not the JIT — was the fps bottleneck.
-const WASM_JIT_REGRESSION_FRACTION = 0.65;
-const WASM_JIT_REGRESSION_MIN_BASELINE_FPS = 18;
-const WASM_JIT_ABSOLUTE_FLOOR_FPS = 6;
-const WASM_JIT_POST_ACTIVATION_STALL_THRESHOLD_MS = 5000;
+// The JIT engages once the core has output this many XFB frames: emulated
+// time, so a run engages at the same point whatever the machine load. There
+// is no wall-clock fuse after engage: a JIT bug must be fixed (or its block
+// blacklisted by the core), not hidden by switching emulation paths on timing.
+const DEFAULT_WASM_JIT_WARMUP_XFB_FRAMES = 60;
+// Boot-stall watchdog grace after engage: the first compile burst can hold
+// the CPU thread briefly.
 const WASM_JIT_POST_ACTIVATION_GRACE_FRAMES = 300;
-// After a temporary degraded-presentation disable, wait this many video frames
-// before allowing the JIT to re-engage. ~5 seconds at 60fps.
-const WASM_JIT_DEGRADED_COOLDOWN_FRAMES = 300;
 
 function createRendererDiagnostics() {
   return {
@@ -659,6 +643,82 @@ function webGpuUboPackMode() {
   // The exact-slice cache owns independent class lifetimes. Dense packets use
   // one shared publication serial, so cache mode deliberately forces legacy.
   return wgpuUboPackEnabled && !wgpuUboCacheEnabled ? 1 : 0;
+}
+
+// Harness-only timing perturbations, to reproduce in headless Chrome the
+// backpressure a visible canvas puts on the replay (validationSetWgpuPerturbation).
+// Both zero by default: nothing changes unless the harness asks.
+const wgpuDiagPerturb = { presentDelayMs: 0, drainEveryMs: 0 };
+let wgpuDiagLastDrainAt = 0;
+// The core's GPU-sync counters (patch 0080), on only for the freeze probe.
+let gpuSyncDiagEnabled = false;
+
+// Milliseconds before the next drain the drainEveryMs perturbation allows (0:
+// drain now). The replay pump sleeps that long instead of polling.
+function wgpuDiagDrainWaitMs(now = performance.now()) {
+  if (!(wgpuDiagPerturb.drainEveryMs > 0)) return 0;
+  return Math.max(0, wgpuDiagLastDrainAt + wgpuDiagPerturb.drainEveryMs - now);
+}
+
+// The core's FIFO / pixel-engine handshake snapshot (WasmGpuSyncDiag.h).
+function readGpuSyncDiag() {
+  const m = moduleInstance;
+  if (!m?._DolphinWeb_GpuSyncDiag) return null;
+  try {
+    return JSON.parse(m.UTF8ToString(m._DolphinWeb_GpuSyncDiag()));
+  } catch (error) {
+    return { error: String(error?.message || error) };
+  }
+}
+
+// Harness diagnostics for a hardware-renderer presentation freeze: where the
+// consumer side of the WebGPU command ring stands, and every gate that can
+// keep it from replaying or presenting. Read-only.
+function readWgpuReplayState() {
+  const ring = webGpuCmdRing;
+  let write = null, read = null, nextOp = null;
+  try {
+    if (ring) {
+      write = Atomics.load(ring.headerI32, 0) >>> 0;
+      read = currentWgpuReadIndex(ring);
+      if (write !== read && moduleInstance) {
+        const u32 = new Uint32Array(moduleInstance.HEAPU8.buffer);
+        nextOp = u32[(ring.slotsBase + (read % ring.capacity) * 32) >>> 2];
+      }
+    }
+  } catch (error) {
+    nextOp = `unreadable: ${error?.message || error}`;
+  }
+  const now = performance.now();
+  return {
+    now,
+    coreState: api?.getCoreStateName?.() ?? null,
+    coreFrame: api?.getFrame?.() ?? null,
+    videoStats: String(api?.getVideoStats?.() ?? "").slice(0, 600),
+    gpuSync: readGpuSyncDiag(),
+    ring: ring ? { write, read, backlog: write !== null ? (write - read) >>> 0 : null, nextOp } : null,
+    fatal: wgpuReplayFatal,
+    mappedCapacityBlocked: wgpuMappedCapacityBlocked,
+    mappedRemapPending: wgpuMappedRemapPromises.size,
+    uploadTransport: wgpuUploadTransport,
+    loadFenceActive: wgpuLoadFenceActive,
+    replayYieldPending: wgpuReplayYieldPending,
+    presentationLoopActive,
+    frameSignalWaitPending,
+    cmdRingOwnsCanvas,
+    sinceLastPresentMs: lastPresentedAt > 0 ? now - lastPresentedAt : null,
+    presents: webGpuExecStats.present,
+    skipDraw: webGpuExecStats.skipDraw || 0,
+    drainCount: webGpuCausalStats.drainCount,
+    readbacksPending: {
+      classifierEfb: wgpuClassifierEfbReadbackPending,
+      classifierBackbuffer: wgpuClassifierBackbufferReadbackPending,
+      classifierXfb: wgpuClassifierXfbReadbackPending,
+      inputBackbuffer: wgpuInputBackbufferReadbackPending,
+    },
+    presentRejected: self._wgPresentRejectedLogCount || 0,
+    lastErrors: rendererDiagnostics.errors.slice(-8),
+  };
 }
 
 function recordRendererError(kind, message) {
@@ -829,6 +889,145 @@ self.addEventListener("message", async (event) => {
   }
 });
 
+// Drain both harness rings since the previous read: presentations (worker)
+// and VI outputs (core). Every entry is returned; `lost` counts entries
+// overwritten before they could be read.
+function readHarnessTimeline() {
+  const presents = { t: [], frame: [], vi: [] };
+  const firstPresent = Math.max(harnessPresentRead, harnessPresentHead - HARNESS_PRESENT_RING);
+  for (let n = firstPresent; n < harnessPresentHead; n += 1) {
+    const slot = (n % HARNESS_PRESENT_RING) * 3;
+    presents.t.push(harnessPresentRing[slot]);
+    presents.frame.push(harnessPresentRing[slot + 1]);
+    presents.vi.push(harnessPresentRing[slot + 2]);
+  }
+  const presentsLost = firstPresent - harnessPresentRead;
+  harnessPresentRead = harnessPresentHead;
+
+  const m = moduleInstance;
+  // The VI ring only exists when the core has the hooks, the harness enabled
+  // them, and the backend goes through DolphinWeb_OnXfb (OGL does not): an
+  // export alone proves nothing.
+  const why = !harnessEnabled ? "harness not enabled"
+    : !m?._DolphinWeb_HarnessViRing ? "core has no VI timeline (rebuild the core)"
+      : harnessVideoBackend === "OGL" ? "OGL does not report VI outputs"
+        : null;
+  const vi = { t: [], ticks: [], sinceBoot: [], sinceLoad: [], lost: 0, supported: why === null, why };
+  if (vi.supported) {
+    const head = m._DolphinWeb_HarnessViRingHead() >>> 0;
+    const ring = readViRing({
+      buffer: m.HEAPU8.buffer,
+      ptr: m._DolphinWeb_HarnessViRing(),
+      capacity: m._DolphinWeb_HarnessViRingCapacity() >>> 0,
+      head,
+      read: harnessViRead
+    });
+    Object.assign(vi, ring);
+    harnessViRead = head;
+  }
+  return { presents: { ...presents, lost: presentsLost }, vi, now: harnessNow() };
+}
+let harnessViRead = null;
+
+// Capture the XFB the core scans out at VI output `index` (from boot, or
+// from the last savestate load). Fails explicitly if that output has passed,
+// never arrives within the timeout, or the core has no capture hook.
+// `ahead` instead of `index`: that many outputs after the latest one.
+async function captureAtViOutput({ index, ahead, fromLoad = false, timeoutMs = 60000 }) {
+  const m = moduleInstance;
+  if (!m?._DolphinWeb_HarnessArmCapture) throw new Error("core has no harness capture hook (rebuild the core)");
+  if (!harnessEnabled) throw new Error("harness hooks not enabled (validationEnableHarness)");
+  if (harnessVideoBackend === "OGL") throw new Error("OGL does not report VI outputs");
+  if (ahead > 0) index = (fromLoad ? m._DolphinWeb_HarnessViSinceLoad() : m._DolphinWeb_HarnessViSinceBoot()) + ahead;
+  if (!(index > 0)) throw new Error("capture index must be ≥ 1");
+  if (harnessVideoBackend === "WebGPU-Real" || harnessVideoBackend === "WebGPU") return captureAtViOutputWgpu(index >>> 0, Boolean(fromLoad), timeoutMs);
+  if (!m._DolphinWeb_HarnessArmCapture(index >>> 0, fromLoad ? 1 : 0)) {
+    throw new Error(`VI output ${index} (${fromLoad ? "since load" : "since boot"}) has already passed`);
+  }
+  const end = performance.now() + timeoutMs;
+  while (performance.now() < end) {
+    const state = m._DolphinWeb_HarnessCaptureState();
+    if (state === 2) {
+      const width = m._DolphinWeb_HarnessCaptureWidth() >>> 0;
+      const height = m._DolphinWeb_HarnessCaptureHeight() >>> 0;
+      const ptr = m._DolphinWeb_HarnessCapturePixels();
+      const pixels = m.HEAPU8.slice(ptr, ptr + width * height * 4);
+      m._DolphinWeb_HarnessDisarmCapture();
+      return {
+        index: m._DolphinWeb_HarnessCaptureIndex() >>> 0,
+        fromLoad: Boolean(fromLoad),
+        ticks: m._DolphinWeb_HarnessCaptureTicks(),
+        width,
+        height,
+        pixels,
+        source: "guest-xfb"
+      };
+    }
+    if (state === 3) {
+      m._DolphinWeb_HarnessDisarmCapture();
+      throw new Error(`VI output ${index} was skipped`);
+    }
+    await new Promise((resolve) => setTimeout(resolve, 2));
+  }
+  m._DolphinWeb_HarnessDisarmCapture();
+  throw new Error(`VI output ${index} never reached within ${timeoutMs} ms`);
+}
+
+// video=wgpu: the picture is on the GPU. The core does not arm its XFB capture
+// (the guest XFB is not what this backend draws); the replay matches the
+// request to the PRESENT tagged with that VI output and reads it back.
+async function captureAtViOutputWgpu(index, fromLoad, timeoutMs) {
+  const generation = moduleInstance?._DolphinWeb_HarnessLoadGeneration?.() >>> 0;
+  const { id, promise } = wgpuExactCapture.arm(index, fromLoad, generation);
+  const timer = setTimeout(() => wgpuExactCapture.cancel(id, new Error(
+    wgpuExactCapture.tagsSeen === 0
+      ? "core does not tag WebGPU presents with VI outputs (rebuild the core)"
+      : `VI output ${index} never reached within ${timeoutMs} ms`)), timeoutMs);
+  try {
+    return await promise;
+  } finally {
+    clearTimeout(timer);
+  }
+}
+
+// Reads back the texture the last hardware present showed, at its own size.
+// Its own submission, queued right after the present's, so it sees exactly
+// what was presented and nothing recorded later.
+// The XFB rectangle the next backbuffer blit samples (PresentSource), and
+// what the last hardware present showed: that rectangle of that texture.
+let wgpuNextPresentSource = null;
+let wgpuPresentedSource = null;
+
+// Reads back exactly what the last hardware present showed: the presenter's
+// source rectangle of the XFB texture, at native size. Its own submission,
+// queued right after the present's, so nothing recorded later can reach it.
+function readbackWgpuPresentSource() {
+  const shown = wgpuPresentedSource;
+  const entry = shown?.textureId ? webGpuObjects.textures.get(shown.textureId) : null;
+  if (!entry || !renderGpu) throw new Error("no presented WebGPU texture to read back");
+  if (!shown.rect) throw new Error("core does not report the presented rectangle (rebuild the core)");
+  if (!(entry.format === "rgba8unorm" || entry.format === "bgra8unorm")) {
+    throw new Error(`presented texture format ${entry.format} cannot be captured`);
+  }
+  const rect = clampSourceRect(shown.rect, entry.tex.width, entry.tex.height);
+  if (!rect) throw new Error("presented rectangle lies outside its texture");
+  const dev = renderGpu.device;
+  const { w: width, h: height } = rect;
+  const bytesPerRow = Math.ceil(width * 4 / 256) * 256;
+  const buffer = dev.createBuffer({ size: bytesPerRow * height, usage: 0x1 | 0x8 });
+  const encoder = dev.createCommandEncoder({ label: "harness-wgpu-capture" });
+  encoder.copyTextureToBuffer({ texture: entry.tex, origin: { x: rect.x, y: rect.y, z: 0 } },
+    { buffer, bytesPerRow, rowsPerImage: height }, { width, height, depthOrArrayLayers: 1 });
+  dev.queue.submit([encoder.finish()]);
+  return buffer.mapAsync(0x1).then(() => {
+    const pixels = packReadbackRows(new Uint8Array(buffer.getMappedRange()), width, height,
+                                    bytesPerRow, entry.format === "bgra8unorm");
+    buffer.unmap();
+    buffer.destroy();
+    return { width, height, pixels };
+  });
+}
+
 async function handleMessage(type, payload) {
   switch (type) {
     case "load":
@@ -912,7 +1111,7 @@ async function handleMessage(type, payload) {
       workerTransportStats.legacyOneWayAck = legacyOneWayAck;
       if (payload.inputStateSab instanceof SharedArrayBuffer) {
         inputStateSabView = new Int32Array(payload.inputStateSab);
-        lastInputStateGeneration = 0;
+        lastInputStateGenerations.fill(0);
       }
       // SAB pixel transport: set up shared views once. The worker's
       // presentation loop will copy s_framebuffer bytes into oglPixelSabView
@@ -1021,8 +1220,9 @@ async function handleMessage(type, payload) {
         triggerRight: payload.triggerRight,
         analogA: payload.analogA,
         analogB: payload.analogB,
+        connected: payload.connected !== false,
         inputGeneration: payload.inputGeneration
-      }, payload.inputSentAtEpochMs, "post");
+      }, payload.inputSentAtEpochMs, "post", payload.port ?? 0);
       return {};
     case "runFrame":
       if (!presentationLoopActive) {
@@ -1092,6 +1292,7 @@ async function handleMessage(type, payload) {
       api?.setWebGpuGeometryPackEnabled?.(wgpuGeometryPackEnabled ? 1 : 0);
       api?.setWebGpuGeometryRangeEnabled?.(wgpuGeometryRangeEnabled ? 1 : 0);
       let loaded = false;
+      wgpuExactCapture.onLoad();
       ppcWasmJitTimingSuspensions += 1;
       try {
         loaded = Boolean(api?.loadState(payload.slot | 0));
@@ -1144,6 +1345,28 @@ async function handleMessage(type, payload) {
         ppcWasmJitTimingSuspensions -= 1;
       }
     }
+    case "validationEnableHarness":
+      // Applied now if the core is loaded, and again when it loads.
+      harnessEnabled = true;
+      moduleInstance?._DolphinWeb_HarnessEnable?.(1);
+      return { enabled: true, coreHooks: Boolean(moduleInstance?._DolphinWeb_HarnessEnable), coreLoaded: Boolean(moduleInstance) };
+    case "validationReadTimeline":
+      return readHarnessTimeline();
+    case "validationPcSampler":
+      return harnessPcSampler(payload);
+    case "validationCaptureAtVi":
+      return captureAtViOutput(payload);
+    case "validationReadWgpuReplayState":
+      return readWgpuReplayState();
+    case "validationEnableGpuSyncDiag":
+      // Applied now if the core is loaded, and again when it loads.
+      gpuSyncDiagEnabled = payload.enabled !== false;
+      moduleInstance?._DolphinWeb_GpuSyncDiagEnable?.(gpuSyncDiagEnabled ? 1 : 0);
+      return { enabled: gpuSyncDiagEnabled, coreDiag: Boolean(moduleInstance?._DolphinWeb_GpuSyncDiagEnable && moduleInstance?._DolphinWeb_GpuSyncDiag), coreLoaded: Boolean(moduleInstance) };
+    case "validationSetWgpuPerturbation":
+      wgpuDiagPerturb.presentDelayMs = Math.max(0, Math.min(100, Number(payload.presentDelayMs) || 0));
+      wgpuDiagPerturb.drainEveryMs = Math.max(0, Math.min(200, Number(payload.drainEveryMs) || 0));
+      return { ...wgpuDiagPerturb };
     case "validationReadCoreProgress": {
       const loadedCheckpoint = readLastLoadedCheckpoint();
       return {
@@ -1154,6 +1377,9 @@ async function handleMessage(type, payload) {
         loadedCheckpointGeneration: loadedCheckpoint.generation,
         loadedCheckpointTicks: loadedCheckpoint.ticks,
         loadedCheckpointPpcPc: loadedCheckpoint.ppcPc,
+        // Emulated field at which the core engaged the JIT (-1: not yet).
+        jitEngagedField: api?.getPpcWasmJitEngagedFrame?.() ?? null,
+        jitArmStartField: api?.getPpcWasmJitArmStartFrame?.() ?? null,
         observedAtMs: performance.now(),
       };
     }
@@ -1309,6 +1535,7 @@ async function handleMessage(type, payload) {
       api?.setWebGpuUboPackEnabled?.(webGpuUboPackMode());
       api?.setWebGpuGeometryPackEnabled?.(wgpuGeometryPackEnabled ? 1 : 0);
       api?.setWebGpuGeometryRangeEnabled?.(wgpuGeometryRangeEnabled ? 1 : 0);
+      wgpuExactCapture.onLoad();
       let rc = 0;
       ppcWasmJitTimingSuspensions += 1;
       try {
@@ -2005,6 +2232,9 @@ async function loadCore({
   }
 
   api = bindApi(moduleInstance);
+  harnessVideoBackend = videoBackend;
+  if (harnessEnabled) moduleInstance._DolphinWeb_HarnessEnable?.(1);
+  if (gpuSyncDiagEnabled) moduleInstance._DolphinWeb_GpuSyncDiagEnable?.(1);
   const ownershipTraceSetterAvailable = Boolean(
     api.setWebGpuOwnershipTraceEnabled &&
     api.getWebGpuOwnershipTracePtr &&
@@ -2116,8 +2346,7 @@ async function loadCore({
   ppcWasmJitRequested = Boolean(ppcWasmJit);
   ppcWasmJitForce = Boolean(requestedPpcWasmJitForce);
   ppcWasmJitActive = false;
-  ppcWasmJitDisabledForSession = false;
-  ppcWasmJitCooldownUntilFrame = 0;
+  ppcWasmJitArmed = false;
   ppcWasmJitEnabledAtFrame = 0;
   ppcWasmJitCorePaused = false;
   ppcWasmJitTimingSuspensions = 0;
@@ -2127,7 +2356,15 @@ async function loadCore({
   console.log(`[s28-jittier] worker init: requested=${JSON.stringify(requestedPpcWasmJitTier)} ` +
     `→ resolved ppcWasmJitTier=${ppcWasmJitTier} (engage will call ` +
     `setPpcWasmJitEnabled(${ppcWasmJitTier === "mixed" ? 2 : 1}))`);
-  api.setPpcWasmJitEnabled?.(0);
+  if (ppcWasmJitRequested && api.setPpcWasmJitWarmup) {
+    // Armed before bootDisc: the core counts the warmup from field 0 of this
+    // boot whatever the worker's timing (a late first poll, a state loaded
+    // before the first frame).
+    api.setPpcWasmJitWarmup(ppcWasmJitTier === "mixed" ? 2 : 1, ppcWasmJitWarmupFrames);
+    ppcWasmJitArmed = true;
+  } else {
+    api.setPpcWasmJitEnabled?.(0);
+  }
   api.setPpcProfileEnabled?.(ppcProfile ? 1 : 0);
   api.setWebGpuUploadArenaMiB?.(wgpuUploadArenaMiB, collectMetrics ? 1 : 0);
   api.setWebGpuProducerProfileEnabled?.(wgpuProducerProfileRequested ? 1 : 0);
@@ -2249,6 +2486,9 @@ function bindApi(module) {
       typeof module._SetCpuCore === "function"
         ? (core) => ccall("SetCpuCore", "number", ["string"], [core])
         : null,
+    setPpcWasmJitWarmup: optionalCwrap("SetPpcWasmJitWarmup", null, ["number", "number"]),
+    getPpcWasmJitEngagedFrame: optionalCwrap("GetPpcWasmJitEngagedFrame", "number", []),
+    getPpcWasmJitArmStartFrame: optionalCwrap("GetPpcWasmJitArmStartFrame", "number", []),
     setPpcWasmJitEnabled:
       typeof module._SetPpcWasmJitEnabled === "function"
         ? (enabled) =>
@@ -2455,6 +2695,31 @@ function bindApi(module) {
               ]
             )
         : null,
+    // Ports 0-3 with hot-plug; absent from cores built before multi-port.
+    setPadState:
+      typeof module._SetPadState === "function"
+        ? (port, state) =>
+            ccall(
+              "SetPadState",
+              "number",
+              ["number", "number", "number", "number", "number", "number", "number", "number", "number", "number", "number", "number"],
+              [
+                port | 0,
+                state.connected === false ? 0 : 1,
+                state.mask >>> 0,
+                state.stickX | 0,
+                state.stickY | 0,
+                state.cStickX | 0,
+                state.cStickY | 0,
+                state.triggerLeft | 0,
+                state.triggerRight | 0,
+                state.analogA | 0,
+                state.analogB | 0,
+                state.inputGeneration >>> 0
+              ]
+            )
+        : null,
+    getPadConnectedMask: optionalCwrap("GetPadConnectedMask", "number", []),
     runFrame: cwrap("RunFrame", null, []),
     frameWidth: cwrap("FrameWidth", "number", []),
     frameHeight: cwrap("FrameHeight", "number", []),
@@ -3501,13 +3766,7 @@ function framePayload({ forceCausalTelemetry = false } = {}) {
   }
 
   maybeEnablePpcWasmJit();
-  const jitState = !ppcWasmJitRequested
-    ? "off"
-    : ppcWasmJitDisabledForSession
-      ? "disabled"
-      : ppcWasmJitActive
-        ? "on"
-        : "warmup";
+  const jitState = !ppcWasmJitRequested ? "off" : ppcWasmJitActive ? "on" : "warmup";
 
   const width = api.frameWidth();
   const height = api.frameHeight();
@@ -3954,33 +4213,27 @@ function scheduleFrameSignalWait() {
     });
 }
 
-function applyInputStateSnapshot(state, sentAtEpochMs, source) {
-  if (!api?.setInputState || !state) return false;
+// Latency telemetry (generations, ages, causal counters) follows port 0 only,
+// as before multi-port; other ports are applied without it.
+function applyInputStateSnapshot(state, sentAtEpochMs, source, port = 0) {
+  if (!state || !Number.isInteger(port) || port < 0 || port >= INPUT_PORT_COUNT) return false;
+  if (port !== 0 ? !api?.setPadState : !api?.setInputState && !api?.setPadState) return false;
   const generation = Number(state.inputGeneration) >>> 0;
   if (!generation) return false;
-  const order = compareInputGenerations(generation, lastInputStateGeneration);
-  if (order === 0) {
-    causalInputStats.duplicateGenerationCount += 1;
-    return false;
-  }
-  if (order < 0) {
-    causalInputStats.staleGenerationCount += 1;
+  const order = compareInputGenerations(generation, lastInputStateGenerations[port]);
+  if (order <= 0) {
+    if (port === 0) {
+      if (order === 0) causalInputStats.duplicateGenerationCount += 1;
+      else causalInputStats.staleGenerationCount += 1;
+    }
     return false;
   }
 
-  lastInputStateGeneration = generation;
-  const mask = Number(state.mask) >>> 0;
-  inputMask = mask;
-  const wrappedSentAt = source === "sab"
-    ? wrappedEpochMilliseconds(Number(sentAtEpochMs) >>> 0)
-    : Number(sentAtEpochMs);
-  recordInputApplied({
-    generation,
-    inputMask: mask,
-    sentAtEpochMs: wrappedSentAt,
-    source
-  });
-  api.setInputState({
+  lastInputStateGenerations[port] = generation;
+  const connected = state.connected !== false;
+  const mask = connected ? Number(state.mask) >>> 0 : 0;
+  const padState = {
+    connected,
     mask,
     stickX: Number(state.stickX) | 0,
     stickY: Number(state.stickY) | 0,
@@ -3991,7 +4244,27 @@ function applyInputStateSnapshot(state, sentAtEpochMs, source) {
     analogA: Number(state.analogA) | 0,
     analogB: Number(state.analogB) | 0,
     inputGeneration: generation
+  };
+  if (port !== 0) {
+    api.setPadState(port, padState);
+    return true;
+  }
+
+  inputMask = mask;
+  const wrappedSentAt = source === "sab"
+    ? wrappedEpochMilliseconds(Number(sentAtEpochMs) >>> 0)
+    : Number(sentAtEpochMs);
+  recordInputApplied({
+    generation,
+    inputMask: mask,
+    sentAtEpochMs: wrappedSentAt,
+    source
   });
+  if (api.setPadState) {
+    api.setPadState(0, padState);
+  } else {
+    api.setInputState(padState);
+  }
   recordInputAge(sentAtEpochMs, source === "sab");
   if (source === "sab") {
     causalInputStats.workerSabApplyCount += 1;
@@ -4003,16 +4276,20 @@ function applyInputStateSnapshot(state, sentAtEpochMs, source) {
 }
 
 function pollInputStateFromSab() {
-  if (!inputStateSabView || !api?.setInputState) {
+  if (!inputStateSabView || (!api?.setInputState && !api?.setPadState)) {
     return;
   }
-  const result = readInputStateSnapshot(inputStateSabView);
-  causalInputStats.sabSnapshotRetryCount += Math.max(0, result.attempts - 1);
-  if (!result.snapshot) {
-    causalInputStats.sabSnapshotRetryCount += 1;
-    return;
+  for (let port = 0; port < INPUT_PORT_COUNT; port += 1) {
+    const result = readInputStateSnapshot(inputStateSabView, { port });
+    if (port === 0) {
+      causalInputStats.sabSnapshotRetryCount += Math.max(0, result.attempts - 1);
+    }
+    if (!result.snapshot) {
+      if (port === 0) causalInputStats.sabSnapshotRetryCount += 1;
+      continue;
+    }
+    applyInputStateSnapshot(result.snapshot, result.snapshot.sentAtEpochMsLow, "sab", port);
   }
-  applyInputStateSnapshot(result.snapshot, result.snapshot.sentAtEpochMsLow, "sab");
 }
 
 function runPresentationLoop() {
@@ -4093,7 +4370,6 @@ function runPresentationLoop() {
       }
       stages.present = collectMetrics ? performance.now() - presentStartedAt : 0;
       updatePresentationFps();
-      maybeDisablePpcWasmJit(coreFrame);
       const loopMs = performance.now() - loopStartedAt;
       stages.loop = loopMs;
       addProfileTime("loop", loopMs);
@@ -4125,186 +4401,49 @@ function runPresentationLoop() {
 }
 
 function resetPpcWasmJitTiming(invalidateBaseline = false) {
-  // Intentional pauses and loads are not emulation stalls. Keep JIT mode,
-  // cooldown, presentation resources, and lifetime metrics unchanged.
-  ppcWasmJitCoreSampleFrame = -1;
-  ppcWasmJitCoreSampleTime = 0;
-  ppcWasmJitCoreFpsRolling = 0;
-  ppcWasmJitFuseLastFrame = -1;
-  ppcWasmJitFuseLastTime = 0;
+  // Intentional pauses and loads are not presentation stalls: restart the
+  // interval statistics. JIT mode is unaffected (it no longer depends on
+  // timing); the argument is kept for the load/pause call sites.
+  void invalidateBaseline;
   presentationMaxIntervalMs = 0;
   maxIntervalSincePresentationFps = 0;
   lastPresentedAt = performance.now();
-  if (invalidateBaseline) {
-    ppcWasmJitPreEngageFps = 0;
-    ppcWasmJitPreEngageCoreFps = 0;
-  }
 }
 
 function maybeEnablePpcWasmJit(coreFrame = api?.getFrame?.() ?? 0) {
+  if (ppcWasmJitRequested && api?.setPpcWasmJitWarmup) {
+    // Core-side gate: same engage field on every run, cpu=dual included, and
+    // re-armed by the core from the loaded field after a state load.
+    if (!ppcWasmJitArmed) {
+      api.setPpcWasmJitWarmup(ppcWasmJitTier === "mixed" ? 2 : 1, ppcWasmJitWarmupFrames);
+      ppcWasmJitArmed = true;
+    }
+    const engaged = api.getPpcWasmJitEngagedFrame?.() ?? -1;
+    if (engaged >= 0 && !ppcWasmJitActive) {
+      ppcWasmJitEnabledAtFrame = coreFrame >>> 0;
+      postStatus(`Experimental WASM JIT engaged at emulated field ${engaged} (warmup ${ppcWasmJitWarmupFrames})`);
+    }
+    ppcWasmJitActive = engaged >= 0;
+    return;
+  }
   if (ppcWasmJitCorePaused || ppcWasmJitTimingSuspensions > 0) return;
-  // Keep a pre-engage core-fps estimate warm. This runs every tick while the
-  // JIT is still off, which is the only window in which an honest "before"
-  // baseline can be taken.
-  sampleCoreFpsRolling(coreFrame);
-  if (
-    !ppcWasmJitRequested ||
-    ppcWasmJitActive ||
-    ppcWasmJitDisabledForSession ||
-    !api?.setPpcWasmJitEnabled
-  ) {
+  if (!ppcWasmJitRequested || ppcWasmJitActive || !api?.setPpcWasmJitEnabled) {
     return;
   }
-
-  // Warm-cache fast path. When Day-9 fingerprint matched and Day-7 loaded
-  // enough cached modules to cover the initial compile burst, skip the
-  // long warmup gate — there's no stability concern because the JIT
-  // doesn't have to actually compile anything; it just instantiates from
-  // cache. The MINIMUM_PRE_JIT_FRAMES floor is still respected so the
-  // emulator gets through the first few video frames stably before we
-  // change its compilation behavior.
-  const MINIMUM_PRE_JIT_FRAMES = 30;
-  const effectiveWarmup =
-    dolphinJitCachePreWarmed && coreFrame >= MINIMUM_PRE_JIT_FRAMES
-      ? MINIMUM_PRE_JIT_FRAMES
-      : ppcWasmJitWarmupFrames;
-  if ((coreFrame >>> 0) < effectiveWarmup) {
+  // Deterministic gate: emulated XFB frames only. A warm cache changes how
+  // fast blocks compile, never when the JIT engages.
+  if ((coreFrame >>> 0) < ppcWasmJitWarmupFrames) {
     return;
   }
-
-  if ((coreFrame >>> 0) < ppcWasmJitCooldownUntilFrame) {
-    return;
-  }
-
-  // Engage after warmup regardless of momentary presentation rate. Single-
-  // window samples drop to 0 during multi-second core stalls and would
-  // indefinitely block engage even when long-term throughput is healthy. The
-  // post-engage guard (maybeDisablePpcWasmJit, ACTIVE_* thresholds) handles
-  // catastrophic regression.
-
-  // Day-21: snapshot the pre-engage presentation rate. The disable
-  // guard judges the JIT by *regression vs this baseline*, not an
-  // absolute fps floor. A heavy renderer (fastsw=0 full-res CPU
-  // raster) caps present fps far below the old absolute threshold;
-  // the JIT still speeds up PPC emulation in that regime, so fusing
-  // it off there was strictly counterproductive (and flapped every
-  // cooldown). Record the baseline so we only fuse when the JIT
-  // itself made presentation worse.
-  ppcWasmJitPreEngageFps = presentationFps;
-  ppcWasmJitPreEngageCoreFps = ppcWasmJitCoreFpsRolling;
 
   console.log(`[s28-jittier] ENGAGE: setPpcWasmJitEnabled(${ppcWasmJitTier === "mixed" ? 2 : 1}) ` +
     `(ppcWasmJitTier=${ppcWasmJitTier}) @frame ${coreFrame}`);
   api.setPpcWasmJitEnabled(ppcWasmJitTier === "mixed" ? 2 : 1);
   ppcWasmJitActive = true;
   ppcWasmJitEnabledAtFrame = coreFrame >>> 0;
-  // §28s: re-arm the core-liveness tracker on every (re)engage so a
-  // pre-cooldown (frame,time) pair can't compute a bogus low coreFps
-  // across the cooldown gap on the first post-re-engage fuse check.
-  ppcWasmJitFuseLastFrame = -1;
-  const reason = dolphinJitCachePreWarmed && effectiveWarmup === MINIMUM_PRE_JIT_FRAMES
-    ? `pre-warmed cache hit, JIT engaged at frame ${coreFrame}`
-    : `JIT enabled after ${coreFrame} stable video frames`;
-  postStatus(`Experimental WASM ${reason}`);
-}
-
-function maybeDisablePpcWasmJit(coreFrame = api?.getFrame?.() ?? 0) {
-  if (ppcWasmJitCorePaused || ppcWasmJitTimingSuspensions > 0) return;
-  if (!ppcWasmJitActive || ppcWasmJitForce || !api?.setPpcWasmJitEnabled) {
-    return;
-  }
-
-  const framesSinceActivation = (coreFrame >>> 0) - ppcWasmJitEnabledAtFrame;
-
-  // Detect multi-second post-activation stalls even during the grace period.
-  // A stall exceeding WASM_JIT_POST_ACTIVATION_STALL_THRESHOLD_MS (5s) means the
-  // compile burst blocked presentation long enough to produce a visible freeze.
-  // §28bq: REVERTED §28bp. Gating this stall guard off for the
-  // webgpu presenter removed the ONLY post-engage grace-period
-  // protection, so a compile-burst freeze went uncaught → boot
-  // stall regression ("core not advancing"). Restored original
-  // (presentation-interval) stall guard; the §28bp sawtooth concern
-  // needs a core-liveness redesign, not removal of protection.
-  if (presentationMaxIntervalMs > WASM_JIT_POST_ACTIVATION_STALL_THRESHOLD_MS) {
-    api.setPpcWasmJitEnabled(0);
-    ppcWasmJitActive = false;
-    ppcWasmJitDisabledForSession = true;
-    postStatus(
-      `Experimental WASM JIT disabled after post-activation stall ` +
-        `(max_interval:${presentationMaxIntervalMs}ms at frame ${coreFrame})`
-    );
-    return;
-  }
-
-  if (framesSinceActivation < WASM_JIT_MIN_ACTIVE_FRAMES_BEFORE_FUSE) {
-    return;
-  }
-
-  // Day-21: judge the JIT by regression vs the pre-engage baseline,
-  // not an absolute fps floor. The absolute floor (fps>=25, gap<=40ms)
-  // assumed a GPU-class renderer; with the CPU software rasteriser
-  // (especially fastsw=0 full-res) present fps is renderer-capped well
-  // below that even though the JIT is *helping* PPC throughput. The
-  // old logic disabled the JIT every cooldown, making emulation slower
-  // for no benefit — exactly the "feels slower" the user hit.
-  //
-  // Keep the JIT unless presentation dropped materially below where it
-  // was right before the JIT engaged (a regression the JIT caused),
-  // OR it's catastrophically slow in absolute terms (sub-floor — a
-  // genuine freeze, not just a heavy renderer). The 5s post-activation
-  // stall check above already handles compile-burst freezes.
-  // §28bq: REVERTED §28bp `regressed` gating (see above).
-  // Judge the JIT by EMULATION THROUGHPUT, not presentation rate. The JIT
-  // affects how fast PowerPC executes; it does not make a scene cheaper to
-  // draw. Comparing a light-screen presentation baseline against a heavy scene
-  // fused the JIT off on every menu->gameplay transition. Core fps is the same
-  // signal the catastrophic check below already uses, measured over one shared
-  // window.
-
-  // §28s: "catastrophic" = the JIT genuinely FROZE emulation, judged
-  // by the core frame counter vs wall-clock — NOT presentationFps
-  // (structurally ~0 in the WebGPU presenter, which made the old
-  // floor fire every window at a healthy 60 coreFps and thrash the
-  // JIT, collapsing the intro cutscene into a black flash). Only
-  // trip when ≥1.5 s of wall time elapsed AND effective core fps is
-  // sub-floor (a true freeze; healthy ≈ 60).
-  const nowMs = (typeof performance !== "undefined" ? performance.now()
-                 : Date.now());
-  const cf = coreFrame >>> 0;
-  let catastrophic = false;
-  let regressed = false;
-  if (ppcWasmJitFuseLastFrame >= 0) {
-    const dtMs = nowMs - ppcWasmJitFuseLastTime;
-    if (dtMs >= 1500) {
-      const dFrames = (cf - ppcWasmJitFuseLastFrame) >>> 0;
-      const coreFps = (dFrames * 1000) / dtMs;
-      catastrophic = coreFps < WASM_JIT_ABSOLUTE_FLOOR_FPS;
-      regressed =
-        ppcWasmJitPreEngageCoreFps >= WASM_JIT_REGRESSION_MIN_BASELINE_FPS &&
-        coreFps < ppcWasmJitPreEngageCoreFps * WASM_JIT_REGRESSION_FRACTION;
-      ppcWasmJitFuseLastFrame = cf;
-      ppcWasmJitFuseLastTime = nowMs;
-    }
-  } else {
-    ppcWasmJitFuseLastFrame = cf;
-    ppcWasmJitFuseLastTime = nowMs;
-  }
-
-  if (!regressed && !catastrophic) {
-    return;
-  }
-
-  api.setPpcWasmJitEnabled(0);
-  ppcWasmJitActive = false;
-  // Cooldown rather than permanent disable: degraded presentation often
-  // recovers (post-cutscene transition, post-shader-compile spike). After the
-  // cooldown frames pass the engage check can re-fire.
-  ppcWasmJitCooldownUntilFrame = (coreFrame >>> 0) + WASM_JIT_DEGRADED_COOLDOWN_FRAMES;
   postStatus(
-    `Experimental WASM JIT temporarily off ` +
-      `(fps:${presentationFps} baseline:${ppcWasmJitPreEngageCoreFps} ` +
-      `${catastrophic ? "catastrophic" : "regressed"}; cooldown ` +
-      `${WASM_JIT_DEGRADED_COOLDOWN_FRAMES} frames)`
+    `Experimental WASM JIT enabled at frame ${coreFrame} (warmup ${ppcWasmJitWarmupFrames}` +
+      `${dolphinJitCachePreWarmed ? ", pre-warmed cache" : ""})`
   );
 }
 
@@ -4769,6 +4908,13 @@ function recordVisualFrameHash(hash, sampledSourceFrame = false) {
 }
 
 function recordPresentedFrame(coreFrame) {
+  if (harnessEnabled) {
+    const slot = (harnessPresentHead % HARNESS_PRESENT_RING) * 3;
+    harnessPresentRing[slot] = harnessNow();
+    harnessPresentRing[slot + 1] = coreFrame;
+    harnessPresentRing[slot + 2] = moduleInstance?._DolphinWeb_HarnessViSinceBoot?.() ?? -1;
+    harnessPresentHead += 1;
+  }
   presentedFrame += 1;
   framesSincePresentationFps += 1;
   presentationLifetimeFrameCount += 1;
@@ -6876,6 +7022,8 @@ const WGPU_CMD_OP_SUBMIT_PRESENT = 22;
 const WGPU_CMD_OP_DESTROY = 23;
 const WGPU_CMD_OP_BLIT_TEXTURE = 24;
 const WGPU_CMD_OP_CLEAR_RECT = 25;
+const WGPU_CMD_OP_VI_TAG = 26;
+const WGPU_CMD_OP_PRESENT_SOURCE = 27;
 // ClearRect uses the full attachment viewport and [0,1] depth range, so its
 // scissor alone determines coverage and its depth is independent of game state.
 // A/B switch: false restores the original game-viewport-dependent clear.
@@ -7361,9 +7509,11 @@ function startWgpuReplayPump() {
     } else {
       webGpuCausalStats.replayPumpEmptyPollCount += 1;
     }
+    // A backlog the drainEveryMs perturbation holds back waits for its next
+    // drain instead of rescheduling at 0 ms.
     scheduleWgpuReplayPump(
       pump,
-      write === read || wgpuMappedCapacityBlocked ? 4 : 0
+      write === read || wgpuMappedCapacityBlocked ? 4 : wgpuDiagDrainWaitMs()
     );
   };
   scheduleWgpuReplayPump(pump, 0);
@@ -10471,6 +10621,11 @@ function recordBoundedHistogram(values, bounds, value) {
 
 function drainWebGpuCmdRing(source = "presentation") {
   if (wgpuReplayFatal) return;
+  if (wgpuDiagPerturb.drainEveryMs > 0) {
+    const now = performance.now();
+    if (wgpuDiagDrainWaitMs(now) > 0) return;
+    wgpuDiagLastDrainAt = now;
+  }
   const ring = webGpuCmdRing;
   if (!ring || !renderGpu) return;
   if (wgpuSemanticRuntimeActive) drainWgpuSemanticOwnership();
@@ -11721,7 +11876,8 @@ function drainWebGpuCmdRing(source = "presentation") {
               // unreliable twice; reading the actual texels replaces the whole
               // inference chain with a direct observation.
               format: fmt,
-              usage: u32[recWord + 5] | ((DIAG_TEX_READBACK || DIAG_DEPTH_READBACK || DIAG_DEPTH_TRACE) ? 0x1 : 0)
+              usage: u32[recWord + 5] |
+                ((harnessEnabled || DIAG_TEX_READBACK || DIAG_DEPTH_READBACK || DIAG_DEPTH_TRACE) ? 0x1 : 0)
             });
             webGpuObjects.textures.set(id,
               { tex, format: fmt, layers, view2dArray: null,
@@ -12055,6 +12211,10 @@ function drainWebGpuCmdRing(source = "presentation") {
                   } catch (e) {}
                 }
               }
+            }
+            if (wgpuDiagPerturb.presentDelayMs > 0) {
+              const until = performance.now() + wgpuDiagPerturb.presentDelayMs;
+              while (performance.now() < until) { /* harness perturbation: a blocking present */ }
             }
             const cur = renderGpu.context.getCurrentTexture();
             lastBackbufferTexture = cur;
@@ -13566,6 +13726,11 @@ function drainWebGpuCmdRing(source = "presentation") {
           // the current command-ring drain returns.
           cmdRingOwnsCanvas = true;
           recordPresentedFrame(api?.getFrame?.() ?? 0);
+          wgpuPresentedSource = {
+            textureId: wgpuLastBackbufferSourceTextureId, rect: wgpuNextPresentSource
+          };
+          wgpuNextPresentSource = null;
+          wgpuExactCapture.onPresent(readbackWgpuPresentSource);
           scheduleDetachedWgpuBitmap(q);
           webGpuExecStats.present++;
           if (webGpuExecStats.present - webGpuExecStats.lastLog >= 120) {
@@ -13643,6 +13808,20 @@ function drainWebGpuCmdRing(source = "presentation") {
           }
           break;
         }
+        case WGPU_CMD_OP_VI_TAG:
+          // Harness only: the VI output the next ViSwap shows.
+          wgpuExactCapture.onViTag({
+            boot: u32[recWord + 1], load: u32[recWord + 2],
+            ticks: u32[recWord + 3] + u32[recWord + 4] * 4294967296,
+            generation: u32[recWord + 5]
+          }, readbackWgpuPresentSource);
+          break;
+        case WGPU_CMD_OP_PRESENT_SOURCE:
+          // Harness only: the XFB rectangle the coming backbuffer blit samples.
+          wgpuNextPresentSource = {
+            x: u32[recWord + 1], y: u32[recWord + 2], w: u32[recWord + 3], h: u32[recWord + 4]
+          };
+          break;
         default:
           break;
       }

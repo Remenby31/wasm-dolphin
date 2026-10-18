@@ -21,13 +21,21 @@
 #include "DiscIO/Filesystem.h"
 #include "DiscIO/Volume.h"
 #include "DiscIO/VolumeDisc.h"
+#include "Core/CoreTiming.h"
+#include "Core/HW/ProcessorInterface.h"
 #include "Core/HW/VideoInterface.h"
+#include "Core/PowerPC/PowerPC.h"
 #include "Core/System.h"
 #include "InputCommon/GCPadStatus.h"
+#include "VideoCommon/CommandProcessor.h"
+#include "VideoCommon/Fifo.h"
+#include "VideoCommon/PixelEngine.h"
+#include "VideoCommon/WasmGpuSyncDiag.h"
 #include "VideoCommon/TextureDecoder.h"
 #include "VideoCommon/Statistics.h"
 
 #include "dolphin_web_xfb_fastpaths.h"
+#include "dolphin_web_pad_latch.h"
 #include "dolphin_web_raster_profile.h"
 
 #ifdef __EMSCRIPTEN__
@@ -129,8 +137,20 @@ struct PadPollSnapshot
   std::uint8_t stick_y = GCPadStatus::MAIN_STICK_CENTER_Y;
 };
 
+// One snapshot and one connection flag per GameCube port. Port 1 (index 0)
+// starts connected: the keyboard drives it by default. A disconnected port
+// answers "no controller" to the SI poll, so a game never sees a phantom pad.
+constexpr int PAD_PORT_COUNT = 4;
 std::mutex s_input_state_mutex;
-InputStateSnapshot s_input_state;
+std::array<InputStateSnapshot, PAD_PORT_COUNT> s_input_states{};
+std::array<bool, PAD_PORT_COUNT> s_pad_connected{true, false, false, false};
+struct PadPoll
+{
+  InputStateSnapshot input;
+  bool connected = false;
+};
+// Guarded by s_input_state_mutex. See dolphin_web_pad_latch.h.
+std::array<DolphinWeb::PadLatch<PadPoll>, PAD_PORT_COUNT> s_pad_latches{};
 std::mutex s_pad_poll_mutex;
 PadPollSnapshot s_pad_poll;
 bool s_using_xfb_frame = false;
@@ -663,7 +683,7 @@ void RenderMetadataFrame()
   std::uint32_t input_mask = 0;
   {
     const std::lock_guard<std::mutex> lock(s_input_state_mutex);
-    input_mask = s_input_state.mask;
+    input_mask = s_input_states[0].mask;
   }
 
   for (int y = 0; y < METADATA_FRAME_HEIGHT; ++y)
@@ -808,40 +828,66 @@ void SetInputMask(std::uint32_t mask)
 {
   {
     const std::lock_guard<std::mutex> lock(s_input_state_mutex);
-    s_input_state.mask = mask;
-    s_input_state.generation = 0;
-    s_input_state.stick_x = GCPadStatus::MAIN_STICK_CENTER_X;
-    s_input_state.stick_y = GCPadStatus::MAIN_STICK_CENTER_Y;
-    s_input_state.c_stick_x = GCPadStatus::C_STICK_CENTER_X;
-    s_input_state.c_stick_y = GCPadStatus::C_STICK_CENTER_Y;
-    s_input_state.trigger_left = 0;
-    s_input_state.trigger_right = 0;
-    s_input_state.analog_a = 0;
-    s_input_state.analog_b = 0;
+    s_input_states[0] = {};
+    s_input_states[0].mask = mask;
   }
   s_input_update_count.fetch_add(1, std::memory_order_relaxed);
+}
+
+// Port 0-3. connected = 0 unplugs the port (its state returns to neutral).
+// Returns 0 for a port out of range.
+#ifdef __EMSCRIPTEN__
+EMSCRIPTEN_KEEPALIVE
+#endif
+int SetPadState(int port, int connected, std::uint32_t mask, int stick_x, int stick_y,
+                int c_stick_x, int c_stick_y, int trigger_left, int trigger_right, int analog_a,
+                int analog_b, std::uint32_t generation)
+{
+  if (port < 0 || port >= PAD_PORT_COUNT)
+    return 0;
+
+  InputStateSnapshot next;
+  next.generation = generation;
+  if (connected)
+  {
+    next.mask = mask;
+    next.stick_x = ClampPadByte(stick_x);
+    next.stick_y = ClampPadByte(stick_y);
+    next.c_stick_x = ClampPadByte(c_stick_x);
+    next.c_stick_y = ClampPadByte(c_stick_y);
+    next.trigger_left = ClampPadByte(trigger_left);
+    next.trigger_right = ClampPadByte(trigger_right);
+    next.analog_a = ClampPadByte(analog_a);
+    next.analog_b = ClampPadByte(analog_b);
+  }
+  {
+    const std::lock_guard<std::mutex> lock(s_input_state_mutex);
+    s_input_states[port] = next;
+    s_pad_connected[port] = connected != 0;
+  }
+  s_input_update_count.fetch_add(1, std::memory_order_relaxed);
+  return 1;
 }
 
 void SetInputState(std::uint32_t mask, int stick_x, int stick_y, int c_stick_x, int c_stick_y,
                    int trigger_left, int trigger_right, int analog_a, int analog_b,
                    std::uint32_t generation)
 {
-  InputStateSnapshot next;
-  next.mask = mask;
-  next.generation = generation;
-  next.stick_x = ClampPadByte(stick_x);
-  next.stick_y = ClampPadByte(stick_y);
-  next.c_stick_x = ClampPadByte(c_stick_x);
-  next.c_stick_y = ClampPadByte(c_stick_y);
-  next.trigger_left = ClampPadByte(trigger_left);
-  next.trigger_right = ClampPadByte(trigger_right);
-  next.analog_a = ClampPadByte(analog_a);
-  next.analog_b = ClampPadByte(analog_b);
-  {
-    const std::lock_guard<std::mutex> lock(s_input_state_mutex);
-    s_input_state = next;
-  }
-  s_input_update_count.fetch_add(1, std::memory_order_relaxed);
+  SetPadState(0, 1, mask, stick_x, stick_y, c_stick_x, c_stick_y, trigger_left, trigger_right,
+              analog_a, analog_b, generation);
+}
+
+// Bit n set when port n is connected.
+#ifdef __EMSCRIPTEN__
+EMSCRIPTEN_KEEPALIVE
+#endif
+int GetPadConnectedMask()
+{
+  const std::lock_guard<std::mutex> lock(s_input_state_mutex);
+  int mask = 0;
+  for (int port = 0; port < PAD_PORT_COUNT; ++port)
+    mask |= s_pad_connected[port] ? 1 << port : 0;
+  return mask;
 }
 
 int SetPresentationScale(float scale)
@@ -896,6 +942,220 @@ std::uint32_t* GetFrameSignalPtr()
   return &s_frame_signal;
 }
 
+// ---- QA harness hooks (harness/README.md) --------------------------------
+// Off unless the harness turns them on (DolphinWeb_HarnessEnable, sent by the
+// worker on validationEnableHarness): production pays two counter
+// increments and one relaxed atomic load per VI output, nothing else.
+//
+// Every VI output (one per emulated field the game scans out, on the CPU
+// thread) is counted from boot and from the last savestate load; those
+// indices are the frame identity the harness uses. When enabled, each output
+// is logged in a ring with its emulated ticks and host time
+// (emscripten_get_now: timeOrigin + performance.now(), the same clock the
+// worker uses for presentations), and a capture can be armed for one exact
+// output: after a GPU fence, the guest XFB is decoded at native size, or the
+// capture is marked missed. The harness never infers a frame from wall time.
+#ifndef EMSCRIPTEN_KEEPALIVE
+#define EMSCRIPTEN_KEEPALIVE
+#endif
+// Per-entry seqlock: `seq` is odd while the entry is being written and
+// 2 * (n + 1) once entry n is complete. The reader (src/harness-vi-ring.js)
+// accepts an entry only if seq is even, is the value expected for that
+// slot, and is unchanged after reading the fields.
+struct DolphinWebHarnessViEntry
+{
+  std::atomic<std::uint32_t> seq;
+  std::uint32_t vi_since_boot;
+  double host_ms;
+  std::uint64_t ticks;
+  std::uint32_t vi_since_load;
+  std::uint32_t pad;
+};
+static_assert(sizeof(DolphinWebHarnessViEntry) == 32, "harness VI entry layout is read from JS");
+
+constexpr std::uint32_t HARNESS_VI_RING_CAPACITY = 8192;  // > 2 min at 60 Hz between drains
+static std::array<DolphinWebHarnessViEntry, HARNESS_VI_RING_CAPACITY> s_harness_vi_ring{};
+static std::atomic<std::uint32_t> s_harness_vi_head{0};
+static std::uint32_t s_harness_vi_since_boot = 0;
+static std::uint32_t s_harness_vi_since_load = 0;
+static std::atomic<std::uint32_t> s_harness_load_generation{0};
+static std::atomic<int> s_harness_enabled{0};
+
+// 0 idle, 1 armed, 2 ready, 3 missed
+static std::atomic<int> s_harness_capture_state{0};
+static std::uint32_t s_harness_capture_target = 0;
+static int s_harness_capture_from_load = 0;
+static std::vector<std::uint32_t> s_harness_capture_pixels;
+static std::uint32_t s_harness_capture_width = 0;
+static std::uint32_t s_harness_capture_height = 0;
+static std::uint32_t s_harness_capture_index = 0;
+static std::uint64_t s_harness_capture_ticks = 0;
+
+// Called on the CPU thread at the end of a savestate load.
+void DolphinWeb_HarnessOnStateLoaded()
+{
+  s_harness_vi_since_load = 0;
+  s_harness_load_generation.fetch_add(1, std::memory_order_release);
+}
+
+static void HarnessOnViOutput(const std::uint8_t* xfb, std::uint32_t width, std::uint32_t stride,
+                              std::uint32_t height)
+{
+  ++s_harness_vi_since_boot;
+  ++s_harness_vi_since_load;
+  if (!s_harness_enabled.load(std::memory_order_relaxed))
+    return;
+  // Informational: GetTicks() includes the event's lateness, so ticks are
+  // not a frame identity; the VI indices are.
+  const std::uint64_t ticks = Core::System::GetInstance().GetCoreTiming().GetTicks();
+  const std::uint32_t head = s_harness_vi_head.load(std::memory_order_relaxed);
+#ifdef __EMSCRIPTEN__
+  const double host_ms = emscripten_get_now();
+#else
+  const double host_ms = 0.0;
+#endif
+  DolphinWebHarnessViEntry& e = s_harness_vi_ring[head % HARNESS_VI_RING_CAPACITY];
+  e.seq.store(2 * head + 1, std::memory_order_relaxed);  // odd: being written
+  std::atomic_thread_fence(std::memory_order_release);
+  e.vi_since_boot = s_harness_vi_since_boot;
+  e.host_ms = host_ms;
+  e.ticks = ticks;
+  e.vi_since_load = s_harness_vi_since_load;
+  e.seq.store(2 * head + 2, std::memory_order_release);  // even: entry `head` complete
+  s_harness_vi_head.store(head + 1, std::memory_order_release);
+
+  if (s_harness_capture_state.load(std::memory_order_acquire) != 1)
+    return;
+  const std::uint32_t index = s_harness_capture_from_load ? s_harness_vi_since_load : s_harness_vi_since_boot;
+  if (index < s_harness_capture_target)
+    return;
+  if (index > s_harness_capture_target)
+  {
+    s_harness_capture_state.store(3, std::memory_order_release);
+    return;
+  }
+  // Fence: in dual core the video thread may still be writing this XFB
+  // (SyncGPU only waits in deterministic-GPU mode). FlushGpu blocks until
+  // the video thread has drained everything the CPU sent before this output.
+  // Only on the captured output.
+  Core::System::GetInstance().GetFifo().FlushGpu();
+  s_harness_capture_pixels.resize(static_cast<std::size_t>(width) * height);
+  for (std::uint32_t y = 0; y < height; ++y)
+  {
+    const std::uint8_t* row = xfb + static_cast<std::size_t>(y) * stride;
+    for (std::uint32_t x = 0; x < width; ++x)
+    {
+      const std::uint8_t* pair = row + static_cast<std::size_t>(x & ~1u) * 2;
+      s_harness_capture_pixels[static_cast<std::size_t>(y) * width + x] =
+          YuvToRgba((x & 1u) ? pair[2] : pair[0], pair[1], pair[3]);
+    }
+  }
+  s_harness_capture_width = width;
+  s_harness_capture_height = height;
+  s_harness_capture_index = index;
+  s_harness_capture_ticks = ticks;
+  s_harness_capture_state.store(2, std::memory_order_release);
+}
+
+EMSCRIPTEN_KEEPALIVE void DolphinWeb_HarnessEnable(int enabled)
+{
+  s_harness_enabled.store(enabled ? 1 : 0, std::memory_order_relaxed);
+}
+
+// The GPU-sync counters have a switch of their own, turned on only by the
+// freeze probe (validationEnableGpuSyncDiag): other harness sessions, the
+// perf gate among them, never count.
+EMSCRIPTEN_KEEPALIVE void DolphinWeb_GpuSyncDiagEnable(int enabled)
+{
+  DolphinWeb::GpuSyncDiag::s_enabled.store(enabled != 0, std::memory_order_relaxed);
+}
+
+// Harness diagnostics for a dual-core GPU stall (validationReadWgpuReplayState):
+// the CP FIFO as the GPU thread sees it, the pixel engine's token/finish
+// handshake, and the counters of VideoCommon/WasmGpuSyncDiag.h. JSON.
+// Read from the worker while the CPU and GPU threads run: each field is one
+// atomic load, but the fields are not one snapshot (the read pointer can
+// move between "read" and "rwDistance"). Good for a stall, where nothing
+// moves; not for arithmetic between fields of a running FIFO.
+EMSCRIPTEN_KEEPALIVE const char* DolphinWeb_GpuSyncDiag()
+{
+  static std::string out;
+  auto& system = Core::System::GetInstance();
+  auto& command_processor = system.GetCommandProcessor();
+  auto& fifo = command_processor.GetFifo();
+  const auto pe = system.GetPixelEngine().GetSyncState();
+  const auto& c = DolphinWeb::GpuSyncDiag::s_counters;
+  const auto load = [](const auto& a) { return static_cast<unsigned long long>(a.load(std::memory_order_relaxed)); };
+  std::ostringstream o;
+  o << "{\"enabled\":" << (DolphinWeb::GpuSyncDiag::Enabled() ? 1 : 0)
+    << ",\"fifo\":{\"base\":" << load(fifo.CPBase) << ",\"end\":" << load(fifo.CPEnd)
+    << ",\"rwDistance\":" << load(fifo.CPReadWriteDistance)
+    << ",\"read\":" << load(fifo.CPReadPointer) << ",\"write\":" << load(fifo.CPWritePointer)
+    << ",\"safeRead\":" << load(fifo.SafeCPReadPointer)
+    << ",\"breakpoint\":" << load(fifo.CPBreakpoint)
+    << ",\"gpLink\":" << load(fifo.bFF_GPLinkEnable) << ",\"gpRead\":" << load(fifo.bFF_GPReadEnable)
+    << ",\"bpEnable\":" << load(fifo.bFF_BPEnable) << ",\"bpInt\":" << load(fifo.bFF_BPInt)
+    << ",\"atBreakpoint\":" << load(fifo.bFF_Breakpoint)
+    << ",\"hiWatermark\":" << load(fifo.bFF_HiWatermark) << ",\"loWatermark\":" << load(fifo.bFF_LoWatermark)
+    << ",\"interruptWaiting\":" << (command_processor.IsInterruptWaiting() ? 1 : 0) << "}"
+    << ",\"pe\":{\"token\":" << pe.token << ",\"tokenPending\":" << pe.token_pending
+    << ",\"tokenInterruptPending\":" << pe.token_interrupt_pending
+    << ",\"finishInterruptPending\":" << pe.finish_interrupt_pending
+    << ",\"eventRaised\":" << pe.event_raised
+    << ",\"signalToken\":" << pe.signal_token_interrupt
+    << ",\"signalFinish\":" << pe.signal_finish_interrupt << "}"
+    << ",\"piCause\":" << system.GetProcessorInterface().GetCause()
+    << ",\"counters\":{\"gpuLoop\":" << load(c.gpu_loop_iterations)
+    << ",\"fifoChunks\":" << load(c.fifo_chunks_decoded)
+    << ",\"tokenRequests\":" << load(c.pe_token_requests)
+    << ",\"finishRequests\":" << load(c.pe_finish_requests)
+    << ",\"eventsScheduled\":" << load(c.pe_events_scheduled)
+    << ",\"eventsRun\":" << load(c.pe_events_run)
+    << ",\"finishSignalled\":" << load(c.pe_finish_signalled)
+    << ",\"tokenSignalled\":" << load(c.pe_token_signalled) << "}}";
+  out = o.str();
+  return out.c_str();
+}
+EMSCRIPTEN_KEEPALIVE int DolphinWeb_HarnessEnabled() { return s_harness_enabled.load(std::memory_order_relaxed); }
+EMSCRIPTEN_KEEPALIVE std::uint32_t DolphinWeb_HarnessViSinceBoot() { return s_harness_vi_since_boot; }
+EMSCRIPTEN_KEEPALIVE std::uint32_t DolphinWeb_HarnessViSinceLoad() { return s_harness_vi_since_load; }
+
+// Arm a capture of VI output `index` (counted from boot, or from the last
+// load when from_load != 0). Returns 0 when that output has already passed.
+EMSCRIPTEN_KEEPALIVE int DolphinWeb_HarnessArmCapture(std::uint32_t index, int from_load)
+{
+  if (!s_harness_enabled.load(std::memory_order_relaxed))
+    return 0;
+  const std::uint32_t now = from_load ? s_harness_vi_since_load : s_harness_vi_since_boot;
+  if (index <= now)
+    return 0;
+  s_harness_capture_target = index;
+  s_harness_capture_from_load = from_load;
+  s_harness_capture_state.store(1, std::memory_order_release);
+  return 1;
+}
+EMSCRIPTEN_KEEPALIVE void DolphinWeb_HarnessDisarmCapture() { s_harness_capture_state.store(0, std::memory_order_release); }
+EMSCRIPTEN_KEEPALIVE int DolphinWeb_HarnessCaptureState() { return s_harness_capture_state.load(std::memory_order_acquire); }
+EMSCRIPTEN_KEEPALIVE std::uint32_t* DolphinWeb_HarnessCapturePixels() { return s_harness_capture_pixels.data(); }
+EMSCRIPTEN_KEEPALIVE std::uint32_t DolphinWeb_HarnessCaptureWidth() { return s_harness_capture_width; }
+EMSCRIPTEN_KEEPALIVE std::uint32_t DolphinWeb_HarnessCaptureHeight() { return s_harness_capture_height; }
+EMSCRIPTEN_KEEPALIVE std::uint32_t DolphinWeb_HarnessCaptureIndex() { return s_harness_capture_index; }
+EMSCRIPTEN_KEEPALIVE double DolphinWeb_HarnessCaptureTicks() { return static_cast<double>(s_harness_capture_ticks); }
+EMSCRIPTEN_KEEPALIVE DolphinWebHarnessViEntry* DolphinWeb_HarnessViRing() { return s_harness_vi_ring.data(); }
+// Address of PowerPCState::pc in the wasm heap, for the harness's guest-PC
+// sampler (src/harness-pc-sampler.js): a worker of its own reads the u32 there
+// every fraction of a millisecond, without stopping the CPU thread. 0 until
+// the runtime is up. Read-only use; harness only.
+EMSCRIPTEN_KEEPALIVE std::uintptr_t DolphinWeb_HarnessPcAddress()
+{
+  if (!s_harness_enabled.load(std::memory_order_acquire))
+    return 0;
+  return reinterpret_cast<std::uintptr_t>(&Core::System::GetInstance().GetPPCState().pc);
+}
+EMSCRIPTEN_KEEPALIVE std::uint32_t DolphinWeb_HarnessViRingCapacity() { return HARNESS_VI_RING_CAPACITY; }
+EMSCRIPTEN_KEEPALIVE std::uint32_t DolphinWeb_HarnessViRingHead() { return s_harness_vi_head.load(std::memory_order_acquire); }
+EMSCRIPTEN_KEEPALIVE std::uint32_t DolphinWeb_HarnessLoadGeneration() { return s_harness_load_generation.load(std::memory_order_acquire); }
+
 void DolphinWeb_OnXfb(const std::uint8_t* xfb, std::uint32_t width, std::uint32_t stride,
                       std::uint32_t height)
 {
@@ -914,6 +1174,7 @@ void DolphinWeb_OnXfb(const std::uint8_t* xfb, std::uint32_t width, std::uint32_
   {
     return;
   }
+  HarnessOnViOutput(xfb, width, stride, height);
 
   const int presentation_width = ScaledPresentationDimension(width);
   const int presentation_height = ScaledPresentationDimension(height);
@@ -1085,19 +1346,28 @@ const char* GetVideoStats()
   return current_video_stats.c_str();
 }
 
+// Answers every port, so Dolphin's own controller config is never consulted.
 int DolphinWeb_GetPadStatus(int pad_num, GCPadStatus* status)
 {
-  if (!status || pad_num != 0)
+  if (!status || pad_num < 0 || pad_num >= PAD_PORT_COUNT)
     return 0;
 
-  InputStateSnapshot input;
+  const std::uint64_t ticks = Core::System::GetInstance().GetCoreTiming().GetTicks();
+  PadPoll poll;
   {
     const std::lock_guard<std::mutex> lock(s_input_state_mutex);
-    input = s_input_state;
+    poll = s_pad_latches[pad_num].Poll(ticks, [pad_num] {
+      return PadPoll{s_input_states[pad_num], s_pad_connected[pad_num]};
+    });
   }
+  const InputStateSnapshot& input = poll.input;
+  const bool connected = poll.connected;
 
   *status = {};
-  status->isConnected = true;
+  status->isConnected = connected;
+  if (!connected)
+    return 1;
+
   status->stickX = input.stick_x;
   status->stickY = input.stick_y;
   status->substickX = input.c_stick_x;
@@ -1145,26 +1415,27 @@ int DolphinWeb_GetPadStatus(int pad_num, GCPadStatus* status)
   if (mask & INPUT_D_RIGHT)
     status->button |= PAD_BUTTON_RIGHT;
 
-  if ((mask & INPUT_STICK_LEFT) && !(mask & INPUT_STICK_RIGHT))
-    status->stickX = 0x20;
-  else if ((mask & INPUT_STICK_RIGHT) && !(mask & INPUT_STICK_LEFT))
-    status->stickX = 0xe0;
+  // Digital directions (mask-only callers) drive a stick axis only while it
+  // rests, at the gate of a genuine controller (Dolphin: 0.794 and 0.722 of
+  // 127 around the centre), so they never clobber analog input.
+  constexpr int MAIN_FULL_TILT = 101;
+  constexpr int C_FULL_TILT = 92;
+  const auto digital_axis = [mask](std::uint8_t& axis, std::uint8_t center, int tilt,
+                                   std::uint32_t negative, std::uint32_t positive) {
+    if (axis != center || !(mask & negative) == !(mask & positive))
+      return;
+    axis = static_cast<std::uint8_t>(center + ((mask & positive) ? tilt : -tilt));
+  };
+  digital_axis(status->stickX, GCPadStatus::MAIN_STICK_CENTER_X, MAIN_FULL_TILT,
+               INPUT_STICK_LEFT, INPUT_STICK_RIGHT);
+  digital_axis(status->stickY, GCPadStatus::MAIN_STICK_CENTER_Y, MAIN_FULL_TILT,
+               INPUT_STICK_DOWN, INPUT_STICK_UP);
+  digital_axis(status->substickX, GCPadStatus::C_STICK_CENTER_X, C_FULL_TILT,
+               INPUT_C_STICK_LEFT, INPUT_C_STICK_RIGHT);
+  digital_axis(status->substickY, GCPadStatus::C_STICK_CENTER_Y, C_FULL_TILT,
+               INPUT_C_STICK_DOWN, INPUT_C_STICK_UP);
 
-  if ((mask & INPUT_STICK_UP) && !(mask & INPUT_STICK_DOWN))
-    status->stickY = 0xe0;
-  else if ((mask & INPUT_STICK_DOWN) && !(mask & INPUT_STICK_UP))
-    status->stickY = 0x20;
-
-  if ((mask & INPUT_C_STICK_LEFT) && !(mask & INPUT_C_STICK_RIGHT))
-    status->substickX = 0x20;
-  else if ((mask & INPUT_C_STICK_RIGHT) && !(mask & INPUT_C_STICK_LEFT))
-    status->substickX = 0xe0;
-
-  if ((mask & INPUT_C_STICK_UP) && !(mask & INPUT_C_STICK_DOWN))
-    status->substickY = 0xe0;
-  else if ((mask & INPUT_C_STICK_DOWN) && !(mask & INPUT_C_STICK_UP))
-    status->substickY = 0x20;
-
+  if (pad_num == 0)
   {
     const std::lock_guard<std::mutex> lock(s_pad_poll_mutex);
     ++s_pad_poll.poll_count;
