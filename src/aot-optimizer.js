@@ -9,11 +9,13 @@
 //   events "optimization-progress" { fraction, done, total, unit: "regions" },
 //          "optimization-done" { total, ms }, "optimization-error" { message, fatal }
 //
-// Compiler session (P5/P6), see docs/aot-plan.md "First launch":
-//   compiler.open({ discKey, compilerVersion }) -> session
-//   session.has(hashes) -> Promise<Set<hash>>      already compiled and persisted
-//   session.submit(regions) -> Promise<{ done: [hash], failed: [{ hash, reason }] }>
-//   session.cancel()
+// Two collaborators:
+//   translator (P4, region compiler in the core, fed from guest memory):
+//     translate(regions) -> Promise<[{ key, bytes } | { key, reason }]>
+//   cache (P5/P6, src/aot-cache.js): openAotCache({ discKey, coreHash, compilerVersion, flagsMask })
+//     -> session { has(keys) -> Set, put([{ key, bytes, meta }]) -> { failed: [{ key, reason }] }, cancel() }
+// The cache key of a region is its fingerprint (known before translation, so
+// has() can resume an interrupted run).
 import { orderedRegions, validatePlan, ANALYZER_VERSION } from "./aot-plan.js";
 
 export const PLAN_CACHE_DIR = "aot-plan";
@@ -24,12 +26,13 @@ const regionWeight = (f) => f.ranges.reduce((n, [s, e]) => n + e - s, 0);
 export class AotOptimizer extends EventTarget {
   // buildPlan: () => Promise<plan> (planDisc over the user's disc, with its profile)
   // planStore: { load(discKey) -> plan|null, save(discKey, plan) } (optional)
-  constructor({ discKey, buildPlan, compiler, compilerVersion, planStore = null, batchSize = BATCH, now = () => performance.now() }) {
+  constructor({ discKey, buildPlan, translator, openCache, cacheIdentity = {}, planStore = null, batchSize = BATCH, now = () => performance.now() }) {
     super();
     this.discKey = discKey;
     this.buildPlan = buildPlan;
-    this.compiler = compiler;
-    this.compilerVersion = compilerVersion;
+    this.translator = translator;
+    this.openCache = openCache;
+    this.cacheIdentity = cacheIdentity;
     this.planStore = planStore;
     this.now = now;
     this.batchSize = batchSize;
@@ -60,7 +63,7 @@ export class AotOptimizer extends EventTarget {
   }
 
   async openSession() {
-    if (!this.session) this.session = await this.compiler.open({ discKey: this.discKey, compilerVersion: this.compilerVersion });
+    if (!this.session) this.session = await this.openCache({ discKey: this.discKey, ...this.cacheIdentity });
     return this.session;
   }
 
@@ -111,13 +114,19 @@ export class AotOptimizer extends EventTarget {
         const batch = todo.slice(i, i + this.batchSize).map(({ module, f }) => ({
           module, entry: f.entry, flags: f.flags ?? 0, hash: f.hash, ranges: f.ranges, extraEntries: f.extraEntries ?? []
         }));
-        const result = await session.submit(batch);
+        const translated = await this.translator.translate(batch);
         if (this.cancelled) break;
-        for (const h of result.done) doneSet.add(h);
-        for (const x of result.failed) {
-          refused.add(x.hash);
-          doneSet.add(x.hash); // counted as handled: progress must reach 100 %
-          this.emit("optimization-error", { message: `region ${x.hash}: ${x.reason}`, fatal: false });
+        const failed = translated.filter((t) => !t.bytes);
+        const ok = translated.filter((t) => t.bytes);
+        const stored = ok.length ? await session.put(ok.map((t) => ({ key: t.key, bytes: t.bytes, meta: t.meta ?? null }))) : { failed: [] };
+        if (this.cancelled) break;
+        failed.push(...(stored.failed ?? []));
+        const failedKeys = new Set(failed.map((x) => x.key));
+        for (const t of ok) if (!failedKeys.has(t.key)) doneSet.add(t.key);
+        for (const x of failed) {
+          refused.add(x.key);
+          doneSet.add(x.key); // handled (left to the JIT): progress must reach 100 %
+          this.emit("optimization-error", { message: `region ${x.key}: ${x.reason}`, fatal: false });
         }
         this.emit("optimization-progress", this.progress(doneSet));
       }
@@ -158,36 +167,45 @@ export class OpfsPlanStore {
   }
 }
 
-// Stand-in for the region compiler (P5/P6) with the agreed session shape:
-// "compiles" a region in `msPerKiB` per KiB of guest code, persists its hash
-// in `persisted` (a Set, or anything with has/add), refuses hashes listed in
-// `refuse`. Used by tests and by the site's simulated flow.
-export function fakeCompiler({ persisted = new Set(), msPerKiB = 0, refuse = new Set(), sleep = (ms) => new Promise((r) => setTimeout(r, ms)) } = {}) {
+// Stand-ins with the agreed shapes, for tests and the site's simulated flow.
+// fakeTranslator: "translates" in `msPerKiB` per KiB of guest code, refuses
+// keys listed in `refuse`. fakeCache: an in-memory cache session factory.
+export function fakeTranslator({ msPerKiB = 0, refuse = new Set(), sleep = (ms) => new Promise((r) => setTimeout(r, ms)) } = {}) {
   return {
-    persisted,
-    async open() {
-      let cancelled = false;
-      return {
-        async has(hashes) {
-          return new Set(hashes.filter((h) => persisted.has(h)));
-        },
-        async submit(regions) {
-          const done = [], failed = [];
-          for (const r of regions) {
-            if (cancelled) break;
-            if (refuse.has(r.hash)) { failed.push({ hash: r.hash, reason: "engine-reject" }); continue; }
-            const bytes = r.ranges.reduce((n, [s, e]) => n + e - s, 0);
-            if (msPerKiB) await sleep((bytes / 1024) * msPerKiB);
-            if (cancelled) break;
-            persisted.add(r.hash);
-            done.push(r.hash);
-          }
-          return { done, failed };
-        },
-        cancel() {
-          cancelled = true;
-        }
-      };
+    async translate(regions) {
+      const out = [];
+      for (const r of regions) {
+        if (refuse.has(r.hash)) { out.push({ key: r.hash, reason: "engine-reject" }); continue; }
+        const bytes = r.ranges.reduce((n, [s, e]) => n + e - s, 0);
+        if (msPerKiB) await sleep((bytes / 1024) * msPerKiB);
+        out.push({ key: r.hash, bytes: new Uint8Array(8) });
+      }
+      return out;
     }
   };
+}
+
+export function fakeCache({ persisted = new Map(), quotaKeys = new Set() } = {}) {
+  const open = async () => {
+    let cancelled = false;
+    return {
+      async has(keys) {
+        return new Set(keys.filter((k) => persisted.has(k)));
+      },
+      async put(entries) {
+        const failed = [];
+        for (const e of entries) {
+          if (cancelled) break;
+          if (quotaKeys.has(e.key)) failed.push({ key: e.key, reason: "quota" });
+          else persisted.set(e.key, e.bytes);
+        }
+        return { failed };
+      },
+      cancel() {
+        cancelled = true;
+      }
+    };
+  };
+  open.persisted = persisted;
+  return open;
 }
