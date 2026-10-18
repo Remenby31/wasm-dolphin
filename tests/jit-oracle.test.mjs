@@ -398,3 +398,57 @@ test("the executed-block export is there, and says when no CPU core runs", { ski
   }
   assert.equal(core.dumpBlocks(), null);
 });
+
+const offThreadSkip = skip || (core.has("DolphinWeb_JitReadyBitsPtr") ? false : "the core predates off-thread compiles (CI builds this branch's core)");
+
+test("jitoffthread: a miss is posted once and deferred, compiled once its ready byte is set, in place when the bytes changed", { skip: offThreadSkip }, async () => {
+  const { default: createDolphinCore } = await import(new URL("../cores/dolphin/dolphin-core-upstream.js", import.meta.url));
+  const { readFileSync } = await import("node:fs");
+  const module = await createDolphinCore({ wasmBinary: readFileSync(coreWasm), noInitialRun: true, printErr: () => {} });
+  // (func (param i32) (result i32) local.get 0) / i32.const 7, exported as "f"
+  const head = [0x00, 0x61, 0x73, 0x6d, 0x01, 0x00, 0x00, 0x00, 0x01, 0x06, 0x01, 0x60, 0x01, 0x7f, 0x01, 0x7f,
+    0x03, 0x02, 0x01, 0x00, 0x07, 0x05, 0x01, 0x01, 0x66, 0x00, 0x00, 0x0a];
+  const a = Uint8Array.from([...head, 0x06, 0x01, 0x04, 0x00, 0x20, 0x00, 0x0b]);
+  const b = Uint8Array.from([...head, 0x06, 0x01, 0x04, 0x00, 0x41, 0x07, 0x0b]);
+  const posted = [];
+  const savedSelf = globalThis.self;
+  // Only compile requests: each in-place compile also posts the bytes for
+  // the persistent cache (dolphin-jit-new-compile), as before.
+  globalThis.self = { postMessage: (message) => { if (message.type === "dolphin-jit-compile-request") posted.push(message); } };
+  module._dolphinJitCache = new Map(); // the pthread cache the persistent JIT cache installs
+  const compile = (bytes, inPlace = false) => {
+    const ptr = module._malloc(bytes.length);
+    module.HEAPU8.set(bytes, ptr);
+    try {
+      return inPlace ? module._DolphinWeb_JitCompileBytesInPlaceForTest(ptr, bytes.length) : module._DolphinWeb_JitCompileBytesForTest(ptr, bytes.length);
+    } finally {
+      module._free(ptr);
+    }
+  };
+  try {
+    module._SetPpcWasmJitOffThread(1);
+    assert.equal(compile(a), -3, "deferred");
+    assert.equal(compile(a), -3, "still deferred");
+    assert.equal(posted.length, 1, "posted once");
+    const [request] = posted;
+    assert.equal(request.type, "dolphin-jit-compile-request");
+    assert.equal(request.kind, "block");
+    assert.deepEqual(Array.from(request.bytes), Array.from(a));
+    assert.equal(request.readyPtr, module._DolphinWeb_JitReadyBitsPtr());
+    assert.equal(request.readySlot, parseInt(request.key.slice(-64, -60), 16));
+    assert.equal(module.HEAPU8[request.readyPtr + request.readySlot], 0);
+    // discio: compiled, warmed and retained (or failed) -> 1
+    Atomics.store(module.HEAPU8, request.readyPtr + request.readySlot, 1);
+    assert.ok(compile(a) > 0, "ready: compiled synchronously");
+    // The block's bytes changed before its retry: compiled in place, not deferred.
+    assert.ok(compile(b, true) > 0, "changed bytes compile in place");
+    assert.equal(posted.length, 1, "nothing posted for the in-place retry");
+    // Off: compiled in place as before.
+    module._SetPpcWasmJitOffThread(0);
+    assert.ok(compile(Uint8Array.from([...head, 0x06, 0x01, 0x04, 0x00, 0x41, 0x09, 0x0b])) > 0);
+    assert.equal(posted.length, 1);
+  } finally {
+    module._SetPpcWasmJitOffThread(0);
+    globalThis.self = savedSelf;
+  }
+});

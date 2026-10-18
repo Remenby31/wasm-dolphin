@@ -25,7 +25,7 @@
       "commit": "01e0577914a75a2569c846778c2f93aa8e6feddd"
     }
   },
-  "patchSeriesSha256": "11d123e7d5159caa60ea8d85fd7ef23119705fb303014556f4ee8ea6bb03b111",
+  "patchSeriesSha256": "1335be18157e48b037d6456d19e1f76140ce6de39e66a1cfd2eb02580e394869",
   "patches": [
     {
       "order": 1,
@@ -592,8 +592,8 @@
       "cwd": ".",
       "hashMode": "lf-normalized",
       "path": "patches/dolphin-wasm/snapshot/0074-jit-offthread-compile-request-block-export.patch",
-      "size": 10295,
-      "sha256": "6611af183b6ffe04bff3353c4a34ebbe37e1078a1acf262fdcd20e56a8e3a5f2"
+      "size": 15375,
+      "sha256": "09f185a9121e82d4605b727fe3209b70e256fdbcb265c980171fe8fbd5349059"
     },
     {
       "order": 72,

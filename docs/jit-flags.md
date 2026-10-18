@@ -22,7 +22,7 @@ correctness is established.
 | `fastmemhoist=1` | Hoist per-block fastmem bounds checks. Default-off because a bad proof could permit an out-of-bounds access. |
 | `disable=...` | Disable named JIT helper/optimization categories, or pass a decimal/hex mask, for bisection. |
 | `nojitcache=1` | Skip the browser-side compiled JIT cache/prewarm path for a cold-cache comparison. |
-| `jitoffthread=1` | The CPU thread never compiles a JIT module: on a cache miss it posts `dolphin-jit-compile-request {key, bytes, kind}`, interprets the block, and retries it once a module (`dolphin-jit-cache-add`) or a failure (`dolphin-jit-compile-failed {key, reason}`, compile/link blacklists, oom is transient) has reached its pthread. Needs the JIT cache (ignored with `nojitcache=1`). |
+| `jitoffthread=1` | The CPU thread does not compile a missed block first: it zeroes the key's byte in a shared ready table (`DolphinWeb_JitReadyBitsPtr()`, slot = first 16 SHA bits of the key), posts `dolphin-jit-compile-request {key, bytes, kind, readyPtr, readySlot}` once, and interprets the block. discio stores 1 in that byte once the compiler worker has compiled, warmed and retained the module, or failed; the block is then recompiled synchronously, which hits V8's per-process module cache for the same bytes (or raises the same engine error and is blacklisted). A retried block whose bytes changed compiles in place. The pthread never needs to receive a message (it does not return to its event loop). Needs the JIT cache (ignored with `nojitcache=1`). |
 | `metrics=1` | Enable on-screen and validation metrics used to judge behavior and performance. |
 
 ## Defaults and safety
