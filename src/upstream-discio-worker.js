@@ -2980,8 +2980,14 @@ async function handleSavesMessage(type, payload) {
       const header = checkSaveState(bytes, identity.gameId);
       validateSaveStateData(bytes);
       const slotPath = payload.slot ? stateSlotPath(identity, payload.slot) : "";
-      if (slotPath && fsExists(slotPath) && !payload.replace && payload.load === false) {
-        throw new Error(`Save state slot ${payload.slot} is in use; pass replace to overwrite it`);
+      // Only the core can check a state's subsystems. A state it has not
+      // loaded may fill an empty slot, never replace a saved one, whatever
+      // replace says: loading a bad one later fails and Dolphin undoes it,
+      // overwriting a good one loses it.
+      if (slotPath && fsExists(slotPath) && payload.load === false) {
+        throw new Error(
+          `Save state slot ${payload.slot} is in use. A state replaces a saved one only once the core has loaded it: import it with load, or pick an empty slot.`
+        );
       }
       // 2. Stage and read back.
       const staged = stageBytes("import.sav", bytes);

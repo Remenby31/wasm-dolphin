@@ -8,6 +8,7 @@ import vm from "node:vm";
 import { createCoreLifecycle } from "../src/core-lifecycle.js";
 import * as memcard from "../src/memcard.js";
 import * as store from "../src/user-data-store.js";
+import { makeStateFile, tinyStateFile } from "./helpers/save-state-fixture.mjs";
 
 const source = await readFile(new URL("../src/upstream-discio-worker.js", import.meta.url), "utf8");
 const begin = source.indexOf("// Saves: /dolphin-user kept in OPFS");
@@ -102,25 +103,8 @@ function gci({ name = "save", blocks = 1, fill = 1, game = "GTST" } = {}) {
   return bytes;
 }
 
-// A minimal valid LZ4 state for game `gameId` holding `payload`.
-function stateFile(gameId = "GTST01", payload = [9, 8, 7, 6]) {
-  const version = new TextEncoder().encode("Dolphin test");
-  const out = new Uint8Array(32 + version.length + 16 + 4 + 1 + payload.length);
-  const view = new DataView(out.buffer);
-  out.set(new TextEncoder().encode(gameId.slice(0, 6)), 0);
-  view.setUint32(24, memcard.STATE_COOKIE_BASE + memcard.STATE_VERSION, true);
-  view.setUint32(28, version.length, true);
-  out.set(version, 32);
-  let at = 32 + version.length;
-  view.setUint16(at, 1, true);
-  view.setUint16(at + 2, 1, true);
-  view.setBigUint64(at + 8, BigInt(payload.length), true);
-  at += 16;
-  view.setInt32(at, 1 + payload.length, true);
-  out[at + 4] = payload.length << 4;
-  out.set(payload, at + 5);
-  return out;
-}
+// A valid state for game `gameId`, told apart by `marker`.
+const stateFile = (gameId = "GTST01", marker = [9, 8, 7, 6, 5]) => makeStateFile({ gameId, marker: marker.length < 5 ? [...marker, 0] : marker });
 
 async function worker({ primitives = memoryPrimitives(), lockGranted = true, booted = true, core = {} } = {}) {
   const fs = memfs();
@@ -242,9 +226,26 @@ test("P1 .sav import: an invalid state never touches the slot", async () => {
   const before = tab.fs.readFile(slot);
   const stored = new Map(tab.primitives.files);
 
-  // Right game and version, 48 bytes of nothing.
-  const tiny = stateFile().subarray(0, 48);
-  await assert.rejects(tab.saves.handleSavesMessage("importSaveState", { bytes: tiny, slot: 2 }), /save state/i);
+  // The review's 49 bytes: right game and version, a one-byte payload.
+  const tiny = tinyStateFile();
+  assert.equal(tiny.byteLength, 49);
+  for (const options of [{ slot: 2 }, { slot: 2, load: false }, { slot: 2, load: false, replace: true }, { slot: 3, load: false }]) {
+    await assert.rejects(
+      tab.saves.handleSavesMessage("importSaveState", { bytes: tiny, ...options }),
+      /too small to hold the console's 24 MiB/,
+      JSON.stringify(options)
+    );
+  }
+  // A well-formed state the core has not loaded never replaces a saved one.
+  await assert.rejects(
+    tab.saves.handleSavesMessage("importSaveState", { bytes: stateFile("GTST01", [2, 2, 2, 2, 2]), slot: 2, load: false, replace: true }),
+    /slot 2 is in use\. A state replaces a saved one only once the core has loaded it/
+  );
+  // It may fill an empty slot.
+  const unloaded = await tab.saves.handleSavesMessage("importSaveState", { bytes: stateFile("GTST01", [2, 2, 2, 2, 2]), slot: 4, load: false });
+  assert.equal(unloaded.loaded, false);
+  assert.ok(tab.fs.nodes.has("/dolphin-user/StateSaves/GTST01.s04"));
+  const storedNow = new Map(tab.primitives.files);
   // Valid structure, but the core does not load it.
   tab.core.rejectLoad = true;
   await assert.rejects(
@@ -253,7 +254,8 @@ test("P1 .sav import: an invalid state never touches the slot", async () => {
   );
   assert.equal(good.saved, true);
   assert.deepEqual(tab.fs.readFile(slot), before);
-  assert.deepEqual(new Map(tab.primitives.files), stored);
+  assert.deepEqual(new Map(tab.primitives.files), storedNow);
+  assert.ok(stored.size < storedNow.size, "only the empty slot was added");
   assert.equal([...tab.fs.nodes.keys()].some((p) => p.includes("/.staging/") && !p.endsWith(".staging")), false, "staging cleaned");
 
   tab.core.rejectLoad = false;

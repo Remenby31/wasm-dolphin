@@ -331,6 +331,22 @@ function lz4DecodeBlock(src, dst, at, limit) {
   return d - at;
 }
 
+// What State::DoState reads first: the Wii flag (one byte) and the MEM1 and
+// MEM2 sizes. GameCube and Wii consoles both have 24 MiB of MEM1. The rest
+// of the payload is every subsystem's DoState and can only be checked by
+// loading it into the core.
+export const STATE_MIN_PAYLOAD_BYTES = 0x1800000;
+function checkStatePayloadStart(payload) {
+  if (payload.byteLength < STATE_MIN_PAYLOAD_BYTES) {
+    throw new Error(`Save state data is ${payload.byteLength} bytes, too small to hold the console's 24 MiB of RAM`);
+  }
+  if (payload[0] > 1) throw new Error("Save state data does not start like a Dolphin state (console flag)");
+  const mem1 = new DataView(payload.buffer, payload.byteOffset, 9).getUint32(1, true);
+  if (mem1 !== 0x1800000) {
+    throw new Error(`Save state data does not start like a Dolphin state (MEM1 size 0x${mem1.toString(16)})`);
+  }
+}
+
 // Everything Dolphin's LoadFileStateData checks before using a state, done
 // here first: headers, the extended header, and the payload decompressed
 // to exactly the announced size. Returns the header and payload size.
@@ -349,7 +365,7 @@ export function validateSaveStateData(bytes) {
   if (payloadOffset !== 0) throw new Error(`Save state payload offset ${payloadOffset} is not supported`);
   let at = base + 16;
   if (compression === 0) {
-    if (bytes.byteLength - at === 0) throw new Error("Save state has no data");
+    checkStatePayloadStart(bytes.subarray(at));
     return { ...header, compression: "none", payloadBytes: bytes.byteLength - at };
   }
   if (compression !== 1) throw new Error(`Save state compression ${compression} is unknown`);
@@ -366,6 +382,7 @@ export function validateSaveStateData(bytes) {
     at += length;
   }
   if (at !== bytes.byteLength) throw new Error(`Save state has ${bytes.byteLength - at} bytes after its data`);
+  checkStatePayloadStart(out);
   return { ...header, compression: "lz4", payloadBytes: size };
 }
 

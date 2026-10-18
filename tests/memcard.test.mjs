@@ -20,6 +20,7 @@ import {
   STATE_VERSION
 } from "../src/memcard.js";
 import { readVendorFileSync, sourceContractTest, vendorSourceRoot } from "./helpers/source-contract.mjs";
+import { GC_STATE_SIZE, makeStateFile, tinyStateFile } from "./helpers/save-state-fixture.mjs";
 
 const readVendorSource = (path) => readVendorFileSync(join(vendorSourceRoot, path));
 
@@ -203,12 +204,19 @@ function lz4State({ payload = new Uint8Array([1, 2, 3, 4, 5]), announced = paylo
 }
 
 test("a save state is decompressed in full before it is trusted", () => {
-  assert.equal(validateSaveStateData(lz4State()).payloadBytes, 5);
-  // The review's case: right game and version, 48 bytes of nothing.
-  const tiny = stateBytes({ versionString: "" }).subarray(0, 48);
-  assert.equal(tiny.byteLength, 48);
-  assert.doesNotThrow(() => checkSaveState(tiny, "GTST01"), "the header alone looks fine");
-  assert.throws(() => validateSaveStateData(tiny), /extended header version 0 is unknown/);
+  assert.equal(validateSaveStateData(makeStateFile()).payloadBytes, GC_STATE_SIZE);
+  assert.equal(validateSaveStateData(makeStateFile({ compression: "none" })).compression, "none");
+  // The review's cases: right game and version, then 48 or 49 bytes in all.
+  const header48 = stateBytes({ versionString: "" }).subarray(0, 48);
+  assert.doesNotThrow(() => checkSaveState(header48, "GTST01"), "the header alone looks fine");
+  assert.throws(() => validateSaveStateData(header48), /extended header version 0 is unknown/);
+  const tiny = tinyStateFile();
+  assert.equal(tiny.byteLength, 49);
+  assert.doesNotThrow(() => checkSaveState(tiny, "GTST01"));
+  assert.throws(() => validateSaveStateData(tiny), /1 bytes, too small to hold the console's 24 MiB of RAM/);
+  // A payload of the right size that does not start like State::DoState's.
+  assert.throws(() => validateSaveStateData(makeStateFile({ mem1: 0x4000000 })), /MEM1 size 0x4000000/);
+  assert.throws(() => validateSaveStateData(makeStateFile({ consoleFlag: 7 })), /console flag/);
   assert.throws(() => validateSaveStateData(lz4State({ announced: 9 })), /data ends after 5 of 9 bytes/);
   const truncated = lz4State();
   assert.throws(() => validateSaveStateData(truncated.subarray(0, truncated.length - 2)), /runs past the file/);
