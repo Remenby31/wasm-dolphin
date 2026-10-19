@@ -19,7 +19,8 @@ export const REGION_STATS_MAX_BYTES = 256;
 const F64 = ["regionCycles", "totalCycles", "regionTimeMs", "dispatchTimeMs", "blockTimeMs", "interpTimeMs", "regionCalls", "regionNotEntry", "regionStops"];
 const TIME = ["regionTimeMs", "dispatchTimeMs", "blockTimeMs", "interpTimeMs"];
 const DIAGNOSTICS = ["regionsQueued", "regionsInstalled", "regionsRefused", "regionsDropped", "entriesMapped", "regionsEnabled", "regionsHleRefused",
-  "chainBreaks", "modeRefusals", "filterFalseHits"];
+  "chainBreaks", "modeRefusals", "filterFalseHits", "idleCycles",
+  "topMiss0Pc", "topMiss0Cycles", "topMiss1Pc", "topMiss1Cycles", "topMiss2Pc", "topMiss2Cycles", "topMiss3Pc", "topMiss3Cycles", "topMiss4Pc", "topMiss4Cycles"];
 
 // bytes: the struct as an array of byte values (what the worker returns).
 export function decodeRegionStats(bytes) {
@@ -30,7 +31,8 @@ export function decodeRegionStats(bytes) {
   if (size < REGION_STATS_BYTES || bytes.length < REGION_STATS_BYTES) return { error: `region stats: struct of ${size} bytes (${bytes.length} copied), v1 needs ${REGION_STATS_BYTES}` };
   const out = { version, sizeBytes: size, sampleEvery: view.getUint32(8, true) };
   F64.forEach((name, i) => { out[name] = view.getFloat64(16 + i * 8, true); });
-  // Diagnostics past v1 (0075, sizeBytes 168): how the regions got there, chaining.
+  // Diagnostics past v1 (0075, sizeBytes 256): how the regions got there,
+  // chaining, idle-skipped cycles, the top five block starts outside regions.
   if (size >= 88 + 8 * DIAGNOSTICS.length && bytes.length >= 88 + 8 * DIAGNOSTICS.length) {
     out.diagnostics = Object.fromEntries(DIAGNOSTICS.map((name, i) => [name, view.getFloat64(88 + i * 8, true)]));
   }
