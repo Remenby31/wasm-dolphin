@@ -25,11 +25,7 @@
       "commit": "01e0577914a75a2569c846778c2f93aa8e6feddd"
     }
   },
-<<<<<<< HEAD
-  "patchSeriesSha256": "4dc4f3e441fe4349b2d66abfb4d875b8f80247416b98427b302fa15c7a3e326a",
-=======
-  "patchSeriesSha256": "3314f0d5040b76b04bcd4a1ed452dfb07550959ba8a920c9a13c8413572a72ba",
->>>>>>> feat/jit-offthread-compile
+  "patchSeriesSha256": "df1042a68b58b1aa67ef95851b31ee93c5696da993a88ff0a8ff01abd7ff68e8",
   "patches": [
     {
       "order": 1,
@@ -605,7 +601,7 @@
       "hashMode": "lf-normalized",
       "path": "patches/dolphin-wasm/snapshot/0075-region-translator.patch",
       "size": 10168,
-      "sha256": "474269953007407bd56046f96e1bbb7a447dd23b5ed28f45ea8685ecc5f2119c"
+      "sha256": "da3804c54696dc6594b9bcfddf3f30f15773c6adbd6b6b1fa0aeece39cec4932"
     },
     {
       "order": 73,
