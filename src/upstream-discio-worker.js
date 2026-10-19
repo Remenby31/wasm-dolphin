@@ -7297,7 +7297,14 @@ async function startLazyJitCacheFill() {
       const { entry, buf } = verified;
       // Only carry bytes through when sourced from the overflow buffer —
       // those need IDB write-back. IDB-sourced entries are already there.
-      return { key: entry.key, p: compileDolphinJitModuleOffThread(buf, DELIVER_BEFORE_WARM, false), bytes: fromOverflow ? buf : null };
+      return {
+        key: entry.key,
+        // The lazy fill continues the boot load's order and its warm budget:
+        // these are the blocks of the menus and the first scenes, and warming
+        // them is where the gain on menu hitches comes from (measures/aot/rss4).
+        p: compileDolphinJitModuleOffThread(buf, DELIVER_BEFORE_WARM, dolphinJitBlockStore ? dolphinJitBootWarmed++ < DOLPHIN_JIT_BOOT_WARM_MAX : false),
+        bytes: fromOverflow ? buf : null
+      };
     }).filter(Boolean);
     dolphinJitLazyFillFailureCount += verifiedSlice.length - compiles.length;
     const settled = await Promise.allSettled(compiles.map((c) => c.p));

@@ -592,12 +592,12 @@ test("the worker announces idleness once nothing compiles or waits for a warm-up
   assert.equal(client.stats().idleStops, 1);
 });
 
-test("cached blocks are warmed at boot up to a budget (all, today); the lazy fill never warms", async () => {
+test("cached blocks are warmed at boot and in the lazy fill up to one budget (all, today)", async () => {
   const { readFile } = await import("node:fs/promises");
   const worker = await readFile(new URL("../src/upstream-discio-worker.js", import.meta.url), "utf8");
   assert.match(worker, /const DOLPHIN_JIT_BOOT_WARM_MAX = Infinity;/);
   assert.match(worker, /const warmFirst = dolphinJitBlockStore \? DOLPHIN_JIT_BOOT_WARM_MAX : 0;/);
-  assert.match(worker, /compileDolphinJitModuleOffThread\(buf, DELIVER_BEFORE_WARM, false\), bytes: fromOverflow/);
+  assert.match(worker, /p: compileDolphinJitModuleOffThread\(buf, DELIVER_BEFORE_WARM, dolphinJitBlockStore \? dolphinJitBootWarmed\+\+ < DOLPHIN_JIT_BOOT_WARM_MAX : false\)/);
   assert.match(worker, /if \(!dolphinAotCompilerEnabled \|\| !warm\) return WebAssembly\.compile\(bytes\);/);
 });
 
