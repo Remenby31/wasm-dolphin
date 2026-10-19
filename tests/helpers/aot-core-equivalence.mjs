@@ -70,18 +70,30 @@ export async function loadAotCore(coreDir = new URL("../../cores/dolphin/", impo
     ram,
     // Guest bytes at effective address `addr` (0x80000000 view of MEM1).
     load(addr, bytes) { ram().set(bytes, addr & 0x01ffffff); },
-    // Fragment of the block at `pc`, or null when the core cannot translate it.
-    translate(pc, mask = PRODUCTION_DISABLE_MASK) {
-      const p = m._DolphinWeb_AotTranslateForTest(pc >>> 0, mask >>> 0) >>> 0;
+    // Fragment of the function at `pc`: its blocks reachable inside `ranges`
+    // ([[start, end)], the block at pc alone by default), or null when the
+    // core cannot translate the block at pc.
+    translate(pc, { mask = PRODUCTION_DISABLE_MASK, ranges = [[pc, pc + 4]], maxBlocks = 64 } = {}) {
+      const r = m._malloc(8 * ranges.length);
+      let p;
+      try {
+        new Uint32Array(m.HEAPU8.buffer, r, 2 * ranges.length).set(ranges.flat());
+        p = m._DolphinWeb_AotTranslateForTest(pc >>> 0, mask >>> 0, r, ranges.length, maxBlocks) >>> 0;
+      } finally {
+        m._free(r);
+      }
       if (!p) return null;
-      const head = new Uint32Array(m.HEAPU8.buffer, p, 3);
-      const [entry, codeLength, relocCount] = head;
-      const words = new Uint32Array(m.HEAPU8.buffer, p + 12, 2 * relocCount);
-      const relocs = Array.from({ length: relocCount }, (_, i) => ({
-        offset: words[2 * i], kind: "import", name: helperNames[words[2 * i + 1]]
-      }));
-      const code = m.HEAPU8.slice(p + 12 + 8 * relocCount, p + 12 + 8 * relocCount + codeLength);
-      return { entry, entries: [entry], code, relocs };
+      const [entry, codeLength, entryCount, relocCount] = new Uint32Array(m.HEAPU8.buffer, p, 4);
+      const words = new Uint32Array(m.HEAPU8.buffer, p + 16, entryCount + 3 * relocCount);
+      const entries = Array.from(words.subarray(0, entryCount));
+      const relocs = Array.from({ length: relocCount }, (_, i) => {
+        const [offset, kind, value] = words.subarray(entryCount + 3 * i, entryCount + 3 * i + 3);
+        if (kind === 0) return { offset, kind: "import", name: helperNames[value] };
+        if (kind === 1) return { offset, kind: "jump", targetPc: value };
+        return { offset, kind: "dispatch" };
+      });
+      const at = p + 16 + 4 * (entryCount + 3 * relocCount);
+      return { entry, entries, code: m.HEAPU8.slice(at, at + codeLength), relocs };
     },
     // Handle of the compiled module in the core's table (> 0), as for a block.
     compile(bytes) {
@@ -134,12 +146,26 @@ export function regionGroups(plan, maxFunctions) {
   return groups;
 }
 
-// Step 2 of the translator: a function's fragment is the block at its entry.
-// The rest of the function runs in the interpreter.
-const entryBlockFragments = (core, mask) => (f) => {
-  const fr = core.translate(f.entry, mask);
+// A function's fragment: its blocks reachable from the entry inside its ranges.
+export const functionFragments = (core, { mask = PRODUCTION_DISABLE_MASK, maxBlocks = 64 } = {}) => (f) => {
+  const fr = core.translate(f.entry, { mask, ranges: f.ranges, maxBlocks });
   return fr ? [fr] : [];
 };
+
+// Functions of a region share blocks (tail-merged code, a function inside
+// another's ranges): a PC is an entry of the first fragment that holds it;
+// a fragment whose own entry is taken is left out (the other one runs it).
+function claimEntries(fragments) {
+  const claimed = new Set();
+  const out = [];
+  for (const fr of fragments) {
+    if (claimed.has(fr.entry >>> 0)) continue;
+    const entries = fr.entries.filter((pc) => !claimed.has(pc >>> 0));
+    for (const pc of entries) claimed.add(pc >>> 0);
+    out.push({ ...fr, entries });
+  }
+  return out;
+}
 
 const diffState = (a, b) => {
   for (let i = 0; i < a.length; i++) if (a[i] !== b[i]) return { word: i, interp: a[i], region: b[i] };
@@ -147,42 +173,48 @@ const diffState = (a, b) => {
 };
 
 export function checkCoreSlice({ core, plan, image, slice, slices, maxFunctions = 100, budget = 400000, seed = 1,
-  mask = PRODUCTION_DISABLE_MASK, fragmentsOf = entryBlockFragments(core, mask) }) {
+  mask = PRODUCTION_DISABLE_MASK, maxBlocks = 64, fragmentsOf = functionFragments(core, { mask, maxBlocks }) }) {
   for (const s of image.segments) core.load(s.start, s.bytes);
   const baseline = core.ram().slice();
   const groups = regionGroups(plan, maxFunctions);
   const mine = new Set(groups.filter((_, i) => i % slices === slice).flat());
   const regionAt = new Map(); // entry pc -> handle
-  const report = { slice, slices, functions: 0, translated: 0, fragments: 0, regions: 0, checked: 0, equal: 0,
-    regionRuns: 0, ends: {}, mismatches: [], skipped: {} };
+  const report = { slice, slices, functions: 0, translated: 0, fragments: 0, blocks: 0, regions: 0, checked: 0, equal: 0,
+    regionRuns: 0, regionCycles: 0, interpCycles: 0, ends: {}, mismatches: [], skipped: {} };
   for (const group of groups) {
-    const fragments = group.flatMap(fragmentsOf);
+    const fragments = claimEntries(group.flatMap(fragmentsOf));
     if (!fragments.length) continue;
     const { bytes } = assembleRegion(fragments, { helpers: HELPER_SIGNATURES, pcOffset: core.pcOffset, memoryPages: core.memoryPages });
     const handle = core.compile(bytes);
     if (handle <= 0) throw new Error(`core rejected a region module (${handle}), group of ${group[0].entry.toString(16)}`);
     report.regions += 1;
     report.fragments += fragments.length;
+    for (const fr of fragments) report.blocks += fr.entries.length;
     for (const fr of fragments) for (const pc of fr.entries) regionAt.set(pc >>> 0, handle);
   }
 
   const skip = (reason) => { report.skipped[reason] = (report.skipped[reason] ?? 0) + 1; };
   // Until the call returns, an exception is taken or downcount <= stopAt.
   const run = (useRegions, stopAt) => {
-    let regionRuns = 0;
+    let regionRuns = 0, regionCycles = 0, interpCycles = 0;
+    const done = (end) => ({ end, regionRuns, regionCycles, interpCycles });
     for (;;) {
       const pc = core.pc();
-      if (pc === STOP) return { end: "stop", regionRuns };
-      if (core.downcount() <= stopAt) return { end: "budget", regionRuns };
+      if (pc === STOP) return done("stop");
+      const before = core.downcount();
+      if (before <= stopAt) return done("budget");
       const handle = useRegions ? regionAt.get(pc) : undefined;
       if (handle === undefined) {
-        if (core.interpretOne()) return { end: "exception", regionRuns };
+        const raised = core.interpretOne();
+        interpCycles += before - core.downcount();
+        if (raised) return done("exception");
         continue;
       }
       regionRuns += 1;
       const code = core.runRegion(handle);
+      regionCycles += before - core.downcount();
       if (code === 1) throw new Error(`region refused its own entry ${pc.toString(16)}`);
-      if (code === 3) return { end: "exception", regionRuns };
+      if (code === 3) return done("exception");
     }
   };
 
@@ -231,6 +263,8 @@ export function checkCoreSlice({ core, plan, image, slice, slices, maxFunctions 
     }
     report.checked += 1;
     report.regionRuns += got.regionRuns;
+    report.regionCycles += got.regionCycles;
+    report.interpCycles += got.interpCycles;
     report.ends[got.end] = (report.ends[got.end] ?? 0) + 1;
     const expectedRam = core.ram();
     let ramAt = -1;

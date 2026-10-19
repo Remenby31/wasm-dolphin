@@ -73,8 +73,23 @@ the oracle tests and the homebrew fuzz check it at every step.
    `DolphinWeb_AotTestSetUp`, `AotTestRam`, `AotTestReset`, `AotTestState`,
    `AotTestInterpretOne`, `AotRunRegionForTest`, `JitHelperName`,
    `AotTestStackPointer`/`StackRestore` (after a trap). Done.
-3. Fragments of several blocks with the entry dispatch and intra-fragment
-   branches; `jump` and `dispatch` relocs, the whole function per fragment.
+3. A function per fragment: the blocks reachable from its entry through
+   static successors inside its plan ranges (at most 64), each block start an
+   entry (return points after a `bl` included). Discovery resumes after an
+   instruction the direct tier does not take (it runs outside the region,
+   which picks up again after it). The fragment is a loop over a compare
+   chain on state.pc; after a block: pc = npc, downcount -= cycles, return 0
+   once downcount <= 0, a closing b/bl to a PC outside the fragment leaves
+   through a `jump` reloc, anything else goes round the loop; a PC the
+   fragment does not hold leaves through the `dispatch` reloc. A region
+   holding several functions declares each PC once (first fragment wins).
+   Done. cpufuzz, 12 seeds: 0 mismatch, 44-55 % of guest cycles in regions
+   (2 % with the entry block alone).
+
+   Found on the way, block JIT: the inline `mtmsr` applied MSR without taking
+   exceptions held pending or the FP exception FE0/FE1 enable, which
+   `Interpreter::mtmsr` and `FastMtmsr` take at once. It now leaves to the
+   system helper when one is pending (oracle test).
 4. Oracle region mode: an assembled region against the interpreter, exits in
    the middle of a region (downcount, DSI, FP exception, icbi).
 5. `RunWasmRegion` and `wasmjit=region` in the dispatcher.

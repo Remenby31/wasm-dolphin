@@ -24,18 +24,20 @@ const stw = (s, a, off) => (36 << 26) | (s << 21) | (a << 16) | (off & 0xffff);
 const lwz = (d, a, off) => (32 << 26) | (d << 21) | (a << 16) | (off & 0xffff);
 const mtlr = (s) => (31 << 26) | (s << 21) | (8 << 16) | (467 << 1);
 
-// Calls, a stack frame, loads and stores through it, a tail branch.
-function program() {
-  const t = assemble(TEXT, [
-    "main", asm.mflr(0), asm.stwu(1, 1, -16), stw(0, 1, 20), asm.li(3, 7), (pc, l) => asm.bl(pc, l.double),
-    (pc, l) => asm.bl(pc, l.sum), lwz(0, 1, 20), asm.addi(1, 1, 16), mtlr(0), (pc, l) => asm.b(pc, l.tailend),
-    "double", add(3, 3, 3), asm.blr(),
-    "sum", asm.li(4, 100), stw(4, 1, 8), lwz(5, 1, 8), add(3, 3, 5), asm.ori(4, 4, 0x0f), asm.blr(),
-    "tailend", asm.ori(7, 3, 1), asm.lis(6, 0x1234), asm.blr()
-  ]);
-  return buildDol({ textAddr: TEXT, text: t.words, entry: t.labels.main });
-}
-const DOUBLE = TEXT + 4 * 10, TAILEND = TEXT + 4 * 18; // labels of program()
+// Calls, a stack frame, loads and stores through it, a loop, a tail branch.
+const PROGRAM = assemble(TEXT, [
+  "main", asm.mflr(0), asm.stwu(1, 1, -16), stw(0, 1, 20), asm.li(3, 7), (pc, l) => asm.bl(pc, l.double),
+  (pc, l) => asm.bl(pc, l.sum), (pc, l) => asm.bl(pc, l.count), lwz(0, 1, 20), asm.addi(1, 1, 16), mtlr(0),
+  (pc, l) => asm.b(pc, l.tailend),
+  "double", add(3, 3, 3), asm.blr(),
+  "sum", asm.li(4, 100), stw(4, 1, 8), lwz(5, 1, 8), add(3, 3, 5), asm.ori(4, 4, 0x0f), asm.blr(),
+  "count", asm.li(8, 0),
+  "count_loop", asm.addi(8, 8, 3), asm.cmplwi(8, 30), (pc, l) => asm.bgt(pc, l.count_done), (pc, l) => asm.b(pc, l.count_loop),
+  "count_done", asm.blr(),
+  "tailend", asm.ori(7, 3, 1), asm.lis(6, 0x1234), asm.blr()
+]);
+const program = () => buildDol({ textAddr: TEXT, text: PROGRAM.words, entry: PROGRAM.labels.main });
+const { double: DOUBLE, count: COUNT, main: MAIN } = PROGRAM.labels;
 
 function setup(dol) {
   const { image, entryPoint } = imageFromDol(dol);
@@ -45,14 +47,32 @@ function setup(dol) {
 test("the core translates a block into a fragment the region assembler links", { skip }, () => {
   const { image } = setup(program());
   for (const s of image.segments) core.load(s.start, s.bytes);
-  const fragment = core.translate(DOUBLE); // add, blr
+  const fragment = core.translate(DOUBLE); // add, blr: one block
   assert.ok(fragment, "translated");
   assert.equal(fragment.entry, DOUBLE);
   assert.equal(fragment.code.at(-1), 0x0b, "body ends with end");
-  for (const r of fragment.relocs) assert.ok(HELPER_SIGNATURES[r.name], `known helper ${r.name}`);
+  for (const r of fragment.relocs) if (r.kind === "import") assert.ok(HELPER_SIGNATURES[r.name], `known helper ${r.name}`);
   const { bytes, entries } = assembleRegion([fragment], { helpers: HELPER_SIGNATURES, pcOffset: core.pcOffset, memoryPages: core.memoryPages });
   assert.deepEqual(entries, [[DOUBLE, 0]]);
+  assert.deepEqual(fragment.relocs.map((r) => r.kind), ["dispatch"], "blr leaves through the dispatcher");
   assert.ok(core.compile(bytes) > 0, "the core compiles and links the region module");
+});
+
+test("a function becomes one fragment of its blocks, calls leave through jump relocs", { skip }, () => {
+  const { image, plan } = setup(program());
+  for (const s of image.segments) core.load(s.start, s.bytes);
+  const fn = (pc) => plan.modules[0].functions.find((f) => f.entry === pc);
+  const count = core.translate(COUNT, { ranges: fn(COUNT).ranges });
+  // Blocks depend on the analyzer (branch following may merge the loop's b
+  // into its successor), not on labels: the entry first, the exit in, all inside.
+  assert.equal(count.entries[0], COUNT);
+  assert.ok(count.entries.includes(PROGRAM.labels.count_done));
+  assert.ok(count.entries.length >= 3 && count.entries.every((pc) => pc >= COUNT && pc < PROGRAM.labels.tailend));
+  const main = core.translate(MAIN, { ranges: fn(MAIN).ranges });
+  const jumps = main.relocs.filter((r) => r.kind === "jump").map((r) => r.targetPc);
+  const entries = new Set(plan.modules[0].functions.map((f) => f.entry));
+  assert.ok(jumps.length >= 1 && jumps.every((pc) => entries.has(pc) && pc !== MAIN), "b/bl to other functions");
+  assert.ok(main.entries.length >= 4, "the return points after each bl are blocks of main");
 });
 
 test("every function of a call graph, over 3 slices: regions end like the interpreter", { skip }, () => {
@@ -71,13 +91,17 @@ test("every function of a call graph, over 3 slices: regions end like the interp
 
 test("a planted translator bug is caught", { skip }, () => {
   const s = setup(program());
-  // The translator hands tailend's block for double's entry.
-  const swapped = (f) => {
-    const fr = core.translate(f.entry);
+  // double's add r3,r3,r3 (local.get 11; local.get 11; i32.add) becomes a sub.
+  const planted = (f) => {
+    const fr = core.translate(f.entry, { ranges: f.ranges });
     if (!fr || f.entry !== DOUBLE) return fr ? [fr] : [];
-    return [{ ...core.translate(TAILEND), entry: DOUBLE, entries: [DOUBLE] }];
+    const code = fr.code.slice();
+    const at = code.findIndex((_, i) => [0x20, 11, 0x20, 11, 0x6a].every((b, j) => code[i + j] === b));
+    assert.ok(at > 0, "the add is in the fragment");
+    code[at + 4] = 0x6b;
+    return [{ ...fr, code }];
   };
-  const report = checkCoreSlice({ core, ...s, slice: 0, slices: 1, fragmentsOf: swapped });
+  const report = checkCoreSlice({ core, ...s, slice: 0, slices: 1, fragmentsOf: planted });
   assert.ok(report.mismatches.length >= 1, "the interpreter and the regions disagree");
   assert.ok(report.mismatches.some((m) => m.state), "on the registers");
 });
@@ -88,10 +112,10 @@ test("cpufuzz over 4 slices: regions end like the interpreter", {
   skip: skip || (!existsSync(CPUFUZZ) && "harness/homebrew/out/cpufuzz.dol not built"), timeout: 600000
 }, (t) => {
   const s = setup(readFileSync(CPUFUZZ));
-  const total = { functions: 0, translated: 0, checked: 0, equal: 0, regionRuns: 0, ends: {}, mismatches: [], skipped: {} };
+  const total = { functions: 0, translated: 0, checked: 0, equal: 0, regionRuns: 0, regionCycles: 0, interpCycles: 0, ends: {}, mismatches: [], skipped: {} };
   for (let k = 0; k < 4; k++) {
     const r = checkCoreSlice({ core, ...s, slice: k, slices: 4, maxFunctions: 40 });
-    for (const key of ["functions", "translated", "checked", "equal", "regionRuns"]) total[key] += r[key];
+    for (const key of ["functions", "translated", "checked", "equal", "regionRuns", "regionCycles", "interpCycles"]) total[key] += r[key];
     total.mismatches.push(...r.mismatches);
     for (const [why, n] of Object.entries(r.skipped)) total.skipped[why] = (total.skipped[why] ?? 0) + n;
     for (const [end, n] of Object.entries(r.ends)) total.ends[end] = (total.ends[end] ?? 0) + n;

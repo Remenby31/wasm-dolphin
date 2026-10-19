@@ -1,19 +1,19 @@
 {
   "schemaVersion": 1,
   "abiVersion": 1,
-  "coreId": "sha256:0464dbda503b52efdb48638da8d45cdd45b2e58a1568a94ec26c280d589fc044",
+  "coreId": "sha256:6187bea1124730b7ae4d2013bdcdb54a2eea24272d348b7dbfc0933c803cb9a9",
   "upstreamCommit": "e22551eae1c84a7e4d0b6a5c519ef4ed4ef69df1",
   "artifacts": [
     {
       "path": "cores/dolphin/dolphin-core-upstream.js",
       "hashMode": "lf-normalized",
-      "size": 272849,
-      "sha256": "8d92bb03006790124b88da9318b3c2ac5f6d92d0dc65c671ee4ed83ea408631a"
+      "size": 274669,
+      "sha256": "a79876a5286e7911a3c850e4d3737de506b2411b48b8592f2c87a3dac3645cda"
     },
     {
       "path": "cores/dolphin/dolphin-core-upstream.wasm",
-      "size": 13028654,
-      "sha256": "0464dbda503b52efdb48638da8d45cdd45b2e58a1568a94ec26c280d589fc044"
+      "size": 13033973,
+      "sha256": "6187bea1124730b7ae4d2013bdcdb54a2eea24272d348b7dbfc0933c803cb9a9"
     }
   ],
   "contractSources": [
@@ -388,6 +388,12 @@
     "_DolphinWeb_HarnessViSinceLoad",
     "_DolphinWeb_JitArmedStepForTest",
     "_DolphinWeb_JitCompileBytesForTest",
+    "_DolphinWeb_JitCompileBytesInPlaceForTest",
+    "_DolphinWeb_JitDumpBlocksBuffer",
+    "_DolphinWeb_JitDumpBlocksCount",
+    "_DolphinWeb_JitDumpBlocksDone",
+    "_DolphinWeb_JitDumpBlocksNowForTest",
+    "_DolphinWeb_JitDumpBlocksRequest",
     "_DolphinWeb_JitEngineRejectCount",
     "_DolphinWeb_JitFailNextInstance",
     "_DolphinWeb_JitFailNextTableGrow",
@@ -395,6 +401,7 @@
     "_DolphinWeb_JitOracleBuffer",
     "_DolphinWeb_JitOracleMessage",
     "_DolphinWeb_JitOracleRun",
+    "_DolphinWeb_JitReadyBitsPtr",
     "_DolphinWeb_JitTableFull",
     "_DolphinWeb_JitTransientRejectCount",
     "_DolphinWeb_RecordCacheHit",
@@ -509,6 +516,7 @@
     "_SetPadState",
     "_SetPpcProfileEnabled",
     "_SetPpcWasmJitEnabled",
+    "_SetPpcWasmJitOffThread",
     "_SetPpcWasmJitWarmup",
     "_SetPresentationScale",
     "_SetRendererFeatureMask",
