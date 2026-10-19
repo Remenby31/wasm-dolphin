@@ -41,6 +41,7 @@ const { positionals, values } = parseArgs({
     play: { type: "string", default: "60" },
     sec: { type: "string", default: "60" },
     runs: { type: "string", default: "3" },
+    launches: { type: "string", default: "1" },
     query: { type: "string", default: PRESET },
     out: { type: "string" }
   }
@@ -79,6 +80,20 @@ async function open({ tree, profileDir }) {
   };
 }
 
+// Resident memory of this profile's Chrome processes (MB): total and the
+// largest renderer (the tab, with its workers).
+function sampleRss(profileDir) {
+  const out = execFileSync("ps", ["-A", "-o", "rss=,command="], { encoding: "utf8", maxBuffer: 32 << 20 });
+  let total = 0, renderer = 0;
+  for (const line of out.split("\n")) {
+    const m = line.match(/^\s*(\d+)\s+(.*)$/);
+    if (!m || !m[2].includes(profileDir)) continue;
+    total += Number(m[1]);
+    if (m[2].includes("--type=renderer")) renderer = Math.max(renderer, Number(m[1]));
+  }
+  return { totalMB: Math.round(total / 1024), rendererMB: Math.round(renderer / 1024) };
+}
+
 async function readiness(page) {
   return workerRequest(page, "validationReadJitCacheReadiness", {}, 15000).catch((e) => ({ error: String(e.message || e) }));
 }
@@ -104,10 +119,7 @@ async function seed() {
   }
 }
 
-async function measureOne(name, tree, runDir) {
-  const profileDir = mkdtempSync(path.join(os.tmpdir(), "gc-aot-probe-"));
-  rmSync(profileDir, { recursive: true, force: true });
-  execFileSync("cp", ["-c", "-R", values["seed-profile"], profileDir]);
+async function measureOne(name, tree, runDir, profileDir) {
   const machineBefore = machineSnapshot();
   const s = await open({ tree, profileDir });
   const chunks = [];
@@ -120,9 +132,11 @@ async function measureOne(name, tree, runDir) {
     result.readinessAtLoad = await readiness(s.page);
     // Drain the rings every second, from load to the end of the window.
     let draining = true;
+    const rss = [];
     const drain = (async () => {
-      while (draining) {
+      for (let i = 0; draining; i += 1) {
         chunks.push(await readTimeline(s.page).catch((e) => ({ error: String(e.message || e) })));
+        if (i % 5 === 0) rss.push(sampleRss(profileDir));
         await s.page.waitForTimeout(1000);
       }
     })();
@@ -143,12 +157,32 @@ async function measureOne(name, tree, runDir) {
       return { frameP50: p.frameP50, frameP95: p.frameP95, frameP99: p.frameP99, frameMax: p.frameMax, hitchesPerMin: p.hitchesPerMin, presentFreezes: p.freezes.length, coreFreezes: c.freezes?.length ?? null, speed: c.speed ?? null, speedP5: c.speedP5 ?? null };
     };
     result.timelineComplete = timeline.complete;
+    result.rss = {
+      peakTotalMB: Math.max(...rss.map((r) => r.totalMB)),
+      peakRendererMB: Math.max(...rss.map((r) => r.rendererMB)),
+      endTotalMB: rss.at(-1)?.totalMB ?? null,
+      endRendererMB: rss.at(-1)?.rendererMB ?? null
+    };
     // The JIT engages at a fixed emulated field: that is when the cached
     // modules are first instantiated and called.
     const progress = await workerRequest(s.page, "validationReadCoreProgress", {}, 15000).catch(() => null);
     result.jitEngagedField = progress?.jitEngagedField ?? null;
     const engage = result.jitEngagedField > 0 ? timeline.vi.find((v) => v.sinceBoot >= result.jitEngagedField) : null;
     if (engage) result.engage = win(engage.t - 1000, engage.t + 10000);
+    // Seconds from load until the core holds >= 95 % speed for 5 s in a row
+    // (VI ticks over host time, one sample per wall-clock second).
+    if (tps > 0) {
+      const vi = timeline.vi.filter((v) => v.t >= loadedAt);
+      const speeds = [];
+      for (let i = 1, start = 0; i < vi.length; i += 1) {
+        if (vi[i].t - vi[start].t >= 1000) {
+          speeds.push({ t: vi[start].t, speed: (100 * (vi[i].ticks - vi[start].ticks) / tps * 1000) / (vi[i].t - vi[start].t) });
+          start = i;
+        }
+      }
+      const at = speeds.findIndex((_, i) => speeds.slice(i, i + 5).length === 5 && speeds.slice(i, i + 5).every((x) => x.speed >= 95));
+      result.timeToFullSpeedSec = at >= 0 ? (speeds[at].t - loadedAt) / 1000 : null;
+    }
     result.menus = win(loadedAt, raceAt);
     result.race = win(raceAt, endAt);
     result.whole = win(loadedAt, endAt);
@@ -162,7 +196,6 @@ async function measureOne(name, tree, runDir) {
     result.error = String(e.stack || e);
   } finally {
     await s.close();
-    rmSync(profileDir, { recursive: true, force: true });
   }
   return result;
 }
@@ -176,12 +209,22 @@ async function measure() {
     const runDir = path.join(values.out, `run${run + 1}`);
     mkdirSync(runDir, { recursive: true });
     for (const [name, tree] of order) {
-      log(`run ${run + 1} ${name}`);
-      const r = await measureOne(name, tree, runDir);
+      // --launches N: N boots on one clone of the seeded profile (launch 2+
+      // sees what launch 1 left: migrated or repacked caches).
+      const profileDir = mkdtempSync(path.join(os.tmpdir(), "gc-aot-probe-"));
+      rmSync(profileDir, { recursive: true, force: true });
+      execFileSync("cp", ["-c", "-R", values["seed-profile"], profileDir]);
+      for (let launch = 1; launch <= Number(values.launches); launch += 1) {
+      const tag = Number(values.launches) > 1 ? `${name}-launch${launch}` : name;
+      log(`run ${run + 1} ${tag}`);
+      const r = await measureOne(tag, tree, runDir, profileDir);
       r.run = run + 1;
+      r.launch = launch;
       all.push(r);
-      writeFileSync(path.join(runDir, `${name}.json`), JSON.stringify(r, null, 1));
-      log(`  ${name}: ${r.error ? "ERROR " + r.error.split("\n")[0] : `engage p99=${r.engage?.frameP99?.toFixed?.(1)} max=${r.engage?.frameMax?.toFixed?.(0)} race p99=${r.race?.frameP99?.toFixed?.(1)} menus p99=${r.menus?.frameP99?.toFixed?.(1)} speed=${r.race?.speed?.toFixed?.(1)} core=${JSON.stringify(r.coreModules)}`}`);
+      writeFileSync(path.join(runDir, `${tag}.json`), JSON.stringify(r, null, 1));
+      log(`  ${tag}: ${r.error ? "ERROR " + r.error.split("\n")[0] : `rss=${r.rss?.peakTotalMB}/${r.rss?.peakRendererMB}MB full-speed=${r.timeToFullSpeedSec}s engage p99=${r.engage?.frameP99?.toFixed?.(1)} max=${r.engage?.frameMax?.toFixed?.(0)} race p99=${r.race?.frameP99?.toFixed?.(1)} menus p99=${r.menus?.frameP99?.toFixed?.(1)} speed=${r.race?.speed?.toFixed?.(1)} core=${JSON.stringify(r.coreModules)}`}`);
+      }
+      rmSync(profileDir, { recursive: true, force: true });
     }
   }
   writeFileSync(path.join(values.out, "all.json"), JSON.stringify(all, null, 1));
