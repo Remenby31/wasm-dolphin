@@ -268,6 +268,16 @@ async function harnessPcSampler({ action, periodMs } = {}) {
   harnessPcSamplerRun = startPcSampler({ buffer: moduleInstance.HEAPU8.buffer, pcAddress, periodMs: Number(periodMs) || 0.25 });
   return { started: true, pcAddress, pcNow: api?.getPpcPc?.() ?? null };
 }
+// QA harness only: copy the core's region JIT counters (P4), layout decoded
+// by harness/lib/jit-region-stats.mjs. sampleEvery >= 0 switches them on and
+// resets them; absent, they are only read.
+function harnessJitRegionStats({ sampleEvery } = {}) {
+  const stats = moduleInstance?._DolphinWeb_JitRegionStats;
+  if (!stats) return { error: "core has no DolphinWeb_JitRegionStats" };
+  const ptr = stats(Number.isInteger(sampleEvery) && sampleEvery >= 0 ? sampleEvery : -1) >>> 0;
+  if (!ptr) return { error: "DolphinWeb_JitRegionStats returned null" };
+  return { bytes: Array.from(new Uint8Array(moduleInstance.HEAPU8.buffer, ptr, 80)) };
+}
 let harnessVideoBackend = null;
 // Exact capture for video=wgpu: presents tagged with VI outputs (ViTag records).
 const wgpuExactCapture = createWgpuExactCapture();
@@ -1411,6 +1421,8 @@ async function handleMessage(type, payload) {
       return readHarnessTimeline();
     case "validationPcSampler":
       return harnessPcSampler(payload);
+    case "validationReadJitRegionStats":
+      return harnessJitRegionStats(payload);
     case "validationCaptureAtVi":
       return captureAtViOutput(payload);
     case "validationReadDetTrace":

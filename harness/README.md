@@ -112,6 +112,47 @@ node harness/probes/race-perf.mjs --iso ../roms/<disc>.iso --state ../measures/h
   and need a counter in the core.
 - A local-only disc is refused when `CI` is set; its results go to
   `../measures/harness` (or `HARNESS_PRIVATE_OUT`), never into the repo.
+- Region JIT counters (P4): when the core exports `DolphinWeb_JitRegionStats`
+  (layout v1 in `lib/jit-region-stats.mjs`, read through
+  `validationReadJitRegionStats`), they are reset at the window's start, host
+  time sampled on 1 call in `--region-sample` (default 64, `off` to skip), and
+  read at its end. `summary.json` carries their medians as `p4`
+  (`regionCycleShare`, `regionTimeShare`, `dispatchTimeShare`,
+  `blockTimeShare`, `interpTimeShare`, `regionCalls`, `regionNotEntry`,
+  `regionStops`, `sampleEvery`) and `baselineP4`; a core without the export
+  gives `p4: null` (reason per run in `p4Why`), never a failure.
+
+## KPI probes and report
+
+The program's KPIs (PROGRAM.md, « KPI du programme ») that race-perf does not
+cover have their own probes. Both are timing measures: they take the perf
+lock and run in the MESURE slots only, headless, three runs by default.
+
+```sh
+node harness/probes/ttff.mjs --iso ../roms/<disc>.iso --port 8082 [--config wgpu] [--runs 3]
+node harness/probes/first-launch.mjs --iso ../roms/<disc>.iso --port 8082 [--runs 3] [--timeout 600]
+node harness/kpi-report.mjs [--print]
+```
+
+- `ttff.mjs`: time to first frame. t0 is the moment the disc is handed to the
+  engine page (the file input, as the Play click does); the KPI is the first
+  presentation after t0 (presentation ring). Also recorded: core loaded, and
+  the first picture the page shows (16×16 canvas samples every 100 ms,
+  indicative). Cold is a new profile, warm the same profile relaunched.
+- `first-launch.mjs`: duration of the first-launch optimisation (P7) and the
+  regions recompiled on the second launch. It boots with `aot=1` and reads
+  `validationReadAotProgress` (or `window.__aotProgressLog`), contract in
+  `lib/aot-progress.mjs`. An engine without P7 answers `p7: null` and n/a,
+  exit 0.
+- `kpi-report.mjs`: reads only. It classifies by content every `summary.json`,
+  `gate.json` and `fuzz.json` under `../measures` and the worktrees'
+  `harness/results`, takes for each KPI the newest result that has its value
+  (race-perf: stock Chrome only, trunk's side of an A/B when there is one),
+  and writes `../measures/kpi/latest.{md,json}` (plus a dated copy), in
+  PROGRAM.md's order, each row marked measured, declared or n/a. What no
+  probe measures yet (PC extrapolation, discovery coverage, aotcompiler
+  memory) comes from `../measures/kpi/manual.json`:
+  `{ "<kpi id>": { "value": …, "source": "…", "at": "…", "note": "…" } }`.
 
 `harness/matrices/local-kart-race.json` runs the same race through `ab`
 (`KART_ISO`, `KART_STATE`; `measureFromState` starts the measured window
