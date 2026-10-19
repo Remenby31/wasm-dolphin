@@ -14,7 +14,7 @@ import { compileAndWarm, createWarmer } from "../src/aot-compiler-worker.js";
 import { imageFromDol } from "../src/aot-image.js";
 import { orderedRegions, planDol, validatePlan } from "../src/aot-plan.js";
 import { createAotRegionLoader } from "../src/aot-region-loader.js";
-import { assembleRegion, groupRegions, paddedUleb } from "../src/aot-region-module.js";
+import { assembleRegion, groupRegions, paddedUleb, regionModuleKey } from "../src/aot-region-module.js";
 import { asm, assemble, buildDol } from "./aot-asm.mjs";
 import { fakeCacheStorage } from "./helpers/fake-cache-storage.mjs";
 
@@ -68,16 +68,9 @@ function translate(f) {
   return { entry: f.entry, entries: [f.entry], code: Uint8Array.from(code), relocs };
 }
 
-// The cache key of a region module: its member functions' guest code, in
-// order (each function's sha256 already covers its bytes), so any change in
-// any member gives another key. Ends with a sha256, as the cache requires.
-function regionModuleKey(functions) {
-  const h = createHash("sha256");
-  for (const f of functions) h.update(`${f.entry.toString(16)}:${f.sha256};`);
-  return `region-v1:00000001:00000000:${h.digest("hex")}`;
-}
+const KEY_PARTS = { compilerVersion: 1, codegenMask: 0 };
 
-function buildRegions({ maxFunctions }) {
+async function buildRegions({ maxFunctions }) {
   const { dol, labels } = program();
   const { image, entryPoint } = imageFromDol(dol);
   const plan = validatePlan(planDol({ image, entryPoint, gameId: "TEST01", dolBytes: dol, options: { gapFill: false } }));
@@ -88,11 +81,11 @@ function buildRegions({ maxFunctions }) {
   return {
     labels,
     plan,
-    regions: groups.map((members) => {
+    regions: await Promise.all(groups.map(async (members) => {
       const functions = members.map((i) => module.functions[i]);
       const assembled = assembleRegion(functions.map(translate), { helpers: HELPERS, pcOffset: PC, memoryPages: 1 });
-      return { key: regionModuleKey(functions), bytes: assembled.bytes, functions };
-    })
+      return { key: await regionModuleKey(functions, KEY_PARTS), bytes: assembled.bytes, functions };
+    }))
   };
 }
 
@@ -112,7 +105,7 @@ function runner(module) {
 }
 
 test("plan -> regions -> cache -> loader: every function runs from the module the loader retained", async () => {
-  const { labels, plan, regions } = buildRegions({ maxFunctions: 2 });
+  const { labels, plan, regions } = await buildRegions({ maxFunctions: 2 });
   assert.equal(plan.modules[0].functions.length, 5);
   assert.ok(regions.length >= 3, `${regions.length} regions of at most 2 functions`);
   // every function of the plan is in exactly one region
@@ -149,12 +142,17 @@ test("plan -> regions -> cache -> loader: every function runs from the module th
 });
 
 test("a changed function gives its region another key: the old module is never loaded for it", async () => {
-  const first = buildRegions({ maxFunctions: 5 });
+  const first = await buildRegions({ maxFunctions: 5 });
   assert.equal(first.regions.length, 1);
   const [region] = first.regions;
   const patched = { ...region.functions[1], sha256: "f".repeat(64) };
-  const newKey = regionModuleKey([region.functions[0], patched, ...region.functions.slice(2)]);
+  const newKey = await regionModuleKey([region.functions[0], patched, ...region.functions.slice(2)], KEY_PARTS);
   assert.notEqual(newKey, region.key);
+  assert.match(region.key, /^region-v1:00000001:00000000:[0-9a-f]{64}$/);
+  // membership and order are part of the key too
+  assert.notEqual(await regionModuleKey(region.functions.slice(1), KEY_PARTS), region.key);
+  assert.notEqual(await regionModuleKey([...region.functions].reverse(), KEY_PARTS), region.key);
+  assert.notEqual(await regionModuleKey(region.functions, { ...KEY_PARTS, codegenMask: 4 }), region.key);
 
   const storage = fakeCacheStorage();
   const openCache = (identity) => openAotCache({ ...identity, baseUrl: BASE, cacheStorage: storage, serviceWorker: false });
@@ -165,7 +163,7 @@ test("a changed function gives its region another key: the old module is never l
 });
 
 test("assembled regions warm off-thread on a scratch memory and keep running correctly", async () => {
-  const { regions } = buildRegions({ maxFunctions: 5 });
+  const { regions } = await buildRegions({ maxFunctions: 5 });
   const warmer = createWarmer();
   for (const r of regions) {
     const result = await compileAndWarm(r.bytes, { warm: true }, warmer);
@@ -175,4 +173,13 @@ test("assembled regions warm off-thread on a scratch memory and keep running cor
     for (const f of r.functions) assert.equal(run.run(f.entry), 0);
     assert.equal(run.word(COUNT), r.functions.length);
   }
+});
+
+test("region modules declare a one-page memory minimum with the core's maximum", async () => {
+  const { parseWasmImports } = await import("../src/aot-compiler-worker.js");
+  const frag = translate({ entry: 0x80003100 });
+  const { bytes } = assembleRegion([frag], { helpers: HELPERS, pcOffset: PC });
+  const memory = parseWasmImports(bytes).find((i) => i.kind === "memory");
+  assert.deepEqual({ initial: memory.initial, maximum: memory.maximum, shared: memory.shared }, { initial: 1, maximum: 24576, shared: true });
+  assert.throws(() => assembleRegion([frag], { helpers: HELPERS, pcOffset: PC, memoryPages: 1, memoryMinPages: 2 }), /memory limits/);
 });

@@ -108,11 +108,16 @@ function dispatcherBody(entries, pcOffset) {
 //   helpers     { name: { params: ["i32", ...], results: [...] } } for every
 //               helper a fragment may import (the core's fixed list)
 //   pcOffset    offset of pc in PowerPCState (_DolphinWeb_JitStateLayout)
-//   memoryPages min = max pages of the shared memory (the core's)
+//   memoryPages maximum pages of the shared memory (the core's); the declared
+//               minimum is memoryMinPages (1): the emulator's memory satisfies
+//               it, and an off-thread warm-up then needs only a small scratch
+//               memory (V8 commits a Memory's initial pages at allocation, which
+//               on Windows counts against the commit charge; decision of #30)
 // Returns { bytes, entries: [[pc, fragmentIndex]] sorted, helpers: [name] }.
-export function assembleRegion(fragments, { helpers, pcOffset, memoryPages = 24576, sharedMemory = true }) {
+export function assembleRegion(fragments, { helpers, pcOffset, memoryPages = 24576, memoryMinPages = 1, sharedMemory = true }) {
   if (!Array.isArray(fragments) || !fragments.length) throw new Error("region: no fragments");
   if (!Number.isInteger(pcOffset) || pcOffset < 0) throw new Error("region: pcOffset required");
+  if (!Number.isInteger(memoryMinPages) || memoryMinPages < 0 || memoryMinPages > memoryPages) throw new Error("region: bad memory limits");
 
   // Helpers actually used, in name order: their function index is their rank.
   const used = new Set();
@@ -170,7 +175,7 @@ export function assembleRegion(fragments, { helpers, pcOffset, memoryPages = 245
   uleb(imports, helperNames.length + 1);
   name(imports, "env"); name(imports, "memory");
   imports.push(0x02, sharedMemory ? 0x03 : 0x01);
-  uleb(imports, memoryPages); uleb(imports, memoryPages);
+  uleb(imports, memoryMinPages); uleb(imports, memoryPages);
   helperNames.forEach((n, i) => { name(imports, "env"); name(imports, n); imports.push(0x00); uleb(imports, helperType[i]); });
   section(out, 2, imports);
 
@@ -200,45 +205,82 @@ export function assembleRegion(fragments, { helpers, pcOffset, memoryPages = 245
   };
 }
 
-// Group the functions of a plan module into regions of `maxFunctions`, in
-// compile order (`order`: function indexes, orderedRegions), pulling each
-// function's callees in breadth first so callers and callees share a region.
-// A region is filled up with the next functions of the order once its call
-// tree is exhausted, so small leaf functions do not end up alone.
-// Returns [[functionIndex...]] for that module.
+// Group the functions of a plan module into regions of at most
+// `maxFunctions`, so that callers and callees share a region (a call inside a
+// region is a return_call, ~4x cheaper than leaving the module).
+//   1. Clusters: every function starts alone; caller/callee pairs are joined,
+//      most call sites first, whenever the two clusters fit together.
+//   2. Regions: clusters in compile order (`order`: function indexes,
+//      orderedRegions; a cluster's place is its first member's) go into the
+//      first region with room (first fit), each member in compile order.
+// On a commercial disc (14 795 functions, 43 038 call edges, regions of 100):
+// 53.1 % of call edges inside a region, 149 regions; 14.8 % with the first
+// version (breadth-first from each function of the order, leaves first),
+// 27.4 % depth-first from roots (harness/probes/aot-grouping.mjs).
+// Returns [[functionIndex...]] for that module; functions absent from `order`
+// are left out.
 export function groupRegions(module, order, { maxFunctions = 100 } = {}) {
   const n = module.functions.length;
-  const callees = Array.from({ length: n }, () => new Set());
+  const rank = new Int32Array(n).fill(-1);
+  order.forEach((f, i) => { if (rank[f] < 0) rank[f] = i; });
+
+  // Call sites per (caller, callee) pair, between functions of the order.
+  const sites = new Map();
   const { from, to, kind } = module.edges;
   for (let i = 0; i < from.length; i++) {
     if (kind[i] !== 3 && kind[i] !== 4) continue; // call, tail
     const a = module.blocks.func[from[i]], b = module.blocks.func[to[i]];
-    if (a >= 0 && b >= 0 && a !== b) callees[a].add(b);
+    if (a < 0 || b < 0 || a === b || rank[a] < 0 || rank[b] < 0) continue;
+    const key = a * n + b;
+    sites.set(key, (sites.get(key) ?? 0) + 1);
   }
-  const taken = new Uint8Array(n);
-  const regions = [];
-  let next = 0;
-  const nextSeed = () => {
-    while (next < order.length && taken[order[next]]) next++;
-    return next < order.length ? order[next] : -1;
-  };
-  for (let seed = nextSeed(); seed >= 0; seed = nextSeed()) {
-    const region = [];
-    const queue = [];
-    const enqueue = (f) => { taken[f] = 1; queue.push(f); };
-    enqueue(seed);
-    while (region.length < maxFunctions) {
-      if (!queue.length) {
-        const s = nextSeed();
-        if (s < 0) break;
-        enqueue(s);
-      }
-      const f = queue.shift();
-      region.push(f);
-      for (const c of callees[f]) if (!taken[c]) enqueue(c);
+  const pairs = [...sites].map(([key, count]) => ({ a: Math.floor(key / n), b: key % n, count }));
+  pairs.sort((x, y) => y.count - x.count || rank[x.a] - rank[y.a] || rank[x.b] - rank[y.b]);
+
+  const parent = Int32Array.from({ length: n }, (_, i) => i);
+  const size = new Int32Array(n).fill(1);
+  const find = (x) => {
+    while (parent[x] !== x) {
+      parent[x] = parent[parent[x]];
+      x = parent[x];
     }
-    for (const f of queue) taken[f] = 0; // not placed: free for a later region
-    regions.push(region);
+    return x;
+  };
+  for (const { a, b } of pairs) {
+    const ra = find(a), rb = find(b);
+    if (ra === rb || size[ra] + size[rb] > maxFunctions) continue;
+    if (rank[ra] <= rank[rb]) { parent[rb] = ra; size[ra] += size[rb]; }
+    else { parent[ra] = rb; size[rb] += size[ra]; }
+  }
+
+  const clusters = new Map(); // root -> members in compile order
+  order.forEach((f, i) => {
+    if (rank[f] !== i) return; // a repeat in the order
+    const root = find(f);
+    if (!clusters.has(root)) clusters.set(root, []);
+    clusters.get(root).push(f);
+  });
+  const regions = [];
+  for (const members of clusters.values()) {
+    const region = regions.find((r) => r.length + members.length <= maxFunctions);
+    if (region) region.push(...members);
+    else regions.push([...members]);
   }
   return regions;
+}
+
+// Cache key of an assembled region module (decision of 2026-10-19): the
+// compiler version and codegen mask (the core's _DolphinWeb_AotKeyParts), then
+// the SHA-256 of its members in module order, "entry:sha256;" each. A change in
+// any member's guest code, in membership or in order gives another key; it
+// ends with ":" + 64 hex, as the cache requires.
+export async function regionModuleKey(functions, { compilerVersion, codegenMask }) {
+  const hex8 = (v) => (v >>> 0).toString(16).padStart(8, "0");
+  const text = functions.map((f) => {
+    if (!/^[0-9a-f]{64}$/.test(f.sha256 ?? "")) throw new Error(`region: function ${f.entry?.toString(16)} has no sha256`);
+    return `${(f.entry >>> 0).toString(16)}:${f.sha256};`;
+  }).join("");
+  const digest = new Uint8Array(await globalThis.crypto.subtle.digest("SHA-256", new TextEncoder().encode(text)));
+  const hex = Array.from(digest, (b) => b.toString(16).padStart(2, "0")).join("");
+  return `region-v1:${hex8(compilerVersion)}:${hex8(codegenMask)}:${hex}`;
 }

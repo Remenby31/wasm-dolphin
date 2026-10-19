@@ -123,14 +123,33 @@ test("aot region: malformed input is refused", () => {
   assert.throws(() => assembleRegion([{ ...A, entries: [0x1004] }], { helpers: HELPERS, pcOffset: 0 }), /own entry/);
 });
 
-test("aot region: grouping follows calls in compile order", () => {
-  // f0 calls f2, f2 calls f3; f1 alone. Blocks: one per function.
+test("aot region: grouping keeps callers with their callees, most call sites first", () => {
+  // f0 calls f2 (twice), f2 calls f3; f1 alone. Blocks: one per function.
   const module = {
     functions: [{}, {}, {}, {}],
     blocks: { func: [0, 1, 2, 3] },
-    edges: { from: [0, 2], to: [2, 3], kind: [3, 3] }
+    edges: { from: [0, 0, 2], to: [2, 2, 3], kind: [3, 3, 3] }
   };
   assert.deepEqual(groupRegions(module, [0, 1, 2, 3], { maxFunctions: 3 }), [[0, 2, 3], [1]]);
-  assert.deepEqual(groupRegions(module, [1, 0, 2, 3], { maxFunctions: 2 }), [[1, 0], [2, 3]], "filled up with the next seeds");
-  assert.deepEqual(groupRegions(module, [3, 2, 1, 0], { maxFunctions: 100 }), [[3, 2, 1, 0]]);
+  // in compile order f1 first; still f0-f2 together (2 call sites) before f2-f3
+  assert.deepEqual(groupRegions(module, [1, 0, 2, 3], { maxFunctions: 2 }), [[1, 3], [0, 2]], "first fit fills the earlier region");
+  assert.deepEqual(groupRegions(module, [3, 2, 1, 0], { maxFunctions: 100 }), [[3, 2, 0, 1]]);
+  // a function outside the order is left out
+  assert.deepEqual(groupRegions(module, [0, 2, 3], { maxFunctions: 100 }), [[0, 2, 3]]);
+});
+
+test("aot region: a hub called from everywhere joins one region, the rest stay with their callers", () => {
+  // f0..f5 each call hub f6; f0 calls f1, f2 calls f3, f4 calls f5 (two sites each)
+  const edges = { from: [], to: [], kind: [] };
+  const call = (a, b, times = 1) => { for (let i = 0; i < times; i++) { edges.from.push(a); edges.to.push(b); edges.kind.push(3); } };
+  for (let f = 0; f < 6; f++) call(f, 6);
+  call(0, 1, 2); call(2, 3, 2); call(4, 5, 2);
+  const module = { functions: Array(7).fill({}), blocks: { func: [0, 1, 2, 3, 4, 5, 6] }, edges };
+  const regions = groupRegions(module, [6, 0, 1, 2, 3, 4, 5], { maxFunctions: 3 });
+  const regionOf = (f) => regions.findIndex((r) => r.includes(f));
+  assert.equal(regionOf(0), regionOf(1));
+  assert.equal(regionOf(2), regionOf(3));
+  assert.equal(regionOf(4), regionOf(5));
+  assert.ok(regions.every((r) => r.length <= 3));
+  assert.equal(regions.flat().length, 7);
 });
