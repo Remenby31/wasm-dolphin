@@ -86,8 +86,8 @@
     {
       "path": "src/core-host.js",
       "hashMode": "lf-normalized",
-      "size": 68236,
-      "sha256": "922d65179918f156c416baa7c87c439866e2d5d2f28b0ddf7047b746661f31c3"
+      "size": 68500,
+      "sha256": "a7448019ea2dd850bb97ca31fd9bf4d0748f1404d3b0fdac52d12f410f2024fd"
     },
     {
       "path": "src/diagnostic-log-filter.js",
@@ -140,8 +140,8 @@
     {
       "path": "src/upstream-discio-worker.js",
       "hashMode": "lf-normalized",
-      "size": 673794,
-      "sha256": "9b97d2937c9d7533864911461e1518b48d95162bc001a3f62c65b507704b9c6b"
+      "size": 679128,
+      "sha256": "bb92770d64df40b51d9220cbc57264feaeb7d6c5c974f288a9bd451c149c55cb"
     },
     {
       "path": "src/wgpu-renderer-worker-probe.js",
@@ -164,8 +164,8 @@
     {
       "path": "src/upstream-worker-adapter.js",
       "hashMode": "lf-normalized",
-      "size": 46080,
-      "sha256": "ca9b60ba8118d88f3bb7784c554fdaea1bbd21fba6db90633dc4ad5590b8c4d5"
+      "size": 47204,
+      "sha256": "13ad1f3f216183d1bbfd70960abfc2e264b50330cce3d76af3524c461d4a442b"
     },
     {
       "path": "src/upstream-worker-protocol.js",
@@ -565,6 +565,9 @@
       "error"
     ],
     "requestTypes": [
+      "aotCancel",
+      "aotOptimize",
+      "aotStatus",
       "bootProbe",
       "configureAudioWorklet",
       "exportMemcard",
@@ -599,6 +602,7 @@
       "validationFinalizeWgpuRendererProbe",
       "validationFinalizeWgpuReplay",
       "validationPcSampler",
+      "validationReadAotProgress",
       "validationReadCoreProgress",
       "validationReadDetTrace",
       "validationReadJitCacheReadiness",

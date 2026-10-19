@@ -7,8 +7,11 @@
 // Interface consumed by the site (P8), on the host or the adapter:
 //   optimizationStatus() -> { state: "none"|"partial"|"complete", fraction }
 //   startOptimization({ resume }) / cancelOptimization()
-//   events "optimization-progress" { fraction, done, total, unit: "modules" },
-//          "optimization-done" { total, refused, ms }, "optimization-error" { message, fatal }
+//   events "optimization-start" { fraction, done, total, unit, ms: 0, resumed },
+//          "optimization-progress" { fraction, done, total, unit: "regions", ms },
+//          "optimization-done" { total, refused, compiled, deferred, ms },
+//          "optimization-error" { message, fatal }
+//   (one region = one module; ms = time since this run started)
 //
 // Collaborators:
 //   translator (P4, region translator in the core, fed from guest memory):
@@ -18,13 +21,19 @@
 //     untranslatable, too-large, budget (stop, resume here), not-ready.
 //   assemble(fragments) -> Uint8Array, default assembleRegion with
 //     `assembleOptions` (helpers, pcOffset, memoryPages from the core).
+//   compile(key, bytes) -> Promise<{ module } | { reason }> (optional, P5):
+//     compiles an assembled module off the CPU thread and keeps it alive
+//     before it is stored. "compile"/"link" (the bytes are bad) blacklist the
+//     module; any other reason (out of memory) leaves it for the next launch.
 //   cache (src/aot-cache.js): openAotCache(identity) -> session { has, put,
 //     isBlacklisted, blacklist, cancel }.
 // One cache entry is one module; its key (regionModuleKey) covers the planned
 // members, so has() and bootKeys() work before anything is translated. A
 // member the core refuses is left out of the module (the dispatcher answers 1
 // for its entries and the JIT runs it); a module with no member left is
-// blacklisted.
+// blacklisted. A module whose every member is a hash mismatch (code not in
+// memory yet, such as a REL not loaded, or patched) gets no verdict: it is
+// retried at the next launch.
 import { orderedRegions, validatePlan, ANALYZER_VERSION } from "./aot-plan.js";
 import { assembleRegion, groupRegions, regionModuleKey } from "./aot-region-module.js";
 
@@ -38,7 +47,7 @@ export class AotOptimizer extends EventTarget {
   // planStore: { load(discKey) -> plan|null, save(discKey, plan) } (optional)
   // keyParts: { compilerVersion, codegenMask } (the core's _DolphinWeb_AotKeyParts)
   constructor({ discKey, buildPlan, translator, openCache, cacheIdentity = {}, keyParts = { compilerVersion: 0, codegenMask: 0 },
-    assemble = null, assembleOptions = null, maxFunctions = 100, planStore = null, batchSize = BATCH,
+    assemble = null, assembleOptions = null, compile = null, maxFunctions = 100, planStore = null, batchSize = BATCH,
     notReadyDelayMs = 1000, sleep = (ms) => new Promise((r) => setTimeout(r, ms)), now = () => performance.now() }) {
     super();
     this.discKey = discKey;
@@ -49,6 +58,7 @@ export class AotOptimizer extends EventTarget {
     this.keyParts = keyParts;
     if (!assemble && !assembleOptions) throw new Error("aot-optimizer: assembleOptions (helpers, pcOffset, memoryPages from the core) required");
     this.assemble = assemble ?? ((fragments) => assembleRegion(fragments, assembleOptions).bytes);
+    this.compile = compile;
     this.maxFunctions = maxFunctions;
     this.planStore = planStore;
     this.now = now;
@@ -134,7 +144,7 @@ export class AotOptimizer extends EventTarget {
     let doneWeight = 0, done = 0;
     for (const u of this.regions) if (doneSet.has(u.key)) { done++; doneWeight += u.weight; }
     const fraction = this.totalWeight ? doneWeight / this.totalWeight : 1;
-    return { fraction, done, total: this.regions.length, unit: "modules" };
+    return { fraction, done, total: this.regions.length, unit: "regions" };
   }
 
   async status() {
@@ -204,6 +214,8 @@ export class AotOptimizer extends EventTarget {
 
   async run() {
     const t0 = this.now();
+    const ms = () => Math.round(this.now() - t0);
+    let compiled = 0, deferred = 0;
     try {
       await this.getPlan();
       const session = await this.openSession();
@@ -213,7 +225,8 @@ export class AotOptimizer extends EventTarget {
       const refused = new Set();
       for (const u of this.regions) if (session.isBlacklisted?.(u.key)) { refused.add(u.key); doneSet.add(u.key); }
       const todo = this.regions.filter((u) => !doneSet.has(u.key));
-      this.emit("optimization-progress", this.progress(doneSet));
+      this.emit("optimization-start", { ...this.progress(doneSet), ms: 0, resumed: doneSet.size > 0 });
+      this.emit("optimization-progress", { ...this.progress(doneSet), ms: ms() });
       for (const unit of todo) {
         if (this.cancelled) break;
         const result = await this.translateUnit(unit);
@@ -222,7 +235,9 @@ export class AotOptimizer extends EventTarget {
           this.emit("optimization-error", { message: `function ${x.entry.toString(16)}: ${x.reason}`, fatal: false });
         }
         let failure = null;
-        if (!result.fragments.length) failure = "untranslatable";
+        if (!result.fragments.length && result.refused.length && result.refused.every((x) => x.reason === "hash-mismatch")) {
+          deferred++;
+        } else if (!result.fragments.length) failure = "untranslatable";
         else {
           let bytes = null;
           try {
@@ -230,10 +245,29 @@ export class AotOptimizer extends EventTarget {
           } catch (error) {
             failure = `assemble: ${error?.message || error}`;
           }
+          if (bytes && this.compile) {
+            let out;
+            try {
+              out = await this.compile(unit.key, bytes);
+            } catch (error) {
+              out = { reason: String(error?.message || error) };
+            }
+            if (this.cancelled) break;
+            if (!out?.module) {
+              const reason = out?.reason ?? "compile";
+              if (reason === "compile" || reason === "link") failure = `engine-reject: ${reason}`;
+              else {
+                deferred++;
+                this.emit("optimization-error", { message: `module ${unit.key}: ${reason}, retried at the next launch`, fatal: false });
+              }
+              bytes = null;
+            }
+          }
           if (bytes) {
             const stored = await session.put([{ key: unit.key, bytes, meta: { members: unit.members.length, translated: result.fragments.length } }]);
             if (this.cancelled) break;
             failure = stored.failed?.[0]?.reason ?? null;
+            if (!failure) compiled++;
           }
         }
         if (failure) {
@@ -243,9 +277,9 @@ export class AotOptimizer extends EventTarget {
           this.emit("optimization-error", { message: `module ${unit.key}: ${failure}`, fatal: false });
         }
         doneSet.add(unit.key); // stored, or handled (left to the JIT): progress must reach 100 %
-        this.emit("optimization-progress", this.progress(doneSet));
+        this.emit("optimization-progress", { ...this.progress(doneSet), ms: ms() });
       }
-      if (!this.cancelled) this.emit("optimization-done", { total: this.regions.length, refused: refused.size, ms: Math.round(this.now() - t0) });
+      if (!this.cancelled) this.emit("optimization-done", { total: this.regions.length, refused: refused.size, compiled, deferred, ms: ms() });
     } catch (error) {
       this.emit("optimization-error", { message: String(error?.message || error), fatal: true });
     }

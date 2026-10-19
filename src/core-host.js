@@ -1,4 +1,5 @@
 import { aotCompilerRequested } from "./aot-compiler-worker.js";
+import { aotFirstLaunchRequested } from "./aot-orchestrator.js";
 import { parseCustomRtc } from "./custom-rtc.js";
 import { DolphinCoreAdapter, dolphinBundleAvailable } from "./dolphin-adapter.js";
 import { buttonMaskFromPressed, isPadPort } from "./input.js";
@@ -125,6 +126,8 @@ export class EmulatorHost {
     // ?aotcompiler=1: compile cached/requested JIT modules in the compiler
     // worker (off by default until its memory cost is measured).
     this.aotCompiler = aotCompilerRequested(window.location.search);
+    // ?aot=1: first-launch optimisation of the disc (P7), off by default.
+    this.aotFirstLaunch = aotFirstLaunchRequested(window.location.search);
     this.collectMetrics = requestedCollectMetrics();
     this.legacyOneWayAck = requestedLegacyOneWayAck(window.location.search);
     this.wgpuReplayDiagnostics = requestedWgpuReplayDiagnostics(window.location.search);
@@ -411,6 +414,7 @@ export class EmulatorHost {
             noJitCache: this.noJitCache,
             jitOffThread: this.jitOffThread,
             aotCompiler: this.aotCompiler,
+            aotFirstLaunch: this.aotFirstLaunch,
             collectMetrics: this.collectMetrics,
             legacyOneWayAck: this.legacyOneWayAck,
             wgpuReplayDiagnostics: this.wgpuReplayDiagnostics,
