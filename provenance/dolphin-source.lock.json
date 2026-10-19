@@ -25,7 +25,7 @@
       "commit": "01e0577914a75a2569c846778c2f93aa8e6feddd"
     }
   },
-  "patchSeriesSha256": "cdf3dea53e3b229b877ced035d870143dfc9f09081cc5e5bcb6ea0112a65c294",
+  "patchSeriesSha256": "4333b6da1e3cbe0de29362963fd224191f5f4427e2df9680557a17cbc05c7147",
   "patches": [
     {
       "order": 1,
@@ -616,8 +616,8 @@
       "cwd": ".",
       "hashMode": "lf-normalized",
       "path": "patches/dolphin-wasm/snapshot/0082-webgpu-internal-resolution-backbuffer.patch",
-      "size": 1258,
-      "sha256": "ae128922e582f469a549986f109d734229330279e2780003d184c96dc0fe781f"
+      "size": 1276,
+      "sha256": "a41d278e7b36d249be0951468adcd6dbba9294731ea98cbc62878ce5395c6607"
     },
     {
       "order": 75,

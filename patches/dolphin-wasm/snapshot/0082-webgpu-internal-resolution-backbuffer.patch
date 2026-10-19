@@ -19,7 +19,7 @@ diff --git a/Source/Core/VideoBackends/WebGPU/WebGPUGfx.cpp b/Source/Core/VideoB
 +  // N times native, so the backbuffer the XFB is blitted into is too; at
 +  // 640x480 the presenter would average the extra pixels away. The worker
 +  // sizes its canvas from the same setting. Clamped to what it allocates.
-+  const int scale = std::clamp(Config::Get(Config::GFX_EFB_SCALE), 1, 4);
++  const u32 scale = static_cast<u32>(std::clamp(Config::Get(Config::GFX_EFB_SCALE), 1, 4));
 +  return {640 * scale, 480 * scale, 1.0f, AbstractTextureFormat::BGRA8};
  }
  

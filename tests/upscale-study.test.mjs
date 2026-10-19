@@ -38,6 +38,6 @@ test("upscale study: the core and patch 0082 read the same setting", () => {
   const core = readFileSync(new URL("../core/upstream/dolphin_web_core.cpp", import.meta.url), "utf8");
   assert.match(core, /Config::SetBase\(Config::GFX_EFB_SCALE, s_video_backend == "WebGPU" \? efb_scale : 1\)/);
   const patch = readFileSync(new URL("../patches/dolphin-wasm/snapshot/0082-webgpu-internal-resolution-backbuffer.patch", import.meta.url), "utf8");
-  assert.match(patch, /\+  const int scale = std::clamp\(Config::Get\(Config::GFX_EFB_SCALE\), 1, 4\);/);
+  assert.match(patch, /\+  const u32 scale = static_cast<u32>\(std::clamp\(Config::Get\(Config::GFX_EFB_SCALE\), 1, 4\)\);/);
   assert.match(patch, /\+  return \{640 \* scale, 480 \* scale, 1\.0f, AbstractTextureFormat::BGRA8\};/);
 });
