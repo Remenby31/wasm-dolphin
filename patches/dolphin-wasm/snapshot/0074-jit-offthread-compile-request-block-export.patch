@@ -206,7 +206,33 @@ diff --git a/Source/Core/Core/PowerPC/CachedInterpreter/CachedInterpreter.cpp b/
    if (!s_wasm_jit_enabled)
    {
      s_deferred_wasm_queues.erase(&cpu);
-@@ -8445,7 +8618,7 @@ std::vector<u8> BuildWasmCachedInterpreterBlock(std::span<const PPCAnalyst::Code
+@@ -8325,16 +8498,18 @@ std::vector<u8> BuildWasmCachedInterpreterBlock(std::span<const PPCAnalyst::Code
+   EmitName(imports, "memory");
+   imports.push_back(0x02);
+   imports.push_back(0x03);
+-  // Imported shared memory's declared min/max MUST equal the SAB's min/max
+-  // (1.5 GiB = 24576 pages — must match INITIAL_MEMORY in CMakeLists.txt).
+-  // Was 16384 — that triggered LinkError("memory max 24576 > WASM binary
+-  // max 16384") at JIT warmup, which is exactly when blocks first compile
+-  // (~frame 700). Crash blocked wasmjit=1 in software backend; bumping the
+-  // ceiling also unblocks block compilation for OGL+forcejit=1.
++  // Imported shared memory: the declared max must equal the SAB's max (1.5
++  // GiB = 24576 pages, INITIAL_MEMORY in CMakeLists.txt; 16384 once raised
++  // LinkError "memory max 24576 > WASM binary max 16384" at JIT warmup). The
++  // min only has to be <= the memory's current size, so it is 1 page: the
++  // core's memory still satisfies it, the code V8 generates is the same
++  // (bounds come from max and guard regions), and the compiler worker's
++  // scratch memory can be a few pages instead of committing 1.5 GiB (V8
++  // commits a Memory's initial pages on Windows).
+ #ifndef DOLPHIN_WASM_MEMORY_PAGES
+ #error "DOLPHIN_WASM_MEMORY_PAGES must be supplied by the pinned CMake configuration"
+ #endif
+-  EmitU32Leb(imports, DOLPHIN_WASM_MEMORY_PAGES);
++  EmitU32Leb(imports, 1);
+   EmitU32Leb(imports, DOLPHIN_WASM_MEMORY_PAGES);
+   EmitSection(bytes, 2, imports);
+ 
+@@ -8445,7 +8620,7 @@ std::vector<u8> BuildWasmCachedInterpreterBlock(std::span<const PPCAnalyst::Code
    return bytes;
  }
  
@@ -215,7 +241,7 @@ diff --git a/Source/Core/Core/PowerPC/CachedInterpreter/CachedInterpreter.cpp b/
  {
    const auto read_u32_index = static_cast<int>(
        reinterpret_cast<std::uintptr_t>(&DolphinWeb_CachedInterpreterReadU32));
-@@ -8492,7 +8665,10 @@ int CompileWasmCachedInterpreterBlockForTest(const std::vector<u8>& bytes)
+@@ -8492,7 +8667,10 @@ int CompileWasmCachedInterpreterBlockForTest(const std::vector<u8>& bytes)
        stfs_index, lfd_index, fmr_index, system_index, fp_index, fctiwz_index, interpret_index,
        fastcheck_gpfifo_index, fast_os_interrupt_call_index, fast_melee_input_status_call_index,
        fast_melee_status_call_index, fast_melee_service_poll_call_index,
@@ -227,7 +253,7 @@ diff --git a/Source/Core/Core/PowerPC/CachedInterpreter/CachedInterpreter.cpp b/
  }
  
  WasmStateLayout MakeWasmBlockTestLayout(PowerPC::PowerPCState& state, u8* ram, u32 ram_size)
-@@ -8947,6 +9123,7 @@ void CachedInterpreter::Run()
+@@ -8947,6 +9125,7 @@ void CachedInterpreter::Run()
  #ifdef __EMSCRIPTEN__
      ApplyArmedWasmPolicy();
      ApplyRequestedWasmPolicy(*this);
@@ -235,7 +261,7 @@ diff --git a/Source/Core/Core/PowerPC/CachedInterpreter/CachedInterpreter.cpp b/
  #endif
      // §28cn metrics-gated per-slice wall-time profiling. The timestamp below
      // spans Advance + ExecuteOneBlock; >16000us means the CPU pthread crossed
-@@ -11917,13 +12094,39 @@ bool CachedInterpreter::TryWriteWasmBlock(u32 nextPC)
+@@ -11917,13 +12096,39 @@ bool CachedInterpreter::TryWriteWasmBlock(u32 nextPC)
      LogWasmBlockReject("blacklisted", nullptr, 0, js.blockStart, code_block.m_num_instructions);
      return false;
    }
@@ -276,7 +302,7 @@ diff --git a/Source/Core/Core/PowerPC/CachedInterpreter/CachedInterpreter.cpp b/
    if (handle == -2)
    {
      // Function table full: no block can be installed any more this session.
-@@ -12208,6 +12411,19 @@ void ApplyArmedWasmPolicy()
+@@ -12208,6 +12413,19 @@ void ApplyArmedWasmPolicy()
  
  // Drives the armed warmup with a synthetic field counter, as the CPU thread
  // would at the start of each slice; returns the engaged field or -1.
@@ -296,7 +322,7 @@ diff --git a/Source/Core/Core/PowerPC/CachedInterpreter/CachedInterpreter.cpp b/
  extern "C" EMSCRIPTEN_KEEPALIVE double DolphinWeb_JitArmedStepForTest(double frame)
  {
    ApplyArmedWasmPolicyAt(static_cast<u64>(frame));
-@@ -12416,6 +12632,7 @@ extern "C" const char* GetPpcWasmHelperStats()
+@@ -12416,6 +12634,7 @@ extern "C" const char* GetPpcWasmHelperStats()
        << " enginereject:" << s_wasm_engine_reject_count.load(std::memory_order_relaxed)
        << " blacklisthit:" << s_wasm_blacklist_hit_count
        << " transientreject:" << s_wasm_transient_reject_count.load(std::memory_order_relaxed)
@@ -304,7 +330,7 @@ diff --git a/Source/Core/Core/PowerPC/CachedInterpreter/CachedInterpreter.cpp b/
        << " tablefull:" << (s_wasm_table_full.load(std::memory_order_relaxed) ? 1 : 0)
        << " fmad:" << s_wasm_fma_import_counts[0].load(std::memory_order_relaxed) +
                           s_wasm_fma_import_counts[1].load(std::memory_order_relaxed)
-@@ -13419,6 +13636,12 @@ extern "C" EMSCRIPTEN_KEEPALIVE int DolphinWeb_JitCompileBytesForTest(const u8*
+@@ -13419,6 +13638,12 @@ extern "C" EMSCRIPTEN_KEEPALIVE int DolphinWeb_JitCompileBytesForTest(const u8*
    return CompileWasmCachedInterpreterBlockForTest(std::vector<u8>(bytes, bytes + size));
  }
  
@@ -317,7 +343,7 @@ diff --git a/Source/Core/Core/PowerPC/CachedInterpreter/CachedInterpreter.cpp b/
  extern "C" EMSCRIPTEN_KEEPALIVE u32 DolphinWeb_JitEngineRejectCount()
  {
    return s_wasm_engine_reject_count.load(std::memory_order_relaxed);
-@@ -14011,6 +14234,7 @@ void CachedInterpreter::ClearCache()
+@@ -14011,6 +14236,7 @@ void CachedInterpreter::ClearCache()
  #line 12477
  #ifdef __EMSCRIPTEN__
    s_deferred_wasm_queues.erase(this);
