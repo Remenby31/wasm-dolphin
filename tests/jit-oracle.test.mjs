@@ -332,14 +332,18 @@ test("an underflowed product is never taken as exact (signed zero, ties at the b
   const setF = (i, hi, lo = 0) => state.set([lo, hi, lo, hi], 48 + i * 4);
   for (const [a, c, [bhi, blo]] of [
     [0x9a700000, 0x1a700000, [0, 0]], [0x9a700000, 0x1a700000, [0x80000000, 0]],
-    [0x20b00000, 0x1c000000, [0x00100000, 1]], [0x1a700000, 0x1a700000, [0x80000000, 0]]
+    // a*c = ±2^-1075: an exact tie against b's ulp, lost if p rounds to ±0
+    [0x20b00000, 0x1c000000, [0x00100000, 1]], [0xa0b00000, 0x1c000000, [0x00100000, 1]]
   ]) {
     setF(2, a);
     setF(3, c);
     setF(4, bhi, blo);
-    for (const xo of [28, 29, 30, 31]) {
-      for (const op of [63, 59, 4]) {
-        assertSame(core.run(Uint32Array.from([A(op, 1, 2, 4, 3, xo), 0x4e800020]), state, SHORT_PREFIX_MASK), `op ${op} xo ${xo} a ${hex(a)} c ${hex(c)}`);
+    // fmadd family (op 63, 59) and paired forms, ps_madds0/1 included (op 4 xo 14, 15)
+    for (const [op, xos] of [[63, [28, 29, 30, 31]], [59, [28, 29, 30, 31]], [4, [14, 15, 28, 29, 30, 31]]]) {
+      for (const xo of xos) {
+        const result = core.run(Uint32Array.from([A(op, 1, 2, 4, 3, xo), 0x4e800020]), state, SHORT_PREFIX_MASK);
+        assert.equal(result.compiledBlocks, 1, `op ${op} xo ${xo}: compiled`);
+        assertSame(result, `op ${op} xo ${xo} a ${hex(a)} c ${hex(c)}`);
       }
     }
   }

@@ -21,6 +21,7 @@ import {
   compileFailureReason,
   createAotCompilerClient
 } from "./aot-compiler-worker.js";
+import { migrateLegacyJitIdb, openAotBlockStore, openAotCache, readDiscKeyFromFile } from "./aot-cache.js";
 import {
   JIT_CACHE_ENTRY_KEY_SCHEMA,
   canonicalCoreFingerprint,
@@ -1035,6 +1036,9 @@ function readbackWgpuPresentSource() {
 }
 
 async function handleMessage(type, payload) {
+  // P6: blocks waiting for their pack go out when the saves do (page hidden
+  // or closed) and on stop; their outcome is not the saves'.
+  if (type === "flushUserData" || type === "stop") void dolphinJitBlockStore?.flush().catch(() => {});
   switch (type) {
     case "load":
       if (!moduleInstance) {
@@ -1391,6 +1395,8 @@ async function handleMessage(type, payload) {
         observedAtMs: performance.now(),
       };
     }
+    case "validationAotCacheProbe":
+      return runAotCacheProbe(payload);
     case "validationReadJitCacheReadiness": {
       const requiredWorkers = dolphinJitPthreadRuntime
         ? [...new Set(dolphinJitPthreadRuntime.runningWorkers || [])]
@@ -1423,7 +1429,11 @@ async function handleMessage(type, payload) {
         compileRequestFailures: dolphinJitCompileRequestFailures,
         compileReadyMarks: dolphinJitReadyMarks,
         compileReadyRejected: dolphinJitReadyRejected,
-        idbWritesPending: dolphinJitIdbWritesPending,
+        aotDiscKey,
+        blockStore: dolphinJitBlockStore ? dolphinJitBlockStore.stats() : null,
+        legacyIdbMigration: dolphinJitLegacyMigration,
+        // Blocks waiting for their pack count as pending writes.
+        idbWritesPending: dolphinJitIdbWritesPending + (dolphinJitBlockStore?.stats().buffered ?? 0),
         idbWriteCount: dolphinJitIdbWriteCount,
         pthreadWorkerCount: dolphinJitPthreadWorkers.length,
         pthreadBarrierGeneration: dolphinJitPthreadBarrierGeneration,
@@ -2130,6 +2140,7 @@ async function loadCore({
   const _t_fetch = performance.now();
   const { wasmBinary, fingerprint: buildFingerprint } =
       await fetchWasmAndFingerprint(coreUrl, expectedCoreSha256);
+  aotCoreFingerprint = buildFingerprint;
   console.log(`[boot-phase] fetchWasmAndFingerprint took ${(performance.now() - _t_fetch).toFixed(1)}ms (${(wasmBinary.byteLength / 1048576).toFixed(2)}MiB)`);
   const _t_import = performance.now();
   const imported = await import(coreUrl);
@@ -3333,6 +3344,15 @@ async function mountFile(file) {
   const _t_workerfs = performance.now();
   fs.mount(resolveWorkerFs(moduleInstance), { blobs: [{ name: safeName, data: file }] }, WORKERFS_MOUNT_DIR);
   mounted = true;
+  // P6: the disc's key for the region cache is read from this File only when
+  // a region cache is first opened, never during boot: this worker serves the
+  // core's file reads, and extra work here while the core boots shifts what
+  // the emulated game shows. A generation per mount keeps a slow read for a
+  // previous disc from landing.
+  aotDiscGeneration += 1;
+  aotDiscKey = null;
+  aotDiscKeyPromise = null;
+  aotDiscFile = file;
   console.log(`[boot-phase] fs.mount(WORKERFS) took ${(performance.now() - _t_workerfs).toFixed(1)}ms (${(file.size / 1048576).toFixed(1)}MiB image)`);
 
   // A .dol/.elf is no disc: DiscIO cannot open it, and BootDisc's
@@ -6321,8 +6341,8 @@ function clearDolphinJitModulesStore(db) {
   });
 }
 async function loadDolphinJitCacheFromIdb(db) {
-  if (!db) return 0;
-  const entries = await new Promise((resolve) => {
+  if (!db && !dolphinJitBlockStore) return 0;
+  const entries = dolphinJitBlockStore ? await readDolphinJitStoredEntries() : await new Promise((resolve) => {
     const out = [];
     try {
       const tx = db.transaction(DOLPHIN_JIT_IDB_STORE, "readonly");
@@ -6385,13 +6405,20 @@ async function loadDolphinJitCacheFromIdb(db) {
   return loaded;
 }
 async function writeDolphinJitEntryToIdb(hash, bytes) {
-  if (!dolphinJitIdb) return;
+  if (!dolphinJitIdb && !dolphinJitBlockStore) return;
   const buf = bytes instanceof ArrayBuffer ? new Uint8Array(bytes) : bytes;
   if (!(buf instanceof Uint8Array) || !(await verifyCanonicalWasmBlockKey(String(hash), buf))) {
     if (!self._dolphinJitIdbIdentityErrLogged) {
       self._dolphinJitIdbIdentityErrLogged = true;
       postStatus("jit-cache: rejected IDB write with mismatched block identity");
     }
+    return;
+  }
+  if (dolphinJitBlockStore) {
+    // Buffered into packs; counted as written once handed over, as an
+    // IndexedDB put was counted on success.
+    dolphinJitBlockStore.append(String(hash), buf);
+    dolphinJitIdbWriteCount += 1;
     return;
   }
   try {
@@ -6457,9 +6484,21 @@ async function fetchWasmAndFingerprint(coreUrlValue, expectedSha256 = DEFAULT_UP
 // Open IDB eagerly so loadCore() doesn't pay the open latency. Module load
 // is deferred until the build fingerprint is computed (after fetching the
 // wasm) so we can skip / clear stale entries from a previous build.
+// P6: with CacheStorage the blocks live in the block store (src/aot-cache.js)
+// and the IndexedDB database is only opened to migrate and delete it; opening
+// it here would recreate it.
 const dolphinJitIdbReady = (async () => {
-  dolphinJitIdb = await openDolphinJitIdb();
+  if (!globalThis.caches) dolphinJitIdb = await openDolphinJitIdb();
 })();
+let dolphinJitBlockStore = null;
+let dolphinJitBlockStoreEntries = null; // read once at boot, reused by the lazy fill
+let dolphinJitLegacyMigration = null;
+async function readDolphinJitStoredEntries() {
+  if (!dolphinJitBlockStoreEntries) {
+    dolphinJitBlockStoreEntries = (await dolphinJitBlockStore.entries()).map(({ key, bytes }) => ({ key, value: bytes }));
+  }
+  return dolphinJitBlockStoreEntries;
+}
 // When the persistent JIT cache loaded a non-trivial number of modules
 // for this build at boot, maybeEnablePpcWasmJit will skip the warmup
 // frame gate and engage JIT essentially immediately. Without this,
@@ -6475,7 +6514,12 @@ const DOLPHIN_JIT_PREWARM_THRESHOLD = 50;
 // equal-or-better coverage already).
 async function maybeSeedIdbFromPrebuiltCache(coreUrlValue, currentFingerprint) {
   await dolphinJitIdbReady;
-  if (!dolphinJitIdb || !currentFingerprint) return 0;
+  const blockStore = dolphinJitBlockStore;
+  if ((!dolphinJitIdb && !blockStore) || !currentFingerprint) return 0;
+  if (blockStore) {
+    // The store's identity is the core: anything in it is this build's.
+    if ((await readDolphinJitStoredEntries()).length >= DOLPHIN_JIT_PREWARM_THRESHOLD) return 0;
+  } else {
   // Skip when IDB already has matching-fingerprint entries — the prebuilt
   // file is for FIRST-session cold start only. Once IDB has accumulated
   // real entries, the user's own cache is a better fit than our shipped one.
@@ -6493,6 +6537,7 @@ async function maybeSeedIdbFromPrebuiltCache(coreUrlValue, currentFingerprint) {
       // User's IDB already pre-warmed enough — no need to seed from prebuilt.
       return 0;
     }
+  }
   }
   const prebuiltUrl = new URL("prebuilt-jit-cache.bin", coreUrlValue).href;
   let buffer;
@@ -6539,6 +6584,12 @@ async function maybeSeedIdbFromPrebuiltCache(coreUrlValue, currentFingerprint) {
   if (overflow.length > 0) {
     dolphinJitPrebuiltOverflow = overflow;
   }
+  if (blockStore) {
+    await blockStore.appendMany(boot.map(({ key, bytes }) => ({ key, bytes })));
+    dolphinJitBlockStoreEntries = null;
+    postStatus(`jit-cache: seeded ${boot.length} prebuilt modules into the block store (fingerprint match)`);
+    return boot.length;
+  }
   const seeded = await new Promise((resolve) => {
     try {
       const tx = dolphinJitIdb.transaction(DOLPHIN_JIT_IDB_STORE, "readwrite");
@@ -6571,6 +6622,42 @@ async function maybeSeedIdbFromPrebuiltCache(coreUrlValue, currentFingerprint) {
 
 async function reconcileJitCacheWithBuild(fingerprint) {
   await dolphinJitIdbReady;
+  if (globalThis.caches && fingerprint) {
+    try {
+      dolphinJitBlockStore = await openAotBlockStore({ coreHash: fingerprint, baseUrl: AOT_BASE_URL });
+    } catch (err) {
+      dolphinJitBlockStore = null;
+      postStatus(`jit-cache: block store unavailable: ${err?.message || err}`);
+    }
+  }
+  if (dolphinJitBlockStore) {
+    if (dolphinJitBlockStore.reset) {
+      postStatus(`jit-cache: identity reset (${dolphinJitBlockStore.reset}); cleared unverified modules`);
+    }
+    try {
+      dolphinJitLegacyMigration = await migrateLegacyJitIdb({ store: dolphinJitBlockStore, coreFingerprint: fingerprint });
+    } catch (err) {
+      // The old database stays for the next boot; this one starts without it.
+      dolphinJitLegacyMigration = { found: true, moved: 0, dropped: 0, reason: `error: ${err?.message || err}` };
+    }
+    if (dolphinJitLegacyMigration.found) {
+      postStatus(
+        `jit-cache: IndexedDB cache migrated (${dolphinJitLegacyMigration.reason}: ` +
+        `${dolphinJitLegacyMigration.moved} moved, ${dolphinJitLegacyMigration.dropped} dropped) and deleted`
+      );
+    }
+    const loadedFromStore = await loadDolphinJitCacheFromIdb(null);
+    if (loadedFromStore > 0) postStatus(`jit-cache: loaded ${loadedFromStore} compiled modules from the block store`);
+    if (loadedFromStore >= DOLPHIN_JIT_PREWARM_THRESHOLD) {
+      dolphinJitCachePreWarmed = true;
+      postStatus(
+        `jit-cache: pre-warmed with ${loadedFromStore} modules; JIT warmup gate will be skipped on this session`
+      );
+    }
+    return loadedFromStore;
+  }
+  // No block store after all (CacheStorage refused): the IndexedDB path.
+  if (!dolphinJitIdb) dolphinJitIdb = await openDolphinJitIdb();
   if (!dolphinJitIdb) return 0;
   const [storedFingerprint, storedEntryKeySchema] = await Promise.all([
     readDolphinJitMetadata(dolphinJitIdb, DOLPHIN_JIT_FINGERPRINT_KEY),
@@ -6612,6 +6699,86 @@ async function reconcileJitCacheWithBuild(fingerprint) {
     );
   }
   return loaded;
+}
+// P6 (plan piste 3): the region cache of the mounted disc under this core.
+// Entries are keyed by region fingerprint and stored under
+// (disc, core, compiler version, JIT flags); see src/aot-cache.js.
+const AOT_BASE_URL = new URL("../", import.meta.url).href;
+let aotDiscKey = null;
+let aotDiscGeneration = 0;
+let aotDiscKeyPromise = null;
+let aotDiscFile = null;
+function readMountedDiscKey() {
+  if (!aotDiscKeyPromise) {
+    const generation = aotDiscGeneration;
+    aotDiscKeyPromise = readDiscKeyFromFile(aotDiscFile).then(
+      (key) => (generation === aotDiscGeneration ? (aotDiscKey = key) : null),
+      () => null
+    );
+  }
+  return aotDiscKeyPromise;
+}
+let aotCoreFingerprint = null;
+export async function openDolphinAotCache({ compilerVersion, flagsMask = 0, coreHash = null, onProgress = null }) {
+  const generation = aotDiscGeneration;
+  const discKey = aotDiscKey ?? await readMountedDiscKey();
+  if (generation !== aotDiscGeneration) return null;
+  const core = coreHash ?? aotCoreFingerprint;
+  if (!discKey || !core) return null;
+  return openAotCache({ discKey, coreHash: core, compilerVersion, flagsMask, baseUrl: AOT_BASE_URL, onProgress });
+}
+// Harness probe of the whole cache path with modules the caller provides:
+// store what is missing, load everything back (through the Service Worker
+// when it controls this worker), then time calls. `coreHash` stands in for
+// another core to check invalidation. Self-contained modules only (no
+// imports): the probe never touches the emulator's memory.
+async function runAotCacheProbe({ modules = [], compilerVersion = "probe-1", flagsMask = 0, coreHash = null, arg = 64, hotRounds = 0, settleMs = 0 } = {}) {
+  const cache = await openDolphinAotCache({ compilerVersion, flagsMask, coreHash });
+  if (!cache) return { error: "no-aot-cache", discKey: aotDiscKey, core: aotCoreFingerprint };
+  const keys = modules.map((m) => m.key);
+  const present = await cache.has(keys);
+  const missing = modules.filter((m) => !present.has(m.key)).map((m) => ({ key: m.key, bytes: new Uint8Array(m.bytes) }));
+  const { failed } = await cache.put(missing);
+  const t0 = performance.now();
+  const loaded = await cache.load(keys);
+  const loadMs = performance.now() - t0;
+  const fns = [];
+  const reasons = {};
+  for (const [key, entry] of loaded) {
+    if (!entry.module) {
+      reasons[entry.reason] = (reasons[entry.reason] || 0) + 1;
+      continue;
+    }
+    for (const value of Object.values(new WebAssembly.Instance(entry.module).exports)) {
+      if (typeof value === "function") fns.push(value);
+    }
+    void key;
+  }
+  const round = () => {
+    const start = performance.now();
+    for (const fn of fns) fn(arg);
+    return performance.now() - start;
+  };
+  const rounds = [round(), round()];
+  for (let i = 0; i < hotRounds; i += 1) rounds.push(round());
+  if (settleMs > 0) await new Promise((resolve) => setTimeout(resolve, settleMs));
+  return {
+    discKey: aotDiscKey,
+    cacheName: cache.cacheName,
+    reset: cache.reset,
+    pruned: cache.pruned,
+    viaServiceWorker: await cache.viaServiceWorker(),
+    present: present.size,
+    stored: missing.length - failed.length,
+    failed,
+    loadReasons: reasons,
+    functions: fns.length,
+    loadMs,
+    firstRoundMs: rounds[0],
+    secondRoundMs: rounds[1],
+    lastRoundMs: rounds[rounds.length - 1],
+    stats: cache.stats()
+  };
 }
 // P5 (plan piste 3): cached and requested modules are compiled in a
 // dedicated worker that also runs every entry point once on scratch memory, so
@@ -7025,7 +7192,7 @@ async function startLazyJitCacheFill() {
   dolphinJitLazyFillAddedEntries = 0;
   dolphinJitLazyFillTerminalReason = "running";
   dolphinJitLazyFillFailureCount = 0;
-  if (!dolphinJitIdb) {
+  if (!dolphinJitIdb && !dolphinJitBlockStore) {
     dolphinJitLazyFillTerminalReason = "indexeddb-unavailable";
     return;
   }
@@ -7048,6 +7215,18 @@ async function startLazyJitCacheFill() {
     // Release the overflow buffer once we've copied the work list — its
     // bytes will be reachable through `remaining` until they compile.
     dolphinJitPrebuiltOverflow = null;
+  } else if (dolphinJitBlockStore) {
+    const stored = await readDolphinJitStoredEntries();
+    remaining = stored.filter((entry) => !skipKeys.has(entry.key));
+    dolphinJitBlockStoreEntries = null;
+    // A store grown wasteful (duplicates, many small packs) is rewritten a
+    // minute into the session, away from the boot.
+    const store = dolphinJitBlockStore;
+    setTimeout(() => {
+      store.compactIfWasteful(stored).then((done) => {
+        if (done) postStatus(`jit-cache: block store compacted (${stored.length} blocks)`);
+      }, () => {});
+    }, 60_000);
   } else {
     remaining = await new Promise((resolve) => {
       const out = [];

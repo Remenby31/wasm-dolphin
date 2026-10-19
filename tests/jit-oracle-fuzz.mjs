@@ -180,8 +180,10 @@ if (fmaCases > 0) {
     state[36] = r.chance(0.8) ? 0 : (r.next() & 0x7) | 0x4; // round to nearest, sometimes NI
     state[37] = 0x00002032;
     const { a, b, c } = fmaOperands(r);
-    for (const [f, w] of [[fa, a], [fb, b], [fc, c]]) {
-      const w2 = name.startsWith("ps_") ? fmaOperands(r).a : w;
+    // Paired forms: lane 1 gets a coherent triplet of its own (bottom-range b,
+    // underflow, ties), not unrelated values.
+    const lane1 = name.startsWith("ps_") ? fmaOperands(r) : { a, b, c };
+    for (const [f, w, w2] of [[fa, a, lane1.a], [fb, b, lane1.b], [fc, c, lane1.c]]) {
       state.set([w[0], w[1], w2[0], w2[1]], 48 + f * 4);
     }
     for (const m of masks) {
