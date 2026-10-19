@@ -16,9 +16,10 @@ export const CONF_POINTER = 1; // address found in data or built by lis/addi
 export const CONF_GAP = 2; // undiscovered gap that decodes as code
 export const CONF_PROFILE = 3; // seen executing in a previous session only
 
-const F_CODE = 1, F_LEADER = 2, F_ENTRY = 4, F_TABLE = 8;
+const F_CODE = 1, F_LEADER = 2, F_ENTRY = 4, F_CONST_SCANNED = 8;
 
 const SLICE_WINDOW = 40; // instructions scanned backward by a slice
+const CONST_SCAN_WINDOW = 8; // for code addresses built by lis/addi
 const WIDE_WINDOW = 256; // second chance for a table base kept in a saved register
 // r0 and r3-r12 do not survive a call (PowerPC EABI).
 // Sorted, merged copy of [start, end) ranges, and a binary-search membership test.
@@ -48,6 +49,9 @@ const SCAN_TABLE_MAX = 512;
 // of the executable sections: total work stays linear on hostile or
 // degenerate images. Real discs use a fraction of it (stats.trialSteps).
 const TRIAL_BUDGET_PER_WORD = 32;
+// Blocks of the whole image: a real game has ~150 000; each costs memory in
+// the plan, so a pathological image (a branch every other word) is refused.
+export const MAX_BLOCKS = 400000;
 
 class Flags {
   constructor(image) {
@@ -55,7 +59,14 @@ class Flags {
     this.parts = image.execSegments.map((s) => ({ start: s.start, end: s.end, f: new Uint8Array((s.end - s.start) >>> 2) }));
   }
   part(addr) {
-    for (const p of this.parts) if (addr >= p.start && addr < p.end) return p;
+    const parts = this.parts;
+    let lo = 0, hi = parts.length - 1;
+    while (lo <= hi) {
+      const m = (lo + hi) >> 1;
+      if (addr < parts[m].start) hi = m - 1;
+      else if (addr >= parts[m].end) lo = m + 1;
+      else return parts[m];
+    }
     return null;
   }
   get(addr) {
@@ -81,6 +92,7 @@ export function discover(image, {
   const entries = new Map(); // addr -> { confidence, sources:Set }
   const jumpTables = new Map(); // site -> table
   const indirectSites = new Map(); // site -> { kind, resolved }
+  let leaderCount = 0;
   const doomed = new Set(); // addresses whose straight-line walk ends on invalid code
   const tableWords = new Set(); // jump table words in data, not code pointers
   const codePointers = new Set(); // code addresses taken as values (entries from outside)
@@ -121,19 +133,18 @@ export function discover(image, {
   };
 
   // Constant value of `reg` just before instruction `at`, or null.
-  function resolveConst(reg, at, depth = 0, crossJumps = false) {
+  function resolveConst(reg, at, depth = 0, crossJumps = false, window = crossJumps ? WIDE_WINDOW : SLICE_WINDOW) {
     if (depth > 4) return null;
-    const window = crossJumps ? WIDE_WINDOW : SLICE_WINDOW;
     for (let a = at - 4, n = 0; n < window && image.isExec(a); a -= 4, n++) {
       const w = read(a);
       const step = constStep(w);
       if (step && step.dst === reg) {
         if (step.op === "addis" || step.op === "addi") {
-          const base = step.src === 0 ? 0 : resolveConst(step.src, a, depth + 1, crossJumps);
+          const base = step.src === 0 ? 0 : resolveConst(step.src, a, depth + 1, crossJumps, window);
           if (base === null) return null;
           return (base + (step.op === "addis" ? step.imm << 16 : step.imm)) >>> 0;
         }
-        const base = resolveConst(step.src, a, depth + 1, crossJumps);
+        const base = resolveConst(step.src, a, depth + 1, crossJumps, window);
         if (base === null) return null;
         if (step.op === "mr") return base;
         return (base | (step.op === "oris" ? step.imm << 16 : step.imm)) >>> 0;
@@ -325,6 +336,8 @@ export function discover(image, {
     if (!commit && bad) return false;
     for (const a of local) flags.set(a, F_CODE);
     for (const a of leaders) flags.set(a, F_LEADER);
+    leaderCount += leaders.size;
+    if (leaderCount > MAX_BLOCKS) throw new Error(`discovery: more than ${MAX_BLOCKS} blocks`);
     for (const s of starts) { flags.set(s, F_ENTRY); addEntry(s, confidence, source); }
     for (const c of calls) { flags.set(c, F_ENTRY); addEntry(c, confidence, `${source}:call`); }
     for (const t of tables) {
@@ -362,23 +375,29 @@ export function discover(image, {
   };
 
   // Wave 1: code addresses built in code (lis/addi, lis/ori) and found in data.
+  // Incremental: each code word is scanned for a constant once, the data once.
+  let dataScanned = false;
   function pointerWave() {
     let added = 0;
     if (constScan) {
       for (const p of flags.parts) {
         for (let i = 0; i < p.f.length; i++) {
-          if (!(p.f[i] & F_CODE)) continue;
+          if (!(p.f[i] & F_CODE) || (p.f[i] & F_CONST_SCANNED)) continue;
+          p.f[i] |= F_CONST_SCANNED;
           const a = p.start + i * 4;
           const step = constStep(read(a));
           if (!step || step.op === "mr" || step.op === "addis" && step.src === 0) continue;
-          const value = resolveConst(step.dst, a + 4);
+          // lis/addi pairs sit close together: a short window keeps the scan
+          // linear on code made of nothing but additions.
+          const value = resolveConst(step.dst, a + 4, 0, false, CONST_SCAN_WINDOW);
           if (value === null || !isCodeAddr(value)) continue;
           codePointers.add(value);
           if (tryCandidate(value, CONF_POINTER, "const")) added++;
         }
       }
     }
-    if (pointerScan) {
+    if (pointerScan && !dataScanned) {
+      dataScanned = true;
       for (const s of image.segments) {
         if (s.exec) continue;
         for (let off = 0; off + 4 <= s.bytes.byteLength; off += 4) {
@@ -419,7 +438,9 @@ export function discover(image, {
   }
 
   const speculate = () => {
-    for (let round = 0; round < 8; round++) {
+    // Rounds repeat only while something was added; each round costs the
+    // new code (constants) plus one pass over the gaps.
+    for (let round = 0; round < 32; round++) {
       let added = pointerScan || constScan ? pointerWave() : 0;
       if (gapFill) added += gapWave();
       if (!added) break;
