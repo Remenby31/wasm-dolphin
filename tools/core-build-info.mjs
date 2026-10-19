@@ -117,6 +117,7 @@ export function unexpectedDirtyPaths(status) {
 export const CORE_LOCAL_INPUTS = Object.freeze([
   "core/upstream/dolphin_web_core.cpp",
   "core/upstream/dolphin_web_discio.cpp",
+  "core/upstream/dolphin_web_fma.h",
   "core/upstream/dolphin_web_pad_latch.h",
   "core/upstream/dolphin_web_raster_profile.h",
   "core/upstream/dolphin_web_xfb_fastpaths.h",
@@ -223,6 +224,7 @@ export function writeCoreBuildInfo({
       fallbackMapDiagnostics: configure.fallbackMapDiagnostics,
       fallbackMapBits: configure.fallbackMapBits,
       directWasmBlockDispatch: configure.directWasmBlockDispatch,
+      detTrace: configure.detTrace,
       wasmCompileFlags: configure.wasmCompileFlags,
       sourcePathFlags: configure.sourcePathFlags,
       rustRemapFlags: configure.rustRemapFlags,

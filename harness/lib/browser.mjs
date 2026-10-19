@@ -6,12 +6,20 @@ import { createHash } from "node:crypto";
 import os from "node:os";
 import { existsSync, readdirSync, readFileSync } from "node:fs";
 import path from "node:path";
-import { pathToFileURL } from "node:url";
-import { FRAME_FIELDS } from "./matrix.mjs";
+import { fileURLToPath, pathToFileURL } from "node:url";
+import { clockCheck, FRAME_FIELDS, withDeterministicClock } from "./matrix.mjs";
 import { decodePng } from "./png.mjs";
 import { ensureServer as serveTree } from "./server.mjs";
 
-export const REPO_ROOT = path.resolve(path.dirname(new URL(import.meta.url).pathname), "..", "..");
+// The checkout root two levels above a module, as a file system path. A URL's
+// pathname is not one: on Windows it reads /C:/…, and spaces or accents stay
+// percent-encoded on every system.
+export function repoRootOf(moduleUrl, { windows = process.platform === "win32" } = {}) {
+  const root = fileURLToPath(new URL("../..", moduleUrl), { windows });
+  return (windows ? path.win32 : path.posix).resolve(root);
+}
+
+export const REPO_ROOT = repoRootOf(import.meta.url);
 
 // Messages that mean the emulator is dead or the JIT emitted bad code.
 export const FATAL_PATTERN = /CompileError|LinkError|RuntimeError|WebAssembly\.Module|unreachable executed|Aborted\(|out of memory|worker (?:error|crashed)|memory access out of bounds/i;
@@ -22,7 +30,8 @@ export async function importPlaywright() {
     return await import("playwright");
   } catch {}
   // playwright-cli (the browser driver used for the evaluation) ships playwright.
-  const globalRoot = execFileSync("npm", ["root", "-g"], { encoding: "utf8" }).trim();
+  // npm is npm.cmd on Windows, which only runs through a shell.
+  const globalRoot = execFileSync("npm", ["root", "-g"], { encoding: "utf8", shell: process.platform === "win32" }).trim();
   for (const candidate of [
     path.join(globalRoot, "@playwright", "cli", "node_modules", "playwright", "index.mjs"),
     path.join(globalRoot, "playwright", "index.mjs")
@@ -76,13 +85,18 @@ export function chromeLaunchOptions(display = "headless") {
 export async function launchChrome({ profileDir, display = "headless", args = [] }) {
   const opts = chromeLaunchOptions(display);
   const { chromium } = await importPlaywright();
+  // HARNESS_CHROME_PATH: run this executable instead of Chrome stable, e.g. a
+  // wrapper that confines Chrome to the efficiency cores (docs/consumer-perf-extrapolation.md).
+  const executablePath = process.env.HARNESS_CHROME_PATH || undefined;
   const context = await chromium.launchPersistentContext(profileDir, {
-    channel: "chrome",
+    ...(executablePath ? { executablePath } : { channel: "chrome" }),
     headless: opts.headless,
     viewport: { width: 1280, height: 800 },
     // Chrome's log and crash dumps stay in the profile; a session whose
     // renderer crashed copies them out as evidence (session.mjs).
-    args: [...opts.args, "--enable-logging", "--v=0", `--log-file=${path.join(profileDir, "chrome.log")}`, `--crash-dumps-dir=${path.join(profileDir, "crash-dumps")}`, ...args]
+    // HARNESS_CHROME_ARGS: extra flags for one machine (e.g. Linux WebGPU:
+    // "--enable-features=Vulkan --use-angle=vulkan"), space-separated.
+    args: [...opts.args, ...(process.env.HARNESS_CHROME_ARGS ?? "").split(/\s+/).filter(Boolean), "--enable-logging", "--v=0", `--log-file=${path.join(profileDir, "chrome.log")}`, `--crash-dumps-dir=${path.join(profileDir, "crash-dumps")}`, ...args]
   });
   context.assertInvisible = (when) => assertNoWindow(profileDir, when, () => context.close());
   return context;
@@ -133,16 +147,36 @@ export function watchPage(page) {
 // Boot a disc and return once the core is loaded, with the harness hooks
 // enabled from the start (they are off in normal use). Nothing is asked of
 // the worker before it exists: the app creates it asynchronously.
-export async function bootIso(page, { url, iso, timeoutMs = 60000 }) {
+export async function bootIso(page, { url: requestedUrl, iso, timeoutMs = 60000, harness = {} }) {
   if (!existsSync(iso)) throw new Error(`disc image not found: ${iso}`);
+  // A single emulated CPU thread runs on the fixed clock that makes it repeat
+  // (matrix.mjs), whoever boots it: sessions, probes, direct callers.
+  const parsed = new URL(requestedUrl);
+  parsed.search = withDeterministicClock(parsed.search.slice(1));
+  const url = parsed.href;
   await page.goto(url, { waitUntil: "domcontentloaded" });
   await page.locator("#romInput").waitFor({ state: "attached", timeout: 30000 });
   await page.waitForFunction(() => window.__host?.adapter, null, { timeout: 30000 });
   await page.locator("#romInput").setInputFiles(iso);
   await page.waitForFunction(() => Boolean(window.__host?.adapter?.worker), null, { timeout: timeoutMs });
-  const enabled = await workerRequest(page, "validationEnableHarness", {}, timeoutMs);
+  // harness: extra switches (detTrace: the determinism trace, from the first event).
+  const enabled = await workerRequest(page, "validationEnableHarness", harness, timeoutMs);
   await page.waitForFunction(() => window.__host?.adapter?.loaded === true, null, { timeout: timeoutMs });
-  return { harness: enabled };
+  // A fixed clock that the core did not take would compare a host-clock run
+  // with a fixed-clock one in silence: check it once the core runs.
+  let clock = { fixed: false };
+  if (new URLSearchParams(parsed.search).has("rtc")) {
+    const end = Date.now() + timeoutMs;
+    let progress = null;
+    while (Date.now() < end) {
+      progress = await readCoreProgress(page);
+      if ((progress?.frame ?? 0) > 0 && progress?.emulatedRtc) break;
+      await page.waitForTimeout(100);
+    }
+    clock = clockCheck(parsed.search.slice(1), progress);
+    if (clock.error) throw new Error(clock.error);
+  }
+  return { harness: enabled, url, clock };
 }
 
 export async function readFrameInfo(page) {

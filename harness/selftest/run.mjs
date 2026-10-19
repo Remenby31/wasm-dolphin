@@ -13,6 +13,7 @@
 // Writes harness/results/selftest-…/selftest.json and selftest.md.
 import { mkdirSync, writeFileSync } from "node:fs";
 import path from "node:path";
+import { pathToFileURL } from "node:url";
 import { parseArgs } from "node:util";
 import { abCompare } from "../cli.mjs";
 import { REPO_ROOT } from "../lib/browser.mjs";
@@ -170,4 +171,4 @@ async function main() {
   process.exitCode = rows.every((r) => r.ok) ? 0 : 1;
 }
 
-if (import.meta.url === `file://${process.argv[1]}`) await main();
+if (import.meta.url === pathToFileURL(process.argv[1] ?? "").href) await main();

@@ -1,27 +1,27 @@
 {
   "schemaVersion": 1,
   "abiVersion": 1,
-  "coreId": "sha256:4057670b9bf8db271ee5a047ca4ca6d17b2d86477fd3d8a4623bdf47fd3e399a",
+  "coreId": "sha256:0464dbda503b52efdb48638da8d45cdd45b2e58a1568a94ec26c280d589fc044",
   "upstreamCommit": "e22551eae1c84a7e4d0b6a5c519ef4ed4ef69df1",
   "artifacts": [
     {
       "path": "cores/dolphin/dolphin-core-upstream.js",
       "hashMode": "lf-normalized",
-      "size": 272025,
-      "sha256": "b3efeddcb87e8f528f9a143505156e36031dd37a144431cf58524a93142457fb"
+      "size": 272849,
+      "sha256": "8d92bb03006790124b88da9318b3c2ac5f6d92d0dc65c671ee4ed83ea408631a"
     },
     {
       "path": "cores/dolphin/dolphin-core-upstream.wasm",
-      "size": 12997998,
-      "sha256": "4057670b9bf8db271ee5a047ca4ca6d17b2d86477fd3d8a4623bdf47fd3e399a"
+      "size": 13028654,
+      "sha256": "0464dbda503b52efdb48638da8d45cdd45b2e58a1568a94ec26c280d589fc044"
     }
   ],
   "contractSources": [
     {
       "path": "core/upstream/dolphin_web_discio.cpp",
       "hashMode": "lf-normalized",
-      "size": 58548,
-      "sha256": "37c21df203e97d71ef25f04b4a42853c86a855a8f462f02e66c2a8cd5990cfa7"
+      "size": 64807,
+      "sha256": "53562ca70640759cf2a65630122dcb1b216a097fb648315da13f2edea854e032"
     },
     {
       "path": "core/upstream/dolphin_web_raster_profile.h",
@@ -36,16 +36,22 @@
       "sha256": "a0262feec1d2044dc576b6f67240a8a99b36a4ba27cf37013cc99d855f3c755e"
     },
     {
+      "path": "core/upstream/dolphin_web_fma.h",
+      "hashMode": "lf-normalized",
+      "size": 6279,
+      "sha256": "f2b13956b48b67b5013e5d62608a362159273ce15e66ed59c45640affa850054"
+    },
+    {
       "path": "core/upstream/dolphin_web_core.cpp",
       "hashMode": "lf-normalized",
-      "size": 45437,
-      "sha256": "8363bedba96d754f7c066f88e411469718124725e1e648576d50566932a91377"
+      "size": 48294,
+      "sha256": "5b50a428210b835d033814c550976b5ed41200fa032964a6b29b1cce3ffc14de"
     },
     {
       "path": "src/app.js",
       "hashMode": "lf-normalized",
-      "size": 50202,
-      "sha256": "ddb35fcaf38055a7cf181c912d2b838ed96ec0767204f70c6719bca727912c55"
+      "size": 50421,
+      "sha256": "403e892c103cfd214dd41df68bded99043818369a663b4260045c35c938a76cc"
     },
     {
       "path": "src/audio.js",
@@ -80,8 +86,8 @@
     {
       "path": "src/core-host.js",
       "hashMode": "lf-normalized",
-      "size": 66536,
-      "sha256": "8280a86af296d04668f7ed527a28371ce0f369c156ba4edf0a324d2539a2d428"
+      "size": 67931,
+      "sha256": "2cdc94e3346aac781043a1e67609b6c1c8d6ca246638e7ada53a71688bf704b9"
     },
     {
       "path": "src/diagnostic-log-filter.js",
@@ -134,8 +140,8 @@
     {
       "path": "src/upstream-discio-worker.js",
       "hashMode": "lf-normalized",
-      "size": 626175,
-      "sha256": "2a63602ddbbdd6bf34793ff928469a2cc5ea43c3c88bb2198bbaf4bf28c0454d"
+      "size": 673433,
+      "sha256": "1a63b0b528f6e5630e2626053829d6c3fafceb639456ee8693d5a65f6781e47c"
     },
     {
       "path": "src/wgpu-renderer-worker-probe.js",
@@ -158,8 +164,8 @@
     {
       "path": "src/upstream-worker-adapter.js",
       "hashMode": "lf-normalized",
-      "size": 41920,
-      "sha256": "c1f7543c35124d4ed7c3eabdf26dd0d185f5e0a2575611dd8146f14c99b2ae04"
+      "size": 45968,
+      "sha256": "696e06ebb4ccac9332643f523a685081145988c2a22c20deb28791bf5dbf7a53"
     },
     {
       "path": "src/upstream-worker-protocol.js",
@@ -290,8 +296,8 @@
     {
       "path": "src/jit-cache-identity.js",
       "hashMode": "lf-normalized",
-      "size": 2470,
-      "sha256": "cefdd0471021456bd80bf90437cf8b9f5fe20e1fa6f414d56ea3792a3c3333c3"
+      "size": 6647,
+      "sha256": "33a9c3d95ea53e227b4eac141b38cd60c7720a6e3dbc98da1d1e8222d4dcce6b"
     },
     {
       "path": "src/wgpu-ubo-compute-projection.js",
@@ -359,6 +365,10 @@
     "_AudioSampleRate",
     "_BootDisc",
     "_CoreInit",
+    "_DolphinWeb_EmulatedRtc",
+    "_DolphinWeb_FmaIsMusl",
+    "_DolphinWeb_GpuSyncDiag",
+    "_DolphinWeb_GpuSyncDiagEnable",
     "_DolphinWeb_HarnessArmCapture",
     "_DolphinWeb_HarnessCaptureHeight",
     "_DolphinWeb_HarnessCaptureIndex",
@@ -370,6 +380,7 @@
     "_DolphinWeb_HarnessEnable",
     "_DolphinWeb_HarnessEnabled",
     "_DolphinWeb_HarnessLoadGeneration",
+    "_DolphinWeb_HarnessPcAddress",
     "_DolphinWeb_HarnessViRing",
     "_DolphinWeb_HarnessViRingCapacity",
     "_DolphinWeb_HarnessViRingHead",
@@ -391,6 +402,7 @@
     "_DolphinWeb_RecordInstanceUs",
     "_DolphinWeb_RecordModuleUs",
     "_DolphinWeb_RecordWasmCompileError",
+    "_FlushMemoryCards",
     "_FrameBuffer",
     "_FrameHeight",
     "_FrameWidth",
@@ -408,6 +420,7 @@
     "_GetCoreTicksLow",
     "_GetCoreTicksPerSecond",
     "_GetCoreTitle",
+    "_GetCustomRtc",
     "_GetDataSize",
     "_GetDiscNumber",
     "_GetFrame",
@@ -488,6 +501,7 @@
     "_SetCpuCore",
     "_SetCpuOverclock",
     "_SetCpuThread",
+    "_SetCustomRtc",
     "_SetEmulationSpeed",
     "_SetFastSoftwareRaster",
     "_SetInputMask",
@@ -545,19 +559,30 @@
     "requestTypes": [
       "bootProbe",
       "configureAudioWorklet",
+      "exportMemcard",
+      "exportSaveState",
+      "flushUserData",
+      "importMemcard",
+      "importSaveState",
+      "listUserData",
       "load",
       "loadState",
       "loadStateFile",
       "mixAudio",
       "mountFile",
+      "pause",
       "rendererDiagnostics",
       "reset",
+      "resume",
       "runFrame",
       "saveState",
       "saveStateFile",
       "setAudioMuted",
       "setInputMask",
       "setInputState",
+      "start",
+      "stop",
+      "validationAotCacheProbe",
       "validationBeginWgpuRendererProbeMeasurement",
       "validationCaptureAtVi",
       "validationEnableGpuSyncDiag",
@@ -565,7 +590,9 @@
       "validationFinalizeWgpuMappedDrain",
       "validationFinalizeWgpuRendererProbe",
       "validationFinalizeWgpuReplay",
+      "validationPcSampler",
       "validationReadCoreProgress",
+      "validationReadDetTrace",
       "validationReadJitCacheReadiness",
       "validationReadTimeline",
       "validationReadWgpuReplayState",

@@ -3,8 +3,8 @@
   "normalization": "git-blob-lf",
   "root": {
     "baseCommit": "e22551eae1c84a7e4d0b6a5c519ef4ed4ef69df1",
-    "resultTree": "86c78d05b8ce03989ac67e506214d5dd44a63815",
-    "changedPathCount": 118,
+    "resultTree": "bac9141ff282f1fe70372da55e3990ecf6fa7fac",
+    "changedPathCount": 124,
     "records": [
       {
         "path": "CMakeLists.txt",
@@ -182,9 +182,9 @@
         "status": "M",
         "mode": "100644",
         "baseBlob": "1fa39d74486b5c652078c7fba67891c1e13c194f",
-        "resultBlob": "68eefc8937bc8a7131537fc27eaf888abb2a0b63",
-        "size": 26921,
-        "sha256": "b35328bba8af93eded862464a27783e8f4abe171901e5b93022e7b0097b3405d"
+        "resultBlob": "df7f282ee400557667fc4deaa365b899fa13b164",
+        "size": 27693,
+        "sha256": "644208a159af08fe7380d76bdbf37102ca55a6c79bee986e7672f804d777294d"
       },
       {
         "path": "Source/Core/Core/HW/DVD/AMMediaboard.cpp",
@@ -214,6 +214,15 @@
         "sha256": "34cc97b1945072e97f2196f02b46583c75a990567e54196fc364a848c49decf9"
       },
       {
+        "path": "Source/Core/Core/HW/EXI/EXI.cpp",
+        "status": "M",
+        "mode": "100644",
+        "baseBlob": "144fdd57b9096e648beb85633c9fc91e9484549e",
+        "resultBlob": "a66622c1b4e91e9a2038f296f722c88cb00f8db1",
+        "size": 8891,
+        "sha256": "a432e0fa44eaa787eb37557607efdd716b3fb0c42d073f6daf3cbe51973d087f"
+      },
+      {
         "path": "Source/Core/Core/HW/EXI/EXI_DeviceEthernet.cpp",
         "status": "M",
         "mode": "100644",
@@ -232,13 +241,49 @@
         "sha256": "58fae8fa63c53fced8445ab8134b3f541e687596ed9980d9c6690ef2ff4e620c"
       },
       {
+        "path": "Source/Core/Core/HW/EXI/EXI_DeviceIPL.cpp",
+        "status": "M",
+        "mode": "100644",
+        "baseBlob": "82650ff1a01ec0332dea1ed3bc028f670d618b1c",
+        "resultBlob": "01373ad2161ce15d0e68308a988e828d856518cf",
+        "size": 12520,
+        "sha256": "0711c519bbba532d1d7d83dfa22fcdb4746c736d5e68933991067acdab076696"
+      },
+      {
         "path": "Source/Core/Core/HW/EXI/EXI_DeviceMemoryCard.cpp",
         "status": "M",
         "mode": "100644",
         "baseBlob": "73ff1d616c5df5c5a5464b0dec8482f258e102a9",
-        "resultBlob": "7cddbee872da31140711f8f89c5edc2076d5b95f",
-        "size": 16913,
-        "sha256": "d13a35180542854f23cd2bc90a3cf9d475af2a0ea1664caf58f696c5fbc4986e"
+        "resultBlob": "ca4be74568d34efadd191250a40d8045cec8f609",
+        "size": 17000,
+        "sha256": "071adedf60db1cf9b9a96355e06788ecfae11b3c8852038ce8810f0779ac0e86"
+      },
+      {
+        "path": "Source/Core/Core/HW/EXI/EXI_DeviceMemoryCard.h",
+        "status": "M",
+        "mode": "100644",
+        "baseBlob": "db9c013671575799ee780b71325501c7cd779fa5",
+        "resultBlob": "a2239854ca7b57e99b2886a37f585bc70feee4a0",
+        "size": 3310,
+        "sha256": "9f5001dc99879efba5546e4527cce8ea68beaba0dc7b0a43cc834ad56fc681df"
+      },
+      {
+        "path": "Source/Core/Core/HW/GCMemcard/GCMemcardBase.h",
+        "status": "M",
+        "mode": "100644",
+        "baseBlob": "5805b9056040a98783bc2fcabd1e0496f55ad990",
+        "resultBlob": "42d63078986eb365eea99c0fa4c29f59076708c4",
+        "size": 1083,
+        "sha256": "4ede5641f589897f7c5715351148e7c9f7a8ad8cf7edf74a3c6cae1a5867b535"
+      },
+      {
+        "path": "Source/Core/Core/HW/GCMemcard/GCMemcardDirectory.h",
+        "status": "M",
+        "mode": "100644",
+        "baseBlob": "27e45b317df852fa250b3b86a0198055c489048d",
+        "resultBlob": "fa8c1dd1d62c20cdceafbc84fcbf671e55f8b6a4",
+        "size": 2337,
+        "sha256": "a1692a11b699d3396366a573cf1482b67bd26066d8830a50c13c263fa323912e"
       },
       {
         "path": "Source/Core/Core/HW/GCPad.cpp",
@@ -299,9 +344,9 @@
         "status": "M",
         "mode": "100644",
         "baseBlob": "3ec24a30162d97c99c2454af6af89d480d90c29d",
-        "resultBlob": "ffbf776ead2a5551dd1e599804d4510626286110",
-        "size": 487172,
-        "sha256": "6af989f933dbed08aecb674d1f6337d29d35738651ab1b3b18a24d8d8021bed1"
+        "resultBlob": "f94da9ff5a073b1893e6f4b1c082619075a9dede",
+        "size": 496012,
+        "sha256": "9ec2a15e2b7b2bbf21a4610093d41b1c2b4a16464eaa536865ac6d95d527e28d"
       },
       {
         "path": "Source/Core/Core/PowerPC/CachedInterpreter/CachedInterpreter.h",
@@ -410,6 +455,15 @@
         "resultBlob": "614dd889d0bf806896a4b48c76377935c42fcae5",
         "size": 3517,
         "sha256": "e664e3c5ddc84ee6515c62d98b905b24cffe88242d7fb95e4e6bac4d944a498f"
+      },
+      {
+        "path": "Source/Core/Core/WasmDetTrace.h",
+        "status": "A",
+        "mode": "100644",
+        "baseBlob": null,
+        "resultBlob": "2499b5b8bd4180b2342142527bd1918fd7cf2a8c",
+        "size": 3414,
+        "sha256": "23d1e0457c685f9f1eaba62c0cfed5c1e1ee74112a0a883bc8b916c9f18f998e"
       },
       {
         "path": "Source/Core/Core/WasmTimingProfile.h",
@@ -1104,5 +1158,5 @@
       ]
     }
   ],
-  "contentSha256": "b51166c9e2146d459e48d1a49a7c686ca3097db7d710953603b0b927c57831db"
+  "contentSha256": "97d74a709fc078acd4a5637da6723cabc41d5c2fe03ea43c73902df0e27ddb96"
 }

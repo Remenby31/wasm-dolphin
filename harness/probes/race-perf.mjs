@@ -37,9 +37,10 @@
 //   measures again: cold and warm caches on the same run.
 import { execFileSync } from "node:child_process";
 import { randomBytes } from "node:crypto";
-import { existsSync, mkdirSync, readFileSync, rmSync, statSync, writeFileSync } from "node:fs";
+import { existsSync, mkdirSync, readdirSync, readFileSync, rmSync, statSync, writeFileSync } from "node:fs";
 import os from "node:os";
 import path from "node:path";
+import { pathToFileURL } from "node:url";
 import { parseArgs } from "node:util";
 
 import { exportRef } from "../cli.mjs";
@@ -78,16 +79,47 @@ export function pairedSpeedChange(runs, { metric = "speed", minPairs = 4 } = {})
   return out;
 }
 
-// The renderer of this profile and the CPU of its busiest threads (ps -M).
+// user + system clock ticks of every thread of `pid` (Linux /proc).
+function linuxThreadTicks(pid) {
+  const out = new Map();
+  for (const tid of readdirSync(`/proc/${pid}/task`)) {
+    try {
+      const stat = readFileSync(`/proc/${pid}/task/${tid}/stat`, "utf8");
+      const f = stat.slice(stat.lastIndexOf(")") + 2).split(" "); // fields from 3 (state) on
+      out.set(tid, Number(f[11]) + Number(f[12])); // utime, stime (fields 14, 15)
+    } catch {} // the thread ended meanwhile
+  }
+  return out;
+}
+let clockTicks = null;
+
+// %CPU of each thread of `pid` now: ps -M on macOS (the first row is the
+// process total); on Linux, /proc over 500 ms (ps -L reports a lifetime
+// average); null where there is no per-thread view (Windows).
+function threadCpus(pid) {
+  if (process.platform === "darwin") {
+    return execFileSync("ps", ["-M", "-o", "%cpu=", "-p", pid], { encoding: "utf8" })
+      .split("\n").map((l) => Number(l.trim().split(/\s+/).at(-1))).filter(Number.isFinite).slice(1);
+  }
+  if (process.platform === "linux") {
+    clockTicks ??= Number(execFileSync("getconf", ["CLK_TCK"], { encoding: "utf8" }).trim()) || 100;
+    const a = linuxThreadTicks(pid);
+    Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, 500);
+    const b = linuxThreadTicks(pid);
+    return [...b].filter(([tid]) => a.has(tid)).map(([tid, t]) => Math.round((1000 * (t - a.get(tid))) / clockTicks / 0.5) / 10);
+  }
+  return null;
+}
+
+// The renderer of this profile and the CPU of its busiest threads.
 function rendererThreads(profileDir) {
+  if (!["darwin", "linux"].includes(process.platform)) return { error: `no per-thread CPU on ${process.platform}` };
   try {
     const ps = execFileSync("ps", ["-A", "-o", "pid=,command="], { encoding: "utf8", maxBuffer: 32 << 20 });
     const pids = ps.split("\n").filter((l) => l.includes(profileDir) && l.includes("--type=renderer")).map((l) => l.trim().split(/\s+/)[0]);
     let best = null;
     for (const pid of pids) {
-      const rows = execFileSync("ps", ["-M", "-o", "%cpu=", "-p", pid], { encoding: "utf8" })
-        .split("\n").map((l) => Number(l.trim().split(/\s+/).at(-1))).filter(Number.isFinite);
-      const threads = rows.slice(1).sort((a, b) => b - a); // first row is the process total
+      const threads = threadCpus(pid).sort((a, b) => b - a);
       if (!best || (threads[0] ?? 0) > best.busiest) best = { pid: Number(pid), busiest: threads[0] ?? null, next: threads.slice(1, 4) };
     }
     return best;
@@ -289,7 +321,12 @@ async function main() {
   const pcNote = o.pcsample && pcSides.length < Object.keys(sides).length ? `guest PC sampled on ${pcSides.join(", ") || "no side"} only` : null;
   if (pcNote) console.warn(`[race-perf] warning: ${pcNote}`);
   const failed = Object.keys(sides).flatMap((n) => runsDone.filter((r) => !good(r[n])).map((r) => ({ run: r.run, side: n, why: r[n]?.error ?? (r[n]?.fatal?.length ? "crash" : "overloaded") })));
+  // Which Chrome ran: a wrapper (HARNESS_CHROME_PATH, e.g. the E-core one) or
+  // extra flags left exported would otherwise pass for a regression.
+  const chrome = { path: process.env.HARNESS_CHROME_PATH || "chrome stable", args: process.env.HARNESS_CHROME_ARGS || "" };
+  if (process.env.HARNESS_CHROME_PATH || process.env.HARNESS_CHROME_ARGS) console.warn(`[race-perf] Chrome: ${chrome.path}${chrome.args ? ` ${chrome.args}` : ""}`);
   const summary = {
+    chrome,
     iso: path.basename(iso), state: path.basename(state), query: o.query, warmupSec: o.warmup, secs: o.secs, hold: o.hold, maxLoad: o.maxLoad,
     sides: Object.fromEntries(Object.entries(sides).map(([n, s]) => [n, s.label])),
     runs: runsDone.length, failed,
@@ -304,4 +341,4 @@ async function main() {
   process.exitCode = failed.length || summary.change?.withheld ? 1 : 0;
 }
 
-if (import.meta.url === `file://${process.argv[1]}`) await main();
+if (import.meta.url === pathToFileURL(process.argv[1] ?? "").href) await main();

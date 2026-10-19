@@ -49,13 +49,19 @@ region's `profileHits`. A wrong guess costs a useless compile, never a wrong
 execution: the guest decides what runs.
 
 Bounds, so a hostile disc cannot make the analysis allocate or loop without
-limit: executables (DOL, apploader, each REL) ≤ 24 MiB, ≤ 256 RELs and
-64 MiB of RELs in total, FST ≤ 16 MiB with its entry count capped by its
-size, names ≤ 255 bytes, directory depth ≤ 32; REL relocation records read
-in total ≤ file size / 8 (imports sharing a run are refused). Speculative
-walks share a budget of 32 instructions per executable word (a real disc
-uses under one); addresses whose straight-line walk ends on invalid code and
-rejected candidates are remembered.
+limit (a refused input means no plan, the JIT runs the game as today):
+executables (DOL, apploader, each REL) ≤ 24 MiB, ≤ 256 RELs and 64 MiB of
+RELs in total, FST ≤ 16 MiB with its entry count capped by its size, names
+≤ 255 bytes, directory depth ≤ 32. Sections of a DOL or REL must not share
+file bytes, an image holds ≤ 4 MiB of code (measured games: ~3 MiB) and
+≤ 24 MiB in all, and discovery stops past 400 000 blocks (a game: ~150 000).
+REL relocation records read in total ≤ file size / 8 (imports sharing a run
+are refused). Speculative walks share a budget of 32 instructions per
+executable word (a real disc uses under one); addresses whose straight-line
+walk ends on invalid code and rejected candidates are remembered; each code
+word is scanned for a lis/addi constant once (8-instruction window), the
+data once. Worst cases measured on an M4 Pro: ~0.5 s and ~500 MiB at the
+4 MiB bound (tests/aot-hostile.test.mjs).
 
 ### Jump tables
 
@@ -83,13 +89,16 @@ JSON. Columns are flat arrays (one entry per block/edge) to keep it small.
 ```js
 {
   schema: "salon-aot-plan/1",
-  analyzer: 1,                       // bump when discovery changes its output
+  analyzer: 2,                       // bump when discovery changes its output; validatePlan refuses others
   hash: "fnv1a64",                   // fingerprint algorithm, see below
   disc: { gameId: "GXXE01", dolHash: "<fnv1a64 of the DOL file>" },
   hints: null | { name, entries },  // hint sheet applied, if any
+  identity: { dolHash, apploaderHash, rels: [{ path, hash }], profileHash, hintsHash },
+                                     // every input of the plan: a cached plan is reused only for the same
   modules: [                         // code at fixed addresses
     {
-      id: 0, kind: "dol" | "apploader" | "rel",
+      id: 0 | 1 | 0x100 + relId,     // DOL, apploader, linked REL
+      kind: "dol" | "apploader" | "rel",
       blocks: { start: [u32], end: [u32], func: [i32] },   // [start, end), end exclusive
       edges:  { from: [blockIdx], to: [blockIdx], kind: [EDGE] },
       functions: [{ entry, confidence, sources: [str], flags, ranges: [[start, end]],
@@ -140,10 +149,17 @@ order, ranges ascending: offset basis `0xcbf29ce484222325`, prime
 `sha256` = SHA-256 of the same bytes in the same order (64 lowercase hex).
 It is the identity of the region in the persistent cache: FNV-1a 64 is the
 fast check, not collision resistant across disc revisions, and the disc key
-does not cover RELs. Cache key of a compiled region (worker side, from
-`_DolphinWeb_AotKeyParts`):
-`region-v1:<compilerVersion, 8 hex>:<codegenMask, 8 hex>:<sha256>`, which
-ends in `:` + 64 hex as the cache requires (`isHashedAotKey`).
+does not cover RELs.
+
+One cache entry is one assembled module: a group of up to ~100 functions
+(`groupRegions`, `assembleRegion` in `src/aot-region-module.js`). Its key
+(`regionModuleKey`, decided 2026-10-19), from `_DolphinWeb_AotKeyParts`:
+`region-v1:<compilerVersion, 8 hex>:<codegenMask, 8 hex>:<sha256>`, where
+`<sha256>` is the SHA-256 of the members in module order, written
+`<entry hex>:<member sha256>;` each. A change in any member's guest code, in
+membership or in order gives another key; it ends in `:` + 64 hex as the
+cache requires (`isHashedAotKey`). The optimiser's `bootKeys()` returns these
+module keys, in compile order.
 
 Before compiling a region ahead of time, and before reusing a cached module
 for it, the compiler re-hashes guest memory over `ranges`. Different hash:
@@ -174,14 +190,15 @@ so the fingerprint covers `ranges` only.
 A REL's load address is only known once `OSLink` has linked it. Discovery
 places section `i` at a synthetic `0xa0000000 + i * 0x01000000`, applies the
 module's relocations against itself (synthetic) and against the DOL
-(absolute), and leaves relocations against other RELs unapplied. The plan
+(absolute). A call relocated against another REL is pointed out of the image
+(`bla 0`) so it is not read as `bl .`; such words are masked in `moduleHash`. The plan
 entry stores `(section, offset)` pairs:
 
 ```js
 { kind: "rel", relId, name, moduleHash,
   sections: [{ index, size, exec, bss, relocWords: [offset] }],
   blocks: { section: [], start: [], end: [], func: [] },
-  functions: [{ section, entry, confidence, sources, ranges: [[section, start, end]] }],
+  functions: [{ section, entry, confidence, sources, extraEntries: [[section, off]], ranges: [[section, start, end]] }],
   jumpTables: [{ site: [section, off], count, targets: [[section, off]] }], ... }
 ```
 

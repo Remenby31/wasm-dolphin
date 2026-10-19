@@ -1,7 +1,9 @@
+import { aotCompilerRequested } from "./aot-compiler-worker.js";
+import { parseCustomRtc } from "./custom-rtc.js";
 import { DolphinCoreAdapter, dolphinBundleAvailable } from "./dolphin-adapter.js";
 import { buttonMaskFromPressed, isPadPort } from "./input.js";
 import { UpstreamMainThreadAdapter } from "./upstream-main-thread-adapter.js";
-import { UpstreamWorkerAdapter, upstreamBundleAvailable } from "./upstream-worker-adapter.js";
+import { UpstreamWorkerAdapter, describeUserDataStatus, upstreamBundleAvailable } from "./upstream-worker-adapter.js";
 import {
   DEFAULT_UPSTREAM_CORE_URL,
   requestedLegacyOneWayAck,
@@ -84,6 +86,7 @@ export class EmulatorHost {
     this.videoBackend = requestedVideoBackend();
     this.cpuThread = requestedCpuThread(this.videoBackend);
     this.cpuCore = requestedCpuCore();
+    this.customRtc = requestedCustomRtc();
     this.ppcWasmJit = requestedPpcWasmJit(this.videoBackend);
     this.ppcWasmJitTier = requestedPpcWasmJitTier();
     this.ppcWasmJitForce = requestedPpcWasmJitForce();
@@ -103,6 +106,8 @@ export class EmulatorHost {
     this.xfbFastPaths = requestedXfbFastPaths(window.location.search);
     this.correctTimeDrift = requestedCorrectTimeDrift();
     this.coreLog = requestedCoreLog();
+    this.memcardSlotB = new URLSearchParams(window.location.search).get("memcardb") === "1";
+    this.savesMode = new URLSearchParams(window.location.search).get("saves") === "off" ? "off" : "";
     this.efbDiag = requestedEfbDiag();
     this.jitVerbose = new URLSearchParams(window.location.search).get("jitverbose") === "1";
     this.frameCap = Number.parseInt(
@@ -113,6 +118,9 @@ export class EmulatorHost {
     );
     this.noJitCache =
       new URLSearchParams(window.location.search).get("nojitcache") === "1";
+    // ?aotcompiler=1: compile cached/requested JIT modules in the compiler
+    // worker (off by default until its memory cost is measured).
+    this.aotCompiler = aotCompilerRequested(window.location.search);
     this.collectMetrics = requestedCollectMetrics();
     this.legacyOneWayAck = requestedLegacyOneWayAck(window.location.search);
     this.wgpuReplayDiagnostics = requestedWgpuReplayDiagnostics(window.location.search);
@@ -322,6 +330,7 @@ export class EmulatorHost {
             videoBackend: this.videoBackend,
             cpuThread: this.cpuThread,
             cpuCore: this.cpuCore,
+            customRtc: this.customRtc,
             ppcWasmJit: this.ppcWasmJit,
             ppcWasmJitTier: this.ppcWasmJitTier,
             ppcWasmJitForce: this.ppcWasmJitForce,
@@ -368,6 +377,7 @@ export class EmulatorHost {
             videoBackend: this.videoBackend,
             cpuThread: this.cpuThread,
             cpuCore: this.cpuCore,
+            customRtc: this.customRtc,
             ppcWasmJit: this.ppcWasmJit,
             ppcWasmJitTier: this.ppcWasmJitTier,
             ppcWasmJitForce: this.ppcWasmJitForce,
@@ -387,12 +397,15 @@ export class EmulatorHost {
             xfbFastPaths: this.xfbFastPaths,
             correctTimeDrift: this.correctTimeDrift,
             coreLog: this.coreLog,
+            memcardSlotB: this.memcardSlotB,
+            savesMode: this.savesMode,
             efbDiag: this.efbDiag,
             jitVerbose: this.jitVerbose,
             frameCap: this.frameCap,
             cachedInterpreterDisableMask: this.cachedInterpreterDisableMask,
             wgpuScissoredClearRect: this.wgpuScissoredClearRect,
             noJitCache: this.noJitCache,
+            aotCompiler: this.aotCompiler,
             collectMetrics: this.collectMetrics,
             legacyOneWayAck: this.legacyOneWayAck,
             wgpuReplayDiagnostics: this.wgpuReplayDiagnostics,
@@ -573,7 +586,8 @@ export class EmulatorHost {
         this.coreFps = 0;
         this.presentationFps = 0;
         this.resetVisibleSampler();
-        this.onStatus(`${this.adapterLabel} mounted`);
+        // A saves warning (read-only tab, saves off) outlives the mount.
+        this.onStatus(describeUserDataStatus(this.adapter.userData) || `${this.adapterLabel} mounted`);
         this.onMode(this.adapterLabel);
         return this.game;
       } catch (error) {
@@ -668,8 +682,9 @@ export class EmulatorHost {
 
   saveState() {
     if (this.mode === "dolphin") {
-      this.adapter.saveState(0);
-      this.onStatus("Save slot 0 requested");
+      // Dolphin numbers its slots from 1 (<game id>.s01).
+      this.adapter.saveState(1);
+      this.onStatus("Saving slot 1");
       return;
     }
 
@@ -686,8 +701,8 @@ export class EmulatorHost {
 
   loadState() {
     if (this.mode === "dolphin") {
-      this.adapter.loadState(0);
-      this.onStatus("Load slot 0 requested");
+      this.adapter.loadState(1);
+      this.onStatus("Loading slot 1");
       return;
     }
 
@@ -1186,6 +1201,13 @@ function requestedCpuThread(videoBackend) {
   return true;
 }
 
+// ?rtc=<seconds since 1970>: the emulated real-time clock starts there and
+// follows emulated time, so two boots of one disc are identical (harness
+// comparisons). Without it, the console clock is the host's.
+function requestedCustomRtc() {
+  return parseCustomRtc(new URLSearchParams(window.location.search).get("rtc"));
+}
+
 function requestedCpuCore() {
   const requested = new URLSearchParams(window.location.search).get("ppc");
   return requested === "interpreter" ? "interpreter" : "cached";
@@ -1431,10 +1453,11 @@ const CACHED_INTERPRETER_DISABLE_BITS = {
   shortprefix:     1 << 21, // §28ca lower JIT min-prefix 4→2 (default-off; ?shortprefix=1 to enable)
   smearcompile:    1 << 22, // §28ce cap JIT compiles/slice (default-off; ?smearcompile=1 to enable)
   fastmemhoist:    1 << 23, // §28cz per-block fastmem bounds-check hoist (ENABLE polarity; default-off; ?fastmemhoist=1)
+  inlinefma:       1 << 26, // inline exact FMA; set: the FMA family calls the interpreter's NI_madd_msub
   // Aliases the plan / TL;DR uses interchangeably:
   fastinputpoll: 1 << 1, // legacy synonym for meleecall (input-poll lives there)
   fastmem:       1 << 7, // legacy synonym for fastsystem (load/store-ish helpers)
-  all:           0x7fffff
+  all:           0x47fffff
 };
 
 // The WebGPU backend emits partial and independent-channel EFB clears as a

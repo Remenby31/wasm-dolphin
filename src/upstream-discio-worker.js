@@ -16,6 +16,13 @@ import { gxClearDepthToStored, gxDepthState } from "./wgpu-depth-state.js";
 import { clampSourceRect, createWgpuExactCapture, packReadbackRows } from "./wgpu-exact-capture.js";
 import { decodePrebuiltCache } from "./prebuilt-jit-cache-format.js";
 import {
+  AOT_COMPILER_WORKER_NAME,
+  DELIVER_BEFORE_WARM,
+  compileFailureReason,
+  createAotCompilerClient
+} from "./aot-compiler-worker.js";
+import { migrateLegacyJitIdb, openAotBlockStore, openAotCache, readDiscKeyFromFile } from "./aot-cache.js";
+import {
   JIT_CACHE_ENTRY_KEY_SCHEMA,
   canonicalCoreFingerprint,
   classifyJitCacheIdentity,
@@ -141,6 +148,28 @@ import {
   createWgpuVisualCadenceTelemetry,
   hashWgpuVisualSample
 } from "./wgpu-visual-cadence.js";
+import { createCoreLifecycle } from "./core-lifecycle.js";
+import { BOOT_FILE_HEAD_BYTES, bootFileKind, checkExecutable, executableGameId } from "./boot-file.js";
+import {
+  USER_DATA_ROOT,
+  acquireWriterLock,
+  createRecordStore,
+  createUserDataMirror,
+  openOpfsPrimitives
+} from "./user-data-store.js";
+import {
+  MAX_CARD_BYTES,
+  MAX_STATE_BYTES,
+  buildRawCard,
+  checkSaveState,
+  gciFileName,
+  gciFolderPath,
+  parseGci,
+  parseRawCard,
+  saveIdentity as memcardSaveIdentity,
+  sniffMemcardFile,
+  validateSaveStateData
+} from "./memcard.js";
 
 // Day-25: mark this thread. The discio worker owns the WebGPU device
 // (createWebGpuPresenter runs here). WebGPU objects aren't shareable
@@ -639,6 +668,44 @@ function wgpuDiagDrainWaitMs(now = performance.now()) {
 }
 
 // The core's FIFO / pixel-engine handshake snapshot (WasmGpuSyncDiag.h).
+// Determinism trace (WasmDetTrace.h): per-VI checkpoints and the event log,
+// copied out of the heap. Checkpoint: u64 events hash, u64 RAM hash (0 where
+// not taken), u64 ticks, u32 events, u32 log count (32 bytes). Log entry:
+// u64 time, i64 late, u32 name, u32 kind (24 bytes with wasm32 pointers).
+let detTraceRequested = false;
+let customRtcStatus = { requested: null, applied: false, why: null };
+function readDetTrace({ fromLog = 0, maxLog = 0 } = {}) {
+  const m = moduleInstance;
+  if (!m?._DolphinWeb_DetTraceCheckpoints) {
+    return { supported: false, why: "core without the determinism trace: build it with DOLPHIN_WEB_DET_TRACE=1" };
+  }
+  const cpCount = m._DolphinWeb_DetTraceCheckpointCount() >>> 0;
+  const cpPtr = m._DolphinWeb_DetTraceCheckpoints() >>> 0;
+  const cp = new DataView(m.HEAPU8.buffer, cpPtr, cpCount * 32);
+  const checkpoints = [];
+  for (let i = 0; i < cpCount; i += 1) {
+    const o = i * 32;
+    checkpoints.push([cp.getBigUint64(o, true).toString(16), cp.getBigUint64(o + 8, true).toString(16), Number(cp.getBigUint64(o + 16, true)), cp.getUint32(o + 24, true), cp.getUint32(o + 28, true)]);
+  }
+  const logCount = m._DolphinWeb_DetTraceLogCount() >>> 0;
+  const logPtr = m._DolphinWeb_DetTraceLog() >>> 0;
+  const end = Math.min(logCount, fromLog + Math.max(0, maxLog));
+  const log = [], names = {};
+  for (let i = fromLog; i < end; i += 1) {
+    const v = new DataView(m.HEAPU8.buffer, logPtr + i * 24, 24);
+    const name = v.getUint32(16, true);
+    names[name] ??= m.UTF8ToString(m._DolphinWeb_DetTraceName(name));
+    log.push([Number(v.getBigUint64(0, true)), Number(v.getBigInt64(8, true)), names[name], v.getUint32(20, true)]);
+  }
+  const ramChunks = [];
+  const chunkCount = m._DolphinWeb_DetTraceRamChunkCount?.() >>> 0;
+  if (chunkCount) {
+    const v = new DataView(m.HEAPU8.buffer, m._DolphinWeb_DetTraceRamChunks() >>> 0, chunkCount * 8);
+    for (let i = 0; i < chunkCount; i += 1) ramChunks.push(v.getBigUint64(i * 8, true).toString(16));
+  }
+  return { supported: true, startVi: m._DolphinWeb_DetTraceStartVi() >>> 0, checkpoints, logCount, log, ramChunks };
+}
+
 function readGpuSyncDiag() {
   const m = moduleInstance;
   if (!m?._DolphinWeb_GpuSyncDiag) return null;
@@ -1007,6 +1074,9 @@ function readbackWgpuPresentSource() {
 }
 
 async function handleMessage(type, payload) {
+  // P6: blocks waiting for their pack go out when the saves do (page hidden
+  // or closed) and on stop; their outcome is not the saves'.
+  if (type === "flushUserData" || type === "stop") void dolphinJitBlockStore?.flush().catch(() => {});
   switch (type) {
     case "load":
       if (!moduleInstance) {
@@ -1109,6 +1179,7 @@ async function handleMessage(type, payload) {
         videoBackend: payload.videoBackend,
         cpuThread: payload.cpuThread,
         cpuCore: payload.cpuCore,
+        customRtc: payload.customRtc,
         ppcWasmJit: payload.ppcWasmJit,
         ppcWasmJitForce: payload.ppcWasmJitForce,
         ppcWasmJitTier: payload.ppcWasmJitTier,
@@ -1128,12 +1199,14 @@ async function handleMessage(type, payload) {
         xfbFastPaths: payload.xfbFastPaths,
         correctTimeDrift: payload.correctTimeDrift,
         coreLog: payload.coreLog,
+        memcardSlotB: payload.memcardSlotB,
         efbDiag: payload.efbDiag,
         jitVerbose: payload.jitVerbose,
         frameCap: payload.frameCap,
         cachedInterpreterDisableMask: payload.cachedInterpreterDisableMask,
         wgpuScissoredClearRect: payload.wgpuScissoredClearRect,
         noJitCache: payload.noJitCache,
+        aotCompiler: payload.aotCompiler,
         reportedCoreSelection: payload.coreSelection,
         wgpuReplayDiagnostics: payload.wgpuReplayDiagnostics,
         wgpuDeepReplayDiagnostics: payload.wgpuDeepReplayDiagnostics,
@@ -1171,9 +1244,17 @@ async function handleMessage(type, payload) {
         wgpuSemanticRuntime: payload.wgpuSemanticRuntime,
         oglSabEnabled: oglPixelSabView !== null
       });
-      return metadataPayload();
+      // Before any boot: Dolphin opens the GCI folder when the card goes in.
+      return { ...metadataPayload(), userData: await startUserDataPersistence(payload.savesMode) };
     case "mountFile":
       return mountFile(payload.file);
+    case "flushUserData":
+    case "listUserData":
+    case "exportMemcard":
+    case "importMemcard":
+    case "exportSaveState":
+    case "importSaveState":
+      return handleSavesMessage(type, payload);
     case "setInputMask":
       inputMask = payload.mask >>> 0;
       api?.setInputMask(inputMask);
@@ -1201,7 +1282,22 @@ async function handleMessage(type, payload) {
         api?.runFrame();
       }
       return framePayload();
-    case "reset":
+    case "start":
+    case "resume":
+      return { ...(await coreLifecycle[type]()), ...framePayload() };
+    case "pause": {
+      const result = await coreLifecycle.pause();
+      return { ...result, persisted: await flushUserDataReported(), ...framePayload() };
+    }
+    case "stop": {
+      const result = await coreLifecycle.stop();
+      if (result.persistError) reportUserDataError("Stopped, but saves were not stored", result.persistError);
+      return { ...result, ...framePayload() };
+    }
+    case "reset": {
+      // The console's reset button; the rest re-arms the renderer state the
+      // way it always did after a reset.
+      const resetResult = await coreLifecycle.reset();
       forceWgpuMappedDrainLifecycle(WGPU_MAPPED_DRAIN_FORCE_REASONS.RESET);
       wgpuSparseUbo?.reset("core-reset");
       if (wgpuUboComputeProjectionActive) {
@@ -1223,11 +1319,12 @@ async function handleMessage(type, payload) {
         verifyWgpuProducerProfileActivation("core reset");
       }
       api?.setInputMask(inputMask);
-      return framePayload();
+      return { ...resetResult, ...framePayload() };
+    }
     case "bootProbe":
       return { bootProbe: bootProbePayload(metadataPayload()) };
     case "saveState":
-      return { saved: Boolean(api?.saveState(payload.slot | 0)) };
+      return saveStateToSlot(payload.slot);
     case "loadState": {
       forceWgpuMappedDrainLifecycle(WGPU_MAPPED_DRAIN_FORCE_REASONS.LOAD);
       wgpuSparseUbo?.reset("slot-state-load");
@@ -1302,6 +1399,12 @@ async function handleMessage(type, payload) {
       // Applied now if the core is loaded, and again when it loads.
       harnessEnabled = true;
       moduleInstance?._DolphinWeb_HarnessEnable?.(1);
+      // The determinism trace (WasmDetTrace.h) must see the boot from its
+      // first event: requested here, started when the core loads.
+      if (payload.detTrace && !detTraceRequested) {
+        detTraceRequested = true;
+        moduleInstance?._DolphinWeb_DetTraceEnable?.(1);
+      }
       return { enabled: true, coreHooks: Boolean(moduleInstance?._DolphinWeb_HarnessEnable), coreLoaded: Boolean(moduleInstance) };
     case "validationReadTimeline":
       return readHarnessTimeline();
@@ -1309,6 +1412,8 @@ async function handleMessage(type, payload) {
       return harnessPcSampler(payload);
     case "validationCaptureAtVi":
       return captureAtViOutput(payload);
+    case "validationReadDetTrace":
+      return readDetTrace(payload);
     case "validationReadWgpuReplayState":
       return readWgpuReplayState();
     case "validationEnableGpuSyncDiag":
@@ -1327,6 +1432,10 @@ async function handleMessage(type, payload) {
         coreTicks: readCoreTicks(),
         coreTicksPerSecond: readCoreTicksPerSecond(),
         ppcPc: api?.getPpcPc?.() ?? 0,
+        // The console clock: what was asked, whether the core took it, and
+        // what the emulated software reads now (seconds since 1970).
+        customRtc: customRtcStatus,
+        emulatedRtc: moduleInstance?._DolphinWeb_EmulatedRtc ? moduleInstance._DolphinWeb_EmulatedRtc() >>> 0 : null,
         loadedCheckpointGeneration: loadedCheckpoint.generation,
         loadedCheckpointTicks: loadedCheckpoint.ticks,
         loadedCheckpointPpcPc: loadedCheckpoint.ppcPc,
@@ -1336,6 +1445,8 @@ async function handleMessage(type, payload) {
         observedAtMs: performance.now(),
       };
     }
+    case "validationAotCacheProbe":
+      return runAotCacheProbe(payload);
     case "validationReadJitCacheReadiness": {
       const requiredWorkers = dolphinJitPthreadRuntime
         ? [...new Set(dolphinJitPthreadRuntime.runningWorkers || [])]
@@ -1362,7 +1473,17 @@ async function handleMessage(type, payload) {
         newCompileCount: dolphinJitNewCompileCount,
         verificationPending: dolphinJitVerificationPending.size,
         compilePending: dolphinJitCompilePending,
-        idbWritesPending: dolphinJitIdbWritesPending,
+        // P5: modules compiled and warmed in the dedicated compiler worker.
+        offThreadCompiler: dolphinAotCompiler ? dolphinAotCompiler.stats() : null,
+        compileRequests: dolphinJitCompileRequestCount,
+        compileRequestFailures: dolphinJitCompileRequestFailures,
+        compileReadyMarks: dolphinJitReadyMarks,
+        compileReadyRejected: dolphinJitReadyRejected,
+        aotDiscKey,
+        blockStore: dolphinJitBlockStore ? dolphinJitBlockStore.stats() : null,
+        legacyIdbMigration: dolphinJitLegacyMigration,
+        // Blocks waiting for their pack count as pending writes.
+        idbWritesPending: dolphinJitIdbWritesPending + (dolphinJitBlockStore?.stats().buffered ?? 0),
         idbWriteCount: dolphinJitIdbWriteCount,
         pthreadWorkerCount: dolphinJitPthreadWorkers.length,
         pthreadBarrierGeneration: dolphinJitPthreadBarrierGeneration,
@@ -1659,6 +1780,7 @@ async function loadCore({
   videoBackend = "Software Renderer",
   cpuThread = false,
   cpuCore = "cached",
+  customRtc = null,
   ppcWasmJit = false,
   ppcWasmJitForce: requestedPpcWasmJitForce = false,
   ppcWasmJitTier: requestedPpcWasmJitTier = "guarded",
@@ -1678,12 +1800,14 @@ async function loadCore({
   xfbFastPaths = 0,
   correctTimeDrift = false,
   coreLog = false,
+  memcardSlotB = false,
   efbDiag = false,
   jitVerbose = false,
   frameCap = 0,
   cachedInterpreterDisableMask = 0,
   wgpuScissoredClearRect = true,
   noJitCache = false,
+  aotCompiler = false,
   reportedCoreSelection = null,
   wgpuReplayDiagnostics = false,
   wgpuDeepReplayDiagnostics: requestedWgpuDeepReplayDiagnostics = false,
@@ -2066,6 +2190,7 @@ async function loadCore({
   const _t_fetch = performance.now();
   const { wasmBinary, fingerprint: buildFingerprint } =
       await fetchWasmAndFingerprint(coreUrl, expectedCoreSha256);
+  aotCoreFingerprint = buildFingerprint;
   console.log(`[boot-phase] fetchWasmAndFingerprint took ${(performance.now() - _t_fetch).toFixed(1)}ms (${(wasmBinary.byteLength / 1048576).toFixed(2)}MiB)`);
   const _t_import = performance.now();
   const imported = await import(coreUrl);
@@ -2089,6 +2214,7 @@ async function loadCore({
   // killing the menu-nav interpret stall measured in §28bz/§28cf.
   const _t_idb = performance.now();
   dolphinJitCachePersistenceEnabled = !noJitCache;
+  dolphinAotCompilerEnabled = aotCompiler === true;
   dolphinJitBootLoadComplete = false;
   dolphinJitBootLoadedEntries = 0;
   if (!noJitCache) {
@@ -2140,6 +2266,7 @@ async function loadCore({
     // false, so the shipping page load is unchanged.
     dolphinCorrectTimeDrift: Boolean(correctTimeDrift),
     dolphinCoreLog: Boolean(coreLog),
+    dolphinMemcardSlotB: Boolean(memcardSlotB),
     // Ranks the instructions that block JIT compilation (?jitverbose=1).
     dolphinWebVerbosePpcJit: Boolean(jitVerbose),
     dolphinFrameCap: (frameCapTarget = Number(frameCap) || 0),
@@ -2185,6 +2312,7 @@ async function loadCore({
   api = bindApi(moduleInstance);
   harnessVideoBackend = videoBackend;
   if (harnessEnabled) moduleInstance._DolphinWeb_HarnessEnable?.(1);
+  if (detTraceRequested) moduleInstance._DolphinWeb_DetTraceEnable?.(1);
   if (gpuSyncDiagEnabled) moduleInstance._DolphinWeb_GpuSyncDiagEnable?.(1);
   const ownershipTraceSetterAvailable = Boolean(
     api.setWebGpuOwnershipTraceEnabled &&
@@ -2294,6 +2422,15 @@ async function loadCore({
   }
   api.setCpuThread?.(Boolean(cpuThread));
   api.setCpuCore?.(cpuCore);
+  // A fixed start for the emulated clock (?rtc=): boots repeat exactly. Its
+  // fate is reported (validationReadCoreProgress): a run that asked for it
+  // must never silently run on the host clock.
+  customRtcStatus = { requested: Number.isInteger(customRtc) ? customRtc : null, applied: false, why: null };
+  if (customRtcStatus.requested !== null) {
+    if (!api.setCustomRtc) customRtcStatus.why = "core without SetCustomRtc";
+    else if (api.setCustomRtc(customRtc) !== 1) customRtcStatus.why = "SetCustomRtc refused the value";
+    else customRtcStatus.applied = true;
+  }
   ppcWasmJitRequested = Boolean(ppcWasmJit);
   ppcWasmJitForce = Boolean(requestedPpcWasmJitForce);
   ppcWasmJitActive = false;
@@ -2433,6 +2570,9 @@ function bindApi(module) {
       typeof module._SetCpuThread === "function"
         ? (enabled) => ccall("SetCpuThread", "number", ["number"], [enabled ? 1 : 0])
         : null,
+    setCustomRtc: typeof module._SetCustomRtc === "function"
+      ? (seconds) => module._SetCustomRtc(1, seconds >>> 0)
+      : null,
     setCpuCore:
       typeof module._SetCpuCore === "function"
         ? (core) => ccall("SetCpuCore", "number", ["string"], [core])
@@ -2598,6 +2738,7 @@ function bindApi(module) {
         ? (path) => ccall("BootDisc", "number", ["string"], [path])
         : null,
     stopCore: optionalCwrap("StopCore", null, []),
+    resetCore: optionalCwrap("ResetCore", "number", []),
     setCorePaused: optionalCwrap("SetCorePaused", "number", ["number"]),
     pumpHostJobs: optionalCwrap("PumpHostJobs", null, []),
     getCoreState: optionalCwrap("GetCoreState", "number", []),
@@ -2674,8 +2815,11 @@ function bindApi(module) {
     frameWidth: cwrap("FrameWidth", "number", []),
     frameHeight: cwrap("FrameHeight", "number", []),
     frameBuffer: cwrap("FrameBuffer", "number", []),
-    saveState: cwrap("SaveState", "number", ["number"]),
-    loadState: cwrap("LoadState", "number", ["number"]),
+    // The bridge's SaveState/LoadState are placeholders that save nothing;
+    // slots are Dolphin's own files, <game id>.sNN in StateSaves.
+    saveState: (slot) => saveStateToSlot(slot),
+    loadState: (slot) => loadStateSlot(slot),
+    flushMemoryCards: optionalCwrap("FlushMemoryCards", "number", []),
     loadStateFile: optionalCwrap("LoadStateFile", "number", ["string"]),
     saveStateFile: optionalCwrap("SaveStateFile", "number", ["string"]),
     getFrame: cwrap("GetFrame", "number", []),
@@ -2711,6 +2855,526 @@ function bindApi(module) {
   };
 }
 
+// ---------------------------------------------------------------------------
+// Saves: /dolphin-user kept in OPFS, memory cards and save states in and out.
+// The pure parts live in user-data-store.js and memcard.js; this section
+// only binds them to the core's FS and exports.
+//
+// Every write path follows the same order: validate everything, write to a
+// staging name outside the persisted folders, read back, switch (MEMFS
+// rename) only then, and copy to OPFS. A failure before the switch leaves the
+// previous save in place; a failed OPFS copy is reported, never hidden.
+
+const USER_DATA_SYNC_INTERVAL_MS = 1000;
+const USER_DATA_STAGING = `${USER_DATA_ROOT}/.staging`;
+let userDataMirror = null;
+let userDataLastReportedError = "";
+// mode: "starting" | "writer" | "read-only" | "unavailable" | "off" | "failed"
+const userDataStatus = {
+  mode: "starting",
+  persistent: false,
+  readOnly: false,
+  reason: "not started",
+  restored: 0,
+  restoredBytes: 0
+};
+// What is running, as Dolphin names it: the disc's game ID, or "ID-<file>"
+// for a bare executable (SConfig::MakeGameID).
+let bootedGame = { kind: "", gameId: "", region: "" };
+let coreStopping = false;
+
+const coreLifecycle = createCoreLifecycle({
+  api: () => api,
+  isBooted: () => coreBoot.accepted,
+  // Same JIT bookkeeping as validationSetCorePaused: wall-clock pacing must
+  // not count the time spent paused.
+  beforeTransition: () => {
+    ppcWasmJitTimingSuspensions += 1;
+    resetPpcWasmJitTiming();
+  },
+  afterTransition: (paused) => {
+    ppcWasmJitCorePaused = paused;
+    resetPpcWasmJitTiming();
+    ppcWasmJitTimingSuspensions -= 1;
+  },
+  beforeStop: async () => {
+    try {
+      await flushUserData();
+    } finally {
+      // From here the cards are being torn down: no native flush.
+      coreStopping = true;
+    }
+  },
+  afterStop: async () => {
+    coreBoot = { ...coreBoot, accepted: false };
+    // Shutting the memory card down flushes its GCI files; keep them.
+    try {
+      await flushUserData();
+    } finally {
+      coreStopping = false;
+    }
+  }
+});
+
+function setUserDataStatus(fields) {
+  Object.assign(userDataStatus, fields);
+  return { ...userDataStatus };
+}
+
+function reportUserDataError(prefix, error) {
+  const message = `${prefix}: ${error?.message || error}`;
+  if (message !== userDataLastReportedError) {
+    userDataLastReportedError = message;
+    postStatus(message);
+  }
+  console.warn(`[user-data] ${message}`);
+}
+
+// Called once, at load, before any boot. "off" (?saves=off) plays without
+// touching stored saves. A restore failure leaves the mode "failed": the
+// next mountFile retries it and refuses to boot if it fails again.
+async function startUserDataPersistence(savesMode = "") {
+  if (userDataMirror || !moduleInstance?.FS) return { ...userDataStatus };
+  if (savesMode === "off") {
+    return setUserDataStatus({ mode: "off", reason: "saves disabled for this page (?saves=off)" });
+  }
+  let primitives;
+  try {
+    primitives = await openOpfsPrimitives();
+  } catch (error) {
+    return setUserDataStatus({ mode: "unavailable", reason: String(error?.message || error) });
+  }
+  const lock = await acquireWriterLock().catch((error) => ({ granted: false, reason: String(error?.message || error) }));
+  const readOnly = !lock.granted;
+  userDataMirror = createUserDataMirror({
+    fs: moduleInstance.FS,
+    store: createRecordStore(primitives, { readOnly }),
+    flushNative: () => (coreStopping || !api?.flushMemoryCards ? -1 : api.flushMemoryCards()),
+    log: (message) => console.warn(message)
+  });
+  setUserDataStatus({ readOnly, reason: readOnly ? `read-only: ${lock.reason}` : "" });
+  await restoreUserData();
+  if (!readOnly) {
+    setInterval(() => {
+      if (userDataStatus.mode !== "writer") return;
+      userDataMirror.sync().then(
+        () => {
+          userDataLastReportedError = "";
+        },
+        (error) => reportUserDataError("Saves are not being stored", error)
+      );
+    }, USER_DATA_SYNC_INTERVAL_MS);
+  }
+  return { ...userDataStatus };
+}
+
+async function restoreUserData() {
+  try {
+    const { restored, bytes } = await userDataMirror.restore();
+    console.log(`[user-data] restored ${restored} file(s), ${bytes} bytes from OPFS`);
+    return setUserDataStatus({
+      mode: userDataStatus.readOnly ? "read-only" : "writer",
+      persistent: !userDataStatus.readOnly,
+      reason: userDataStatus.readOnly ? userDataStatus.reason : "",
+      restored,
+      restoredBytes: bytes
+    });
+  } catch (error) {
+    reportUserDataError("Saves could not be restored", error);
+    return setUserDataStatus({ mode: "failed", persistent: false, reason: String(error?.message || error) });
+  }
+}
+
+// mountFile's gate: a game never boots on a card whose restore failed.
+async function ensureUserDataReady() {
+  if (userDataStatus.mode !== "failed") return;
+  await restoreUserData();
+  if (userDataStatus.mode === "failed") {
+    throw new Error(
+      `${userDataStatus.reason}. The game was not started, so it cannot overwrite them. ` +
+        "Reload to try again, or open the page with ?saves=off to play without saves."
+    );
+  }
+}
+
+// Resolves once every changed file is stored in OPFS and read back.
+// Throws when a copy fails (a full quota, for instance).
+async function flushUserData() {
+  if (!userDataMirror || userDataStatus.mode !== "writer") {
+    return { persistent: false, readOnly: userDataStatus.readOnly, mode: userDataStatus.mode, reason: userDataStatus.reason, written: 0 };
+  }
+  const written = await userDataMirror.flush();
+  return { persistent: true, mode: "writer", written, stats: { ...userDataMirror.stats } };
+}
+
+// For paths where the save itself succeeded: the OPFS copy's outcome is
+// part of the answer, and a failure is also posted as a status.
+async function flushUserDataReported() {
+  try {
+    return await flushUserData();
+  } catch (error) {
+    reportUserDataError("Saved for this session only, not stored", error);
+    return { persistent: false, mode: userDataStatus.mode, error: String(error?.message || error) };
+  }
+}
+
+// The game saves belong to: the booted one, or the one the caller names
+// (importing a save before booting, so the card holds it at insertion).
+function saveIdentity(payload = {}) {
+  if (coreBoot.accepted && bootedGame.gameId) return bootedGame;
+  if (payload.gameId) return { kind: "named", gameId: String(payload.gameId), region: String(payload.region || "") };
+  throw new Error("No game is booted; pass gameId and region to address its saves");
+}
+
+function cardFolder(identity, slot = "A") {
+  return gciFolderPath(USER_DATA_ROOT, identity.region, slot);
+}
+
+function listCardSaves(folder) {
+  const fs = moduleInstance.FS;
+  let names = [];
+  try {
+    names = fs.readdir(folder).filter((name) => name.toLowerCase().endsWith(".gci"));
+  } catch {
+    return [];
+  }
+  return names.sort().map((fileName) => {
+    const bytes = fs.readFile(`${folder}/${fileName}`);
+    try {
+      const info = parseGci(bytes);
+      const { gameCode, makerCode, fileName: saveName, blockCount } = info;
+      return { fileName, gameCode, makerCode, saveName, blockCount, size: bytes.byteLength, identity: memcardSaveIdentity(info) };
+    } catch (error) {
+      return { fileName, error: String(error.message || error), size: bytes.byteLength };
+    }
+  });
+}
+
+function stateSlotPath(identity, slot) {
+  const number = Number(slot);
+  if (!Number.isInteger(number) || number < 1 || number > 99) {
+    throw new Error(`Save state slot must be 1-99, got ${slot}`);
+  }
+  return `${USER_DATA_ROOT}/StateSaves/${identity.gameId}.s${String(number).padStart(2, "0")}`;
+}
+
+function mkdirTreeFs(dir) {
+  let current = "";
+  for (const part of dir.split("/").filter(Boolean)) {
+    current += `/${part}`;
+    try {
+      moduleInstance.FS.mkdir(current);
+    } catch {
+      // Already there.
+    }
+  }
+}
+
+function fsExists(path) {
+  return moduleInstance.FS.analyzePath(path).exists;
+}
+
+function fsRemove(path) {
+  try {
+    moduleInstance.FS.unlink(path);
+  } catch {
+    // Already gone.
+  }
+}
+
+function stagingPath(name) {
+  mkdirTreeFs(USER_DATA_STAGING);
+  return `${USER_DATA_STAGING}/${Date.now().toString(36)}-${Math.random().toString(36).slice(2)}-${name}`;
+}
+
+// Writes `bytes` to a staging name and reads them back.
+function stageBytes(name, bytes) {
+  const path = stagingPath(name);
+  moduleInstance.FS.writeFile(path, bytes);
+  const back = moduleInstance.FS.readFile(path);
+  if (back.byteLength !== bytes.byteLength || back.some((value, i) => value !== bytes[i])) {
+    fsRemove(path);
+    throw new Error(`${name}: the staged copy does not match`);
+  }
+  return path;
+}
+
+// Legacy slot API (api.loadState) used by the JIT timing paths.
+function loadStateSlot(slot) {
+  if (!api?.loadStateFile) throw new Error("This core build cannot load save states");
+  const path = stateSlotPath(saveIdentity(), slot);
+  if (!fsExists(path)) throw new Error(`Save state slot ${slot} is empty`);
+  return api.loadStateFile(path);
+}
+
+// Asks the CPU thread for a state at `path` (a fresh staging name) and
+// waits for it. Dolphin writes a temporary file and renames it, so the file
+// appears whole; it is then checked like an imported one.
+async function writeSaveState(path) {
+  if (!api?.saveStateFile) throw new Error("This core build cannot write save states");
+  if (!coreBoot.accepted) throw new Error("No game is booted");
+  const fs = moduleInstance.FS;
+  mkdirTreeFs(path.slice(0, path.lastIndexOf("/")) || "/");
+  fsRemove(path);
+  if (!api.saveStateFile(path)) {
+    throw new Error(`SaveStateFile refused (core ${api.getCoreStateName?.() || "unknown"})`);
+  }
+  for (let i = 0; i < 150; i += 1) {
+    await new Promise((resolve) => setTimeout(resolve, 100));
+    let bytes = null;
+    try {
+      if (fs.stat(path).size > 0) bytes = fs.readFile(path);
+    } catch {
+      // Not written yet.
+    }
+    if (bytes) {
+      validateSaveStateData(bytes);
+      return bytes;
+    }
+  }
+  fsRemove(path);
+  throw new Error("The save state was not written within 15 s");
+}
+
+// A slot save: written and checked under a staging name, then switched
+// over the slot, then stored. "saved" means the slot holds the new state.
+async function saveStateToSlot(slot) {
+  const identity = saveIdentity();
+  const slotPath = stateSlotPath(identity, slot);
+  const staged = stagingPath(`slot${slot}.sav`);
+  let bytes;
+  try {
+    bytes = await writeSaveState(staged);
+    checkSaveState(bytes, identity.gameId);
+  } catch (error) {
+    fsRemove(staged);
+    throw error;
+  }
+  mkdirTreeFs(slotPath.slice(0, slotPath.lastIndexOf("/")));
+  moduleInstance.FS.rename(staged, slotPath);
+  return { saved: true, slot, path: slotPath, size: bytes.byteLength, persisted: await flushUserDataReported() };
+}
+
+function transferable(bytes) {
+  const buffer = bytes.buffer.slice(bytes.byteOffset, bytes.byteOffset + bytes.byteLength);
+  return { buffer, transfer: [buffer] };
+}
+
+function importBytes(payload, limit, what) {
+  const bytes = new Uint8Array(payload.bytes ?? []);
+  if (bytes.byteLength === 0) throw new Error(`${what}: no bytes`);
+  if (bytes.byteLength > limit) throw new Error(`${what}: ${bytes.byteLength} bytes is more than ${limit}`);
+  return bytes;
+}
+
+// Moves staged GCI files onto the card, all or none. `plan` entries are
+// { staged, target, replaces } (replaces: an existing file of the same save).
+function commitCardFiles(plan) {
+  const done = [];
+  try {
+    for (const step of plan) {
+      if (step.replaces) {
+        const backup = stagingPath("replaced.gci");
+        moduleInstance.FS.rename(step.replaces, backup);
+        done.push({ from: backup, to: step.replaces });
+      }
+      if (fsExists(step.target)) throw new Error(`${step.target} appeared on the card during the import`);
+      moduleInstance.FS.rename(step.staged, step.target);
+      done.push({ from: step.target, to: step.staged });
+    }
+  } catch (error) {
+    for (const { from, to } of done.reverse()) {
+      try {
+        moduleInstance.FS.rename(from, to);
+      } catch {
+        // Best effort: the error below names the import as failed.
+      }
+    }
+    throw new Error(`Import rolled back: ${error?.message || error}`);
+  }
+  // Committed: drop the backups of replaced saves.
+  for (const { from } of done) {
+    if (from.startsWith(USER_DATA_STAGING)) fsRemove(from);
+  }
+}
+
+async function waitForLoadedCheckpoint(generationBefore, timeoutMs = 5000) {
+  const deadline = Date.now() + timeoutMs;
+  while (Date.now() < deadline) {
+    if (readLastLoadedCheckpoint().generation !== generationBefore) return true;
+    await new Promise((resolve) => setTimeout(resolve, 50));
+  }
+  return false;
+}
+
+async function handleSavesMessage(type, payload) {
+  switch (type) {
+    case "flushUserData":
+      return flushUserData();
+    case "listUserData": {
+      const identity = coreBoot.accepted ? bootedGame : null;
+      const states = [];
+      try {
+        for (const name of moduleInstance.FS.readdir(`${USER_DATA_ROOT}/StateSaves`)) {
+          if (/\.s\d\d$/.test(name)) states.push(name);
+        }
+      } catch {
+        // No state yet.
+      }
+      return {
+        userData: { ...userDataStatus, stats: userDataMirror ? { ...userDataMirror.stats } : null },
+        game: identity,
+        cards: identity
+          ? { A: listCardSaves(cardFolder(identity, "A")), B: listCardSaves(cardFolder(identity, "B")) }
+          : null,
+        regions: (() => {
+          try {
+            return moduleInstance.FS.readdir(`${USER_DATA_ROOT}/GC`).filter((name) => !name.startsWith("."));
+          } catch {
+            return [];
+          }
+        })(),
+        // Dolphin creates a slot's folder when it inserts the card there.
+        inserted: identity
+          ? { A: fsExists(cardFolder(identity, "A")), B: fsExists(cardFolder(identity, "B")) }
+          : null,
+        states: states.sort()
+      };
+    }
+    case "exportMemcard": {
+      const identity = saveIdentity(payload);
+      const folder = cardFolder(identity, payload.slot || "A");
+      if (payload.format === "gci") {
+        const name = String(payload.fileName || "");
+        if (!name || name.includes("/")) throw new Error("exportMemcard gci: fileName is required");
+        if (!fsExists(`${folder}/${name}`)) throw new Error(`${name} is not on memory card ${payload.slot || "A"}`);
+        const bytes = moduleInstance.FS.readFile(`${folder}/${name}`);
+        parseGci(bytes);
+        const { buffer, transfer } = transferable(bytes);
+        return { format: "gci", fileName: name, bytes: buffer, transfer };
+      }
+      if (payload.format !== "raw") throw new Error(`exportMemcard: format must be gci or raw, got ${payload.format}`);
+      const saves = listCardSaves(folder).filter((save) => !save.error);
+      const card = buildRawCard(saves.map((save) => moduleInstance.FS.readFile(`${folder}/${save.fileName}`)));
+      const { buffer, transfer } = transferable(card);
+      return { format: "raw", saves: saves.length, fileName: `MemoryCard${payload.slot || "A"}.raw`, bytes: buffer, transfer };
+    }
+    case "importMemcard": {
+      const identity = saveIdentity(payload);
+      const slot = payload.slot || "A";
+      const folder = cardFolder(identity, slot);
+      // 1. Validate everything: size, structure, game, collisions.
+      const bytes = importBytes(payload, MAX_CARD_BYTES, "importMemcard");
+      const kind = sniffMemcardFile(bytes);
+      const incoming = kind === "gci" ? [{ ...parseGci(bytes), bytes }] : parseRawCard(bytes).saves;
+      const gameCode = identity.gameId.slice(0, 4);
+      const accepted = payload.anyGame ? incoming : incoming.filter((save) => save.gameCode === gameCode);
+      if (accepted.length === 0) {
+        throw new Error(
+          `No save for game ${gameCode} in this ${kind} file (found ${[...new Set(incoming.map((s) => s.gameCode))].join(", ") || "none"})`
+        );
+      }
+      const existing = new Map();
+      for (const save of listCardSaves(folder)) if (save.identity) existing.set(save.identity, save.fileName);
+      const clashes = accepted.filter((save) => existing.has(memcardSaveIdentity(save)));
+      if (clashes.length && !payload.replace) {
+        throw new Error(
+          `Already on card ${slot}: ${clashes.map((s) => `${s.gameCode} "${s.fileName}"`).join(", ")}. Nothing was imported; pass replace to overwrite.`
+        );
+      }
+      // 2. Stage and read back; 3. switch all or none.
+      const plan = [];
+      try {
+        for (const save of accepted) {
+          const replaced = existing.get(memcardSaveIdentity(save));
+          plan.push({
+            staged: stageBytes("import.gci", save.bytes),
+            target: replaced ? `${folder}/${replaced}` : `${folder}/${gciFileName(save)}`,
+            replaces: replaced ? `${folder}/${replaced}` : null,
+            fileName: replaced || gciFileName(save)
+          });
+        }
+        mkdirTreeFs(folder);
+        commitCardFiles(plan);
+      } catch (error) {
+        for (const step of plan) fsRemove(step.staged);
+        throw error;
+      }
+      // 4. Store. Dolphin reads the GCI folder when the card goes in, at boot.
+      return {
+        kind,
+        imported: plan.map((step) => step.fileName),
+        replaced: plan.filter((step) => step.replaces).map((step) => step.fileName),
+        skipped: incoming.length - accepted.length,
+        restartRequired: coreBoot.accepted,
+        persisted: await flushUserDataReported()
+      };
+    }
+    case "exportSaveState": {
+      const identity = saveIdentity();
+      const slotPath = payload.slot ? stateSlotPath(identity, payload.slot) : "";
+      if (slotPath && !fsExists(slotPath)) throw new Error(`Save state slot ${payload.slot} is empty`);
+      let bytes;
+      if (slotPath) {
+        bytes = moduleInstance.FS.readFile(slotPath);
+      } else {
+        const staged = stagingPath("export.sav");
+        try {
+          bytes = await writeSaveState(staged);
+        } finally {
+          fsRemove(staged);
+        }
+      }
+      const header = checkSaveState(bytes, identity.gameId);
+      const { buffer, transfer } = transferable(bytes);
+      return { ...header, fileName: `${identity.gameId}.${payload.slot ? `s${String(payload.slot).padStart(2, "0")}` : "sav"}`, bytes: buffer, transfer };
+    }
+    case "importSaveState": {
+      const identity = saveIdentity();
+      // 1. Validate: game, state version, and the whole payload.
+      const bytes = importBytes(payload, MAX_STATE_BYTES, "importSaveState");
+      const header = checkSaveState(bytes, identity.gameId);
+      validateSaveStateData(bytes);
+      const slotPath = payload.slot ? stateSlotPath(identity, payload.slot) : "";
+      // Only the core can check a state's subsystems. A state it has not
+      // loaded may fill an empty slot, never replace a saved one, whatever
+      // replace says: loading a bad one later fails and Dolphin undoes it,
+      // overwriting a good one loses it.
+      if (slotPath && fsExists(slotPath) && payload.load === false) {
+        throw new Error(
+          `Save state slot ${payload.slot} is in use. A state replaces a saved one only once the core has loaded it: import it with load, or pick an empty slot.`
+        );
+      }
+      // 2. Stage and read back.
+      const staged = stageBytes("import.sav", bytes);
+      let result = { loaded: false };
+      try {
+        // 3. Dolphin's own check: load it, from the staging name.
+        if (payload.load !== false) {
+          const generation = readLastLoadedCheckpoint().generation;
+          result = await handleMessage("loadStateFile", { fsPath: staged });
+          if (!result.loaded || !(await waitForLoadedCheckpoint(generation))) {
+            throw new Error(`The core did not load the save state (rc=${result.rc}); slot ${payload.slot || "-"} is unchanged`);
+          }
+        }
+      } catch (error) {
+        fsRemove(staged);
+        throw error;
+      }
+      if (!slotPath) {
+        fsRemove(staged);
+        return { ...result, ...header, path: "", persisted: null };
+      }
+      // 4. Switch the slot, then store.
+      mkdirTreeFs(slotPath.slice(0, slotPath.lastIndexOf("/")));
+      moduleInstance.FS.rename(staged, slotPath);
+      return { ...result, ...header, path: slotPath, persisted: await flushUserDataReported() };
+    }
+    default:
+      throw new Error(`Unknown saves message: ${type}`);
+  }
+}
+
 async function mountFile(file) {
   if (!moduleInstance) {
     throw new Error("Upstream core must be loaded before mounting a disc");
@@ -2719,6 +3383,7 @@ async function mountFile(file) {
   if (!file) {
     throw new Error("No disc file was provided to the upstream worker");
   }
+  await ensureUserDataReady();
 
   const fs = moduleInstance.FS;
   const safeName = sanitizeDiscFileName(file.name);
@@ -2738,13 +3403,32 @@ async function mountFile(file) {
   const _t_workerfs = performance.now();
   fs.mount(resolveWorkerFs(moduleInstance), { blobs: [{ name: safeName, data: file }] }, WORKERFS_MOUNT_DIR);
   mounted = true;
+  // P6: the disc's key for the region cache is read from this File only when
+  // a region cache is first opened, never during boot: this worker serves the
+  // core's file reads, and extra work here while the core boots shifts what
+  // the emulated game shows. A generation per mount keeps a slow read for a
+  // previous disc from landing.
+  aotDiscGeneration += 1;
+  aotDiscKey = null;
+  aotDiscKeyPromise = null;
+  aotDiscFile = file;
   console.log(`[boot-phase] fs.mount(WORKERFS) took ${(performance.now() - _t_workerfs).toFixed(1)}ms (${(file.size / 1048576).toFixed(1)}MiB image)`);
 
-  const _t_mount = performance.now();
-  const accepted = api.mountDisc(path);
-  console.log(`[boot-phase] api.mountDisc() took ${(performance.now() - _t_mount).toFixed(1)}ms`);
-  if (!accepted) {
-    throw new Error("Upstream Dolphin DiscIO rejected the selected disc");
+  // A .dol/.elf is no disc: DiscIO cannot open it, and BootDisc's
+  // GenerateFromFile boots it directly, whatever its size.
+  const bootKind = bootFileKind(safeName);
+  let executable = null;
+  if (bootKind === "disc") {
+    const _t_mount = performance.now();
+    const accepted = api.mountDisc(path);
+    console.log(`[boot-phase] api.mountDisc() took ${(performance.now() - _t_mount).toFixed(1)}ms`);
+    if (!accepted) {
+      throw new Error("Upstream Dolphin DiscIO rejected the selected disc");
+    }
+  } else {
+    const head = new Uint8Array(await file.slice(0, BOOT_FILE_HEAD_BYTES).arrayBuffer());
+    executable = checkExecutable(bootKind, head, file.size);
+    if (!api.bootDisc) throw new Error("This core build cannot boot executables (no BootDisc export)");
   }
 
   coreBoot = {
@@ -2760,7 +3444,7 @@ async function mountFile(file) {
   lastPresentedAt = 0;
   presentedFrame = 0;
 
-  if (api.bootDisc && file.size >= MIN_FULL_BOOT_BYTES) {
+  if (api.bootDisc && (executable || file.size >= MIN_FULL_BOOT_BYTES)) {
     coreBoot.attempted = true;
     const _t_boot = performance.now();
     coreBoot.accepted = Boolean(api.bootDisc(path));
@@ -2769,6 +3453,14 @@ async function mountFile(file) {
       rendererDiagnostics.videoBackendEvidence = "SetVideoBackend invoked and BootDisc accepted";
     }
     console.log(`[boot-phase] api.bootDisc() took ${(performance.now() - _t_boot).toFixed(1)}ms`);
+    if (executable && !coreBoot.accepted) {
+      throw new Error(`Dolphin refused the ${bootKind}: ${api.getCoreStatus?.() || "no status"}`);
+    }
+    bootedGame = executable
+      // An executable has no region: Dolphin falls back to its default one,
+      // PAL in the browser (no host locale; observed as GC/EUR).
+      ? { kind: bootKind, gameId: executableGameId(path), region: "PAL" }
+      : { kind: "disc", gameId: api.getGameId() || "", region: api.getRegion() || "" };
     const _t_pump = performance.now();
     api.pumpHostJobs?.();
     console.log(`[boot-phase] api.pumpHostJobs() took ${(performance.now() - _t_pump).toFixed(1)}ms`);
@@ -2779,6 +3471,9 @@ async function mountFile(file) {
   const metadata = metadataPayload();
   return {
     ...metadata,
+    ...(executable
+      ? { title: file.name, gameId: "", platform: "GameCube", region: "", bootKind, entryPoint: executable.entryPoint }
+      : { bootKind }),
     bootProbe: bootProbePayload(metadata),
     path,
     ...framePayload()
@@ -5605,6 +6300,9 @@ const DOLPHIN_JIT_CACHE_MAX = 49152; // hard cap on in-memory entries
 // extensions, GC. ALWAYS validate in real browser before shipping changes
 // to PTHREAD_POOL_SIZE.
 const DOLPHIN_JIT_IDB_BOOT_LOAD_MAX = 8192;
+// Upper bound on each pre-boot compile pass over the cache (boot load, then
+// lazy fill), whatever compiles the modules.
+const DOLPHIN_JIT_BOOT_COMPILE_BUDGET_MS = 30_000;
 const DOLPHIN_JIT_FINGERPRINT_KEY = "buildFingerprint";
 const DOLPHIN_JIT_ENTRY_KEY_SCHEMA_KEY = "entryKeySchema";
 let dolphinJitIdb = null;
@@ -5702,8 +6400,8 @@ function clearDolphinJitModulesStore(db) {
   });
 }
 async function loadDolphinJitCacheFromIdb(db) {
-  if (!db) return 0;
-  const entries = await new Promise((resolve) => {
+  if (!db && !dolphinJitBlockStore) return 0;
+  const entries = dolphinJitBlockStore ? await readDolphinJitStoredEntries() : await new Promise((resolve) => {
     const out = [];
     try {
       const tx = db.transaction(DOLPHIN_JIT_IDB_STORE, "readonly");
@@ -5733,8 +6431,12 @@ async function loadDolphinJitCacheFromIdb(db) {
   // warm-boot compile drops to ~1-3 s. Module is structured-cloneable
   // so each pthread still receives ready-to-instantiate Modules.
   const COMPILE_BATCH = 64;
+  const compileStartedAt = performance.now();
   for (let i = 0; i < entries.length; i += COMPILE_BATCH) {
     if (dolphinJitCacheMap.size >= DOLPHIN_JIT_IDB_BOOT_LOAD_MAX) break;
+    // The boot never waits longer than this on the cache; what is left is
+    // compiled when the game asks for it.
+    if (performance.now() - compileStartedAt > DOLPHIN_JIT_BOOT_COMPILE_BUDGET_MS) break;
     const candidates = [];
     for (const { key, value } of entries.slice(i, i + COMPILE_BATCH)) {
       if (!(value instanceof Uint8Array) && !(value instanceof ArrayBuffer)) continue;
@@ -5747,9 +6449,17 @@ async function loadDolphinJitCacheFromIdb(db) {
       buf,
       valid: await verifyCanonicalWasmBlockKey(String(key), buf)
     })));
+    // At most the first DOLPHIN_JIT_BOOT_WARM_MAX blocks of the block store
+    // are warmed (packs are in the order blocks were first compiled). Every
+    // block, today: measured by phys_footprint, warming all ~19 500 costs
+    // +25 to +40 MB at the end of a race and +110 MB at peak, and a 2048
+    // budget lost the whole gain on menu hitches (measures/aot/memory-aotcompiler.md).
     const batch = verified
       .filter(({ valid }) => valid)
-      .map(({ key, buf }) => ({ key, p: WebAssembly.compile(buf) }));
+      .map(({ key, buf }) => ({
+        key,
+        p: compileDolphinJitModuleOffThread(buf, DELIVER_BEFORE_WARM, takeDolphinJitWarmSlot())
+      }));
     const res = await Promise.allSettled(batch.map((b) => b.p));
     for (let k = 0; k < res.length; k++) {
       if (res[k].status === "fulfilled") {
@@ -5762,13 +6472,20 @@ async function loadDolphinJitCacheFromIdb(db) {
   return loaded;
 }
 async function writeDolphinJitEntryToIdb(hash, bytes) {
-  if (!dolphinJitIdb) return;
+  if (!dolphinJitIdb && !dolphinJitBlockStore) return;
   const buf = bytes instanceof ArrayBuffer ? new Uint8Array(bytes) : bytes;
   if (!(buf instanceof Uint8Array) || !(await verifyCanonicalWasmBlockKey(String(hash), buf))) {
     if (!self._dolphinJitIdbIdentityErrLogged) {
       self._dolphinJitIdbIdentityErrLogged = true;
       postStatus("jit-cache: rejected IDB write with mismatched block identity");
     }
+    return;
+  }
+  if (dolphinJitBlockStore) {
+    // Buffered into packs; counted as written once handed over, as an
+    // IndexedDB put was counted on success.
+    dolphinJitBlockStore.append(String(hash), buf);
+    dolphinJitIdbWriteCount += 1;
     return;
   }
   try {
@@ -5834,9 +6551,21 @@ async function fetchWasmAndFingerprint(coreUrlValue, expectedSha256 = DEFAULT_UP
 // Open IDB eagerly so loadCore() doesn't pay the open latency. Module load
 // is deferred until the build fingerprint is computed (after fetching the
 // wasm) so we can skip / clear stale entries from a previous build.
+// P6: with CacheStorage the blocks live in the block store (src/aot-cache.js)
+// and the IndexedDB database is only opened to migrate and delete it; opening
+// it here would recreate it.
 const dolphinJitIdbReady = (async () => {
-  dolphinJitIdb = await openDolphinJitIdb();
+  if (!globalThis.caches) dolphinJitIdb = await openDolphinJitIdb();
 })();
+let dolphinJitBlockStore = null;
+let dolphinJitBlockStoreEntries = null; // read once at boot, reused by the lazy fill
+let dolphinJitLegacyMigration = null;
+async function readDolphinJitStoredEntries() {
+  if (!dolphinJitBlockStoreEntries) {
+    dolphinJitBlockStoreEntries = (await dolphinJitBlockStore.entries()).map(({ key, bytes }) => ({ key, value: bytes }));
+  }
+  return dolphinJitBlockStoreEntries;
+}
 // When the persistent JIT cache loaded a non-trivial number of modules
 // for this build at boot, maybeEnablePpcWasmJit will skip the warmup
 // frame gate and engage JIT essentially immediately. Without this,
@@ -5852,7 +6581,12 @@ const DOLPHIN_JIT_PREWARM_THRESHOLD = 50;
 // equal-or-better coverage already).
 async function maybeSeedIdbFromPrebuiltCache(coreUrlValue, currentFingerprint) {
   await dolphinJitIdbReady;
-  if (!dolphinJitIdb || !currentFingerprint) return 0;
+  const blockStore = dolphinJitBlockStore;
+  if ((!dolphinJitIdb && !blockStore) || !currentFingerprint) return 0;
+  if (blockStore) {
+    // The store's identity is the core: anything in it is this build's.
+    if ((await readDolphinJitStoredEntries()).length >= DOLPHIN_JIT_PREWARM_THRESHOLD) return 0;
+  } else {
   // Skip when IDB already has matching-fingerprint entries — the prebuilt
   // file is for FIRST-session cold start only. Once IDB has accumulated
   // real entries, the user's own cache is a better fit than our shipped one.
@@ -5870,6 +6604,7 @@ async function maybeSeedIdbFromPrebuiltCache(coreUrlValue, currentFingerprint) {
       // User's IDB already pre-warmed enough — no need to seed from prebuilt.
       return 0;
     }
+  }
   }
   const prebuiltUrl = new URL("prebuilt-jit-cache.bin", coreUrlValue).href;
   let buffer;
@@ -5916,6 +6651,12 @@ async function maybeSeedIdbFromPrebuiltCache(coreUrlValue, currentFingerprint) {
   if (overflow.length > 0) {
     dolphinJitPrebuiltOverflow = overflow;
   }
+  if (blockStore) {
+    await blockStore.appendMany(boot.map(({ key, bytes }) => ({ key, bytes })));
+    dolphinJitBlockStoreEntries = null;
+    postStatus(`jit-cache: seeded ${boot.length} prebuilt modules into the block store (fingerprint match)`);
+    return boot.length;
+  }
   const seeded = await new Promise((resolve) => {
     try {
       const tx = dolphinJitIdb.transaction(DOLPHIN_JIT_IDB_STORE, "readwrite");
@@ -5948,6 +6689,42 @@ async function maybeSeedIdbFromPrebuiltCache(coreUrlValue, currentFingerprint) {
 
 async function reconcileJitCacheWithBuild(fingerprint) {
   await dolphinJitIdbReady;
+  if (globalThis.caches && fingerprint) {
+    try {
+      dolphinJitBlockStore = await openAotBlockStore({ coreHash: fingerprint, baseUrl: AOT_BASE_URL });
+    } catch (err) {
+      dolphinJitBlockStore = null;
+      postStatus(`jit-cache: block store unavailable: ${err?.message || err}`);
+    }
+  }
+  if (dolphinJitBlockStore) {
+    if (dolphinJitBlockStore.reset) {
+      postStatus(`jit-cache: identity reset (${dolphinJitBlockStore.reset}); cleared unverified modules`);
+    }
+    try {
+      dolphinJitLegacyMigration = await migrateLegacyJitIdb({ store: dolphinJitBlockStore, coreFingerprint: fingerprint });
+    } catch (err) {
+      // The old database stays for the next boot; this one starts without it.
+      dolphinJitLegacyMigration = { found: true, moved: 0, dropped: 0, reason: `error: ${err?.message || err}` };
+    }
+    if (dolphinJitLegacyMigration.found) {
+      postStatus(
+        `jit-cache: IndexedDB cache migrated (${dolphinJitLegacyMigration.reason}: ` +
+        `${dolphinJitLegacyMigration.moved} moved, ${dolphinJitLegacyMigration.dropped} dropped) and deleted`
+      );
+    }
+    const loadedFromStore = await loadDolphinJitCacheFromIdb(null);
+    if (loadedFromStore > 0) postStatus(`jit-cache: loaded ${loadedFromStore} compiled modules from the block store`);
+    if (loadedFromStore >= DOLPHIN_JIT_PREWARM_THRESHOLD) {
+      dolphinJitCachePreWarmed = true;
+      postStatus(
+        `jit-cache: pre-warmed with ${loadedFromStore} modules; JIT warmup gate will be skipped on this session`
+      );
+    }
+    return loadedFromStore;
+  }
+  // No block store after all (CacheStorage refused): the IndexedDB path.
+  if (!dolphinJitIdb) dolphinJitIdb = await openDolphinJitIdb();
   if (!dolphinJitIdb) return 0;
   const [storedFingerprint, storedEntryKeySchema] = await Promise.all([
     readDolphinJitMetadata(dolphinJitIdb, DOLPHIN_JIT_FINGERPRINT_KEY),
@@ -5990,6 +6767,252 @@ async function reconcileJitCacheWithBuild(fingerprint) {
   }
   return loaded;
 }
+// P6 (plan piste 3): the region cache of the mounted disc under this core.
+// Entries are keyed by region fingerprint and stored under
+// (disc, core, compiler version, JIT flags); see src/aot-cache.js.
+const AOT_BASE_URL = new URL("../", import.meta.url).href;
+let aotDiscKey = null;
+let aotDiscGeneration = 0;
+let aotDiscKeyPromise = null;
+let aotDiscFile = null;
+function readMountedDiscKey() {
+  if (!aotDiscKeyPromise) {
+    const generation = aotDiscGeneration;
+    aotDiscKeyPromise = readDiscKeyFromFile(aotDiscFile).then(
+      (key) => (generation === aotDiscGeneration ? (aotDiscKey = key) : null),
+      () => null
+    );
+  }
+  return aotDiscKeyPromise;
+}
+let aotCoreFingerprint = null;
+export async function openDolphinAotCache({ compilerVersion, flagsMask = 0, coreHash = null, onProgress = null }) {
+  const generation = aotDiscGeneration;
+  const discKey = aotDiscKey ?? await readMountedDiscKey();
+  if (generation !== aotDiscGeneration) return null;
+  const core = coreHash ?? aotCoreFingerprint;
+  if (!discKey || !core) return null;
+  return openAotCache({ discKey, coreHash: core, compilerVersion, flagsMask, baseUrl: AOT_BASE_URL, onProgress });
+}
+// Harness probe of the whole cache path with modules the caller provides:
+// store what is missing, load everything back (through the Service Worker
+// when it controls this worker), then time calls. `coreHash` stands in for
+// another core to check invalidation. Self-contained modules only (no
+// imports): the probe never touches the emulator's memory.
+async function runAotCacheProbe({ modules = [], compilerVersion = "probe-1", flagsMask = 0, coreHash = null, arg = 64, hotRounds = 0, settleMs = 0 } = {}) {
+  const cache = await openDolphinAotCache({ compilerVersion, flagsMask, coreHash });
+  if (!cache) return { error: "no-aot-cache", discKey: aotDiscKey, core: aotCoreFingerprint };
+  const keys = modules.map((m) => m.key);
+  const present = await cache.has(keys);
+  const missing = modules.filter((m) => !present.has(m.key)).map((m) => ({ key: m.key, bytes: new Uint8Array(m.bytes) }));
+  const { failed } = await cache.put(missing);
+  const t0 = performance.now();
+  const loaded = await cache.load(keys);
+  const loadMs = performance.now() - t0;
+  const fns = [];
+  const reasons = {};
+  for (const [key, entry] of loaded) {
+    if (!entry.module) {
+      reasons[entry.reason] = (reasons[entry.reason] || 0) + 1;
+      continue;
+    }
+    for (const value of Object.values(new WebAssembly.Instance(entry.module).exports)) {
+      if (typeof value === "function") fns.push(value);
+    }
+    void key;
+  }
+  const round = () => {
+    const start = performance.now();
+    for (const fn of fns) fn(arg);
+    return performance.now() - start;
+  };
+  const rounds = [round(), round()];
+  for (let i = 0; i < hotRounds; i += 1) rounds.push(round());
+  if (settleMs > 0) await new Promise((resolve) => setTimeout(resolve, settleMs));
+  return {
+    discKey: aotDiscKey,
+    cacheName: cache.cacheName,
+    reset: cache.reset,
+    pruned: cache.pruned,
+    viaServiceWorker: await cache.viaServiceWorker(),
+    present: present.size,
+    stored: missing.length - failed.length,
+    failed,
+    loadReasons: reasons,
+    functions: fns.length,
+    loadMs,
+    firstRoundMs: rounds[0],
+    secondRoundMs: rounds[1],
+    lastRoundMs: rounds[rounds.length - 1],
+    stats: cache.stats()
+  };
+}
+// P5 (plan piste 3): cached and requested modules are compiled in a
+// dedicated worker that also runs every entry point once on scratch memory, so
+// V8's lazy Liftoff code exists before a pthread instantiates the Module. The
+// CPU thread is left with instantiation only. No worker: compile in place.
+// Modules loaded at boot are handed over at once and warmed in the background
+// (nothing calls them before the JIT engages); requested ones after warm-up.
+let dolphinAotCompiler = null;
+function getDolphinAotCompiler() {
+  if (!dolphinAotCompiler) {
+    dolphinAotCompiler = createAotCompilerClient({
+      createWorker: dolphinAotCompilerWorkerFactoryForTest ?? (() => new Worker(new URL("./aot-compiler-worker.js", import.meta.url), {
+        type: "module",
+        name: AOT_COMPILER_WORKER_NAME
+      })),
+      onEvent: (event) => {
+        if (event.type === "warm-timeout") {
+          postStatus("jit-cache: compiler worker warm-up timed out; worker restarted");
+        }
+      }
+    });
+  }
+  return dolphinAotCompiler;
+}
+// Off by default (?aotcompiler=1 turns it on): without it, cached and
+// requested modules compile in place on this worker, as before.
+let dolphinAotCompilerEnabled = false;
+export function setDolphinAotCompilerForTest({ enabled, createWorker } = {}) {
+  dolphinAotCompilerEnabled = enabled === true;
+  dolphinAotCompiler?.terminate();
+  dolphinAotCompiler = null;
+  dolphinAotCompilerWorkerFactoryForTest = createWorker ?? null;
+}
+let dolphinAotCompilerWorkerFactoryForTest = null;
+// Cached modules: compiled in place (validation only, V8 compiles lazily) unless
+// they are among the first ones the session will run, which are warmed.
+const DOLPHIN_JIT_BOOT_WARM_MAX = Infinity;
+let dolphinJitBootWarmed = 0;
+// One budget over boot load and lazy fill, with or without the block store
+// (without it, IndexedDB's order is the keys', so the budget is all or none).
+export function takeDolphinJitWarmSlot() {
+  return dolphinJitBootWarmed++ < DOLPHIN_JIT_BOOT_WARM_MAX;
+}
+function compileDolphinJitModuleOffThread(bytes, deliver, warm) {
+  if (!dolphinAotCompilerEnabled || !warm) return WebAssembly.compile(bytes);
+  return getDolphinAotCompiler().compile(bytes, { deliver }).then((result) => result.module);
+}
+// How a Module reaches the CPU thread. That pthread never returns to its
+// event loop while it emulates, so a message to it lands only before boot
+// (the pre-boot fence of installDolphinPthreadChannels). During a session the
+// way in is V8's native module cache, keyed by the module's bytes: a Module
+// compiled here (and warmed by the compiler worker) that stays alive in
+// dolphinJitCacheMap turns the CPU thread's own synchronous
+// `new WebAssembly.Module(bytes)` of the same bytes into a cache hit, Liftoff
+// code included (3 000 blocks: compile 70 -> 33 ms, first call 89 -> 5 ms;
+// measures/aot/q8). So the work here is: precompile, warm, keep alive.
+//
+// Contract with the JIT owner (CPU pthread side):
+//   {type: "dolphin-jit-compile-request", key, bytes, kind, readyPtr, readySlot}
+//     asks for that precompilation. The core owns a byte table in its heap at
+//     readyPtr (one byte per slot, slot = first 16 bits of the key's SHA-256),
+//     zeroes the slot before asking and interprets the block meanwhile. Once
+//     the Module is compiled, warmed and kept alive, or once compiling failed,
+//     the slot is set to 1 here (Atomics.store); the core then compiles the
+//     bytes itself, synchronously: a cache hit, or the engine's own verdict
+//     (CompileError: blacklist; out of memory: transient). A slot is shared
+//     by every key with the same 16 bits: 1 means "some request of this slot
+//     finished", never "this key's Module is here". The core must always
+//     compile its own bytes on retry; a collision then costs one synchronous
+//     compile that misses V8's cache, never a wrong module.
+//   {type: "dolphin-jit-warm-state", statePtr, state} the scratch state that
+//     makes every entry point leave at its first downcount test. No core
+//     sends it yet (regions, P4, will); blocks warm on a zeroed state.
+// The key is the core's, used as is: block keys are also the IndexedDB keys,
+// so only a key that matches its bytes is persisted.
+let dolphinJitCompileRequestCount = 0;
+let dolphinJitCompileRequestFailures = 0;
+const dolphinJitCompileRequestsInFlight = new Map(); // key -> Promise of the outcome
+
+// Compile and warm `bytes` off the CPU thread and keep the Module alive under
+// `key`. Resolves {module} or {reason} (compile, link, oom, key-mismatch,
+// cache-full); never rejects. Also the entry point for ahead-of-time callers.
+export function precompileDolphinJitModule(key, input) {
+  key = String(key ?? "");
+  let bytes = input instanceof ArrayBuffer ? new Uint8Array(input) : input;
+  if (!key || !(bytes instanceof Uint8Array)) return Promise.resolve({ reason: "compile" });
+  const cached = dolphinJitCacheMap.get(key);
+  if (cached) return Promise.resolve({ module: cached });
+  const inFlight = dolphinJitCompileRequestsInFlight.get(key);
+  if (inFlight) return inFlight;
+  // A view of the wasm heap: copy the module out (digest and worker transfer
+  // need its own buffer, and the heap must never be handed over).
+  if (bytes.buffer instanceof SharedArrayBuffer) bytes = bytes.slice();
+  const outcome = (async () => {
+    // A block key names the SHA-256 of its bytes: one that does not match is
+    // never cached under that name (as for every other cache entry). Keys of
+    // any other schema are refused until regions (P4) define how theirs are
+    // checked.
+    const blockKey = key.startsWith(`${JIT_CACHE_ENTRY_KEY_SCHEMA}:`);
+    if (!blockKey) return { reason: "bad-key" };
+    if (!(await verifyCanonicalWasmBlockKey(key, bytes))) {
+      postStatus("jit-cache: rejected compile request with mismatched block identity");
+      return { reason: "key-mismatch" };
+    }
+    let mod;
+    try {
+      mod = dolphinAotCompilerEnabled
+        ? await getDolphinAotCompiler().compile(bytes).then((result) => result.module)
+        : await WebAssembly.compile(bytes);
+    } catch (err) {
+      return { reason: compileFailureReason(err) };
+    }
+    if (dolphinJitCacheMap.size >= DOLPHIN_JIT_CACHE_MAX) return { reason: "cache-full", module: mod };
+    dolphinJitCacheMap.set(key, mod);
+    if (dolphinJitCachePersistenceEnabled) void writeDolphinJitEntryToIdb(key, bytes);
+    return { module: mod };
+  })().finally(() => dolphinJitCompileRequestsInFlight.delete(key));
+  dolphinJitCompileRequestsInFlight.set(key, outcome);
+  return outcome;
+}
+
+async function handleDolphinJitCompileRequest(event) {
+  const data = event.data;
+  if (data?.type === "dolphin-jit-warm-state") {
+    if (data.state instanceof Uint8Array && dolphinAotCompilerEnabled) getDolphinAotCompiler().setWarmState(data);
+    return;
+  }
+  if (!data || data.type !== "dolphin-jit-compile-request") return;
+  const key = String(data.key ?? data.hash ?? "");
+  if (!key || !data.bytes) return;
+  dolphinJitCompileRequestCount += 1;
+  const firstAsk = !dolphinJitCompileRequestsInFlight.has(key);
+  const outcome = await precompileDolphinJitModule(key, data.bytes);
+  if (!firstAsk) return; // the first request marks the slot
+  if (!outcome.module || outcome.reason) dolphinJitCompileRequestFailures += 1;
+  markDolphinJitModuleReady(data.readyPtr, data.readySlot);
+}
+
+const DOLPHIN_JIT_READY_SLOTS = 1 << 16;
+let dolphinJitReadyHeapForTest = null;
+let dolphinJitReadyTablePtrForTest = null;
+let dolphinJitReadyRejected = 0;
+export function dolphinJitReadyStatsForTest() {
+  return { marks: dolphinJitReadyMarks, rejected: dolphinJitReadyRejected };
+}
+export function setDolphinJitReadyHeapForTest(heap, tablePtr = null) {
+  dolphinJitReadyHeapForTest = heap;
+  dolphinJitReadyTablePtrForTest = tablePtr;
+}
+let dolphinJitReadyMarks = 0;
+// The only byte ever written into the core's heap from here: a slot of the
+// table the core itself reports (_DolphinWeb_JitReadyBitsPtr); a request
+// naming any other address is ignored.
+function markDolphinJitModuleReady(readyPtr, readySlot) {
+  if (!Number.isInteger(readyPtr) || !Number.isInteger(readySlot)) return;
+  if (readyPtr <= 0 || readySlot < 0 || readySlot >= DOLPHIN_JIT_READY_SLOTS) return;
+  const tablePtr = dolphinJitReadyTablePtrForTest ?? moduleInstance?._DolphinWeb_JitReadyBitsPtr?.();
+  if (!Number.isInteger(tablePtr) || readyPtr !== tablePtr) {
+    dolphinJitReadyRejected += 1;
+    return;
+  }
+  const buffer = (dolphinJitReadyHeapForTest ?? moduleInstance?.HEAPU8)?.buffer;
+  if (!(buffer instanceof SharedArrayBuffer) || readyPtr + readySlot >= buffer.byteLength) return;
+  Atomics.store(new Uint8Array(buffer), readyPtr + readySlot, 1);
+  dolphinJitReadyMarks += 1;
+}
+
 let dolphinJitNewCompileCount = 0;
 let dolphinJitCompilePending = 0;
 const dolphinJitVerificationPending = new Set();
@@ -6108,6 +7131,7 @@ function ensureDolphinJitPthreadListeners(worker) {
   }
   if (!dolphinJitPthreadCompileListeners.has(worker)) {
     worker.addEventListener("message", handleDolphinJitNewCompile);
+    worker.addEventListener("message", handleDolphinJitCompileRequest);
     dolphinJitPthreadCompileListeners.add(worker);
   }
 }
@@ -6244,7 +7268,7 @@ async function startLazyJitCacheFill() {
   dolphinJitLazyFillAddedEntries = 0;
   dolphinJitLazyFillTerminalReason = "running";
   dolphinJitLazyFillFailureCount = 0;
-  if (!dolphinJitIdb) {
+  if (!dolphinJitIdb && !dolphinJitBlockStore) {
     dolphinJitLazyFillTerminalReason = "indexeddb-unavailable";
     return;
   }
@@ -6267,6 +7291,18 @@ async function startLazyJitCacheFill() {
     // Release the overflow buffer once we've copied the work list — its
     // bytes will be reachable through `remaining` until they compile.
     dolphinJitPrebuiltOverflow = null;
+  } else if (dolphinJitBlockStore) {
+    const stored = await readDolphinJitStoredEntries();
+    remaining = stored.filter((entry) => !skipKeys.has(entry.key));
+    dolphinJitBlockStoreEntries = null;
+    // A store grown wasteful (duplicates, many small packs) is rewritten a
+    // minute into the session, away from the boot.
+    const store = dolphinJitBlockStore;
+    setTimeout(() => {
+      store.compactIfWasteful(stored).then((done) => {
+        if (done) postStatus(`jit-cache: block store compacted (${stored.length} blocks)`);
+      }, () => {});
+    }, 60_000);
   } else {
     remaining = await new Promise((resolve) => {
       const out = [];
@@ -6313,6 +7349,7 @@ async function startLazyJitCacheFill() {
   let added = 0;
   for (let i = 0; i < remaining.length; i += LAZY_BATCH) {
     if (dolphinJitCacheMap.size >= HARD_CAP) break;
+    if (performance.now() - startedAt > DOLPHIN_JIT_BOOT_COMPILE_BUDGET_MS) break;
     const slice = remaining.slice(i, i + LAZY_BATCH);
     const verifiedSlice = await Promise.all(slice.map(async (entry) => {
       if (!(entry.value instanceof Uint8Array) && !(entry.value instanceof ArrayBuffer)) {
@@ -6329,7 +7366,14 @@ async function startLazyJitCacheFill() {
       const { entry, buf } = verified;
       // Only carry bytes through when sourced from the overflow buffer —
       // those need IDB write-back. IDB-sourced entries are already there.
-      return { key: entry.key, p: WebAssembly.compile(buf), bytes: fromOverflow ? buf : null };
+      return {
+        key: entry.key,
+        // The lazy fill continues the boot load's order and its warm budget:
+        // these are the blocks of the menus and the first scenes, and warming
+        // them is where the gain on menu hitches comes from (measures/aot/memory-aotcompiler.md).
+        p: compileDolphinJitModuleOffThread(buf, DELIVER_BEFORE_WARM, takeDolphinJitWarmSlot()),
+        bytes: fromOverflow ? buf : null
+      };
     }).filter(Boolean);
     dolphinJitLazyFillFailureCount += verifiedSlice.length - compiles.length;
     const settled = await Promise.allSettled(compiles.map((c) => c.p));

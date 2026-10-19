@@ -6,6 +6,7 @@ import { GuestImage, imageFromDol } from "./aot-image.js";
 import { discover } from "./aot-discovery.js";
 import { hintsMatch } from "./aot-hints.js";
 import { fnv1a64Hex, planDol, planModule } from "./aot-plan.js";
+import { encodeProfile } from "./aot-profile.js";
 import { planRel } from "./aot-rel.js";
 
 // `read(offset, length)` reads the disc image (Uint8Array or a promise of one).
@@ -18,7 +19,7 @@ export async function planDisc(read, { profile = null, hints = null, options = {
   const { image, entryPoint } = imageFromDol(disc.dol);
   const plan = planDol({ image, entryPoint, gameId: disc.gameId, dolBytes: disc.dol, profile, hints: sheet, options });
   if (sheet) {
-    for (const [start, end] of sheet.dynamicCode) plan.dynamic.push({ start, end, source: "hint" });
+    for (const [start, end] of sheet.dynamicCode) plan.dynamic.push({ start, end, mode: "virt", source: "hint" });
   }
   if (disc.apploader) {
     onProgress({ step: "apploader" });
@@ -33,6 +34,15 @@ export async function planDisc(read, { profile = null, hints = null, options = {
       plan.rels.push({ kind: "rel", name: rel.path, error: String(error?.message || error) });
     }
   }
+  // Everything the plan was built from: a cached plan is reused only for the
+  // same inputs (DOL, apploader, RELs, profile, hint sheet).
+  plan.identity = {
+    dolHash,
+    apploaderHash: disc.apploader ? fnv1a64Hex(disc.apploader.bytes) : null,
+    rels: disc.rels.map((r) => ({ path: r.path, hash: fnv1a64Hex(r.bytes) })),
+    profileHash: profile ? fnv1a64Hex(encodeProfile(profile)) : null,
+    hintsHash: sheet ? fnv1a64Hex(new TextEncoder().encode(JSON.stringify(sheet))) : null
+  };
   onProgress({ step: "done" });
   return plan;
 }

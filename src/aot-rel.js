@@ -9,6 +9,8 @@ import { GuestImage } from "./aot-image.js";
 import { Fnv1a64, mergeRanges, regionHash, regionSha256 } from "./aot-plan.js";
 
 export const SYNTH_BASE = 0xa0000000;
+// Plan module ids: 0 DOL, 1 apploader, REL_MODULE_ID_BASE + relId for a linked REL.
+export const REL_MODULE_ID_BASE = 0x100;
 export const SYNTH_STRIDE = 0x01000000;
 
 // OS globals: first and last linked module (OSModuleInfo*).
@@ -64,6 +66,12 @@ export function parseRel(bytes) {
     if (!bss && size && offset + size > u8.byteLength) throw new Error(`REL section ${i} out of range`);
     sections.push({ index: i, offset, size, exec, bss });
   }
+  // Sections are distinct byte ranges of the file: overlapping ones would be
+  // copied (and analysed) once each.
+  const stored = sections.filter((s) => !s.bss && s.size).sort((a, b) => a.offset - b.offset);
+  for (let i = 1; i < stored.length; i++) {
+    if (stored[i].offset < stored[i - 1].offset + stored[i - 1].size) throw new Error(`REL sections ${stored[i - 1].index} and ${stored[i].index} overlap`);
+  }
   // Import table: per referenced module, a run of relocations.
   const imports = [];
   if (header.impOffset + header.impSize > u8.byteLength) throw new Error("REL import table out of range");
@@ -101,7 +109,18 @@ export function synthImage(rel) {
   for (const imp of rel.imports) {
     const self = imp.moduleId === rel.header.id;
     if (!self && imp.moduleId !== 0) {
-      for (const r of imp.relocs) relocWords[r.section]?.add(r.offset & ~3);
+      // Target unknown until linked. A call left as on disc reads "bl ." and
+      // would invent a function: point it out of the image (bla 0) so the
+      // call is seen and ignored.
+      for (const r of imp.relocs) {
+        const buf = copies[r.section];
+        if (!buf || r.offset + 4 > buf.length) continue;
+        relocWords[r.section].add(r.offset & ~3);
+        if (r.type === R_PPC_REL24 || r.type === R_PPC_ADDR24) {
+          const v = new DataView(buf.buffer, buf.byteOffset, buf.byteLength);
+          v.setUint32(r.offset, (v.getUint32(r.offset, false) & 0xfc000001) | 2, false);
+        }
+      }
       continue;
     }
     for (const r of imp.relocs) {
@@ -154,6 +173,27 @@ export function maskedModuleHash(read32ForSection, rel, relocWords) {
   return h.hex();
 }
 
+// Addresses inside function `f` reached from outside it (jump-table targets,
+// resolved indirect targets, code pointers), in synthetic form.
+const outsideSorted = new WeakMap();
+function outsideEntries(result, f, blocks) {
+  let sorted = outsideSorted.get(result);
+  if (!sorted) {
+    const set = new Set(result.codePointers ?? []);
+    for (const t of result.jumpTables) for (const x of t.targets) set.add(x);
+    for (const s of result.indirectSites) for (const x of s.resolved ?? []) set.add(x);
+    sorted = [...set].sort((a, b) => a - b);
+    outsideSorted.set(result, sorted);
+  }
+  const out = [];
+  for (const b of f.blocks) {
+    let lo = 0, hi = sorted.length;
+    while (lo < hi) { const m = (lo + hi) >> 1; if (sorted[m] < blocks.start[b]) lo = m + 1; else hi = m; }
+    for (let i = lo; i < sorted.length && sorted[i] < blocks.end[b]; i++) if (sorted[i] !== f.entry) out.push(sorted[i]);
+  }
+  return out.sort((a, b) => a - b);
+}
+
 // Discover the code of one REL. Entry points: prolog, epilog, unresolved,
 // plus everything discovery reaches (relocated calls, vtables in data).
 export function planRel(relBytes, { name = "", options = {} } = {}) {
@@ -190,6 +230,7 @@ export function planRel(relBytes, { name = "", options = {} } = {}) {
       entry: local(f.entry)[1],
       confidence: f.confidence,
       sources: f.sources,
+      extraEntries: outsideEntries(result, f, blocks).map(local),
       // [section, start, end): a function may cross sections through a branch.
       ranges: mergeRanges(f.blocks.map((b) => [blocks.start[b], blocks.end[b]])).map(([s, e]) => [local(s)[0], local(s)[1], local(e - 4)[1] + 4])
     })),
@@ -240,10 +281,14 @@ export function relocateModulePlan(modulePlan, linked, read32) {
   const abs = (section, off) => (base(section) + off) >>> 0;
   const functions = modulePlan.functions.map((f) => {
     const ranges = f.ranges.map(([sect, s, e]) => [abs(sect, s), abs(sect, e)]).sort((a, b) => a[0] - b[0]);
-    return { entry: abs(f.section, f.entry), confidence: f.confidence, sources: f.sources, ranges, hash: regionHash(read32, ranges), sha256: regionSha256(read32, ranges) };
+    return {
+      entry: abs(f.section, f.entry), confidence: f.confidence, sources: f.sources, flags: 0, ranges,
+      extraEntries: (f.extraEntries ?? []).map((x) => abs(...x)).sort((a, b) => a - b),
+      hash: regionHash(read32, ranges), sha256: regionSha256(read32, ranges)
+    };
   });
   return {
-    id: modulePlan.relId,
+    id: REL_MODULE_ID_BASE + modulePlan.relId,
     kind: "rel",
     linkedAt: linked.address,
     blocks: {

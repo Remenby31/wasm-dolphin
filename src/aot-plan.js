@@ -8,7 +8,7 @@ import { PROFILE_REAL_MODE } from "./aot-profile.js";
 import { IncrementalSha256 } from "./incremental-sha256.js";
 
 export const PLAN_SCHEMA = "salon-aot-plan/1";
-export const ANALYZER_VERSION = 1;
+export const ANALYZER_VERSION = 2; // 2: per-region sha256, extraEntries, plan identity
 export const HASH_ALGORITHM = "fnv1a64";
 
 // FNV-1a 64 over guest bytes in memory order. Kept in two 32-bit halves:
@@ -206,7 +206,15 @@ function checkRanges(ranges, where) {
     last = r[1];
   }
 }
-const within = (ranges, a) => ranges.some(([s, e]) => a >= s && a < e);
+// Ranges are sorted and disjoint (checkRanges): binary search.
+const within = (ranges, a) => {
+  let lo = 0, hi = ranges.length - 1;
+  while (lo <= hi) {
+    const m = (lo + hi) >> 1;
+    if (a < ranges[m][0]) hi = m - 1; else if (a >= ranges[m][1]) lo = m + 1; else return true;
+  }
+  return false;
+};
 
 // Structural check of a plan (from cache or another agent). Throws on the
 // first problem; a consumer that catches simply runs without the plan.
@@ -214,6 +222,7 @@ export function validatePlan(plan) {
   if (!plan || typeof plan !== "object") fail("not an object");
   if (plan.schema !== PLAN_SCHEMA) fail(`schema ${plan.schema} unsupported`);
   if (plan.hash !== HASH_ALGORITHM) fail(`hash ${plan.hash} unsupported`);
+  if (plan.analyzer !== ANALYZER_VERSION) fail(`analyzer ${plan.analyzer} is not ${ANALYZER_VERSION}: rebuild the plan`);
   if (!Array.isArray(plan.modules) || !Array.isArray(plan.rels) || !Array.isArray(plan.dynamic)) fail("modules, rels and dynamic must be arrays");
   for (const m of plan.modules) {
     if (!isU32(m.id) || !MODULE_KINDS.has(m.kind)) fail("bad module");
