@@ -71,6 +71,9 @@ test("ttff: first present after the hand-over, medians cold and warm against 10 
   assert.equal(s.warm.firstPresentMs.median, 4000);
   assert.equal(s.pass, true);
   assert.equal(summarizeTtff([{ cold: { firstPresentMs: 12000 } }]).pass, false);
+  const loaded = summarizeTtff([{ run: 1, loadGate: { ok: false }, cold: { firstPresentMs: 30000 } }, { run: 2, loadGate: { ok: true }, cold: { firstPresentMs: 5000 } }]);
+  assert.equal(loaded.cold.firstPresentMs.median, 5000);
+  assert.deepEqual(loaded.overloadedRuns, [1]);
   assert.equal(summarizeTtff([{ cold: { error: "x" } }]).pass, null);
 });
 

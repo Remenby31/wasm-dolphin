@@ -30,10 +30,12 @@ export function launchTtff({ clickAt, presents = [], loadedAt = null, contentTim
   };
 }
 
-// Medians over the runs, per phase, and the verdict on the cold median.
+// Medians over the runs, per phase, and the verdict on the cold median. A
+// run that started on an overloaded machine (load gate not passed) is left
+// out, as race-perf leaves out overloaded windows.
 export function summarizeTtff(runs, { target = TTFF_TARGET_MS } = {}) {
   const phase = (name) => {
-    const got = runs.map((r) => r[name]).filter((l) => l && !l.error);
+    const got = runs.filter((r) => r.loadGate?.ok !== false).map((r) => r[name]).filter((l) => l && !l.error);
     if (!got.length) return null;
     return {
       runs: got.length,
@@ -46,6 +48,7 @@ export function summarizeTtff(runs, { target = TTFF_TARGET_MS } = {}) {
   const med = (p) => p?.firstPresentMs?.median ?? null;
   return {
     targetMs: target,
+    overloadedRuns: runs.filter((r) => r.loadGate?.ok === false).map((r) => r.run),
     cold, warm,
     pass: med(cold) == null ? null : med(cold) < target && (med(warm) == null || med(warm) < target)
   };
