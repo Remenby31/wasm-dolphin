@@ -75,15 +75,18 @@ function summarize(rows) {
 // once more (runPlan): "infra-crash", reported, not blocking. Crashes that
 // did happen again are in the crash check. One exception: renderer crashes
 // only on the candidate, twice or more in one comparison, are a regression
-// (a rare crash the candidate makes less rare).
+// (a rare crash the candidate makes less rare). CDP pipe faults (the harness
+// lost Chrome, browser.mjs) are listed but never counted against a side.
 export function infraCrashGate(baseRecords, candRecords) {
   const infra = (records) => records.filter((r) => r.infraCrash);
   const b = infra(baseRecords), c = infra(candRecords);
+  const what = (r) => (r.infraCrash.kind === "cdp-pipe" ? `CDP pipe fault${r.infraCrash.repeated ? ", again: unjudged" : ", not again"}` : "renderer crash, not again");
   const rows = [
-    ...b.map((r) => ({ game: r.game, config: r.config, check: `infraCrash r${r.run}`, baseline: "renderer crash, not again", candidate: null, status: "infra-crash", detail: r.infraCrash.evidence })),
-    ...c.map((r) => ({ game: r.game, config: r.config, check: `infraCrash r${r.run}`, baseline: null, candidate: "renderer crash, not again", status: "infra-crash", detail: r.infraCrash.evidence }))
+    ...b.map((r) => ({ game: r.game, config: r.config, check: `infraCrash r${r.run}`, baseline: what(r), candidate: null, status: "infra-crash", detail: r.infraCrash.evidence })),
+    ...c.map((r) => ({ game: r.game, config: r.config, check: `infraCrash r${r.run}`, baseline: null, candidate: what(r), status: "infra-crash", detail: r.infraCrash.evidence }))
   ];
-  if (c.length >= 2 && b.length === 0) {
+  const renderer = (list) => list.filter((r) => r.infraCrash.kind !== "cdp-pipe").length;
+  if (renderer(c) >= 2 && renderer(b) === 0) {
     rows.push({ game: "*", config: "*", check: "infraCrash", baseline: "0", candidate: String(c.length), status: "regressed", detail: "renderer crashes on the candidate only, twice or more" });
   }
   // No rows is fine here (no crash), unlike the other gates.

@@ -51,6 +51,9 @@ test("region stats: unknown layout, short struct, torn read and impossible share
   // More region cycles than cycles: never clamped into a plausible share.
   assert.match(regionRecord(reply([1100, 1000, 1, 1, 1, 1, 1, 0, 0])).p4Why, /regionCycleShare 1\.1 outside \[0, 1\]/);
   assert.match(consistentRead({ error: "x" }, {}).error, /x/);
+  // Dispatch time is slice time minus the sampled parts: it may drop between two copies.
+  assert.equal(regionRecord(reply([900, 1000, 70, 10, 15, 5, 9, 0, 0], [905, 1010, 71, 9.5, 16, 5, 10, 0, 0])).p4.regionCycleShare, 0.9);
+  assert.match(regionRecord(reply([900, 1000, 70, -1, 15, 5, 9, 0, 0])).p4Why, /dispatchTimeMs = -1/);
 });
 
 test("race-perf p4: precise reason when null, pooled shares that add up, one-sided A/B withheld", () => {

@@ -74,10 +74,13 @@ function launchFailure(l, what) {
 // Every judged run counts: a launch that did not finish (or a second launch
 // without its compiled count) is listed in `failed` and the block does not
 // pass; the numbers are those of the launches that finished. Runs started on
-// an overloaded machine (load gate not passed) are left out and listed. Null
+// an overloaded machine (load gate not passed), and runs in which the harness
+// lost Chrome (infraCrash, a CDP pipe fault), are left out and listed. Null
 // when no run could be judged.
 export function summarizeP7(allRuns, { target = OPTIMISATION_TARGET_MS } = {}) {
-  const runs = allRuns.filter((r) => r.loadGate?.ok !== false);
+  const lost = (r) => Boolean(r.first?.infraCrash || r.second?.infraCrash);
+  const infraRuns = allRuns.filter((r) => r.loadGate?.ok !== false && lost(r)).map((r) => r.run);
+  const runs = allRuns.filter((r) => r.loadGate?.ok !== false && !lost(r));
   if (!runs.length) return null;
   const failedFirst = [], failedSecond = [];
   const first = [], second = [];
@@ -95,6 +98,7 @@ export function summarizeP7(allRuns, { target = OPTIMISATION_TARGET_MS } = {}) {
   return {
     runs: runs.length,
     overloadedRuns: allRuns.filter((r) => r.loadGate?.ok === false).map((r) => r.run),
+    infraRuns,
     durationMs: round(durationMs, 0),
     durationRuns: first.map((l) => l.durationMs),
     total: first[0]?.total ?? null,

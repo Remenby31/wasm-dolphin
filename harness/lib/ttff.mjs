@@ -39,17 +39,20 @@ export function launchTtff({ clickAt, presents = [], loadedAt = null, contentTim
 // Per phase: medians over the successful launches and every failed one. A
 // failure counts: the phase does not pass while any launch failed. A run
 // that started on an overloaded machine (load gate not passed) is left out
-// and listed, as race-perf leaves out overloaded windows.
+// and listed, as race-perf leaves out overloaded windows; so is a launch the
+// harness lost Chrome in (infraCrash, a CDP pipe fault).
 export function summarizeTtff(runs, { target = TTFF_TARGET_MS } = {}) {
   const judged = runs.filter((r) => r.loadGate?.ok !== false);
   const phase = (name) => {
-    const launches = judged.map((r) => ({ run: r.run, l: r[name] ?? { error: "not run" } }));
-    if (!launches.length) return null;
+    const all = judged.map((r) => ({ run: r.run, l: r[name] ?? { error: "not run" } }));
+    const infra = all.filter((x) => x.l.infraCrash).map((x) => ({ run: x.run, why: x.l.infraCrash }));
+    const launches = all.filter((x) => !x.l.infraCrash);
+    if (!launches.length) return infra.length ? { runs: 0, failed: [], infra, firstContentMs: null, pass: null } : null;
     const ok = launches.filter((x) => !x.l.error).map((x) => x.l);
     const failed = launches.filter((x) => x.l.error).map((x) => ({ run: x.run, error: x.l.error }));
     const firstContentMs = describe(ok.map((l) => l.firstContentMs), 0);
     return {
-      runs: launches.length, failed,
+      runs: launches.length, failed, infra,
       firstContentMs,
       firstPresentMs: describe(ok.map((l) => l.firstPresentMs), 0),
       coreLoadedMs: describe(ok.map((l) => l.coreLoadedMs), 0),
