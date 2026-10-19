@@ -31,6 +31,7 @@ export const AOT_SW_PING = "ping";
 export const AOT_HASH_HEADER = "x-salon-aot-sha256";
 export const AOT_SW_HEADER = "x-salon-aot-sw";
 const IDENTITY_ENTRY = "identity.json";
+const BLACKLIST_ENTRY = "blacklist.json";
 
 const GC_DISC_MAGIC = 0xc2339f3d;
 const MAX_DOL_BYTES = 32 << 20;
@@ -248,7 +249,37 @@ export async function openAotCache({
 
   let cancelled = false;
   const inflight = new Set();
-  const stats = { puts: 0, putBytes: 0, loads: 0, streamed: 0, corrupt: 0, rejected: 0, quota: 0, missing: 0, readErrors: 0 };
+  const stats = { puts: 0, putBytes: 0, loads: 0, streamed: 0, corrupt: 0, rejected: 0, quota: 0, missing: 0, readErrors: 0, blacklisted: 0 };
+  // Regions left to the JIT for good under this identity: bytes the engine
+  // rejects, and what the first-launch optimiser reports (untranslatable,
+  // too large). It lives in the identity's cache, so a new core, compiler or
+  // flag set starts with a clean list.
+  const blacklistUrl = new URL(`${AOT_SW_SEGMENT}/${cacheName}/${BLACKLIST_ENTRY}`, baseUrl).href;
+  const blacklist = new Map(); // key -> reason
+  try {
+    const stored = await (await cache.match(blacklistUrl))?.json();
+    if (stored && typeof stored === "object") {
+      for (const [key, reason] of Object.entries(stored)) if (isHashedAotKey(key)) blacklist.set(key, String(reason));
+    }
+  } catch {
+    // unreadable: start empty, the regions are just tried again
+  }
+  let blacklistWrite = Promise.resolve();
+  function addToBlacklist(entries) {
+    let added = 0;
+    for (const { key, reason } of entries) {
+      if (!isHashedAotKey(key) || blacklist.has(key)) continue;
+      blacklist.set(key, String(reason || "refused"));
+      added += 1;
+    }
+    if (!added) return blacklistWrite;
+    stats.blacklisted += added;
+    const body = JSON.stringify(Object.fromEntries(blacklist));
+    blacklistWrite = blacklistWrite.then(() => cache.put(blacklistUrl, new Response(body, {
+      headers: { "content-type": "application/json" }
+    }))).catch(() => {});
+    return blacklistWrite;
+  }
   const track = (promise) => {
     inflight.add(promise);
     promise.finally(() => inflight.delete(promise));
@@ -274,7 +305,10 @@ export async function openAotCache({
   async function putOne({ key, bytes }) {
     if (!isHashedAotKey(key)) return { key, reason: "bad-key" };
     const view = bytes instanceof Uint8Array ? bytes : new Uint8Array(bytes);
-    if (!WebAssembly.validate(view)) return { key, reason: "engine-reject" };
+    if (!WebAssembly.validate(view)) {
+      await addToBlacklist([{ key, reason: "engine-reject" }]);
+      return { key, reason: "engine-reject" };
+    }
     const sha256 = await sha256Hex(view);
     const outcome = await writeWithEviction(() => cache.put(urlOf(key), wasmResponse(view, sha256)), {
       cacheStorage, keep: cacheName, baseUrl
@@ -330,6 +364,7 @@ export async function openAotCache({
       if (error instanceof WebAssembly.CompileError || error?.name === "CompileError") {
         stats.rejected += 1;
         await dropEntry(key);
+        await addToBlacklist([{ key, reason: "engine-reject" }]);
         return { reason: "engine-reject" };
       }
       return { reason: "compile-error" };
@@ -342,6 +377,13 @@ export async function openAotCache({
     reset,
     pruned,
     viaServiceWorker,
+
+    // Synchronous, for the optimiser's skip test.
+    isBlacklisted: (key) => blacklist.has(key),
+    blacklistReason: (key) => blacklist.get(key) ?? null,
+    // [{ key, reason }]: left to the JIT from now on, under this identity.
+    // Resolves once written (an unwritable list is kept for this session).
+    blacklist: (entries) => addToBlacklist(entries),
 
     // The keys among `keys` that have an entry. An entry may still turn out
     // corrupt at load; has() only says what is worth not recompiling.
@@ -396,6 +438,7 @@ export async function openAotCache({
 
     async drain() {
       while (inflight.size) await Promise.allSettled([...inflight]);
+      await blacklistWrite;
     },
 
     cancel() {

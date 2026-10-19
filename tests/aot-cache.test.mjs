@@ -29,51 +29,7 @@ const CORE = "a".repeat(64);
 const MOD_A = Uint8Array.from(Buffer.from("0061736d0100000001060160017f017f03020100070501016600000a0601040020000b", "hex"));
 const MOD_B = Uint8Array.from(Buffer.from("0061736d0100000001060160017f017f03020100070501016600000a09010700200041016a0b", "hex"));
 
-// CacheStorage as the browser has it, in memory. Entries keep the stored
-// Response's bytes and headers; `failPut` simulates a full quota.
-function fakeCacheStorage() {
-  const caches = new Map();
-  const storage = {
-    failPut: null,
-    caches,
-    async open(name) {
-      if (!caches.has(name)) {
-        const entries = new Map();
-        caches.set(name, {
-          entries,
-          async put(url, response) {
-            if (storage.failPut) {
-              const error = storage.failPut(name, url);
-              if (error) throw error;
-            }
-            entries.set(String(url), { body: new Uint8Array(await response.arrayBuffer()), headers: [...response.headers] });
-          },
-          async match(url) {
-            const hit = entries.get(String(url?.url ?? url));
-            return hit ? new Response(hit.body.slice(), { headers: hit.headers }) : undefined;
-          },
-          async delete(url) {
-            return entries.delete(String(url?.url ?? url));
-          },
-          async keys() {
-            return [...entries.keys()].map((url) => ({ url }));
-          }
-        });
-      }
-      return caches.get(name);
-    },
-    async has(name) {
-      return caches.has(name);
-    },
-    async delete(name) {
-      return caches.delete(name);
-    },
-    async keys() {
-      return [...caches.keys()];
-    }
-  };
-  return storage;
-}
+import { fakeCacheStorage } from "./helpers/fake-cache-storage.mjs";
 
 const DISC = `disc-sha256-v1:${"1".repeat(64)}`;
 const OTHER_DISC = `disc-sha256-v1:${"2".repeat(64)}`;
@@ -623,4 +579,30 @@ test("the block store's buffer goes out when the saves do (page hidden or closed
   assert.match(worker, /if \(type === "flushUserData" \|\| type === "stop"\) void dolphinJitBlockStore\?\.flush\(\)/);
   const adapter = await readFile(new URL("../src/upstream-worker-adapter.js", import.meta.url), "utf8");
   assert.match(adapter, /addEventListener\?\.\("pagehide", \(\) => this\.flushUserData\(\)/);
+});
+
+test("blacklist: engine rejects and refusals are remembered under the identity, and a new identity starts clean", async () => {
+  const storage = fakeCacheStorage();
+  const key = (n) => `r:${String(n).padStart(64, "0")}`;
+  const cache = await open(storage);
+  const { failed } = await cache.put([{ key: key(1), bytes: new Uint8Array([1, 2, 3]) }]);
+  assert.deepEqual(failed, [{ key: key(1), reason: "engine-reject" }]);
+  await cache.blacklist([{ key: key(2), reason: "untranslatable" }, { key: "not-hashed", reason: "x" }]);
+  assert.equal(cache.isBlacklisted(key(1)), true);
+  assert.equal(cache.blacklistReason(key(2)), "untranslatable");
+  assert.equal(cache.isBlacklisted("not-hashed"), false);
+  await cache.drain();
+  // the next session of the same identity knows it
+  const again = await open(storage);
+  assert.equal(again.isBlacklisted(key(1)) && again.isBlacklisted(key(2)), true);
+  assert.deepEqual(await again.has([key(1), key(2)]), new Set(), "the list is not an entry");
+  // another compiler version: a clean list
+  const other = await open(storage, { compilerVersion: "region-2" });
+  assert.equal(other.isBlacklisted(key(1)), false);
+  // an unreadable list is dropped, not fatal
+  const raw = await storage.open(cache.cacheName);
+  const listUrl = [...raw.entries.keys()].find((u) => u.endsWith("/blacklist.json"));
+  raw.entries.get(listUrl).body = new TextEncoder().encode("{not json");
+  const third = await open(storage);
+  assert.equal(third.isBlacklisted(key(1)), false);
 });
