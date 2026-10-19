@@ -183,3 +183,34 @@ test("region modules declare a one-page memory minimum with the core's maximum",
   assert.deepEqual({ initial: memory.initial, maximum: memory.maximum, shared: memory.shared }, { initial: 1, maximum: 24576, shared: true });
   assert.throws(() => assembleRegion([frag], { helpers: HELPERS, pcOffset: PC, memoryPages: 1, memoryMinPages: 2 }), /memory limits/);
 });
+
+test("optimizer -> cache -> bootKeys -> loader: the first launch's modules come back on the next one", async () => {
+  const { AotOptimizer } = await import("../src/aot-optimizer.js");
+  const { dol } = program();
+  const { image, entryPoint } = imageFromDol(dol);
+  const plan = planDol({ image, entryPoint, gameId: "TEST01", dolBytes: dol, options: { gapFill: false } });
+  const storage = fakeCacheStorage();
+  const openCache = (identity) => openAotCache({ ...identity, ...IDENTITY, baseUrl: BASE, cacheStorage: storage, serviceWorker: false });
+  // the core's translator, stood in for: one fragment per function
+  const translator = { translate: async (fns) => fns.map((f) => ({ entry: f.entry, fragment: translate(f) })) };
+  const make = () => new AotOptimizer({
+    discKey: IDENTITY.discKey, buildPlan: async () => plan, translator, openCache, keyParts: KEY_PARTS, maxFunctions: 2,
+    assembleOptions: { helpers: HELPERS, pcOffset: PC, memoryPages: 1 }
+  });
+  const first = make();
+  await first.start();
+  assert.deepEqual(await first.status(), { state: "complete", fraction: 1 });
+
+  const next = make();
+  const keys = await next.bootKeys();
+  assert.deepEqual(keys, next.regions.map((u) => u.key), "every module, in compile order");
+  const retained = new Map();
+  const loader = createAotRegionLoader({ openCache, retain: (k, m) => retained.set(k, m) });
+  const report = await loader.load({ ...IDENTITY, keys, budgetMs: 1000 });
+  assert.equal(report.loaded, keys.length);
+  for (const u of next.regions) {
+    const run = runner(retained.get(u.key));
+    for (const f of u.members) assert.equal(run.run(f.entry), 0);
+    assert.equal(run.word(COUNT), u.members.length);
+  }
+});

@@ -26,7 +26,8 @@ function plan(n = 40) {
 function optimizer({ cache = fakeCache(), translator = fakeTranslator(), ...extra } = {}) {
   const p = plan();
   let builds = 0;
-  const o = new AotOptimizer({ discKey: "disc", cacheIdentity: { compilerVersion: "fake-1" }, openCache: cache, translator, buildPlan: async () => { builds++; return p; }, ...extra });
+  // regions of 8 functions: the 41 functions of the plan make several modules
+  const o = new AotOptimizer({ discKey: "disc", cacheIdentity: { compilerVersion: "fake-1" }, openCache: cache, translator, maxFunctions: 8, buildPlan: async () => { builds++; return p; }, ...extra });
   const events = [];
   for (const type of ["optimization-progress", "optimization-done", "optimization-error"]) o.addEventListener(type, (e) => events.push([type, e.detail]));
   return { o, events, builds: () => builds };
@@ -62,17 +63,26 @@ test("aot optimizer: cancel keeps what was compiled and a restart resumes", asyn
   assert.ok(submitted >= before - 1, "the restart starts from the persisted regions");
 });
 
-test("aot optimizer: refused regions are not fatal and progress still ends at 1", async () => {
+test("aot optimizer: a refused function is left out of its module; refused modules are not fatal; progress ends at 1", async () => {
   const p = plan();
   const refuse = new Set([p.modules[0].functions[3].hash]);
-  const quota = new Set([p.modules[0].functions[5].sha256]);
-  const { o, events } = optimizer({ translator: fakeTranslator({ refuse }), cache: fakeCache({ quotaKeys: quota }) });
+  const quotaCache = fakeCache();
+  const probe = optimizer({ cache: quotaCache });
+  await probe.o.status();
+  const quotaKey = probe.o.regions[1].key;
+  const cache = fakeCache({ quotaKeys: new Set([quotaKey]) });
+  const { o, events } = optimizer({ translator: fakeTranslator({ refuse }), cache });
   await o.start();
   const errors = events.filter(([t]) => t === "optimization-error").map(([, d]) => d);
-  assert.equal(errors.length, 2, "one refused by the translator, one by the cache");
-  assert.equal(errors[0].fatal, false);
+  assert.equal(errors.length, 2, "one function refused by the translator, one module by the cache");
+  assert.ok(errors.every((e) => e.fatal === false));
   assert.equal(events.at(-1)[0], "optimization-done");
-  assert.equal(events.at(-1)[1].refused, 2);
+  assert.equal(events.at(-1)[1].refused, 1, "only the module refused by the cache");
+  assert.equal(cache.persisted.size, o.regions.length - 1);
+  // the module holding the refused function was still stored, without it
+  const holder = o.regions.find((u) => u.members.some((f) => f.hash === p.modules[0].functions[3].hash));
+  assert.ok(cache.persisted.has(holder.key));
+  assert.deepEqual(await o.status(), { state: "complete", fraction: 1 });
 });
 
 test("aot optimizer: the plan is cached and a stale or broken cached plan is rebuilt", async () => {
@@ -98,29 +108,42 @@ test("aot optimizer: a compiler that cannot open is a fatal error, never a throw
 
 test("aot optimizer: core slices (budget), waits before boot (not-ready), skips blacklisted keys", async () => {
   const p = plan();
-  const keyOf = (f) => `k-${f.sha256}`;
-  const black = p.modules[0].functions[2];
+  void p;
+  const probe = optimizer();
+  await probe.o.status();
+  const blackKey = probe.o.regions[2].key;
   let sleeps = 0;
-  const cache = fakeCache({ blacklist: new Set([keyOf(black)]) });
-  const { o, events } = optimizer({ cache, keyOf, translator: fakeTranslator({ perCall: 3, notReadyCalls: 2 }), sleep: async () => { sleeps++; } });
+  const cache = fakeCache({ blacklist: new Set([blackKey]) });
+  const { o, events } = optimizer({ cache, keyParts: { compilerVersion: 0, codegenMask: 0 }, translator: fakeTranslator({ perCall: 3, notReadyCalls: 2 }), sleep: async () => { sleeps++; } });
   await o.start();
   assert.equal(events.at(-1)[0], "optimization-done");
   assert.equal(events.at(-1)[1].refused, 1, "the blacklisted key is skipped, not retried");
   assert.ok(sleeps >= 2, "not-ready waits before retrying");
-  assert.ok([...cache.persisted.keys()].every((k) => k.startsWith("k-")), "the cache sees the core's keys");
+  assert.ok([...cache.persisted.keys()].every((k) => /^region-v1:00000000:00000000:[0-9a-f]{64}$/.test(k)), "module keys");
   assert.equal(cache.persisted.size, o.regions.length - 1);
   assert.deepEqual(await o.status(), { state: "complete", fraction: 1 });
 });
 
-test("aot optimizer: region cache key follows the core formula", async () => {
-  const { regionKeyOf } = await import("../src/aot-optimizer.js");
-  const sha = "ab".repeat(32);
-  assert.equal(regionKeyOf({ compilerVersion: 3, codegenMask: 0x10 })({ sha256: sha }), `region-v1:00000003:00000010:${sha}`);
+test("aot optimizer: a module's key is regionModuleKey of its planned members; stored bytes are an assembled module", async () => {
+  const { regionModuleKey } = await import("../src/aot-region-module.js");
+  const cache = fakeCache();
+  const { o } = optimizer({ cache, keyParts: { compilerVersion: 3, codegenMask: 0x10 } });
+  await o.start();
+  for (const u of o.regions) {
+    assert.equal(u.key, await regionModuleKey(u.members, { compilerVersion: 3, codegenMask: 0x10 }));
+    assert.ok(u.members.length <= 8);
+    const module = new WebAssembly.Module(cache.persisted.get(u.key));
+    assert.deepEqual(WebAssembly.Module.exports(module).map((e) => e.name), ["f"]);
+  }
+  // every function of the plan is in exactly one module
+  const all = o.regions.flatMap((u) => u.members.map((f) => f.entry)).sort((a, b) => a - b);
+  assert.equal(new Set(all).size, all.length);
+  assert.equal(all.length, o.plan.modules[0].functions.length);
 });
 
 test("aot optimizer: translator results out of batch order are a fatal error, nothing stored", async () => {
   const cache = fakeCache();
-  const translator = { translate: async (regions) => regions.map((r, i) => ({ entry: regions[(i + 1) % regions.length].entry, bytes: new Uint8Array(4) })) };
+  const translator = { translate: async (fns) => fns.map((r, i) => ({ entry: fns[(i + 1) % fns.length].entry, fragment: null })) };
   const { o, events } = optimizer({ cache, translator });
   await o.start();
   assert.deepEqual(events.at(-1), ["optimization-error", { message: "translator results out of order", fatal: true }]);
@@ -129,12 +152,17 @@ test("aot optimizer: translator results out of batch order are a fatal error, no
 
 test("aot optimizer: refusals are blacklisted in the cache, boot keys follow the compile order", async () => {
   const p = plan();
-  const refuse = new Set([p.modules[0].functions[4].hash]);
+  // every function of one module refused: that module is blacklisted
+  const probe = optimizer();
+  await probe.o.status();
+  const target = probe.o.regions[1];
+  const refuse = new Set(target.members.map((f) => f.hash));
   const blacklist = new Set();
   const cache = fakeCache({ blacklist });
   const { o } = optimizer({ cache, translator: fakeTranslator({ refuse }) });
   await o.start();
-  assert.ok(blacklist.has(p.modules[0].functions[4].sha256), "an untranslatable region is remembered across reloads");
+  assert.ok(blacklist.has(target.key), "a module with nothing translatable is remembered across reloads");
+  void p;
   const keys = await o.bootKeys();
   assert.deepEqual(keys, o.regions.map((r) => r.key).filter((k) => !blacklist.has(k)));
 });

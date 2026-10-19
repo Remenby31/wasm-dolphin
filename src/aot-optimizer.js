@@ -1,34 +1,44 @@
 // First-launch optimisation (track 3, P7): build the compilation plan of the
-// user's disc, then feed its regions to the region compiler in compile order
-// until they are all in the persistent cache. Interruptible at any point:
+// user's disc, group its functions into region modules, have the core
+// translate each function, assemble the fragments and store each module in
+// the persistent cache, in compile order. Interruptible at any point:
 // progress is what the cache holds, so a reload resumes where it stopped.
 //
 // Interface consumed by the site (P8), on the host or the adapter:
 //   optimizationStatus() -> { state: "none"|"partial"|"complete", fraction }
 //   startOptimization({ resume }) / cancelOptimization()
-//   events "optimization-progress" { fraction, done, total, unit: "regions" },
-//          "optimization-done" { total, ms }, "optimization-error" { message, fatal }
+//   events "optimization-progress" { fraction, done, total, unit: "modules" },
+//          "optimization-done" { total, refused, ms }, "optimization-error" { message, fatal }
 //
-// Two collaborators:
-//   translator (P4, region compiler in the core, fed from guest memory):
-//     translate(regions) -> Promise<[{ key, bytes } | { key, reason }]>
-//   cache (P5/P6, src/aot-cache.js): openAotCache({ discKey, coreHash, compilerVersion, flagsMask })
-//     -> session { has(keys) -> Set, put([{ key, bytes, meta }]) -> { failed: [{ key, reason }] }, cancel() }
-// The cache key of a region is its fingerprint (known before translation, so
-// has() can resume an interrupted run).
+// Collaborators:
+//   translator (P4, region translator in the core, fed from guest memory):
+//     translate(functions) -> Promise<[{ entry, fragment } | { entry, reason }]>
+//     in batch order; fragment = { entry, entries, code, relocs } (the
+//     contract of src/aot-region-module.js). Reasons: hash-mismatch,
+//     untranslatable, too-large, budget (stop, resume here), not-ready.
+//   assemble(fragments) -> Uint8Array, default assembleRegion with
+//     `assembleOptions` (helpers, pcOffset, memoryPages from the core).
+//   cache (src/aot-cache.js): openAotCache(identity) -> session { has, put,
+//     isBlacklisted, blacklist, cancel }.
+// One cache entry is one module; its key (regionModuleKey) covers the planned
+// members, so has() and bootKeys() work before anything is translated. A
+// member the core refuses is left out of the module (the dispatcher answers 1
+// for its entries and the JIT runs it); a module with no member left is
+// blacklisted.
 import { orderedRegions, validatePlan, ANALYZER_VERSION } from "./aot-plan.js";
+import { assembleRegion, groupRegions, regionModuleKey } from "./aot-region-module.js";
 
 export const PLAN_CACHE_DIR = "aot-plan";
 const BATCH = 64;
 
-const regionWeight = (f) => f.ranges.reduce((n, [s, e]) => n + e - s, 0);
+const functionWeight = (f) => f.ranges.reduce((n, [s, e]) => n + e - s, 0);
 
 export class AotOptimizer extends EventTarget {
   // buildPlan: () => Promise<plan> (planDisc over the user's disc, with its profile)
   // planStore: { load(discKey) -> plan|null, save(discKey, plan) } (optional)
-  // keyOf(region function): cache key of a compiled region, see regionKeyOf;
-  // defaults to the region's SHA-256.
-  constructor({ discKey, buildPlan, translator, openCache, cacheIdentity = {}, keyOf = (f) => f.sha256, planStore = null, batchSize = BATCH,
+  // keyParts: { compilerVersion, codegenMask } (the core's _DolphinWeb_AotKeyParts)
+  constructor({ discKey, buildPlan, translator, openCache, cacheIdentity = {}, keyParts = { compilerVersion: 0, codegenMask: 0 },
+    assemble = null, assembleOptions = { helpers: {}, pcOffset: 0 }, maxFunctions = 100, planStore = null, batchSize = BATCH,
     notReadyDelayMs = 1000, sleep = (ms) => new Promise((r) => setTimeout(r, ms)), now = () => performance.now() }) {
     super();
     this.discKey = discKey;
@@ -36,10 +46,12 @@ export class AotOptimizer extends EventTarget {
     this.translator = translator;
     this.openCache = openCache;
     this.cacheIdentity = cacheIdentity;
+    this.keyParts = keyParts;
+    this.assemble = assemble ?? ((fragments) => assembleRegion(fragments, assembleOptions).bytes);
+    this.maxFunctions = maxFunctions;
     this.planStore = planStore;
     this.now = now;
     this.batchSize = batchSize;
-    this.keyOf = keyOf;
     this.notReadyDelayMs = notReadyDelayMs;
     this.sleep = sleep;
     this.plan = null;
@@ -62,9 +74,28 @@ export class AotOptimizer extends EventTarget {
       plan = validatePlan(await this.buildPlan());
       await this.planStore?.save(this.discKey, plan).catch(() => {});
     }
+    // Region modules, in compile order: each module takes the place of its
+    // first member in orderedRegions.
+    const ordered = orderedRegions(plan).filter((r) => r.f.hash && r.f.sha256);
+    const rankOf = new Map(ordered.map((r, i) => [r.f, i]));
+    const units = [];
+    for (const m of [...plan.modules, ...(plan.rels ?? []).filter((r) => r.functions)]) {
+      const order = ordered.filter((r) => r.module === m.id).map((r) => m.functions.indexOf(r.f)).filter((i) => i >= 0);
+      for (const group of groupRegions(m, order, { maxFunctions: this.maxFunctions })) {
+        const members = group.map((i) => m.functions[i]);
+        units.push({
+          module: m.id,
+          members,
+          rank: Math.min(...members.map((f) => rankOf.get(f))),
+          weight: members.reduce((n, f) => n + functionWeight(f), 0),
+          key: await regionModuleKey(members, this.keyParts)
+        });
+      }
+    }
+    units.sort((a, b) => a.rank - b.rank);
     this.plan = plan;
-    this.regions = orderedRegions(plan).filter((r) => r.f.hash && r.f.sha256).map((r) => ({ ...r, key: this.keyOf(r.f) }));
-    this.totalWeight = this.regions.reduce((n, r) => n + regionWeight(r.f), 0);
+    this.regions = units;
+    this.totalWeight = units.reduce((n, u) => n + u.weight, 0);
     return plan;
   }
 
@@ -73,30 +104,30 @@ export class AotOptimizer extends EventTarget {
     return this.session;
   }
 
-  // Weighted by region size: a 10 KiB region counts more than a 40-byte one.
+  // Weighted by guest code size: a 10 KiB module counts more than a 40-byte one.
   progress(doneSet) {
     let doneWeight = 0, done = 0;
-    for (const r of this.regions) if (doneSet.has(r.key)) { done++; doneWeight += regionWeight(r.f); }
+    for (const u of this.regions) if (doneSet.has(u.key)) { done++; doneWeight += u.weight; }
     const fraction = this.totalWeight ? doneWeight / this.totalWeight : 1;
-    return { fraction, done, total: this.regions.length, unit: "regions" };
+    return { fraction, done, total: this.regions.length, unit: "modules" };
   }
 
   async status() {
     await this.getPlan();
     const session = await this.openSession();
-    const doneSet = await session.has(this.regions.map((r) => r.key));
-    for (const r of this.regions) if (session.isBlacklisted?.(r.key)) doneSet.add(r.key); // left to the JIT
+    const doneSet = await session.has(this.regions.map((u) => u.key));
+    for (const u of this.regions) if (session.isBlacklisted?.(u.key)) doneSet.add(u.key); // left to the JIT
     const p = this.progress(doneSet);
     return { state: p.done === 0 ? "none" : p.done >= p.total ? "complete" : "partial", fraction: p.fraction };
   }
 
-  // Keys to load at boot, in compile order (profile first), that the cache
-  // holds: what the region loader (aot-region-loader.js) loads under its budget.
+  // Module keys to load at boot, in compile order, that the cache holds: what
+  // the region loader (aot-region-loader.js) loads under its budget.
   async bootKeys() {
     await this.getPlan();
     const session = await this.openSession();
-    const held = await session.has(this.regions.map((r) => r.key));
-    return this.regions.map((r) => r.key).filter((k) => held.has(k) && !session.isBlacklisted?.(k));
+    const held = await session.has(this.regions.map((u) => u.key));
+    return this.regions.map((u) => u.key).filter((k) => held.has(k) && !session.isBlacklisted?.(k));
   }
 
   start({ resume = true } = {}) {
@@ -116,55 +147,78 @@ export class AotOptimizer extends EventTarget {
     this.dispatchEvent(Object.assign(new Event(type), { detail }));
   }
 
+  // Fragments of the members of `unit`, in member order. The core translates
+  // in slices: "budget" means resume at that function, "not-ready" (before
+  // boot) means wait and retry. Null when cancelled.
+  async translateUnit(unit) {
+    const fragments = [];
+    const refused = [];
+    let i = 0;
+    while (i < unit.members.length) {
+      if (this.cancelled) return null;
+      const slice = unit.members.slice(i, i + this.batchSize);
+      const batch = slice.map((f) => ({
+        module: unit.module, entry: f.entry, flags: f.flags ?? 0, hash: f.hash, ranges: f.ranges, extraEntries: f.extraEntries ?? []
+      }));
+      const translated = await this.translator.translate(batch);
+      if (this.cancelled) return null;
+      let consumed = 0, wait = false;
+      for (const [n, r] of translated.entries()) {
+        if (r.reason === "budget") break;
+        if (r.reason === "not-ready") { wait = true; break; }
+        if (n >= batch.length || (r.entry !== undefined && r.entry !== batch[n].entry)) throw new Error("translator results out of order");
+        consumed++;
+        if (r.fragment) fragments.push(r.fragment);
+        else refused.push({ entry: batch[n].entry, reason: r.reason ?? "untranslatable" });
+      }
+      i += consumed;
+      if (wait || !consumed) await this.sleep(wait ? this.notReadyDelayMs : 0);
+    }
+    return { fragments, refused };
+  }
+
   async run() {
     const t0 = this.now();
     try {
       await this.getPlan();
       const session = await this.openSession();
-      const doneSet = await session.has(this.regions.map((r) => r.key));
-      // Regions refused (hash mismatch, untranslatable, too large, quota) are
+      const doneSet = await session.has(this.regions.map((u) => u.key));
+      // Modules refused (no member translatable, rejected bytes, quota) are
       // left to the JIT; keys the cache blacklisted are skipped.
       const refused = new Set();
-      const todo = this.regions.filter((r) => !doneSet.has(r.key) && !session.isBlacklisted?.(r.key));
-      for (const r of this.regions) if (session.isBlacklisted?.(r.key)) { refused.add(r.key); doneSet.add(r.key); }
+      for (const u of this.regions) if (session.isBlacklisted?.(u.key)) { refused.add(u.key); doneSet.add(u.key); }
+      const todo = this.regions.filter((u) => !doneSet.has(u.key));
       this.emit("optimization-progress", this.progress(doneSet));
-      // The core translates in slices: "budget" means resume at that region,
-      // "not-ready" (before boot) means wait and retry.
-      let i = 0;
-      while (i < todo.length && !this.cancelled) {
-        const slice = todo.slice(i, i + this.batchSize);
-        const batch = slice.map(({ module, f, key }) => ({
-          module, entry: f.entry, flags: f.flags ?? 0, hash: f.hash, key, ranges: f.ranges, extraEntries: f.extraEntries ?? []
-        }));
-        const translated = await this.translator.translate(batch);
+      for (const unit of todo) {
         if (this.cancelled) break;
-        let consumed = 0, wait = false;
-        const ok = [], failed = [];
-        // Results come in batch order, each echoing its region's entry; the
-        // cache key is the worker's (the core does not compute it).
-        for (const [n, r] of translated.entries()) {
-          if (r.reason === "budget") break;
-          if (r.reason === "not-ready") { wait = true; break; }
-          if (n >= batch.length || (r.entry !== undefined && r.entry !== batch[n].entry)) throw new Error("translator results out of order");
-          consumed++;
-          const t = { ...r, key: batch[n].key };
-          if (t.bytes) ok.push(t); else failed.push(t);
+        const result = await this.translateUnit(unit);
+        if (!result || this.cancelled) break;
+        for (const x of result.refused) {
+          this.emit("optimization-error", { message: `function ${x.entry.toString(16)}: ${x.reason}`, fatal: false });
         }
-        const stored = ok.length ? await session.put(ok.map((t) => ({ key: t.key, bytes: t.bytes, meta: t.meta ?? null }))) : { failed: [] };
-        if (this.cancelled) break;
-        failed.push(...(stored.failed ?? []));
-        const failedKeys = new Set(failed.map((x) => x.key));
-        for (const t of ok) if (!failedKeys.has(t.key)) doneSet.add(t.key);
-        // Refusals survive a reload: the cache keeps them per identity.
-        if (failed.length) await session.blacklist?.(failed.map((x) => ({ key: x.key, reason: x.reason })));
-        for (const x of failed) {
-          refused.add(x.key);
-          doneSet.add(x.key); // handled (left to the JIT): progress must reach 100 %
-          this.emit("optimization-error", { message: `region ${x.key}: ${x.reason}`, fatal: false });
+        let failure = null;
+        if (!result.fragments.length) failure = "untranslatable";
+        else {
+          let bytes = null;
+          try {
+            bytes = this.assemble(result.fragments);
+          } catch (error) {
+            failure = `assemble: ${error?.message || error}`;
+          }
+          if (bytes) {
+            const stored = await session.put([{ key: unit.key, bytes, meta: { members: unit.members.length, translated: result.fragments.length } }]);
+            if (this.cancelled) break;
+            failure = stored.failed?.[0]?.reason ?? null;
+          }
         }
-        i += consumed;
-        if (consumed) this.emit("optimization-progress", this.progress(doneSet));
-        if (wait || !consumed) await this.sleep(wait ? this.notReadyDelayMs : 0);
+        if (failure) {
+          // Refusals survive a reload: the cache keeps them per identity.
+          await session.blacklist?.([{ key: unit.key, reason: failure.split(":")[0] }]);
+          refused.add(unit.key);
+          this.emit("optimization-error", { message: `module ${unit.key}: ${failure}`, fatal: false });
+        }
+        doneSet.add(unit.key); // stored, or handled (left to the JIT): progress must reach 100 %
+        this.emit("optimization-progress", this.progress(doneSet));
       }
       if (!this.cancelled) this.emit("optimization-done", { total: this.regions.length, refused: refused.size, ms: Math.round(this.now() - t0) });
     } catch (error) {
@@ -208,7 +262,7 @@ export class OpfsPlanStore {
 // keys listed in `refuse`. fakeCache: an in-memory cache session factory.
 // Reasons follow _DolphinWeb_AotTranslate: hash-mismatch, untranslatable,
 // budget (stop, resume here), too-large, not-ready (before boot).
-// `perCall`: regions translated per call before "budget"; `notReadyCalls`:
+// `perCall`: functions translated per call before "budget"; `notReadyCalls`:
 // first calls answer "not-ready".
 export function fakeTranslator({ msPerKiB = 0, refuse = new Set(), perCall = Infinity, notReadyCalls = 0, sleep = (ms) => new Promise((r) => setTimeout(r, ms)) } = {}) {
   let calls = 0;
@@ -222,7 +276,8 @@ export function fakeTranslator({ msPerKiB = 0, refuse = new Set(), perCall = Inf
         if (refuse.has(r.hash)) { out.push({ entry: r.entry, reason: "untranslatable" }); continue; }
         const bytes = r.ranges.reduce((t, [s, e]) => t + e - s, 0);
         if (msPerKiB) await sleep((bytes / 1024) * msPerKiB);
-        out.push({ entry: r.entry, bytes: new Uint8Array(8) });
+        // the smallest fragment with the contract's shape: declares its entry, returns 0
+        out.push({ entry: r.entry, fragment: { entry: r.entry, entries: [r.entry], code: Uint8Array.from([0x00, 0x41, 0x00, 0x0b]), relocs: [] } });
       }
       return out;
     }
@@ -256,12 +311,4 @@ export function fakeCache({ persisted = new Map(), quotaKeys = new Set(), blackl
   };
   open.persisted = persisted;
   return open;
-}
-
-// Cache key of a compiled region (docs/aot-plan.md): ends in ":" + the
-// SHA-256 of the region's guest code, as the cache requires. The parts come
-// from the core's pure export _DolphinWeb_AotKeyParts.
-export function regionKeyOf({ compilerVersion, codegenMask }) {
-  const hex8 = (v) => (v >>> 0).toString(16).padStart(8, "0");
-  return (f) => `region-v1:${hex8(compilerVersion)}:${hex8(codegenMask)}:${f.sha256}`;
 }
