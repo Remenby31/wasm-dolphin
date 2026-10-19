@@ -1,4 +1,5 @@
 import { aotCompilerRequested } from "./aot-compiler-worker.js";
+import { parseCustomRtc } from "./custom-rtc.js";
 import { DolphinCoreAdapter, dolphinBundleAvailable } from "./dolphin-adapter.js";
 import { buttonMaskFromPressed, isPadPort } from "./input.js";
 import { UpstreamMainThreadAdapter } from "./upstream-main-thread-adapter.js";
@@ -85,6 +86,7 @@ export class EmulatorHost {
     this.videoBackend = requestedVideoBackend();
     this.cpuThread = requestedCpuThread(this.videoBackend);
     this.cpuCore = requestedCpuCore();
+    this.customRtc = requestedCustomRtc();
     this.ppcWasmJit = requestedPpcWasmJit(this.videoBackend);
     this.ppcWasmJitTier = requestedPpcWasmJitTier();
     this.ppcWasmJitForce = requestedPpcWasmJitForce();
@@ -328,6 +330,7 @@ export class EmulatorHost {
             videoBackend: this.videoBackend,
             cpuThread: this.cpuThread,
             cpuCore: this.cpuCore,
+            customRtc: this.customRtc,
             ppcWasmJit: this.ppcWasmJit,
             ppcWasmJitTier: this.ppcWasmJitTier,
             ppcWasmJitForce: this.ppcWasmJitForce,
@@ -374,6 +377,7 @@ export class EmulatorHost {
             videoBackend: this.videoBackend,
             cpuThread: this.cpuThread,
             cpuCore: this.cpuCore,
+            customRtc: this.customRtc,
             ppcWasmJit: this.ppcWasmJit,
             ppcWasmJitTier: this.ppcWasmJitTier,
             ppcWasmJitForce: this.ppcWasmJitForce,
@@ -1197,6 +1201,13 @@ function requestedCpuThread(videoBackend) {
   return true;
 }
 
+// ?rtc=<seconds since 1970>: the emulated real-time clock starts there and
+// follows emulated time, so two boots of one disc are identical (harness
+// comparisons). Without it, the console clock is the host's.
+function requestedCustomRtc() {
+  return parseCustomRtc(new URLSearchParams(window.location.search).get("rtc"));
+}
+
 function requestedCpuCore() {
   const requested = new URLSearchParams(window.location.search).get("ppc");
   return requested === "interpreter" ? "interpreter" : "cached";
@@ -1442,10 +1453,11 @@ const CACHED_INTERPRETER_DISABLE_BITS = {
   shortprefix:     1 << 21, // §28ca lower JIT min-prefix 4→2 (default-off; ?shortprefix=1 to enable)
   smearcompile:    1 << 22, // §28ce cap JIT compiles/slice (default-off; ?smearcompile=1 to enable)
   fastmemhoist:    1 << 23, // §28cz per-block fastmem bounds-check hoist (ENABLE polarity; default-off; ?fastmemhoist=1)
+  inlinefma:       1 << 26, // inline exact FMA; set: the FMA family calls the interpreter's NI_madd_msub
   // Aliases the plan / TL;DR uses interchangeably:
   fastinputpoll: 1 << 1, // legacy synonym for meleecall (input-poll lives there)
   fastmem:       1 << 7, // legacy synonym for fastsystem (load/store-ish helpers)
-  all:           0x7fffff
+  all:           0x47fffff
 };
 
 // The WebGPU backend emits partial and independent-channel EFB clears as a

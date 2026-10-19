@@ -1,0 +1,184 @@
+diff --git a/Source/Core/Core/CoreTiming.cpp b/Source/Core/Core/CoreTiming.cpp
+--- a/Source/Core/Core/CoreTiming.cpp
++++ b/Source/Core/Core/CoreTiming.cpp
+@@ -28,6 +28,9 @@
+ #include "Core/PowerPC/PowerPC.h"
+ #include "Core/System.h"
+ #ifdef __EMSCRIPTEN__
++#if defined(DOLPHIN_WEB_DET_TRACE) && DOLPHIN_WEB_DET_TRACE
++#include "Core/WasmDetTrace.h"
++#endif
+ #include "Core/WasmTimingProfile.h"
+ #endif
+ 
+@@ -306,6 +309,10 @@ void CoreTimingManager::ScheduleEvent(s64 cycles_into_future, EventType* event_t
+                     *event_type->name);
+     }
+ 
++#if defined(DOLPHIN_WEB_DET_TRACE) && DOLPHIN_WEB_DET_TRACE
++    DolphinWeb::DetTrace::Record(DolphinWeb::DetTrace::OffThread, event_type->name,
++                                 static_cast<u64>(cycles_into_future), 0);
++#endif
+     std::lock_guard lk(m_ts_write_lock);
+     m_ts_queue.Push(Event{cycles_into_future, 0, userdata, event_type});
+   }
+@@ -351,6 +358,10 @@ void CoreTimingManager::MoveEvents()
+ 
+     ev.fifo_order = m_event_fifo_id++;
+     ev.time += m_globals.global_timer;
++#if defined(DOLPHIN_WEB_DET_TRACE) && DOLPHIN_WEB_DET_TRACE
++    DolphinWeb::DetTrace::Record(DolphinWeb::DetTrace::Moved, ev.type->name,
++                                 static_cast<u64>(ev.time), 0);
++#endif
+ 
+     std::ranges::push_heap(m_event_queue, std::ranges::greater{});
+   }
+@@ -454,6 +465,10 @@ void CoreTimingManager::Advance()
+     Event evt = m_event_queue.front();
+     std::ranges::pop_heap(m_event_queue, std::ranges::greater{});
+     m_event_queue.pop_back();
++#if defined(DOLPHIN_WEB_DET_TRACE) && DOLPHIN_WEB_DET_TRACE
++    DolphinWeb::DetTrace::Record(DolphinWeb::DetTrace::Run, evt.type->name,
++                                 static_cast<u64>(evt.time), m_globals.global_timer - evt.time);
++#endif
+ #ifdef __EMSCRIPTEN__
+     // §28cp metrics-gated per-event callback timing. Logs when ANY single
+     // event callback exceeds 5ms wall time — these are the spikes that
+diff --git a/Source/Core/Core/HW/EXI/EXI.cpp b/Source/Core/Core/HW/EXI/EXI.cpp
+--- a/Source/Core/Core/HW/EXI/EXI.cpp
++++ b/Source/Core/Core/HW/EXI/EXI.cpp
+@@ -129,8 +129,19 @@ void ExpansionInterfaceManager::Init(const Sram* override_sram)
+     const CardFlashId& flash_id = sram.settings_ex.flash_id[Memcard::SLOT_A];
+     const u32 rtc_bias = sram.settings.rtc_bias;
+     const u32 sram_language = static_cast<u32>(sram.settings.language);
++#ifdef __EMSCRIPTEN__
++    // With the browser build's deterministic clock (a custom RTC, see
++    // CEXIIPL::GetEmulatedTime), the cards are formatted at its start too:
++    // the format time seeds the card serial, which the game reads.
++    const u64 format_time =
++        Config::Get(Config::MAIN_CUSTOM_RTC_ENABLE) ?
++            static_cast<u64>(Config::Get(Config::MAIN_CUSTOM_RTC_VALUE)) -
++                ExpansionInterface::CEXIIPL::GC_EPOCH :
++            Common::Timer::GetLocalTimeSinceJan1970() - ExpansionInterface::CEXIIPL::GC_EPOCH;
++#else
+     const u64 format_time =
+         Common::Timer::GetLocalTimeSinceJan1970() - ExpansionInterface::CEXIIPL::GC_EPOCH;
++#endif
+ 
+     for (u32 i = 0; i < MAX_EXI_CHANNELS; i++)
+     {
+diff --git a/Source/Core/Core/HW/EXI/EXI_DeviceIPL.cpp b/Source/Core/Core/HW/EXI/EXI_DeviceIPL.cpp
+--- a/Source/Core/Core/HW/EXI/EXI_DeviceIPL.cpp
++++ b/Source/Core/Core/HW/EXI/EXI_DeviceIPL.cpp
+@@ -417,6 +417,17 @@ u32 CEXIIPL::GetEmulatedTime(Core::System& system, u32 epoch)
+     // let's keep time moving forward, regardless of what it starts at
+     ltime += system.GetCoreTiming().GetTicks() / system.GetSystemTimers().GetTicksPerSecond();
+   }
++#ifdef __EMSCRIPTEN__
++  else if (Config::Get(Config::MAIN_CUSTOM_RTC_ENABLE))
++  {
++    // The browser build's custom RTC is a deterministic clock: it starts at
++    // the configured value and follows emulated time, as a movie does. On the
++    // host clock (the branch below), the time base set at boot and every RTC
++    // read depend on when the run happens, so two boots of one disc diverge.
++    ltime = Config::Get(Config::MAIN_CUSTOM_RTC_VALUE);
++    ltime += system.GetCoreTiming().GetTicks() / system.GetSystemTimers().GetTicksPerSecond();
++  }
++#endif
+   else
+   {
+     ASSERT(!Core::WantsDeterminism());
+diff --git a/Source/Core/Core/WasmDetTrace.h b/Source/Core/Core/WasmDetTrace.h
+new file mode 100644
+index 0000000..2499b5b
+--- /dev/null
++++ b/Source/Core/Core/WasmDetTrace.h
+@@ -0,0 +1,88 @@
++// Copyright 2026 Dolphin Emulator Project (wasm-dolphin fork)
++// SPDX-License-Identifier: GPL-2.0-or-later
++
++#pragma once
++
++// Harness diagnostics for emulation determinism (dolphin_web_discio.cpp,
++// validationReadDetTrace): every CoreTiming event the CPU thread runs, and
++// every event another thread schedules, in order, with its emulated time and
++// how late it ran. Two runs of one boot that should be identical are compared
++// on this log: the first entry that differs names what host timing reached.
++// Compiled only into a trace build (DOLPHIN_WEB_DET_TRACE=1 at configure
++// time): a player's core has none of it, CoreTiming's hot path is upstream's.
++// In a trace build it is off until a harness session asks, then costs one
++// relaxed load per event and a few stores; the log is allocated on first use.
++
++#include <atomic>
++#include <cstdint>
++#include <string>
++
++namespace DolphinWeb::DetTrace
++{
++enum Kind : std::uint32_t
++{
++  Run = 0,        // the CPU thread ran the event (time, late = cycles late)
++  Moved = 1,      // an off-thread event got its emulated time (time; late = 0)
++  OffThread = 2,  // another thread scheduled it (time = cycles into the future)
++};
++
++struct Entry
++{
++  std::uint64_t time;
++  std::int64_t late;
++  std::uintptr_t name;  // const std::string* of the event type (resolved on read)
++  std::uint32_t kind;
++};
++static_assert(sizeof(Entry) == 24 || sizeof(std::uintptr_t) != 4, "the worker reads 24-byte entries");
++
++inline constexpr std::uint32_t kLogCapacity = 1u << 18;
++
++inline std::atomic<bool> s_enabled{false};
++inline std::atomic<Entry*> s_log{nullptr};
++inline std::atomic<std::uint32_t> s_log_count{0};
++inline std::atomic<std::uint64_t> s_hash{1469598103934665603ull};
++inline std::atomic<std::uint64_t> s_events{0};
++
++inline bool Enabled()
++{
++  return s_enabled.load(std::memory_order_relaxed);
++}
++
++inline void Record(Kind kind, const std::string* name, std::uint64_t time, std::int64_t late)
++{
++  if (!Enabled())
++    return;
++  // A slot per entry, whichever thread records it.
++  const std::uint32_t n = s_log_count.fetch_add(1, std::memory_order_relaxed);
++  Entry* const log = s_log.load(std::memory_order_acquire);
++  if (log && n < kLogCapacity)
++    log[n] = Entry{time, late, reinterpret_cast<std::uintptr_t>(name), kind};
++  if (kind == OffThread)
++    return;  // another thread, at a host-timed moment: hashed when Moved
++  // From here on, the CPU thread only.
++  // The name's characters, not its address: equal runs must hash equal.
++  std::uint64_t h = s_hash.load(std::memory_order_relaxed);
++  if (name)
++    for (const char c : *name)
++      h = (h ^ static_cast<unsigned char>(c)) * 1099511628211ull;
++  for (const std::uint64_t v : {std::uint64_t{kind}, time, static_cast<std::uint64_t>(late)})
++    h = (h ^ v) * 1099511628211ull;
++  s_hash.store(h, std::memory_order_relaxed);
++  s_events.fetch_add(1, std::memory_order_relaxed);
++}
++
++inline void Enable(bool on)
++{
++  if (on)
++  {
++    // Allocated once, on the first activation; never freed (the harness
++    // reads it until the page goes away).
++    if (!s_log.load(std::memory_order_acquire))
++      s_log.store(new Entry[kLogCapacity](), std::memory_order_release);
++    s_log_count.store(0, std::memory_order_relaxed);
++    s_hash.store(1469598103934665603ull, std::memory_order_relaxed);
++    s_events.store(0, std::memory_order_relaxed);
++  }
++  s_enabled.store(on, std::memory_order_release);
++}
++}  // namespace DolphinWeb::DetTrace

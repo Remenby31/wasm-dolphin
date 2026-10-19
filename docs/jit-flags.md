@@ -61,7 +61,7 @@ ignored. Current named categories include:
 meleeloop meleecall osinterrupt dcbxloop fastbranch fastfp fastinteger
 fastsystem wasmblock wasmcarry wasmaddc wasmsubfc wasmadde wasmsubfe
 wasmaddze blockredispatch blockmerge regalloc shortprefix smearcompile
-fastmemhoist all
+fastmemhoist inlinefma all
 ```
 
 Aliases include `fastinputpoll` for `meleecall` and `fastmem` for
@@ -96,17 +96,41 @@ Gekko's single rounding of frC), FPSCR including FPRF/FI/FR and the sticky
 exception bits, memory, and on an exception SRR0/SRR1/DAR/DSISR and the MSR.
 The direct tier computes zero and normal results in WASM. The FMA family
 (`fmadd`, `fmsub`, `fnmadd`, `fnmsub`, their single forms and `ps_madd*`,
-`ps_msub`, `ps_nmadd`, `ps_nmsub`) must round once. When the product a·frC
-is exact in double (their significant bits add up to 53 or fewer, frC
-rounded to 25 bits first for single ops, the product normal or an operand
-zero), `a·c ± b` is computed inline and rounds once like `std::fma`; on the
-single-precision tie that the interpreter corrects, and whenever the product
-is not exact, it calls the interpreter's own `NI_madd_msub` through the `fma`
-import. Either way the result stays inline under the zero-or-normal rule. NaN, infinity,
-denormal results, a denormal frC, the reciprocal estimates and
+`ps_msub`, `ps_nmadd`, `ps_nmsub`) must round once, as `std::fma` does, and
+the WASM code does it without a hardware or relaxed-SIMD FMA, so the result is
+the same on every machine. Inline, frC is first rounded to 25 bits for single
+ops. When a·c is exact in double (the significands need 53 bits or fewer
+together, counted with `i64.ctz`; always the case for a single-precision a in
+single and paired-single forms) and the product is normal (a zero or
+subnormal product of nonzero operands underflowed and is not exact), or when a
+or frC is zero, the result is simply p + b. Otherwise TwoProduct (Veltkamp split) gives a·c = p + e exactly, TwoSum gives
+p ± b = s + t, and the result is RN(s + RO(t + e)), RO rounding to odd
+(u + v = t + e by TwoSum; when v ≠ 0 and u is even, u moves one ulp toward
+v). Boldo and Melquiond prove this rounds a·c ± b once, in binary64, without
+underflow or overflow ("Emulation of FMA and correctly rounded sums: proved
+algorithms using rounding to odd", IEEE TC 2008). The `fma` import (the
+interpreter's own `NI_madd_msub`) takes the rest: operands outside |a|, |c|,
+|b| ≤ 2^995 with |p| ≥ 2^-900, and a denormal a or frC. For single forms, when the double result sits exactly
+on a single-precision midpoint, `NI_madd_msub` moves it one ulp toward the
+exact value with its own error estimate (b − r, r + a′, fma(a, c, a′)…); the
+JIT computes that same estimate inline, the inner fma from the same exact
+product (p + a′ when a·c is exact). That estimate is exact for single-precision inputs only (Dolphin's
+comment); with a double b it can differ from a single rounding, and the JIT
+then differs exactly as the interpreter does (`singleInexact` in the fuzz).
+`disable=inlinefma` sends the whole family to the import, for A/B.
+
+Either way the result stays inline under the zero-or-normal rule. `frsqrte`
+reads Gekko's estimate table inline for positive normal inputs. NaN, infinity,
+denormal results, a denormal frC, `fres`, the other `frsqrte` inputs and
 `MSR.FE0/FE1` set re-run the instruction through the interpreter helper
 before anything is written. FPRF is skipped only when the analyzer proves a
 later op of the block rewrites it and FPSCR.VE = ZE = 0.
+
+The interpreter's `std::fma` must round once too. The core links naga's
+Rust `compiler_builtins`, whose weak `fma` double-rounds near a midpoint and
+used to win the link over musl's; `core/upstream/dolphin_web_fma.h` defines
+musl's as a strong symbol. The oracle checks the interpreter's double FMA
+results against exact integer arithmetic.
 
 `tests/jit-oracle-fuzz.mjs` checks this in Node against the built core
 (`DolphinWeb_JitOracleRun` runs the same program from the same state through
@@ -116,9 +140,15 @@ the interpreter, then through the CPU thread's block pipeline):
 node tests/jit-oracle-fuzz.mjs --per-instruction 300          # every instruction class
 node tests/jit-oracle-fuzz.mjs --programs 20000 --length 48 --seed 2 --reduce
 node tests/jit-oracle-fuzz.mjs --programs 10000 --mask 0x20000  # shortprefix on
+node tests/jit-oracle-fuzz.mjs --fma 220000 --seed 3       # FMA family, adversarial operands
 ```
 
-Both modes run with the GPR register cache on and off; `--reduce` shrinks a
+`--fma` draws operands for the FMA family: cancellations (b ≈ −a·c),
+products beside the inline path's range guards, overflows, zeros, denormal
+b and frC, single values, and constructed double-rounding traps (a·c rounds
+to 2^m with a tiny error, b's ulp is 2^(m+1): p + b is an exact tie that
+only the error resolves); double forms in round-to-nearest are also checked
+against exact integer arithmetic (`exactMismatch`). All modes run with the GPR register cache on and off; `--reduce` shrinks a
 diverging program to the instructions that matter. Programs that raise (FP
 program exceptions: one state in six sets FE0/FE1) are compared at the
 exception vector (SRR0/SRR1/MSR included), counted as `raisedException`.

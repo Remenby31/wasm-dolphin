@@ -31,6 +31,13 @@ if (!["0", "1"].includes(fallbackMapDiagnostics)) {
     `DOLPHIN_WEB_FALLBACK_MAP_DIAGNOSTICS must be 0 or 1, got ${JSON.stringify(fallbackMapDiagnostics)}`
   );
 }
+// DOLPHIN_WEB_DET_TRACE=1: a trace build (patch 0081's CoreTiming trace, read
+// by harness/probes/determinism.mjs). Off by default: a player's core has
+// none of it and CoreTiming's hot path is upstream's.
+const detTrace = String(process.env.DOLPHIN_WEB_DET_TRACE ?? "0").trim();
+if (!["0", "1"].includes(detTrace)) {
+  throw new Error(`DOLPHIN_WEB_DET_TRACE must be 0 or 1, got ${JSON.stringify(detTrace)}`);
+}
 const fallbackMapBits = String(
   process.env.DOLPHIN_WEB_FALLBACK_MAP_BITS ?? "16"
 ).trim();
@@ -157,6 +164,7 @@ const wasmCompileFlags =
   `-DDOLPHIN_WEB_FALLBACK_MAP_DIAGNOSTICS=${fallbackMapDiagnostics} ` +
   `-DDOLPHIN_WEB_FALLBACK_MAP_BITS=${fallbackMapBits} ` +
   `-DDOLPHIN_WEB_DIRECT_WASM_BLOCK_DISPATCH=${directWasmBlockDispatch} ` +
+  `-DDOLPHIN_WEB_DET_TRACE=${detTrace} ` +
   sourcePathFlags.join(" ");
 const wasmDebugProbeFlags = "-O0 -fno-lto";
 const cmakeArgs = [
@@ -284,6 +292,7 @@ writeFileSync(resolve(buildDir, "wasm-dolphin-configure.json"), `${JSON.stringif
   fallbackMapDiagnostics,
   fallbackMapBits,
   directWasmBlockDispatch,
+  detTrace,
   wasmCompileFlags,
   sourcePathFlags,
   unmappedPaths,
