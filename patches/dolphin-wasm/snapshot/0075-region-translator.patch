@@ -17,7 +17,36 @@ diff --git a/Source/Core/Core/PowerPC/CachedInterpreter/CachedInterpreter.cpp b/
  #include <mbedtls/sha256.h>
  
  #ifndef DOLPHIN_WEB_HOT_COUNTERS
-@@ -2544,6 +2546,17 @@ extern "C" int DolphinWeb_CachedInterpreterSystem(int state_ptr, u32 inst_hex, u
+@@ -361,16 +363,26 @@ constexpr u32 DOLPHIN_WEB_DISABLE_INLINE_FMA = 1u << 26;  // 24 and 25: clear-re
+ constexpr u32 COMPILE_THROTTLE_MAX_PER_SLICE = 8;
+ constexpr u32 COMPILE_THROTTLE_MAX_US_PER_SLICE = 5000;
+ 
++// The region translator off the CPU thread (DolphinWeb_AotTranslate) emits
++// with its own mask, never the CPU thread's.
++thread_local bool t_disable_mask_override = false;
++thread_local u32 t_disable_mask = 0;
++inline u32 DolphinWebDisableMask()
++{
++  return t_disable_mask_override ? t_disable_mask :
++                                   s_dolphin_web_disable_mask.load(std::memory_order_relaxed);
++}
++
+ inline bool DolphinWebHelperDisabled(u32 bit)
+ {
+-  return (s_dolphin_web_disable_mask.load(std::memory_order_relaxed) & bit) != 0;
++  return (DolphinWebDisableMask() & bit) != 0;
+ }
+ 
+ // §28cz ENABLE-polarity gate (opposite of DolphinWebHelperDisabled): the
+ // fastmem-hoist feature is active only when its bit is SET in the mask.
+ inline bool DolphinWebFeatureEnabled(u32 bit)
+ {
+-  return (s_dolphin_web_disable_mask.load(std::memory_order_relaxed) & bit) != 0;
++  return (DolphinWebDisableMask() & bit) != 0;
+ }
+ 
+ u32 s_wasm_block_compile_count = 0;
+@@ -2544,6 +2556,17 @@ extern "C" int DolphinWeb_CachedInterpreterSystem(int state_ptr, u32 inst_hex, u
      }
      ppc_state.msr.Hex = ppc_state.gpr[inst.RS];
      system.GetPowerPC().MSRUpdated();
@@ -35,7 +64,7 @@ diff --git a/Source/Core/Core/PowerPC/CachedInterpreter/CachedInterpreter.cpp b/
      break;
    case 371:  // mftb
    {
-@@ -2799,6 +2812,50 @@ constexpr u32 WASM_IMPORT_FMA_INDEX = 19;
+@@ -2799,6 +2822,50 @@ constexpr u32 WASM_IMPORT_FMA_INDEX = 19;
  constexpr u32 WASM_GATHER_PIPE_FLUSH_THRESHOLD =
      GPFifo::GATHER_PIPE_EXTRA_SIZE - GPFifo::GATHER_PIPE_SIZE;
  
@@ -86,7 +115,25 @@ diff --git a/Source/Core/Core/PowerPC/CachedInterpreter/CachedInterpreter.cpp b/
  void EmitLocalGet(std::vector<u8>& body, u32 index)
  {
    body.push_back(0x20);
-@@ -3565,6 +3622,26 @@ void EmitMtmsr(std::vector<u8>& body, const WasmStateLayout& layout, const PPCAn
+@@ -2831,7 +2898,7 @@ struct WasmGprRegCache
+   bool present[32] = {};  // GPR loaded into local WASM_GPR_LOCAL_BASE+i at prologue
+   bool dirty[32] = {};    // GPR local written since prologue (sticky, never cleared)
+ };
+-static WasmGprRegCache s_gpr_rc;
++static thread_local WasmGprRegCache s_gpr_rc;  // per emitting thread (P4 translator)
+ 
+ // §28cz fastmem bounds-check hoist plan. Built per block (gated on the enable
+ // bit) BEFORE the emit loop by AnalyzeFastmemHoistPlan, which re-runs the exact
+@@ -2860,7 +2927,7 @@ struct WasmFastmemHoistPlan
+   };
+   std::unordered_map<const PPCAnalyst::CodeOp*, OpInfo> ops;
+ };
+-static WasmFastmemHoistPlan s_fmh_plan;
++static thread_local WasmFastmemHoistPlan s_fmh_plan;
+ 
+ inline bool RegCacheGprIndex(u32 offset, u32* out_index)
+ {
+@@ -3565,6 +3632,26 @@ void EmitMtmsr(std::vector<u8>& body, const WasmStateLayout& layout, const PPCAn
    body.push_back(0x05);
    EmitApplyMsrFromLocal(body, layout, 2);
    EmitStoreNpcConst(body, layout, op.address + 4);
@@ -113,7 +160,7 @@ diff --git a/Source/Core/Core/PowerPC/CachedInterpreter/CachedInterpreter.cpp b/
    body.push_back(0x0b);
  }
  
-@@ -4051,8 +4128,7 @@ void EmitFastCheckGatherPipeIfFull(std::vector<u8>& body, const WasmStateLayout&
+@@ -4051,8 +4138,7 @@ void EmitFastCheckGatherPipeIfFull(std::vector<u8>& body, const WasmStateLayout&
    EmitLocalGet(body, 0);
    EmitI32Const(body, 0);
    EmitI32Const(body, 0);
@@ -123,7 +170,7 @@ diff --git a/Source/Core/Core/PowerPC/CachedInterpreter/CachedInterpreter.cpp b/
    body.push_back(0x0b);
  }
  
-@@ -4108,8 +4184,7 @@ void EmitReadU32MaybeDirect(std::vector<u8>& body, const WasmStateLayout& layout
+@@ -4108,8 +4194,7 @@ void EmitReadU32MaybeDirect(std::vector<u8>& body, const WasmStateLayout& layout
    body.push_back(0x05);
    EmitLocalGet(body, 0);
    EmitLocalGet(body, 1);
@@ -133,7 +180,7 @@ diff --git a/Source/Core/Core/PowerPC/CachedInterpreter/CachedInterpreter.cpp b/
    body.push_back(0x0b);
  }
  
-@@ -4132,8 +4207,7 @@ void EmitReadU8MaybeDirect(std::vector<u8>& body, const WasmStateLayout& layout)
+@@ -4132,8 +4217,7 @@ void EmitReadU8MaybeDirect(std::vector<u8>& body, const WasmStateLayout& layout)
    body.push_back(0x05);
    EmitLocalGet(body, 0);
    EmitLocalGet(body, 1);
@@ -143,7 +190,7 @@ diff --git a/Source/Core/Core/PowerPC/CachedInterpreter/CachedInterpreter.cpp b/
    body.push_back(0x0b);
  }
  
-@@ -4158,8 +4232,7 @@ void EmitReadU16MaybeDirect(std::vector<u8>& body, const WasmStateLayout& layout
+@@ -4158,8 +4242,7 @@ void EmitReadU16MaybeDirect(std::vector<u8>& body, const WasmStateLayout& layout
    body.push_back(0x05);
    EmitLocalGet(body, 0);
    EmitLocalGet(body, 1);
@@ -153,7 +200,7 @@ diff --git a/Source/Core/Core/PowerPC/CachedInterpreter/CachedInterpreter.cpp b/
    body.push_back(0x0b);
  }
  
-@@ -4200,8 +4273,7 @@ void EmitWriteU32MaybeDirect(std::vector<u8>& body, const WasmStateLayout& layou
+@@ -4200,8 +4283,7 @@ void EmitWriteU32MaybeDirect(std::vector<u8>& body, const WasmStateLayout& layou
    EmitLocalGet(body, 0);
    EmitLocalGet(body, 1);
    EmitLocalGet(body, 2);
@@ -163,7 +210,7 @@ diff --git a/Source/Core/Core/PowerPC/CachedInterpreter/CachedInterpreter.cpp b/
    body.push_back(0x0b);
  }
  
-@@ -4226,8 +4298,7 @@ void EmitWriteU8MaybeDirect(std::vector<u8>& body, const WasmStateLayout& layout
+@@ -4226,8 +4308,7 @@ void EmitWriteU8MaybeDirect(std::vector<u8>& body, const WasmStateLayout& layout
    EmitLocalGet(body, 0);
    EmitLocalGet(body, 1);
    EmitLocalGet(body, 2);
@@ -173,7 +220,7 @@ diff --git a/Source/Core/Core/PowerPC/CachedInterpreter/CachedInterpreter.cpp b/
    body.push_back(0x0b);
  }
  
-@@ -4254,8 +4325,7 @@ void EmitWriteU16MaybeDirect(std::vector<u8>& body, const WasmStateLayout& layou
+@@ -4254,8 +4335,7 @@ void EmitWriteU16MaybeDirect(std::vector<u8>& body, const WasmStateLayout& layou
    EmitLocalGet(body, 0);
    EmitLocalGet(body, 1);
    EmitLocalGet(body, 2);
@@ -183,7 +230,7 @@ diff --git a/Source/Core/Core/PowerPC/CachedInterpreter/CachedInterpreter.cpp b/
    body.push_back(0x0b);
  }
  
-@@ -4353,7 +4423,9 @@ void EmitImportedHaltCheck(std::vector<u8>& body)
+@@ -4353,7 +4433,9 @@ void EmitImportedHaltCheck(std::vector<u8>& body)
  {
    body.push_back(0x04);
    body.push_back(0x40);
@@ -194,7 +241,7 @@ diff --git a/Source/Core/Core/PowerPC/CachedInterpreter/CachedInterpreter.cpp b/
    body.push_back(0x0f);
    body.push_back(0x0b);
  }
-@@ -4366,8 +4438,7 @@ void EmitSystemCall(std::vector<u8>& body, const PPCAnalyst::CodeOp& op, u32 dow
+@@ -4366,8 +4448,7 @@ void EmitSystemCall(std::vector<u8>& body, const PPCAnalyst::CodeOp& op, u32 dow
    EmitI32Const(body, op.address);
    EmitI32Const(body, downcount);
    EmitI32Const(body, 0);
@@ -204,7 +251,7 @@ diff --git a/Source/Core/Core/PowerPC/CachedInterpreter/CachedInterpreter.cpp b/
    EmitImportedHaltCheck(body);
    EmitRegCacheReloadAll(body);  // helper may have written arbitrary GPRs
  }
-@@ -4381,8 +4452,7 @@ void EmitInterpretCall(std::vector<u8>& body, const PPCAnalyst::CodeOp& op, u32
+@@ -4381,8 +4462,7 @@ void EmitInterpretCall(std::vector<u8>& body, const PPCAnalyst::CodeOp& op, u32
    EmitI32Const(body, op.inst.hex);
    EmitI32Const(body, write_pc ? 1 : 0);
    EmitI32Const(body, downcount);
@@ -214,7 +261,7 @@ diff --git a/Source/Core/Core/PowerPC/CachedInterpreter/CachedInterpreter.cpp b/
    EmitImportedHaltCheck(body);
    EmitRegCacheReloadAll(body);  // interpret may have written arbitrary GPRs
  }
-@@ -4396,8 +4466,7 @@ void EmitFastOsInterruptCall(std::vector<u8>& body, u32 current_pc,
+@@ -4396,8 +4476,7 @@ void EmitFastOsInterruptCall(std::vector<u8>& body, u32 current_pc,
    EmitI32Const(body, target.mode);
    EmitI32Const(body, target.cycles_primary);
    EmitI32Const(body, target.cycles_secondary);
@@ -224,7 +271,7 @@ diff --git a/Source/Core/Core/PowerPC/CachedInterpreter/CachedInterpreter.cpp b/
    EmitImportedHaltCheck(body);
    EmitRegCacheReloadAll(body);  // interrupt handler may write arbitrary GPRs
  }
-@@ -4407,8 +4476,7 @@ void EmitFastMeleeInputStatusCall(std::vector<u8>& body, u32 current_pc)
+@@ -4407,8 +4486,7 @@ void EmitFastMeleeInputStatusCall(std::vector<u8>& body, u32 current_pc)
    EmitRegCacheFlushDirty(body);  // §28cx C1
    EmitLocalGet(body, 0);
    EmitI32Const(body, current_pc);
@@ -234,7 +281,7 @@ diff --git a/Source/Core/Core/PowerPC/CachedInterpreter/CachedInterpreter.cpp b/
    EmitImportedHaltCheck(body);
    EmitRegCacheReloadAll(body);  // HLE call may write arbitrary GPRs
  }
-@@ -4421,8 +4489,7 @@ void EmitFastMeleeStatusCall(std::vector<u8>& body, u32 current_pc, u32 downcoun
+@@ -4421,8 +4499,7 @@ void EmitFastMeleeStatusCall(std::vector<u8>& body, u32 current_pc, u32 downcoun
    EmitI32Const(body, downcount);
    EmitI32Const(body, 0);
    EmitI32Const(body, 0);
@@ -244,7 +291,7 @@ diff --git a/Source/Core/Core/PowerPC/CachedInterpreter/CachedInterpreter.cpp b/
    EmitImportedHaltCheck(body);
    EmitRegCacheReloadAll(body);  // HLE call may write arbitrary GPRs
  }
-@@ -4435,8 +4502,7 @@ void EmitFastMeleeServicePollCall(std::vector<u8>& body, u32 current_pc, u32 dow
+@@ -4435,8 +4512,7 @@ void EmitFastMeleeServicePollCall(std::vector<u8>& body, u32 current_pc, u32 dow
    EmitI32Const(body, downcount);
    EmitI32Const(body, 0);
    EmitI32Const(body, 0);
@@ -254,7 +301,7 @@ diff --git a/Source/Core/Core/PowerPC/CachedInterpreter/CachedInterpreter.cpp b/
    EmitImportedHaltCheck(body);
    EmitRegCacheReloadAll(body);  // HLE call may write arbitrary GPRs
  }
-@@ -4449,8 +4515,7 @@ void EmitFpCall(std::vector<u8>& body, const PPCAnalyst::CodeOp& op, u32 downcou
+@@ -4449,8 +4525,7 @@ void EmitFpCall(std::vector<u8>& body, const PPCAnalyst::CodeOp& op, u32 downcou
    EmitI32Const(body, op.address);
    EmitI32Const(body, downcount);
    EmitI32Const(body, 0);
@@ -264,7 +311,7 @@ diff --git a/Source/Core/Core/PowerPC/CachedInterpreter/CachedInterpreter.cpp b/
    EmitImportedHaltCheck(body);
    // FP ops write FPRs (+CR/FPSCR), not GPRs — reload only the op's GPR outputs
    // (normally none), so the FP-heavy Melee path doesn't pay a full reload.
-@@ -4465,8 +4530,7 @@ void EmitLfsImportCall(std::vector<u8>& body, UGeckoInstruction inst, u32 curren
+@@ -4465,8 +4540,7 @@ void EmitLfsImportCall(std::vector<u8>& body, UGeckoInstruction inst, u32 curren
    EmitI32Const(body, inst.FD);
    EmitI32Const(body, current_pc);
    EmitI32Const(body, downcount);
@@ -274,7 +321,7 @@ diff --git a/Source/Core/Core/PowerPC/CachedInterpreter/CachedInterpreter.cpp b/
    EmitImportedHaltCheck(body);
  }
  
-@@ -4479,8 +4543,7 @@ void EmitStfsImportCall(std::vector<u8>& body, UGeckoInstruction inst, u32 curre
+@@ -4479,8 +4553,7 @@ void EmitStfsImportCall(std::vector<u8>& body, UGeckoInstruction inst, u32 curre
    EmitI32Const(body, inst.FS);
    EmitI32Const(body, current_pc);
    EmitI32Const(body, downcount);
@@ -284,7 +331,7 @@ diff --git a/Source/Core/Core/PowerPC/CachedInterpreter/CachedInterpreter.cpp b/
    EmitImportedHaltCheck(body);
  }
  
-@@ -4492,8 +4555,7 @@ void EmitLfdImportCall(std::vector<u8>& body, UGeckoInstruction inst, u32 curren
+@@ -4492,8 +4565,7 @@ void EmitLfdImportCall(std::vector<u8>& body, UGeckoInstruction inst, u32 curren
    EmitI32Const(body, inst.FD);
    EmitI32Const(body, current_pc);
    EmitI32Const(body, downcount);
@@ -294,7 +341,7 @@ diff --git a/Source/Core/Core/PowerPC/CachedInterpreter/CachedInterpreter.cpp b/
    EmitImportedHaltCheck(body);
  }
  
-@@ -4505,8 +4567,7 @@ void EmitFctiwzImportCall(std::vector<u8>& body, const PPCAnalyst::CodeOp& op, u
+@@ -4505,8 +4577,7 @@ void EmitFctiwzImportCall(std::vector<u8>& body, const PPCAnalyst::CodeOp& op, u
    EmitI32Const(body, op.address);
    EmitI32Const(body, downcount);
    EmitI32Const(body, 0);
@@ -304,7 +351,7 @@ diff --git a/Source/Core/Core/PowerPC/CachedInterpreter/CachedInterpreter.cpp b/
    EmitImportedHaltCheck(body);
  }
  
-@@ -4893,8 +4954,7 @@ void EmitExactMulAddSub(std::vector<u8>& body, const WasmStateLayout& layout,
+@@ -4893,8 +4964,7 @@ void EmitExactMulAddSub(std::vector<u8>& body, const WasmStateLayout& layout,
      EmitStateLoadF64(body, PsOffset(layout, inst.FC, c_lane));
      EmitStateLoadF64(body, PsOffset(layout, inst.FB, lane));
      EmitI32Const(body, (sub ? 1u : 0u) | (single ? 2u : 0u));
@@ -314,7 +361,7 @@ diff --git a/Source/Core/Core/PowerPC/CachedInterpreter/CachedInterpreter.cpp b/
    };
    const auto f64const = [&](double v) { EmitF64ConstBits(body, std::bit_cast<u64>(v)); };
    // TwoSum(x, y) -> hi in `hi`, lo in `lo` (Knuth; exact barring overflow).
-@@ -8617,6 +8677,11 @@ std::vector<u8> BuildWasmCachedInterpreterBlock(std::span<const PPCAnalyst::Code
+@@ -8617,6 +8687,11 @@ std::vector<u8> BuildWasmCachedInterpreterBlock(std::span<const PPCAnalyst::Code
    }
    EmitI32Const(body, 0);
    body.push_back(0x0b);
@@ -326,7 +373,7 @@ diff --git a/Source/Core/Core/PowerPC/CachedInterpreter/CachedInterpreter.cpp b/
  
    std::vector<u8> code;
    code.push_back(0x01);
-@@ -8806,8 +8871,259 @@ void CachedInterpreter::Shutdown()
+@@ -8806,9 +8881,425 @@ void CachedInterpreter::Shutdown()
  #line 7779
  }
  
@@ -345,13 +392,59 @@ diff --git a/Source/Core/Core/PowerPC/CachedInterpreter/CachedInterpreter.cpp b/
 +  std::vector<u32> entries;
 +  std::vector<u32> ranges;  // [start, end) pairs, effective addresses
 +  bool live = true;
++  u64 hash = 0;           // FNV-1a 64 of the ranges when installed
++  bool verified = true;   // false after a cache clear: hashed again before it runs
 +};
++
++// FNV-1a 64 of the guest words in `ranges`, read from MEM1 (0x8/0xC views);
++// false when a word is outside it.
++bool RegionCodeHash(const std::vector<u32>& ranges, u64* out)
++{
++  auto& memory = Core::System::GetInstance().GetMemory();
++  const u8* ram = memory.GetRAM();
++  const u32 ram_size = memory.GetRamSizeReal();
++  if (!ram)
++    return false;
++  u64 h = 0xcbf29ce484222325ull;
++  for (std::size_t i = 0; i + 1 < ranges.size(); i += 2)
++  {
++    for (u32 a = ranges[i]; a < ranges[i + 1]; a += 4)
++    {
++      const u32 physical = a & 0x01ffffff;
++      if (((a >> 28) != 0x8 && (a >> 28) != 0xc) || physical + 4 > ram_size)
++        return false;
++      for (u32 k = 0; k < 4; ++k)
++      {
++        h ^= ram[physical + k];
++        h *= 0x100000001b3ull;
++      }
++    }
++  }
++  *out = h;
++  return true;
++}
 +std::vector<InstalledRegion> s_regions;
 +std::unordered_map<u32, u32> s_region_at;  // entry pc -> index in s_regions
 +// Physical 4 KiB pages of MEM1 some live region covers (count per page): an
 +// invalidation outside them costs one lookup.
 +std::vector<u16> s_region_pages(0x01800000 >> 12);
 +std::atomic<bool> s_regions_enabled{false};
++// Direct-mapped filter of entry PCs (bit (pc >> 2) & 0xfffff, 128 KiB: a
++// disc maps ~135 000 entries, 64 Kibit saturated): the dispatcher
++// and block chaining look up the map only when the bit is set, so installed
++// regions cost one bit test per block where none starts. Rebuilt when a
++// region is dropped.
++std::array<u64, 16384> s_region_filter{};
++inline bool RegionFilterHas(u32 pc)
++{
++  const u32 bit = (pc >> 2) & 0xfffff;
++  return (s_region_filter[bit >> 6] >> (bit & 63)) & 1;
++}
++inline void RegionFilterAdd(u32 pc)
++{
++  const u32 bit = (pc >> 2) & 0xfffff;
++  s_region_filter[bit >> 6] |= u64{1} << (bit & 63);
++}
 +
 +struct PendingRegion
 +{
@@ -369,18 +462,44 @@ diff --git a/Source/Core/Core/PowerPC/CachedInterpreter/CachedInterpreter.cpp b/
 +struct RegionStats
 +{
 +  u32 version = 1;
-+  u32 size_bytes = 88;
++  u32 size_bytes = 168;
 +  u32 sample_every = 0;
 +  u32 reserved = 0;
 +  double region_cycles = 0, total_cycles = 0, region_time_ms = 0, dispatch_time_ms = 0,
 +         block_time_ms = 0, interp_time_ms = 0, region_calls = 0, region_not_entry = 0,
 +         region_stops = 0;
++  // Diagnostics past v1 (counted whether stats are on or not; not reset).
++  double regions_queued = 0, regions_installed = 0, regions_refused = 0, regions_dropped = 0,
++         entries_mapped = 0, regions_enabled = 0, regions_hle_refused = 0;
++  // Chaining (counted while stats are on): block chains cut at a region
++  // entry, region lookups refused by the CPU's mode, filter hits that were
++  // not entries.
++  double chain_breaks = 0, mode_refusals = 0, filter_false_hits = 0;
 +};
-+static_assert(sizeof(RegionStats) == 88);
++static_assert(sizeof(RegionStats) == 168);
 +alignas(8) RegionStats s_region_stats;
 +bool s_region_stats_on = false;
-+u32 s_region_sample_counter = 0;
-+u32 s_block_sample_counter = 0;
++// Set while one sampled ExecuteOneBlock runs: its block lookups (chained
++// ones included) are timed and left to dispatch.
++bool s_sampling_lookups = false;
++double s_sampled_lookup_ms = 0;
++u32 s_sampled_lookups = 0;
++double s_last_timed_ms = 0;  // region + block time already accounted in dispatch
++// Cost of one now()/now() pair, measured when stats are enabled and taken off
++// every timed sample (otherwise counted sample_every times).
++double s_clock_pair_ms = 0;
++
++double MeasureClockPairMs()
++{
++  double best = 1e9;
++  for (int i = 0; i < 64; ++i)
++  {
++    const auto a = std::chrono::steady_clock::now();
++    const auto b = std::chrono::steady_clock::now();
++    best = std::min(best, std::chrono::duration<double, std::milli>(b - a).count());
++  }
++  return best;
++}
 +
 +void ForEachRegionPage(const InstalledRegion& region, int delta)
 +{
@@ -401,6 +520,7 @@ diff --git a/Source/Core/Core/PowerPC/CachedInterpreter/CachedInterpreter.cpp b/
 +  if (!region.live)
 +    return;
 +  region.live = false;
++  s_region_stats.regions_dropped += 1;
 +  for (const u32 pc : region.entries)
 +  {
 +    const auto it = s_region_at.find(pc);
@@ -408,13 +528,18 @@ diff --git a/Source/Core/Core/PowerPC/CachedInterpreter/CachedInterpreter.cpp b/
 +      s_region_at.erase(it);
 +  }
 +  ForEachRegionPage(region, -1);
++  s_region_filter.fill(0);
++  for (const auto& [pc, owner] : s_region_at)
++    RegionFilterAdd(pc);
 +}
 +
-+void DropAllRegions()
++// A cache clear (state load, full JIT cache) does not say which code changed:
++// every region is hashed again before it next runs, and dropped if its code
++// is no longer the one it was translated from.
++void UnverifyAllRegions()
 +{
-+  s_regions.clear();
-+  s_region_at.clear();
-+  std::fill(s_region_pages.begin(), s_region_pages.end(), u16{0});
++  for (InstalledRegion& region : s_regions)
++    region.verified = false;
 +}
 +
 +// On the CPU thread at a slice boundary: compile and map queued regions. A
@@ -437,14 +562,31 @@ diff --git a/Source/Core/Core/PowerPC/CachedInterpreter/CachedInterpreter.cpp b/
 +  {
 +    if (std::any_of(pending.entries.begin(), pending.entries.end(),
 +                    [](u32 pc) { return HLE::GetHookByAddress(pc) != 0; }))
++    {
++      s_region_stats.regions_hle_refused += 1;
 +      continue;
++    }
++    u64 hash = 0;
++    if (!RegionCodeHash(pending.ranges, &hash))
++    {
++      s_region_stats.regions_refused += 1;
++      continue;
++    }
 +    const int handle = CompileWasmCachedInterpreterBlockForTest(pending.bytes, true);
 +    if (handle <= 0)
++    {
++      s_region_stats.regions_refused += 1;
 +      continue;
++    }
++    s_region_stats.regions_installed += 1;
 +    const u32 index = static_cast<u32>(s_regions.size());
-+    s_regions.push_back({handle, std::move(pending.entries), std::move(pending.ranges), true});
++    s_regions.push_back(
++        {handle, std::move(pending.entries), std::move(pending.ranges), true, hash, true});
 +    for (const u32 pc : s_regions.back().entries)
++    {
 +      s_region_at.emplace(pc, index);  // an entry already mapped keeps its region
++      RegionFilterAdd(pc);
++    }
 +    ForEachRegionPage(s_regions.back(), +1);
 +  }
 +}
@@ -453,25 +595,47 @@ diff --git a/Source/Core/Core/PowerPC/CachedInterpreter/CachedInterpreter.cpp b/
 +// pc): the caller dispatches a block.
 +bool TryRunRegion(PowerPC::PowerPCState& ppc_state)
 +{
-+  if (!ppc_state.msr.IR || !ppc_state.msr.DR || !ppc_state.msr.FP)
++  if (!RegionFilterHas(ppc_state.pc))
 +    return false;
++  if (!ppc_state.msr.IR || !ppc_state.msr.DR || !ppc_state.msr.FP)
++  {
++    if (s_region_stats_on)
++      s_region_stats.mode_refusals += 1;
++    return false;
++  }
 +  const auto it = s_region_at.find(ppc_state.pc);
 +  if (it == s_region_at.end())
++  {
++    if (s_region_stats_on)
++      s_region_stats.filter_false_hits += 1;
 +    return false;
++  }
++  InstalledRegion& region = s_regions[it->second];
++  if (!region.verified)
++  {
++    u64 hash = 0;
++    if (!RegionCodeHash(region.ranges, &hash) || hash != region.hash)
++    {
++      DropRegion(it->second);
++      return false;
++    }
++    region.verified = true;
++  }
 +  using RegionFunction = int (*)(int);
 +  const auto run = reinterpret_cast<RegionFunction>(
 +      static_cast<std::uintptr_t>(s_regions[it->second].handle));
 +  const s32 downcount = ppc_state.downcount;
 +  int code;
-+  if (s_region_stats_on && s_region_stats.sample_every != 0 &&
-+      ++s_region_sample_counter >= s_region_stats.sample_every)
++  if (s_region_stats_on && s_region_stats.sample_every != 0)
 +  {
-+    s_region_sample_counter = 0;
++    // Every region call is timed (they are few: a region runs until it
++    // leaves its code or downcount runs out).
 +    const auto start = std::chrono::steady_clock::now();
 +    code = run(static_cast<int>(reinterpret_cast<std::uintptr_t>(&ppc_state)));
-+    s_region_stats.region_time_ms +=
-+        std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now() - start).count() *
-+        s_region_stats.sample_every;
++    const double ms =
++        std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now() - start).count() -
++        s_clock_pair_ms;
++    s_region_stats.region_time_ms += std::max(ms, 0.0);
 +  }
 +  else
 +  {
@@ -487,6 +651,18 @@ diff --git a/Source/Core/Core/PowerPC/CachedInterpreter/CachedInterpreter.cpp b/
 +      s_region_stats.region_stops += 1;
 +  }
 +  return code != 1;
++}
++// Block chaining stops where a region would run: at a mapped entry, in the
++// mode regions run in.
++inline bool RegionWouldRun(const PowerPC::PowerPCState& ppc_state)
++{
++  if (!s_regions_enabled.load(std::memory_order_relaxed) || !RegionFilterHas(ppc_state.pc) ||
++      !ppc_state.msr.IR || !ppc_state.msr.DR || !ppc_state.msr.FP ||
++      !s_region_at.contains(ppc_state.pc))
++    return false;
++  if (s_region_stats_on)
++    s_region_stats.chain_breaks += 1;
++  return true;
 +}
 +}  // namespace
 +
@@ -530,6 +706,7 @@ diff --git a/Source/Core/Core/PowerPC/CachedInterpreter/CachedInterpreter.cpp b/
 +  std::lock_guard lock(s_region_queue_mutex);
 +  s_region_queue.push_back(std::move(pending));
 +  s_region_queue_nonempty.store(true, std::memory_order_release);
++  s_region_stats.regions_queued += 1;
 +}
 +
 +// wasmjit=region: run installed regions (off by default).
@@ -565,11 +742,24 @@ diff --git a/Source/Core/Core/PowerPC/CachedInterpreter/CachedInterpreter.cpp b/
 +// region call in sample_every (0: counters only); < 0 reads.
 +extern "C" EMSCRIPTEN_KEEPALIVE u32 DolphinWeb_JitRegionStats(int sample_every)
 +{
++  s_region_stats.entries_mapped = static_cast<double>(s_region_at.size());
++  s_region_stats.regions_enabled = s_regions_enabled.load(std::memory_order_relaxed) ? 1 : 0;
 +  if (sample_every >= 0)
 +  {
++    const RegionStats kept = s_region_stats;
 +    s_region_stats = RegionStats{};
++    s_region_stats.regions_queued = kept.regions_queued;
++    s_region_stats.regions_installed = kept.regions_installed;
++    s_region_stats.regions_refused = kept.regions_refused;
++    s_region_stats.regions_dropped = kept.regions_dropped;
++    s_region_stats.entries_mapped = kept.entries_mapped;
++    s_region_stats.regions_enabled = kept.regions_enabled;
++    s_region_stats.regions_hle_refused = kept.regions_hle_refused;
 +    s_region_stats.sample_every = static_cast<u32>(sample_every);
-+    s_region_sample_counter = 0;
++    s_last_timed_ms = 0;
++    s_sampled_lookup_ms = 0;
++    s_sampled_lookups = 0;
++    s_clock_pair_ms = sample_every > 0 ? MeasureClockPairMs() : 0;
 +    s_region_stats_on = true;
 +  }
 +  return static_cast<u32>(reinterpret_cast<std::uintptr_t>(&s_region_stats));
@@ -583,21 +773,52 @@ diff --git a/Source/Core/Core/PowerPC/CachedInterpreter/CachedInterpreter.cpp b/
 +      TryRunRegion(m_ppc_state))
 +    return;
 +#endif
++#ifdef __EMSCRIPTEN__
++  // With stats timing on, one block lookup in sample_every is timed and
++  // stands for sample_every of them (lookups are short and many).
++  const auto timed_lookup = [&] {
++    if (!s_sampling_lookups) [[likely]]
++      return m_block_cache.Dispatch();
++    if (++s_sampled_lookups < s_region_stats.sample_every)
++      return m_block_cache.Dispatch();
++    s_sampled_lookups = 0;
++    const auto t0 = std::chrono::steady_clock::now();
++    const u8* const found = m_block_cache.Dispatch();
++    s_sampled_lookup_ms +=
++        std::max(std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now() - t0)
++                         .count() -
++                     s_clock_pair_ms,
++                 0.0) *
++        s_region_stats.sample_every;
++    return found;
++  };
++  const u8* normal_entry = timed_lookup();
++#else
    const u8* normal_entry = m_block_cache.Dispatch();
++#endif
  #if DOLPHIN_WEB_STATIC_EXIT_LINKS && DOLPHIN_WEB_STATIC_EXIT_LINK_STATS
    s_static_link_stats.InitialDispatch(normal_entry == nullptr);
-@@ -9078,7 +9394,9 @@ void CachedInterpreter::ExecuteOneBlock([[maybe_unused]] bool allow_redispatch)
+ #endif
+@@ -9078,7 +9569,8 @@ void CachedInterpreter::ExecuteOneBlock([[maybe_unused]] bool allow_redispatch)
    }
  #ifdef __EMSCRIPTEN__
      if (redispatch_enabled && m_ppc_state.downcount > 0 &&
 -        *redispatch_state_ptr == CPU::State::Running)
 +        *redispatch_state_ptr == CPU::State::Running &&
-+        !(s_regions_enabled.load(std::memory_order_relaxed) && !s_region_at.empty() &&
-+          s_region_at.contains(m_ppc_state.pc)))
++        !RegionWouldRun(m_ppc_state))
      {
  #if DOLPHIN_WEB_STATIC_EXIT_LINKS
        const auto static_link_result = static_link_scope.Resolve(
-@@ -9166,6 +9484,7 @@ void CachedInterpreter::Run()
+@@ -9093,7 +9585,7 @@ void CachedInterpreter::ExecuteOneBlock([[maybe_unused]] bool allow_redispatch)
+ #endif
+ #else
+ #line 8054
+-      const u8* const next = m_block_cache.Dispatch();
++      const u8* const next = timed_lookup();
+ #endif
+ #line 8055
+       if (!next)
+@@ -9166,6 +9658,7 @@ void CachedInterpreter::Run()
      }
      // The compile budget has been replenished and no cached callback is active.
      RetryDeferredWasmBlocks(*this);
@@ -605,64 +826,68 @@ diff --git a/Source/Core/Core/PowerPC/CachedInterpreter/CachedInterpreter.cpp b/
      // Start new timing slice
      // Metrics-off runs avoid all per-slice clocks. BeginSlice also resets
      // the exclusive wait/work attribution for this one CoreTiming slice.
-@@ -9179,10 +9498,56 @@ void CachedInterpreter::Run()
+@@ -9179,12 +9672,58 @@ void CachedInterpreter::Run()
      const auto _advance_end =
          _profile_slice ? std::chrono::steady_clock::now() : std::chrono::steady_clock::time_point{};
  
 +#ifdef __EMSCRIPTEN__
 +    // Region stats (DolphinWeb_JitRegionStats): cycles of the slice, and with
-+    // sampling the time split between regions, WASM blocks, the cached
-+    // interpreter and what is left (dispatch, compiles, exits).
++    // timing on: every ExecuteOneBlock call and every region call timed, one
++    // block lookup in sample_every timed (lookups are short and many). Block
++    // time is the calls' time less their region calls and lookups; dispatch
++    // is what the slice leaves (lookups, the loop, compiles, exits). The
++    // cached-interpreter callbacks inside block chains are not told apart from
++    // WASM blocks (interp_time_ms stays 0).
 +    const bool region_stats = s_region_stats_on;
-+    const u32 sample_every = region_stats ? s_region_stats.sample_every : 0;
++    const bool timing = region_stats && s_region_stats.sample_every != 0;
 +    const s32 slice_downcount = m_ppc_state.downcount;
-+    const double timed_before = s_region_stats.region_time_ms + s_region_stats.block_time_ms +
-+                                s_region_stats.interp_time_ms;
-+    const auto slice_start = sample_every ? std::chrono::steady_clock::now() :
-+                                            std::chrono::steady_clock::time_point{};
++    const auto slice_start =
++        timing ? std::chrono::steady_clock::now() : std::chrono::steady_clock::time_point{};
++    s_sampling_lookups = timing;
 +#endif
      do
      {
 +#ifdef __EMSCRIPTEN__
-+      if (sample_every && ++s_block_sample_counter >= sample_every &&
-+          !(s_regions_enabled.load(std::memory_order_relaxed) &&
-+            s_region_at.contains(m_ppc_state.pc)))
++      if (timing)
 +      {
-+        s_block_sample_counter = 0;
-+        const u8* const entry = m_block_cache.Dispatch();
-+        const bool wasm = entry && *reinterpret_cast<const AnyCallback*>(entry) ==
-+                                       AnyCallbackCast(RunWasmBlock);
++        const double region_before = s_region_stats.region_time_ms;
++        const double lookups_before = s_sampled_lookup_ms;
 +        const auto start = std::chrono::steady_clock::now();
 +        ExecuteOneBlock();
 +        const double ms =
 +            std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now() - start)
-+                .count() *
-+            sample_every;
-+        (wasm ? s_region_stats.block_time_ms : s_region_stats.interp_time_ms) += ms;
++                .count() -
++            s_clock_pair_ms - (s_region_stats.region_time_ms - region_before) -
++            (s_sampled_lookup_ms - lookups_before);
++        s_region_stats.block_time_ms += std::max(ms, 0.0);
 +        continue;
 +      }
 +#endif
        ExecuteOneBlock();
      } while (m_ppc_state.downcount > 0 && *state_ptr == CPU::State::Running);
+-#if DOLPHIN_WEB_STATIC_EXIT_LINKS && DOLPHIN_WEB_STATIC_EXIT_LINK_STATS
+-    s_static_link_stats.Slice();
 +#ifdef __EMSCRIPTEN__
++    s_sampling_lookups = false;
 +    if (region_stats)
 +    {
 +      s_region_stats.total_cycles += static_cast<double>(slice_downcount - m_ppc_state.downcount);
-+      if (sample_every)
++      if (timing)
 +      {
 +        const double slice_ms = std::chrono::duration<double, std::milli>(
 +                                    std::chrono::steady_clock::now() - slice_start)
 +                                    .count();
-+        const double timed = s_region_stats.region_time_ms + s_region_stats.block_time_ms +
-+                             s_region_stats.interp_time_ms - timed_before;
-+        s_region_stats.dispatch_time_ms += slice_ms - timed;
++        s_region_stats.dispatch_time_ms = std::max(
++            s_region_stats.dispatch_time_ms + slice_ms - s_region_stats.region_time_ms -
++                s_region_stats.block_time_ms + s_last_timed_ms,
++            0.0);
++        s_last_timed_ms = s_region_stats.region_time_ms + s_region_stats.block_time_ms;
 +      }
 +    }
-+#endif
- #if DOLPHIN_WEB_STATIC_EXIT_LINKS && DOLPHIN_WEB_STATIC_EXIT_LINK_STATS
-     s_static_link_stats.Slice();
  #endif
-@@ -12422,8 +12787,19 @@ void ApplyArmedWasmPolicy()
+ #line 8132
+     // §28cn slice timing close-out. compile_us already accumulated by
+@@ -12422,8 +12961,19 @@ void ApplyArmedWasmPolicy()
      ApplyArmedWasmPolicyAt(Core::System::GetInstance().GetMovie().GetCurrentFrame());
  }
  
@@ -684,7 +909,7 @@ diff --git a/Source/Core/Core/PowerPC/CachedInterpreter/CachedInterpreter.cpp b/
  // Serves a dump request in place (the test has no CPU thread loop running):
  // returns the number of triplets, or -1 when the core is not the
  // CachedInterpreter.
-@@ -12437,6 +12813,8 @@ extern "C" EMSCRIPTEN_KEEPALIVE int DolphinWeb_JitDumpBlocksNowForTest()
+@@ -12437,6 +12987,8 @@ extern "C" EMSCRIPTEN_KEEPALIVE int DolphinWeb_JitDumpBlocksNowForTest()
    return static_cast<int>(DolphinWeb_JitDumpBlocksCount());
  }
  
@@ -693,7 +918,7 @@ diff --git a/Source/Core/Core/PowerPC/CachedInterpreter/CachedInterpreter.cpp b/
  extern "C" EMSCRIPTEN_KEEPALIVE double DolphinWeb_JitArmedStepForTest(double frame)
  {
    ApplyArmedWasmPolicyAt(static_cast<u64>(frame));
-@@ -13850,6 +14228,412 @@ extern "C" EMSCRIPTEN_KEEPALIVE int DolphinWeb_JitOracleRun(u32 word_count, u32
+@@ -13850,6 +14402,543 @@ extern "C" EMSCRIPTEN_KEEPALIVE int DolphinWeb_JitOracleRun(u32 word_count, u32
    return std::memcmp(s_jit_oracle.interp, s_jit_oracle.jit, sizeof s_jit_oracle.jit) == 0 ? 0 : 1;
  }
  
@@ -732,6 +957,11 @@ diff --git a/Source/Core/Core/PowerPC/CachedInterpreter/CachedInterpreter.cpp b/
 +// A block of a fragment: its expression (the block body without locals and
 +// without the final `i32.const 0; end`), the PCs control can reach statically
 +// when it ends, and the target of a closing b/bl.
++// Set while DolphinWeb_AotTranslate runs on this thread: regions run with
++// FP on only (TryRunRegion), so FP instructions are taken whatever the CPU's
++// MSR is now.
++thread_local bool t_aot_translating = false;
++
 +struct FragmentBlock
 +{
 +  u32 start = 0;
@@ -765,7 +995,7 @@ diff --git a/Source/Core/Core/PowerPC/CachedInterpreter/CachedInterpreter.cpp b/
 +  {
 +    const PPCAnalyst::CodeOp& op = buffer[prefix];
 +    if (op.branchIsIdleLoop || !IsPpcWasmDirectInstructionCandidate(op) ||
-+        ((op.opinfo->flags & FL_USE_FPU) != 0 && !ppc.msr.FP))
++        ((op.opinfo->flags & FL_USE_FPU) != 0 && !ppc.msr.FP && !t_aot_translating))
 +      break;
 +    if (op.canEndBlock)
 +    {
@@ -999,6 +1229,132 @@ diff --git a/Source/Core/Core/PowerPC/CachedInterpreter/CachedInterpreter.cpp b/
 +  return out.data();
 +}
 +
++// Production region translator (P7, src/aot-orchestrator.js), callable on any
++// pthread of the module but the CPU thread: the mask is this call's, the
++// emitter state thread_local, guest code read from MEM1 through the 0x8 and
++// 0xC views (no MMU, no TLB, whatever the CPU's mode), and the plan's FNV-1a
++// 64 of the ranges checked before and after (the game may write its code
++// meanwhile). Output: [status, entry, codeLength, entryCount, relocCount, 0],
++// entries, relocs (offset, kind, value), code; valid until the next call on
++// the same thread. Status: 0 ok, 1 hash-mismatch, 2 untranslatable,
++// 3 too-large, 4 not-ready, 5 budget (unused).
++namespace
++{
++// Bumped whenever the code the translator emits changes (cache keys).
++constexpr u32 AOT_COMPILER_VERSION = 1;
++constexpr u32 AOT_MAX_FRAGMENT_BYTES = 1u << 20;
++thread_local std::vector<u32> t_aot_out;
++u8* s_aot_ram = nullptr;
++u32 s_aot_ram_size = 0;
++
++PPCAnalyst::InstructionRead AotReadInstruction(u32 address)
++{
++  const u32 view = address >> 28;
++  const u32 physical = address & 0x01ffffff;
++  if ((view != 0x8 && view != 0xc) || (address & 0x0e000000) != 0 || (address & 3) != 0 ||
++      physical + 4 > s_aot_ram_size)
++    return {false, 0, 0};
++  const u8* p = s_aot_ram + physical;
++  return {true, (u32{p[0]} << 24) | (u32{p[1]} << 16) | (u32{p[2]} << 8) | p[3], physical};
++}
++
++// FNV-1a 64 of the ranges, bytes in memory order (src/aot-plan.js regionHash);
++// false when a word is outside MEM1.
++bool AotRangesHash(std::span<const u32> ranges, u64* hash)
++{
++  u64 h = 0xcbf29ce484222325ull;
++  for (std::size_t i = 0; i + 1 < ranges.size(); i += 2)
++  {
++    for (u32 a = ranges[i]; a < ranges[i + 1]; a += 4)
++    {
++      const auto read = AotReadInstruction(a);
++      if (!read.valid)
++        return false;
++      for (int shift = 24; shift >= 0; shift -= 8)
++      {
++        h ^= (read.hex >> shift) & 0xff;
++        h *= 0x100000001b3ull;
++      }
++    }
++  }
++  *hash = h;
++  return true;
++}
++
++const u32* AotStatus(u32 status, u32 entry)
++{
++  t_aot_out.assign({status, entry, 0, 0, 0, 0});
++  return t_aot_out.data();
++}
++}  // namespace
++
++extern "C" EMSCRIPTEN_KEEPALIVE const u32* DolphinWeb_AotTranslate(u32 entry_pc, u32 mask,
++                                                                   const u32* ranges,
++                                                                   u32 range_count, u32 max_blocks,
++                                                                   u32 hash_lo, u32 hash_hi)
++{
++  auto& memory = Core::System::GetInstance().GetMemory();
++  if (!memory.GetRAM())
++    return AotStatus(4, entry_pc);
++  s_aot_ram = memory.GetRAM();
++  s_aot_ram_size = memory.GetRamSizeReal();
++  const std::span<const u32> range_span{ranges, 2 * std::size_t{range_count}};
++  const u64 expected = (u64{hash_hi} << 32) | hash_lo;
++  u64 hash = 0;
++  if (!AotRangesHash(range_span, &hash))
++    return AotStatus(2, entry_pc);
++  if (expected != 0 && hash != expected)
++    return AotStatus(1, entry_pc);
++
++  RegionFragment fragment;
++  t_disable_mask_override = true;
++  t_disable_mask = mask;
++  t_aot_translating = true;
++  PPCAnalyst::g_instruction_reader = AotReadInstruction;
++  const bool built = BuildRegionFragment(Core::System::GetInstance(), entry_pc, range_span,
++                                         std::max<u32>(max_blocks, 1), &fragment);
++  PPCAnalyst::g_instruction_reader = nullptr;
++  t_aot_translating = false;
++  t_disable_mask_override = false;
++  if (!built)
++    return AotStatus(2, entry_pc);
++  if (fragment.code.size() > AOT_MAX_FRAGMENT_BYTES)
++    return AotStatus(3, entry_pc);
++  u64 after = 0;
++  if (!AotRangesHash(range_span, &after) || after != hash)
++    return AotStatus(1, entry_pc);
++
++  auto& out = t_aot_out;
++  out.assign({0, entry_pc, static_cast<u32>(fragment.code.size()),
++              static_cast<u32>(fragment.entries.size()), static_cast<u32>(fragment.relocs.size()),
++              0});
++  out.insert(out.end(), fragment.entries.begin(), fragment.entries.end());
++  for (const auto& reloc : fragment.relocs)
++    out.insert(out.end(), {reloc.offset, reloc.kind, reloc.value});
++  const std::size_t words = out.size();
++  out.resize(words + (fragment.code.size() + 3) / 4);
++  std::memcpy(out.data() + words, fragment.code.data(), fragment.code.size());
++  return out.data();
++}
++
++// [compilerVersion, codegenMask]: the codegen mask is the CPU thread's, so
++// regions are emitted as its blocks are.
++extern "C" EMSCRIPTEN_KEEPALIVE void DolphinWeb_AotKeyParts(u32* out)
++{
++  out[0] = AOT_COMPILER_VERSION;
++  out[1] = s_dolphin_web_disable_mask.load(std::memory_order_relaxed);
++}
++
++// Helper signatures in import order, "params>results" (BuildWasmCachedInterpreterBlock's types).
++extern "C" EMSCRIPTEN_KEEPALIVE const char* DolphinWeb_JitHelperSignature(u32 index)
++{
++  static constexpr std::array<const char*, 5> TYPES = {
++      "i32>i32", "i32,i32>i32", "i32,i32,i32>", "i32,i32,i32,i32,i32>i32", "f64,f64,f64,i32>f64"};
++  static constexpr std::array<u8, 20> TYPE_OF = {1, 2, 1, 2, 1, 2, 3, 3, 3, 3,
++                                                 3, 3, 3, 3, 2, 3, 1, 3, 3, 4};
++  return index < TYPE_OF.size() ? TYPES[TYPE_OF[index]] : nullptr;
++}
++
 +// Test CPU for region equivalence: the oracle's memory and BATs, MSR with FP
 +// and translation on. Returns the PowerPCState address (the region's state
 +// argument); RAM is at DolphinWeb_AotTestRam.
@@ -1106,11 +1462,11 @@ diff --git a/Source/Core/Core/PowerPC/CachedInterpreter/CachedInterpreter.cpp b/
  extern "C" int RunPpcWasmFloatCompareSmoke()
  {
    auto& state = Core::System::GetInstance().GetPPCState();
-@@ -14248,6 +15032,7 @@ void CachedInterpreter::ClearCache()
+@@ -14248,6 +15337,7 @@ void CachedInterpreter::ClearCache()
  #ifdef __EMSCRIPTEN__
    s_deferred_wasm_queues.erase(this);
    ResetOffThreadCompiles();
-+  DropAllRegions();  // the code they were translated from may be gone (state load)
++  UnverifyAllRegions();  // the code may have changed (state load): checked before they run
  #endif
    m_block_cache.Clear();
    m_block_cache.ClearRangesToFree();
@@ -1143,3 +1499,55 @@ diff --git a/Source/Core/Core/PowerPC/JitInterface.cpp b/Source/Core/Core/PowerP
    if (m_jit)
      m_jit->GetBlockCache()->InvalidateICacheLine(address);
  }
+diff --git a/Source/Core/Core/PowerPC/PPCAnalyst.cpp b/Source/Core/Core/PowerPC/PPCAnalyst.cpp
+--- a/Source/Core/Core/PowerPC/PPCAnalyst.cpp
++++ b/Source/Core/Core/PowerPC/PPCAnalyst.cpp
+@@ -797,6 +797,8 @@ static bool CanCauseGatherPipeInterruptCheck(const CodeOp& op)
+          op.opinfo->type == OpType::StorePS;
+ }
+ 
++thread_local InstructionReader g_instruction_reader = nullptr;
++
+ u32 PPCAnalyzer::Analyze(u32 address, CodeBlock* block, CodeBuffer* buffer,
+                          std::size_t block_size) const
+ {
+@@ -831,7 +833,16 @@ u32 PPCAnalyzer::Analyze(u32 address, CodeBlock* block, CodeBuffer* buffer,
+   auto& mmu = system.GetMMU();
+   for (std::size_t i = 0; i < block_size; ++i)
+   {
+-    auto result = mmu.TryReadInstruction(address);
++    PowerPC::TryReadInstResult result{};
++    if (g_instruction_reader)
++    {
++      const InstructionRead read = g_instruction_reader(address);
++      result = {read.valid, true, read.hex, read.physical_address};
++    }
++    else
++    {
++      result = mmu.TryReadInstruction(address);
++    }
+     if (!result.valid)
+     {
+       if (i == 0)
+diff --git a/Source/Core/Core/PowerPC/PPCAnalyst.h b/Source/Core/Core/PowerPC/PPCAnalyst.h
+--- a/Source/Core/Core/PowerPC/PPCAnalyst.h
++++ b/Source/Core/Core/PowerPC/PPCAnalyst.h
+@@ -132,6 +132,18 @@ struct CodeBlock
+   Common::RangeSet<u32> m_physical_addresses;
+ };
+ 
++// wasm-dolphin (P4, region translator off the CPU thread): when set on a
++// thread, Analyze reads instructions through it instead of the MMU. Returns
++// {valid, hex, physical_address}.
++struct InstructionRead
++{
++  bool valid;
++  u32 hex;
++  u32 physical_address;
++};
++using InstructionReader = InstructionRead (*)(u32 address);
++extern thread_local InstructionReader g_instruction_reader;
++
+ class PPCAnalyzer
+ {
+ public:

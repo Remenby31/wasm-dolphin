@@ -239,6 +239,22 @@ export function assembleRegion(fragments, { helpers, pcOffset, memoryPages, memo
   };
 }
 
+// Functions of a region share blocks (tail-merged code, a function inside
+// another's ranges): a PC is an entry of the first fragment that holds it,
+// and a fragment whose own entry is taken is left out (the other one runs
+// it). The core's translator lists every block start of a function.
+export function claimEntries(fragments) {
+  const claimed = new Set();
+  const out = [];
+  for (const fr of fragments) {
+    if (claimed.has(fr.entry >>> 0)) continue;
+    const entries = (fr.entries?.length ? fr.entries : [fr.entry]).filter((pc) => !claimed.has(pc >>> 0));
+    for (const pc of entries) claimed.add(pc >>> 0);
+    out.push({ ...fr, entries });
+  }
+  return out;
+}
+
 // Group the functions of a plan module into regions of at most
 // `maxFunctions`, so that callers and callees share a region (a call inside a
 // region is a return_call, ~4x cheaper than leaving the module).

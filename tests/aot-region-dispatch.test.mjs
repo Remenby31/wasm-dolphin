@@ -74,7 +74,7 @@ test("queued regions install at the slice boundary and the dispatcher runs them 
   core.serviceRegions();
   assert.equal(core.regionCount(), before + entries);
   const stats0 = core.regionStats(0);
-  assert.deepEqual([stats0.version, stats0.sizeBytes, stats0.sampleEvery], [1, 88, 0]);
+  assert.deepEqual([stats0.version, stats0.sizeBytes, stats0.sampleEvery], [1, 168, 0]); // v1 + diagnostics
   const reference = runCall(PROGRAM.labels.main, { regions: false });
   const got = runCall(PROGRAM.labels.main, { regions: true });
   // Calls between functions of a region are return_calls: the whole call

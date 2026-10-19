@@ -127,7 +127,7 @@ constexpr unsigned COMPILE_THROTTLE_MAX_PER_SLICE = 8;
 std::atomic<bool> s_wasm_off_thread_compile{false};
 static void RetryOffThreadWasmBlocks(CachedInterpreter&) {}
 static void ResetOffThreadCompiles() {}
-static void DropAllRegions() {}
+static void UnverifyAllRegions() {}
 void Host_JitCacheInvalidation() {}
 #define __EMSCRIPTEN__ 1
 /* INTERPRETER_METHODS */

@@ -90,7 +90,7 @@ export function createAotRegionLoader({ openCache, retain, now = () => performan
           continue;
         }
         try {
-          retain(key, entry.module);
+          retain(key, entry.module, entry.bytes);
           report.loaded += 1;
           run.modules += 1;
           run.bytes += entry.byteLength ?? 0;

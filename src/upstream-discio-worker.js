@@ -6987,6 +6987,7 @@ export async function prepareAotFirstLaunch(file, {
       return typeof Worker === "function" ? planDiscInWorker(file, { profile }) : planDisc(fileReader(file), { profile });
     },
     compile: precompileAotRegion,
+    install: (region) => queueAotRegion(module, region),
     retain: (key, mod) => {
       if (dolphinJitCacheMap.size < DOLPHIN_JIT_CACHE_MAX) dolphinJitCacheMap.set(key, mod);
     },
@@ -7028,6 +7029,23 @@ export function startAotFirstLaunchAfterBoot(flow = aotFirstLaunch) {
   return flow.loadRest().catch(() => {}).then(() => {
     if (aotFirstLaunch === flow) return flow.start({ resume: true, ifGeneration: generation });
   });
+}
+// Hands a region module to the core's dispatcher: the CPU thread compiles it
+// at its next slice boundary (a cache hit once compiled here) and runs it
+// for its entries (P4, patch 0075).
+function queueAotRegion(module, { bytes, entries, ranges }) {
+  if (typeof module?._DolphinWeb_AotQueueRegion !== "function" || !bytes?.length || !entries?.length) return;
+  const words = [...entries, ...ranges.flat()].map((v) => v >>> 0);
+  const b = module._malloc(bytes.length);
+  const w = module._malloc(4 * words.length);
+  try {
+    module.HEAPU8.set(bytes, b);
+    new Uint32Array(module.HEAPU8.buffer, w, words.length).set(words);
+    module._DolphinWeb_AotQueueRegion(b, bytes.length, w, entries.length, w + 4 * entries.length, ranges.length);
+  } finally {
+    module._free(b);
+    module._free(w);
+  }
 }
 // A region module of the first launch: compiled off the CPU thread when the
 // compiler worker is on (?aotcompiler=1), kept alive under its key.
