@@ -38,7 +38,7 @@ export class AotOptimizer extends EventTarget {
   // planStore: { load(discKey) -> plan|null, save(discKey, plan) } (optional)
   // keyParts: { compilerVersion, codegenMask } (the core's _DolphinWeb_AotKeyParts)
   constructor({ discKey, buildPlan, translator, openCache, cacheIdentity = {}, keyParts = { compilerVersion: 0, codegenMask: 0 },
-    assemble = null, assembleOptions = { helpers: {}, pcOffset: 0 }, maxFunctions = 100, planStore = null, batchSize = BATCH,
+    assemble = null, assembleOptions = null, maxFunctions = 100, planStore = null, batchSize = BATCH,
     notReadyDelayMs = 1000, sleep = (ms) => new Promise((r) => setTimeout(r, ms)), now = () => performance.now() }) {
     super();
     this.discKey = discKey;
@@ -47,6 +47,7 @@ export class AotOptimizer extends EventTarget {
     this.openCache = openCache;
     this.cacheIdentity = cacheIdentity;
     this.keyParts = keyParts;
+    if (!assemble && !assembleOptions) throw new Error("aot-optimizer: assembleOptions (helpers, pcOffset, memoryPages from the core) required");
     this.assemble = assemble ?? ((fragments) => assembleRegion(fragments, assembleOptions).bytes);
     this.maxFunctions = maxFunctions;
     this.planStore = planStore;
@@ -75,13 +76,36 @@ export class AotOptimizer extends EventTarget {
       await this.planStore?.save(this.discKey, plan).catch(() => {});
     }
     // Region modules, in compile order: each module takes the place of its
-    // first member in orderedRegions.
+    // first member in orderedRegions. Groups are kept across plan rebuilds (a
+    // new profile reorders functions, and regrouping would change every key
+    // and miss the whole cache): a stored group whose members all still exist
+    // with the same code is reused as is; only the rest is grouped anew.
     const ordered = orderedRegions(plan).filter((r) => r.f.hash && r.f.sha256);
     const rankOf = new Map(ordered.map((r, i) => [r.f, i]));
+    const memberId = (moduleId, f) => `${moduleId}:${(f.entry >>> 0).toString(16)}:${f.sha256}`;
+    let stored = null;
+    try {
+      stored = await this.planStore?.loadGroups?.(this.discKey);
+    } catch {
+      stored = null;
+    }
     const units = [];
+    const savedGroups = [];
     for (const m of [...plan.modules, ...(plan.rels ?? []).filter((r) => r.functions)]) {
-      const order = ordered.filter((r) => r.module === m.id).map((r) => m.functions.indexOf(r.f)).filter((i) => i >= 0);
-      for (const group of groupRegions(m, order, { maxFunctions: this.maxFunctions })) {
+      const indexOf = new Map(m.functions.map((f, i) => [memberId(m.id, f), i]));
+      const taken = new Set();
+      const groups = [];
+      for (const ids of Array.isArray(stored) ? stored : []) {
+        if (!Array.isArray(ids) || !ids.length) continue;
+        const idx = ids.map((id) => indexOf.get(id));
+        if (idx.some((i) => i === undefined || taken.has(i))) continue;
+        idx.forEach((i) => taken.add(i));
+        groups.push(idx);
+      }
+      const order = ordered.filter((r) => r.module === m.id).map((r) => m.functions.indexOf(r.f)).filter((i) => i >= 0 && !taken.has(i));
+      groups.push(...groupRegions(m, order, { maxFunctions: this.maxFunctions }));
+      for (const group of groups) {
+        savedGroups.push(group.map((i) => memberId(m.id, m.functions[i])));
         const members = group.map((i) => m.functions[i]);
         units.push({
           module: m.id,
@@ -93,6 +117,7 @@ export class AotOptimizer extends EventTarget {
       }
     }
     units.sort((a, b) => a.rank - b.rank);
+    await this.planStore?.saveGroups?.(this.discKey, savedGroups)?.catch?.(() => {});
     this.plan = plan;
     this.regions = units;
     this.totalWeight = units.reduce((n, u) => n + u.weight, 0);
@@ -248,6 +273,21 @@ export class OpfsPlanStore {
       if (error?.name === "NotFoundError" || error instanceof SyntaxError) return null;
       throw error;
     }
+  }
+  async loadGroups(discKey) {
+    try {
+      const file = await (await (await this.dir()).getFileHandle(OpfsPlanStore.name(discKey).replace(/\.json$/, ".groups.json"))).getFile();
+      return JSON.parse(await file.text());
+    } catch (error) {
+      if (error?.name === "NotFoundError" || error instanceof SyntaxError) return null;
+      throw error;
+    }
+  }
+  async saveGroups(discKey, groups) {
+    const handle = await (await this.dir()).getFileHandle(OpfsPlanStore.name(discKey).replace(/\.json$/, ".groups.json"), { create: true });
+    const writable = await handle.createWritable();
+    await writable.write(JSON.stringify(groups));
+    await writable.close();
   }
   async save(discKey, plan) {
     const handle = await (await this.dir()).getFileHandle(OpfsPlanStore.name(discKey), { create: true });

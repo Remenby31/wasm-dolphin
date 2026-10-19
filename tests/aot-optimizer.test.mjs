@@ -27,7 +27,10 @@ function optimizer({ cache = fakeCache(), translator = fakeTranslator(), ...extr
   const p = plan();
   let builds = 0;
   // regions of 8 functions: the 41 functions of the plan make several modules
-  const o = new AotOptimizer({ discKey: "disc", cacheIdentity: { compilerVersion: "fake-1" }, openCache: cache, translator, maxFunctions: 8, buildPlan: async () => { builds++; return p; }, ...extra });
+  const o = new AotOptimizer({
+    discKey: "disc", cacheIdentity: { compilerVersion: "fake-1" }, openCache: cache, translator, maxFunctions: 8,
+    assembleOptions: { helpers: {}, pcOffset: 0, memoryPages: 1 }, buildPlan: async () => { builds++; return p; }, ...extra
+  });
   const events = [];
   for (const type of ["optimization-progress", "optimization-done", "optimization-error"]) o.addEventListener(type, (e) => events.push([type, e.detail]));
   return { o, events, builds: () => builds };
@@ -133,7 +136,7 @@ test("aot optimizer: a module's key is regionModuleKey of its planned members; s
     assert.equal(u.key, await regionModuleKey(u.members, { compilerVersion: 3, codegenMask: 0x10 }));
     assert.ok(u.members.length <= 8);
     const module = new WebAssembly.Module(cache.persisted.get(u.key));
-    assert.deepEqual(WebAssembly.Module.exports(module).map((e) => e.name), ["f"]);
+    assert.deepEqual(WebAssembly.Module.exports(module).map((e) => e.name), ["f", "fragments"]);
   }
   // every function of the plan is in exactly one module
   const all = o.regions.flatMap((u) => u.members.map((f) => f.entry)).sort((a, b) => a - b);
@@ -165,4 +168,32 @@ test("aot optimizer: refusals are blacklisted in the cache, boot keys follow the
   void p;
   const keys = await o.bootKeys();
   assert.deepEqual(keys, o.regions.map((r) => r.key).filter((k) => !blacklist.has(k)));
+});
+
+test("aot optimizer: groups survive a plan rebuilt with a new profile, so the cache keeps hitting", async () => {
+  const groups = new Map();
+  const planStore = {
+    load: async () => null, save: async () => {},
+    loadGroups: async (k) => groups.get(k) ?? null, saveGroups: async (k, g) => { groups.set(k, g); }
+  };
+  const cache = fakeCache();
+  const first = optimizer({ cache, planStore });
+  await first.o.start();
+  const keysBefore = await first.o.bootKeys();
+  assert.equal(keysBefore.length, first.o.regions.length);
+  // a new profile reorders the functions: hot ones first
+  const p = plan();
+  p.modules[0].functions.forEach((f, i) => { f.profileHits = i; });
+  const rebuilt = optimizer({ cache, planStore, buildPlan: async () => p });
+  assert.deepEqual(new Set(await rebuilt.o.bootKeys()), new Set(keysBefore), "same modules, same keys");
+  // without stored groups, the new order regroups and the keys change
+  const fresh = optimizer({ cache, buildPlan: async () => p });
+  const freshKeys = await fresh.o.bootKeys();
+  assert.ok(freshKeys.length < keysBefore.length, "regrouping misses the cache");
+  // a stored group whose member changed is regrouped, the others kept
+  const changed = plan();
+  changed.modules[0].functions[5].sha256 = "e".repeat(64);
+  const partly = optimizer({ cache, planStore, buildPlan: async () => changed });
+  const kept = new Set(await partly.o.bootKeys());
+  assert.equal(kept.size, keysBefore.length - 1, "only the group holding the changed function misses");
 });
