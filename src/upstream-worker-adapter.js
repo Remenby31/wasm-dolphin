@@ -96,6 +96,7 @@ export class UpstreamWorkerAdapter {
     wgpuScissoredClearRect = true,
     noJitCache = false,
     jitOffThread = false,
+    aotCompiler = false,
     collectMetrics = false,
     legacyOneWayAck = false,
     wgpuReplayDiagnostics = false,
@@ -195,6 +196,7 @@ export class UpstreamWorkerAdapter {
     this.wgpuScissoredClearRect = wgpuScissoredClearRect !== false;
     this.noJitCache = Boolean(noJitCache);
     this.jitOffThread = Boolean(jitOffThread);
+    this.aotCompiler = aotCompiler === true;
     this.collectMetrics = Boolean(collectMetrics);
     this.legacyOneWayAck = Boolean(legacyOneWayAck);
     this.wgpuReplayDiagnostics = Boolean(wgpuReplayDiagnostics);
@@ -399,6 +401,7 @@ export class UpstreamWorkerAdapter {
       wgpuScissoredClearRect: this.wgpuScissoredClearRect,
       noJitCache: this.noJitCache,
       jitOffThread: this.jitOffThread,
+      aotCompiler: this.aotCompiler,
       collectMetrics: this.collectMetrics,
       legacyOneWayAck: this.legacyOneWayAck,
       coreSelection: this.coreSelectionTelemetry(window.location.href),
