@@ -20,7 +20,7 @@ import { readFileSync } from "node:fs";
 
 import { orderedRegions } from "../../src/aot-plan.js";
 import { assembleRegion, groupRegions } from "../../src/aot-region-module.js";
-import { PRODUCTION_DISABLE_MASK } from "./jit-oracle.mjs";
+import { PRODUCTION_DISABLE_MASK, makeRng, randomProgram, randomState } from "./jit-oracle.mjs";
 
 // Signatures of the block module's import types (BuildWasmCachedInterpreterBlock).
 const T1 = { params: ["i32", "i32"], results: ["i32"] };
@@ -328,3 +328,50 @@ export function checkCoreSlice({ core, plan, image, slice, slices, maxFunctions 
   }
   return report;
 }
+
+const ORACLE_CODE = 0x80003000;
+
+function bigEndian(words) {
+  const out = new Uint8Array(4 * words.length);
+  const v = new DataView(out.buffer);
+  words.forEach((w, i) => v.setUint32(4 * i, w >>> 0, false));
+  return out;
+}
+
+// The oracle's random programs (jit-oracle.mjs), one fragment each, from its
+// random states, with a full and a small cycle budget (mid-region exits).
+export function runOracleProgramsAsRegions(core, { seed, count, length, mask }) {
+  const r = makeRng(seed);
+  const tally = { programs: 0, translated: 0, compared: 0, equal: 0, trap: 0, ends: {}, regionRuns: 0, mismatches: [] };
+  for (let n = 0; n < count; n++) {
+    const words = randomProgram(r, length);
+    const state = randomState(r);
+    const smallBudget = 1 + r.below(60);
+    tally.programs += 1;
+    core.load(ORACLE_CODE, bigEndian(words));
+    const fragment = core.translate(ORACLE_CODE, { mask, ranges: [[ORACLE_CODE, ORACLE_CODE + 4 * words.length]] });
+    if (!fragment) continue;
+    tally.translated += 1;
+    const { bytes } = assembleRegion([fragment], { helpers: HELPER_SIGNATURES, pcOffset: core.pcOffset, memoryPages: core.memoryPages });
+    const handle = core.compile(bytes);
+    if (handle <= 0) throw new Error(`core rejected a region module (${handle})`);
+    const regionAt = new Map(fragment.entries.map((pc) => [pc >>> 0, handle]));
+    const baseline = core.ram().slice();
+    for (const budget of [400000, smallBudget]) {
+      const result = compareCall(core, regionAt, () => {
+        core.ram().set(baseline);
+        core.loadState(state, ORACLE_CODE);
+        core.setDowncount(budget);
+      });
+      if (result.trap) { tally.trap += 1; continue; }
+      tally.compared += 1;
+      if (result.error) { tally.mismatches.push({ n, budget, error: result.error }); continue; }
+      tally.ends[result.got.end] = (tally.ends[result.got.end] ?? 0) + 1;
+      tally.regionRuns += result.got.regionRuns;
+      if (result.equal) tally.equal += 1;
+      else tally.mismatches.push({ n, budget, program: Array.from(words, (w) => w.toString(16)), ...result.difference });
+    }
+  }
+  return tally;
+}
+

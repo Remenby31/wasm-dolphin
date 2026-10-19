@@ -959,7 +959,7 @@ diff --git a/Source/Core/Core/PowerPC/CachedInterpreter/CachedInterpreter.cpp b/
  extern "C" EMSCRIPTEN_KEEPALIVE double DolphinWeb_JitArmedStepForTest(double frame)
  {
    ApplyArmedWasmPolicyAt(static_cast<u64>(frame));
-@@ -13850,6 +14435,543 @@ extern "C" EMSCRIPTEN_KEEPALIVE int DolphinWeb_JitOracleRun(u32 word_count, u32
+@@ -13850,6 +14435,566 @@ extern "C" EMSCRIPTEN_KEEPALIVE int DolphinWeb_JitOracleRun(u32 word_count, u32
    return std::memcmp(s_jit_oracle.interp, s_jit_oracle.jit, sizeof s_jit_oracle.jit) == 0 ? 0 : 1;
  }
  
@@ -1011,6 +1011,10 @@ diff --git a/Source/Core/Core/PowerPC/CachedInterpreter/CachedInterpreter.cpp b/
 +  u32 cycles = 0;
 +  std::vector<u32> successors;
 +  u32 jump_target = UINT32_MAX;
++  // Ends with an instruction that ends a block without branching (isync
++  // after icbi, sc, rfi, mtmsr...): the region returns to the dispatcher
++  // there, as the block JIT does, so invalidated code is never run on.
++  bool exits = false;
 +};
 +
 +// Locals of a block body without the fastmem hoist (the only layout a
@@ -1020,15 +1024,20 @@ diff --git a/Source/Core/Core/PowerPC/CachedInterpreter/CachedInterpreter.cpp b/
 +constexpr u32 WASM_FRAGMENT_PC_LOCAL = 56;  // appended after the block locals 1..55
 +
 +// The block at pc as the CPU thread would build it (same analyzer, same
-+// direct-candidate prefix), emitted in fragment mode.
-+bool BuildFragmentBlock(Core::System& system, u32 pc, FragmentBlock* out)
++// direct-candidate prefix), emitted in fragment mode. A region holds only
++// code inside its ranges (invalidation drops it by those ranges): no branch
++// following (a call is a jump, its return point an entry), and the block
++// stops at `limit`, the end of the range holding pc.
++bool BuildFragmentBlock(Core::System& system, u32 pc, u32 limit, FragmentBlock* out)
 +{
 +  auto& ppc = system.GetPPCState();
 +  PPCAnalyst::PPCAnalyzer analyzer;
-+  analyzer.SetBranchFollowingEnabled(Config::Get(Config::MAIN_JIT_FOLLOW_BRANCH));
++  analyzer.SetBranchFollowingEnabled(false);
 +  PPCAnalyst::CodeBuffer buffer(JIT_ORACLE_MAX_WORDS + 8);
 +  PPCAnalyst::CodeBlock block;
-+  const u32 next_pc = analyzer.Analyze(pc, &block, &buffer, buffer.size());
++  const std::size_t max_ops =
++      std::min<std::size_t>(buffer.size(), limit > pc ? (limit - pc) / 4 : 1);
++  const u32 next_pc = analyzer.Analyze(pc, &block, &buffer, max_ops);
 +  if (block.m_memory_exception || block.m_num_instructions == 0)
 +    return false;
 +  u32 prefix = 0;
@@ -1089,9 +1098,14 @@ diff --git a/Source/Core/Core/PowerPC/CachedInterpreter/CachedInterpreter.cpp b/
 +    return true;
 +  }
 +  const UGeckoInstruction inst = last.inst;
-+  const bool branch = inst.OPCD == 16 || inst.OPCD == 18 || inst.OPCD == 19;
++  // bc, b, bclr, bcctr (isync and rfi are opcode 19 too, but do not branch).
++  const bool branch = inst.OPCD == 16 || inst.OPCD == 18 ||
++                      (inst.OPCD == 19 && (inst.SUBOP10 == 16 || inst.SUBOP10 == 528));
 +  if (!branch)
-+    return true;  // sc, rfi, ...: the helper writes pc
++  {
++    out->exits = true;  // sc, rfi, isync, ...: back to the dispatcher
++    return true;
++  }
 +  if (last.branchTo != UINT32_MAX)
 +    out->successors.push_back(last.branchTo);
 +  const bool conditional = inst.OPCD != 18 && (inst.BO & 0x14) != 0x14;
@@ -1125,12 +1139,14 @@ diff --git a/Source/Core/Core/PowerPC/CachedInterpreter/CachedInterpreter.cpp b/
 +bool BuildRegionFragment(Core::System& system, u32 entry_pc, std::span<const u32> ranges,
 +                         u32 max_blocks, RegionFragment* out)
 +{
-+  const auto inside = [&](u32 pc) {
++  // End of the range holding pc, 0 when none does.
++  const auto range_end = [&](u32 pc) -> u32 {
 +    for (std::size_t i = 0; i + 1 < ranges.size(); i += 2)
 +      if (pc >= ranges[i] && pc < ranges[i + 1])
-+        return true;
-+    return false;
++        return ranges[i + 1];
++    return 0;
 +  };
++  const auto inside = [&](u32 pc) { return range_end(pc) != 0; };
 +  std::vector<FragmentBlock> blocks;
 +  std::vector<u32> work{entry_pc};
 +  std::unordered_set<u32> seen{entry_pc};
@@ -1139,7 +1155,9 @@ diff --git a/Source/Core/Core/PowerPC/CachedInterpreter/CachedInterpreter.cpp b/
 +    const u32 pc = work.front();
 +    work.erase(work.begin());
 +    FragmentBlock fb;
-+    if (!BuildFragmentBlock(system, pc, &fb))
++    // The entry may lie outside the ranges (a test's single block): one block.
++    const u32 limit = inside(pc) ? range_end(pc) : pc + 4 * (JIT_ORACLE_MAX_WORDS + 8);
++    if (!BuildFragmentBlock(system, pc, limit, &fb))
 +    {
 +      if (pc == entry_pc)
 +        return false;
@@ -1216,7 +1234,12 @@ diff --git a/Source/Core/Core/PowerPC/CachedInterpreter/CachedInterpreter.cpp b/
 +    code.insert(code.end(), {0x4c, 0x04, 0x40});  // i32.le_s; if
 +    EmitI32Const(code, 0);
 +    code.insert(code.end(), {0x0f, 0x0b});  // return; end
-+    if (b.jump_target != UINT32_MAX && !starts.contains(b.jump_target))
++    if (b.exits)
++    {
++      EmitI32Const(code, 0);
++      code.push_back(0x0f);  // return
++    }
++    else if (b.jump_target != UINT32_MAX && !starts.contains(b.jump_target))
 +    {
 +      EmitLocalGet(code, 0);
 +      reloc_site(1, b.jump_target);
@@ -1503,7 +1526,7 @@ diff --git a/Source/Core/Core/PowerPC/CachedInterpreter/CachedInterpreter.cpp b/
  extern "C" int RunPpcWasmFloatCompareSmoke()
  {
    auto& state = Core::System::GetInstance().GetPPCState();
-@@ -14248,6 +15370,7 @@ void CachedInterpreter::ClearCache()
+@@ -14248,6 +15393,7 @@ void CachedInterpreter::ClearCache()
  #ifdef __EMSCRIPTEN__
    s_deferred_wasm_queues.erase(this);
    ResetOffThreadCompiles();
