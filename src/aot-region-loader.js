@@ -14,12 +14,14 @@
 // Wiring, when P4/P7 land (discio worker, loadCore, after the block cache):
 //   const loader = createAotRegionLoader({ openCache: openDolphinAotCache,
 //     retain: (key, module) => dolphinJitCacheMap.set(key, module) });
-//   await loader.load({ ...identity, keys: hotFirstKeys, budgetMs: 1500 });
+//   const keys = await optimizer.bootKeys(); // P7: plan order, cached, not blacklisted
+//   await loader.load({ ...identity, keys, budgetMs: 1500 });
 //   ...installDolphinPthreadChannels(...)        // delivers what was loaded
 //   void loader.loadRest();                      // the rest, retained only
 //
-// `keys` come in plan order (orderedRegions: profile first), so the budget
-// cuts the coldest regions, which then load after boot.
+// `keys` come from the optimiser in plan order (profile, then confidence,
+// then size), never rebuilt from has(): the budget then cuts the coldest
+// regions, which load after boot.
 
 export const DEFAULT_REGION_BATCH = 64;
 
