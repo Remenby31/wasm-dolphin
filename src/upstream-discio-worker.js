@@ -268,6 +268,22 @@ async function harnessPcSampler({ action, periodMs } = {}) {
   harnessPcSamplerRun = startPcSampler({ buffer: moduleInstance.HEAPU8.buffer, pcAddress, periodMs: Number(periodMs) || 0.25 });
   return { started: true, pcAddress, pcNow: api?.getPpcPc?.() ?? null };
 }
+// QA harness only: copy the core's region JIT counters (P4), layout decoded
+// by harness/lib/jit-region-stats.mjs. sampleEvery >= 0 switches them on and
+// resets them; absent, they are only read. Copied twice, back to back, so the
+// harness can refuse a torn read; the size comes from the struct's header.
+function harnessJitRegionStats({ sampleEvery } = {}) {
+  if (!harnessEnabled) return { error: "harness hooks are off" };
+  const stats = moduleInstance?._DolphinWeb_JitRegionStats;
+  if (!stats) return { error: "core has no DolphinWeb_JitRegionStats" };
+  const ptr = stats(Number.isInteger(sampleEvery) && sampleEvery >= 0 ? sampleEvery : -1) >>> 0;
+  const heap = moduleInstance.HEAPU8;
+  if (!ptr || ptr + 8 > heap.length) return { error: `DolphinWeb_JitRegionStats returned ${ptr}` };
+  const size = Math.min(new DataView(heap.buffer, ptr, 8).getUint32(4, true), 256);
+  if (ptr + size > heap.length) return { error: `region stats of ${size} bytes past the heap` };
+  const copy = () => Array.from(new Uint8Array(heap.buffer, ptr, size));
+  return { bytes: copy(), again: copy() };
+}
 let harnessVideoBackend = null;
 // Exact capture for video=wgpu: presents tagged with VI outputs (ViTag records).
 const wgpuExactCapture = createWgpuExactCapture();
@@ -1413,6 +1429,8 @@ async function handleMessage(type, payload) {
       return readHarnessTimeline();
     case "validationPcSampler":
       return harnessPcSampler(payload);
+    case "validationReadJitRegionStats":
+      return harnessJitRegionStats(payload);
     case "validationCaptureAtVi":
       return captureAtViOutput(payload);
     case "validationReadDetTrace":
