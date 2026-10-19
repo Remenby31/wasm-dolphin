@@ -112,15 +112,19 @@ node harness/probes/race-perf.mjs --iso ../roms/<disc>.iso --state ../measures/h
   and need a counter in the core.
 - A local-only disc is refused when `CI` is set; its results go to
   `../measures/harness` (or `HARNESS_PRIVATE_OUT`), never into the repo.
-- Region JIT counters (P4): when the core exports `DolphinWeb_JitRegionStats`
-  (layout v1 in `lib/jit-region-stats.mjs`, read through
-  `validationReadJitRegionStats`), they are reset at the window's start, host
-  time sampled on 1 call in `--region-sample` (default 64, `off` to skip), and
-  read at its end. `summary.json` carries their medians as `p4`
-  (`regionCycleShare`, `regionTimeShare`, `dispatchTimeShare`,
-  `blockTimeShare`, `interpTimeShare`, `regionCalls`, `regionNotEntry`,
-  `regionStops`, `sampleEvery`) and `baselineP4`; a core without the export
-  gives `p4: null` (reason per run in `p4Why`), never a failure.
+- Region JIT counters (P4): off by default, the speed windows never carry
+  them. With `--region-sample N`, a separate stats window of `--region-secs`
+  (default 10) follows each speed window: it resets the core's
+  `DolphinWeb_JitRegionStats` counters (layout v1 in `lib/jit-region-stats.mjs`,
+  read through `validationReadJitRegionStats`, copied twice to refuse a torn
+  read; host time sampled on 1 call in N, 0 = counters only) and reads them.
+  `summary.json` carries `p4` (`regionCycleShare`, `regionTimeShare`,
+  `dispatchTimeShare`, `blockTimeShare`, `interpTimeShare`, `regionCalls`,
+  `regionNotEntry`, `regionStops`, `sampleEvery`, `windows`) as shares of the
+  pooled counters, so the four time shares add up to 1, and `baselineP4`; a
+  share outside [0, 1] is refused. Without counters, `p4: null` and `p4Why`
+  gives the reason, never a failure. `p4Compare` withholds the comparison
+  when only one side has counters.
 
 ## KPI probes and report
 
@@ -135,24 +139,36 @@ node harness/kpi-report.mjs [--print]
 ```
 
 - `ttff.mjs`: time to first frame. t0 is the moment the disc is handed to the
-  engine page (the file input, as the Play click does); the KPI is the first
-  presentation after t0 (presentation ring). Also recorded: core loaded, and
-  the first picture the page shows (16×16 canvas samples every 100 ms,
-  indicative). Cold is a new profile, warm the same profile relaunched.
+  engine page (the file input, as the Play click does). The KPI is the first
+  non-uniform picture on the screen canvas (so neither black nor blank) after
+  the first present of a core frame (vi > 0): the worker presents empty
+  frames during the boot. Also recorded: first core frame, first empty
+  present, core loaded. Cold is a new profile, warm the same profile
+  relaunched. A launch without that picture within `--timeout` fails, and a
+  phase with a failed launch does not pass, whatever the median.
 - `first-launch.mjs`: duration of the first-launch optimisation (P7) and the
   regions recompiled on the second launch. It boots with `aot=1` and reads
   `validationReadAotProgress` (or `window.__aotProgressLog`), contract in
-  `lib/aot-progress.mjs`. An engine without P7 answers `p7: null` and n/a,
-  exit 0.
+  `lib/aot-progress.mjs`. A launch without "done" (or a second launch without
+  its compiled count) is a failure with its reason. An engine without P7
+  answers `p7: null` and n/a, exit 0.
+- Both record the served tree (commit, dirty) and the Chrome that ran, and
+  leave out runs started on an overloaded machine (listed). `--no-lock`
+  checks the plumbing in a CORRECTION slot; such results are not measures.
 - `kpi-report.mjs`: reads only. It classifies by content every `summary.json`,
   `gate.json` and `fuzz.json` under `../measures` and the worktrees'
-  `harness/results`, takes for each KPI the newest result that has its value
-  (race-perf: stock Chrome only, trunk's side of an A/B when there is one),
-  and writes `../measures/kpi/latest.{md,json}` (plus a dated copy), in
-  PROGRAM.md's order, each row marked measured, declared or n/a. What no
-  probe measures yet (PC extrapolation, discovery coverage, aotcompiler
-  memory) comes from `../measures/kpi/manual.json`:
-  `{ "<kpi id>": { "value": …, "source": "…", "at": "…", "note": "…" } }`.
+  `harness/results`, and keeps only results measured on a clean commit of
+  origin/main's first-parent history (`served`, or the run files next to an
+  older summary; fetch origin first). Each KPI reads one result, the newest
+  of its kinds on trunk (race-perf: stock Chrome only, trunk's side of an
+  A/B), shown with its file, commit and date; it never falls back on an
+  older one. Failed runs make the row KO with their reasons. Output:
+  `../measures/kpi/latest.{md,json}` and a dated copy, in PROGRAM.md's order,
+  each row measured, declared or n/a. What no probe measures yet (PC
+  extrapolation, discovery coverage, aotcompiler memory) comes from
+  `../measures/kpi/manual.json`:
+  `{ "<kpi id>": { "value": <number>, "source": "…", "at": "…", "note": "…" } }`;
+  an unreadable file turns those rows into n/a with the reason.
 
 `harness/matrices/local-kart-race.json` runs the same race through `ab`
 (`KART_ISO`, `KART_STATE`; `measureFromState` starts the measured window

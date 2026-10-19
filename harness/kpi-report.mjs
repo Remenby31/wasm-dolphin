@@ -12,8 +12,11 @@
 // Default sources: ../measures (local-only probes write there), this tree's
 // harness/results, and the harness/results of the sibling worktrees (the
 // agents' fuzz and gate runs). Each source is read four levels deep for
-// summary.json, gate.json and fuzz.json, classified by content. manual.json holds what no probe
-// measures yet: { "<kpi id>": { "value": …, "source": "…", "at": "…", "note": "…" } }.
+// summary.json, gate.json and fuzz.json, classified by content. Only results
+// measured on a clean commit of origin/main's first-parent history count
+// (lib/kpi.mjs); fetch origin first for an up-to-date trunk. manual.json
+// holds what no probe measures yet:
+// { "<kpi id>": { "value": <number>, "source": "…", "at": "…", "note": "…" } }.
 import { execFileSync } from "node:child_process";
 import { existsSync, mkdirSync, readdirSync, readFileSync, statSync, writeFileSync } from "node:fs";
 import path from "node:path";
@@ -51,15 +54,46 @@ function defaultSources() {
   return dirs;
 }
 
-export function loadResults(dirs) {
+const readJson = (file) => { try { return JSON.parse(readFileSync(file, "utf8")); } catch { return null; } };
+
+// What a result needs from the files next to it to say what it measured:
+// race-perf's run*.json (older summaries have no `served`), the gate's
+// candidate/summary.json.
+function extraOf(kind, json, file) {
+  const dir = path.dirname(file);
+  if (kind === "race-perf" && !json.served) {
+    let names = [];
+    try { names = readdirSync(dir).filter((n) => /^run\d+\.json$/.test(n)); } catch {}
+    return { runs: names.map((n) => readJson(path.join(dir, n))).filter(Boolean) };
+  }
+  if (kind === "gate") return { candidate: readJson(path.join(dir, "candidate", "summary.json")) };
+  return null;
+}
+
+export function loadResults(dirs, { root = PROGRAM_ROOT } = {}) {
   const results = [];
   for (const file of [...new Set(dirs.flatMap((d) => findResults(d)))]) {
-    let json;
-    try { json = JSON.parse(readFileSync(file, "utf8")); } catch { continue; }
+    const json = readJson(file);
     const kind = classify(json, file);
-    if (kind) results.push({ kind, json, file: path.relative(PROGRAM_ROOT, file), mtimeMs: statSync(file).mtimeMs });
+    if (kind) results.push({ kind, json, file: path.relative(root, file), mtimeMs: statSync(file).mtimeMs, extra: extraOf(kind, json, file) });
   }
   return results;
+}
+
+// Commits of origin/main's first-parent history: the trunk results may name.
+export function trunkCommits(repo = REPO_ROOT, ref = "origin/main") {
+  return new Set(execFileSync("git", ["-C", repo, "rev-list", "--first-parent", ref], { encoding: "utf8", maxBuffer: 64 << 20 }).split("\n").filter(Boolean));
+}
+
+// manual.json, or { error } when it is there but unreadable (the rows say so).
+export function readManual(file) {
+  if (!existsSync(file)) return {};
+  try {
+    const m = JSON.parse(readFileSync(file, "utf8"));
+    return m && typeof m === "object" && !Array.isArray(m) ? m : { error: `${path.basename(file)} : un objet est attendu` };
+  } catch (e) {
+    return { error: `${path.basename(file)} illisible (${String(e.message).slice(0, 80)})` };
+  }
 }
 
 async function main() {
@@ -73,15 +107,16 @@ async function main() {
   const dirs = values.from.length ? values.from.map((d) => path.resolve(d))
     : values["no-worktrees"] ? [path.join(PROGRAM_ROOT, "measures"), path.join(REPO_ROOT, "harness", "results")] : defaultSources();
   const results = loadResults(dirs);
-  const manual = existsSync(values.manual) ? JSON.parse(readFileSync(values.manual, "utf8")) : {};
-  const rows = kpiTable(results, manual);
+  const manual = readManual(values.manual);
+  const trunk = trunkCommits();
+  const rows = kpiTable(results, manual, { trunk });
   const at = new Date().toISOString();
   let uptime = null;
   try { uptime = execFileSync("uptime", { encoding: "utf8" }).trim(); } catch {}
   const md = kpiMarkdown(rows, { at, uptime });
   mkdirSync(values.out, { recursive: true });
   const stamp = at.replace(/[:.]/g, "-").slice(0, 19);
-  const json = JSON.stringify({ at, uptime, sources: dirs.map((d) => path.relative(PROGRAM_ROOT, d)), scanned: results.length, rows }, null, 1) + "\n";
+  const json = JSON.stringify({ at, uptime, sources: dirs.map((d) => path.relative(PROGRAM_ROOT, d)), trunk: { ref: "origin/main", head: [...trunk][0] ?? null }, scanned: results.length, rows }, null, 1) + "\n";
   for (const name of [`kpi-${stamp}`, "latest"]) {
     writeFileSync(path.join(values.out, `${name}.md`), md + "\n");
     writeFileSync(path.join(values.out, `${name}.json`), json);

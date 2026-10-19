@@ -11,11 +11,13 @@
 // Each run opens a new Chrome profile (cold: no HTTP cache, no V8 code
 // cache, no JIT cache), loads the engine page, then hands the disc to it as
 // the Play click does (the file input): that instant is t0. It polls the
-// presentation ring until the first present of a core frame (the KPI; the
-// worker's earlier presents of the empty boot frames are recorded apart), and also records when
-// the adapter reports the core loaded and when the page first shows a picture
-// (lib/ttff.mjs, indicative). Then it closes Chrome and opens it again on
-// the same profile for the warm launch, the player's second visit.
+// presentation ring and the screen canvas until the first non-uniform
+// picture after the first present of a core frame: the KPI (lib/ttff.mjs).
+// The worker's earlier presents of the empty boot frames, the first core
+// frame and the core's load are recorded too. A launch without that picture
+// within --timeout fails and the phase does not pass. Then it closes Chrome
+// and opens it again on the same profile for the warm launch, the player's
+// second visit.
 // It is a timing measure: it takes the shared perf lock (MESURE slots only)
 // and waits for the machine load like race-perf.
 import { rmSync, mkdtempSync, writeFileSync } from "node:fs";
@@ -26,10 +28,10 @@ import { parseArgs } from "node:util";
 
 import { ensureServer, launchChrome, readTimeline, REPO_ROOT, workerRequest } from "../lib/browser.mjs";
 import { waitForLoad } from "../lib/env.mjs";
-import { PRESETS } from "../lib/matrix.mjs";
+import { PRESETS, withDeterministicClock } from "../lib/matrix.mjs";
 import { claim } from "../lib/ownership.mjs";
 import { acquirePerfLock } from "../lib/perf-lock.mjs";
-import { isLocalOnly, probeOutDir } from "../lib/probe-out.mjs";
+import { chromeInfo, isLocalOnly, probeOutDir } from "../lib/probe-out.mjs";
 import { machineSnapshot } from "../lib/system.mjs";
 import { installContentWatcher, launchTtff, summarizeTtff } from "../lib/ttff.mjs";
 import { num } from "./race-perf.mjs";
@@ -43,7 +45,8 @@ async function launch({ base, query, iso, profileDir, timeoutSec }) {
     await context.assertInvisible("after launch");
     await context.addInitScript(installContentWatcher);
     const page = context.pages()[0] ?? (await context.newPage());
-    await page.goto(`${base}?${query}`, { waitUntil: "domcontentloaded" });
+    // The fixed clock of single-core runs, as every harness boot (bootIso).
+    await page.goto(`${base}?${withDeterministicClock(query)}`, { waitUntil: "domcontentloaded" });
     await page.locator("#romInput").waitFor({ state: "attached", timeout: 30000 });
     await page.waitForFunction(() => window.__host?.adapter, null, { timeout: 30000 });
     await page.evaluate(() => window.__ttffArm());
@@ -60,16 +63,14 @@ async function launch({ base, query, iso, profileDir, timeoutSec }) {
       if (!chunk?.error) chunk.presents.t.forEach((t, i) => presents.push({ t, vi: chunk.presents.vi[i] }));
       if (loadedAt == null && (await page.evaluate(() => window.__host?.adapter?.loaded === true))) loadedAt = await epochNow(page);
       const changes = await page.evaluate(() => window.__ttff?.changes ?? []);
-      // Wait for both: the KPI (first core frame) and a picture after it, bounded.
-      const core = presents.find((p) => p.t >= clickAt && p.vi !== 0);
-      if (core && (changes.some((t) => t >= core.t) || Date.now() > end - (timeoutSec * 1000) / 2)) break;
+      // Until the KPI: a picture after the first core frame.
+      const core = presents.find((p) => p.t >= clickAt && p.vi > 0);
+      if (core && changes.some((t) => t >= core.t)) break;
       await page.waitForTimeout(100);
     }
     await context.assertInvisible("after boot");
     const watcher = await page.evaluate(() => window.__ttff);
-    const result = launchTtff({ clickAt, presents, loadedAt, contentTimes: watcher?.changes ?? [] });
-    if (result.firstPresentMs == null) result.error = `no presentation within ${timeoutSec} s`;
-    return { ...result, contentWatcherError: watcher?.error ?? null };
+    return launchTtff({ clickAt, presents, loadedAt, contentTimes: watcher?.changes ?? [], watcherError: watcher?.error ?? null, timeoutSec });
   } finally {
     await context.close().catch(() => {});
   }
@@ -114,7 +115,7 @@ async function main() {
           } catch (error) {
             record[phase] = { error: String(error?.message || error).slice(0, 300) };
           }
-          log(`run ${run} ${phase}: ${record[phase].error ?? `first present ${record[phase].firstPresentMs} ms, core loaded ${record[phase].coreLoadedMs} ms, picture ${record[phase].firstContentMs ?? "n/a"} ms`}`);
+          log(`run ${run} ${phase}: ${record[phase].error ?? `picture ${record[phase].firstContentMs} ms (first core frame ${record[phase].firstPresentMs} ms, core loaded ${record[phase].coreLoadedMs} ms)`}`);
         }
       } finally {
         releaseProfile();
@@ -130,13 +131,15 @@ async function main() {
   }
   const summary = {
     probe: "ttff", at: new Date().toISOString(), locked: !values["no-lock"], machine: machineSnapshot(),
-    iso: path.basename(iso), query, url: `${server.base}?${query}`, runs: records.length,
-    definition: "t0 = disc handed to the engine page (the Play click); KPI = first presentation after t0. cold = new profile, warm = same profile relaunched.",
+    chrome: chromeInfo(), served: server.identity,
+    iso: path.basename(iso), query, url: `${server.base}?${withDeterministicClock(query)}`, runs: records.length,
+    definition: "t0 = disc handed to the engine page (the Play click); KPI = first non-uniform picture after the first present of a core frame (vi > 0). cold = new profile, warm = same profile relaunched. A launch without it fails.",
     ...summarizeTtff(records)
   };
   writeFileSync(path.join(outDir, "summary.json"), JSON.stringify(summary, null, 1) + "\n");
-  log(`cold ${summary.cold?.firstPresentMs?.median ?? "-"} ms, warm ${summary.warm?.firstPresentMs?.median ?? "-"} ms (target < ${summary.targetMs} ms) -> ${outDir}`);
-  process.exitCode = summary.cold ? 0 : 1;
+  const phaseLog = (p) => `${p?.firstContentMs?.median ?? "-"} ms${p?.failed?.length ? ` (${p.failed.length} of ${p.runs} failed)` : ""}`;
+  log(`cold ${phaseLog(summary.cold)}, warm ${phaseLog(summary.warm)} (target < ${summary.targetMs} ms)${summary.overloadedRuns.length ? `, overloaded runs left out: ${summary.overloadedRuns.join(", ")}` : ""} -> ${outDir}`);
+  process.exitCode = summary.pass == null || summary.cold?.failed.length || summary.warm?.failed.length ? 1 : 0;
 }
 
 if (import.meta.url === pathToFileURL(process.argv[1] ?? "").href) await main();

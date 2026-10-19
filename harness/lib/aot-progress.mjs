@@ -58,23 +58,52 @@ export function summarizeLaunch(events) {
   };
 }
 
+// Why a launch did not give its number, or null.
+function launchFailure(l, what) {
+  if (!l) return `${what}: not run`;
+  if (l.error) return `${what}: ${l.error}`;
+  if (l.unavailable) return `${what}: ${l.unavailable}`;
+  const fatal = l.errors?.find((e) => e.fatal);
+  if (fatal) return `${what}: fatal error "${fatal.message}"`;
+  if (!l.finished) return `${what}: no "done" event${l.timedOut ? " before the timeout" : ""}`;
+  if (what === "second launch" && !Number.isFinite(l.compiled)) return `${what}: "done" without a compiled count`;
+  return null;
+}
+
 // The summary.json p7 block from the runs (first and second launch each).
-// Runs started on an overloaded machine (load gate not passed) are left out.
+// Every judged run counts: a launch that did not finish (or a second launch
+// without its compiled count) is listed in `failed` and the block does not
+// pass; the numbers are those of the launches that finished. Runs started on
+// an overloaded machine (load gate not passed) are left out and listed. Null
+// when no run could be judged.
 export function summarizeP7(allRuns, { target = OPTIMISATION_TARGET_MS } = {}) {
   const runs = allRuns.filter((r) => r.loadGate?.ok !== false);
-  const first = runs.map((r) => r.first).filter((l) => l?.finished);
-  if (!first.length) return null;
+  if (!runs.length) return null;
+  const failedFirst = [], failedSecond = [];
+  const first = [], second = [];
+  for (const r of runs) {
+    const f = r.error ? `first launch: ${r.error}` : launchFailure(r.first, "first launch");
+    if (f) { failedFirst.push({ run: r.run, why: f }); continue; }
+    first.push(r.first);
+    const s = launchFailure(r.second, "second launch");
+    if (s) failedSecond.push({ run: r.run, why: s });
+    else second.push(r.second);
+  }
   const durationMs = median(first.map((l) => l.durationMs));
-  const second = runs.map((r) => r.second).filter(Boolean);
-  const recompiled = second.map((l) => l.compiled).filter(Number.isFinite);
+  const recompiled = second.map((l) => l.compiled);
+  const secondLaunchCompiled = recompiled.length ? Math.max(...recompiled) : null;
   return {
+    runs: runs.length,
+    overloadedRuns: allRuns.filter((r) => r.loadGate?.ok === false).map((r) => r.run),
     durationMs: round(durationMs, 0),
     durationRuns: first.map((l) => l.durationMs),
-    total: first[0].total,
+    total: first[0]?.total ?? null,
     speedDuring: round(median(first.map((l) => l.speedDuring)), 1),
-    secondLaunchCompiled: recompiled.length ? Math.max(...recompiled) : null,
+    failedFirst,
+    secondLaunchCompiled,
     secondLaunchInstalled: median(second.map((l) => l.install?.loaded)),
+    failedSecond,
     targetMs: target,
-    pass: durationMs != null && durationMs < target && (!recompiled.length || Math.max(...recompiled) === 0)
+    pass: failedFirst.length || failedSecond.length || durationMs == null || secondLaunchCompiled == null ? false : durationMs < target && secondLaunchCompiled === 0
   };
 }

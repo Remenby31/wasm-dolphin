@@ -2,9 +2,9 @@
 // SPDX-License-Identifier: MIT
 // Time to first frame (KPI "expérience joueur", target < 10 s): from the
 // moment the disc is handed to the engine (the Play click) to the first
-// presentation, cold (new profile) and warm (same profile, second visit).
-// Pure: the probe (probes/ttff.mjs) feeds it timestamps, all on one clock
-// (performance.timeOrigin + performance.now(), as the harness rings).
+// picture of the game, cold (new profile) and warm (same profile, second
+// visit). Pure: the probe (probes/ttff.mjs) feeds it timestamps, all on one
+// clock (performance.timeOrigin + performance.now(), as the harness rings).
 import { describe, round } from "./stats.mjs";
 
 export const TTFF_TARGET_MS = 10000;
@@ -12,53 +12,63 @@ export const TTFF_TARGET_MS = 10000;
 // One launch: `clickAt` the hand-over, `presents` the drained presentations
 // ({ t, vi }: vi = VI outputs since boot at that present, -1 when the core
 // cannot say), `loadedAt` when the adapter said the core was loaded,
-// `contentTimes` when the page saw a new, non-uniform picture (the first one
-// at or after the first core frame counts; earlier ones are the page's own
-// loading screens). The worker presents before the core has output anything
-// (vi 0, the boot's empty frames, measured on 2026-10-19): the first frame
-// is the first present that carries a VI output of the core.
-export function launchTtff({ clickAt, presents = [], loadedAt = null, contentTimes = [], error = null }) {
+// `contentTimes` when the page saw a new non-uniform picture (so neither
+// black nor blank). The worker presents before the core has output anything
+// (vi 0, the boot's empty frames, measured on 2026-10-19), and the page
+// changes the canvas while loading: the KPI is the first non-uniform picture
+// at or after the first present that carries a VI output of the core (vi > 0).
+// A launch without one is a failure, with its reason.
+export function launchTtff({ clickAt, presents = [], loadedAt = null, contentTimes = [], watcherError = null, timeoutSec = null }) {
   const after = presents.filter((p) => p.t >= clickAt);
-  const first = after.find((p) => p.vi !== 0);
+  const first = after.find((p) => p.vi > 0);
   const since = (t) => (Number.isFinite(t) && t >= clickAt ? round(t - clickAt, 0) : null);
+  const firstContentMs = first == null ? null : since(contentTimes.find((t) => t >= first.t));
+  const within = timeoutSec ? ` within ${timeoutSec} s` : "";
+  const error = first == null ? `no core frame presented${within}${after.some((p) => p.vi < 0) ? " (the core does not report VI outputs)" : ""}`
+    : firstContentMs == null ? `no picture after the first core frame${within}${watcherError ? ` (canvas: ${watcherError})` : ""}`
+      : null;
   return {
+    firstContentMs,
     firstPresentMs: first == null ? null : round(first.t - clickAt, 0),
     firstEmptyPresentMs: after.length ? round(after[0].t - clickAt, 0) : null,
     coreLoadedMs: since(loadedAt),
-    firstContentMs: first == null ? null : since(contentTimes.find((t) => t >= first.t)),
     error
   };
 }
 
-// Medians over the runs, per phase, and the verdict on the cold median. A
-// run that started on an overloaded machine (load gate not passed) is left
-// out, as race-perf leaves out overloaded windows.
+// Per phase: medians over the successful launches and every failed one. A
+// failure counts: the phase does not pass while any launch failed. A run
+// that started on an overloaded machine (load gate not passed) is left out
+// and listed, as race-perf leaves out overloaded windows.
 export function summarizeTtff(runs, { target = TTFF_TARGET_MS } = {}) {
+  const judged = runs.filter((r) => r.loadGate?.ok !== false);
   const phase = (name) => {
-    const got = runs.filter((r) => r.loadGate?.ok !== false).map((r) => r[name]).filter((l) => l && !l.error);
-    if (!got.length) return null;
+    const launches = judged.map((r) => ({ run: r.run, l: r[name] ?? { error: "not run" } }));
+    if (!launches.length) return null;
+    const ok = launches.filter((x) => !x.l.error).map((x) => x.l);
+    const failed = launches.filter((x) => x.l.error).map((x) => ({ run: x.run, error: x.l.error }));
+    const firstContentMs = describe(ok.map((l) => l.firstContentMs), 0);
     return {
-      runs: got.length,
-      firstPresentMs: describe(got.map((l) => l.firstPresentMs), 0),
-      coreLoadedMs: describe(got.map((l) => l.coreLoadedMs), 0),
-      firstContentMs: describe(got.map((l) => l.firstContentMs), 0)
+      runs: launches.length, failed,
+      firstContentMs,
+      firstPresentMs: describe(ok.map((l) => l.firstPresentMs), 0),
+      coreLoadedMs: describe(ok.map((l) => l.coreLoadedMs), 0),
+      pass: failed.length ? false : firstContentMs.median == null ? null : firstContentMs.median < target
     };
   };
   const cold = phase("cold"), warm = phase("warm");
-  const med = (p) => p?.firstPresentMs?.median ?? null;
   return {
     targetMs: target,
     overloadedRuns: runs.filter((r) => r.loadGate?.ok === false).map((r) => r.run),
     cold, warm,
-    pass: med(cold) == null ? null : med(cold) < target && (med(warm) == null || med(warm) < target)
+    pass: !cold || !warm ? null : cold.pass === false || warm.pass === false ? false : cold.pass && warm.pass
   };
 }
 
 // Page-side watcher, injected as an init script: once armed, it samples the
 // screen canvas 10 times a second on a 16×16 grid and records when the
-// picture changes to a non-uniform one (up to 200 times). Indicative only
-// (±100 ms, and the canvas may refuse to be read); the KPI is the first
-// presentation of a core frame.
+// picture changes to a non-uniform one (up to 200 times): ±100 ms. A canvas
+// that cannot be read leaves no picture, so the launch fails with the reason.
 export function installContentWatcher() {
   const w = window;
   w.__ttff = { armedAt: null, changes: [], error: null };

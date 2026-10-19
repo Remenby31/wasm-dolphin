@@ -23,3 +23,7 @@ export function probeOutDir(name, iso, out = null) {
   claim(dir, REPO_ROOT, "results");
   return dir;
 }
+
+// Which Chrome ran (race-perf records the same): a wrapper or extra flags
+// left exported would otherwise pass for the engine's own numbers.
+export const chromeInfo = () => ({ path: process.env.HARNESS_CHROME_PATH || "chrome stable", args: process.env.HARNESS_CHROME_ARGS || "" });

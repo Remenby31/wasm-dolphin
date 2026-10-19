@@ -14,7 +14,9 @@
 // progress events and the timeline until "done" (or an error, or --timeout):
 // duration, progress shape, and the emulated speed while it ran. Then it
 // relaunches Chrome on the same profile and boots again: the "install" event
-// and the "done" event's compiled count (0 expected) for --second-sec.
+// and the "done" event's compiled count (0 expected), within --second-sec.
+// Every run counts: a launch without "done" (or a second one without its
+// compiled count) is a failure with its reason, and p7 does not pass.
 // An engine without P7 (no validationReadAotProgress and no
 // window.__aotProgressLog, or state "unsupported") gives p7: null and n/a,
 // exit 0: nothing is measured, nothing fails.
@@ -29,7 +31,7 @@ import { waitForLoad } from "../lib/env.mjs";
 import { PRESETS } from "../lib/matrix.mjs";
 import { claim } from "../lib/ownership.mjs";
 import { acquirePerfLock } from "../lib/perf-lock.mjs";
-import { isLocalOnly, probeOutDir } from "../lib/probe-out.mjs";
+import { chromeInfo, isLocalOnly, probeOutDir } from "../lib/probe-out.mjs";
 import { machineSnapshot } from "../lib/system.mjs";
 import { coreStats, mergeTimeline, windowOf } from "../lib/timeline.mjs";
 import { summarizeLaunch, summarizeP7, unavailable } from "../lib/aot-progress.mjs";
@@ -42,8 +44,8 @@ async function readProgress(page) {
 }
 
 // Boot once on `profileDir` and follow the progress for up to `sec` seconds,
-// until "done" or a fatal error (or, if `untilDone` is false, the whole time).
-async function launch({ base, query, iso, profileDir, sec, untilDone = true }) {
+// until "done" or a fatal error.
+async function launch({ base, query, iso, profileDir, sec }) {
   const context = await launchChrome({ profileDir });
   try {
     await context.assertInvisible("after launch");
@@ -63,7 +65,7 @@ async function launch({ base, query, iso, profileDir, sec, untilDone = true }) {
       state = reply?.state ?? state;
       events.push(...(source === "worker" ? reply.events ?? [] : pageLog ?? []));
       chunks.push(await readTimeline(page));
-      if (untilDone && events.some((e) => e.type === "done" || (e.type === "error" && e.fatal))) break;
+      if (events.some((e) => e.type === "done" || (e.type === "error" && e.fatal))) break;
       await page.waitForTimeout(500);
     }
     await context.assertInvisible("after boot");
@@ -75,7 +77,7 @@ async function launch({ base, query, iso, profileDir, sec, untilDone = true }) {
       const core = coreStats(windowOf(timeline, summary.window.from, summary.window.to), { ticksPerSecond: progress?.coreTicksPerSecond });
       summary.speedDuring = Number.isFinite(core.speed) ? Math.round(core.speed * 10) / 10 : null;
     }
-    return { source, state, ...summary, timedOut: untilDone && !summary.finished && !summary.errors.some((e) => e.fatal), events: events.length };
+    return { source, state, ...summary, timedOut: !summary.finished && !summary.errors.some((e) => e.fatal), events: events.length };
   } finally {
     await context.close().catch(() => {});
   }
@@ -120,7 +122,7 @@ async function main() {
           na = record.first.unavailable;
         } else {
           log(`run ${run} first launch: ${record.first.finished ? `done in ${record.first.durationMs} ms, ${record.first.total} regions, speed ${record.first.speedDuring} %` : record.first.timedOut ? `not done after ${timeoutSec} s` : `stopped: ${JSON.stringify(record.first.errors)}`}`);
-          record.second = await launch({ base: server.base, query, iso, profileDir, sec: secondSec, untilDone: false });
+          record.second = await launch({ base: server.base, query, iso, profileDir, sec: secondSec });
           log(`run ${run} second launch: installed ${record.second.install?.loaded ?? "?"}, recompiled ${record.second.compiled ?? "?"}`);
         }
       } catch (error) {
@@ -140,13 +142,15 @@ async function main() {
   const p7 = na ? null : summarizeP7(records);
   const summary = {
     probe: "first-launch", at: new Date().toISOString(), locked: !values["no-lock"], machine: machineSnapshot(),
+    chrome: chromeInfo(), served: server.identity,
     iso: path.basename(iso), query, url: `${server.base}?${query}`, runs: records.length,
-    p7, p7Why: na ?? (p7 ? null : "no run finished the optimisation")
+    p7, p7Why: na ?? (p7 ? null : "every run started on an overloaded machine")
   };
   writeFileSync(path.join(outDir, "summary.json"), JSON.stringify(summary, null, 1) + "\n");
-  log(na ? `n/a: ${na} -> ${outDir}` : `optimisation ${p7?.durationMs ?? "-"} ms (target < ${p7?.targetMs ?? 60000} ms), recompiled on 2nd launch ${p7?.secondLaunchCompiled ?? "-"} -> ${outDir}`);
-  // n/a is not a failure; runs that never finished are.
-  process.exitCode = na || p7 ? 0 : 1;
+  const failures = p7 ? [...p7.failedFirst, ...p7.failedSecond] : [];
+  log(na ? `n/a: ${na} -> ${outDir}` : `optimisation ${p7?.durationMs ?? "-"} ms (target < ${p7?.targetMs ?? 60000} ms), recompiled on 2nd launch ${p7?.secondLaunchCompiled ?? "-"}${failures.length ? `; failed: ${failures.map((f) => `r${f.run} ${f.why}`).join("; ")}` : ""} -> ${outDir}`);
+  // n/a is not a failure; a run that did not finish is.
+  process.exitCode = na ? 0 : p7 && !failures.length ? 0 : 1;
 }
 
 if (import.meta.url === pathToFileURL(process.argv[1] ?? "").href) await main();

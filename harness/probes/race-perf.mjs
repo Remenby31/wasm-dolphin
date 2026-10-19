@@ -14,7 +14,7 @@
 //     [--runs 4 (even with --baseline)] [--min-pairs 4] [--hold KeyX] [--warm]
 //     [--max-load L] [--load-wait 300] [--lock-wait 1800]
 //     [--pcsample [periodMs]] [--symbols functions.json] [--out dir]
-//     [--region-sample 64 | off]
+//     [--region-sample N [--region-secs 10]]
 //
 // - Pairing and interleaving: run i measures both sides back to back, the
 //   order alternating (base, head | head, base | …), so drift on the machine
@@ -36,11 +36,15 @@
 //   sampling: it cannot tell "more work" from "the same work, slower".
 // - --warm boots again in the same profile (JIT cache in IndexedDB) and
 //   measures again: cold and warm caches on the same run.
-// - Region JIT counters (P4, lib/jit-region-stats.mjs): when the core
-//   exports DolphinWeb_JitRegionStats, they are reset at the window's start
-//   (host time sampled on 1 call out of --region-sample) and read at its end;
-//   summary.json carries their medians as p4 (candidate) and baselineP4.
-//   A core without the export gives p4: null, never a failure.
+// - Region JIT counters (P4, lib/jit-region-stats.mjs): off by default. With
+//   --region-sample N, after the speed window (never during it: the counters
+//   and their timers cost time), a separate stats window of --region-secs
+//   resets them (host time sampled on 1 call in N, 0 = counters only) and
+//   reads them. summary.json carries the pooled shares of the cold stats
+//   windows as p4 (candidate) and baselineP4; a core without the export
+//   gives p4: null with the reason (p4Why), never a failure. The speed
+//   windows are identical with or without it; p4 is compared between sides
+//   only when both have it (p4Compare).
 import { execFileSync } from "node:child_process";
 import { randomBytes } from "node:crypto";
 import { existsSync, mkdirSync, readdirSync, readFileSync, rmSync, statSync, writeFileSync } from "node:fs";
@@ -58,7 +62,7 @@ import { openSession, rebootSession } from "../lib/session.mjs";
 import { waitForLoad } from "../lib/env.mjs";
 import { describe, median, percentile, round } from "../lib/stats.mjs";
 import { coreStats, mergeTimeline, presentationStats } from "../lib/timeline.mjs";
-import { decodeRegionStats, P4_FIELDS, regionShares } from "../lib/jit-region-stats.mjs";
+import { consistentRead, decodeRegionStats, poolStats, regionShares } from "../lib/jit-region-stats.mjs";
 import { summarizePcSamples } from "../../src/harness-pc-sampler.js";
 
 const HOMEBREW_OUT = path.join(REPO_ROOT, "harness", "homebrew", "out");
@@ -147,8 +151,6 @@ async function measure(session, o) {
     // the run says why it has no PC histogram.
     const pcStart = o.pcsample ? await workerRequest(page, "validationPcSampler", { action: "start", periodMs: o.pcsample }, 10000) : null;
     const sampling = Boolean(pcStart?.started);
-    // Region counters: reset now, read when the window ends (no call between).
-    const regionStart = o.regionSample == null ? null : await workerRequest(page, "validationReadJitRegionStats", { sampleEvery: o.regionSample }, 10000);
     await readTimeline(page); // drop everything before the window
     const t0 = await page.evaluate(() => performance.timeOrigin + performance.now());
     // The window: node timers only. The rings (VI 8192, presents 16384)
@@ -161,7 +163,6 @@ async function measure(session, o) {
     }
     const chunk = await readTimeline(page);
     const t1 = await page.evaluate(() => performance.timeOrigin + performance.now());
-    const regionEnd = regionStart && !regionStart.error ? await workerRequest(page, "validationReadJitRegionStats", {}, 10000) : regionStart;
     const pc = sampling ? await workerRequest(page, "validationPcSampler", { action: "stop" }, 20000) : pcStart && { error: pcStart.error ?? "not started" };
     threads.push(rendererThreads(session.profileDir));
     const info = await readFrameInfo(page);
@@ -172,6 +173,15 @@ async function measure(session, o) {
     const viMs = timeline.vi.slice(1).map((v, i) => v.t - timeline.vi[i].t);
     const xfbDt = /xfb_dt:([\d.]+) avg:([\d.]+) max:([\d.]+)/.exec(String(info?.ppcWasmHelperStats ?? ""));
     const medianLoad = median(loads);
+    // The stats window, after everything the speed window reads.
+    let regionEnd = null;
+    if (o.regionSample != null) {
+      regionEnd = await workerRequest(page, "validationReadJitRegionStats", { sampleEvery: o.regionSample }, 10000);
+      if (!regionEnd?.error) {
+        await new Promise((r) => setTimeout(r, o.regionSecs * 1000));
+        regionEnd = await workerRequest(page, "validationReadJitRegionStats", {}, 10000);
+      }
+    }
     return {
       windowMs: Math.round(t1 - t0),
       load1: { min: round(Math.min(...loads), 2), median: round(medianLoad, 2), max: round(Math.max(...loads), 2), limit: o.maxLoad },
@@ -194,22 +204,40 @@ async function measure(session, o) {
   }
 }
 
-// p4 for one window, or null and why (no export, region stats off).
+// p4 of one stats window, or null and why (not asked, no export, torn or
+// inconsistent counters).
 export function regionRecord(reply) {
-  if (!reply) return { p4: null, p4Why: "region stats not asked (--region-sample off)" };
-  if (reply.error) return { p4: null, p4Why: reply.error };
-  const stats = decodeRegionStats(reply.bytes);
-  return stats.error ? { p4: null, p4Why: stats.error } : { p4: regionShares(stats), p4Raw: stats };
+  if (!reply) return { p4: null, p4Why: "region stats not asked (no --region-sample)" };
+  if (reply.error) return { p4: null, p4Why: /Unknown upstream worker message/.test(reply.error) ? "engine without validationReadJitRegionStats" : reply.error };
+  const stats = consistentRead(decodeRegionStats(reply.bytes), decodeRegionStats(reply.again));
+  if (stats.error) return { p4: null, p4Why: stats.error };
+  const p4 = regionShares(stats);
+  return p4.error ? { p4: null, p4Why: p4.error } : { p4, p4Raw: stats };
 }
 
-// Median of each p4 field over the windows that have one; null if none.
+// One side's p4 over its stats windows: shares of the pooled counters (so
+// the four time shares add up to 1), the counts summed, and `windows`. Null
+// with the distinct reasons when no window has counters.
 export function summarizeP4(windows) {
-  const got = windows.map((w) => w?.p4).filter(Boolean);
-  if (!got.length) return null;
-  return Object.fromEntries(P4_FIELDS.map((f) => {
-    const v = got.map((p) => p[f]).filter(Number.isFinite);
-    return [f, v.length ? round(median(v), 4) : null];
-  }));
+  const recs = windows.filter(Boolean);
+  const raw = recs.map((w) => w.p4Raw).filter(Boolean);
+  const why = [...new Set(recs.filter((w) => !w.p4Raw).map((w) => w.p4Why).filter(Boolean))].join("; ") || "no window";
+  if (!raw.length) return { p4: null, why };
+  const pooled = regionShares(poolStats(raw));
+  if (pooled.error) return { p4: null, why: pooled.error };
+  return { p4: { ...pooled, windows: raw.length, missingWindows: recs.length - raw.length }, why: raw.length < recs.length ? why : null };
+}
+
+// p4 / baselineP4 and their reasons; the sides are compared only when both
+// have counters (one side without the export is not a comparison).
+export function p4Summary(runs, sides, good = (r) => r && !r.error) {
+  const side = (n) => summarizeP4(runs.map((r) => r[n]).filter(good).map((r) => r.cold));
+  const c = side("candidate"), b = sides.baseline ? side("baseline") : null;
+  return {
+    p4: c.p4, p4Why: c.why,
+    baselineP4: b?.p4 ?? null, baselineP4Why: b?.why ?? null,
+    p4Compare: !b ? null : c.p4 && b.p4 ? "both sides" : c.p4 || b.p4 ? `withheld: counters on the ${c.p4 ? "candidate" : "baseline"} only` : "neither side"
+  };
 }
 
 async function measureSide(side, o) {
@@ -267,7 +295,7 @@ async function main() {
       runs: { type: "string", default: "4" }, "min-pairs": { type: "string" }, "load-wait": { type: "string", default: "300" }, warmup: { type: "string", default: "25" }, secs: { type: "string", default: "20" },
       hold: { type: "string", default: "KeyX" }, warm: { type: "boolean", default: false },
       "max-load": { type: "string" }, "lock-wait": { type: "string", default: "1800" },
-      pcsample: { type: "string" }, symbols: { type: "string" }, "region-sample": { type: "string", default: "64" },
+      pcsample: { type: "string" }, symbols: { type: "string" }, "region-sample": { type: "string" }, "region-secs": { type: "string", default: "10" },
       "core-candidate": { type: "string", multiple: true, default: [] },
       port: { type: "string", default: process.env.HARNESS_PORT }, out: { type: "string" }
     },
@@ -294,7 +322,8 @@ async function main() {
     maxLoad: values["max-load"] ? num(values, "max-load", { min: 0.1 }) : Math.max(2, os.cpus().length / 4),
     loadWait: num(values, "load-wait", { min: 0 }),
     pcsample: values.pcsample ? num(values, "pcsample", { min: 0.05 }) : null,
-    regionSample: values["region-sample"] === "off" ? null : num(values, "region-sample", { min: 0, int: true }),
+    regionSample: values["region-sample"] == null ? null : num(values, "region-sample", { min: 0, int: true }),
+    regionSecs: num(values, "region-secs", { min: 1 }),
     functions: values.symbols ? JSON.parse(readFileSync(values.symbols, "utf8")).sort((a, b) => a[0] - b[0]) : null,
     coreCandidates: values["core-candidate"]
   };
@@ -365,9 +394,10 @@ async function main() {
     baseline: sides.baseline ? { cold: summarize("baseline", "cold"), warm: summarize("baseline", "warm") } : null,
     change: sides.baseline ? pairedSpeedChange(runsDone.filter((r) => good(r.baseline) && good(r.candidate)), { minPairs: o.minPairs }) : null,
     pcsample: pcNote,
-    // P4 counters (KPI: region and dispatch shares), cold windows of good runs.
-    p4: summarizeP4(runsDone.map((r) => r.candidate).filter(good).map((r) => r.cold)),
-    baselineP4: sides.baseline ? summarizeP4(runsDone.map((r) => r.baseline).filter(good).map((r) => r.cold)) : null
+    // P4 counters (KPI: region and dispatch shares), cold stats windows of good runs.
+    ...p4Summary(runsDone, sides, good),
+    // What each side served (commit, dirty), for kpi-report: from its first good run.
+    served: Object.fromEntries(Object.keys(sides).map((n) => [n, runsDone.map((r) => r[n]).find(good)?.served ?? null]))
   };
   writeFileSync(path.join(outDir, "summary.json"), JSON.stringify(summary, null, 1) + "\n");
   const med = (n) => summary[n]?.cold?.speed?.median ?? "-";
