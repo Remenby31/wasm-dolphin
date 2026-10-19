@@ -31,7 +31,7 @@ export const AOT_SW_PING = "ping";
 export const AOT_HASH_HEADER = "x-salon-aot-sha256";
 export const AOT_SW_HEADER = "x-salon-aot-sw";
 const IDENTITY_ENTRY = "identity.json";
-const BLACKLIST_ENTRY = "blacklist.json";
+const BLACKLIST_DIR = "blacklist";
 
 const GC_DISC_MAGIC = 0xc2339f3d;
 const MAX_DOL_BYTES = 32 << 20;
@@ -253,31 +253,48 @@ export async function openAotCache({
   // Regions left to the JIT for good under this identity: bytes the engine
   // rejects, and what the first-launch optimiser reports (untranslatable,
   // too large). It lives in the identity's cache, so a new core, compiler or
-  // flag set starts with a clean list.
-  const blacklistUrl = new URL(`${AOT_SW_SEGMENT}/${cacheName}/${BLACKLIST_ENTRY}`, baseUrl).href;
+  // flag set starts with a clean list. One empty entry per key, everything in
+  // its URL (reason, engine, key): reading the list is one keys() call, and
+  // two tabs adding keys never overwrite each other. An engine reject only
+  // holds for the browser build that rejected (another V8 may accept it).
+  const engineTag = (await sha256Hex(new TextEncoder().encode(String(globalThis.navigator?.userAgent ?? "unknown")))).slice(0, 12);
+  const blacklistPrefix = new URL(`${AOT_SW_SEGMENT}/${cacheName}/${BLACKLIST_DIR}/`, baseUrl).href;
+  const blacklistUrl = (key, reason) => {
+    const engine = reason === "engine-reject" ? engineTag : "any";
+    return `${blacklistPrefix}${encodeURIComponent(reason)}/${engine}/${encodeURIComponent(key)}`;
+  };
   const blacklist = new Map(); // key -> reason
   try {
-    const stored = await (await cache.match(blacklistUrl))?.json();
-    if (stored && typeof stored === "object") {
-      for (const [key, reason] of Object.entries(stored)) if (isHashedAotKey(key)) blacklist.set(key, String(reason));
+    for (const request of await cache.keys()) {
+      if (!request.url.startsWith(blacklistPrefix)) continue;
+      const [reason, engine, encodedKey] = request.url.slice(blacklistPrefix.length).split("/").map(decodeURIComponent);
+      if (!isHashedAotKey(encodedKey)) continue;
+      if (engine !== "any" && engine !== engineTag) {
+        await cache.delete(request.url).catch(() => {}); // another browser build's verdict
+        continue;
+      }
+      blacklist.set(encodedKey, reason);
     }
   } catch {
     // unreadable: start empty, the regions are just tried again
   }
   let blacklistWrite = Promise.resolve();
   function addToBlacklist(entries) {
-    let added = 0;
+    const added = [];
     for (const { key, reason } of entries) {
       if (!isHashedAotKey(key) || blacklist.has(key)) continue;
-      blacklist.set(key, String(reason || "refused"));
-      added += 1;
+      const why = String(reason || "refused").replace(/[^A-Za-z0-9._-]/g, "_").slice(0, 40) || "refused";
+      blacklist.set(key, why);
+      added.push([key, why]);
     }
-    if (!added) return blacklistWrite;
-    stats.blacklisted += added;
-    const body = JSON.stringify(Object.fromEntries(blacklist));
-    blacklistWrite = blacklistWrite.then(() => cache.put(blacklistUrl, new Response(body, {
-      headers: { "content-type": "application/json" }
-    }))).catch(() => {});
+    if (!added.length) return blacklistWrite;
+    stats.blacklisted += added.length;
+    blacklistWrite = blacklistWrite.then(async () => {
+      for (const [key, why] of added) {
+        await cache.put(blacklistUrl(key, why), new Response(null)).catch(() => {});
+        await dropEntry(key); // its bytes are never loaded again
+      }
+    });
     return blacklistWrite;
   }
   const track = (promise) => {

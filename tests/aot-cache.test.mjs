@@ -599,10 +599,29 @@ test("blacklist: engine rejects and refusals are remembered under the identity, 
   // another compiler version: a clean list
   const other = await open(storage, { compilerVersion: "region-2" });
   assert.equal(other.isBlacklisted(key(1)), false);
-  // an unreadable list is dropped, not fatal
-  const raw = await storage.open(cache.cacheName);
-  const listUrl = [...raw.entries.keys()].find((u) => u.endsWith("/blacklist.json"));
-  raw.entries.get(listUrl).body = new TextEncoder().encode("{not json");
-  const third = await open(storage);
-  assert.equal(third.isBlacklisted(key(1)), false);
+  // an engine reject holds only for the browser build that rejected
+  const realNavigator = Object.getOwnPropertyDescriptor(globalThis, "navigator");
+  Object.defineProperty(globalThis, "navigator", { value: { userAgent: "another browser build" }, configurable: true });
+  try {
+    const newer = await open(storage);
+    assert.equal(newer.isBlacklisted(key(1)), false, "engine-reject from another build is dropped");
+    assert.equal(newer.isBlacklisted(key(2)), true, "a refusal of the translator holds on any build");
+  } finally {
+    if (realNavigator) Object.defineProperty(globalThis, "navigator", realNavigator);
+    else delete globalThis.navigator;
+  }
+});
+
+test("blacklist: two sessions of one identity add keys side by side, and a blacklisted region's bytes go", async () => {
+  const storage = fakeCacheStorage();
+  const key = (n) => `r:${String(n).padStart(64, "0")}`;
+  const tabA = await open(storage);
+  const tabB = await open(storage);
+  await tabA.put([{ key: key(7), bytes: MOD_A }]);
+  await Promise.all([tabA.blacklist([{ key: key(7), reason: "too-large" }]), tabB.blacklist([{ key: key(8), reason: "untranslatable" }])]);
+  await Promise.all([tabA.drain(), tabB.drain()]);
+  const next = await open(storage);
+  assert.equal(next.isBlacklisted(key(7)) && next.isBlacklisted(key(8)), true, "neither tab's list overwrote the other");
+  assert.deepEqual(await next.has([key(7)]), new Set(), "the bytes of a blacklisted region are deleted");
+  assert.equal(next.blacklistReason(key(7)), "too-large");
 });
