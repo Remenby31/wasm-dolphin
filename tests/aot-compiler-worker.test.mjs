@@ -538,3 +538,65 @@ test("a worker that keeps losing replies is replaced, so the boot never waits a 
   assert.equal((await client.compile(bytes)).offThread, false);
   assert.equal(made.length, 1);
 });
+
+test("an idle compiler worker is stopped, and the next job starts a new one (not a respawn)", async (t) => {
+  const { factory, made } = fakeWorkerFactory();
+  const clock = manualClock();
+  const client = createAotCompilerClient({ createWorker: factory, idleStopMs: 1000, ...clock });
+  t.after(() => client.terminate());
+  const bytes = buildModule({ memory: MEMORY, bodies: [[...i32const(1)]] });
+  const first = client.compile(bytes, { warm: false });
+  await settle();
+  const job = made[0].sent.find((m) => m.type === "aot-compile").jobs[0];
+  made[0].emit("message", { type: "aot-compiled", results: [{ id: job.id, module: new WebAssembly.Module(bytes) }], totals: {} });
+  await first;
+  // busy again before the delay: the stop is cancelled
+  made[0].emit("message", { type: "aot-idle", totals: {} });
+  const second = client.compile(bytes, { warm: false });
+  await settle();
+  clock.timers.splice(0); // the idle timer was cancelled by the new job; drop it unfired
+  const job2 = made[0].sent.filter((m) => m.type === "aot-compile").at(-1).jobs[0];
+  made[0].emit("message", { type: "aot-compiled", results: [{ id: job2.id, module: new WebAssembly.Module(bytes) }], totals: {} });
+  await second;
+  assert.equal(made[0].terminated, false);
+  // idle for good: stopped
+  made[0].emit("message", { type: "aot-idle", totals: {} });
+  clock.fire();
+  assert.equal(made[0].terminated, true);
+  assert.equal(client.stats().idleStops, 1);
+  // the next job starts a new worker, counted as a start, not a respawn
+  client.compile(bytes, { warm: false }).catch(() => {}); // left pending; terminate() rejects it
+  await settle();
+  assert.equal(made.length, 2);
+  assert.equal(client.stats().respawns, 0);
+  assert.equal(client.stats().offThread, true);
+});
+
+test("the worker announces idleness once nothing compiles or waits for a warm-up", async (t) => {
+  const seen = [];
+  const factory = nodeWorkerFactory();
+  const client = createAotCompilerClient({
+    createWorker: () => {
+      const w = factory();
+      const add = w.addEventListener;
+      w.addEventListener = (type, fn) => add(type, (e) => { if (type === "message") seen.push(e.data?.type); fn(e); });
+      return w;
+    },
+    idleStopMs: 200
+  });
+  t.after(() => client.terminate());
+  await client.compile(buildModule({ memory: MEMORY, funcImports: 1, bodies: [WRITER_BODY] }));
+  await client.drain();
+  assert.ok(seen.includes("aot-idle"));
+  await new Promise((r) => setTimeout(r, 400));
+  assert.equal(client.stats().idleStops, 1);
+});
+
+test("only the first blocks of the store are warmed at boot; the lazy fill never warms", async () => {
+  const { readFile } = await import("node:fs/promises");
+  const worker = await readFile(new URL("../src/upstream-discio-worker.js", import.meta.url), "utf8");
+  assert.match(worker, /const DOLPHIN_JIT_BOOT_WARM_MAX = 2048;/);
+  assert.match(worker, /const warmFirst = dolphinJitBlockStore \? DOLPHIN_JIT_BOOT_WARM_MAX : 0;/);
+  assert.match(worker, /compileDolphinJitModuleOffThread\(buf, DELIVER_BEFORE_WARM, false\), bytes: fromOverflow/);
+  assert.match(worker, /if \(!dolphinAotCompilerEnabled \|\| !warm\) return WebAssembly\.compile\(bytes\);/);
+});

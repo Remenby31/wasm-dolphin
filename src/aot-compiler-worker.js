@@ -351,6 +351,7 @@ export function installAotCompilerWorker(scope) {
 
   // Answered once nothing is compiling or waiting for its warm-up.
   function answerFlushes() {
+    if (!inFlight && !pumping) scope.postMessage({ type: "aot-idle", totals: { ...totals } });
     if (inFlight || pumping || !flushes.length) return;
     if (outbox.length) flushReplies();
     for (const id of flushes) scope.postMessage({ type: "aot-flushed", id, totals: { ...totals } });
@@ -456,6 +457,9 @@ export function createAotCompilerClient({
   maxWorkerFailures = 3,
   maxConsecutiveLost = 3,
   retryAfterMs = 30000,
+  // A worker with nothing to do for this long is stopped (its isolate and
+  // any scratch memory go with it); the next job starts a new one.
+  idleStopMs = 30000,
   pollMs = Math.max(50, Math.floor(warmTimeoutMs / 4)),
   setTimer = (fn, ms) => setTimeout(fn, ms),
   clearTimer = (id) => clearTimeout(id),
@@ -464,6 +468,9 @@ export function createAotCompilerClient({
   const pending = new Map(); // id -> {bytes, warm, deliver, sentAt, promise, resolve, reject}
   let worker = null;
   let workerFailures = 0;
+  let idleTimer = null;
+  let stoppingIdle = false;
+  let restartAfterIdle = false;
   let consecutiveLost = 0;
   let brokenUntil = createWorker ? 0 : Infinity;
   let workersStarted = 0;
@@ -478,7 +485,7 @@ export function createAotCompilerClient({
   const flushWaiters = new Map();
   const stats = {
     jobs: 0, done: 0, failed: 0, inPlace: 0, lost: 0, messageErrors: 0, timeouts: 0, respawns: 0,
-    workerFailures: 0, compileMs: 0, warmed: 0, warmCalls: 0, warmMs: 0, maxWarmMs: 0
+    workerFailures: 0, compileMs: 0, warmed: 0, warmCalls: 0, warmMs: 0, maxWarmMs: 0, idleStops: 0
   };
   const zero = () => ({ warmed: 0, warmCalls: 0, warmMs: 0, maxWarmMs: 0, scratchFailures: 0, traps: 0 });
   let carried = zero(); // totals of workers that are gone
@@ -554,6 +561,8 @@ export function createAotCompilerClient({
 
   function killWorker() {
     if (!worker) return;
+    cancelIdleStop();
+    if (stoppingIdle) restartAfterIdle = true;
     try {
       worker.terminate();
     } catch {
@@ -587,7 +596,29 @@ export function createAotCompilerClient({
     resendAll();
   }
 
+  function cancelIdleStop() {
+    if (idleTimer !== null) clearTimer(idleTimer);
+    idleTimer = null;
+  }
+
   function onMessage(data) {
+    if (data?.type === "aot-idle") {
+      current = data.totals;
+      foldTotals();
+      cancelIdleStop();
+      if (pending.size === 0 && outgoing.length === 0 && idleStopMs > 0) {
+        idleTimer = setTimer(() => {
+          idleTimer = null;
+          if (pending.size || outgoing.length || !worker) return;
+          stats.idleStops += 1;
+          stoppingIdle = true;
+          killWorker();
+          stoppingIdle = false;
+        }, idleStopMs);
+        idleTimer?.unref?.();
+      }
+      return;
+    }
     if (data?.type === "aot-flushed") {
       current = data.totals;
       foldTotals();
@@ -636,7 +667,8 @@ export function createAotCompilerClient({
       return null;
     }
     worker = created;
-    if (workersStarted++ > 0) stats.respawns += 1;
+    if (workersStarted++ > 0 && !restartAfterIdle) stats.respawns += 1;
+    restartAfterIdle = false;
     // Events of a worker that was replaced are ignored: its replies are
     // stale and its totals already counted.
     created.addEventListener("message", (event) => {
@@ -674,6 +706,7 @@ export function createAotCompilerClient({
   function send(id) {
     const job = pending.get(id);
     if (!job) return;
+    cancelIdleStop();
     const target = ensureWorker();
     if (!target) {
       compileInPlace(id);

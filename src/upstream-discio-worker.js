@@ -6384,9 +6384,18 @@ async function loadDolphinJitCacheFromIdb(db) {
       buf,
       valid: await verifyCanonicalWasmBlockKey(String(key), buf)
     })));
+    // Only the first blocks of the block store are warmed: packs are in the
+    // order blocks were first compiled, so these are what boot and menus run
+    // first. Warming every cached block retained its code for the session
+    // (+0.4 to +0.9 GB, measures/aot/rss-aotcompiler.md); the rest gets its
+    // code when the CPU thread runs it, as without the compiler worker.
+    const warmFirst = dolphinJitBlockStore ? DOLPHIN_JIT_BOOT_WARM_MAX : 0;
     const batch = verified
       .filter(({ valid }) => valid)
-      .map(({ key, buf }) => ({ key, p: compileDolphinJitModuleOffThread(buf, DELIVER_BEFORE_WARM) }));
+      .map(({ key, buf }) => ({
+        key,
+        p: compileDolphinJitModuleOffThread(buf, DELIVER_BEFORE_WARM, dolphinJitBootWarmed++ < warmFirst)
+      }));
     const res = await Promise.allSettled(batch.map((b) => b.p));
     for (let k = 0; k < res.length; k++) {
       if (res[k].status === "fulfilled") {
@@ -6807,8 +6816,12 @@ export function setDolphinAotCompilerForTest({ enabled, createWorker } = {}) {
   dolphinAotCompilerWorkerFactoryForTest = createWorker ?? null;
 }
 let dolphinAotCompilerWorkerFactoryForTest = null;
-function compileDolphinJitModuleOffThread(bytes, deliver) {
-  if (!dolphinAotCompilerEnabled) return WebAssembly.compile(bytes);
+// Cached modules: compiled in place (validation only, V8 compiles lazily) unless
+// they are among the first ones the session will run, which are warmed.
+const DOLPHIN_JIT_BOOT_WARM_MAX = 2048;
+let dolphinJitBootWarmed = 0;
+function compileDolphinJitModuleOffThread(bytes, deliver, warm) {
+  if (!dolphinAotCompilerEnabled || !warm) return WebAssembly.compile(bytes);
   return getDolphinAotCompiler().compile(bytes, { deliver }).then((result) => result.module);
 }
 // How a Module reaches the CPU thread. That pthread never returns to its
@@ -7284,7 +7297,7 @@ async function startLazyJitCacheFill() {
       const { entry, buf } = verified;
       // Only carry bytes through when sourced from the overflow buffer —
       // those need IDB write-back. IDB-sourced entries are already there.
-      return { key: entry.key, p: compileDolphinJitModuleOffThread(buf, DELIVER_BEFORE_WARM), bytes: fromOverflow ? buf : null };
+      return { key: entry.key, p: compileDolphinJitModuleOffThread(buf, DELIVER_BEFORE_WARM, false), bytes: fromOverflow ? buf : null };
     }).filter(Boolean);
     dolphinJitLazyFillFailureCount += verifiedSlice.length - compiles.length;
     const settled = await Promise.allSettled(compiles.map((c) => c.p));
