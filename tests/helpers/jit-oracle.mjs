@@ -41,6 +41,7 @@ export async function loadOracleCore(coreDir = new URL("../../cores/dolphin/", i
   const base = module._DolphinWeb_JitOracleBuffer() >>> 0;
   const view = () => new Uint32Array(module.HEAPU8.buffer, base, MAX_WORDS + 3 * STATE_WORDS + 4);
   return {
+    has: (name) => typeof module[`_${name}`] === "function",
     run(program, state, mask = PRODUCTION_DISABLE_MASK) {
       if (program.length > MAX_WORDS) throw new Error("program too long");
       const v = view();
@@ -388,3 +389,56 @@ export function describeDifference(a, b) {
 
 const bswap = (v) => (((v & 0xff) << 24) | ((v & 0xff00) << 8) | ((v >>> 8) & 0xff00) | (v >>> 24)) >>> 0;
 export const hex = (v) => `0x${(v >>> 0).toString(16).padStart(8, "0")}`;
+
+// a*c + b rounded once to nearest-even (to single precision when `single`,
+// returned as the double of that single), from exact integer arithmetic, as
+// [lo, hi] words; null when an operand is not finite or the result is
+// subnormal or overflows.
+export function exactFmaDouble(a, c, b, single = false) {
+  const words = (x) => new BigUint64Array(new Float64Array([x]).buffer)[0];
+  const parts = (x) => {
+    const w = words(x);
+    const field = Number((w >> 52n) & 0x7ffn);
+    if (field === 0x7ff) return null;
+    let m = w & ((1n << 52n) - 1n);
+    if (field) m |= 1n << 52n;
+    return [w >> 63n ? -m : m, (field || 1) - 1075];
+  };
+  const pa = parts(a), pc = parts(c), pb = parts(b);
+  if (!pa || !pc || !pb) return null;
+  const [mp, ep] = [pa[0] * pc[0], pa[1] + pc[1]];
+  const e0 = Math.min(ep, pb[1]);
+  const sum = (mp << BigInt(ep - e0)) + (pb[0] << BigInt(pb[1] - e0));
+  if (sum === 0n) {
+    // Exact zero: -0 only when both terms are zeros of negative sign (round
+    // to nearest), else +0.
+    const negP = (a < 0 || Object.is(a, -0)) !== (c < 0 || Object.is(c, -0));
+    const negB = b < 0 || Object.is(b, -0);
+    return [0, mp === 0n && pb[0] === 0n && negP && negB ? 0x80000000 : 0];
+  }
+  const sign = sum < 0n ? 1n : 0n;
+  const mag = sum < 0n ? -sum : sum;
+  const precision = single ? 24 : 53;
+  let shift = mag.toString(2).length - precision;
+  let q;
+  if (shift > 0) {
+    q = mag >> BigInt(shift);
+    const rest = mag & ((1n << BigInt(shift)) - 1n), half = 1n << BigInt(shift - 1);
+    if (rest > half || (rest === half && (q & 1n))) q += 1n;
+    if (q === 1n << BigInt(precision)) { q >>= 1n; shift += 1; }
+  } else {
+    q = mag << BigInt(-shift);
+  }
+  const exponent = e0 + shift + precision - 1;
+  if (single ? exponent < -126 || exponent > 127 : exponent < -1022 || exponent > 1023) return null;
+  if (single) q <<= 29n;
+  const w = (sign << 63n) | (BigInt(exponent + 1023) << 52n) | (q - (1n << 52n));
+  return [Number(w & 0xffffffffn), Number(w >> 32n)];
+}
+
+// Gekko's rounding of frC for single-precision multiplies (Force25Bit).
+export function force25Bit(x) {
+  const w = new BigUint64Array(new Float64Array([x]).buffer)[0];
+  const r = (w & 0xfffffffff8000000n) + (w & 0x8000000n);
+  return new Float64Array(new BigUint64Array([r]).buffer)[0];
+}

@@ -36,10 +36,16 @@
       "sha256": "a0262feec1d2044dc576b6f67240a8a99b36a4ba27cf37013cc99d855f3c755e"
     },
     {
+      "path": "core/upstream/dolphin_web_fma.h",
+      "hashMode": "lf-normalized",
+      "size": 6279,
+      "sha256": "f2b13956b48b67b5013e5d62608a362159273ce15e66ed59c45640affa850054"
+    },
+    {
       "path": "core/upstream/dolphin_web_core.cpp",
       "hashMode": "lf-normalized",
-      "size": 48265,
-      "sha256": "145efa5331c6263dc628f447769a468aac02f3554e4db5a0553652a84a3a1528"
+      "size": 48294,
+      "sha256": "5b50a428210b835d033814c550976b5ed41200fa032964a6b29b1cce3ffc14de"
     },
     {
       "path": "src/app.js",
@@ -80,8 +86,8 @@
     {
       "path": "src/core-host.js",
       "hashMode": "lf-normalized",
-      "size": 67824,
-      "sha256": "4e55038f65d453d7d649eff2b4151e1f908d5e0fccf0c5eaf31cfc2e291795e3"
+      "size": 67931,
+      "sha256": "2cdc94e3346aac781043a1e67609b6c1c8d6ca246638e7ada53a71688bf704b9"
     },
     {
       "path": "src/diagnostic-log-filter.js",
@@ -351,18 +357,7 @@
   },
   "memoryContractStatus": "consistent",
   "sourceOnlyExportsPendingRebuild": [
-    "_DolphinWeb_DetTraceCheckpointCount",
-    "_DolphinWeb_DetTraceCheckpoints",
-    "_DolphinWeb_DetTraceEnable",
-    "_DolphinWeb_DetTraceLog",
-    "_DolphinWeb_DetTraceLogCount",
-    "_DolphinWeb_DetTraceName",
-    "_DolphinWeb_DetTraceRamChunkCount",
-    "_DolphinWeb_DetTraceRamChunks",
-    "_DolphinWeb_DetTraceStartVi",
-    "_DolphinWeb_EmulatedRtc",
-    "_GetCustomRtc",
-    "_SetCustomRtc"
+    "_DolphinWeb_FmaIsMusl"
   ],
   "moduleExports": [
     "_AcknowledgeWebGpuOwnershipTraceCapture",
