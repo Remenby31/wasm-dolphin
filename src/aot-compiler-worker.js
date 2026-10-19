@@ -195,6 +195,18 @@ export function createWarmer() {
     if (memory) {
       const bytes = warmState ? warmState.state : null;
       const len = bytes ? bytes.length : WARM_STATE_CLEAR_BYTES;
+      // A module that declares a small minimum gets a small scratch memory
+      // (only its initial pages are committed, which on Windows counts
+      // against the commit charge at once); it grows just enough to hold the
+      // warm state.
+      const needed = Math.ceil((statePtr + len) / PAGE);
+      if (statePtr >= 0 && memory.buffer.byteLength < statePtr + len) {
+        try {
+          memory.grow(needed - memory.buffer.byteLength / PAGE);
+        } catch {
+          // past its maximum: calls run on what there is
+        }
+      }
       if (statePtr >= 0 && memory.buffer.byteLength >= statePtr + len) {
         const view = new Uint8Array(memory.buffer, statePtr, len);
         if (bytes) view.set(bytes);

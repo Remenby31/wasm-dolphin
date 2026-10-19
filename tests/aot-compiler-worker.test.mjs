@@ -600,3 +600,20 @@ test("cached blocks are warmed at boot up to a budget (all, today); the lazy fil
   assert.match(worker, /compileDolphinJitModuleOffThread\(buf, DELIVER_BEFORE_WARM, false\), bytes: fromOverflow/);
   assert.match(worker, /if \(!dolphinAotCompilerEnabled \|\| !warm\) return WebAssembly\.compile\(bytes\);/);
 });
+
+test("a module declaring a small memory minimum warms on a small scratch memory, and still runs on the emulator's", async () => {
+  // shared memory import min 1 page, max 24576 (the core's maximum)
+  const SMALL = { shared: true, initial: 1, maximum: 24576 };
+  const bytes = buildModule({ memory: SMALL, funcImports: 1, bodies: [WRITER_BODY] });
+  const warmer = createWarmer();
+  const result = await compileAndWarm(bytes, { warm: true }, warmer);
+  assert.equal(result.warmed, true);
+  const [scratch] = warmer.scratchMemories();
+  // grown only to hold the warm state, far from the 1.5 GiB of the core's shape
+  assert.ok(scratch.buffer.byteLength <= 4 * 65536, `${scratch.buffer.byteLength} bytes`);
+  assert.equal(new DataView(scratch.buffer).getUint32(WARM_STATE_PTR, true), 0xabababab, "the warm call ran");
+  // the emulator's memory (min = max = 24576) satisfies the import
+  const real = new WebAssembly.Memory({ shared: true, initial: 24576, maximum: 24576 });
+  const instance = new WebAssembly.Instance(result.module, { env: { memory: real, h0: () => 0 } });
+  assert.equal(instance.exports.f(0x100) >>> 0, 0x80003000);
+});
