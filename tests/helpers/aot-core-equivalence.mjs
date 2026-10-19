@@ -107,6 +107,33 @@ export async function loadAotCore(coreDir = new URL("../../cores/dolphin/", impo
       }
     },
     runRegion: (handle) => m._DolphinWeb_AotRunRegionForTest(handle),
+    // The dispatcher's region path (P4 step 5): queue, install, dispatch.
+    queueRegion(bytes, entries, ranges) {
+      const words = [...entries, ...ranges.flat()];
+      const b = m._malloc(bytes.length), w = m._malloc(4 * words.length);
+      try {
+        m.HEAPU8.set(bytes, b);
+        new Uint32Array(m.HEAPU8.buffer, w, words.length).set(words);
+        m._DolphinWeb_AotQueueRegion(b, bytes.length, w, entries.length, w + 4 * entries.length, ranges.length);
+      } finally {
+        m._free(b);
+        m._free(w);
+      }
+    },
+    serviceRegions: () => m._DolphinWeb_AotServiceRegionsForTest(),
+    setRegionsEnabled: (on) => m._DolphinWeb_JitSetRegionsEnabled(on ? 1 : 0),
+    regionCount: () => m._DolphinWeb_JitRegionCount() >>> 0,
+    dispatchRegion: () => m._DolphinWeb_AotDispatchRegionForTest(),
+    invalidate: (address, size) => m._DolphinWeb_AotInvalidateForTest(address >>> 0, size >>> 0),
+    // Layout v1 of DolphinWeb_JitRegionStats (sampleEvery >= 0 resets).
+    regionStats(sampleEvery = -1) {
+      const p = m._DolphinWeb_JitRegionStats(sampleEvery) >>> 0;
+      const head = new Uint32Array(m.HEAPU8.buffer, p, 4);
+      const f = new Float64Array(m.HEAPU8.buffer, p + 16, 9);
+      const names = ["regionCycles", "totalCycles", "regionTimeMs", "dispatchTimeMs", "blockTimeMs", "interpTimeMs",
+        "regionCalls", "regionNotEntry", "regionStops"];
+      return { version: head[0], sizeBytes: head[1], sampleEvery: head[2], ...Object.fromEntries(names.map((n, i) => [n, f[i]])) };
+    },
     interpretOne: () => m._DolphinWeb_AotTestInterpretOne(),
     reset(gprs, pc, lr, downcount) {
       new Int32Array(m.HEAPU8.buffer, gprPtr, 32).set(gprs);

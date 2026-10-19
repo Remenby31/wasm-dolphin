@@ -99,5 +99,15 @@ the oracle tests and the homebrew fuzz check it at every step.
    800 programs, 1 218 runs (DSI, FP program exceptions and downcount exits
    in the middle of regions), 0 mismatch. Done. `icbi` invalidation of
    region code is step 5's (the dispatcher owns region lifetimes).
-5. `RunWasmRegion` and `wasmjit=region` in the dispatcher.
+5. Regions in the dispatcher. `DolphinWeb_AotQueueRegion(bytes, entries,
+   ranges)` from any thread; the CPU thread compiles and maps queued modules
+   at a slice boundary (4 per slice; a region with an entry HLE hooks is left
+   out). `ExecuteOneBlock` runs the region holding the pc before looking for
+   a block, with translation and FP on only; block chaining stops at a
+   region entry. `JitInterface::InvalidateICache(Line)` drops the regions
+   covering the code (a page map rejects the rest in one lookup);
+   `ClearCache` drops them all. On with `aot=1`, their only producer
+   (`wasmjit` already carries 0/1/2). Stats: `DolphinWeb_JitRegionStats`,
+   layout v1 agreed with the harness (88 bytes, off until enabled). Tests:
+   `tests/aot-region-dispatch.test.mjs`. Done; the live check needs P7.
 6. The FP analyses over a region, each behind its own flag.

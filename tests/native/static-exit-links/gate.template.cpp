@@ -1,6 +1,12 @@
 #define NOMINMAX
 #include "test-platform.h"
+#include <atomic>
 #include <chrono>
+#include <unordered_map>
+// P4 regions (0075): none installed in these groups.
+std::atomic<bool> s_regions_enabled{false};
+std::unordered_map<u32, u32> s_region_at;
+template <class State> bool TryRunRegion(State&) { return false; }
 bool helper_disabled = false, s_ppc_block_profile_enabled = false;
 u32 helper_checks = 0, s_ppc_profile_total_blocks = 0, profile_records = 0;
 constexpr u32 DOLPHIN_WEB_DISABLE_BLOCK_REDISPATCH = 1, PPC_PROFILE_SAMPLE_MASK = 1023;

@@ -2468,6 +2468,8 @@ async function loadCore({
   // Off-thread compiles need the pthread cache map the persistent cache
   // installs; without it the core compiles in place as before.
   api.setPpcWasmJitOffThread?.(jitOffThread && !noJitCache ? 1 : 0);
+  // Region modules (P4) run in the dispatcher with aot=1, their only producer.
+  api.setJitRegionsEnabled?.(aotFirstLaunch ? 1 : 0);
   api.setPpcProfileEnabled?.(ppcProfile ? 1 : 0);
   api.setWebGpuUploadArenaMiB?.(wgpuUploadArenaMiB, collectMetrics ? 1 : 0);
   api.setWebGpuProducerProfileEnabled?.(wgpuProducerProfileRequested ? 1 : 0);
@@ -2594,6 +2596,7 @@ function bindApi(module) {
         : null,
     setPpcWasmJitWarmup: optionalCwrap("SetPpcWasmJitWarmup", null, ["number", "number"]),
     setPpcWasmJitOffThread: optionalCwrap("SetPpcWasmJitOffThread", null, ["number"]),
+    setJitRegionsEnabled: optionalCwrap("DolphinWeb_JitSetRegionsEnabled", null, ["number"]),
     getPpcWasmJitEngagedFrame: optionalCwrap("GetPpcWasmJitEngagedFrame", "number", []),
     getPpcWasmJitArmStartFrame: optionalCwrap("GetPpcWasmJitArmStartFrame", "number", []),
     setPpcWasmJitEnabled:
