@@ -12666,11 +12666,12 @@ function drainWebGpuCmdRing(source = "presentation") {
             // resizing the swapchain repeatedly blanked the output entirely
             // (0.0 visual fps). The size must be stable, so take the page
             // canvas's intended size once and leave it alone.
+            const postFactor = upscaleStudy.filter ? upscaleStudy.factor : 1;
             if (!wgpuBackbufferSized && renderCanvas &&
-                (renderCanvas.width < WGPU_BACKBUFFER_W * wgpuBackbufferScale ||
-                 renderCanvas.height < WGPU_BACKBUFFER_H * wgpuBackbufferScale)) {
+                (renderCanvas.width < WGPU_BACKBUFFER_W * wgpuBackbufferScale * postFactor ||
+                 renderCanvas.height < WGPU_BACKBUFFER_H * wgpuBackbufferScale * postFactor ||
+                 (upscaleStudy.gpuTime && !wgpuGpuTimer))) {
               wgpuBackbufferSized = true;
-              const postFactor = upscaleStudy.filter ? upscaleStudy.factor : 1;
               const newW = WGPU_BACKBUFFER_W * wgpuBackbufferScale * postFactor;
               const newH = WGPU_BACKBUFFER_H * wgpuBackbufferScale * postFactor;
               try {

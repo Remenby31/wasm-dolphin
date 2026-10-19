@@ -70,11 +70,24 @@ const median = (a) => { const s = a.filter(Number.isFinite).sort((x, y) => x - y
 
 async function runConfig(o, server, config, run) {
   const query = `${o.baseQuery}&${config}&gputime=1&metrics=1`;
-  const session = await openSession({ base: server.base, server, query, iso: o.iso, routes: { [STATE_ROUTE]: o.state } });
+  // One retry: on this loaded Mac a launch occasionally dies before the
+  // page is up (and its profile cleanup then races Chrome's last writes).
+  const open = () => openSession({ base: server.base, server, query, iso: o.iso, routes: o.state ? { [STATE_ROUTE]: o.state } : {} });
+  let session;
+  try {
+    session = await open();
+  } catch (e) {
+    console.log(`[upscale-study] ${config} run${run}: launch failed (${String(e?.message || e).slice(0, 120)}), retrying`);
+    await new Promise((r) => setTimeout(r, 3000));
+    session = await open();
+  }
   const rec = { config, run, url: session.url };
   try {
-    const loaded = await loadHarnessState(session.page, session.url);
-    if (!loaded?.loaded) throw new Error(`savestate load failed: ${JSON.stringify(loaded)}`);
+    // No --state: a homebrew that boots straight into its scene.
+    if (o.state) {
+      const loaded = await loadHarnessState(session.page, session.url);
+      if (!loaded?.loaded) throw new Error(`savestate load failed: ${JSON.stringify(loaded)}`);
+    }
     if (o.hold) await session.page.keyboard.down(o.hold);
     await session.page.waitForTimeout(o.warmup * 1000);
     await workerRequest(session.page, "upscaleStudyStats", { reset: true }, 10000);
@@ -114,6 +127,17 @@ async function runConfig(o, server, config, run) {
   return rec;
 }
 
+// Under heavy load, playwright's pipe transport sometimes receives empty CDP
+// frames and throws "Unexpected end of JSON input" from a setImmediate,
+// which would kill the probe; the session itself goes on (checked: the
+// captures and stats of such a run are complete). Only that error is let
+// through.
+process.on("uncaughtException", (e) => {
+  if (/Unexpected end of JSON input/.test(String(e?.message))) return;
+  console.error(e);
+  process.exit(1);
+});
+
 async function main() {
   const { values } = parseArgs({
     options: {
@@ -122,15 +146,16 @@ async function main() {
       runs: { type: "string", default: "3" }, warmup: { type: "string", default: "25" }, secs: { type: "string", default: "20" },
       hold: { type: "string", default: "KeyX" }, lock: { type: "boolean", default: false },
       capture: { type: "boolean", default: true }, "no-capture": { type: "boolean", default: false },
-      out: { type: "string" }
+      out: { type: "string" }, "repo-out": { type: "boolean", default: false }
     }
   });
-  if (!values.iso || !values.state || !values.port || !values.out) throw new Error("usage: upscale-study.mjs --iso disc.iso --state scene.sav --port N --out dir [--configs a;b] [--runs 3] [--lock]");
+  if (!values.iso || !values.port || !values.out) throw new Error("usage: upscale-study.mjs --iso disc.iso [--state scene.sav] --port N --out dir [--configs a;b] [--runs 3] [--lock] [--repo-out]");
   const out = path.resolve(values.out);
-  if (out.startsWith(REPO_ROOT + path.sep)) throw new Error(`--out ${out} is inside the repo: captures of a commercial disc stay outside`);
+  // --repo-out: a homebrew's captures may go into the repo (docs/images).
+  if (out.startsWith(REPO_ROOT + path.sep) && !values["repo-out"]) throw new Error(`--out ${out} is inside the repo: captures of a commercial disc stay outside (--repo-out for a homebrew)`);
   mkdirSync(out, { recursive: true });
   const o = {
-    iso: path.resolve(values.iso), state: path.resolve(values.state), port: Number(values.port), out,
+    iso: path.resolve(values.iso), state: values.state ? path.resolve(values.state) : null, port: Number(values.port), out,
     baseQuery: values["base-query"] ?? PRESETS.wgpu, runs: Number(values.runs), warmup: Number(values.warmup),
     secs: Number(values.secs), hold: values.hold, capture: values.capture && !values["no-capture"]
   };

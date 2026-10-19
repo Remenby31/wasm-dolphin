@@ -266,7 +266,7 @@ export function createPostUpscaler(device, format, { srcW, srcH, outW, outH, fil
 // Sums the GPU time of the render passes between two presents. Each pass
 // gets a begin/end timestamp pair; at present the pairs are resolved and
 // read back asynchronously (a ring of readback buffers, never waited on).
-export function createGpuPassTimer(device, { maxPasses = 512, ring = 4 } = {}) {
+export function createGpuPassTimer(device, { maxPasses = 512, ring = 16 } = {}) {
   if (!device.features?.has?.("timestamp-query")) return null;
   const B = self.GPUBufferUsage;
   const count = maxPasses * 2;
