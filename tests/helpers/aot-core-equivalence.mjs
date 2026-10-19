@@ -64,6 +64,7 @@ export async function loadAotCore(coreDir = new URL("../../cores/dolphin/", impo
   m._free(layoutPtr);
   const gprPtr = m._malloc(128);
   return {
+    has: (name) => typeof m[`_${name}`] === "function",
     pcOffset,
     helperNames,
     memoryPages: m.HEAPU8.buffer.byteLength / 65536,
@@ -113,6 +114,17 @@ export async function loadAotCore(coreDir = new URL("../../cores/dolphin/", impo
       new Int32Array(m.HEAPU8.buffer, statePtr + downcountOffset, 1)[0] = downcount;
     },
     downcount: () => new Int32Array(m.HEAPU8.buffer, statePtr + downcountOffset, 1)[0],
+    setDowncount: (v) => { new Int32Array(m.HEAPU8.buffer, statePtr + downcountOffset, 1)[0] = v; },
+    // The oracle's 248-word state (jit-oracle.mjs) as the start state, at pc.
+    loadState(words, pc) {
+      const p = m._malloc(4 * words.length);
+      try {
+        new Uint32Array(m.HEAPU8.buffer, p, words.length).set(words);
+        m._DolphinWeb_AotTestLoadState(p, pc >>> 0);
+      } finally {
+        m._free(p);
+      }
+    },
     // The test CPU has no hardware behind MMIO and no CoreTiming: code that
     // reaches them traps. The caller catches the trap and restores the stack.
     stackSave: () => m._DolphinWeb_AotTestStackPointer() >>> 0,
@@ -167,10 +179,85 @@ function claimEntries(fragments) {
   return out;
 }
 
+// First differing word of the oracle state, with the words that differ.
 const diffState = (a, b) => {
-  for (let i = 0; i < a.length; i++) if (a[i] !== b[i]) return { word: i, interp: a[i], region: b[i] };
-  return null;
+  const words = [];
+  for (let i = 0; i < a.length; i++) if (a[i] !== b[i]) words.push(i);
+  if (!words.length) return null;
+  const i = words[0];
+  return { word: i, interp: a[i], region: b[i], words: words.slice(0, 8), pc: { interp: a[47], region: b[47] } };
 };
+
+// Runs one call twice from `start()` (which sets RAM, state and downcount):
+// the interpreter alone, then regions wherever regionAt holds the pc. Until
+// the call returns to STOP, an exception is taken or downcount runs out; the
+// interpreter is then rerun to the downcount where the regions stopped.
+// Returns { trap } when the interpreter cannot run it on the test CPU,
+// { error } when a region refused its own entry, else { equal, got,
+// reference, difference }.
+export function compareCall(core, regionAt, start) {
+  const run = (useRegions, stopAt) => {
+    let regionRuns = 0, regionCycles = 0, interpCycles = 0;
+    const done = (end) => ({ end, regionRuns, regionCycles, interpCycles });
+    for (;;) {
+      const pc = core.pc();
+      if (pc === STOP) return done("stop");
+      const before = core.downcount();
+      if (before <= stopAt) return done("budget");
+      const handle = useRegions ? regionAt.get(pc) : undefined;
+      if (handle === undefined) {
+        const raised = core.interpretOne();
+        interpCycles += before - core.downcount();
+        if (raised) return done("exception");
+        continue;
+      }
+      regionRuns += 1;
+      const code = core.runRegion(handle);
+      regionCycles += before - core.downcount();
+      if (code === 1) throw new Error(`region refused its own entry ${pc.toString(16)}`);
+      if (code === 3) return done("exception");
+    }
+  };
+  const sp = core.stackSave();
+  const guarded = (useRegions, stopAt = 0) => {
+    try {
+      return run(useRegions, stopAt);
+    } catch (error) {
+      if (!(error instanceof WebAssembly.RuntimeError)) throw error;
+      core.stackRestore(sp);
+      return { end: "trap", error: String(error.message) };
+    }
+  };
+  start();
+  let reference = guarded(false);
+  if (reference.end === "trap") return { trap: true };
+  start();
+  let got;
+  try {
+    got = guarded(true);
+  } catch (error) {
+    return { error: String(error.message) };
+  }
+  const state = core.state();
+  const downcount = core.downcount();
+  const ram = core.ram().slice();
+  start();
+  // Same point. Regions check downcount between blocks only, so a block can
+  // take it below 0 and finish (even return to STOP): the interpreter runs
+  // to that same downcount. A region run that ended in an exception is
+  // compared with the interpreter run to its exception, whatever the budget.
+  const stopAt = got.end === "exception" ? -Infinity : Math.min(downcount, 0);
+  reference = guarded(false, stopAt);
+  const expectedRam = core.ram();
+  let ramAt = -1;
+  if (Buffer.compare(ram, expectedRam) !== 0) ramAt = ram.findIndex((b, i) => b !== expectedRam[i]);
+  const stateDiff = diffState(core.state(), state);
+  // Exits through an exception leave downcount to the CPU loop.
+  const cyclesDiffer = got.end !== "exception" && core.downcount() !== downcount;
+  const equal = got.end === reference.end && !stateDiff && ramAt < 0 && !cyclesDiffer;
+  return { equal, got, reference, difference: equal ? null : { end: got.end, reference: reference.end, state: stateDiff,
+    ram: ramAt < 0 ? null : (0x80000000 + ramAt) >>> 0, downcount: cyclesDiffer ? { interp: core.downcount(), region: downcount } : null } };
+}
 
 export function checkCoreSlice({ core, plan, image, slice, slices, maxFunctions = 100, budget = 400000, seed = 1,
   mask = PRODUCTION_DISABLE_MASK, maxBlocks = 64, fragmentsOf = functionFragments(core, { mask, maxBlocks }) }) {
@@ -194,87 +281,23 @@ export function checkCoreSlice({ core, plan, image, slice, slices, maxFunctions 
   }
 
   const skip = (reason) => { report.skipped[reason] = (report.skipped[reason] ?? 0) + 1; };
-  // Until the call returns, an exception is taken or downcount <= stopAt.
-  const run = (useRegions, stopAt) => {
-    let regionRuns = 0, regionCycles = 0, interpCycles = 0;
-    const done = (end) => ({ end, regionRuns, regionCycles, interpCycles });
-    for (;;) {
-      const pc = core.pc();
-      if (pc === STOP) return done("stop");
-      const before = core.downcount();
-      if (before <= stopAt) return done("budget");
-      const handle = useRegions ? regionAt.get(pc) : undefined;
-      if (handle === undefined) {
-        const raised = core.interpretOne();
-        interpCycles += before - core.downcount();
-        if (raised) return done("exception");
-        continue;
-      }
-      regionRuns += 1;
-      const code = core.runRegion(handle);
-      regionCycles += before - core.downcount();
-      if (code === 1) throw new Error(`region refused its own entry ${pc.toString(16)}`);
-      if (code === 3) return done("exception");
-    }
-  };
-
-  const sp = core.stackSave();
-  const guarded = (useRegions, stopAt = 0) => {
-    try {
-      return run(useRegions, stopAt);
-    } catch (error) {
-      if (!(error instanceof WebAssembly.RuntimeError)) throw error;
-      core.stackRestore(sp);
-      return { end: "trap", regionRuns: 0, error: String(error.message) };
-    }
-  };
-
   for (const f of plan.modules.flatMap((m) => m.functions)) {
     if (!mine.has(f)) continue;
     report.functions += 1;
     if (!regionAt.has(f.entry >>> 0)) continue;
     report.translated += 1;
     const gprs = seedGprs(seed ^ f.entry);
-    const start = () => {
+    const result = compareCall(core, regionAt, () => {
       core.ram().set(baseline);
       core.reset(gprs, f.entry, STOP, budget);
-    };
-    start();
-    let reference = guarded(false);
-    if (reference.end === "trap") { skip("trap"); continue; }
-    start();
-    let got;
-    try {
-      got = guarded(true);
-    } catch (error) {
-      report.mismatches.push({ entry: f.entry, error: String(error.message) });
-      continue;
-    }
-    const state = core.state();
-    const downcount = core.downcount();
-    const ram = core.ram().slice();
-    if (got.end === "budget" && reference.end === "budget") {
-      // Same point: the interpreter stops at the downcount the regions ran out at.
-      start();
-      reference = guarded(false, downcount);
-    } else {
-      start();
-      reference = guarded(false);
-    }
+    });
+    if (result.trap) { skip("trap"); continue; }
+    if (result.error) { report.mismatches.push({ entry: f.entry, error: result.error }); continue; }
     report.checked += 1;
-    report.regionRuns += got.regionRuns;
-    report.regionCycles += got.regionCycles;
-    report.interpCycles += got.interpCycles;
-    report.ends[got.end] = (report.ends[got.end] ?? 0) + 1;
-    const expectedRam = core.ram();
-    let ramAt = -1;
-    if (Buffer.compare(ram, expectedRam) !== 0) ramAt = ram.findIndex((b, i) => b !== expectedRam[i]);
-    const stateDiff = diffState(core.state(), state);
-    // Exits through an exception leave downcount to the CPU loop.
-    const cyclesDiffer = got.end !== "exception" && core.downcount() !== downcount;
-    if (got.end === reference.end && !stateDiff && ramAt < 0 && !cyclesDiffer) report.equal += 1;
-    else report.mismatches.push({ entry: f.entry, end: got.end, reference: reference.end, state: stateDiff,
-      ram: ramAt < 0 ? null : (0x80000000 + ramAt) >>> 0, downcount: cyclesDiffer ? { interp: core.downcount(), region: downcount } : null });
+    for (const k of ["regionRuns", "regionCycles", "interpCycles"]) report[k] += result.got[k];
+    report.ends[result.got.end] = (report.ends[result.got.end] ?? 0) + 1;
+    if (result.equal) report.equal += 1;
+    else report.mismatches.push({ entry: f.entry, ...result.difference });
   }
   return report;
 }

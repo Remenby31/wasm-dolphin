@@ -90,7 +90,14 @@ the oracle tests and the homebrew fuzz check it at every step.
    exceptions held pending or the FP exception FE0/FE1 enable, which
    `Interpreter::mtmsr` and `FastMtmsr` take at once. It now leaves to the
    system helper when one is pending (oracle test).
-4. Oracle region mode: an assembled region against the interpreter, exits in
-   the middle of a region (downcount, DSI, FP exception, icbi).
+4. Oracle region mode (`tests/aot-region-oracle.test.mjs`): the oracle's random
+   programs as one fragment each, from its random states, with a full and a
+   small cycle budget (the region stops between blocks with downcount below
+   0; the interpreter is compared at that downcount). A cut prefix is
+   analysed alone: whole-block analysis let an op skip FPRF/CR/GPR state a
+   later op past the cut overwrites, visible at a region block boundary.
+   800 programs, 1 218 runs (DSI, FP program exceptions and downcount exits
+   in the middle of regions), 0 mismatch. Done. `icbi` invalidation of
+   region code is step 5's (the dispatcher owns region lifetimes).
 5. `RunWasmRegion` and `wasmjit=region` in the dispatcher.
 6. The FP analyses over a region, each behind its own flag.

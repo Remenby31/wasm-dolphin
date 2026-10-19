@@ -349,7 +349,7 @@ diff --git a/Source/Core/Core/PowerPC/CachedInterpreter/CachedInterpreter.cpp b/
  extern "C" EMSCRIPTEN_KEEPALIVE double DolphinWeb_JitArmedStepForTest(double frame)
  {
    ApplyArmedWasmPolicyAt(static_cast<u64>(frame));
-@@ -13850,6 +13927,390 @@ extern "C" EMSCRIPTEN_KEEPALIVE int DolphinWeb_JitOracleRun(u32 word_count, u32
+@@ -13850,6 +13927,412 @@ extern "C" EMSCRIPTEN_KEEPALIVE int DolphinWeb_JitOracleRun(u32 word_count, u32
    return std::memcmp(s_jit_oracle.interp, s_jit_oracle.jit, sizeof s_jit_oracle.jit) == 0 ? 0 : 1;
  }
  
@@ -431,9 +431,20 @@ diff --git a/Source/Core/Core/PowerPC/CachedInterpreter/CachedInterpreter.cpp b/
 +  }
 +  if (prefix == 0)
 +    return false;
++  const u32 resume_pc = prefix == block.m_num_instructions ? next_pc : buffer[prefix].address;
++  if (prefix < block.m_num_instructions)
++  {
++    // The analysis of the whole block lets an op skip state a later op
++    // overwrites (FPRF, CR fields, discardable GPRs). Past the prefix those
++    // later ops run outside the region, after a block boundary where the
++    // region can exit on downcount and an interrupt see that state: analyze
++    // the prefix alone.
++    analyzer.Analyze(pc, &block, &buffer, prefix);
++    if (block.m_memory_exception || block.m_num_instructions != prefix)
++      return false;
++  }
 +  const PPCAnalyst::CodeOp& last = buffer[prefix - 1];
 +  const bool ends_with_branch = last.canEndBlock;
-+  const u32 resume_pc = prefix == block.m_num_instructions ? next_pc : buffer[prefix].address;
 +  WasmFragmentRelocs fragment;
 +  WasmFragmentRelocs* const saved = s_wasm_fragment_relocs;
 +  s_wasm_fragment_relocs = &fragment;
@@ -683,6 +694,15 @@ diff --git a/Source/Core/Core/PowerPC/CachedInterpreter/CachedInterpreter.cpp b/
 +  ppc.downcount = 0x7fffffff;
 +}
 +
++// Start state from the oracle's 248-word layout (DolphinWeb_AotTestState),
++// at pc: the oracle's programs run as regions (mid-region exits).
++extern "C" EMSCRIPTEN_KEEPALIVE void DolphinWeb_AotTestLoadState(const u32* in, u32 pc)
++{
++  auto& ppc = Core::System::GetInstance().GetPPCState();
++  JitOracleLoadState(Core::System::GetInstance(), in);
++  ppc.pc = ppc.npc = pc;
++}
++
 +// The oracle's 248-word state (GPRs, CR, XER, LR, CTR, FPSCR, MSR, GQRs,
 +// exceptions, pc, FPRs, the scratch window, SRR0/1, DAR, DSISR).
 +extern "C" EMSCRIPTEN_KEEPALIVE const u32* DolphinWeb_AotTestState()
@@ -721,9 +741,9 @@ diff --git a/Source/Core/Core/PowerPC/CachedInterpreter/CachedInterpreter.cpp b/
 +}
 +
 +// Runs a region module compiled by DolphinWeb_JitCompileBytesForTest on the
-+// test CPU: 0 continue at pc, 1 not an entry, 2 stopped. After 2, pending
-+// exceptions are taken as the CPU loop would; the result is then 3 when one
-+// was.
++// test CPU: 0 continue at pc, 1 not an entry, 2 stopped, 3 stopped in an
++// exception handler (taken by a helper, or pending and taken here as the CPU
++// loop would).
 +extern "C" EMSCRIPTEN_KEEPALIVE int DolphinWeb_AotRunRegionForTest(int handle)
 +{
 +  auto& system = Core::System::GetInstance();
@@ -732,7 +752,9 @@ diff --git a/Source/Core/Core/PowerPC/CachedInterpreter/CachedInterpreter.cpp b/
 +      handle, static_cast<int>(reinterpret_cast<std::uintptr_t>(&ppc)));
 +  if (code != 2)
 +    return code;
-+  if (ppc.Exceptions)
++  // A helper that stopped the region has taken its exception (translation
++  // off in the handler); others still pending wait, as in the interpreter.
++  if (ppc.msr.IR && ppc.Exceptions)
 +    system.GetPowerPC().CheckExceptions();
 +  return ppc.msr.IR ? 2 : 3;
 +}
