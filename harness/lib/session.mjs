@@ -56,7 +56,7 @@ async function startSession({ context, profileDir, base, server, query, iso, gam
     await page.route(pattern, (route) => route.fulfill({ path: file, contentType: "application/octet-stream" }));
   }
   const watch = watchPage(page);
-  // cpu=single runs get the fixed clock that makes them repeat (matrix.mjs).
+  // bootIso puts single-core runs on the fixed clock and checks it took.
   const url = `${base}?${withDeterministicClock(query)}`;
   const machineBefore = machineSnapshot();
   const startedAt = Date.now();
@@ -80,6 +80,7 @@ async function startSession({ context, profileDir, base, server, query, iso, gam
     machineBefore,
     startedAt,
     harness: boot.harness,
+    clock: boot.clock,
     core,
     coreFetches,
     rendererCrashed: () => watch.events.some((e) => e.type === "crash"),

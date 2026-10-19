@@ -180,11 +180,34 @@ export function captureSourceOk(query, source) {
 // at boot and formats the memory cards, so two boots of one disc part from the
 // first frames (patch 0081, ?rtc=). 2001-09-09: any fixed value works.
 export const HARNESS_RTC = 1000000000;
+// One emulated CPU thread, as the page decides it (core-host.js
+// requestedCpuThread): cpu=single, or cpu=auto with any renderer but OGL.
+export function isSingleCore(query) {
+  const p = new URLSearchParams(query);
+  const cpu = p.get("cpu");
+  return cpu === "single" || (cpu === "auto" && p.get("video") !== "ogl");
+}
 export function withDeterministicClock(query) {
   const p = new URLSearchParams(query);
-  if (p.get("cpu") !== "single" || p.has("rtc")) return query;
+  if (!isSingleCore(query) || p.has("rtc")) return query;
   p.set("rtc", String(HARNESS_RTC));
   return p.toString();
+}
+// The clock a run asked for and what the core reports, from
+// validationReadCoreProgress: an error when a fixed clock was asked for and
+// the core does not run on it (a missing export, a refused value, or a clock
+// that is not the requested start plus emulated seconds).
+export function clockCheck(query, progress) {
+  const raw = new URLSearchParams(query).get("rtc");
+  const wanted = raw !== null && /^\d+$/.test(raw) ? Number(raw) : null;
+  if (wanted === null) return { fixed: false };
+  const status = progress?.customRtc;
+  if (!status?.applied) return { fixed: true, error: `rtc not applied: ${status?.why ?? "the worker does not report the clock"}` };
+  if (!(progress.coreTicksPerSecond > 0) || progress.emulatedRtc == null) return { fixed: true, error: "rtc not verifiable: the core does not report its clock" };
+  const expected = wanted + Math.floor(progress.coreTicks / progress.coreTicksPerSecond);
+  // The two reads are not atomic: one second either way is the same clock.
+  if (Math.abs(progress.emulatedRtc - expected) > 1) return { fixed: true, error: `rtc not followed: the core reads ${progress.emulatedRtc}, expected ${expected}` };
+  return { fixed: true, rtc: wanted, emulatedRtc: progress.emulatedRtc };
 }
 
 export function forCrossRenderer(query) {

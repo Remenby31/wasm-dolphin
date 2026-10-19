@@ -7,7 +7,7 @@ import os from "node:os";
 import { existsSync, readdirSync, readFileSync } from "node:fs";
 import path from "node:path";
 import { fileURLToPath, pathToFileURL } from "node:url";
-import { FRAME_FIELDS } from "./matrix.mjs";
+import { clockCheck, FRAME_FIELDS, withDeterministicClock } from "./matrix.mjs";
 import { decodePng } from "./png.mjs";
 import { ensureServer as serveTree } from "./server.mjs";
 
@@ -144,8 +144,13 @@ export function watchPage(page) {
 // Boot a disc and return once the core is loaded, with the harness hooks
 // enabled from the start (they are off in normal use). Nothing is asked of
 // the worker before it exists: the app creates it asynchronously.
-export async function bootIso(page, { url, iso, timeoutMs = 60000, harness = {} }) {
+export async function bootIso(page, { url: requestedUrl, iso, timeoutMs = 60000, harness = {} }) {
   if (!existsSync(iso)) throw new Error(`disc image not found: ${iso}`);
+  // A single emulated CPU thread runs on the fixed clock that makes it repeat
+  // (matrix.mjs), whoever boots it: sessions, probes, direct callers.
+  const parsed = new URL(requestedUrl);
+  parsed.search = withDeterministicClock(parsed.search.slice(1));
+  const url = parsed.href;
   await page.goto(url, { waitUntil: "domcontentloaded" });
   await page.locator("#romInput").waitFor({ state: "attached", timeout: 30000 });
   await page.waitForFunction(() => window.__host?.adapter, null, { timeout: 30000 });
@@ -154,7 +159,21 @@ export async function bootIso(page, { url, iso, timeoutMs = 60000, harness = {} 
   // harness: extra switches (detTrace: the determinism trace, from the first event).
   const enabled = await workerRequest(page, "validationEnableHarness", harness, timeoutMs);
   await page.waitForFunction(() => window.__host?.adapter?.loaded === true, null, { timeout: timeoutMs });
-  return { harness: enabled };
+  // A fixed clock that the core did not take would compare a host-clock run
+  // with a fixed-clock one in silence: check it once the core runs.
+  let clock = { fixed: false };
+  if (new URLSearchParams(parsed.search).has("rtc")) {
+    const end = Date.now() + timeoutMs;
+    let progress = null;
+    while (Date.now() < end) {
+      progress = await readCoreProgress(page);
+      if ((progress?.frame ?? 0) > 0 && progress?.emulatedRtc) break;
+      await page.waitForTimeout(100);
+    }
+    clock = clockCheck(parsed.search.slice(1), progress);
+    if (clock.error) throw new Error(clock.error);
+  }
+  return { harness: enabled, url, clock };
 }
 
 export async function readFrameInfo(page) {

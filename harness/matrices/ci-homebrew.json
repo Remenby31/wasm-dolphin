@@ -27,6 +27,11 @@
     {
       "id": "wgpu-interp",
       "preset": "wgpu-nojit"
+    },
+    {
+      "id": "sw-single-hostclock",
+      "preset": "sw-interp",
+      "set": { "cpu": "single", "rtc": "host" }
     }
   ],
   "reference": "sw-interp",

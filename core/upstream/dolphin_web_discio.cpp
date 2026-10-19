@@ -32,6 +32,7 @@
 #include "VideoCommon/Fifo.h"
 #include "VideoCommon/PixelEngine.h"
 #include "VideoCommon/WasmGpuSyncDiag.h"
+#include "Core/HW/EXI/EXI_DeviceIPL.h"
 #include "Core/HW/Memmap.h"
 #include "Core/WasmDetTrace.h"
 #include "VideoCommon/TextureDecoder.h"
@@ -1017,7 +1018,8 @@ struct DetCheckpoint
   std::uint32_t log_count;
 };
 constexpr std::uint32_t kDetCheckpoints = 8192;
-std::array<DetCheckpoint, kDetCheckpoints> s_det_checkpoints{};
+// Allocated when the trace is turned on: nothing for a player's core.
+std::vector<DetCheckpoint> s_det_checkpoints;
 std::atomic<std::uint32_t> s_det_checkpoint_count{0};
 
 std::uint64_t EmulatedRamHash()
@@ -1037,14 +1039,15 @@ std::uint64_t EmulatedRamHash()
 
 // RAM in 64 KiB chunks at VI output 30: which region two runs disagree on.
 constexpr std::uint32_t kDetRamChunkShift = 16;
-std::array<std::uint64_t, 1024> s_det_ram_chunks{};
+std::vector<std::uint64_t> s_det_ram_chunks;
 std::uint32_t s_det_ram_chunk_count = 0;
 void HashRamChunks()
 {
   auto& memory = Core::System::GetInstance().GetMemory();
   const std::uint8_t* ram = memory.GetRAM();
   const std::uint32_t size = memory.GetRamSizeReal();
-  s_det_ram_chunk_count = std::min<std::uint32_t>(size >> kDetRamChunkShift, 1024);
+  s_det_ram_chunks.resize(size >> kDetRamChunkShift);
+  s_det_ram_chunk_count = static_cast<std::uint32_t>(s_det_ram_chunks.size());
   for (std::uint32_t c = 0; c < s_det_ram_chunk_count; ++c)
   {
     std::uint64_t h = 1469598103934665603ull;
@@ -1065,7 +1068,7 @@ void DetTraceOnViOutput(std::uint32_t vi)
   if (!DolphinWeb::DetTrace::Enabled())
     return;
   const std::uint32_t n = s_det_checkpoint_count.load(std::memory_order_relaxed);
-  if (n >= kDetCheckpoints)
+  if (n >= s_det_checkpoints.size())
     return;
   s_det_checkpoints[n] = DetCheckpoint{
       DolphinWeb::DetTrace::s_hash.load(std::memory_order_relaxed),
@@ -1204,6 +1207,8 @@ static std::uint32_t s_det_start_vi = 0;
 EMSCRIPTEN_KEEPALIVE void DolphinWeb_DetTraceEnable(int enabled)
 {
   s_det_checkpoint_count.store(0, std::memory_order_relaxed);
+  if (enabled && s_det_checkpoints.empty())
+    s_det_checkpoints.resize(kDetCheckpoints);
   s_det_start_vi = s_harness_vi_since_boot;
   DolphinWeb::DetTrace::Enable(enabled != 0);
 }
@@ -1211,11 +1216,26 @@ EMSCRIPTEN_KEEPALIVE std::uint32_t DolphinWeb_DetTraceStartVi() { return s_det_s
 EMSCRIPTEN_KEEPALIVE const void* DolphinWeb_DetTraceRamChunks() { return s_det_ram_chunks.data(); }
 EMSCRIPTEN_KEEPALIVE std::uint32_t DolphinWeb_DetTraceRamChunkCount() { return s_det_ram_chunk_count; }
 EMSCRIPTEN_KEEPALIVE const void* DolphinWeb_DetTraceCheckpoints() { return s_det_checkpoints.data(); }
+// The console's real-time clock now, in seconds since 1970, as the emulated
+// software reads it (?rtc= starts it, emulated time moves it). The harness
+// checks it against what it asked for.
+EMSCRIPTEN_KEEPALIVE std::uint32_t DolphinWeb_EmulatedRtc()
+{
+  auto& system = Core::System::GetInstance();
+  // GetEmulatedTime divides by the timers' rate: 0 rather than a trap if it
+  // is not set. Before boot applies ?rtc=, this is the host's clock.
+  if (system.GetSystemTimers().GetTicksPerSecond() == 0)
+    return 0;
+  return ExpansionInterface::CEXIIPL::GetEmulatedTime(system, 0);
+}
 EMSCRIPTEN_KEEPALIVE std::uint32_t DolphinWeb_DetTraceCheckpointCount()
 {
   return s_det_checkpoint_count.load(std::memory_order_acquire);
 }
-EMSCRIPTEN_KEEPALIVE const void* DolphinWeb_DetTraceLog() { return DolphinWeb::DetTrace::s_log.data(); }
+EMSCRIPTEN_KEEPALIVE const void* DolphinWeb_DetTraceLog()
+{
+  return DolphinWeb::DetTrace::s_log.load(std::memory_order_acquire);
+}
 EMSCRIPTEN_KEEPALIVE std::uint32_t DolphinWeb_DetTraceLogCount()
 {
   return std::min(DolphinWeb::DetTrace::s_log_count.load(std::memory_order_acquire),

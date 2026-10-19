@@ -20,8 +20,8 @@
     {
       "path": "core/upstream/dolphin_web_discio.cpp",
       "hashMode": "lf-normalized",
-      "size": 63592,
-      "sha256": "a9ac415b5c21a3e945096cac22673731aa4f2e202f3e70e6cc47cef30e6674e6"
+      "size": 64371,
+      "sha256": "68062809a1b13b87e61cbf453ee931aa96a74077b3922562da51693cdf47ac8a"
     },
     {
       "path": "core/upstream/dolphin_web_raster_profile.h",
@@ -38,8 +38,8 @@
     {
       "path": "core/upstream/dolphin_web_core.cpp",
       "hashMode": "lf-normalized",
-      "size": 47956,
-      "sha256": "20c425c4236463ace82920dff572a30de5ca6eb2bf9f31cf116ac37575ffb477"
+      "size": 48265,
+      "sha256": "145efa5331c6263dc628f447769a468aac02f3554e4db5a0553652a84a3a1528"
     },
     {
       "path": "src/app.js",
@@ -80,8 +80,8 @@
     {
       "path": "src/core-host.js",
       "hashMode": "lf-normalized",
-      "size": 67909,
-      "sha256": "13de3577efc64f31296662f242a5abd5c879119382275d5a10ec3bd3098add32"
+      "size": 67824,
+      "sha256": "4e55038f65d453d7d649eff2b4151e1f908d5e0fccf0c5eaf31cfc2e291795e3"
     },
     {
       "path": "src/diagnostic-log-filter.js",
@@ -134,8 +134,8 @@
     {
       "path": "src/upstream-discio-worker.js",
       "hashMode": "lf-normalized",
-      "size": 662972,
-      "sha256": "4fad662995bb4c7eab0cb003f30b1c3581eb602d03084d71efa99a4a1803f19b"
+      "size": 663748,
+      "sha256": "c6ec569f7801b15f08420bfe2aafbfea5b9375020d8f520535ea27d916222702"
     },
     {
       "path": "src/wgpu-renderer-worker-probe.js",
@@ -350,7 +350,20 @@
     }
   },
   "memoryContractStatus": "consistent",
-  "sourceOnlyExportsPendingRebuild": [],
+  "sourceOnlyExportsPendingRebuild": [
+    "_DolphinWeb_DetTraceCheckpointCount",
+    "_DolphinWeb_DetTraceCheckpoints",
+    "_DolphinWeb_DetTraceEnable",
+    "_DolphinWeb_DetTraceLog",
+    "_DolphinWeb_DetTraceLogCount",
+    "_DolphinWeb_DetTraceName",
+    "_DolphinWeb_DetTraceRamChunkCount",
+    "_DolphinWeb_DetTraceRamChunks",
+    "_DolphinWeb_DetTraceStartVi",
+    "_DolphinWeb_EmulatedRtc",
+    "_GetCustomRtc",
+    "_SetCustomRtc"
+  ],
   "moduleExports": [
     "_AcknowledgeWebGpuOwnershipTraceCapture",
     "_AudioBuffer",

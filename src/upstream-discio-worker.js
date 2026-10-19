@@ -672,6 +672,7 @@ function wgpuDiagDrainWaitMs(now = performance.now()) {
 // not taken), u64 ticks, u32 events, u32 log count (32 bytes). Log entry:
 // u64 time, i64 late, u32 name, u32 kind (24 bytes with wasm32 pointers).
 let detTraceRequested = false;
+let customRtcStatus = { requested: null, applied: false, why: null };
 function readDetTrace({ fromLog = 0, maxLog = 0 } = {}) {
   const m = moduleInstance;
   if (!m?._DolphinWeb_DetTraceCheckpoints) return { supported: false, why: "core without the determinism trace" };
@@ -1425,6 +1426,10 @@ async function handleMessage(type, payload) {
         coreTicks: readCoreTicks(),
         coreTicksPerSecond: readCoreTicksPerSecond(),
         ppcPc: api?.getPpcPc?.() ?? 0,
+        // The console clock: what was asked, whether the core took it, and
+        // what the emulated software reads now (seconds since 1970).
+        customRtc: customRtcStatus,
+        emulatedRtc: moduleInstance?._DolphinWeb_EmulatedRtc ? moduleInstance._DolphinWeb_EmulatedRtc() >>> 0 : null,
         loadedCheckpointGeneration: loadedCheckpoint.generation,
         loadedCheckpointTicks: loadedCheckpoint.ticks,
         loadedCheckpointPpcPc: loadedCheckpoint.ppcPc,
@@ -2404,8 +2409,15 @@ async function loadCore({
   }
   api.setCpuThread?.(Boolean(cpuThread));
   api.setCpuCore?.(cpuCore);
-  // A fixed start for the emulated clock (?rtc=): boots repeat exactly.
-  if (Number.isInteger(customRtc) && customRtc >= 0) api.setCustomRtc?.(customRtc);
+  // A fixed start for the emulated clock (?rtc=): boots repeat exactly. Its
+  // fate is reported (validationReadCoreProgress): a run that asked for it
+  // must never silently run on the host clock.
+  customRtcStatus = { requested: Number.isInteger(customRtc) ? customRtc : null, applied: false, why: null };
+  if (customRtcStatus.requested !== null) {
+    if (!api.setCustomRtc) customRtcStatus.why = "core without SetCustomRtc";
+    else if (api.setCustomRtc(customRtc) !== 1) customRtcStatus.why = "SetCustomRtc refused the value";
+    else customRtcStatus.applied = true;
+  }
   ppcWasmJitRequested = Boolean(ppcWasmJit);
   ppcWasmJitForce = Boolean(requestedPpcWasmJitForce);
   ppcWasmJitActive = false;
@@ -2545,7 +2557,7 @@ function bindApi(module) {
       typeof module._SetCpuThread === "function"
         ? (enabled) => ccall("SetCpuThread", "number", ["number"], [enabled ? 1 : 0])
         : null,
-    setCustomRtc: optionalCwrap("SetCustomRtc", "number", ["number", "number"])
+    setCustomRtc: typeof module._SetCustomRtc === "function"
       ? (seconds) => module._SetCustomRtc(1, seconds >>> 0)
       : null,
     setCpuCore:

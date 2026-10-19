@@ -1,4 +1,5 @@
 import { aotCompilerRequested } from "./aot-compiler-worker.js";
+import { parseCustomRtc } from "./custom-rtc.js";
 import { DolphinCoreAdapter, dolphinBundleAvailable } from "./dolphin-adapter.js";
 import { buttonMaskFromPressed, isPadPort } from "./input.js";
 import { UpstreamMainThreadAdapter } from "./upstream-main-thread-adapter.js";
@@ -1204,9 +1205,7 @@ function requestedCpuThread(videoBackend) {
 // follows emulated time, so two boots of one disc are identical (harness
 // comparisons). Without it, the console clock is the host's.
 function requestedCustomRtc() {
-  const raw = new URLSearchParams(window.location.search).get("rtc");
-  const seconds = raw === null ? NaN : Number(raw);
-  return Number.isInteger(seconds) && seconds >= 0 && seconds <= 0xffffffff ? seconds : null;
+  return parseCustomRtc(new URLSearchParams(window.location.search).get("rtc"));
 }
 
 function requestedCpuCore() {
