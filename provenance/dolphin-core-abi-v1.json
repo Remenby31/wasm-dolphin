@@ -140,8 +140,8 @@
     {
       "path": "src/upstream-discio-worker.js",
       "hashMode": "lf-normalized",
-      "size": 660160,
-      "sha256": "2d55c849718d46419f339a1007514dc72b29139035e35bc41b50f9cfaccf8715"
+      "size": 668540,
+      "sha256": "8d3ca6539fc8847541fe9716690ab8f007979e4f8ca001759c4bb9faef86169e"
     },
     {
       "path": "src/wgpu-renderer-worker-probe.js",
@@ -296,8 +296,8 @@
     {
       "path": "src/jit-cache-identity.js",
       "hashMode": "lf-normalized",
-      "size": 2470,
-      "sha256": "cefdd0471021456bd80bf90437cf8b9f5fe20e1fa6f414d56ea3792a3c3333c3"
+      "size": 6647,
+      "sha256": "33a9c3d95ea53e227b4eac141b38cd60c7720a6e3dbc98da1d1e8222d4dcce6b"
     },
     {
       "path": "src/wgpu-ubo-compute-projection.js",
@@ -580,6 +580,7 @@
       "setInputState",
       "start",
       "stop",
+      "validationAotCacheProbe",
       "validationBeginWgpuRendererProbeMeasurement",
       "validationCaptureAtVi",
       "validationEnableGpuSyncDiag",
