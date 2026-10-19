@@ -90,6 +90,15 @@ export class AotOptimizer extends EventTarget {
     return { state: p.done === 0 ? "none" : p.done >= p.total ? "complete" : "partial", fraction: p.fraction };
   }
 
+  // Keys to load at boot, in compile order (profile first), that the cache
+  // holds: what the region loader (aot-region-loader.js) loads under its budget.
+  async bootKeys() {
+    await this.getPlan();
+    const session = await this.openSession();
+    const held = await session.has(this.regions.map((r) => r.key));
+    return this.regions.map((r) => r.key).filter((k) => held.has(k) && !session.isBlacklisted?.(k));
+  }
+
   start({ resume = true } = {}) {
     if (this.running) return this.running;
     this.cancelled = false;
@@ -146,6 +155,8 @@ export class AotOptimizer extends EventTarget {
         failed.push(...(stored.failed ?? []));
         const failedKeys = new Set(failed.map((x) => x.key));
         for (const t of ok) if (!failedKeys.has(t.key)) doneSet.add(t.key);
+        // Refusals survive a reload: the cache keeps them per identity.
+        if (failed.length) await session.blacklist?.(failed.map((x) => ({ key: x.key, reason: x.reason })));
         for (const x of failed) {
           refused.add(x.key);
           doneSet.add(x.key); // handled (left to the JIT): progress must reach 100 %
@@ -223,6 +234,9 @@ export function fakeCache({ persisted = new Map(), quotaKeys = new Set(), blackl
     let cancelled = false;
     return {
       isBlacklisted: (key) => blacklist.has(key),
+      async blacklist(entries) {
+        for (const e of entries) blacklist.add(e.key);
+      },
       async has(keys) {
         return new Set(keys.filter((k) => persisted.has(k)));
       },

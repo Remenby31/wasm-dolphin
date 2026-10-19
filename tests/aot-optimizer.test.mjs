@@ -126,3 +126,15 @@ test("aot optimizer: translator results out of batch order are a fatal error, no
   assert.deepEqual(events.at(-1), ["optimization-error", { message: "translator results out of order", fatal: true }]);
   assert.equal(cache.persisted.size, 0);
 });
+
+test("aot optimizer: refusals are blacklisted in the cache, boot keys follow the compile order", async () => {
+  const p = plan();
+  const refuse = new Set([p.modules[0].functions[4].hash]);
+  const blacklist = new Set();
+  const cache = fakeCache({ blacklist });
+  const { o } = optimizer({ cache, translator: fakeTranslator({ refuse }) });
+  await o.start();
+  assert.ok(blacklist.has(p.modules[0].functions[4].sha256), "an untranslatable region is remembered across reloads");
+  const keys = await o.bootKeys();
+  assert.deepEqual(keys, o.regions.map((r) => r.key).filter((k) => !blacklist.has(k)));
+});
