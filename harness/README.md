@@ -115,7 +115,10 @@ node harness/probes/race-perf.mjs --iso ../roms/<disc>.iso --state ../measures/h
 
 `harness/matrices/local-kart-race.json` runs the same race through `ab`
 (`KART_ISO`, `KART_STATE`; `measureFromState` starts the measured window
-from the savestate; local only).
+from the savestate; local only). In dual core the race gives several pictures
+per commit, so `rec` and `wgpu` are listed `report-only` for renderVsBaseline
+(kept for perf and the other checks); `rec-single` and `wgpu-single` run on the
+fixed clock and carry the exact render comparison.
 
 ## Freeze probes
 
@@ -236,7 +239,7 @@ Per (game, config) cell, the **correctness checks** (`lib/correctness.mjs`):
 | coreFreeze | no VI output for 2 s while the run went on (from the VI timeline) |
 | render | the exact capture is blank, or differs from the reference config's capture of the same run at the same VI output: byte-identical required for the same renderer, otherwise `match` (no missing detail, no squeezed picture) |
 | audio | the game spec says `audio: true` and the output peak stays under 1e-3 |
-| renderVsBaseline (ab) | per cell, the candidate's capture differs from the baseline's at the same VI output; catches what all configs of one commit get wrong together. Intended changes: `--accept game/config`. Each side must first agree with itself across runs. Baseline nondeterministic, candidate stable: known (not blocking) if the candidate's picture is one of the baseline's; otherwise, for a cell listed in `harness/known-failures.json`, known only if it differs from the closest baseline picture by no more pixels than the baseline's pictures differ from each other, else it blocks. Candidate nondeterministic, baseline stable: blocks. Both: blocks unless listed. A cell listed with `"mode": "set-equal"` (a `reason` is mandatory) is judged on picture sets instead: fail on a crash, a blank picture or a candidate picture the baseline never gave; inconclusive under 3 runs a side; pass when every candidate picture was seen on the baseline (a baseline picture the candidate did not sample is sampling, not a regression) |
+| renderVsBaseline (ab) | per cell, the candidate's capture differs from the baseline's at the same VI output; catches what all configs of one commit get wrong together. Intended changes: `--accept game/config`. Each side must first agree with itself across runs. Baseline nondeterministic, candidate stable: known (not blocking) if the candidate's picture is one of the baseline's; otherwise, for a cell listed in `harness/known-failures.json`, known only if it differs from the closest baseline picture by no more pixels than the baseline's pictures differ from each other, else it blocks. Candidate nondeterministic, baseline stable: blocks. Both: blocks unless listed. A cell listed with `"mode": "set-equal"` (a `reason` is mandatory) is judged on picture sets instead: fail on a crash, a blank picture or a candidate picture the baseline never gave; inconclusive under 3 runs a side; pass when every candidate picture was seen on the baseline (a baseline picture the candidate did not sample is sampling, not a regression). A cell listed with `"mode": "report-only"` (a `reason` is mandatory) gets the verdict it would have had unlisted, shown as `report-only (would be …)`, never blocking; its other checks (crash, errors, coreFreeze, render, audio, perf) still block |
 
 Each check of each run is pass, fail or **unjudged** (with the reason: no VI
 timeline in this core, capture refused for a hardware renderer, scripted
