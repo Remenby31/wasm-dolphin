@@ -6384,11 +6384,11 @@ async function loadDolphinJitCacheFromIdb(db) {
       buf,
       valid: await verifyCanonicalWasmBlockKey(String(key), buf)
     })));
-    // Only the first blocks of the block store are warmed: packs are in the
-    // order blocks were first compiled, so these are what boot and menus run
-    // first. Warming every cached block retained its code for the session
-    // (+0.4 to +0.9 GB, measures/aot/rss-aotcompiler.md); the rest gets its
-    // code when the CPU thread runs it, as without the compiler worker.
+    // At most the first DOLPHIN_JIT_BOOT_WARM_MAX blocks of the block store
+    // are warmed (packs are in the order blocks were first compiled). Every
+    // block, today: measured by phys_footprint, warming all ~19 500 costs
+    // +25 to +40 MB at the end of a race and +110 MB at peak, and a 2048
+    // budget lost the whole gain on menu hitches (measures/aot/rss3-*).
     const warmFirst = dolphinJitBlockStore ? DOLPHIN_JIT_BOOT_WARM_MAX : 0;
     const batch = verified
       .filter(({ valid }) => valid)
@@ -6818,7 +6818,7 @@ export function setDolphinAotCompilerForTest({ enabled, createWorker } = {}) {
 let dolphinAotCompilerWorkerFactoryForTest = null;
 // Cached modules: compiled in place (validation only, V8 compiles lazily) unless
 // they are among the first ones the session will run, which are warmed.
-const DOLPHIN_JIT_BOOT_WARM_MAX = 2048;
+const DOLPHIN_JIT_BOOT_WARM_MAX = Infinity;
 let dolphinJitBootWarmed = 0;
 function compileDolphinJitModuleOffThread(bytes, deliver, warm) {
   if (!dolphinAotCompilerEnabled || !warm) return WebAssembly.compile(bytes);
