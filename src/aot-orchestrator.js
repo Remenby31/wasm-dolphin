@@ -62,6 +62,10 @@ export function createAotFirstLaunch({
   batchSize,
   bootBudgetMs = 1500,
   maxBootModules = Infinity,
+  maxBootBytes = Infinity, // what the launch may retain, in bytes of region modules
+  maxErrorEvents = 64, // per run: a flood of refusals never pushes out install/start
+  runId = null,
+  tuning = {}, // AotOptimizer options: maxAttempts, notReadyDelayMs, maxNotReadyWaits
   clock = epochNow,
   now = () => globalThis.performance?.now?.() ?? Date.now(),
   sleep
@@ -71,9 +75,22 @@ export function createAotFirstLaunch({
   let events = [];
   let running = false;
   let lastState = supported ? "none" : "unsupported";
+  // cancel() and dispose() bump it: a start queued before (after the boot)
+  // checks it and does not run a flow that was stopped meanwhile.
+  let generation = 0;
+  let disposed = false;
+  let errorEvents = 0;
+  let errorsDropped = 0;
+  const run = runId ?? Math.random().toString(36).slice(2, 10);
 
   function record(type, detail) {
-    const event = { t: clock(), type, ...detail };
+    if (type === "error" && !detail.fatal && ++errorEvents > maxErrorEvents) {
+      errorsDropped++;
+      return null;
+    }
+    if (type === "start") errorEvents = 0;
+    if (type === "done" && errorsDropped) detail = { ...detail, errorsDropped };
+    const event = { t: clock(), type, disc: discKey, run, ...detail };
     events.push(event);
     if (events.length > MAX_EVENTS) events.splice(0, events.length - MAX_EVENTS);
     try {
@@ -91,7 +108,8 @@ export function createAotFirstLaunch({
       discKey: planKey, buildPlan, translator, planStore, keyParts, assembleOptions, compile, maxFunctions, now,
       openCache: () => openCache(identity),
       ...(batchSize ? { batchSize } : {}),
-      ...(sleep ? { sleep } : {})
+      ...(sleep ? { sleep } : {}),
+      ...tuning
     })
     : null;
   if (optimizer) {
@@ -117,14 +135,16 @@ export function createAotFirstLaunch({
       const t0 = now();
       let report;
       try {
-        // No stored plan: a first launch, nothing in the cache. Planning reads
-        // the disc and would only delay the boot; it happens after it.
-        if (planStore && !(await Promise.resolve(planStore.load(planKey)).catch(() => null))) {
-          record("install", { loaded: 0, failed: 0, deferred: 0, ms: Math.round(now() - t0), firstLaunch: true });
-          return { loaded: 0, failed: [], deferred: 0, ms: 0, firstLaunch: true };
+        // Never plans: without a valid stored plan (first launch, new
+        // analyzer, no OPFS) the boot goes on without regions and planning
+        // happens after it.
+        if (!(await optimizer.getPlan({ build: false }))) {
+          const ms = Math.round(now() - t0);
+          record("install", { loaded: 0, failed: 0, deferred: 0, ms, firstLaunch: true });
+          return { loaded: 0, failed: [], deferred: 0, ms, firstLaunch: true };
         }
         const keys = await optimizer.bootKeys();
-        report = await loader.load({ ...identity, keys, budgetMs: bootBudgetMs, maxModules: maxBootModules });
+        report = await loader.load({ ...identity, keys, budgetMs: bootBudgetMs, maxModules: maxBootModules, maxBytes: maxBootBytes });
       } catch (error) {
         report = { loaded: 0, failed: [], deferred: 0, ms: 0, error: String(error?.message || error) };
       }
@@ -148,8 +168,10 @@ export function createAotFirstLaunch({
 
     // First launch, or a resume: in the background, after the boot (the core
     // translates from guest memory and answers "not-ready" before it).
-    async start({ resume = true } = {}) {
-      if (!supported) return;
+    // ifGeneration: the generation read when this start was queued; a
+    // cancel() since then makes it a no-op.
+    async start({ resume = true, ifGeneration = generation } = {}) {
+      if (!supported || disposed || ifGeneration !== generation) return;
       running = true;
       lastState = "running";
       try {
@@ -160,14 +182,25 @@ export function createAotFirstLaunch({
       }
     },
 
+    get generation() {
+      return generation;
+    },
+
     cancel() {
+      generation++;
       optimizer?.cancel();
       loader.cancel();
     },
 
+    // The disc is gone (remount, stop): nothing of this flow runs again.
+    dispose() {
+      disposed = true;
+      this.cancel();
+    },
+
     // The probe's read: events since the boot, or since the last drain.
     progress({ drain = false } = {}) {
-      const out = { schema: AOT_PROGRESS_SCHEMA, state: running ? "running" : lastState, events: events.slice() };
+      const out = { schema: AOT_PROGRESS_SCHEMA, state: running ? "running" : lastState, disc: discKey, run, events: events.slice() };
       if (drain) events = [];
       return out;
     },

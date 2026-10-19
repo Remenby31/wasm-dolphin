@@ -258,8 +258,11 @@ test("optimizer -> cache -> bootKeys -> loader: the first launch's modules come 
   const openCache = (identity) => openAotCache({ ...identity, ...IDENTITY, baseUrl: BASE, cacheStorage: storage, serviceWorker: false });
   // the core's translator, stood in for: one fragment per function
   const translator = { translate: async (fns) => fns.map((f) => ({ entry: f.entry, fragment: translate(f) })) };
+  // the plan store keeps the plan for the next launch: boot keys never plan
+  const plans = new Map();
+  const planStore = { load: async (k) => plans.get(k) ?? null, save: async (k, p) => { plans.set(k, p); } };
   const make = () => new AotOptimizer({
-    discKey: IDENTITY.discKey, buildPlan: async () => plan, translator, openCache, keyParts: KEY_PARTS, maxFunctions: 2,
+    discKey: "disc", buildPlan: async () => plan, translator, openCache, keyParts: KEY_PARTS, maxFunctions: 2, planStore,
     assembleOptions: { helpers: HELPERS, pcOffset: PC, memoryPages: 1 }
   });
   const first = make();

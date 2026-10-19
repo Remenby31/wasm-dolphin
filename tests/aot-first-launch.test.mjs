@@ -78,13 +78,16 @@ function profile() {
   const storage = fakeCacheStorage();
   const plans = new Map();
   const groups = new Map();
+  const attempts = new Map();
   return {
     storage,
     planStore: {
       load: async (k) => plans.get(k) ?? null,
       save: async (k, p) => { plans.set(k, structuredClone(p)); },
       loadGroups: async (k) => groups.get(k) ?? null,
-      saveGroups: async (k, g) => { groups.set(k, g); }
+      saveGroups: async (k, g) => { groups.set(k, g); },
+      loadAttempts: async (k) => attempts.get(k) ?? null,
+      saveAttempts: async (k, a) => { attempts.set(k, structuredClone(a)); }
     }
   };
 }
@@ -276,7 +279,8 @@ test("without the core's translator the flow is unsupported and does nothing", a
   assert.deepEqual(await flow.status(), { state: "unsupported", fraction: 0 });
   assert.equal((await flow.installBeforeBoot()).loaded, 0);
   await flow.start();
-  assert.deepEqual(flow.progress(), { schema: AOT_PROGRESS_SCHEMA, state: "unsupported", events: [] });
+  const read = flow.progress();
+  assert.deepEqual([read.schema, read.state, read.disc, read.events], [AOT_PROGRESS_SCHEMA, "unsupported", DISC, []]);
   assert.deepEqual(regionCacheIdentity(KEY_PARTS), { compilerVersion: "region-3", flagsMask: 0x40 });
 });
 
@@ -347,4 +351,119 @@ test("coreRegionTranslator reads the agreed layout of _DolphinWeb_AotTranslate",
   assert.equal(coreRegionTranslator({}), null);
   assert.deepEqual(parseHelperSignature("f64,f64,f64,i32>f64"), { params: ["f64", "f64", "f64", "i32"], results: ["f64"] });
   assert.deepEqual(parseHelperSignature("i32,i32,i32>"), { params: ["i32", "i32", "i32"], results: [] });
+});
+
+// --- review of #38: the P1s ---
+
+test("a cancel before the queued start wins; an explicit start after it runs", async () => {
+  const p = profile();
+  const { flow, translator } = launch(p);
+  const generation = flow.generation;
+  flow.cancel(); // aotCancel / stop before the post-boot start
+  await flow.start({ resume: true, ifGeneration: generation });
+  assert.equal(translator.translated.length, 0);
+  assert.equal(ofType(flow, "start").length, 0);
+  await flow.start({ resume: true }); // the site's aotOptimize afterwards
+  assert.equal(ofType(flow, "done").length, 1);
+  // a disposed flow (disc remounted) never runs again
+  flow.dispose();
+  await flow.start();
+  assert.equal(ofType(flow, "start").length, 1);
+});
+
+test("a core that stays not-ready ends the run (bounded), the state is partial", async () => {
+  const p = profile();
+  let calls = 0;
+  const translator = { async translate(batch) { calls++; return batch.map((f) => ({ entry: f.entry, reason: "not-ready" })); } };
+  const { flow } = launch(p, { translator, tuning: { maxNotReadyWaits: 3, notReadyDelayMs: 0 } });
+  await flow.start();
+  assert.equal(calls, 4);
+  assert.equal(ofType(flow, "done").length, 0);
+  assert.match(ofType(flow, "error").at(-1).message, /not ready/);
+  assert.equal(flow.progress().state, "partial");
+});
+
+test("one plan computation at a time; the boot never plans, even with a stale stored plan", async () => {
+  const p = profile();
+  let resolvePlan;
+  let builds = 0;
+  const gate = new Promise((r) => { resolvePlan = r; });
+  const { flow } = launch(p, { buildPlan: async () => { builds++; await gate; return makePlan(); } });
+  const pending = [flow.status(), flow.status(), flow.start()];
+  resolvePlan();
+  await Promise.all(pending);
+  assert.equal(builds, 1);
+  // a stored plan of another analyzer version: rebuilt after the boot, not before
+  const stale = profile();
+  await stale.planStore.save(DISC.replace(/[^0-9A-Za-z_-]/g, "_"), { ...makePlan(), analyzer: -1 });
+  const next = launch(stale);
+  const report = await next.flow.installBeforeBoot();
+  assert.equal(report.firstLaunch, true);
+  assert.equal(next.builds(), 0);
+});
+
+test("retries are bounded: a region with no verdict is blacklisted after 3 launches, and the state shows partial work", async () => {
+  const p = profile();
+  const mismatch = { async translate(batch) { return batch.map((f) => ({ entry: f.entry, reason: "hash-mismatch" })); } };
+  const states = [];
+  let refused = 0;
+  for (let n = 0; n < 3; n++) {
+    const { flow } = launch(p, { translator: mismatch });
+    await flow.start();
+    const [done] = ofType(flow, "done");
+    states.push((await flow.status()).state);
+    refused = done.refused;
+    assert.equal(done.compiled, 0);
+  }
+  assert.deepEqual(states, ["partial", "partial", "complete"]);
+  assert.ok(refused > 0, "blacklisted at the third launch");
+  // the fourth launch has nothing left to try
+  const last = launch(p, { translator: mismatch });
+  await last.flow.start();
+  assert.equal(ofType(last.flow, "done")[0].refused, refused);
+  assert.equal(ofType(last.flow, "done")[0].deferred, 0);
+});
+
+test("resume: false compiles everything again", async () => {
+  const p = profile();
+  const first = launch(p);
+  await first.flow.start();
+  const again = launch(p);
+  await again.flow.start({ resume: false });
+  assert.equal(ofType(again.flow, "done")[0].compiled, first.compiled.length);
+});
+
+test("events carry the disc and the run; errors past the cap are counted, not recorded", async () => {
+  const p = profile();
+  const plan = makePlan();
+  const refuse = new Set(plan.modules[0].functions.map((f) => f.entry));
+  const { flow } = launch(p, { translator: standInTranslator({ refuse }), maxErrorEvents: 5, runId: "r1" });
+  await flow.start();
+  const events = flow.progress().events;
+  assert.ok(events.every((e) => e.disc === DISC && e.run === "r1"));
+  assert.equal(ofType(flow, "error").length, 5);
+  assert.ok(ofType(flow, "done")[0].errorsDropped > 0);
+  assert.equal(ofType(flow, "start").length, 1, "start is still there");
+});
+
+test("the boot loads at most maxBootBytes of region modules", async () => {
+  const p = profile();
+  await launch(p).flow.start();
+  const capped = launch(p, { maxBootBytes: 1 });
+  const report = await capped.flow.installBeforeBoot();
+  assert.equal(report.loaded, 1, "the byte cap stops after the first module");
+  assert.ok(report.overCap > 0);
+});
+
+test("planning runs in a worker of its own; its failure or silence rejects", async () => {
+  const { planDiscInWorker } = await import("../src/aot-plan-worker.js");
+  const fakeWorker = (reply) => () => {
+    const w = { terminated: false, terminate() { w.terminated = true; }, postMessage(msg) { setTimeout(() => reply(w, msg), 0); } };
+    return w;
+  };
+  const file = { name: "disc" };
+  const plan = await planDiscInWorker(file, { createWorker: fakeWorker((w, msg) => w.onmessage({ data: { ok: true, plan: { got: msg.file === file } } })) });
+  assert.deepEqual(plan, { got: true });
+  await assert.rejects(planDiscInWorker(file, { createWorker: fakeWorker((w) => w.onmessage({ data: { ok: false, message: "bad DOL" } })) }), /bad DOL/);
+  await assert.rejects(planDiscInWorker(file, { createWorker: fakeWorker(() => {}), timeoutMs: 5 }), /timed out/);
 });

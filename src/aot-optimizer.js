@@ -32,8 +32,10 @@
 // member the core refuses is left out of the module (the dispatcher answers 1
 // for its entries and the JIT runs it); a module with no member left is
 // blacklisted. A module whose every member is a hash mismatch (code not in
-// memory yet, such as a REL not loaded, or patched) gets no verdict: it is
-// retried at the next launch.
+// memory yet, such as a REL not loaded, or patched), a compile out of memory
+// or a full quota get no verdict at once: the module is retried at the next
+// launch, `maxAttempts` launches at most, then blacklisted. Attempts are kept
+// in the plan store (loadAttempts/saveAttempts).
 import { orderedRegions, validatePlan, ANALYZER_VERSION } from "./aot-plan.js";
 import { assembleRegion, groupRegions, regionModuleKey } from "./aot-region-module.js";
 
@@ -48,7 +50,7 @@ export class AotOptimizer extends EventTarget {
   // keyParts: { compilerVersion, codegenMask } (the core's _DolphinWeb_AotKeyParts)
   constructor({ discKey, buildPlan, translator, openCache, cacheIdentity = {}, keyParts = { compilerVersion: 0, codegenMask: 0 },
     assemble = null, assembleOptions = null, compile = null, maxFunctions = 100, planStore = null, batchSize = BATCH,
-    notReadyDelayMs = 1000, sleep = (ms) => new Promise((r) => setTimeout(r, ms)), now = () => performance.now() }) {
+    notReadyDelayMs = 1000, maxNotReadyWaits = 300, maxAttempts = 3, sleep = (ms) => new Promise((r) => setTimeout(r, ms)), now = () => performance.now() }) {
     super();
     this.discKey = discKey;
     this.buildPlan = buildPlan;
@@ -64,6 +66,10 @@ export class AotOptimizer extends EventTarget {
     this.now = now;
     this.batchSize = batchSize;
     this.notReadyDelayMs = notReadyDelayMs;
+    this.maxNotReadyWaits = maxNotReadyWaits;
+    this.maxAttempts = maxAttempts;
+    this.attempts = null;
+    this.planTask = null;
     this.sleep = sleep;
     this.plan = null;
     this.session = null;
@@ -71,8 +77,26 @@ export class AotOptimizer extends EventTarget {
     this.cancelled = false;
   }
 
-  async getPlan() {
+  // One plan computation at a time, shared by every caller. build = false:
+  // the stored plan only (before the boot, when planning would read the disc
+  // while the core boots), null without a valid one.
+  async getPlan({ build = true } = {}) {
     if (this.plan) return this.plan;
+    if (this.planTask && (this.planTask.build || !build)) return this.planTask.promise;
+    if (this.planTask) {
+      await this.planTask.promise.catch(() => null);
+      if (this.plan) return this.plan;
+      if (this.planTask?.build) return this.planTask.promise;
+    }
+    const task = { build, promise: null };
+    task.promise = this.preparePlan(build).finally(() => {
+      if (this.planTask === task) this.planTask = null;
+    });
+    this.planTask = task;
+    return task.promise;
+  }
+
+  async preparePlan(build) {
     let plan = null;
     try {
       plan = await this.planStore?.load(this.discKey);
@@ -81,6 +105,7 @@ export class AotOptimizer extends EventTarget {
     } catch {
       plan = null; // a bad cached plan is rebuilt
     }
+    if (!plan && !build) return null;
     if (!plan) {
       plan = validatePlan(await this.buildPlan());
       await this.planStore?.save(this.discKey, plan).catch(() => {});
@@ -147,19 +172,41 @@ export class AotOptimizer extends EventTarget {
     return { fraction, done, total: this.regions.length, unit: "regions" };
   }
 
+  async loadAttempts() {
+    if (!this.attempts) {
+      let stored = null;
+      try {
+        stored = await this.planStore?.loadAttempts?.(this.discKey);
+      } catch {
+        stored = null;
+      }
+      this.attempts = new Map(stored && typeof stored === "object" ? Object.entries(stored).filter(([, n]) => Number.isInteger(n)) : []);
+    }
+    return this.attempts;
+  }
+
+  async saveAttempts() {
+    await this.planStore?.saveAttempts?.(this.discKey, Object.fromEntries(this.attempts))?.catch?.(() => {});
+  }
+
+  // "partial" as soon as any work was done, a module deferred included.
   async status() {
     await this.getPlan();
     const session = await this.openSession();
     const doneSet = await session.has(this.regions.map((u) => u.key));
     for (const u of this.regions) if (session.isBlacklisted?.(u.key)) doneSet.add(u.key); // left to the JIT
+    const attempts = await this.loadAttempts();
+    const tried = this.regions.some((u) => attempts.has(u.key));
     const p = this.progress(doneSet);
-    return { state: p.done === 0 ? "none" : p.done >= p.total ? "complete" : "partial", fraction: p.fraction };
+    const state = p.done >= p.total ? "complete" : p.done > 0 || tried ? "partial" : "none";
+    return { state, fraction: p.fraction };
   }
 
   // Module keys to load at boot, in compile order, that the cache holds: what
-  // the region loader (aot-region-loader.js) loads under its budget.
+  // the region loader (aot-region-loader.js) loads under its budget. Never
+  // plans: without a stored plan, nothing (the first launch boots without).
   async bootKeys() {
-    await this.getPlan();
+    if (!(await this.getPlan({ build: false }))) return [];
     const session = await this.openSession();
     const held = await session.has(this.regions.map((u) => u.key));
     return this.regions.map((u) => u.key).filter((k) => held.has(k) && !session.isBlacklisted?.(k));
@@ -188,7 +235,7 @@ export class AotOptimizer extends EventTarget {
   async translateUnit(unit) {
     const fragments = [];
     const refused = [];
-    let i = 0;
+    let i = 0, waits = 0;
     while (i < unit.members.length) {
       if (this.cancelled) return null;
       const slice = unit.members.slice(i, i + this.batchSize);
@@ -207,19 +254,39 @@ export class AotOptimizer extends EventTarget {
         else refused.push({ entry: batch[n].entry, reason: r.reason ?? "untranslatable" });
       }
       i += consumed;
+      if (wait && ++waits > this.maxNotReadyWaits) return { notReady: true };
       if (wait || !consumed) await this.sleep(wait ? this.notReadyDelayMs : 0);
     }
     return { fragments, refused };
   }
 
-  async run() {
+  // No verdict yet (code not in memory, out of memory, quota): retried at the
+  // next launch, blacklisted after maxAttempts launches.
+  async defer(session, unit, reason) {
+    const n = (this.attempts.get(unit.key) ?? 0) + 1;
+    this.attempts.set(unit.key, n);
+    let blacklisted = false;
+    if (n >= this.maxAttempts) {
+      await session.blacklist?.([{ key: unit.key, reason: `${reason}-retries` }]);
+      blacklisted = true;
+    }
+    await this.saveAttempts();
+    this.emit("optimization-error", {
+      message: `module ${unit.key}: ${reason}, ${blacklisted ? `left to the JIT after ${n} launches` : "retried at the next launch"}`, fatal: false
+    });
+    return blacklisted;
+  }
+
+  async run(resume = true) {
     const t0 = this.now();
     const ms = () => Math.round(this.now() - t0);
     let compiled = 0, deferred = 0;
     try {
       await this.getPlan();
       const session = await this.openSession();
-      const doneSet = await session.has(this.regions.map((u) => u.key));
+      await this.loadAttempts();
+      // resume = false: everything again (stored modules are overwritten).
+      const doneSet = resume ? await session.has(this.regions.map((u) => u.key)) : new Set();
       // Modules refused (no member translatable, rejected bytes, quota) are
       // left to the JIT; keys the cache blacklisted are skipped.
       const refused = new Set();
@@ -231,12 +298,16 @@ export class AotOptimizer extends EventTarget {
         if (this.cancelled) break;
         const result = await this.translateUnit(unit);
         if (!result || this.cancelled) break;
+        if (result.notReady) {
+          this.emit("optimization-error", { message: "the core is not ready to translate; resumed at the next launch", fatal: false });
+          return;
+        }
         for (const x of result.refused) {
           this.emit("optimization-error", { message: `function ${x.entry.toString(16)}: ${x.reason}`, fatal: false });
         }
-        let failure = null;
+        let failure = null, wait = null;
         if (!result.fragments.length && result.refused.length && result.refused.every((x) => x.reason === "hash-mismatch")) {
-          deferred++;
+          wait = "hash-mismatch";
         } else if (!result.fragments.length) failure = "untranslatable";
         else {
           let bytes = null;
@@ -256,19 +327,25 @@ export class AotOptimizer extends EventTarget {
             if (!out?.module) {
               const reason = out?.reason ?? "compile";
               if (reason === "compile" || reason === "link") failure = `engine-reject: ${reason}`;
-              else {
-                deferred++;
-                this.emit("optimization-error", { message: `module ${unit.key}: ${reason}, retried at the next launch`, fatal: false });
-              }
+              else wait = reason;
               bytes = null;
             }
           }
           if (bytes) {
             const stored = await session.put([{ key: unit.key, bytes, meta: { members: unit.members.length, translated: result.fragments.length } }]);
             if (this.cancelled) break;
-            failure = stored.failed?.[0]?.reason ?? null;
-            if (!failure) compiled++;
+            const reason = stored.failed?.[0]?.reason ?? null;
+            if (reason === "quota") wait = "quota";
+            else failure = reason;
+            if (!reason) {
+              compiled++;
+              if (this.attempts.delete(unit.key)) await this.saveAttempts();
+            }
           }
+        }
+        if (wait) {
+          if (await this.defer(session, unit, wait)) refused.add(unit.key);
+          else deferred++;
         }
         if (failure) {
           // Refusals survive a reload: the cache keeps them per identity.
@@ -316,6 +393,21 @@ export class OpfsPlanStore {
       if (error?.name === "NotFoundError" || error instanceof SyntaxError) return null;
       throw error;
     }
+  }
+  async loadAttempts(discKey) {
+    try {
+      const file = await (await (await this.dir()).getFileHandle(OpfsPlanStore.name(discKey).replace(/\.json$/, ".attempts.json"))).getFile();
+      return JSON.parse(await file.text());
+    } catch (error) {
+      if (error?.name === "NotFoundError" || error instanceof SyntaxError) return null;
+      throw error;
+    }
+  }
+  async saveAttempts(discKey, attempts) {
+    const handle = await (await this.dir()).getFileHandle(OpfsPlanStore.name(discKey).replace(/\.json$/, ".attempts.json"), { create: true });
+    const writable = await handle.createWritable();
+    await writable.write(JSON.stringify(attempts));
+    await writable.close();
   }
   async saveGroups(discKey, groups) {
     const handle = await (await this.dir()).getFileHandle(OpfsPlanStore.name(discKey).replace(/\.json$/, ".groups.json"), { create: true });

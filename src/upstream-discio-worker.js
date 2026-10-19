@@ -22,10 +22,6 @@ import {
   createAotCompilerClient
 } from "./aot-compiler-worker.js";
 import { migrateLegacyJitIdb, openAotBlockStore, openAotCache, readDiscKeyFromFile } from "./aot-cache.js";
-import { OpfsPlanStore } from "./aot-optimizer.js";
-import { coreAotKeyParts, coreAssembleOptions, coreRegionTranslator, createAotFirstLaunch } from "./aot-orchestrator.js";
-import { AotProfileStore } from "./aot-profile.js";
-import { fileReader, planDisc } from "./aot-recomp.js";
 import {
   JIT_CACHE_ENTRY_KEY_SCHEMA,
   canonicalCoreFingerprint,
@@ -1456,17 +1452,10 @@ async function handleMessage(type, payload) {
       return runAotCacheProbe(payload);
     // P7 (?aot=1): the site's controls and the KPI probe's read.
     case "aotStatus":
-      return aotFirstLaunch ? aotFirstLaunch.status() : { state: aotFirstLaunchEnabled ? "none" : "disabled", fraction: 0 };
     case "aotOptimize":
-      if (aotFirstLaunch) void aotFirstLaunch.start({ resume: payload?.resume !== false });
-      return { started: Boolean(aotFirstLaunch?.supported) };
     case "aotCancel":
-      aotFirstLaunch?.cancel();
-      return {};
     case "validationReadAotProgress":
-      return aotFirstLaunch
-        ? aotFirstLaunch.progress({ drain: payload?.drain === true })
-        : { schema: "wasm-dolphin.aot-progress.v1", state: aotFirstLaunchEnabled ? "none" : "disabled", events: [] };
+      return handleAotMessage(type, payload);
     case "validationReadJitCacheReadiness": {
       const requiredWorkers = dolphinJitPthreadRuntime
         ? [...new Set(dolphinJitPthreadRuntime.runningWorkers || [])]
@@ -3436,7 +3425,7 @@ async function mountFile(file) {
   // the emulated game shows. A generation per mount keeps a slow read for a
   // previous disc from landing.
   aotDiscGeneration += 1;
-  aotFirstLaunch?.cancel();
+  aotFirstLaunch?.dispose();
   aotFirstLaunch = null;
   aotDiscKey = null;
   aotDiscKeyPromise = null;
@@ -3498,10 +3487,7 @@ async function mountFile(file) {
     const _t_pump = performance.now();
     api.pumpHostJobs?.();
     console.log(`[boot-phase] api.pumpHostJobs() took ${(performance.now() - _t_pump).toFixed(1)}ms`);
-    if (coreBoot.accepted && aotFirstLaunch?.supported) {
-      const flow = aotFirstLaunch;
-      void flow.loadRest().catch(() => {}).then(() => flow.start({ resume: true }));
-    }
+    if (coreBoot.accepted) void startAotFirstLaunchAfterBoot();
   } else if (api.bootDisc) {
     coreBoot.skippedReason = `Disc image is too small for full CPU boot (${file.size} bytes)`;
   }
@@ -6894,44 +6880,107 @@ async function runAotCacheProbe({ modules = [], compilerVersion = "probe-1", fla
 // and stored (P6). Progress goes to the page as "aot-progress" messages.
 let aotFirstLaunchEnabled = false;
 let aotFirstLaunch = null;
-async function prepareAotFirstLaunch(file) {
-  aotFirstLaunch?.cancel();
+const AOT_PROGRESS_SCHEMA = "wasm-dolphin.aot-progress.v1";
+const DOLPHIN_AOT_BOOT_BYTES = 192 << 20; // region modules retained before boot, at most
+export function setAotFirstLaunchEnabledForTest(enabled) {
+  aotFirstLaunchEnabled = enabled === true;
+  aotFirstLaunch?.dispose();
   aotFirstLaunch = null;
+}
+// Without ?aot=1 these answer "disabled" and nothing of P7 is even imported.
+export async function handleAotMessage(type, payload = {}) {
+  const idle = aotFirstLaunchEnabled ? "none" : "disabled";
+  switch (type) {
+    case "aotStatus":
+      return aotFirstLaunch ? aotFirstLaunch.status() : { state: idle, fraction: 0 };
+    case "aotOptimize":
+      if (aotFirstLaunch?.supported) void aotFirstLaunch.start({ resume: payload?.resume !== false });
+      return { started: Boolean(aotFirstLaunch?.supported) };
+    case "aotCancel":
+      aotFirstLaunch?.cancel();
+      return {};
+    case "validationReadAotProgress":
+      return aotFirstLaunch
+        ? aotFirstLaunch.progress({ drain: payload?.drain === true })
+        : { schema: AOT_PROGRESS_SCHEMA, state: idle, events: [] };
+    default:
+      throw new Error(`Unknown aot message: ${type}`);
+  }
+}
+// Stand-in flow of a core that cannot translate: nothing is read, allocated
+// or opened for it.
+function unsupportedAotFlow() {
+  return {
+    supported: false,
+    generation: 0,
+    cancel() {},
+    dispose() {},
+    loadRest: async () => ({ loaded: 0, failed: [], deferred: 0 }),
+    start: async () => {},
+    status: async () => ({ state: "unsupported", fraction: 0 }),
+    progress: () => ({ schema: AOT_PROGRESS_SCHEMA, state: "unsupported", events: [] })
+  };
+}
+// Test seams: `module` stands for the core, `readDiscKey` for the disc key of
+// the mounted file, `cacheStorage` for the browser's.
+export async function prepareAotFirstLaunch(file, {
+  module = moduleInstance,
+  readDiscKey = readMountedDiscKey,
+  coreHash = aotCoreFingerprint,
+  cacheStorage = globalThis.caches,
+  storageRoot = () => globalThis.navigator?.storage?.getDirectory?.()
+} = {}) {
+  aotFirstLaunch?.dispose();
+  aotFirstLaunch = null;
+  // The export first: a core without it costs nothing (no disc key read, no
+  // allocation, no OPFS).
+  if (typeof module?._DolphinWeb_AotTranslate !== "function" || typeof module._DolphinWeb_AotKeyParts !== "function") {
+    aotFirstLaunch = unsupportedAotFlow();
+    postStatus("aot: first-launch optimisation unavailable (this core has no region translator)");
+    return;
+  }
   const generation = aotDiscGeneration;
-  const discKey = await readMountedDiscKey();
+  const [{ coreAotKeyParts, coreAssembleOptions, coreRegionTranslator, createAotFirstLaunch }, { OpfsPlanStore }, { AotProfileStore }, { planDiscInWorker }, { fileReader, planDisc }] =
+    await Promise.all([import("./aot-orchestrator.js"), import("./aot-optimizer.js"), import("./aot-profile.js"), import("./aot-plan-worker.js"), import("./aot-recomp.js")]);
+  const discKey = await readDiscKey();
   if (generation !== aotDiscGeneration) return;
-  const keyParts = coreAotKeyParts(moduleInstance);
-  const core = coreAssembleOptions(moduleInstance);
-  const translator = keyParts && core
-    ? coreRegionTranslator(moduleInstance, { mask: keyParts.codegenMask, helperNames: core.helperNames })
+  const keyParts = coreAotKeyParts(module);
+  const core = coreAssembleOptions(module);
+  const translator = keyParts && core && discKey && coreHash
+    ? coreRegionTranslator(module, { mask: keyParts.codegenMask, helperNames: core.helperNames })
     : null;
-  const opfs = await Promise.resolve(globalThis.navigator?.storage?.getDirectory?.()).catch(() => null);
+  const opfs = translator ? await Promise.resolve(storageRoot()).catch(() => null) : null;
   const flow = createAotFirstLaunch({
     discKey,
-    coreHash: aotCoreFingerprint,
+    coreHash,
     keyParts,
-    translator: discKey && aotCoreFingerprint ? translator : null,
+    translator,
     assembleOptions: core?.assemble,
-    openCache: (identity) => openAotCache({ ...identity, baseUrl: AOT_BASE_URL }),
+    openCache: (identity) => openAotCache({ ...identity, baseUrl: AOT_BASE_URL, cacheStorage }),
     planStore: opfs ? new OpfsPlanStore(opfs) : null,
+    // Planning reads the DOL and RELs and runs discovery (about a second):
+    // in a worker of its own, never on this one, which serves the core's
+    // disc reads. Without workers (tests), in place.
     buildPlan: async () => {
       const profile = opfs ? await new AotProfileStore(opfs).load(discKey).catch(() => null) : null;
-      return planDisc(fileReader(file), { profile });
+      return typeof Worker === "function" ? planDiscInWorker(file, { profile }) : planDisc(fileReader(file), { profile });
     },
     compile: precompileAotRegion,
-    retain: (key, module) => {
-      if (dolphinJitCacheMap.size < DOLPHIN_JIT_CACHE_MAX) dolphinJitCacheMap.set(key, module);
+    retain: (key, mod) => {
+      if (dolphinJitCacheMap.size < DOLPHIN_JIT_CACHE_MAX) dolphinJitCacheMap.set(key, mod);
     },
     maxBootModules: Math.max(0, DOLPHIN_JIT_CACHE_MAX - dolphinJitCacheMap.size),
+    maxBootBytes: DOLPHIN_AOT_BOOT_BYTES,
     onEvent: (event) => self.postMessage({ type: "aot-progress", event })
   });
   aotFirstLaunch = flow;
   if (!flow.supported) {
-    postStatus("aot: first-launch optimisation unavailable (this core has no region translator)");
+    postStatus("aot: first-launch optimisation unavailable (no disc key, core hash or translator)");
     return;
   }
   const before = new Set(dolphinJitCacheMap.keys());
   const report = await flow.installBeforeBoot();
+  if (aotFirstLaunch !== flow) return;
   // Hand what was loaded to every pthread, then the same fence as at load.
   const added = [...dolphinJitCacheMap.keys()].filter((key) => !before.has(key));
   if (added.length && dolphinJitPthreadWorkers.length) {
@@ -6948,6 +6997,16 @@ async function prepareAotFirstLaunch(file) {
     await waitForDolphinJitPthreadBarrier();
   }
   postStatus(`aot: ${report.loaded} region modules installed before boot in ${report.ms}ms (${report.deferred} after boot)`);
+}
+// After the boot: the rest of the cache (retained only), then the
+// optimisation. A cancel (aotCancel, stop) or a remount in between wins: the
+// start is dropped.
+export function startAotFirstLaunchAfterBoot(flow = aotFirstLaunch) {
+  if (!flow?.supported) return Promise.resolve();
+  const generation = flow.generation;
+  return flow.loadRest().catch(() => {}).then(() => {
+    if (aotFirstLaunch === flow) return flow.start({ resume: true, ifGeneration: generation });
+  });
 }
 // A region module of the first launch: compiled off the CPU thread when the
 // compiler worker is on (?aotcompiler=1), kept alive under its key.

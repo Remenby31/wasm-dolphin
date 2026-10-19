@@ -80,12 +80,13 @@ test("aot optimizer: a refused function is left out of its module; refused modul
   assert.equal(errors.length, 2, "one function refused by the translator, one module by the cache");
   assert.ok(errors.every((e) => e.fatal === false));
   assert.equal(events.at(-1)[0], "optimization-done");
-  assert.equal(events.at(-1)[1].refused, 1, "only the module refused by the cache");
+  // a full quota is no verdict: retried at the next launch, not blacklisted
+  assert.deepEqual([events.at(-1)[1].refused, events.at(-1)[1].deferred], [0, 1]);
   assert.equal(cache.persisted.size, o.regions.length - 1);
   // the module holding the refused function was still stored, without it
   const holder = o.regions.find((u) => u.members.some((f) => f.hash === p.modules[0].functions[3].hash));
   assert.ok(cache.persisted.has(holder.key));
-  assert.deepEqual(await o.status(), { state: "complete", fraction: 1 });
+  assert.equal((await o.status()).state, "partial");
 });
 
 test("aot optimizer: the plan is cached and a stale or broken cached plan is rebuilt", async () => {
@@ -185,15 +186,18 @@ test("aot optimizer: groups survive a plan rebuilt with a new profile, so the ca
   const p = plan();
   p.modules[0].functions.forEach((f, i) => { f.profileHits = i; });
   const rebuilt = optimizer({ cache, planStore, buildPlan: async () => p });
+  await rebuilt.o.getPlan(); // after the boot: boot keys never plan
   assert.deepEqual(new Set(await rebuilt.o.bootKeys()), new Set(keysBefore), "same modules, same keys");
   // without stored groups, the new order regroups and the keys change
   const fresh = optimizer({ cache, buildPlan: async () => p });
+  await fresh.o.getPlan();
   const freshKeys = await fresh.o.bootKeys();
   assert.ok(freshKeys.length < keysBefore.length, "regrouping misses the cache");
   // a stored group whose member changed is regrouped, the others kept
   const changed = plan();
   changed.modules[0].functions[5].sha256 = "e".repeat(64);
   const partly = optimizer({ cache, planStore, buildPlan: async () => changed });
+  await partly.o.getPlan();
   const kept = new Set(await partly.o.bootKeys());
   assert.equal(kept.size, keysBefore.length - 1, "only the group holding the changed function misses");
 });
