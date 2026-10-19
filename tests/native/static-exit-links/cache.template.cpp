@@ -1,3 +1,4 @@
+#include <atomic>
 #include <algorithm>
 #include <array>
 #include <bit>
@@ -122,6 +123,10 @@ public:
 bool s_wasm_jit_enabled = true;
 std::unordered_map<CachedInterpreter*, DeferredJit::Queue> s_deferred_wasm_queues;
 constexpr unsigned COMPILE_THROTTLE_MAX_PER_SLICE = 8;
+// Off-thread compiles (patch 0074): not exercised by these groups.
+std::atomic<bool> s_wasm_off_thread_compile{false};
+static void RetryOffThreadWasmBlocks(CachedInterpreter&) {}
+static void ResetOffThreadCompiles() {}
 void Host_JitCacheInvalidation() {}
 #define __EMSCRIPTEN__ 1
 /* INTERPRETER_METHODS */
