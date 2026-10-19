@@ -223,6 +223,31 @@ test("unmapped and misaligned accesses agree with the interpreter", { skip }, ()
   }
 });
 
+// The block JIT's inline mtmsr takes pending exceptions since patch 0076.
+const mtmsrSkip = skip || (!core.has("DolphinWeb_JitMtmsrTakesPendingExceptions") && "the core predates patch 0076 (CI builds this branch's core)");
+test("mtmsr takes the exceptions held pending and FP exceptions it enables, as the interpreter", { skip: mtmsrSkip }, () => {
+  const r = makeRng(0xe3);
+  const MFMSR_R5 = 0x7ca000a6, MTMSR_R5 = 0x7ca00124, LI_R5_FE = 0x38a02932, BLR = 0x4e800020;
+  let raised = 0;
+  for (let k = 0; k < 40; k++) {
+    // A misaligned lmw leaves an alignment exception pending; mtmsr takes it.
+    const held = Uint32Array.from([generate("lmw-misaligned", r), MFMSR_R5, MTMSR_R5, BLR]);
+    // FPSCR.FEX set, mtmsr turns FE0/FE1 on: a floating-point program exception.
+    const enabled = Uint32Array.from([LI_R5_FE, MTMSR_R5, BLR]);
+    const state = randomState(r);
+    state[37] = 0x00002032;
+    for (const [program, st] of [[held, state], [enabled, Uint32Array.from(state, (v, i) => (i === 36 ? v | 0x40000000 : v))]]) {
+      for (const mask of [SHORT_PREFIX_MASK, SHORT_PREFIX_MASK | REGALLOC_OFF]) {
+        const result = core.run(program, st, mask);
+        assertSame(result, `${hex(program[0])} mtmsr mask ${hex(mask)}`);
+        assert.ok(result.compiledBlocks > 0, "the block with mtmsr ran in WASM");
+        if (result.message.startsWith("exception")) raised += 1;
+      }
+    }
+  }
+  assert.ok(raised >= 100, `exceptions taken at mtmsr: ${raised}`);
+});
+
 test("inline FMA keeps NI_madd_msub's single rounding, ties included", { skip }, () => {
   // The Mario Strikers Charged inputs from Interpreter_FPUtils.h: the exact
   // product of two singles plus b ties at single precision; the interpreter

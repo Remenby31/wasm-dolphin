@@ -1,0 +1,61 @@
+diff --git a/Source/Core/Core/PowerPC/CachedInterpreter/CachedInterpreter.cpp b/Source/Core/Core/PowerPC/CachedInterpreter/CachedInterpreter.cpp
+--- a/Source/Core/Core/PowerPC/CachedInterpreter/CachedInterpreter.cpp
++++ b/Source/Core/Core/PowerPC/CachedInterpreter/CachedInterpreter.cpp
+@@ -2544,6 +2544,17 @@ extern "C" int DolphinWeb_CachedInterpreterSystem(int state_ptr, u32 inst_hex, u
+     }
+     ppc_state.msr.Hex = ppc_state.gpr[inst.RS];
+     system.GetPowerPC().MSRUpdated();
++    // As Interpreter::mtmsr: FE0/FE1 may have been set, and exceptions held
++    // pending (an alignment exception, external ones once EE is on) are taken
++    // here, not at the end of the slice.
++    CheckFPExceptions(ppc_state);
++    system.GetPowerPC().CheckExceptions();
++    if (ppc_state.pc != current_pc)
++    {
++      ppc_state.downcount -= downcount;
++      ++s_wasm_helper_halt_count;
++      return 1;
++    }
+     break;
+   case 371:  // mftb
+   {
+@@ -3565,6 +3576,26 @@ void EmitMtmsr(std::vector<u8>& body, const WasmStateLayout& layout, const PPCAn
+   body.push_back(0x05);
+   EmitApplyMsrFromLocal(body, layout, 2);
+   EmitStoreNpcConst(body, layout, op.address + 4);
++  // As Interpreter::mtmsr and FastMtmsr: exceptions pending (external ones
++  // once EE is on, an alignment exception held since an earlier instruction)
++  // or an FP exception enabled by FE0/FE1 are taken here. The helper applies
++  // the same MSR again and takes them.
++  EmitLocalGet(body, 0);
++  body.insert(body.end(), {0x28, 0x02});  // i32.load
++  EmitU32Leb(body, static_cast<u32>(offsetof(PowerPC::PowerPCState, Exceptions)));
++  EmitStateLoadU32(body, layout.fpscr_offset);
++  EmitI32Const(body, 1u << 30);  // FEX
++  body.push_back(0x71);
++  EmitLocalGet(body, 2);
++  EmitI32Const(body, (1u << 11) | (1u << 8));  // FE0 | FE1
++  body.push_back(0x71);
++  body.insert(body.end(), {0x45, 0x45});  // i32.eqz; i32.eqz
++  body.push_back(0x6c);                   // i32.mul: FEX && FE (FEX is one bit)
++  body.push_back(0x72);                   // i32.or
++  body.push_back(0x04);
++  body.push_back(0x40);
++  EmitSystemCall(body, op, downcount);
++  body.push_back(0x0b);
+   body.push_back(0x0b);
+ }
+ 
+@@ -13850,6 +13881,12 @@ extern "C" EMSCRIPTEN_KEEPALIVE int DolphinWeb_JitOracleRun(u32 word_count, u32
+   return std::memcmp(s_jit_oracle.interp, s_jit_oracle.jit, sizeof s_jit_oracle.jit) == 0 ? 0 : 1;
+ }
+ 
++// Marker for tests: the block JIT's mtmsr takes pending exceptions (0076).
++extern "C" EMSCRIPTEN_KEEPALIVE int DolphinWeb_JitMtmsrTakesPendingExceptions()
++{
++  return 1;
++}
++
+ extern "C" int RunPpcWasmFloatCompareSmoke()
+ {
+   auto& state = Core::System::GetInstance().GetPPCState();
