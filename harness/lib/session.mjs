@@ -84,6 +84,8 @@ async function startSession({ context, profileDir, base, server, query, iso, gam
     core,
     coreFetches,
     rendererCrashed: () => watch.events.some((e) => e.type === "crash"),
+    // Chrome's CDP pipe failed under the harness (browser.mjs): an infra crash.
+    pipeFault: () => context.pipeFault ?? null,
     // Keep Chrome's log and crash dumps (Crashpad) of this profile in `dir`.
     keepCrashEvidence(dir) {
       mkdirSync(dir, { recursive: true });

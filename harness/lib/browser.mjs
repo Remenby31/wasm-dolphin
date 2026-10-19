@@ -99,7 +99,46 @@ export async function launchChrome({ profileDir, display = "headless", args = []
     args: [...opts.args, ...(process.env.HARNESS_CHROME_ARGS ?? "").split(/\s+/).filter(Boolean), "--enable-logging", "--v=0", `--log-file=${path.join(profileDir, "chrome.log")}`, `--crash-dumps-dir=${path.join(profileDir, "crash-dumps")}`, ...args]
   });
   context.assertInvisible = (when) => assertNoWindow(profileDir, when, () => context.close());
+  context.pipeFault = null;
+  liveContexts.add(context);
+  context.on("close", () => liveContexts.delete(context));
+  installPipeGuard();
   return context;
+}
+
+// Playwright talks to Chrome over a pipe of NUL-separated JSON messages. On
+// this Mac under heavy load (2026-10-19, load 100+, several sessions at the
+// same minutes) Chrome's side sometimes yields an empty message:
+// JSON.parse("") throws in Playwright's own timer callback, outside any
+// harness code, and would kill the process with every run not yet written.
+// The guard recognises that fault only, marks the contexts open at that
+// moment (context.pipeFault) and closes them: their pending calls fail, the
+// run reports an infra crash (cli.mjs, probes) and the harness goes on. Any
+// other uncaught exception ends the process as node would.
+const liveContexts = new Set();
+let pipeGuard = null;
+
+export function isPipeFault(error) {
+  const stack = String(error?.stack ?? "");
+  return error instanceof SyntaxError && /JSON/.test(String(error.message)) && /playwright-core/.test(stack) && /JSON\.parse/.test(stack);
+}
+
+export function onUncaught(error, { contexts = liveContexts, exit = (e) => { console.error(e); process.exit(1); } } = {}) {
+  if (!isPipeFault(error)) return exit(error);
+  const fault = { at: new Date().toISOString(), message: String(error.message), contexts: contexts.size };
+  console.error(`[harness] infra: Chrome's CDP pipe sent an unreadable message (${fault.message}); closing ${contexts.size} browser(s), the run is reported as an infra crash`);
+  for (const context of [...contexts]) {
+    context.pipeFault ??= fault;
+    contexts.delete(context);
+    context.close().catch(() => {});
+  }
+  return fault;
+}
+
+export function installPipeGuard() {
+  if (pipeGuard) return;
+  pipeGuard = (error) => onUncaught(error);
+  process.on("uncaughtException", pipeGuard);
 }
 
 let windowTool = null;

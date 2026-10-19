@@ -71,6 +71,10 @@ async function launch({ base, query, iso, profileDir, timeoutSec }) {
     await context.assertInvisible("after boot");
     const watcher = await page.evaluate(() => window.__ttff);
     return launchTtff({ clickAt, presents, loadedAt, contentTimes: watcher?.changes ?? [], watcherError: watcher?.error ?? null, timeoutSec });
+  } catch (error) {
+    // The harness lost Chrome (CDP pipe fault, lib/browser.mjs): infra, left out.
+    if (context.pipeFault) return { infraCrash: context.pipeFault.message, error: null };
+    throw error;
   } finally {
     await context.close().catch(() => {});
   }

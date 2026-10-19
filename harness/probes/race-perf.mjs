@@ -256,6 +256,8 @@ async function measureSide(side, o) {
       }
     } catch (error) {
       record.error = String(error?.message || error).slice(0, 300);
+      // The harness lost Chrome (CDP pipe fault, lib/browser.mjs): infra.
+      if (session.pipeFault()) record.infraCrash = session.pipeFault().message;
     }
     record.fatal = session.watch.fatal();
     await session.close();
@@ -379,7 +381,7 @@ async function main() {
   const pcSides = o.pcsample ? Object.keys(sides).filter((n) => runsDone.some((r) => r[n]?.cold?.pc?.samples)) : [];
   const pcNote = o.pcsample && pcSides.length < Object.keys(sides).length ? `guest PC sampled on ${pcSides.join(", ") || "no side"} only` : null;
   if (pcNote) console.warn(`[race-perf] warning: ${pcNote}`);
-  const failed = Object.keys(sides).flatMap((n) => runsDone.filter((r) => !good(r[n])).map((r) => ({ run: r.run, side: n, why: r[n]?.error ?? (r[n]?.fatal?.length ? "crash" : "overloaded") })));
+  const failed = Object.keys(sides).flatMap((n) => runsDone.filter((r) => !good(r[n])).map((r) => ({ run: r.run, side: n, why: r[n]?.infraCrash ? "infra" : r[n]?.error ?? (r[n]?.fatal?.length ? "crash" : "overloaded") })));
   // Which Chrome ran: a wrapper (HARNESS_CHROME_PATH, e.g. the E-core one) or
   // extra flags left exported would otherwise pass for a regression.
   const chrome = { path: process.env.HARNESS_CHROME_PATH || "chrome stable", args: process.env.HARNESS_CHROME_ARGS || "" };

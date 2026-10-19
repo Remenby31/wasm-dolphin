@@ -200,6 +200,18 @@ candidate only, twice or more in one comparison, are a regression. Chrome's
 log (`--enable-logging --log-file`) and crash dumps of each crashed run are
 kept in `<results>/<run>-crash/`.
 
+A **CDP pipe fault** is the harness losing Chrome, not the emulator crashing:
+under heavy load (seen on 2026-10-19, several sessions at the same minutes)
+Playwright receives an empty message from Chrome and its `JSON.parse` throws
+outside any harness code, which used to kill the process with every run not
+yet written. `lib/browser.mjs` catches that one exception (anything else
+still ends the process), closes the browsers open at that moment and marks
+them (`context.pipeFault`). A matrix cell is then recorded as an infra crash
+(`kind: "cdp-pipe"`) and run once more; lost again, it stays unjudged. It is
+never counted against a side. race-perf records the run as failed with `why:
+"infra"`; ttff and first-launch leave the launch out and list it (`infra`,
+`infraRuns`), as they do with overloaded runs.
+
 ## No windows
 
 The harness never shows a browser window: people work on the machine it
