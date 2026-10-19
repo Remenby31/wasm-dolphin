@@ -85,8 +85,11 @@ export function chromeLaunchOptions(display = "headless") {
 export async function launchChrome({ profileDir, display = "headless", args = [] }) {
   const opts = chromeLaunchOptions(display);
   const { chromium } = await importPlaywright();
+  // HARNESS_CHROME_PATH: run this executable instead of Chrome stable, e.g. a
+  // wrapper that confines Chrome to the efficiency cores (docs/consumer-perf-extrapolation.md).
+  const executablePath = process.env.HARNESS_CHROME_PATH || undefined;
   const context = await chromium.launchPersistentContext(profileDir, {
-    channel: "chrome",
+    ...(executablePath ? { executablePath } : { channel: "chrome" }),
     headless: opts.headless,
     viewport: { width: 1280, height: 800 },
     // Chrome's log and crash dumps stay in the profile; a session whose

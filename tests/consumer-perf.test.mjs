@@ -88,3 +88,43 @@ test("steps go through the wait they are given, and the race steps are valid", a
   assert.deepEqual(waited, [2000, 120, 880, 120, 880]);
   validateSteps(JSON.parse(readFileSync(new URL("../harness/probes/local-race-steps.json", import.meta.url), "utf8")));
 });
+
+test("projected speed is proportional to the single-core score, ranged and capped at 100 %", async () => {
+  const { projectSpeed, speedClass } = await import("../harness/lib/consumer.mjs");
+  const ref = { refScore: 3000, refSpeed: 90 };
+  assert.deepEqual(projectSpeed(1500, ref), { low: 36, mid: 45, high: 54 });
+  assert.deepEqual(projectSpeed(6000, ref), { low: 100, mid: 100, high: 100 });
+  assert.deepEqual(projectSpeed(3000, { ...ref, spread: 0 }), { low: 90, mid: 90, high: 90 });
+  assert.throws(() => projectSpeed(0, ref), /positive/);
+  assert.equal(speedClass({ low: 96, mid: 100 }), "real time");
+  assert.equal(speedClass({ low: 50, mid: 70 }), "playable");
+  assert.equal(speedClass({ low: 30, mid: 40 }), "slow");
+});
+
+test("speed classes: real time from 95 %, playable from 60 %, on the middle of the range", async () => {
+  const { speedClass, REALTIME_SPEED, PLAYABLE_SPEED, projectSpeed } = await import("../harness/lib/consumer.mjs");
+  assert.equal(REALTIME_SPEED, 95);
+  assert.equal(PLAYABLE_SPEED, 60);
+  assert.equal(speedClass({ low: 76, mid: 95 }), "real time");
+  assert.equal(speedClass({ low: 80, mid: 100 }), "real time"); // a machine at full speed
+  assert.equal(speedClass({ low: 75, mid: 94 }), "playable");
+  assert.equal(speedClass({ low: 48, mid: 60 }), "playable");
+  assert.equal(speedClass({ low: 47, mid: 59 }), "slow");
+  for (const spread of [-0.1, 1, 1.5, Number.NaN]) assert.throws(() => projectSpeed(1000, { refScore: 1000, refSpeed: 50, spread }), /spread/);
+  assert.deepEqual(projectSpeed(1000, { refScore: 1000, refSpeed: 50, spread: 0 }), { low: 50, mid: 50, high: 50 });
+});
+
+test("the extrapolation table is the model's output, row by row", async () => {
+  const { projectSpeed, speedClass } = await import("../harness/lib/consumer.mjs");
+  const doc = readFileSync(new URL("../docs/consumer-perf-extrapolation.md", import.meta.url), "utf8");
+  const calib = /calibrated on the Mac: (\d+) % at (\d+)/.exec(doc.replace(/\s+/g, " "));
+  assert.ok(calib, "the doc states its calibration point");
+  const ref = { refSpeed: Number(calib[1]), refScore: Number(calib[2]) };
+  const rows = [...doc.matchAll(/^\| (.+?) \| ~(\d+) \| (\d+)-(\d+) % \| (\d+) % \| (real time|playable|slow) \|$/gm)];
+  assert.ok(rows.length >= 6, `table rows found: ${rows.length}`);
+  for (const [, name, score, low, high, mid, cls] of rows) {
+    const p = projectSpeed(Number(score), ref);
+    assert.deepEqual([p.low, p.high, p.mid], [Number(low), Number(high), Number(mid)], name);
+    assert.equal(speedClass(p), cls, name);
+  }
+});
