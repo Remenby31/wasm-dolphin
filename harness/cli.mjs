@@ -135,6 +135,21 @@ async function measureOne(server, values, { iso, query, label, warmup, secs, sho
   try {
     return await measureInSession(session, server, { iso, label, warmup, secs, shotEvery, dir, steps, game, spec, statePath, query, loadGate });
   } catch (e) {
+    // A CDP pipe fault (browser.mjs) closed this Chrome under the harness:
+    // an infra crash, whatever the emulator did. The record says so and
+    // judges nothing; runPlan runs the cell once more.
+    const pipeFault = session.pipeFault();
+    if (pipeFault) {
+      const record = {
+        label, url: session.url, iso: path.resolve(iso), served: server.identity, core: session.core, loadGate,
+        machineBefore: session.machineBefore, machineAfter: machineSnapshot(),
+        summary: {}, crashed: false, pipeFault, errors: [], overloaded: false,
+        audioRequired: game.audio === true, capture: { error: "Chrome lost by the harness (CDP pipe fault)" }, events: session.watch.events.slice(0, 50),
+        harnessError: e.message
+      };
+      writeJson(path.join(dir, `${label}.json`), record);
+      return record;
+    }
     // A renderer crash (Target crashed) breaks every later page call: it is
     // reported as a crash record, never as a harness error.
     if (!session.rendererCrashed()) throw e;
@@ -319,6 +334,15 @@ export async function runPlan(plan, { values, spec, dir, specDir, tree = { root:
   });
   for (const item of plan) {
     let r = await run(item, item.label);
+    // The harness lost Chrome (CDP pipe fault): not the emulator's doing. The
+    // cell runs once more; if it is lost again, the run stays unjudged.
+    if (r.pipeFault) {
+      log(`[harness] ${item.label}: CDP pipe fault (infra); running the cell once more`);
+      const first = { label: r.label, kind: "cdp-pipe", evidence: r.pipeFault.message, errors: [] };
+      noteInfraCrash(infraLog, dir, { label: item.label, game: item.game.id, config: item.config.id, run: item.run, ...first });
+      const retry = await run(item, `${item.label}-retry`);
+      r = retry.pipeFault ? { ...retry, infraCrash: { ...first, repeated: true } } : { ...retry, infraCrash: first };
+    }
     if (r.rendererCrash) {
       log(`[harness] ${item.label}: Chrome renderer crashed; running the cell once more`);
       const first = { label: r.label, evidence: path.join(dir, `${item.label}-crash`), errors: r.errors?.slice(0, 3) ?? [] };

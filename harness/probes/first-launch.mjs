@@ -78,6 +78,10 @@ async function launch({ base, query, iso, profileDir, sec }) {
       summary.speedDuring = Number.isFinite(core.speed) ? Math.round(core.speed * 10) / 10 : null;
     }
     return { source, state, ...summary, timedOut: !summary.finished && !summary.errors.some((e) => e.fatal), events: events.length };
+  } catch (error) {
+    // The harness lost Chrome (CDP pipe fault, lib/browser.mjs): infra, left out.
+    if (context.pipeFault) return { infraCrash: context.pipeFault.message, error: null };
+    throw error;
   } finally {
     await context.close().catch(() => {});
   }
@@ -144,7 +148,7 @@ async function main() {
     probe: "first-launch", at: new Date().toISOString(), locked: !values["no-lock"], machine: machineSnapshot(),
     chrome: chromeInfo(), served: server.identity,
     iso: path.basename(iso), query, url: `${server.base}?${query}`, runs: records.length,
-    p7, p7Why: na ?? (p7 ? null : "every run started on an overloaded machine")
+    p7, p7Why: na ?? (p7 ? null : "every run left out (overloaded machine, or Chrome lost by the harness)")
   };
   writeFileSync(path.join(outDir, "summary.json"), JSON.stringify(summary, null, 1) + "\n");
   const failures = p7 ? [...p7.failedFirst, ...p7.failedSecond] : [];
