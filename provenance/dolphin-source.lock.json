@@ -25,7 +25,7 @@
       "commit": "01e0577914a75a2569c846778c2f93aa8e6feddd"
     }
   },
-  "patchSeriesSha256": "e6cb56048ffc5d304ae7f16a25969d45f746c2559a8c526f65b28531607cb050",
+  "patchSeriesSha256": "4b04fd95d3f6aec351019d1709479290e736ee20e519b307a3f6a11c7ca70239",
   "patches": [
     {
       "order": 1,
@@ -583,12 +583,20 @@
       "order": 70,
       "cwd": ".",
       "hashMode": "lf-normalized",
+      "path": "patches/dolphin-wasm/snapshot/0073-jit-fast-exact-fma-inline-frsqrte.patch",
+      "size": 19292,
+      "sha256": "a0a3c5ecf61c4b956c53483f4ba7685012a8153ee71bc0fc115ae0c05fd2dbbc"
+    },
+    {
+      "order": 71,
+      "cwd": ".",
+      "hashMode": "lf-normalized",
       "path": "patches/dolphin-wasm/snapshot/0080-gpu-sync-diagnostics.patch",
       "size": 6519,
       "sha256": "0b8142c819403ed8518459c1993189eb78891fda254ebebf44de549164fef0ff"
     },
     {
-      "order": 71,
+      "order": 72,
       "cwd": "Externals/SFML/SFML",
       "hashMode": "lf-normalized",
       "path": "patches/dolphin-wasm/submodules/0001-sfml-emscripten-config.patch",
@@ -596,7 +604,7 @@
       "sha256": "f82197a21fe982ad83f6ee7bbf5a03839b1cebd4d64da3eab11263842bf61d89"
     },
     {
-      "order": 72,
+      "order": 73,
       "cwd": "Externals/xxhash/xxHash",
       "hashMode": "lf-normalized",
       "path": "patches/dolphin-wasm/submodules/0002-xxhash-wasm-simd-scalar.patch",

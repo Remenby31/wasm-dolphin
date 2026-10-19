@@ -2,6 +2,7 @@
 // SPDX-License-Identifier: GPL-2.0-or-later
 
 #include "dolphin_web_discio.cpp"
+#include "dolphin_web_fma.h"
 
 #include <array>
 #include <algorithm>
