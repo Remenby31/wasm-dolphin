@@ -14,7 +14,7 @@
 // Wiring, when P4/P7 land (discio worker, loadCore, after the block cache):
 //   const loader = createAotRegionLoader({ openCache: openDolphinAotCache,
 //     retain: (key, module) => dolphinJitCacheMap.set(key, module) });
-//   const keys = await optimizer.bootKeys(); // P7: plan order, cached, not blacklisted
+//   const keys = await optimizer.bootKeys(); // P7: module keys (regionModuleKey), compile order
 //   await loader.load({ ...identity, keys, budgetMs: 1500,
 //     maxModules: DOLPHIN_JIT_CACHE_MAX - dolphinJitCacheMap.size });
 //   ...installDolphinPthreadChannels(...)        // delivers what was loaded

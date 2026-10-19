@@ -149,10 +149,17 @@ order, ranges ascending: offset basis `0xcbf29ce484222325`, prime
 `sha256` = SHA-256 of the same bytes in the same order (64 lowercase hex).
 It is the identity of the region in the persistent cache: FNV-1a 64 is the
 fast check, not collision resistant across disc revisions, and the disc key
-does not cover RELs. Cache key of a compiled region (worker side, from
-`_DolphinWeb_AotKeyParts`):
-`region-v1:<compilerVersion, 8 hex>:<codegenMask, 8 hex>:<sha256>`, which
-ends in `:` + 64 hex as the cache requires (`isHashedAotKey`).
+does not cover RELs.
+
+One cache entry is one assembled module: a group of up to ~100 functions
+(`groupRegions`, `assembleRegion` in `src/aot-region-module.js`). Its key
+(`regionModuleKey`, decided 2026-10-19), from `_DolphinWeb_AotKeyParts`:
+`region-v1:<compilerVersion, 8 hex>:<codegenMask, 8 hex>:<sha256>`, where
+`<sha256>` is the SHA-256 of the members in module order, written
+`<entry hex>:<member sha256>;` each. A change in any member's guest code, in
+membership or in order gives another key; it ends in `:` + 64 hex as the
+cache requires (`isHashedAotKey`). The optimiser's `bootKeys()` returns these
+module keys, in compile order.
 
 Before compiling a region ahead of time, and before reusing a cached module
 for it, the compiler re-hashes guest memory over `ranges`. Different hash:
