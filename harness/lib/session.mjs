@@ -9,6 +9,7 @@ import { addGamepadMock } from "./gamepad-mock.mjs";
 import { installMonitor } from "./monitor.mjs";
 import { encodePng } from "./png.mjs";
 import { checkCore, recordCoreFetches } from "./core-identity.mjs";
+import { withDeterministicClock } from "./matrix.mjs";
 import { claim } from "./ownership.mjs";
 import { machineSnapshot, sampleChromeCpu } from "./system.mjs";
 
@@ -22,7 +23,7 @@ process.on("exit", () => {
 });
 
 // `launch` is a seam for tests; it defaults to the headless launchChrome.
-export async function openSession({ base, server = null, query, iso, display = "headless", gamepads = null, keepProfile = false, routes = {}, launch = launchChrome }) {
+export async function openSession({ base, server = null, query, iso, display = "headless", gamepads = null, keepProfile = false, routes = {}, launch = launchChrome, harness = {} }) {
   // Fail before Chrome exists: a missing disc must not cost a browser.
   if (!iso || !existsSync(iso)) throw new Error(`disc image not found: ${iso}`);
   const profileDir = mkdtempSync(path.join(os.tmpdir(), "gc-harness-profile-"));
@@ -37,7 +38,7 @@ export async function openSession({ base, server = null, query, iso, display = "
   };
   try {
     context = await launch({ profileDir, display });
-    return await startSession({ context, profileDir, base, server, query, iso, gamepads, routes, discard });
+    return await startSession({ context, profileDir, base, server, query, iso, gamepads, routes, discard, harness });
   } catch (e) {
     // Any failure after the profile is claimed: close Chrome, free the
     // profile, then rethrow, so node does not hang on a live browser.
@@ -46,7 +47,7 @@ export async function openSession({ base, server = null, query, iso, display = "
   }
 }
 
-async function startSession({ context, profileDir, base, server, query, iso, gamepads, routes, discard }) {
+async function startSession({ context, profileDir, base, server, query, iso, gamepads, routes, discard, harness }) {
   await context.assertInvisible?.("after launch");
   await context.addInitScript(installMonitor);
   if (gamepads) await addGamepadMock(context, gamepads);
@@ -55,11 +56,12 @@ async function startSession({ context, profileDir, base, server, query, iso, gam
     await page.route(pattern, (route) => route.fulfill({ path: file, contentType: "application/octet-stream" }));
   }
   const watch = watchPage(page);
-  const url = `${base}?${query}`;
+  // bootIso puts single-core runs on the fixed clock and checks it took.
+  const url = `${base}?${withDeterministicClock(query)}`;
   const machineBefore = machineSnapshot();
   const startedAt = Date.now();
   const coreFetches = server ? recordCoreFetches(context, server) : [];
-  const boot = await bootIso(page, { url, iso });
+  const boot = await bootIso(page, { url, iso, harness });
   await context.assertInvisible?.("after boot");
   // The core really loaded must be the one asked for (core-identity.mjs).
   let core = null;
@@ -78,6 +80,7 @@ async function startSession({ context, profileDir, base, server, query, iso, gam
     machineBefore,
     startedAt,
     harness: boot.harness,
+    clock: boot.clock,
     core,
     coreFetches,
     rendererCrashed: () => watch.events.some((e) => e.type === "crash"),

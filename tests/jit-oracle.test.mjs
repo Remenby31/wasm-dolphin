@@ -10,11 +10,14 @@
 import assert from "node:assert/strict";
 import { existsSync } from "node:fs";
 import test from "node:test";
+import { fileURLToPath } from "node:url";
+import { coreStatus } from "../tools/core-artifacts.mjs";
 import {
   PRODUCTION_DISABLE_MASK,
   REGALLOC_OFF,
   SHORT_PREFIX_MASK,
   describeDifference,
+  exactFmaDouble,
   generate,
   hex,
   instructionNames,
@@ -245,9 +248,9 @@ test("inline FMA keeps NI_madd_msub's single rounding, ties included", { skip },
   }
 });
 
-test("double FMA with wide significands matches std::fma (product exactness bound)", { skip }, () => {
-  // Products whose significands need 53 or 54 bits: the inline path may only
-  // take the ones that are exact in double.
+test("double FMA with wide significands matches std::fma", { skip }, () => {
+  // Products whose significands need 53 or 54 bits, around the edge where
+  // a*c stops being exact in double.
   const A = (op, t, a, b, c, xo) => ((op << 26) | (t << 21) | (a << 16) | (b << 11) | (c << 6) | (xo << 1)) >>> 0;
   const r = makeRng(0xf3a);
   const state = randomState(r);
@@ -266,4 +269,120 @@ test("double FMA with wide significands matches std::fma (product exactness boun
       assertSame(result, `xo ${xo} case ${k}`);
     }
   }
+});
+
+// Skipped only on a core older than these sources (main's, restored on a
+// branch): a core built from this tree without the marker fails the test.
+const repoRoot = fileURLToPath(new URL("..", import.meta.url));
+const fmaSkip = skip || (core.has("DolphinWeb_FmaIsMusl") || (await coreStatus(repoRoot)).current
+  ? false : "the core predates the strong musl fma (CI builds this branch's core)");
+
+test("FMA rounds once on double-rounding traps, interpreter and JIT (correct fma linked)", { skip: fmaSkip }, () => {
+  assert.ok(core.has("DolphinWeb_FmaIsMusl"), "this core links no strong fma (core/upstream/dolphin_web_fma.h)");
+  // c has 24 bits, a = 1/c: a*c rounds to exactly 2^m with a tiny error e.
+  // b's ulp is 2^(m+1), so p + b is an exact tie in double and only e
+  // decides the rounding; ignoring e rounds to even, wrongly half the time.
+  // The interpreter's std::fma is checked against exact arithmetic too: a
+  // weak fma() from a linked Rust compiler_builtins once won over musl's and
+  // double-rounded exactly these (core/upstream/dolphin_web_fma.h).
+  const A = (op, t, a, b, c, xo) => ((op << 26) | (t << 21) | (a << 16) | (b << 11) | (c << 6) | (xo << 1)) >>> 0;
+  const d = (x) => Array.from(new Uint32Array(new Float64Array([x]).buffer));
+  const r = makeRng(0x7e5);
+  const state = randomState(r);
+  state[36] = 0;
+  state[37] = 0x00002032;
+  const setF = (i, x) => { const [lo, hi] = d(x); state.set([lo, hi, lo, hi], 48 + i * 4); };
+  const f = (hi, lo) => new Float64Array(new Uint32Array([lo, hi]).buffer)[0];
+  // fnmsub of the reported case: b - 16 - 2^-61 rounds to b - ulp, not to b.
+  const cases = [[f(0xc02f870e, 0x3619b278), f(0xbff03d60, 0xe0000000), f(0x438fbd2f, 0x3eb1057e)]];
+  while (cases.length < 400) {
+    const c = Math.fround(1 + r.next() / 2 ** 32);
+    const m = r.below(61) - 30;
+    const a = (1 / c) * 2 ** m;
+    if (a * c !== 2 ** m) continue;
+    cases.push([a, c, (r.chance(0.5) ? 1 : -1) * (1 + r.next() / 2 ** 32 + (r.next() >>> 12) / 2 ** 52) * 2 ** (m + 53)]);
+  }
+  let checked = 0;
+  for (const [k, [a, c, b]] of cases.entries()) {
+    setF(2, a);
+    setF(3, c);
+    setF(4, b);
+    for (const xo of [29, 28, 31, 30]) {
+      for (const op of [63, 59, 4]) {
+        const result = core.run(Uint32Array.from([A(op, 1, 2, 4, 3, xo), 0x4e800020]), state, SHORT_PREFIX_MASK);
+        assertSame(result, `op ${op} xo ${xo} case ${k}`);
+        if (op !== 63) continue;
+        const want = exactFmaDouble(a, c, xo === 28 || xo === 30 ? -b : b);
+        if (xo >= 30) want[1] = (want[1] ^ 0x80000000) >>> 0;
+        assert.deepEqual([result.interp[48 + 4], result.interp[48 + 5]], want, `interpreter fma, xo ${xo} case ${k}: not correctly rounded`);
+        checked += 1;
+      }
+    }
+  }
+  assert.ok(checked >= 1600);
+});
+
+test("an underflowed product is never taken as exact (signed zero, ties at the bottom)", { skip }, () => {
+  // Review of #27: a*c = ±2^-1075 or less rounds to ±0 although neither
+  // operand is zero; p + b would then lose the sign of zero or a tie.
+  const A = (op, t, a, b, c, xo) => ((op << 26) | (t << 21) | (a << 16) | (b << 11) | (c << 6) | (xo << 1)) >>> 0;
+  const state = randomState(makeRng(0x0f1));
+  state[36] = 0;
+  state[37] = 0x00002032;
+  const setF = (i, hi, lo = 0) => state.set([lo, hi, lo, hi], 48 + i * 4);
+  for (const [a, c, [bhi, blo]] of [
+    [0x9a700000, 0x1a700000, [0, 0]], [0x9a700000, 0x1a700000, [0x80000000, 0]],
+    [0x20b00000, 0x1c000000, [0x00100000, 1]], [0x1a700000, 0x1a700000, [0x80000000, 0]]
+  ]) {
+    setF(2, a);
+    setF(3, c);
+    setF(4, bhi, blo);
+    for (const xo of [28, 29, 30, 31]) {
+      for (const op of [63, 59, 4]) {
+        assertSame(core.run(Uint32Array.from([A(op, 1, 2, 4, 3, xo), 0x4e800020]), state, SHORT_PREFIX_MASK), `op ${op} xo ${xo} a ${hex(a)} c ${hex(c)}`);
+      }
+    }
+  }
+});
+
+test("single FMA with a denormal frC is not mistaken for a zero product", { skip }, () => {
+  // Rounding frC to 25 bits turns 2^-1074 into 0, but the interpreter's
+  // product is a tiny nonzero value: the inline zero-operand path must not fire.
+  const A = (op, t, a, b, c, xo) => ((op << 26) | (t << 21) | (a << 16) | (b << 11) | (c << 6) | (xo << 1)) >>> 0;
+  const state = randomState(makeRng(0xde1));
+  state[36] = 0;
+  state[37] = 0x00002032;
+  const setF = (i, lo, hi) => state.set([lo, hi, lo, hi], 48 + i * 4);
+  setF(2, 0x2621e9b6, 0x79f3a39d);
+  setF(4, 0, 0);
+  for (const [lo, hi] of [[1, 0], [0, 0x80000], [0x10000000, 0x80000000]]) {
+    setF(3, lo, hi);
+    for (const xo of [29, 28, 31, 30]) {
+      for (const op of [59, 4]) {
+        assertSame(core.run(Uint32Array.from([A(op, 1, 2, 4, 3, xo), 0x4e800020]), state, SHORT_PREFIX_MASK), `op ${op} xo ${xo} c ${hex(hi)}${hex(lo).slice(2)}`);
+      }
+    }
+  }
+});
+
+test("inline frsqrte reproduces Gekko's table estimate bit for bit", { skip }, () => {
+  // Positive normals across exponent parities and every table segment, plus
+  // the cases left to the helper (zero, negative, denormal, inf, NaN).
+  const A = (op, t, a, b, c, xo) => ((op << 26) | (t << 21) | (a << 16) | (b << 11) | (c << 6) | (xo << 1)) >>> 0;
+  const r = makeRng(0x45e);
+  const state = randomState(r);
+  state[36] = 0;
+  state[37] = 0x00002032;
+  const program = Uint32Array.from([A(63, 1, 0, 2, 0, 26), 0x4e800020]);
+  const specials = [[0, 0], [0, 0x80000000], [0, 0xbff00000], [1, 0], [0, 0x7ff00000], [0, 0x7ff80000], [1, 0x7ff00000], [0xffffffff, 0x7fefffff], [0, 0x00100000]];
+  const cases = [...specials];
+  for (let k = 0; k < 3000; k++) cases.push([r.next(), ((1 + r.below(2045)) << 20 | (r.next() & 0xfffff)) >>> 0]);
+  let compiled = 0;
+  for (const [lo, hi] of cases) {
+    state.set([lo, hi, lo, hi], 48 + 2 * 4);
+    const result = core.run(program, state, SHORT_PREFIX_MASK);
+    assertSame(result, `frsqrte ${hex(hi)}${hex(lo).slice(2)}`);
+    if (result.code === 0) compiled += 1;
+  }
+  assert.equal(compiled, cases.length);
 });

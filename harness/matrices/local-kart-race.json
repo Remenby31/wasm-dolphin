@@ -23,6 +23,20 @@
     {
       "id": "wgpu",
       "preset": "wgpu"
+    },
+    {
+      "id": "rec-single",
+      "preset": "rec",
+      "set": {
+        "cpu": "single"
+      }
+    },
+    {
+      "id": "wgpu-single",
+      "preset": "wgpu",
+      "set": {
+        "cpu": "single"
+      }
     }
   ],
   "reference": "rec",
