@@ -1,7 +1,15 @@
 diff --git a/Source/Core/Core/PowerPC/CachedInterpreter/CachedInterpreter.cpp b/Source/Core/Core/PowerPC/CachedInterpreter/CachedInterpreter.cpp
 --- a/Source/Core/Core/PowerPC/CachedInterpreter/CachedInterpreter.cpp
 +++ b/Source/Core/Core/PowerPC/CachedInterpreter/CachedInterpreter.cpp
-@@ -2799,6 +2799,47 @@ constexpr u32 WASM_IMPORT_FMA_INDEX = 19;
+@@ -90,6 +90,7 @@ StaticExitLinks::Stats s_static_link_stats;
+ 
+ #ifdef __EMSCRIPTEN__
+ #include <emscripten/emscripten.h>
++#include <emscripten/stack.h>
+ #include <mbedtls/sha256.h>
+ 
+ #ifndef DOLPHIN_WEB_HOT_COUNTERS
+@@ -2799,6 +2800,50 @@ constexpr u32 WASM_IMPORT_FMA_INDEX = 19;
  constexpr u32 WASM_GATHER_PIPE_FLUSH_THRESHOLD =
      GPFifo::GATHER_PIPE_EXTRA_SIZE - GPFifo::GATHER_PIPE_SIZE;
  
@@ -24,6 +32,8 @@ diff --git a/Source/Core/Core/PowerPC/CachedInterpreter/CachedInterpreter.cpp b/
 +    const char* name;
 +  };
 +  std::vector<Reloc> relocs;
++  std::vector<u8> code;  // the function body (locals, expression, end) once built
++  u32 cycles = 0;        // what the block's RunWasmBlock would take from downcount
 +};
 +thread_local WasmFragmentRelocs* s_wasm_fragment_relocs = nullptr;
 +
@@ -42,14 +52,15 @@ diff --git a/Source/Core/Core/PowerPC/CachedInterpreter/CachedInterpreter.cpp b/
 +    EmitU32Leb(body, index);
 +    return;
 +  }
++  // The site holds a padded zero until the region assembler patches it.
 +  s_wasm_fragment_relocs->relocs.push_back({body.size(), WASM_IMPORT_NAMES[index]});
-+  EmitPaddedU32Leb(body, index);
++  EmitPaddedU32Leb(body, 0);
 +}
 +
  void EmitLocalGet(std::vector<u8>& body, u32 index)
  {
    body.push_back(0x20);
-@@ -4051,8 +4092,7 @@ void EmitFastCheckGatherPipeIfFull(std::vector<u8>& body, const WasmStateLayout&
+@@ -4051,8 +4096,7 @@ void EmitFastCheckGatherPipeIfFull(std::vector<u8>& body, const WasmStateLayout&
    EmitLocalGet(body, 0);
    EmitI32Const(body, 0);
    EmitI32Const(body, 0);
@@ -59,7 +70,7 @@ diff --git a/Source/Core/Core/PowerPC/CachedInterpreter/CachedInterpreter.cpp b/
    body.push_back(0x0b);
  }
  
-@@ -4108,8 +4148,7 @@ void EmitReadU32MaybeDirect(std::vector<u8>& body, const WasmStateLayout& layout
+@@ -4108,8 +4152,7 @@ void EmitReadU32MaybeDirect(std::vector<u8>& body, const WasmStateLayout& layout
    body.push_back(0x05);
    EmitLocalGet(body, 0);
    EmitLocalGet(body, 1);
@@ -69,7 +80,7 @@ diff --git a/Source/Core/Core/PowerPC/CachedInterpreter/CachedInterpreter.cpp b/
    body.push_back(0x0b);
  }
  
-@@ -4132,8 +4171,7 @@ void EmitReadU8MaybeDirect(std::vector<u8>& body, const WasmStateLayout& layout)
+@@ -4132,8 +4175,7 @@ void EmitReadU8MaybeDirect(std::vector<u8>& body, const WasmStateLayout& layout)
    body.push_back(0x05);
    EmitLocalGet(body, 0);
    EmitLocalGet(body, 1);
@@ -79,7 +90,7 @@ diff --git a/Source/Core/Core/PowerPC/CachedInterpreter/CachedInterpreter.cpp b/
    body.push_back(0x0b);
  }
  
-@@ -4158,8 +4196,7 @@ void EmitReadU16MaybeDirect(std::vector<u8>& body, const WasmStateLayout& layout
+@@ -4158,8 +4200,7 @@ void EmitReadU16MaybeDirect(std::vector<u8>& body, const WasmStateLayout& layout
    body.push_back(0x05);
    EmitLocalGet(body, 0);
    EmitLocalGet(body, 1);
@@ -89,7 +100,7 @@ diff --git a/Source/Core/Core/PowerPC/CachedInterpreter/CachedInterpreter.cpp b/
    body.push_back(0x0b);
  }
  
-@@ -4200,8 +4237,7 @@ void EmitWriteU32MaybeDirect(std::vector<u8>& body, const WasmStateLayout& layou
+@@ -4200,8 +4241,7 @@ void EmitWriteU32MaybeDirect(std::vector<u8>& body, const WasmStateLayout& layou
    EmitLocalGet(body, 0);
    EmitLocalGet(body, 1);
    EmitLocalGet(body, 2);
@@ -99,7 +110,7 @@ diff --git a/Source/Core/Core/PowerPC/CachedInterpreter/CachedInterpreter.cpp b/
    body.push_back(0x0b);
  }
  
-@@ -4226,8 +4262,7 @@ void EmitWriteU8MaybeDirect(std::vector<u8>& body, const WasmStateLayout& layout
+@@ -4226,8 +4266,7 @@ void EmitWriteU8MaybeDirect(std::vector<u8>& body, const WasmStateLayout& layout
    EmitLocalGet(body, 0);
    EmitLocalGet(body, 1);
    EmitLocalGet(body, 2);
@@ -109,7 +120,7 @@ diff --git a/Source/Core/Core/PowerPC/CachedInterpreter/CachedInterpreter.cpp b/
    body.push_back(0x0b);
  }
  
-@@ -4254,8 +4289,7 @@ void EmitWriteU16MaybeDirect(std::vector<u8>& body, const WasmStateLayout& layou
+@@ -4254,8 +4293,7 @@ void EmitWriteU16MaybeDirect(std::vector<u8>& body, const WasmStateLayout& layou
    EmitLocalGet(body, 0);
    EmitLocalGet(body, 1);
    EmitLocalGet(body, 2);
@@ -119,7 +130,18 @@ diff --git a/Source/Core/Core/PowerPC/CachedInterpreter/CachedInterpreter.cpp b/
    body.push_back(0x0b);
  }
  
-@@ -4366,8 +4400,7 @@ void EmitSystemCall(std::vector<u8>& body, const PPCAnalyst::CodeOp& op, u32 dow
+@@ -4353,7 +4391,9 @@ void EmitImportedHaltCheck(std::vector<u8>& body)
+ {
+   body.push_back(0x04);
+   body.push_back(0x40);
+-  EmitI32Const(body, 1);
++  // A block module returns 1 (halted); a region fragment 2 (stopped), since 1
++  // there means "not an entry".
++  EmitI32Const(body, s_wasm_fragment_relocs ? 2 : 1);
+   body.push_back(0x0f);
+   body.push_back(0x0b);
+ }
+@@ -4366,8 +4406,7 @@ void EmitSystemCall(std::vector<u8>& body, const PPCAnalyst::CodeOp& op, u32 dow
    EmitI32Const(body, op.address);
    EmitI32Const(body, downcount);
    EmitI32Const(body, 0);
@@ -129,7 +151,7 @@ diff --git a/Source/Core/Core/PowerPC/CachedInterpreter/CachedInterpreter.cpp b/
    EmitImportedHaltCheck(body);
    EmitRegCacheReloadAll(body);  // helper may have written arbitrary GPRs
  }
-@@ -4381,8 +4414,7 @@ void EmitInterpretCall(std::vector<u8>& body, const PPCAnalyst::CodeOp& op, u32
+@@ -4381,8 +4420,7 @@ void EmitInterpretCall(std::vector<u8>& body, const PPCAnalyst::CodeOp& op, u32
    EmitI32Const(body, op.inst.hex);
    EmitI32Const(body, write_pc ? 1 : 0);
    EmitI32Const(body, downcount);
@@ -139,7 +161,7 @@ diff --git a/Source/Core/Core/PowerPC/CachedInterpreter/CachedInterpreter.cpp b/
    EmitImportedHaltCheck(body);
    EmitRegCacheReloadAll(body);  // interpret may have written arbitrary GPRs
  }
-@@ -4396,8 +4428,7 @@ void EmitFastOsInterruptCall(std::vector<u8>& body, u32 current_pc,
+@@ -4396,8 +4434,7 @@ void EmitFastOsInterruptCall(std::vector<u8>& body, u32 current_pc,
    EmitI32Const(body, target.mode);
    EmitI32Const(body, target.cycles_primary);
    EmitI32Const(body, target.cycles_secondary);
@@ -149,7 +171,7 @@ diff --git a/Source/Core/Core/PowerPC/CachedInterpreter/CachedInterpreter.cpp b/
    EmitImportedHaltCheck(body);
    EmitRegCacheReloadAll(body);  // interrupt handler may write arbitrary GPRs
  }
-@@ -4407,8 +4438,7 @@ void EmitFastMeleeInputStatusCall(std::vector<u8>& body, u32 current_pc)
+@@ -4407,8 +4444,7 @@ void EmitFastMeleeInputStatusCall(std::vector<u8>& body, u32 current_pc)
    EmitRegCacheFlushDirty(body);  // §28cx C1
    EmitLocalGet(body, 0);
    EmitI32Const(body, current_pc);
@@ -159,7 +181,7 @@ diff --git a/Source/Core/Core/PowerPC/CachedInterpreter/CachedInterpreter.cpp b/
    EmitImportedHaltCheck(body);
    EmitRegCacheReloadAll(body);  // HLE call may write arbitrary GPRs
  }
-@@ -4421,8 +4451,7 @@ void EmitFastMeleeStatusCall(std::vector<u8>& body, u32 current_pc, u32 downcoun
+@@ -4421,8 +4457,7 @@ void EmitFastMeleeStatusCall(std::vector<u8>& body, u32 current_pc, u32 downcoun
    EmitI32Const(body, downcount);
    EmitI32Const(body, 0);
    EmitI32Const(body, 0);
@@ -169,7 +191,7 @@ diff --git a/Source/Core/Core/PowerPC/CachedInterpreter/CachedInterpreter.cpp b/
    EmitImportedHaltCheck(body);
    EmitRegCacheReloadAll(body);  // HLE call may write arbitrary GPRs
  }
-@@ -4435,8 +4464,7 @@ void EmitFastMeleeServicePollCall(std::vector<u8>& body, u32 current_pc, u32 dow
+@@ -4435,8 +4470,7 @@ void EmitFastMeleeServicePollCall(std::vector<u8>& body, u32 current_pc, u32 dow
    EmitI32Const(body, downcount);
    EmitI32Const(body, 0);
    EmitI32Const(body, 0);
@@ -179,7 +201,7 @@ diff --git a/Source/Core/Core/PowerPC/CachedInterpreter/CachedInterpreter.cpp b/
    EmitImportedHaltCheck(body);
    EmitRegCacheReloadAll(body);  // HLE call may write arbitrary GPRs
  }
-@@ -4449,8 +4477,7 @@ void EmitFpCall(std::vector<u8>& body, const PPCAnalyst::CodeOp& op, u32 downcou
+@@ -4449,8 +4483,7 @@ void EmitFpCall(std::vector<u8>& body, const PPCAnalyst::CodeOp& op, u32 downcou
    EmitI32Const(body, op.address);
    EmitI32Const(body, downcount);
    EmitI32Const(body, 0);
@@ -189,7 +211,7 @@ diff --git a/Source/Core/Core/PowerPC/CachedInterpreter/CachedInterpreter.cpp b/
    EmitImportedHaltCheck(body);
    // FP ops write FPRs (+CR/FPSCR), not GPRs — reload only the op's GPR outputs
    // (normally none), so the FP-heavy Melee path doesn't pay a full reload.
-@@ -4465,8 +4492,7 @@ void EmitLfsImportCall(std::vector<u8>& body, UGeckoInstruction inst, u32 curren
+@@ -4465,8 +4498,7 @@ void EmitLfsImportCall(std::vector<u8>& body, UGeckoInstruction inst, u32 curren
    EmitI32Const(body, inst.FD);
    EmitI32Const(body, current_pc);
    EmitI32Const(body, downcount);
@@ -199,7 +221,7 @@ diff --git a/Source/Core/Core/PowerPC/CachedInterpreter/CachedInterpreter.cpp b/
    EmitImportedHaltCheck(body);
  }
  
-@@ -4479,8 +4505,7 @@ void EmitStfsImportCall(std::vector<u8>& body, UGeckoInstruction inst, u32 curre
+@@ -4479,8 +4511,7 @@ void EmitStfsImportCall(std::vector<u8>& body, UGeckoInstruction inst, u32 curre
    EmitI32Const(body, inst.FS);
    EmitI32Const(body, current_pc);
    EmitI32Const(body, downcount);
@@ -209,7 +231,7 @@ diff --git a/Source/Core/Core/PowerPC/CachedInterpreter/CachedInterpreter.cpp b/
    EmitImportedHaltCheck(body);
  }
  
-@@ -4492,8 +4517,7 @@ void EmitLfdImportCall(std::vector<u8>& body, UGeckoInstruction inst, u32 curren
+@@ -4492,8 +4523,7 @@ void EmitLfdImportCall(std::vector<u8>& body, UGeckoInstruction inst, u32 curren
    EmitI32Const(body, inst.FD);
    EmitI32Const(body, current_pc);
    EmitI32Const(body, downcount);
@@ -219,7 +241,7 @@ diff --git a/Source/Core/Core/PowerPC/CachedInterpreter/CachedInterpreter.cpp b/
    EmitImportedHaltCheck(body);
  }
  
-@@ -4505,8 +4529,7 @@ void EmitFctiwzImportCall(std::vector<u8>& body, const PPCAnalyst::CodeOp& op, u
+@@ -4505,8 +4535,7 @@ void EmitFctiwzImportCall(std::vector<u8>& body, const PPCAnalyst::CodeOp& op, u
    EmitI32Const(body, op.address);
    EmitI32Const(body, downcount);
    EmitI32Const(body, 0);
@@ -229,7 +251,7 @@ diff --git a/Source/Core/Core/PowerPC/CachedInterpreter/CachedInterpreter.cpp b/
    EmitImportedHaltCheck(body);
  }
  
-@@ -4893,8 +4916,7 @@ void EmitExactMulAddSub(std::vector<u8>& body, const WasmStateLayout& layout,
+@@ -4893,8 +4922,7 @@ void EmitExactMulAddSub(std::vector<u8>& body, const WasmStateLayout& layout,
      EmitStateLoadF64(body, PsOffset(layout, inst.FC, c_lane));
      EmitStateLoadF64(body, PsOffset(layout, inst.FB, lane));
      EmitI32Const(body, (sub ? 1u : 0u) | (single ? 2u : 0u));
@@ -239,10 +261,24 @@ diff --git a/Source/Core/Core/PowerPC/CachedInterpreter/CachedInterpreter.cpp b/
    };
    const auto f64const = [&](double v) { EmitF64ConstBits(body, std::bit_cast<u64>(v)); };
    // TwoSum(x, y) -> hi in `hi`, lo in `lo` (Knuth; exact barring overflow).
-@@ -12424,6 +12446,19 @@ void ApplyArmedWasmPolicy()
+@@ -8617,6 +8645,11 @@ std::vector<u8> BuildWasmCachedInterpreterBlock(std::span<const PPCAnalyst::Code
+   }
+   EmitI32Const(body, 0);
+   body.push_back(0x0b);
++  if (s_wasm_fragment_relocs)
++  {
++    s_wasm_fragment_relocs->code = body;
++    s_wasm_fragment_relocs->cycles = downcount;
++  }
  
- // Drives the armed warmup with a synthetic field counter, as the CPU thread
- // would at the start of each slice; returns the engaged field or -1.
+   std::vector<u8> code;
+   code.push_back(0x01);
+@@ -12422,8 +12455,19 @@ void ApplyArmedWasmPolicy()
+     ApplyArmedWasmPolicyAt(Core::System::GetInstance().GetMovie().GetCurrentFrame());
+ }
+ 
+-// Drives the armed warmup with a synthetic field counter, as the CPU thread
+-// would at the start of each slice; returns the engaged field or -1.
 +// Region modules (P4) write pc and downcount themselves; the region
 +// assembler finds pc with these. out: pc, npc and downcount offsets in
 +// PowerPCState, then the layout version.
@@ -259,3 +295,246 @@ diff --git a/Source/Core/Core/PowerPC/CachedInterpreter/CachedInterpreter.cpp b/
  // Serves a dump request in place (the test has no CPU thread loop running):
  // returns the number of triplets, or -1 when the core is not the
  // CachedInterpreter.
+@@ -12437,6 +12481,8 @@ extern "C" EMSCRIPTEN_KEEPALIVE int DolphinWeb_JitDumpBlocksNowForTest()
+   return static_cast<int>(DolphinWeb_JitDumpBlocksCount());
+ }
+ 
++// Drives the armed warmup with a synthetic field counter, as the CPU thread
++// would at the start of each slice; returns the engaged field or -1.
+ extern "C" EMSCRIPTEN_KEEPALIVE double DolphinWeb_JitArmedStepForTest(double frame)
+ {
+   ApplyArmedWasmPolicyAt(static_cast<u64>(frame));
+@@ -13850,6 +13896,233 @@ extern "C" EMSCRIPTEN_KEEPALIVE int DolphinWeb_JitOracleRun(u32 word_count, u32
+   return std::memcmp(s_jit_oracle.interp, s_jit_oracle.jit, sizeof s_jit_oracle.jit) == 0 ? 0 : 1;
+ }
+ 
++// P4 region translator, step 2: one block as a region fragment
++// (docs/region-translator.md). The block emitter runs in fragment mode (helper
++// calls relocatable, halts return 2) and the tail RunWasmBlock runs for a
++// completed block moves into the fragment: pc = npc, downcount -= the block's
++// cycles. The performance monitor is not updated on this path yet.
++namespace
++{
++std::vector<u32> s_aot_translate_out;
++std::array<u32, 248> s_aot_test_state{};
++constexpr u32 AOT_TEST_MSR = 0x00002032;  // FP, IR, DR, RI; external interrupts off
++
++WasmStateLayout CurrentWasmStateLayout(Core::System& system)
++{
++  auto& ppc = system.GetPPCState();
++  auto& memory = system.GetMemory();
++  const auto state_base = reinterpret_cast<std::uintptr_t>(&ppc);
++  const auto offset = [&](const void* field) {
++    return static_cast<u32>(reinterpret_cast<std::uintptr_t>(field) - state_base);
++  };
++  return {
++      offset(&ppc.npc), offset(ppc.gpr), offset(ppc.ps), offset(ppc.cr.fields),
++      offset(ppc.spr), offset(&ppc.msr), offset(&ppc.fpscr), offset(&ppc.feature_flags),
++      offset(&ppc.pagetable_update_pending), offset(&ppc.xer_ca), offset(&ppc.xer_so_ov),
++      offset(&ppc.xer_stringctrl), offset(&ppc.m_enable_dcache), offset(&ppc.gather_pipe_ptr),
++      offset(&ppc.gather_pipe_base_ptr),
++      static_cast<u32>(reinterpret_cast<std::uintptr_t>(memory.GetRAM())),
++      memory.GetRamSizeReal(),
++      static_cast<u32>(reinterpret_cast<std::uintptr_t>(memory.GetL1Cache())),
++      memory.GetL1CacheSize(),
++  };
++}
++
++// The block at entry_pc as the CPU thread would build it (same analyzer, same
++// direct-candidate prefix), emitted as a fragment into `out`.
++bool BuildWasmRegionFragmentForBlock(Core::System& system, u32 entry_pc, WasmFragmentRelocs* out)
++{
++  auto& ppc = system.GetPPCState();
++  PPCAnalyst::PPCAnalyzer analyzer;
++  analyzer.SetBranchFollowingEnabled(Config::Get(Config::MAIN_JIT_FOLLOW_BRANCH));
++  PPCAnalyst::CodeBuffer buffer(JIT_ORACLE_MAX_WORDS + 8);
++  PPCAnalyst::CodeBlock block;
++  const u32 next_pc = analyzer.Analyze(entry_pc, &block, &buffer, buffer.size());
++  if (block.m_memory_exception || block.m_num_instructions == 0)
++    return false;
++  u32 prefix = 0;
++  for (; prefix < block.m_num_instructions; ++prefix)
++  {
++    const PPCAnalyst::CodeOp& op = buffer[prefix];
++    if (op.branchIsIdleLoop || !IsPpcWasmDirectInstructionCandidate(op) ||
++        ((op.opinfo->flags & FL_USE_FPU) != 0 && !ppc.msr.FP))
++      break;
++    if (op.canEndBlock)
++    {
++      ++prefix;
++      break;
++    }
++  }
++  if (prefix == 0)
++    return false;
++  const bool ends_with_branch = buffer[prefix - 1].canEndBlock;
++  const u32 resume_pc = prefix == block.m_num_instructions ? next_pc : buffer[prefix].address;
++  WasmFragmentRelocs* const saved = s_wasm_fragment_relocs;
++  s_wasm_fragment_relocs = out;
++  const std::vector<u8> bytes = BuildWasmCachedInterpreterBlock(
++      std::span<const PPCAnalyst::CodeOp>{buffer.data(), prefix}, CurrentWasmStateLayout(system),
++      resume_pc, !ends_with_branch, false, false);
++  s_wasm_fragment_relocs = saved;
++  std::vector<u8>& code = out->code;
++  const std::size_t n = code.size();
++  if (bytes.empty() || n < 3 || code[n - 3] != 0x41 || code[n - 2] != 0x00 || code[n - 1] != 0x0b)
++    return false;
++  code.resize(n - 3);  // i32.const 0; end
++  const auto base = reinterpret_cast<std::uintptr_t>(&ppc);
++  const u32 pc_offset = static_cast<u32>(reinterpret_cast<std::uintptr_t>(&ppc.pc) - base);
++  const u32 npc_offset = static_cast<u32>(reinterpret_cast<std::uintptr_t>(&ppc.npc) - base);
++  const u32 downcount_offset =
++      static_cast<u32>(reinterpret_cast<std::uintptr_t>(&ppc.downcount) - base);
++  const auto load = [&](u32 offset) {
++    code.insert(code.end(), {0x28, 0x02});
++    EmitU32Leb(code, offset);
++  };
++  const auto store = [&](u32 offset) {
++    code.insert(code.end(), {0x36, 0x02});
++    EmitU32Leb(code, offset);
++  };
++  EmitLocalGet(code, 0);
++  EmitLocalGet(code, 0);
++  load(npc_offset);
++  store(pc_offset);
++  EmitLocalGet(code, 0);
++  EmitLocalGet(code, 0);
++  load(downcount_offset);
++  EmitI32Const(code, out->cycles);
++  code.push_back(0x6b);  // i32.sub
++  store(downcount_offset);
++  EmitI32Const(code, 0);
++  code.push_back(0x0b);
++  return true;
++}
++}  // namespace
++
++extern "C" EMSCRIPTEN_KEEPALIVE const char* DolphinWeb_JitHelperName(u32 index)
++{
++  return index < WASM_IMPORT_NAMES.size() ? WASM_IMPORT_NAMES[index] : nullptr;
++}
++
++// Translates the block at entry_pc of the guest RAM (set up by
++// DolphinWeb_AotTestSetUp, filled by the caller). Returns u32 words: entry,
++// code length, reloc count, (offset, helper index) per reloc, then the code
++// bytes packed little-endian; null when the block cannot be translated.
++extern "C" EMSCRIPTEN_KEEPALIVE const u32* DolphinWeb_AotTranslateForTest(u32 entry_pc,
++                                                                          u32 disable_mask)
++{
++  auto& system = Core::System::GetInstance();
++  WasmFragmentRelocs fragment;
++  const u32 saved_mask = s_dolphin_web_disable_mask.exchange(disable_mask);
++  const bool built = BuildWasmRegionFragmentForBlock(system, entry_pc, &fragment);
++  s_dolphin_web_disable_mask.store(saved_mask);
++  if (!built)
++    return nullptr;
++  auto& out = s_aot_translate_out;
++  out.assign({entry_pc, static_cast<u32>(fragment.code.size()),
++              static_cast<u32>(fragment.relocs.size())});
++  for (const auto& reloc : fragment.relocs)
++  {
++    const auto it = std::find(WASM_IMPORT_NAMES.begin(), WASM_IMPORT_NAMES.end(), reloc.name);
++    out.push_back(static_cast<u32>(reloc.offset));
++    out.push_back(static_cast<u32>(it - WASM_IMPORT_NAMES.begin()));
++  }
++  const std::size_t words = out.size();
++  out.resize(words + (fragment.code.size() + 3) / 4);
++  std::memcpy(out.data() + words, fragment.code.data(), fragment.code.size());
++  return out.data();
++}
++
++// Test CPU for region equivalence: the oracle's memory and BATs, MSR with FP
++// and translation on. Returns the PowerPCState address (the region's state
++// argument); RAM is at DolphinWeb_AotTestRam.
++extern "C" EMSCRIPTEN_KEEPALIVE u32 DolphinWeb_AotTestSetUp()
++{
++  auto& system = Core::System::GetInstance();
++  if (!JitOracleSetUp(system))
++    return 0;
++  system.GetPowerPC().GetBreakPoints().Clear();
++  return static_cast<u32>(reinterpret_cast<std::uintptr_t>(&system.GetPPCState()));
++}
++
++extern "C" EMSCRIPTEN_KEEPALIVE u32 DolphinWeb_AotTestRam()
++{
++  return static_cast<u32>(
++      reinterpret_cast<std::uintptr_t>(Core::System::GetInstance().GetMemory().GetRAM()));
++}
++
++// Start state of a call: GPRs from `gprs`, every other register cleared,
++// pc = entry, LR = return address.
++extern "C" EMSCRIPTEN_KEEPALIVE void DolphinWeb_AotTestReset(const u32* gprs, u32 pc, u32 lr)
++{
++  auto& ppc = Core::System::GetInstance().GetPPCState();
++  std::copy(s_jit_oracle_spr.begin(), s_jit_oracle_spr.end(), ppc.spr);
++  for (u32 i = 0; i < 32; ++i)
++  {
++    ppc.gpr[i] = gprs[i];
++    ppc.ps[i].SetBoth(u64{0}, u64{0});
++  }
++  ppc.cr.Set(0);
++  ppc.SetXER(UReg_XER{0});
++  LR(ppc) = lr;
++  ppc.fpscr.Hex = 0;
++  ppc.msr.Hex = AOT_TEST_MSR;
++  ppc.Exceptions = 0;
++  ppc.pc = ppc.npc = pc;
++  ppc.downcount = 0x7fffffff;
++}
++
++// The oracle's 248-word state (GPRs, CR, XER, LR, CTR, FPSCR, MSR, GQRs,
++// exceptions, pc, FPRs, the scratch window, SRR0/1, DAR, DSISR).
++extern "C" EMSCRIPTEN_KEEPALIVE const u32* DolphinWeb_AotTestState()
++{
++  JitOracleSaveState(Core::System::GetInstance(), s_aot_test_state.data());
++  return s_aot_test_state.data();
++}
++
++// One instruction, as the oracle's interpreter runs it. Returns 1 once an
++// exception was taken (translation is off in the handler).
++extern "C" EMSCRIPTEN_KEEPALIVE int DolphinWeb_AotTestInterpretOne()
++{
++  auto& system = Core::System::GetInstance();
++  auto& ppc = system.GetPPCState();
++  const u32 pc = ppc.pc;
++  system.GetInterpreter().SingleStepInner();
++  if (ppc.Exceptions & EXCEPTION_PROGRAM)
++  {
++    ppc.pc = pc;
++    system.GetPowerPC().CheckExceptions();
++  }
++  return ppc.msr.IR ? 0 : 1;
++}
++
++// The test CPU has no hardware behind MMIO and no CoreTiming, so code that
++// reaches them traps; the test then puts the stack pointer back.
++extern "C" void _emscripten_stack_restore(std::uintptr_t);
++extern "C" EMSCRIPTEN_KEEPALIVE u32 DolphinWeb_AotTestStackPointer()
++{
++  return static_cast<u32>(emscripten_stack_get_current());
++}
++extern "C" EMSCRIPTEN_KEEPALIVE void DolphinWeb_AotTestStackRestore(u32 sp)
++{
++  _emscripten_stack_restore(sp);
++}
++
++// Runs a region module compiled by DolphinWeb_JitCompileBytesForTest on the
++// test CPU: 0 continue at pc, 1 not an entry, 2 stopped. After 2, pending
++// exceptions are taken as the CPU loop would; the result is then 3 when one
++// was.
++extern "C" EMSCRIPTEN_KEEPALIVE int DolphinWeb_AotRunRegionForTest(int handle)
++{
++  auto& system = Core::System::GetInstance();
++  auto& ppc = system.GetPPCState();
++  const int code = DolphinWeb_CachedInterpreterRunWasmBlockForTest(
++      handle, static_cast<int>(reinterpret_cast<std::uintptr_t>(&ppc)));
++  if (code != 2)
++    return code;
++  if (ppc.Exceptions)
++    system.GetPowerPC().CheckExceptions();
++  return ppc.msr.IR ? 2 : 3;
++}
++
+ extern "C" int RunPpcWasmFloatCompareSmoke()
+ {
+   auto& state = Core::System::GetInstance().GetPPCState();

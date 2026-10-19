@@ -60,11 +60,18 @@ the oracle tests and the homebrew fuzz check it at every step.
 
 1. Helper call relocs and the state layout export. Done.
 2. Fragment mode in the block emitter: early exits return 2, the completed
-   block tail in WASM. Oracle: one block wrapped as a fragment equals the
-   block run by `RunWasmBlock`.
+   block tail in WASM (pc = npc, downcount -= the block's cycles; the
+   performance monitor is not updated yet). `_DolphinWeb_AotTranslateForTest`
+   returns the block at an entry as `{entry, entries: [entry], code, relocs}`.
+   `tests/aot-region-core.test.mjs` runs the N-slice equivalence on the core:
+   per plan function, the block at its entry is a fragment, regions are
+   assembled by `src/aot-region-module.js`, compiled and run by the core with
+   its real helpers, and the full oracle state and all of RAM must match the
+   interpreter. Test exports: `DolphinWeb_AotTestSetUp`, `AotTestRam`,
+   `AotTestReset`, `AotTestState`, `AotTestInterpretOne`,
+   `AotRunRegionForTest`, `JitHelperName`. Done.
 3. Fragments of several blocks with the entry dispatch and intra-fragment
-   branches; `jump` and `dispatch` relocs. `_DolphinWeb_AotTranslateForTest`
-   returns `{entry, entries, code, relocs}` for the region assembler.
+   branches; `jump` and `dispatch` relocs, the whole function per fragment.
 4. Oracle region mode: an assembled region against the interpreter, exits in
    the middle of a region (downcount, DSI, FP exception, icbi).
 5. `RunWasmRegion` and `wasmjit=region` in the dispatcher.
