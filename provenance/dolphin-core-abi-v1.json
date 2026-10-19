@@ -1,19 +1,19 @@
 {
   "schemaVersion": 1,
   "abiVersion": 1,
-  "coreId": "sha256:34f23a6261726a2034f56b646fc67ad111cb45b5c17008b0467d94addecba453",
+  "coreId": "sha256:0464dbda503b52efdb48638da8d45cdd45b2e58a1568a94ec26c280d589fc044",
   "upstreamCommit": "e22551eae1c84a7e4d0b6a5c519ef4ed4ef69df1",
   "artifacts": [
     {
       "path": "cores/dolphin/dolphin-core-upstream.js",
       "hashMode": "lf-normalized",
-      "size": 272609,
-      "sha256": "ed94b4d92a17ab4681ec6f26b4ae8a76daa39e11fe2625bf82389e14ce8b5737"
+      "size": 272849,
+      "sha256": "8d92bb03006790124b88da9318b3c2ac5f6d92d0dc65c671ee4ed83ea408631a"
     },
     {
       "path": "cores/dolphin/dolphin-core-upstream.wasm",
-      "size": 13027979,
-      "sha256": "34f23a6261726a2034f56b646fc67ad111cb45b5c17008b0467d94addecba453"
+      "size": 13028654,
+      "sha256": "0464dbda503b52efdb48638da8d45cdd45b2e58a1568a94ec26c280d589fc044"
     }
   ],
   "contractSources": [
@@ -140,8 +140,8 @@
     {
       "path": "src/upstream-discio-worker.js",
       "hashMode": "lf-normalized",
-      "size": 672538,
-      "sha256": "f797b07b55f50380d044d0dde289b6d35ae8125b0f37d3787d3cfaaa4aa53681"
+      "size": 673794,
+      "sha256": "9b97d2937c9d7533864911461e1518b48d95162bc001a3f62c65b507704b9c6b"
     },
     {
       "path": "src/wgpu-renderer-worker-probe.js",
@@ -365,6 +365,7 @@
     "_AudioSampleRate",
     "_BootDisc",
     "_CoreInit",
+    "_DolphinWeb_EmulatedRtc",
     "_DolphinWeb_FmaIsMusl",
     "_DolphinWeb_GpuSyncDiag",
     "_DolphinWeb_GpuSyncDiagEnable",
@@ -419,6 +420,7 @@
     "_GetCoreTicksLow",
     "_GetCoreTicksPerSecond",
     "_GetCoreTitle",
+    "_GetCustomRtc",
     "_GetDataSize",
     "_GetDiscNumber",
     "_GetFrame",
@@ -499,6 +501,7 @@
     "_SetCpuCore",
     "_SetCpuOverclock",
     "_SetCpuThread",
+    "_SetCustomRtc",
     "_SetEmulationSpeed",
     "_SetFastSoftwareRaster",
     "_SetInputMask",

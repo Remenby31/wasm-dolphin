@@ -34,6 +34,9 @@ const WARM_STATE_CLEAR_BYTES = 0x10000;
 // the first entries a module's own segments fill are worth calling.
 const WARM_TABLE_SCAN_MAX = 4096;
 const SCRATCH_MEMORY_SHAPES_MAX = 2;
+// A scratch memory grows to hold the warm state, never past this (16 MiB):
+// a state placed further away is not copied and calls run on what there is.
+const WARM_SCRATCH_MAX_PAGES = 256;
 // Scratch memories are dropped once warm-ups have been idle this long; the
 // next warm-up allocates again.
 const SCRATCH_IDLE_RELEASE_MS = 5000;
@@ -195,6 +198,18 @@ export function createWarmer() {
     if (memory) {
       const bytes = warmState ? warmState.state : null;
       const len = bytes ? bytes.length : WARM_STATE_CLEAR_BYTES;
+      // A module that declares a small minimum gets a small scratch memory
+      // (only its initial pages are committed, which on Windows counts
+      // against the commit charge at once); it grows just enough to hold the
+      // warm state.
+      const needed = Math.ceil((statePtr + len) / PAGE);
+      if (statePtr >= 0 && memory.buffer.byteLength < statePtr + len && needed <= WARM_SCRATCH_MAX_PAGES) {
+        try {
+          memory.grow(needed - memory.buffer.byteLength / PAGE);
+        } catch {
+          // past its maximum: calls run on what there is
+        }
+      }
       if (statePtr >= 0 && memory.buffer.byteLength >= statePtr + len) {
         const view = new Uint8Array(memory.buffer, statePtr, len);
         if (bytes) view.set(bytes);
@@ -351,6 +366,12 @@ export function installAotCompilerWorker(scope) {
 
   // Answered once nothing is compiling or waiting for its warm-up.
   function answerFlushes() {
+    if (!inFlight && !pumping) {
+      // Replies first: the owner arms its idle stop only once nothing is
+      // pending on its side.
+      if (outbox.length) flushReplies();
+      scope.postMessage({ type: "aot-idle", totals: { ...totals } });
+    }
     if (inFlight || pumping || !flushes.length) return;
     if (outbox.length) flushReplies();
     for (const id of flushes) scope.postMessage({ type: "aot-flushed", id, totals: { ...totals } });
@@ -456,6 +477,9 @@ export function createAotCompilerClient({
   maxWorkerFailures = 3,
   maxConsecutiveLost = 3,
   retryAfterMs = 30000,
+  // A worker with nothing to do for this long is stopped (its isolate and
+  // any scratch memory go with it); the next job starts a new one.
+  idleStopMs = 30000,
   pollMs = Math.max(50, Math.floor(warmTimeoutMs / 4)),
   setTimer = (fn, ms) => setTimeout(fn, ms),
   clearTimer = (id) => clearTimeout(id),
@@ -464,6 +488,9 @@ export function createAotCompilerClient({
   const pending = new Map(); // id -> {bytes, warm, deliver, sentAt, promise, resolve, reject}
   let worker = null;
   let workerFailures = 0;
+  let idleTimer = null;
+  let stoppingIdle = false;
+  let restartAfterIdle = false;
   let consecutiveLost = 0;
   let brokenUntil = createWorker ? 0 : Infinity;
   let workersStarted = 0;
@@ -478,7 +505,7 @@ export function createAotCompilerClient({
   const flushWaiters = new Map();
   const stats = {
     jobs: 0, done: 0, failed: 0, inPlace: 0, lost: 0, messageErrors: 0, timeouts: 0, respawns: 0,
-    workerFailures: 0, compileMs: 0, warmed: 0, warmCalls: 0, warmMs: 0, maxWarmMs: 0
+    workerFailures: 0, compileMs: 0, warmed: 0, warmCalls: 0, warmMs: 0, maxWarmMs: 0, idleStops: 0
   };
   const zero = () => ({ warmed: 0, warmCalls: 0, warmMs: 0, maxWarmMs: 0, scratchFailures: 0, traps: 0 });
   let carried = zero(); // totals of workers that are gone
@@ -554,6 +581,8 @@ export function createAotCompilerClient({
 
   function killWorker() {
     if (!worker) return;
+    cancelIdleStop();
+    if (stoppingIdle) restartAfterIdle = true;
     try {
       worker.terminate();
     } catch {
@@ -587,7 +616,29 @@ export function createAotCompilerClient({
     resendAll();
   }
 
+  function cancelIdleStop() {
+    if (idleTimer !== null) clearTimer(idleTimer);
+    idleTimer = null;
+  }
+
   function onMessage(data) {
+    if (data?.type === "aot-idle") {
+      current = data.totals;
+      foldTotals();
+      cancelIdleStop();
+      if (pending.size === 0 && outgoing.length === 0 && idleStopMs > 0) {
+        idleTimer = setTimer(() => {
+          idleTimer = null;
+          if (pending.size || outgoing.length || !worker) return;
+          stats.idleStops += 1;
+          stoppingIdle = true;
+          killWorker();
+          stoppingIdle = false;
+        }, idleStopMs);
+        idleTimer?.unref?.();
+      }
+      return;
+    }
     if (data?.type === "aot-flushed") {
       current = data.totals;
       foldTotals();
@@ -632,11 +683,13 @@ export function createAotCompilerClient({
     try {
       created = createWorker();
     } catch {
+      restartAfterIdle = false;
       onWorkerFailure();
       return null;
     }
     worker = created;
-    if (workersStarted++ > 0) stats.respawns += 1;
+    if (workersStarted++ > 0 && !restartAfterIdle) stats.respawns += 1;
+    restartAfterIdle = false;
     // Events of a worker that was replaced are ignored: its replies are
     // stale and its totals already counted.
     created.addEventListener("message", (event) => {
@@ -674,6 +727,7 @@ export function createAotCompilerClient({
   function send(id) {
     const job = pending.get(id);
     if (!job) return;
+    cancelIdleStop();
     const target = ensureWorker();
     if (!target) {
       compileInPlace(id);
@@ -738,7 +792,7 @@ export function createAotCompilerClient({
         worker.postMessage({ type: "aot-flush", id });
       });
     },
-    stats: () => ({ ...stats, pending: pending.size, offThread: brokenUntil !== Infinity, watchdog: canWatch, warmDisabled: !warmAllowed() && canWatch }),
+    stats: () => ({ ...stats, pending: pending.size, offThread: brokenUntil !== Infinity, watchdog: canWatch, warmDisabled: canWatch && stats.timeouts >= maxWarmTimeouts }),
     terminate() {
       killWorker();
       brokenUntil = Infinity;

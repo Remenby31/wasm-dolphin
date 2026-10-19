@@ -538,3 +538,153 @@ test("a worker that keeps losing replies is replaced, so the boot never waits a 
   assert.equal((await client.compile(bytes)).offThread, false);
   assert.equal(made.length, 1);
 });
+
+test("an idle compiler worker is stopped, and the next job starts a new one (not a respawn)", async (t) => {
+  const { factory, made } = fakeWorkerFactory();
+  const clock = manualClock();
+  const client = createAotCompilerClient({ createWorker: factory, idleStopMs: 1000, ...clock });
+  t.after(() => client.terminate());
+  const bytes = buildModule({ memory: MEMORY, bodies: [[...i32const(1)]] });
+  const first = client.compile(bytes, { warm: false });
+  await settle();
+  const job = made[0].sent.find((m) => m.type === "aot-compile").jobs[0];
+  made[0].emit("message", { type: "aot-compiled", results: [{ id: job.id, module: new WebAssembly.Module(bytes) }], totals: {} });
+  await first;
+  // busy again before the delay: the stop is cancelled
+  made[0].emit("message", { type: "aot-idle", totals: {} });
+  const second = client.compile(bytes, { warm: false });
+  await settle();
+  clock.timers.splice(0); // the idle timer was cancelled by the new job; drop it unfired
+  const job2 = made[0].sent.filter((m) => m.type === "aot-compile").at(-1).jobs[0];
+  made[0].emit("message", { type: "aot-compiled", results: [{ id: job2.id, module: new WebAssembly.Module(bytes) }], totals: {} });
+  await second;
+  assert.equal(made[0].terminated, false);
+  // idle for good: stopped
+  made[0].emit("message", { type: "aot-idle", totals: {} });
+  clock.fire();
+  assert.equal(made[0].terminated, true);
+  assert.equal(client.stats().idleStops, 1);
+  // the next job starts a new worker, counted as a start, not a respawn
+  client.compile(bytes, { warm: false }).catch(() => {}); // left pending; terminate() rejects it
+  await settle();
+  assert.equal(made.length, 2);
+  assert.equal(client.stats().respawns, 0);
+  assert.equal(client.stats().offThread, true);
+});
+
+test("the worker announces idleness once nothing compiles or waits for a warm-up", async (t) => {
+  const seen = [];
+  const factory = nodeWorkerFactory();
+  const client = createAotCompilerClient({
+    createWorker: () => {
+      const w = factory();
+      const add = w.addEventListener;
+      w.addEventListener = (type, fn) => add(type, (e) => { if (type === "message") seen.push(e.data?.type); fn(e); });
+      return w;
+    },
+    idleStopMs: 200
+  });
+  t.after(() => client.terminate());
+  await client.compile(buildModule({ memory: MEMORY, funcImports: 1, bodies: [WRITER_BODY] }));
+  await client.drain();
+  assert.ok(seen.includes("aot-idle"));
+  await new Promise((r) => setTimeout(r, 400));
+  assert.equal(client.stats().idleStops, 1);
+});
+
+test("cached blocks take warm slots from one budget, with or without a block store", async (t) => {
+  const originalSelf = globalThis.self;
+  globalThis.self = { location: { href: "http://127.0.0.1:8080/" }, addEventListener() {}, postMessage() {} };
+  t.after(() => {
+    if (originalSelf === undefined) delete globalThis.self;
+    else globalThis.self = originalSelf;
+  });
+  // a fresh worker module: no block store opened (as without CacheStorage)
+  const { takeDolphinJitWarmSlot } = await import(`../src/upstream-discio-worker.js?warm-slot-test=${Date.now()}`);
+  for (let i = 0; i < 20000; i += 1) assert.equal(takeDolphinJitWarmSlot(), true, `slot ${i}`);
+});
+
+
+test("a module declaring a small memory minimum warms on a small scratch memory, and still runs on the emulator's", async () => {
+  // shared memory import min 1 page, max 24576 (the core's maximum)
+  const SMALL = { shared: true, initial: 1, maximum: 24576 };
+  const bytes = buildModule({ memory: SMALL, funcImports: 1, bodies: [WRITER_BODY] });
+  const warmer = createWarmer();
+  const result = await compileAndWarm(bytes, { warm: true }, warmer);
+  assert.equal(result.warmed, true);
+  const [scratch] = warmer.scratchMemories();
+  // grown only to hold the warm state, far from the 1.5 GiB of the core's shape
+  assert.ok(scratch.buffer.byteLength <= 4 * 65536, `${scratch.buffer.byteLength} bytes`);
+  assert.equal(new DataView(scratch.buffer).getUint32(WARM_STATE_PTR, true), 0xabababab, "the warm call ran");
+  // the emulator's memory (min = max = 24576) satisfies the import
+  const real = new WebAssembly.Memory({ shared: true, initial: 24576, maximum: 24576 });
+  const instance = new WebAssembly.Instance(result.module, { env: { memory: real, h0: () => 0 } });
+  assert.equal(instance.exports.f(0x100) >>> 0, 0x80003000);
+});
+
+test("after-warm jobs (the core's requests) arm the idle stop without drain(), with real timers", async (t) => {
+  const client = createAotCompilerClient({ createWorker: nodeWorkerFactory(), idleStopMs: 150 });
+  t.after(() => client.terminate());
+  const result = await client.compile(buildModule({ memory: MEMORY, funcImports: 1, bodies: [WRITER_BODY] }));
+  assert.equal(result.warmed, true);
+  await new Promise((r) => setTimeout(r, 600));
+  const stats = client.stats();
+  assert.equal(stats.idleStops, 1);
+  assert.equal(stats.warmDisabled, false, "an idle stop does not disable warm-ups");
+  // and the next job runs on a new worker, warmed
+  assert.equal((await client.compile(buildModule({ memory: MEMORY, funcImports: 1, bodies: [WRITER_BODY] }))).warmed, true);
+  assert.equal(client.stats().respawns, 0);
+});
+
+test("scratch growth: a memory that cannot grow, or a state too far away, still warms (calls trap, code exists)", async () => {
+  // max 1 page: the state at 0x10000 does not fit and the memory cannot grow
+  const tiny = buildModule({ memory: { shared: true, initial: 1, maximum: 1 }, bodies: [WRITER_BODY] });
+  const warmer = createWarmer();
+  const r = await compileAndWarm(tiny, { warm: true }, warmer);
+  assert.equal(r.warmed, true);
+  assert.equal(warmer.stats.traps, 1);
+  assert.equal(warmer.scratchMemories()[0].buffer.byteLength, 65536);
+  // a warm state 64 MiB away is past the growth cap: not grown
+  const far = createWarmer();
+  far.setWarmState({ statePtr: 64 << 20, state: new Uint8Array(16) });
+  const small = buildModule({ memory: { shared: true, initial: 1, maximum: 24576 }, bodies: [WRITER_BODY] });
+  assert.equal((await compileAndWarm(small, { warm: true }, far)).warmed, true);
+  assert.equal(far.scratchMemories()[0].buffer.byteLength, 65536);
+});
+
+test("a worker that cannot be created after an idle stop counts as a failure, and the next start is not mistaken for a restart", async (t) => {
+  let fail = false;
+  let time = 0;
+  const realNow = performance.now;
+  performance.now = () => time;
+  t.after(() => {
+    performance.now = realNow;
+  });
+  const { factory, made } = fakeWorkerFactory();
+  const clock = manualClock();
+  const client = createAotCompilerClient({
+    createWorker: () => {
+      if (fail) throw new Error("no worker");
+      return factory();
+    },
+    idleStopMs: 1, retryAfterMs: 1000, ...clock
+  });
+  t.after(() => client.terminate());
+  const bytes = buildModule({ memory: MEMORY, bodies: [[...i32const(1)]] });
+  const p = client.compile(bytes, { warm: false });
+  await settle();
+  const job = made[0].sent.find((m) => m.type === "aot-compile").jobs[0];
+  made[0].emit("message", { type: "aot-compiled", results: [{ id: job.id, module: new WebAssembly.Module(bytes) }], totals: {} });
+  await p;
+  made[0].emit("message", { type: "aot-idle", totals: {} });
+  clock.fire(); // idle stop
+  fail = true;
+  assert.equal((await client.compile(bytes, { warm: false })).offThread, false);
+  assert.equal(client.stats().workerFailures, 1);
+  fail = false;
+  time = 5000; // past the back-off
+  client.compile(bytes, { warm: false }).catch(() => {});
+  await settle();
+  assert.equal(made.length, 2);
+  assert.equal(client.stats().respawns, 1, "a start after a failure is a respawn, not an idle restart");
+});
