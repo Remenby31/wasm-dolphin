@@ -118,6 +118,10 @@ export class EmulatorHost {
     );
     this.noJitCache =
       new URLSearchParams(window.location.search).get("nojitcache") === "1";
+    // ?jitoffthread=1: the CPU thread never compiles a JIT module itself; it
+    // posts the bytes to the compiler worker and interprets until it arrives.
+    this.jitOffThread =
+      new URLSearchParams(window.location.search).get("jitoffthread") === "1";
     // ?aotcompiler=1: compile cached/requested JIT modules in the compiler
     // worker (off by default until its memory cost is measured).
     this.aotCompiler = aotCompilerRequested(window.location.search);
@@ -405,6 +409,7 @@ export class EmulatorHost {
             cachedInterpreterDisableMask: this.cachedInterpreterDisableMask,
             wgpuScissoredClearRect: this.wgpuScissoredClearRect,
             noJitCache: this.noJitCache,
+            jitOffThread: this.jitOffThread,
             aotCompiler: this.aotCompiler,
             collectMetrics: this.collectMetrics,
             legacyOneWayAck: this.legacyOneWayAck,

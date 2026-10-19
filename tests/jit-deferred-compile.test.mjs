@@ -84,6 +84,7 @@ sourceContractTest("actual deferred queue and retry helper preserve replacement 
     "per-interpreter queue declaration");
   compileAndRun("queue", String.raw`
 #include "WasmDeferredCompileQueue.h"
+#include <atomic>
 #include <cassert>
 #include <map>
 #include <utility>
@@ -113,6 +114,9 @@ struct CachedInterpreter {
   BlockCache* GetBlockCache() { return &cache; }
 };
 bool s_wasm_jit_enabled = true;
+// Off-thread compiles (patch 0074): off here, the retry helper skips them.
+std::atomic<bool> s_wasm_off_thread_compile{false};
+static void RetryOffThreadWasmBlocks(CachedInterpreter&) {}
 ${budget}
 ${queues}
 ${retry}

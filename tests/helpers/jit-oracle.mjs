@@ -42,6 +42,13 @@ export async function loadOracleCore(coreDir = new URL("../../cores/dolphin/", i
   const view = () => new Uint32Array(module.HEAPU8.buffer, base, MAX_WORDS + 3 * STATE_WORDS + 4);
   return {
     has: (name) => typeof module[`_${name}`] === "function",
+    // Executed-block export (docs/aot-plan.md): {start, length, flags} triplets.
+    dumpBlocks() {
+      const count = module._DolphinWeb_JitDumpBlocksNowForTest();
+      if (count < 0) return null;
+      const words = new Uint32Array(module.HEAPU8.buffer, module._DolphinWeb_JitDumpBlocksBuffer() >>> 0, count * 3);
+      return Array.from({ length: count }, (_, i) => ({ start: words[3 * i], length: words[3 * i + 1], flags: words[3 * i + 2] }));
+    },
     run(program, state, mask = PRODUCTION_DISABLE_MASK) {
       if (program.length > MAX_WORDS) throw new Error("program too long");
       const v = view();

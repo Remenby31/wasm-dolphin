@@ -22,6 +22,7 @@ correctness is established.
 | `fastmemhoist=1` | Hoist per-block fastmem bounds checks. Default-off because a bad proof could permit an out-of-bounds access. |
 | `disable=...` | Disable named JIT helper/optimization categories, or pass a decimal/hex mask, for bisection. |
 | `nojitcache=1` | Skip the browser-side compiled JIT cache/prewarm path for a cold-cache comparison. |
+| `jitoffthread=1` | The CPU thread does not compile a missed block first: it zeroes the key's byte in a shared ready table (`DolphinWeb_JitReadyBitsPtr()`, slot = first 16 SHA bits of the key), posts `dolphin-jit-compile-request {key, bytes, kind, readyPtr, readySlot}` once, and interprets the block. discio stores 1 in that byte once the compiler worker has compiled, warmed and retained the module, or failed; the block is then recompiled synchronously, which hits V8's per-process module cache for the same bytes (or raises the same engine error and is blacklisted). A retried block whose bytes changed compiles in place. The pthread never needs to receive a message (it does not return to its event loop). Needs the JIT cache (ignored with `nojitcache=1`); pair it with `aotcompiler=1` so the modules come back warmed (without it discio compiles them, unwarmed). |
 | `aotcompiler=1` | Compile cached and requested JIT modules in a dedicated compiler worker (`src/aot-compiler-worker.js`) that warms them on scratch memory, and keep them alive so the CPU thread's own compile of the same bytes hits V8's cache. Off by default until its memory cost is measured. |
 | `metrics=1` | Enable on-screen and validation metrics used to judge behavior and performance. |
 
@@ -160,3 +161,14 @@ counts value divergences (`divergent`) and FPSCR-status-only ones
 fixed-seed slice (`tests/jit-oracle.test.mjs`). The browser-side check is the
 harness's `cpufuzz` discs, which compare interpreter and JIT runs at the same
 VI output.
+
+## Executed-block export
+
+The first-launch profile (docs/aot-plan.md) reads the blocks the CPU thread
+has run without a sampler: `DolphinWeb_JitDumpBlocksRequest()` returns a
+sequence number, the CPU thread serves it at its next slice boundary, and
+once `DolphinWeb_JitDumpBlocksDone()` reaches that number,
+`DolphinWeb_JitDumpBlocksCount()` triplets `{effective address, PPC byte
+length, flags}` sit at `DolphinWeb_JitDumpBlocksBuffer()` (flags: bit 0
+executed, bit 1 reserved, bit 2 real mode). The block cache is cleared on
+icbi floods and state loads, so callers dump periodically and merge.

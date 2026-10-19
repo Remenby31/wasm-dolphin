@@ -332,14 +332,18 @@ test("an underflowed product is never taken as exact (signed zero, ties at the b
   const setF = (i, hi, lo = 0) => state.set([lo, hi, lo, hi], 48 + i * 4);
   for (const [a, c, [bhi, blo]] of [
     [0x9a700000, 0x1a700000, [0, 0]], [0x9a700000, 0x1a700000, [0x80000000, 0]],
-    [0x20b00000, 0x1c000000, [0x00100000, 1]], [0x1a700000, 0x1a700000, [0x80000000, 0]]
+    // a*c = ±2^-1075: an exact tie against b's ulp, lost if p rounds to ±0
+    [0x20b00000, 0x1c000000, [0x00100000, 1]], [0xa0b00000, 0x1c000000, [0x00100000, 1]]
   ]) {
     setF(2, a);
     setF(3, c);
     setF(4, bhi, blo);
-    for (const xo of [28, 29, 30, 31]) {
-      for (const op of [63, 59, 4]) {
-        assertSame(core.run(Uint32Array.from([A(op, 1, 2, 4, 3, xo), 0x4e800020]), state, SHORT_PREFIX_MASK), `op ${op} xo ${xo} a ${hex(a)} c ${hex(c)}`);
+    // fmadd family (op 63, 59) and paired forms, ps_madds0/1 included (op 4 xo 14, 15)
+    for (const [op, xos] of [[63, [28, 29, 30, 31]], [59, [28, 29, 30, 31]], [4, [14, 15, 28, 29, 30, 31]]]) {
+      for (const xo of xos) {
+        const result = core.run(Uint32Array.from([A(op, 1, 2, 4, 3, xo), 0x4e800020]), state, SHORT_PREFIX_MASK);
+        assert.equal(result.compiledBlocks, 1, `op ${op} xo ${xo}: compiled`);
+        assertSame(result, `op ${op} xo ${xo} a ${hex(a)} c ${hex(c)}`);
       }
     }
   }
@@ -385,4 +389,82 @@ test("inline frsqrte reproduces Gekko's table estimate bit for bit", { skip }, (
     if (result.code === 0) compiled += 1;
   }
   assert.equal(compiled, cases.length);
+});
+
+const dumpSkip = skip || (core.has("DolphinWeb_JitDumpBlocksNowForTest") ? false : "the core predates the block export (CI builds this branch's core)");
+
+test("the executed-block export is there, and says when no CPU core runs", { skip: dumpSkip }, () => {
+  // The oracle compiles its blocks without the CachedInterpreter block cache,
+  // so here the export can only answer that no JIT core is running; the
+  // live check reads the blocks of a race (P3 lane 10).
+  for (const name of ["DolphinWeb_JitDumpBlocksRequest", "DolphinWeb_JitDumpBlocksDone", "DolphinWeb_JitDumpBlocksCount", "DolphinWeb_JitDumpBlocksBuffer"]) {
+    assert.ok(core.has(name), name);
+  }
+  assert.equal(core.dumpBlocks(), null);
+});
+
+const offThreadSkip = skip || (core.has("DolphinWeb_JitReadyBitsPtr") ? false : "the core predates off-thread compiles (CI builds this branch's core)");
+
+test("jitoffthread: a miss is posted once and deferred, compiled once its ready byte is set, in place when the bytes changed", { skip: offThreadSkip }, async () => {
+  const { default: createDolphinCore } = await import(new URL("../cores/dolphin/dolphin-core-upstream.js", import.meta.url));
+  const { readFileSync } = await import("node:fs");
+  const module = await createDolphinCore({ wasmBinary: readFileSync(coreWasm), noInitialRun: true, printErr: () => {} });
+  // (func (param i32) (result i32) local.get 0) / i32.const 7, exported as "f"
+  const head = [0x00, 0x61, 0x73, 0x6d, 0x01, 0x00, 0x00, 0x00, 0x01, 0x06, 0x01, 0x60, 0x01, 0x7f, 0x01, 0x7f,
+    0x03, 0x02, 0x01, 0x00, 0x07, 0x05, 0x01, 0x01, 0x66, 0x00, 0x00, 0x0a];
+  const a = Uint8Array.from([...head, 0x06, 0x01, 0x04, 0x00, 0x20, 0x00, 0x0b]);
+  const b = Uint8Array.from([...head, 0x06, 0x01, 0x04, 0x00, 0x41, 0x07, 0x0b]);
+  const posted = [];
+  const savedSelf = globalThis.self;
+  // Only compile requests: each in-place compile also posts the bytes for
+  // the persistent cache (dolphin-jit-new-compile), as before.
+  globalThis.self = { postMessage: (message) => { if (message.type === "dolphin-jit-compile-request") posted.push(message); } };
+  module._dolphinJitCache = new Map(); // the pthread cache the persistent JIT cache installs
+  const compile = (bytes, inPlace = false) => {
+    const ptr = module._malloc(bytes.length);
+    module.HEAPU8.set(bytes, ptr);
+    try {
+      return inPlace ? module._DolphinWeb_JitCompileBytesInPlaceForTest(ptr, bytes.length) : module._DolphinWeb_JitCompileBytesForTest(ptr, bytes.length);
+    } finally {
+      module._free(ptr);
+    }
+  };
+  try {
+    module._SetPpcWasmJitOffThread(1);
+    assert.equal(compile(a), -3, "deferred");
+    assert.equal(compile(a), -3, "still deferred");
+    assert.equal(posted.length, 1, "posted once");
+    const [request] = posted;
+    assert.equal(request.type, "dolphin-jit-compile-request");
+    assert.equal(request.kind, "block");
+    assert.deepEqual(Array.from(request.bytes), Array.from(a));
+    assert.equal(request.readyPtr, module._DolphinWeb_JitReadyBitsPtr());
+    assert.equal(request.readySlot, parseInt(request.key.slice(-64, -60), 16));
+    assert.equal(module.HEAPU8[request.readyPtr + request.readySlot], 0);
+    // discio: compiled, warmed and retained (or failed) -> 1
+    Atomics.store(module.HEAPU8, request.readyPtr + request.readySlot, 1);
+    assert.ok(compile(a) > 0, "ready: compiled synchronously");
+    // The block's bytes changed before its retry: compiled in place, not deferred.
+    assert.ok(compile(b, true) > 0, "changed bytes compile in place");
+    assert.equal(posted.length, 1, "nothing posted for the in-place retry");
+    // A 1 left in a slot by another key is read while clearing it (-4: the
+    // caller lets that slot's waiters retry), never silently lost.
+    const c = Uint8Array.from([...head, 0x06, 0x01, 0x04, 0x00, 0x41, 0x0b, 0x0b]);
+    const posts = posted.length;
+    // c's slot from its request; then a colliding key's 1 lands there and c
+    // is posted again (fresh in-flight set, as after a cache clear).
+    assert.equal(compile(c), -3);
+    const slotOfC = posted[posts].readySlot;
+    globalThis._dolphinJitInflight?.clear();
+    Atomics.store(module.HEAPU8, request.readyPtr + slotOfC, 1);
+    assert.equal(compile(c), -4, "the cleared 1 is reported");
+    assert.equal(module.HEAPU8[request.readyPtr + slotOfC], 0);
+    // Off: compiled in place as before.
+    module._SetPpcWasmJitOffThread(0);
+    assert.ok(compile(Uint8Array.from([...head, 0x06, 0x01, 0x04, 0x00, 0x41, 0x09, 0x0b])) > 0);
+    assert.equal(posted.length, posts + 2);
+  } finally {
+    module._SetPpcWasmJitOffThread(0);
+    globalThis.self = savedSelf;
+  }
 });
