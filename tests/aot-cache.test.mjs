@@ -29,51 +29,7 @@ const CORE = "a".repeat(64);
 const MOD_A = Uint8Array.from(Buffer.from("0061736d0100000001060160017f017f03020100070501016600000a0601040020000b", "hex"));
 const MOD_B = Uint8Array.from(Buffer.from("0061736d0100000001060160017f017f03020100070501016600000a09010700200041016a0b", "hex"));
 
-// CacheStorage as the browser has it, in memory. Entries keep the stored
-// Response's bytes and headers; `failPut` simulates a full quota.
-function fakeCacheStorage() {
-  const caches = new Map();
-  const storage = {
-    failPut: null,
-    caches,
-    async open(name) {
-      if (!caches.has(name)) {
-        const entries = new Map();
-        caches.set(name, {
-          entries,
-          async put(url, response) {
-            if (storage.failPut) {
-              const error = storage.failPut(name, url);
-              if (error) throw error;
-            }
-            entries.set(String(url), { body: new Uint8Array(await response.arrayBuffer()), headers: [...response.headers] });
-          },
-          async match(url) {
-            const hit = entries.get(String(url?.url ?? url));
-            return hit ? new Response(hit.body.slice(), { headers: hit.headers }) : undefined;
-          },
-          async delete(url) {
-            return entries.delete(String(url?.url ?? url));
-          },
-          async keys() {
-            return [...entries.keys()].map((url) => ({ url }));
-          }
-        });
-      }
-      return caches.get(name);
-    },
-    async has(name) {
-      return caches.has(name);
-    },
-    async delete(name) {
-      return caches.delete(name);
-    },
-    async keys() {
-      return [...caches.keys()];
-    }
-  };
-  return storage;
-}
+import { fakeCacheStorage } from "./helpers/fake-cache-storage.mjs";
 
 const DISC = `disc-sha256-v1:${"1".repeat(64)}`;
 const OTHER_DISC = `disc-sha256-v1:${"2".repeat(64)}`;
@@ -623,4 +579,49 @@ test("the block store's buffer goes out when the saves do (page hidden or closed
   assert.match(worker, /if \(type === "flushUserData" \|\| type === "stop"\) void dolphinJitBlockStore\?\.flush\(\)/);
   const adapter = await readFile(new URL("../src/upstream-worker-adapter.js", import.meta.url), "utf8");
   assert.match(adapter, /addEventListener\?\.\("pagehide", \(\) => this\.flushUserData\(\)/);
+});
+
+test("blacklist: engine rejects and refusals are remembered under the identity, and a new identity starts clean", async () => {
+  const storage = fakeCacheStorage();
+  const key = (n) => `r:${String(n).padStart(64, "0")}`;
+  const cache = await open(storage);
+  const { failed } = await cache.put([{ key: key(1), bytes: new Uint8Array([1, 2, 3]) }]);
+  assert.deepEqual(failed, [{ key: key(1), reason: "engine-reject" }]);
+  await cache.blacklist([{ key: key(2), reason: "untranslatable" }, { key: "not-hashed", reason: "x" }]);
+  assert.equal(cache.isBlacklisted(key(1)), true);
+  assert.equal(cache.blacklistReason(key(2)), "untranslatable");
+  assert.equal(cache.isBlacklisted("not-hashed"), false);
+  await cache.drain();
+  // the next session of the same identity knows it
+  const again = await open(storage);
+  assert.equal(again.isBlacklisted(key(1)) && again.isBlacklisted(key(2)), true);
+  assert.deepEqual(await again.has([key(1), key(2)]), new Set(), "the list is not an entry");
+  // another compiler version: a clean list
+  const other = await open(storage, { compilerVersion: "region-2" });
+  assert.equal(other.isBlacklisted(key(1)), false);
+  // an engine reject holds only for the browser build that rejected
+  const realNavigator = Object.getOwnPropertyDescriptor(globalThis, "navigator");
+  Object.defineProperty(globalThis, "navigator", { value: { userAgent: "another browser build" }, configurable: true });
+  try {
+    const newer = await open(storage);
+    assert.equal(newer.isBlacklisted(key(1)), false, "engine-reject from another build is dropped");
+    assert.equal(newer.isBlacklisted(key(2)), true, "a refusal of the translator holds on any build");
+  } finally {
+    if (realNavigator) Object.defineProperty(globalThis, "navigator", realNavigator);
+    else delete globalThis.navigator;
+  }
+});
+
+test("blacklist: two sessions of one identity add keys side by side, and a blacklisted region's bytes go", async () => {
+  const storage = fakeCacheStorage();
+  const key = (n) => `r:${String(n).padStart(64, "0")}`;
+  const tabA = await open(storage);
+  const tabB = await open(storage);
+  await tabA.put([{ key: key(7), bytes: MOD_A }]);
+  await Promise.all([tabA.blacklist([{ key: key(7), reason: "too-large" }]), tabB.blacklist([{ key: key(8), reason: "untranslatable" }])]);
+  await Promise.all([tabA.drain(), tabB.drain()]);
+  const next = await open(storage);
+  assert.equal(next.isBlacklisted(key(7)) && next.isBlacklisted(key(8)), true, "neither tab's list overwrote the other");
+  assert.deepEqual(await next.has([key(7)]), new Set(), "the bytes of a blacklisted region are deleted");
+  assert.equal(next.blacklistReason(key(7)), "too-large");
 });
