@@ -1,0 +1,26 @@
+diff --git a/Source/Core/VideoBackends/WebGPU/WebGPUGfx.cpp b/Source/Core/VideoBackends/WebGPU/WebGPUGfx.cpp
+--- a/Source/Core/VideoBackends/WebGPU/WebGPUGfx.cpp
++++ b/Source/Core/VideoBackends/WebGPU/WebGPUGfx.cpp
+@@ -14,6 +14,7 @@
+ 
+ #include "Common/Logging/Log.h"
+ 
++#include "Core/Config/GraphicsSettings.h"
+ #include "Core/System.h"
+ 
+ #include "VideoCommon/AbstractFramebuffer.h"
+@@ -2684,7 +2685,13 @@ SurfaceInfo WebGPUGfx::GetSurfaceInfo() const
+   // incompatible with the bgra8unorm canvas pass ("Attachment state
+   // ... not compatible"), so the blit silently failed and nothing
+   // presented. Must match the consumer's context format.
+-  return {640, 480, 1.0f, AbstractTextureFormat::BGRA8};
++  //
++  // Internal resolution (?ir=N, patch 0082): the EFB and the XFB copies are
++  // N times native, so the backbuffer the XFB is blitted into is too; at
++  // 640x480 the presenter would average the extra pixels away. The worker
++  // sizes its canvas from the same setting. Clamped to what it allocates.
++  const int scale = std::clamp(Config::Get(Config::GFX_EFB_SCALE), 1, 4);
++  return {640 * scale, 480 * scale, 1.0f, AbstractTextureFormat::BGRA8};
+ }
+ 
+ void WebGPUEFBInterface::ReinterpretPixelData(EFBReinterpretType /* convtype */)

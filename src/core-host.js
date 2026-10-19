@@ -1,5 +1,6 @@
 import { aotCompilerRequested } from "./aot-compiler-worker.js";
 import { parseCustomRtc } from "./custom-rtc.js";
+import { requestedUpscaleStudy } from "./wgpu-upscale-study.js";
 import { DolphinCoreAdapter, dolphinBundleAvailable } from "./dolphin-adapter.js";
 import { buttonMaskFromPressed, isPadPort } from "./input.js";
 import { UpstreamMainThreadAdapter } from "./upstream-main-thread-adapter.js";
@@ -107,6 +108,9 @@ export class EmulatorHost {
     this.correctTimeDrift = requestedCorrectTimeDrift();
     this.coreLog = requestedCoreLog();
     this.memcardSlotB = new URLSearchParams(window.location.search).get("memcardb") === "1";
+    // ?ir=2|3|4: internal resolution of the hardware path (patch 0082).
+    this.internalResolution = requestedInternalResolution(window.location.search);
+    this.upscaleStudy = requestedUpscaleStudy(window.location.search);
     this.savesMode = new URLSearchParams(window.location.search).get("saves") === "off" ? "off" : "";
     this.efbDiag = requestedEfbDiag();
     this.jitVerbose = new URLSearchParams(window.location.search).get("jitverbose") === "1";
@@ -402,6 +406,8 @@ export class EmulatorHost {
             correctTimeDrift: this.correctTimeDrift,
             coreLog: this.coreLog,
             memcardSlotB: this.memcardSlotB,
+            internalResolution: this.internalResolution,
+            upscaleStudy: this.upscaleStudy,
             savesMode: this.savesMode,
             efbDiag: this.efbDiag,
             jitVerbose: this.jitVerbose,
@@ -1569,4 +1575,11 @@ function requestedVisibleSampler() {
 
 function requestedCollectMetrics() {
   return new URLSearchParams(window.location.search).get("metrics") === "1";
+}
+
+// Internal resolution multiplier from ?ir= (1 = native, the default). Only
+// the WebGPU hardware path honours it; the core clamps it again.
+export function requestedInternalResolution(search) {
+  const n = Number.parseInt(new URLSearchParams(search).get("ir") || "1", 10);
+  return n >= 1 && n <= 4 ? n : 1;
 }

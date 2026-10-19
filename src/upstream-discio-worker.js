@@ -11,6 +11,7 @@ import {
   sha256Hex
 } from "./upstream-worker-protocol.js";
 import { parseDolHeader } from "./dol.js";
+import { createGpuPassTimer, createPostUpscaler } from "./wgpu-upscale-study.js";
 import { decodeWgpuSamplerState } from "./wgpu-sampler-state.js";
 import { gxClearDepthToStored, gxDepthState } from "./wgpu-depth-state.js";
 import { clampSourceRect, createWgpuExactCapture, packReadbackRows } from "./wgpu-exact-capture.js";
@@ -204,6 +205,13 @@ let renderCanvas = null;
 // hardware path never restores it.
 const WGPU_BACKBUFFER_W = 640;
 const WGPU_BACKBUFFER_H = 480;
+// ?ir=N multiplies it (the core's GetSurfaceInfo does the same, patch 0082).
+let wgpuBackbufferScale = 1;
+// Upscaling study (src/wgpu-upscale-study.js): ?upscale= filters the
+// presented frame into a larger canvas, ?gputime=1 times the render passes.
+let upscaleStudy = { filter: "", factor: 2, sharpness: 0.2, gpuTime: false };
+let wgpuPostUpscaler = null;
+let wgpuGpuTimer = null;
 let wgpuBackbufferSized = false;
 let renderContext = null;
 let renderImageData = null;
@@ -1200,6 +1208,8 @@ async function handleMessage(type, payload) {
         correctTimeDrift: payload.correctTimeDrift,
         coreLog: payload.coreLog,
         memcardSlotB: payload.memcardSlotB,
+        internalResolution: payload.internalResolution,
+        upscaleStudy: payload.upscaleStudy,
         efbDiag: payload.efbDiag,
         jitVerbose: payload.jitVerbose,
         frameCap: payload.frameCap,
@@ -1417,6 +1427,17 @@ async function handleMessage(type, payload) {
       return readDetTrace(payload);
     case "validationReadWgpuReplayState":
       return readWgpuReplayState();
+    case "upscaleStudyStats": {
+      // GPU pass times since the last reset (?gputime=1), and the sizes.
+      const out = {
+        internalResolution: wgpuBackbufferScale, upscale: upscaleStudy,
+        canvas: renderCanvas ? [renderCanvas.width, renderCanvas.height] : null,
+        timer: wgpuGpuTimer ? wgpuGpuTimer.stats() : null,
+        timestampFeature: Boolean(renderGpu?.device?.features?.has?.("timestamp-query"))
+      };
+      if (payload?.reset) wgpuGpuTimer?.reset();
+      return out;
+    }
     case "validationEnableGpuSyncDiag":
       // Applied now if the core is loaded, and again when it loads.
       gpuSyncDiagEnabled = payload.enabled !== false;
@@ -1802,6 +1823,8 @@ async function loadCore({
   correctTimeDrift = false,
   coreLog = false,
   memcardSlotB = false,
+  internalResolution = 1,
+  upscaleStudy: requestedUpscaleStudy = null,
   efbDiag = false,
   jitVerbose = false,
   frameCap = 0,
@@ -2042,6 +2065,8 @@ async function loadCore({
   wgpuPowerPreference = requestedWgpuPowerPreference === "low-power"
     ? "low-power"
     : "high-performance";
+  upscaleStudy = { filter: "", factor: 2, sharpness: 0.2, gpuTime: false,
+    ...(requestedUpscaleStudy || {}) };
   webGpuCausalStats.rendererWorkerProbe = {
     ...webGpuCausalStats.rendererWorkerProbe,
     requested: wgpuRendererWorkerProbe,
@@ -2269,6 +2294,10 @@ async function loadCore({
     dolphinCorrectTimeDrift: Boolean(correctTimeDrift),
     dolphinCoreLog: Boolean(coreLog),
     dolphinMemcardSlotB: Boolean(memcardSlotB),
+    // ?ir=N: the core renders the EFB at N times native (patch 0082) and
+    // reports an N-times backbuffer; the canvas grows to match below.
+    dolphinEfbScale: (wgpuBackbufferScale =
+      Math.min(4, Math.max(1, Number(internalResolution) | 0 || 1))),
     // Ranks the instructions that block JIT compilation (?jitverbose=1).
     dolphinWebVerbosePpcJit: Boolean(jitVerbose),
     dolphinFrameCap: (frameCapTarget = Number(frameCap) || 0),
@@ -5504,6 +5533,7 @@ async function createWebGpuPresenter(canvas) {
   // dual-source-blending lets GX destination alpha and source-alpha blending
   // coexist in one draw (see RENDERER_FEATURE_DUAL_SOURCE_BLEND).
   const wantFeatures = ["clip-distances", "depth-clip-control", "dual-source-blending"];
+  if (upscaleStudy.gpuTime) wantFeatures.push("timestamp-query");
   const haveFeatures = wantFeatures.filter((f) => adapter.features && adapter.features.has(f));
   console.log("[wgpu-features] got=" + (haveFeatures.join(",") || "none") +
               " missing=" + (wantFeatures.filter((f) => !haveFeatures.includes(f)).join(",") || "none"));
@@ -5980,12 +6010,16 @@ function drawFrameBytesToWebGpu(width, height, frameView) {
     return;
   }
 
-  if (renderCanvas.width !== width || renderCanvas.height !== height) {
-    renderCanvas.width = width;
-    renderCanvas.height = height;
+  // ?upscale= (upscaling study): the canvas is `factor` times the frame and
+  // the presentation upscaler draws into it from the uploaded frame.
+  const postFactor = upscaleStudy.filter ? upscaleStudy.factor : 1;
+  const canvasW = width * postFactor, canvasH = height * postFactor;
+  if (renderCanvas.width !== canvasW || renderCanvas.height !== canvasH) {
+    renderCanvas.width = canvasW;
+    renderCanvas.height = canvasH;
   }
 
-  if (gpu.canvasWidth !== width || gpu.canvasHeight !== height) {
+  if (gpu.canvasWidth !== canvasW || gpu.canvasHeight !== canvasH) {
     gpu.context.configure({
       alphaMode: "opaque",
       device: gpu.device,
@@ -5994,8 +6028,8 @@ function drawFrameBytesToWebGpu(width, height, frameView) {
         ((wgpuReplayClassifier || inputReadbackDiagnostics) ? textureUsage.COPY_SRC : 0) |
         (wgpuVisualCadenceEnabled ? textureUsage.TEXTURE_BINDING : 0)
     });
-    gpu.canvasWidth = width;
-    gpu.canvasHeight = height;
+    gpu.canvasWidth = canvasW;
+    gpu.canvasHeight = canvasH;
   }
 
   if (gpu.textureWidth !== width || gpu.textureHeight !== height) {
@@ -6018,6 +6052,11 @@ function drawFrameBytesToWebGpu(width, height, frameView) {
     gpu.textureWidth = width;
     gpu.textureHeight = height;
     gpu.uploadBuffer = null;
+    gpu.postUpscaler = upscaleStudy.filter
+      ? createPostUpscaler(gpu.device, gpu.format, { srcW: width, srcH: height,
+        outW: canvasW, outH: canvasH, filter: upscaleStudy.filter,
+        sharpness: upscaleStudy.sharpness, externalSource: gpu.textureView })
+      : null;
   }
 
   const rowBytes = width * 4;
@@ -6031,6 +6070,12 @@ function drawFrameBytesToWebGpu(width, height, frameView) {
   );
 
   const encoder = gpu.device.createCommandEncoder({ label: "dolphin-xfb-presenter" });
+  if (gpu.postUpscaler) {
+    gpu.postUpscaler.encode(encoder, gpu.context.getCurrentTexture().createView());
+    gpu.device.queue.submit([encoder.finish()]);
+    gpuCompletionTracker.recordSubmittedWork(gpu.device.queue, "software-present");
+    return;
+  }
   const pass = encoder.beginRenderPass({
     colorAttachments: [
       {
@@ -11536,6 +11581,7 @@ function drainWebGpuCmdRing(source = "presentation") {
       gpuCompletionTracker.recordSubmittedWork(q, "hardware-replay");
       acceptMappedBatch(mappedBatch);
       submitted = true;
+      wgpuGpuTimer?.afterSubmit();
       dtraceDrainPending();
     } catch (e) {
       lastSubmitFailureReason = "submit-error";
@@ -12621,11 +12667,12 @@ function drainWebGpuCmdRing(source = "presentation") {
             // (0.0 visual fps). The size must be stable, so take the page
             // canvas's intended size once and leave it alone.
             if (!wgpuBackbufferSized && renderCanvas &&
-                (renderCanvas.width < WGPU_BACKBUFFER_W ||
-                 renderCanvas.height < WGPU_BACKBUFFER_H)) {
+                (renderCanvas.width < WGPU_BACKBUFFER_W * wgpuBackbufferScale ||
+                 renderCanvas.height < WGPU_BACKBUFFER_H * wgpuBackbufferScale)) {
               wgpuBackbufferSized = true;
-              const newW = WGPU_BACKBUFFER_W;
-              const newH = WGPU_BACKBUFFER_H;
+              const postFactor = upscaleStudy.filter ? upscaleStudy.factor : 1;
+              const newW = WGPU_BACKBUFFER_W * wgpuBackbufferScale * postFactor;
+              const newH = WGPU_BACKBUFFER_H * wgpuBackbufferScale * postFactor;
               try {
                 renderCanvas.width = newW;
                 renderCanvas.height = newH;
@@ -12640,6 +12687,17 @@ function drainWebGpuCmdRing(source = "presentation") {
                 });
                 renderGpu.canvasWidth = newW;
                 renderGpu.canvasHeight = newH;
+                if (upscaleStudy.filter) {
+                  wgpuPostUpscaler = createPostUpscaler(renderGpu.device, renderGpu.format, {
+                    srcW: WGPU_BACKBUFFER_W * wgpuBackbufferScale,
+                    srcH: WGPU_BACKBUFFER_H * wgpuBackbufferScale,
+                    outW: newW, outH: newH,
+                    filter: upscaleStudy.filter, sharpness: upscaleStudy.sharpness
+                  });
+                }
+                if (upscaleStudy.gpuTime && !wgpuGpuTimer) {
+                  wgpuGpuTimer = createGpuPassTimer(renderGpu.device);
+                }
                 console.log(`[bbresize] backbuffer ${newW}x${newH} (game viewport extent)`);
                 postStatus(`wgpu backbuffer resized to ${newW}x${newH}`);
               } catch (e) {
@@ -12671,10 +12729,13 @@ function drainWebGpuCmdRing(source = "presentation") {
               const until = performance.now() + wgpuDiagPerturb.presentDelayMs;
               while (performance.now() < until) { /* harness perturbation: a blocking present */ }
             }
-            const cur = renderGpu.context.getCurrentTexture();
+            // With a presentation upscaler, Dolphin's backbuffer is the
+            // upscaler's source; the canvas is written at SUBMIT_PRESENT.
+            const cur = wgpuPostUpscaler
+              ? wgpuPostUpscaler.source : renderGpu.context.getCurrentTexture();
             lastBackbufferTexture = cur;
             currentBackbufferSourceTextureId = 0;
-            colorView = cur.createView();
+            colorView = wgpuPostUpscaler ? wgpuPostUpscaler.sourceView : cur.createView();
             passW = cur.width;
             passH = cur.height;
             passColorFmt = renderGpu.format;
@@ -12756,6 +12817,7 @@ function drainWebGpuCmdRing(source = "presentation") {
             desc.depthStencilAttachment = ds;
           }
           if (fbId === self._wgEfbColorId) vpDiagNoteEfbPass(loadOp === "clear");
+          wgpuGpuTimer?.wrap(desc);
           pass = enc.beginRenderPass(desc);
           dtPassDesc = desc;
           lastAppliedViewport = lastAppliedScissor = dtLastPipe = dtLastVb = dtLastIb = null;
@@ -13813,6 +13875,12 @@ function drainWebGpuCmdRing(source = "presentation") {
               complete: true
             });
           }
+          if (wgpuPostUpscaler && lastBackbufferTexture === wgpuPostUpscaler.source) {
+            const canvasTex = renderGpu.context.getCurrentTexture();
+            wgpuPostUpscaler.encode(ensureEnc(), canvasTex.createView(), wgpuGpuTimer);
+            lastBackbufferTexture = canvasTex;
+          }
+          wgpuGpuTimer?.present(ensureEnc());
           if (DIAG_DEPTH_TRACE) {
             const pn = self._wgPresentCount || 0;
             const dt = self._wgDt;

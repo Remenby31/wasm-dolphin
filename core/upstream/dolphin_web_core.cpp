@@ -646,6 +646,16 @@ void EnsureRuntime()
   Config::SetBase(Config::MAIN_AUDIO_MUTED, false);
   Config::SetBase(Config::GFX_HACK_SKIP_XFB_COPY_TO_RAM, s_video_backend == "OGL");
   Config::SetBase(Config::GFX_HACK_COPY_EFB_SCALED, false);
+  // ?ir=N (Module['dolphinEfbScale'], 1 to 4): internal resolution, the EFB
+  // and the XFB copies at N times native (patch 0082 sizes the backbuffer to
+  // match). EFB copies to textures stay native (COPY_EFB_SCALED above): only
+  // the frame gets sharper, effects that read the EFB back are unchanged.
+  // Hardware path only; 1, the default, is native.
+  const int efb_scale = EM_ASM_INT({
+    const n = (typeof Module !== 'undefined') ? (Module['dolphinEfbScale'] | 0) : 0;
+    return n >= 1 && n <= 4 ? n : 1;
+  });
+  Config::SetBase(Config::GFX_EFB_SCALE, s_video_backend == "WebGPU" ? efb_scale : 1);
   // Fill the canvas with the XFB, as the software presenter does. Dolphin's
   // default analog aspect pillarboxes a 640-wide XFB to ~583 pixels, so the
   // hardware path showed every game narrower than the software one.
