@@ -108,8 +108,9 @@ function sampleRss(profileDir) {
       sample.footprintMB = Math.round(per.reduce((n, x) => n + x.bytes, 0) / 1048576);
       const r = per.find((x) => x.pid === rendererPid);
       if (r) sample.rendererFootprintMB = Math.round(r.bytes / 1048576);
-    } catch {
-      // footprint unavailable: RSS only
+    } catch (error) {
+      // footprint unavailable: RSS only, and the run says why
+      sample.footprintError = String(error?.message || error).slice(0, 200);
     }
   }
   return sample;
@@ -186,8 +187,10 @@ async function measureOne(name, tree, runDir, profileDir) {
       endRendererMB: rss.at(-1)?.rendererMB ?? null,
       peakFootprintMB: peak("footprintMB"),
       endFootprintMB: rss.at(-1)?.footprintMB ?? null,
-      endRendererFootprintMB: rss.at(-1)?.rendererFootprintMB ?? null
+      endRendererFootprintMB: rss.at(-1)?.rendererFootprintMB ?? null,
+      footprintError: rss.find((r) => r.footprintError)?.footprintError ?? null
     };
+    if (result.rss.footprintError) log(`footprint failed: ${result.rss.footprintError}`);
     // The JIT engages at a fixed emulated field: that is when the cached
     // modules are first instantiated and called.
     const progress = await workerRequest(s.page, "validationReadCoreProgress", {}, 15000).catch(() => null);

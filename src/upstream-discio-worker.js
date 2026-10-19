@@ -6453,13 +6453,12 @@ async function loadDolphinJitCacheFromIdb(db) {
     // are warmed (packs are in the order blocks were first compiled). Every
     // block, today: measured by phys_footprint, warming all ~19 500 costs
     // +25 to +40 MB at the end of a race and +110 MB at peak, and a 2048
-    // budget lost the whole gain on menu hitches (measures/aot/rss3-*).
-    const warmFirst = dolphinJitBlockStore ? DOLPHIN_JIT_BOOT_WARM_MAX : 0;
+    // budget lost the whole gain on menu hitches (measures/aot/memory-aotcompiler.md).
     const batch = verified
       .filter(({ valid }) => valid)
       .map(({ key, buf }) => ({
         key,
-        p: compileDolphinJitModuleOffThread(buf, DELIVER_BEFORE_WARM, dolphinJitBootWarmed++ < warmFirst)
+        p: compileDolphinJitModuleOffThread(buf, DELIVER_BEFORE_WARM, takeDolphinJitWarmSlot())
       }));
     const res = await Promise.allSettled(batch.map((b) => b.p));
     for (let k = 0; k < res.length; k++) {
@@ -6885,6 +6884,11 @@ let dolphinAotCompilerWorkerFactoryForTest = null;
 // they are among the first ones the session will run, which are warmed.
 const DOLPHIN_JIT_BOOT_WARM_MAX = Infinity;
 let dolphinJitBootWarmed = 0;
+// One budget over boot load and lazy fill, with or without the block store
+// (without it, IndexedDB's order is the keys', so the budget is all or none).
+export function takeDolphinJitWarmSlot() {
+  return dolphinJitBootWarmed++ < DOLPHIN_JIT_BOOT_WARM_MAX;
+}
 function compileDolphinJitModuleOffThread(bytes, deliver, warm) {
   if (!dolphinAotCompilerEnabled || !warm) return WebAssembly.compile(bytes);
   return getDolphinAotCompiler().compile(bytes, { deliver }).then((result) => result.module);
@@ -7366,8 +7370,8 @@ async function startLazyJitCacheFill() {
         key: entry.key,
         // The lazy fill continues the boot load's order and its warm budget:
         // these are the blocks of the menus and the first scenes, and warming
-        // them is where the gain on menu hitches comes from (measures/aot/rss4).
-        p: compileDolphinJitModuleOffThread(buf, DELIVER_BEFORE_WARM, dolphinJitBlockStore ? dolphinJitBootWarmed++ < DOLPHIN_JIT_BOOT_WARM_MAX : false),
+        // them is where the gain on menu hitches comes from (measures/aot/memory-aotcompiler.md).
+        p: compileDolphinJitModuleOffThread(buf, DELIVER_BEFORE_WARM, takeDolphinJitWarmSlot()),
         bytes: fromOverflow ? buf : null
       };
     }).filter(Boolean);

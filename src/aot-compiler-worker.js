@@ -34,6 +34,9 @@ const WARM_STATE_CLEAR_BYTES = 0x10000;
 // the first entries a module's own segments fill are worth calling.
 const WARM_TABLE_SCAN_MAX = 4096;
 const SCRATCH_MEMORY_SHAPES_MAX = 2;
+// A scratch memory grows to hold the warm state, never past this (16 MiB):
+// a state placed further away is not copied and calls run on what there is.
+const WARM_SCRATCH_MAX_PAGES = 256;
 // Scratch memories are dropped once warm-ups have been idle this long; the
 // next warm-up allocates again.
 const SCRATCH_IDLE_RELEASE_MS = 5000;
@@ -200,7 +203,7 @@ export function createWarmer() {
       // against the commit charge at once); it grows just enough to hold the
       // warm state.
       const needed = Math.ceil((statePtr + len) / PAGE);
-      if (statePtr >= 0 && memory.buffer.byteLength < statePtr + len) {
+      if (statePtr >= 0 && memory.buffer.byteLength < statePtr + len && needed <= WARM_SCRATCH_MAX_PAGES) {
         try {
           memory.grow(needed - memory.buffer.byteLength / PAGE);
         } catch {
@@ -363,7 +366,12 @@ export function installAotCompilerWorker(scope) {
 
   // Answered once nothing is compiling or waiting for its warm-up.
   function answerFlushes() {
-    if (!inFlight && !pumping) scope.postMessage({ type: "aot-idle", totals: { ...totals } });
+    if (!inFlight && !pumping) {
+      // Replies first: the owner arms its idle stop only once nothing is
+      // pending on its side.
+      if (outbox.length) flushReplies();
+      scope.postMessage({ type: "aot-idle", totals: { ...totals } });
+    }
     if (inFlight || pumping || !flushes.length) return;
     if (outbox.length) flushReplies();
     for (const id of flushes) scope.postMessage({ type: "aot-flushed", id, totals: { ...totals } });
@@ -675,6 +683,7 @@ export function createAotCompilerClient({
     try {
       created = createWorker();
     } catch {
+      restartAfterIdle = false;
       onWorkerFailure();
       return null;
     }
@@ -783,7 +792,7 @@ export function createAotCompilerClient({
         worker.postMessage({ type: "aot-flush", id });
       });
     },
-    stats: () => ({ ...stats, pending: pending.size, offThread: brokenUntil !== Infinity, watchdog: canWatch, warmDisabled: !warmAllowed() && canWatch }),
+    stats: () => ({ ...stats, pending: pending.size, offThread: brokenUntil !== Infinity, watchdog: canWatch, warmDisabled: canWatch && stats.timeouts >= maxWarmTimeouts }),
     terminate() {
       killWorker();
       brokenUntil = Infinity;
