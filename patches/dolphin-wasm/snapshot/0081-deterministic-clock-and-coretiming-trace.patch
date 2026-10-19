@@ -1,45 +1,49 @@
 diff --git a/Source/Core/Core/CoreTiming.cpp b/Source/Core/Core/CoreTiming.cpp
 --- a/Source/Core/Core/CoreTiming.cpp
 +++ b/Source/Core/Core/CoreTiming.cpp
-@@ -28,6 +28,7 @@
+@@ -28,6 +28,9 @@
  #include "Core/PowerPC/PowerPC.h"
  #include "Core/System.h"
  #ifdef __EMSCRIPTEN__
++#if defined(DOLPHIN_WEB_DET_TRACE) && DOLPHIN_WEB_DET_TRACE
 +#include "Core/WasmDetTrace.h"
++#endif
  #include "Core/WasmTimingProfile.h"
  #endif
  
-@@ -306,6 +307,10 @@ void CoreTimingManager::ScheduleEvent(s64 cycles_into_future, EventType* event_t
+@@ -306,6 +309,10 @@ void CoreTimingManager::ScheduleEvent(s64 cycles_into_future, EventType* event_t
                      *event_type->name);
      }
  
-+#ifdef __EMSCRIPTEN__
++#if defined(DOLPHIN_WEB_DET_TRACE) && DOLPHIN_WEB_DET_TRACE
 +    DolphinWeb::DetTrace::Record(DolphinWeb::DetTrace::OffThread, event_type->name,
 +                                 static_cast<u64>(cycles_into_future), 0);
 +#endif
      std::lock_guard lk(m_ts_write_lock);
      m_ts_queue.Push(Event{cycles_into_future, 0, userdata, event_type});
    }
-@@ -351,6 +356,10 @@ void CoreTimingManager::MoveEvents()
+@@ -351,6 +358,10 @@ void CoreTimingManager::MoveEvents()
  
      ev.fifo_order = m_event_fifo_id++;
      ev.time += m_globals.global_timer;
-+#ifdef __EMSCRIPTEN__
++#if defined(DOLPHIN_WEB_DET_TRACE) && DOLPHIN_WEB_DET_TRACE
 +    DolphinWeb::DetTrace::Record(DolphinWeb::DetTrace::Moved, ev.type->name,
 +                                 static_cast<u64>(ev.time), 0);
 +#endif
  
      std::ranges::push_heap(m_event_queue, std::ranges::greater{});
    }
-@@ -455,6 +464,8 @@ void CoreTimingManager::Advance()
+@@ -454,6 +465,10 @@ void CoreTimingManager::Advance()
+     Event evt = m_event_queue.front();
      std::ranges::pop_heap(m_event_queue, std::ranges::greater{});
      m_event_queue.pop_back();
- #ifdef __EMSCRIPTEN__
++#if defined(DOLPHIN_WEB_DET_TRACE) && DOLPHIN_WEB_DET_TRACE
 +    DolphinWeb::DetTrace::Record(DolphinWeb::DetTrace::Run, evt.type->name,
 +                                 static_cast<u64>(evt.time), m_globals.global_timer - evt.time);
++#endif
+ #ifdef __EMSCRIPTEN__
      // §28cp metrics-gated per-event callback timing. Logs when ANY single
      // event callback exceeds 5ms wall time — these are the spikes that
-     // produce the 60ms advMax spike seen in §28co. Per-event so we can
 diff --git a/Source/Core/Core/HW/EXI/EXI.cpp b/Source/Core/Core/HW/EXI/EXI.cpp
 --- a/Source/Core/Core/HW/EXI/EXI.cpp
 +++ b/Source/Core/Core/HW/EXI/EXI.cpp
@@ -86,10 +90,10 @@ diff --git a/Source/Core/Core/HW/EXI/EXI_DeviceIPL.cpp b/Source/Core/Core/HW/EXI
      ASSERT(!Core::WantsDeterminism());
 diff --git a/Source/Core/Core/WasmDetTrace.h b/Source/Core/Core/WasmDetTrace.h
 new file mode 100644
-index 0000000..b9990cf
+index 0000000..2499b5b
 --- /dev/null
 +++ b/Source/Core/Core/WasmDetTrace.h
-@@ -0,0 +1,87 @@
+@@ -0,0 +1,88 @@
 +// Copyright 2026 Dolphin Emulator Project (wasm-dolphin fork)
 +// SPDX-License-Identifier: GPL-2.0-or-later
 +
@@ -100,9 +104,10 @@ index 0000000..b9990cf
 +// every event another thread schedules, in order, with its emulated time and
 +// how late it ran. Two runs of one boot that should be identical are compared
 +// on this log: the first entry that differs names what host timing reached.
-+// Off unless a harness session asks: then one relaxed load per event and a
-+// few stores. The log is allocated when the trace is first turned on, so a
-+// player's core reserves nothing for it.
++// Compiled only into a trace build (DOLPHIN_WEB_DET_TRACE=1 at configure
++// time): a player's core has none of it, CoreTiming's hot path is upstream's.
++// In a trace build it is off until a harness session asks, then costs one
++// relaxed load per event and a few stores; the log is allocated on first use.
 +
 +#include <atomic>
 +#include <cstdint>

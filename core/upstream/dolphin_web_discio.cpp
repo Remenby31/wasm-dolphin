@@ -34,7 +34,9 @@
 #include "VideoCommon/WasmGpuSyncDiag.h"
 #include "Core/HW/EXI/EXI_DeviceIPL.h"
 #include "Core/HW/Memmap.h"
+#if defined(DOLPHIN_WEB_DET_TRACE) && DOLPHIN_WEB_DET_TRACE
 #include "Core/WasmDetTrace.h"
+#endif
 #include "VideoCommon/TextureDecoder.h"
 #include "VideoCommon/Statistics.h"
 
@@ -1002,6 +1004,7 @@ void DolphinWeb_HarnessOnStateLoaded()
   s_harness_load_generation.fetch_add(1, std::memory_order_release);
 }
 
+#if defined(DOLPHIN_WEB_DET_TRACE) && DOLPHIN_WEB_DET_TRACE
 // ---- Determinism trace (Core/WasmDetTrace.h) ------------------------------
 // At every VI output while the trace is on: the hash of every CoreTiming event
 // so far, the emulated ticks and, every 30 outputs, a hash of emulated RAM.
@@ -1079,13 +1082,16 @@ void DetTraceOnViOutput(std::uint32_t vi)
   s_det_checkpoint_count.store(n + 1, std::memory_order_release);
 }
 }  // namespace
+#endif  // DOLPHIN_WEB_DET_TRACE
 
 static void HarnessOnViOutput(const std::uint8_t* xfb, std::uint32_t width, std::uint32_t stride,
                               std::uint32_t height)
 {
   ++s_harness_vi_since_boot;
   ++s_harness_vi_since_load;
+#if defined(DOLPHIN_WEB_DET_TRACE) && DOLPHIN_WEB_DET_TRACE
   DetTraceOnViOutput(s_harness_vi_since_boot);
+#endif
   if (!s_harness_enabled.load(std::memory_order_relaxed))
     return;
   // Informational: GetTicks() includes the event's lateness, so ticks are
@@ -1199,7 +1205,21 @@ EMSCRIPTEN_KEEPALIVE const char* DolphinWeb_GpuSyncDiag()
   out = o.str();
   return out.c_str();
 }
-// The determinism trace: on before the emulation starts (the worker applies
+// The console's real-time clock now, in seconds since 1970, as the emulated
+// software reads it (?rtc= starts it, emulated time moves it). The harness
+// checks it against what it asked for.
+EMSCRIPTEN_KEEPALIVE std::uint32_t DolphinWeb_EmulatedRtc()
+{
+  auto& system = Core::System::GetInstance();
+  // GetEmulatedTime divides by the timers' rate: 0 rather than a trap if it
+  // is not set. Before boot applies ?rtc=, this is the host's clock.
+  if (system.GetSystemTimers().GetTicksPerSecond() == 0)
+    return 0;
+  return ExpansionInterface::CEXIIPL::GetEmulatedTime(system, 0);
+}
+
+#if defined(DOLPHIN_WEB_DET_TRACE) && DOLPHIN_WEB_DET_TRACE
+// The determinism trace (a trace build only, DOLPHIN_WEB_DET_TRACE=1): on before the emulation starts (the worker applies
 // ?dettrace=1 when the core loads), read back by validationReadDetTrace.
 // A trace that starts after the first VI output missed part of the boot: the
 // start index is reported so such a run is never compared.
@@ -1216,18 +1236,6 @@ EMSCRIPTEN_KEEPALIVE std::uint32_t DolphinWeb_DetTraceStartVi() { return s_det_s
 EMSCRIPTEN_KEEPALIVE const void* DolphinWeb_DetTraceRamChunks() { return s_det_ram_chunks.data(); }
 EMSCRIPTEN_KEEPALIVE std::uint32_t DolphinWeb_DetTraceRamChunkCount() { return s_det_ram_chunk_count; }
 EMSCRIPTEN_KEEPALIVE const void* DolphinWeb_DetTraceCheckpoints() { return s_det_checkpoints.data(); }
-// The console's real-time clock now, in seconds since 1970, as the emulated
-// software reads it (?rtc= starts it, emulated time moves it). The harness
-// checks it against what it asked for.
-EMSCRIPTEN_KEEPALIVE std::uint32_t DolphinWeb_EmulatedRtc()
-{
-  auto& system = Core::System::GetInstance();
-  // GetEmulatedTime divides by the timers' rate: 0 rather than a trap if it
-  // is not set. Before boot applies ?rtc=, this is the host's clock.
-  if (system.GetSystemTimers().GetTicksPerSecond() == 0)
-    return 0;
-  return ExpansionInterface::CEXIIPL::GetEmulatedTime(system, 0);
-}
 EMSCRIPTEN_KEEPALIVE std::uint32_t DolphinWeb_DetTraceCheckpointCount()
 {
   return s_det_checkpoint_count.load(std::memory_order_acquire);
@@ -1246,6 +1254,7 @@ EMSCRIPTEN_KEEPALIVE const char* DolphinWeb_DetTraceName(std::uintptr_t name)
 {
   return name ? reinterpret_cast<const std::string*>(name)->c_str() : "";
 }
+#endif  // DOLPHIN_WEB_DET_TRACE
 EMSCRIPTEN_KEEPALIVE int DolphinWeb_HarnessEnabled() { return s_harness_enabled.load(std::memory_order_relaxed); }
 EMSCRIPTEN_KEEPALIVE std::uint32_t DolphinWeb_HarnessViSinceBoot() { return s_harness_vi_since_boot; }
 EMSCRIPTEN_KEEPALIVE std::uint32_t DolphinWeb_HarnessViSinceLoad() { return s_harness_vi_since_load; }

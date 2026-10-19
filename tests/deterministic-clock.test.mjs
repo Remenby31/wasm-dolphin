@@ -84,3 +84,26 @@ test("patch 0081: the custom clock follows emulated time and formats the cards",
   // The trace's log is allocated when it is turned on, never for a player.
   assert.match(patch, /\+inline std::atomic<Entry\*> s_log\{nullptr\};/);
 });
+
+test("the CoreTiming trace exists only in a trace build: a player's core has none of it", async () => {
+  const dir = new URL("../patches/dolphin-wasm/snapshot/", import.meta.url);
+  const name = (await readdir(dir)).find((f) => /^0081-.*\.patch$/.test(f));
+  const patch = readFileSync(new URL(name, dir), "utf8");
+  const gate = "#if defined(DOLPHIN_WEB_DET_TRACE) && DOLPHIN_WEB_DET_TRACE";
+  // Every hook in CoreTiming (and its include) sits behind the build flag, so
+  // Advance and MoveEvents compile to upstream's code by default.
+  const coreTiming = patch.slice(0, patch.indexOf("diff --git a/Source/Core/Core/HW/EXI/EXI.cpp"));
+  const records = coreTiming.match(/DolphinWeb::DetTrace::Record\(/g) ?? [];
+  assert.equal(records.length, 3);
+  for (const block of coreTiming.split(`+${gate}`).slice(1)) assert.match(block, /^\n\+(#include "Core\/WasmDetTrace\.h"|    DolphinWeb::DetTrace::Record\()/);
+  assert.equal(coreTiming.split(`+${gate}`).length - 1, 4);
+  const configure = readFileSync(new URL("../tools/configure-upstream-wasm.mjs", import.meta.url), "utf8");
+  assert.match(configure, /process\.env\.DOLPHIN_WEB_DET_TRACE \?\? "0"/);
+  assert.match(configure, /-DDOLPHIN_WEB_DET_TRACE=\$\{detTrace\}/);
+  assert.match(readFileSync(new URL("../tools/core-build-info.mjs", import.meta.url), "utf8"), /detTrace: configure\.detTrace/);
+  // The trace's exports too; the clock's are in every build.
+  const discio = readFileSync(new URL("../core/upstream/dolphin_web_discio.cpp", import.meta.url), "utf8");
+  const traced = discio.slice(discio.indexOf(`${gate}\n// The determinism trace`));
+  assert.ok(traced.indexOf("DolphinWeb_DetTraceEnable") < traced.indexOf("#endif  // DOLPHIN_WEB_DET_TRACE"));
+  assert.ok(discio.indexOf("DolphinWeb_EmulatedRtc()") < discio.indexOf(`${gate}\n// The determinism trace`));
+});

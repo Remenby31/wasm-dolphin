@@ -15,6 +15,10 @@
 // Exit 0: identical runs on the fixed clock, or differing runs on the host
 // clock (--host-clock). Exit 1 otherwise.
 //
+// The trace exists only in a trace build of the core (DOLPHIN_WEB_DET_TRACE=1
+// at configure time; pass it with coreid= in --query): the committed core,
+// like a player's, has none of it, and the probe says so.
+//
 // The harness runs cpu=single on a fixed console clock (?rtc=, matrix.mjs) and
 // the probe expects identical runs. --host-clock runs on the host's clock, as
 // the app does for players, and expects the opposite: the clock sets the time

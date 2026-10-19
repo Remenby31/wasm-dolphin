@@ -52,7 +52,9 @@ silence. `rtc=host` keeps the host's clock, as players have it; the CI matrix
 keeps one such cell (`sw-single-hostclock`). `probes/determinism.mjs` boots a
 disc several times with a CoreTiming trace and compares every event, emulated
 RAM and the picture: identical on the fixed clock, and with `--host-clock` it
-expects the runs to differ.
+expects the runs to differ. The trace is compiled only into a trace build
+(`DOLPHIN_WEB_DET_TRACE=1 npm run build:core:repro`, loaded with `coreid=`):
+the committed core and a player's have none of it.
 
 Against a trunk older than 0081, a single-core cell boots on a clock that
 trunk does not have: run that one comparison with `rtc=host` on both sides,

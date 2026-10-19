@@ -676,7 +676,9 @@ let detTraceRequested = false;
 let customRtcStatus = { requested: null, applied: false, why: null };
 function readDetTrace({ fromLog = 0, maxLog = 0 } = {}) {
   const m = moduleInstance;
-  if (!m?._DolphinWeb_DetTraceCheckpoints) return { supported: false, why: "core without the determinism trace" };
+  if (!m?._DolphinWeb_DetTraceCheckpoints) {
+    return { supported: false, why: "core without the determinism trace: build it with DOLPHIN_WEB_DET_TRACE=1" };
+  }
   const cpCount = m._DolphinWeb_DetTraceCheckpointCount() >>> 0;
   const cpPtr = m._DolphinWeb_DetTraceCheckpoints() >>> 0;
   const cp = new DataView(m.HEAPU8.buffer, cpPtr, cpCount * 32);

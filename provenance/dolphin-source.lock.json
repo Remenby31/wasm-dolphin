@@ -25,7 +25,7 @@
       "commit": "01e0577914a75a2569c846778c2f93aa8e6feddd"
     }
   },
-  "patchSeriesSha256": "c1f07847d88da7c2c5892f2414b14de006be545350bbeeeb0e4ca2da882aebc8",
+  "patchSeriesSha256": "9cb6511afffe94509f66a5bb6b5ad61ecd12857d027b8177f4f78b1aab350972",
   "patches": [
     {
       "order": 1,
@@ -592,8 +592,8 @@
       "cwd": ".",
       "hashMode": "lf-normalized",
       "path": "patches/dolphin-wasm/snapshot/0081-deterministic-clock-and-coretiming-trace.patch",
-      "size": 7606,
-      "sha256": "1ce878d54af23824303d85322aea97428f2b766659103b0a3511a7b1b4d62500"
+      "size": 7901,
+      "sha256": "8dbcdec068f9dfe4fd626432e04e14178a1b341fa5052747265ca5bf5fca70c6"
     },
     {
       "order": 72,
