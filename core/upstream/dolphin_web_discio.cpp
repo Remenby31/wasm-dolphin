@@ -3,6 +3,7 @@
 
 #include <array>
 #include <algorithm>
+#include <cstring>
 #include <climits>
 #include <atomic>
 #include <chrono>
@@ -31,6 +32,11 @@
 #include "VideoCommon/Fifo.h"
 #include "VideoCommon/PixelEngine.h"
 #include "VideoCommon/WasmGpuSyncDiag.h"
+#include "Core/HW/EXI/EXI_DeviceIPL.h"
+#include "Core/HW/Memmap.h"
+#if defined(DOLPHIN_WEB_DET_TRACE) && DOLPHIN_WEB_DET_TRACE
+#include "Core/WasmDetTrace.h"
+#endif
 #include "VideoCommon/TextureDecoder.h"
 #include "VideoCommon/Statistics.h"
 
@@ -998,11 +1004,94 @@ void DolphinWeb_HarnessOnStateLoaded()
   s_harness_load_generation.fetch_add(1, std::memory_order_release);
 }
 
+#if defined(DOLPHIN_WEB_DET_TRACE) && DOLPHIN_WEB_DET_TRACE
+// ---- Determinism trace (Core/WasmDetTrace.h) ------------------------------
+// At every VI output while the trace is on: the hash of every CoreTiming event
+// so far, the emulated ticks and, every 30 outputs, a hash of emulated RAM.
+// Two runs that should be identical part at the first differing checkpoint;
+// the event log then shows what happened just before.
+namespace
+{
+struct DetCheckpoint
+{
+  std::uint64_t events_hash;
+  std::uint64_t ram_hash;  // 0 where not computed
+  std::uint64_t ticks;
+  std::uint32_t events;
+  std::uint32_t log_count;
+};
+constexpr std::uint32_t kDetCheckpoints = 8192;
+// Allocated when the trace is turned on: nothing for a player's core.
+std::vector<DetCheckpoint> s_det_checkpoints;
+std::atomic<std::uint32_t> s_det_checkpoint_count{0};
+
+std::uint64_t EmulatedRamHash()
+{
+  auto& memory = Core::System::GetInstance().GetMemory();
+  const std::uint8_t* ram = memory.GetRAM();
+  const std::uint32_t size = memory.GetRamSizeReal();
+  std::uint64_t h = 1469598103934665603ull;
+  for (std::uint32_t i = 0; i + 8 <= size; i += 8)
+  {
+    std::uint64_t word;
+    std::memcpy(&word, ram + i, 8);
+    h = (h ^ word) * 1099511628211ull;
+  }
+  return h;
+}
+
+// RAM in 64 KiB chunks at VI output 30: which region two runs disagree on.
+constexpr std::uint32_t kDetRamChunkShift = 16;
+std::vector<std::uint64_t> s_det_ram_chunks;
+std::uint32_t s_det_ram_chunk_count = 0;
+void HashRamChunks()
+{
+  auto& memory = Core::System::GetInstance().GetMemory();
+  const std::uint8_t* ram = memory.GetRAM();
+  const std::uint32_t size = memory.GetRamSizeReal();
+  s_det_ram_chunks.resize(size >> kDetRamChunkShift);
+  s_det_ram_chunk_count = static_cast<std::uint32_t>(s_det_ram_chunks.size());
+  for (std::uint32_t c = 0; c < s_det_ram_chunk_count; ++c)
+  {
+    std::uint64_t h = 1469598103934665603ull;
+    for (std::uint32_t i = c << kDetRamChunkShift; i < (c + 1) << kDetRamChunkShift; i += 8)
+    {
+      std::uint64_t word;
+      std::memcpy(&word, ram + i, 8);
+      h = (h ^ word) * 1099511628211ull;
+    }
+    s_det_ram_chunks[c] = h;
+  }
+}
+
+void DetTraceOnViOutput(std::uint32_t vi)
+{
+  if (DolphinWeb::DetTrace::Enabled() && vi == 30)
+    HashRamChunks();
+  if (!DolphinWeb::DetTrace::Enabled())
+    return;
+  const std::uint32_t n = s_det_checkpoint_count.load(std::memory_order_relaxed);
+  if (n >= s_det_checkpoints.size())
+    return;
+  s_det_checkpoints[n] = DetCheckpoint{
+      DolphinWeb::DetTrace::s_hash.load(std::memory_order_relaxed),
+      vi % 30 == 0 ? EmulatedRamHash() : 0,
+      Core::System::GetInstance().GetCoreTiming().GetTicks(),
+      static_cast<std::uint32_t>(DolphinWeb::DetTrace::s_events.load(std::memory_order_relaxed)),
+      DolphinWeb::DetTrace::s_log_count.load(std::memory_order_relaxed)};
+  s_det_checkpoint_count.store(n + 1, std::memory_order_release);
+}
+}  // namespace
+#endif  // DOLPHIN_WEB_DET_TRACE
+
 static void HarnessOnViOutput(const std::uint8_t* xfb, std::uint32_t width, std::uint32_t stride,
                               std::uint32_t height)
 {
   ++s_harness_vi_since_boot;
   ++s_harness_vi_since_load;
+#if defined(DOLPHIN_WEB_DET_TRACE) && DOLPHIN_WEB_DET_TRACE
+  DetTraceOnViOutput(s_harness_vi_since_boot);
+#endif
   if (!s_harness_enabled.load(std::memory_order_relaxed))
     return;
   // Informational: GetTicks() includes the event's lateness, so ticks are
@@ -1116,6 +1205,56 @@ EMSCRIPTEN_KEEPALIVE const char* DolphinWeb_GpuSyncDiag()
   out = o.str();
   return out.c_str();
 }
+// The console's real-time clock now, in seconds since 1970, as the emulated
+// software reads it (?rtc= starts it, emulated time moves it). The harness
+// checks it against what it asked for.
+EMSCRIPTEN_KEEPALIVE std::uint32_t DolphinWeb_EmulatedRtc()
+{
+  auto& system = Core::System::GetInstance();
+  // GetEmulatedTime divides by the timers' rate: 0 rather than a trap if it
+  // is not set. Before boot applies ?rtc=, this is the host's clock.
+  if (system.GetSystemTimers().GetTicksPerSecond() == 0)
+    return 0;
+  return ExpansionInterface::CEXIIPL::GetEmulatedTime(system, 0);
+}
+
+#if defined(DOLPHIN_WEB_DET_TRACE) && DOLPHIN_WEB_DET_TRACE
+// The determinism trace (a trace build only, DOLPHIN_WEB_DET_TRACE=1): on before the emulation starts (the worker applies
+// ?dettrace=1 when the core loads), read back by validationReadDetTrace.
+// A trace that starts after the first VI output missed part of the boot: the
+// start index is reported so such a run is never compared.
+static std::uint32_t s_det_start_vi = 0;
+EMSCRIPTEN_KEEPALIVE void DolphinWeb_DetTraceEnable(int enabled)
+{
+  s_det_checkpoint_count.store(0, std::memory_order_relaxed);
+  if (enabled && s_det_checkpoints.empty())
+    s_det_checkpoints.resize(kDetCheckpoints);
+  s_det_start_vi = s_harness_vi_since_boot;
+  DolphinWeb::DetTrace::Enable(enabled != 0);
+}
+EMSCRIPTEN_KEEPALIVE std::uint32_t DolphinWeb_DetTraceStartVi() { return s_det_start_vi; }
+EMSCRIPTEN_KEEPALIVE const void* DolphinWeb_DetTraceRamChunks() { return s_det_ram_chunks.data(); }
+EMSCRIPTEN_KEEPALIVE std::uint32_t DolphinWeb_DetTraceRamChunkCount() { return s_det_ram_chunk_count; }
+EMSCRIPTEN_KEEPALIVE const void* DolphinWeb_DetTraceCheckpoints() { return s_det_checkpoints.data(); }
+EMSCRIPTEN_KEEPALIVE std::uint32_t DolphinWeb_DetTraceCheckpointCount()
+{
+  return s_det_checkpoint_count.load(std::memory_order_acquire);
+}
+EMSCRIPTEN_KEEPALIVE const void* DolphinWeb_DetTraceLog()
+{
+  return DolphinWeb::DetTrace::s_log.load(std::memory_order_acquire);
+}
+EMSCRIPTEN_KEEPALIVE std::uint32_t DolphinWeb_DetTraceLogCount()
+{
+  return std::min(DolphinWeb::DetTrace::s_log_count.load(std::memory_order_acquire),
+                  DolphinWeb::DetTrace::kLogCapacity);
+}
+// An event name recorded in the log (the address of its EventType's name).
+EMSCRIPTEN_KEEPALIVE const char* DolphinWeb_DetTraceName(std::uintptr_t name)
+{
+  return name ? reinterpret_cast<const std::string*>(name)->c_str() : "";
+}
+#endif  // DOLPHIN_WEB_DET_TRACE
 EMSCRIPTEN_KEEPALIVE int DolphinWeb_HarnessEnabled() { return s_harness_enabled.load(std::memory_order_relaxed); }
 EMSCRIPTEN_KEEPALIVE std::uint32_t DolphinWeb_HarnessViSinceBoot() { return s_harness_vi_since_boot; }
 EMSCRIPTEN_KEEPALIVE std::uint32_t DolphinWeb_HarnessViSinceLoad() { return s_harness_vi_since_load; }

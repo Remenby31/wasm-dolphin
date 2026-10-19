@@ -476,6 +476,10 @@ public:
 };
 
 PowerPC::CPUCore s_cpu_core = PowerPC::CPUCore::CachedInterpreter;
+// ?rtc=<seconds since 1970>: a fixed start for the emulated real-time clock,
+// which then follows emulated time (EXI_DeviceIPL.cpp). Off: the host clock.
+bool s_custom_rtc_enabled = false;
+std::uint32_t s_custom_rtc_value = 0;
 bool s_cpu_thread = false;
 float s_cpu_overclock = 1.0f;
 float s_emulation_speed = 1.0f;
@@ -595,6 +599,9 @@ void EnsureRuntime()
   Config::SetBase(Config::MAIN_GFX_BACKEND, s_video_backend);
   Config::SetBase(Config::GFX_PREFER_GLES, s_video_backend == "OGL");
   Config::SetBase(Config::MAIN_CPU_CORE, s_cpu_core);
+  Config::SetBase(Config::MAIN_CUSTOM_RTC_ENABLE, s_custom_rtc_enabled);
+  if (s_custom_rtc_enabled)
+    Config::SetBase(Config::MAIN_CUSTOM_RTC_VALUE, s_custom_rtc_value);
   Config::SetBase(Config::MAIN_CPU_THREAD, s_cpu_thread);
   Config::SetBase(Config::MAIN_SKIP_IPL, true);
   Config::SetBase(Config::MAIN_DSP_HLE, true);
@@ -896,6 +903,28 @@ int SetCpuThread(int enabled)
 
   s_cpu_thread = enabled != 0;
   return 1;
+}
+
+#ifdef __EMSCRIPTEN__
+EMSCRIPTEN_KEEPALIVE
+#endif
+int SetCustomRtc(int enabled, std::uint32_t seconds_since_1970)
+{
+  // The console counts from 2000 (GC_EPOCH): an earlier start would wrap.
+  constexpr std::uint32_t kJan2000 = 946684800;
+  if (s_runtime_initialized || (enabled && seconds_since_1970 < kJan2000))
+    return 0;
+  s_custom_rtc_enabled = enabled != 0;
+  s_custom_rtc_value = seconds_since_1970;
+  return 1;
+}
+
+#ifdef __EMSCRIPTEN__
+EMSCRIPTEN_KEEPALIVE
+#endif
+std::uint32_t GetCustomRtc()
+{
+  return s_custom_rtc_enabled ? s_custom_rtc_value : 0;
 }
 
 int SetCpuCore(const char* core)

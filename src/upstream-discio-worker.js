@@ -668,6 +668,44 @@ function wgpuDiagDrainWaitMs(now = performance.now()) {
 }
 
 // The core's FIFO / pixel-engine handshake snapshot (WasmGpuSyncDiag.h).
+// Determinism trace (WasmDetTrace.h): per-VI checkpoints and the event log,
+// copied out of the heap. Checkpoint: u64 events hash, u64 RAM hash (0 where
+// not taken), u64 ticks, u32 events, u32 log count (32 bytes). Log entry:
+// u64 time, i64 late, u32 name, u32 kind (24 bytes with wasm32 pointers).
+let detTraceRequested = false;
+let customRtcStatus = { requested: null, applied: false, why: null };
+function readDetTrace({ fromLog = 0, maxLog = 0 } = {}) {
+  const m = moduleInstance;
+  if (!m?._DolphinWeb_DetTraceCheckpoints) {
+    return { supported: false, why: "core without the determinism trace: build it with DOLPHIN_WEB_DET_TRACE=1" };
+  }
+  const cpCount = m._DolphinWeb_DetTraceCheckpointCount() >>> 0;
+  const cpPtr = m._DolphinWeb_DetTraceCheckpoints() >>> 0;
+  const cp = new DataView(m.HEAPU8.buffer, cpPtr, cpCount * 32);
+  const checkpoints = [];
+  for (let i = 0; i < cpCount; i += 1) {
+    const o = i * 32;
+    checkpoints.push([cp.getBigUint64(o, true).toString(16), cp.getBigUint64(o + 8, true).toString(16), Number(cp.getBigUint64(o + 16, true)), cp.getUint32(o + 24, true), cp.getUint32(o + 28, true)]);
+  }
+  const logCount = m._DolphinWeb_DetTraceLogCount() >>> 0;
+  const logPtr = m._DolphinWeb_DetTraceLog() >>> 0;
+  const end = Math.min(logCount, fromLog + Math.max(0, maxLog));
+  const log = [], names = {};
+  for (let i = fromLog; i < end; i += 1) {
+    const v = new DataView(m.HEAPU8.buffer, logPtr + i * 24, 24);
+    const name = v.getUint32(16, true);
+    names[name] ??= m.UTF8ToString(m._DolphinWeb_DetTraceName(name));
+    log.push([Number(v.getBigUint64(0, true)), Number(v.getBigInt64(8, true)), names[name], v.getUint32(20, true)]);
+  }
+  const ramChunks = [];
+  const chunkCount = m._DolphinWeb_DetTraceRamChunkCount?.() >>> 0;
+  if (chunkCount) {
+    const v = new DataView(m.HEAPU8.buffer, m._DolphinWeb_DetTraceRamChunks() >>> 0, chunkCount * 8);
+    for (let i = 0; i < chunkCount; i += 1) ramChunks.push(v.getBigUint64(i * 8, true).toString(16));
+  }
+  return { supported: true, startVi: m._DolphinWeb_DetTraceStartVi() >>> 0, checkpoints, logCount, log, ramChunks };
+}
+
 function readGpuSyncDiag() {
   const m = moduleInstance;
   if (!m?._DolphinWeb_GpuSyncDiag) return null;
@@ -1141,6 +1179,7 @@ async function handleMessage(type, payload) {
         videoBackend: payload.videoBackend,
         cpuThread: payload.cpuThread,
         cpuCore: payload.cpuCore,
+        customRtc: payload.customRtc,
         ppcWasmJit: payload.ppcWasmJit,
         ppcWasmJitForce: payload.ppcWasmJitForce,
         ppcWasmJitTier: payload.ppcWasmJitTier,
@@ -1360,6 +1399,12 @@ async function handleMessage(type, payload) {
       // Applied now if the core is loaded, and again when it loads.
       harnessEnabled = true;
       moduleInstance?._DolphinWeb_HarnessEnable?.(1);
+      // The determinism trace (WasmDetTrace.h) must see the boot from its
+      // first event: requested here, started when the core loads.
+      if (payload.detTrace && !detTraceRequested) {
+        detTraceRequested = true;
+        moduleInstance?._DolphinWeb_DetTraceEnable?.(1);
+      }
       return { enabled: true, coreHooks: Boolean(moduleInstance?._DolphinWeb_HarnessEnable), coreLoaded: Boolean(moduleInstance) };
     case "validationReadTimeline":
       return readHarnessTimeline();
@@ -1367,6 +1412,8 @@ async function handleMessage(type, payload) {
       return harnessPcSampler(payload);
     case "validationCaptureAtVi":
       return captureAtViOutput(payload);
+    case "validationReadDetTrace":
+      return readDetTrace(payload);
     case "validationReadWgpuReplayState":
       return readWgpuReplayState();
     case "validationEnableGpuSyncDiag":
@@ -1385,6 +1432,10 @@ async function handleMessage(type, payload) {
         coreTicks: readCoreTicks(),
         coreTicksPerSecond: readCoreTicksPerSecond(),
         ppcPc: api?.getPpcPc?.() ?? 0,
+        // The console clock: what was asked, whether the core took it, and
+        // what the emulated software reads now (seconds since 1970).
+        customRtc: customRtcStatus,
+        emulatedRtc: moduleInstance?._DolphinWeb_EmulatedRtc ? moduleInstance._DolphinWeb_EmulatedRtc() >>> 0 : null,
         loadedCheckpointGeneration: loadedCheckpoint.generation,
         loadedCheckpointTicks: loadedCheckpoint.ticks,
         loadedCheckpointPpcPc: loadedCheckpoint.ppcPc,
@@ -1729,6 +1780,7 @@ async function loadCore({
   videoBackend = "Software Renderer",
   cpuThread = false,
   cpuCore = "cached",
+  customRtc = null,
   ppcWasmJit = false,
   ppcWasmJitForce: requestedPpcWasmJitForce = false,
   ppcWasmJitTier: requestedPpcWasmJitTier = "guarded",
@@ -2260,6 +2312,7 @@ async function loadCore({
   api = bindApi(moduleInstance);
   harnessVideoBackend = videoBackend;
   if (harnessEnabled) moduleInstance._DolphinWeb_HarnessEnable?.(1);
+  if (detTraceRequested) moduleInstance._DolphinWeb_DetTraceEnable?.(1);
   if (gpuSyncDiagEnabled) moduleInstance._DolphinWeb_GpuSyncDiagEnable?.(1);
   const ownershipTraceSetterAvailable = Boolean(
     api.setWebGpuOwnershipTraceEnabled &&
@@ -2369,6 +2422,15 @@ async function loadCore({
   }
   api.setCpuThread?.(Boolean(cpuThread));
   api.setCpuCore?.(cpuCore);
+  // A fixed start for the emulated clock (?rtc=): boots repeat exactly. Its
+  // fate is reported (validationReadCoreProgress): a run that asked for it
+  // must never silently run on the host clock.
+  customRtcStatus = { requested: Number.isInteger(customRtc) ? customRtc : null, applied: false, why: null };
+  if (customRtcStatus.requested !== null) {
+    if (!api.setCustomRtc) customRtcStatus.why = "core without SetCustomRtc";
+    else if (api.setCustomRtc(customRtc) !== 1) customRtcStatus.why = "SetCustomRtc refused the value";
+    else customRtcStatus.applied = true;
+  }
   ppcWasmJitRequested = Boolean(ppcWasmJit);
   ppcWasmJitForce = Boolean(requestedPpcWasmJitForce);
   ppcWasmJitActive = false;
@@ -2508,6 +2570,9 @@ function bindApi(module) {
       typeof module._SetCpuThread === "function"
         ? (enabled) => ccall("SetCpuThread", "number", ["number"], [enabled ? 1 : 0])
         : null,
+    setCustomRtc: typeof module._SetCustomRtc === "function"
+      ? (seconds) => module._SetCustomRtc(1, seconds >>> 0)
+      : null,
     setCpuCore:
       typeof module._SetCpuCore === "function"
         ? (core) => ccall("SetCpuCore", "number", ["string"], [core])

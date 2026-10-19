@@ -37,6 +37,29 @@ machine, which people use while it runs) with a fresh `user-data-dir` per run
 (no JIT cache or IndexedDB
 carried over). Exit code: 0 pass, 1 finding, 2 usage or infrastructure error.
 
+## The console clock of single-core runs
+
+The console's real-time clock sets the PowerPC time base at boot and formats
+the memory cards; on the host's clock, two boots of one disc part from the
+first frames. With one emulated CPU thread (`cpu=single`, or `cpu=auto` with
+any renderer but OGL) every harness boot adds `rtc=1000000000` unless the
+query sets `rtc`: the clock then starts there and follows emulated time
+(patch 0081), and the run repeats exactly. `bootIso` checks, once the core
+runs, that the core took the value and that its clock is that start plus the
+emulated seconds; otherwise the boot fails (`rtc not applied` / `rtc not
+followed`), so a host-clock run is never compared with a fixed-clock one in
+silence. `rtc=host` keeps the host's clock, as players have it; the CI matrix
+keeps one such cell (`sw-single-hostclock`). `probes/determinism.mjs` boots a
+disc several times with a CoreTiming trace and compares every event, emulated
+RAM and the picture: identical on the fixed clock, and with `--host-clock` it
+expects the runs to differ. The trace is compiled only into a trace build
+(`DOLPHIN_WEB_DET_TRACE=1 npm run build:core:repro`, loaded with `coreid=`):
+the committed core and a player's have none of it.
+
+Against a trunk older than 0081, a single-core cell boots on a clock that
+trunk does not have: run that one comparison with `rtc=host` on both sides,
+or accept the cell (`--accept game/config`).
+
 ## Which core a run used
 
 Every run checks, once the core is loaded, that the bytes the harness server

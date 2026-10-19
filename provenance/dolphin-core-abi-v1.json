@@ -20,8 +20,8 @@
     {
       "path": "core/upstream/dolphin_web_discio.cpp",
       "hashMode": "lf-normalized",
-      "size": 59098,
-      "sha256": "640c5272dce7ca14b6abf93cf0ce696330daca359792d6ee9a18fa51188bff23"
+      "size": 64807,
+      "sha256": "53562ca70640759cf2a65630122dcb1b216a097fb648315da13f2edea854e032"
     },
     {
       "path": "core/upstream/dolphin_web_raster_profile.h",
@@ -44,8 +44,8 @@
     {
       "path": "core/upstream/dolphin_web_core.cpp",
       "hashMode": "lf-normalized",
-      "size": 47327,
-      "sha256": "6a2bdb8f64cb9301024fee7056d5b794fd9cc738b0c2eaf45f5bdfc2a8e837f2"
+      "size": 48294,
+      "sha256": "5b50a428210b835d033814c550976b5ed41200fa032964a6b29b1cce3ffc14de"
     },
     {
       "path": "src/app.js",
@@ -86,8 +86,8 @@
     {
       "path": "src/core-host.js",
       "hashMode": "lf-normalized",
-      "size": 67432,
-      "sha256": "478949bf92d6833c39f33bd799823f7f24cc5aabdde0ddb0b5f7151e64173e1f"
+      "size": 67931,
+      "sha256": "2cdc94e3346aac781043a1e67609b6c1c8d6ca246638e7ada53a71688bf704b9"
     },
     {
       "path": "src/diagnostic-log-filter.js",
@@ -140,8 +140,8 @@
     {
       "path": "src/upstream-discio-worker.js",
       "hashMode": "lf-normalized",
-      "size": 668540,
-      "sha256": "8d3ca6539fc8847541fe9716690ab8f007979e4f8ca001759c4bb9faef86169e"
+      "size": 672177,
+      "sha256": "b43266b0df38765419da94c6418676040caa7e973558adac1eeb3a4b2f0440e2"
     },
     {
       "path": "src/wgpu-renderer-worker-probe.js",
@@ -164,8 +164,8 @@
     {
       "path": "src/upstream-worker-adapter.js",
       "hashMode": "lf-normalized",
-      "size": 45881,
-      "sha256": "5d611e4224ac0d712ff5d068b332a36761515d373c441e21f263d34b68bdd3b3"
+      "size": 45968,
+      "sha256": "696e06ebb4ccac9332643f523a685081145988c2a22c20deb28791bf5dbf7a53"
     },
     {
       "path": "src/upstream-worker-protocol.js",
@@ -589,6 +589,7 @@
       "validationFinalizeWgpuReplay",
       "validationPcSampler",
       "validationReadCoreProgress",
+      "validationReadDetTrace",
       "validationReadJitCacheReadiness",
       "validationReadTimeline",
       "validationReadWgpuReplayState",
