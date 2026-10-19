@@ -3500,7 +3500,7 @@ async function mountFile(file) {
     console.log(`[boot-phase] api.pumpHostJobs() took ${(performance.now() - _t_pump).toFixed(1)}ms`);
     if (coreBoot.accepted && aotFirstLaunch?.supported) {
       const flow = aotFirstLaunch;
-      void flow.loadRest().then(() => flow.start({ resume: true }));
+      void flow.loadRest().catch(() => {}).then(() => flow.start({ resume: true }));
     }
   } else if (api.bootDisc) {
     coreBoot.skippedReason = `Disc image is too small for full CPU boot (${file.size} bytes)`;
@@ -6905,7 +6905,7 @@ async function prepareAotFirstLaunch(file) {
   const translator = keyParts && core
     ? coreRegionTranslator(moduleInstance, { mask: keyParts.codegenMask, helperNames: core.helperNames })
     : null;
-  const opfs = await globalThis.navigator?.storage?.getDirectory?.().catch(() => null);
+  const opfs = await Promise.resolve(globalThis.navigator?.storage?.getDirectory?.()).catch(() => null);
   const flow = createAotFirstLaunch({
     discKey,
     coreHash: aotCoreFingerprint,
