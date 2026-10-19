@@ -82,16 +82,38 @@ async function open({ tree, profileDir }) {
 
 // Resident memory of this profile's Chrome processes (MB): total and the
 // largest renderer (the tab, with its workers).
+// RSS alone misleads on macOS (compressed and purgeable pages; under memory
+// pressure it reads the same whatever runs): phys_footprint, from footprint(1),
+// is what the system charges each process, compressed memory included.
 function sampleRss(profileDir) {
-  const out = execFileSync("ps", ["-A", "-o", "rss=,command="], { encoding: "utf8", maxBuffer: 32 << 20 });
-  let total = 0, renderer = 0;
+  const out = execFileSync("ps", ["-A", "-o", "pid=,rss=,command="], { encoding: "utf8", maxBuffer: 32 << 20 });
+  let total = 0, renderer = 0, rendererPid = null;
+  const pids = [];
   for (const line of out.split("\n")) {
-    const m = line.match(/^\s*(\d+)\s+(.*)$/);
-    if (!m || !m[2].includes(profileDir)) continue;
-    total += Number(m[1]);
-    if (m[2].includes("--type=renderer")) renderer = Math.max(renderer, Number(m[1]));
+    const m = line.match(/^\s*(\d+)\s+(\d+)\s+(.*)$/);
+    if (!m || !m[3].includes(profileDir)) continue;
+    pids.push(m[1]);
+    total += Number(m[2]);
+    if (m[3].includes("--type=renderer") && Number(m[2]) >= renderer) {
+      renderer = Number(m[2]);
+      rendererPid = m[1];
+    }
   }
-  return { totalMB: Math.round(total / 1024), rendererMB: Math.round(renderer / 1024) };
+  const sample = { totalMB: Math.round(total / 1024), rendererMB: Math.round(renderer / 1024) };
+  if (process.platform === "darwin" && pids.length) {
+    try {
+      const fp = execFileSync("footprint", [...pids.flatMap((p) => ["-p", p]), "-f", "bytes"], { encoding: "utf8", maxBuffer: 32 << 20 });
+      // one header line per process: "<name> [<pid>]: 64-bit    Footprint: <n> B"
+      const per = [...fp.matchAll(/^.*\[(\d+)\]: \S+\s+Footprint: (\d+) B/gm)].map((m) => ({ pid: m[1], bytes: Number(m[2]) }));
+      sample.footprintMB = Math.round(per.reduce((n, x) => n + x.bytes, 0) / 1048576);
+      const r = per.find((x) => x.pid === rendererPid);
+      if (r) sample.rendererFootprintMB = Math.round(r.bytes / 1048576);
+    } catch (error) {
+      // footprint unavailable: RSS only, and the run says why
+      sample.footprintError = String(error?.message || error).slice(0, 200);
+    }
+  }
+  return sample;
 }
 
 async function readiness(page) {
@@ -157,12 +179,18 @@ async function measureOne(name, tree, runDir, profileDir) {
       return { frameP50: p.frameP50, frameP95: p.frameP95, frameP99: p.frameP99, frameMax: p.frameMax, hitchesPerMin: p.hitchesPerMin, presentFreezes: p.freezes.length, coreFreezes: c.freezes?.length ?? null, speed: c.speed ?? null, speedP5: c.speedP5 ?? null };
     };
     result.timelineComplete = timeline.complete;
+    const peak = (field) => Math.max(...rss.map((r) => r[field] ?? -Infinity));
     result.rss = {
-      peakTotalMB: Math.max(...rss.map((r) => r.totalMB)),
-      peakRendererMB: Math.max(...rss.map((r) => r.rendererMB)),
+      peakTotalMB: peak("totalMB"),
+      peakRendererMB: peak("rendererMB"),
       endTotalMB: rss.at(-1)?.totalMB ?? null,
-      endRendererMB: rss.at(-1)?.rendererMB ?? null
+      endRendererMB: rss.at(-1)?.rendererMB ?? null,
+      peakFootprintMB: peak("footprintMB"),
+      endFootprintMB: rss.at(-1)?.footprintMB ?? null,
+      endRendererFootprintMB: rss.at(-1)?.rendererFootprintMB ?? null,
+      footprintError: rss.find((r) => r.footprintError)?.footprintError ?? null
     };
+    if (result.rss.footprintError) log(`footprint failed: ${result.rss.footprintError}`);
     // The JIT engages at a fixed emulated field: that is when the cached
     // modules are first instantiated and called.
     const progress = await workerRequest(s.page, "validationReadCoreProgress", {}, 15000).catch(() => null);
@@ -222,7 +250,7 @@ async function measure() {
       r.launch = launch;
       all.push(r);
       writeFileSync(path.join(runDir, `${tag}.json`), JSON.stringify(r, null, 1));
-      log(`  ${tag}: ${r.error ? "ERROR " + r.error.split("\n")[0] : `rss=${r.rss?.peakTotalMB}/${r.rss?.peakRendererMB}MB full-speed=${r.timeToFullSpeedSec}s engage p99=${r.engage?.frameP99?.toFixed?.(1)} max=${r.engage?.frameMax?.toFixed?.(0)} race p99=${r.race?.frameP99?.toFixed?.(1)} menus p99=${r.menus?.frameP99?.toFixed?.(1)} speed=${r.race?.speed?.toFixed?.(1)} core=${JSON.stringify(r.coreModules)}`}`);
+      log(`  ${tag}: ${r.error ? "ERROR " + r.error.split("\n")[0] : `fp=${r.rss?.endFootprintMB}/${r.rss?.endRendererFootprintMB}MB rss=${r.rss?.peakTotalMB}/${r.rss?.peakRendererMB}MB full-speed=${r.timeToFullSpeedSec}s engage p99=${r.engage?.frameP99?.toFixed?.(1)} max=${r.engage?.frameMax?.toFixed?.(0)} race p99=${r.race?.frameP99?.toFixed?.(1)} menus p99=${r.menus?.frameP99?.toFixed?.(1)} speed=${r.race?.speed?.toFixed?.(1)} core=${JSON.stringify(r.coreModules)}`}`);
       }
       rmSync(profileDir, { recursive: true, force: true });
     }
