@@ -80,6 +80,8 @@ const p4Why = (j, side) => {
 // race-perf runs that failed for another reason than the machine's load.
 const raceFailures = (j, side) => (j.failed ?? []).filter((f) => f.side === side && f.why !== "overloaded").map((f) => `run ${f.run} : ${f.why}`);
 const launchFailures = (phase) => (phase?.failed ?? []).map((f) => `run ${f.run} : ${f.error}`);
+// Why a TTFF phase has no value: every run started on an overloaded machine.
+const ttffWhy = (j) => (j.overloadedRuns?.length && j.overloadedRuns.length === j.runs ? `runs ${j.overloadedRuns.join(", ")} lancées sur machine surchargée, exclues` : null);
 
 // The rows, in PROGRAM.md's order. `better`: "higher" | "lower" | "zero" | "true".
 // read(json, side, kind) → value; failures(json, side, kind) → reasons that make the row KO.
@@ -96,8 +98,8 @@ export const KPI_ROWS = [
   { id: "aotcompilerMemory", group: "Garde-fous", label: "Surcoût mémoire aotcompiler", target: 150, unit: "Mo", better: "lower", from: "manual" },
   { id: "optimisationMs", group: "Expérience joueur", label: "Durée d'optimisation au 1er lancement", target: 60000, unit: "ms", better: "lower", from: "first-launch", read: (j) => j.p7?.durationMs ?? null, why: (j) => j.p7Why ?? null, failures: (j) => (j.p7?.failedFirst ?? []).map((f) => `run ${f.run} : ${f.why}`) },
   { id: "secondLaunchRecompiled", group: "Expérience joueur", label: "Régions recompilées au 2e lancement", target: 0, unit: "", better: "zero", from: "first-launch", read: (j) => j.p7?.secondLaunchCompiled ?? null, why: (j) => j.p7Why ?? null, failures: (j) => [...(j.p7?.failedFirst ?? []), ...(j.p7?.failedSecond ?? [])].map((f) => `run ${f.run} : ${f.why}`) },
-  { id: "ttffCold", group: "Expérience joueur", label: "Time-to-first-frame, à froid", target: 10000, unit: "ms", better: "lower", from: "ttff", read: (j) => med(j.cold?.firstContentMs), failures: (j) => launchFailures(j.cold) },
-  { id: "ttffWarm", group: "Expérience joueur", label: "Time-to-first-frame, à chaud", target: 10000, unit: "ms", better: "lower", from: "ttff", read: (j) => med(j.warm?.firstContentMs), failures: (j) => launchFailures(j.warm) }
+  { id: "ttffCold", group: "Expérience joueur", label: "Time-to-first-frame, à froid", target: 10000, unit: "ms", better: "lower", from: "ttff", read: (j) => med(j.cold?.firstContentMs), why: ttffWhy, failures: (j) => launchFailures(j.cold) },
+  { id: "ttffWarm", group: "Expérience joueur", label: "Time-to-first-frame, à chaud", target: 10000, unit: "ms", better: "lower", from: "ttff", read: (j) => med(j.warm?.firstContentMs), why: ttffWhy, failures: (j) => launchFailures(j.warm) }
 ];
 
 export function meets(row, value) {
