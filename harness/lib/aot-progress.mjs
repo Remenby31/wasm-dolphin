@@ -59,7 +59,9 @@ export function summarizeLaunch(events) {
 }
 
 // The summary.json p7 block from the runs (first and second launch each).
-export function summarizeP7(runs, { target = OPTIMISATION_TARGET_MS } = {}) {
+// Runs started on an overloaded machine (load gate not passed) are left out.
+export function summarizeP7(allRuns, { target = OPTIMISATION_TARGET_MS } = {}) {
+  const runs = allRuns.filter((r) => r.loadGate?.ok !== false);
   const first = runs.map((r) => r.first).filter((l) => l?.finished);
   if (!first.length) return null;
   const durationMs = median(first.map((l) => l.durationMs));
