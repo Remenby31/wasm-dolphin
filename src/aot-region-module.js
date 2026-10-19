@@ -74,7 +74,10 @@ function signature(sig) {
 }
 
 // Dispatcher body: binary search of state.pc over sorted [pc, funcIndex].
-function dispatcherBody(entries, pcOffset) {
+// `missing` is what a PC that is not an entry returns: 1 for the exported
+// dispatcher (nothing ran), 0 for the internal one that `dispatch` relocs
+// reach (code already ran and wrote state.pc: continue there).
+function dispatcherBody(entries, pcOffset, missing) {
   const body = [0x01, 0x01, VAL.i32]; // one i32 local: pc
   body.push(OP.localGet, 0, OP.i32Load, 2);
   uleb(body, pcOffset);
@@ -88,7 +91,7 @@ function dispatcherBody(entries, pcOffset) {
         uleb(body, entries[i][1]);
         body.push(OP.end);
       }
-      body.push(OP.i32Const, 1, OP.return); // not an entry of the region
+      body.push(OP.i32Const, missing, OP.return); // not an entry of the region
       return;
     }
     const mid = (lo + hi) >> 1;
@@ -100,7 +103,7 @@ function dispatcherBody(entries, pcOffset) {
     emit(mid, hi);
   };
   emit(0, entries.length);
-  body.push(OP.i32Const, 1, OP.end);
+  body.push(OP.i32Const, missing, OP.end);
   return body;
 }
 
@@ -114,9 +117,10 @@ function dispatcherBody(entries, pcOffset) {
 //               memory (V8 commits a Memory's initial pages at allocation, which
 //               on Windows counts against the commit charge; decision of #30)
 // Returns { bytes, entries: [[pc, fragmentIndex]] sorted, helpers: [name] }.
-export function assembleRegion(fragments, { helpers, pcOffset, memoryPages = 24576, memoryMinPages = 1, sharedMemory = true }) {
+export function assembleRegion(fragments, { helpers, pcOffset, memoryPages, memoryMinPages = 1, sharedMemory = true }) {
   if (!Array.isArray(fragments) || !fragments.length) throw new Error("region: no fragments");
   if (!Number.isInteger(pcOffset) || pcOffset < 0) throw new Error("region: pcOffset required");
+  if (!Number.isInteger(memoryPages) || memoryPages < 1) throw new Error("region: memoryPages (the core's maximum) required");
   if (!Number.isInteger(memoryMinPages) || memoryMinPages < 0 || memoryMinPages > memoryPages) throw new Error("region: bad memory limits");
 
   // Helpers actually used, in name order: their function index is their rank.
@@ -125,7 +129,10 @@ export function assembleRegion(fragments, { helpers, pcOffset, memoryPages = 245
   const helperNames = [...used].sort();
   for (const n of helperNames) if (!helpers?.[n]) throw new Error(`region: unknown helper ${n}`);
   const helperIndex = new Map(helperNames.map((n, i) => [n, i]));
-  const DISPATCHER = helperNames.length, STUB = DISPATCHER + 1, FIRST = STUB + 1;
+  // Functions: helpers (imports), the exported dispatcher, the internal one
+  // (`dispatch` relocs), the exit stub, then the fragments.
+  const DISPATCHER = helperNames.length, INNER = DISPATCHER + 1, STUB = INNER + 1, FIRST = STUB + 1;
+  const LOCAL_FUNCTIONS = 3 + fragments.length;
 
   // Entries -> fragment function index.
   const entryOwner = new Map();
@@ -141,14 +148,25 @@ export function assembleRegion(fragments, { helpers, pcOffset, memoryPages = 245
   const sortedEntries = [...entryOwner].sort((a, b) => a[0] - b[0]);
 
   // Patch relocation sites.
+  const TEMPLATE = paddedUleb(0);
   const bodies = fragments.map((f) => {
     const code = Uint8Array.from(f.code);
+    const offsets = new Set();
     for (const r of f.relocs ?? []) {
-      if (!Number.isInteger(r.offset) || r.offset < 0 || r.offset + 5 > code.length) throw new Error(`region: reloc outside the code at ${r.offset}`);
+      if (!Number.isInteger(r.offset) || r.offset < 1 || r.offset + 5 > code.length) throw new Error(`region: reloc outside the code at ${r.offset}`);
+      // A site is a padded zero after the instruction it patches: call for a
+      // helper, return_call for a jump or a dispatch. Sites never overlap.
+      for (const o of offsets) if (Math.abs(o - r.offset) < 5) throw new Error(`region: overlapping relocs at ${r.offset}`);
+      offsets.add(r.offset);
+      if (TEMPLATE.some((b, i) => code[r.offset + i] !== b)) throw new Error(`region: reloc at ${r.offset} is not a padded zero`);
+      const opcode = code[r.offset - 1];
+      if ((r.kind === "import" && opcode !== 0x10) || ((r.kind === "jump" || r.kind === "dispatch") && opcode !== OP.returnCall)) {
+        throw new Error(`region: ${r.kind} reloc at ${r.offset} after opcode 0x${opcode.toString(16)}`);
+      }
       let index;
       if (r.kind === "import") index = helperIndex.get(r.name);
       else if (r.kind === "jump") index = entryOwner.get(r.targetPc >>> 0) ?? STUB;
-      else if (r.kind === "dispatch") index = DISPATCHER;
+      else if (r.kind === "dispatch") index = INNER;
       else throw new Error(`region: unknown reloc kind ${r.kind}`);
       code.set(paddedUleb(index), r.offset);
     }
@@ -180,22 +198,38 @@ export function assembleRegion(fragments, { helpers, pcOffset, memoryPages = 245
   section(out, 2, imports);
 
   const funcs = [];
-  uleb(funcs, 2 + fragments.length);
-  for (let i = 0; i < 2 + fragments.length; i++) uleb(funcs, TYPE_STATE);
+  uleb(funcs, LOCAL_FUNCTIONS);
+  for (let i = 0; i < LOCAL_FUNCTIONS; i++) uleb(funcs, TYPE_STATE);
   section(out, 3, funcs);
 
+  // A funcref table of the fragments, exported as "fragments": an off-thread
+  // warm-up calls each of them (V8 compiles a function lazily, at its first
+  // call); the core only ever calls `f`.
+  const table = [0x01, 0x70, 0x00];
+  uleb(table, fragments.length);
+  section(out, 4, table);
+
   const exports = [];
-  uleb(exports, 1);
+  uleb(exports, 2);
   name(exports, "f"); exports.push(0x00); uleb(exports, DISPATCHER);
+  name(exports, "fragments"); exports.push(0x01); uleb(exports, 0);
   section(out, 7, exports);
 
+  const elem = [0x01, 0x00, OP.i32Const, 0x00, OP.end];
+  uleb(elem, fragments.length);
+  for (let i = 0; i < fragments.length; i++) uleb(elem, FIRST + i);
+  section(out, 9, elem);
+
   const code = [];
-  uleb(code, 2 + fragments.length);
-  const dispatcher = dispatcherBody(sortedEntries, pcOffset);
-  uleb(code, dispatcher.length); code.push(...dispatcher);
+  uleb(code, LOCAL_FUNCTIONS);
+  const append = (bytes) => { for (const x of bytes) code.push(x); }; // no spread: large bodies
+  for (const missing of [1, 0]) {
+    const dispatcher = dispatcherBody(sortedEntries, pcOffset, missing);
+    uleb(code, dispatcher.length); append(dispatcher);
+  }
   const stub = [0x00, OP.i32Const, 0x00, OP.end]; // state.pc already written: continue there
-  uleb(code, stub.length); code.push(...stub);
-  for (const b of bodies) { uleb(code, b.length); for (const x of b) code.push(x); }
+  uleb(code, stub.length); append(stub);
+  for (const b of bodies) { uleb(code, b.length); append(b); }
   section(out, 10, code);
 
   return {
@@ -270,15 +304,23 @@ export function groupRegions(module, order, { maxFunctions = 100 } = {}) {
 }
 
 // Cache key of an assembled region module (decision of 2026-10-19): the
-// compiler version and codegen mask (the core's _DolphinWeb_AotKeyParts), then
-// the SHA-256 of its members in module order, "entry:sha256;" each. A change in
-// any member's guest code, in membership or in order gives another key; it
-// ends with ":" + 64 hex, as the cache requires.
+// compiler version and codegen mask (the core's _DolphinWeb_AotKeyParts, u32
+// each), then the SHA-256 of its members in module order, written
+// "entry:sha256:extraEntries;" each (extra entries sorted, comma separated).
+// A change in any member's guest code or entries, in membership or in order
+// gives another key; it ends with ":" + 64 hex, as the cache requires.
+// "region-v1" is the layout of this module and of this key text: bump it when
+// either changes (dispatchers, exports, return codes, key fields); a change
+// of code generation in the core is covered by compilerVersion instead.
 export async function regionModuleKey(functions, { compilerVersion, codegenMask }) {
+  for (const [what, v] of [["compilerVersion", compilerVersion], ["codegenMask", codegenMask]]) {
+    if (!Number.isInteger(v) || v < 0 || v > 0xffffffff) throw new Error(`region: ${what} must be a u32`);
+  }
   const hex8 = (v) => (v >>> 0).toString(16).padStart(8, "0");
   const text = functions.map((f) => {
     if (!/^[0-9a-f]{64}$/.test(f.sha256 ?? "")) throw new Error(`region: function ${f.entry?.toString(16)} has no sha256`);
-    return `${(f.entry >>> 0).toString(16)}:${f.sha256};`;
+    const extra = [...(f.extraEntries ?? [])].map((pc) => (pc >>> 0)).sort((a, b) => a - b).map((pc) => pc.toString(16)).join(",");
+    return `${(f.entry >>> 0).toString(16)}:${f.sha256}:${extra};`;
   }).join("");
   const digest = new Uint8Array(await globalThis.crypto.subtle.digest("SHA-256", new TextEncoder().encode(text)));
   const hex = Array.from(digest, (b) => b.toString(16).padStart(2, "0")).join("");

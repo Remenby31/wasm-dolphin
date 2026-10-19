@@ -65,6 +65,7 @@ async function instantiate(region, { onBump = () => {} } = {}) {
   return {
     run(pc) { u32[(STATE + PC) / 4] = pc; return instance.exports.f(STATE); },
     word: (off) => u32[(STATE + off) / 4],
+    set: (off, v) => { u32[(STATE + off) / 4] = v; },
     reset() { u32.fill(0); }
   };
 }
@@ -116,11 +117,54 @@ test("aot region: the dispatcher finds every entry among hundreds (binary search
 
 test("aot region: malformed input is refused", () => {
   const [A, B] = program();
-  assert.throws(() => assembleRegion([], { helpers: HELPERS, pcOffset: 0 }), /no fragments/);
-  assert.throws(() => assembleRegion([A, { ...B, entries: [0x2000, 0x1000] }], { helpers: HELPERS, pcOffset: 0 }), /declared twice/);
-  assert.throws(() => assembleRegion([A, { ...B, relocs: [{ offset: 0, kind: "import", name: "nope" }] }], { helpers: HELPERS, pcOffset: 0 }), /unknown helper/);
-  assert.throws(() => assembleRegion([{ ...A, relocs: [{ offset: A.code.length - 2, kind: "dispatch" }] }], { helpers: HELPERS, pcOffset: 0 }), /outside the code/);
-  assert.throws(() => assembleRegion([{ ...A, entries: [0x1004] }], { helpers: HELPERS, pcOffset: 0 }), /own entry/);
+  const opts = { helpers: HELPERS, pcOffset: 0, memoryPages: 1 };
+  assert.throws(() => assembleRegion([], opts), /no fragments/);
+  assert.throws(() => assembleRegion([A, B], { helpers: HELPERS, pcOffset: 0 }), /memoryPages/);
+  assert.throws(() => assembleRegion([A, { ...B, entries: [0x2000, 0x1000] }], opts), /declared twice/);
+  assert.throws(() => assembleRegion([A, { ...B, relocs: B.relocs.map((r) => (r.kind === "import" ? { ...r, name: "nope" } : r)) }], opts), /unknown helper/);
+  assert.throws(() => assembleRegion([{ ...A, relocs: [{ offset: A.code.length - 2, kind: "dispatch" }] }], opts), /outside the code/);
+  assert.throws(() => assembleRegion([{ ...A, entries: [0x1004] }], opts), /own entry/);
+  // relocation sites: a padded zero, after the opcode they patch, never overlapping
+  const site = B.relocs.find((r) => r.kind === "dispatch");
+  assert.throws(() => assembleRegion([A, { ...B, relocs: [...B.relocs, { ...site }] }], opts), /overlapping/);
+  assert.throws(() => assembleRegion([A, { ...B, relocs: B.relocs.map((r) => (r === site ? { ...r, kind: "import", name: "bump" } : r)) }], opts), /after opcode/);
+  const dirty = Uint8Array.from(B.code);
+  dirty[site.offset] = 0x81;
+  assert.throws(() => assembleRegion([A, { ...B, code: dirty }], opts), /padded zero/);
+});
+
+test("aot region: a dispatch to a PC outside the region returns 0 (code ran), the exported f returns 1 only before anything ran", async () => {
+  const [A, B] = program();
+  const r = await instantiate(assembleRegion([A, B], { helpers: HELPERS, pcOffset: PC, memoryPages: 1 }));
+  // B returns through LR: with LR outside the region, its dispatch misses
+  r.reset();
+  const u32 = (off, v) => r.set(off, v);
+  u32(LR, 0x80001234);
+  assert.equal(r.run(0x2000), 0, "B ran, then dispatched out of the region: continue at state.pc");
+  assert.equal(r.word(PC), 0x80001234);
+  assert.equal(r.word(COUNT), 10);
+  r.reset();
+  assert.equal(r.run(0x80001234), 1, "not an entry, nothing ran");
+  assert.equal(r.word(COUNT), 0);
+});
+
+test("aot region: the fragments table lets a warm-up call every fragment", async () => {
+  const { compileAndWarm, createWarmer } = await import("../src/aot-compiler-worker.js");
+  const [A, B] = program();
+  const { bytes } = assembleRegion([A, B], { helpers: HELPERS, pcOffset: PC, memoryPages: 1 });
+  const module = new WebAssembly.Module(bytes);
+  assert.deepEqual(WebAssembly.Module.exports(module).map((e) => e.name), ["f", "fragments"]);
+  const warmer = createWarmer();
+  const notes = [];
+  const result = await compileAndWarm(bytes, { warm: true }, warmer);
+  // f, and each of the two fragments through the table
+  assert.equal(result.calls, 3);
+  // B's call to its helper proves a fragment body ran (the warm-up's helpers are stubs);
+  // check directly that the table holds the fragments in order
+  const instance = new WebAssembly.Instance(module, { env: { memory: new WebAssembly.Memory({ initial: 1, maximum: 1, shared: true }), bump: () => notes.push("bump"), read_u32: () => 0 } });
+  assert.equal(instance.exports.fragments.length, 2);
+  instance.exports.fragments.get(1)(STATE);
+  assert.deepEqual(notes, ["bump"], "table entry 1 is fragment B");
 });
 
 test("aot region: grouping keeps callers with their callees, most call sites first", () => {
