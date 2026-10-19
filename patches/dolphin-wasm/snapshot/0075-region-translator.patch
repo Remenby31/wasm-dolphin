@@ -1,7 +1,7 @@
 diff --git a/Source/Core/Core/PowerPC/CachedInterpreter/CachedInterpreter.cpp b/Source/Core/Core/PowerPC/CachedInterpreter/CachedInterpreter.cpp
 --- a/Source/Core/Core/PowerPC/CachedInterpreter/CachedInterpreter.cpp
 +++ b/Source/Core/Core/PowerPC/CachedInterpreter/CachedInterpreter.cpp
-@@ -2789,6 +2789,47 @@ constexpr u32 WASM_IMPORT_FMA_INDEX = 19;
+@@ -2799,6 +2799,47 @@ constexpr u32 WASM_IMPORT_FMA_INDEX = 19;
  constexpr u32 WASM_GATHER_PIPE_FLUSH_THRESHOLD =
      GPFifo::GATHER_PIPE_EXTRA_SIZE - GPFifo::GATHER_PIPE_SIZE;
  
@@ -49,7 +49,7 @@ diff --git a/Source/Core/Core/PowerPC/CachedInterpreter/CachedInterpreter.cpp b/
  void EmitLocalGet(std::vector<u8>& body, u32 index)
  {
    body.push_back(0x20);
-@@ -4041,8 +4082,7 @@ void EmitFastCheckGatherPipeIfFull(std::vector<u8>& body, const WasmStateLayout&
+@@ -4051,8 +4092,7 @@ void EmitFastCheckGatherPipeIfFull(std::vector<u8>& body, const WasmStateLayout&
    EmitLocalGet(body, 0);
    EmitI32Const(body, 0);
    EmitI32Const(body, 0);
@@ -59,7 +59,7 @@ diff --git a/Source/Core/Core/PowerPC/CachedInterpreter/CachedInterpreter.cpp b/
    body.push_back(0x0b);
  }
  
-@@ -4098,8 +4138,7 @@ void EmitReadU32MaybeDirect(std::vector<u8>& body, const WasmStateLayout& layout
+@@ -4108,8 +4148,7 @@ void EmitReadU32MaybeDirect(std::vector<u8>& body, const WasmStateLayout& layout
    body.push_back(0x05);
    EmitLocalGet(body, 0);
    EmitLocalGet(body, 1);
@@ -69,7 +69,7 @@ diff --git a/Source/Core/Core/PowerPC/CachedInterpreter/CachedInterpreter.cpp b/
    body.push_back(0x0b);
  }
  
-@@ -4122,8 +4161,7 @@ void EmitReadU8MaybeDirect(std::vector<u8>& body, const WasmStateLayout& layout)
+@@ -4132,8 +4171,7 @@ void EmitReadU8MaybeDirect(std::vector<u8>& body, const WasmStateLayout& layout)
    body.push_back(0x05);
    EmitLocalGet(body, 0);
    EmitLocalGet(body, 1);
@@ -79,7 +79,7 @@ diff --git a/Source/Core/Core/PowerPC/CachedInterpreter/CachedInterpreter.cpp b/
    body.push_back(0x0b);
  }
  
-@@ -4148,8 +4186,7 @@ void EmitReadU16MaybeDirect(std::vector<u8>& body, const WasmStateLayout& layout
+@@ -4158,8 +4196,7 @@ void EmitReadU16MaybeDirect(std::vector<u8>& body, const WasmStateLayout& layout
    body.push_back(0x05);
    EmitLocalGet(body, 0);
    EmitLocalGet(body, 1);
@@ -89,7 +89,7 @@ diff --git a/Source/Core/Core/PowerPC/CachedInterpreter/CachedInterpreter.cpp b/
    body.push_back(0x0b);
  }
  
-@@ -4190,8 +4227,7 @@ void EmitWriteU32MaybeDirect(std::vector<u8>& body, const WasmStateLayout& layou
+@@ -4200,8 +4237,7 @@ void EmitWriteU32MaybeDirect(std::vector<u8>& body, const WasmStateLayout& layou
    EmitLocalGet(body, 0);
    EmitLocalGet(body, 1);
    EmitLocalGet(body, 2);
@@ -99,7 +99,7 @@ diff --git a/Source/Core/Core/PowerPC/CachedInterpreter/CachedInterpreter.cpp b/
    body.push_back(0x0b);
  }
  
-@@ -4216,8 +4252,7 @@ void EmitWriteU8MaybeDirect(std::vector<u8>& body, const WasmStateLayout& layout
+@@ -4226,8 +4262,7 @@ void EmitWriteU8MaybeDirect(std::vector<u8>& body, const WasmStateLayout& layout
    EmitLocalGet(body, 0);
    EmitLocalGet(body, 1);
    EmitLocalGet(body, 2);
@@ -109,7 +109,7 @@ diff --git a/Source/Core/Core/PowerPC/CachedInterpreter/CachedInterpreter.cpp b/
    body.push_back(0x0b);
  }
  
-@@ -4244,8 +4279,7 @@ void EmitWriteU16MaybeDirect(std::vector<u8>& body, const WasmStateLayout& layou
+@@ -4254,8 +4289,7 @@ void EmitWriteU16MaybeDirect(std::vector<u8>& body, const WasmStateLayout& layou
    EmitLocalGet(body, 0);
    EmitLocalGet(body, 1);
    EmitLocalGet(body, 2);
@@ -119,7 +119,7 @@ diff --git a/Source/Core/Core/PowerPC/CachedInterpreter/CachedInterpreter.cpp b/
    body.push_back(0x0b);
  }
  
-@@ -4356,8 +4390,7 @@ void EmitSystemCall(std::vector<u8>& body, const PPCAnalyst::CodeOp& op, u32 dow
+@@ -4366,8 +4400,7 @@ void EmitSystemCall(std::vector<u8>& body, const PPCAnalyst::CodeOp& op, u32 dow
    EmitI32Const(body, op.address);
    EmitI32Const(body, downcount);
    EmitI32Const(body, 0);
@@ -129,7 +129,7 @@ diff --git a/Source/Core/Core/PowerPC/CachedInterpreter/CachedInterpreter.cpp b/
    EmitImportedHaltCheck(body);
    EmitRegCacheReloadAll(body);  // helper may have written arbitrary GPRs
  }
-@@ -4371,8 +4404,7 @@ void EmitInterpretCall(std::vector<u8>& body, const PPCAnalyst::CodeOp& op, u32
+@@ -4381,8 +4414,7 @@ void EmitInterpretCall(std::vector<u8>& body, const PPCAnalyst::CodeOp& op, u32
    EmitI32Const(body, op.inst.hex);
    EmitI32Const(body, write_pc ? 1 : 0);
    EmitI32Const(body, downcount);
@@ -139,7 +139,7 @@ diff --git a/Source/Core/Core/PowerPC/CachedInterpreter/CachedInterpreter.cpp b/
    EmitImportedHaltCheck(body);
    EmitRegCacheReloadAll(body);  // interpret may have written arbitrary GPRs
  }
-@@ -4386,8 +4418,7 @@ void EmitFastOsInterruptCall(std::vector<u8>& body, u32 current_pc,
+@@ -4396,8 +4428,7 @@ void EmitFastOsInterruptCall(std::vector<u8>& body, u32 current_pc,
    EmitI32Const(body, target.mode);
    EmitI32Const(body, target.cycles_primary);
    EmitI32Const(body, target.cycles_secondary);
@@ -149,7 +149,7 @@ diff --git a/Source/Core/Core/PowerPC/CachedInterpreter/CachedInterpreter.cpp b/
    EmitImportedHaltCheck(body);
    EmitRegCacheReloadAll(body);  // interrupt handler may write arbitrary GPRs
  }
-@@ -4397,8 +4428,7 @@ void EmitFastMeleeInputStatusCall(std::vector<u8>& body, u32 current_pc)
+@@ -4407,8 +4438,7 @@ void EmitFastMeleeInputStatusCall(std::vector<u8>& body, u32 current_pc)
    EmitRegCacheFlushDirty(body);  // §28cx C1
    EmitLocalGet(body, 0);
    EmitI32Const(body, current_pc);
@@ -159,7 +159,7 @@ diff --git a/Source/Core/Core/PowerPC/CachedInterpreter/CachedInterpreter.cpp b/
    EmitImportedHaltCheck(body);
    EmitRegCacheReloadAll(body);  // HLE call may write arbitrary GPRs
  }
-@@ -4411,8 +4441,7 @@ void EmitFastMeleeStatusCall(std::vector<u8>& body, u32 current_pc, u32 downcoun
+@@ -4421,8 +4451,7 @@ void EmitFastMeleeStatusCall(std::vector<u8>& body, u32 current_pc, u32 downcoun
    EmitI32Const(body, downcount);
    EmitI32Const(body, 0);
    EmitI32Const(body, 0);
@@ -169,7 +169,7 @@ diff --git a/Source/Core/Core/PowerPC/CachedInterpreter/CachedInterpreter.cpp b/
    EmitImportedHaltCheck(body);
    EmitRegCacheReloadAll(body);  // HLE call may write arbitrary GPRs
  }
-@@ -4425,8 +4454,7 @@ void EmitFastMeleeServicePollCall(std::vector<u8>& body, u32 current_pc, u32 dow
+@@ -4435,8 +4464,7 @@ void EmitFastMeleeServicePollCall(std::vector<u8>& body, u32 current_pc, u32 dow
    EmitI32Const(body, downcount);
    EmitI32Const(body, 0);
    EmitI32Const(body, 0);
@@ -179,7 +179,7 @@ diff --git a/Source/Core/Core/PowerPC/CachedInterpreter/CachedInterpreter.cpp b/
    EmitImportedHaltCheck(body);
    EmitRegCacheReloadAll(body);  // HLE call may write arbitrary GPRs
  }
-@@ -4439,8 +4467,7 @@ void EmitFpCall(std::vector<u8>& body, const PPCAnalyst::CodeOp& op, u32 downcou
+@@ -4449,8 +4477,7 @@ void EmitFpCall(std::vector<u8>& body, const PPCAnalyst::CodeOp& op, u32 downcou
    EmitI32Const(body, op.address);
    EmitI32Const(body, downcount);
    EmitI32Const(body, 0);
@@ -189,7 +189,7 @@ diff --git a/Source/Core/Core/PowerPC/CachedInterpreter/CachedInterpreter.cpp b/
    EmitImportedHaltCheck(body);
    // FP ops write FPRs (+CR/FPSCR), not GPRs — reload only the op's GPR outputs
    // (normally none), so the FP-heavy Melee path doesn't pay a full reload.
-@@ -4455,8 +4482,7 @@ void EmitLfsImportCall(std::vector<u8>& body, UGeckoInstruction inst, u32 curren
+@@ -4465,8 +4492,7 @@ void EmitLfsImportCall(std::vector<u8>& body, UGeckoInstruction inst, u32 curren
    EmitI32Const(body, inst.FD);
    EmitI32Const(body, current_pc);
    EmitI32Const(body, downcount);
@@ -199,7 +199,7 @@ diff --git a/Source/Core/Core/PowerPC/CachedInterpreter/CachedInterpreter.cpp b/
    EmitImportedHaltCheck(body);
  }
  
-@@ -4469,8 +4495,7 @@ void EmitStfsImportCall(std::vector<u8>& body, UGeckoInstruction inst, u32 curre
+@@ -4479,8 +4505,7 @@ void EmitStfsImportCall(std::vector<u8>& body, UGeckoInstruction inst, u32 curre
    EmitI32Const(body, inst.FS);
    EmitI32Const(body, current_pc);
    EmitI32Const(body, downcount);
@@ -209,7 +209,7 @@ diff --git a/Source/Core/Core/PowerPC/CachedInterpreter/CachedInterpreter.cpp b/
    EmitImportedHaltCheck(body);
  }
  
-@@ -4482,8 +4507,7 @@ void EmitLfdImportCall(std::vector<u8>& body, UGeckoInstruction inst, u32 curren
+@@ -4492,8 +4517,7 @@ void EmitLfdImportCall(std::vector<u8>& body, UGeckoInstruction inst, u32 curren
    EmitI32Const(body, inst.FD);
    EmitI32Const(body, current_pc);
    EmitI32Const(body, downcount);
@@ -219,7 +219,7 @@ diff --git a/Source/Core/Core/PowerPC/CachedInterpreter/CachedInterpreter.cpp b/
    EmitImportedHaltCheck(body);
  }
  
-@@ -4495,8 +4519,7 @@ void EmitFctiwzImportCall(std::vector<u8>& body, const PPCAnalyst::CodeOp& op, u
+@@ -4505,8 +4529,7 @@ void EmitFctiwzImportCall(std::vector<u8>& body, const PPCAnalyst::CodeOp& op, u
    EmitI32Const(body, op.address);
    EmitI32Const(body, downcount);
    EmitI32Const(body, 0);
@@ -229,7 +229,7 @@ diff --git a/Source/Core/Core/PowerPC/CachedInterpreter/CachedInterpreter.cpp b/
    EmitImportedHaltCheck(body);
  }
  
-@@ -4883,8 +4906,7 @@ void EmitExactMulAddSub(std::vector<u8>& body, const WasmStateLayout& layout,
+@@ -4893,8 +4916,7 @@ void EmitExactMulAddSub(std::vector<u8>& body, const WasmStateLayout& layout,
      EmitStateLoadF64(body, PsOffset(layout, inst.FC, c_lane));
      EmitStateLoadF64(body, PsOffset(layout, inst.FB, lane));
      EmitI32Const(body, (sub ? 1u : 0u) | (single ? 2u : 0u));
@@ -239,7 +239,7 @@ diff --git a/Source/Core/Core/PowerPC/CachedInterpreter/CachedInterpreter.cpp b/
    };
    const auto f64const = [&](double v) { EmitF64ConstBits(body, std::bit_cast<u64>(v)); };
    // TwoSum(x, y) -> hi in `hi`, lo in `lo` (Knuth; exact barring overflow).
-@@ -12413,6 +12435,19 @@ void ApplyArmedWasmPolicy()
+@@ -12424,6 +12446,19 @@ void ApplyArmedWasmPolicy()
  
  // Drives the armed warmup with a synthetic field counter, as the CPU thread
  // would at the start of each slice; returns the engaged field or -1.
