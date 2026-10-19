@@ -168,7 +168,7 @@ test("assembled regions warm off-thread on a scratch memory and keep running cor
   for (const r of regions) {
     const result = await compileAndWarm(r.bytes, { warm: true }, warmer);
     assert.equal(result.warmed, true);
-    assert.ok(result.calls >= 1, "the dispatcher was called");
+    assert.equal(result.calls, 1 + r.functions.length, "the dispatcher, then every fragment through the table");
     const run = runner(result.module);
     for (const f of r.functions) assert.equal(run.run(f.entry), 0);
     assert.equal(run.word(COUNT), r.functions.length);
@@ -178,10 +178,75 @@ test("assembled regions warm off-thread on a scratch memory and keep running cor
 test("region modules declare a one-page memory minimum with the core's maximum", async () => {
   const { parseWasmImports } = await import("../src/aot-compiler-worker.js");
   const frag = translate({ entry: 0x80003100 });
-  const { bytes } = assembleRegion([frag], { helpers: HELPERS, pcOffset: PC });
+  const { bytes } = assembleRegion([frag], { helpers: HELPERS, pcOffset: PC, memoryPages: 24576 });
   const memory = parseWasmImports(bytes).find((i) => i.kind === "memory");
   assert.deepEqual({ initial: memory.initial, maximum: memory.maximum, shared: memory.shared }, { initial: 1, maximum: 24576, shared: true });
   assert.throws(() => assembleRegion([frag], { helpers: HELPERS, pcOffset: PC, memoryPages: 1, memoryMinPages: 2 }), /memory limits/);
+  assert.throws(() => assembleRegion([frag], { helpers: HELPERS, pcOffset: PC }), /memoryPages/);
+});
+
+// A second stand-in translator exercising every exit of the contract: member
+// k jumps to member k+1 inside the region (jump reloc), the last member
+// returns through a dispatch to a PC outside the region (internal
+// dispatcher: 0), and HALT_ENTRY returns 2 (halted).
+function chainTranslate(members, haltEntry = null) {
+  const get = [0x20, 0x00];
+  return members.map((f, k) => {
+    const code = [0x00];
+    const relocs = [];
+    code.push(...get, ...get, 0x28, 0x02, COUNT, 0x41, 0x01, 0x6a, 0x36, 0x02, COUNT);
+    code.push(...get, 0x41, ...sleb(f.entry), 0x36, 0x02, LAST);
+    if (f.entry === haltEntry) {
+      code.push(0x41, 0x02, 0x0b);
+      return { entry: f.entry, entries: [f.entry], code: Uint8Array.from(code), relocs };
+    }
+    const next = members[k + 1];
+    code.push(...get, 0x41, ...sleb(next ? next.entry : OUTSIDE), 0x36, 0x02, PC);
+    code.push(...get, 0x12);
+    relocs.push({ offset: code.length, ...(next ? { kind: "jump", targetPc: next.entry } : { kind: "dispatch" }) });
+    code.push(...paddedUleb(0), 0x0b);
+    return { entry: f.entry, entries: [f.entry], code: Uint8Array.from(code), relocs };
+  });
+}
+
+test("every exit of the contract through cache and loader: internal jumps, dispatch out of the region (0), halt (2), not an entry (1)", async () => {
+  const { regions } = await buildRegions({ maxFunctions: 5 });
+  const [region] = regions;
+  const members = region.functions;
+  const halt = members[members.length - 1].entry;
+  const variants = [
+    { name: "chain", bytes: assembleRegion(chainTranslate(members), { helpers: HELPERS, pcOffset: PC, memoryPages: 1 }).bytes },
+    { name: "halt", bytes: assembleRegion(chainTranslate(members, halt), { helpers: HELPERS, pcOffset: PC, memoryPages: 1 }).bytes }
+  ];
+  const storage = fakeCacheStorage();
+  const openCache = (identity) => openAotCache({ ...identity, baseUrl: BASE, cacheStorage: storage, serviceWorker: false });
+  const keys = await Promise.all(variants.map((v, i) => regionModuleKey(members, { ...KEY_PARTS, codegenMask: i })));
+  await (await openCache(IDENTITY)).put(variants.map((v, i) => ({ key: keys[i], bytes: v.bytes })));
+  const retained = new Map();
+  const loader = createAotRegionLoader({ openCache, retain: (k, m) => retained.set(k, m) });
+  assert.equal((await loader.load({ ...IDENTITY, keys })).loaded, 2);
+
+  const chain = runner(retained.get(keys[0]));
+  assert.equal(chain.run(members[0].entry), 0, "ran every member through internal jumps, then dispatched out");
+  assert.equal(chain.word(COUNT), members.length);
+  assert.equal(chain.word(PC), OUTSIDE);
+  assert.equal(chain.word(LAST), members.at(-1).entry);
+  assert.equal(chain.run(0x80000000), 1, "not an entry");
+  assert.equal(chain.word(COUNT), members.length, "and nothing ran");
+
+  const halting = runner(retained.get(keys[1]));
+  assert.equal(halting.run(members[0].entry), 2, "halted in the last member");
+  assert.equal(halting.word(COUNT), members.length);
+});
+
+test("module keys: extra entries are part of the key, versions must be u32", async () => {
+  const { regions } = await buildRegions({ maxFunctions: 5 });
+  const members = regions[0].functions;
+  const base = await regionModuleKey(members, KEY_PARTS);
+  const withExtra = await regionModuleKey([{ ...members[0], extraEntries: [members[0].entry + 8] }, ...members.slice(1)], KEY_PARTS);
+  assert.notEqual(withExtra, base);
+  await assert.rejects(regionModuleKey(members, { compilerVersion: "region-1", codegenMask: 0 }), /u32/);
+  await assert.rejects(regionModuleKey(members, { compilerVersion: 1, codegenMask: -1 }), /u32/);
 });
 
 test("optimizer -> cache -> bootKeys -> loader: the first launch's modules come back on the next one", async () => {
