@@ -1,3 +1,4 @@
+import { aotCompilerRequested } from "./aot-compiler-worker.js";
 import { DolphinCoreAdapter, dolphinBundleAvailable } from "./dolphin-adapter.js";
 import { buttonMaskFromPressed, isPadPort } from "./input.js";
 import { UpstreamMainThreadAdapter } from "./upstream-main-thread-adapter.js";
@@ -115,6 +116,9 @@ export class EmulatorHost {
     );
     this.noJitCache =
       new URLSearchParams(window.location.search).get("nojitcache") === "1";
+    // ?aotcompiler=1: compile cached/requested JIT modules in the compiler
+    // worker (off by default until its memory cost is measured).
+    this.aotCompiler = aotCompilerRequested(window.location.search);
     this.collectMetrics = requestedCollectMetrics();
     this.legacyOneWayAck = requestedLegacyOneWayAck(window.location.search);
     this.wgpuReplayDiagnostics = requestedWgpuReplayDiagnostics(window.location.search);
@@ -397,6 +401,7 @@ export class EmulatorHost {
             cachedInterpreterDisableMask: this.cachedInterpreterDisableMask,
             wgpuScissoredClearRect: this.wgpuScissoredClearRect,
             noJitCache: this.noJitCache,
+            aotCompiler: this.aotCompiler,
             collectMetrics: this.collectMetrics,
             legacyOneWayAck: this.legacyOneWayAck,
             wgpuReplayDiagnostics: this.wgpuReplayDiagnostics,
@@ -1437,10 +1442,11 @@ const CACHED_INTERPRETER_DISABLE_BITS = {
   shortprefix:     1 << 21, // §28ca lower JIT min-prefix 4→2 (default-off; ?shortprefix=1 to enable)
   smearcompile:    1 << 22, // §28ce cap JIT compiles/slice (default-off; ?smearcompile=1 to enable)
   fastmemhoist:    1 << 23, // §28cz per-block fastmem bounds-check hoist (ENABLE polarity; default-off; ?fastmemhoist=1)
+  inlinefma:       1 << 26, // inline exact FMA; set: the FMA family calls the interpreter's NI_madd_msub
   // Aliases the plan / TL;DR uses interchangeably:
   fastinputpoll: 1 << 1, // legacy synonym for meleecall (input-poll lives there)
   fastmem:       1 << 7, // legacy synonym for fastsystem (load/store-ish helpers)
-  all:           0x7fffff
+  all:           0x47fffff
 };
 
 // The WebGPU backend emits partial and independent-channel EFB clears as a

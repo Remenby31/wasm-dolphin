@@ -36,10 +36,16 @@
       "sha256": "a0262feec1d2044dc576b6f67240a8a99b36a4ba27cf37013cc99d855f3c755e"
     },
     {
+      "path": "core/upstream/dolphin_web_fma.h",
+      "hashMode": "lf-normalized",
+      "size": 6279,
+      "sha256": "f2b13956b48b67b5013e5d62608a362159273ce15e66ed59c45640affa850054"
+    },
+    {
       "path": "core/upstream/dolphin_web_core.cpp",
       "hashMode": "lf-normalized",
-      "size": 47298,
-      "sha256": "b6281cf58785f673408bea2a0513b43f330c811b3a03276f004a8108070eb8d5"
+      "size": 47327,
+      "sha256": "6a2bdb8f64cb9301024fee7056d5b794fd9cc738b0c2eaf45f5bdfc2a8e837f2"
     },
     {
       "path": "src/app.js",
@@ -80,8 +86,8 @@
     {
       "path": "src/core-host.js",
       "hashMode": "lf-normalized",
-      "size": 67006,
-      "sha256": "5437d1b9db741a78ae6eff6081ac2297af4cdfbdcd4425c0d0678dfef015d20e"
+      "size": 67432,
+      "sha256": "478949bf92d6833c39f33bd799823f7f24cc5aabdde0ddb0b5f7151e64173e1f"
     },
     {
       "path": "src/diagnostic-log-filter.js",
@@ -134,8 +140,8 @@
     {
       "path": "src/upstream-discio-worker.js",
       "hashMode": "lf-normalized",
-      "size": 650616,
-      "sha256": "65d0d94e8eae940c6e651cff0ed40288f774f37f53f230081e7abab8ec570879"
+      "size": 668540,
+      "sha256": "8d3ca6539fc8847541fe9716690ab8f007979e4f8ca001759c4bb9faef86169e"
     },
     {
       "path": "src/wgpu-renderer-worker-probe.js",
@@ -158,8 +164,8 @@
     {
       "path": "src/upstream-worker-adapter.js",
       "hashMode": "lf-normalized",
-      "size": 45774,
-      "sha256": "524fb35d4d8c0b18b60772bdb1b990ee9c88fc22178bbf5af1f1f821379abefd"
+      "size": 45881,
+      "sha256": "5d611e4224ac0d712ff5d068b332a36761515d373c441e21f263d34b68bdd3b3"
     },
     {
       "path": "src/upstream-worker-protocol.js",
@@ -290,8 +296,8 @@
     {
       "path": "src/jit-cache-identity.js",
       "hashMode": "lf-normalized",
-      "size": 2470,
-      "sha256": "cefdd0471021456bd80bf90437cf8b9f5fe20e1fa6f414d56ea3792a3c3333c3"
+      "size": 6647,
+      "sha256": "33a9c3d95ea53e227b4eac141b38cd60c7720a6e3dbc98da1d1e8222d4dcce6b"
     },
     {
       "path": "src/wgpu-ubo-compute-projection.js",
@@ -350,7 +356,9 @@
     }
   },
   "memoryContractStatus": "consistent",
-  "sourceOnlyExportsPendingRebuild": [],
+  "sourceOnlyExportsPendingRebuild": [
+    "_DolphinWeb_FmaIsMusl"
+  ],
   "moduleExports": [
     "_AcknowledgeWebGpuOwnershipTraceCapture",
     "_AudioBuffer",
@@ -572,6 +580,7 @@
       "setInputState",
       "start",
       "stop",
+      "validationAotCacheProbe",
       "validationBeginWgpuRendererProbeMeasurement",
       "validationCaptureAtVi",
       "validationEnableGpuSyncDiag",
