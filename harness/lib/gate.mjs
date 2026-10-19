@@ -95,9 +95,11 @@ export function infraCrashGate(baseRecords, candRecords) {
 export function crossCommitGate(candRecords) {
   const rows = candRecords.map((r) => {
     const st = r.renderVsBaseline?.status ?? "unjudged";
+    // report-only (known-failures.json): shown with what it would have been, never blocking.
+    const candidate = st === "report-only" ? `report-only (would be ${r.renderVsBaseline.wouldBe})` : st;
     return {
-      game: r.game, config: r.config, check: `renderVsBaseline r${r.run}`, baseline: "capture", candidate: st,
-      status: st === "fail" ? "regressed" : st === "pass" ? "ok" : st === "known" ? "known-failure" : st === "not-covered" ? "not-covered" : "inconclusive",
+      game: r.game, config: r.config, check: `renderVsBaseline r${r.run}`, baseline: "capture", candidate,
+      status: st === "fail" ? "regressed" : st === "pass" ? "ok" : st === "known" ? "known-failure" : st === "not-covered" ? "not-covered" : st === "report-only" ? "report-only" : "inconclusive",
       detail: r.renderVsBaseline?.detail ?? null
     };
   });

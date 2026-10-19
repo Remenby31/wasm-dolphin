@@ -46,5 +46,5 @@ test("a set-equal entry needs a reason, and the repo's list is valid", () => {
   assert.throws(() => setEqualCells([{ cell: "g/c", check: "renderVsBaseline", mode: "set-equal" }]), /needs a reason/);
   assert.throws(() => setEqualCells([{ cell: "g/c", check: "renderVsBaseline", mode: "loose", reason: "x" }]), /unknown mode/);
   const known = JSON.parse(readFileSync(new URL("../harness/known-failures.json", import.meta.url), "utf8"));
-  assert.ok(setEqualCells(known).size >= 2);
+  assert.doesNotThrow(() => setEqualCells(known));
 });

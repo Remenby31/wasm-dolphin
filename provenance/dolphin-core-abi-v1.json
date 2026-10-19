@@ -1,27 +1,27 @@
 {
   "schemaVersion": 1,
   "abiVersion": 1,
-  "coreId": "sha256:6dd107ed1dd850566fe7a6ab07e92b990a280a8b2c55510c148e8becf3492232",
+  "coreId": "sha256:34f23a6261726a2034f56b646fc67ad111cb45b5c17008b0467d94addecba453",
   "upstreamCommit": "e22551eae1c84a7e4d0b6a5c519ef4ed4ef69df1",
   "artifacts": [
     {
       "path": "cores/dolphin/dolphin-core-upstream.js",
       "hashMode": "lf-normalized",
-      "size": 272515,
-      "sha256": "6d344a9eb426599155de6157052aef4507b4e294157a9b0420ea0485c2f4622e"
+      "size": 272609,
+      "sha256": "ed94b4d92a17ab4681ec6f26b4ae8a76daa39e11fe2625bf82389e14ce8b5737"
     },
     {
       "path": "cores/dolphin/dolphin-core-upstream.wasm",
-      "size": 13001362,
-      "sha256": "6dd107ed1dd850566fe7a6ab07e92b990a280a8b2c55510c148e8becf3492232"
+      "size": 13027979,
+      "sha256": "34f23a6261726a2034f56b646fc67ad111cb45b5c17008b0467d94addecba453"
     }
   ],
   "contractSources": [
     {
       "path": "core/upstream/dolphin_web_discio.cpp",
       "hashMode": "lf-normalized",
-      "size": 59098,
-      "sha256": "640c5272dce7ca14b6abf93cf0ce696330daca359792d6ee9a18fa51188bff23"
+      "size": 64807,
+      "sha256": "53562ca70640759cf2a65630122dcb1b216a097fb648315da13f2edea854e032"
     },
     {
       "path": "core/upstream/dolphin_web_raster_profile.h",
@@ -44,8 +44,8 @@
     {
       "path": "core/upstream/dolphin_web_core.cpp",
       "hashMode": "lf-normalized",
-      "size": 47327,
-      "sha256": "6a2bdb8f64cb9301024fee7056d5b794fd9cc738b0c2eaf45f5bdfc2a8e837f2"
+      "size": 48294,
+      "sha256": "5b50a428210b835d033814c550976b5ed41200fa032964a6b29b1cce3ffc14de"
     },
     {
       "path": "src/app.js",
@@ -86,8 +86,8 @@
     {
       "path": "src/core-host.js",
       "hashMode": "lf-normalized",
-      "size": 67737,
-      "sha256": "281ddd1b0bb41559fce82df0d4f9484610419a86cdb67ac144cb8962115b2620"
+      "size": 68236,
+      "sha256": "922d65179918f156c416baa7c87c439866e2d5d2f28b0ddf7047b746661f31c3"
     },
     {
       "path": "src/diagnostic-log-filter.js",
@@ -140,8 +140,8 @@
     {
       "path": "src/upstream-discio-worker.js",
       "hashMode": "lf-normalized",
-      "size": 668901,
-      "sha256": "733cb7c60ae8e90109305212f01d21659d0252c8a703bfe9edb2d6a8018278b3"
+      "size": 672538,
+      "sha256": "f797b07b55f50380d044d0dde289b6d35ae8125b0f37d3787d3cfaaa4aa53681"
     },
     {
       "path": "src/wgpu-renderer-worker-probe.js",
@@ -164,8 +164,8 @@
     {
       "path": "src/upstream-worker-adapter.js",
       "hashMode": "lf-normalized",
-      "size": 45993,
-      "sha256": "ab450f4b9ac1de1c4b824eb49a8fe92e8feeced8e69bf6093545901c3668f6fc"
+      "size": 46080,
+      "sha256": "ca9b60ba8118d88f3bb7784c554fdaea1bbd21fba6db90633dc4ad5590b8c4d5"
     },
     {
       "path": "src/upstream-worker-protocol.js",
@@ -356,9 +356,7 @@
     }
   },
   "memoryContractStatus": "consistent",
-  "sourceOnlyExportsPendingRebuild": [
-    "_DolphinWeb_FmaIsMusl"
-  ],
+  "sourceOnlyExportsPendingRebuild": [],
   "moduleExports": [
     "_AcknowledgeWebGpuOwnershipTraceCapture",
     "_AudioBuffer",
@@ -367,6 +365,7 @@
     "_AudioSampleRate",
     "_BootDisc",
     "_CoreInit",
+    "_DolphinWeb_FmaIsMusl",
     "_DolphinWeb_GpuSyncDiag",
     "_DolphinWeb_GpuSyncDiagEnable",
     "_DolphinWeb_HarnessArmCapture",
@@ -590,6 +589,7 @@
       "validationFinalizeWgpuReplay",
       "validationPcSampler",
       "validationReadCoreProgress",
+      "validationReadDetTrace",
       "validationReadJitCacheReadiness",
       "validationReadTimeline",
       "validationReadWgpuReplayState",

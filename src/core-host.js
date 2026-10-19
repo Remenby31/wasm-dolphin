@@ -1,4 +1,5 @@
 import { aotCompilerRequested } from "./aot-compiler-worker.js";
+import { parseCustomRtc } from "./custom-rtc.js";
 import { DolphinCoreAdapter, dolphinBundleAvailable } from "./dolphin-adapter.js";
 import { buttonMaskFromPressed, isPadPort } from "./input.js";
 import { UpstreamMainThreadAdapter } from "./upstream-main-thread-adapter.js";
@@ -85,6 +86,7 @@ export class EmulatorHost {
     this.videoBackend = requestedVideoBackend();
     this.cpuThread = requestedCpuThread(this.videoBackend);
     this.cpuCore = requestedCpuCore();
+    this.customRtc = requestedCustomRtc();
     this.ppcWasmJit = requestedPpcWasmJit(this.videoBackend);
     this.ppcWasmJitTier = requestedPpcWasmJitTier();
     this.ppcWasmJitForce = requestedPpcWasmJitForce();
@@ -332,6 +334,7 @@ export class EmulatorHost {
             videoBackend: this.videoBackend,
             cpuThread: this.cpuThread,
             cpuCore: this.cpuCore,
+            customRtc: this.customRtc,
             ppcWasmJit: this.ppcWasmJit,
             ppcWasmJitTier: this.ppcWasmJitTier,
             ppcWasmJitForce: this.ppcWasmJitForce,
@@ -378,6 +381,7 @@ export class EmulatorHost {
             videoBackend: this.videoBackend,
             cpuThread: this.cpuThread,
             cpuCore: this.cpuCore,
+            customRtc: this.customRtc,
             ppcWasmJit: this.ppcWasmJit,
             ppcWasmJitTier: this.ppcWasmJitTier,
             ppcWasmJitForce: this.ppcWasmJitForce,
@@ -1200,6 +1204,13 @@ function requestedCpuThread(videoBackend) {
     return videoBackend === "OGL";
   }
   return true;
+}
+
+// ?rtc=<seconds since 1970>: the emulated real-time clock starts there and
+// follows emulated time, so two boots of one disc are identical (harness
+// comparisons). Without it, the console clock is the host's.
+function requestedCustomRtc() {
+  return parseCustomRtc(new URLSearchParams(window.location.search).get("rtc"));
 }
 
 function requestedCpuCore() {

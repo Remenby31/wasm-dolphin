@@ -8,22 +8,15 @@
   {
     "cell": "kart-race/rec",
     "check": "renderVsBaseline",
-    "mode": "set-equal",
-    "reason": "cpu=dual race state : ordre des frames non déterministe ; contrôle par égalité d'ensembles",
-    "since": "2026-10-18"
+    "mode": "report-only",
+    "reason": "cpu=dual race state: one commit gives several pictures across runs (wgpu: 3 distinct in 6 runs), so no baseline set holds; the exact render check of the race is on the cpu=single cells (rec-single, wgpu-single)",
+    "since": "2026-10-19"
   },
   {
     "cell": "kart-race/wgpu",
     "check": "renderVsBaseline",
-    "mode": "set-equal",
-    "reason": "cpu=dual race state : ordre des frames non déterministe ; contrôle par égalité d'ensembles",
-    "since": "2026-10-18"
-  },
-  {
-    "cell": "kart-attract/rec-single",
-    "check": "renderVsBaseline",
-    "mode": "set-equal",
-    "reason": "non-déterminisme du boot en cpu=single, en cours de correction (patch 0081, wgpu-apple) ; à retirer quand 0081 est fusionné",
+    "mode": "report-only",
+    "reason": "cpu=dual race state: one commit gives several pictures across runs (wgpu: 3 distinct in 6 runs), so no baseline set holds; the exact render check of the race is on the cpu=single cells (rec-single, wgpu-single)",
     "since": "2026-10-19"
   }
 ]

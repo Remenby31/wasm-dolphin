@@ -224,6 +224,7 @@ export function writeCoreBuildInfo({
       fallbackMapDiagnostics: configure.fallbackMapDiagnostics,
       fallbackMapBits: configure.fallbackMapBits,
       directWasmBlockDispatch: configure.directWasmBlockDispatch,
+      detTrace: configure.detTrace,
       wasmCompileFlags: configure.wasmCompileFlags,
       sourcePathFlags: configure.sourcePathFlags,
       rustRemapFlags: configure.rustRemapFlags,
