@@ -25,7 +25,7 @@
       "commit": "01e0577914a75a2569c846778c2f93aa8e6feddd"
     }
   },
-  "patchSeriesSha256": "367cdbae1e0f57a60ea9f357651cb4f98ef4262653cb2aac188bf40bc1c9557f",
+  "patchSeriesSha256": "4d7fca3dc862cc2f1ece87fe7d1c7e8b6d626bcb408b3447810413d1aa207b4b",
   "patches": [
     {
       "order": 1,
@@ -600,8 +600,8 @@
       "cwd": ".",
       "hashMode": "lf-normalized",
       "path": "patches/dolphin-wasm/snapshot/0076-jit-mtmsr-pending-exceptions.patch",
-      "size": 2681,
-      "sha256": "855f376da5712a688455208096d4657a002ccd86870f28575c4549e42e2c4e6d"
+      "size": 5778,
+      "sha256": "e7b34a475c8495b33cb3b09ff9adde954c905ac2543cb03625a9eec3eac312e7"
     },
     {
       "order": 73,
