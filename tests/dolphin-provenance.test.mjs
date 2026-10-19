@@ -305,9 +305,10 @@ test("committed Dolphin provenance and ABI manifests verify", () => {
   // PixelEngine.cpp/.h: 118. 0070 (memory card flush on request) adds three:
   // GCMemcardBase.h, GCMemcardDirectory.h and EXI_DeviceMemoryCard.h, so 121.
   // 0081 (deterministic clock and CoreTiming trace) adds WasmDetTrace.h and
-  // the first changes to EXI.cpp and EXI_DeviceIPL.cpp: 124.
+  // the first changes to EXI.cpp and EXI_DeviceIPL.cpp: 124. The region
+  // translator (0075) reads guest code through a hook in PPCAnalyst.cpp/.h: 126.
   // Update deliberately when the series changes what it modifies.
-  assert.equal(result.vendorSnapshot.rootPaths, 124);
+  assert.equal(result.vendorSnapshot.rootPaths, 126);
   assert.equal(result.vendorSnapshot.submodulePaths, 2);
   assert.equal(result.core.abiVersion, 1);
   assert.equal(result.core.memoryContract.jsGlue.initialPages, 24576);
