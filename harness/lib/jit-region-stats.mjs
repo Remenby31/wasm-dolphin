@@ -34,11 +34,14 @@ export function decodeRegionStats(bytes) {
 
 // Two reads taken back to back while the CPU thread keeps counting: every
 // counter must have stayed or grown. A read that went backwards was torn (a
-// reset in between, or fields read mid-update): refused.
+// reset in between, or fields read mid-update): refused. dispatchTimeMs is
+// not checked: the core adds slice time minus the sampled parts, which may be
+// negative for one slice (0075); only a negative total is refused (decode).
+const MONOTONIC = F64.filter((f) => f !== "dispatchTimeMs");
 export function consistentRead(a, b) {
   if (a.error) return a;
   if (b.error) return b;
-  const back = F64.filter((f) => b[f] < a[f]);
+  const back = MONOTONIC.filter((f) => b[f] < a[f]);
   return back.length ? { error: `region stats: torn read (${back.join(", ")} went backwards)` } : a;
 }
 
