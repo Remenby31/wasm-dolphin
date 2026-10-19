@@ -101,7 +101,8 @@ test("pthread renderer transport is independent of the optional JIT cache channe
   assert.deepEqual(listenerNames(cacheEnabled), [
     ...rendererListenerNames,
     "handleDolphinJitPthreadBarrierAckEvent",
-    "handleDolphinJitNewCompile"
+    "handleDolphinJitNewCompile",
+    "handleDolphinJitCompileRequest"
   ]);
   assert.equal(cacheEnabled.messages.length, 2);
   assert.equal(cacheEnabled.messages[0].type, "dolphin-jit-cache");
@@ -115,8 +116,137 @@ test("pthread renderer transport is independent of the optional JIT cache channe
   assert.deepEqual(listenerNames(cachePostFailure), [
     ...rendererListenerNames,
     "handleDolphinJitPthreadBarrierAckEvent",
-    "handleDolphinJitNewCompile"
+    "handleDolphinJitNewCompile",
+    "handleDolphinJitCompileRequest"
   ]);
+});
+
+test("a compile request is precompiled, kept alive and marked ready in the core's table, never posted to the CPU thread", async (t) => {
+  const originalSelf = globalThis.self;
+  globalThis.self = {
+    location: { href: "http://127.0.0.1:8080/" },
+    addEventListener() {},
+    postMessage() {}
+  };
+  t.after(() => {
+    if (originalSelf === undefined) delete globalThis.self;
+    else globalThis.self = originalSelf;
+  });
+  const stamp = Date.now();
+  const {
+    installDolphinPthreadChannels, precompileDolphinJitModule, setDolphinJitReadyHeapForTest,
+    dolphinJitReadyStatsForTest, setDolphinAotCompilerForTest
+  } = await import(`${workerUrl.href}?compile-request-test=${stamp}`);
+  const { canonicalWasmBlockKey } = await import("../src/jit-cache-identity.js");
+  const { Worker } = await import("node:worker_threads");
+  const cpu = fakePthreadWorker();
+  await installDolphinPthreadChannels(
+    { PThread: { runningWorkers: [cpu], unusedWorkers: [] } },
+    { jitCacheEnabled: true }
+  );
+  const request = cpu.listeners.find(({ name }) => name === "handleDolphinJitCompileRequest").listener;
+  // with the compiler worker on, through a real worker thread
+  let workersMade = 0;
+  setDolphinAotCompilerForTest({
+    enabled: true,
+    createWorker: () => {
+      workersMade += 1;
+      const w = new Worker(new URL("./helpers/aot-compiler-node-worker.mjs", import.meta.url));
+      return {
+        addEventListener(type, listener) {
+          if (type === "message") w.on("message", (data) => listener({ data }));
+          if (type === "error") w.on("error", listener);
+        },
+        postMessage: (m) => w.postMessage(m),
+        terminate: () => w.terminate()
+      };
+    }
+  });
+  t.after(() => setDolphinAotCompilerForTest({}));
+  // the core's heap: shared, the ready table it reports at 0x1000
+  const heap = new Uint8Array(new SharedArrayBuffer(0x20000));
+  const READY = 0x1000;
+  setDolphinJitReadyHeapForTest(heap, READY);
+  t.after(() => setDolphinJitReadyHeapForTest(null));
+  const plusOne = Uint8Array.from(Buffer.from("0061736d0100000001060160017f017f03020100070501016600000a09010700200041016a0b", "hex"));
+  const plusKey = await canonicalWasmBlockKey(plusOne);
+  const slot = parseInt(plusKey.slice(-64, -60), 16);
+  heap.set(plusOne, 0x18000);
+  const view = heap.subarray(0x18000, 0x18000 + plusOne.length);
+  const before = cpu.messages.length;
+  const marksBefore = dolphinJitReadyStatsForTest().marks;
+  await Promise.all([
+    request({ currentTarget: cpu, data: { type: "dolphin-jit-compile-request", key: plusKey, bytes: view, kind: "block", readyPtr: READY, readySlot: slot } }),
+    request({ currentTarget: cpu, data: { type: "dolphin-jit-compile-request", key: plusKey, bytes: view, kind: "block", readyPtr: READY, readySlot: slot } })
+  ]);
+  assert.equal(Atomics.load(heap, READY + slot), 1);
+  assert.equal(dolphinJitReadyStatsForTest().marks - marksBefore, 1, "two requests in flight, one compile, one mark");
+  assert.equal(workersMade, 1, "compiled in the compiler worker");
+  assert.equal(cpu.messages.length, before, "nothing is posted to the CPU thread");
+  // kept alive: the same Module comes back, so the CPU thread's own compile of these bytes hits V8's cache
+  const kept = await precompileDolphinJitModule(plusKey, plusOne);
+  assert.ok(kept.module instanceof WebAssembly.Module);
+  assert.equal(new WebAssembly.Instance(kept.module).exports.f(7), 8);
+  assert.equal((await precompileDolphinJitModule(plusKey, plusOne)).module, kept.module);
+
+  // a forged block key, bytes the engine rejects: not cached, still marked done
+  const forged = `wasm-block-sha256-v1:${"0".repeat(64)}`;
+  await request({ currentTarget: cpu, data: { type: "dolphin-jit-compile-request", key: forged, bytes: plusOne, kind: "block", readyPtr: READY, readySlot: 7 } });
+  assert.equal(Atomics.load(heap, READY + 7), 1);
+  assert.deepEqual(await precompileDolphinJitModule(forged, plusOne), { reason: "key-mismatch" });
+  const bad = new Uint8Array([0, 0x61, 0x73, 0x6d, 1, 0, 0, 0, 0x0a, 1]);
+  const badKey = await canonicalWasmBlockKey(bad);
+  await request({ currentTarget: cpu, data: { type: "dolphin-jit-compile-request", key: badKey, bytes: bad, kind: "block", readyPtr: READY, readySlot: 9 } });
+  assert.equal(Atomics.load(heap, READY + 9), 1);
+  assert.deepEqual(await precompileDolphinJitModule(badKey, bad), { reason: "compile" });
+  // keys of another schema are refused until regions define their check
+  assert.deepEqual(await precompileDolphinJitModule(`region-v1:${"a".repeat(64)}`, plusOne), { reason: "bad-key" });
+
+  // two keys sharing a slot (16 bits of SHA-256): the slot says "something
+  // finished", never "this key's Module is here". Each key keeps its own
+  // Module; the core always compiles its own bytes, so a collision costs one
+  // synchronous compile, never a wrong module.
+  const identity = Uint8Array.from(Buffer.from("0061736d0100000001060160017f017f03020100070501016600000a0601040020000b", "hex"));
+  const identityKey = await canonicalWasmBlockKey(identity);
+  await request({ currentTarget: cpu, data: { type: "dolphin-jit-compile-request", key: identityKey, bytes: identity, kind: "block", readyPtr: READY, readySlot: 3 } });
+  assert.equal(Atomics.load(heap, READY + 3), 1);
+  assert.equal(new WebAssembly.Instance((await precompileDolphinJitModule(identityKey, identity)).module).exports.f(7), 7);
+  assert.equal(new WebAssembly.Instance(kept.module).exports.f(7), 8);
+  assert.deepEqual(await precompileDolphinJitModule(`wasm-block-sha256-v1:${"f".repeat(64)}`, identity), { reason: "key-mismatch" });
+
+  // only the core's own table is ever written: another address, or a slot
+  // past the end of the heap, is ignored
+  const snapshot = heap.slice();
+  const rejectedBefore = dolphinJitReadyStatsForTest().rejected;
+  const other = Uint8Array.from(Buffer.from("0061736d0100000001060160017f017f03020100070501016600000a09010700200041026a0b", "hex"));
+  const otherKey = await canonicalWasmBlockKey(other);
+  await request({ currentTarget: cpu, data: { type: "dolphin-jit-compile-request", key: otherKey, bytes: other, kind: "block", readyPtr: 0x2000, readySlot: 5 } });
+  assert.equal(dolphinJitReadyStatsForTest().rejected - rejectedBefore, 1);
+  setDolphinJitReadyHeapForTest(heap, heap.length - 4);
+  const other2 = Uint8Array.from(Buffer.from("0061736d0100000001060160017f017f03020100070501016600000a09010700200041036a0b", "hex"));
+  await request({ currentTarget: cpu, data: { type: "dolphin-jit-compile-request", key: await canonicalWasmBlockKey(other2), bytes: other2, kind: "block", readyPtr: heap.length - 4, readySlot: 100 } });
+  assert.deepEqual(heap, snapshot, "no byte of the heap changed");
+});
+
+test("the compiler worker is off by default: modules compile in place, no worker starts", async (t) => {
+  const { aotCompilerRequested } = await import("../src/aot-compiler-worker.js");
+  assert.equal(aotCompilerRequested(""), false);
+  assert.equal(aotCompilerRequested("?aotcompiler=0"), false);
+  assert.equal(aotCompilerRequested("?x=1&aotcompiler=1"), true);
+  const originalSelf = globalThis.self;
+  globalThis.self = { location: { href: "http://127.0.0.1:8080/" }, addEventListener() {}, postMessage() {} };
+  t.after(() => {
+    if (originalSelf === undefined) delete globalThis.self;
+    else globalThis.self = originalSelf;
+  });
+  const { precompileDolphinJitModule, setDolphinAotCompilerForTest } = await import(`${workerUrl.href}?default-off-test=${Date.now()}`);
+  let made = 0;
+  setDolphinAotCompilerForTest({ enabled: false, createWorker: () => { made += 1; throw new Error("must not start"); } });
+  const { canonicalWasmBlockKey } = await import("../src/jit-cache-identity.js");
+  const bytes = Uint8Array.from(Buffer.from("0061736d0100000001060160017f017f03020100070501016600000a0601040020000b", "hex"));
+  const result = await precompileDolphinJitModule(await canonicalWasmBlockKey(bytes), bytes);
+  assert.ok(result.module instanceof WebAssembly.Module);
+  assert.equal(made, 0);
 });
 
 test("loadCore awaits pthread cache installation before returning", async () => {
