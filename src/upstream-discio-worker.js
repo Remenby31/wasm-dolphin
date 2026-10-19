@@ -6449,9 +6449,17 @@ async function loadDolphinJitCacheFromIdb(db) {
       buf,
       valid: await verifyCanonicalWasmBlockKey(String(key), buf)
     })));
+    // At most the first DOLPHIN_JIT_BOOT_WARM_MAX blocks of the block store
+    // are warmed (packs are in the order blocks were first compiled). Every
+    // block, today: measured by phys_footprint, warming all ~19 500 costs
+    // +25 to +40 MB at the end of a race and +110 MB at peak, and a 2048
+    // budget lost the whole gain on menu hitches (measures/aot/memory-aotcompiler.md).
     const batch = verified
       .filter(({ valid }) => valid)
-      .map(({ key, buf }) => ({ key, p: compileDolphinJitModuleOffThread(buf, DELIVER_BEFORE_WARM) }));
+      .map(({ key, buf }) => ({
+        key,
+        p: compileDolphinJitModuleOffThread(buf, DELIVER_BEFORE_WARM, takeDolphinJitWarmSlot())
+      }));
     const res = await Promise.allSettled(batch.map((b) => b.p));
     for (let k = 0; k < res.length; k++) {
       if (res[k].status === "fulfilled") {
@@ -6872,8 +6880,17 @@ export function setDolphinAotCompilerForTest({ enabled, createWorker } = {}) {
   dolphinAotCompilerWorkerFactoryForTest = createWorker ?? null;
 }
 let dolphinAotCompilerWorkerFactoryForTest = null;
-function compileDolphinJitModuleOffThread(bytes, deliver) {
-  if (!dolphinAotCompilerEnabled) return WebAssembly.compile(bytes);
+// Cached modules: compiled in place (validation only, V8 compiles lazily) unless
+// they are among the first ones the session will run, which are warmed.
+const DOLPHIN_JIT_BOOT_WARM_MAX = Infinity;
+let dolphinJitBootWarmed = 0;
+// One budget over boot load and lazy fill, with or without the block store
+// (without it, IndexedDB's order is the keys', so the budget is all or none).
+export function takeDolphinJitWarmSlot() {
+  return dolphinJitBootWarmed++ < DOLPHIN_JIT_BOOT_WARM_MAX;
+}
+function compileDolphinJitModuleOffThread(bytes, deliver, warm) {
+  if (!dolphinAotCompilerEnabled || !warm) return WebAssembly.compile(bytes);
   return getDolphinAotCompiler().compile(bytes, { deliver }).then((result) => result.module);
 }
 // How a Module reaches the CPU thread. That pthread never returns to its
@@ -7349,7 +7366,14 @@ async function startLazyJitCacheFill() {
       const { entry, buf } = verified;
       // Only carry bytes through when sourced from the overflow buffer —
       // those need IDB write-back. IDB-sourced entries are already there.
-      return { key: entry.key, p: compileDolphinJitModuleOffThread(buf, DELIVER_BEFORE_WARM), bytes: fromOverflow ? buf : null };
+      return {
+        key: entry.key,
+        // The lazy fill continues the boot load's order and its warm budget:
+        // these are the blocks of the menus and the first scenes, and warming
+        // them is where the gain on menu hitches comes from (measures/aot/memory-aotcompiler.md).
+        p: compileDolphinJitModuleOffThread(buf, DELIVER_BEFORE_WARM, takeDolphinJitWarmSlot()),
+        bytes: fromOverflow ? buf : null
+      };
     }).filter(Boolean);
     dolphinJitLazyFillFailureCount += verifiedSlice.length - compiles.length;
     const settled = await Promise.allSettled(compiles.map((c) => c.p));
