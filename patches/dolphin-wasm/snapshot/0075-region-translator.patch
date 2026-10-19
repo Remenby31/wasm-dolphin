@@ -304,7 +304,7 @@ diff --git a/Source/Core/Core/PowerPC/CachedInterpreter/CachedInterpreter.cpp b/
  extern "C" EMSCRIPTEN_KEEPALIVE double DolphinWeb_JitArmedStepForTest(double frame)
  {
    ApplyArmedWasmPolicyAt(static_cast<u64>(frame));
-@@ -13850,6 +13896,233 @@ extern "C" EMSCRIPTEN_KEEPALIVE int DolphinWeb_JitOracleRun(u32 word_count, u32
+@@ -13850,6 +13896,234 @@ extern "C" EMSCRIPTEN_KEEPALIVE int DolphinWeb_JitOracleRun(u32 word_count, u32
    return std::memcmp(s_jit_oracle.interp, s_jit_oracle.jit, sizeof s_jit_oracle.jit) == 0 ? 0 : 1;
  }
  
@@ -490,14 +490,15 @@ diff --git a/Source/Core/Core/PowerPC/CachedInterpreter/CachedInterpreter.cpp b/
 +  return s_aot_test_state.data();
 +}
 +
-+// One instruction, as the oracle's interpreter runs it. Returns 1 once an
-+// exception was taken (translation is off in the handler).
++// One instruction, as the oracle's interpreter runs it, taking its cycles from
++// downcount as the interpreter's run loop does. Returns 1 once an exception
++// was taken (translation is off in the handler).
 +extern "C" EMSCRIPTEN_KEEPALIVE int DolphinWeb_AotTestInterpretOne()
 +{
 +  auto& system = Core::System::GetInstance();
 +  auto& ppc = system.GetPPCState();
 +  const u32 pc = ppc.pc;
-+  system.GetInterpreter().SingleStepInner();
++  ppc.downcount -= system.GetInterpreter().SingleStepInner();
 +  if (ppc.Exceptions & EXCEPTION_PROGRAM)
 +  {
 +    ppc.pc = pc;

@@ -88,15 +88,17 @@ test("cpufuzz over 4 slices: regions end like the interpreter", {
   skip: skip || (!existsSync(CPUFUZZ) && "harness/homebrew/out/cpufuzz.dol not built"), timeout: 600000
 }, (t) => {
   const s = setup(readFileSync(CPUFUZZ));
-  const total = { functions: 0, translated: 0, checked: 0, equal: 0, regionRuns: 0, mismatches: [], skipped: {} };
+  const total = { functions: 0, translated: 0, checked: 0, equal: 0, regionRuns: 0, ends: {}, mismatches: [], skipped: {} };
   for (let k = 0; k < 4; k++) {
     const r = checkCoreSlice({ core, ...s, slice: k, slices: 4, maxFunctions: 40 });
     for (const key of ["functions", "translated", "checked", "equal", "regionRuns"]) total[key] += r[key];
     total.mismatches.push(...r.mismatches);
     for (const [why, n] of Object.entries(r.skipped)) total.skipped[why] = (total.skipped[why] ?? 0) + n;
+    for (const [end, n] of Object.entries(r.ends)) total.ends[end] = (total.ends[end] ?? 0) + n;
   }
   t.diagnostic(JSON.stringify({ ...total, mismatches: total.mismatches.slice(0, 8), mismatchCount: total.mismatches.length }));
   assert.equal(total.functions, s.plan.modules.reduce((n, m) => n + m.functions.length, 0));
-  assert.ok(total.checked > 0);
+  // Only traps (MMIO, mtdec: no hardware behind the test CPU) are not compared.
+  assert.ok(total.checked >= 0.9 * total.translated, `${total.checked} of ${total.translated} compared`);
   assert.deepEqual(total.mismatches, []);
 });

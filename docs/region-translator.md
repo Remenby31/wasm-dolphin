@@ -67,9 +67,12 @@ the oracle tests and the homebrew fuzz check it at every step.
    per plan function, the block at its entry is a fragment, regions are
    assembled by `src/aot-region-module.js`, compiled and run by the core with
    its real helpers, and the full oracle state and all of RAM must match the
-   interpreter. Test exports: `DolphinWeb_AotTestSetUp`, `AotTestRam`,
-   `AotTestReset`, `AotTestState`, `AotTestInterpretOne`,
-   `AotRunRegionForTest`, `JitHelperName`. Done.
+   interpreter (downcount included; a call that does not return within its
+   cycle budget is compared at the downcount where the regions ran out, one
+   that ends in an exception at the exception). Test exports:
+   `DolphinWeb_AotTestSetUp`, `AotTestRam`, `AotTestReset`, `AotTestState`,
+   `AotTestInterpretOne`, `AotRunRegionForTest`, `JitHelperName`,
+   `AotTestStackPointer`/`StackRestore` (after a trap). Done.
 3. Fragments of several blocks with the entry dispatch and intra-fragment
    branches; `jump` and `dispatch` relocs, the whole function per fragment.
 4. Oracle region mode: an assembled region against the interpreter, exits in
