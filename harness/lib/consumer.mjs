@@ -64,17 +64,19 @@ export function isBlankFrame(frame) {
 // the emulator does not run the game faster than the console.
 export function projectSpeed(score, { refScore, refSpeed, spread = 0.2 }) {
   if (!(score > 0) || !(refScore > 0) || !(refSpeed > 0)) throw new Error("projectSpeed: scores and speed must be positive");
+  if (!(spread >= 0 && spread < 1)) throw new Error(`projectSpeed: spread must be in [0, 1), got ${spread}`);
   const mid = (refSpeed * score) / refScore;
   const cap = (v) => Math.round(Math.min(100, v));
   return { low: cap(mid * (1 - spread)), mid: cap(mid), high: cap(mid * (1 + spread)) };
 }
 
-// real-time: full speed even at the low end of the range; playable: the
-// middle reaches PLAYABLE_SPEED; slow otherwise.
+// The class of the middle of the range: real time from REALTIME_SPEED (the
+// game keeps the console's pace), playable from PLAYABLE_SPEED (slower than
+// the console, still a game), slow below. The range is shown beside it.
 export const REALTIME_SPEED = 95;
 export const PLAYABLE_SPEED = 60;
-export function speedClass({ low, mid }) {
-  if (low >= REALTIME_SPEED) return "real time";
+export function speedClass({ mid }) {
+  if (mid >= REALTIME_SPEED) return "real time";
   if (mid >= PLAYABLE_SPEED) return "playable";
   return "slow";
 }

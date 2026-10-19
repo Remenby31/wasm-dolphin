@@ -196,7 +196,8 @@ function checkRenderer(backend, state) {
 
 const machine = machineSnapshot();
 const chromeArgs = process.env.HARNESS_CHROME_ARGS ?? "";
-console.log(`[consumer-perf] ${machine.platform}, ${machine.cpuModel} x${machine.cpus}, ${machine.totalMemGiB} GiB${chromeArgs ? `, Chrome args "${chromeArgs}"` : ""}`);
+const chromePath = process.env.HARNESS_CHROME_PATH || "chrome stable";
+console.log(`[consumer-perf] ${machine.platform}, ${machine.cpuModel} x${machine.cpus}, ${machine.totalMemGiB} GiB${chromeArgs ? `, Chrome args "${chromeArgs}"` : ""}${process.env.HARNESS_CHROME_PATH ? `, Chrome ${chromePath}` : ""}`);
 const { browser, adapter } = await probeBrowser();
 console.log(`[consumer-perf] Chrome ${browser.chrome ?? "?"}, WebGPU ${adapter.available ? `${adapter.vendor} ${adapter.architecture} ${adapter.description || adapter.device || ""}${adapter.fallback ? " (fallback)" : ""}` : `unavailable (${adapter.why})`}`);
 const choice = pickBackends(adapter, values.backend);
@@ -234,7 +235,7 @@ const row = (backend, phase) => {
 };
 const windows = process.platform === "win32";
 const report = {
-  label, at: new Date().toISOString(), machine, browser, adapter, chromeArgs, backendChoice: choice, savestateFrame: saved.frame,
+  label, at: new Date().toISOString(), machine, browser, adapter, chromeArgs, chromePath, backendChoice: choice, savestateFrame: saved.frame,
   loadGuard: windows ? "inactive: Windows reports no load average; CPU busy is measured before each backend instead" : "1-minute load average",
   query: Object.fromEntries(choice.backends.map((b) => [b, PRESETS[BACKENDS[b]]])),
   results: Object.fromEntries(choice.backends.map((b) => [b, {
@@ -247,7 +248,7 @@ const gpu = adapter.available ? `${adapter.vendor ?? "?"} / ${adapter.architectu
 const md = [
   `# Race speed on ${label}`,
   "",
-  `${machine.platform}, ${machine.cpuModel} ×${machine.cpus}, ${machine.totalMemGiB} GiB, Chrome ${browser.chrome ?? "?"}${chromeArgs ? ` with \`${chromeArgs}\`` : ""}. WebGPU adapter: ${gpu}.`,
+  `${machine.platform}, ${machine.cpuModel} ×${machine.cpus}, ${machine.totalMemGiB} GiB, Chrome ${browser.chrome ?? "?"}${process.env.HARNESS_CHROME_PATH ? ` (${chromePath})` : ""}${chromeArgs ? ` with \`${chromeArgs}\`` : ""}. WebGPU adapter: ${gpu}.`,
   "",
   "| Backend | Presenter | Cache | Speed % | Game fps | VI p99 ms | Present p99 ms | Hitches/min | Busiest thread % |",
   "|---|---|---|---|---|---|---|---|---|",

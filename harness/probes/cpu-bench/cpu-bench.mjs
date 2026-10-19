@@ -6,8 +6,14 @@
 // register-machine interpreter (dispatch, integer ALU, loads/stores, branches,
 // some float), the shape of the emulator's inner loop, run in a dedicated
 // worker as WASM and as the same JavaScript. Deterministic: both print the
-// same checksum. Used to place a machine on the speed model of
-// docs/consumer-perf-extrapolation.md.
+// same checksum. It compares machines and core sets (P-cores vs E-cores) in
+// the browser; nothing converts its Mops/s into a Geekbench score, and the
+// speed model of docs/consumer-perf-extrapolation.md uses published scores.
+//
+// Limits: 16 KiB of state that stays in L1, and an opcode stream that
+// repeats every 256 instructions, so the branch predictor learns it. It
+// measures the core's execution speed, not memory, caches or misprediction,
+// which the emulator also meets.
 //
 //   node harness/probes/cpu-bench/cpu-bench.mjs [--rounds 3]
 //   HARNESS_CHROME_PATH=harness/probes/chrome-ecores.sh node harness/probes/cpu-bench/cpu-bench.mjs
@@ -30,6 +36,7 @@ async function once() {
   const dir = mkdtempSync(path.join(os.tmpdir(), "gc-cpu-bench-"));
   const context = await launchChrome({ profileDir: dir });
   try {
+    await context.assertInvisible?.("after launch");
     const page = context.pages()[0] ?? (await context.newPage());
   const worker = `
       const bytes = Uint8Array.from(atob(${JSON.stringify(wasmB64)}), c => c.charCodeAt(0));

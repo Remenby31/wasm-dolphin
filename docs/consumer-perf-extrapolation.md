@@ -19,7 +19,7 @@ commands; the table below describes main at `6dd107ed` (2026-10-19).
 - With the WebGPU renderer the emulated CPU thread is saturated: speed
   follows that thread, that is single-core performance.
 - The software renderer reaches full speed only because the game drops to
-  10-14 rendered frames per second: speed and game fps must be read together.
+  10-12 rendered frames per second: speed and game fps must be read together.
 - The GPU side weighs about 4 points on this Mac (presentation scale 0.25
   vs 1; the internal resolution is native-only in this build).
 
@@ -30,22 +30,27 @@ background QoS) 116-122 Mops/s, a ratio of 0.26.
 
 ## Model
 
-Speed is projected in proportion to Geekbench 6 single-core score,
-calibrated on the Mac: 77 % at 3299 (M4 Pro Mac mini, Geekbench Browser
-average). The range is ±20 % for what one score does not capture (memory,
+Speed is projected in proportion to the Geekbench 6 single-core score,
+calibrated on the Mac: 77 % at 3940, the M4 Pro's score on cpu-monkey, the
+source of every other score below (Geekbench Browser's own average for the
+Mac mini is 3299: calibrating there would raise every projection by about
+19 %). The range is ±20 % for what one score does not capture (memory,
 browser engine, thermals, power plan), capped at 100 % (the emulator never
-runs the game faster than the console). Classes: **real time** if even the
-low end reaches 95 %, **playable** if the middle reaches 60 %, **slow**
-otherwise (`harness/lib/consumer.mjs`, unit-tested).
+runs the game faster than the console). The class is that of the middle of
+the range: **real time** from 95 % (the game keeps the console's pace),
+**playable** from 60 % (slower than the console, still a game), **slow**
+below (`harness/lib/consumer.mjs`, unit-tested; a test checks this table
+against it).
 
-| Machine class | GB6 single-core | Projected speed | Class |
-|---|---|---|---|
-| Chromebook, Intel Celeron N4500 | ~480 | 9-13 % | slow |
-| Chromebook, MediaTek Kompanio 520 | ~410 (16 % below the N4500) | 8-11 % | slow |
-| 2020 laptop, Intel Core i5-1135G7 | ~1783 | 33-50 % | slow |
-| 2022 laptop, AMD Ryzen 5 6600U / 6600H | ~1977 / ~2002 | 37-56 % | slow |
-| Intel iGPU laptop, Core i5-1235U (Iris Xe) | ~2095 | 39-59 % | slow |
-| Reference: Apple M4 Pro | 3299 | 62-92 % (measured 77 %) | playable |
+| Machine class | GB6 single-core | Projected speed | Middle | Class |
+|---|---|---|---|---|
+| Chromebook, Intel Celeron N4500 | ~480 | 8-11 % | 9 % | slow |
+| Chromebook, MediaTek Kompanio 520 | ~633 | 10-15 % | 12 % | slow |
+| 2020 laptop, Intel Core i5-1135G7 | ~1783 | 28-42 % | 35 % | slow |
+| 2022 laptop, AMD Ryzen 5 6600U | ~1977 | 31-46 % | 39 % | slow |
+| 2022 laptop, AMD Ryzen 5 6600H | ~2002 | 31-47 % | 39 % | slow |
+| Intel iGPU laptop, Core i5-1235U (Iris Xe) | ~2095 | 33-49 % | 41 % | slow |
+| Reference: Apple M4 Pro (measured 77 %) | ~3940 | 62-92 % | 77 % | playable |
 
 At these speeds the game itself slows down; with the software renderer it
 keeps time but renders few frames. On today's main, no consumer class plays
@@ -64,28 +69,31 @@ GPU.
   Chromebook it may weigh more than 4 points; WebGPU itself may be missing
   or a fallback adapter there (then the software renderer runs:
   `consumer-perf.mjs` detects it).
-- **Scores are approximate.** Geekbench Browser, cpu-monkey and Notebookcheck
-  refuse automated fetches; the figures below come from their pages as
-  summarised by a web search, and each class mixes many laptops (the same
-  i5-1135G7 differs by up to 60 % between chassis).
+- **Scores are approximate.** cpu-monkey, Geekbench Browser and Notebookcheck
+  refuse automated fetches; the figures come from their pages as summarised
+  by a web search and from the review of this document, and each class mixes
+  many laptops (the same i5-1135G7 differs by up to 60 % between chassis).
+  One source for all of them (cpu-monkey), except the i5-1235U (LaptopMedia).
 - The Mac runs were on a loaded machine (other agents): ±3 points.
 
 ## Sources
 
-- Apple M4 Pro, Mac mini (2024): Geekbench 6 single-core 3,299 (average of
-  293 results), [Geekbench Browser](https://browser.geekbench.com/macs/mac-mini-2024-14c-cpu).
-- Intel Core i5-1135G7: ~1,783 (775 samples),
-  [cpu-monkey](https://www.cpu-monkey.com/en/benchmark-intel_core_i5_1135g7-geekbench_6_single_core),
-  [Geekbench Browser](https://browser.geekbench.com/processors/intel-core-i5-1135g7).
+Geekbench 6 single-core, cpu-monkey unless stated:
+
+- Apple M4 Pro: ~3,940 (cpu-monkey); for comparison, Geekbench Browser's
+  average for the Mac mini (2024) is 3,299 (293 results),
+  [Geekbench Browser](https://browser.geekbench.com/macs/mac-mini-2024-14c-cpu).
+- Intel Core i5-1135G7: ~1,783,
+  [cpu-monkey](https://www.cpu-monkey.com/en/benchmark-intel_core_i5_1135g7-geekbench_6_single_core).
 - AMD Ryzen 5 6600H ~2,002, 6600U ~1,977,
-  [cpu-monkey](https://www.cpu-monkey.com/en/benchmark-amd_ryzen_5_6600h-geekbench_6_single_core),
-  [Geekbench Browser](https://browser.geekbench.com/processors/amd-ryzen-5-6600u).
+  [cpu-monkey](https://www.cpu-monkey.com/en/benchmark-amd_ryzen_5_6600h-geekbench_6_single_core).
 - Intel Core i5-1235U: ~2,095,
   [LaptopMedia](https://laptopmedia.com/processor/intel-core-i5-1235u/).
 - Intel Celeron N4500: ~480,
-  [cpu-monkey](https://www.cpu-monkey.com/en/benchmark-intel_celeron_n4500-geekbench_6_single_core);
-  MediaTek Kompanio 520 about 16 % below it in single core,
-  [cpu-monkey](https://www.cpu-monkey.com/en/compare_cpu-mediatek_kompanio_520_mt8186-vs-intel_celeron_n4500).
+  [cpu-monkey](https://www.cpu-monkey.com/en/benchmark-intel_celeron_n4500-geekbench_6_single_core).
+- MediaTek Kompanio 520: ~633,
+  [cpu-monkey](https://www.cpu-monkey.com/en/compare_cpu-mediatek_kompanio_520_mt8186-vs-intel_celeron_n4500);
+  655 in [MediaTek's benchmark sheet](https://i.mediatek.com/hubfs/MediaTek%20Kompanio%20520%20528%20838%20Benchmarking_0624.pdf).
 
 ## Redo it
 
