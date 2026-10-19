@@ -1036,6 +1036,9 @@ function readbackWgpuPresentSource() {
 }
 
 async function handleMessage(type, payload) {
+  // P6: blocks waiting for their pack go out when the saves do (page hidden
+  // or closed) and on stop; their outcome is not the saves'.
+  if (type === "flushUserData" || type === "stop") void dolphinJitBlockStore?.flush().catch(() => {});
   switch (type) {
     case "load":
       if (!moduleInstance) {
@@ -7207,8 +7210,17 @@ async function startLazyJitCacheFill() {
     // bytes will be reachable through `remaining` until they compile.
     dolphinJitPrebuiltOverflow = null;
   } else if (dolphinJitBlockStore) {
-    remaining = (await readDolphinJitStoredEntries()).filter((entry) => !skipKeys.has(entry.key));
+    const stored = await readDolphinJitStoredEntries();
+    remaining = stored.filter((entry) => !skipKeys.has(entry.key));
     dolphinJitBlockStoreEntries = null;
+    // A store grown wasteful (duplicates, many small packs) is rewritten a
+    // minute into the session, away from the boot.
+    const store = dolphinJitBlockStore;
+    setTimeout(() => {
+      store.compactIfWasteful(stored).then((done) => {
+        if (done) postStatus(`jit-cache: block store compacted (${stored.length} blocks)`);
+      }, () => {});
+    }, 60_000);
   } else {
     remaining = await new Promise((resolve) => {
       const out = [];

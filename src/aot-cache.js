@@ -65,14 +65,7 @@ export async function registerAotServiceWorker({ container = globalThis.navigato
   // standalone registration left from a visit without the site would take
   // the engine's workers away from it, so it goes.
   if (globalThis.__salonAotServiceWorkerManaged === true) {
-    try {
-      for (const registration of await container.getRegistrations?.() ?? []) {
-        const url = registration.active?.scriptURL ?? registration.installing?.scriptURL ?? registration.waiting?.scriptURL ?? "";
-        if (url.includes("aot-sw.js") && url.includes("standalone=1")) await registration.unregister();
-      }
-    } catch {
-      // nothing to clean
-    }
+    await unregisterAotServiceWorker({ container });
     return null;
   }
   if (container.controller && !String(container.controller.scriptURL).includes("aot-sw.js")) return null;
@@ -81,6 +74,22 @@ export async function registerAotServiceWorker({ container = globalThis.navigato
   } catch {
     return null;
   }
+}
+
+// Removes the engine's own standalone registration (never a site's): the
+// engine page calls it whenever it does not ask for the Service Worker, so a
+// visit with ?aotsw=1 does not leave it controlling every later visit.
+export async function unregisterAotServiceWorker({ container = globalThis.navigator?.serviceWorker } = {}) {
+  let removed = 0;
+  try {
+    for (const registration of await container?.getRegistrations?.() ?? []) {
+      const url = registration.active?.scriptURL ?? registration.installing?.scriptURL ?? registration.waiting?.scriptURL ?? "";
+      if (url.includes("aot-sw.js") && url.includes("standalone=1") && await registration.unregister()) removed += 1;
+    }
+  } catch {
+    // nothing to clean
+  }
+  return removed;
 }
 
 export function aotEntryUrl(baseUrl, cacheName, key) {
@@ -430,11 +439,19 @@ export async function openAotBlockStore({
   // tabs never write the same name; order is by sequence, then session.
   const session = Array.from(globalThis.crypto.getRandomValues(new Uint8Array(4)), (b) => b.toString(16).padStart(2, "0")).join("");
   const packUrl = (seq) => new URL(`${AOT_SW_SEGMENT}/${cacheName}/${PACK_PREFIX}${String(seq).padStart(8, "0")}-${session}.pack`, baseUrl).href;
-  const stats = { packsRead: 0, packsWritten: 0, blocksWritten: 0, corruptPacks: 0, readErrors: 0, quota: 0, writeErrors: 0 };
+  const stats = {
+    packsRead: 0, packsWritten: 0, blocksWritten: 0, corruptPacks: 0, readErrors: 0, quota: 0, writeErrors: 0,
+    duplicatesSkipped: 0, duplicatesRead: 0, compactions: 0
+  };
+  // Keys already stored (learnt when the packs are read, and as they are
+  // written) or waiting in the buffer: a block is written once, however many
+  // sessions compile it again before the lazy fill reaches it.
+  const known = new Set();
   let nextSeq = 0;
   let buffered = [];
   let timer = null;
   let writing = Promise.resolve(true);
+  let lastRead = null;
 
   async function packRequests() {
     let requests;
@@ -508,7 +525,10 @@ export async function openAotBlockStore({
     async entries() {
       await writing.catch(() => true);
       const out = [];
-      for (const url of await packRequests()) {
+      const seen = new Set();
+      const duplicatesBefore = stats.duplicatesRead;
+      const urls = await packRequests();
+      for (const url of urls) {
         let decoded = null;
         try {
           const response = await cache.match(url);
@@ -526,9 +546,40 @@ export async function openAotBlockStore({
           continue;
         }
         stats.packsRead += 1;
-        for (const { hash, bytes: b } of decoded.entries) out.push({ key: hash, bytes: b });
+        for (const { hash, bytes: b } of decoded.entries) {
+          if (seen.has(hash)) {
+            stats.duplicatesRead += 1;
+            continue;
+          }
+          seen.add(hash);
+          known.add(hash);
+          out.push({ key: hash, bytes: b });
+        }
       }
+      lastRead = { packs: urls.length, entries: out.length, duplicates: stats.duplicatesRead - duplicatesBefore };
       return out;
+    },
+
+    // Rewrites the store as full packs of unique blocks once it has become
+    // wasteful: duplicates above `maxDuplicateShare` of what was read, or
+    // more packs than `maxPacks` (the idle flush writes small ones). The new
+    // packs are written before the old ones are deleted, so an interruption
+    // leaves duplicates, never a loss. `entries` is what entries() returned.
+    async compactIfWasteful(entries, { maxDuplicateShare = 0.2, maxPacks = 64 } = {}) {
+      if (!lastRead) return false;
+      const total = lastRead.entries + lastRead.duplicates;
+      const wasteful = (total > 0 && lastRead.duplicates / total > maxDuplicateShare) || lastRead.packs > maxPacks;
+      if (!wasteful) return false;
+      await writing.catch(() => true);
+      const old = await packRequests();
+      let ok = true;
+      for (let i = 0; i < entries.length; i += packSize) ok = (await writePack(entries.slice(i, i + packSize))) && ok;
+      if (!ok) return false;
+      const fresh = new Set(await packRequests());
+      for (const url of old) await cache.delete(url).catch(() => {});
+      stats.compactions += 1;
+      lastRead = { packs: fresh.size - old.length, entries: entries.length, duplicates: 0 };
+      return true;
     },
 
     async count() {
@@ -538,6 +589,11 @@ export async function openAotBlockStore({
     // Buffered: a pack is written once `packSize` blocks wait, or `flushMs`
     // after the last one.
     append(key, bytes) {
+      if (known.has(key)) {
+        stats.duplicatesSkipped += 1;
+        return writing;
+      }
+      known.add(key);
       buffered.push({ key, bytes });
       if (buffered.length >= packSize) return flush();
       if (timer === null) {
@@ -552,7 +608,14 @@ export async function openAotBlockStore({
 
     // True once every block of `list` is written.
     appendMany(list) {
-      buffered.push(...list);
+      for (const entry of list) {
+        if (known.has(entry.key)) {
+          stats.duplicatesSkipped += 1;
+          continue;
+        }
+        known.add(entry.key);
+        buffered.push(entry);
+      }
       return flush();
     },
 
@@ -564,6 +627,7 @@ export async function openAotBlockStore({
       timer = null;
       await writing.catch(() => true);
       for (const url of await packRequests()) await cache.delete(url).catch(() => {});
+      known.clear();
     },
 
     stats: () => ({ ...stats, buffered: buffered.length })

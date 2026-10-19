@@ -10,7 +10,8 @@ import {
   openAotCache,
   pruneAotCaches,
   readDiscKeyFromFile,
-  registerAotServiceWorker
+  registerAotServiceWorker,
+  unregisterAotServiceWorker
 } from "../src/aot-cache.js";
 import {
   AOT_ANY_DISC_KEY,
@@ -330,6 +331,14 @@ test("registerAotServiceWorker: registers standalone, or clears it when a site m
   } finally {
     delete globalThis.__salonAotServiceWorkerManaged;
   }
+  // a later visit without ?aotsw=1 removes the engine's standalone registration only
+  unregistered.length = 0;
+  assert.equal(await unregisterAotServiceWorker({ container }), 1);
+  assert.deepEqual(unregistered, ["aot"]);
+  assert.equal(await unregisterAotServiceWorker({ container: {} }), 0);
+  const bootstrap = await readFile(new URL("../src/bootstrap.js", import.meta.url), "utf8");
+  assert.match(bootstrap, /aot\.unregisterAotServiceWorker\(\)/);
+  assert.match(bootstrap, /aotsw"\) === "1"\) \{\s*import\("\.\/aot-cache\.js"\)\.then\(\(aot\) => aot\.registerAotServiceWorker\(\)\)/);
   // another Service Worker already controls the page: leave it be
   assert.equal(await registerAotServiceWorker({ container: { ...container, controller: { scriptURL: "http://x/sw.js" } } }), null);
 });
@@ -397,11 +406,13 @@ const manualTimer = () => {
   return { timers, setTimer: (fn) => (timers.push(fn), timers.length), clearTimer: () => {} };
 };
 
+const MOD_C = Uint8Array.from(Buffer.from("0061736d0100000001060160017f017f03020100070501016600000a09010700200041026a0b", "hex"));
+
 test("block store: packs of blocks, read back in order, reopened by the next session", async () => {
   const storage = fakeCacheStorage();
   const t = manualTimer();
   const store = await openAotBlockStore({ coreHash: CORE, baseUrl: BASE, cacheStorage: storage, packSize: 2, ...t });
-  const blocks = await Promise.all([MOD_A, MOD_B, MOD_A.slice()].map(async (bytes) => ({ key: await canonicalWasmBlockKey(bytes), bytes })));
+  const blocks = await Promise.all([MOD_A, MOD_B, MOD_C].map(async (bytes) => ({ key: await canonicalWasmBlockKey(bytes), bytes })));
   await store.append(blocks[0].key, blocks[0].bytes);
   await store.append(blocks[1].key, blocks[1].bytes); // fills a pack
   store.append(blocks[2].key, blocks[2].bytes); // waits for the timer
@@ -413,8 +424,36 @@ test("block store: packs of blocks, read back in order, reopened by the next ses
   const again = await openAotBlockStore({ coreHash: CORE, baseUrl: BASE, cacheStorage: storage, packSize: 2, ...t });
   assert.equal(again.cacheName, store.cacheName);
   assert.deepEqual((await again.entries()).map((e) => e.key), blocks.map((b) => b.key));
-  await again.appendMany([blocks[1]]);
-  assert.equal((await again.entries()).length, 4, "new packs follow the old ones");
+});
+
+test("block store: a block is written once, and a wasteful store is compacted without loss", async () => {
+  const storage = fakeCacheStorage();
+  const t = manualTimer();
+  const keyA = await canonicalWasmBlockKey(MOD_A);
+  const keyB = await canonicalWasmBlockKey(MOD_B);
+  const keyC = await canonicalWasmBlockKey(MOD_C);
+  const first = await openAotBlockStore({ coreHash: CORE, baseUrl: BASE, cacheStorage: storage, packSize: 2, ...t });
+  await first.appendMany([{ key: keyA, bytes: MOD_A }, { key: keyA, bytes: MOD_A }, { key: keyB, bytes: MOD_B }]);
+  assert.equal(first.stats().duplicatesSkipped, 1);
+  first.append(keyB, MOD_B);
+  assert.equal(first.stats().buffered, 0, "already written in this session");
+  // a session that never read the store writes what it compiles again: duplicates on disk
+  const blind = await openAotBlockStore({ coreHash: CORE, baseUrl: BASE, cacheStorage: storage, packSize: 2, ...t });
+  await blind.appendMany([{ key: keyA, bytes: MOD_A }, { key: keyC, bytes: MOD_C }]);
+  // the next session reads each block once, then compacts
+  const next = await openAotBlockStore({ coreHash: CORE, baseUrl: BASE, cacheStorage: storage, packSize: 2, ...t });
+  const entries = await next.entries();
+  assert.deepEqual(entries.map((e) => e.key), [keyA, keyB, keyC]);
+  assert.equal(next.stats().duplicatesRead, 1);
+  next.append(keyC, MOD_C);
+  assert.equal(next.stats().buffered, 0, "a block read from the store is not written again");
+  assert.equal(await next.compactIfWasteful(entries, { maxDuplicateShare: 0.2 }), true);
+  const raw = await storage.open(next.cacheName);
+  assert.equal([...raw.entries.keys()].filter((u) => u.endsWith(".pack")).length, 2, "3 unique blocks in packs of 2");
+  const after = await openAotBlockStore({ coreHash: CORE, baseUrl: BASE, cacheStorage: storage, packSize: 2, ...t });
+  assert.deepEqual((await after.entries()).map((e) => e.key), [keyA, keyB, keyC]);
+  assert.equal(after.stats().duplicatesRead, 0);
+  assert.equal(await after.compactIfWasteful(await after.entries()), false, "nothing to do any more");
 });
 
 test("block store: a corrupt pack is dropped, another core starts empty and prunes the old store", async () => {
@@ -577,4 +616,11 @@ test("migration keeps the IndexedDB database when the store cannot take it (quot
   storage.failPut = null;
   assert.equal((await migrateLegacyJitIdb({ store, coreFingerprint: fingerprint, idb })).reason, "moved");
   assert.equal(idb.exists, false);
+});
+
+test("the block store's buffer goes out when the saves do (page hidden or closed) and on stop", async () => {
+  const worker = await readFile(new URL("../src/upstream-discio-worker.js", import.meta.url), "utf8");
+  assert.match(worker, /if \(type === "flushUserData" \|\| type === "stop"\) void dolphinJitBlockStore\?\.flush\(\)/);
+  const adapter = await readFile(new URL("../src/upstream-worker-adapter.js", import.meta.url), "utf8");
+  assert.match(adapter, /addEventListener\?\.\("pagehide", \(\) => this\.flushUserData\(\)/);
 });
