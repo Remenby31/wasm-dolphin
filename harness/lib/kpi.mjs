@@ -73,6 +73,10 @@ export const stockChrome = (json) => !json.chrome || (json.chrome.path === "chro
 const med = (d) => d?.median ?? null;
 const cold = (j, side) => j[side]?.cold ?? null;
 const p4Of = (j, side) => (side === "baseline" ? j.baselineP4 : j.p4);
+const idleNote = (p) => [
+  p?.idleCycleShare != null ? `idle skip : ${Math.round(p.idleCycleShare * 1000) / 10} % des cycles` : null,
+  p?.idleTimeShare != null ? `attente : ${Math.round(p.idleTimeShare * 1000) / 10} % du temps, à part` : null
+].filter(Boolean).join(" ; ") || null;
 const p4Why = (j, side) => {
   if (p4Of(j, side) !== undefined) return (side === "baseline" ? j.baselineP4Why : j.p4Why) ?? "pas de compteurs P4 dans ce résultat";
   return "race-perf antérieure aux compteurs P4";
@@ -92,8 +96,11 @@ const ttffWhy = (j, phase) => [
 export const KPI_ROWS = [
   { id: "pcSpeed", group: "North star", label: "Vitesse course, PC grand public milieu de gamme (modèle P9)", target: 95, unit: "%", better: "higher", from: "manual" },
   { id: "macSpeed", group: "Leviers", label: "Vitesse course, Mac M4 Pro", target: 160, unit: "%", better: "higher", from: "race-perf", read: (j, s) => med(cold(j, s)?.speed), failures: raceFailures },
-  { id: "regionTimeShare", group: "Leviers", label: "Part du temps CPU en code de région", target: 0.9, unit: "share", better: "higher", from: "race-perf", read: (j, s) => p4Of(j, s)?.regionTimeShare ?? null, why: p4Why, failures: raceFailures },
-  { id: "dispatchTimeShare", group: "Leviers", label: "Part du dispatch entre blocs", target: 0.1, unit: "share", better: "lower", from: "race-perf", read: (j, s) => p4Of(j, s)?.dispatchTimeShare ?? null, why: p4Why, failures: raceFailures },
+  // Outside idle skip only (PROGRAM.md, 2026-10-20): a core without
+  // idleCycles gives the raw share, shown in the reason, not as the KPI.
+  { id: "regionCycleShare", group: "Leviers", label: "Part des cycles invités en régions, hors idle skip", target: 0.9, unit: "share", better: "higher", from: "race-perf", read: (j, s) => (p4Of(j, s)?.cycleBasis === "outside idle skip" ? p4Of(j, s).regionCycleShare : null), why: (j, s) => (p4Of(j, s)?.regionCycleShare != null ? `cœur sans idleCycles : part brute ${Math.round(p4Of(j, s).regionCycleShare * 1000) / 10} %, idle compris` : p4Why(j, s)), detail: (j, s) => idleNote(p4Of(j, s)), failures: raceFailures },
+  { id: "regionTimeShare", group: "Leviers", label: "Part du temps CPU en code de région, hors attente", target: 0.9, unit: "share", better: "higher", from: "race-perf", read: (j, s) => p4Of(j, s)?.regionTimeShare ?? null, why: p4Why, detail: (j, s) => idleNote(p4Of(j, s)), failures: raceFailures },
+  { id: "dispatchTimeShare", group: "Leviers", label: "Part du dispatch entre blocs, hors attente", target: 0.1, unit: "share", better: "lower", from: "race-perf", read: (j, s) => p4Of(j, s)?.dispatchTimeShare ?? null, why: p4Why, failures: raceFailures },
   { id: "discoveryCoverage", group: "Leviers", label: "Couverture de la découverte (PC distincts)", target: 99, unit: "%", better: "higher", from: "manual" },
   { id: "oracleDivergences", group: "Garde-fous", label: "Divergences à l'oracle (fuzz différentiel)", target: 0, unit: "", better: "zero", from: "fuzz", read: (j) => j.results.reduce((n, r) => n + (r.findings?.length ?? 0), 0) },
   { id: "gateGreen", group: "Garde-fous", label: "Gate de correction vert", target: true, unit: "", better: "true", from: "gate", read: (j) => Boolean(j.decision?.ok), detail: (j) => (j.decision?.ok ? null : j.decision?.reason ?? null) },
