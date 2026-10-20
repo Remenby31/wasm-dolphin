@@ -11,7 +11,7 @@ import { consistentRead, decodeRegionStats, DIAGNOSTICS, DIAGNOSTICS_BY_VERSION,
 import { p4Summary, regionRecord, summarizeP4 } from "../harness/probes/race-perf.mjs";
 import { launchTtff, summarizeTtff } from "../harness/lib/ttff.mjs";
 import { summarizeLaunch, summarizeP7, unavailable } from "../harness/lib/aot-progress.mjs";
-import { candidateColumn, classify, KPI_ROWS, kpiMarkdown, kpiTable, servedSides, sideFlags, trunkSide } from "../harness/lib/kpi.mjs";
+import { candidateColumn, classify, KPI_ROWS, kpiMarkdown, kpiTable, servedSides, sideFlags, sideHasAot, trunkSide } from "../harness/lib/kpi.mjs";
 import { findResults, loadResults, readCandidate, readManual } from "../harness/kpi-report.mjs";
 
 // The struct the core writes (layout v1), as the worker returns it.
@@ -245,8 +245,8 @@ test("KPI: only clean trunk results count, one result per row, shown with its co
   assert.equal(rows.macSpeed.status, "KO");
   assert.equal(rows.raceFrameP99.status, "OK");
   assert.equal(rows.regionTimeShare.status, "n/a");
-  assert.equal(rows.regionTimeShare.why, "core has no DolphinWeb_JitRegionStats");
-  assert.equal(rows.regionCycleShare.why, "core has no DolphinWeb_JitRegionStats");
+  assert.equal(rows.regionTimeShare.why, "aucune race-perf avec aot=1 sur trunk"); // P4 shares read aot=1
+  assert.equal(rows.macSpeedAot.why, "aucune race-perf avec aot=1 sur trunk");
   assert.equal(rows.ttffCold.status, "OK");
   assert.equal(rows.ttffWarm.status, "KO");
   assert.equal(rows.optimisationMs.why, "no P7 progress in this engine");
@@ -328,7 +328,7 @@ test("KPI report: files classified by content; manual.json errors become reasons
   const rows = (m) => Object.fromEntries(kpiTable([], m, { trunk: TRUNK }).map((r) => [r.id, r]));
   assert.match(rows(readManual(path.join(root, "m1.json"))).pcSpeed.why, /illisible/);
   assert.match(rows(readManual(path.join(root, "m2.json"))).pcSpeed.why, /non numérique/);
-  assert.equal(KPI_ROWS.length, 15);
+  assert.equal(KPI_ROWS.length, 17);
   // Every TTFF run overloaded: n/a, and the row says so.
   const over = { kind: "ttff", file: "o", json: { probe: "ttff", at: "2026-10-19T11:00:00Z", served: served("T1"), runs: 3, overloadedRuns: [1, 2, 3], cold: null, warm: null } };
   assert.match(kpiTable([over], {}, { trunk: TRUNK }).find((r) => r.id === "ttffCold").why, /runs 1, 2, 3 lancées sur machine surchargée/);
@@ -336,7 +336,7 @@ test("KPI report: files classified by content; manual.json errors become reasons
 
 test("KPI: the region cycle share counts only outside idle skip", () => {
   const p4 = (basis) => ({ regionCycleShare: 0.93, regionTimeShare: 0.5, dispatchTimeShare: 0.2, idleCycleShare: 0.55, idleTimeShare: 0.3, cycleBasis: basis });
-  const rows = (basis) => Object.fromEntries(kpiTable([race("2026-10-20T03:00:00Z", { extra: { p4: p4(basis) } })], {}, { trunk: TRUNK }).map((r) => [r.id, r]));
+  const rows = (basis) => Object.fromEntries(kpiTable([race("2026-10-20T03:00:00Z", { extra: { query: "video=wgpu&aot=1", p4: p4(basis) } })], {}, { trunk: TRUNK }).map((r) => [r.id, r]));
   const outside = rows("outside idle skip");
   assert.equal(outside.regionCycleShare.value, 0.93);
   assert.equal(outside.regionCycleShare.status, "OK");
@@ -359,12 +359,14 @@ test("KPI: a candidate column beside trunk, never in its place", (t) => {
   assert.equal(byId.regionCycleShare.status, "n/a");
   const c = candidateColumn(ab, { label: "P4 (#43)" });
   assert.deepEqual([c.commit, c.dirty, c.flags], ["B", true, "aot=1&wasmjit=1"]);
-  assert.deepEqual(c.values.macSpeed, { value: 95.8, status: "KO", why: null });
+  assert.deepEqual(c.values.macSpeedAot, { value: 95.8, status: "KO", why: null });
+  assert.equal(c.values.macSpeed, undefined); // an aot=1 candidate leaves the default rows empty
   assert.equal(c.values.regionCycleShare.status, "OK");
   assert.equal(c.values.dispatchTimeShare.value, 0.22);
   assert.equal(c.values.ttffCold, undefined); // only the rows race-perf feeds
   const md = kpiMarkdown(rows, { at: "T", candidate: c });
-  assert.match(md, /\| Vitesse course, Mac M4 Pro \| 83\.3 % \|.*\| 95\.8 % \(KO\) \|/);
+  assert.match(md, /\| Vitesse course, Mac M4 Pro, défaut \| 83\.3 % \|.*\|  \|/);
+  assert.match(md, /\| Vitesse course, Mac M4 Pro, aot=1 [^|]*\| n\/a [^|]*\|.*\| 95\.8 % \(KO\) \|/);
   assert.match(md, /Colonne « Candidat » : `P4 \(#43\)` \(aot=1&wasmjit=1\), max-load 6, `ab` @ B avec modifications locales/);
   assert.doesNotMatch(kpiMarkdown(rows, { at: "T" }), /Candidat/);
 
@@ -372,7 +374,7 @@ test("KPI: a candidate column beside trunk, never in its place", (t) => {
   t.after(() => rmSync(root, { recursive: true, force: true }));
   writeFileSync(path.join(root, "s.json"), JSON.stringify(ab.json));
   writeFileSync(path.join(root, "f.json"), JSON.stringify({ probe: "ttff" }));
-  assert.equal(readCandidate({ candidate: path.join(root, "s.json"), "candidate-label": "L" }).values.macSpeed.value, 95.8);
+  assert.equal(readCandidate({ candidate: path.join(root, "s.json"), "candidate-label": "L" }).values.macSpeedAot.value, 95.8);
   assert.match(readCandidate({ candidate: path.join(root, "f.json") }).error, /not a race-perf summary/);
   assert.equal(readCandidate({}, path.join(root, "absent.json")), null);
   // candidate.json pointing at a summary that is gone: an error, never an exception.
@@ -421,7 +423,15 @@ test("KPI: one trunk with and without a switch (--baseline-query): the row says 
     served: { candidate: served("T1"), baseline: served("T1") }, baseline: { cold: { speed: { median: 82 }, presentP99Ms: { median: 27 } } } } });
   assert.equal(sideFlags(pair.json, "candidate"), "aot=1");
   assert.equal(sideFlags(pair.json, "baseline"), null);
-  const row = kpiTable([pair], {}, { trunk: TRUNK }).find((r) => r.id === "macSpeed");
-  assert.deepEqual([row.value, row.side, row.flags], [95, "candidate", "aot=1"]);
-  assert.match(kpiMarkdown([row], { at: "T" }), /@ T1, aot=1, 2026-10-20T23:10/);
+  // aot=1 asked of a core without regions (before P4) runs as the default.
+  assert.equal(sideHasAot({ query: "aot=1", baselineP4Why: "core has no DolphinWeb_JitRegionStats" }, "baseline"), false);
+  assert.equal(sideHasAot({ query: "aot=1", p4Why: "region stats not asked (no --region-sample)" }, "candidate"), true);
+  assert.equal(sideFlags({ query: "aot=1", baselineP4Why: "core has no DolphinWeb_JitRegionStats" }, "baseline"), "aot=1 sans effet (cœur sans régions)");
+  const rows = Object.fromEntries(kpiTable([pair], {}, { trunk: TRUNK }).map((r) => [r.id, r]));
+  // The default rows read the side without aot=1, the aot=1 rows the other.
+  assert.deepEqual([rows.macSpeed.value, rows.macSpeed.side, rows.macSpeed.flags], [82, "baseline", null]);
+  assert.deepEqual([rows.macSpeedAot.value, rows.macSpeedAot.side, rows.macSpeedAot.flags], [95, "candidate", "aot=1"]);
+  assert.equal(rows.macSpeedAot.counted, false);
+  assert.equal(rows.macSpeed.counted, true);
+  assert.match(kpiMarkdown([rows.macSpeedAot], { at: "T" }), /@ T1, aot=1, 2026-10-20T23:10/);
 });
