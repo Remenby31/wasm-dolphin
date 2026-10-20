@@ -1461,6 +1461,7 @@ const CACHED_INTERPRETER_DISABLE_BITS = {
   shortprefix:     1 << 21, // §28ca lower JIT min-prefix 4→2 (default-off; ?shortprefix=1 to enable)
   smearcompile:    1 << 22, // §28ce cap JIT compiles/slice (default-off; ?smearcompile=1 to enable)
   fastmemhoist:    1 << 23, // §28cz per-block fastmem bounds-check hoist (ENABLE polarity; default-off; ?fastmemhoist=1)
+  fpsingle:        1 << 28, // 0077 known-single FPR lanes skip Force25Bit/width tests (ENABLE polarity; default-off; ?fpsingle=1)
   inlinefma:       1 << 26, // inline exact FMA; set: the FMA family calls the interpreter's NI_madd_msub
   // Aliases the plan / TL;DR uses interchangeably:
   fastinputpoll: 1 << 1, // legacy synonym for meleecall (input-poll lives there)
@@ -1562,6 +1563,13 @@ function requestedCachedInterpreterDisableMask() {
   // unchecked OOB WASM load) — kept off until A/B + correctness verified.
   if (params.get("fastmemhoist") === "1") {
     mask |= CACHED_INTERPRETER_DISABLE_BITS.fastmemhoist;
+  }
+  // 0077 known-single FPRs: DEFAULT-OFF, ENABLE polarity like fastmemhoist.
+  // The core's codegen options all travel in this one mask (it is also the
+  // region cache key's codegenMask and the translator's mask), so the opt-in
+  // is a bit here, reached with ?fpsingle=1.
+  if (params.get("fpsingle") === "1") {
+    mask |= CACHED_INTERPRETER_DISABLE_BITS.fpsingle;
   }
   return mask >>> 0;
 }

@@ -13,7 +13,8 @@ import { imageFromDol } from "../src/aot-image.js";
 import { planDol } from "../src/aot-plan.js";
 import { assembleRegion, regionModuleEntries } from "../src/aot-region-module.js";
 import { asm, assemble, buildDol } from "./aot-asm.mjs";
-import { HELPER_SIGNATURES, checkCoreSlice, loadAotCore } from "./helpers/aot-core-equivalence.mjs";
+import { HELPER_SIGNATURES, STOP, checkCoreSlice, loadAotCore } from "./helpers/aot-core-equivalence.mjs";
+import { PRODUCTION_DISABLE_MASK } from "./helpers/jit-oracle.mjs";
 
 const core = await loadAotCore();
 const skip = !core && "core without _DolphinWeb_AotTranslateForTest (patch 0075)";
@@ -126,4 +127,26 @@ test("cpufuzz over 4 slices: regions end like the interpreter", {
   // Only traps (MMIO, mtdec: no hardware behind the test CPU) are not compared.
   assert.ok(total.checked >= 0.9 * total.translated, `${total.checked} of ${total.translated} compared`);
   assert.deepEqual(total.mismatches, []);
+});
+
+// 0077 (?fpsingle=1): the known-single analysis runs on region code too
+// (the translator emits each block with the same emitter and its own mask).
+test("known-single FPRs apply to region code: less code, the skip counter moves", { skip: skip || (!core?.has("DolphinWeb_JitFpKnownSingleSkips") && "core without 0077") }, () => {
+  const A = (op, d, a, b, c, xo) => ((op << 26) | (d << 21) | (a << 16) | (b << 11) | (c << 6) | (xo << 1)) >>> 0;
+  // lfs f1,0(r1); lfs f2,4(r1); fmadds f3,f1,f2,f4; fmuls f5,f1,f2; blr
+  const words = [((48 << 26) | (1 << 21) | (1 << 16)) >>> 0, ((48 << 26) | (2 << 21) | (1 << 16) | 4) >>> 0, A(59, 3, 1, 4, 2, 29), A(59, 5, 1, 0, 2, 25), 0x4e800020];
+  const bytes = new Uint8Array(4 * words.length);
+  words.forEach((w, i) => new DataView(bytes.buffer).setUint32(4 * i, w));
+  core.load(TEXT, bytes);
+  core.reset(new Array(32).fill(0x80100000), TEXT, STOP, 400000);
+  const skips = () => core.module._DolphinWeb_JitFpKnownSingleSkips() >>> 0;
+  const ranges = [[TEXT, TEXT + bytes.length]];
+  const s0 = skips();
+  const off = core.translate(TEXT, { ranges });
+  const s1 = skips();
+  const on = core.translate(TEXT, { ranges, mask: (PRODUCTION_DISABLE_MASK | (1 << 28)) >>> 0 });
+  assert.ok(off && on);
+  assert.equal(s1, s0, "off: nothing skipped");
+  assert.equal(skips() - s1, 2, "on: frC of fmadds and fmuls known single");
+  assert.ok(on.code.length < off.code.length, `${on.code.length} < ${off.code.length}`);
 });
