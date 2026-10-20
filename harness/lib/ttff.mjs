@@ -109,3 +109,39 @@ export function installContentWatcher() {
     tick();
   };
 }
+
+// The first-launch optimisation (P7) as one launch saw it, from
+// validationReadAotProgress (lib/aot-progress.mjs): its state, and the
+// regions installed from the cache before boot (the "install" event: a
+// second launch with the cache has loaded > 0). Null for an engine without P7.
+export function aotLaunchInfo(reply) {
+  if (!reply || reply.error || !reply.schema) return null;
+  const install = (reply.events ?? []).find((e) => e.type === "install");
+  const done = (reply.events ?? []).find((e) => e.type === "done");
+  return {
+    state: reply.state ?? null,
+    install: install ? { loaded: install.loaded ?? null, failed: install.failed ?? null, deferred: install.deferred ?? null, ms: install.ms ?? null } : null,
+    done: done ? { ms: done.ms ?? null, compiled: done.compiled ?? null, total: done.total ?? null } : null
+  };
+}
+
+// Whether a state means the recompiler does not run (off, or a core without it).
+export const aotInactive = (state) => state == null || state === "disabled" || state === "unsupported";
+
+// Per phase: the optimisation states seen, and the regions installed at boot
+// (a warm launch measured with the region cache has them all > 0).
+export function summarizeAot(runs) {
+  const phase = (name) => {
+    const infos = runs.map((r) => r[name]?.aot).filter(Boolean);
+    if (!infos.length) return null;
+    const loaded = infos.map((a) => a.install?.loaded ?? 0);
+    return {
+      states: [...new Set(infos.map((a) => a.state))],
+      regionsInstalled: loaded,
+      withRegionCache: infos.every((a) => !aotInactive(a.state)) && loaded.every((n) => n > 0),
+      settled: infos.map((a) => a.settled ?? null)
+    };
+  };
+  const cold = phase("cold"), warm = phase("warm");
+  return cold || warm ? { cold, warm } : null;
+}
