@@ -175,6 +175,12 @@ node harness/kpi-report.mjs [--print]
   `../measures/kpi/manual.json`:
   `{ "<kpi id>": { "value": <number>, "source": "…", "at": "…", "note": "…" } }`;
   an unreadable file turns those rows into n/a with the reason.
+  A **candidate** column (a PR's head, measured before it merges) can sit
+  beside trunk: `--candidate <race-perf summary.json> [--candidate-label …]`,
+  or `../measures/kpi/candidate.json` `{ "summary": "<path from the program
+  root>", "label": "…" }` so each refresh keeps it. The rows race-perf feeds
+  read that result's candidate side; the column shows its own verdicts, its
+  commit (and local changes) and query flags, and never changes trunk's.
 
 `harness/matrices/local-kart-race.json` runs the same race through `ab`
 (`KART_ISO`, `KART_STATE`; `measureFromState` starts the measured window
