@@ -512,3 +512,13 @@ test("jitoffthread: a miss is posted once and deferred, compiled once its ready 
     globalThis.self = savedSelf;
   }
 });
+
+const layoutSkip = skip || (core.has("DolphinWeb_JitStateLayout") ? false : "the core predates region modules (CI builds this branch's core)");
+
+test("the state layout export gives distinct, aligned pc, npc and downcount offsets", { skip: layoutSkip }, () => {
+  const [pc, npc, downcount, version] = core.stateLayout();
+  assert.equal(version, 1);
+  assert.equal(npc, pc + 4, "npc follows pc in PowerPCState");
+  for (const offset of [pc, npc, downcount]) assert.equal(offset % 4, 0);
+  assert.notEqual(downcount, pc);
+});

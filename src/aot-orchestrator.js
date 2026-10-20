@@ -29,6 +29,7 @@
 // time since the start of this run.
 import { AotOptimizer } from "./aot-optimizer.js";
 import { createAotRegionLoader } from "./aot-region-loader.js";
+import { regionModuleEntries } from "./aot-region-module.js";
 
 export const AOT_FIRST_LAUNCH_PARAM = "aot";
 export const AOT_PROGRESS_SCHEMA = "wasm-dolphin.aot-progress.v1";
@@ -57,6 +58,7 @@ export function createAotFirstLaunch({
   planStore = null,
   compile = null, // (key, bytes) -> { module } | { reason } (P5); also keeps the Module alive
   retain = () => {}, // (key, module): a module loaded before boot, for the CPU thread
+  install = null, // ({ key, bytes, entries, members }): hands a module to the core's dispatcher
   onEvent = () => {}, // every progress event, as it happens
   maxFunctions = 100,
   batchSize,
@@ -105,7 +107,7 @@ export function createAotFirstLaunch({
   const planKey = String(discKey).replace(/[^0-9A-Za-z_-]/g, "_").slice(0, 128);
   const optimizer = supported
     ? new AotOptimizer({
-      discKey: planKey, buildPlan, translator, planStore, keyParts, assembleOptions, compile, maxFunctions, now,
+      discKey: planKey, buildPlan, translator, planStore, keyParts, assembleOptions, compile, install, maxFunctions, now,
       openCache: () => openCache(identity),
       ...(batchSize ? { batchSize } : {}),
       ...(sleep ? { sleep } : {}),
@@ -121,7 +123,17 @@ export function createAotFirstLaunch({
     }
   }
 
-  const loader = createAotRegionLoader({ openCache, retain, now });
+  // A module from the cache goes to the dispatcher too, mapped at its
+  // functions' entries (block starts inside are resolved by its own
+  // dispatcher); ranges for invalidation.
+  const retainAndInstall = (key, module, bytes) => {
+    retain(key, module);
+    const unit = install && bytes ? optimizer?.regions?.find((u) => u.key === key) : null;
+    if (!unit) return;
+    const entries = regionModuleEntries(module) ?? unit.members.map((f) => f.entry);
+    install({ key, bytes, entries, members: unit.members.map((f) => ({ ranges: f.ranges, hash: f.hash })) });
+  };
+  const loader = createAotRegionLoader({ openCache, retain: retainAndInstall, now });
 
   return {
     supported,

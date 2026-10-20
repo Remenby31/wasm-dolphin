@@ -42,6 +42,16 @@ export async function loadOracleCore(coreDir = new URL("../../cores/dolphin/", i
   const view = () => new Uint32Array(module.HEAPU8.buffer, base, MAX_WORDS + 3 * STATE_WORDS + 4);
   return {
     has: (name) => typeof module[`_${name}`] === "function",
+    // Region modules (P4): pc, npc and downcount offsets in PowerPCState, version.
+    stateLayout() {
+      const ptr = module._malloc(16);
+      try {
+        module._DolphinWeb_JitStateLayout(ptr);
+        return Array.from(new Uint32Array(module.HEAPU8.buffer, ptr, 4));
+      } finally {
+        module._free(ptr);
+      }
+    },
     // Executed-block export (docs/aot-plan.md): {start, length, flags} triplets.
     dumpBlocks() {
       const count = module._DolphinWeb_JitDumpBlocksNowForTest();

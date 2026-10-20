@@ -376,7 +376,7 @@ export async function openAotCache({
       module ??= await compile(bytes);
       stats.loads += 1;
       if (streamed) stats.streamed += 1;
-      return { module, streamed, byteLength: bytes.byteLength };
+      return { module, streamed, byteLength: bytes.byteLength, bytes };
     } catch (error) {
       if (error instanceof WebAssembly.CompileError || error?.name === "CompileError") {
         stats.rejected += 1;

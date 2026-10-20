@@ -282,7 +282,19 @@ function harnessJitRegionStats({ sampleEvery } = {}) {
   const size = Math.min(new DataView(heap.buffer, ptr, 8).getUint32(4, true), 256);
   if (ptr + size > heap.length) return { error: `region stats of ${size} bytes past the heap` };
   const copy = () => Array.from(new Uint8Array(heap.buffer, ptr, size));
-  return { bytes: copy(), again: copy() };
+  return { bytes: copy(), again: copy(), installSamples: harnessRegionInstallSamples(heap) };
+}
+// The core's first region installs, [ms, bytes, path] each (path 0 first
+// attempt, 1 after the worker's ready byte, 2 cold); null with an older core.
+function harnessRegionInstallSamples(heap) {
+  const at = moduleInstance?._DolphinWeb_JitRegionInstallSamples?.() >>> 0;
+  if (!at || at + 8 > heap.length) return null;
+  const view = new DataView(heap.buffer, at);
+  const count = Math.min(view.getUint32(0, true), view.getUint32(4, true));
+  if (at + 8 + 12 * count > heap.length) return null;
+  return Array.from({ length: count }, (_, i) => [
+    Math.round(view.getFloat32(8 + 12 * i, true) * 1000) / 1000, view.getUint32(12 + 12 * i, true), view.getUint32(16 + 12 * i, true)
+  ]);
 }
 let harnessVideoBackend = null;
 // Exact capture for video=wgpu: presents tagged with VI outputs (ViTag records).
@@ -2486,6 +2498,8 @@ async function loadCore({
   // Off-thread compiles need the pthread cache map the persistent cache
   // installs; without it the core compiles in place as before.
   api.setPpcWasmJitOffThread?.(jitOffThread !== false && !noJitCache ? 1 : 0);
+  // Region modules (P4) run in the dispatcher with aot=1, their only producer.
+  api.setJitRegionsEnabled?.(aotFirstLaunch ? 1 : 0);
   api.setPpcProfileEnabled?.(ppcProfile ? 1 : 0);
   api.setWebGpuUploadArenaMiB?.(wgpuUploadArenaMiB, collectMetrics ? 1 : 0);
   api.setWebGpuProducerProfileEnabled?.(wgpuProducerProfileRequested ? 1 : 0);
@@ -2612,6 +2626,7 @@ function bindApi(module) {
         : null,
     setPpcWasmJitWarmup: optionalCwrap("SetPpcWasmJitWarmup", null, ["number", "number"]),
     setPpcWasmJitOffThread: optionalCwrap("SetPpcWasmJitOffThread", null, ["number"]),
+    setJitRegionsEnabled: optionalCwrap("DolphinWeb_JitSetRegionsEnabled", null, ["number"]),
     getPpcWasmJitEngagedFrame: optionalCwrap("GetPpcWasmJitEngagedFrame", "number", []),
     getPpcWasmJitArmStartFrame: optionalCwrap("GetPpcWasmJitArmStartFrame", "number", []),
     setPpcWasmJitEnabled:
@@ -6984,7 +6999,22 @@ export async function prepareAotFirstLaunch(file, {
       return typeof Worker === "function" ? planDiscInWorker(file, { profile }) : planDisc(fileReader(file), { profile });
     },
     compile: precompileAotRegion,
-    retain: (key, mod) => {
+    // Queued once the module is also kept under its bytes' key: the CPU
+    // thread's compile request for it then resolves from this live Module.
+    install: (region) => {
+      const mod = dolphinJitCacheMap.get(region.key);
+      const keyed = mod ? regionBlockCacheKey(region.bytes).then((k) => {
+        if (dolphinJitCacheMap.size < DOLPHIN_JIT_CACHE_MAX) dolphinJitCacheMap.set(k, mod);
+      }) : Promise.resolve();
+      keyed.catch(() => {}).then(() => queueAotRegion(module, region));
+    },
+    retain: (key, mod, bytes) => {
+      // Also under the key the CPU thread's compile looks up (the SHA-256 of
+      // the bytes, as for a block): its install of the region is then a hit
+      // in its own module map, handed over below before the boot.
+      if (bytes) blockKeys.push(regionBlockCacheKey(bytes).then((k) => {
+        if (dolphinJitCacheMap.size < DOLPHIN_JIT_CACHE_MAX) dolphinJitCacheMap.set(k, mod);
+      }).catch(() => {}));
       if (dolphinJitCacheMap.size < DOLPHIN_JIT_CACHE_MAX) dolphinJitCacheMap.set(key, mod);
     },
     maxBootModules: Math.max(0, DOLPHIN_JIT_CACHE_MAX - dolphinJitCacheMap.size),
@@ -6992,12 +7022,14 @@ export async function prepareAotFirstLaunch(file, {
     onEvent: (event) => self.postMessage({ type: "aot-progress", event })
   });
   aotFirstLaunch = flow;
+  const blockKeys = [];
   if (!flow.supported) {
     postStatus("aot: first-launch optimisation unavailable (no disc key, core hash or translator)");
     return;
   }
   const before = new Set(dolphinJitCacheMap.keys());
   const report = await flow.installBeforeBoot();
+  await Promise.all(blockKeys);
   if (aotFirstLaunch !== flow) return;
   // Hand what was loaded to every pthread, then the same fence as at load.
   const added = [...dolphinJitCacheMap.keys()].filter((key) => !before.has(key));
@@ -7025,6 +7057,34 @@ export function startAotFirstLaunchAfterBoot(flow = aotFirstLaunch) {
   return flow.loadRest().catch(() => {}).then(() => {
     if (aotFirstLaunch === flow) return flow.start({ resume: true, ifGeneration: generation });
   });
+}
+// The CPU thread's module-map key for these bytes (DolphinWeb_MakeWasmBlockCacheKey).
+async function regionBlockCacheKey(bytes) {
+  const digest = new Uint8Array(await crypto.subtle.digest("SHA-256", bytes));
+  return "wasm-block-sha256-v1:" + Array.from(digest, (b) => b.toString(16).padStart(2, "0")).join("");
+}
+// Hands a region module to the core's dispatcher (P4, patch 0075). With
+// jitoffthread=1 the CPU thread asks for it with a compile request (answered
+// from the Module kept alive here) and compiles it once its ready byte is set,
+// a hit in V8's native module cache; it then runs it for its entries.
+// members: [{ ranges, hash }] per function, the plan's FNV-1a 64 of its code:
+// the core installs nothing whose code changed since the translation.
+function queueAotRegion(module, { bytes, entries, members }) {
+  if (typeof module?._DolphinWeb_AotQueueRegion !== "function" || !bytes?.length || !entries?.length || !members?.length) return;
+  const ranges = members.flatMap((m) => m.ranges);
+  const triples = members.flatMap((m) => [m.ranges.length, m.hash ? parseInt(m.hash.slice(8), 16) : 0, m.hash ? parseInt(m.hash.slice(0, 8), 16) : 0]);
+  const words = [...entries, ...ranges.flat(), ...triples].map((v) => v >>> 0);
+  const b = module._malloc(bytes.length);
+  const w = module._malloc(4 * words.length);
+  try {
+    module.HEAPU8.set(bytes, b);
+    new Uint32Array(module.HEAPU8.buffer, w, words.length).set(words);
+    const rangesAt = w + 4 * entries.length, membersAt = rangesAt + 8 * ranges.length;
+    module._DolphinWeb_AotQueueRegion(b, bytes.length, w, entries.length, rangesAt, ranges.length, membersAt, members.length);
+  } finally {
+    module._free(b);
+    module._free(w);
+  }
 }
 // A region module of the first launch: compiled off the CPU thread when the
 // compiler worker is on (?aotcompiler=1), kept alive under its key.
@@ -7098,6 +7158,7 @@ function compileDolphinJitModuleOffThread(bytes, deliver, warm) {
 //
 // Contract with the JIT owner (CPU pthread side):
 //   {type: "dolphin-jit-compile-request", key, bytes, kind, readyPtr, readySlot}
+//     (kind "region": no bytes, the Module is already here under key)
 //     asks for that precompilation. The core owns a byte table in its heap at
 //     readyPtr (one byte per slot, slot = first 16 bits of the key's SHA-256),
 //     zeroes the slot before asking and interprets the block meanwhile. Once
@@ -7134,9 +7195,9 @@ export function precompileDolphinJitModule(key, input) {
   if (bytes.buffer instanceof SharedArrayBuffer) bytes = bytes.slice();
   const outcome = (async () => {
     // A block key names the SHA-256 of its bytes: one that does not match is
-    // never cached under that name (as for every other cache entry). Keys of
-    // any other schema are refused until regions (P4) define how theirs are
-    // checked.
+    // never cached under that name (as for every other cache entry). Region
+    // modules (P4) are asked for under the same schema; keys of any other
+    // schema are refused.
     const blockKey = key.startsWith(`${JIT_CACHE_ENTRY_KEY_SCHEMA}:`);
     if (!blockKey) return { reason: "bad-key" };
     if (!(await verifyCanonicalWasmBlockKey(key, bytes))) {
@@ -7168,6 +7229,15 @@ async function handleDolphinJitCompileRequest(event) {
   }
   if (!data || data.type !== "dolphin-jit-compile-request") return;
   const key = String(data.key ?? data.hash ?? "");
+  // A region (P4) asks without bytes: its Module is kept alive here under
+  // that key (retain, install). Ready either way: missing, the CPU thread
+  // compiles its own bytes.
+  if (key && data.kind === "region" && !data.bytes) {
+    dolphinJitCompileRequestCount += 1;
+    if (!dolphinJitCacheMap.has(key)) dolphinJitCompileRequestFailures += 1;
+    markDolphinJitModuleReady(data.readyPtr, data.readySlot);
+    return;
+  }
   if (!key || !data.bytes) return;
   dolphinJitCompileRequestCount += 1;
   const firstAsk = !dolphinJitCompileRequestsInFlight.has(key);

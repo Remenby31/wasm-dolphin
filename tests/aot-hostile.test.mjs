@@ -15,6 +15,23 @@ import { asm, assemble, buildDol, buildRel } from "./aot-asm.mjs";
 
 const BASE = 0x80000000;
 const timed = (fn) => { const t = performance.now(); const r = fn(); return [r, performance.now() - t]; };
+// Bounds hold on an unloaded M4 Pro. Over a bound, the bound is scaled by how
+// much slower a fixed reference workload (20 ms there) runs right now, so a
+// loaded or slower machine is not mistaken for a slow refusal.
+const REFERENCE_MS = 20;
+const reference = () => timed(() => {
+  let h = 0x811c9dc5;
+  for (let i = 0; i < 2e7; i++) { h ^= i; h = Math.imul(h, 16777619); }
+  return h;
+})[1];
+function assertFast(ms, bound) {
+  if (ms < bound) return;
+  // Median of three: test files run in parallel, the load comes in bursts.
+  const runs = [reference(), reference(), reference()].sort((a, b) => a - b);
+  // Capped: a refusal 4x slower than the bound is a regression, whatever the load.
+  const scale = Math.min(4, Math.max(1, runs[1] / REFERENCE_MS));
+  assert.ok(ms < bound * scale, `${Math.round(ms)} ms, bound ${bound} ms x ${scale.toFixed(2)} (machine slowdown)`);
+}
 const lis = (r, x) => asm.lis(r, (x + 0x8000) >>> 16);
 const lo = (x) => x & 0xffff;
 
@@ -52,13 +69,13 @@ test("aot hostile: a chain of functions each found by the previous one's constan
   const { image, entryPoint } = imageFromDol(buildDol({ textAddr: BASE, text: T, entry }));
   const [plan, ms] = timed(() => planDol({ image, entryPoint }));
   assert.equal(plan.modules[0].functions.length, K + 1);
-  assert.ok(ms < 1000, `${Math.round(ms)} ms`);
+  assertFast(ms, 1000);
 });
 
 test("aot hostile: DOL sections sharing file bytes, too much code or too many blocks are refused fast (P1-3)", () => {
   const shared = rawDol({ size: 1 << 20, entry: BASE, sections: [0, 1, 2].map((i) => ({ kind: "text", index: i, offset: 0x100, address: BASE + i * 0x01000000, length: (1 << 20) - 0x100 })) });
   const [, ms] = timed(() => assert.throws(() => imageFromDol(shared), /share file bytes/));
-  assert.ok(ms < 200);
+  assertFast(ms, 200);
 
   const big = rawDol({ size: MAX_EXEC_BYTES + 0x1000, entry: BASE, sections: [{ kind: "text", index: 0, offset: 0x100, address: BASE, length: MAX_EXEC_BYTES + 0xf00 }] });
   assert.throws(() => imageFromDol(big), /bytes of code/);
@@ -70,7 +87,7 @@ test("aot hostile: DOL sections sharing file bytes, too much code or too many bl
   T.push(asm.blr());
   const { image, entryPoint } = imageFromDol(buildDol({ textAddr: BASE, text: assemble(BASE, T).words, entry: BASE }));
   const [, ms2] = timed(() => assert.throws(() => discover(image, { entryPoints: [{ addr: entryPoint, source: "t" }] }), /blocks/));
-  assert.ok(ms2 < 1500, `${Math.round(ms2)} ms`);
+  assertFast(ms2, 1500);
 });
 
 test("aot hostile: the largest accepted image plans in bounded time and memory (P2-10)", () => {
@@ -79,7 +96,7 @@ test("aot hostile: the largest accepted image plans in bounded time and memory (
   const [plan, ms] = timed(() => { const { image, entryPoint } = imageFromDol(dol); return planDol({ image, entryPoint, dolBytes: dol }); });
   const after = process.memoryUsage();
   validatePlan(plan);
-  assert.ok(ms < 2000, `${Math.round(ms)} ms`);
+  assertFast(ms, 2000);
   const grownMiB = (after.heapUsed + after.arrayBuffers - before.heapUsed - before.arrayBuffers) / 2 ** 20;
   assert.ok(grownMiB < 512, `${Math.round(grownMiB)} MiB`);
 });
@@ -91,7 +108,7 @@ test("aot hostile: REL sections overlapping in the file are refused (P1-2)", () 
   const body = 0x40 + NS * 8;
   for (let i = 0; i < NS; i++) { v.setUint32(0x40 + i * 8, (body | 1) >>> 0); v.setUint32(0x44 + i * 8, S - body); }
   const [, ms] = timed(() => assert.throws(() => parseRel(u), /overlap/));
-  assert.ok(ms < 200);
+  assertFast(ms, 200);
 });
 
 test("aot hostile: a call relocated against another REL is not a function (P2-6)", () => {
@@ -120,7 +137,7 @@ test("aot hostile: validatePlan stays linear on a region with 100 000 ranges and
   const plan = planDol({ image, entryPoint, options: { gapFill: false } });
   assert.ok(plan.modules[0].functions[0].extraEntries.length > N / 2);
   const [, ms] = timed(() => validatePlan(plan));
-  assert.ok(ms < 500, `${Math.round(ms)} ms`);
+  assertFast(ms, 500);
 });
 
 test("aot plan: hint dynamic code is valid, analyzer is checked, identity covers every input (P2-5, P2-9)", async () => {

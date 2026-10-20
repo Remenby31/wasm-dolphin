@@ -37,7 +37,7 @@
 // launch, `maxAttempts` launches at most, then blacklisted. Attempts are kept
 // in the plan store (loadAttempts/saveAttempts).
 import { orderedRegions, validatePlan, ANALYZER_VERSION } from "./aot-plan.js";
-import { assembleRegion, groupRegions, regionModuleKey } from "./aot-region-module.js";
+import { assembleRegion, claimEntries, groupRegions, regionModuleKey } from "./aot-region-module.js";
 
 export const PLAN_CACHE_DIR = "aot-plan";
 const BATCH = 64;
@@ -49,7 +49,7 @@ export class AotOptimizer extends EventTarget {
   // planStore: { load(discKey) -> plan|null, save(discKey, plan) } (optional)
   // keyParts: { compilerVersion, codegenMask } (the core's _DolphinWeb_AotKeyParts)
   constructor({ discKey, buildPlan, translator, openCache, cacheIdentity = {}, keyParts = { compilerVersion: 0, codegenMask: 0 },
-    assemble = null, assembleOptions = null, compile = null, maxFunctions = 100, planStore = null, batchSize = BATCH,
+    assemble = null, assembleOptions = null, compile = null, install = null, maxFunctions = 100, planStore = null, batchSize = BATCH,
     notReadyDelayMs = 1000, maxNotReadyWaits = 300, maxAttempts = 3, sleep = (ms) => new Promise((r) => setTimeout(r, ms)), now = () => performance.now() }) {
     super();
     this.discKey = discKey;
@@ -61,6 +61,9 @@ export class AotOptimizer extends EventTarget {
     if (!assemble && !assembleOptions) throw new Error("aot-optimizer: assembleOptions (helpers, pcOffset, memoryPages from the core) required");
     this.assemble = assemble ?? ((fragments) => assembleRegion(fragments, assembleOptions).bytes);
     this.compile = compile;
+    // install({ key, bytes, entries, members }): hands a compiled module to the
+    // core's dispatcher (_DolphinWeb_AotQueueRegion). Optional.
+    this.install = install;
     this.maxFunctions = maxFunctions;
     this.planStore = planStore;
     this.now = now;
@@ -311,8 +314,9 @@ export class AotOptimizer extends EventTarget {
         } else if (!result.fragments.length) failure = "untranslatable";
         else {
           let bytes = null;
+          const fragments = claimEntries(result.fragments);
           try {
-            bytes = this.assemble(result.fragments);
+            bytes = this.assemble(fragments);
           } catch (error) {
             failure = `assemble: ${error?.message || error}`;
           }
@@ -332,13 +336,16 @@ export class AotOptimizer extends EventTarget {
             }
           }
           if (bytes) {
-            const stored = await session.put([{ key: unit.key, bytes, meta: { members: unit.members.length, translated: result.fragments.length } }]);
+            const entries = fragments.flatMap((fr) => fr.entries);
+            const ranges = unit.members.flatMap((f) => f.ranges);
+            const stored = await session.put([{ key: unit.key, bytes, meta: { members: unit.members.length, translated: result.fragments.length, entries, ranges } }]);
             if (this.cancelled) break;
             const reason = stored.failed?.[0]?.reason ?? null;
             if (reason === "quota") wait = "quota";
             else failure = reason;
             if (!reason) {
               compiled++;
+              this.install?.({ key: unit.key, bytes, entries, members: unit.members.map((f) => ({ ranges: f.ranges, hash: f.hash })) });
               if (this.attempts.delete(unit.key)) await this.saveAttempts();
             }
           }

@@ -54,6 +54,10 @@ test("region stats: layout versions 1 and 2 decoded each their own way, any othe
   // v2 of 0075 after its review: three top misses, then the region installs.
   const v2 = decodeRegionStats(statsBytes256({ version: 2, f64, diag: { idleCycles: 550, installMaxSliceMs: 3.5, installsFast: 40, installMs: 120 } }));
   assert.deepEqual([v2.diagnostics.installMaxSliceMs, v2.diagnostics.installsFast, v2.diagnostics.installMs], [3.5, 40, 120]);
+  assert.equal(v2.diagnostics.installFallbacks, 0);
+  // The v2 header's spare u32 counts the regions compiled cold (no ready byte).
+  const packed = decodeRegionStats(statsBytes256({ version: 2, f64, reserved: (57 << 16) | 3 })).diagnostics;
+  assert.deepEqual([packed.installFallbacks, packed.installBootMaxSliceMs], [3, 5.7]); // high 16 bits: boot max x 10
   assert.equal("topMiss3Pc" in v2.diagnostics, false);
   assert.equal(topMisses(v2).length, 0); // no top miss set in this read
   // v1 may come without diagnostics (88 bytes); v2 never.
@@ -74,13 +78,17 @@ test("region stats: unknown layout, short struct, torn read and impossible share
   // Dispatch time is slice time minus the sampled parts: it may drop between two copies.
   assert.equal(regionRecord(reply([900, 1000, 70, 10, 15, 5, 9, 0, 0], [905, 1010, 71, 9.5, 16, 5, 10, 0, 0])).p4.regionCycleShare, 0.9);
   assert.match(regionRecord(reply([900, 1000, 70, -1, 15, 5, 9, 0, 0])).p4Why, /dispatchTimeMs = -1/);
+  // The core's per-install samples ride along as they are; none with an older core.
+  const samples = [[0.21, 40960, 1], [3.4, 912384, 2]];
+  assert.deepEqual(regionRecord({ ...reply([900, 1000, 70, 10, 15, 5, 9, 0, 0]), installSamples: samples }).installSamples, samples);
+  assert.equal("installSamples" in regionRecord(reply([900, 1000, 70, 10, 15, 5, 9, 0, 0])), false);
 });
 
 // The 0075 struct of 256 bytes: v1 then the diagnostics (DIAGNOSTICS order).
-function statsBytes256({ f64 = [], diag = {}, version = 2, size = 256 } = {}) {
+function statsBytes256({ f64 = [], diag = {}, version = 2, size = 256, reserved = 0 } = {}) {
   const buf = new ArrayBuffer(256);
   const v = new DataView(buf);
-  v.setUint32(0, version, true); v.setUint32(4, size, true); v.setUint32(8, 64, true);
+  v.setUint32(0, version, true); v.setUint32(4, size, true); v.setUint32(8, 64, true); v.setUint32(12, reserved, true);
   f64.forEach((x, i) => v.setFloat64(16 + i * 8, x, true));
   (DIAGNOSTICS_BY_VERSION[version] ?? DIAGNOSTICS).forEach((name, i) => v.setFloat64(88 + i * 8, diag[name] ?? 0, true));
   return Array.from(new Uint8Array(buf));

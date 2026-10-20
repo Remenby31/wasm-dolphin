@@ -1,7 +1,7 @@
 diff --git a/Source/Core/Core/PowerPC/CachedInterpreter/CachedInterpreter.cpp b/Source/Core/Core/PowerPC/CachedInterpreter/CachedInterpreter.cpp
 --- a/Source/Core/Core/PowerPC/CachedInterpreter/CachedInterpreter.cpp
 +++ b/Source/Core/Core/PowerPC/CachedInterpreter/CachedInterpreter.cpp
-@@ -1043,6 +1043,12 @@ bool ExecuteFastOsInterruptInline(PowerPC::PowerPCState& ppc_state,
+@@ -1058,6 +1058,12 @@ bool ExecuteFastOsInterruptInline(PowerPC::PowerPCState& ppc_state,
  {
    if (!IsOsInterruptModeVerified(mode))
      return false;
@@ -14,7 +14,7 @@ diff --git a/Source/Core/Core/PowerPC/CachedInterpreter/CachedInterpreter.cpp b/
  
    ppc_state.pc = function_pc;
    ppc_state.npc = return_pc;
-@@ -1090,13 +1096,7 @@ bool ExecuteFastOsInterruptInline(PowerPC::PowerPCState& ppc_state,
+@@ -1105,13 +1111,7 @@ bool ExecuteFastOsInterruptInline(PowerPC::PowerPCState& ppc_state,
      return false;
    }
  
@@ -29,7 +29,7 @@ diff --git a/Source/Core/Core/PowerPC/CachedInterpreter/CachedInterpreter.cpp b/
  
    ppc_state.pc = ppc_state.npc;
    ppc_state.downcount -= static_cast<int>(cycles);
-@@ -2544,6 +2544,17 @@ extern "C" int DolphinWeb_CachedInterpreterSystem(int state_ptr, u32 inst_hex, u
+@@ -2559,6 +2559,17 @@ extern "C" int DolphinWeb_CachedInterpreterSystem(int state_ptr, u32 inst_hex, u
      }
      ppc_state.msr.Hex = ppc_state.gpr[inst.RS];
      system.GetPowerPC().MSRUpdated();
@@ -47,7 +47,7 @@ diff --git a/Source/Core/Core/PowerPC/CachedInterpreter/CachedInterpreter.cpp b/
      break;
    case 371:  // mftb
    {
-@@ -3558,6 +3569,24 @@ void EmitMtmsr(std::vector<u8>& body, const WasmStateLayout& layout, const PPCAn
+@@ -3617,6 +3628,24 @@ void EmitMtmsr(std::vector<u8>& body, const WasmStateLayout& layout, const PPCAn
    body.push_back(0x71);
    EmitPendingPageTableUpdateForMsrLocal(body, layout, 2);
    body.push_back(0x72);
@@ -72,7 +72,7 @@ diff --git a/Source/Core/Core/PowerPC/CachedInterpreter/CachedInterpreter.cpp b/
  
    body.push_back(0x04);
    body.push_back(0x40);
-@@ -11419,6 +11448,28 @@ s32 CachedInterpreter::FastOsInterruptFunction(PowerPC::PowerPCState& ppc_state,
+@@ -12293,6 +12322,28 @@ s32 CachedInterpreter::FastOsInterruptFunction(PowerPC::PowerPCState& ppc_state,
    ppc_state.pc = current_pc;
    ppc_state.npc = LR(ppc_state) & ~3u;
  
@@ -101,7 +101,7 @@ diff --git a/Source/Core/Core/PowerPC/CachedInterpreter/CachedInterpreter.cpp b/
    if (ppc_state.msr.PR)
    {
      GenerateProgramException(ppc_state, ProgramExceptionCause::PrivilegedInstruction);
-@@ -11462,13 +11513,7 @@ s32 CachedInterpreter::FastOsInterruptFunction(PowerPC::PowerPCState& ppc_state,
+@@ -12336,13 +12387,7 @@ s32 CachedInterpreter::FastOsInterruptFunction(PowerPC::PowerPCState& ppc_state,
      return 0;
    }
  
@@ -116,7 +116,7 @@ diff --git a/Source/Core/Core/PowerPC/CachedInterpreter/CachedInterpreter.cpp b/
  
    ppc_state.pc = ppc_state.npc;
    ppc_state.downcount -= static_cast<int>(cycles);
-@@ -13540,7 +13585,7 @@ void JitOracleLoadState(Core::System& system, const u32* in)
+@@ -14428,7 +14473,7 @@ void JitOracleLoadState(Core::System& system, const u32* in)
    ppc.msr.Hex = in[37];
    for (u32 i = 0; i < 8; ++i)
      ppc.spr[SPR_GQR0 + i] = in[38 + i];
@@ -125,7 +125,7 @@ diff --git a/Source/Core/Core/PowerPC/CachedInterpreter/CachedInterpreter.cpp b/
    ppc.pc = JIT_ORACLE_CODE_VA;
    ppc.npc = JIT_ORACLE_CODE_VA;
    for (u32 i = 0; i < 32; ++i)
-@@ -13850,6 +13895,12 @@ extern "C" EMSCRIPTEN_KEEPALIVE int DolphinWeb_JitOracleRun(u32 word_count, u32
+@@ -14738,6 +14783,12 @@ extern "C" EMSCRIPTEN_KEEPALIVE int DolphinWeb_JitOracleRun(u32 word_count, u32
    return std::memcmp(s_jit_oracle.interp, s_jit_oracle.jit, sizeof s_jit_oracle.jit) == 0 ? 0 : 1;
  }
  
@@ -135,6 +135,6 @@ diff --git a/Source/Core/Core/PowerPC/CachedInterpreter/CachedInterpreter.cpp b/
 +  return 1;
 +}
 +
- extern "C" int RunPpcWasmFloatCompareSmoke()
- {
-   auto& state = Core::System::GetInstance().GetPPCState();
+ // P4 region translator (docs/region-translator.md): a function as a region
+ // fragment. The block emitter runs in fragment mode (helper calls
+ // relocatable, halts return 2) and the tail RunWasmBlock runs for a completed
