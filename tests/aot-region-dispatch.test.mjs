@@ -232,3 +232,27 @@ test("with jitoffthread=1 a request never answered falls back to a synchronous c
     assert.equal(lastInstallPath(), 2, "sampled as cold");
   });
 });
+
+test("with jitoffthread=1 a cache clear while regions wait asks again: no mark is lost", { skip: offThreadSkip }, () => {
+  withOffThreadCompile((requests) => {
+    const plan = setup();
+    core.setRegionsEnabled(true);
+    const before = core.regionCount();
+    const entries = queueAll(plan);
+    core.serviceRegions();
+    const first = requests().length;
+    assert.ok(first >= 1);
+    // The worker answers, then a state load clears the cache before the CPU
+    // thread saw the marks: the ready table and the requests in flight are reset.
+    for (const r of requests()) Atomics.store(core.module.HEAPU8, r.readyPtr + r.readySlot, 1);
+    core.module._DolphinWeb_AotResetRequestsForTest();
+    const fallbacks = core.regionStats().installFallbacks;
+    core.serviceRegions();
+    assert.equal(core.regionCount(), before, "nothing ready after the reset");
+    assert.ok(requests().length > first, "the waiting regions asked again");
+    for (const r of requests().slice(first)) Atomics.store(core.module.HEAPU8, r.readyPtr + r.readySlot, 1);
+    core.serviceRegions();
+    assert.equal(core.regionCount(), before + entries, "installed on the new marks, not after the 5 s wait");
+    assert.equal(core.regionStats().installFallbacks, fallbacks);
+  });
+});

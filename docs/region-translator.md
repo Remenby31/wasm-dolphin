@@ -139,7 +139,7 @@ The three P1s and the trivial P2s are fixed in #43; the rest is tracked here.
 - [ ] **Flag name**: plan says `wasmjit=region`, shipped as `aot=1`; `docs/jit-flags.md` not updated.
 - [ ] **One compiler worker**: blocks and regions not in the module map share a single worker, FIFO. Regions never queue there today (their live Module is in the map under their bytes' key), but a full map (49 152 entries) would send them behind every block. A second worker, or a priority lane for regions already hit, needs the client's watchdog and stats per worker: not trivial.
 - [ ] **Bimodal hitch bursts on main** (not P4, found while reviewing #37): in about one race-perf run in six, on main as on a candidate, single dropped frames (36–47 ms) every ~20 VI in two segments of the race savestate (viSinceLoad ~1370–1720 and ~1920–2090); the other runs have 0–2. Measures: `measures/jit-robustness/race-perf/p37-review-vs-main-1300` and `p37-hitches-1500` (`cold.hitchList`). Next: `--pcsample` restricted to those VI ranges, runs with and without a burst compared (after #43).
-- [ ] **Late ready signal on the last region** (pair 16:00, 2 runs of 6): the 143rd install, a 2.4 MB region, waits the full 5 s and is counted in `installFallbacks`, yet costs a V8 hit (1.5 ms): its ready byte came late or was cleared without a -4 on this side. Timestamp requests and marks to find what clears it.
+- [x] **Late ready signal on the last region** (pair 16:00): a state load (`ClearCache`) zeroed the ready table and forgot the requests in flight; a mark that landed before it was lost and the region waited out the 5 s. Waiting regions now ask again after a cache clear.
 
 ### From the final review of #43 (P2)
 

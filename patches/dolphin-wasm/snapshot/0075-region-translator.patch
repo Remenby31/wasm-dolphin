@@ -418,7 +418,7 @@ diff --git a/Source/Core/Core/PowerPC/CachedInterpreter/CachedInterpreter.cpp b/
  }
  
  WasmStateLayout MakeWasmBlockTestLayout(PowerPC::PowerPCState& state, u8* ram, u32 ram_size)
-@@ -8806,9 +8863,748 @@ void CachedInterpreter::Shutdown()
+@@ -8806,9 +8863,787 @@ void CachedInterpreter::Shutdown()
  #line 7779
  }
  
@@ -527,6 +527,9 @@ diff --git a/Source/Core/Core/PowerPC/CachedInterpreter/CachedInterpreter.cpp b/
 +  // Its ready byte was set, then cleared by another key's post (-4) before
 +  // this thread saw it: the module is there, compiled from its own bytes.
 +  bool signalled = false;
++  // A cache clear (a state load) zeroed every ready byte and forgot the
++  // requests in flight: a mark that landed before it is lost. Asked again.
++  bool repost = false;
 +};
 +std::mutex s_region_queue_mutex;
 +std::vector<PendingRegion> s_region_queue;
@@ -555,6 +558,18 @@ diff --git a/Source/Core/Core/PowerPC/CachedInterpreter/CachedInterpreter.cpp b/
 +double s_install_ms_per_byte = 0.8e-6;
 +double s_region_boot_max_slice_ms = 0;  // published in the header's spare u32
 +u32 s_region_install_fallbacks = 0;     // likewise
++
++// ClearCache: the ready table and the requests in flight were reset.
++void RepostWaitingRegions()
++{
++  const auto now = std::chrono::steady_clock::now();
++  for (auto& waiting : s_region_waiting)
++  {
++    waiting.repost = true;
++    waiting.signalled = false;
++    waiting.posted = now;
++  }
++}
 +
 +// Regions waiting on `slot`, whose byte a post of another key just cleared.
 +void SignalRegionWaiters(u32 slot)
@@ -812,6 +827,22 @@ diff --git a/Source/Core/Core/PowerPC/CachedInterpreter/CachedInterpreter.cpp b/
 +  for (std::size_t i = 0; i < s_region_waiting.size();)
 +  {
 +    PendingRegion& pending = s_region_waiting[i];
++    if (pending.repost)
++    {
++      // A post only (or a hit in this pthread's map): not counted in the slice.
++      pending.repost = false;
++      double ignored = 0;
++      if (TryInstallRegion(pending, ready_bits_ptr, ignored, InstallPath::Ready))
++      {
++        s_region_waiting[i] = std::move(s_region_waiting.back());
++        s_region_waiting.pop_back();
++      }
++      else
++      {
++        ++i;
++      }
++      continue;
++    }
 +    const bool ready =
 +        s_wasm_jit_ready_bits[pending.slot].load(std::memory_order_acquire) != 0;
 +    const bool expired = now - pending.posted > s_region_ready_wait;
@@ -1084,6 +1115,14 @@ diff --git a/Source/Core/Core/PowerPC/CachedInterpreter/CachedInterpreter.cpp b/
 +  return static_cast<u32>(reinterpret_cast<std::uintptr_t>(&s_install_samples));
 +}
 +
++// Tests: what ClearCache does to the off-thread requests (a state load).
++extern "C" EMSCRIPTEN_KEEPALIVE void DolphinWeb_AotResetRequestsForTest()
++{
++  s_wasm_off_thread_used = true;
++  ResetOffThreadCompiles();
++  RepostWaitingRegions();
++}
++
 +extern "C" EMSCRIPTEN_KEEPALIVE void DolphinWeb_AotSetReadyWaitForTest(int ms)
 +{
 +  s_region_ready_wait = std::chrono::milliseconds(ms);
@@ -1167,7 +1206,7 @@ diff --git a/Source/Core/Core/PowerPC/CachedInterpreter/CachedInterpreter.cpp b/
  #if DOLPHIN_WEB_STATIC_EXIT_LINKS && DOLPHIN_WEB_STATIC_EXIT_LINK_STATS
    s_static_link_stats.InitialDispatch(normal_entry == nullptr);
  #endif
-@@ -9078,7 +9874,8 @@ void CachedInterpreter::ExecuteOneBlock([[maybe_unused]] bool allow_redispatch)
+@@ -9078,7 +9913,8 @@ void CachedInterpreter::ExecuteOneBlock([[maybe_unused]] bool allow_redispatch)
    }
  #ifdef __EMSCRIPTEN__
      if (redispatch_enabled && m_ppc_state.downcount > 0 &&
@@ -1177,7 +1216,7 @@ diff --git a/Source/Core/Core/PowerPC/CachedInterpreter/CachedInterpreter.cpp b/
      {
  #if DOLPHIN_WEB_STATIC_EXIT_LINKS
        const auto static_link_result = static_link_scope.Resolve(
-@@ -9093,7 +9890,7 @@ void CachedInterpreter::ExecuteOneBlock([[maybe_unused]] bool allow_redispatch)
+@@ -9093,7 +9929,7 @@ void CachedInterpreter::ExecuteOneBlock([[maybe_unused]] bool allow_redispatch)
  #endif
  #else
  #line 8054
@@ -1186,7 +1225,7 @@ diff --git a/Source/Core/Core/PowerPC/CachedInterpreter/CachedInterpreter.cpp b/
  #endif
  #line 8055
        if (!next)
-@@ -9166,6 +9963,8 @@ void CachedInterpreter::Run()
+@@ -9166,6 +10002,8 @@ void CachedInterpreter::Run()
      }
      // The compile budget has been replenished and no cached callback is active.
      RetryDeferredWasmBlocks(*this);
@@ -1195,7 +1234,7 @@ diff --git a/Source/Core/Core/PowerPC/CachedInterpreter/CachedInterpreter.cpp b/
      // Start new timing slice
      // Metrics-off runs avoid all per-slice clocks. BeginSlice also resets
      // the exclusive wait/work attribution for this one CoreTiming slice.
-@@ -9179,10 +9978,65 @@ void CachedInterpreter::Run()
+@@ -9179,10 +10017,65 @@ void CachedInterpreter::Run()
      const auto _advance_end =
          _profile_slice ? std::chrono::steady_clock::now() : std::chrono::steady_clock::time_point{};
  
@@ -1261,7 +1300,7 @@ diff --git a/Source/Core/Core/PowerPC/CachedInterpreter/CachedInterpreter.cpp b/
  #if DOLPHIN_WEB_STATIC_EXIT_LINKS && DOLPHIN_WEB_STATIC_EXIT_LINK_STATS
      s_static_link_stats.Slice();
  #endif
-@@ -9365,7 +10219,27 @@ s32 CachedInterpreter::CheckIdle(PowerPC::PowerPCState& ppc_state,
+@@ -9365,7 +10258,27 @@ s32 CachedInterpreter::CheckIdle(PowerPC::PowerPCState& ppc_state,
  {
    const auto& [core_timing, idle_pc] = operands;
    if (ppc_state.npc == idle_pc)
@@ -1289,7 +1328,7 @@ diff --git a/Source/Core/Core/PowerPC/CachedInterpreter/CachedInterpreter.cpp b/
    return sizeof(AnyCallback) + sizeof(operands);
  }
  
-@@ -12119,7 +12993,7 @@ bool CachedInterpreter::TryWriteWasmBlock(u32 nextPC)
+@@ -12119,7 +13032,7 @@ bool CachedInterpreter::TryWriteWasmBlock(u32 nextPC)
        fastcheck_gpfifo_index, fast_os_interrupt_call_index, fast_melee_input_status_call_index,
        fast_melee_status_call_index, fast_melee_service_poll_call_index,
        static_cast<int>(reinterpret_cast<std::uintptr_t>(&DolphinWeb_CachedInterpreterFma)),
@@ -1298,7 +1337,7 @@ diff --git a/Source/Core/Core/PowerPC/CachedInterpreter/CachedInterpreter.cpp b/
    if (handle == -3 || handle == -4)
    {
      // Posted to the compiler worker: interpret now, retry once its byte is set.
-@@ -12129,12 +13003,13 @@ bool CachedInterpreter::TryWriteWasmBlock(u32 nextPC)
+@@ -12129,12 +13042,13 @@ bool CachedInterpreter::TryWriteWasmBlock(u32 nextPC)
      if (handle == -4)
      {
        // This post cleared a 1 another key of the slot was waiting for: let
@@ -1313,7 +1352,7 @@ diff --git a/Source/Core/Core/PowerPC/CachedInterpreter/CachedInterpreter.cpp b/
      }
      s_wasm_off_thread_waiting.push_back({js.blockStart, static_cast<u32>(m_ppc_state.feature_flags),
                                           js.curBlock->normalEntry, slot, 0});
-@@ -12422,8 +13297,19 @@ void ApplyArmedWasmPolicy()
+@@ -12422,8 +13336,19 @@ void ApplyArmedWasmPolicy()
      ApplyArmedWasmPolicyAt(Core::System::GetInstance().GetMovie().GetCurrentFrame());
  }
  
@@ -1335,7 +1374,7 @@ diff --git a/Source/Core/Core/PowerPC/CachedInterpreter/CachedInterpreter.cpp b/
  // Serves a dump request in place (the test has no CPU thread loop running):
  // returns the number of triplets, or -1 when the core is not the
  // CachedInterpreter.
-@@ -12437,6 +13323,8 @@ extern "C" EMSCRIPTEN_KEEPALIVE int DolphinWeb_JitDumpBlocksNowForTest()
+@@ -12437,6 +13362,8 @@ extern "C" EMSCRIPTEN_KEEPALIVE int DolphinWeb_JitDumpBlocksNowForTest()
    return static_cast<int>(DolphinWeb_JitDumpBlocksCount());
  }
  
@@ -1344,7 +1383,7 @@ diff --git a/Source/Core/Core/PowerPC/CachedInterpreter/CachedInterpreter.cpp b/
  extern "C" EMSCRIPTEN_KEEPALIVE double DolphinWeb_JitArmedStepForTest(double frame)
  {
    ApplyArmedWasmPolicyAt(static_cast<u64>(frame));
-@@ -13850,6 +14738,580 @@ extern "C" EMSCRIPTEN_KEEPALIVE int DolphinWeb_JitOracleRun(u32 word_count, u32
+@@ -13850,6 +14777,580 @@ extern "C" EMSCRIPTEN_KEEPALIVE int DolphinWeb_JitOracleRun(u32 word_count, u32
    return std::memcmp(s_jit_oracle.interp, s_jit_oracle.jit, sizeof s_jit_oracle.jit) == 0 ? 0 : 1;
  }
  
@@ -1925,10 +1964,11 @@ diff --git a/Source/Core/Core/PowerPC/CachedInterpreter/CachedInterpreter.cpp b/
  extern "C" int RunPpcWasmFloatCompareSmoke()
  {
    auto& state = Core::System::GetInstance().GetPPCState();
-@@ -14248,6 +15710,7 @@ void CachedInterpreter::ClearCache()
+@@ -14248,6 +15749,8 @@ void CachedInterpreter::ClearCache()
  #ifdef __EMSCRIPTEN__
    s_deferred_wasm_queues.erase(this);
    ResetOffThreadCompiles();
++  RepostWaitingRegions();
 +  UnverifyAllRegions();  // the code may have changed (state load): checked before they run
  #endif
    m_block_cache.Clear();
