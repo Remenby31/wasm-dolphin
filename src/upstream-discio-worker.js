@@ -139,6 +139,7 @@ import {
 } from "./wgpu-upload-probe-executor.js";
 import { AudioPcmProducer } from "./audio-pcm-producer.js";
 import { installWgpuDiagnosticLogFilter } from "./diagnostic-log-filter.js";
+import { createStatusRateLimiter } from "./status-rate-limit.js";
 import {
   WGPU_VISUAL_BYTES_PER_ROW,
   WGPU_VISUAL_READBACK_BYTES,
@@ -6312,10 +6313,24 @@ function postStatus(message) {
       rendererDiagnostics.fatalStatusHistory.shift();
     }
   }
+  // Rate-limited (status-rate-limit.js): a core looping on a log line must
+  // not flood the page and Chrome's browser process.
+  if (!statusRelay().push(text)) return;
   self.postMessage({
     type: "status",
     message: text
   });
+}
+
+// The summaries of what the rate limit held back (folded repeats, lines not
+// relayed) reach the page as statuses too.
+let statusRelayInstance = null;
+function statusRelay() {
+  statusRelayInstance ??= createStatusRateLimiter({
+    emit: (message) => self.postMessage({ type: "status", message }),
+    isFatal: isFatalStatusMessage,
+  });
+  return statusRelayInstance;
 }
 
 function isFatalStatusMessage(message) {
