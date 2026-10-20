@@ -70,6 +70,14 @@ export function trunkSide(r, trunk) {
 // flags measure something else (the P9 extrapolation).
 export const stockChrome = (json) => !json.chrome || (json.chrome.path === "chrome stable" && !json.chrome.args);
 
+// Absolute numbers (race speed, p99, shares) come from night measures, run
+// with a load limit of 6 at most (rule of 2026-10-20); day pairs at a higher
+// limit only compare two sides and never feed trunk's rows. A summary that
+// does not say its limit is left out too.
+export const ABSOLUTE_MAX_LOAD = 6;
+export const nightMeasure = (json) => Number.isFinite(json.maxLoad) && json.maxLoad <= ABSOLUTE_MAX_LOAD;
+export const absoluteRace = (json) => stockChrome(json) && nightMeasure(json);
+
 const med = (d) => d?.median ?? null;
 const cold = (j, side) => j[side]?.cold ?? null;
 const p4Of = (j, side) => (side === "baseline" ? j.baselineP4 : j.p4);
@@ -127,7 +135,7 @@ export function meets(row, value) {
 // results: [{ kind, json, file, mtimeMs, extra? }]; trunk: Set of the
 // commits of origin/main's first-parent history; manual: { id → { value,
 // source, at, note } } or { error } when the file could not be read.
-export function kpiTable(results, manual = {}, { trunk = new Set(), accept = { "race-perf": stockChrome } } = {}) {
+export function kpiTable(results, manual = {}, { trunk = new Set(), accept = { "race-perf": absoluteRace } } = {}) {
   return KPI_ROWS.map((row) => {
     const base = { id: row.id, group: row.group, label: row.label, target: row.target, unit: row.unit, better: row.better };
     if (row.from === "manual") {
@@ -138,9 +146,11 @@ export function kpiTable(results, manual = {}, { trunk = new Set(), accept = { "
       return { ...base, value: m.value, status: statusOf(meets(row, m.value)), nature: "declared", source: m.source ?? null, at: m.at ?? null, detail: m.note ?? null };
     }
     const kinds = [row.from].flat();
-    const all = results.filter((r) => kinds.includes(r.kind) && (!accept[r.kind] || accept[r.kind](r.json)));
+    const ofKinds = results.filter((r) => kinds.includes(r.kind));
+    const all = ofKinds.filter((r) => !accept[r.kind] || accept[r.kind](r.json));
+    const refused = ofKinds.length - all.length;
     const onTrunk = all.map((r) => ({ r, t: trunkSide(r, trunk) })).filter((x) => x.t).sort((a, b) => resultTime(b.r) - resultTime(a.r));
-    if (!onTrunk.length) return { ...base, value: null, status: "n/a", nature: "n/a", why: `aucun résultat ${kinds.join(" / ")} sur un commit propre de trunk (${all.length} hors trunk ignoré(s))` };
+    if (!onTrunk.length) return { ...base, value: null, status: "n/a", nature: "n/a", why: `aucun résultat ${kinds.join(" / ")} sur un commit propre de trunk (${all.length} hors trunk ignoré(s)${refused ? `, ${refused} hors règle ignoré(s) : Chrome non standard ou mesure de jour, max-load > ${ABSOLUTE_MAX_LOAD}` : ""})` };
     const { r, t } = onTrunk[0];
     const source = { source: r.file, commit: t.commit, side: t.side, at: new Date(resultTime(r)).toISOString() };
     const value = row.read(r.json, t.side, r.kind);
@@ -166,12 +176,12 @@ const cmp = { higher: "≥", lower: "≤", zero: "=", true: "=" };
 // head, measured before it merges), its candidate side read by the same rows.
 // Shown beside trunk, never in trunk's place: its own value, verdict, commit
 // (and whether the tree had local changes) and query.
-export function candidateColumn(r, { label = null } = {}) {
+export function candidateColumn(r, { label = null, note = null } = {}) {
   if (r?.kind !== "race-perf") return null;
   const served = servedSides(r).candidate;
   const query = new URLSearchParams(String(r.json.query ?? ""));
   const flags = ["aot", "wasmjit", "jitoffthread"].filter((k) => query.has(k)).map((k) => `${k}=${query.get(k)}`).join("&");
-  const header = { label: label ?? String(r.json.sides?.candidate ?? "candidate").split("/").pop(), source: r.file, commit: served?.commit ?? null, dirty: served?.dirty ?? null, flags, at: new Date(resultTime(r)).toISOString() };
+  const header = { label: label ?? String(r.json.sides?.candidate ?? "candidate").split("/").pop(), note, maxLoad: r.json.maxLoad ?? null, source: r.file, commit: served?.commit ?? null, dirty: served?.dirty ?? null, flags, at: new Date(resultTime(r)).toISOString() };
   const values = {};
   for (const row of KPI_ROWS) {
     if (![row.from].flat().includes("race-perf")) continue;
@@ -196,7 +206,7 @@ export function kpiMarkdown(rows, { at = new Date().toISOString(), uptime = null
     if (!next || next.group !== group) lines.push("");
   }
   if (candidate) {
-    lines.push(`Colonne « Candidat » : \`${candidate.label}\`${candidate.flags ? ` (${candidate.flags})` : ""}, \`${candidate.source}\` @ ${candidate.commit ? candidate.commit.slice(0, 8) : "?"}${candidate.dirty ? " avec modifications locales" : ""}, ${candidate.at.slice(0, 16)}. Mesure d'une branche avant fusion, à titre de comparaison : elle ne compte pas dans l'état des KPI.`, "");
+    lines.push(`Colonne « Candidat » : \`${candidate.label}\`${candidate.note ? `, ${candidate.note}` : ""}${candidate.flags ? ` (${candidate.flags})` : ""}${candidate.maxLoad != null ? `, max-load ${candidate.maxLoad}` : ""}, \`${candidate.source}\` @ ${candidate.commit ? candidate.commit.slice(0, 8) : "?"}${candidate.dirty ? " avec modifications locales" : ""}, ${candidate.at.slice(0, 16)}. Mesure d'une branche avant fusion, à titre de comparaison : elle ne compte pas dans l'état des KPI.`, "");
   }
   return lines.join("\n");
 }

@@ -20,7 +20,7 @@
 // holds what no probe measures yet:
 // { "<kpi id>": { "value": <number>, "source": "…", "at": "…", "note": "…" } }.
 import { execFileSync } from "node:child_process";
-import { existsSync, mkdirSync, readdirSync, readFileSync, statSync, writeFileSync } from "node:fs";
+import { existsSync, mkdirSync, readdirSync, readFileSync, realpathSync, statSync, writeFileSync } from "node:fs";
 import path from "node:path";
 import { pathToFileURL } from "node:url";
 import { parseArgs } from "node:util";
@@ -74,9 +74,17 @@ function extraOf(kind, json, file) {
   return null;
 }
 
+// A source given as a symbolic link (a worktree whose harness/results was
+// moved to build.noindex, out of Spotlight's way) is read through it; links
+// below a source are not followed (no loop). The same file reached twice
+// (the link and its target both given as sources) counts once.
+const realPath = (p) => { try { return realpathSync(p); } catch { return p; } };
+
 export function loadResults(dirs, { root = PROGRAM_ROOT } = {}) {
   const results = [];
-  for (const file of [...new Set(dirs.flatMap((d) => findResults(d)))]) {
+  const byReal = new Map();
+  for (const file of dirs.flatMap((d) => findResults(d))) if (!byReal.has(realPath(file))) byReal.set(realPath(file), file);
+  for (const file of byReal.values()) {
     const json = readJson(file);
     const kind = classify(json, file);
     if (kind) results.push({ kind, json, file: path.relative(root, file), mtimeMs: statSync(file).mtimeMs, extra: extraOf(kind, json, file) });
@@ -91,9 +99,9 @@ export function trunkCommits(repo = REPO_ROOT, ref = "origin/main") {
 
 // The candidate column: --candidate <race-perf summary.json> [--candidate-label],
 // else measures/kpi/candidate.json { "summary": "<path from the program root>",
-// "label": "…" }, kept so a refresh shows the same candidate. Null without one.
+// "label": "…", "note": "…" (e.g. "jour, relatif") }, kept so a refresh shows the same candidate. Null without one.
 export function readCandidate(values, file = path.join(PROGRAM_ROOT, "measures", "kpi", "candidate.json")) {
-  let spec = values.candidate ? { summary: values.candidate, label: values["candidate-label"] } : readJson(file);
+  let spec = values.candidate ? { summary: values.candidate, label: values["candidate-label"], note: values["candidate-note"] } : readJson(file);
   if (!spec?.summary) return null;
   const summary = path.resolve(PROGRAM_ROOT, spec.summary);
   // A summary that is gone or unreadable leaves the column out, with the reason.
@@ -102,7 +110,7 @@ export function readCandidate(values, file = path.join(PROGRAM_ROOT, "measures",
   if (classify(json, summary) !== "race-perf") return { error: `${spec.summary}: not a race-perf summary` };
   let mtimeMs = 0;
   try { mtimeMs = statSync(summary).mtimeMs; } catch {} // removed since it was read: the result's own date is kept
-  return candidateColumn({ kind: "race-perf", json, file: path.relative(PROGRAM_ROOT, summary), mtimeMs, extra: extraOf("race-perf", json, summary) }, { label: spec.label ?? null });
+  return candidateColumn({ kind: "race-perf", json, file: path.relative(PROGRAM_ROOT, summary), mtimeMs, extra: extraOf("race-perf", json, summary) }, { label: spec.label ?? null, note: spec.note ?? null });
 }
 
 // manual.json, or { error } when it is there but unreadable (the rows say so).
@@ -121,7 +129,7 @@ async function main() {
     options: {
       from: { type: "string", multiple: true, default: [] }, "no-worktrees": { type: "boolean", default: false },
       manual: { type: "string", default: path.join(PROGRAM_ROOT, "measures", "kpi", "manual.json") },
-      candidate: { type: "string" }, "candidate-label": { type: "string" },
+      candidate: { type: "string" }, "candidate-label": { type: "string" }, "candidate-note": { type: "string" },
       out: { type: "string", default: path.join(PROGRAM_ROOT, "measures", "kpi") }, print: { type: "boolean", default: false }
     }
   });
