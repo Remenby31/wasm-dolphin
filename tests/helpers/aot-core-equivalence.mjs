@@ -109,13 +109,17 @@ export async function loadAotCore(coreDir = new URL("../../cores/dolphin/", impo
     },
     runRegion: (handle) => m._DolphinWeb_AotRunRegionForTest(handle),
     // The dispatcher's region path (P4 step 5): queue, install, dispatch.
-    queueRegion(bytes, entries, ranges) {
-      const words = [...entries, ...ranges.flat()];
+    // members: [{ ranges, hash }] (hash: the plan's 16-hex FNV-1a 64, or null).
+    queueRegion(bytes, entries, members) {
+      const ranges = members.flatMap((x) => x.ranges);
+      const triples = members.flatMap((x) => [x.ranges.length, x.hash ? parseInt(x.hash.slice(8), 16) : 0, x.hash ? parseInt(x.hash.slice(0, 8), 16) : 0]);
+      const words = [...entries, ...ranges.flat(), ...triples].map((v) => v >>> 0);
       const b = m._malloc(bytes.length), w = m._malloc(4 * words.length);
       try {
         m.HEAPU8.set(bytes, b);
         new Uint32Array(m.HEAPU8.buffer, w, words.length).set(words);
-        m._DolphinWeb_AotQueueRegion(b, bytes.length, w, entries.length, w + 4 * entries.length, ranges.length);
+        const rangesAt = w + 4 * entries.length;
+        m._DolphinWeb_AotQueueRegion(b, bytes.length, w, entries.length, rangesAt, ranges.length, rangesAt + 8 * ranges.length, members.length);
       } finally {
         m._free(b);
         m._free(w);
@@ -126,9 +130,11 @@ export async function loadAotCore(coreDir = new URL("../../cores/dolphin/", impo
     regionCount: () => m._DolphinWeb_JitRegionCount() >>> 0,
     dispatchRegion: () => m._DolphinWeb_AotDispatchRegionForTest(),
     invalidate: (address, size) => m._DolphinWeb_AotInvalidateForTest(address >>> 0, size >>> 0),
+    unverifyRegions: () => m._DolphinWeb_AotUnverifyForTest(),
     // Layout v1 of DolphinWeb_JitRegionStats (sampleEvery >= 0 resets).
     regionStats(sampleEvery = -1) {
       const p = m._DolphinWeb_JitRegionStats(sampleEvery) >>> 0;
+      m._DolphinWeb_AotPublishStatsForTest?.(); // no CPU loop here: apply and publish now
       const head = new Uint32Array(m.HEAPU8.buffer, p, 4);
       const f = new Float64Array(m.HEAPU8.buffer, p + 16, 9);
       const names = ["regionCycles", "totalCycles", "regionTimeMs", "dispatchTimeMs", "blockTimeMs", "interpTimeMs",

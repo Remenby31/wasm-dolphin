@@ -111,3 +111,19 @@ the oracle tests and the homebrew fuzz check it at every step.
    layout v1 agreed with the harness (88 bytes, off until enabled). Tests:
    `tests/aot-region-dispatch.test.mjs`. Done; the live check needs P7.
 6. The FP analyses over a region, each behind its own flag.
+
+## Open follow-ups (review of #43)
+
+The three P1s and the trivial P2s are fixed in #43; the rest is tracked here.
+
+- [ ] **Translator off the CPU thread reads CPU-thread state**: `Analyze` consults `HLE::TryReplaceFunction(symbol_db)`, `GetMode()` and breakpoints unsynchronised. Give the translator its own read-only view (or snapshot them on the CPU thread).
+- [ ] **Analyzer options**: the translator's `PPCAnalyzer` does not take the JIT's options (e.g. DivByZeroExceptions, set by 2 game INIs), and they are not in the region cache key. Mirror the JIT's options and add them to `codegenMask`.
+- [ ] **Emit diagnostics counters** (`s_wasm_emit_*`, `s_fmh_*`, `s_wasm_emit_fail_*`) are incremented by the translator and the CPU thread at once: thread_local or atomic.
+- [ ] **Return code 1 after a mid-region `dispatch` exit** (an op outside the tier at `resume_pc`): code already ran, 1 claims nothing did. Harmless today; it skews `regionNotEntry`.
+- [ ] **DropRegion rebuilds the entry filter** from ~135k entries per dropped region: O(N·135k) for a wide invalidation. Rebuild once per invalidation; free dropped handles; clear regions and the queue on shutdown.
+- [ ] **Shared entry not remapped** when the first region holding it is dropped (speed only).
+- [ ] **Oracle region mode forces `Exceptions=0`** at entry: no pending exception enters a region in the tests. Add cases.
+- [ ] **No oracle case for icbi on the running region** (only lane 10 covers it).
+- [ ] **Time shares**: validate the sampled shares against a V8 CPU profile once (< 5 points).
+- [ ] **FP analyses over a region** (known-single, FPRF once per region, FPSCR in a local), each behind its own flag with oracle + race-perf pair (plan P4, next PR).
+- [ ] **Flag name**: plan says `wasmjit=region`, shipped as `aot=1`; `docs/jit-flags.md` not updated.

@@ -28,7 +28,8 @@ function assertFast(ms, bound) {
   if (ms < bound) return;
   // Median of three: test files run in parallel, the load comes in bursts.
   const runs = [reference(), reference(), reference()].sort((a, b) => a - b);
-  const scale = Math.max(1, runs[1] / REFERENCE_MS);
+  // Capped: a refusal 4x slower than the bound is a regression, whatever the load.
+  const scale = Math.min(4, Math.max(1, runs[1] / REFERENCE_MS));
   assert.ok(ms < bound * scale, `${Math.round(ms)} ms, bound ${bound} ms x ${scale.toFixed(2)} (machine slowdown)`);
 }
 const lis = (r, x) => asm.lis(r, (x + 0x8000) >>> 16);

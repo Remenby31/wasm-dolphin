@@ -6988,7 +6988,13 @@ export async function prepareAotFirstLaunch(file, {
     },
     compile: precompileAotRegion,
     install: (region) => queueAotRegion(module, region),
-    retain: (key, mod) => {
+    retain: (key, mod, bytes) => {
+      // Also under the key the CPU thread's compile looks up (the SHA-256 of
+      // the bytes, as for a block): its install of the region is then a hit
+      // in its own module map, handed over below before the boot.
+      if (bytes) blockKeys.push(regionBlockCacheKey(bytes).then((k) => {
+        if (dolphinJitCacheMap.size < DOLPHIN_JIT_CACHE_MAX) dolphinJitCacheMap.set(k, mod);
+      }).catch(() => {}));
       if (dolphinJitCacheMap.size < DOLPHIN_JIT_CACHE_MAX) dolphinJitCacheMap.set(key, mod);
     },
     maxBootModules: Math.max(0, DOLPHIN_JIT_CACHE_MAX - dolphinJitCacheMap.size),
@@ -6996,12 +7002,14 @@ export async function prepareAotFirstLaunch(file, {
     onEvent: (event) => self.postMessage({ type: "aot-progress", event })
   });
   aotFirstLaunch = flow;
+  const blockKeys = [];
   if (!flow.supported) {
     postStatus("aot: first-launch optimisation unavailable (no disc key, core hash or translator)");
     return;
   }
   const before = new Set(dolphinJitCacheMap.keys());
   const report = await flow.installBeforeBoot();
+  await Promise.all(blockKeys);
   if (aotFirstLaunch !== flow) return;
   // Hand what was loaded to every pthread, then the same fence as at load.
   const added = [...dolphinJitCacheMap.keys()].filter((key) => !before.has(key));
@@ -7030,18 +7038,27 @@ export function startAotFirstLaunchAfterBoot(flow = aotFirstLaunch) {
     if (aotFirstLaunch === flow) return flow.start({ resume: true, ifGeneration: generation });
   });
 }
+// The CPU thread's module-map key for these bytes (DolphinWeb_MakeWasmBlockCacheKey).
+async function regionBlockCacheKey(bytes) {
+  const digest = new Uint8Array(await crypto.subtle.digest("SHA-256", bytes));
+  return "wasm-block-sha256-v1:" + Array.from(digest, (b) => b.toString(16).padStart(2, "0")).join("");
+}
 // Hands a region module to the core's dispatcher: the CPU thread compiles it
-// at its next slice boundary (a cache hit once compiled here) and runs it
-// for its entries (P4, patch 0075).
-function queueAotRegion(module, { bytes, entries, ranges }) {
-  if (typeof module?._DolphinWeb_AotQueueRegion !== "function" || !bytes?.length || !entries?.length) return;
-  const words = [...entries, ...ranges.flat()].map((v) => v >>> 0);
+// at its next slice boundary and runs it for its entries (P4, patch 0075).
+// members: [{ ranges, hash }] per function, the plan's FNV-1a 64 of its code:
+// the core installs nothing whose code changed since the translation.
+function queueAotRegion(module, { bytes, entries, members }) {
+  if (typeof module?._DolphinWeb_AotQueueRegion !== "function" || !bytes?.length || !entries?.length || !members?.length) return;
+  const ranges = members.flatMap((m) => m.ranges);
+  const triples = members.flatMap((m) => [m.ranges.length, m.hash ? parseInt(m.hash.slice(8), 16) : 0, m.hash ? parseInt(m.hash.slice(0, 8), 16) : 0]);
+  const words = [...entries, ...ranges.flat(), ...triples].map((v) => v >>> 0);
   const b = module._malloc(bytes.length);
   const w = module._malloc(4 * words.length);
   try {
     module.HEAPU8.set(bytes, b);
     new Uint32Array(module.HEAPU8.buffer, w, words.length).set(words);
-    module._DolphinWeb_AotQueueRegion(b, bytes.length, w, entries.length, w + 4 * entries.length, ranges.length);
+    const rangesAt = w + 4 * entries.length, membersAt = rangesAt + 8 * ranges.length;
+    module._DolphinWeb_AotQueueRegion(b, bytes.length, w, entries.length, rangesAt, ranges.length, membersAt, members.length);
   } finally {
     module._free(b);
     module._free(w);

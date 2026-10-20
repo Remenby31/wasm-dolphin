@@ -36,19 +36,30 @@ function setup() {
   const { image, entryPoint } = imageFromDol(dol);
   const plan = planDol({ image, entryPoint, gameId: "TEST01", dolBytes: dol, options: { gapFill: false } });
   for (const s of image.segments) core.load(s.start, s.bytes);
+  core.invalidate(TEXT, 4 * PROGRAM.words.length); // regions of an earlier test are dropped
   return plan;
 }
 
-// Every region of the plan, queued as P7 would.
+// Every region of the plan, queued as P7 would (members with the plan's hashes).
 function queueAll(plan) {
   let entries = 0;
   for (const group of regionGroups(plan, 100)) {
     const fragments = group.flatMap(functionFragments(core));
     const { bytes, entries: mapped } = assembleRegion(fragments, { helpers: HELPER_SIGNATURES, pcOffset: core.pcOffset, memoryPages: core.memoryPages });
-    core.queueRegion(bytes, mapped.map(([pc]) => pc), group.flatMap((f) => f.ranges));
+    core.queueRegion(bytes, mapped.map(([pc]) => pc), group.map((f) => ({ ranges: f.ranges, hash: f.hash })));
     entries += mapped.length;
   }
   return entries;
+}
+
+// The program's regions installed, from a clean code image (each test alone).
+function installed() {
+  const plan = setup();
+  core.setRegionsEnabled(true);
+  const before = core.regionCount();
+  const entries = queueAll(plan);
+  core.serviceRegions();
+  return { plan, before, entries };
 }
 
 // The CPU loop, one dispatch at a time: a region where there is one, else
@@ -64,6 +75,9 @@ function runCall(entry, { regions }) {
   assert.equal(core.pc(), STOP);
   return { state: core.state(), downcount: core.downcount(), ran, interpreted };
 }
+
+const ADDI_R3_1 = ((14 << 26) | (3 << 21) | (3 << 16) | 1) >>> 0; // addi r3,r3,1
+const patchDouble = () => core.load(PROGRAM.labels.double, Uint8Array.of(ADDI_R3_1 >>> 24, (ADDI_R3_1 >>> 16) & 0xff, (ADDI_R3_1 >>> 8) & 0xff, ADDI_R3_1 & 0xff));
 
 test("queued regions install at the slice boundary and the dispatcher runs them like the interpreter", { skip }, () => {
   const plan = setup();
@@ -90,7 +104,7 @@ test("queued regions install at the slice boundary and the dispatcher runs them 
 });
 
 test("regions run only with translation and FP on", { skip }, () => {
-  setup();
+  installed();
   core.reset(seedGprs(1), PROGRAM.labels.double, STOP, 400000);
   assert.equal(core.dispatchRegion(), 1);
   core.reset(seedGprs(1), PROGRAM.labels.double, STOP, 400000);
@@ -100,7 +114,7 @@ test("regions run only with translation and FP on", { skip }, () => {
 });
 
 test("invalidating covered code drops the regions holding it, other code keeps them", { skip }, () => {
-  setup();
+  installed();
   const count = core.regionCount();
   core.invalidate(0x80100000, 0x1000);
   assert.equal(core.regionCount(), count, "unrelated code");
@@ -108,4 +122,34 @@ test("invalidating covered code drops the regions holding it, other code keeps t
   assert.ok(core.regionCount() < count, "the region with double is gone");
   core.reset(seedGprs(1), PROGRAM.labels.double, STOP, 400000);
   assert.equal(core.dispatchRegion(), 0);
+});
+
+test("code changed between translation and install: the region is never installed (plan hashes)", { skip }, () => {
+  const plan = setup();
+  core.setRegionsEnabled(true);
+  const before = core.regionCount();
+  queueAll(plan);
+  patchDouble(); // the game rewrites double and invalidates it before the slice boundary
+  core.invalidate(PROGRAM.labels.double, 4);
+  core.serviceRegions();
+  core.reset(seedGprs(1), PROGRAM.labels.double, STOP, 400000);
+  assert.equal(core.dispatchRegion(), 0, "no stale region for double");
+  assert.equal(core.regionCount(), before, "the region holding double was refused");
+  const reference = runCall(PROGRAM.labels.main, { regions: false });
+  const got = runCall(PROGRAM.labels.main, { regions: true });
+  assert.deepEqual(got.state, reference.state, "the new code runs");
+});
+
+test("after a cache clear, regions are hashed again: changed code is dropped, unchanged code runs", { skip }, () => {
+  installed();
+  core.unverifyRegions();
+  core.reset(seedGprs(1), PROGRAM.labels.count, STOP, 400000);
+  assert.equal(core.dispatchRegion(), 1, "unchanged code: verified, runs");
+  patchDouble(); // no icbi: a state load replaced memory
+  core.unverifyRegions();
+  core.reset(seedGprs(1), PROGRAM.labels.double, STOP, 400000);
+  assert.equal(core.dispatchRegion(), 0, "changed code: dropped before it runs");
+  const reference = runCall(PROGRAM.labels.main, { regions: false });
+  const got = runCall(PROGRAM.labels.main, { regions: true });
+  assert.deepEqual(got.state, reference.state);
 });

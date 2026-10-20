@@ -58,7 +58,7 @@ export function createAotFirstLaunch({
   planStore = null,
   compile = null, // (key, bytes) -> { module } | { reason } (P5); also keeps the Module alive
   retain = () => {}, // (key, module): a module loaded before boot, for the CPU thread
-  install = null, // ({ key, bytes, entries, ranges }): hands a module to the core's dispatcher
+  install = null, // ({ key, bytes, entries, members }): hands a module to the core's dispatcher
   onEvent = () => {}, // every progress event, as it happens
   maxFunctions = 100,
   batchSize,
@@ -131,7 +131,7 @@ export function createAotFirstLaunch({
     const unit = install && bytes ? optimizer?.regions?.find((u) => u.key === key) : null;
     if (!unit) return;
     const entries = regionModuleEntries(module) ?? unit.members.map((f) => f.entry);
-    install({ key, bytes, entries, ranges: unit.members.flatMap((f) => f.ranges) });
+    install({ key, bytes, entries, members: unit.members.map((f) => ({ ranges: f.ranges, hash: f.hash })) });
   };
   const loader = createAotRegionLoader({ openCache, retain: retainAndInstall, now });
 
