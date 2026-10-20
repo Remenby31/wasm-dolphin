@@ -56,6 +56,15 @@ export function describeSlotSave(slot, response) {
   return `Saved slot ${slot} for this session only: ${why}`;
 }
 
+// P7 (?aot=1): every optimisation event of the worker, for the page (the KPI
+// probe reads window.__aotProgressLog; the site listens with onAotProgress).
+const AOT_PROGRESS_LOG_MAX = 4096;
+function recordAotProgress(event) {
+  const log = (globalThis.__aotProgressLog ??= []);
+  log.push(event);
+  if (log.length > AOT_PROGRESS_LOG_MAX) log.splice(0, log.length - AOT_PROGRESS_LOG_MAX);
+}
+
 export class UpstreamWorkerAdapter {
   constructor({
     coreUrl = DEFAULT_UPSTREAM_CORE_URL,
@@ -100,6 +109,8 @@ export class UpstreamWorkerAdapter {
     noJitCache = false,
     jitOffThread = false,
     aotCompiler = false,
+    aotFirstLaunch = false,
+    onAotProgress = () => {},
     collectMetrics = false,
     legacyOneWayAck = false,
     wgpuReplayDiagnostics = false,
@@ -203,6 +214,8 @@ export class UpstreamWorkerAdapter {
     this.noJitCache = Boolean(noJitCache);
     this.jitOffThread = Boolean(jitOffThread);
     this.aotCompiler = aotCompiler === true;
+    this.aotFirstLaunch = aotFirstLaunch === true;
+    this.onAotProgress = onAotProgress;
     this.collectMetrics = Boolean(collectMetrics);
     this.legacyOneWayAck = Boolean(legacyOneWayAck);
     this.wgpuReplayDiagnostics = Boolean(wgpuReplayDiagnostics);
@@ -411,6 +424,7 @@ export class UpstreamWorkerAdapter {
       noJitCache: this.noJitCache,
       jitOffThread: this.jitOffThread,
       aotCompiler: this.aotCompiler,
+      aotFirstLaunch: this.aotFirstLaunch,
       collectMetrics: this.collectMetrics,
       legacyOneWayAck: this.legacyOneWayAck,
       coreSelection: this.coreSelectionTelemetry(window.location.href),
@@ -567,6 +581,19 @@ export class UpstreamWorkerAdapter {
       ppcWasmBlockCompileCount: response.ppcWasmBlockCompileCount,
       ppcWasmBlockRunCount: response.ppcWasmBlockRunCount
     };
+  }
+
+  // P7 (?aot=1): the interface the site's OptimizationSource wraps.
+  aotStatus() {
+    return this.request("aotStatus");
+  }
+
+  aotOptimize({ resume = true } = {}) {
+    return this.request("aotOptimize", { resume });
+  }
+
+  aotCancel() {
+    return this.request("aotCancel");
   }
 
   async probeBoot() {
@@ -1012,6 +1039,15 @@ export class UpstreamWorkerAdapter {
     }
     if (message?.type === "status") {
       this.onStatus(message.message);
+      return;
+    }
+    if (message?.type === "aot-progress" && message.event) {
+      recordAotProgress(message.event);
+      try {
+        this.onAotProgress(message.event);
+      } catch {
+        // a listener never breaks the worker transport
+      }
       return;
     }
 

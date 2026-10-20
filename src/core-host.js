@@ -129,6 +129,8 @@ export class EmulatorHost {
     // ?aotcompiler=1: compile cached/requested JIT modules in the compiler
     // worker (off by default until its memory cost is measured).
     this.aotCompiler = aotCompilerRequested(window.location.search);
+    // ?aot=1: first-launch optimisation of the disc (P7), off by default.
+    this.aotFirstLaunch = new URLSearchParams(window.location.search).get("aot") === "1";
     this.collectMetrics = requestedCollectMetrics();
     this.legacyOneWayAck = requestedLegacyOneWayAck(window.location.search);
     this.wgpuReplayDiagnostics = requestedWgpuReplayDiagnostics(window.location.search);
@@ -417,6 +419,7 @@ export class EmulatorHost {
             noJitCache: this.noJitCache,
             jitOffThread: this.jitOffThread,
             aotCompiler: this.aotCompiler,
+            aotFirstLaunch: this.aotFirstLaunch,
             collectMetrics: this.collectMetrics,
             legacyOneWayAck: this.legacyOneWayAck,
             wgpuReplayDiagnostics: this.wgpuReplayDiagnostics,
