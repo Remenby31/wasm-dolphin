@@ -19,18 +19,23 @@
 #define DONE_FRAME 900
 #define CALLS_PER_FRAME 2000
 
-/* Kept apart and simple: the first word is li r3,1 (checked before patching). */
-__attribute__((noinline, aligned(32))) int smc_target(void) {
+/* Kept apart and simple: the first word is li r3,1 (checked before patching).
+ * noipa: GCC must not use its return value at the call sites (it would fold
+ * the calls away and the patch would never be seen). */
+__attribute__((noipa, aligned(32))) int smc_target(void) {
 	return 1;
 }
 
-__attribute__((noinline)) static u32 call_many(void) {
+/* Called through a volatile pointer too: a real call each time. */
+static int (*volatile target_fn)(void) = smc_target;
+
+__attribute__((noipa)) static u32 call_many(void) {
 	u32 sum = 0;
-	for (int i = 0; i < CALLS_PER_FRAME; i++) sum += (u32)smc_target();
+	for (int i = 0; i < CALLS_PER_FRAME; i++) sum += (u32)target_fn();
 	return sum / CALLS_PER_FRAME;
 }
 
-static void patch_target(void) {
+__attribute__((noipa)) static void patch_target(void) {
 	u32 *code = (u32 *)(void *)smc_target;
 	if (code[0] != 0x38600001u) return; /* not li r3,1: leave the code alone */
 	code[0] = 0x38600002u;              /* li r3,2 */
