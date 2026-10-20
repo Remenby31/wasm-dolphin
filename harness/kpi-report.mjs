@@ -143,6 +143,7 @@ async function main() {
   let uptime = null;
   try { uptime = execFileSync("uptime", { encoding: "utf8" }).trim(); } catch {}
   const candidate = readCandidate(values);
+  const counted = rows.filter((r) => r.counted !== false);
   const md = kpiMarkdown(rows, { at, uptime, candidate: candidate?.error ? null : candidate });
   if (candidate?.error) console.warn(`[kpi-report] candidate column left out: ${candidate.error}`);
   mkdirSync(values.out, { recursive: true });
@@ -152,7 +153,7 @@ async function main() {
     writeFileSync(path.join(values.out, `${name}.md`), md + "\n");
     writeFileSync(path.join(values.out, `${name}.json`), json);
   }
-  console.log(values.print ? md : `[kpi-report] ${rows.filter((r) => r.status === "OK").length} OK, ${rows.filter((r) => r.status === "KO").length} KO, ${rows.filter((r) => r.status === "n/a").length} n/a over ${results.length} results -> ${path.join(values.out, "latest.md")}`);
+  console.log(values.print ? md : `[kpi-report] ${counted.filter((r) => r.status === "OK").length} OK, ${counted.filter((r) => r.status === "KO").length} KO, ${counted.filter((r) => r.status === "n/a").length} n/a (global status: ${counted.length} rows; ${rows.length - counted.length} aot=1 rows apart) over ${results.length} results -> ${path.join(values.out, "latest.md")}`);
 }
 
 if (import.meta.url === pathToFileURL(process.argv[1] ?? "").href) await main();
