@@ -122,7 +122,35 @@ test("review #22: contenders on a stale lock: one holder at a time, every one ge
   const outs = await Promise.all(children.map((c) => new Promise((resolve) => { let out = ""; c.stdout.on("data", (d) => (out += d)); c.on("exit", (code) => resolve(`${code}:${out.trim()}`)); })));
   assert.deepEqual(outs, Array(6).fill("0:ok"));
   assert.equal(existsSync(dir), false);
-  assert.deepEqual(readdirSync(path.dirname(dir)).filter((n) => n.includes("stale")), []);
+  assert.deepEqual(readdirSync(path.dirname(dir)).filter((n) => n.includes("stale") || n.includes(".new-") || n.includes(".takeover") || n.includes(".released-")), []);
+});
+
+test("perf lock: a takeover guard left by a dead harness is abandoned once old", async (t) => {
+  const dir = lockDir(t);
+  const dead = spawn(process.execPath, ["-e", ""]);
+  await new Promise((r) => dead.on("exit", r));
+  mkdirSync(dir);
+  writeFileSync(path.join(dir, "owner"), JSON.stringify({ name: "crashed run", pid: dead.pid, host: os.hostname(), harness: true }));
+  mkdirSync(`${dir}.takeover`); // its taker died mid-takeover
+  // Fresh guard: somebody is taking over, so wait.
+  await assert.rejects(acquirePerfLock({ dir, name: "test", waitSec: 0, sleep: async () => {} }), /still held by/);
+  const old = new Date(Date.now() - 60_000);
+  utimesSync(`${dir}.takeover`, old, old);
+  const release = await acquirePerfLock({ dir, name: "test", waitSec: 5, pollSec: 0.01 });
+  assert.equal(readLockOwner(dir).name, "test");
+  release();
+  assert.deepEqual(readdirSync(path.dirname(dir)), []);
+});
+
+test("perf lock: published whole, never an ownerless .perf-lock; a leftover unpublished dir of a dead harness is swept", async (t) => {
+  const dir = lockDir(t);
+  const dead = spawn(process.execPath, ["-e", ""]);
+  await new Promise((r) => dead.on("exit", r));
+  mkdirSync(`${dir}.new-${dead.pid}-abcd`); // died between its mkdir and its rename
+  const release = await acquirePerfLock({ dir, name: "test", waitSec: 0 });
+  assert.deepEqual(readdirSync(path.dirname(dir)), [".perf-lock"]);
+  assert.equal(readLockOwner(dir).name, "test");
+  release();
 });
 
 test("review #22: an ownerless lock is taken over only once it is old", async (t) => {
