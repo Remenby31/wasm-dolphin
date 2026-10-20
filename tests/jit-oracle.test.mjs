@@ -522,3 +522,37 @@ test("the state layout export gives distinct, aligned pc, npc and downcount offs
   for (const offset of [pc, npc, downcount]) assert.equal(offset % 4, 0);
   assert.notEqual(downcount, pc);
 });
+
+// 0077: FPR lanes known to hold a single (lfs, single arithmetic, frsp) let
+// single multiplies and FMAs skip Force25Bit and the exact-product width
+// test; a double written over them (lfd, a double op, fmr: ps0 only) drops
+// that knowledge. Opt-in bit 1 << 28.
+const FP_KNOWN_SINGLE = 1 << 28;
+test("known-single FPRs (0077): single products and FMAs as the interpreter, overwritten lanes dropped", { skip }, () => {
+  const r = makeRng(0x5161e);
+  const withFd = (word, fd) => ((word & ~(31 << 21)) | (fd << 21)) >>> 0;
+  const skips = () => (core.has("DolphinWeb_JitFpKnownSingleSkips") ? core.module._DolphinWeb_JitFpKnownSingleSkips() >>> 0 : null);
+  const before = skips();
+  let compiled = 0;
+  for (const target of ["fmadds", "fmsubs", "fnmadds", "fmuls", "ps_madd", "ps_mul", "ps_muls0", "ps_muls1", "ps_madds0", "ps_madds1"]) {
+    for (let k = 0; k < 40; k++) {
+      let word;
+      do word = generate(target, r); while (word & 1);
+      const fa = (word >>> 16) & 31, fb = (word >>> 11) & 31, fc = (word >>> 6) & 31;
+      if (fa === fb || fa === fc || fb === fc) { k--; continue; }
+      const words = [withFd(generate("lfs", r), fc), withFd(generate(r.pick(["lfs", "fmuls"]), r), fa)];
+      if (k % 4 === 3) words.push(withFd(generate(r.pick(["lfd", "fmadd", "fmr"]), r), fc));
+      words.push(word, 0x4e800020);
+      const program = Uint32Array.from(words);
+      const state = randomState(r);
+      state[37] = 0x00002032;
+      for (const mask of [SHORT_PREFIX_MASK | FP_KNOWN_SINGLE, SHORT_PREFIX_MASK | REGALLOC_OFF | FP_KNOWN_SINGLE]) {
+        const result = core.run(program, state, mask);
+        assertSame(result, `${target} ${Array.from(program, hex).join(" ")} mask ${hex(mask)}`);
+        if (result.code === 0) compiled += 1;
+      }
+    }
+  }
+  assert.ok(compiled > 300, `too few compiled blocks (${compiled})`);
+  if (before !== null) assert.ok(skips() > before, "the analysis dropped work in some lanes");
+});

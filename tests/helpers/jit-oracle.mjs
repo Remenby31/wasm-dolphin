@@ -41,6 +41,7 @@ export async function loadOracleCore(coreDir = new URL("../../cores/dolphin/", i
   const base = module._DolphinWeb_JitOracleBuffer() >>> 0;
   const view = () => new Uint32Array(module.HEAPU8.buffer, base, MAX_WORDS + 3 * STATE_WORDS + 4);
   return {
+    module,
     has: (name) => typeof module[`_${name}`] === "function",
     // Region modules (P4): pc, npc and downcount offsets in PowerPCState, version.
     stateLayout() {

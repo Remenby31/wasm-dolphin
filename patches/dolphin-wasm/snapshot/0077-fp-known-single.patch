@@ -1,0 +1,216 @@
+diff --git a/Source/Core/Core/PowerPC/CachedInterpreter/CachedInterpreter.cpp b/Source/Core/Core/PowerPC/CachedInterpreter/CachedInterpreter.cpp
+--- a/Source/Core/Core/PowerPC/CachedInterpreter/CachedInterpreter.cpp
++++ b/Source/Core/Core/PowerPC/CachedInterpreter/CachedInterpreter.cpp
+@@ -358,6 +358,11 @@ constexpr u32 DOLPHIN_WEB_ENABLE_FASTMEM_HOIST = 1u << 23;
+ // Inline exact FMA (TwoProduct + round-to-odd sum). Set: every FMA-family op
+ // calls the `fma` import (the interpreter's NI_madd_msub) instead.
+ constexpr u32 DOLPHIN_WEB_DISABLE_INLINE_FMA = 1u << 26;  // 24 and 25: clear-rect (WebGPU)
++// Known-single FPRs (plan P4, FP analyses). ENABLE polarity, default off: a
++// lane known to hold an f32-exact value skips Force25Bit and its denormal
++// test as frC of a single multiply, and the significand-width test of the
++// exact product when both factors are known single.
++constexpr u32 DOLPHIN_WEB_ENABLE_FP_KNOWN_SINGLE = 1u << 28;
+ // §28ce burst smearing: when ENABLED (gate bit CLEARED), TryWriteWasmBlock
+ // returns false (falls to interpret) once this many compiles OR this much
+ // compile wall time have happened in the current CoreTiming slice. Smears
+@@ -2932,6 +2937,101 @@ struct WasmFastmemHoistPlan
+ };
+ static thread_local WasmFastmemHoistPlan s_fmh_plan;
+ 
++// Block-local: the FPR lanes known to hold an f32-exact value (low 29
++// significand bits zero, so never a double denormal), as of the op being
++// emitted. Updated from each op's semantics, so a helper or interpreter
++// fallback for that op leaves it right. Unknown at block entry.
++struct WasmFpSingleState
++{
++  bool active = false;
++  u32 lane[2] = {0, 0};
++};
++static thread_local WasmFpSingleState s_fp_single;
++// Emitted FP lanes that dropped work thanks to it (compile time, all threads).
++std::atomic<u32> s_fp_single_skips{0};
++
++inline bool FprLaneKnownSingle(u32 reg, u32 lane)
++{
++  return s_fp_single.active && ((s_fp_single.lane[lane & 1] >> reg) & 1) != 0;
++}
++
++void UpdateFpSingleState(const PPCAnalyst::CodeOp& op)
++{
++  if (!s_fp_single.active)
++    return;
++  const UGeckoInstruction inst = op.inst;
++  const u32 d = inst.FD, bit = 1u << d;
++  const auto set_both = [&] { s_fp_single.lane[0] |= bit; s_fp_single.lane[1] |= bit; };
++  const auto kill_both = [&](u32 r) {
++    s_fp_single.lane[0] &= ~(1u << r);
++    s_fp_single.lane[1] &= ~(1u << r);
++  };
++  switch (inst.OPCD)
++  {
++  case 48: case 49:  // lfs, lfsu: the same single in both lanes
++  case 56: case 57:  // psq_l, psq_lu: f32 or dequantized (f32-exact), or 1.0
++    set_both();
++    return;
++  case 59:
++    // fdivs, fsubs, fadds, fmuls, fmsubs, fmadds, fnmsubs, fnmadds: rounded
++    // to single (fres and fsqrts left out)
++    if (inst.SUBOP5 == 18 || inst.SUBOP5 == 20 || inst.SUBOP5 == 21 || inst.SUBOP5 == 25 ||
++        inst.SUBOP5 >= 28)
++    {
++      set_both();
++      return;
++    }
++    break;
++  case 31:
++    if (inst.SUBOP10 == 535 || inst.SUBOP10 == 567)  // lfsx, lfsux
++    {
++      set_both();
++      return;
++    }
++    break;
++  case 4:
++    switch (inst.SUBOP5)
++    {
++    case 10: case 11: case 12: case 13: case 14:  // ps_sum0/1, ps_muls0/1, ps_madds0
++    case 15:                                        // ps_madds1
++      if (inst.SUBOP5 >= 12)
++      {
++        set_both();
++        return;
++      }
++      break;
++    case 18: case 20: case 21: case 25: case 28: case 29: case 30: case 31:
++      // ps_div, ps_sub, ps_add, ps_mul, ps_msub, ps_madd, ps_nmsub, ps_nmadd
++      set_both();
++      return;
++    default:
++      break;
++    }
++    break;
++  case 63:
++    if (inst.SUBOP10 == 12)  // frsp
++    {
++      set_both();
++      return;
++    }
++    if (inst.SUBOP10 == 72 || inst.SUBOP10 == 40 || inst.SUBOP10 == 264 ||
++        inst.SUBOP10 == 136)  // fmr, fneg, fabs, fnabs: ps0 from FB.ps0, ps1 kept
++    {
++      const u32 b0 = (s_fp_single.lane[0] >> inst.FB) & 1;
++      s_fp_single.lane[0] = (s_fp_single.lane[0] & ~bit) | (b0 << d);
++      return;
++    }
++    break;
++  case 16: case 17: case 18: case 19:  // branches, sc (HLE and fast calls)
++    s_fp_single.lane[0] = s_fp_single.lane[1] = 0;
++    return;
++  default:
++    break;
++  }
++  if (op.fregOut >= 0)
++    kill_both(static_cast<u32>(op.fregOut));
++}
++
+ inline bool RegCacheGprIndex(u32 offset, u32* out_index)
+ {
+   if (!s_gpr_rc.active || offset < s_gpr_rc.gpr_base)
+@@ -5030,7 +5130,11 @@ void EmitExactMulAddSub(std::vector<u8>& body, const WasmStateLayout& layout,
+   EmitIsZeroOrNormalDouble(body);
+   op(AND);
+   set(2);
+-  if (single)
++  const bool c_single = FprLaneKnownSingle(inst.FC, c_lane);
++  const bool both_single = c_single && FprLaneKnownSingle(inst.FA, lane);
++  if (c_single || both_single)
++    s_fp_single_skips.fetch_add(1, std::memory_order_relaxed);
++  if (single && !c_single)  // a known single frC already has 25 bits or fewer
+   {
+     get(c);
+     EmitForce25BitNonDenormal(body);
+@@ -5044,10 +5148,18 @@ void EmitExactMulAddSub(std::vector<u8>& body, const WasmStateLayout& layout,
+   // exact); a zero a or frC gives an exact signed zero. Then a*c + b rounds
+   // once as p + b. Local 2 first: a denormal frC rounds to zero above, its
+   // product does not.
+-  get(a); op(0xbd); EmitI64Const(body, 1ull << 52); op(0x84); op(0x7a);  // i64.ctz
+-  get(c); op(0xbd); EmitI64Const(body, 1ull << 52); op(0x84); op(0x7a);
+-  op(0x7c); EmitI64Const(body, 53); op(0x59);                  // i64.ge_s
+-  get(p); op(ABS); f64const(0x1p-1022); op(GE); op(AND);
++  if (both_single)
++  {
++    // 24 significant bits each: the trailing zeros add up to 58 at least.
++    get(p); op(ABS); f64const(0x1p-1022); op(GE);
++  }
++  else
++  {
++    get(a); op(0xbd); EmitI64Const(body, 1ull << 52); op(0x84); op(0x7a);  // i64.ctz
++    get(c); op(0xbd); EmitI64Const(body, 1ull << 52); op(0x84); op(0x7a);
++    op(0x7c); EmitI64Const(body, 53); op(0x59);                // i64.ge_s
++    get(p); op(ABS); f64const(0x1p-1022); op(GE); op(AND);
++  }
+   get(p); op(ABS); f64const(std::numeric_limits<double>::infinity()); op(LT); op(AND);
+   get(a); f64const(0.0); op(EQ); op(OR);
+   get(c); f64const(0.0); op(EQ); op(OR);
+@@ -5155,9 +5267,12 @@ void EmitFpArithLane(std::vector<u8>& body, const WasmStateLayout& layout, UGeck
+   else if (kind == FpArithKind::Mul)
+   {
+     EmitStateLoadF64(body, PsOffset(layout, inst.FC, c_lane));
+-    if (single)
++    if (single && FprLaneKnownSingle(inst.FC, c_lane))
++      s_fp_single_skips.fetch_add(1, std::memory_order_relaxed);
++    if (single && !FprLaneKnownSingle(inst.FC, c_lane))
+     {
+-      // Single-precision multiplies round frC to 25 bits first (Force25Bit).
++      // Single-precision multiplies round frC to 25 bits first (Force25Bit);
++      // a known single frC is neither denormal nor changed by it.
+       body.push_back(0x22);  // local.tee
+       EmitU32Leb(body, dst);
+       EmitIsNotDenormalDouble(body);
+@@ -8647,12 +8762,19 @@ std::vector<u8> BuildWasmCachedInterpreterBlock(std::span<const PPCAnalyst::Code
+     }
+   }
+ 
++  s_fp_single = {};
++  s_fp_single.active = DolphinWebFeatureEnabled(DOLPHIN_WEB_ENABLE_FP_KNOWN_SINGLE);
+   u32 downcount = 0;
+   for (const PPCAnalyst::CodeOp& op : ops)
+   {
+     downcount += op.opinfo->num_cycles;
+     if (op.skip)
++    {
++      // Folded into another op's emission: its FPR write is not tracked.
++      if (op.fregOut >= 0)
++        s_fp_single.lane[0] = s_fp_single.lane[1] = 0;
+       continue;
++    }
+ 
+     if (!EmitWasmSupportedIntegerInstruction(body, layout, op, downcount))
+     {
+@@ -8669,11 +8791,14 @@ std::vector<u8> BuildWasmCachedInterpreterBlock(std::span<const PPCAnalyst::Code
+         s_gpr_rc.active = false;  // §28cx C1: don't leak cache state on abort
+         s_fmh_plan.active = false;  // §28cz: don't leak hoist plan on abort
+         s_fmh_plan.ops.clear();
++        s_fp_single.active = false;
+         return {};
+       }
+       EmitInterpretCall(body, op, downcount, op.canEndBlock);
+     }
++    UpdateFpSingleState(op);
+   }
++  s_fp_single.active = false;
+ 
+   // §28cx C1: commit all dirty GPR locals to guest memory before the block's
+   // single unconditional exit. The halt early-returns inside the call emitters
+@@ -14784,6 +14909,12 @@ extern "C" EMSCRIPTEN_KEEPALIVE int DolphinWeb_JitOracleRun(u32 word_count, u32
+ }
+ 
+ // Marker for tests: the block JIT's mtmsr takes pending exceptions (0076).
++// FP lanes emitted with less work thanks to the known-single analysis (0077).
++extern "C" EMSCRIPTEN_KEEPALIVE u32 DolphinWeb_JitFpKnownSingleSkips()
++{
++  return s_fp_single_skips.load(std::memory_order_relaxed);
++}
++
+ extern "C" EMSCRIPTEN_KEEPALIVE int DolphinWeb_JitMtmsrTakesPendingExceptions()
+ {
+   return 1;

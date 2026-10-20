@@ -8,7 +8,12 @@
 //   node tests/jit-oracle-fuzz.mjs --programs 5000         # random blocks (cpufuzz-like)
 //
 // Options: --seed S, --core <dir>, --mask <hex> (CachedInterpreter disable
-// mask; default production), --regalloc both|on|off, --json out.json.
+// mask; default production), --regalloc both|on|off, --json out.json,
+// --extra-mask <hex> (ORed into every mode's mask: an opt-in codegen bit).
+//   node tests/jit-oracle-fuzz.mjs --known-single 20000 --extra-mask 0x10000000
+// sets frC (and sometimes frA) with a single-producing op (lfs, fmuls, frsp)
+// before a multiply or FMA, sometimes overwritten again by a double (lfd,
+// fmadd, fmr of a double register), to check the known-single analysis.
 // Exit 0 when nothing diverged and nothing was rejected by the engine.
 
 import { writeFileSync } from "node:fs";
@@ -94,6 +99,8 @@ function check(name, program, state, mask) {
 }
 
 const fmaCases = Number(opt("fma", "0"));
+const knownSingleCases = Number(opt("known-single", "0"));
+const extraMask = Number(opt("extra-mask", "0")) >>> 0;
 let exactChecked = 0, exactMismatch = 0, singleInexact = 0;
 
 // Adversarial operands for the FMA family: full-width significands (products
@@ -164,7 +171,7 @@ if (perInstruction > 0) {
     for (let k = 0; k < perInstruction; k++) {
       const program = Uint32Array.from([generate(name, r), 0x4e800020]);
       const state = randomState(r);
-      for (const m of masks) check(name, program, state, SHORT_PREFIX_MASK | m);
+      for (const m of masks) check(name, program, state, SHORT_PREFIX_MASK | m | extraMask);
     }
   }
 }
@@ -187,7 +194,7 @@ if (fmaCases > 0) {
       state.set([w[0], w[1], w2[0], w2[1]], 48 + f * 4);
     }
     for (const m of masks) {
-      const result = check(name, Uint32Array.from([word, 0x4e800020]), state, SHORT_PREFIX_MASK | m);
+      const result = check(name, Uint32Array.from([word, 0x4e800020]), state, SHORT_PREFIX_MASK | m | extraMask);
       // Double forms, round to nearest: the interpreter (std::fma) and so the
       // JIT must give the correctly rounded a*c +- b, from exact arithmetic.
       const opcd = word >>> 26;
@@ -216,7 +223,32 @@ if (programs > 0) {
   for (let i = 0; i < programs; i++) {
     const program = randomProgram(r, length, { names: only });
     const state = randomState(r);
-    for (const m of masks) check(`program`, program, state, baseMask | m);
+    for (const m of masks) check(`program`, program, state, baseMask | m | extraMask);
+  }
+}
+
+if (knownSingleCases > 0) {
+  const r = makeRng(seed ^ 0x51f6);
+  const targets = [...FMA_NAMES, "fmuls", "ps_mul", "ps_muls0", "ps_muls1"];
+  const withFd = (word, fd) => ((word & ~(31 << 21)) | (fd << 21)) >>> 0;
+  for (let i = 0; i < knownSingleCases; i++) {
+    const name = targets[i % targets.length];
+    let word;
+    do word = generate(name, r); while (word & 1);
+    const fa = (word >>> 16) & 31, fb = (word >>> 11) & 31, fc = (word >>> 6) & 31;
+    if (fa === fb || fa === fc || fb === fc) { i--; continue; }
+    const words = [withFd(generate(r.pick(["lfs", "lfs", "fmuls", "frsp"]), r), fc)];
+    if (r.chance(0.5)) words.push(withFd(generate(r.pick(["lfs", "fmuls"]), r), fa));
+    // A double over the single: the analysis must drop it (lfd, a double
+    // FMA, fmr of a register holding a double: ps0 only).
+    if (r.chance(0.3)) words.push(withFd(generate(r.pick(["lfd", "fmadd", "fmr", "fadd"]), r), r.chance(0.7) ? fc : fa));
+    words.push(word, 0x4e800020);
+    const state = randomState(r);
+    state[36] = r.chance(0.8) ? 0 : (r.next() & 0x7) | 0x4;
+    state[37] = 0x00002032;
+    const { a, b, c } = fmaOperands(r);
+    for (const [f, w] of [[fa, a], [fb, b], [fc, c]]) state.set([w[0], w[1], w[0], w[1]], 48 + f * 4);
+    for (const m of masks) check(`known-single:${name}`, Uint32Array.from(words), state, SHORT_PREFIX_MASK | m | extraMask);
   }
 }
 

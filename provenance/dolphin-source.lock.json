@@ -25,7 +25,7 @@
       "commit": "01e0577914a75a2569c846778c2f93aa8e6feddd"
     }
   },
-  "patchSeriesSha256": "17b1ba175a958c2be1fc27d8c0c3e82b9d27f99965789ecf125ba374ad5afcee",
+  "patchSeriesSha256": "477e4da1fe5aad9b9165b68ce07d0287308e0639a322cd4c9ca585324da150de",
   "patches": [
     {
       "order": 1,
@@ -615,12 +615,20 @@
       "order": 74,
       "cwd": ".",
       "hashMode": "lf-normalized",
+      "path": "patches/dolphin-wasm/snapshot/0077-fp-known-single.patch",
+      "size": 8674,
+      "sha256": "c26841b01d8374ac3a0d0c64346237c9930928dfa3cb38ddc9784f37ae167bcc"
+    },
+    {
+      "order": 75,
+      "cwd": ".",
+      "hashMode": "lf-normalized",
       "path": "patches/dolphin-wasm/snapshot/0080-gpu-sync-diagnostics.patch",
       "size": 6519,
       "sha256": "0b8142c819403ed8518459c1993189eb78891fda254ebebf44de549164fef0ff"
     },
     {
-      "order": 75,
+      "order": 76,
       "cwd": ".",
       "hashMode": "lf-normalized",
       "path": "patches/dolphin-wasm/snapshot/0081-deterministic-clock-and-coretiming-trace.patch",
@@ -628,7 +636,7 @@
       "sha256": "8dbcdec068f9dfe4fd626432e04e14178a1b341fa5052747265ca5bf5fca70c6"
     },
     {
-      "order": 76,
+      "order": 77,
       "cwd": "Externals/SFML/SFML",
       "hashMode": "lf-normalized",
       "path": "patches/dolphin-wasm/submodules/0001-sfml-emscripten-config.patch",
@@ -636,7 +644,7 @@
       "sha256": "f82197a21fe982ad83f6ee7bbf5a03839b1cebd4d64da3eab11263842bf61d89"
     },
     {
-      "order": 77,
+      "order": 78,
       "cwd": "Externals/xxhash/xxHash",
       "hashMode": "lf-normalized",
       "path": "patches/dolphin-wasm/submodules/0002-xxhash-wasm-simd-scalar.patch",
