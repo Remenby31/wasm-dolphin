@@ -11,7 +11,12 @@
 //   then, when sizeBytes is 256 (0075, 2026-10-20), diagnostics in f64 from
 //   +88 (DIAGNOSTICS below): region pipeline counts, chaining, the idle-skipped
 //   cycles and the time in CoreTiming::Idle (already taken out of blockTimeMs
-//   by the core), the four costliest block starts outside regions, one spare.
+//   by the core), the four costliest block starts outside regions, and
+//   installMs (host time compiling region modules on the CPU thread; like
+//   the pipeline counts, cumulative and never reset).
+// A reset (n >= 0) is applied by the CPU thread at its next slice boundary
+// (0075, 2026-10-20): a read right after it may still show the old values;
+// race-perf reads after its whole stats window.
 // DolphinWeb_JitRegionStats(n): n >= 0 sets the host-time sampling (1 call
 // out of n timed, 0 = counters only) and resets; n < 0 only reads. Before the
 // first n >= 0 call the stats are fully off (nothing is counted).
@@ -32,7 +37,7 @@ export const DIAGNOSTICS = [
   "regionsQueued", "regionsInstalled", "regionsRefused", "regionsDropped", "entriesMapped", "regionsEnabled", "regionsHleRefused",
   "chainBreaks", "modeRefusals", "filterFalseHits", "idleCycles", "idleTimeMs",
   "topMiss0Pc", "topMiss0Cycles", "topMiss1Pc", "topMiss1Cycles", "topMiss2Pc", "topMiss2Cycles", "topMiss3Pc", "topMiss3Cycles",
-  "spare"
+  "installMs"
 ];
 const DIAGNOSTICS_BYTES = REGION_STATS_BYTES + 8 * DIAGNOSTICS.length; // 256
 // Diagnostics that only ever add up (summed over windows, checked for tears);

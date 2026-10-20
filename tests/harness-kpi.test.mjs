@@ -88,6 +88,7 @@ test("region stats 256 bytes: cycle share outside idle skip, wait time apart, di
   assert.equal(p4.diagnostics.idleCycles, 1000);
   assert.equal(p4.diagnostics.chainBreaks, 14);
   assert.equal(p4.diagnostics.regionsInstalled, 120);
+  assert.equal(p4.diagnostics.installMs, 0); // the last f64, cumulative (0075)
   assert.deepEqual(p4.diagnostics.topMisses[0], ["0x80012345", 40]);
   // Idle cycles going backwards between the two copies: a torn read.
   assert.match(regionRecord({ bytes: statsBytes256({ f64: [1, 1000], diag: { idleCycles: 5 } }), again: statsBytes256({ f64: [1, 1000], diag: { idleCycles: 4 } }) }).p4Why, /idleCycles went backwards/);
