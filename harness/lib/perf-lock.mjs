@@ -1,19 +1,32 @@
 // Copyright 2026 wasm-dolphin contributors
 // SPDX-License-Identifier: MIT
 // The shared performance lock of this Mac (PROGRAM.md): one speed campaign
-// at a time. The lock is the directory .perf-lock with its owner file. It is
-// published whole: a private directory .perf-lock.new-<pid>-<rand> gets the
-// owner file, then is renamed to .perf-lock (atomic; it fails if a lock with
-// an owner is there), so this code never leaves a .perf-lock without an
-// owner. Taken with mkdir then the owner write (older harnesses), a takeover
-// could move the fresh directory between the two and the write failed
-// (ENOENT, seen in CI with six contenders). Released by removing the
-// directory. Every
+// at a time. The lock is the directory .perf-lock with its owner file; every
 // harness command that measures speed (race-perf, ab) takes it before its
-// first launch and releases it on every exit path; it only ever removes a
+// first launch and releases it on every exit path, and only ever removes a
 // lock it holds itself.
+//
+// Taking it is an exclusive mkdir, as in every earlier harness, so this code
+// and older checkouts still running on the machine exclude each other. The
+// owner is then written to a temporary file inside the directory just made
+// and renamed to owner, never left half-written. Hardened on 2026-10-20
+// after 24 contenders on a stale lock gave two holders at once (11 rounds of
+// 320 on the earlier code):
+// - the directory made can vanish before its owner is written (an older
+//   harness's takeover moved it): the write fails or lands elsewhere, so the
+//   directory's identity (inode) is checked and the owner read back; any
+//   doubt means not held, and the contender tries again;
+// - a stale lock is taken over by one contender at a time, under the
+//   .perf-lock.takeover guard, judging again before moving it; while the
+//   guard is held nobody else moves .perf-lock and a stale lock's holder is
+//   gone, so what was judged is what is moved;
+// - releasing moves the directory aside before removing it (never emptied in
+//   place), and the guard is released the same way, each only when it still
+//   carries this process's nonce;
+// - leftovers of a process killed mid-step (.stale-, .released-, moved
+//   guards) are swept once old.
 import { randomBytes } from "node:crypto";
-import { existsSync, mkdirSync, readdirSync, readFileSync, renameSync, rmSync, statSync, writeFileSync } from "node:fs";
+import { existsSync, mkdirSync, readdirSync, readFileSync, renameSync, rmSync, statSync, unlinkSync, writeFileSync } from "node:fs";
 import os from "node:os";
 import path from "node:path";
 
@@ -21,6 +34,11 @@ export const DEFAULT_PERF_LOCK = path.join(os.homedir(), "projects", "gc-web-emu
 // A lock directory with no owner file is one whose holder died between mkdir
 // and writing the owner; it is taken over once it is this old.
 export const ORPHAN_SEC = 30;
+// A takeover guard this old was abandoned (its harness died or hung
+// mid-takeover); a takeover takes milliseconds.
+export const TAKEOVER_ABANDONED_SEC = 10;
+// Leftovers of a killed step (moved locks and guards) are removed once this old.
+export const LEFTOVER_SEC = 60;
 
 export function readLockOwner(dir) {
   try {
@@ -39,6 +57,14 @@ const ageSec = (dir) => {
   try { return (Date.now() - statSync(dir).mtimeMs) / 1000; } catch { return 0; }
 };
 
+const inode = (dir) => {
+  try { return statSync(dir).ino; } catch { return null; }
+};
+
+const unique = (base, tag) => `${base}.${tag}-${process.pid}-${randomBytes(4).toString("hex")}`;
+
+const newOwner = (name) => ({ name, pid: process.pid, host: os.hostname(), harness: true, startedAt: new Date().toISOString(), nonce: randomBytes(6).toString("hex") });
+
 // Why a held lock may be taken over, or null.
 function staleReason(dir, holder, orphanSec) {
   if (!holder) return ageSec(dir) >= orphanSec ? `no owner file for ${Math.round(ageSec(dir))} s` : null;
@@ -46,89 +72,108 @@ function staleReason(dir, holder, orphanSec) {
   return null;
 }
 
+// Make `dir` exclusively and give it `owner`. "taken": it exists already;
+// "lost": made, but it vanished or changed before it was ours (nothing of
+// ours is left behind); "held": ours.
+function claim(dir, owner) {
+  try {
+    mkdirSync(dir);
+  } catch (e) {
+    if (e.code === "EEXIST") return "taken";
+    throw e;
+  }
+  const ino = inode(dir);
+  const tmp = path.join(dir, `owner.tmp-${process.pid}-${randomBytes(4).toString("hex")}`);
+  try {
+    writeFileSync(tmp, `${JSON.stringify(owner)}\n`, { flag: "wx" });
+  } catch (e) {
+    if (["ENOENT", "EINVAL", "ENOTDIR"].includes(e.code)) return "lost";
+    throw e;
+  }
+  // The directory written into must still be the one made.
+  if (inode(dir) !== ino) {
+    try { unlinkSync(tmp); } catch {}
+    return "lost";
+  }
+  try {
+    renameSync(tmp, path.join(dir, "owner"));
+  } catch (e) {
+    try { unlinkSync(tmp); } catch {}
+    if (["ENOENT", "EINVAL", "ENOTDIR"].includes(e.code)) return "lost";
+    throw e;
+  }
+  return inode(dir) === ino && readLockOwner(dir)?.nonce === owner.nonce ? "held" : "lost";
+}
 
-// A takeover in progress: one contender at a time judges again and moves a
-// stale lock (see takeOver). Abandoned (its harness died mid-takeover) once
-// this old; a takeover takes milliseconds.
-export const TAKEOVER_ABANDONED_SEC = 10;
+// Move `dir` aside under a unique name, and remove it if `isMeant(moved)`
+// says it is the one meant; otherwise put it back. True when removed. A
+// removal never empties `dir` in place. A guard that cannot be put back (a
+// newer one is there) is left aside for the sweep; a lock that cannot be
+// put back is an error.
+function removeIf(dir, tag, isMeant, { mustPutBack = true } = {}) {
+  const aside = unique(dir, tag);
+  try {
+    renameSync(dir, aside);
+  } catch (e) {
+    if (e.code === "ENOENT") return false;
+    throw e;
+  }
+  if (isMeant(aside)) {
+    rmSync(aside, { recursive: true, force: true });
+    return true;
+  }
+  try {
+    renameSync(aside, dir);
+  } catch (e) {
+    if (!mustPutBack) return false;
+    throw new Error(`perf lock: moved ${path.basename(dir)} to ${aside} by mistake and could not put it back (${e.code}); fix by hand`);
+  }
+  return false;
+}
 
-// Take a stale lock away. Judging it stale and moving it are not atomic: the
-// stale lock could be replaced by a fresh one in between and the fresh one
-// moved (seen with 24 contenders). So contenders serialise on a guard
-// directory, .perf-lock.takeover, and the one holding it judges again before
-// moving: while it holds the guard, nobody else moves .perf-lock, a fresh
-// lock cannot be published over an existing one, and a stale lock's holder
-// is gone, so what was judged is what is moved. The moved lock is then
-// checked once more and deleted; were it a fresh one after all (an older
-// harness's takeover), it is put back.
+// Take a stale lock away, one contender at a time (see the header). True
+// when the caller should look again at once, false when another contender
+// is taking it over (wait a little).
 function takeOver(dir, judged, { orphanSec, log }) {
   const guard = `${dir}.takeover`;
-  try {
-    mkdirSync(guard);
-  } catch (e) {
-    if (e.code !== "EEXIST") throw e;
-    if (ageSec(guard) < TAKEOVER_ABANDONED_SEC) return false; // someone else is taking it over: wait
-    rmSync(guard, { recursive: true, force: true });
-    return true; // an abandoned guard cleared: look again now
+  const me = newOwner("takeover");
+  const got = claim(guard, me);
+  if (got === "lost") return true;
+  if (got === "taken") {
+    if (ageSec(guard) < TAKEOVER_ABANDONED_SEC) return false;
+    // Abandoned: removed only if what was moved is still that old guard
+    // (a fresh one made meanwhile is put back).
+    removeIf(guard, "takeover-abandoned", (moved) => ageSec(moved) >= TAKEOVER_ABANDONED_SEC, { mustPutBack: false });
+    return true;
   }
   try {
     if (!existsSync(dir)) return true;
     const now = readLockOwner(dir);
     const still = judged ? JSON.stringify(now) === JSON.stringify(judged) : now == null && ageSec(dir) >= orphanSec;
     if (!still) return true; // replaced or claimed meanwhile: judged again by the caller
-    const aside = `${dir}.stale-${process.pid}-${randomBytes(4).toString("hex")}`;
-    renameSync(dir, aside);
-    const moved = readLockOwner(aside);
-    const same = judged ? JSON.stringify(moved) === JSON.stringify(judged) : moved == null;
-    if (same) {
-      rmSync(aside, { recursive: true, force: true });
-      return true;
-    }
-    try {
-      renameSync(aside, dir);
-      log("a fresh lock replaced the stale one meanwhile; put it back");
-      return true;
-    } catch (e) {
-      throw new Error(`perf lock: moved a live lock to ${aside} and could not put it back (${e.code}); fix by hand`);
-    }
+    const moved = removeIf(dir, "stale", (aside) => {
+      const owner = readLockOwner(aside);
+      return judged ? JSON.stringify(owner) === JSON.stringify(judged) : owner == null;
+    });
+    if (!moved) log("a fresh lock replaced the stale one meanwhile; put it back");
+    return true;
   } finally {
-    rmSync(guard, { recursive: true, force: true });
+    // Our guard only: one that is not ours any more (we hung past the
+    // abandon delay and another contender cleared it) is put back.
+    removeIf(guard, "takeover-done", (moved) => readLockOwner(moved)?.nonce === me.nonce, { mustPutBack: false });
   }
 }
 
-// Publish the lock whole (see the header); true when it is ours. A rename
-// onto an existing directory fails when it holds an owner (ENOTEMPTY or
-// EEXIST; EPERM on Windows), but succeeds onto an empty one: an ownerless
-// lock (an older harness between its mkdir and its owner write, or one that
-// died there) is never published over, it goes through the orphan rule. If
-// such a directory appears between the check and the rename, its harness
-// then writes its owner over ours: the lock is ours only when the owner read
-// back is.
-function publish(dir, owner) {
-  if (existsSync(dir)) return false;
-  const tmp = `${dir}.new-${process.pid}-${randomBytes(4).toString("hex")}`;
-  mkdirSync(tmp);
-  try {
-    writeFileSync(path.join(tmp, "owner"), `${JSON.stringify(owner)}\n`);
-    renameSync(tmp, dir);
-  } catch (e) {
-    rmSync(tmp, { recursive: true, force: true });
-    if (["EEXIST", "ENOTEMPTY", "EPERM", "EACCES"].includes(e.code)) return false;
-    throw e;
-  }
-  return readLockOwner(dir)?.nonce === owner.nonce;
-}
-
-// Unpublished directories of harness processes that died between their
-// mkdir and their rename (this host only).
-function sweepUnpublished(dir) {
-  const base = `${path.basename(dir)}.new-`;
+// Leftovers of a process killed between two steps: moved locks and guards.
+function sweepLeftovers(dir) {
+  const parent = path.dirname(dir);
+  const prefixes = [".stale-", ".released-", ".takeover.takeover-abandoned-", ".takeover.takeover-done-"].map((p) => `${path.basename(dir)}${p}`);
   let names = [];
-  try { names = readdirSync(path.dirname(dir)); } catch { return; }
+  try { names = readdirSync(parent); } catch { return; }
   for (const n of names) {
-    if (!n.startsWith(base)) continue;
-    const pid = Number(n.slice(base.length).split("-")[0]);
-    if (Number.isInteger(pid) && pid !== process.pid && !alive(pid)) rmSync(path.join(path.dirname(dir), n), { recursive: true, force: true });
+    if (!prefixes.some((p) => n.startsWith(p))) continue;
+    const p = path.join(parent, n);
+    if (ageSec(p) >= LEFTOVER_SEC) rmSync(p, { recursive: true, force: true });
   }
 }
 
@@ -141,10 +186,12 @@ export async function acquirePerfLock({
   if (path.basename(dir) !== ".perf-lock") throw new Error(`perf lock must be a directory named .perf-lock, not ${dir}`);
   for (const [k, v] of Object.entries({ waitSec, pollSec, orphanSec })) if (!Number.isFinite(v) || v < 0) throw new Error(`perf lock: ${k} must be a number ≥ 0, not ${v}`);
   const end = Date.now() + waitSec * 1000;
-  sweepUnpublished(dir);
+  sweepLeftovers(dir);
   for (;;) {
-    const owner = { name, pid: process.pid, host: os.hostname(), harness: true, startedAt: new Date().toISOString(), nonce: randomBytes(6).toString("hex") };
-    if (publish(dir, owner)) return release(dir, owner);
+    const owner = newOwner(name);
+    const got = claim(dir, owner);
+    if (got === "held") return release(dir, owner);
+    if (got === "lost") continue; // our directory was moved away before it was ours: try again
     const holder = readLockOwner(dir);
     const stale = staleReason(dir, holder, orphanSec);
     if (stale) {
@@ -167,20 +214,10 @@ function release(dir, owner) {
   const free = () => {
     if (done) return;
     done = true;
-    const now = readLockOwner(dir);
     // Only our own lock: never remove one somebody else took meanwhile.
+    const now = readLockOwner(dir);
     if (now?.pid !== owner.pid || now?.nonce !== owner.nonce) return;
-    // Moved aside first, then removed: emptied in place, .perf-lock would be
-    // an empty directory for an instant, and a contender's publish (a rename)
-    // would land in it (ENOTEMPTY here, seen under load 49).
-    const aside = `${dir}.released-${process.pid}-${randomBytes(4).toString("hex")}`;
-    try {
-      renameSync(dir, aside);
-    } catch (e) {
-      if (e.code === "ENOENT") return;
-      throw e;
-    }
-    rmSync(aside, { recursive: true, force: true });
+    removeIf(dir, "released", (moved) => readLockOwner(moved)?.nonce === owner.nonce);
   };
   // SIGHUP: the SSH session that started the run closed.
   const onSignal = (sig) => { free(); process.exit({ SIGINT: 130, SIGTERM: 143, SIGHUP: 129 }[sig] ?? 1); };

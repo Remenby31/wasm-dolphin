@@ -142,15 +142,55 @@ test("perf lock: a takeover guard left by a dead harness is abandoned once old",
   assert.deepEqual(readdirSync(path.dirname(dir)), []);
 });
 
-test("perf lock: published whole, never an ownerless .perf-lock; a leftover unpublished dir of a dead harness is swept", async (t) => {
+test("perf lock: leftovers of a killed step are swept once old, young ones kept", async (t) => {
   const dir = lockDir(t);
-  const dead = spawn(process.execPath, ["-e", ""]);
-  await new Promise((r) => dead.on("exit", r));
-  mkdirSync(`${dir}.new-${dead.pid}-abcd`); // died between its mkdir and its rename
+  const parent = path.dirname(dir);
+  const old = new Date(Date.now() - 120_000);
+  for (const n of [".perf-lock.stale-1-aa", ".perf-lock.released-1-bb", ".perf-lock.takeover.takeover-done-1-cc"]) {
+    mkdirSync(path.join(parent, n));
+    utimesSync(path.join(parent, n), old, old);
+  }
+  mkdirSync(path.join(parent, ".perf-lock.stale-2-young")); // a takeover right now
   const release = await acquirePerfLock({ dir, name: "test", waitSec: 0 });
-  assert.deepEqual(readdirSync(path.dirname(dir)), [".perf-lock"]);
-  assert.equal(readLockOwner(dir).name, "test");
+  assert.deepEqual(readdirSync(parent).sort(), [".perf-lock", ".perf-lock.stale-2-young"]);
   release();
+});
+
+// Older checkouts keep running during the transition: their protocol (mkdir,
+// then the owner written in place; released by emptying the directory in
+// place) and this one must exclude each other (review of #47: publishing by
+// rename onto an empty directory gave two holders).
+test("perf lock: older and current harnesses exclude each other", async (t) => {
+  const dir = lockDir(t);
+  const holding = path.join(path.dirname(dir), "holding");
+  const lockLib = path.resolve(import.meta.dirname, "../harness/lib/perf-lock.mjs");
+  const hold = `try { writeFileSync(${JSON.stringify(holding)}, "x", { flag: "wx" }); } catch { console.log("OVERLAP"); process.exit(2); }
+      await new Promise((r) => setTimeout(r, 2)); rmSync(${JSON.stringify(holding)});`;
+  const current = `import { acquirePerfLock } from ${JSON.stringify(lockLib)}; import { writeFileSync, rmSync } from "node:fs";
+    for (let i = 0; i < 15; i++) {
+      const release = await acquirePerfLock({ dir: ${JSON.stringify(dir)}, name: "new", waitSec: 120, pollSec: 0.005 });
+      ${hold}
+      release();
+    }
+    console.log("ok");`;
+  const older = `import { mkdirSync, writeFileSync, rmSync } from "node:fs";
+    for (let i = 0; i < 15; i++) {
+      for (;;) { try { mkdirSync(${JSON.stringify(dir)}); break; } catch (e) { if (e.code !== "EEXIST") throw e; await new Promise((r) => setTimeout(r, 5)); } }
+      writeFileSync(${JSON.stringify(path.join(dir, "owner"))}, JSON.stringify({ name: "old", pid: process.pid, harness: true }));
+      ${hold}
+      rmSync(${JSON.stringify(dir)}, { recursive: true, force: true });
+    }
+    console.log("ok");`;
+  const run = (script) => new Promise((resolve) => {
+    const c = spawn(process.execPath, ["--input-type=module", "-e", script], { stdio: ["ignore", "pipe", "pipe"] });
+    let out = "", err = "";
+    c.stdout.on("data", (d) => (out += d));
+    c.stderr.on("data", (d) => (err += d));
+    c.on("exit", (code) => resolve(`${code}:${out.trim()}${code ? ` ${err.split("\n")[0]}` : ""}`));
+  });
+  const outs = await Promise.all([...Array(4).fill(current), ...Array(4).fill(older)].map(run));
+  assert.deepEqual(outs, Array(8).fill("0:ok"));
+  assert.equal(existsSync(dir), false);
 });
 
 test("review #22: an ownerless lock is taken over only once it is old", async (t) => {
