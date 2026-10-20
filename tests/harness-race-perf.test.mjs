@@ -11,6 +11,7 @@ import test from "node:test";
 import { acquirePerfLock, readLockOwner } from "../harness/lib/perf-lock.mjs";
 import { num, pairedSpeedChange, sideOrder } from "../harness/probes/race-perf.mjs";
 import { summarizePcSamples } from "../src/harness-pc-sampler.js";
+import { hitchList, HITCH_MS } from "../harness/lib/timeline.mjs";
 
 function lockDir(t) {
   const root = mkdtempSync(path.join(os.tmpdir(), "harness-test-lock-"));
@@ -258,4 +259,33 @@ test("guest PC histogram: shares, top PCs and per-function attribution", () => {
   assert.equal(s.topPcs[0].pc, "0x80003000");
   assert.deepEqual(s.topFunctions, [{ name: "PSMTXConcat", share: 75 }, { name: "memcpy", share: 20 }]);
   assert.equal(s.unattributedShare, 5);
+});
+
+test("race-perf hitch list: where each hitch is, in the window and in the scene", () => {
+  // Presents every 16.7 ms, with hitches of 50 and 100 ms; VI outputs since
+  // boot are 1000 + VI since the savestate load.
+  const presents = [];
+  let t = 10_000, vi = 1200;
+  for (let i = 0; i < 30; i += 1) {
+    t += i === 10 ? 50 : i === 20 ? 100 : 1000 / 60;
+    vi += 1;
+    presents.push({ t, vi });
+  }
+  const timeline = { presents, vi: [{ t: 10_000, ticks: 0, sinceBoot: 1200, sinceLoad: 200 }] };
+  const h = hitchList(timeline, { origin: 10_000 });
+  assert.equal(h.count, 2);
+  assert.equal(h.truncated, false);
+  assert.deepEqual(h.hitches.map(([, ms]) => ms), [50, 100]);
+  assert.deepEqual(h.hitches.map(([, , place]) => place), [211, 221]); // the same place on a slower side
+  assert.ok(h.hitches[0][0] > 0 && h.hitches[1][0] > h.hitches[0][0]);
+  // Capped: the longest kept, in time order; the count says how many there were.
+  const many = { presents: Array.from({ length: 401 }, (_, i) => ({ t: i * 40 + (i % 2 ? 5 : 0), vi: -1 })), vi: [] };
+  const capped = hitchList(many, { origin: 0, cap: 200 });
+  assert.equal(capped.count, 400);
+  assert.equal(capped.truncated, true);
+  assert.equal(capped.hitches.length, 200);
+  assert.ok(capped.hitches.every(([, ms]) => ms === 45)); // the longer half (45 ms), not the 35 ms ones
+  assert.ok(capped.hitches.every(([at], i, a) => i === 0 || at > a[i - 1][0]));
+  assert.ok(capped.hitches.every(([, , place]) => place === null)); // no VI timeline: no place
+  assert.ok(HITCH_MS > 1000 / 60 && HITCH_MS < 35);
 });
