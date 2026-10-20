@@ -11,9 +11,11 @@
 //   then, when sizeBytes is 256 (0075, 2026-10-20), diagnostics in f64 from
 //   +88 (DIAGNOSTICS below): region pipeline counts, chaining, the idle-skipped
 //   cycles and the time in CoreTiming::Idle (already taken out of blockTimeMs
-//   by the core), the four costliest block starts outside regions, and
-//   installMs (host time compiling region modules on the CPU thread; like
-//   the pipeline counts, cumulative and never reset).
+//   by the core), the three costliest block starts outside regions, then
+//   the region installs on the CPU thread: installMaxSliceMs (the longest
+//   time installing in one slice), installsFast (installs under 0.5 ms, a
+//   hit in V8's native module cache) and installMs (host time compiling
+//   region modules); like the pipeline counts, cumulative and never reset.
 // A reset (n >= 0) is applied by the CPU thread at its next slice boundary
 // (0075, 2026-10-20): a read right after it may still show the old values;
 // race-perf reads after its whole stats window.
@@ -36,7 +38,8 @@ const TIME = ["regionTimeMs", "dispatchTimeMs", "blockTimeMs", "interpTimeMs"];
 export const DIAGNOSTICS = [
   "regionsQueued", "regionsInstalled", "regionsRefused", "regionsDropped", "entriesMapped", "regionsEnabled", "regionsHleRefused",
   "chainBreaks", "modeRefusals", "filterFalseHits", "idleCycles", "idleTimeMs",
-  "topMiss0Pc", "topMiss0Cycles", "topMiss1Pc", "topMiss1Cycles", "topMiss2Pc", "topMiss2Cycles", "topMiss3Pc", "topMiss3Cycles",
+  "topMiss0Pc", "topMiss0Cycles", "topMiss1Pc", "topMiss1Cycles", "topMiss2Pc", "topMiss2Cycles",
+  "installMaxSliceMs", "installsFast",
   "installMs"
 ];
 const DIAGNOSTICS_BYTES = REGION_STATS_BYTES + 8 * DIAGNOSTICS.length; // 256
@@ -130,11 +133,11 @@ export function poolStats(list) {
   return sum;
 }
 
-// The four costliest block starts outside regions of one read, as [pc hex, cycles].
+// The three costliest block starts outside regions of one read, as [pc hex, cycles].
 export function topMisses(s) {
   const d = s?.diagnostics;
   if (!d) return null;
-  return [0, 1, 2, 3].map((i) => [d[`topMiss${i}Pc`], d[`topMiss${i}Cycles`]])
+  return [0, 1, 2].map((i) => [d[`topMiss${i}Pc`], d[`topMiss${i}Cycles`]])
     .filter(([pc, cycles]) => pc > 0 && cycles > 0)
     .map(([pc, cycles]) => [`0x${(pc >>> 0).toString(16).padStart(8, "0")}`, cycles]);
 }
