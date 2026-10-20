@@ -177,6 +177,14 @@ function withOffThreadCompile(fn) {
     else delete globalThis.self;
   }
 }
+// The path of the last sampled install (DolphinWeb_JitRegionInstallSamples:
+// 0 first attempt, 1 after the ready byte, 2 cold), or null when full.
+function lastInstallPath() {
+  const m = core.module, at = m._DolphinWeb_JitRegionInstallSamples() >>> 0;
+  const view = new DataView(m.HEAPU8.buffer, at);
+  const count = view.getUint32(0, true);
+  return count && count < view.getUint32(4, true) ? view.getUint32(8 + 12 * (count - 1) + 8, true) : null;
+}
 const offThreadSkip = skip || (!core?.has("SetPpcWasmJitOffThread") && "core without jitoffthread");
 
 test("with jitoffthread=1 a region installs once the worker marked its module ready", { skip: offThreadSkip }, () => {
@@ -197,6 +205,7 @@ test("with jitoffthread=1 a region installs once the worker marked its module re
     core.serviceRegions();
     assert.equal(core.regionCount(), before + entries);
     assert.equal(core.regionStats().installFallbacks, fallbacks, "no cold compile");
+    assert.equal(lastInstallPath(), 1, "sampled as installed after the ready byte");
     const reference = runCall(PROGRAM.labels.main, { regions: false });
     const got = runCall(PROGRAM.labels.main, { regions: true });
     assert.ok(got.ran >= 1);
@@ -211,8 +220,14 @@ test("with jitoffthread=1 a request never answered falls back to a synchronous c
     const before = core.regionCount();
     const entries = queueAll(plan);
     const fallbacks = core.regionStats().installFallbacks;
-    for (let slice = 0; slice < 300 && core.regionCount() === before; slice++) core.serviceRegions();
+    core.module._DolphinWeb_AotSetReadyWaitForTest(0); // 5 s in production
+    try {
+      for (let slice = 0; slice < 300 && core.regionCount() === before; slice++) core.serviceRegions();
+    } finally {
+      core.module._DolphinWeb_AotSetReadyWaitForTest(5000);
+    }
     assert.equal(core.regionCount(), before + entries);
     assert.ok(core.regionStats().installFallbacks > fallbacks, "counted as a cold compile (installFallbacks)");
+    assert.equal(lastInstallPath(), 2, "sampled as cold");
   });
 });

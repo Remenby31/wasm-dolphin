@@ -282,7 +282,19 @@ function harnessJitRegionStats({ sampleEvery } = {}) {
   const size = Math.min(new DataView(heap.buffer, ptr, 8).getUint32(4, true), 256);
   if (ptr + size > heap.length) return { error: `region stats of ${size} bytes past the heap` };
   const copy = () => Array.from(new Uint8Array(heap.buffer, ptr, size));
-  return { bytes: copy(), again: copy() };
+  return { bytes: copy(), again: copy(), installSamples: harnessRegionInstallSamples(heap) };
+}
+// The core's first region installs, [ms, bytes, path] each (path 0 first
+// attempt, 1 after the worker's ready byte, 2 cold); null with an older core.
+function harnessRegionInstallSamples(heap) {
+  const at = moduleInstance?._DolphinWeb_JitRegionInstallSamples?.() >>> 0;
+  if (!at || at + 8 > heap.length) return null;
+  const view = new DataView(heap.buffer, at);
+  const count = Math.min(view.getUint32(0, true), view.getUint32(4, true));
+  if (at + 8 + 12 * count > heap.length) return null;
+  return Array.from({ length: count }, (_, i) => [
+    Math.round(view.getFloat32(8 + 12 * i, true) * 1000) / 1000, view.getUint32(12 + 12 * i, true), view.getUint32(16 + 12 * i, true)
+  ]);
 }
 let harnessVideoBackend = null;
 // Exact capture for video=wgpu: presents tagged with VI outputs (ViTag records).

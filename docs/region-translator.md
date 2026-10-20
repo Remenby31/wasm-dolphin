@@ -108,7 +108,9 @@ the oracle tests and the homebrew fuzz check it at every step.
    asked for with a compile request, and the region is installed once the
    worker set its ready byte, its synchronous compile then a hit in V8's
    native module cache (the block JIT runs the code meanwhile; a request
-   never answered compiles synchronously after 256 slices). `ExecuteOneBlock` runs the region holding the pc before looking for
+   never answered compiles synchronously after 5 s, counted as
+   `installFallbacks`; the first 256 installs are sampled, time, size and
+   path, in `DolphinWeb_JitRegionInstallSamples`, read with the stats). `ExecuteOneBlock` runs the region holding the pc before looking for
    a block, with translation and FP on only; block chaining stops at a
    region entry. `JitInterface::InvalidateICache(Line)` drops the regions
    covering the code (a page map rejects the rest in one lookup);
@@ -133,3 +135,4 @@ The three P1s and the trivial P2s are fixed in #43; the rest is tracked here.
 - [ ] **Time shares**: validate the sampled shares against a V8 CPU profile once (< 5 points).
 - [ ] **FP analyses over a region** (known-single, FPRF once per region, FPSCR in a local), each behind its own flag with oracle + race-perf pair (plan P4, next PR).
 - [ ] **Flag name**: plan says `wasmjit=region`, shipped as `aot=1`; `docs/jit-flags.md` not updated.
+- [ ] **One compiler worker**: blocks and regions not in the module map share a single worker, FIFO. Regions never queue there today (their live Module is in the map under their bytes' key), but a full map (49 152 entries) would send them behind every block. A second worker, or a priority lane for regions already hit, needs the client's watchdog and stats per worker: not trivial.

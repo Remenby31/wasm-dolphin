@@ -215,7 +215,8 @@ export function regionRecord(reply) {
   const stats = consistentRead(decodeRegionStats(reply.bytes), decodeRegionStats(reply.again));
   if (stats.error) return { p4: null, p4Why: stats.error };
   const p4 = regionShares(stats);
-  return p4.error ? { p4: null, p4Why: p4.error } : { p4, p4Raw: stats };
+  const samples = Array.isArray(reply.installSamples) ? { installSamples: reply.installSamples } : {};
+  return p4.error ? { p4: null, p4Why: p4.error, ...samples } : { p4, p4Raw: stats, ...samples };
 }
 
 // One side's p4 over its stats windows: shares of the pooled counters (so

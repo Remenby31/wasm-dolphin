@@ -77,6 +77,10 @@ test("region stats: unknown layout, short struct, torn read and impossible share
   // Dispatch time is slice time minus the sampled parts: it may drop between two copies.
   assert.equal(regionRecord(reply([900, 1000, 70, 10, 15, 5, 9, 0, 0], [905, 1010, 71, 9.5, 16, 5, 10, 0, 0])).p4.regionCycleShare, 0.9);
   assert.match(regionRecord(reply([900, 1000, 70, -1, 15, 5, 9, 0, 0])).p4Why, /dispatchTimeMs = -1/);
+  // The core's per-install samples ride along as they are; none with an older core.
+  const samples = [[0.21, 40960, 1], [3.4, 912384, 2]];
+  assert.deepEqual(regionRecord({ ...reply([900, 1000, 70, 10, 15, 5, 9, 0, 0]), installSamples: samples }).installSamples, samples);
+  assert.equal("installSamples" in regionRecord(reply([900, 1000, 70, 10, 15, 5, 9, 0, 0])), false);
 });
 
 // The 0075 struct of 256 bytes: v1 then the diagnostics (DIAGNOSTICS order).

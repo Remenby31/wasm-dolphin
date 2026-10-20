@@ -387,7 +387,7 @@ diff --git a/Source/Core/Core/PowerPC/CachedInterpreter/CachedInterpreter.cpp b/
  }
  
  WasmStateLayout MakeWasmBlockTestLayout(PowerPC::PowerPCState& state, u8* ram, u32 ram_size)
-@@ -8806,9 +8860,655 @@ void CachedInterpreter::Shutdown()
+@@ -8806,9 +8860,703 @@ void CachedInterpreter::Shutdown()
  #line 7779
  }
  
@@ -489,10 +489,10 @@ diff --git a/Source/Core/Core/PowerPC/CachedInterpreter/CachedInterpreter.cpp b/
 +  std::vector<u32> ranges;
 +  std::vector<RegionMember> members;
 +  // Hashed by the queuing thread (SHA-256 of a large module is milliseconds,
-+  // never spent on the CPU thread); its ready byte; slices waited for it.
++  // never spent on the CPU thread); its ready byte; when it was posted.
 +  std::array<char, 86> key{};
 +  u32 slot = 0;
-+  u32 checks = 0;
++  std::chrono::steady_clock::time_point posted{};
 +};
 +std::mutex s_region_queue_mutex;
 +std::vector<PendingRegion> s_region_queue;
@@ -503,8 +503,10 @@ diff --git a/Source/Core/Core/PowerPC/CachedInterpreter/CachedInterpreter.cpp b/
 +// runs its code.
 +std::vector<PendingRegion> s_region_waiting;
 +// A ready byte cleared by another key of its slot is never set again for
-+// this one: past this many slices the region compiles synchronously.
-+constexpr u32 REGION_READY_WAIT_SLICES = 256;
++// this one: past this much host time the region compiles synchronously. In
++// host time, not slices: a slice is tens of microseconds, and the worker
++// compiles the boot's regions one after the other.
++std::chrono::milliseconds s_region_ready_wait{5000};  // tests shorten it
 +// Installs at a slice boundary stop once this much host time went into
 +// compiling them (the rest waits for the next slice), at most this many.
 +constexpr u32 REGION_INSTALLS_PER_SLICE = 8;
@@ -520,7 +522,7 @@ diff --git a/Source/Core/Core/PowerPC/CachedInterpreter/CachedInterpreter.cpp b/
 +  u32 size_bytes = 256;
 +  u32 sample_every = 0;
 +  // Regions compiled synchronously because their ready byte never came
-+  // (REGION_READY_WAIT_SLICES): a cold compile on the CPU thread each.
++  // (s_region_ready_wait): a cold compile on the CPU thread each.
 +  u32 install_fallbacks = 0;
 +  double region_cycles = 0, total_cycles = 0, region_time_ms = 0, dispatch_time_ms = 0,
 +         block_time_ms = 0, interp_time_ms = 0, region_calls = 0, region_not_entry = 0,
@@ -652,9 +654,32 @@ diff --git a/Source/Core/Core/PowerPC/CachedInterpreter/CachedInterpreter.cpp b/
 +  return true;
 +}
 +
++// The first installs of the session, one sample each, for the harness
++// (DolphinWeb_JitRegionInstallSamples): host time, module size and path.
++enum class InstallPath : u32
++{
++  First = 0,  // at the first attempt: handed over before the boot, or synchronous
++  Ready = 1,  // after the worker's ready byte
++  Cold = 2,   // the ready byte never came (installFallbacks)
++};
++struct RegionInstallSample
++{
++  float ms;
++  u32 bytes;
++  u32 path;
++};
++struct RegionInstallSamples
++{
++  u32 count = 0;
++  u32 capacity = 256;
++  RegionInstallSample samples[256] = {};
++};
++RegionInstallSamples s_install_samples;
++
 +// One compile attempt, timed. True when the region was handled (installed or
 +// refused), false when it waits for the compiler worker.
-+bool TryInstallRegion(PendingRegion& pending, int ready_bits_ptr, double& spent_ms)
++bool TryInstallRegion(PendingRegion& pending, int ready_bits_ptr, double& spent_ms,
++                      InstallPath path)
 +{
 +  const auto start = std::chrono::steady_clock::now();
 +  const int handle = pending.key[0] ?
@@ -680,11 +705,18 @@ diff --git a/Source/Core/Core/PowerPC/CachedInterpreter/CachedInterpreter.cpp b/
 +  if (handle == -1 && ready_bits_ptr)
 +  {
 +    // The post itself failed: compiled synchronously at the next slice.
-+    pending.checks = REGION_READY_WAIT_SLICES;
++    pending.posted = std::chrono::steady_clock::now() - 2 * s_region_ready_wait;
 +    return false;
 +  }
 +  if (ms < 0.5)
 +    s_region_stats.installs_fast += 1;
++  if (s_install_samples.count < s_install_samples.capacity)
++  {
++    s_install_samples.samples[s_install_samples.count] = {
++        static_cast<float>(ms), static_cast<u32>(pending.bytes.size()), static_cast<u32>(path)};
++    std::atomic_thread_fence(std::memory_order_release);
++    s_install_samples.count += 1;
++  }
 +  if (handle <= 0)
 +  {
 +    s_region_stats.regions_refused += 1;
@@ -711,7 +743,7 @@ diff --git a/Source/Core/Core/PowerPC/CachedInterpreter/CachedInterpreter.cpp b/
 +    PendingRegion& pending = s_region_waiting[i];
 +    const bool ready =
 +        s_wasm_jit_ready_bits[pending.slot].load(std::memory_order_acquire) != 0;
-+    const bool expired = ++pending.checks > REGION_READY_WAIT_SLICES;
++    const bool expired = std::chrono::steady_clock::now() - pending.posted > s_region_ready_wait;
 +    if (!ready && !expired)
 +    {
 +      ++i;
@@ -722,7 +754,8 @@ diff --git a/Source/Core/Core/PowerPC/CachedInterpreter/CachedInterpreter.cpp b/
 +      s_region_stats.install_fallbacks += 1;
 +    // Waited past a slice where the game may have reloaded its code.
 +    if (!RegionInstallable(pending) ||
-+        TryInstallRegion(pending, ready && ready_bits_ptr ? ready_bits_ptr : 0, spent_ms))
++        TryInstallRegion(pending, ready && ready_bits_ptr ? ready_bits_ptr : 0, spent_ms,
++                         ready ? InstallPath::Ready : InstallPath::Cold))
 +    {
 +      s_region_waiting[i] = std::move(s_region_waiting.back());
 +      s_region_waiting.pop_back();
@@ -747,7 +780,9 @@ diff --git a/Source/Core/Core/PowerPC/CachedInterpreter/CachedInterpreter.cpp b/
 +      continue;
 +    // A module handed to this pthread before the boot is installed at once;
 +    // any other is posted to the compiler worker and waits for its byte.
-+    if (!TryInstallRegion(pending, pending.key[0] ? ready_bits_ptr : 0, spent_ms))
++    pending.posted = std::chrono::steady_clock::now();
++    if (!TryInstallRegion(pending, pending.key[0] ? ready_bits_ptr : 0, spent_ms,
++                          InstallPath::First))
 +      s_region_waiting.push_back(std::move(pending));
 +  }
 +  // The boot (before the first image) may install synchronously: what the
@@ -965,6 +1000,19 @@ diff --git a/Source/Core/Core/PowerPC/CachedInterpreter/CachedInterpreter.cpp b/
 +  ApplyRegionStatsRequest();
 +}
 +
++// {u32 count, u32 capacity, then count x {f32 ms, u32 bytes, u32 path}}: the
++// session's first region installs (path: 0 first attempt, 1 after the ready
++// byte, 2 cold). Written by the CPU thread only, read by the harness.
++extern "C" EMSCRIPTEN_KEEPALIVE u32 DolphinWeb_JitRegionInstallSamples()
++{
++  return static_cast<u32>(reinterpret_cast<std::uintptr_t>(&s_install_samples));
++}
++
++extern "C" EMSCRIPTEN_KEEPALIVE void DolphinWeb_AotSetReadyWaitForTest(int ms)
++{
++  s_region_ready_wait = std::chrono::milliseconds(ms);
++}
++
 +extern "C" EMSCRIPTEN_KEEPALIVE int DolphinWeb_AotDispatchRegionForTest()
 +{
 +  ApplyRegionStatsRequest();
@@ -1043,7 +1091,7 @@ diff --git a/Source/Core/Core/PowerPC/CachedInterpreter/CachedInterpreter.cpp b/
  #if DOLPHIN_WEB_STATIC_EXIT_LINKS && DOLPHIN_WEB_STATIC_EXIT_LINK_STATS
    s_static_link_stats.InitialDispatch(normal_entry == nullptr);
  #endif
-@@ -9078,7 +9778,8 @@ void CachedInterpreter::ExecuteOneBlock([[maybe_unused]] bool allow_redispatch)
+@@ -9078,7 +9826,8 @@ void CachedInterpreter::ExecuteOneBlock([[maybe_unused]] bool allow_redispatch)
    }
  #ifdef __EMSCRIPTEN__
      if (redispatch_enabled && m_ppc_state.downcount > 0 &&
@@ -1053,7 +1101,7 @@ diff --git a/Source/Core/Core/PowerPC/CachedInterpreter/CachedInterpreter.cpp b/
      {
  #if DOLPHIN_WEB_STATIC_EXIT_LINKS
        const auto static_link_result = static_link_scope.Resolve(
-@@ -9093,7 +9794,7 @@ void CachedInterpreter::ExecuteOneBlock([[maybe_unused]] bool allow_redispatch)
+@@ -9093,7 +9842,7 @@ void CachedInterpreter::ExecuteOneBlock([[maybe_unused]] bool allow_redispatch)
  #endif
  #else
  #line 8054
@@ -1062,7 +1110,7 @@ diff --git a/Source/Core/Core/PowerPC/CachedInterpreter/CachedInterpreter.cpp b/
  #endif
  #line 8055
        if (!next)
-@@ -9166,6 +9867,8 @@ void CachedInterpreter::Run()
+@@ -9166,6 +9915,8 @@ void CachedInterpreter::Run()
      }
      // The compile budget has been replenished and no cached callback is active.
      RetryDeferredWasmBlocks(*this);
@@ -1071,7 +1119,7 @@ diff --git a/Source/Core/Core/PowerPC/CachedInterpreter/CachedInterpreter.cpp b/
      // Start new timing slice
      // Metrics-off runs avoid all per-slice clocks. BeginSlice also resets
      // the exclusive wait/work attribution for this one CoreTiming slice.
-@@ -9179,10 +9882,65 @@ void CachedInterpreter::Run()
+@@ -9179,10 +9930,65 @@ void CachedInterpreter::Run()
      const auto _advance_end =
          _profile_slice ? std::chrono::steady_clock::now() : std::chrono::steady_clock::time_point{};
  
@@ -1137,7 +1185,7 @@ diff --git a/Source/Core/Core/PowerPC/CachedInterpreter/CachedInterpreter.cpp b/
  #if DOLPHIN_WEB_STATIC_EXIT_LINKS && DOLPHIN_WEB_STATIC_EXIT_LINK_STATS
      s_static_link_stats.Slice();
  #endif
-@@ -9365,7 +10123,27 @@ s32 CachedInterpreter::CheckIdle(PowerPC::PowerPCState& ppc_state,
+@@ -9365,7 +10171,27 @@ s32 CachedInterpreter::CheckIdle(PowerPC::PowerPCState& ppc_state,
  {
    const auto& [core_timing, idle_pc] = operands;
    if (ppc_state.npc == idle_pc)
@@ -1165,7 +1213,7 @@ diff --git a/Source/Core/Core/PowerPC/CachedInterpreter/CachedInterpreter.cpp b/
    return sizeof(AnyCallback) + sizeof(operands);
  }
  
-@@ -12422,8 +13200,19 @@ void ApplyArmedWasmPolicy()
+@@ -12422,8 +13248,19 @@ void ApplyArmedWasmPolicy()
      ApplyArmedWasmPolicyAt(Core::System::GetInstance().GetMovie().GetCurrentFrame());
  }
  
@@ -1187,7 +1235,7 @@ diff --git a/Source/Core/Core/PowerPC/CachedInterpreter/CachedInterpreter.cpp b/
  // Serves a dump request in place (the test has no CPU thread loop running):
  // returns the number of triplets, or -1 when the core is not the
  // CachedInterpreter.
-@@ -12437,6 +13226,8 @@ extern "C" EMSCRIPTEN_KEEPALIVE int DolphinWeb_JitDumpBlocksNowForTest()
+@@ -12437,6 +13274,8 @@ extern "C" EMSCRIPTEN_KEEPALIVE int DolphinWeb_JitDumpBlocksNowForTest()
    return static_cast<int>(DolphinWeb_JitDumpBlocksCount());
  }
  
@@ -1196,7 +1244,7 @@ diff --git a/Source/Core/Core/PowerPC/CachedInterpreter/CachedInterpreter.cpp b/
  extern "C" EMSCRIPTEN_KEEPALIVE double DolphinWeb_JitArmedStepForTest(double frame)
  {
    ApplyArmedWasmPolicyAt(static_cast<u64>(frame));
-@@ -13850,6 +14641,580 @@ extern "C" EMSCRIPTEN_KEEPALIVE int DolphinWeb_JitOracleRun(u32 word_count, u32
+@@ -13850,6 +14689,580 @@ extern "C" EMSCRIPTEN_KEEPALIVE int DolphinWeb_JitOracleRun(u32 word_count, u32
    return std::memcmp(s_jit_oracle.interp, s_jit_oracle.jit, sizeof s_jit_oracle.jit) == 0 ? 0 : 1;
  }
  
@@ -1777,7 +1825,7 @@ diff --git a/Source/Core/Core/PowerPC/CachedInterpreter/CachedInterpreter.cpp b/
  extern "C" int RunPpcWasmFloatCompareSmoke()
  {
    auto& state = Core::System::GetInstance().GetPPCState();
-@@ -14248,6 +15613,7 @@ void CachedInterpreter::ClearCache()
+@@ -14248,6 +15661,7 @@ void CachedInterpreter::ClearCache()
  #ifdef __EMSCRIPTEN__
    s_deferred_wasm_queues.erase(this);
    ResetOffThreadCompiles();
