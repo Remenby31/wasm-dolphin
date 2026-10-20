@@ -5,13 +5,21 @@
 // DolphinWeb_JitRegionStats struct. Layout v1, agreed with the JIT owner on
 // 2026-10-19 (little-endian, 8-byte aligned, counters cumulative since the
 // last reset):
-//   +0 u32 version  +4 u32 sizeBytes  +8 u32 sampleEvery  +12 u32 reserved
+//   +0 u32 version (1 or 2, see DIAGNOSTICS_BY_VERSION)  +4 u32 sizeBytes
+//   +8 u32 sampleEvery  +12 u32 reserved
 //   then f64 from +16: regionCycles, totalCycles, regionTimeMs, dispatchTimeMs,
 //   blockTimeMs, interpTimeMs, regionCalls, regionNotEntry, regionStops
 //   then, when sizeBytes is 256 (0075, 2026-10-20), diagnostics in f64 from
 //   +88 (DIAGNOSTICS below): region pipeline counts, chaining, the idle-skipped
 //   cycles and the time in CoreTiming::Idle (already taken out of blockTimeMs
-//   by the core), the four costliest block starts outside regions, one spare.
+//   by the core), the three costliest block starts outside regions, then
+//   the region installs on the CPU thread: installMaxSliceMs (the longest
+//   time installing in one slice), installsFast (installs under 0.5 ms, a
+//   hit in V8's native module cache) and installMs (host time compiling
+//   region modules); like the pipeline counts, cumulative and never reset.
+// A reset (n >= 0) is applied by the CPU thread at its next slice boundary
+// (0075, 2026-10-20): a read right after it may still show the old values;
+// race-perf reads after its whole stats window.
 // DolphinWeb_JitRegionStats(n): n >= 0 sets the host-time sampling (1 call
 // out of n timed, 0 = counters only) and resets; n < 0 only reads. Before the
 // first n >= 0 call the stats are fully off (nothing is counted).
@@ -23,18 +31,28 @@
 // (idleTimeShare).
 import { round } from "./stats.mjs";
 
-export const REGION_STATS_VERSION = 1;
+// Layouts this harness decodes; any other version is refused, never guessed.
+export const REGION_STATS_VERSIONS = [1, 2];
 export const REGION_STATS_BYTES = 88;
 export const REGION_STATS_MAX_BYTES = 256;
 const F64 = ["regionCycles", "totalCycles", "regionTimeMs", "dispatchTimeMs", "blockTimeMs", "interpTimeMs", "regionCalls", "regionNotEntry", "regionStops"];
 const TIME = ["regionTimeMs", "dispatchTimeMs", "blockTimeMs", "interpTimeMs"];
-export const DIAGNOSTICS = [
+const DIAG_COMMON = [
   "regionsQueued", "regionsInstalled", "regionsRefused", "regionsDropped", "entriesMapped", "regionsEnabled", "regionsHleRefused",
   "chainBreaks", "modeRefusals", "filterFalseHits", "idleCycles", "idleTimeMs",
-  "topMiss0Pc", "topMiss0Cycles", "topMiss1Pc", "topMiss1Cycles", "topMiss2Pc", "topMiss2Cycles", "topMiss3Pc", "topMiss3Cycles",
-  "spare"
+  "topMiss0Pc", "topMiss0Cycles", "topMiss1Pc", "topMiss1Cycles", "topMiss2Pc", "topMiss2Cycles"
 ];
-const DIAGNOSTICS_BYTES = REGION_STATS_BYTES + 8 * DIAGNOSTICS.length; // 256
+// Diagnostics past the v1 fields, per layout version:
+// v1 (0075 before its review): diagnostics optional (88 or 256 bytes), four
+//    top misses and a spare f64;
+// v2 (0075 after its review): diagnostics required (256 bytes), three top
+//    misses, then the region installs.
+export const DIAGNOSTICS_BY_VERSION = {
+  1: [...DIAG_COMMON, "topMiss3Pc", "topMiss3Cycles", "spare"],
+  2: [...DIAG_COMMON, "installMaxSliceMs", "installsFast", "installMs"]
+};
+export const DIAGNOSTICS = DIAGNOSTICS_BY_VERSION[2];
+const DIAGNOSTICS_BYTES = REGION_STATS_BYTES + 8 * DIAGNOSTICS.length; // 256 in both layouts
 // Diagnostics that only ever add up (summed over windows, checked for tears);
 // the others are states of the region pipeline at the time of the read.
 const DIAG_COUNTERS = ["chainBreaks", "modeRefusals", "filterFalseHits", "idleCycles", "idleTimeMs"];
@@ -44,13 +62,14 @@ export function decodeRegionStats(bytes) {
   if (!bytes || bytes.length < 8) return { error: `region stats: ${bytes?.length ?? 0} bytes, no header` };
   const view = new DataView(Uint8Array.from(bytes).buffer);
   const version = view.getUint32(0, true), size = view.getUint32(4, true);
-  if (version !== REGION_STATS_VERSION) return { error: `region stats: layout version ${version}, this harness reads ${REGION_STATS_VERSION}` };
-  if (size < REGION_STATS_BYTES || bytes.length < REGION_STATS_BYTES) return { error: `region stats: struct of ${size} bytes (${bytes.length} copied), v1 needs ${REGION_STATS_BYTES}` };
+  if (!REGION_STATS_VERSIONS.includes(version)) return { error: `region stats: layout version ${version}, this harness reads ${REGION_STATS_VERSIONS.join(" and ")}` };
+  const needs = version === 2 ? DIAGNOSTICS_BYTES : REGION_STATS_BYTES;
+  if (size < needs || bytes.length < needs) return { error: `region stats: struct of ${size} bytes (${bytes.length} copied), v${version} needs ${needs}` };
   const out = { version, sizeBytes: size, sampleEvery: view.getUint32(8, true) };
   F64.forEach((name, i) => { out[name] = view.getFloat64(16 + i * 8, true); });
   for (const name of F64) if (!Number.isFinite(out[name]) || out[name] < 0) return { error: `region stats: ${name} = ${out[name]}` };
   if (size >= DIAGNOSTICS_BYTES && bytes.length >= DIAGNOSTICS_BYTES) {
-    out.diagnostics = Object.fromEntries(DIAGNOSTICS.map((name, i) => [name, view.getFloat64(REGION_STATS_BYTES + i * 8, true)]));
+    out.diagnostics = Object.fromEntries(DIAGNOSTICS_BY_VERSION[version].map((name, i) => [name, view.getFloat64(REGION_STATS_BYTES + i * 8, true)]));
     for (const name of DIAG_COUNTERS) {
       const v = out.diagnostics[name];
       if (!Number.isFinite(v) || v < 0) return { error: `region stats: ${name} = ${v}` };
@@ -125,11 +144,12 @@ export function poolStats(list) {
   return sum;
 }
 
-// The four costliest block starts outside regions of one read, as [pc hex, cycles].
+// The costliest block starts outside regions of one read (three in v2, four
+// in v1), as [pc hex, cycles].
 export function topMisses(s) {
   const d = s?.diagnostics;
   if (!d) return null;
-  return [0, 1, 2, 3].map((i) => [d[`topMiss${i}Pc`], d[`topMiss${i}Cycles`]])
+  return [0, 1, 2, 3].filter((i) => `topMiss${i}Pc` in d).map((i) => [d[`topMiss${i}Pc`], d[`topMiss${i}Cycles`]])
     .filter(([pc, cycles]) => pc > 0 && cycles > 0)
     .map(([pc, cycles]) => [`0x${(pc >>> 0).toString(16).padStart(8, "0")}`, cycles]);
 }
