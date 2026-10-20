@@ -228,11 +228,53 @@ test("a compile request is precompiled, kept alive and marked ready in the core'
   assert.deepEqual(heap, snapshot, "no byte of the heap changed");
 });
 
-test("the compiler worker is off by default: modules compile in place, no worker starts", async (t) => {
-  const { aotCompilerRequested } = await import("../src/aot-compiler-worker.js");
-  assert.equal(aotCompilerRequested(""), false);
-  assert.equal(aotCompilerRequested("?aotcompiler=0"), false);
+test("the off-thread compiler is on by default: no parameter, worker load defaults and adapter defaults", async () => {
+  const { aotCompilerRequested, jitOffThreadRequested } = await import("../src/aot-compiler-worker.js");
+  assert.equal(aotCompilerRequested(""), true);
   assert.equal(aotCompilerRequested("?x=1&aotcompiler=1"), true);
+  assert.equal(jitOffThreadRequested(""), true);
+  assert.equal(jitOffThreadRequested("?x=1&jitoffthread=1"), true);
+  const { UpstreamWorkerAdapter } = await import("../src/upstream-worker-adapter.js");
+  const adapter = new UpstreamWorkerAdapter();
+  assert.equal(adapter.aotCompiler, true);
+  assert.equal(adapter.jitOffThread, true);
+  // a load payload that omits them (older host) still turns both on
+  const source = await readFile(workerUrl, "utf8");
+  assert.match(source, /\n  jitOffThread = true,\n  aotCompiler = true,\n/);
+  assert.match(source, /dolphinAotCompilerEnabled = aotCompiler !== false;/);
+  assert.match(source, /setPpcWasmJitOffThread\?\.\(jitOffThread !== false && !noJitCache \? 1 : 0\)/);
+  const host = await readFile(new URL("../src/core-host.js", import.meta.url), "utf8");
+  assert.match(host, /this\.jitOffThread = jitOffThreadRequested\(window\.location\.search\);/);
+  assert.match(host, /this\.aotCompiler = aotCompilerRequested\(window\.location\.search\);/);
+});
+
+test("aotcompiler=0 and jitoffthread=0 turn both off: modules compile in place, no worker starts", async (t) => {
+  const { aotCompilerRequested, jitOffThreadRequested } = await import("../src/aot-compiler-worker.js");
+  assert.equal(aotCompilerRequested("?aotcompiler=0"), false);
+  assert.equal(jitOffThreadRequested("?jitoffthread=0"), false);
+  assert.equal(aotCompilerRequested("?jitoffthread=0"), true, "each switch only cuts its own flag");
+  assert.equal(jitOffThreadRequested("?aotcompiler=0"), true, "each switch only cuts its own flag");
+  const { UpstreamWorkerAdapter } = await import("../src/upstream-worker-adapter.js");
+  const adapter = new UpstreamWorkerAdapter({
+    aotCompiler: aotCompilerRequested("?aotcompiler=0&jitoffthread=0"),
+    jitOffThread: jitOffThreadRequested("?aotcompiler=0&jitoffthread=0")
+  });
+  let posted = null;
+  adapter.worker = {
+    postMessage(message) {
+      posted = message;
+      queueMicrotask(() => adapter.handleMessage({ id: message.id, ok: true }));
+    }
+  };
+  const originalWindow = globalThis.window;
+  globalThis.window = { location: { href: "http://127.0.0.1:8080/?aotcompiler=0&jitoffthread=0", search: "?aotcompiler=0&jitoffthread=0" } };
+  t.after(() => {
+    if (originalWindow === undefined) delete globalThis.window;
+    else globalThis.window = originalWindow;
+  });
+  await adapter.load();
+  assert.equal(posted.payload.aotCompiler, false);
+  assert.equal(posted.payload.jitOffThread, false);
   const originalSelf = globalThis.self;
   globalThis.self = { location: { href: "http://127.0.0.1:8080/" }, addEventListener() {}, postMessage() {} };
   t.after(() => {

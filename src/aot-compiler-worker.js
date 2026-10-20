@@ -17,11 +17,15 @@
 
 export const AOT_COMPILER_WORKER_NAME = "salon-aot-compiler";
 
-// Off by default until its memory cost is measured on mainstream machines
-// (a scratch Memory of the JIT's shape reserves 1.5 GiB of address space,
-// and warmed code is retained): ?aotcompiler=1 turns it on.
+// On by default since 2026-10-19 (user decision; memory cost in
+// measures/aot/memory-aotcompiler.md): ?aotcompiler=0 turns it off.
 export function aotCompilerRequested(search = "") {
-  return new URLSearchParams(search).get("aotcompiler") === "1";
+  return new URLSearchParams(search).get("aotcompiler") !== "0";
+}
+// Off-thread compile of JIT misses (core side, patch 0074), on by default
+// with the compiler worker: ?jitoffthread=0 turns it off.
+export function jitOffThreadRequested(search = "") {
+  return new URLSearchParams(search).get("jitoffthread") !== "0";
 }
 export const AOT_COMPILER_PROTOCOL = 1;
 
