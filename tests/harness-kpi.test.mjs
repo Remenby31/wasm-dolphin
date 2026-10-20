@@ -490,3 +490,13 @@ test("ttff memory guard: RSS per process type of one profile, and the reason a c
   assert.equal(row.status, "KO");
   assert.match(row.why, /run 1 : cut: Chrome at 9842 MB > 9000 MB \(browser 7436 MB/);
 });
+
+test("aot-warm-launch: a seeded profile is measured on the origin it was seeded on", async (t) => {
+  const { SEED_FILE, seedOriginCheck } = await import("../harness/lib/seed-origin.mjs");
+  const dir = mkdtempSync(path.join(os.tmpdir(), "seed-origin-test-"));
+  t.after(() => rmSync(dir, { recursive: true, force: true }));
+  assert.match(seedOriginCheck(dir, 8086).warning, /cannot be checked/); // seeded before the check
+  writeFileSync(path.join(dir, SEED_FILE), JSON.stringify({ origin: "http://127.0.0.1:8092/", port: 8092 }));
+  assert.match(seedOriginCheck(dir, 8086).error, /seeded on port 8092 .* measured on port 8086: .* every launch would be a first launch\. Measure with --port 8092/);
+  assert.equal(seedOriginCheck(dir, 8092).seed.port, 8092);
+});
