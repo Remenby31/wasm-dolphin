@@ -344,4 +344,9 @@ test("KPI: a candidate column beside trunk, never in its place", (t) => {
   assert.equal(readCandidate({ candidate: path.join(root, "s.json"), "candidate-label": "L" }).values.macSpeed.value, 95.8);
   assert.match(readCandidate({ candidate: path.join(root, "f.json") }).error, /not a race-perf summary/);
   assert.equal(readCandidate({}, path.join(root, "absent.json")), null);
+  // candidate.json pointing at a summary that is gone: an error, never an exception.
+  writeFileSync(path.join(root, "candidate.json"), JSON.stringify({ summary: path.join(root, "gone", "summary.json") }));
+  assert.match(readCandidate({}, path.join(root, "candidate.json")).error, /missing or unreadable/);
+  writeFileSync(path.join(root, "broken.json"), "{ not json");
+  assert.match(readCandidate({ candidate: path.join(root, "broken.json") }).error, /missing or unreadable/);
 });

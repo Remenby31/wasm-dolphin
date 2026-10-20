@@ -93,10 +93,13 @@ export function readCandidate(values, file = path.join(PROGRAM_ROOT, "measures",
   let spec = values.candidate ? { summary: values.candidate, label: values["candidate-label"] } : readJson(file);
   if (!spec?.summary) return null;
   const summary = path.resolve(PROGRAM_ROOT, spec.summary);
+  // A summary that is gone or unreadable leaves the column out, with the reason.
   const json = readJson(summary);
-  const kind = classify(json, summary);
-  if (kind !== "race-perf") return { error: `${spec.summary}: not a race-perf summary` };
-  return candidateColumn({ kind, json, file: path.relative(PROGRAM_ROOT, summary), mtimeMs: statSync(summary).mtimeMs, extra: extraOf(kind, json, summary) }, { label: spec.label ?? null });
+  if (!json) return { error: `${spec.summary}: missing or unreadable` };
+  if (classify(json, summary) !== "race-perf") return { error: `${spec.summary}: not a race-perf summary` };
+  let mtimeMs = 0;
+  try { mtimeMs = statSync(summary).mtimeMs; } catch {} // removed since it was read: the result's own date is kept
+  return candidateColumn({ kind: "race-perf", json, file: path.relative(PROGRAM_ROOT, summary), mtimeMs, extra: extraOf("race-perf", json, summary) }, { label: spec.label ?? null });
 }
 
 // manual.json, or { error } when it is there but unreadable (the rows say so).
