@@ -1,4 +1,4 @@
-import { aotCompilerRequested } from "./aot-compiler-worker.js";
+import { aotCompilerRequested, jitOffThreadRequested } from "./aot-compiler-worker.js";
 import { parseCustomRtc } from "./custom-rtc.js";
 import { DolphinCoreAdapter, dolphinBundleAvailable } from "./dolphin-adapter.js";
 import { buttonMaskFromPressed, isPadPort } from "./input.js";
@@ -118,12 +118,12 @@ export class EmulatorHost {
     );
     this.noJitCache =
       new URLSearchParams(window.location.search).get("nojitcache") === "1";
-    // ?jitoffthread=1: the CPU thread never compiles a JIT module itself; it
-    // posts the bytes to the compiler worker and interprets until it arrives.
-    this.jitOffThread =
-      new URLSearchParams(window.location.search).get("jitoffthread") === "1";
-    // ?aotcompiler=1: compile cached/requested JIT modules in the compiler
-    // worker (off by default until its memory cost is measured).
+    // On by default, ?jitoffthread=0 turns it off: the CPU thread never compiles
+    // a JIT module first; it posts the bytes to the compiler worker and
+    // interprets until it arrives.
+    this.jitOffThread = jitOffThreadRequested(window.location.search);
+    // On by default, ?aotcompiler=0 turns it off: compile cached/requested JIT
+    // modules in the compiler worker.
     this.aotCompiler = aotCompilerRequested(window.location.search);
     // ?aot=1: first-launch optimisation of the disc (P7), off by default.
     this.aotFirstLaunch = new URLSearchParams(window.location.search).get("aot") === "1";
