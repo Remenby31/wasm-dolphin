@@ -145,3 +145,11 @@ export function summarizeAot(runs) {
   const cold = phase("cold"), warm = phase("warm");
   return cold || warm ? { cold, warm } : null;
 }
+
+// Why a launch was cut by the memory guard: the total and the heaviest
+// process types, e.g. "cut: Chrome at 10331 MB > 10240 MB (browser 7342 MB,
+// renderer 2560 MB, gpu-process 157 MB)".
+export function memoryCutReason(rss, limitMB) {
+  const top = Object.entries(rss.byType ?? {}).sort((a, b) => b[1] - a[1]).slice(0, 3).map(([t, mb]) => `${t} ${mb} MB`).join(", ");
+  return `cut: Chrome at ${rss.totalMB} MB > ${limitMB} MB${top ? ` (${top})` : ""}`;
+}
