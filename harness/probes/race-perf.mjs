@@ -232,7 +232,7 @@ export function summarizeP4(windows) {
   // Diagnostics (0075 struct of 256 bytes): the region pipeline as the last
   // window saw it, the summed chaining counters, and its top misses.
   const diagnostics = sum.diagnostics
-    ? { ...Object.fromEntries(Object.entries(sum.diagnostics).filter(([k]) => !/^topMiss/.test(k))), topMisses: topMisses(raw.at(-1)) }
+    ? { ...Object.fromEntries(Object.entries(sum.diagnostics).filter(([k]) => !/^topMiss|^spare$/.test(k))), topMisses: topMisses(raw.at(-1)) }
     : null;
   return { p4: { ...pooled, windows: raw.length, missingWindows: recs.length - raw.length, diagnostics }, why: raw.length < recs.length ? why : null };
 }

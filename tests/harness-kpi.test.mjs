@@ -7,7 +7,7 @@ import os from "node:os";
 import path from "node:path";
 import test from "node:test";
 
-import { consistentRead, decodeRegionStats, DIAGNOSTICS, poolStats, regionShares, REGION_STATS_BYTES, topMisses } from "../harness/lib/jit-region-stats.mjs";
+import { consistentRead, decodeRegionStats, DIAGNOSTICS, DIAGNOSTICS_BY_VERSION, poolStats, regionShares, REGION_STATS_BYTES, topMisses } from "../harness/lib/jit-region-stats.mjs";
 import { p4Summary, regionRecord, summarizeP4 } from "../harness/probes/race-perf.mjs";
 import { launchTtff, summarizeTtff } from "../harness/lib/ttff.mjs";
 import { summarizeLaunch, summarizeP7, unavailable } from "../harness/lib/aot-progress.mjs";
@@ -43,8 +43,27 @@ test("region stats: layout v1 decoded, shares over the CPU loop's four parts", (
   assert.equal(counters.regionTimeShare, null);
 });
 
+test("region stats: layout versions 1 and 2 decoded each their own way, any other refused", () => {
+  const f64 = [414, 1000, 60, 10, 25, 5, 50, 1, 0];
+  // v1 of 0075 before its review: four top misses and a spare.
+  const v1 = decodeRegionStats(statsBytes256({ version: 1, f64, diag: { idleCycles: 550, topMiss3Pc: 0x80031234, topMiss3Cycles: 9, spare: 0 } }));
+  assert.equal(v1.version, 1);
+  assert.equal(v1.diagnostics.topMiss3Pc, 0x80031234);
+  assert.equal("installMs" in v1.diagnostics, false); // a PC is never read as milliseconds
+  assert.deepEqual(topMisses(v1), [["0x80031234", 9]]); // the 4th pair exists in v1
+  // v2 of 0075 after its review: three top misses, then the region installs.
+  const v2 = decodeRegionStats(statsBytes256({ version: 2, f64, diag: { idleCycles: 550, installMaxSliceMs: 3.5, installsFast: 40, installMs: 120 } }));
+  assert.deepEqual([v2.diagnostics.installMaxSliceMs, v2.diagnostics.installsFast, v2.diagnostics.installMs], [3.5, 40, 120]);
+  assert.equal("topMiss3Pc" in v2.diagnostics, false);
+  assert.equal(topMisses(v2).length, 0); // no top miss set in this read
+  // v1 may come without diagnostics (88 bytes); v2 never.
+  assert.equal(decodeRegionStats(statsBytes({ f64 })).diagnostics, undefined);
+  assert.match(decodeRegionStats(statsBytes256({ version: 2, size: 88, f64 })).error, /v2 needs 256/);
+  assert.match(decodeRegionStats(statsBytes256({ version: 3, f64 })).error, /layout version 3, this harness reads 1 and 2/);
+});
+
 test("region stats: unknown layout, short struct, torn read and impossible shares are refused", () => {
-  assert.match(decodeRegionStats(statsBytes({ version: 2 })).error, /version 2/);
+  assert.match(decodeRegionStats(statsBytes({ version: 7 })).error, /version 7/);
   assert.match(decodeRegionStats(statsBytes({ size: 80 })).error, /struct of 80 bytes/);
   assert.match(decodeRegionStats([1, 0, 0]).error, /no header/);
   // The second copy went backwards: a reset or a mid-update read.
@@ -58,12 +77,12 @@ test("region stats: unknown layout, short struct, torn read and impossible share
 });
 
 // The 0075 struct of 256 bytes: v1 then the diagnostics (DIAGNOSTICS order).
-function statsBytes256({ f64 = [], diag = {} } = {}) {
+function statsBytes256({ f64 = [], diag = {}, version = 2, size = 256 } = {}) {
   const buf = new ArrayBuffer(256);
   const v = new DataView(buf);
-  v.setUint32(0, 1, true); v.setUint32(4, 256, true); v.setUint32(8, 64, true);
+  v.setUint32(0, version, true); v.setUint32(4, size, true); v.setUint32(8, 64, true);
   f64.forEach((x, i) => v.setFloat64(16 + i * 8, x, true));
-  DIAGNOSTICS.forEach((name, i) => v.setFloat64(88 + i * 8, diag[name] ?? 0, true));
+  (DIAGNOSTICS_BY_VERSION[version] ?? DIAGNOSTICS).forEach((name, i) => v.setFloat64(88 + i * 8, diag[name] ?? 0, true));
   return Array.from(new Uint8Array(buf));
 }
 
