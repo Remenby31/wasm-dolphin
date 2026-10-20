@@ -9,7 +9,7 @@ import test from "node:test";
 
 import { consistentRead, decodeRegionStats, DIAGNOSTICS, DIAGNOSTICS_BY_VERSION, poolStats, regionShares, REGION_STATS_BYTES, topMisses } from "../harness/lib/jit-region-stats.mjs";
 import { p4Summary, regionRecord, summarizeP4 } from "../harness/probes/race-perf.mjs";
-import { launchTtff, summarizeTtff } from "../harness/lib/ttff.mjs";
+import { aotLaunchInfo, launchTtff, summarizeAot, summarizeTtff } from "../harness/lib/ttff.mjs";
 import { summarizeLaunch, summarizeP7, unavailable } from "../harness/lib/aot-progress.mjs";
 import { candidateColumn, classify, KPI_ROWS, kpiMarkdown, kpiTable, servedSides, sideFlags, sideHasAot, trunkSide } from "../harness/lib/kpi.mjs";
 import { findResults, loadResults, readCandidate, readManual } from "../harness/kpi-report.mjs";
@@ -254,7 +254,7 @@ test("KPI: only clean trunk results count, one result per row, shown with its co
   assert.match(rows.oracleDivergences.why, /aucun résultat fuzz/);
   const md = kpiMarkdown(Object.values(rows), { at: "T" });
   assert.ok(md.indexOf("North star") < md.indexOf("Leviers") && md.indexOf("Garde-fous") < md.indexOf("Expérience joueur"));
-  assert.match(md, /\| Time-to-first-frame, à froid \| 7 s \| ≤ 10 s \| OK \| mesuré \| `ttff-2026-10-19T11:00:00Z` @ T2, 2026-10-19T11:00 \|/);
+  assert.match(md, /\| Time-to-first-frame, à froid, défaut \| 7 s \| ≤ 10 s \| OK \| mesuré \| `ttff-2026-10-19T11:00:00Z` @ T2, 2026-10-19T11:00 \|/);
 
   // The newest trunk result has no value: the row says why, it does not
   // fall back on an older one.
@@ -328,7 +328,7 @@ test("KPI report: files classified by content; manual.json errors become reasons
   const rows = (m) => Object.fromEntries(kpiTable([], m, { trunk: TRUNK }).map((r) => [r.id, r]));
   assert.match(rows(readManual(path.join(root, "m1.json"))).pcSpeed.why, /illisible/);
   assert.match(rows(readManual(path.join(root, "m2.json"))).pcSpeed.why, /non numérique/);
-  assert.equal(KPI_ROWS.length, 17);
+  assert.equal(KPI_ROWS.length, 19);
   // Every TTFF run overloaded: n/a, and the row says so.
   const over = { kind: "ttff", file: "o", json: { probe: "ttff", at: "2026-10-19T11:00:00Z", served: served("T1"), runs: 3, overloadedRuns: [1, 2, 3], cold: null, warm: null } };
   assert.match(kpiTable([over], {}, { trunk: TRUNK }).find((r) => r.id === "ttffCold").why, /runs 1, 2, 3 lancées sur machine surchargée/);
@@ -434,4 +434,36 @@ test("KPI: one trunk with and without a switch (--baseline-query): the row says 
   assert.equal(rows.macSpeedAot.counted, false);
   assert.equal(rows.macSpeed.counted, true);
   assert.match(kpiMarkdown([rows.macSpeedAot], { at: "T" }), /@ T1, aot=1, 2026-10-20T23:10/);
+});
+
+test("KPI: TTFF default and aot=1 apart; a second launch without the region cache says so", () => {
+  const ttff = (at, query, aot, warm = 1500) => ({ kind: "ttff", file: `ttff-${at}`, json: { probe: "ttff", at, query, served: served("T1"),
+    cold: { firstContentMs: { median: 1300 }, failed: [] }, warm: { firstContentMs: { median: warm }, failed: [] }, aot } });
+  const off = ttff("2026-10-21T00:05:00Z", "video=wgpu", null);
+  const withCache = ttff("2026-10-21T00:20:00Z", "video=wgpu&aot=1", { cold: { states: ["running"], regionsInstalled: [0, 0, 0], withRegionCache: false }, warm: { states: ["complete"], regionsInstalled: [143, 143, 143], withRegionCache: true } }, 900);
+  const rows = Object.fromEntries(kpiTable([off, withCache], {}, { trunk: TRUNK }).map((r) => [r.id, r]));
+  assert.equal(rows.ttffWarm.value, 1500); // the default rows read the run without aot=1
+  assert.equal(rows.ttffWarmAot.value, 900);
+  assert.equal(rows.ttffWarmAot.counted, false);
+  assert.match(rows.ttffWarmAot.detail, /régions installées au boot : 143, 143, 143/);
+  const noCache = ttff("2026-10-21T00:25:00Z", "video=wgpu&aot=1", { cold: { states: ["running"], regionsInstalled: [0] }, warm: { states: ["running"], regionsInstalled: [0], withRegionCache: false } });
+  assert.match(kpiTable([noCache], {}, { trunk: TRUNK }).find((r) => r.id === "ttffWarmAot").detail, /SANS cache de régions/);
+  // aot=1 asked of a core without the recompiler: a default run.
+  const inactive = ttff("2026-10-21T00:30:00Z", "video=wgpu&aot=1", { cold: { states: ["unsupported"] }, warm: { states: ["unsupported"] } });
+  assert.equal(kpiTable([inactive], {}, { trunk: TRUNK }).find((r) => r.id === "ttffCold").value, 1300);
+});
+
+test("ttff: the optimisation as each launch saw it, and whether the warm launch had the region cache", () => {
+  assert.equal(aotLaunchInfo({ error: "Unknown upstream worker message: validationReadAotProgress" }), null);
+  const info = aotLaunchInfo({ schema: "wasm-dolphin.aot-progress.v1", state: "complete", events: [{ type: "install", loaded: 143, failed: 0, deferred: 0, ms: 40 }, { type: "done", ms: 3400, compiled: 0, total: 143 }] });
+  assert.deepEqual(info, { state: "complete", install: { loaded: 143, failed: 0, deferred: 0, ms: 40 }, done: { ms: 3400, compiled: 0, total: 143 } });
+  const runs = [
+    { run: 1, cold: { aot: { state: "running", install: null, settled: { state: "complete", ms: 3400 } } }, warm: { aot: info } },
+    { run: 2, cold: { aot: { state: "running", install: null } }, warm: { aot: { ...info, install: { loaded: 0 } } } }
+  ];
+  const s = summarizeAot(runs);
+  assert.deepEqual(s.warm.regionsInstalled, [143, 0]);
+  assert.equal(s.warm.withRegionCache, false); // one warm launch without the cache
+  assert.equal(s.cold.withRegionCache, false);
+  assert.equal(summarizeAot([{ run: 1, cold: {}, warm: {} }]), null); // an engine without P7
 });

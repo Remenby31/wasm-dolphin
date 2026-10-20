@@ -65,7 +65,7 @@ export function trunkSide(r, trunk, { config = null } = {}) {
   const sides = servedSides(r);
   const onTrunk = (s) => s && s.dirty === false && typeof s.commit === "string" && trunk.has(s.commit);
   const order = r.kind === "race-perf" ? ["candidate", "baseline"] : ["candidate"];
-  const fits = (n) => !config || r.kind !== "race-perf" || (config === "aot") === sideHasAot(r.json, n);
+  const fits = (n) => !config || !["race-perf", "ttff"].includes(r.kind) || (config === "aot") === (r.kind === "ttff" ? ttffHasAot(r.json) : sideHasAot(r.json, n));
   const side = order.find((n) => onTrunk(sides[n]) && fits(n));
   return side ? { side, commit: sides[side].commit } : null;
 }
@@ -91,6 +91,14 @@ export function sideHasAot(j, side) {
   const asked = new URLSearchParams(String((side === "baseline" ? j.baselineQuery ?? j.query : j.query) ?? "")).get("aot") === "1";
   const why = side === "baseline" ? j.baselineP4Why : j.p4Why;
   return asked && !/no DolphinWeb_JitRegionStats|engine without validationReadJitRegionStats/.test(String(why ?? ""));
+}
+
+// A TTFF run with the recompiler: aot=1 in its query, unless every launch saw
+// it inactive (a core without it, or switched off).
+export function ttffHasAot(j) {
+  const asked = new URLSearchParams(String(j.query ?? "")).get("aot") === "1";
+  const states = [j.aot?.cold?.states, j.aot?.warm?.states].flat().filter((x) => x !== undefined);
+  return asked && !(states.length && states.every((st) => st == null || st === "disabled" || st === "unsupported"));
 }
 
 // The switches a race-perf side booted with (its own query: --baseline-query).
@@ -141,8 +149,11 @@ export const KPI_ROWS = [
   { id: "aotcompilerMemory", group: "Garde-fous", label: "Surcoût mémoire aotcompiler", target: 150, unit: "Mo", better: "lower", from: "manual" },
   { id: "optimisationMs", group: "Expérience joueur", label: "Durée d'optimisation au 1er lancement", target: 60000, unit: "ms", better: "lower", from: "first-launch", read: (j) => j.p7?.durationMs ?? null, why: (j) => j.p7Why ?? null, failures: (j) => (j.p7?.failedFirst ?? []).map((f) => `run ${f.run} : ${f.why}`) },
   { id: "secondLaunchRecompiled", group: "Expérience joueur", label: "Régions recompilées au 2e lancement", target: 0, unit: "", better: "zero", from: "first-launch", read: (j) => j.p7?.secondLaunchCompiled ?? null, why: (j) => j.p7Why ?? null, failures: (j) => [...(j.p7?.failedFirst ?? []), ...(j.p7?.failedSecond ?? [])].map((f) => `run ${f.run} : ${f.why}`) },
-  { id: "ttffCold", group: "Expérience joueur", label: "Time-to-first-frame, à froid", target: 10000, unit: "ms", better: "lower", from: "ttff", read: (j) => med(j.cold?.firstContentMs), why: (j) => ttffWhy(j, "cold"), failures: (j) => launchFailures(j.cold) },
-  { id: "ttffWarm", group: "Expérience joueur", label: "Time-to-first-frame, à chaud", target: 10000, unit: "ms", better: "lower", from: "ttff", read: (j) => med(j.warm?.firstContentMs), why: (j) => ttffWhy(j, "warm"), failures: (j) => launchFailures(j.warm) }
+  { id: "ttffCold", group: "Expérience joueur", label: "Time-to-first-frame, à froid, défaut", target: 10000, unit: "ms", better: "lower", from: "ttff", config: "default", read: (j) => med(j.cold?.firstContentMs), why: (j) => ttffWhy(j, "cold"), failures: (j) => launchFailures(j.cold) },
+  { id: "ttffWarm", group: "Expérience joueur", label: "Time-to-first-frame, à chaud, défaut", target: 10000, unit: "ms", better: "lower", from: "ttff", config: "default", read: (j) => med(j.warm?.firstContentMs), why: (j) => ttffWhy(j, "warm"), failures: (j) => launchFailures(j.warm) },
+  { id: "ttffColdAot", group: "Expérience joueur", label: "Time-to-first-frame, à froid, aot=1 (hors statut global)", target: 10000, unit: "ms", better: "lower", from: "ttff", config: "aot", counted: false, read: (j) => med(j.cold?.firstContentMs), failures: (j) => launchFailures(j.cold) },
+  // The second launch counts as such only with the region cache installed at boot.
+  { id: "ttffWarmAot", group: "Expérience joueur", label: "Time-to-first-frame, 2e lancement, aot=1 (avec cache de régions, hors statut global)", target: 10000, unit: "ms", better: "lower", from: "ttff", config: "aot", counted: false, read: (j) => med(j.warm?.firstContentMs), detail: (j) => (j.aot?.warm?.withRegionCache ? `régions installées au boot : ${j.aot.warm.regionsInstalled.join(", ")}` : "SANS cache de régions : pas un vrai 2e lancement"), failures: (j) => launchFailures(j.warm) },
 ];
 
 export function meets(row, value) {
@@ -175,7 +186,7 @@ export function kpiTable(results, manual = {}, { trunk = new Set(), accept = { "
     const refused = ofKinds.length - all.length;
     const onTrunk = all.map((r) => ({ r, t: trunkSide(r, trunk, { config: row.config }) })).filter((x) => x.t).sort((a, b) => resultTime(b.r) - resultTime(a.r));
     if (!onTrunk.length && row.config && all.some((r) => trunkSide(r, trunk))) {
-      return { ...base, value: null, status: "n/a", nature: "n/a", why: `aucune race-perf ${row.config === "aot" ? "avec aot=1" : "par défaut (sans aot=1)"} sur trunk` };
+      return { ...base, value: null, status: "n/a", nature: "n/a", why: `aucune ${kinds.join(" / ")} ${row.config === "aot" ? "avec aot=1" : "par défaut (sans aot=1)"} sur trunk` };
     }
     if (!onTrunk.length) return { ...base, value: null, status: "n/a", nature: "n/a", why: `aucun résultat ${kinds.join(" / ")} sur un commit propre de trunk (${all.length} hors trunk ignoré(s)${refused ? `, ${refused} hors règle ignoré(s) : Chrome non standard ou mesure de jour, max-load > ${ABSOLUTE_MAX_LOAD}` : ""})` };
     const { r, t } = onTrunk[0];
