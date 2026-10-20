@@ -467,3 +467,26 @@ test("ttff: the optimisation as each launch saw it, and whether the warm launch 
   assert.equal(s.cold.withRegionCache, false);
   assert.equal(summarizeAot([{ run: 1, cold: {}, warm: {} }]), null); // an engine without P7
 });
+
+test("ttff memory guard: RSS per process type of one profile, and the reason a cut launch gives", async () => {
+  const { parseRssForProfile } = await import("../harness/lib/system.mjs");
+  const { memoryCutReason } = await import("../harness/lib/ttff.mjs");
+  const ps = [
+    "  20130 7614464 /Applications/Chrome --user-data-dir=/tmp/gc-harness-ttff-ab12",
+    "  20147 2199552 /Applications/Chrome Helper (Renderer) --type=renderer --user-data-dir=/tmp/gc-harness-ttff-ab12",
+    "  20138  158720 /Applications/Chrome Helper (GPU) --type=gpu-process --user-data-dir=/tmp/gc-harness-ttff-ab12",
+    "  20139  105472 /Applications/Chrome Helper --type=utility --utility-sub-type=network.mojom.NetworkService --user-data-dir=/tmp/gc-harness-ttff-ab12",
+    "  99999 9999999 /Applications/Chrome --user-data-dir=/tmp/someone-else"
+  ].join("\n");
+  const rss = parseRssForProfile(ps, "/tmp/gc-harness-ttff-ab12");
+  assert.deepEqual(rss.byType, { browser: 7436, renderer: 2148, "gpu-process": 155, "utility:network.mojom.NetworkService": 103 });
+  assert.equal(rss.totalMB, 9842);
+  assert.equal(memoryCutReason(rss, 9000), "cut: Chrome at 9842 MB > 9000 MB (browser 7436 MB, renderer 2148 MB, gpu-process 155 MB)");
+  // In the KPI table, a cut second launch is a failure with that reason.
+  const ttff = { kind: "ttff", file: "t", json: { probe: "ttff", at: "2026-10-21T01:10:00Z", query: "video=wgpu&aot=1", served: served("T1"),
+    cold: { firstContentMs: { median: 2755 }, failed: [] }, warm: { firstContentMs: { median: null }, failed: [{ run: 1, error: memoryCutReason(rss, 9000) }] },
+    aot: { cold: { states: ["running"] }, warm: null } } };
+  const row = kpiTable([ttff], {}, { trunk: TRUNK }).find((r) => r.id === "ttffWarmAot");
+  assert.equal(row.status, "KO");
+  assert.match(row.why, /run 1 : cut: Chrome at 9842 MB > 9000 MB \(browser 7436 MB/);
+});
