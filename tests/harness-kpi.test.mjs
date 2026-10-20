@@ -214,9 +214,9 @@ test("P7 progress: n/a until the engine has it, then duration and second launch,
 // Results as kpi-report hands them over: trunk = {T1, T2}, B = a branch.
 const TRUNK = new Set(["T1", "T2"]);
 const served = (commit, dirty = false) => ({ commit, dirty, snapshot: "x", files: 1 });
-const race = (at, { speed = 80, side = "candidate", commit = "T1", dirty = false, failed = [], chrome = { path: "chrome stable", args: "" }, extra = {} } = {}) => ({
+const race = (at, { speed = 80, side = "candidate", commit = "T1", dirty = false, failed = [], chrome = { path: "chrome stable", args: "" }, maxLoad = 6, extra = {} } = {}) => ({
   kind: "race-perf", file: `race-${at}`,
-  json: { probe: "race-perf", at, chrome, failed, served: { [side]: served(commit, dirty) }, [side]: { cold: speed == null ? null : { speed: { median: speed }, presentP99Ms: { median: 30 } } }, ...extra }
+  json: { probe: "race-perf", at, chrome, maxLoad, failed, served: { [side]: served(commit, dirty) }, [side]: { cold: speed == null ? null : { speed: { median: speed }, presentP99Ms: { median: 30 } } }, ...extra }
 });
 
 test("KPI: only clean trunk results count, one result per row, shown with its commit", () => {
@@ -276,7 +276,7 @@ test("KPI: failed runs make the row KO with the reasons, whatever the median", (
 });
 
 test("KPI: trunk's side of an A/B, identities from the result or the files next to it", () => {
-  const ab = { kind: "race-perf", file: "ab", json: { at: "2026-10-19T10:00:00Z", state: "s", query: "q", change: null, candidate: { cold: { speed: { median: 81 } } }, baseline: { cold: { speed: { median: 79 } } } },
+  const ab = { kind: "race-perf", file: "ab", json: { at: "2026-10-19T10:00:00Z", state: "s", query: "q", maxLoad: 6, change: null, candidate: { cold: { speed: { median: 81 } } }, baseline: { cold: { speed: { median: 79 } } } },
     extra: { runs: [{ candidate: { served: served("B", true) }, baseline: { served: served("T2") } }, { candidate: { served: served("B", true) }, baseline: { served: served("T2") } }] } };
   assert.deepEqual(trunkSide(ab, TRUNK), { side: "baseline", commit: "T2" });
   const row = kpiTable([ab], {}, { trunk: TRUNK }).find((r) => r.id === "macSpeed");
@@ -341,7 +341,7 @@ test("KPI: the region cycle share counts only outside idle skip", () => {
 
 test("KPI: a candidate column beside trunk, never in its place", (t) => {
   // An A/B: trunk as baseline (clean T1), a PR head as candidate (dirty B, aot=1).
-  const ab = { kind: "race-perf", file: "ab", json: { probe: "race-perf", at: "2026-10-20T03:11:00Z", query: "video=wgpu&wasmjit=1&aot=1&metrics=1", chrome: { path: "chrome stable", args: "" }, failed: [],
+  const ab = { kind: "race-perf", file: "ab", json: { probe: "race-perf", at: "2026-10-20T03:11:00Z", query: "video=wgpu&wasmjit=1&aot=1&metrics=1", maxLoad: 6, chrome: { path: "chrome stable", args: "" }, failed: [],
     sides: { candidate: "/x/wt-jit-0074", baseline: "/x/wt-jit-trunk" }, served: { candidate: served("B", true), baseline: served("T1") },
     candidate: { cold: { speed: { median: 95.8 }, presentP99Ms: { median: 27 } } }, baseline: { cold: { speed: { median: 83.3 }, presentP99Ms: { median: 27.2 } } },
     p4: { regionCycleShare: 0.93, regionTimeShare: 0.33, dispatchTimeShare: 0.22, cycleBasis: "outside idle skip" }, baselineP4: null, baselineP4Why: "core has no DolphinWeb_JitRegionStats" } };
@@ -357,7 +357,7 @@ test("KPI: a candidate column beside trunk, never in its place", (t) => {
   assert.equal(c.values.ttffCold, undefined); // only the rows race-perf feeds
   const md = kpiMarkdown(rows, { at: "T", candidate: c });
   assert.match(md, /\| Vitesse course, Mac M4 Pro \| 83\.3 % \|.*\| 95\.8 % \(KO\) \|/);
-  assert.match(md, /Colonne « Candidat » : `P4 \(#43\)` \(aot=1&wasmjit=1\), `ab` @ B avec modifications locales/);
+  assert.match(md, /Colonne « Candidat » : `P4 \(#43\)` \(aot=1&wasmjit=1\), max-load 6, `ab` @ B avec modifications locales/);
   assert.doesNotMatch(kpiMarkdown(rows, { at: "T" }), /Candidat/);
 
   const root = mkdtempSync(path.join(os.tmpdir(), "kpi-candidate-test-"));
@@ -388,4 +388,21 @@ test("KPI report: a harness/results moved behind a symbolic link is still read, 
   assert.deepEqual(viaLink.map((r) => r.file), ["wt-x/harness/results/fuzz-1/fuzz.json"]);
   // The link and its target both as sources: one result.
   assert.equal(loadResults([path.join(root, "wt-x", "harness", "results"), path.join(root, "build.noindex")], { root }).length, 1);
+});
+
+test("KPI: absolute race rows come from night measures (max-load 6 at most)", () => {
+  const night = race("2026-10-20T03:11:00Z", { speed: 83.3, maxLoad: 6 });
+  const day = race("2026-10-20T13:11:00Z", { speed: 80.2, maxLoad: 8 }); // newer, but a day pair
+  const unknown = race("2026-10-20T14:00:00Z", { speed: 70, maxLoad: null }); // its limit unknown
+  const rows = Object.fromEntries(kpiTable([night, day, unknown], {}, { trunk: TRUNK }).map((r) => [r.id, r]));
+  assert.equal(rows.macSpeed.value, 83.3);
+  assert.equal(rows.macSpeed.source, night.file);
+  assert.equal(rows.raceFrameP99.source, night.file);
+  const none = kpiTable([day], {}, { trunk: TRUNK }).find((r) => r.id === "macSpeed");
+  assert.equal(none.status, "n/a");
+  assert.match(none.why, /1 hors règle ignoré\(s\) : Chrome non standard ou mesure de jour, max-load > 6/);
+  // The candidate column is relative: a day pair is shown, with its limit and note.
+  const c = candidateColumn({ ...day, json: { ...day.json, sides: { candidate: "/x/wt-p4" } } }, { label: "P4 (#43)", note: "jour, relatif" });
+  assert.equal(c.values.macSpeed.value, 80.2);
+  assert.match(kpiMarkdown(kpiTable([night], {}, { trunk: TRUNK }), { at: "T", candidate: c }), /Colonne « Candidat » : `P4 \(#43\)`, jour, relatif, max-load 8,/);
 });
