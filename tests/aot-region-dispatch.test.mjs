@@ -7,6 +7,7 @@
 // invalidating covered code drops them. Skipped with a core before 0075.
 
 import assert from "node:assert/strict";
+import { createHash } from "node:crypto";
 import test from "node:test";
 
 import { imageFromDol } from "../src/aot-image.js";
@@ -152,4 +153,62 @@ test("after a cache clear, regions are hashed again: changed code is dropped, un
   const reference = runCall(PROGRAM.labels.main, { regions: false });
   const got = runCall(PROGRAM.labels.main, { regions: true });
   assert.deepEqual(got.state, reference.state);
+});
+
+// jitoffthread=1 (the production default): the CPU thread never compiles a
+// region module cold. It posts a compile request under its bytes' key and
+// installs the region once the worker set the ready byte, so its own compile
+// is a hit in V8's native module cache; meanwhile the block JIT runs the code.
+function withOffThreadCompile(fn) {
+  const m = core.module;
+  const saved = Object.getOwnPropertyDescriptor(globalThis, "self");
+  const posted = [];
+  Object.defineProperty(globalThis, "self", { value: { postMessage: (msg) => posted.push(msg) }, configurable: true, writable: true });
+  const savedCache = m._dolphinJitCache;
+  m._dolphinJitCache = new Map(); // the pthread's module map (pre-js), empty
+  m._SetPpcWasmJitOffThread(1);
+  try {
+    return fn(posted.filter.bind(posted, (msg) => msg.type === "dolphin-jit-compile-request"));
+  } finally {
+    m._SetPpcWasmJitOffThread(0);
+    m._dolphinJitCache = savedCache;
+    globalThis._dolphinJitInflight?.clear();
+    if (saved) Object.defineProperty(globalThis, "self", saved);
+    else delete globalThis.self;
+  }
+}
+const offThreadSkip = skip || (!core?.has("SetPpcWasmJitOffThread") && "core without jitoffthread");
+
+test("with jitoffthread=1 a region installs once the worker marked its module ready", { skip: offThreadSkip }, () => {
+  withOffThreadCompile((requests) => {
+    const plan = setup();
+    core.setRegionsEnabled(true);
+    const before = core.regionCount();
+    const entries = queueAll(plan);
+    core.serviceRegions();
+    core.serviceRegions();
+    assert.equal(core.regionCount(), before, "nothing installed before the worker answers");
+    assert.ok(requests().length >= 1, "a compile request per region");
+    for (const r of requests()) {
+      assert.equal(r.key, `wasm-block-sha256-v1:${createHash("sha256").update(r.bytes).digest("hex")}`, "the key names the bytes");
+      Atomics.store(core.module.HEAPU8, r.readyPtr + r.readySlot, 1);
+    }
+    core.serviceRegions();
+    assert.equal(core.regionCount(), before + entries);
+    const reference = runCall(PROGRAM.labels.main, { regions: false });
+    const got = runCall(PROGRAM.labels.main, { regions: true });
+    assert.ok(got.ran >= 1);
+    assert.deepEqual(got.state, reference.state);
+  });
+});
+
+test("with jitoffthread=1 a request never answered falls back to a synchronous compile", { skip: offThreadSkip }, () => {
+  withOffThreadCompile(() => {
+    const plan = setup();
+    core.setRegionsEnabled(true);
+    const before = core.regionCount();
+    const entries = queueAll(plan);
+    for (let slice = 0; slice < 300 && core.regionCount() === before; slice++) core.serviceRegions();
+    assert.equal(core.regionCount(), before + entries);
+  });
 });

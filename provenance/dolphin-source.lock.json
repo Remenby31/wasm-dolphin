@@ -25,7 +25,7 @@
       "commit": "01e0577914a75a2569c846778c2f93aa8e6feddd"
     }
   },
-  "patchSeriesSha256": "84898e71016ac90def3bc5d393f757f71859e3fb8448dddaf2fe59dce2fc09de",
+  "patchSeriesSha256": "770200d540c561bb3d950139678ccbc2f66862689a931de1ba589da6efe38edf",
   "patches": [
     {
       "order": 1,
@@ -600,8 +600,8 @@
       "cwd": ".",
       "hashMode": "lf-normalized",
       "path": "patches/dolphin-wasm/snapshot/0075-region-translator.patch",
-      "size": 68840,
-      "sha256": "05e7b441f512e26978271454252da19544023d4d2b29b0b6b316044e66d6992b"
+      "size": 74875,
+      "sha256": "7ae80598bc4576cc6673906dcc237a9a5de1ae41181125a372c47415f91b57f6"
     },
     {
       "order": 73,

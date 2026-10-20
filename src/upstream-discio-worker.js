@@ -6987,7 +6987,15 @@ export async function prepareAotFirstLaunch(file, {
       return typeof Worker === "function" ? planDiscInWorker(file, { profile }) : planDisc(fileReader(file), { profile });
     },
     compile: precompileAotRegion,
-    install: (region) => queueAotRegion(module, region),
+    // Queued once the module is also kept under its bytes' key: the CPU
+    // thread's compile request for it then resolves from this live Module.
+    install: (region) => {
+      const mod = dolphinJitCacheMap.get(region.key);
+      const keyed = mod ? regionBlockCacheKey(region.bytes).then((k) => {
+        if (dolphinJitCacheMap.size < DOLPHIN_JIT_CACHE_MAX) dolphinJitCacheMap.set(k, mod);
+      }) : Promise.resolve();
+      keyed.catch(() => {}).then(() => queueAotRegion(module, region));
+    },
     retain: (key, mod, bytes) => {
       // Also under the key the CPU thread's compile looks up (the SHA-256 of
       // the bytes, as for a block): its install of the region is then a hit
@@ -7043,8 +7051,10 @@ async function regionBlockCacheKey(bytes) {
   const digest = new Uint8Array(await crypto.subtle.digest("SHA-256", bytes));
   return "wasm-block-sha256-v1:" + Array.from(digest, (b) => b.toString(16).padStart(2, "0")).join("");
 }
-// Hands a region module to the core's dispatcher: the CPU thread compiles it
-// at its next slice boundary and runs it for its entries (P4, patch 0075).
+// Hands a region module to the core's dispatcher (P4, patch 0075). With
+// jitoffthread=1 the CPU thread asks for it with a compile request (answered
+// from the Module kept alive here) and compiles it once its ready byte is set,
+// a hit in V8's native module cache; it then runs it for its entries.
 // members: [{ ranges, hash }] per function, the plan's FNV-1a 64 of its code:
 // the core installs nothing whose code changed since the translation.
 function queueAotRegion(module, { bytes, entries, members }) {
@@ -7172,9 +7182,9 @@ export function precompileDolphinJitModule(key, input) {
   if (bytes.buffer instanceof SharedArrayBuffer) bytes = bytes.slice();
   const outcome = (async () => {
     // A block key names the SHA-256 of its bytes: one that does not match is
-    // never cached under that name (as for every other cache entry). Keys of
-    // any other schema are refused until regions (P4) define how theirs are
-    // checked.
+    // never cached under that name (as for every other cache entry). Region
+    // modules (P4) are asked for under the same schema; keys of any other
+    // schema are refused.
     const blockKey = key.startsWith(`${JIT_CACHE_ENTRY_KEY_SCHEMA}:`);
     if (!blockKey) return { reason: "bad-key" };
     if (!(await verifyCanonicalWasmBlockKey(key, bytes))) {
