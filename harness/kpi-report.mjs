@@ -20,7 +20,7 @@
 // holds what no probe measures yet:
 // { "<kpi id>": { "value": <number>, "source": "…", "at": "…", "note": "…" } }.
 import { execFileSync } from "node:child_process";
-import { existsSync, mkdirSync, readdirSync, readFileSync, statSync, writeFileSync } from "node:fs";
+import { existsSync, mkdirSync, readdirSync, readFileSync, realpathSync, statSync, writeFileSync } from "node:fs";
 import path from "node:path";
 import { pathToFileURL } from "node:url";
 import { parseArgs } from "node:util";
@@ -74,9 +74,17 @@ function extraOf(kind, json, file) {
   return null;
 }
 
+// A source given as a symbolic link (a worktree whose harness/results was
+// moved to build.noindex, out of Spotlight's way) is read through it; links
+// below a source are not followed (no loop). The same file reached twice
+// (the link and its target both given as sources) counts once.
+const realPath = (p) => { try { return realpathSync(p); } catch { return p; } };
+
 export function loadResults(dirs, { root = PROGRAM_ROOT } = {}) {
   const results = [];
-  for (const file of [...new Set(dirs.flatMap((d) => findResults(d)))]) {
+  const byReal = new Map();
+  for (const file of dirs.flatMap((d) => findResults(d))) if (!byReal.has(realPath(file))) byReal.set(realPath(file), file);
+  for (const file of byReal.values()) {
     const json = readJson(file);
     const kind = classify(json, file);
     if (kind) results.push({ kind, json, file: path.relative(root, file), mtimeMs: statSync(file).mtimeMs, extra: extraOf(kind, json, file) });

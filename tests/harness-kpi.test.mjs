@@ -2,7 +2,7 @@
 // SPDX-License-Identifier: MIT
 
 import assert from "node:assert/strict";
-import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
+import { mkdirSync, mkdtempSync, rmSync, symlinkSync, writeFileSync } from "node:fs";
 import os from "node:os";
 import path from "node:path";
 import test from "node:test";
@@ -372,4 +372,20 @@ test("KPI: a candidate column beside trunk, never in its place", (t) => {
   assert.match(readCandidate({}, path.join(root, "candidate.json")).error, /missing or unreadable/);
   writeFileSync(path.join(root, "broken.json"), "{ not json");
   assert.match(readCandidate({ candidate: path.join(root, "broken.json") }).error, /missing or unreadable/);
+});
+
+test("KPI report: a harness/results moved behind a symbolic link is still read, once", (t) => {
+  const root = mkdtempSync(path.join(os.tmpdir(), "kpi-report-link-test-"));
+  t.after(() => rmSync(root, { recursive: true, force: true }));
+  const moved = path.join(root, "build.noindex", "wt-x", "harness", "results");
+  mkdirSync(path.join(moved, "fuzz-1"), { recursive: true });
+  writeFileSync(path.join(moved, "fuzz-1", "fuzz.json"), JSON.stringify({ interpQuery: "i", jitQuery: "j", results: [], served: served("T1") }));
+  mkdirSync(path.join(root, "wt-x", "harness"), { recursive: true });
+  symlinkSync(moved, path.join(root, "wt-x", "harness", "results"));
+  // A link below a source is not followed: no loop.
+  symlinkSync(moved, path.join(moved, "fuzz-1", "loop"));
+  const viaLink = loadResults([path.join(root, "wt-x", "harness", "results")], { root });
+  assert.deepEqual(viaLink.map((r) => r.file), ["wt-x/harness/results/fuzz-1/fuzz.json"]);
+  // The link and its target both as sources: one result.
+  assert.equal(loadResults([path.join(root, "wt-x", "harness", "results"), path.join(root, "build.noindex")], { root }).length, 1);
 });
