@@ -23,8 +23,17 @@
 // - releasing moves the directory aside before removing it (never emptied in
 //   place), and the guard is released the same way, each only when it still
 //   carries this process's nonce;
+// - a takeover that moved a live lock after all (an older harness, whose
+//   takeover is unguarded, removed the stale one and made a fresh one in
+//   between) puts it back only onto nothing, else leaves it aside as stale,
+//   and never aborts; a contender whose own owner is in .perf-lock holds it,
+//   it never waits on itself;
 // - leftovers of a process killed mid-step (.stale-, .released-, moved
-//   guards) are swept once old.
+//   guards) carry their time in their name and are swept once 60 s old.
+// Left: a takeover guard holder suspended past the abandon delay may lose its
+// guard between its last check and its rename (narrowed, not closed); and
+// older harnesses' own unguarded takeovers race among themselves until every
+// checkout has this code.
 import { randomBytes } from "node:crypto";
 import { existsSync, mkdirSync, readdirSync, readFileSync, renameSync, rmSync, statSync, unlinkSync, writeFileSync } from "node:fs";
 import os from "node:os";
@@ -61,7 +70,10 @@ const inode = (dir) => {
   try { return statSync(dir).ino; } catch { return null; }
 };
 
-const unique = (base, tag) => `${base}.${tag}-${process.pid}-${randomBytes(4).toString("hex")}`;
+// Names of moved locks and guards carry the time they were moved: a rename
+// keeps the directory's mtime, so a lock held for minutes would look old the
+// instant it is moved aside (the sweep would remove it mid-release).
+const unique = (base, tag) => `${base}.${tag}-${Date.now()}-${process.pid}-${randomBytes(4).toString("hex")}`;
 
 const newOwner = (name) => ({ name, pid: process.pid, host: os.hostname(), harness: true, startedAt: new Date().toISOString(), nonce: randomBytes(6).toString("hex") });
 
@@ -102,15 +114,19 @@ function claim(dir, owner) {
     if (["ENOENT", "EINVAL", "ENOTDIR"].includes(e.code)) return "lost";
     throw e;
   }
-  return inode(dir) === ino && readLockOwner(dir)?.nonce === owner.nonce ? "held" : "lost";
+  // Our owner in .perf-lock is ours, whatever happened meanwhile (an older
+  // harness may have moved the directory and put it back).
+  return readLockOwner(dir)?.nonce === owner.nonce ? "held" : "lost";
 }
 
 // Move `dir` aside under a unique name, and remove it if `isMeant(moved)`
-// says it is the one meant; otherwise put it back. True when removed. A
-// removal never empties `dir` in place. A guard that cannot be put back (a
-// newer one is there) is left aside for the sweep; a lock that cannot be
-// put back is an error.
-function removeIf(dir, tag, isMeant, { mustPutBack = true } = {}) {
+// says it is the one meant. True when removed. A removal never empties `dir`
+// in place. What was moved by mistake (a live lock or guard that replaced
+// the one judged, possible while older harnesses take over without the
+// guard) is put back only if nothing took its place; otherwise it stays
+// aside, as a stale lock would, for the sweep. Never throws: the caller
+// looks again.
+function removeIf(dir, tag, isMeant, { log = () => {} } = {}) {
   const aside = unique(dir, tag);
   try {
     renameSync(dir, aside);
@@ -122,12 +138,16 @@ function removeIf(dir, tag, isMeant, { mustPutBack = true } = {}) {
     rmSync(aside, { recursive: true, force: true });
     return true;
   }
-  try {
-    renameSync(aside, dir);
-  } catch (e) {
-    if (!mustPutBack) return false;
-    throw new Error(`perf lock: moved ${path.basename(dir)} to ${aside} by mistake and could not put it back (${e.code}); fix by hand`);
+  // Put back only onto nothing: a rename onto an empty directory would
+  // replace a lock being taken by an older harness.
+  if (!existsSync(dir)) {
+    try {
+      renameSync(aside, dir);
+      log(`moved a live ${path.basename(dir)} by mistake; put it back`);
+      return false;
+    } catch {}
   }
+  log(`moved a live ${path.basename(dir)} by mistake and something took its place; left aside as ${path.basename(aside)}`);
   return false;
 }
 
@@ -143,7 +163,7 @@ function takeOver(dir, judged, { orphanSec, log }) {
     if (ageSec(guard) < TAKEOVER_ABANDONED_SEC) return false;
     // Abandoned: removed only if what was moved is still that old guard
     // (a fresh one made meanwhile is put back).
-    removeIf(guard, "takeover-abandoned", (moved) => ageSec(moved) >= TAKEOVER_ABANDONED_SEC, { mustPutBack: false });
+    removeIf(guard, "takeover-abandoned", (moved) => ageSec(moved) >= TAKEOVER_ABANDONED_SEC, { log });
     return true;
   }
   try {
@@ -151,16 +171,18 @@ function takeOver(dir, judged, { orphanSec, log }) {
     const now = readLockOwner(dir);
     const still = judged ? JSON.stringify(now) === JSON.stringify(judged) : now == null && ageSec(dir) >= orphanSec;
     if (!still) return true; // replaced or claimed meanwhile: judged again by the caller
-    const moved = removeIf(dir, "stale", (aside) => {
+    // A guard taken from us while we were suspended (past the abandon delay):
+    // stop before moving anything.
+    if (readLockOwner(guard)?.nonce !== me.nonce) return true;
+    removeIf(dir, "stale", (aside) => {
       const owner = readLockOwner(aside);
       return judged ? JSON.stringify(owner) === JSON.stringify(judged) : owner == null;
-    });
-    if (!moved) log("a fresh lock replaced the stale one meanwhile; put it back");
+    }, { log });
     return true;
   } finally {
     // Our guard only: one that is not ours any more (we hung past the
     // abandon delay and another contender cleared it) is put back.
-    removeIf(guard, "takeover-done", (moved) => readLockOwner(moved)?.nonce === me.nonce, { mustPutBack: false });
+    removeIf(guard, "takeover-done", (moved) => readLockOwner(moved)?.nonce === me.nonce, { log });
   }
 }
 
@@ -171,9 +193,13 @@ function sweepLeftovers(dir) {
   let names = [];
   try { names = readdirSync(parent); } catch { return; }
   for (const n of names) {
-    if (!prefixes.some((p) => n.startsWith(p))) continue;
-    const p = path.join(parent, n);
-    if (ageSec(p) >= LEFTOVER_SEC) rmSync(p, { recursive: true, force: true });
+    const prefix = prefixes.find((p) => n.startsWith(p));
+    if (!prefix) continue;
+    // Age from the time in the name; an older harness's name (pid first, no
+    // time) falls back to the mtime.
+    const at = Number(n.slice(prefix.length).split("-")[0]);
+    const age = at > 1e12 ? (Date.now() - at) / 1000 : ageSec(path.join(parent, n));
+    if (age >= LEFTOVER_SEC) rmSync(path.join(parent, n), { recursive: true, force: true });
   }
 }
 
@@ -187,12 +213,17 @@ export async function acquirePerfLock({
   for (const [k, v] of Object.entries({ waitSec, pollSec, orphanSec })) if (!Number.isFinite(v) || v < 0) throw new Error(`perf lock: ${k} must be a number ≥ 0, not ${v}`);
   const end = Date.now() + waitSec * 1000;
   sweepLeftovers(dir);
+  const ours = new Map(); // nonce → owner, of every attempt
   for (;;) {
     const owner = newOwner(name);
+    ours.set(owner.nonce, owner);
     const got = claim(dir, owner);
     if (got === "held") return release(dir, owner);
     if (got === "lost") continue; // our directory was moved away before it was ours: try again
     const holder = readLockOwner(dir);
+    // An earlier attempt of ours that an older harness put back after we
+    // gave it up: it is ours, never wait on ourselves.
+    if (holder && ours.has(holder.nonce)) return release(dir, ours.get(holder.nonce));
     const stale = staleReason(dir, holder, orphanSec);
     if (stale) {
       log(`perf lock is stale (${stale}): taking it over`);
@@ -217,7 +248,9 @@ function release(dir, owner) {
     // Only our own lock: never remove one somebody else took meanwhile.
     const now = readLockOwner(dir);
     if (now?.pid !== owner.pid || now?.nonce !== owner.nonce) return;
-    removeIf(dir, "released", (moved) => readLockOwner(moved)?.nonce === owner.nonce);
+    try {
+      removeIf(dir, "released", (moved) => readLockOwner(moved)?.nonce === owner.nonce);
+    } catch {} // released anyway: never throw from an exit path
   };
   // SIGHUP: the SSH session that started the run closed.
   const onSignal = (sig) => { free(); process.exit({ SIGINT: 130, SIGTERM: 143, SIGHUP: 129 }[sig] ?? 1); };

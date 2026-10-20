@@ -193,6 +193,52 @@ test("perf lock: older and current harnesses exclude each other", async (t) => {
   assert.equal(existsSync(dir), false);
 });
 
+// Review of #47 (round 2): with older harnesses AND holders killed (stale
+// locks to take over), a takeover could move a live lock and abort, or a
+// contender wait on its own lock.
+test("perf lock: older and current harnesses with holders killed mid-hold", async (t) => {
+  const dir = lockDir(t);
+  const holding = path.join(path.dirname(dir), "holding");
+  const lockLib = path.resolve(import.meta.dirname, "../harness/lib/perf-lock.mjs");
+  const hold = `try { writeFileSync(${JSON.stringify(holding)}, "x", { flag: "wx" }); } catch { console.log("OVERLAP"); process.exit(2); }
+      await new Promise((r) => setTimeout(r, 2)); rmSync(${JSON.stringify(holding)});`;
+  const take = { current: `const release = await acquirePerfLock({ dir: ${JSON.stringify(dir)}, name: "new", waitSec: 120, pollSec: 0.005, orphanSec: 1 });`,
+    older: `for (;;) { try { mkdirSync(${JSON.stringify(dir)}); break; } catch (e) { if (e.code !== "EEXIST") throw e; await new Promise((r) => setTimeout(r, 5)); } }
+      writeFileSync(${JSON.stringify(path.join(dir, "owner"))}, JSON.stringify({ name: "old", pid: process.pid, host: ${JSON.stringify(os.hostname())}, harness: true, nonce: String(Math.random()) }));
+      const release = () => rmSync(${JSON.stringify(dir)}, { recursive: true, force: true });` };
+  const head = `import { acquirePerfLock } from ${JSON.stringify(lockLib)}; import { mkdirSync, writeFileSync, rmSync } from "node:fs";`;
+  const worker = (kind) => `${head} for (let i = 0; i < 12; i++) { ${take[kind]} ${hold} release(); } console.log("ok");`;
+  // A holder that never lets go: killed (SIGKILL) once it holds, its lock left stale.
+  const dying = (kind) => `${head} ${take[kind]} console.log("held"); setInterval(() => {}, 1000);`;
+  const run = (script, { killOnHeld = false } = {}) => new Promise((resolve) => {
+    const c = spawn(process.execPath, ["--input-type=module", "-e", script], { stdio: ["ignore", "pipe", "pipe"] });
+    let out = "", err = "";
+    c.stdout.on("data", (d) => { out += d; if (killOnHeld && out.includes("held")) c.kill("SIGKILL"); });
+    c.stderr.on("data", (d) => (err += d));
+    c.on("exit", (code, signal) => resolve(signal ? `killed:${out.trim()}` : `${code}:${out.trim()}${code ? ` ${err.split("\n")[0]}` : ""}`));
+  });
+  const workers = [...Array(4).fill("current"), ...Array(4).fill("older")].map((k) => run(worker(k)));
+  // Older harnesses here never take a stale lock over (the real ones do,
+  // unguarded, with races of their own, out of this test): a current harness
+  // passing by does, as on the machine, until every other contender is done
+  // (else the last stale lock is never taken over and the test hangs).
+  const dyings = (async () => {
+    const killed = [];
+    for (const kind of ["current", "older", "current", "older"]) {
+      await new Promise((r) => setTimeout(r, 40));
+      killed.push(await run(dying(kind), { killOnHeld: true }));
+    }
+    return killed;
+  })();
+  let done = false;
+  const all = Promise.all([Promise.all(workers), dyings]).finally(() => { done = true; });
+  const janitor = (async () => { while (!done) { await run(`${head} ${take.current} release(); console.log("ok");`); await new Promise((r) => setTimeout(r, 100)); } })();
+  const [results, killed] = await all;
+  await janitor;
+  assert.deepEqual(killed, Array(4).fill("killed:held"));
+  assert.deepEqual(results, Array(8).fill("0:ok"));
+});
+
 test("review #22: an ownerless lock is taken over only once it is old", async (t) => {
   const dir = lockDir(t);
   mkdirSync(dir); // a holder that died between mkdir and writing its owner
