@@ -140,3 +140,13 @@ The three P1s and the trivial P2s are fixed in #43; the rest is tracked here.
 - [ ] **One compiler worker**: blocks and regions not in the module map share a single worker, FIFO. Regions never queue there today (their live Module is in the map under their bytes' key), but a full map (49 152 entries) would send them behind every block. A second worker, or a priority lane for regions already hit, needs the client's watchdog and stats per worker: not trivial.
 - [ ] **Bimodal hitch bursts on main** (not P4, found while reviewing #37): in about one race-perf run in six, on main as on a candidate, single dropped frames (36–47 ms) every ~20 VI in two segments of the race savestate (viSinceLoad ~1370–1720 and ~1920–2090); the other runs have 0–2. Measures: `measures/jit-robustness/race-perf/p37-review-vs-main-1300` and `p37-hitches-1500` (`cold.hitchList`). Next: `--pcsample` restricted to those VI ranges, runs with and without a burst compared (after #43).
 - [ ] **Late ready signal on the last region** (pair 16:00, 2 runs of 6): the 143rd install, a 2.4 MB region, waits the full 5 s and is counted in `installFallbacks`, yet costs a V8 hit (1.5 ms): its ready byte came late or was cleared without a -4 on this side. Timestamp requests and marks to find what clears it.
+
+### From the final review of #43 (P2)
+
+- [ ] **Cold compile counted as Ready**: a ready byte set by another key of the slot, or a full module map, makes the CPU thread's compile of a region a cold one while `InstallPath::Ready` is recorded. Check the pthread's map before trusting the byte; count such installs apart.
+- [ ] **Budget escapes**: the first module of a slice and the fallback compile are never refused by the slice budget. Bound both (defer a module whose estimate alone exceeds the slice target to a slice with nothing else).
+- [ ] **Boot window on a first launch**: the 3 s window starts at the first install, which on a first launch (regions from the optimisation, minutes in) falls in the middle of play. Open it only for installs that come from the cache before the first image.
+- [ ] **Hand-over before boot races**: `retain` does not receive the bytes, so the region's byte key is registered by an async digest that may land after the pthread barrier. Pass the bytes (or the key) to `retain` and await it before the barrier.
+- [ ] **Modules kept for the session**: every region Module stays alive in discio's map (127 MB of wire bytes for MKDD) for the whole session. Release a region's Module once installed on every pthread, or cap by bytes.
+
+Order after #43 (Main, 2026-10-20): TTFF aot=1 vs off on main; the late ready signal; the FP analyses; the dispatch share (22 % of host time).
