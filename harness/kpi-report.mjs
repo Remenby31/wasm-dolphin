@@ -12,7 +12,8 @@
 //
 // Default sources: ../measures (local-only probes write there), this tree's
 // harness/results, and the harness/results of the sibling worktrees (the
-// agents' fuzz and gate runs). Each source is read four levels deep for
+// agents' fuzz and gate runs, archived under ../measures/worktree-archive-*
+// once a worktree is removed). Each source is read six levels deep for
 // summary.json, gate.json and fuzz.json, classified by content. Only results
 // measured on a clean commit of origin/main's first-parent history count
 // (lib/kpi.mjs); fetch origin first for an up-to-date trunk. manual.json
@@ -31,7 +32,9 @@ const RESULT_FILES = new Set(["summary.json", "gate.json", "fuzz.json"]);
 const PROGRAM_ROOT = path.resolve(REPO_ROOT, "..");
 
 // Result files under `root`, up to `depth` directory levels below it.
-export function findResults(root, depth = 4) {
+// Six levels: the archived worktree results add two to a run's own
+// (measures/worktree-archive-<date>/<wt>/results/<run>/baseline/fuzz.json).
+export function findResults(root, depth = 6) {
   const out = [];
   const walk = (dir, left) => {
     let entries;

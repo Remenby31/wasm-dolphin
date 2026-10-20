@@ -302,11 +302,12 @@ test("KPI report: files classified by content; manual.json errors become reasons
   put("g/candidate/summary.json", { spec: { name: "ci-homebrew" }, results: [{ served: served("T1") }] });
   put("e/summary.json", { spec: { name: "freeze-loop" }, results: [] });
   put("p/summary.json", { probe: "ttff", locked: false }); // a --no-lock plumbing check
-  put("a/b/c/d/e/summary.json", { probe: "ttff" }); // too deep
+  put("a/b/c/d/e/f/g/summary.json", { probe: "ttff" }); // too deep
+  put("worktree-archive-20261020/wt-x/results/ab-1/baseline/fuzz.json", { interpQuery: "i", jitQuery: "j", results: [] }); // an archived worktree's run
   put("bad/summary.json", "{ not json");
-  assert.equal(findResults(root).length, 7);
+  assert.equal(findResults(root).length, 8);
   const results = loadResults([root], { root });
-  assert.deepEqual(results.map((r) => r.kind).sort(), ["freeze-loop", "fuzz", "gate", "race-perf"]);
+  assert.deepEqual(results.map((r) => r.kind).sort(), ["freeze-loop", "fuzz", "fuzz", "gate", "race-perf"]);
   assert.deepEqual(servedSides(results.find((r) => r.kind === "race-perf")).candidate, served("T1"));
   assert.deepEqual(servedSides(results.find((r) => r.kind === "gate")).candidate, served("T1"));
   assert.equal(classify({ probe: "first-launch" }), "first-launch");
