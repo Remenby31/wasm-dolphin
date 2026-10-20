@@ -64,7 +64,7 @@ import { acquirePerfLock } from "../lib/perf-lock.mjs";
 import { openSession, rebootSession } from "../lib/session.mjs";
 import { waitForLoad } from "../lib/env.mjs";
 import { describe, median, percentile, round } from "../lib/stats.mjs";
-import { coreStats, mergeTimeline, presentationStats } from "../lib/timeline.mjs";
+import { coreStats, hitchList, mergeTimeline, presentationStats } from "../lib/timeline.mjs";
 import { consistentRead, decodeRegionStats, poolStats, regionShares, topMisses } from "../lib/jit-region-stats.mjs";
 import { summarizePcSamples } from "../../src/harness-pc-sampler.js";
 
@@ -196,6 +196,8 @@ async function measure(session, o) {
       viIntervalMs: { p50: round(percentile(viMs, 50)), p99: round(percentile(viMs, 99)), max: round(viMs.length ? Math.max(...viMs) : null) },
       presentIntervalMs: { p50: round(pres.frameP50), p99: round(pres.frameP99), max: round(pres.frameMax) },
       hitchesPerMin: round(pres.hitchesPerMin),
+      // Where they happen (timeline.mjs): [ms into the window, interval ms, VI since load].
+      hitchList: hitchList(timeline, { origin: t0 }),
       coreprofXfbDtMaxMs: xfbDt ? Number(xfbDt[3]) : null,
       rendererThreads: threads,
       freezes: { core: core.freezes?.length ?? 0, present: pres.freezes.length },

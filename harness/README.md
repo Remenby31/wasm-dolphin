@@ -117,6 +117,11 @@ node harness/probes/race-perf.mjs --iso ../roms/<disc>.iso --state ../measures/h
   and need a counter in the core.
 - A local-only disc is refused when `CI` is set; its results go to
   `../measures/harness` (or `HARNESS_PRIVATE_OUT`), never into the repo.
+- Each run's window also lists its hitches (`cold.hitchList`, in `run<N>.json`):
+  `[ms into the window, interval ms, VI outputs since the savestate load]`,
+  the last being the place in the scene whatever the speed, so two runs or
+  two sides can be lined up; over 200 the longest are kept, in time order,
+  with `count`.
 - Region JIT counters (P4): off by default, the speed windows never carry
   them. With `--region-sample N`, a separate stats window of `--region-secs`
   (default 10) follows each speed window: it resets the core's

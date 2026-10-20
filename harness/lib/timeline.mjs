@@ -48,6 +48,25 @@ const gaps = (events) => events.slice(1).map((e, i) => ({ start: events[i].t, en
 
 // Presentation timing: every interval, freezes where the core kept producing
 // VI outputs while nothing was presented.
+// Every hitch of a window (a presentation interval over HITCH_MS), to see
+// whether two runs or two sides hitch at the same place: [ms since `origin`
+// (the window's start), interval ms, VI outputs since the savestate load at
+// the hitch's end (the place in the scene, the same whatever the speed; null
+// without a VI timeline)]. Over `cap`, the longest are kept, in time order,
+// and `count` says how many there were.
+export function hitchList(timeline, { origin = timeline.presents[0]?.t ?? 0, cap = 200 } = {}) {
+  const all = gaps(timeline.presents).map((g, i) => ({ ...g, vi: timeline.presents[i + 1].vi })).filter((g) => g.ms > HITCH_MS);
+  // VI outputs since boot minus since load: one offset for the whole window.
+  const v = timeline.vi.find((x) => Number.isFinite(x.sinceBoot) && Number.isFinite(x.sinceLoad));
+  const offset = v ? v.sinceBoot - v.sinceLoad : null;
+  const kept = all.length > cap ? [...all].sort((a, b) => b.ms - a.ms).slice(0, cap).sort((a, b) => a.end - b.end) : all;
+  return {
+    count: all.length,
+    truncated: all.length > kept.length,
+    hitches: kept.map((g) => [Math.round(g.end - origin), Math.round(g.ms * 10) / 10, offset != null && g.vi >= 0 ? g.vi - offset : null])
+  };
+}
+
 export function presentationStats(timeline) {
   const intervals = gaps(timeline.presents);
   const ms = intervals.map((g) => g.ms);
