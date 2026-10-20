@@ -99,8 +99,13 @@ node harness/probes/race-perf.mjs --iso ../roms/<disc>.iso --state ../measures/h
 - The shared perf lock (`~/projects/gc-web-emu/.perf-lock`, PROGRAM.md) is
   taken before the first launch and released on every exit, Ctrl-C
   included; `--lock-wait` bounds the wait (60 s polls). `harness/run ab`
-  takes it too. A stale lock (its harness process is gone, or no owner file
-  for 30 s) is taken over atomically: renamed aside, checked, then removed.
+  takes it too. The lock is published whole (a private directory with its
+  owner file, renamed to `.perf-lock`), and released by moving it aside
+  before removing it, so `.perf-lock` never exists without its owner. A
+  stale lock (its harness process is gone, or no owner file for 30 s) is
+  taken over by one contender at a time, under the `.perf-lock.takeover`
+  guard (abandoned after 10 s): judged again, renamed aside, checked, then
+  removed.
 - Each run checks the core it loaded (core-mismatch otherwise) and records
   its hash, again after the `--warm` reboot.
 - `--pcsample [ms]`: a worker of its own reads the guest PC in the shared
