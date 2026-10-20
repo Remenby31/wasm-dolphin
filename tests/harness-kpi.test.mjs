@@ -11,7 +11,7 @@ import { consistentRead, decodeRegionStats, DIAGNOSTICS, DIAGNOSTICS_BY_VERSION,
 import { p4Summary, regionRecord, summarizeP4 } from "../harness/probes/race-perf.mjs";
 import { launchTtff, summarizeTtff } from "../harness/lib/ttff.mjs";
 import { summarizeLaunch, summarizeP7, unavailable } from "../harness/lib/aot-progress.mjs";
-import { candidateColumn, classify, KPI_ROWS, kpiMarkdown, kpiTable, servedSides, trunkSide } from "../harness/lib/kpi.mjs";
+import { candidateColumn, classify, KPI_ROWS, kpiMarkdown, kpiTable, servedSides, sideFlags, trunkSide } from "../harness/lib/kpi.mjs";
 import { findResults, loadResults, readCandidate, readManual } from "../harness/kpi-report.mjs";
 
 // The struct the core writes (layout v1), as the worker returns it.
@@ -413,4 +413,15 @@ test("KPI: absolute race rows come from night measures (max-load 6 at most)", ()
   const c = candidateColumn({ ...day, json: { ...day.json, sides: { candidate: "/x/wt-p4" } } }, { label: "P4 (#43)", note: "jour, relatif" });
   assert.equal(c.values.macSpeed.value, 80.2);
   assert.match(kpiMarkdown(kpiTable([night], {}, { trunk: TRUNK }), { at: "T", candidate: c }), /Colonne « Candidat » : `P4 \(#43\)`, jour, relatif, max-load 8,/);
+});
+
+test("KPI: one trunk with and without a switch (--baseline-query): the row says which side it read", () => {
+  const pair = race("2026-10-20T23:10:00Z", { speed: 95, extra: {
+    query: "video=wgpu&aot=1&metrics=1", baselineQuery: "video=wgpu&metrics=1",
+    served: { candidate: served("T1"), baseline: served("T1") }, baseline: { cold: { speed: { median: 82 }, presentP99Ms: { median: 27 } } } } });
+  assert.equal(sideFlags(pair.json, "candidate"), "aot=1");
+  assert.equal(sideFlags(pair.json, "baseline"), null);
+  const row = kpiTable([pair], {}, { trunk: TRUNK }).find((r) => r.id === "macSpeed");
+  assert.deepEqual([row.value, row.side, row.flags], [95, "candidate", "aot=1"]);
+  assert.match(kpiMarkdown([row], { at: "T" }), /@ T1, aot=1, 2026-10-20T23:10/);
 });
