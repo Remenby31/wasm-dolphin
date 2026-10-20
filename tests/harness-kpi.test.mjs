@@ -7,7 +7,7 @@ import os from "node:os";
 import path from "node:path";
 import test from "node:test";
 
-import { consistentRead, decodeRegionStats, poolStats, regionShares, REGION_STATS_BYTES } from "../harness/lib/jit-region-stats.mjs";
+import { consistentRead, decodeRegionStats, DIAGNOSTICS, poolStats, regionShares, REGION_STATS_BYTES, topMisses } from "../harness/lib/jit-region-stats.mjs";
 import { p4Summary, regionRecord, summarizeP4 } from "../harness/probes/race-perf.mjs";
 import { launchTtff, summarizeTtff } from "../harness/lib/ttff.mjs";
 import { summarizeLaunch, summarizeP7, unavailable } from "../harness/lib/aot-progress.mjs";
@@ -33,7 +33,8 @@ test("region stats: layout v1 decoded, shares over the CPU loop's four parts", (
   assert.equal(s.sizeBytes, 88);
   assert.equal(s.sampleEvery, 64);
   assert.deepEqual(regionShares(s), {
-    regionCycleShare: 0.9, regionTimeShare: 0.7, dispatchTimeShare: 0.1, blockTimeShare: 0.15, interpTimeShare: 0.05,
+    regionCycleShare: 0.9, regionCycleShareRaw: 0.9, regionTimeShare: 0.7, dispatchTimeShare: 0.1, blockTimeShare: 0.15, interpTimeShare: 0.05,
+    idleCycleShare: null, idleTimeShare: null, cycleBasis: "all cycles (core without idleCycles)",
     regionCalls: 1234, regionNotEntry: 3, regionStops: 7, sampleEvery: 64
   });
   // Counters only (no host time sampled): time shares are null, not 0.
@@ -49,11 +50,49 @@ test("region stats: unknown layout, short struct, torn read and impossible share
   // The second copy went backwards: a reset or a mid-update read.
   assert.match(regionRecord(reply([900, 1000, 70, 10, 15, 5, 9, 0, 0], [10, 20, 1, 1, 1, 1, 1, 0, 0])).p4Why, /torn read/);
   // More region cycles than cycles: never clamped into a plausible share.
-  assert.match(regionRecord(reply([1100, 1000, 1, 1, 1, 1, 1, 0, 0])).p4Why, /regionCycleShare 1\.1 outside \[0, 1\]/);
+  assert.match(regionRecord(reply([1100, 1000, 1, 1, 1, 1, 1, 0, 0])).p4Why, /regionCycleShare 1\.1, .* outside \[0, 1\]/);
   assert.match(consistentRead({ error: "x" }, {}).error, /x/);
   // Dispatch time is slice time minus the sampled parts: it may drop between two copies.
   assert.equal(regionRecord(reply([900, 1000, 70, 10, 15, 5, 9, 0, 0], [905, 1010, 71, 9.5, 16, 5, 10, 0, 0])).p4.regionCycleShare, 0.9);
   assert.match(regionRecord(reply([900, 1000, 70, -1, 15, 5, 9, 0, 0])).p4Why, /dispatchTimeMs = -1/);
+});
+
+// The 0075 struct of 256 bytes: v1 then the diagnostics (DIAGNOSTICS order).
+function statsBytes256({ f64 = [], diag = {} } = {}) {
+  const buf = new ArrayBuffer(256);
+  const v = new DataView(buf);
+  v.setUint32(0, 1, true); v.setUint32(4, 256, true); v.setUint32(8, 64, true);
+  f64.forEach((x, i) => v.setFloat64(16 + i * 8, x, true));
+  DIAGNOSTICS.forEach((name, i) => v.setFloat64(88 + i * 8, diag[name] ?? 0, true));
+  return Array.from(new Uint8Array(buf));
+}
+
+test("region stats 256 bytes: cycle share outside idle skip, wait time apart, diagnostics", () => {
+  // A race: 55 % of the cycles idle-skipped, regions 41.4 % of all cycles.
+  const diag = { idleCycles: 550, idleTimeMs: 25, chainBreaks: 7, regionsInstalled: 120, topMiss0Pc: 0x80012345, topMiss0Cycles: 40, topMiss1Pc: 0x80020000, topMiss1Cycles: 10 };
+  const s = decodeRegionStats(statsBytes256({ f64: [414, 1000, 60, 10, 25, 5, 50, 1, 0], diag }));
+  assert.equal(s.diagnostics.idleCycles, 550);
+  const p = regionShares(s);
+  assert.equal(p.regionCycleShare, 0.92); // 414 / (1000 - 550)
+  assert.equal(p.regionCycleShareRaw, 0.414);
+  assert.equal(p.cycleBasis, "outside idle skip");
+  assert.equal(p.idleCycleShare, 0.55);
+  assert.equal(p.regionTimeShare, 0.6); // over region + dispatch + block + interp, the wait apart
+  assert.equal(p.idleTimeShare, 0.2); // 25 / (100 + 25)
+  assert.deepEqual(topMisses(s), [["0x80012345", 40], ["0x80020000", 10]]);
+  assert.match(decodeRegionStats(statsBytes256({ f64: [1, 10], diag: { idleCycles: 11 } })).error, /idleCycles 11 > totalCycles 10/);
+  // Summary over two windows: counters summed, pipeline state of the last one.
+  const w = (idle) => regionRecord({ bytes: statsBytes256({ f64: [414, 1000, 60, 10, 25, 5, 50, 1, 0], diag: { ...diag, idleCycles: idle } }), again: statsBytes256({ f64: [414, 1000, 60, 10, 25, 5, 50, 1, 0], diag: { ...diag, idleCycles: idle } }) });
+  const { p4 } = summarizeP4([w(550), w(450)]);
+  assert.equal(p4.regionCycleShare, 0.828); // 828 / (2000 - 1000)
+  assert.equal(p4.diagnostics.idleCycles, 1000);
+  assert.equal(p4.diagnostics.chainBreaks, 14);
+  assert.equal(p4.diagnostics.regionsInstalled, 120);
+  assert.deepEqual(p4.diagnostics.topMisses[0], ["0x80012345", 40]);
+  // Idle cycles going backwards between the two copies: a torn read.
+  assert.match(regionRecord({ bytes: statsBytes256({ f64: [1, 1000], diag: { idleCycles: 5 } }), again: statsBytes256({ f64: [1, 1000], diag: { idleCycles: 4 } }) }).p4Why, /idleCycles went backwards/);
+  // A window without diagnostics pooled with one that has them: raw basis, never half-subtracted.
+  assert.equal(regionShares(poolStats([s, decodeRegionStats(statsBytes({ f64: [414, 1000, 60, 10, 25, 5, 50, 1, 0] }))])).cycleBasis, "all cycles (core without idleCycles)");
 });
 
 test("race-perf p4: precise reason when null, pooled shares that add up, one-sided A/B withheld", () => {
@@ -177,6 +216,7 @@ test("KPI: only clean trunk results count, one result per row, shown with its co
   assert.equal(rows.raceFrameP99.status, "OK");
   assert.equal(rows.regionTimeShare.status, "n/a");
   assert.equal(rows.regionTimeShare.why, "core has no DolphinWeb_JitRegionStats");
+  assert.equal(rows.regionCycleShare.why, "core has no DolphinWeb_JitRegionStats");
   assert.equal(rows.ttffCold.status, "OK");
   assert.equal(rows.ttffWarm.status, "KO");
   assert.equal(rows.optimisationMs.why, "no P7 progress in this engine");
@@ -257,8 +297,21 @@ test("KPI report: files classified by content; manual.json errors become reasons
   const rows = (m) => Object.fromEntries(kpiTable([], m, { trunk: TRUNK }).map((r) => [r.id, r]));
   assert.match(rows(readManual(path.join(root, "m1.json"))).pcSpeed.why, /illisible/);
   assert.match(rows(readManual(path.join(root, "m2.json"))).pcSpeed.why, /non numérique/);
-  assert.equal(KPI_ROWS.length, 14);
+  assert.equal(KPI_ROWS.length, 15);
   // Every TTFF run overloaded: n/a, and the row says so.
   const over = { kind: "ttff", file: "o", json: { probe: "ttff", at: "2026-10-19T11:00:00Z", served: served("T1"), runs: 3, overloadedRuns: [1, 2, 3], cold: null, warm: null } };
   assert.match(kpiTable([over], {}, { trunk: TRUNK }).find((r) => r.id === "ttffCold").why, /runs 1, 2, 3 lancées sur machine surchargée/);
+});
+
+test("KPI: the region cycle share counts only outside idle skip", () => {
+  const p4 = (basis) => ({ regionCycleShare: 0.93, regionTimeShare: 0.5, dispatchTimeShare: 0.2, idleCycleShare: 0.55, idleTimeShare: 0.3, cycleBasis: basis });
+  const rows = (basis) => Object.fromEntries(kpiTable([race("2026-10-20T03:00:00Z", { extra: { p4: p4(basis) } })], {}, { trunk: TRUNK }).map((r) => [r.id, r]));
+  const outside = rows("outside idle skip");
+  assert.equal(outside.regionCycleShare.value, 0.93);
+  assert.equal(outside.regionCycleShare.status, "OK");
+  assert.match(outside.regionCycleShare.detail, /idle skip : 55 % des cycles/);
+  assert.match(outside.regionTimeShare.detail, /attente : 30 % du temps, à part/);
+  const raw = rows("all cycles (core without idleCycles)");
+  assert.equal(raw.regionCycleShare.status, "n/a");
+  assert.match(raw.regionCycleShare.why, /part brute 93 %, idle compris/);
 });

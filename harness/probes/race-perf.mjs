@@ -42,7 +42,10 @@
 //   resets them (host time sampled on 1 call in N, 0 = counters only) and
 //   reads them. summary.json carries the pooled shares of the cold stats
 //   windows as p4 (candidate) and baselineP4; a core without the export
-//   gives p4: null with the reason (p4Why), never a failure. The speed
+//   gives p4: null with the reason (p4Why), never a failure. A core with the
+//   256-byte struct also gives the idle-skipped cycles, taken out of
+//   regionCycleShare (PROGRAM.md, 2026-10-20), the idle time apart
+//   (idleTimeShare), and its diagnostics (p4.diagnostics). The speed
 //   windows are identical with or without it; p4 is compared between sides
 //   only when both have it (p4Compare).
 import { execFileSync } from "node:child_process";
@@ -62,7 +65,7 @@ import { openSession, rebootSession } from "../lib/session.mjs";
 import { waitForLoad } from "../lib/env.mjs";
 import { describe, median, percentile, round } from "../lib/stats.mjs";
 import { coreStats, mergeTimeline, presentationStats } from "../lib/timeline.mjs";
-import { consistentRead, decodeRegionStats, poolStats, regionShares } from "../lib/jit-region-stats.mjs";
+import { consistentRead, decodeRegionStats, poolStats, regionShares, topMisses } from "../lib/jit-region-stats.mjs";
 import { summarizePcSamples } from "../../src/harness-pc-sampler.js";
 
 const HOMEBREW_OUT = path.join(REPO_ROOT, "harness", "homebrew", "out");
@@ -223,9 +226,15 @@ export function summarizeP4(windows) {
   const raw = recs.map((w) => w.p4Raw).filter(Boolean);
   const why = [...new Set(recs.filter((w) => !w.p4Raw).map((w) => w.p4Why).filter(Boolean))].join("; ") || "no window";
   if (!raw.length) return { p4: null, why };
-  const pooled = regionShares(poolStats(raw));
+  const sum = poolStats(raw);
+  const pooled = regionShares(sum);
   if (pooled.error) return { p4: null, why: pooled.error };
-  return { p4: { ...pooled, windows: raw.length, missingWindows: recs.length - raw.length }, why: raw.length < recs.length ? why : null };
+  // Diagnostics (0075 struct of 256 bytes): the region pipeline as the last
+  // window saw it, the summed chaining counters, and its top misses.
+  const diagnostics = sum.diagnostics
+    ? { ...Object.fromEntries(Object.entries(sum.diagnostics).filter(([k]) => !/^topMiss|^spare$/.test(k))), topMisses: topMisses(raw.at(-1)) }
+    : null;
+  return { p4: { ...pooled, windows: raw.length, missingWindows: recs.length - raw.length, diagnostics }, why: raw.length < recs.length ? why : null };
 }
 
 // p4 / baselineP4 and their reasons; the sides are compared only when both
