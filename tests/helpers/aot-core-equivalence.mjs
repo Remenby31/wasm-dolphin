@@ -64,6 +64,7 @@ export async function loadAotCore(coreDir = new URL("../../cores/dolphin/", impo
   m._free(layoutPtr);
   const gprPtr = m._malloc(128);
   return {
+    module: m, // the Emscripten module, for the production exports
     has: (name) => typeof m[`_${name}`] === "function",
     pcOffset,
     helperNames,

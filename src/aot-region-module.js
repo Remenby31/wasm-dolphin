@@ -117,6 +117,15 @@ function dispatcherBody(entries, pcOffset, missing) {
 //               memory (V8 commits a Memory's initial pages at allocation, which
 //               on Windows counts against the commit charge; decision of #30)
 // Returns { bytes, entries: [[pc, fragmentIndex]] sorted, helpers: [name] }.
+export const REGION_ENTRIES_SECTION = "region-entries";
+
+// Entries a region module declares (its "region-entries" section), or null.
+export function regionModuleEntries(module) {
+  const [section] = WebAssembly.Module.customSections(module, REGION_ENTRIES_SECTION);
+  if (!section || section.byteLength % 4) return null;
+  return Array.from(new Uint32Array(section.slice(0)));
+}
+
 export function assembleRegion(fragments, { helpers, pcOffset, memoryPages, memoryMinPages = 1, sharedMemory = true }) {
   if (!Array.isArray(fragments) || !fragments.length) throw new Error("region: no fragments");
   if (!Number.isInteger(pcOffset) || pcOffset < 0) throw new Error("region: pcOffset required");
@@ -231,6 +240,14 @@ export function assembleRegion(fragments, { helpers, pcOffset, memoryPages, memo
   uleb(code, stub.length); append(stub);
   for (const b of bodies) { uleb(code, b.length); append(b); }
   section(out, 10, code);
+
+  // Custom section "region-entries": every declared entry (u32 LE, sorted),
+  // so a module loaded from the cache is mapped at all of them (returns
+  // after a call land inside functions), without its fragments.
+  const custom = [];
+  name(custom, REGION_ENTRIES_SECTION);
+  for (const [pc] of sortedEntries) custom.push(pc & 0xff, (pc >>> 8) & 0xff, (pc >>> 16) & 0xff, (pc >>> 24) & 0xff);
+  section(out, 0, custom);
 
   return {
     bytes: Uint8Array.from(out),

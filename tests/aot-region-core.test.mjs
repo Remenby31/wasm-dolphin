@@ -11,7 +11,7 @@ import test from "node:test";
 
 import { imageFromDol } from "../src/aot-image.js";
 import { planDol } from "../src/aot-plan.js";
-import { assembleRegion } from "../src/aot-region-module.js";
+import { assembleRegion, regionModuleEntries } from "../src/aot-region-module.js";
 import { asm, assemble, buildDol } from "./aot-asm.mjs";
 import { HELPER_SIGNATURES, checkCoreSlice, loadAotCore } from "./helpers/aot-core-equivalence.mjs";
 
@@ -56,6 +56,7 @@ test("the core translates a block into a fragment the region assembler links", {
   assert.deepEqual(entries, [[DOUBLE, 0]]);
   assert.deepEqual(fragment.relocs.map((r) => r.kind), ["dispatch"], "blr leaves through the dispatcher");
   assert.ok(core.compile(bytes) > 0, "the core compiles and links the region module");
+  assert.deepEqual(regionModuleEntries(new WebAssembly.Module(bytes)), [DOUBLE], "entries travel with the module (cache loads)");
 });
 
 test("a function becomes one fragment of its blocks, calls leave through jump relocs", { skip }, () => {

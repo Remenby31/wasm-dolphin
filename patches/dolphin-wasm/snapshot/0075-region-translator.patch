@@ -974,7 +974,7 @@ diff --git a/Source/Core/Core/PowerPC/CachedInterpreter/CachedInterpreter.cpp b/
  extern "C" EMSCRIPTEN_KEEPALIVE double DolphinWeb_JitArmedStepForTest(double frame)
  {
    ApplyArmedWasmPolicyAt(static_cast<u64>(frame));
-@@ -13850,6 +14450,574 @@ extern "C" EMSCRIPTEN_KEEPALIVE int DolphinWeb_JitOracleRun(u32 word_count, u32
+@@ -13850,6 +14450,580 @@ extern "C" EMSCRIPTEN_KEEPALIVE int DolphinWeb_JitOracleRun(u32 word_count, u32
    return std::memcmp(s_jit_oracle.interp, s_jit_oracle.jit, sizeof s_jit_oracle.jit) == 0 ? 0 : 1;
  }
  
@@ -1378,13 +1378,19 @@ diff --git a/Source/Core/Core/PowerPC/CachedInterpreter/CachedInterpreter.cpp b/
 +  s_aot_ram = memory.GetRAM();
 +  s_aot_ram_size = memory.GetRamSizeReal();
 +  const std::span<const u32> range_span{ranges, 2 * std::size_t{range_count}};
-+  // Code not loaded yet (P7 may plan a small disc before the apploader has
-+  // copied the DOL): MEM1 still holds zeros at the entry. Not ready, so P7
-+  // waits and tries again instead of counting a hash mismatch.
++  // The game not started yet (P7 may plan a small disc before the boot has
++  // copied the DOL; the CPU is still outside MEM1's game code, below
++  // 0x80000000 or in the apploader at 0x81200000): not ready, P7 waits and
++  // tries again. Once the game runs, code still absent (zeros, loaded later)
++  // is a hash mismatch for that function only, never a wait for all.
 +  {
-+    const auto entry_word = AotReadInstruction(entry_pc);
-+    if (entry_word.valid && entry_word.hex == 0)
-+      return AotStatus(4, entry_pc);
++    const u32 pc = Core::System::GetInstance().GetPPCState().pc;  // racy read, a hint
++    if (pc < 0x80000000 || pc >= 0x81200000)
++    {
++      const auto entry_word = AotReadInstruction(entry_pc);
++      if (entry_word.valid && entry_word.hex == 0)
++        return AotStatus(4, entry_pc);
++    }
 +  }
 +  const u64 expected = (u64{hash_hi} << 32) | hash_lo;
 +  u64 hash = 0;
@@ -1549,7 +1555,7 @@ diff --git a/Source/Core/Core/PowerPC/CachedInterpreter/CachedInterpreter.cpp b/
  extern "C" int RunPpcWasmFloatCompareSmoke()
  {
    auto& state = Core::System::GetInstance().GetPPCState();
-@@ -14248,6 +15416,7 @@ void CachedInterpreter::ClearCache()
+@@ -14248,6 +15422,7 @@ void CachedInterpreter::ClearCache()
  #ifdef __EMSCRIPTEN__
    s_deferred_wasm_queues.erase(this);
    ResetOffThreadCompiles();

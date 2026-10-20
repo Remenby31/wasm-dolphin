@@ -29,6 +29,7 @@
 // time since the start of this run.
 import { AotOptimizer } from "./aot-optimizer.js";
 import { createAotRegionLoader } from "./aot-region-loader.js";
+import { regionModuleEntries } from "./aot-region-module.js";
 
 export const AOT_FIRST_LAUNCH_PARAM = "aot";
 export const AOT_PROGRESS_SCHEMA = "wasm-dolphin.aot-progress.v1";
@@ -128,7 +129,9 @@ export function createAotFirstLaunch({
   const retainAndInstall = (key, module, bytes) => {
     retain(key, module);
     const unit = install && bytes ? optimizer?.regions?.find((u) => u.key === key) : null;
-    if (unit) install({ key, bytes, entries: unit.members.map((f) => f.entry), ranges: unit.members.flatMap((f) => f.ranges) });
+    if (!unit) return;
+    const entries = regionModuleEntries(module) ?? unit.members.map((f) => f.entry);
+    install({ key, bytes, entries, ranges: unit.members.flatMap((f) => f.ranges) });
   };
   const loader = createAotRegionLoader({ openCache, retain: retainAndInstall, now });
 
