@@ -125,6 +125,12 @@ node harness/probes/race-perf.mjs --iso ../roms/<disc>.iso --state ../measures/h
   share outside [0, 1] is refused. Without counters, `p4: null` and `p4Why`
   gives the reason, never a failure. `p4Compare` withholds the comparison
   when only one side has counters.
+  A core with the 256-byte struct (0075) adds its diagnostics: the
+  idle-skipped cycles are taken out of `regionCycleShare` (the KPI since
+  2026-10-20; `regionCycleShareRaw` keeps all cycles, `cycleBasis` says which),
+  the time in CoreTiming::Idle is apart (`idleTimeShare`, `idleCycleShare`),
+  and `p4.diagnostics` holds the region pipeline counts and the four costliest
+  block starts outside regions (`topMisses`).
 
 ## KPI probes and report
 
