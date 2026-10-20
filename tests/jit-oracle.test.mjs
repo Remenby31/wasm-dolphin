@@ -223,6 +223,50 @@ test("unmapped and misaligned accesses agree with the interpreter", { skip }, ()
   }
 });
 
+// The block JIT's inline mtmsr takes pending exceptions since patch 0076.
+const mtmsrSkip = skip || (!core.has("DolphinWeb_JitMtmsrTakesPendingExceptions") && "the core predates patch 0076 (CI builds this branch's core)");
+test("mtmsr takes the exceptions held pending and FP exceptions it enables, as the interpreter", { skip: mtmsrSkip }, () => {
+  const r = makeRng(0xe3);
+  const MFMSR_R5 = 0x7ca000a6, MTMSR_R5 = 0x7ca00124, BLR = 0x4e800020;
+  const li5 = (v) => (0x38a00000 | v) >>> 0;
+  const ORI_R5_EE = 0x60a58000;
+  const EXTERNAL_INT = 0x4; // Gekko.h EXCEPTION_EXTERNAL_INT
+  const withWord = (state, i, f) => Uint32Array.from(state, (v, j) => (j === i ? f(v) : v));
+  const ends = {};
+  for (let k = 0; k < 30; k++) {
+    const state = randomState(r);
+    state[37] = 0x00002032; // FP, IR, DR, RI; EE, PR, FE0/FE1 off
+    const fex = withWord(state, 36, (v) => v | 0x40000000);
+    const cases = [
+      // A misaligned lmw leaves an alignment exception pending; mtmsr takes it.
+      ["held alignment", [generate("lmw-misaligned", r), MFMSR_R5, MTMSR_R5, BLR], state],
+      // The same with the new MSR in user mode: taken before PR matters.
+      ["held alignment, new PR=1", [generate("lmw-misaligned", r), li5(0x6032), MTMSR_R5, BLR], state],
+      // FPSCR.FEX set: FE0, FE1 or both turned on raise an FP program exception.
+      ["FE0", [li5(0x2832), MTMSR_R5, BLR], fex],
+      ["FE1", [li5(0x2132), MTMSR_R5, BLR], fex],
+      ["FE0|FE1", [li5(0x2932), MTMSR_R5, BLR], fex],
+      // An external interrupt pending: not taken while EE stays off, taken once on.
+      ["external, EE off", [MFMSR_R5, MTMSR_R5, BLR], withWord(state, 46, () => EXTERNAL_INT)],
+      ["external, EE on", [li5(0x2032), ORI_R5_EE, MTMSR_R5, BLR], withWord(state, 46, () => EXTERNAL_INT)]
+    ];
+    for (const [name, words, st] of cases) {
+      const program = Uint32Array.from(words);
+      for (const mask of [SHORT_PREFIX_MASK, SHORT_PREFIX_MASK | REGALLOC_OFF]) {
+        const result = core.run(program, st, mask);
+        assertSame(result, `${name}: ${hex(program[0])} mask ${hex(mask)}`);
+        assert.ok(result.compiledBlocks > 0, `${name}: the block with mtmsr ran in WASM`);
+        const end = result.message.startsWith("exception") ? "exception" : "return";
+        ends[`${name}/${end}`] = (ends[`${name}/${end}`] ?? 0) + 1;
+      }
+    }
+  }
+  for (const name of ["held alignment", "held alignment, new PR=1", "FE0", "FE1", "FE0|FE1", "external, EE on"]) {
+    assert.equal(ends[`${name}/exception`], 60, `${name}: the exception is taken (${JSON.stringify(ends)})`);
+  }
+  assert.equal(ends["external, EE off/return"], 60, "a pending external stays pending while EE is off");
+});
+
 test("inline FMA keeps NI_madd_msub's single rounding, ties included", { skip }, () => {
   // The Mario Strikers Charged inputs from Interpreter_FPUtils.h: the exact
   // product of two singles plus b ties at single precision; the interpreter

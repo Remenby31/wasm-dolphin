@@ -1,0 +1,140 @@
+diff --git a/Source/Core/Core/PowerPC/CachedInterpreter/CachedInterpreter.cpp b/Source/Core/Core/PowerPC/CachedInterpreter/CachedInterpreter.cpp
+--- a/Source/Core/Core/PowerPC/CachedInterpreter/CachedInterpreter.cpp
++++ b/Source/Core/Core/PowerPC/CachedInterpreter/CachedInterpreter.cpp
+@@ -1043,6 +1043,12 @@ bool ExecuteFastOsInterruptInline(PowerPC::PowerPCState& ppc_state,
+ {
+   if (!IsOsInterruptModeVerified(mode))
+     return false;
++  // The function's mtmsr takes exceptions held pending and an FP exception
++  // FE0/FE1 enable, with SRR0 at that instruction: those calls run the code
++  // itself (the caller branches to the function).
++  if (ppc_state.Exceptions != 0 ||
++      (ppc_state.fpscr.FEX && (ppc_state.msr.FE0 || ppc_state.msr.FE1)))
++    return false;
+ 
+   ppc_state.pc = function_pc;
+   ppc_state.npc = return_pc;
+@@ -1090,13 +1096,7 @@ bool ExecuteFastOsInterruptInline(PowerPC::PowerPCState& ppc_state,
+     return false;
+   }
+ 
+-  ppc_state.msr.Hex = new_msr;
+-  if ((new_msr & MSR_EE_MASK) != 0 &&
+-      (ppc_state.Exceptions &
+-       (EXCEPTION_EXTERNAL_INT | EXCEPTION_PERFORMANCE_MONITOR | EXCEPTION_DECREMENTER)) != 0)
+-  {
+-    power_pc.CheckExceptions();
+-  }
++  ppc_state.msr.Hex = new_msr;  // nothing pending (checked above)
+ 
+   ppc_state.pc = ppc_state.npc;
+   ppc_state.downcount -= static_cast<int>(cycles);
+@@ -2544,6 +2544,17 @@ extern "C" int DolphinWeb_CachedInterpreterSystem(int state_ptr, u32 inst_hex, u
+     }
+     ppc_state.msr.Hex = ppc_state.gpr[inst.RS];
+     system.GetPowerPC().MSRUpdated();
++    // As Interpreter::mtmsr: FE0/FE1 may have been set, and exceptions held
++    // pending (an alignment exception, external ones once EE is on) are taken
++    // here, not at the end of the slice.
++    CheckFPExceptions(ppc_state);
++    system.GetPowerPC().CheckExceptions();
++    if (ppc_state.pc != current_pc)
++    {
++      ppc_state.downcount -= downcount;
++      ++s_wasm_helper_halt_count;
++      return 1;
++    }
+     break;
+   case 371:  // mftb
+   {
+@@ -3558,6 +3569,24 @@ void EmitMtmsr(std::vector<u8>& body, const WasmStateLayout& layout, const PPCAn
+   body.push_back(0x71);
+   EmitPendingPageTableUpdateForMsrLocal(body, layout, 2);
+   body.push_back(0x72);
++  // As Interpreter::mtmsr and FastMtmsr, exceptions held pending (external
++  // ones once EE is on, an alignment exception left by an earlier
++  // instruction) and an FP exception the new FE0/FE1 enable are taken at the
++  // mtmsr: those go to the system helper too, which checks PR on the old MSR,
++  // applies the new one and takes them.
++  EmitLocalGet(body, 0);
++  body.insert(body.end(), {0x28, 0x02});  // i32.load
++  EmitU32Leb(body, static_cast<u32>(offsetof(PowerPC::PowerPCState, Exceptions)));
++  body.push_back(0x72);
++  EmitStateLoadU32(body, layout.fpscr_offset);
++  EmitI32Const(body, 1u << 30);  // FEX
++  body.push_back(0x71);
++  EmitLocalGet(body, 2);
++  EmitI32Const(body, (1u << 11) | (1u << 8));  // FE0 | FE1
++  body.push_back(0x71);
++  body.insert(body.end(), {0x45, 0x45});  // i32.eqz; i32.eqz
++  body.push_back(0x6c);                   // i32.mul: FEX && FE (FEX is one bit)
++  body.push_back(0x72);
+ 
+   body.push_back(0x04);
+   body.push_back(0x40);
+@@ -11419,6 +11448,28 @@ s32 CachedInterpreter::FastOsInterruptFunction(PowerPC::PowerPCState& ppc_state,
+   ppc_state.pc = current_pc;
+   ppc_state.npc = LR(ppc_state) & ~3u;
+ 
++  // The function's mtmsr takes exceptions held pending and an FP exception
++  // FE0/FE1 enable, with SRR0 at that instruction: then its few instructions
++  // run in the interpreter, up to its return or the exception vector.
++  if (ppc_state.Exceptions != 0 ||
++      (ppc_state.fpscr.FEX && (ppc_state.msr.FE0 || ppc_state.msr.FE1)))
++  {
++    auto& interpreter = Core::System::GetInstance().GetInterpreter();
++    const u32 return_pc = ppc_state.npc;
++    for (u32 i = 0; i < 16 && ppc_state.pc != return_pc && ppc_state.pc - current_pc < 0x40; ++i)
++    {
++      const u32 pc = ppc_state.pc;
++      ppc_state.downcount -= interpreter.SingleStepInner();
++      if (ppc_state.Exceptions & EXCEPTION_PROGRAM)
++      {
++        ppc_state.pc = pc;
++        power_pc.CheckExceptions();
++      }
++    }
++    ++s_fast_os_interrupt_inline_fallbacks;
++    return 0;
++  }
++
+   if (ppc_state.msr.PR)
+   {
+     GenerateProgramException(ppc_state, ProgramExceptionCause::PrivilegedInstruction);
+@@ -11462,13 +11513,7 @@ s32 CachedInterpreter::FastOsInterruptFunction(PowerPC::PowerPCState& ppc_state,
+     return 0;
+   }
+ 
+-  ppc_state.msr.Hex = new_msr;
+-  if ((new_msr & MSR_EE_MASK) != 0 &&
+-      (ppc_state.Exceptions &
+-       (EXCEPTION_EXTERNAL_INT | EXCEPTION_PERFORMANCE_MONITOR | EXCEPTION_DECREMENTER)) != 0)
+-  {
+-    power_pc.CheckExceptions();
+-  }
++  ppc_state.msr.Hex = new_msr;  // nothing pending (checked above)
+ 
+   ppc_state.pc = ppc_state.npc;
+   ppc_state.downcount -= static_cast<int>(cycles);
+@@ -13540,7 +13585,7 @@ void JitOracleLoadState(Core::System& system, const u32* in)
+   ppc.msr.Hex = in[37];
+   for (u32 i = 0; i < 8; ++i)
+     ppc.spr[SPR_GQR0 + i] = in[38 + i];
+-  ppc.Exceptions = 0;
++  ppc.Exceptions = in[46];  // 0 in random states; a test sets pending ones
+   ppc.pc = JIT_ORACLE_CODE_VA;
+   ppc.npc = JIT_ORACLE_CODE_VA;
+   for (u32 i = 0; i < 32; ++i)
+@@ -13850,6 +13895,12 @@ extern "C" EMSCRIPTEN_KEEPALIVE int DolphinWeb_JitOracleRun(u32 word_count, u32
+   return std::memcmp(s_jit_oracle.interp, s_jit_oracle.jit, sizeof s_jit_oracle.jit) == 0 ? 0 : 1;
+ }
+ 
++// Marker for tests: the block JIT's mtmsr takes pending exceptions (0076).
++extern "C" EMSCRIPTEN_KEEPALIVE int DolphinWeb_JitMtmsrTakesPendingExceptions()
++{
++  return 1;
++}
++
+ extern "C" int RunPpcWasmFloatCompareSmoke()
+ {
+   auto& state = Core::System::GetInstance().GetPPCState();
