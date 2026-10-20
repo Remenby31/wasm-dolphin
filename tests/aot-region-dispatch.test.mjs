@@ -193,8 +193,10 @@ test("with jitoffthread=1 a region installs once the worker marked its module re
       assert.equal(r.key, `wasm-block-sha256-v1:${createHash("sha256").update(r.bytes).digest("hex")}`, "the key names the bytes");
       Atomics.store(core.module.HEAPU8, r.readyPtr + r.readySlot, 1);
     }
+    const fallbacks = core.regionStats().installFallbacks;
     core.serviceRegions();
     assert.equal(core.regionCount(), before + entries);
+    assert.equal(core.regionStats().installFallbacks, fallbacks, "no cold compile");
     const reference = runCall(PROGRAM.labels.main, { regions: false });
     const got = runCall(PROGRAM.labels.main, { regions: true });
     assert.ok(got.ran >= 1);
@@ -208,7 +210,9 @@ test("with jitoffthread=1 a request never answered falls back to a synchronous c
     core.setRegionsEnabled(true);
     const before = core.regionCount();
     const entries = queueAll(plan);
+    const fallbacks = core.regionStats().installFallbacks;
     for (let slice = 0; slice < 300 && core.regionCount() === before; slice++) core.serviceRegions();
     assert.equal(core.regionCount(), before + entries);
+    assert.ok(core.regionStats().installFallbacks > fallbacks, "counted as a cold compile (installFallbacks)");
   });
 });

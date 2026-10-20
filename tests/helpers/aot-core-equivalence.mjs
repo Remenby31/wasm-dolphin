@@ -139,7 +139,7 @@ export async function loadAotCore(coreDir = new URL("../../cores/dolphin/", impo
       const f = new Float64Array(m.HEAPU8.buffer, p + 16, 9);
       const names = ["regionCycles", "totalCycles", "regionTimeMs", "dispatchTimeMs", "blockTimeMs", "interpTimeMs",
         "regionCalls", "regionNotEntry", "regionStops"];
-      return { version: head[0], sizeBytes: head[1], sampleEvery: head[2], ...Object.fromEntries(names.map((n, i) => [n, f[i]])) };
+      return { version: head[0], sizeBytes: head[1], sampleEvery: head[2], installFallbacks: head[3], ...Object.fromEntries(names.map((n, i) => [n, f[i]])) };
     },
     interpretOne: () => m._DolphinWeb_AotTestInterpretOne(),
     reset(gprs, pc, lr, downcount) {
