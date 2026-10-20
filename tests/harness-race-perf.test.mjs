@@ -96,6 +96,7 @@ test("review #22: odd runs and a pinned coreid are refused with --baseline", () 
     assert.match(run(["--runs", "3"]), /runs must be even/);
     assert.match(run(["--query", "core=upstream&coreid=sha256:" + "a".repeat(64)]), /no coreid in --query/);
     assert.match(run(["--max-load", "abc"]), /--max-load abc/);
+    assert.match(run(["--baseline-query", "core=upstream&coreid=sha256:" + "a".repeat(64)]), /no coreid in --query or --baseline-query/);
   } finally {
     rmSync(dir, { recursive: true, force: true });
   }

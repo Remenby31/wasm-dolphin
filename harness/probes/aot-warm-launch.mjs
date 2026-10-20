@@ -43,6 +43,9 @@ const { positionals, values } = parseArgs({
     runs: { type: "string", default: "3" },
     launches: { type: "string", default: "1" },
     query: { type: "string", default: PRESET },
+    // --side-query name=QUERY: that side boots with its own query (one tree
+    // with and without a switch); the others use --query.
+    "side-query": { type: "string", multiple: true, default: [] },
     out: { type: "string" }
   }
 });
@@ -141,14 +144,16 @@ async function seed() {
   }
 }
 
-async function measureOne(name, tree, runDir, profileDir) {
+const sideQueries = new Map(values["side-query"].map((s) => { const i = s.indexOf("="); return [s.slice(0, i), s.slice(i + 1)]; }));
+
+async function measureOne(name, tree, runDir, profileDir, query = values.query) {
   const machineBefore = machineSnapshot();
   const s = await open({ tree, profileDir });
   const chunks = [];
-  const result = { side: name, machineBefore };
+  const result = { side: name, machineBefore, query };
   try {
     const t0 = Date.now();
-    await bootIso(s.page, { url: `${s.server.base}?${values.query}`, iso: values.iso, timeoutMs: 120000 });
+    await bootIso(s.page, { url: `${s.server.base}?${query}`, iso: values.iso, timeoutMs: 120000 });
     await s.context.assertInvisible("after boot");
     result.bootMs = Date.now() - t0;
     result.readinessAtLoad = await readiness(s.page);
@@ -245,7 +250,7 @@ async function measure() {
       for (let launch = 1; launch <= Number(values.launches); launch += 1) {
       const tag = Number(values.launches) > 1 ? `${name}-launch${launch}` : name;
       log(`run ${run + 1} ${tag}`);
-      const r = await measureOne(tag, tree, runDir, profileDir);
+      const r = await measureOne(tag, tree, runDir, profileDir, sideQueries.get(name) ?? values.query);
       r.run = run + 1;
       r.launch = launch;
       all.push(r);

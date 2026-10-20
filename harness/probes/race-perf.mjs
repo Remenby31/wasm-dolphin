@@ -14,7 +14,7 @@
 //     [--runs 4 (even with --baseline)] [--min-pairs 4] [--hold KeyX] [--warm]
 //     [--max-load L] [--load-wait 300] [--lock-wait 1800]
 //     [--pcsample [periodMs]] [--symbols functions.json] [--out dir]
-//     [--region-sample N [--region-secs 10]]
+//     [--region-sample N [--region-secs 10]] [--baseline-query "..."]
 //
 // - Pairing and interleaving: run i measures both sides back to back, the
 //   order alternating (base, head | head, base | …), so drift on the machine
@@ -258,7 +258,7 @@ async function measureSide(side, o) {
   const loadGate = await waitForLoad({ maxLoad: o.maxLoad, waitSec: o.loadWait, log: (m) => console.log(`[race-perf] ${side.name}: ${m}`) });
   const server = await ensureServer({ port: o.port, root: side.root, coreCandidates: o.coreCandidates });
   try {
-    const session = await openSession({ base: server.base, server, query: o.query, iso: o.iso, routes: { [STATE_ROUTE]: o.state } });
+    const session = await openSession({ base: server.base, server, query: side.query ?? o.query, iso: o.iso, routes: { [STATE_ROUTE]: o.state } });
     const record = { url: session.url, served: server.identity, core: session.core, loadGate };
     try {
       record.cold = await measure(session, o);
@@ -309,7 +309,7 @@ async function main() {
       runs: { type: "string", default: "4" }, "min-pairs": { type: "string" }, "load-wait": { type: "string", default: "300" }, warmup: { type: "string", default: "25" }, secs: { type: "string", default: "20" },
       hold: { type: "string", default: "KeyX" }, warm: { type: "boolean", default: false },
       "max-load": { type: "string" }, "lock-wait": { type: "string", default: "1800" },
-      pcsample: { type: "string" }, symbols: { type: "string" }, "region-sample": { type: "string" }, "region-secs": { type: "string", default: "10" },
+      pcsample: { type: "string" }, symbols: { type: "string" }, "region-sample": { type: "string" }, "region-secs": { type: "string", default: "10" }, "baseline-query": { type: "string" },
       "core-candidate": { type: "string", multiple: true, default: [] },
       port: { type: "string", default: process.env.HARNESS_PORT }, out: { type: "string" }
     },
@@ -323,9 +323,13 @@ async function main() {
   const localOnly = !iso.startsWith(HOMEBREW_OUT);
   if (localOnly && process.env.CI) throw new Error("this disc is local-only and must never run in CI");
   const query = `${values.query ?? PRESETS[values.config] ?? values.config}&metrics=1`;
+  // --baseline-query: the baseline side boots with its own query (same tree
+  // with and without a switch, e.g. aot=1 against the default).
+  const baselineQuery = values["baseline-query"] ? `${values["baseline-query"]}&metrics=1` : null;
+  if (baselineQuery && !values.baseline) throw new Error("--baseline-query needs --baseline");
   // A coreid would pin both sides to one core: trunk against head would
   // then compare a core with itself.
-  if (values.baseline && new URLSearchParams(query).has("coreid")) throw new Error("--baseline compares the two sides' own cores: no coreid in --query");
+  if (values.baseline && [query, baselineQuery].some((q) => q && new URLSearchParams(q).has("coreid"))) throw new Error("--baseline compares the two sides' own cores: no coreid in --query or --baseline-query");
   const runs = num(values, "runs", { min: 1, int: true });
   if (values.baseline && runs % 2) throw new Error(`--runs ${runs}: with --baseline the runs must be even, so trunk goes first as often as head`);
   const o = {
@@ -349,7 +353,7 @@ async function main() {
   const dropExports = () => { for (const s of Object.values(sides)) if (s.temp && existsSync(s.root)) { release(s.root); rmSync(s.root, { recursive: true, force: true }); } };
   process.once("exit", dropExports);
   sides.candidate = resolveSide("candidate", values.candidate);
-  if (values.baseline) sides.baseline = resolveSide("baseline", values.baseline);
+  if (values.baseline) sides.baseline = { ...resolveSide("baseline", values.baseline), query: baselineQuery };
   const releaseLock = await acquirePerfLock({ name: `harness race-perf (${REPO_ROOT})`, waitSec: lockWait, log: (m) => console.log(`[race-perf] ${m}`) });
   // A local-only disc never writes into the repo.
   const stamp = `${new Date().toISOString().replace(/[:.]/g, "-").slice(0, 19)}-${process.pid}-${randomBytes(3).toString("hex")}`;
@@ -401,7 +405,7 @@ async function main() {
   const summary = {
     probe: "race-perf", at: new Date().toISOString(),
     chrome,
-    iso: path.basename(iso), state: path.basename(state), query: o.query, warmupSec: o.warmup, secs: o.secs, hold: o.hold, maxLoad: o.maxLoad,
+    iso: path.basename(iso), state: path.basename(state), query: o.query, baselineQuery: sides.baseline?.query ?? null, warmupSec: o.warmup, secs: o.secs, hold: o.hold, maxLoad: o.maxLoad,
     sides: Object.fromEntries(Object.entries(sides).map(([n, s]) => [n, s.label])),
     runs: runsDone.length, failed,
     candidate: { cold: summarize("candidate", "cold"), warm: summarize("candidate", "warm") },

@@ -79,6 +79,12 @@ export const nightMeasure = (json) => Number.isFinite(json.maxLoad) && json.maxL
 export const absoluteRace = (json) => stockChrome(json) && nightMeasure(json);
 
 const med = (d) => d?.median ?? null;
+
+// The switches a race-perf side booted with (its own query: --baseline-query).
+export function sideFlags(j, side) {
+  const q = new URLSearchParams(String((side === "baseline" ? j.baselineQuery ?? j.query : j.query) ?? ""));
+  return ["aot", "jitoffthread", "aotcompiler"].filter((k) => q.has(k)).map((k) => `${k}=${q.get(k)}`).join("&") || null;
+}
 const cold = (j, side) => j[side]?.cold ?? null;
 const p4Of = (j, side) => (side === "baseline" ? j.baselineP4 : j.p4);
 const idleNote = (p) => [
@@ -152,7 +158,7 @@ export function kpiTable(results, manual = {}, { trunk = new Set(), accept = { "
     const onTrunk = all.map((r) => ({ r, t: trunkSide(r, trunk) })).filter((x) => x.t).sort((a, b) => resultTime(b.r) - resultTime(a.r));
     if (!onTrunk.length) return { ...base, value: null, status: "n/a", nature: "n/a", why: `aucun résultat ${kinds.join(" / ")} sur un commit propre de trunk (${all.length} hors trunk ignoré(s)${refused ? `, ${refused} hors règle ignoré(s) : Chrome non standard ou mesure de jour, max-load > ${ABSOLUTE_MAX_LOAD}` : ""})` };
     const { r, t } = onTrunk[0];
-    const source = { source: r.file, commit: t.commit, side: t.side, at: new Date(resultTime(r)).toISOString() };
+    const source = { source: r.file, commit: t.commit, side: t.side, at: new Date(resultTime(r)).toISOString(), flags: r.kind === "race-perf" ? sideFlags(r.json, t.side) : null };
     const value = row.read(r.json, t.side, r.kind);
     const failures = row.failures?.(r.json, t.side, r.kind) ?? [];
     if (failures.length) return { ...base, value, status: "KO", nature: "measured", ...source, why: `${failures.length} run(s) en échec : ${failures.join(" ; ")}` };
@@ -201,7 +207,7 @@ export function kpiMarkdown(rows, { at = new Date().toISOString(), uptime = null
       lines.push(`## ${group}`, "", `| KPI | Valeur | Cible | État | Nature | Source |${candidate ? " Candidat |" : ""}`, `|---|---|---|---|---|---|${candidate ? "---|" : ""}`);
     }
     const note = r.why ?? r.detail;
-    lines.push(`| ${r.label} | ${fmt(r.value, r.unit)}${note ? ` (${note})` : ""} | ${cmp[r.better]} ${fmt(r.target, r.unit)} | ${r.status} | ${{ measured: "mesuré", declared: "déclaré", "n/a": "n/a" }[r.nature]} | ${r.source ? `\`${r.source}\`${r.commit ? ` @ ${r.commit.slice(0, 8)}${r.side === "baseline" ? " (côté baseline)" : ""}` : ""}${r.at ? `, ${r.at.slice(0, 16)}` : ""}` : "-"} |${candidate ? ` ${candidateCell(candidate.values[r.id], r.unit)} |` : ""}`);
+    lines.push(`| ${r.label} | ${fmt(r.value, r.unit)}${note ? ` (${note})` : ""} | ${cmp[r.better]} ${fmt(r.target, r.unit)} | ${r.status} | ${{ measured: "mesuré", declared: "déclaré", "n/a": "n/a" }[r.nature]} | ${r.source ? `\`${r.source}\`${r.commit ? ` @ ${r.commit.slice(0, 8)}${r.side === "baseline" ? " (côté baseline)" : ""}${r.flags ? `, ${r.flags}` : ""}` : ""}${r.at ? `, ${r.at.slice(0, 16)}` : ""}` : "-"} |${candidate ? ` ${candidateCell(candidate.values[r.id], r.unit)} |` : ""}`);
     const next = rows[rows.indexOf(r) + 1];
     if (!next || next.group !== group) lines.push("");
   }
