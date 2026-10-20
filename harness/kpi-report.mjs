@@ -8,6 +8,7 @@
 //
 //   node harness/kpi-report.mjs [--from dir]… [--no-worktrees]
 //     [--manual measures/kpi/manual.json] [--out measures/kpi] [--print]
+//     [--candidate race-perf/summary.json [--candidate-label name]]
 //
 // Default sources: ../measures (local-only probes write there), this tree's
 // harness/results, and the harness/results of the sibling worktrees (the
@@ -24,7 +25,7 @@ import { pathToFileURL } from "node:url";
 import { parseArgs } from "node:util";
 
 import { REPO_ROOT } from "./lib/browser.mjs";
-import { classify, kpiMarkdown, kpiTable } from "./lib/kpi.mjs";
+import { candidateColumn, classify, kpiMarkdown, kpiTable } from "./lib/kpi.mjs";
 
 const RESULT_FILES = new Set(["summary.json", "gate.json", "fuzz.json"]);
 const PROGRAM_ROOT = path.resolve(REPO_ROOT, "..");
@@ -85,6 +86,22 @@ export function trunkCommits(repo = REPO_ROOT, ref = "origin/main") {
   return new Set(execFileSync("git", ["-C", repo, "rev-list", "--first-parent", ref], { encoding: "utf8", maxBuffer: 64 << 20 }).split("\n").filter(Boolean));
 }
 
+// The candidate column: --candidate <race-perf summary.json> [--candidate-label],
+// else measures/kpi/candidate.json { "summary": "<path from the program root>",
+// "label": "…" }, kept so a refresh shows the same candidate. Null without one.
+export function readCandidate(values, file = path.join(PROGRAM_ROOT, "measures", "kpi", "candidate.json")) {
+  let spec = values.candidate ? { summary: values.candidate, label: values["candidate-label"] } : readJson(file);
+  if (!spec?.summary) return null;
+  const summary = path.resolve(PROGRAM_ROOT, spec.summary);
+  // A summary that is gone or unreadable leaves the column out, with the reason.
+  const json = readJson(summary);
+  if (!json) return { error: `${spec.summary}: missing or unreadable` };
+  if (classify(json, summary) !== "race-perf") return { error: `${spec.summary}: not a race-perf summary` };
+  let mtimeMs = 0;
+  try { mtimeMs = statSync(summary).mtimeMs; } catch {} // removed since it was read: the result's own date is kept
+  return candidateColumn({ kind: "race-perf", json, file: path.relative(PROGRAM_ROOT, summary), mtimeMs, extra: extraOf("race-perf", json, summary) }, { label: spec.label ?? null });
+}
+
 // manual.json, or { error } when it is there but unreadable (the rows say so).
 export function readManual(file) {
   if (!existsSync(file)) return {};
@@ -101,6 +118,7 @@ async function main() {
     options: {
       from: { type: "string", multiple: true, default: [] }, "no-worktrees": { type: "boolean", default: false },
       manual: { type: "string", default: path.join(PROGRAM_ROOT, "measures", "kpi", "manual.json") },
+      candidate: { type: "string" }, "candidate-label": { type: "string" },
       out: { type: "string", default: path.join(PROGRAM_ROOT, "measures", "kpi") }, print: { type: "boolean", default: false }
     }
   });
@@ -113,10 +131,12 @@ async function main() {
   const at = new Date().toISOString();
   let uptime = null;
   try { uptime = execFileSync("uptime", { encoding: "utf8" }).trim(); } catch {}
-  const md = kpiMarkdown(rows, { at, uptime });
+  const candidate = readCandidate(values);
+  const md = kpiMarkdown(rows, { at, uptime, candidate: candidate?.error ? null : candidate });
+  if (candidate?.error) console.warn(`[kpi-report] candidate column left out: ${candidate.error}`);
   mkdirSync(values.out, { recursive: true });
   const stamp = at.replace(/[:.]/g, "-").slice(0, 19);
-  const json = JSON.stringify({ at, uptime, sources: dirs.map((d) => path.relative(PROGRAM_ROOT, d)), trunk: { ref: "origin/main", head: [...trunk][0] ?? null }, scanned: results.length, rows }, null, 1) + "\n";
+  const json = JSON.stringify({ at, uptime, sources: dirs.map((d) => path.relative(PROGRAM_ROOT, d)), trunk: { ref: "origin/main", head: [...trunk][0] ?? null }, scanned: results.length, rows, candidate }, null, 1) + "\n";
   for (const name of [`kpi-${stamp}`, "latest"]) {
     writeFileSync(path.join(values.out, `${name}.md`), md + "\n");
     writeFileSync(path.join(values.out, `${name}.json`), json);

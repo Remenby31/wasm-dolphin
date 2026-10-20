@@ -162,18 +162,43 @@ const fmt = (v, unit) => {
 };
 const cmp = { higher: "≥", lower: "≤", zero: "=", true: "=" };
 
-export function kpiMarkdown(rows, { at = new Date().toISOString(), uptime = null } = {}) {
+// The candidate column: one race-perf result named by the operator (a PR's
+// head, measured before it merges), its candidate side read by the same rows.
+// Shown beside trunk, never in trunk's place: its own value, verdict, commit
+// (and whether the tree had local changes) and query.
+export function candidateColumn(r, { label = null } = {}) {
+  if (r?.kind !== "race-perf") return null;
+  const served = servedSides(r).candidate;
+  const query = new URLSearchParams(String(r.json.query ?? ""));
+  const flags = ["aot", "wasmjit", "jitoffthread"].filter((k) => query.has(k)).map((k) => `${k}=${query.get(k)}`).join("&");
+  const header = { label: label ?? String(r.json.sides?.candidate ?? "candidate").split("/").pop(), source: r.file, commit: served?.commit ?? null, dirty: served?.dirty ?? null, flags, at: new Date(resultTime(r)).toISOString() };
+  const values = {};
+  for (const row of KPI_ROWS) {
+    if (![row.from].flat().includes("race-perf")) continue;
+    const value = row.read(r.json, "candidate", r.kind);
+    const failures = row.failures?.(r.json, "candidate", r.kind) ?? [];
+    values[row.id] = { value, status: failures.length ? "KO" : statusOf(meets(row, value)), why: failures.length ? `${failures.length} run(s) en échec` : value == null ? row.why?.(r.json, "candidate") ?? null : null };
+  }
+  return { ...header, values };
+}
+
+export function kpiMarkdown(rows, { at = new Date().toISOString(), uptime = null, candidate = null } = {}) {
   const lines = [`# KPI du programme Salon`, "", `Généré le ${at}${uptime ? ` (charge : ${uptime})` : ""} par harness/kpi-report.mjs, dans l'ordre de PROGRAM.md. Seuls les résultats mesurés sur un commit propre de trunk comptent.`, ""];
   let group = null;
   for (const r of rows) {
     if (r.group !== group) {
       group = r.group;
-      lines.push(`## ${group}`, "", "| KPI | Valeur | Cible | État | Nature | Source |", "|---|---|---|---|---|---|");
+      lines.push(`## ${group}`, "", `| KPI | Valeur | Cible | État | Nature | Source |${candidate ? " Candidat |" : ""}`, `|---|---|---|---|---|---|${candidate ? "---|" : ""}`);
     }
     const note = r.why ?? r.detail;
-    lines.push(`| ${r.label} | ${fmt(r.value, r.unit)}${note ? ` (${note})` : ""} | ${cmp[r.better]} ${fmt(r.target, r.unit)} | ${r.status} | ${{ measured: "mesuré", declared: "déclaré", "n/a": "n/a" }[r.nature]} | ${r.source ? `\`${r.source}\`${r.commit ? ` @ ${r.commit.slice(0, 8)}${r.side === "baseline" ? " (côté baseline)" : ""}` : ""}${r.at ? `, ${r.at.slice(0, 16)}` : ""}` : "-"} |`);
+    lines.push(`| ${r.label} | ${fmt(r.value, r.unit)}${note ? ` (${note})` : ""} | ${cmp[r.better]} ${fmt(r.target, r.unit)} | ${r.status} | ${{ measured: "mesuré", declared: "déclaré", "n/a": "n/a" }[r.nature]} | ${r.source ? `\`${r.source}\`${r.commit ? ` @ ${r.commit.slice(0, 8)}${r.side === "baseline" ? " (côté baseline)" : ""}` : ""}${r.at ? `, ${r.at.slice(0, 16)}` : ""}` : "-"} |${candidate ? ` ${candidateCell(candidate.values[r.id], r.unit)} |` : ""}`);
     const next = rows[rows.indexOf(r) + 1];
     if (!next || next.group !== group) lines.push("");
   }
+  if (candidate) {
+    lines.push(`Colonne « Candidat » : \`${candidate.label}\`${candidate.flags ? ` (${candidate.flags})` : ""}, \`${candidate.source}\` @ ${candidate.commit ? candidate.commit.slice(0, 8) : "?"}${candidate.dirty ? " avec modifications locales" : ""}, ${candidate.at.slice(0, 16)}. Mesure d'une branche avant fusion, à titre de comparaison : elle ne compte pas dans l'état des KPI.`, "");
+  }
   return lines.join("\n");
 }
+
+const candidateCell = (c, unit) => (!c ? "" : c.value == null ? `n/a${c.why ? ` (${c.why})` : ""}` : `${fmt(c.value, unit)} (${c.status})${c.why ? ` (${c.why})` : ""}`);

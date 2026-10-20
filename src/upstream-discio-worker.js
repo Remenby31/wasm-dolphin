@@ -1834,8 +1834,8 @@ async function loadCore({
   cachedInterpreterDisableMask = 0,
   wgpuScissoredClearRect = true,
   noJitCache = false,
-  jitOffThread = false,
-  aotCompiler = false,
+  jitOffThread = true,
+  aotCompiler = true,
   aotFirstLaunch = false,
   reportedCoreSelection = null,
   wgpuReplayDiagnostics = false,
@@ -2243,7 +2243,7 @@ async function loadCore({
   // killing the menu-nav interpret stall measured in §28bz/§28cf.
   const _t_idb = performance.now();
   dolphinJitCachePersistenceEnabled = !noJitCache;
-  dolphinAotCompilerEnabled = aotCompiler === true;
+  dolphinAotCompilerEnabled = aotCompiler !== false;
   aotFirstLaunchEnabled = aotFirstLaunch === true;
   dolphinJitBootLoadComplete = false;
   dolphinJitBootLoadedEntries = 0;
@@ -2485,7 +2485,7 @@ async function loadCore({
   }
   // Off-thread compiles need the pthread cache map the persistent cache
   // installs; without it the core compiles in place as before.
-  api.setPpcWasmJitOffThread?.(jitOffThread && !noJitCache ? 1 : 0);
+  api.setPpcWasmJitOffThread?.(jitOffThread !== false && !noJitCache ? 1 : 0);
   // Region modules (P4) run in the dispatcher with aot=1, their only producer.
   api.setJitRegionsEnabled?.(aotFirstLaunch ? 1 : 0);
   api.setPpcProfileEnabled?.(ppcProfile ? 1 : 0);
@@ -7101,8 +7101,8 @@ function getDolphinAotCompiler() {
   }
   return dolphinAotCompiler;
 }
-// Off by default (?aotcompiler=1 turns it on): without it, cached and
-// requested modules compile in place on this worker, as before.
+// On by default, set by loadCore (?aotcompiler=0 turns it off): without it,
+// cached and requested modules compile in place on this worker.
 let dolphinAotCompilerEnabled = false;
 export function setDolphinAotCompilerForTest({ enabled, createWorker } = {}) {
   dolphinAotCompilerEnabled = enabled === true;
