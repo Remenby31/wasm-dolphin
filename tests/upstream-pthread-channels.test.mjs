@@ -189,6 +189,14 @@ test("a compile request is precompiled, kept alive and marked ready in the core'
   assert.equal(new WebAssembly.Instance(kept.module).exports.f(7), 8);
   assert.equal((await precompileDolphinJitModule(plusKey, plusOne)).module, kept.module);
 
+  // a region (P4) asks without bytes: its Module is already here under the key; marked at once, no compile
+  const madeBefore = workersMade, regionMarks = dolphinJitReadyStatsForTest().marks;
+  Atomics.store(heap, READY + 11, 0);
+  await request({ currentTarget: cpu, data: { type: "dolphin-jit-compile-request", key: plusKey, kind: "region", readyPtr: READY, readySlot: 11 } });
+  assert.equal(Atomics.load(heap, READY + 11), 1);
+  assert.equal(dolphinJitReadyStatsForTest().marks - regionMarks, 1);
+  assert.equal(workersMade, madeBefore, "nothing compiled for a region request");
+
   // a forged block key, bytes the engine rejects: not cached, still marked done
   const forged = `wasm-block-sha256-v1:${"0".repeat(64)}`;
   await request({ currentTarget: cpu, data: { type: "dolphin-jit-compile-request", key: forged, bytes: plusOne, kind: "block", readyPtr: READY, readySlot: 7 } });

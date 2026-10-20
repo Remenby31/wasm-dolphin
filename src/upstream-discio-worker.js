@@ -7158,6 +7158,7 @@ function compileDolphinJitModuleOffThread(bytes, deliver, warm) {
 //
 // Contract with the JIT owner (CPU pthread side):
 //   {type: "dolphin-jit-compile-request", key, bytes, kind, readyPtr, readySlot}
+//     (kind "region": no bytes, the Module is already here under key)
 //     asks for that precompilation. The core owns a byte table in its heap at
 //     readyPtr (one byte per slot, slot = first 16 bits of the key's SHA-256),
 //     zeroes the slot before asking and interprets the block meanwhile. Once
@@ -7228,6 +7229,15 @@ async function handleDolphinJitCompileRequest(event) {
   }
   if (!data || data.type !== "dolphin-jit-compile-request") return;
   const key = String(data.key ?? data.hash ?? "");
+  // A region (P4) asks without bytes: its Module is kept alive here under
+  // that key (retain, install). Ready either way: missing, the CPU thread
+  // compiles its own bytes.
+  if (key && data.kind === "region" && !data.bytes) {
+    dolphinJitCompileRequestCount += 1;
+    if (!dolphinJitCacheMap.has(key)) dolphinJitCompileRequestFailures += 1;
+    markDolphinJitModuleReady(data.readyPtr, data.readySlot);
+    return;
+  }
   if (!key || !data.bytes) return;
   dolphinJitCompileRequestCount += 1;
   const firstAsk = !dolphinJitCompileRequestsInFlight.has(key);

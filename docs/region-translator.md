@@ -102,10 +102,12 @@ the oracle tests and the homebrew fuzz check it at every step.
 5. Regions in the dispatcher. `DolphinWeb_AotQueueRegion(bytes, entries,
    ranges, members)` from any thread, which also hashes the bytes (their
    module-cache key); the CPU thread maps queued modules at a slice boundary
-   (8 per slice or 2 ms; a region with an entry HLE hooks, or whose code no
+   (during the first 3 s, slices of up to 8 ms; then up to 8 per slice while
+   the estimate, size x the measured cost per byte, stays under 2.5 ms; a region with an entry HLE hooks, or whose code no
    longer matches the plan's hashes, is left out). With `jitoffthread=1` it
    never compiles one cold: a module not handed over before the boot is
-   asked for with a compile request, and the region is installed once the
+   asked for with a compile request (no bytes: discio holds the Module under
+   the key), and the region is installed once the
    worker set its ready byte, its synchronous compile then a hit in V8's
    native module cache (the block JIT runs the code meanwhile; a request
    never answered compiles synchronously after 5 s, counted as

@@ -7,7 +7,6 @@
 // invalidating covered code drops them. Skipped with a core before 0075.
 
 import assert from "node:assert/strict";
-import { createHash } from "node:crypto";
 import test from "node:test";
 
 import { imageFromDol } from "../src/aot-image.js";
@@ -198,7 +197,9 @@ test("with jitoffthread=1 a region installs once the worker marked its module re
     assert.equal(core.regionCount(), before, "nothing installed before the worker answers");
     assert.ok(requests().length >= 1, "a compile request per region");
     for (const r of requests()) {
-      assert.equal(r.key, `wasm-block-sha256-v1:${createHash("sha256").update(r.bytes).digest("hex")}`, "the key names the bytes");
+      assert.match(r.key, /^wasm-block-sha256-v1:[0-9a-f]{64}$/);
+      assert.equal(r.kind, "region");
+      assert.equal("bytes" in r, false, "no bytes copied: discio holds the Module under the key");
       Atomics.store(core.module.HEAPU8, r.readyPtr + r.readySlot, 1);
     }
     const fallbacks = core.regionStats().installFallbacks;

@@ -17,7 +17,38 @@ diff --git a/Source/Core/Core/PowerPC/CachedInterpreter/CachedInterpreter.cpp b/
  #include <mbedtls/sha256.h>
  
  #ifndef DOLPHIN_WEB_HOT_COUNTERS
-@@ -361,16 +363,26 @@ constexpr u32 DOLPHIN_WEB_DISABLE_INLINE_FMA = 1u << 26;  // 24 and 25: clear-re
+@@ -135,7 +137,7 @@ EM_JS(int, DolphinWeb_CachedInterpreterCompileWasmBlock,
+        int fp_index, int fctiwz_index, int interpret_index, int fastcheck_gpfifo_index,
+        int fast_os_interrupt_call_index, int fast_melee_input_status_call_index,
+        int fast_melee_status_call_index, int fast_melee_service_poll_call_index, int fma_index,
+-       int ready_bits_ptr), {
++       int ready_bits_ptr, int region_request), {
+   // Day-7 Phase B: cache lookup before WebAssembly.Module compilation.
+   // Module._dolphinJitCache is populated on each pthread by the pre-js
+   // receiver (tools/jit-cache-prejs.js) when the discio worker sends a
+@@ -178,14 +180,17 @@ EM_JS(int, DolphinWeb_CachedInterpreterCompileWasmBlock,
+         // not be lost (-4 tells the caller to retry that slot's waiters).
+         released = Atomics.exchange(HEAPU8, ready_bits_ptr + slot, 0) !== 0;
+         try {
+-          self.postMessage({
++          // A region's module is already kept alive by discio under this
++          // key (P4): its request carries no bytes (megabytes to copy).
++          const request = {
+             type: "dolphin-jit-compile-request",
+             key: cacheKey,
+-            bytes: Module.HEAPU8.slice(bytes_ptr, bytes_ptr + bytes_len),
+-            kind: "block",
++            kind: region_request ? "region" : "block",
+             readyPtr: ready_bits_ptr,
+             readySlot: slot
+-          });
++          };
++          if (!region_request) request.bytes = Module.HEAPU8.slice(bytes_ptr, bytes_ptr + bytes_len);
++          self.postMessage(request);
+         } catch (e) {
+           inflight.delete(cacheKey);
+           return -1;
+@@ -361,16 +366,26 @@ constexpr u32 DOLPHIN_WEB_DISABLE_INLINE_FMA = 1u << 26;  // 24 and 25: clear-re
  constexpr u32 COMPILE_THROTTLE_MAX_PER_SLICE = 8;
  constexpr u32 COMPILE_THROTTLE_MAX_US_PER_SLICE = 5000;
  
@@ -46,7 +77,7 @@ diff --git a/Source/Core/Core/PowerPC/CachedInterpreter/CachedInterpreter.cpp b/
  }
  
  u32 s_wasm_block_compile_count = 0;
-@@ -2799,6 +2811,50 @@ constexpr u32 WASM_IMPORT_FMA_INDEX = 19;
+@@ -2799,6 +2814,50 @@ constexpr u32 WASM_IMPORT_FMA_INDEX = 19;
  constexpr u32 WASM_GATHER_PIPE_FLUSH_THRESHOLD =
      GPFifo::GATHER_PIPE_EXTRA_SIZE - GPFifo::GATHER_PIPE_SIZE;
  
@@ -97,7 +128,7 @@ diff --git a/Source/Core/Core/PowerPC/CachedInterpreter/CachedInterpreter.cpp b/
  void EmitLocalGet(std::vector<u8>& body, u32 index)
  {
    body.push_back(0x20);
-@@ -2831,7 +2887,7 @@ struct WasmGprRegCache
+@@ -2831,7 +2890,7 @@ struct WasmGprRegCache
    bool present[32] = {};  // GPR loaded into local WASM_GPR_LOCAL_BASE+i at prologue
    bool dirty[32] = {};    // GPR local written since prologue (sticky, never cleared)
  };
@@ -106,7 +137,7 @@ diff --git a/Source/Core/Core/PowerPC/CachedInterpreter/CachedInterpreter.cpp b/
  
  // §28cz fastmem bounds-check hoist plan. Built per block (gated on the enable
  // bit) BEFORE the emit loop by AnalyzeFastmemHoistPlan, which re-runs the exact
-@@ -2860,7 +2916,7 @@ struct WasmFastmemHoistPlan
+@@ -2860,7 +2919,7 @@ struct WasmFastmemHoistPlan
    };
    std::unordered_map<const PPCAnalyst::CodeOp*, OpInfo> ops;
  };
@@ -115,7 +146,7 @@ diff --git a/Source/Core/Core/PowerPC/CachedInterpreter/CachedInterpreter.cpp b/
  
  inline bool RegCacheGprIndex(u32 offset, u32* out_index)
  {
-@@ -4051,8 +4107,7 @@ void EmitFastCheckGatherPipeIfFull(std::vector<u8>& body, const WasmStateLayout&
+@@ -4051,8 +4110,7 @@ void EmitFastCheckGatherPipeIfFull(std::vector<u8>& body, const WasmStateLayout&
    EmitLocalGet(body, 0);
    EmitI32Const(body, 0);
    EmitI32Const(body, 0);
@@ -125,7 +156,7 @@ diff --git a/Source/Core/Core/PowerPC/CachedInterpreter/CachedInterpreter.cpp b/
    body.push_back(0x0b);
  }
  
-@@ -4108,8 +4163,7 @@ void EmitReadU32MaybeDirect(std::vector<u8>& body, const WasmStateLayout& layout
+@@ -4108,8 +4166,7 @@ void EmitReadU32MaybeDirect(std::vector<u8>& body, const WasmStateLayout& layout
    body.push_back(0x05);
    EmitLocalGet(body, 0);
    EmitLocalGet(body, 1);
@@ -135,7 +166,7 @@ diff --git a/Source/Core/Core/PowerPC/CachedInterpreter/CachedInterpreter.cpp b/
    body.push_back(0x0b);
  }
  
-@@ -4132,8 +4186,7 @@ void EmitReadU8MaybeDirect(std::vector<u8>& body, const WasmStateLayout& layout)
+@@ -4132,8 +4189,7 @@ void EmitReadU8MaybeDirect(std::vector<u8>& body, const WasmStateLayout& layout)
    body.push_back(0x05);
    EmitLocalGet(body, 0);
    EmitLocalGet(body, 1);
@@ -145,7 +176,7 @@ diff --git a/Source/Core/Core/PowerPC/CachedInterpreter/CachedInterpreter.cpp b/
    body.push_back(0x0b);
  }
  
-@@ -4158,8 +4211,7 @@ void EmitReadU16MaybeDirect(std::vector<u8>& body, const WasmStateLayout& layout
+@@ -4158,8 +4214,7 @@ void EmitReadU16MaybeDirect(std::vector<u8>& body, const WasmStateLayout& layout
    body.push_back(0x05);
    EmitLocalGet(body, 0);
    EmitLocalGet(body, 1);
@@ -155,7 +186,7 @@ diff --git a/Source/Core/Core/PowerPC/CachedInterpreter/CachedInterpreter.cpp b/
    body.push_back(0x0b);
  }
  
-@@ -4200,8 +4252,7 @@ void EmitWriteU32MaybeDirect(std::vector<u8>& body, const WasmStateLayout& layou
+@@ -4200,8 +4255,7 @@ void EmitWriteU32MaybeDirect(std::vector<u8>& body, const WasmStateLayout& layou
    EmitLocalGet(body, 0);
    EmitLocalGet(body, 1);
    EmitLocalGet(body, 2);
@@ -165,7 +196,7 @@ diff --git a/Source/Core/Core/PowerPC/CachedInterpreter/CachedInterpreter.cpp b/
    body.push_back(0x0b);
  }
  
-@@ -4226,8 +4277,7 @@ void EmitWriteU8MaybeDirect(std::vector<u8>& body, const WasmStateLayout& layout
+@@ -4226,8 +4280,7 @@ void EmitWriteU8MaybeDirect(std::vector<u8>& body, const WasmStateLayout& layout
    EmitLocalGet(body, 0);
    EmitLocalGet(body, 1);
    EmitLocalGet(body, 2);
@@ -175,7 +206,7 @@ diff --git a/Source/Core/Core/PowerPC/CachedInterpreter/CachedInterpreter.cpp b/
    body.push_back(0x0b);
  }
  
-@@ -4254,8 +4304,7 @@ void EmitWriteU16MaybeDirect(std::vector<u8>& body, const WasmStateLayout& layou
+@@ -4254,8 +4307,7 @@ void EmitWriteU16MaybeDirect(std::vector<u8>& body, const WasmStateLayout& layou
    EmitLocalGet(body, 0);
    EmitLocalGet(body, 1);
    EmitLocalGet(body, 2);
@@ -185,7 +216,7 @@ diff --git a/Source/Core/Core/PowerPC/CachedInterpreter/CachedInterpreter.cpp b/
    body.push_back(0x0b);
  }
  
-@@ -4353,7 +4402,9 @@ void EmitImportedHaltCheck(std::vector<u8>& body)
+@@ -4353,7 +4405,9 @@ void EmitImportedHaltCheck(std::vector<u8>& body)
  {
    body.push_back(0x04);
    body.push_back(0x40);
@@ -196,7 +227,7 @@ diff --git a/Source/Core/Core/PowerPC/CachedInterpreter/CachedInterpreter.cpp b/
    body.push_back(0x0f);
    body.push_back(0x0b);
  }
-@@ -4366,8 +4417,7 @@ void EmitSystemCall(std::vector<u8>& body, const PPCAnalyst::CodeOp& op, u32 dow
+@@ -4366,8 +4420,7 @@ void EmitSystemCall(std::vector<u8>& body, const PPCAnalyst::CodeOp& op, u32 dow
    EmitI32Const(body, op.address);
    EmitI32Const(body, downcount);
    EmitI32Const(body, 0);
@@ -206,7 +237,7 @@ diff --git a/Source/Core/Core/PowerPC/CachedInterpreter/CachedInterpreter.cpp b/
    EmitImportedHaltCheck(body);
    EmitRegCacheReloadAll(body);  // helper may have written arbitrary GPRs
  }
-@@ -4381,8 +4431,7 @@ void EmitInterpretCall(std::vector<u8>& body, const PPCAnalyst::CodeOp& op, u32
+@@ -4381,8 +4434,7 @@ void EmitInterpretCall(std::vector<u8>& body, const PPCAnalyst::CodeOp& op, u32
    EmitI32Const(body, op.inst.hex);
    EmitI32Const(body, write_pc ? 1 : 0);
    EmitI32Const(body, downcount);
@@ -216,7 +247,7 @@ diff --git a/Source/Core/Core/PowerPC/CachedInterpreter/CachedInterpreter.cpp b/
    EmitImportedHaltCheck(body);
    EmitRegCacheReloadAll(body);  // interpret may have written arbitrary GPRs
  }
-@@ -4396,8 +4445,7 @@ void EmitFastOsInterruptCall(std::vector<u8>& body, u32 current_pc,
+@@ -4396,8 +4448,7 @@ void EmitFastOsInterruptCall(std::vector<u8>& body, u32 current_pc,
    EmitI32Const(body, target.mode);
    EmitI32Const(body, target.cycles_primary);
    EmitI32Const(body, target.cycles_secondary);
@@ -226,7 +257,7 @@ diff --git a/Source/Core/Core/PowerPC/CachedInterpreter/CachedInterpreter.cpp b/
    EmitImportedHaltCheck(body);
    EmitRegCacheReloadAll(body);  // interrupt handler may write arbitrary GPRs
  }
-@@ -4407,8 +4455,7 @@ void EmitFastMeleeInputStatusCall(std::vector<u8>& body, u32 current_pc)
+@@ -4407,8 +4458,7 @@ void EmitFastMeleeInputStatusCall(std::vector<u8>& body, u32 current_pc)
    EmitRegCacheFlushDirty(body);  // §28cx C1
    EmitLocalGet(body, 0);
    EmitI32Const(body, current_pc);
@@ -236,7 +267,7 @@ diff --git a/Source/Core/Core/PowerPC/CachedInterpreter/CachedInterpreter.cpp b/
    EmitImportedHaltCheck(body);
    EmitRegCacheReloadAll(body);  // HLE call may write arbitrary GPRs
  }
-@@ -4421,8 +4468,7 @@ void EmitFastMeleeStatusCall(std::vector<u8>& body, u32 current_pc, u32 downcoun
+@@ -4421,8 +4471,7 @@ void EmitFastMeleeStatusCall(std::vector<u8>& body, u32 current_pc, u32 downcoun
    EmitI32Const(body, downcount);
    EmitI32Const(body, 0);
    EmitI32Const(body, 0);
@@ -246,7 +277,7 @@ diff --git a/Source/Core/Core/PowerPC/CachedInterpreter/CachedInterpreter.cpp b/
    EmitImportedHaltCheck(body);
    EmitRegCacheReloadAll(body);  // HLE call may write arbitrary GPRs
  }
-@@ -4435,8 +4481,7 @@ void EmitFastMeleeServicePollCall(std::vector<u8>& body, u32 current_pc, u32 dow
+@@ -4435,8 +4484,7 @@ void EmitFastMeleeServicePollCall(std::vector<u8>& body, u32 current_pc, u32 dow
    EmitI32Const(body, downcount);
    EmitI32Const(body, 0);
    EmitI32Const(body, 0);
@@ -256,7 +287,7 @@ diff --git a/Source/Core/Core/PowerPC/CachedInterpreter/CachedInterpreter.cpp b/
    EmitImportedHaltCheck(body);
    EmitRegCacheReloadAll(body);  // HLE call may write arbitrary GPRs
  }
-@@ -4449,8 +4494,7 @@ void EmitFpCall(std::vector<u8>& body, const PPCAnalyst::CodeOp& op, u32 downcou
+@@ -4449,8 +4497,7 @@ void EmitFpCall(std::vector<u8>& body, const PPCAnalyst::CodeOp& op, u32 downcou
    EmitI32Const(body, op.address);
    EmitI32Const(body, downcount);
    EmitI32Const(body, 0);
@@ -266,7 +297,7 @@ diff --git a/Source/Core/Core/PowerPC/CachedInterpreter/CachedInterpreter.cpp b/
    EmitImportedHaltCheck(body);
    // FP ops write FPRs (+CR/FPSCR), not GPRs — reload only the op's GPR outputs
    // (normally none), so the FP-heavy Melee path doesn't pay a full reload.
-@@ -4465,8 +4509,7 @@ void EmitLfsImportCall(std::vector<u8>& body, UGeckoInstruction inst, u32 curren
+@@ -4465,8 +4512,7 @@ void EmitLfsImportCall(std::vector<u8>& body, UGeckoInstruction inst, u32 curren
    EmitI32Const(body, inst.FD);
    EmitI32Const(body, current_pc);
    EmitI32Const(body, downcount);
@@ -276,7 +307,7 @@ diff --git a/Source/Core/Core/PowerPC/CachedInterpreter/CachedInterpreter.cpp b/
    EmitImportedHaltCheck(body);
  }
  
-@@ -4479,8 +4522,7 @@ void EmitStfsImportCall(std::vector<u8>& body, UGeckoInstruction inst, u32 curre
+@@ -4479,8 +4525,7 @@ void EmitStfsImportCall(std::vector<u8>& body, UGeckoInstruction inst, u32 curre
    EmitI32Const(body, inst.FS);
    EmitI32Const(body, current_pc);
    EmitI32Const(body, downcount);
@@ -286,7 +317,7 @@ diff --git a/Source/Core/Core/PowerPC/CachedInterpreter/CachedInterpreter.cpp b/
    EmitImportedHaltCheck(body);
  }
  
-@@ -4492,8 +4534,7 @@ void EmitLfdImportCall(std::vector<u8>& body, UGeckoInstruction inst, u32 curren
+@@ -4492,8 +4537,7 @@ void EmitLfdImportCall(std::vector<u8>& body, UGeckoInstruction inst, u32 curren
    EmitI32Const(body, inst.FD);
    EmitI32Const(body, current_pc);
    EmitI32Const(body, downcount);
@@ -296,7 +327,7 @@ diff --git a/Source/Core/Core/PowerPC/CachedInterpreter/CachedInterpreter.cpp b/
    EmitImportedHaltCheck(body);
  }
  
-@@ -4505,8 +4546,7 @@ void EmitFctiwzImportCall(std::vector<u8>& body, const PPCAnalyst::CodeOp& op, u
+@@ -4505,8 +4549,7 @@ void EmitFctiwzImportCall(std::vector<u8>& body, const PPCAnalyst::CodeOp& op, u
    EmitI32Const(body, op.address);
    EmitI32Const(body, downcount);
    EmitI32Const(body, 0);
@@ -306,7 +337,7 @@ diff --git a/Source/Core/Core/PowerPC/CachedInterpreter/CachedInterpreter.cpp b/
    EmitImportedHaltCheck(body);
  }
  
-@@ -4893,8 +4933,7 @@ void EmitExactMulAddSub(std::vector<u8>& body, const WasmStateLayout& layout,
+@@ -4893,8 +4936,7 @@ void EmitExactMulAddSub(std::vector<u8>& body, const WasmStateLayout& layout,
      EmitStateLoadF64(body, PsOffset(layout, inst.FC, c_lane));
      EmitStateLoadF64(body, PsOffset(layout, inst.FB, lane));
      EmitI32Const(body, (sub ? 1u : 0u) | (single ? 2u : 0u));
@@ -316,7 +347,7 @@ diff --git a/Source/Core/Core/PowerPC/CachedInterpreter/CachedInterpreter.cpp b/
    };
    const auto f64const = [&](double v) { EmitF64ConstBits(body, std::bit_cast<u64>(v)); };
    // TwoSum(x, y) -> hi in `hi`, lo in `lo` (Knuth; exact barring overflow).
-@@ -4940,7 +4979,7 @@ void EmitExactMulAddSub(std::vector<u8>& body, const WasmStateLayout& layout,
+@@ -4940,7 +4982,7 @@ void EmitExactMulAddSub(std::vector<u8>& body, const WasmStateLayout& layout,
      get(hi); op(ADD);
    };
    set(a);
@@ -325,7 +356,7 @@ diff --git a/Source/Core/Core/PowerPC/CachedInterpreter/CachedInterpreter.cpp b/
         DOLPHIN_WEB_DISABLE_INLINE_FMA) != 0)
    {
      emit_import();
-@@ -8086,7 +8125,7 @@ bool IsPpcWasmDirectInstructionCandidate(const PPCAnalyst::CodeOp& op)
+@@ -8086,7 +8128,7 @@ bool IsPpcWasmDirectInstructionCandidate(const PPCAnalyst::CodeOp& op)
    // (cheap, one probe), then narrow to the exact opcode (per-op probes).
    if (inst.OPCD == 31)
    {
@@ -334,7 +365,7 @@ diff --git a/Source/Core/Core/PowerPC/CachedInterpreter/CachedInterpreter.cpp b/
      const bool umbrella_off = (disable_mask & DOLPHIN_WEB_DISABLE_WASMCARRY) != 0;
      switch (inst.SUBOP10)
      {
-@@ -8617,6 +8656,11 @@ std::vector<u8> BuildWasmCachedInterpreterBlock(std::span<const PPCAnalyst::Code
+@@ -8617,6 +8659,11 @@ std::vector<u8> BuildWasmCachedInterpreterBlock(std::span<const PPCAnalyst::Code
    }
    EmitI32Const(body, 0);
    body.push_back(0x0b);
@@ -346,7 +377,7 @@ diff --git a/Source/Core/Core/PowerPC/CachedInterpreter/CachedInterpreter.cpp b/
  
    std::vector<u8> code;
    code.push_back(0x01);
-@@ -8630,7 +8674,11 @@ std::vector<u8> BuildWasmCachedInterpreterBlock(std::span<const PPCAnalyst::Code
+@@ -8630,7 +8677,11 @@ std::vector<u8> BuildWasmCachedInterpreterBlock(std::span<const PPCAnalyst::Code
    return bytes;
  }
  
@@ -355,11 +386,11 @@ diff --git a/Source/Core/Core/PowerPC/CachedInterpreter/CachedInterpreter.cpp b/
 +// ready_bits_ptr as for a block: 0 compiles synchronously, otherwise a miss
 +// in the pthread's module map is posted to the compiler worker (-3 / -4).
 +int CompileWasmModuleWithKey(const std::vector<u8>& bytes, const std::array<char, 86>& cache_key,
-+                             int ready_bits_ptr)
++                             int ready_bits_ptr, bool region = false)
  {
    const auto read_u32_index = static_cast<int>(
        reinterpret_cast<std::uintptr_t>(&DolphinWeb_CachedInterpreterReadU32));
-@@ -8670,7 +8718,6 @@ int CompileWasmCachedInterpreterBlockForTest(const std::vector<u8>& bytes, bool
+@@ -8670,7 +8721,6 @@ int CompileWasmCachedInterpreterBlockForTest(const std::vector<u8>& bytes, bool
        reinterpret_cast<std::uintptr_t>(&DolphinWeb_CachedInterpreterFastMeleeStatusCall));
    const auto fast_melee_service_poll_call_index = static_cast<int>(
        reinterpret_cast<std::uintptr_t>(&DolphinWeb_CachedInterpreterFastMeleeServicePollCall));
@@ -367,14 +398,14 @@ diff --git a/Source/Core/Core/PowerPC/CachedInterpreter/CachedInterpreter.cpp b/
    return DolphinWeb_CachedInterpreterCompileWasmBlock(
        bytes.data(), static_cast<int>(bytes.size()), cache_key.data(), read_u32_index,
        write_u32_index, read_u8_index, write_u8_index, read_u16_index, write_u16_index, lfs_index,
-@@ -8678,9 +8725,16 @@ int CompileWasmCachedInterpreterBlockForTest(const std::vector<u8>& bytes, bool
+@@ -8678,9 +8728,16 @@ int CompileWasmCachedInterpreterBlockForTest(const std::vector<u8>& bytes, bool
        fastcheck_gpfifo_index, fast_os_interrupt_call_index, fast_melee_input_status_call_index,
        fast_melee_status_call_index, fast_melee_service_poll_call_index,
        static_cast<int>(reinterpret_cast<std::uintptr_t>(&DolphinWeb_CachedInterpreterFma)),
 -      s_wasm_off_thread_compile.load(std::memory_order_relaxed) && !in_place ?
 -          static_cast<int>(DolphinWeb_JitReadyBitsPtr()) :
 -          0);
-+      ready_bits_ptr);
++      ready_bits_ptr, region ? 1 : 0);
 +}
 +
 +int CompileWasmCachedInterpreterBlockForTest(const std::vector<u8>& bytes, bool in_place = false)
@@ -387,7 +418,7 @@ diff --git a/Source/Core/Core/PowerPC/CachedInterpreter/CachedInterpreter.cpp b/
  }
  
  WasmStateLayout MakeWasmBlockTestLayout(PowerPC::PowerPCState& state, u8* ram, u32 ram_size)
-@@ -8806,9 +8860,703 @@ void CachedInterpreter::Shutdown()
+@@ -8806,9 +8863,748 @@ void CachedInterpreter::Shutdown()
  #line 7779
  }
  
@@ -493,6 +524,9 @@ diff --git a/Source/Core/Core/PowerPC/CachedInterpreter/CachedInterpreter.cpp b/
 +  std::array<char, 86> key{};
 +  u32 slot = 0;
 +  std::chrono::steady_clock::time_point posted{};
++  // Its ready byte was set, then cleared by another key's post (-4) before
++  // this thread saw it: the module is there, compiled from its own bytes.
++  bool signalled = false;
 +};
 +std::mutex s_region_queue_mutex;
 +std::vector<PendingRegion> s_region_queue;
@@ -507,6 +541,30 @@ diff --git a/Source/Core/Core/PowerPC/CachedInterpreter/CachedInterpreter.cpp b/
 +// host time, not slices: a slice is tens of microseconds, and the worker
 +// compiles the boot's regions one after the other.
 +std::chrono::milliseconds s_region_ready_wait{5000};  // tests shorten it
++// The boot: the first seconds after the CPU thread first serves installs
++// (first image at ~1.3 s). What is ready then installs in slices of up to
++// REGION_BOOT_SLICE_MS (no visible freeze of the title screen), and the worst
++// of them is reported apart from installMaxSliceMs.
++constexpr std::chrono::milliseconds REGION_BOOT_WINDOW{3000};
++constexpr double REGION_BOOT_SLICE_MS = 8.0;
++std::optional<std::chrono::steady_clock::time_point> s_region_service_start;
++// Past the boot a slice stops installing when the next module's estimated
++// cost would take it over this; estimate = size x the measured cost per byte
++// (copy out of the heap and V8's lookup by wire bytes, ~0.7 ms/MB).
++constexpr double REGION_SLICE_TARGET_MS = 2.5;
++double s_install_ms_per_byte = 0.8e-6;
++double s_region_boot_max_slice_ms = 0;  // published in the header's spare u32
++u32 s_region_install_fallbacks = 0;     // likewise
++
++// Regions waiting on `slot`, whose byte a post of another key just cleared.
++void SignalRegionWaiters(u32 slot)
++{
++  for (auto& waiting : s_region_waiting)
++  {
++    if (waiting.slot == slot)
++      waiting.signalled = true;
++  }
++}
 +// Installs at a slice boundary stop once this much host time went into
 +// compiling them (the rest waits for the next slice), at most this many.
 +constexpr u32 REGION_INSTALLS_PER_SLICE = 8;
@@ -521,8 +579,9 @@ diff --git a/Source/Core/Core/PowerPC/CachedInterpreter/CachedInterpreter.cpp b/
 +  u32 version = 2;
 +  u32 size_bytes = 256;
 +  u32 sample_every = 0;
-+  // Regions compiled synchronously because their ready byte never came
-+  // (s_region_ready_wait): a cold compile on the CPU thread each.
++  // Low 16 bits: regions compiled synchronously because their ready byte
++  // never came (s_region_ready_wait), a cold compile on the CPU thread each.
++  // High 16 bits: the longest install slice of the boot window, in 0.1 ms.
 +  u32 install_fallbacks = 0;
 +  double region_cycles = 0, total_cycles = 0, region_time_ms = 0, dispatch_time_ms = 0,
 +         block_time_ms = 0, interp_time_ms = 0, region_calls = 0, region_not_entry = 0,
@@ -538,7 +597,7 @@ diff --git a/Source/Core/Core/PowerPC/CachedInterpreter/CachedInterpreter.cpp b/
 +  // time spent waiting there (CoreTiming::Idle, out of block time), and the
 +  // three block-start PCs whose calls outside regions took the most cycles
 +  // (pc, cycles), filled when read; then the longest install time in one
-+  // slice past the boot (2 s of guest time; ms) and the installs that took
++  // slice past the boot (REGION_BOOT_WINDOW; ms) and the installs that took
 +  // under 0.5 ms (a hit in V8's
 +  // native module cache, the bytes compiled before by the worker).
 +  double idle_cycles = 0;
@@ -683,7 +742,7 @@ diff --git a/Source/Core/Core/PowerPC/CachedInterpreter/CachedInterpreter.cpp b/
 +{
 +  const auto start = std::chrono::steady_clock::now();
 +  const int handle = pending.key[0] ?
-+                         CompileWasmModuleWithKey(pending.bytes, pending.key, ready_bits_ptr) :
++                         CompileWasmModuleWithKey(pending.bytes, pending.key, ready_bits_ptr, true) :
 +                         CompileWasmCachedInterpreterBlockForTest(pending.bytes, true);
 +  const double ms =
 +      std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now() - start).count();
@@ -699,6 +758,7 @@ diff --git a/Source/Core/Core/PowerPC/CachedInterpreter/CachedInterpreter.cpp b/
 +        if (waiting.bit == pending.slot)
 +          waiting.checks = UINT32_MAX - 1;
 +      }
++      SignalRegionWaiters(pending.slot);
 +    }
 +    return false;
 +  }
@@ -710,6 +770,8 @@ diff --git a/Source/Core/Core/PowerPC/CachedInterpreter/CachedInterpreter.cpp b/
 +  }
 +  if (ms < 0.5)
 +    s_region_stats.installs_fast += 1;
++  if (handle > 0 && path != InstallPath::Cold && pending.bytes.size() >= (256u << 10))
++    s_install_ms_per_byte = 0.8 * s_install_ms_per_byte + 0.2 * ms / pending.bytes.size();
 +  if (s_install_samples.count < s_install_samples.capacity)
 +  {
 +    s_install_samples.samples[s_install_samples.count] = {
@@ -730,32 +792,44 @@ diff --git a/Source/Core/Core/PowerPC/CachedInterpreter/CachedInterpreter.cpp b/
 +{
 +  if (s_region_waiting.empty() && !s_region_queue_nonempty.load(std::memory_order_acquire))
 +    return;
++  const auto now = std::chrono::steady_clock::now();
++  if (!s_region_service_start)
++    s_region_service_start = now;
++  const bool boot = now - *s_region_service_start < REGION_BOOT_WINDOW;
 +  const int ready_bits_ptr = s_wasm_off_thread_compile.load(std::memory_order_relaxed) ?
 +                                 static_cast<int>(DolphinWeb_JitReadyBitsPtr()) :
 +                                 0;
 +  double spent_ms = 0;
 +  u32 n = 0;
++  // Room in this slice for a module of `bytes`: always for the first one.
++  const auto room = [&](std::size_t bytes) {
++    const double estimate = spent_ms + bytes * s_install_ms_per_byte;
++    return n == 0 || (boot ? estimate <= REGION_BOOT_SLICE_MS :
++                             n < REGION_INSTALLS_PER_SLICE && estimate <= REGION_SLICE_TARGET_MS);
++  };
 +  // Waiting regions whose module the worker has compiled (or that waited too
 +  // long) first: their compile is the cheap one.
-+  for (std::size_t i = 0; i < s_region_waiting.size() && n < REGION_INSTALLS_PER_SLICE &&
-+                          spent_ms < REGION_INSTALL_BUDGET_MS;)
++  for (std::size_t i = 0; i < s_region_waiting.size();)
 +  {
 +    PendingRegion& pending = s_region_waiting[i];
 +    const bool ready =
 +        s_wasm_jit_ready_bits[pending.slot].load(std::memory_order_acquire) != 0;
-+    const bool expired = std::chrono::steady_clock::now() - pending.posted > s_region_ready_wait;
-+    if (!ready && !expired)
++    const bool expired = now - pending.posted > s_region_ready_wait;
++    if ((!ready && !pending.signalled && !expired) || !room(pending.bytes.size()))
 +    {
 +      ++i;
 +      continue;
 +    }
 +    ++n;
-+    if (!ready)
-+      s_region_stats.install_fallbacks += 1;
++    const bool answered = ready || pending.signalled;
++    if (!answered)
++      s_region_install_fallbacks += 1;
++    // Its own bytes, synchronously, unless the byte is still set (the request
++    // path then clears the in-flight mark): a hit either way once answered.
 +    // Waited past a slice where the game may have reloaded its code.
 +    if (!RegionInstallable(pending) ||
 +        TryInstallRegion(pending, ready && ready_bits_ptr ? ready_bits_ptr : 0, spent_ms,
-+                         ready ? InstallPath::Ready : InstallPath::Cold))
++                         answered ? InstallPath::Ready : InstallPath::Cold))
 +    {
 +      s_region_waiting[i] = std::move(s_region_waiting.back());
 +      s_region_waiting.pop_back();
@@ -765,12 +839,12 @@ diff --git a/Source/Core/Core/PowerPC/CachedInterpreter/CachedInterpreter.cpp b/
 +      ++i;
 +    }
 +  }
-+  for (; n < REGION_INSTALLS_PER_SLICE && spent_ms < REGION_INSTALL_BUDGET_MS; ++n)
++  for (;; ++n)
 +  {
 +    PendingRegion pending;
 +    {
 +      std::lock_guard lock(s_region_queue_mutex);
-+      if (s_region_queue.empty())
++      if (s_region_queue.empty() || !room(s_region_queue.front().bytes.size()))
 +        break;
 +      pending = std::move(s_region_queue.front());
 +      s_region_queue.erase(s_region_queue.begin());
@@ -780,16 +854,15 @@ diff --git a/Source/Core/Core/PowerPC/CachedInterpreter/CachedInterpreter.cpp b/
 +      continue;
 +    // A module handed to this pthread before the boot is installed at once;
 +    // any other is posted to the compiler worker and waits for its byte.
-+    pending.posted = std::chrono::steady_clock::now();
++    pending.posted = now;
 +    if (!TryInstallRegion(pending, pending.key[0] ? ready_bits_ptr : 0, spent_ms,
 +                          InstallPath::First))
 +      s_region_waiting.push_back(std::move(pending));
 +  }
-+  // The boot (before the first image) may install synchronously: what the
-+  // cache hands over before it is in the pthread's map, the rest is not.
-+  auto& system = Core::System::GetInstance();
-+  if (system.GetCoreTiming().GetTicks() >= 2 * u64{system.GetSystemTimers().GetTicksPerSecond()})
++  if (!boot)
 +    s_region_stats.install_max_slice_ms = std::max(s_region_stats.install_max_slice_ms, spent_ms);
++  else
++    s_region_boot_max_slice_ms = std::max(s_region_boot_max_slice_ms, spent_ms);
 +}
 +
 +// CPU thread, at a slice boundary: a pending stats request (reset, sampling)
@@ -800,6 +873,9 @@ diff --git a/Source/Core/Core/PowerPC/CachedInterpreter/CachedInterpreter.cpp b/
 +
 +void PublishRegionStats()
 +{
++  s_region_stats.install_fallbacks =
++      std::min<u32>(s_region_install_fallbacks, 0xffff) |
++      (std::min<u32>(static_cast<u32>(s_region_boot_max_slice_ms * 10 + 0.5), 0xffff) << 16);
 +  s_region_stats.regions_queued = s_regions_queued.load(std::memory_order_relaxed);
 +  s_region_stats.entries_mapped = static_cast<double>(s_region_at.size());
 +  s_region_stats.regions_enabled = s_regions_enabled.load(std::memory_order_relaxed) ? 1 : 0;
@@ -1091,7 +1167,7 @@ diff --git a/Source/Core/Core/PowerPC/CachedInterpreter/CachedInterpreter.cpp b/
  #if DOLPHIN_WEB_STATIC_EXIT_LINKS && DOLPHIN_WEB_STATIC_EXIT_LINK_STATS
    s_static_link_stats.InitialDispatch(normal_entry == nullptr);
  #endif
-@@ -9078,7 +9826,8 @@ void CachedInterpreter::ExecuteOneBlock([[maybe_unused]] bool allow_redispatch)
+@@ -9078,7 +9874,8 @@ void CachedInterpreter::ExecuteOneBlock([[maybe_unused]] bool allow_redispatch)
    }
  #ifdef __EMSCRIPTEN__
      if (redispatch_enabled && m_ppc_state.downcount > 0 &&
@@ -1101,7 +1177,7 @@ diff --git a/Source/Core/Core/PowerPC/CachedInterpreter/CachedInterpreter.cpp b/
      {
  #if DOLPHIN_WEB_STATIC_EXIT_LINKS
        const auto static_link_result = static_link_scope.Resolve(
-@@ -9093,7 +9842,7 @@ void CachedInterpreter::ExecuteOneBlock([[maybe_unused]] bool allow_redispatch)
+@@ -9093,7 +9890,7 @@ void CachedInterpreter::ExecuteOneBlock([[maybe_unused]] bool allow_redispatch)
  #endif
  #else
  #line 8054
@@ -1110,7 +1186,7 @@ diff --git a/Source/Core/Core/PowerPC/CachedInterpreter/CachedInterpreter.cpp b/
  #endif
  #line 8055
        if (!next)
-@@ -9166,6 +9915,8 @@ void CachedInterpreter::Run()
+@@ -9166,6 +9963,8 @@ void CachedInterpreter::Run()
      }
      // The compile budget has been replenished and no cached callback is active.
      RetryDeferredWasmBlocks(*this);
@@ -1119,7 +1195,7 @@ diff --git a/Source/Core/Core/PowerPC/CachedInterpreter/CachedInterpreter.cpp b/
      // Start new timing slice
      // Metrics-off runs avoid all per-slice clocks. BeginSlice also resets
      // the exclusive wait/work attribution for this one CoreTiming slice.
-@@ -9179,10 +9930,65 @@ void CachedInterpreter::Run()
+@@ -9179,10 +9978,65 @@ void CachedInterpreter::Run()
      const auto _advance_end =
          _profile_slice ? std::chrono::steady_clock::now() : std::chrono::steady_clock::time_point{};
  
@@ -1185,7 +1261,7 @@ diff --git a/Source/Core/Core/PowerPC/CachedInterpreter/CachedInterpreter.cpp b/
  #if DOLPHIN_WEB_STATIC_EXIT_LINKS && DOLPHIN_WEB_STATIC_EXIT_LINK_STATS
      s_static_link_stats.Slice();
  #endif
-@@ -9365,7 +10171,27 @@ s32 CachedInterpreter::CheckIdle(PowerPC::PowerPCState& ppc_state,
+@@ -9365,7 +10219,27 @@ s32 CachedInterpreter::CheckIdle(PowerPC::PowerPCState& ppc_state,
  {
    const auto& [core_timing, idle_pc] = operands;
    if (ppc_state.npc == idle_pc)
@@ -1213,7 +1289,31 @@ diff --git a/Source/Core/Core/PowerPC/CachedInterpreter/CachedInterpreter.cpp b/
    return sizeof(AnyCallback) + sizeof(operands);
  }
  
-@@ -12422,8 +13248,19 @@ void ApplyArmedWasmPolicy()
+@@ -12119,7 +12993,7 @@ bool CachedInterpreter::TryWriteWasmBlock(u32 nextPC)
+       fastcheck_gpfifo_index, fast_os_interrupt_call_index, fast_melee_input_status_call_index,
+       fast_melee_status_call_index, fast_melee_service_poll_call_index,
+       static_cast<int>(reinterpret_cast<std::uintptr_t>(&DolphinWeb_CachedInterpreterFma)),
+-      off_thread ? static_cast<int>(DolphinWeb_JitReadyBitsPtr()) : 0);
++      off_thread ? static_cast<int>(DolphinWeb_JitReadyBitsPtr()) : 0, 0);
+   if (handle == -3 || handle == -4)
+   {
+     // Posted to the compiler worker: interpret now, retry once its byte is set.
+@@ -12129,12 +13003,13 @@ bool CachedInterpreter::TryWriteWasmBlock(u32 nextPC)
+     if (handle == -4)
+     {
+       // This post cleared a 1 another key of the slot was waiting for: let
+-      // those blocks retry now (each recompiles its own bytes).
++      // those blocks and regions retry now (each recompiles its own bytes).
+       for (auto& waiting : s_wasm_off_thread_waiting)
+       {
+         if (waiting.bit == slot)
+           waiting.checks = UINT32_MAX - 1;
+       }
++      SignalRegionWaiters(slot);
+     }
+     s_wasm_off_thread_waiting.push_back({js.blockStart, static_cast<u32>(m_ppc_state.feature_flags),
+                                          js.curBlock->normalEntry, slot, 0});
+@@ -12422,8 +13297,19 @@ void ApplyArmedWasmPolicy()
      ApplyArmedWasmPolicyAt(Core::System::GetInstance().GetMovie().GetCurrentFrame());
  }
  
@@ -1235,7 +1335,7 @@ diff --git a/Source/Core/Core/PowerPC/CachedInterpreter/CachedInterpreter.cpp b/
  // Serves a dump request in place (the test has no CPU thread loop running):
  // returns the number of triplets, or -1 when the core is not the
  // CachedInterpreter.
-@@ -12437,6 +13274,8 @@ extern "C" EMSCRIPTEN_KEEPALIVE int DolphinWeb_JitDumpBlocksNowForTest()
+@@ -12437,6 +13323,8 @@ extern "C" EMSCRIPTEN_KEEPALIVE int DolphinWeb_JitDumpBlocksNowForTest()
    return static_cast<int>(DolphinWeb_JitDumpBlocksCount());
  }
  
@@ -1244,7 +1344,7 @@ diff --git a/Source/Core/Core/PowerPC/CachedInterpreter/CachedInterpreter.cpp b/
  extern "C" EMSCRIPTEN_KEEPALIVE double DolphinWeb_JitArmedStepForTest(double frame)
  {
    ApplyArmedWasmPolicyAt(static_cast<u64>(frame));
-@@ -13850,6 +14689,580 @@ extern "C" EMSCRIPTEN_KEEPALIVE int DolphinWeb_JitOracleRun(u32 word_count, u32
+@@ -13850,6 +14738,580 @@ extern "C" EMSCRIPTEN_KEEPALIVE int DolphinWeb_JitOracleRun(u32 word_count, u32
    return std::memcmp(s_jit_oracle.interp, s_jit_oracle.jit, sizeof s_jit_oracle.jit) == 0 ? 0 : 1;
  }
  
@@ -1825,7 +1925,7 @@ diff --git a/Source/Core/Core/PowerPC/CachedInterpreter/CachedInterpreter.cpp b/
  extern "C" int RunPpcWasmFloatCompareSmoke()
  {
    auto& state = Core::System::GetInstance().GetPPCState();
-@@ -14248,6 +15661,7 @@ void CachedInterpreter::ClearCache()
+@@ -14248,6 +15710,7 @@ void CachedInterpreter::ClearCache()
  #ifdef __EMSCRIPTEN__
    s_deferred_wasm_queues.erase(this);
    ResetOffThreadCompiles();

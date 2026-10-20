@@ -6,8 +6,10 @@
 // 2026-10-19 (little-endian, 8-byte aligned, counters cumulative since the
 // last reset):
 //   +0 u32 version (1 or 2, see DIAGNOSTICS_BY_VERSION)  +4 u32 sizeBytes
-//   +8 u32 sampleEvery  +12 u32 reserved (v2: installFallbacks, regions
-//   compiled cold because the worker never marked them ready; 0 before)
+//   +8 u32 sampleEvery  +12 u32 reserved (v2: low 16 bits installFallbacks,
+//   regions compiled cold because the worker never marked them ready; high
+//   16 bits installBootMaxSliceMs x 10, the longest install slice of the boot
+//   window; 0 before)
 //   then f64 from +16: regionCycles, totalCycles, regionTimeMs, dispatchTimeMs,
 //   blockTimeMs, interpTimeMs, regionCalls, regionNotEntry, regionStops
 //   then, when sizeBytes is 256 (0075, 2026-10-20), diagnostics in f64 from
@@ -15,8 +17,8 @@
 //   cycles and the time in CoreTiming::Idle (already taken out of blockTimeMs
 //   by the core), the three costliest block starts outside regions, then
 //   the region installs on the CPU thread: installMaxSliceMs (the longest
-//   time installing in one slice past the boot, 2 s of guest time, since the
-//   install fix of 2026-10-20), installsFast (installs under 0.5 ms, a
+//   time installing in one slice past the boot, the first 3 s of host time
+//   the CPU thread serves installs, since the install fix of 2026-10-20), installsFast (installs under 0.5 ms, a
 //   hit in V8's native module cache) and installMs (host time compiling
 //   region modules); like the pipeline counts, cumulative and never reset.
 // A reset (n >= 0) is applied by the CPU thread at its next slice boundary
@@ -72,7 +74,11 @@ export function decodeRegionStats(bytes) {
   for (const name of F64) if (!Number.isFinite(out[name]) || out[name] < 0) return { error: `region stats: ${name} = ${out[name]}` };
   if (size >= DIAGNOSTICS_BYTES && bytes.length >= DIAGNOSTICS_BYTES) {
     out.diagnostics = Object.fromEntries(DIAGNOSTICS_BY_VERSION[version].map((name, i) => [name, view.getFloat64(REGION_STATS_BYTES + i * 8, true)]));
-    if (version === 2) out.diagnostics.installFallbacks = view.getUint32(12, true);
+    if (version === 2) {
+      const spare = view.getUint32(12, true);
+      out.diagnostics.installFallbacks = spare & 0xffff;
+      out.diagnostics.installBootMaxSliceMs = (spare >>> 16) / 10;
+    }
     for (const name of DIAG_COUNTERS) {
       const v = out.diagnostics[name];
       if (!Number.isFinite(v) || v < 0) return { error: `region stats: ${name} = ${v}` };
