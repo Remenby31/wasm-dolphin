@@ -22,8 +22,8 @@ correctness is established.
 | `fastmemhoist=1` | Hoist per-block fastmem bounds checks. Default-off because a bad proof could permit an out-of-bounds access. |
 | `disable=...` | Disable named JIT helper/optimization categories, or pass a decimal/hex mask, for bisection. |
 | `nojitcache=1` | Skip the browser-side compiled JIT cache/prewarm path for a cold-cache comparison. |
-| `jitoffthread=1` | The CPU thread does not compile a missed block first: it zeroes the key's byte in a shared ready table (`DolphinWeb_JitReadyBitsPtr()`, slot = first 16 SHA bits of the key), posts `dolphin-jit-compile-request {key, bytes, kind, readyPtr, readySlot}` once, and interprets the block. discio stores 1 in that byte once the compiler worker has compiled, warmed and retained the module, or failed; the block is then recompiled synchronously, which hits V8's per-process module cache for the same bytes (or raises the same engine error and is blacklisted). A retried block whose bytes changed compiles in place. The pthread never needs to receive a message (it does not return to its event loop). Needs the JIT cache (ignored with `nojitcache=1`); pair it with `aotcompiler=1` so the modules come back warmed (without it discio compiles them, unwarmed). |
-| `aotcompiler=1` | Compile cached and requested JIT modules in a dedicated compiler worker (`src/aot-compiler-worker.js`) that warms them on scratch memory, and keep them alive so the CPU thread's own compile of the same bytes hits V8's cache. Off by default until its memory cost is measured. |
+| `jitoffthread=0` | **On by default** (user decision, 2026-10-19); `jitoffthread=0` turns it off and the CPU thread compiles misses in place. When on, the CPU thread does not compile a missed block first: it zeroes the key's byte in a shared ready table (`DolphinWeb_JitReadyBitsPtr()`, slot = first 16 SHA bits of the key), posts `dolphin-jit-compile-request {key, bytes, kind, readyPtr, readySlot}` once, and interprets the block. discio stores 1 in that byte once the compiler worker has compiled, warmed and retained the module, or failed; the block is then recompiled synchronously, which hits V8's per-process module cache for the same bytes (or raises the same engine error and is blacklisted). A retried block whose bytes changed compiles in place. The pthread never needs to receive a message (it does not return to its event loop). Needs the JIT cache (ignored with `nojitcache=1`); with `aotcompiler=0` the modules come back from discio unwarmed. |
+| `aotcompiler=0` | **On by default** (user decision, 2026-10-19); `aotcompiler=0` turns it off and modules compile in place on discio, unwarmed. When on, cached and requested JIT modules compile in a dedicated compiler worker (`src/aot-compiler-worker.js`) that warms them on scratch memory, and stay alive so the CPU thread's own compile of the same bytes hits V8's cache. Measured cost on the race, as the default (aotcompiler and jitoffthread on, campaign mem7 of 2026-10-20): about +57 MB median phys_footprint at the end of the window (+51 to +126 MB, peak +50 to +94 MB), worst menu frame about −33 % median. |
 | `metrics=1` | Enable on-screen and validation metrics used to judge behavior and performance. |
 
 ## Defaults and safety
@@ -36,6 +36,9 @@ correctness is established.
 - Register allocation/GPR caching is default-on. `regalloc=0` is the immediate
   escape hatch.
 - Compile smearing is default-on. `smearcompile=0` restores eager compilation.
+- Off-thread compilation is default-on: `jitoffthread=0` makes the CPU thread
+  compile misses in place, `aotcompiler=0` compiles modules on discio without
+  the compiler worker. Pass both to get the pre-2026-10-19 behavior.
 - `forcejit`, mixed-tier selection, and unsafe warmup are experimental
   diagnostics, not implied by the recommended URL.
 - There is no wall-clock fuse: once engaged, the JIT stays on. A block the
