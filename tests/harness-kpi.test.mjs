@@ -11,8 +11,8 @@ import { consistentRead, decodeRegionStats, DIAGNOSTICS, poolStats, regionShares
 import { p4Summary, regionRecord, summarizeP4 } from "../harness/probes/race-perf.mjs";
 import { launchTtff, summarizeTtff } from "../harness/lib/ttff.mjs";
 import { summarizeLaunch, summarizeP7, unavailable } from "../harness/lib/aot-progress.mjs";
-import { classify, KPI_ROWS, kpiMarkdown, kpiTable, servedSides, trunkSide } from "../harness/lib/kpi.mjs";
-import { findResults, loadResults, readManual } from "../harness/kpi-report.mjs";
+import { candidateColumn, classify, KPI_ROWS, kpiMarkdown, kpiTable, servedSides, trunkSide } from "../harness/lib/kpi.mjs";
+import { findResults, loadResults, readCandidate, readManual } from "../harness/kpi-report.mjs";
 
 // The struct the core writes (layout v1), as the worker returns it.
 function statsBytes({ version = 1, size = REGION_STATS_BYTES, sampleEvery = 64, f64 = [] } = {}) {
@@ -314,4 +314,34 @@ test("KPI: the region cycle share counts only outside idle skip", () => {
   const raw = rows("all cycles (core without idleCycles)");
   assert.equal(raw.regionCycleShare.status, "n/a");
   assert.match(raw.regionCycleShare.why, /part brute 93 %, idle compris/);
+});
+
+test("KPI: a candidate column beside trunk, never in its place", (t) => {
+  // An A/B: trunk as baseline (clean T1), a PR head as candidate (dirty B, aot=1).
+  const ab = { kind: "race-perf", file: "ab", json: { probe: "race-perf", at: "2026-10-20T03:11:00Z", query: "video=wgpu&wasmjit=1&aot=1&metrics=1", chrome: { path: "chrome stable", args: "" }, failed: [],
+    sides: { candidate: "/x/wt-jit-0074", baseline: "/x/wt-jit-trunk" }, served: { candidate: served("B", true), baseline: served("T1") },
+    candidate: { cold: { speed: { median: 95.8 }, presentP99Ms: { median: 27 } } }, baseline: { cold: { speed: { median: 83.3 }, presentP99Ms: { median: 27.2 } } },
+    p4: { regionCycleShare: 0.93, regionTimeShare: 0.33, dispatchTimeShare: 0.22, cycleBasis: "outside idle skip" }, baselineP4: null, baselineP4Why: "core has no DolphinWeb_JitRegionStats" } };
+  const rows = kpiTable([ab], {}, { trunk: TRUNK });
+  const byId = Object.fromEntries(rows.map((r) => [r.id, r]));
+  assert.equal(byId.macSpeed.value, 83.3); // trunk stays trunk
+  assert.equal(byId.regionCycleShare.status, "n/a");
+  const c = candidateColumn(ab, { label: "P4 (#43)" });
+  assert.deepEqual([c.commit, c.dirty, c.flags], ["B", true, "aot=1&wasmjit=1"]);
+  assert.deepEqual(c.values.macSpeed, { value: 95.8, status: "KO", why: null });
+  assert.equal(c.values.regionCycleShare.status, "OK");
+  assert.equal(c.values.dispatchTimeShare.value, 0.22);
+  assert.equal(c.values.ttffCold, undefined); // only the rows race-perf feeds
+  const md = kpiMarkdown(rows, { at: "T", candidate: c });
+  assert.match(md, /\| Vitesse course, Mac M4 Pro \| 83\.3 % \|.*\| 95\.8 % \(KO\) \|/);
+  assert.match(md, /Colonne « Candidat » : `P4 \(#43\)` \(aot=1&wasmjit=1\), `ab` @ B avec modifications locales/);
+  assert.doesNotMatch(kpiMarkdown(rows, { at: "T" }), /Candidat/);
+
+  const root = mkdtempSync(path.join(os.tmpdir(), "kpi-candidate-test-"));
+  t.after(() => rmSync(root, { recursive: true, force: true }));
+  writeFileSync(path.join(root, "s.json"), JSON.stringify(ab.json));
+  writeFileSync(path.join(root, "f.json"), JSON.stringify({ probe: "ttff" }));
+  assert.equal(readCandidate({ candidate: path.join(root, "s.json"), "candidate-label": "L" }).values.macSpeed.value, 95.8);
+  assert.match(readCandidate({ candidate: path.join(root, "f.json") }).error, /not a race-perf summary/);
+  assert.equal(readCandidate({}, path.join(root, "absent.json")), null);
 });
