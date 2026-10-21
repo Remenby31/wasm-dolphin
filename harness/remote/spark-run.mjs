@@ -306,7 +306,8 @@ async function main() {
   for (const f of ["--iso", "--state", "--out", "--port", "--runs", "--candidate", "--baseline", "--core-candidate"]) {
     if (positionals.includes(f)) throw new Error(`${f} is set by spark-run, not after --`);
   }
-  if (!["auto", "a", "b"].includes(values.lane)) throw new Error(`--lane ${values.lane}: a, b or auto`);
+  if (values.lane === "b") throw new Error("--lane b: two pairs at once disturb each other on the Spark (A/A of 2026-10-21: σ 1.86 pt), pairs run one at a time in lane a");
+  if (!["auto", "a"].includes(values.lane)) throw new Error(`--lane ${values.lane}: a or auto`);
   const { date, name } = runId(values);
   if (existsSync(path.join(MEASURES, date, name))) throw new Error(`${path.join(MEASURES, date, name)} exists: pick another --name`);
 
