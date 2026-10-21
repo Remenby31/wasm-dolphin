@@ -1,5 +1,5 @@
 diff --git a/Source/Core/Core/CoreTiming.cpp b/Source/Core/Core/CoreTiming.cpp
-index df7f282ee4..29e57bdf14 100644
+index df7f282ee4..8b87a21f47 100644
 --- a/Source/Core/Core/CoreTiming.cpp
 +++ b/Source/Core/Core/CoreTiming.cpp
 @@ -22,6 +22,7 @@
@@ -238,7 +238,7 @@ index df7f282ee4..29e57bdf14 100644
      else
      {
        evt.type->callback(m_system, evt.userdata, m_globals.global_timer - evt.time);
-@@ -502,6 +675,32 @@ void CoreTimingManager::Advance()
+@@ -502,6 +675,38 @@ void CoreTimingManager::Advance()
      evt.type->callback(m_system, evt.userdata, m_globals.global_timer - evt.time);
  #endif
    }
@@ -248,8 +248,10 @@ index df7f282ee4..29e57bdf14 100644
 +    // and end the block. Do what those would do to CoreTiming, then what the
 +    // next Advance() does before running events, as long as the events stay
 +    // transparent, no exception is pending and the CPU keeps running.
++    // SyncOnSkipIdle (off in this port) would sync with the GPU in every
++    // skipped Idle(): never skipped then.
 +    if (!ff_transparent || ppc_state.Exceptions != 0 || m_event_queue.empty() ||
-+        m_system.GetCPU().GetState() != CPU::State::Running)
++        m_config_sync_on_skip_idle || m_system.GetCPU().GetState() != CPU::State::Running)
 +    {
 +      break;
 +    }
@@ -258,9 +260,13 @@ index df7f282ee4..29e57bdf14 100644
 +    const int slice = static_cast<int>(std::min<s64>(
 +        m_event_queue.front().time - m_globals.global_timer, MAX_SLICE_LENGTH));
 +    m_idled_cycles += DowncountToCycles(CyclesToDowncount(slice));
-+    // The next Advance()'s head.
++    // The next Advance()'s head, config changes included (an overclock
++    // change applies from there, as it would).
++    CPUThreadConfigCallback::CheckForConfigChanges();
 +    MoveEvents();
 +    m_globals.global_timer += slice - DowncountToCycles(-ff_loop_downcount);
++    m_last_oc_factor = m_config_oc_factor;
++    m_globals.last_OC_factor_inverted = m_config_oc_inv_factor;
 +    // The skipped Idle() left at the end of that slice.
 +    s_last_idle_exit_ticks = static_cast<u64>(m_globals.global_timer) -
 +                             static_cast<u64>(DowncountToCycles(ff_loop_downcount));
@@ -271,7 +277,7 @@ index df7f282ee4..29e57bdf14 100644
  
    m_is_global_timer_sane = false;
  
-@@ -519,6 +718,24 @@ void CoreTimingManager::Advance()
+@@ -519,6 +724,24 @@ void CoreTimingManager::Advance()
    // until the next slice:
    //        Pokemon Box refuses to boot if the first exception from the audio DMA is received late
    power_pc.CheckExternalExceptions();
@@ -296,7 +302,7 @@ index df7f282ee4..29e57bdf14 100644
  }
  
  TimePoint CoreTimingManager::CalculateTargetHostTimeInternal(s64 target_cycle)
-@@ -722,7 +939,7 @@ void CoreTimingManager::AdjustEventQueueTimes(u32 new_ppc_clock, u32 old_ppc_clo
+@@ -722,7 +945,7 @@ void CoreTimingManager::AdjustEventQueueTimes(u32 new_ppc_clock, u32 old_ppc_clo
    }
  }
  
@@ -305,7 +311,7 @@ index df7f282ee4..29e57bdf14 100644
  {
    if (m_config_sync_on_skip_idle)
    {
-@@ -733,9 +950,54 @@ void CoreTimingManager::Idle()
+@@ -733,9 +956,54 @@ void CoreTimingManager::Idle()
    }
  
    auto& ppc_state = m_system.GetPPCState();
