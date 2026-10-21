@@ -40,6 +40,20 @@ test("matrix: runs are interleaved across cells and local-only games never run i
   assert.throws(() => expandMatrix(spec, { env: {} }), /HB is not set/);
 });
 
+test("matrix: a game's own set applies to every config, over the config's", () => {
+  const spec = {
+    runs: 1,
+    games: [{ id: "peek", iso: "/p.iso", set: { efbaccess: "1", cpu: "single" } }, { id: "plain", iso: "/q.iso" }],
+    configs: [{ id: "sw", preset: "sw-interp", set: { cpu: "dual" } }]
+  };
+  const [peek, plain] = expandMatrix(spec, { env: {} });
+  const q = new URLSearchParams(peek.query);
+  assert.equal(q.get("efbaccess"), "1");
+  assert.equal(q.get("cpu"), "single");
+  assert.equal(new URLSearchParams(plain.query).get("efbaccess"), null);
+  assert.equal(new URLSearchParams(plain.query).get("cpu"), "dual");
+});
+
 // One run sampled twice at a constant speed (no VI timeline: the app's
 // sampled gameSpeed is used and labelled as such), 150 % CPU.
 const run = (speed) => ({ game: "g", config: "c", summary: summarizeRun({ samples: [{ t: 0, speed, frame: 0 }, { t: 1000, speed, frame: 60 }], cpu: [{ total: 150, rendererMax: 100, gpu: 20 }] }) });
