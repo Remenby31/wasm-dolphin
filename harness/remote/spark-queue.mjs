@@ -68,8 +68,16 @@ const writeTicket = (bench, t) => {
   renameSync(`${file}.tmp`, file);
 };
 
-// Core builds of a harness before this queue: spark-build processes with
-// no ticket. They take lane a's lock alone (or wait for it) and compile on
+// A core build is a node process running spark-build.mjs, never the shell
+// that started it (`sh -c 'node …spark-build.mjs …; echo $? > …'`): that
+// shell has no ticket, and counting it as a build without one kept lane b
+// busy for the queue's own builds, which then waited forever (2026-10-21).
+export function isBuildProcess(argv) {
+  return path.basename(argv[0] ?? "") === "node" && /(?:^|\/)harness\/remote\/spark-build\.mjs$/.test(argv[1] ?? "");
+}
+
+// Core builds of a harness before this queue: build processes with no
+// ticket. They take lane a's lock alone (or wait for it) and compile on
 // every core.
 function untrackedBuilds(tickets) {
   if (process.platform !== "linux") return [];
@@ -77,7 +85,8 @@ function untrackedBuilds(tickets) {
   const out = [];
   for (const pid of readdirSync("/proc").filter((n) => /^\d+$/.test(n))) {
     try {
-      if (/harness\/remote\/spark-build\.mjs/.test(readFileSync(`/proc/${pid}/cmdline`, "utf8")) && !ticketed.has(Number(pid))) out.push(Number(pid));
+      const argv = readFileSync(`/proc/${pid}/cmdline`, "utf8").split("\0");
+      if (isBuildProcess(argv) && !ticketed.has(Number(pid))) out.push(Number(pid));
     } catch {} // gone meanwhile
   }
   return out;
