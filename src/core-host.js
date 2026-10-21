@@ -705,6 +705,30 @@ export class EmulatorHost {
     return this.adapter.padFeedback?.(port) ?? null;
   }
 
+  // Streaming (docs/input.md, "Streaming"): a video MediaStreamTrack fed by
+  // the emulation worker itself, one VideoFrame per presented frame, without
+  // the page's main thread in between. Null where the browser has no
+  // MediaStreamTrackGenerator (then use canvas.captureStream()).
+  captureVideoTrack() {
+    if (typeof MediaStreamTrackGenerator !== "function" || !this.adapter.request) return null;
+    if (this.streamTrack && this.streamTrack.readyState === "live") return this.streamTrack;
+    const generator = new MediaStreamTrackGenerator({ kind: "video" });
+    const writable = generator.writable;
+    this.adapter.request("streamCapture", { writable }, [writable]).catch((error) => {
+      this.onStatus(`Worker capture unavailable: ${error?.message ?? error}`);
+      generator.stop();
+    });
+    this.streamTrack = generator;
+    return generator;
+  }
+
+  // { attached, frames, dropped, errors, source, width, height,
+  // captureMsTotal, captureMsMax, lastCaptureAt, lastCoreFrame }
+  async streamCaptureStats() {
+    const r = await this.adapter.request?.("streamCaptureStats");
+    return r?.stats ?? null;
+  }
+
   // Plugs (true) or unplugs (false) the controller on a port. An unplugged
   // port answers "no controller" to the game.
   connectPad(port, connected) {
