@@ -146,14 +146,15 @@ function ssh(host, command, { input, quiet = false } = {}) {
 }
 
 // Push `files` of `root` to ~/salon-bench/<kind>/<key> unless it is there.
-// Extracted aside, then renamed: a half-pushed tree is never used.
+// Extracted aside, then renamed: a half-pushed tree is never used, and of
+// two agents pushing the same content at once, the second keeps the first's.
 function pushTree(host, { root, files, kind, key, identity = null }) {
   const dest = `${BENCH}/${kind}/${key}`;
   if (ssh(host, `test -d ${dest}`, { quiet: true }).status === 0) return { dest, pushed: false };
   for (const f of files) if (DISC.test(f)) throw new Error(`${root}: refusing to push a disc image (${f})`);
   const tar = execFileSync("tar", ["--no-mac-metadata", "-L", "-c", "-C", root, "-T", "-"], { input: files.join("\n"), maxBuffer: 1 << 30, env: { ...process.env, COPYFILE_DISABLE: "1" } });
   const id = identity ? `printf %s ${sh(JSON.stringify(identity))} > "$t"/${IDENTITY_FILE} && ` : "";
-  ssh(host, `set -e; mkdir -p ${BENCH}/${kind}; t=$(mktemp -d ${dest}.tmp-XXXXXX); tar -x -C "$t"; ${id}chmod 755 "$t"; mv -T "$t" ${dest}`, { input: tar });
+  ssh(host, `set -e; mkdir -p ${BENCH}/${kind}; t=$(mktemp -d ${dest}.tmp-XXXXXX); tar -x -C "$t"; ${id}chmod 755 "$t"; mv -T "$t" ${dest} 2>/dev/null || { rm -rf "$t"; test -d ${dest}; }`, { input: tar });
   return { dest, pushed: true };
 }
 
@@ -241,6 +242,9 @@ async function build(host, ref) {
   const harnessFiles = listFiles(REPO_ROOT, HARNESS_ROOTS, HARNESS_SKIP);
   const harness = pushTree(host, { root: REPO_ROOT, files: harnessFiles, kind: "harness", key: contentKey(REPO_ROOT, harnessFiles) });
   const base = `${BENCH}/build/wt/${commit}`;
+  const done = ssh(host, `cat ${base}.exit 2>/dev/null || { test -e ${base}.log && echo running; }`, { quiet: true }).out.trim();
+  if (done === "0") return console.log(`[spark-run] already built: --candidate spark:${commit}`), 0;
+  if (done) throw new Error(`a build of ${commit.slice(0, 12)} is ${done === "running" ? "under way" : `done with exit ${done}`} (~/${base}.log); remove its .log and .exit to build again`);
   ssh(host, `mkdir -p ${BENCH}/build/wt && test ! -e ${base}.log && cd ${harness.dest} && { PATH="$HOME/${BENCH}/node/bin:$PATH" setsid nohup sh -c 'node harness/remote/spark-build.mjs ${commit} >> $HOME/${base}.log 2>&1; echo $? > $HOME/${base}.exit' </dev/null >/dev/null 2>&1 & }`);
   console.log(`[spark-run] building ${commit.slice(0, 12)} on ${host} (waits for the bench's perf lock; ~8 min, first build of a worktree more)`);
   const exit = await followLog(host, base, { lost: `the build goes on there: ssh ${host} cat ~/${base}.log` });
