@@ -68,6 +68,7 @@ export function runId({ name, candidate, baseline, now = new Date() }) {
 // limit). video=null keeps the race CPU-bound as wgpu does on the Mac
 // (PROGRAM.md: video=null is no faster there): so every query's wgpu
 // becomes null, its WebGPU presenter 2d; the rest of the query is kept.
+export const BENCH_LOCK_WAIT = 4 * 3600;
 export const RACE_QUERY = "core=upstream&video=wgpu&presenter=webgpu&cpu=dual&speed=1&wasmjit=1&jitwarmup=60&oc=1";
 export function benchQuery(query) {
   const q = new URLSearchParams(PRESETS[query] ?? query);
@@ -91,6 +92,9 @@ export function benchRaceArgs(args, { keepVideo = false } = {}) {
       if (to !== from) swaps.push({ option: a, from, to });
     } else out.push(a);
   }
+  // The bench queues pairs and builds of several agents: race-perf's 30 min
+  // (one Mac slot) is not enough to wait for a turn there.
+  if (!out.includes("--lock-wait")) out.push("--lock-wait", String(BENCH_LOCK_WAIT));
   if (!hasQuery) {
     const to = keepVideo ? RACE_QUERY : benchQuery(RACE_QUERY);
     out.push("--query", to);

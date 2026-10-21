@@ -59,9 +59,10 @@ test("spark-run: wgpu runs as video=null on the bench, the rest of the query kep
   assert.equal(benchQuery("video=software&presenter=webgpu"), "video=software&presenter=webgpu");
   // No query: the race's own, swapped; --config becomes a --query; --baseline-query too.
   const none = benchRaceArgs(["--warmup", "25"]);
-  assert.deepEqual(none.args, ["--warmup", "25", "--query", benchQuery(RACE_QUERY)]);
+  assert.deepEqual(none.args, ["--warmup", "25", "--lock-wait", "14400", "--query", benchQuery(RACE_QUERY)]);
   assert.equal(none.swaps.length, 1);
   const both = benchRaceArgs(["--config", "wgpu", "--baseline-query", "video=wgpu&aot=1"]);
-  assert.deepEqual(both.args, ["--query", benchQuery("wgpu"), "--baseline-query", "video=null&aot=1&presenter=2d"]);
-  assert.deepEqual(benchRaceArgs(["--query", "video=wgpu"], { keepVideo: true }).args, ["--query", "video=wgpu"]);
+  assert.deepEqual(both.args, ["--query", benchQuery("wgpu"), "--baseline-query", "video=null&aot=1&presenter=2d", "--lock-wait", "14400"]);
+  // An explicit --lock-wait is kept.
+  assert.deepEqual(benchRaceArgs(["--query", "video=wgpu", "--lock-wait", "60"], { keepVideo: true }).args, ["--query", "video=wgpu", "--lock-wait", "60"]);
 });

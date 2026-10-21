@@ -42,7 +42,7 @@ if (!existsSync(wt)) {
 const releases = [];
 for (const dir of [path.join(os.homedir(), "salon-bench", ".perf-lock"), path.join(os.homedir(), "salon-bench", "lanes", "b", ".perf-lock")]) {
   mkdirSync(path.dirname(dir), { recursive: true });
-  releases.push(await acquirePerfLock({ dir, name: `spark-build ${commit.slice(0, 12)}`, waitSec: 3600, log: (m) => console.log(`[spark-build] ${m}`) }));
+  releases.push(await acquirePerfLock({ dir, name: `spark-build ${commit.slice(0, 12)}`, waitSec: 4 * 3600, log: (m) => console.log(`[spark-build] ${m}`) }));
 }
 try {
   run("nice", ["-n", "10", "node", "tools/build-core-repro.mjs", "--install", ...(rest.length ? rest : ["--jobs", "16"])], wt);
