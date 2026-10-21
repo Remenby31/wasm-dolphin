@@ -328,14 +328,179 @@ diff --git a/Source/Core/Core/PowerPC/CachedInterpreter/CachedInterpreter.cpp b/
    s_wasm_fragment_relocs = saved;
    const std::vector<u8>& code = fragment.code;
    const std::size_t n = code.size();
-@@ -15290,7 +15474,9 @@ namespace
+@@ -15119,6 +15303,151 @@ struct RegionFragment
+ //         b/bl out of the fragment: return_call jump(target), else re-enter
+ //         the loop }; no block at pc: return_call dispatch
+ // Halts inside a body return 2.
++constexpr u32 WASM_FRAGMENT_INDEX_LOCAL = 57;  // patch 0083: the next block's index
++// Patch 0083 experiment (lever 1): the fragment's blocks entered through a
++// br_table instead of a compare chain after every block. Compiler version 5.
++constexpr bool REGION_FRAGMENT_SWITCH = true;
++
++// Patch 0083: the fragment as a switch. A block that continues inside the
++// fragment compares its new pc with its static successors (at most two) and
++// sets the next block's index; a br_table on that index enters the block.
++// pc is looked up over every block start only on entry and after a dynamic
++// successor (the compare chain the fragment ran after every block before),
++// and still written to state.pc after every block, as before.
++//   PC = state.pc; IDX = -1
++//   loop $L
++//     if IDX < 0: IDX = k where start_k == PC, else return_call dispatch
++//     block*N; br_table IDX; end; code_0; end; code_1 ... code_{N-1}
++//   code_k: body; state.pc = PC = npc; downcount; then return, return_call
++//           jump, or IDX = j for the successor at PC (-1: none) and br $L
++void EmitRegionFragmentSwitch(const std::vector<FragmentBlock>& blocks,
++                              const std::unordered_set<u32>& starts, u32 pc_offset,
++                              u32 npc_offset, u32 downcount_offset, RegionFragment* out)
++{
++  std::vector<u8>& code = out->code;
++  const auto load = [&](u32 offset) {
++    code.insert(code.end(), {0x28, 0x02});
++    EmitU32Leb(code, offset);
++  };
++  const auto store = [&](u32 offset) {
++    code.insert(code.end(), {0x36, 0x02});
++    EmitU32Leb(code, offset);
++  };
++  const auto reloc_site = [&](u32 kind, u32 value) {
++    code.push_back(0x12);  // return_call
++    out->relocs.push_back({static_cast<u32>(code.size()), kind, value});
++    EmitPaddedU32Leb(code, 0);
++  };
++  const auto br = [&](u32 depth) {
++    code.push_back(0x0c);
++    EmitU32Leb(code, depth);
++  };
++  std::unordered_map<u32, u32> index;
++  for (u32 k = 0; k < blocks.size(); ++k)
++    index.emplace(blocks[k].start, k);
++  const u32 n = static_cast<u32>(blocks.size());
++
++  code.assign(WASM_BLOCK_LOCALS.begin(), WASM_BLOCK_LOCALS.end());
++  code[0] = 0x07;
++  code.insert(code.end(), {0x02, 0x7f});  // PC, IDX
++  EmitLocalGet(code, 0);
++  load(pc_offset);
++  EmitLocalSet(code, WASM_FRAGMENT_PC_LOCAL);
++  EmitI32Const(code, -1);
++  EmitLocalSet(code, WASM_FRAGMENT_INDEX_LOCAL);
++  code.insert(code.end(), {0x03, 0x40});  // loop $L
++  // Lookup over every start when the index is unknown.
++  EmitLocalGet(code, WASM_FRAGMENT_INDEX_LOCAL);
++  EmitI32Const(code, 0);
++  code.insert(code.end(), {0x48, 0x04, 0x40});  // i32.lt_s; if
++  for (u32 k = 0; k < n; ++k)
++  {
++    out->entries.push_back(blocks[k].start);
++    EmitLocalGet(code, WASM_FRAGMENT_PC_LOCAL);
++    EmitI32Const(code, blocks[k].start);
++    code.insert(code.end(), {0x46, 0x04, 0x40});  // i32.eq; if
++    EmitI32Const(code, static_cast<s32>(k));
++    EmitLocalSet(code, WASM_FRAGMENT_INDEX_LOCAL);
++    code.push_back(0x0b);
++  }
++  EmitLocalGet(code, WASM_FRAGMENT_INDEX_LOCAL);
++  EmitI32Const(code, 0);
++  code.insert(code.end(), {0x48, 0x04, 0x40});  // i32.lt_s; if: no block at pc
++  EmitLocalGet(code, 0);
++  reloc_site(2, 0);
++  code.insert(code.end(), {0x0b, 0x0b});  // end if; end if
++  for (u32 k = 0; k < n; ++k)
++    code.insert(code.end(), {0x02, 0x40});  // block b_{n-1} .. b_0
++  EmitLocalGet(code, WASM_FRAGMENT_INDEX_LOCAL);
++  code.push_back(0x0e);  // br_table
++  EmitU32Leb(code, n);
++  for (u32 k = 0; k < n; ++k)
++    EmitU32Leb(code, k);
++  EmitU32Leb(code, n - 1);
++  for (u32 k = 0; k < n; ++k)
++  {
++    const FragmentBlock& b = blocks[k];
++    code.push_back(0x0b);  // end of b_k: code_k follows
++    // Labels between code_k and the loop: b_{k+1} .. b_{n-1}.
++    const u32 to_loop = n - 1 - k;
++    const u32 at = static_cast<u32>(code.size());
++    code.insert(code.end(), b.expr.begin(), b.expr.end());
++    for (const auto& reloc : b.relocs)
++    {
++      const auto it = std::find(WASM_IMPORT_NAMES.begin(), WASM_IMPORT_NAMES.end(), reloc.name);
++      out->relocs.push_back({at + static_cast<u32>(reloc.offset), 0,
++                             static_cast<u32>(it - WASM_IMPORT_NAMES.begin())});
++    }
++    EmitLocalGet(code, 0);
++    EmitLocalGet(code, 0);
++    load(npc_offset);
++    code.push_back(0x22);  // local.tee PC
++    EmitU32Leb(code, WASM_FRAGMENT_PC_LOCAL);
++    store(pc_offset);
++    EmitLocalGet(code, 0);
++    EmitLocalGet(code, 0);
++    load(downcount_offset);
++    EmitI32Const(code, b.cycles);
++    code.push_back(0x6b);  // i32.sub
++    store(downcount_offset);
++    EmitLocalGet(code, 0);
++    load(downcount_offset);
++    EmitI32Const(code, 0);
++    code.insert(code.end(), {0x4c, 0x04, 0x40});  // i32.le_s; if
++    EmitI32Const(code, 0);
++    code.insert(code.end(), {0x0f, 0x0b});  // return; end
++    if (b.exits)
++    {
++      EmitI32Const(code, 0);
++      code.push_back(0x0f);
++      continue;
++    }
++    if (b.jump_target != UINT32_MAX && !starts.contains(b.jump_target))
++    {
++      EmitLocalGet(code, 0);
++      reloc_site(1, b.jump_target);
++      continue;
++    }
++    for (const u32 next : b.successors)
++    {
++      const auto it = index.find(next);
++      if (it == index.end())
++        continue;
++      EmitLocalGet(code, WASM_FRAGMENT_PC_LOCAL);
++      EmitI32Const(code, next);
++      code.insert(code.end(), {0x46, 0x04, 0x40});  // i32.eq; if
++      EmitI32Const(code, static_cast<s32>(it->second));
++      EmitLocalSet(code, WASM_FRAGMENT_INDEX_LOCAL);
++      br(to_loop + 1);
++      code.push_back(0x0b);
++    }
++    EmitI32Const(code, -1);
++    EmitLocalSet(code, WASM_FRAGMENT_INDEX_LOCAL);
++    br(to_loop);
++  }
++  code.insert(code.end(), {0x0b, 0x00, 0x0b});  // end loop; unreachable; end
++}
++
+ bool BuildRegionFragment(Core::System& system, u32 entry_pc, std::span<const u32> ranges,
+                          u32 max_blocks, RegionFragment* out)
+ {
+@@ -15166,6 +15495,11 @@ bool BuildRegionFragment(Core::System& system, u32 entry_pc, std::span<const u32
+   const u32 npc_offset = static_cast<u32>(reinterpret_cast<std::uintptr_t>(&ppc.npc) - base);
+   const u32 downcount_offset =
+       static_cast<u32>(reinterpret_cast<std::uintptr_t>(&ppc.downcount) - base);
++  if (REGION_FRAGMENT_SWITCH)
++  {
++    EmitRegionFragmentSwitch(blocks, starts, pc_offset, npc_offset, downcount_offset, out);
++    return true;
++  }
+   std::vector<u8>& code = out->code;
+   const auto load = [&](u32 offset) {
+     code.insert(code.end(), {0x28, 0x02});
+@@ -15290,7 +15624,10 @@ namespace
  // Bumped whenever the code the translator emits changes (cache keys).
  // 2: modules carry their heap layout (region-layout); version 1 modules have
  // none and would never install.
 -constexpr u32 AOT_COMPILER_VERSION = 2;
 +// 3: region modules chain through env.region_chain and env.table (0083).
 +// 4: FPU ops outside the direct tier stay in the region, interpreted (0083).
-+constexpr u32 AOT_COMPILER_VERSION = 4;
++// 5: a fragment enters its blocks through a br_table (0083).
++constexpr u32 AOT_COMPILER_VERSION = 5;
  constexpr u32 AOT_MAX_FRAGMENT_BYTES = 1u << 20;
  thread_local std::vector<u32> t_aot_out;
  u8* s_aot_ram = nullptr;
