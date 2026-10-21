@@ -49,6 +49,9 @@ if (existsSync(path.join(wt, "cores", "dolphin", "dolphin-core-upstream.wasm")))
   console.log(`[spark-build] already built: --candidate spark:${commit}`);
   process.exit(0);
 }
+// A per-commit worktree from an older spark-build (its own build, maybe
+// under way): never replaced.
+if (existsSync(path.join(wt, ".git"))) throw new Error(`${wt} is a worktree of an older spark-build without a core: remove it (git worktree remove) once nothing builds there`);
 run("git", ["fetch", "--quiet", "origin"], clone);
 // Its turn in the bench's queue, then every lane's lock, always in the same
 // order: a build on 16 jobs would disturb a pair in either cluster.
