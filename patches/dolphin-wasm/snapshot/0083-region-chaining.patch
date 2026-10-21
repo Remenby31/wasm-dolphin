@@ -425,11 +425,12 @@ diff --git a/Source/Core/Core/PowerPC/CachedInterpreter/CachedInterpreter.cpp b/
    if (!ends_with_branch)
    {
      out->successors.push_back(resume_pc);
-@@ -15119,6 +15358,184 @@ struct RegionFragment
+@@ -15119,6 +15358,185 @@ struct RegionFragment
  //         b/bl out of the fragment: return_call jump(target), else re-enter
  //         the loop }; no block at pc: return_call dispatch
  // Halts inside a body return 2.
 +constexpr u32 WASM_FRAGMENT_INDEX_LOCAL = 57;  // patch 0083: the next block's index
++constexpr std::size_t REGION_FRAGMENT_MAX_BYTES = 480000;  // patch 0083: see BuildRegionFragment
 +// Patch 0083 experiment (lever 1): the fragment's blocks entered through a
 +// br_table instead of a compare chain after every block. Compiler version 5.
 +constexpr bool REGION_FRAGMENT_SWITCH = true;
@@ -610,7 +611,30 @@ diff --git a/Source/Core/Core/PowerPC/CachedInterpreter/CachedInterpreter.cpp b/
  bool BuildRegionFragment(Core::System& system, u32 entry_pc, std::span<const u32> ranges,
                           u32 max_blocks, RegionFragment* out)
  {
-@@ -15166,6 +15583,43 @@ bool BuildRegionFragment(Core::System& system, u32 entry_pc, std::span<const u32
+@@ -15133,7 +15551,13 @@ bool BuildRegionFragment(Core::System& system, u32 entry_pc, std::span<const u32
+   std::vector<FragmentBlock> blocks;
+   std::vector<u32> work{entry_pc};
+   std::unordered_set<u32> seen{entry_pc};
+-  while (!work.empty() && blocks.size() < max_blocks)
++  // Patch 0083: a fragment stops taking blocks past this much code. V8's
++  // optimizing tier runs out of memory on functions of ~750 KB and is stable
++  // under 500 KB (research/wasm-jit-targets.md); 3 functions of a commercial
++  // disc reached ~660 KB. The blocks left out run outside the region.
++  std::size_t fragment_bytes = 0;
++  while (!work.empty() && blocks.size() < max_blocks &&
++         fragment_bytes < REGION_FRAGMENT_MAX_BYTES)
+   {
+     const u32 pc = work.front();
+     work.erase(work.begin());
+@@ -15154,6 +15578,7 @@ bool BuildRegionFragment(Core::System& system, u32 entry_pc, std::span<const u32
+       if ((next & 3) == 0 && inside(next) && seen.insert(next).second)
+         work.push_back(next);
+     }
++    fragment_bytes += fb.expr.size() + 64;  // body and its tail
+     blocks.push_back(std::move(fb));
+   }
+   std::unordered_set<u32> starts;
+@@ -15166,6 +15591,43 @@ bool BuildRegionFragment(Core::System& system, u32 entry_pc, std::span<const u32
    const u32 npc_offset = static_cast<u32>(reinterpret_cast<std::uintptr_t>(&ppc.npc) - base);
    const u32 downcount_offset =
        static_cast<u32>(reinterpret_cast<std::uintptr_t>(&ppc.downcount) - base);
@@ -654,7 +678,7 @@ diff --git a/Source/Core/Core/PowerPC/CachedInterpreter/CachedInterpreter.cpp b/
    std::vector<u8>& code = out->code;
    const auto load = [&](u32 offset) {
      code.insert(code.end(), {0x28, 0x02});
-@@ -15290,7 +15744,11 @@ namespace
+@@ -15290,7 +15752,11 @@ namespace
  // Bumped whenever the code the translator emits changes (cache keys).
  // 2: modules carry their heap layout (region-layout); version 1 modules have
  // none and would never install.
