@@ -8,8 +8,9 @@ import os from "node:os";
 import path from "node:path";
 import test from "node:test";
 
-import { acquirePerfLock, readLockOwner } from "../harness/lib/perf-lock.mjs";
-import { num, pairedSpeedChange, sideOrder } from "../harness/probes/race-perf.mjs";
+import { acquirePerfLock, queueDir, readLockOwner, ticketsAhead } from "../harness/lib/perf-lock.mjs";
+import { chromeArgsOf, num, pairedSpeedChange, sideOrder } from "../harness/probes/race-perf.mjs";
+import { stockChrome } from "../harness/lib/kpi.mjs";
 import { summarizePcSamples } from "../src/harness-pc-sampler.js";
 import { hitchList, HITCH_MS } from "../harness/lib/timeline.mjs";
 
@@ -41,6 +42,49 @@ test("perf lock: waits for another holder, then gets it", async (t) => {
   const release = await acquirePerfLock({ dir, name: "test", waitSec: 60, sleep: async () => { polls += 1; if (polls === 2) rmSync(dir, { recursive: true }); } });
   assert.equal(polls, 2);
   release();
+});
+
+test("perf lock: first come, first served, whoever polls faster", async (t) => {
+  const dir = lockDir(t);
+  mkdirSync(dir);
+  writeFileSync(path.join(dir, "owner"), "another agent\n");
+  // A arrives first and polls slowly (it moves only when told); B arrives
+  // second and polls every few milliseconds.
+  let wakeA;
+  const order = [];
+  const a = acquirePerfLock({ dir, name: "A", waitSec: 60, sleep: () => new Promise((r) => (wakeA = r)) }).then((rel) => { order.push("A"); return rel; });
+  await new Promise((r) => setTimeout(r, 5));
+  const b = acquirePerfLock({ dir, name: "B", waitSec: 60, sleep: (ms) => new Promise((r) => setTimeout(r, 2)) }).then((rel) => { order.push("B"); return rel; });
+  rmSync(dir, { recursive: true });
+  await new Promise((r) => setTimeout(r, 60));
+  assert.deepEqual(order, [], "B waits behind A although the lock is free");
+  assert.equal(existsSync(dir), false);
+  wakeA();
+  const releaseA = await a;
+  assert.equal(readLockOwner(dir).name, "A");
+  releaseA();
+  const releaseB = await b;
+  assert.deepEqual(order, ["A", "B"]);
+  releaseB();
+  assert.equal(existsSync(queueDir(dir)), false, "no ticket left, nor the queue");
+});
+
+test("perf lock: a ticket of a gone process never blocks; a contender that gives up leaves none", async (t) => {
+  const dir = lockDir(t);
+  const dead = spawn(process.execPath, ["-e", ""]);
+  await new Promise((r) => dead.on("exit", r));
+  mkdirSync(queueDir(dir));
+  writeFileSync(path.join(queueDir(dir), `${Date.now() - 1000}-${dead.pid}-abcd`), JSON.stringify({ name: "killed run", pid: dead.pid, host: os.hostname() }));
+  const release = await acquirePerfLock({ dir, name: "test", waitSec: 0, sleep: async () => {} });
+  assert.equal(readLockOwner(dir).pid, process.pid);
+  assert.equal(existsSync(queueDir(dir)), false);
+  mkdirSync(queueDir(dir));
+  // A live contender ahead: refused at the deadline, with who is ahead, and no ticket left.
+  writeFileSync(path.join(queueDir(dir), `${Date.now() - 1000}-${process.pid}-beef`), JSON.stringify({ name: "earlier run", pid: process.pid, host: os.hostname() }));
+  release();
+  await assert.rejects(acquirePerfLock({ dir, name: "late", waitSec: 0, sleep: async () => {} }), /1 contender\(s\) arrived first.*earlier run/);
+  assert.deepEqual(readdirSync(queueDir(dir)).map((n) => n.endsWith("-beef")), [true], "only the earlier ticket stays");
+  assert.equal(ticketsAhead(dir, `${Date.now()}-1-ffff`).length, 1);
 });
 
 test("perf lock: a lock left by a dead harness process of this host is taken over", async (t) => {
@@ -289,4 +333,12 @@ test("race-perf hitch list: where each hitch is, in the window and in the scene"
   assert.ok(capped.hitches.every(([at], i, a) => i === 0 || at > a[i - 1][0]));
   assert.ok(capped.hitches.every(([, , place]) => place === null)); // no VI timeline: no place
   assert.ok(HITCH_MS > 1000 / 60 && HITCH_MS < 35);
+});
+
+test("race-perf Chromium flags per side: plain extra flags only, never stock Chrome for the KPIs", () => {
+  assert.deepEqual(chromeArgsOf("--js-flags=--no-liftoff  --enable-features=X", "chrome-args"), ["--js-flags=--no-liftoff", "--enable-features=X"]);
+  assert.deepEqual(chromeArgsOf(undefined, "chrome-args"), []);
+  for (const bad of ["--headless=new", "--user-data-dir=/tmp/x", "--remote-debugging-port=9", "js-flags", "--a b"]) assert.throws(() => chromeArgsOf(bad, "chrome-args"), /not an extra Chromium flag/, bad);
+  assert.equal(stockChrome({ chrome: { path: "chrome stable", args: "" } }), true);
+  assert.equal(stockChrome({ chrome: { path: "chrome stable", args: "", sideArgs: { baseline: "--js-flags=--no-liftoff" } } }), false);
 });

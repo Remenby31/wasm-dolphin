@@ -150,3 +150,18 @@ test("known-single FPRs apply to region code: less code, the skip counter moves"
   assert.equal(skips() - s1, 2, "on: frC of fmadds and fmuls known single");
   assert.ok(on.code.length < off.code.length, `${on.code.length} < ${off.code.length}`);
 });
+
+// 0091: nothing is translated under the MMU (regions would run on after a
+// DSI); the block JIT refuses there too (cached-interpreter-mmu-guard-source).
+test("under the MMU the translator refuses every entry, and translates again once it is off", { skip: skip || (!core.setMMUMode && "core without DolphinWeb_AotMMUModeForTest (0091)") }, () => {
+  const { image } = setup(program());
+  for (const s of image.segments) core.load(s.start, s.bytes);
+  core.setMMUMode(true);
+  try {
+    assert.equal(core.translate(DOUBLE), null);
+    assert.equal(core.translate(MAIN, { ranges: [[TEXT, TEXT + 4 * PROGRAM.words.length]] }), null);
+  } finally {
+    core.setMMUMode(false);
+  }
+  assert.ok(core.translate(DOUBLE), "translated with the MMU off");
+});
