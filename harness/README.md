@@ -150,7 +150,7 @@ node harness/probes/race-perf.mjs --iso ../roms/<disc>.iso --state ../measures/h
 
 ```sh
 node harness/remote/spark-run.mjs --candidate <ref|dir> --baseline <ref|dir> \
-  --state ../measures/harness/<race>.sav [--name n] [--runs 6] [--detach] [-- <race-perf options>]
+  --state ../measures/harness/<race>.sav [--name n] [--runs 6] [--lane auto|a|b] [--detach] [-- <race-perf options>]
 node harness/remote/spark-run.mjs --fetch <date>/<name>   # a detached or interrupted run
 node harness/remote/spark-run.mjs --build <ref>           # its core built on the bench, then --candidate spark:<ref>
 ```
@@ -176,14 +176,20 @@ node harness/remote/spark-run.mjs --build <ref>           # its core built on th
   `~/salon-bench/{harness,trees}/`, so a later pair reuses them. The disc is
   never pushed: the bench holds its only copy (`~/salon-bench/roms`, 700/600,
   PROGRAM.md); `--state` is pushed next to it once.
-- The pair runs detached (`setsid`) under the Spark's own perf lock
-  (`~/salon-bench/.perf-lock`, same `acquirePerfLock`): pairs from several
-  agents queue there, and the Mac's lock and MESURE slots do not apply.
-  Chromium is pinned to cpus 15-19 (the big cores of one cluster,
-  `--chrome-cpus`), node to 0-4 (`--node-cpus`).
+- **Two lanes, two pairs at once.** The Spark has two CPU clusters, each
+  with its own L3 and 5 big + 5 little cores. Lane `a` pins Chromium to
+  cpus 15-19 and node to 10-14 (port 8090, lock `~/salon-bench/.perf-lock`).
+  Lane `b` pins Chromium to 5-9 and node to 0-4 (port 8091, lock
+  `~/salon-bench/lanes/b/.perf-lock`). Both locks use the same
+  `acquirePerfLock`. A pair runs whole in one lane: `--lane auto` (the
+  default) takes the first free one when it starts, `--lane a|b` waits for
+  that one. Pairs from several agents queue there; the Mac's lock and MESURE
+  slots do not apply. Compare sides of one pair only, never a lane with the
+  other. `--chrome-cpus` / `--node-cpus` override the pinning.
 - `--build <ref>` (a commit of the fork) builds its core on the bench with
   the pinned toolchain (`build-core-repro.mjs --install`, linux-arm64, ~8
-  min) in `~/salon-bench/build/wt/<commit>`, holding the bench's perf lock;
+  min) in `~/salon-bench/build/wt/<commit>`, holding both lanes' locks (and
+  lane `b` also waits while an older harness's build holds lane `a`'s);
   `--candidate spark:<ref>` / `--baseline spark:<ref>` then serve that
   worktree. A core built there differs in bytes from CI's and from a Mac
   build: compare it only with another core built on the bench.
