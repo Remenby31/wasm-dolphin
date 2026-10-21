@@ -96,6 +96,11 @@ node harness/probes/race-perf.mjs --iso ../roms/<disc>.iso --state ../measures/h
 - Load, as in the matrix (`lib/env.mjs`): each side first waits up to
   `--load-wait` s for the 1-minute load to drop under `--max-load` (default
   a quarter of the cores); a window whose median load is above it fails.
+- race-perf and ttff wait for a calm machine (load ≤ `--max-load`) before
+  they take the perf lock, up to `--calm-wait` (default `--lock-wait`); not
+  calm by then, they stop without the lock and without measuring. Under the
+  lock, a run whose load gate does not open within `--load-wait` gives the
+  remaining runs up (`gaveUp` in summary.json) and the lock goes back.
 - The shared perf lock (`~/projects/gc-web-emu/.perf-lock`, PROGRAM.md) is
   taken before the first launch and released on every exit, Ctrl-C
   included; `--lock-wait` bounds the wait (60 s polls). `harness/run ab`
