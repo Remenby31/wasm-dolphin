@@ -182,14 +182,21 @@ node harness/remote/spark-run.mjs --build <ref>           # its core built on th
   Lane `b` pins Chromium to 5-9 and node to 0-4 (port 8091, lock
   `~/salon-bench/lanes/b/.perf-lock`). Both locks use the same
   `acquirePerfLock`. A pair runs whole in one lane: `--lane auto` (the
-  default) takes the first free one when it starts, `--lane a|b` waits for
-  that one. Pairs from several agents queue there; the Mac's lock and MESURE
-  slots do not apply. Compare sides of one pair only, never a lane with the
+  default) takes the first free one, `--lane a|b` waits for that one. The
+  Mac's lock and MESURE slots do not apply.
+- **First come, first served** (`spark-queue.mjs`). The locks are polled, so
+  a burst of builds once retook lane a for half an hour while a pair queued
+  before them timed out. Every job now drops a ticket in
+  `~/salon-bench/queue/` (arrival time, its pid) and starts only when no
+  older waiting ticket could use a lane it wants and that lane is free; a
+  build wants both. `node harness/remote/spark-queue.mjs list` on the Spark
+  shows the queue. Pairs wait up to 4 h by default (`--lock-wait`). Compare sides of one pair only, never a lane with the
   other. `--chrome-cpus` / `--node-cpus` override the pinning.
 - `--build <ref>` (a commit of the fork) builds its core on the bench with
   the pinned toolchain (`build-core-repro.mjs --install`, linux-arm64, ~8
-  min) in `~/salon-bench/build/wt/<commit>`, holding both lanes' locks (and
-  lane `b` also waits while an older harness's build holds lane `a`'s);
+  min) in `~/salon-bench/build/wt/<commit>`, in its turn, holding both
+  lanes' locks (lane `b` also waits while a build of an older harness,
+  without a ticket, exists);
   `--candidate spark:<ref>` / `--baseline spark:<ref>` then serve that
   worktree. A core built there differs in bytes from CI's and from a Mac
   build: compare it only with another core built on the bench.

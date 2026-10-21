@@ -16,6 +16,7 @@ import os from "node:os";
 import path from "node:path";
 
 import { acquirePerfLock } from "../lib/perf-lock.mjs";
+import { done, laneLock, LANES, waitTurn } from "./spark-queue.mjs";
 
 const [commit, ...rest] = process.argv.slice(2);
 if (!/^[0-9a-f]{40}$/.test(commit ?? "")) throw new Error("usage: spark-build.mjs <full commit sha> [build-core-repro options]");
@@ -37,10 +38,12 @@ if (!existsSync(wt)) {
   run("git", ["fetch", "--quiet", "origin"], clone);
   run("git", ["worktree", "add", "--detach", wt, commit], clone);
 }
-// Every lane's lock (spark-race.sh), always in the same order: a build on
-// 16 jobs would disturb a pair in either cluster.
+// Its turn in the bench's queue, then every lane's lock, always in the same
+// order: a build on 16 jobs would disturb a pair in either cluster.
+await waitTurn({ pid: process.pid, kind: "build", name: commit.slice(0, 12), log: (m) => console.log(`[spark-build] ${m}`) });
+process.once("exit", () => done(process.pid));
 const releases = [];
-for (const dir of [path.join(os.homedir(), "salon-bench", ".perf-lock"), path.join(os.homedir(), "salon-bench", "lanes", "b", ".perf-lock")]) {
+for (const dir of LANES.map((l) => laneLock(l))) {
   mkdirSync(path.dirname(dir), { recursive: true });
   releases.push(await acquirePerfLock({ dir, name: `spark-build ${commit.slice(0, 12)}`, waitSec: 4 * 3600, log: (m) => console.log(`[spark-build] ${m}`) }));
 }
