@@ -18,12 +18,12 @@ shift 3
 B="$HOME/salon-bench"
 lock() { if [ "$1" = a ]; then echo "$B/.perf-lock"; else echo "$B/lanes/$1/.perf-lock"; fi; }
 mkdir -p "$B/lanes/b"
-# A lane is busy while its lock is held, and lane b also while a core build
-# holds lane a's lock: a build from a harness before lanes takes only that
-# one, and compiles on every core.
+# A lane is busy while its lock is held, and lane b also while any core
+# build exists, running or queued: a build from a harness before lanes takes
+# only lane a's lock, and compiles on every core.
 busy() {
   [ -e "$(lock "$1")" ] && return 0
-  [ "$1" = b ] && grep -qs '"name":"spark-build' "$(lock a)/owner"
+  [ "$1" = b ] && pgrep -u "$(id -u)" -f '^node harness/remote/spark-build[.]mjs' >/dev/null
 }
 {
   lanes=$want
