@@ -445,7 +445,7 @@ test("KPI: TTFF default and aot=1 apart; a second launch without the region cach
   assert.equal(rows.ttffWarm.value, 1500); // the default rows read the run without aot=1
   assert.equal(rows.ttffWarmAot.value, 900);
   assert.equal(rows.ttffWarmAot.counted, false);
-  assert.match(rows.ttffWarmAot.detail, /régions installées au boot : 143, 143, 143/);
+  assert.match(rows.ttffWarmAot.detail, /régions installées au boot \(install event\) : 143, 143, 143/);
   const noCache = ttff("2026-10-21T00:25:00Z", "video=wgpu&aot=1", { cold: { states: ["running"], regionsInstalled: [0] }, warm: { states: ["running"], regionsInstalled: [0], withRegionCache: false } });
   assert.match(kpiTable([noCache], {}, { trunk: TRUNK }).find((r) => r.id === "ttffWarmAot").detail, /SANS cache de régions/);
   // aot=1 asked of a core without the recompiler: a default run.
@@ -499,4 +499,23 @@ test("aot-warm-launch: a seeded profile is measured on the origin it was seeded 
   writeFileSync(path.join(dir, SEED_FILE), JSON.stringify({ origin: "http://127.0.0.1:8092/", port: 8092 }));
   assert.match(seedOriginCheck(dir, 8086).error, /seeded on port 8092 .* measured on port 8086: .* every launch would be a first launch\. Measure with --port 8092/);
   assert.equal(seedOriginCheck(dir, 8092).seed.port, 8092);
+});
+
+test("ttff: the core's own count of installed regions, not the P7 install event", async () => {
+  const { coreRegions } = await import("../harness/lib/ttff.mjs");
+  const decode = () => ({ diagnostics: { regionsInstalled: 0, regionsRefused: 143 } });
+  // The P7 event said 143 loaded; the core installed none (another heap layout).
+  const core = coreRegions({ bytes: [1], layoutRefused: 143 }, decode);
+  assert.deepEqual(core, { installed: 0, refused: 143, layoutRefused: 143 });
+  assert.equal(coreRegions({ error: "Unknown upstream worker message" }, decode), null);
+  const install = { loaded: 143 };
+  const s = summarizeAot([{ run: 1, warm: { aot: { state: "partial", install, core } } }, { run: 2, warm: { aot: { state: "partial", install, core } } }]);
+  assert.deepEqual(s.warm.regionsInstalled, [0, 0]);
+  assert.equal(s.warm.installedBy, "core");
+  assert.equal(s.warm.withRegionCache, false);
+  const row = kpiTable([{ kind: "ttff", file: "t", json: { probe: "ttff", at: "2026-10-21T03:50:00Z", query: "video=wgpu&aot=1", served: served("T1"),
+    cold: { firstContentMs: { median: 2542 }, failed: [] }, warm: { firstContentMs: { median: 1988 }, failed: [] }, aot: s } }], {}, { trunk: TRUNK }).find((r) => r.id === "ttffWarmAot");
+  assert.match(row.detail, /SANS cache de régions : refusées pour une autre disposition du tas \(143, 143\)/);
+  // An older probe without the core's count falls back on the install event.
+  assert.equal(summarizeAot([{ run: 1, warm: { aot: { state: "complete", install } } }]).warm.installedBy, "install event");
 });

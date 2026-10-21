@@ -127,6 +127,16 @@ const ttffWhy = (j, phase) => [
   j[phase]?.infra?.length ? `runs ${j[phase].infra.map((x) => x.run).join(", ")} perdues par le harnais (pipe CDP), exclues` : null
 ].filter(Boolean).join(" ; ") || null;
 
+// What the second aot=1 launch really ran with: the regions the core
+// installed at boot (or the P7 install event on an older probe), and those it
+// refused for another heap layout (0078).
+function warmRegionNote(w) {
+  const refused = (w?.layoutRefused ?? []).filter((n) => n > 0);
+  if (w?.withRegionCache) return `régions installées au boot (${w.installedBy ?? "install event"}) : ${w.regionsInstalled.join(", ")}`;
+  if (refused.length) return `SANS cache de régions : refusées pour une autre disposition du tas (${w.layoutRefused.join(", ")})`;
+  return "SANS cache de régions : pas un vrai 2e lancement";
+}
+
 // The rows, in PROGRAM.md's order. `better`: "higher" | "lower" | "zero" | "true".
 // read(json, side, kind) → value; failures(json, side, kind) → reasons that make the row KO.
 export const KPI_ROWS = [
@@ -153,7 +163,7 @@ export const KPI_ROWS = [
   { id: "ttffWarm", group: "Expérience joueur", label: "Time-to-first-frame, à chaud, défaut", target: 10000, unit: "ms", better: "lower", from: "ttff", config: "default", read: (j) => med(j.warm?.firstContentMs), why: (j) => ttffWhy(j, "warm"), failures: (j) => launchFailures(j.warm) },
   { id: "ttffColdAot", group: "Expérience joueur", label: "Time-to-first-frame, à froid, aot=1 (hors statut global)", target: 10000, unit: "ms", better: "lower", from: "ttff", config: "aot", counted: false, read: (j) => med(j.cold?.firstContentMs), failures: (j) => launchFailures(j.cold) },
   // The second launch counts as such only with the region cache installed at boot.
-  { id: "ttffWarmAot", group: "Expérience joueur", label: "Time-to-first-frame, 2e lancement, aot=1 (avec cache de régions, hors statut global)", target: 10000, unit: "ms", better: "lower", from: "ttff", config: "aot", counted: false, read: (j) => med(j.warm?.firstContentMs), detail: (j) => (j.aot?.warm?.withRegionCache ? `régions installées au boot : ${j.aot.warm.regionsInstalled.join(", ")}` : "SANS cache de régions : pas un vrai 2e lancement"), failures: (j) => launchFailures(j.warm) },
+  { id: "ttffWarmAot", group: "Expérience joueur", label: "Time-to-first-frame, 2e lancement, aot=1 (avec cache de régions, hors statut global)", target: 10000, unit: "ms", better: "lower", from: "ttff", config: "aot", counted: false, read: (j) => med(j.warm?.firstContentMs), detail: (j) => warmRegionNote(j.aot?.warm), failures: (j) => launchFailures(j.warm) },
 ];
 
 export function meets(row, value) {

@@ -37,7 +37,8 @@ import { claim } from "../lib/ownership.mjs";
 import { acquirePerfLock } from "../lib/perf-lock.mjs";
 import { chromeInfo, isLocalOnly, probeOutDir } from "../lib/probe-out.mjs";
 import { machineSnapshot, sampleChromeRss } from "../lib/system.mjs";
-import { aotInactive, aotLaunchInfo, installContentWatcher, launchTtff, memoryCutReason, summarizeAot, summarizeTtff } from "../lib/ttff.mjs";
+import { decodeRegionStats } from "../lib/jit-region-stats.mjs";
+import { aotInactive, aotLaunchInfo, coreRegions, installContentWatcher, launchTtff, memoryCutReason, summarizeAot, summarizeTtff } from "../lib/ttff.mjs";
 import { num } from "./race-perf.mjs";
 
 const epochNow = (page) => page.evaluate(() => performance.timeOrigin + performance.now());
@@ -89,6 +90,7 @@ async function launch({ base, query, iso, profileDir, timeoutSec, settleSec = 0,
     // with --settle, the browser stays open until it is done (after the
     // measured interval), so the next launch on this profile has the cache.
     result.aot = aotLaunchInfo(await workerRequest(page, "validationReadAotProgress", {}, 10000));
+    if (result.aot) result.aot.core = coreRegions(await workerRequest(page, "validationReadJitRegionStats", {}, 10000), decodeRegionStats);
     if (settleSec > 0 && result.aot && !aotInactive(result.aot.state)) {
       const settleEnd = Date.now() + settleSec * 1000;
       let info = result.aot;
