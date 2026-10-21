@@ -352,6 +352,16 @@ test("KPI: the region cycle share counts only outside idle skip", () => {
   assert.match(raw.regionCycleShare.why, /part brute 93 %, idle compris/);
 });
 
+test("KPI: the dispatch row carries its instrumentation caveat under the table", () => {
+  const rows = kpiTable([], {}, { trunk: TRUNK });
+  assert.match(rows.find((r) => r.id === "dispatchTimeShare").caveat, /gonflé par l'instrumentation/);
+  assert.equal(rows.find((r) => r.id === "regionTimeShare").caveat, null);
+  const md = kpiMarkdown(rows);
+  const leviers = md.slice(md.indexOf("## Leviers"), md.indexOf("## Garde-fous"));
+  assert.match(leviers, /\n> \*\*Part du dispatch entre blocs, hors attente\*\* : indicateur gonflé/);
+  assert.equal(md.match(/gonflé par l'instrumentation/g).length, 1);
+});
+
 test("KPI: a candidate column beside trunk, never in its place", (t) => {
   // An A/B: trunk as baseline (clean T1), a PR head as candidate (dirty B, aot=1).
   const ab = { kind: "race-perf", file: "ab", json: { probe: "race-perf", at: "2026-10-20T03:11:00Z", query: "video=wgpu&wasmjit=1&aot=1&metrics=1", maxLoad: 6, chrome: { path: "chrome stable", args: "" }, failed: [],

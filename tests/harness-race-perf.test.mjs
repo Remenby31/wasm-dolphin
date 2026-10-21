@@ -8,7 +8,7 @@ import os from "node:os";
 import path from "node:path";
 import test from "node:test";
 
-import { acquirePerfLock, readLockOwner } from "../harness/lib/perf-lock.mjs";
+import { acquirePerfLock, queueDir, readLockOwner, ticketsAhead } from "../harness/lib/perf-lock.mjs";
 import { num, pairedSpeedChange, sideOrder } from "../harness/probes/race-perf.mjs";
 import { summarizePcSamples } from "../src/harness-pc-sampler.js";
 import { hitchList, HITCH_MS } from "../harness/lib/timeline.mjs";
@@ -41,6 +41,49 @@ test("perf lock: waits for another holder, then gets it", async (t) => {
   const release = await acquirePerfLock({ dir, name: "test", waitSec: 60, sleep: async () => { polls += 1; if (polls === 2) rmSync(dir, { recursive: true }); } });
   assert.equal(polls, 2);
   release();
+});
+
+test("perf lock: first come, first served, whoever polls faster", async (t) => {
+  const dir = lockDir(t);
+  mkdirSync(dir);
+  writeFileSync(path.join(dir, "owner"), "another agent\n");
+  // A arrives first and polls slowly (it moves only when told); B arrives
+  // second and polls every few milliseconds.
+  let wakeA;
+  const order = [];
+  const a = acquirePerfLock({ dir, name: "A", waitSec: 60, sleep: () => new Promise((r) => (wakeA = r)) }).then((rel) => { order.push("A"); return rel; });
+  await new Promise((r) => setTimeout(r, 5));
+  const b = acquirePerfLock({ dir, name: "B", waitSec: 60, sleep: (ms) => new Promise((r) => setTimeout(r, 2)) }).then((rel) => { order.push("B"); return rel; });
+  rmSync(dir, { recursive: true });
+  await new Promise((r) => setTimeout(r, 60));
+  assert.deepEqual(order, [], "B waits behind A although the lock is free");
+  assert.equal(existsSync(dir), false);
+  wakeA();
+  const releaseA = await a;
+  assert.equal(readLockOwner(dir).name, "A");
+  releaseA();
+  const releaseB = await b;
+  assert.deepEqual(order, ["A", "B"]);
+  releaseB();
+  assert.equal(existsSync(queueDir(dir)), false, "no ticket left, nor the queue");
+});
+
+test("perf lock: a ticket of a gone process never blocks; a contender that gives up leaves none", async (t) => {
+  const dir = lockDir(t);
+  const dead = spawn(process.execPath, ["-e", ""]);
+  await new Promise((r) => dead.on("exit", r));
+  mkdirSync(queueDir(dir));
+  writeFileSync(path.join(queueDir(dir), `${Date.now() - 1000}-${dead.pid}-abcd`), JSON.stringify({ name: "killed run", pid: dead.pid, host: os.hostname() }));
+  const release = await acquirePerfLock({ dir, name: "test", waitSec: 0, sleep: async () => {} });
+  assert.equal(readLockOwner(dir).pid, process.pid);
+  assert.equal(existsSync(queueDir(dir)), false);
+  mkdirSync(queueDir(dir));
+  // A live contender ahead: refused at the deadline, with who is ahead, and no ticket left.
+  writeFileSync(path.join(queueDir(dir), `${Date.now() - 1000}-${process.pid}-beef`), JSON.stringify({ name: "earlier run", pid: process.pid, host: os.hostname() }));
+  release();
+  await assert.rejects(acquirePerfLock({ dir, name: "late", waitSec: 0, sleep: async () => {} }), /1 contender\(s\) arrived first.*earlier run/);
+  assert.deepEqual(readdirSync(queueDir(dir)).map((n) => n.endsWith("-beef")), [true], "only the earlier ticket stays");
+  assert.equal(ticketsAhead(dir, `${Date.now()}-1-ffff`).length, 1);
 });
 
 test("perf lock: a lock left by a dead harness process of this host is taken over", async (t) => {
