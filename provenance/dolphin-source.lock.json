@@ -25,7 +25,7 @@
       "commit": "01e0577914a75a2569c846778c2f93aa8e6feddd"
     }
   },
-  "patchSeriesSha256": "877269442ef6c774b7ff31f0661097e9eaf5f8df88a468f9c7b55f85156082c8",
+  "patchSeriesSha256": "662d2b45b8180fb03808ce0a19a75d6649d578cc994c5c16170aaabad6437eba",
   "patches": [
     {
       "order": 1,
@@ -645,6 +645,14 @@
     },
     {
       "order": 78,
+      "cwd": ".",
+      "hashMode": "lf-normalized",
+      "path": "patches/dolphin-wasm/snapshot/0091-no-wasm-code-under-mmu.patch",
+      "size": 3471,
+      "sha256": "d169775dc85c7e756561439fb1da2f749d3a774f0abd2b0dc0116017ed67a46d"
+    },
+    {
+      "order": 79,
       "cwd": "Externals/SFML/SFML",
       "hashMode": "lf-normalized",
       "path": "patches/dolphin-wasm/submodules/0001-sfml-emscripten-config.patch",
@@ -652,7 +660,7 @@
       "sha256": "f82197a21fe982ad83f6ee7bbf5a03839b1cebd4d64da3eab11263842bf61d89"
     },
     {
-      "order": 79,
+      "order": 80,
       "cwd": "Externals/xxhash/xxHash",
       "hashMode": "lf-normalized",
       "path": "patches/dolphin-wasm/submodules/0002-xxhash-wasm-simd-scalar.patch",
