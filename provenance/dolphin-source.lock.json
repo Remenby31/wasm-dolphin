@@ -25,7 +25,7 @@
       "commit": "01e0577914a75a2569c846778c2f93aa8e6feddd"
     }
   },
-  "patchSeriesSha256": "a0841b81cbf342f5e1d8749ce22ccaaf844576d2f0f49e415f8d4d606f32567f",
+  "patchSeriesSha256": "ffe15a3f573fe24be7535ee0feb41969679eab1fd29a52856907f3f162e9ba8f",
   "patches": [
     {
       "order": 1,
@@ -600,8 +600,8 @@
       "cwd": ".",
       "hashMode": "lf-normalized",
       "path": "patches/dolphin-wasm/snapshot/0075-region-translator.patch",
-      "size": 82752,
-      "sha256": "c4b88d93bad6fce800b59ac48006f86ddd253fe4140bc803e3e020e481665a11"
+      "size": 85424,
+      "sha256": "664b9e682811a970951a18dab0039193273d4ce4aa3cddf5319a030ec7308573"
     },
     {
       "order": 73,
@@ -616,8 +616,8 @@
       "cwd": ".",
       "hashMode": "lf-normalized",
       "path": "patches/dolphin-wasm/snapshot/0078-region-layout-guard.patch",
-      "size": 10013,
-      "sha256": "e1095c79b1255a768ab8e94821d58a869f34e5e1aae7bce21581dff61d33c0e9"
+      "size": 10008,
+      "sha256": "6d8afb967536650947d4aeb232364efcc74a1917c894c947958dadc46e220bd6"
     },
     {
       "order": 75,

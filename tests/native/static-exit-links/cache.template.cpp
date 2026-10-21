@@ -128,6 +128,8 @@ std::atomic<bool> s_wasm_off_thread_compile{false};
 static void RetryOffThreadWasmBlocks(CachedInterpreter&) {}
 static void ResetOffThreadCompiles() {}
 static void UnverifyAllRegions() {}
+static void RepostWaitingRegions() {}
+static void ClearOffThreadAndRegionState() {}
 static void ForgetAllRegions() {}
 void Host_JitCacheInvalidation() {}
 #define __EMSCRIPTEN__ 1

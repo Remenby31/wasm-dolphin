@@ -139,7 +139,7 @@ The three P1s and the trivial P2s are fixed in #43; the rest is tracked here.
 - [ ] **Flag name**: plan says `wasmjit=region`, shipped as `aot=1`; `docs/jit-flags.md` not updated.
 - [ ] **One compiler worker**: blocks and regions not in the module map share a single worker, FIFO. Regions never queue there today (their live Module is in the map under their bytes' key), but a full map (49 152 entries) would send them behind every block. A second worker, or a priority lane for regions already hit, needs the client's watchdog and stats per worker: not trivial.
 - [ ] **Bimodal hitch bursts on main** (not P4, found while reviewing #37): in about one race-perf run in six, on main as on a candidate, single dropped frames (36–47 ms) every ~20 VI in two segments of the race savestate (viSinceLoad ~1370–1720 and ~1920–2090); the other runs have 0–2. Measures: `measures/jit-robustness/race-perf/p37-review-vs-main-1300` and `p37-hitches-1500` (`cold.hitchList`). Next: `--pcsample` restricted to those VI ranges, runs with and without a burst compared (after #43).
-- [ ] **Late ready signal on the last region** (pair 16:00, 2 runs of 6): the 143rd install, a 2.4 MB region, waits the full 5 s and is counted in `installFallbacks`, yet costs a V8 hit (1.5 ms): its ready byte came late or was cleared without a -4 on this side. Timestamp requests and marks to find what clears it.
+- [x] **Late ready signal on the last region** (pair 16:00): a state load (`ClearCache`) zeroed the ready table and forgot the requests in flight; a mark that landed before it was lost and the region waited out the 5 s. Waiting regions now ask again after a cache clear. (#58; review: the re-post goes through the plan-hash and HLE checks and the slice budget, region posts also mark the request table for reset, and a region whose code is invalidated while it waits is dropped.)
 
 ### From the final review of #43 (P2)
 
@@ -150,6 +150,7 @@ The three P1s and the trivial P2s are fixed in #43; the rest is tracked here.
 - [ ] **Modules kept for the session**: every region Module stays alive in discio's map (127 MB of wire bytes for MKDD) for the whole session. Release a region's Module once installed on every pthread, or cap by bytes.
 
 Order after #43 (Main, 2026-10-20): TTFF aot=1 vs off on main; the late ready signal; the FP analyses; the dispatch share (22 % of host time).
+- [ ] **Orphan request after a late mark** (review of #58, P3): when discio marks an old request after a cache clear but before the re-post, the region installs synchronously with the in-flight key still set, and the re-post's answer later leaves a stale 1 in the slot; a block sharing it compiles cold once. Same family as "Cold compile counted as Ready".
 
 ## Heap layout guard (patch 0078, 2026-10-21)
 
@@ -199,3 +200,5 @@ million console lines, the browser process at 7-14 GB).
   immutable globals instead of constants, so a moved heap no longer refuses
   (and wastes) the cache. The cache key cannot hold the layout: it is opened
   before the boot, when the RAM is not allocated yet.
+- [ ] **35 regions dropped on every second launch** (KPI, d18249e, and locally): installed during the OS init, they are dropped by invalidations (icbi or DMA) over their ranges; the code then runs in the block JIT for the session. Log the invalidations that drop them; consider re-verifying (plan hashes) instead of dropping when the code is unchanged.
+- [ ] **Second-launch TTFF +0.8 s** (first core frame 1.55 s against 0.72 s cold): the region cache read and compiled before the boot (`installBeforeBoot`). Load fewer modules before the boot, the rest after (target 10 s, today 2.05 s).
