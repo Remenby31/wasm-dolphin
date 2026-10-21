@@ -11,6 +11,7 @@ import test from "node:test";
 import { acquirePerfLock, queueDir, readLockOwner, ticketsAhead } from "../harness/lib/perf-lock.mjs";
 import { chromeArgsOf, num, pairedSpeedChange, sideOrder } from "../harness/probes/race-perf.mjs";
 import { stockChrome } from "../harness/lib/kpi.mjs";
+import { calmThenLock, loadGaveUp } from "../harness/lib/env.mjs";
 import { summarizePcSamples } from "../src/harness-pc-sampler.js";
 import { hitchList, HITCH_MS } from "../harness/lib/timeline.mjs";
 
@@ -341,4 +342,21 @@ test("race-perf Chromium flags per side: plain extra flags only, never stock Chr
   for (const bad of ["--headless=new", "--user-data-dir=/tmp/x", "--remote-debugging-port=9", "js-flags", "--a b"]) assert.throws(() => chromeArgsOf(bad, "chrome-args"), /not an extra Chromium flag/, bad);
   assert.equal(stockChrome({ chrome: { path: "chrome stable", args: "" } }), true);
   assert.equal(stockChrome({ chrome: { path: "chrome stable", args: "", sideArgs: { baseline: "--js-flags=--no-liftoff" } } }), false);
+});
+
+test("load: a calm machine before the lock, never the lock held while waiting on the load", async () => {
+  let locked = 0;
+  const acquire = async () => { locked += 1; return () => {}; };
+  // Calm: the lock is taken after the wait.
+  const order = [];
+  await calmThenLock({ maxLoad: 6, calmWait: 60, acquire: async () => { order.push("lock"); return acquire(); }, wait: async ({ waitSec, pollSec }) => { order.push(`wait ${waitSec} s, poll ${pollSec} s`); return { load: 3, limit: 6, ok: true }; } });
+  assert.deepEqual(order, ["wait 60 s, poll 30 s", "lock"]);
+  // Never calm: refused, the lock never asked for.
+  locked = 0;
+  await assert.rejects(calmThenLock({ maxLoad: 6, calmWait: 600, acquire, wait: async () => ({ load: 25.3, limit: 6, ok: false }) }), /machine not calm: load 25.3 > 6 after 600 s; no lock taken/);
+  assert.equal(locked, 0);
+  // Under the lock: a gate that did not open gives the remaining runs up.
+  assert.equal(loadGaveUp({ load: 3, limit: 6, ok: true }), null);
+  assert.equal(loadGaveUp(undefined), null);
+  assert.match(loadGaveUp({ load: 9.1, limit: 6, ok: false }), /load 9.1 > 6 after --load-wait: remaining runs given up, lock released/);
 });
