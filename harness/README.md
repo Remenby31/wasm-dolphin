@@ -106,6 +106,11 @@ node harness/probes/race-perf.mjs --iso ../roms/<disc>.iso --state ../measures/h
   taken over by one contender at a time, under the `.perf-lock.takeover`
   guard (abandoned after 10 s): judged again, renamed aside, checked, then
   removed.
+  First come, first served: each contender drops a ticket named by its
+  arrival time in `.perf-lock.queue` and tries the lock only once no older
+  ticket of a live process is waiting, so a burst of short runs can no
+  longer starve a long wait. Tickets of a gone process are removed by the
+  next reader; older harnesses take none and can still pass ahead.
 - Each run checks the core it loaded (core-mismatch otherwise) and records
   its hash, again after the `--warm` reboot.
 - `--pcsample [ms]`: a worker of its own reads the guest PC in the shared
