@@ -15,6 +15,7 @@
 //     [--max-load L] [--load-wait 300] [--lock-wait 1800]
 //     [--pcsample [periodMs]] [--symbols functions.json] [--out dir]
 //     [--region-sample N [--region-secs 10]] [--baseline-query "..."]
+//     [--chrome-args "--flag …"] [--baseline-chrome-args "--flag …"]
 //
 // - Pairing and interleaving: run i measures both sides back to back, the
 //   order alternating (base, head | head, base | …), so drift on the machine
@@ -34,6 +35,13 @@
 // - --pcsample samples the guest PC from a worker of its own during the
 //   window (no CDP): where the emulated CPU spends its time. Real-time
 //   sampling: it cannot tell "more work" from "the same work, slower".
+// - --chrome-args: extra Chromium flags for both sides (space-separated,
+//   each starting with --); --baseline-chrome-args replaces them on the
+//   baseline side, so one tree can be compared with itself under two
+//   Chromium configurations (e.g. --js-flags=--no-liftoff). Recorded in
+//   summary.json (chrome.sideArgs): such a result is never stock Chrome for
+//   kpi-report. Each run also records bootMs, from the Chrome launch to the
+//   session ready (boot, compilations included).
 // - --warm boots again in the same profile (JIT cache in IndexedDB) and
 //   measures again: cold and warm caches on the same run.
 // - Region JIT counters (P4, lib/jit-region-stats.mjs): off by default. With
@@ -274,8 +282,9 @@ async function measureSide(side, o) {
   const loadGate = await waitForLoad({ maxLoad: o.maxLoad, waitSec: o.loadWait, log: (m) => console.log(`[race-perf] ${side.name}: ${m}`) });
   const server = await ensureServer({ port: o.port, root: side.root, coreCandidates: o.coreCandidates });
   try {
-    const session = await openSession({ base: server.base, server, query: side.query ?? o.query, iso: o.iso, routes: { [STATE_ROUTE]: o.state } });
-    const record = { url: session.url, served: server.identity, core: session.core, loadGate };
+    const bootStart = performance.now();
+    const session = await openSession({ base: server.base, server, query: side.query ?? o.query, iso: o.iso, routes: { [STATE_ROUTE]: o.state }, chromeArgs: side.chromeArgs ?? [] });
+    const record = { url: session.url, served: server.identity, core: session.core, loadGate, bootMs: round(performance.now() - bootStart, 0) };
     try {
       record.cold = await measure(session, o);
       if (o.warm) {
@@ -299,6 +308,14 @@ async function measureSide(side, o) {
 }
 
 // A numeric option, rejected unless it is a finite number in range.
+// Chromium flags from one option: space-separated, each a --flag.
+export function chromeArgsOf(text, option) {
+  const args = String(text ?? "").split(/\s+/).filter(Boolean);
+  const bad = args.filter((a) => !/^--[\w-]+(=\S*)?$/.test(a) || /^--(headless|remote-debugging|user-data-dir)/.test(a));
+  if (bad.length) throw new Error(`--${option}: ${bad.join(" ")} is not an extra Chromium flag this harness passes (--name or --name=value; never headless, debugging or profile flags)`);
+  return args;
+}
+
 export function num(values, name, { min = -Infinity, int = false } = {}) {
   const v = Number(values[name]);
   if (values[name] == null || values[name] === "" || !Number.isFinite(v) || v < min || (int && !Number.isInteger(v))) {
@@ -325,7 +342,7 @@ async function main() {
       runs: { type: "string", default: "4" }, "min-pairs": { type: "string" }, "load-wait": { type: "string", default: "300" }, warmup: { type: "string", default: "25" }, secs: { type: "string", default: "20" },
       hold: { type: "string", default: "KeyX" }, warm: { type: "boolean", default: false },
       "max-load": { type: "string" }, "lock-wait": { type: "string", default: "1800" },
-      pcsample: { type: "string" }, symbols: { type: "string" }, "region-sample": { type: "string" }, "region-secs": { type: "string", default: "10" }, "baseline-query": { type: "string" },
+      pcsample: { type: "string" }, symbols: { type: "string" }, "region-sample": { type: "string" }, "region-secs": { type: "string", default: "10" }, "baseline-query": { type: "string" }, "chrome-args": { type: "string" }, "baseline-chrome-args": { type: "string" },
       "core-candidate": { type: "string", multiple: true, default: [] },
       port: { type: "string", default: process.env.HARNESS_PORT }, out: { type: "string" }
     },
@@ -346,6 +363,9 @@ async function main() {
   // A coreid would pin both sides to one core: trunk against head would
   // then compare a core with itself.
   if (values.baseline && [query, baselineQuery].some((q) => q && new URLSearchParams(q).has("coreid"))) throw new Error("--baseline compares the two sides' own cores: no coreid in --query or --baseline-query");
+  const chromeArgs = chromeArgsOf(values["chrome-args"], "chrome-args");
+  const baselineChromeArgs = values["baseline-chrome-args"] == null ? chromeArgs : chromeArgsOf(values["baseline-chrome-args"], "baseline-chrome-args");
+  if (values["baseline-chrome-args"] != null && !values.baseline) throw new Error("--baseline-chrome-args needs --baseline");
   const runs = num(values, "runs", { min: 1, int: true });
   if (values.baseline && runs % 2) throw new Error(`--runs ${runs}: with --baseline the runs must be even, so trunk goes first as often as head`);
   const o = {
@@ -368,8 +388,8 @@ async function main() {
   // lock's signal handler exits the process, which runs this).
   const dropExports = () => { for (const s of Object.values(sides)) if (s.temp && existsSync(s.root)) { release(s.root); rmSync(s.root, { recursive: true, force: true }); } };
   process.once("exit", dropExports);
-  sides.candidate = resolveSide("candidate", values.candidate);
-  if (values.baseline) sides.baseline = { ...resolveSide("baseline", values.baseline), query: baselineQuery };
+  sides.candidate = { ...resolveSide("candidate", values.candidate), chromeArgs };
+  if (values.baseline) sides.baseline = { ...resolveSide("baseline", values.baseline), query: baselineQuery, chromeArgs: baselineChromeArgs };
   const releaseLock = await acquirePerfLock({ name: `harness race-perf (${REPO_ROOT})`, waitSec: lockWait, log: (m) => console.log(`[race-perf] ${m}`) });
   // A local-only disc never writes into the repo.
   const stamp = `${new Date().toISOString().replace(/[:.]/g, "-").slice(0, 19)}-${process.pid}-${randomBytes(3).toString("hex")}`;
@@ -405,7 +425,8 @@ async function main() {
     return {
       speed: describe(m.map((x) => x.speed)), gameFps: describe(m.map((x) => x.gameFps)),
       viP99Ms: describe(m.map((x) => x.viIntervalMs.p99)), presentP99Ms: describe(m.map((x) => x.presentIntervalMs.p99)),
-      hitchesPerMin: describe(m.map((x) => x.hitchesPerMin)), busiestThread: describe(m.map((x) => x.rendererThreads.at(-1)?.busiest))
+      hitchesPerMin: describe(m.map((x) => x.hitchesPerMin)), busiestThread: describe(m.map((x) => x.rendererThreads.at(-1)?.busiest)),
+      ...(phase === "cold" ? { bootMs: describe(runsDone.map((r) => r[name]).filter(good).map((r) => r.bootMs).filter((v) => v != null)) } : {})
     };
   };
   // The PC histogram exists on one side only when the other side's core
@@ -416,8 +437,10 @@ async function main() {
   const failed = Object.keys(sides).flatMap((n) => runsDone.filter((r) => !good(r[n])).map((r) => ({ run: r.run, side: n, why: r[n]?.infraCrash ? "infra" : r[n]?.error ?? (r[n]?.fatal?.length ? "crash" : "overloaded") })));
   // Which Chrome ran: a wrapper (HARNESS_CHROME_PATH, e.g. the E-core one) or
   // extra flags left exported would otherwise pass for a regression.
-  const chrome = { path: process.env.HARNESS_CHROME_PATH || "chrome stable", args: process.env.HARNESS_CHROME_ARGS || "" };
+  const sideArgs = Object.fromEntries(Object.entries(sides).filter(([, s]) => s.chromeArgs?.length).map(([n, s]) => [n, s.chromeArgs.join(" ")]));
+  const chrome = { path: process.env.HARNESS_CHROME_PATH || "chrome stable", args: process.env.HARNESS_CHROME_ARGS || "", ...(Object.keys(sideArgs).length ? { sideArgs } : {}) };
   if (process.env.HARNESS_CHROME_PATH || process.env.HARNESS_CHROME_ARGS) console.warn(`[race-perf] Chrome: ${chrome.path}${chrome.args ? ` ${chrome.args}` : ""}`);
+  for (const [n, a] of Object.entries(sideArgs)) console.warn(`[race-perf] Chrome flags on the ${n}: ${a}`);
   const summary = {
     probe: "race-perf", at: new Date().toISOString(),
     chrome,
