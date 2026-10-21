@@ -106,6 +106,11 @@ node harness/probes/race-perf.mjs --iso ../roms/<disc>.iso --state ../measures/h
   taken over by one contender at a time, under the `.perf-lock.takeover`
   guard (abandoned after 10 s): judged again, renamed aside, checked, then
   removed.
+  First come, first served: each contender drops a ticket named by its
+  arrival time in `.perf-lock.queue` and tries the lock only once no older
+  ticket of a live process is waiting, so a burst of short runs can no
+  longer starve a long wait. Tickets of a gone process are removed by the
+  next reader; older harnesses take none and can still pass ahead.
 - Each run checks the core it loaded (core-mismatch otherwise) and records
   its hash, again after the `--warm` reboot.
 - `--pcsample [ms]`: a worker of its own reads the guest PC in the shared
@@ -150,7 +155,7 @@ node harness/probes/race-perf.mjs --iso ../roms/<disc>.iso --state ../measures/h
 
 ```sh
 node harness/remote/spark-run.mjs --candidate <ref|dir> --baseline <ref|dir> \
-  --state ../measures/harness/<race>.sav [--name n] [--runs 6] [--lane auto|a|b] [--detach] [-- <race-perf options>]
+  --state ../measures/harness/<race>.sav [--name n] [--runs 6] [--detach] [-- <race-perf options>]
 node harness/remote/spark-run.mjs --fetch <date>/<name>   # a detached or interrupted run
 node harness/remote/spark-run.mjs --build <ref>           # its core built on the bench, then --candidate spark:<ref>
 ```
@@ -176,14 +181,14 @@ node harness/remote/spark-run.mjs --build <ref>           # its core built on th
   `~/salon-bench/{harness,trees}/`, so a later pair reuses them. The disc is
   never pushed: the bench holds its only copy (`~/salon-bench/roms`, 700/600,
   PROGRAM.md); `--state` is pushed next to it once.
-- **Two lanes, two pairs at once.** The Spark has two CPU clusters, each
-  with its own L3 and 5 big + 5 little cores. Lane `a` pins Chromium to
-  cpus 15-19 and node to 10-14 (port 8090, lock `~/salon-bench/.perf-lock`).
-  Lane `b` pins Chromium to 5-9 and node to 0-4 (port 8091, lock
-  `~/salon-bench/lanes/b/.perf-lock`). Both locks use the same
-  `acquirePerfLock`. A pair runs whole in one lane: `--lane auto` (the
-  default) takes the first free one, `--lane a|b` waits for that one. The
-  Mac's lock and MESURE slots do not apply.
+- **One pair at a time.** Chromium is pinned to cpus 15-19 (the big cores
+  of one cluster, its own L3) and node to 10-14: lane `a`, port 8090, lock
+  `~/salon-bench/.perf-lock`. A second lane (Chromium on 5-9, the other
+  cluster) was tried and failed its A/A next to a pair in lane `a`
+  (2026-10-21: σ 1.86 pt, one pair at +4.8 %, both pairs 1-7 % slower and
+  over the load limit), so pairs only run in lane `a`; `--lane b` is
+  refused. Lane `b`'s lock stays, taken by builds. The Mac's lock and MESURE
+  slots do not apply. `--chrome-cpus` / `--node-cpus` override the pinning.
 - **First come, first served** (`spark-queue.mjs`). The locks are polled, so
   a burst of builds once retook lane a for half an hour while a pair queued
   before them timed out. Every job now drops a ticket in

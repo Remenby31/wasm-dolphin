@@ -24,11 +24,17 @@ import { parseArgs } from "node:util";
 
 export const BENCH_DIR = path.join(os.homedir(), "salon-bench");
 export const LANES = ["a", "b"];
+// Lanes a pair may be given. Two pairs at once failed their A/A (2026-10-21
+// 22:55: lane b σ 1.86 pt and one pair at +4.8 %, both pairs 1-7 % slower
+// and over the load limit): the clusters share enough to disturb each
+// other. So one pair at a time, in lane a; lane b stays defined for builds'
+// locks and a later attempt.
+export const PAIR_LANES = ["a"];
 export const laneLock = (lane, bench = BENCH_DIR) => (lane === "a" ? path.join(bench, ".perf-lock") : path.join(bench, "lanes", lane, ".perf-lock"));
 const queueDir = (bench) => path.join(bench, "queue");
 
 // The lanes a job could take.
-export const wants = (t) => (t.kind === "build" ? LANES : t.lanes === "auto" ? LANES : [t.lanes]);
+export const wants = (t) => (t.kind === "build" ? LANES : t.lanes === "auto" ? PAIR_LANES : [t.lanes]);
 
 // What `me` may do now: { go: lanes } or { wait: why }. `tickets` are the
 // live ones, `busy(lane)` says whether a lane's lock is held.
