@@ -125,6 +125,17 @@ export function aotLaunchInfo(reply) {
   };
 }
 
+// What the core itself installed (validationReadJitRegionStats: the region
+// pipeline counters, readable with the stats off; layoutRefused, 0078). The
+// P7 "install" event only says the regions were handed over: on 2026-10-21
+// it said 143 loaded while the core refused all 143 for another heap layout.
+export function coreRegions(reply, decode) {
+  if (!reply || reply.error || !reply.bytes) return null;
+  const d = decode(reply.bytes)?.diagnostics;
+  if (!d) return null;
+  return { installed: d.regionsInstalled ?? null, refused: d.regionsRefused ?? null, layoutRefused: Number.isInteger(reply.layoutRefused) ? reply.layoutRefused : null };
+}
+
 // Whether a state means the recompiler does not run (off, or a core without it).
 export const aotInactive = (state) => state == null || state === "disabled" || state === "unsupported";
 
@@ -134,14 +145,25 @@ export function summarizeAot(runs) {
   const phase = (name) => {
     const infos = runs.map((r) => r[name]?.aot).filter(Boolean);
     if (!infos.length) return null;
-    const loaded = infos.map((a) => a.install?.loaded ?? 0);
+    // The core's own count when it gives one, else the P7 install event.
+    const loaded = infos.map((a) => a.core?.installed ?? a.install?.loaded ?? 0);
     return {
       states: [...new Set(infos.map((a) => a.state))],
       regionsInstalled: loaded,
+      installedBy: infos.every((a) => a.core) ? "core" : "install event",
+      layoutRefused: infos.map((a) => a.core?.layoutRefused ?? null),
       withRegionCache: infos.every((a) => !aotInactive(a.state)) && loaded.every((n) => n > 0),
       settled: infos.map((a) => a.settled ?? null)
     };
   };
   const cold = phase("cold"), warm = phase("warm");
   return cold || warm ? { cold, warm } : null;
+}
+
+// Why a launch was cut by the memory guard: the total and the heaviest
+// process types, e.g. "cut: Chrome at 10331 MB > 10240 MB (browser 7342 MB,
+// renderer 2560 MB, gpu-process 157 MB)".
+export function memoryCutReason(rss, limitMB) {
+  const top = Object.entries(rss.byType ?? {}).sort((a, b) => b[1] - a[1]).slice(0, 3).map(([t, mb]) => `${t} ${mb} MB`).join(", ");
+  return `cut: Chrome at ${rss.totalMB} MB > ${limitMB} MB${top ? ` (${top})` : ""}`;
 }

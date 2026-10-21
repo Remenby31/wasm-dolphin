@@ -7,6 +7,8 @@
 //   node harness/probes/ttff.mjs --iso disc.iso --port N
 //     [--config wgpu | --query "..."] [--runs 3] [--timeout 60]
 //     [--max-load L] [--load-wait 300] [--lock-wait 1800 | --no-lock] [--out dir]
+//     [--max-rss-mb 10240 (0: off): a launch whose Chrome processes go over it
+//                       is cut and fails with that reason, per process type]
 //     [--settle 120]   (aot=1: keep the cold launch open until the first-launch
 //                       optimisation is done, so the warm launch has the region cache)
 //
@@ -34,15 +36,26 @@ import { PRESETS, withDeterministicClock } from "../lib/matrix.mjs";
 import { claim } from "../lib/ownership.mjs";
 import { acquirePerfLock } from "../lib/perf-lock.mjs";
 import { chromeInfo, isLocalOnly, probeOutDir } from "../lib/probe-out.mjs";
-import { machineSnapshot } from "../lib/system.mjs";
-import { aotInactive, aotLaunchInfo, installContentWatcher, launchTtff, summarizeAot, summarizeTtff } from "../lib/ttff.mjs";
+import { machineSnapshot, sampleChromeRss } from "../lib/system.mjs";
+import { decodeRegionStats } from "../lib/jit-region-stats.mjs";
+import { aotInactive, aotLaunchInfo, coreRegions, installContentWatcher, launchTtff, memoryCutReason, summarizeAot, summarizeTtff } from "../lib/ttff.mjs";
 import { num } from "./race-perf.mjs";
 
 const epochNow = (page) => page.evaluate(() => performance.timeOrigin + performance.now());
 
 // One launch on `profileDir`: page, hand-over, first present.
-async function launch({ base, query, iso, profileDir, timeoutSec, settleSec = 0 }) {
+async function launch({ base, query, iso, profileDir, timeoutSec, settleSec = 0, maxRssMB = 0 }) {
   const context = await launchChrome({ profileDir });
+  // Memory guard: the profile's Chrome processes over maxRssMB end this
+  // launch (the browser is closed); the launch fails with that reason.
+  let memoryCut = null;
+  const guard = maxRssMB > 0 && setInterval(() => {
+    const rss = sampleChromeRss(profileDir);
+    if (!memoryCut && rss.totalMB > maxRssMB) {
+      memoryCut = rss;
+      context.close().catch(() => {});
+    }
+  }, 1000);
   try {
     await context.assertInvisible("after launch");
     await context.addInitScript(installContentWatcher);
@@ -77,6 +90,7 @@ async function launch({ base, query, iso, profileDir, timeoutSec, settleSec = 0 
     // with --settle, the browser stays open until it is done (after the
     // measured interval), so the next launch on this profile has the cache.
     result.aot = aotLaunchInfo(await workerRequest(page, "validationReadAotProgress", {}, 10000));
+    if (result.aot) result.aot.core = coreRegions(await workerRequest(page, "validationReadJitRegionStats", {}, 10000), decodeRegionStats);
     if (settleSec > 0 && result.aot && !aotInactive(result.aot.state)) {
       const settleEnd = Date.now() + settleSec * 1000;
       let info = result.aot;
@@ -88,10 +102,12 @@ async function launch({ base, query, iso, profileDir, timeoutSec, settleSec = 0 
     }
     return result;
   } catch (error) {
+    if (memoryCut) return { error: memoryCutReason(memoryCut, maxRssMB), memoryCut };
     // The harness lost Chrome (CDP pipe fault, lib/browser.mjs): infra, left out.
     if (context.pipeFault) return { infraCrash: context.pipeFault.message, error: null };
     throw error;
   } finally {
+    if (guard) clearInterval(guard);
     await context.close().catch(() => {});
   }
 }
@@ -100,7 +116,7 @@ async function main() {
   const { values } = parseArgs({
     options: {
       iso: { type: "string" }, config: { type: "string", default: "wgpu" }, query: { type: "string" },
-      runs: { type: "string", default: "3" }, timeout: { type: "string", default: "60" }, settle: { type: "string", default: "0" },
+      runs: { type: "string", default: "3" }, timeout: { type: "string", default: "60" }, settle: { type: "string", default: "0" }, "max-rss-mb": { type: "string", default: "10240" },
       "max-load": { type: "string" }, "load-wait": { type: "string", default: "300" }, "lock-wait": { type: "string", default: "1800" }, "no-lock": { type: "boolean", default: false },
       port: { type: "string", default: process.env.HARNESS_PORT }, out: { type: "string" }
     }
@@ -112,6 +128,7 @@ async function main() {
   const runs = num(values, "runs", { min: 1, int: true });
   const timeoutSec = num(values, "timeout", { min: 5 });
   const settleSec = num(values, "settle", { min: 0 });
+  const maxRssMB = num(values, "max-rss-mb", { min: 0 }); // 0: no memory guard
   const maxLoad = values["max-load"] ? num(values, "max-load", { min: 0.1 }) : Math.max(2, os.cpus().length / 4);
   const loadWait = num(values, "load-wait", { min: 0 });
   const port = num(values, "port", { min: 1, int: true });
@@ -132,7 +149,7 @@ async function main() {
       try {
         for (const phase of ["cold", "warm"]) {
           try {
-            record[phase] = await launch({ base: server.base, query, iso, profileDir, timeoutSec, settleSec: phase === "cold" ? settleSec : 0 });
+            record[phase] = await launch({ base: server.base, query, iso, profileDir, timeoutSec, settleSec: phase === "cold" ? settleSec : 0, maxRssMB });
           } catch (error) {
             record[phase] = { error: String(error?.message || error).slice(0, 300) };
           }

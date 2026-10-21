@@ -139,7 +139,7 @@ The three P1s and the trivial P2s are fixed in #43; the rest is tracked here.
 - [ ] **Flag name**: plan says `wasmjit=region`, shipped as `aot=1`; `docs/jit-flags.md` not updated.
 - [ ] **One compiler worker**: blocks and regions not in the module map share a single worker, FIFO. Regions never queue there today (their live Module is in the map under their bytes' key), but a full map (49 152 entries) would send them behind every block. A second worker, or a priority lane for regions already hit, needs the client's watchdog and stats per worker: not trivial.
 - [ ] **Bimodal hitch bursts on main** (not P4, found while reviewing #37): in about one race-perf run in six, on main as on a candidate, single dropped frames (36–47 ms) every ~20 VI in two segments of the race savestate (viSinceLoad ~1370–1720 and ~1920–2090); the other runs have 0–2. Measures: `measures/jit-robustness/race-perf/p37-review-vs-main-1300` and `p37-hitches-1500` (`cold.hitchList`). Next: `--pcsample` restricted to those VI ranges, runs with and without a burst compared (after #43).
-- [ ] **Late ready signal on the last region** (pair 16:00, 2 runs of 6): the 143rd install, a 2.4 MB region, waits the full 5 s and is counted in `installFallbacks`, yet costs a V8 hit (1.5 ms): its ready byte came late or was cleared without a -4 on this side. Timestamp requests and marks to find what clears it.
+- [x] **Late ready signal on the last region** (pair 16:00): a state load (`ClearCache`) zeroed the ready table and forgot the requests in flight; a mark that landed before it was lost and the region waited out the 5 s. Waiting regions now ask again after a cache clear. (#58; review: the re-post goes through the plan-hash and HLE checks and the slice budget, region posts also mark the request table for reset, and a region whose code is invalidated while it waits is dropped.)
 
 ### From the final review of #43 (P2)
 
@@ -150,3 +150,55 @@ The three P1s and the trivial P2s are fixed in #43; the rest is tracked here.
 - [ ] **Modules kept for the session**: every region Module stays alive in discio's map (127 MB of wire bytes for MKDD) for the whole session. Release a region's Module once installed on every pthread, or cap by bytes.
 
 Order after #43 (Main, 2026-10-20): TTFF aot=1 vs off on main; the late ready signal; the FP analyses; the dispatch share (22 % of host time).
+- [ ] **Orphan request after a late mark** (review of #58, P3): when discio marks an old request after a cache clear but before the re-post, the region installs synchronously with the in-flight key still set, and the re-post's answer later leaves a stale 1 in the slot; a block sharing it compiles cold once. Same family as "Cold compile counted as Ready".
+
+## Heap layout guard (patch 0078, 2026-10-21)
+
+Region code, like block code, embeds absolute addresses of the core's heap:
+the emulated RAM and L1 (`WasmStateLayout.ram_base`, `l1_base`, read by the
+fastmem paths). A block is regenerated live and keyed by the SHA-256 of its
+bytes, so a moved RAM is a cache miss; a region is translated once and kept.
+On a second launch with `aot=1`, P7 queued every cached region before the
+boot: 127 MB copied into the core's heap before the core allocated the
+emulated RAM, which then sat elsewhere. The cached regions read and wrote the
+old address; the game diverged (a loop of "Invalid read" at frame ~130, a
+million console lines, the browser process at 7-14 GB).
+
+- `DolphinWeb_AotTranslate`'s sixth word is `WasmLayoutHash` of the layout
+  the code was emitted for (every field: offsets and the RAM/L1 addresses);
+  the region module carries it in a `region-layout` custom section.
+- `DolphinWeb_AotQueueRegion` takes it (ninth argument); the install refuses
+  a region whose layout differs from the session's, or that has none
+  (`DolphinWeb_AotLayoutRefused` counts them). Compiler version 2: modules of
+  version 1 have no layout.
+  `DolphinWeb_AotLayoutWords` returns the layout's fields (which one moved).
+- Checked live (2026-10-21, 3 relaunches of a seeded profile): 143 regions
+  installed from the cache, 0 "Invalid read", ~6 900 frames in 40 s, peak
+  3.9 GB. One earlier relaunch found the RAM elsewhere (all 143 refused, the
+  game correct and slower): the heap is not always laid out the same, which
+  is what position-independent code removes.
+- Discio copies no region into the core's heap before the core has
+  allocated the emulated RAM (`DolphinWeb_AotRamReady`, polled after the boot
+  is submitted), and none whose layout already differs from the core's
+  (counted with the core's refusals as `layoutRefused`).
+- Installed regions keep their layout: a cache clear (a new boot) has them
+  checked again, layout included, before they run; `CachedInterpreter::Shutdown`
+  forgets every region, installed, waiting or queued (review of #62).
+- After a refusal the session runs without those regions and nothing
+  retranslates them: the cache keeps its modules, a relaunch under the same
+  moved layout refuses again (counted per launch). The code's other absolute
+  address, the `frsqrte_expected` table, is static data of the binary,
+  covered by the core hash in the cache identity.
+- Lane 11 of P4/P7 (`harness/probes/aot-second-launch.mjs`): seed, then launch
+  again on the seed's origin (checked); pass when modules came from the
+  region cache and were installed, 0 "Invalid read"; `refused-layout` (the
+  heap moved, the game still correct) is told apart.
+- [ ] **Retranslate after a layout refusal**: compare a cached module's
+  layout with the core's once the RAM exists, mark the key not done, translate
+  it again and overwrite the entry (review of #62, P1-3).
+- [ ] **Position-independent region code**: pass RAM and L1 as imported
+  immutable globals instead of constants, so a moved heap no longer refuses
+  (and wastes) the cache. The cache key cannot hold the layout: it is opened
+  before the boot, when the RAM is not allocated yet.
+- [ ] **35 regions dropped on every second launch** (KPI, d18249e, and locally): installed during the OS init, they are dropped by invalidations (icbi or DMA) over their ranges; the code then runs in the block JIT for the session. Log the invalidations that drop them; consider re-verifying (plan hashes) instead of dropping when the code is unchanged.
+- [ ] **Second-launch TTFF +0.8 s** (first core frame 1.55 s against 0.72 s cold): the region cache read and compiled before the boot (`installBeforeBoot`). Load fewer modules before the boot, the rest after (target 10 s, today 2.05 s).

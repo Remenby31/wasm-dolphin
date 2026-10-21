@@ -7,6 +7,7 @@
 // invalidating covered code drops them. Skipped with a core before 0075.
 
 import assert from "node:assert/strict";
+import { createHash } from "node:crypto";
 import test from "node:test";
 
 import { imageFromDol } from "../src/aot-image.js";
@@ -50,6 +51,12 @@ function queueAll(plan) {
     entries += mapped.length;
   }
   return entries;
+}
+
+// The modules queueAll queues, in the same order.
+function regionModules(plan) {
+  return regionGroups(plan, 100).map((group) =>
+    assembleRegion(group.flatMap(functionFragments(core)), { helpers: HELPER_SIGNATURES, pcOffset: core.pcOffset, memoryPages: core.memoryPages }).bytes);
 }
 
 // The program's regions installed, from a clean code image (each test alone).
@@ -231,4 +238,117 @@ test("with jitoffthread=1 a request never answered falls back to a synchronous c
     assert.ok(core.regionStats().installFallbacks > fallbacks, "counted as a cold compile (installFallbacks)");
     assert.equal(lastInstallPath(), 2, "sampled as cold");
   });
+});
+
+// A state load: ClearOffThreadAndRegionState, the part of
+// CachedInterpreter::ClearCache for off-thread requests and regions (the
+// Node core has no CachedInterpreter instance to clear).
+const clearCacheSkip = offThreadSkip || (!core?.has("DolphinWeb_AotClearCacheForTest") && "core without the cache-clear test export (#58)");
+function clearCache() {
+  core.module._DolphinWeb_AotClearCacheForTest();
+}
+
+test("with jitoffthread=1 a cache clear while regions wait asks again: no mark is lost", { skip: clearCacheSkip }, () => {
+  withOffThreadCompile((requests) => {
+    const plan = setup();
+    core.setRegionsEnabled(true);
+    const before = core.regionCount();
+    const entries = queueAll(plan);
+    core.serviceRegions();
+    const first = requests().length;
+    assert.ok(first >= 1);
+    // The worker answers, then a state load clears the cache before the CPU
+    // thread saw the marks: the ready table and the requests in flight are reset.
+    for (const r of requests()) Atomics.store(core.module.HEAPU8, r.readyPtr + r.readySlot, 1);
+    clearCache();
+    const fallbacks = core.regionStats().installFallbacks;
+    core.serviceRegions();
+    assert.equal(core.regionCount(), before, "nothing ready after the reset");
+    assert.ok(requests().length > first, "the waiting regions asked again");
+    for (const r of requests().slice(first)) Atomics.store(core.module.HEAPU8, r.readyPtr + r.readySlot, 1);
+    core.serviceRegions();
+    assert.equal(core.regionCount(), before + entries, "installed on the new marks, not after the 5 s wait");
+    assert.equal(core.regionStats().installFallbacks, fallbacks);
+  });
+});
+
+test("with jitoffthread=1 a region asked again after a cache clear is checked against the plan", { skip: clearCacheSkip }, () => {
+  withOffThreadCompile((requests) => {
+    const plan = setup();
+    core.setRegionsEnabled(true);
+    const before = core.regionCount();
+    queueAll(plan);
+    const modules = regionModules(plan); // translated from the code as queued
+    core.serviceRegions();
+    const first = requests().length;
+    // The state load also rewrote double (no icbi), and the pthread already
+    // holds the modules: the re-post would install at once without the check.
+    patchDouble();
+    for (const bytes of modules) {
+      core.module._dolphinJitCache.set(`wasm-block-sha256-v1:${createHash("sha256").update(bytes).digest("hex")}`, new WebAssembly.Module(bytes));
+    }
+    clearCache();
+    core.serviceRegions();
+    assert.ok(requests().length >= first);
+    core.reset(seedGprs(1), PROGRAM.labels.double, STOP, 400000);
+    assert.equal(core.dispatchRegion(), 0, "no region over the rewritten double");
+    const reference = runCall(PROGRAM.labels.main, { regions: false });
+    const got = runCall(PROGRAM.labels.main, { regions: true });
+    assert.deepEqual(got.state, reference.state, "the new code runs");
+    assert.ok(core.regionCount() >= before);
+  });
+});
+
+// A region's code embeds absolute addresses of the core's heap (RAM, L1): a
+// module translated in another session, whose RAM sat elsewhere, would read
+// and write the wrong host memory. The core installs it only under the
+// layout it was translated for (2nd launch with aot=1, 2026-10-21).
+test("a region translated for another heap layout is never installed", { skip: skip || (!core?.has("DolphinWeb_AotLayoutHash") && "core without the layout guard") }, () => {
+  const plan = setup();
+  core.setRegionsEnabled(true);
+  const before = core.regionCount();
+  const refused = core.module._DolphinWeb_AotLayoutRefused() >>> 0;
+  const layout = core.module._DolphinWeb_AotLayoutHash() >>> 0;
+  for (const group of regionGroups(plan, 100)) {
+    const { bytes, entries } = assembleRegion(group.flatMap(functionFragments(core)), { helpers: HELPER_SIGNATURES, pcOffset: core.pcOffset, memoryPages: core.memoryPages });
+    const members = group.map((f) => ({ ranges: f.ranges, hash: f.hash }));
+    core.queueRegion(bytes, entries.map(([pc]) => pc), members, (layout ^ 0x10) >>> 0);
+    core.queueRegion(bytes, entries.map(([pc]) => pc), members, 0);
+  }
+  core.serviceRegions();
+  assert.equal(core.regionCount(), before, "nothing installed");
+  assert.ok((core.module._DolphinWeb_AotLayoutRefused() >>> 0) - refused >= 2, "counted as layout refusals");
+  core.reset(seedGprs(1), PROGRAM.labels.main, STOP, 400000);
+  assert.equal(core.dispatchRegion(), 0);
+});
+
+// A region already installed when the RAM moves (a stop and a new boot in
+// the same page reallocates it): its code still writes the old address. A
+// cache clear makes it checked again, layout included; a shutdown forgets
+// every region (review of #62, P1-1).
+test("an installed region is dropped when the heap layout moved, before it runs again", { skip: skip || (!core?.has("DolphinWeb_AotLayoutShiftForTest") && "core without the layout re-check") }, () => {
+  installed();
+  core.reset(seedGprs(1), PROGRAM.labels.count, STOP, 400000);
+  assert.equal(core.dispatchRegion(), 1, "runs under its own layout");
+  core.module._DolphinWeb_AotLayoutShiftForTest(0x100000); // the RAM sits 1 MiB further
+  try {
+    core.unverifyRegions(); // what ClearCache does at the new boot
+    core.reset(seedGprs(1), PROGRAM.labels.count, STOP, 400000);
+    assert.equal(core.dispatchRegion(), 0, "dropped, not run at the old address");
+  } finally {
+    core.module._DolphinWeb_AotLayoutShiftForTest(0);
+  }
+});
+
+test("a core shutdown forgets every region: installed, waiting and queued", { skip: skip || (!core?.has("DolphinWeb_AotForgetRegionsForTest") && "core without ForgetAllRegions") }, () => {
+  const { before } = installed();
+  assert.ok(core.regionCount() > 0);
+  queueAll(setup()); // queued, not installed yet
+  core.module._DolphinWeb_AotForgetRegionsForTest();
+  assert.equal(core.regionCount(), 0);
+  core.serviceRegions();
+  assert.equal(core.regionCount(), 0, "the queue went too");
+  core.reset(seedGprs(1), PROGRAM.labels.count, STOP, 400000);
+  assert.equal(core.dispatchRegion(), 0);
+  assert.ok(before >= 0);
 });

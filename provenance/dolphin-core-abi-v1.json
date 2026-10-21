@@ -1,19 +1,19 @@
 {
   "schemaVersion": 1,
   "abiVersion": 1,
-  "coreId": "sha256:e47de1731b3c444d286fd767f2ed4ee3e21a4fdc463209551f98f6985794efd7",
+  "coreId": "sha256:11bf9609c0b1b9bd643164c65599e4670db6f5dc1163822e435166135fe27b81",
   "upstreamCommit": "e22551eae1c84a7e4d0b6a5c519ef4ed4ef69df1",
   "artifacts": [
     {
       "path": "cores/dolphin/dolphin-core-upstream.js",
       "hashMode": "lf-normalized",
-      "size": 277976,
-      "sha256": "cbe9409ddd20488c1b513b4a2bc7ef2a218786adae6d13fa09395c17aa7085f6"
+      "size": 278963,
+      "sha256": "3f37376341a1493733e608f2598278d9808caf3c60388c46e31bcaf249091e6c"
     },
     {
       "path": "cores/dolphin/dolphin-core-upstream.wasm",
-      "size": 13064842,
-      "sha256": "e47de1731b3c444d286fd767f2ed4ee3e21a4fdc463209551f98f6985794efd7"
+      "size": 13074868,
+      "sha256": "11bf9609c0b1b9bd643164c65599e4670db6f5dc1163822e435166135fe27b81"
     }
   ],
   "contractSources": [
@@ -44,8 +44,8 @@
     {
       "path": "core/upstream/dolphin_web_core.cpp",
       "hashMode": "lf-normalized",
-      "size": 48294,
-      "sha256": "5b50a428210b835d033814c550976b5ed41200fa032964a6b29b1cce3ffc14de"
+      "size": 52827,
+      "sha256": "e1f0f91237f5be969194d49495ffde43318f9f0c24d01219badd5e5fe5708957"
     },
     {
       "path": "src/app.js",
@@ -140,8 +140,8 @@
     {
       "path": "src/upstream-discio-worker.js",
       "hashMode": "lf-normalized",
-      "size": 687135,
-      "sha256": "c5c6980db5c3b80510a19215068ac108580475dc2bf3063df244dd4f1aa884f2"
+      "size": 689739,
+      "sha256": "598d52e182ed796c38ff6ba9a296136e004c8824f1396b14e7d29029fc491a17"
     },
     {
       "path": "src/wgpu-renderer-worker-probe.js",
@@ -359,17 +359,26 @@
   "sourceOnlyExportsPendingRebuild": [],
   "moduleExports": [
     "_AcknowledgeWebGpuOwnershipTraceCapture",
+    "_AlertRelayForTest",
+    "_AlertRelayStats",
     "_AudioBuffer",
     "_AudioBufferFrames",
     "_AudioChannels",
     "_AudioSampleRate",
     "_BootDisc",
     "_CoreInit",
+    "_DolphinWeb_AotClearCacheForTest",
     "_DolphinWeb_AotDispatchRegionForTest",
+    "_DolphinWeb_AotForgetRegionsForTest",
     "_DolphinWeb_AotInvalidateForTest",
     "_DolphinWeb_AotKeyParts",
+    "_DolphinWeb_AotLayoutHash",
+    "_DolphinWeb_AotLayoutRefused",
+    "_DolphinWeb_AotLayoutShiftForTest",
+    "_DolphinWeb_AotLayoutWords",
     "_DolphinWeb_AotPublishStatsForTest",
     "_DolphinWeb_AotQueueRegion",
+    "_DolphinWeb_AotRamReady",
     "_DolphinWeb_AotRunRegionForTest",
     "_DolphinWeb_AotServiceRegionsForTest",
     "_DolphinWeb_AotSetReadyWaitForTest",

@@ -110,7 +110,7 @@ export async function loadAotCore(coreDir = new URL("../../cores/dolphin/", impo
     runRegion: (handle) => m._DolphinWeb_AotRunRegionForTest(handle),
     // The dispatcher's region path (P4 step 5): queue, install, dispatch.
     // members: [{ ranges, hash }] (hash: the plan's 16-hex FNV-1a 64, or null).
-    queueRegion(bytes, entries, members) {
+    queueRegion(bytes, entries, members, layout = m._DolphinWeb_AotLayoutHash?.() ?? 0) {
       const ranges = members.flatMap((x) => x.ranges);
       const triples = members.flatMap((x) => [x.ranges.length, x.hash ? parseInt(x.hash.slice(8), 16) : 0, x.hash ? parseInt(x.hash.slice(0, 8), 16) : 0]);
       const words = [...entries, ...ranges.flat(), ...triples].map((v) => v >>> 0);
@@ -119,7 +119,7 @@ export async function loadAotCore(coreDir = new URL("../../cores/dolphin/", impo
         m.HEAPU8.set(bytes, b);
         new Uint32Array(m.HEAPU8.buffer, w, words.length).set(words);
         const rangesAt = w + 4 * entries.length;
-        m._DolphinWeb_AotQueueRegion(b, bytes.length, w, entries.length, rangesAt, ranges.length, rangesAt + 8 * ranges.length, members.length);
+        m._DolphinWeb_AotQueueRegion(b, bytes.length, w, entries.length, rangesAt, ranges.length, rangesAt + 8 * ranges.length, members.length, layout >>> 0);
       } finally {
         m._free(b);
         m._free(w);
