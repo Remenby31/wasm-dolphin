@@ -119,6 +119,11 @@ test("region stats 256 bytes: cycle share outside idle skip, wait time apart, di
   assert.equal(p4.diagnostics.installsFast, 0);
   assert.equal("topMiss3Pc" in p4.diagnostics, false); // three top misses since 0075's review
   assert.deepEqual(p4.diagnostics.topMisses[0], ["0x80012345", 40]);
+  assert.equal("regionChain" in p4.diagnostics, false, "no chaining counters before 0083");
+  // Region chaining counters (patch 0083) ride along per window and are summed.
+  const chain = (chained) => ({ enabled: 1, chained, outOfTime: 1, noRegion: 2, refused: 0 });
+  const wc = (idle, c) => ({ ...w(idle), regionChain: regionRecord({ ...{ bytes: statsBytes256({ f64: [414, 1000, 60, 10, 25, 5, 50, 1, 0], diag }), again: statsBytes256({ f64: [414, 1000, 60, 10, 25, 5, 50, 1, 0], diag }) }, regionChain: c }).regionChain });
+  assert.deepEqual(summarizeP4([wc(550, chain(30)), wc(450, chain(12))]).p4.diagnostics.regionChain, { enabled: 1, chained: 42, outOfTime: 2, noRegion: 4, refused: 0 });
   // Idle cycles going backwards between the two copies: a torn read.
   assert.match(regionRecord({ bytes: statsBytes256({ f64: [1, 1000], diag: { idleCycles: 5 } }), again: statsBytes256({ f64: [1, 1000], diag: { idleCycles: 4 } }) }).p4Why, /idleCycles went backwards/);
   // A window without diagnostics pooled with one that has them: raw basis, never half-subtracted.

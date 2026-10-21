@@ -129,6 +129,15 @@ export async function loadAotCore(coreDir = new URL("../../cores/dolphin/", impo
     setRegionsEnabled: (on) => m._DolphinWeb_JitSetRegionsEnabled(on ? 1 : 0),
     regionCount: () => m._DolphinWeb_JitRegionCount() >>> 0,
     dispatchRegion: () => m._DolphinWeb_AotDispatchRegionForTest(),
+    // Region chaining (patch 0083): on/off, and its counters (null before 0083).
+    setRegionChaining: (on) => m._DolphinWeb_JitSetRegionChaining?.(on ? 1 : 0),
+    regionChainStats() {
+      if (!m._DolphinWeb_JitRegionChainStats) return null;
+      const p = m._DolphinWeb_JitRegionChainStats() >>> 0;
+      const head = new Uint32Array(m.HEAPU8.buffer, p, 2);
+      const f = new Float64Array(m.HEAPU8.buffer, p + 8, 4);
+      return { version: head[0], enabled: head[1], chained: f[0], outOfTime: f[1], noRegion: f[2], refused: f[3] };
+    },
     invalidate: (address, size) => m._DolphinWeb_AotInvalidateForTest(address >>> 0, size >>> 0),
     unverifyRegions: () => m._DolphinWeb_AotUnverifyForTest(),
     // Layout v1 of DolphinWeb_JitRegionStats (sampleEvery >= 0 resets).

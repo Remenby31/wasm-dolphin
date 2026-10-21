@@ -56,13 +56,17 @@ function program() {
   return [A, B];
 }
 
-async function instantiate(region, { onBump = () => {} } = {}) {
-  const memory = new WebAssembly.Memory({ initial: 1, maximum: 1, shared: true });
+// The core's side of region chaining (patch 0083): region_chain(state) picks
+// the next region's table index in `table`, 0 to return to the dispatcher.
+const noChain = () => ({ region_chain: () => 0, table: new WebAssembly.Table({ element: "anyfunc", initial: 1 }) });
+
+async function instantiate(region, { onBump = () => {}, memory = new WebAssembly.Memory({ initial: 1, maximum: 1, shared: true }), chain = noChain() } = {}) {
   const { instance } = await WebAssembly.instantiate(region.bytes, {
-    env: { memory, bump: onBump, read_u32: () => 0 }
+    env: { memory, bump: onBump, read_u32: () => 0, ...chain }
   });
   const u32 = new Uint32Array(memory.buffer);
   return {
+    f: instance.exports.f,
     run(pc) { u32[(STATE + PC) / 4] = pc; return instance.exports.f(STATE); },
     word: (off) => u32[(STATE + off) / 4],
     set: (off, v) => { u32[(STATE + off) / 4] = v; },
@@ -148,6 +152,39 @@ test("aot region: a dispatch to a PC outside the region returns 0 (code ran), th
   assert.equal(r.word(COUNT), 0);
 });
 
+test("aot region: an exit tail-calls the region region_chain picks, in the core's table (patch 0083)", async () => {
+  // Region 1 = A alone: its call to B (0x2000) leaves the region. Region 2 =
+  // B: returns through LR (0x1004), outside region 2, back into region 1.
+  const [A, B] = program();
+  const memory = new WebAssembly.Memory({ initial: 1, maximum: 1, shared: true });
+  const table = new WebAssembly.Table({ element: "anyfunc", initial: 3 });
+  const owner = new Map([[0x1000, 1], [0x1004, 1], [0x1008, 1], [0x2000, 2]]);
+  const asked = [];
+  let budget = Infinity; // exits the core lets chain
+  const region_chain = (state) => {
+    const pc = new Uint32Array(memory.buffer)[(state + PC) / 4];
+    asked.push(pc);
+    return budget-- > 0 ? owner.get(pc) ?? 0 : 0;
+  };
+  const opts = { helpers: HELPERS, pcOffset: PC, memoryPages: 1 };
+  const r1 = await instantiate(assembleRegion([A], opts), { memory, chain: { region_chain, table } });
+  const r2 = await instantiate(assembleRegion([B], opts), { memory, chain: { region_chain, table } });
+  table.set(1, r1.f);
+  table.set(2, r2.f);
+  // A(0x1000) -> stub -> region 2: B -> dispatch miss -> stub -> region 1:
+  // A(0x1004) -> stub (0x80009000: no region) -> 0.
+  assert.equal(r1.run(0x1000), 0);
+  assert.equal(r1.word(COUNT), 111, "both regions ran within one call");
+  assert.equal(r1.word(PC), 0x80009000);
+  assert.deepEqual(asked, [0x2000, 0x1004, 0x80009000]);
+  // Refused: the first exit returns to the dispatcher, state.pc written.
+  r1.reset(); asked.length = 0; budget = 0;
+  assert.equal(r1.run(0x1000), 0);
+  assert.equal(r1.word(COUNT), 1);
+  assert.equal(r1.word(PC), 0x2000);
+  assert.deepEqual(asked, [0x2000]);
+});
+
 test("aot region: the fragments table lets a warm-up call every fragment", async () => {
   const { compileAndWarm, createWarmer } = await import("../src/aot-compiler-worker.js");
   const [A, B] = program();
@@ -161,7 +198,7 @@ test("aot region: the fragments table lets a warm-up call every fragment", async
   assert.equal(result.calls, 3);
   // B's call to its helper proves a fragment body ran (the warm-up's helpers are stubs);
   // check directly that the table holds the fragments in order
-  const instance = new WebAssembly.Instance(module, { env: { memory: new WebAssembly.Memory({ initial: 1, maximum: 1, shared: true }), bump: () => notes.push("bump"), read_u32: () => 0 } });
+  const instance = new WebAssembly.Instance(module, { env: { memory: new WebAssembly.Memory({ initial: 1, maximum: 1, shared: true }), bump: () => notes.push("bump"), read_u32: () => 0, ...noChain() } });
   assert.equal(instance.exports.fragments.length, 2);
   instance.exports.fragments.get(1)(STATE);
   assert.deepEqual(notes, ["bump"], "table entry 1 is fragment B");

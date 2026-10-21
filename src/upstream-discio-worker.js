@@ -286,7 +286,16 @@ function harnessJitRegionStats({ sampleEvery } = {}) {
   // layoutRefused: queued regions refused for another heap layout (0078), null
   // with an older core.
   const layoutRefused = moduleInstance._DolphinWeb_AotLayoutRefused ? (moduleInstance._DolphinWeb_AotLayoutRefused() >>> 0) + aotLayoutSkipped : null;
-  return { bytes: copy(), again: copy(), installSamples: harnessRegionInstallSamples(heap), layoutRefused };
+  return { bytes: copy(), again: copy(), installSamples: harnessRegionInstallSamples(heap), layoutRefused, regionChain: harnessRegionChainStats(heap) };
+}
+// Region chaining counters (patch 0083), reset with the region stats; null
+// with an older core.
+function harnessRegionChainStats(heap) {
+  const at = moduleInstance?._DolphinWeb_JitRegionChainStats?.() >>> 0;
+  if (!at || at + 40 > heap.length) return null;
+  const view = new DataView(heap.buffer, at, 40);
+  const f = (i) => view.getFloat64(8 + 8 * i, true);
+  return { enabled: view.getUint32(4, true), chained: f(0), outOfTime: f(1), noRegion: f(2), refused: f(3) };
 }
 // The core's first region installs, [ms, bytes, path] each (path 0 first
 // attempt, 1 after the worker's ready byte, 2 cold); null with an older core.
@@ -1241,6 +1250,7 @@ async function handleMessage(type, payload) {
         jitOffThread: payload.jitOffThread,
         aotCompiler: payload.aotCompiler,
         aotFirstLaunch: payload.aotFirstLaunch,
+        regionChain: payload.regionChain,
         reportedCoreSelection: payload.coreSelection,
         wgpuReplayDiagnostics: payload.wgpuReplayDiagnostics,
         wgpuDeepReplayDiagnostics: payload.wgpuDeepReplayDiagnostics,
@@ -1853,6 +1863,7 @@ async function loadCore({
   jitOffThread = true,
   aotCompiler = true,
   aotFirstLaunch = false,
+  regionChain = true,
   reportedCoreSelection = null,
   wgpuReplayDiagnostics = false,
   wgpuDeepReplayDiagnostics: requestedWgpuDeepReplayDiagnostics = false,
@@ -2504,6 +2515,7 @@ async function loadCore({
   api.setPpcWasmJitOffThread?.(jitOffThread !== false && !noJitCache ? 1 : 0);
   // Region modules (P4) run in the dispatcher with aot=1, their only producer.
   api.setJitRegionsEnabled?.(aotFirstLaunch ? 1 : 0);
+  api.setJitRegionChaining?.(regionChain !== false ? 1 : 0);
   api.setPpcProfileEnabled?.(ppcProfile ? 1 : 0);
   api.setWebGpuUploadArenaMiB?.(wgpuUploadArenaMiB, collectMetrics ? 1 : 0);
   api.setWebGpuProducerProfileEnabled?.(wgpuProducerProfileRequested ? 1 : 0);
@@ -2631,6 +2643,7 @@ function bindApi(module) {
     setPpcWasmJitWarmup: optionalCwrap("SetPpcWasmJitWarmup", null, ["number", "number"]),
     setPpcWasmJitOffThread: optionalCwrap("SetPpcWasmJitOffThread", null, ["number"]),
     setJitRegionsEnabled: optionalCwrap("DolphinWeb_JitSetRegionsEnabled", null, ["number"]),
+    setJitRegionChaining: optionalCwrap("DolphinWeb_JitSetRegionChaining", null, ["number"]),
     getPpcWasmJitEngagedFrame: optionalCwrap("GetPpcWasmJitEngagedFrame", "number", []),
     getPpcWasmJitArmStartFrame: optionalCwrap("GetPpcWasmJitArmStartFrame", "number", []),
     setPpcWasmJitEnabled:

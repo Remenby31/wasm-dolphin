@@ -42,9 +42,9 @@ function setup() {
 }
 
 // Every region of the plan, queued as P7 would (members with the plan's hashes).
-function queueAll(plan) {
+function queueAll(plan, maxFunctions = 100) {
   let entries = 0;
-  for (const group of regionGroups(plan, 100)) {
+  for (const group of regionGroups(plan, maxFunctions)) {
     const fragments = group.flatMap(functionFragments(core));
     const { bytes, entries: mapped } = assembleRegion(fragments, { helpers: HELPER_SIGNATURES, pcOffset: core.pcOffset, memoryPages: core.memoryPages });
     core.queueRegion(bytes, mapped.map(([pc]) => pc), group.map((f) => ({ ranges: f.ranges, hash: f.hash })));
@@ -351,4 +351,110 @@ test("a core shutdown forgets every region: installed, waiting and queued", { sk
   core.reset(seedGprs(1), PROGRAM.labels.count, STOP, 400000);
   assert.equal(core.dispatchRegion(), 0);
   assert.ok(before >= 0);
+});
+
+// Region chaining (patch 0083): a region leaving for another region's entry
+// tail-calls it (env.region_chain picks it, env.table holds it) instead of
+// returning to the dispatcher. One region per function here, so every call
+// and every return crosses regions.
+const chainSkip = skip || (!core?.has("DolphinWeb_JitRegionChainStats") && "core without region chaining (patch 0083)");
+function installedOnePerFunction() {
+  const plan = setup();
+  core.setRegionsEnabled(true);
+  queueAll(plan, 1);
+  core.serviceRegions();
+  return plan;
+}
+
+test("chained regions run a whole call in one dispatch, like the interpreter", { skip: chainSkip }, () => {
+  installedOnePerFunction();
+  const reference = runCall(PROGRAM.labels.main, { regions: false });
+  try {
+    core.setRegionChaining(false);
+    core.regionStats(0);
+    const unchained = runCall(PROGRAM.labels.main, { regions: true });
+    assert.deepEqual(unchained.state, reference.state);
+    assert.equal(unchained.downcount, reference.downcount);
+    assert.equal(core.regionChainStats().chained, 0, "off: every exit goes back to the dispatcher");
+    core.setRegionChaining(true);
+    core.regionStats(0);
+    const chained = runCall(PROGRAM.labels.main, { regions: true });
+    assert.deepEqual(chained.state, reference.state);
+    assert.equal(chained.downcount, reference.downcount);
+    assert.equal(chained.interpreted, 0);
+    assert.equal(chained.ran, 1, "main, double, main, count, main: one dispatch");
+    assert.ok(unchained.ran >= 4, `unchained dispatches (${unchained.ran})`);
+    const chain = core.regionChainStats();
+    assert.equal(chain.chained, unchained.ran - 1, "one chain per dispatcher round trip saved");
+    assert.equal(core.regionStats().regionCalls, 1);
+  } finally {
+    core.setRegionChaining(true);
+  }
+});
+
+test("chaining stops when downcount runs out, at the interpreter's state", { skip: chainSkip }, () => {
+  installedOnePerFunction();
+  // Budgets that end inside main, double, count's loop and between them.
+  for (const budget of [1, 3, 5, 8, 13, 21, 34]) {
+    core.reset(seedGprs(PROGRAM.labels.main), PROGRAM.labels.main, STOP, budget);
+    core.regionStats(0);
+    assert.equal(core.dispatchRegion(), 1);
+    const got = { state: core.state(), downcount: core.downcount() };
+    assert.ok(got.downcount <= 0 || core.pc() === STOP, `budget ${budget}: stopped on downcount`);
+    // The interpreter from the same start until it spent the same cycles.
+    core.reset(seedGprs(PROGRAM.labels.main), PROGRAM.labels.main, STOP, budget);
+    for (let n = 0; n < 100000 && core.downcount() > got.downcount; n++) assert.equal(core.interpretOne(), 0);
+    assert.equal(core.downcount(), got.downcount, `budget ${budget}`);
+    assert.deepEqual(core.state(), got.state, `budget ${budget}`);
+  }
+});
+
+test("a dropped region is never chained to, even after a chain into it", { skip: chainSkip }, () => {
+  installedOnePerFunction();
+  core.setRegionChaining(true);
+  assert.equal(runCall(PROGRAM.labels.main, { regions: true }).ran, 1, "main chains into double");
+  patchDouble();
+  core.invalidate(PROGRAM.labels.double, 4); // drops double's region
+  core.regionStats(0);
+  const got = runCall(PROGRAM.labels.main, { regions: true });
+  const reference = runCall(PROGRAM.labels.main, { regions: false });
+  assert.deepEqual(got.state, reference.state, "the patched double ran, not its old region");
+  assert.ok(got.interpreted > 0, "double interpreted");
+  assert.ok(core.regionChainStats().noRegion >= 1);
+});
+
+// A loop that never leaves, across two regions: spin calls tick and branches
+// back. Chaining tests downcount at every crossing, as the dispatcher loop
+// does (an interrupt or a scheduled event ends the slice through downcount,
+// CoreTiming::ForceExceptionCheck): one dispatch ends when downcount is
+// spent, never later, at the interpreter's state.
+const SPIN = assemble(TEXT, [
+  "spin", asm.addi(4, 4, 1), (pc, l) => asm.bl(pc, l.tick), (pc, l) => asm.b(pc, l.spin),
+  "tick", asm.addi(5, 5, 1), asm.blr()
+]);
+
+test("a loop across chained regions that never exits stops on downcount, like the interpreter", { skip: chainSkip }, () => {
+  const dol = buildDol({ textAddr: TEXT, text: SPIN.words, entry: SPIN.labels.spin });
+  const { image, entryPoint } = imageFromDol(dol);
+  const plan = planDol({ image, entryPoint, gameId: "TEST01", dolBytes: dol, options: { gapFill: false } });
+  for (const seg of image.segments) core.load(seg.start, seg.bytes);
+  core.invalidate(TEXT, 4 * PROGRAM.words.length);
+  core.setRegionsEnabled(true);
+  core.setRegionChaining(true);
+  queueAll(plan, 1);
+  core.serviceRegions();
+  for (const budget of [7, 100, 5000, 200000]) {
+    core.reset(seedGprs(SPIN.labels.spin), SPIN.labels.spin, STOP, budget);
+    core.regionStats(0);
+    assert.equal(core.dispatchRegion(), 1, `budget ${budget}`);
+    const got = { state: core.state(), downcount: core.downcount() };
+    assert.ok(got.downcount <= 0, `budget ${budget}: stopped on downcount (${got.downcount})`);
+    const chain = core.regionChainStats();
+    if (budget >= 100) assert.ok(chain.chained > 2, `budget ${budget}: chained ${chain.chained}`);
+    core.reset(seedGprs(SPIN.labels.spin), SPIN.labels.spin, STOP, budget);
+    for (let n = 0; n < 1e6 && core.downcount() > got.downcount; n++) assert.equal(core.interpretOne(), 0);
+    assert.equal(core.downcount(), got.downcount, `budget ${budget}`);
+    assert.deepEqual(core.state(), got.state, `budget ${budget}`);
+  }
+  core.invalidate(TEXT, 4 * SPIN.words.length); // the next test's setup reloads PROGRAM
 });

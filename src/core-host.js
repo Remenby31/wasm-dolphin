@@ -127,6 +127,8 @@ export class EmulatorHost {
     this.aotCompiler = aotCompilerRequested(window.location.search);
     // ?aot=1: first-launch optimisation of the disc (P7), off by default.
     this.aotFirstLaunch = new URLSearchParams(window.location.search).get("aot") === "1";
+    // With aot=1, regions tail-call the next region (patch 0083); ?regionchain=0 turns it off.
+    this.regionChain = new URLSearchParams(window.location.search).get("regionchain") !== "0";
     this.collectMetrics = requestedCollectMetrics();
     this.legacyOneWayAck = requestedLegacyOneWayAck(window.location.search);
     this.wgpuReplayDiagnostics = requestedWgpuReplayDiagnostics(window.location.search);
@@ -414,6 +416,7 @@ export class EmulatorHost {
             jitOffThread: this.jitOffThread,
             aotCompiler: this.aotCompiler,
             aotFirstLaunch: this.aotFirstLaunch,
+            regionChain: this.regionChain,
             collectMetrics: this.collectMetrics,
             legacyOneWayAck: this.legacyOneWayAck,
             wgpuReplayDiagnostics: this.wgpuReplayDiagnostics,
