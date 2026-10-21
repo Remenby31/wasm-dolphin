@@ -22,12 +22,13 @@
 // searches state.pc over the declared entries only, so a fragment is never
 // entered on a PC it did not declare.
 //
-// Exit stub (region chaining, core patch 0083): reached by a jump out of the
-// region and by a `dispatch` to a PC that is not one of its entries, with
-// the state written. It calls env.region_chain(state), the core's choice of
-// the next region (a table index, 0 for none), and tail-calls that region's
-// dispatcher through env.table, the core's function table, without going
-// back to the core's dispatcher; 0 returns there (continue at state.pc).
+// Exit stub: reached by a jump out of the region and by a `dispatch` to a PC
+// that is not one of its entries, with the state written. It returns 0
+// (continue at state.pc). With `chain` (a core with patch 0083), it first
+// calls env.region_chain(state), the core's choice of the next region (a
+// table index, 0 for none), and tail-calls that region's dispatcher through
+// env.table, the core's function table, without going back to the core's
+// dispatcher.
 
 const TYPE_STATE = 0; // (i32) -> i32: dispatcher, stub, fragments
 const OP = { localGet: 0x20, localSet: 0x21, localTee: 0x22, call: 0x10, i32Load: 0x28, i32Const: 0x41, i32Eq: 0x46, i32LtU: 0x49, if: 0x04, end: 0x0b, return: 0x0f, returnCall: 0x12, returnCallIndirect: 0x13 };
@@ -114,7 +115,8 @@ function dispatcherBody(entries, pcOffset, missing) {
     emit(mid, hi);
   };
   emit(0, entries.length);
-  miss(body);
+  if (typeof missing === "object") miss(body);
+  else body.push(OP.i32Const, missing);
   body.push(OP.end);
   return body;
 }
@@ -148,7 +150,9 @@ export function regionModuleEntries(module) {
   return Array.from(new Uint32Array(section.slice(0)));
 }
 
-export function assembleRegion(fragments, { helpers, pcOffset, memoryPages, memoryMinPages = 1, sharedMemory = true }) {
+//   chain       the exit stub chains to the next region (env.region_chain,
+//               env.table): only for a core that exports them (patch 0083)
+export function assembleRegion(fragments, { helpers, pcOffset, memoryPages, memoryMinPages = 1, sharedMemory = true, chain = false }) {
   if (!Array.isArray(fragments) || !fragments.length) throw new Error("region: no fragments");
   if (!Number.isInteger(pcOffset) || pcOffset < 0) throw new Error("region: pcOffset required");
   if (!Number.isInteger(memoryPages) || memoryPages < 1) throw new Error("region: memoryPages (the core's maximum) required");
@@ -160,10 +164,10 @@ export function assembleRegion(fragments, { helpers, pcOffset, memoryPages, memo
   const helperNames = [...used].sort();
   for (const n of helperNames) if (!helpers?.[n]) throw new Error(`region: unknown helper ${n}`);
   const helperIndex = new Map(helperNames.map((n, i) => [n, i]));
-  // Functions: helpers (imports), region_chain (import), the exported
-  // dispatcher, the internal one (`dispatch` relocs), the exit stub, then the
-  // fragments.
-  const CHAIN = helperNames.length, DISPATCHER = CHAIN + 1, INNER = DISPATCHER + 1, STUB = INNER + 1, FIRST = STUB + 1;
+  // Functions: helpers (imports), region_chain (import, with `chain`), the
+  // exported dispatcher, the internal one (`dispatch` relocs), the exit stub,
+  // then the fragments.
+  const CHAIN = helperNames.length, DISPATCHER = CHAIN + (chain ? 1 : 0), INNER = DISPATCHER + 1, STUB = INNER + 1, FIRST = STUB + 1;
   const LOCAL_FUNCTIONS = 3 + fragments.length;
 
   // Entries -> fragment function index.
@@ -222,15 +226,17 @@ export function assembleRegion(fragments, { helpers, pcOffset, memoryPages, memo
   section(out, 1, types);
 
   const imports = [];
-  uleb(imports, helperNames.length + 3);
+  uleb(imports, helperNames.length + 1 + (chain ? 2 : 0));
   name(imports, "env"); name(imports, "memory");
   imports.push(0x02, sharedMemory ? 0x03 : 0x01);
   uleb(imports, memoryMinPages); uleb(imports, memoryPages);
   helperNames.forEach((n, i) => { name(imports, "env"); name(imports, n); imports.push(0x00); uleb(imports, helperType[i]); });
-  name(imports, "env"); name(imports, "region_chain"); imports.push(0x00); uleb(imports, TYPE_STATE);
-  // Table 0: the core's function table, where the next region's dispatcher
-  // is (any size).
-  name(imports, "env"); name(imports, "table"); imports.push(0x01, 0x70, 0x00, 0x00);
+  if (chain) {
+    name(imports, "env"); name(imports, "region_chain"); imports.push(0x00); uleb(imports, TYPE_STATE);
+    // Table 0: the core's function table, where the next region's dispatcher
+    // is (any size).
+    name(imports, "env"); name(imports, "table"); imports.push(0x01, 0x70, 0x00, 0x00);
+  }
   section(out, 2, imports);
 
   const funcs = [];
@@ -238,9 +244,11 @@ export function assembleRegion(fragments, { helpers, pcOffset, memoryPages, memo
   for (let i = 0; i < LOCAL_FUNCTIONS; i++) uleb(funcs, TYPE_STATE);
   section(out, 3, funcs);
 
-  // Table 1: a funcref table of the fragments, exported as "fragments": an
-  // off-thread warm-up calls each of them (V8 compiles a function lazily, at
-  // its first call); the core only ever calls `f`.
+  // A funcref table of the fragments (table 1 after the core's with `chain`),
+  // exported as "fragments": an off-thread warm-up calls each of them (V8
+  // compiles a function lazily, at its first call); the core only ever calls
+  // `f`.
+  const FRAGMENTS_TABLE = chain ? 1 : 0;
   const table = [0x01, 0x70, 0x00];
   uleb(table, fragments.length);
   section(out, 4, table);
@@ -248,10 +256,12 @@ export function assembleRegion(fragments, { helpers, pcOffset, memoryPages, memo
   const exports = [];
   uleb(exports, 2);
   name(exports, "f"); exports.push(0x00); uleb(exports, DISPATCHER);
-  name(exports, "fragments"); exports.push(0x01); uleb(exports, 1);
+  name(exports, "fragments"); exports.push(0x01); uleb(exports, FRAGMENTS_TABLE);
   section(out, 7, exports);
 
-  const elem = [0x01, 0x02, 0x01, OP.i32Const, 0x00, OP.end, 0x00]; // active, table 1, funcref indexes
+  const elem = chain
+    ? [0x01, 0x02, 0x01, OP.i32Const, 0x00, OP.end, 0x00] // active, table 1, funcref indexes
+    : [0x01, 0x00, OP.i32Const, 0x00, OP.end];
   uleb(elem, fragments.length);
   for (let i = 0; i < fragments.length; i++) uleb(elem, FIRST + i);
   section(out, 9, elem);
@@ -259,14 +269,16 @@ export function assembleRegion(fragments, { helpers, pcOffset, memoryPages, memo
   const code = [];
   uleb(code, LOCAL_FUNCTIONS);
   const append = (bytes) => { for (const x of bytes) code.push(x); }; // no spread: large bodies
-  for (const missing of [1, { stub: STUB }]) {
+  for (const missing of [1, chain ? { stub: STUB } : 0]) {
     const dispatcher = dispatcherBody(sortedEntries, pcOffset, missing);
     uleb(code, dispatcher.length); append(dispatcher);
   }
   // State written: the next region, or 0 (continue at state.pc).
-  const stub = [0x01, 0x01, VAL.i32, OP.localGet, 0, OP.call];
-  uleb(stub, CHAIN);
-  stub.push(OP.localTee, 1, OP.if, 0x40, OP.localGet, 0, OP.localGet, 1, OP.returnCallIndirect, TYPE_STATE, 0x00, OP.end, OP.i32Const, 0x00, OP.end);
+  const stub = chain ? [0x01, 0x01, VAL.i32, OP.localGet, 0, OP.call] : [0x00, OP.i32Const, 0x00, OP.end];
+  if (chain) {
+    uleb(stub, CHAIN);
+    stub.push(OP.localTee, 1, OP.if, 0x40, OP.localGet, 0, OP.localGet, 1, OP.returnCallIndirect, TYPE_STATE, 0x00, OP.end, OP.i32Const, 0x00, OP.end);
+  }
   uleb(code, stub.length); append(stub);
   for (const b of bodies) { uleb(code, b.length); append(b); }
   section(out, 10, code);

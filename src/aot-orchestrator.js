@@ -278,7 +278,10 @@ export function coreAssembleOptions(m) {
   }
   // The core's memory never grows (INITIAL_MEMORY = DOLPHIN_WASM_MEMORY_PAGES):
   // its size is the maximum the region modules declare.
-  return { helperNames: names, assemble: { helpers, pcOffset, memoryPages: m.HEAPU8.buffer.byteLength / 65536 } };
+  // chain: region modules tail-call the next region when the core exports
+  // the chaining helper (patch 0083); an older core cannot link them.
+  return { helperNames: names, assemble: { helpers, pcOffset, memoryPages: m.HEAPU8.buffer.byteLength / 65536,
+    chain: typeof m._DolphinWeb_RegionChainHelper === "function" } };
 }
 
 // The translator the optimiser drives, over the core's export. Translates

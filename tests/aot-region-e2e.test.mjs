@@ -92,9 +92,7 @@ async function buildRegions({ maxFunctions }) {
 function runner(module) {
   const memory = new WebAssembly.Memory({ initial: 1, maximum: 1, shared: true });
   const notes = [];
-  // No next region (patch 0083's region_chain): every exit returns to the caller.
-  const chain = { region_chain: () => 0, table: new WebAssembly.Table({ element: "anyfunc", initial: 1 }) };
-  const instance = new WebAssembly.Instance(module, { env: { memory, note: (_state, pc) => notes.push(pc >>> 0), ...chain } });
+  const instance = new WebAssembly.Instance(module, { env: { memory, note: (_state, pc) => notes.push(pc >>> 0) } });
   const u32 = new Uint32Array(memory.buffer);
   return {
     run(pc) {

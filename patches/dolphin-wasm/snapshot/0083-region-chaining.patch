@@ -169,7 +169,7 @@ diff --git a/Source/Core/Core/PowerPC/CachedInterpreter/CachedInterpreter.cpp b/
    const s32 downcount = ppc_state.downcount;
    int code;
    if (s_region_stats_on && s_region_stats.sample_every != 0)
-@@ -9562,14 +9630,112 @@ inline bool RegionWouldRun(const PowerPC::PowerPCState& ppc_state)
+@@ -9562,14 +9630,116 @@ inline bool RegionWouldRun(const PowerPC::PowerPCState& ppc_state)
    if (!s_regions_enabled.load(std::memory_order_relaxed) || !RegionFilterHas(ppc_state.pc) ||
        !ppc_state.msr.IR || !ppc_state.msr.DR || !ppc_state.msr.FP ||
        (ppc_state.feature_flags & FEATURE_FLAG_PERFMON) != 0 ||
@@ -205,11 +205,14 @@ diff --git a/Source/Core/Core/PowerPC/CachedInterpreter/CachedInterpreter.cpp b/
 +static_assert(sizeof(RegionChainStats) == 40);
 +alignas(8) RegionChainStats s_region_chain_stats;
 +
++// ?regionchain=0 (DolphinWeb_JitSetRegionChaining, any thread); the CPU
++// thread reflects it in RegionChainStats::enabled.
++std::atomic<bool> s_region_chain_enabled{true};
++
 +void ResetRegionChainStats()
 +{
-+  const u32 enabled = s_region_chain_stats.enabled;
 +  s_region_chain_stats = RegionChainStats{};
-+  s_region_chain_stats.enabled = enabled;
++  s_region_chain_stats.enabled = s_region_chain_enabled.load(std::memory_order_relaxed) ? 1 : 0;
 +  s_chain_exit_pcs.clear();
 +  s_chain_break_pcs.clear();
 +}
@@ -219,6 +222,7 @@ diff --git a/Source/Core/Core/PowerPC/CachedInterpreter/CachedInterpreter.cpp b/
 +  const auto& ppc_state =
 +      *reinterpret_cast<const PowerPC::PowerPCState*>(static_cast<std::uintptr_t>(state_ptr));
 +  RegionChainStats& stats = s_region_chain_stats;
++  stats.enabled = s_region_chain_enabled.load(std::memory_order_relaxed) ? 1 : 0;
 +  if (!stats.enabled)
 +  {
 +    stats.refused += 1;
@@ -251,7 +255,7 @@ diff --git a/Source/Core/Core/PowerPC/CachedInterpreter/CachedInterpreter.cpp b/
  }  // namespace
  
 +// The table index of RegionChainNext, imported by region modules as
-+// env.region_chain (the compile in DolphinWeb_CompileWasmModule).
++// env.region_chain (the import object of DolphinWeb_CachedInterpreterCompileWasmBlock).
 +extern "C" EMSCRIPTEN_KEEPALIVE int DolphinWeb_RegionChainHelper()
 +{
 +  return static_cast<int>(reinterpret_cast<std::uintptr_t>(&RegionChainNext));
@@ -261,7 +265,7 @@ diff --git a/Source/Core/Core/PowerPC/CachedInterpreter/CachedInterpreter.cpp b/
 +// dispatcher, as before 0083); on by default. Any thread.
 +extern "C" EMSCRIPTEN_KEEPALIVE void DolphinWeb_JitSetRegionChaining(int enabled)
 +{
-+  s_region_chain_stats.enabled = enabled != 0 ? 1 : 0;
++  s_region_chain_enabled.store(enabled != 0, std::memory_order_relaxed);
 +}
 +
 +// Two lists, {u32 count, then 12 x {u32 pc, u32 n}}: the PCs without a
@@ -283,7 +287,7 @@ diff --git a/Source/Core/Core/PowerPC/CachedInterpreter/CachedInterpreter.cpp b/
  // Code at [address, address + size) changed (icbi, DMA, a cache clear):
  // regions covering it are dropped. From JitInterface.
  void DolphinWeb_InvalidateRegions(u32 address, u32 size)
-@@ -15290,7 +15456,8 @@ namespace
+@@ -15290,7 +15460,8 @@ namespace
  // Bumped whenever the code the translator emits changes (cache keys).
  // 2: modules carry their heap layout (region-layout); version 1 modules have
  // none and would never install.

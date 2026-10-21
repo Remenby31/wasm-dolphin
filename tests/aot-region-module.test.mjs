@@ -166,7 +166,7 @@ test("aot region: an exit tail-calls the region region_chain picks, in the core'
     asked.push(pc);
     return budget-- > 0 ? owner.get(pc) ?? 0 : 0;
   };
-  const opts = { helpers: HELPERS, pcOffset: PC, memoryPages: 1 };
+  const opts = { helpers: HELPERS, pcOffset: PC, memoryPages: 1, chain: true };
   const r1 = await instantiate(assembleRegion([A], opts), { memory, chain: { region_chain, table } });
   const r2 = await instantiate(assembleRegion([B], opts), { memory, chain: { region_chain, table } });
   table.set(1, r1.f);
@@ -183,6 +183,17 @@ test("aot region: an exit tail-calls the region region_chain picks, in the core'
   assert.equal(r1.word(COUNT), 1);
   assert.equal(r1.word(PC), 0x2000);
   assert.deepEqual(asked, [0x2000]);
+});
+
+test("aot region: without chain (a core before 0083) the module imports neither region_chain nor the table", () => {
+  const opts = { helpers: HELPERS, pcOffset: PC, memoryPages: 1 };
+  const names = (o) => WebAssembly.Module.imports(new WebAssembly.Module(assembleRegion(program(), o).bytes)).map((i) => i.name);
+  assert.deepEqual(names(opts), ["memory", "bump"]);
+  assert.deepEqual(names({ ...opts, chain: true }), ["memory", "bump", "region_chain", "table"]);
+  // both expose the fragments for the warm-up
+  for (const o of [opts, { ...opts, chain: true }]) {
+    assert.deepEqual(WebAssembly.Module.exports(new WebAssembly.Module(assembleRegion(program(), o).bytes)).map((e) => e.name), ["f", "fragments"]);
+  }
 });
 
 test("aot region: the fragments table lets a warm-up call every fragment", async () => {

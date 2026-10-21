@@ -119,8 +119,7 @@ const ofType = (flow, type) => flow.progress().events.filter((e) => e.type === t
 
 function runs(module) {
   const memory = new WebAssembly.Memory({ initial: 1, maximum: 1, shared: true });
-  const chain = { region_chain: () => 0, table: new WebAssembly.Table({ element: "anyfunc", initial: 1 }) }; // patch 0083
-  const instance = new WebAssembly.Instance(module, { env: { memory, ...chain } });
+  const instance = new WebAssembly.Instance(module, { env: { memory } });
   const u32 = new Uint32Array(memory.buffer);
   return (pc) => {
     u32[(STATE + PC) / 4] = pc;

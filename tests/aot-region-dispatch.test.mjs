@@ -42,11 +42,11 @@ function setup() {
 }
 
 // Every region of the plan, queued as P7 would (members with the plan's hashes).
-function queueAll(plan, maxFunctions = 100) {
+function queueAll(plan, maxFunctions = 100, chain = false) {
   let entries = 0;
   for (const group of regionGroups(plan, maxFunctions)) {
     const fragments = group.flatMap(functionFragments(core));
-    const { bytes, entries: mapped } = assembleRegion(fragments, { helpers: HELPER_SIGNATURES, pcOffset: core.pcOffset, memoryPages: core.memoryPages });
+    const { bytes, entries: mapped } = assembleRegion(fragments, { helpers: HELPER_SIGNATURES, pcOffset: core.pcOffset, memoryPages: core.memoryPages, chain });
     core.queueRegion(bytes, mapped.map(([pc]) => pc), group.map((f) => ({ ranges: f.ranges, hash: f.hash })));
     entries += mapped.length;
   }
@@ -361,7 +361,7 @@ const chainSkip = skip || (!core?.has("DolphinWeb_JitRegionChainStats") && "core
 function installedOnePerFunction() {
   const plan = setup();
   core.setRegionsEnabled(true);
-  queueAll(plan, 1);
+  queueAll(plan, 1, true);
   serviceAll();
   return plan;
 }
@@ -450,7 +450,7 @@ test("a loop across chained regions that never exits stops on downcount, like th
   core.invalidate(TEXT, 4 * PROGRAM.words.length);
   core.setRegionsEnabled(true);
   core.setRegionChaining(true);
-  queueAll(plan, 1);
+  queueAll(plan, 1, true);
   serviceAll();
   for (const budget of [7, 100, 5000, 200000]) {
     core.reset(seedGprs(SPIN.labels.spin), SPIN.labels.spin, STOP, budget);
