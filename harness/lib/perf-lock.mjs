@@ -30,12 +30,20 @@
 //   it never waits on itself;
 // - leftovers of a process killed mid-step (.stale-, .released-, moved
 //   guards) carry their time in their name and are swept once 60 s old.
+// First come, first served (2026-10-21): the lock is polled, so a burst of
+// short runs or builds could retake it again and again while a long wait
+// timed out. Every contender first drops a ticket in .perf-lock.queue, named
+// by its arrival time, and tries the lock only when no older ticket of a
+// live process is still waiting; the ticket goes once the lock is held, or
+// when the contender gives up. Tickets of a process that is gone are removed
+// by whoever reads them. Older harnesses take no ticket and can still pass
+// ahead, until every checkout has this code.
 // Left: a takeover guard holder suspended past the abandon delay may lose its
 // guard between its last check and its rename (narrowed, not closed); and
 // older harnesses' own unguarded takeovers race among themselves until every
 // checkout has this code.
 import { randomBytes } from "node:crypto";
-import { existsSync, mkdirSync, readdirSync, readFileSync, renameSync, rmSync, statSync, unlinkSync, writeFileSync } from "node:fs";
+import { existsSync, mkdirSync, readdirSync, readFileSync, renameSync, rmdirSync, rmSync, statSync, unlinkSync, writeFileSync } from "node:fs";
 import os from "node:os";
 import path from "node:path";
 
@@ -186,6 +194,54 @@ function takeOver(dir, judged, { orphanSec, log }) {
   }
 }
 
+export const queueDir = (dir) => `${dir}.queue`;
+const TICKET = /^\d{13}-\d+-[0-9a-f]+$/;
+
+// Drops this contender's ticket; returns its name. Written aside and renamed,
+// so a reader never sees half a ticket.
+function enqueue(dir, name) {
+  const q = queueDir(dir);
+  const id = `${Date.now()}-${process.pid}-${randomBytes(4).toString("hex")}`;
+  const tmp = path.join(q, `.tmp-${id}`);
+  for (let i = 0; ; i++) {
+    try {
+      mkdirSync(q, { recursive: true });
+      writeFileSync(tmp, JSON.stringify({ name, pid: process.pid, host: os.hostname(), at: new Date().toISOString() }));
+      renameSync(tmp, path.join(q, id));
+      return id;
+    } catch (e) {
+      // The queue emptied and was removed between our mkdir and our write.
+      if (e.code !== "ENOENT" || i >= 10) throw e;
+    }
+  }
+}
+
+// The ticket goes, and the queue with it once empty (rmdir refuses a
+// directory that still has tickets).
+const dequeue = (dir, id) => {
+  try { unlinkSync(path.join(queueDir(dir), id)); } catch {} // never throw from an exit path
+  try { rmdirSync(queueDir(dir)); } catch {}
+};
+
+// Tickets older than `id` whose process is still there, oldest first; those
+// of a process gone from this host are removed.
+export function ticketsAhead(dir, id) {
+  const q = queueDir(dir);
+  let names = [];
+  try { names = readdirSync(q); } catch { return []; }
+  const out = [];
+  for (const n of names.filter((n) => TICKET.test(n) && n < id).sort()) {
+    let t = null;
+    try { t = JSON.parse(readFileSync(path.join(q, n), "utf8")); } catch {}
+    if (!t || (t.host === os.hostname() && Number.isInteger(t.pid) && !alive(t.pid))) {
+      try { unlinkSync(path.join(q, n)); } catch {}
+      continue;
+    }
+    out.push(t);
+  }
+  return out;
+}
+
 // Leftovers of a process killed between two steps: moved locks and guards.
 function sweepLeftovers(dir) {
   const parent = path.dirname(dir);
@@ -213,8 +269,24 @@ export async function acquirePerfLock({
   for (const [k, v] of Object.entries({ waitSec, pollSec, orphanSec })) if (!Number.isFinite(v) || v < 0) throw new Error(`perf lock: ${k} must be a number ≥ 0, not ${v}`);
   const end = Date.now() + waitSec * 1000;
   sweepLeftovers(dir);
+  const ticket = enqueue(dir, name);
+  try {
+    return await contend({ dir, name, waitSec, pollSec, orphanSec, log, sleep, end, ticket });
+  } finally {
+    dequeue(dir, ticket);
+  }
+}
+
+async function contend({ dir, name, waitSec, pollSec, orphanSec, log, sleep, end, ticket }) {
   const ours = new Map(); // nonce → owner, of every attempt
   for (;;) {
+    const ahead = ticketsAhead(dir, ticket);
+    if (ahead.length) {
+      if (Date.now() >= end) throw new Error(`perf lock ${dir}: ${ahead.length} contender(s) arrived first, still waiting after ${waitSec} s (first: ${ahead[0].name}, pid ${ahead[0].pid})`);
+      log(`perf lock: ${ahead.length} contender(s) arrived first (${ahead[0].name}); retrying in ${pollSec} s`);
+      await sleep(pollSec * 1000);
+      continue;
+    }
     const owner = newOwner(name);
     ours.set(owner.nonce, owner);
     const got = claim(dir, owner);
