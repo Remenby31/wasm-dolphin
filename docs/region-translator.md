@@ -200,3 +200,5 @@ million console lines, the browser process at 7-14 GB).
   immutable globals instead of constants, so a moved heap no longer refuses
   (and wastes) the cache. The cache key cannot hold the layout: it is opened
   before the boot, when the RAM is not allocated yet.
+- [ ] **35 regions dropped on every second launch** (KPI, d18249e, and locally): installed during the OS init, they are dropped by invalidations (icbi or DMA) over their ranges; the code then runs in the block JIT for the session. Log the invalidations that drop them; consider re-verifying (plan hashes) instead of dropping when the code is unchanged.
+- [ ] **Second-launch TTFF +0.8 s** (first core frame 1.55 s against 0.72 s cold): the region cache read and compiled before the boot (`installBeforeBoot`). Load fewer modules before the boot, the rest after (target 10 s, today 2.05 s).
