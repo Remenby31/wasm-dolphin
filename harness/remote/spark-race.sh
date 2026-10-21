@@ -21,7 +21,7 @@ export PATH="$B/node/bin:$PATH"
 mkdir -p "$B/lanes/b"
 {
   # Its turn, first come first served (spark-queue.mjs): the lane granted.
-  lane=$(node harness/remote/spark-queue.mjs wait --pid $$ --kind pair --lanes "$want" --name "$(basename "$out")")
+  lane=$(node harness/remote/spark-queue.mjs wait --pid $$ --kind pair --lanes "$want" --name "$(basename "$out")" -- "$@")
   trap 'node harness/remote/spark-queue.mjs done --pid $$' EXIT
   case $lane in
     a) cpus=15-19 ncpus=10-14 port=8090 ;;
