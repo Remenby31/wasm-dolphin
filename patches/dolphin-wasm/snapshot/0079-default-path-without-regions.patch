@@ -1,0 +1,148 @@
+diff --git a/Source/Core/Core/PowerPC/CachedInterpreter/CachedInterpreter.cpp b/Source/Core/Core/PowerPC/CachedInterpreter/CachedInterpreter.cpp
+--- a/Source/Core/Core/PowerPC/CachedInterpreter/CachedInterpreter.cpp
++++ b/Source/Core/Core/PowerPC/CachedInterpreter/CachedInterpreter.cpp
+@@ -9407,6 +9407,9 @@ void PublishRegionStats()
+ 
+ void ApplyRegionStatsRequest()
+ {
++  // Nearly always nothing pending: a load, not a read-modify-write per slice.
++  if (s_region_stats_request.load(std::memory_order_relaxed) < 0) [[likely]]
++    return;
+   const int request = s_region_stats_request.exchange(-1, std::memory_order_acq_rel);
+   if (request >= 0)
+   {
+@@ -9521,6 +9524,8 @@ inline bool RegionWouldRun(const PowerPC::PowerPCState& ppc_state)
+ // regions covering it are dropped. From JitInterface.
+ void DolphinWeb_InvalidateRegions(u32 address, u32 size)
+ {
++  if (s_region_waiting.empty() && s_region_at.empty()) [[likely]]
++    return;  // no region (aot off): nothing to look up
+   if (s_region_at.empty())
+     return;
+   // MEM1 offsets: the 0x8 and 0xC views and DMA (physical) addresses meet.
+@@ -9654,6 +9659,28 @@ extern "C" EMSCRIPTEN_KEEPALIVE u32 DolphinWeb_JitRegionStats(int sample_every)
+ }
+ #endif
+ 
++#ifdef __EMSCRIPTEN__
++// Region stats with timing on: one block lookup in sample_every is timed and
++// stands for sample_every of them (lookups are short and many). Out of line,
++// so that ExecuteOneBlock stays the size it was without the stats.
++template <typename BlockCache>
++[[gnu::noinline]] const u8* TimedDispatch(BlockCache& cache)
++{
++  if (++s_sampled_lookups < s_region_stats.sample_every)
++    return cache.Dispatch();
++  s_sampled_lookups = 0;
++  const auto t0 = std::chrono::steady_clock::now();
++  const u8* const found = cache.Dispatch();
++  s_sampled_lookup_ms +=
++      std::max(std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now() - t0)
++                       .count() -
++                   s_clock_pair_ms,
++               0.0) *
++      s_region_stats.sample_every;
++  return found;
++}
++#endif
++
+ void CachedInterpreter::ExecuteOneBlock([[maybe_unused]] bool allow_redispatch)
+ {
+ #ifdef __EMSCRIPTEN__
+@@ -9662,25 +9689,10 @@ void CachedInterpreter::ExecuteOneBlock([[maybe_unused]] bool allow_redispatch)
+     return;
+ #endif
+ #ifdef __EMSCRIPTEN__
+-  // With stats timing on, one block lookup in sample_every is timed and
+-  // stands for sample_every of them (lookups are short and many).
+-  const auto timed_lookup = [&] {
+-    if (!s_sampling_lookups) [[likely]]
+-      return m_block_cache.Dispatch();
+-    if (++s_sampled_lookups < s_region_stats.sample_every)
+-      return m_block_cache.Dispatch();
+-    s_sampled_lookups = 0;
+-    const auto t0 = std::chrono::steady_clock::now();
+-    const u8* const found = m_block_cache.Dispatch();
+-    s_sampled_lookup_ms +=
+-        std::max(std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now() - t0)
+-                         .count() -
+-                     s_clock_pair_ms,
+-                 0.0) *
+-        s_region_stats.sample_every;
+-    return found;
+-  };
+-  const u8* normal_entry = timed_lookup();
++  // With stats timing on, one block lookup in sample_every is timed, out of
++  // line: without stats the lookup is the plain one.
++  const u8* normal_entry =
++      s_sampling_lookups ? TimedDispatch(m_block_cache) : m_block_cache.Dispatch();
+ #else
+   const u8* normal_entry = m_block_cache.Dispatch();
+ #endif
+@@ -9969,7 +9981,8 @@ void CachedInterpreter::ExecuteOneBlock([[maybe_unused]] bool allow_redispatch)
+ #endif
+ #else
+ #line 8054
+-      const u8* const next = timed_lookup();
++      const u8* const next =
++          s_sampling_lookups ? TimedDispatch(m_block_cache) : m_block_cache.Dispatch();
+ #endif
+ #line 8055
+       if (!next)
+@@ -10071,11 +10084,21 @@ void CachedInterpreter::Run()
+     const auto slice_start =
+         timing ? std::chrono::steady_clock::now() : std::chrono::steady_clock::time_point{};
+     s_sampling_lookups = timing;
++#endif
++#ifdef __EMSCRIPTEN__
++    if (!timing) [[likely]]
++    {
++      // The loop as it was before region stats.
++      do
++      {
++        ExecuteOneBlock();
++      } while (m_ppc_state.downcount > 0 && *state_ptr == CPU::State::Running);
++    }
++    else
+ #endif
+     do
+     {
+ #ifdef __EMSCRIPTEN__
+-      if (timing)
+       {
+         const double region_before = s_region_stats.region_time_ms;
+         const double lookups_before = s_sampled_lookup_ms;
+@@ -10300,21 +10323,24 @@ s32 CachedInterpreter::CheckIdle(PowerPC::PowerPCState& ppc_state,
+   if (ppc_state.npc == idle_pc)
+   {
+ #ifdef __EMSCRIPTEN__
+-    const s32 before = ppc_state.downcount;
+-    if (s_sampling_lookups)  // timing on
++    if (!s_region_stats_on) [[likely]]
+     {
+-      const auto start = std::chrono::steady_clock::now();
+-      core_timing.Idle();
+-      s_region_stats.idle_time_ms +=
+-          std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now() - start)
+-              .count();
++      core_timing.Idle();  // as before region stats
+     }
+     else
+     {
++      const s32 before = ppc_state.downcount;
++      const auto start = s_sampling_lookups ? std::chrono::steady_clock::now() :
++                                              std::chrono::steady_clock::time_point{};
+       core_timing.Idle();
+-    }
+-    if (s_region_stats_on)
++      if (s_sampling_lookups)  // timing on
++      {
++        s_region_stats.idle_time_ms +=
++            std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now() - start)
++                .count();
++      }
+       s_region_stats.idle_cycles += static_cast<double>(before - ppc_state.downcount);
++    }
+ #else
+     core_timing.Idle();
+ #endif

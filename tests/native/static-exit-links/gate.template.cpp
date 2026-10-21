@@ -12,6 +12,7 @@ bool s_sampling_lookups = false;
 u32 s_sampled_lookups = 0;
 double s_sampled_lookup_ms = 0, s_clock_pair_ms = 0;
 struct { u32 sample_every = 0; } s_region_stats;
+template <class Cache> const u8* TimedDispatch(Cache& cache) { return cache.Dispatch(); }
 bool helper_disabled = false, s_ppc_block_profile_enabled = false;
 u32 helper_checks = 0, s_ppc_profile_total_blocks = 0, profile_records = 0;
 constexpr u32 DOLPHIN_WEB_DISABLE_BLOCK_REDISPATCH = 1, PPC_PROFILE_SAMPLE_MASK = 1023;
