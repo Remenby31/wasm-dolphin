@@ -458,3 +458,48 @@ test("a loop across chained regions that never exits stops on downcount, like th
   }
   core.invalidate(TEXT, 4 * SPIN.words.length); // the next test's setup reloads PROGRAM
 });
+
+// FPU ops the direct tier does not emit (ps_sum0, ps_neg, fres) stay in the
+// region as interpreter calls (patch 0083, compiler version 4) instead of
+// leaving it: the whole call runs in region code, nothing is interpreted
+// outside, at the interpreter's state.
+const DATA = 0x80004000;
+const ps = (xo, d, a, b, c = 0) => (4 << 26) | (d << 21) | (a << 16) | (b << 11) | (c << 6) | (xo << 1);
+const lfs = (d, a, off) => (48 << 26) | (d << 21) | (a << 16) | (off & 0xffff);
+const stfd = (s, a, off) => (54 << 26) | (s << 21) | (a << 16) | (off & 0xffff);
+const fres = (d, b) => (59 << 26) | (d << 21) | (b << 11) | (24 << 1);
+const FPU = assemble(TEXT, [
+  "main", asm.mflr(0), asm.stwu(1, 1, -16), stw(0, 1, 20), (pc, l) => asm.bl(pc, l.fpu),
+  lwz(0, 1, 20), asm.addi(1, 1, 16), mtlr(0), asm.blr(),
+  "fpu", asm.lis(5, DATA >>> 16), asm.ori(5, 5, DATA & 0xffff), lfs(1, 5, 0), lfs(2, 5, 4),
+  ps(10, 3, 1, 2, 1), // ps_sum0 f3, f1, f1, f2
+  ps(40, 4, 0, 3), // ps_neg f4, f3
+  fres(5, 2),
+  stfd(3, 5, 8), stfd(4, 5, 16), stfd(5, 5, 24), asm.addi(6, 6, 1), asm.blr()
+]);
+
+test("FPU ops outside the direct tier run inside the region, interpreted, like the interpreter", { skip: chainSkip || (!core?.has("DolphinWeb_JitRegionTransitionTop") && "core without 0083's diagnostics") }, () => {
+  const dol = buildDol({ textAddr: TEXT, text: FPU.words, entry: FPU.labels.main });
+  const { image, entryPoint } = imageFromDol(dol);
+  const plan = planDol({ image, entryPoint, gameId: "TEST01", dolBytes: dol, options: { gapFill: false } });
+  for (const seg of image.segments) core.load(seg.start, seg.bytes);
+  core.invalidate(TEXT, 4 * Math.max(PROGRAM.words.length, FPU.words.length));
+  const floats = new DataView(new ArrayBuffer(32));
+  floats.setFloat32(0, 1.5); floats.setFloat32(4, -3.25);
+  const loadData = () => core.load(DATA, new Uint8Array(floats.buffer));
+  loadData();
+  core.reset(seedGprs(FPU.labels.main), FPU.labels.main, STOP, 400000); // MSR.FP on while translating
+  core.setRegionsEnabled(true);
+  core.setRegionChaining(true);
+  queueAll(plan, 1);
+  core.serviceRegions();
+  loadData();
+  const reference = runCall(FPU.labels.main, { regions: false });
+  loadData();
+  const got = runCall(FPU.labels.main, { regions: true });
+  assert.deepEqual(got.state, reference.state);
+  assert.equal(got.downcount, reference.downcount);
+  assert.equal(got.interpreted, 0, "no op left the region");
+  assert.equal(got.ran, 1);
+  core.invalidate(TEXT, 4 * FPU.words.length);
+});

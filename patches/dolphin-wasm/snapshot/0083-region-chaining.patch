@@ -283,13 +283,59 @@ diff --git a/Source/Core/Core/PowerPC/CachedInterpreter/CachedInterpreter.cpp b/
  // Code at [address, address + size) changed (icbi, DMA, a cache clear):
  // regions covering it are dropped. From JitInterface.
  void DolphinWeb_InvalidateRegions(u32 address, u32 size)
-@@ -15290,7 +15456,8 @@ namespace
+@@ -15011,6 +15177,22 @@ constexpr u32 WASM_FRAGMENT_PC_LOCAL = 56;  // appended after the block locals 1
+ // code inside its ranges (invalidation drops it by those ranges): no branch
+ // following (a call is a jump, its return point an entry), and the block
+ // stops at `limit`, the end of the range holding pc.
++// Patch 0083: an FPU op the direct tier does not emit (ps_sum0, ps_neg,
++// fres, the Rc forms, ...) stays in the region as a call to the interpreter
++// (EmitInterpretCall: GPR cache flushed and reloaded, a halt returns 2)
++// instead of ending it: leaving the region for one op cost a round trip
++// through the dispatcher and the cached interpreter (~240 000 a second on
++// the race). Only computational FPU ops: an op that changes the MSR, the
++// translation or the code (system, cache and branch ops) still ends the
++// region, which never checks the CPU's mode between its blocks.
++bool RegionInterpretsInline(const PPCAnalyst::CodeOp& op)
++{
++  if ((op.opinfo->flags & FL_USE_FPU) == 0 || op.canEndBlock || op.branchIsIdleLoop)
++    return false;
++  const UGeckoInstruction inst = op.inst;
++  return !(inst.OPCD == 4 && inst.SUBOP10 == 1014);  // dcbz_l: a cache op
++}
++
+ bool BuildFragmentBlock(Core::System& system, u32 pc, u32 limit, FragmentBlock* out)
+ {
+   auto& ppc = system.GetPPCState();
+@@ -15027,7 +15209,8 @@ bool BuildFragmentBlock(Core::System& system, u32 pc, u32 limit, FragmentBlock*
+   for (; prefix < block.m_num_instructions; ++prefix)
+   {
+     const PPCAnalyst::CodeOp& op = buffer[prefix];
+-    if (op.branchIsIdleLoop || !IsPpcWasmDirectInstructionCandidate(op) ||
++    if (op.branchIsIdleLoop ||
++        (!IsPpcWasmDirectInstructionCandidate(op) && !RegionInterpretsInline(op)) ||
+         ((op.opinfo->flags & FL_USE_FPU) != 0 && !ppc.msr.FP && !t_aot_translating))
+       break;
+     if (op.canEndBlock)
+@@ -15055,9 +15238,10 @@ bool BuildFragmentBlock(Core::System& system, u32 pc, u32 limit, FragmentBlock*
+   WasmFragmentRelocs fragment;
+   WasmFragmentRelocs* const saved = s_wasm_fragment_relocs;
+   s_wasm_fragment_relocs = &fragment;
++  // allow_interpret_fallback: the ops RegionInterpretsInline let in (0083).
+   const std::vector<u8> bytes = BuildWasmCachedInterpreterBlock(
+       std::span<const PPCAnalyst::CodeOp>{buffer.data(), prefix}, CurrentWasmStateLayout(system),
+-      resume_pc, !ends_with_branch, false, false);
++      resume_pc, !ends_with_branch, true, false);
+   s_wasm_fragment_relocs = saved;
+   const std::vector<u8>& code = fragment.code;
+   const std::size_t n = code.size();
+@@ -15290,7 +15474,9 @@ namespace
  // Bumped whenever the code the translator emits changes (cache keys).
  // 2: modules carry their heap layout (region-layout); version 1 modules have
  // none and would never install.
 -constexpr u32 AOT_COMPILER_VERSION = 2;
 +// 3: region modules chain through env.region_chain and env.table (0083).
-+constexpr u32 AOT_COMPILER_VERSION = 3;
++// 4: FPU ops outside the direct tier stay in the region, interpreted (0083).
++constexpr u32 AOT_COMPILER_VERSION = 4;
  constexpr u32 AOT_MAX_FRAGMENT_BYTES = 1u << 20;
  thread_local std::vector<u32> t_aot_out;
  u8* s_aot_ram = nullptr;
