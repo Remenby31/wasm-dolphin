@@ -25,7 +25,7 @@
       "commit": "01e0577914a75a2569c846778c2f93aa8e6feddd"
     }
   },
-  "patchSeriesSha256": "e541b9590506135e943767ca5811244acf76751a255d1c255a1fdafe8f7bb53c",
+  "patchSeriesSha256": "f68f365ec15e9f51b4eb5f6c56efe51a6367dd30c02db1855eae5303a8ce01d6",
   "patches": [
     {
       "order": 1,
@@ -640,8 +640,8 @@
       "cwd": ".",
       "hashMode": "lf-normalized",
       "path": "patches/dolphin-wasm/snapshot/0091-no-wasm-code-under-mmu.patch",
-      "size": 2264,
-      "sha256": "8e897ad581ac76605e3110c32204bd3c6765f446ca2e044909c6a6a3f55ff4d6"
+      "size": 3471,
+      "sha256": "d169775dc85c7e756561439fb1da2f749d3a774f0abd2b0dc0116017ed67a46d"
     },
     {
       "order": 78,
