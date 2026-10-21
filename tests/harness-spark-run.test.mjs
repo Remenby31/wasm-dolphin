@@ -9,7 +9,7 @@ import path from "node:path";
 import test from "node:test";
 
 import { kpiTable } from "../harness/lib/kpi.mjs";
-import { launchCommand, runId, sh, stampSummary } from "../harness/remote/spark-run.mjs";
+import { benchQuery, benchRaceArgs, launchCommand, RACE_QUERY, runId, sh, stampSummary } from "../harness/remote/spark-run.mjs";
 
 const race = (extra = {}) => ({
   kind: "race-perf", file: "race",
@@ -37,8 +37,10 @@ test("spark-run: run names are path-safe and dated", () => {
 
 test("spark-run: the launch command quotes every argument for the remote shell", () => {
   const cmd = launchCommand({ harnessDir: "/h/salon-bench/harness/k", outDir: "/h/salon-bench/results/d/n", raceArgs: ["--query", "video=wgpu&cpu=dual", "--warmup", "it's"], chromeCpus: "15-19" });
-  assert.match(cmd, /SPARK_CHROME_CPUS='15-19' setsid nohup sh harness\/remote\/spark-race\.sh '\/h\/salon-bench\/results\/d\/n' -- '--query' 'video=wgpu&cpu=dual'/);
+  assert.match(cmd, /\{ SPARK_CHROME_CPUS='15-19' setsid nohup sh harness\/remote\/spark-race\.sh '\/h\/salon-bench\/results\/d\/n' -- '--query' 'video=wgpu&cpu=dual'/);
   assert.match(cmd, /^mkdir -p '\/h\/salon-bench\/results\/d' && test ! -e '\/h\/salon-bench\/results\/d\/n\.log' && cd '\/h\/salon-bench\/harness\/k' && /);
+  // The whole command parses (a bare `& &&` does not).
+  execFileSync("bash", ["-n", "-c", cmd]);
   // What sh() quotes, a POSIX shell reads back unchanged.
   const dir = mkdtempSync(path.join(os.tmpdir(), "spark-run-test-"));
   try {
@@ -49,4 +51,17 @@ test("spark-run: the launch command quotes every argument for the remote shell",
   } finally {
     rmSync(dir, { recursive: true, force: true });
   }
+});
+
+test("spark-run: wgpu runs as video=null on the bench, the rest of the query kept", () => {
+  assert.equal(benchQuery("core=upstream&video=wgpu&presenter=webgpu&cpu=dual&jitwarmup=60&aot=1"), "core=upstream&video=null&presenter=2d&cpu=dual&jitwarmup=60&aot=1");
+  assert.equal(benchQuery("wgpu"), "core=upstream&video=null&presenter=2d&cpu=dual&speed=1&wasmjit=1&jitwarmup=700&oc=1");
+  assert.equal(benchQuery("video=software&presenter=webgpu"), "video=software&presenter=webgpu");
+  // No query: the race's own, swapped; --config becomes a --query; --baseline-query too.
+  const none = benchRaceArgs(["--warmup", "25"]);
+  assert.deepEqual(none.args, ["--warmup", "25", "--query", benchQuery(RACE_QUERY)]);
+  assert.equal(none.swaps.length, 1);
+  const both = benchRaceArgs(["--config", "wgpu", "--baseline-query", "video=wgpu&aot=1"]);
+  assert.deepEqual(both.args, ["--query", benchQuery("wgpu"), "--baseline-query", "video=null&aot=1&presenter=2d"]);
+  assert.deepEqual(benchRaceArgs(["--query", "video=wgpu"], { keepVideo: true }).args, ["--query", "video=wgpu"]);
 });

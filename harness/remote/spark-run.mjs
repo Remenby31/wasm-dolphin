@@ -9,8 +9,9 @@
 //
 //   node harness/remote/spark-run.mjs --candidate <ref|dir> [--baseline <ref|dir>]
 //     --state <local .sav> [--name n] [--runs 6] [--host spark] [--detach]
-//     [-- <race-perf options: --config, --query, --warmup, --secs, --max-load, …>]
+//     [--keep-video] [-- <race-perf options: --query, --warmup, --secs, --max-load, …>]
 //   node harness/remote/spark-run.mjs --fetch <date>/<name>   (a detached run)
+//   node harness/remote/spark-run.mjs --build <ref>            (core built on the bench)
 //
 // - Relative only: Playwright's Chromium on Linux arm64 (no Google Chrome
 //   there), another CPU and GPU. Every summary is stamped host=spark and
@@ -25,6 +26,10 @@
 //   (mode 600) when missing.
 // - The run is detached on the Spark (setsid): a dropped ssh session does
 //   not stop it, and --fetch brings it back later.
+// - --build <ref> builds that commit's core on the bench (spark-build.mjs,
+//   under the bench's perf lock; the commit must be on the fork), and
+//   `spark:<ref>` then names that worktree as a side: a Linux build, the
+//   same kind as CI's, never compared with a core built on this Mac.
 import { execFileSync, spawnSync } from "node:child_process";
 import { createHash } from "node:crypto";
 import { existsSync, mkdirSync, readdirSync, readFileSync, rmSync, statSync, writeFileSync } from "node:fs";
@@ -33,6 +38,7 @@ import { pathToFileURL } from "node:url";
 import { parseArgs } from "node:util";
 
 import { exportRef } from "../cli.mjs";
+import { PRESETS } from "../lib/matrix.mjs";
 import { REPO_ROOT } from "../lib/browser.mjs";
 import { IDENTITY_FILE, snapshotTree } from "../lib/server.mjs";
 import { release } from "../lib/ownership.mjs";
@@ -56,6 +62,43 @@ export function runId({ name, candidate, baseline, now = new Date() }) {
   return { date, name: safeName(name ?? auto) };
 }
 
+// The bench has no hardware WebGPU (headless Chromium on Linux arm64 only
+// offers SwiftShader, where the wgpu device is lost), and the software
+// renderer in dual core lets the CPU thread idle on it (speed capped at the
+// limit). video=null keeps the race CPU-bound as wgpu does on the Mac
+// (PROGRAM.md: video=null is no faster there): so every query's wgpu
+// becomes null, its WebGPU presenter 2d; the rest of the query is kept.
+export const RACE_QUERY = "core=upstream&video=wgpu&presenter=webgpu&cpu=dual&speed=1&wasmjit=1&jitwarmup=60&oc=1";
+export function benchQuery(query) {
+  const q = new URLSearchParams(PRESETS[query] ?? query);
+  if (q.get("video") === "wgpu") q.set("video", "null");
+  if (q.get("video") === "null" && (q.get("presenter") ?? "webgpu") === "webgpu") q.set("presenter", "2d");
+  return q.toString();
+}
+
+// race-perf's options after --, with every query made fit for the bench
+// (--config becomes a --query).
+export function benchRaceArgs(args, { keepVideo = false } = {}) {
+  const out = [], swaps = [];
+  let hasQuery = false;
+  for (let i = 0; i < args.length; i += 1) {
+    const a = args[i];
+    if (["--query", "--config", "--baseline-query"].includes(a) && i + 1 < args.length) {
+      const from = args[(i += 1)];
+      const to = keepVideo ? (PRESETS[from] ?? from) : benchQuery(from);
+      if (a !== "--baseline-query") hasQuery = true;
+      out.push(a === "--config" ? "--query" : a, to);
+      if (to !== from) swaps.push({ option: a, from, to });
+    } else out.push(a);
+  }
+  if (!hasQuery) {
+    const to = keepVideo ? RACE_QUERY : benchQuery(RACE_QUERY);
+    out.push("--query", to);
+    swaps.push({ option: "--query", from: `(default) ${RACE_QUERY}`, to });
+  }
+  return { args: out, swaps };
+}
+
 // The summary as the Mac keeps it: marked as measured on the bench, never
 // on this Mac's stock Chrome (lib/kpi.mjs leaves it out of trunk's rows).
 export function stampSummary(summary, bench) {
@@ -70,7 +113,7 @@ export function launchCommand({ harnessDir, outDir, raceArgs, chromeCpus, nodeCp
     // Two pairs never share a name (race-perf refuses an existing --out, the log would mix).
     `test ! -e ${sh(`${outDir}.log`)}`,
     `cd ${sh(harnessDir)}`,
-    `${env ? `${env} ` : ""}setsid nohup sh harness/remote/spark-race.sh ${sh(outDir)} -- ${raceArgs.map(sh).join(" ")} </dev/null >/dev/null 2>&1 &`,
+    `{ ${env ? `${env} ` : ""}setsid nohup sh harness/remote/spark-race.sh ${sh(outDir)} -- ${raceArgs.map(sh).join(" ")} </dev/null >/dev/null 2>&1 & }`,
     "echo started"
   ].join(" && ");
 }
@@ -114,9 +157,19 @@ function pushTree(host, { root, files, kind, key, identity = null }) {
   return { dest, pushed: true };
 }
 
+// A worktree built on the bench (--build): spark:<ref>.
+function benchSide(host, spec) {
+  const commit = execFileSync("git", ["-C", REPO_ROOT, "rev-parse", `${spec.slice("spark:".length)}^{commit}`], { encoding: "utf8" }).trim();
+  const dest = `${BENCH}/build/wt/${commit}`;
+  if (ssh(host, `test -f ${dest}/cores/dolphin/dolphin-core-upstream.wasm`, { quiet: true }).status !== 0) throw new Error(`${spec}: no core built on the bench for ${commit}: run --build ${commit} first`);
+  console.log(`[spark-run] ${spec}: core built on the bench (build/wt/${commit.slice(0, 12)})`);
+  return { spec, dest, key: `build-${commit}`, source: { commit, builtOn: "spark" } };
+}
+
 // One side: the files it serves (and tools/serve.mjs, which the remote
 // harness imports to resolve them), keyed by the snapshot hash.
 async function pushSide(host, spec) {
+  if (spec.startsWith("spark:")) return benchSide(host, spec);
   const isDir = existsSync(spec) && statSync(spec).isDirectory();
   const root = isDir ? path.resolve(spec) : exportRef(spec);
   try {
@@ -154,25 +207,45 @@ function benchDisc(host, name) {
 
 const sleep = (s) => new Promise((r) => setTimeout(r, s * 1000));
 
-// Follow the detached run's log until its exit file appears, then bring
-// the result back and stamp it.
-async function follow(host, { date, name, meta = null, pollSec = 20 }) {
-  const remote = `${BENCH}/results/${date}/${name}`;
+// Print a detached job's log (<base>.log) until its exit file (<base>.exit)
+// appears; its exit code.
+async function followLog(host, base, { lost, pollSec = 20 }) {
   let shown = 0, misses = 0;
   for (;;) {
-    const r = ssh(host, `cat ${remote}.exit 2>/dev/null; echo ---; tail -n +${shown + 1} ${remote}.log 2>/dev/null`, { quiet: true });
+    const r = ssh(host, `cat ${base}.exit 2>/dev/null; echo ---; tail -n +${shown + 1} ${base}.log 2>/dev/null`, { quiet: true });
     if (r.status !== 0) {
-      if (++misses > 30) throw new Error(`lost the Spark for ${misses} polls; the run goes on there: --fetch ${date}/${name}`);
+      if (++misses > 30) throw new Error(`lost the Spark for ${misses} polls; ${lost}`);
     } else {
       misses = 0;
       const [code, log = ""] = r.out.split("---\n");
       const lines = log.split("\n").filter(Boolean);
       for (const l of lines) console.log(l);
       shown += lines.length;
-      if (code.trim() !== "") return fetchResult(host, { date, name, meta, exit: Number(code.trim()) });
+      if (code.trim() !== "") return Number(code.trim());
     }
     await sleep(pollSec);
   }
+}
+
+// Follow the detached run until it ends, then bring the result back and stamp it.
+async function follow(host, { date, name, meta = null }) {
+  const exit = await followLog(host, `${BENCH}/results/${date}/${name}`, { lost: `the run goes on there: --fetch ${date}/${name}` });
+  return fetchResult(host, { date, name, meta, exit });
+}
+
+// --build: the commit's core, built on the bench (spark-build.mjs).
+async function build(host, ref) {
+  const commit = execFileSync("git", ["-C", REPO_ROOT, "rev-parse", `${ref}^{commit}`], { encoding: "utf8" }).trim();
+  const remotes = execFileSync("git", ["-C", REPO_ROOT, "branch", "-r", "--contains", commit], { encoding: "utf8" });
+  if (!/^\s*origin\//m.test(remotes)) throw new Error(`${ref} (${commit.slice(0, 12)}) is not on origin: push it to the fork first, the bench fetches from there`);
+  const harnessFiles = listFiles(REPO_ROOT, HARNESS_ROOTS, HARNESS_SKIP);
+  const harness = pushTree(host, { root: REPO_ROOT, files: harnessFiles, kind: "harness", key: contentKey(REPO_ROOT, harnessFiles) });
+  const base = `${BENCH}/build/wt/${commit}`;
+  ssh(host, `mkdir -p ${BENCH}/build/wt && test ! -e ${base}.log && cd ${harness.dest} && { PATH="$HOME/${BENCH}/node/bin:$PATH" setsid nohup sh -c 'node harness/remote/spark-build.mjs ${commit} >> $HOME/${base}.log 2>&1; echo $? > $HOME/${base}.exit' </dev/null >/dev/null 2>&1 & }`);
+  console.log(`[spark-run] building ${commit.slice(0, 12)} on ${host} (waits for the bench's perf lock; ~8 min, first build of a worktree more)`);
+  const exit = await followLog(host, base, { lost: `the build goes on there: ssh ${host} cat ~/${base}.log` });
+  if (exit === 0) console.log(`[spark-run] built: --candidate spark:${commit}`);
+  return exit;
 }
 
 function fetchResult(host, { date, name, meta, exit }) {
@@ -204,12 +277,16 @@ async function main() {
       candidate: { type: "string" }, baseline: { type: "string" }, state: { type: "string" }, iso: { type: "string" },
       name: { type: "string" }, runs: { type: "string", default: "6" }, port: { type: "string", default: "8090" },
       host: { type: "string", default: process.env.SPARK_HOST || "spark" },
-      "chrome-cpus": { type: "string" }, "node-cpus": { type: "string" },
-      detach: { type: "boolean", default: false }, fetch: { type: "string" }
+      "chrome-cpus": { type: "string" }, "node-cpus": { type: "string" }, "keep-video": { type: "boolean", default: false },
+      detach: { type: "boolean", default: false }, fetch: { type: "string" }, build: { type: "string" }
     },
     allowPositionals: true
   });
   const host = values.host;
+  if (values.build) {
+    process.exitCode = await build(host, values.build);
+    return;
+  }
   if (values.fetch) {
     const [date, name] = values.fetch.split("/");
     process.exitCode = await follow(host, { date, name: safeName(name) });
@@ -230,23 +307,26 @@ async function main() {
   const iso = benchDisc(host, values.iso);
   const home = ssh(host, "printf %s \"$HOME\"").out;
   const abs = (p) => `${home}/${p}`;
+  const bench = benchRaceArgs(positionals, { keepVideo: values["keep-video"] });
+  for (const s of bench.swaps) console.log(`[spark-run] ${s.option} on the bench: ${s.to} (was ${s.from})`);
   const raceArgs = [
     "--iso", abs(iso), "--state", abs(state), "--port", values.port, "--runs", values.runs,
     "--candidate", abs(candidate.dest), ...(baseline ? ["--baseline", abs(baseline.dest)] : []),
-    ...positionals
+    ...bench.args
   ];
   const outDir = abs(`${BENCH}/results/${date}/${name}`);
   const meta = {
     host: "spark", hostname: ssh(host, "hostname").out.trim(), at: new Date().toISOString(),
-    chromiumVersion: ssh(host, `ls -d ${BENCH}/ms-playwright/chromium-*/chrome-linux*/chrome | sort -V | tail -1 | xargs -I{} {} --version`).out.trim(),
+    chromiumVersion: ssh(host, `c=$(ls -d ${BENCH}/ms-playwright/chromium-*/chrome-linux*/chrome | sort -V | tail -1) && "$c" --version`).out.trim(),
     chromeCpus: values["chrome-cpus"] ?? "15-19", nodeCpus: values["node-cpus"] ?? "0-4",
     harness: { from: REPO_ROOT, key: path.basename(harness.dest) },
     sides: { candidate, ...(baseline ? { baseline } : {}) },
+    querySwaps: bench.swaps,
     raceArgs
   };
+  ssh(host, launchCommand({ harnessDir: abs(harness.dest), outDir, raceArgs, chromeCpus: values["chrome-cpus"], nodeCpus: values["node-cpus"] }));
   mkdirSync(path.join(MEASURES, date, name), { recursive: true });
   writeFileSync(path.join(MEASURES, date, name, "spark.json"), JSON.stringify(meta, null, 1) + "\n");
-  ssh(host, launchCommand({ harnessDir: abs(harness.dest), outDir, raceArgs, chromeCpus: values["chrome-cpus"], nodeCpus: values["node-cpus"] }));
   console.log(`[spark-run] started on ${host}: ${date}/${name} (race-perf waits for the Spark's perf lock)`);
   if (values.detach) {
     console.log(`[spark-run] detached; bring it back with: node harness/remote/spark-run.mjs --fetch ${date}/${name}`);

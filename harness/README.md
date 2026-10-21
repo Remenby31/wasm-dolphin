@@ -152,13 +152,24 @@ node harness/probes/race-perf.mjs --iso ../roms/<disc>.iso --state ../measures/h
 node harness/remote/spark-run.mjs --candidate <ref|dir> --baseline <ref|dir> \
   --state ../measures/harness/<race>.sav [--name n] [--runs 6] [--detach] [-- <race-perf options>]
 node harness/remote/spark-run.mjs --fetch <date>/<name>   # a detached or interrupted run
+node harness/remote/spark-run.mjs --build <ref>           # its core built on the bench, then --candidate spark:<ref>
 ```
 
 - **Relative only.** Playwright's Chromium (Google Chrome has no Linux arm64
-  build), Cortex-X925 cores, no hardware WebGPU in headless Chromium there
-  (only SwiftShader). Each summary is stamped `host: "spark"`,
+  build), Cortex-X925 cores. Each summary is stamped `host: "spark"`,
   `chromium: "playwright"`, and `kpi-report` never reads it for trunk's
   rows (`lib/kpi.mjs` `thisMac`). Compare the two sides of a pair, nothing else.
+- **`video=null` instead of wgpu.** Headless Chromium there offers WebGPU on
+  SwiftShader only, where the wgpu device is lost (black picture). The
+  software renderer in dual core lets the emulated CPU wait on it: the race
+  sits at the speed limit (100 % at `speed=1`, 150 % at 1.5, even on two
+  little cores), so a CPU change cannot show. `speed=unlimited` stalls the
+  scene. With `video=null` the race runs (≈10 k JIT blocks compiled, as on
+  the Mac) with the CPU thread saturated at ~60 %, the regime of wgpu on the
+  Mac (where null is no faster). So every query's `video=wgpu` becomes
+  `video=null` and its WebGPU presenter `2d`, the rest kept; the default
+  query is the Mac's race query swapped the same way. `--keep-video` turns
+  this off. It measures the CPU side only: a change to rendering needs the Mac.
 - It pushes this checkout's harness and what each side serves
   (`snapshotTree`: a ref exported with `git archive`, a directory as it is,
   cores and local changes included), keyed by content under
@@ -170,6 +181,12 @@ node harness/remote/spark-run.mjs --fetch <date>/<name>   # a detached or interr
   agents queue there, and the Mac's lock and MESURE slots do not apply.
   Chromium is pinned to cpus 15-19 (the big cores of one cluster,
   `--chrome-cpus`), node to 0-4 (`--node-cpus`).
+- `--build <ref>` (a commit of the fork) builds its core on the bench with
+  the pinned toolchain (`build-core-repro.mjs --install`, linux-arm64, ~8
+  min) in `~/salon-bench/build/wt/<commit>`, holding the bench's perf lock;
+  `--candidate spark:<ref>` / `--baseline spark:<ref>` then serve that
+  worktree. A core built there differs in bytes from CI's and from a Mac
+  build: compare it only with another core built on the bench.
 
 ## KPI probes and report
 
