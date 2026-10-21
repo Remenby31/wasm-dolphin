@@ -116,11 +116,15 @@ export function installContentWatcher() {
 // second launch with the cache has loaded > 0). Null for an engine without P7.
 export function aotLaunchInfo(reply) {
   if (!reply || reply.error || !reply.schema) return null;
-  const install = (reply.events ?? []).find((e) => e.type === "install");
+  const install = (reply.events ?? []).find((e) => e.type === "install" && !e.after);
+  // Modules of the cache loaded after the first image (only the boot set
+  // loads before the boot): a second "install" event.
+  const rest = (reply.events ?? []).filter((e) => e.type === "install" && e.after === "first-image");
   const done = (reply.events ?? []).find((e) => e.type === "done");
   return {
     state: reply.state ?? null,
     install: install ? { loaded: install.loaded ?? null, failed: install.failed ?? null, deferred: install.deferred ?? null, ms: install.ms ?? null } : null,
+    ...(rest.length ? { afterFirstImage: { loaded: rest.reduce((n, e) => n + (e.loaded ?? 0), 0) } } : {}),
     done: done ? { ms: done.ms ?? null, compiled: done.compiled ?? null, total: done.total ?? null } : null
   };
 }

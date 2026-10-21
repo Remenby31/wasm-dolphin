@@ -505,3 +505,27 @@ test("before the boot only the recorded boot set loads; the rest after the first
   assert.equal(await third.flow.recordBootBlocks([]), size);
   assert.equal((await third.flow.loadRest()).loaded, total - size);
 });
+
+// A first launch has no plan at its first image: recording the boot set plans
+// it then (the optimisation that follows reuses that plan), so the second
+// launch already loads its boot set before the boot.
+test("the first launch records its boot set too; the rest is a second install event", async () => {
+  const p = profile();
+  const boot = new Map();
+  p.planStore.loadBootKeys = async (k) => boot.get(k) ?? null;
+  p.planStore.saveBootKeys = async (k, keys) => { boot.set(k, [...keys]); };
+  const plan = makePlan();
+  const first = launch(p, { plan });
+  assert.equal((await first.flow.installBeforeBoot()).loaded, 0);
+  const f = plan.modules[0].functions[0];
+  const size = await first.flow.recordBootBlocks([[f.ranges[0][0], f.ranges[0][0] + 4, 1, 0]]);
+  assert.equal(size, 1);
+  await first.flow.start();
+  assert.equal(first.builds(), 1, "planned once, shared with the optimisation");
+  const second = launch(p);
+  assert.equal((await second.flow.installBeforeBoot()).loaded, 1);
+  const rest = await second.flow.loadRest();
+  assert.ok(rest.loaded > 0);
+  const installs = ofType(second.flow, "install");
+  assert.deepEqual(installs.map((e) => [e.loaded, e.after ?? null]), [[1, null], [rest.loaded, "first-image"]]);
+});

@@ -175,7 +175,17 @@ export function createAotFirstLaunch({
       return { ...report, ms };
     },
 
-    loadRest: () => (supported ? loader.loadRest() : Promise.resolve({ loaded: 0, failed: [], deferred: 0 })),
+    // After the first image: what installBeforeBoot left, as a second
+    // "install" event (after: "first-image").
+    async loadRest() {
+      if (!supported) return { loaded: 0, failed: [], deferred: 0 };
+      const t0 = now();
+      const report = await loader.loadRest();
+      if (report.loaded || report.failed.length) {
+        record("install", { loaded: report.loaded, failed: report.failed.length, deferred: report.deferred, ms: Math.round(now() - t0), after: "first-image" });
+      }
+      return report;
+    },
 
     async status() {
       if (!supported) return { state: "unsupported", fraction: 0 };
@@ -209,7 +219,9 @@ export function createAotFirstLaunch({
     // added to the stored boot set. The boot set only grows: code a region
     // ran is not in the JIT's block dump. Resolves to the set's size.
     async recordBootBlocks(blocks) {
-      if (!supported || typeof planStore?.saveBootKeys !== "function" || !(await optimizer.getPlan({ build: false }))) return 0;
+      // A first launch has no plan yet at its first image: planned now (the
+      // optimisation that starts after it shares the computation).
+      if (!supported || typeof planStore?.saveBootKeys !== "function" || !(await optimizer.getPlan().catch(() => null))) return 0;
       const keys = new Set(await planStore.loadBootKeys(planKey).catch(() => null) ?? []);
       const ranges = [];
       for (const u of optimizer.regions) for (const f of u.members) for (const [a, b] of f.ranges) ranges.push([a >>> 0, b >>> 0, u.key]);
