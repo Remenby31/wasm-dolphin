@@ -78,6 +78,20 @@ export class AotOptimizer extends EventTarget {
     this.session = null;
     this.running = null;
     this.cancelled = false;
+    // Keys whose stored module the core refused (translated for another heap
+    // layout): the next run translates them again and overwrites the entry.
+    // Once per key and session: a second refusal leaves it to the JIT.
+    this.stale = new Set();
+    this.restaled = new Set();
+  }
+
+  // A stored module the core refused: translated again, live, by the current
+  // run or the next one. False when the key was already retranslated.
+  markStale(key) {
+    if (this.restaled.has(key) || !this.regions?.some((u) => u.key === key)) return false;
+    this.restaled.add(key);
+    this.stale.add(key);
+    return true;
   }
 
   // One plan computation at a time, shared by every caller. build = false:
@@ -290,6 +304,7 @@ export class AotOptimizer extends EventTarget {
       await this.loadAttempts();
       // resume = false: everything again (stored modules are overwritten).
       const doneSet = resume ? await session.has(this.regions.map((u) => u.key)) : new Set();
+      for (const key of this.stale) doneSet.delete(key);
       // Modules refused (no member translatable, rejected bytes, quota) are
       // left to the JIT; keys the cache blacklisted are skipped.
       const refused = new Set();
@@ -297,8 +312,15 @@ export class AotOptimizer extends EventTarget {
       const todo = this.regions.filter((u) => !doneSet.has(u.key));
       this.emit("optimization-start", { ...this.progress(doneSet), ms: 0, resumed: doneSet.size > 0 });
       this.emit("optimization-progress", { ...this.progress(doneSet), ms: ms() });
-      for (const unit of todo) {
-        if (this.cancelled) break;
+      // Modules marked stale while this run goes are appended to its work.
+      const queued = new Set(todo.map((u) => u.key));
+      for (let n = 0; ; n++) {
+        if (n >= todo.length) {
+          for (const u of this.regions) if (this.stale.has(u.key) && !queued.has(u.key)) { queued.add(u.key); todo.push(u); }
+        }
+        if (n >= todo.length || this.cancelled) break;
+        const unit = todo[n];
+        this.stale.delete(unit.key);
         const result = await this.translateUnit(unit);
         if (!result || this.cancelled) break;
         if (result.notReady) {

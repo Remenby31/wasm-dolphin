@@ -468,3 +468,35 @@ test("planning runs in a worker of its own; its failure or silence rejects", asy
   await assert.rejects(planDiscInWorker(file, { createWorker: fakeWorker((w) => w.onmessage({ data: { ok: false, message: "bad DOL" } })) }), /bad DOL/);
   await assert.rejects(planDiscInWorker(file, { createWorker: fakeWorker(() => {}), timeoutMs: 5 }), /timed out/);
 });
+
+// Review of #62 (P1-3): a cached module the core refuses (translated for
+// another heap layout) is translated again from guest memory after the boot,
+// its cache entry overwritten and the new module installed; the next launch
+// loads the new one. Once per key and launch, whether the refusal comes
+// before the start after the boot or after the run.
+test("a module refused at install is translated again live and its cache entry rewritten", async () => {
+  const p = profile();
+  await launch(p).flow.start();
+  for (const when of ["before-start", "after-run"]) {
+    const installs = [];
+    const next = launch(p, { install: (r) => installs.push(r) });
+    await next.flow.installBeforeBoot();
+    installs.length = 0; // the cached modules, handed at load
+    const key = [...next.retained.keys()][1];
+    if (when === "after-run") {
+      await next.flow.start();
+      assert.equal(next.translator.translated.length, 0, "a second launch translates nothing");
+    }
+    assert.equal(next.flow.retranslate(key), true);
+    assert.equal(next.flow.retranslate(key), false, "once per launch");
+    if (when === "before-start") await next.flow.start();
+    for (let i = 0; i < 100 && !installs.length; i++) await new Promise((r) => setTimeout(r, 5));
+    assert.deepEqual(next.compiled, [key], `${when}: only that module, compiled again`);
+    assert.ok(next.translator.translated.length > 0 && next.translator.translated.length <= 4);
+    assert.deepEqual(installs.map((r) => r.key), [key], "handed to the core");
+    assert.equal(next.flow.stats().retranslated, 1);
+  }
+  assert.equal(launch(p).flow.retranslate("region-v1:unknown"), false, "no plan, nothing to do");
+  const last = launch(p);
+  assert.equal((await last.flow.installBeforeBoot()).failed.length, 0, "the rewritten entries load");
+});

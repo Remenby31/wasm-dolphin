@@ -201,3 +201,46 @@ test("aot optimizer: groups survive a plan rebuilt with a new profile, so the ca
   const kept = new Set(await partly.o.bootKeys());
   assert.equal(kept.size, keysBefore.length - 1, "only the group holding the changed function misses");
 });
+
+// A module the core refused at install (translated for another heap layout,
+// review of #62 P1-3): translated again, live, and its entry overwritten,
+// instead of being lost for every launch. Once per key and session.
+test("aot optimizer: a stale module is translated again and its entry overwritten, once", async () => {
+  const cache = fakeCache();
+  await optimizer({ cache }).o.start();
+  const installs = [];
+  let translated = 0;
+  const base = fakeTranslator();
+  const translator = { translate: (batch) => { translated += batch.length; return base.translate(batch); } };
+  const { o, events } = optimizer({ cache, translator, install: (r) => installs.push(r.key) });
+  await o.start();
+  assert.equal(translated, 0, "a second launch translates nothing");
+  const [stale] = await o.bootKeys();
+  cache.persisted.set(stale, Uint8Array.of(0)); // stands for the refused module
+  assert.equal(o.markStale(stale), true);
+  assert.equal(o.markStale(stale), false, "once per session");
+  assert.equal(o.markStale("region-v1:unknown"), false, "only modules of the plan");
+  await o.start();
+  assert.ok(translated > 0 && translated <= 8, "only the stale module's members");
+  assert.deepEqual(installs, [stale], "the new module goes to the core");
+  assert.notDeepEqual(cache.persisted.get(stale), Uint8Array.of(0), "entry overwritten");
+  assert.equal(o.stale.size, 0);
+  assert.equal(events.at(-1)[0], "optimization-done");
+});
+
+// Marked while a run goes: the same run takes it after its own work.
+test("aot optimizer: a module marked stale during a run is done by that run", async () => {
+  const cache = fakeCache();
+  await optimizer({ cache }).o.start();
+  const { o, events } = optimizer({ cache, translator: fakeTranslator({ msPerKiB: 5 }) });
+  await o.getPlan(); // bootKeys never plans
+  const [first, second] = await o.bootKeys();
+  cache.persisted.delete(first); // the run has one module to do
+  o.addEventListener("optimization-start", () => o.markStale(second), { once: true });
+  const before = cache.persisted.get(second);
+  await o.start();
+  assert.ok(cache.persisted.has(first), JSON.stringify(events));
+  assert.ok(second);
+  assert.notEqual(cache.persisted.get(second), before, "rewritten by the same run");
+  assert.equal(o.stale.size, 0);
+});
