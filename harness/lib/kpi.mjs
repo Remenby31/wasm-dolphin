@@ -80,7 +80,10 @@ export const stockChrome = (json) => !json.chrome || (json.chrome.path === "chro
 // does not say its limit is left out too.
 export const ABSOLUTE_MAX_LOAD = 6;
 export const nightMeasure = (json) => Number.isFinite(json.maxLoad) && json.maxLoad <= ABSOLUTE_MAX_LOAD;
-export const absoluteRace = (json) => stockChrome(json) && nightMeasure(json);
+// Measured on another machine (harness/remote/spark-run.mjs stamps `host`):
+// a relative pair only, never a number for trunk's rows.
+export const thisMac = (json) => !json.host;
+export const absoluteRace = (json) => thisMac(json) && stockChrome(json) && nightMeasure(json);
 
 const med = (d) => d?.median ?? null;
 
@@ -137,6 +140,14 @@ function warmRegionNote(w) {
   return "SANS cache de régions : pas un vrai 2e lancement";
 }
 
+// A caveat is printed under its group's table, whatever the value: it is
+// about what the row measures, not about one result.
+// Dispatch (judge, 2026-10-21): with the stats on, each timed region call
+// reads the clock about 4 times, partly counted outside the region, so the
+// dispatch share overstates the real cost (cutting the round trips by 2.4
+// gave about 1 % of speed).
+const DISPATCH_CAVEAT = "indicateur gonflé par l'instrumentation : en mode stats, chaque appel de région chronométré ajoute environ 4 lectures d'horloge, dont une partie comptée hors région ; diviser par 2,4 les allers-retours n'a donné qu'environ 1 % de vitesse. À confronter à une mesure moins intrusive (fenêtre de stats à échantillonnage plus rare, `--region-sample`) avant d'en tirer un gain attendu.";
+
 // The rows, in PROGRAM.md's order. `better`: "higher" | "lower" | "zero" | "true".
 // read(json, side, kind) → value; failures(json, side, kind) → reasons that make the row KO.
 export const KPI_ROWS = [
@@ -149,7 +160,7 @@ export const KPI_ROWS = [
   // idleCycles gives the raw share, shown in the reason, not as the KPI.
   { id: "regionCycleShare", group: "Leviers", label: "Part des cycles invités en régions, hors idle skip", target: 0.9, unit: "share", better: "higher", from: "race-perf", config: "aot", read: (j, s) => (p4Of(j, s)?.cycleBasis === "outside idle skip" ? p4Of(j, s).regionCycleShare : null), why: (j, s) => (p4Of(j, s)?.regionCycleShare != null ? `cœur sans idleCycles : part brute ${Math.round(p4Of(j, s).regionCycleShare * 1000) / 10} %, idle compris` : p4Why(j, s)), detail: (j, s) => idleNote(p4Of(j, s)), failures: raceFailures },
   { id: "regionTimeShare", group: "Leviers", label: "Part du temps CPU en code de région, hors attente", target: 0.9, unit: "share", better: "higher", from: "race-perf", config: "aot", read: (j, s) => p4Of(j, s)?.regionTimeShare ?? null, why: p4Why, detail: (j, s) => idleNote(p4Of(j, s)), failures: raceFailures },
-  { id: "dispatchTimeShare", group: "Leviers", label: "Part du dispatch entre blocs, hors attente", target: 0.1, unit: "share", better: "lower", from: "race-perf", config: "aot", read: (j, s) => p4Of(j, s)?.dispatchTimeShare ?? null, why: p4Why, failures: raceFailures },
+  { id: "dispatchTimeShare", group: "Leviers", label: "Part du dispatch entre blocs, hors attente", target: 0.1, unit: "share", better: "lower", from: "race-perf", config: "aot", read: (j, s) => p4Of(j, s)?.dispatchTimeShare ?? null, why: p4Why, failures: raceFailures, caveat: DISPATCH_CAVEAT },
   { id: "discoveryCoverage", group: "Leviers", label: "Couverture de la découverte (PC distincts)", target: 99, unit: "%", better: "higher", from: "manual" },
   { id: "oracleDivergences", group: "Garde-fous", label: "Divergences à l'oracle (fuzz différentiel)", target: 0, unit: "", better: "zero", from: "fuzz", read: (j) => j.results.reduce((n, r) => n + (r.findings?.length ?? 0), 0) },
   { id: "gateGreen", group: "Garde-fous", label: "Gate de correction vert", target: true, unit: "", better: "true", from: "gate", read: (j) => Boolean(j.decision?.ok), detail: (j) => (j.decision?.ok ? null : j.decision?.reason ?? null) },
@@ -182,7 +193,7 @@ export function meets(row, value) {
 // source, at, note } } or { error } when the file could not be read.
 export function kpiTable(results, manual = {}, { trunk = new Set(), accept = { "race-perf": absoluteRace } } = {}) {
   return KPI_ROWS.map((row) => {
-    const base = { id: row.id, group: row.group, label: row.label, target: row.target, unit: row.unit, better: row.better, counted: row.counted !== false };
+    const base = { id: row.id, group: row.group, label: row.label, target: row.target, unit: row.unit, better: row.better, counted: row.counted !== false, caveat: row.caveat ?? null };
     if (row.from === "manual") {
       if (manual.error) return { ...base, value: null, status: "n/a", nature: "n/a", why: manual.error };
       const m = manual[row.id];
@@ -253,7 +264,10 @@ export function kpiMarkdown(rows, { at = new Date().toISOString(), uptime = null
     const note = r.why ?? r.detail;
     lines.push(`| ${r.label} | ${fmt(r.value, r.unit)}${note ? ` (${note})` : ""} | ${cmp[r.better]} ${fmt(r.target, r.unit)} | ${r.status} | ${{ measured: "mesuré", declared: "déclaré", "n/a": "n/a" }[r.nature]} | ${r.source ? `\`${r.source}\`${r.commit ? ` @ ${r.commit.slice(0, 8)}${r.side === "baseline" ? " (côté baseline)" : ""}${r.flags ? `, ${r.flags}` : ""}` : ""}${r.at ? `, ${r.at.slice(0, 16)}` : ""}` : "-"} |${candidate ? ` ${candidateCell(candidate.values[r.id], r.unit)} |` : ""}`);
     const next = rows[rows.indexOf(r) + 1];
-    if (!next || next.group !== group) lines.push("");
+    if (!next || next.group !== group) {
+      lines.push("");
+      for (const c of rows.filter((x) => x.group === group && x.caveat)) lines.push(`> **${c.label}** : ${c.caveat}`, "");
+    }
   }
   if (candidate) {
     lines.push(`Colonne « Candidat » : \`${candidate.label}\`${candidate.note ? `, ${candidate.note}` : ""}${candidate.flags ? ` (${candidate.flags})` : ""}${candidate.maxLoad != null ? `, max-load ${candidate.maxLoad}` : ""}, \`${candidate.source}\` @ ${candidate.commit ? candidate.commit.slice(0, 8) : "?"}${candidate.dirty ? " avec modifications locales" : ""}, ${candidate.at.slice(0, 16)}. Mesure d'une branche avant fusion, à titre de comparaison : elle ne compte pas dans l'état des KPI.`, "");
