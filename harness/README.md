@@ -127,6 +127,14 @@ node harness/probes/race-perf.mjs --iso ../roms/<disc>.iso --state ../measures/h
   the last being the place in the scene whatever the speed, so two runs or
   two sides can be lined up; over 200 the longest are kept, in time order,
   with `count`.
+- `--chrome-args "--flag …"` adds Chromium flags on both sides;
+  `--baseline-chrome-args` replaces them on the baseline side, so one tree is
+  compared with itself under two Chromium configurations (e.g.
+  `--baseline-chrome-args=--js-flags=--no-liftoff`; write a value that
+  starts with `--` after `=`). Headless, debugging and profile flags are
+  refused. The flags are recorded in `summary.json` (`chrome.sideArgs`), and
+  kpi-report never takes such a result as stock Chrome. Each run records
+  `bootMs` (Chrome launch to session ready); `cold.bootMs` per side.
 - Region JIT counters (P4): off by default, the speed windows never carry
   them. With `--region-sample N`, a separate stats window of `--region-secs`
   (default 10) follows each speed window: it resets the core's
