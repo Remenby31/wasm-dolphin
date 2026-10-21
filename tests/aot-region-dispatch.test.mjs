@@ -362,8 +362,17 @@ function installedOnePerFunction() {
   const plan = setup();
   core.setRegionsEnabled(true);
   queueAll(plan, 1);
-  core.serviceRegions();
+  serviceAll();
   return plan;
+}
+// A slice installs what fits its time budget: on a loaded machine the rest
+// waits for the next slices. Serve them until nothing more is installed.
+function serviceAll() {
+  let count = -1;
+  for (let i = 0; i < 50 && core.regionCount() !== count; i++) {
+    count = core.regionCount();
+    core.serviceRegions();
+  }
 }
 
 test("chained regions run a whole call in one dispatch, like the interpreter", { skip: chainSkip }, () => {
@@ -442,7 +451,7 @@ test("a loop across chained regions that never exits stops on downcount, like th
   core.setRegionsEnabled(true);
   core.setRegionChaining(true);
   queueAll(plan, 1);
-  core.serviceRegions();
+  serviceAll();
   for (const budget of [7, 100, 5000, 200000]) {
     core.reset(seedGprs(SPIN.labels.spin), SPIN.labels.spin, STOP, budget);
     core.regionStats(0);
