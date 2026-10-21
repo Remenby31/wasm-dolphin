@@ -155,8 +155,18 @@ export function createAotFirstLaunch({
           record("install", { loaded: 0, failed: 0, deferred: 0, ms, firstLaunch: true });
           return { loaded: 0, failed: [], deferred: 0, ms, firstLaunch: true };
         }
+        // Before the boot, only the modules the boot runs (the boot set the
+        // previous launch recorded, recordBootBlocks): loading the whole cache
+        // first delayed the first image by 0.8 s. The rest loads after the
+        // first image (loadRest). A plan store that keeps no boot set: all.
         const keys = await optimizer.bootKeys();
-        report = await loader.load({ ...identity, keys, budgetMs: bootBudgetMs, maxModules: maxBootModules, maxBytes: maxBootBytes });
+        let eager = Infinity;
+        if (typeof planStore?.loadBootKeys === "function") {
+          const boot = new Set(await planStore.loadBootKeys(planKey).catch(() => null) ?? []);
+          keys.sort((a, b) => boot.has(b) - boot.has(a)); // stable: compile order kept within each part
+          eager = keys.filter((k) => boot.has(k)).length;
+        }
+        report = await loader.load({ ...identity, keys, eager, budgetMs: bootBudgetMs, maxModules: maxBootModules, maxBytes: maxBootBytes });
       } catch (error) {
         report = { loaded: 0, failed: [], deferred: 0, ms: 0, error: String(error?.message || error) };
       }
@@ -192,6 +202,33 @@ export function createAotFirstLaunch({
         running = false;
         if (lastState === "running") lastState = "partial"; // cancelled or fatal
       }
+    },
+
+    // At the first image: the modules holding code the boot ran (`blocks`,
+    // [start, end] guest ranges of executed blocks, blocksFromCoreDump),
+    // added to the stored boot set. The boot set only grows: code a region
+    // ran is not in the JIT's block dump. Resolves to the set's size.
+    async recordBootBlocks(blocks) {
+      if (!supported || typeof planStore?.saveBootKeys !== "function" || !(await optimizer.getPlan({ build: false }))) return 0;
+      const keys = new Set(await planStore.loadBootKeys(planKey).catch(() => null) ?? []);
+      const ranges = [];
+      for (const u of optimizer.regions) for (const f of u.members) for (const [a, b] of f.ranges) ranges.push([a >>> 0, b >>> 0, u.key]);
+      ranges.sort((x, y) => x[0] - y[0]);
+      for (const [start] of blocks) {
+        const pc = start >>> 0;
+        let lo = 0, hi = ranges.length;
+        while (lo < hi) {
+          const mid = (lo + hi) >> 1;
+          if (ranges[mid][0] <= pc) lo = mid + 1;
+          else hi = mid;
+        }
+        // ranges of different functions never overlap (the plan's functions)
+        if (lo && pc < ranges[lo - 1][1]) keys.add(ranges[lo - 1][2]);
+      }
+      const known = new Set(optimizer.regions.map((u) => u.key));
+      const out = [...keys].filter((k) => known.has(k));
+      await planStore.saveBootKeys(planKey, out).catch(() => {});
+      return out.length;
     },
 
     get generation() {

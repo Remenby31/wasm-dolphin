@@ -5072,6 +5072,7 @@ function recordVisualFrameHash(hash, sampledSourceFrame = false) {
 }
 
 function recordPresentedFrame(coreFrame) {
+  if (aotFirstImageWaiters.length) for (const resolve of aotFirstImageWaiters.splice(0)) resolve(true);
   if (harnessEnabled) {
     const slot = (harnessPresentHead % HARNESS_PRESENT_RING) * 3;
     harnessPresentRing[slot] = harnessNow();
@@ -7080,9 +7081,41 @@ export function startAotFirstLaunchAfterBoot(flow = aotFirstLaunch) {
   });
   if (!flow?.supported) return Promise.resolve();
   const generation = flow.generation;
-  return flow.loadRest().catch(() => {}).then(() => {
+  // Only the boot set was loaded before the boot: the rest of the cache, and
+  // the optimisation, after the first image (TTFF of a second launch).
+  return aotWhenFirstImage(moduleInstance).then((seen) => {
+    if (seen && aotFirstLaunch === flow) void recordAotBootSet(moduleInstance, flow);
+    return flow.loadRest();
+  }).catch(() => {}).then(() => {
     if (aotFirstLaunch === flow) return flow.start({ resume: true, ifGeneration: generation });
   });
+}
+// The first presented image of this boot, or false after `timeoutMs`. No
+// running core (tests): at once.
+const aotFirstImageWaiters = [];
+function aotWhenFirstImage(module, { timeoutMs = 15000 } = {}) {
+  if (!module) return Promise.resolve(false);
+  return new Promise((resolve) => {
+    aotFirstImageWaiters.push(resolve);
+    setTimeout(() => resolve(false), timeoutMs);
+  });
+}
+// The boot set: modules of the cache holding code the boot ran (the JIT's
+// executed blocks at the first image), loaded before the next boot.
+async function recordAotBootSet(module, flow, { timeoutMs = 5000, everyMs = 50 } = {}) {
+  if (typeof module?._DolphinWeb_JitDumpBlocksRequest !== "function" || typeof flow?.recordBootBlocks !== "function") return;
+  const seq = module._DolphinWeb_JitDumpBlocksRequest() >>> 0;
+  const start = performance.now();
+  while ((module._DolphinWeb_JitDumpBlocksDone() >>> 0) < seq) {
+    if (performance.now() - start > timeoutMs) return;
+    await new Promise((resolve) => setTimeout(resolve, everyMs));
+  }
+  const count = module._DolphinWeb_JitDumpBlocksCount() >>> 0;
+  const at = module._DolphinWeb_JitDumpBlocksBuffer() >>> 0;
+  const words = new Uint32Array(module.HEAPU8.buffer, at, 3 * count).slice();
+  const { blocksFromCoreDump } = await import("./aot-profile.js");
+  const size = await flow.recordBootBlocks(blocksFromCoreDump(words));
+  postStatus(`aot: boot set of ${size} region modules recorded`);
 }
 // No region is copied into the core's heap before the core has allocated the
 // emulated RAM: those copies (a second launch queues every cached region, 127

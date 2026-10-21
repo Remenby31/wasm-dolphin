@@ -419,6 +419,23 @@ export class OpfsPlanStore {
     await writable.write(JSON.stringify(attempts));
     await writable.close();
   }
+  // Module keys the boot ran (the orchestrator's boot set), or null.
+  async loadBootKeys(discKey) {
+    try {
+      const file = await (await (await this.dir()).getFileHandle(OpfsPlanStore.name(discKey).replace(/\.json$/, ".boot.json"))).getFile();
+      const keys = JSON.parse(await file.text());
+      return Array.isArray(keys) ? keys.filter((k) => typeof k === "string") : null;
+    } catch (error) {
+      if (error?.name === "NotFoundError" || error instanceof SyntaxError) return null;
+      throw error;
+    }
+  }
+  async saveBootKeys(discKey, keys) {
+    const handle = await (await this.dir()).getFileHandle(OpfsPlanStore.name(discKey).replace(/\.json$/, ".boot.json"), { create: true });
+    const writable = await handle.createWritable();
+    await writable.write(JSON.stringify(keys));
+    await writable.close();
+  }
   async saveGroups(discKey, groups) {
     const handle = await (await this.dir()).getFileHandle(OpfsPlanStore.name(discKey).replace(/\.json$/, ".groups.json"), { create: true });
     const writable = await handle.createWritable();

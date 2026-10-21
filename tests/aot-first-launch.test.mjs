@@ -468,3 +468,40 @@ test("planning runs in a worker of its own; its failure or silence rejects", asy
   await assert.rejects(planDiscInWorker(file, { createWorker: fakeWorker((w) => w.onmessage({ data: { ok: false, message: "bad DOL" } })) }), /bad DOL/);
   await assert.rejects(planDiscInWorker(file, { createWorker: fakeWorker(() => {}), timeoutMs: 5 }), /timed out/);
 });
+
+// TTFF of a second launch (+0.8 s when the whole cache loaded before the
+// boot): only the boot set loads before the boot, the rest after the first
+// image. The boot set is what the boot ran (executed blocks at the first
+// image), recorded per disc; with none recorded yet, nothing before the boot.
+test("before the boot only the recorded boot set loads; the rest after the first image", async () => {
+  const p = profile();
+  const boot = new Map();
+  p.planStore.loadBootKeys = async (k) => boot.get(k) ?? null;
+  p.planStore.saveBootKeys = async (k, keys) => { boot.set(k, [...keys]); };
+  await launch(p).flow.start();
+  const plan = makePlan();
+  const fn = (i) => plan.modules[0].functions.find((f) => f.entry === plan.modules[0].functions.map((x) => x.entry).sort((a, b) => a - b)[i]);
+
+  const second = launch(p);
+  const report = await second.flow.installBeforeBoot();
+  assert.equal(report.loaded, 0, "no boot set yet: nothing before the boot");
+  const total = report.deferred;
+  assert.ok(total >= 6);
+  // the first image: the boot ran two functions (and code outside the plan)
+  const ran = [fn(0), fn(1)].map((f) => [f.ranges[0][0], f.ranges[0][0] + 4, 1, 0]);
+  const size = await second.flow.recordBootBlocks([...ran, [0x80700000, 0x80700010, 1, 0]]);
+  assert.ok(size >= 1 && size <= 2, `${size} modules in the boot set`);
+  assert.equal((await second.flow.loadRest()).loaded, total, "the rest after the first image");
+
+  const third = launch(p);
+  const early = await third.flow.installBeforeBoot();
+  assert.equal(early.loaded, size, "the boot set before the boot");
+  assert.equal(early.deferred, total - size);
+  const kept = [...third.retained.values()];
+  for (const f of [fn(0), fn(1)]) {
+    assert.equal(kept.map((m) => runs(m)(f.entry)).filter(([code]) => code === 0).length, 1, "the boot's functions are in it");
+  }
+  // a later image adds to the set, never removes
+  assert.equal(await third.flow.recordBootBlocks([]), size);
+  assert.equal((await third.flow.loadRest()).loaded, total - size);
+});
