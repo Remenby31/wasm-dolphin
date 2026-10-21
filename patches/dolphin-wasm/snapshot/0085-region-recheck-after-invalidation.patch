@@ -1,0 +1,73 @@
+diff --git a/Source/Core/Core/PowerPC/CachedInterpreter/CachedInterpreter.cpp b/Source/Core/Core/PowerPC/CachedInterpreter/CachedInterpreter.cpp
+--- a/Source/Core/Core/PowerPC/CachedInterpreter/CachedInterpreter.cpp
++++ b/Source/Core/Core/PowerPC/CachedInterpreter/CachedInterpreter.cpp
+@@ -9228,6 +9228,10 @@ void InstallRegion(PendingRegion& pending, int handle)
+ WasmStateLayout CurrentWasmStateLayout(Core::System& system);
+ u32 WasmLayoutHash(const WasmStateLayout& layout);
+ u32 s_region_layout_refused = 0;
++// Installed regions an invalidation left to be checked again instead of
++// dropped (patch 0085), and regions found unchanged by such a check.
++u32 s_region_invalidated_kept = 0;
++u32 s_region_reverified = 0;
+ 
+ bool RegionInstallable(const PendingRegion& pending)
+ {
+@@ -9523,6 +9527,7 @@ bool TryRunRegion(PowerPC::PowerPCState& ppc_state)
+       return false;
+     }
+     region.verified = true;
++    s_region_reverified += 1;
+   }
+   using RegionFunction = int (*)(int);
+   const auto run = reinterpret_cast<RegionFunction>(
+@@ -9571,7 +9576,8 @@ inline bool RegionWouldRun(const PowerPC::PowerPCState& ppc_state)
+ }  // namespace
+ 
+ // Code at [address, address + size) changed (icbi, DMA, a cache clear):
+-// regions covering it are dropped. From JitInterface.
++// regions covering it are checked against the plan before they next run, and
++// dropped then if it changed. From JitInterface.
+ void DolphinWeb_InvalidateRegions(u32 address, u32 size)
+ {
+   // MEM1 offsets: the 0x8 and 0xC views and DMA (physical) addresses meet.
+@@ -9613,8 +9619,24 @@ void DolphinWeb_InvalidateRegions(u32 address, u32 size)
+     {
+       const u64 start = region.ranges[i] & 0x01ffffff;
+       const u64 stop = start + (region.ranges[i + 1] - region.ranges[i]);
+-      if (start < end && begin < stop)
++      if (!(start < end && begin < stop))
++        continue;
++      // The OS rewrites or re-DMAs code with the same bytes (35 regions per
++      // second launch were dropped during its init): checked against the
++      // plan's hashes before the region next runs, dropped only if the code
++      // changed. A member without a hash cannot be checked: dropped now.
++      const bool hashed = std::all_of(region.members.begin(), region.members.end(),
++                                      [](const RegionMember& m) { return m.hash != 0; });
++      if (!hashed)
++      {
+         DropRegion(index);
++      }
++      else if (region.verified)
++      {
++        s_regions[index].verified = false;
++        s_region_invalidated_kept += 1;
++      }
++      break;
+     }
+   }
+ }
+@@ -15437,6 +15459,14 @@ extern "C" EMSCRIPTEN_KEEPALIVE u32 DolphinWeb_AotLayoutWords(u32* out, u32 capa
+   return n;
+ }
+ 
++// [installed regions an invalidation left to be checked again, regions found
++// unchanged when checked again (after an invalidation or a cache clear)].
++extern "C" EMSCRIPTEN_KEEPALIVE void DolphinWeb_AotRegionRechecks(u32* out)
++{
++  out[0] = s_region_invalidated_kept;
++  out[1] = s_region_reverified;
++}
++
+ extern "C" EMSCRIPTEN_KEEPALIVE u32 DolphinWeb_AotLayoutRefused()
+ {
+   return s_region_layout_refused;

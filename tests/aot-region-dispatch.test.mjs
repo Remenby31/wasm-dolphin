@@ -38,6 +38,7 @@ function setup() {
   const plan = planDol({ image, entryPoint, gameId: "TEST01", dolBytes: dol, options: { gapFill: false } });
   for (const s of image.segments) core.load(s.start, s.bytes);
   core.invalidate(TEXT, 4 * PROGRAM.words.length); // regions of an earlier test are dropped
+  core.module._DolphinWeb_AotForgetRegionsForTest?.(); // (0085: an invalidation alone keeps unchanged code)
   return plan;
 }
 
@@ -120,7 +121,43 @@ test("regions run only with translation and FP on", { skip }, () => {
   assert.equal(core.dispatchRegion(), 0, "FP off: the block path");
 });
 
-test("invalidating covered code drops the regions holding it, other code keeps them", { skip }, () => {
+// Patch 0085: an invalidation over a region's code checks it again against
+// the plan's hashes before it next runs: the same bytes written again (the
+// OS init on every second launch) keep it, changed code drops it.
+const rechecks = () => {
+  const p = core.module._malloc(8);
+  try {
+    core.module._DolphinWeb_AotRegionRechecks(p);
+    return Array.from(new Uint32Array(core.module.HEAPU8.buffer, p, 2));
+  } finally {
+    core.module._free(p);
+  }
+};
+test("invalidating covered code: unchanged code keeps its region, changed code drops it before it runs", { skip: skip || (!core?.has("DolphinWeb_AotRegionRechecks") && "core without region re-checks (0085)") }, () => {
+  installed();
+  const count = core.regionCount();
+  core.invalidate(0x80100000, 0x1000);
+  assert.equal(core.regionCount(), count, "unrelated code");
+  const [kept, reverified] = rechecks();
+  core.load(PROGRAM.labels.double, core.ram().slice(PROGRAM.labels.double & 0x01ffffff, (PROGRAM.labels.double & 0x01ffffff) + 4));
+  core.invalidate(PROGRAM.labels.double, 4); // the same bytes again (a DMA of the same code)
+  assert.equal(core.regionCount(), count, "kept, to be checked");
+  assert.equal(rechecks()[0], kept + 1);
+  core.reset(seedGprs(1), PROGRAM.labels.double, STOP, 400000);
+  assert.equal(core.dispatchRegion(), 1, "unchanged: checked and run");
+  assert.equal(rechecks()[1], reverified + 1);
+  const reference = runCall(PROGRAM.labels.main, { regions: false });
+  assert.deepEqual(runCall(PROGRAM.labels.main, { regions: true }).state, reference.state);
+  patchDouble();
+  core.invalidate(PROGRAM.labels.double, 4);
+  core.reset(seedGprs(1), PROGRAM.labels.double, STOP, 400000);
+  assert.equal(core.dispatchRegion(), 0, "changed: dropped before it runs");
+  assert.ok(core.regionCount() < count, "the region with double is gone");
+  const patched = runCall(PROGRAM.labels.main, { regions: false });
+  assert.deepEqual(runCall(PROGRAM.labels.main, { regions: true }).state, patched.state, "the new code runs");
+});
+
+test("invalidating covered code drops the regions holding it, other code keeps them (core before 0085)", { skip: skip || (core?.has("DolphinWeb_AotRegionRechecks") && "core with region re-checks (0085)") }, () => {
   installed();
   const count = core.regionCount();
   core.invalidate(0x80100000, 0x1000);
