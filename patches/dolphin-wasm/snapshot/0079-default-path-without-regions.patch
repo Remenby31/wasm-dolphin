@@ -1,7 +1,21 @@
 diff --git a/Source/Core/Core/PowerPC/CachedInterpreter/CachedInterpreter.cpp b/Source/Core/Core/PowerPC/CachedInterpreter/CachedInterpreter.cpp
 --- a/Source/Core/Core/PowerPC/CachedInterpreter/CachedInterpreter.cpp
 +++ b/Source/Core/Core/PowerPC/CachedInterpreter/CachedInterpreter.cpp
-@@ -9460,6 +9460,9 @@ void PublishRegionStats()
+@@ -381,6 +381,13 @@ inline bool DolphinWebHelperDisabled(u32 bit)
+   return (DolphinWebDisableMask() & bit) != 0;
+ }
+ 
++// The CPU thread's mask only, without the translator's thread_local override
++// (a TLS read): for the per-block checks of the run loop.
++inline bool DolphinWebCpuHelperDisabled(u32 bit)
++{
++  return (s_dolphin_web_disable_mask.load(std::memory_order_relaxed) & bit) != 0;
++}
++
+ // §28cz ENABLE-polarity gate (opposite of DolphinWebHelperDisabled): the
+ // fastmem-hoist feature is active only when its bit is SET in the mask.
+ inline bool DolphinWebFeatureEnabled(u32 bit)
+@@ -9460,6 +9467,9 @@ void PublishRegionStats()
  
  void ApplyRegionStatsRequest()
  {
@@ -11,7 +25,7 @@ diff --git a/Source/Core/Core/PowerPC/CachedInterpreter/CachedInterpreter.cpp b/
    const int request = s_region_stats_request.exchange(-1, std::memory_order_acq_rel);
    if (request >= 0)
    {
-@@ -9574,6 +9577,8 @@ inline bool RegionWouldRun(const PowerPC::PowerPCState& ppc_state)
+@@ -9574,6 +9584,8 @@ inline bool RegionWouldRun(const PowerPC::PowerPCState& ppc_state)
  // regions covering it are dropped. From JitInterface.
  void DolphinWeb_InvalidateRegions(u32 address, u32 size)
  {
@@ -20,7 +34,7 @@ diff --git a/Source/Core/Core/PowerPC/CachedInterpreter/CachedInterpreter.cpp b/
    // MEM1 offsets: the 0x8 and 0xC views and DMA (physical) addresses meet.
    const u64 begin = address & 0x01ffffff;
    const u64 end = size >= 0x01800000 ? u64{0x01800000} : begin + size;
-@@ -9738,6 +9743,28 @@ extern "C" EMSCRIPTEN_KEEPALIVE u32 DolphinWeb_JitRegionStats(int sample_every)
+@@ -9738,6 +9750,28 @@ extern "C" EMSCRIPTEN_KEEPALIVE u32 DolphinWeb_JitRegionStats(int sample_every)
  }
  #endif
  
@@ -49,7 +63,7 @@ diff --git a/Source/Core/Core/PowerPC/CachedInterpreter/CachedInterpreter.cpp b/
  void CachedInterpreter::ExecuteOneBlock([[maybe_unused]] bool allow_redispatch)
  {
  #ifdef __EMSCRIPTEN__
-@@ -9746,25 +9773,10 @@ void CachedInterpreter::ExecuteOneBlock([[maybe_unused]] bool allow_redispatch)
+@@ -9746,25 +9780,10 @@ void CachedInterpreter::ExecuteOneBlock([[maybe_unused]] bool allow_redispatch)
      return;
  #endif
  #ifdef __EMSCRIPTEN__
@@ -79,7 +93,16 @@ diff --git a/Source/Core/Core/PowerPC/CachedInterpreter/CachedInterpreter.cpp b/
  #else
    const u8* normal_entry = m_block_cache.Dispatch();
  #endif
-@@ -10053,7 +10065,8 @@ void CachedInterpreter::ExecuteOneBlock([[maybe_unused]] bool allow_redispatch)
+@@ -9792,7 +9811,7 @@ void CachedInterpreter::ExecuteOneBlock([[maybe_unused]] bool allow_redispatch)
+   // DOLPHIN_WEB_DISABLE_BLOCK_REDISPATCH mask bit.
+   const CPU::State* const redispatch_state_ptr = m_system.GetCPU().GetStatePtr();
+   const bool redispatch_enabled =
+-      allow_redispatch && !DolphinWebHelperDisabled(DOLPHIN_WEB_DISABLE_BLOCK_REDISPATCH) &&
++      allow_redispatch && !DolphinWebCpuHelperDisabled(DOLPHIN_WEB_DISABLE_BLOCK_REDISPATCH) &&
+       !s_ppc_block_profile_enabled;
+ #endif
+ #ifdef __EMSCRIPTEN__
+@@ -10053,7 +10072,8 @@ void CachedInterpreter::ExecuteOneBlock([[maybe_unused]] bool allow_redispatch)
  #endif
  #else
  #line 8054
@@ -89,7 +112,7 @@ diff --git a/Source/Core/Core/PowerPC/CachedInterpreter/CachedInterpreter.cpp b/
  #endif
  #line 8055
        if (!next)
-@@ -10155,11 +10168,21 @@ void CachedInterpreter::Run()
+@@ -10155,11 +10175,21 @@ void CachedInterpreter::Run()
      const auto slice_start =
          timing ? std::chrono::steady_clock::now() : std::chrono::steady_clock::time_point{};
      s_sampling_lookups = timing;
@@ -112,7 +135,7 @@ diff --git a/Source/Core/Core/PowerPC/CachedInterpreter/CachedInterpreter.cpp b/
        {
          const double region_before = s_region_stats.region_time_ms;
          const double lookups_before = s_sampled_lookup_ms;
-@@ -10384,21 +10407,24 @@ s32 CachedInterpreter::CheckIdle(PowerPC::PowerPCState& ppc_state,
+@@ -10384,21 +10414,24 @@ s32 CachedInterpreter::CheckIdle(PowerPC::PowerPCState& ppc_state,
    if (ppc_state.npc == idle_pc)
    {
  #ifdef __EMSCRIPTEN__

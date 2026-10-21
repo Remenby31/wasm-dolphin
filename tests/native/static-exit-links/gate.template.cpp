@@ -17,6 +17,7 @@ bool helper_disabled = false, s_ppc_block_profile_enabled = false;
 u32 helper_checks = 0, s_ppc_profile_total_blocks = 0, profile_records = 0;
 constexpr u32 DOLPHIN_WEB_DISABLE_BLOCK_REDISPATCH = 1, PPC_PROFILE_SAMPLE_MASK = 1023;
 bool DolphinWebHelperDisabled(u32) { ++helper_checks; return helper_disabled; }
+bool DolphinWebCpuHelperDisabled(u32 bit) { return DolphinWebHelperDisabled(bit); }
 void ApplyArmedWasmPolicy() {}
 void ApplyRequestedWasmPolicy(CachedInterpreter&) {}
 const L::Context* expected_context_at_profile = nullptr;
