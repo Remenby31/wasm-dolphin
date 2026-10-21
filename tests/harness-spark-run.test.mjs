@@ -3,13 +3,13 @@
 
 import assert from "node:assert/strict";
 import { execFileSync } from "node:child_process";
-import { mkdtempSync, rmSync, writeFileSync } from "node:fs";
+import { mkdirSync, mkdtempSync, readdirSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import os from "node:os";
 import path from "node:path";
 import test from "node:test";
 
 import { kpiTable } from "../harness/lib/kpi.mjs";
-import { isBuildProcess, nextStep, readTickets, waitTurn } from "../harness/remote/spark-queue.mjs";
+import { estimateMin, eta, isBuildProcess, move, movedId, nextStep, readTickets, waitTurn } from "../harness/remote/spark-queue.mjs";
 import { benchQuery, benchRaceArgs, launchCommand, RACE_QUERY, runId, sh, stampSummary } from "../harness/remote/spark-run.mjs";
 
 const race = (extra = {}) => ({
@@ -113,4 +113,68 @@ test("spark queue: a build is the node process, never the shell that started it"
   assert.equal(isBuildProcess(["sh", "-c", "node harness/remote/spark-build.mjs 2babd9cf >> log 2>&1; echo $? > exit"]), false);
   assert.equal(isBuildProcess(["bash", "-c", "pgrep -f harness/remote/spark-build.mjs"]), false);
   assert.equal(isBuildProcess(["node", "harness/probes/race-perf.mjs"]), false);
+});
+
+test("spark queue: the judge moves a waiting ticket, the waiter follows it", async () => {
+  const bench = mkdtempSync(path.join(os.tmpdir(), "spark-queue-"));
+  const q = path.join(bench, "queue");
+  const ticket = (ms, pid, name, lane = null) => writeFileSync(path.join(q, `${String(ms).padStart(15, "0")}-${pid}.json`), JSON.stringify({ pid, host: os.hostname(), kind: "pair", lanes: "a", name, lane }));
+  try {
+    mkdirSync(q);
+    // Live pids: ours and our parent's stand for other jobs.
+    ticket(1000, process.ppid, "running", "a");
+    const waiting = waitTurn({ pid: process.pid, kind: "pair", lanes: "a", name: "late", bench, pollSec: 0.02 });
+    await new Promise((r) => setTimeout(r, 50));
+    const before = readTickets(bench).map((t) => t.name);
+    assert.deepEqual(before, ["running", "late"]);
+    // Move "late" to the head: still behind the running job, ahead of later ones.
+    const id = move("late", "head", { bench });
+    assert.equal(readTickets(bench).find((t) => t.name === "late").id, id);
+    assert.match(readFileSync(path.join(q, "moves.log"), "utf8"), /judge: late after head/);
+    // The running job ends: the moved waiter gets its turn under its new name, once.
+    rmSync(path.join(q, "000000000001000-" + process.ppid + ".json"));
+    assert.equal(await waiting, "a");
+    const left = readTickets(bench);
+    assert.equal(left.length, 1);
+    assert.equal(left[0].id, id);
+    assert.ok(left[0].grantedAt);
+  } finally {
+    rmSync(bench, { recursive: true, force: true });
+  }
+});
+
+test("spark queue: move refuses what would break the order, a duplicate keeps the granted copy", () => {
+  const t = (ms, name, lane = null, pid = ms) => ({ id: `${String(ms).padStart(15, "0")}-${pid}.json`, name, lane, pid });
+  const q = [t(1000, "run", "a"), t(5000, "b1"), t(9000, "b2"), t(9001, "b3")];
+  assert.equal(movedId(q, "b3", "head"), "000000000003000-9001.json"); // between run and b1
+  assert.equal(movedId(q, "b1", "b3"), "000000000010001-5000.json"); // to the end
+  assert.throws(() => movedId(q, "b1", "b2"), /no room between b2 and b3/); // 9000 and 9001
+  assert.throws(() => movedId(q, "run", "head"), /already running/);
+  assert.throws(() => movedId(q, "nope", "head"), /no ticket/);
+  assert.throws(() => movedId([t(1000, "a"), t(1001, "b"), t(5000, "c")], "c", "a"), /no room/);
+  // Two files for one job (a move racing its grant): the granted one stays.
+  const bench = mkdtempSync(path.join(os.tmpdir(), "spark-queue-"));
+  try {
+    mkdirSync(path.join(bench, "queue"));
+    const w = (ms, lane) => writeFileSync(path.join(bench, "queue", `${String(ms).padStart(15, "0")}-${process.pid}.json`), JSON.stringify({ pid: process.pid, host: os.hostname(), kind: "pair", lanes: "a", name: "x", lane }));
+    w(2000, null); w(3000, "a");
+    assert.deepEqual(readTickets(bench).map((x) => [x.id.slice(0, 15), x.lane]), [["000000000003000", "a"]]);
+    assert.equal(readdirSync(path.join(bench, "queue")).length, 1);
+  } finally {
+    rmSync(bench, { recursive: true, force: true });
+  }
+});
+
+test("spark queue: estimated durations and each job's wait", () => {
+  assert.equal(estimateMin("pair", ["--runs", "6", "--baseline", "/b", "--candidate", "/c"]), 13); // 6 × 2 × 65 s
+  assert.equal(estimateMin("pair", ["--runs", "4", "--warmup", "10", "--secs", "10"]), 3); // one side
+  assert.equal(estimateMin("build"), 8);
+  const now = Date.parse("2026-10-22T00:30:00Z");
+  const rows = eta([
+    { id: "1", kind: "pair", name: "r", lane: "a", estMin: 13, grantedAt: "2026-10-22T00:25:00Z" },
+    { id: "2", kind: "build", name: "b", lane: "none" }, // a neutral ticket counts for nothing
+    { id: "3", kind: "pair", name: "p", estMin: 10 },
+    { id: "4", kind: "build", name: "k" }
+  ], now);
+  assert.deepEqual(rows.map((r) => [r.name, r.startsIn, r.endsIn]), [["r", 0, 8], ["p", 8, 18], ["k", 18, 26]]);
 });

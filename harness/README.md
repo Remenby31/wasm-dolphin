@@ -202,8 +202,16 @@ node harness/remote/spark-run.mjs --build <ref>           # its core built on th
   before them timed out. Every job now drops a ticket in
   `~/salon-bench/queue/` (arrival time, its pid) and starts only when no
   older waiting ticket could use a lane it wants and that lane is free; a
-  build wants both. `node harness/remote/spark-queue.mjs list` on the Spark
-  shows the queue. Pairs wait up to 4 h by default (`--lock-wait`). Compare sides of one pair only, never a lane with the
+  build wants both. On the Spark, `node harness/remote/spark-queue.mjs list
+  --eta` shows the queue with each job's estimated start and end (from its
+  race-perf options; ~8 min a build). Pairs wait up to 4 h by default
+  (`--lock-wait`).
+- **Reordering is the judge's call:** `spark-queue.mjs move <name> --after
+  <name|head> --as-judge` renames a waiting ticket between its new
+  neighbours (logged in `queue/moves.log`). A waiting job finds its ticket by
+  its pid at every poll, so it follows the move. Never rename a ticket by
+  hand while a job from before this change waits on it: such a job keeps
+  its old name and would wait for itself. Compare sides of one pair only, never a lane with the
   other. `--chrome-cpus` / `--node-cpus` override the pinning.
 - `--build <ref>` (a commit of the fork) builds its core on the bench with
   the pinned toolchain (`build-core-repro.mjs --install`, linux-arm64, ~8
