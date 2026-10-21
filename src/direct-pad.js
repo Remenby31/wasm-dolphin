@@ -10,7 +10,7 @@
 
 export const DIRECT_PAD_LAYOUT = 1;
 export const DIRECT_PAD_PORTS = 4;
-export const DIRECT_PAD_SLOTS = 32;
+export const DIRECT_PAD_SLOTS = 36;
 export const DIRECT_PAD_BUTTONS = 12;
 
 export const SLOT = Object.freeze({
@@ -30,7 +30,8 @@ export const SLOT = Object.freeze({
   RUMBLE: 16,
   RUMBLE_GEN: 17,
   PRESSES: 18,
-  REPORTED_MASK: 30
+  REPORTED_MASK: 30,
+  EDGE_POLL_TIME: 32
 });
 
 const byte = (v) => Math.max(0, Math.min(0xff, Math.round(Number(v) || 0)));
@@ -95,6 +96,7 @@ export class DirectPad {
       rumble: Atomics.load(v, b + SLOT.RUMBLE),
       rumbleGeneration: Atomics.load(v, b + SLOT.RUMBLE_GEN) >>> 0,
       reportedMask: Atomics.load(v, b + SLOT.REPORTED_MASK) >>> 0,
+      edgePollTime: this.f64[(b + SLOT.EDGE_POLL_TIME) / 2],
       presses
     };
   }

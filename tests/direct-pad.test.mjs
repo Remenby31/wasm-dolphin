@@ -38,7 +38,7 @@ int main() {
   PollPort(p, latch, 11, 1003.0, fallback, &reported, &direct);   // next frame: reported once more, then released
   std::printf("%u\n", reported);
   PollPort(p, latch, 11, 1004.0, fallback, &reported, &direct);
-  std::printf("%u %u %u\n", reported, p[PRESSES + 0].load(), p[POLL_COUNT].load());
+  std::printf("%u %u %u %.1f\n", reported, p[PRESSES + 0].load(), p[POLL_COUNT].load(), LoadF64(p + EDGE_POLL_TIME));
   // A writer mid-update (odd seq): the poll falls back rather than read a torn state.
   p[SEQ] = 3;
   PollPort(p, latch, 12, 1005.0, fallback, &reported, &direct);
@@ -62,7 +62,7 @@ test("SI poll side: direct read, tap hold across a frame boundary, counters", { 
       "1 1 7 1000.5",    // tap reported at once, seq and reception time echoed
       "1",               // held through the frame
       "1",               // reported by a poll of the next frame
-      "0 1 5",           // then released; one press counted; five polls
+      "0 1 5 1001.0",    // then released; one press counted at poll time 1001; five polls
       "0 2",             // torn read → fallback
       "0 0"              // unplugged: nothing reported, taps consumed
     ]);

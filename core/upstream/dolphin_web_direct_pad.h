@@ -25,7 +25,7 @@ namespace DolphinWeb::DirectPad
 {
 constexpr std::uint32_t DIRECT_PAD_LAYOUT = 1;
 constexpr int DIRECT_PAD_PORTS = 4;
-constexpr int DIRECT_PAD_SLOTS = 32;
+constexpr int DIRECT_PAD_SLOTS = 36;  // 144 bytes: f64 slots stay 8-byte aligned
 constexpr int DIRECT_PAD_BUTTONS = 12;
 
 enum Slot : int
@@ -49,6 +49,7 @@ enum Slot : int
   RUMBLE_GEN = 17,       // +1 per rumble change
   PRESSES = 18,          // 18-29: rising edges reported, per button
   REPORTED_MASK = 30,
+  EDGE_POLL_TIME = 32,   // f64 (32-33): poll time of the last rising edge reported
 };
 
 struct Block
@@ -164,6 +165,8 @@ State PollPort(std::atomic<std::uint32_t>* port, TapLatch& latch, std::uint64_t 
   for (int i = 0; i < DIRECT_PAD_BUTTONS; ++i)
     if (rising & (1u << i))
       port[PRESSES + i].fetch_add(1, std::memory_order_relaxed);
+  if (rising)
+    StoreF64(port + EDGE_POLL_TIME, now);
   port[REPORTED_MASK].store(reported, std::memory_order_relaxed);
   if (*direct)
   {

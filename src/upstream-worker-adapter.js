@@ -352,6 +352,9 @@ export class UpstreamWorkerAdapter {
     // Direct pad block in the core's memory (src/direct-pad.js): null until
     // the worker hands it over, and on cores without it.
     this.directPad = null;
+    // ?directpad=0: the block only reports (polls, press edges, rumble); pad
+    // states keep going through the presentation loop (A/B measurements).
+    this.directPadWrites = new URLSearchParams(globalThis.location?.search ?? "").get("directpad") !== "0";
     this.directPadMeta = Array.from({ length: 4 }, () => ({ inputSeq: 0, rxTime: 0 }));
   }
 
@@ -642,7 +645,7 @@ export class UpstreamWorkerAdapter {
   }
 
   writeDirectPad(port) {
-    if (!this.directPad) return;
+    if (!this.directPad || !this.directPadWrites) return;
     const { connected, state } = this.padPorts.ports[port];
     const meta = this.directPadMeta[port];
     this.directPad.write(port, state, { connected, inputSeq: meta.inputSeq, rxTime: meta.rxTime || epochNow() });
@@ -667,7 +670,7 @@ export class UpstreamWorkerAdapter {
   // poll keeps them until a poll of a later frame reported them. False when
   // the core cannot (no direct block): the caller holds them itself.
   tapPad(port, buttons) {
-    if (!this.directPad) return false;
+    if (!this.directPad || !this.directPadWrites) return false;
     this.directPad.tap(port, buttons >>> 0);
     return true;
   }
