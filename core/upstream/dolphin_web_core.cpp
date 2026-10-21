@@ -10,6 +10,8 @@
 #include <cstddef>
 #include <cstdint>
 #include <cstring>
+#include <mutex>
+#include <chrono>
 #include <functional>
 #include <memory>
 #include <span>
@@ -496,11 +498,8 @@ std::atomic<std::uint32_t> s_last_loaded_ticks_high{0};
 std::atomic<std::uint32_t> s_last_loaded_ppc_pc{0};
 std::atomic<std::uint32_t> s_last_loaded_checkpoint_generation{0};
 
-bool BrowserMsgHandler(const char* caption, const char* text, bool yes_no, Common::MsgType style)
+void RelayAlert(const std::string& message)
 {
-  (void)yes_no;
-  (void)style;
-  s_core_status = std::string(caption ? caption : "Alert") + ": " + (text ? text : "");
 #ifdef __EMSCRIPTEN__
   EM_ASM(
       {
@@ -510,8 +509,109 @@ bool BrowserMsgHandler(const char* caption, const char* text, bool yes_no, Commo
         if (typeof console !== 'undefined')
           console.error(message);
       },
-      s_core_status.c_str());
+      message.c_str());
+#else
+  (void)message;
 #endif
+}
+
+// Rate limit for the alerts relayed to the page, as src/status-rate-limit.js
+// does for the worker's status lines. Every relayed line reaches Chrome's
+// browser process (and CDP): a core looping on one alert (2026-10-21: an MMU
+// "Invalid read" a million times in 31 s, from the CPU thread) took it past
+// 10 GB and stalled the worker serving disc reads.
+// - consecutive identical alerts are folded: the first is relayed, the
+//   repeats counted, "… repeated N times" relayed when another one comes, or
+//   once per window while they go on;
+// - beyond ALERT_MAX_PER_WINDOW alerts per window, alerts are counted, not
+//   relayed, and one summary is relayed when the window rolls;
+// - critical alerts are always relayed.
+// s_core_status always holds the latest alert. Alerts come from any thread.
+constexpr int ALERT_MAX_PER_WINDOW = 200;
+constexpr std::chrono::milliseconds ALERT_WINDOW{1000};
+struct AlertRelayState
+{
+  std::mutex mutex;
+  std::string last;
+  std::uint32_t repeats = 0;
+  std::chrono::steady_clock::time_point repeats_since{};
+  std::chrono::steady_clock::time_point window_start{};
+  int sent_in_window = 0;
+  std::uint32_t dropped_in_window = 0;
+  std::uint32_t relayed = 0, folded = 0, dropped = 0;
+};
+AlertRelayState s_alert_relay;
+
+void SendAlert(AlertRelayState& r, const std::string& message)
+{
+  r.relayed += 1;
+  RelayAlert(message);
+}
+
+void FlushAlertRepeats(AlertRelayState& r, std::chrono::steady_clock::time_point t)
+{
+  if (r.repeats > 0)
+  {
+    SendAlert(r, "… repeated " + std::to_string(r.repeats) + (r.repeats > 1 ? " times: " : " time: ") +
+                     r.last.substr(0, 200));
+  }
+  r.repeats = 0;
+  r.repeats_since = t;
+}
+
+void RollAlertWindow(AlertRelayState& r, std::chrono::steady_clock::time_point t)
+{
+  if (t - r.window_start < ALERT_WINDOW)
+    return;
+  if (r.dropped_in_window > 0)
+  {
+    SendAlert(r, "[alert] " + std::to_string(r.dropped_in_window) + " alert(s) not relayed (rate cap " +
+                     std::to_string(ALERT_MAX_PER_WINDOW) + " per second)");
+  }
+  r.window_start = t;
+  r.sent_in_window = 0;
+  r.dropped_in_window = 0;
+}
+
+void RelayAlertLimited(const std::string& message, bool critical)
+{
+  auto& r = s_alert_relay;
+  std::lock_guard lock(r.mutex);
+  const auto t = std::chrono::steady_clock::now();
+  RollAlertWindow(r, t);
+  if (critical)
+  {
+    FlushAlertRepeats(r, t);
+    r.last = message;
+    SendAlert(r, message);
+    return;
+  }
+  if (message == r.last)
+  {
+    r.repeats += 1;
+    r.folded += 1;
+    if (t - r.repeats_since >= ALERT_WINDOW)
+      FlushAlertRepeats(r, t);  // a loop: the count goes out once per window
+    return;
+  }
+  FlushAlertRepeats(r, t);
+  r.last = message;
+  if (r.sent_in_window >= ALERT_MAX_PER_WINDOW)
+  {
+    r.dropped_in_window += 1;
+    r.dropped += 1;
+    return;
+  }
+  r.sent_in_window += 1;
+  SendAlert(r, message);
+}
+
+bool BrowserMsgHandler(const char* caption, const char* text, bool yes_no, Common::MsgType style)
+{
+  (void)yes_no;
+  const std::string message = std::string(caption ? caption : "Alert") + ": " + (text ? text : "");
+  s_core_status = message;
+  RelayAlertLimited(message, style == Common::MsgType::Critical);
   return true;
 }
 
@@ -903,6 +1003,32 @@ int SetCpuThread(int enabled)
 
   s_cpu_thread = enabled != 0;
   return 1;
+}
+
+// Tests: `count` alerts through the relay, all the same text when
+// `distinct` is 0, all different otherwise; then the relay's totals
+// [relayed, folded, dropped] (cumulative).
+#ifdef __EMSCRIPTEN__
+EMSCRIPTEN_KEEPALIVE
+#endif
+void AlertRelayForTest(std::uint32_t count, std::uint32_t distinct)
+{
+  for (std::uint32_t i = 0; i < count; ++i)
+  {
+    const std::string text = distinct ? "Invalid read from " + std::to_string(i) : "Invalid read from 0xbd420186";
+    BrowserMsgHandler("Warning", text.c_str(), false, Common::MsgType::Warning);
+  }
+}
+
+#ifdef __EMSCRIPTEN__
+EMSCRIPTEN_KEEPALIVE
+#endif
+void AlertRelayStats(std::uint32_t* out)
+{
+  std::lock_guard lock(s_alert_relay.mutex);
+  out[0] = s_alert_relay.relayed;
+  out[1] = s_alert_relay.folded;
+  out[2] = s_alert_relay.dropped;
 }
 
 #ifdef __EMSCRIPTEN__
