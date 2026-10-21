@@ -7,6 +7,7 @@
 // invalidating covered code drops them. Skipped with a core before 0075.
 
 import assert from "node:assert/strict";
+import { createHash } from "node:crypto";
 import test from "node:test";
 
 import { imageFromDol } from "../src/aot-image.js";
@@ -50,6 +51,12 @@ function queueAll(plan) {
     entries += mapped.length;
   }
   return entries;
+}
+
+// The modules queueAll queues, in the same order.
+function regionModules(plan) {
+  return regionGroups(plan, 100).map((group) =>
+    assembleRegion(group.flatMap(functionFragments(core)), { helpers: HELPER_SIGNATURES, pcOffset: core.pcOffset, memoryPages: core.memoryPages }).bytes);
 }
 
 // The program's regions installed, from a clean code image (each test alone).
@@ -230,6 +237,65 @@ test("with jitoffthread=1 a request never answered falls back to a synchronous c
     assert.equal(core.regionCount(), before + entries);
     assert.ok(core.regionStats().installFallbacks > fallbacks, "counted as a cold compile (installFallbacks)");
     assert.equal(lastInstallPath(), 2, "sampled as cold");
+  });
+});
+
+// A state load: ClearOffThreadAndRegionState, the part of
+// CachedInterpreter::ClearCache for off-thread requests and regions (the
+// Node core has no CachedInterpreter instance to clear).
+const clearCacheSkip = offThreadSkip || (!core?.has("DolphinWeb_AotClearCacheForTest") && "core without the cache-clear test export (#58)");
+function clearCache() {
+  core.module._DolphinWeb_AotClearCacheForTest();
+}
+
+test("with jitoffthread=1 a cache clear while regions wait asks again: no mark is lost", { skip: clearCacheSkip }, () => {
+  withOffThreadCompile((requests) => {
+    const plan = setup();
+    core.setRegionsEnabled(true);
+    const before = core.regionCount();
+    const entries = queueAll(plan);
+    core.serviceRegions();
+    const first = requests().length;
+    assert.ok(first >= 1);
+    // The worker answers, then a state load clears the cache before the CPU
+    // thread saw the marks: the ready table and the requests in flight are reset.
+    for (const r of requests()) Atomics.store(core.module.HEAPU8, r.readyPtr + r.readySlot, 1);
+    clearCache();
+    const fallbacks = core.regionStats().installFallbacks;
+    core.serviceRegions();
+    assert.equal(core.regionCount(), before, "nothing ready after the reset");
+    assert.ok(requests().length > first, "the waiting regions asked again");
+    for (const r of requests().slice(first)) Atomics.store(core.module.HEAPU8, r.readyPtr + r.readySlot, 1);
+    core.serviceRegions();
+    assert.equal(core.regionCount(), before + entries, "installed on the new marks, not after the 5 s wait");
+    assert.equal(core.regionStats().installFallbacks, fallbacks);
+  });
+});
+
+test("with jitoffthread=1 a region asked again after a cache clear is checked against the plan", { skip: clearCacheSkip }, () => {
+  withOffThreadCompile((requests) => {
+    const plan = setup();
+    core.setRegionsEnabled(true);
+    const before = core.regionCount();
+    queueAll(plan);
+    const modules = regionModules(plan); // translated from the code as queued
+    core.serviceRegions();
+    const first = requests().length;
+    // The state load also rewrote double (no icbi), and the pthread already
+    // holds the modules: the re-post would install at once without the check.
+    patchDouble();
+    for (const bytes of modules) {
+      core.module._dolphinJitCache.set(`wasm-block-sha256-v1:${createHash("sha256").update(bytes).digest("hex")}`, new WebAssembly.Module(bytes));
+    }
+    clearCache();
+    core.serviceRegions();
+    assert.ok(requests().length >= first);
+    core.reset(seedGprs(1), PROGRAM.labels.double, STOP, 400000);
+    assert.equal(core.dispatchRegion(), 0, "no region over the rewritten double");
+    const reference = runCall(PROGRAM.labels.main, { regions: false });
+    const got = runCall(PROGRAM.labels.main, { regions: true });
+    assert.deepEqual(got.state, reference.state, "the new code runs");
+    assert.ok(core.regionCount() >= before);
   });
 });
 

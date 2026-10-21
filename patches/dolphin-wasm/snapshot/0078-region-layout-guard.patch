@@ -31,10 +31,10 @@ diff --git a/Source/Core/Core/PowerPC/CachedInterpreter/CachedInterpreter.cpp b/
  };
  
  // FNV-1a 64 of the guest words in ranges[first .. first+count) (pairs), read
-@@ -8997,6 +9008,10 @@ struct PendingRegion
-   // Its ready byte was set, then cleared by another key's post (-4) before
-   // this thread saw it: the module is there, compiled from its own bytes.
-   bool signalled = false;
+@@ -9000,6 +9011,10 @@ struct PendingRegion
+   // A cache clear (a state load) zeroed every ready byte and forgot the
+   // requests in flight: a mark that landed before it is lost. Asked again.
+   bool repost = false;
 +  // WasmLayoutHash of the layout its code was translated for: the code embeds
 +  // absolute addresses of this session's heap (RAM, L1), so a module built in
 +  // another session runs only where they are the same.
@@ -42,7 +42,7 @@ diff --git a/Source/Core/Core/PowerPC/CachedInterpreter/CachedInterpreter.cpp b/
  };
  std::mutex s_region_queue_mutex;
  std::vector<PendingRegion> s_region_queue;
-@@ -9137,6 +9152,22 @@ void DropRegion(u32 index)
+@@ -9164,6 +9179,22 @@ void DropRegion(u32 index)
      RegionFilterAdd(pc);
  }
  
@@ -65,7 +65,7 @@ diff --git a/Source/Core/Core/PowerPC/CachedInterpreter/CachedInterpreter.cpp b/
  // A cache clear (state load, full JIT cache) does not say which code changed:
  // every region is hashed again before it next runs, and dropped if its code
  // is no longer the one it was translated from.
-@@ -9154,7 +9185,7 @@ void InstallRegion(PendingRegion& pending, int handle)
+@@ -9181,7 +9212,7 @@ void InstallRegion(PendingRegion& pending, int handle)
    s_region_stats.regions_installed += 1;
    const u32 index = static_cast<u32>(s_regions.size());
    s_regions.push_back({handle, std::move(pending.entries), std::move(pending.ranges),
@@ -74,7 +74,7 @@ diff --git a/Source/Core/Core/PowerPC/CachedInterpreter/CachedInterpreter.cpp b/
    for (const u32 pc : s_regions.back().entries)
    {
      s_region_at.emplace(pc, index);  // an entry already mapped keeps its region
-@@ -9167,8 +9198,20 @@ void InstallRegion(PendingRegion& pending, int handle)
+@@ -9194,8 +9225,20 @@ void InstallRegion(PendingRegion& pending, int handle)
  // The code may have changed since the translation (an overlay, code
  // reloaded): an icbi then found no region to drop. Checked against the
  // plan's hashes, not against whatever memory holds now.
@@ -95,7 +95,7 @@ diff --git a/Source/Core/Core/PowerPC/CachedInterpreter/CachedInterpreter.cpp b/
    if (std::any_of(pending.entries.begin(), pending.entries.end(),
                    [](u32 pc) { return HLE::GetHookByAddress(pc) != 0; }))
    {
-@@ -9416,7 +9459,12 @@ bool TryRunRegion(PowerPC::PowerPCState& ppc_state)
+@@ -9469,7 +9512,12 @@ bool TryRunRegion(PowerPC::PowerPCState& ppc_state)
    InstalledRegion& region = s_regions[it->second];
    if (!region.verified)
    {
@@ -109,7 +109,7 @@ diff --git a/Source/Core/Core/PowerPC/CachedInterpreter/CachedInterpreter.cpp b/
      {
        DropRegion(it->second);
        return false;
-@@ -9504,7 +9552,8 @@ void DolphinWeb_InvalidateRegions(u32 address, u32 size)
+@@ -9579,7 +9627,8 @@ void DolphinWeb_InvalidateRegions(u32 address, u32 size)
  extern "C" EMSCRIPTEN_KEEPALIVE void DolphinWeb_AotQueueRegion(const u8* bytes, u32 size,
                                                                 const u32* entries, u32 entry_count,
                                                                 const u32* ranges, u32 range_count,
@@ -119,7 +119,7 @@ diff --git a/Source/Core/Core/PowerPC/CachedInterpreter/CachedInterpreter.cpp b/
  {
    PendingRegion pending{std::vector<u8>(bytes, bytes + size),
                          std::vector<u32>(entries, entries + entry_count),
-@@ -9522,6 +9571,7 @@ extern "C" EMSCRIPTEN_KEEPALIVE void DolphinWeb_AotQueueRegion(const u8* bytes,
+@@ -9597,6 +9646,7 @@ extern "C" EMSCRIPTEN_KEEPALIVE void DolphinWeb_AotQueueRegion(const u8* bytes,
    }
    if (next != range_count || pending.members.empty())
      return;
@@ -127,7 +127,7 @@ diff --git a/Source/Core/Core/PowerPC/CachedInterpreter/CachedInterpreter.cpp b/
    pending.key = DolphinWeb_MakeWasmBlockCacheKey(pending.bytes);
    if (pending.key[0])
      pending.slot = ReadyBitOfKey(pending.key);
-@@ -14800,6 +14850,29 @@ std::vector<u32> s_aot_translate_out;
+@@ -14884,6 +14934,29 @@ std::vector<u32> s_aot_translate_out;
  std::array<u32, 248> s_aot_test_state{};
  constexpr u32 AOT_TEST_MSR = 0x00002032;  // FP, IR, DR, RI; external interrupts off
  
@@ -157,7 +157,7 @@ diff --git a/Source/Core/Core/PowerPC/CachedInterpreter/CachedInterpreter.cpp b/
  WasmStateLayout CurrentWasmStateLayout(Core::System& system)
  {
    auto& ppc = system.GetPPCState();
-@@ -15131,7 +15204,9 @@ extern "C" EMSCRIPTEN_KEEPALIVE const u32* DolphinWeb_AotTranslateForTest(
+@@ -15215,7 +15288,9 @@ extern "C" EMSCRIPTEN_KEEPALIVE const u32* DolphinWeb_AotTranslateForTest(
  namespace
  {
  // Bumped whenever the code the translator emits changes (cache keys).
@@ -168,7 +168,7 @@ diff --git a/Source/Core/Core/PowerPC/CachedInterpreter/CachedInterpreter.cpp b/
  constexpr u32 AOT_MAX_FRAGMENT_BYTES = 1u << 20;
  thread_local std::vector<u32> t_aot_out;
  u8* s_aot_ram = nullptr;
-@@ -15231,7 +15306,7 @@ extern "C" EMSCRIPTEN_KEEPALIVE const u32* DolphinWeb_AotTranslate(u32 entry_pc,
+@@ -15315,7 +15390,7 @@ extern "C" EMSCRIPTEN_KEEPALIVE const u32* DolphinWeb_AotTranslate(u32 entry_pc,
    auto& out = t_aot_out;
    out.assign({0, entry_pc, static_cast<u32>(fragment.code.size()),
                static_cast<u32>(fragment.entries.size()), static_cast<u32>(fragment.relocs.size()),
@@ -177,7 +177,7 @@ diff --git a/Source/Core/Core/PowerPC/CachedInterpreter/CachedInterpreter.cpp b/
    out.insert(out.end(), fragment.entries.begin(), fragment.entries.end());
    for (const auto& reloc : fragment.relocs)
      out.insert(out.end(), {reloc.offset, reloc.kind, reloc.value});
-@@ -15243,6 +15318,46 @@ extern "C" EMSCRIPTEN_KEEPALIVE const u32* DolphinWeb_AotTranslate(u32 entry_pc,
+@@ -15327,6 +15402,46 @@ extern "C" EMSCRIPTEN_KEEPALIVE const u32* DolphinWeb_AotTranslate(u32 entry_pc,
  
  // [compilerVersion, codegenMask]: the codegen mask is the CPU thread's, so
  // regions are emitted as its blocks are.
