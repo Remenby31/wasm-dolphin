@@ -10,7 +10,11 @@
 // events around it.
 //
 //   node harness/probes/determinism.mjs --port N [--iso disc.iso] [--runs 3]
-//     [--vi 120] [--stress 8] [--query "..."] [--host-clock]
+//     [--vi 120] [--stress 8] [--query "..."] [--query-b "..."] [--host-clock]
+//
+// --query-b: even runs boot with this query instead (same fixed clock), and
+// must still match run 1 exactly: a switch that claims to change nothing the
+// guest can see (e.g. idleff=1, patch 0089) is checked event by event.
 //
 // Exit 0: identical runs on the fixed clock, or differing runs on the host
 // clock (--host-clock). Exit 1 otherwise.
@@ -41,6 +45,7 @@ const { values } = parseArgs({
     vi: { type: "string", default: "120" },
     stress: { type: "string", default: "0" },
     query: { type: "string", default: "core=upstream&video=software&presenter=webgpu&cpu=single&speed=1&oc=1&fastsw=1&wasmjit=0&metrics=1" },
+    "query-b": { type: "string" },
     "host-clock": { type: "boolean", default: false },
     port: { type: "string", default: process.env.HARNESS_PORT },
   },
@@ -53,6 +58,13 @@ const hostClock = values["host-clock"];
 const params = new URLSearchParams(values.query);
 if (hostClock) params.set("rtc", "host");
 const query = params.toString();
+const queryB = values["query-b"] ? (() => {
+  if (!isSingleCore(values["query-b"])) throw new Error("--query-b must run one emulated CPU thread too");
+  const b = new URLSearchParams(values["query-b"]);
+  if (hostClock) b.set("rtc", "host");
+  return b.toString();
+})() : null;
+if (queryB && hostClock) throw new Error("--query-b compares two switches on the fixed clock: no --host-clock");
 
 // Busy host CPUs, so host timing has every chance to leak in.
 const stress = Array.from({ length: Number(values.stress) }, () => new Worker("let x = 0; for (;;) x = (x * 1103515245 + 12345) | 0;", { eval: true }));
@@ -60,7 +72,7 @@ const server = await ensureServer({ port: Number(values.port) });
 const runs = [];
 try {
   for (let run = 1; run <= Number(values.runs); run += 1) {
-    const session = await openSession({ base: server.base, server, query, iso, harness: { detTrace: true } });
+    const session = await openSession({ base: server.base, server, query: queryB && run % 2 === 0 ? queryB : query, iso, harness: { detTrace: true } });
     try {
       const capture = await captureInSession(session, { index: Number(values.vi), timeoutMs: 180000 });
       if (capture.error) throw new Error(`capture: ${capture.error}`);
@@ -69,7 +81,7 @@ try {
       if (trace.startVi !== 0) throw new Error(`the trace started at VI ${trace.startVi}, after the boot began`);
       if (hostClock ? session.clock?.fixed : !session.clock?.fixed) throw new Error(`clock: expected the ${hostClock ? "host" : "fixed"} clock, got ${JSON.stringify(session.clock)}`);
       runs.push({ run, url: session.url, clock: session.clock, picture: createHash("sha256").update(capture.data).digest("hex").slice(0, 12), ...trace });
-      console.log(`[determinism] run ${run}: picture ${runs.at(-1).picture}, ${trace.checkpoints.length} checkpoints`);
+      console.log(`[determinism] run ${run}${queryB ? ` (query ${run % 2 === 0 ? "b" : "a"})` : ""}: picture ${runs.at(-1).picture}, ${trace.checkpoints.length} checkpoints`);
     } finally {
       await session.close();
     }
