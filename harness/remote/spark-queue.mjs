@@ -15,8 +15,13 @@
 //   node harness/remote/spark-queue.mjs wait --pid <job pid> --kind pair|build --lanes auto|a|b --name <label>
 //     prints the lane granted (a, b, or "a b" for a build)
 //   node harness/remote/spark-queue.mjs done --pid <job pid>
-//   node harness/remote/spark-queue.mjs list
-import { existsSync, mkdirSync, readdirSync, readFileSync, renameSync, rmSync, writeFileSync } from "node:fs";
+//   node harness/remote/spark-queue.mjs list [--eta]
+//   node harness/remote/spark-queue.mjs move <name> --after <name|head> --as-judge
+//
+// A waiting job finds its ticket by its pid at every poll, so moving a
+// ticket (a rename, `move`) changes its turn safely; the judge alone moves
+// tickets (PROGRAM.md), and every move is logged in queue/moves.log.
+import { appendFileSync, existsSync, mkdirSync, readdirSync, readFileSync, renameSync, rmSync, writeFileSync } from "node:fs";
 import os from "node:os";
 import path from "node:path";
 import { pathToFileURL } from "node:url";
@@ -54,6 +59,9 @@ const alive = (pid) => {
 };
 
 // Live tickets, oldest first; tickets of a process that is gone are removed.
+// One ticket per job: a move racing with the job's own grant can leave two
+// (the moved one, and the granted one under the old name); the granted, or
+// else the newest name, is kept.
 export function readTickets(bench = BENCH_DIR) {
   const dir = queueDir(bench);
   if (!existsSync(dir)) return [];
@@ -64,7 +72,70 @@ export function readTickets(bench = BENCH_DIR) {
     if (t.host === os.hostname() && !alive(t.pid)) { rmSync(path.join(dir, id), { force: true }); continue; }
     out.push({ ...t, id });
   }
+  const keep = new Map();
+  for (const t of out) {
+    const k = `${t.host} ${t.pid}`, prev = keep.get(k);
+    if (!prev) { keep.set(k, t); continue; }
+    const [win, lose] = Boolean(t.lane) !== Boolean(prev.lane) ? (t.lane ? [t, prev] : [prev, t]) : [t, prev];
+    rmSync(path.join(dir, lose.id), { force: true });
+    keep.set(k, win);
+  }
+  return out.filter((t) => keep.get(`${t.host} ${t.pid}`) === t);
+}
+
+// Minutes a job holds the bench: a pair, from race-perf's options (every
+// run boots each side: warmup + window + ~20 s of boot and savestate); a
+// build ~8 min (more for a new worktree, which fetches its sources).
+export function estimateMin(kind, args = []) {
+  if (kind === "build") return 8;
+  const opt = (name, def) => { const i = args.indexOf(`--${name}`); return i >= 0 && Number.isFinite(Number(args[i + 1])) ? Number(args[i + 1]) : def; };
+  const sides = args.includes("--baseline") ? 2 : 1;
+  return Math.round((opt("runs", 4) * sides * (opt("warmup", 25) + opt("secs", 20) + 20)) / 60);
+}
+
+// When each job should start and end, in minutes from `now`. The bench runs
+// one job at a time (a pair in lane a, a build on both lanes), so in queue
+// order; a running job has its estimate minus the time since its grant.
+export function eta(tickets, now = Date.now()) {
+  let t0 = 0;
+  const out = [];
+  for (const t of tickets.filter((x) => x.lane !== "none")) {
+    const est = t.estMin ?? (t.kind === "build" ? 8 : 13);
+    if (t.lane) {
+      const left = Math.max(1, est - (t.grantedAt ? (now - Date.parse(t.grantedAt)) / 60000 : 0));
+      out.push({ ...t, startsIn: 0, endsIn: Math.round(left) });
+      t0 = Math.max(t0, left);
+    } else {
+      out.push({ ...t, startsIn: Math.round(t0), endsIn: Math.round(t0 + est) });
+      t0 += est;
+    }
+  }
   return out;
+}
+
+// The ticket name that puts `name` just after `after` ("head": before every
+// waiting ticket): a time between its new neighbours.
+export function movedId(tickets, name, after) {
+  const me = tickets.find((t) => t.name === name);
+  if (!me) throw new Error(`no ticket named ${name}`);
+  if (me.lane) throw new Error(`${name} is already running`);
+  const others = tickets.filter((t) => t !== me);
+  const at = after === "head" ? others.filter((t) => t.lane).length : others.findIndex((t) => t.name === after) + 1;
+  if (after !== "head" && at === 0) throw new Error(`no ticket named ${after}`);
+  if (others.slice(at).some((t) => t.lane)) throw new Error(`cannot move ${name} before a running job`);
+  const ms = (t) => Number(t.id.split("-")[0]);
+  const lo = at > 0 ? ms(others[at - 1]) : ms(others[0] ?? me) - 2000, hi = at < others.length ? ms(others[at]) : ms(others.at(-1)) + 2000;
+  if (hi - lo < 2) throw new Error(`no room between ${others[at - 1]?.name} and ${others[at]?.name} (same millisecond)`);
+  return `${String(Math.floor((lo + hi) / 2)).padStart(15, "0")}-${me.pid}.json`;
+}
+
+export function move(name, after, { bench = BENCH_DIR, by = "judge" } = {}) {
+  const tickets = readTickets(bench);
+  const me = tickets.find((t) => t.name === name);
+  const id = movedId(tickets, name, after);
+  renameSync(path.join(queueDir(bench), me.id), path.join(queueDir(bench), id));
+  appendFileSync(path.join(queueDir(bench), "moves.log"), `${new Date().toISOString()} ${by}: ${name} after ${after} (${me.id} -> ${id})\n`);
+  return id;
 }
 
 const writeTicket = (bench, t) => {
@@ -105,18 +176,23 @@ export function laneBusy(lane, { bench = BENCH_DIR, tickets = [] } = {}) {
   return lane !== "a" && untrackedBuilds(tickets).length > 0;
 }
 
-export async function waitTurn({ pid, kind, lanes = "auto", name, bench = BENCH_DIR, pollSec = 15, log = () => {} }) {
+export async function waitTurn({ pid, kind, lanes = "auto", name, estMin = null, bench = BENCH_DIR, pollSec = 15, log = () => {} }) {
   if (!["pair", "build"].includes(kind)) throw new Error(`--kind ${kind}: pair or build`);
   if (!["auto", ...LANES].includes(lanes)) throw new Error(`--lanes ${lanes}: auto, ${LANES.join(", ")}`);
   mkdirSync(queueDir(bench), { recursive: true });
-  const me = { id: `${String(Date.now()).padStart(15, "0")}-${pid}.json`, pid, host: os.hostname(), kind, lanes, name, at: new Date().toISOString(), lane: null };
+  const me = { id: `${String(Date.now()).padStart(15, "0")}-${pid}.json`, pid, host: os.hostname(), kind, lanes, name, estMin, at: new Date().toISOString(), lane: null };
   writeTicket(bench, me);
   let said = null;
   for (;;) {
     const tickets = readTickets(bench);
-    const step = nextStep(me, tickets, (l) => laneBusy(l, { bench, tickets }));
+    // Our ticket as it is now: its name changes when the judge moves it.
+    const mine = tickets.find((t) => t.pid === pid && t.host === me.host);
+    if (mine) me.id = mine.id;
+    else writeTicket(bench, me); // removed by hand: back in at its old place
+    const step = nextStep(me, mine ? tickets : readTickets(bench), (l) => laneBusy(l, { bench, tickets }));
     if (step.go) {
       me.lane = step.go.join(" ");
+      me.grantedAt = new Date().toISOString();
       writeTicket(bench, me);
       return me.lane;
     }
@@ -131,17 +207,33 @@ export function done(pid, bench = BENCH_DIR) {
 
 async function main() {
   const [cmd, ...rest] = process.argv.slice(2);
-  const { values } = parseArgs({ args: rest, options: { pid: { type: "string" }, kind: { type: "string" }, lanes: { type: "string", default: "auto" }, name: { type: "string", default: "" } } });
+  const { values, positionals } = parseArgs({ args: rest, allowPositionals: true, options: {
+    pid: { type: "string" }, kind: { type: "string" }, lanes: { type: "string", default: "auto" }, name: { type: "string", default: "" },
+    eta: { type: "boolean", default: false }, after: { type: "string" }, "as-judge": { type: "boolean", default: false }
+  } });
   if (cmd === "list") {
-    for (const t of readTickets()) console.log(`${t.at} ${t.kind} ${t.name} lanes:${t.lanes} ${t.lane ? `running in ${t.lane}` : "waiting"} pid ${t.pid}`);
+    // A running ticket of an older harness has no grantedAt: its lane lock's
+    // owner says when it started.
+    const lockStart = (lane) => { try { return JSON.parse(readFileSync(path.join(laneLock(lane), "owner"), "utf8")).startedAt; } catch { return null; } };
+    const tickets = readTickets().map((t) => (t.lane && t.lane !== "none" && !t.grantedAt ? { ...t, grantedAt: lockStart(t.lane.split(" ")[0]) ?? undefined } : t));
+    const rows = values.eta ? eta(tickets) : tickets;
+    for (const t of rows) console.log(`${t.at} ${t.kind} ${t.name} lanes:${t.lanes} ${t.lane ? `running in ${t.lane}` : "waiting"} pid ${t.pid}${values.eta && t.lane !== "none" ? ` | starts in ~${t.startsIn} min, ends in ~${t.endsIn} min` : ""}`);
+    return;
+  }
+  if (cmd === "move") {
+    if (!values["as-judge"]) throw new Error("move reorders every agent's turn: the judge's call only (--as-judge)");
+    if (positionals.length !== 1 || !values.after) throw new Error("usage: spark-queue.mjs move <name> --after <name|head> --as-judge");
+    console.log(`moved: ${move(positionals[0], values.after)}`);
     return;
   }
   const pid = Number(values.pid);
   if (!Number.isInteger(pid) || pid <= 0) throw new Error("--pid <job pid> is required");
   if (cmd === "done") return done(pid);
   if (cmd !== "wait") throw new Error("usage: spark-queue.mjs wait|done|list …");
-  // Progress on stderr, the lane alone on stdout.
-  console.log(await waitTurn({ pid, kind: values.kind, lanes: values.lanes, name: values.name, log: (m) => console.error(`[spark-queue] ${m}`) }));
+  // Progress on stderr, the lane alone on stdout. After the options, a
+  // pair's race-perf options (for its estimated duration).
+  const estMin = estimateMin(values.kind, positionals);
+  console.log(await waitTurn({ pid, kind: values.kind, lanes: values.lanes, name: values.name, estMin, log: (m) => console.error(`[spark-queue] ${m}`) }));
 }
 
 if (import.meta.url === pathToFileURL(process.argv[1] ?? "").href) {
