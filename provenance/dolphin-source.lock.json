@@ -25,7 +25,7 @@
       "commit": "01e0577914a75a2569c846778c2f93aa8e6feddd"
     }
   },
-  "patchSeriesSha256": "79a5ff8ea848ff605166cc06c1bf7931a4be9c15578e50ff56cdacca5a460cd5",
+  "patchSeriesSha256": "23802d3c19c1a1cfb8366bdcf781d73f6cfef22a29773ae43cc0a3e9668495f4",
   "patches": [
     {
       "order": 1,
@@ -639,12 +639,20 @@
       "order": 77,
       "cwd": ".",
       "hashMode": "lf-normalized",
+      "path": "patches/dolphin-wasm/snapshot/0091-no-wasm-code-under-mmu.patch",
+      "size": 3471,
+      "sha256": "d169775dc85c7e756561439fb1da2f749d3a774f0abd2b0dc0116017ed67a46d"
+    },
+    {
+      "order": 78,
+      "cwd": ".",
+      "hashMode": "lf-normalized",
       "path": "patches/dolphin-wasm/snapshot/0095-rumble-hook.patch",
       "size": 759,
       "sha256": "312aa4410fd82d04f0ee19fd8cc46af91d5a579829740712601e8d97586be628"
     },
     {
-      "order": 78,
+      "order": 79,
       "cwd": "Externals/SFML/SFML",
       "hashMode": "lf-normalized",
       "path": "patches/dolphin-wasm/submodules/0001-sfml-emscripten-config.patch",
@@ -652,7 +660,7 @@
       "sha256": "f82197a21fe982ad83f6ee7bbf5a03839b1cebd4d64da3eab11263842bf61d89"
     },
     {
-      "order": 79,
+      "order": 80,
       "cwd": "Externals/xxhash/xxHash",
       "hashMode": "lf-normalized",
       "path": "patches/dolphin-wasm/submodules/0002-xxhash-wasm-simd-scalar.patch",
