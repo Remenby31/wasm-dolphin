@@ -80,7 +80,10 @@ export const stockChrome = (json) => !json.chrome || (json.chrome.path === "chro
 // does not say its limit is left out too.
 export const ABSOLUTE_MAX_LOAD = 6;
 export const nightMeasure = (json) => Number.isFinite(json.maxLoad) && json.maxLoad <= ABSOLUTE_MAX_LOAD;
-export const absoluteRace = (json) => stockChrome(json) && nightMeasure(json);
+// Measured on another machine (harness/remote/spark-run.mjs stamps `host`):
+// a relative pair only, never a number for trunk's rows.
+export const thisMac = (json) => !json.host;
+export const absoluteRace = (json) => thisMac(json) && stockChrome(json) && nightMeasure(json);
 
 const med = (d) => d?.median ?? null;
 
