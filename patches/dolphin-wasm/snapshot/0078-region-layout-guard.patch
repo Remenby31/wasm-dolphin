@@ -1,0 +1,226 @@
+diff --git a/Source/Core/Core/PowerPC/CachedInterpreter/CachedInterpreter.cpp b/Source/Core/Core/PowerPC/CachedInterpreter/CachedInterpreter.cpp
+--- a/Source/Core/Core/PowerPC/CachedInterpreter/CachedInterpreter.cpp
++++ b/Source/Core/Core/PowerPC/CachedInterpreter/CachedInterpreter.cpp
+@@ -8874,11 +8874,19 @@ void CachedInterpreter::Init()
+   code_block.m_fpa = &js.fpa;
+ }
+ 
++namespace
++{
++void ForgetAllRegions();
++}
++
+ void CachedInterpreter::Shutdown()
+ {
+ #if DOLPHIN_WEB_STATIC_EXIT_LINKS
+   m_block_cache.AdvanceStaticLinkEpoch();
+ #endif
++#ifdef __EMSCRIPTEN__
++  ForgetAllRegions();
++#endif
+ #line 7773
+ #ifdef __EMSCRIPTEN__
+   s_deferred_wasm_queues.erase(this);
+@@ -8919,6 +8927,9 @@ struct InstalledRegion
+   std::vector<RegionMember> members;
+   bool live = true;
+   bool verified = true;   // false after a cache clear: hashed again before it runs
++  // The heap layout its code embeds (PendingRegion::layout_hash): checked
++  // again with the code after a cache clear, when the RAM may have moved.
++  u32 layout_hash = 0;
+ };
+ 
+ // FNV-1a 64 of the guest words in ranges[first .. first+count) (pairs), read
+@@ -9000,6 +9011,10 @@ struct PendingRegion
+   // A cache clear (a state load) zeroed every ready byte and forgot the
+   // requests in flight: a mark that landed before it is lost. Asked again.
+   bool repost = false;
++  // WasmLayoutHash of the layout its code was translated for: the code embeds
++  // absolute addresses of this session's heap (RAM, L1), so a module built in
++  // another session runs only where they are the same.
++  u32 layout_hash = 0;
+ };
+ std::mutex s_region_queue_mutex;
+ std::vector<PendingRegion> s_region_queue;
+@@ -9164,6 +9179,22 @@ void DropRegion(u32 index)
+     RegionFilterAdd(pc);
+ }
+ 
++// The CPU core shuts down (stop, another boot in the same page): every
++// region, installed, waiting or queued, is forgotten. Their code embeds this
++// session's RAM address; the next session allocates its own.
++void ForgetAllRegions()
++{
++  s_regions.clear();
++  s_region_at.clear();
++  s_region_filter.fill(0);
++  std::fill(s_region_pages.begin(), s_region_pages.end(), 0);
++  s_region_waiting.clear();
++  s_region_service_start.reset();
++  std::lock_guard lock(s_region_queue_mutex);
++  s_region_queue.clear();
++  s_region_queue_nonempty.store(false, std::memory_order_release);
++}
++
+ // A cache clear (state load, full JIT cache) does not say which code changed:
+ // every region is hashed again before it next runs, and dropped if its code
+ // is no longer the one it was translated from.
+@@ -9181,7 +9212,7 @@ void InstallRegion(PendingRegion& pending, int handle)
+   s_region_stats.regions_installed += 1;
+   const u32 index = static_cast<u32>(s_regions.size());
+   s_regions.push_back({handle, std::move(pending.entries), std::move(pending.ranges),
+-                       std::move(pending.members), true, true});
++                       std::move(pending.members), true, true, pending.layout_hash});
+   for (const u32 pc : s_regions.back().entries)
+   {
+     s_region_at.emplace(pc, index);  // an entry already mapped keeps its region
+@@ -9194,8 +9225,20 @@ void InstallRegion(PendingRegion& pending, int handle)
+ // The code may have changed since the translation (an overlay, code
+ // reloaded): an icbi then found no region to drop. Checked against the
+ // plan's hashes, not against whatever memory holds now.
++WasmStateLayout CurrentWasmStateLayout(Core::System& system);
++u32 WasmLayoutHash(const WasmStateLayout& layout);
++u32 s_region_layout_refused = 0;
++
+ bool RegionInstallable(const PendingRegion& pending)
+ {
++  // Code translated for another heap layout (a cached module from a session
++  // whose RAM sat elsewhere) would read and write the wrong host memory.
++  if (pending.layout_hash != WasmLayoutHash(CurrentWasmStateLayout(Core::System::GetInstance())))
++  {
++    s_region_layout_refused += 1;
++    s_region_stats.regions_refused += 1;
++    return false;
++  }
+   if (std::any_of(pending.entries.begin(), pending.entries.end(),
+                   [](u32 pc) { return HLE::GetHookByAddress(pc) != 0; }))
+   {
+@@ -9469,7 +9512,12 @@ bool TryRunRegion(PowerPC::PowerPCState& ppc_state)
+   InstalledRegion& region = s_regions[it->second];
+   if (!region.verified)
+   {
+-    if (!RegionCodeMatchesPlan(region.ranges, region.members))
++    // The RAM may have been allocated again (a stop and a new boot in the same
++    // page): the code embeds the old address, whatever the guest code says.
++    if (region.layout_hash != WasmLayoutHash(CurrentWasmStateLayout(Core::System::GetInstance())))
++      s_region_layout_refused += 1;
++    if (region.layout_hash != WasmLayoutHash(CurrentWasmStateLayout(Core::System::GetInstance())) ||
++        !RegionCodeMatchesPlan(region.ranges, region.members))
+     {
+       DropRegion(it->second);
+       return false;
+@@ -9579,7 +9627,8 @@ void DolphinWeb_InvalidateRegions(u32 address, u32 size)
+ extern "C" EMSCRIPTEN_KEEPALIVE void DolphinWeb_AotQueueRegion(const u8* bytes, u32 size,
+                                                                const u32* entries, u32 entry_count,
+                                                                const u32* ranges, u32 range_count,
+-                                                               const u32* members, u32 member_count)
++                                                               const u32* members, u32 member_count,
++                                                               u32 layout_hash)
+ {
+   PendingRegion pending{std::vector<u8>(bytes, bytes + size),
+                         std::vector<u32>(entries, entries + entry_count),
+@@ -9597,6 +9646,7 @@ extern "C" EMSCRIPTEN_KEEPALIVE void DolphinWeb_AotQueueRegion(const u8* bytes,
+   }
+   if (next != range_count || pending.members.empty())
+     return;
++  pending.layout_hash = layout_hash;  // 0 (a caller without it): never installed
+   pending.key = DolphinWeb_MakeWasmBlockCacheKey(pending.bytes);
+   if (pending.key[0])
+     pending.slot = ReadyBitOfKey(pending.key);
+@@ -14884,6 +14934,29 @@ std::vector<u32> s_aot_translate_out;
+ std::array<u32, 248> s_aot_test_state{};
+ constexpr u32 AOT_TEST_MSR = 0x00002032;  // FP, IR, DR, RI; external interrupts off
+ 
++// FNV-1a 32 of every field (offsets in PowerPCState, and the absolute
++// addresses and sizes of RAM and L1 in this session's heap), never 0.
++u32 s_layout_shift_for_test = 0;  // tests: a moved RAM (DolphinWeb_AotLayoutShiftForTest)
++
++u32 WasmLayoutHash(const WasmStateLayout& layout_in)
++{
++  WasmStateLayout layout = layout_in;
++  layout.ram_base += s_layout_shift_for_test;
++  static_assert(sizeof(WasmStateLayout) % sizeof(u32) == 0);
++  std::array<u32, sizeof(WasmStateLayout) / sizeof(u32)> words;
++  std::memcpy(words.data(), &layout, sizeof(layout));
++  u32 h = 0x811c9dc5u;
++  for (const u32 w : words)
++  {
++    for (int shift = 0; shift < 32; shift += 8)
++    {
++      h ^= (w >> shift) & 0xff;
++      h *= 0x01000193u;
++    }
++  }
++  return h != 0 ? h : 1;
++}
++
+ WasmStateLayout CurrentWasmStateLayout(Core::System& system)
+ {
+   auto& ppc = system.GetPPCState();
+@@ -15215,7 +15288,9 @@ extern "C" EMSCRIPTEN_KEEPALIVE const u32* DolphinWeb_AotTranslateForTest(
+ namespace
+ {
+ // Bumped whenever the code the translator emits changes (cache keys).
+-constexpr u32 AOT_COMPILER_VERSION = 1;
++// 2: modules carry their heap layout (region-layout); version 1 modules have
++// none and would never install.
++constexpr u32 AOT_COMPILER_VERSION = 2;
+ constexpr u32 AOT_MAX_FRAGMENT_BYTES = 1u << 20;
+ thread_local std::vector<u32> t_aot_out;
+ u8* s_aot_ram = nullptr;
+@@ -15315,7 +15390,7 @@ extern "C" EMSCRIPTEN_KEEPALIVE const u32* DolphinWeb_AotTranslate(u32 entry_pc,
+   auto& out = t_aot_out;
+   out.assign({0, entry_pc, static_cast<u32>(fragment.code.size()),
+               static_cast<u32>(fragment.entries.size()), static_cast<u32>(fragment.relocs.size()),
+-              0});
++              WasmLayoutHash(CurrentWasmStateLayout(Core::System::GetInstance()))});
+   out.insert(out.end(), fragment.entries.begin(), fragment.entries.end());
+   for (const auto& reloc : fragment.relocs)
+     out.insert(out.end(), {reloc.offset, reloc.kind, reloc.value});
+@@ -15327,6 +15402,46 @@ extern "C" EMSCRIPTEN_KEEPALIVE const u32* DolphinWeb_AotTranslate(u32 entry_pc,
+ 
+ // [compilerVersion, codegenMask]: the codegen mask is the CPU thread's, so
+ // regions are emitted as its blocks are.
++// The layout hash regions translated now carry (DolphinWeb_AotTranslate's
++// sixth word), and the count of queued regions refused for another layout.
++// Tests (the Node core never reallocates its RAM): pretend the layout moved
++// (0: the real one again), and what Shutdown does to regions.
++extern "C" EMSCRIPTEN_KEEPALIVE void DolphinWeb_AotLayoutShiftForTest(u32 shift)
++{
++  s_layout_shift_for_test = shift;
++}
++
++extern "C" EMSCRIPTEN_KEEPALIVE void DolphinWeb_AotForgetRegionsForTest()
++{
++  ForgetAllRegions();
++}
++
++// 1 once the core has allocated the emulated RAM (the layout regions are
++// translated for exists): discio queues no region before.
++extern "C" EMSCRIPTEN_KEEPALIVE u32 DolphinWeb_AotRamReady()
++{
++  return Core::System::GetInstance().GetMemory().GetRAM() != nullptr ? 1 : 0;
++}
++
++extern "C" EMSCRIPTEN_KEEPALIVE u32 DolphinWeb_AotLayoutHash()
++{
++  return WasmLayoutHash(CurrentWasmStateLayout(Core::System::GetInstance()));
++}
++
++// The layout's fields, in WasmStateLayout order (diagnostics: which one moved).
++extern "C" EMSCRIPTEN_KEEPALIVE u32 DolphinWeb_AotLayoutWords(u32* out, u32 capacity)
++{
++  const WasmStateLayout layout = CurrentWasmStateLayout(Core::System::GetInstance());
++  const u32 n = static_cast<u32>(sizeof(layout) / sizeof(u32));
++  std::memcpy(out, &layout, std::min(n, capacity) * sizeof(u32));
++  return n;
++}
++
++extern "C" EMSCRIPTEN_KEEPALIVE u32 DolphinWeb_AotLayoutRefused()
++{
++  return s_region_layout_refused;
++}
++
+ extern "C" EMSCRIPTEN_KEEPALIVE void DolphinWeb_AotKeyParts(u32* out)
+ {
+   out[0] = AOT_COMPILER_VERSION;

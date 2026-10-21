@@ -217,7 +217,10 @@ export function regionRecord(reply) {
   const stats = consistentRead(decodeRegionStats(reply.bytes), decodeRegionStats(reply.again));
   if (stats.error) return { p4: null, p4Why: stats.error };
   const p4 = regionShares(stats);
-  const samples = Array.isArray(reply.installSamples) ? { installSamples: reply.installSamples } : {};
+  const samples = {
+    ...(Array.isArray(reply.installSamples) ? { installSamples: reply.installSamples } : {}),
+    ...(Number.isInteger(reply.layoutRefused) ? { layoutRefused: reply.layoutRefused } : {})
+  };
   return p4.error ? { p4: null, p4Why: p4.error, ...samples } : { p4, p4Raw: stats, ...samples };
 }
 

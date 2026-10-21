@@ -130,6 +130,7 @@ static void ResetOffThreadCompiles() {}
 static void UnverifyAllRegions() {}
 static void RepostWaitingRegions() {}
 static void ClearOffThreadAndRegionState() {}
+static void ForgetAllRegions() {}
 void Host_JitCacheInvalidation() {}
 #define __EMSCRIPTEN__ 1
 /* INTERPRETER_METHODS */

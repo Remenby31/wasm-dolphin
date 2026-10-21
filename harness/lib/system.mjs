@@ -47,3 +47,30 @@ export function sampleChromeCpu(profileDir) {
     return { t: Date.now(), error: String(error.message || error) };
   }
 }
+
+// Resident memory of one profile's Chrome processes, per process type
+// (browser, renderer, gpu-process, utility:<service>), from
+// `ps -A -o pid=,rss=,command=` (RSS in KB). Pure.
+export function parseRssForProfile(psOutput, profileDir) {
+  const byType = {};
+  let totalMB = 0;
+  for (const line of psOutput.split("\n")) {
+    const m = line.match(/^\s*(\d+)\s+(\d+)\s+(.*)$/);
+    if (!m || !m[3].includes(profileDir)) continue;
+    const mb = Number(m[2]) / 1024;
+    let type = /--type=([a-z-]+)/.exec(m[3])?.[1] ?? "browser";
+    const sub = /--utility-sub-type=([A-Za-z.]+)/.exec(m[3])?.[1];
+    if (sub) type += `:${sub}`;
+    byType[type] = Math.round((byType[type] ?? 0) + mb);
+    totalMB += mb;
+  }
+  return { totalMB: Math.round(totalMB), byType };
+}
+
+export function sampleChromeRss(profileDir) {
+  try {
+    return parseRssForProfile(execFileSync("ps", ["-A", "-o", "pid=,rss=,command="], { encoding: "utf8", maxBuffer: 32 << 20 }), profileDir);
+  } catch (error) {
+    return { error: String(error.message || error) };
+  }
+}

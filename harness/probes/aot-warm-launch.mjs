@@ -23,6 +23,7 @@ import { bootIso, grabFrame, launchChrome, readTimeline, workerRequest } from ".
 import { ensureServer } from "../lib/server.mjs";
 import { savePng } from "../lib/session.mjs";
 import { runSteps } from "../lib/steps.mjs";
+import { SEED_FILE, seedOriginCheck } from "../lib/seed-origin.mjs";
 import { machineSnapshot } from "../lib/system.mjs";
 import { coreStats, mergeTimeline, presentationStats, windowOf } from "../lib/timeline.mjs";
 
@@ -139,6 +140,9 @@ async function seed() {
     }
     log(`seeded: cache=${r?.cacheSize} newCompiles=${r?.newCompileCount} idbWrites=${r?.idbWriteCount}`);
     writeFileSync(path.join(values.profile, "..", `${path.basename(values.profile)}.seed.json`), JSON.stringify({ readiness: r, console: s.consoleLines }, null, 1));
+    // The caches it filled (Cache API, OPFS, IndexedDB) belong to this
+    // origin: written inside the profile, so a clone carries it (SEED_FILE).
+    writeFileSync(path.join(values.profile, SEED_FILE), JSON.stringify({ origin: s.server.base, port, query: values.query, at: new Date().toISOString() }, null, 1));
   } finally {
     await s.close();
   }
@@ -234,6 +238,9 @@ async function measureOne(name, tree, runDir, profileDir, query = values.query) 
 }
 
 async function measure() {
+  const seeded = seedOriginCheck(values["seed-profile"], port);
+  if (seeded.error) throw new Error(seeded.error);
+  if (seeded.warning) log(`warning: ${seeded.warning}`);
   const sides = values.side.map((s) => { const i = s.indexOf("="); return [s.slice(0, i), s.slice(i + 1)]; });
   mkdirSync(values.out, { recursive: true });
   const all = [];
