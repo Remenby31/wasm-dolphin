@@ -142,6 +142,65 @@ node harness/probes/race-perf.mjs --iso ../roms/<disc>.iso --state ../measures/h
   and `p4.diagnostics` holds the region pipeline counts and the four costliest
   block starts outside regions (`topMisses`).
 
+## Second bench: the DGX Spark
+
+`harness/remote/spark-run.mjs` runs a race-perf pair on the DGX Spark
+(`ssh spark`, Tailscale) instead of this Mac, and brings it back under
+`../measures/spark/<date>/<name>/`:
+
+```sh
+node harness/remote/spark-run.mjs --candidate <ref|dir> --baseline <ref|dir> \
+  --state ../measures/harness/<race>.sav [--name n] [--runs 6] [--detach] [-- <race-perf options>]
+node harness/remote/spark-run.mjs --fetch <date>/<name>   # a detached or interrupted run
+node harness/remote/spark-run.mjs --build <ref>           # its core built on the bench, then --candidate spark:<ref>
+```
+
+- **Relative only.** Playwright's Chromium (Google Chrome has no Linux arm64
+  build), Cortex-X925 cores. Each summary is stamped `host: "spark"`,
+  `chromium: "playwright"`, and `kpi-report` never reads it for trunk's
+  rows (`lib/kpi.mjs` `thisMac`). Compare the two sides of a pair, nothing else.
+- **`video=null` instead of wgpu.** Headless Chromium there offers WebGPU on
+  SwiftShader only, where the wgpu device is lost (black picture). The
+  software renderer in dual core lets the emulated CPU wait on it: the race
+  sits at the speed limit (100 % at `speed=1`, 150 % at 1.5, even on two
+  little cores), so a CPU change cannot show. `speed=unlimited` stalls the
+  scene. With `video=null` the race runs (≈10 k JIT blocks compiled, as on
+  the Mac) with the CPU thread saturated at ~60 %, the regime of wgpu on the
+  Mac (where null is no faster). So every query's `video=wgpu` becomes
+  `video=null` and its WebGPU presenter `2d`, the rest kept; the default
+  query is the Mac's race query swapped the same way. `--keep-video` turns
+  this off. It measures the CPU side only: a change to rendering needs the Mac.
+- It pushes this checkout's harness and what each side serves
+  (`snapshotTree`: a ref exported with `git archive`, a directory as it is,
+  cores and local changes included), keyed by content under
+  `~/salon-bench/{harness,trees}/`, so a later pair reuses them. The disc is
+  never pushed: the bench holds its only copy (`~/salon-bench/roms`, 700/600,
+  PROGRAM.md); `--state` is pushed next to it once.
+- **One pair at a time.** Chromium is pinned to cpus 15-19 (the big cores
+  of one cluster, its own L3) and node to 10-14: lane `a`, port 8090, lock
+  `~/salon-bench/.perf-lock`. A second lane (Chromium on 5-9, the other
+  cluster) was tried and failed its A/A next to a pair in lane `a`
+  (2026-10-21: σ 1.86 pt, one pair at +4.8 %, both pairs 1-7 % slower and
+  over the load limit), so pairs only run in lane `a`; `--lane b` is
+  refused. Lane `b`'s lock stays, taken by builds. The Mac's lock and MESURE
+  slots do not apply. `--chrome-cpus` / `--node-cpus` override the pinning.
+- **First come, first served** (`spark-queue.mjs`). The locks are polled, so
+  a burst of builds once retook lane a for half an hour while a pair queued
+  before them timed out. Every job now drops a ticket in
+  `~/salon-bench/queue/` (arrival time, its pid) and starts only when no
+  older waiting ticket could use a lane it wants and that lane is free; a
+  build wants both. `node harness/remote/spark-queue.mjs list` on the Spark
+  shows the queue. Pairs wait up to 4 h by default (`--lock-wait`). Compare sides of one pair only, never a lane with the
+  other. `--chrome-cpus` / `--node-cpus` override the pinning.
+- `--build <ref>` (a commit of the fork) builds its core on the bench with
+  the pinned toolchain (`build-core-repro.mjs --install`, linux-arm64, ~8
+  min) in `~/salon-bench/build/wt/<commit>`, in its turn, holding both
+  lanes' locks (lane `b` also waits while a build of an older harness,
+  without a ticket, exists);
+  `--candidate spark:<ref>` / `--baseline spark:<ref>` then serve that
+  worktree. A core built there differs in bytes from CI's and from a Mac
+  build: compare it only with another core built on the bench.
+
 ## KPI probes and report
 
 The program's KPIs (PROGRAM.md, « KPI du programme ») that race-perf does not
