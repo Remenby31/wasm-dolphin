@@ -1,0 +1,260 @@
+#!/usr/bin/env node
+// Copyright 2026 wasm-dolphin contributors
+// SPDX-License-Identifier: MIT
+//
+// A race-perf pair on the DGX Spark bench, driven from the Mac: pushes the
+// two sides (git refs or worktrees, with their cores) and this harness, runs
+// harness/probes/race-perf.mjs there under the Spark's own perf lock, and
+// brings the result back under ../measures/spark/<date>/<name>.
+//
+//   node harness/remote/spark-run.mjs --candidate <ref|dir> [--baseline <ref|dir>]
+//     --state <local .sav> [--name n] [--runs 6] [--host spark] [--detach]
+//     [-- <race-perf options: --config, --query, --warmup, --secs, --max-load, …>]
+//   node harness/remote/spark-run.mjs --fetch <date>/<name>   (a detached run)
+//
+// - Relative only: Playwright's Chromium on Linux arm64 (no Google Chrome
+//   there), another CPU and GPU. Every summary is stamped host=spark and
+//   chromium=playwright, and kpi-report never reads it for trunk's absolute
+//   rows (lib/kpi.mjs). Compare the two sides of one pair, nothing else.
+// - What is pushed is what each side serves (lib/server.mjs snapshotTree),
+//   stored under ~/salon-bench/trees/<snapshot hash>: pushed once, reused
+//   by every later pair. A git ref is exported first (git archive), a
+//   directory is taken as it is, local changes and cores included.
+// - The disc is never pushed: race-perf reads the one already on the bench
+//   (~/salon-bench/roms, the only copy, PROGRAM.md). --state is pushed there
+//   (mode 600) when missing.
+// - The run is detached on the Spark (setsid): a dropped ssh session does
+//   not stop it, and --fetch brings it back later.
+import { execFileSync, spawnSync } from "node:child_process";
+import { createHash } from "node:crypto";
+import { existsSync, mkdirSync, readdirSync, readFileSync, rmSync, statSync, writeFileSync } from "node:fs";
+import path from "node:path";
+import { pathToFileURL } from "node:url";
+import { parseArgs } from "node:util";
+
+import { exportRef } from "../cli.mjs";
+import { REPO_ROOT } from "../lib/browser.mjs";
+import { IDENTITY_FILE, snapshotTree } from "../lib/server.mjs";
+import { release } from "../lib/ownership.mjs";
+
+export const BENCH = "salon-bench"; // under the Spark user's home
+export const MEASURES = path.resolve(REPO_ROOT, "..", "measures", "spark");
+// Never pushed by this script, whatever a tree holds.
+const DISC = /\.(?:iso|gcm|rvz|ciso|wbfs|gcz)$/i;
+// The harness itself, as the pair runs it (race-perf and what it imports).
+const HARNESS_ROOTS = ["harness", "src", "package.json"];
+const HARNESS_SKIP = /^harness\/(?:results|homebrew)(?:\/|$)/;
+
+export const safeName = (s) => String(s).replace(/[^\w.-]+/g, "-").replace(/^[-.]+|-+$/g, "").slice(0, 80) || "run";
+export const sh = (s) => `'${String(s).replace(/'/g, `'\\''`)}'`;
+
+// Today's directory and a run name: given, or the two sides and the time.
+export function runId({ name, candidate, baseline, now = new Date() }) {
+  const date = now.toISOString().slice(0, 10).replace(/-/g, "");
+  const label = (spec) => (spec ? path.basename(String(spec)) : null);
+  const auto = [label(candidate), baseline ? `vs-${label(baseline)}` : null, now.toISOString().slice(11, 16).replace(":", "")].filter(Boolean).join("-");
+  return { date, name: safeName(name ?? auto) };
+}
+
+// The summary as the Mac keeps it: marked as measured on the bench, never
+// on this Mac's stock Chrome (lib/kpi.mjs leaves it out of trunk's rows).
+export function stampSummary(summary, bench) {
+  return { ...summary, host: bench.host, chromium: "playwright", bench };
+}
+
+// The Spark command that starts the pair detached and returns at once.
+export function launchCommand({ harnessDir, outDir, raceArgs, chromeCpus, nodeCpus }) {
+  const env = [chromeCpus && `SPARK_CHROME_CPUS=${sh(chromeCpus)}`, nodeCpus && `SPARK_NODE_CPUS=${sh(nodeCpus)}`].filter(Boolean).join(" ");
+  return [
+    `mkdir -p ${sh(path.posix.dirname(outDir))}`,
+    // Two pairs never share a name (race-perf refuses an existing --out, the log would mix).
+    `test ! -e ${sh(`${outDir}.log`)}`,
+    `cd ${sh(harnessDir)}`,
+    `${env ? `${env} ` : ""}setsid nohup sh harness/remote/spark-race.sh ${sh(outDir)} -- ${raceArgs.map(sh).join(" ")} </dev/null >/dev/null 2>&1 &`,
+    "echo started"
+  ].join(" && ");
+}
+
+// Files under `roots` of `root`, relative and sorted, minus `skip`.
+function listFiles(root, roots, skip = null) {
+  const out = [];
+  const walk = (rel) => {
+    if (skip?.test(rel)) return;
+    const abs = path.join(root, rel);
+    if (!existsSync(abs)) return;
+    const st = statSync(abs);
+    if (st.isDirectory()) for (const n of readdirSync(abs).sort()) walk(path.posix.join(rel, n));
+    else if (st.isFile()) out.push(rel);
+  };
+  for (const r of roots) walk(r);
+  return out.sort();
+}
+
+export function contentKey(root, files) {
+  const h = createHash("sha256");
+  for (const f of files) h.update(`${f}\0${createHash("sha256").update(readFileSync(path.join(root, f))).digest("hex")}\n`);
+  return h.digest("hex").slice(0, 24);
+}
+
+function ssh(host, command, { input, quiet = false } = {}) {
+  const r = spawnSync("ssh", ["-o", "ServerAliveInterval=15", "-o", "ConnectTimeout=20", host, command], { input, maxBuffer: 1 << 30 });
+  if (r.status !== 0 && !quiet) throw new Error(`ssh ${host}: ${command.slice(0, 120)}… exit ${r.status}: ${String(r.stderr ?? "").trim().slice(0, 400)}`);
+  return { status: r.status, bytes: r.stdout, out: String(r.stdout ?? "") };
+}
+
+// Push `files` of `root` to ~/salon-bench/<kind>/<key> unless it is there.
+// Extracted aside, then renamed: a half-pushed tree is never used.
+function pushTree(host, { root, files, kind, key, identity = null }) {
+  const dest = `${BENCH}/${kind}/${key}`;
+  if (ssh(host, `test -d ${dest}`, { quiet: true }).status === 0) return { dest, pushed: false };
+  for (const f of files) if (DISC.test(f)) throw new Error(`${root}: refusing to push a disc image (${f})`);
+  const tar = execFileSync("tar", ["--no-mac-metadata", "-L", "-c", "-C", root, "-T", "-"], { input: files.join("\n"), maxBuffer: 1 << 30, env: { ...process.env, COPYFILE_DISABLE: "1" } });
+  const id = identity ? `printf %s ${sh(JSON.stringify(identity))} > "$t"/${IDENTITY_FILE} && ` : "";
+  ssh(host, `set -e; mkdir -p ${BENCH}/${kind}; t=$(mktemp -d ${dest}.tmp-XXXXXX); tar -x -C "$t"; ${id}chmod 755 "$t"; mv -T "$t" ${dest}`, { input: tar });
+  return { dest, pushed: true };
+}
+
+// One side: the files it serves (and tools/serve.mjs, which the remote
+// harness imports to resolve them), keyed by the snapshot hash.
+async function pushSide(host, spec) {
+  const isDir = existsSync(spec) && statSync(spec).isDirectory();
+  const root = isDir ? path.resolve(spec) : exportRef(spec);
+  try {
+    const snap = await snapshotTree(root);
+    const files = [...snap.files.keys()].map((k) => k.slice(1)).concat("tools/serve.mjs").sort();
+    const identity = { ref: isDir ? root : spec, ...snap.source, host: "mac" };
+    const key = snap.hash.slice(0, 24);
+    const { dest, pushed } = pushTree(host, { root, files, kind: "trees", key, identity });
+    console.log(`[spark-run] ${spec}: ${pushed ? "pushed" : "already there"} as trees/${key} (commit ${String(snap.source.commit ?? "?").slice(0, 8)}${snap.source.dirty ? ", local changes" : ""})`);
+    return { spec, dest, key, snapshot: snap.hash, source: snap.source };
+  } finally {
+    if (!isDir) { release(root); rmSync(root, { recursive: true, force: true }); }
+  }
+}
+
+// The savestate goes next to the disc, private, once per content.
+function pushState(host, file) {
+  const bytes = readFileSync(file);
+  const name = `${path.basename(file, ".sav")}-${createHash("sha256").update(bytes).digest("hex").slice(0, 12)}.sav`;
+  const dest = `${BENCH}/roms/${name}`;
+  if (ssh(host, `test -f ${dest}`, { quiet: true }).status !== 0) {
+    ssh(host, `set -e; umask 077; cat > ${dest}.tmp; mv ${dest}.tmp ${dest}`, { input: bytes });
+    console.log(`[spark-run] savestate pushed as roms/${name}`);
+  }
+  return dest;
+}
+
+// The one disc on the bench, unless named.
+function benchDisc(host, name) {
+  if (name) return `${BENCH}/roms/${path.basename(name)}`;
+  const discs = ssh(host, `ls ${BENCH}/roms`).out.split("\n").filter((f) => DISC.test(f));
+  if (discs.length !== 1) throw new Error(`${discs.length} discs on the bench: name one with --iso <file name in ~/${BENCH}/roms>`);
+  return `${BENCH}/roms/${discs[0]}`;
+}
+
+const sleep = (s) => new Promise((r) => setTimeout(r, s * 1000));
+
+// Follow the detached run's log until its exit file appears, then bring
+// the result back and stamp it.
+async function follow(host, { date, name, meta = null, pollSec = 20 }) {
+  const remote = `${BENCH}/results/${date}/${name}`;
+  let shown = 0, misses = 0;
+  for (;;) {
+    const r = ssh(host, `cat ${remote}.exit 2>/dev/null; echo ---; tail -n +${shown + 1} ${remote}.log 2>/dev/null`, { quiet: true });
+    if (r.status !== 0) {
+      if (++misses > 30) throw new Error(`lost the Spark for ${misses} polls; the run goes on there: --fetch ${date}/${name}`);
+    } else {
+      misses = 0;
+      const [code, log = ""] = r.out.split("---\n");
+      const lines = log.split("\n").filter(Boolean);
+      for (const l of lines) console.log(l);
+      shown += lines.length;
+      if (code.trim() !== "") return fetchResult(host, { date, name, meta, exit: Number(code.trim()) });
+    }
+    await sleep(pollSec);
+  }
+}
+
+function fetchResult(host, { date, name, meta, exit }) {
+  const local = path.join(MEASURES, date, name);
+  mkdirSync(local, { recursive: true });
+  const tar = ssh(host, `tar -c -C ${BENCH}/results/${date} ${name} ${name}.log ${name}.exit 2>/dev/null; true`).bytes;
+  execFileSync("tar", ["-x", "-C", path.dirname(local)], { input: tar });
+  // name.log / name.exit land next to the directory: keep them inside.
+  for (const ext of ["log", "exit"]) {
+    const f = path.join(path.dirname(local), `${name}.${ext}`);
+    if (existsSync(f)) { writeFileSync(path.join(local, `spark-run.${ext}`), readFileSync(f)); rmSync(f); }
+  }
+  const metaFile = path.join(local, "spark.json");
+  const bench = meta ?? (existsSync(metaFile) ? JSON.parse(readFileSync(metaFile, "utf8")) : { host: "spark" });
+  writeFileSync(metaFile, JSON.stringify({ ...bench, exit }, null, 1) + "\n");
+  const summaryFile = path.join(local, "summary.json");
+  if (existsSync(summaryFile)) {
+    const summary = stampSummary(JSON.parse(readFileSync(summaryFile, "utf8")), bench);
+    writeFileSync(summaryFile, JSON.stringify(summary, null, 1) + "\n");
+    const c = summary.change;
+    console.log(`[spark-run] ${c ? `paired change ${c.median ?? `withheld (${c.withheld})`}${c.median != null ? " %" : ""}, per run ${c.perRun.join(" ")}` : `speed ${summary.candidate?.cold?.speed?.median} %`} -> ${local}`);
+  } else console.log(`[spark-run] no summary (exit ${exit}), see ${path.join(local, "spark-run.log")}`);
+  return exit;
+}
+
+async function main() {
+  const { values, positionals } = parseArgs({
+    options: {
+      candidate: { type: "string" }, baseline: { type: "string" }, state: { type: "string" }, iso: { type: "string" },
+      name: { type: "string" }, runs: { type: "string", default: "6" }, port: { type: "string", default: "8090" },
+      host: { type: "string", default: process.env.SPARK_HOST || "spark" },
+      "chrome-cpus": { type: "string" }, "node-cpus": { type: "string" },
+      detach: { type: "boolean", default: false }, fetch: { type: "string" }
+    },
+    allowPositionals: true
+  });
+  const host = values.host;
+  if (values.fetch) {
+    const [date, name] = values.fetch.split("/");
+    process.exitCode = await follow(host, { date, name: safeName(name) });
+    return;
+  }
+  if (!values.candidate || !values.state) throw new Error("usage: spark-run.mjs --candidate <ref|dir> [--baseline <ref|dir>] --state <local .sav> [--name n] [--runs 6] [--detach] [-- race-perf options]");
+  for (const f of ["--iso", "--state", "--out", "--port", "--runs", "--candidate", "--baseline", "--core-candidate"]) {
+    if (positionals.includes(f)) throw new Error(`${f} is set by spark-run, not after --`);
+  }
+  const { date, name } = runId(values);
+  if (existsSync(path.join(MEASURES, date, name))) throw new Error(`${path.join(MEASURES, date, name)} exists: pick another --name`);
+
+  const harnessFiles = listFiles(REPO_ROOT, HARNESS_ROOTS, HARNESS_SKIP);
+  const harness = pushTree(host, { root: REPO_ROOT, files: harnessFiles, kind: "harness", key: contentKey(REPO_ROOT, harnessFiles) });
+  const candidate = await pushSide(host, values.candidate);
+  const baseline = values.baseline ? (values.baseline === values.candidate ? candidate : await pushSide(host, values.baseline)) : null;
+  const state = pushState(host, path.resolve(values.state));
+  const iso = benchDisc(host, values.iso);
+  const home = ssh(host, "printf %s \"$HOME\"").out;
+  const abs = (p) => `${home}/${p}`;
+  const raceArgs = [
+    "--iso", abs(iso), "--state", abs(state), "--port", values.port, "--runs", values.runs,
+    "--candidate", abs(candidate.dest), ...(baseline ? ["--baseline", abs(baseline.dest)] : []),
+    ...positionals
+  ];
+  const outDir = abs(`${BENCH}/results/${date}/${name}`);
+  const meta = {
+    host: "spark", hostname: ssh(host, "hostname").out.trim(), at: new Date().toISOString(),
+    chromiumVersion: ssh(host, `ls -d ${BENCH}/ms-playwright/chromium-*/chrome-linux*/chrome | sort -V | tail -1 | xargs -I{} {} --version`).out.trim(),
+    chromeCpus: values["chrome-cpus"] ?? "15-19", nodeCpus: values["node-cpus"] ?? "0-4",
+    harness: { from: REPO_ROOT, key: path.basename(harness.dest) },
+    sides: { candidate, ...(baseline ? { baseline } : {}) },
+    raceArgs
+  };
+  mkdirSync(path.join(MEASURES, date, name), { recursive: true });
+  writeFileSync(path.join(MEASURES, date, name, "spark.json"), JSON.stringify(meta, null, 1) + "\n");
+  ssh(host, launchCommand({ harnessDir: abs(harness.dest), outDir, raceArgs, chromeCpus: values["chrome-cpus"], nodeCpus: values["node-cpus"] }));
+  console.log(`[spark-run] started on ${host}: ${date}/${name} (race-perf waits for the Spark's perf lock)`);
+  if (values.detach) {
+    console.log(`[spark-run] detached; bring it back with: node harness/remote/spark-run.mjs --fetch ${date}/${name}`);
+    return;
+  }
+  process.exitCode = await follow(host, { date, name, meta });
+}
+
+if (import.meta.url === pathToFileURL(process.argv[1] ?? "").href) {
+  main().catch((e) => { console.error(`[spark-run] ${e.message}`); process.exitCode = 2; });
+}

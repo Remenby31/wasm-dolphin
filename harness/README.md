@@ -142,6 +142,35 @@ node harness/probes/race-perf.mjs --iso ../roms/<disc>.iso --state ../measures/h
   and `p4.diagnostics` holds the region pipeline counts and the four costliest
   block starts outside regions (`topMisses`).
 
+## Second bench: the DGX Spark
+
+`harness/remote/spark-run.mjs` runs a race-perf pair on the DGX Spark
+(`ssh spark`, Tailscale) instead of this Mac, and brings it back under
+`../measures/spark/<date>/<name>/`:
+
+```sh
+node harness/remote/spark-run.mjs --candidate <ref|dir> --baseline <ref|dir> \
+  --state ../measures/harness/<race>.sav [--name n] [--runs 6] [--detach] [-- <race-perf options>]
+node harness/remote/spark-run.mjs --fetch <date>/<name>   # a detached or interrupted run
+```
+
+- **Relative only.** Playwright's Chromium (Google Chrome has no Linux arm64
+  build), Cortex-X925 cores, no hardware WebGPU in headless Chromium there
+  (only SwiftShader). Each summary is stamped `host: "spark"`,
+  `chromium: "playwright"`, and `kpi-report` never reads it for trunk's
+  rows (`lib/kpi.mjs` `thisMac`). Compare the two sides of a pair, nothing else.
+- It pushes this checkout's harness and what each side serves
+  (`snapshotTree`: a ref exported with `git archive`, a directory as it is,
+  cores and local changes included), keyed by content under
+  `~/salon-bench/{harness,trees}/`, so a later pair reuses them. The disc is
+  never pushed: the bench holds its only copy (`~/salon-bench/roms`, 700/600,
+  PROGRAM.md); `--state` is pushed next to it once.
+- The pair runs detached (`setsid`) under the Spark's own perf lock
+  (`~/salon-bench/.perf-lock`, same `acquirePerfLock`): pairs from several
+  agents queue there, and the Mac's lock and MESURE slots do not apply.
+  Chromium is pinned to cpus 15-19 (the big cores of one cluster,
+  `--chrome-cpus`), node to 0-4 (`--node-cpus`).
+
 ## KPI probes and report
 
 The program's KPIs (PROGRAM.md, « KPI du programme ») that race-perf does not
