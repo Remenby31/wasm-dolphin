@@ -108,6 +108,8 @@ export async function loadAotCore(coreDir = new URL("../../cores/dolphin/", impo
       }
     },
     runRegion: (handle) => m._DolphinWeb_AotRunRegionForTest(handle),
+    // The MMU mode a game's INI sets (0091); null when the core lacks the hook.
+    setMMUMode: typeof m._DolphinWeb_AotMMUModeForTest === "function" ? (on) => m._DolphinWeb_AotMMUModeForTest(on ? 1 : 0) : null,
     // The dispatcher's region path (P4 step 5): queue, install, dispatch.
     // members: [{ ranges, hash }] (hash: the plan's 16-hex FNV-1a 64, or null).
     queueRegion(bytes, entries, members, layout = m._DolphinWeb_AotLayoutHash?.() ?? 0) {
