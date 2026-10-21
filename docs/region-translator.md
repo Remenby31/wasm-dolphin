@@ -196,9 +196,16 @@ million console lines, the browser process at 7-14 GB).
 - [ ] **Retranslate after a layout refusal**: compare a cached module's
   layout with the core's once the RAM exists, mark the key not done, translate
   it again and overwrite the entry (review of #62, P1-3).
-- [ ] **Position-independent region code**: pass RAM and L1 as imported
-  immutable globals instead of constants, so a moved heap no longer refuses
-  (and wastes) the cache. The cache key cannot hold the layout: it is opened
-  before the boot, when the RAM is not allocated yet.
+- [x] **Position-independent region code** (patch 0084): region fragments
+  read RAM and L1 from imported immutable globals (`env.ram_base`,
+  `env.l1_base`, reloc kind 3 "global", a `global.get` of a padded zero the
+  assembler renumbers) instead of `i32.const`; the core passes their values
+  when it instantiates a region. `WasmLayoutHash` leaves the two addresses
+  out, so a moved heap no longer refuses (and wastes) the cache; the guard
+  still refuses a change of any other field (offsets in the CPU state, RAM
+  and L1 sizes). Block modules keep the constants: their bytes and keys are
+  unchanged. Compiler version 3 (modules of version 2 embed the addresses).
+  Tests: `DolphinWeb_AotLayoutShiftForTest` (the RAM moved: still installs)
+  and `DolphinWeb_AotLayoutShiftFieldForTest` (another field: refused).
 - [ ] **35 regions dropped on every second launch** (KPI, d18249e, and locally): installed during the OS init, they are dropped by invalidations (icbi or DMA) over their ranges; the code then runs in the block JIT for the session. Log the invalidations that drop them; consider re-verifying (plan hashes) instead of dropping when the code is unchanged.
 - [ ] **Second-launch TTFF +0.8 s** (first core frame 1.55 s against 0.72 s cold): the region cache read and compiled before the boot (`installBeforeBoot`). Load fewer modules before the boot, the rest after (target 10 s, today 2.05 s).

@@ -210,3 +210,36 @@ test("aot region: the translation layout is carried by the module, mixed layouts
   const [a, b] = withLayout(1);
   assert.throws(() => assembleRegion([a, { ...b, layout: 2 }], { helpers: HELPERS, pcOffset: PC, memoryPages: 1 }), /different layouts/);
 });
+
+// Patch 0084: a fragment reads the RAM and L1 addresses from globals, set at
+// instantiation; the same module runs against a heap laid out elsewhere.
+test("aot region: global relocs import env.ram_base / env.l1_base, read at instantiation", async () => {
+  // COUNT = mem[ram_base + 16] + l1_base
+  const G = fragment(0x3000, [0x3000], [
+    get, [0x23], { kind: "global", name: "ram_base" }, [0x28, 0x02, 16],
+    [0x23], { kind: "global", name: "l1_base" }, [0x6a, 0x36, 0x02, COUNT],
+    store(PC, konst(0x80009000)), konst(0)
+  ]);
+  const region = assembleRegion([G], { helpers: HELPERS, pcOffset: PC, memoryPages: 1 });
+  const imports = WebAssembly.Module.imports(new WebAssembly.Module(region.bytes));
+  assert.deepEqual(imports.filter((i) => i.kind === "global").map((i) => i.name), ["ram_base", "l1_base"]);
+  const memory = new WebAssembly.Memory({ initial: 1, maximum: 1, shared: true });
+  const u32 = new Uint32Array(memory.buffer);
+  for (const ramBase of [1024, 2048]) {
+    u32[(ramBase + 16) / 4] = ramBase + 7;
+    const { instance } = await WebAssembly.instantiate(region.bytes, {
+      env: { memory, ram_base: new WebAssembly.Global({ value: "i32" }, ramBase), l1_base: new WebAssembly.Global({ value: "i32" }, 5) }
+    });
+    u32[(STATE + PC) / 4] = 0x3000;
+    assert.equal(instance.exports.f(STATE), 0);
+    assert.equal(u32[(STATE + COUNT) / 4], ramBase + 12);
+  }
+  // Without global relocs, no global import (modules of older cores).
+  const plain = WebAssembly.Module.imports(new WebAssembly.Module(assembleRegion(program(), { helpers: HELPERS, pcOffset: PC, memoryPages: 1 }).bytes));
+  assert.ok(!plain.some((i) => i.kind === "global"));
+  // Only after global.get, and only known names.
+  const misplaced = fragment(0x3000, [0x3000], [[0x41], { kind: "global", name: "ram_base" }, [0x1a], konst(1)]);
+  assert.throws(() => assembleRegion([misplaced], { helpers: HELPERS, pcOffset: PC, memoryPages: 1 }), /global reloc/);
+  const unknown = fragment(0x3000, [0x3000], [[0x23], { kind: "global", name: "heap" }, [0x1a], konst(1)]);
+  assert.throws(() => assembleRegion([unknown], { helpers: HELPERS, pcOffset: PC, memoryPages: 1 }), /unknown global/);
+});
