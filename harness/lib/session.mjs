@@ -23,7 +23,7 @@ process.on("exit", () => {
 });
 
 // `launch` is a seam for tests; it defaults to the headless launchChrome.
-export async function openSession({ base, server = null, query, iso, display = "headless", gamepads = null, keepProfile = false, routes = {}, launch = launchChrome, harness = {} }) {
+export async function openSession({ base, server = null, query, iso, display = "headless", gamepads = null, keepProfile = false, routes = {}, launch = launchChrome, harness = {}, chromeArgs = [] }) {
   // Fail before Chrome exists: a missing disc must not cost a browser.
   if (!iso || !existsSync(iso)) throw new Error(`disc image not found: ${iso}`);
   const profileDir = mkdtempSync(path.join(os.tmpdir(), "gc-harness-profile-"));
@@ -37,7 +37,7 @@ export async function openSession({ base, server = null, query, iso, display = "
     liveProfiles.delete(profileDir);
   };
   try {
-    context = await launch({ profileDir, display });
+    context = await launch({ profileDir, display, args: chromeArgs });
     return await startSession({ context, profileDir, base, server, query, iso, gamepads, routes, discard, harness });
   } catch (e) {
     // Any failure after the profile is claimed: close Chrome, free the

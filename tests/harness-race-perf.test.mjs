@@ -9,7 +9,8 @@ import path from "node:path";
 import test from "node:test";
 
 import { acquirePerfLock, queueDir, readLockOwner, ticketsAhead } from "../harness/lib/perf-lock.mjs";
-import { num, pairedSpeedChange, sideOrder } from "../harness/probes/race-perf.mjs";
+import { chromeArgsOf, num, pairedSpeedChange, sideOrder } from "../harness/probes/race-perf.mjs";
+import { stockChrome } from "../harness/lib/kpi.mjs";
 import { summarizePcSamples } from "../src/harness-pc-sampler.js";
 import { hitchList, HITCH_MS } from "../harness/lib/timeline.mjs";
 
@@ -332,4 +333,12 @@ test("race-perf hitch list: where each hitch is, in the window and in the scene"
   assert.ok(capped.hitches.every(([at], i, a) => i === 0 || at > a[i - 1][0]));
   assert.ok(capped.hitches.every(([, , place]) => place === null)); // no VI timeline: no place
   assert.ok(HITCH_MS > 1000 / 60 && HITCH_MS < 35);
+});
+
+test("race-perf Chromium flags per side: plain extra flags only, never stock Chrome for the KPIs", () => {
+  assert.deepEqual(chromeArgsOf("--js-flags=--no-liftoff  --enable-features=X", "chrome-args"), ["--js-flags=--no-liftoff", "--enable-features=X"]);
+  assert.deepEqual(chromeArgsOf(undefined, "chrome-args"), []);
+  for (const bad of ["--headless=new", "--user-data-dir=/tmp/x", "--remote-debugging-port=9", "js-flags", "--a b"]) assert.throws(() => chromeArgsOf(bad, "chrome-args"), /not an extra Chromium flag/, bad);
+  assert.equal(stockChrome({ chrome: { path: "chrome stable", args: "" } }), true);
+  assert.equal(stockChrome({ chrome: { path: "chrome stable", args: "", sideArgs: { baseline: "--js-flags=--no-liftoff" } } }), false);
 });
