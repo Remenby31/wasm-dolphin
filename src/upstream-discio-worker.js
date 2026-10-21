@@ -295,7 +295,17 @@ function harnessRegionChainStats(heap) {
   if (!at || at + 40 > heap.length) return null;
   const view = new DataView(heap.buffer, at, 40);
   const f = (i) => view.getFloat64(8 + 8 * i, true);
-  return { enabled: view.getUint32(4, true), chained: f(0), outOfTime: f(1), noRegion: f(2), refused: f(3) };
+  return { enabled: view.getUint32(4, true), chained: f(0), outOfTime: f(1), noRegion: f(2), refused: f(3), ...harnessRegionTransitionTop(heap) };
+}
+// Where chains of regions leave for code without a region, and which region
+// entries block chains reach: [pc hex, count], most frequent first (0083).
+function harnessRegionTransitionTop(heap) {
+  const at = moduleInstance?._DolphinWeb_JitRegionTransitionTop?.() >>> 0;
+  const TOP = 12, SIZE = 4 * 2 * (1 + 2 * TOP);
+  if (!at || at + SIZE > heap.length) return {};
+  const u32 = new Uint32Array(heap.buffer.slice(at, at + SIZE));
+  const list = (base) => Array.from({ length: Math.min(u32[base], TOP) }, (_, i) => [`0x${u32[base + 1 + 2 * i].toString(16).padStart(8, "0")}`, u32[base + 2 + 2 * i]]);
+  return { exitTargets: list(0), breakEntries: list(1 + 2 * TOP) };
 }
 // The core's first region installs, [ms, bytes, path] each (path 0 first
 // attempt, 1 after the worker's ready byte, 2 cold); null with an older core.

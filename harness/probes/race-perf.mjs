@@ -246,6 +246,12 @@ export function summarizeP4(windows) {
   if (diagnostics && chains.length) {
     diagnostics.regionChain = { enabled: chains.every((c) => c.enabled === 1) ? 1 : 0 };
     for (const k of ["chained", "outOfTime", "noRegion", "refused"]) diagnostics.regionChain[k] = chains.reduce((a, c) => a + (c[k] ?? 0), 0);
+    // The most frequent transitions back to the dispatcher, summed by pc.
+    for (const k of ["exitTargets", "breakEntries"]) {
+      const sum = new Map();
+      for (const c of chains) for (const [pc, n] of c[k] ?? []) sum.set(pc, (sum.get(pc) ?? 0) + n);
+      if (sum.size) diagnostics.regionChain[k] = [...sum].sort((a, b) => b[1] - a[1]).slice(0, 12);
+    }
   }
   return { p4: { ...pooled, windows: raw.length, missingWindows: recs.length - raw.length, diagnostics }, why: raw.length < recs.length ? why : null };
 }
