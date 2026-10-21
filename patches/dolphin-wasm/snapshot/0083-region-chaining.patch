@@ -425,7 +425,7 @@ diff --git a/Source/Core/Core/PowerPC/CachedInterpreter/CachedInterpreter.cpp b/
    if (!ends_with_branch)
    {
      out->successors.push_back(resume_pc);
-@@ -15119,6 +15358,185 @@ struct RegionFragment
+@@ -15119,6 +15358,190 @@ struct RegionFragment
  //         b/bl out of the fragment: return_call jump(target), else re-enter
  //         the loop }; no block at pc: return_call dispatch
  // Halts inside a body return 2.
@@ -438,6 +438,11 @@ diff --git a/Source/Core/Core/PowerPC/CachedInterpreter/CachedInterpreter.cpp b/
 +// locals across its blocks, loaded at its entry, flushed at its exits.
 +// Compiler version 6.
 +constexpr bool REGION_FRAGMENT_GPRS = false;
++// Patch 0083 experiment (lever D): the plan's extra entries of a function
++// (jump table targets, entries reached from elsewhere) seed the fragment's
++// discovery once its entry's blocks are taken, so a bctr to a case finds it.
++constexpr bool REGION_EXTRA_SEEDS = true;
++thread_local std::vector<u32> t_region_seeds;  // set by DolphinWeb_AotTranslateSeeds
 +
 +// Patch 0083: the fragment as a switch. A block that continues inside the
 +// fragment compares its new pc with its static successors (at most two) and
@@ -611,22 +616,35 @@ diff --git a/Source/Core/Core/PowerPC/CachedInterpreter/CachedInterpreter.cpp b/
  bool BuildRegionFragment(Core::System& system, u32 entry_pc, std::span<const u32> ranges,
                           u32 max_blocks, RegionFragment* out)
  {
-@@ -15133,7 +15551,13 @@ bool BuildRegionFragment(Core::System& system, u32 entry_pc, std::span<const u32
+@@ -15133,8 +15556,25 @@ bool BuildRegionFragment(Core::System& system, u32 entry_pc, std::span<const u32
    std::vector<FragmentBlock> blocks;
    std::vector<u32> work{entry_pc};
    std::unordered_set<u32> seen{entry_pc};
 -  while (!work.empty() && blocks.size() < max_blocks)
+-  {
 +  // Patch 0083: a fragment stops taking blocks past this much code. V8's
 +  // optimizing tier runs out of memory on functions of ~750 KB and is stable
 +  // under 500 KB (research/wasm-jit-targets.md); 3 functions of a commercial
 +  // disc reached ~660 KB. The blocks left out run outside the region.
 +  std::size_t fragment_bytes = 0;
-+  while (!work.empty() && blocks.size() < max_blocks &&
-+         fragment_bytes < REGION_FRAGMENT_MAX_BYTES)
-   {
++  std::size_t next_seed = 0;
++  while (blocks.size() < max_blocks && fragment_bytes < REGION_FRAGMENT_MAX_BYTES)
++  {
++    if (work.empty() && REGION_EXTRA_SEEDS)
++    {
++      while (next_seed < t_region_seeds.size() &&
++             ((t_region_seeds[next_seed] & 3) != 0 || !inside(t_region_seeds[next_seed]) ||
++              !seen.insert(t_region_seeds[next_seed]).second))
++        ++next_seed;
++      if (next_seed < t_region_seeds.size())
++        work.push_back(t_region_seeds[next_seed++]);
++    }
++    if (work.empty())
++      break;
      const u32 pc = work.front();
      work.erase(work.begin());
-@@ -15154,6 +15578,7 @@ bool BuildRegionFragment(Core::System& system, u32 entry_pc, std::span<const u32
+     FragmentBlock fb;
+@@ -15154,6 +15594,7 @@ bool BuildRegionFragment(Core::System& system, u32 entry_pc, std::span<const u32
        if ((next & 3) == 0 && inside(next) && seen.insert(next).second)
          work.push_back(next);
      }
@@ -634,7 +652,7 @@ diff --git a/Source/Core/Core/PowerPC/CachedInterpreter/CachedInterpreter.cpp b/
      blocks.push_back(std::move(fb));
    }
    std::unordered_set<u32> starts;
-@@ -15166,6 +15591,43 @@ bool BuildRegionFragment(Core::System& system, u32 entry_pc, std::span<const u32
+@@ -15166,6 +15607,43 @@ bool BuildRegionFragment(Core::System& system, u32 entry_pc, std::span<const u32
    const u32 npc_offset = static_cast<u32>(reinterpret_cast<std::uintptr_t>(&ppc.npc) - base);
    const u32 downcount_offset =
        static_cast<u32>(reinterpret_cast<std::uintptr_t>(&ppc.downcount) - base);
@@ -678,7 +696,7 @@ diff --git a/Source/Core/Core/PowerPC/CachedInterpreter/CachedInterpreter.cpp b/
    std::vector<u8>& code = out->code;
    const auto load = [&](u32 offset) {
      code.insert(code.end(), {0x28, 0x02});
-@@ -15290,7 +15752,11 @@ namespace
+@@ -15290,7 +15768,13 @@ namespace
  // Bumped whenever the code the translator emits changes (cache keys).
  // 2: modules carry their heap layout (region-layout); version 1 modules have
  // none and would never install.
@@ -687,7 +705,32 @@ diff --git a/Source/Core/Core/PowerPC/CachedInterpreter/CachedInterpreter.cpp b/
 +// 4: FPU ops outside the direct tier stay in the region, interpreted (0083).
 +// 5: a fragment enters its blocks through a br_table (0083).
 +// 6: a fragment keeps its GPRs in locals across its blocks (0083).
-+constexpr u32 AOT_COMPILER_VERSION = 4;
++// 7: regions of up to 256 blocks (0083, experiment C).
++// 8: a fragment's discovery seeded with the plan's extra entries (0083, D).
++constexpr u32 AOT_COMPILER_VERSION = 8;
  constexpr u32 AOT_MAX_FRAGMENT_BYTES = 1u << 20;
  thread_local std::vector<u32> t_aot_out;
  u8* s_aot_ram = nullptr;
+@@ -15337,6 +15821,14 @@ const u32* AotStatus(u32 status, u32 entry)
+ }
+ }  // namespace
+ 
++// Patch 0083: extra entries of the next function DolphinWeb_AotTranslate
++// translates on this thread (the plan's extraEntries), as seeds of its
++// fragment's discovery. Cleared by that translation.
++extern "C" EMSCRIPTEN_KEEPALIVE void DolphinWeb_AotTranslateSeeds(const u32* pcs, u32 count)
++{
++  t_region_seeds.assign(pcs, pcs + count);
++}
++
+ extern "C" EMSCRIPTEN_KEEPALIVE const u32* DolphinWeb_AotTranslate(u32 entry_pc, u32 mask,
+                                                                    const u32* ranges,
+                                                                    u32 range_count, u32 max_blocks,
+@@ -15376,6 +15868,7 @@ extern "C" EMSCRIPTEN_KEEPALIVE const u32* DolphinWeb_AotTranslate(u32 entry_pc,
+   PPCAnalyst::g_instruction_reader = AotReadInstruction;
+   const bool built = BuildRegionFragment(Core::System::GetInstance(), entry_pc, range_span,
+                                          std::max<u32>(max_blocks, 1), &fragment);
++  t_region_seeds.clear();  // one translation each (DolphinWeb_AotTranslateSeeds)
+   PPCAnalyst::g_instruction_reader = nullptr;
+   t_aot_translating = false;
+   t_disable_mask_override = false;

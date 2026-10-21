@@ -307,6 +307,19 @@ export function coreRegionTranslator(m, { mask, helperNames, maxBlocks = 64, sli
   };
 }
 
+// The function's extra entries (jump table targets, entries reached from
+// elsewhere) seed its fragment's discovery (core patch 0083).
+function seedTranslation(m, pcs) {
+  if (typeof m._DolphinWeb_AotTranslateSeeds !== "function" || !pcs?.length) return;
+  const p = m._malloc(4 * pcs.length);
+  try {
+    new Uint32Array(m.HEAPU8.buffer, p, pcs.length).set(pcs.map((v) => v >>> 0));
+    m._DolphinWeb_AotTranslateSeeds(p, pcs.length);
+  } finally {
+    m._free(p);
+  }
+}
+
 function translateOne(m, f, { mask, maxBlocks, names }) {
   const ranges = f.ranges;
   const r = m._malloc(8 * ranges.length);
@@ -315,6 +328,7 @@ function translateOne(m, f, { mask, maxBlocks, names }) {
     new Uint32Array(m.HEAPU8.buffer, r, 2 * ranges.length).set(ranges.flat().map((v) => v >>> 0));
     const hashHi = f.hash ? parseInt(f.hash.slice(0, 8), 16) : 0;
     const hashLo = f.hash ? parseInt(f.hash.slice(8), 16) : 0;
+    seedTranslation(m, f.extraEntries);
     p = m._DolphinWeb_AotTranslate(f.entry >>> 0, mask >>> 0, r, ranges.length, maxBlocks, hashLo >>> 0, hashHi >>> 0) >>> 0;
   } finally {
     m._free(r);
