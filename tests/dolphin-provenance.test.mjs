@@ -307,8 +307,10 @@ test("committed Dolphin provenance and ABI manifests verify", () => {
   // 0081 (deterministic clock and CoreTiming trace) adds WasmDetTrace.h and
   // the first changes to EXI.cpp and EXI_DeviceIPL.cpp: 124. The region
   // translator (0075) reads guest code through a hook in PPCAnalyst.cpp/.h: 126.
+  // The idle-skip counters and fast-forward (0089) add WasmIdleStats.h and
+  // touch CoreTiming.h, SystemTimers.h and MMU.cpp: 130.
   // Update deliberately when the series changes what it modifies.
-  assert.equal(result.vendorSnapshot.rootPaths, 126);
+  assert.equal(result.vendorSnapshot.rootPaths, 130);
   assert.equal(result.vendorSnapshot.submodulePaths, 2);
   assert.equal(result.core.abiVersion, 1);
   assert.equal(result.core.memoryContract.jsGlue.initialPages, 24576);

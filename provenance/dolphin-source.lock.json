@@ -25,7 +25,7 @@
       "commit": "01e0577914a75a2569c846778c2f93aa8e6feddd"
     }
   },
-  "patchSeriesSha256": "d4ecdfc9b46ffd42456340c536c95e47f656b294a5d2ccf1926a2d62c3b93642",
+  "patchSeriesSha256": "612b18c7154853fa2987522c5388434c4544d941cb5b4f2b27982d3642a6c0c1",
   "patches": [
     {
       "order": 1,
@@ -639,9 +639,9 @@
       "order": 77,
       "cwd": ".",
       "hashMode": "lf-normalized",
-      "path": "patches/dolphin-wasm/snapshot/0089-idle-skip-stats.patch",
-      "size": 12836,
-      "sha256": "520586624ea0ae7e4db8fab2cae549cffe54d4c67ca84544a2b3d68d1a296448"
+      "path": "patches/dolphin-wasm/snapshot/0089-idle-skip-stats-and-fast-forward.patch",
+      "size": 26047,
+      "sha256": "e5609aeaac5852997bea85f650b1366cf5a40152687d0e8418fe98bf18d7cac6"
     },
     {
       "order": 78,

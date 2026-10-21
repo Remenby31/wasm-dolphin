@@ -1,0 +1,658 @@
+diff --git a/Source/Core/Core/CoreTiming.cpp b/Source/Core/Core/CoreTiming.cpp
+index df7f282ee4..29e57bdf14 100644
+--- a/Source/Core/Core/CoreTiming.cpp
++++ b/Source/Core/Core/CoreTiming.cpp
+@@ -22,6 +22,7 @@
+ #include "Core/CPUThreadConfigCallback.h"
+ #include "Core/Config/MainSettings.h"
+ #include "Core/Core.h"
++#include "Core/HW/CPU.h"
+ #include "Core/HW/Memmap.h"
+ #include "Core/HW/ProcessorInterface.h"
+ #include "Core/HW/SystemTimers.h"
+@@ -31,6 +32,7 @@
+ #if defined(DOLPHIN_WEB_DET_TRACE) && DOLPHIN_WEB_DET_TRACE
+ #include "Core/WasmDetTrace.h"
+ #endif
++#include "Core/WasmIdleStats.h"
+ #include "Core/WasmTimingProfile.h"
+ #endif
+ 
+@@ -55,6 +57,77 @@ static void EmptyTimedCallback(Core::System& system, u64 userdata, s64 cyclesLat
+ {
+ }
+ 
++#ifdef __EMSCRIPTEN__
++namespace
++{
++namespace IdleStats = DolphinWeb::IdleStats;
++using IdleClock = std::chrono::steady_clock;
++
++// Idle stats bookkeeping (CPU thread): where the counted window started, the
++// last Idle() (its loop, the tick and host time it left at) and the event
++// callback time since, and whether the current slice was ended by Idle().
++s64 s_idle_window_start_ticks = 0;
++IdleClock::time_point s_idle_window_start_host;
++u32 s_last_idle_pc = 0;
++u64 s_last_idle_exit_ticks = 0;
++IdleClock::time_point s_last_idle_exit_host;
++double s_event_ms_since_idle = 0;
++bool s_slice_ended_by_idle = false;
++// Idle fast-forward: where the last Advance() left the CPU (pc, downcount,
++// hardware reads), and the downcount of the wait loop's block when the slice
++// ended in a proven loop (0: not proven, nothing to skip).
++u32 s_advance_end_pc = 0;
++s32 s_advance_end_downcount = 0;
++u32 s_advance_end_hw_reads = 0;
++s32 s_ff_loop_downcount = 0;
++// The events a proven loop cannot observe, resolved by name on first use.
++const CoreTiming::EventType* s_ff_events[4] = {};
++bool s_ff_events_resolved = false;
++
++double MsSince(IdleClock::time_point start, IdleClock::time_point end)
++{
++  return std::chrono::duration<double, std::milli>(end - start).count();
++}
++
++// The kind of an event run in an idle wake (VI apart, see Advance()).
++void CountWakeEvent(const std::string& name)
++{
++  auto& s = IdleStats::g_stats;
++  if (name == "AudioDMACallback")
++    s.wake_audio_dma += 1;
++  else if (name == "DSPCallback")
++    s.wake_dsp += 1;
++  else if (name == "GPUSleeper")
++    s.wake_gpu_sleeper += 1;
++  else if (name == "IPC_HLE_UpdateCallback")
++    s.wake_ipc += 1;
++  else if (name == "DecCallback")
++    s.wake_dec += 1;
++  else if (name == "SITransferPending")
++    s.wake_si += 1;
++  else
++    s.wake_other += 1;
++}
++}  // namespace
++
++// Idle fast-forward on (1) or off (0), CPU thread only (core boot).
++extern "C" EMSCRIPTEN_KEEPALIVE void DolphinWeb_SetIdleFastForward(int on)
++{
++  IdleStats::g_ff_enabled.store(on != 0, std::memory_order_relaxed);
++  s_ff_loop_downcount = 0;
++}
++
++// Idle stats (WasmIdleStats.h). request >= 0 asks the CPU thread to reset
++// them and count from its next Advance(); < 0 only reads. Returns the
++// struct's address; the caller copies it.
++extern "C" EMSCRIPTEN_KEEPALIVE u32 DolphinWeb_IdleStats(int request)
++{
++  if (request >= 0)
++    IdleStats::g_request.store(request, std::memory_order_release);
++  return static_cast<u32>(reinterpret_cast<std::uintptr_t>(&IdleStats::g_stats));
++}
++#endif
++
+ CoreTimingManager::CoreTimingManager(Core::System& system) : m_system(system)
+ {
+ }
+@@ -91,8 +164,36 @@ EventType* CoreTimingManager::RegisterEvent(const std::string& name, TimedCallba
+   return event_type;
+ }
+ 
++#ifdef __EMSCRIPTEN__
++// An event a proven wait loop cannot observe (WasmIdleStats.h): it only
++// changes hardware registers and interrupts, or the host's state.
++bool CoreTimingManager::IsIdleTransparentEvent(const EventType* type)
++{
++  if (!s_ff_events_resolved)
++  {
++    const char* names[] = {"VICallback", "AICallback", "AudioDMACallback", "GPUSleeper"};
++    for (size_t i = 0; i < std::size(names); ++i)
++    {
++      const auto it = m_event_types.find(names[i]);
++      s_ff_events[i] = it != m_event_types.end() ? &it->second : nullptr;
++    }
++    s_ff_events_resolved = true;
++  }
++  for (const EventType* t : s_ff_events)
++  {
++    if (t != nullptr && t == type)
++      return true;
++  }
++  return false;
++}
++#endif
++
+ void CoreTimingManager::UnregisterAllEvents()
+ {
++#ifdef __EMSCRIPTEN__
++  s_ff_events_resolved = false;
++  s_ff_loop_downcount = 0;
++#endif
+   ASSERT_MSG(POWERPC, m_event_queue.empty(), "Cannot unregister events with events pending");
+   m_event_types.clear();
+ }
+@@ -190,6 +291,11 @@ void CoreTimingManager::DoState(PointerWrap& p)
+   p.Do(m_globals.slice_length);
+   p.Do(m_globals.global_timer);
+   p.Do(m_idled_cycles);
++#ifdef __EMSCRIPTEN__
++  // A loaded state starts with no proven wait loop.
++  s_ff_loop_downcount = 0;
++  s_last_idle_pc = 0;
++#endif
+   p.Do(m_fake_dec_start_value);
+   p.Do(m_fake_dec_start_ticks);
+   p.Do(m_globals.fake_TB_start_value);
+@@ -379,6 +485,39 @@ void CoreTimingManager::Advance()
+   int cyclesExecuted = m_globals.slice_length - DowncountToCycles(ppc_state.downcount);
+   m_globals.global_timer += cyclesExecuted;
+ 
++#ifdef __EMSCRIPTEN__
++  if (IdleStats::g_request.exchange(-1, std::memory_order_acq_rel) >= 0)
++  {
++    IdleStats::g_stats = IdleStats::Stats{};
++    IdleStats::g_stats.size_bytes = sizeof(IdleStats::Stats);
++    IdleStats::g_stats.on = 1;
++    IdleStats::g_on = true;
++    s_idle_window_start_ticks = m_globals.global_timer;
++    s_idle_window_start_host = IdleClock::now();
++    s_last_idle_pc = 0;
++    s_slice_ended_by_idle = false;
++  }
++  const bool idle_stats = IdleStats::g_on;
++  const bool idle_wake = idle_stats && s_slice_ended_by_idle;
++  // Idle fast-forward: armed when the slice ended in a proven wait loop and
++  // nothing ran after its Idle() but the end of its block.
++  const s32 ff_loop_downcount = s_slice_ended_by_idle ? s_ff_loop_downcount : 0;
++  bool ff_transparent = ff_loop_downcount > 0 && IdleStats::g_ff_enabled.load(std::memory_order_relaxed) &&
++                        ppc_state.downcount == -ff_loop_downcount &&
++                        (ppc_state.feature_flags & FEATURE_FLAG_PERFMON) == 0;
++  s_ff_loop_downcount = 0;
++  if (idle_stats && ff_transparent)
++    IdleStats::g_stats.ff_armed += 1;
++  bool wake_vi = false, wake_vi_observable = false, wake_non_vi = false;
++  const u32 pc_before_events = ppc_state.pc;
++  if (idle_stats)
++  {
++    IdleStats::g_stats.advances += 1;
++    IdleStats::g_stats.idle_wakes += idle_wake ? 1 : 0;
++  }
++  s_slice_ended_by_idle = false;
++#endif
++
+ #ifdef __EMSCRIPTEN__
+   // §27e: is the CPU thread / CoreTiming still advancing after the
+   // post-load backlog drains? Logs global_timer + event-queue depth.
+@@ -460,11 +599,19 @@ void CoreTimingManager::Advance()
+ 
+   m_is_global_timer_sane = true;
+ 
++#ifdef __EMSCRIPTEN__
++  for (;;)
++  {
++#endif
+   while (!m_event_queue.empty() && m_event_queue.front().time <= m_globals.global_timer)
+   {
+     Event evt = m_event_queue.front();
+     std::ranges::pop_heap(m_event_queue, std::ranges::greater{});
+     m_event_queue.pop_back();
++#ifdef __EMSCRIPTEN__
++    if (ff_transparent && !IsIdleTransparentEvent(evt.type))
++      ff_transparent = false;
++#endif
+ #if defined(DOLPHIN_WEB_DET_TRACE) && DOLPHIN_WEB_DET_TRACE
+     DolphinWeb::DetTrace::Record(DolphinWeb::DetTrace::Run, evt.type->name,
+                                  static_cast<u64>(evt.time), m_globals.global_timer - evt.time);
+@@ -494,6 +641,32 @@ void CoreTimingManager::Advance()
+             static_cast<int>(callback_us));
+       }
+     }
++    else if (idle_stats)
++    {
++      const bool is_vi = evt.type == m_system.GetSystemTimers().GetVIEventType();
++      IdleStats::g_vi_observable = false;
++      const auto callback_start = IdleClock::now();
++      evt.type->callback(m_system, evt.userdata, m_globals.global_timer - evt.time);
++      s_event_ms_since_idle += MsSince(callback_start, IdleClock::now());
++      if (is_vi)
++      {
++        IdleStats::g_stats.vi_updates += 1;
++        IdleStats::g_stats.vi_observable += IdleStats::g_vi_observable ? 1 : 0;
++      }
++      if (idle_wake)
++      {
++        if (is_vi)
++        {
++          wake_vi = true;
++          wake_vi_observable |= IdleStats::g_vi_observable;
++        }
++        else
++        {
++          wake_non_vi = true;
++          CountWakeEvent(evt.type->name ? *evt.type->name : std::string{});
++        }
++      }
++    }
+     else
+     {
+       evt.type->callback(m_system, evt.userdata, m_globals.global_timer - evt.time);
+@@ -502,6 +675,32 @@ void CoreTimingManager::Advance()
+     evt.type->callback(m_system, evt.userdata, m_globals.global_timer - evt.time);
+ #endif
+   }
++#ifdef __EMSCRIPTEN__
++    // Idle fast-forward: with no exception to take, the loop would now run
++    // its block again, identically (nothing it reads changed), call Idle()
++    // and end the block. Do what those would do to CoreTiming, then what the
++    // next Advance() does before running events, as long as the events stay
++    // transparent, no exception is pending and the CPU keeps running.
++    if (!ff_transparent || ppc_state.Exceptions != 0 || m_event_queue.empty() ||
++        m_system.GetCPU().GetState() != CPU::State::Running)
++    {
++      break;
++    }
++    // Advance()'s tail and the block: the slice, then Idle() idles all of it
++    // and the end of the block leaves the downcount at -ff_loop_downcount.
++    const int slice = static_cast<int>(std::min<s64>(
++        m_event_queue.front().time - m_globals.global_timer, MAX_SLICE_LENGTH));
++    m_idled_cycles += DowncountToCycles(CyclesToDowncount(slice));
++    // The next Advance()'s head.
++    MoveEvents();
++    m_globals.global_timer += slice - DowncountToCycles(-ff_loop_downcount);
++    // The skipped Idle() left at the end of that slice.
++    s_last_idle_exit_ticks = static_cast<u64>(m_globals.global_timer) -
++                             static_cast<u64>(DowncountToCycles(ff_loop_downcount));
++    if (idle_stats)
++      IdleStats::g_stats.ff_skips += 1;
++  }
++#endif
+ 
+   m_is_global_timer_sane = false;
+ 
+@@ -519,6 +718,24 @@ void CoreTimingManager::Advance()
+   // until the next slice:
+   //        Pokemon Box refuses to boot if the first exception from the audio DMA is received late
+   power_pc.CheckExternalExceptions();
++
++#ifdef __EMSCRIPTEN__
++  s_advance_end_pc = ppc_state.pc;
++  s_advance_end_downcount = ppc_state.downcount;
++  s_advance_end_hw_reads = IdleStats::g_hw_reads;
++  if (idle_stats)
++  {
++    auto& st = IdleStats::g_stats;
++    if (idle_wake)
++    {
++      st.wake_with_vi += wake_vi ? 1 : 0;
++      st.wake_vi_only += wake_vi && !wake_vi_observable && !wake_non_vi ? 1 : 0;
++      st.wake_exceptions += ppc_state.pc != pc_before_events ? 1 : 0;
++    }
++    st.cycles = static_cast<double>(m_globals.global_timer - s_idle_window_start_ticks);
++    st.host_ms = MsSince(s_idle_window_start_host, IdleClock::now());
++  }
++#endif
+ }
+ 
+ TimePoint CoreTimingManager::CalculateTargetHostTimeInternal(s64 target_cycle)
+@@ -722,7 +939,7 @@ void CoreTimingManager::AdjustEventQueueTimes(u32 new_ppc_clock, u32 old_ppc_clo
+   }
+ }
+ 
+-void CoreTimingManager::Idle()
++void CoreTimingManager::Idle(s32 block_downcount)
+ {
+   if (m_config_sync_on_skip_idle)
+   {
+@@ -733,9 +950,54 @@ void CoreTimingManager::Idle()
+   }
+ 
+   auto& ppc_state = m_system.GetPPCState();
++#ifdef __EMSCRIPTEN__
++  const bool track = IdleStats::g_on || IdleStats::g_ff_enabled.load(std::memory_order_relaxed);
++  if (track)
++  {
++    // Stats: the same loop as the previous Idle(), at most
++    // REENTRY_MAX_CYCLES run since (so no interrupt handler).
++    const u64 ticks = GetTicks();
++    const s64 executed = static_cast<s64>(ticks - s_last_idle_exit_ticks);
++    const bool reentry = s_last_idle_pc == ppc_state.npc && executed > 0 &&
++                         executed <= IdleStats::REENTRY_MAX_CYCLES;
++    // Fast-forward proof: this loop's block is the first block run since
++    // Advance() (it started at the pc Advance() left and nothing has taken
++    // cycles off the downcount yet), and it read no hardware register. Its
++    // next runs read the same memory with the same registers.
++    const bool proven = block_downcount > 0 && s_advance_end_pc == ppc_state.npc &&
++                        s_advance_end_downcount == ppc_state.downcount &&
++                        s_advance_end_hw_reads == IdleStats::g_hw_reads;
++    s_ff_loop_downcount = proven ? block_downcount : 0;
++    if (IdleStats::g_on)
++    {
++      auto& st = IdleStats::g_stats;
++      st.idle_calls += 1;
++      st.idle_cycles += DowncountToCycles(ppc_state.downcount);
++      st.flush_gpu += m_config_sync_on_skip_idle ? 1 : 0;
++      if (reentry)
++      {
++        st.reentries += 1;
++        st.reentry_cycles += static_cast<double>(executed);
++        st.reentry_host_ms += MsSince(s_last_idle_exit_host, IdleClock::now());
++        st.reentry_event_ms += s_event_ms_since_idle;
++      }
++      s_event_ms_since_idle = 0;
++    }
++    s_last_idle_pc = ppc_state.npc;
++    s_slice_ended_by_idle = true;
++  }
++#endif
+   PowerPC::UpdatePerformanceMonitor(ppc_state.downcount, 0, 0, ppc_state);
+   m_idled_cycles += DowncountToCycles(ppc_state.downcount);
+   ppc_state.downcount = 0;
++#ifdef __EMSCRIPTEN__
++  if (track)
++  {
++    s_last_idle_exit_ticks = GetTicks();
++    if (IdleStats::g_on)
++      s_last_idle_exit_host = IdleClock::now();
++  }
++#endif
+ }
+ 
+ std::string CoreTimingManager::GetScheduledEventsSummary() const
+diff --git a/Source/Core/Core/CoreTiming.h b/Source/Core/Core/CoreTiming.h
+index 29d636e433..9c8adbe04d 100644
+--- a/Source/Core/Core/CoreTiming.h
++++ b/Source/Core/Core/CoreTiming.h
+@@ -134,7 +134,9 @@ public:
+   void MoveEvents();
+ 
+   // Pretend that the main CPU has executed enough cycles to reach the next event.
+-  void Idle();
++  // block_downcount: the downcount of the wait loop's block, which its end
++  // takes off after this call (0 when not known).
++  void Idle(s32 block_downcount = 0);
+ 
+   // Clear all pending events. This should ONLY be done on exit or state load.
+   void ClearPendingEvents();
+@@ -180,6 +182,9 @@ private:
+   // unordered_map stores each element separately as a linked list node so pointers to elements
+   // remain stable regardless of rehashes/resizing.
+   std::unordered_map<std::string, EventType> m_event_types;
++#ifdef __EMSCRIPTEN__
++  bool IsIdleTransparentEvent(const EventType* type);
++#endif
+ 
+   // STATE_TO_SAVE
+   // The queue is a min-heap using std::ranges::make_heap/push_heap/pop_heap.
+diff --git a/Source/Core/Core/HW/SystemTimers.h b/Source/Core/Core/HW/SystemTimers.h
+index b0002c49ee..b4b6fa8272 100644
+--- a/Source/Core/Core/HW/SystemTimers.h
++++ b/Source/Core/Core/HW/SystemTimers.h
+@@ -89,6 +89,8 @@ public:
+   // - 2.0: the emulator is running at 200% speed (or 100% speed but sleeping half of the time).
+   double GetEstimatedEmulationPerformance() const;
+ 
++  CoreTiming::EventType* GetVIEventType() const { return m_event_type_vi; }
++
+ private:
+   static void DSPCallback(Core::System& system, u64 userdata, s64 cycles_late);
+   static void AudioDMACallback(Core::System& system, u64 userdata, s64 cycles_late);
+diff --git a/Source/Core/Core/HW/VideoInterface.cpp b/Source/Core/Core/HW/VideoInterface.cpp
+index 2fa67037f1..cb51305a24 100644
+--- a/Source/Core/Core/HW/VideoInterface.cpp
++++ b/Source/Core/Core/HW/VideoInterface.cpp
+@@ -28,6 +28,7 @@
+ #include "Core/Core.h"
+ #include "Core/CoreTiming.h"
+ #ifdef __EMSCRIPTEN__
++#include "Core/WasmIdleStats.h"
+ #include "Core/WasmTimingProfile.h"
+ #endif
+ #include "Core/FifoPlayer/FifoPlayer.h"
+@@ -324,6 +325,9 @@ void VideoInterfaceManager::RegisterMMIO(MMIO::Mapping* mmio, u32 base)
+   mmio->Register(
+       base | VI_VERTICAL_BEAM_POSITION, MMIO::ComplexRead<u16>([](Core::System& system, u32) {
+         auto& vi = system.GetVideoInterface();
++#ifdef __EMSCRIPTEN__
++        DolphinWeb::IdleStats::NoteBeamRead();
++#endif
+         return 1 + (vi.m_half_line_count) / 2;
+       }),
+       MMIO::ComplexWrite<u16>([](Core::System& system, u32, u16 val) {
+@@ -334,6 +338,9 @@ void VideoInterfaceManager::RegisterMMIO(MMIO::Mapping* mmio, u32 base)
+   mmio->Register(
+       base | VI_HORIZONTAL_BEAM_POSITION, MMIO::ComplexRead<u16>([](Core::System& system, u32) {
+         auto& vi = system.GetVideoInterface();
++#ifdef __EMSCRIPTEN__
++        DolphinWeb::IdleStats::NoteBeamRead();
++#endif
+         u16 value = static_cast<u16>(
+             1 + vi.m_h_timing_0.HLW *
+                     (system.GetCoreTiming().GetTicks() - vi.m_ticks_last_line_start) /
+@@ -930,6 +937,15 @@ void VideoInterfaceManager::Update(u64 ticks)
+   if (is_at_field_boundary)
+     m_system.GetMovie().FrameUpdate();
+ 
++#ifdef __EMSCRIPTEN__
++  if (is_at_field_boundary || m_half_line_count == m_odd_field_first_hl ||
++      m_half_line_count == m_even_field_first_hl || m_half_line_count == m_odd_field_last_hl ||
++      m_half_line_count == m_even_field_last_hl || m_half_line_count == m_half_line_of_next_si_poll)
++  {
++    DolphinWeb::IdleStats::NoteViObservable();
++  }
++#endif
++
+   // If this half-line is at some boundary of the "active video lines" in either field, we either
+   // need to (a) send a request to the GPU thread to actually render the XFB, or (b) increment
+   // the number of frames we've actually drawn
+@@ -1070,6 +1086,10 @@ void VideoInterfaceManager::Update(u64 ticks)
+     u32 target_halfline = (reg.HCT > m_h_timing_0.HLW) ? 1 : 0;
+     if ((1 + (m_half_line_count) / 2 == reg.VCT) && ((m_half_line_count & 1) == target_halfline))
+     {
++#ifdef __EMSCRIPTEN__
++      if (!reg.IR_INT)
++        DolphinWeb::IdleStats::NoteViObservable();
++#endif
+       reg.IR_INT = 1;
+     }
+   }
+diff --git a/Source/Core/Core/PowerPC/CachedInterpreter/CachedInterpreter.cpp b/Source/Core/Core/PowerPC/CachedInterpreter/CachedInterpreter.cpp
+index 253cc6f686..0021225832 100644
+--- a/Source/Core/Core/PowerPC/CachedInterpreter/CachedInterpreter.cpp
++++ b/Source/Core/Core/PowerPC/CachedInterpreter/CachedInterpreter.cpp
+@@ -10380,7 +10380,7 @@ s32 CachedInterpreter::CheckBreakpoint(PowerPC::PowerPCState& ppc_state,
+ s32 CachedInterpreter::CheckIdle(PowerPC::PowerPCState& ppc_state,
+                                  const CheckIdleOperands& operands)
+ {
+-  const auto& [core_timing, idle_pc] = operands;
++  const auto& [core_timing, idle_pc, downcount] = operands;
+   if (ppc_state.npc == idle_pc)
+   {
+ #ifdef __EMSCRIPTEN__
+@@ -10388,19 +10388,19 @@ s32 CachedInterpreter::CheckIdle(PowerPC::PowerPCState& ppc_state,
+     if (s_sampling_lookups)  // timing on
+     {
+       const auto start = std::chrono::steady_clock::now();
+-      core_timing.Idle();
++      core_timing.Idle(static_cast<s32>(downcount));
+       s_region_stats.idle_time_ms +=
+           std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now() - start)
+               .count();
+     }
+     else
+     {
+-      core_timing.Idle();
++      core_timing.Idle(static_cast<s32>(downcount));
+     }
+     if (s_region_stats_on)
+       s_region_stats.idle_cycles += static_cast<double>(before - ppc_state.downcount);
+ #else
+-    core_timing.Idle();
++    core_timing.Idle(static_cast<s32>(downcount));
+ #endif
+   }
+   return sizeof(AnyCallback) + sizeof(operands);
+@@ -13340,7 +13340,7 @@ bool CachedInterpreter::TryWriteWasmBlock(u32 nextPC)
+       }
+ 
+       if (op.branchIsIdleLoop)
+-        Write(CheckIdle, {m_system.GetCoreTiming(), js.blockStart});
++        Write(CheckIdle, {m_system.GetCoreTiming(), js.blockStart, js.downcountAmount});
+ #if DOLPHIN_WEB_STATIC_EXIT_LINKS
+       if (op.canEndBlock)
+         WriteEndBlock(i == static_link_op_index ?
+@@ -15893,7 +15893,7 @@ bool CachedInterpreter::DoJit(u32 em_address, JitBlock* b, u32 nextPC)
+       }
+ 
+       if (op.branchIsIdleLoop)
+-        Write(CheckIdle, {m_system.GetCoreTiming(), js.blockStart});
++        Write(CheckIdle, {m_system.GetCoreTiming(), js.blockStart, js.downcountAmount});
+ #if DOLPHIN_WEB_STATIC_EXIT_LINKS
+       if (op.canEndBlock)
+         WriteEndBlock(i == static_link_op_index ?
+diff --git a/Source/Core/Core/PowerPC/CachedInterpreter/CachedInterpreter.h b/Source/Core/Core/PowerPC/CachedInterpreter/CachedInterpreter.h
+index 3b7577ab6b..1f846c08d8 100644
+--- a/Source/Core/Core/PowerPC/CachedInterpreter/CachedInterpreter.h
++++ b/Source/Core/Core/PowerPC/CachedInterpreter/CachedInterpreter.h
+@@ -336,6 +336,8 @@ struct CachedInterpreter::CheckIdleOperands
+ {
+   CoreTiming::CoreTimingManager& core_timing;
+   u32 idle_pc;
++  // The block's downcount, taken off by its end after the check.
++  u32 downcount;
+ };
+ 
+ #ifdef __EMSCRIPTEN__
+diff --git a/Source/Core/Core/PowerPC/CachedInterpreter/CachedInterpreter_Disassembler.cpp b/Source/Core/Core/PowerPC/CachedInterpreter/CachedInterpreter_Disassembler.cpp
+index 2185ae96d9..c6f74e43d5 100644
+--- a/Source/Core/Core/PowerPC/CachedInterpreter/CachedInterpreter_Disassembler.cpp
++++ b/Source/Core/Core/PowerPC/CachedInterpreter/CachedInterpreter_Disassembler.cpp
+@@ -105,8 +105,8 @@ s32 CachedInterpreter::CheckBreakpoint(std::ostream& stream, const CheckHaltOper
+ 
+ s32 CachedInterpreter::CheckIdle(std::ostream& stream, const CheckIdleOperands& operands)
+ {
+-  const auto& [core_timing, idle_pc] = operands;
+-  fmt::println(stream, "CheckIdle(idle_pc=0x{:08x})", idle_pc);
++  const auto& [core_timing, idle_pc, downcount] = operands;
++  fmt::println(stream, "CheckIdle(idle_pc=0x{:08x}, downcount={})", idle_pc, downcount);
+   return sizeof(AnyCallback) + sizeof(operands);
+ }
+ 
+diff --git a/Source/Core/Core/PowerPC/MMU.cpp b/Source/Core/Core/PowerPC/MMU.cpp
+index 940e93c7ea..4ca3a9f778 100644
+--- a/Source/Core/Core/PowerPC/MMU.cpp
++++ b/Source/Core/Core/PowerPC/MMU.cpp
+@@ -54,6 +54,9 @@
+ #include "Core/PowerPC/JitInterface.h"
+ #include "Core/PowerPC/PowerPC.h"
+ #include "Core/System.h"
++#ifdef __EMSCRIPTEN__
++#include "Core/WasmIdleStats.h"
++#endif
+ 
+ #include "VideoCommon/EFBInterface.h"
+ 
+@@ -232,6 +235,9 @@ T MMU::ReadFromHardware(u32 em_address)
+ 
+   if (flag == XCheckTLBFlag::Read && (em_address & 0xF8000000) == 0x08000000)
+   {
++#ifdef __EMSCRIPTEN__
++    DolphinWeb::IdleStats::NoteHardwareRead();
++#endif
+     if (em_address < 0x0c000000)
+     {
+       return EFB_Read(em_address);
+diff --git a/Source/Core/Core/WasmIdleStats.h b/Source/Core/Core/WasmIdleStats.h
+new file mode 100644
+index 0000000000..d5da6dc9fb
+--- /dev/null
++++ b/Source/Core/Core/WasmIdleStats.h
+@@ -0,0 +1,87 @@
++// Copyright 2026 wasm-dolphin contributors
++// SPDX-License-Identifier: GPL-2.0-or-later
++
++// Idle-skip counters for the harness (DolphinWeb_IdleStats, decoded by
++// harness/lib/idle-stats.mjs). Off until the harness asks: then the CPU
++// thread resets them at its next Advance() and counts until the next request.
++// Written by the CPU thread only; a reader copies the struct.
++
++#pragma once
++
++#include <atomic>
++
++#include "Common/CommonTypes.h"
++
++namespace DolphinWeb::IdleStats
++{
++// Layout v1, little-endian, f64 from +16, cumulative since the last reset.
++struct Stats
++{
++  u32 version = 1;
++  u32 size_bytes = 0;
++  u32 on = 0;
++  u32 reserved = 0;
++  // Guest cycles and host time since the reset (updated at each Advance).
++  double cycles = 0, host_ms = 0;
++  // CoreTiming slices, CoreTiming::Idle() calls, the cycles they skipped,
++  // and the FlushGpu() calls they made (SyncOnSkipIdle).
++  double advances = 0, idle_calls = 0, idle_cycles = 0, flush_gpu = 0;
++  // An Idle() at the same loop as the previous one, with at most
++  // REENTRY_MAX_CYCLES executed in between (no interrupt handler ran): the
++  // loop came back out only to go straight back in. Executed cycles, host
++  // time from the previous Idle() to this one, and the part of it spent in
++  // event callbacks (work that has to happen anyway).
++  double reentries = 0, reentry_cycles = 0, reentry_host_ms = 0, reentry_event_ms = 0;
++  // Slices that began right after an Idle(): those with only a VI event that
++  // changed nothing a game can observe besides the beam position, those
++  // with a VI event, and those where an external exception was taken.
++  double idle_wakes = 0, wake_vi_only = 0, wake_with_vi = 0, wake_exceptions = 0;
++  // VI half-line updates, those with an effect beyond the beam position
++  // (field start/end, SI poll, an interrupt status bit set), and guest reads
++  // of the beam position registers.
++  double vi_updates = 0, vi_observable = 0, beam_reads = 0;
++  // Events run in an idle wake, by kind.
++  double wake_audio_dma = 0, wake_dsp = 0, wake_gpu_sleeper = 0, wake_ipc = 0, wake_dec = 0,
++         wake_si = 0, wake_other = 0;
++  // Idle fast-forward (?idleff=1): wakes where it could start (the loop just
++  // proved itself, see CoreTiming::Idle) and loop iterations it replaced.
++  double ff_armed = 0, ff_skips = 0;
++};
++
++inline constexpr s64 REENTRY_MAX_CYCLES = 256;
++
++inline Stats g_stats;
++inline bool g_on = false;
++// Set by VideoInterfaceManager::Update when the half-line does more than
++// move the beam; read and cleared by CoreTiming around each VI callback.
++inline bool g_vi_observable = false;
++inline std::atomic<int> g_request{-1};
++
++// Idle fast-forward (?idleff=1, DolphinWeb_SetIdleFastForward). When a wait
++// loop has just run one iteration that read no hardware register and came
++// straight back to CoreTiming::Idle(), the next events that only touch
++// hardware registers, interrupts or the host (VI, AI, audio DMA, GPU sleeper)
++// cannot change what the loop reads: CoreTiming::Advance then accounts for
++// the iterations it would run between them, without running them, until an
++// exception is pending or another event runs.
++inline std::atomic<bool> g_ff_enabled{false};
++// Guest loads from hardware registers or the EFB (MMU::ReadFromHardware),
++// counted always by the CPU thread.
++inline u32 g_hw_reads = 0;
++
++inline void NoteHardwareRead()
++{
++  ++g_hw_reads;
++}
++
++inline void NoteViObservable()
++{
++  g_vi_observable = true;
++}
++
++inline void NoteBeamRead()
++{
++  if (g_on)
++    g_stats.beam_reads += 1;
++}
++}  // namespace DolphinWeb::IdleStats

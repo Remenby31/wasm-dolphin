@@ -92,6 +92,7 @@ export class EmulatorHost {
     this.ppcWasmJitForce = requestedPpcWasmJitForce();
     this.ppcWasmJitWarmupFrames = requestedPpcWasmJitWarmupFrames(this.videoBackend);
     this.ppcProfile = requestedPpcProfile();
+    this.idleFastForward = requestedIdleFastForward();
     this.cpuOverclock = requestedCpuOverclock();
     this.emulationSpeed = requestedEmulationSpeed();
     this.presentationScale = requestedPresentationScale();
@@ -342,6 +343,7 @@ export class EmulatorHost {
             ppcWasmJitForce: this.ppcWasmJitForce,
             ppcWasmJitWarmupFrames: this.ppcWasmJitWarmupFrames,
             ppcProfile: this.ppcProfile,
+            idleFastForward: this.idleFastForward,
             cpuOverclock: this.cpuOverclock,
             emulationSpeed: this.emulationSpeed,
             presentationScale: this.presentationScale,
@@ -389,6 +391,7 @@ export class EmulatorHost {
             ppcWasmJitForce: this.ppcWasmJitForce,
             ppcWasmJitWarmupFrames: this.ppcWasmJitWarmupFrames,
             ppcProfile: this.ppcProfile,
+            idleFastForward: this.idleFastForward,
             cpuOverclock: this.cpuOverclock,
             emulationSpeed: this.emulationSpeed,
             presentationScale: this.presentationScale,
@@ -1288,6 +1291,12 @@ function requestedPpcWasmJitWarmupFrames(videoBackend) {
 
 function requestedPpcProfile() {
   return new URLSearchParams(window.location.search).get("ppcprof") === "1";
+}
+
+// ?idleff=1: CoreTiming skips the iterations of a proven wait loop between
+// events it cannot observe (patch 0089). Off by default while it is measured.
+function requestedIdleFastForward() {
+  return new URLSearchParams(window.location.search).get("idleff") === "1";
 }
 
 function requestedCpuOverclock() {

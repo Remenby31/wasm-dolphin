@@ -83,6 +83,7 @@ export class UpstreamWorkerAdapter {
     ppcWasmJitForce = false,
     ppcWasmJitWarmupFrames = 60,
     ppcProfile = false,
+    idleFastForward = false,
     cpuOverclock = 1,
     emulationSpeed = 1,
     presentationScale = 1,
@@ -185,6 +186,7 @@ export class UpstreamWorkerAdapter {
     this.ppcWasmJitForce = Boolean(ppcWasmJitForce);
     this.ppcWasmJitWarmupFrames = ppcWasmJitWarmupFrames;
     this.ppcProfile = Boolean(ppcProfile);
+    this.idleFastForward = idleFastForward === true;
     this.cpuOverclock = cpuOverclock;
     this.emulationSpeed = emulationSpeed;
     this.presentationScale = presentationScale;
@@ -394,6 +396,7 @@ export class UpstreamWorkerAdapter {
       ppcWasmJitForce: this.ppcWasmJitForce,
       ppcWasmJitWarmupFrames: this.ppcWasmJitWarmupFrames,
       ppcProfile: this.ppcProfile,
+      idleFastForward: this.idleFastForward,
       cpuOverclock: this.cpuOverclock,
       emulationSpeed: this.emulationSpeed,
       presentationScale: this.presentationScale,
