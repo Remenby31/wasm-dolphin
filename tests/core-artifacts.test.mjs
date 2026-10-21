@@ -229,8 +229,11 @@ test("status: a copy of a current core is current, and a changed shim makes it s
     writeFileSync(path.join(dir, "core/upstream/dolphin_web_discio.cpp"), "// edited\n", { flag: "a" });
     const status = await coreStatus(dir);
     assert.equal(status.current, false);
+    // A branch that changes core/upstream (before its CI builds the core) is
+    // already stale for that reason; the edit must still be the reason.
+    assert.ok(status.reasons.includes("source.localInputsSha256 differs"));
     assert.deepEqual(status.reasons.filter((reason) => !before.reasons.includes(reason)),
-      ["source.localInputsSha256 differs"]);
+      before.reasons.includes("source.localInputsSha256 differs") ? [] : ["source.localInputsSha256 differs"]);
   } finally {
     rmSync(dir, { recursive: true, force: true });
   }
