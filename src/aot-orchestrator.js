@@ -65,6 +65,7 @@ export function createAotFirstLaunch({
   bootBudgetMs = 1500,
   maxBootModules = Infinity,
   maxBootBytes = Infinity, // what the launch may retain, in bytes of region modules
+  loadBeforeBoot = false, // true: the cache loads before the boot (under bootBudgetMs), as before
   maxErrorEvents = 64, // per run: a flood of refusals never pushes out install/start
   runId = null,
   tuning = {}, // AotOptimizer options: maxAttempts, notReadyDelayMs, maxNotReadyWaits
@@ -139,9 +140,10 @@ export function createAotFirstLaunch({
     supported,
     identity,
 
-    // Next launches: the modules the cache holds for this disc, in compile
-    // order, retained before the boot under `bootBudgetMs`; the rest after
-    // the boot with loadRest(). Never throws: a failure costs only speed.
+    // Next launches: opens the region cache for the modules it holds for
+    // this disc, in compile order; they load after the first image with
+    // loadRest() (loadBeforeBoot: before the boot, under `bootBudgetMs`).
+    // Never throws: a failure costs only speed.
     async installBeforeBoot() {
       if (!supported) return { loaded: 0, failed: [], deferred: 0, ms: 0, unsupported: true };
       const t0 = now();
@@ -155,17 +157,13 @@ export function createAotFirstLaunch({
           record("install", { loaded: 0, failed: 0, deferred: 0, ms, firstLaunch: true });
           return { loaded: 0, failed: [], deferred: 0, ms, firstLaunch: true };
         }
-        // Before the boot, only the modules the boot runs (the boot set the
-        // previous launch recorded, recordBootBlocks): loading the whole cache
-        // first delayed the first image by 0.8 s. The rest loads after the
-        // first image (loadRest). A plan store that keeps no boot set: all.
+        // Before the boot, nothing by default (loadBeforeBoot = false): the
+        // whole cache read and compiled first delayed the first image of a
+        // second launch by 0.8 s, and the boot does not need the regions (a
+        // first launch never has them there). They load after the first
+        // image (loadRest), as the optimisation of a first launch does.
         const keys = await optimizer.bootKeys();
-        let eager = Infinity;
-        if (typeof planStore?.loadBootKeys === "function") {
-          const boot = new Set(await planStore.loadBootKeys(planKey).catch(() => null) ?? []);
-          keys.sort((a, b) => boot.has(b) - boot.has(a)); // stable: compile order kept within each part
-          eager = keys.filter((k) => boot.has(k)).length;
-        }
+        const eager = loadBeforeBoot ? Infinity : 0;
         report = await loader.load({ ...identity, keys, eager, budgetMs: bootBudgetMs, maxModules: maxBootModules, maxBytes: maxBootBytes });
       } catch (error) {
         report = { loaded: 0, failed: [], deferred: 0, ms: 0, error: String(error?.message || error) };
@@ -212,35 +210,6 @@ export function createAotFirstLaunch({
         running = false;
         if (lastState === "running") lastState = "partial"; // cancelled or fatal
       }
-    },
-
-    // At the first image: the modules holding code the boot ran (`blocks`,
-    // [start, end] guest ranges of executed blocks, blocksFromCoreDump),
-    // added to the stored boot set. The boot set only grows: code a region
-    // ran is not in the JIT's block dump. Resolves to the set's size.
-    async recordBootBlocks(blocks) {
-      // A first launch has no plan yet at its first image: planned now (the
-      // optimisation that starts after it shares the computation).
-      if (!supported || typeof planStore?.saveBootKeys !== "function" || !(await optimizer.getPlan().catch(() => null))) return 0;
-      const keys = new Set(await planStore.loadBootKeys(planKey).catch(() => null) ?? []);
-      const ranges = [];
-      for (const u of optimizer.regions) for (const f of u.members) for (const [a, b] of f.ranges) ranges.push([a >>> 0, b >>> 0, u.key]);
-      ranges.sort((x, y) => x[0] - y[0]);
-      for (const [start] of blocks) {
-        const pc = start >>> 0;
-        let lo = 0, hi = ranges.length;
-        while (lo < hi) {
-          const mid = (lo + hi) >> 1;
-          if (ranges[mid][0] <= pc) lo = mid + 1;
-          else hi = mid;
-        }
-        // ranges of different functions never overlap (the plan's functions)
-        if (lo && pc < ranges[lo - 1][1]) keys.add(ranges[lo - 1][2]);
-      }
-      const known = new Set(optimizer.regions.map((u) => u.key));
-      const out = [...keys].filter((k) => known.has(k));
-      await planStore.saveBootKeys(planKey, out).catch(() => {});
-      return out.length;
     },
 
     get generation() {

@@ -110,6 +110,7 @@ function launch(p, { translator = standInTranslator(), compile, plan = makePlan(
       return { module };
     }),
     retain: (key, module) => retained.set(key, module),
+    loadBeforeBoot: true, // the loader's budget and caps (the engine loads after the first image)
     ...extra
   });
   return { flow, retained, compiled, translator, builds: () => builds };
@@ -470,62 +471,24 @@ test("planning runs in a worker of its own; its failure or silence rejects", asy
 });
 
 // TTFF of a second launch (+0.8 s when the whole cache loaded before the
-// boot): only the boot set loads before the boot, the rest after the first
-// image. The boot set is what the boot ran (executed blocks at the first
-// image), recorded per disc; with none recorded yet, nothing before the boot.
-test("before the boot only the recorded boot set loads; the rest after the first image", async () => {
+// boot): nothing loads before the boot, the cache after the first image, as a
+// second "install" event. (A "boot set" of the modules whose code ran before
+// the first image was tried: at region granularity it held all 143 modules
+// of a commercial disc, and the first image came no sooner.)
+test("a second launch loads nothing before the boot and the region cache after the first image", async () => {
   const p = profile();
-  const boot = new Map();
-  p.planStore.loadBootKeys = async (k) => boot.get(k) ?? null;
-  p.planStore.saveBootKeys = async (k, keys) => { boot.set(k, [...keys]); };
   await launch(p).flow.start();
-  const plan = makePlan();
-  const fn = (i) => plan.modules[0].functions.find((f) => f.entry === plan.modules[0].functions.map((x) => x.entry).sort((a, b) => a - b)[i]);
-
-  const second = launch(p);
+  const second = launch(p, { loadBeforeBoot: false });
   const report = await second.flow.installBeforeBoot();
-  assert.equal(report.loaded, 0, "no boot set yet: nothing before the boot");
+  assert.equal(report.loaded, 0, "nothing before the boot");
+  assert.equal(second.retained.size, 0);
   const total = report.deferred;
   assert.ok(total >= 6);
-  // the first image: the boot ran two functions (and code outside the plan)
-  const ran = [fn(0), fn(1)].map((f) => [f.ranges[0][0], f.ranges[0][0] + 4, 1, 0]);
-  const size = await second.flow.recordBootBlocks([...ran, [0x80700000, 0x80700010, 1, 0]]);
-  assert.ok(size >= 1 && size <= 2, `${size} modules in the boot set`);
-  assert.equal((await second.flow.loadRest()).loaded, total, "the rest after the first image");
-
-  const third = launch(p);
-  const early = await third.flow.installBeforeBoot();
-  assert.equal(early.loaded, size, "the boot set before the boot");
-  assert.equal(early.deferred, total - size);
-  const kept = [...third.retained.values()];
-  for (const f of [fn(0), fn(1)]) {
-    assert.equal(kept.map((m) => runs(m)(f.entry)).filter(([code]) => code === 0).length, 1, "the boot's functions are in it");
-  }
-  // a later image adds to the set, never removes
-  assert.equal(await third.flow.recordBootBlocks([]), size);
-  assert.equal((await third.flow.loadRest()).loaded, total - size);
-});
-
-// A first launch has no plan at its first image: recording the boot set plans
-// it then (the optimisation that follows reuses that plan), so the second
-// launch already loads its boot set before the boot.
-test("the first launch records its boot set too; the rest is a second install event", async () => {
-  const p = profile();
-  const boot = new Map();
-  p.planStore.loadBootKeys = async (k) => boot.get(k) ?? null;
-  p.planStore.saveBootKeys = async (k, keys) => { boot.set(k, [...keys]); };
-  const plan = makePlan();
-  const first = launch(p, { plan });
-  assert.equal((await first.flow.installBeforeBoot()).loaded, 0);
-  const f = plan.modules[0].functions[0];
-  const size = await first.flow.recordBootBlocks([[f.ranges[0][0], f.ranges[0][0] + 4, 1, 0]]);
-  assert.equal(size, 1);
-  await first.flow.start();
-  assert.equal(first.builds(), 1, "planned once, shared with the optimisation");
-  const second = launch(p);
-  assert.equal((await second.flow.installBeforeBoot()).loaded, 1);
   const rest = await second.flow.loadRest();
-  assert.ok(rest.loaded > 0);
+  assert.equal(rest.loaded, total, "the whole cache after the first image");
+  assert.equal(second.retained.size, total);
   const installs = ofType(second.flow, "install");
-  assert.deepEqual(installs.map((e) => [e.loaded, e.after ?? null]), [[1, null], [rest.loaded, "first-image"]]);
+  assert.deepEqual(installs.map((e) => [e.loaded, e.after ?? null]), [[0, null], [total, "first-image"]]);
+  await second.flow.start();
+  assert.equal(second.compiled.length, 0, "0 region recompiled");
 });
