@@ -29,7 +29,7 @@
 // time since the start of this run.
 import { AotOptimizer } from "./aot-optimizer.js";
 import { createAotRegionLoader } from "./aot-region-loader.js";
-import { regionModuleEntries } from "./aot-region-module.js";
+import { regionModuleEntries, regionModuleLayout } from "./aot-region-module.js";
 
 export const AOT_FIRST_LAUNCH_PARAM = "aot";
 export const AOT_PROGRESS_SCHEMA = "wasm-dolphin.aot-progress.v1";
@@ -131,7 +131,7 @@ export function createAotFirstLaunch({
     const unit = install && bytes ? optimizer?.regions?.find((u) => u.key === key) : null;
     if (!unit) return;
     const entries = regionModuleEntries(module) ?? unit.members.map((f) => f.entry);
-    install({ key, bytes, entries, members: unit.members.map((f) => ({ ranges: f.ranges, hash: f.hash })) });
+    install({ key, bytes, entries, layout: regionModuleLayout(module), members: unit.members.map((f) => ({ ranges: f.ranges, hash: f.hash })) });
   };
   const loader = createAotRegionLoader({ openCache, retain: retainAndInstall, now });
 
@@ -320,7 +320,7 @@ function translateOne(m, f, { mask, maxBlocks, names }) {
     m._free(r);
   }
   if (!p) return { entry: f.entry, reason: "untranslatable" };
-  const [status, entry, codeLength, entryCount, relocCount] = new Uint32Array(m.HEAPU8.buffer, p, 6);
+  const [status, entry, codeLength, entryCount, relocCount, layout] = new Uint32Array(m.HEAPU8.buffer, p, 6);
   if (status !== 0) return { entry: f.entry, reason: TRANSLATE_STATUS[status] ?? "untranslatable" };
   const words = new Uint32Array(m.HEAPU8.buffer, p + 24, entryCount + 3 * relocCount);
   const entries = Array.from(words.subarray(0, entryCount));
@@ -331,5 +331,7 @@ function translateOne(m, f, { mask, maxBlocks, names }) {
     return { offset, kind: "dispatch" };
   });
   const at = p + 24 + 4 * (entryCount + 3 * relocCount);
-  return { entry: f.entry, fragment: { entry, entries, code: m.HEAPU8.slice(at, at + codeLength), relocs } };
+  // layout: the core's heap layout hash the code embeds (0 from a core
+  // before the layout guard): the region module carries it to the install.
+  return { entry: f.entry, fragment: { entry, entries, code: m.HEAPU8.slice(at, at + codeLength), relocs, layout } };
 }

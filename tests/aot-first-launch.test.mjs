@@ -309,7 +309,7 @@ function fakeCore(results) {
       u32.fill(0);
       if (r === null) return 0;
       if (typeof r === "number") { u32[0] = r; return out; }
-      u32.set([0, pc, r.code.length, r.entries.length, r.relocs.length, 0]);
+      u32.set([0, pc, r.code.length, r.entries.length, r.relocs.length, r.layout ?? 0]);
       u32.set(r.entries, 6);
       u32.set(r.relocs.flat(), 6 + r.entries.length);
       heap.set(r.code, out + 24 + 4 * (r.entries.length + 3 * r.relocs.length));
@@ -321,7 +321,7 @@ function fakeCore(results) {
 
 test("coreRegionTranslator reads the agreed layout of _DolphinWeb_AotTranslate", async () => {
   const { m, calls } = fakeCore((pc) => (pc === 0x80003000
-    ? { entries: [0x80003000, 0x80003010], relocs: [[5, 0, 1], [11, 1, 0x80004000], [17, 2, 0]], code: [1, 2, 3, 4] }
+    ? { entries: [0x80003000, 0x80003010], relocs: [[5, 0, 1], [11, 1, 0x80004000], [17, 2, 0]], code: [1, 2, 3, 4], layout: 0x5eed1234 }
     : pc === 0x80003100 ? 1 : pc === 0x80003200 ? 4 : null));
   const t = coreRegionTranslator(m, { mask: 0x40, helperNames: ["read_u32", "write_u32"], yieldNow: async () => {} });
   const batch = [
@@ -336,7 +336,8 @@ test("coreRegionTranslator reads the agreed layout of _DolphinWeb_AotTranslate",
     entry: 0x80003000,
     fragment: {
       entry: 0x80003000, entries: [0x80003000, 0x80003010], code: Uint8Array.from([1, 2, 3, 4]),
-      relocs: [{ offset: 5, kind: "import", name: "write_u32" }, { offset: 11, kind: "jump", targetPc: 0x80004000 }, { offset: 17, kind: "dispatch" }]
+      relocs: [{ offset: 5, kind: "import", name: "write_u32" }, { offset: 11, kind: "jump", targetPc: 0x80004000 }, { offset: 17, kind: "dispatch" }],
+      layout: 0x5eed1234 // the sixth word: the heap layout hash the code embeds
     }
   });
   assert.deepEqual(out.slice(1).map((r) => r.reason), ["hash-mismatch", "untranslatable", "not-ready"], "stops at not-ready");
