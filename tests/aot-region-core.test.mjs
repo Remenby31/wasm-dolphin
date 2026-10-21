@@ -8,6 +8,7 @@
 import assert from "node:assert/strict";
 import { existsSync, readFileSync } from "node:fs";
 import test from "node:test";
+import { fileURLToPath } from "node:url";
 
 import { imageFromDol } from "../src/aot-image.js";
 import { planDol } from "../src/aot-plan.js";
@@ -126,4 +127,32 @@ test("cpufuzz over 4 slices: regions end like the interpreter", {
   // Only traps (MMIO, mtdec: no hardware behind the test CPU) are not compared.
   assert.ok(total.checked >= 0.9 * total.translated, `${total.checked} of ${total.translated} compared`);
   assert.deepEqual(total.mismatches, []);
+});
+
+// 0088: Dolphin's idle skip in regions. A block that loops to its own start
+// without side effects (PPCAnalyzer::IsBusyWaitLoop) must stay out of the
+// region whole: cut before its branch, the region went on at the branch's
+// address, where no idle loop is seen any more, and the loop spun inside the
+// region without ever reaching CoreTiming::Idle. Outside, the block path runs
+// it from its start with CheckIdle; the region resumes after the loop.
+const { coreStatus } = await import("../tools/core-artifacts.mjs");
+const idleSkip = skip || ((await coreStatus(fileURLToPath(new URL("..", import.meta.url)))).current
+  ? false : "the core in cores/dolphin predates these sources (CI builds this branch's core)");
+test("an idle loop stays out of the region: its start is not a region block, the region resumes after it", { skip: idleSkip }, () => {
+  const IDLE = assemble(TEXT, [
+    "wait", asm.addi(5, 5, 1),
+    "wait_loop", lwz(3, 4, 0), asm.cmplwi(3, 0), (pc, l) => asm.beq(pc, l.wait_loop),
+    "after", asm.addi(6, 6, 1), asm.blr()
+  ]);
+  const { image } = setup(buildDol({ textAddr: TEXT, text: IDLE.words, entry: IDLE.labels.wait }));
+  for (const s of image.segments) core.load(s.start, s.bytes);
+  const { wait, wait_loop: loop, after } = IDLE.labels;
+  const end = TEXT + 4 * IDLE.words.length;
+  const fragment = core.translate(wait, { ranges: [[TEXT, end]] });
+  assert.ok(fragment, "translated");
+  const beq = loop + 8;
+  assert.ok(!fragment.entries.includes(loop), `the idle loop's start ${loop.toString(16)} is not in the region`);
+  assert.ok(!fragment.entries.includes(beq), "nor its branch, which no longer looks idle on its own");
+  assert.ok(fragment.entries.includes(after), "the region resumes after the loop");
+  assert.equal(core.translate(loop, { ranges: [[TEXT, end]] }), null, "an idle loop is no region entry");
 });

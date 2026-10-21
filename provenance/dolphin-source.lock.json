@@ -25,7 +25,7 @@
       "commit": "01e0577914a75a2569c846778c2f93aa8e6feddd"
     }
   },
-  "patchSeriesSha256": "ffe15a3f573fe24be7535ee0feb41969679eab1fd29a52856907f3f162e9ba8f",
+  "patchSeriesSha256": "d03f055e7c195585ce166ae2c8ac33b06396ae3bb1d633fb5e2f3e5e851b1499",
   "patches": [
     {
       "order": 1,
@@ -637,6 +637,14 @@
     },
     {
       "order": 77,
+      "cwd": ".",
+      "hashMode": "lf-normalized",
+      "path": "patches/dolphin-wasm/snapshot/0088-region-idle-loops-outside.patch",
+      "size": 2762,
+      "sha256": "15c7127637fa3550e9a8d7d6850afb80f53548d7536a5252ed75e416bebab9d0"
+    },
+    {
+      "order": 78,
       "cwd": "Externals/SFML/SFML",
       "hashMode": "lf-normalized",
       "path": "patches/dolphin-wasm/submodules/0001-sfml-emscripten-config.patch",
@@ -644,7 +652,7 @@
       "sha256": "f82197a21fe982ad83f6ee7bbf5a03839b1cebd4d64da3eab11263842bf61d89"
     },
     {
-      "order": 78,
+      "order": 79,
       "cwd": "Externals/xxhash/xxHash",
       "hashMode": "lf-normalized",
       "path": "patches/dolphin-wasm/submodules/0002-xxhash-wasm-simd-scalar.patch",
