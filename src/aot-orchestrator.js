@@ -284,7 +284,7 @@ export function coreAssembleOptions(m) {
 // The translator the optimiser drives, over the core's export. Translates
 // for at most `sliceMs` per call and answers "budget" for the rest: the discio
 // worker also serves the core's disc reads, so it yields between slices.
-export function coreRegionTranslator(m, { mask, helperNames, maxBlocks = 64, sliceMs = 8, now = () => performance.now(),
+export function coreRegionTranslator(m, { mask, helperNames, maxBlocks = 256, sliceMs = 8, now = () => performance.now(),
   yieldNow = () => new Promise((r) => setTimeout(r, 0)) } = {}) {
   if (typeof m?._DolphinWeb_AotTranslate !== "function") return null;
   const names = helperNames ?? coreAssembleOptions(m)?.helperNames ?? [];
