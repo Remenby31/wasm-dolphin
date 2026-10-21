@@ -15,6 +15,7 @@ import { planDol } from "../src/aot-plan.js";
 import { assembleRegion } from "../src/aot-region-module.js";
 import { asm, assemble, buildDol } from "./aot-asm.mjs";
 import { HELPER_SIGNATURES, STOP, functionFragments, loadAotCore, regionGroups, seedGprs } from "./helpers/aot-core-equivalence.mjs";
+import { makeRng, randomProgram } from "./helpers/jit-oracle.mjs";
 
 const core = await loadAotCore();
 const skip = !core?.has("DolphinWeb_AotQueueRegion") && "core without the region dispatcher (patch 0075)";
@@ -372,6 +373,69 @@ test("a region translated while the RAM sat elsewhere installs and runs here", {
   const got = runCall(PROGRAM.labels.main, { regions: true });
   assert.ok(got.ran > 0, "regions ran");
   assert.deepEqual(got.state, reference.state);
+});
+
+// The RAM moved under an installed region (a stop and a new boot in the same
+// page reallocates it): its instance still reads the old address from the
+// globals it was bound to. A cache clear makes it checked again, and it is
+// dropped before it runs (#62 P1-1; patch 0086, since the layout hash no
+// longer holds the address).
+test("an installed region is dropped when the RAM moved under it, before it runs again", { skip: skip || (!core?.has("DolphinWeb_AotRegionHeapBases") && "core without the heap-base guard (0086)") }, () => {
+  installed();
+  core.reset(seedGprs(1), PROGRAM.labels.count, STOP, 400000);
+  assert.equal(core.dispatchRegion(), 1, "runs where it was bound");
+  core.module._DolphinWeb_AotLayoutShiftForTest(0x100000); // the RAM sits 1 MiB further
+  try {
+    core.unverifyRegions(); // what ClearCache does at the new boot
+    core.reset(seedGprs(1), PROGRAM.labels.count, STOP, 400000);
+    assert.equal(core.dispatchRegion(), 0, "dropped, not run at the old address");
+  } finally {
+    core.module._DolphinWeb_AotLayoutShiftForTest(0);
+  }
+});
+
+// Patch 0084's only guarantee against an address left in the code: no
+// fragment holds an i32.const of the RAM or L1 address (the layout hash no
+// longer covers them, and Node never moves the RAM). Over the oracle's
+// random programs; a constant planted in a copy proves the scan finds one.
+const i32Consts = (code) => {
+  const out = [];
+  for (let i = 0; i + 1 < code.length; i++) {
+    if (code[i] !== 0x41) continue;
+    let v = 0, shift = 0, j = i + 1, b;
+    do { b = code[j++]; v |= (b & 0x7f) << shift; shift += 7; } while (b & 0x80 && shift < 35 && j < code.length);
+    if (shift < 32 && b & 0x40) v |= -1 << shift;
+    out.push(v >>> 0);
+  }
+  return out;
+};
+test("no region fragment embeds the RAM or L1 address", { skip: skip || (!core?.has("DolphinWeb_JitCompileRegionBytesForTest") && "core without position-independent regions (0084)") }, () => {
+  const p = core.module._malloc(4 * 32);
+  let ram, l1;
+  try {
+    core.module._DolphinWeb_AotLayoutWords(p, 32);
+    [ram, l1] = [15, 17].map((i) => new Uint32Array(core.module.HEAPU8.buffer, p, 32)[i]);
+  } finally {
+    core.module._free(p);
+  }
+  assert.ok(ram && l1);
+  const r = makeRng(84);
+  const CODE = 0x80004000;
+  let fragments = 0, heapRelocs = 0;
+  for (let n = 0; n < 300; n++) {
+    const words = randomProgram(r, 48);
+    core.load(CODE, Uint8Array.from(words.flatMap((w) => [w >>> 24, (w >>> 16) & 0xff, (w >>> 8) & 0xff, w & 0xff])));
+    const fragment = core.translate(CODE, { ranges: [[CODE, CODE + 4 * words.length]] });
+    if (!fragment) continue;
+    fragments += 1;
+    heapRelocs += fragment.relocs.filter((x) => x.kind === "global").length;
+    const consts = i32Consts(fragment.code);
+    assert.ok(!consts.includes(ram) && !consts.includes(l1), `program ${n}: an i32.const of the RAM or L1 address`);
+  }
+  core.invalidate(CODE, 4 * 48);
+  assert.ok(fragments > 100 && heapRelocs > 100, `${fragments} fragments, ${heapRelocs} heap-base reads`);
+  const planted = [0x00, 0x41, ...(() => { const o = []; let v = ram | 0; for (;;) { const b = v & 0x7f; v >>= 7; if ((v === 0 && !(b & 0x40)) || (v === -1 && (b & 0x40))) { o.push(b); return o; } o.push(b | 0x80); } })()];
+  assert.ok(i32Consts(planted).includes(ram), "the scan finds a planted constant");
 });
 
 test("a core shutdown forgets every region: installed, waiting and queued", { skip: skip || (!core?.has("DolphinWeb_AotForgetRegionsForTest") && "core without ForgetAllRegions") }, () => {

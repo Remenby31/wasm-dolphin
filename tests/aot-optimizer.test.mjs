@@ -217,9 +217,9 @@ test("aot optimizer: a stale module is translated again and its entry overwritte
   assert.equal(translated, 0, "a second launch translates nothing");
   const [stale] = await o.bootKeys();
   cache.persisted.set(stale, Uint8Array.of(0)); // stands for the refused module
-  assert.equal(o.markStale(stale), true);
-  assert.equal(o.markStale(stale), false, "once per session");
-  assert.equal(o.markStale("region-v1:unknown"), false, "only modules of the plan");
+  assert.equal(await o.markStale(stale), true);
+  assert.equal(await o.markStale(stale), false, "once per session");
+  assert.equal(await o.markStale("region-v1:unknown"), false, "only modules of the plan");
   await o.start();
   assert.ok(translated > 0 && translated <= 8, "only the stale module's members");
   assert.deepEqual(installs, [stale], "the new module goes to the core");

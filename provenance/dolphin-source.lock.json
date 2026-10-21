@@ -25,7 +25,7 @@
       "commit": "01e0577914a75a2569c846778c2f93aa8e6feddd"
     }
   },
-  "patchSeriesSha256": "519f1e76e3a8a2bf9472363d631b32ea68463fae778db66211d6ba2c337d92dc",
+  "patchSeriesSha256": "8a7b1dec015fb62042635a9f4eaa442cf84c5457ab1ee816d1f7f33a4822429f",
   "patches": [
     {
       "order": 1,
@@ -645,6 +645,14 @@
     },
     {
       "order": 78,
+      "cwd": ".",
+      "hashMode": "lf-normalized",
+      "path": "patches/dolphin-wasm/snapshot/0086-region-heap-bases-guard.patch",
+      "size": 4171,
+      "sha256": "954121961ca65dd6e154b6212351ba1ebe103001cbe9b939491e90fa350472e6"
+    },
+    {
+      "order": 79,
       "cwd": "Externals/SFML/SFML",
       "hashMode": "lf-normalized",
       "path": "patches/dolphin-wasm/submodules/0001-sfml-emscripten-config.patch",
@@ -652,7 +660,7 @@
       "sha256": "f82197a21fe982ad83f6ee7bbf5a03839b1cebd4d64da3eab11263842bf61d89"
     },
     {
-      "order": 79,
+      "order": 80,
       "cwd": "Externals/xxhash/xxHash",
       "hashMode": "lf-normalized",
       "path": "patches/dolphin-wasm/submodules/0002-xxhash-wasm-simd-scalar.patch",

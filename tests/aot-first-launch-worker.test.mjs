@@ -106,3 +106,30 @@ test("with the export: install before boot (first launch), then a cancel or a re
   assert.equal(core.translations, 0);
   worker.setAotFirstLaunchEnabledForTest(false);
 });
+
+// Review of #72 (P2-2): a cached module whose layout differs from the core's
+// is not copied into the core's heap and is handed back for retranslation,
+// under its key; one under the core's layout is queued.
+test("a cached region under another layout goes to retranslation, never into the core", async (t) => {
+  const { worker } = await loadWorker(t);
+  const heap = new Uint8Array(1 << 16);
+  let top = 1024;
+  const queued = [];
+  const core = {
+    HEAPU8: heap,
+    _malloc: (n) => { const p = top; top += (n + 7) & ~7; return p; },
+    _free: () => {},
+    _DolphinWeb_AotLayoutHash: () => 0x1234,
+    _DolphinWeb_AotQueueRegion: (...args) => queued.push(args)
+  };
+  const asked = [];
+  const flow = { retranslate: async (key) => { asked.push(key); return true; } };
+  const region = { key: "region-v1:k", bytes: Uint8Array.of(0, 97, 115, 109), entries: [0x80003100], members: [{ ranges: [[0x80003100, 0x80003110]], hash: "0011223344556677" }] };
+  worker.queueAotRegionForTest(core, { ...region, layout: 0x9999 }, flow);
+  assert.deepEqual(asked, ["region-v1:k"]);
+  assert.equal(queued.length, 0, "not copied into the core");
+  worker.queueAotRegionForTest(core, { ...region, layout: 0x1234 }, flow);
+  assert.equal(queued.length, 1);
+  assert.equal(queued[0][8], 0x1234, "queued with its layout");
+  assert.deepEqual(asked, ["region-v1:k"], "no retranslation under the core's layout");
+});

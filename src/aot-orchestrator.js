@@ -202,7 +202,7 @@ export function createAotFirstLaunch({
     // A module from the cache the core cannot run here (translated for another
     // heap layout): translated again from guest memory, live, and its cache
     // entry overwritten, instead of being lost for every launch. Once per key
-    // and launch. True when queued.
+    // and launch, 3 launches at most. True when queued.
     retranslate(key) {
       if (!supported || disposed || !optimizer.markStale(key)) return false;
       retranslated += 1;

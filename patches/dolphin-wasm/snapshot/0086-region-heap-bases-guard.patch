@@ -1,0 +1,85 @@
+diff --git a/Source/Core/Core/PowerPC/CachedInterpreter/CachedInterpreter.cpp b/Source/Core/Core/PowerPC/CachedInterpreter/CachedInterpreter.cpp
+--- a/Source/Core/Core/PowerPC/CachedInterpreter/CachedInterpreter.cpp
++++ b/Source/Core/Core/PowerPC/CachedInterpreter/CachedInterpreter.cpp
+@@ -8963,10 +8963,18 @@ struct InstalledRegion
+   bool live = true;
+   bool verified = true;   // false after a cache clear: hashed again before it runs
+   // The heap layout its code embeds (PendingRegion::layout_hash): checked
+-  // again with the code after a cache clear, when the RAM may have moved.
++  // again with the code after a cache clear.
+   u32 layout_hash = 0;
++  // The RAM and L1 addresses its instance was bound to (env.ram_base,
++  // env.l1_base, patch 0084): the layout hash leaves them out, so a RAM
++  // allocated again under an installed region is caught here (patch 0086).
++  u32 ram_base = 0;
++  u32 l1_base = 0;
+ };
+ 
++// The RAM and L1 host addresses a region instantiated now is bound to.
++std::pair<u32, u32> RegionHeapBases();
++
+ // FNV-1a 64 of the guest words in ranges[first .. first+count) (pairs), read
+ // from MEM1 (0x8/0xC views); false when a word is outside it.
+ bool RegionRangesHash(const std::vector<u32>& ranges, u32 first, u32 count, u64* out)
+@@ -9246,8 +9254,10 @@ void InstallRegion(PendingRegion& pending, int handle)
+ {
+   s_region_stats.regions_installed += 1;
+   const u32 index = static_cast<u32>(s_regions.size());
++  const auto [ram_base, l1_base] = RegionHeapBases();
+   s_regions.push_back({handle, std::move(pending.entries), std::move(pending.ranges),
+-                       std::move(pending.members), true, true, pending.layout_hash});
++                       std::move(pending.members), true, true, pending.layout_hash, ram_base,
++                       l1_base});
+   for (const u32 pc : s_regions.back().entries)
+   {
+     s_region_at.emplace(pc, index);  // an entry already mapped keeps its region
+@@ -9548,11 +9558,14 @@ bool TryRunRegion(PowerPC::PowerPCState& ppc_state)
+   if (!region.verified)
+   {
+     // The RAM may have been allocated again (a stop and a new boot in the same
+-    // page): the code embeds the old address, whatever the guest code says.
+-    if (region.layout_hash != WasmLayoutHash(CurrentWasmStateLayout(Core::System::GetInstance())))
++    // page): the instance still reads the old address from its globals,
++    // whatever the guest code says. Other layout fields: the code embeds them.
++    const bool moved = std::pair{region.ram_base, region.l1_base} != RegionHeapBases() ||
++                       region.layout_hash !=
++                           WasmLayoutHash(CurrentWasmStateLayout(Core::System::GetInstance()));
++    if (moved)
+       s_region_layout_refused += 1;
+-    if (region.layout_hash != WasmLayoutHash(CurrentWasmStateLayout(Core::System::GetInstance())) ||
+-        !RegionCodeMatchesPlan(region.ranges, region.members))
++    if (moved || !RegionCodeMatchesPlan(region.ranges, region.members))
+     {
+       DropRegion(it->second);
+       return false;
+@@ -15009,6 +15022,14 @@ u32 WasmLayoutHash(const WasmStateLayout& layout_in)
+   return h != 0 ? h : 1;
+ }
+ 
++std::pair<u32, u32> RegionHeapBases()
++{
++  const WasmStateLayout layout = CurrentWasmStateLayout(Core::System::GetInstance());
++  const bool ram_shifted =
++      s_layout_shift_field_for_test == offsetof(WasmStateLayout, ram_base) / sizeof(u32);
++  return {layout.ram_base + (ram_shifted ? s_layout_shift_for_test : 0), layout.l1_base};
++}
++
+ WasmStateLayout CurrentWasmStateLayout(Core::System& system)
+ {
+   auto& ppc = system.GetPPCState();
+@@ -15507,6 +15528,15 @@ extern "C" EMSCRIPTEN_KEEPALIVE u32 DolphinWeb_AotLayoutWords(u32* out, u32 capa
+   return n;
+ }
+ 
++// [ram_base, l1_base] a region instantiated now is bound to (tests apply
++// DolphinWeb_AotLayoutShiftForTest's RAM shift, as the guard does).
++extern "C" EMSCRIPTEN_KEEPALIVE void DolphinWeb_AotRegionHeapBases(u32* out)
++{
++  const auto [ram_base, l1_base] = RegionHeapBases();
++  out[0] = ram_base;
++  out[1] = l1_base;
++}
++
+ extern "C" EMSCRIPTEN_KEEPALIVE u32 DolphinWeb_AotLayoutRefused()
+ {
+   return s_region_layout_refused;

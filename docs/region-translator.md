@@ -193,9 +193,17 @@ million console lines, the browser process at 7-14 GB).
   again on the seed's origin (checked); pass when modules came from the
   region cache and were installed, 0 "Invalid read"; `refused-layout` (the
   heap moved, the game still correct) is told apart.
-- [ ] **Retranslate after a layout refusal**: compare a cached module's
-  layout with the core's once the RAM exists, mark the key not done, translate
-  it again and overwrite the entry (review of #62, P1-3).
+- [x] **Retranslate after a layout refusal** (#72, follow-up): discio skips a
+  cached module whose layout differs from the core's and marks its key stale;
+  the optimiser translates it again after the boot, overwrites the entry and
+  installs the new module. Once per key and launch, `maxAttempts` (3) launches
+  per key at most (`retranslate:<key>` in the attempts store).
+- [x] **Heap bases of installed regions** (patch 0086): the layout hash no
+  longer holds the RAM and L1 addresses (0084), so an installed region keeps
+  the addresses its instance was bound to and is dropped, before it runs again,
+  if they changed (#62 P1-1 defence in depth). Tests: the RAM moved under an
+  installed region; no fragment holds an `i32.const` of the RAM or L1 address
+  (the only guard against a site left out of `EmitHeapBase`).
 - [x] **Position-independent region code** (patch 0084): region fragments
   read RAM and L1 from imported immutable globals (`env.ram_base`,
   `env.l1_base`, reloc kind 3 "global", a `global.get` of a padded zero the
