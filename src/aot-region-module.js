@@ -137,6 +137,27 @@ export function regionModuleLayout(module) {
   return section && section.byteLength === 4 ? new DataView(section).getUint32(0, true) : 0;
 }
 
+// Custom section "region-warm" (when assembled with a downcountOffset): what
+// the compiler worker needs to push every fragment to V8's top tier before the
+// CPU thread runs it. u32 LE [version 1, pcOffset, downcountOffset, count],
+// then per fragment, in the order of the "fragments" table, [entry, body
+// bytes]. A fragment called with state.pc = its entry and downcount 0 runs one
+// block and leaves by `return`, which charges V8's tier-up budget (shared by
+// every thread holding the module) with the whole function's Liftoff size.
+export const REGION_WARM_SECTION = "region-warm";
+export const REGION_WARM_VERSION = 1;
+
+export function regionModuleWarm(module) {
+  const [section] = WebAssembly.Module.customSections(module, REGION_WARM_SECTION);
+  if (!section || section.byteLength < 16 || section.byteLength % 4) return null;
+  const w = new Uint32Array(section.slice(0));
+  const [version, pcOffset, downcountOffset, count] = w;
+  if (version !== REGION_WARM_VERSION || w.length !== 4 + 2 * count) return null;
+  const fragments = [];
+  for (let i = 0; i < count; i++) fragments.push({ entry: w[4 + 2 * i], size: w[5 + 2 * i] });
+  return { pcOffset, downcountOffset, fragments };
+}
+
 // Entries a region module declares (its "region-entries" section), or null.
 export function regionModuleEntries(module) {
   const [section] = WebAssembly.Module.customSections(module, REGION_ENTRIES_SECTION);
@@ -144,7 +165,7 @@ export function regionModuleEntries(module) {
   return Array.from(new Uint32Array(section.slice(0)));
 }
 
-export function assembleRegion(fragments, { helpers, pcOffset, memoryPages, memoryMinPages = 1, sharedMemory = true }) {
+export function assembleRegion(fragments, { helpers, pcOffset, downcountOffset, memoryPages, memoryMinPages = 1, sharedMemory = true }) {
   if (!Array.isArray(fragments) || !fragments.length) throw new Error("region: no fragments");
   if (!Number.isInteger(pcOffset) || pcOffset < 0) throw new Error("region: pcOffset required");
   if (!Number.isInteger(memoryPages) || memoryPages < 1) throw new Error("region: memoryPages (the core's maximum) required");
@@ -274,6 +295,14 @@ export function assembleRegion(fragments, { helpers, pcOffset, memoryPages, memo
   name(custom, REGION_ENTRIES_SECTION);
   for (const [pc] of sortedEntries) custom.push(pc & 0xff, (pc >>> 8) & 0xff, (pc >>> 16) & 0xff, (pc >>> 24) & 0xff);
   section(out, 0, custom);
+  if (Number.isInteger(downcountOffset) && downcountOffset >= 0) {
+    const warm = [];
+    name(warm, REGION_WARM_SECTION);
+    const u32 = (v) => warm.push(v & 0xff, (v >>> 8) & 0xff, (v >>> 16) & 0xff, (v >>> 24) & 0xff);
+    u32(REGION_WARM_VERSION); u32(pcOffset); u32(downcountOffset); u32(fragments.length);
+    fragments.forEach((f, i) => { u32(f.entry >>> 0); u32(bodies[i].length); });
+    section(out, 0, warm);
+  }
   const layouts = new Set(fragments.map((f) => (f.layout ?? 0) >>> 0));
   if (layouts.size !== 1) throw new Error("region: fragments translated for different layouts");
   const [layout] = layouts;

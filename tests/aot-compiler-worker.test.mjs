@@ -10,8 +10,10 @@ import {
   compileFailureReason,
   createAotCompilerClient,
   createWarmer,
-  parseWasmImports
+  parseWasmImports,
+  tierUpCalls
 } from "../src/aot-compiler-worker.js";
+import { assembleRegion, paddedUleb, regionModuleWarm } from "../src/aot-region-module.js";
 
 // Minimal module builder, enough for the shapes the JIT emits: env.* function
 // imports, a shared env.memory, functions taking the state pointer.
@@ -687,4 +689,91 @@ test("a worker that cannot be created after an idle stop counts as a failure, an
   await settle();
   assert.equal(made.length, 2);
   assert.equal(client.stats().respawns, 1, "a start after a failure is a respawn, not an idle restart");
+});
+
+function sleb(v) {
+  const out = [];
+  v |= 0;
+  for (;;) {
+    const b = v & 0x7f;
+    v >>= 7;
+    if ((v === 0 && !(b & 0x40)) || (v === -1 && (b & 0x40))) { out.push(b); return out; }
+    out.push(b | 0x80);
+  }
+}
+
+// Region tier-up: V8 moves a function to its top tier once ~13 M bytes of its
+// Liftoff code ran, counted in the module shared by every thread, and a
+// `return` charges the whole function. A fragment of the "region-warm"
+// section is called with state.pc = its entry and downcount 0 until that
+// budget is spent, on a scratch memory where env.ram_base points at MEM1.
+const TU = { PC: 0, COUNT: 4, DC: 12 };
+function tierUpRegion({ trap = false, warmSection = true } = {}) {
+  const get = [0x20, 0x00];
+  const load = (off) => [...get, 0x28, 0x02, off];
+  const store = (off, value) => [...get, ...value, 0x36, 0x02, off];
+  const k = (v) => [0x41, ...sleb(v)];
+  const code = [0x00];
+  const relocs = [];
+  const push = (...bytes) => code.push(...bytes);
+  // if (state.pc == 0x1000) { count++; read MEM1's last word; downcount -= 5;
+  //   if (downcount <= 0) return 0; } state.pc = 0x1000; return_call dispatch
+  push(...load(TU.PC), ...k(0x1000), 0x46, 0x04, 0x40);
+  if (trap) push(0x00);
+  push(...store(TU.COUNT, [...load(TU.COUNT), ...k(1), 0x6a]));
+  push(0x23); relocs.push({ offset: code.length, kind: "global", name: "ram_base" }); push(...paddedUleb(0));
+  push(...k(0x1800000 - 4), 0x6a, 0x28, 0x02, 0x00, 0x1a); // i32.load, drop
+  push(...store(TU.DC, [...load(TU.DC), ...k(5), 0x6b]));
+  push(...load(TU.DC), ...k(0), 0x4c, 0x04, 0x40, ...k(0), 0x0f, 0x0b); // i32.le_s: return 0
+  push(0x0b);
+  push(...store(TU.PC, k(0x1000)), ...get, 0x12); relocs.push({ offset: code.length, kind: "dispatch" }); push(...paddedUleb(0));
+  push(0x0b);
+  const fragment = { entry: 0x1000, entries: [0x1000], code: Uint8Array.from(code), relocs };
+  return assembleRegion([fragment], { helpers: {}, pcOffset: TU.PC, ...(warmSection ? { downcountOffset: TU.DC } : {}), memoryPages: 1024 });
+}
+
+test("region-warm: the section lists each fragment's entry and size, and a module without a downcount offset has none", () => {
+  const { bytes } = tierUpRegion();
+  const plan = regionModuleWarm(new WebAssembly.Module(bytes));
+  assert.equal(plan.pcOffset, TU.PC);
+  assert.equal(plan.downcountOffset, TU.DC);
+  assert.equal(plan.fragments.length, 1);
+  assert.equal(plan.fragments[0].entry, 0x1000);
+  assert.ok(plan.fragments[0].size > 20);
+  assert.equal(regionModuleWarm(new WebAssembly.Module(tierUpRegion({ warmSection: false }).bytes)), null);
+});
+
+test("tierUpCalls spends V8's 13 M budget with margin: 5.6 KB (tiered between 3 000 and 3 250 calls in Node) gets more, huge functions 5", () => {
+  assert.ok(tierUpCalls(5594) >= 3250);
+  assert.equal(tierUpCalls(16 * 1024), Math.ceil((Math.floor(13e6 / 12288) + 1) * 1.25));
+  assert.equal(tierUpCalls(8 << 20), Math.ceil(5 * 1.25));
+  assert.ok(tierUpCalls(50) > tierUpCalls(1000));
+});
+
+test("a region's tier-up calls each fragment from its entry until its budget is spent, on scratch memory covering MEM1", () => {
+  const { bytes } = tierUpRegion();
+  const module = new WebAssembly.Module(bytes);
+  const warmer = createWarmer();
+  const run = warmer.startTierUp(module, bytes);
+  assert.ok(run, "a module with a region-warm section starts a tier-up");
+  const size = run.plan.fragments[0].size;
+  let slices = 0;
+  while (!run.step(performance.now() + 1)) slices += 1;
+  assert.equal(run.result.traps, 0, "MEM1's last word is inside the scratch memory: no trap");
+  assert.equal(run.result.tieredUp, 1);
+  assert.equal(run.result.calls, tierUpCalls(size));
+  const [memory] = warmer.scratchMemories();
+  const count = new DataView(memory.buffer).getUint32(WARM_STATE_PTR + TU.COUNT, true);
+  assert.equal(count, tierUpCalls(size), "every call ran the entry block once and returned");
+  assert.ok(slices >= 0);
+});
+
+test("a fragment that traps ends its tier-up (counted), and a module without the section has none", () => {
+  const trapping = tierUpRegion({ trap: true });
+  const run = createWarmer().startTierUp(new WebAssembly.Module(trapping.bytes), trapping.bytes);
+  assert.equal(run.step(Infinity), true);
+  assert.equal(run.result.traps, 1);
+  assert.equal(run.result.tieredUp, 0);
+  const plain = tierUpRegion({ warmSection: false });
+  assert.equal(createWarmer().startTierUp(new WebAssembly.Module(plain.bytes), plain.bytes), null);
 });

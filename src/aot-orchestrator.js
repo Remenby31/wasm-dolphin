@@ -270,16 +270,16 @@ export function coreAssembleOptions(m) {
     helpers[name] = parseHelperSignature(m.UTF8ToString(m._DolphinWeb_JitHelperSignature(i)));
   }
   const p = m._malloc(16);
-  let pcOffset;
+  let pcOffset, downcountOffset;
   try {
     m._DolphinWeb_JitStateLayout(p);
-    [pcOffset] = new Uint32Array(m.HEAPU8.buffer, p, 4);
+    [pcOffset, , downcountOffset] = new Uint32Array(m.HEAPU8.buffer, p, 4);
   } finally {
     m._free(p);
   }
   // The core's memory never grows (INITIAL_MEMORY = DOLPHIN_WASM_MEMORY_PAGES):
   // its size is the maximum the region modules declare.
-  return { helperNames: names, assemble: { helpers, pcOffset, memoryPages: m.HEAPU8.buffer.byteLength / 65536 } };
+  return { helperNames: names, assemble: { helpers, pcOffset, downcountOffset, memoryPages: m.HEAPU8.buffer.byteLength / 65536 } };
 }
 
 // The translator the optimiser drives, over the core's export. Translates

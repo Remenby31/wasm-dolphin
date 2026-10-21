@@ -47,6 +47,61 @@ const SCRATCH_IDLE_RELEASE_MS = 5000;
 
 const PAGE = 65536;
 
+// Region tier-up (modules with a "region-warm" section, src/aot-region-module.js):
+// V8 compiles lazily to Liftoff and moves a function to its top tier once a
+// per-function budget of ~13 M "bytes of Liftoff code executed" is spent. The
+// budget lives in the NativeModule, shared by every thread holding the same
+// bytes, and a `return` charges the whole function's Liftoff size
+// (research/deep-v8-tierup.md, V8 15.6). So the worker calls each fragment
+// with state.pc = its entry and downcount 0 (one block, then `return`) until
+// its budget is spent: the CPU thread then runs the top tier at its next call.
+const TIERUP_BUDGET = 13_000_000; // --wasm-tiering-budget
+const TIERUP_MAX_CHARGE = 3_248_128; // budget / 4, rounded to 4 KiB on arm64
+// Liftoff bytes per wasm byte, on the low side so the budget is spent: V8's
+// own estimate is 4 (kLiftoffCodeSizeMultiplier), but a 5.6 KB fragment of
+// state loads and stores moved to TurboFan between 3 000 and 3 250 calls in
+// Node 25 on arm64 (%IsTurboFanFunction; charge 4 096: 4-8 KB of Liftoff).
+const TIERUP_LIFTOFF_PER_WASM_BYTE = 0.75;
+const TIERUP_MARGIN = 1.25;
+// Fragments read the emulated RAM and L1 through the globals env.ram_base and
+// env.l1_base (patch 0084): in a warm-up both point here, above the warm
+// state, and the scratch memory covers MEM1 from there.
+const WARM_RAM_BASE = 0x100000;
+const WARM_RAM_SPAN = 0x1800000 + PAGE; // 24 MiB of MEM1 (L1 aliased on it) and a page of slack
+const REGION_GLOBALS = new Set(["ram_base", "l1_base"]);
+// Time one module's tier-up may take in all (its slices yield like warm-ups),
+// and the whole session's: past them, the remaining fragments tier up at
+// V8's own pace on the CPU thread.
+const TIERUP_MODULE_MS = 250;
+const TIERUP_SESSION_MS = 20_000;
+
+// Calls that spend a fragment's budget: each charges min(Liftoff size + 60,
+// budget / 4), rounded down to 4 KiB above 4 KiB.
+export function tierUpCalls(wasmBytes) {
+  let charge = Math.floor(TIERUP_LIFTOFF_PER_WASM_BYTE * wasmBytes) + 60;
+  if (charge > 4095) charge -= charge % 4096;
+  charge = Math.min(charge, TIERUP_MAX_CHARGE);
+  return Math.ceil((Math.floor(TIERUP_BUDGET / charge) + 1) * TIERUP_MARGIN);
+}
+
+// The "region-warm" section of a module, or null (kept here so the worker
+// imports nothing; same layout as regionModuleWarm in aot-region-module.js).
+function regionWarmPlan(module) {
+  let section;
+  try {
+    [section] = WebAssembly.Module.customSections(module, "region-warm");
+  } catch {
+    return null;
+  }
+  if (!section || section.byteLength < 16 || section.byteLength % 4) return null;
+  const w = new Uint32Array(section.slice(0));
+  const [version, pcOffset, downcountOffset, count] = w;
+  if (version !== 1 || w.length !== 4 + 2 * count) return null;
+  const fragments = [];
+  for (let i = 0; i < count; i++) fragments.push({ index: i, entry: w[4 + 2 * i], size: w[5 + 2 * i] });
+  return { pcOffset, downcountOffset, fragments };
+}
+
 function readU32Leb(bytes, state) {
   let result = 0;
   let shift = 0;
@@ -127,7 +182,7 @@ const stub = () => 0;
 // 1.5 GiB of address space, reserved once per shape, not per block.
 export function createWarmer() {
   const memories = new Map();
-  const stats = { modules: 0, warmed: 0, calls: 0, traps: 0, skipped: 0, scratchFailures: 0 };
+  const stats = { modules: 0, warmed: 0, calls: 0, traps: 0, skipped: 0, scratchFailures: 0, tierUpModules: 0, tierUpSkipped: 0 };
 
   // A shape the engine could not allocate is not tried again: those modules
   // are delivered unwarmed.
@@ -175,9 +230,10 @@ export function createWarmer() {
         tables.push(value);
       } else if (desc.kind === "global") {
         if (desc.value === "unsupported") return null;
+        const base = desc.module === "env" && REGION_GLOBALS.has(desc.name) && desc.value === "i32" ? WARM_RAM_BASE : 0;
         value = new WebAssembly.Global(
           { value: desc.value, mutable: desc.mutable },
-          desc.value === "i64" ? 0n : 0
+          desc.value === "i64" ? 0n : base
         );
       } else {
         return null;
@@ -277,7 +333,87 @@ export function createWarmer() {
     return { warmed: true, calls: stats.calls - callsBefore };
   }
 
-  return { warm, setWarmState, stats, scratchMemories: () => [...memories.values()], releaseScratch: () => memories.clear() };
+  // A region module's tier-up, run in slices: step(deadline) calls fragments,
+  // largest first, until the deadline, and says whether it is done. Null when
+  // the module has no "region-warm" section or cannot be instantiated on a
+  // scratch memory that covers the emulated RAM. A trap ends that fragment
+  // (counted): its budget is not charged by a call that does not return.
+  function startTierUp(module, bytes) {
+    const plan = regionWarmPlan(module);
+    if (!plan || !plan.fragments.length) return null;
+    let built;
+    try {
+      built = buildImports(parseWasmImports(bytes));
+    } catch {
+      built = null;
+    }
+    if (!built?.memory) return null;
+    const memory = built.memory;
+    const needed = Math.ceil((WARM_RAM_BASE + WARM_RAM_SPAN) / PAGE);
+    try {
+      if (memory.buffer.byteLength < needed * PAGE) memory.grow(needed - memory.buffer.byteLength / PAGE);
+    } catch {
+      stats.tierUpSkipped += 1;
+      return null;
+    }
+    let table;
+    try {
+      table = new WebAssembly.Instance(module, built.importObject).exports.fragments;
+    } catch {
+      table = null;
+    }
+    if (!(table instanceof WebAssembly.Table)) {
+      stats.tierUpSkipped += 1;
+      return null;
+    }
+    const statePtr = warmState ? warmState.statePtr : WARM_STATE_PTR;
+    const view = new DataView(memory.buffer);
+    const order = [...plan.fragments].sort((a, b) => b.size - a.size);
+    let at = 0, done = 0;
+    const result = { fragments: order.length, tieredUp: 0, calls: 0, traps: 0, ms: 0 };
+    stats.tierUpModules += 1;
+    function step(deadline) {
+      const t0 = now();
+      while (at < order.length && now() < deadline) {
+        const f = order[at];
+        let fn = null;
+        try {
+          fn = table.get(f.index);
+        } catch {
+          fn = null;
+        }
+        const want = tierUpCalls(f.size);
+        let trapped = false;
+        while (fn && done < want) {
+          view.setUint32(statePtr + plan.pcOffset, f.entry, true);
+          view.setInt32(statePtr + plan.downcountOffset, 0, true);
+          result.calls += 1;
+          try {
+            fn(statePtr);
+          } catch {
+            trapped = true;
+            break;
+          }
+          done += 1;
+          if ((done & 63) === 0 && now() >= deadline) break;
+        }
+        if (trapped || !fn) {
+          result.traps += 1;
+        } else if (done < want) {
+          break; // deadline inside a fragment: resume it next slice
+        } else {
+          result.tieredUp += 1;
+        }
+        at += 1;
+        done = 0;
+      }
+      result.ms += now() - t0;
+      return at >= order.length;
+    }
+    return { step, result, plan };
+  }
+
+  return { warm, startTierUp, setWarmState, stats, scratchMemories: () => [...memories.values()], releaseScratch: () => memories.clear() };
 }
 
 
@@ -319,7 +455,14 @@ export function installAotCompilerWorker(scope) {
   let idleRelease = null;
   let flushes = [];
   let inFlight = 0;
-  const totals = { warmed: 0, warmCalls: 0, warmMs: 0, maxWarmMs: 0, scratchFailures: 0, traps: 0 };
+  const totals = {
+    warmed: 0, warmCalls: 0, warmMs: 0, maxWarmMs: 0, scratchFailures: 0, traps: 0,
+    tierUpModules: 0, tierUpFragments: 0, tierUpDone: 0, tierUpCalls: 0, tierUpTraps: 0, tierUpMs: 0, tierUpCapped: 0
+  };
+  // Region tier-ups waiting or under way, run only when no warm-up is queued
+  // (after their module was delivered: nothing waits on them).
+  const tiering = [];
+  let sessionTierUpMs = 0;
 
   function runWarm(job, module) {
     Atomics.store(status, 0, job.id);
@@ -349,6 +492,36 @@ export function installAotCompilerWorker(scope) {
     outbox.push({ id: job.id, ...fields });
   }
 
+  function finishTierUp(t, capped) {
+    const r = t.run.result;
+    totals.tierUpModules += 1;
+    totals.tierUpFragments += r.fragments;
+    totals.tierUpDone += r.tieredUp;
+    totals.tierUpCalls += r.calls;
+    totals.tierUpTraps += r.traps;
+    totals.tierUpMs += r.ms;
+    if (capped) totals.tierUpCapped += 1;
+  }
+
+  function tierUpSlice(sliceEnd) {
+    while (tiering.length && now() < sliceEnd) {
+      const t = tiering[0];
+      if (sessionTierUpMs >= TIERUP_SESSION_MS) {
+        for (const left of tiering.splice(0)) finishTierUp(left, true);
+        return;
+      }
+      const before = t.run.result.ms;
+      Atomics.store(status, 0, t.job.id);
+      const finished = t.run.step(Math.min(sliceEnd, now() + TIERUP_MODULE_MS - before));
+      Atomics.store(status, 0, 0);
+      sessionTierUpMs += t.run.result.ms - before;
+      if (finished || t.run.result.ms >= TIERUP_MODULE_MS) {
+        tiering.shift();
+        finishTierUp(t, !finished);
+      }
+    }
+  }
+
   function pump() {
     const sliceEnd = now() + WARM_SLICE_MS;
     while (urgent.length || background.length) {
@@ -357,15 +530,21 @@ export function installAotCompilerWorker(scope) {
       if (item.replyAfter) {
         reply(item.job, { module: item.module, compileMs: item.compileMs, warmed: w.warmed, warmMs: w.warmMs, calls: w.calls });
       }
+      const run = sessionTierUpMs < TIERUP_SESSION_MS ? warmer.startTierUp(item.module, item.job.bytes) : null;
+      if (run) tiering.push({ job: item.job, run });
       if (now() >= sliceEnd) break;
     }
-    if (urgent.length || background.length) setTimeout(pump, 0);
+    const warmsQueued = urgent.length || background.length;
+    if (!warmsQueued) tierUpSlice(sliceEnd);
+    if (warmsQueued || tiering.length) setTimeout(pump, 0);
     else {
       pumping = false;
       clearTimeout(idleRelease);
       idleRelease = setTimeout(() => warmer.releaseScratch(), SCRATCH_IDLE_RELEASE_MS);
-      answerFlushes();
     }
+    // A tier-up under way holds back the idle announcement (the owner stops
+    // an idle worker), not the answers to flushes.
+    if (!warmsQueued) answerFlushes();
   }
 
   // Answered once nothing is compiling or waiting for its warm-up.
@@ -376,7 +555,7 @@ export function installAotCompilerWorker(scope) {
       if (outbox.length) flushReplies();
       scope.postMessage({ type: "aot-idle", totals: { ...totals } });
     }
-    if (inFlight || pumping || !flushes.length) return;
+    if (inFlight || urgent.length || background.length || !flushes.length) return;
     if (outbox.length) flushReplies();
     for (const id of flushes) scope.postMessage({ type: "aot-flushed", id, totals: { ...totals } });
     flushes = [];
