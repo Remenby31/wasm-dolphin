@@ -447,7 +447,16 @@ std::string FormatSize(u64 bytes, int decimals)
 namespace
 {
 bool s_runtime_initialized = false;
+// Written by the API's thread and by alerts from any thread (CPU, GPU): every
+// access goes through SetCoreStatus / GetCoreStatus, under this mutex.
+std::mutex s_core_status_mutex;
 std::string s_core_status = "Not initialized";
+
+void SetCoreStatus(std::string status)
+{
+  std::lock_guard lock(s_core_status_mutex);
+  s_core_status = std::move(status);
+}
 std::string s_core_title;
 std::string s_video_backend = "Software Renderer";
 
@@ -526,7 +535,9 @@ void RelayAlert(const std::string& message)
 // - beyond ALERT_MAX_PER_WINDOW alerts per window, alerts are counted, not
 //   relayed, and one summary is relayed when the window rolls;
 // - critical alerts are always relayed.
-// s_core_status always holds the latest alert. Alerts come from any thread.
+// The core status (SetCoreStatus) always holds the latest alert. Alerts come
+// from any thread. A loop that stops dead keeps its last "… repeated N times"
+// until another alert comes (no timer here; accepted, review of #63).
 constexpr int ALERT_MAX_PER_WINDOW = 200;
 constexpr std::chrono::milliseconds ALERT_WINDOW{1000};
 struct AlertRelayState
@@ -610,7 +621,7 @@ bool BrowserMsgHandler(const char* caption, const char* text, bool yes_no, Commo
 {
   (void)yes_no;
   const std::string message = std::string(caption ? caption : "Alert") + ": " + (text ? text : "");
-  s_core_status = message;
+  SetCoreStatus(message);
   RelayAlertLimited(message, style == Common::MsgType::Critical);
   return true;
 }
@@ -841,7 +852,7 @@ void EnsureRuntime()
   });
 
   s_runtime_initialized = true;
-  s_core_status = "Runtime initialized";
+  SetCoreStatus("Runtime initialized");
 }
 }  // namespace
 
@@ -879,7 +890,7 @@ void Host_Message(HostMessageID id)
 {
   if (id == HostMessageID::WMUserStop)
   {
-    s_core_status = "Core requested stop";
+    SetCoreStatus("Core requested stop");
     Core::Stop(Core::System::GetInstance());
   }
 }
@@ -1156,7 +1167,7 @@ int BootDisc(const char* path)
 {
   if (!path)
   {
-    s_core_status = "Boot path was null";
+    SetCoreStatus("Boot path was null");
     return 0;
   }
 
@@ -1168,7 +1179,7 @@ int BootDisc(const char* path)
   auto boot = BootParameters::GenerateFromFile(std::string(path));
   if (!boot)
   {
-    s_core_status = "BootParameters::GenerateFromFile rejected disc";
+    SetCoreStatus("BootParameters::GenerateFromFile rejected disc");
     return 0;
   }
 
@@ -1177,7 +1188,7 @@ int BootDisc(const char* path)
   VideoBackendBase::ActivateBackend(s_video_backend);
 
   const bool booted = BootManager::BootCore(Core::System::GetInstance(), std::move(boot), wsi);
-  s_core_status = booted ? "Boot submitted to Dolphin core" : "BootManager::BootCore failed";
+  SetCoreStatus(booted ? "Boot submitted to Dolphin core" : "BootManager::BootCore failed");
   return booted ? 1 : 0;
 }
 
@@ -1185,7 +1196,7 @@ void StopCore()
 {
   if (s_runtime_initialized)
     Core::Stop(Core::System::GetInstance());
-  s_core_status = "Stopped";
+  SetCoreStatus("Stopped");
 }
 
 int SetCorePaused(int paused)
@@ -1195,7 +1206,7 @@ int SetCorePaused(int paused)
 
   Core::SetState(Core::System::GetInstance(), paused ? Core::State::Paused : Core::State::Running);
   Core::HostDispatchJobs(Core::System::GetInstance());
-  s_core_status = paused ? "Paused" : "Running";
+  SetCoreStatus(paused ? "Paused" : "Running");
   return 1;
 }
 
@@ -1239,7 +1250,7 @@ int ResetCore()
   Core::QueueHostJob(
       [](Core::System& system) { system.GetProcessorInterface().ResetButton_Tap(); });
   Core::HostDispatchJobs(Core::System::GetInstance());
-  s_core_status = "Reset requested";
+  SetCoreStatus("Reset requested");
   return 1;
 }
 
@@ -1250,7 +1261,7 @@ int SaveCoreState(int slot)
 
   State::Save(Core::System::GetInstance(), slot);
   Core::HostDispatchJobs(Core::System::GetInstance());
-  s_core_status = "Save state requested";
+  SetCoreStatus("Save state requested");
   return 1;
 }
 
@@ -1261,7 +1272,7 @@ int LoadCoreState(int slot)
 
   State::Load(Core::System::GetInstance(), slot);
   Core::HostDispatchJobs(Core::System::GetInstance());
-  s_core_status = "Load state requested";
+  SetCoreStatus("Load state requested");
   return 1;
 }
 
@@ -1279,7 +1290,7 @@ int LoadStateFile(const char* path)
 
   State::LoadAs(Core::System::GetInstance(), std::string(path));
   Core::HostDispatchJobs(Core::System::GetInstance());
-  s_core_status = "Load state from file requested";
+  SetCoreStatus("Load state from file requested");
   return 1;
 }
 
@@ -1301,7 +1312,7 @@ int SaveStateFile(const char* path)
   // until the CPU thread runs the queued job; then the file is whole.
   State::SaveToFileSync(Core::System::GetInstance(), std::string(path));
   Core::HostDispatchJobs(Core::System::GetInstance());
-  s_core_status = "Save state to file requested";
+  SetCoreStatus("Save state to file requested");
   return 1;
 }
 
@@ -1327,7 +1338,12 @@ const char* GetCoreStateName()
 
 const char* GetCoreStatus()
 {
-  return s_core_status.c_str();
+  // A copy per calling thread: the pointer stays valid until this thread's
+  // next call, whatever other threads write meanwhile.
+  thread_local std::string snapshot;
+  std::lock_guard lock(s_core_status_mutex);
+  snapshot = s_core_status;
+  return snapshot.c_str();
 }
 
 const char* GetCoreTitle()
