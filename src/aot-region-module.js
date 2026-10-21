@@ -15,15 +15,22 @@
 //                       the exit stub when targetPc is outside the region
 //            "dispatch" return_call to the region dispatcher (blr, bctr),
 //                       state.pc already written
+//            "global"   global.get of a host address the core passes at
+//                       instantiation (REGION_GLOBAL_NAMES: the emulated RAM,
+//                       L1; patch 0084), so the code runs wherever the heap is
 //
-// Module: imports env.memory (shared) and the helpers used, exports one
+// Module: imports env.memory (shared), the helpers used and the globals used
+// (immutable i32, in REGION_GLOBAL_NAMES order), exports one
 // function `f` = the dispatcher: (state) -> 0 continue at state.pc, 1 state.pc
 // is not an entry of the region (nothing ran), 2 stopped. The dispatcher
 // searches state.pc over the declared entries only, so a fragment is never
 // entered on a PC it did not declare. The exit stub returns 0.
 
 const TYPE_STATE = 0; // (i32) -> i32: dispatcher, stub, fragments
-const OP = { localGet: 0x20, localSet: 0x21, i32Load: 0x28, i32Const: 0x41, i32Eq: 0x46, i32LtU: 0x49, if: 0x04, end: 0x0b, return: 0x0f, returnCall: 0x12 };
+// Globals a fragment may read, by the index the core's reloc carries (kind 3).
+export const REGION_GLOBAL_NAMES = Object.freeze(["ram_base", "l1_base"]);
+
+const OP = { globalGet: 0x23, localGet: 0x20, localSet: 0x21, i32Load: 0x28, i32Const: 0x41, i32Eq: 0x46, i32LtU: 0x49, if: 0x04, end: 0x0b, return: 0x0f, returnCall: 0x12 };
 const VAL = { i32: 0x7f, i64: 0x7e, f32: 0x7d, f64: 0x7c };
 
 function uleb(out, v) {
@@ -119,8 +126,9 @@ function dispatcherBody(entries, pcOffset, missing) {
 // Returns { bytes, entries: [[pc, fragmentIndex]] sorted, helpers: [name] }.
 export const REGION_ENTRIES_SECTION = "region-entries";
 // Custom section "region-layout": the u32 hash of the core's heap layout the
-// fragments were translated for (WasmLayoutHash: their code embeds absolute
-// addresses of RAM and L1). The core installs the module only under the same
+// fragments were translated for (WasmLayoutHash: offsets in the CPU state and
+// sizes their code embeds; since patch 0084 not the RAM and L1 addresses,
+// which are globals). The core installs the module only under the same
 // layout; a module without it is never installed.
 export const REGION_LAYOUT_SECTION = "region-layout";
 
@@ -148,6 +156,11 @@ export function assembleRegion(fragments, { helpers, pcOffset, memoryPages, memo
   const helperNames = [...used].sort();
   for (const n of helperNames) if (!helpers?.[n]) throw new Error(`region: unknown helper ${n}`);
   const helperIndex = new Map(helperNames.map((n, i) => [n, i]));
+  const usedGlobals = new Set();
+  for (const f of fragments) for (const r of f.relocs ?? []) if (r.kind === "global") usedGlobals.add(r.name);
+  const globalNames = REGION_GLOBAL_NAMES.filter((n) => usedGlobals.has(n));
+  for (const n of usedGlobals) if (!REGION_GLOBAL_NAMES.includes(n)) throw new Error(`region: unknown global ${n}`);
+  const globalIndex = new Map(globalNames.map((n, i) => [n, i]));
   // Functions: helpers (imports), the exported dispatcher, the internal one
   // (`dispatch` relocs), the exit stub, then the fragments.
   const DISPATCHER = helperNames.length, INNER = DISPATCHER + 1, STUB = INNER + 1, FIRST = STUB + 1;
@@ -179,13 +192,15 @@ export function assembleRegion(fragments, { helpers, pcOffset, memoryPages, memo
       offsets.add(r.offset);
       if (TEMPLATE.some((b, i) => code[r.offset + i] !== b)) throw new Error(`region: reloc at ${r.offset} is not a padded zero`);
       const opcode = code[r.offset - 1];
-      if ((r.kind === "import" && opcode !== 0x10) || ((r.kind === "jump" || r.kind === "dispatch") && opcode !== OP.returnCall)) {
+      if ((r.kind === "import" && opcode !== 0x10) || ((r.kind === "jump" || r.kind === "dispatch") && opcode !== OP.returnCall) ||
+          (r.kind === "global" && opcode !== OP.globalGet)) {
         throw new Error(`region: ${r.kind} reloc at ${r.offset} after opcode 0x${opcode.toString(16)}`);
       }
       let index;
       if (r.kind === "import") index = helperIndex.get(r.name);
       else if (r.kind === "jump") index = entryOwner.get(r.targetPc >>> 0) ?? STUB;
       else if (r.kind === "dispatch") index = INNER;
+      else if (r.kind === "global") index = globalIndex.get(r.name);
       else throw new Error(`region: unknown reloc kind ${r.kind}`);
       code.set(paddedUleb(index), r.offset);
     }
@@ -209,11 +224,12 @@ export function assembleRegion(fragments, { helpers, pcOffset, memoryPages, memo
   section(out, 1, types);
 
   const imports = [];
-  uleb(imports, helperNames.length + 1);
+  uleb(imports, helperNames.length + 1 + globalNames.length);
   name(imports, "env"); name(imports, "memory");
   imports.push(0x02, sharedMemory ? 0x03 : 0x01);
   uleb(imports, memoryMinPages); uleb(imports, memoryPages);
   helperNames.forEach((n, i) => { name(imports, "env"); name(imports, n); imports.push(0x00); uleb(imports, helperType[i]); });
+  for (const n of globalNames) { name(imports, "env"); name(imports, n); imports.push(0x03, VAL.i32, 0x00); }
   section(out, 2, imports);
 
   const funcs = [];

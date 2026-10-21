@@ -19,7 +19,7 @@
 import { readFileSync } from "node:fs";
 
 import { orderedRegions } from "../../src/aot-plan.js";
-import { assembleRegion, groupRegions } from "../../src/aot-region-module.js";
+import { REGION_GLOBAL_NAMES, assembleRegion, groupRegions } from "../../src/aot-region-module.js";
 import { PRODUCTION_DISABLE_MASK, makeRng, randomProgram, randomState } from "./jit-oracle.mjs";
 
 // Signatures of the block module's import types (BuildWasmCachedInterpreterBlock).
@@ -92,17 +92,19 @@ export async function loadAotCore(coreDir = new URL("../../cores/dolphin/", impo
         const [offset, kind, value] = words.subarray(entryCount + 3 * i, entryCount + 3 * i + 3);
         if (kind === 0) return { offset, kind: "import", name: helperNames[value] };
         if (kind === 1) return { offset, kind: "jump", targetPc: value };
+        if (kind === 3) return { offset, kind: "global", name: REGION_GLOBAL_NAMES[value] };
         return { offset, kind: "dispatch" };
       });
       const at = p + 16 + 4 * (entryCount + 3 * relocCount);
       return { entry, entries, code: m.HEAPU8.slice(at, at + codeLength), relocs };
     },
-    // Handle of the compiled module in the core's table (> 0), as for a block.
+    // Handle of the compiled region module in the core's table (> 0), linked
+    // as an installed region is (RAM and L1 globals, patch 0084).
     compile(bytes) {
       const p = m._malloc(bytes.length);
       try {
         m.HEAPU8.set(bytes, p);
-        return m._DolphinWeb_JitCompileBytesForTest(p, bytes.length);
+        return (m._DolphinWeb_JitCompileRegionBytesForTest ?? m._DolphinWeb_JitCompileBytesForTest)(p, bytes.length);
       } finally {
         m._free(p);
       }

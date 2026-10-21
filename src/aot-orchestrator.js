@@ -29,7 +29,7 @@
 // time since the start of this run.
 import { AotOptimizer } from "./aot-optimizer.js";
 import { createAotRegionLoader } from "./aot-region-loader.js";
-import { regionModuleEntries, regionModuleLayout } from "./aot-region-module.js";
+import { REGION_GLOBAL_NAMES, regionModuleEntries, regionModuleLayout } from "./aot-region-module.js";
 
 export const AOT_FIRST_LAUNCH_PARAM = "aot";
 export const AOT_PROGRESS_SCHEMA = "wasm-dolphin.aot-progress.v1";
@@ -244,7 +244,8 @@ export function createAotFirstLaunch({
 //   thread_local, guest code read from physical RAM through the BAT views).
 //   ptr -> [status, entry, codeLength, entryCount, relocCount, reserved],
 //   entries (u32 each), relocs (offset, kind, value: 0 import by helper
-//   index, 1 jump to value, 2 dispatch), code. Valid until the next call on
+//   index, 1 jump to value, 2 dispatch, 3 global by REGION_GLOBAL_NAMES
+//   index), code. Valid until the next call on
 //   the same thread; 0 is an internal error.
 // _DolphinWeb_AotKeyParts(ptr) writes [compilerVersion, codegenMask].
 // _DolphinWeb_JitHelperName(i) / _DolphinWeb_JitHelperSignature(i): helper
@@ -344,6 +345,7 @@ function translateOne(m, f, { mask, maxBlocks, names }) {
     const [offset, kind, value] = words.subarray(entryCount + 3 * i, entryCount + 3 * i + 3);
     if (kind === 0) return { offset, kind: "import", name: names[value] };
     if (kind === 1) return { offset, kind: "jump", targetPc: value };
+    if (kind === 3) return { offset, kind: "global", name: REGION_GLOBAL_NAMES[value] };
     return { offset, kind: "dispatch" };
   });
   const at = p + 24 + 4 * (entryCount + 3 * relocCount);

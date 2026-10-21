@@ -322,22 +322,56 @@ test("a region translated for another heap layout is never installed", { skip: s
   assert.equal(core.dispatchRegion(), 0);
 });
 
-// A region already installed when the RAM moves (a stop and a new boot in
-// the same page reallocates it): its code still writes the old address. A
-// cache clear makes it checked again, layout included; a shutdown forgets
-// every region (review of #62, P1-1).
-test("an installed region is dropped when the heap layout moved, before it runs again", { skip: skip || (!core?.has("DolphinWeb_AotLayoutShiftForTest") && "core without the layout re-check") }, () => {
+// A region already installed when the layout moves: its code still embeds
+// the old offsets or sizes. A cache clear makes it checked again, layout
+// included; a shutdown forgets every region (review of #62, P1-1). The RAM
+// address is no longer part of the layout (patch 0084): the region reads it
+// from a global, so a moved RAM keeps it.
+const LAYOUT_RAM_SIZE_FIELD = 16; // WasmStateLayout.ram_size_real
+test("an installed region is dropped when the heap layout moved, before it runs again", { skip: skip || (!core?.has("DolphinWeb_AotLayoutShiftFieldForTest") && "core without position-independent regions (0084)") }, () => {
   installed();
   core.reset(seedGprs(1), PROGRAM.labels.count, STOP, 400000);
   assert.equal(core.dispatchRegion(), 1, "runs under its own layout");
-  core.module._DolphinWeb_AotLayoutShiftForTest(0x100000); // the RAM sits 1 MiB further
+  core.module._DolphinWeb_AotLayoutShiftFieldForTest(LAYOUT_RAM_SIZE_FIELD, 0x100000);
   try {
     core.unverifyRegions(); // what ClearCache does at the new boot
     core.reset(seedGprs(1), PROGRAM.labels.count, STOP, 400000);
-    assert.equal(core.dispatchRegion(), 0, "dropped, not run at the old address");
+    assert.equal(core.dispatchRegion(), 0, "dropped, not run with the old sizes");
+  } finally {
+    core.module._DolphinWeb_AotLayoutShiftFieldForTest(0, 0);
+  }
+});
+
+// Patch 0084: a module translated in a session whose RAM sat elsewhere (its
+// layout hash computed there) installs here and runs as the interpreter does.
+test("a region translated while the RAM sat elsewhere installs and runs here", { skip: skip || (!core?.has("DolphinWeb_AotLayoutShiftFieldForTest") && "core without position-independent regions (0084)") }, () => {
+  const plan = setup();
+  core.setRegionsEnabled(true);
+  const before = core.regionCount();
+  const refused = core.module._DolphinWeb_AotLayoutRefused() >>> 0;
+  core.module._DolphinWeb_AotLayoutShiftForTest(0x100000); // the RAM 1 MiB further
+  let modules;
+  try {
+    modules = regionGroups(plan, 100).map((group) => ({
+      group, ...assembleRegion(group.flatMap(functionFragments(core)), { helpers: HELPER_SIGNATURES, pcOffset: core.pcOffset, memoryPages: core.memoryPages }),
+      layout: core.module._DolphinWeb_AotLayoutHash() >>> 0
+    }));
   } finally {
     core.module._DolphinWeb_AotLayoutShiftForTest(0);
   }
+  for (const m of modules) {
+    assert.equal(m.layout, core.module._DolphinWeb_AotLayoutHash() >>> 0, "the RAM address is not in the layout");
+    const imports = WebAssembly.Module.imports(new WebAssembly.Module(m.bytes)).filter((i) => i.kind === "global").map((i) => i.name);
+    assert.ok(imports.includes("ram_base"), "RAM read through env.ram_base");
+    core.queueRegion(m.bytes, m.entries.map(([pc]) => pc), m.group.map((f) => ({ ranges: f.ranges, hash: f.hash })), m.layout);
+  }
+  core.serviceRegions();
+  assert.ok(core.regionCount() > before, "installed");
+  assert.equal(core.module._DolphinWeb_AotLayoutRefused() >>> 0, refused, "no layout refusal");
+  const reference = runCall(PROGRAM.labels.main, { regions: false });
+  const got = runCall(PROGRAM.labels.main, { regions: true });
+  assert.ok(got.ran > 0, "regions ran");
+  assert.deepEqual(got.state, reference.state);
 });
 
 test("a core shutdown forgets every region: installed, waiting and queued", { skip: skip || (!core?.has("DolphinWeb_AotForgetRegionsForTest") && "core without ForgetAllRegions") }, () => {
