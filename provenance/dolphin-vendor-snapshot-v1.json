@@ -3,8 +3,8 @@
   "normalization": "git-blob-lf",
   "root": {
     "baseCommit": "e22551eae1c84a7e4d0b6a5c519ef4ed4ef69df1",
-    "resultTree": "c8edae060c82eced5fd31b49f9a5ada0cac65558",
-    "changedPathCount": 126,
+    "resultTree": "1c6e154940af9f1bf59126216441d695f3e303f4",
+    "changedPathCount": 128,
     "records": [
       {
         "path": "CMakeLists.txt",
@@ -182,9 +182,9 @@
         "status": "M",
         "mode": "100644",
         "baseBlob": "1fa39d74486b5c652078c7fba67891c1e13c194f",
-        "resultBlob": "df7f282ee400557667fc4deaa365b899fa13b164",
-        "size": 27693,
-        "sha256": "644208a159af08fe7380d76bdbf37102ca55a6c79bee986e7672f804d777294d"
+        "resultBlob": "41ace0dd3ed8995d3467b3f06e37a5376208cafd",
+        "size": 32560,
+        "sha256": "42b0881da05eaccb573ea476cac4b3e8c52b4012332fb52ac135ce98fe42bf59"
       },
       {
         "path": "Source/Core/Core/HW/DVD/AMMediaboard.cpp",
@@ -295,6 +295,15 @@
         "sha256": "8e46fa08236f8eae0d644e67cd2b7f96c67c2042b9d791d26070cfd653ea86af"
       },
       {
+        "path": "Source/Core/Core/HW/SystemTimers.h",
+        "status": "M",
+        "mode": "100644",
+        "baseBlob": "b0002c49ee1bafae8497b19bde54df6066d5ca99",
+        "resultBlob": "b4b6fa8272c9e6876513e642091587c0768bbf94",
+        "size": 4108,
+        "sha256": "efceebfcdaf5f15e9308393179d48ea91ed9e0e73384c0e7622821bdabf22291"
+      },
+      {
         "path": "Source/Core/Core/HW/Triforce/ICCardReader.cpp",
         "status": "M",
         "mode": "100644",
@@ -317,9 +326,9 @@
         "status": "M",
         "mode": "100644",
         "baseBlob": "42e0f350ba133ed466cefa0fd102f71bd0f7c880",
-        "resultBlob": "2fa67037f14895d8976ee454e0d19deed4baea29",
-        "size": 43120,
-        "sha256": "9827badf3f1a2aea477b747d0ea70c19e0756822a40f8333143dad9794b8f061"
+        "resultBlob": "cb51305a244a42077575c574f67cf7e360b2242f",
+        "size": 43764,
+        "sha256": "82f31acc1b61271cda74cd86d8bf3b48893ea143fb2a81e6fe2ef74b5e104331"
       },
       {
         "path": "Source/Core/Core/IOS/Network/Socket.h",
@@ -482,6 +491,15 @@
         "resultBlob": "2499b5b8bd4180b2342142527bd1918fd7cf2a8c",
         "size": 3414,
         "sha256": "23d1e0457c685f9f1eaba62c0cfed5c1e1ee74112a0a883bc8b916c9f18f998e"
+      },
+      {
+        "path": "Source/Core/Core/WasmIdleStats.h",
+        "status": "A",
+        "mode": "100644",
+        "baseBlob": null,
+        "resultBlob": "da3a64b330847d92706c961c3bf42bbb0d09ccb4",
+        "size": 2614,
+        "sha256": "05ca81c26e8463ac36091a1f24241dd6d4ac4255424d5dabc039ac11d2c0e699"
       },
       {
         "path": "Source/Core/Core/WasmTimingProfile.h",
@@ -1176,5 +1194,5 @@
       ]
     }
   ],
-  "contentSha256": "6bca7082834161c3479770be89a1f5d44daa5171147de57ae322abfbb8210ff2"
+  "contentSha256": "a70a8ee42493580022fa1e3103e8de3d4abf9e2fa1578285ea641c7ad7e964ba"
 }

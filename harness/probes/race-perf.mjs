@@ -14,7 +14,7 @@
 //     [--runs 4 (even with --baseline)] [--min-pairs 4] [--hold KeyX] [--warm]
 //     [--max-load L] [--load-wait 300] [--lock-wait 1800]
 //     [--pcsample [periodMs]] [--symbols functions.json] [--out dir]
-//     [--region-sample N [--region-secs 10]] [--baseline-query "..."]
+//     [--region-sample N [--region-secs 10]] [--idle-secs N] [--baseline-query "..."]
 //
 // - Pairing and interleaving: run i measures both sides back to back, the
 //   order alternating (base, head | head, base | …), so drift on the machine
@@ -48,6 +48,11 @@
 //   (idleTimeShare), and its diagnostics (p4.diagnostics). The speed
 //   windows are identical with or without it; p4 is compared between sides
 //   only when both have it (p4Compare).
+// - Idle-skip counters (patch 0089, lib/idle-stats.mjs): off by default. With
+//   --idle-secs N, after the speed and region windows, a stats window of N s
+//   resets and reads them: CoreTiming::Idle() calls, the loops that came back
+//   out only to go straight back in (reentries) and what woke them, per
+//   field. summary.json carries them as idle and baselineIdle.
 import { execFileSync } from "node:child_process";
 import { randomBytes } from "node:crypto";
 import { existsSync, mkdirSync, readdirSync, readFileSync, rmSync, statSync, writeFileSync } from "node:fs";
@@ -66,6 +71,7 @@ import { waitForLoad } from "../lib/env.mjs";
 import { describe, median, percentile, round } from "../lib/stats.mjs";
 import { coreStats, hitchList, mergeTimeline, presentationStats } from "../lib/timeline.mjs";
 import { consistentRead, decodeRegionStats, poolStats, regionShares, topMisses } from "../lib/jit-region-stats.mjs";
+import { idleRecord, summarizeIdle } from "../lib/idle-stats.mjs";
 import { summarizePcSamples } from "../../src/harness-pc-sampler.js";
 
 const HOMEBREW_OUT = path.join(REPO_ROOT, "harness", "homebrew", "out");
@@ -185,6 +191,14 @@ async function measure(session, o) {
         regionEnd = await workerRequest(page, "validationReadJitRegionStats", {}, 10000);
       }
     }
+    let idleEnd = null;
+    if (o.idleSecs != null) {
+      idleEnd = await workerRequest(page, "validationReadIdleStats", { reset: true }, 10000);
+      if (!idleEnd?.error) {
+        await new Promise((r) => setTimeout(r, o.idleSecs * 1000));
+        idleEnd = await workerRequest(page, "validationReadIdleStats", {}, 10000);
+      }
+    }
     return {
       windowMs: Math.round(t1 - t0),
       load1: { min: round(Math.min(...loads), 2), median: round(medianLoad, 2), max: round(Math.max(...loads), 2), limit: o.maxLoad },
@@ -202,7 +216,8 @@ async function measure(session, o) {
       rendererThreads: threads,
       freezes: { core: core.freezes?.length ?? 0, present: pres.freezes.length },
       pc: pc && !pc.error ? summarizePcSamples(pc, { functions: o.functions }) : pc,
-      ...regionRecord(regionEnd)
+      ...regionRecord(regionEnd),
+      ...(o.idleSecs != null ? idleRecord(idleEnd) : {})
     };
   } finally {
     if (o.hold) await page.keyboard.up(o.hold).catch(() => {});
@@ -253,6 +268,13 @@ export function p4Summary(runs, sides, good = (r) => r && !r.error) {
     baselineP4: b?.p4 ?? null, baselineP4Why: b?.why ?? null,
     p4Compare: !b ? null : c.p4 && b.p4 ? "both sides" : c.p4 || b.p4 ? `withheld: counters on the ${c.p4 ? "candidate" : "baseline"} only` : "neither side"
   };
+}
+
+// idle / baselineIdle over the cold stats windows of good runs.
+export function idleSummary(runs, sides, good = (r) => r && !r.error) {
+  const side = (n) => summarizeIdle(runs.map((r) => r[n]).filter(good).map((r) => r.cold));
+  const c = side("candidate"), b = sides.baseline ? side("baseline") : null;
+  return { idle: c.idle, idleWhy: c.why, baselineIdle: b?.idle ?? null, baselineIdleWhy: b?.why ?? null };
 }
 
 async function measureSide(side, o) {
@@ -312,7 +334,7 @@ async function main() {
       runs: { type: "string", default: "4" }, "min-pairs": { type: "string" }, "load-wait": { type: "string", default: "300" }, warmup: { type: "string", default: "25" }, secs: { type: "string", default: "20" },
       hold: { type: "string", default: "KeyX" }, warm: { type: "boolean", default: false },
       "max-load": { type: "string" }, "lock-wait": { type: "string", default: "1800" },
-      pcsample: { type: "string" }, symbols: { type: "string" }, "region-sample": { type: "string" }, "region-secs": { type: "string", default: "10" }, "baseline-query": { type: "string" },
+      pcsample: { type: "string" }, symbols: { type: "string" }, "region-sample": { type: "string" }, "region-secs": { type: "string", default: "10" }, "idle-secs": { type: "string" }, "baseline-query": { type: "string" },
       "core-candidate": { type: "string", multiple: true, default: [] },
       port: { type: "string", default: process.env.HARNESS_PORT }, out: { type: "string" }
     },
@@ -345,6 +367,7 @@ async function main() {
     pcsample: values.pcsample ? num(values, "pcsample", { min: 0.05 }) : null,
     regionSample: values["region-sample"] == null ? null : num(values, "region-sample", { min: 0, int: true }),
     regionSecs: num(values, "region-secs", { min: 1 }),
+    idleSecs: values["idle-secs"] == null ? null : num(values, "idle-secs", { min: 1 }),
     functions: values.symbols ? JSON.parse(readFileSync(values.symbols, "utf8")).sort((a, b) => a[0] - b[0]) : null,
     coreCandidates: values["core-candidate"]
   };
@@ -417,6 +440,8 @@ async function main() {
     pcsample: pcNote,
     // P4 counters (KPI: region and dispatch shares), cold stats windows of good runs.
     ...p4Summary(runsDone, sides, good),
+    // Idle-skip counters (--idle-secs), cold stats windows of good runs.
+    ...(o.idleSecs != null ? idleSummary(runsDone, sides, good) : {}),
     // What each side served (commit, dirty), for kpi-report: from its first good run.
     served: Object.fromEntries(Object.keys(sides).map((n) => [n, runsDone.map((r) => r[n]).find(good)?.served ?? null]))
   };
