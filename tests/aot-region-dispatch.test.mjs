@@ -467,3 +467,25 @@ test("a loop across chained regions that never exits stops on downcount, like th
   }
   core.invalidate(TEXT, 4 * SPIN.words.length); // the next test's setup reloads PROGRAM
 });
+
+// 0091 (with dispatch's 0090): under the MMU no region is installed, not even
+// one queued before (a cache translated in a session without it), since
+// region code does not stop at a DSI. The block path runs the code.
+test("under the MMU queued regions are not installed, and the skips are counted", { skip: skip || ((!core?.setMMUMode || typeof core.module._DolphinWeb_AotRegionsSkippedMmu !== "function") && "core without the MMU guard (0091)") }, () => {
+  const plan = setup();
+  core.setRegionsEnabled(true);
+  const before = core.regionCount();
+  const skipped = core.module._DolphinWeb_AotRegionsSkippedMmu() >>> 0;
+  const queued = regionGroups(plan, 100).length;
+  queueAll(plan);
+  core.setMMUMode(true);
+  try {
+    core.serviceRegions();
+    assert.equal(core.regionCount(), before, "nothing installed");
+    assert.equal((core.module._DolphinWeb_AotRegionsSkippedMmu() >>> 0) - skipped, queued);
+    core.reset(seedGprs(1), PROGRAM.labels.main, STOP, 400000);
+    assert.equal(core.dispatchRegion(), 0, "the block path runs the code");
+  } finally {
+    core.setMMUMode(false);
+  }
+});
