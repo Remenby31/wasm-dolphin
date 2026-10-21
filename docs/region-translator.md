@@ -200,7 +200,9 @@ million console lines, the browser process at 7-14 GB).
   read RAM and L1 from imported immutable globals (`env.ram_base`,
   `env.l1_base`, reloc kind 3 "global", a `global.get` of a padded zero the
   assembler renumbers) instead of `i32.const`; the core passes their values
-  when it instantiates a region. `WasmLayoutHash` leaves the two addresses
+  when it instantiates a region. A fragment copies both into two locals at
+  its entry and every access reads a local: one `global.get` per access cost
+  0.8 % of the race with aot=1 (Spark pair p1-heap-globals-aot1). `WasmLayoutHash` leaves the two addresses
   out, so a moved heap no longer refuses (and wastes) the cache; the guard
   still refuses a change of any other field (offsets in the CPU state, RAM
   and L1 sizes). Block modules keep the constants: their bytes and keys are
