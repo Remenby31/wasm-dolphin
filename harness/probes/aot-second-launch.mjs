@@ -89,6 +89,7 @@ async function launchOnce(profileDir) {
         await page.waitForTimeout(Number(values.sec) * 1000);
         const r = await workerRequest(page, "validationReadJitRegionStats", {}, 10000).catch(() => null);
         result.regions = r?.bytes ? decodeRegionStats(r.bytes).diagnostics ?? null : null;
+        result.layoutRefused = Number.isInteger(r?.layoutRefused) ? r.layoutRefused : null;
       })(),
       (async () => { while (!stop) await new Promise((res) => setTimeout(res, 500)); throw new Error(`over ${values["cap-mb"]} MB`); })(),
       new Promise((_, rej) => setTimeout(() => rej(new Error("4 min limit")), 240000))
@@ -103,6 +104,10 @@ async function launchOnce(profileDir) {
   }
   return result;
 }
+
+// A launch without regions because the heap moved (all refused for their
+// layout) is told apart from one whose cache was empty.
+const result_layout = (r) => (r.layoutRefused > 0 ? ` (${r.layoutRefused} refused for another heap layout)` : "");
 
 const outDir = values.out ?? null;
 if (outDir) mkdirSync(outDir, { recursive: true });
@@ -121,9 +126,9 @@ for (let run = 1; run <= Number(values.runs); run += 1) {
     r.capped && `memory cap (${r.capped.totalMB} MB: ${JSON.stringify(r.capped.byType)})`,
     r.invalidReads > 0 && `${r.invalidReads} "Invalid read"`,
     frames < Number(values["min-frames"]) && `${frames} frames < ${values["min-frames"]}`,
-    !(installed > 0) && "no region installed from the cache"
+    !(installed > 0) && `no region installed from the cache${result_layout(r)}`
   ].filter(Boolean);
-  log(`run ${run}: ${why.length ? `FAIL (${why.join("; ")})` : "pass"}; frames ${frames}, peak ${peak} MB, regions ${JSON.stringify(r.regions && { queued: r.regions.regionsQueued, installed, refused: r.regions.regionsRefused, dropped: r.regions.regionsDropped })}`);
+  log(`run ${run}: ${why.length ? `FAIL (${why.join("; ")})` : "pass"}; frames ${frames}, peak ${peak} MB, regions ${JSON.stringify(r.regions && { queued: r.regions.regionsQueued, installed, refused: r.regions.regionsRefused, layoutRefused: r.layoutRefused, dropped: r.regions.regionsDropped })}`);
   if (why.length) failed += 1;
   if (outDir) writeFileSync(path.join(outDir, `run${run}.json`), JSON.stringify({ ...r, frames, peak, verdict: why.length ? "fail" : "pass", why }, null, 1));
 }

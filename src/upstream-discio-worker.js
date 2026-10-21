@@ -283,7 +283,10 @@ function harnessJitRegionStats({ sampleEvery } = {}) {
   const size = Math.min(new DataView(heap.buffer, ptr, 8).getUint32(4, true), 256);
   if (ptr + size > heap.length) return { error: `region stats of ${size} bytes past the heap` };
   const copy = () => Array.from(new Uint8Array(heap.buffer, ptr, size));
-  return { bytes: copy(), again: copy(), installSamples: harnessRegionInstallSamples(heap) };
+  // layoutRefused: queued regions refused for another heap layout (0078), null
+  // with an older core.
+  const layoutRefused = moduleInstance._DolphinWeb_AotLayoutRefused ? moduleInstance._DolphinWeb_AotLayoutRefused() >>> 0 : null;
+  return { bytes: copy(), again: copy(), installSamples: harnessRegionInstallSamples(heap), layoutRefused };
 }
 // The core's first region installs, [ms, bytes, path] each (path 0 first
 // attempt, 1 after the worker's ready byte, 2 cold); null with an older core.
