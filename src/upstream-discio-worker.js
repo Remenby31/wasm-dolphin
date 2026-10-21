@@ -2356,6 +2356,17 @@ async function loadCore({
   }
 
   api = bindApi(moduleInstance);
+  // Direct pad block (src/direct-pad.js): the page writes pad states into the
+  // core's shared memory and the SI poll reads them there.
+  if (typeof moduleInstance._DolphinWeb_DirectPadBlock === "function" &&
+      moduleInstance.HEAPU8.buffer instanceof SharedArrayBuffer) {
+    self.postMessage({
+      type: "direct-pad",
+      buffer: moduleInstance.HEAPU8.buffer,
+      offset: moduleInstance._DolphinWeb_DirectPadBlock() >>> 0,
+      layout: moduleInstance._DolphinWeb_DirectPadLayout() >>> 0
+    });
+  }
   harnessVideoBackend = videoBackend;
   if (harnessEnabled) moduleInstance._DolphinWeb_HarnessEnable?.(1);
   if (detTraceRequested) moduleInstance._DolphinWeb_DetTraceEnable?.(1);

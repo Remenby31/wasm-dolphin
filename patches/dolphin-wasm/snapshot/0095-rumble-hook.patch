@@ -1,0 +1,23 @@
+diff --git a/Source/Core/Core/HW/GCPad.cpp b/Source/Core/Core/HW/GCPad.cpp
+--- a/Source/Core/Core/HW/GCPad.cpp
++++ b/Source/Core/Core/HW/GCPad.cpp
+@@ -15,6 +15,9 @@
+ 
+ #ifdef __EMSCRIPTEN__
+ extern "C" int DolphinWeb_GetPadStatus(int pad_num, GCPadStatus* status);
++// The game switched a controller's motor (SI CMD_WRITE): the page reads it
++// back to forward it to the player's own pad, or to a streamed guest.
++extern "C" void DolphinWeb_OnRumble(int pad_num, double strength);
+ #endif
+ 
+ InputConfig* GetConfig()
+@@ -76,6 +79,9 @@
+ 
+ void Rumble(const int pad_num, const ControlState strength)
+ {
++#ifdef __EMSCRIPTEN__
++  DolphinWeb_OnRumble(pad_num, strength);
++#endif
+   static_cast<GCPad*>(s_config.GetController(pad_num))->SetOutput(strength);
+ }
+ 

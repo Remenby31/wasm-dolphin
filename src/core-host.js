@@ -679,6 +679,32 @@ export class EmulatorHost {
     return true;
   }
 
+  // A streamed guest's state on a port (docs/input.md, "Streaming"): as
+  // setPad, plus the guest's sequence number and reception time
+  // (performance.timeOrigin + now()), echoed by padFeedback once a poll read it.
+  setRemotePad(port, state, meta = {}) {
+    if (!isPadPort(port) || !state) return false;
+    if (!this.adapter.setRemotePadState) return this.setPad(port, state);
+    this.adapter.setRemotePadState(port, state, meta);
+    return true;
+  }
+
+  // Buttons pressed and maybe already released (press counters of a streamed
+  // guest): the SI poll holds them until a poll of a later frame read them.
+  // False when the core cannot: the caller must hold them itself.
+  tapPad(port, buttons) {
+    if (!isPadPort(port)) return false;
+    return Boolean(this.adapter.tapPad?.(port, buttons));
+  }
+
+  // { pollCount, appliedSeq, appliedRxTime, pollTime, rumble, rumbleGeneration,
+  // reportedMask, presses[12] } for a port, or null on a core without the
+  // direct pad block.
+  padFeedback(port) {
+    if (!isPadPort(port)) return null;
+    return this.adapter.padFeedback?.(port) ?? null;
+  }
+
   // Plugs (true) or unplugs (false) the controller on a port. An unplugged
   // port answers "no controller" to the game.
   connectPad(port, connected) {
