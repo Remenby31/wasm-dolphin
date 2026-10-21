@@ -7114,8 +7114,9 @@ async function recordAotBootSet(module, flow, { timeoutMs = 5000, everyMs = 50 }
   const at = module._DolphinWeb_JitDumpBlocksBuffer() >>> 0;
   const words = new Uint32Array(module.HEAPU8.buffer, at, 3 * count).slice();
   const { blocksFromCoreDump } = await import("./aot-profile.js");
-  const size = await flow.recordBootBlocks(blocksFromCoreDump(words));
-  postStatus(`aot: boot set of ${size} region modules recorded`);
+  const blocks = blocksFromCoreDump(words);
+  const size = await flow.recordBootBlocks(blocks);
+  console.info(`[aot] boot set: ${blocks.length} blocks executed at the first image, ${size} region modules`);
 }
 // No region is copied into the core's heap before the core has allocated the
 // emulated RAM: those copies (a second launch queues every cached region, 127
