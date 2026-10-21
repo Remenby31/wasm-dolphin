@@ -285,7 +285,7 @@ function harnessJitRegionStats({ sampleEvery } = {}) {
   const copy = () => Array.from(new Uint8Array(heap.buffer, ptr, size));
   // layoutRefused: queued regions refused for another heap layout (0078), null
   // with an older core.
-  const layoutRefused = moduleInstance._DolphinWeb_AotLayoutRefused ? moduleInstance._DolphinWeb_AotLayoutRefused() >>> 0 : null;
+  const layoutRefused = moduleInstance._DolphinWeb_AotLayoutRefused ? (moduleInstance._DolphinWeb_AotLayoutRefused() >>> 0) + aotLayoutSkipped : null;
   return { bytes: copy(), again: copy(), installSamples: harnessRegionInstallSamples(heap), layoutRefused };
 }
 // The core's first region installs, [ms, bytes, path] each (path 0 first
@@ -3466,6 +3466,7 @@ async function mountFile(file) {
   aotFirstLaunch = null;
   aotCoreBooted = false;
   aotRegionsBeforeBoot.length = 0;
+  aotLayoutSkipped = 0;
   aotDiscKey = null;
   aotDiscKeyPromise = null;
   aotDiscFile = file;
@@ -7072,19 +7073,34 @@ export async function prepareAotFirstLaunch(file, {
 // optimisation. A cancel (aotCancel, stop) or a remount in between wins: the
 // start is dropped.
 export function startAotFirstLaunchAfterBoot(flow = aotFirstLaunch) {
-  aotCoreBooted = true;
-  for (const [module, region] of aotRegionsBeforeBoot.splice(0)) queueAotRegion(module, region);
+  void whenCoreRamReady(moduleInstance).then((ready) => {
+    if (!ready) return;
+    aotCoreBooted = true;
+    for (const [module, region] of aotRegionsBeforeBoot.splice(0)) queueAotRegion(module, region);
+  });
   if (!flow?.supported) return Promise.resolve();
   const generation = flow.generation;
   return flow.loadRest().catch(() => {}).then(() => {
     if (aotFirstLaunch === flow) return flow.start({ resume: true, ifGeneration: generation });
   });
 }
-// No region is copied into the core's heap before the boot: those copies (a
-// second launch queues every cached region, 127 MB for a race) came before
-// the core allocated the emulated RAM and moved it, and a region's code
-// embeds that address (its layout hash then refuses it). They wait here.
+// No region is copied into the core's heap before the core has allocated the
+// emulated RAM: those copies (a second launch queues every cached region, 127
+// MB for a race) came first and moved it, and a region's code embeds that
+// address (its layout hash then refuses it). Booting only submits the boot to
+// the emulation thread, which allocates the RAM: they wait for the core to
+// say it exists (DolphinWeb_AotRamReady), polled, up to 60 s.
 let aotCoreBooted = false;
+let aotLayoutSkipped = 0;
+async function whenCoreRamReady(module, { timeoutMs = 60000, everyMs = 50 } = {}) {
+  if (typeof module?._DolphinWeb_AotRamReady !== "function") return true; // older core: as before
+  const start = performance.now();
+  while (performance.now() - start < timeoutMs) {
+    if (module._DolphinWeb_AotRamReady()) return true;
+    await new Promise((resolve) => setTimeout(resolve, everyMs));
+  }
+  return false;
+}
 const aotRegionsBeforeBoot = [];
 function queueAotRegionAfterBoot(module, region) {
   if (aotCoreBooted) queueAotRegion(module, region);
@@ -7103,6 +7119,12 @@ async function regionBlockCacheKey(bytes) {
 // the core installs nothing whose code changed since the translation.
 function queueAotRegion(module, { bytes, entries, members, layout = 0 }) {
   if (typeof module?._DolphinWeb_AotQueueRegion !== "function" || !bytes?.length || !entries?.length || !members?.length) return;
+  // Translated for another heap layout: the core would refuse it; not even
+  // copied into its heap (counted).
+  if (typeof module._DolphinWeb_AotLayoutHash === "function" && (layout >>> 0) !== (module._DolphinWeb_AotLayoutHash() >>> 0)) {
+    aotLayoutSkipped += 1;
+    return;
+  }
   const ranges = members.flatMap((m) => m.ranges);
   const triples = members.flatMap((m) => [m.ranges.length, m.hash ? parseInt(m.hash.slice(8), 16) : 0, m.hash ? parseInt(m.hash.slice(0, 8), 16) : 0]);
   const words = [...entries, ...ranges.flat(), ...triples].map((v) => v >>> 0);

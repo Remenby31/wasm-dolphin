@@ -126,7 +126,7 @@ export const REGION_LAYOUT_SECTION = "region-layout";
 
 export function regionModuleLayout(module) {
   const [section] = WebAssembly.Module.customSections(module, REGION_LAYOUT_SECTION);
-  return section && section.byteLength === 4 ? new Uint32Array(section.slice(0))[0] : 0;
+  return section && section.byteLength === 4 ? new DataView(section).getUint32(0, true) : 0;
 }
 
 // Entries a region module declares (its "region-entries" section), or null.

@@ -176,10 +176,25 @@ million console lines, the browser process at 7-14 GB).
   3.9 GB. One earlier relaunch found the RAM elsewhere (all 143 refused, the
   game correct and slower): the heap is not always laid out the same, which
   is what position-independent code removes.
-- Discio copies no region into the core's heap before the boot: what P7
-  installs before it waits for `startAotFirstLaunchAfterBoot`.
+- Discio copies no region into the core's heap before the core has
+  allocated the emulated RAM (`DolphinWeb_AotRamReady`, polled after the boot
+  is submitted), and none whose layout already differs from the core's
+  (counted with the core's refusals as `layoutRefused`).
+- Installed regions keep their layout: a cache clear (a new boot) has them
+  checked again, layout included, before they run; `CachedInterpreter::Shutdown`
+  forgets every region, installed, waiting or queued (review of #62).
+- After a refusal the session runs without those regions and nothing
+  retranslates them: the cache keeps its modules, a relaunch under the same
+  moved layout refuses again (counted per launch). The code's other absolute
+  address, the `frsqrte_expected` table, is static data of the binary,
+  covered by the core hash in the cache identity.
 - Lane 11 of P4/P7 (`harness/probes/aot-second-launch.mjs`): seed, then launch
-  again; 0 "Invalid read", regions installed from the cache.
+  again on the seed's origin (checked); pass when modules came from the
+  region cache and were installed, 0 "Invalid read"; `refused-layout` (the
+  heap moved, the game still correct) is told apart.
+- [ ] **Retranslate after a layout refusal**: compare a cached module's
+  layout with the core's once the RAM exists, mark the key not done, translate
+  it again and overwrite the entry (review of #62, P1-3).
 - [ ] **Position-independent region code**: pass RAM and L1 as imported
   immutable globals instead of constants, so a moved heap no longer refuses
   (and wastes) the cache. The cache key cannot hold the layout: it is opened

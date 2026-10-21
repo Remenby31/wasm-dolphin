@@ -25,7 +25,7 @@
       "commit": "01e0577914a75a2569c846778c2f93aa8e6feddd"
     }
   },
-  "patchSeriesSha256": "bec5beb121b9d7538d4604e69f43a8e3828dba1bbcb1b1ba506be6143c5dd040",
+  "patchSeriesSha256": "a0841b81cbf342f5e1d8749ce22ccaaf844576d2f0f49e415f8d4d606f32567f",
   "patches": [
     {
       "order": 1,
@@ -616,8 +616,8 @@
       "cwd": ".",
       "hashMode": "lf-normalized",
       "path": "patches/dolphin-wasm/snapshot/0078-region-layout-guard.patch",
-      "size": 6160,
-      "sha256": "c854052bb3ba2bfe2bd51e30afaf29d20c0f16f45b47f8d901ea1b85b06f4bb0"
+      "size": 10013,
+      "sha256": "e1095c79b1255a768ab8e94821d58a869f34e5e1aae7bce21581dff61d33c0e9"
     },
     {
       "order": 75,

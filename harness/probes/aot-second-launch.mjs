@@ -18,8 +18,15 @@
 // run boots an APFS clone of the seeded profile, plays the steps, waits
 // --sec, and records every console line (repeated "Invalid read" counted, not
 // kept), the RSS of the profile's Chrome processes by type each second (the
-// run stops above --cap-mb) and the core's frame. Pass: regions installed
-// from the cache, 0 "Invalid read", more than --min-frames, under the cap.
+// run stops above --cap-mb) and the core's frame. Verdicts:
+// - pass: modules loaded from the region cache before the boot (P7's install
+//   event, not live translations), regions installed, 0 "Invalid read", more
+//   than --min-frames, under the cap;
+// - refused-layout: the heap moved, every cached region refused for its
+//   layout, and the game still correct (0 "Invalid read", frames): the guard
+//   working, counted apart (no regions this launch);
+// - fail: anything else, including a launch that had no region cache at all.
+// The seeded profile must carry the measure's origin (harness/lib/seed-origin.mjs).
 // Exit 1 when a run fails.
 import { execFileSync } from "node:child_process";
 import { mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
@@ -28,7 +35,9 @@ import path from "node:path";
 import { parseArgs } from "node:util";
 import { bootIso, launchChrome, workerRequest } from "../lib/browser.mjs";
 import { decodeRegionStats } from "../lib/jit-region-stats.mjs";
+import { seedOriginCheck } from "../lib/seed-origin.mjs";
 import { ensureServer } from "../lib/server.mjs";
+import { aotLaunchInfo } from "../lib/ttff.mjs";
 import { runSteps } from "../lib/steps.mjs";
 
 const { values } = parseArgs({ options: {
@@ -42,6 +51,12 @@ if (!values["seed-profile"] || !values.iso || !values.steps || !values.query) {
   process.exit(2);
 }
 const log = (m) => console.log(`[aot-second-launch] ${m}`);
+const origin = seedOriginCheck(values["seed-profile"], values.port);
+if (origin.error) {
+  console.error(`[aot-second-launch] ${origin.error}`);
+  process.exit(2);
+}
+if (origin.warning) log(`warning: ${origin.warning}`);
 
 // RSS (MB) of the Chrome processes of this profile, by process type.
 function rss(profileDir) {
@@ -90,6 +105,7 @@ async function launchOnce(profileDir) {
         const r = await workerRequest(page, "validationReadJitRegionStats", {}, 10000).catch(() => null);
         result.regions = r?.bytes ? decodeRegionStats(r.bytes).diagnostics ?? null : null;
         result.layoutRefused = Number.isInteger(r?.layoutRefused) ? r.layoutRefused : null;
+        result.aot = aotLaunchInfo(await workerRequest(page, "validationReadAotProgress", {}, 10000).catch(() => null));
       })(),
       (async () => { while (!stop) await new Promise((res) => setTimeout(res, 500)); throw new Error(`over ${values["cap-mb"]} MB`); })(),
       new Promise((_, rej) => setTimeout(() => rej(new Error("4 min limit")), 240000))
@@ -121,15 +137,19 @@ for (let run = 1; run <= Number(values.runs); run += 1) {
   const frames = Math.max(0, ...r.samples.map((s) => s.frame ?? 0));
   const peak = Math.max(0, ...r.samples.map((s) => s.totalMB));
   const installed = r.regions?.regionsInstalled ?? 0;
-  const why = [
+  const fromCache = r.aot?.install?.loaded ?? 0;
+  const healthy = [
     r.error && `error: ${r.error}`,
     r.capped && `memory cap (${r.capped.totalMB} MB: ${JSON.stringify(r.capped.byType)})`,
     r.invalidReads > 0 && `${r.invalidReads} "Invalid read"`,
     frames < Number(values["min-frames"]) && `${frames} frames < ${values["min-frames"]}`,
-    !(installed > 0) && `no region installed from the cache${result_layout(r)}`
+    !(fromCache > 0) && "no module loaded from the region cache (a first launch: seed, port, compiler version?)"
   ].filter(Boolean);
-  log(`run ${run}: ${why.length ? `FAIL (${why.join("; ")})` : "pass"}; frames ${frames}, peak ${peak} MB, regions ${JSON.stringify(r.regions && { queued: r.regions.regionsQueued, installed, refused: r.regions.regionsRefused, layoutRefused: r.layoutRefused, dropped: r.regions.regionsDropped })}`);
-  if (why.length) failed += 1;
-  if (outDir) writeFileSync(path.join(outDir, `run${run}.json`), JSON.stringify({ ...r, frames, peak, verdict: why.length ? "fail" : "pass", why }, null, 1));
+  const refusedLayout = !healthy.length && !(installed > 0) && r.layoutRefused > 0;
+  const why = refusedLayout ? [] : [...healthy, ...(healthy.length || installed > 0 ? [] : [`no region installed${result_layout(r)}`])];
+  const verdict = refusedLayout ? "refused-layout" : why.length ? "fail" : "pass";
+  log(`run ${run}: ${verdict === "fail" ? `FAIL (${why.join("; ")})` : verdict}; frames ${frames}, peak ${peak} MB, from cache ${fromCache}, regions ${JSON.stringify(r.regions && { installed, refused: r.regions.regionsRefused, layoutRefused: r.layoutRefused, dropped: r.regions.regionsDropped })}`);
+  if (verdict === "fail") failed += 1;
+  if (outDir) writeFileSync(path.join(outDir, `run${run}.json`), JSON.stringify({ ...r, frames, peak, fromCache, verdict, why }, null, 1));
 }
 process.exit(failed ? 1 : 0);

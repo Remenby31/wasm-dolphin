@@ -255,3 +255,34 @@ test("a region translated for another heap layout is never installed", { skip: s
   core.reset(seedGprs(1), PROGRAM.labels.main, STOP, 400000);
   assert.equal(core.dispatchRegion(), 0);
 });
+
+// A region already installed when the RAM moves (a stop and a new boot in
+// the same page reallocates it): its code still writes the old address. A
+// cache clear makes it checked again, layout included; a shutdown forgets
+// every region (review of #62, P1-1).
+test("an installed region is dropped when the heap layout moved, before it runs again", { skip: skip || (!core?.has("DolphinWeb_AotLayoutShiftForTest") && "core without the layout re-check") }, () => {
+  installed();
+  core.reset(seedGprs(1), PROGRAM.labels.count, STOP, 400000);
+  assert.equal(core.dispatchRegion(), 1, "runs under its own layout");
+  core.module._DolphinWeb_AotLayoutShiftForTest(0x100000); // the RAM sits 1 MiB further
+  try {
+    core.unverifyRegions(); // what ClearCache does at the new boot
+    core.reset(seedGprs(1), PROGRAM.labels.count, STOP, 400000);
+    assert.equal(core.dispatchRegion(), 0, "dropped, not run at the old address");
+  } finally {
+    core.module._DolphinWeb_AotLayoutShiftForTest(0);
+  }
+});
+
+test("a core shutdown forgets every region: installed, waiting and queued", { skip: skip || (!core?.has("DolphinWeb_AotForgetRegionsForTest") && "core without ForgetAllRegions") }, () => {
+  const { before } = installed();
+  assert.ok(core.regionCount() > 0);
+  queueAll(setup()); // queued, not installed yet
+  core.module._DolphinWeb_AotForgetRegionsForTest();
+  assert.equal(core.regionCount(), 0);
+  core.serviceRegions();
+  assert.equal(core.regionCount(), 0, "the queue went too");
+  core.reset(seedGprs(1), PROGRAM.labels.count, STOP, 400000);
+  assert.equal(core.dispatchRegion(), 0);
+  assert.ok(before >= 0);
+});

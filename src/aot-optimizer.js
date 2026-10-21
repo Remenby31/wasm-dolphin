@@ -318,7 +318,10 @@ export class AotOptimizer extends EventTarget {
           try {
             bytes = this.assemble(fragments);
           } catch (error) {
-            failure = `assemble: ${error?.message || error}`;
+            // Fragments of one unit translated across a stop and a new boot
+            // (another heap layout): translated again later, not refused.
+            if (/different layouts/.test(String(error?.message))) wait = "layout";
+            else failure = `assemble: ${error?.message || error}`;
           }
           if (bytes && this.compile) {
             let out;
