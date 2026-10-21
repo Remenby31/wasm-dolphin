@@ -8,7 +8,7 @@
 // brings the result back under ../measures/spark/<date>/<name>.
 //
 //   node harness/remote/spark-run.mjs --candidate <ref|dir> [--baseline <ref|dir>]
-//     --state <local .sav> [--name n] [--runs 6] [--host spark] [--detach]
+//     --state <local .sav> [--name n] [--runs 6] [--lane auto|a|b] [--host spark] [--detach]
 //     [--keep-video] [-- <race-perf options: --query, --warmup, --secs, --max-load, …>]
 //   node harness/remote/spark-run.mjs --fetch <date>/<name>   (a detached run)
 //   node harness/remote/spark-run.mjs --build <ref>            (core built on the bench)
@@ -68,6 +68,7 @@ export function runId({ name, candidate, baseline, now = new Date() }) {
 // limit). video=null keeps the race CPU-bound as wgpu does on the Mac
 // (PROGRAM.md: video=null is no faster there): so every query's wgpu
 // becomes null, its WebGPU presenter 2d; the rest of the query is kept.
+export const BENCH_LOCK_WAIT = 4 * 3600;
 export const RACE_QUERY = "core=upstream&video=wgpu&presenter=webgpu&cpu=dual&speed=1&wasmjit=1&jitwarmup=60&oc=1";
 export function benchQuery(query) {
   const q = new URLSearchParams(PRESETS[query] ?? query);
@@ -91,6 +92,9 @@ export function benchRaceArgs(args, { keepVideo = false } = {}) {
       if (to !== from) swaps.push({ option: a, from, to });
     } else out.push(a);
   }
+  // The bench queues pairs and builds of several agents: race-perf's 30 min
+  // (one Mac slot) is not enough to wait for a turn there.
+  if (!out.includes("--lock-wait")) out.push("--lock-wait", String(BENCH_LOCK_WAIT));
   if (!hasQuery) {
     const to = keepVideo ? RACE_QUERY : benchQuery(RACE_QUERY);
     out.push("--query", to);
@@ -106,14 +110,14 @@ export function stampSummary(summary, bench) {
 }
 
 // The Spark command that starts the pair detached and returns at once.
-export function launchCommand({ harnessDir, outDir, raceArgs, chromeCpus, nodeCpus }) {
+export function launchCommand({ harnessDir, outDir, lane = "auto", raceArgs, chromeCpus, nodeCpus }) {
   const env = [chromeCpus && `SPARK_CHROME_CPUS=${sh(chromeCpus)}`, nodeCpus && `SPARK_NODE_CPUS=${sh(nodeCpus)}`].filter(Boolean).join(" ");
   return [
     `mkdir -p ${sh(path.posix.dirname(outDir))}`,
     // Two pairs never share a name (race-perf refuses an existing --out, the log would mix).
     `test ! -e ${sh(`${outDir}.log`)}`,
     `cd ${sh(harnessDir)}`,
-    `{ ${env ? `${env} ` : ""}setsid nohup sh harness/remote/spark-race.sh ${sh(outDir)} -- ${raceArgs.map(sh).join(" ")} </dev/null >/dev/null 2>&1 & }`,
+    `{ ${env ? `${env} ` : ""}setsid nohup sh harness/remote/spark-race.sh ${sh(outDir)} ${sh(lane)} -- ${raceArgs.map(sh).join(" ")} </dev/null >/dev/null 2>&1 & }`,
     "echo started"
   ].join(" && ");
 }
@@ -255,16 +259,18 @@ async function build(host, ref) {
 function fetchResult(host, { date, name, meta, exit }) {
   const local = path.join(MEASURES, date, name);
   mkdirSync(local, { recursive: true });
-  const tar = ssh(host, `tar -c -C ${BENCH}/results/${date} ${name} ${name}.log ${name}.exit 2>/dev/null; true`).bytes;
+  const tar = ssh(host, `tar -c -C ${BENCH}/results/${date} ${name} ${name}.log ${name}.exit ${name}.lane 2>/dev/null; true`).bytes;
   execFileSync("tar", ["-x", "-C", path.dirname(local)], { input: tar });
-  // name.log / name.exit land next to the directory: keep them inside.
-  for (const ext of ["log", "exit"]) {
+  // name.log / .exit / .lane land next to the directory: keep them inside.
+  for (const ext of ["log", "exit", "lane"]) {
     const f = path.join(path.dirname(local), `${name}.${ext}`);
     if (existsSync(f)) { writeFileSync(path.join(local, `spark-run.${ext}`), readFileSync(f)); rmSync(f); }
   }
   const metaFile = path.join(local, "spark.json");
   const bench = meta ?? (existsSync(metaFile) ? JSON.parse(readFileSync(metaFile, "utf8")) : { host: "spark" });
-  writeFileSync(metaFile, JSON.stringify({ ...bench, exit }, null, 1) + "\n");
+  const laneFile = path.join(local, "spark-run.lane");
+  const lane = existsSync(laneFile) ? readFileSync(laneFile, "utf8").trim() : null;
+  writeFileSync(metaFile, JSON.stringify({ ...bench, lane, exit }, null, 1) + "\n");
   const summaryFile = path.join(local, "summary.json");
   if (existsSync(summaryFile)) {
     const summary = stampSummary(JSON.parse(readFileSync(summaryFile, "utf8")), bench);
@@ -279,7 +285,7 @@ async function main() {
   const { values, positionals } = parseArgs({
     options: {
       candidate: { type: "string" }, baseline: { type: "string" }, state: { type: "string" }, iso: { type: "string" },
-      name: { type: "string" }, runs: { type: "string", default: "6" }, port: { type: "string", default: "8090" },
+      name: { type: "string" }, runs: { type: "string", default: "6" }, lane: { type: "string", default: "auto" },
       host: { type: "string", default: process.env.SPARK_HOST || "spark" },
       "chrome-cpus": { type: "string" }, "node-cpus": { type: "string" }, "keep-video": { type: "boolean", default: false },
       detach: { type: "boolean", default: false }, fetch: { type: "string" }, build: { type: "string" }
@@ -300,6 +306,7 @@ async function main() {
   for (const f of ["--iso", "--state", "--out", "--port", "--runs", "--candidate", "--baseline", "--core-candidate"]) {
     if (positionals.includes(f)) throw new Error(`${f} is set by spark-run, not after --`);
   }
+  if (!["auto", "a", "b"].includes(values.lane)) throw new Error(`--lane ${values.lane}: a, b or auto`);
   const { date, name } = runId(values);
   if (existsSync(path.join(MEASURES, date, name))) throw new Error(`${path.join(MEASURES, date, name)} exists: pick another --name`);
 
@@ -314,7 +321,7 @@ async function main() {
   const bench = benchRaceArgs(positionals, { keepVideo: values["keep-video"] });
   for (const s of bench.swaps) console.log(`[spark-run] ${s.option} on the bench: ${s.to} (was ${s.from})`);
   const raceArgs = [
-    "--iso", abs(iso), "--state", abs(state), "--port", values.port, "--runs", values.runs,
+    "--iso", abs(iso), "--state", abs(state), "--runs", values.runs,
     "--candidate", abs(candidate.dest), ...(baseline ? ["--baseline", abs(baseline.dest)] : []),
     ...bench.args
   ];
@@ -322,16 +329,16 @@ async function main() {
   const meta = {
     host: "spark", hostname: ssh(host, "hostname").out.trim(), at: new Date().toISOString(),
     chromiumVersion: ssh(host, `c=$(ls -d ${BENCH}/ms-playwright/chromium-*/chrome-linux*/chrome | sort -V | tail -1) && "$c" --version`).out.trim(),
-    chromeCpus: values["chrome-cpus"] ?? "15-19", nodeCpus: values["node-cpus"] ?? "0-4",
+    chromeCpus: values["chrome-cpus"] ?? "lane", nodeCpus: values["node-cpus"] ?? "lane",
     harness: { from: REPO_ROOT, key: path.basename(harness.dest) },
     sides: { candidate, ...(baseline ? { baseline } : {}) },
     querySwaps: bench.swaps,
     raceArgs
   };
-  ssh(host, launchCommand({ harnessDir: abs(harness.dest), outDir, raceArgs, chromeCpus: values["chrome-cpus"], nodeCpus: values["node-cpus"] }));
+  ssh(host, launchCommand({ harnessDir: abs(harness.dest), outDir, lane: values.lane, raceArgs, chromeCpus: values["chrome-cpus"], nodeCpus: values["node-cpus"] }));
   mkdirSync(path.join(MEASURES, date, name), { recursive: true });
   writeFileSync(path.join(MEASURES, date, name, "spark.json"), JSON.stringify(meta, null, 1) + "\n");
-  console.log(`[spark-run] started on ${host}: ${date}/${name} (race-perf waits for the Spark's perf lock)`);
+  console.log(`[spark-run] started on ${host}: ${date}/${name}, lane ${values.lane} (race-perf waits for its lane's perf lock)`);
   if (values.detach) {
     console.log(`[spark-run] detached; bring it back with: node harness/remote/spark-run.mjs --fetch ${date}/${name}`);
     return;
