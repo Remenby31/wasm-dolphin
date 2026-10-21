@@ -156,3 +156,18 @@ test("an idle loop stays out of the region: its start is not a region block, the
   assert.ok(fragment.entries.includes(after), "the region resumes after the loop");
   assert.equal(core.translate(loop, { ranges: [[TEXT, end]] }), null, "an idle loop is no region entry");
 });
+
+// 0091: nothing is translated under the MMU (regions would run on after a
+// DSI); the block JIT refuses there too (cached-interpreter-mmu-guard-source).
+test("under the MMU the translator refuses every entry, and translates again once it is off", { skip: skip || (!core.setMMUMode && "core without DolphinWeb_AotMMUModeForTest (0091)") }, () => {
+  const { image } = setup(program());
+  for (const s of image.segments) core.load(s.start, s.bytes);
+  core.setMMUMode(true);
+  try {
+    assert.equal(core.translate(DOUBLE), null);
+    assert.equal(core.translate(MAIN, { ranges: [[TEXT, TEXT + 4 * PROGRAM.words.length]] }), null);
+  } finally {
+    core.setMMUMode(false);
+  }
+  assert.ok(core.translate(DOUBLE), "translated with the MMU off");
+});
