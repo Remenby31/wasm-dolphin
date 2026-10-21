@@ -118,6 +118,16 @@ function dispatcherBody(entries, pcOffset, missing) {
 //               on Windows counts against the commit charge; decision of #30)
 // Returns { bytes, entries: [[pc, fragmentIndex]] sorted, helpers: [name] }.
 export const REGION_ENTRIES_SECTION = "region-entries";
+// Custom section "region-layout": the u32 hash of the core's heap layout the
+// fragments were translated for (WasmLayoutHash: their code embeds absolute
+// addresses of RAM and L1). The core installs the module only under the same
+// layout; a module without it is never installed.
+export const REGION_LAYOUT_SECTION = "region-layout";
+
+export function regionModuleLayout(module) {
+  const [section] = WebAssembly.Module.customSections(module, REGION_LAYOUT_SECTION);
+  return section && section.byteLength === 4 ? new Uint32Array(section.slice(0))[0] : 0;
+}
 
 // Entries a region module declares (its "region-entries" section), or null.
 export function regionModuleEntries(module) {
@@ -248,9 +258,19 @@ export function assembleRegion(fragments, { helpers, pcOffset, memoryPages, memo
   name(custom, REGION_ENTRIES_SECTION);
   for (const [pc] of sortedEntries) custom.push(pc & 0xff, (pc >>> 8) & 0xff, (pc >>> 16) & 0xff, (pc >>> 24) & 0xff);
   section(out, 0, custom);
+  const layouts = new Set(fragments.map((f) => (f.layout ?? 0) >>> 0));
+  if (layouts.size !== 1) throw new Error("region: fragments translated for different layouts");
+  const [layout] = layouts;
+  if (layout) {
+    const tag = [];
+    name(tag, REGION_LAYOUT_SECTION);
+    tag.push(layout & 0xff, (layout >>> 8) & 0xff, (layout >>> 16) & 0xff, (layout >>> 24) & 0xff);
+    section(out, 0, tag);
+  }
 
   return {
     bytes: Uint8Array.from(out),
+    layout,
     entries: sortedEntries.map(([pc, fn]) => [pc, fn - FIRST]),
     helpers: helperNames
   };

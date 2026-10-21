@@ -3461,6 +3461,8 @@ async function mountFile(file) {
   aotDiscGeneration += 1;
   aotFirstLaunch?.dispose();
   aotFirstLaunch = null;
+  aotCoreBooted = false;
+  aotRegionsBeforeBoot.length = 0;
   aotDiscKey = null;
   aotDiscKeyPromise = null;
   aotDiscFile = file;
@@ -7021,7 +7023,7 @@ export async function prepareAotFirstLaunch(file, {
       const keyed = mod ? regionBlockCacheKey(region.bytes).then((k) => {
         if (dolphinJitCacheMap.size < DOLPHIN_JIT_CACHE_MAX) dolphinJitCacheMap.set(k, mod);
       }) : Promise.resolve();
-      keyed.catch(() => {}).then(() => queueAotRegion(module, region));
+      keyed.catch(() => {}).then(() => queueAotRegionAfterBoot(module, region));
     },
     retain: (key, mod, bytes) => {
       // Also under the key the CPU thread's compile looks up (the SHA-256 of
@@ -7067,11 +7069,23 @@ export async function prepareAotFirstLaunch(file, {
 // optimisation. A cancel (aotCancel, stop) or a remount in between wins: the
 // start is dropped.
 export function startAotFirstLaunchAfterBoot(flow = aotFirstLaunch) {
+  aotCoreBooted = true;
+  for (const [module, region] of aotRegionsBeforeBoot.splice(0)) queueAotRegion(module, region);
   if (!flow?.supported) return Promise.resolve();
   const generation = flow.generation;
   return flow.loadRest().catch(() => {}).then(() => {
     if (aotFirstLaunch === flow) return flow.start({ resume: true, ifGeneration: generation });
   });
+}
+// No region is copied into the core's heap before the boot: those copies (a
+// second launch queues every cached region, 127 MB for a race) came before
+// the core allocated the emulated RAM and moved it, and a region's code
+// embeds that address (its layout hash then refuses it). They wait here.
+let aotCoreBooted = false;
+const aotRegionsBeforeBoot = [];
+function queueAotRegionAfterBoot(module, region) {
+  if (aotCoreBooted) queueAotRegion(module, region);
+  else aotRegionsBeforeBoot.push([module, region]);
 }
 // The CPU thread's module-map key for these bytes (DolphinWeb_MakeWasmBlockCacheKey).
 async function regionBlockCacheKey(bytes) {
@@ -7084,7 +7098,7 @@ async function regionBlockCacheKey(bytes) {
 // a hit in V8's native module cache; it then runs it for its entries.
 // members: [{ ranges, hash }] per function, the plan's FNV-1a 64 of its code:
 // the core installs nothing whose code changed since the translation.
-function queueAotRegion(module, { bytes, entries, members }) {
+function queueAotRegion(module, { bytes, entries, members, layout = 0 }) {
   if (typeof module?._DolphinWeb_AotQueueRegion !== "function" || !bytes?.length || !entries?.length || !members?.length) return;
   const ranges = members.flatMap((m) => m.ranges);
   const triples = members.flatMap((m) => [m.ranges.length, m.hash ? parseInt(m.hash.slice(8), 16) : 0, m.hash ? parseInt(m.hash.slice(0, 8), 16) : 0]);
@@ -7095,7 +7109,7 @@ function queueAotRegion(module, { bytes, entries, members }) {
     module.HEAPU8.set(bytes, b);
     new Uint32Array(module.HEAPU8.buffer, w, words.length).set(words);
     const rangesAt = w + 4 * entries.length, membersAt = rangesAt + 8 * ranges.length;
-    module._DolphinWeb_AotQueueRegion(b, bytes.length, w, entries.length, rangesAt, ranges.length, membersAt, members.length);
+    module._DolphinWeb_AotQueueRegion(b, bytes.length, w, entries.length, rangesAt, ranges.length, membersAt, members.length, layout >>> 0);
   } finally {
     module._free(b);
     module._free(w);

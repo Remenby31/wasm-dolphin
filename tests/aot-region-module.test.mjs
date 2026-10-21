@@ -1,7 +1,7 @@
 import assert from "node:assert/strict";
 import test from "node:test";
 
-import { assembleRegion, groupRegions, paddedUleb } from "../src/aot-region-module.js";
+import { assembleRegion, groupRegions, paddedUleb, regionModuleLayout } from "../src/aot-region-module.js";
 
 // Synthetic fragments in the translator's shape. State layout of the tests:
 // pc at +0, a counter at +4, LR at +8, state at address 64.
@@ -196,4 +196,17 @@ test("aot region: a hub called from everywhere joins one region, the rest stay w
   assert.equal(regionOf(4), regionOf(5));
   assert.ok(regions.every((r) => r.length <= 3));
   assert.equal(regions.flat().length, 7);
+});
+
+// The heap layout the fragments were translated for (the core's WasmLayoutHash:
+// their code embeds RAM and L1 addresses) travels in a custom section; the
+// core installs a module only under the same layout.
+test("aot region: the translation layout is carried by the module, mixed layouts are refused", () => {
+  const withLayout = (layout) => program().map((f) => ({ ...f, layout }));
+  const region = assembleRegion(withLayout(0x8badf00d), { helpers: HELPERS, pcOffset: PC, memoryPages: 1 });
+  assert.equal(region.layout, 0x8badf00d);
+  assert.equal(regionModuleLayout(new WebAssembly.Module(region.bytes)), 0x8badf00d);
+  assert.equal(regionModuleLayout(new WebAssembly.Module(assembleRegion(program(), { helpers: HELPERS, pcOffset: PC, memoryPages: 1 }).bytes)), 0, "no layout: 0, never installed");
+  const [a, b] = withLayout(1);
+  assert.throws(() => assembleRegion([a, { ...b, layout: 2 }], { helpers: HELPERS, pcOffset: PC, memoryPages: 1 }), /different layouts/);
 });

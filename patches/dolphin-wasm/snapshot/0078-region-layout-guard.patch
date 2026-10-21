@@ -1,0 +1,127 @@
+diff --git a/Source/Core/Core/PowerPC/CachedInterpreter/CachedInterpreter.cpp b/Source/Core/Core/PowerPC/CachedInterpreter/CachedInterpreter.cpp
+--- a/Source/Core/Core/PowerPC/CachedInterpreter/CachedInterpreter.cpp
++++ b/Source/Core/Core/PowerPC/CachedInterpreter/CachedInterpreter.cpp
+@@ -8997,6 +8997,10 @@ struct PendingRegion
+   // Its ready byte was set, then cleared by another key's post (-4) before
+   // this thread saw it: the module is there, compiled from its own bytes.
+   bool signalled = false;
++  // WasmLayoutHash of the layout its code was translated for: the code embeds
++  // absolute addresses of this session's heap (RAM, L1), so a module built in
++  // another session runs only where they are the same.
++  u32 layout_hash = 0;
+ };
+ std::mutex s_region_queue_mutex;
+ std::vector<PendingRegion> s_region_queue;
+@@ -9167,8 +9171,20 @@ void InstallRegion(PendingRegion& pending, int handle)
+ // The code may have changed since the translation (an overlay, code
+ // reloaded): an icbi then found no region to drop. Checked against the
+ // plan's hashes, not against whatever memory holds now.
++WasmStateLayout CurrentWasmStateLayout(Core::System& system);
++u32 WasmLayoutHash(const WasmStateLayout& layout);
++u32 s_region_layout_refused = 0;
++
+ bool RegionInstallable(const PendingRegion& pending)
+ {
++  // Code translated for another heap layout (a cached module from a session
++  // whose RAM sat elsewhere) would read and write the wrong host memory.
++  if (pending.layout_hash != WasmLayoutHash(CurrentWasmStateLayout(Core::System::GetInstance())))
++  {
++    s_region_layout_refused += 1;
++    s_region_stats.regions_refused += 1;
++    return false;
++  }
+   if (std::any_of(pending.entries.begin(), pending.entries.end(),
+                   [](u32 pc) { return HLE::GetHookByAddress(pc) != 0; }))
+   {
+@@ -9504,7 +9520,8 @@ void DolphinWeb_InvalidateRegions(u32 address, u32 size)
+ extern "C" EMSCRIPTEN_KEEPALIVE void DolphinWeb_AotQueueRegion(const u8* bytes, u32 size,
+                                                                const u32* entries, u32 entry_count,
+                                                                const u32* ranges, u32 range_count,
+-                                                               const u32* members, u32 member_count)
++                                                               const u32* members, u32 member_count,
++                                                               u32 layout_hash)
+ {
+   PendingRegion pending{std::vector<u8>(bytes, bytes + size),
+                         std::vector<u32>(entries, entries + entry_count),
+@@ -9522,6 +9539,7 @@ extern "C" EMSCRIPTEN_KEEPALIVE void DolphinWeb_AotQueueRegion(const u8* bytes,
+   }
+   if (next != range_count || pending.members.empty())
+     return;
++  pending.layout_hash = layout_hash;  // 0 (a caller without it): never installed
+   pending.key = DolphinWeb_MakeWasmBlockCacheKey(pending.bytes);
+   if (pending.key[0])
+     pending.slot = ReadyBitOfKey(pending.key);
+@@ -14800,6 +14818,25 @@ std::vector<u32> s_aot_translate_out;
+ std::array<u32, 248> s_aot_test_state{};
+ constexpr u32 AOT_TEST_MSR = 0x00002032;  // FP, IR, DR, RI; external interrupts off
+ 
++// FNV-1a 32 of every field (offsets in PowerPCState, and the absolute
++// addresses and sizes of RAM and L1 in this session's heap), never 0.
++u32 WasmLayoutHash(const WasmStateLayout& layout)
++{
++  static_assert(sizeof(WasmStateLayout) % sizeof(u32) == 0);
++  std::array<u32, sizeof(WasmStateLayout) / sizeof(u32)> words;
++  std::memcpy(words.data(), &layout, sizeof(layout));
++  u32 h = 0x811c9dc5u;
++  for (const u32 w : words)
++  {
++    for (int shift = 0; shift < 32; shift += 8)
++    {
++      h ^= (w >> shift) & 0xff;
++      h *= 0x01000193u;
++    }
++  }
++  return h != 0 ? h : 1;
++}
++
+ WasmStateLayout CurrentWasmStateLayout(Core::System& system)
+ {
+   auto& ppc = system.GetPPCState();
+@@ -15131,7 +15168,9 @@ extern "C" EMSCRIPTEN_KEEPALIVE const u32* DolphinWeb_AotTranslateForTest(
+ namespace
+ {
+ // Bumped whenever the code the translator emits changes (cache keys).
+-constexpr u32 AOT_COMPILER_VERSION = 1;
++// 2: modules carry their heap layout (region-layout); version 1 modules have
++// none and would never install.
++constexpr u32 AOT_COMPILER_VERSION = 2;
+ constexpr u32 AOT_MAX_FRAGMENT_BYTES = 1u << 20;
+ thread_local std::vector<u32> t_aot_out;
+ u8* s_aot_ram = nullptr;
+@@ -15231,7 +15270,7 @@ extern "C" EMSCRIPTEN_KEEPALIVE const u32* DolphinWeb_AotTranslate(u32 entry_pc,
+   auto& out = t_aot_out;
+   out.assign({0, entry_pc, static_cast<u32>(fragment.code.size()),
+               static_cast<u32>(fragment.entries.size()), static_cast<u32>(fragment.relocs.size()),
+-              0});
++              WasmLayoutHash(CurrentWasmStateLayout(Core::System::GetInstance()))});
+   out.insert(out.end(), fragment.entries.begin(), fragment.entries.end());
+   for (const auto& reloc : fragment.relocs)
+     out.insert(out.end(), {reloc.offset, reloc.kind, reloc.value});
+@@ -15243,6 +15282,27 @@ extern "C" EMSCRIPTEN_KEEPALIVE const u32* DolphinWeb_AotTranslate(u32 entry_pc,
+ 
+ // [compilerVersion, codegenMask]: the codegen mask is the CPU thread's, so
+ // regions are emitted as its blocks are.
++// The layout hash regions translated now carry (DolphinWeb_AotTranslate's
++// sixth word), and the count of queued regions refused for another layout.
++extern "C" EMSCRIPTEN_KEEPALIVE u32 DolphinWeb_AotLayoutHash()
++{
++  return WasmLayoutHash(CurrentWasmStateLayout(Core::System::GetInstance()));
++}
++
++// The layout's fields, in WasmStateLayout order (diagnostics: which one moved).
++extern "C" EMSCRIPTEN_KEEPALIVE u32 DolphinWeb_AotLayoutWords(u32* out, u32 capacity)
++{
++  const WasmStateLayout layout = CurrentWasmStateLayout(Core::System::GetInstance());
++  const u32 n = static_cast<u32>(sizeof(layout) / sizeof(u32));
++  std::memcpy(out, &layout, std::min(n, capacity) * sizeof(u32));
++  return n;
++}
++
++extern "C" EMSCRIPTEN_KEEPALIVE u32 DolphinWeb_AotLayoutRefused()
++{
++  return s_region_layout_refused;
++}
++
+ extern "C" EMSCRIPTEN_KEEPALIVE void DolphinWeb_AotKeyParts(u32* out)
+ {
+   out[0] = AOT_COMPILER_VERSION;

@@ -61,7 +61,7 @@ export class AotOptimizer extends EventTarget {
     if (!assemble && !assembleOptions) throw new Error("aot-optimizer: assembleOptions (helpers, pcOffset, memoryPages from the core) required");
     this.assemble = assemble ?? ((fragments) => assembleRegion(fragments, assembleOptions).bytes);
     this.compile = compile;
-    // install({ key, bytes, entries, members }): hands a compiled module to the
+    // install({ key, bytes, entries, layout, members }): hands a compiled module to the
     // core's dispatcher (_DolphinWeb_AotQueueRegion). Optional.
     this.install = install;
     this.maxFunctions = maxFunctions;
@@ -345,7 +345,7 @@ export class AotOptimizer extends EventTarget {
             else failure = reason;
             if (!reason) {
               compiled++;
-              this.install?.({ key: unit.key, bytes, entries, members: unit.members.map((f) => ({ ranges: f.ranges, hash: f.hash })) });
+              this.install?.({ key: unit.key, bytes, entries, layout: fragments[0]?.layout ?? 0, members: unit.members.map((f) => ({ ranges: f.ranges, hash: f.hash })) });
               if (this.attempts.delete(unit.key)) await this.saveAttempts();
             }
           }

@@ -232,3 +232,26 @@ test("with jitoffthread=1 a request never answered falls back to a synchronous c
     assert.equal(lastInstallPath(), 2, "sampled as cold");
   });
 });
+
+// A region's code embeds absolute addresses of the core's heap (RAM, L1): a
+// module translated in another session, whose RAM sat elsewhere, would read
+// and write the wrong host memory. The core installs it only under the
+// layout it was translated for (2nd launch with aot=1, 2026-10-21).
+test("a region translated for another heap layout is never installed", { skip: skip || (!core?.has("DolphinWeb_AotLayoutHash") && "core without the layout guard") }, () => {
+  const plan = setup();
+  core.setRegionsEnabled(true);
+  const before = core.regionCount();
+  const refused = core.module._DolphinWeb_AotLayoutRefused() >>> 0;
+  const layout = core.module._DolphinWeb_AotLayoutHash() >>> 0;
+  for (const group of regionGroups(plan, 100)) {
+    const { bytes, entries } = assembleRegion(group.flatMap(functionFragments(core)), { helpers: HELPER_SIGNATURES, pcOffset: core.pcOffset, memoryPages: core.memoryPages });
+    const members = group.map((f) => ({ ranges: f.ranges, hash: f.hash }));
+    core.queueRegion(bytes, entries.map(([pc]) => pc), members, (layout ^ 0x10) >>> 0);
+    core.queueRegion(bytes, entries.map(([pc]) => pc), members, 0);
+  }
+  core.serviceRegions();
+  assert.equal(core.regionCount(), before, "nothing installed");
+  assert.ok((core.module._DolphinWeb_AotLayoutRefused() >>> 0) - refused >= 2, "counted as layout refusals");
+  core.reset(seedGprs(1), PROGRAM.labels.main, STOP, 400000);
+  assert.equal(core.dispatchRegion(), 0);
+});
