@@ -9,7 +9,7 @@ import path from "node:path";
 import test from "node:test";
 
 import { kpiTable } from "../harness/lib/kpi.mjs";
-import { nextStep, readTickets, waitTurn } from "../harness/remote/spark-queue.mjs";
+import { isBuildProcess, nextStep, readTickets, waitTurn } from "../harness/remote/spark-queue.mjs";
 import { benchQuery, benchRaceArgs, launchCommand, RACE_QUERY, runId, sh, stampSummary } from "../harness/remote/spark-run.mjs";
 
 const race = (extra = {}) => ({
@@ -100,4 +100,13 @@ test("spark queue: tickets on disk, dead ones dropped, the lane written once gra
   } finally {
     rmSync(bench, { recursive: true, force: true });
   }
+});
+
+test("spark queue: a build is the node process, never the shell that started it", () => {
+  assert.equal(isBuildProcess(["node", "harness/remote/spark-build.mjs", "2babd9cf"]), true);
+  assert.equal(isBuildProcess(["/home/u/salon-bench/node/bin/node", "/h/harness/remote/spark-build.mjs", "x"]), true);
+  // The wrapper spark-run starts it with: it once deadlocked the queue.
+  assert.equal(isBuildProcess(["sh", "-c", "node harness/remote/spark-build.mjs 2babd9cf >> log 2>&1; echo $? > exit"]), false);
+  assert.equal(isBuildProcess(["bash", "-c", "pgrep -f harness/remote/spark-build.mjs"]), false);
+  assert.equal(isBuildProcess(["node", "harness/probes/race-perf.mjs"]), false);
 });
