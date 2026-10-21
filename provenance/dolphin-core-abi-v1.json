@@ -1,19 +1,19 @@
 {
   "schemaVersion": 1,
   "abiVersion": 1,
-  "coreId": "sha256:e47de1731b3c444d286fd767f2ed4ee3e21a4fdc463209551f98f6985794efd7",
+  "coreId": "sha256:9156189730076b24c71c8e95d40f810c865d23beeba6496eeb6c1b9fcd15acee",
   "upstreamCommit": "e22551eae1c84a7e4d0b6a5c519ef4ed4ef69df1",
   "artifacts": [
     {
       "path": "cores/dolphin/dolphin-core-upstream.js",
       "hashMode": "lf-normalized",
-      "size": 277976,
-      "sha256": "cbe9409ddd20488c1b513b4a2bc7ef2a218786adae6d13fa09395c17aa7085f6"
+      "size": 278836,
+      "sha256": "8fc696a28e14ea0b4a1851e9bce26d1c2f217f4fca3d28cd754e7dd77ce9bbd9"
     },
     {
       "path": "cores/dolphin/dolphin-core-upstream.wasm",
-      "size": 13064842,
-      "sha256": "e47de1731b3c444d286fd767f2ed4ee3e21a4fdc463209551f98f6985794efd7"
+      "size": 13074110,
+      "sha256": "9156189730076b24c71c8e95d40f810c865d23beeba6496eeb6c1b9fcd15acee"
     }
   ],
   "contractSources": [
@@ -359,6 +359,8 @@
   "sourceOnlyExportsPendingRebuild": [],
   "moduleExports": [
     "_AcknowledgeWebGpuOwnershipTraceCapture",
+    "_AlertRelayForTest",
+    "_AlertRelayStats",
     "_AudioBuffer",
     "_AudioBufferFrames",
     "_AudioChannels",
@@ -366,10 +368,16 @@
     "_BootDisc",
     "_CoreInit",
     "_DolphinWeb_AotDispatchRegionForTest",
+    "_DolphinWeb_AotForgetRegionsForTest",
     "_DolphinWeb_AotInvalidateForTest",
     "_DolphinWeb_AotKeyParts",
+    "_DolphinWeb_AotLayoutHash",
+    "_DolphinWeb_AotLayoutRefused",
+    "_DolphinWeb_AotLayoutShiftForTest",
+    "_DolphinWeb_AotLayoutWords",
     "_DolphinWeb_AotPublishStatsForTest",
     "_DolphinWeb_AotQueueRegion",
+    "_DolphinWeb_AotRamReady",
     "_DolphinWeb_AotRunRegionForTest",
     "_DolphinWeb_AotServiceRegionsForTest",
     "_DolphinWeb_AotSetReadyWaitForTest",
