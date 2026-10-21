@@ -140,6 +140,7 @@ export class UpstreamWorkerAdapter {
     wgpuMappedDrainCoalescing = false,
     wgpuRendererWorkerProbe = "off",
     wgpuVisualCadence = false,
+    wgpuPipelinePrewarm = true,
     gpuCompletionDiagnostics = false,
     wgpuDirtyRangeProjection = false,
     wgpuPassPackageProjection = false,
@@ -249,6 +250,7 @@ export class UpstreamWorkerAdapter {
       "canary", "inline-upload", "worker-upload", "null-drain"
     ]).has(wgpuRendererWorkerProbe) ? wgpuRendererWorkerProbe : "off";
     this.wgpuVisualCadence = Boolean(wgpuVisualCadence);
+    this.wgpuPipelinePrewarm = wgpuPipelinePrewarm !== false;
     this.gpuCompletionDiagnostics = Boolean(gpuCompletionDiagnostics);
     this.wgpuDirtyRangeProjection = Boolean(wgpuDirtyRangeProjection);
     this.wgpuPassPackageProjection = Boolean(wgpuPassPackageProjection);
@@ -451,6 +453,7 @@ export class UpstreamWorkerAdapter {
       wgpuMappedDrainCoalescing: this.wgpuMappedDrainCoalescing,
       wgpuRendererWorkerProbe: this.wgpuRendererWorkerProbe,
       wgpuVisualCadence: this.wgpuVisualCadence,
+      wgpuPipelinePrewarm: this.wgpuPipelinePrewarm,
       gpuCompletionDiagnostics: this.gpuCompletionDiagnostics,
       wgpuDirtyRangeProjection: this.wgpuDirtyRangeProjection,
       wgpuPassPackageProjection: this.wgpuPassPackageProjection,
