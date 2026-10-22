@@ -25,7 +25,7 @@
       "commit": "01e0577914a75a2569c846778c2f93aa8e6feddd"
     }
   },
-  "patchSeriesSha256": "d86480b0b0cf34a7e9843b1f82ed188267f70666196119e2e277f73d631e9625",
+  "patchSeriesSha256": "d275de229b9696a6546d1c9055e2f397044acea9264f4cf67528e8c9edf7bc2b",
   "patches": [
     {
       "order": 1,
@@ -655,12 +655,20 @@
       "order": 79,
       "cwd": ".",
       "hashMode": "lf-normalized",
+      "path": "patches/dolphin-wasm/snapshot/0086-region-installs-in-throttle-sleep.patch",
+      "size": 8084,
+      "sha256": "bb3a0f8688f6ae5250a07ae704e830a3da865284bc836a8a4e98ee4ec71a3de7"
+    },
+    {
+      "order": 80,
+      "cwd": ".",
+      "hashMode": "lf-normalized",
       "path": "patches/dolphin-wasm/snapshot/0087-native-ps-sum-neg-res.patch",
       "size": 12319,
       "sha256": "bb67b5219c0a94e39beb3a2e81b5d4f1af7643e6d1428374f0ca9c851d9749fb"
     },
     {
-      "order": 80,
+      "order": 81,
       "cwd": ".",
       "hashMode": "lf-normalized",
       "path": "patches/dolphin-wasm/snapshot/0088-region-idle-loops-outside.patch",
@@ -668,7 +676,7 @@
       "sha256": "15c7127637fa3550e9a8d7d6850afb80f53548d7536a5252ed75e416bebab9d0"
     },
     {
-      "order": 81,
+      "order": 82,
       "cwd": ".",
       "hashMode": "lf-normalized",
       "path": "patches/dolphin-wasm/snapshot/0091-no-wasm-code-under-mmu.patch",
@@ -676,7 +684,7 @@
       "sha256": "d169775dc85c7e756561439fb1da2f749d3a774f0abd2b0dc0116017ed67a46d"
     },
     {
-      "order": 82,
+      "order": 83,
       "cwd": ".",
       "hashMode": "lf-normalized",
       "path": "patches/dolphin-wasm/snapshot/0097-embed-filtered-gamesettings.patch",
@@ -684,7 +692,7 @@
       "sha256": "6726edf3d4ff8937f77085e593020d9f351444e0b02d4c75e2cdea510fefc5a0"
     },
     {
-      "order": 83,
+      "order": 84,
       "cwd": ".",
       "hashMode": "lf-normalized",
       "path": "patches/dolphin-wasm/snapshot/0099-ax-hle-timing.patch",
@@ -692,7 +700,7 @@
       "sha256": "fcf883f10294f89b4660891765bba842259213b7ebebbf80e6815cb0b083f6b5"
     },
     {
-      "order": 84,
+      "order": 85,
       "cwd": ".",
       "hashMode": "lf-normalized",
       "path": "patches/dolphin-wasm/snapshot/0103-fma-ctz-as-clz.patch",
@@ -700,7 +708,7 @@
       "sha256": "66260aea20f5cacb8578da119dfe5cd2606f30f6bcd5bcb040ec142a3393f55a"
     },
     {
-      "order": 85,
+      "order": 86,
       "cwd": "Externals/SFML/SFML",
       "hashMode": "lf-normalized",
       "path": "patches/dolphin-wasm/submodules/0001-sfml-emscripten-config.patch",
@@ -708,7 +716,7 @@
       "sha256": "f82197a21fe982ad83f6ee7bbf5a03839b1cebd4d64da3eab11263842bf61d89"
     },
     {
-      "order": 86,
+      "order": 87,
       "cwd": "Externals/xxhash/xxHash",
       "hashMode": "lf-normalized",
       "path": "patches/dolphin-wasm/submodules/0002-xxhash-wasm-simd-scalar.patch",

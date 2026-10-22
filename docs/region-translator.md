@@ -252,3 +252,19 @@ cache translated in a session without the MMU (`RegionInstallable`,
 counted by `DolphinWeb_AotRegionsSkippedMmu`). MMU games keep the
 CachedInterpreter with `aot=1`. Lifted once faults are delivered from our
 code (deferred delivery on the slow paths: backlog).
+
+## Installs in the throttle sleep (patch 0086, 2026-10-22)
+
+Installing a region is a synchronous `new WebAssembly.Module` on the CPU
+thread: a hit in V8's native module cache, but V8 reads all the wire bytes to
+find it, about 1.7 ms per MB measured on the bench (modules up to 5.8 MB:
+slices of 9-14 ms past the boot). The estimate is now 1.7 ms/MB (was 0.7).
+When the game is speed-capped, CoreTiming's throttle sleeps several ms per
+frame: `SleepUntil` first installs ready regions while the next module's
+estimate fits before the deadline (1 ms margin), then sleeps the rest. At a
+slice boundary past the boot, a module whose estimate exceeds the slice target
+(2.5 ms) waits for such a window, 2 s at most (a scene that never sleeps still
+gets it). Counters: `DolphinWeb_AotRegionSleepInstalls` [installs, ms x 100];
+sleep installs stay out of `installMaxSliceMs`. If p95 > 3 ms remains, the
+next lever is a size cap with split modules (coordinated with dispatch: lever
+C and #75's chaining are intra-module).

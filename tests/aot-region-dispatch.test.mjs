@@ -616,3 +616,32 @@ test("an idle loop inside a region returns to the dispatcher at its start instea
   assert.equal(core.pc() >>> 0, IDLE.labels.wait_loop, "back to the dispatcher at the idle loop's start");
   assert.ok(budget - core.downcount() < 100, `only the block before the loop ran (${budget - core.downcount()} cycles), not the slice`);
 });
+
+// Patch 0086: the CPU thread's throttle sleep installs ready regions (no
+// frame pays for them), counted apart and kept out of installMaxSliceMs.
+test("a throttle sleep window installs queued regions", { skip: skip || (typeof core?.module._DolphinWeb_AotRegionSleepWindowForTest !== "function" && "core without installs in throttle sleeps (0086)") }, () => {
+  const plan = setup();
+  core.setRegionsEnabled(true);
+  const before = core.regionCount();
+  const counters = () => {
+    const p = core.module._malloc(8);
+    try {
+      core.module._DolphinWeb_AotRegionSleepInstalls(p);
+      return Array.from(new Uint32Array(core.module.HEAPU8.buffer, p, 2));
+    } finally {
+      core.module._free(p);
+    }
+  };
+  const [installs] = counters();
+  queueAll(plan);
+  core.module._DolphinWeb_AotRegionSleepWindowForTest(50); // a 50 ms sleep, as the throttle gives it
+  assert.ok(core.regionCount() > before, "installed in the sleep window");
+  assert.ok(counters()[0] > installs, "counted as sleep installs");
+  const reference = runCall(PROGRAM.labels.main, { regions: false });
+  assert.deepEqual(runCall(PROGRAM.labels.main, { regions: true }).state, reference.state);
+  // A window with no time left installs nothing more.
+  queueAll(setup());
+  const after = core.regionCount();
+  core.module._DolphinWeb_AotRegionSleepWindowForTest(0);
+  assert.equal(core.regionCount(), after);
+});
