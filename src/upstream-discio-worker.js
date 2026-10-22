@@ -151,6 +151,7 @@ import {
   hashWgpuVisualSample
 } from "./wgpu-visual-cadence.js";
 import { createCoreLifecycle } from "./core-lifecycle.js";
+import { createDisplayCounter, startDisplayLoop } from "./wgpu-display-counter.js";
 import { PipelinePrewarm } from "./wgpu-pipeline-prewarm.js";
 import { BOOT_FILE_HEAD_BYTES, bootFileKind, checkExecutable, executableGameId } from "./boot-file.js";
 import {
@@ -173,6 +174,7 @@ import {
   sniffMemcardFile,
   validateSaveStateData
 } from "./memcard.js";
+import { StreamCapture } from "./stream-capture.js";
 
 // Day-25: mark this thread. The discio worker owns the WebGPU device
 // (createWebGpuPresenter runs here). WebGPU objects aren't shareable
@@ -186,6 +188,8 @@ console.log(`[boot-phase] discio-worker module-eval at perf.now=${performance.no
 let coreUrl = DEFAULT_UPSTREAM_CORE_URL;
 let moduleInstance = null;
 let api = null;
+// Streaming: presented frames → VideoFrames → the page's MediaStreamTrackGenerator.
+const streamCapture = new StreamCapture();
 let wgpuDiagnosticQuiet = false;
 let wgpuDiagnosticLogFilter = installWgpuDiagnosticLogFilter({ enabled: false });
 let mounted = false;
@@ -275,6 +279,37 @@ async function harnessPcSampler({ action, periodMs } = {}) {
 // by harness/lib/jit-region-stats.mjs. sampleEvery >= 0 switches them on and
 // resets them; absent, they are only read. Copied twice, back to back, so the
 // harness can refuse a torn read; the size comes from the struct's header.
+// Where this launch's emulated memory sits in the wasm heap: ram and L1
+// bases and sizes (WasmStateLayout words 15-18, _DolphinWeb_AotLayoutWords,
+// 0078), the region heap bases where the core has them (0084), the heap size
+// and the stack pointer. Read only; null fields when the core lacks an export.
+function harnessHeapLayout(m) {
+  if (!m) return null;
+  const out = { heapBytes: m.HEAPU8?.buffer?.byteLength ?? null, ramBase: null, ramSize: null, l1Base: null, l1Size: null, heapBases: null, stack: null };
+  if (typeof m._DolphinWeb_AotLayoutWords === "function" && typeof m._malloc === "function") {
+    const p = m._malloc(32 * 4);
+    try {
+      m._DolphinWeb_AotLayoutWords(p, 32);
+      const w = new Uint32Array(m.HEAPU8.buffer, p, 32);
+      Object.assign(out, { ramBase: w[15] >>> 0, ramSize: w[16] >>> 0, l1Base: w[17] >>> 0, l1Size: w[18] >>> 0 });
+    } finally {
+      m._free?.(p);
+    }
+  }
+  if (typeof m._DolphinWeb_AotRegionHeapBases === "function" && typeof m._malloc === "function") {
+    const p = m._malloc(8);
+    try {
+      m._DolphinWeb_AotRegionHeapBases(p);
+      const w = new Uint32Array(m.HEAPU8.buffer, p, 2);
+      out.heapBases = [w[0] >>> 0, w[1] >>> 0];
+    } finally {
+      m._free?.(p);
+    }
+  }
+  if (typeof m.stackSave === "function") out.stack = m.stackSave() >>> 0;
+  return out;
+}
+
 function harnessJitRegionStats({ sampleEvery } = {}) {
   if (!harnessEnabled) return { error: "harness hooks are off" };
   const stats = moduleInstance?._DolphinWeb_JitRegionStats;
@@ -288,7 +323,15 @@ function harnessJitRegionStats({ sampleEvery } = {}) {
   // layoutRefused: queued regions refused for another heap layout (0078), null
   // with an older core.
   const layoutRefused = moduleInstance._DolphinWeb_AotLayoutRefused ? (moduleInstance._DolphinWeb_AotLayoutRefused() >>> 0) + aotLayoutSkipped : null;
-  return { bytes: copy(), again: copy(), installSamples: harnessRegionInstallSamples(heap), layoutRefused, regionChain: harnessRegionChainStats(heap) };
+  // layoutHash: this launch's heap layout as the region modules see it (the
+  // hash the cache is keyed on, 0078); it varies between launches of one
+  // build, and with it the host work per guest cycle (bench, 2026-10-22).
+  const layoutHash = moduleInstance._DolphinWeb_AotLayoutHash ? moduleInstance._DolphinWeb_AotLayoutHash() >>> 0 : null;
+  // heapPatched: cached modules whose heap sites were moved to this session's
+  // (0084), the bytes of their unpatched compiles, and patched compiles refused.
+  return { bytes: copy(), again: copy(), installSamples: harnessRegionInstallSamples(heap), layoutRefused, layoutHash, layout: harnessHeapLayout(moduleInstance),
+    heapPatched: aotHeapPatched, heapPatchedBytes: aotHeapPatchedBytes, heapPatchFailed: aotHeapPatchFailed,
+    regionChain: harnessRegionChainStats(heap) };
 }
 // Region chaining counters (patch 0102), reset with the region stats; null
 // with an older core.
@@ -357,6 +400,10 @@ const wgpuExactCapture = createWgpuExactCapture();
 const HARNESS_PRESENT_RING = 16384;
 const harnessPresentRing = new Float64Array(HARNESS_PRESENT_RING * 3);
 let harnessPresentHead = 0;
+// Harness only, when it asks (validationEnableHarness { displayed: true }):
+// what each BeginFrame put on screen (src/wgpu-display-counter.js).
+const harnessDisplay = createDisplayCounter();
+let harnessDisplayStop = null;
 let harnessPresentRead = 0;
 const presentationIntervalHistogram = new Uint32Array(
   PRESENTATION_HISTOGRAM_BUCKETS_MS.length + 1
@@ -1059,7 +1106,14 @@ function readHarnessTimeline() {
     Object.assign(vi, ring);
     harnessViRead = head;
   }
-  return { presents: { ...presents, lost: presentsLost }, vi, now: harnessNow() };
+  // displayed: null when not asked for, or when this worker has no rAF.
+  const display = harnessDisplayStop ? harnessDisplay.drain() : { displayed: null, displayedLost: 0, dropped: null };
+  return {
+    presents: { ...presents, lost: presentsLost }, vi, now: harnessNow(),
+    displayedEnabled: Boolean(harnessDisplayStop),
+    displayedWhy: harnessDisplayStop ? null : typeof requestAnimationFrame !== "function" ? "no requestAnimationFrame in this worker" : "not requested (validationEnableHarness { displayed: true })",
+    ...display
+  };
 }
 let harnessViRead = null;
 
@@ -1393,6 +1447,19 @@ async function handleMessage(type, payload) {
     case "exportSaveState":
     case "importSaveState":
       return handleSavesMessage(type, payload);
+    case "streamCapture":
+      if (!(payload?.writable instanceof WritableStream)) throw new Error("streamCapture needs a WritableStream");
+      // Frames reach this worker only when it presents them itself; OGL's CPU
+      // framebuffer is a stale readback. Say so instead of a silent track.
+      if (harnessVideoBackend === "OGL") throw new Error("streamCapture: not available with the OGL backend");
+      if (!renderGpu && !renderGl && !renderContext) throw new Error("streamCapture: the page owns the canvas, no frame reaches the worker");
+      streamCapture.attach(payload.writable);
+      return {};
+    case "streamCaptureStop":
+      streamCapture.detach();
+      return {};
+    case "streamCaptureStats":
+      return { stats: { ...streamCapture.stats } };
     case "setInputMask":
       inputMask = payload.mask >>> 0;
       api?.setInputMask(inputMask);
@@ -1538,13 +1605,22 @@ async function handleMessage(type, payload) {
       // Applied now if the core is loaded, and again when it loads.
       harnessEnabled = true;
       moduleInstance?._DolphinWeb_HarnessEnable?.(1);
+      if (payload.displayed && !harnessDisplayStop) {
+        harnessDisplayStop = startDisplayLoop(harnessDisplay, { active: () => harnessEnabled });
+      }
       // The determinism trace (WasmDetTrace.h) must see the boot from its
       // first event: requested here, started when the core loads.
       if (payload.detTrace && !detTraceRequested) {
         detTraceRequested = true;
         moduleInstance?._DolphinWeb_DetTraceEnable?.(1);
       }
-      return { enabled: true, coreHooks: Boolean(moduleInstance?._DolphinWeb_HarnessEnable), coreLoaded: Boolean(moduleInstance) };
+      // Tests of position-independent regions (0084): memory taken from the
+      // core's heap before the boot, so the emulated RAM sits elsewhere than
+      // in the session that filled the region cache (heapShift: whether the
+      // boot is still to come).
+      if (Number.isFinite(payload.heapShiftMb) && payload.heapShiftMb > 0) aotTestHeapShiftBytes = Math.min(payload.heapShiftMb, 256) * 1048576;
+      return { enabled: true, coreHooks: Boolean(moduleInstance?._DolphinWeb_HarnessEnable), coreLoaded: Boolean(moduleInstance),
+        ...(aotTestHeapShiftBytes ? { heapShift: coreBoot.attempted ? "too-late" : "before-boot" } : {}) };
     case "validationReadTimeline":
       return readHarnessTimeline();
     case "validationUniqueFrames":
@@ -2476,6 +2552,17 @@ async function loadCore({
   }
 
   api = bindApi(moduleInstance);
+  // Direct pad block (src/direct-pad.js): the page writes pad states into the
+  // core's shared memory and the SI poll reads them there.
+  if (typeof moduleInstance._DolphinWeb_DirectPadBlock === "function" &&
+      moduleInstance.HEAPU8.buffer instanceof SharedArrayBuffer) {
+    self.postMessage({
+      type: "direct-pad",
+      buffer: moduleInstance.HEAPU8.buffer,
+      offset: moduleInstance._DolphinWeb_DirectPadBlock() >>> 0,
+      layout: moduleInstance._DolphinWeb_DirectPadLayout() >>> 0
+    });
+  }
   harnessVideoBackend = videoBackend;
   if (harnessEnabled) moduleInstance._DolphinWeb_HarnessEnable?.(1);
   if (detTraceRequested) moduleInstance._DolphinWeb_DetTraceEnable?.(1);
@@ -3589,6 +3676,9 @@ async function mountFile(file) {
   aotCoreBooted = false;
   aotRegionsBeforeBoot.length = 0;
   aotLayoutSkipped = 0;
+  aotHeapPatched = 0;
+  aotHeapPatchedBytes = 0;
+  aotHeapPatchFailed = 0;
   aotDiscKey = null;
   aotDiscKeyPromise = null;
   aotDiscFile = file;
@@ -3628,6 +3718,10 @@ async function mountFile(file) {
   // boot; the optimisation of the rest starts once the boot is accepted.
   if (aotFirstLaunchEnabled && bootKind === "disc" && api.bootDisc && file.size >= MIN_FULL_BOOT_BYTES) {
     await prepareAotFirstLaunch(file);
+  }
+  if (aotTestHeapShiftBytes && !aotTestHeapPad && moduleInstance?._malloc) {
+    aotTestHeapPad = moduleInstance._malloc(aotTestHeapShiftBytes); // kept for the session
+    postStatus(`harness: ${aotTestHeapShiftBytes >> 20} MiB taken from the core's heap before the boot (heap shift test)`);
   }
   if (api.bootDisc && (executable || file.size >= MIN_FULL_BOOT_BYTES)) {
     coreBoot.attempted = true;
@@ -4980,6 +5074,7 @@ function presentFrame(width, height, pointer, length, coreFrame = api?.getFrame?
     _lastFrameLength = length;
     _lastFrameCopyValid = true;
     sourceFrameView = _lastFrameCopy.subarray(0, length);
+    if (streamCapture.active) streamCapture.offerBytes(sourceFrameView, width, height, coreFrame);
     const marked = frameWithInputMarker(sourceFrameView, width, height, marker);
     markerApplied = marked.applied;
     if (markerApplied) displayFrameView = marked.bytes;
@@ -5109,6 +5204,7 @@ function presentFrameBytes(width, height, bytes, coreFrame) {
     return;
   }
 
+  if (streamCapture.active) streamCapture.offerBytes(bytes, width, height, coreFrame);
   const marker = prepareInputVisualMarker(coreFrame);
   const marked = frameWithInputMarker(bytes, width, height, marker);
   const markerApplied = marked.applied;
@@ -5201,6 +5297,7 @@ function recordPresentedFrame(coreFrame) {
     harnessPresentRing[slot + 1] = coreFrame;
     harnessPresentRing[slot + 2] = moduleInstance?._DolphinWeb_HarnessViSinceBoot?.() ?? -1;
     harnessPresentHead += 1;
+    if (harnessDisplayStop) harnessDisplay.submit(harnessPresentRing[slot + 2]);
   }
   presentedFrame += 1;
   framesSincePresentationFps += 1;
@@ -7199,7 +7296,7 @@ export function startAotFirstLaunchAfterBoot(flow = aotFirstLaunch) {
   void whenCoreRamReady(moduleInstance).then((ready) => {
     if (!ready) return;
     aotCoreBooted = true;
-    for (const [module, region] of aotRegionsBeforeBoot.splice(0)) queueAotRegion(module, region);
+    for (const [module, region] of aotRegionsBeforeBoot.splice(0)) void queueAotRegion(module, region).catch(() => {});
   });
   if (!flow?.supported) return Promise.resolve();
   const generation = flow.generation;
@@ -7215,6 +7312,11 @@ export function startAotFirstLaunchAfterBoot(flow = aotFirstLaunch) {
 // say it exists (DolphinWeb_AotRamReady), polled, up to 60 s.
 let aotCoreBooted = false;
 let aotLayoutSkipped = 0;
+let aotHeapPatched = 0; // cached region modules patched for this session's heap (0084)
+let aotTestHeapShiftBytes = 0; // harness: heap taken before the boot (validationEnableHarness heapShiftMb)
+let aotTestHeapPad = 0;
+let aotHeapPatchedBytes = 0; // their unpatched bytes, compiled by the cache loader for nothing
+let aotHeapPatchFailed = 0; // patched modules the compiler refused: left to the JIT
 async function whenCoreRamReady(module, { timeoutMs = 60000, everyMs = 50 } = {}) {
   if (typeof module?._DolphinWeb_AotRamReady !== "function") return true; // older core: as before
   const start = performance.now();
@@ -7226,7 +7328,7 @@ async function whenCoreRamReady(module, { timeoutMs = 60000, everyMs = 50 } = {}
 }
 const aotRegionsBeforeBoot = [];
 function queueAotRegionAfterBoot(module, region) {
-  if (aotCoreBooted) queueAotRegion(module, region);
+  if (aotCoreBooted) void queueAotRegion(module, region).catch(() => {});
   else aotRegionsBeforeBoot.push([module, region]);
 }
 // The CPU thread's module-map key for these bytes (DolphinWeb_MakeWasmBlockCacheKey).
@@ -7240,13 +7342,52 @@ async function regionBlockCacheKey(bytes) {
 // a hit in V8's native module cache; it then runs it for its entries.
 // members: [{ ranges, hash }] per function, the plan's FNV-1a 64 of its code:
 // the core installs nothing whose code changed since the translation.
-function queueAotRegion(module, { bytes, entries, members, layout = 0 }) {
+async function queueAotRegion(module, { key, bytes, entries, members, layout = 0 }, flow = aotFirstLaunch) {
   if (typeof module?._DolphinWeb_AotQueueRegion !== "function" || !bytes?.length || !entries?.length || !members?.length) return;
   // Translated for another heap layout: the core would refuse it; not even
-  // copied into its heap (counted).
+  // copied into its heap (counted). Translated again from guest memory, its
+  // cache entry overwritten (the new module comes back through install).
   if (typeof module._DolphinWeb_AotLayoutHash === "function" && (layout >>> 0) !== (module._DolphinWeb_AotLayoutHash() >>> 0)) {
     aotLayoutSkipped += 1;
+    if (key) flow?.retranslate?.(key);
     return;
+  }
+  // Its heap sites hold the RAM and L1 addresses of the session that
+  // translated it (patch 0084): moved to this session's, and the patched
+  // bytes compiled off the CPU thread and kept under their key, as the CPU
+  // thread's compile request looks them up. It is queued with the bases its
+  // final bytes say they hold, never the session's: a module without the
+  // section, or whose section does not parse, goes with none (0, 0), which
+  // the core refuses; the core also checks every site itself.
+  let heapBases = [0, 0];
+  if (typeof module._DolphinWeb_AotRegionHeapBases === "function") {
+    const generation = aotDiscGeneration;
+    const { coreHeapBases } = await import("./aot-orchestrator.js");
+    const { patchRegionHeap, regionHeapOfBytes } = await import("./aot-region-module.js");
+    const session = coreHeapBases(module);
+    let patched, heap;
+    try {
+      patched = patchRegionHeap(bytes, { ramBase: session[0], l1Base: session[1] });
+      heap = regionHeapOfBytes(patched);
+    } catch {
+      aotLayoutSkipped += 1; // a malformed section or a site that does not hold its base: never queued
+      return;
+    }
+    if (patched !== bytes) {
+      // The module the cache loader compiled from the unpatched bytes is
+      // thrown away (counted; up to the whole cache when the heap moved).
+      aotHeapPatched += 1;
+      aotHeapPatchedBytes += bytes.length;
+      const patchedKey = await regionBlockCacheKey(patched);
+      const compiled = await precompileAotRegion(patchedKey, patched);
+      if (!compiled.module) {
+        aotHeapPatchFailed += 1;
+        return;
+      }
+      bytes = patched;
+    }
+    if (generation !== aotDiscGeneration) return; // another disc meanwhile
+    if (heap) heapBases = [heap.ramBase, heap.l1Base];
   }
   const ranges = members.flatMap((m) => m.ranges);
   const triples = members.flatMap((m) => [m.ranges.length, m.hash ? parseInt(m.hash.slice(8), 16) : 0, m.hash ? parseInt(m.hash.slice(0, 8), 16) : 0]);
@@ -7257,12 +7398,14 @@ function queueAotRegion(module, { bytes, entries, members, layout = 0 }) {
     module.HEAPU8.set(bytes, b);
     new Uint32Array(module.HEAPU8.buffer, w, words.length).set(words);
     const rangesAt = w + 4 * entries.length, membersAt = rangesAt + 8 * ranges.length;
-    module._DolphinWeb_AotQueueRegion(b, bytes.length, w, entries.length, rangesAt, ranges.length, membersAt, members.length, layout >>> 0);
+    module._DolphinWeb_AotQueueRegion(b, bytes.length, w, entries.length, rangesAt, ranges.length, membersAt, members.length, layout >>> 0,
+      heapBases[0] >>> 0, heapBases[1] >>> 0);
   } finally {
     module._free(b);
     module._free(w);
   }
 }
+export const queueAotRegionForTest = queueAotRegion;
 // A region module of the first launch: compiled off the CPU thread when the
 // compiler worker is on (?aotcompiler=1), kept alive under its key.
 async function precompileAotRegion(key, bytes) {
@@ -14614,6 +14757,8 @@ function drainWebGpuCmdRing(source = "presentation") {
           // the legacy repaint loop cannot race this submitted frame before
           // the current command-ring drain returns.
           cmdRingOwnsCanvas = true;
+          // A frame carrying the diagnostic input marker is not streamed.
+          if (streamCapture.active && !hardwareInputMarkerApplied) streamCapture.offerCanvas(renderCanvas, api?.getFrame?.() ?? 0);
           recordPresentedFrame(api?.getFrame?.() ?? 0);
           wgpuPresentedSource = {
             textureId: wgpuLastBackbufferSourceTextureId, rect: wgpuNextPresentSource

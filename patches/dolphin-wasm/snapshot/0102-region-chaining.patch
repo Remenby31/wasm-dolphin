@@ -14,7 +14,7 @@ diff --git a/Source/Core/Core/PowerPC/CachedInterpreter/CachedInterpreter.cpp b/
          }
        }).exports.f;
    const inst_t1 = (typeof performance !== "undefined" && performance.now) ? performance.now() : 0;
-@@ -9225,6 +9229,38 @@ inline void RegionFilterAdd(u32 pc)
+@@ -9343,6 +9347,38 @@ inline void RegionFilterAdd(u32 pc)
    s_region_filter[bit >> 6] |= u64{1} << (bit & 63);
  }
  
@@ -53,7 +53,7 @@ diff --git a/Source/Core/Core/PowerPC/CachedInterpreter/CachedInterpreter.cpp b/
  struct PendingRegion
  {
    std::vector<u8> bytes;
-@@ -9278,6 +9314,7 @@ u32 s_region_install_fallbacks = 0;     // likewise
+@@ -9400,6 +9436,7 @@ u32 s_region_install_fallbacks = 0;     // likewise
  // ClearCache: the ready table and the requests in flight were reset.
  void RepostWaitingRegions();
  void UnverifyAllRegions();
@@ -61,7 +61,7 @@ diff --git a/Source/Core/Core/PowerPC/CachedInterpreter/CachedInterpreter.cpp b/
  
  // The part of CachedInterpreter::ClearCache that concerns off-thread
  // compiles and regions (a state load may have changed any code).
-@@ -9354,6 +9391,32 @@ struct RegionStats
+@@ -9476,6 +9513,32 @@ struct RegionStats
  };
  static_assert(sizeof(RegionStats) == 256);
  std::unordered_map<u32, double> s_miss_cycles;  // while timing is on
@@ -94,7 +94,7 @@ diff --git a/Source/Core/Core/PowerPC/CachedInterpreter/CachedInterpreter.cpp b/
  alignas(8) RegionStats s_region_stats;
  bool s_region_stats_on = false;
  // Set while one sampled ExecuteOneBlock runs: its block lookups (chained
-@@ -9405,6 +9468,7 @@ void DropRegion(u32 index)
+@@ -9527,6 +9590,7 @@ void DropRegion(u32 index)
        s_region_at.erase(it);
    }
    ForEachRegionPage(region, -1);
@@ -102,7 +102,7 @@ diff --git a/Source/Core/Core/PowerPC/CachedInterpreter/CachedInterpreter.cpp b/
    s_region_filter.fill(0);
    for (const auto& [pc, owner] : s_region_at)
      RegionFilterAdd(pc);
-@@ -9417,6 +9481,7 @@ void ForgetAllRegions()
+@@ -9539,6 +9603,7 @@ void ForgetAllRegions()
  {
    s_regions.clear();
    s_region_at.clear();
@@ -110,7 +110,7 @@ diff --git a/Source/Core/Core/PowerPC/CachedInterpreter/CachedInterpreter.cpp b/
    s_region_filter.fill(0);
    std::fill(s_region_pages.begin(), s_region_pages.end(), 0);
    s_region_waiting.clear();
-@@ -9449,6 +9514,7 @@ void InstallRegion(PendingRegion& pending, int handle)
+@@ -9572,6 +9637,7 @@ void InstallRegion(PendingRegion& pending, int handle)
      s_region_at.emplace(pc, index);  // an entry already mapped keeps its region
      RegionFilterAdd(pc);
    }
@@ -118,7 +118,7 @@ diff --git a/Source/Core/Core/PowerPC/CachedInterpreter/CachedInterpreter.cpp b/
    ForEachRegionPage(s_regions.back(), +1);
  }
  
-@@ -9705,6 +9771,7 @@ void PublishRegionStats()
+@@ -9839,6 +9905,7 @@ void PublishRegionStats()
      s_region_stats.top_miss[2 * i] = i < n ? top[i].second : 0;
      s_region_stats.top_miss[2 * i + 1] = i < n ? top[i].first : 0;
    }
@@ -126,7 +126,7 @@ diff --git a/Source/Core/Core/PowerPC/CachedInterpreter/CachedInterpreter.cpp b/
  }
  
  void ApplyRegionStatsRequest()
-@@ -9723,6 +9790,7 @@ void ApplyRegionStatsRequest()
+@@ -9857,6 +9924,7 @@ void ApplyRegionStatsRequest()
      s_region_stats.installs_fast = kept.installs_fast;
      s_region_stats.install_fallbacks = kept.install_fallbacks;
      s_miss_cycles.clear();
@@ -134,7 +134,7 @@ diff --git a/Source/Core/Core/PowerPC/CachedInterpreter/CachedInterpreter.cpp b/
      s_region_stats.sample_every = static_cast<u32>(request);
      s_last_timed_ms = 0;
      s_sampled_lookup_ms = 0;
-@@ -9751,14 +9819,14 @@ bool TryRunRegion(PowerPC::PowerPCState& ppc_state)
+@@ -9885,14 +9953,14 @@ bool TryRunRegion(PowerPC::PowerPCState& ppc_state)
        s_region_stats.mode_refusals += 1;
      return false;
    }
@@ -152,9 +152,9 @@ diff --git a/Source/Core/Core/PowerPC/CachedInterpreter/CachedInterpreter.cpp b/
    if (!region.verified)
    {
      // The RAM may have been allocated again (a stop and a new boot in the same
-@@ -9768,12 +9836,12 @@ bool TryRunRegion(PowerPC::PowerPCState& ppc_state)
-     if (region.layout_hash != WasmLayoutHash(CurrentWasmStateLayout(Core::System::GetInstance())) ||
-         !RegionCodeMatchesPlan(region.ranges, region.members))
+@@ -9904,12 +9972,12 @@ bool TryRunRegion(PowerPC::PowerPCState& ppc_state)
+       s_region_layout_refused += 1;
+     if (moved || !RegionCodeMatchesPlan(region.ranges, region.members))
      {
 -      DropRegion(it->second);
 +      DropRegion(index);
@@ -167,7 +167,7 @@ diff --git a/Source/Core/Core/PowerPC/CachedInterpreter/CachedInterpreter.cpp b/
        return false;
      }
      region.verified = true;
-@@ -9781,7 +9849,7 @@ bool TryRunRegion(PowerPC::PowerPCState& ppc_state)
+@@ -9917,7 +9985,7 @@ bool TryRunRegion(PowerPC::PowerPCState& ppc_state)
    }
    using RegionFunction = int (*)(int);
    const auto run = reinterpret_cast<RegionFunction>(
@@ -176,7 +176,7 @@ diff --git a/Source/Core/Core/PowerPC/CachedInterpreter/CachedInterpreter.cpp b/
    const s32 downcount = ppc_state.downcount;
    int code;
    if (s_region_stats_on && s_region_stats.sample_every != 0)
-@@ -9817,14 +9885,116 @@ inline bool RegionWouldRun(const PowerPC::PowerPCState& ppc_state)
+@@ -9953,14 +10021,116 @@ inline bool RegionWouldRun(const PowerPC::PowerPCState& ppc_state)
    if (!s_regions_enabled.load(std::memory_order_relaxed) || !RegionFilterHas(ppc_state.pc) ||
        !ppc_state.msr.IR || !ppc_state.msr.DR || !ppc_state.msr.FP ||
        (ppc_state.feature_flags & FEATURE_FLAG_PERFMON) != 0 ||

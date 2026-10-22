@@ -194,6 +194,17 @@ took 22 % of the CPU thread (`dispatchTimeShare`).
   across regions that never exits at the interpreter's state, no chaining
   into a dropped region).
 
+## Function names (2026-10-22)
+
+A region module carries a `name` section: the module is `r<lowest entry PC>`,
+its functions `r<id>_dispatch`, `r<id>_inner`, `r<id>_exit` and
+`r<id>_f<entry PC>` per fragment (8 hex digits each). Profiles (V8's
+DevTools profiles, perf maps, jitdump) then show which region and which
+guest function runs instead of `wasm-function[N]`. V8's code generation
+ignores the section; the cache key holds the members, not the bytes, so a
+module cached before it is still used (without names). `names: false` in
+`assembleRegion` leaves it out.
+
 ## Heap layout guard (patch 0078, 2026-10-21)
 
 Region code, like block code, embeds absolute addresses of the core's heap:
@@ -238,10 +249,36 @@ million console lines, the browser process at 7-14 GB).
 - [ ] **Retranslate after a layout refusal**: compare a cached module's
   layout with the core's once the RAM exists, mark the key not done, translate
   it again and overwrite the entry (review of #62, P1-3).
-- [ ] **Position-independent region code**: pass RAM and L1 as imported
-  immutable globals instead of constants, so a moved heap no longer refuses
-  (and wastes) the cache. The cache key cannot hold the layout: it is opened
-  before the boot, when the RAM is not allocated yet.
+- [x] **Position-independent region code** (patch 0084): the machine code
+  is main's (`i32.const base; offset; i32.add`), but the `i32.const` of each
+  RAM or L1 base is a 5-byte padded signed LEB listed as a heap site (reloc
+  kind 3; the module's `region-heap` section: the bases it holds and its
+  sites, each with its form, `const` or a memarg `offset`). Discio patches a
+  cached module's sites to this session's bases (`patchRegionHeap`) and
+  compiles the patched bytes off the CPU thread before it queues them;
+  `DolphinWeb_AotQueueRegion` takes the bases the sites hold, and the core
+  refuses a region whose bases are not this session's, at install and when an
+  installed one is checked again (a RAM allocated again under it, #62 P1-1).
+  `WasmLayoutHash` leaves the two addresses out; the other fields stay
+  guarded. Block modules are unchanged. Compiler version: 3 was reserved for
+  0084; 0087 (merged first) bumps it to 5, which covers it.
+  Measured on the race with aot=1 (Spark pairs) before this form: imported
+  globals −0.8 %, locals copied at fragment entry −0.6 %, the base folded into
+  the memarg offset −1.3 % (ARM rematerialises a large offset at every
+  access; the `offset` form is kept for x64, where it folds into the
+  addressing mode, untested without an x86 machine).
+  Discio queues a module with the bases its final bytes hold (none without a
+  section, which the core refuses), and the core checks the module's own
+  `region-heap` section and every site against this session's bases. When the
+  heap moved, the cache loader's compile of each unpatched module is thrown
+  away: counted with the patched ones (`heapPatched`, `heapPatchedBytes`,
+  `heapPatchFailed` in the region stats reply), up to the whole cache.
+  Tests: a module patched for another heap runs there; a module with another
+  session's bases is refused, and runs once patched back; a module without
+  its section, with a site changed, or whose section claims other bases is
+  refused by the core; a malformed section throws; the RAM moved under
+  an installed region drops it; every fragment site holds the base, and no
+  immediate holds a heap address outside the sites.
 - [x] **35 regions dropped on every second launch** (KPI, d18249e, and locally): installed during the OS init, they were dropped by invalidations (icbi or DMA) over their ranges, and the code then ran in the block JIT for the session. Patch 0085: an invalidation over an installed region marks it unverified instead; before it next runs it is checked against the plan's hashes (as after a cache clear), and dropped only if its code changed. A region with a member that has no hash, or an HLE hook installed at an entry since, is dropped (a hook changes no byte); a forced invalidation (breakpoints) drops at once, as before; a region already due for a check is skipped by later invalidations. `DolphinWeb_AotRegionRechecks` counts the regions kept for a check, the checks passed and the regions invalidations looked at.
 - [ ] **Second-launch TTFF +0.8 s** (first core frame 1.55 s against 0.72 s cold): the region cache read and compiled before the boot (`installBeforeBoot`). Load fewer modules before the boot, the rest after (target 10 s, today 2.05 s).
 

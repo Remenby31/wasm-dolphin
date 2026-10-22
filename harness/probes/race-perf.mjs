@@ -14,18 +14,22 @@
 //     [--runs 4 (even with --baseline)] [--min-pairs 4] [--hold KeyX] [--warm]
 //     [--max-load L] [--load-wait 300] [--lock-wait 1800]
 //     [--pcsample [periodMs]] [--symbols functions.json] [--out dir]
-//     [--unique-frames secs] [--region-sample N [--region-secs 10]] [--mem-stats] [--baseline-query "..."]
+//     [--display] [--unique-frames secs] [--region-sample N [--region-secs 10]] [--mem-stats] [--baseline-query "..."]
 //     [--calm-wait S (default --lock-wait): wait for load ≤ --max-load before taking the lock]
 //     [--chrome-args "--flag …"] [--baseline-chrome-args "--flag …"]
+//     [--emulated-window S [--emulated-warmup W (default --warmup)] [--emulated-poll-ms 100]]
 //
 // - Pairing and interleaving: run i measures both sides back to back, the
 //   order alternating (base, head | head, base | …), so drift on the machine
 //   hits both sides alike; the change is the median of per-run ratios.
 // - Speed is the core's own (VI ticks over host time from the VI timeline),
 //   never the page's gameSpeed (5-8 points higher): one measure only.
-// - Machine load: as in the matrix (env.mjs), each side first waits up to
-//   --load-wait s for the 1-minute load to drop under --max-load (default: a
-//   quarter of the cores); a window whose median load is above it fails.
+// - Machine load: the 1-minute load must be under --max-load (default: a
+//   quarter of the cores) before each side, and a window whose median load
+//   is above it fails. Never waited for under the perf lock: loaded, the
+//   lock goes back, the calm is awaited up to --load-wait s outside it, the
+//   lock is taken again in turn and the run played again (both sides); at
+//   most 3 times, and no calm within --load-wait gives the runs up.
 // - The runs are even and the pairs balanced in order (trunk first as often
 //   as head first), with at least --min-pairs valid pairs; otherwise the
 //   change is withheld and the probe exits non-zero.
@@ -43,6 +47,16 @@
 //   summary.json (chrome.sideArgs): such a result is never stock Chrome for
 //   kpi-report. Each run also records bootMs, from the Chrome launch to the
 //   session ready (boot, compilations included).
+// - --emulated-window S: the window is S GUEST seconds instead of --secs host
+//   seconds. With a host-time window the faster side covers another stretch
+//   of the scene (another idle share), which biases the pair (PROGRAM.md,
+//   2026-10-22). Each run loads the savestate, pauses, presses the key,
+//   resumes, runs W guest seconds, then measures S guest seconds; node polls
+//   the core's ticks every --emulated-poll-ms during the window (the one
+//   page call allowed in it). speed is then guest seconds covered over host
+//   seconds; the run records guestTicksStart/End, guestSecondsCovered,
+//   hostMs, overshootTicks and speedVi (the VI timeline's, same span), and
+//   --counters are divided by the ticks covered.
 // - --warm boots again in the same profile (JIT cache in IndexedDB) and
 //   measures again: cold and warm caches on the same run.
 // - Region JIT counters (P4, lib/jit-region-stats.mjs): off by default. With
@@ -71,12 +85,14 @@ import { PRESETS } from "../lib/matrix.mjs";
 import { claim, release } from "../lib/ownership.mjs";
 import { acquirePerfLock } from "../lib/perf-lock.mjs";
 import { openSession, rebootSession } from "../lib/session.mjs";
-import { calmThenLock, loadGaveUp, waitForLoad } from "../lib/env.mjs";
+import { calmThenLock, calmUnderLock, loadGaveUp } from "../lib/env.mjs";
 import { describe, median, percentile, round } from "../lib/stats.mjs";
-import { coreStats, hitchList, mergeTimeline, presentationStats } from "../lib/timeline.mjs";
+import { coreStats, displayStats, hitchList, mergeTimeline, presentationStats } from "../lib/timeline.mjs";
 import { consistentRead, decodeRegionStats, poolStats, regionShares, topMisses } from "../lib/jit-region-stats.mjs";
 import { consistentMemRead, decodeMemStats, memAccessShares, poolMemStats } from "../lib/mem-access-stats.mjs";
 import { summarizePcSamples } from "../../src/harness-pc-sampler.js";
+import { checkPerfAccess, instructionsPerGuestCycle, perfCounters } from "../lib/perf-counters.mjs";
+import { emulatedStart } from "../lib/emulated-window.mjs";
 
 const HOMEBREW_OUT = path.join(REPO_ROOT, "harness", "homebrew", "out");
 export const STATE_ROUTE = "**/__harness_state.sav";
@@ -153,27 +169,41 @@ export function rendererThreads(profileDir) {
 }
 
 // Load the scene, hold the key, settle, then a window with no page call.
-async function measure(session, o) {
+export async function measure(session, o) {
   const { page } = session;
   const loaded = await loadHarnessState(page, session.url);
   if (!loaded?.loaded) throw new Error(`savestate load failed: ${JSON.stringify(loaded)}`);
-  if (o.hold) await page.keyboard.down(o.hold);
+  // --emulated-window: the key is pressed while the core is paused, and the
+  // warmup and the window are counted in guest seconds (lib/emulated-window.mjs).
+  if (o.hold && !o.emulatedWindow) await page.keyboard.down(o.hold);
   try {
-    await page.waitForTimeout(o.warmup * 1000);
+    const emu = o.emulatedWindow ? await emulatedStart(page, { warmup: o.emulatedWarmup, pollMs: o.emulatedPollMs, press: o.hold ? () => page.keyboard.down(o.hold) : undefined }) : null;
+    if (!emu) await page.waitForTimeout(o.warmup * 1000);
     // A core without the sampler export (older trunk) is measured anyway;
     // the run says why it has no PC histogram.
     const pcStart = o.pcsample ? await workerRequest(page, "validationPcSampler", { action: "start", periodMs: o.pcsample }, 10000) : null;
     const sampling = Boolean(pcStart?.started);
+    // o.onWindow (race-multi's hardware counters): called just before and
+    // just after the window, from node only (no page call inside it).
+    if (o.onWindow) await o.onWindow("start", session);
     await readTimeline(page); // drop everything before the window
     const t0 = await page.evaluate(() => performance.timeOrigin + performance.now());
     // The window: node timers only. The rings (VI 8192, presents 16384)
     // hold far more than a window, so nothing is read until it ends.
     const loads = [], threads = [];
-    for (let s = 0; s < o.secs; s += 1) {
+    // Emulated: node polls the guest ticks (one worker call per poll).
+    const emulated = emu && await emu.window(o.emulatedWindow, {
+      poll: (t, fraction) => {
+        loads.push(os.loadavg()[0]);
+        if (fraction >= 0.5 && threads.length === 0) threads.push(rendererThreads(session.profileDir));
+      }
+    });
+    for (let s = 0; !emu && s < o.secs; s += 1) {
       await new Promise((r) => setTimeout(r, 1000));
       loads.push(os.loadavg()[0]);
       if (s === Math.floor(o.secs / 2)) threads.push(rendererThreads(session.profileDir));
     }
+    const counters = o.onWindow ? await o.onWindow("end", session) : undefined;
     const chunk = await readTimeline(page);
     const t1 = await page.evaluate(() => performance.timeOrigin + performance.now());
     const pc = sampling ? await workerRequest(page, "validationPcSampler", { action: "stop" }, 20000) : pcStart && { error: pcStart.error ?? "not started" };
@@ -214,14 +244,24 @@ async function measure(session, o) {
         if (live(memEnd)) memEnd = await workerRequest(page, "validationReadMemAccessStats", {}, 10000);
       }
     }
+    // Regions the engine set aside without the core ever seeing them (another
+    // heap layout, 0078; heap patches, 0084): read even without
+    // --region-sample, so that a launch running without its region cache
+    // never goes unnoticed (2026-10-22: 0/143 on a loaded machine).
+    const pipeline = regionEnd ? null : await workerRequest(page, "validationReadJitRegionStats", {}, 10000).catch(() => null);
     return {
       windowMs: Math.round(t1 - t0),
       load1: { min: round(Math.min(...loads), 2), median: round(medianLoad, 2), max: round(Math.max(...loads), 2), limit: o.maxLoad },
       overloaded: medianLoad > o.maxLoad,
       complete: timeline.complete,
-      speed: round(core.speed), speedP5: round(core.speedP5), speedMin: round(core.speedMin),
+      // Emulated: the speed over the guest seconds the window covered (the
+      // VI timeline's own over the same span kept as speedVi).
+      ...(emulated ? { ...emulated, speed: emulated.speed, speedVi: round(core.speed) } : { speed: round(core.speed) }),
+      speedP5: round(core.speedP5), speedMin: round(core.speedMin),
       gameFps: info?.vis ?? null,
       presents: pres.presents, viOutputs: timeline.vi.length,
+      // --display: what the screen showed (one worker rAF per BeginFrame).
+      ...(o.display ? { display: displayStats(timeline) } : {}),
       presentsPerSecond: round(pres.presents / ((t1 - t0) / 1000), 1),
       ...(o.uniqueFrames ? { uniqueFrames, uniqueFpsEstimate: uniqueFrames?.uniqueShare == null ? null : round((pres.presents / ((t1 - t0) / 1000)) * uniqueFrames.uniqueShare, 1) } : {}),
       viIntervalMs: { p50: round(percentile(viMs, 50)), p99: round(percentile(viMs, 99)), max: round(viMs.length ? Math.max(...viMs) : null) },
@@ -234,11 +274,20 @@ async function measure(session, o) {
       freezes: { core: core.freezes?.length ?? 0, present: pres.freezes.length },
       pc: pc && !pc.error ? summarizePcSamples(pc, { functions: o.functions }) : pc,
       ...regionRecord(regionEnd),
+      ...(pipeline && !pipeline.error ? regionPipeline(pipeline) : {}),
+      ...(counters ? { counters } : {}),
       ...(o.memStats ? memRecord(memEnd) : {})
     };
   } finally {
     if (o.hold) await page.keyboard.up(o.hold).catch(() => {});
   }
+}
+
+// A change measured while another harness held the perf lock too is not a
+// measure: withheld, with the overlap as the reason.
+export function withheldOnOverlap(change, overlaps) {
+  if (!change || !overlaps.length) return change;
+  return { ...change, median: null, withheld: `perf lock overlap: ${overlaps.map((x) => `${x.at}: ${x.why}`).join("; ")}` };
 }
 
 // p4 of one stats window, or null and why (not asked, no export, torn or
@@ -251,10 +300,23 @@ export function regionRecord(reply) {
   const p4 = regionShares(stats);
   const samples = {
     ...(Array.isArray(reply.installSamples) ? { installSamples: reply.installSamples } : {}),
-    ...(Number.isInteger(reply.layoutRefused) ? { layoutRefused: reply.layoutRefused } : {}),
+    // layoutRefused, the launch's heap layout (it varies between launches, and
+    // the host work per guest cycle with it, bench 2026-10-22), and the 0084
+    // heap patches
+    ...regionPipeline(reply),
     ...(reply.regionChain ? { regionChain: reply.regionChain } : {})
   };
   return p4.error ? { p4: null, p4Why: p4.error, ...samples } : { p4, p4Raw: stats, ...samples };
+}
+
+// The region pipeline counters a stats reply carries besides the stats.
+export function regionPipeline(reply) {
+  return {
+    ...(Number.isInteger(reply.layoutRefused) ? { layoutRefused: reply.layoutRefused } : {}),
+    ...(Number.isInteger(reply.layoutHash) ? { layoutHash: reply.layoutHash } : {}),
+    ...(reply.layout ? { layout: reply.layout } : {}),
+    ...(Number.isInteger(reply.heapPatched) ? { heapPatched: reply.heapPatched, heapPatchedBytes: reply.heapPatchedBytes ?? null, heapPatchFailed: reply.heapPatchFailed ?? null } : {})
+  };
 }
 
 // Memory accesses per instruction of one stats window (0104), or null and why.
@@ -327,17 +389,20 @@ export function p4Summary(runs, sides, good = (r) => r && !r.error) {
   };
 }
 
-async function measureSide(side, o) {
-  // As the matrix does (env.mjs): wait for the machine to calm down first,
-  // then judge the window on its median load.
-  const loadGate = await waitForLoad({ maxLoad: o.maxLoad, waitSec: o.loadWait, log: (m) => console.log(`[race-perf] ${side.name}: ${m}`) });
+// Times a pair may let the lock go for the load before giving its runs up.
+const MAX_RELOCKS = 3;
+
+// loadGate: the load before the side (calmUnderLock, outside the lock when
+// loaded); the window is then judged on its median load.
+async function measureSide(side, o, loadGate) {
   const server = await ensureServer({ port: o.port, root: side.root, coreCandidates: o.coreCandidates });
   try {
     const bootStart = performance.now();
-    const session = await openSession({ base: server.base, server, query: side.query ?? o.query, iso: o.iso, routes: { [STATE_ROUTE]: o.state }, chromeArgs: side.chromeArgs ?? [] });
+    const session = await openSession({ base: server.base, server, query: side.query ?? o.query, iso: o.iso, routes: { [STATE_ROUTE]: o.state }, chromeArgs: side.chromeArgs ?? [], harness: o.display ? { displayed: true } : {} });
     const record = { url: session.url, served: server.identity, core: session.core, loadGate, bootMs: round(performance.now() - bootStart, 0) };
     try {
       record.cold = await measure(session, o);
+      if (record.cold.counters) record.cold.instructionsPerGuestCycle = instructionsPerGuestCycle(record.cold);
       if (o.warm) {
         record.warmCore = await rebootSession(session, server);
         record.warm = await measure(session, o);
@@ -382,7 +447,7 @@ function resolveSide(name, spec) {
   return { name, label: spec, root: exportRef(spec), temp: true };
 }
 
-const brief = (m) => m && `speed ${m.speed} % (p5 ${m.speedP5}) game ${m.gameFps} fps vi p99 ${m.viIntervalMs.p99} ms hitches ${m.hitchesPerMin}/min busiest thread ${m.rendererThreads.at(-1)?.busiest} % load ${m.load1.median}${m.overloaded ? " OVERLOADED" : ""}${m.pc?.samples ? ` pc ${m.pc.samples} samples` : ""}`;
+const brief = (m) => m && `speed ${m.speed} % (p5 ${m.speedP5}) game ${m.gameFps} fps vi p99 ${m.viIntervalMs.p99} ms hitches ${m.hitchesPerMin}/min busiest thread ${m.rendererThreads.at(-1)?.busiest} % load ${m.load1.median}${m.overloaded ? " OVERLOADED" : ""}${m.pc?.samples ? ` pc ${m.pc.samples} samples` : ""}${m.layoutRefused > 0 ? ` REGIONS REFUSED FOR THE HEAP LAYOUT ${m.layoutRefused}` : ""}${m.heapPatched > 0 ? ` heap-patched ${m.heapPatched}` : ""}`;
 
 async function main() {
   const { values } = parseArgs({
@@ -391,9 +456,10 @@ async function main() {
       baseline: { type: "string" }, candidate: { type: "string" },
       config: { type: "string", default: "wgpu" }, query: { type: "string" },
       runs: { type: "string", default: "4" }, "min-pairs": { type: "string" }, "load-wait": { type: "string", default: "300" }, "calm-wait": { type: "string" }, warmup: { type: "string", default: "25" }, secs: { type: "string", default: "20" },
+      "emulated-window": { type: "string" }, "emulated-warmup": { type: "string" }, "emulated-poll-ms": { type: "string", default: "100" },
       hold: { type: "string", default: "KeyX" }, warm: { type: "boolean", default: false },
       "max-load": { type: "string" }, "lock-wait": { type: "string", default: "1800" },
-      pcsample: { type: "string" }, symbols: { type: "string" }, "region-sample": { type: "string" }, "region-secs": { type: "string", default: "10" }, "unique-frames": { type: "string" }, "mem-stats": { type: "boolean", default: false }, "baseline-query": { type: "string" }, "chrome-args": { type: "string" }, "baseline-chrome-args": { type: "string" },
+      pcsample: { type: "string" }, symbols: { type: "string" }, "region-sample": { type: "string" }, "region-secs": { type: "string", default: "10" }, counters: { type: "boolean", default: false }, "unique-frames": { type: "string" }, display: { type: "boolean", default: false }, "mem-stats": { type: "boolean", default: false }, "baseline-query": { type: "string" }, "chrome-args": { type: "string" }, "baseline-chrome-args": { type: "string" },
       "core-candidate": { type: "string", multiple: true, default: [] },
       port: { type: "string", default: process.env.HARNESS_PORT }, out: { type: "string" }
     },
@@ -423,14 +489,25 @@ async function main() {
     iso, state, port: num(values, "port", { min: 1, int: true }), query, runs,
     minPairs: values["min-pairs"] ? num(values, "min-pairs", { min: 2, int: true }) : Math.min(runs, 4),
     warmup: num(values, "warmup", { min: 0 }), secs: num(values, "secs", { min: 2, int: true }),
+    // --emulated-window S: S guest seconds after --emulated-warmup W guest
+    // seconds (default: --warmup), ticks polled every --emulated-poll-ms.
+    ...(values["emulated-window"] ? {
+      emulatedWindow: num(values, "emulated-window", { min: 1 }),
+      emulatedWarmup: values["emulated-warmup"] == null ? num(values, "warmup", { min: 0 }) : num(values, "emulated-warmup", { min: 0 }),
+      emulatedPollMs: num(values, "emulated-poll-ms", { min: 10, int: true })
+    } : {}),
     hold: values.hold || null, warm: values.warm,
     maxLoad: values["max-load"] ? num(values, "max-load", { min: 0.1 }) : Math.max(2, os.cpus().length / 4),
     loadWait: num(values, "load-wait", { min: 0 }),
     pcsample: values.pcsample ? num(values, "pcsample", { min: 0.05 }) : null,
     regionSample: values["region-sample"] == null ? null : num(values, "region-sample", { min: 0, int: true }),
     regionSecs: num(values, "region-secs", { min: 1 }),
+    // --counters (Linux perf): host instructions per guest cycle of the
+    // emulated CPU thread, per window (lib/perf-counters.mjs).
+    ...(values.counters ? (checkPerfAccess(), { onWindow: perfCounters() }) : {}),
     uniqueFrames: values["unique-frames"] == null ? null : num(values, "unique-frames", { min: 2 }),
     memStats: values["mem-stats"],
+    display: values.display,
     functions: values.symbols ? JSON.parse(readFileSync(values.symbols, "utf8")).sort((a, b) => a[0] - b[0]) : null,
     coreCandidates: values["core-candidate"]
   };
@@ -445,10 +522,8 @@ async function main() {
   if (values.baseline) sides.baseline = { ...resolveSide("baseline", values.baseline), query: baselineQuery, chromeArgs: baselineChromeArgs };
   // A calm machine first (--calm-wait, default --lock-wait), then the lock.
   const calmWait = values["calm-wait"] == null ? lockWait : num(values, "calm-wait", { min: 0 });
-  const releaseLock = await calmThenLock({
-    maxLoad: o.maxLoad, calmWait, log: (m) => console.log(`[race-perf] before the lock: ${m}`),
-    acquire: () => acquirePerfLock({ name: `harness race-perf (${REPO_ROOT})`, waitSec: lockWait, log: (m) => console.log(`[race-perf] ${m}`) })
-  });
+  const acquire = () => acquirePerfLock({ name: `harness race-perf (${REPO_ROOT})`, waitSec: lockWait, log: (m) => console.log(`[race-perf] ${m}`) });
+  let releaseLock = await calmThenLock({ maxLoad: o.maxLoad, calmWait, log: (m) => console.log(`[race-perf] before the lock: ${m}`), acquire });
   // A local-only disc never writes into the repo.
   const stamp = `${new Date().toISOString().replace(/[:.]/g, "-").slice(0, 19)}-${process.pid}-${randomBytes(3).toString("hex")}`;
   const outDir = values.out ? path.resolve(values.out) : localOnly
@@ -460,21 +535,48 @@ async function main() {
 
   const records = [];
   let gaveUp = null;
+  // Two holders of the perf lock at once would measure on a shared machine:
+  // checked when taken, before each run and at the end (lockIntegrity).
+  const lockOverlap = [];
+  const checkLock = (at) => {
+    const c = releaseLock.check?.();
+    if (c && !c.ok) { lockOverlap.push({ at, why: c.why }); console.warn(`[race-perf] perf lock overlap detected (${at}): ${c.why}`); }
+  };
+  checkLock("taken");
   try {
+    // Times each run was played again after the lock went back for the load.
+    let relocks = 0;
+    const loadRetries = new Map();
     for (let run = 1; run <= o.runs && !gaveUp; run += 1) {
-      const record = { run };
+      checkLock(`before run ${run}`);
+      const record = { run, loadRetries: loadRetries.get(run) ?? 0 };
+      let replay = false;
       for (const name of sideOrder(run).filter((n) => sides[n])) {
-        record[name] = await measureSide(sides[name], o);
+        // Loaded: the lock goes back during the wait (--load-wait), and the
+        // run is played again once it is taken back, both sides together.
+        const g = await calmUnderLock({ lock: releaseLock, maxLoad: o.maxLoad, waitSec: o.loadWait, acquire, log: (m) => console.log(`[race-perf] run ${run} ${name}: ${m}`) });
+        releaseLock = g.lock;
+        gaveUp = loadGaveUp(g.gate);
+        if (gaveUp) { console.warn(`[race-perf] run ${run} ${name}: ${gaveUp}`); break; }
+        if (g.relocked) {
+          relocks += 1;
+          checkLock(`taken again in run ${run}`);
+          if (relocks > MAX_RELOCKS) { gaveUp = `the lock was let go for the load ${relocks} times: remaining runs given up`; console.warn(`[race-perf] ${gaveUp}`); break; }
+          replay = true;
+          break;
+        }
+        record[name] = await measureSide(sides[name], o, g.gate);
         const r = record[name];
         console.log(`[race-perf] run ${run} ${name}: ${r.error ?? brief(r.cold)}${r.warm ? ` | warm: ${brief(r.warm)}` : ""}`);
-        gaveUp = loadGaveUp(r.loadGate);
-        if (gaveUp) { console.warn(`[race-perf] run ${run} ${name}: ${gaveUp}`); break; }
       }
+      if (replay) { loadRetries.set(run, (loadRetries.get(run) ?? 0) + 1); console.log(`[race-perf] run ${run} played again (lock taken back)`); run -= 1; continue; }
+      if (gaveUp && !Object.keys(sides).some((n) => record[n])) break;
       writeFileSync(path.join(outDir, `run${run}.json`), JSON.stringify(record, null, 1) + "\n");
       records.push(record);
     }
+    checkLock("end");
   } finally {
-    releaseLock();
+    releaseLock?.();
     dropExports();
   }
   const runsDone = records;
@@ -488,6 +590,14 @@ async function main() {
       viP99Ms: describe(m.map((x) => x.viIntervalMs.p99)), presentP99Ms: describe(m.map((x) => x.presentIntervalMs.p99)),
       hitchesPerMin: describe(m.map((x) => x.hitchesPerMin)), busiestThread: describe(m.map((x) => x.rendererThreads.at(-1)?.busiest)),
       presentsPerSecond: describe(m.map((x) => x.presentsPerSecond)),
+      ...(m.some((x) => x.display) ? {
+        displayedPerSecond: describe(m.map((x) => x.display?.displayedPerSecond)),
+        displayedP95: describe(m.map((x) => x.display?.displayedP95)),
+        droppedPerMin: describe(m.map((x) => x.display?.droppedPerMin)),
+        judderPct: describe(m.map((x) => x.display?.judderPct)),
+        offOneVsyncPct: describe(m.map((x) => x.display?.offOneVsyncPct)),
+        displayWhy: [...new Set(m.map((x) => (x.display?.supported === false ? x.display.why : null)).filter(Boolean))].join("; ") || null
+      } : {}),
       // Unique images (--unique-frames): measured in their own window; the
       // speed window's presents/s × that window's share of new images.
       ...(m.some((x) => x.uniqueFrames) ? {
@@ -513,12 +623,20 @@ async function main() {
   const summary = {
     probe: "race-perf", at: new Date().toISOString(),
     chrome,
-    iso: path.basename(iso), state: path.basename(state), query: o.query, baselineQuery: sides.baseline?.query ?? null, warmupSec: o.warmup, secs: o.secs, hold: o.hold, maxLoad: o.maxLoad,
+    iso: path.basename(iso), state: path.basename(state), query: o.query, baselineQuery: sides.baseline?.query ?? null, warmupSec: o.warmup, secs: o.secs,
+    // Window in guest seconds (null: host seconds, --secs).
+    emulatedWindow: o.emulatedWindow ? { secs: o.emulatedWindow, warmup: o.emulatedWarmup, pollMs: o.emulatedPollMs } : null, hold: o.hold, maxLoad: o.maxLoad,
     sides: Object.fromEntries(Object.entries(sides).map(([n, s]) => [n, s.label])),
     runs: runsDone.length, failed, gaveUp,
+    // Runs played again after the lock went back for the load: { run: times }.
+    loadRetries: Object.fromEntries(runsDone.filter((r) => r.loadRetries).map((r) => [r.run, r.loadRetries])),
     candidate: { cold: summarize("candidate", "cold"), warm: summarize("candidate", "warm") },
     baseline: sides.baseline ? { cold: summarize("baseline", "cold"), warm: summarize("baseline", "warm") } : null,
-    change: sides.baseline ? pairedSpeedChange(runsDone.filter((r) => good(r.baseline) && good(r.candidate)), { minPairs: o.minPairs }) : null,
+    change: sides.baseline ? withheldOnOverlap(pairedSpeedChange(runsDone.filter((r) => good(r.baseline) && good(r.candidate)), { minPairs: o.minPairs }), lockOverlap) : null,
+    // Checks of the perf lock that found another holder (empty: none).
+    lockOverlap,
+    // --counters: the same pairing on host instructions per guest cycle (lower is better).
+    ...(o.onWindow && sides.baseline ? { counterChange: pairedSpeedChange(runsDone.filter((r) => good(r.baseline) && good(r.candidate)), { metric: "instructionsPerGuestCycle", minPairs: o.minPairs }) } : {}),
     pcsample: pcNote,
     // P4 counters (KPI: region and dispatch shares), cold stats windows of good runs.
     ...p4Summary(runsDone, sides, good),
@@ -530,7 +648,7 @@ async function main() {
   writeFileSync(path.join(outDir, "summary.json"), JSON.stringify(summary, null, 1) + "\n");
   const med = (n) => summary[n]?.cold?.speed?.median ?? "-";
   console.log(`[race-perf] ${sides.baseline ? `baseline ${med("baseline")} % → candidate ${med("candidate")} %, paired change ${summary.change.median ?? `withheld (${summary.change.withheld})`}${summary.change.median != null ? ` % over ${summary.change.pairs} pairs` : ""}` : `speed median ${med("candidate")} %`}${failed.length ? `; ${failed.length} failed run(s): ${failed.map((f) => `r${f.run} ${f.side} ${f.why}`).join(", ")}` : ""} -> ${outDir}`);
-  process.exitCode = failed.length || summary.change?.withheld ? 1 : 0;
+  process.exitCode = failed.length || summary.change?.withheld || lockOverlap.length ? 1 : 0;
 }
 
 if (import.meta.url === pathToFileURL(process.argv[1] ?? "").href) await main();

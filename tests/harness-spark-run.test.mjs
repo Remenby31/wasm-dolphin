@@ -211,3 +211,41 @@ test("spark queue: an agent's builds are counted for the cap of 3", () => {
   assert.equal(ownerBuilds(q, "wt-robust").length, 1);
   assert.equal(ownerBuilds(q, "wt-kpi").length, 0);
 });
+
+test("spark-run --multi: three arms, the bench's validated options, refused before the layout fix", async () => {
+  const { checkLayoutFix, LAYOUT_FIX, MULTI_LANES, multiArms, multiLaunchCommand, multiRaceArgs } = await import("../harness/remote/spark-run.mjs");
+  assert.deepEqual(multiArms("main", ["lever"]), ["main", "lever", "main"], "one candidate: base again as the A/A control");
+  assert.deepEqual(multiArms("main", ["l1", "l2"]), ["main", "l1", "l2"]);
+  assert.throws(() => multiArms("main", []), /one or two --candidate/);
+  assert.throws(() => multiArms("main", ["a", "b", "c"]), /one or two --candidate/);
+  assert.throws(() => multiArms(undefined, ["a"]), /needs --baseline/);
+  const args = multiRaceArgs({ iso: "/r/d", state: "/r/s.sav", runs: "6", armDirs: ["/t/0", "/t/1", "/t/0"], extra: ["--emulated-window", "20"] });
+  assert.deepEqual(args.slice(0, 6), ["--iso", "/r/d", "--state", "/r/s.sav", "--runs", "6"]);
+  assert.deepEqual(args.filter((_, i) => args[i - 1] === "--arm"), ["/t/0", "/t/1", "/t/0"]);
+  assert.equal(args[args.indexOf("--lanes") + 1], MULTI_LANES);
+  for (const o of ["--counters", "--aot-seed", "--isolated-boot"]) assert.ok(args.includes(o), o);
+  assert.match(args[args.indexOf("--query") + 1], /cpu=single/);
+  assert.match(args[args.indexOf("--query") + 1], /aot=1/);
+  assert.equal(args.lastIndexOf("--emulated-window"), args.length - 2, "options after -- come last and win");
+  assert.throws(() => multiRaceArgs({ iso: "i", state: "s", runs: "4", armDirs: ["a", "b", "c"] }), /multiple of 3/);
+  const isAncestor = (a, b) => a === LAYOUT_FIX && b === "new";
+  assert.doesNotThrow(() => checkLayoutFix("main", "new", isAncestor));
+  assert.throws(() => checkLayoutFix("old", "243ef96384a1", isAncestor), /predates the region layout fix/);
+  assert.throws(() => checkLayoutFix("dir", undefined, isAncestor), /no commit known/);
+  const cmd = multiLaunchCommand({ harnessDir: "/h", outDir: "/o/20261022/x", raceArgs: ["--runs", "6"] });
+  assert.match(cmd, /setsid nohup sh harness\/remote\/spark-multi\.sh '\/o\/20261022\/x' -- '--runs' '6'/);
+  assert.match(cmd, /test ! -e '\/o\/20261022\/x\.log'/);
+});
+
+test("spark-queue: a multi takes the whole bench, in order of arrival, its estimate from its runs", () => {
+  const free = () => false, busyA = (l) => l === "a";
+  const pair = { id: "1", kind: "pair", lanes: "auto", name: "p" };
+  const m = { id: "2", kind: "multi", lanes: "auto", name: "m" };
+  const later = { id: "3", kind: "pair", lanes: "auto", name: "q" };
+  assert.match(nextStep(m, [pair, m], free).wait, /pair p arrived first/);
+  assert.deepEqual(nextStep(m, [m, later], free), { go: ["a", "b"] });
+  assert.match(nextStep(m, [m], busyA).wait, /a lane is in use/);
+  assert.match(nextStep(later, [{ ...m, lane: "a b" }, later], free).wait, /lane a in use/);
+  assert.equal(estimateMin("multi", ["--runs", "6"]), 13);
+  assert.equal(estimateMin("multi", ["--runs", "12"]), 22);
+});

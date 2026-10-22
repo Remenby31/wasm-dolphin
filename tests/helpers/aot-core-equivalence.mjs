@@ -19,7 +19,7 @@
 import { readFileSync } from "node:fs";
 
 import { orderedRegions } from "../../src/aot-plan.js";
-import { assembleRegion, groupRegions } from "../../src/aot-region-module.js";
+import { REGION_HEAP_NAMES, assembleRegion, groupRegions } from "../../src/aot-region-module.js";
 import { PRODUCTION_DISABLE_MASK, makeRng, randomProgram, randomState } from "./jit-oracle.mjs";
 
 // Signatures of the block module's import types (BuildWasmCachedInterpreterBlock).
@@ -63,6 +63,17 @@ export async function loadAotCore(coreDir = new URL("../../cores/dolphin/", impo
   const [pcOffset, , downcountOffset] = new Uint32Array(m.HEAPU8.buffer, layoutPtr, 4);
   m._free(layoutPtr);
   const gprPtr = m._malloc(128);
+  // The core's [ramBase, l1Base] (0084), null with an older core.
+  const heapBases = () => {
+    if (typeof m._DolphinWeb_AotRegionHeapBases !== "function") return null;
+    const p = m._malloc(8);
+    try {
+      m._DolphinWeb_AotRegionHeapBases(p);
+      return Array.from(new Uint32Array(m.HEAPU8.buffer, p, 2));
+    } finally {
+      m._free(p);
+    }
+  };
   return {
     module: m, // the Emscripten module, for the production exports
     has: (name) => typeof m[`_${name}`] === "function",
@@ -92,10 +103,11 @@ export async function loadAotCore(coreDir = new URL("../../cores/dolphin/", impo
         const [offset, kind, value] = words.subarray(entryCount + 3 * i, entryCount + 3 * i + 3);
         if (kind === 0) return { offset, kind: "import", name: helperNames[value] };
         if (kind === 1) return { offset, kind: "jump", targetPc: value };
+        if (kind === 3) return { offset, kind: "heap", name: REGION_HEAP_NAMES[value & 1], form: value & 2 ? "offset" : "const" };
         return { offset, kind: "dispatch" };
       });
       const at = p + 16 + 4 * (entryCount + 3 * relocCount);
-      return { entry, entries, code: m.HEAPU8.slice(at, at + codeLength), relocs };
+      return { entry, entries, code: m.HEAPU8.slice(at, at + codeLength), relocs, ...(heapBases() ? { heapBases: heapBases() } : {}) };
     },
     // Handle of the compiled module in the core's table (> 0), as for a block.
     compile(bytes) {
@@ -112,7 +124,8 @@ export async function loadAotCore(coreDir = new URL("../../cores/dolphin/", impo
     setMMUMode: typeof m._DolphinWeb_AotMMUModeForTest === "function" ? (on) => m._DolphinWeb_AotMMUModeForTest(on ? 1 : 0) : null,
     // The dispatcher's region path (P4 step 5): queue, install, dispatch.
     // members: [{ ranges, hash }] (hash: the plan's 16-hex FNV-1a 64, or null).
-    queueRegion(bytes, entries, members, layout = m._DolphinWeb_AotLayoutHash?.() ?? 0) {
+    // bases: the RAM and L1 addresses its heap sites hold (0084), this session's by default.
+    queueRegion(bytes, entries, members, layout = m._DolphinWeb_AotLayoutHash?.() ?? 0, bases = heapBases() ?? [0, 0]) {
       const ranges = members.flatMap((x) => x.ranges);
       const triples = members.flatMap((x) => [x.ranges.length, x.hash ? parseInt(x.hash.slice(8), 16) : 0, x.hash ? parseInt(x.hash.slice(0, 8), 16) : 0]);
       const words = [...entries, ...ranges.flat(), ...triples].map((v) => v >>> 0);
@@ -121,7 +134,7 @@ export async function loadAotCore(coreDir = new URL("../../cores/dolphin/", impo
         m.HEAPU8.set(bytes, b);
         new Uint32Array(m.HEAPU8.buffer, w, words.length).set(words);
         const rangesAt = w + 4 * entries.length;
-        m._DolphinWeb_AotQueueRegion(b, bytes.length, w, entries.length, rangesAt, ranges.length, rangesAt + 8 * ranges.length, members.length, layout >>> 0);
+        m._DolphinWeb_AotQueueRegion(b, bytes.length, w, entries.length, rangesAt, ranges.length, rangesAt + 8 * ranges.length, members.length, layout >>> 0, bases[0] >>> 0, bases[1] >>> 0);
       } finally {
         m._free(b);
         m._free(w);
