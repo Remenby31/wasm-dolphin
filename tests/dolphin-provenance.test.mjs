@@ -308,8 +308,9 @@ test("committed Dolphin provenance and ABI manifests verify", () => {
   // the first changes to EXI.cpp and EXI_DeviceIPL.cpp: 124. The region
   // translator (0075) reads guest code through a hook in PPCAnalyst.cpp/.h: 126.
   // 0091 (no wasm code under the MMU) adds a test setter to System.h: 127.
+  // 0096 gives System::GetInstance a plain pointer (CreateInstance in System.cpp): 128.
   // Update deliberately when the series changes what it modifies.
-  assert.equal(result.vendorSnapshot.rootPaths, 127);
+  assert.equal(result.vendorSnapshot.rootPaths, 128);
   assert.equal(result.vendorSnapshot.submodulePaths, 2);
   assert.equal(result.core.abiVersion, 1);
   assert.equal(result.core.memoryContract.jsGlue.initialPages, 24576);

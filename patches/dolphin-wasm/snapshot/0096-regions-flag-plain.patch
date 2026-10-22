@@ -48,3 +48,52 @@ diff --git a/Source/Core/Core/PowerPC/CachedInterpreter/CachedInterpreter.cpp b/
      ApplyRegionStatsRequest();
      // Start new timing slice
      // Metrics-off runs avoid all per-slice clocks. BeginSlice also resets
+diff --git a/Source/Core/Core/System.cpp b/Source/Core/Core/System.cpp
+--- a/Source/Core/Core/System.cpp
++++ b/Source/Core/Core/System.cpp
+@@ -114,6 +114,13 @@ System::System() : m_impl{std::make_unique<Impl>(*this)}
+ 
+ System::~System() = default;
+ 
++System& System::CreateInstance()
++{
++  static System instance;
++  s_instance = &instance;
++  return instance;
++}
++
+ void System::Initialize()
+ {
+   m_separate_cpu_and_gpu_threads = Config::Get(Config::MAIN_CPU_THREAD);
+diff --git a/Source/Core/Core/System.h b/Source/Core/Core/System.h
+--- a/Source/Core/Core/System.h
++++ b/Source/Core/Core/System.h
+@@ -132,10 +132,16 @@ public:
+   System& operator=(System&&) = delete;
+ 
+   // Intermediate instance accessor until global state is eliminated.
++  // (0096) A plain pointer first: a function-local static checks its
++  // thread-safe init guard at every call, an atomic load in a pthread wasm
++  // build, and the CPU thread calls this from every slow memory access and
++  // helper. The first call, on any thread, creates the one instance and
++  // records it; later calls read the pointer.
+   static System& GetInstance()
+   {
+-    static System instance;
+-    return instance;
++    if (System* const instance = s_instance) [[likely]]
++      return *instance;
++    return CreateInstance();
+   }
+ 
+   void Initialize();
+@@ -207,6 +213,9 @@ public:
+   VideoEvents& GetVideoEvents() const;
+ 
+ private:
++  static System& CreateInstance();
++  static inline System* s_instance = nullptr;
++
+   System();
+ 
+   struct Impl;
