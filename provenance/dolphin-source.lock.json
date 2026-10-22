@@ -25,7 +25,7 @@
       "commit": "01e0577914a75a2569c846778c2f93aa8e6feddd"
     }
   },
-  "patchSeriesSha256": "c47c8f0cbeb22c4daf3819320d36e18d942d9f608cd5259df6ea08a2d5a5fef8",
+  "patchSeriesSha256": "305912304644c2c4e693c5d687e627a264d879d1adce3ac84523451a78bcd983",
   "patches": [
     {
       "order": 1,
@@ -696,8 +696,8 @@
       "cwd": ".",
       "hashMode": "lf-normalized",
       "path": "patches/dolphin-wasm/snapshot/0098-gpu-thread-spin-budget.patch",
-      "size": 4460,
-      "sha256": "3f9865ab8537ebb5598c9c862f486e4fe70d00ad35936e967e46874a32ec545c"
+      "size": 4435,
+      "sha256": "91d1793c85456481cd34c58e28e02d379868687bead56dffb62b85c4f5118abd"
     },
     {
       "order": 85,

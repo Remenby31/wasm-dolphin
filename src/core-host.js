@@ -1389,11 +1389,19 @@ function requestedPpcProfile() {
 // 0 sleeps at once and costs the CPU thread a wakeup per burst (-3 %).
 // ?gpuspin=-1 restores the 1 kHz busy loop.
 export const DEFAULT_GPU_SPIN_MICROS = 200;
+export const MAX_GPU_SPIN_MICROS = 1000000;
+// Strict: "-1" or a decimal integer in [0, MAX_GPU_SPIN_MICROS]. Anything else
+// (blank, " 50", "1e3", "2.5", out of range) is refused with a warning and
+// the default applies.
+export function parseGpuSpinMicros(raw) {
+  if (raw == null) return DEFAULT_GPU_SPIN_MICROS;
+  if (raw === "-1") return -1;
+  if (/^\d{1,7}$/.test(raw) && Number(raw) <= MAX_GPU_SPIN_MICROS) return Number(raw);
+  console.warn(`?gpuspin=${JSON.stringify(raw)} ignored: expected -1 or an integer from 0 to ${MAX_GPU_SPIN_MICROS} (microseconds); using ${DEFAULT_GPU_SPIN_MICROS}`);
+  return DEFAULT_GPU_SPIN_MICROS;
+}
 function requestedGpuSpinMicros() {
-  const raw = new URLSearchParams(window.location.search).get("gpuspin");
-  const us = raw == null || raw === "" ? NaN : Number(raw);
-  if (us === -1) return -1;
-  return Number.isInteger(us) && us >= 0 && us <= 1000000 ? us : DEFAULT_GPU_SPIN_MICROS;
+  return parseGpuSpinMicros(new URLSearchParams(window.location.search).get("gpuspin"));
 }
 
 function requestedCpuOverclock() {

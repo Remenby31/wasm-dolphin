@@ -1,5 +1,5 @@
 diff --git a/Source/Core/Common/BlockingLoop.h b/Source/Core/Common/BlockingLoop.h
-index 472a84b1f6..960c2aa711 100644
+index 472a84b1f6..67bf797ad0 100644
 --- a/Source/Core/Common/BlockingLoop.h
 +++ b/Source/Core/Common/BlockingLoop.h
 @@ -4,6 +4,8 @@
@@ -68,13 +68,12 @@ index 472a84b1f6..960c2aa711 100644
  
  private:
    std::mutex m_wait_lock;
-@@ -249,7 +270,8 @@ private:
-     STATE_LAST_EXECUTION = 2,
+@@ -250,6 +271,8 @@ private:
      STATE_NEED_EXECUTION = 3
    };
--  std::atomic<int> m_running_state;  // must be of type RUNNING_TYPE
-+  std::atomic<int> m_running_state;
-+  std::atomic<int64_t> m_spin_budget_us{-1};  // must be of type RUNNING_TYPE
+   std::atomic<int> m_running_state;  // must be of type RUNNING_TYPE
++  // Spin budget in microseconds, negative for none (SetSpinBudgetMicros).
++  std::atomic<int64_t> m_spin_budget_us{-1};
  
    Flag m_may_sleep;  // If this is set, we fall back from the busy loop to an event based
                       // synchronization.
