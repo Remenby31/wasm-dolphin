@@ -5,7 +5,7 @@ diff --git a/Source/Core/Core/PowerPC/CachedInterpreter/CachedInterpreter.cpp b/
  };
  thread_local WasmFragmentRelocs* s_wasm_fragment_relocs = nullptr;
  
-+// Patch 0113: the GPRs a fragment keeps in its locals across its blocks (the
++// Patch 0114: the GPRs a fragment keeps in its locals across its blocks (the
 +// fragment loads them at its entry and stores the written ones at its exits);
 +// set while BuildRegionFragment emits its blocks again with them.
 +struct FragmentResidentGprs
@@ -22,7 +22,7 @@ diff --git a/Source/Core/Core/PowerPC/CachedInterpreter/CachedInterpreter.cpp b/
      s_gpr_rc.present[i] = false;
      s_gpr_rc.dirty[i] = false;
    }
-+  // 0113: in a fragment that keeps GPRs, they are present (in their locals)
++  // 0114: in a fragment that keeps GPRs, they are present (in their locals)
 +  // and, when the fragment writes them, dirty from the block's start: a
 +  // helper call or a halt stores them as any other dirty GPR.
 +  const u32 resident = s_wasm_fragment_relocs ? t_fragment_resident.gprs : 0;
@@ -50,7 +50,7 @@ diff --git a/Source/Core/Core/PowerPC/CachedInterpreter/CachedInterpreter.cpp b/
    // §28cx C1: commit all dirty GPR locals to guest memory before the block's
    // single unconditional exit. The halt early-returns inside the call emitters
    // already flushed before their call, so every exit path is covered.
-+  // 0113: the fragment's resident GPRs stay in their locals.
++  // 0114: the fragment's resident GPRs stay in their locals.
 +  for (u32 i = 0; i < 32; ++i)
 +  {
 +    if (((resident >> i) & 1) != 0)
@@ -63,7 +63,7 @@ diff --git a/Source/Core/Core/PowerPC/CachedInterpreter/CachedInterpreter.cpp b/
    // 0088: set when the block was left out because it holds an idle loop:
    // the region picks up again after the whole block (the loop's exit).
    u32 outside_until = 0;
-+  // 0113: per GPR, the ops of the block that read or write it; the GPRs it
++  // 0114: per GPR, the ops of the block that read or write it; the GPRs it
 +  // writes; whether the GPR cache was on for it.
 +  std::array<u16, 32> gpr_uses{};
 +  u32 gprs_written = 0;
@@ -75,7 +75,7 @@ diff --git a/Source/Core/Core/PowerPC/CachedInterpreter/CachedInterpreter.cpp b/
  constexpr std::array<u8, 13> WASM_BLOCK_LOCALS = {0x06, 0x03, 0x7f, 0x02, 0x7e, 0x01, 0x7c,
                                                    0x01, 0x7f, 0x20, 0x7f, 0x10, 0x7c};
  constexpr u32 WASM_FRAGMENT_PC_LOCAL = 56;  // appended after the block locals 1..55
-+// 0113: at most this many GPRs stay in a fragment's locals across its blocks.
++// 0114: at most this many GPRs stay in a fragment's locals across its blocks.
 +constexpr u32 REGION_RESIDENT_GPRS = 12;
  
  // The block at pc as the CPU thread would build it (same analyzer, same
@@ -105,7 +105,7 @@ diff --git a/Source/Core/Core/PowerPC/CachedInterpreter/CachedInterpreter.cpp b/
      fragment_bytes += fb.expr.size() + 64;  // body and its tail
      blocks.push_back(std::move(fb));
    }
-+  // 0113: the fragment's most used GPRs (at most REGION_RESIDENT_GPRS, used by
++  // 0114: the fragment's most used GPRs (at most REGION_RESIDENT_GPRS, used by
 +  // more than one op) stay in their locals across its blocks. Its blocks are
 +  // emitted again with them, and kept only if they come out the same shape.
 +  FragmentResidentGprs resident;
@@ -155,7 +155,7 @@ diff --git a/Source/Core/Core/PowerPC/CachedInterpreter/CachedInterpreter.cpp b/
      EmitU32Leb(code, offset);
    };
 +  const u32 gpr_offset = static_cast<u32>(reinterpret_cast<std::uintptr_t>(&ppc.gpr[0]) - base);
-+  // 0113: the resident GPRs the fragment writes go back to the state before
++  // 0114: the resident GPRs the fragment writes go back to the state before
 +  // it leaves (return or tail call).
 +  const auto store_resident = [&] {
 +    for (u32 i = 0; i < 32; ++i)
@@ -206,7 +206,7 @@ diff --git a/Source/Core/Core/PowerPC/CachedInterpreter/CachedInterpreter.cpp b/
  // 256 blocks, under a 480 KB cap. 9 (0110): region modules carry wasm branch
 -// hints.
 -constexpr u32 AOT_COMPILER_VERSION = 9;
-+// hints. 12 (0113): a fragment keeps its 12 most used GPRs in locals.
++// hints. 12 (0114): a fragment keeps its 12 most used GPRs in locals.
 +constexpr u32 AOT_COMPILER_VERSION = 12;
  constexpr u32 AOT_MAX_FRAGMENT_BYTES = 1u << 20;
  thread_local std::vector<u32> t_aot_out;

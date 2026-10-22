@@ -321,7 +321,7 @@ as a `metadata.code.branch_hint` custom section (wasm branch hinting) before
 the code section, so V8 lays out the cold arms out of line. An engine that
 doesn't know the section ignores it. Compiler version 9.
 
-## Resident GPRs (patch 0113, 2026-10-22)
+## Resident GPRs (patch 0114, 2026-10-22)
 
 Each block of a fragment used to load the GPRs it touches into their locals
 at its start and store the written ones at its end. A fragment now keeps

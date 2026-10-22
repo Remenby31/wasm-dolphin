@@ -782,7 +782,7 @@ test("FPU ops outside the direct tier run inside the region, interpreted, like t
   core.invalidate(FPU_TEXT, 4 * FPU.words.length);
 });
 
-// 0113: a fragment keeps its most used GPRs in locals across its blocks,
+// 0114: a fragment keeps its most used GPRs in locals across its blocks,
 // stored back at its exits. A loop over memory with an interpreted FPU op
 // (a helper call: resident GPRs stored and reloaded around it), run to the
 // end and stopped on downcount at every budget, against the interpreter.
@@ -798,7 +798,7 @@ const GPRS = assemble(GPR_TEXT, [
   stfd(3, 5, 16), asm.blr()
 ]);
 
-test("resident GPRs end like the interpreter, at the end and on downcount (0113)", { skip: chainSkip || (core?.has("DolphinWeb_AotKeyParts") && keyVersion() < 12 && "core before 0113 (compiler version < 12)") }, () => {
+test("resident GPRs end like the interpreter, at the end and on downcount (0114)", { skip: chainSkip || (core?.has("DolphinWeb_AotKeyParts") && keyVersion() < 12 && "core before 0114 (compiler version < 12)") }, () => {
   const dol = buildDol({ textAddr: GPR_TEXT, text: GPRS.words, entry: GPRS.labels.main });
   const { image, entryPoint } = imageFromDol(dol);
   const plan = planDol({ image, entryPoint, gameId: "TEST01", dolBytes: dol, options: { gapFill: false } });
