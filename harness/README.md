@@ -290,6 +290,31 @@ per commit, so `rec` and `wgpu` are listed `report-only` for renderVsBaseline
 (kept for perf and the other checks); `rec-single` and `wgpu-single` run on the
 fixed clock and carry the exact render comparison.
 
+## AX HLE share of the CPU thread
+
+`harness/probes/ax-hle.mjs` measures how much of the CPU thread goes into the
+AX HLE audio synthesis, which runs a whole command list synchronously inside
+the DSP mailbox MMIO write (research/deep-thread-budget.md §2). It reads the
+core counters of patch 0099 (`DolphinWeb_AxHleStats`, layout in
+`lib/ax-hle-stats.mjs`, worker message `validationReadAxHleStats`), off until
+the probe resets them:
+
+```
+node harness/probes/ax-hle.mjs --iso ../roms/<disc>.iso --port 8092 \
+  (--state ../measures/harness/race-after.sav | --steps harness/probes/local-menu-steps.json) \
+  [--query "..."] [--runs 3] [--warmup 20] [--secs 20] [--max-load 6]
+```
+
+Per run: the scene (a savestate, or input steps such as the loaded menu of
+`local-menu-steps.json`), `--warmup`, then a window of `--secs` with the
+counters on (two clock reads per mail, a few hundred per second).
+`summary.json` gives `shareOfWindow` (host time in the mail handling over the
+core's window), `shareOfActive` (the same over the CPU thread's occupancy,
+the busiest renderer thread sampled in the window, so a capped scene that
+sleeps in the throttle is not understated), `msPerSecond`, `mailsPerSecond`,
+`meanMailUs` and `mailMaxMs`, medians of the good runs. Calm machine first,
+then the perf lock, as race-perf.
+
 ## Freeze probes
 
 During the measured window the timeline is drained every second. When it
