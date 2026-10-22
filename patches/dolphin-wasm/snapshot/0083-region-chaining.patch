@@ -14,11 +14,11 @@ diff --git a/Source/Core/Core/PowerPC/CachedInterpreter/CachedInterpreter.cpp b/
          }
        }).exports.f;
    const inst_t1 = (typeof performance !== "undefined" && performance.now) ? performance.now() : 0;
-@@ -2684,6 +2688,15 @@ extern "C" int DolphinWeb_CachedInterpreterSystem(int state_ptr, u32 inst_hex, u
-   return DolphinWeb_CachedInterpreterCheckProgramOrDsi(ppc_state, current_pc, downcount) ? 1 : 0;
+@@ -2380,6 +2384,15 @@ bool TryFastPairedQuantizedMemory(Core::System& system, PowerPC::PowerPCState& p
+   return true;
  }
  
-+// Tests (lever G): the next interpret helper call lowers downcount by this
++// Tests (lever G): the next interpret or FP helper call lowers downcount by this
 +// much, as a helper raising an interrupt does through ForceExceptionCheck (the
 +// test core has no CoreTiming). 0: off.
 +s32 s_test_helper_downcount_drop = 0;
@@ -27,10 +27,22 @@ diff --git a/Source/Core/Core/PowerPC/CachedInterpreter/CachedInterpreter.cpp b/
 +  s_test_helper_downcount_drop = cycles;
 +}
 +
- extern "C" int DolphinWeb_CachedInterpreterInterpret(int state_ptr, u32 current_pc, u32 inst_hex,
-                                                       int write_pc, u32 downcount)
+ extern "C" int DolphinWeb_CachedInterpreterFpOp(int state_ptr, u32 inst_hex, u32 current_pc,
+                                                  u32 downcount, u32 unused)
  {
-@@ -2693,6 +2706,11 @@ extern "C" int DolphinWeb_CachedInterpreterInterpret(int state_ptr, u32 current_
+@@ -2389,6 +2402,11 @@ extern "C" int DolphinWeb_CachedInterpreterFpOp(int state_ptr, u32 inst_hex, u32
+   auto& interpreter = system.GetInterpreter();
+   auto& ppc_state = *reinterpret_cast<PowerPC::PowerPCState*>(
+       static_cast<std::uintptr_t>(state_ptr));
++  if (s_test_helper_downcount_drop != 0) [[unlikely]]
++  {
++    ppc_state.downcount -= s_test_helper_downcount_drop;
++    s_test_helper_downcount_drop = 0;
++  }
+   if (DolphinWeb_CachedInterpreterCheckFpu(ppc_state, current_pc, downcount))
+     return 1;
+ 
+@@ -2693,6 +2711,11 @@ extern "C" int DolphinWeb_CachedInterpreterInterpret(int state_ptr, u32 current_
        static_cast<std::uintptr_t>(state_ptr));
    const UGeckoInstruction inst{inst_hex};
    const GekkoOPInfo* opinfo = PPCTables::GetOpInfo(inst, current_pc);
@@ -42,7 +54,7 @@ diff --git a/Source/Core/Core/PowerPC/CachedInterpreter/CachedInterpreter.cpp b/
    ++s_wasm_helper_call_count;
    ++s_wasm_helper_key_counts[(inst.OPCD << 10) | inst.SUBOP10];
    if (inst.OPCD == 31 && inst.SUBOP10 == 339)
-@@ -2846,8 +2864,41 @@ struct WasmFragmentRelocs
+@@ -2846,8 +2869,42 @@ struct WasmFragmentRelocs
    std::vector<Reloc> relocs;
    std::vector<u8> code;  // the function body (locals, expression, end) once built
    u32 cycles = 0;        // what the block's RunWasmBlock would take from downcount
@@ -67,6 +79,7 @@ diff --git a/Source/Core/Core/PowerPC/CachedInterpreter/CachedInterpreter.cpp b/
  };
  thread_local WasmFragmentRelocs* s_wasm_fragment_relocs = nullptr;
 +constexpr bool REGION_DOWNCOUNT_LOCAL = true;
++constexpr bool REGION_LOAD_READ_GPRS = false;  // lever H, see the GPR cache prologue
 +// Set while a fragment's blocks are built with downcount in a local (lever G).
 +struct FragmentDowncount
 +{
@@ -84,7 +97,7 @@ diff --git a/Source/Core/Core/PowerPC/CachedInterpreter/CachedInterpreter.cpp b/
  
  void EmitPaddedU32Leb(std::vector<u8>& out, u32 value)
  {
-@@ -2858,6 +2909,18 @@ void EmitPaddedU32Leb(std::vector<u8>& out, u32 value)
+@@ -2858,6 +2915,18 @@ void EmitPaddedU32Leb(std::vector<u8>& out, u32 value)
  
  void EmitCallImport(std::vector<u8>& body, u32 index)
  {
@@ -103,7 +116,7 @@ diff --git a/Source/Core/Core/PowerPC/CachedInterpreter/CachedInterpreter.cpp b/
    body.push_back(0x10);  // call
    if (!s_wasm_fragment_relocs)
    {
-@@ -2867,6 +2930,16 @@ void EmitCallImport(std::vector<u8>& body, u32 index)
+@@ -2867,6 +2936,16 @@ void EmitCallImport(std::vector<u8>& body, u32 index)
    // The site holds a padded zero until the region assembler patches it.
    s_wasm_fragment_relocs->relocs.push_back({body.size(), WASM_IMPORT_NAMES[index]});
    EmitPaddedU32Leb(body, 0);
@@ -120,7 +133,7 @@ diff --git a/Source/Core/Core/PowerPC/CachedInterpreter/CachedInterpreter.cpp b/
  }
  
  void EmitLocalGet(std::vector<u8>& body, u32 index)
-@@ -3982,8 +4055,27 @@ void EmitL1Address(std::vector<u8>& body, const WasmStateLayout& layout)
+@@ -3982,8 +4061,27 @@ void EmitL1Address(std::vector<u8>& body, const WasmStateLayout& layout)
    body.push_back(0x6a);
  }
  
@@ -148,7 +161,7 @@ diff --git a/Source/Core/Core/PowerPC/CachedInterpreter/CachedInterpreter.cpp b/
    EmitLocalGet(body, local_index);
    EmitI32Const(body, 0xff);
    body.push_back(0x71);
-@@ -4182,6 +4274,7 @@ void EmitReadU32MaybeDirect(std::vector<u8>& body, const WasmStateLayout& layout
+@@ -4182,6 +4280,7 @@ void EmitReadU32MaybeDirect(std::vector<u8>& body, const WasmStateLayout& layout
    EmitU32Leb(body, 3);
    EmitI32Const(body, layout.ram_size_real - sizeof(u32));
    body.push_back(0x4d);
@@ -156,7 +169,7 @@ diff --git a/Source/Core/Core/PowerPC/CachedInterpreter/CachedInterpreter.cpp b/
    body.push_back(0x04);
    body.push_back(0x7f);
    EmitI32Const(body, layout.ram_base);
-@@ -4207,6 +4300,7 @@ void EmitReadU8MaybeDirect(std::vector<u8>& body, const WasmStateLayout& layout)
+@@ -4207,6 +4306,7 @@ void EmitReadU8MaybeDirect(std::vector<u8>& body, const WasmStateLayout& layout)
    EmitU32Leb(body, 3);
    EmitI32Const(body, layout.ram_size_real - sizeof(u8));
    body.push_back(0x4d);
@@ -164,7 +177,7 @@ diff --git a/Source/Core/Core/PowerPC/CachedInterpreter/CachedInterpreter.cpp b/
    body.push_back(0x04);
    body.push_back(0x7f);
    EmitI32Const(body, layout.ram_base);
-@@ -4230,6 +4324,7 @@ void EmitReadU16MaybeDirect(std::vector<u8>& body, const WasmStateLayout& layout
+@@ -4230,6 +4330,7 @@ void EmitReadU16MaybeDirect(std::vector<u8>& body, const WasmStateLayout& layout
    EmitU32Leb(body, 3);
    EmitI32Const(body, layout.ram_size_real - sizeof(u16));
    body.push_back(0x4d);
@@ -172,7 +185,7 @@ diff --git a/Source/Core/Core/PowerPC/CachedInterpreter/CachedInterpreter.cpp b/
    body.push_back(0x04);
    body.push_back(0x7f);
    EmitI32Const(body, layout.ram_base);
-@@ -4269,6 +4364,7 @@ void EmitWriteU32MaybeDirect(std::vector<u8>& body, const WasmStateLayout& layou
+@@ -4269,6 +4370,7 @@ void EmitWriteU32MaybeDirect(std::vector<u8>& body, const WasmStateLayout& layou
    EmitU32Leb(body, 3);
    EmitI32Const(body, layout.ram_size_real - sizeof(u32));
    body.push_back(0x4d);
@@ -180,7 +193,7 @@ diff --git a/Source/Core/Core/PowerPC/CachedInterpreter/CachedInterpreter.cpp b/
    body.push_back(0x04);
    body.push_back(0x40);
    EmitBswap32FromLocal(body, 2);
-@@ -4296,6 +4392,7 @@ void EmitWriteU8MaybeDirect(std::vector<u8>& body, const WasmStateLayout& layout
+@@ -4296,6 +4398,7 @@ void EmitWriteU8MaybeDirect(std::vector<u8>& body, const WasmStateLayout& layout
    EmitU32Leb(body, 3);
    EmitI32Const(body, layout.ram_size_real - sizeof(u8));
    body.push_back(0x4d);
@@ -188,7 +201,7 @@ diff --git a/Source/Core/Core/PowerPC/CachedInterpreter/CachedInterpreter.cpp b/
    body.push_back(0x04);
    body.push_back(0x40);
    EmitI32Const(body, layout.ram_base);
-@@ -4321,6 +4418,7 @@ void EmitWriteU16MaybeDirect(std::vector<u8>& body, const WasmStateLayout& layou
+@@ -4321,6 +4424,7 @@ void EmitWriteU16MaybeDirect(std::vector<u8>& body, const WasmStateLayout& layou
    EmitU32Leb(body, 3);
    EmitI32Const(body, layout.ram_size_real - sizeof(u16));
    body.push_back(0x4d);
@@ -196,7 +209,7 @@ diff --git a/Source/Core/Core/PowerPC/CachedInterpreter/CachedInterpreter.cpp b/
    body.push_back(0x04);
    body.push_back(0x40);
    EmitBswap16FromLocal(body, 2);
-@@ -4432,6 +4530,7 @@ bool EmitFmhTryRangeCheck(std::vector<u8>& body, const WasmStateLayout& layout,
+@@ -4432,6 +4536,7 @@ bool EmitFmhTryRangeCheck(std::vector<u8>& body, const WasmStateLayout& layout,
  
  void EmitImportedHaltCheck(std::vector<u8>& body)
  {
@@ -204,7 +217,7 @@ diff --git a/Source/Core/Core/PowerPC/CachedInterpreter/CachedInterpreter.cpp b/
    body.push_back(0x04);
    body.push_back(0x40);
    // A block module returns 1 (halted); a region fragment 2 (stopped), since 1
-@@ -8629,7 +8728,31 @@ std::vector<u8> BuildWasmCachedInterpreterBlock(std::span<const PPCAnalyst::Code
+@@ -8629,16 +8734,55 @@ std::vector<u8> BuildWasmCachedInterpreterBlock(std::span<const PPCAnalyst::Code
      s_gpr_rc.present[i] = false;
      s_gpr_rc.dirty[i] = false;
    }
@@ -237,7 +250,31 @@ diff --git a/Source/Core/Core/PowerPC/CachedInterpreter/CachedInterpreter.cpp b/
    {
      BitSet32 used_gprs;
      for (const PPCAnalyst::CodeOp& op : ops)
-@@ -8678,7 +8801,9 @@ std::vector<u8> BuildWasmCachedInterpreterBlock(std::span<const PPCAnalyst::Code
+       used_gprs |= op.regsIn | op.regsOut;
++    // Lever H (0102 experiment, region code only): a GPR the block writes
++    // before any op reads it needs no load; it is present all the same (its
++    // local is written before it is read).
++    BitSet32 read_first;
++    if (REGION_LOAD_READ_GPRS && s_wasm_fragment_relocs)
++    {
++      BitSet32 written;
++      for (const PPCAnalyst::CodeOp& op : ops)
++      {
++        read_first |= op.regsIn & ~written;
++        written |= op.regsOut;
++      }
++    }
+     for (int bit : used_gprs)
+     {
+       if (bit < 0 || bit >= 32)
+         continue;
+       s_gpr_rc.present[bit] = true;
++      if (REGION_LOAD_READ_GPRS && s_wasm_fragment_relocs && !read_first[bit])
++        continue;
+       EmitLocalGet(body, 0);
+       body.push_back(0x28);  // i32.load
+       body.push_back(0x02);  // align=2
+@@ -8678,7 +8822,9 @@ std::vector<u8> BuildWasmCachedInterpreterBlock(std::span<const PPCAnalyst::Code
    // §28cx C1: commit all dirty GPR locals to guest memory before the block's
    // single unconditional exit. The halt early-returns inside the call emitters
    // already flushed before their call, so every exit path is covered.
@@ -248,7 +285,7 @@ diff --git a/Source/Core/Core/PowerPC/CachedInterpreter/CachedInterpreter.cpp b/
  
    if (write_npc)
    {
-@@ -8994,6 +9119,38 @@ inline void RegionFilterAdd(u32 pc)
+@@ -8994,6 +9140,38 @@ inline void RegionFilterAdd(u32 pc)
    s_region_filter[bit >> 6] |= u64{1} << (bit & 63);
  }
  
@@ -287,7 +324,7 @@ diff --git a/Source/Core/Core/PowerPC/CachedInterpreter/CachedInterpreter.cpp b/
  struct PendingRegion
  {
    std::vector<u8> bytes;
-@@ -9047,6 +9204,7 @@ u32 s_region_install_fallbacks = 0;     // likewise
+@@ -9047,6 +9225,7 @@ u32 s_region_install_fallbacks = 0;     // likewise
  // ClearCache: the ready table and the requests in flight were reset.
  void RepostWaitingRegions();
  void UnverifyAllRegions();
@@ -295,7 +332,7 @@ diff --git a/Source/Core/Core/PowerPC/CachedInterpreter/CachedInterpreter.cpp b/
  
  // The part of CachedInterpreter::ClearCache that concerns off-thread
  // compiles and regions (a state load may have changed any code).
-@@ -9123,6 +9281,32 @@ struct RegionStats
+@@ -9123,6 +9302,32 @@ struct RegionStats
  };
  static_assert(sizeof(RegionStats) == 256);
  std::unordered_map<u32, double> s_miss_cycles;  // while timing is on
@@ -328,7 +365,7 @@ diff --git a/Source/Core/Core/PowerPC/CachedInterpreter/CachedInterpreter.cpp b/
  alignas(8) RegionStats s_region_stats;
  bool s_region_stats_on = false;
  // Set while one sampled ExecuteOneBlock runs: its block lookups (chained
-@@ -9174,6 +9358,7 @@ void DropRegion(u32 index)
+@@ -9174,6 +9379,7 @@ void DropRegion(u32 index)
        s_region_at.erase(it);
    }
    ForEachRegionPage(region, -1);
@@ -336,7 +373,7 @@ diff --git a/Source/Core/Core/PowerPC/CachedInterpreter/CachedInterpreter.cpp b/
    s_region_filter.fill(0);
    for (const auto& [pc, owner] : s_region_at)
      RegionFilterAdd(pc);
-@@ -9186,6 +9371,7 @@ void ForgetAllRegions()
+@@ -9186,6 +9392,7 @@ void ForgetAllRegions()
  {
    s_regions.clear();
    s_region_at.clear();
@@ -344,7 +381,7 @@ diff --git a/Source/Core/Core/PowerPC/CachedInterpreter/CachedInterpreter.cpp b/
    s_region_filter.fill(0);
    std::fill(s_region_pages.begin(), s_region_pages.end(), 0);
    s_region_waiting.clear();
-@@ -9218,6 +9404,7 @@ void InstallRegion(PendingRegion& pending, int handle)
+@@ -9218,6 +9425,7 @@ void InstallRegion(PendingRegion& pending, int handle)
      s_region_at.emplace(pc, index);  // an entry already mapped keeps its region
      RegionFilterAdd(pc);
    }
@@ -352,7 +389,7 @@ diff --git a/Source/Core/Core/PowerPC/CachedInterpreter/CachedInterpreter.cpp b/
    ForEachRegionPage(s_regions.back(), +1);
  }
  
-@@ -9456,6 +9643,7 @@ void PublishRegionStats()
+@@ -9456,6 +9664,7 @@ void PublishRegionStats()
      s_region_stats.top_miss[2 * i] = i < n ? top[i].second : 0;
      s_region_stats.top_miss[2 * i + 1] = i < n ? top[i].first : 0;
    }
@@ -360,7 +397,7 @@ diff --git a/Source/Core/Core/PowerPC/CachedInterpreter/CachedInterpreter.cpp b/
  }
  
  void ApplyRegionStatsRequest()
-@@ -9474,6 +9662,7 @@ void ApplyRegionStatsRequest()
+@@ -9474,6 +9683,7 @@ void ApplyRegionStatsRequest()
      s_region_stats.installs_fast = kept.installs_fast;
      s_region_stats.install_fallbacks = kept.install_fallbacks;
      s_miss_cycles.clear();
@@ -368,7 +405,7 @@ diff --git a/Source/Core/Core/PowerPC/CachedInterpreter/CachedInterpreter.cpp b/
      s_region_stats.sample_every = static_cast<u32>(request);
      s_last_timed_ms = 0;
      s_sampled_lookup_ms = 0;
-@@ -9502,14 +9691,14 @@ bool TryRunRegion(PowerPC::PowerPCState& ppc_state)
+@@ -9502,14 +9712,14 @@ bool TryRunRegion(PowerPC::PowerPCState& ppc_state)
        s_region_stats.mode_refusals += 1;
      return false;
    }
@@ -386,7 +423,7 @@ diff --git a/Source/Core/Core/PowerPC/CachedInterpreter/CachedInterpreter.cpp b/
    if (!region.verified)
    {
      // The RAM may have been allocated again (a stop and a new boot in the same
-@@ -9519,14 +9708,14 @@ bool TryRunRegion(PowerPC::PowerPCState& ppc_state)
+@@ -9519,14 +9729,14 @@ bool TryRunRegion(PowerPC::PowerPCState& ppc_state)
      if (region.layout_hash != WasmLayoutHash(CurrentWasmStateLayout(Core::System::GetInstance())) ||
          !RegionCodeMatchesPlan(region.ranges, region.members))
      {
@@ -403,7 +440,7 @@ diff --git a/Source/Core/Core/PowerPC/CachedInterpreter/CachedInterpreter.cpp b/
    const s32 downcount = ppc_state.downcount;
    int code;
    if (s_region_stats_on && s_region_stats.sample_every != 0)
-@@ -9562,14 +9751,116 @@ inline bool RegionWouldRun(const PowerPC::PowerPCState& ppc_state)
+@@ -9562,14 +9772,116 @@ inline bool RegionWouldRun(const PowerPC::PowerPCState& ppc_state)
    if (!s_regions_enabled.load(std::memory_order_relaxed) || !RegionFilterHas(ppc_state.pc) ||
        !ppc_state.msr.IR || !ppc_state.msr.DR || !ppc_state.msr.FP ||
        (ppc_state.feature_flags & FEATURE_FLAG_PERFMON) != 0 ||
@@ -521,7 +558,7 @@ diff --git a/Source/Core/Core/PowerPC/CachedInterpreter/CachedInterpreter.cpp b/
  // Code at [address, address + size) changed (icbi, DMA, a cache clear):
  // regions covering it are dropped. From JitInterface.
  void DolphinWeb_InvalidateRegions(u32 address, u32 size)
-@@ -14998,7 +15289,22 @@ struct FragmentBlock
+@@ -14998,7 +15310,22 @@ struct FragmentBlock
    // after icbi, sc, rfi, mtmsr...): the region returns to the dispatcher
    // there, as the block JIT does, so invalidated code is never run on.
    bool exits = false;
@@ -544,7 +581,7 @@ diff --git a/Source/Core/Core/PowerPC/CachedInterpreter/CachedInterpreter.cpp b/
  
  // Locals of a block body without the fastmem hoist (the only layout a
  // fragment takes: its blocks share the function's locals).
-@@ -15011,6 +15317,22 @@ constexpr u32 WASM_FRAGMENT_PC_LOCAL = 56;  // appended after the block locals 1
+@@ -15011,6 +15338,22 @@ constexpr u32 WASM_FRAGMENT_PC_LOCAL = 56;  // appended after the block locals 1
  // code inside its ranges (invalidation drops it by those ranges): no branch
  // following (a call is a jump, its return point an entry), and the block
  // stops at `limit`, the end of the range holding pc.
@@ -567,7 +604,7 @@ diff --git a/Source/Core/Core/PowerPC/CachedInterpreter/CachedInterpreter.cpp b/
  bool BuildFragmentBlock(Core::System& system, u32 pc, u32 limit, FragmentBlock* out)
  {
    auto& ppc = system.GetPPCState();
-@@ -15027,7 +15349,8 @@ bool BuildFragmentBlock(Core::System& system, u32 pc, u32 limit, FragmentBlock*
+@@ -15027,7 +15370,8 @@ bool BuildFragmentBlock(Core::System& system, u32 pc, u32 limit, FragmentBlock*
    for (; prefix < block.m_num_instructions; ++prefix)
    {
      const PPCAnalyst::CodeOp& op = buffer[prefix];
@@ -577,7 +614,7 @@ diff --git a/Source/Core/Core/PowerPC/CachedInterpreter/CachedInterpreter.cpp b/
          ((op.opinfo->flags & FL_USE_FPU) != 0 && !ppc.msr.FP && !t_aot_translating))
        break;
      if (op.canEndBlock)
-@@ -15053,11 +15376,17 @@ bool BuildFragmentBlock(Core::System& system, u32 pc, u32 limit, FragmentBlock*
+@@ -15053,11 +15397,17 @@ bool BuildFragmentBlock(Core::System& system, u32 pc, u32 limit, FragmentBlock*
    const PPCAnalyst::CodeOp& last = buffer[prefix - 1];
    const bool ends_with_branch = last.canEndBlock;
    WasmFragmentRelocs fragment;
@@ -596,7 +633,7 @@ diff --git a/Source/Core/Core/PowerPC/CachedInterpreter/CachedInterpreter.cpp b/
    s_wasm_fragment_relocs = saved;
    const std::vector<u8>& code = fragment.code;
    const std::size_t n = code.size();
-@@ -15071,6 +15400,12 @@ bool BuildFragmentBlock(Core::System& system, u32 pc, u32 limit, FragmentBlock*
+@@ -15071,6 +15421,12 @@ bool BuildFragmentBlock(Core::System& system, u32 pc, u32 limit, FragmentBlock*
    for (auto& reloc : out->relocs)
      reloc.offset -= WASM_BLOCK_LOCALS.size();
    out->cycles = fragment.cycles;
@@ -609,7 +646,7 @@ diff --git a/Source/Core/Core/PowerPC/CachedInterpreter/CachedInterpreter.cpp b/
    if (!ends_with_branch)
    {
      out->successors.push_back(resume_pc);
-@@ -15106,8 +15441,8 @@ struct RegionFragment
+@@ -15106,8 +15462,8 @@ struct RegionFragment
    struct Reloc
    {
      u32 offset;
@@ -620,7 +657,7 @@ diff --git a/Source/Core/Core/PowerPC/CachedInterpreter/CachedInterpreter.cpp b/
    };
    std::vector<Reloc> relocs;
  };
-@@ -15119,9 +15454,207 @@ struct RegionFragment
+@@ -15119,9 +15475,207 @@ struct RegionFragment
  //         b/bl out of the fragment: return_call jump(target), else re-enter
  //         the loop }; no block at pc: return_call dispatch
  // Halts inside a body return 2.
@@ -828,7 +865,7 @@ diff --git a/Source/Core/Core/PowerPC/CachedInterpreter/CachedInterpreter.cpp b/
    // End of the range holding pc, 0 when none does.
    const auto range_end = [&](u32 pc) -> u32 {
      for (std::size_t i = 0; i + 1 < ranges.size(); i += 2)
-@@ -15133,8 +15666,25 @@ bool BuildRegionFragment(Core::System& system, u32 entry_pc, std::span<const u32
+@@ -15133,8 +15687,25 @@ bool BuildRegionFragment(Core::System& system, u32 entry_pc, std::span<const u32
    std::vector<FragmentBlock> blocks;
    std::vector<u32> work{entry_pc};
    std::unordered_set<u32> seen{entry_pc};
@@ -856,7 +893,7 @@ diff --git a/Source/Core/Core/PowerPC/CachedInterpreter/CachedInterpreter.cpp b/
      const u32 pc = work.front();
      work.erase(work.begin());
      FragmentBlock fb;
-@@ -15154,6 +15704,7 @@ bool BuildRegionFragment(Core::System& system, u32 entry_pc, std::span<const u32
+@@ -15154,6 +15725,7 @@ bool BuildRegionFragment(Core::System& system, u32 entry_pc, std::span<const u32
        if ((next & 3) == 0 && inside(next) && seen.insert(next).second)
          work.push_back(next);
      }
@@ -864,7 +901,7 @@ diff --git a/Source/Core/Core/PowerPC/CachedInterpreter/CachedInterpreter.cpp b/
      blocks.push_back(std::move(fb));
    }
    std::unordered_set<u32> starts;
-@@ -15166,6 +15717,43 @@ bool BuildRegionFragment(Core::System& system, u32 entry_pc, std::span<const u32
+@@ -15166,6 +15738,43 @@ bool BuildRegionFragment(Core::System& system, u32 entry_pc, std::span<const u32
    const u32 npc_offset = static_cast<u32>(reinterpret_cast<std::uintptr_t>(&ppc.npc) - base);
    const u32 downcount_offset =
        static_cast<u32>(reinterpret_cast<std::uintptr_t>(&ppc.downcount) - base);
@@ -908,7 +945,7 @@ diff --git a/Source/Core/Core/PowerPC/CachedInterpreter/CachedInterpreter.cpp b/
    std::vector<u8>& code = out->code;
    const auto load = [&](u32 offset) {
      code.insert(code.end(), {0x28, 0x02});
-@@ -15182,11 +15770,31 @@ bool BuildRegionFragment(Core::System& system, u32 entry_pc, std::span<const u32
+@@ -15182,11 +15791,31 @@ bool BuildRegionFragment(Core::System& system, u32 entry_pc, std::span<const u32
    };
    code.assign(WASM_BLOCK_LOCALS.begin(), WASM_BLOCK_LOCALS.end());
    code[0] = 0x07;
@@ -944,7 +981,7 @@ diff --git a/Source/Core/Core/PowerPC/CachedInterpreter/CachedInterpreter.cpp b/
    for (const auto& b : blocks)
    {
      out->entries.push_back(b.start);
-@@ -15201,29 +15809,52 @@ bool BuildRegionFragment(Core::System& system, u32 entry_pc, std::span<const u32
+@@ -15201,29 +15830,52 @@ bool BuildRegionFragment(Core::System& system, u32 entry_pc, std::span<const u32
        out->relocs.push_back({at + static_cast<u32>(reloc.offset), 0,
                               static_cast<u32>(it - WASM_IMPORT_NAMES.begin())});
      }
@@ -1005,7 +1042,7 @@ diff --git a/Source/Core/Core/PowerPC/CachedInterpreter/CachedInterpreter.cpp b/
        EmitLocalGet(code, 0);
        reloc_site(1, b.jump_target);
      }
-@@ -15233,6 +15864,7 @@ bool BuildRegionFragment(Core::System& system, u32 entry_pc, std::span<const u32
+@@ -15233,6 +15885,7 @@ bool BuildRegionFragment(Core::System& system, u32 entry_pc, std::span<const u32
      }
      code.push_back(0x0b);  // end if
    }
@@ -1013,7 +1050,7 @@ diff --git a/Source/Core/Core/PowerPC/CachedInterpreter/CachedInterpreter.cpp b/
    EmitLocalGet(code, 0);
    reloc_site(2, 0);
    code.insert(code.end(), {0x0b, 0x00, 0x0b});  // end loop; unreachable; end
-@@ -15290,7 +15922,16 @@ namespace
+@@ -15290,7 +15943,17 @@ namespace
  // Bumped whenever the code the translator emits changes (cache keys).
  // 2: modules carry their heap layout (region-layout); version 1 modules have
  // none and would never install.
@@ -1027,11 +1064,12 @@ diff --git a/Source/Core/Core/PowerPC/CachedInterpreter/CachedInterpreter.cpp b/
 +// 9: region code swaps bytes with two rotates (0083, E).
 +// 10: region modules carry wasm branch hints (0083, F).
 +// 11: a fragment keeps downcount (and the next pc) in locals (0083, G).
++// 12: a region block loads only the GPRs it reads before writing (0083, H).
 +constexpr u32 AOT_COMPILER_VERSION = 11;
  constexpr u32 AOT_MAX_FRAGMENT_BYTES = 1u << 20;
  thread_local std::vector<u32> t_aot_out;
  u8* s_aot_ram = nullptr;
-@@ -15337,6 +15978,14 @@ const u32* AotStatus(u32 status, u32 entry)
+@@ -15337,6 +16000,14 @@ const u32* AotStatus(u32 status, u32 entry)
  }
  }  // namespace
  
@@ -1046,7 +1084,7 @@ diff --git a/Source/Core/Core/PowerPC/CachedInterpreter/CachedInterpreter.cpp b/
  extern "C" EMSCRIPTEN_KEEPALIVE const u32* DolphinWeb_AotTranslate(u32 entry_pc, u32 mask,
                                                                     const u32* ranges,
                                                                     u32 range_count, u32 max_blocks,
-@@ -15376,6 +16025,7 @@ extern "C" EMSCRIPTEN_KEEPALIVE const u32* DolphinWeb_AotTranslate(u32 entry_pc,
+@@ -15376,6 +16047,7 @@ extern "C" EMSCRIPTEN_KEEPALIVE const u32* DolphinWeb_AotTranslate(u32 entry_pc,
    PPCAnalyst::g_instruction_reader = AotReadInstruction;
    const bool built = BuildRegionFragment(Core::System::GetInstance(), entry_pc, range_span,
                                           std::max<u32>(max_blocks, 1), &fragment);
