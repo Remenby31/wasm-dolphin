@@ -334,9 +334,9 @@ calls). The store stays, so every exit sees the exact CR.
 
 SO must be clear for this. Regions refuse to run while XER.SO is set
 (TryRunRegion, RegionWouldRun, RegionChainNext), and the ops that can set
-it (`mtxer`, `mcrxr`, the OE forms) run outside them. Research note:
-`research/deep-cr-flags.md` (R1). The lazy store without the fused branch
-was slower on unpredictable branches, so they ship together. Compiler
+it (`mtxer`, `mcrxr`, the OE forms) run outside them. In a V8
+microbenchmark the lazy store without the fused branch was slower on
+unpredictable branches (+14 to +30 %), so the two ship together. Compiler
 version 10.
 
 ## MMU mode (patch 0091, with dispatch's 0090, 2026-10-22)
