@@ -25,7 +25,7 @@
       "commit": "01e0577914a75a2569c846778c2f93aa8e6feddd"
     }
   },
-  "patchSeriesSha256": "61645dcfed6cf0cfbaacb296d5f2acb40aa2b50c964fd4e97109381156dfdd2f",
+  "patchSeriesSha256": "64ced064332e420cfd09774b6553a2f10c58b737e04214fe3f7c9fff50b9a2d1",
   "patches": [
     {
       "order": 1,
@@ -647,12 +647,20 @@
       "order": 78,
       "cwd": ".",
       "hashMode": "lf-normalized",
+      "path": "patches/dolphin-wasm/snapshot/0097-embed-filtered-gamesettings.patch",
+      "size": 975,
+      "sha256": "6726edf3d4ff8937f77085e593020d9f351444e0b02d4c75e2cdea510fefc5a0"
+    },
+    {
+      "order": 79,
+      "cwd": ".",
+      "hashMode": "lf-normalized",
       "path": "patches/dolphin-wasm/snapshot/0099-ax-hle-timing.patch",
       "size": 3424,
       "sha256": "fcf883f10294f89b4660891765bba842259213b7ebebbf80e6815cb0b083f6b5"
     },
     {
-      "order": 79,
+      "order": 80,
       "cwd": "Externals/SFML/SFML",
       "hashMode": "lf-normalized",
       "path": "patches/dolphin-wasm/submodules/0001-sfml-emscripten-config.patch",
@@ -660,7 +668,7 @@
       "sha256": "f82197a21fe982ad83f6ee7bbf5a03839b1cebd4d64da3eab11263842bf61d89"
     },
     {
-      "order": 80,
+      "order": 81,
       "cwd": "Externals/xxhash/xxHash",
       "hashMode": "lf-normalized",
       "path": "patches/dolphin-wasm/submodules/0002-xxhash-wasm-simd-scalar.patch",

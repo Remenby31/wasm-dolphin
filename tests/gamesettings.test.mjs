@@ -1,0 +1,110 @@
+// Copyright 2026 wasm-dolphin contributors
+// SPDX-License-Identifier: GPL-2.0-or-later
+//
+// Dolphin's per-game settings in the core (patch 0097): the build keeps the
+// GameCube discs' INIs with only the allowlisted keys and embeds them where
+// GameConfigLoader reads them. Synthetic discs only (TST01, ...).
+
+import assert from "node:assert/strict";
+import { mkdtempSync, readFileSync, readdirSync, writeFileSync } from "node:fs";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
+import test from "node:test";
+
+import { buildGameSettings, filterIni, loadAllowlist } from "../tools/gamesettings-filter.mjs";
+import { loadAotCore } from "./helpers/aot-core-equivalence.mjs";
+
+// The shipped allowlist's keys, for fixtures named like test discs.
+const allowlist = { ...loadAllowlist(), discIds: "^T" };
+
+const FULL = [
+  "# TST01 - a test disc",
+  "[Core]",
+  "# Values set here will override the main Dolphin settings.",
+  "CPUThread = False",
+  "MMU = True",
+  "FPRF = True",
+  "[OnFrame]",
+  "[ActionReplay]",
+  "$Some Code",
+  "01234567 89ABCDEF",
+  "[Video_Settings]",
+  "SafeTextureCacheColorSamples = 512",
+  ""
+].join("\r\n");
+
+test("the filter keeps only allowlisted keys, LF, in allowlist order", () => {
+  assert.equal(filterIni(FULL, allowlist), "[Core]\nMMU = True\n");
+});
+
+test("a file with no allowlisted key gives nothing; comments, codes and other sections never pass", () => {
+  assert.equal(filterIni("[Core]\n[OnFrame]\n[ActionReplay]\n$Code\n01234567 89ABCDEF\n", allowlist), null);
+  assert.equal(filterIni("MMU = True\n[Video_Settings]\nMMU = True\n", allowlist), null, "MMU outside [Core]");
+  assert.equal(filterIni("[Core]\n# MMU = True\n", allowlist), null, "a commented key");
+});
+
+test("a later line of the same key wins, as in Dolphin's IniFile", () => {
+  assert.equal(filterIni("[Core]\nMMU = True\nMMU = False\n", allowlist), "[Core]\nMMU = False\n");
+});
+
+test("the build is deterministic: same sources, same files and bytes, in name order", () => {
+  const src = mkdtempSync(join(tmpdir(), "gs-src-"));
+  writeFileSync(join(src, "TST02.ini"), "[Core]\nCPUThread = False\n");
+  writeFileSync(join(src, "TST01.ini"), FULL);
+  writeFileSync(join(src, "RST01.ini"), "[Core]\nMMU = True\n"); // not a disc of the list
+  writeFileSync(join(src, "TST01r1.ini"), "[Core]\r\nMMU = False\r\n");
+  const runs = [0, 1].map(() => {
+    const out = mkdtempSync(join(tmpdir(), "gs-out-"));
+    const written = buildGameSettings(src, out, allowlist);
+    return { written, files: readdirSync(out).sort().map((n) => [n, readFileSync(join(out, n))]) };
+  });
+  assert.deepEqual(runs[0].written, ["TST01.ini", "TST01r1.ini"]);
+  assert.deepEqual(runs[0].files, runs[1].files);
+  assert.equal(runs[0].files[0][1].toString(), "[Core]\nMMU = True\n");
+  assert.equal(runs[0].files[1][1].toString(), "[Core]\nMMU = False\n");
+});
+
+test("the shipped allowlist: version 1, a reason per key, GameCube discs only", () => {
+  const shipped = loadAllowlist();
+  assert.equal(shipped.version, 1);
+  assert.ok(shipped.keys.length > 0);
+  for (const k of shipped.keys) assert.ok(k.section && k.key && k.why.length > 20, `${k.section}.${k.key} has a reason`);
+  assert.equal(shipped.discIds, "^[GDP]");
+});
+
+test("Dolphin's own folder gives only allowlisted keys", () => {
+  const src = new URL("../vendor/dolphin/Data/Sys/GameSettings", import.meta.url);
+  let entries;
+  try {
+    entries = readdirSync(src);
+  } catch {
+    return; // no vendor tree
+  }
+  assert.ok(entries.length > 0);
+  const out = mkdtempSync(join(tmpdir(), "gs-dolphin-"));
+  const shipped = loadAllowlist();
+  const written = buildGameSettings(src.pathname, out, shipped);
+  const allowed = new Set(shipped.keys.map((k) => k.key));
+  for (const name of written) {
+    for (const line of readFileSync(join(out, name), "utf8").split("\n")) {
+      if (!line || line.startsWith("[")) continue;
+      assert.ok(allowed.has(line.split(" = ")[0]), `${line} is allowlisted`);
+    }
+  }
+});
+
+const core = await loadAotCore();
+const coreSkip = core && typeof core.module._GameConfigMmuForTest === "function" ? false : "the core predates 0097 (CI builds this branch's core)";
+
+test("the core's game config applies an embedded disc INI: MMU = True gives the MMU mode", { skip: coreSkip }, () => {
+  const m = core.module;
+  try {
+    m.FS.mkdirTree("/dolphin-sys/GameSettings");
+  } catch {
+    // already there
+  }
+  m.FS.writeFile("/dolphin-sys/GameSettings/TST01.ini", "[Core]\nMMU = True\n");
+  const mmu = (id) => m.ccall("GameConfigMmuForTest", "number", ["string", "number"], [id, 0]);
+  assert.equal(mmu("TST01"), 1, "the disc's INI sets the MMU");
+  assert.equal(mmu("TST02"), 0, "a disc without an INI keeps the default");
+});
