@@ -104,6 +104,7 @@ import { coreStats, displayStats, hitchList, mergeTimeline, presentationStats } 
 import { consistentRead, decodeRegionStats, poolStats, regionShares, topMisses } from "../lib/jit-region-stats.mjs";
 import { consistentMemRead, decodeMemStats, memAccessShares, poolMemStats } from "../lib/mem-access-stats.mjs";
 import { consistentHeadroomRead, decodeHeadroomStats, headroomOf, invalidReasons, querySpeed, unlimitedAllowed } from "../lib/headroom.mjs";
+import { runSteps, validateSteps } from "../lib/steps.mjs";
 import { summarizePcSamples } from "../../src/harness-pc-sampler.js";
 import { busiestThread, checkPerfAccess, counterEvents, cyclesPerGuestCycle, instructionsPerGuestCycle, perfCounters } from "../lib/perf-counters.mjs";
 import { checkXctrace, freeDiskGB, perKiloGuestCycles, XCTRACE_MIN_FREE_GB, xctraceCounters } from "../lib/xctrace-counters.mjs";
@@ -217,7 +218,10 @@ export function rendererThreads(profileDir) {
 export async function measure(session, o) {
   const { page } = session;
   // A homebrew (no savestate) is measured from its boot.
-  if (o.state) {
+  // --steps: a scene from input steps after the boot (e.g. menus → race).
+  if (o.steps) {
+    await runSteps(page, o.steps);
+  } else if (o.state) {
     const loaded = await loadHarnessState(page, session.url);
     if (!loaded?.loaded) throw new Error(`savestate load failed: ${JSON.stringify(loaded)}`);
   }
@@ -594,7 +598,7 @@ async function main() {
       "emulated-window": { type: "string" }, "emulated-warmup": { type: "string" }, "emulated-poll-ms": { type: "string", default: "100" },
       hold: { type: "string", default: "KeyX" }, warm: { type: "boolean", default: false },
       "max-load": { type: "string" }, "lock-wait": { type: "string", default: "1800" },
-      pcsample: { type: "string" }, symbols: { type: "string" }, "region-sample": { type: "string" }, "region-secs": { type: "string", default: "10" }, counters: { type: "boolean", default: false }, "counter-events": { type: "string" }, "pin-cpu-thread": { type: "string" }, "unique-frames": { type: "string" }, display: { type: "boolean", default: false }, "mem-stats": { type: "boolean", default: false }, "mem-warm": { type: "string", default: "5" }, headroom: { type: "boolean", default: false }, "frames-per-vi-ref": { type: "string" }, "baseline-query": { type: "string" }, "chrome-args": { type: "string" }, "baseline-chrome-args": { type: "string" },
+      pcsample: { type: "string" }, symbols: { type: "string" }, "region-sample": { type: "string" }, "region-secs": { type: "string", default: "10" }, counters: { type: "boolean", default: false }, steps: { type: "string" }, "counter-events": { type: "string" }, "pin-cpu-thread": { type: "string" }, "unique-frames": { type: "string" }, display: { type: "boolean", default: false }, "mem-stats": { type: "boolean", default: false }, "mem-warm": { type: "string", default: "5" }, headroom: { type: "boolean", default: false }, "frames-per-vi-ref": { type: "string" }, "baseline-query": { type: "string" }, "chrome-args": { type: "string" }, "baseline-chrome-args": { type: "string" },
       "core-candidate": { type: "string", multiple: true, default: [] },
       port: { type: "string", default: process.env.HARNESS_PORT }, out: { type: "string" }
     },
@@ -607,6 +611,9 @@ async function main() {
   const iso = path.resolve(values.iso), state = values.state ? path.resolve(values.state) : null;
   for (const f of [iso, state].filter(Boolean)) if (!existsSync(f)) throw new Error(`not found: ${f}`);
   const localOnly = !isHomebrew(iso);
+  // --steps replaces the savestate as the scene.
+  const steps = values.steps ? JSON.parse(readFileSync(path.resolve(values.steps), "utf8")) : null;
+  if (steps) validateSteps(steps);
   if (localOnly && process.env.CI) throw new Error("this disc is local-only and must never run in CI");
   const query = `${values.query ?? PRESETS[values.config] ?? values.config}&metrics=1`;
   // --baseline-query: the baseline side boots with its own query (same tree
@@ -629,7 +636,7 @@ async function main() {
   if (values["counter-events"] && !values.counters) throw new Error("--counter-events needs --counters");
   if (values.baseline && runs % 2) throw new Error(`--runs ${runs}: with --baseline the runs must be even, so trunk goes first as often as head`);
   const o = {
-    iso, state, port: num(values, "port", { min: 1, int: true }), query, runs,
+    iso, state, steps, port: num(values, "port", { min: 1, int: true }), query, runs,
     minPairs: values["min-pairs"] ? num(values, "min-pairs", { min: 2, int: true }) : Math.min(runs, 4),
     warmup: num(values, "warmup", { min: 0 }), secs: num(values, "secs", { min: 2, int: true }),
     // --emulated-window S: S guest seconds after --emulated-warmup W guest
@@ -823,7 +830,7 @@ async function main() {
     sceneProtocol: sceneCheck.protocol ? { state: state && path.basename(state), ...sceneCheck.protocol, warnings: sceneCheck.warnings } : null,
     probe: "race-perf", at: new Date().toISOString(),
     chrome,
-    iso: path.basename(iso), state: state && path.basename(state), query: o.query, baselineQuery: sides.baseline?.query ?? null, warmupSec: o.warmup, secs: o.secs,
+    iso: path.basename(iso), state: steps ? null : state && path.basename(state), steps: steps ? path.basename(values.steps) : null, query: o.query, baselineQuery: sides.baseline?.query ?? null, warmupSec: o.warmup, secs: o.secs,
     // Window in guest seconds (null: host seconds, --secs).
     emulatedWindow: o.emulatedWindow ? { secs: o.emulatedWindow, warmup: o.emulatedWarmup, pollMs: o.emulatedPollMs } : null, hold: o.hold, maxLoad: o.maxLoad,
     sides: Object.fromEntries(Object.entries(sides).map(([n, s]) => [n, s.label])),
