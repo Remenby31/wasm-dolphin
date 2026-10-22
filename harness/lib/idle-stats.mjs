@@ -24,7 +24,10 @@ export const FIELDS = [
   "reentries", "reentryCycles", "reentryHostMs", "reentryEventMs",
   "idleWakes", "wakeViOnly", "wakeWithVi", "wakeExceptions",
   "viUpdates", "viObservable", "beamReads",
-  "wakeAudioDma", "wakeDsp", "wakeGpuSleeper", "wakeIpc", "wakeDec", "wakeSi", "wakeOther"
+  "wakeAudioDma", "wakeDsp", "wakeGpuSleeper", "wakeIpc", "wakeDec", "wakeSi", "wakeOther",
+  // ?idleff=1: wakes where the fast-forward could start, loop iterations it
+  // replaced.
+  "ffArmed", "ffSkips"
 ];
 export const IDLE_STATS_BYTES = 16 + 8 * FIELDS.length;
 // GameCube CPU clock, and NTSC fields per second (VideoInterface).
@@ -93,6 +96,7 @@ export function idleRates(s) {
     viObservableShare: round(per(s.viObservable, s.viUpdates), 4),
     viUpdatesPerField: round(per(s.viUpdates, fields), 1),
     beamReadsPerField: round(per(s.beamReads, fields), 2),
+    ffSkipsPerField: round(per(s.ffSkips, fields), 1),
     wakeOtherPerField: Object.fromEntries(["wakeAudioDma", "wakeDsp", "wakeGpuSleeper", "wakeIpc", "wakeDec", "wakeSi", "wakeOther"].map((f) => [f, round(per(s[f], fields), 2)]))
   };
 }

@@ -37,6 +37,7 @@ import { Worker } from "node:worker_threads";
 import { ensureServer, REPO_ROOT, workerRequest } from "../lib/browser.mjs";
 import { isSingleCore } from "../lib/matrix.mjs";
 import { captureInSession, openSession } from "../lib/session.mjs";
+import { decodeIdleStats } from "../lib/idle-stats.mjs";
 
 const { values } = parseArgs({
   options: {
@@ -74,14 +75,21 @@ try {
   for (let run = 1; run <= Number(values.runs); run += 1) {
     const session = await openSession({ base: server.base, server, query: queryB && run % 2 === 0 ? queryB : query, iso, harness: { detTrace: true } });
     try {
+      // Idle-skip counters from the boot on (patch 0089; absent from older
+      // cores): a --query-b run with a fast-forward that never skipped would
+      // prove nothing.
+      const idleReset = await workerRequest(session.page, "validationReadIdleStats", { reset: true }, 10000).catch((e) => ({ error: String(e) }));
       const capture = await captureInSession(session, { index: Number(values.vi), timeoutMs: 180000 });
       if (capture.error) throw new Error(`capture: ${capture.error}`);
       const trace = await workerRequest(session.page, "validationReadDetTrace", { fromLog: 0, maxLog: 1 << 18 }, 120000);
       if (!trace?.supported) throw new Error(`no determinism trace: ${trace?.why ?? trace?.error}`);
       if (trace.startVi !== 0) throw new Error(`the trace started at VI ${trace.startVi}, after the boot began`);
       if (hostClock ? session.clock?.fixed : !session.clock?.fixed) throw new Error(`clock: expected the ${hostClock ? "host" : "fixed"} clock, got ${JSON.stringify(session.clock)}`);
-      runs.push({ run, url: session.url, clock: session.clock, picture: createHash("sha256").update(capture.data).digest("hex").slice(0, 12), ...trace });
-      console.log(`[determinism] run ${run}${queryB ? ` (query ${run % 2 === 0 ? "b" : "a"})` : ""}: picture ${runs.at(-1).picture}, ${trace.checkpoints.length} checkpoints`);
+      const idleReply = idleReset?.error ? idleReset : await workerRequest(session.page, "validationReadIdleStats", {}, 10000).catch((e) => ({ error: String(e) }));
+      const idle = idleReply.error ? { error: idleReply.error } : decodeIdleStats(idleReply.bytes);
+      runs.push({ run, url: session.url, clock: session.clock, picture: createHash("sha256").update(capture.data).digest("hex").slice(0, 12), idle, ...trace });
+      const idleNote = idle.error ? `idle stats: ${idle.error}` : `${idle.idleCalls} Idle() calls, ${idle.ffSkips} iterations fast-forwarded`;
+      console.log(`[determinism] run ${run}${queryB ? ` (query ${run % 2 === 0 ? "b" : "a"})` : ""}: picture ${runs.at(-1).picture}, ${trace.checkpoints.length} checkpoints, ${idleNote}`);
     } finally {
       await session.close();
     }
@@ -114,6 +122,8 @@ for (const r of runs.slice(1)) {
     let k = 0;
     while (k < Math.min(a.length, b.length) && JSON.stringify(a[k]) === JSON.stringify(b[k])) k += 1;
     console.log(`  first differing CPU-thread event (${k} after VI ${events}) [time, late, name, kind]: run 1 ${JSON.stringify(a[k])} | run ${r.run} ${JSON.stringify(b[k])}`);
+    // The events just before it (kind 0 run, 1 scheduled, 2 off-thread …).
+    for (let j = Math.max(0, k - 8); j < k; j += 1) console.log(`    ${JSON.stringify(a[j])}`);
   }
   if (ram >= 0 && r.ramChunks?.length) {
     const chunks = r.ramChunks.map((h, i) => (h !== ref.ramChunks[i] ? `0x${(0x80000000 + i * 65536).toString(16)}` : null)).filter(Boolean);
