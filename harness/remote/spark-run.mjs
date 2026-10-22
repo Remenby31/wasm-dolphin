@@ -41,6 +41,7 @@ import { exportRef } from "../cli.mjs";
 import { PRESETS } from "../lib/matrix.mjs";
 import { REPO_ROOT } from "../lib/browser.mjs";
 import { IDENTITY_FILE, snapshotTree } from "../lib/server.mjs";
+import { MAX_BUILDS_PER_OWNER, ownerBuilds } from "./spark-queue.mjs";
 import { release } from "../lib/ownership.mjs";
 
 export const BENCH = "salon-bench"; // under the Spark user's home
@@ -162,11 +163,19 @@ function pushTree(host, { root, files, kind, key, identity = null }) {
   return { dest, pushed: true };
 }
 
+// The remote test that `dir` holds a core built on the bench: a tree
+// spark-build exported (identity builtOn spark), or a per-commit worktree of
+// an older spark-build whose cores/ --install changed. A wasm alone proves
+// nothing: every checkout has the committed CI core (2026-10-22: four
+// unbuilt worktrees passed for built).
+export const builtOnBenchTest = (dir) =>
+  `test -f ${dir}/cores/dolphin/dolphin-core-upstream.wasm && { grep -qs '"builtOn":"spark"' ${dir}/.harness-identity.json || { test -e ${dir}/.git && test -n "$(git -C ${dir} status --porcelain -- cores)"; }; }`;
+
 // A worktree built on the bench (--build): spark:<ref>.
 function benchSide(host, spec) {
   const commit = execFileSync("git", ["-C", REPO_ROOT, "rev-parse", `${spec.slice("spark:".length)}^{commit}`], { encoding: "utf8" }).trim();
   const dest = `${BENCH}/build/wt/${commit}`;
-  if (ssh(host, `test -f ${dest}/cores/dolphin/dolphin-core-upstream.wasm`, { quiet: true }).status !== 0) throw new Error(`${spec}: no core built on the bench for ${commit}: run --build ${commit} first`);
+  if (ssh(host, builtOnBenchTest(dest), { quiet: true }).status !== 0) throw new Error(`${spec}: no core built on the bench for ${commit}: run --build ${commit} first`);
   console.log(`[spark-run] ${spec}: core built on the bench (build/wt/${commit.slice(0, 12)})`);
   return { spec, dest, key: `build-${commit}`, source: { commit, builtOn: "spark" } };
 }
@@ -247,9 +256,21 @@ async function build(host, ref) {
   const harness = pushTree(host, { root: REPO_ROOT, files: harnessFiles, kind: "harness", key: contentKey(REPO_ROOT, harnessFiles) });
   const base = `${BENCH}/build/wt/${commit}`;
   const done = ssh(host, `cat ${base}.exit 2>/dev/null || { test -e ${base}.log && echo running; }`, { quiet: true }).out.trim();
-  if (done === "0") return console.log(`[spark-run] already built: --candidate spark:${commit}`), 0;
-  if (done) throw new Error(`a build of ${commit.slice(0, 12)} is ${done === "running" ? "under way" : `done with exit ${done}`} (~/${base}.log); remove its .log and .exit to build again`);
-  ssh(host, `mkdir -p ${BENCH}/build/wt && test ! -e ${base}.log && cd ${harness.dest} && { PATH="$HOME/${BENCH}/node/bin:$PATH" setsid nohup sh -c 'node harness/remote/spark-build.mjs ${commit} >> $HOME/${base}.log 2>&1; echo $? > $HOME/${base}.exit' </dev/null >/dev/null 2>&1 & }`);
+  if (done === "0" && ssh(host, builtOnBenchTest(base), { quiet: true }).status === 0) return console.log(`[spark-run] already built: --candidate spark:${commit}`), 0;
+  // A build under way (queued or compiling): follow it rather than refuse.
+  if (done === "running") {
+    console.log(`[spark-run] a build of ${commit.slice(0, 12)} is under way: following it`);
+    const exit = await followLog(host, base, { lost: `the build goes on there: ssh ${host} cat ~/${base}.log` });
+    if (exit === 0) console.log(`[spark-run] built: --candidate spark:${commit}`);
+    return exit;
+  }
+  if (done) throw new Error(`a build of ${commit.slice(0, 12)} ended with exit ${done}${done === "0" ? " but no core built on the bench is there" : ""} (~/${base}.log); remove its .log and .exit to build again`);
+  // At most MAX_BUILDS_PER_OWNER builds of this agent (its worktree) in the queue.
+  const owner = safeName(path.basename(REPO_ROOT)); // [\w.-] only: safe in the remote sh -c '…' 
+  const tickets = JSON.parse(ssh(host, `cd ${harness.dest} && PATH="$HOME/${BENCH}/node/bin:$PATH" node harness/remote/spark-queue.mjs list --json`).out || "[]");
+  const mine = ownerBuilds(tickets, owner);
+  if (mine.length >= MAX_BUILDS_PER_OWNER) throw new Error(`${owner} already has ${mine.length} builds in the bench's queue (${mine.map((t) => t.name).join(", ")}), at most ${MAX_BUILDS_PER_OWNER}: wait for one of your builds to go through`);
+  ssh(host, `mkdir -p ${BENCH}/build/wt && test ! -e ${base}.log && cd ${harness.dest} && { PATH="$HOME/${BENCH}/node/bin:$PATH" setsid nohup sh -c 'node harness/remote/spark-build.mjs ${commit} --owner ${owner} >> $HOME/${base}.log 2>&1; echo $? > $HOME/${base}.exit' </dev/null >/dev/null 2>&1 & }`);
   console.log(`[spark-run] building ${commit.slice(0, 12)} on ${host} (waits for the bench's perf lock; ~8 min, first build of a worktree more)`);
   const exit = await followLog(host, base, { lost: `the build goes on there: ssh ${host} cat ~/${base}.log` });
   if (exit === 0) console.log(`[spark-run] built: --candidate spark:${commit}`);
