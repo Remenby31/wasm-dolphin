@@ -26,7 +26,7 @@ diff --git a/Source/Core/Core/CoreTiming.cpp b/Source/Core/Core/CoreTiming.cpp
 diff --git a/Source/Core/Core/PowerPC/CachedInterpreter/CachedInterpreter.cpp b/Source/Core/Core/PowerPC/CachedInterpreter/CachedInterpreter.cpp
 --- a/Source/Core/Core/PowerPC/CachedInterpreter/CachedInterpreter.cpp
 +++ b/Source/Core/Core/PowerPC/CachedInterpreter/CachedInterpreter.cpp
-@@ -9171,9 +9171,20 @@ constexpr double REGION_BOOT_SLICE_MS = 8.0;
+@@ -9401,9 +9401,20 @@ constexpr double REGION_BOOT_SLICE_MS = 8.0;
  std::optional<std::chrono::steady_clock::time_point> s_region_service_start;
  // Past the boot a slice stops installing when the next module's estimated
  // cost would take it over this; estimate = size x the measured cost per byte
@@ -49,7 +49,7 @@ diff --git a/Source/Core/Core/PowerPC/CachedInterpreter/CachedInterpreter.cpp b/
  double s_region_boot_max_slice_ms = 0;  // published in the header's spare u32
  u32 s_region_install_fallbacks = 0;     // likewise
  
-@@ -9479,7 +9490,10 @@ bool TryInstallRegion(PendingRegion& pending, int ready_bits_ptr, double& spent_
+@@ -9722,25 +9733,50 @@ bool TryInstallRegion(PendingRegion& pending, int ready_bits_ptr, double& spent_
    return true;
  }
  
@@ -59,9 +59,15 @@ diff --git a/Source/Core/Core/PowerPC/CachedInterpreter/CachedInterpreter.cpp b/
 +// boundary.
 +void ServiceRegionInstalls(std::optional<std::chrono::steady_clock::time_point> deadline = {})
  {
++  // The boot window (REGION_BOOT_WINDOW, larger slices) opens at the CPU
++  // thread's first slice boundary, not at the first install: since the
++  // region cache loads after the first image (#86), the first install comes
++  // in play, where the boot's budget would cost frames (review of #86).
++  if (!s_region_service_start && !deadline)
++    s_region_service_start = std::chrono::steady_clock::now();
    if (s_region_waiting.empty() && !s_region_queue_nonempty.load(std::memory_order_acquire))
      return;
-@@ -9487,17 +9501,33 @@ void ServiceRegionInstalls()
+   const auto now = std::chrono::steady_clock::now();
    if (!s_region_service_start)
      s_region_service_start = now;
    const bool boot = now - *s_region_service_start < REGION_BOOT_WINDOW;
@@ -96,7 +102,7 @@ diff --git a/Source/Core/Core/PowerPC/CachedInterpreter/CachedInterpreter.cpp b/
    // Waiting regions whose module the worker has compiled (or that waited too
    // long) first: their compile is the cheap one.
    for (std::size_t i = 0; i < s_region_waiting.size();)
-@@ -9531,7 +9561,8 @@ void ServiceRegionInstalls()
+@@ -9774,7 +9810,8 @@ void ServiceRegionInstalls()
      const bool ready =
          s_wasm_jit_ready_bits[pending.slot].load(std::memory_order_acquire) != 0;
      const bool expired = now - pending.posted > s_region_ready_wait;
@@ -106,7 +112,7 @@ diff --git a/Source/Core/Core/PowerPC/CachedInterpreter/CachedInterpreter.cpp b/
      {
        ++i;
        continue;
-@@ -9562,6 +9593,9 @@ void ServiceRegionInstalls()
+@@ -9805,6 +9842,9 @@ void ServiceRegionInstalls()
        std::lock_guard lock(s_region_queue_mutex);
        if (s_region_queue.empty() || !room(s_region_queue.front().bytes.size()))
          break;
@@ -116,7 +122,7 @@ diff --git a/Source/Core/Core/PowerPC/CachedInterpreter/CachedInterpreter.cpp b/
        pending = std::move(s_region_queue.front());
        s_region_queue.erase(s_region_queue.begin());
        s_region_queue_nonempty.store(!s_region_queue.empty(), std::memory_order_release);
-@@ -9575,6 +9609,13 @@ void ServiceRegionInstalls()
+@@ -9818,6 +9858,13 @@ void ServiceRegionInstalls()
                            InstallPath::First))
        s_region_waiting.push_back(std::move(pending));
    }
@@ -130,7 +136,7 @@ diff --git a/Source/Core/Core/PowerPC/CachedInterpreter/CachedInterpreter.cpp b/
    if (!boot)
      s_region_stats.install_max_slice_ms = std::max(s_region_stats.install_max_slice_ms, spent_ms);
    else
-@@ -9853,6 +9894,30 @@ extern "C" EMSCRIPTEN_KEEPALIVE void DolphinWeb_AotServiceRegionsForTest()
+@@ -10096,6 +10143,30 @@ extern "C" EMSCRIPTEN_KEEPALIVE void DolphinWeb_AotServiceRegionsForTest()
    ApplyRegionStatsRequest();
  }
  
