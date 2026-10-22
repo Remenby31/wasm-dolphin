@@ -9,7 +9,7 @@ import path from "node:path";
 import test from "node:test";
 
 import { acquirePerfLock, lockIntegrity, queueDir, readLockOwner, ticketsAhead } from "../harness/lib/perf-lock.mjs";
-import { chromeArgsOf, num, pairedSpeedChange, regionPipeline, sideOrder, withheldOnOverlap } from "../harness/probes/race-perf.mjs";
+import { chromeArgsOf, lockOverlapAt, num, pairedSpeedChange, regionPipeline, sideOrder, withheldOnOverlap } from "../harness/probes/race-perf.mjs";
 import { stockChrome } from "../harness/lib/kpi.mjs";
 import { calmThenLock, loadGaveUp } from "../harness/lib/env.mjs";
 import { summarizePcSamples } from "../src/harness-pc-sampler.js";
@@ -545,4 +545,20 @@ test("calmLock: no probe waits for the load on its own any more (the pattern doe
     const direct = src.split("\n").filter((l) => /\bwaitForLoad\(/.test(l) && !/abLock \?/.test(l));
     assert.deepEqual(direct, [], `${f} calls waitForLoad outside calmLock / calmUnderLock`);
   }
+});
+
+test("load give-up after --load-wait: no lock held, the lock checks pass cleanly (no TypeError)", async () => {
+  const { calmUnderLock } = await import("../harness/lib/env.mjs");
+  let released = 0;
+  const held = Object.assign(() => { released += 1; }, { check: () => ({ ok: true }) });
+  // The loop's give-up: loaded for the whole --load-wait, the lock goes back and is not taken again.
+  const g = await calmUnderLock({ lock: held, maxLoad: 4, waitSec: 1, acquire: async () => assert.fail("never taken again"), wait: async () => ({ load: 9, limit: 4, ok: false }), load: () => 9 });
+  assert.equal(g.lock, null);
+  assert.equal(released, 1);
+  // What race-perf then does: checkLock("end") and the final release on the lock it holds (none).
+  assert.equal(lockOverlapAt(g.lock, "end"), null);
+  assert.doesNotThrow(() => g.lock?.());
+  // A held lock still reports an overlap.
+  assert.deepEqual(lockOverlapAt(Object.assign(() => {}, { check: () => ({ ok: false, why: "another holder" }) }), "before run 2"), { at: "before run 2", why: "another holder" });
+  assert.equal(lockOverlapAt(Object.assign(() => {}, { check: () => ({ ok: true }) }), "x"), null);
 });

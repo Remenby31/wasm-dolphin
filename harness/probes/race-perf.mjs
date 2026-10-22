@@ -389,6 +389,14 @@ export function p4Summary(runs, sides, good = (r) => r && !r.error) {
   };
 }
 
+// The overlap seen by the lock held now, or null. No lock held (given up
+// for the load: the lock went back and was never taken again): nothing to
+// check, never a TypeError.
+export function lockOverlapAt(release, at) {
+  const c = release?.check?.();
+  return c && !c.ok ? { at, why: c.why } : null;
+}
+
 // Times a pair may let the lock go for the load before giving its runs up.
 const MAX_RELOCKS = 3;
 
@@ -539,8 +547,8 @@ async function main() {
   // checked when taken, before each run and at the end (lockIntegrity).
   const lockOverlap = [];
   const checkLock = (at) => {
-    const c = releaseLock.check?.();
-    if (c && !c.ok) { lockOverlap.push({ at, why: c.why }); console.warn(`[race-perf] perf lock overlap detected (${at}): ${c.why}`); }
+    const overlap = lockOverlapAt(releaseLock, at);
+    if (overlap) { lockOverlap.push(overlap); console.warn(`[race-perf] perf lock overlap detected (${at}): ${overlap.why}`); }
   };
   checkLock("taken");
   try {
