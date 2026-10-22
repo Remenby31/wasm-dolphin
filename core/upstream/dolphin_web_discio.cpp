@@ -1574,8 +1574,7 @@ PadPoll ReadPadForPoll(int pad_num, std::uint64_t ticks)
     in.analog_a = static_cast<std::uint8_t>(s.axes1 >> 16);
     in.analog_b = static_cast<std::uint8_t>(s.axes1 >> 24);
   }
-  // Held taps are buttons only; the digital stick bits keep the state's.
-  in.mask = s.connected ? (s.mask | (reported & ((1u << DIRECT_PAD_BUTTONS) - 1))) : 0;
+  in.mask = ComposeMask(s, reported);
   return PadPoll{in, s.connected};
 }
 }  // namespace

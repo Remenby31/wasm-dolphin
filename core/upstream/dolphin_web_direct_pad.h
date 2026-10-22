@@ -112,30 +112,83 @@ inline bool Read(const std::atomic<std::uint32_t>* port, State* out, int attempt
 
 // Minimum hold (research/deep-stream-input.md §8.6 step 5; reference
 // implementation and tests: Salon's PollLatch). A tap stays reported until a
-// poll of a later frame has reported it.
+// poll of a later frame window has reported it. A second tap of a button
+// still held by the latch is not merged into the first: it waits, the button
+// then reads released for one window, and the tap is reported again (up to
+// MAX_PENDING_TAPS queued per button).
 class TapLatch
 {
 public:
+  static constexpr std::uint8_t MAX_PENDING_TAPS = 3;
+
   std::uint32_t Poll(std::uint32_t state_mask, std::uint32_t taps, std::uint64_t frame)
   {
-    const std::uint32_t fresh = taps & ~m_latched;
     for (int i = 0; i < DIRECT_PAD_BUTTONS; ++i)
-      if (fresh & (1u << i))
-        m_armed_at[i] = frame;
-    m_latched |= fresh;
+    {
+      const std::uint32_t bit = 1u << i;
+      // A release gap is over: the queued tap goes out now.
+      if ((m_gap & bit) && frame > m_gap_at[i])
+      {
+        m_gap &= ~bit;
+        --m_pending[i];
+        Arm(i, frame);
+      }
+      if (!(taps & bit))
+        continue;
+      if ((m_latched | m_gap) & bit)
+      {
+        if (m_pending[i] < MAX_PENDING_TAPS)
+          ++m_pending[i];
+      }
+      else
+      {
+        Arm(i, frame);
+      }
+    }
     const std::uint32_t reported = state_mask | m_latched;
     for (int i = 0; i < DIRECT_PAD_BUTTONS; ++i)
-      if ((m_latched & (1u << i)) && frame > m_armed_at[i])
-        m_latched &= ~(1u << i);
+    {
+      const std::uint32_t bit = 1u << i;
+      if (!(m_latched & bit) || frame <= m_armed_at[i])
+        continue;
+      m_latched &= ~bit;
+      if (m_pending[i])
+      {
+        m_gap |= bit;
+        m_gap_at[i] = frame;
+      }
+    }
     return reported;
   }
 
-  void Clear() { m_latched = 0; }
+  void Clear()
+  {
+    m_latched = 0;
+    m_gap = 0;
+    for (auto& p : m_pending)
+      p = 0;
+  }
 
 private:
+  void Arm(int i, std::uint64_t frame)
+  {
+    m_latched |= 1u << i;
+    m_armed_at[i] = frame;
+  }
+
   std::uint32_t m_latched = 0;
+  std::uint32_t m_gap = 0;
   std::uint64_t m_armed_at[DIRECT_PAD_BUTTONS]{};
+  std::uint64_t m_gap_at[DIRECT_PAD_BUTTONS]{};
+  std::uint8_t m_pending[DIRECT_PAD_BUTTONS]{};
 };
+
+// The buttons the poll reports: the state's own mask (digital stick bits
+// included) plus the held taps; nothing when unplugged.
+inline std::uint32_t ComposeMask(const State& s, std::uint32_t reported)
+{
+  return s.connected ? (s.mask | (reported & ((1u << DIRECT_PAD_BUTTONS) - 1))) : 0;
+}
 
 // What one poll of a port does with the block: read the state (or fall back),
 // consume the taps, apply the hold, and write back what was read.

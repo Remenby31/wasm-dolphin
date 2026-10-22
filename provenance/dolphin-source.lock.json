@@ -25,7 +25,7 @@
       "commit": "01e0577914a75a2569c846778c2f93aa8e6feddd"
     }
   },
-  "patchSeriesSha256": "23802d3c19c1a1cfb8366bdcf781d73f6cfef22a29773ae43cc0a3e9668495f4",
+  "patchSeriesSha256": "d920eb343e27e71af320565a35eafc767de81e74145433ecad720e091e9a3f07",
   "patches": [
     {
       "order": 1,
@@ -648,8 +648,8 @@
       "cwd": ".",
       "hashMode": "lf-normalized",
       "path": "patches/dolphin-wasm/snapshot/0095-rumble-hook.patch",
-      "size": 759,
-      "sha256": "312aa4410fd82d04f0ee19fd8cc46af91d5a579829740712601e8d97586be628"
+      "size": 1018,
+      "sha256": "833790160fc3f2b929c5c914c91f257a30e52eb4f714a2f8af64d1ad4ac4273f"
     },
     {
       "order": 79,

@@ -1294,6 +1294,10 @@ async function handleMessage(type, payload) {
       return handleSavesMessage(type, payload);
     case "streamCapture":
       if (!(payload?.writable instanceof WritableStream)) throw new Error("streamCapture needs a WritableStream");
+      // Frames reach this worker only when it presents them itself; OGL's CPU
+      // framebuffer is a stale readback. Say so instead of a silent track.
+      if (harnessVideoBackend === "OGL") throw new Error("streamCapture: not available with the OGL backend");
+      if (!renderGpu && !renderGl && !renderContext) throw new Error("streamCapture: the page owns the canvas, no frame reaches the worker");
       streamCapture.attach(payload.writable);
       return {};
     case "streamCaptureStop":
@@ -14516,7 +14520,8 @@ function drainWebGpuCmdRing(source = "presentation") {
           // the legacy repaint loop cannot race this submitted frame before
           // the current command-ring drain returns.
           cmdRingOwnsCanvas = true;
-          if (streamCapture.active) streamCapture.offerCanvas(renderCanvas, api?.getFrame?.() ?? 0);
+          // A frame carrying the diagnostic input marker is not streamed.
+          if (streamCapture.active && !hardwareInputMarkerApplied) streamCapture.offerCanvas(renderCanvas, api?.getFrame?.() ?? 0);
           recordPresentedFrame(api?.getFrame?.() ?? 0);
           wgpuPresentedSource = {
             textureId: wgpuLastBackbufferSourceTextureId, rect: wgpuNextPresentSource

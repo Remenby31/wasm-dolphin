@@ -100,10 +100,42 @@ test("page side writes the header's layout", () => {
   assert.throws(() => new DirectPad(memory, 512, DIRECT_PAD_LAYOUT + 1), RangeError);
 });
 
-test("the core reads pads through the direct block and the rumble hook", () => {
-  const core = readFileSync(join(root, "core/upstream/dolphin_web_discio.cpp"), "utf8");
-  assert.match(core, /s_pad_latches\[pad_num\]\.Poll\(ticks, \[pad_num, ticks\] \{ return ReadPadForPoll\(pad_num, ticks\); \}\)/);
-  assert.match(core, /extern "C" void DolphinWeb_OnRumble\(int pad_num, double strength\)/);
-  const patch = readFileSync(join(root, "patches/dolphin-wasm/snapshot/0095-rumble-hook.patch"), "utf8");
-  assert.match(patch, /\+  DolphinWeb_OnRumble\(pad_num, strength\);/);
+// A tap of a button still held by the latch is queued, not merged: the game
+// reads two presses with a release between them. ComposeMask: taps add
+// buttons only, an unplugged port reports nothing.
+const latchProgram = String.raw`
+#include <cstdio>
+#include "dolphin_web_direct_pad.h"
+using namespace DolphinWeb::DirectPad;
+int main() {
+  TapLatch latch;
+  // Two taps of A (bit 0) inside one window; polls at two per window.
+  std::uint32_t taps[] = {1, 1, 0, 0, 0, 0, 0, 0};
+  int edges = 0;
+  std::uint32_t prev = 0;
+  for (int poll = 0; poll < 8; ++poll) {
+    const std::uint32_t r = latch.Poll(0, taps[poll], poll / 2) & 1;
+    if (r && !prev) ++edges;
+    std::printf("%u", r);
+    prev = r;
+  }
+  State s; s.connected = true; s.mask = 1u << 13;   // a digital stick bit kept as is
+  std::printf(" %d %x %x", edges, ComposeMask(s, 0x1001u), ComposeMask(State{}, 0xfffu));
+}
+`;
+
+test("SI poll side: a second tap during the hold is reported after a release, not merged", { skip: !hasCompiler && "no C++ compiler" }, () => {
+  const dir = mkdtempSync(join(tmpdir(), "direct-pad-latch-"));
+  try {
+    writeFileSync(join(dir, "main.cpp"), latchProgram);
+    const exe = join(dir, "main");
+    const built = spawnSync(compiler, ["-std=c++20", "-I", join(root, "core/upstream"), join(dir, "main.cpp"), "-o", exe], { encoding: "utf8" });
+    assert.equal(built.status, 0, built.stderr);
+    const run = spawnSync(exe, { encoding: "utf8" });
+    // pressed through window 0 and the first poll of window 1, released for
+    // window 1's rest, pressed again through window 2 and into 3: two edges.
+    assert.equal(run.stdout.trim(), "11101110 2 2001 0");
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
 });

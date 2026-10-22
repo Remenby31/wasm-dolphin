@@ -75,10 +75,11 @@ Input latency telemetry follows port 1 only.
 
 Cores with the direct pad block (`core/upstream/dolphin_web_direct_pad.h`,
 `src/direct-pad.js`) also get every state straight in their shared memory:
-the worker hands the block to the page once the core is up, the adapter
-writes each published state there (seqlock), and the SI poll reads it at
-once instead of the presentation loop's copy. `?directpad=0` keeps the block
-report-only (A/B measurements).
+the worker hands the block to the page once the core is up, and the adapter
+writes there (seqlock) the states of the ports given to streamed guests
+(`enableRemotePad`); the SI poll reads them at once instead of the
+presentation loop's copy. Local ports keep the presentation-loop path.
+`?directpad=0` keeps the block report-only (A/B measurements).
 
 ## Streaming
 
@@ -87,10 +88,12 @@ guests send their pads):
 
 | Call | Effect |
 | --- | --- |
-| `host.setRemotePad(port, state, { inputSeq, rxTime })` | As `setPad`, plus the guest's packet sequence and its reception time (`performance.timeOrigin + performance.now()`), echoed once an SI poll read the state. |
-| `host.tapPad(port, buttons)` | Buttons pressed since the last update, maybe already released (press counters of a lossy channel). The SI poll keeps them reported until a poll of a later 1/50 s window did; returns false on a core without the block (hold them yourself). |
+| `host.enableRemotePad(port, true \| false)` | Gives `port` to a streamed guest, or takes it back (kick, leave). Only such ports go through the direct block; the host's own ports never do. |
+| `host.setRemotePad(port, state, { inputSeq, rxTime })` | As `setPad`, plus the guest's packet sequence (u16) and its reception time (`performance.timeOrigin + performance.now()`), echoed once an SI poll read the state. Refused (false) on a port not given to a guest, on an unplugged port (it never plugs a port in), on an older sequence, on an invalid state. |
+| `host.tapPad(port, buttons)` | Buttons pressed since the last update, maybe already released (press counters of a lossy channel). The SI poll keeps them reported until a poll of a later 1/50 s window did; a second tap of a held button is queued (released for a window, then pressed again). Returns false without the block or on a port not given to a guest (hold them yourself). |
 | `host.padFeedback(port)` | `{ pollCount, appliedSeq, appliedRxTime, pollTime, edgePollTime, rumble, rumbleGeneration, reportedMask, presses[12] }`: what the last poll read, when, the game's rumble on that port (patch 0095, `Pad::Rumble`), and the press edges the game was given per button. |
-| `host.captureVideoTrack()` | A video `MediaStreamTrack` fed by the emulation worker, one `VideoFrame` per presented frame (software: RGBA copy; wgpu: the presented canvas), without the page's main thread in between. Null without `MediaStreamTrackGenerator`. |
+| `host.captureVideoTrack()` | A video `MediaStreamTrack` fed by the emulation worker, one `VideoFrame` per presented frame (software: RGBA copy; wgpu: the presented canvas, minus frames carrying the diagnostic input marker), without the page's main thread in between. Null without `MediaStreamTrackGenerator`, with OGL, or when the page owns the canvas (`host.streamCaptureUnsupported()` says why). |
+| `host.stopVideoCapture()` | Ends it (room closed). A track stopped by the page ends it too. |
 | `await host.streamCaptureStats()` | Frames, drops (consumer behind), errors, worker ms per frame. |
 
 All times share the epoch clock the core's threads use (`emscripten_get_now()`

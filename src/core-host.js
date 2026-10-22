@@ -682,11 +682,19 @@ export class EmulatorHost {
   // A streamed guest's state on a port (docs/input.md, "Streaming"): as
   // setPad, plus the guest's sequence number and reception time
   // (performance.timeOrigin + now()), echoed by padFeedback once a poll read it.
+  // Refused (false) unless the port was given to a guest (enableRemotePad)
+  // and is plugged in: it never plugs a port in.
   setRemotePad(port, state, meta = {}) {
     if (!isPadPort(port) || !state) return false;
-    if (!this.adapter.setRemotePadState) return this.setPad(port, state);
-    this.adapter.setRemotePadState(port, state, meta);
-    return true;
+    return Boolean(this.adapter.setRemotePadState?.(port, state, meta));
+  }
+
+  // The host gives `port` to a streamed guest (true) or takes it back
+  // (false, e.g. kick). Only such ports accept setRemotePad and tapPad; the
+  // host's own ports never go through the direct block.
+  enableRemotePad(port, enabled) {
+    if (!isPadPort(port)) return false;
+    return Boolean(this.adapter.enableRemotePad?.(port, Boolean(enabled)));
   }
 
   // Buttons pressed and maybe already released (press counters of a streamed
@@ -712,6 +720,13 @@ export class EmulatorHost {
   captureVideoTrack() {
     if (typeof MediaStreamTrackGenerator !== "function" || !this.adapter.request) return null;
     if (this.streamTrack && this.streamTrack.readyState === "live") return this.streamTrack;
+    // The worker presents the frames only when it owns the canvas, and not
+    // with OGL (its CPU framebuffer is a stale readback there).
+    const why = this.streamCaptureUnsupported();
+    if (why) {
+      this.onStatus(`Worker capture unavailable: ${why}`);
+      return null;
+    }
     const generator = new MediaStreamTrackGenerator({ kind: "video" });
     const writable = generator.writable;
     this.adapter.request("streamCapture", { writable }, [writable]).catch((error) => {
@@ -720,6 +735,21 @@ export class EmulatorHost {
     });
     this.streamTrack = generator;
     return generator;
+  }
+
+  // Null when the worker can capture, else why not.
+  streamCaptureUnsupported() {
+    if (this.videoBackend === "OGL") return "OGL backend";
+    if (!this.usesAdapterCanvas) return "the worker does not own the canvas";
+    return null;
+  }
+
+  // Ends the worker capture (room closed, last guest gone).
+  stopVideoCapture() {
+    const track = this.streamTrack;
+    this.streamTrack = null;
+    track?.stop();
+    return this.adapter.request?.("streamCaptureStop").catch(() => {});
   }
 
   // { attached, frames, dropped, errors, source, width, height,

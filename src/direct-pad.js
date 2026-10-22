@@ -75,6 +75,13 @@ export class DirectPad {
     Atomics.store(v, b + SLOT.ENABLED, 1);
   }
 
+  // The page stops serving this port: the poll falls back to the
+  // presentation-loop copy.
+  disable(port) {
+    Atomics.store(this.i32, this.base(port) + SLOT.ENABLED, 0);
+    Atomics.store(this.i32, this.base(port) + SLOT.TAPS, 0);
+  }
+
   // Buttons pressed since the last poll, held until a poll of a later frame read them.
   tap(port, buttons) {
     const bits = buttons & ((1 << DIRECT_PAD_BUTTONS) - 1);

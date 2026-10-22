@@ -16,8 +16,10 @@
 // frame, the new one is dropped (the next one is fresher anyway).
 
 export class StreamCapture {
-  constructor({ now = () => performance.now() } = {}) {
+  // VideoFrameImpl: injectable for tests (node has no VideoFrame).
+  constructor({ now = () => performance.now(), VideoFrameImpl = globalThis.VideoFrame } = {}) {
     this.now = now;
+    this.VideoFrameImpl = VideoFrameImpl;
     this.writer = null;
     this.stats = StreamCapture.emptyStats();
   }
@@ -76,7 +78,7 @@ export class StreamCapture {
     const startedAt = this.now();
     let frame;
     try {
-      frame = new VideoFrame(bytes, {
+      frame = new this.VideoFrameImpl(bytes, {
         format: "RGBX",
         codedWidth: width,
         codedHeight: height,
@@ -95,7 +97,7 @@ export class StreamCapture {
     const startedAt = this.now();
     let frame;
     try {
-      frame = new VideoFrame(canvas, { timestamp: Math.round(startedAt * 1000), alpha: "discard" });
+      frame = new this.VideoFrameImpl(canvas, { timestamp: Math.round(startedAt * 1000), alpha: "discard" });
     } catch {
       this.stats.errors += 1;
       return;
@@ -115,13 +117,16 @@ export class StreamCapture {
     s.lastCaptureAt = startedAt;
     s.lastCoreFrame = coreFrame;
     // write() takes ownership: the track closes the frame once consumed.
-    this.writer.write(frame).catch(() => {
+    const writer = this.writer;
+    writer.write(frame).catch(() => {
+      // The track is gone (stopped, page closed): stop capturing.
       s.errors += 1;
       try {
         frame.close();
       } catch {
         // already closed by the sink
       }
+      if (this.writer === writer) this.detach();
     });
   }
 }
