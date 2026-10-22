@@ -152,6 +152,17 @@ The three P1s and the trivial P2s are fixed in #43; the rest is tracked here.
 Order after #43 (Main, 2026-10-20): TTFF aot=1 vs off on main; the late ready signal; the FP analyses; the dispatch share (22 % of host time).
 - [ ] **Orphan request after a late mark** (review of #58, P3): when discio marks an old request after a cache clear but before the re-post, the region installs synchronously with the in-flight key still set, and the re-post's answer later leaves a stale 1 in the slot; a block sharing it compiles cold once. Same family as "Cold compile counted as Ready".
 
+## Function names (2026-10-22)
+
+A region module carries a `name` section: the module is `r<lowest entry PC>`,
+its functions `r<id>_dispatch`, `r<id>_inner`, `r<id>_exit` and
+`r<id>_f<entry PC>` per fragment (8 hex digits each). Profiles (V8's
+DevTools profiles, perf maps, jitdump) then show which region and which
+guest function runs instead of `wasm-function[N]`. V8's code generation
+ignores the section; the cache key holds the members, not the bytes, so a
+module cached before it is still used (without names). `names: false` in
+`assembleRegion` leaves it out.
+
 ## Heap layout guard (patch 0078, 2026-10-21)
 
 Region code, like block code, embeds absolute addresses of the core's heap:
