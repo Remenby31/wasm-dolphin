@@ -3,13 +3,13 @@
 
 import assert from "node:assert/strict";
 import { spawn, spawnSync } from "node:child_process";
-import { existsSync, mkdirSync, mkdtempSync, readdirSync, readFileSync, rmSync, utimesSync, writeFileSync } from "node:fs";
+import { appendFileSync, existsSync, mkdirSync, mkdtempSync, readdirSync, readFileSync, rmSync, utimesSync, writeFileSync } from "node:fs";
 import os from "node:os";
 import path from "node:path";
 import test from "node:test";
 
-import { acquirePerfLock, queueDir, readLockOwner, ticketsAhead } from "../harness/lib/perf-lock.mjs";
-import { chromeArgsOf, num, pairedSpeedChange, sideOrder } from "../harness/probes/race-perf.mjs";
+import { acquirePerfLock, lockIntegrity, queueDir, readLockOwner, ticketsAhead } from "../harness/lib/perf-lock.mjs";
+import { chromeArgsOf, num, pairedSpeedChange, regionPipeline, sideOrder, withheldOnOverlap } from "../harness/probes/race-perf.mjs";
 import { stockChrome } from "../harness/lib/kpi.mjs";
 import { calmThenLock, loadGaveUp } from "../harness/lib/env.mjs";
 import { summarizePcSamples } from "../src/harness-pc-sampler.js";
@@ -243,24 +243,48 @@ test("perf lock: older and current harnesses exclude each other", async (t) => {
 // Review of #47 (round 2): with older harnesses AND holders killed (stale
 // locks to take over), a takeover could move a live lock and abort, or a
 // contender wait on its own lock.
+// Holds of the perf lock in time order, from `ms pid kind take|release`
+// lines, and the overlaps among them (a take while another holder had not
+// released): what a failure of the test below needs to be read.
+function lockTimeline(text) {
+  const events = text.split("\n").filter(Boolean).map((l) => { const [ms, pid, kind, what] = l.split(" "); return { ms: Number(ms), pid, kind, what }; }).sort((a, b) => a.ms - b.ms);
+  const overlaps = [];
+  let holder = null;
+  for (const e of events) {
+    if (e.what === "take") { if (holder) overlaps.push({ ms: e.ms, holder: `${holder.kind} ${holder.pid}`, taker: `${e.kind} ${e.pid}` }); holder = e; }
+    else if (holder?.pid === e.pid) holder = null;
+  }
+  return { events, overlaps };
+}
+
+test("perf lock: the timeline of holds finds an overlap", () => {
+  const t = lockTimeline("10 1 current take\n12 1 current release\n13 2 older take\n14 3 current take\n15 2 older release\n");
+  assert.deepEqual(t.overlaps, [{ ms: 14, holder: "older 2", taker: "current 3" }]);
+  assert.equal(lockTimeline("1 1 a take\n2 1 a release\n3 2 b take\n4 2 b release\n").overlaps.length, 0);
+});
+
 test("perf lock: older and current harnesses with holders killed mid-hold", async (t) => {
   const dir = lockDir(t);
   const holding = path.join(path.dirname(dir), "holding");
+  // Every take and release, with its time, for the diagnosis on failure.
+  const timeline = path.join(path.dirname(dir), "timeline");
   const lockLib = path.resolve(import.meta.dirname, "../harness/lib/perf-lock.mjs");
-  const hold = `try { writeFileSync(${JSON.stringify(holding)}, "x", { flag: "wx" }); } catch { console.log("OVERLAP"); process.exit(2); }
-      await new Promise((r) => setTimeout(r, 2)); rmSync(${JSON.stringify(holding)});`;
+  const mark = (what) => `appendFileSync(${JSON.stringify(timeline)}, \`\${Date.now()} \${process.pid} \${KIND} ${what}\\n\`);`;
+  const hold = `${mark("take")} try { writeFileSync(${JSON.stringify(holding)}, "x", { flag: "wx" }); } catch { console.log("OVERLAP"); process.exit(2); }
+      await new Promise((r) => setTimeout(r, 2)); rmSync(${JSON.stringify(holding)}); ${mark("release")}`;
   const take = { current: `const release = await acquirePerfLock({ dir: ${JSON.stringify(dir)}, name: "new", waitSec: 120, pollSec: 0.005, orphanSec: 1 });`,
     older: `for (;;) { try { mkdirSync(${JSON.stringify(dir)}); break; } catch (e) { if (e.code !== "EEXIST") throw e; await new Promise((r) => setTimeout(r, 5)); } }
       writeFileSync(${JSON.stringify(path.join(dir, "owner"))}, JSON.stringify({ name: "old", pid: process.pid, host: ${JSON.stringify(os.hostname())}, harness: true, nonce: String(Math.random()) }));
       const release = () => rmSync(${JSON.stringify(dir)}, { recursive: true, force: true });` };
-  const head = `import { acquirePerfLock } from ${JSON.stringify(lockLib)}; import { mkdirSync, writeFileSync, rmSync } from "node:fs";`;
-  const worker = (kind) => `${head} for (let i = 0; i < 12; i++) { ${take[kind]} ${hold} release(); } console.log("ok");`;
+  const head = (kind) => `import { acquirePerfLock } from ${JSON.stringify(lockLib)}; import { appendFileSync, mkdirSync, writeFileSync, rmSync } from "node:fs"; const KIND = ${JSON.stringify(kind)};`;
+  const worker = (kind) => `${head(kind)} for (let i = 0; i < 12; i++) { ${take[kind]} ${hold} release(); } console.log("ok");`;
   // A holder that never lets go: killed (SIGKILL) once it holds, its lock left stale.
-  const dying = (kind) => `${head} ${take[kind]} console.log("held"); setInterval(() => {}, 1000);`;
+  const dying = (kind) => `${head(`${kind}-dying`)} ${take[kind]} ${mark("take")} console.log("held"); setInterval(() => {}, 1000);`;
   const run = (script, { killOnHeld = false } = {}) => new Promise((resolve) => {
     const c = spawn(process.execPath, ["--input-type=module", "-e", script], { stdio: ["ignore", "pipe", "pipe"] });
     let out = "", err = "";
-    c.stdout.on("data", (d) => { out += d; if (killOnHeld && out.includes("held")) c.kill("SIGKILL"); });
+    // A holder killed mid-hold leaves a stale lock: its hold ends at the kill.
+    c.stdout.on("data", (d) => { out += d; if (killOnHeld && out.includes("held") && !c.killed) { appendFileSync(timeline, `${Date.now()} ${c.pid} killed release\n`); c.kill("SIGKILL"); } });
     c.stderr.on("data", (d) => (err += d));
     c.on("exit", (code, signal) => resolve(signal ? `killed:${out.trim()}` : `${code}:${out.trim()}${code ? ` ${err.split("\n")[0]}` : ""}`));
   });
@@ -279,11 +303,23 @@ test("perf lock: older and current harnesses with holders killed mid-hold", asyn
   })();
   let done = false;
   const all = Promise.all([Promise.all(workers), dyings]).finally(() => { done = true; });
-  const janitor = (async () => { while (!done) { await run(`${head} ${take.current} release(); console.log("ok");`); await new Promise((r) => setTimeout(r, 100)); } })();
+  const janitor = (async () => { while (!done) { await run(`${head("janitor")} ${take.current} ${mark("take")} release(); ${mark("release")} console.log("ok");`); await new Promise((r) => setTimeout(r, 100)); } })();
   const [results, killed] = await all;
   await janitor;
-  assert.deepEqual(killed, Array(4).fill("killed:held"));
-  assert.deepEqual(results, Array(8).fill("0:ok"));
+  // Failed once in ~83 runs under heavy load (2026-10-22) without saying
+  // why: on failure, everything needed to tell a tight limit from a real
+  // overlap goes to stderr.
+  try {
+    assert.deepEqual(killed, Array(4).fill("killed:held"));
+    assert.deepEqual(results, Array(8).fill("0:ok"));
+  } catch (error) {
+    const tl = lockTimeline(existsSync(timeline) ? readFileSync(timeline, "utf8") : "");
+    console.error(`[perf lock test] workers (code:out): ${JSON.stringify(results)}`);
+    console.error(`[perf lock test] killed holders: ${JSON.stringify(killed)}`);
+    console.error(`[perf lock test] overlaps in the timeline: ${JSON.stringify(tl.overlaps)}`);
+    console.error(`[perf lock test] timeline (ms pid kind take|release), last 60:\n${tl.events.slice(-60).map((e) => `${e.ms} ${e.pid} ${e.kind} ${e.what}`).join("\n")}`);
+    throw error;
+  }
 });
 
 test("review #22: an ownerless lock is taken over only once it is old", async (t) => {
@@ -359,4 +395,97 @@ test("load: a calm machine before the lock, never the lock held while waiting on
   assert.equal(loadGaveUp({ load: 3, limit: 6, ok: true }), null);
   assert.equal(loadGaveUp(undefined), null);
   assert.match(loadGaveUp({ load: 9.1, limit: 6, ok: false }), /load 9.1 > 6 after --load-wait: remaining runs given up, lock released/);
+});
+
+test("perf lock: a holder knows when it is not alone (overlap guard)", async (t) => {
+  const dir = lockDir(t);
+  const release = await acquirePerfLock({ dir, name: "test", waitSec: 0 });
+  try {
+    assert.deepEqual(release.check(), { ok: true });
+    const me = readLockOwner(dir);
+    // A live lock moved aside by a takeover: its holder (alive) still measures.
+    const aside = `${dir}.stale-${Date.now()}-1-ab`;
+    mkdirSync(aside);
+    writeFileSync(path.join(aside, "owner"), JSON.stringify({ name: "other", pid: process.ppid, host: os.hostname(), harness: true, nonce: "x" }));
+    assert.match(release.check().why, /another living holder: other/);
+    // The same with a holder that is gone: no overlap.
+    writeFileSync(path.join(aside, "owner"), JSON.stringify({ name: "gone", pid: 2 ** 22 + 99, host: os.hostname(), harness: true, nonce: "y" }));
+    assert.deepEqual(release.check(), { ok: true });
+    // Our lock replaced under us.
+    writeFileSync(path.join(dir, "owner"), JSON.stringify({ ...me, nonce: "someone-else", name: "intruder" }));
+    assert.match(lockIntegrity(dir, me).why, /held by intruder/);
+  } finally {
+    writeFileSync(path.join(dir, "owner"), JSON.stringify(readLockOwner(dir)));
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test("race-perf: a change measured during a lock overlap is withheld", () => {
+  const change = { pairs: 4, median: 3.1, withheld: null, perRun: [3, 3.2, 3.1, 3] };
+  assert.equal(withheldOnOverlap(change, []), change);
+  const w = withheldOnOverlap(change, [{ at: "before run 3", why: "another living holder: x (pid 9)" }]);
+  assert.equal(w.median, null);
+  assert.match(w.withheld, /perf lock overlap: before run 3: another living holder/);
+});
+
+// A page whose core runs `rate` ticks per node ms from `start`; pause and
+// resume are counted, everything else answered as the core would.
+function fakeCorePage({ rate = 1000, start = 5000, perSecond = 486_000_000 } = {}) {
+  const t0 = Date.now(), calls = [];
+  return {
+    calls,
+    evaluate: async (_fn, [type]) => {
+      calls.push(type);
+      if (type === "validationReadCoreProgress") return { coreTicks: start + Math.floor((Date.now() - t0) * rate), coreTicksPerSecond: perSecond };
+      return { ok: true };
+    }
+  };
+}
+
+test("emulated window: covers at least S guest seconds after W, from a paused key press", async () => {
+  const { emulatedStart } = await import("../harness/lib/emulated-window.mjs");
+  // 1000 ticks per ms and 10 000 ticks per guest second: 10 ms per guest second.
+  const page = fakeCorePage({ rate: 1000, perSecond: 10_000 });
+  const order = [];
+  const run = await emulatedStart(page, { warmup: 2, pollMs: 5, press: async () => order.push(page.calls.at(-1)) });
+  assert.deepEqual(order, ["pause"], "the key goes down while the core is paused");
+  assert.ok(page.calls.includes("resume"));
+  const fractions = [];
+  const r = await run.window(3, { poll: (_t, f) => fractions.push(f) });
+  assert.ok(r.guestTicksStart - run.t0.ticks >= 20_000, "warmup of 2 guest seconds");
+  assert.equal(r.guestTicks, r.guestTicksEnd - r.guestTicksStart);
+  assert.ok(r.guestTicks >= 30_000 && r.overshootTicks >= 0);
+  assert.equal(r.guestSecondsCovered, r.guestTicks / 10_000);
+  assert.ok(fractions.at(-1) >= 1 && fractions.length >= 2);
+  assert.deepEqual(r.emulatedWindow, { secs: 3, warmup: 2, pollMs: 5, polls: fractions.length });
+});
+
+test("emulated window: speed is guest seconds over host seconds; a core without ticks is refused", async () => {
+  const { emulatedRecord, emulatedStart } = await import("../harness/lib/emulated-window.mjs");
+  const r = emulatedRecord({
+    t0: { ticks: 0, perSecond: 486e6 }, begin: { ticks: 486e6, at: 1000 }, end: { ticks: 486e6 * 6 + 100, at: 11000, polls: 99 },
+    target: 486e6 * 6, secs: 5, warmup: 1, pollMs: 100
+  });
+  assert.equal(r.overshootTicks, 100);
+  assert.equal(r.hostMs, 10000);
+  assert.equal(r.speed, 50);
+  assert.equal(r.warmupTicks, 486e6);
+  const dead = { evaluate: async (_fn, [type]) => (type === "validationReadCoreProgress" ? { error: "Unknown upstream worker message" } : { ok: true }) };
+  await assert.rejects(emulatedStart(dead, { warmup: 1 }), /no guest ticks/);
+});
+
+test("emulated window: counters are divided by the ticks covered when known", async () => {
+  const { instructionsPerGuestCycle } = await import("../harness/lib/perf-counters.mjs");
+  assert.equal(instructionsPerGuestCycle({ counters: { instructions: 4e9 }, guestTicks: 1e8, speed: 50, windowMs: 1 }), 40);
+  assert.equal(instructionsPerGuestCycle({ counters: { instructions: 486e6 }, speed: 100, windowMs: 1000 }), 1);
+});
+
+// 2026-10-22: a launch on a loaded machine ran without its region cache, every
+// module set aside by the engine for another heap layout before the core saw
+// it. The counters are read whatever the options, so the run says so.
+test("race-perf: the region pipeline counters of a stats reply", () => {
+  assert.deepEqual(regionPipeline({ layoutRefused: 143, heapPatched: 0, heapPatchedBytes: 0, heapPatchFailed: 0 }),
+    { layoutRefused: 143, heapPatched: 0, heapPatchedBytes: 0, heapPatchFailed: 0 });
+  assert.deepEqual(regionPipeline({ layoutRefused: 0 }), { layoutRefused: 0 }, "an engine before 0084: no heap counters");
+  assert.deepEqual(regionPipeline({}), {}, "an engine before 0078");
 });
