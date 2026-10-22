@@ -209,7 +209,7 @@ node harness/remote/spark-run.mjs --build <ref>           # its core built on th
   older waiting ticket could use a lane it wants and that lane is free; a
   build wants both. On the Spark, `node harness/remote/spark-queue.mjs list
   --eta` shows the queue with each job's estimated start and end (from its
-  race-perf options; ~8 min a build). Pairs wait up to 4 h by default
+  race-perf options; ~3 min a build). Pairs wait up to 4 h by default
   (`--lock-wait`).
 - **Reordering is the judge's call:** `spark-queue.mjs move <name> --after
   <name|head> --as-judge` renames a waiting ticket between its new
