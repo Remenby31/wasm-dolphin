@@ -84,4 +84,7 @@ test("the harness only launches headless Chrome, never full screen or in front",
   assert.equal(o.headless, true);
   assert.equal(o.args.some((a) => /fullscreen|kiosk|maximized|window-position|start-/.test(a)), false);
   for (const d of ["headed", "offscreen", "hidden"]) assert.throws(() => chromeLaunchOptions(d), /only runs headless/);
+  // No keychain dialog (Chrome for Testing shows one even headless without these).
+  assert.ok(o.args.includes("--use-mock-keychain"));
+  assert.ok(o.args.includes("--password-store=basic"));
 });

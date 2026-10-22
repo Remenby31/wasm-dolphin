@@ -5,6 +5,7 @@ import {
   isOneWayWorkerRequestType,
   verifyUpstreamCoreWasm
 } from "./upstream-worker-protocol.js";
+import { DirectPad, epochNow } from "./direct-pad.js";
 import {
   INPUT_STATE_SLOT_COUNT,
   PadPortRequests,
@@ -354,6 +355,16 @@ export class UpstreamWorkerAdapter {
       this.inputStateSab = null;
       this.inputStateView = null;
     }
+    // Direct pad block in the core's memory (src/direct-pad.js): null until
+    // the worker hands it over, and on cores without it.
+    this.directPad = null;
+    // ?directpad=0: the block only reports (polls, press edges, rumble); pad
+    // states keep going through the presentation loop (A/B measurements).
+    this.directPadWrites = new URLSearchParams(globalThis.location?.search ?? "").get("directpad") !== "0";
+    this.directPadMeta = Array.from({ length: 4 }, () => ({ lastSeq: null }));
+    // Ports given to streamed guests (enableRemotePad): the only ones the
+    // direct block serves.
+    this.remotePads = new Set();
   }
 
   async load() {
@@ -631,7 +642,91 @@ export class UpstreamWorkerAdapter {
     }
   }
 
-  publishPadState(port) {
+  // The worker posts the core's direct pad block once the core is up. It is
+  // used only for the ports the host gives to streamed guests
+  // (enableRemotePad): local input keeps the presentation-loop path, its
+  // generations and latency telemetry unchanged.
+  attachDirectPad({ buffer, offset, layout }) {
+    try {
+      this.directPad = new DirectPad(buffer, offset >>> 0, layout >>> 0);
+    } catch (error) {
+      this.directPad = null;
+      this.onStatus(`Direct pad input unavailable: ${error.message}`);
+      return;
+    }
+    for (const port of this.remotePads) this.writeDirectPad(port);
+  }
+
+  // The host hands `port` to a streamed guest (true) or takes it back
+  // (false). Only such ports accept setRemotePadState and tapPad.
+  enableRemotePad(port, enabled) {
+    const meta = this.directPadMeta[port];
+    if (!meta) return false;
+    meta.lastSeq = null;
+    if (enabled) {
+      this.remotePads.add(port);
+      this.writeDirectPad(port);
+    } else {
+      this.remotePads.delete(port);
+      this.directPad?.disable(port);
+    }
+    return true;
+  }
+
+  // meta: { inputSeq, rxTime } of a streamed packet; a state from the host
+  // itself (unplug, neutral) carries none.
+  writeDirectPad(port, meta = null) {
+    if (!this.directPad || !this.directPadWrites || !this.remotePads.has(port)) return;
+    const { connected, state } = this.padPorts.ports[port];
+    this.directPad.write(port, state, { connected, inputSeq: meta?.inputSeq ?? 0, rxTime: meta?.rxTime ?? epochNow() });
+  }
+
+  // A streamed guest's state, with the guest's sequence number (u16) and its
+  // reception time (epochNow()), reported back by padFeedback. Refused
+  // (false) on a port not given to a guest, on an unplugged port (a packet
+  // still in flight after connectPad(port, false) never plugs the guest back
+  // in), on an older sequence, and on an invalid state.
+  setRemotePadState(port, state, { inputSeq = 0, rxTime = epochNow() } = {}) {
+    const meta = this.directPadMeta[port];
+    if (!meta || !this.remotePads.has(port) || !this.padPorts.ports[port].connected) return false;
+    const seq = inputSeq & 0xffff;
+    if (meta.lastSeq !== null) {
+      const ahead = (seq - meta.lastSeq) & 0xffff;
+      if (ahead === 0 || ahead >= 0x8000) return false;
+    }
+    let changed;
+    try {
+      changed = this.padPorts.request(port, state, true);
+    } catch {
+      return false;
+    }
+    meta.lastSeq = seq;
+    this.writeDirectPad(port, { inputSeq: seq, rxTime });
+    // Same state (a resend): only the sequence moved, in the block.
+    if (changed && this.loaded) this.publishPadState(port, { remote: true });
+    return true;
+  }
+
+  // Buttons pressed since the last update and maybe already released: the SI
+  // poll keeps them until a poll of a later frame reported them. False when
+  // the core cannot (no direct block, or not a guest's port): the caller holds
+  // them itself.
+  tapPad(port, buttons) {
+    if (!this.directPad || !this.directPadWrites || !this.remotePads.has(port)) return false;
+    if (!this.padPorts.ports[port]?.connected) return false;
+    this.directPad.tap(port, buttons >>> 0);
+    return true;
+  }
+
+  // What the SI poll last read on a port, the game's rumble, and the press
+  // edges it reported; null without a direct block.
+  padFeedback(port) {
+    return this.directPad ? this.directPad.read(port) : null;
+  }
+
+  // remote: called by setRemotePadState, which wrote the block itself.
+  publishPadState(port, { remote = false } = {}) {
+    if (!remote) this.writeDirectPad(port);
     const { connected, state } = this.padPorts.ports[port];
     const inputSentAtEpochMs = Date.now();
     // Generations are per port; input telemetry follows port 0 only.
@@ -653,6 +748,9 @@ export class UpstreamWorkerAdapter {
         this.inputTelemetry.mainSabWriteCount += 1;
       }
     }
+    // A guest's port read from the direct block needs no message: a flood
+    // of remote states then costs one block write and one SAB write each.
+    if (remote && this.directPad && this.directPadWrites) return;
     // Always also send via postMessage. Belt-and-suspenders: if the worker
     // is between SAB-poll iterations when an input arrives (e.g. it's
     // blocked in a long pumpHostJobs() or compile burst), the message-based
@@ -1042,6 +1140,10 @@ export class UpstreamWorkerAdapter {
     }
     if (message?.type === "status") {
       this.onStatus(message.message);
+      return;
+    }
+    if (message?.type === "direct-pad") {
+      this.attachDirectPad(message);
       return;
     }
     if (message?.type === "aot-progress" && message.event) {
