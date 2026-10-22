@@ -207,7 +207,8 @@ million console lines, the browser process at 7-14 GB).
   refuses a region whose bases are not this session's, at install and when an
   installed one is checked again (a RAM allocated again under it, #62 P1-1).
   `WasmLayoutHash` leaves the two addresses out; the other fields stay
-  guarded. Block modules are unchanged. Compiler version 3.
+  guarded. Block modules are unchanged. Compiler version: 3 was reserved for
+  0084; 0087 (merged first) bumps it to 5, which covers it.
   Measured on the race with aot=1 (Spark pairs) before this form: imported
   globals −0.8 %, locals copied at fragment entry −0.6 %, the base folded into
   the memarg offset −1.3 % (ARM rematerialises a large offset at every
@@ -217,7 +218,7 @@ million console lines, the browser process at 7-14 GB).
   session's bases is refused, and runs once patched back; the RAM moved under
   an installed region drops it; every fragment site holds the base, and no
   immediate holds a heap address outside the sites.
-- [ ] **35 regions dropped on every second launch** (KPI, d18249e, and locally): installed during the OS init, they are dropped by invalidations (icbi or DMA) over their ranges; the code then runs in the block JIT for the session. Log the invalidations that drop them; consider re-verifying (plan hashes) instead of dropping when the code is unchanged.
+- [x] **35 regions dropped on every second launch** (KPI, d18249e, and locally): installed during the OS init, they were dropped by invalidations (icbi or DMA) over their ranges, and the code then ran in the block JIT for the session. Patch 0085: an invalidation over an installed region marks it unverified instead; before it next runs it is checked against the plan's hashes (as after a cache clear), and dropped only if its code changed. A region with a member that has no hash, or an HLE hook installed at an entry since, is dropped (a hook changes no byte); a forced invalidation (breakpoints) drops at once, as before; a region already due for a check is skipped by later invalidations. `DolphinWeb_AotRegionRechecks` counts the regions kept for a check, the checks passed and the regions invalidations looked at.
 - [ ] **Second-launch TTFF +0.8 s** (first core frame 1.55 s against 0.72 s cold): the region cache read and compiled before the boot (`installBeforeBoot`). Load fewer modules before the boot, the rest after (target 10 s, today 2.05 s).
 
 ## MMU mode (patch 0091, with dispatch's 0090, 2026-10-22)

@@ -132,6 +132,26 @@ node harness/probes/race-perf.mjs --iso ../roms/<disc>.iso --state ../measures/h
   the last being the place in the scene whatever the speed, so two runs or
   two sides can be lined up; over 200 the longest are kept, in time order,
   with `count`.
+- `--unique-frames secs`: unique images, in a window of its own after the
+  speed window (its GPU readbacks never weigh on the speed). At each WebGPU
+  present the worker reads back 8 full rows of the presented rectangle,
+  hashes them and compares with the previous present
+  (`src/harness-unique-frames.js`, worker message `validationUniqueFrames`,
+  off otherwise). Each run gets `presentsPerSecond` (speed window),
+  `uniqueFrames` (`uniqueShare`: presents showing a new image; `skipped`
+  past 6 readbacks in flight, `errors`) and `uniqueFpsEstimate` = the speed
+  window's presents/s × that share; `cold.uniqueShare` and
+  `cold.uniqueFpsEstimate` per side. WebGPU presents only (`video=wgpu`).
+- `--mem-stats` (patch 0104): guest memory accesses per instruction, read in
+  the stats window after the speed window (with `--region-sample`, the same
+  window). `summary.json` → `memAccess` (and `baselineMemAccess`):
+  `accessesPerInstruction` over the counted blocks, `coverage` (their share of
+  the window's cycles), loads/stores per instruction, `byKind`
+  (int/fp/psq load/store), `slowShare` (slow-path calls over all accesses),
+  and, with aot=1, the region part estimated apart
+  (`regionAccessesPerInstructionEstimated`, `withRegionsEstimated`), never
+  merged into the counted figure. A core without the export gives
+  `memAccess: null` and `memAccessWhy`.
 - `--chrome-args "--flag …"` adds Chromium flags on both sides;
   `--baseline-chrome-args` replaces them on the baseline side, so one tree is
   compared with itself under two Chromium configurations (e.g.
@@ -451,6 +471,23 @@ Per (game, config) cell, the **correctness checks** (`lib/correctness.mjs`):
 Each check of each run is pass, fail or **unjudged** (with the reason: no VI
 timeline in this core, capture refused for a hardware renderer, scripted
 inputs without a savestate, …). Machine load changes none of them.
+
+**Expected failures.** A test added before its implementation fails on main
+by design. List it in `harness/known-failures.json` with `"mode":
+"expected-fail"`, its `cell` (`game/config`), `check` (crash, errors,
+coreFreeze, render or audio), `reason`, `until` (the follow-up that fixes it)
+and `detail`, a regular expression the failure's detail must match (how it is
+expected to fail). That failure is **XFAIL**, shown with the reason and never
+blocking; any other failure of the cell, and a blank picture always, stays a
+regression. A pass is **XPASS** and blocks, so the PR that fixes it also
+removes the entry. An entry for a game the run has but a cell it does not is
+stale and blocks; other matrices do not judge it.
+
+The list is read from the candidate's tree, so a PR can break a check and
+declare it expected-fail in the same change. The gate therefore marks every
+XFAIL whose baseline passes the check (a new entry, or a feature main cannot
+exercise) with a warning (⚠): the reviewer must find its justification in
+the PR.
 
 **`harness/run ab <spec>`** exports the served files of `--baseline-ref`
 (default `origin/main`) with `git archive`, runs the matrix (and the spec's

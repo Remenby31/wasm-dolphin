@@ -272,17 +272,7 @@ diff --git a/Source/Core/Core/PowerPC/CachedInterpreter/CachedInterpreter.cpp b/
        const auto it = std::find(WASM_IMPORT_NAMES.begin(), WASM_IMPORT_NAMES.end(), reloc.name);
        out->relocs.push_back({at + static_cast<u32>(reloc.offset), 0,
                               static_cast<u32>(it - WASM_IMPORT_NAMES.begin())});
-@@ -15290,7 +15374,8 @@ namespace
- // Bumped whenever the code the translator emits changes (cache keys).
- // 2: modules carry their heap layout (region-layout); version 1 modules have
- // none and would never install.
--constexpr u32 AOT_COMPILER_VERSION = 2;
-+// 3: RAM and L1 addresses in listed heap sites, out of the layout hash.
-+constexpr u32 AOT_COMPILER_VERSION = 3;
- constexpr u32 AOT_MAX_FRAGMENT_BYTES = 1u << 20;
- thread_local std::vector<u32> t_aot_out;
- u8* s_aot_ram = nullptr;
-@@ -15404,10 +15489,18 @@ extern "C" EMSCRIPTEN_KEEPALIVE const u32* DolphinWeb_AotTranslate(u32 entry_pc,
+@@ -15404,10 +15488,18 @@ extern "C" EMSCRIPTEN_KEEPALIVE const u32* DolphinWeb_AotTranslate(u32 entry_pc,
  // regions are emitted as its blocks are.
  // The layout hash regions translated now carry (DolphinWeb_AotTranslate's
  // sixth word), and the count of queued regions refused for another layout.
@@ -303,7 +293,7 @@ diff --git a/Source/Core/Core/PowerPC/CachedInterpreter/CachedInterpreter.cpp b/
    s_layout_shift_for_test = shift;
  }
  
-@@ -15437,6 +15530,15 @@ extern "C" EMSCRIPTEN_KEEPALIVE u32 DolphinWeb_AotLayoutWords(u32* out, u32 capa
+@@ -15437,6 +15529,15 @@ extern "C" EMSCRIPTEN_KEEPALIVE u32 DolphinWeb_AotLayoutWords(u32* out, u32 capa
    return n;
  }
  
