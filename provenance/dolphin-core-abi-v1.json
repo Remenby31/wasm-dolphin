@@ -1,19 +1,19 @@
 {
   "schemaVersion": 1,
   "abiVersion": 1,
-  "coreId": "sha256:7d7b39e1daa0bc62aa90c050d0cacab0f5d7efb9f3ddbfb331f4f90f351b77ed",
+  "coreId": "sha256:f10dbef40ee070163c883b803af5072081e00d4fe280519da10d89e90595155d",
   "upstreamCommit": "e22551eae1c84a7e4d0b6a5c519ef4ed4ef69df1",
   "artifacts": [
     {
       "path": "cores/dolphin/dolphin-core-upstream.js",
       "hashMode": "lf-normalized",
-      "size": 279640,
-      "sha256": "11cce1afdfd241a8d26e79cb5a22a73a55a2ab56b49957813dac3d47d6da3269"
+      "size": 279734,
+      "sha256": "258bd30f7373b24abe50a9ad96cc9b16c85d5362126e2afe3de95d74288e7101"
     },
     {
       "path": "cores/dolphin/dolphin-core-upstream.wasm",
-      "size": 13088821,
-      "sha256": "7d7b39e1daa0bc62aa90c050d0cacab0f5d7efb9f3ddbfb331f4f90f351b77ed"
+      "size": 13090892,
+      "sha256": "f10dbef40ee070163c883b803af5072081e00d4fe280519da10d89e90595155d"
     }
   ],
   "contractSources": [
@@ -454,6 +454,7 @@
     "_FrameBuffer",
     "_FrameHeight",
     "_FrameWidth",
+    "_GameConfigMmuForTest",
     "_GetApploaderDate",
     "_GetApploaderSize",
     "_GetAudioStats",
