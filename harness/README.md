@@ -661,7 +661,7 @@ boots one of our homebrews on the software renderer (cpu=single) and has the
 core's FifoRecorder save the next frames as `homebrew/out/<name>.dff`
 (FifoPlayer's format). The app boots a `.dff` like a disc, and
 `matrices/fifo-homebrew.json` replays the logs on each backend against the
-software reference: the same GPU commands, without the homebrew's CPU side.
+exact software reference (`fastsw=0`): the same GPU commands, without the homebrew's CPU side, so wgpu is compared with the software rasterizer pixel for pixel (within the cross-renderer tolerance).
 Record them after `homebrew/build.sh`. Only our homebrews are recorded; no
 third-party FIFO logs (they contain game content).
 

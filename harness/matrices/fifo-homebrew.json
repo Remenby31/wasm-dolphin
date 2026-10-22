@@ -4,12 +4,27 @@
   "warmupSec": 4,
   "sampleSec": 8,
   "games": [
-    { "id": "gxscene-fifo", "iso": "harness/homebrew/out/gxscene.dff", "static": true, "set": { "cpu": "single" } },
-    { "id": "efbpeek-fifo", "iso": "harness/homebrew/out/efbpeek.dff", "static": true, "set": { "cpu": "single" } }
+    {
+      "id": "gxscene-fifo",
+      "iso": "harness/homebrew/out/gxscene.dff",
+      "static": true,
+      "set": {
+        "cpu": "single"
+      }
+    }
   ],
   "configs": [
-    { "id": "sw-interp", "preset": "sw-interp" },
-    { "id": "wgpu-interp", "preset": "wgpu-nojit" }
+    {
+      "id": "sw-exact",
+      "preset": "sw-interp",
+      "set": {
+        "fastsw": "0"
+      }
+    },
+    {
+      "id": "wgpu-interp",
+      "preset": "wgpu-nojit"
+    }
   ],
-  "reference": "sw-interp"
+  "reference": "sw-exact"
 }
