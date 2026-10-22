@@ -757,7 +757,20 @@ void EnsureRuntime()
     Config::SetBase(Config::GetInfoForSIDevice(port), SerialInterface::SIDEVICE_GC_CONTROLLER);
   Config::SetBase(Config::MAIN_AUDIO_BACKEND, std::string("Web Audio"));
   Config::SetBase(Config::MAIN_AUDIO_MUTED, false);
-  Config::SetBase(Config::GFX_HACK_SKIP_XFB_COPY_TO_RAM, s_video_backend == "OGL");
+  // Dolphin's default. OGL and WebGPU present the XFB from the texture cache,
+  // so the copy to guest RAM only fed DolphinWeb_OnXfb's software presenter.
+  // A GameINI that needs the RAM copy ([Video_Hacks] XFBToTextureEnable =
+  // False, embedded by 0097 v3) overrides this base value from the game
+  // layer: only the base layer is set here.
+  const bool hardware_xfb = s_video_backend == "OGL" || s_video_backend == "WebGPU";
+  Config::SetBase(Config::GFX_HACK_SKIP_XFB_COPY_TO_RAM, hardware_xfb);
+  s_skip_xfb_decode = s_video_backend == "WebGPU";
+  // Without the RAM copy, an XFB texture keeps its id until the game copies a
+  // new one, so Dolphin's duplicate check starts skipping the presents of
+  // fields that repeat a frame (with the RAM copy every field reloaded a new
+  // texture). Keep one present per VI field, as before and as OGL does.
+  if (s_video_backend == "WebGPU")
+    Config::SetBase(Config::GFX_HACK_SKIP_DUPLICATE_XFBS, false);
   Config::SetBase(Config::GFX_HACK_COPY_EFB_SCALED, false);
   // ?efbaccess=1 (Module['dolphinEfbAccess']): CPU reads and writes of the
   // EFB, off by default as in Dolphin; upstream turns them on per game
