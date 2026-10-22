@@ -165,10 +165,13 @@ test("invalidations skip a region already due for a check; a forced one drops it
   const count = core.regionCount();
   const same = () => core.load(PROGRAM.labels.double, core.ram().slice(PROGRAM.labels.double & 0x01ffffff, (PROGRAM.labels.double & 0x01ffffff) + 4));
   same();
-  core.invalidate(PROGRAM.labels.double, 4); // kept, to be checked
+  const before = rechecks()[2];
+  core.invalidate(PROGRAM.labels.double, 4); // every live region looked at; the one over double kept, to be checked
+  const first = rechecks()[2] - before;
+  assert.ok(first >= 1);
   const scans = rechecks()[2];
   for (let line = 0; line < 64; line++) core.invalidate(PROGRAM.labels.double, 4);
-  assert.ok(rechecks()[2] - scans < 64, `the region due for a check is skipped (${rechecks()[2] - scans} scans for 64 invalidations)`);
+  assert.equal(rechecks()[2] - scans, 64 * (first - 1), "the region due for a check is never looked at again, the others once per invalidation");
   assert.equal(core.regionCount(), count, "kept");
   core.module._DolphinWeb_AotInvalidateForcedForTest(PROGRAM.labels.double, 4);
   assert.ok(core.regionCount() < count, "a forced invalidation drops it");
