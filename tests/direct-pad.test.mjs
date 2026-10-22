@@ -139,3 +139,55 @@ test("SI poll side: a second tap during the hold is reported after a release, no
     rmSync(dir, { recursive: true, force: true });
   }
 });
+
+// The gold-standard case: a burst lost across a gap that covered three
+// presses of A. The next packet's counter says 3: the poll must report three
+// separate presses, not one.
+const countsProgram = String.raw`
+#include <cstdio>
+#include "dolphin_web_direct_pad.h"
+using namespace DolphinWeb::DirectPad;
+int main() {
+  static Block block{};
+  auto* p = block.slots[1];
+  p[SEQ] = 2; p[CONNECTED] = 1; p[MASK] = 0; p[ENABLED] = 1;
+  p[TAPS] = 3u;                 // A (button 0): 3 presses
+  p[TAPS_HIGH] = 2u << 4;       // D_DOWN (button 9): 2 presses
+  TapLatch latch;
+  bool direct = false;
+  std::uint32_t reported = 0;
+  auto none = [] { return State{}; };
+  for (int poll = 0; poll < 24; ++poll)
+    PollPort(p, latch, poll / 2, poll, none, &reported, &direct);
+  std::printf("%u %u %u %u", p[PRESSES + 0].load(), p[PRESSES + 9].load(), p[TAPS].load(), p[TAPS_HIGH].load());
+}
+`;
+
+test("SI poll side: three presses revealed at once are three presses for the game", { skip: !hasCompiler && "no C++ compiler" }, () => {
+  const dir = mkdtempSync(join(tmpdir(), "direct-pad-counts-"));
+  try {
+    writeFileSync(join(dir, "main.cpp"), countsProgram);
+    const exe = join(dir, "main");
+    const built = spawnSync(compiler, ["-std=c++20", "-I", join(root, "core/upstream"), join(dir, "main.cpp"), "-o", exe], { encoding: "utf8" });
+    assert.equal(built.status, 0, built.stderr);
+    const run = spawnSync(exe, { encoding: "utf8" });
+    // 3 edges of A, 2 of D_DOWN, both counter words consumed.
+    assert.equal(run.stdout.trim(), "3 2 0 0");
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test("page side: per-button tap counts, 4 bits each, added and saturated", () => {
+  const memory = new SharedArrayBuffer(4096);
+  const pad = new DirectPad(memory, 512, DIRECT_PAD_LAYOUT);
+  const v = new Int32Array(memory, 512);
+  const b = 1 * DIRECT_PAD_SLOTS;
+  pad.tap(1, 0b1);                                   // mask: A once
+  pad.tap(1, [2, 0, 0, 0, 0, 0, 0, 0, 0, 3, 0, 0]);  // A twice more, D_DOWN 3
+  assert.equal(v[b + SLOT.TAPS] & 0xf, 3);
+  assert.equal((v[b + SLOT.TAPS_HIGH] >>> 4) & 0xf, 3);
+  pad.tap(1, [20]);                                  // saturates at 15
+  assert.equal(v[b + SLOT.TAPS] & 0xf, 15);
+  assert.equal((v[b + SLOT.TAPS] >>> 4) & 0xf, 0, "no carry into B");
+});
