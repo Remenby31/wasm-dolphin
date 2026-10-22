@@ -321,6 +321,22 @@ as a `metadata.code.branch_hint` custom section (wasm branch hinting) before
 the code section, so V8 lays out the cold arms out of line. An engine that
 doesn't know the section ignores it. Compiler version 9.
 
+## Resident GPRs (patch 0113, 2026-10-22)
+
+Each block of a fragment used to load the GPRs it touches into their locals
+at its start and store the written ones at its end. A fragment now keeps
+its most used GPRs in their locals across its blocks: at most 12, each used
+by more than one op, counted over the fragment's ops. The fragment loads
+them once before its loop and stores the written ones before each exit
+(downcount, an exiting block, a jump out, the dispatch tail call). Inside a
+block they are present and, if the fragment writes them, dirty. So a helper
+call or a halt stores them, and a helper that may write GPRs reloads them,
+as for any cached GPR. The blocks are emitted a second time with that set,
+and that pass is only kept if it comes out the same shape (successors,
+exits, cycles). Compiler version 12. The cap follows the microbenchmark of
+GPRs in locals (fewer spills than keeping all 32); an earlier uncapped try
+without branch hints was slower.
+
 ## MMU mode (patch 0091, with dispatch's 0090, 2026-10-22)
 
 Under the MMU (bMMU, set by a game's INI) no wasm code of ours runs. The

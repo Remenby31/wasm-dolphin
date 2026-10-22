@@ -781,3 +781,54 @@ test("FPU ops outside the direct tier run inside the region, interpreted, like t
   assert.equal(got.ran, 1);
   core.invalidate(FPU_TEXT, 4 * FPU.words.length);
 });
+
+// 0113: a fragment keeps its most used GPRs in locals across its blocks,
+// stored back at its exits. A loop over memory with an interpreted FPU op
+// (a helper call: resident GPRs stored and reloaded around it), run to the
+// end and stopped on downcount at every budget, against the interpreter.
+const GPR_TEXT = 0x80010100;
+const bltR = (from, to) => asm.bc(12, 0, from, to);
+const GPRS = assemble(GPR_TEXT, [
+  "main", asm.mflr(0), asm.stwu(1, 1, -16), stw(0, 1, 20), (pc, l) => asm.bl(pc, l.loop),
+  lwz(0, 1, 20), asm.addi(1, 1, 16), mtlr(0), asm.blr(),
+  "loop", asm.lis(5, DATA >>> 16), asm.ori(5, 5, DATA & 0xffff), asm.li(8, 0), asm.li(10, 0),
+  lfs(1, 5, 0), lfs(2, 5, 4),
+  "body", lwz(9, 5, 8), add(10, 10, 9), stw(10, 5, 12), faddsRc(3, 1, 2), asm.addi(8, 8, 1),
+  asm.addi(9, 9, 3), stw(9, 5, 8), asm.cmplwi(8, 5), (pc, l) => bltR(pc, l.body),
+  stfd(3, 5, 16), asm.blr()
+]);
+
+test("resident GPRs end like the interpreter, at the end and on downcount (0113)", { skip: chainSkip || (core?.has("DolphinWeb_AotKeyParts") && keyVersion() < 12 && "core before 0113 (compiler version < 12)") }, () => {
+  const dol = buildDol({ textAddr: GPR_TEXT, text: GPRS.words, entry: GPRS.labels.main });
+  const { image, entryPoint } = imageFromDol(dol);
+  const plan = planDol({ image, entryPoint, gameId: "TEST01", dolBytes: dol, options: { gapFill: false } });
+  for (const seg of image.segments) core.load(seg.start, seg.bytes);
+  const data = new DataView(new ArrayBuffer(24));
+  data.setFloat32(0, 1.5); data.setFloat32(4, -3.25); data.setUint32(8, 7);
+  const loadData = () => core.load(DATA, new Uint8Array(data.buffer));
+  loadData();
+  core.reset(seedGprs(GPRS.labels.main), GPRS.labels.main, STOP, 400000);
+  core.setRegionsEnabled(true);
+  core.setRegionChaining(true);
+  queueAll(plan, 1, true);
+  serviceAll();
+  loadData();
+  const reference = runCall(GPRS.labels.main, { regions: false });
+  loadData();
+  const got = runCall(GPRS.labels.main, { regions: true });
+  assert.deepEqual(got.state, reference.state);
+  assert.equal(got.interpreted, 0, "no op left the region");
+  for (const budget of [1, 4, 9, 17, 30, 47]) {
+    loadData();
+    core.reset(seedGprs(GPRS.labels.main), GPRS.labels.main, STOP, budget);
+    core.dispatchRegion();
+    const stopped = { state: core.state(), downcount: core.downcount() };
+    loadData();
+    core.reset(seedGprs(GPRS.labels.main), GPRS.labels.main, STOP, budget);
+    for (let n = 0; n < 100000 && core.downcount() > stopped.downcount; n++) assert.equal(core.interpretOne(), 0);
+    assert.equal(core.downcount(), stopped.downcount, `budget ${budget}`);
+    assert.deepEqual(core.state(), stopped.state, `budget ${budget}`);
+  }
+  core.invalidate(GPR_TEXT, 4 * GPRS.words.length);
+  core.module._DolphinWeb_AotForgetRegionsForTest?.();
+});
