@@ -25,7 +25,7 @@
       "commit": "01e0577914a75a2569c846778c2f93aa8e6feddd"
     }
   },
-  "patchSeriesSha256": "530df6028c07f164b62c765e5d168fbed3af858be6f2fb74676b62548bb5cf63",
+  "patchSeriesSha256": "5147facdd70ac6706bad6ff4728fe07d306879c3f17e88867b68e259519d3785",
   "patches": [
     {
       "order": 1,
@@ -728,8 +728,8 @@
       "cwd": ".",
       "hashMode": "lf-normalized",
       "path": "patches/dolphin-wasm/snapshot/0107-region-installs-in-throttle-sleep.patch",
-      "size": 14139,
-      "sha256": "43f3ac106a40e783a67720e120139c7a63f64633deb19612e33f34049166f962"
+      "size": 14473,
+      "sha256": "a689ed9f6299569cb04a859e854cdb1ac1161950e9b16c69b2929b9f3ca0de62"
     },
     {
       "order": 89,

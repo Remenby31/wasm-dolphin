@@ -304,10 +304,11 @@ slices of 9-14 ms past the boot). The estimate is now 1.7 ms/MB (was 0.7).
 When the game is speed-capped, CoreTiming's throttle sleeps several ms per
 frame: `SleepUntil` first installs ready regions while the next module's
 estimate fits before the deadline (1 ms margin), then sleeps the rest. At a
-slice boundary, boot window included, a module whose estimate exceeds the
-slice target (2.5 ms) waits for such a window, 2 s at most from when a slice
-first found it installable (not from its post: with #86 every module is
-posted at once). A scene that never sleeps still gets it, one per slice. Only
+slice boundary, boot window included (with #86 the region cache loads after
+the first image, so the boot window is play), every ready module waits for
+such a window, 2 s at most from when a slice first found it installable (not
+from its post: with #86 every module is posted at once). A scene that never
+sleeps still gets it, then in slices of the slice target (not the boot's). Only
 a running CachedInterpreter installs in its sleeps. The installability checks
 (heap sites, plan hashes) count in the slice or sleep time. Counters:
 `DolphinWeb_AotRegionSleepInstalls` [installs, ms x 100, worst lateness past

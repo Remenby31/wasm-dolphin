@@ -235,9 +235,13 @@ function withOffThreadCompile(fn) {
   const savedCache = m._dolphinJitCache;
   m._dolphinJitCache = new Map(); // the pthread's module map (pre-js), empty
   m._SetPpcWasmJitOffThread(1);
+  // 0107: a ready module waits for a throttle sleep (2 s at most); these
+  // tests install at slice boundaries, as after that wait.
+  m._DolphinWeb_AotSetSleepWaitForTest?.(0);
   try {
     return fn(posted.filter.bind(posted, (msg) => msg.type === "dolphin-jit-compile-request"));
   } finally {
+    m._DolphinWeb_AotSetSleepWaitForTest?.(2000);
     m._SetPpcWasmJitOffThread(0);
     m._dolphinJitCache = savedCache;
     globalThis._dolphinJitInflight?.clear();
@@ -777,6 +781,7 @@ function withLargeModules(plan, fn) {
   const sizes = regionModules(plan).map((bytes) => bytes.length);
   // Each module estimated at 3 ms or more: too large for a slice.
   const saved = core.module._DolphinWeb_AotSetInstallCostForTest(3 / Math.min(...sizes));
+  core.module._DolphinWeb_AotSetSleepWaitForTest(2000); // the production wait
   try {
     return fn(3 * Math.max(...sizes) / Math.min(...sizes) * sizes.length);
   } finally {
@@ -805,6 +810,22 @@ test("a large ready module waits for a sleep window instead of costing a slice, 
       assert.equal(lateBy, 0, "the window's deadline was kept");
       assert.equal(expired, 0);
     });
+  });
+});
+
+test("any ready module waits for a sleep window: with #86 the boot window is play", { skip: largeSkip }, () => {
+  withOffThreadCompile((requests) => {
+    const plan = setup();
+    core.setRegionsEnabled(true);
+    core.module._DolphinWeb_AotSetSleepWaitForTest(2000);
+    const before = core.regionCount();
+    const entries = queueAll(plan);
+    core.serviceRegions();
+    for (const r of requests()) Atomics.store(core.module.HEAPU8, r.readyPtr + r.readySlot, 1);
+    for (let slice = 0; slice < 20; slice++) core.serviceRegions();
+    assert.equal(core.regionCount(), before, "small modules too: no slice installs them while a sleep may come");
+    core.module._DolphinWeb_AotRegionSleepWindowForTest(200);
+    assert.equal(core.regionCount(), before + entries);
   });
 });
 

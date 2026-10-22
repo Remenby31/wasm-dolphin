@@ -70,7 +70,7 @@ diff --git a/Source/Core/Core/PowerPC/CachedInterpreter/CachedInterpreter.cpp b/
  };
  std::mutex s_region_queue_mutex;
  std::vector<PendingRegion> s_region_queue;
-@@ -9437,9 +9452,28 @@ constexpr double REGION_BOOT_SLICE_MS = 8.0;
+@@ -9437,9 +9452,29 @@ constexpr double REGION_BOOT_SLICE_MS = 8.0;
  std::optional<std::chrono::steady_clock::time_point> s_region_service_start;
  // Past the boot a slice stops installing when the next module's estimated
  // cost would take it over this; estimate = size x the measured cost per byte
@@ -80,11 +80,12 @@ diff --git a/Source/Core/Core/PowerPC/CachedInterpreter/CachedInterpreter.cpp b/
  constexpr double REGION_SLICE_TARGET_MS = 2.5;
 -double s_install_ms_per_byte = 0.8e-6;
 +double s_install_ms_per_byte = 1.7e-6;
-+// Patch 0107: a module whose estimate exceeds the slice target (boot window
-+// included) waits for a throttle sleep of the CPU thread
-+// (DolphinWeb_RegionInstallsWhileIdle, where an install costs no frame), at
-+// most this long from when it became installable: a scene that never sleeps
-+// still gets its regions, one per slice.
++// Patch 0107: a module whose ready byte the CPU thread saw waits for a
++// throttle sleep of the CPU thread (DolphinWeb_RegionInstallsWhileIdle, where
++// an install costs no frame), at most this long from when it became
++// installable, boot window included: with #86 the region cache loads after
++// the first image, so the boot window is play. A scene that never sleeps
++// still gets its regions, in slices of the slice target.
 +std::chrono::milliseconds s_region_sleep_wait{2000};  // tests change it
 +// What an install in a sleep window leaves before the deadline (its estimate
 +// can be off by the jitter measured on the bench).
@@ -101,7 +102,7 @@ diff --git a/Source/Core/Core/PowerPC/CachedInterpreter/CachedInterpreter.cpp b/
  double s_region_boot_max_slice_ms = 0;  // published in the header's spare u32
  u32 s_region_install_fallbacks = 0;     // likewise
  
-@@ -9618,6 +9652,10 @@ void ForgetAllRegions()
+@@ -9618,6 +9653,10 @@ void ForgetAllRegions()
    std::fill(s_region_pages.begin(), s_region_pages.end(), 0);
    s_region_waiting.clear();
    s_region_service_start.reset();
@@ -112,7 +113,7 @@ diff --git a/Source/Core/Core/PowerPC/CachedInterpreter/CachedInterpreter.cpp b/
    std::lock_guard lock(s_region_queue_mutex);
    s_region_queue.clear();
    s_region_queue_nonempty.store(false, std::memory_order_release);
-@@ -9788,25 +9826,68 @@ bool TryInstallRegion(PendingRegion& pending, int ready_bits_ptr, double& spent_
+@@ -9788,24 +9827,68 @@ bool TryInstallRegion(PendingRegion& pending, int ready_bits_ptr, double& spent_
    return true;
  }
  
@@ -135,10 +136,10 @@ diff --git a/Source/Core/Core/PowerPC/CachedInterpreter/CachedInterpreter.cpp b/
      s_region_service_start = now;
    const bool boot = now - *s_region_service_start < REGION_BOOT_WINDOW;
 +  const u32 installed_before = s_region_stats.regions_installed;
-+  // A module too big for a slice waits for a sleep window, the sleep wait at
-+  // most from when a slice first found it installable (not from its post:
-+  // with #86 every module is posted at once, and one ready late would
-+  // otherwise skip the wait).
++  // A ready module waits for a sleep window, the sleep wait at most from when
++  // a slice first found it installable (not from its post: with #86 every
++  // module is posted at once, and one ready late would otherwise skip the
++  // wait).
 +  const auto may_wait_for_sleep = [&](PendingRegion& pending) {
 +    if (deadline)
 +      return false;
@@ -155,21 +156,25 @@ diff --git a/Source/Core/Core/PowerPC/CachedInterpreter/CachedInterpreter.cpp b/
    double spent_ms = 0;
    u32 n = 0;
 -  // Room in this slice for a module of `bytes`: always for the first one.
+-  const auto room = [&](std::size_t bytes) {
 +  // Room in this slice for a module of `bytes`: always for the first one at
 +  // a slice boundary; in a sleep window, while it fits before the deadline.
-   const auto room = [&](std::size_t bytes) {
++  // `boot_budget`: the boot window's larger slices (a module handed over
++  // before the boot, a repost); a ready module whose sleep wait ran out gets
++  // the slice target only.
++  const auto room = [&](std::size_t bytes, bool boot_budget = true) {
      const double estimate = spent_ms + bytes * s_install_ms_per_byte;
+-    return n == 0 || (boot ? estimate <= REGION_BOOT_SLICE_MS :
+-                             n < REGION_INSTALLS_PER_SLICE && estimate <= REGION_SLICE_TARGET_MS);
 +    if (deadline)
 +    {
 +      const double left =
 +          std::chrono::duration<double, std::milli>(*deadline - now).count() - REGION_SLEEP_MARGIN_MS;
 +      return estimate <= left;
 +    }
-     return n == 0 || (boot ? estimate <= REGION_BOOT_SLICE_MS :
-                              n < REGION_INSTALLS_PER_SLICE && estimate <= REGION_SLICE_TARGET_MS);
-   };
-+  const auto too_big = [&](std::size_t bytes) {
-+    return bytes * s_install_ms_per_byte > REGION_SLICE_TARGET_MS;
++    return n == 0 || (boot && boot_budget ?
++                          estimate <= REGION_BOOT_SLICE_MS :
++                          n < REGION_INSTALLS_PER_SLICE && estimate <= REGION_SLICE_TARGET_MS);
 +  };
 +  // The checks scan the module's heap sites and hash its guest code: their
 +  // time counts in the slice (or the sleep) like the compile's.
@@ -179,11 +184,10 @@ diff --git a/Source/Core/Core/PowerPC/CachedInterpreter/CachedInterpreter.cpp b/
 +    spent_ms +=
 +        std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now() - start).count();
 +    return ok;
-+  };
+   };
    // Waiting regions whose module the worker has compiled (or that waited too
    // long) first: their compile is the cheap one.
-   for (std::size_t i = 0; i < s_region_waiting.size();)
-@@ -9825,7 +9906,7 @@ void ServiceRegionInstalls()
+@@ -9825,7 +9908,7 @@ void ServiceRegionInstalls()
        }
        pending.repost = false;
        ++n;
@@ -192,17 +196,17 @@ diff --git a/Source/Core/Core/PowerPC/CachedInterpreter/CachedInterpreter.cpp b/
            TryInstallRegion(pending, ready_bits_ptr, spent_ms, InstallPath::First))
        {
          s_region_waiting[i] = std::move(s_region_waiting.back());
-@@ -9840,7 +9921,8 @@ void ServiceRegionInstalls()
+@@ -9840,7 +9923,8 @@ void ServiceRegionInstalls()
      const bool ready =
          s_wasm_jit_ready_bits[pending.slot].load(std::memory_order_acquire) != 0;
      const bool expired = now - pending.posted > s_region_ready_wait;
 -    if ((!ready && !pending.signalled && !expired) || !room(pending.bytes.size()))
-+    if ((!ready && !pending.signalled && !expired) || !room(pending.bytes.size()) ||
-+        (too_big(pending.bytes.size()) && may_wait_for_sleep(pending)))
++    if ((!ready && !pending.signalled && !expired) || !room(pending.bytes.size(), false) ||
++        may_wait_for_sleep(pending))
      {
        ++i;
        continue;
-@@ -9852,7 +9934,7 @@ void ServiceRegionInstalls()
+@@ -9852,7 +9936,7 @@ void ServiceRegionInstalls()
      // Its own bytes, synchronously, unless the byte is still set (the request
      // path then clears the in-flight mark): a hit either way once answered.
      // Waited past a slice where the game may have reloaded its code.
@@ -211,7 +215,7 @@ diff --git a/Source/Core/Core/PowerPC/CachedInterpreter/CachedInterpreter.cpp b/
          TryInstallRegion(pending, ready && ready_bits_ptr ? ready_bits_ptr : 0, spent_ms,
                           answered ? InstallPath::Ready : InstallPath::Cold))
      {
-@@ -9871,11 +9953,14 @@ void ServiceRegionInstalls()
+@@ -9871,11 +9955,14 @@ void ServiceRegionInstalls()
        std::lock_guard lock(s_region_queue_mutex);
        if (s_region_queue.empty() || !room(s_region_queue.front().bytes.size()))
          break;
@@ -227,7 +231,7 @@ diff --git a/Source/Core/Core/PowerPC/CachedInterpreter/CachedInterpreter.cpp b/
        continue;
      // A module handed to this pthread before the boot is installed at once;
      // any other is posted to the compiler worker and waits for its byte.
-@@ -9884,6 +9969,22 @@ void ServiceRegionInstalls()
+@@ -9884,6 +9971,22 @@ void ServiceRegionInstalls()
                            InstallPath::First))
        s_region_waiting.push_back(std::move(pending));
    }
@@ -250,7 +254,7 @@ diff --git a/Source/Core/Core/PowerPC/CachedInterpreter/CachedInterpreter.cpp b/
    if (!boot)
      s_region_stats.install_max_slice_ms = std::max(s_region_stats.install_max_slice_ms, spent_ms);
    else
-@@ -10266,6 +10367,53 @@ extern "C" EMSCRIPTEN_KEEPALIVE void DolphinWeb_AotServiceRegionsForTest()
+@@ -10266,6 +10369,53 @@ extern "C" EMSCRIPTEN_KEEPALIVE void DolphinWeb_AotServiceRegionsForTest()
    ApplyRegionStatsRequest();
  }
  
