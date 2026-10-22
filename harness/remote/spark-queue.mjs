@@ -119,6 +119,10 @@ export function movedId(tickets, name, after) {
   const me = tickets.find((t) => t.name === name);
   if (!me) throw new Error(`no ticket named ${name}`);
   if (me.lane) throw new Error(`${name} is already running`);
+  // A waiter from a harness before moves (no estMin in its ticket) keeps its
+  // ticket's name in memory: renamed, it would wait for itself (2026-10-22,
+  // p87-native-ps-aot idled the bench). Its owner requeues it with main.
+  if (!("estMin" in me)) throw new Error(`${name} waits with a harness from before \`move\`: it would wait for itself; its owner must requeue it after merging main`);
   const others = tickets.filter((t) => t !== me);
   const at = after === "head" ? others.filter((t) => t.lane).length : others.findIndex((t) => t.name === after) + 1;
   if (after !== "head" && at === 0) throw new Error(`no ticket named ${after}`);
