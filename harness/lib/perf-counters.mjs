@@ -34,7 +34,7 @@ export function parsePerfCsv(text) {
 
 // The busiest thread of the renderer(s) of `profileDir`, from /proc ticks
 // over `ms`: the emulated CPU thread in a race (saturated).
-async function busiestThread(profileDir, ms = 500) {
+export async function busiestThread(profileDir, ms = 500) {
   const ps = execFileSync("ps", ["-A", "-o", "pid=,args="], { encoding: "utf8", maxBuffer: 32 << 20 });
   const pids = ps.split("\n").filter((l) => l.includes(profileDir) && l.includes("--type=renderer")).map((l) => l.trim().split(/\s+/)[0]);
   const ticks = () => {

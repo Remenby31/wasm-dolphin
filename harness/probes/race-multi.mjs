@@ -13,7 +13,7 @@
 //     --arm <dir> --arm <dir> [--arm <dir> …]      (the first is the baseline)
 //     --lanes "5,6,7;15,16,17;8,9,19" [--query …] [--runs 6] [--warmup 25] [--secs 20]
 //     [--max-load L] [--lock <dir/.perf-lock> …] [--counters] [--aot-seed [--seed-sec 600]]
-//     [--isolated-boot [--settle-sec 10]] [--out dir]
+//     [--isolated-boot [--settle-sec 10]] [--perf-record] [--out dir]
 //
 // - Each arm is a tree served as is (race-perf's sides), on its own port
 //   (port + arm index), its Chromium pinned through HARNESS_CHROME_PATH's
@@ -44,6 +44,11 @@
 //   without aot). Each arm then boots alone: once booted and settled (its
 //   regions with --aot-seed, else --settle-sec) it is paused before the next
 //   one boots; all resume together before the savestates and windows.
+// - --perf-record (diagnostic, never a measure): each arm's Chromium runs
+//   with V8's jitdump (--perf-prof, --no-sandbox) and `perf record -e
+//   cycles:u -t <CPU thread>` samples its window; after the runs,
+//   wasm-hot.mjs gives each arm-run's hottest functions (perf-<run>-<arm>/top.txt),
+//   to compare a low arm with a high one of the same run.
 import { randomBytes } from "node:crypto";
 import { mkdirSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import os from "node:os";
@@ -59,7 +64,9 @@ import { median, round } from "../lib/stats.mjs";
 import { measure, num } from "./race-perf.mjs";
 import { workerRequest } from "../lib/browser.mjs";
 import { decodeRegionStats } from "../lib/jit-region-stats.mjs";
-import { checkPerfAccess, instructionsPerGuestCycle, perfCounters } from "../lib/perf-counters.mjs";
+import { busiestThread, checkPerfAccess, instructionsPerGuestCycle, perfCounters } from "../lib/perf-counters.mjs";
+import { execFileSync, spawn } from "node:child_process";
+import { existsSync, readdirSync, statSync } from "node:fs";
 
 export { GUEST_HZ, instructionsPerGuestCycle, parsePerfCsv } from "../lib/perf-counters.mjs";
 
@@ -178,7 +185,8 @@ async function main() {
       hold: { type: "string", default: "KeyX" }, "max-load": { type: "string" },
       lock: { type: "string", multiple: true, default: [] }, "lock-wait": { type: "string", default: "14400" }, out: { type: "string" },
       counters: { type: "boolean", default: false }, "aot-seed": { type: "boolean", default: false }, "seed-sec": { type: "string", default: "600" },
-      "gate-sec": { type: "string", default: "120" }, "isolated-boot": { type: "boolean", default: false }, "settle-sec": { type: "string", default: "10" }
+      "gate-sec": { type: "string", default: "120" }, "isolated-boot": { type: "boolean", default: false }, "settle-sec": { type: "string", default: "10" },
+      "perf-record": { type: "boolean", default: false }
     }
   });
   const lanes = String(values.lanes ?? "").split(";").map((l) => l.trim()).filter(Boolean);
@@ -199,6 +207,25 @@ async function main() {
   const outDir = path.resolve(values.out ?? path.join(REPO_ROOT, "..", "measures", "harness", `race-multi-${Date.now()}-${randomBytes(3).toString("hex")}`));
   mkdirSync(outDir, { recursive: true });
   const counters = values.counters ? (checkPerfAccess(), perfCounters(outDir)) : null;
+  if (values["perf-record"]) checkPerfAccess();
+  // --perf-record: per session, its jitdump directory, perf process and window.
+  const recordings = new Map();
+  const startRecording = async (session) => {
+    const rec = recordings.get(session.recordKey);
+    const tid = await busiestThread(session.profileDir);
+    if (!rec || !tid) return;
+    const pid = readFileSync(`/proc/${tid}/status`, "utf8").match(/^Tgid:\s+(\d+)/m)?.[1];
+    rec.window = { start: Date.now(), monoStartNs: String(process.hrtime.bigint()), rendererPid: Number(pid), tid: Number(tid) };
+    rec.proc = spawn("perf", ["record", "-k", "mono", "-e", "cycles:u", "-F", "4999", "-t", String(tid), "-o", path.join(rec.dir, "perf.data"), "--", "sleep", String(o.secs)], { stdio: "ignore" });
+  };
+  const stopRecording = async (session) => {
+    const rec = recordings.get(session.recordKey);
+    if (!rec?.proc) return;
+    await new Promise((r) => (rec.proc.exitCode != null ? r() : rec.proc.once("exit", r)));
+    rec.window.end = Date.now();
+    rec.window.monoEndNs = String(process.hrtime.bigint());
+    writeFileSync(path.join(rec.dir, "window.json"), JSON.stringify(rec.window));
+  };
   // Per run (--aot-seed): each arm's region gate, and the barrier they share.
   const gates = new Map();
   let arrive = null;
@@ -206,6 +233,8 @@ async function main() {
     // Without --aot-seed: one read of the region pipeline (the launch's
     // layout hash and counts), no waiting.
     if (phase === "start" && !values["aot-seed"]) gates.set(session, { ...(await regionPipeline(session.page)), together: await arrive() });
+    if (phase === "start" && values["perf-record"]) await startRecording(session);
+    if (phase === "end" && values["perf-record"]) await stopRecording(session);
     if (phase === "start" && values["aot-seed"]) {
       const gate = await waitRegionsQuiescent(() => regionPipeline(session.page), { target: seedRegions.get(session.seedOf) ?? null, timeoutMs: num(values, "gate-sec", { min: 1 }) * 1000 });
       // What the boot of this arm said about its regions (for the region robustness work).
@@ -266,8 +295,17 @@ async function main() {
           const lane = laneOf(a, r, lanes.length);
           process.env.SPARK_CHROME_CPUS = lanes[lane];
           const bootStart = Date.now();
-          sessions[a] = await openSession({ base: servers[a].base, server: servers[a], query: o.query, iso: path.resolve(values.iso), routes: { [STATE_ROUTE]: path.resolve(values.state) }, seedProfile: seeds[a] ?? null });
+          let chromeArgs = [];
+          if (values["perf-record"]) {
+            // A jitdump per arm-run, outside the repository (hundreds of MB).
+            const dir = path.join(outDir, `perf-${r}-${a}`);
+            mkdirSync(path.join(dir, "jit"), { recursive: true });
+            chromeArgs = ["--no-sandbox", `--js-flags=--perf-prof --perf-prof-path=${path.join(dir, "jit")} --no-logfile-per-isolate --logfile=${path.join(dir, "jit", "v8.log")}`];
+            recordings.set(`${r}-${a}`, { dir });
+          }
+          sessions[a] = await openSession({ chromeArgs, base: servers[a].base, server: servers[a], query: o.query, iso: path.resolve(values.iso), routes: { [STATE_ROUTE]: path.resolve(values.state) }, seedProfile: seeds[a] ?? null });
           sessions[a].seedOf = a;
+          sessions[a].recordKey = `${r}-${a}`;
           record.arms[a] = { arm: a, lane, cpus: lanes[lane], bootRank: bootOrder(r, arms.length).indexOf(a), boot: { startMs: bootStart - runStart, ms: Date.now() - bootStart }, url: sessions[a].url, served: servers[a].identity, core: sessions[a].core };
           if (values["isolated-boot"]) {
             // Settled, then paused: the next arm boots with this one idle.
@@ -300,6 +338,24 @@ async function main() {
       console.log(`[race-multi] run ${r}: ${record.arms.map((x) => `arm${x.arm}@lane${x.lane} ${x.error ?? `${x.cold.speed} %${x.cold.instructionsPerGuestCycle ? ` ${round(x.cold.instructionsPerGuestCycle, 3)} insn/guest cycle` : ""}${x.cold.overloaded ? " OVERLOADED" : ""}`}`).join(" | ")}`);
       writeFileSync(path.join(outDir, `run${r}.json`), JSON.stringify(record, null, 1) + "\n");
       records.push(record);
+    }
+    // --perf-record: each arm-run's hottest functions, from its own jitdump.
+    for (const [key, rec] of recordings) {
+      if (!existsSync(path.join(rec.dir, "perf.data")) || !rec.window) continue;
+      try {
+        const samples = path.join(rec.dir, "samples.txt");
+        writeFileSync(samples, execFileSync("perf", ["script", "-i", path.join(rec.dir, "perf.data"), "-F", "pid,tid,time,ip", "--ns"], { maxBuffer: 1 << 30 }));
+        const dumps = readdirSync(path.join(rec.dir, "jit")).filter((f) => /^jit-\d+\.dump$/.test(f)).map((f) => path.join(rec.dir, "jit", f)).sort((x, y) => statSync(y).size - statSync(x).size);
+        if (!dumps.length) { console.warn(`[race-multi] perf ${key}: no jitdump`); continue; }
+        const top = execFileSync(process.execPath, [path.join(REPO_ROOT, "harness", "probes", "wasm-hot.mjs"), "--jitdump", dumps[0], "--perf-script", samples, "--window", path.join(rec.dir, "window.json"), "--top", "30", "--insns", "0"], { maxBuffer: 1 << 26, encoding: "utf8" });
+        writeFileSync(path.join(rec.dir, "top.txt"), top);
+        // The jitdumps are large: only the hottest functions stay.
+        rmSync(path.join(rec.dir, "jit"), { recursive: true, force: true });
+        rmSync(path.join(rec.dir, "perf.data"), { force: true });
+        rmSync(samples, { force: true });
+      } catch (e) {
+        console.warn(`[race-multi] perf ${key}: ${String(e.message).slice(0, 200)}`);
+      }
     }
   } finally {
     for (const dir of seeds) rmSync(dir, { recursive: true, force: true });
