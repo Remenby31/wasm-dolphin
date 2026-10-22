@@ -25,7 +25,7 @@
       "commit": "01e0577914a75a2569c846778c2f93aa8e6feddd"
     }
   },
-  "patchSeriesSha256": "8af51c6e00506a3ec037d2221de5c3e583ad2092854fe139769b8d23d16555aa",
+  "patchSeriesSha256": "11292154cc455d4f5bb51cbf4632ab19c818fa159cec55b4f54e9ad5bf73f28e",
   "patches": [
     {
       "order": 1,
@@ -655,12 +655,20 @@
       "order": 79,
       "cwd": ".",
       "hashMode": "lf-normalized",
+      "path": "patches/dolphin-wasm/snapshot/0094-present-sleep-until-on-video-thread.patch",
+      "size": 1890,
+      "sha256": "77e1d2e8f8e1a5d4ec982c9488bde41ef3726c68aed4be8d04cb415324673252"
+    },
+    {
+      "order": 80,
+      "cwd": ".",
+      "hashMode": "lf-normalized",
       "path": "patches/dolphin-wasm/snapshot/0099-ax-hle-timing.patch",
       "size": 3424,
       "sha256": "fcf883f10294f89b4660891765bba842259213b7ebebbf80e6815cb0b083f6b5"
     },
     {
-      "order": 80,
+      "order": 81,
       "cwd": "Externals/SFML/SFML",
       "hashMode": "lf-normalized",
       "path": "patches/dolphin-wasm/submodules/0001-sfml-emscripten-config.patch",
@@ -668,7 +676,7 @@
       "sha256": "f82197a21fe982ad83f6ee7bbf5a03839b1cebd4d64da3eab11263842bf61d89"
     },
     {
-      "order": 81,
+      "order": 82,
       "cwd": "Externals/xxhash/xxHash",
       "hashMode": "lf-normalized",
       "path": "patches/dolphin-wasm/submodules/0002-xxhash-wasm-simd-scalar.patch",
