@@ -1,6 +1,6 @@
 # video=wgpu: real EFB readback (peeks, EFB/XFB copies to RAM)
 
-Status: design, 2026-10-22. Nothing here is implemented yet.
+Status: step 1 (tests, PR #84) and step 2 (the staging texture, patch 0093) are in; per-game settings are not.
 
 ## What is wrong today
 
