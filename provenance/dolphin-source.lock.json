@@ -25,7 +25,7 @@
       "commit": "01e0577914a75a2569c846778c2f93aa8e6feddd"
     }
   },
-  "patchSeriesSha256": "1beba97ef250efb2170fc41bcdfc0026dfb48295290895d2d9c7623ccbc5266c",
+  "patchSeriesSha256": "613071b7080655aefec60c680aa4102a8184eafccedd83fb55cc48961094925f",
   "patches": [
     {
       "order": 1,
@@ -680,8 +680,8 @@
       "cwd": ".",
       "hashMode": "lf-normalized",
       "path": "patches/dolphin-wasm/snapshot/0094-present-sleep-until-on-video-thread.patch",
-      "size": 1890,
-      "sha256": "77e1d2e8f8e1a5d4ec982c9488bde41ef3726c68aed4be8d04cb415324673252"
+      "size": 2434,
+      "sha256": "e0caebd7a85161d580ed4b4876335fd060a8b127953899208f6240404eaa7673"
     },
     {
       "order": 83,

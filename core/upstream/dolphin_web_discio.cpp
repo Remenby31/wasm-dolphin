@@ -1326,7 +1326,20 @@ void DolphinWeb_OnXfb(const std::uint8_t* xfb, std::uint32_t width, std::uint32_
 
   const int presentation_width = ScaledPresentationDimension(width);
   const int presentation_height = ScaledPresentationDimension(height);
-  if (!s_skip_xfb_decode)
+  if (s_skip_xfb_decode)
+  {
+    // Until the replay's first present owns the canvas, the worker's legacy
+    // loop still blits s_framebuffer, which holds the boot-time metadata
+    // frame: show black instead, once. s_frame keeps counting (it drives
+    // the JIT warmup and the frame telemetry).
+    static bool cleared = false;
+    if (!cleared)
+    {
+      s_framebuffer.fill(0);
+      cleared = true;
+    }
+  }
+  else
   {
     DecodeXfbToPresentationBuffer(xfb, width, stride, height, presentation_width,
                                    presentation_height);

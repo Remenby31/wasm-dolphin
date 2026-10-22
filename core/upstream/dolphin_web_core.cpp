@@ -759,7 +759,9 @@ void EnsureRuntime()
   Config::SetBase(Config::MAIN_AUDIO_MUTED, false);
   // Dolphin's default. OGL and WebGPU present the XFB from the texture cache,
   // so the copy to guest RAM only fed DolphinWeb_OnXfb's software presenter.
-  // A GameINI that needs the RAM copy still overrides this base value.
+  // A GameINI that needs the RAM copy ([Video_Hacks] XFBToTextureEnable =
+  // False, embedded by 0097 v3) overrides this base value from the game
+  // layer: only the base layer is set here.
   const bool hardware_xfb = s_video_backend == "OGL" || s_video_backend == "WebGPU";
   Config::SetBase(Config::GFX_HACK_SKIP_XFB_COPY_TO_RAM, hardware_xfb);
   s_skip_xfb_decode = s_video_backend == "WebGPU";
