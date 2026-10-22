@@ -60,9 +60,11 @@ export async function calmThenLock({ maxLoad, calmWait, acquire, log = () => {},
 export async function calmUnderLock({ lock, maxLoad, waitSec, acquire, log = () => {}, load = () => os.loadavg()[0], wait = waitForLoad }) {
   const limit = loadLimit(maxLoad);
   const now = load();
-  if (now <= limit) return { lock, gate: { load: Math.round(now * 100) / 100, limit, ok: true }, relocked: false };
-  log(`load ${now.toFixed(1)} > ${limit}: perf lock released while waiting for calm`);
-  lock();
+  const gate = { load: Math.round(now * 100) / 100, limit, ok: true };
+  // Calm. No lock held (a gate gave up before): taken again in its turn.
+  if (now <= limit) return lock ? { lock, gate, relocked: false } : { lock: await acquire(), gate, relocked: true };
+  log(`load ${now.toFixed(1)} > ${limit}: ${lock ? "perf lock released while waiting for calm" : "waiting for calm before taking the perf lock again"}`);
+  lock?.();
   const calm = await wait({ maxLoad, waitSec, pollSec: 30, log });
   if (!calm.ok) return { lock: null, gate: calm, relocked: false };
   return { lock: await acquire(), gate: calm, relocked: true };
@@ -74,14 +76,21 @@ export async function calmUnderLock({ lock, maxLoad, waitSec, acquire, log = () 
 // during the wait and takes it again in turn (calmUnderLock). The gate it
 // returns says whether the lock went back (relocked). `acquire` null: no
 // lock (--no-lock), the gate only waits. release() lets go of what is held.
-export async function calmLock({ maxLoad, calmWait, acquire, log = () => {}, wait = waitForLoad, load }) {
+// retakeOnGiveUp (ab): a gate still loaded after waitSec takes the lock
+// again anyway, since the campaign goes on and measures under it (the cell
+// is judged overloaded); a probe that stops on a give-up leaves it off.
+export async function calmLock({ maxLoad, calmWait, acquire, log = () => {}, wait = waitForLoad, load, retakeOnGiveUp = false }) {
   let held = acquire ? await calmThenLock({ maxLoad, calmWait, acquire, log, wait }) : null;
   return {
     async waitCalmUnlocked({ waitSec, log: gateLog = log }) {
       if (!acquire) return { ...(await wait({ maxLoad, waitSec, log: gateLog })), relocked: false };
       const g = await calmUnderLock({ lock: held, maxLoad, waitSec, acquire, log: gateLog, wait, ...(load ? { load } : {}) });
       held = g.lock;
-      return { ...g.gate, relocked: g.relocked };
+      if (!held && retakeOnGiveUp) {
+        gateLog(`load ${g.gate.load} > ${g.gate.limit} after ${waitSec} s: perf lock taken again, the run goes on under it`);
+        held = await acquire();
+      }
+      return { ...g.gate, relocked: g.relocked || Boolean(held && retakeOnGiveUp && !g.lock) };
     },
     check: () => held?.check?.(),
     release() { const r = held; held = null; r?.(); }
