@@ -333,8 +333,11 @@ between writes them or the field (`regsOut`, `crOut`, `system` and the HLE
 calls). The store stays, so every exit sees the exact CR.
 
 SO must be clear for this. Regions refuse to run while XER.SO is set
-(TryRunRegion, RegionWouldRun, RegionChainNext), and the ops that can set
-it (`mtxer`, `mcrxr`, the OE forms) run outside them. In a V8
+(TryRunRegion, RegionWouldRun, RegionChainNext, and each fragment at its
+entry, which returns 1), and the ops that can set it (`mtxer`, `mcrxr`,
+the OE forms) run outside them. A zero difference is stored with bit 63
+set, as the interpreter does: block code reads GT as "bit 63 clear"
+(`mfcr`), so an EQ field must never be 0. In a V8
 microbenchmark the lazy store without the fused branch was slower on
 unpredictable branches (+14 to +30 %), so the two ship together. Compiler
 version 10.

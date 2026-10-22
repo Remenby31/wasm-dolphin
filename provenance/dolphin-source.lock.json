@@ -25,7 +25,7 @@
       "commit": "01e0577914a75a2569c846778c2f93aa8e6feddd"
     }
   },
-  "patchSeriesSha256": "582ec49ecb072a4bdec7a681378f1ed2e8151856b4ce6d871029a571538875ea",
+  "patchSeriesSha256": "0600ec6ed02125ec18baca01531b2700cf75958d5ca849a81bb5caa5422ba316",
   "patches": [
     {
       "order": 1,
@@ -768,8 +768,8 @@
       "cwd": ".",
       "hashMode": "lf-normalized",
       "path": "patches/dolphin-wasm/snapshot/0111-region-lazy-cr-fusion.patch",
-      "size": 11445,
-      "sha256": "1d88bf3fd4c47f4ff70c72a7ccbf602e3e1d353c200f4fffdc03cd964b8d9c65"
+      "size": 13197,
+      "sha256": "a47a6bc5c37f6a590535ca4ae75fc2ac3e6d67833ef783a2216e68275ee2029b"
     },
     {
       "order": 94,

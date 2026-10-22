@@ -37,11 +37,12 @@ diff --git a/Source/Core/Core/PowerPC/CachedInterpreter/CachedInterpreter.cpp b/
    s_wasm_fragment_relocs->relocs.push_back({body.size(), WASM_IMPORT_NAMES[index]});
    EmitPaddedU32Leb(body, 0);
  }
-@@ -3303,9 +3325,84 @@ void EmitStoreCrField(std::vector<u8>& body, const WasmStateLayout& layout, u32
+@@ -3303,9 +3325,103 @@ void EmitStoreCrField(std::vector<u8>& body, const WasmStateLayout& layout, u32
    EmitStateStoreU32Suffix(body, field_offset + sizeof(u32));
  }
  
 +void EmitI64Const(std::vector<u8>& body, u64 value);
++void EmitLazyCrFieldTail(std::vector<u8>& body, const WasmStateLayout& layout, u32 field);
 +
 +// Region code (0111): the CR field as one i64, A - B with both extended as
 +// the compare is signed or not, SO (bit 59) cleared: regions only run with
@@ -64,11 +65,7 @@ diff --git a/Source/Core/Core/PowerPC/CachedInterpreter/CachedInterpreter.cpp b/
 +                                     static_cast<u64>(c.imm));
 +  }
 +  body.push_back(0x7d);  // i64.sub
-+  EmitI64Const(body, ~(u64{1} << 59));
-+  body.push_back(0x83);  // i64.and
-+  body.push_back(0x37);  // i64.store
-+  body.push_back(0x03);
-+  EmitU32Leb(body, CrFieldOffset(layout, c.field));
++  EmitLazyCrFieldTail(body, layout, c.field);
 +}
 +
 +// The CR bit `bit` (LT, GT or EQ of the recorded field) from the operands.
@@ -92,6 +89,28 @@ diff --git a/Source/Core/Core/PowerPC/CachedInterpreter/CachedInterpreter.cpp b/
 +    body.push_back(0x46);  // i32.eq
 +    break;
 +  }
++}
++
++// The i64 on the stack (a difference or a sign-extended result) as a CR
++// field: bit 59 (SO) cleared and, when it is 0, bit 63 set, as the
++// interpreter's Helper_UpdateCR0 and PPCToInternal do: an EQ field is never
++// 0, so code that reads GT as "bit 63 clear" (EmitCrFieldToPpcBits) stays
++// right. Uses i64 local 4. Then the store.
++void EmitLazyCrFieldTail(std::vector<u8>& body, const WasmStateLayout& layout, u32 field)
++{
++  EmitI64Const(body, ~(u64{1} << 59));
++  body.push_back(0x83);  // i64.and
++  body.push_back(0x22);  // local.tee 4
++  EmitU32Leb(body, 4);
++  EmitLocalGet(body, 4);
++  body.push_back(0x50);  // i64.eqz
++  body.push_back(0xad);  // i64.extend_i32_u
++  EmitI64Const(body, 63);
++  body.push_back(0x86);  // i64.shl
++  body.push_back(0x84);  // i64.or
++  body.push_back(0x37);  // i64.store
++  body.push_back(0x03);
++  EmitU32Leb(body, CrFieldOffset(layout, field));
 +}
 +
 +// In region code, stores the compare lazily and records it; false elsewhere.
@@ -122,7 +141,7 @@ diff --git a/Source/Core/Core/PowerPC/CachedInterpreter/CachedInterpreter.cpp b/
    EmitStateLoadU32(body, GprOffset(layout, inst.RA));
    EmitI32Const(body, is_signed ? static_cast<u32>(static_cast<s32>(inst.SIMM_16)) : inst.UIMM);
    body.push_back(is_signed ? 0x48 : 0x49);
-@@ -3327,6 +3424,28 @@ void EmitCompareImmediate(std::vector<u8>& body, const WasmStateLayout& layout,
+@@ -3327,6 +3443,24 @@ void EmitCompareImmediate(std::vector<u8>& body, const WasmStateLayout& layout,
  
  void EmitUpdateCr0FromLocal(std::vector<u8>& body, const WasmStateLayout& layout, u32 local_index)
  {
@@ -134,11 +153,7 @@ diff --git a/Source/Core/Core/PowerPC/CachedInterpreter/CachedInterpreter.cpp b/
 +    EmitLocalGet(body, 0);
 +    EmitLocalGet(body, local_index);
 +    body.push_back(0xac);  // i64.extend_i32_s
-+    EmitI64Const(body, ~(u64{1} << 59));
-+    body.push_back(0x83);
-+    body.push_back(0x37);
-+    body.push_back(0x03);
-+    EmitU32Leb(body, CrFieldOffset(layout, 0));
++    EmitLazyCrFieldTail(body, layout, 0);
 +    t_fused_cr.valid = false;
 +    if (t_region_op && t_region_op->regsOut.Count() == 1)
 +    {
@@ -151,7 +166,7 @@ diff --git a/Source/Core/Core/PowerPC/CachedInterpreter/CachedInterpreter.cpp b/
    EmitLocalGet(body, local_index);
    EmitI32Const(body, 0);
    body.push_back(0x48);
-@@ -3377,6 +3496,13 @@ void EmitAddic(std::vector<u8>& body, const WasmStateLayout& layout, UGeckoInstr
+@@ -3377,6 +3511,13 @@ void EmitAddic(std::vector<u8>& body, const WasmStateLayout& layout, UGeckoInstr
  void EmitCompareRegister(std::vector<u8>& body, const WasmStateLayout& layout,
                           UGeckoInstruction inst, bool is_signed)
  {
@@ -165,7 +180,7 @@ diff --git a/Source/Core/Core/PowerPC/CachedInterpreter/CachedInterpreter.cpp b/
    EmitStateLoadU32(body, GprOffset(layout, inst.RA));
    EmitStateLoadU32(body, GprOffset(layout, inst.RB));
    body.push_back(is_signed ? 0x48 : 0x49);
-@@ -3775,7 +3901,11 @@ void EmitConditionalBranch(std::vector<u8>& body, const WasmStateLayout& layout,
+@@ -3775,7 +3916,11 @@ void EmitConditionalBranch(std::vector<u8>& body, const WasmStateLayout& layout,
    }
    else
    {
@@ -178,7 +193,7 @@ diff --git a/Source/Core/Core/PowerPC/CachedInterpreter/CachedInterpreter.cpp b/
      EmitI32Const(body, (inst.BO >> 3) & 1);
      body.push_back(0x46);
    }
-@@ -8949,13 +9079,21 @@ std::vector<u8> BuildWasmCachedInterpreterBlock(std::span<const PPCAnalyst::Code
+@@ -8949,13 +9094,21 @@ std::vector<u8> BuildWasmCachedInterpreterBlock(std::span<const PPCAnalyst::Code
    }
  
    u32 downcount = 0;
@@ -201,7 +216,7 @@ diff --git a/Source/Core/Core/PowerPC/CachedInterpreter/CachedInterpreter.cpp b/
      {
        if (!allow_interpret_fallback)
        {
-@@ -9991,9 +10129,10 @@ bool TryRunRegion(PowerPC::PowerPCState& ppc_state)
+@@ -9991,9 +10144,10 @@ bool TryRunRegion(PowerPC::PowerPCState& ppc_state)
  {
    if (!RegionFilterHas(ppc_state.pc))
      return false;
@@ -214,7 +229,7 @@ diff --git a/Source/Core/Core/PowerPC/CachedInterpreter/CachedInterpreter.cpp b/
    {
      if (s_region_stats_on)
        s_region_stats.mode_refusals += 1;
-@@ -10066,7 +10205,7 @@ inline bool RegionWouldRun(const PowerPC::PowerPCState& ppc_state)
+@@ -10066,7 +10220,7 @@ inline bool RegionWouldRun(const PowerPC::PowerPCState& ppc_state)
  {
    if (!s_regions_enabled.load(std::memory_order_relaxed) || !RegionFilterHas(ppc_state.pc) ||
        !ppc_state.msr.IR || !ppc_state.msr.DR || !ppc_state.msr.FP ||
@@ -223,7 +238,7 @@ diff --git a/Source/Core/Core/PowerPC/CachedInterpreter/CachedInterpreter.cpp b/
        FindRegionIndex(ppc_state.pc) == NO_REGION)
      return false;
    if (s_region_stats_on)
-@@ -10137,7 +10276,7 @@ int RegionChainNext(int state_ptr)
+@@ -10137,7 +10291,7 @@ int RegionChainNext(int state_ptr)
    const InstalledRegion& region = s_regions[index];
    if (!region.verified || !s_regions_enabled.load(std::memory_order_relaxed) ||
        !ppc_state.msr.IR || !ppc_state.msr.DR || !ppc_state.msr.FP ||
@@ -232,7 +247,7 @@ diff --git a/Source/Core/Core/PowerPC/CachedInterpreter/CachedInterpreter.cpp b/
    {
      stats.refused += 1;
      return 0;
-@@ -15686,6 +15825,20 @@ bool RegionInterpretsInline(const PPCAnalyst::CodeOp& op)
+@@ -15686,6 +15840,20 @@ bool RegionInterpretsInline(const PPCAnalyst::CodeOp& op)
    return !(inst.OPCD == 4 && inst.SUBOP10 == 1014);  // dcbz_l: a cache op
  }
  
@@ -253,7 +268,7 @@ diff --git a/Source/Core/Core/PowerPC/CachedInterpreter/CachedInterpreter.cpp b/
  bool BuildFragmentBlock(Core::System& system, u32 pc, u32 limit, FragmentBlock* out)
  {
    auto& ppc = system.GetPPCState();
-@@ -15718,7 +15871,8 @@ bool BuildFragmentBlock(Core::System& system, u32 pc, u32 limit, FragmentBlock*
+@@ -15718,7 +15886,8 @@ bool BuildFragmentBlock(Core::System& system, u32 pc, u32 limit, FragmentBlock*
    {
      const PPCAnalyst::CodeOp& op = buffer[prefix];
      if ((!IsPpcWasmDirectInstructionCandidate(op) && !RegionInterpretsInline(op)) ||
@@ -263,7 +278,25 @@ diff --git a/Source/Core/Core/PowerPC/CachedInterpreter/CachedInterpreter.cpp b/
        break;
      if (op.canEndBlock)
      {
-@@ -16014,8 +16168,8 @@ namespace
+@@ -15892,6 +16061,17 @@ bool BuildRegionFragment(Core::System& system, u32 entry_pc, std::span<const u32
+   code.assign(WASM_BLOCK_LOCALS.begin(), WASM_BLOCK_LOCALS.end());
+   code[0] = 0x07;
+   code.insert(code.end(), {0x01, 0x7f});  // the dispatch pc
++  // 0111: compares store CR fields without SO (EmitLazyCrStore): with XER.SO
++  // set the fragment does not run (1, as a pc that is not an entry). The
++  // dispatcher and region chaining refuse first; this covers a direct call.
++  EmitLocalGet(code, 0);
++  code.insert(code.end(), {0x2d, 0x00});  // i32.load8_u
++  EmitU32Leb(code, static_cast<u32>(reinterpret_cast<std::uintptr_t>(&ppc.xer_so_ov) - base));
++  EmitI32Const(code, 2);
++  out->relocs.push_back({static_cast<u32>(code.size()) + 1, 4, 0});  // SO set: unlikely
++  code.insert(code.end(), {0x71, 0x04, 0x40});  // i32.and; if
++  EmitI32Const(code, 1);
++  code.insert(code.end(), {0x0f, 0x0b});  // return; end
+   code.insert(code.end(), {0x03, 0x40});  // loop
+   EmitLocalGet(code, 0);
+   load(pc_offset);
+@@ -16014,8 +16194,8 @@ namespace
  // 6 (0105): FPU ops outside the direct tier stay in the region, interpreted.
  // 7 (0108): region byte swaps as two rotates. 8 (0109): regions of up to
  // 256 blocks, under a 480 KB cap. 9 (0110): region modules carry wasm branch
