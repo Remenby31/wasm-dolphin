@@ -757,7 +757,20 @@ void EnsureRuntime()
     Config::SetBase(Config::GetInfoForSIDevice(port), SerialInterface::SIDEVICE_GC_CONTROLLER);
   Config::SetBase(Config::MAIN_AUDIO_BACKEND, std::string("Web Audio"));
   Config::SetBase(Config::MAIN_AUDIO_MUTED, false);
-  Config::SetBase(Config::GFX_HACK_SKIP_XFB_COPY_TO_RAM, s_video_backend == "OGL");
+  // Dolphin's default. OGL and WebGPU present the XFB from the texture cache,
+  // so the copy to guest RAM only fed DolphinWeb_OnXfb's software presenter.
+  // A GameINI that needs the RAM copy ([Video_Hacks] XFBToTextureEnable =
+  // False, embedded by 0097 v3) overrides this base value from the game
+  // layer: only the base layer is set here.
+  const bool hardware_xfb = s_video_backend == "OGL" || s_video_backend == "WebGPU";
+  Config::SetBase(Config::GFX_HACK_SKIP_XFB_COPY_TO_RAM, hardware_xfb);
+  s_skip_xfb_decode = s_video_backend == "WebGPU";
+  // Without the RAM copy, an XFB texture keeps its id until the game copies a
+  // new one, so Dolphin's duplicate check starts skipping the presents of
+  // fields that repeat a frame (with the RAM copy every field reloaded a new
+  // texture). Keep one present per VI field, as before and as OGL does.
+  if (s_video_backend == "WebGPU")
+    Config::SetBase(Config::GFX_HACK_SKIP_DUPLICATE_XFBS, false);
   Config::SetBase(Config::GFX_HACK_COPY_EFB_SCALED, false);
   // ?efbaccess=1 (Module['dolphinEfbAccess']): CPU reads and writes of the
   // EFB, off by default as in Dolphin; upstream turns them on per game
@@ -1027,7 +1040,8 @@ int SetCpuThread(int enabled)
 // Tests (patch 0097): the value Dolphin's game config gives an allowlisted
 // setting (tools/gamesettings-allowlist.json) for a disc ID and revision from
 // the INIs under /dolphin-sys/GameSettings, as the game's boot reads it: MMU
-// (System::Initialize, IsMMUMode) and SafeTextureCacheColorSamples; booleans
+// (System::Initialize, IsMMUMode), SafeTextureCacheColorSamples and
+// XFBToTextureEnable (GFX_HACK_SKIP_XFB_COPY_TO_RAM); booleans
 // as 0/1. The global game layer is added for the read and removed after; -1
 // when a game's layer is already there (a game is running), which this must
 // not replace, -2 for a setting it does not know.
@@ -1037,13 +1051,15 @@ EMSCRIPTEN_KEEPALIVE
 int GameConfigValueForTest(const char* game_id, int revision, const char* setting)
 {
   const std::string_view name = setting;
-  if (name != "MMU" && name != "SafeTextureCacheColorSamples")
+  if (name != "MMU" && name != "SafeTextureCacheColorSamples" && name != "XFBToTextureEnable")
     return -2;
   if (Config::GetLayer(Config::LayerType::GlobalGame))
     return -1;
   Config::AddLayer(ConfigLoaders::GenerateGlobalGameConfigLoader(game_id, static_cast<u16>(revision)));
-  const int value = name == "MMU" ? (Config::Get(Config::MAIN_MMU) ? 1 : 0) :
-                                    Config::Get(Config::GFX_SAFE_TEXTURE_CACHE_COLOR_SAMPLES);
+  const int value =
+      name == "MMU"                  ? (Config::Get(Config::MAIN_MMU) ? 1 : 0) :
+      name == "XFBToTextureEnable"   ? (Config::Get(Config::GFX_HACK_SKIP_XFB_COPY_TO_RAM) ? 1 : 0) :
+                                       Config::Get(Config::GFX_SAFE_TEXTURE_CACHE_COLOR_SAMPLES);
   Config::RemoveLayer(Config::LayerType::GlobalGame);
   return value;
 }
