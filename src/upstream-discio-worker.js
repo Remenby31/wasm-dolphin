@@ -5290,12 +5290,15 @@ function recordVisualFrameHash(hash, sampledSourceFrame = false) {
   lastVisualFrameHash = visualFrameHash;
 }
 
-function recordPresentedFrame(coreFrame) {
+// shownVi: the VI output (since boot) this present shows, when the renderer
+// knows it (video=wgpu: its ViTag); otherwise the core's VI count now, which
+// can already be ahead of the field on screen.
+function recordPresentedFrame(coreFrame, shownVi = null) {
   if (harnessEnabled) {
     const slot = (harnessPresentHead % HARNESS_PRESENT_RING) * 3;
     harnessPresentRing[slot] = harnessNow();
     harnessPresentRing[slot + 1] = coreFrame;
-    harnessPresentRing[slot + 2] = moduleInstance?._DolphinWeb_HarnessViSinceBoot?.() ?? -1;
+    harnessPresentRing[slot + 2] = shownVi ?? moduleInstance?._DolphinWeb_HarnessViSinceBoot?.() ?? -1;
     harnessPresentHead += 1;
     if (harnessDisplayStop) harnessDisplay.submit(harnessPresentRing[slot + 2]);
   }
@@ -14759,7 +14762,7 @@ function drainWebGpuCmdRing(source = "presentation") {
           cmdRingOwnsCanvas = true;
           // A frame carrying the diagnostic input marker is not streamed.
           if (streamCapture.active && !hardwareInputMarkerApplied) streamCapture.offerCanvas(renderCanvas, api?.getFrame?.() ?? 0);
-          recordPresentedFrame(api?.getFrame?.() ?? 0);
+          recordPresentedFrame(api?.getFrame?.() ?? 0, wgpuExactCapture.currentBoot());
           wgpuPresentedSource = {
             textureId: wgpuLastBackbufferSourceTextureId, rect: wgpuNextPresentSource
           };

@@ -93,6 +93,12 @@ export function createWgpuExactCapture() {
       if (request) finish(request, reason instanceof Error ? reason : new Error(String(reason)));
     },
 
+    // The VI output (since boot) the next present shows: the last ViTag, or
+    // null before the first one (a core without tags, harness off).
+    currentBoot() {
+      return current ? current.boot : null;
+    },
+
     // A savestate load finished: every waiting request belongs to the
     // replaced timeline, and nothing on screen is attributable any more.
     onLoad() {
