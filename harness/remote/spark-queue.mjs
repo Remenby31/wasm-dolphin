@@ -85,9 +85,11 @@ export function readTickets(bench = BENCH_DIR) {
 
 // Minutes a job holds the bench: a pair, from race-perf's options (every
 // run boots each side: warmup + window + ~20 s of boot and savestate); a
-// build ~8 min (more for a new worktree, which fetches its sources).
+// build ~3 min: one build checkout and a shared ccache (#78) make a build
+// after another 1-3.5 min (measured 2026-10-22); only a cold one takes ~7.
+export const BUILD_MIN = 3;
 export function estimateMin(kind, args = []) {
-  if (kind === "build") return 8;
+  if (kind === "build") return BUILD_MIN;
   const opt = (name, def) => { const i = args.indexOf(`--${name}`); return i >= 0 && Number.isFinite(Number(args[i + 1])) ? Number(args[i + 1]) : def; };
   const sides = args.includes("--baseline") ? 2 : 1;
   return Math.round((opt("runs", 4) * sides * (opt("warmup", 25) + opt("secs", 20) + 20)) / 60);
@@ -100,7 +102,7 @@ export function eta(tickets, now = Date.now()) {
   let t0 = 0;
   const out = [];
   for (const t of tickets.filter((x) => x.lane !== "none")) {
-    const est = t.estMin ?? (t.kind === "build" ? 8 : 13);
+    const est = t.estMin ?? (t.kind === "build" ? BUILD_MIN : 13);
     if (t.lane) {
       const left = Math.max(1, est - (t.grantedAt ? (now - Date.parse(t.grantedAt)) / 60000 : 0));
       out.push({ ...t, startsIn: 0, endsIn: Math.round(left) });

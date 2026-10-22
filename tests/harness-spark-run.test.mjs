@@ -171,7 +171,7 @@ test("spark queue: move refuses what would break the order, a duplicate keeps th
 test("spark queue: estimated durations and each job's wait", () => {
   assert.equal(estimateMin("pair", ["--runs", "6", "--baseline", "/b", "--candidate", "/c"]), 13); // 6 × 2 × 65 s
   assert.equal(estimateMin("pair", ["--runs", "4", "--warmup", "10", "--secs", "10"]), 3); // one side
-  assert.equal(estimateMin("build"), 8);
+  assert.equal(estimateMin("build"), 3);
   const now = Date.parse("2026-10-22T00:30:00Z");
   const rows = eta([
     { id: "1", kind: "pair", name: "r", lane: "a", estMin: 13, grantedAt: "2026-10-22T00:25:00Z" },
@@ -179,7 +179,7 @@ test("spark queue: estimated durations and each job's wait", () => {
     { id: "3", kind: "pair", name: "p", estMin: 10 },
     { id: "4", kind: "build", name: "k" }
   ], now);
-  assert.deepEqual(rows.map((r) => [r.name, r.startsIn, r.endsIn]), [["r", 0, 8], ["p", 8, 18], ["k", 18, 26]]);
+  assert.deepEqual(rows.map((r) => [r.name, r.startsIn, r.endsIn]), [["r", 0, 8], ["p", 8, 18], ["k", 18, 21]]);
 });
 
 test("spark-run: a core counts as built on the bench only when the bench built it", () => {
