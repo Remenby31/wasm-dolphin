@@ -125,10 +125,10 @@ test("regions run only with translation and FP on", { skip }, () => {
 // the plan's hashes before it next runs: the same bytes written again (the
 // OS init on every second launch) keep it, changed code drops it.
 const rechecks = () => {
-  const p = core.module._malloc(8);
+  const p = core.module._malloc(12);
   try {
     core.module._DolphinWeb_AotRegionRechecks(p);
-    return Array.from(new Uint32Array(core.module.HEAPU8.buffer, p, 2));
+    return Array.from(new Uint32Array(core.module.HEAPU8.buffer, p, 3));
   } finally {
     core.module._free(p);
   }
@@ -155,6 +155,25 @@ test("invalidating covered code: unchanged code keeps its region, changed code d
   assert.ok(core.regionCount() < count, "the region with double is gone");
   const patched = runCall(PROGRAM.labels.main, { regions: false });
   assert.deepEqual(runCall(PROGRAM.labels.main, { regions: true }).state, patched.state, "the new code runs");
+});
+
+// Review of #85: a region already due for a check is not scanned again by
+// every later invalidation (a game invalidating a megabyte line by line), and
+// a forced invalidation (breakpoints) drops it at once, as before.
+test("invalidations skip a region already due for a check; a forced one drops it", { skip: skip || (typeof core?.module._DolphinWeb_AotInvalidateForcedForTest !== "function" && "core without forced invalidations (0085)") }, () => {
+  installed();
+  const count = core.regionCount();
+  const same = () => core.load(PROGRAM.labels.double, core.ram().slice(PROGRAM.labels.double & 0x01ffffff, (PROGRAM.labels.double & 0x01ffffff) + 4));
+  same();
+  core.invalidate(PROGRAM.labels.double, 4); // kept, to be checked
+  const scans = rechecks()[2];
+  for (let line = 0; line < 64; line++) core.invalidate(PROGRAM.labels.double, 4);
+  assert.ok(rechecks()[2] - scans < 64, `the region due for a check is skipped (${rechecks()[2] - scans} scans for 64 invalidations)`);
+  assert.equal(core.regionCount(), count, "kept");
+  core.module._DolphinWeb_AotInvalidateForcedForTest(PROGRAM.labels.double, 4);
+  assert.ok(core.regionCount() < count, "a forced invalidation drops it");
+  core.reset(seedGprs(1), PROGRAM.labels.double, STOP, 400000);
+  assert.equal(core.dispatchRegion(), 0);
 });
 
 test("invalidating covered code drops the regions holding it, other code keeps them (core before 0085)", { skip: skip || (core?.has("DolphinWeb_AotRegionRechecks") && "core with region re-checks (0085)") }, () => {
