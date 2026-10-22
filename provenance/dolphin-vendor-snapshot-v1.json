@@ -3,8 +3,8 @@
   "normalization": "git-blob-lf",
   "root": {
     "baseCommit": "e22551eae1c84a7e4d0b6a5c519ef4ed4ef69df1",
-    "resultTree": "8d0d62509e0e2116428d1826d1ed503c1a7f13fb",
-    "changedPathCount": 131,
+    "resultTree": "e0d04391f1dd35903bd4af5ca32c07c691447c87",
+    "changedPathCount": 133,
     "records": [
       {
         "path": "CMakeLists.txt",
@@ -59,6 +59,15 @@
         "resultBlob": "c07dd188620372c907f3457febdc05499b43838a",
         "size": 562,
         "sha256": "9b6e3f4cc79ea2a7acb852bc348d917e9dcddd8e6d29d281b92f9bd0c4c77e6d"
+      },
+      {
+        "path": "Source/Core/Common/BlockingLoop.h",
+        "status": "M",
+        "mode": "100644",
+        "baseBlob": "472a84b1f62915518d511d1f5c8245b3d48a7187",
+        "resultBlob": "67bf797ad023b046bf04ad495af5211513bbfc12",
+        "size": 9237,
+        "sha256": "65aaf87db1172751b591aa0963e704a00f37fc2b7b5d236ece081d7681800916"
       },
       {
         "path": "Source/Core/Common/CMakeLists.txt",
@@ -938,9 +947,18 @@
         "status": "M",
         "mode": "100644",
         "baseBlob": "f183c9365514cc908bbc3641d55ff8db8c3acfe9",
-        "resultBlob": "ac88478ca1fe4fd18f5448f6baad4f8a4db28faf",
-        "size": 27463,
-        "sha256": "dca2d4698a24950da5ba81febee37edabbf5b3ea3e8c8a5f3c8412ceda155535"
+        "resultBlob": "27d3ae2cd9f48906689a8d71772acbb289475970",
+        "size": 27787,
+        "sha256": "2c50a474c9878a08136022d15e47448759ab2c1596b0bd3061633ce02ad528cf"
+      },
+      {
+        "path": "Source/Core/VideoCommon/Fifo.h",
+        "status": "M",
+        "mode": "100644",
+        "baseBlob": "2afa110532edc7120dc10ce3d56713b56c3dd1a2",
+        "resultBlob": "3fe342e31bb5d8bea4deee4babc2115981f255b5",
+        "size": 4267,
+        "sha256": "dd66f1d67d07183f7719f4a02e1b0553345701ed5490ec964d41f90e8cf2b399"
       },
       {
         "path": "Source/Core/VideoCommon/FramebufferManager.cpp",
@@ -1221,5 +1239,5 @@
       ]
     }
   ],
-  "contentSha256": "5256cfcdb14925434f6e548ba9ca236c740a429797538331fb44d8b0d04f47a0"
+  "contentSha256": "def70b2b9a9f81bb42a58280793eed8ff23510fb5472049910f1bafbbd77853c"
 }
