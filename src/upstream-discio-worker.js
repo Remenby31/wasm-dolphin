@@ -150,6 +150,7 @@ import {
   hashWgpuVisualSample
 } from "./wgpu-visual-cadence.js";
 import { createCoreLifecycle } from "./core-lifecycle.js";
+import { PipelinePrewarm } from "./wgpu-pipeline-prewarm.js";
 import { BOOT_FILE_HEAD_BYTES, bootFileKind, checkExecutable, executableGameId } from "./boot-file.js";
 import {
   USER_DATA_ROOT,
@@ -395,6 +396,12 @@ let wgpuRendererWorkerProbe = "off";
 let wgpuVisualCadenceEnabled = false;
 // Mirrors the loaded core's videoBackend for code outside loadCore's scope.
 let hardwareVideoBackend = false;
+// video=wgpu: pipelines seen in earlier sessions, compiled at boot
+// (src/wgpu-pipeline-prewarm.js). null when off (?wgpuprewarm=0) or not wgpu.
+let wgpuPipelinePrewarmEnabled = true;
+let pipelinePrewarm = null;
+// The loaded core's identity: a pipeline list belongs to one core build.
+let coreBuildFingerprint = "";
 let wgpuVisualCadenceResources = null;
 let wgpuVisualCadenceTelemetry = createWgpuVisualCadenceTelemetry(false);
 let wgpuVisualCadenceSequence = 0;
@@ -1139,6 +1146,8 @@ async function handleMessage(type, payload) {
   // P6: blocks waiting for their pack go out when the saves do (page hidden
   // or closed) and on stop; their outcome is not the saves'.
   if (type === "flushUserData" || type === "stop") void dolphinJitBlockStore?.flush().catch(() => {});
+  if (type === "flushUserData" || type === "stop") void pipelinePrewarm?.flush();
+  if (type === "stop") pipelinePrewarm?.stop();
   switch (type) {
     case "load":
       if (!moduleInstance) {
@@ -1301,6 +1310,7 @@ async function handleMessage(type, payload) {
         wgpuMappedDrainCoalescing: payload.wgpuMappedDrainCoalescing,
         wgpuRendererWorkerProbe: payload.wgpuRendererWorkerProbe,
         wgpuVisualCadence: payload.wgpuVisualCadence,
+        wgpuPipelinePrewarm: payload.wgpuPipelinePrewarm,
         wgpuPassPackageProjection: payload.wgpuPassPackageProjection,
         wgpuUploadRunProjection: payload.wgpuUploadRunProjection,
         wgpuUboComputeProjection: payload.wgpuUboComputeProjection,
@@ -1484,6 +1494,8 @@ async function handleMessage(type, payload) {
       return harnessMemAccessStats(payload);
     case "validationCaptureAtVi":
       return captureAtViOutput(payload);
+    case "validationReadPipelinePrewarm":
+      return pipelinePrewarm ? pipelinePrewarm.snapshot() : { enabled: false, why: !hardwareVideoBackend ? "not video=wgpu" : !wgpuPipelinePrewarmEnabled ? "wgpuprewarm=0" : "not started" };
     case "validationReadDetTrace":
       return readDetTrace(payload);
     case "validationReadWgpuReplayState":
@@ -1919,6 +1931,7 @@ async function loadCore({
   wgpuMappedDrainCoalescing: requestedWgpuMappedDrainCoalescing = false,
   wgpuRendererWorkerProbe: requestedWgpuRendererWorkerProbe = "off",
   wgpuVisualCadence: requestedWgpuVisualCadence = false,
+  wgpuPipelinePrewarm: requestedWgpuPipelinePrewarm = true,
   wgpuPassPackageProjection: requestedWgpuPassPackageProjection = false,
   wgpuUploadRunProjection: requestedWgpuUploadRunProjection = false,
   wgpuUboComputeProjection: requestedWgpuUboComputeProjection = false,
@@ -2089,6 +2102,9 @@ async function loadCore({
   }
   destroyWgpuVisualCadenceResources();
   hardwareVideoBackend = videoBackend === "WebGPU-Real";
+  wgpuPipelinePrewarmEnabled = requestedWgpuPipelinePrewarm !== false;
+  pipelinePrewarm?.stop();
+  pipelinePrewarm = null;
   wgpuVisualCadenceEnabled = Boolean(requestedWgpuVisualCadence);
   wgpuVisualCadenceTelemetry = createWgpuVisualCadenceTelemetry(
     wgpuVisualCadenceEnabled
@@ -2299,6 +2315,7 @@ async function loadCore({
   aotFirstLaunchEnabled = aotFirstLaunch === true;
   dolphinJitBootLoadComplete = false;
   dolphinJitBootLoadedEntries = 0;
+  coreBuildFingerprint = String(buildFingerprint ?? "");
   if (!noJitCache) {
     await reconcileJitCacheWithBuild(buildFingerprint);
   } else {
@@ -3565,6 +3582,7 @@ async function mountFile(file) {
     api.pumpHostJobs?.();
     console.log(`[boot-phase] api.pumpHostJobs() took ${(performance.now() - _t_pump).toFixed(1)}ms`);
     if (coreBoot.accepted) void startAotFirstLaunchAfterBoot();
+    if (coreBoot.accepted) void startPipelinePrewarm(bootedGame.gameId);
   } else if (api.bootDisc) {
     coreBoot.skippedReason = `Disc image is too small for full CPU boot (${file.size} bytes)`;
   }
@@ -14853,6 +14871,28 @@ function finishWebGpuDrain(startedAt, processed) {
   );
 }
 
+// video=wgpu: load this game's pipeline list and compile it while the game
+// boots. Created before the first await, so that every shader the replay
+// creates from now on is noted and its pipelines can be recorded.
+async function startPipelinePrewarm(gameId) {
+  if (!hardwareVideoBackend || !wgpuPipelinePrewarmEnabled || !renderGpu || !gameId) return;
+  const prewarm = new PipelinePrewarm();
+  pipelinePrewarm?.stop();
+  pipelinePrewarm = prewarm;
+  try { prewarm.root = await navigator.storage.getDirectory(); } catch { /* memory only */ }
+  const loaded = await prewarm.load(gameId, coreBuildFingerprint);
+  if (!loaded || pipelinePrewarm !== prewarm || !renderGpu) return;
+  const device = renderGpu.device;
+  // Stops at a core reload or a lost device (renderGpu replaced or cleared).
+  const alive = () => pipelinePrewarm === prewarm && renderGpu?.device === device;
+  const stats = await prewarm.prewarm(device, (samplingKey) => {
+    const [u, n] = samplingKey.split("/").map(Number);
+    return getFixedLayouts(u, n).pipelineLayout;
+  }, { alive });
+  console.log(`[wgpu-prewarm] ${gameId}: ${stats.compiled}/${stats.loaded} pipelines compiled in ${stats.prewarmMs} ms` +
+    (stats.failed ? `, ${stats.failed} failed (${stats.lastError})` : ""));
+}
+
 // Day-29: build a real GPURenderPipeline from a bridge-translated
 // vertex-shader module + the constant-colour test FS. Wrapped in an
 // error scope so WGSL/pipeline-validation failures are reported
@@ -15237,9 +15277,14 @@ function resolvePipeline(pipelineId, colorFmt, depthFmt, dbg, revZ, samplingKey 
     vpDiagFinalCmp.set(key, (vpDiagFinalCmp.get(key) || 0) + 1);
   }
   let pipe = null;
+  const prewarmEntry = pipelinePrewarm?.keyFor(d, {
+    vsId: tpl.vsId, fsId: tpl.fsId, samplingKey,
+    vsModule: webGpuObjects.shaders.get(tpl.vsId), fsModule: webGpuObjects.shaders.get(tpl.fsId)
+  }) ?? null;
+  const prewarmed = prewarmEntry ? pipelinePrewarm.take(prewarmEntry.key) : null;
   try {
     renderGpu.device.pushErrorScope("validation");
-    pipe = renderGpu.device.createRenderPipeline(d);
+    pipe = prewarmed ?? renderGpu.device.createRenderPipeline(d);
     if (pipe && d.depthStencil) {
       vpDiagPipeFinalDs.set(pipe, { cmp: d.depthStencil.depthCompare,
                                     write: !!d.depthStencil.depthWriteEnabled });
@@ -15259,6 +15304,7 @@ function resolvePipeline(pipelineId, colorFmt, depthFmt, dbg, revZ, samplingKey 
         }
       } else {
         webGpuPcfg.ok += 1;
+        pipelinePrewarm?.record(prewarmEntry);
         if (webGpuPcfg.ok <= 3 || webGpuPcfg.ok % 128 === 0) {
           console.log(`[webgpu-pcfg] variant OK ${key} ` +
             `[ok=${webGpuPcfg.ok} fail=${webGpuPcfg.fail}]`);
@@ -15542,6 +15588,7 @@ function replayCreateShader(id, blobPtr, blobLen, stage) {
     return;
   }
   webGpuObjects.shaders.set(id, module);
+  pipelinePrewarm?.noteShader(id, wgsl);
   if (uvForcedWgsl) {
     try {
       webGpuObjects.shadersUvForced.set(id,
