@@ -289,6 +289,21 @@ function harnessJitRegionStats({ sampleEvery } = {}) {
   // heapPatched: cached modules whose heap sites were moved to this session's (0084).
   return { bytes: copy(), again: copy(), installSamples: harnessRegionInstallSamples(heap), layoutRefused, heapPatched: aotHeapPatched };
 }
+// AX HLE timing (patch 0099, harness/lib/ax-hle-stats.mjs): reset >= 0
+// zeroes and turns the counters on from the next mail; copied twice so the
+// harness can refuse a torn read.
+function harnessAxHleStats({ reset } = {}) {
+  if (!harnessEnabled) return { error: "harness hooks are off" };
+  const stats = moduleInstance?._DolphinWeb_AxHleStats;
+  if (!stats) return { error: "core has no DolphinWeb_AxHleStats" };
+  const ptr = stats(Number.isInteger(reset) && reset >= 0 ? reset : -1) >>> 0;
+  const heap = moduleInstance.HEAPU8;
+  if (!ptr || ptr + 8 > heap.length) return { error: `DolphinWeb_AxHleStats returned ${ptr}` };
+  const size = Math.min(new DataView(heap.buffer, ptr, 8).getUint32(4, true), 64);
+  if (ptr + size > heap.length) return { error: `AX stats of ${size} bytes past the heap` };
+  const copy = () => Array.from(new Uint8Array(heap.buffer, ptr, size));
+  return { bytes: copy(), again: copy() };
+}
 // The core's first region installs, [ms, bytes, path] each (path 0 first
 // attempt, 1 after the worker's ready byte, 2 cold); null with an older core.
 function harnessRegionInstallSamples(heap) {
@@ -1448,6 +1463,8 @@ async function handleMessage(type, payload) {
       return harnessPcSampler(payload);
     case "validationReadJitRegionStats":
       return harnessJitRegionStats(payload);
+    case "validationReadAxHleStats":
+      return harnessAxHleStats(payload);
     case "validationCaptureAtVi":
       return captureAtViOutput(payload);
     case "validationReadDetTrace":

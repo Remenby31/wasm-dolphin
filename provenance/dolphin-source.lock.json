@@ -25,7 +25,11 @@
       "commit": "01e0577914a75a2569c846778c2f93aa8e6feddd"
     }
   },
+<<<<<<< HEAD
   "patchSeriesSha256": "93af24201a54a98734c6f5e7b7d20c879d80e30d435545761d67e56e52e83a03",
+=======
+  "patchSeriesSha256": "61645dcfed6cf0cfbaacb296d5f2acb40aa2b50c964fd4e97109381156dfdd2f",
+>>>>>>> origin/main
   "patches": [
     {
       "order": 1,
@@ -652,6 +656,17 @@
       "sha256": "d169775dc85c7e756561439fb1da2f749d3a774f0abd2b0dc0116017ed67a46d"
     },
     {
+<<<<<<< HEAD
+=======
+      "order": 78,
+      "cwd": ".",
+      "hashMode": "lf-normalized",
+      "path": "patches/dolphin-wasm/snapshot/0099-ax-hle-timing.patch",
+      "size": 3424,
+      "sha256": "fcf883f10294f89b4660891765bba842259213b7ebebbf80e6815cb0b083f6b5"
+    },
+    {
+>>>>>>> origin/main
       "order": 79,
       "cwd": "Externals/SFML/SFML",
       "hashMode": "lf-normalized",

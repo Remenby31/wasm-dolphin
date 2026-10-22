@@ -1,0 +1,92 @@
+diff --git a/Source/Core/Core/HW/DSPHLE/DSPHLE.cpp b/Source/Core/Core/HW/DSPHLE/DSPHLE.cpp
+--- a/Source/Core/Core/HW/DSPHLE/DSPHLE.cpp
++++ b/Source/Core/Core/HW/DSPHLE/DSPHLE.cpp
+@@ -12,6 +12,15 @@
+ #include "Core/HW/SystemTimers.h"
+ #include "Core/System.h"
+ 
++#ifdef __EMSCRIPTEN__
++#include <algorithm>
++#include <atomic>
++#include <chrono>
++#include <cstdint>
++
++#include <emscripten/emscripten.h>
++#endif
++
+ namespace DSP::HLE
+ {
+ DSPHLE::DSPHLE(Core::System& system) : m_mail_handler(system.GetDSP()), m_system(system)
+@@ -60,6 +69,43 @@ u32 DSPHLE::DSP_UpdateRate()
+   return m_system.GetSystemTimers().GetTicksPerSecond() / 1000;
+ }
+ 
++#ifdef __EMSCRIPTEN__
++namespace
++{
++// AX HLE timing (patch 0099, read by harness/lib/ax-hle-stats.mjs): host time
++// of the mail handling on the CPU thread. AX runs a whole command list
++// synchronously inside the DSP mailbox MMIO write (AXUCode::HandleMail ->
++// HandleCommandList). Off until DolphinWeb_AxHleStats(n >= 0); the CPU thread
++// applies the request at its next mailbox write, so nothing is added on any
++// per-block path, and only one relaxed load per mail while it is off.
++// Layout v1, little-endian: u32 version, size_bytes, on, reserved; then f64
++// mail_ms (host time in the mail handling), mails, mail_max_ms, window_ms
++// (host time from the reset to the last mail), and two spares.
++struct AxHleStats
++{
++  u32 version = 1;
++  u32 size_bytes = 64;
++  u32 on = 0;
++  u32 reserved = 0;
++  double mail_ms = 0, mails = 0, mail_max_ms = 0, window_ms = 0;
++  double spare[2] = {};
++};
++static_assert(sizeof(AxHleStats) == 64);
++AxHleStats s_ax_stats;
++std::atomic<int> s_ax_stats_request{-1};
++std::chrono::steady_clock::time_point s_ax_window_start;
++}  // namespace
++
++// n >= 0: counts from zero from the next mail on; n < 0: only reads. Returns
++// the address of the struct (read from the worker, copied twice for tears).
++extern "C" EMSCRIPTEN_KEEPALIVE u32 DolphinWeb_AxHleStats(int reset)
++{
++  if (reset >= 0)
++    s_ax_stats_request.store(reset, std::memory_order_release);
++  return static_cast<u32>(reinterpret_cast<std::uintptr_t>(&s_ax_stats));
++}
++#endif
++
+ void DSPHLE::SendMailToDSP(u32 mail)
+ {
+   if (m_ucode != nullptr)
+@@ -181,6 +227,28 @@ void DSPHLE::DSP_WriteMailBoxLow(bool cpu_mailbox, u16 value)
+   if (cpu_mailbox)
+   {
+     m_dsp_state.cpu_mailbox = (m_dsp_state.cpu_mailbox & 0xFFFF0000) | value;
++#ifdef __EMSCRIPTEN__
++    if (s_ax_stats_request.load(std::memory_order_relaxed) >= 0) [[unlikely]]
++    {
++      s_ax_stats_request.exchange(-1, std::memory_order_acquire);
++      s_ax_stats = AxHleStats{};
++      s_ax_stats.on = 1;
++      s_ax_window_start = std::chrono::steady_clock::now();
++    }
++    if (s_ax_stats.on) [[unlikely]]
++    {
++      const auto start = std::chrono::steady_clock::now();
++      SendMailToDSP(m_dsp_state.cpu_mailbox);
++      const auto end = std::chrono::steady_clock::now();
++      const double ms = std::chrono::duration<double, std::milli>(end - start).count();
++      s_ax_stats.mail_ms += ms;
++      s_ax_stats.mails += 1;
++      s_ax_stats.mail_max_ms = std::max(s_ax_stats.mail_max_ms, ms);
++      s_ax_stats.window_ms =
++          std::chrono::duration<double, std::milli>(end - s_ax_window_start).count();
++    }
++    else
++#endif
+     SendMailToDSP(m_dsp_state.cpu_mailbox);
+     // Mail sent so clear MSB to show that it is progressed
+     m_dsp_state.cpu_mailbox &= 0x7FFFFFFF;
