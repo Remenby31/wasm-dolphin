@@ -252,6 +252,11 @@ if (process.env.DOLPHIN_WASM_CCACHE) {
 // PROFILING_FUNCS=1 adds a wasm name section to the core so CPU profiles show
 // real symbols instead of wasm-function[N]. Name section only — no codegen or
 // optimisation change, so timings stay representative. Off by default.
+// The LTO step of wasm-ld runs at its default --lto-O2: emcc passes -O3 to
+// compilation and wasm-opt, never to wasm-ld (research/deep-build-toolchain.md
+// §2.1). The flag is passed on every configure, so a cached value never
+// outlives the setting.
+const linkerFlags = ["-Wl,--lto-O3"];
 if (process.env.PROFILING_FUNCS === "1") {
   // The -D was on its own for a while, and nothing in the vendored CMake ever
   // read it: the configure step logged that it was building with symbols, the
@@ -259,9 +264,10 @@ if (process.env.PROFILING_FUNCS === "1") {
   // Pass the flag itself so the setting cannot be advertised without taking
   // effect.
   cmakeArgs.push("-DDOLPHIN_WASM_PROFILING_FUNCS=ON");
-  cmakeArgs.push("-DCMAKE_EXE_LINKER_FLAGS:STRING=--profiling-funcs");
+  linkerFlags.push("--profiling-funcs");
   console.log("PROFILING_FUNCS=1 -> core will be built with a wasm name section");
 }
+cmakeArgs.push(`-DCMAKE_EXE_LINKER_FLAGS:STRING=${linkerFlags.join(" ")}`);
 
 if (existsSync(bridgeSource)) {
   cmakeArgs.push(`-DDOLPHIN_WASM_BRIDGE_SOURCE=${bridgeSource}`);
