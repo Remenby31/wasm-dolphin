@@ -25,7 +25,7 @@
       "commit": "01e0577914a75a2569c846778c2f93aa8e6feddd"
     }
   },
-  "patchSeriesSha256": "f68f365ec15e9f51b4eb5f6c56efe51a6367dd30c02db1855eae5303a8ce01d6",
+  "patchSeriesSha256": "2ebd7ca0e5f18f90ffe0d4b4d1f077880c350297fa3d90a76363d2e3a7852833",
   "patches": [
     {
       "order": 1,
@@ -639,12 +639,20 @@
       "order": 77,
       "cwd": ".",
       "hashMode": "lf-normalized",
+      "path": "patches/dolphin-wasm/snapshot/0085-region-recheck-after-invalidation.patch",
+      "size": 3267,
+      "sha256": "61b5fd43d597f5733a80deb4ade470372847107e43aa65c679397191d8d73f11"
+    },
+    {
+      "order": 78,
+      "cwd": ".",
+      "hashMode": "lf-normalized",
       "path": "patches/dolphin-wasm/snapshot/0091-no-wasm-code-under-mmu.patch",
       "size": 3471,
       "sha256": "d169775dc85c7e756561439fb1da2f749d3a774f0abd2b0dc0116017ed67a46d"
     },
     {
-      "order": 78,
+      "order": 79,
       "cwd": "Externals/SFML/SFML",
       "hashMode": "lf-normalized",
       "path": "patches/dolphin-wasm/submodules/0001-sfml-emscripten-config.patch",
@@ -652,7 +660,7 @@
       "sha256": "f82197a21fe982ad83f6ee7bbf5a03839b1cebd4d64da3eab11263842bf61d89"
     },
     {
-      "order": 79,
+      "order": 80,
       "cwd": "Externals/xxhash/xxHash",
       "hashMode": "lf-normalized",
       "path": "patches/dolphin-wasm/submodules/0002-xxhash-wasm-simd-scalar.patch",
