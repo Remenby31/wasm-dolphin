@@ -498,17 +498,20 @@ test("a dropped region is never chained to, even after a chain into it", { skip:
 // does (an interrupt or a scheduled event ends the slice through downcount,
 // CoreTiming::ForceExceptionCheck): one dispatch ends when downcount is
 // spent, never later, at the interpreter's state.
-const SPIN = assemble(TEXT, [
+// Its own text: since 0085 an invalidation keeps a region whose code is still
+// checkable (to be verified before it runs), and an entry already mapped
+// keeps its region, so code loaded over PROGRAM's would not get its own.
+const SPIN_TEXT = 0x80008100;
+const SPIN = assemble(SPIN_TEXT, [
   "spin", asm.addi(4, 4, 1), (pc, l) => asm.bl(pc, l.tick), (pc, l) => asm.b(pc, l.spin),
   "tick", asm.addi(5, 5, 1), asm.blr()
 ]);
 
 test("a loop across chained regions that never exits stops on downcount, like the interpreter", { skip: chainSkip }, () => {
-  const dol = buildDol({ textAddr: TEXT, text: SPIN.words, entry: SPIN.labels.spin });
+  const dol = buildDol({ textAddr: SPIN_TEXT, text: SPIN.words, entry: SPIN.labels.spin });
   const { image, entryPoint } = imageFromDol(dol);
   const plan = planDol({ image, entryPoint, gameId: "TEST01", dolBytes: dol, options: { gapFill: false } });
   for (const seg of image.segments) core.load(seg.start, seg.bytes);
-  core.invalidate(TEXT, 4 * PROGRAM.words.length);
   core.setRegionsEnabled(true);
   core.setRegionChaining(true);
   queueAll(plan, 1, true);
@@ -526,7 +529,7 @@ test("a loop across chained regions that never exits stops on downcount, like th
     assert.equal(core.downcount(), got.downcount, `budget ${budget}`);
     assert.deepEqual(core.state(), got.state, `budget ${budget}`);
   }
-  core.invalidate(TEXT, 4 * SPIN.words.length); // the next test's setup reloads PROGRAM
+  core.invalidate(SPIN_TEXT, 4 * SPIN.words.length);
 });
 
 // 0091 (with dispatch's 0090): under the MMU no region is installed, not even
