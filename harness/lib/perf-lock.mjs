@@ -312,6 +312,25 @@ async function contend({ dir, name, waitSec, pollSec, orphanSec, log, sleep, end
   }
 }
 
+// Whether `owner` still holds the lock alone: its nonce in .perf-lock, and
+// no other living harness holder, in .perf-lock or in a lock moved aside
+// (a takeover that moved a live lock): two holders at once would measure
+// on a shared machine. Cheap: one directory listing and a few small reads.
+export function lockIntegrity(dir, owner) {
+  const now = readLockOwner(dir);
+  if (now?.nonce !== owner.nonce) return { ok: false, why: `the lock is held by ${now ? `${now.name} (pid ${now.pid})` : "nobody"}, not by this process` };
+  const parent = path.dirname(dir), base = path.basename(dir);
+  let names = [];
+  try { names = readdirSync(parent).filter((n) => n.startsWith(`${base}.`) && !n.startsWith(`${base}.takeover`)); } catch {}
+  for (const n of names) {
+    const o = readLockOwner(path.join(parent, n));
+    if (o && o.nonce !== owner.nonce && o.harness && o.host === os.hostname() && Number.isInteger(o.pid) && o.pid !== process.pid && alive(o.pid)) {
+      return { ok: false, why: `another living holder: ${o.name} (pid ${o.pid}) in ${n}` };
+    }
+  }
+  return { ok: true };
+}
+
 function release(dir, owner) {
   let done = false;
   const free = () => {
@@ -330,11 +349,15 @@ function release(dir, owner) {
   process.once("SIGINT", onSignal);
   process.once("SIGTERM", onSignal);
   process.once("SIGHUP", onSignal);
-  return () => {
+  const releaseFn = () => {
     free();
     process.off("exit", free);
     process.off("SIGINT", onSignal);
     process.off("SIGTERM", onSignal);
     process.off("SIGHUP", onSignal);
   };
+  // releaseFn.check(): lockIntegrity for this holder (race-perf checks it
+  // when it takes the lock, before each run and at the end).
+  releaseFn.check = () => lockIntegrity(dir, owner);
+  return releaseFn;
 }

@@ -245,8 +245,8 @@ test("KPI: only clean trunk results count, one result per row, shown with its co
   assert.equal(rows.macSpeed.status, "KO");
   assert.equal(rows.raceFrameP99.status, "OK");
   assert.equal(rows.regionTimeShare.status, "n/a");
-  assert.equal(rows.regionTimeShare.why, "aucune race-perf avec aot=1 sur trunk"); // P4 shares read aot=1
-  assert.equal(rows.macSpeedAot.why, "aucune race-perf avec aot=1 sur trunk");
+  assert.equal(rows.regionTimeShare.why, "aucune race-perf en rendu matériel (video=wgpu), aot=1 sur trunk"); // P4 shares read aot=1
+  assert.equal(rows.macSpeedAot.why, "aucune race-perf en rendu matériel (video=wgpu), aot=1 sur trunk");
   assert.equal(rows.ttffCold.status, "OK");
   assert.equal(rows.ttffWarm.status, "KO");
   assert.equal(rows.optimisationMs.why, "no P7 progress in this engine");
@@ -254,7 +254,7 @@ test("KPI: only clean trunk results count, one result per row, shown with its co
   assert.match(rows.oracleDivergences.why, /aucun résultat fuzz/);
   const md = kpiMarkdown(Object.values(rows), { at: "T" });
   assert.ok(md.indexOf("North star") < md.indexOf("Leviers") && md.indexOf("Garde-fous") < md.indexOf("Expérience joueur"));
-  assert.match(md, /\| Time-to-first-frame, à froid, défaut \| 7 s \| ≤ 10 s \| OK \| mesuré \| `ttff-2026-10-19T11:00:00Z` @ T2, 2026-10-19T11:00 \|/);
+  assert.match(md, /\| Time-to-first-frame, à froid, rendu matériel wgpu \(hors statut global\) \| 7 s \| ≤ 10 s \| OK \| mesuré \| `ttff-2026-10-19T11:00:00Z` @ T2, 2026-10-19T11:00 \|/);
 
   // The newest trunk result has no value: the row says why, it does not
   // fall back on an older one.
@@ -328,7 +328,7 @@ test("KPI report: files classified by content; manual.json errors become reasons
   const rows = (m) => Object.fromEntries(kpiTable([], m, { trunk: TRUNK }).map((r) => [r.id, r]));
   assert.match(rows(readManual(path.join(root, "m1.json"))).pcSpeed.why, /illisible/);
   assert.match(rows(readManual(path.join(root, "m2.json"))).pcSpeed.why, /non numérique/);
-  assert.equal(KPI_ROWS.length, 19);
+  assert.equal(KPI_ROWS.length, 24);
   // Every TTFF run overloaded: n/a, and the row says so.
   const over = { kind: "ttff", file: "o", json: { probe: "ttff", at: "2026-10-19T11:00:00Z", served: served("T1"), runs: 3, overloadedRuns: [1, 2, 3], cold: null, warm: null } };
   assert.match(kpiTable([over], {}, { trunk: TRUNK }).find((r) => r.id === "ttffCold").why, /runs 1, 2, 3 lancées sur machine surchargée/);
@@ -357,6 +357,26 @@ test("KPI: the dispatch row carries its instrumentation caveat under the table",
   assert.equal(md.match(/gonflé par l'instrumentation/g).length, 1);
 });
 
+test("KPI: the product config (video=software) counts; wgpu and aot=1 are trajectory rows", () => {
+  const product = race("2026-10-22T05:00:00Z", { speed: 70, extra: {
+    query: "video=software&presenter=webgpu&pacing=tick&speed=unlimited&aot=1&metrics=1", baselineQuery: "video=software&presenter=webgpu&pacing=tick&speed=unlimited&metrics=1",
+    served: { candidate: served("T1"), baseline: served("T1") }, baseline: { cold: { speed: { median: 61 }, presentP99Ms: { median: 30 } } } } });
+  const wgpu = race("2026-10-22T05:30:00Z", { speed: 120, extra: { query: "video=wgpu&speed=unlimited&metrics=1", served: { candidate: served("T1") } } });
+  const table = kpiTable([product, wgpu], {}, { trunk: TRUNK });
+  const rows = Object.fromEntries(table.map((r) => [r.id, r]));
+  // What the player sees today: the product side without aot.
+  assert.deepEqual([rows.macSpeedProduct.value, rows.macSpeedProduct.side, rows.macSpeedProduct.counted], [61, "baseline", true]);
+  assert.match(rows.macSpeedProduct.flags, /video=software&speed=unlimited/);
+  // If aot=1 were turned on: trajectory, not counted.
+  assert.deepEqual([rows.macSpeedProductAot.value, rows.macSpeedProductAot.counted], [70, false]);
+  // The hardware renderer never feeds the product rows, and is not counted.
+  assert.deepEqual([rows.macSpeed.value, rows.macSpeed.counted], [120, false]);
+  assert.equal(rows.raceFrameP99Product.counted, true);
+  assert.equal(rows.ttffColdProduct.counted, true);
+  assert.equal(rows.ttffCold.counted, false);
+  assert.equal(rows.ttffColdProduct.why, "aucun résultat ttff sur un commit propre de trunk (0 hors trunk ignoré(s))");
+});
+
 test("KPI: a candidate column beside trunk, never in its place", (t) => {
   // An A/B: trunk as baseline (clean T1), a PR head as candidate (dirty B, aot=1).
   const ab = { kind: "race-perf", file: "ab", json: { probe: "race-perf", at: "2026-10-20T03:11:00Z", query: "video=wgpu&wasmjit=1&aot=1&metrics=1", maxLoad: 6, chrome: { path: "chrome stable", args: "" }, failed: [],
@@ -375,8 +395,8 @@ test("KPI: a candidate column beside trunk, never in its place", (t) => {
   assert.equal(c.values.dispatchTimeShare.value, 0.22);
   assert.equal(c.values.ttffCold, undefined); // only the rows race-perf feeds
   const md = kpiMarkdown(rows, { at: "T", candidate: c });
-  assert.match(md, /\| Vitesse course, Mac M4 Pro, défaut \| 83\.3 % \|.*\|  \|/);
-  assert.match(md, /\| Vitesse course, Mac M4 Pro, aot=1 [^|]*\| n\/a [^|]*\|.*\| 95\.8 % \(KO\) \|/);
+  assert.match(md, /\| Vitesse course, Mac M4 Pro, rendu matériel wgpu \(trajectoire, hors statut global\) \| 83\.3 % \|.*\|  \|/);
+  assert.match(md, /\| Vitesse course, Mac M4 Pro, wgpu \+ aot=1 [^|]*\| n\/a [^|]*\|.*\| 95\.8 % \(KO\) \|/);
   assert.match(md, /Colonne « Candidat » : `P4 \(#43\)` \(aot=1&wasmjit=1\), max-load 6, `ab` @ B avec modifications locales/);
   assert.doesNotMatch(kpiMarkdown(rows, { at: "T" }), /Candidat/);
 
@@ -431,19 +451,19 @@ test("KPI: one trunk with and without a switch (--baseline-query): the row says 
   const pair = race("2026-10-20T23:10:00Z", { speed: 95, extra: {
     query: "video=wgpu&aot=1&metrics=1", baselineQuery: "video=wgpu&metrics=1",
     served: { candidate: served("T1"), baseline: served("T1") }, baseline: { cold: { speed: { median: 82 }, presentP99Ms: { median: 27 } } } } });
-  assert.equal(sideFlags(pair.json, "candidate"), "aot=1");
-  assert.equal(sideFlags(pair.json, "baseline"), null);
+  assert.equal(sideFlags(pair.json, "candidate"), "video=wgpu&aot=1");
+  assert.equal(sideFlags(pair.json, "baseline"), "video=wgpu");
   // aot=1 asked of a core without regions (before P4) runs as the default.
   assert.equal(sideHasAot({ query: "aot=1", baselineP4Why: "core has no DolphinWeb_JitRegionStats" }, "baseline"), false);
   assert.equal(sideHasAot({ query: "aot=1", p4Why: "region stats not asked (no --region-sample)" }, "candidate"), true);
   assert.equal(sideFlags({ query: "aot=1", baselineP4Why: "core has no DolphinWeb_JitRegionStats" }, "baseline"), "aot=1 sans effet (cœur sans régions)");
   const rows = Object.fromEntries(kpiTable([pair], {}, { trunk: TRUNK }).map((r) => [r.id, r]));
   // The default rows read the side without aot=1, the aot=1 rows the other.
-  assert.deepEqual([rows.macSpeed.value, rows.macSpeed.side, rows.macSpeed.flags], [82, "baseline", null]);
-  assert.deepEqual([rows.macSpeedAot.value, rows.macSpeedAot.side, rows.macSpeedAot.flags], [95, "candidate", "aot=1"]);
+  assert.deepEqual([rows.macSpeed.value, rows.macSpeed.side, rows.macSpeed.flags], [82, "baseline", "video=wgpu"]);
+  assert.deepEqual([rows.macSpeedAot.value, rows.macSpeedAot.side, rows.macSpeedAot.flags], [95, "candidate", "video=wgpu&aot=1"]);
   assert.equal(rows.macSpeedAot.counted, false);
-  assert.equal(rows.macSpeed.counted, true);
-  assert.match(kpiMarkdown([rows.macSpeedAot], { at: "T" }), /@ T1, aot=1, 2026-10-20T23:10/);
+  assert.equal(rows.macSpeed.counted, false); // wgpu: trajectory since 2026-10-22, the product counts
+  assert.match(kpiMarkdown([rows.macSpeedAot], { at: "T" }), /@ T1, video=wgpu&aot=1, 2026-10-20T23:10/);
 });
 
 test("KPI: TTFF default and aot=1 apart; a second launch without the region cache says so", () => {
