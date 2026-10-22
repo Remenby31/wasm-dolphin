@@ -510,10 +510,10 @@ test("FPU ops outside the direct tier run inside the region, interpreted, like t
 // interpret helper, the test core has no CoreTiming) stops the region at the
 // end of that block, where the interpreter with the same drop is.
 const DC_TEXT = 0x8000c100;
-const mffsOp = (d) => (63 << 26) | (d << 21) | (583 << 1);
+const faddsRcOp = (d, a, b) => (59 << 26) | (d << 21) | (a << 16) | (b << 11) | (21 << 1) | 1; // fadds.: FPU, not a direct candidate
 const DC = assemble(DC_TEXT, [
   "f", asm.addi(4, 4, 1), (pc, l) => asm.b(pc, l.f2),
-  "f2", asm.addi(4, 4, 2), mffsOp(6), asm.addi(4, 4, 3), (pc, l) => asm.b(pc, l.f3),
+  "f2", asm.addi(4, 4, 2), faddsRcOp(6, 1, 2), asm.addi(4, 4, 3), (pc, l) => asm.b(pc, l.f3),
   "f3", asm.addi(4, 4, 4), (pc, l) => asm.b(pc, l.f4),
   "f4", asm.addi(4, 4, 5), asm.blr()
 ]);
@@ -527,7 +527,7 @@ test("a helper that lowers downcount stops the region at the end of its block (l
   core.setRegionsEnabled(true);
   queueAll(plan, 100, true);
   for (let i = 0, n = -1; i < 50 && core.regionCount() !== n; i++) { n = core.regionCount(); core.serviceRegions(); }
-  const mffsPc = DC.labels.f2 + 4, DROP = 100000;
+  const opPc = DC.labels.f2 + 4, DROP = 100000;
   core.reset(seedGprs(DC.labels.f), DC.labels.f, STOP, 1000);
   core.module._DolphinWeb_AotTestDropDowncountOnNextHelper(DROP);
   assert.equal(core.dispatchRegion(), 1);
@@ -539,7 +539,7 @@ test("a helper that lowers downcount stops the region at the end of its block (l
   // The interpreter, with the same drop at the same instruction, up to that pc.
   core.reset(seedGprs(DC.labels.f), DC.labels.f, STOP, 1000);
   for (let n = 0; n < 1000 && core.pc() !== got.pc; n++) {
-    if (core.pc() === mffsPc) core.setDowncount(core.downcount() - DROP);
+    if (core.pc() === opPc) core.setDowncount(core.downcount() - DROP);
     assert.equal(core.interpretOne(), 0);
   }
   assert.equal(core.pc(), got.pc);
