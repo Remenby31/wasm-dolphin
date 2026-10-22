@@ -115,6 +115,6 @@ test("hardware WGPU presents publish cadence only after a successful submission"
 
   assert.match(
     worker,
-    /const submittedPresent = presentAlreadySubmitted \|\| submitEnc\("present"\);[\s\S]*?if \(!submittedPresent\) \{[\s\S]*?recordPresentRejected[\s\S]*?break;[\s\S]*?\}[\s\S]*?cmdRingOwnsCanvas = true;[\s\S]*?recordPresentedFrame\(api\?\.getFrame\?\.\(\) \?\? 0\);/,
+    /const submittedPresent = presentAlreadySubmitted \|\| submitEnc\("present"\);[\s\S]*?if \(!submittedPresent\) \{[\s\S]*?recordPresentRejected[\s\S]*?break;[\s\S]*?\}[\s\S]*?cmdRingOwnsCanvas = true;[\s\S]*?recordPresentedFrame\(api\?\.getFrame\?\.\(\) \?\? 0, wgpuExactCapture\.currentBoot\(\)\);/,
   );
 });

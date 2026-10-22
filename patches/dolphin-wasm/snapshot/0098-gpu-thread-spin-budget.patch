@@ -1,0 +1,113 @@
+diff --git a/Source/Core/Common/BlockingLoop.h b/Source/Core/Common/BlockingLoop.h
+index 472a84b1f6..67bf797ad0 100644
+--- a/Source/Core/Common/BlockingLoop.h
++++ b/Source/Core/Common/BlockingLoop.h
+@@ -4,6 +4,8 @@
+ #pragma once
+ 
+ #include <atomic>
++#include <chrono>
++#include <cstdint>
+ #include <mutex>
+ #include <thread>
+ 
+@@ -129,6 +131,18 @@ public:
+     // But a good implementation should call this before already.
+     Prepare();
+ 
++    // When the busy loop of the done state began (spin budget), or none.
++    std::chrono::steady_clock::time_point spin_start{};
++    const auto spin_budget_spent = [&] {
++      const int64_t budget = m_spin_budget_us.load(std::memory_order_relaxed);
++      if (budget < 0)
++        return false;
++      const auto now = std::chrono::steady_clock::now();
++      if (spin_start == std::chrono::steady_clock::time_point{})
++        spin_start = now;
++      return now - spin_start >= std::chrono::microseconds(budget);
++    };
++
+     while (!m_shutdown.IsSet())
+     {
+       payload();
+@@ -136,6 +150,7 @@ public:
+       switch (m_running_state.load())
+       {
+       case STATE_NEED_EXECUTION:
++        spin_start = {};
+         // We won't get notified while we are in the STATE_NEED_EXECUTION state, so maybe Wakeup was
+         // called.
+         // So we have to assume on finishing the STATE_NEED_EXECUTION state, that there may be some
+@@ -150,6 +165,7 @@ public:
+         // execution of the payload. This means we should be ready now.
+         // But bad luck, Wakeup may have been called right now. So break and rerun the payload
+         // if the state was touched.
++        spin_start = {};
+         if (m_running_state-- != STATE_LAST_EXECUTION)
+           break;
+ 
+@@ -162,8 +178,9 @@ public:
+       case STATE_DONE:
+         // We're done now. So time to check if we want to sleep or if we want to stay in a busy
+         // loop.
+-        if (m_may_sleep.TestAndClear())
++        if (m_may_sleep.TestAndClear() || spin_budget_spent())
+         {
++          spin_start = {};
+           // Try to set the sleeping state.
+           if (m_running_state-- != STATE_DONE)
+             break;
+@@ -231,6 +248,10 @@ public:
+   // This function should be triggered regularly over time so
+   // that we will fall back from the busy loop to sleeping.
+   void AllowSleep() { m_may_sleep.Set(); }
++  // Spin budget (patch 0098, ?gpuspin=<us>): once done, busy-loop at most this
++  // many microseconds without new work, then sleep as if AllowSleep() had
++  // been called. Negative (the default): only AllowSleep() puts it to sleep.
++  void SetSpinBudgetMicros(int64_t us) { m_spin_budget_us.store(us, std::memory_order_relaxed); }
+ 
+ private:
+   std::mutex m_wait_lock;
+@@ -250,6 +271,8 @@ private:
+     STATE_NEED_EXECUTION = 3
+   };
+   std::atomic<int> m_running_state;  // must be of type RUNNING_TYPE
++  // Spin budget in microseconds, negative for none (SetSpinBudgetMicros).
++  std::atomic<int64_t> m_spin_budget_us{-1};
+ 
+   Flag m_may_sleep;  // If this is set, we fall back from the busy loop to an event based
+                      // synchronization.
+diff --git a/Source/Core/VideoCommon/Fifo.cpp b/Source/Core/VideoCommon/Fifo.cpp
+index 86281c7903..581a3e92cf 100644
+--- a/Source/Core/VideoCommon/Fifo.cpp
++++ b/Source/Core/VideoCommon/Fifo.cpp
+@@ -529,6 +529,15 @@ void FifoManager::GpuMaySleep()
+   m_gpu_mainloop.AllowSleep();
+ }
+ 
++#ifdef __EMSCRIPTEN__
++// ?gpuspin=<us> (patch 0098), set by the worker at boot: the GPU thread's
++// spin budget in microseconds, -1 for the default (sleep at 1 kHz only).
++extern "C" EMSCRIPTEN_KEEPALIVE void DolphinWeb_SetGpuSpinBudget(int us)
++{
++  Core::System::GetInstance().GetFifo().SetGpuSpinBudgetMicros(us);
++}
++#endif
++
+ bool AtBreakpoint(Core::System& system)
+ {
+   auto& command_processor = system.GetCommandProcessor();
+diff --git a/Source/Core/VideoCommon/Fifo.h b/Source/Core/VideoCommon/Fifo.h
+index 2afa110532..3fe342e31b 100644
+--- a/Source/Core/VideoCommon/Fifo.h
++++ b/Source/Core/VideoCommon/Fifo.h
+@@ -71,6 +71,9 @@ public:
+   void FlushGpu();
+   void RunGpu();
+   void GpuMaySleep();
++  // Patch 0098 (?gpuspin=<us>): how long the GPU thread busy-loops once its
++  // FIFO is drained before it sleeps; negative keeps the 1 kHz GpuMaySleep().
++  void SetGpuSpinBudgetMicros(int64_t us) { m_gpu_mainloop.SetSpinBudgetMicros(us); }
+   void RunGpuLoop();
+   void ExitGpuLoop();
+   void EmulatorState(bool running);

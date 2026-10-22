@@ -1,0 +1,25 @@
+{
+  "version": 1,
+  "about": "Keys of Dolphin's per-game settings (vendor/dolphin/Data/Sys/GameSettings) that the core build keeps and embeds at /dolphin-sys/GameSettings (tools/gamesettings-filter.mjs). Every other key is left out: add one only with its reason and, when it can change speed or what the game shows, a measurement.",
+  "discIds": "^[GDPU]",
+  "keys": [
+    {
+      "section": "Core",
+      "key": "MMU",
+      "why": "Correctness: games that need address translation run wrong without it. Under the MMU the block JIT refuses every block (jo.memcheck) and no region is translated or installed (0091), so those games run correct on the cached interpreter.",
+      "measured": "No effect on the measurement disc (its [Core] section is empty)."
+    },
+    {
+      "section": "Video_Settings",
+      "key": "SafeTextureCacheColorSamples",
+      "why": "Correctness: games that need a safer texture cache hash more samples of each texture (or all, 0) so updates to texture memory are seen. VideoCommon reads it on the CPU side, the same on every backend (the rendering agent checked wgpu, 2026-10-22).",
+      "measured": "No effect on the measurement disc (its INI sets no [Video_Settings] key). Larger values cost CPU time in the games that set them, as on Dolphin desktop."
+    },
+    {
+      "section": "Video_Hacks",
+      "key": "XFBToTextureEnable",
+      "why": "Correctness: False keeps the XFB copy to RAM for the games that read it back. Under video=wgpu the copy is skipped unless the game's settings ask for it (#93), so without this key those games lose their frames.",
+      "measured": "No effect on the measurement disc (its INI sets no [Video_Hacks] key). The RAM copy costs what it costs on Dolphin desktop, in the two GameCube games that ask for it."
+    }
+  ]
+}

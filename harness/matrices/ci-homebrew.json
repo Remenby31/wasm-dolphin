@@ -41,6 +41,11 @@
       "preset": "wgpu-nojit"
     },
     {
+      "id": "sw-2d",
+      "preset": "sw-interp",
+      "set": { "presenter": "2d" }
+    },
+    {
       "id": "sw-single-hostclock",
       "preset": "sw-interp",
       "set": { "cpu": "single", "rtc": "host" }

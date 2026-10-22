@@ -12,8 +12,8 @@
 // its lane into its ticket and takes the lock as before; the ticket goes
 // when the job ends, or when its process is gone.
 //
-//   node harness/remote/spark-queue.mjs wait --pid <job pid> --kind pair|build --lanes auto|a|b --name <label>
-//     prints the lane granted (a, b, or "a b" for a build)
+//   node harness/remote/spark-queue.mjs wait --pid <job pid> --kind pair|build|multi --lanes auto|a|b --name <label>
+//     prints the lane granted (a, b, or "a b" for a build or a multi)
 //   node harness/remote/spark-queue.mjs done --pid <job pid>
 //   node harness/remote/spark-queue.mjs list [--eta]
 //   node harness/remote/spark-queue.mjs move <name> --after <name|head> --as-judge
@@ -38,8 +38,11 @@ export const PAIR_LANES = ["a"];
 export const laneLock = (lane, bench = BENCH_DIR) => (lane === "a" ? path.join(bench, ".perf-lock") : path.join(bench, "lanes", lane, ".perf-lock"));
 const queueDir = (bench) => path.join(bench, "queue");
 
+// Jobs that take the whole bench: a build, and a multi (race-multi: one arm
+// per lane of big cores on both clusters, spark-multi.sh).
+export const WHOLE_BENCH = ["build", "multi"];
 // The lanes a job could take.
-export const wants = (t) => (t.kind === "build" ? LANES : t.lanes === "auto" ? PAIR_LANES : [t.lanes]);
+export const wants = (t) => (WHOLE_BENCH.includes(t.kind) ? LANES : t.lanes === "auto" ? PAIR_LANES : [t.lanes]);
 
 // What `me` may do now: { go: lanes } or { wait: why }. `tickets` are the
 // live ones, `busy(lane)` says whether a lane's lock is held.
@@ -49,7 +52,7 @@ export function nextStep(me, tickets, busy) {
   const ahead = older.find((t) => !t.lane && wants(t).some((l) => mine.includes(l)));
   if (ahead) return { wait: `${ahead.kind} ${ahead.name} arrived first` };
   const taken = (l) => busy(l) || tickets.some((t) => t.id !== me.id && t.lane?.split(" ").includes(l));
-  if (me.kind === "build") return mine.some(taken) ? { wait: "a lane is in use" } : { go: mine };
+  if (WHOLE_BENCH.includes(me.kind)) return mine.some(taken) ? { wait: "a lane is in use" } : { go: mine };
   const free = mine.find((l) => !taken(l));
   return free ? { go: [free] } : { wait: `lane${mine.length > 1 ? "s" : ""} ${mine.join(" ")} in use` };
 }
@@ -88,9 +91,14 @@ export function readTickets(bench = BENCH_DIR) {
 // build ~3 min: one build checkout and a shared ccache (#78) make a build
 // after another 1-3.5 min (measured 2026-10-22); only a cold one takes ~7.
 export const BUILD_MIN = 3;
+export const MULTI_SEED_MIN = 4, MULTI_RUN_MIN = 1.5;
+const optOf = (args, name, def) => { const i = args.indexOf(`--${name}`); return i >= 0 && Number.isFinite(Number(args[i + 1])) ? Number(args[i + 1]) : def; };
 export function estimateMin(kind, args = []) {
   if (kind === "build") return BUILD_MIN;
-  const opt = (name, def) => { const i = args.indexOf(`--${name}`); return i >= 0 && Number.isFinite(Number(args[i + 1])) ? Number(args[i + 1]) : def; };
+  // A multi: one first launch per arm (~4 min, together), then ~75 s a run
+  // (multi-aba-emu-0087b, 2026-10-22), discarded runs played again.
+  if (kind === "multi") return Math.round(MULTI_SEED_MIN + optOf(args, "runs", 6) * MULTI_RUN_MIN);
+  const opt = (name, def) => optOf(args, name, def);
   const sides = args.includes("--baseline") ? 2 : 1;
   return Math.round((opt("runs", 4) * sides * (opt("warmup", 25) + opt("secs", 20) + 20)) / 60);
 }
@@ -102,7 +110,7 @@ export function eta(tickets, now = Date.now()) {
   let t0 = 0;
   const out = [];
   for (const t of tickets.filter((x) => x.lane !== "none")) {
-    const est = t.estMin ?? (t.kind === "build" ? BUILD_MIN : 13);
+    const est = t.estMin ?? (t.kind === "build" ? BUILD_MIN : t.kind === "multi" ? estimateMin("multi") : 13);
     if (t.lane) {
       const left = Math.max(1, est - (t.grantedAt ? (now - Date.parse(t.grantedAt)) / 60000 : 0));
       out.push({ ...t, startsIn: 0, endsIn: Math.round(left) });
@@ -183,7 +191,7 @@ export function laneBusy(lane, { bench = BENCH_DIR, tickets = [] } = {}) {
 }
 
 export async function waitTurn({ pid, kind, lanes = "auto", name, estMin = null, owner = null, bench = BENCH_DIR, pollSec = 15, log = () => {} }) {
-  if (!["pair", "build"].includes(kind)) throw new Error(`--kind ${kind}: pair or build`);
+  if (!["pair", ...WHOLE_BENCH].includes(kind)) throw new Error(`--kind ${kind}: pair, build or multi`);
   if (!["auto", ...LANES].includes(lanes)) throw new Error(`--lanes ${lanes}: auto, ${LANES.join(", ")}`);
   mkdirSync(queueDir(bench), { recursive: true });
   const me = { id: `${String(Date.now()).padStart(15, "0")}-${pid}.json`, pid, host: os.hostname(), kind, lanes, name, estMin, owner, at: new Date().toISOString(), lane: null };

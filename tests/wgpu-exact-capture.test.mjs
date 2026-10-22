@@ -205,3 +205,14 @@ test("the worker routes video=wgpu captures to the tagged presents", async () =>
   // The rectangle is the one the blit uses: same fit to the backbuffer.
   assert.match(patch, /\+    AdjustRectanglesToFitBounds\(&harness_target_rc, &harness_source_rc, m_backbuffer_width,/);
 });
+
+test("currentBoot is the VI output the next present shows: the last tag", () => {
+  const capture = createWgpuExactCapture();
+  assert.equal(capture.currentBoot(), null, "no tag yet");
+  capture.onViTag({ boot: 41, load: 3, ticks: 0, generation: 0 }, () => {});
+  assert.equal(capture.currentBoot(), 41);
+  capture.onViTag({ boot: 42, load: 4, ticks: 0, generation: 0 }, () => {});
+  assert.equal(capture.currentBoot(), 42);
+  capture.onLoad();
+  assert.equal(capture.currentBoot(), null, "a load drops it");
+});

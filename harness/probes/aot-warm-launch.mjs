@@ -25,7 +25,7 @@ import { savePng } from "../lib/session.mjs";
 import { runSteps } from "../lib/steps.mjs";
 import { SEED_FILE, seedOriginCheck } from "../lib/seed-origin.mjs";
 import { machineSnapshot } from "../lib/system.mjs";
-import { coreStats, mergeTimeline, presentationStats, windowOf } from "../lib/timeline.mjs";
+import { coreStats, fullSpeedAt, mergeTimeline, presentationStats, speedSeries, windowOf } from "../lib/timeline.mjs";
 
 const PRESET = "core=upstream&video=software&presenter=webgpu&cpu=dual&speed=1&wasmjit=1&jitwarmup=700&oc=1&pacing=tick&fastsw=1&metrics=1";
 
@@ -207,19 +207,18 @@ async function measureOne(name, tree, runDir, profileDir, query = values.query) 
     const engage = result.jitEngagedField > 0 ? timeline.vi.find((v) => v.sinceBoot >= result.jitEngagedField) : null;
     if (engage) result.engage = win(engage.t - 1000, engage.t + 10000);
     // Seconds from load until the core holds >= 95 % speed for 5 s in a row
-    // (VI ticks over host time, one sample per wall-clock second).
+    // (VI ticks over host time, one sample per wall-clock second). One slower
+    // second restarts the count, so the series is kept with it: [ms from
+    // load, speed %] per second, the first VI output and the race's start.
     if (tps > 0) {
       const vi = timeline.vi.filter((v) => v.t >= loadedAt);
-      const speeds = [];
-      for (let i = 1, start = 0; i < vi.length; i += 1) {
-        if (vi[i].t - vi[start].t >= 1000) {
-          speeds.push({ t: vi[start].t, speed: (100 * (vi[i].ticks - vi[start].ticks) / tps * 1000) / (vi[i].t - vi[start].t) });
-          start = i;
-        }
-      }
-      const at = speeds.findIndex((_, i) => speeds.slice(i, i + 5).length === 5 && speeds.slice(i, i + 5).every((x) => x.speed >= 95));
-      result.timeToFullSpeedSec = at >= 0 ? (speeds[at].t - loadedAt) / 1000 : null;
+      const speeds = speedSeries(vi, tps);
+      const at = fullSpeedAt(speeds);
+      result.timeToFullSpeedSec = at != null ? (at - loadedAt) / 1000 : null;
+      result.speedSeries = speeds.map((x) => [Math.round(x.atMs - loadedAt), Math.round(x.speed * 10) / 10]);
+      result.firstViMs = vi.length ? Math.round(vi[0].t - loadedAt) : null;
     }
+    result.raceAtMs = Math.round(raceAt - loadedAt);
     result.menus = win(loadedAt, raceAt);
     result.race = win(raceAt, endAt);
     result.whole = win(loadedAt, endAt);

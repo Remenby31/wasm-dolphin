@@ -9,7 +9,15 @@ diff --git a/Source/Core/VideoCommon/Present.cpp b/Source/Core/VideoCommon/Prese
  #include "Core/System.h"
  
  #include "InputCommon/ControllerInterface/ControllerInterface.h"
-@@ -923,15 +924,17 @@
+@@ -20,6 +21,7 @@
+ #include "VideoCommon/OnScreenUI.h"
+ #include "VideoCommon/PostProcessing.h"
+ #include "VideoCommon/VertexManagerBase.h"
++#include "VideoCommon/VideoBackendBase.h"
+ #include "VideoCommon/VideoConfig.h"
+ #include "VideoCommon/VideoEvents.h"
+ #include "VideoCommon/Widescreen.h"
+@@ -923,15 +925,22 @@
      {
        const auto present_time = GetUpdatedPresentationTime(present_info->intended_present_time);
  
@@ -30,8 +38,13 @@ diff --git a/Source/Core/VideoCommon/Present.cpp b/Source/Core/VideoCommon/Prese
 +      // RushFramePresentation the CPU thread renders 2-3 cheap fields ahead
 +      // in one burst, and without the sleep each burst reached the screen
 +      // at once (gxscene on video=wgpu: frame-time p95 35-52 ms at 100 %).
-+      if (!Core::IsCPUThread())
++      // Only measured on video=wgpu (gxscene 35 -> 50 pictures shown per
++      // second, race +7.7 %); OGL and Software keep presenting on arrival.
++      if (!Core::IsCPUThread() && g_video_backend &&
++          g_video_backend->GetConfigName() == "WebGPU")
++      {
 +        Core::System::GetInstance().GetCoreTiming().SleepUntil(present_time);
++      }
 +#else
        Core::System::GetInstance().GetCoreTiming().SleepUntil(present_time);
  #endif

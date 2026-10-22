@@ -128,6 +128,26 @@ test("aot optimizer: core slices (budget), waits before boot (not-ready), skips 
   assert.deepEqual(await o.status(), { state: "complete", fraction: 1 });
 });
 
+// A core with region chaining (patch 0102) gets chained modules under their
+// own keys: a module cached before it (region-v1, no chaining stub) is never
+// found for it, nor a chained one for an older core.
+test("aot optimizer: with chain the modules are keyed region-v2 and chain; a region-v1 cache entry is never taken", async () => {
+  const cache = fakeCache();
+  const plain = optimizer({ cache: fakeCache(), keyParts: { compilerVersion: 5, codegenMask: 0 } });
+  await plain.o.start();
+  const v1 = new Set(plain.o.regions.map((u) => u.key));
+  assert.ok([...v1].every((k) => k.startsWith("region-v1:")));
+  const { o } = optimizer({ cache, keyParts: { compilerVersion: 5, codegenMask: 0 }, assembleOptions: { helpers: {}, pcOffset: 0, memoryPages: 1, chain: true } });
+  await o.start();
+  assert.ok(o.regions.length > 0);
+  for (const u of o.regions) {
+    assert.match(u.key, /^region-v2:00000005:00000000:[0-9a-f]{64}$/);
+    assert.equal(v1.has(u.key), false, "never a region-v1 key");
+    const names = WebAssembly.Module.imports(new WebAssembly.Module(cache.persisted.get(u.key))).map((i) => i.name);
+    assert.ok(names.includes("region_chain") && names.includes("table"), "a chained module");
+  }
+});
+
 test("aot optimizer: a module's key is regionModuleKey of its planned members; stored bytes are an assembled module", async () => {
   const { regionModuleKey } = await import("../src/aot-region-module.js");
   const cache = fakeCache();
@@ -200,4 +220,47 @@ test("aot optimizer: groups survive a plan rebuilt with a new profile, so the ca
   await partly.o.getPlan();
   const kept = new Set(await partly.o.bootKeys());
   assert.equal(kept.size, keysBefore.length - 1, "only the group holding the changed function misses");
+});
+
+// A module the core refused at install (translated for another heap layout,
+// review of #62 P1-3): translated again, live, and its entry overwritten,
+// instead of being lost for every launch. Once per key and session.
+test("aot optimizer: a stale module is translated again and its entry overwritten, once", async () => {
+  const cache = fakeCache();
+  await optimizer({ cache }).o.start();
+  const installs = [];
+  let translated = 0;
+  const base = fakeTranslator();
+  const translator = { translate: (batch) => { translated += batch.length; return base.translate(batch); } };
+  const { o, events } = optimizer({ cache, translator, install: (r) => installs.push(r.key) });
+  await o.start();
+  assert.equal(translated, 0, "a second launch translates nothing");
+  const [stale] = await o.bootKeys();
+  cache.persisted.set(stale, Uint8Array.of(0)); // stands for the refused module
+  assert.equal(await o.markStale(stale), true);
+  assert.equal(await o.markStale(stale), false, "once per session");
+  assert.equal(await o.markStale("region-v1:unknown"), false, "only modules of the plan");
+  await o.start();
+  assert.ok(translated > 0 && translated <= 8, "only the stale module's members");
+  assert.deepEqual(installs, [stale], "the new module goes to the core");
+  assert.notDeepEqual(cache.persisted.get(stale), Uint8Array.of(0), "entry overwritten");
+  assert.equal(o.stale.size, 0);
+  assert.equal(events.at(-1)[0], "optimization-done");
+});
+
+// Marked while a run goes: the same run takes it after its own work.
+test("aot optimizer: a module marked stale during a run is done by that run", async () => {
+  const cache = fakeCache();
+  await optimizer({ cache }).o.start();
+  const { o, events } = optimizer({ cache, translator: fakeTranslator({ msPerKiB: 5 }) });
+  await o.getPlan(); // bootKeys never plans
+  const [first, second] = await o.bootKeys();
+  cache.persisted.delete(first); // the run has one module to do
+  o.addEventListener("optimization-start", () => o.markStale(second), { once: true });
+  const before = cache.persisted.get(second);
+  await o.start();
+  assert.ok(cache.persisted.has(first), JSON.stringify(events));
+  assert.ok(second);
+  assert.notEqual(cache.persisted.get(second), before, "rewritten by the same run");
+  assert.equal(o.stale.size, 0);
 });
