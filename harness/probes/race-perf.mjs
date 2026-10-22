@@ -14,7 +14,7 @@
 //     [--runs 4 (even with --baseline)] [--min-pairs 4] [--hold KeyX] [--warm]
 //     [--max-load L] [--load-wait 300] [--lock-wait 1800]
 //     [--pcsample [periodMs]] [--symbols functions.json] [--out dir]
-//     [--region-sample N [--region-secs 10]] [--mem-stats] [--baseline-query "..."]
+//     [--unique-frames secs] [--region-sample N [--region-secs 10]] [--mem-stats] [--baseline-query "..."]
 //     [--calm-wait S (default --lock-wait): wait for load ≤ --max-load before taking the lock]
 //     [--chrome-args "--flag …"] [--baseline-chrome-args "--flag …"]
 //
@@ -186,6 +186,20 @@ async function measure(session, o) {
     const viMs = timeline.vi.slice(1).map((v, i) => v.t - timeline.vi[i].t);
     const xfbDt = /xfb_dt:([\d.]+) avg:([\d.]+) max:([\d.]+)/.exec(String(info?.ppcWasmHelperStats ?? ""));
     const medianLoad = median(loads);
+    // Unique images (--unique-frames): a window of its own after the speed
+    // window (its GPU readbacks never weigh on the speed), before the stats.
+    let uniqueFrames = null;
+    if (o.uniqueFrames) {
+      // Off until now: no readback may have happened (readbacksBefore 0).
+      const before = await workerRequest(page, "validationUniqueFrames", { action: "status" }, 10000);
+      const started = await workerRequest(page, "validationUniqueFrames", { action: "start" }, 10000);
+      if (started?.started) {
+        await new Promise((r) => setTimeout(r, o.uniqueFrames * 1000));
+        uniqueFrames = { ...(await workerRequest(page, "validationUniqueFrames", { action: "stop" }, 20000)), readbacksBefore: before?.readbacksTotal ?? null };
+      } else {
+        uniqueFrames = { error: started?.error ?? "unique-frame counter did not start" };
+      }
+    }
     // The stats window, after everything the speed window reads.
     // --mem-stats (0104) shares that window: both are reset together and
     // read after it.
@@ -208,6 +222,8 @@ async function measure(session, o) {
       speed: round(core.speed), speedP5: round(core.speedP5), speedMin: round(core.speedMin),
       gameFps: info?.vis ?? null,
       presents: pres.presents, viOutputs: timeline.vi.length,
+      presentsPerSecond: round(pres.presents / ((t1 - t0) / 1000), 1),
+      ...(o.uniqueFrames ? { uniqueFrames, uniqueFpsEstimate: uniqueFrames?.uniqueShare == null ? null : round((pres.presents / ((t1 - t0) / 1000)) * uniqueFrames.uniqueShare, 1) } : {}),
       viIntervalMs: { p50: round(percentile(viMs, 50)), p99: round(percentile(viMs, 99)), max: round(viMs.length ? Math.max(...viMs) : null) },
       presentIntervalMs: { p50: round(pres.frameP50), p99: round(pres.frameP99), max: round(pres.frameMax) },
       hitchesPerMin: round(pres.hitchesPerMin),
@@ -364,7 +380,7 @@ async function main() {
       runs: { type: "string", default: "4" }, "min-pairs": { type: "string" }, "load-wait": { type: "string", default: "300" }, "calm-wait": { type: "string" }, warmup: { type: "string", default: "25" }, secs: { type: "string", default: "20" },
       hold: { type: "string", default: "KeyX" }, warm: { type: "boolean", default: false },
       "max-load": { type: "string" }, "lock-wait": { type: "string", default: "1800" },
-      pcsample: { type: "string" }, symbols: { type: "string" }, "region-sample": { type: "string" }, "region-secs": { type: "string", default: "10" }, "mem-stats": { type: "boolean", default: false }, "baseline-query": { type: "string" }, "chrome-args": { type: "string" }, "baseline-chrome-args": { type: "string" },
+      pcsample: { type: "string" }, symbols: { type: "string" }, "region-sample": { type: "string" }, "region-secs": { type: "string", default: "10" }, "unique-frames": { type: "string" }, "mem-stats": { type: "boolean", default: false }, "baseline-query": { type: "string" }, "chrome-args": { type: "string" }, "baseline-chrome-args": { type: "string" },
       "core-candidate": { type: "string", multiple: true, default: [] },
       port: { type: "string", default: process.env.HARNESS_PORT }, out: { type: "string" }
     },
@@ -400,6 +416,7 @@ async function main() {
     pcsample: values.pcsample ? num(values, "pcsample", { min: 0.05 }) : null,
     regionSample: values["region-sample"] == null ? null : num(values, "region-sample", { min: 0, int: true }),
     regionSecs: num(values, "region-secs", { min: 1 }),
+    uniqueFrames: values["unique-frames"] == null ? null : num(values, "unique-frames", { min: 2 }),
     memStats: values["mem-stats"],
     functions: values.symbols ? JSON.parse(readFileSync(values.symbols, "utf8")).sort((a, b) => a[0] - b[0]) : null,
     coreCandidates: values["core-candidate"]
@@ -457,6 +474,14 @@ async function main() {
       speed: describe(m.map((x) => x.speed)), gameFps: describe(m.map((x) => x.gameFps)),
       viP99Ms: describe(m.map((x) => x.viIntervalMs.p99)), presentP99Ms: describe(m.map((x) => x.presentIntervalMs.p99)),
       hitchesPerMin: describe(m.map((x) => x.hitchesPerMin)), busiestThread: describe(m.map((x) => x.rendererThreads.at(-1)?.busiest)),
+      presentsPerSecond: describe(m.map((x) => x.presentsPerSecond)),
+      // Unique images (--unique-frames): measured in their own window; the
+      // speed window's presents/s × that window's share of new images.
+      ...(m.some((x) => x.uniqueFrames) ? {
+        uniqueShare: describe(m.map((x) => x.uniqueFrames?.uniqueShare), 4),
+        uniqueFpsEstimate: describe(m.map((x) => x.uniqueFpsEstimate)),
+        uniqueFramesWhy: [...new Set(m.map((x) => x.uniqueFrames?.error).filter(Boolean))].join("; ") || null
+      } : {}),
       ...(phase === "cold" ? { bootMs: describe(runsDone.map((r) => r[name]).filter(good).map((r) => r.bootMs).filter((v) => v != null)) } : {})
     };
   };

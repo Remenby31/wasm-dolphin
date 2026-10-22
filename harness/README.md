@@ -132,6 +132,16 @@ node harness/probes/race-perf.mjs --iso ../roms/<disc>.iso --state ../measures/h
   the last being the place in the scene whatever the speed, so two runs or
   two sides can be lined up; over 200 the longest are kept, in time order,
   with `count`.
+- `--unique-frames secs`: unique images, in a window of its own after the
+  speed window (its GPU readbacks never weigh on the speed). At each WebGPU
+  present the worker reads back 8 full rows of the presented rectangle,
+  hashes them and compares with the previous present
+  (`src/harness-unique-frames.js`, worker message `validationUniqueFrames`,
+  off otherwise). Each run gets `presentsPerSecond` (speed window),
+  `uniqueFrames` (`uniqueShare`: presents showing a new image; `skipped`
+  past 6 readbacks in flight, `errors`) and `uniqueFpsEstimate` = the speed
+  window's presents/s × that share; `cold.uniqueShare` and
+  `cold.uniqueFpsEstimate` per side. WebGPU presents only (`video=wgpu`).
 - `--mem-stats` (patch 0104): guest memory accesses per instruction, read in
   the stats window after the speed window (with `--region-sample`, the same
   window). `summary.json` → `memAccess` (and `baselineMemAccess`):
