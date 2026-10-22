@@ -387,8 +387,8 @@ test("a region translated for another heap layout is never installed", { skip: s
 // A region already installed when the layout moves: its code still embeds
 // the old offsets or sizes. A cache clear makes it checked again, layout
 // included; a shutdown forgets every region (review of #62, P1-1). The RAM
-// address is no longer part of the layout (patch 0084): the region reads it
-// from a global, so a moved RAM keeps it.
+// address is no longer part of the layout (patch 0084): it sits in listed
+// heap sites, checked apart (the next tests).
 const LAYOUT_RAM_SIZE_FIELD = 16; // WasmStateLayout.ram_size_real
 test("an installed region is dropped when the heap layout moved, before it runs again", { skip: skip || (!core?.has("DolphinWeb_AotLayoutShiftFieldForTest") && "core without position-independent regions (0084)") }, () => {
   installed();
@@ -447,6 +447,41 @@ test("a region translated while the RAM sat elsewhere is refused as it is, and r
   const got = runCall(PROGRAM.labels.main, { regions: true });
   assert.ok(got.ran > 0);
   assert.deepEqual(got.state, reference.state);
+});
+
+// Review of #71: the core checks the module's own heap section and sites,
+// whatever bases the caller passes. A module without the section, one whose
+// section claims other bases, and one whose site was changed are refused.
+test("the core refuses a region whose heap section or sites do not hold this session's bases", { skip: heapSkip }, () => {
+  const plan = setup();
+  core.setRegionsEnabled(true);
+  const before = core.regionCount();
+  const here = bases();
+  const [group] = regionGroups(plan, 100);
+  const { bytes, entries } = assembleRegion(group.flatMap(functionFragments(core)), { helpers: HELPER_SIGNATURES, pcOffset: core.pcOffset, memoryPages: core.memoryPages });
+  const heap = regionHeapOfBytes(bytes);
+  assert.ok(heap?.sites.length);
+  const members = group.map((f) => ({ ranges: f.ranges, hash: f.hash }));
+  const queue = (b) => core.queueRegion(b, entries.map(([pc]) => pc), members); // the session's bases, as a buggy caller would
+  // 1. a site changed to another address (the section still says here)
+  const site = Uint8Array.from(bytes);
+  site.set(paddedSleb(here[0] + 0x100000), heap.sites[0].offset);
+  // 2. the section removed (renamed: the module still compiles)
+  const unnamed = Uint8Array.from(bytes);
+  const name = new TextEncoder().encode("region-heap");
+  const at = unnamed.findIndex((_, i) => name.every((c, k) => unnamed[i + k] === c));
+  unnamed[at] = "R".charCodeAt(0);
+  // 3. the section claims other bases than its sites hold
+  const claims = patchRegionHeap(bytes, { ramBase: here[0] + 0x100000, l1Base: here[1] });
+  claims.set(Array.from(bytes.subarray(heap.sites[0].offset, heap.sites[0].offset + 5)), heap.sites[0].offset);
+  const refused = core.module._DolphinWeb_AotLayoutRefused() >>> 0;
+  for (const b of [site, unnamed, claims]) queue(b);
+  core.serviceRegions();
+  assert.equal(core.regionCount(), before, "none installed");
+  assert.equal((core.module._DolphinWeb_AotLayoutRefused() >>> 0) - refused, 3, "each counted as a heap refusal");
+  queue(bytes); // the module as translated here
+  core.serviceRegions();
+  assert.ok(core.regionCount() > before, "the untouched module installs");
 });
 
 // The RAM moved under an installed region (a stop and a new boot in the same

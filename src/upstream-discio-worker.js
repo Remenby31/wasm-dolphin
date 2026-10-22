@@ -288,8 +288,10 @@ function harnessJitRegionStats({ sampleEvery } = {}) {
   // layoutRefused: queued regions refused for another heap layout (0078), null
   // with an older core.
   const layoutRefused = moduleInstance._DolphinWeb_AotLayoutRefused ? (moduleInstance._DolphinWeb_AotLayoutRefused() >>> 0) + aotLayoutSkipped : null;
-  // heapPatched: cached modules whose heap sites were moved to this session's (0084).
-  return { bytes: copy(), again: copy(), installSamples: harnessRegionInstallSamples(heap), layoutRefused, heapPatched: aotHeapPatched };
+  // heapPatched: cached modules whose heap sites were moved to this session's
+  // (0084), the bytes of their unpatched compiles, and patched compiles refused.
+  return { bytes: copy(), again: copy(), installSamples: harnessRegionInstallSamples(heap), layoutRefused, heapPatched: aotHeapPatched,
+    heapPatchedBytes: aotHeapPatchedBytes, heapPatchFailed: aotHeapPatchFailed };
 }
 // AX HLE timing (patch 0099, harness/lib/ax-hle-stats.mjs): reset >= 0
 // zeroes and turns the counters on from the next mail; copied twice so the
@@ -3568,6 +3570,8 @@ async function mountFile(file) {
   aotRegionsBeforeBoot.length = 0;
   aotLayoutSkipped = 0;
   aotHeapPatched = 0;
+  aotHeapPatchedBytes = 0;
+  aotHeapPatchFailed = 0;
   aotDiscKey = null;
   aotDiscKeyPromise = null;
   aotDiscFile = file;
@@ -7195,6 +7199,8 @@ export function startAotFirstLaunchAfterBoot(flow = aotFirstLaunch) {
 let aotCoreBooted = false;
 let aotLayoutSkipped = 0;
 let aotHeapPatched = 0; // cached region modules patched for this session's heap (0084)
+let aotHeapPatchedBytes = 0; // their unpatched bytes, compiled by the cache loader for nothing
+let aotHeapPatchFailed = 0; // patched modules the compiler refused: left to the JIT
 async function whenCoreRamReady(module, { timeoutMs = 60000, everyMs = 50 } = {}) {
   if (typeof module?._DolphinWeb_AotRamReady !== "function") return true; // older core: as before
   const start = performance.now();
@@ -7231,26 +7237,39 @@ async function queueAotRegion(module, { bytes, entries, members, layout = 0 }) {
   // Its heap sites hold the RAM and L1 addresses of the session that
   // translated it (patch 0084): moved to this session's, and the patched
   // bytes compiled off the CPU thread and kept under their key, as the CPU
-  // thread's compile request looks them up.
+  // thread's compile request looks them up. It is queued with the bases its
+  // final bytes say they hold, never the session's: a module without the
+  // section, or whose section does not parse, goes with none (0, 0), which
+  // the core refuses; the core also checks every site itself.
   let heapBases = [0, 0];
   if (typeof module._DolphinWeb_AotRegionHeapBases === "function") {
+    const generation = aotDiscGeneration;
     const { coreHeapBases } = await import("./aot-orchestrator.js");
-    const { patchRegionHeap } = await import("./aot-region-module.js");
-    heapBases = coreHeapBases(module);
-    let patched;
+    const { patchRegionHeap, regionHeapOfBytes } = await import("./aot-region-module.js");
+    const session = coreHeapBases(module);
+    let patched, heap;
     try {
-      patched = patchRegionHeap(bytes, { ramBase: heapBases[0], l1Base: heapBases[1] });
+      patched = patchRegionHeap(bytes, { ramBase: session[0], l1Base: session[1] });
+      heap = regionHeapOfBytes(patched);
     } catch {
-      aotLayoutSkipped += 1; // a module whose sites do not hold its bases: never queued
+      aotLayoutSkipped += 1; // a malformed section or a site that does not hold its base: never queued
       return;
     }
     if (patched !== bytes) {
+      // The module the cache loader compiled from the unpatched bytes is
+      // thrown away (counted; up to the whole cache when the heap moved).
       aotHeapPatched += 1;
+      aotHeapPatchedBytes += bytes.length;
       const key = await regionBlockCacheKey(patched);
       const compiled = await precompileAotRegion(key, patched);
-      if (!compiled.module) return;
+      if (!compiled.module) {
+        aotHeapPatchFailed += 1;
+        return;
+      }
       bytes = patched;
     }
+    if (generation !== aotDiscGeneration) return; // another disc meanwhile
+    if (heap) heapBases = [heap.ramBase, heap.l1Base];
   }
   const ranges = members.flatMap((m) => m.ranges);
   const triples = members.flatMap((m) => [m.ranges.length, m.hash ? parseInt(m.hash.slice(8), 16) : 0, m.hash ? parseInt(m.hash.slice(0, 8), 16) : 0]);

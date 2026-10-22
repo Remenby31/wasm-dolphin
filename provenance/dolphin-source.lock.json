@@ -25,7 +25,7 @@
       "commit": "01e0577914a75a2569c846778c2f93aa8e6feddd"
     }
   },
-  "patchSeriesSha256": "feff4b1d62491f7ac702aabb0ce78a31ac59516f5ae7db743c48dc15e4d6dcbc",
+  "patchSeriesSha256": "619f1f866a39f2d7d5b7c6b945fb5abfc2734400da402fb3d5f7e21f12bd79bf",
   "patches": [
     {
       "order": 1,
@@ -640,8 +640,8 @@
       "cwd": ".",
       "hashMode": "lf-normalized",
       "path": "patches/dolphin-wasm/snapshot/0084-region-position-independent.patch",
-      "size": 14515,
-      "sha256": "c95cd07698ca4e07785805e08b42d38f5016cbb1bc19e64059269e5c20a7cbf6"
+      "size": 17824,
+      "sha256": "49dcf8137b25d3195d9ee94abbe8cb73d7acc0014d84c751b78fd309c56fb6cb"
     },
     {
       "order": 78,

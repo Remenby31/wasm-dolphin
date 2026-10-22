@@ -279,3 +279,31 @@ test("aot region: i32.const heap sites hold the base itself and are patched in p
   // The site must hold the base exactly.
   assert.throws(() => assembleRegion([{ ...G, heapBases: [1040, 4096] }], { helpers: HELPERS, pcOffset: PC, memoryPages: 1 }), /does not hold ram_base/);
 });
+
+// Review of #71: a region-heap section that does not parse is an error, never
+// "no section" (the module would go unpatched); sites are checked even when
+// nothing moves.
+test("aot region: a malformed heap section throws; sites are checked even when nothing moves", () => {
+  const code = [0x00, ...get, 0x41];
+  const at = code.length;
+  code.push(...paddedSleb(1024), ...konst(16), 0x6a, 0x28, 0x02, 0x00, 0x36, 0x02, COUNT, ...store(PC, konst(0x80009000)), ...konst(0), 0x0b);
+  const G = { entry: 0x3000, entries: [0x3000], code: Uint8Array.from(code), relocs: [{ offset: at, kind: "heap", name: "ram_base" }], heapBases: [1024, 4096] };
+  const { bytes } = assembleRegion([G], { helpers: HELPERS, pcOffset: PC, memoryPages: 1 });
+  const heap = regionHeapOfBytes(bytes);
+  // the count word (third word of the section): one site too many
+  const name = new TextEncoder().encode("region-heap");
+  const nameAt = bytes.findIndex((_, i) => name.every((c, k) => bytes[i + k] === c));
+  const bad = Uint8Array.from(bytes);
+  bad[nameAt + name.length + 8] += 1;
+  assert.throws(() => regionHeapOfBytes(bad), /malformed module/);
+  assert.throws(() => patchRegionHeap(bad, { ramBase: 2048, l1Base: 4096 }), /malformed module/);
+  // a section running past the end of the bytes
+  assert.throws(() => regionHeapOfBytes(bytes.subarray(0, bytes.length - 3)), /malformed module/);
+  // a site that does not hold its base, same bases: still refused
+  const tampered = Uint8Array.from(bytes);
+  tampered.set(paddedSleb(1028), heap.sites[0].offset);
+  assert.throws(() => patchRegionHeap(tampered, { ramBase: 1024, l1Base: 4096 }), /does not hold its base/);
+  // fragments with known bases and no site: the section is still written
+  const none = { entry: 0x3000, entries: [0x3000], code: Uint8Array.from([0x00, ...konst(0), 0x0b]), relocs: [], heapBases: [1024, 4096] };
+  assert.deepEqual(regionHeapOfBytes(assembleRegion([none], { helpers: HELPERS, pcOffset: PC, memoryPages: 1 }).bytes), { ramBase: 1024, l1Base: 4096, sites: [] });
+});

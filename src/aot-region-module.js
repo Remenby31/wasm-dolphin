@@ -18,9 +18,10 @@
 //            "heap"     a 5-byte padded LEB holding the host address of the
 //                       emulated RAM or L1 (`name`, one of REGION_HEAP_NAMES):
 //                       the immediate of an i32.const (`form` "const", signed
-//                       LEB, the base itself) or the memarg offset of an
-//                       access ("offset", unsigned, base + byte offset; for x64
-//                       later). Left as is, listed in the module's
+//                       LEB, the base itself; what the core emits) or,
+//                       reserved for x64 and never emitted today, the memarg
+//                       offset of an access ("offset", unsigned, base + byte
+//                       offset). Left as is, listed in the module's
 //                       "region-heap" section, so a module can be patched for
 //                       another heap (patch 0084)
 //
@@ -152,30 +153,43 @@ export const REGION_LAYOUT_SECTION = "region-layout";
 // unsigned LEB (base + a byte offset under 64 KiB). Each is 5 bytes padded.
 export const REGION_HEAP_SECTION = "region-heap";
 
-// { ramBase, l1Base, sites: [{ offset, kind }] } of a module's bytes (read
-// from the section headers, without compiling), or null without the section.
+// { ramBase, l1Base, sites: [{ offset, kind, form }] } of a module's bytes
+// (read from the section headers, without compiling), or null without the
+// section. Throws on a "region-heap" section that does not parse, or on
+// bytes whose sections run past their end: never read as "no section".
 export function regionHeapOfBytes(bytes) {
   const b = bytes instanceof Uint8Array ? bytes : new Uint8Array(bytes);
-  const leb = (at) => {
+  const fail = (why) => { throw new Error(`region: malformed module (${why})`); };
+  const leb = (at, limit) => {
     let v = 0, shift = 0, x;
-    do { x = b[at.p++]; v += (x & 0x7f) * 2 ** shift; shift += 7; } while (x & 0x80);
+    do {
+      if (at.p >= limit || shift > 28) fail("LEB past its end");
+      x = b[at.p++];
+      v += (x & 0x7f) * 2 ** shift;
+      shift += 7;
+    } while (x & 0x80);
     return v;
   };
   const at = { p: 8 };
   while (at.p < b.length) {
     const id = b[at.p++];
-    const size = leb(at);
+    const size = leb(at, b.length);
     const end = at.p + size;
+    if (end > b.length) fail("a section past the end");
     if (id === 0) {
-      const nameLength = leb(at);
+      const nameLength = leb(at, end);
+      if (at.p + nameLength > end) fail("a section name past its section");
       const label = new TextDecoder().decode(b.subarray(at.p, at.p + nameLength));
       at.p += nameLength;
-      if (label === REGION_HEAP_SECTION && (end - at.p) % 4 === 0 && end - at.p >= 12) {
-        const words = new DataView(b.buffer, b.byteOffset + at.p, end - at.p);
+      if (label === REGION_HEAP_SECTION) {
+        const length = end - at.p;
+        if (length % 4 || length < 12) fail(`${REGION_HEAP_SECTION} of ${length} bytes`);
+        const words = new DataView(b.buffer, b.byteOffset + at.p, length);
         const word = (i) => words.getUint32(4 * i, true);
         const count = word(2);
-        if (3 + count !== (end - at.p) / 4) return null;
+        if (3 + count !== length / 4) fail(`${REGION_HEAP_SECTION} counts ${count} sites in ${length} bytes`);
         const sites = Array.from({ length: count }, (_, i) => ({ offset: word(3 + i) & 0x3fffffff, kind: word(3 + i) >>> 31, form: (word(3 + i) >>> 30) & 1 }));
+        for (const site of sites) if (site.offset < 1 || site.offset + 5 > b.length) fail(`a heap site at ${site.offset}`);
         return { ramBase: word(0), l1Base: word(1), sites };
       }
     }
@@ -218,12 +232,15 @@ function siteHolds(b, at, form, base) {
 export function patchRegionHeap(bytes, { ramBase, l1Base }) {
   const heap = regionHeapOfBytes(bytes);
   if (!heap) return bytes;
+  const bases = [heap.ramBase, heap.l1Base];
+  // Every site is checked, whether it moves or not.
+  for (const { offset, kind, form } of heap.sites) {
+    if (!siteHolds(bytes, offset, form, bases[kind])) throw new Error(`region: heap site at ${offset} does not hold its base`);
+  }
   const delta = [(ramBase - heap.ramBase) >>> 0, (l1Base - heap.l1Base) >>> 0];
   if (!delta[0] && !delta[1]) return bytes;
   const out = Uint8Array.from(bytes);
-  const bases = [heap.ramBase, heap.l1Base];
   for (const { offset, kind, form } of heap.sites) {
-    if (!siteHolds(out, offset, form, bases[kind])) throw new Error(`region: heap site at ${offset} does not hold its base`);
     const value = (readPadded(out, offset, form === 0) + delta[kind]) >>> 0;
     out.set(form === 0 ? paddedSleb(value) : paddedUleb(value), offset);
   }
@@ -395,7 +412,11 @@ export function assembleRegion(fragments, { helpers, pcOffset, memoryPages, memo
   name(custom, REGION_ENTRIES_SECTION);
   for (const [pc] of sortedEntries) custom.push(pc & 0xff, (pc >>> 8) & 0xff, (pc >>> 16) & 0xff, (pc >>> 24) & 0xff);
   section(out, 0, custom);
-  if (heapSites.length) {
+  // Written whenever the bases are known, sites or not: a module of this
+  // translator without the section is never installed (discio queues it
+  // with no bases, which the core refuses).
+  if (heapSites.length || Array.isArray(heapBases)) {
+    if (!Array.isArray(heapBases) || heapBases.length !== 2) throw new Error("region: heapBases required for heap sites");
     const words = [heapBases[0] >>> 0, heapBases[1] >>> 0, heapSites.length,
       ...heapSites.map(([fi, offset, kind, form]) => ((kind << 31) | (form << 30) | (codeAt + bodyAt[fi] + offset)) >>> 0)];
     const tag = [];

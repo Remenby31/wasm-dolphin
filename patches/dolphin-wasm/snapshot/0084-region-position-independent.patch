@@ -131,7 +131,92 @@ diff --git a/Source/Core/Core/PowerPC/CachedInterpreter/CachedInterpreter.cpp b/
  // FNV-1a 64 of the guest words in ranges[first .. first+count) (pairs), read
  // from MEM1 (0x8/0xC views); false when a word is outside it.
  bool RegionRangesHash(const std::vector<u32>& ranges, u32 first, u32 count, u64* out)
-@@ -9015,6 +9055,10 @@ struct PendingRegion
+@@ -8971,6 +9011,84 @@ bool RegionCodeMatchesPlan(const std::vector<u32>& ranges, const std::vector<Reg
+   }
+   return true;
+ }
++// The module's "region-heap" custom section (src/aot-region-module.js):
++// u32 LE [ram base, l1 base, count, (kind << 31 | form << 30 | offset)...],
++// each site a 5-byte padded LEB: form 0 an i32.const's signed immediate equal
++// to its base, form 1 a memarg offset of its base plus under 64 KiB. True
++// when the section exists, holds these bases, and every site holds its base.
++bool RegionHeapSitesHold(const std::vector<u8>& bytes, u32 ram_base, u32 l1_base)
++{
++  const std::size_t n = bytes.size();
++  std::size_t p = 8;
++  const auto leb = [&](std::size_t limit, u32* out) {
++    u32 v = 0;
++    for (int shift = 0; shift < 35; shift += 7)
++    {
++      if (p >= limit)
++        return false;
++      const u8 b = bytes[p++];
++      v |= static_cast<u32>(b & 0x7f) << shift;
++      if (!(b & 0x80))
++      {
++        *out = v;
++        return true;
++      }
++    }
++    return false;
++  };
++  static constexpr std::string_view name = "region-heap";
++  while (p < n)
++  {
++    const u8 id = bytes[p++];
++    u32 size = 0;
++    if (!leb(n, &size) || size > n - p)
++      return false;
++    const std::size_t end = p + size;
++    u32 name_length = 0;
++    if (id == 0 && leb(end, &name_length) && name_length <= end - p &&
++        std::string_view(reinterpret_cast<const char*>(bytes.data() + p), name_length) == name)
++    {
++      p += name_length;
++      const std::size_t length = end - p;
++      if (length < 12 || length % 4)
++        return false;
++      const auto word = [&](std::size_t i) {
++        u32 w;
++        std::memcpy(&w, bytes.data() + p + 4 * i, sizeof(w));
++        return w;
++      };
++      if (word(0) != ram_base || word(1) != l1_base || 3 + std::size_t{word(2)} != length / 4)
++        return false;
++      for (u32 i = 0; i < word(2); ++i)
++      {
++        const u32 site = word(3 + i);
++        const std::size_t at = site & 0x3fffffff;
++        const u32 base = (site >> 31) ? l1_base : ram_base;
++        if (at < 1 || at + 5 > n)
++          return false;
++        u32 v = 0;
++        for (int k = 0; k < 4; ++k)
++        {
++          if (!(bytes[at + k] & 0x80))
++            return false;  // not padded to 5 bytes
++          v |= static_cast<u32>(bytes[at + k] & 0x7f) << (7 * k);
++        }
++        const u8 top = bytes[at + 4];
++        if (top & 0x80)
++          return false;
++        v |= static_cast<u32>(top & 0x0f) << 28;
++        const bool offset_form = (site >> 30) & 1;
++        if (offset_form ? ((top & 0x70) != 0 || v - base >= 0x10000) :
++                          (v != base || (top & 0x70) != ((v & 0x80000000u) ? 0x70 : 0)))
++          return false;
++      }
++      return true;
++    }
++    p = end;
++  }
++  return false;  // no section: a module of this translator always has one
++}
++
+ std::vector<InstalledRegion> s_regions;
+ std::unordered_map<u32, u32> s_region_at;  // entry pc -> index in s_regions
+ // Physical 4 KiB pages of MEM1 some live region covers (count per page): an
+@@ -9015,6 +9133,10 @@ struct PendingRegion
    // absolute addresses of this session's heap (RAM, L1), so a module built in
    // another session runs only where they are the same.
    u32 layout_hash = 0;
@@ -142,7 +227,7 @@ diff --git a/Source/Core/Core/PowerPC/CachedInterpreter/CachedInterpreter.cpp b/
  };
  std::mutex s_region_queue_mutex;
  std::vector<PendingRegion> s_region_queue;
-@@ -9212,7 +9256,8 @@ void InstallRegion(PendingRegion& pending, int handle)
+@@ -9212,7 +9334,8 @@ void InstallRegion(PendingRegion& pending, int handle)
    s_region_stats.regions_installed += 1;
    const u32 index = static_cast<u32>(s_regions.size());
    s_regions.push_back({handle, std::move(pending.entries), std::move(pending.ranges),
@@ -152,13 +237,16 @@ diff --git a/Source/Core/Core/PowerPC/CachedInterpreter/CachedInterpreter.cpp b/
    for (const u32 pc : s_regions.back().entries)
    {
      s_region_at.emplace(pc, index);  // an entry already mapped keeps its region
-@@ -9239,6 +9284,14 @@ bool RegionInstallable(const PendingRegion& pending)
+@@ -9239,6 +9362,17 @@ bool RegionInstallable(const PendingRegion& pending)
      s_region_stats.regions_refused += 1;
      return false;
    }
 +  // Heap sites patched for another RAM or L1 address (discio patches a module
-+  // to this session's before it queues it; 0: a caller that does not say).
-+  if (std::pair{pending.ram_base, pending.l1_base} != RegionHeapBases())
++  // to this session's before it queues it; 0: a caller that does not say),
++  // as the caller says and as the module's own "region-heap" section and
++  // sites hold (a module without it, or whose sites differ, never runs).
++  if (std::pair{pending.ram_base, pending.l1_base} != RegionHeapBases() ||
++      !RegionHeapSitesHold(pending.bytes, pending.ram_base, pending.l1_base))
 +  {
 +    s_region_layout_refused += 1;
 +    s_region_stats.regions_refused += 1;
@@ -167,7 +255,7 @@ diff --git a/Source/Core/Core/PowerPC/CachedInterpreter/CachedInterpreter.cpp b/
    if (std::any_of(pending.entries.begin(), pending.entries.end(),
                    [](u32 pc) { return HLE::GetHookByAddress(pc) != 0; }))
    {
-@@ -9514,10 +9567,12 @@ bool TryRunRegion(PowerPC::PowerPCState& ppc_state)
+@@ -9514,10 +9648,12 @@ bool TryRunRegion(PowerPC::PowerPCState& ppc_state)
    {
      // The RAM may have been allocated again (a stop and a new boot in the same
      // page): the code embeds the old address, whatever the guest code says.
@@ -183,7 +271,7 @@ diff --git a/Source/Core/Core/PowerPC/CachedInterpreter/CachedInterpreter.cpp b/
      {
        DropRegion(it->second);
        return false;
-@@ -9628,7 +9683,8 @@ extern "C" EMSCRIPTEN_KEEPALIVE void DolphinWeb_AotQueueRegion(const u8* bytes,
+@@ -9628,7 +9764,8 @@ extern "C" EMSCRIPTEN_KEEPALIVE void DolphinWeb_AotQueueRegion(const u8* bytes,
                                                                 const u32* entries, u32 entry_count,
                                                                 const u32* ranges, u32 range_count,
                                                                 const u32* members, u32 member_count,
@@ -193,7 +281,7 @@ diff --git a/Source/Core/Core/PowerPC/CachedInterpreter/CachedInterpreter.cpp b/
  {
    PendingRegion pending{std::vector<u8>(bytes, bytes + size),
                          std::vector<u32>(entries, entries + entry_count),
-@@ -9647,6 +9703,8 @@ extern "C" EMSCRIPTEN_KEEPALIVE void DolphinWeb_AotQueueRegion(const u8* bytes,
+@@ -9647,6 +9784,8 @@ extern "C" EMSCRIPTEN_KEEPALIVE void DolphinWeb_AotQueueRegion(const u8* bytes,
    if (next != range_count || pending.members.empty())
      return;
    pending.layout_hash = layout_hash;  // 0 (a caller without it): never installed
@@ -202,7 +290,7 @@ diff --git a/Source/Core/Core/PowerPC/CachedInterpreter/CachedInterpreter.cpp b/
    pending.key = DolphinWeb_MakeWasmBlockCacheKey(pending.bytes);
    if (pending.key[0])
      pending.slot = ReadyBitOfKey(pending.key);
-@@ -14934,14 +14992,24 @@ std::vector<u32> s_aot_translate_out;
+@@ -14934,14 +15073,24 @@ std::vector<u32> s_aot_translate_out;
  std::array<u32, 248> s_aot_test_state{};
  constexpr u32 AOT_TEST_MSR = 0x00002032;  // FP, IR, DR, RI; external interrupts off
  
@@ -231,7 +319,7 @@ diff --git a/Source/Core/Core/PowerPC/CachedInterpreter/CachedInterpreter.cpp b/
    static_assert(sizeof(WasmStateLayout) % sizeof(u32) == 0);
    std::array<u32, sizeof(WasmStateLayout) / sizeof(u32)> words;
    std::memcpy(words.data(), &layout, sizeof(layout));
-@@ -14957,6 +15025,14 @@ u32 WasmLayoutHash(const WasmStateLayout& layout_in)
+@@ -14957,6 +15106,14 @@ u32 WasmLayoutHash(const WasmStateLayout& layout_in)
    return h != 0 ? h : 1;
  }
  
@@ -246,7 +334,7 @@ diff --git a/Source/Core/Core/PowerPC/CachedInterpreter/CachedInterpreter.cpp b/
  WasmStateLayout CurrentWasmStateLayout(Core::System& system)
  {
    auto& ppc = system.GetPPCState();
-@@ -15106,8 +15182,8 @@ struct RegionFragment
+@@ -15106,8 +15263,8 @@ struct RegionFragment
    struct Reloc
    {
      u32 offset;
@@ -257,7 +345,7 @@ diff --git a/Source/Core/Core/PowerPC/CachedInterpreter/CachedInterpreter.cpp b/
    };
    std::vector<Reloc> relocs;
  };
-@@ -15197,6 +15273,14 @@ bool BuildRegionFragment(Core::System& system, u32 entry_pc, std::span<const u32
+@@ -15197,6 +15354,14 @@ bool BuildRegionFragment(Core::System& system, u32 entry_pc, std::span<const u32
      code.insert(code.end(), b.expr.begin(), b.expr.end());
      for (const auto& reloc : b.relocs)
      {
@@ -272,7 +360,7 @@ diff --git a/Source/Core/Core/PowerPC/CachedInterpreter/CachedInterpreter.cpp b/
        const auto it = std::find(WASM_IMPORT_NAMES.begin(), WASM_IMPORT_NAMES.end(), reloc.name);
        out->relocs.push_back({at + static_cast<u32>(reloc.offset), 0,
                               static_cast<u32>(it - WASM_IMPORT_NAMES.begin())});
-@@ -15404,10 +15488,18 @@ extern "C" EMSCRIPTEN_KEEPALIVE const u32* DolphinWeb_AotTranslate(u32 entry_pc,
+@@ -15404,10 +15569,18 @@ extern "C" EMSCRIPTEN_KEEPALIVE const u32* DolphinWeb_AotTranslate(u32 entry_pc,
  // regions are emitted as its blocks are.
  // The layout hash regions translated now carry (DolphinWeb_AotTranslate's
  // sixth word), and the count of queued regions refused for another layout.
@@ -293,7 +381,7 @@ diff --git a/Source/Core/Core/PowerPC/CachedInterpreter/CachedInterpreter.cpp b/
    s_layout_shift_for_test = shift;
  }
  
-@@ -15437,6 +15529,15 @@ extern "C" EMSCRIPTEN_KEEPALIVE u32 DolphinWeb_AotLayoutWords(u32* out, u32 capa
+@@ -15437,6 +15610,15 @@ extern "C" EMSCRIPTEN_KEEPALIVE u32 DolphinWeb_AotLayoutWords(u32* out, u32 capa
    return n;
  }
  

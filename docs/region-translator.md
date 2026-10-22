@@ -214,8 +214,16 @@ million console lines, the browser process at 7-14 GB).
   the memarg offset −1.3 % (ARM rematerialises a large offset at every
   access; the `offset` form is kept for x64, where it folds into the
   addressing mode, untested without an x86 machine).
+  Discio queues a module with the bases its final bytes hold (none without a
+  section, which the core refuses), and the core checks the module's own
+  `region-heap` section and every site against this session's bases. When the
+  heap moved, the cache loader's compile of each unpatched module is thrown
+  away: counted with the patched ones (`heapPatched`, `heapPatchedBytes`,
+  `heapPatchFailed` in the region stats reply), up to the whole cache.
   Tests: a module patched for another heap runs there; a module with another
-  session's bases is refused, and runs once patched back; the RAM moved under
+  session's bases is refused, and runs once patched back; a module without
+  its section, with a site changed, or whose section claims other bases is
+  refused by the core; a malformed section throws; the RAM moved under
   an installed region drops it; every fragment site holds the base, and no
   immediate holds a heap address outside the sites.
 - [x] **35 regions dropped on every second launch** (KPI, d18249e, and locally): installed during the OS init, they were dropped by invalidations (icbi or DMA) over their ranges, and the code then ran in the block JIT for the session. Patch 0085: an invalidation over an installed region marks it unverified instead; before it next runs it is checked against the plan's hashes (as after a cache clear), and dropped only if its code changed. A region with a member that has no hash, or an HLE hook installed at an entry since, is dropped (a hook changes no byte); a forced invalidation (breakpoints) drops at once, as before; a region already due for a check is skipped by later invalidations. `DolphinWeb_AotRegionRechecks` counts the regions kept for a check, the checks passed and the regions invalidations looked at.
