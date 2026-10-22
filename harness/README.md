@@ -219,8 +219,11 @@ node harness/remote/spark-run.mjs --build <ref>           # its core built on th
   its old name and would wait for itself. Compare sides of one pair only, never a lane with the
   other. `--chrome-cpus` / `--node-cpus` override the pinning.
 - `--build <ref>` (a commit of the fork) builds its core on the bench with
-  the pinned toolchain (`build-core-repro.mjs --install`, linux-arm64, ~8
-  min) in `~/salon-bench/build/wt/<commit>`, in its turn, holding both
+  the pinned toolchain (`build-core-repro.mjs --install --reset-vendor
+  --ccache`, linux-arm64) in one build checkout, `~/salon-bench/build/work`,
+  whose CMake tree, Dolphin sources and ccache carry over (~7 min cold, 1-3.5
+  min after another commit; the core's bytes do not depend on the path), and
+  exports the tree it serves to `~/salon-bench/build/wt/<commit>`, in its turn, holding both
   lanes' locks (lane `b` also waits while a build of an older harness,
   without a ticket, exists);
   `--candidate spark:<ref>` / `--baseline spark:<ref>` then serve that
