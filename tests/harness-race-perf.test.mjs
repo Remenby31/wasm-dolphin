@@ -9,7 +9,7 @@ import path from "node:path";
 import test from "node:test";
 
 import { acquirePerfLock, lockIntegrity, queueDir, readLockOwner, ticketsAhead } from "../harness/lib/perf-lock.mjs";
-import { chromeArgsOf, num, pairedSpeedChange, regionPipeline, sideOrder, withheldOnOverlap } from "../harness/probes/race-perf.mjs";
+import { chromeArgsOf, guestCovered, lockOverlapAt, num, pairedSpeedChange, regionPipeline, sideOrder, withheldOnOverlap } from "../harness/probes/race-perf.mjs";
 import { stockChrome } from "../harness/lib/kpi.mjs";
 import { calmThenLock, loadGaveUp } from "../harness/lib/env.mjs";
 import { summarizePcSamples } from "../src/harness-pc-sampler.js";
@@ -490,6 +490,14 @@ test("race-perf: the region pipeline counters of a stats reply", () => {
   assert.deepEqual(regionPipeline({}), {}, "an engine before 0078");
 });
 
+test("race-perf: the guest time a host-time window covered", () => {
+  assert.deepEqual(guestCovered(1000, 486001000, 486000000), { ticks: 486000000, seconds: 1 });
+  assert.deepEqual(guestCovered("0", "972000000", 486000000), { ticks: 972000000, seconds: 2 });
+  assert.equal(guestCovered(null, 5, 486000000), null);
+  assert.equal(guestCovered(10, 5, 486000000), null);
+  assert.equal(guestCovered(1, 5, 0), null);
+});
+
 test("load under the lock: a loaded machine gives the lock back while waiting, then takes it again in turn", async () => {
   const { calmUnderLock } = await import("../harness/lib/env.mjs");
   const events = [];
@@ -545,4 +553,58 @@ test("calmLock: no probe waits for the load on its own any more (the pattern doe
     const direct = src.split("\n").filter((l) => /\bwaitForLoad\(/.test(l) && !/abLock \?/.test(l));
     assert.deepEqual(direct, [], `${f} calls waitForLoad outside calmLock / calmUnderLock`);
   }
+});
+
+test("load give-up after --load-wait: no lock held, the lock checks pass cleanly (no TypeError)", async () => {
+  const { calmUnderLock } = await import("../harness/lib/env.mjs");
+  let released = 0;
+  const held = Object.assign(() => { released += 1; }, { check: () => ({ ok: true }) });
+  // The loop's give-up: loaded for the whole --load-wait, the lock goes back and is not taken again.
+  const g = await calmUnderLock({ lock: held, maxLoad: 4, waitSec: 1, acquire: async () => assert.fail("never taken again"), wait: async () => ({ load: 9, limit: 4, ok: false }), load: () => 9 });
+  assert.equal(g.lock, null);
+  assert.equal(released, 1);
+  // What race-perf then does: checkLock("end") and the final release on the lock it holds (none).
+  assert.equal(lockOverlapAt(g.lock, "end"), null);
+  assert.doesNotThrow(() => g.lock?.());
+  // A held lock still reports an overlap.
+  assert.deepEqual(lockOverlapAt(Object.assign(() => {}, { check: () => ({ ok: false, why: "another holder" }) }), "before run 2"), { at: "before run 2", why: "another holder" });
+  assert.equal(lockOverlapAt(Object.assign(() => {}, { check: () => ({ ok: true }) }), "x"), null);
+});
+
+test("ab: load > max-load at the start of a run → release, calm wait, retake, no exception (even after a give-up)", async () => {
+  const { calmLock, calmUnderLock } = await import("../harness/lib/env.mjs");
+  const events = [];
+  let n = 0;
+  const acquire = async () => { const id = ++n; events.push(`acquire${id}`); return Object.assign(() => events.push(`release${id}`), { check: () => ({ ok: true }) }); };
+  let calmAfterWait = true;
+  const wait = async () => { events.push("wait"); return calmAfterWait ? { load: 1, limit: 4, ok: true } : { load: 9, limit: 4, ok: false }; };
+  let load = 1;
+  const lock = await calmLock({ maxLoad: 4, calmWait: 60, acquire, wait, load: () => load, retakeOnGiveUp: true });
+  events.length = 0;
+  // Loaded at the start of a run, calm within the wait: released, waited, retaken.
+  load = 9;
+  assert.equal((await lock.waitCalmUnlocked({ waitSec: 60 })).ok, true);
+  assert.deepEqual(events, ["release1", "wait", "acquire2"]);
+  // Loaded and never calm (the 2026-10-22 crash): released, waited, and taken again anyway for the cell.
+  events.length = 0;
+  calmAfterWait = false;
+  const gaveUp = await lock.waitCalmUnlocked({ waitSec: 60 });
+  assert.equal(gaveUp.ok, false);
+  assert.deepEqual(events, ["release2", "wait", "acquire3"]);
+  // The next run, loaded again: no TypeError, the lock it holds goes back.
+  events.length = 0;
+  await assert.doesNotReject(lock.waitCalmUnlocked({ waitSec: 60 }));
+  assert.deepEqual(events, ["release3", "wait", "acquire4"]);
+  lock.release();
+  assert.deepEqual(events.slice(-1), ["release4"]);
+  // Without retake (ttff, ax-hle, first-launch stop on a give-up), a later gate with no lock held
+  // never calls null: calm, it takes the lock; loaded, it waits first.
+  events.length = 0;
+  const calm = await calmUnderLock({ lock: null, maxLoad: 4, waitSec: 1, acquire, wait, load: () => 1 });
+  assert.equal(calm.relocked, true);
+  assert.deepEqual(events, ["acquire5"]);
+  events.length = 0;
+  calmAfterWait = true;
+  await assert.doesNotReject(calmUnderLock({ lock: null, maxLoad: 4, waitSec: 1, acquire, wait, load: () => 9 }));
+  assert.deepEqual(events, ["wait", "acquire6"]);
 });
