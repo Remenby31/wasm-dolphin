@@ -1,7 +1,7 @@
 import assert from "node:assert/strict";
 import test from "node:test";
 
-import { assembleRegion, groupRegions, paddedUleb, regionModuleLayout } from "../src/aot-region-module.js";
+import { assembleRegion, groupRegions, paddedUleb, patchRegionHeap, regionHeapOfBytes, regionModuleLayout } from "../src/aot-region-module.js";
 
 // Synthetic fragments in the translator's shape. State layout of the tests:
 // pc at +0, a counter at +4, LR at +8, state at address 64.
@@ -211,35 +211,39 @@ test("aot region: the translation layout is carried by the module, mixed layouts
   assert.throws(() => assembleRegion([a, { ...b, layout: 2 }], { helpers: HELPERS, pcOffset: PC, memoryPages: 1 }), /different layouts/);
 });
 
-// Patch 0084: a fragment reads the RAM and L1 addresses from globals, set at
-// instantiation; the same module runs against a heap laid out elsewhere.
-test("aot region: global relocs import env.ram_base / env.l1_base, read at instantiation", async () => {
-  // COUNT = mem[ram_base + 16] + l1_base
-  const G = fragment(0x3000, [0x3000], [
-    get, [0x23], { kind: "global", name: "ram_base" }, [0x28, 0x02, 16],
-    [0x23], { kind: "global", name: "l1_base" }, [0x6a, 0x36, 0x02, COUNT],
-    store(PC, konst(0x80009000)), konst(0)
-  ]);
+// Patch 0084: a load's memarg offset holds the RAM address plus a byte
+// offset (a heap site); the module lists its sites, and a copy patched for
+// another heap runs there.
+test("aot region: heap sites are listed and a module patched for another heap runs there", async () => {
+  const site = (base) => ({ kind: "heap", name: "ram_base", base });
+  // COUNT = mem[ram_base + 16]; state.pc = outside; return 0
+  const code = [0x00, ...get, ...konst(0), 0x28, 0x02]; // store address; guest offset 0; i32.load
+  const at = code.length;
+  code.push(...paddedUleb(1024 + 16), 0x36, 0x02, COUNT, ...store(PC, konst(0x80009000)), ...konst(0), 0x0b);
+  const G = { entry: 0x3000, entries: [0x3000], code: Uint8Array.from(code), relocs: [{ offset: at, ...site() }], heapBases: [1024, 4096] };
   const region = assembleRegion([G], { helpers: HELPERS, pcOffset: PC, memoryPages: 1 });
-  const imports = WebAssembly.Module.imports(new WebAssembly.Module(region.bytes));
-  assert.deepEqual(imports.filter((i) => i.kind === "global").map((i) => i.name), ["ram_base", "l1_base"]);
+  const heap = regionHeapOfBytes(region.bytes);
+  assert.equal(heap.ramBase, 1024);
+  assert.equal(heap.l1Base, 4096);
+  assert.equal(heap.sites.length, 1);
+  assert.deepEqual(Array.from(region.bytes.subarray(heap.sites[0].offset, heap.sites[0].offset + 5)), paddedUleb(1040), "the site, in place in the module");
+  assert.equal(WebAssembly.Module.imports(new WebAssembly.Module(region.bytes)).filter((i) => i.kind === "global").length, 0, "no global");
   const memory = new WebAssembly.Memory({ initial: 1, maximum: 1, shared: true });
   const u32 = new Uint32Array(memory.buffer);
   for (const ramBase of [1024, 2048]) {
+    const bytes = patchRegionHeap(region.bytes, { ramBase, l1Base: 4096 });
+    assert.equal(regionHeapOfBytes(bytes).ramBase, ramBase);
     u32[(ramBase + 16) / 4] = ramBase + 7;
-    const { instance } = await WebAssembly.instantiate(region.bytes, {
-      env: { memory, ram_base: new WebAssembly.Global({ value: "i32" }, ramBase), l1_base: new WebAssembly.Global({ value: "i32" }, 5) }
-    });
+    const { instance } = await WebAssembly.instantiate(bytes, { env: { memory, bump: () => {}, read_u32: () => 0 } });
     u32[(STATE + PC) / 4] = 0x3000;
     assert.equal(instance.exports.f(STATE), 0);
-    assert.equal(u32[(STATE + COUNT) / 4], ramBase + 12);
+    assert.equal(u32[(STATE + COUNT) / 4], ramBase + 7, `reads at ${ramBase}`);
   }
-  // Without global relocs, no global import (modules of older cores).
-  const plain = WebAssembly.Module.imports(new WebAssembly.Module(assembleRegion(program(), { helpers: HELPERS, pcOffset: PC, memoryPages: 1 }).bytes));
-  assert.ok(!plain.some((i) => i.kind === "global"));
-  // Only after global.get, and only known names.
-  const misplaced = fragment(0x3000, [0x3000], [[0x41], { kind: "global", name: "ram_base" }, [0x1a], konst(1)]);
-  assert.throws(() => assembleRegion([misplaced], { helpers: HELPERS, pcOffset: PC, memoryPages: 1 }), /global reloc/);
-  const unknown = fragment(0x3000, [0x3000], [[0x23], { kind: "global", name: "heap" }, [0x1a], konst(1)]);
-  assert.throws(() => assembleRegion([unknown], { helpers: HELPERS, pcOffset: PC, memoryPages: 1 }), /unknown global/);
+  assert.equal(patchRegionHeap(region.bytes, { ramBase: 1024, l1Base: 4096 }), region.bytes, "nothing to move: the same bytes");
+  // Without heap sites, no section (modules with no memory access).
+  assert.equal(regionHeapOfBytes(assembleRegion(program(), { helpers: HELPERS, pcOffset: PC, memoryPages: 1 }).bytes), null);
+  // A site must hold its base (plus less than 64 KiB), and the bases are given.
+  assert.throws(() => assembleRegion([{ ...G, heapBases: [8192, 4096] }], { helpers: HELPERS, pcOffset: PC, memoryPages: 1 }), /does not hold ram_base/);
+  assert.throws(() => assembleRegion([{ ...G, heapBases: undefined }], { helpers: HELPERS, pcOffset: PC, memoryPages: 1 }), /heapBases required/);
+  assert.throws(() => assembleRegion([G, { ...G, entry: 0x4000, entries: [0x4000], heapBases: [2048, 4096] }], { helpers: HELPERS, pcOffset: PC, memoryPages: 1 }), /different heaps/);
 });

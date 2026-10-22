@@ -1,193 +1,379 @@
 diff --git a/Source/Core/Core/PowerPC/CachedInterpreter/CachedInterpreter.cpp b/Source/Core/Core/PowerPC/CachedInterpreter/CachedInterpreter.cpp
 --- a/Source/Core/Core/PowerPC/CachedInterpreter/CachedInterpreter.cpp
 +++ b/Source/Core/Core/PowerPC/CachedInterpreter/CachedInterpreter.cpp
-@@ -137,7 +137,7 @@ EM_JS(int, DolphinWeb_CachedInterpreterCompileWasmBlock,
-        int fp_index, int fctiwz_index, int interpret_index, int fastcheck_gpfifo_index,
-        int fast_os_interrupt_call_index, int fast_melee_input_status_call_index,
-        int fast_melee_status_call_index, int fast_melee_service_poll_call_index, int fma_index,
--       int ready_bits_ptr, int region_request), {
-+       int ready_bits_ptr, int region_request, int ram_base, int l1_base), {
-   // Day-7 Phase B: cache lookup before WebAssembly.Module compilation.
-   // Module._dolphinJitCache is populated on each pthread by the pre-js
-   // receiver (tools/jit-cache-prejs.js) when the discio worker sends a
-@@ -228,9 +228,16 @@ EM_JS(int, DolphinWeb_CachedInterpreterCompileWasmBlock,
-     _DolphinWeb_RecordCacheHit();
-   }
-   const inst_t0 = (typeof performance !== "undefined" && performance.now) ? performance.now() : 0;
-+  // A region reads the host addresses of RAM and L1 from these (patch 0084);
-+  // a block embeds them.
-+  const heap = region_request ? {
-+    ram_base: new WebAssembly.Global({ value: "i32", mutable: false }, ram_base),
-+    l1_base: new WebAssembly.Global({ value: "i32", mutable: false }, l1_base)
-+  } : null;
-   const fn =
-       new WebAssembly.Instance(mod, {
-         env: {
-+          ...heap,
-           memory: wasmMemory,
-           read_u32: wasmTable.get(read_u32_index),
-           write_u32: wasmTable.get(write_u32_index),
-@@ -2869,6 +2876,32 @@ void EmitCallImport(std::vector<u8>& body, u32 index)
+@@ -2869,6 +2869,58 @@ void EmitCallImport(std::vector<u8>& body, u32 index)
    EmitPaddedU32Leb(body, 0);
  }
  
-+// Region fragments read the host addresses of the emulated RAM and L1 from
-+// imported immutable globals (env.ram_base, env.l1_base) instead of embedding
-+// them: a module translated in another session, whose heap sat elsewhere,
-+// then runs unchanged. A fragment copies both into locals at its entry
-+// (BuildRegionFragment, two reloc-patched global.get), and every access reads
-+// the local: a global.get per access cost 0.8 % of the race (aot=1).
-+// Block modules keep the constants (same bytes, same keys).
-+constexpr u32 WASM_REGION_GLOBAL_RAM_BASE = 0;  // index in the assembler's REGION_GLOBAL_NAMES
-+constexpr u32 WASM_REGION_GLOBAL_L1_BASE = 1;
-+constexpr u32 WASM_FRAGMENT_RAM_LOCAL = 57;  // after the dispatch pc (WASM_FRAGMENT_PC_LOCAL)
-+constexpr u32 WASM_FRAGMENT_L1_LOCAL = 58;
++// Region fragments do not take the host addresses of the emulated RAM and L1
++// as operands: an access pushes the guest offset alone, and its memarg offset
++// holds base + byte offset as a 5-byte padded LEB, a heap site the fragment
++// lists (reloc kind 3, value 0 RAM, 1 L1). V8 folds a memarg offset into the
++// addressing mode: no i32.add, no global read (an imported global cost 0.8 %
++// of the race with aot=1, a local 0.6 %). A module translated while the heap
++// sat elsewhere is patched at its sites before it is compiled (discio) and
++// queued with the bases it holds, checked against this session's.
++// Block modules keep i32.const + i32.add (same bytes, same keys).
++constexpr u32 WASM_HEAP_RAM = 0;
++constexpr u32 WASM_HEAP_L1 = 1;
++constexpr std::array<const char*, 2> WASM_HEAP_SITE_NAMES = {"ram_base", "l1_base"};
++// The base the next access's memarg offset adds (fragment mode), set by
++// EmitHeapBaseOperand, consumed by EmitAccessOffset.
++thread_local int t_heap_site_kind = -1;
++thread_local u32 t_heap_site_base = 0;
 +
 +void EmitI32Const(std::vector<u8>& body, u32 value);
-+void EmitLocalGet(std::vector<u8>& body, u32 index);
 +
-+void EmitHeapBase(std::vector<u8>& body, u32 address, u32 global)
++// The base of an address: i32.const in a block; in a fragment, nothing (the
++// access adds it through its memarg offset).
++void EmitHeapBaseOperand(std::vector<u8>& body, u32 address, u32 kind)
 +{
 +  if (!s_wasm_fragment_relocs)
 +  {
 +    EmitI32Const(body, address);
 +    return;
 +  }
-+  EmitLocalGet(body, global == WASM_REGION_GLOBAL_RAM_BASE ? WASM_FRAGMENT_RAM_LOCAL :
-+                                                             WASM_FRAGMENT_L1_LOCAL);
++  t_heap_site_kind = static_cast<int>(kind);
++  t_heap_site_base = address;
++}
++
++void EmitHeapAdd(std::vector<u8>& body)
++{
++  if (!s_wasm_fragment_relocs)
++    body.push_back(0x6a);  // i32.add
++}
++
++// The memarg offset of an access to an address built above.
++void EmitAccessOffset(std::vector<u8>& body, u32 byte_offset)
++{
++  if (!s_wasm_fragment_relocs || t_heap_site_kind < 0)
++  {
++    EmitU32Leb(body, byte_offset);
++    return;
++  }
++  s_wasm_fragment_relocs->relocs.push_back(
++      {body.size(), WASM_HEAP_SITE_NAMES[static_cast<u32>(t_heap_site_kind)]});
++  EmitPaddedU32Leb(body, t_heap_site_base + byte_offset);
++  t_heap_site_kind = -1;
 +}
 +
  void EmitLocalGet(std::vector<u8>& body, u32 index)
  {
    body.push_back(0x20);
-@@ -3968,14 +4001,14 @@ void EmitRamOffset(std::vector<u8>& body)
+@@ -3968,18 +4020,18 @@ void EmitRamOffset(std::vector<u8>& body)
  
  void EmitRamAddress(std::vector<u8>& body, const WasmStateLayout& layout)
  {
 -  EmitI32Const(body, layout.ram_base);
-+  EmitHeapBase(body, layout.ram_base, WASM_REGION_GLOBAL_RAM_BASE);
++  EmitHeapBaseOperand(body, layout.ram_base, WASM_HEAP_RAM);
    EmitRamOffset(body);
-   body.push_back(0x6a);
+-  body.push_back(0x6a);
++  EmitHeapAdd(body);
  }
  
  void EmitL1Address(std::vector<u8>& body, const WasmStateLayout& layout)
  {
 -  EmitI32Const(body, layout.l1_base);
-+  EmitHeapBase(body, layout.l1_base, WASM_REGION_GLOBAL_L1_BASE);
++  EmitHeapBaseOperand(body, layout.l1_base, WASM_HEAP_L1);
    EmitLocalGet(body, 1);
    EmitI32Const(body, 0x0fffffff);
    body.push_back(0x71);
-@@ -4184,7 +4217,7 @@ void EmitReadU32MaybeDirect(std::vector<u8>& body, const WasmStateLayout& layout
-   body.push_back(0x4d);
-   body.push_back(0x04);
-   body.push_back(0x7f);
--  EmitI32Const(body, layout.ram_base);
-+  EmitHeapBase(body, layout.ram_base, WASM_REGION_GLOBAL_RAM_BASE);
-   EmitLocalGet(body, 3);
-   body.push_back(0x6a);
+-  body.push_back(0x6a);
++  EmitHeapAdd(body);
+ }
+ 
+ void EmitBswap32FromLocal(std::vector<u8>& body, u32 local_index)
+@@ -4027,7 +4079,7 @@ void EmitLoadU32BigEndianFromRamAddress(std::vector<u8>& body, const WasmStateLa
+   EmitRamAddress(body, layout);
    body.push_back(0x28);
-@@ -4209,7 +4242,7 @@ void EmitReadU8MaybeDirect(std::vector<u8>& body, const WasmStateLayout& layout)
-   body.push_back(0x4d);
-   body.push_back(0x04);
-   body.push_back(0x7f);
--  EmitI32Const(body, layout.ram_base);
-+  EmitHeapBase(body, layout.ram_base, WASM_REGION_GLOBAL_RAM_BASE);
-   EmitLocalGet(body, 3);
-   body.push_back(0x6a);
-   body.push_back(0x2d);
-@@ -4232,7 +4265,7 @@ void EmitReadU16MaybeDirect(std::vector<u8>& body, const WasmStateLayout& layout
-   body.push_back(0x4d);
-   body.push_back(0x04);
-   body.push_back(0x7f);
--  EmitI32Const(body, layout.ram_base);
-+  EmitHeapBase(body, layout.ram_base, WASM_REGION_GLOBAL_RAM_BASE);
-   EmitLocalGet(body, 3);
-   body.push_back(0x6a);
+   body.push_back(0x00);
+-  EmitU32Leb(body, 0);
++  EmitAccessOffset(body, 0);
+   EmitLocalSet(body, 2);
+   EmitBswap32FromLocal(body, 2);
+ }
+@@ -4038,7 +4090,7 @@ void EmitLoadU32BigEndianFromRamAddressOffset(std::vector<u8>& body,
+   EmitRamAddress(body, layout);
+   body.push_back(0x28);
+   body.push_back(0x00);
+-  EmitU32Leb(body, byte_offset);
++  EmitAccessOffset(body, byte_offset);
+   EmitLocalSet(body, 2);
+   EmitBswap32FromLocal(body, 2);
+ }
+@@ -4049,7 +4101,7 @@ void EmitLoadU32BigEndianFromL1AddressOffset(std::vector<u8>& body,
+   EmitL1Address(body, layout);
+   body.push_back(0x28);
+   body.push_back(0x00);
+-  EmitU32Leb(body, byte_offset);
++  EmitAccessOffset(body, byte_offset);
+   EmitLocalSet(body, 2);
+   EmitBswap32FromLocal(body, 2);
+ }
+@@ -4059,7 +4111,7 @@ void EmitLoadU16BigEndianFromRamAddress(std::vector<u8>& body, const WasmStateLa
+   EmitRamAddress(body, layout);
    body.push_back(0x2f);
-@@ -4273,7 +4306,7 @@ void EmitWriteU32MaybeDirect(std::vector<u8>& body, const WasmStateLayout& layou
+   body.push_back(0x00);
+-  EmitU32Leb(body, 0);
++  EmitAccessOffset(body, 0);
+   EmitLocalSet(body, 2);
+   EmitBswap16FromLocal(body, 2);
+ }
+@@ -4070,7 +4122,7 @@ void EmitLoadU16BigEndianFromRamAddressOffset(std::vector<u8>& body,
+   EmitRamAddress(body, layout);
+   body.push_back(0x2f);
+   body.push_back(0x00);
+-  EmitU32Leb(body, byte_offset);
++  EmitAccessOffset(body, byte_offset);
+   EmitLocalSet(body, 2);
+   EmitBswap16FromLocal(body, 2);
+ }
+@@ -4083,7 +4135,7 @@ void EmitStoreU32BigEndianToRamAddress(std::vector<u8>& body, const WasmStateLay
+   EmitLocalGet(body, 3);
+   body.push_back(0x36);
+   body.push_back(0x00);
+-  EmitU32Leb(body, 0);
++  EmitAccessOffset(body, 0);
+ }
+ 
+ void EmitStoreU32BigEndianToRamAddressOffset(std::vector<u8>& body,
+@@ -4095,7 +4147,7 @@ void EmitStoreU32BigEndianToRamAddressOffset(std::vector<u8>& body,
+   EmitLocalGet(body, 3);
+   body.push_back(0x36);
+   body.push_back(0x00);
+-  EmitU32Leb(body, byte_offset);
++  EmitAccessOffset(body, byte_offset);
+ }
+ 
+ void EmitStoreU32BigEndianToL1AddressOffset(std::vector<u8>& body,
+@@ -4107,7 +4159,7 @@ void EmitStoreU32BigEndianToL1AddressOffset(std::vector<u8>& body,
+   EmitLocalGet(body, 3);
+   body.push_back(0x36);
+   body.push_back(0x00);
+-  EmitU32Leb(body, byte_offset);
++  EmitAccessOffset(body, byte_offset);
+ }
+ 
+ void EmitStoreU32BigEndianToGatherPipe(std::vector<u8>& body, const WasmStateLayout& layout)
+@@ -4151,7 +4203,7 @@ void EmitStoreU16BigEndianToRamAddress(std::vector<u8>& body, const WasmStateLay
+   EmitLocalGet(body, 3);
+   body.push_back(0x3b);
+   body.push_back(0x00);
+-  EmitU32Leb(body, 0);
++  EmitAccessOffset(body, 0);
+ }
+ 
+ void EmitStoreU8ToL1AddressOffset(std::vector<u8>& body, const WasmStateLayout& layout,
+@@ -4161,7 +4213,7 @@ void EmitStoreU8ToL1AddressOffset(std::vector<u8>& body, const WasmStateLayout&
+   EmitLocalGet(body, 2);
+   body.push_back(0x3a);
+   body.push_back(0x00);
+-  EmitU32Leb(body, byte_offset);
++  EmitAccessOffset(body, byte_offset);
+ }
+ 
+ void EmitStoreZeroU32ToRamAddress(std::vector<u8>& body, const WasmStateLayout& layout,
+@@ -4171,7 +4223,7 @@ void EmitStoreZeroU32ToRamAddress(std::vector<u8>& body, const WasmStateLayout&
+   EmitI32Const(body, 0);
+   body.push_back(0x36);
+   body.push_back(0x02);
+-  EmitU32Leb(body, byte_offset);
++  EmitAccessOffset(body, byte_offset);
+ }
+ 
+ void EmitReadU32MaybeDirect(std::vector<u8>& body, const WasmStateLayout& layout)
+@@ -4184,12 +4236,12 @@ void EmitReadU32MaybeDirect(std::vector<u8>& body, const WasmStateLayout& layout
+   body.push_back(0x4d);
+   body.push_back(0x04);
+   body.push_back(0x7f);
+-  EmitI32Const(body, layout.ram_base);
++  EmitHeapBaseOperand(body, layout.ram_base, WASM_HEAP_RAM);
+   EmitLocalGet(body, 3);
+-  body.push_back(0x6a);
++  EmitHeapAdd(body);
+   body.push_back(0x28);
+   body.push_back(0x00);
+-  EmitU32Leb(body, 0);
++  EmitAccessOffset(body, 0);
+   EmitLocalSet(body, 2);
+   EmitBswap32FromLocal(body, 2);
+   body.push_back(0x05);
+@@ -4209,12 +4261,12 @@ void EmitReadU8MaybeDirect(std::vector<u8>& body, const WasmStateLayout& layout)
+   body.push_back(0x4d);
+   body.push_back(0x04);
+   body.push_back(0x7f);
+-  EmitI32Const(body, layout.ram_base);
++  EmitHeapBaseOperand(body, layout.ram_base, WASM_HEAP_RAM);
+   EmitLocalGet(body, 3);
+-  body.push_back(0x6a);
++  EmitHeapAdd(body);
+   body.push_back(0x2d);
+   body.push_back(0x00);
+-  EmitU32Leb(body, 0);
++  EmitAccessOffset(body, 0);
+   body.push_back(0x05);
+   EmitLocalGet(body, 0);
+   EmitLocalGet(body, 1);
+@@ -4232,12 +4284,12 @@ void EmitReadU16MaybeDirect(std::vector<u8>& body, const WasmStateLayout& layout
+   body.push_back(0x4d);
+   body.push_back(0x04);
+   body.push_back(0x7f);
+-  EmitI32Const(body, layout.ram_base);
++  EmitHeapBaseOperand(body, layout.ram_base, WASM_HEAP_RAM);
+   EmitLocalGet(body, 3);
+-  body.push_back(0x6a);
++  EmitHeapAdd(body);
+   body.push_back(0x2f);
+   body.push_back(0x00);
+-  EmitU32Leb(body, 0);
++  EmitAccessOffset(body, 0);
+   EmitLocalSet(body, 2);
+   EmitBswap16FromLocal(body, 2);
+   body.push_back(0x05);
+@@ -4273,13 +4325,13 @@ void EmitWriteU32MaybeDirect(std::vector<u8>& body, const WasmStateLayout& layou
    body.push_back(0x40);
    EmitBswap32FromLocal(body, 2);
    EmitLocalSet(body, 2);
 -  EmitI32Const(body, layout.ram_base);
-+  EmitHeapBase(body, layout.ram_base, WASM_REGION_GLOBAL_RAM_BASE);
++  EmitHeapBaseOperand(body, layout.ram_base, WASM_HEAP_RAM);
    EmitLocalGet(body, 3);
-   body.push_back(0x6a);
+-  body.push_back(0x6a);
++  EmitHeapAdd(body);
    EmitLocalGet(body, 2);
-@@ -4298,7 +4331,7 @@ void EmitWriteU8MaybeDirect(std::vector<u8>& body, const WasmStateLayout& layout
+   body.push_back(0x36);
+   body.push_back(0x00);
+-  EmitU32Leb(body, 0);
++  EmitAccessOffset(body, 0);
+   body.push_back(0x05);
+   EmitLocalGet(body, 0);
+   EmitLocalGet(body, 1);
+@@ -4298,13 +4350,13 @@ void EmitWriteU8MaybeDirect(std::vector<u8>& body, const WasmStateLayout& layout
    body.push_back(0x4d);
    body.push_back(0x04);
    body.push_back(0x40);
 -  EmitI32Const(body, layout.ram_base);
-+  EmitHeapBase(body, layout.ram_base, WASM_REGION_GLOBAL_RAM_BASE);
++  EmitHeapBaseOperand(body, layout.ram_base, WASM_HEAP_RAM);
    EmitLocalGet(body, 3);
-   body.push_back(0x6a);
+-  body.push_back(0x6a);
++  EmitHeapAdd(body);
    EmitLocalGet(body, 2);
-@@ -4325,7 +4358,7 @@ void EmitWriteU16MaybeDirect(std::vector<u8>& body, const WasmStateLayout& layou
+   body.push_back(0x3a);
+   body.push_back(0x00);
+-  EmitU32Leb(body, 0);
++  EmitAccessOffset(body, 0);
+   body.push_back(0x05);
+   EmitLocalGet(body, 0);
+   EmitLocalGet(body, 1);
+@@ -4325,13 +4377,13 @@ void EmitWriteU16MaybeDirect(std::vector<u8>& body, const WasmStateLayout& layou
    body.push_back(0x40);
    EmitBswap16FromLocal(body, 2);
    EmitLocalSet(body, 2);
 -  EmitI32Const(body, layout.ram_base);
-+  EmitHeapBase(body, layout.ram_base, WASM_REGION_GLOBAL_RAM_BASE);
++  EmitHeapBaseOperand(body, layout.ram_base, WASM_HEAP_RAM);
    EmitLocalGet(body, 3);
-   body.push_back(0x6a);
+-  body.push_back(0x6a);
++  EmitHeapAdd(body);
    EmitLocalGet(body, 2);
-@@ -8709,9 +8742,13 @@ std::vector<u8> BuildWasmCachedInterpreterBlock(std::span<const PPCAnalyst::Code
- // bytes under the key its caller already hashed (DolphinWeb_MakeWasmBlockCacheKey);
- // ready_bits_ptr as for a block: 0 compiles synchronously, otherwise a miss
- // in the pthread's module map is posted to the compiler worker (-3 / -4).
-+WasmStateLayout CurrentWasmStateLayout(Core::System& system);
-+
- int CompileWasmModuleWithKey(const std::vector<u8>& bytes, const std::array<char, 86>& cache_key,
-                              int ready_bits_ptr, bool region = false)
- {
-+  const WasmStateLayout layout =
-+      region ? CurrentWasmStateLayout(Core::System::GetInstance()) : WasmStateLayout{};
-   const auto read_u32_index = static_cast<int>(
-       reinterpret_cast<std::uintptr_t>(&DolphinWeb_CachedInterpreterReadU32));
-   const auto write_u32_index = static_cast<int>(
-@@ -8757,7 +8794,8 @@ int CompileWasmModuleWithKey(const std::vector<u8>& bytes, const std::array<char
-       fastcheck_gpfifo_index, fast_os_interrupt_call_index, fast_melee_input_status_call_index,
-       fast_melee_status_call_index, fast_melee_service_poll_call_index,
-       static_cast<int>(reinterpret_cast<std::uintptr_t>(&DolphinWeb_CachedInterpreterFma)),
--      ready_bits_ptr, region ? 1 : 0);
-+      ready_bits_ptr, region ? 1 : 0, region ? static_cast<int>(layout.ram_base) : 0,
-+      region ? static_cast<int>(layout.l1_base) : 0);
- }
+   body.push_back(0x3b);
+   body.push_back(0x00);
+-  EmitU32Leb(body, 0);
++  EmitAccessOffset(body, 0);
+   body.push_back(0x05);
+   EmitLocalGet(body, 0);
+   EmitLocalGet(body, 1);
+@@ -8928,10 +8980,19 @@ struct InstalledRegion
+   bool live = true;
+   bool verified = true;   // false after a cache clear: hashed again before it runs
+   // The heap layout its code embeds (PendingRegion::layout_hash): checked
+-  // again with the code after a cache clear, when the RAM may have moved.
++  // again with the code after a cache clear.
+   u32 layout_hash = 0;
++  // The RAM and L1 addresses its heap sites hold (patch 0084): the layout
++  // hash leaves them out, so a RAM allocated again under an installed region
++  // is caught here.
++  u32 ram_base = 0;
++  u32 l1_base = 0;
+ };
  
- int CompileWasmCachedInterpreterBlockForTest(const std::vector<u8>& bytes, bool in_place = false)
-@@ -9283,7 +9321,7 @@ bool TryInstallRegion(PendingRegion& pending, int ready_bits_ptr, double& spent_
-   const auto start = std::chrono::steady_clock::now();
-   const int handle = pending.key[0] ?
-                          CompileWasmModuleWithKey(pending.bytes, pending.key, ready_bits_ptr, true) :
--                         CompileWasmCachedInterpreterBlockForTest(pending.bytes, true);
-+                         CompileWasmModuleWithKey(pending.bytes, pending.key, 0, true);
-   const double ms =
-       std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now() - start).count();
-   spent_ms += ms;
-@@ -13172,7 +13210,7 @@ bool CachedInterpreter::TryWriteWasmBlock(u32 nextPC)
-       fastcheck_gpfifo_index, fast_os_interrupt_call_index, fast_melee_input_status_call_index,
-       fast_melee_status_call_index, fast_melee_service_poll_call_index,
-       static_cast<int>(reinterpret_cast<std::uintptr_t>(&DolphinWeb_CachedInterpreterFma)),
--      off_thread ? static_cast<int>(DolphinWeb_JitReadyBitsPtr()) : 0, 0);
-+      off_thread ? static_cast<int>(DolphinWeb_JitReadyBitsPtr()) : 0, 0, 0, 0);
-   if (handle == -3 || handle == -4)
++// The RAM and L1 host addresses of this session (tests: the RAM shifted by
++// DolphinWeb_AotLayoutShiftForTest).
++std::pair<u32, u32> RegionHeapBases();
++
+ // FNV-1a 64 of the guest words in ranges[first .. first+count) (pairs), read
+ // from MEM1 (0x8/0xC views); false when a word is outside it.
+ bool RegionRangesHash(const std::vector<u32>& ranges, u32 first, u32 count, u64* out)
+@@ -9015,6 +9076,10 @@ struct PendingRegion
+   // absolute addresses of this session's heap (RAM, L1), so a module built in
+   // another session runs only where they are the same.
+   u32 layout_hash = 0;
++  // The RAM and L1 addresses its heap sites hold (patch 0084): discio patches
++  // a cached module to this session's before it queues it.
++  u32 ram_base = 0;
++  u32 l1_base = 0;
+ };
+ std::mutex s_region_queue_mutex;
+ std::vector<PendingRegion> s_region_queue;
+@@ -9212,7 +9277,8 @@ void InstallRegion(PendingRegion& pending, int handle)
+   s_region_stats.regions_installed += 1;
+   const u32 index = static_cast<u32>(s_regions.size());
+   s_regions.push_back({handle, std::move(pending.entries), std::move(pending.ranges),
+-                       std::move(pending.members), true, true, pending.layout_hash});
++                       std::move(pending.members), true, true, pending.layout_hash,
++                       pending.ram_base, pending.l1_base});
+   for (const u32 pc : s_regions.back().entries)
    {
-     // Posted to the compiler worker: interpret now, retry once its byte is set.
-@@ -14716,6 +14754,13 @@ extern "C" EMSCRIPTEN_KEEPALIVE int DolphinWeb_JitCompileBytesForTest(const u8*
-   return CompileWasmCachedInterpreterBlockForTest(std::vector<u8>(bytes, bytes + size));
- }
- 
-+// As a region module is installed: in place, with the RAM and L1 globals.
-+extern "C" EMSCRIPTEN_KEEPALIVE int DolphinWeb_JitCompileRegionBytesForTest(const u8* bytes, u32 size)
-+{
-+  const std::vector<u8> module(bytes, bytes + size);
-+  return CompileWasmModuleWithKey(module, DolphinWeb_MakeWasmBlockCacheKey(module), 0, true);
-+}
-+
- // As TryWriteWasmBlock compiles a block retried because its module is ready.
- extern "C" EMSCRIPTEN_KEEPALIVE int DolphinWeb_JitCompileBytesInPlaceForTest(const u8* bytes, u32 size)
+     s_region_at.emplace(pc, index);  // an entry already mapped keeps its region
+@@ -9239,6 +9305,14 @@ bool RegionInstallable(const PendingRegion& pending)
+     s_region_stats.regions_refused += 1;
+     return false;
+   }
++  // Heap sites patched for another RAM or L1 address (discio patches a module
++  // to this session's before it queues it; 0: a caller that does not say).
++  if (std::pair{pending.ram_base, pending.l1_base} != RegionHeapBases())
++  {
++    s_region_layout_refused += 1;
++    s_region_stats.regions_refused += 1;
++    return false;
++  }
+   if (std::any_of(pending.entries.begin(), pending.entries.end(),
+                   [](u32 pc) { return HLE::GetHookByAddress(pc) != 0; }))
+   {
+@@ -9514,10 +9588,12 @@ bool TryRunRegion(PowerPC::PowerPCState& ppc_state)
+   {
+     // The RAM may have been allocated again (a stop and a new boot in the same
+     // page): the code embeds the old address, whatever the guest code says.
+-    if (region.layout_hash != WasmLayoutHash(CurrentWasmStateLayout(Core::System::GetInstance())))
++    const bool moved = std::pair{region.ram_base, region.l1_base} != RegionHeapBases() ||
++                       region.layout_hash !=
++                           WasmLayoutHash(CurrentWasmStateLayout(Core::System::GetInstance()));
++    if (moved)
+       s_region_layout_refused += 1;
+-    if (region.layout_hash != WasmLayoutHash(CurrentWasmStateLayout(Core::System::GetInstance())) ||
+-        !RegionCodeMatchesPlan(region.ranges, region.members))
++    if (moved || !RegionCodeMatchesPlan(region.ranges, region.members))
+     {
+       DropRegion(it->second);
+       return false;
+@@ -9628,7 +9704,8 @@ extern "C" EMSCRIPTEN_KEEPALIVE void DolphinWeb_AotQueueRegion(const u8* bytes,
+                                                                const u32* entries, u32 entry_count,
+                                                                const u32* ranges, u32 range_count,
+                                                                const u32* members, u32 member_count,
+-                                                               u32 layout_hash)
++                                                               u32 layout_hash, u32 ram_base,
++                                                               u32 l1_base)
  {
-@@ -14934,14 +14979,24 @@ std::vector<u32> s_aot_translate_out;
+   PendingRegion pending{std::vector<u8>(bytes, bytes + size),
+                         std::vector<u32>(entries, entries + entry_count),
+@@ -9647,6 +9724,8 @@ extern "C" EMSCRIPTEN_KEEPALIVE void DolphinWeb_AotQueueRegion(const u8* bytes,
+   if (next != range_count || pending.members.empty())
+     return;
+   pending.layout_hash = layout_hash;  // 0 (a caller without it): never installed
++  pending.ram_base = ram_base;  // the addresses its heap sites hold (0084)
++  pending.l1_base = l1_base;
+   pending.key = DolphinWeb_MakeWasmBlockCacheKey(pending.bytes);
+   if (pending.key[0])
+     pending.slot = ReadyBitOfKey(pending.key);
+@@ -14934,14 +15013,24 @@ std::vector<u32> s_aot_translate_out;
  std::array<u32, 248> s_aot_test_state{};
  constexpr u32 AOT_TEST_MSR = 0x00002032;  // FP, IR, DR, RI; external interrupts off
  
@@ -195,9 +381,9 @@ diff --git a/Source/Core/Core/PowerPC/CachedInterpreter/CachedInterpreter.cpp b/
 -// addresses and sizes of RAM and L1 in this session's heap), never 0.
 -u32 s_layout_shift_for_test = 0;  // tests: a moved RAM (DolphinWeb_AotLayoutShiftForTest)
 +// FNV-1a 32 of the fields region code embeds (offsets in PowerPCState, sizes
-+// of RAM and L1), never 0. Not the host addresses of RAM and L1: region code
-+// reads them from imported globals (EmitHeapBase), so a module translated in
-+// a session whose heap sat elsewhere still installs.
++// of RAM and L1), never 0. Not the host addresses of RAM and L1: they sit in
++// heap sites a module lists (EmitAccessOffset), patched to this session's
++// before the module is queued, and checked apart (RegionHeapBases).
 +// Tests (DolphinWeb_AotLayoutShiftForTest): pretend a field moved.
 +u32 s_layout_shift_field_for_test = 0;
 +u32 s_layout_shift_for_test = 0;
@@ -216,48 +402,77 @@ diff --git a/Source/Core/Core/PowerPC/CachedInterpreter/CachedInterpreter.cpp b/
    static_assert(sizeof(WasmStateLayout) % sizeof(u32) == 0);
    std::array<u32, sizeof(WasmStateLayout) / sizeof(u32)> words;
    std::memcpy(words.data(), &layout, sizeof(layout));
-@@ -15106,8 +15161,8 @@ struct RegionFragment
+@@ -14957,6 +15046,14 @@ u32 WasmLayoutHash(const WasmStateLayout& layout_in)
+   return h != 0 ? h : 1;
+ }
+ 
++std::pair<u32, u32> RegionHeapBases()
++{
++  const WasmStateLayout layout = CurrentWasmStateLayout(Core::System::GetInstance());
++  const bool ram_shifted =
++      s_layout_shift_field_for_test == offsetof(WasmStateLayout, ram_base) / sizeof(u32);
++  return {layout.ram_base + (ram_shifted ? s_layout_shift_for_test : 0), layout.l1_base};
++}
++
+ WasmStateLayout CurrentWasmStateLayout(Core::System& system)
+ {
+   auto& ppc = system.GetPPCState();
+@@ -15055,10 +15152,17 @@ bool BuildFragmentBlock(Core::System& system, u32 pc, u32 limit, FragmentBlock*
+   WasmFragmentRelocs fragment;
+   WasmFragmentRelocs* const saved = s_wasm_fragment_relocs;
+   s_wasm_fragment_relocs = &fragment;
++  t_heap_site_kind = -1;
+   const std::vector<u8> bytes = BuildWasmCachedInterpreterBlock(
+       std::span<const PPCAnalyst::CodeOp>{buffer.data(), prefix}, CurrentWasmStateLayout(system),
+       resume_pc, !ends_with_branch, false, false);
+   s_wasm_fragment_relocs = saved;
++  // Every base an access took must have become a heap site: one left over
++  // would have been dropped from an address (never emitted that way).
++  const bool site_left = t_heap_site_kind >= 0;
++  t_heap_site_kind = -1;
++  if (site_left)
++    return false;
+   const std::vector<u8>& code = fragment.code;
+   const std::size_t n = code.size();
+   if (bytes.empty() || n < WASM_BLOCK_LOCALS.size() + 3 ||
+@@ -15106,8 +15210,8 @@ struct RegionFragment
    struct Reloc
    {
      u32 offset;
 -    u32 kind;   // 0 import, 1 jump, 2 dispatch
 -    u32 value;  // helper index, target pc, 0
-+    u32 kind;   // 0 import, 1 jump, 2 dispatch, 3 global
-+    u32 value;  // helper index, target pc, 0, WASM_REGION_GLOBAL_NAMES index
++    u32 kind;   // 0 import, 1 jump, 2 dispatch, 3 heap site
++    u32 value;  // helper index, target pc, 0, WASM_HEAP_SITE_NAMES index
    };
    std::vector<Reloc> relocs;
  };
-@@ -15182,7 +15237,17 @@ bool BuildRegionFragment(Core::System& system, u32 entry_pc, std::span<const u32
-   };
-   code.assign(WASM_BLOCK_LOCALS.begin(), WASM_BLOCK_LOCALS.end());
-   code[0] = 0x07;
--  code.insert(code.end(), {0x01, 0x7f});  // the dispatch pc
-+  code.insert(code.end(), {0x03, 0x7f});  // the dispatch pc, the RAM and L1 addresses
-+  static_assert(WASM_FRAGMENT_RAM_LOCAL == WASM_FRAGMENT_PC_LOCAL + 1 &&
-+                WASM_FRAGMENT_L1_LOCAL == WASM_FRAGMENT_PC_LOCAL + 2);
-+  for (const auto [global, local] : {std::pair{WASM_REGION_GLOBAL_RAM_BASE, WASM_FRAGMENT_RAM_LOCAL},
-+                                     std::pair{WASM_REGION_GLOBAL_L1_BASE, WASM_FRAGMENT_L1_LOCAL}})
-+  {
-+    code.push_back(0x23);  // global.get, renumbered by the assembler (reloc kind 3)
-+    out->relocs.push_back({static_cast<u32>(code.size()), 3, global});
-+    EmitPaddedU32Leb(code, 0);
-+    EmitLocalSet(code, local);
-+  }
-   code.insert(code.end(), {0x03, 0x40});  // loop
-   EmitLocalGet(code, 0);
-   load(pc_offset);
-@@ -15290,7 +15355,9 @@ namespace
+@@ -15197,6 +15301,14 @@ bool BuildRegionFragment(Core::System& system, u32 entry_pc, std::span<const u32
+     code.insert(code.end(), b.expr.begin(), b.expr.end());
+     for (const auto& reloc : b.relocs)
+     {
++      const auto heap = std::find(WASM_HEAP_SITE_NAMES.begin(), WASM_HEAP_SITE_NAMES.end(),
++                                  reloc.name);
++      if (heap != WASM_HEAP_SITE_NAMES.end())
++      {
++        out->relocs.push_back({at + static_cast<u32>(reloc.offset), 3,
++                               static_cast<u32>(heap - WASM_HEAP_SITE_NAMES.begin())});
++        continue;
++      }
+       const auto it = std::find(WASM_IMPORT_NAMES.begin(), WASM_IMPORT_NAMES.end(), reloc.name);
+       out->relocs.push_back({at + static_cast<u32>(reloc.offset), 0,
+                              static_cast<u32>(it - WASM_IMPORT_NAMES.begin())});
+@@ -15290,7 +15402,9 @@ namespace
  // Bumped whenever the code the translator emits changes (cache keys).
  // 2: modules carry their heap layout (region-layout); version 1 modules have
  // none and would never install.
 -constexpr u32 AOT_COMPILER_VERSION = 2;
-+// 3: RAM and L1 addresses from imported globals (env.ram_base, env.l1_base),
-+// out of the layout hash.
++// 3: RAM and L1 addresses in listed heap sites (memarg offsets), out of the
++// layout hash.
 +constexpr u32 AOT_COMPILER_VERSION = 3;
  constexpr u32 AOT_MAX_FRAGMENT_BYTES = 1u << 20;
  thread_local std::vector<u32> t_aot_out;
  u8* s_aot_ram = nullptr;
-@@ -15404,10 +15471,18 @@ extern "C" EMSCRIPTEN_KEEPALIVE const u32* DolphinWeb_AotTranslate(u32 entry_pc,
+@@ -15404,10 +15518,18 @@ extern "C" EMSCRIPTEN_KEEPALIVE const u32* DolphinWeb_AotTranslate(u32 entry_pc,
  // regions are emitted as its blocks are.
  // The layout hash regions translated now carry (DolphinWeb_AotTranslate's
  // sixth word), and the count of queued regions refused for another layout.
@@ -278,3 +493,19 @@ diff --git a/Source/Core/Core/PowerPC/CachedInterpreter/CachedInterpreter.cpp b/
    s_layout_shift_for_test = shift;
  }
  
+@@ -15437,6 +15559,15 @@ extern "C" EMSCRIPTEN_KEEPALIVE u32 DolphinWeb_AotLayoutWords(u32* out, u32 capa
+   return n;
+ }
+ 
++// [ram_base, l1_base] of this session: what discio patches a cached region
++// module's heap sites to (tests apply DolphinWeb_AotLayoutShiftForTest).
++extern "C" EMSCRIPTEN_KEEPALIVE void DolphinWeb_AotRegionHeapBases(u32* out)
++{
++  const auto [ram_base, l1_base] = RegionHeapBases();
++  out[0] = ram_base;
++  out[1] = l1_base;
++}
++
+ extern "C" EMSCRIPTEN_KEEPALIVE u32 DolphinWeb_AotLayoutRefused()
+ {
+   return s_region_layout_refused;

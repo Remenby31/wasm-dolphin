@@ -63,12 +63,32 @@ const TIERUP_MAX_CHARGE = 3_248_128; // budget / 4, rounded to 4 KiB on arm64
 // Node 25 on arm64 (%IsTurboFanFunction; charge 4 096: 4-8 KB of Liftoff).
 const TIERUP_LIFTOFF_PER_WASM_BYTE = 0.75;
 const TIERUP_MARGIN = 1.25;
-// Fragments read the emulated RAM and L1 through the globals env.ram_base and
-// env.l1_base (patch 0084): in a warm-up both point here, above the warm
-// state, and the scratch memory covers MEM1 from there.
+// Where a fragment's emulated RAM and L1 are. Patch 0084 writes the session's
+// host addresses into each access (the "region-heap" section lists them, and
+// the worker gets the bytes the CPU thread compiles: same bytes, same shared
+// code), so the scratch memory covers MEM1 and L1 at those addresses.
+// A module that imports them as globals (env.ram_base, env.l1_base) gets
+// WARM_RAM_BASE, above the warm state.
 const WARM_RAM_BASE = 0x100000;
 const WARM_RAM_SPAN = 0x1800000 + PAGE; // 24 MiB of MEM1 (L1 aliased on it) and a page of slack
+const WARM_L1_SPAN = 0x4000 + PAGE; // the 16 KiB locked L1 and a page of slack
 const REGION_GLOBALS = new Set(["ram_base", "l1_base"]);
+// The scratch memory never grows past this for a tier-up (64 MiB, committed
+// only where a warm call touches it).
+const TIERUP_SCRATCH_MAX_BYTES = 64 << 20;
+
+// The heap bases of a module's "region-heap" section, or null.
+function regionHeapBases(module) {
+  let section;
+  try {
+    [section] = WebAssembly.Module.customSections(module, "region-heap");
+  } catch {
+    return null;
+  }
+  if (!section || section.byteLength < 12 || section.byteLength % 4) return null;
+  const w = new Uint32Array(section.slice(0, 8));
+  return { ramBase: w[0], l1Base: w[1] };
+}
 // Time one module's tier-up may take in all (its slices yield like warm-ups),
 // and the whole session's: past them, the remaining fragments tier up at
 // V8's own pace on the CPU thread.
@@ -349,7 +369,13 @@ export function createWarmer() {
     }
     if (!built?.memory) return null;
     const memory = built.memory;
-    const needed = Math.ceil((WARM_RAM_BASE + WARM_RAM_SPAN) / PAGE);
+    const heap = regionHeapBases(module);
+    const top = heap ? Math.max(heap.ramBase + WARM_RAM_SPAN, heap.l1Base + WARM_L1_SPAN) : WARM_RAM_BASE + WARM_RAM_SPAN;
+    if (top > TIERUP_SCRATCH_MAX_BYTES) {
+      stats.tierUpSkipped += 1;
+      return null;
+    }
+    const needed = Math.ceil(top / PAGE);
     try {
       if (memory.buffer.byteLength < needed * PAGE) memory.grow(needed - memory.buffer.byteLength / PAGE);
     } catch {

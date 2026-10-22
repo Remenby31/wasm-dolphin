@@ -708,6 +708,7 @@ function sleb(v) {
 // section is called with state.pc = its entry and downcount 0 until that
 // budget is spent, on a scratch memory where env.ram_base points at MEM1.
 const TU = { PC: 0, COUNT: 4, DC: 12 };
+const TU_RAM_BASE = 0x1300000;
 function tierUpRegion({ trap = false, warmSection = true } = {}) {
   const get = [0x20, 0x00];
   const load = (off) => [...get, 0x28, 0x02, off];
@@ -721,15 +722,17 @@ function tierUpRegion({ trap = false, warmSection = true } = {}) {
   push(...load(TU.PC), ...k(0x1000), 0x46, 0x04, 0x40);
   if (trap) push(0x00);
   push(...store(TU.COUNT, [...load(TU.COUNT), ...k(1), 0x6a]));
-  push(0x23); relocs.push({ offset: code.length, kind: "global", name: "ram_base" }); push(...paddedUleb(0));
-  push(...k(0x1800000 - 4), 0x6a, 0x28, 0x02, 0x00, 0x1a); // i32.load, drop
+  // i32.load of MEM1's last word: the memarg offset holds the session's RAM
+  // address (a heap site, patch 0084), here ~19 MB as in a real session.
+  push(...k(0x1800000 - 4), 0x28, 0x02); relocs.push({ offset: code.length, kind: "heap", name: "ram_base" });
+  push(...paddedUleb(TU_RAM_BASE), 0x1a);
   push(...store(TU.DC, [...load(TU.DC), ...k(5), 0x6b]));
   push(...load(TU.DC), ...k(0), 0x4c, 0x04, 0x40, ...k(0), 0x0f, 0x0b); // i32.le_s: return 0
   push(0x0b);
   push(...store(TU.PC, k(0x1000)), ...get, 0x12); relocs.push({ offset: code.length, kind: "dispatch" }); push(...paddedUleb(0));
   push(0x0b);
   const fragment = { entry: 0x1000, entries: [0x1000], code: Uint8Array.from(code), relocs };
-  return assembleRegion([fragment], { helpers: {}, pcOffset: TU.PC, ...(warmSection ? { downcountOffset: TU.DC } : {}), memoryPages: 1024 });
+  return assembleRegion([fragment], { helpers: {}, pcOffset: TU.PC, ...(warmSection ? { downcountOffset: TU.DC } : {}), memoryPages: 1024, heapBases: [TU_RAM_BASE, TU_RAM_BASE + 0x1800000] });
 }
 
 test("region-warm: the section lists each fragment's entry and size, and a module without a downcount offset has none", () => {
@@ -750,7 +753,7 @@ test("tierUpCalls spends V8's 13 M budget with margin: 5.6 KB (tiered between 3 
   assert.ok(tierUpCalls(50) > tierUpCalls(1000));
 });
 
-test("a region's tier-up calls each fragment from its entry until its budget is spent, on scratch memory covering MEM1", () => {
+test("a region's tier-up calls each fragment from its entry until its budget is spent, on scratch memory covering MEM1 at the session's address", () => {
   const { bytes } = tierUpRegion();
   const module = new WebAssembly.Module(bytes);
   const warmer = createWarmer();
