@@ -31,7 +31,7 @@ import { pathToFileURL } from "node:url";
 import { parseArgs } from "node:util";
 
 import { ensureServer, launchChrome, readTimeline, REPO_ROOT, workerRequest } from "../lib/browser.mjs";
-import { waitForLoad } from "../lib/env.mjs";
+import { calmThenLock, loadGaveUp, waitForLoad } from "../lib/env.mjs";
 import { PRESETS, withDeterministicClock } from "../lib/matrix.mjs";
 import { claim } from "../lib/ownership.mjs";
 import { acquirePerfLock } from "../lib/perf-lock.mjs";
@@ -117,7 +117,7 @@ async function main() {
     options: {
       iso: { type: "string" }, config: { type: "string", default: "wgpu" }, query: { type: "string" },
       runs: { type: "string", default: "3" }, timeout: { type: "string", default: "60" }, settle: { type: "string", default: "0" }, "max-rss-mb": { type: "string", default: "10240" },
-      "max-load": { type: "string" }, "load-wait": { type: "string", default: "300" }, "lock-wait": { type: "string", default: "1800" }, "no-lock": { type: "boolean", default: false },
+      "max-load": { type: "string" }, "load-wait": { type: "string", default: "300" }, "lock-wait": { type: "string", default: "1800" }, "calm-wait": { type: "string" }, "no-lock": { type: "boolean", default: false },
       port: { type: "string", default: process.env.HARNESS_PORT }, out: { type: "string" }
     }
   });
@@ -136,13 +136,22 @@ async function main() {
 
   // --no-lock: a plumbing check in a CORRECTION slot; its numbers are not
   // a measure and kpi-report ignores them.
-  const releaseLock = values["no-lock"] ? () => {} : await acquirePerfLock({ name: `harness ttff (${REPO_ROOT})`, waitSec: num(values, "lock-wait", { min: 0 }), log });
+  // A calm machine first (--calm-wait, default --lock-wait), then the lock.
+  const lockWait = num(values, "lock-wait", { min: 0 });
+  const calmWait = values["calm-wait"] == null ? lockWait : num(values, "calm-wait", { min: 0 });
+  const releaseLock = values["no-lock"] ? () => {} : await calmThenLock({
+    maxLoad, calmWait, log: (m) => log(`before the lock: ${m}`),
+    acquire: () => acquirePerfLock({ name: `harness ttff (${REPO_ROOT})`, waitSec: lockWait, log })
+  });
   const outDir = probeOutDir("ttff", iso, values.out);
   const server = await ensureServer({ port, root: REPO_ROOT });
   const records = [];
+  let gaveUp = null;
   try {
     for (let run = 1; run <= runs; run += 1) {
       const loadGate = await waitForLoad({ maxLoad, waitSec: loadWait, log });
+      gaveUp = loadGaveUp(loadGate);
+      if (gaveUp) { log(`run ${run}: ${gaveUp}`); break; }
       const profileDir = mkdtempSync(path.join(os.tmpdir(), "gc-harness-ttff-"));
       const releaseProfile = claim(profileDir, REPO_ROOT, "chrome-profile");
       const record = { run, loadGate, load1Before: os.loadavg()[0] };
@@ -170,7 +179,7 @@ async function main() {
   const summary = {
     probe: "ttff", at: new Date().toISOString(), locked: !values["no-lock"], machine: machineSnapshot(),
     chrome: chromeInfo(), served: server.identity,
-    iso: path.basename(iso), query, url: `${server.base}?${withDeterministicClock(query)}`, runs: records.length,
+    iso: path.basename(iso), query, url: `${server.base}?${withDeterministicClock(query)}`, runs: records.length, gaveUp,
     definition: "t0 = disc handed to the engine page (the Play click); KPI = first non-uniform picture after the first present of a core frame (vi > 0). cold = new profile, warm = same profile relaunched. A launch without it fails.",
     ...summarizeTtff(records),
     // aot=1: optimisation states and regions installed at boot per phase

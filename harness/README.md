@@ -96,6 +96,11 @@ node harness/probes/race-perf.mjs --iso ../roms/<disc>.iso --state ../measures/h
 - Load, as in the matrix (`lib/env.mjs`): each side first waits up to
   `--load-wait` s for the 1-minute load to drop under `--max-load` (default
   a quarter of the cores); a window whose median load is above it fails.
+- race-perf and ttff wait for a calm machine (load ≤ `--max-load`) before
+  they take the perf lock, up to `--calm-wait` (default `--lock-wait`); not
+  calm by then, they stop without the lock and without measuring. Under the
+  lock, a run whose load gate does not open within `--load-wait` gives the
+  remaining runs up (`gaveUp` in summary.json) and the lock goes back.
 - The shared perf lock (`~/projects/gc-web-emu/.perf-lock`, PROGRAM.md) is
   taken before the first launch and released on every exit, Ctrl-C
   included; `--lock-wait` bounds the wait (60 s polls). `harness/run ab`
@@ -214,8 +219,11 @@ node harness/remote/spark-run.mjs --build <ref>           # its core built on th
   its old name and would wait for itself. Compare sides of one pair only, never a lane with the
   other. `--chrome-cpus` / `--node-cpus` override the pinning.
 - `--build <ref>` (a commit of the fork) builds its core on the bench with
-  the pinned toolchain (`build-core-repro.mjs --install`, linux-arm64, ~8
-  min) in `~/salon-bench/build/wt/<commit>`, in its turn, holding both
+  the pinned toolchain (`build-core-repro.mjs --install --reset-vendor
+  --ccache`, linux-arm64) in one build checkout, `~/salon-bench/build/work`,
+  whose CMake tree, Dolphin sources and ccache carry over (~7 min cold, 1-3.5
+  min after another commit; the core's bytes do not depend on the path), and
+  exports the tree it serves to `~/salon-bench/build/wt/<commit>`, in its turn, holding both
   lanes' locks (lane `b` also waits while a build of an older harness,
   without a ticket, exists);
   `--candidate spark:<ref>` / `--baseline spark:<ref>` then serve that
