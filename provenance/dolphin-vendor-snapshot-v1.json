@@ -3,8 +3,8 @@
   "normalization": "git-blob-lf",
   "root": {
     "baseCommit": "e22551eae1c84a7e4d0b6a5c519ef4ed4ef69df1",
-    "resultTree": "bdfd99d0d49146a311beb19fc43cdad1ca9c4756",
-    "changedPathCount": 127,
+    "resultTree": "c7ac68bb482fdabeb4dc334c900410ec8ec615e1",
+    "changedPathCount": 128,
     "records": [
       {
         "path": "CMakeLists.txt",
@@ -185,6 +185,15 @@
         "resultBlob": "df7f282ee400557667fc4deaa365b899fa13b164",
         "size": 27693,
         "sha256": "644208a159af08fe7380d76bdbf37102ca55a6c79bee986e7672f804d777294d"
+      },
+      {
+        "path": "Source/Core/Core/HW/DSPHLE/DSPHLE.cpp",
+        "status": "M",
+        "mode": "100644",
+        "baseBlob": "c8fc1317deab75dc88283756faaf235276d281fc",
+        "resultBlob": "b7f972c2e71198627db65f029df2b6291f166b39",
+        "size": 8719,
+        "sha256": "1cdf9922d2df9884f5c45e073f95da8a17c56b16f9a04405932f76b4f6f40009"
       },
       {
         "path": "Source/Core/Core/HW/DVD/AMMediaboard.cpp",
@@ -1185,5 +1194,5 @@
       ]
     }
   ],
-  "contentSha256": "7d500cbbb129718d9c0cf705f43a4b8bb06653b64d5bff439af4a11d786587d2"
+  "contentSha256": "ffd2c5a9256c31a1bf9fc76db9a6f492b64a0eafe05024468d9554d3b707791c"
 }
