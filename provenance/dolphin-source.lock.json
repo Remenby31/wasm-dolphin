@@ -25,7 +25,7 @@
       "commit": "01e0577914a75a2569c846778c2f93aa8e6feddd"
     }
   },
-  "patchSeriesSha256": "2fa8de52fcc13f82e4ad26ee9eb50658390db6a3825259ea39a9d3e36dee5ce2",
+  "patchSeriesSha256": "bb5981fae038e9cdf5c93f627a89ba731fff86f19edc3d50da82222a5232e6e6",
   "patches": [
     {
       "order": 1,
@@ -640,8 +640,8 @@
       "cwd": ".",
       "hashMode": "lf-normalized",
       "path": "patches/dolphin-wasm/snapshot/0083-region-chaining.patch",
-      "size": 45676,
-      "sha256": "ad6d1d746c5ca3041fe87e8158cd6e7e9ec991dc120756eb2c6c00bc4a2c7ef7"
+      "size": 45675,
+      "sha256": "ea9f9b0b91e9141e2ce16b8709522fe1288812764c55cb1e1ba07f4bdd8aa843"
     },
     {
       "order": 78,

@@ -87,7 +87,7 @@ diff --git a/Source/Core/Core/PowerPC/CachedInterpreter/CachedInterpreter.cpp b/
 +  u32 offset = 0;
 +};
 +thread_local FragmentDowncount t_fragment_downcount;
-+constexpr bool REGION_BRANCH_HINTS = false;
++constexpr bool REGION_BRANCH_HINTS = true;
 +// Records the `if` about to be emitted at body.size() (fragment mode only).
 +inline void HintNextIf(const std::vector<u8>& body, bool likely)
 +{
@@ -1065,7 +1065,7 @@ diff --git a/Source/Core/Core/PowerPC/CachedInterpreter/CachedInterpreter.cpp b/
 +// 10: region modules carry wasm branch hints (0083, F).
 +// 11: a fragment keeps downcount (and the next pc) in locals (0083, G).
 +// 12: a region block loads only the GPRs it reads before writing (0083, H).
-+constexpr u32 AOT_COMPILER_VERSION = 13;
++constexpr u32 AOT_COMPILER_VERSION = 14;
  constexpr u32 AOT_MAX_FRAGMENT_BYTES = 1u << 20;
  thread_local std::vector<u32> t_aot_out;
  u8* s_aot_ram = nullptr;

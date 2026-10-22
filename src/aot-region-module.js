@@ -185,6 +185,7 @@ export function assembleRegion(fragments, { helpers, pcOffset, memoryPages, memo
     const code = Uint8Array.from(f.code);
     const offsets = new Set();
     for (const r of f.relocs ?? []) {
+      if (r.kind === "hint") continue; // branch hints patch nothing (metadata.code.branch_hint below)
       if (!Number.isInteger(r.offset) || r.offset < 1 || r.offset + 5 > code.length) throw new Error(`region: reloc outside the code at ${r.offset}`);
       // A site is a padded zero after the instruction it patches: call for a
       // helper, return_call for a jump or a dispatch. Sites never overlap.
@@ -269,6 +270,25 @@ export function assembleRegion(fragments, { helpers, pcOffset, memoryPages, memo
   stub.push(OP.localTee, 1, OP.if, 0x40, OP.localGet, 0, OP.localGet, 1, OP.returnCallIndirect, TYPE_STATE, 0x00, OP.end, OP.i32Const, 0x00, OP.end);
   uleb(code, stub.length); append(stub);
   for (const b of bodies) { uleb(code, b.length); append(b); }
+  // Custom section "metadata.code.branch_hint" (wasm branch hinting, before
+  // the code section): per fragment, the `if` opcodes the core marked and
+  // whether their true arm is likely (fast memory path) or not (a halt, the
+  // downcount running out). Offsets are from the start of the function body,
+  // as the fragment's own code starts.
+  const hinted = fragments.map((f, i) => [FIRST + i, (f.relocs ?? []).filter((r) => r.kind === "hint")
+    .filter((r) => Number.isInteger(r.offset) && r.offset >= 0 && r.offset < f.code.length && f.code[r.offset] === OP.if)
+    .sort((a, b) => a.offset - b.offset)]).filter(([, hs]) => hs.length);
+  if (hinted.length) {
+    const hints = [];
+    name(hints, "metadata.code.branch_hint");
+    uleb(hints, hinted.length);
+    for (const [fn, hs] of hinted) {
+      uleb(hints, fn);
+      uleb(hints, hs.length);
+      for (const h of hs) { uleb(hints, h.offset); hints.push(0x01, h.likely ? 0x01 : 0x00); }
+    }
+    section(out, 0, hints);
+  }
   section(out, 10, code);
 
   // Custom section "region-entries": every declared entry (u32 LE, sorted),

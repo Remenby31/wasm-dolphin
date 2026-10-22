@@ -328,6 +328,7 @@ function translateOne(m, f, { mask, maxBlocks, names }) {
     const [offset, kind, value] = words.subarray(entryCount + 3 * i, entryCount + 3 * i + 3);
     if (kind === 0) return { offset, kind: "import", name: names[value] };
     if (kind === 1) return { offset, kind: "jump", targetPc: value };
+    if (kind === 4) return { offset, kind: "hint", likely: value === 1 }; // an `if` and its likely arm (0102)
     return { offset, kind: "dispatch" };
   });
   const at = p + 24 + 4 * (entryCount + 3 * relocCount);
