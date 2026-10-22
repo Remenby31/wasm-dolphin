@@ -283,7 +283,7 @@ diff --git a/Source/Core/Core/PowerPC/CachedInterpreter/CachedInterpreter.cpp b/
      return false;
  
    case 10:  // cmpli
-@@ -15289,8 +15509,9 @@ namespace
+@@ -15338,8 +15558,9 @@ namespace
  {
  // Bumped whenever the code the translator emits changes (cache keys).
  // 2: modules carry their heap layout (region-layout); version 1 modules have
