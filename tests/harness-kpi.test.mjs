@@ -333,7 +333,7 @@ test("KPI report: files classified by content; manual.json errors become reasons
   const rows = (m) => Object.fromEntries(kpiTable([], m, { trunk: TRUNK }).map((r) => [r.id, r]));
   assert.match(rows(readManual(path.join(root, "m1.json"))).pcSpeed.why, /illisible/);
   assert.match(rows(readManual(path.join(root, "m2.json"))).pcSpeed.why, /non numérique/);
-  assert.equal(KPI_ROWS.length, 24);
+  assert.equal(KPI_ROWS.length, 27);
   // Every TTFF run overloaded: n/a, and the row says so.
   const over = { kind: "ttff", file: "o", json: { probe: "ttff", at: "2026-10-19T11:00:00Z", served: served("T1"), runs: 3, overloadedRuns: [1, 2, 3], cold: null, warm: null } };
   assert.match(kpiTable([over], {}, { trunk: TRUNK }).find((r) => r.id === "ttffCold").why, /runs 1, 2, 3 lancées sur machine surchargée/);
@@ -370,7 +370,11 @@ test("KPI: the product config (video=software) counts; wgpu and aot=1 are trajec
   const table = kpiTable([product, wgpu], {}, { trunk: TRUNK });
   const rows = Object.fromEntries(table.map((r) => [r.id, r]));
   // What the player sees today: the product side without aot.
-  assert.deepEqual([rows.macSpeedProduct.value, rows.macSpeedProduct.side, rows.macSpeedProduct.counted], [61, "baseline", true]);
+  assert.deepEqual([rows.macSpeedProduct.value, rows.macSpeedProduct.side, rows.macSpeedProduct.counted], [61, "baseline", false]);
+  // The main KPI is the headroom; without --headroom it says so.
+  assert.equal(rows.macHeadroomProduct.counted, true);
+  assert.equal(rows.macHeadroomProduct.status, "n/a");
+  assert.equal(rows.macHeadroomProduct.why, "pas de mesure --headroom");
   assert.match(rows.macSpeedProduct.flags, /video=software&speed=unlimited/);
   // If aot=1 were turned on: trajectory, not counted.
   assert.deepEqual([rows.macSpeedProductAot.value, rows.macSpeedProductAot.counted], [70, false]);
@@ -380,6 +384,17 @@ test("KPI: the product config (video=software) counts; wgpu and aot=1 are trajec
   assert.equal(rows.ttffColdProduct.counted, true);
   assert.equal(rows.ttffCold.counted, false);
   assert.equal(rows.ttffColdProduct.why, "aucun résultat ttff sur un commit propre de trunk (0 hors trunk ignoré(s))");
+});
+
+test("KPI: the headroom row reads race-perf --headroom, only where the throttle slept", () => {
+  const run = (applies) => race("2026-10-22T20:00:00Z", { speed: 100, extra: { query: "video=software&presenter=webgpu&pacing=tick&speed=1&metrics=1", served: { candidate: served("T1") } } });
+  const withHr = (applies) => { const r = run(); r.json.candidate.cold = { ...r.json.candidate.cold, headroom: { median: 1.734 }, headroomApplies: applies }; return r; };
+  const rows = (r) => Object.fromEntries(kpiTable([r], {}, { trunk: TRUNK }).map((x) => [x.id, x]));
+  const ok = rows(withHr(true)).macHeadroomProduct;
+  assert.deepEqual([ok.value, ok.status, ok.counted], [173.4, "OK", true]);
+  const under = rows(withHr(false)).macHeadroomProduct;
+  assert.equal(under.status, "n/a");
+  assert.match(under.why, /sous 100 %/);
 });
 
 test("KPI: a candidate column beside trunk, never in its place", (t) => {
