@@ -1,0 +1,210 @@
+diff --git a/Source/Core/Core/PowerPC/CachedInterpreter/CachedInterpreter.cpp b/Source/Core/Core/PowerPC/CachedInterpreter/CachedInterpreter.cpp
+--- a/Source/Core/Core/PowerPC/CachedInterpreter/CachedInterpreter.cpp
++++ b/Source/Core/Core/PowerPC/CachedInterpreter/CachedInterpreter.cpp
+@@ -2860,6 +2860,14 @@ struct WasmFragmentRelocs
+ };
+ thread_local WasmFragmentRelocs* s_wasm_fragment_relocs = nullptr;
+ 
++// Patch 0112: in region code XER.CA is also kept in a fragment local from
++// its store (which stays) to its next read in the same block: an addc/adde
++// chain reads a local instead of the byte it just stored. Reset at each
++// block start and by the helpers that may write XER (`system`, `interpret`,
++// the HLE calls).
++constexpr u32 WASM_FRAGMENT_CA_LOCAL = 57;  // after the dispatch pc (56)
++thread_local bool t_ca_in_local = false;
++
+ // Records the `if` about to be emitted at body.size() (fragment mode only).
+ inline void HintNextIf(const std::vector<u8>& body, bool likely)
+ {
+@@ -2883,6 +2891,8 @@ void EmitCallImport(std::vector<u8>& body, u32 index)
+     return;
+   }
+   // The site holds a padded zero until the region assembler patches it.
++  if (index == 10 || (index >= 13 && index <= 18))
++    t_ca_in_local = false;
+   s_wasm_fragment_relocs->relocs.push_back({body.size(), WASM_IMPORT_NAMES[index]});
+   EmitPaddedU32Leb(body, 0);
+ }
+@@ -3193,6 +3203,28 @@ void EmitStateStoreU8Suffix(std::vector<u8>& body, u32 offset)
+   EmitU32Leb(body, offset);
+ }
+ 
++// XER.CA (a 0 or 1): the store, and in region code the local (0112).
++void EmitCaStoreSuffix(std::vector<u8>& body, const WasmStateLayout& layout)
++{
++  if (s_wasm_fragment_relocs)
++  {
++    body.push_back(0x22);  // local.tee
++    EmitU32Leb(body, WASM_FRAGMENT_CA_LOCAL);
++    t_ca_in_local = true;
++  }
++  EmitStateStoreU8Suffix(body, layout.xer_ca_offset);
++}
++
++void EmitCaLoad(std::vector<u8>& body, const WasmStateLayout& layout)
++{
++  if (s_wasm_fragment_relocs && t_ca_in_local)
++  {
++    EmitLocalGet(body, WASM_FRAGMENT_CA_LOCAL);
++    return;
++  }
++  EmitStateLoadU8(body, layout.xer_ca_offset);
++}
++
+ void EmitStateStoreU16Suffix(std::vector<u8>& body, u32 offset)
+ {
+   body.push_back(0x3b);
+@@ -3215,7 +3247,7 @@ void EmitStoreNpcConst(std::vector<u8>& body, const WasmStateLayout& layout, u32
+ void EmitLoadXer(std::vector<u8>& body, const WasmStateLayout& layout)
+ {
+   EmitStateLoadU16(body, layout.xer_stringctrl_offset);
+-  EmitStateLoadU8(body, layout.xer_ca_offset);
++  EmitCaLoad(body, layout);
+   EmitI32Const(body, XER_CA_SHIFT);
+   body.push_back(0x74);
+   body.push_back(0x72);
+@@ -3243,7 +3275,7 @@ void EmitStoreXerFromLocal(std::vector<u8>& body, const WasmStateLayout& layout,
+   body.push_back(0x76);
+   EmitI32Const(body, 1);
+   body.push_back(0x71);
+-  EmitStateStoreU8Suffix(body, layout.xer_ca_offset);
++  EmitCaStoreSuffix(body, layout);
+ 
+   EmitStateStoreU32Prefix(body);
+   EmitLocalGet(body, local_index);
+@@ -3364,7 +3396,7 @@ void EmitAddic(std::vector<u8>& body, const WasmStateLayout& layout, UGeckoInstr
+   EmitI32Const(body, 0xffffffff);
+   body.push_back(0x73);
+   body.push_back(0x4b);
+-  EmitStateStoreU8Suffix(body, layout.xer_ca_offset);
++  EmitCaStoreSuffix(body, layout);
+ 
+   EmitStateStoreU32Prefix(body);
+   EmitLocalGet(body, 3);
+@@ -7349,7 +7381,7 @@ bool EmitWasmSupportedIntegerInstruction(std::vector<u8>& body, const WasmStateL
+     EmitI32Const(body, immediate);
+     body.push_back(0x49);
+     body.push_back(0x72);
+-    EmitStateStoreU8Suffix(body, layout.xer_ca_offset);
++    EmitCaStoreSuffix(body, layout);
+ 
+     EmitStateStoreU32Prefix(body);
+     EmitLocalGet(body, 3);
+@@ -7909,7 +7941,7 @@ bool EmitWasmSupportedIntegerInstruction(std::vector<u8>& body, const WasmStateL
+       EmitI32Const(body, 0xffffffff);
+       body.push_back(0x73);
+       body.push_back(0x4b);
+-      EmitStateStoreU8Suffix(body, layout.xer_ca_offset);
++      EmitCaStoreSuffix(body, layout);
+ 
+       EmitStateStoreU32Prefix(body);
+       EmitLocalGet(body, 3);
+@@ -7922,7 +7954,7 @@ bool EmitWasmSupportedIntegerInstruction(std::vector<u8>& body, const WasmStateL
+     if (inst.SUBOP10 == 138 && !inst.OE)
+     {
+       // Compute the result (RA + RB + CA) into local[3].
+-      EmitStateLoadU8(body, layout.xer_ca_offset);
++      EmitCaLoad(body, layout);
+       EmitLocalSet(body, 2);
+       EmitStateLoadU32(body, GprOffset(layout, inst.RA));
+       EmitStateLoadU32(body, GprOffset(layout, inst.RB));
+@@ -7952,7 +7984,7 @@ bool EmitWasmSupportedIntegerInstruction(std::vector<u8>& body, const WasmStateL
+       body.push_back(0x46);
+       body.push_back(0x71);
+       body.push_back(0x72);
+-      EmitStateStoreU8Suffix(body, layout.xer_ca_offset);
++      EmitCaStoreSuffix(body, layout);
+ 
+       // NOW write the result. Safe even if RD aliases RA or RB because the CA
+       // computation has already consumed the original values.
+@@ -7966,7 +7998,7 @@ bool EmitWasmSupportedIntegerInstruction(std::vector<u8>& body, const WasmStateL
+     }
+     if (inst.SUBOP10 == 202 && !inst.OE)
+     {
+-      EmitStateLoadU8(body, layout.xer_ca_offset);
++      EmitCaLoad(body, layout);
+       EmitLocalSet(body, 2);
+       EmitStateLoadU32(body, GprOffset(layout, inst.RA));
+       EmitLocalGet(body, 2);
+@@ -7981,7 +8013,7 @@ bool EmitWasmSupportedIntegerInstruction(std::vector<u8>& body, const WasmStateL
+       EmitLocalGet(body, 3);
+       body.push_back(0x45);
+       body.push_back(0x71);
+-      EmitStateStoreU8Suffix(body, layout.xer_ca_offset);
++      EmitCaStoreSuffix(body, layout);
+       if (inst.Rc)
+         EmitUpdateCr0FromLocal(body, layout, 3);
+       return true;
+@@ -8002,7 +8034,7 @@ bool EmitWasmSupportedIntegerInstruction(std::vector<u8>& body, const WasmStateL
+       body.push_back(0x49);
+       body.push_back(0x45);
+       body.push_back(0x72);
+-      EmitStateStoreU8Suffix(body, layout.xer_ca_offset);
++      EmitCaStoreSuffix(body, layout);
+ 
+       EmitStateStoreU32Prefix(body);
+       EmitLocalGet(body, 3);
+@@ -8017,7 +8049,7 @@ bool EmitWasmSupportedIntegerInstruction(std::vector<u8>& body, const WasmStateL
+       // See the note on addex (138) below: store new XER.CA BEFORE storing
+       // result to GprOffset(RD), because RD may alias RA or RB and the CA
+       // recomputation re-reads them from memory.
+-      EmitStateLoadU8(body, layout.xer_ca_offset);
++      EmitCaLoad(body, layout);
+       EmitLocalSet(body, 2);
+       EmitStateLoadU32(body, GprOffset(layout, inst.RA));
+       EmitI32Const(body, 0xffffffff);
+@@ -8040,7 +8072,7 @@ bool EmitWasmSupportedIntegerInstruction(std::vector<u8>& body, const WasmStateL
+       body.push_back(0x46);
+       body.push_back(0x71);
+       body.push_back(0x72);
+-      EmitStateStoreU8Suffix(body, layout.xer_ca_offset);
++      EmitCaStoreSuffix(body, layout);
+ 
+       EmitStateStoreU32Prefix(body);
+       EmitLocalGet(body, 3);
+@@ -8255,7 +8287,7 @@ bool EmitWasmSupportedIntegerInstruction(std::vector<u8>& body, const WasmStateL
+       EmitStateStoreU32Suffix(body, GprOffset(layout, inst.RA));
+       EmitStateStoreU32Prefix(body);
+       EmitLocalGet(body, 2);
+-      EmitStateStoreU8Suffix(body, layout.xer_ca_offset);
++      EmitCaStoreSuffix(body, layout);
+       if (inst.Rc)
+         EmitUpdateCr0FromLocal(body, layout, 3);
+       return true;
+@@ -8283,7 +8315,7 @@ bool EmitWasmSupportedIntegerInstruction(std::vector<u8>& body, const WasmStateL
+         EmitI32Const(body, 0);
+         body.push_back(0x47);
+       }
+-      EmitStateStoreU8Suffix(body, layout.xer_ca_offset);
++      EmitCaStoreSuffix(body, layout);
+       EmitStateStoreU32Prefix(body);
+       EmitLocalGet(body, 3);
+       EmitStateStoreU32Suffix(body, GprOffset(layout, inst.RA));
+@@ -8949,6 +8981,7 @@ std::vector<u8> BuildWasmCachedInterpreterBlock(std::span<const PPCAnalyst::Code
+   }
+ 
+   u32 downcount = 0;
++  t_ca_in_local = false;
+   for (const PPCAnalyst::CodeOp& op : ops)
+   {
+     downcount += op.opinfo->num_cycles;
+@@ -15891,7 +15924,7 @@ bool BuildRegionFragment(Core::System& system, u32 entry_pc, std::span<const u32
+   };
+   code.assign(WASM_BLOCK_LOCALS.begin(), WASM_BLOCK_LOCALS.end());
+   code[0] = 0x07;
+-  code.insert(code.end(), {0x01, 0x7f});  // the dispatch pc
++  code.insert(code.end(), {0x02, 0x7f});  // the dispatch pc, XER.CA (0112)
+   code.insert(code.end(), {0x03, 0x40});  // loop
+   EmitLocalGet(code, 0);
+   load(pc_offset);
+@@ -16014,8 +16047,8 @@ namespace
+ // 6 (0105): FPU ops outside the direct tier stay in the region, interpreted.
+ // 7 (0108): region byte swaps as two rotates. 8 (0109): regions of up to
+ // 256 blocks, under a 480 KB cap. 9 (0110): region modules carry wasm branch
+-// hints.
+-constexpr u32 AOT_COMPILER_VERSION = 9;
++// hints. 11 (0112): XER.CA read from a fragment local after its store.
++constexpr u32 AOT_COMPILER_VERSION = 11;
+ constexpr u32 AOT_MAX_FRAGMENT_BYTES = 1u << 20;
+ thread_local std::vector<u32> t_aot_out;
+ u8* s_aot_ram = nullptr;

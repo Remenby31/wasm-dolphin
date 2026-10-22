@@ -781,3 +781,39 @@ test("FPU ops outside the direct tier run inside the region, interpreted, like t
   assert.equal(got.ran, 1);
   core.invalidate(FPU_TEXT, 4 * FPU.words.length);
 });
+
+// 0112: XER.CA read from a fragment local after its store in the block:
+// 64-bit adds and subtracts (addc/adde, subfc/subfe, addze) with carries
+// out of the low word, an srawi feeding addze, then mfxer reads CA back.
+const CA_TEXT = 0x8000f100;
+const xo = (sub) => (d, a, b) => (31 << 26) | (d << 21) | (a << 16) | (b << 11) | (sub << 1);
+const addc = xo(10), adde = xo(138), subfc = xo(8), subfe = xo(136);
+const addze = (d, a) => xo(202)(d, a, 0);
+const srawi = (a, s, sh) => (31 << 26) | (s << 21) | (a << 16) | (sh << 11) | (824 << 1);
+const mfxer = (d) => (31 << 26) | (d << 21) | (1 << 16) | (339 << 1);
+const CA = assemble(CA_TEXT, [
+  "main", asm.mflr(0), asm.stwu(1, 1, -16), stw(0, 1, 20), (pc, l) => asm.bl(pc, l.ca),
+  lwz(0, 1, 20), asm.addi(1, 1, 16), mtlr(0), asm.blr(),
+  "ca", asm.li(5, -1), asm.li(6, 1), asm.li(7, 2), asm.li(8, 3),
+  addc(9, 5, 6), adde(10, 7, 8), addc(11, 9, 5), adde(12, 10, 7),
+  subfc(13, 6, 5), subfe(14, 8, 7), srawi(15, 5, 1), addze(16, 15), mfxer(17), asm.blr()
+]);
+
+test("carry chains in a region end like the interpreter, CA included (0112)", { skip: chainSkip || (core?.has("DolphinWeb_AotKeyParts") && keyVersion() < 11 && "core before 0112 (compiler version < 11)") }, () => {
+  const dol = buildDol({ textAddr: CA_TEXT, text: CA.words, entry: CA.labels.main });
+  const { image, entryPoint } = imageFromDol(dol);
+  const plan = planDol({ image, entryPoint, gameId: "TEST01", dolBytes: dol, options: { gapFill: false } });
+  for (const seg of image.segments) core.load(seg.start, seg.bytes);
+  core.reset(seedGprs(CA.labels.main), CA.labels.main, STOP, 400000);
+  core.setRegionsEnabled(true);
+  core.setRegionChaining(true);
+  queueAll(plan, 1, true);
+  serviceAll();
+  const reference = runCall(CA.labels.main, { regions: false });
+  const got = runCall(CA.labels.main, { regions: true });
+  core.invalidate(CA_TEXT, 4 * CA.words.length);
+  core.module._DolphinWeb_AotForgetRegionsForTest?.();
+  assert.deepEqual(got.state, reference.state);
+  assert.equal(got.interpreted, 0, "no op left the region");
+  assert.equal(got.ran, 1);
+});

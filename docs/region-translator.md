@@ -321,6 +321,15 @@ as a `metadata.code.branch_hint` custom section (wasm branch hinting) before
 the code section, so V8 lays out the cold arms out of line. An engine that
 doesn't know the section ignores it. Compiler version 9.
 
+## XER.CA in a local (patch 0112, 2026-10-22)
+
+In region code a store of XER.CA also tees the value into a fragment local
+(57, after the dispatch pc). Later reads of CA in the same block (`adde`,
+`addze`, `subfe`, `mfxer`) take the local instead of reloading the byte
+the block just stored. The store stays, so every exit sees CA. The local is
+forgotten at each block start and after the helpers that may write XER
+(`system`, `interpret`, the HLE calls). Compiler version 11.
+
 ## MMU mode (patch 0091, with dispatch's 0090, 2026-10-22)
 
 Under the MMU (bMMU, set by a game's INI) no wasm code of ours runs. The
