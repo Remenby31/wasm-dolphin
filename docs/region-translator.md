@@ -245,6 +245,19 @@ million console lines, the browser process at 7-14 GB).
 - [x] **35 regions dropped on every second launch** (KPI, d18249e, and locally): installed during the OS init, they were dropped by invalidations (icbi or DMA) over their ranges, and the code then ran in the block JIT for the session. Patch 0085: an invalidation over an installed region marks it unverified instead; before it next runs it is checked against the plan's hashes (as after a cache clear), and dropped only if its code changed. A region with a member that has no hash, or an HLE hook installed at an entry since, is dropped (a hook changes no byte); a forced invalidation (breakpoints) drops at once, as before; a region already due for a check is skipped by later invalidations. `DolphinWeb_AotRegionRechecks` counts the regions kept for a check, the checks passed and the regions invalidations looked at.
 - [ ] **Second-launch TTFF +0.8 s** (first core frame 1.55 s against 0.72 s cold): the region cache read and compiled before the boot (`installBeforeBoot`). Load fewer modules before the boot, the rest after (target 10 s, today 2.05 s).
 
+## FPU ops interpreted inside a region (patch 0103, 2026-10-22)
+
+An FPU op the direct tier does not emit (the Rc forms, `mffs`, `mtfsf`,
+the paired-single ops 0087 leaves to helpers, ...) used to end the
+region's block: the region left for one op, the cached interpreter ran the
+rest of the block, and the block chain came back at the next region entry
+(~240 000 times a second on the race before 0087). In region translation it
+is now an `EmitInterpretCall` (the mixed tier's `allow_interpret_fallback`:
+GPR cache flushed and reloaded, a halt returns 2). Only computational FPU
+ops (`RegionInterpretsInline`): system, cache and branch ops, which may
+change the MSR, the translation or the code, still end the region, which
+does not check the CPU's mode between its blocks. Compiler version 6.
+
 ## MMU mode (patch 0091, with dispatch's 0090, 2026-10-22)
 
 Under the MMU (bMMU, set by a game's INI) no wasm code of ours runs. The
