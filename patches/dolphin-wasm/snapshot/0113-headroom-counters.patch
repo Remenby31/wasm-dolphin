@@ -1,0 +1,243 @@
+diff --git a/Source/Core/Core/CoreTiming.cpp b/Source/Core/Core/CoreTiming.cpp
+--- a/Source/Core/Core/CoreTiming.cpp
++++ b/Source/Core/Core/CoreTiming.cpp
+@@ -22,6 +22,9 @@
+ #include "Core/CPUThreadConfigCallback.h"
+ #include "Core/Config/MainSettings.h"
+ #include "Core/Core.h"
++#ifdef __EMSCRIPTEN__
++#include "Core/WasmHeadroom.h"
++#endif
+ #include "Core/HW/Memmap.h"
+ #include "Core/HW/ProcessorInterface.h"
+ #include "Core/HW/SystemTimers.h"
+@@ -564,6 +567,7 @@
+     const TimePoint time_after_sleep = Clock::now();
+     m_system.GetPerfMetrics().CountThrottleSleep(time_after_sleep - time);
+ #ifdef __EMSCRIPTEN__
++    DolphinWeb::Headroom::AddCpuSleep(time_after_sleep - time);
+     if (DolphinWeb::WasmTimingProfile::IsSliceActive())
+     {
+       const u32 requested_us = DolphinWeb::WasmTimingProfile::ElapsedMicros(time, time_point);
+@@ -587,6 +591,9 @@
+ void CoreTimingManager::Throttle(const s64 target_cycle)
+ {
+   const TimePoint time = Clock::now();
++#ifdef __EMSCRIPTEN__
++  DolphinWeb::Headroom::OnThrottle();
++#endif
+ 
+   const bool already_throttled =
+       m_throttled_after_presentation.exchange(true, std::memory_order_relaxed);
+@@ -599,7 +606,12 @@
+   const bool skip_throttle = already_throttled && m_config_rush_frame_presentation &&
+                              ((GetTargetHostTime(target_cycle) - time) < m_max_throttle_skip_time);
+   if (skip_throttle)
++  {
++#ifdef __EMSCRIPTEN__
++    DolphinWeb::Headroom::CountRushSkip();
++#endif
+     return;
++  }
+ 
+   // Measure current performance after throttling.
+   Common::ScopeGuard perf_marker{[&] {
+@@ -803,3 +815,14 @@
+ }
+ 
+ }  // namespace CoreTiming
++
++#ifdef __EMSCRIPTEN__
++// Headroom counters (WasmHeadroom.h): n >= 0 zeroes and turns them on at the
++// CPU thread's next Throttle; n < 0 only reads. Returns the struct's address.
++extern "C" EMSCRIPTEN_KEEPALIVE u32 DolphinWeb_HeadroomStats(int reset)
++{
++  if (reset >= 0)
++    DolphinWeb::Headroom::g_request.store(reset, std::memory_order_release);
++  return static_cast<u32>(reinterpret_cast<std::uintptr_t>(&DolphinWeb::Headroom::g_stats));
++}
++#endif
+diff --git a/Source/Core/VideoCommon/BPStructs.cpp b/Source/Core/VideoCommon/BPStructs.cpp
+--- a/Source/Core/VideoCommon/BPStructs.cpp
++++ b/Source/Core/VideoCommon/BPStructs.cpp
+@@ -41,6 +41,10 @@
+ #include "VideoCommon/VideoEvents.h"
+ #include "VideoCommon/XFStateManager.h"
+ 
++#ifdef __EMSCRIPTEN__
++#include "Core/WasmHeadroom.h"
++#endif
++
+ using namespace BPFunctions;
+ 
+ static constexpr Common::EnumMap<float, GammaCorrection::Invalid2_2> s_gammaLUT = {1.0f, 1.7f, 2.2f,
+@@ -318,6 +322,9 @@
+         // here. Not sure if there's a better spot to put this.
+         // the number of lines copied is determined by the y scale * source efb height
+         g_bounding_box->Disable(pixel_shader_manager);
++#ifdef __EMSCRIPTEN__
++        DolphinWeb::Headroom::CountXfbCopy();
++#endif
+ 
+         float yScale;
+         if (PE_copy.scale_invert)
+diff --git a/Source/Core/VideoCommon/Fifo.cpp b/Source/Core/VideoCommon/Fifo.cpp
+--- a/Source/Core/VideoCommon/Fifo.cpp
++++ b/Source/Core/VideoCommon/Fifo.cpp
+@@ -40,6 +40,7 @@
+ #include <emscripten/emscripten.h>
+ #include <pthread.h>
+ #include "dolphin_web_raster_profile.h"
++#include "Core/WasmHeadroom.h"
+ #endif
+ 
+ namespace Fifo
+@@ -307,6 +308,13 @@
+ {
+   m_gpu_mainloop.Run(
+       [this] {
++#ifdef __EMSCRIPTEN__
++        // Headroom (WasmHeadroom.h): host time of the passes that ran the FIFO.
++        const bool hr_on = DolphinWeb::Headroom::g_on;
++        const auto hr_start = hr_on ? DolphinWeb::Headroom::Clock::now() :
++                                      DolphinWeb::Headroom::Clock::time_point{};
++        bool hr_work = false;
++#endif
+         // Run events from the CPU thread.
+         AsyncRequests::GetInstance()->PullEvents();
+         DolphinWeb::GpuSyncDiag::Count(DolphinWeb::GpuSyncDiag::s_counters.gpu_loop_iterations);
+@@ -391,6 +399,9 @@
+           {
+             if (m_config_sync_gpu && m_sync_ticks.load() < m_config_sync_gpu_min_distance)
+               break;
++#ifdef __EMSCRIPTEN__
++            hr_work = true;
++#endif
+ 
+             u32 cyclesExecuted = 0;
+             u32 readPtr = fifo.CPReadPointer.load(std::memory_order_relaxed);
+@@ -512,6 +523,10 @@
+                 flush_needed, refresh_needed, dirty_at_skip);
+           }
+         }
++#ifdef __EMSCRIPTEN__
++        if (hr_on && hr_work)
++          DolphinWeb::Headroom::AddGpuWork(DolphinWeb::Headroom::Clock::now() - hr_start);
++#endif
+       },
+       100);
+ }
+@@ -521,6 +536,16 @@
+   if (!m_system.IsDualCoreMode() || m_use_deterministic_gpu_thread)
+     return;
+ 
++#ifdef __EMSCRIPTEN__
++  // Headroom: the CPU thread waiting for the GPU (SyncOnSkipIdle on).
++  if (DolphinWeb::Headroom::g_on && !m_gpu_mainloop.IsDone()) [[unlikely]]
++  {
++    const auto start = DolphinWeb::Headroom::Clock::now();
++    m_gpu_mainloop.Wait();
++    DolphinWeb::Headroom::AddFlushGpuWait(DolphinWeb::Headroom::Clock::now() - start);
++    return;
++  }
++#endif
+   m_gpu_mainloop.Wait();
+ }
+ 
+diff --git a/Source/Core/Core/WasmHeadroom.h b/Source/Core/Core/WasmHeadroom.h
+new file mode 100644
+--- /dev/null
++++ b/Source/Core/Core/WasmHeadroom.h
+@@ -0,0 +1,92 @@
++// Copyright 2026 wasm-dolphin contributors
++// SPDX-License-Identifier: GPL-2.0-or-later
++//
++// Headroom counters (patch 0113, read by harness/lib/headroom.mjs): how fast
++// the game could run, measured at speed=1 (research/deep-headroom-kpi.md).
++// The CPU thread counts its throttle sleep, its waits for the GPU in
++// FlushGpu and the Rush skips; the GPU thread counts the host time of its
++// non-empty passes and the XFB copies. Each counter is written by one thread
++// only, as a plain double; the harness copies the struct twice and refuses
++// a torn read. Off until DolphinWeb_HeadroomStats(n >= 0): the CPU thread
++// applies the request at its next Throttle (once per VI) and the hooks test a
++// plain bool, so nothing is added on any per-block path, and no atomic is
++// read on the GPU thread.
++#pragma once
++
++#ifdef __EMSCRIPTEN__
++#include <atomic>
++#include <chrono>
++
++#include "Common/CommonTypes.h"
++
++namespace DolphinWeb::Headroom
++{
++// Layout v1 (80 bytes, little-endian), agreed with the harness.
++struct Stats
++{
++  u32 version = 1;
++  u32 size_bytes = 80;
++  u32 on = 0;
++  u32 reserved = 0;
++  double window_us = 0;        // host time since the reset (CPU thread)
++  double cpu_sleep_us = 0;     // throttle sleep (CPU thread, SleepUntil)
++  double gpu_work_us = 0;      // non-empty GPU loop passes (GPU thread)
++  double xfb_copies = 0;       // EFB-to-XFB copies (GPU thread in dual core)
++  double rush_skips = 0;       // throttles skipped by Rush (CPU thread)
++  double flush_gpu_wait_us = 0;  // CPU waiting in FlushGpu (CPU thread)
++  double flush_gpu_waits = 0;
++  double spare = 0;
++};
++static_assert(sizeof(Stats) == 80);
++
++using Clock = std::chrono::steady_clock;
++inline Stats g_stats;
++inline bool g_on = false;  // read plainly by both threads
++inline std::atomic<int> g_request{-1};
++inline Clock::time_point g_reset_at;
++
++inline double Micros(Clock::duration d)
++{
++  return std::chrono::duration<double, std::micro>(d).count();
++}
++
++// CPU thread, once per Throttle: applies a reset request, keeps the window.
++inline void OnThrottle()
++{
++  if (g_request.load(std::memory_order_relaxed) >= 0) [[unlikely]]
++  {
++    g_request.exchange(-1, std::memory_order_acquire);
++    g_stats = Stats{};
++    g_reset_at = Clock::now();
++    g_stats.on = 1;
++    g_on = true;
++  }
++  if (g_on) [[unlikely]]
++    g_stats.window_us = Micros(Clock::now() - g_reset_at);
++}
++inline void CountRushSkip()
++{
++  if (g_on) [[unlikely]]
++    g_stats.rush_skips += 1;
++}
++inline void AddCpuSleep(Clock::duration d)
++{
++  if (g_on) [[unlikely]]
++    g_stats.cpu_sleep_us += Micros(d);
++}
++inline void AddFlushGpuWait(Clock::duration d)
++{
++  g_stats.flush_gpu_wait_us += Micros(d);
++  g_stats.flush_gpu_waits += 1;
++}
++inline void AddGpuWork(Clock::duration d)
++{
++  g_stats.gpu_work_us += Micros(d);
++}
++inline void CountXfbCopy()
++{
++  if (g_on) [[unlikely]]
++    g_stats.xfb_copies += 1;
++}
++}  // namespace DolphinWeb::Headroom
++#endif
