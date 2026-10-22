@@ -151,6 +151,7 @@ import {
   hashWgpuVisualSample
 } from "./wgpu-visual-cadence.js";
 import { createCoreLifecycle } from "./core-lifecycle.js";
+import { createDisplayCounter, startDisplayLoop } from "./wgpu-display-counter.js";
 import { PipelinePrewarm } from "./wgpu-pipeline-prewarm.js";
 import { BOOT_FILE_HEAD_BYTES, bootFileKind, checkExecutable, executableGameId } from "./boot-file.js";
 import {
@@ -338,6 +339,10 @@ const wgpuExactCapture = createWgpuExactCapture();
 const HARNESS_PRESENT_RING = 16384;
 const harnessPresentRing = new Float64Array(HARNESS_PRESENT_RING * 3);
 let harnessPresentHead = 0;
+// Harness only, when it asks (validationEnableHarness { displayed: true }):
+// what each BeginFrame put on screen (src/wgpu-display-counter.js).
+const harnessDisplay = createDisplayCounter();
+let harnessDisplayStop = null;
 let harnessPresentRead = 0;
 const presentationIntervalHistogram = new Uint32Array(
   PRESENTATION_HISTOGRAM_BUCKETS_MS.length + 1
@@ -1040,7 +1045,14 @@ function readHarnessTimeline() {
     Object.assign(vi, ring);
     harnessViRead = head;
   }
-  return { presents: { ...presents, lost: presentsLost }, vi, now: harnessNow() };
+  // displayed: null when not asked for, or when this worker has no rAF.
+  const display = harnessDisplayStop ? harnessDisplay.drain() : { displayed: null, displayedLost: 0, dropped: null };
+  return {
+    presents: { ...presents, lost: presentsLost }, vi, now: harnessNow(),
+    displayedEnabled: Boolean(harnessDisplayStop),
+    displayedWhy: harnessDisplayStop ? null : typeof requestAnimationFrame !== "function" ? "no requestAnimationFrame in this worker" : "not requested (validationEnableHarness { displayed: true })",
+    ...display
+  };
 }
 let harnessViRead = null;
 
@@ -1518,6 +1530,9 @@ async function handleMessage(type, payload) {
       // Applied now if the core is loaded, and again when it loads.
       harnessEnabled = true;
       moduleInstance?._DolphinWeb_HarnessEnable?.(1);
+      if (payload.displayed && !harnessDisplayStop) {
+        harnessDisplayStop = startDisplayLoop(harnessDisplay, { active: () => harnessEnabled });
+      }
       // The determinism trace (WasmDetTrace.h) must see the boot from its
       // first event: requested here, started when the core loads.
       if (payload.detTrace && !detTraceRequested) {
@@ -5178,6 +5193,7 @@ function recordPresentedFrame(coreFrame) {
     harnessPresentRing[slot + 1] = coreFrame;
     harnessPresentRing[slot + 2] = moduleInstance?._DolphinWeb_HarnessViSinceBoot?.() ?? -1;
     harnessPresentHead += 1;
+    if (harnessDisplayStop) harnessDisplay.submit(harnessPresentRing[slot + 2]);
   }
   presentedFrame += 1;
   framesSincePresentationFps += 1;
