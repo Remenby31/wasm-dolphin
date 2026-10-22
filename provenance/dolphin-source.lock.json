@@ -25,7 +25,7 @@
       "commit": "01e0577914a75a2569c846778c2f93aa8e6feddd"
     }
   },
-  "patchSeriesSha256": "2ebd7ca0e5f18f90ffe0d4b4d1f077880c350297fa3d90a76363d2e3a7852833",
+  "patchSeriesSha256": "8d0721c796d15146718d9a32cd231101bdb135034b003614a23d5d387719fb5c",
   "patches": [
     {
       "order": 1,
@@ -640,8 +640,8 @@
       "cwd": ".",
       "hashMode": "lf-normalized",
       "path": "patches/dolphin-wasm/snapshot/0085-region-recheck-after-invalidation.patch",
-      "size": 3267,
-      "sha256": "61b5fd43d597f5733a80deb4ade470372847107e43aa65c679397191d8d73f11"
+      "size": 3277,
+      "sha256": "65746d0a6078ed818c4bfe3a7a528f4bad3437891f1d73b2bbb15591dd925922"
     },
     {
       "order": 78,

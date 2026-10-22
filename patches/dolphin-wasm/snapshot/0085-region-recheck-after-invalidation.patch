@@ -56,8 +56,8 @@ diff --git a/Source/Core/Core/PowerPC/CachedInterpreter/CachedInterpreter.cpp b/
      }
    }
  }
-@@ -15437,6 +15459,14 @@ extern "C" EMSCRIPTEN_KEEPALIVE u32 DolphinWeb_AotLayoutWords(u32* out, u32 capa
-   return n;
+@@ -15442,6 +15464,14 @@ extern "C" EMSCRIPTEN_KEEPALIVE u32 DolphinWeb_AotLayoutRefused()
+   return s_region_layout_refused;
  }
  
 +// [installed regions an invalidation left to be checked again, regions found
@@ -68,6 +68,6 @@ diff --git a/Source/Core/Core/PowerPC/CachedInterpreter/CachedInterpreter.cpp b/
 +  out[1] = s_region_reverified;
 +}
 +
- extern "C" EMSCRIPTEN_KEEPALIVE u32 DolphinWeb_AotLayoutRefused()
+ extern "C" EMSCRIPTEN_KEEPALIVE void DolphinWeb_AotKeyParts(u32* out)
  {
-   return s_region_layout_refused;
+   out[0] = AOT_COMPILER_VERSION;
