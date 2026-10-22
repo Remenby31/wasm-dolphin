@@ -526,7 +526,7 @@ test("a helper that lowers downcount stops the region at the end of its block (l
   core.reset(seedGprs(DC.labels.f), DC.labels.f, STOP, 400000); // MSR.FP on while translating
   core.setRegionsEnabled(true);
   queueAll(plan, 100, true);
-  serviceAll();
+  for (let i = 0, n = -1; i < 50 && core.regionCount() !== n; i++) { n = core.regionCount(); core.serviceRegions(); }
   const mffsPc = DC.labels.f2 + 4, DROP = 100000;
   core.reset(seedGprs(DC.labels.f), DC.labels.f, STOP, 1000);
   core.module._DolphinWeb_AotTestDropDowncountOnNextHelper(DROP);
