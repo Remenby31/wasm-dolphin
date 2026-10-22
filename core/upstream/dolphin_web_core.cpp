@@ -1048,6 +1048,15 @@ int GameConfigValueForTest(const char* game_id, int revision, const char* settin
   return value;
 }
 
+// The MMU only (the first 0097 test; kept: the ABI manifest lists it).
+#ifdef __EMSCRIPTEN__
+EMSCRIPTEN_KEEPALIVE
+#endif
+int GameConfigMmuForTest(const char* game_id, int revision)
+{
+  return GameConfigValueForTest(game_id, revision, "MMU");
+}
+
 // Tests: `count` alerts through the relay, all the same text when
 // `distinct` is 0, all different otherwise; then the relay's totals
 // [relayed, folded, dropped] (cumulative).
