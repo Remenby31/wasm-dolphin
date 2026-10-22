@@ -12,7 +12,8 @@
 //   node harness/probes/race-multi.mjs --iso disc.iso --state scene.sav --port N
 //     --arm <dir> --arm <dir> [--arm <dir> …]      (the first is the baseline)
 //     --lanes "5,6,7;15,16,17;8,9,19" [--query …] [--runs 6] [--warmup 25] [--secs 20]
-//     [--max-load L] [--lock <dir/.perf-lock> …] [--counters] [--aot-seed [--seed-sec 600]] [--out dir]
+//     [--max-load L] [--lock <dir/.perf-lock> …] [--counters] [--aot-seed [--seed-sec 600]]
+//     [--isolated-boot [--settle-sec 10]] [--out dir]
 //
 // - Each arm is a tree served as is (race-perf's sides), on its own port
 //   (port + arm index), its Chromium pinned through HARNESS_CHROME_PATH's
@@ -37,6 +38,12 @@
 //   (queued = installed + refused + dropped) and its installed count holds
 //   for 3 reads, then all arms open their windows together; the counts are
 //   recorded per arm (regionGate) and compared (regionCountsEqual).
+// - --isolated-boot: an arm booting while the others already emulate can
+//   come up differently (2026-10-22: the cached regions refused for heap
+//   layout on such arms, ~6 % fewer host instructions per guest cycle
+//   without aot). Each arm then boots alone: once booted and settled (its
+//   regions with --aot-seed, else --settle-sec) it is paused before the next
+//   one boots; all resume together before the savestates and windows.
 import { randomBytes } from "node:crypto";
 import { mkdirSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import os from "node:os";
@@ -167,7 +174,7 @@ async function main() {
       hold: { type: "string", default: "KeyX" }, "max-load": { type: "string" },
       lock: { type: "string", multiple: true, default: [] }, "lock-wait": { type: "string", default: "14400" }, out: { type: "string" },
       counters: { type: "boolean", default: false }, "aot-seed": { type: "boolean", default: false }, "seed-sec": { type: "string", default: "600" },
-      "gate-sec": { type: "string", default: "120" }
+      "gate-sec": { type: "string", default: "120" }, "isolated-boot": { type: "boolean", default: false }, "settle-sec": { type: "string", default: "10" }
     }
   });
   const lanes = String(values.lanes ?? "").split(";").map((l) => l.trim()).filter(Boolean);
@@ -255,6 +262,20 @@ async function main() {
           sessions[a] = await openSession({ base: servers[a].base, server: servers[a], query: o.query, iso: path.resolve(values.iso), routes: { [STATE_ROUTE]: path.resolve(values.state) }, seedProfile: seeds[a] ?? null });
           sessions[a].seedOf = a;
           record.arms[a] = { arm: a, lane, cpus: lanes[lane], bootRank: bootOrder(r, arms.length).indexOf(a), boot: { startMs: bootStart - runStart, ms: Date.now() - bootStart }, url: sessions[a].url, served: servers[a].identity, core: sessions[a].core };
+          if (values["isolated-boot"]) {
+            // Settled, then paused: the next arm boots with this one idle.
+            record.arms[a].boot.settle = values["aot-seed"]
+              ? await waitRegionsQuiescent(() => regionPipeline(sessions[a].page), { target: seedRegions.get(a) ?? null, timeoutMs: num(values, "gate-sec", { min: 1 }) * 1000 })
+              : (await new Promise((res) => setTimeout(res, num(values, "settle-sec", { min: 0 }) * 1000)), { sec: num(values, "settle-sec", { min: 0 }) });
+            const paused = await workerRequest(sessions[a].page, "pause", {}, 30000);
+            record.arms[a].boot.paused = !paused?.error;
+            if (paused?.error) console.warn(`[race-multi] run ${r} arm ${a}: pause failed (${paused.error})`);
+          }
+        }
+        if (values["isolated-boot"]) {
+          // Every arm booted alone: all go on together.
+          const resumed = await Promise.all(sessions.map((s) => workerRequest(s.page, "resume", {}, 30000)));
+          resumed.forEach((x, a) => { record.arms[a].boot.resumed = !x?.error; });
         }
         // The windows together.
         const results = await Promise.allSettled(sessions.map((s) => measure(s, o)));
