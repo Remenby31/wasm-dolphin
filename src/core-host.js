@@ -57,6 +57,7 @@ import {
 } from "./input-latency-telemetry.js";
 import { requestedInputPhotonMarkerConfig } from "./input-visual-marker.js";
 import { requestedWgpuVisualCadence } from "./wgpu-visual-cadence.js";
+import { requestedWgpuPipelinePrewarm } from "./wgpu-pipeline-prewarm.js";
 import { requestedWgpuSparseUbo } from "./wgpu-sparse-ubo-copy-forward.js";
 
 const DEMO_WIDTH = 320;
@@ -108,6 +109,8 @@ export class EmulatorHost {
     this.correctTimeDrift = requestedCorrectTimeDrift();
     this.coreLog = requestedCoreLog();
     this.memcardSlotB = new URLSearchParams(window.location.search).get("memcardb") === "1";
+    // CPU reads of the EFB (peeks), off by default as in Dolphin (EFBAccessEnable).
+    this.efbAccess = new URLSearchParams(window.location.search).get("efbaccess") === "1";
     this.savesMode = new URLSearchParams(window.location.search).get("saves") === "off" ? "off" : "";
     this.efbDiag = requestedEfbDiag();
     this.jitVerbose = new URLSearchParams(window.location.search).get("jitverbose") === "1";
@@ -128,6 +131,8 @@ export class EmulatorHost {
     this.aotCompiler = aotCompilerRequested(window.location.search);
     // ?aot=1: first-launch optimisation of the disc (P7), off by default.
     this.aotFirstLaunch = new URLSearchParams(window.location.search).get("aot") === "1";
+    // With aot=1, regions tail-call the next region (patch 0102); ?regionchain=0 turns it off.
+    this.regionChain = new URLSearchParams(window.location.search).get("regionchain") !== "0";
     this.collectMetrics = requestedCollectMetrics();
     this.legacyOneWayAck = requestedLegacyOneWayAck(window.location.search);
     this.wgpuReplayDiagnostics = requestedWgpuReplayDiagnostics(window.location.search);
@@ -178,6 +183,7 @@ export class EmulatorHost {
     this.wgpuVisualCadence = requestedWgpuVisualCadence(window.location.search, {
       hardwareVideo: this.videoBackend === "WebGPU-Real"
     });
+    this.wgpuPipelinePrewarm = requestedWgpuPipelinePrewarm(window.location.search);
     this.gpuCompletionDiagnostics = requestedGpuCompletionDiagnostics(window.location.search);
     this.wgpuDirtyRangeProjection = requestedWgpuDirtyRangeProjection(window.location.search);
     this.wgpuPassPackageProjection = requestedWgpuPassPackageProjection(
@@ -407,6 +413,7 @@ export class EmulatorHost {
             correctTimeDrift: this.correctTimeDrift,
             coreLog: this.coreLog,
             memcardSlotB: this.memcardSlotB,
+            efbAccess: this.efbAccess,
             savesMode: this.savesMode,
             efbDiag: this.efbDiag,
             jitVerbose: this.jitVerbose,
@@ -417,6 +424,7 @@ export class EmulatorHost {
             jitOffThread: this.jitOffThread,
             aotCompiler: this.aotCompiler,
             aotFirstLaunch: this.aotFirstLaunch,
+            regionChain: this.regionChain,
             collectMetrics: this.collectMetrics,
             legacyOneWayAck: this.legacyOneWayAck,
             wgpuReplayDiagnostics: this.wgpuReplayDiagnostics,
@@ -448,6 +456,7 @@ export class EmulatorHost {
             wgpuMappedDrainCoalescing: this.wgpuMappedDrainCoalescing,
             wgpuRendererWorkerProbe: this.wgpuRendererWorkerProbe,
             wgpuVisualCadence: this.wgpuVisualCadence,
+            wgpuPipelinePrewarm: this.wgpuPipelinePrewarm,
             gpuCompletionDiagnostics: this.gpuCompletionDiagnostics,
             wgpuDirtyRangeProjection: this.wgpuDirtyRangeProjection,
             wgpuPassPackageProjection: this.wgpuPassPackageProjection,
@@ -680,6 +689,86 @@ export class EmulatorHost {
     if (port !== 0) return false;
     this.adapter.setInputState?.(state);
     return true;
+  }
+
+  // A streamed guest's state on a port (docs/input.md, "Streaming"): as
+  // setPad, plus the guest's sequence number and reception time
+  // (performance.timeOrigin + now()), echoed by padFeedback once a poll read it.
+  // Refused (false) unless the port was given to a guest (enableRemotePad)
+  // and is plugged in: it never plugs a port in.
+  setRemotePad(port, state, meta = {}) {
+    if (!isPadPort(port) || !state) return false;
+    return Boolean(this.adapter.setRemotePadState?.(port, state, meta));
+  }
+
+  // The host gives `port` to a streamed guest (true) or takes it back
+  // (false, e.g. kick). Only such ports accept setRemotePad and tapPad; the
+  // host's own ports never go through the direct block.
+  enableRemotePad(port, enabled) {
+    if (!isPadPort(port)) return false;
+    return Boolean(this.adapter.enableRemotePad?.(port, Boolean(enabled)));
+  }
+
+  // Buttons pressed and maybe already released (press counters of a streamed
+  // guest): the SI poll holds them until a poll of a later frame read them.
+  // False when the core cannot: the caller must hold them itself.
+  tapPad(port, buttons) {
+    if (!isPadPort(port)) return false;
+    return Boolean(this.adapter.tapPad?.(port, buttons));
+  }
+
+  // { pollCount, appliedSeq, appliedRxTime, pollTime, rumble, rumbleGeneration,
+  // reportedMask, presses[12] } for a port, or null on a core without the
+  // direct pad block.
+  padFeedback(port) {
+    if (!isPadPort(port)) return null;
+    return this.adapter.padFeedback?.(port) ?? null;
+  }
+
+  // Streaming (docs/input.md, "Streaming"): a video MediaStreamTrack fed by
+  // the emulation worker itself, one VideoFrame per presented frame, without
+  // the page's main thread in between. Null where the browser has no
+  // MediaStreamTrackGenerator (then use canvas.captureStream()).
+  captureVideoTrack() {
+    if (typeof MediaStreamTrackGenerator !== "function" || !this.adapter.request) return null;
+    if (this.streamTrack && this.streamTrack.readyState === "live") return this.streamTrack;
+    // The worker presents the frames only when it owns the canvas, and not
+    // with OGL (its CPU framebuffer is a stale readback there).
+    const why = this.streamCaptureUnsupported();
+    if (why) {
+      this.onStatus(`Worker capture unavailable: ${why}`);
+      return null;
+    }
+    const generator = new MediaStreamTrackGenerator({ kind: "video" });
+    const writable = generator.writable;
+    this.adapter.request("streamCapture", { writable }, [writable]).catch((error) => {
+      this.onStatus(`Worker capture unavailable: ${error?.message ?? error}`);
+      generator.stop();
+    });
+    this.streamTrack = generator;
+    return generator;
+  }
+
+  // Null when the worker can capture, else why not.
+  streamCaptureUnsupported() {
+    if (this.videoBackend === "OGL") return "OGL backend";
+    if (!this.usesAdapterCanvas) return "the worker does not own the canvas";
+    return null;
+  }
+
+  // Ends the worker capture (room closed, last guest gone).
+  stopVideoCapture() {
+    const track = this.streamTrack;
+    this.streamTrack = null;
+    track?.stop();
+    return this.adapter.request?.("streamCaptureStop").catch(() => {});
+  }
+
+  // { attached, frames, dropped, errors, source, width, height,
+  // captureMsTotal, captureMsMax, lastCaptureAt, lastCoreFrame }
+  async streamCaptureStats() {
+    const r = await this.adapter.request?.("streamCaptureStats");
+    return r?.stats ?? null;
   }
 
   // Plugs (true) or unplugs (false) the controller on a port. An unplugged
@@ -1295,11 +1384,16 @@ function requestedPpcProfile() {
 
 // ?gpuspin=<us> (patch 0098): the GPU thread sleeps once its FIFO has been
 // drained this long instead of busy-looping until the next 1 kHz tick.
-// Absent or invalid: the default (-1).
+// Default 200 us (race, 2026-10-22: GPU thread 37 -> 25 % of a core, CPU
+// thread +1.6 % on the Spark bench, +5.7 % median on the Mac with wgpu);
+// 0 sleeps at once and costs the CPU thread a wakeup per burst (-3 %).
+// ?gpuspin=-1 restores the 1 kHz busy loop.
+export const DEFAULT_GPU_SPIN_MICROS = 200;
 function requestedGpuSpinMicros() {
   const raw = new URLSearchParams(window.location.search).get("gpuspin");
   const us = raw == null || raw === "" ? NaN : Number(raw);
-  return Number.isInteger(us) && us >= 0 && us <= 1000000 ? us : -1;
+  if (us === -1) return -1;
+  return Number.isInteger(us) && us >= 0 && us <= 1000000 ? us : DEFAULT_GPU_SPIN_MICROS;
 }
 
 function requestedCpuOverclock() {

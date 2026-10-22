@@ -14,6 +14,7 @@ import { parseDolHeader } from "./dol.js";
 import { decodeWgpuSamplerState } from "./wgpu-sampler-state.js";
 import { gxClearDepthToStored, gxDepthState } from "./wgpu-depth-state.js";
 import { clampSourceRect, createWgpuExactCapture, packReadbackRows } from "./wgpu-exact-capture.js";
+import { createUniqueFrameCounter, hashRows, sampleRowOffsets } from "./harness-unique-frames.js";
 import { decodePrebuiltCache } from "./prebuilt-jit-cache-format.js";
 import {
   AOT_COMPILER_WORKER_NAME,
@@ -150,6 +151,8 @@ import {
   hashWgpuVisualSample
 } from "./wgpu-visual-cadence.js";
 import { createCoreLifecycle } from "./core-lifecycle.js";
+import { createDisplayCounter, startDisplayLoop } from "./wgpu-display-counter.js";
+import { PipelinePrewarm } from "./wgpu-pipeline-prewarm.js";
 import { BOOT_FILE_HEAD_BYTES, bootFileKind, checkExecutable, executableGameId } from "./boot-file.js";
 import {
   USER_DATA_ROOT,
@@ -171,6 +174,7 @@ import {
   sniffMemcardFile,
   validateSaveStateData
 } from "./memcard.js";
+import { StreamCapture } from "./stream-capture.js";
 
 // Day-25: mark this thread. The discio worker owns the WebGPU device
 // (createWebGpuPresenter runs here). WebGPU objects aren't shareable
@@ -184,6 +188,8 @@ console.log(`[boot-phase] discio-worker module-eval at perf.now=${performance.no
 let coreUrl = DEFAULT_UPSTREAM_CORE_URL;
 let moduleInstance = null;
 let api = null;
+// Streaming: presented frames → VideoFrames → the page's MediaStreamTrackGenerator.
+const streamCapture = new StreamCapture();
 let wgpuDiagnosticQuiet = false;
 let wgpuDiagnosticLogFilter = installWgpuDiagnosticLogFilter({ enabled: false });
 let mounted = false;
@@ -273,6 +279,37 @@ async function harnessPcSampler({ action, periodMs } = {}) {
 // by harness/lib/jit-region-stats.mjs. sampleEvery >= 0 switches them on and
 // resets them; absent, they are only read. Copied twice, back to back, so the
 // harness can refuse a torn read; the size comes from the struct's header.
+// Where this launch's emulated memory sits in the wasm heap: ram and L1
+// bases and sizes (WasmStateLayout words 15-18, _DolphinWeb_AotLayoutWords,
+// 0078), the region heap bases where the core has them (0084), the heap size
+// and the stack pointer. Read only; null fields when the core lacks an export.
+function harnessHeapLayout(m) {
+  if (!m) return null;
+  const out = { heapBytes: m.HEAPU8?.buffer?.byteLength ?? null, ramBase: null, ramSize: null, l1Base: null, l1Size: null, heapBases: null, stack: null };
+  if (typeof m._DolphinWeb_AotLayoutWords === "function" && typeof m._malloc === "function") {
+    const p = m._malloc(32 * 4);
+    try {
+      m._DolphinWeb_AotLayoutWords(p, 32);
+      const w = new Uint32Array(m.HEAPU8.buffer, p, 32);
+      Object.assign(out, { ramBase: w[15] >>> 0, ramSize: w[16] >>> 0, l1Base: w[17] >>> 0, l1Size: w[18] >>> 0 });
+    } finally {
+      m._free?.(p);
+    }
+  }
+  if (typeof m._DolphinWeb_AotRegionHeapBases === "function" && typeof m._malloc === "function") {
+    const p = m._malloc(8);
+    try {
+      m._DolphinWeb_AotRegionHeapBases(p);
+      const w = new Uint32Array(m.HEAPU8.buffer, p, 2);
+      out.heapBases = [w[0] >>> 0, w[1] >>> 0];
+    } finally {
+      m._free?.(p);
+    }
+  }
+  if (typeof m.stackSave === "function") out.stack = m.stackSave() >>> 0;
+  return out;
+}
+
 function harnessJitRegionStats({ sampleEvery } = {}) {
   if (!harnessEnabled) return { error: "harness hooks are off" };
   const stats = moduleInstance?._DolphinWeb_JitRegionStats;
@@ -286,7 +323,64 @@ function harnessJitRegionStats({ sampleEvery } = {}) {
   // layoutRefused: queued regions refused for another heap layout (0078), null
   // with an older core.
   const layoutRefused = moduleInstance._DolphinWeb_AotLayoutRefused ? (moduleInstance._DolphinWeb_AotLayoutRefused() >>> 0) + aotLayoutSkipped : null;
-  return { bytes: copy(), again: copy(), installSamples: harnessRegionInstallSamples(heap), layoutRefused };
+  // layoutHash: this launch's heap layout as the region modules see it (the
+  // hash the cache is keyed on, 0078); it varies between launches of one
+  // build, and with it the host work per guest cycle (bench, 2026-10-22).
+  const layoutHash = moduleInstance._DolphinWeb_AotLayoutHash ? moduleInstance._DolphinWeb_AotLayoutHash() >>> 0 : null;
+  // heapPatched: cached modules whose heap sites were moved to this session's
+  // (0084), the bytes of their unpatched compiles, and patched compiles refused.
+  return { bytes: copy(), again: copy(), installSamples: harnessRegionInstallSamples(heap), layoutRefused, layoutHash, layout: harnessHeapLayout(moduleInstance),
+    heapPatched: aotHeapPatched, heapPatchedBytes: aotHeapPatchedBytes, heapPatchFailed: aotHeapPatchFailed,
+    regionChain: harnessRegionChainStats(heap) };
+}
+// Region chaining counters (patch 0102), reset with the region stats; null
+// with an older core.
+function harnessRegionChainStats(heap) {
+  const at = moduleInstance?._DolphinWeb_JitRegionChainStats?.() >>> 0;
+  if (!at || at + 40 > heap.length) return null;
+  const view = new DataView(heap.buffer, at, 40);
+  const f = (i) => view.getFloat64(8 + 8 * i, true);
+  return { enabled: view.getUint32(4, true), chained: f(0), outOfTime: f(1), noRegion: f(2), refused: f(3), ...harnessRegionTransitionTop(heap) };
+}
+// Where chains of regions leave for code without a region, and which region
+// entries block chains reach: [pc hex, count], most frequent first (0102).
+function harnessRegionTransitionTop(heap) {
+  const at = moduleInstance?._DolphinWeb_JitRegionTransitionTop?.() >>> 0;
+  const TOP = 12, SIZE = 4 * 2 * (1 + 2 * TOP);
+  if (!at || at + SIZE > heap.length) return {};
+  const u32 = new Uint32Array(heap.buffer.slice(at, at + SIZE));
+  const list = (base) => Array.from({ length: Math.min(u32[base], TOP) }, (_, i) => [`0x${u32[base + 1 + 2 * i].toString(16).padStart(8, "0")}`, u32[base + 2 + 2 * i]]);
+  return { exitTargets: list(0), breakEntries: list(1 + 2 * TOP) };
+}
+// AX HLE timing (patch 0099, harness/lib/ax-hle-stats.mjs): reset >= 0
+// zeroes and turns the counters on from the next mail; copied twice so the
+// harness can refuse a torn read.
+function harnessAxHleStats({ reset } = {}) {
+  if (!harnessEnabled) return { error: "harness hooks are off" };
+  const stats = moduleInstance?._DolphinWeb_AxHleStats;
+  if (!stats) return { error: "core has no DolphinWeb_AxHleStats" };
+  const ptr = stats(Number.isInteger(reset) && reset >= 0 ? reset : -1) >>> 0;
+  const heap = moduleInstance.HEAPU8;
+  if (!ptr || ptr + 8 > heap.length) return { error: `DolphinWeb_AxHleStats returned ${ptr}` };
+  const size = Math.min(new DataView(heap.buffer, ptr, 8).getUint32(4, true), 64);
+  if (ptr + size > heap.length) return { error: `AX stats of ${size} bytes past the heap` };
+  const copy = () => Array.from(new Uint8Array(heap.buffer, ptr, size));
+  return { bytes: copy(), again: copy() };
+}
+// Guest memory accesses per instruction (patch 0104,
+// harness/lib/mem-access-stats.mjs): reset >= 0 zeroes and turns the
+// counters on at the next slice; copied twice so a torn read is refused.
+function harnessMemAccessStats({ reset } = {}) {
+  if (!harnessEnabled) return { error: "harness hooks are off" };
+  const stats = moduleInstance?._DolphinWeb_MemAccessStats;
+  if (!stats) return { error: "core has no DolphinWeb_MemAccessStats" };
+  const ptr = stats(Number.isInteger(reset) && reset >= 0 ? reset : -1) >>> 0;
+  const heap = moduleInstance.HEAPU8;
+  if (!ptr || ptr + 8 > heap.length) return { error: `DolphinWeb_MemAccessStats returned ${ptr}` };
+  const size = Math.min(new DataView(heap.buffer, ptr, 8).getUint32(4, true), 192);
+  if (ptr + size > heap.length) return { error: `memory access stats of ${size} bytes past the heap` };
+  const copy = () => Array.from(new Uint8Array(heap.buffer, ptr, size));
+  return { bytes: copy(), again: copy() };
 }
 // The core's first region installs, [ms, bytes, path] each (path 0 first
 // attempt, 1 after the worker's ready byte, 2 cold); null with an older core.
@@ -306,6 +400,10 @@ const wgpuExactCapture = createWgpuExactCapture();
 const HARNESS_PRESENT_RING = 16384;
 const harnessPresentRing = new Float64Array(HARNESS_PRESENT_RING * 3);
 let harnessPresentHead = 0;
+// Harness only, when it asks (validationEnableHarness { displayed: true }):
+// what each BeginFrame put on screen (src/wgpu-display-counter.js).
+const harnessDisplay = createDisplayCounter();
+let harnessDisplayStop = null;
 let harnessPresentRead = 0;
 const presentationIntervalHistogram = new Uint32Array(
   PRESENTATION_HISTOGRAM_BUCKETS_MS.length + 1
@@ -365,6 +463,12 @@ let wgpuRendererWorkerProbe = "off";
 let wgpuVisualCadenceEnabled = false;
 // Mirrors the loaded core's videoBackend for code outside loadCore's scope.
 let hardwareVideoBackend = false;
+// video=wgpu: pipelines seen in earlier sessions, compiled at boot
+// (src/wgpu-pipeline-prewarm.js). null when off (?wgpuprewarm=0) or not wgpu.
+let wgpuPipelinePrewarmEnabled = true;
+let pipelinePrewarm = null;
+// The loaded core's identity: a pipeline list belongs to one core build.
+let coreBuildFingerprint = "";
 let wgpuVisualCadenceResources = null;
 let wgpuVisualCadenceTelemetry = createWgpuVisualCadenceTelemetry(false);
 let wgpuVisualCadenceSequence = 0;
@@ -1002,7 +1106,14 @@ function readHarnessTimeline() {
     Object.assign(vi, ring);
     harnessViRead = head;
   }
-  return { presents: { ...presents, lost: presentsLost }, vi, now: harnessNow() };
+  // displayed: null when not asked for, or when this worker has no rAF.
+  const display = harnessDisplayStop ? harnessDisplay.drain() : { displayed: null, displayedLost: 0, dropped: null };
+  return {
+    presents: { ...presents, lost: presentsLost }, vi, now: harnessNow(),
+    displayedEnabled: Boolean(harnessDisplayStop),
+    displayedWhy: harnessDisplayStop ? null : typeof requestAnimationFrame !== "function" ? "no requestAnimationFrame in this worker" : "not requested (validationEnableHarness { displayed: true })",
+    ...display
+  };
 }
 let harnessViRead = null;
 
@@ -1105,10 +1216,54 @@ function readbackWgpuPresentSource() {
   });
 }
 
+// Unique images (harness only, src/harness-unique-frames.js): a few full rows
+// of the presented WebGPU rectangle read back and hashed, at each present
+// while the harness has the counter on.
+const harnessUniqueFrames = createUniqueFrameCounter();
+// Readbacks done since the worker started: 0 as long as the counter was
+// never on (the harness checks it before starting the counter).
+let harnessUniqueReadbacks = 0;
+function readbackWgpuPresentRowsHash() {
+  harnessUniqueReadbacks += 1;
+  const shown = wgpuPresentedSource;
+  const entry = shown?.textureId ? webGpuObjects.textures.get(shown.textureId) : null;
+  if (!entry || !renderGpu || !shown.rect) throw new Error("no presented WebGPU texture to sample");
+  const rect = clampSourceRect(shown.rect, entry.tex.width, entry.tex.height);
+  if (!rect) throw new Error("presented rectangle lies outside its texture");
+  const rows = sampleRowOffsets(rect.h);
+  const bytesPerRow = Math.ceil(rect.w * 4 / 256) * 256;
+  const dev = renderGpu.device;
+  const buffer = dev.createBuffer({ size: bytesPerRow * rows.length, usage: 0x1 | 0x8 });
+  const encoder = dev.createCommandEncoder({ label: "harness-unique-frames" });
+  rows.forEach((row, i) => encoder.copyTextureToBuffer({ texture: entry.tex, origin: { x: rect.x, y: rect.y + row, z: 0 } },
+    { buffer, offset: i * bytesPerRow, bytesPerRow }, { width: rect.w, height: 1, depthOrArrayLayers: 1 }));
+  dev.queue.submit([encoder.finish()]);
+  return buffer.mapAsync(0x1).then(() => {
+    const h = hashRows(new Uint8Array(buffer.getMappedRange()), rect.w * 4, bytesPerRow, rows.length);
+    buffer.unmap();
+    buffer.destroy();
+    return h;
+  });
+}
+
+async function harnessUniqueFramesRequest({ action } = {}) {
+  if (!harnessEnabled) return { error: "harness hooks are off" };
+  if (action === "start") {
+    if (!(harnessVideoBackend === "WebGPU-Real" || harnessVideoBackend === "WebGPU")) return { error: `unique frames: WebGPU presents only (backend ${harnessVideoBackend ?? "unknown"})` };
+    harnessUniqueFrames.start();
+    return { started: true };
+  }
+  if (action === "stop") return { ...(await harnessUniqueFrames.stop()), readbacksTotal: harnessUniqueReadbacks };
+  if (action === "status") return { active: harnessUniqueFrames.active, readbacksTotal: harnessUniqueReadbacks };
+  return { error: `unique frames: action ${action}` };
+}
+
 async function handleMessage(type, payload) {
   // P6: blocks waiting for their pack go out when the saves do (page hidden
   // or closed) and on stop; their outcome is not the saves'.
   if (type === "flushUserData" || type === "stop") void dolphinJitBlockStore?.flush().catch(() => {});
+  if (type === "flushUserData" || type === "stop") void pipelinePrewarm?.flush();
+  if (type === "stop") pipelinePrewarm?.stop();
   switch (type) {
     case "load":
       if (!moduleInstance) {
@@ -1233,6 +1388,7 @@ async function handleMessage(type, payload) {
         correctTimeDrift: payload.correctTimeDrift,
         coreLog: payload.coreLog,
         memcardSlotB: payload.memcardSlotB,
+        efbAccess: payload.efbAccess,
         efbDiag: payload.efbDiag,
         jitVerbose: payload.jitVerbose,
         frameCap: payload.frameCap,
@@ -1242,6 +1398,7 @@ async function handleMessage(type, payload) {
         jitOffThread: payload.jitOffThread,
         aotCompiler: payload.aotCompiler,
         aotFirstLaunch: payload.aotFirstLaunch,
+        regionChain: payload.regionChain,
         reportedCoreSelection: payload.coreSelection,
         wgpuReplayDiagnostics: payload.wgpuReplayDiagnostics,
         wgpuDeepReplayDiagnostics: payload.wgpuDeepReplayDiagnostics,
@@ -1271,6 +1428,7 @@ async function handleMessage(type, payload) {
         wgpuMappedDrainCoalescing: payload.wgpuMappedDrainCoalescing,
         wgpuRendererWorkerProbe: payload.wgpuRendererWorkerProbe,
         wgpuVisualCadence: payload.wgpuVisualCadence,
+        wgpuPipelinePrewarm: payload.wgpuPipelinePrewarm,
         wgpuPassPackageProjection: payload.wgpuPassPackageProjection,
         wgpuUploadRunProjection: payload.wgpuUploadRunProjection,
         wgpuUboComputeProjection: payload.wgpuUboComputeProjection,
@@ -1290,6 +1448,19 @@ async function handleMessage(type, payload) {
     case "exportSaveState":
     case "importSaveState":
       return handleSavesMessage(type, payload);
+    case "streamCapture":
+      if (!(payload?.writable instanceof WritableStream)) throw new Error("streamCapture needs a WritableStream");
+      // Frames reach this worker only when it presents them itself; OGL's CPU
+      // framebuffer is a stale readback. Say so instead of a silent track.
+      if (harnessVideoBackend === "OGL") throw new Error("streamCapture: not available with the OGL backend");
+      if (!renderGpu && !renderGl && !renderContext) throw new Error("streamCapture: the page owns the canvas, no frame reaches the worker");
+      streamCapture.attach(payload.writable);
+      return {};
+    case "streamCaptureStop":
+      streamCapture.detach();
+      return {};
+    case "streamCaptureStats":
+      return { stats: { ...streamCapture.stats } };
     case "setInputMask":
       inputMask = payload.mask >>> 0;
       api?.setInputMask(inputMask);
@@ -1435,21 +1606,38 @@ async function handleMessage(type, payload) {
       // Applied now if the core is loaded, and again when it loads.
       harnessEnabled = true;
       moduleInstance?._DolphinWeb_HarnessEnable?.(1);
+      if (payload.displayed && !harnessDisplayStop) {
+        harnessDisplayStop = startDisplayLoop(harnessDisplay, { active: () => harnessEnabled });
+      }
       // The determinism trace (WasmDetTrace.h) must see the boot from its
       // first event: requested here, started when the core loads.
       if (payload.detTrace && !detTraceRequested) {
         detTraceRequested = true;
         moduleInstance?._DolphinWeb_DetTraceEnable?.(1);
       }
-      return { enabled: true, coreHooks: Boolean(moduleInstance?._DolphinWeb_HarnessEnable), coreLoaded: Boolean(moduleInstance) };
+      // Tests of position-independent regions (0084): memory taken from the
+      // core's heap before the boot, so the emulated RAM sits elsewhere than
+      // in the session that filled the region cache (heapShift: whether the
+      // boot is still to come).
+      if (Number.isFinite(payload.heapShiftMb) && payload.heapShiftMb > 0) aotTestHeapShiftBytes = Math.min(payload.heapShiftMb, 256) * 1048576;
+      return { enabled: true, coreHooks: Boolean(moduleInstance?._DolphinWeb_HarnessEnable), coreLoaded: Boolean(moduleInstance),
+        ...(aotTestHeapShiftBytes ? { heapShift: coreBoot.attempted ? "too-late" : "before-boot" } : {}) };
     case "validationReadTimeline":
       return readHarnessTimeline();
+    case "validationUniqueFrames":
+      return harnessUniqueFramesRequest(payload);
     case "validationPcSampler":
       return harnessPcSampler(payload);
     case "validationReadJitRegionStats":
       return harnessJitRegionStats(payload);
+    case "validationReadAxHleStats":
+      return harnessAxHleStats(payload);
+    case "validationReadMemAccessStats":
+      return harnessMemAccessStats(payload);
     case "validationCaptureAtVi":
       return captureAtViOutput(payload);
+    case "validationReadPipelinePrewarm":
+      return pipelinePrewarm ? pipelinePrewarm.snapshot() : { enabled: false, why: !hardwareVideoBackend ? "not video=wgpu" : !wgpuPipelinePrewarmEnabled ? "wgpuprewarm=0" : "not started" };
     case "validationReadDetTrace":
       return readDetTrace(payload);
     case "validationReadWgpuReplayState":
@@ -1846,6 +2034,7 @@ async function loadCore({
   correctTimeDrift = false,
   coreLog = false,
   memcardSlotB = false,
+  efbAccess = false,
   efbDiag = false,
   jitVerbose = false,
   frameCap = 0,
@@ -1855,6 +2044,7 @@ async function loadCore({
   jitOffThread = true,
   aotCompiler = true,
   aotFirstLaunch = false,
+  regionChain = true,
   reportedCoreSelection = null,
   wgpuReplayDiagnostics = false,
   wgpuDeepReplayDiagnostics: requestedWgpuDeepReplayDiagnostics = false,
@@ -1885,6 +2075,7 @@ async function loadCore({
   wgpuMappedDrainCoalescing: requestedWgpuMappedDrainCoalescing = false,
   wgpuRendererWorkerProbe: requestedWgpuRendererWorkerProbe = "off",
   wgpuVisualCadence: requestedWgpuVisualCadence = false,
+  wgpuPipelinePrewarm: requestedWgpuPipelinePrewarm = true,
   wgpuPassPackageProjection: requestedWgpuPassPackageProjection = false,
   wgpuUploadRunProjection: requestedWgpuUploadRunProjection = false,
   wgpuUboComputeProjection: requestedWgpuUboComputeProjection = false,
@@ -2055,6 +2246,9 @@ async function loadCore({
   }
   destroyWgpuVisualCadenceResources();
   hardwareVideoBackend = videoBackend === "WebGPU-Real";
+  wgpuPipelinePrewarmEnabled = requestedWgpuPipelinePrewarm !== false;
+  pipelinePrewarm?.stop();
+  pipelinePrewarm = null;
   wgpuVisualCadenceEnabled = Boolean(requestedWgpuVisualCadence);
   wgpuVisualCadenceTelemetry = createWgpuVisualCadenceTelemetry(
     wgpuVisualCadenceEnabled
@@ -2265,6 +2459,7 @@ async function loadCore({
   aotFirstLaunchEnabled = aotFirstLaunch === true;
   dolphinJitBootLoadComplete = false;
   dolphinJitBootLoadedEntries = 0;
+  coreBuildFingerprint = String(buildFingerprint ?? "");
   if (!noJitCache) {
     await reconcileJitCacheWithBuild(buildFingerprint);
   } else {
@@ -2315,6 +2510,7 @@ async function loadCore({
     dolphinCorrectTimeDrift: Boolean(correctTimeDrift),
     dolphinCoreLog: Boolean(coreLog),
     dolphinMemcardSlotB: Boolean(memcardSlotB),
+    dolphinEfbAccess: Boolean(efbAccess),
     // Ranks the instructions that block JIT compilation (?jitverbose=1).
     dolphinWebVerbosePpcJit: Boolean(jitVerbose),
     dolphinFrameCap: (frameCapTarget = Number(frameCap) || 0),
@@ -2358,6 +2554,17 @@ async function loadCore({
   }
 
   api = bindApi(moduleInstance);
+  // Direct pad block (src/direct-pad.js): the page writes pad states into the
+  // core's shared memory and the SI poll reads them there.
+  if (typeof moduleInstance._DolphinWeb_DirectPadBlock === "function" &&
+      moduleInstance.HEAPU8.buffer instanceof SharedArrayBuffer) {
+    self.postMessage({
+      type: "direct-pad",
+      buffer: moduleInstance.HEAPU8.buffer,
+      offset: moduleInstance._DolphinWeb_DirectPadBlock() >>> 0,
+      layout: moduleInstance._DolphinWeb_DirectPadLayout() >>> 0
+    });
+  }
   harnessVideoBackend = videoBackend;
   if (harnessEnabled) moduleInstance._DolphinWeb_HarnessEnable?.(1);
   if (detTraceRequested) moduleInstance._DolphinWeb_DetTraceEnable?.(1);
@@ -2506,6 +2713,7 @@ async function loadCore({
   api.setPpcWasmJitOffThread?.(jitOffThread !== false && !noJitCache ? 1 : 0);
   // Region modules (P4) run in the dispatcher with aot=1, their only producer.
   api.setJitRegionsEnabled?.(aotFirstLaunch ? 1 : 0);
+  api.setJitRegionChaining?.(regionChain !== false ? 1 : 0);
   api.setPpcProfileEnabled?.(ppcProfile ? 1 : 0);
   if (Number.isInteger(gpuSpinMicros) && gpuSpinMicros >= 0) api.setGpuSpinBudget?.(gpuSpinMicros);
   api.setWebGpuUploadArenaMiB?.(wgpuUploadArenaMiB, collectMetrics ? 1 : 0);
@@ -2634,6 +2842,7 @@ function bindApi(module) {
     setPpcWasmJitWarmup: optionalCwrap("SetPpcWasmJitWarmup", null, ["number", "number"]),
     setPpcWasmJitOffThread: optionalCwrap("SetPpcWasmJitOffThread", null, ["number"]),
     setJitRegionsEnabled: optionalCwrap("DolphinWeb_JitSetRegionsEnabled", null, ["number"]),
+    setJitRegionChaining: optionalCwrap("DolphinWeb_JitSetRegionChaining", null, ["number"]),
     setGpuSpinBudget: optionalCwrap("DolphinWeb_SetGpuSpinBudget", null, ["number"]),
     getPpcWasmJitEngagedFrame: optionalCwrap("GetPpcWasmJitEngagedFrame", "number", []),
     getPpcWasmJitArmStartFrame: optionalCwrap("GetPpcWasmJitArmStartFrame", "number", []),
@@ -3471,6 +3680,9 @@ async function mountFile(file) {
   aotCoreBooted = false;
   aotRegionsBeforeBoot.length = 0;
   aotLayoutSkipped = 0;
+  aotHeapPatched = 0;
+  aotHeapPatchedBytes = 0;
+  aotHeapPatchFailed = 0;
   aotDiscKey = null;
   aotDiscKeyPromise = null;
   aotDiscFile = file;
@@ -3511,6 +3723,10 @@ async function mountFile(file) {
   if (aotFirstLaunchEnabled && bootKind === "disc" && api.bootDisc && file.size >= MIN_FULL_BOOT_BYTES) {
     await prepareAotFirstLaunch(file);
   }
+  if (aotTestHeapShiftBytes && !aotTestHeapPad && moduleInstance?._malloc) {
+    aotTestHeapPad = moduleInstance._malloc(aotTestHeapShiftBytes); // kept for the session
+    postStatus(`harness: ${aotTestHeapShiftBytes >> 20} MiB taken from the core's heap before the boot (heap shift test)`);
+  }
   if (api.bootDisc && (executable || file.size >= MIN_FULL_BOOT_BYTES)) {
     coreBoot.attempted = true;
     const _t_boot = performance.now();
@@ -3532,6 +3748,7 @@ async function mountFile(file) {
     api.pumpHostJobs?.();
     console.log(`[boot-phase] api.pumpHostJobs() took ${(performance.now() - _t_pump).toFixed(1)}ms`);
     if (coreBoot.accepted) void startAotFirstLaunchAfterBoot();
+    if (coreBoot.accepted) void startPipelinePrewarm(bootedGame.gameId);
   } else if (api.bootDisc) {
     coreBoot.skippedReason = `Disc image is too small for full CPU boot (${file.size} bytes)`;
   }
@@ -4861,6 +5078,7 @@ function presentFrame(width, height, pointer, length, coreFrame = api?.getFrame?
     _lastFrameLength = length;
     _lastFrameCopyValid = true;
     sourceFrameView = _lastFrameCopy.subarray(0, length);
+    if (streamCapture.active) streamCapture.offerBytes(sourceFrameView, width, height, coreFrame);
     const marked = frameWithInputMarker(sourceFrameView, width, height, marker);
     markerApplied = marked.applied;
     if (markerApplied) displayFrameView = marked.bytes;
@@ -4990,6 +5208,7 @@ function presentFrameBytes(width, height, bytes, coreFrame) {
     return;
   }
 
+  if (streamCapture.active) streamCapture.offerBytes(bytes, width, height, coreFrame);
   const marker = prepareInputVisualMarker(coreFrame);
   const marked = frameWithInputMarker(bytes, width, height, marker);
   const markerApplied = marked.applied;
@@ -5082,6 +5301,7 @@ function recordPresentedFrame(coreFrame) {
     harnessPresentRing[slot + 1] = coreFrame;
     harnessPresentRing[slot + 2] = moduleInstance?._DolphinWeb_HarnessViSinceBoot?.() ?? -1;
     harnessPresentHead += 1;
+    if (harnessDisplayStop) harnessDisplay.submit(harnessPresentRing[slot + 2]);
   }
   presentedFrame += 1;
   framesSincePresentationFps += 1;
@@ -7080,7 +7300,7 @@ export function startAotFirstLaunchAfterBoot(flow = aotFirstLaunch) {
   void whenCoreRamReady(moduleInstance).then((ready) => {
     if (!ready) return;
     aotCoreBooted = true;
-    for (const [module, region] of aotRegionsBeforeBoot.splice(0)) queueAotRegion(module, region);
+    for (const [module, region] of aotRegionsBeforeBoot.splice(0)) void queueAotRegion(module, region).catch(() => {});
   });
   if (!flow?.supported) return Promise.resolve();
   const generation = flow.generation;
@@ -7096,6 +7316,11 @@ export function startAotFirstLaunchAfterBoot(flow = aotFirstLaunch) {
 // say it exists (DolphinWeb_AotRamReady), polled, up to 60 s.
 let aotCoreBooted = false;
 let aotLayoutSkipped = 0;
+let aotHeapPatched = 0; // cached region modules patched for this session's heap (0084)
+let aotTestHeapShiftBytes = 0; // harness: heap taken before the boot (validationEnableHarness heapShiftMb)
+let aotTestHeapPad = 0;
+let aotHeapPatchedBytes = 0; // their unpatched bytes, compiled by the cache loader for nothing
+let aotHeapPatchFailed = 0; // patched modules the compiler refused: left to the JIT
 async function whenCoreRamReady(module, { timeoutMs = 60000, everyMs = 50 } = {}) {
   if (typeof module?._DolphinWeb_AotRamReady !== "function") return true; // older core: as before
   const start = performance.now();
@@ -7107,7 +7332,7 @@ async function whenCoreRamReady(module, { timeoutMs = 60000, everyMs = 50 } = {}
 }
 const aotRegionsBeforeBoot = [];
 function queueAotRegionAfterBoot(module, region) {
-  if (aotCoreBooted) queueAotRegion(module, region);
+  if (aotCoreBooted) void queueAotRegion(module, region).catch(() => {});
   else aotRegionsBeforeBoot.push([module, region]);
 }
 // The CPU thread's module-map key for these bytes (DolphinWeb_MakeWasmBlockCacheKey).
@@ -7121,13 +7346,52 @@ async function regionBlockCacheKey(bytes) {
 // a hit in V8's native module cache; it then runs it for its entries.
 // members: [{ ranges, hash }] per function, the plan's FNV-1a 64 of its code:
 // the core installs nothing whose code changed since the translation.
-function queueAotRegion(module, { bytes, entries, members, layout = 0 }) {
+async function queueAotRegion(module, { key, bytes, entries, members, layout = 0 }, flow = aotFirstLaunch) {
   if (typeof module?._DolphinWeb_AotQueueRegion !== "function" || !bytes?.length || !entries?.length || !members?.length) return;
   // Translated for another heap layout: the core would refuse it; not even
-  // copied into its heap (counted).
+  // copied into its heap (counted). Translated again from guest memory, its
+  // cache entry overwritten (the new module comes back through install).
   if (typeof module._DolphinWeb_AotLayoutHash === "function" && (layout >>> 0) !== (module._DolphinWeb_AotLayoutHash() >>> 0)) {
     aotLayoutSkipped += 1;
+    if (key) flow?.retranslate?.(key);
     return;
+  }
+  // Its heap sites hold the RAM and L1 addresses of the session that
+  // translated it (patch 0084): moved to this session's, and the patched
+  // bytes compiled off the CPU thread and kept under their key, as the CPU
+  // thread's compile request looks them up. It is queued with the bases its
+  // final bytes say they hold, never the session's: a module without the
+  // section, or whose section does not parse, goes with none (0, 0), which
+  // the core refuses; the core also checks every site itself.
+  let heapBases = [0, 0];
+  if (typeof module._DolphinWeb_AotRegionHeapBases === "function") {
+    const generation = aotDiscGeneration;
+    const { coreHeapBases } = await import("./aot-orchestrator.js");
+    const { patchRegionHeap, regionHeapOfBytes } = await import("./aot-region-module.js");
+    const session = coreHeapBases(module);
+    let patched, heap;
+    try {
+      patched = patchRegionHeap(bytes, { ramBase: session[0], l1Base: session[1] });
+      heap = regionHeapOfBytes(patched);
+    } catch {
+      aotLayoutSkipped += 1; // a malformed section or a site that does not hold its base: never queued
+      return;
+    }
+    if (patched !== bytes) {
+      // The module the cache loader compiled from the unpatched bytes is
+      // thrown away (counted; up to the whole cache when the heap moved).
+      aotHeapPatched += 1;
+      aotHeapPatchedBytes += bytes.length;
+      const patchedKey = await regionBlockCacheKey(patched);
+      const compiled = await precompileAotRegion(patchedKey, patched);
+      if (!compiled.module) {
+        aotHeapPatchFailed += 1;
+        return;
+      }
+      bytes = patched;
+    }
+    if (generation !== aotDiscGeneration) return; // another disc meanwhile
+    if (heap) heapBases = [heap.ramBase, heap.l1Base];
   }
   const ranges = members.flatMap((m) => m.ranges);
   const triples = members.flatMap((m) => [m.ranges.length, m.hash ? parseInt(m.hash.slice(8), 16) : 0, m.hash ? parseInt(m.hash.slice(0, 8), 16) : 0]);
@@ -7138,12 +7402,14 @@ function queueAotRegion(module, { bytes, entries, members, layout = 0 }) {
     module.HEAPU8.set(bytes, b);
     new Uint32Array(module.HEAPU8.buffer, w, words.length).set(words);
     const rangesAt = w + 4 * entries.length, membersAt = rangesAt + 8 * ranges.length;
-    module._DolphinWeb_AotQueueRegion(b, bytes.length, w, entries.length, rangesAt, ranges.length, membersAt, members.length, layout >>> 0);
+    module._DolphinWeb_AotQueueRegion(b, bytes.length, w, entries.length, rangesAt, ranges.length, membersAt, members.length, layout >>> 0,
+      heapBases[0] >>> 0, heapBases[1] >>> 0);
   } finally {
     module._free(b);
     module._free(w);
   }
 }
+export const queueAotRegionForTest = queueAotRegion;
 // A region module of the first launch: compiled off the CPU thread when the
 // compiler worker is on (?aotcompiler=1), kept alive under its key.
 async function precompileAotRegion(key, bytes) {
@@ -14495,12 +14761,15 @@ function drainWebGpuCmdRing(source = "presentation") {
           // the legacy repaint loop cannot race this submitted frame before
           // the current command-ring drain returns.
           cmdRingOwnsCanvas = true;
+          // A frame carrying the diagnostic input marker is not streamed.
+          if (streamCapture.active && !hardwareInputMarkerApplied) streamCapture.offerCanvas(renderCanvas, api?.getFrame?.() ?? 0);
           recordPresentedFrame(api?.getFrame?.() ?? 0);
           wgpuPresentedSource = {
             textureId: wgpuLastBackbufferSourceTextureId, rect: wgpuNextPresentSource
           };
           wgpuNextPresentSource = null;
           wgpuExactCapture.onPresent(readbackWgpuPresentSource);
+          if (harnessUniqueFrames.active) harnessUniqueFrames.onPresent(readbackWgpuPresentRowsHash);
           scheduleDetachedWgpuBitmap(q);
           webGpuExecStats.present++;
           if (webGpuExecStats.present - webGpuExecStats.lastLog >= 120) {
@@ -14818,6 +15087,28 @@ function finishWebGpuDrain(startedAt, processed) {
     WGPU_DRAIN_DURATION_BUCKET_BOUNDS_MS,
     elapsed
   );
+}
+
+// video=wgpu: load this game's pipeline list and compile it while the game
+// boots. Created before the first await, so that every shader the replay
+// creates from now on is noted and its pipelines can be recorded.
+async function startPipelinePrewarm(gameId) {
+  if (!hardwareVideoBackend || !wgpuPipelinePrewarmEnabled || !renderGpu || !gameId) return;
+  const prewarm = new PipelinePrewarm();
+  pipelinePrewarm?.stop();
+  pipelinePrewarm = prewarm;
+  try { prewarm.root = await navigator.storage.getDirectory(); } catch { /* memory only */ }
+  const loaded = await prewarm.load(gameId, coreBuildFingerprint);
+  if (!loaded || pipelinePrewarm !== prewarm || !renderGpu) return;
+  const device = renderGpu.device;
+  // Stops at a core reload or a lost device (renderGpu replaced or cleared).
+  const alive = () => pipelinePrewarm === prewarm && renderGpu?.device === device;
+  const stats = await prewarm.prewarm(device, (samplingKey) => {
+    const [u, n] = samplingKey.split("/").map(Number);
+    return getFixedLayouts(u, n).pipelineLayout;
+  }, { alive });
+  console.log(`[wgpu-prewarm] ${gameId}: ${stats.compiled}/${stats.loaded} pipelines compiled in ${stats.prewarmMs} ms` +
+    (stats.failed ? `, ${stats.failed} failed (${stats.lastError})` : ""));
 }
 
 // Day-29: build a real GPURenderPipeline from a bridge-translated
@@ -15204,9 +15495,14 @@ function resolvePipeline(pipelineId, colorFmt, depthFmt, dbg, revZ, samplingKey 
     vpDiagFinalCmp.set(key, (vpDiagFinalCmp.get(key) || 0) + 1);
   }
   let pipe = null;
+  const prewarmEntry = pipelinePrewarm?.keyFor(d, {
+    vsId: tpl.vsId, fsId: tpl.fsId, samplingKey,
+    vsModule: webGpuObjects.shaders.get(tpl.vsId), fsModule: webGpuObjects.shaders.get(tpl.fsId)
+  }) ?? null;
+  const prewarmed = prewarmEntry ? pipelinePrewarm.take(prewarmEntry.key) : null;
   try {
     renderGpu.device.pushErrorScope("validation");
-    pipe = renderGpu.device.createRenderPipeline(d);
+    pipe = prewarmed ?? renderGpu.device.createRenderPipeline(d);
     if (pipe && d.depthStencil) {
       vpDiagPipeFinalDs.set(pipe, { cmp: d.depthStencil.depthCompare,
                                     write: !!d.depthStencil.depthWriteEnabled });
@@ -15226,6 +15522,7 @@ function resolvePipeline(pipelineId, colorFmt, depthFmt, dbg, revZ, samplingKey 
         }
       } else {
         webGpuPcfg.ok += 1;
+        pipelinePrewarm?.record(prewarmEntry);
         if (webGpuPcfg.ok <= 3 || webGpuPcfg.ok % 128 === 0) {
           console.log(`[webgpu-pcfg] variant OK ${key} ` +
             `[ok=${webGpuPcfg.ok} fail=${webGpuPcfg.fail}]`);
@@ -15509,6 +15806,7 @@ function replayCreateShader(id, blobPtr, blobLen, stage) {
     return;
   }
   webGpuObjects.shaders.set(id, module);
+  pipelinePrewarm?.noteShader(id, wgsl);
   if (uvForcedWgsl) {
     try {
       webGpuObjects.shadersUvForced.set(id,
