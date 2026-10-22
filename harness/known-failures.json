@@ -25,6 +25,7 @@
     "mode": "expected-fail",
     "reason": "video=wgpu reads the EFB back as zeros (WebGPUStagingTexture is a stub, docs/wgpu-efb-readback-design.md): the peeked colours draw black and the depths white.",
     "until": "wgpu EFB readback step 2 (real WebGPUStagingTexture), follow-up of PR #84",
-    "since": "2026-10-22"
+    "since": "2026-10-22",
+    "detail": "^missing-detail$"
   }
 ]

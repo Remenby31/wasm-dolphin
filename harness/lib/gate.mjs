@@ -23,19 +23,30 @@ const key = (c) => `${c.game}\u0000${c.config}`;
 
 // Expected failures (harness/known-failures.json, "mode": "expected-fail"):
 // a check main is known to fail until a named follow-up fixes it, e.g. a
-// test added before its implementation. Its failure is XFAIL, reported and
-// not blocking, whatever the baseline did; a pass is XPASS and blocks, so the
+// test added before its implementation. The entry pins how it fails
+// (`detail`, a regular expression on the check's detail): that failure is
+// XFAIL, reported and not blocking; any other failure of the cell, a blank
+// picture above all, stays a regression. A pass is XPASS and blocks, so the
 // PR that fixes it must also remove the entry. `until` names that follow-up.
+//
+// The list is read from the candidate's tree: a PR could break a check and
+// declare it expected-fail at once. So an XFAIL whose baseline PASSES the
+// check (a new entry, or a feature main cannot exercise) carries a visible
+// warning for the reviewer. An entry for a game the run has but a cell it
+// does not is stale and blocks; games the run does not have are not judged.
 export const EXPECTED_FAIL = "expected-fail";
 export function expectedFailures(known = []) {
   const out = new Map();
   for (const x of known) {
     if (x.mode !== EXPECTED_FAIL) continue;
+    if (typeof x.cell !== "string" || !/^[^/]+\/[^/]+$/.test(x.cell)) throw new Error(`known-failures: expected-fail entry needs a cell "game/config", got ${JSON.stringify(x.cell)}`);
     if (!CHECKS.includes(x.check)) throw new Error(`known-failures: expected-fail ${x.cell} needs a check among ${CHECKS.join(", ")}, not "${x.check}"`);
-    for (const field of ["reason", "until"]) {
+    for (const field of ["reason", "until", "detail"]) {
       if (typeof x[field] !== "string" || !x[field].trim()) throw new Error(`known-failures: expected-fail ${x.cell} needs a ${field}`);
     }
-    out.set(`${x.cell}\u0000${x.check}`, { reason: x.reason.trim(), until: x.until.trim() });
+    const k = `${x.cell}\u0000${x.check}`;
+    if (out.has(k)) throw new Error(`known-failures: expected-fail ${x.cell} ${x.check} is listed twice`);
+    out.set(k, { cell: x.cell, check: x.check, reason: x.reason.trim(), until: x.until.trim(), detail: new RegExp(x.detail) });
   }
   return out;
 }
@@ -43,6 +54,7 @@ export function expectedFailures(known = []) {
 export function correctnessGate(baselineCells, candidateCells, { expected = new Map() } = {}) {
   const base = new Map(baselineCells.map((c) => [key(c), c]));
   const rows = [];
+  const used = new Set();
   for (const cand of candidateCells) {
     const b = base.get(key(cand));
     base.delete(key(cand));
@@ -54,17 +66,32 @@ export function correctnessGate(baselineCells, candidateCells, { expected = new 
       // crash signature where the baseline crashed differently, or could not
       // be judged, is a regression.
       const same = check !== "crash" || b?.checks?.crash?.detail === cand.checks?.crash?.detail;
-      const xf = expected.get(`${cand.game}/${cand.config}\u0000${check}`);
+      const xkey = `${cand.game}/${cand.config}\u0000${check}`;
+      const xf = expected.get(xkey);
+      if (xf) used.add(xkey);
       let detail = cand.checks?.[check]?.detail ?? null;
-      if (xf && cs === "fail") { status = "xfail"; detail = `expected to fail until ${xf.until}: ${xf.reason}`; }
-      else if (xf && cs === "pass") { status = "xpass"; detail = `passes but is listed as expected-fail (until ${xf.until}): remove its entry from harness/known-failures.json`; }
-      else if (cs === "fail") status = bs === "fail" && same ? "known-failure" : "regressed";
+      const asExpected = xf && cs === "fail" && xf.detail.test(String(detail ?? "")) && !/blank/.test(String(detail ?? ""));
+      if (asExpected) {
+        status = "xfail";
+        detail = `expected to fail until ${xf.until}: ${xf.reason} (failed: ${detail})` +
+          (bs === "pass" ? ". WARNING: the baseline passes this check; a new expected-fail must be justified in the PR" : "");
+      } else if (xf && cs === "pass") { status = "xpass"; detail = `passes but is listed as expected-fail (until ${xf.until}): remove its entry from harness/known-failures.json`; }
+      else if (cs === "fail") {
+        status = bs === "fail" && same ? "known-failure" : "regressed";
+        if (xf) detail = `${detail} (listed as expected-fail, but not the expected failure ${xf.detail})`;
+      }
       else if (cs === "unjudged") status = bs === "unjudged" ? "not-covered" : "inconclusive";
       else status = bs === "fail" ? "fixed" : "ok";
       rows.push({ game: cand.game, config: cand.config, check, baseline: bs, candidate: cs, status, detail });
     }
   }
   for (const b of base.values()) rows.push({ game: b.game, config: b.config, check: "*", baseline: "present", candidate: null, status: "missing" });
+  const games = new Set(candidateCells.map((c) => c.game));
+  for (const [k, xf] of expected) {
+    if (used.has(k) || !games.has(xf.cell.split("/")[0])) continue;
+    const [game, config] = xf.cell.split("/");
+    rows.push({ game, config, check: xf.check, baseline: null, candidate: null, status: "stale-expected", detail: "listed as expected-fail, but the run has no such cell: remove or fix the entry" });
+  }
   return summarize(rows);
 }
 
@@ -85,7 +112,7 @@ export function findingsGate(name, baselineFindings, candidateFindings) {
 }
 
 function summarize(rows) {
-  const blocking = rows.filter((r) => r.status === "regressed" || r.status === "missing" || r.status === "inconclusive" || r.status === "xpass");
+  const blocking = rows.filter((r) => r.status === "regressed" || r.status === "missing" || r.status === "inconclusive" || r.status === "xpass" || r.status === "stale-expected");
   return {
     ok: rows.length > 0 && blocking.length === 0,
     inconclusive: rows.length === 0 || (blocking.length > 0 && blocking.every((r) => r.status === "inconclusive")),
@@ -203,8 +230,9 @@ export function gateMarkdown({ correctness, perf = [] }) {
   const lines = ["## Correctness (blocking)", "", "| Game | Config | Check | Baseline | Candidate | Status |", "|---|---|---|---|---|---|"];
   for (const r of correctness.rows) if (r.status !== "ok") lines.push(`| ${r.game} | ${r.config} | ${r.check} | ${r.baseline ?? "–"} | ${r.candidate ?? "–"} | ${r.status} |`);
   const infra = correctness.rows.filter((r) => r.status === "infra-crash");
-  for (const r of correctness.rows.filter((x) => x.status === "xfail" || x.status === "xpass")) {
-    lines.push("", `${r.status === "xpass" ? "**XPASS (blocks)**" : "XFAIL (not blocking)"} ${r.game}/${r.config} ${r.check}: ${r.detail}`);
+  for (const r of correctness.rows.filter((x) => ["xfail", "xpass", "stale-expected"].includes(x.status))) {
+    const label = r.status === "xpass" ? "**XPASS (blocks)**" : r.status === "stale-expected" ? "**Stale expected-fail entry (blocks)**" : /WARNING/.test(r.detail) ? "XFAIL (not blocking) ⚠" : "XFAIL (not blocking)";
+    lines.push("", `${label} ${r.game}/${r.config} ${r.check}: ${r.detail}`);
   }
   lines.push("", `${correctness.rows.filter((r) => r.status === "ok").length} check(s) ok.${infra.length ? ` ${infra.length} infra crash(es): a Chrome renderer crash that did not happen again on a second run (not blocking; counted in harness/results/infra-crashes.jsonl).` : ""}`, "");
   lines.push("## Performance (paired; blocks only a confirmed ≥ 15 % regression)", "", "| Game | Config | Metric | Pairs | Median change | Regressed |", "|---|---|---|---|---|---|");

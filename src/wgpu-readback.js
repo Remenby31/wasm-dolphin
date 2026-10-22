@@ -40,7 +40,7 @@ export class WgpuReadback {
     this.pool = new Map(); // size -> [GPUBuffer]
     this.recorded = []; // copies encoded, not submitted yet
     this.inFlight = new Set();
-    this.stats = { copies: 0, completed: 0, stale: 0, lost: 0, failed: 0, bytes: 0, maxLatencyMs: 0 };
+    this.stats = { copies: 0, completed: 0, stale: 0, lost: 0, failed: 0, rejected: 0, bytes: 0, maxLatencyMs: 0 };
   }
 
   takeBuffer(size) {
@@ -84,42 +84,60 @@ export class WgpuReadback {
 
   async land(c, now) {
     this.inFlight.add(c);
+    let mapped = false;
     try {
       await c.buffer.mapAsync(MAP_MODE_READ);
-    } catch (error) {
-      this.inFlight.delete(c);
+      mapped = true;
+    } catch {
       this.stats.failed += 1;
       this.publish(c, READBACK_LOST);
       return;
+    } finally {
+      this.inFlight.delete(c);
     }
-    this.inFlight.delete(c);
-    if (c.generation !== this.generation) {
-      // Reset while in flight: reset() already released the waiter.
-      c.buffer.unmap();
-      this.stats.stale += 1;
+    try {
+      if (c.generation !== this.generation) {
+        // Reset while in flight: reset() already released the waiter.
+        this.stats.stale += 1;
+      } else if (Atomics.load(this.words(), c.wordIndex) >= c.seq) {
+        // A later copy of this slot landed first: its texels stand.
+        this.stats.stale += 1;
+      } else if (!this.fits(c)) {
+        // The producer asked for a rectangle that does not fit its buffer:
+        // nothing is written, the waiter is released.
+        this.stats.rejected += 1;
+        this.publish(c, READBACK_LOST);
+      } else {
+        copyRows(new Uint8Array(c.buffer.getMappedRange()), this.heap(), c.heapPtr,
+          { rowBytes: c.rowBytes, srcStride: c.srcStride, dstStride: c.dstStride, rows: c.height });
+        this.stats.completed += 1;
+        this.stats.bytes += c.rowBytes * c.height;
+        this.stats.maxLatencyMs = Math.max(this.stats.maxLatencyMs, now() - c.at);
+        this.publish(c, READBACK_OK);
+      }
+    } finally {
+      if (mapped) c.buffer.unmap();
       this.giveBack(c.buffer, c.size);
-      return;
     }
-    const seqWord = c.wordIndex;
-    if (Atomics.load(this.words(), seqWord) >= c.seq) {
-      // A later copy of this slot landed first: its texels stand.
-      this.stats.stale += 1;
-    } else {
-      copyRows(new Uint8Array(c.buffer.getMappedRange()), this.heap(), c.heapPtr,
-        { rowBytes: c.rowBytes, srcStride: c.srcStride, dstStride: c.dstStride, rows: c.height });
-      this.stats.completed += 1;
-      this.stats.bytes += c.rowBytes * c.height;
-      this.stats.maxLatencyMs = Math.max(this.stats.maxLatencyMs, now() - c.at);
-      this.publish(c, READBACK_OK);
-    }
-    c.buffer.unmap();
-    this.giveBack(c.buffer, c.size);
   }
 
+  // The destination rectangle lies inside the heap, rows do not overlap.
+  fits(c) {
+    const heap = this.heap();
+    const { heapPtr, dstStride, rowBytes, height } = c;
+    if (![heapPtr, dstStride, rowBytes, height].every((n) => Number.isSafeInteger(n) && n >= 0)) return false;
+    if (height === 0 || rowBytes === 0) return true;
+    return dstStride >= rowBytes && heapPtr + dstStride * (height - 1) + rowBytes <= heap.length;
+  }
+
+  // Completions only move a slot forward: an older copy (landing late, or
+  // released as LOST) never overwrites a newer one's status. The status is
+  // written before the seq that publishes it.
   publish(c, status) {
     const words = this.words();
+    if (Atomics.load(words, c.wordIndex) >= c.seq) return;
     Atomics.store(words, c.wordIndex + 1, status);
-    if (Atomics.load(words, c.wordIndex) < c.seq) Atomics.store(words, c.wordIndex, c.seq);
+    Atomics.store(words, c.wordIndex, c.seq);
     Atomics.notify(words, c.wordIndex);
   }
 

@@ -109,18 +109,28 @@ test("correctness gate: regressions and unjudgeable candidates block, shared fai
   assert.equal(runChecks(record()).coreFreeze.status, "pass");
 });
 
-test("expected failures: XFAIL reported without blocking, XPASS blocks until the entry goes", () => {
-  const known = [{ cell: "g/c", check: "render", mode: "expected-fail", reason: "readback is a stub", until: "PR #99" }];
-  const expected = expectedFailures(known);
+test("expected failures: the pinned failure is XFAIL, any other failure and a pass (XPASS) block", () => {
+  const entry = { cell: "g/c", check: "render", mode: "expected-fail", reason: "readback is a stub", until: "PR #99", detail: "^missing-detail$" };
+  const expected = expectedFailures([entry]);
   const failing = { ...ok, render: { status: "fail", detail: "missing-detail" } };
-  // The baseline passes (it could not exercise the feature) or fails alike.
-  for (const base of [ok, failing]) {
-    const g = correctnessGate(cells([["c", base]]), cells([["c", failing]]), { expected });
-    assert.equal(g.ok, true);
-    const row = g.rows.find((r) => r.check === "render");
-    assert.equal(row.status, "xfail");
-    assert.match(row.detail, /until PR #99: readback is a stub/);
+  const xfail = correctnessGate(cells([["c", failing]]), cells([["c", failing]]), { expected });
+  assert.equal(xfail.ok, true);
+  const row = xfail.rows.find((r) => r.check === "render");
+  assert.equal(row.status, "xfail");
+  assert.match(row.detail, /until PR #99: readback is a stub/);
+  assert.doesNotMatch(row.detail, /WARNING/);
+  // Another failure of the same check is not the expected one: a blank or
+  // garbled picture stays a regression.
+  for (const detail of ["blank", "geometry-missing"]) {
+    const g = correctnessGate(cells([["c", ok]]), cells([["c", { ...ok, render: { status: "fail", detail } }]]), { expected });
+    assert.equal(g.ok, false, detail);
+    assert.equal(g.rows.find((r) => r.check === "render").status, "regressed");
   }
+  assert.equal(expectedFailures([{ ...entry, detail: "blank|missing-detail" }]).size, 1);
+  const blankEvenIfPinned = correctnessGate(cells([["c", ok]]), cells([["c", { ...ok, render: { status: "fail", detail: "blank" } }]]),
+    { expected: expectedFailures([{ ...entry, detail: "blank|missing-detail" }]) });
+  assert.equal(blankEvenIfPinned.ok, false, "blank is never an expected failure");
+  // XPASS blocks and says what to do.
   const xpass = correctnessGate(cells([["c", failing]]), cells([["c", ok]]), { expected });
   assert.equal(xpass.ok, false);
   assert.equal(xpass.rows.find((r) => r.check === "render").status, "xpass");
@@ -128,10 +138,30 @@ test("expected failures: XFAIL reported without blocking, XPASS blocks until the
   // Only the listed check of the listed cell is relaxed.
   const crash = { ...failing, crash: { status: "fail", detail: "x" } };
   assert.equal(correctnessGate(cells([["c", ok]]), cells([["c", crash]]), { expected }).ok, false);
-  assert.equal(correctnessGate(cells([["d", ok]]), cells([["d", failing]]), { expected }).ok, false);
-  // Entries must say why and until when; renderVsBaseline keeps its own modes.
-  assert.throws(() => expectedFailures([{ ...known[0], until: "" }]), /needs a until/);
-  assert.throws(() => expectedFailures([{ ...known[0], check: "renderVsBaseline" }]), /needs a check among/);
+});
+
+test("expected failures: a baseline that passes the check is flagged, a stale entry blocks", () => {
+  const entry = { cell: "g/c", check: "render", mode: "expected-fail", reason: "r", until: "u", detail: "^missing-detail$" };
+  const failing = { ...ok, render: { status: "fail", detail: "missing-detail" } };
+  const fresh = correctnessGate(cells([["c", ok]]), cells([["c", failing]]), { expected: expectedFailures([entry]) });
+  assert.equal(fresh.ok, true);
+  assert.match(fresh.rows.find((r) => r.check === "render").detail, /WARNING: the baseline passes this check/);
+  assert.match(gateMarkdown({ correctness: fresh }), /XFAIL \(not blocking\) ⚠/);
+  // The run has game g but no g/gone: the entry is stale.
+  const stale = correctnessGate(cells([["c", ok]]), cells([["c", ok]]), { expected: expectedFailures([{ ...entry, cell: "g/gone" }]) });
+  assert.equal(stale.ok, false);
+  assert.equal(stale.rows.at(-1).status, "stale-expected");
+  // Another matrix without game g does not judge it.
+  assert.equal(correctnessGate(cells([["c", ok]]), cells([["c", ok]]), { expected: expectedFailures([{ ...entry, cell: "other/c" }]) }).ok, true);
+});
+
+test("expected failures: entries need a cell, a check, a reason, until and the expected detail, once", () => {
+  const entry = { cell: "g/c", check: "render", mode: "expected-fail", reason: "r", until: "u", detail: "^missing-detail$" };
+  assert.throws(() => expectedFailures([{ ...entry, cell: undefined }]), /needs a cell/);
+  assert.throws(() => expectedFailures([{ ...entry, until: "" }]), /needs a until/);
+  assert.throws(() => expectedFailures([{ ...entry, detail: undefined }]), /needs a detail/);
+  assert.throws(() => expectedFailures([{ ...entry, check: "renderVsBaseline" }]), /needs a check among/);
+  assert.throws(() => expectedFailures([entry, { ...entry, reason: "again" }]), /listed twice/);
 });
 
 test("the committed known-failures.json parses for both gates", async () => {

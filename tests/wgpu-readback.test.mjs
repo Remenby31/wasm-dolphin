@@ -132,3 +132,32 @@ test("map buffers are reused per size", async () => {
   }
   assert.equal(device.created.length, 1);
 });
+
+test("a late LOST for an older copy never overwrites a newer copy's OK", async () => {
+  const { device, words, rb } = setup();
+  rb.record(fakeEncoder(texture), copyOf(1));
+  rb.record(fakeEncoder(texture), copyOf(2));
+  const done = rb.submitted();
+  device.created[1].land();
+  await flush();
+  assert.equal(Atomics.load(words, 0), 2);
+  device.created[0].fail(); // copy 1's map fails after copy 2 landed
+  await done;
+  assert.equal(Atomics.load(words, 0), 2);
+  assert.equal(Atomics.load(words, 1), READBACK_OK, "status still the newer copy's");
+});
+
+test("a rectangle outside the heap or with overlapping rows is refused, the buffer unmapped, the waiter released", async () => {
+  for (const bad of [{ heapPtr: 4090 }, { dstStride: 8 }, { heapPtr: -4 }]) {
+    const { device, heap, words, rb } = setup();
+    rb.record(fakeEncoder(texture), copyOf(1, bad));
+    const done = rb.submitted();
+    device.created[0].land();
+    await done;
+    assert.equal(Atomics.load(words, 0), 1, JSON.stringify(bad));
+    assert.equal(Atomics.load(words, 1), READBACK_LOST);
+    assert.equal(device.created[0].mapped, false, "unmapped");
+    assert.equal(rb.stats.rejected, 1);
+    assert.ok(heap.every((b) => b === 0), "nothing written");
+  }
+});
