@@ -1,0 +1,71 @@
+diff --git a/Source/Core/Core/PowerPC/CachedInterpreter/CachedInterpreter.cpp b/Source/Core/Core/PowerPC/CachedInterpreter/CachedInterpreter.cpp
+--- a/Source/Core/Core/PowerPC/CachedInterpreter/CachedInterpreter.cpp
++++ b/Source/Core/Core/PowerPC/CachedInterpreter/CachedInterpreter.cpp
+@@ -9229,8 +9229,21 @@ WasmStateLayout CurrentWasmStateLayout(Core::System& system);
+ u32 WasmLayoutHash(const WasmStateLayout& layout);
+ u32 s_region_layout_refused = 0;
+ 
++// 0091 (with dispatch's 0090): no region is installed under the MMU, not even
++// one from the cache translated in a session without it: the slow paths of
++// region loads and stores take a DSI and go on with 0, and a region does not
++// stop there. Counted apart (DolphinWeb_AotRegionsSkippedMmu): the stats
++// struct v2 has no free field.
++u32 s_regions_skipped_mmu = 0;
++
+ bool RegionInstallable(const PendingRegion& pending)
+ {
++  if (Core::System::GetInstance().IsMMUMode())
++  {
++    s_regions_skipped_mmu += 1;
++    s_region_stats.regions_refused += 1;
++    return false;
++  }
+   // Code translated for another heap layout (a cached module from a session
+   // whose RAM sat elsewhere) would read and write the wrong host memory.
+   if (pending.layout_hash != WasmLayoutHash(CurrentWasmStateLayout(Core::System::GetInstance())))
+@@ -15122,6 +15135,12 @@ struct RegionFragment
+ bool BuildRegionFragment(Core::System& system, u32 entry_pc, std::span<const u32> ranges,
+                          u32 max_blocks, RegionFragment* out)
+ {
++  // 0091: no region under the MMU (a game's INI). Its slow memory paths take
++  // a DSI and go on with 0, and a region does not stop there; the block JIT
++  // never runs under the MMU either (jo.memcheck: TryWriteWasmBlock refuses).
++  // Defence in depth with 0090, which keeps such regions from installing.
++  if (system.IsMMUMode())
++    return false;
+   // End of the range holding pc, 0 when none does.
+   const auto range_end = [&](u32 pc) -> u32 {
+     for (std::size_t i = 0; i + 1 < ranges.size(); i += 2)
+@@ -15429,6 +15448,19 @@ extern "C" EMSCRIPTEN_KEEPALIVE u32 DolphinWeb_AotLayoutHash()
+ }
+ 
+ // The layout's fields, in WasmStateLayout order (diagnostics: which one moved).
++// Regions not installed because the core runs under the MMU (0091).
++extern "C" EMSCRIPTEN_KEEPALIVE u32 DolphinWeb_AotRegionsSkippedMmu()
++{
++  return s_regions_skipped_mmu;
++}
++
++// Tests: the MMU mode a game's INI would set (0091), so a test can check that
++// nothing is translated or installed under it.
++extern "C" EMSCRIPTEN_KEEPALIVE void DolphinWeb_AotMMUModeForTest(int enabled)
++{
++  Core::System::GetInstance().SetMMUModeForTest(enabled != 0);
++}
++
+ extern "C" EMSCRIPTEN_KEEPALIVE u32 DolphinWeb_AotLayoutWords(u32* out, u32 capacity)
+ {
+   const WasmStateLayout layout = CurrentWasmStateLayout(Core::System::GetInstance());
+diff --git a/Source/Core/Core/System.h b/Source/Core/Core/System.h
+--- a/Source/Core/Core/System.h
++++ b/Source/Core/Core/System.h
+@@ -142,6 +142,9 @@ public:
+ 
+   bool IsDualCoreMode() const { return m_separate_cpu_and_gpu_threads; }
+   bool IsMMUMode() const { return m_mmu_enabled; }
++  // Tests only (DolphinWeb_AotMMUModeForTest, patch 0091): the mode a game's INI
++  // would set at boot.
++  void SetMMUModeForTest(bool enabled) { m_mmu_enabled = enabled; }
+   bool IsPauseOnPanicMode() const { return m_pause_on_panic_enabled; }
+   bool IsMIOS() const { return m_is_mios; }
+   bool IsTriforce() const { return m_is_triforce; }
