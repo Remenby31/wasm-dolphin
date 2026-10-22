@@ -1527,7 +1527,13 @@ async function handleMessage(type, payload) {
         detTraceRequested = true;
         moduleInstance?._DolphinWeb_DetTraceEnable?.(1);
       }
-      return { enabled: true, coreHooks: Boolean(moduleInstance?._DolphinWeb_HarnessEnable), coreLoaded: Boolean(moduleInstance) };
+      // Tests of position-independent regions (0084): memory taken from the
+      // core's heap before the boot, so the emulated RAM sits elsewhere than
+      // in the session that filled the region cache (heapShift: whether the
+      // boot is still to come).
+      if (Number.isFinite(payload.heapShiftMb) && payload.heapShiftMb > 0) aotTestHeapShiftBytes = Math.min(payload.heapShiftMb, 256) * 1048576;
+      return { enabled: true, coreHooks: Boolean(moduleInstance?._DolphinWeb_HarnessEnable), coreLoaded: Boolean(moduleInstance),
+        ...(aotTestHeapShiftBytes ? { heapShift: coreBoot.attempted ? "too-late" : "before-boot" } : {}) };
     case "validationReadTimeline":
       return readHarnessTimeline();
     case "validationUniqueFrames":
@@ -3611,6 +3617,10 @@ async function mountFile(file) {
   // boot; the optimisation of the rest starts once the boot is accepted.
   if (aotFirstLaunchEnabled && bootKind === "disc" && api.bootDisc && file.size >= MIN_FULL_BOOT_BYTES) {
     await prepareAotFirstLaunch(file);
+  }
+  if (aotTestHeapShiftBytes && !aotTestHeapPad && moduleInstance?._malloc) {
+    aotTestHeapPad = moduleInstance._malloc(aotTestHeapShiftBytes); // kept for the session
+    postStatus(`harness: ${aotTestHeapShiftBytes >> 20} MiB taken from the core's heap before the boot (heap shift test)`);
   }
   if (api.bootDisc && (executable || file.size >= MIN_FULL_BOOT_BYTES)) {
     coreBoot.attempted = true;
@@ -7199,6 +7209,8 @@ export function startAotFirstLaunchAfterBoot(flow = aotFirstLaunch) {
 let aotCoreBooted = false;
 let aotLayoutSkipped = 0;
 let aotHeapPatched = 0; // cached region modules patched for this session's heap (0084)
+let aotTestHeapShiftBytes = 0; // harness: heap taken before the boot (validationEnableHarness heapShiftMb)
+let aotTestHeapPad = 0;
 let aotHeapPatchedBytes = 0; // their unpatched bytes, compiled by the cache loader for nothing
 let aotHeapPatchFailed = 0; // patched modules the compiler refused: left to the JIT
 async function whenCoreRamReady(module, { timeoutMs = 60000, everyMs = 50 } = {}) {
