@@ -214,6 +214,11 @@ async function measure(session, o) {
         if (live(memEnd)) memEnd = await workerRequest(page, "validationReadMemAccessStats", {}, 10000);
       }
     }
+    // Regions the engine set aside without the core ever seeing them (another
+    // heap layout, 0078; heap patches, 0084): read even without
+    // --region-sample, so that a launch running without its region cache
+    // never goes unnoticed (2026-10-22: 0/143 on a loaded machine).
+    const pipeline = regionEnd ? null : await workerRequest(page, "validationReadJitRegionStats", {}, 10000).catch(() => null);
     return {
       windowMs: Math.round(t1 - t0),
       load1: { min: round(Math.min(...loads), 2), median: round(medianLoad, 2), max: round(Math.max(...loads), 2), limit: o.maxLoad },
@@ -234,6 +239,7 @@ async function measure(session, o) {
       freezes: { core: core.freezes?.length ?? 0, present: pres.freezes.length },
       pc: pc && !pc.error ? summarizePcSamples(pc, { functions: o.functions }) : pc,
       ...regionRecord(regionEnd),
+      ...(pipeline && !pipeline.error ? regionPipeline(pipeline) : {}),
       ...(o.memStats ? memRecord(memEnd) : {})
     };
   } finally {
@@ -251,9 +257,19 @@ export function regionRecord(reply) {
   const p4 = regionShares(stats);
   const samples = {
     ...(Array.isArray(reply.installSamples) ? { installSamples: reply.installSamples } : {}),
-    ...(Number.isInteger(reply.layoutRefused) ? { layoutRefused: reply.layoutRefused } : {})
+    // cached modules patched for this session's heap (0084), their unpatched
+    // compiles thrown away, and patched compiles refused
+    ...regionPipeline(reply)
   };
   return p4.error ? { p4: null, p4Why: p4.error, ...samples } : { p4, p4Raw: stats, ...samples };
+}
+
+// The region pipeline counters a stats reply carries besides the stats.
+export function regionPipeline(reply) {
+  return {
+    ...(Number.isInteger(reply.layoutRefused) ? { layoutRefused: reply.layoutRefused } : {}),
+    ...(Number.isInteger(reply.heapPatched) ? { heapPatched: reply.heapPatched, heapPatchedBytes: reply.heapPatchedBytes ?? null, heapPatchFailed: reply.heapPatchFailed ?? null } : {})
+  };
 }
 
 // Memory accesses per instruction of one stats window (0104), or null and why.
@@ -369,7 +385,7 @@ function resolveSide(name, spec) {
   return { name, label: spec, root: exportRef(spec), temp: true };
 }
 
-const brief = (m) => m && `speed ${m.speed} % (p5 ${m.speedP5}) game ${m.gameFps} fps vi p99 ${m.viIntervalMs.p99} ms hitches ${m.hitchesPerMin}/min busiest thread ${m.rendererThreads.at(-1)?.busiest} % load ${m.load1.median}${m.overloaded ? " OVERLOADED" : ""}${m.pc?.samples ? ` pc ${m.pc.samples} samples` : ""}`;
+const brief = (m) => m && `speed ${m.speed} % (p5 ${m.speedP5}) game ${m.gameFps} fps vi p99 ${m.viIntervalMs.p99} ms hitches ${m.hitchesPerMin}/min busiest thread ${m.rendererThreads.at(-1)?.busiest} % load ${m.load1.median}${m.overloaded ? " OVERLOADED" : ""}${m.pc?.samples ? ` pc ${m.pc.samples} samples` : ""}${m.layoutRefused > 0 ? ` REGIONS REFUSED FOR THE HEAP LAYOUT ${m.layoutRefused}` : ""}${m.heapPatched > 0 ? ` heap-patched ${m.heapPatched}` : ""}`;
 
 async function main() {
   const { values } = parseArgs({

@@ -9,7 +9,7 @@ import path from "node:path";
 import test from "node:test";
 
 import { acquirePerfLock, queueDir, readLockOwner, ticketsAhead } from "../harness/lib/perf-lock.mjs";
-import { chromeArgsOf, num, pairedSpeedChange, sideOrder } from "../harness/probes/race-perf.mjs";
+import { chromeArgsOf, num, pairedSpeedChange, regionPipeline, sideOrder } from "../harness/probes/race-perf.mjs";
 import { stockChrome } from "../harness/lib/kpi.mjs";
 import { calmThenLock, loadGaveUp } from "../harness/lib/env.mjs";
 import { summarizePcSamples } from "../src/harness-pc-sampler.js";
@@ -359,4 +359,14 @@ test("load: a calm machine before the lock, never the lock held while waiting on
   assert.equal(loadGaveUp({ load: 3, limit: 6, ok: true }), null);
   assert.equal(loadGaveUp(undefined), null);
   assert.match(loadGaveUp({ load: 9.1, limit: 6, ok: false }), /load 9.1 > 6 after --load-wait: remaining runs given up, lock released/);
+});
+
+// 2026-10-22: a launch on a loaded machine ran without its region cache, every
+// module set aside by the engine for another heap layout before the core saw
+// it. The counters are read whatever the options, so the run says so.
+test("race-perf: the region pipeline counters of a stats reply", () => {
+  assert.deepEqual(regionPipeline({ layoutRefused: 143, heapPatched: 0, heapPatchedBytes: 0, heapPatchFailed: 0 }),
+    { layoutRefused: 143, heapPatched: 0, heapPatchedBytes: 0, heapPatchFailed: 0 });
+  assert.deepEqual(regionPipeline({ layoutRefused: 0 }), { layoutRefused: 0 }, "an engine before 0084: no heap counters");
+  assert.deepEqual(regionPipeline({}), {}, "an engine before 0078");
 });
