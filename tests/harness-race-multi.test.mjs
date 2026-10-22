@@ -10,7 +10,7 @@ import test from "node:test";
 import { claim, OWNER_FILE } from "../harness/lib/ownership.mjs";
 import { copySeedProfile } from "../harness/lib/session.mjs";
 
-import { armEffects, barrier, bootOrder, GUEST_HZ, instructionsPerGuestCycle, laneOf, parsePerfCsv, waitRegionsQuiescent } from "../harness/probes/race-multi.mjs";
+import { armEffects, barrier, bootOrder, chromeLogLines, GUEST_HZ, instructionsPerGuestCycle, laneOf, parsePerfCsv, waitRegionsQuiescent } from "../harness/probes/race-multi.mjs";
 
 test("race-multi: a cyclic Latin square, every arm on every lane equally", () => {
   const seen = Array.from({ length: 3 }, () => [0, 0, 0]);
@@ -107,5 +107,35 @@ test("seed profile: copied with its caches, never its locks nor its owner", () =
     assert.doesNotThrow(() => claim(dest, root, "chrome-profile"));
   } finally {
     rmSync(root, { recursive: true, force: true });
+  }
+});
+
+test("race-multi --aot-seed: a stable count below the seed's is not done", async () => {
+  const seq = (states) => { let i = 0; return async () => states[Math.min(i++, states.length - 1)]; };
+  const p = (installed) => ({ queued: 0, installed, refused: 0, dropped: 0, pending: 0 });
+  const fast = { everyMs: 0, sleep: async () => {} };
+  // 0 installed and stable: done without a target, not with the seed's 143.
+  assert.equal((await waitRegionsQuiescent(seq([p(0)]), fast)).quiescent, true);
+  const ko = await waitRegionsQuiescent(seq([p(0)]), { ...fast, target: 143, timeoutMs: -1 });
+  assert.equal(ko.quiescent, false);
+  assert.match(ko.why, /0 installed, 143 expected/);
+  assert.equal((await waitRegionsQuiescent(seq([p(100), p(143), p(143), p(143)]), { ...fast, target: 143 })).installed, 143);
+});
+
+test("race-multi: the boot's console lines about regions, from chrome.log", () => {
+  const dir = mkdtempSync(path.join(os.tmpdir(), "chrome-log-"));
+  try {
+    writeFileSync(path.join(dir, "chrome.log"), [
+      "[1:1:1022/1:INFO:CONSOLE(1)] \"aot: 143 region modules installed before boot\", source: x",
+      "[1:1:1022/1:INFO:CONSOLE(2)] \"jit-cache: discio recorded 100 new compiles (cache size=2917)\", source: x",
+      "[1:1:1022/1:INFO:CONSOLE(3)] \"unrelated\", source: x",
+      "[1:1:1022/1:WARNING:x.cc] aot outside the console"
+    ].join("\n"));
+    const lines = chromeLogLines(dir);
+    assert.equal(lines.length, 2);
+    assert.match(lines[0], /143 region modules/);
+    assert.deepEqual(chromeLogLines(path.join(dir, "missing")), []);
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
   }
 });

@@ -38,7 +38,7 @@
 //   for 3 reads, then all arms open their windows together; the counts are
 //   recorded per arm (regionGate) and compared (regionCountsEqual).
 import { randomBytes } from "node:crypto";
-import { mkdirSync, rmSync, writeFileSync } from "node:fs";
+import { mkdirSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import os from "node:os";
 import path from "node:path";
 import { pathToFileURL } from "node:url";
@@ -79,22 +79,43 @@ async function regionPipeline(page) {
   const d = reply?.bytes ? decodeRegionStats(reply.bytes)?.diagnostics : null;
   if (!d) return null;
   const { regionsQueued: queued = 0, regionsInstalled: installed = 0, regionsRefused: refused = 0, regionsDropped: dropped = 0 } = d;
-  return { queued, installed, refused, dropped, pending: queued - installed - refused - dropped };
+  // Regions installed from the cache at boot never pass through the queue:
+  // pending can be negative, which means none left.
+  return {
+    queued, installed, refused, dropped, pending: Math.max(0, queued - installed - refused - dropped),
+    // layoutRefused: the core's refusals plus discio's skips before queueing
+    // (0078); heapPatched: modules patched to a moved heap (0084, #71).
+    layoutRefused: Number.isInteger(reply.layoutRefused) ? reply.layoutRefused : null,
+    heapPatched: Number.isInteger(reply.heapPatched) ? reply.heapPatched : null
+  };
 }
 
 // Wait until no region is pending and the installed count holds for
 // `stableReads` reads `everyMs` apart (bounded by `timeoutMs`).
-export async function waitRegionsQuiescent(read, { everyMs = 1000, stableReads = 3, timeoutMs = 120000, sleep = (ms) => new Promise((r) => setTimeout(r, ms)) } = {}) {
+export async function waitRegionsQuiescent(read, { everyMs = 1000, stableReads = 3, timeoutMs = 120000, target = null, sleep = (ms) => new Promise((r) => setTimeout(r, ms)) } = {}) {
   const t0 = Date.now();
   let last = null, stable = 0, p = null;
   for (;;) {
     p = await read();
     if (!p) return { quiescent: false, why: "no region pipeline in this core", ms: Date.now() - t0 };
     stable = p.pending === 0 && last && p.installed === last.installed ? stable + 1 : 0;
-    if (stable >= stableReads - 1 && p.pending === 0) return { quiescent: true, ...p, ms: Date.now() - t0 };
-    if (Date.now() - t0 > timeoutMs) return { quiescent: false, why: `still ${p.pending} pending after ${timeoutMs} ms`, ...p, ms: Date.now() - t0 };
+    // With a target (the seed's count), a stable count below it is not done:
+    // the regions may still come (or never will: the timeout says so).
+    const reached = target == null || p.installed >= target;
+    if (stable >= stableReads - 1 && p.pending === 0 && reached) return { quiescent: true, ...p, ms: Date.now() - t0 };
+    if (Date.now() - t0 > timeoutMs) return { quiescent: false, why: p.pending ? `still ${p.pending} pending after ${timeoutMs} ms` : `${p.installed} installed, ${target} expected, after ${timeoutMs} ms`, ...p, ms: Date.now() - t0 };
     last = p;
     await sleep(everyMs);
+  }
+}
+
+// Lines of the profile's chrome.log (--enable-logging) about regions, the
+// first-launch optimisation and the JIT cache: what the page said at boot.
+export function chromeLogLines(profileDir, re = /aot|region|cache size|jit-cache|layout/i, max = 40) {
+  try {
+    return readFileSync(path.join(profileDir, "chrome.log"), "utf8").split("\n").filter((l) => /CONSOLE/.test(l) && re.test(l)).slice(-max).map((l) => l.slice(0, 400));
+  } catch {
+    return [];
   }
 }
 
@@ -145,7 +166,8 @@ async function main() {
       runs: { type: "string", default: "6" }, warmup: { type: "string", default: "25" }, secs: { type: "string", default: "20" },
       hold: { type: "string", default: "KeyX" }, "max-load": { type: "string" },
       lock: { type: "string", multiple: true, default: [] }, "lock-wait": { type: "string", default: "14400" }, out: { type: "string" },
-      counters: { type: "boolean", default: false }, "aot-seed": { type: "boolean", default: false }, "seed-sec": { type: "string", default: "600" }
+      counters: { type: "boolean", default: false }, "aot-seed": { type: "boolean", default: false }, "seed-sec": { type: "string", default: "600" },
+      "gate-sec": { type: "string", default: "120" }
     }
   });
   const lanes = String(values.lanes ?? "").split(";").map((l) => l.trim()).filter(Boolean);
@@ -171,7 +193,11 @@ async function main() {
   let arrive = null;
   o.onWindow = async (phase, session) => {
     if (phase === "start" && values["aot-seed"]) {
-      const gate = await waitRegionsQuiescent(() => regionPipeline(session.page));
+      const gate = await waitRegionsQuiescent(() => regionPipeline(session.page), { target: seedRegions.get(session.seedOf) ?? null, timeoutMs: num(values, "gate-sec", { min: 1 }) * 1000 });
+      // What the boot of this arm said about its regions (for the region robustness work).
+      const progress = await workerRequest(session.page, "validationReadAotProgress", { drain: true }, 15000);
+      gate.aot = { state: progress?.state ?? null, events: (progress?.events ?? []).filter((e) => e.type !== "progress").slice(-12) };
+      gate.log = chromeLogLines(session.profileDir);
       gate.together = await arrive();
       gates.set(session, gate);
     }
@@ -180,6 +206,7 @@ async function main() {
   const servers = [];
   const records = [];
   const seeds = [];
+  const seedRegions = new Map();
   try {
     for (let a = 0; a < arms.length; a += 1) servers.push(await ensureServer({ port: port + a, root: arms[a] }));
     if (values["aot-seed"]) {
@@ -192,7 +219,11 @@ async function main() {
           const end = Date.now() + seedSec * 1000;
           for (;;) {
             const reply = await workerRequest(s.page, "validationReadAotProgress", { drain: true }, 15000);
-            if ((reply?.events ?? []).some((e) => e.type === "done")) return { profile: s.profileDir, ok: true };
+            if ((reply?.events ?? []).some((e) => e.type === "done")) {
+              // The region count the seed reached: what each run's gate waits for.
+              await new Promise((r) => setTimeout(r, 3000));
+              return { profile: s.profileDir, ok: true, regions: await regionPipeline(s.page) };
+            }
             if ((reply?.events ?? []).some((e) => e.type === "error" && e.fatal) || Date.now() > end) return { profile: s.profileDir, ok: false, why: reply?.error ?? "no done within the seed time" };
             await new Promise((r) => setTimeout(r, 1000));
           }
@@ -200,7 +231,8 @@ async function main() {
           await s.close().catch(() => {});
         }
       }));
-      seeded.forEach((x, a) => console.log(`[race-multi] seed arm ${a}: ${x.ok ? "first-launch optimisation done" : `FAILED (${x.why})`} -> ${x.profile}`));
+      seeded.forEach((x, a) => console.log(`[race-multi] seed arm ${a}: ${x.ok ? `first-launch optimisation done, ${x.regions?.installed ?? "?"} regions installed` : `FAILED (${x.why})`} -> ${x.profile}`));
+      seeded.forEach((x, a) => seedRegions.set(a, x.regions?.installed ?? null));
       if (!seeded.every((x) => x.ok)) throw new Error("--aot-seed: an arm's first launch did not finish its optimisation");
       seeds.push(...seeded.map((x) => x.profile));
     }
@@ -214,12 +246,15 @@ async function main() {
         sessions.length = arms.length;
         record.arms = new Array(arms.length);
         gates.clear();
-        arrive = barrier(arms.length);
+        arrive = barrier(arms.length, (num(values, "gate-sec", { min: 1 }) + 60) * 1000);
+        const runStart = Date.now();
         for (const a of bootOrder(r, arms.length)) {
           const lane = laneOf(a, r, lanes.length);
           process.env.SPARK_CHROME_CPUS = lanes[lane];
+          const bootStart = Date.now();
           sessions[a] = await openSession({ base: servers[a].base, server: servers[a], query: o.query, iso: path.resolve(values.iso), routes: { [STATE_ROUTE]: path.resolve(values.state) }, seedProfile: seeds[a] ?? null });
-          record.arms[a] = { arm: a, lane, cpus: lanes[lane], bootRank: bootOrder(r, arms.length).indexOf(a), url: sessions[a].url, served: servers[a].identity, core: sessions[a].core };
+          sessions[a].seedOf = a;
+          record.arms[a] = { arm: a, lane, cpus: lanes[lane], bootRank: bootOrder(r, arms.length).indexOf(a), boot: { startMs: bootStart - runStart, ms: Date.now() - bootStart }, url: sessions[a].url, served: servers[a].identity, core: sessions[a].core };
         }
         // The windows together.
         const results = await Promise.allSettled(sessions.map((s) => measure(s, o)));
@@ -232,7 +267,7 @@ async function main() {
         record.arms.forEach((x, a) => { x.regionGate = gates.get(sessions[a]) ?? null; });
         const counts = record.arms.map((x) => x.regionGate?.installed);
         record.regionCountsEqual = counts.every((c) => Number.isInteger(c) && c === counts[0]);
-        console.log(`[race-multi] run ${r} regions installed per arm: ${counts.join(" / ")}${record.regionCountsEqual ? "" : " (NOT EQUAL)"}; quiescent ${record.arms.map((x) => (x.regionGate?.quiescent ? `${x.regionGate.ms} ms` : x.regionGate?.why ?? "?")).join(" / ")}`);
+        console.log(`[race-multi] run ${r} regions installed per arm: ${counts.join(" / ")}${record.regionCountsEqual ? "" : " (NOT EQUAL)"}; layoutRefused ${record.arms.map((x) => x.regionGate?.layoutRefused ?? "-").join(" / ")}; heapPatched ${record.arms.map((x) => x.regionGate?.heapPatched ?? "-").join(" / ")}; boot rank ${record.arms.map((x) => x.bootRank).join(" / ")}; quiescent ${record.arms.map((x) => (x.regionGate?.quiescent ? `${x.regionGate.ms} ms` : x.regionGate?.why ?? "?")).join(" / ")}`);
       }
       console.log(`[race-multi] run ${r}: ${record.arms.map((x) => `arm${x.arm}@lane${x.lane} ${x.error ?? `${x.cold.speed} %${x.cold.instructionsPerGuestCycle ? ` ${round(x.cold.instructionsPerGuestCycle, 3)} insn/guest cycle` : ""}${x.cold.overloaded ? " OVERLOADED" : ""}`}`).join(" | ")}`);
       writeFileSync(path.join(outDir, `run${r}.json`), JSON.stringify(record, null, 1) + "\n");
