@@ -5,6 +5,7 @@
 #include <unordered_map>
 // P4 regions (0075): none installed in these groups.
 std::atomic<bool> s_regions_enabled{false};
+bool s_regions_on = false;
 std::unordered_map<u32, u32> s_region_at;
 template <class State> bool TryRunRegion(State&) { return false; }
 template <class State> bool RegionWouldRun(const State&) { return false; }
