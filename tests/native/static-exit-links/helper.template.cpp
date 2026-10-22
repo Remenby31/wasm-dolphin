@@ -72,10 +72,10 @@ int main()
   group("actual terminal callbacks tolerate direct invocation without execution context", [] {
     require(L::active_context == nullptr, "no context before direct callbacks");
     PowerPC::PowerPCState state; PowerPC::PowerPCManager manager{&state}; state.npc = 0x2000;
-    CachedInterpreter::EndBlockOperands<false> end{7, 3, 2, L::Fallthrough(0x2000)};
+    CachedInterpreter::EndBlockOperands<false> end{7, 3, 2, 0, L::Fallthrough(0x2000)};
     require(CachedInterpreter::EndBlock<false>(state, end) == 0, "direct native normal terminal");
     wasm_call = [](s32, PowerPC::PowerPCState& ppc) { ppc.npc = 0x2000; return 0; };
-    CachedInterpreter::WasmBlockOperands wasm{1, 0x2000, 7, 3, 2, 1, L::Fallthrough(0x2000)};
+    CachedInterpreter::WasmBlockOperands wasm{1, 0x2000, 7, 3, 2, 1, 0, L::Fallthrough(0x2000)};
     require(CachedInterpreter::RunWasmBlock(state, wasm) == 0, "direct WASM normal terminal");
     settings = {}; settings.status = 1; reset_helper_state(); state.downcount = 40;
     CachedInterpreter::MeleeIdlePollLoopOperands idle{manager, MELEE_IDLE_POLL_LOOP_PC, MELEE_IDLE_POLL_LOOP_END_PC, 4, 2, {}};
@@ -93,7 +93,7 @@ int main()
       BaselineInterpreter::EndBlockOperands<false> old_end{7, 3, 2};
       auto descriptor = L::Branch((18u << 26) | 0x1001, 0x1000); const u8 code[8]{};
       if (linked) for (auto& cell : descriptor.cells) L::WriteEntry(&cell, code);
-      CachedInterpreter::EndBlockOperands<false> new_end{7, 3, 2, descriptor};
+      CachedInterpreter::EndBlockOperands<false> new_end{7, 3, 2, 0, descriptor};
       inline_mode = mode; reset_helper_state();
       const auto old_size = BaselineInterpreter::FastOsInterruptCallBranch(baseline, old_op);
       BaselineInterpreter::EndBlock<false>(baseline, old_end); const auto old_counts = helper_counters();
