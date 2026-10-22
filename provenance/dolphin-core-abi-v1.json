@@ -86,8 +86,8 @@
     {
       "path": "src/core-host.js",
       "hashMode": "lf-normalized",
-      "size": 68901,
-      "sha256": "00bb27ded340d101279a072ccbd91c41ab58b207c18036f61ba23c2f7647e900"
+      "size": 69120,
+      "sha256": "1f861a3ac08b6c0b30892f6089aca37480958defe622d1a86e18c0cbf479d78f"
     },
     {
       "path": "src/diagnostic-log-filter.js",
@@ -140,8 +140,8 @@
     {
       "path": "src/upstream-discio-worker.js",
       "hashMode": "lf-normalized",
-      "size": 692294,
-      "sha256": "1239661ad4d997672aa8c3522bcfb7b0802182683df8ab91110d9443ea4b9689"
+      "size": 698768,
+      "sha256": "90d1e3427dbd13124ed4b4e96947e063697f269562c502199cc5406fd6da3813"
     },
     {
       "path": "src/wgpu-renderer-worker-probe.js",
@@ -164,8 +164,8 @@
     {
       "path": "src/upstream-worker-adapter.js",
       "hashMode": "lf-normalized",
-      "size": 47408,
-      "sha256": "04d322a6c932a0733f8a87b0f5b5853efb9228296e384b9c8099c7f1c9b14919"
+      "size": 47555,
+      "sha256": "52931296b458c14f8588909e2b5e52f1c17de077e7a2f41a544c1c6e335a4a68"
     },
     {
       "path": "src/upstream-worker-protocol.js",
@@ -646,10 +646,13 @@
       "validationReadDetTrace",
       "validationReadJitCacheReadiness",
       "validationReadJitRegionStats",
+      "validationReadMemAccessStats",
+      "validationReadPipelinePrewarm",
       "validationReadTimeline",
       "validationReadWgpuReplayState",
       "validationSetCorePaused",
-      "validationSetWgpuPerturbation"
+      "validationSetWgpuPerturbation",
+      "validationUniqueFrames"
     ],
     "notificationFields": {
       "detachedOglFrame": [
