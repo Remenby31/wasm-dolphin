@@ -302,6 +302,15 @@ is `(rotl(x, 8) & 0x00ff00ff) | (rotr(x, 8) & 0xff00ff00)`, the form LLVM
 emits: 5 ops instead of 10 shifts, masks and ors. Blocks keep the old form,
 so their bytes and cache keys don't change. Compiler version 7.
 
+## Regions of up to 256 blocks (patch 0109, 2026-10-22)
+
+The optimizer asks for up to 256 blocks per function (`maxBlocks`, was 64),
+so fewer blocks of hot functions run outside their region. A fragment stops
+taking blocks past 480 KB of code: V8's optimizing tier runs out of memory
+on functions of ~750 KB, and at 256 blocks a few functions of a commercial
+disc reached ~660 KB. Region modules get larger (median 2.2 KB) and a
+translate slice gets longer. Compiler version 8.
+
 ## MMU mode (patch 0091, with dispatch's 0090, 2026-10-22)
 
 Under the MMU (bMMU, set by a game's INI) no wasm code of ours runs. The
