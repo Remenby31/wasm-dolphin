@@ -92,6 +92,7 @@ export async function loadAotCore(coreDir = new URL("../../cores/dolphin/", impo
         const [offset, kind, value] = words.subarray(entryCount + 3 * i, entryCount + 3 * i + 3);
         if (kind === 0) return { offset, kind: "import", name: helperNames[value] };
         if (kind === 1) return { offset, kind: "jump", targetPc: value };
+        if (kind === 4) return { offset, kind: "hint", likely: value === 1 }; // branch hint (0102 lever F)
         return { offset, kind: "dispatch" };
       });
       const at = p + 16 + 4 * (entryCount + 3 * relocCount);
