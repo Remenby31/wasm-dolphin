@@ -21,3 +21,9 @@ test("wgpu skips the XFB decode and hash but still counts the frame", () => {
   assert.match(onXfb, /s_skip_xfb_decode \? 0 :/);
   assert.match(onXfb, /\+\+s_frame;\n\s*PublishFrameSignal\(\);/);
 });
+
+test("wgpu keeps one present per VI field (no duplicate-XFB skipping)", () => {
+  // Measured 2026-10-22: without this, 4.5-11 % of the race's VI fields were
+  // not presented (presents < VI outputs) once the RAM copy was skipped.
+  assert.match(core, /if \(s_video_backend == "WebGPU"\)\n\s*Config::SetBase\(Config::GFX_HACK_SKIP_DUPLICATE_XFBS, false\);/);
+});
