@@ -272,8 +272,9 @@ export function regionRecord(reply) {
   const p4 = regionShares(stats);
   const samples = {
     ...(Array.isArray(reply.installSamples) ? { installSamples: reply.installSamples } : {}),
-    // cached modules patched for this session's heap (0084), their unpatched
-    // compiles thrown away, and patched compiles refused
+    // layoutRefused, the launch's heap layout (it varies between launches, and
+    // the host work per guest cycle with it, bench 2026-10-22), and the 0084
+    // heap patches
     ...regionPipeline(reply)
   };
   return p4.error ? { p4: null, p4Why: p4.error, ...samples } : { p4, p4Raw: stats, ...samples };
@@ -283,6 +284,8 @@ export function regionRecord(reply) {
 export function regionPipeline(reply) {
   return {
     ...(Number.isInteger(reply.layoutRefused) ? { layoutRefused: reply.layoutRefused } : {}),
+    ...(Number.isInteger(reply.layoutHash) ? { layoutHash: reply.layoutHash } : {}),
+    ...(reply.layout ? { layout: reply.layout } : {}),
     ...(Number.isInteger(reply.heapPatched) ? { heapPatched: reply.heapPatched, heapPatchedBytes: reply.heapPatchedBytes ?? null, heapPatchFailed: reply.heapPatchFailed ?? null } : {})
   };
 }
