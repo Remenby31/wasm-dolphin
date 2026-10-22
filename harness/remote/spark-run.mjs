@@ -41,6 +41,7 @@ import { exportRef } from "../cli.mjs";
 import { PRESETS } from "../lib/matrix.mjs";
 import { REPO_ROOT } from "../lib/browser.mjs";
 import { IDENTITY_FILE, snapshotTree } from "../lib/server.mjs";
+import { MAX_BUILDS_PER_OWNER, ownerBuilds } from "./spark-queue.mjs";
 import { release } from "../lib/ownership.mjs";
 
 export const BENCH = "salon-bench"; // under the Spark user's home
@@ -264,7 +265,12 @@ async function build(host, ref) {
     return exit;
   }
   if (done) throw new Error(`a build of ${commit.slice(0, 12)} ended with exit ${done}${done === "0" ? " but no core built on the bench is there" : ""} (~/${base}.log); remove its .log and .exit to build again`);
-  ssh(host, `mkdir -p ${BENCH}/build/wt && test ! -e ${base}.log && cd ${harness.dest} && { PATH="$HOME/${BENCH}/node/bin:$PATH" setsid nohup sh -c 'node harness/remote/spark-build.mjs ${commit} >> $HOME/${base}.log 2>&1; echo $? > $HOME/${base}.exit' </dev/null >/dev/null 2>&1 & }`);
+  // At most MAX_BUILDS_PER_OWNER builds of this agent (its worktree) in the queue.
+  const owner = safeName(path.basename(REPO_ROOT)); // [\w.-] only: safe in the remote sh -c '…' 
+  const tickets = JSON.parse(ssh(host, `cd ${harness.dest} && PATH="$HOME/${BENCH}/node/bin:$PATH" node harness/remote/spark-queue.mjs list --json`).out || "[]");
+  const mine = ownerBuilds(tickets, owner);
+  if (mine.length >= MAX_BUILDS_PER_OWNER) throw new Error(`${owner} already has ${mine.length} builds in the bench's queue (${mine.map((t) => t.name).join(", ")}), at most ${MAX_BUILDS_PER_OWNER}: wait for one of your builds to go through`);
+  ssh(host, `mkdir -p ${BENCH}/build/wt && test ! -e ${base}.log && cd ${harness.dest} && { PATH="$HOME/${BENCH}/node/bin:$PATH" setsid nohup sh -c 'node harness/remote/spark-build.mjs ${commit} --owner ${owner} >> $HOME/${base}.log 2>&1; echo $? > $HOME/${base}.exit' </dev/null >/dev/null 2>&1 & }`);
   console.log(`[spark-run] building ${commit.slice(0, 12)} on ${host} (waits for the bench's perf lock; ~8 min, first build of a worktree more)`);
   const exit = await followLog(host, base, { lost: `the build goes on there: ssh ${host} cat ~/${base}.log` });
   if (exit === 0) console.log(`[spark-run] built: --candidate spark:${commit}`);
