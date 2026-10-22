@@ -1,0 +1,51 @@
+diff --git a/Source/Core/VideoCommon/Present.cpp b/Source/Core/VideoCommon/Present.cpp
+--- a/Source/Core/VideoCommon/Present.cpp
++++ b/Source/Core/VideoCommon/Present.cpp
+@@ -9,6 +9,7 @@
+ #include "Core/CoreTiming.h"
+ #include "Core/HW/VideoInterface.h"
+ #include "Core/Host.h"
++#include "Core/Core.h"
+ #include "Core/System.h"
+ 
+ #include "InputCommon/ControllerInterface/ControllerInterface.h"
+@@ -20,6 +21,7 @@
+ #include "VideoCommon/OnScreenUI.h"
+ #include "VideoCommon/PostProcessing.h"
+ #include "VideoCommon/VertexManagerBase.h"
++#include "VideoCommon/VideoBackendBase.h"
+ #include "VideoCommon/VideoConfig.h"
+ #include "VideoCommon/VideoEvents.h"
+ #include "VideoCommon/Widescreen.h"
+@@ -923,15 +925,22 @@
+     {
+       const auto present_time = GetUpdatedPresentationTime(present_info->intended_present_time);
+ 
+-#ifndef __EMSCRIPTEN__
+-      // In single-threaded WASM (the browser build) AsyncRequests passthrough
+-      // mode is true, so this Present runs synchronously on the CPU thread.
+-      // SleepUntil would block the core for ~60ms when wall-clock drifted
+-      // multiple VI fields behind game time. Browser pacing is provided by
+-      // emscripten_webgl_commit_frame's implicit 60Hz cap, so this VI sleep
+-      // is redundant in the browser. (A bounded variant capped at 20ms was
+-      // tried and degraded performance further by re-introducing partial
+-      // stalls on every frame.)
++#ifdef __EMSCRIPTEN__
++      // When this Present runs on the CPU thread (single core: AsyncRequests
++      // passthrough), sleeping would stall the emulation: skipped there.
++      // In dual core it runs on the video thread, and the sleep is what
++      // spreads the presents to their times (SmoothEarlyPresentation): with
++      // RushFramePresentation the CPU thread renders 2-3 cheap fields ahead
++      // in one burst, and without the sleep each burst reached the screen
++      // at once (gxscene on video=wgpu: frame-time p95 35-52 ms at 100 %).
++      // Only measured on video=wgpu (gxscene 35 -> 50 pictures shown per
++      // second, race +7.7 %); OGL and Software keep presenting on arrival.
++      if (!Core::IsCPUThread() && g_video_backend &&
++          g_video_backend->GetConfigName() == "WebGPU")
++      {
++        Core::System::GetInstance().GetCoreTiming().SleepUntil(present_time);
++      }
++#else
+       Core::System::GetInstance().GetCoreTiming().SleepUntil(present_time);
+ #endif
+ 
