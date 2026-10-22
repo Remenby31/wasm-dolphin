@@ -347,6 +347,32 @@ sleeps in the throttle is not understated), `msPerSecond`, `mailsPerSecond`,
 `meanMailUs` and `mailMaxMs`, medians of the good runs. Calm machine first,
 then the perf lock, as race-perf.
 
+## Profiling the generated wasm (regions)
+
+Where the CPU thread's cycles go inside the generated code
+(research/deep-region-profiling.md). One dedicated session, never a speed
+measurement (jitdump on, no sandbox, sampling), on a perf lock only so it
+does not overlap anyone's window:
+
+```
+# macOS: samply wraps the run, the window is filtered afterwards
+samply record --save-only -r 2000 -o OUT/profile.json.gz -- \
+  node harness/probes/profile.mjs --iso ../roms/<disc>.iso --out OUT [--query ...] [--warmup 40] [--secs 20]
+node harness/probes/wasm-hot.mjs --jitdump OUT/jit/jit-<pid>.dump --samply OUT/profile.json.gz \
+  --window OUT/window.json --top 30 --insns 12 --annotate 5 --out OUT/asm
+# Spark (perf attached to the renderer for the window, FIFO queue, lane a)
+ssh spark 'cd ~/salon-bench/<tree> && setsid nohup sh harness/remote/spark-profile.sh ~/salon-bench/profiles/<name> ~/salon-bench/roms/<disc> >/dev/null 2>&1 &'
+```
+
+`profile.mjs` runs Chrome with `--no-sandbox --js-flags=--perf-prof` (V8
+writes a jitdump with every code object's address, name and bytes) and
+writes `OUT/jit/` and `OUT/window.json`; `OUT` must be outside the
+repository (≈ 400 MB for 75 s). `wasm-hot.mjs` maps the samples to the
+jitdump's code objects, ranks the wasm functions by self time and
+disassembles the hottest instructions; region functions are named
+`r<id>_f<entry PC>` once the region modules carry a name section. On the
+Spark, perf needs `kernel.perf_event_paranoid <= 2` for the bench user.
+
 ## Freeze probes
 
 During the measured window the timeline is drained every second. When it
