@@ -15,10 +15,10 @@ import { compareFrames, diffImage, identical } from "./lib/image-diff.mjs";
 import { decodePadRow, decodeRows, hex } from "./lib/markers.mjs";
 import { captureSourceOk, captureSupported, confirmationItems, expandEnv, expandMatrix, forCrossRenderer, matrixMarkdown, PRESETS, resolveQuery, runFlags, summarizeMatrix, summarizeRun } from "./lib/matrix.mjs";
 import { runChecks } from "./lib/correctness.mjs";
-import { browserInfo, isOverloaded, waitForLoad } from "./lib/env.mjs";
+import { browserInfo, calmLock, isOverloaded, waitForLoad } from "./lib/env.mjs";
 import { createFreezeWatch, probeWorker } from "./lib/freeze-probe.mjs";
 import { acquirePerfLock } from "./lib/perf-lock.mjs";
-import { correctnessGate, crossCommitGate, decide, infraCrashGate, findingsGate, gateMarkdown, mergeGates, perfReport, runsByCell } from "./lib/gate.mjs";
+import { correctnessGate, crossCommitGate, expectedFailures, decide, infraCrashGate, findingsGate, gateMarkdown, mergeGates, perfReport, runsByCell } from "./lib/gate.mjs";
 import { renderChecks, renderVsBaseline } from "./lib/render-check.mjs";
 import { IDENTITY_FILE } from "./lib/server.mjs";
 import { mergeTimeline } from "./lib/timeline.mjs";
@@ -121,15 +121,16 @@ async function withServer(values, fn, tree = REPO_ROOT) {
 }
 
 // ---------------------------------------------------------------- measure
+// The perf lock of the ab campaign under way (calmLock), null outside one.
+let abLock = null;
+
 // One run: boot, play steps, warm up, then over the measured window drain
 // the complete timeline, sample the counters the timeline lacks, and finish
 // with the exact capture the render check uses.
 async function measureOne(server, values, { iso, query, label, warmup, secs, shotEvery, dir, steps, game = {}, spec = {}, statePath = null }) {
-  const loadGate = await waitForLoad({
-    maxLoad: Number(spec.maxLoad),
-    waitSec: Number(spec.loadWaitSec ?? 60),
-    log: (m) => console.log(`[harness] ${label}: ${m}`)
-  });
+  // Under ab's perf lock, the load is never waited for with the lock held.
+  const gate = { maxLoad: Number(spec.maxLoad), waitSec: Number(spec.loadWaitSec ?? 60), log: (m) => console.log(`[harness] ${label}: ${m}`) };
+  const loadGate = abLock ? await abLock.waitCalmUnlocked(gate) : await waitForLoad(gate);
   const routes = statePath ? { "**/__harness_state.sav": statePath } : {};
   const session = await openSession({ base: server.base, server, query, iso, display: displayOf(values), keepProfile: values["keep-profiles"], routes });
   try {
@@ -733,7 +734,8 @@ function gateFromDirs(baseDir, candDir, { accept = [], known = [] } = {}) {
   const read = (d) => JSON.parse(readFileSync(path.join(d, "summary.json"), "utf8"));
   const optional = (d, f) => (existsSync(path.join(d, f)) ? JSON.parse(readFileSync(path.join(d, f), "utf8")) : null);
   const base = read(baseDir), cand = read(candDir);
-  const gates = [correctnessGate(base.cells, cand.cells), infraCrashGate(base.results, cand.results), crossCommitGate(renderVsBaseline(base.results, cand.results, { accept, known: [...knownFailures(), ...known] }))];
+  const allKnown = [...knownFailures(), ...known];
+  const gates = [correctnessGate(base.cells, cand.cells, { expected: expectedFailures(allKnown) }), infraCrashGate(base.results, cand.results), crossCommitGate(renderVsBaseline(base.results, cand.results, { accept, known: allKnown }))];
   for (const [name, file, pick] of [["fuzz", "fuzz.json", (r) => r.results.flatMap((x) => x.findings.map((f) => ({ ...f, iso: x.iso })))], ["pads", "pads.json", (r) => padFindings(r)]]) {
     const b = optional(baseDir, file), c = optional(candDir, file);
     if (b || c) gates.push(findingsGate(name, b ? pick(b) : [], c ? pick(c) : null));
@@ -761,11 +763,16 @@ export async function abCompare({ spec, specDir, values, dir, baseline, candidat
   const plan = expandMatrix(spec);
   // ab measures speed (the performance report): one campaign at a time on
   // this machine, under the shared perf lock (PROGRAM.md).
-  const releaseLock = await acquirePerfLock({ name: `harness ab ${spec.name ?? "matrix"} (${REPO_ROOT})`, waitSec: Number(values["lock-wait"] ?? 1800), log: (m) => console.log(`[harness] ${m}`) });
+  // A calm machine first, and the load never waited for under the lock
+  // (calmLock; each cell's gate goes through abLock).
+  const lockWait = Number(values["lock-wait"] ?? 1800);
+  const log = (m) => console.log(`[harness] ${m}`);
+  abLock = await calmLock({ maxLoad: Number(spec.maxLoad), calmWait: lockWait, log: (m) => log(`before the lock: ${m}`), acquire: () => acquirePerfLock({ name: `harness ab ${spec.name ?? "matrix"} (${REPO_ROOT})`, waitSec: lockWait, log }), retakeOnGiveUp: true });
   try {
     return await abCompareLocked({ spec, specDir, values, dir, baseline, candidate, accept, known, plan });
   } finally {
-    releaseLock();
+    abLock.release();
+    abLock = null;
   }
 }
 

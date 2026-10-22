@@ -25,7 +25,7 @@
       "commit": "01e0577914a75a2569c846778c2f93aa8e6feddd"
     }
   },
-  "patchSeriesSha256": "81c01b8adaba9da4be271d02fa5fccc0c72cdcca291e82c9e5856189a8848613",
+  "patchSeriesSha256": "1beba97ef250efb2170fc41bcdfc0026dfb48295290895d2d9c7623ccbc5266c",
   "patches": [
     {
       "order": 1,
@@ -639,12 +639,44 @@
       "order": 77,
       "cwd": ".",
       "hashMode": "lf-normalized",
+      "path": "patches/dolphin-wasm/snapshot/0084-region-position-independent.patch",
+      "size": 17824,
+      "sha256": "49dcf8137b25d3195d9ee94abbe8cb73d7acc0014d84c751b78fd309c56fb6cb"
+    },
+    {
+      "order": 78,
+      "cwd": ".",
+      "hashMode": "lf-normalized",
+      "path": "patches/dolphin-wasm/snapshot/0085-region-recheck-after-invalidation.patch",
+      "size": 7002,
+      "sha256": "3aee58f9d6aa911e70b8af1982c6b25fdaf48bdb2e40ef362717be3589125199"
+    },
+    {
+      "order": 79,
+      "cwd": ".",
+      "hashMode": "lf-normalized",
+      "path": "patches/dolphin-wasm/snapshot/0087-native-ps-sum-neg-res.patch",
+      "size": 12319,
+      "sha256": "bb67b5219c0a94e39beb3a2e81b5d4f1af7643e6d1428374f0ca9c851d9749fb"
+    },
+    {
+      "order": 80,
+      "cwd": ".",
+      "hashMode": "lf-normalized",
+      "path": "patches/dolphin-wasm/snapshot/0088-region-idle-loops-outside.patch",
+      "size": 2762,
+      "sha256": "15c7127637fa3550e9a8d7d6850afb80f53548d7536a5252ed75e416bebab9d0"
+    },
+    {
+      "order": 81,
+      "cwd": ".",
+      "hashMode": "lf-normalized",
       "path": "patches/dolphin-wasm/snapshot/0091-no-wasm-code-under-mmu.patch",
       "size": 3471,
       "sha256": "d169775dc85c7e756561439fb1da2f749d3a774f0abd2b0dc0116017ed67a46d"
     },
     {
-      "order": 78,
+      "order": 82,
       "cwd": ".",
       "hashMode": "lf-normalized",
       "path": "patches/dolphin-wasm/snapshot/0094-present-sleep-until-on-video-thread.patch",
@@ -652,7 +684,55 @@
       "sha256": "77e1d2e8f8e1a5d4ec982c9488bde41ef3726c68aed4be8d04cb415324673252"
     },
     {
-      "order": 79,
+      "order": 83,
+      "cwd": ".",
+      "hashMode": "lf-normalized",
+      "path": "patches/dolphin-wasm/snapshot/0095-rumble-hook.patch",
+      "size": 1018,
+      "sha256": "833790160fc3f2b929c5c914c91f257a30e52eb4f714a2f8af64d1ad4ac4273f"
+    },
+    {
+      "order": 84,
+      "cwd": ".",
+      "hashMode": "lf-normalized",
+      "path": "patches/dolphin-wasm/snapshot/0097-embed-filtered-gamesettings.patch",
+      "size": 975,
+      "sha256": "6726edf3d4ff8937f77085e593020d9f351444e0b02d4c75e2cdea510fefc5a0"
+    },
+    {
+      "order": 85,
+      "cwd": ".",
+      "hashMode": "lf-normalized",
+      "path": "patches/dolphin-wasm/snapshot/0098-gpu-thread-spin-budget.patch",
+      "size": 4435,
+      "sha256": "91d1793c85456481cd34c58e28e02d379868687bead56dffb62b85c4f5118abd"
+    },
+    {
+      "order": 86,
+      "cwd": ".",
+      "hashMode": "lf-normalized",
+      "path": "patches/dolphin-wasm/snapshot/0099-ax-hle-timing.patch",
+      "size": 3424,
+      "sha256": "fcf883f10294f89b4660891765bba842259213b7ebebbf80e6815cb0b083f6b5"
+    },
+    {
+      "order": 87,
+      "cwd": ".",
+      "hashMode": "lf-normalized",
+      "path": "patches/dolphin-wasm/snapshot/0102-region-chaining.patch",
+      "size": 11738,
+      "sha256": "7938d117b7a9eee9df929d52ceaaebfd5f41af2e463b933b89e9ed25126adb27"
+    },
+    {
+      "order": 88,
+      "cwd": ".",
+      "hashMode": "lf-normalized",
+      "path": "patches/dolphin-wasm/snapshot/0103-fma-ctz-as-clz.patch",
+      "size": 1581,
+      "sha256": "66260aea20f5cacb8578da119dfe5cd2606f30f6bcd5bcb040ec142a3393f55a"
+    },
+    {
+      "order": 89,
       "cwd": "Externals/SFML/SFML",
       "hashMode": "lf-normalized",
       "path": "patches/dolphin-wasm/submodules/0001-sfml-emscripten-config.patch",
@@ -660,7 +740,7 @@
       "sha256": "f82197a21fe982ad83f6ee7bbf5a03839b1cebd4d64da3eab11263842bf61d89"
     },
     {
-      "order": 80,
+      "order": 90,
       "cwd": "Externals/xxhash/xxHash",
       "hashMode": "lf-normalized",
       "path": "patches/dolphin-wasm/submodules/0002-xxhash-wasm-simd-scalar.patch",

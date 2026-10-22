@@ -27,7 +27,7 @@ import { pathToFileURL } from "node:url";
 import { parseArgs } from "node:util";
 
 import { bootIso, ensureServer, launchChrome, readCoreProgress, readTimeline, REPO_ROOT, workerRequest } from "../lib/browser.mjs";
-import { waitForLoad } from "../lib/env.mjs";
+import { calmLock } from "../lib/env.mjs";
 import { PRESETS } from "../lib/matrix.mjs";
 import { claim } from "../lib/ownership.mjs";
 import { acquirePerfLock } from "../lib/perf-lock.mjs";
@@ -109,14 +109,19 @@ async function main() {
 
   // --no-lock: a plumbing check in a CORRECTION slot; its numbers are not
   // a measure and kpi-report ignores them.
-  const releaseLock = values["no-lock"] ? () => {} : await acquirePerfLock({ name: `harness first-launch (${REPO_ROOT})`, waitSec: num(values, "lock-wait", { min: 0 }), log });
+  // A calm machine before the lock, and never waited for under it (calmLock).
+  const lockWait = num(values, "lock-wait", { min: 0 });
+  const lock = await calmLock({
+    maxLoad, calmWait: lockWait, log: (m) => log(`before the lock: ${m}`),
+    acquire: values["no-lock"] ? null : () => acquirePerfLock({ name: `harness first-launch (${REPO_ROOT})`, waitSec: lockWait, log })
+  });
   const outDir = probeOutDir("first-launch", iso, values.out);
   const server = await ensureServer({ port, root: REPO_ROOT });
   const records = [];
   let na = null;
   try {
     for (let run = 1; run <= runs && !na; run += 1) {
-      const loadGate = await waitForLoad({ maxLoad, waitSec: num(values, "load-wait", { min: 0 }), log });
+      const loadGate = await lock.waitCalmUnlocked({ waitSec: num(values, "load-wait", { min: 0 }), log });
       const profileDir = mkdtempSync(path.join(os.tmpdir(), "gc-harness-first-launch-"));
       const releaseProfile = claim(profileDir, REPO_ROOT, "chrome-profile");
       const record = { run, loadGate };
@@ -141,7 +146,7 @@ async function main() {
     }
   } finally {
     await server.stop();
-    releaseLock();
+    lock.release();
   }
   const p7 = na ? null : summarizeP7(records);
   const summary = {

@@ -16,6 +16,7 @@
 #include <memory>
 #include <span>
 #include <string>
+#include <string_view>
 #include <vector>
 
 #include "AudioCommon/AudioCommon.h"
@@ -33,6 +34,7 @@
 #include "Core/Config/GraphicsSettings.h"
 #include "Core/Config/MainSettings.h"
 #include "Core/ConfigLoaders/BaseConfigLoader.h"
+#include "Core/ConfigLoaders/GameConfigLoader.h"
 #include "Core/ConfigManager.h"
 #include "Core/HW/SI/SI_Device.h"
 #include "Core/Core.h"
@@ -768,6 +770,12 @@ void EnsureRuntime()
   if (s_video_backend == "WebGPU")
     Config::SetBase(Config::GFX_HACK_SKIP_DUPLICATE_XFBS, false);
   Config::SetBase(Config::GFX_HACK_COPY_EFB_SCALED, false);
+  // ?efbaccess=1 (Module['dolphinEfbAccess']): CPU reads and writes of the
+  // EFB, off by default as in Dolphin; upstream turns them on per game
+  // (GameINI), which this build does not ship yet.
+  const bool efb_access = EM_ASM_INT({ return (typeof Module !== 'undefined' &&
+                                               Module['dolphinEfbAccess']) ? 1 : 0; }) != 0;
+  Config::SetBase(Config::GFX_HACK_EFB_ACCESS_ENABLE, efb_access);
   // Fill the canvas with the XFB, as the software presenter does. Dolphin's
   // default analog aspect pillarboxes a 640-wide XFB to ~583 pixels, so the
   // hardware path showed every game narrower than the software one.
@@ -1025,6 +1033,39 @@ int SetCpuThread(int enabled)
 
   s_cpu_thread = enabled != 0;
   return 1;
+}
+
+// Tests (patch 0097): the value Dolphin's game config gives an allowlisted
+// setting (tools/gamesettings-allowlist.json) for a disc ID and revision from
+// the INIs under /dolphin-sys/GameSettings, as the game's boot reads it: MMU
+// (System::Initialize, IsMMUMode) and SafeTextureCacheColorSamples; booleans
+// as 0/1. The global game layer is added for the read and removed after; -1
+// when a game's layer is already there (a game is running), which this must
+// not replace, -2 for a setting it does not know.
+#ifdef __EMSCRIPTEN__
+EMSCRIPTEN_KEEPALIVE
+#endif
+int GameConfigValueForTest(const char* game_id, int revision, const char* setting)
+{
+  const std::string_view name = setting;
+  if (name != "MMU" && name != "SafeTextureCacheColorSamples")
+    return -2;
+  if (Config::GetLayer(Config::LayerType::GlobalGame))
+    return -1;
+  Config::AddLayer(ConfigLoaders::GenerateGlobalGameConfigLoader(game_id, static_cast<u16>(revision)));
+  const int value = name == "MMU" ? (Config::Get(Config::MAIN_MMU) ? 1 : 0) :
+                                    Config::Get(Config::GFX_SAFE_TEXTURE_CACHE_COLOR_SAMPLES);
+  Config::RemoveLayer(Config::LayerType::GlobalGame);
+  return value;
+}
+
+// The MMU only (the first 0097 test; kept: the ABI manifest lists it).
+#ifdef __EMSCRIPTEN__
+EMSCRIPTEN_KEEPALIVE
+#endif
+int GameConfigMmuForTest(const char* game_id, int revision)
+{
+  return GameConfigValueForTest(game_id, revision, "MMU");
 }
 
 // Tests: `count` alerts through the relay, all the same text when

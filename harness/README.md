@@ -132,6 +132,40 @@ node harness/probes/race-perf.mjs --iso ../roms/<disc>.iso --state ../measures/h
   the last being the place in the scene whatever the speed, so two runs or
   two sides can be lined up; over 200 the longest are kept, in time order,
   with `count`.
+- `--display`: what the screen showed, not what the worker submitted
+  (research/deep-frame-pacing.md §3.1: Chrome keeps only the last picture
+  submitted between two BeginFrames). The worker counts its presents per
+  BeginFrame (one rAF per BeginFrame, `src/wgpu-display-counter.js`, on
+  only when asked). Each run gets `display` (`lib/timeline.mjs`
+  `displayStats`): `vsyncMs` (median BeginFrame interval: 16.7 ms in
+  headless Chrome, whatever the real screen), `displayedPerSecond`,
+  `submittedPerSecond`, `dropped` / `droppedPerMin`, `displayedP50/P95/P99`
+  (intervals between pictures shown), `judderPct` (shown intervals that are
+  not the dominant number of vsyncs: a steady 30 fps is not judder),
+  `offOneVsyncPct`, `noUpdatePct`. Per side: `cold.displayedPerSecond`,
+  `displayedP95`, `droppedPerMin`, `judderPct`, `offOneVsyncPct`.
+- `--unique-frames secs`: unique images, in a window of its own after the
+  speed window (its GPU readbacks never weigh on the speed). At each WebGPU
+  present the worker reads back 8 full rows of the presented rectangle,
+  hashes them and compares with the previous present
+  (`src/harness-unique-frames.js`, worker message `validationUniqueFrames`,
+  off otherwise). Each run gets `presentsPerSecond` (speed window),
+  `uniqueFrames` (`uniqueShare`: presents showing a new image; `skipped`
+  past 6 readbacks in flight, `errors`) and `uniqueFpsEstimate` = the speed
+  window's presents/s × that share; `cold.uniqueShare` and
+  `cold.uniqueFpsEstimate` per side. WebGPU presents only (`video=wgpu`).
+- `--mem-stats` (patch 0104): guest memory accesses per instruction, read in
+  the stats window after the speed window (with `--region-sample`, the same
+  window). `summary.json` → `memAccess` (and `baselineMemAccess`):
+  `accessesPerInstruction` over the counted blocks, `coverage` (their share of
+  the window's cycles), loads/stores per instruction, `byKind`
+  (int/fp/psq load/store), `slowShare` (slow-path calls over all accesses),
+  and, with aot=1, the region part estimated apart
+  (`regionAccessesPerInstructionEstimated`, `withRegionsEstimated`), never
+  merged into the counted figure; `flagsPerInstruction` (CR writes, CR
+  reads, XER[CA] writes and reads per instruction, counted blocks, 0104 at
+  4c6122e and later). A core without the export gives
+  `memAccess: null` and `memAccessWhy`.
 - `--chrome-args "--flag …"` adds Chromium flags on both sides;
   `--baseline-chrome-args` replaces them on the baseline side, so one tree is
   compared with itself under two Chromium configurations (e.g.
@@ -290,6 +324,57 @@ per commit, so `rec` and `wgpu` are listed `report-only` for renderVsBaseline
 (kept for perf and the other checks); `rec-single` and `wgpu-single` run on the
 fixed clock and carry the exact render comparison.
 
+## AX HLE share of the CPU thread
+
+`harness/probes/ax-hle.mjs` measures how much of the CPU thread goes into the
+AX HLE audio synthesis, which runs a whole command list synchronously inside
+the DSP mailbox MMIO write (research/deep-thread-budget.md §2). It reads the
+core counters of patch 0099 (`DolphinWeb_AxHleStats`, layout in
+`lib/ax-hle-stats.mjs`, worker message `validationReadAxHleStats`), off until
+the probe resets them:
+
+```
+node harness/probes/ax-hle.mjs --iso ../roms/<disc>.iso --port 8092 \
+  (--state ../measures/harness/race-after.sav | --steps harness/probes/local-menu-steps.json) \
+  [--query "..."] [--runs 3] [--warmup 20] [--secs 20] [--max-load 6]
+```
+
+Per run: the scene (a savestate, or input steps such as the loaded menu of
+`local-menu-steps.json`), `--warmup`, then a window of `--secs` with the
+counters on (two clock reads per mail, a few hundred per second).
+`summary.json` gives `shareOfWindow` (host time in the mail handling over the
+core's window), `shareOfActive` (the same over the CPU thread's occupancy,
+the busiest renderer thread sampled in the window, so a capped scene that
+sleeps in the throttle is not understated), `msPerSecond`, `mailsPerSecond`,
+`meanMailUs` and `mailMaxMs`, medians of the good runs. Calm machine first,
+then the perf lock, as race-perf.
+
+## Profiling the generated wasm (regions)
+
+Where the CPU thread's cycles go inside the generated code
+(research/deep-region-profiling.md). One dedicated session, never a speed
+measurement (jitdump on, no sandbox, sampling), on a perf lock only so it
+does not overlap anyone's window:
+
+```
+# macOS: samply wraps the run, the window is filtered afterwards
+samply record --save-only -r 2000 -o OUT/profile.json.gz -- \
+  node harness/probes/profile.mjs --iso ../roms/<disc>.iso --out OUT [--query ...] [--warmup 40] [--secs 20]
+node harness/probes/wasm-hot.mjs --jitdump OUT/jit/jit-<pid>.dump --samply OUT/profile.json.gz \
+  --window OUT/window.json --top 30 --insns 12 --annotate 5 --out OUT/asm
+# Spark (perf attached to the renderer for the window, FIFO queue, lane a)
+ssh spark 'cd ~/salon-bench/<tree> && setsid nohup sh harness/remote/spark-profile.sh ~/salon-bench/profiles/<name> ~/salon-bench/roms/<disc> >/dev/null 2>&1 &'
+```
+
+`profile.mjs` runs Chrome with `--no-sandbox --js-flags=--perf-prof` (V8
+writes a jitdump with every code object's address, name and bytes) and
+writes `OUT/jit/` and `OUT/window.json`; `OUT` must be outside the
+repository (≈ 400 MB for 75 s). `wasm-hot.mjs` maps the samples to the
+jitdump's code objects, ranks the wasm functions by self time and
+disassembles the hottest instructions; region functions are named
+`r<id>_f<entry PC>` once the region modules carry a name section. On the
+Spark, perf needs `kernel.perf_event_paranoid <= 2` for the bench user.
+
 ## Freeze probes
 
 During the measured window the timeline is drained every second. When it
@@ -426,6 +511,23 @@ Per (game, config) cell, the **correctness checks** (`lib/correctness.mjs`):
 Each check of each run is pass, fail or **unjudged** (with the reason: no VI
 timeline in this core, capture refused for a hardware renderer, scripted
 inputs without a savestate, …). Machine load changes none of them.
+
+**Expected failures.** A test added before its implementation fails on main
+by design. List it in `harness/known-failures.json` with `"mode":
+"expected-fail"`, its `cell` (`game/config`), `check` (crash, errors,
+coreFreeze, render or audio), `reason`, `until` (the follow-up that fixes it)
+and `detail`, a regular expression the failure's detail must match (how it is
+expected to fail). That failure is **XFAIL**, shown with the reason and never
+blocking; any other failure of the cell, and a blank picture always, stays a
+regression. A pass is **XPASS** and blocks, so the PR that fixes it also
+removes the entry. An entry for a game the run has but a cell it does not is
+stale and blocks; other matrices do not judge it.
+
+The list is read from the candidate's tree, so a PR can break a check and
+declare it expected-fail in the same change. The gate therefore marks every
+XFAIL whose baseline passes the check (a new entry, or a feature main cannot
+exercise) with a warning (⚠): the reviewer must find its justification in
+the PR.
 
 **`harness/run ab <spec>`** exports the served files of `--baseline-ref`
 (default `origin/main`) with `git archive`, runs the matrix (and the spec's

@@ -1,0 +1,24 @@
+diff --git a/Source/Core/Core/PowerPC/CachedInterpreter/CachedInterpreter.cpp b/Source/Core/Core/PowerPC/CachedInterpreter/CachedInterpreter.cpp
+--- a/Source/Core/Core/PowerPC/CachedInterpreter/CachedInterpreter.cpp
++++ b/Source/Core/Core/PowerPC/CachedInterpreter/CachedInterpreter.cpp
+@@ -5047,8 +5047,18 @@ void EmitExactMulAddSub(std::vector<u8>& body, const WasmStateLayout& layout,
+   // exact); a zero a or frC gives an exact signed zero. Then a*c + b rounds
+   // once as p + b. Local 2 first: a denormal frC rounds to zero above, its
+   // product does not.
+-  get(a); op(0xbd); EmitI64Const(body, 1ull << 52); op(0x84); op(0x7a);  // i64.ctz
+-  get(c); op(0xbd); EmitI64Const(body, 1ull << 52); op(0x84); op(0x7a);
++  // ctz(x) as 63 - clz(x & -x) (0103): without FEAT_CSSC (Apple M4, the
++  // Spark's GB10) TurboFan compiles i64.ctz into a call to C. x has bit 52
++  // set, never zero, so both give the same 0..52. i64 local 4 is a scratch.
++  const auto trailing_zeros = [&](u32 v) {
++    EmitI64Const(body, 63);
++    get(v); op(0xbd); EmitI64Const(body, 1ull << 52); op(0x84);
++    op(0x22); EmitU32Leb(body, 4);                     // local.tee 4
++    EmitI64Const(body, 0); EmitLocalGet(body, 4); op(0x7d);  // -x
++    op(0x83); op(0x79); op(0x7d);                      // and, clz, 63 - clz
++  };
++  trailing_zeros(a);
++  trailing_zeros(c);
+   op(0x7c); EmitI64Const(body, 53); op(0x59);                  // i64.ge_s
+   get(p); op(ABS); f64const(0x1p-1022); op(GE); op(AND);
+   get(p); op(ABS); f64const(std::numeric_limits<double>::infinity()); op(LT); op(AND);
