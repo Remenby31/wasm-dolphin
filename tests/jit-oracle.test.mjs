@@ -522,3 +522,57 @@ test("the state layout export gives distinct, aligned pc, npc and downcount offs
   for (const offset of [pc, npc, downcount]) assert.equal(offset % 4, 0);
   assert.notEqual(downcount, pc);
 });
+
+// 0087: ps_sum0/1, ps_res, fres and ps_neg/mr/nabs/abs compiled into the
+// block (they used to cut it, and a region, at ~240k exits/s on the disc).
+// Inline when the operands keep every result a zero or normal single and
+// FPSCR untouched but FPRF; zero, denormal, inf, NaN, the extreme exponents
+// of the fres table and enabled exceptions take the helper. Bit 1 << 29 sends
+// them back to the interpreter.
+const NATIVE_PS_OFF = 1 << 29;
+const A87 = (op, t, a, b, c, xo) => ((op << 26) | (t << 21) | (a << 16) | (b << 11) | (c << 6) | (xo << 1)) >>> 0;
+const X87 = (op, t, b, xo) => ((op << 26) | (t << 21) | (b << 11) | (xo << 1)) >>> 0;
+const NATIVE_PS = {
+  ps_sum0: A87(4, 1, 2, 3, 4, 10), ps_sum1: A87(4, 1, 2, 3, 4, 11), ps_res: A87(4, 1, 0, 3, 0, 24),
+  fres: A87(59, 1, 0, 3, 0, 24), ps_neg: X87(4, 1, 3, 40), ps_mr: X87(4, 1, 3, 72),
+  ps_nabs: X87(4, 1, 3, 136), ps_abs: X87(4, 1, 3, 264)
+};
+const nativePsSkip = skip || (core.run(Uint32Array.from([NATIVE_PS.ps_neg, 0x4e800020]), randomState(makeRng(1)), SHORT_PREFIX_MASK).code === 0
+  ? false : "the core predates 0087 (CI builds this branch's core)");
+
+// [lo, hi] doubles: signed zeros, denormals, the fres table's exponent edges
+// (894, 895, 1148, 1149), the single range's edges, inf, quiet and signalling
+// NaN, and doubles that are not singles.
+function nativePsOperand(r) {
+  const specials = [[0, 0], [0, 0x80000000], [1, 0], [0, 0x800fffff], [0, 894 << 20], [0, 895 << 20],
+    [0xffffffff, (894 << 20) | 0xfffff], [0, 1148 << 20], [0xffffffff, (1148 << 20) | 0xfffff], [0, 1149 << 20],
+    [0, 0x38100000], [0xe0000000, 0x47efffff], [0xf0000000, 0x47efffff], [0, 0x7ff00000], [0, 0xfff00000],
+    [0, 0x7ff80000], [1, 0x7ff00000], [0x12345678, 0x7ff40000], [0x10000000, 0x3ff00000], [0x00000001, 0x3ff00000]];
+  if (r.below(3) === 0) return r.pick(specials);
+  const sign = r.below(2) ? 0x80000000 : 0;
+  const exp = r.below(4) === 0 ? r.below(2047) : 896 + r.below(252);
+  const lo = r.below(2) ? (r.next() & 0xe0000000) >>> 0 : r.next();
+  return [lo, (sign | (exp << 20) | (r.next() & 0xfffff)) >>> 0];
+}
+
+test("0087: ps_sum0/1, ps_res, fres, ps_neg/mr/nabs/abs compiled as the interpreter computes them", { skip: nativePsSkip }, () => {
+  const r = makeRng(0x87087);
+  const fpscrs = [0, 0x4 /* NI */, 0x80 | 0x10 /* VE | ZE */, 0x2 /* RN */];
+  let compiled = 0, runs = 0;
+  for (const [name, word] of Object.entries(NATIVE_PS)) {
+    for (let k = 0; k < 300; k++) {
+      const state = randomState(r);
+      state[36] = r.pick(fpscrs);
+      state[37] = 0x00002032;
+      for (const fr of [2, 3, 4]) state.set([...nativePsOperand(r), ...nativePsOperand(r)], 48 + fr * 4);
+      const program = Uint32Array.from([word, 0x4e800020]);
+      for (const mask of [SHORT_PREFIX_MASK, SHORT_PREFIX_MASK | REGALLOC_OFF, SHORT_PREFIX_MASK | NATIVE_PS_OFF]) {
+        const result = core.run(program, state, mask);
+        assertSame(result, `${name} ${Array.from(state.slice(56, 68), hex).join(" ")} fpscr ${hex(state[36])} mask ${hex(mask)}`);
+        runs += 1;
+        if (result.code === 0 && !(mask & NATIVE_PS_OFF)) compiled += 1;
+      }
+    }
+  }
+  assert.ok(compiled > runs / 2, `too few compiled blocks (${compiled} of ${runs})`);
+});

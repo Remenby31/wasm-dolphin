@@ -80,17 +80,35 @@ export class AotOptimizer extends EventTarget {
     this.cancelled = false;
     // Keys whose stored module the core refused (translated for another heap
     // layout): the next run translates them again and overwrites the entry.
-    // Once per key and session: a second refusal leaves it to the JIT.
+    // Once per key and session: a second refusal leaves it to the JIT. And
+    // `maxAttempts` launches per key at most (counted with the attempts, as
+    // "retranslate:<key>"): a module the core kept refusing after its
+    // retranslation is not translated again at every launch.
     this.stale = new Set();
     this.restaled = new Set();
+    this.uncounted = new Set(); // marked before the attempts were read
   }
 
   // A stored module the core refused: translated again, live, by the current
-  // run or the next one. False when the key was already retranslated.
+  // run or the next one. False when the key was already retranslated this
+  // session, `maxAttempts` launches already, or is not a module of the plan.
+  // Synchronous: a run that is ending sees the key (no window between the
+  // mark and the check that starts one more run).
   markStale(key) {
     if (this.restaled.has(key) || !this.regions?.some((u) => u.key === key)) return false;
     this.restaled.add(key);
+    if (this.attempts && !this.countRetranslation(key)) return false;
+    if (!this.attempts) this.uncounted.add(key); // counted when the run reads them
     this.stale.add(key);
+    return true;
+  }
+
+  countRetranslation(key) {
+    const counter = `retranslate:${key}`;
+    const n = this.attempts.get(counter) ?? 0;
+    if (n >= this.maxAttempts) return false;
+    this.attempts.set(counter, n + 1);
+    void this.saveAttempts();
     return true;
   }
 
@@ -302,6 +320,8 @@ export class AotOptimizer extends EventTarget {
       await this.getPlan();
       const session = await this.openSession();
       await this.loadAttempts();
+      for (const key of this.uncounted) if (!this.countRetranslation(key)) this.stale.delete(key);
+      this.uncounted.clear();
       // resume = false: everything again (stored modules are overwritten).
       const doneSet = resume ? await session.has(this.regions.map((u) => u.key)) : new Set();
       for (const key of this.stale) doneSet.delete(key);

@@ -3,6 +3,7 @@ import { spawnSync } from "node:child_process";
 import { homedir } from "node:os";
 import { delimiter, dirname, resolve } from "node:path";
 import { sha256File, verifyWasmToolchain } from "./wasm-toolchain.mjs";
+import { buildGameSettings } from "./gamesettings-filter.mjs";
 import { rustRemapFlags as remapFlags, scmGitShim, sourcePathFlags as pathFlags, vendoredCargoArgs } from "./toolchain/path-maps.mjs";
 
 const root = process.cwd();
@@ -167,6 +168,14 @@ const wasmCompileFlags =
   `-DDOLPHIN_WEB_DET_TRACE=${detTrace} ` +
   sourcePathFlags.join(" ");
 const wasmDebugProbeFlags = "-O0 -fno-lto";
+// Dolphin's per-game settings (patch 0097): the GameCube discs' INIs with
+// only the allowlisted keys (tools/gamesettings-allowlist.json), embedded at
+// /dolphin-sys/GameSettings where GameConfigLoader looks for them.
+const gameSettingsDir = resolve(buildDir, "gamesettings");
+const gameSettingsFiles = buildGameSettings(resolve(sourceDir, "Data/Sys/GameSettings"), gameSettingsDir);
+if (!gameSettingsFiles.length) throw new Error("gamesettings: no disc file kept; is vendor/dolphin/Data/Sys/GameSettings there?");
+console.log(`gamesettings: ${gameSettingsFiles.length} disc files with allowlisted keys`);
+
 const cmakeArgs = [
   cmake,
   "-S",
@@ -176,6 +185,7 @@ const cmakeArgs = [
   "-GNinja",
   `-DCMAKE_MAKE_PROGRAM=${ninja}`,
   "-DCMAKE_BUILD_TYPE=Release",
+  `-DDOLPHIN_WEB_GAMESETTINGS_DIR=${gameSettingsDir}`,
   "-DCMAKE_TRY_COMPILE_CONFIGURATION=Debug",
   "-DCMAKE_EXPORT_COMPILE_COMMANDS=ON",
   "-DUSE_SYSTEM_LIBS=OFF",
