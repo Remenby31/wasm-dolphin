@@ -27,7 +27,22 @@ diff --git a/Source/Core/Core/CoreTiming.cpp b/Source/Core/Core/CoreTiming.cpp
 diff --git a/Source/Core/Core/PowerPC/CachedInterpreter/CachedInterpreter.cpp b/Source/Core/Core/PowerPC/CachedInterpreter/CachedInterpreter.cpp
 --- a/Source/Core/Core/PowerPC/CachedInterpreter/CachedInterpreter.cpp
 +++ b/Source/Core/Core/PowerPC/CachedInterpreter/CachedInterpreter.cpp
-@@ -9126,6 +9126,9 @@ void CachedInterpreter::Init()
+@@ -9119,6 +9119,14 @@ CachedInterpreter::CachedInterpreter(Core::System& system) : JitBase(system), m_
+ 
+ CachedInterpreter::~CachedInterpreter() = default;
+ 
++#ifdef __EMSCRIPTEN__
++namespace
++{
++// Patch 0107: the throttle sleep installs regions only while this core runs.
++extern std::atomic<bool> s_region_core_active;
++}  // namespace
++#endif
++
+ void CachedInterpreter::Init()
+ {
+ #if DOLPHIN_WEB_STATIC_EXIT_LINKS && DOLPHIN_WEB_STATIC_EXIT_LINK_STATS
+@@ -9126,6 +9134,9 @@ void CachedInterpreter::Init()
  #endif
  #line 7757
    RefreshConfig();
@@ -37,16 +52,7 @@ diff --git a/Source/Core/Core/PowerPC/CachedInterpreter/CachedInterpreter.cpp b/
  
    AllocCodeSpace(CODE_SIZE);
    ResetFreeMemoryRanges();
-@@ -9142,6 +9145,8 @@ void CachedInterpreter::Init()
- namespace
- {
- void ForgetAllRegions();
-+// Patch 0107: the throttle sleep installs regions only while this core runs.
-+extern std::atomic<bool> s_region_core_active;
- }
- 
- void CachedInterpreter::Shutdown()
-@@ -9151,6 +9156,7 @@ void CachedInterpreter::Shutdown()
+@@ -9151,6 +9162,7 @@ void CachedInterpreter::Shutdown()
  #endif
  #ifdef __EMSCRIPTEN__
    ForgetAllRegions();
@@ -54,7 +60,7 @@ diff --git a/Source/Core/Core/PowerPC/CachedInterpreter/CachedInterpreter.cpp b/
  #endif
  #line 7773
  #ifdef __EMSCRIPTEN__
-@@ -9414,6 +9420,9 @@ struct PendingRegion
+@@ -9414,6 +9426,9 @@ struct PendingRegion
    // a cached module to this session's before it queues it.
    u32 ram_base = 0;
    u32 l1_base = 0;
@@ -64,7 +70,7 @@ diff --git a/Source/Core/Core/PowerPC/CachedInterpreter/CachedInterpreter.cpp b/
  };
  std::mutex s_region_queue_mutex;
  std::vector<PendingRegion> s_region_queue;
-@@ -9437,9 +9446,28 @@ constexpr double REGION_BOOT_SLICE_MS = 8.0;
+@@ -9437,9 +9452,28 @@ constexpr double REGION_BOOT_SLICE_MS = 8.0;
  std::optional<std::chrono::steady_clock::time_point> s_region_service_start;
  // Past the boot a slice stops installing when the next module's estimated
  // cost would take it over this; estimate = size x the measured cost per byte
@@ -95,7 +101,7 @@ diff --git a/Source/Core/Core/PowerPC/CachedInterpreter/CachedInterpreter.cpp b/
  double s_region_boot_max_slice_ms = 0;  // published in the header's spare u32
  u32 s_region_install_fallbacks = 0;     // likewise
  
-@@ -9618,6 +9646,10 @@ void ForgetAllRegions()
+@@ -9618,6 +9652,10 @@ void ForgetAllRegions()
    std::fill(s_region_pages.begin(), s_region_pages.end(), 0);
    s_region_waiting.clear();
    s_region_service_start.reset();
@@ -106,7 +112,7 @@ diff --git a/Source/Core/Core/PowerPC/CachedInterpreter/CachedInterpreter.cpp b/
    std::lock_guard lock(s_region_queue_mutex);
    s_region_queue.clear();
    s_region_queue_nonempty.store(false, std::memory_order_release);
-@@ -9788,25 +9820,68 @@ bool TryInstallRegion(PendingRegion& pending, int ready_bits_ptr, double& spent_
+@@ -9788,25 +9826,68 @@ bool TryInstallRegion(PendingRegion& pending, int ready_bits_ptr, double& spent_
    return true;
  }
  
@@ -177,7 +183,7 @@ diff --git a/Source/Core/Core/PowerPC/CachedInterpreter/CachedInterpreter.cpp b/
    // Waiting regions whose module the worker has compiled (or that waited too
    // long) first: their compile is the cheap one.
    for (std::size_t i = 0; i < s_region_waiting.size();)
-@@ -9825,7 +9900,7 @@ void ServiceRegionInstalls()
+@@ -9825,7 +9906,7 @@ void ServiceRegionInstalls()
        }
        pending.repost = false;
        ++n;
@@ -186,7 +192,7 @@ diff --git a/Source/Core/Core/PowerPC/CachedInterpreter/CachedInterpreter.cpp b/
            TryInstallRegion(pending, ready_bits_ptr, spent_ms, InstallPath::First))
        {
          s_region_waiting[i] = std::move(s_region_waiting.back());
-@@ -9840,7 +9915,8 @@ void ServiceRegionInstalls()
+@@ -9840,7 +9921,8 @@ void ServiceRegionInstalls()
      const bool ready =
          s_wasm_jit_ready_bits[pending.slot].load(std::memory_order_acquire) != 0;
      const bool expired = now - pending.posted > s_region_ready_wait;
@@ -196,7 +202,7 @@ diff --git a/Source/Core/Core/PowerPC/CachedInterpreter/CachedInterpreter.cpp b/
      {
        ++i;
        continue;
-@@ -9852,7 +9928,7 @@ void ServiceRegionInstalls()
+@@ -9852,7 +9934,7 @@ void ServiceRegionInstalls()
      // Its own bytes, synchronously, unless the byte is still set (the request
      // path then clears the in-flight mark): a hit either way once answered.
      // Waited past a slice where the game may have reloaded its code.
@@ -205,7 +211,7 @@ diff --git a/Source/Core/Core/PowerPC/CachedInterpreter/CachedInterpreter.cpp b/
          TryInstallRegion(pending, ready && ready_bits_ptr ? ready_bits_ptr : 0, spent_ms,
                           answered ? InstallPath::Ready : InstallPath::Cold))
      {
-@@ -9871,11 +9947,14 @@ void ServiceRegionInstalls()
+@@ -9871,11 +9953,14 @@ void ServiceRegionInstalls()
        std::lock_guard lock(s_region_queue_mutex);
        if (s_region_queue.empty() || !room(s_region_queue.front().bytes.size()))
          break;
@@ -221,7 +227,7 @@ diff --git a/Source/Core/Core/PowerPC/CachedInterpreter/CachedInterpreter.cpp b/
        continue;
      // A module handed to this pthread before the boot is installed at once;
      // any other is posted to the compiler worker and waits for its byte.
-@@ -9884,6 +9963,22 @@ void ServiceRegionInstalls()
+@@ -9884,6 +9969,22 @@ void ServiceRegionInstalls()
                            InstallPath::First))
        s_region_waiting.push_back(std::move(pending));
    }
@@ -244,7 +250,7 @@ diff --git a/Source/Core/Core/PowerPC/CachedInterpreter/CachedInterpreter.cpp b/
    if (!boot)
      s_region_stats.install_max_slice_ms = std::max(s_region_stats.install_max_slice_ms, spent_ms);
    else
-@@ -10266,6 +10361,53 @@ extern "C" EMSCRIPTEN_KEEPALIVE void DolphinWeb_AotServiceRegionsForTest()
+@@ -10266,6 +10367,53 @@ extern "C" EMSCRIPTEN_KEEPALIVE void DolphinWeb_AotServiceRegionsForTest()
    ApplyRegionStatsRequest();
  }
  
