@@ -9,7 +9,7 @@ import path from "node:path";
 import test from "node:test";
 
 import { acquirePerfLock, lockIntegrity, queueDir, readLockOwner, ticketsAhead } from "../harness/lib/perf-lock.mjs";
-import { chromeArgsOf, num, pairedSpeedChange, sideOrder, withheldOnOverlap } from "../harness/probes/race-perf.mjs";
+import { chromeArgsOf, num, pairedSpeedChange, regionPipeline, sideOrder, withheldOnOverlap } from "../harness/probes/race-perf.mjs";
 import { stockChrome } from "../harness/lib/kpi.mjs";
 import { calmThenLock, loadGaveUp } from "../harness/lib/env.mjs";
 import { summarizePcSamples } from "../src/harness-pc-sampler.js";
@@ -426,4 +426,14 @@ test("race-perf: a change measured during a lock overlap is withheld", () => {
   const w = withheldOnOverlap(change, [{ at: "before run 3", why: "another living holder: x (pid 9)" }]);
   assert.equal(w.median, null);
   assert.match(w.withheld, /perf lock overlap: before run 3: another living holder/);
+});
+
+// 2026-10-22: a launch on a loaded machine ran without its region cache, every
+// module set aside by the engine for another heap layout before the core saw
+// it. The counters are read whatever the options, so the run says so.
+test("race-perf: the region pipeline counters of a stats reply", () => {
+  assert.deepEqual(regionPipeline({ layoutRefused: 143, heapPatched: 0, heapPatchedBytes: 0, heapPatchFailed: 0 }),
+    { layoutRefused: 143, heapPatched: 0, heapPatchedBytes: 0, heapPatchFailed: 0 });
+  assert.deepEqual(regionPipeline({ layoutRefused: 0 }), { layoutRefused: 0 }, "an engine before 0084: no heap counters");
+  assert.deepEqual(regionPipeline({}), {}, "an engine before 0078");
 });

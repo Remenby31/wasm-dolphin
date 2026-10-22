@@ -12,7 +12,12 @@
 //        --steps harness/probes/local-race-steps.json --profile DIR/profile --query "...&aot=1" --port N
 //   node harness/probes/aot-second-launch.mjs --seed-profile DIR/profile --iso disc.iso \
 //        --steps harness/probes/local-race-steps.json --query "...&aot=1" --port N [--runs 2] [--sec 45]
-//        [--min-frames 3000] [--cap-mb 6144] [--out dir]
+//        [--min-frames 3000] [--cap-mb 6144] [--out dir] [--heap-shift-mb 64]
+//
+// --heap-shift-mb N: N MiB taken from the core's heap before the boot
+// (validationEnableHarness heapShiftMb), so the emulated RAM sits elsewhere
+// than in the seed's session: a pass then also needs every cached region
+// patched for this heap (heapPatched > 0, 0084) and none refused for its layout.
 //
 // Same port as the seed: the cache, OPFS and IndexedDB are per origin. Each
 // run boots an APFS clone of the seeded profile, plays the steps, waits
@@ -44,7 +49,10 @@ const { values } = parseArgs({ options: {
   "seed-profile": { type: "string" }, iso: { type: "string" }, steps: { type: "string" }, query: { type: "string" },
   port: { type: "string", default: process.env.HARNESS_PORT || "8086" }, runs: { type: "string", default: "2" },
   sec: { type: "string", default: "45" }, "min-frames": { type: "string", default: "3000" },
-  "cap-mb": { type: "string", default: "6144" }, out: { type: "string" }
+  "cap-mb": { type: "string", default: "6144" }, out: { type: "string" },
+  // MiB taken from the core's heap before the boot: the RAM sits elsewhere
+  // than in the seed's session, so every cached region must be patched (0084).
+  "heap-shift-mb": { type: "string" }
 } });
 if (!values["seed-profile"] || !values.iso || !values.steps || !values.query) {
   console.error("usage: aot-second-launch.mjs --seed-profile DIR --iso disc.iso --steps s.json --query '...&aot=1' [--port N]");
@@ -99,12 +107,14 @@ async function launchOnce(profileDir) {
   try {
     await Promise.race([
       (async () => {
-        await bootIso(page, { url: `${server.base}?${values.query}`, iso: values.iso, timeoutMs: 120000 });
+        const heapShiftMb = Number(values["heap-shift-mb"] ?? 0);
+        await bootIso(page, { url: `${server.base}?${values.query}`, iso: values.iso, timeoutMs: 120000, ...(heapShiftMb > 0 ? { harness: { heapShiftMb } } : {}) });
         await runSteps(page, JSON.parse(readFileSync(values.steps, "utf8")));
         await page.waitForTimeout(Number(values.sec) * 1000);
         const r = await workerRequest(page, "validationReadJitRegionStats", {}, 10000).catch(() => null);
         result.regions = r?.bytes ? decodeRegionStats(r.bytes).diagnostics ?? null : null;
         result.layoutRefused = Number.isInteger(r?.layoutRefused) ? r.layoutRefused : null;
+        result.heapPatched = Number.isInteger(r?.heapPatched) ? r.heapPatched : null;
         result.aot = aotLaunchInfo(await workerRequest(page, "validationReadAotProgress", {}, 10000).catch(() => null));
       })(),
       (async () => { while (!stop) await new Promise((res) => setTimeout(res, 500)); throw new Error(`over ${values["cap-mb"]} MB`); })(),
@@ -143,12 +153,15 @@ for (let run = 1; run <= Number(values.runs); run += 1) {
     r.capped && `memory cap (${r.capped.totalMB} MB: ${JSON.stringify(r.capped.byType)})`,
     r.invalidReads > 0 && `${r.invalidReads} "Invalid read"`,
     frames < Number(values["min-frames"]) && `${frames} frames < ${values["min-frames"]}`,
-    !(fromCache > 0) && "no module loaded from the region cache (a first launch: seed, port, compiler version?)"
+    !(fromCache > 0) && "no module loaded from the region cache (a first launch: seed, port, compiler version?)",
+    // a forced heap shift: every region must have been patched, none refused
+    values["heap-shift-mb"] && !(r.heapPatched > 0) && `heap shifted but ${r.heapPatched ?? "no"} module patched`,
+    values["heap-shift-mb"] && r.layoutRefused > 0 && `heap shifted and ${r.layoutRefused} refused for their layout`
   ].filter(Boolean);
   const refusedLayout = !healthy.length && !(installed > 0) && r.layoutRefused > 0;
   const why = refusedLayout ? [] : [...healthy, ...(healthy.length || installed > 0 ? [] : [`no region installed${result_layout(r)}`])];
   const verdict = refusedLayout ? "refused-layout" : why.length ? "fail" : "pass";
-  log(`run ${run}: ${verdict === "fail" ? `FAIL (${why.join("; ")})` : verdict}; frames ${frames}, peak ${peak} MB, from cache ${fromCache}, regions ${JSON.stringify(r.regions && { installed, refused: r.regions.regionsRefused, layoutRefused: r.layoutRefused, dropped: r.regions.regionsDropped })}`);
+  log(`run ${run}: ${verdict === "fail" ? `FAIL (${why.join("; ")})` : verdict}; frames ${frames}, peak ${peak} MB, from cache ${fromCache}, regions ${JSON.stringify(r.regions && { installed, refused: r.regions.regionsRefused, layoutRefused: r.layoutRefused, heapPatched: r.heapPatched, dropped: r.regions.regionsDropped })}`);
   if (verdict === "fail") failed += 1;
   if (outDir) writeFileSync(path.join(outDir, `run${run}.json`), JSON.stringify({ ...r, frames, peak, fromCache, verdict, why }, null, 1));
 }
