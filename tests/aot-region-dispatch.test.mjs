@@ -591,7 +591,7 @@ test("an idle loop inside a region returns to the dispatcher at its start instea
 });
 
 // FPU ops the direct tier does not emit (the Rc forms, mffs, ps_merge00, ...)
-// stay in the region as interpreter calls (patch 0103, compiler version 6)
+// stay in the region as interpreter calls (patch 0105, compiler version 6)
 // instead of leaving it: the whole call runs in region code, nothing is
 // interpreted outside, at the interpreter's state. Its own text (see SPIN).
 const FPU_TEXT = 0x8000a100, DATA = 0x80004000;
@@ -612,7 +612,7 @@ const keyVersion = () => {
   try { core.module._DolphinWeb_AotKeyParts(p); return new Uint32Array(core.module.HEAPU8.buffer, p, 2)[0]; } finally { core.module._free(p); }
 };
 
-test("FPU ops outside the direct tier run inside the region, interpreted, like the interpreter (0103)", { skip: chainSkip || (core?.has("DolphinWeb_AotKeyParts") && keyVersion() < 6 && "core before 0103 (compiler version < 6)") }, () => {
+test("FPU ops outside the direct tier run inside the region, interpreted, like the interpreter (0105)", { skip: chainSkip || (core?.has("DolphinWeb_AotKeyParts") && keyVersion() < 6 && "core before 0105 (compiler version < 6)") }, () => {
   const dol = buildDol({ textAddr: FPU_TEXT, text: FPU.words, entry: FPU.labels.main });
   const { image, entryPoint } = imageFromDol(dol);
   const plan = planDol({ image, entryPoint, gameId: "TEST01", dolBytes: dol, options: { gapFill: false } });

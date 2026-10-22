@@ -5,7 +5,7 @@ diff --git a/Source/Core/Core/PowerPC/CachedInterpreter/CachedInterpreter.cpp b/
  // code inside its ranges (invalidation drops it by those ranges): no branch
  // following (a call is a jump, its return point an entry), and the block
  // stops at `limit`, the end of the range holding pc.
-+// Patch 0103: an FPU op the direct tier does not emit (the Rc forms, mffs,
++// Patch 0105: an FPU op the direct tier does not emit (the Rc forms, mffs,
 +// mtfsf, the paired-single ops 0087 leaves to helpers, ...) stays in the
 +// region as a call to the interpreter (EmitInterpretCall: GPR cache flushed
 +// and reloaded, a halt returns 2) instead of ending it: leaving the region
@@ -37,7 +37,7 @@ diff --git a/Source/Core/Core/PowerPC/CachedInterpreter/CachedInterpreter.cpp b/
    WasmFragmentRelocs fragment;
    WasmFragmentRelocs* const saved = s_wasm_fragment_relocs;
    s_wasm_fragment_relocs = &fragment;
-+  // allow_interpret_fallback: the ops RegionInterpretsInline let in (0103).
++  // allow_interpret_fallback: the ops RegionInterpretsInline let in (0105).
    const std::vector<u8> bytes = BuildWasmCachedInterpreterBlock(
        std::span<const PPCAnalyst::CodeOp>{buffer.data(), prefix}, CurrentWasmStateLayout(system),
 -      resume_pc, !ends_with_branch, false, false);
@@ -50,7 +50,7 @@ diff --git a/Source/Core/Core/PowerPC/CachedInterpreter/CachedInterpreter.cpp b/
  // none and would never install. 5 (0087): ps_sum0/1, ps_res, fres and
  // ps_neg/mr/nabs/abs compiled inline (3 and 4 are taken by 0084 and 0083).
 -constexpr u32 AOT_COMPILER_VERSION = 5;
-+// 6 (0103): FPU ops outside the direct tier stay in the region, interpreted.
++// 6 (0105): FPU ops outside the direct tier stay in the region, interpreted.
 +constexpr u32 AOT_COMPILER_VERSION = 6;
  constexpr u32 AOT_MAX_FRAGMENT_BYTES = 1u << 20;
  thread_local std::vector<u32> t_aot_out;
