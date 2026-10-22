@@ -90,6 +90,7 @@ import { describe, median, percentile, round } from "../lib/stats.mjs";
 import { coreStats, displayStats, hitchList, mergeTimeline, presentationStats } from "../lib/timeline.mjs";
 import { consistentRead, decodeRegionStats, poolStats, regionShares, topMisses } from "../lib/jit-region-stats.mjs";
 import { consistentMemRead, decodeMemStats, memAccessShares, poolMemStats } from "../lib/mem-access-stats.mjs";
+import { runSteps, validateSteps } from "../lib/steps.mjs";
 import { summarizePcSamples } from "../../src/harness-pc-sampler.js";
 import { checkPerfAccess, instructionsPerGuestCycle, perfCounters } from "../lib/perf-counters.mjs";
 import { emulatedStart } from "../lib/emulated-window.mjs";
@@ -171,8 +172,14 @@ export function rendererThreads(profileDir) {
 // Load the scene, hold the key, settle, then a window with no page call.
 export async function measure(session, o) {
   const { page } = session;
-  const loaded = await loadHarnessState(page, session.url);
-  if (!loaded?.loaded) throw new Error(`savestate load failed: ${JSON.stringify(loaded)}`);
+  // The scene: input steps from the boot (--steps, e.g. a loaded menu) or
+  // the savestate.
+  if (o.steps) {
+    await runSteps(page, o.steps);
+  } else {
+    const loaded = await loadHarnessState(page, session.url);
+    if (!loaded?.loaded) throw new Error(`savestate load failed: ${JSON.stringify(loaded)}`);
+  }
   // --emulated-window: the key is pressed while the core is paused, and the
   // warmup and the window are counted in guest seconds (lib/emulated-window.mjs).
   if (o.hold && !o.emulatedWindow) await page.keyboard.down(o.hold);
@@ -467,7 +474,7 @@ async function main() {
       "emulated-window": { type: "string" }, "emulated-warmup": { type: "string" }, "emulated-poll-ms": { type: "string", default: "100" },
       hold: { type: "string", default: "KeyX" }, warm: { type: "boolean", default: false },
       "max-load": { type: "string" }, "lock-wait": { type: "string", default: "1800" },
-      pcsample: { type: "string" }, symbols: { type: "string" }, "region-sample": { type: "string" }, "region-secs": { type: "string", default: "10" }, counters: { type: "boolean", default: false }, "unique-frames": { type: "string" }, display: { type: "boolean", default: false }, "mem-stats": { type: "boolean", default: false }, "baseline-query": { type: "string" }, "chrome-args": { type: "string" }, "baseline-chrome-args": { type: "string" },
+      pcsample: { type: "string" }, symbols: { type: "string" }, "region-sample": { type: "string" }, "region-secs": { type: "string", default: "10" }, counters: { type: "boolean", default: false }, "unique-frames": { type: "string" }, display: { type: "boolean", default: false }, "mem-stats": { type: "boolean", default: false }, steps: { type: "string" }, "baseline-query": { type: "string" }, "chrome-args": { type: "string" }, "baseline-chrome-args": { type: "string" },
       "core-candidate": { type: "string", multiple: true, default: [] },
       port: { type: "string", default: process.env.HARNESS_PORT }, out: { type: "string" }
     },
@@ -478,6 +485,10 @@ async function main() {
   }
   const iso = path.resolve(values.iso), state = path.resolve(values.state);
   for (const f of [iso, state]) if (!existsSync(f)) throw new Error(`not found: ${f}`);
+  // --steps replaces the savestate as the scene (--state stays required:
+  // spark-run always passes one).
+  const steps = values.steps ? JSON.parse(readFileSync(path.resolve(values.steps), "utf8")) : null;
+  if (steps) validateSteps(steps);
   const localOnly = !iso.startsWith(HOMEBREW_OUT);
   if (localOnly && process.env.CI) throw new Error("this disc is local-only and must never run in CI");
   const query = `${values.query ?? PRESETS[values.config] ?? values.config}&metrics=1`;
@@ -494,7 +505,7 @@ async function main() {
   const runs = num(values, "runs", { min: 1, int: true });
   if (values.baseline && runs % 2) throw new Error(`--runs ${runs}: with --baseline the runs must be even, so trunk goes first as often as head`);
   const o = {
-    iso, state, port: num(values, "port", { min: 1, int: true }), query, runs,
+    iso, state, steps, port: num(values, "port", { min: 1, int: true }), query, runs,
     minPairs: values["min-pairs"] ? num(values, "min-pairs", { min: 2, int: true }) : Math.min(runs, 4),
     warmup: num(values, "warmup", { min: 0 }), secs: num(values, "secs", { min: 2, int: true }),
     // --emulated-window S: S guest seconds after --emulated-warmup W guest
@@ -631,7 +642,7 @@ async function main() {
   const summary = {
     probe: "race-perf", at: new Date().toISOString(),
     chrome,
-    iso: path.basename(iso), state: path.basename(state), query: o.query, baselineQuery: sides.baseline?.query ?? null, warmupSec: o.warmup, secs: o.secs,
+    iso: path.basename(iso), state: steps ? null : path.basename(state), steps: steps ? path.basename(values.steps) : null, query: o.query, baselineQuery: sides.baseline?.query ?? null, warmupSec: o.warmup, secs: o.secs,
     // Window in guest seconds (null: host seconds, --secs).
     emulatedWindow: o.emulatedWindow ? { secs: o.emulatedWindow, warmup: o.emulatedWarmup, pollMs: o.emulatedPollMs } : null, hold: o.hold, maxLoad: o.maxLoad,
     sides: Object.fromEntries(Object.entries(sides).map(([n, s]) => [n, s.label])),
