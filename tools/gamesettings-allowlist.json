@@ -14,6 +14,12 @@
       "key": "SafeTextureCacheColorSamples",
       "why": "Correctness: games that need a safer texture cache hash more samples of each texture (or all, 0) so updates to texture memory are seen. VideoCommon reads it on the CPU side, the same on every backend (the rendering agent checked wgpu, 2026-10-22).",
       "measured": "No effect on the measurement disc (its INI sets no [Video_Settings] key). Larger values cost CPU time in the games that set them, as on Dolphin desktop."
+    },
+    {
+      "section": "Video_Hacks",
+      "key": "XFBToTextureEnable",
+      "why": "Correctness: False keeps the XFB copy to RAM for the games that read it back. Under video=wgpu the copy is skipped unless the game's settings ask for it (#93), so without this key those games lose their frames.",
+      "measured": "No effect on the measurement disc (its INI sets no [Video_Hacks] key). The RAM copy costs what it costs on Dolphin desktop, in the two GameCube games that ask for it."
     }
   ]
 }
