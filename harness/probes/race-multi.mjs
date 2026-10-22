@@ -171,15 +171,16 @@ async function jitStats(page) {
 
 // --emulated-window: one arm's window of exactly S guest seconds after W of
 // warmup, the key pressed while paused (lib/emulated-window.mjs).
-async function measureEmulated(session, o, counters) {
+async function measureEmulated(session, o, hook) {
   const { page } = session;
+  if (o.ready) await o.ready(session);
   const loaded = await loadHarnessState(page, session.url);
   if (!loaded?.loaded) throw new Error(`savestate load failed: ${JSON.stringify(loaded)}`);
   try {
     const { record, finished: c } = await emulatedWindow(page, { secs: o.emulatedWindow, warmup: o.emulatedWarmup, pollMs: o.emulatedPollMs }, {
       press: o.hold ? () => page.keyboard.down(o.hold) : undefined,
-      start: counters ? () => counters("start", session) : undefined,
-      end: counters ? () => counters("end", session) : undefined
+      start: hook ? () => hook("start", session) : undefined,
+      end: hook ? () => hook("end", session) : undefined
     });
     return {
       ...record, windowMs: record.hostMs,
@@ -289,24 +290,29 @@ async function main() {
     o.emulatedPollMs = num(values, "emulated-poll-ms", { min: 10, int: true });
   }
   let arrive = null;
+  // The arm's regions before its window: one read of the region pipeline
+  // (the launch's layout hash and counts), or with --aot-seed the wait until
+  // its seeded regions are installed; then the barrier between arms.
+  o.ready = async (session) => {
+    if (!values["aot-seed"]) { gates.set(session, { ...(await regionPipeline(session.page)), together: await arrive() }); return; }
+    const gate = await waitRegionsQuiescent(() => regionPipeline(session.page), { target: seedRegions.get(session.seedOf) ?? null, timeoutMs: num(values, "gate-sec", { min: 1 }) * 1000 });
+    // What the boot of this arm said about its regions (for the region robustness work).
+    const progress = await workerRequest(session.page, "validationReadAotProgress", { drain: true }, 15000);
+    gate.aot = { state: progress?.state ?? null, events: (progress?.events ?? []).filter((e) => e.type !== "progress").slice(-12) };
+    gate.log = chromeLogLines(session.profileDir);
+    gate.together = await arrive();
+    gates.set(session, gate);
+  };
   o.onWindow = async (phase, session) => {
-    // Without --aot-seed: one read of the region pipeline (the launch's
-    // layout hash and counts), no waiting.
-    if (phase === "start" && !values["aot-seed"]) gates.set(session, { ...(await regionPipeline(session.page)), together: await arrive() });
+    // Host-time window: the regions just before it. Emulated: measureEmulated
+    // waits for them before loading the savestate (a wait here would shift
+    // the window's guest start from arm to arm).
+    if (phase === "start" && !o.emulatedWindow) await o.ready(session);
     if (phase === "start" && values["perf-record"]) await startRecording(session);
     if (phase === "end" && values["perf-record"]) await stopRecording(session);
     // The window's guest ticks at both ends, and the JIT's counters at its end.
     if (phase === "start") emu.set(session, { start: await ticksNow(session.page) });
     if (phase === "end") { const e = emu.get(session); if (e) Object.assign(e, { end: await ticksNow(session.page), jit: await jitStats(session.page) }); }
-    if (phase === "start" && values["aot-seed"]) {
-      const gate = await waitRegionsQuiescent(() => regionPipeline(session.page), { target: seedRegions.get(session.seedOf) ?? null, timeoutMs: num(values, "gate-sec", { min: 1 }) * 1000 });
-      // What the boot of this arm said about its regions (for the region robustness work).
-      const progress = await workerRequest(session.page, "validationReadAotProgress", { drain: true }, 15000);
-      gate.aot = { state: progress?.state ?? null, events: (progress?.events ?? []).filter((e) => e.type !== "progress").slice(-12) };
-      gate.log = chromeLogLines(session.profileDir);
-      gate.together = await arrive();
-      gates.set(session, gate);
-    }
     return counters ? counters(phase, session) : undefined;
   };
   const servers = [];
@@ -386,7 +392,7 @@ async function main() {
           resumed.forEach((x, a) => { record.arms[a].boot.resumed = !x?.error; });
         }
         // The windows together.
-        const results = await Promise.allSettled(sessions.map((s) => (o.emulatedWindow ? measureEmulated(s, o, counters) : measure(s, o))));
+        const results = await Promise.allSettled(sessions.map((s) => (o.emulatedWindow ? measureEmulated(s, o, o.onWindow) : measure(s, o))));
         results.forEach((res, a) => { if (res.status === "fulfilled") record.arms[a].cold = res.value; else record.arms[a].error = String(res.reason?.message ?? res.reason).slice(0, 300); });
       } finally {
         for (const s of sessions) await s?.close().catch(() => {});
