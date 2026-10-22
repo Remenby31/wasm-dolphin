@@ -531,10 +531,12 @@ async function main() {
   };
   checkLock("taken");
   try {
+    // Times each run was played again after the lock went back for the load.
     let relocks = 0;
+    const loadRetries = new Map();
     for (let run = 1; run <= o.runs && !gaveUp; run += 1) {
       checkLock(`before run ${run}`);
-      const record = { run };
+      const record = { run, loadRetries: loadRetries.get(run) ?? 0 };
       let replay = false;
       for (const name of sideOrder(run).filter((n) => sides[n])) {
         // Loaded: the lock goes back during the wait (--load-wait), and the
@@ -554,7 +556,7 @@ async function main() {
         const r = record[name];
         console.log(`[race-perf] run ${run} ${name}: ${r.error ?? brief(r.cold)}${r.warm ? ` | warm: ${brief(r.warm)}` : ""}`);
       }
-      if (replay) { console.log(`[race-perf] run ${run} played again (lock taken back)`); run -= 1; continue; }
+      if (replay) { loadRetries.set(run, (loadRetries.get(run) ?? 0) + 1); console.log(`[race-perf] run ${run} played again (lock taken back)`); run -= 1; continue; }
       if (gaveUp && !Object.keys(sides).some((n) => record[n])) break;
       writeFileSync(path.join(outDir, `run${run}.json`), JSON.stringify(record, null, 1) + "\n");
       records.push(record);
@@ -613,6 +615,8 @@ async function main() {
     emulatedWindow: o.emulatedWindow ? { secs: o.emulatedWindow, warmup: o.emulatedWarmup, pollMs: o.emulatedPollMs } : null, hold: o.hold, maxLoad: o.maxLoad,
     sides: Object.fromEntries(Object.entries(sides).map(([n, s]) => [n, s.label])),
     runs: runsDone.length, failed, gaveUp,
+    // Runs played again after the lock went back for the load: { run: times }.
+    loadRetries: Object.fromEntries(runsDone.filter((r) => r.loadRetries).map((r) => [r.run, r.loadRetries])),
     candidate: { cold: summarize("candidate", "cold"), warm: summarize("candidate", "warm") },
     baseline: sides.baseline ? { cold: summarize("baseline", "cold"), warm: summarize("baseline", "warm") } : null,
     change: sides.baseline ? withheldOnOverlap(pairedSpeedChange(runsDone.filter((r) => good(r.baseline) && good(r.candidate)), { minPairs: o.minPairs }), lockOverlap) : null,
