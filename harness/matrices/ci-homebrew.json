@@ -13,7 +13,7 @@
       "id": "efbpeek",
       "iso": "harness/homebrew/out/efbpeek.iso",
       "static": true,
-      "set": { "efbaccess": "1" }
+      "set": { "efbaccess": "1", "cpu": "single" }
     },
     {
       "id": "cpufuzz-nomcrf",
