@@ -9,9 +9,11 @@
 import assert from "node:assert/strict";
 import { createHash } from "node:crypto";
 import test from "node:test";
+import { fileURLToPath } from "node:url";
 
 import { imageFromDol } from "../src/aot-image.js";
 import { planDol } from "../src/aot-plan.js";
+import { coreStatus } from "../tools/core-artifacts.mjs";
 import { assembleRegion } from "../src/aot-region-module.js";
 import { asm, assemble, buildDol } from "./aot-asm.mjs";
 import { HELPER_SIGNATURES, STOP, functionFragments, loadAotCore, regionGroups, seedGprs } from "./helpers/aot-core-equivalence.mjs";
@@ -38,6 +40,7 @@ function setup() {
   const plan = planDol({ image, entryPoint, gameId: "TEST01", dolBytes: dol, options: { gapFill: false } });
   for (const s of image.segments) core.load(s.start, s.bytes);
   core.invalidate(TEXT, 4 * PROGRAM.words.length); // regions of an earlier test are dropped
+  core.module._DolphinWeb_AotForgetRegionsForTest?.(); // (0085: an invalidation alone keeps unchanged code)
   return plan;
 }
 
@@ -120,7 +123,65 @@ test("regions run only with translation and FP on", { skip }, () => {
   assert.equal(core.dispatchRegion(), 0, "FP off: the block path");
 });
 
-test("invalidating covered code drops the regions holding it, other code keeps them", { skip }, () => {
+// Patch 0085: an invalidation over a region's code checks it again against
+// the plan's hashes before it next runs: the same bytes written again (the
+// OS init on every second launch) keep it, changed code drops it.
+const rechecks = () => {
+  const p = core.module._malloc(12);
+  try {
+    core.module._DolphinWeb_AotRegionRechecks(p);
+    return Array.from(new Uint32Array(core.module.HEAPU8.buffer, p, 3));
+  } finally {
+    core.module._free(p);
+  }
+};
+test("invalidating covered code: unchanged code keeps its region, changed code drops it before it runs", { skip: skip || (!core?.has("DolphinWeb_AotRegionRechecks") && "core without region re-checks (0085)") }, () => {
+  installed();
+  const count = core.regionCount();
+  core.invalidate(0x80100000, 0x1000);
+  assert.equal(core.regionCount(), count, "unrelated code");
+  const [kept, reverified] = rechecks();
+  core.load(PROGRAM.labels.double, core.ram().slice(PROGRAM.labels.double & 0x01ffffff, (PROGRAM.labels.double & 0x01ffffff) + 4));
+  core.invalidate(PROGRAM.labels.double, 4); // the same bytes again (a DMA of the same code)
+  assert.equal(core.regionCount(), count, "kept, to be checked");
+  assert.equal(rechecks()[0], kept + 1);
+  core.reset(seedGprs(1), PROGRAM.labels.double, STOP, 400000);
+  assert.equal(core.dispatchRegion(), 1, "unchanged: checked and run");
+  assert.equal(rechecks()[1], reverified + 1);
+  const reference = runCall(PROGRAM.labels.main, { regions: false });
+  assert.deepEqual(runCall(PROGRAM.labels.main, { regions: true }).state, reference.state);
+  patchDouble();
+  core.invalidate(PROGRAM.labels.double, 4);
+  core.reset(seedGprs(1), PROGRAM.labels.double, STOP, 400000);
+  assert.equal(core.dispatchRegion(), 0, "changed: dropped before it runs");
+  assert.ok(core.regionCount() < count, "the region with double is gone");
+  const patched = runCall(PROGRAM.labels.main, { regions: false });
+  assert.deepEqual(runCall(PROGRAM.labels.main, { regions: true }).state, patched.state, "the new code runs");
+});
+
+// Review of #85: a region already due for a check is not scanned again by
+// every later invalidation (a game invalidating a megabyte line by line), and
+// a forced invalidation (breakpoints) drops it at once, as before.
+test("invalidations skip a region already due for a check; a forced one drops it", { skip: skip || (typeof core?.module._DolphinWeb_AotInvalidateForcedForTest !== "function" && "core without forced invalidations (0085)") }, () => {
+  installed();
+  const count = core.regionCount();
+  const same = () => core.load(PROGRAM.labels.double, core.ram().slice(PROGRAM.labels.double & 0x01ffffff, (PROGRAM.labels.double & 0x01ffffff) + 4));
+  same();
+  const before = rechecks()[2];
+  core.invalidate(PROGRAM.labels.double, 4); // every live region looked at; the one over double kept, to be checked
+  const first = rechecks()[2] - before;
+  assert.ok(first >= 1);
+  const scans = rechecks()[2];
+  for (let line = 0; line < 64; line++) core.invalidate(PROGRAM.labels.double, 4);
+  assert.equal(rechecks()[2] - scans, 64 * (first - 1), "the region due for a check is never looked at again, the others once per invalidation");
+  assert.equal(core.regionCount(), count, "kept");
+  core.module._DolphinWeb_AotInvalidateForcedForTest(PROGRAM.labels.double, 4);
+  assert.ok(core.regionCount() < count, "a forced invalidation drops it");
+  core.reset(seedGprs(1), PROGRAM.labels.double, STOP, 400000);
+  assert.equal(core.dispatchRegion(), 0);
+});
+
+test("invalidating covered code drops the regions holding it, other code keeps them (core before 0085)", { skip: skip || (core?.has("DolphinWeb_AotRegionRechecks") && "core with region re-checks (0085)") }, () => {
   installed();
   const count = core.regionCount();
   core.invalidate(0x80100000, 0x1000);
@@ -373,4 +434,40 @@ test("under the MMU queued regions are not installed, and the skips are counted"
   } finally {
     core.setMMUMode(false);
   }
+});
+
+// 0088: an idle loop inside a region (a block looping to its own start,
+// PPCAnalyzer::IsBusyWaitLoop) must come back to the dispatcher, where the
+// block path's CheckIdle skips it (CoreTiming::Idle). Before, the region cut
+// the block before its branch, went on at the branch's address (no idle loop
+// seen from there) and spun inside the region until the slice ran out. The
+// Node core has no CPU loop to run CheckIdle, so the test checks what the
+// skip needs: the region stops at the loop's start, a few cycles in.
+const idleSkip88 = skip || ((await coreStatus(fileURLToPath(new URL("..", import.meta.url)))).current
+  ? false : "the core in cores/dolphin predates these sources (CI builds this branch's core)");
+test("an idle loop inside a region returns to the dispatcher at its start instead of spinning to the end of the slice", { skip: idleSkip88 }, () => {
+  const IDLE = assemble(TEXT, [
+    "wait", asm.addi(5, 5, 1),
+    "wait_loop", lwz(3, 4, 0), asm.cmplwi(3, 0), (pc, l) => asm.beq(pc, l.wait_loop),
+    "after", asm.addi(6, 6, 1), asm.blr()
+  ]);
+  const dol = buildDol({ textAddr: TEXT, text: IDLE.words, entry: IDLE.labels.wait });
+  const { image, entryPoint } = imageFromDol(dol);
+  const plan = planDol({ image, entryPoint, gameId: "TEST01", dolBytes: dol, options: { gapFill: false } });
+  for (const s of image.segments) core.load(s.start, s.bytes);
+  core.invalidate(TEXT, 4 * IDLE.words.length);
+  core.setRegionsEnabled(true);
+  for (const group of regionGroups(plan, 100)) {
+    const fragments = group.flatMap(functionFragments(core));
+    const { bytes, entries } = assembleRegion(fragments, { helpers: HELPER_SIGNATURES, pcOffset: core.pcOffset, memoryPages: core.memoryPages });
+    core.queueRegion(bytes, entries.map(([pc]) => pc), group.map((f) => ({ ranges: f.ranges, hash: f.hash })));
+  }
+  core.serviceRegions();
+  const gprs = seedGprs(1);
+  gprs[4] = 0x80100000; // a zero word: the loop never ends by itself
+  const budget = 400000;
+  core.reset(gprs, IDLE.labels.wait, STOP, budget);
+  assert.equal(core.dispatchRegion(), 1, "the region runs from its entry");
+  assert.equal(core.pc() >>> 0, IDLE.labels.wait_loop, "back to the dispatcher at the idle loop's start");
+  assert.ok(budget - core.downcount() < 100, `only the block before the loop ran (${budget - core.downcount()} cycles), not the slice`);
 });

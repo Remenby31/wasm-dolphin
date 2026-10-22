@@ -78,7 +78,7 @@ import { consistentRead, decodeRegionStats, poolStats, regionShares, topMisses }
 import { summarizePcSamples } from "../../src/harness-pc-sampler.js";
 
 const HOMEBREW_OUT = path.join(REPO_ROOT, "harness", "homebrew", "out");
-const STATE_ROUTE = "**/__harness_state.sav";
+export const STATE_ROUTE = "**/__harness_state.sav";
 
 export function sideOrder(run) {
   return run % 2 === 1 ? ["baseline", "candidate"] : ["candidate", "baseline"];
@@ -135,7 +135,7 @@ function threadCpus(pid) {
 }
 
 // The renderer of this profile and the CPU of its busiest threads.
-function rendererThreads(profileDir) {
+export function rendererThreads(profileDir) {
   if (!["darwin", "linux"].includes(process.platform)) return { error: `no per-thread CPU on ${process.platform}` };
   try {
     const ps = execFileSync("ps", ["-A", "-o", "pid=,command="], { encoding: "utf8", maxBuffer: 32 << 20 });
