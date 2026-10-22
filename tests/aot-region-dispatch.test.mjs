@@ -14,9 +14,10 @@ import { fileURLToPath } from "node:url";
 import { imageFromDol } from "../src/aot-image.js";
 import { planDol } from "../src/aot-plan.js";
 import { coreStatus } from "../tools/core-artifacts.mjs";
-import { assembleRegion } from "../src/aot-region-module.js";
+import { assembleRegion, paddedSleb, paddedUleb, patchRegionHeap, regionHeapOfBytes } from "../src/aot-region-module.js";
 import { asm, assemble, buildDol } from "./aot-asm.mjs";
 import { HELPER_SIGNATURES, STOP, functionFragments, loadAotCore, regionGroups, seedGprs } from "./helpers/aot-core-equivalence.mjs";
+import { makeRng, randomProgram } from "./helpers/jit-oracle.mjs";
 
 const core = await loadAotCore();
 const skip = !core?.has("DolphinWeb_AotQueueRegion") && "core without the region dispatcher (patch 0075)";
@@ -383,14 +384,113 @@ test("a region translated for another heap layout is never installed", { skip: s
   assert.equal(core.dispatchRegion(), 0);
 });
 
-// A region already installed when the RAM moves (a stop and a new boot in
-// the same page reallocates it): its code still writes the old address. A
-// cache clear makes it checked again, layout included; a shutdown forgets
-// every region (review of #62, P1-1).
-test("an installed region is dropped when the heap layout moved, before it runs again", { skip: skip || (!core?.has("DolphinWeb_AotLayoutShiftForTest") && "core without the layout re-check") }, () => {
+// A region already installed when the layout moves: its code still embeds
+// the old offsets or sizes. A cache clear makes it checked again, layout
+// included; a shutdown forgets every region (review of #62, P1-1). The RAM
+// address is no longer part of the layout (patch 0084): it sits in listed
+// heap sites, checked apart (the next tests).
+const LAYOUT_RAM_SIZE_FIELD = 16; // WasmStateLayout.ram_size_real
+test("an installed region is dropped when the heap layout moved, before it runs again", { skip: skip || (!core?.has("DolphinWeb_AotLayoutShiftFieldForTest") && "core without position-independent regions (0084)") }, () => {
   installed();
   core.reset(seedGprs(1), PROGRAM.labels.count, STOP, 400000);
   assert.equal(core.dispatchRegion(), 1, "runs under its own layout");
+  core.module._DolphinWeb_AotLayoutShiftFieldForTest(LAYOUT_RAM_SIZE_FIELD, 0x100000);
+  try {
+    core.unverifyRegions(); // what ClearCache does at the new boot
+    core.reset(seedGprs(1), PROGRAM.labels.count, STOP, 400000);
+    assert.equal(core.dispatchRegion(), 0, "dropped, not run with the old sizes");
+  } finally {
+    core.module._DolphinWeb_AotLayoutShiftFieldForTest(0, 0);
+  }
+});
+
+const heapSkip = skip || (!core?.has("DolphinWeb_AotRegionHeapBases") && "core without heap sites (0084)");
+const bases = () => {
+  const p = core.module._malloc(8);
+  try {
+    core.module._DolphinWeb_AotRegionHeapBases(p);
+    return Array.from(new Uint32Array(core.module.HEAPU8.buffer, p, 2));
+  } finally {
+    core.module._free(p);
+  }
+};
+
+// Patch 0084: a module translated in a session whose RAM sat elsewhere holds
+// that address in its heap sites. Queued as it is, the core refuses it (its
+// bases are not this session's); patched to this session's bases, it
+// installs and runs as the interpreter does.
+test("a region translated while the RAM sat elsewhere is refused as it is, and runs once patched", { skip: heapSkip }, () => {
+  const plan = setup();
+  core.setRegionsEnabled(true);
+  const before = core.regionCount();
+  const here = bases();
+  const there = { ramBase: (here[0] + 0x100000) >>> 0, l1Base: here[1] };
+  const modules = regionGroups(plan, 100).map((group) => ({ group, ...assembleRegion(group.flatMap(functionFragments(core)), { helpers: HELPER_SIGNATURES, pcOffset: core.pcOffset, memoryPages: core.memoryPages }) }));
+  assert.ok(modules.some((m) => regionHeapOfBytes(m.bytes)?.sites.length), "the program's loads and stores are heap sites");
+  const refused = core.module._DolphinWeb_AotLayoutRefused() >>> 0;
+  for (const m of modules) {
+    const elsewhere = patchRegionHeap(m.bytes, there); // as the other session's cache holds it
+    core.queueRegion(elsewhere, m.entries.map(([pc]) => pc), m.group.map((f) => ({ ranges: f.ranges, hash: f.hash })), undefined, [there.ramBase, there.l1Base]);
+  }
+  core.serviceRegions();
+  assert.equal(core.regionCount(), before, "refused under another RAM address");
+  assert.ok((core.module._DolphinWeb_AotLayoutRefused() >>> 0) > refused);
+  for (const m of modules) {
+    const elsewhere = patchRegionHeap(m.bytes, there);
+    const back = patchRegionHeap(elsewhere, { ramBase: here[0], l1Base: here[1] }); // what discio does
+    assert.deepEqual(back, m.bytes, "patching back gives the bytes translated here");
+    core.queueRegion(back, m.entries.map(([pc]) => pc), m.group.map((f) => ({ ranges: f.ranges, hash: f.hash })));
+  }
+  core.serviceRegions();
+  assert.ok(core.regionCount() > before, "installed once patched");
+  const reference = runCall(PROGRAM.labels.main, { regions: false });
+  const got = runCall(PROGRAM.labels.main, { regions: true });
+  assert.ok(got.ran > 0);
+  assert.deepEqual(got.state, reference.state);
+});
+
+// Review of #71: the core checks the module's own heap section and sites,
+// whatever bases the caller passes. A module without the section, one whose
+// section claims other bases, and one whose site was changed are refused.
+test("the core refuses a region whose heap section or sites do not hold this session's bases", { skip: heapSkip }, () => {
+  const plan = setup();
+  core.setRegionsEnabled(true);
+  const before = core.regionCount();
+  const here = bases();
+  const [group] = regionGroups(plan, 100);
+  const { bytes, entries } = assembleRegion(group.flatMap(functionFragments(core)), { helpers: HELPER_SIGNATURES, pcOffset: core.pcOffset, memoryPages: core.memoryPages });
+  const heap = regionHeapOfBytes(bytes);
+  assert.ok(heap?.sites.length);
+  const members = group.map((f) => ({ ranges: f.ranges, hash: f.hash }));
+  const queue = (b) => core.queueRegion(b, entries.map(([pc]) => pc), members); // the session's bases, as a buggy caller would
+  // 1. a site changed to another address (the section still says here)
+  const site = Uint8Array.from(bytes);
+  site.set(paddedSleb(here[0] + 0x100000), heap.sites[0].offset);
+  // 2. the section removed (renamed: the module still compiles)
+  const unnamed = Uint8Array.from(bytes);
+  const name = new TextEncoder().encode("region-heap");
+  const at = unnamed.findIndex((_, i) => name.every((c, k) => unnamed[i + k] === c));
+  unnamed[at] = "R".charCodeAt(0);
+  // 3. the section claims other bases than its sites hold
+  const claims = patchRegionHeap(bytes, { ramBase: here[0] + 0x100000, l1Base: here[1] });
+  claims.set(Array.from(bytes.subarray(heap.sites[0].offset, heap.sites[0].offset + 5)), heap.sites[0].offset);
+  const refused = core.module._DolphinWeb_AotLayoutRefused() >>> 0;
+  for (const b of [site, unnamed, claims]) queue(b);
+  core.serviceRegions();
+  assert.equal(core.regionCount(), before, "none installed");
+  assert.equal((core.module._DolphinWeb_AotLayoutRefused() >>> 0) - refused, 3, "each counted as a heap refusal");
+  queue(bytes); // the module as translated here
+  core.serviceRegions();
+  assert.ok(core.regionCount() > before, "the untouched module installs");
+});
+
+// The RAM moved under an installed region (a stop and a new boot in the same
+// page reallocates it): its heap sites still hold the old address. A cache
+// clear makes it checked again, and it is dropped before it runs (#62 P1-1).
+test("an installed region is dropped when the RAM moved under it, before it runs again", { skip: heapSkip }, () => {
+  installed();
+  core.reset(seedGprs(1), PROGRAM.labels.count, STOP, 400000);
+  assert.equal(core.dispatchRegion(), 1, "runs where it was patched for");
   core.module._DolphinWeb_AotLayoutShiftForTest(0x100000); // the RAM sits 1 MiB further
   try {
     core.unverifyRegions(); // what ClearCache does at the new boot
@@ -399,6 +499,51 @@ test("an installed region is dropped when the heap layout moved, before it runs 
   } finally {
     core.module._DolphinWeb_AotLayoutShiftForTest(0);
   }
+});
+
+// The only guard against an address left out of the heap sites (Node never
+// moves the RAM): no immediate of a fragment holds the RAM or L1 address,
+// or a byte offset past it, but at a listed heap site. Over the oracle's
+// random programs; one planted outside the sites proves the scan finds it.
+const immediates = (code) => {
+  const out = [];
+  for (let i = 0; i < code.length; i++) {
+    let v = 0, shift = 0, j = i, b;
+    do { b = code[j++]; v += (b & 0x7f) * 2 ** shift; shift += 7; } while (b & 0x80 && shift < 35 && j < code.length);
+    const signed = shift < 35 && b & 0x40 ? (v - 2 ** shift) >>> 0 : v >>> 0;
+    out.push([i, v >>> 0, signed]);
+  }
+  return out;
+};
+const nearBase = (v, [ram, l1]) => ((v - ram) >>> 0) < 0x10000 || ((v - l1) >>> 0) < 0x10000;
+function strayAddresses(fragment, base) {
+  const sites = new Set(fragment.relocs.filter((r) => r.kind === "heap").map((r) => r.offset));
+  return immediates(fragment.code).filter(([at, u, sgn]) => !sites.has(at) && (nearBase(u, base) || nearBase(sgn, base))).map(([at]) => at);
+}
+test("no region fragment holds the RAM or L1 address outside its heap sites", { skip: heapSkip }, () => {
+  const base = bases();
+  const r = makeRng(84);
+  const CODE = 0x80004000;
+  let fragments = 0, sites = 0;
+  for (let n = 0; n < 300; n++) {
+    const words = Array.from(randomProgram(r, 48));
+    core.load(CODE, Uint8Array.from(words.flatMap((w) => [w >>> 24, (w >>> 16) & 0xff, (w >>> 8) & 0xff, w & 0xff])));
+    const fragment = core.translate(CODE, { ranges: [[CODE, CODE + 4 * words.length]] });
+    if (!fragment) continue;
+    fragments += 1;
+    for (const site of fragment.relocs.filter((x) => x.kind === "heap")) {
+      sites += 1;
+      // main's i32.const of the base, padded to 5 bytes
+      assert.equal(site.form, "const");
+      assert.equal(fragment.code[site.offset - 1], 0x41, "an i32.const");
+      assert.deepEqual(Array.from(fragment.code.subarray(site.offset, site.offset + 5)), paddedSleb(base[site.name === "ram_base" ? 0 : 1]), "it holds the base");
+    }
+    assert.deepEqual(strayAddresses(fragment, base), [], `program ${n}: an address outside the heap sites`);
+  }
+  core.invalidate(CODE, 4 * 48);
+  assert.ok(fragments > 100 && sites > 100, `${fragments} fragments, ${sites} heap sites`);
+  const planted = { code: Uint8Array.of(0x00, 0x41, ...paddedUleb(base[0] + 8)), relocs: [] };
+  assert.equal(strayAddresses(planted, base).length > 0, true, "the scan finds a planted address");
 });
 
 test("a core shutdown forgets every region: installed, waiting and queued", { skip: skip || (!core?.has("DolphinWeb_AotForgetRegionsForTest") && "core without ForgetAllRegions") }, () => {

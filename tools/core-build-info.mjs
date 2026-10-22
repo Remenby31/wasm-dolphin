@@ -116,6 +116,7 @@ export function unexpectedDirtyPaths(status) {
 // Local files compiled into the core besides the patched Dolphin tree.
 export const CORE_LOCAL_INPUTS = Object.freeze([
   "core/upstream/dolphin_web_core.cpp",
+  "core/upstream/dolphin_web_direct_pad.h",
   "core/upstream/dolphin_web_discio.cpp",
   "core/upstream/dolphin_web_fma.h",
   "core/upstream/dolphin_web_pad_latch.h",
