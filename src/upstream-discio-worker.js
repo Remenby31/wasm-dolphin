@@ -288,7 +288,7 @@ function harnessJitRegionStats({ sampleEvery } = {}) {
   const layoutRefused = moduleInstance._DolphinWeb_AotLayoutRefused ? (moduleInstance._DolphinWeb_AotLayoutRefused() >>> 0) + aotLayoutSkipped : null;
   return { bytes: copy(), again: copy(), installSamples: harnessRegionInstallSamples(heap), layoutRefused, regionChain: harnessRegionChainStats(heap) };
 }
-// Region chaining counters (patch 0083), reset with the region stats; null
+// Region chaining counters (patch 0102), reset with the region stats; null
 // with an older core.
 function harnessRegionChainStats(heap) {
   const at = moduleInstance?._DolphinWeb_JitRegionChainStats?.() >>> 0;
@@ -298,7 +298,7 @@ function harnessRegionChainStats(heap) {
   return { enabled: view.getUint32(4, true), chained: f(0), outOfTime: f(1), noRegion: f(2), refused: f(3), ...harnessRegionTransitionTop(heap) };
 }
 // Where chains of regions leave for code without a region, and which region
-// entries block chains reach: [pc hex, count], most frequent first (0083).
+// entries block chains reach: [pc hex, count], most frequent first (0102).
 function harnessRegionTransitionTop(heap) {
   const at = moduleInstance?._DolphinWeb_JitRegionTransitionTop?.() >>> 0;
   const TOP = 12, SIZE = 4 * 2 * (1 + 2 * TOP);

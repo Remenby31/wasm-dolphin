@@ -25,7 +25,7 @@
       "commit": "01e0577914a75a2569c846778c2f93aa8e6feddd"
     }
   },
-  "patchSeriesSha256": "0906cea507bf3ad9e3cbdbe44c44ab8702fb5f7ae49ecc5b0cabb373f78ac55c",
+  "patchSeriesSha256": "fdf3b9a6aa168529490c4f7fef9467e50990b10a5c664273a8246059fb6458de",
   "patches": [
     {
       "order": 1,
@@ -639,12 +639,20 @@
       "order": 77,
       "cwd": ".",
       "hashMode": "lf-normalized",
-      "path": "patches/dolphin-wasm/snapshot/0083-region-chaining.patch",
-      "size": 12041,
-      "sha256": "da01d7a64bf0d24bfac4492344b0e66fc2bca225aa19102a1d469c316f854417"
+      "path": "patches/dolphin-wasm/snapshot/0085-region-recheck-after-invalidation.patch",
+      "size": 7002,
+      "sha256": "3aee58f9d6aa911e70b8af1982c6b25fdaf48bdb2e40ef362717be3589125199"
     },
     {
       "order": 78,
+      "cwd": ".",
+      "hashMode": "lf-normalized",
+      "path": "patches/dolphin-wasm/snapshot/0087-native-ps-sum-neg-res.patch",
+      "size": 12319,
+      "sha256": "bb67b5219c0a94e39beb3a2e81b5d4f1af7643e6d1428374f0ca9c851d9749fb"
+    },
+    {
+      "order": 79,
       "cwd": ".",
       "hashMode": "lf-normalized",
       "path": "patches/dolphin-wasm/snapshot/0088-region-idle-loops-outside.patch",
@@ -652,7 +660,7 @@
       "sha256": "15c7127637fa3550e9a8d7d6850afb80f53548d7536a5252ed75e416bebab9d0"
     },
     {
-      "order": 79,
+      "order": 80,
       "cwd": ".",
       "hashMode": "lf-normalized",
       "path": "patches/dolphin-wasm/snapshot/0091-no-wasm-code-under-mmu.patch",
@@ -660,7 +668,7 @@
       "sha256": "d169775dc85c7e756561439fb1da2f749d3a774f0abd2b0dc0116017ed67a46d"
     },
     {
-      "order": 80,
+      "order": 81,
       "cwd": ".",
       "hashMode": "lf-normalized",
       "path": "patches/dolphin-wasm/snapshot/0099-ax-hle-timing.patch",
@@ -668,7 +676,15 @@
       "sha256": "fcf883f10294f89b4660891765bba842259213b7ebebbf80e6815cb0b083f6b5"
     },
     {
-      "order": 81,
+      "order": 82,
+      "cwd": ".",
+      "hashMode": "lf-normalized",
+      "path": "patches/dolphin-wasm/snapshot/0102-region-chaining.patch",
+      "size": 11793,
+      "sha256": "6af20dcb81ffa562f2df5795b8db395b52a2b9b415287e162d0f6ecb80534c4f"
+    },
+    {
+      "order": 83,
       "cwd": "Externals/SFML/SFML",
       "hashMode": "lf-normalized",
       "path": "patches/dolphin-wasm/submodules/0001-sfml-emscripten-config.patch",
@@ -676,7 +692,7 @@
       "sha256": "f82197a21fe982ad83f6ee7bbf5a03839b1cebd4d64da3eab11263842bf61d89"
     },
     {
-      "order": 82,
+      "order": 84,
       "cwd": "Externals/xxhash/xxHash",
       "hashMode": "lf-normalized",
       "path": "patches/dolphin-wasm/submodules/0002-xxhash-wasm-simd-scalar.patch",

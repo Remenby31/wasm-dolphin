@@ -1,7 +1,7 @@
 import assert from "node:assert/strict";
 import test from "node:test";
 
-import { assembleRegion, groupRegions, paddedUleb, regionModuleLayout } from "../src/aot-region-module.js";
+import { assembleRegion, groupRegions, paddedUleb, regionModuleKey, regionModuleLayout } from "../src/aot-region-module.js";
 
 // Synthetic fragments in the translator's shape. State layout of the tests:
 // pc at +0, a counter at +4, LR at +8, state at address 64.
@@ -56,7 +56,7 @@ function program() {
   return [A, B];
 }
 
-// The core's side of region chaining (patch 0083): region_chain(state) picks
+// The core's side of region chaining (patch 0102): region_chain(state) picks
 // the next region's table index in `table`, 0 to return to the dispatcher.
 const noChain = () => ({ region_chain: () => 0, table: new WebAssembly.Table({ element: "anyfunc", initial: 1 }) });
 
@@ -152,7 +152,7 @@ test("aot region: a dispatch to a PC outside the region returns 0 (code ran), th
   assert.equal(r.word(COUNT), 0);
 });
 
-test("aot region: an exit tail-calls the region region_chain picks, in the core's table (patch 0083)", async () => {
+test("aot region: an exit tail-calls the region region_chain picks, in the core's table (patch 0102)", async () => {
   // Region 1 = A alone: its call to B (0x2000) leaves the region. Region 2 =
   // B: returns through LR (0x1004), outside region 2, back into region 1.
   const [A, B] = program();
@@ -185,7 +185,16 @@ test("aot region: an exit tail-calls the region region_chain picks, in the core'
   assert.deepEqual(asked, [0x2000]);
 });
 
-test("aot region: without chain (a core before 0083) the module imports neither region_chain nor the table", () => {
+test("aot region: chained modules are keyed region-v2, the others region-v1", async () => {
+  const members = [{ entry: 0x1000, sha256: "a".repeat(64) }, { entry: 0x2000, sha256: "b".repeat(64) }];
+  const parts = { compilerVersion: 5, codegenMask: 0 };
+  assert.match(await regionModuleKey(members, parts), /^region-v1:00000005:00000000:[0-9a-f]{64}$/);
+  const chained = await regionModuleKey(members, { ...parts, chain: true });
+  assert.match(chained, /^region-v2:00000005:00000000:[0-9a-f]{64}$/);
+  assert.equal(chained.slice(10), (await regionModuleKey(members, parts)).slice(10), "same members, same hash");
+});
+
+test("aot region: without chain (a core before 0102) the module imports neither region_chain nor the table", () => {
   const opts = { helpers: HELPERS, pcOffset: PC, memoryPages: 1 };
   const names = (o) => WebAssembly.Module.imports(new WebAssembly.Module(assembleRegion(program(), o).bytes)).map((i) => i.name);
   assert.deepEqual(names(opts), ["memory", "bump"]);

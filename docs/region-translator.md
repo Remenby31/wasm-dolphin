@@ -152,7 +152,7 @@ The three P1s and the trivial P2s are fixed in #43; the rest is tracked here.
 Order after #43 (Main, 2026-10-20): TTFF aot=1 vs off on main; the late ready signal; the FP analyses; the dispatch share (22 % of host time).
 - [ ] **Orphan request after a late mark** (review of #58, P3): when discio marks an old request after a cache clear but before the re-post, the region installs synchronously with the in-flight key still set, and the re-post's answer later leaves a stale 1 in the slot; a block sharing it compiles cold once. Same family as "Cold compile counted as Ready".
 
-## Region chaining (patch 0083, 2026-10-21)
+## Region chaining (patch 0102, 2026-10-21)
 
 On the race with `aot=1` (night KPI, 2026-10-21), regions ran ~800 000 times
 a second for ~245 guest cycles each: every jump or return out of a region
@@ -181,8 +181,13 @@ took 22 % of the CPU thread (`dispatchTimeShare`).
   region, refused), reset with the region stats; race-perf reports them in
   `p4.diagnostics.regionChain`. `regionCalls` now counts dispatcher calls,
   a chain of regions being one.
-- `AOT_COMPILER_VERSION` 3: modules assembled before 0083 import neither
-  `region_chain` nor `table` and are missed by the cache.
+- The assembler emits the chaining stub only for a core that exports the
+  helper (`assembleRegion(..., { chain })`, set by `coreAssembleOptions`);
+  otherwise its bytes are those of before 0102. Chained modules are keyed
+  `region-v2:` (the stub imports `region_chain` and `table`), so a module
+  assembled without chaining is never taken from the cache for a chaining
+  core, and the other way round. The translated code does not change:
+  `AOT_COMPILER_VERSION` stays as it is.
 - Tests: `tests/aot-region-module.test.mjs` (two modules chained through a
   shared table, refusal), `tests/aot-region-dispatch.test.mjs` (one region
   per function: a whole call in one dispatch, downcount cuts and a loop
@@ -237,7 +242,7 @@ million console lines, the browser process at 7-14 GB).
   immutable globals instead of constants, so a moved heap no longer refuses
   (and wastes) the cache. The cache key cannot hold the layout: it is opened
   before the boot, when the RAM is not allocated yet.
-- [ ] **35 regions dropped on every second launch** (KPI, d18249e, and locally): installed during the OS init, they are dropped by invalidations (icbi or DMA) over their ranges; the code then runs in the block JIT for the session. Log the invalidations that drop them; consider re-verifying (plan hashes) instead of dropping when the code is unchanged.
+- [x] **35 regions dropped on every second launch** (KPI, d18249e, and locally): installed during the OS init, they were dropped by invalidations (icbi or DMA) over their ranges, and the code then ran in the block JIT for the session. Patch 0085: an invalidation over an installed region marks it unverified instead; before it next runs it is checked against the plan's hashes (as after a cache clear), and dropped only if its code changed. A region with a member that has no hash, or an HLE hook installed at an entry since, is dropped (a hook changes no byte); a forced invalidation (breakpoints) drops at once, as before; a region already due for a check is skipped by later invalidations. `DolphinWeb_AotRegionRechecks` counts the regions kept for a check, the checks passed and the regions invalidations looked at.
 - [ ] **Second-launch TTFF +0.8 s** (first core frame 1.55 s against 0.72 s cold): the region cache read and compiled before the boot (`installBeforeBoot`). Load fewer modules before the boot, the rest after (target 10 s, today 2.05 s).
 
 ## MMU mode (patch 0091, with dispatch's 0090, 2026-10-22)

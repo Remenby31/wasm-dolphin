@@ -256,7 +256,7 @@ test("the off-thread compiler is on by default: no parameter, worker load defaul
   assert.match(host, /this\.aotCompiler = aotCompilerRequested\(window\.location\.search\);/);
 });
 
-test("region chaining is on by default; ?regionchain=0 reaches the core through the host, the adapter and the worker (0083)", async () => {
+test("region chaining is on by default; ?regionchain=0 reaches the core through the host, the adapter and the worker (0102)", async () => {
   const { UpstreamWorkerAdapter } = await import("../src/upstream-worker-adapter.js");
   assert.equal(new UpstreamWorkerAdapter().regionChain, true);
   assert.equal(new UpstreamWorkerAdapter({ regionChain: false }).regionChain, false);

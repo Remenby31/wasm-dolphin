@@ -131,7 +131,7 @@ export async function loadAotCore(coreDir = new URL("../../cores/dolphin/", impo
     setRegionsEnabled: (on) => m._DolphinWeb_JitSetRegionsEnabled(on ? 1 : 0),
     regionCount: () => m._DolphinWeb_JitRegionCount() >>> 0,
     dispatchRegion: () => m._DolphinWeb_AotDispatchRegionForTest(),
-    // Region chaining (patch 0083): on/off, and its counters (null before 0083).
+    // Region chaining (patch 0102): on/off, and its counters (null before 0102).
     setRegionChaining: (on) => m._DolphinWeb_JitSetRegionChaining?.(on ? 1 : 0),
     regionChainStats() {
       if (!m._DolphinWeb_JitRegionChainStats) return null;

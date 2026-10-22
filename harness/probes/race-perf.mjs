@@ -250,7 +250,7 @@ export function summarizeP4(windows) {
   const diagnostics = sum.diagnostics
     ? { ...Object.fromEntries(Object.entries(sum.diagnostics).filter(([k]) => !/^topMiss|^spare$/.test(k))), topMisses: topMisses(raw.at(-1)) }
     : null;
-  // Region chaining (patch 0083), summed over the windows that have it.
+  // Region chaining (patch 0102), summed over the windows that have it.
   const chains = recs.map((w) => w.regionChain).filter(Boolean);
   if (diagnostics && chains.length) {
     diagnostics.regionChain = { enabled: chains.every((c) => c.enabled === 1) ? 1 : 0 };

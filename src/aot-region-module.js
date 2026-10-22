@@ -24,7 +24,7 @@
 //
 // Exit stub: reached by a jump out of the region and by a `dispatch` to a PC
 // that is not one of its entries, with the state written. It returns 0
-// (continue at state.pc). With `chain` (a core with patch 0083), it first
+// (continue at state.pc). With `chain` (a core with patch 0102), it first
 // calls env.region_chain(state), the core's choice of the next region (a
 // table index, 0 for none), and tail-calls that region's dispatcher through
 // env.table, the core's function table, without going back to the core's
@@ -151,7 +151,7 @@ export function regionModuleEntries(module) {
 }
 
 //   chain       the exit stub chains to the next region (env.region_chain,
-//               env.table): only for a core that exports them (patch 0083)
+//               env.table): only for a core that exports them (patch 0102)
 export function assembleRegion(fragments, { helpers, pcOffset, memoryPages, memoryMinPages = 1, sharedMemory = true, chain = false }) {
   if (!Array.isArray(fragments) || !fragments.length) throw new Error("region: no fragments");
   if (!Number.isInteger(pcOffset) || pcOffset < 0) throw new Error("region: pcOffset required");
@@ -396,9 +396,10 @@ export function groupRegions(module, order, { maxFunctions = 100 } = {}) {
 // gives another key; it ends with ":" + 64 hex, as the cache requires.
 // "region-v1" is the layout of this module and of this key text: bump it when
 // either changes (dispatchers, exports, return codes, key fields); a change
-// of code generation in the core is covered by compilerVersion instead (the
-// exit stub's chaining, patch 0083, ships with the core's version 3).
-export async function regionModuleKey(functions, { compilerVersion, codegenMask }) {
+// of code generation in the core is covered by compilerVersion instead.
+// "region-v2": the same with the chaining exit stub (`chain`, patch 0102),
+// which imports env.region_chain and env.table.
+export async function regionModuleKey(functions, { compilerVersion, codegenMask, chain = false }) {
   for (const [what, v] of [["compilerVersion", compilerVersion], ["codegenMask", codegenMask]]) {
     if (!Number.isInteger(v) || v < 0 || v > 0xffffffff) throw new Error(`region: ${what} must be a u32`);
   }
@@ -410,5 +411,5 @@ export async function regionModuleKey(functions, { compilerVersion, codegenMask 
   }).join("");
   const digest = new Uint8Array(await globalThis.crypto.subtle.digest("SHA-256", new TextEncoder().encode(text)));
   const hex = Array.from(digest, (b) => b.toString(16).padStart(2, "0")).join("");
-  return `region-v1:${hex8(compilerVersion)}:${hex8(codegenMask)}:${hex}`;
+  return `${chain ? "region-v2" : "region-v1"}:${hex8(compilerVersion)}:${hex8(codegenMask)}:${hex}`;
 }

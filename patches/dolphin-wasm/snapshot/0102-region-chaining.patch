@@ -7,18 +7,18 @@ diff --git a/Source/Core/Core/PowerPC/CachedInterpreter/CachedInterpreter.cpp b/
            fast_melee_service_poll_call: wasmTable.get(fast_melee_service_poll_call_index),
 -          fma: wasmTable.get(fma_index)
 +          fma: wasmTable.get(fma_index),
-+          // Region chaining (patch 0083): a region's exit stub asks the core
++          // Region chaining (patch 0102): a region's exit stub asks the core
 +          // for the next region and tail-calls it through the core's table.
 +          region_chain: wasmTable.get(_DolphinWeb_RegionChainHelper()),
 +          table: wasmTable
          }
        }).exports.f;
    const inst_t1 = (typeof performance !== "undefined" && performance.now) ? performance.now() : 0;
-@@ -8994,6 +8998,38 @@ inline void RegionFilterAdd(u32 pc)
+@@ -9225,6 +9229,38 @@ inline void RegionFilterAdd(u32 pc)
    s_region_filter[bit >> 6] |= u64{1} << (bit & 63);
  }
  
-+// Patch 0083: a direct-mapped cache of s_region_at (entry pc -> index + 1,
++// Patch 0102: a direct-mapped cache of s_region_at (entry pc -> index + 1,
 +// 0 empty) for the hot lookups: the dispatcher, block chaining and region
 +// chaining. s_region_at holds ~135 000 nodes, one cache miss per find.
 +// Cleared whenever s_region_at changes.
@@ -53,19 +53,19 @@ diff --git a/Source/Core/Core/PowerPC/CachedInterpreter/CachedInterpreter.cpp b/
  struct PendingRegion
  {
    std::vector<u8> bytes;
-@@ -9047,6 +9083,7 @@ u32 s_region_install_fallbacks = 0;     // likewise
+@@ -9278,6 +9314,7 @@ u32 s_region_install_fallbacks = 0;     // likewise
  // ClearCache: the ready table and the requests in flight were reset.
  void RepostWaitingRegions();
  void UnverifyAllRegions();
-+void ResetRegionChainStats();  // patch 0083
++void ResetRegionChainStats();  // patch 0102
  
  // The part of CachedInterpreter::ClearCache that concerns off-thread
  // compiles and regions (a state load may have changed any code).
-@@ -9123,6 +9160,32 @@ struct RegionStats
+@@ -9354,6 +9391,32 @@ struct RegionStats
  };
  static_assert(sizeof(RegionStats) == 256);
  std::unordered_map<u32, double> s_miss_cycles;  // while timing is on
-+// Patch 0083 diagnostics, while stats are on: the PCs without a region that
++// Patch 0102 diagnostics, while stats are on: the PCs without a region that
 +// chains of regions leave for, and the region entries block chains reach
 +// (each a return to the dispatcher). Their most frequent, published by the
 +// CPU thread with the stats (DolphinWeb_JitRegionTransitionTop).
@@ -94,7 +94,7 @@ diff --git a/Source/Core/Core/PowerPC/CachedInterpreter/CachedInterpreter.cpp b/
  alignas(8) RegionStats s_region_stats;
  bool s_region_stats_on = false;
  // Set while one sampled ExecuteOneBlock runs: its block lookups (chained
-@@ -9174,6 +9237,7 @@ void DropRegion(u32 index)
+@@ -9405,6 +9468,7 @@ void DropRegion(u32 index)
        s_region_at.erase(it);
    }
    ForEachRegionPage(region, -1);
@@ -102,7 +102,7 @@ diff --git a/Source/Core/Core/PowerPC/CachedInterpreter/CachedInterpreter.cpp b/
    s_region_filter.fill(0);
    for (const auto& [pc, owner] : s_region_at)
      RegionFilterAdd(pc);
-@@ -9186,6 +9250,7 @@ void ForgetAllRegions()
+@@ -9417,6 +9481,7 @@ void ForgetAllRegions()
  {
    s_regions.clear();
    s_region_at.clear();
@@ -110,7 +110,7 @@ diff --git a/Source/Core/Core/PowerPC/CachedInterpreter/CachedInterpreter.cpp b/
    s_region_filter.fill(0);
    std::fill(s_region_pages.begin(), s_region_pages.end(), 0);
    s_region_waiting.clear();
-@@ -9218,6 +9283,7 @@ void InstallRegion(PendingRegion& pending, int handle)
+@@ -9449,6 +9514,7 @@ void InstallRegion(PendingRegion& pending, int handle)
      s_region_at.emplace(pc, index);  // an entry already mapped keeps its region
      RegionFilterAdd(pc);
    }
@@ -118,7 +118,7 @@ diff --git a/Source/Core/Core/PowerPC/CachedInterpreter/CachedInterpreter.cpp b/
    ForEachRegionPage(s_regions.back(), +1);
  }
  
-@@ -9456,6 +9522,7 @@ void PublishRegionStats()
+@@ -9705,6 +9771,7 @@ void PublishRegionStats()
      s_region_stats.top_miss[2 * i] = i < n ? top[i].second : 0;
      s_region_stats.top_miss[2 * i + 1] = i < n ? top[i].first : 0;
    }
@@ -126,7 +126,7 @@ diff --git a/Source/Core/Core/PowerPC/CachedInterpreter/CachedInterpreter.cpp b/
  }
  
  void ApplyRegionStatsRequest()
-@@ -9474,6 +9541,7 @@ void ApplyRegionStatsRequest()
+@@ -9723,6 +9790,7 @@ void ApplyRegionStatsRequest()
      s_region_stats.installs_fast = kept.installs_fast;
      s_region_stats.install_fallbacks = kept.install_fallbacks;
      s_miss_cycles.clear();
@@ -134,7 +134,7 @@ diff --git a/Source/Core/Core/PowerPC/CachedInterpreter/CachedInterpreter.cpp b/
      s_region_stats.sample_every = static_cast<u32>(request);
      s_last_timed_ms = 0;
      s_sampled_lookup_ms = 0;
-@@ -9502,14 +9570,14 @@ bool TryRunRegion(PowerPC::PowerPCState& ppc_state)
+@@ -9751,14 +9819,14 @@ bool TryRunRegion(PowerPC::PowerPCState& ppc_state)
        s_region_stats.mode_refusals += 1;
      return false;
    }
@@ -152,7 +152,7 @@ diff --git a/Source/Core/Core/PowerPC/CachedInterpreter/CachedInterpreter.cpp b/
    if (!region.verified)
    {
      // The RAM may have been allocated again (a stop and a new boot in the same
-@@ -9519,14 +9587,14 @@ bool TryRunRegion(PowerPC::PowerPCState& ppc_state)
+@@ -9768,12 +9836,12 @@ bool TryRunRegion(PowerPC::PowerPCState& ppc_state)
      if (region.layout_hash != WasmLayoutHash(CurrentWasmStateLayout(Core::System::GetInstance())) ||
          !RegionCodeMatchesPlan(region.ranges, region.members))
      {
@@ -160,7 +160,14 @@ diff --git a/Source/Core/Core/PowerPC/CachedInterpreter/CachedInterpreter.cpp b/
 +      DropRegion(index);
        return false;
      }
+     if (!RegionStillCheckable(region.entries, region.members))
+     {
+-      DropRegion(it->second);
++      DropRegion(index);
+       return false;
+     }
      region.verified = true;
+@@ -9781,7 +9849,7 @@ bool TryRunRegion(PowerPC::PowerPCState& ppc_state)
    }
    using RegionFunction = int (*)(int);
    const auto run = reinterpret_cast<RegionFunction>(
@@ -169,7 +176,7 @@ diff --git a/Source/Core/Core/PowerPC/CachedInterpreter/CachedInterpreter.cpp b/
    const s32 downcount = ppc_state.downcount;
    int code;
    if (s_region_stats_on && s_region_stats.sample_every != 0)
-@@ -9562,14 +9630,116 @@ inline bool RegionWouldRun(const PowerPC::PowerPCState& ppc_state)
+@@ -9817,14 +9885,116 @@ inline bool RegionWouldRun(const PowerPC::PowerPCState& ppc_state)
    if (!s_regions_enabled.load(std::memory_order_relaxed) || !RegionFilterHas(ppc_state.pc) ||
        !ppc_state.msr.IR || !ppc_state.msr.DR || !ppc_state.msr.FP ||
        (ppc_state.feature_flags & FEATURE_FLAG_PERFMON) != 0 ||
@@ -184,7 +191,7 @@ diff --git a/Source/Core/Core/PowerPC/CachedInterpreter/CachedInterpreter.cpp b/
    return true;
  }
 +
-+// Patch 0083, region chaining. A region leaving for a PC it does not hold
++// Patch 0102, region chaining. A region leaving for a PC it does not hold
 +// (its exit stub: a jump out of the region, or a blr/bctr/bctrl to a PC that
 +// is not one of its entries; state.pc and the rest of the state written)
 +// calls this through its `region_chain` import: the table index of the
@@ -262,7 +269,7 @@ diff --git a/Source/Core/Core/PowerPC/CachedInterpreter/CachedInterpreter.cpp b/
 +}
 +
 +// ?regionchain=0 turns region chaining off (every exit returns to the
-+// dispatcher, as before 0083); on by default. Any thread.
++// dispatcher, as before 0102); on by default. Any thread.
 +extern "C" EMSCRIPTEN_KEEPALIVE void DolphinWeb_JitSetRegionChaining(int enabled)
 +{
 +  s_region_chain_enabled.store(enabled != 0, std::memory_order_relaxed);
@@ -285,15 +292,5 @@ diff --git a/Source/Core/Core/PowerPC/CachedInterpreter/CachedInterpreter.cpp b/
 +}
 +
  // Code at [address, address + size) changed (icbi, DMA, a cache clear):
- // regions covering it are dropped. From JitInterface.
- void DolphinWeb_InvalidateRegions(u32 address, u32 size)
-@@ -15290,7 +15460,8 @@ namespace
- // Bumped whenever the code the translator emits changes (cache keys).
- // 2: modules carry their heap layout (region-layout); version 1 modules have
- // none and would never install.
--constexpr u32 AOT_COMPILER_VERSION = 2;
-+// 3: region modules chain through env.region_chain and env.table (0083).
-+constexpr u32 AOT_COMPILER_VERSION = 3;
- constexpr u32 AOT_MAX_FRAGMENT_BYTES = 1u << 20;
- thread_local std::vector<u32> t_aot_out;
- u8* s_aot_ram = nullptr;
+ // regions covering it are checked against the plan before they next run, and
+ // dropped then if it changed. From JitInterface.
