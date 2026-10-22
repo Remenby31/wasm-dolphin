@@ -93,7 +93,9 @@ async function regionPipeline(page) {
     // layoutRefused: the core's refusals plus discio's skips before queueing
     // (0078); heapPatched: modules patched to a moved heap (0084, #71).
     layoutRefused: Number.isInteger(reply.layoutRefused) ? reply.layoutRefused : null,
-    heapPatched: Number.isInteger(reply.heapPatched) ? reply.heapPatched : null
+    heapPatched: Number.isInteger(reply.heapPatched) ? reply.heapPatched : null,
+    // This launch's heap layout (hash): it varies between launches of one build.
+    layoutHash: Number.isInteger(reply.layoutHash) ? reply.layoutHash : null
   };
 }
 
@@ -199,6 +201,9 @@ async function main() {
   const gates = new Map();
   let arrive = null;
   o.onWindow = async (phase, session) => {
+    // Without --aot-seed: one read of the region pipeline (the launch's
+    // layout hash and counts), no waiting.
+    if (phase === "start" && !values["aot-seed"]) gates.set(session, { ...(await regionPipeline(session.page)), together: await arrive() });
     if (phase === "start" && values["aot-seed"]) {
       const gate = await waitRegionsQuiescent(() => regionPipeline(session.page), { target: seedRegions.get(session.seedOf) ?? null, timeoutMs: num(values, "gate-sec", { min: 1 }) * 1000 });
       // What the boot of this arm said about its regions (for the region robustness work).
@@ -284,8 +289,8 @@ async function main() {
         for (const s of sessions) await s?.close().catch(() => {});
       }
       for (const x of record.arms) if (x.cold) x.cold.instructionsPerGuestCycle = instructionsPerGuestCycle(x.cold);
+      record.arms.forEach((x, a) => { x.regionGate = gates.get(sessions[a]) ?? null; });
       if (values["aot-seed"]) {
-        record.arms.forEach((x, a) => { x.regionGate = gates.get(sessions[a]) ?? null; });
         const counts = record.arms.map((x) => x.regionGate?.installed);
         record.regionCountsEqual = counts.every((c) => Number.isInteger(c) && c === counts[0]);
         console.log(`[race-multi] run ${r} regions installed per arm: ${counts.join(" / ")}${record.regionCountsEqual ? "" : " (NOT EQUAL)"}; layoutRefused ${record.arms.map((x) => x.regionGate?.layoutRefused ?? "-").join(" / ")}; heapPatched ${record.arms.map((x) => x.regionGate?.heapPatched ?? "-").join(" / ")}; boot rank ${record.arms.map((x) => x.bootRank).join(" / ")}; quiescent ${record.arms.map((x) => (x.regionGate?.quiescent ? `${x.regionGate.ms} ms` : x.regionGate?.why ?? "?")).join(" / ")}`);
