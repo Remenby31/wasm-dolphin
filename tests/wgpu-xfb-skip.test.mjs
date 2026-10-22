@@ -27,3 +27,13 @@ test("wgpu keeps one present per VI field (no duplicate-XFB skipping)", () => {
   // not presented (presents < VI outputs) once the RAM copy was skipped.
   assert.match(core, /if \(s_video_backend == "WebGPU"\)\n\s*Config::SetBase\(Config::GFX_HACK_SKIP_DUPLICATE_XFBS, false\);/);
 });
+
+test("dual core presents at their time again: the video thread sleeps until presentation_time (patch 0094)", () => {
+  // Measured 2026-10-22: without the sleep, rush frame presentation let the
+  // CPU thread emit 2-3 cheap fields at once and every burst reached the
+  // screen together (gxscene, video=wgpu, 100 %: frame-time p95 35-52 ms).
+  const lock = JSON.parse(read("provenance/dolphin-source.lock.json"));
+  assert.ok(lock.patches.some((p) => /0094-present-sleep-until-on-video-thread\.patch$/.test(p.path)));
+  const patch = read("patches/dolphin-wasm/snapshot/0094-present-sleep-until-on-video-thread.patch");
+  assert.match(patch, /\+      if \(!Core::IsCPUThread\(\)\)\n\+        Core::System::GetInstance\(\)\.GetCoreTiming\(\)\.SleepUntil\(present_time\);/);
+});
