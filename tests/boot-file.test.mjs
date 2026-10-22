@@ -49,3 +49,14 @@ test("an executable gets Dolphin's file-name game ID", async () => {
   assert.equal(executableGameId("demo.v2.elf"), "ID-demo.v2");
   assert.equal(executableGameId("noext"), "ID-noext");
 });
+
+test("a FIFO log (.dff) boots through FifoPlayer when its header says so", () => {
+  assert.equal(bootFileKind("gxscene.DFF"), "dff");
+  const head = new Uint8Array(0x100);
+  new DataView(head.buffer).setUint32(0, 0x0d01f1f0, true);
+  assert.deepEqual(checkExecutable("dff", head, 4096), { kind: "dff", entryPoint: null });
+  assert.throws(() => checkExecutable("dff", new Uint8Array(0x100), 4096), /Not a FIFO log/);
+  const bigEndian = new Uint8Array(0x100);
+  new DataView(bigEndian.buffer).setUint32(0, 0x0d01f1f0, false);
+  assert.throws(() => checkExecutable("dff", bigEndian, 4096), /Not a FIFO log/);
+});

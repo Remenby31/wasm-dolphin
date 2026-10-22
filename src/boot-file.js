@@ -1,8 +1,9 @@
 // Copyright 2026 wasm-dolphin contributors
 // SPDX-License-Identifier: GPL-2.0-or-later
 //
-// What a picked file is: a disc image for DiscIO, or a bare executable
-// (.dol/.elf) that BootParameters::GenerateFromFile boots on its own. Dolphin
+// What a picked file is: a disc image for DiscIO, or a file that
+// BootParameters::GenerateFromFile boots on its own: a bare executable
+// (.dol/.elf), or a FIFO log (.dff) that FifoPlayer replays. Dolphin
 // picks the executable path from the extension, so the extension decides
 // here too; the header is checked so a mislabelled file fails with a
 // sentence instead of a core that never starts.
@@ -14,11 +15,14 @@ const ELF_MAGIC = [0x7f, 0x45, 0x4c, 0x46];
 const ELFCLASS32 = 1;
 const ELFDATA2MSB = 2;
 const EM_PPC = 20;
+// FifoDataFile's FILE_ID, the first word of its header, little-endian.
+const DFF_FILE_ID = 0x0d01f1f0;
 
 export function bootFileKind(name) {
   const lower = String(name || "").toLowerCase();
   if (lower.endsWith(".dol")) return "dol";
   if (lower.endsWith(".elf")) return "elf";
+  if (lower.endsWith(".dff")) return "dff";
   return "disc";
 }
 
@@ -46,6 +50,12 @@ export function checkExecutable(kind, head, size) {
       throw new Error(`DOL entry point 0x${dol.entryPoint.toString(16)} is not in GameCube RAM`);
     }
     return { kind, entryPoint: dol.entryPoint };
+  }
+  if (kind === "dff") {
+    if (size < 4 || new DataView(head.buffer, head.byteOffset, head.byteLength).getUint32(0, true) !== DFF_FILE_ID) {
+      throw new Error("Not a FIFO log: bad magic");
+    }
+    return { kind, entryPoint: null };
   }
   throw new Error(`${kind} is not an executable`);
 }

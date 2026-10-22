@@ -27,6 +27,8 @@
 #include "Core/HW/VideoInterface.h"
 #include "Core/PowerPC/PowerPC.h"
 #include "Core/System.h"
+#include "Core/FifoPlayer/FifoDataFile.h"
+#include "Core/FifoPlayer/FifoRecorder.h"
 #include "InputCommon/GCPadStatus.h"
 #include "VideoCommon/CommandProcessor.h"
 #include "VideoCommon/Fifo.h"
@@ -1294,6 +1296,31 @@ EMSCRIPTEN_KEEPALIVE std::uintptr_t DolphinWeb_HarnessPcAddress()
 EMSCRIPTEN_KEEPALIVE std::uint32_t DolphinWeb_HarnessViRingCapacity() { return HARNESS_VI_RING_CAPACITY; }
 EMSCRIPTEN_KEEPALIVE std::uint32_t DolphinWeb_HarnessViRingHead() { return s_harness_vi_head.load(std::memory_order_acquire); }
 EMSCRIPTEN_KEEPALIVE std::uint32_t DolphinWeb_HarnessLoadGeneration() { return s_harness_load_generation.load(std::memory_order_acquire); }
+
+// Harness: record the next `frames` frames of the GPU FIFO into a FIFO log
+// at `path` (FifoPlayer's .dff format), so a homebrew's frames can be
+// replayed on every backend without its CPU side. State: 0 idle,
+// 1 recording, 2 saved, 3 failed.
+static std::atomic<int> s_fifo_record_state{0};
+static std::string s_fifo_record_path;
+EMSCRIPTEN_KEEPALIVE int DolphinWeb_HarnessFifoRecord(int frames, const char* path)
+{
+  if (!s_harness_enabled.load(std::memory_order_relaxed) || frames <= 0 || !path ||
+      s_fifo_record_state.load(std::memory_order_acquire) == 1)
+  {
+    return 0;
+  }
+  s_fifo_record_path = path;
+  s_fifo_record_state.store(1, std::memory_order_release);
+  auto& recorder = Core::System::GetInstance().GetFifoRecorder();
+  recorder.StartRecording(frames, [&recorder] {
+    FifoDataFile* file = recorder.GetRecordedFile();
+    const bool saved = file && file->Save(s_fifo_record_path);
+    s_fifo_record_state.store(saved ? 2 : 3, std::memory_order_release);
+  });
+  return 1;
+}
+EMSCRIPTEN_KEEPALIVE int DolphinWeb_HarnessFifoRecordState() { return s_fifo_record_state.load(std::memory_order_acquire); }
 
 void DolphinWeb_OnXfb(const std::uint8_t* xfb, std::uint32_t width, std::uint32_t stride,
                       std::uint32_t height)

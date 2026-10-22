@@ -1,0 +1,15 @@
+{
+  "name": "fifo-homebrew",
+  "runs": 2,
+  "warmupSec": 4,
+  "sampleSec": 8,
+  "games": [
+    { "id": "gxscene-fifo", "iso": "harness/homebrew/out/gxscene.dff", "static": true, "set": { "cpu": "single" } },
+    { "id": "efbpeek-fifo", "iso": "harness/homebrew/out/efbpeek.dff", "static": true, "set": { "cpu": "single" } }
+  ],
+  "configs": [
+    { "id": "sw-interp", "preset": "sw-interp" },
+    { "id": "wgpu-interp", "preset": "wgpu-nojit" }
+  ],
+  "reference": "sw-interp"
+}
