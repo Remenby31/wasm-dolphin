@@ -95,7 +95,9 @@ async function regionPipeline(page) {
     layoutRefused: Number.isInteger(reply.layoutRefused) ? reply.layoutRefused : null,
     heapPatched: Number.isInteger(reply.heapPatched) ? reply.heapPatched : null,
     // This launch's heap layout (hash): it varies between launches of one build.
-    layoutHash: Number.isInteger(reply.layoutHash) ? reply.layoutHash : null
+    layoutHash: Number.isInteger(reply.layoutHash) ? reply.layoutHash : null,
+    // Where the emulated memory sits (ram/L1 bases and sizes, heap bases, heap size, stack).
+    layout: reply.layout ?? null
   };
 }
 
