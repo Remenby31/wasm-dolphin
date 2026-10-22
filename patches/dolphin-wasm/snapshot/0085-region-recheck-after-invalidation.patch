@@ -1,0 +1,155 @@
+diff --git a/Source/Core/Core/PowerPC/CachedInterpreter/CachedInterpreter.cpp b/Source/Core/Core/PowerPC/CachedInterpreter/CachedInterpreter.cpp
+--- a/Source/Core/Core/PowerPC/CachedInterpreter/CachedInterpreter.cpp
++++ b/Source/Core/Core/PowerPC/CachedInterpreter/CachedInterpreter.cpp
+@@ -8960,6 +8960,17 @@ bool RegionRangesHash(const std::vector<u32>& ranges, u32 first, u32 count, u64*
+   return true;
+ }
+ 
++// Whether a region kept after an invalidation can be vouched for by its
++// hashes alone (patch 0085): every member hashed, and no HLE hook installed
++// at an entry since it was (a hook changes no byte; RegionInstallable checks
++// it once).
++bool RegionStillCheckable(const std::vector<u32>& entries, const std::vector<RegionMember>& members)
++{
++  return std::all_of(members.begin(), members.end(), [](const RegionMember& m) { return m.hash != 0; }) &&
++         std::none_of(entries.begin(), entries.end(),
++                      [](u32 pc) { return HLE::GetHookByAddress(pc) != 0; });
++}
++
+ // Every member's code is still the code the plan (and the translator) saw.
+ bool RegionCodeMatchesPlan(const std::vector<u32>& ranges, const std::vector<RegionMember>& members)
+ {
+@@ -9225,6 +9236,11 @@ void InstallRegion(PendingRegion& pending, int handle)
+ // The code may have changed since the translation (an overlay, code
+ // reloaded): an icbi then found no region to drop. Checked against the
+ // plan's hashes, not against whatever memory holds now.
++// Installed regions an invalidation left to be checked again instead of
++// dropped (patch 0085), and regions found unchanged by such a check.
++u32 s_region_invalidated_kept = 0;
++u32 s_region_reverified = 0;
++u32 s_region_invalidation_scans = 0;  // regions an invalidation looked at
+ WasmStateLayout CurrentWasmStateLayout(Core::System& system);
+ u32 WasmLayoutHash(const WasmStateLayout& layout);
+ u32 s_region_layout_refused = 0;
+@@ -9522,7 +9538,13 @@ bool TryRunRegion(PowerPC::PowerPCState& ppc_state)
+       DropRegion(it->second);
+       return false;
+     }
++    if (!RegionStillCheckable(region.entries, region.members))
++    {
++      DropRegion(it->second);
++      return false;
++    }
+     region.verified = true;
++    s_region_reverified += 1;
+   }
+   using RegionFunction = int (*)(int);
+   const auto run = reinterpret_cast<RegionFunction>(
+@@ -9571,8 +9593,9 @@ inline bool RegionWouldRun(const PowerPC::PowerPCState& ppc_state)
+ }  // namespace
+ 
+ // Code at [address, address + size) changed (icbi, DMA, a cache clear):
+-// regions covering it are dropped. From JitInterface.
+-void DolphinWeb_InvalidateRegions(u32 address, u32 size)
++// regions covering it are checked against the plan before they next run, and
++// dropped then if it changed. From JitInterface.
++void DolphinWeb_InvalidateRegions(u32 address, u32 size, bool forced)
+ {
+   // MEM1 offsets: the 0x8 and 0xC views and DMA (physical) addresses meet.
+   const u64 begin = address & 0x01ffffff;
+@@ -9609,12 +9632,32 @@ void DolphinWeb_InvalidateRegions(u32 address, u32 size)
+   for (u32 index = 0; index < s_regions.size(); ++index)
+   {
+     const InstalledRegion& region = s_regions[index];
+-    for (std::size_t i = 0; region.live && i + 1 < region.ranges.size(); i += 2)
++    // Already due for a check before it runs: nothing more to learn here
++    // (a game invalidating a megabyte line by line rescanned every range).
++    if (!region.live || (!region.verified && !forced))
++      continue;
++    s_region_invalidation_scans += 1;
++    for (std::size_t i = 0; i + 1 < region.ranges.size(); i += 2)
+     {
+       const u64 start = region.ranges[i] & 0x01ffffff;
+       const u64 stop = start + (region.ranges[i + 1] - region.ranges[i]);
+-      if (start < end && begin < stop)
++      if (!(start < end && begin < stop))
++        continue;
++      // The OS rewrites or re-DMAs code with the same bytes (35 regions per
++      // second launch were dropped during its init): checked against the
++      // plan's hashes before the region next runs (RegionStillCheckable
++      // too), dropped only if the code changed. A forced invalidation
++      // (breakpoints) drops it now, as before.
++      if (forced || !RegionStillCheckable(region.entries, region.members))
++      {
+         DropRegion(index);
++      }
++      else
++      {
++        s_regions[index].verified = false;
++        s_region_invalidated_kept += 1;
++      }
++      break;
+     }
+   }
+ }
+@@ -9718,6 +9761,12 @@ extern "C" EMSCRIPTEN_KEEPALIVE void DolphinWeb_AotInvalidateForTest(u32 address
+   Core::System::GetInstance().GetJitInterface().InvalidateICache(address, size, false);
+ }
+ 
++// A forced invalidation (breakpoints): regions over it are dropped (0085).
++extern "C" EMSCRIPTEN_KEEPALIVE void DolphinWeb_AotInvalidateForcedForTest(u32 address, u32 size)
++{
++  Core::System::GetInstance().GetJitInterface().InvalidateICache(address, size, true);
++}
++
+ extern "C" EMSCRIPTEN_KEEPALIVE u32 DolphinWeb_JitRegionCount()
+ {
+   return static_cast<u32>(s_region_at.size());
+@@ -15442,6 +15491,16 @@ extern "C" EMSCRIPTEN_KEEPALIVE u32 DolphinWeb_AotLayoutRefused()
+   return s_region_layout_refused;
+ }
+ 
++// [installed regions an invalidation left to be checked again, regions found
++// unchanged when checked again (after an invalidation or a cache clear),
++// regions an invalidation looked at].
++extern "C" EMSCRIPTEN_KEEPALIVE void DolphinWeb_AotRegionRechecks(u32* out)
++{
++  out[0] = s_region_invalidated_kept;
++  out[1] = s_region_reverified;
++  out[2] = s_region_invalidation_scans;
++}
++
+ extern "C" EMSCRIPTEN_KEEPALIVE void DolphinWeb_AotKeyParts(u32* out)
+ {
+   out[0] = AOT_COMPILER_VERSION;
+diff --git a/Source/Core/Core/PowerPC/JitInterface.cpp b/Source/Core/Core/PowerPC/JitInterface.cpp
+--- a/Source/Core/Core/PowerPC/JitInterface.cpp
++++ b/Source/Core/Core/PowerPC/JitInterface.cpp
+@@ -279,14 +279,15 @@ std::size_t JitInterface::DisassembleFarCode(const JitBlock& block, std::ostream
+ }
+ 
+ #ifdef __EMSCRIPTEN__
+-// Region modules (CachedInterpreter.cpp, P4) covering changed code are dropped.
+-void DolphinWeb_InvalidateRegions(u32 address, u32 size);
++// Region modules (CachedInterpreter.cpp, P4) covering changed code are checked
++// against their plan before they run again; dropped when forced (0085).
++void DolphinWeb_InvalidateRegions(u32 address, u32 size, bool forced);
+ #endif
+ 
+ void JitInterface::InvalidateICache(u32 address, u32 size, bool forced)
+ {
+ #ifdef __EMSCRIPTEN__
+-  DolphinWeb_InvalidateRegions(address, size);
++  DolphinWeb_InvalidateRegions(address, size, forced);
+ #endif
+   if (m_jit)
+     m_jit->GetBlockCache()->InvalidateICache(address, size, forced);
+@@ -295,7 +296,7 @@ void JitInterface::InvalidateICache(u32 address, u32 size, bool forced)
+ void JitInterface::InvalidateICacheLine(u32 address)
+ {
+ #ifdef __EMSCRIPTEN__
+-  DolphinWeb_InvalidateRegions(address & ~0x1fu, 32);
++  DolphinWeb_InvalidateRegions(address & ~0x1fu, 32, false);
+ #endif
+   if (m_jit)
+     m_jit->GetBlockCache()->InvalidateICacheLine(address);
