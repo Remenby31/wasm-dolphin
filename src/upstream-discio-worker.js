@@ -1262,6 +1262,7 @@ async function handleMessage(type, payload) {
         coreLog: payload.coreLog,
         memcardSlotB: payload.memcardSlotB,
         efbAccess: payload.efbAccess,
+        efbCopyRam: payload.efbCopyRam,
         efbDiag: payload.efbDiag,
         jitVerbose: payload.jitVerbose,
         frameCap: payload.frameCap,
@@ -1877,6 +1878,7 @@ async function loadCore({
   coreLog = false,
   memcardSlotB = false,
   efbAccess = false,
+  efbCopyRam = false,
   efbDiag = false,
   jitVerbose = false,
   frameCap = 0,
@@ -2347,6 +2349,7 @@ async function loadCore({
     dolphinCoreLog: Boolean(coreLog),
     dolphinMemcardSlotB: Boolean(memcardSlotB),
     dolphinEfbAccess: Boolean(efbAccess),
+    dolphinEfbCopyRam: Boolean(efbCopyRam),
     // Ranks the instructions that block JIT compilation (?jitverbose=1).
     dolphinWebVerbosePpcJit: Boolean(jitVerbose),
     dolphinFrameCap: (frameCapTarget = Number(frameCap) || 0),

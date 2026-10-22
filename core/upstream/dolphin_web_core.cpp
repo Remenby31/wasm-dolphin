@@ -774,6 +774,11 @@ void EnsureRuntime()
   const bool efb_access = EM_ASM_INT({ return (typeof Module !== 'undefined' &&
                                                Module['dolphinEfbAccess']) ? 1 : 0; }) != 0;
   Config::SetBase(Config::GFX_HACK_EFB_ACCESS_ENABLE, efb_access);
+  // ?efbcopyram=1 (Module['dolphinEfbCopyRam']): EFB copies also land in
+  // guest RAM, as upstream's GameINIs ask with EFBToTextureEnable=False.
+  const bool efb_copy_ram = EM_ASM_INT({ return (typeof Module !== 'undefined' &&
+                                                 Module['dolphinEfbCopyRam']) ? 1 : 0; }) != 0;
+  Config::SetBase(Config::GFX_HACK_SKIP_EFB_COPY_TO_RAM, !efb_copy_ram);
   // Fill the canvas with the XFB, as the software presenter does. Dolphin's
   // default analog aspect pillarboxes a 640-wide XFB to ~583 pixels, so the
   // hardware path showed every game narrower than the software one.

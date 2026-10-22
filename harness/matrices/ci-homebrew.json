@@ -16,6 +16,12 @@
       "set": { "efbaccess": "1", "cpu": "single" }
     },
     {
+      "id": "ramcopy",
+      "iso": "harness/homebrew/out/ramcopy.iso",
+      "static": true,
+      "set": { "efbcopyram": "1", "cpu": "single" }
+    },
+    {
       "id": "cpufuzz-nomcrf",
       "iso": "harness/homebrew/out/cpufuzz-nomcrf.iso",
       "static": true

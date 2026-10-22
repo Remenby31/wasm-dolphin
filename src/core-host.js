@@ -109,6 +109,8 @@ export class EmulatorHost {
     this.memcardSlotB = new URLSearchParams(window.location.search).get("memcardb") === "1";
     // CPU reads of the EFB (peeks), off by default as in Dolphin (EFBAccessEnable).
     this.efbAccess = new URLSearchParams(window.location.search).get("efbaccess") === "1";
+    // EFB copies written to guest RAM too (Dolphin's EFBToTextureEnable=False).
+    this.efbCopyRam = new URLSearchParams(window.location.search).get("efbcopyram") === "1";
     this.savesMode = new URLSearchParams(window.location.search).get("saves") === "off" ? "off" : "";
     this.efbDiag = requestedEfbDiag();
     this.jitVerbose = new URLSearchParams(window.location.search).get("jitverbose") === "1";
@@ -407,6 +409,7 @@ export class EmulatorHost {
             coreLog: this.coreLog,
             memcardSlotB: this.memcardSlotB,
             efbAccess: this.efbAccess,
+            efbCopyRam: this.efbCopyRam,
             savesMode: this.savesMode,
             efbDiag: this.efbDiag,
             jitVerbose: this.jitVerbose,
