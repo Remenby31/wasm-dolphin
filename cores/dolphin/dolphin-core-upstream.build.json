@@ -1,18 +1,18 @@
 {
   "schemaVersion": 1,
-  "createdAt": "2026-10-21T04:50:08.776Z",
-  "coreId": "sha256:11bf9609c0b1b9bd643164c65599e4670db6f5dc1163822e435166135fe27b81",
+  "createdAt": "2026-10-22T12:26:22.025Z",
+  "coreId": "sha256:7731668320c3baad43739730a28cbae5dc3bc83c15a34a8cd560a6707492cda1",
   "repository": {
-    "commit": "6d1a7abd593447ae6e8e2f8ee2d2f77516654c7a",
+    "commit": "965d149b94739ff39127752ce960484e739905f2",
     "status": "",
     "cleanTree": true
   },
   "source": {
     "upstreamCommit": "e22551eae1c84a7e4d0b6a5c519ef4ed4ef69df1",
-    "patchSeriesSha256": "ffe15a3f573fe24be7535ee0feb41969679eab1fd29a52856907f3f162e9ba8f",
-    "vendorResultTree": "c8edae060c82eced5fd31b49f9a5ada0cac65558",
-    "sourceLockSha256": "9bc22829777b1b3ee2003f74bc04256aaf6e14c06c9ad1b79a479c8f3763965b",
-    "vendorSnapshotSha256": "2b5c70a7a8735772df68027a5a70c29281c0e32c68ff993ee0d8d2b9c9e11749",
+    "patchSeriesSha256": "ec17ecb863d6d524f2045e94b82c7b186392512f3ebe99334a80cddfccf5df70",
+    "vendorResultTree": "b8e03d1e0ee6e3f13b2c567a359041d7aa855e90",
+    "sourceLockSha256": "70b7775a6b5f345611622fedd6a2ba33159a25aa993cc144dd121104b87fee85",
+    "vendorSnapshotSha256": "875ed8b65c57127faa83235d0a0bf2ecab517fc4abe65283ff772ab93de95361",
     "localInputsSha256": "8e00591e696ccead20e91b1d96f29fc44f2d309b45f9ef8f606a7b1b0e23b4b6",
     "localInputs": [
       {
@@ -72,7 +72,7 @@
     "nagaDependencyVersion": "26.0.0",
     "cargoLockSha256": "1f9dbc6ae36abff7af42626c17fb899275bcd7e134d36ec24a78ef79c8c4ce78",
     "observed": {
-      "platform": "linux-x64",
+      "platform": "linux-arm64",
       "emsdkCommit": "bafd64c26bdaf10bd829163d1575b50b759a72d8",
       "emscriptenVersion": "5.0.7",
       "emccVersion": "emcc (Emscripten gcc/clang-like replacement + linker emulating GNU ld) 5.0.7 (263db4cffa6f9fc2ec514a70abac81362ea41849)",
@@ -85,45 +85,45 @@
       "rustcCommit": "7c3c88f42ad444f4688b865591d84660be4ece2f",
       "rustSrcPresent": true,
       "hashes": {
-        "clangSha256": "1b251c7453ba8f7c7d751151f98ca35637493d9092209d8b4ebcf296728b9a00",
-        "wasmLdSha256": "c041439a76fd714e5343eb10d962ed90f2028244cb954076ad3a2560f8f7459b",
-        "wasmOptSha256": "879bd5d240e97b0d3d4cfeac430f0a0f096f0490c3c3236cd3a5e1d8c62d88bd",
-        "rustcSha256": "e3eb90defdeb5c84d4431f5697925d13274d2b22a8acaa4363e7c952061115d6",
-        "cargoSha256": "4915338d52569f9f4c8af911c50af943a87e99256ccaa6f5977fbb97551abbf5",
-        "cmakeSha256": "2cb2b2ed8a79eb5612bd611d010c882bf467feb51ad69dac288a245519080408",
-        "ninjaSha256": "696f9628a79d9ce50314cf9556d7cd1a1d1ec52b8fd52828f6f9db1719565b67"
+        "clangSha256": "6622fda056a8c518f31ed587ae7ee33f5683fbe035c82e3593b3d2496beb6ccd",
+        "wasmLdSha256": "056233b51fff01420340aa0c53e6d2b4a0ce0b36cb814502947cea058e5e9620",
+        "wasmOptSha256": "f697d0085c681cdd278e4b3c56d21969e54dfe8faf1a10d9619e6adc1f925b43",
+        "rustcSha256": "0ca9f5ed09851e68d0fcaf816b6a370482a4b8964882421b5380c964e9f5538f",
+        "cargoSha256": "8cc1dd13e0b4baf36547ceaa4b98be622ef0a97263dcddf92874f02c8c8cd2d6",
+        "cmakeSha256": "e2fedfca09764eae13d19af0d5a519c6756cab595c1597aebb0137761bf0a189",
+        "ninjaSha256": "abf714870db6db3de512100023d26db0b2750d6afffe96cdde5513564e3d910b"
       },
-      "toolchainDir": "/opt/wasm-toolchain"
+      "toolchainDir": "/home/admin/salon-bench/build/.tools"
     }
   },
   "configure": {
-    "buildDir": "/wasm-dolphin/build/repro/linux-x64/dolphin-wasm",
-    "outputDir": "/wasm-dolphin/build/repro/linux-x64/core",
-    "nagaLibrarySha256": "1f7f053755a4e4cde239645bfefbeddc1a3fd825e9fe6b1c0181eb3272218338",
+    "buildDir": "/home/admin/salon-bench/build/work/build/repro/linux-arm64/dolphin-wasm",
+    "outputDir": "/home/admin/salon-bench/build/work/build/repro/linux-arm64/core",
+    "nagaLibrarySha256": "74a279d0c51741f98d4ec239c6bd9db12272a5216703028e89ed8798687cd572",
     "wasmMemoryPages": 24576,
     "fastBranchInline": "1",
     "fallbackMapDiagnostics": "0",
     "fallbackMapBits": "16",
     "directWasmBlockDispatch": "0",
     "detTrace": "0",
-    "wasmCompileFlags": "-O3 -pthread -msimd128 -flto -DXXH_VECTOR=0 -DDOLPHIN_WEB_HOT_COUNTERS=0 -DDOLPHIN_WEB_INLINE_FAST_BRANCH=1 -DDOLPHIN_WEB_FALLBACK_MAP_DIAGNOSTICS=0 -DDOLPHIN_WEB_FALLBACK_MAP_BITS=16 -DDOLPHIN_WEB_DIRECT_WASM_BLOCK_DISPATCH=0 -DDOLPHIN_WEB_DET_TRACE=0 -ffile-prefix-map=/wasm-dolphin=/wasm-dolphin",
+    "wasmCompileFlags": "-O3 -pthread -msimd128 -flto -DXXH_VECTOR=0 -DDOLPHIN_WEB_HOT_COUNTERS=0 -DDOLPHIN_WEB_INLINE_FAST_BRANCH=1 -DDOLPHIN_WEB_FALLBACK_MAP_DIAGNOSTICS=0 -DDOLPHIN_WEB_FALLBACK_MAP_BITS=16 -DDOLPHIN_WEB_DIRECT_WASM_BLOCK_DISPATCH=0 -DDOLPHIN_WEB_DET_TRACE=0 -ffile-prefix-map=/home/admin/salon-bench/build/work=/wasm-dolphin",
     "sourcePathFlags": [
-      "-ffile-prefix-map=/wasm-dolphin=/wasm-dolphin"
+      "-ffile-prefix-map=/home/admin/salon-bench/build/work=/wasm-dolphin"
     ],
     "rustRemapFlags": [
-      "--remap-path-prefix=/opt/cargo=/cargo",
-      "--remap-path-prefix=/opt/cargo/registry/src/index.crates.io-1949cf8c6b5b557f=/cargo/registry/src/crates.io",
-      "--remap-path-prefix=/opt/rustup/toolchains/nightly-2026-05-15-x86_64-unknown-linux-gnu/lib/rustlib/src/rust=/rustc/7c3c88f42ad444f4688b865591d84660be4ece2f",
-      "--remap-path-prefix=/wasm-dolphin=/wasm-dolphin"
+      "--remap-path-prefix=/home/admin/salon-bench/build/cargo=/cargo",
+      "--remap-path-prefix=/home/admin/salon-bench/build/cargo/registry/src/index.crates.io-1949cf8c6b5b557f=/cargo/registry/src/crates.io",
+      "--remap-path-prefix=/home/admin/salon-bench/build/rustup/toolchains/nightly-2026-05-15-aarch64-unknown-linux-gnu/lib/rustlib/src/rust=/rustc/7c3c88f42ad444f4688b865591d84660be4ece2f",
+      "--remap-path-prefix=/home/admin/salon-bench/build/work=/wasm-dolphin"
     ],
     "cmakeArgs": [
-      "/opt/wasm-toolchain/python/bin/cmake",
+      "/home/admin/salon-bench/build/.tools/python/bin/cmake",
       "-S",
-      "/wasm-dolphin/vendor/dolphin",
+      "/home/admin/salon-bench/build/work/vendor/dolphin",
       "-B",
-      "/wasm-dolphin/build/repro/linux-x64/dolphin-wasm",
+      "/home/admin/salon-bench/build/work/build/repro/linux-arm64/dolphin-wasm",
       "-GNinja",
-      "-DCMAKE_MAKE_PROGRAM=/opt/wasm-toolchain/python/bin/ninja",
+      "-DCMAKE_MAKE_PROGRAM=/home/admin/salon-bench/build/.tools/python/bin/ninja",
       "-DCMAKE_BUILD_TYPE=Release",
       "-DCMAKE_TRY_COMPILE_CONFIGURATION=Debug",
       "-DCMAKE_EXPORT_COMPILE_COMMANDS=ON",
@@ -159,38 +159,38 @@
       "-DWITH_AVX512=OFF",
       "-DWITH_AVX512VNNI=OFF",
       "-DWITH_VPCLMULQDQ=OFF",
-      "-DCMAKE_C_FLAGS:STRING=-O3 -pthread -msimd128 -flto -DXXH_VECTOR=0 -DDOLPHIN_WEB_HOT_COUNTERS=0 -DDOLPHIN_WEB_INLINE_FAST_BRANCH=1 -DDOLPHIN_WEB_FALLBACK_MAP_DIAGNOSTICS=0 -DDOLPHIN_WEB_FALLBACK_MAP_BITS=16 -DDOLPHIN_WEB_DIRECT_WASM_BLOCK_DISPATCH=0 -DDOLPHIN_WEB_DET_TRACE=0 -ffile-prefix-map=/wasm-dolphin=/wasm-dolphin",
-      "-DCMAKE_CXX_FLAGS:STRING=-O3 -pthread -msimd128 -flto -DXXH_VECTOR=0 -DDOLPHIN_WEB_HOT_COUNTERS=0 -DDOLPHIN_WEB_INLINE_FAST_BRANCH=1 -DDOLPHIN_WEB_FALLBACK_MAP_DIAGNOSTICS=0 -DDOLPHIN_WEB_FALLBACK_MAP_BITS=16 -DDOLPHIN_WEB_DIRECT_WASM_BLOCK_DISPATCH=0 -DDOLPHIN_WEB_DET_TRACE=0 -ffile-prefix-map=/wasm-dolphin=/wasm-dolphin",
+      "-DCMAKE_C_FLAGS:STRING=-O3 -pthread -msimd128 -flto -DXXH_VECTOR=0 -DDOLPHIN_WEB_HOT_COUNTERS=0 -DDOLPHIN_WEB_INLINE_FAST_BRANCH=1 -DDOLPHIN_WEB_FALLBACK_MAP_DIAGNOSTICS=0 -DDOLPHIN_WEB_FALLBACK_MAP_BITS=16 -DDOLPHIN_WEB_DIRECT_WASM_BLOCK_DISPATCH=0 -DDOLPHIN_WEB_DET_TRACE=0 -ffile-prefix-map=/home/admin/salon-bench/build/work=/wasm-dolphin",
+      "-DCMAKE_CXX_FLAGS:STRING=-O3 -pthread -msimd128 -flto -DXXH_VECTOR=0 -DDOLPHIN_WEB_HOT_COUNTERS=0 -DDOLPHIN_WEB_INLINE_FAST_BRANCH=1 -DDOLPHIN_WEB_FALLBACK_MAP_DIAGNOSTICS=0 -DDOLPHIN_WEB_FALLBACK_MAP_BITS=16 -DDOLPHIN_WEB_DIRECT_WASM_BLOCK_DISPATCH=0 -DDOLPHIN_WEB_DET_TRACE=0 -ffile-prefix-map=/home/admin/salon-bench/build/work=/wasm-dolphin",
       "-DCMAKE_C_FLAGS_DEBUG:STRING=-O0 -fno-lto",
       "-DCMAKE_CXX_FLAGS_DEBUG:STRING=-O0 -fno-lto",
-      "-DDOLPHIN_WASM_NAGA_WGSL_LIB=/wasm-dolphin/build/repro/linux-x64/naga-target/wasm32-unknown-emscripten/release/libnaga_spirv_wgsl.a",
-      "-DDOLPHIN_WASM_JIT_CACHE_PRE_JS=/wasm-dolphin/tools/jit-cache-prejs.js",
+      "-DDOLPHIN_WASM_NAGA_WGSL_LIB=/home/admin/salon-bench/build/work/build/repro/linux-arm64/naga-target/wasm32-unknown-emscripten/release/libnaga_spirv_wgsl.a",
+      "-DDOLPHIN_WASM_JIT_CACHE_PRE_JS=/home/admin/salon-bench/build/work/tools/jit-cache-prejs.js",
       "-DDOLPHIN_WASM_MEMORY_PAGES=24576",
-      "-DDOLPHIN_WASM_PROJECT_ROOT=/wasm-dolphin",
+      "-DDOLPHIN_WASM_PROJECT_ROOT=/home/admin/salon-bench/build/work",
       "-DCMAKE_DISABLE_FIND_PACKAGE_Git=ON",
       "-DGIT_FOUND=ON",
-      "-DGIT_EXECUTABLE=/wasm-dolphin/build/repro/linux-x64/dolphin-wasm/scm-git.sh",
-      "-UCMAKE_C_COMPILER_LAUNCHER",
-      "-UCMAKE_CXX_COMPILER_LAUNCHER",
-      "-DDOLPHIN_WASM_BRIDGE_SOURCE=/wasm-dolphin/core/upstream/dolphin_web_discio.cpp",
-      "-DDOLPHIN_WASM_SHARED_SOURCE_DIR=/wasm-dolphin/core/upstream",
-      "-DDOLPHIN_WASM_OUTPUT_DIR=/wasm-dolphin/build/repro/linux-x64/core",
-      "-DDOLPHIN_WASM_CORE_SOURCE=/wasm-dolphin/core/upstream/dolphin_web_core.cpp",
-      "-DDOLPHIN_WASM_OUTPUT_DIR=/wasm-dolphin/build/repro/linux-x64/core"
+      "-DGIT_EXECUTABLE=/home/admin/salon-bench/build/work/build/repro/linux-arm64/dolphin-wasm/scm-git.sh",
+      "-DCMAKE_C_COMPILER_LAUNCHER=/home/admin/salon-bench/build/.tools/ccache/ccache",
+      "-DCMAKE_CXX_COMPILER_LAUNCHER=/home/admin/salon-bench/build/.tools/ccache/ccache",
+      "-DDOLPHIN_WASM_BRIDGE_SOURCE=/home/admin/salon-bench/build/work/core/upstream/dolphin_web_discio.cpp",
+      "-DDOLPHIN_WASM_SHARED_SOURCE_DIR=/home/admin/salon-bench/build/work/core/upstream",
+      "-DDOLPHIN_WASM_OUTPUT_DIR=/home/admin/salon-bench/build/work/build/repro/linux-arm64/core",
+      "-DDOLPHIN_WASM_CORE_SOURCE=/home/admin/salon-bench/build/work/core/upstream/dolphin_web_core.cpp",
+      "-DDOLPHIN_WASM_OUTPUT_DIR=/home/admin/salon-bench/build/work/build/repro/linux-arm64/core"
     ],
-    "cmakeCacheSha256": "1cbe41c0dae77b7bb31b12e90d94c0d75063c62ac7bcd6a8dcc952884132e9bc"
+    "cmakeCacheSha256": "e527b983a2297e253630ebccb16bf5ee6ab7b83e55cf644bf6ecb3410a0c4898"
   },
   "artifacts": {
     "js": {
-      "path": "/wasm-dolphin/build/repro/linux-x64/core/dolphin-core-upstream.js",
-      "size": 278963,
-      "sha256": "3f37376341a1493733e608f2598278d9808caf3c60388c46e31bcaf249091e6c",
+      "path": "/home/admin/salon-bench/build/work/build/repro/linux-arm64/core/dolphin-core-upstream.js",
+      "size": 279822,
+      "sha256": "c83ed0dab211a2d1ca3385493246361125096150049d690863a83c09cfba2e4e",
       "hashMode": "lf-normalized"
     },
     "wasm": {
-      "path": "/wasm-dolphin/build/repro/linux-x64/core/dolphin-core-upstream.wasm",
-      "size": 13074868,
-      "sha256": "11bf9609c0b1b9bd643164c65599e4670db6f5dc1163822e435166135fe27b81",
+      "path": "/home/admin/salon-bench/build/work/build/repro/linux-arm64/core/dolphin-core-upstream.wasm",
+      "size": 13088279,
+      "sha256": "7731668320c3baad43739730a28cbae5dc3bc83c15a34a8cd560a6707492cda1",
       "hashMode": "raw"
     },
     "wasmSections": [
@@ -206,48 +206,48 @@
       },
       {
         "id": 3,
-        "size": 12577,
-        "sha256": "939dbc14c88e972218bb36989921cbd13df54972f3364f74ff326d9c5e75cdd1"
+        "size": 12587,
+        "sha256": "ab244da0516bf6e78e2e7ddcc067f8d05a8cb040997fe4a5e9bce39d6a9b875b"
       },
       {
         "id": 4,
         "size": 5,
-        "sha256": "e133efcabc4dee366a860f09f6148475d2be0c18bc66c2b52b778cd7713c576f"
+        "sha256": "8a0427acb1d9020509c27f2fffd8d2253ac7ebc4f7ea90e90839763b4b2b235c"
       },
       {
         "id": 6,
         "size": 49,
-        "sha256": "58fcc7de06107a62db4ed69d4b47fc8825a8b25f7533ea500ebbf55f0bb5b12b"
+        "sha256": "dc47d6aa4a5460b04b194d716fadee4aa22c1fc277df7ee2d47aefcc36730ab9"
       },
       {
         "id": 7,
-        "size": 1579,
-        "sha256": "4c0c6c9747293c064dacf74e6d52c1b81494dea4970b41581744bf2c4f0419b9"
+        "size": 1615,
+        "sha256": "82025a9c6c12b653f40f52c7696cb8df7c442080ded53a795df7bd41270be0af"
       },
       {
         "id": 8,
         "size": 2,
-        "sha256": "20c495db9a4cf70f7f6111305f475d28361c840d2875de6226fb06d721f46e85"
+        "sha256": "a8ae5aa7c1bdaf6c127595b1c63851900b7c2d7d08cc43e3ebfad5c9c7b81f05"
       },
       {
         "id": 9,
-        "size": 22595,
-        "sha256": "fcccd2d2b759ccda4df8eee2da86d064ea3d5e8497dc986b72728b09015eddb1"
+        "size": 22599,
+        "sha256": "965e73d78bf538022842424d62212f4b8347a9bf6f1eb9bc30fc9ecf15ef49e8"
       },
       {
         "id": 12,
         "size": 2,
-        "sha256": "fba61b2c0797c0a9bef339aad579bda79a88200ee9507faea6d57c713c1adf7b"
+        "sha256": "1b68169674fd57706bf3577857e5ad3a9930baa282585ee069d9d3a32e55ffc9"
       },
       {
         "id": 10,
-        "size": 10585523,
-        "sha256": "c6f8e437e05988d429786969a640fd7e3cdaabb1611f3d1fe81a8bf7b3dfdd41"
+        "size": 10598859,
+        "sha256": "4628e5e90be4a8d10ac91c5b695cc3cde60656d0f9d42fb65ab638bc8e0ee884"
       },
       {
         "id": 11,
-        "size": 2448037,
-        "sha256": "1fd6c13b9e01429ed0732fcfb07a92f81a4876400572c88a2f6d783544dbcdb6"
+        "size": 2448062,
+        "sha256": "4826528f4dbfb0dfca9a00d9fc7aa8366c524f949849536aa29c522a6315b341"
       }
     ]
   }
