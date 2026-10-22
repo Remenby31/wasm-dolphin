@@ -67,7 +67,11 @@ test("validity: ring overflow, speed above its target, no unique image, game fra
 test("race-perf refuses speed=unlimited while SyncOnSkipIdle is off", () => {
   // Any existing files stand for the disc and the savestate: the query is refused first.
   const here = path.resolve(import.meta.dirname, "harness-headroom.test.mjs");
-  const r = spawnSync(process.execPath, [path.resolve(import.meta.dirname, "../harness/probes/race-perf.mjs"), "--iso", here, "--state", here, "--port", "1", "--query", "core=upstream&speed=unlimited"], { encoding: "utf8", timeout: 20000 });
+  const r = spawnSync(process.execPath, [path.resolve(import.meta.dirname, "../harness/probes/race-perf.mjs"), "--iso", here, "--state", here, "--port", "1", "--query", "core=upstream&speed=unlimited"], {
+    encoding: "utf8", timeout: 20000,
+    // Outside CI: there a stand-in disc is refused as local-only before the query is read.
+    env: Object.fromEntries(Object.entries(process.env).filter(([k]) => k !== "CI"))
+  });
   assert.notEqual(r.status, 0);
   assert.match(r.stderr, /speed=unlimited without synconidle=1/);
 });
