@@ -92,6 +92,7 @@ export class EmulatorHost {
     this.ppcWasmJitForce = requestedPpcWasmJitForce();
     this.ppcWasmJitWarmupFrames = requestedPpcWasmJitWarmupFrames(this.videoBackend);
     this.ppcProfile = requestedPpcProfile();
+    this.gpuSpinMicros = requestedGpuSpinMicros();
     this.cpuOverclock = requestedCpuOverclock();
     this.emulationSpeed = requestedEmulationSpeed();
     this.presentationScale = requestedPresentationScale();
@@ -342,6 +343,7 @@ export class EmulatorHost {
             ppcWasmJitForce: this.ppcWasmJitForce,
             ppcWasmJitWarmupFrames: this.ppcWasmJitWarmupFrames,
             ppcProfile: this.ppcProfile,
+            gpuSpinMicros: this.gpuSpinMicros,
             cpuOverclock: this.cpuOverclock,
             emulationSpeed: this.emulationSpeed,
             presentationScale: this.presentationScale,
@@ -389,6 +391,7 @@ export class EmulatorHost {
             ppcWasmJitForce: this.ppcWasmJitForce,
             ppcWasmJitWarmupFrames: this.ppcWasmJitWarmupFrames,
             ppcProfile: this.ppcProfile,
+            gpuSpinMicros: this.gpuSpinMicros,
             cpuOverclock: this.cpuOverclock,
             emulationSpeed: this.emulationSpeed,
             presentationScale: this.presentationScale,
@@ -1288,6 +1291,15 @@ function requestedPpcWasmJitWarmupFrames(videoBackend) {
 
 function requestedPpcProfile() {
   return new URLSearchParams(window.location.search).get("ppcprof") === "1";
+}
+
+// ?gpuspin=<us> (patch 0098): the GPU thread sleeps once its FIFO has been
+// drained this long instead of busy-looping until the next 1 kHz tick.
+// Absent or invalid: the default (-1).
+function requestedGpuSpinMicros() {
+  const raw = new URLSearchParams(window.location.search).get("gpuspin");
+  const us = raw == null || raw === "" ? NaN : Number(raw);
+  return Number.isInteger(us) && us >= 0 && us <= 1000000 ? us : -1;
 }
 
 function requestedCpuOverclock() {

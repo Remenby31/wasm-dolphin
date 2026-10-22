@@ -25,7 +25,7 @@
       "commit": "01e0577914a75a2569c846778c2f93aa8e6feddd"
     }
   },
-  "patchSeriesSha256": "f68f365ec15e9f51b4eb5f6c56efe51a6367dd30c02db1855eae5303a8ce01d6",
+  "patchSeriesSha256": "aa466de993dc10a2e007fb745a6cf7907800bc86db01a8cd4908c3e37446baa5",
   "patches": [
     {
       "order": 1,
@@ -645,6 +645,14 @@
     },
     {
       "order": 78,
+      "cwd": ".",
+      "hashMode": "lf-normalized",
+      "path": "patches/dolphin-wasm/snapshot/0098-gpu-thread-spin-budget.patch",
+      "size": 4460,
+      "sha256": "3f9865ab8537ebb5598c9c862f486e4fe70d00ad35936e967e46874a32ec545c"
+    },
+    {
+      "order": 79,
       "cwd": "Externals/SFML/SFML",
       "hashMode": "lf-normalized",
       "path": "patches/dolphin-wasm/submodules/0001-sfml-emscripten-config.patch",
@@ -652,7 +660,7 @@
       "sha256": "f82197a21fe982ad83f6ee7bbf5a03839b1cebd4d64da3eab11263842bf61d89"
     },
     {
-      "order": 79,
+      "order": 80,
       "cwd": "Externals/xxhash/xxHash",
       "hashMode": "lf-normalized",
       "path": "patches/dolphin-wasm/submodules/0002-xxhash-wasm-simd-scalar.patch",
