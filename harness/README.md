@@ -209,7 +209,7 @@ node harness/remote/spark-run.mjs --build <ref>           # its core built on th
   older waiting ticket could use a lane it wants and that lane is free; a
   build wants both. On the Spark, `node harness/remote/spark-queue.mjs list
   --eta` shows the queue with each job's estimated start and end (from its
-  race-perf options; ~8 min a build). Pairs wait up to 4 h by default
+  race-perf options; ~3 min a build). Pairs wait up to 4 h by default
   (`--lock-wait`).
 - **Reordering is the judge's call:** `spark-queue.mjs move <name> --after
   <name|head> --as-judge` renames a waiting ticket between its new
@@ -218,7 +218,9 @@ node harness/remote/spark-run.mjs --build <ref>           # its core built on th
   hand while a job from before this change waits on it: such a job keeps
   its old name and would wait for itself. Compare sides of one pair only, never a lane with the
   other. `--chrome-cpus` / `--node-cpus` override the pinning.
-- `--build <ref>` (a commit of the fork) builds its core on the bench with
+- `--build <ref>` (a commit of the fork; at most 3 builds of one agent,
+  counted by its Mac worktree's name, wait or run at once, beyond which
+  spark-run refuses: wait for one of yours to go through) builds its core on the bench with
   the pinned toolchain (`build-core-repro.mjs --install --reset-vendor
   --ccache`, linux-arm64) in one build checkout, `~/salon-bench/build/work`,
   whose CMake tree, Dolphin sources and ccache carry over (~7 min cold, 1-3.5
