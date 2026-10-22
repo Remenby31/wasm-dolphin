@@ -14,6 +14,7 @@ import { parseDolHeader } from "./dol.js";
 import { decodeWgpuSamplerState } from "./wgpu-sampler-state.js";
 import { gxClearDepthToStored, gxDepthState } from "./wgpu-depth-state.js";
 import { clampSourceRect, createWgpuExactCapture, packReadbackRows } from "./wgpu-exact-capture.js";
+import { createUniqueFrameCounter, hashRows, sampleRowOffsets } from "./harness-unique-frames.js";
 import { decodePrebuiltCache } from "./prebuilt-jit-cache-format.js";
 import {
   AOT_COMPILER_WORKER_NAME,
@@ -1142,6 +1143,43 @@ function readbackWgpuPresentSource() {
   });
 }
 
+// Unique images (harness only, src/harness-unique-frames.js): a few full rows
+// of the presented WebGPU rectangle read back and hashed, at each present
+// while the harness has the counter on.
+const harnessUniqueFrames = createUniqueFrameCounter();
+function readbackWgpuPresentRowsHash() {
+  const shown = wgpuPresentedSource;
+  const entry = shown?.textureId ? webGpuObjects.textures.get(shown.textureId) : null;
+  if (!entry || !renderGpu || !shown.rect) throw new Error("no presented WebGPU texture to sample");
+  const rect = clampSourceRect(shown.rect, entry.tex.width, entry.tex.height);
+  if (!rect) throw new Error("presented rectangle lies outside its texture");
+  const rows = sampleRowOffsets(rect.h);
+  const bytesPerRow = Math.ceil(rect.w * 4 / 256) * 256;
+  const dev = renderGpu.device;
+  const buffer = dev.createBuffer({ size: bytesPerRow * rows.length, usage: 0x1 | 0x8 });
+  const encoder = dev.createCommandEncoder({ label: "harness-unique-frames" });
+  rows.forEach((row, i) => encoder.copyTextureToBuffer({ texture: entry.tex, origin: { x: rect.x, y: rect.y + row, z: 0 } },
+    { buffer, offset: i * bytesPerRow, bytesPerRow }, { width: rect.w, height: 1, depthOrArrayLayers: 1 }));
+  dev.queue.submit([encoder.finish()]);
+  return buffer.mapAsync(0x1).then(() => {
+    const h = hashRows(new Uint8Array(buffer.getMappedRange()), rect.w * 4, bytesPerRow, rows.length);
+    buffer.unmap();
+    buffer.destroy();
+    return h;
+  });
+}
+
+async function harnessUniqueFramesRequest({ action } = {}) {
+  if (!harnessEnabled) return { error: "harness hooks are off" };
+  if (action === "start") {
+    if (!(harnessVideoBackend === "WebGPU-Real" || harnessVideoBackend === "WebGPU")) return { error: `unique frames: WebGPU presents only (backend ${harnessVideoBackend ?? "unknown"})` };
+    harnessUniqueFrames.start();
+    return { started: true };
+  }
+  if (action === "stop") return harnessUniqueFrames.stop();
+  return { error: `unique frames: action ${action}` };
+}
+
 async function handleMessage(type, payload) {
   // P6: blocks waiting for their pack go out when the saves do (page hidden
   // or closed) and on stop; their outcome is not the saves'.
@@ -1484,6 +1522,8 @@ async function handleMessage(type, payload) {
       return { enabled: true, coreHooks: Boolean(moduleInstance?._DolphinWeb_HarnessEnable), coreLoaded: Boolean(moduleInstance) };
     case "validationReadTimeline":
       return readHarnessTimeline();
+    case "validationUniqueFrames":
+      return harnessUniqueFramesRequest(payload);
     case "validationPcSampler":
       return harnessPcSampler(payload);
     case "validationReadJitRegionStats":
@@ -14552,6 +14592,7 @@ function drainWebGpuCmdRing(source = "presentation") {
           };
           wgpuNextPresentSource = null;
           wgpuExactCapture.onPresent(readbackWgpuPresentSource);
+          if (harnessUniqueFrames.active) harnessUniqueFrames.onPresent(readbackWgpuPresentRowsHash);
           scheduleDetachedWgpuBitmap(q);
           webGpuExecStats.present++;
           if (webGpuExecStats.present - webGpuExecStats.lastLog >= 120) {
