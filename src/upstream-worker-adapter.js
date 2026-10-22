@@ -84,6 +84,7 @@ export class UpstreamWorkerAdapter {
     ppcWasmJitForce = false,
     ppcWasmJitWarmupFrames = 60,
     ppcProfile = false,
+    gpuSpinMicros = -1,
     cpuOverclock = 1,
     emulationSpeed = 1,
     presentationScale = 1,
@@ -110,6 +111,7 @@ export class UpstreamWorkerAdapter {
     jitOffThread = true,
     aotCompiler = true,
     aotFirstLaunch = false,
+    regionChain = true,
     onAotProgress = () => {},
     collectMetrics = false,
     legacyOneWayAck = false,
@@ -188,6 +190,7 @@ export class UpstreamWorkerAdapter {
     this.ppcWasmJitForce = Boolean(ppcWasmJitForce);
     this.ppcWasmJitWarmupFrames = ppcWasmJitWarmupFrames;
     this.ppcProfile = Boolean(ppcProfile);
+    this.gpuSpinMicros = Number.isInteger(gpuSpinMicros) ? gpuSpinMicros : -1;
     this.cpuOverclock = cpuOverclock;
     this.emulationSpeed = emulationSpeed;
     this.presentationScale = presentationScale;
@@ -215,6 +218,7 @@ export class UpstreamWorkerAdapter {
     this.jitOffThread = jitOffThread !== false;
     this.aotCompiler = aotCompiler !== false;
     this.aotFirstLaunch = aotFirstLaunch === true;
+    this.regionChain = regionChain !== false;
     this.onAotProgress = onAotProgress;
     this.collectMetrics = Boolean(collectMetrics);
     this.legacyOneWayAck = Boolean(legacyOneWayAck);
@@ -409,6 +413,7 @@ export class UpstreamWorkerAdapter {
       ppcWasmJitForce: this.ppcWasmJitForce,
       ppcWasmJitWarmupFrames: this.ppcWasmJitWarmupFrames,
       ppcProfile: this.ppcProfile,
+      gpuSpinMicros: this.gpuSpinMicros,
       cpuOverclock: this.cpuOverclock,
       emulationSpeed: this.emulationSpeed,
       presentationScale: this.presentationScale,
@@ -435,6 +440,7 @@ export class UpstreamWorkerAdapter {
       jitOffThread: this.jitOffThread,
       aotCompiler: this.aotCompiler,
       aotFirstLaunch: this.aotFirstLaunch,
+      regionChain: this.regionChain,
       collectMetrics: this.collectMetrics,
       legacyOneWayAck: this.legacyOneWayAck,
       coreSelection: this.coreSelectionTelemetry(window.location.href),

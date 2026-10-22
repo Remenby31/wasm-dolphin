@@ -330,8 +330,47 @@ function harnessJitRegionStats({ sampleEvery } = {}) {
   // heapPatched: cached modules whose heap sites were moved to this session's
   // (0084), the bytes of their unpatched compiles, and patched compiles refused.
   return { bytes: copy(), again: copy(), installSamples: harnessRegionInstallSamples(heap), layoutRefused, layoutHash, layout: harnessHeapLayout(moduleInstance),
-    heapPatched: aotHeapPatched, heapPatchedBytes: aotHeapPatchedBytes, heapPatchFailed: aotHeapPatchFailed };
+    heapPatched: aotHeapPatched, heapPatchedBytes: aotHeapPatchedBytes, heapPatchFailed: aotHeapPatchFailed,
+    regionChain: harnessRegionChainStats(heap) };
 }
+// Region chaining counters (patch 0102), reset with the region stats; null
+// with an older core.
+function harnessRegionChainStats(heap) {
+  const at = moduleInstance?._DolphinWeb_JitRegionChainStats?.() >>> 0;
+  if (!at || at + 40 > heap.length) return null;
+  const view = new DataView(heap.buffer, at, 40);
+  const f = (i) => view.getFloat64(8 + 8 * i, true);
+  return { enabled: view.getUint32(4, true), chained: f(0), outOfTime: f(1), noRegion: f(2), refused: f(3), ...harnessRegionTransitionTop(heap) };
+}
+// Where chains of regions leave for code without a region, and which region
+// entries block chains reach: [pc hex, count], most frequent first (0102).
+function harnessRegionTransitionTop(heap) {
+  const at = moduleInstance?._DolphinWeb_JitRegionTransitionTop?.() >>> 0;
+  const TOP = 12, SIZE = 4 * 2 * (1 + 2 * TOP);
+  if (!at || at + SIZE > heap.length) return {};
+  const u32 = new Uint32Array(heap.buffer.slice(at, at + SIZE));
+  const list = (base) => Array.from({ length: Math.min(u32[base], TOP) }, (_, i) => [`0x${u32[base + 1 + 2 * i].toString(16).padStart(8, "0")}`, u32[base + 2 + 2 * i]]);
+  return { exitTargets: list(0), breakEntries: list(1 + 2 * TOP) };
+}
+// Headroom counters (patch 0113, harness/lib/headroom.mjs): reset >= 0
+// zeroes and turns them on (each thread applies it at its next pass); copied
+// twice so a torn read is refused.
+function harnessHeadroomStats({ reset } = {}) {
+  if (!harnessEnabled) return { error: "harness hooks are off" };
+  const stats = moduleInstance?._DolphinWeb_HeadroomStats;
+  if (!stats) return { error: "core has no DolphinWeb_HeadroomStats" };
+  const ptr = stats(Number.isInteger(reset) && reset >= 0 ? reset : -1) >>> 0;
+  const heap = moduleInstance.HEAPU8;
+  if (!ptr || ptr + 8 > heap.length) return { error: `DolphinWeb_HeadroomStats returned ${ptr}` };
+  const size = Math.min(new DataView(heap.buffer, ptr, 8).getUint32(4, true), 96);
+  if (ptr + size > heap.length) return { error: `headroom stats of ${size} bytes past the heap` };
+  if (ptr % 8 !== 0 || size % 8 !== 0) return { error: `headroom stats at ${ptr} (${size} bytes): not 8-aligned` };
+  // Whole f64 reads (an aligned Float64Array), never a double split across
+  // two byte loads while a thread writes it.
+  const copy = () => Array.from(new Uint8Array(new Float64Array(heap.buffer, ptr, size / 8).slice().buffer));
+  return { bytes: copy(), again: copy() };
+}
+
 // AX HLE timing (patch 0099, harness/lib/ax-hle-stats.mjs): reset >= 0
 // zeroes and turns the counters on from the next mail; copied twice so the
 // harness can refuse a torn read.
@@ -1377,6 +1416,7 @@ async function handleMessage(type, payload) {
         ppcWasmJitTier: payload.ppcWasmJitTier,
         ppcWasmJitWarmupFrames: payload.ppcWasmJitWarmupFrames,
         ppcProfile: payload.ppcProfile,
+        gpuSpinMicros: payload.gpuSpinMicros,
         cpuOverclock: payload.cpuOverclock,
         emulationSpeed: payload.emulationSpeed,
         presentationScale: payload.presentationScale,
@@ -1402,6 +1442,7 @@ async function handleMessage(type, payload) {
         jitOffThread: payload.jitOffThread,
         aotCompiler: payload.aotCompiler,
         aotFirstLaunch: payload.aotFirstLaunch,
+        regionChain: payload.regionChain,
         reportedCoreSelection: payload.coreSelection,
         wgpuReplayDiagnostics: payload.wgpuReplayDiagnostics,
         wgpuDeepReplayDiagnostics: payload.wgpuDeepReplayDiagnostics,
@@ -1635,6 +1676,8 @@ async function handleMessage(type, payload) {
       return harnessJitRegionStats(payload);
     case "validationReadAxHleStats":
       return harnessAxHleStats(payload);
+    case "validationReadHeadroomStats":
+      return harnessHeadroomStats(payload);
     case "validationReadMemAccessStats":
       return harnessMemAccessStats(payload);
     case "validationCaptureAtVi":
@@ -2023,6 +2066,7 @@ async function loadCore({
   ppcWasmJitTier: requestedPpcWasmJitTier = "guarded",
   ppcWasmJitWarmupFrames: requestedPpcWasmJitWarmupFrames = DEFAULT_WASM_JIT_WARMUP_XFB_FRAMES,
   ppcProfile = false,
+  gpuSpinMicros = -1,
   cpuOverclock = 1,
   emulationSpeed = 1,
   presentationScale = 1,
@@ -2048,6 +2092,7 @@ async function loadCore({
   jitOffThread = true,
   aotCompiler = true,
   aotFirstLaunch = false,
+  regionChain = true,
   reportedCoreSelection = null,
   wgpuReplayDiagnostics = false,
   wgpuDeepReplayDiagnostics: requestedWgpuDeepReplayDiagnostics = false,
@@ -2716,7 +2761,9 @@ async function loadCore({
   api.setPpcWasmJitOffThread?.(jitOffThread !== false && !noJitCache ? 1 : 0);
   // Region modules (P4) run in the dispatcher with aot=1, their only producer.
   api.setJitRegionsEnabled?.(aotFirstLaunch ? 1 : 0);
+  api.setJitRegionChaining?.(regionChain !== false ? 1 : 0);
   api.setPpcProfileEnabled?.(ppcProfile ? 1 : 0);
+  if (Number.isInteger(gpuSpinMicros) && gpuSpinMicros >= 0) api.setGpuSpinBudget?.(gpuSpinMicros);
   api.setWebGpuUploadArenaMiB?.(wgpuUploadArenaMiB, collectMetrics ? 1 : 0);
   api.setWebGpuProducerProfileEnabled?.(wgpuProducerProfileRequested ? 1 : 0);
   api.setWebGpuDrawProfileEnabled?.(wgpuDrawProfileRequested ? 1 : 0);
@@ -2843,6 +2890,8 @@ function bindApi(module) {
     setPpcWasmJitWarmup: optionalCwrap("SetPpcWasmJitWarmup", null, ["number", "number"]),
     setPpcWasmJitOffThread: optionalCwrap("SetPpcWasmJitOffThread", null, ["number"]),
     setJitRegionsEnabled: optionalCwrap("DolphinWeb_JitSetRegionsEnabled", null, ["number"]),
+    setJitRegionChaining: optionalCwrap("DolphinWeb_JitSetRegionChaining", null, ["number"]),
+    setGpuSpinBudget: optionalCwrap("DolphinWeb_SetGpuSpinBudget", null, ["number"]),
     getPpcWasmJitEngagedFrame: optionalCwrap("GetPpcWasmJitEngagedFrame", "number", []),
     getPpcWasmJitArmStartFrame: optionalCwrap("GetPpcWasmJitArmStartFrame", "number", []),
     setPpcWasmJitEnabled:
@@ -5294,12 +5343,15 @@ function recordVisualFrameHash(hash, sampledSourceFrame = false) {
   lastVisualFrameHash = visualFrameHash;
 }
 
-function recordPresentedFrame(coreFrame) {
+// shownVi: the VI output (since boot) this present shows, when the renderer
+// knows it (video=wgpu: its ViTag); otherwise the core's VI count now, which
+// can already be ahead of the field on screen.
+function recordPresentedFrame(coreFrame, shownVi = null) {
   if (harnessEnabled) {
     const slot = (harnessPresentHead % HARNESS_PRESENT_RING) * 3;
     harnessPresentRing[slot] = harnessNow();
     harnessPresentRing[slot + 1] = coreFrame;
-    harnessPresentRing[slot + 2] = moduleInstance?._DolphinWeb_HarnessViSinceBoot?.() ?? -1;
+    harnessPresentRing[slot + 2] = shownVi ?? moduleInstance?._DolphinWeb_HarnessViSinceBoot?.() ?? -1;
     harnessPresentHead += 1;
     if (harnessDisplayStop) harnessDisplay.submit(harnessPresentRing[slot + 2]);
   }
@@ -14763,7 +14815,7 @@ function drainWebGpuCmdRing(source = "presentation") {
           cmdRingOwnsCanvas = true;
           // A frame carrying the diagnostic input marker is not streamed.
           if (streamCapture.active && !hardwareInputMarkerApplied) streamCapture.offerCanvas(renderCanvas, api?.getFrame?.() ?? 0);
-          recordPresentedFrame(api?.getFrame?.() ?? 0);
+          recordPresentedFrame(api?.getFrame?.() ?? 0, wgpuExactCapture.currentBoot());
           wgpuPresentedSource = {
             textureId: wgpuLastBackbufferSourceTextureId, rect: wgpuNextPresentSource
           };
