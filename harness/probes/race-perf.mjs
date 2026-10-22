@@ -247,6 +247,13 @@ export async function measure(session, o) {
   }
 }
 
+// A change measured while another harness held the perf lock too is not a
+// measure: withheld, with the overlap as the reason.
+export function withheldOnOverlap(change, overlaps) {
+  if (!change || !overlaps.length) return change;
+  return { ...change, median: null, withheld: `perf lock overlap: ${overlaps.map((x) => `${x.at}: ${x.why}`).join("; ")}` };
+}
+
 // p4 of one stats window, or null and why (not asked, no export, torn or
 // inconsistent counters).
 export function regionRecord(reply) {
@@ -457,8 +464,17 @@ async function main() {
 
   const records = [];
   let gaveUp = null;
+  // Two holders of the perf lock at once would measure on a shared machine:
+  // checked when taken, before each run and at the end (lockIntegrity).
+  const lockOverlap = [];
+  const checkLock = (at) => {
+    const c = releaseLock.check?.();
+    if (c && !c.ok) { lockOverlap.push({ at, why: c.why }); console.warn(`[race-perf] perf lock overlap detected (${at}): ${c.why}`); }
+  };
+  checkLock("taken");
   try {
     for (let run = 1; run <= o.runs && !gaveUp; run += 1) {
+      checkLock(`before run ${run}`);
       const record = { run };
       for (const name of sideOrder(run).filter((n) => sides[n])) {
         record[name] = await measureSide(sides[name], o);
@@ -470,6 +486,7 @@ async function main() {
       writeFileSync(path.join(outDir, `run${run}.json`), JSON.stringify(record, null, 1) + "\n");
       records.push(record);
     }
+    checkLock("end");
   } finally {
     releaseLock();
     dropExports();
@@ -515,7 +532,9 @@ async function main() {
     runs: runsDone.length, failed, gaveUp,
     candidate: { cold: summarize("candidate", "cold"), warm: summarize("candidate", "warm") },
     baseline: sides.baseline ? { cold: summarize("baseline", "cold"), warm: summarize("baseline", "warm") } : null,
-    change: sides.baseline ? pairedSpeedChange(runsDone.filter((r) => good(r.baseline) && good(r.candidate)), { minPairs: o.minPairs }) : null,
+    change: sides.baseline ? withheldOnOverlap(pairedSpeedChange(runsDone.filter((r) => good(r.baseline) && good(r.candidate)), { minPairs: o.minPairs }), lockOverlap) : null,
+    // Checks of the perf lock that found another holder (empty: none).
+    lockOverlap,
     // --counters: the same pairing on host instructions per guest cycle (lower is better).
     ...(o.onWindow && sides.baseline ? { counterChange: pairedSpeedChange(runsDone.filter((r) => good(r.baseline) && good(r.candidate)), { metric: "instructionsPerGuestCycle", minPairs: o.minPairs }) } : {}),
     pcsample: pcNote,
@@ -529,7 +548,7 @@ async function main() {
   writeFileSync(path.join(outDir, "summary.json"), JSON.stringify(summary, null, 1) + "\n");
   const med = (n) => summary[n]?.cold?.speed?.median ?? "-";
   console.log(`[race-perf] ${sides.baseline ? `baseline ${med("baseline")} % → candidate ${med("candidate")} %, paired change ${summary.change.median ?? `withheld (${summary.change.withheld})`}${summary.change.median != null ? ` % over ${summary.change.pairs} pairs` : ""}` : `speed median ${med("candidate")} %`}${failed.length ? `; ${failed.length} failed run(s): ${failed.map((f) => `r${f.run} ${f.side} ${f.why}`).join(", ")}` : ""} -> ${outDir}`);
-  process.exitCode = failed.length || summary.change?.withheld ? 1 : 0;
+  process.exitCode = failed.length || summary.change?.withheld || lockOverlap.length ? 1 : 0;
 }
 
 if (import.meta.url === pathToFileURL(process.argv[1] ?? "").href) await main();
