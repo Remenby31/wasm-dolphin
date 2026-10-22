@@ -25,7 +25,7 @@
       "commit": "01e0577914a75a2569c846778c2f93aa8e6feddd"
     }
   },
-  "patchSeriesSha256": "c8ca2e7e806306d0e6a86a08ccb9a7da0a340007b398187789e39788ae96e7c8",
+  "patchSeriesSha256": "59e082dae6c370c9b8051005972a4a7e42a42f578fbf50725e331043d48740f6",
   "patches": [
     {
       "order": 1,
@@ -720,8 +720,8 @@
       "cwd": ".",
       "hashMode": "lf-normalized",
       "path": "patches/dolphin-wasm/snapshot/0113-headroom-counters.patch",
-      "size": 8156,
-      "sha256": "22e3326f2bac73d56fee046ae08441a8213ff8eb833de4e2cd251dcebc70c60a"
+      "size": 12231,
+      "sha256": "704fdcdba2d3d8b39edc38a158acfb884fa4cdd77a52eee31658a9ed4616fcc0"
     },
     {
       "order": 88,
