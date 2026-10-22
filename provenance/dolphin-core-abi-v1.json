@@ -1,19 +1,19 @@
 {
   "schemaVersion": 1,
   "abiVersion": 1,
-  "coreId": "sha256:11bf9609c0b1b9bd643164c65599e4670db6f5dc1163822e435166135fe27b81",
+  "coreId": "sha256:c978f3f3022c972bdec7093e5275bc44f00bd2091e0bbc2bddbbfce8f6be33ad",
   "upstreamCommit": "e22551eae1c84a7e4d0b6a5c519ef4ed4ef69df1",
   "artifacts": [
     {
       "path": "cores/dolphin/dolphin-core-upstream.js",
       "hashMode": "lf-normalized",
-      "size": 278963,
-      "sha256": "3f37376341a1493733e608f2598278d9808caf3c60388c46e31bcaf249091e6c"
+      "size": 279208,
+      "sha256": "e73038b8e7cfdb804dae53147aeec0d1f6cf8c8f39d4434407e23af138206cf5"
     },
     {
       "path": "cores/dolphin/dolphin-core-upstream.wasm",
-      "size": 13074868,
-      "sha256": "11bf9609c0b1b9bd643164c65599e4670db6f5dc1163822e435166135fe27b81"
+      "size": 13074916,
+      "sha256": "c978f3f3022c972bdec7093e5275bc44f00bd2091e0bbc2bddbbfce8f6be33ad"
     }
   ],
   "contractSources": [
@@ -44,8 +44,8 @@
     {
       "path": "core/upstream/dolphin_web_core.cpp",
       "hashMode": "lf-normalized",
-      "size": 52827,
-      "sha256": "e1f0f91237f5be969194d49495ffde43318f9f0c24d01219badd5e5fe5708957"
+      "size": 53267,
+      "sha256": "797255a33b2323017f59995e92b79c47ac36f6ff669b4829a3f85b5a41322b05"
     },
     {
       "path": "src/app.js",
@@ -86,8 +86,8 @@
     {
       "path": "src/core-host.js",
       "hashMode": "lf-normalized",
-      "size": 68686,
-      "sha256": "b14e1c62e52b2b1428c65705d01e5a63ea90b16c2f1cb3e1948ff92739279398"
+      "size": 68901,
+      "sha256": "4bd70105079a5a7bb071cad9cf225f36cfb836903d379766de018ad34fbbce4b"
     },
     {
       "path": "src/diagnostic-log-filter.js",
@@ -140,8 +140,8 @@
     {
       "path": "src/upstream-discio-worker.js",
       "hashMode": "lf-normalized",
-      "size": 691189,
-      "sha256": "6fee84c58f53d57f43a0e127128ee24f8f0e9b01c865ec17487529fb414fbe70"
+      "size": 692294,
+      "sha256": "aaf9c2b7eda29f035def034dc40256b1b77766f1ce66a83754ad8dc22db5d037"
     },
     {
       "path": "src/wgpu-renderer-worker-probe.js",
@@ -164,8 +164,8 @@
     {
       "path": "src/upstream-worker-adapter.js",
       "hashMode": "lf-normalized",
-      "size": 47311,
-      "sha256": "0deb98670384b2a7db560c70e849d7dd7b037ac5b042c94a05c18239dff2567d"
+      "size": 47408,
+      "sha256": "04d322a6c932a0733f8a87b0f5b5853efb9228296e384b9c8099c7f1c9b14919"
     },
     {
       "path": "src/upstream-worker-protocol.js",
@@ -376,9 +376,11 @@
     "_DolphinWeb_AotLayoutRefused",
     "_DolphinWeb_AotLayoutShiftForTest",
     "_DolphinWeb_AotLayoutWords",
+    "_DolphinWeb_AotMMUModeForTest",
     "_DolphinWeb_AotPublishStatsForTest",
     "_DolphinWeb_AotQueueRegion",
     "_DolphinWeb_AotRamReady",
+    "_DolphinWeb_AotRegionsSkippedMmu",
     "_DolphinWeb_AotRunRegionForTest",
     "_DolphinWeb_AotServiceRegionsForTest",
     "_DolphinWeb_AotSetReadyWaitForTest",
@@ -639,6 +641,7 @@
       "validationFinalizeWgpuReplay",
       "validationPcSampler",
       "validationReadAotProgress",
+      "validationReadAxHleStats",
       "validationReadCoreProgress",
       "validationReadDetTrace",
       "validationReadJitCacheReadiness",
