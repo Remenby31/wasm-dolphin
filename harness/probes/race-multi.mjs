@@ -13,7 +13,8 @@
 //     --arm <dir> --arm <dir> [--arm <dir> …]      (the first is the baseline)
 //     --lanes "5,6,7;15,16,17;8,9,19" [--query …] [--runs 6] [--warmup 25] [--secs 20]
 //     [--max-load L] [--lock <dir/.perf-lock> …] [--counters] [--aot-seed [--seed-sec 600]]
-//     [--isolated-boot [--settle-sec 10]] [--perf-record] [--out dir]
+//     [--isolated-boot [--settle-sec 10]] [--perf-record]
+//     [--emulated-window <guest s> [--emulated-warmup <guest s>]] [--out dir]
 //
 // - Each arm is a tree served as is (race-perf's sides), on its own port
 //   (port + arm index), its Chromium pinned through HARNESS_CHROME_PATH's
@@ -49,6 +50,18 @@
 //   cycles:u -t <CPU thread>` samples its window; after the runs,
 //   wasm-hot.mjs gives each arm-run's hottest functions (perf-<run>-<arm>/top.txt),
 //   to compare a low arm with a high one of the same run.
+// - Every arm's window records its guest ticks at both ends (emulated) and
+//   its JIT counters at the end (jit: compiled, rejections, transient
+//   rejections…); with --counters, host instructions are divided by the
+//   ticks the window actually covered (instructionsPerGuestTick).
+// - --emulated-window S: the window is S GUEST seconds, not host seconds.
+//   With a host-time window a faster arm covers another stretch of the
+//   scene (another idle share): two arms then differ in host work per guest
+//   cycle without any arm being slower. Here each arm loads the savestate,
+//   pauses, presses the key, resumes, runs --emulated-warmup guest seconds,
+//   then measures exactly S guest seconds from there (ticks polled from
+//   node every 100 ms; no barrier between arms, which would let the faster
+//   ones run on in emulated time).
 import { randomBytes } from "node:crypto";
 import { mkdirSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import os from "node:os";
@@ -62,6 +75,7 @@ import { acquirePerfLock } from "../lib/perf-lock.mjs";
 import { openSession } from "../lib/session.mjs";
 import { median, round } from "../lib/stats.mjs";
 import { measure, num } from "./race-perf.mjs";
+import { loadHarnessState, readCoreProgress } from "../lib/browser.mjs";
 import { workerRequest } from "../lib/browser.mjs";
 import { decodeRegionStats } from "../lib/jit-region-stats.mjs";
 import { busiestThread, checkPerfAccess, instructionsPerGuestCycle, perfCounters } from "../lib/perf-counters.mjs";
@@ -137,6 +151,67 @@ export function chromeLogLines(profileDir, re = /aot|region|cache size|jit-cache
   }
 }
 
+// The JIT's counters from the page's frame info (ppcWasmHelperStats):
+// compiled blocks, rejections, transient rejections, blacklist hits…
+export function parseJitStats(text) {
+  const t = String(text ?? "");
+  const jit = /tier:\S+ hotcounts:\S+ jit (.*?)(?: \| |$)/.exec(t)?.[1] ?? t.split(" | ")[0];
+  const out = {};
+  for (const [, k, v] of jit.matchAll(/(\w+):(\d+)(?=[\s/]|$)/g)) if (!(k in out)) out[k] = Number(v);
+  const reject = /\breject:(\d+)/.exec(t);
+  if (reject) out.reject = Number(reject[1]);
+  return out;
+}
+
+async function jitStats(page) {
+  const text = await page.evaluate(() => window.__lastFrameInfo?.ppcWasmHelperStats ?? null).catch(() => null);
+  return text ? parseJitStats(text) : null;
+}
+
+// Guest ticks now (validationReadCoreProgress), as numbers.
+async function ticksNow(page) {
+  const p = await readCoreProgress(page);
+  return { ticks: Number(p?.coreTicks ?? NaN), perSecond: Number(p?.coreTicksPerSecond ?? NaN), at: Date.now() };
+}
+
+async function waitTicks(page, target, { everyMs = 100, timeoutMs = 600000 } = {}) {
+  const end = Date.now() + timeoutMs;
+  for (;;) {
+    const t = await ticksNow(page);
+    if (t.ticks >= target || Date.now() > end) return t;
+    await new Promise((r) => setTimeout(r, everyMs));
+  }
+}
+
+// --emulated-window: one arm's window of exactly `secs` guest seconds after
+// `warmup` guest seconds, the key pressed while paused (a fixed emulated tick).
+async function measureEmulated(session, o, counters) {
+  const { page } = session;
+  const loaded = await loadHarnessState(page, session.url);
+  if (!loaded?.loaded) throw new Error(`savestate load failed: ${JSON.stringify(loaded)}`);
+  await workerRequest(page, "pause", {}, 30000);
+  if (o.hold) await page.keyboard.down(o.hold);
+  await workerRequest(page, "resume", {}, 30000);
+  try {
+    const t0 = await ticksNow(page);
+    if (!Number.isFinite(t0.ticks) || !Number.isFinite(t0.perSecond)) throw new Error("no guest ticks from this core");
+    const start = await waitTicks(page, t0.ticks + o.emulatedWarmup * t0.perSecond);
+    if (counters) await counters("start", session);
+    const begin = await ticksNow(page);
+    const end = await waitTicks(page, begin.ticks + o.emulatedWindow * t0.perSecond);
+    const c = counters ? await counters("end", session) : undefined;
+    const guestTicks = end.ticks - begin.ticks, windowMs = end.at - begin.at;
+    return {
+      emulatedWindow: true, windowMs, guestTicks, warmupTicks: begin.ticks - t0.ticks, lateStartTicks: begin.ticks - start.ticks,
+      speed: round((guestTicks / t0.perSecond / (windowMs / 1000)) * 100, 2),
+      ...(c ? { counters: c, instructionsPerGuestTick: c.instructions ? c.instructions / guestTicks : null } : {}),
+      jit: await jitStats(page)
+    };
+  } finally {
+    if (o.hold) await page.keyboard.up(o.hold).catch(() => {});
+  }
+}
+
 // A barrier for `n` arms, released when all arrived or after `timeoutMs`.
 export function barrier(n, timeoutMs = 180000) {
   let arrived = 0, open;
@@ -186,7 +261,7 @@ async function main() {
       lock: { type: "string", multiple: true, default: [] }, "lock-wait": { type: "string", default: "14400" }, out: { type: "string" },
       counters: { type: "boolean", default: false }, "aot-seed": { type: "boolean", default: false }, "seed-sec": { type: "string", default: "600" },
       "gate-sec": { type: "string", default: "120" }, "isolated-boot": { type: "boolean", default: false }, "settle-sec": { type: "string", default: "10" },
-      "perf-record": { type: "boolean", default: false }
+      "perf-record": { type: "boolean", default: false }, "emulated-window": { type: "string" }, "emulated-warmup": { type: "string", default: "10" }
     }
   });
   const lanes = String(values.lanes ?? "").split(";").map((l) => l.trim()).filter(Boolean);
@@ -228,6 +303,11 @@ async function main() {
   };
   // Per run (--aot-seed): each arm's region gate, and the barrier they share.
   const gates = new Map();
+  const emu = new Map();
+  if (values["emulated-window"]) {
+    o.emulatedWindow = num(values, "emulated-window", { min: 1 });
+    o.emulatedWarmup = num(values, "emulated-warmup", { min: 0 });
+  }
   let arrive = null;
   o.onWindow = async (phase, session) => {
     // Without --aot-seed: one read of the region pipeline (the launch's
@@ -235,6 +315,9 @@ async function main() {
     if (phase === "start" && !values["aot-seed"]) gates.set(session, { ...(await regionPipeline(session.page)), together: await arrive() });
     if (phase === "start" && values["perf-record"]) await startRecording(session);
     if (phase === "end" && values["perf-record"]) await stopRecording(session);
+    // The window's guest ticks at both ends, and the JIT's counters at its end.
+    if (phase === "start") emu.set(session, { start: await ticksNow(session.page) });
+    if (phase === "end") { const e = emu.get(session); if (e) Object.assign(e, { end: await ticksNow(session.page), jit: await jitStats(session.page) }); }
     if (phase === "start" && values["aot-seed"]) {
       const gate = await waitRegionsQuiescent(() => regionPipeline(session.page), { target: seedRegions.get(session.seedOf) ?? null, timeoutMs: num(values, "gate-sec", { min: 1 }) * 1000 });
       // What the boot of this arm said about its regions (for the region robustness work).
@@ -323,12 +406,22 @@ async function main() {
           resumed.forEach((x, a) => { record.arms[a].boot.resumed = !x?.error; });
         }
         // The windows together.
-        const results = await Promise.allSettled(sessions.map((s) => measure(s, o)));
+        const results = await Promise.allSettled(sessions.map((s) => (o.emulatedWindow ? measureEmulated(s, o, counters) : measure(s, o))));
         results.forEach((res, a) => { if (res.status === "fulfilled") record.arms[a].cold = res.value; else record.arms[a].error = String(res.reason?.message ?? res.reason).slice(0, 300); });
       } finally {
         for (const s of sessions) await s?.close().catch(() => {});
       }
-      for (const x of record.arms) if (x.cold) x.cold.instructionsPerGuestCycle = instructionsPerGuestCycle(x.cold);
+      record.arms.forEach((x, a) => {
+        if (!x.cold) return;
+        const e = emu.get(sessions[a]);
+        if (e?.start && e?.end && !x.cold.emulatedWindow) {
+          x.cold.guestTicks = e.end.ticks - e.start.ticks;
+          x.cold.jit = e.jit;
+          if (x.cold.counters?.instructions) x.cold.instructionsPerGuestTick = x.cold.counters.instructions / x.cold.guestTicks;
+        }
+        // One name for the analysis: per tick when the ticks are known, else from the speed.
+        x.cold.instructionsPerGuestCycle = x.cold.instructionsPerGuestTick ?? instructionsPerGuestCycle(x.cold);
+      });
       record.arms.forEach((x, a) => { x.regionGate = gates.get(sessions[a]) ?? null; });
       if (values["aot-seed"]) {
         const counts = record.arms.map((x) => x.regionGate?.installed);

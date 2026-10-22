@@ -10,7 +10,7 @@ import test from "node:test";
 import { claim, OWNER_FILE } from "../harness/lib/ownership.mjs";
 import { copySeedProfile } from "../harness/lib/session.mjs";
 
-import { armEffects, barrier, bootOrder, chromeLogLines, GUEST_HZ, instructionsPerGuestCycle, laneOf, parsePerfCsv, waitRegionsQuiescent } from "../harness/probes/race-multi.mjs";
+import { armEffects, barrier, bootOrder, chromeLogLines, parseJitStats, GUEST_HZ, instructionsPerGuestCycle, laneOf, parsePerfCsv, waitRegionsQuiescent } from "../harness/probes/race-multi.mjs";
 
 test("race-multi: a cyclic Latin square, every arm on every lane equally", () => {
   const seen = Array.from({ length: 3 }, () => [0, 0, 0]);
@@ -138,4 +138,17 @@ test("race-multi: the boot's console lines about regions, from chrome.log", () =
   } finally {
     rmSync(dir, { recursive: true, force: true });
   }
+});
+
+test("race-multi: the JIT's counters from the page's frame info", () => {
+  const text = "tier:guarded hotcounts:off jit attempts:4175 compiled:1472 full:1463 partial:9 mixed:0/32768 short:1212/1196 merge:0 regalloc:49 emitfail:0 compilefail:0 enginereject:0 blacklisthit:0 transientreject:3 offthreaddefer:1491 tablefull:0 fmad:0 | imports system:551 | rej19/50:7 reject:33 0 calls";
+  const j = parseJitStats(text);
+  assert.equal(j.attempts, 4175);
+  assert.equal(j.compiled, 1472);
+  assert.equal(j.transientreject, 3);
+  assert.equal(j.blacklisthit, 0);
+  assert.equal(j.offthreaddefer, 1491);
+  assert.equal(j.reject, 33);
+  assert.equal(j.system, undefined); // past the JIT's own segment
+  assert.deepEqual(parseJitStats(null), {});
 });
