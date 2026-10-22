@@ -17,9 +17,10 @@ Every GPU→CPU read of the hardware renderer returns zeros:
 
 Two things hide the bug:
 
-1. **The core ships no rendering GameINI key.** Since patch 0097 it embeds
+1. **The core ships no EFB GameINI key.** Since patch 0097 it embeds
    only the allowlisted keys of `Data/Sys/GameSettings`
-   (`tools/gamesettings-allowlist.json`: `[Core] MMU`), so for the video
+   (`tools/gamesettings-allowlist.json`: `[Core] MMU` and
+   `[Video_Settings] SafeTextureCacheColorSamples`), so for the EFB
    settings Dolphin's defaults apply to every disc:
    `EFBAccessEnable=false` (peeks are skipped and read 0 on any backend),
    `EFBToTextureEnable=true` and `XFBToTextureEnable=true` (copies stay on the

@@ -35,7 +35,7 @@ const FULL = [
 ].join("\r\n");
 
 test("the filter keeps only allowlisted keys, LF, in allowlist order", () => {
-  assert.equal(filterIni(FULL, allowlist), "[Core]\nMMU = True\n");
+  assert.equal(filterIni(FULL, allowlist), "[Core]\nMMU = True\n[Video_Settings]\nSafeTextureCacheColorSamples = 512\n");
 });
 
 test("a file with no allowlisted key gives nothing; comments, codes and other keys never pass", () => {
@@ -51,12 +51,18 @@ test("section headers as Dolphin reads them: untrimmed '[' first, the name up to
   assert.throws(() => filterIni("[Core]\n[Video_Settings] ; x\nMMU = True\n", allowlist), /Video_Settings/, "a header with text after ']' still starts a section");
 });
 
-test("[Dolphin.Core] is the other spelling Dolphin maps to Main/Core; values lose their quotes", () => {
+test("[Dolphin.Core] and [Graphics.Settings] are the other spellings Dolphin maps; values lose their quotes", () => {
   assert.equal(filterIni('[Dolphin.Core]\nMMU = "False"\n', allowlist), "[Core]\nMMU = False\n");
+  assert.equal(filterIni("[Graphics.Settings]\nSafeTextureCacheColorSamples = 0\n", allowlist), "[Video_Settings]\nSafeTextureCacheColorSamples = 0\n");
+});
+
+test("an empty value is kept: Dolphin reads it as no value, the default", () => {
+  assert.equal(filterIni("[Video_Settings]\nSafeTextureCacheColorSamples = \n", allowlist), "[Video_Settings]\nSafeTextureCacheColorSamples = \n");
 });
 
 test("any other spelling or section of an allowlisted key stops the build", () => {
-  for (const ini of ["[core]\nMMU = False\n", "[Core]\nmmu = False\n", "[Main.Core]\nMMU = False\n", "[Video]\nMMU = True\n"]) {
+  for (const ini of ["[core]\nMMU = False\n", "[Core]\nmmu = False\n", "[Main.Core]\nMMU = False\n", "[Video]\nMMU = True\n",
+    "[video_settings]\nSafeTextureCacheColorSamples = 0\n", "[GFX.Settings]\nSafeTextureCacheColorSamples = 0\n", "[Video_Hacks]\nSafeTextureCacheColorSamples = 0\n"]) {
     assert.throws(() => filterIni(ini, allowlist, "TST99.ini"), /TST99\.ini/, JSON.stringify(ini));
   }
 });
@@ -78,7 +84,7 @@ test("the build is deterministic: same sources, same files and bytes, in name or
   });
   assert.deepEqual(runs[0].written, ["TST01.ini", "TST01r1.ini"]);
   assert.deepEqual(runs[0].files, runs[1].files);
-  assert.equal(runs[0].files[0][1].toString(), "[Core]\nMMU = True\n");
+  assert.equal(runs[0].files[0][1].toString(), "[Core]\nMMU = True\n[Video_Settings]\nSafeTextureCacheColorSamples = 512\n");
   assert.equal(runs[0].files[1][1].toString(), "[Core]\nMMU = False\n");
 });
 
@@ -114,7 +120,7 @@ test("Dolphin's own folder passes the filter and gives only allowlisted keys", (
 });
 
 const core = await loadAotCore();
-const coreSkip = core && typeof core.module._GameConfigMmuForTest === "function" ? false : "the core predates 0097 (CI builds this branch's core)";
+const coreSkip = core && typeof core.module._GameConfigValueForTest === "function" ? false : "the core predates 0097 v2 (CI builds this branch's core)";
 
 test("the core embeds the filtered INIs, and its game config applies them in Dolphin's order", { skip: coreSkip }, () => {
   const m = core.module;
@@ -122,16 +128,25 @@ test("the core embeds the filtered INIs, and its game config applies them in Dol
   const embedded = m.FS.readdir(dir).filter((n) => n.endsWith(".ini"));
   assert.ok(embedded.length > 0, "the build embedded the filtered INIs");
   for (const name of embedded) {
-    assert.match(m.FS.readFile(`${dir}/${name}`, { encoding: "utf8" }), /^\[Core\]\nMMU = (True|False)\n$/, name);
+    const text = m.FS.readFile(`${dir}/${name}`, { encoding: "utf8" });
+    assert.ok(text.length > 0, name);
+    assert.match(text, /^(\[Core\]\nMMU = (True|False)\n)?(\[Video_Settings\]\nSafeTextureCacheColorSamples = \d*\n)?$/, name);
   }
   // Synthetic discs: ID3, then ID6, then ID6rN, the later file winning.
-  const fixtures = { "TST.ini": "[Core]\nMMU = True\n", "TSTE01r1.ini": "[Core]\nMMU = False\n" };
+  const fixtures = {
+    "TST.ini": "[Core]\nMMU = True\n[Video_Settings]\nSafeTextureCacheColorSamples = 512\n",
+    "TSTE01r1.ini": "[Core]\nMMU = False\n[Video_Settings]\nSafeTextureCacheColorSamples = 0\n"
+  };
   for (const [name, text] of Object.entries(fixtures)) m.FS.writeFile(`${dir}/${name}`, text);
   try {
-    const mmu = (id, revision) => m.ccall("GameConfigMmuForTest", "number", ["string", "number"], [id, revision]);
-    assert.equal(mmu("TSTE01", 0), 1, "the ID3 file sets the MMU");
-    assert.equal(mmu("TSTE01", 1), 0, "revision 1's file turns it off again");
-    assert.equal(mmu("XYZE01", 0), 0, "a disc without an INI keeps the default");
+    const value = (id, revision, setting) => m.ccall("GameConfigValueForTest", "number", ["string", "number", "string"], [id, revision, setting]);
+    assert.equal(value("TSTE01", 0, "MMU"), 1, "the ID3 file sets the MMU");
+    assert.equal(value("TSTE01", 1, "MMU"), 0, "revision 1's file turns it off again");
+    assert.equal(value("XYZE01", 0, "MMU"), 0, "a disc without an INI keeps the default");
+    assert.equal(value("TSTE01", 0, "SafeTextureCacheColorSamples"), 512, "the ID3 file sets the samples");
+    assert.equal(value("TSTE01", 1, "SafeTextureCacheColorSamples"), 0, "revision 1's file: all samples");
+    assert.equal(value("XYZE01", 0, "SafeTextureCacheColorSamples"), 128, "Dolphin's default");
+    assert.equal(value("TSTE01", 0, "CPUThread"), -2, "only allowlisted settings");
   } finally {
     for (const name of Object.keys(fixtures)) m.FS.unlink(`${dir}/${name}`);
   }
