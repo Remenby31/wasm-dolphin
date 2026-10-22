@@ -3,8 +3,8 @@
   "normalization": "git-blob-lf",
   "root": {
     "baseCommit": "e22551eae1c84a7e4d0b6a5c519ef4ed4ef69df1",
-    "resultTree": "234f0f0f815f900f5a5448274175c17784bc5b8a",
-    "changedPathCount": 128,
+    "resultTree": "155c6221926c9e5addf24f43ffb24101ece6850f",
+    "changedPathCount": 130,
     "records": [
       {
         "path": "CMakeLists.txt",
@@ -59,6 +59,15 @@
         "resultBlob": "c07dd188620372c907f3457febdc05499b43838a",
         "size": 562,
         "sha256": "9b6e3f4cc79ea2a7acb852bc348d917e9dcddd8e6d29d281b92f9bd0c4c77e6d"
+      },
+      {
+        "path": "Source/Core/Common/BlockingLoop.h",
+        "status": "M",
+        "mode": "100644",
+        "baseBlob": "472a84b1f62915518d511d1f5c8245b3d48a7187",
+        "resultBlob": "67bf797ad023b046bf04ad495af5211513bbfc12",
+        "size": 9237,
+        "sha256": "65aaf87db1172751b591aa0963e704a00f37fc2b7b5d236ece081d7681800916"
       },
       {
         "path": "Source/Core/Common/CMakeLists.txt",
@@ -911,9 +920,18 @@
         "status": "M",
         "mode": "100644",
         "baseBlob": "f183c9365514cc908bbc3641d55ff8db8c3acfe9",
-        "resultBlob": "86281c79032a6cedb381b13b74a6220c2d022f39",
-        "size": 26406,
-        "sha256": "baeeb5ec53001315cc3fd34b975960223ef5a5ff18545b58448ef1e644c540c7"
+        "resultBlob": "581a3e92cfcf421eed753fa78d7f70280acb5ffe",
+        "size": 26730,
+        "sha256": "7239f9379988b8c37d81c2b69e713268b88f62908bff1fd57e2e80b2062b8e5e"
+      },
+      {
+        "path": "Source/Core/VideoCommon/Fifo.h",
+        "status": "M",
+        "mode": "100644",
+        "baseBlob": "2afa110532edc7120dc10ce3d56713b56c3dd1a2",
+        "resultBlob": "3fe342e31bb5d8bea4deee4babc2115981f255b5",
+        "size": 4267,
+        "sha256": "dd66f1d67d07183f7719f4a02e1b0553345701ed5490ec964d41f90e8cf2b399"
       },
       {
         "path": "Source/Core/VideoCommon/FramebufferManager.cpp",
@@ -1194,5 +1212,5 @@
       ]
     }
   ],
-  "contentSha256": "1651fd510f4188b32020c82dbdcb3c46e6154b566e2a8c3222029d10b7211681"
+  "contentSha256": "2c0824dafce93aa2b340b04411d7573e1017bcd1860e51009bd4da80e3b3b26a"
 }
