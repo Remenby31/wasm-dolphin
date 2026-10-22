@@ -9,7 +9,7 @@ import path from "node:path";
 import test from "node:test";
 
 import { acquirePerfLock, lockIntegrity, queueDir, readLockOwner, ticketsAhead } from "../harness/lib/perf-lock.mjs";
-import { chromeArgsOf, num, pairedSpeedChange, regionPipeline, sideOrder, withheldOnOverlap } from "../harness/probes/race-perf.mjs";
+import { chromeArgsOf, lockOverlapAt, num, pairedSpeedChange, regionPipeline, sideOrder, withheldOnOverlap } from "../harness/probes/race-perf.mjs";
 import { stockChrome } from "../harness/lib/kpi.mjs";
 import { calmThenLock, loadGaveUp } from "../harness/lib/env.mjs";
 import { summarizePcSamples } from "../src/harness-pc-sampler.js";
@@ -428,6 +428,58 @@ test("race-perf: a change measured during a lock overlap is withheld", () => {
   assert.match(w.withheld, /perf lock overlap: before run 3: another living holder/);
 });
 
+// A page whose core runs `rate` ticks per node ms from `start`; pause and
+// resume are counted, everything else answered as the core would.
+function fakeCorePage({ rate = 1000, start = 5000, perSecond = 486_000_000 } = {}) {
+  const t0 = Date.now(), calls = [];
+  return {
+    calls,
+    evaluate: async (_fn, [type]) => {
+      calls.push(type);
+      if (type === "validationReadCoreProgress") return { coreTicks: start + Math.floor((Date.now() - t0) * rate), coreTicksPerSecond: perSecond };
+      return { ok: true };
+    }
+  };
+}
+
+test("emulated window: covers at least S guest seconds after W, from a paused key press", async () => {
+  const { emulatedStart } = await import("../harness/lib/emulated-window.mjs");
+  // 1000 ticks per ms and 10 000 ticks per guest second: 10 ms per guest second.
+  const page = fakeCorePage({ rate: 1000, perSecond: 10_000 });
+  const order = [];
+  const run = await emulatedStart(page, { warmup: 2, pollMs: 5, press: async () => order.push(page.calls.at(-1)) });
+  assert.deepEqual(order, ["pause"], "the key goes down while the core is paused");
+  assert.ok(page.calls.includes("resume"));
+  const fractions = [];
+  const r = await run.window(3, { poll: (_t, f) => fractions.push(f) });
+  assert.ok(r.guestTicksStart - run.t0.ticks >= 20_000, "warmup of 2 guest seconds");
+  assert.equal(r.guestTicks, r.guestTicksEnd - r.guestTicksStart);
+  assert.ok(r.guestTicks >= 30_000 && r.overshootTicks >= 0);
+  assert.equal(r.guestSecondsCovered, r.guestTicks / 10_000);
+  assert.ok(fractions.at(-1) >= 1 && fractions.length >= 2);
+  assert.deepEqual(r.emulatedWindow, { secs: 3, warmup: 2, pollMs: 5, polls: fractions.length });
+});
+
+test("emulated window: speed is guest seconds over host seconds; a core without ticks is refused", async () => {
+  const { emulatedRecord, emulatedStart } = await import("../harness/lib/emulated-window.mjs");
+  const r = emulatedRecord({
+    t0: { ticks: 0, perSecond: 486e6 }, begin: { ticks: 486e6, at: 1000 }, end: { ticks: 486e6 * 6 + 100, at: 11000, polls: 99 },
+    target: 486e6 * 6, secs: 5, warmup: 1, pollMs: 100
+  });
+  assert.equal(r.overshootTicks, 100);
+  assert.equal(r.hostMs, 10000);
+  assert.equal(r.speed, 50);
+  assert.equal(r.warmupTicks, 486e6);
+  const dead = { evaluate: async (_fn, [type]) => (type === "validationReadCoreProgress" ? { error: "Unknown upstream worker message" } : { ok: true }) };
+  await assert.rejects(emulatedStart(dead, { warmup: 1 }), /no guest ticks/);
+});
+
+test("emulated window: counters are divided by the ticks covered when known", async () => {
+  const { instructionsPerGuestCycle } = await import("../harness/lib/perf-counters.mjs");
+  assert.equal(instructionsPerGuestCycle({ counters: { instructions: 4e9 }, guestTicks: 1e8, speed: 50, windowMs: 1 }), 40);
+  assert.equal(instructionsPerGuestCycle({ counters: { instructions: 486e6 }, speed: 100, windowMs: 1000 }), 1);
+});
+
 // 2026-10-22: a launch on a loaded machine ran without its region cache, every
 // module set aside by the engine for another heap layout before the core saw
 // it. The counters are read whatever the options, so the run says so.
@@ -436,4 +488,77 @@ test("race-perf: the region pipeline counters of a stats reply", () => {
     { layoutRefused: 143, heapPatched: 0, heapPatchedBytes: 0, heapPatchFailed: 0 });
   assert.deepEqual(regionPipeline({ layoutRefused: 0 }), { layoutRefused: 0 }, "an engine before 0084: no heap counters");
   assert.deepEqual(regionPipeline({}), {}, "an engine before 0078");
+});
+
+test("load under the lock: a loaded machine gives the lock back while waiting, then takes it again in turn", async () => {
+  const { calmUnderLock } = await import("../harness/lib/env.mjs");
+  const events = [];
+  const lock = () => events.push("release");
+  const acquire = async () => { events.push("acquire"); return () => events.push("release2"); };
+  const wait = async () => { events.push("wait"); return { load: 1, limit: 4, ok: true }; };
+  // Calm: the lock is kept, nothing waited for.
+  const calm = await calmUnderLock({ lock, maxLoad: 4, waitSec: 300, acquire, wait, load: () => 2 });
+  assert.equal(calm.lock, lock);
+  assert.equal(calm.relocked, false);
+  assert.deepEqual(events, []);
+  // Loaded: released BEFORE the wait, taken again after it.
+  const loaded = await calmUnderLock({ lock, maxLoad: 4, waitSec: 300, acquire, wait, load: () => 9 });
+  assert.deepEqual(events, ["release", "wait", "acquire"]);
+  assert.equal(loaded.relocked, true);
+  assert.notEqual(loaded.lock, lock);
+  // Never calm: released, not taken again, given up with no lock held.
+  events.length = 0;
+  const never = await calmUnderLock({ lock, maxLoad: 4, waitSec: 300, acquire, wait: async () => ({ load: 9, limit: 4, ok: false }), load: () => 9 });
+  assert.deepEqual(events, ["release"]);
+  assert.equal(never.lock, null);
+  assert.match(loadGaveUp(never.gate), /given up, lock released/);
+});
+
+test("calmLock: every probe's load gate gives the lock back while waiting; --no-lock only waits", async () => {
+  const { calmLock } = await import("../harness/lib/env.mjs");
+  const events = [];
+  let n = 0;
+  const acquire = async () => { const id = ++n; events.push(`acquire${id}`); const r = () => events.push(`release${id}`); return r; };
+  const wait = async ({ waitSec }) => { events.push(`wait${waitSec}`); return { load: 1, limit: 4, ok: true }; };
+  let load = 1;
+  const lock = await calmLock({ maxLoad: 4, calmWait: 7, acquire, wait, load: () => load });
+  assert.deepEqual(events, ["wait7", "acquire1"], "calm first, then the lock");
+  assert.equal((await lock.waitCalmUnlocked({ waitSec: 300 })).relocked, false);
+  load = 9;
+  const g = await lock.waitCalmUnlocked({ waitSec: 300 });
+  assert.equal(g.relocked, true);
+  assert.deepEqual(events.slice(2), ["release1", "wait300", "acquire2"], "released before the wait, taken again after");
+  lock.release();
+  lock.release();
+  assert.deepEqual(events.slice(5), ["release2"], "release lets go of the lock held now, once");
+  const none = await calmLock({ maxLoad: 4, calmWait: 7, acquire: null, wait });
+  events.length = 0;
+  assert.equal((await none.waitCalmUnlocked({ waitSec: 5 })).ok, true);
+  assert.deepEqual(events, ["wait5"]);
+});
+
+test("calmLock: no probe waits for the load on its own any more (the pattern does not come back)", () => {
+  const dir = path.join(import.meta.dirname, "..", "harness");
+  const files = ["probes/race-perf.mjs", "probes/ttff.mjs", "probes/ax-hle.mjs", "probes/first-launch.mjs", "cli.mjs"];
+  for (const f of files) {
+    const src = readFileSync(path.join(dir, f), "utf8");
+    const direct = src.split("\n").filter((l) => /\bwaitForLoad\(/.test(l) && !/abLock \?/.test(l));
+    assert.deepEqual(direct, [], `${f} calls waitForLoad outside calmLock / calmUnderLock`);
+  }
+});
+
+test("load give-up after --load-wait: no lock held, the lock checks pass cleanly (no TypeError)", async () => {
+  const { calmUnderLock } = await import("../harness/lib/env.mjs");
+  let released = 0;
+  const held = Object.assign(() => { released += 1; }, { check: () => ({ ok: true }) });
+  // The loop's give-up: loaded for the whole --load-wait, the lock goes back and is not taken again.
+  const g = await calmUnderLock({ lock: held, maxLoad: 4, waitSec: 1, acquire: async () => assert.fail("never taken again"), wait: async () => ({ load: 9, limit: 4, ok: false }), load: () => 9 });
+  assert.equal(g.lock, null);
+  assert.equal(released, 1);
+  // What race-perf then does: checkLock("end") and the final release on the lock it holds (none).
+  assert.equal(lockOverlapAt(g.lock, "end"), null);
+  assert.doesNotThrow(() => g.lock?.());
+  // A held lock still reports an overlap.
+  assert.deepEqual(lockOverlapAt(Object.assign(() => {}, { check: () => ({ ok: false, why: "another holder" }) }), "before run 2"), { at: "before run 2", why: "another holder" });
+  assert.equal(lockOverlapAt(Object.assign(() => {}, { check: () => ({ ok: true }) }), "x"), null);
 });

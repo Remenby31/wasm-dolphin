@@ -152,6 +152,48 @@ The three P1s and the trivial P2s are fixed in #43; the rest is tracked here.
 Order after #43 (Main, 2026-10-20): TTFF aot=1 vs off on main; the late ready signal; the FP analyses; the dispatch share (22 % of host time).
 - [ ] **Orphan request after a late mark** (review of #58, P3): when discio marks an old request after a cache clear but before the re-post, the region installs synchronously with the in-flight key still set, and the re-post's answer later leaves a stale 1 in the slot; a block sharing it compiles cold once. Same family as "Cold compile counted as Ready".
 
+## Region chaining (patch 0102, 2026-10-21)
+
+On the race with `aot=1` (night KPI, 2026-10-21), regions ran ~800 000 times
+a second for ~245 guest cycles each: every jump or return out of a region
+went back through `Run`, `ExecuteOneBlock` and `TryRunRegion` (a filter, the
+mode checks and a `s_region_at` find in ~135 000 nodes), and the dispatcher
+took 22 % of the CPU thread (`dispatchTimeShare`).
+
+- The exit stub of a region module (`src/aot-region-module.js`), reached by
+  a jump out of the region and by a `dispatch` (blr, bctr, bctrl) to a PC
+  that is not one of its entries, calls `env.region_chain(state)`: the core
+  answers the table index of the region mapped at `state.pc`, and the stub
+  tail-calls its dispatcher with `return_call_indirect` through `env.table`
+  (the core's function table). 0 returns to the dispatcher, as before.
+- `RegionChainNext` chains under the dispatcher's own conditions: downcount
+  left (an interrupt or an event ends the slice through downcount), an
+  entry mapped at pc, translation and FP on, no performance monitor, the
+  region verified since the last cache clear. Halts (code 2) never pass
+  through the stub. A dropped region leaves `s_region_at`, so nothing
+  chains into it; its handle is never freed.
+- A direct-mapped cache (8192 slots) sits in front of `s_region_at` for the
+  dispatcher, block chaining and chaining; it is cleared whenever the map
+  changes.
+- `?regionchain=0` turns chaining off (`DolphinWeb_JitSetRegionChaining`):
+  the same core and modules, every exit back to the dispatcher (A/B).
+- Counters: `DolphinWeb_JitRegionChainStats` (chained, out of time, no
+  region, refused), reset with the region stats; race-perf reports them in
+  `p4.diagnostics.regionChain`. `regionCalls` now counts dispatcher calls,
+  a chain of regions being one.
+- The assembler emits the chaining stub only for a core that exports the
+  helper (`assembleRegion(..., { chain })`, set by `coreAssembleOptions`);
+  otherwise its bytes are those of before 0102. Chained modules are keyed
+  `region-v2:` (the stub imports `region_chain` and `table`), so a module
+  assembled without chaining is never taken from the cache for a chaining
+  core, and the other way round. The translated code does not change:
+  `AOT_COMPILER_VERSION` stays as it is.
+- Tests: `tests/aot-region-module.test.mjs` (two modules chained through a
+  shared table, refusal), `tests/aot-region-dispatch.test.mjs` (one region
+  per function: a whole call in one dispatch, downcount cuts and a loop
+  across regions that never exits at the interpreter's state, no chaining
+  into a dropped region).
+
 ## Function names (2026-10-22)
 
 A region module carries a `name` section: the module is `r<lowest entry PC>`,
