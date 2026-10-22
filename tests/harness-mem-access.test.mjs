@@ -15,7 +15,8 @@ function memBytes(v = {}) {
   view.setUint32(8, v.on ?? 1, true);
   const f = [
     v.instructions ?? 0, ...KINDS.map((k) => v.access?.[k] ?? 0), ...KINDS.map((k) => v.slow?.[k] ?? 0),
-    v.cyclesCovered ?? 0, v.cyclesTotal ?? 0, v.regionAccesses ?? 0, v.regionInstructions ?? 0, v.saturations ?? 0
+    v.cyclesCovered ?? 0, v.cyclesTotal ?? 0, v.regionAccesses ?? 0, v.regionInstructions ?? 0, v.saturations ?? 0,
+    ...(v.flags ?? [0, 0, 0, 0])
   ];
   f.forEach((x, i) => view.setFloat64(16 + 8 * i, x, true));
   return Array.from(new Uint8Array(view.buffer));
@@ -64,6 +65,17 @@ test("memory access ratio: counted blocks, coverage, the region part estimated a
   assert.equal(aot.withRegionsEstimated, round(4300 / 11000));
   assert.equal(aot.slowShare, round(5 / 4300));
   assert.match(memAccessShares(decodeMemStats(memBytes({ on: 0 }))).error, /not on/);
+});
+
+test("memory access stats: CR and carry traffic in v1's spares (+160..+184), per instruction", () => {
+  const s = decodeMemStats(memBytes({ ...BLOCKS, flags: [120, 150, 30, 10] }));
+  const view = new DataView(Uint8Array.from(memBytes({ ...BLOCKS, flags: [120, 150, 30, 10] })).buffer);
+  assert.equal(view.getFloat64(160, true), 120);
+  assert.equal(view.getFloat64(184, true), 10);
+  assert.equal(s["flag.crWrite"], 120);
+  assert.deepEqual(memAccessShares(s).flagsPerInstruction, { crWrite: 0.12, crRead: 0.15, caWrite: 0.03, caRead: 0.01 });
+  // A core before the flag counts: zeros, not an error.
+  assert.deepEqual(memAccessShares(decodeMemStats(memBytes(BLOCKS))).flagsPerInstruction, { crWrite: 0, crRead: 0, caWrite: 0, caRead: 0 });
 });
 
 test("race-perf --mem-stats: a window's record, the pooled ratio, and why when absent", () => {
