@@ -3,11 +3,15 @@ import test from "node:test";
 
 import { READBACK_LOST, READBACK_OK, WgpuReadback, copyRows, paddedBytesPerRow, unwrapSeq } from "../src/wgpu-readback.js";
 
-// A device whose buffers map when the test says so, in any order.
+// A device whose buffers map when the test says so, in any order. Its
+// encoder fills the buffer the way the GPU would (rows of the source
+// rectangle at the padded stride); `rejectNext` makes the next copy fail
+// validation (its error scope reports an error, the buffer stays as it was).
 function fakeDevice() {
   const created = [];
+  const scopes = [];
   const device = {
-    created,
+    created, submits: 0, rejectNext: false, throwNext: false,
     createBuffer({ size }) {
       const bytes = new Uint8Array(size);
       let resolve, reject;
@@ -22,38 +26,50 @@ function fakeDevice() {
       };
       created.push(buffer);
       return buffer;
+    },
+    pushErrorScope() { scopes.push(null); },
+    popErrorScope() { return Promise.resolve(scopes.pop()); },
+    createCommandEncoder() {
+      return {
+        copyTextureToBuffer(src, dst, size) {
+          if (device.throwNext) {
+            device.throwNext = false;
+            throw new Error("bad copy");
+          }
+          if (device.rejectNext) {
+            device.rejectNext = false;
+            scopes[scopes.length - 1] = { message: "invalid copy" };
+            return;
+          }
+          const { texture } = src;
+          const texel = texture.texelSize;
+          for (let y = 0; y < size.height; y += 1) {
+            for (let b = 0; b < size.width * texel; b += 1) {
+              dst.buffer.bytes[y * dst.bytesPerRow + b] = texture.byteAt(src.origin.x * texel + b, src.origin.y + y);
+            }
+          }
+        },
+        finish() { return {}; }
+      };
     }
   };
+  device.queue = { submit() { device.submits += 1; } };
   return device;
 }
 
-// The encoder fills the buffer the way the GPU would: rows of the source
-// rectangle at the padded stride.
-function fakeEncoder(texture) {
-  return {
-    copyTextureToBuffer(src, dst, size) {
-      const texel = texture.texelSize;
-      for (let y = 0; y < size.height; y += 1) {
-        for (let b = 0; b < size.width * texel; b += 1) {
-          dst.buffer.bytes[y * dst.bytesPerRow + b] = texture.byteAt(src.origin.x * texel + b, src.origin.y + y);
-        }
-      }
-    }
-  };
-}
-
 const texture = { texelSize: 4, byteAt: (bx, y) => (bx + 7 * y) & 0xff };
+const flat = (v) => ({ texelSize: 4, byteAt: () => v });
 const flush = () => new Promise((r) => setImmediate(r));
 
-function setup() {
+function setup(options = {}) {
   const device = fakeDevice();
   const heap = new Uint8Array(4096);
   const words = new Int32Array(new SharedArrayBuffer(64));
-  return { device, heap, words, rb: new WgpuReadback({ device, heap: () => heap, words: () => words }) };
+  return { device, heap, words, rb: new WgpuReadback({ device, heap: () => heap, words: () => words, ...options }) };
 }
 
 const copyOf = (seq, extra = {}) => ({
-  slot: 0, seq, texture, origin: { x: 3, y: 2, z: 0 }, width: 5, height: 3, texelSize: 4,
+  seq, texture, origin: { x: 3, y: 2, z: 0 }, width: 5, height: 3, texelSize: 4,
   heapPtr: 100, dstStride: 20, wordIndex: 0, ...extra
 });
 
@@ -67,10 +83,11 @@ test("rows are padded to 256 bytes on the GPU side and packed on the host side",
   assert.deepEqual([...dst], [0, 0, 0, 1, 2, 0, 0, 0, 1, 2, 0, 0, 0, 0, 0, 0]);
 });
 
-test("a copy lands in the heap, then its seq is published", async () => {
+test("a copy lands in the heap in its own submission, then its seq is published", async () => {
   const { device, heap, words, rb } = setup();
-  rb.record(fakeEncoder(texture), copyOf(1));
-  const done = rb.submitted();
+  const done = rb.issue(device.queue, copyOf(1));
+  await flush();
+  assert.equal(device.submits, 1);
   assert.equal(Atomics.load(words, 0), 0, "nothing before the map");
   device.created[0].land();
   await done;
@@ -82,24 +99,65 @@ test("a copy lands in the heap, then its seq is published", async () => {
   assert.equal(rb.stats.completed, 1);
 });
 
-test("an older copy landing after a newer one of the same slot leaves the newer texels", async () => {
+// #125 review: an invalid copy used to map anyway and publish the pooled
+// buffer's old bytes as OK.
+test("a copy the device rejects is LOST and its buffer never read", async () => {
+  for (const how of ["rejectNext", "throwNext"]) {
+    const { device, heap, words, rb } = setup();
+    device[how] = true;
+    await rb.issue(device.queue, copyOf(1));
+    assert.equal(Atomics.load(words, 0), 1, how);
+    assert.equal(Atomics.load(words, 1), READBACK_LOST);
+    assert.ok(heap.every((b) => b === 0), "nothing written");
+    assert.equal(rb.stats.failed, 1);
+  }
+});
+
+// #125 review: copy 2 (another tile) LOST while copy 1 is in flight made
+// Flush return early, and copy 1 was then dropped as stale.
+test("a slot is published only up to its first unfinished copy", async () => {
   const { device, heap, words, rb } = setup();
-  rb.record(fakeEncoder(texture), copyOf(1));
-  rb.record(fakeEncoder({ texelSize: 4, byteAt: () => 0xaa }), copyOf(2));
-  const done = rb.submitted();
+  const one = rb.issue(device.queue, copyOf(1));
+  rb.lose(copyOf(2, { heapPtr: 300 }));
+  await flush();
+  assert.equal(Atomics.load(words, 0), 0, "copy 1 is still in flight");
+  device.created[0].land();
+  await one;
+  assert.equal(Atomics.load(words, 0), 2);
+  assert.equal(Atomics.load(words, 1), READBACK_LOST, "the run had a lost copy");
+  assert.equal(heap[100], texture.byteAt(12, 2), "copy 1's texels written");
+});
+
+test("copies landing out of order are written in seq order: the later copy of a tile wins", async () => {
+  const { device, heap, words, rb } = setup();
+  const one = rb.issue(device.queue, copyOf(1));
+  const two = rb.issue(device.queue, copyOf(2, { texture: flat(0xaa) }));
+  await flush();
   device.created[1].land();
+  await two;
+  assert.equal(Atomics.load(words, 0), 0, "copy 2 waits for copy 1");
+  assert.equal(heap[100], 0, "nothing written ahead of copy 1");
+  device.created[0].land();
+  await one;
+  assert.equal(Atomics.load(words, 0), 2);
+  assert.equal(Atomics.load(words, 1), READBACK_OK);
+  assert.equal(heap[100], 0xaa);
+});
+
+test("a seq the replay never saw counts as lost, so the slot cannot jam", async () => {
+  const { device, words, rb } = setup();
+  const three = rb.issue(device.queue, copyOf(3));
   await flush();
   device.created[0].land();
-  await done;
-  assert.equal(Atomics.load(words, 0), 2);
-  assert.equal(heap[100], 0xaa);
-  assert.equal(rb.stats.stale, 1);
+  await three;
+  assert.equal(Atomics.load(words, 0), 3);
+  assert.equal(Atomics.load(words, 1), READBACK_LOST);
 });
 
 test("a failed map wakes the waiter with LOST", async () => {
   const { device, words, rb } = setup();
-  rb.record(fakeEncoder(texture), copyOf(1));
-  const done = rb.submitted();
+  const done = rb.issue(device.queue, copyOf(1));
+  await flush();
   device.created[0].fail();
   await done;
   assert.equal(Atomics.load(words, 0), 1);
@@ -108,9 +166,9 @@ test("a failed map wakes the waiter with LOST", async () => {
 
 test("reset releases every waiter as LOST and drops what lands later", async () => {
   const { device, heap, words, rb } = setup();
-  rb.record(fakeEncoder(texture), copyOf(1));
-  const done = rb.submitted();
-  rb.record(fakeEncoder(texture), copyOf(1, { wordIndex: 2, heapPtr: 600 }));
+  const done = rb.issue(device.queue, copyOf(1));
+  rb.issue(device.queue, copyOf(1, { wordIndex: 2, heapPtr: 600 }));
+  await flush();
   rb.reset();
   assert.equal(Atomics.load(words, 0), 1);
   assert.equal(Atomics.load(words, 1), READBACK_LOST);
@@ -125,33 +183,31 @@ test("reset releases every waiter as LOST and drops what lands later", async () 
 test("map buffers are reused per size", async () => {
   const { device, rb } = setup();
   for (let seq = 1; seq <= 3; seq += 1) {
-    rb.record(fakeEncoder(texture), copyOf(seq));
-    const done = rb.submitted();
+    const done = rb.issue(device.queue, copyOf(seq));
+    await flush();
     device.created.at(-1).land();
     await done;
   }
   assert.equal(device.created.length, 1);
 });
 
-test("a late LOST for an older copy never overwrites a newer copy's OK", async () => {
-  const { device, words, rb } = setup();
-  rb.record(fakeEncoder(texture), copyOf(1));
-  rb.record(fakeEncoder(texture), copyOf(2));
-  const done = rb.submitted();
-  device.created[1].land();
+// #125 review: the pool kept 4 buffers per distinct size forever.
+test("the reuse pool is capped in bytes", async () => {
+  const { device, rb } = setup({ poolBytes: 1024 });
+  const sizes = [3, 4, 5];
+  const pending = sizes.map((height, i) => rb.issue(device.queue, copyOf(i + 1, { height, heapPtr: 100 + i * 200 })));
   await flush();
-  assert.equal(Atomics.load(words, 0), 2);
-  device.created[0].fail(); // copy 1's map fails after copy 2 landed
-  await done;
-  assert.equal(Atomics.load(words, 0), 2);
-  assert.equal(Atomics.load(words, 1), READBACK_OK, "status still the newer copy's");
+  for (const b of device.created) b.land();
+  await Promise.all(pending);
+  assert.ok(rb.pooledBytes <= 1024);
+  assert.equal(device.created.filter((b) => b.destroyed).length, 2, "256*3 kept, 256*4 and 256*5 destroyed");
 });
 
 test("a rectangle outside the heap or with overlapping rows is refused, the buffer unmapped, the waiter released", async () => {
   for (const bad of [{ heapPtr: 4090 }, { dstStride: 8 }, { heapPtr: -4 }]) {
     const { device, heap, words, rb } = setup();
-    rb.record(fakeEncoder(texture), copyOf(1, bad));
-    const done = rb.submitted();
+    const done = rb.issue(device.queue, copyOf(1, bad));
+    await flush();
     device.created[0].land();
     await done;
     assert.equal(Atomics.load(words, 0), 1, JSON.stringify(bad));

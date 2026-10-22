@@ -1,7 +1,7 @@
 diff --git a/Source/Core/VideoBackends/WebGPU/WebGPUCommandStream.cpp b/Source/Core/VideoBackends/WebGPU/WebGPUCommandStream.cpp
 --- a/Source/Core/VideoBackends/WebGPU/WebGPUCommandStream.cpp
 +++ b/Source/Core/VideoBackends/WebGPU/WebGPUCommandStream.cpp
-@@ -1447,6 +1447,34 @@
+@@ -1452,6 +1452,34 @@
    rec.arg.u[1] = y;
    rec.arg.u[2] = w;
    rec.arg.u[3] = h;
@@ -98,7 +98,15 @@ diff --git a/Source/Core/VideoBackends/WebGPU/WebGPUTexture.cpp b/Source/Core/Vi
  
  namespace WebGPU
  {
-@@ -213,16 +220,73 @@
+@@ -208,21 +215,93 @@
+   // the AbstractStagingTexture interface produces zero-filled pixels
+   // (rather than reading uninitialized memory). Real WebGPU storage
+   // comes later.
+-  m_buffer.resize(m_texel_size * config.width * config.height);
+-  m_map_pointer = reinterpret_cast<char*>(m_buffer.data());
++  m_block = std::make_unique<StagingReadbackBlock>();
++  m_block->texels.resize(m_texel_size * config.width * config.height);
++  m_map_pointer = reinterpret_cast<char*>(m_block->texels.data());
    m_map_stride = m_texel_size * config.width;
  }
  
@@ -106,24 +114,38 @@ diff --git a/Source/Core/VideoBackends/WebGPU/WebGPUTexture.cpp b/Source/Core/Vi
 +WebGPUStagingTexture::~WebGPUStagingTexture()
 +{
 +  // A copy still in flight would write into freed memory: wait for it, and
-+  // if it never lands (device lost mid-copy), leak the buffer rather than
++  // if it never lands (device lost mid-copy), leak the block rather than
 +  // free it under the worker.
 +  if (!WaitForCopies(1000))
-+  {
-+    static std::vector<std::vector<u8>> s_orphans;
-+    s_orphans.push_back(std::move(m_buffer));
-+  }
++    OrphanBlock(false);
 +}
  
 -void WebGPUStagingTexture::CopyFromTexture(const AbstractTexture* /* src */,
 -                                           const MathUtil::Rectangle<int>& /* src_rect */,
 -                                           u32 /* src_layer */, u32 /* src_level */,
 -                                           const MathUtil::Rectangle<int>& /* dst_rect */)
++// Blocks a late copy may still write into, texels and words alike.
++static std::vector<std::unique_ptr<StagingReadbackBlock>> s_orphaned_blocks;
++
++void WebGPUStagingTexture::OrphanBlock(bool keep_texels)
+ {
++  auto fresh = std::make_unique<StagingReadbackBlock>();
++  if (keep_texels)
++  {
++    fresh->texels = m_block->texels;
++    // Everything issued so far is settled as far as the fresh block goes.
++    fresh->words[0].store(static_cast<s32>(m_issued), std::memory_order_release);
++  }
++  s_orphaned_blocks.push_back(std::move(m_block));
++  m_block = std::move(fresh);
++  m_map_pointer = reinterpret_cast<char*>(m_block->texels.data());
++}
++
 +void WebGPUStagingTexture::CopyFromTexture(const AbstractTexture* src,
 +                                           const MathUtil::Rectangle<int>& src_rect,
 +                                           u32 src_layer, u32 src_level,
 +                                           const MathUtil::Rectangle<int>& dst_rect)
- {
++{
 +  const u32 src_id = src ? static_cast<const WebGPUTexture*>(src)->GetBridgeId() : 0;
 +  if (src_id == 0 || src_rect.GetWidth() <= 0 || src_rect.GetHeight() <= 0 ||
 +      dst_rect.GetWidth() != src_rect.GetWidth() || dst_rect.GetHeight() != src_rect.GetHeight() ||
@@ -136,7 +158,7 @@ diff --git a/Source/Core/VideoBackends/WebGPU/WebGPUTexture.cpp b/Source/Core/Vi
 +  // The copy runs after everything recorded so far, the pass that drew the
 +  // source included.
 +  static_cast<WebGPUGfx*>(g_gfx.get())->EndPassForImmediateOp();
-+  u8* dst = m_buffer.data() + static_cast<size_t>(dst_rect.top) * m_map_stride +
++  u8* dst = m_block->texels.data() + static_cast<size_t>(dst_rect.top) * m_map_stride +
 +            static_cast<size_t>(dst_rect.left) * m_texel_size;
 +  const u32 seq = m_issued + 1;
 +  if (!GetCommandStream().PushCopyToStaging(
@@ -144,7 +166,7 @@ diff --git a/Source/Core/VideoBackends/WebGPU/WebGPUTexture.cpp b/Source/Core/Vi
 +          static_cast<u32>(src_rect.GetWidth()), static_cast<u32>(src_rect.GetHeight()), src_layer,
 +          src_level, static_cast<u32>(m_texel_size), seq,
 +          static_cast<u32>(reinterpret_cast<uintptr_t>(dst)), static_cast<u32>(m_map_stride),
-+          static_cast<u32>(reinterpret_cast<uintptr_t>(&m_words[0]))))
++          static_cast<u32>(reinterpret_cast<uintptr_t>(&m_block->words[0]))))
 +  {
 +    return;
 +  }
@@ -154,19 +176,19 @@ diff --git a/Source/Core/VideoBackends/WebGPU/WebGPUTexture.cpp b/Source/Core/Vi
  
 +bool WebGPUStagingTexture::WaitForCopies(u32 timeout_ms)
 +{
-+  if (static_cast<u32>(m_words[0].load(std::memory_order_acquire)) >= m_issued)
++  if (static_cast<u32>(m_block->words[0].load(std::memory_order_acquire)) >= m_issued)
 +    return true;
 +#ifdef __EMSCRIPTEN__
 +  const double deadline = emscripten_get_now() + timeout_ms;
 +  for (;;)
 +  {
-+    const s32 done = m_words[0].load(std::memory_order_acquire);
++    const s32 done = m_block->words[0].load(std::memory_order_acquire);
 +    if (static_cast<u32>(done) >= m_issued)
 +      return true;
 +    const double left = deadline - emscripten_get_now();
 +    if (left <= 0)
 +      return false;
-+    emscripten_futex_wait(reinterpret_cast<volatile void*>(&m_words[0]),
++    emscripten_futex_wait(reinterpret_cast<volatile void*>(&m_block->words[0]),
 +                          static_cast<u32>(done), left);
 +  }
 +#else
@@ -177,7 +199,7 @@ diff --git a/Source/Core/VideoBackends/WebGPU/WebGPUTexture.cpp b/Source/Core/Vi
  void WebGPUStagingTexture::CopyToTexture(const MathUtil::Rectangle<int>& /* src_rect */,
                                            AbstractTexture* /* dst */,
                                            const MathUtil::Rectangle<int>& /* dst_rect */,
-@@ -242,6 +306,18 @@
+@@ -242,6 +321,20 @@
  
  void WebGPUStagingTexture::Flush()
  {
@@ -192,6 +214,8 @@ diff --git a/Source/Core/VideoBackends/WebGPU/WebGPUTexture.cpp b/Source/Core/Vi
 +      WARN_LOG_FMT(VIDEO, "WebGPU readback: copy {} not back after 500 ms, using older texels",
 +                   m_issued);
 +    }
++    // The late copy may still land: not into texels being read now.
++    OrphanBlock(true);
 +  }
    m_needs_flush = false;
  }
@@ -207,18 +231,34 @@ diff --git a/Source/Core/VideoBackends/WebGPU/WebGPUTexture.h b/Source/Core/Vide
  #include <vector>
  
  #include "Common/CommonTypes.h"
-@@ -74,7 +75,15 @@
+@@ -57,6 +58,15 @@
+   u32 m_bridge_id = 0;
+ };
+ 
++// A staging texture's host memory: the texels, and the two shared words the
++// worker completes readbacks in: [0] the last completed copy, [1] its status
++// (0 ok, 1 lost).
++struct StagingReadbackBlock
++{
++  alignas(8) std::atomic<s32> words[2] = {};
++  std::vector<u8> texels;
++};
++
+ class WebGPUStagingTexture final : public AbstractStagingTexture
+ {
+ public:
+@@ -74,7 +84,14 @@
    void Flush() override;
  
  private:
+-  std::vector<u8> m_buffer;
 +  // Readback (docs/wgpu-efb-readback-design.md): copies issued to the
-+  // worker, and the two shared words it completes them in: [0] the last
-+  // completed copy, [1] its status (0 ok, 1 lost). The worker writes the
-+  // texels straight into m_buffer, so neither may move or be freed while a
-+  // copy is in flight (see the destructor).
++  // worker, which writes their texels and completes them in the block's
++  // words while they are in flight. A copy that does not come back in time
++  // may still land, so the block is then orphaned, never freed (OrphanBlock).
 +  bool WaitForCopies(u32 timeout_ms);
-   std::vector<u8> m_buffer;
-+  alignas(8) std::atomic<s32> m_words[2] = {};
++  void OrphanBlock(bool keep_texels);
++  std::unique_ptr<StagingReadbackBlock> m_block;
 +  u32 m_issued = 0;
  };
  

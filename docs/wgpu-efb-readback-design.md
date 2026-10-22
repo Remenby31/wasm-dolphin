@@ -60,17 +60,20 @@ CPU peeks, the data is usually back. The staging texture only has to make
 
 `WebGPUStagingTexture` for `StagingTextureType::Readback`:
 
-- Owns a slot id and a host buffer in the wasm heap (`m_buffer`, unchanged,
-  `m_map_stride` = tight rows).
+- Owns a host block in the wasm heap: the texels (`m_map_stride` = tight
+  rows) and the slot's two completion words, allocated together.
 - `CopyFromTexture(src, rect, layer, level, dst_rect)` records a new opcode
   `COPY_TEXTURE_TO_STAGING {slot, texture id, layer, level, rect, dst offset,
   heap ptr, stride, seq}` and remembers `m_pending_seq = ++seq`. No wait.
 - `Flush()`: if `m_pending_seq` is not complete, submit the command stream
   (`g_gfx->Flush()` semantics: the ring is published to the worker), then wait
   on the slot's completion word with `emscripten_futex_wait` until it reaches
-  `m_pending_seq`. Bounded wait (500 ms): on timeout, log once, count it, and
-  keep the previous contents (no deadlock if the device is lost or the worker
-  is reloading).
+  `m_pending_seq`. Bounded wait (500 ms): on timeout, log once and keep the
+  previous contents (no deadlock if the device is lost or the worker is
+  reloading). The late copy may still land, so the block is orphaned (kept,
+  never freed) and the texture goes on with a fresh copy of it; the
+  destructor does the same after 1 s. A late copy only ever writes into
+  memory nobody reads.
 - `Map()` stays trivial (the buffer is always mapped on the host side).
 - Upload staging (`StagingTextureType::Upload`/`Mutable`) is out of scope.
 
@@ -79,15 +82,20 @@ copying from `depth24plus`); keep the existing colour-pass fallback otherwise.
 
 ### Consumer (discio worker, `src/wgpu-readback.js`)
 
-- On `COPY_TEXTURE_TO_STAGING`: inside the current command encoder,
-  `copyTextureToBuffer` into a pooled `MAP_READ|COPY_DST` buffer
-  (`bytesPerRow` rounded to 256), then at the next submit boundary
-  `mapAsync(READ)`.
+- On `COPY_TEXTURE_TO_STAGING`: submit everything recorded so far (a failed
+  submit releases the copy as LOST), then `copyTextureToBuffer` into a pooled
+  `MAP_READ|COPY_DST` buffer (`bytesPerRow` rounded to 256) in its own
+  encoder and submission, inside a validation error scope: a bad copy spoils
+  no draw, and a rejected one is LOST, never OK with a pooled buffer's old
+  bytes. Then `mapAsync(READ)`. The pool is capped in bytes.
 - On resolve: pack rows into the tight host layout at `heap ptr`
   (`packReadbackRows`, already used by the harness capture), then
   `Atomics.store(seqWord, seq)` + `Atomics.notify`. Unmap, return the buffer
   to the pool.
-- Completions are applied in `seq` order per slot; a stale one (renderer
+- Completions are applied in `seq` order per slot: a slot's word reaches
+  `seq` only once every copy up to it is finished, and texels are written in
+  that order (a later copy of a tile wins). A `seq` the replay never saw
+  counts as lost, so a slot cannot jam. A stale one (renderer
   generation changed: device lost, core reload, savestate load) is dropped
   and its waiter woken with the generation bump, never with old pixels.
 - Never wait inside the worker: the video thread is the only side that

@@ -25,7 +25,7 @@
       "commit": "01e0577914a75a2569c846778c2f93aa8e6feddd"
     }
   },
-  "patchSeriesSha256": "3877ee957292e50134d8bfbc77a8f59b53a0308e5256667d0ee0d2dd9e48e7f8",
+  "patchSeriesSha256": "c63d6498163f96d46ae92a712a54d54d0fc017f0f323a8c3053f82a9fa9776d8",
   "patches": [
     {
       "order": 1,
@@ -680,8 +680,8 @@
       "cwd": ".",
       "hashMode": "lf-normalized",
       "path": "patches/dolphin-wasm/snapshot/0093-webgpu-staging-readback.patch",
-      "size": 9257,
-      "sha256": "4e7182607d4994435a4bf4ba2e752b976bbe293c429f6bd5b983d2dde37249e0"
+      "size": 10848,
+      "sha256": "7859d27659e8152e9c6aa249529b4c7a860d54bb1d6c6d2511c5e336ff55919e"
     },
     {
       "order": 83,

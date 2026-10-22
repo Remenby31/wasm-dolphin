@@ -9,9 +9,14 @@
 // number in shared memory, where the video thread waits for it only when it
 // actually reads (Flush). The worker never waits.
 //
-// Per slot, two Int32 words in shared memory: [done seq, status]. status is
-// READBACK_OK, or READBACK_LOST when the copy will never land (device lost,
-// renderer reset): the waiter wakes and keeps its previous texels.
+// Per slot, two Int32 words in shared memory: [done seq, status]. A slot's
+// seq S is published only once every copy up to S is finished, in order:
+// copies of different tiles of one staging texture may land in any order,
+// and the waiter must not read a tile still in flight. Texels are written in
+// seq order too, so a later copy of the same tile wins. status is
+// READBACK_OK, or READBACK_LOST when a copy in the published run will never
+// land (device lost, rejected copy, renderer reset): the waiter wakes and
+// keeps its previous texels for those.
 
 export const READBACK_OK = 0;
 export const READBACK_LOST = 1;
@@ -20,7 +25,7 @@ const COPY_DST = 0x0008;
 const MAP_MODE_READ = 0x0001;
 
 // The command record carries the low 16 bits of a copy's seq; the full seq
-// follows the slot's last completed one (a handful of copies are in flight
+// follows the slot's last published one (a handful of copies are in flight
 // at most, never 65536).
 export function unwrapSeq(last, seq16) {
   return (last >>> 0) + (((seq16 & 0xFFFF) - (last & 0xFFFF)) & 0xFFFF);
@@ -38,94 +43,183 @@ export function copyRows(src, dst, dstOffset, { rowBytes, srcStride, dstStride, 
 
 export class WgpuReadback {
   // heap(): the wasm heap's current Uint8Array (it can grow); words(): the
-  // shared Int32Array the slots' words live in.
-  constructor({ device, heap, words }) {
+  // shared Int32Array the slots' words live in. poolBytes caps the MAP_READ
+  // buffers kept for reuse.
+  constructor({ device, heap, words, poolBytes = 8 << 20 }) {
     this.device = device;
     this.heap = heap;
     this.words = words;
+    this.poolBytes = poolBytes;
     this.generation = 0;
     this.pool = new Map(); // size -> [GPUBuffer]
-    this.recorded = []; // copies encoded, not submitted yet
-    this.inFlight = new Set();
+    this.pooledBytes = 0;
+    this.slots = new Map(); // wordIndex -> { published, recorded, entries: Map(seq -> entry) }
     this.stats = { copies: 0, completed: 0, stale: 0, lost: 0, failed: 0, rejected: 0, bytes: 0, maxLatencyMs: 0 };
   }
 
   takeBuffer(size) {
     const free = this.pool.get(size);
-    return free?.pop() ?? this.device.createBuffer({ size, usage: MAP_READ | COPY_DST, label: "dolphin-readback" });
+    const buffer = free?.pop();
+    if (buffer) {
+      this.pooledBytes -= size;
+      return buffer;
+    }
+    return this.device.createBuffer({ size, usage: MAP_READ | COPY_DST, label: "dolphin-readback" });
   }
 
   giveBack(buffer, size) {
     const free = this.pool.get(size) ?? [];
-    if (free.length < 4) {
+    if (free.length < 4 && this.pooledBytes + size <= this.poolBytes) {
       free.push(buffer);
       this.pool.set(size, free);
+      this.pooledBytes += size;
     } else {
       buffer.destroy();
     }
   }
 
-  // Inside the replay's command encoder. copy: { slot, seq, texture,
-  // mipLevel, origin {x,y,z}, width, height, texelSize, aspect?, heapPtr,
-  // dstStride, wordIndex }.
-  record(encoder, copy, now = performance.now()) {
+  // The copy's place in its slot. Records arrive in seq order, so a seq
+  // skipped since the slot's last record (a record the producer pushed but
+  // the replay never saw) will never come: it counts as lost, or the slot
+  // would wait for it forever.
+  track(c) {
+    let slot = this.slots.get(c.wordIndex);
+    if (!slot || slot.entries.size === 0) {
+      // Idle: start from the shared word (a staging texture may have been
+      // freed and another one allocated at the same address).
+      const published = Atomics.load(this.words(), c.wordIndex) >>> 0;
+      slot = { published, recorded: published, entries: new Map() };
+      this.slots.set(c.wordIndex, slot);
+    }
+    if (c.seq <= slot.recorded) return null;
+    for (let seq = slot.recorded + 1; seq < c.seq; seq += 1) {
+      slot.entries.set(seq, { c: { ...c, seq }, state: "lost" });
+    }
+    slot.recorded = c.seq;
+    const entry = { c, state: "pending" };
+    slot.entries.set(c.seq, entry);
+    return entry;
+  }
+
+  // A copy that never reaches the GPU (no source texture, replay failure):
+  // released as LOST in its turn.
+  lose(c) {
+    const entry = this.track(c);
+    if (!entry) {
+      this.stats.rejected += 1;
+      return;
+    }
+    this.stats.lost += 1;
+    entry.state = "lost";
+    this.advance(c.wordIndex);
+  }
+
+  // Its own encoder and submission, inside a validation scope, after the
+  // caller submitted everything recorded before it: a bad copy invalidates
+  // nothing else, and a copy the device rejects is LOST, never OK with the
+  // stale bytes of a pooled buffer. copy: { seq, texture, mipLevel, origin
+  // {x,y,z}, width, height, texelSize, aspect?, heapPtr, dstStride, wordIndex }.
+  async issue(queue, copy, now = () => performance.now()) {
+    const entry = this.track(copy);
+    if (!entry) {
+      this.stats.rejected += 1;
+      return;
+    }
+    const generation = this.generation;
     const rowBytes = copy.width * copy.texelSize;
     const srcStride = paddedBytesPerRow(rowBytes);
     const size = srcStride * copy.height;
-    const buffer = this.takeBuffer(size);
-    encoder.copyTextureToBuffer(
-      { texture: copy.texture, mipLevel: copy.mipLevel ?? 0, origin: copy.origin, ...(copy.aspect ? { aspect: copy.aspect } : {}) },
-      { buffer, bytesPerRow: srcStride, rowsPerImage: copy.height },
-      { width: copy.width, height: copy.height, depthOrArrayLayers: 1 }
-    );
+    const c = Object.assign(entry.c, { rowBytes, srcStride, size, at: now() });
     this.stats.copies += 1;
-    this.recorded.push({ ...copy, buffer, size, rowBytes, srcStride, generation: this.generation, at: now });
-  }
-
-  // Right after the queue.submit that carried the recorded copies.
-  submitted(now = () => performance.now()) {
-    const batch = this.recorded;
-    this.recorded = [];
-    return Promise.all(batch.map((c) => this.land(c, now)));
-  }
-
-  async land(c, now) {
-    this.inFlight.add(c);
-    let mapped = false;
+    let buffer = null;
+    let thrown = false;
+    this.device.pushErrorScope("validation");
     try {
-      await c.buffer.mapAsync(MAP_MODE_READ);
-      mapped = true;
+      buffer = this.takeBuffer(size);
+      const encoder = this.device.createCommandEncoder({ label: "dolphin-readback" });
+      encoder.copyTextureToBuffer(
+        { texture: c.texture, mipLevel: c.mipLevel ?? 0, origin: c.origin, ...(c.aspect ? { aspect: c.aspect } : {}) },
+        { buffer, bytesPerRow: srcStride, rowsPerImage: c.height },
+        { width: c.width, height: c.height, depthOrArrayLayers: 1 }
+      );
+      queue.submit([encoder.finish()]);
     } catch {
-      this.stats.failed += 1;
-      this.publish(c, READBACK_LOST);
+      thrown = true;
+    }
+    const scope = this.device.popErrorScope();
+    const rejected = thrown || Boolean(await scope.catch(() => true));
+    if (generation !== this.generation) {
+      buffer?.destroy();
       return;
-    } finally {
-      this.inFlight.delete(c);
+    }
+    if (rejected) {
+      if (buffer) this.giveBack(buffer, size);
+      this.finish(entry, "lost", null, "failed");
+      return;
     }
     try {
-      if (c.generation !== this.generation) {
-        // Reset while in flight: reset() already released the waiter.
-        this.stats.stale += 1;
-      } else if (Atomics.load(this.words(), c.wordIndex) >= c.seq) {
-        // A later copy of this slot landed first: its texels stand.
-        this.stats.stale += 1;
-      } else if (!this.fits(c)) {
-        // The producer asked for a rectangle that does not fit its buffer:
-        // nothing is written, the waiter is released.
-        this.stats.rejected += 1;
-        this.publish(c, READBACK_LOST);
+      await buffer.mapAsync(MAP_MODE_READ);
+    } catch {
+      if (generation === this.generation) {
+        this.giveBack(buffer, size);
+        this.finish(entry, "lost", null, "failed");
       } else {
-        copyRows(new Uint8Array(c.buffer.getMappedRange()), this.heap(), c.heapPtr,
-          { rowBytes: c.rowBytes, srcStride: c.srcStride, dstStride: c.dstStride, rows: c.height });
-        this.stats.completed += 1;
-        this.stats.bytes += c.rowBytes * c.height;
-        this.stats.maxLatencyMs = Math.max(this.stats.maxLatencyMs, now() - c.at);
-        this.publish(c, READBACK_OK);
+        buffer.destroy();
       }
-    } finally {
-      if (mapped) c.buffer.unmap();
-      this.giveBack(c.buffer, c.size);
+      return;
     }
+    if (generation !== this.generation) {
+      // Reset while in flight: reset() already released the waiter.
+      this.stats.stale += 1;
+      buffer.unmap();
+      buffer.destroy();
+      return;
+    }
+    this.stats.maxLatencyMs = Math.max(this.stats.maxLatencyMs, now() - c.at);
+    this.finish(entry, "ok", buffer);
+  }
+
+  finish(entry, state, buffer = null, stat = null) {
+    if (stat) this.stats[stat] += 1;
+    entry.state = state;
+    entry.buffer = buffer;
+    this.advance(entry.c.wordIndex);
+  }
+
+  // Publishes the slot's finished copies that have no unfinished one before
+  // them, writing their texels in seq order.
+  advance(wordIndex) {
+    const slot = this.slots.get(wordIndex);
+    if (!slot) return;
+    let status = READBACK_OK;
+    let moved = false;
+    for (let entry = slot.entries.get(slot.published + 1); entry && entry.state !== "pending"; entry = slot.entries.get(slot.published + 1)) {
+      const { c, buffer } = entry;
+      if (entry.state === "ok") {
+        try {
+          if (this.fits(c)) {
+            copyRows(new Uint8Array(buffer.getMappedRange()), this.heap(), c.heapPtr,
+              { rowBytes: c.rowBytes, srcStride: c.srcStride, dstStride: c.dstStride, rows: c.height });
+            this.stats.completed += 1;
+            this.stats.bytes += c.rowBytes * c.height;
+          } else {
+            // The producer asked for a rectangle that does not fit its
+            // buffer: nothing is written, the waiter is released.
+            this.stats.rejected += 1;
+            status = READBACK_LOST;
+          }
+        } finally {
+          buffer.unmap();
+          this.giveBack(buffer, c.size);
+        }
+      } else {
+        status = READBACK_LOST;
+      }
+      slot.entries.delete(c.seq);
+      slot.published = c.seq;
+      moved = true;
+    }
+    if (moved) this.publish(wordIndex, slot.published, status);
   }
 
   // The destination rectangle lies inside the heap, rows do not overlap.
@@ -137,27 +231,31 @@ export class WgpuReadback {
     return dstStride >= rowBytes && heapPtr + dstStride * (height - 1) + rowBytes <= heap.length;
   }
 
-  // Completions only move a slot forward: an older copy (landing late, or
-  // released as LOST) never overwrites a newer one's status. The status is
-  // written before the seq that publishes it.
-  publish(c, status) {
+  // The status is written before the seq that publishes it.
+  publish(wordIndex, seq, status) {
     const words = this.words();
-    if (Atomics.load(words, c.wordIndex) >= c.seq) return;
-    Atomics.store(words, c.wordIndex + 1, status);
-    Atomics.store(words, c.wordIndex, c.seq);
-    Atomics.notify(words, c.wordIndex);
+    Atomics.store(words, wordIndex + 1, status);
+    Atomics.store(words, wordIndex, seq);
+    Atomics.notify(words, wordIndex);
   }
 
   // Device lost, core reload, savestate load: nothing in flight will land.
+  // Every slot is released up to its last recorded copy.
   reset() {
     this.generation += 1;
-    for (const c of [...this.recorded, ...this.inFlight]) {
-      this.stats.lost += 1;
-      this.publish(c, READBACK_LOST);
+    for (const [wordIndex, slot] of this.slots) {
+      for (const entry of slot.entries.values()) {
+        if (entry.buffer) {
+          entry.buffer.unmap();
+          entry.buffer.destroy();
+        }
+        if (entry.state === "pending") this.stats.lost += 1;
+      }
+      if (slot.entries.size > 0) this.publish(wordIndex, slot.recorded, READBACK_LOST);
     }
-    this.recorded = [];
-    this.inFlight.clear();
+    this.slots.clear();
     for (const buffers of this.pool.values()) for (const b of buffers) b.destroy();
     this.pool.clear();
+    this.pooledBytes = 0;
   }
 }

@@ -151,7 +151,7 @@ import {
   hashWgpuVisualSample
 } from "./wgpu-visual-cadence.js";
 import { createCoreLifecycle } from "./core-lifecycle.js";
-import { READBACK_LOST, WgpuReadback, unwrapSeq } from "./wgpu-readback.js";
+import { WgpuReadback, unwrapSeq } from "./wgpu-readback.js";
 import { createDisplayCounter, startDisplayLoop } from "./wgpu-display-counter.js";
 import { PipelinePrewarm } from "./wgpu-pipeline-prewarm.js";
 import { BOOT_FILE_HEAD_BYTES, bootFileKind, checkExecutable, executableGameId } from "./boot-file.js";
@@ -14906,15 +14906,18 @@ function drainWebGpuCmdRing(source = "presentation") {
           };
           if (!source) {
             wgpuReplayClassifier?.recordMissingResource({ kind: "readback-source", id: u32[recWord + 1] });
-            rb.publish(copy, READBACK_LOST);
+            rb.lose(copy);
             break;
           }
-          // After everything recorded before it, in its own submission, so
-          // the map can start right away.
+          // Everything recorded before it is submitted first; the copy then
+          // goes in its own encoder and submission (WgpuReadback.issue), so
+          // the map can start right away and a bad copy spoils no draw.
           endPass("readback", read);
-          rb.record(ensureEnc(), copy);
-          submitEnc("readback");
-          void rb.submitted();
+          if (!submitEnc("readback") && lastSubmitFailureReason !== "no-command-encoder") {
+            rb.lose(copy);
+            break;
+          }
+          void rb.issue(q, copy);
           break;
         }
         case WGPU_CMD_OP_VI_TAG:
