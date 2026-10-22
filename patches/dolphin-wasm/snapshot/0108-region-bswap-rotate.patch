@@ -1,0 +1,40 @@
+diff --git a/Source/Core/Core/PowerPC/CachedInterpreter/CachedInterpreter.cpp b/Source/Core/Core/PowerPC/CachedInterpreter/CachedInterpreter.cpp
+--- a/Source/Core/Core/PowerPC/CachedInterpreter/CachedInterpreter.cpp
++++ b/Source/Core/Core/PowerPC/CachedInterpreter/CachedInterpreter.cpp
+@@ -4020,8 +4020,26 @@ void EmitL1Address(std::vector<u8>& body, const WasmStateLayout& layout)
+   body.push_back(0x6a);
+ }
+ 
++// Patch 0108: in region code, the byte swap in the form LLVM emits,
++// (rotl(x, 8) & 0x00ff00ff) | (rotr(x, 8) & 0xff00ff00), 5 ops instead of
++// 10. Blocks keep their bytes (and cache keys).
+ void EmitBswap32FromLocal(std::vector<u8>& body, u32 local_index)
+ {
++  if (s_wasm_fragment_relocs)
++  {
++    EmitLocalGet(body, local_index);
++    EmitI32Const(body, 8);
++    body.push_back(0x77);  // i32.rotl
++    EmitI32Const(body, 0x00ff00ff);
++    body.push_back(0x71);  // i32.and
++    EmitLocalGet(body, local_index);
++    EmitI32Const(body, 8);
++    body.push_back(0x78);  // i32.rotr
++    EmitI32Const(body, 0xff00ff00u);
++    body.push_back(0x71);
++    body.push_back(0x72);  // i32.or
++    return;
++  }
+   EmitLocalGet(body, local_index);
+   EmitI32Const(body, 0xff);
+   body.push_back(0x71);
+@@ -15962,7 +15980,8 @@ namespace
+ // none and would never install. 5 (0087): ps_sum0/1, ps_res, fres and
+ // ps_neg/mr/nabs/abs compiled inline (3 and 4 are taken by 0084 and 0083).
+ // 6 (0105): FPU ops outside the direct tier stay in the region, interpreted.
+-constexpr u32 AOT_COMPILER_VERSION = 6;
++// 7 (0108): region byte swaps as two rotates.
++constexpr u32 AOT_COMPILER_VERSION = 7;
+ constexpr u32 AOT_MAX_FRAGMENT_BYTES = 1u << 20;
+ thread_local std::vector<u32> t_aot_out;
+ u8* s_aot_ram = nullptr;

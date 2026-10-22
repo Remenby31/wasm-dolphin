@@ -295,6 +295,13 @@ ops (`RegionInterpretsInline`): system, cache and branch ops, which may
 change the MSR, the translation or the code, still end the region, which
 does not check the CPU's mode between its blocks. Compiler version 6.
 
+## Byte swaps as rotates (patch 0108, 2026-10-22)
+
+In region code, a 32-bit byte swap (32-bit guest loads and stores)
+is `(rotl(x, 8) & 0x00ff00ff) | (rotr(x, 8) & 0xff00ff00)`, the form LLVM
+emits: 5 ops instead of 10 shifts, masks and ors. Blocks keep the old form,
+so their bytes and cache keys don't change. Compiler version 7.
+
 ## MMU mode (patch 0091, with dispatch's 0090, 2026-10-22)
 
 Under the MMU (bMMU, set by a game's INI) no wasm code of ours runs. The
