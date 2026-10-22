@@ -41,6 +41,7 @@
 #include "VideoCommon/Statistics.h"
 
 #include "dolphin_web_xfb_fastpaths.h"
+#include "dolphin_web_direct_pad.h"
 #include "dolphin_web_pad_latch.h"
 #include "dolphin_web_raster_profile.h"
 
@@ -157,6 +158,11 @@ struct PadPoll
 };
 // Guarded by s_input_state_mutex. See dolphin_web_pad_latch.h.
 std::array<DolphinWeb::PadLatch<PadPoll>, PAD_PORT_COUNT> s_pad_latches{};
+// Written by the page's main thread, read at the SI poll; see
+// dolphin_web_direct_pad.h. The tap latches are guarded by s_input_state_mutex.
+alignas(8) DolphinWeb::DirectPad::Block s_direct_pad{};
+std::array<DolphinWeb::DirectPad::TapLatch, PAD_PORT_COUNT> s_tap_latches{};
+static_assert(DolphinWeb::DirectPad::DIRECT_PAD_PORTS == PAD_PORT_COUNT);
 std::mutex s_pad_poll_mutex;
 PadPollSnapshot s_pad_poll;
 bool s_using_xfb_frame = false;
@@ -1485,6 +1491,94 @@ const char* GetVideoStats()
   return current_video_stats.c_str();
 }
 
+// Direct pad block: address and layout version for the page (src/direct-pad.js).
+#ifdef __EMSCRIPTEN__
+EMSCRIPTEN_KEEPALIVE
+#endif
+void* DolphinWeb_DirectPadBlock()
+{
+  return &s_direct_pad;
+}
+
+#ifdef __EMSCRIPTEN__
+EMSCRIPTEN_KEEPALIVE
+#endif
+std::uint32_t DolphinWeb_DirectPadLayout()
+{
+  return DolphinWeb::DirectPad::DIRECT_PAD_LAYOUT;
+}
+
+// Called by Pad::Rumble (patch 0095) when the game switches a controller's
+// motor: 1.0 on, 0.0 off or hard stop. The page reads it in the block.
+extern "C" void DolphinWeb_OnRumble(int pad_num, double strength)
+{
+  using namespace DolphinWeb::DirectPad;
+  if (pad_num < 0 || pad_num >= PAD_PORT_COUNT)
+    return;
+  auto* port = s_direct_pad.slots[pad_num];
+  const std::uint32_t on = strength > 0 ? 1 : 0;
+  if (port[RUMBLE].exchange(on, std::memory_order_relaxed) != on)
+    port[RUMBLE_GEN].fetch_add(1, std::memory_order_release);
+}
+
+namespace
+{
+std::uint32_t PackAxes0(const InputStateSnapshot& in)
+{
+  return in.stick_x | (in.stick_y << 8) | (in.c_stick_x << 16) | (static_cast<std::uint32_t>(in.c_stick_y) << 24);
+}
+std::uint32_t PackAxes1(const InputStateSnapshot& in)
+{
+  return in.trigger_left | (in.trigger_right << 8) | (in.analog_a << 16) |
+         (static_cast<std::uint32_t>(in.analog_b) << 24);
+}
+
+// One poll of one port (once per emulated tick, under the per-tick latch):
+// the page's direct block when it writes this port, else the copy the
+// presentation loop made, then the tap hold.
+PadPoll ReadPadForPoll(int pad_num, std::uint64_t ticks)
+{
+  using namespace DolphinWeb::DirectPad;
+  auto& system = Core::System::GetInstance();
+  // Hold windows of 1/50 s: a tap stays visible for at least a full frame at
+  // 50 or 60 Hz once a poll has picked it up.
+  const std::uint64_t window = std::max<std::uint64_t>(1, system.GetSystemTimers().GetTicksPerSecond() / 50);
+#ifdef __EMSCRIPTEN__
+  const double now = emscripten_get_now();
+#else
+  const double now = 0;
+#endif
+  std::uint32_t reported = 0;
+  bool direct = false;
+  const State s = PollPort(s_direct_pad.slots[pad_num], s_tap_latches[pad_num], ticks / window, now,
+                           [pad_num] {
+                             const InputStateSnapshot& in = s_input_states[pad_num];
+                             State f;
+                             f.connected = s_pad_connected[pad_num];
+                             f.mask = in.mask;
+                             f.axes0 = PackAxes0(in);
+                             f.axes1 = PackAxes1(in);
+                             return f;
+                           },
+                           &reported, &direct);
+  InputStateSnapshot in = direct ? InputStateSnapshot{} : s_input_states[pad_num];
+  if (direct)
+  {
+    in.generation = s.input_seq;
+    in.stick_x = static_cast<std::uint8_t>(s.axes0);
+    in.stick_y = static_cast<std::uint8_t>(s.axes0 >> 8);
+    in.c_stick_x = static_cast<std::uint8_t>(s.axes0 >> 16);
+    in.c_stick_y = static_cast<std::uint8_t>(s.axes0 >> 24);
+    in.trigger_left = static_cast<std::uint8_t>(s.axes1);
+    in.trigger_right = static_cast<std::uint8_t>(s.axes1 >> 8);
+    in.analog_a = static_cast<std::uint8_t>(s.axes1 >> 16);
+    in.analog_b = static_cast<std::uint8_t>(s.axes1 >> 24);
+  }
+  in.mask = ComposeMask(s, reported);
+  return PadPoll{in, s.connected};
+}
+}  // namespace
+
 // Answers every port, so Dolphin's own controller config is never consulted.
 int DolphinWeb_GetPadStatus(int pad_num, GCPadStatus* status)
 {
@@ -1495,9 +1589,7 @@ int DolphinWeb_GetPadStatus(int pad_num, GCPadStatus* status)
   PadPoll poll;
   {
     const std::lock_guard<std::mutex> lock(s_input_state_mutex);
-    poll = s_pad_latches[pad_num].Poll(ticks, [pad_num] {
-      return PadPoll{s_input_states[pad_num], s_pad_connected[pad_num]};
-    });
+    poll = s_pad_latches[pad_num].Poll(ticks, [pad_num, ticks] { return ReadPadForPoll(pad_num, ticks); });
   }
   const InputStateSnapshot& input = poll.input;
   const bool connected = poll.connected;

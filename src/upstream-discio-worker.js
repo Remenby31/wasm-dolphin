@@ -174,6 +174,7 @@ import {
   sniffMemcardFile,
   validateSaveStateData
 } from "./memcard.js";
+import { StreamCapture } from "./stream-capture.js";
 
 // Day-25: mark this thread. The discio worker owns the WebGPU device
 // (createWebGpuPresenter runs here). WebGPU objects aren't shareable
@@ -187,6 +188,8 @@ console.log(`[boot-phase] discio-worker module-eval at perf.now=${performance.no
 let coreUrl = DEFAULT_UPSTREAM_CORE_URL;
 let moduleInstance = null;
 let api = null;
+// Streaming: presented frames → VideoFrames → the page's MediaStreamTrackGenerator.
+const streamCapture = new StreamCapture();
 let wgpuDiagnosticQuiet = false;
 let wgpuDiagnosticLogFilter = installWgpuDiagnosticLogFilter({ enabled: false });
 let mounted = false;
@@ -1423,6 +1426,19 @@ async function handleMessage(type, payload) {
     case "exportSaveState":
     case "importSaveState":
       return handleSavesMessage(type, payload);
+    case "streamCapture":
+      if (!(payload?.writable instanceof WritableStream)) throw new Error("streamCapture needs a WritableStream");
+      // Frames reach this worker only when it presents them itself; OGL's CPU
+      // framebuffer is a stale readback. Say so instead of a silent track.
+      if (harnessVideoBackend === "OGL") throw new Error("streamCapture: not available with the OGL backend");
+      if (!renderGpu && !renderGl && !renderContext) throw new Error("streamCapture: the page owns the canvas, no frame reaches the worker");
+      streamCapture.attach(payload.writable);
+      return {};
+    case "streamCaptureStop":
+      streamCapture.detach();
+      return {};
+    case "streamCaptureStats":
+      return { stats: { ...streamCapture.stats } };
     case "setInputMask":
       inputMask = payload.mask >>> 0;
       api?.setInputMask(inputMask);
@@ -2514,6 +2530,17 @@ async function loadCore({
   }
 
   api = bindApi(moduleInstance);
+  // Direct pad block (src/direct-pad.js): the page writes pad states into the
+  // core's shared memory and the SI poll reads them there.
+  if (typeof moduleInstance._DolphinWeb_DirectPadBlock === "function" &&
+      moduleInstance.HEAPU8.buffer instanceof SharedArrayBuffer) {
+    self.postMessage({
+      type: "direct-pad",
+      buffer: moduleInstance.HEAPU8.buffer,
+      offset: moduleInstance._DolphinWeb_DirectPadBlock() >>> 0,
+      layout: moduleInstance._DolphinWeb_DirectPadLayout() >>> 0
+    });
+  }
   harnessVideoBackend = videoBackend;
   if (harnessEnabled) moduleInstance._DolphinWeb_HarnessEnable?.(1);
   if (detTraceRequested) moduleInstance._DolphinWeb_DetTraceEnable?.(1);
@@ -5023,6 +5050,7 @@ function presentFrame(width, height, pointer, length, coreFrame = api?.getFrame?
     _lastFrameLength = length;
     _lastFrameCopyValid = true;
     sourceFrameView = _lastFrameCopy.subarray(0, length);
+    if (streamCapture.active) streamCapture.offerBytes(sourceFrameView, width, height, coreFrame);
     const marked = frameWithInputMarker(sourceFrameView, width, height, marker);
     markerApplied = marked.applied;
     if (markerApplied) displayFrameView = marked.bytes;
@@ -5152,6 +5180,7 @@ function presentFrameBytes(width, height, bytes, coreFrame) {
     return;
   }
 
+  if (streamCapture.active) streamCapture.offerBytes(bytes, width, height, coreFrame);
   const marker = prepareInputVisualMarker(coreFrame);
   const marked = frameWithInputMarker(bytes, width, height, marker);
   const markerApplied = marked.applied;
@@ -14729,6 +14758,8 @@ function drainWebGpuCmdRing(source = "presentation") {
           // the legacy repaint loop cannot race this submitted frame before
           // the current command-ring drain returns.
           cmdRingOwnsCanvas = true;
+          // A frame carrying the diagnostic input marker is not streamed.
+          if (streamCapture.active && !hardwareInputMarkerApplied) streamCapture.offerCanvas(renderCanvas, api?.getFrame?.() ?? 0);
           recordPresentedFrame(api?.getFrame?.() ?? 0);
           wgpuPresentedSource = {
             textureId: wgpuLastBackbufferSourceTextureId, rect: wgpuNextPresentSource
