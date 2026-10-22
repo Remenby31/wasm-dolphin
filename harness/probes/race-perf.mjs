@@ -81,6 +81,7 @@ import { describe, median, percentile, round } from "../lib/stats.mjs";
 import { coreStats, hitchList, mergeTimeline, presentationStats } from "../lib/timeline.mjs";
 import { consistentRead, decodeRegionStats, poolStats, regionShares, topMisses } from "../lib/jit-region-stats.mjs";
 import { idleRecord, summarizeIdle } from "../lib/idle-stats.mjs";
+import { runSteps, validateSteps } from "../lib/steps.mjs";
 import { summarizePcSamples } from "../../src/harness-pc-sampler.js";
 
 const HOMEBREW_OUT = path.join(REPO_ROOT, "harness", "homebrew", "out");
@@ -160,8 +161,14 @@ function rendererThreads(profileDir) {
 // Load the scene, hold the key, settle, then a window with no page call.
 async function measure(session, o) {
   const { page } = session;
-  const loaded = await loadHarnessState(page, session.url);
-  if (!loaded?.loaded) throw new Error(`savestate load failed: ${JSON.stringify(loaded)}`);
+  // The scene: input steps from the boot (--steps, e.g. a loaded menu) or
+  // the savestate.
+  if (o.steps) {
+    await runSteps(page, o.steps);
+  } else {
+    const loaded = await loadHarnessState(page, session.url);
+    if (!loaded?.loaded) throw new Error(`savestate load failed: ${JSON.stringify(loaded)}`);
+  }
   if (o.hold) await page.keyboard.down(o.hold);
   try {
     await page.waitForTimeout(o.warmup * 1000);
@@ -352,7 +359,7 @@ async function main() {
       runs: { type: "string", default: "4" }, "min-pairs": { type: "string" }, "load-wait": { type: "string", default: "300" }, "calm-wait": { type: "string" }, warmup: { type: "string", default: "25" }, secs: { type: "string", default: "20" },
       hold: { type: "string", default: "KeyX" }, warm: { type: "boolean", default: false },
       "max-load": { type: "string" }, "lock-wait": { type: "string", default: "1800" },
-      pcsample: { type: "string" }, symbols: { type: "string" }, "region-sample": { type: "string" }, "region-secs": { type: "string", default: "10" }, "idle-secs": { type: "string" }, "baseline-query": { type: "string" }, "chrome-args": { type: "string" }, "baseline-chrome-args": { type: "string" },
+      pcsample: { type: "string" }, symbols: { type: "string" }, "region-sample": { type: "string" }, "region-secs": { type: "string", default: "10" }, "idle-secs": { type: "string" }, steps: { type: "string" }, "baseline-query": { type: "string" }, "chrome-args": { type: "string" }, "baseline-chrome-args": { type: "string" },
       "core-candidate": { type: "string", multiple: true, default: [] },
       port: { type: "string", default: process.env.HARNESS_PORT }, out: { type: "string" }
     },
@@ -363,6 +370,10 @@ async function main() {
   }
   const iso = path.resolve(values.iso), state = path.resolve(values.state);
   for (const f of [iso, state]) if (!existsSync(f)) throw new Error(`not found: ${f}`);
+  // --steps replaces the savestate as the scene (--state stays required:
+  // spark-run always passes one).
+  const steps = values.steps ? JSON.parse(readFileSync(path.resolve(values.steps), "utf8")) : null;
+  if (steps) validateSteps(steps);
   const localOnly = !iso.startsWith(HOMEBREW_OUT);
   if (localOnly && process.env.CI) throw new Error("this disc is local-only and must never run in CI");
   const query = `${values.query ?? PRESETS[values.config] ?? values.config}&metrics=1`;
@@ -379,7 +390,7 @@ async function main() {
   const runs = num(values, "runs", { min: 1, int: true });
   if (values.baseline && runs % 2) throw new Error(`--runs ${runs}: with --baseline the runs must be even, so trunk goes first as often as head`);
   const o = {
-    iso, state, port: num(values, "port", { min: 1, int: true }), query, runs,
+    iso, state, steps, port: num(values, "port", { min: 1, int: true }), query, runs,
     minPairs: values["min-pairs"] ? num(values, "min-pairs", { min: 2, int: true }) : Math.min(runs, 4),
     warmup: num(values, "warmup", { min: 0 }), secs: num(values, "secs", { min: 2, int: true }),
     hold: values.hold || null, warm: values.warm,
@@ -463,7 +474,7 @@ async function main() {
   const summary = {
     probe: "race-perf", at: new Date().toISOString(),
     chrome,
-    iso: path.basename(iso), state: path.basename(state), query: o.query, baselineQuery: sides.baseline?.query ?? null, warmupSec: o.warmup, secs: o.secs, hold: o.hold, maxLoad: o.maxLoad,
+    iso: path.basename(iso), state: steps ? null : path.basename(state), steps: steps ? path.basename(values.steps) : null, query: o.query, baselineQuery: sides.baseline?.query ?? null, warmupSec: o.warmup, secs: o.secs, hold: o.hold, maxLoad: o.maxLoad,
     sides: Object.fromEntries(Object.entries(sides).map(([n, s]) => [n, s.label])),
     runs: runsDone.length, failed, gaveUp,
     candidate: { cold: summarize("candidate", "cold"), warm: summarize("candidate", "warm") },
