@@ -303,6 +303,21 @@ function harnessAxHleStats({ reset } = {}) {
   const copy = () => Array.from(new Uint8Array(heap.buffer, ptr, size));
   return { bytes: copy(), again: copy() };
 }
+// Guest memory accesses per instruction (patch 0104,
+// harness/lib/mem-access-stats.mjs): reset >= 0 zeroes and turns the
+// counters on at the next slice; copied twice so a torn read is refused.
+function harnessMemAccessStats({ reset } = {}) {
+  if (!harnessEnabled) return { error: "harness hooks are off" };
+  const stats = moduleInstance?._DolphinWeb_MemAccessStats;
+  if (!stats) return { error: "core has no DolphinWeb_MemAccessStats" };
+  const ptr = stats(Number.isInteger(reset) && reset >= 0 ? reset : -1) >>> 0;
+  const heap = moduleInstance.HEAPU8;
+  if (!ptr || ptr + 8 > heap.length) return { error: `DolphinWeb_MemAccessStats returned ${ptr}` };
+  const size = Math.min(new DataView(heap.buffer, ptr, 8).getUint32(4, true), 192);
+  if (ptr + size > heap.length) return { error: `memory access stats of ${size} bytes past the heap` };
+  const copy = () => Array.from(new Uint8Array(heap.buffer, ptr, size));
+  return { bytes: copy(), again: copy() };
+}
 // The core's first region installs, [ms, bytes, path] each (path 0 first
 // attempt, 1 after the worker's ready byte, 2 cold); null with an older core.
 function harnessRegionInstallSamples(heap) {
@@ -1465,6 +1480,8 @@ async function handleMessage(type, payload) {
       return harnessJitRegionStats(payload);
     case "validationReadAxHleStats":
       return harnessAxHleStats(payload);
+    case "validationReadMemAccessStats":
+      return harnessMemAccessStats(payload);
     case "validationCaptureAtVi":
       return captureAtViOutput(payload);
     case "validationReadDetTrace":

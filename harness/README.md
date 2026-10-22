@@ -132,6 +132,16 @@ node harness/probes/race-perf.mjs --iso ../roms/<disc>.iso --state ../measures/h
   the last being the place in the scene whatever the speed, so two runs or
   two sides can be lined up; over 200 the longest are kept, in time order,
   with `count`.
+- `--mem-stats` (patch 0104): guest memory accesses per instruction, read in
+  the stats window after the speed window (with `--region-sample`, the same
+  window). `summary.json` → `memAccess` (and `baselineMemAccess`):
+  `accessesPerInstruction` over the counted blocks, `coverage` (their share of
+  the window's cycles), loads/stores per instruction, `byKind`
+  (int/fp/psq load/store), `slowShare` (slow-path calls over all accesses),
+  and, with aot=1, the region part estimated apart
+  (`regionAccessesPerInstructionEstimated`, `withRegionsEstimated`), never
+  merged into the counted figure. A core without the export gives
+  `memAccess: null` and `memAccessWhy`.
 - `--chrome-args "--flag …"` adds Chromium flags on both sides;
   `--baseline-chrome-args` replaces them on the baseline side, so one tree is
   compared with itself under two Chromium configurations (e.g.
