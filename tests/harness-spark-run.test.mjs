@@ -118,7 +118,7 @@ test("spark queue: a build is the node process, never the shell that started it"
 test("spark queue: the judge moves a waiting ticket, the waiter follows it", async () => {
   const bench = mkdtempSync(path.join(os.tmpdir(), "spark-queue-"));
   const q = path.join(bench, "queue");
-  const ticket = (ms, pid, name, lane = null) => writeFileSync(path.join(q, `${String(ms).padStart(15, "0")}-${pid}.json`), JSON.stringify({ pid, host: os.hostname(), kind: "pair", lanes: "a", name, lane }));
+  const ticket = (ms, pid, name, lane = null) => writeFileSync(path.join(q, `${String(ms).padStart(15, "0")}-${pid}.json`), JSON.stringify({ pid, host: os.hostname(), kind: "pair", lanes: "a", name, lane, estMin: null }));
   try {
     mkdirSync(q);
     // Live pids: ours and our parent's stand for other jobs.
@@ -144,12 +144,15 @@ test("spark queue: the judge moves a waiting ticket, the waiter follows it", asy
 });
 
 test("spark queue: move refuses what would break the order, a duplicate keeps the granted copy", () => {
-  const t = (ms, name, lane = null, pid = ms) => ({ id: `${String(ms).padStart(15, "0")}-${pid}.json`, name, lane, pid });
+  const t = (ms, name, lane = null, pid = ms) => ({ id: `${String(ms).padStart(15, "0")}-${pid}.json`, name, lane, pid, estMin: null });
   const q = [t(1000, "run", "a"), t(5000, "b1"), t(9000, "b2"), t(9001, "b3")];
   assert.equal(movedId(q, "b3", "head"), "000000000003000-9001.json"); // between run and b1
   assert.equal(movedId(q, "b1", "b3"), "000000000010001-5000.json"); // to the end
   assert.throws(() => movedId(q, "b1", "b2"), /no room between b2 and b3/); // 9000 and 9001
   assert.throws(() => movedId(q, "run", "head"), /already running/);
+  // An old waiter (no estMin) cannot follow a rename: refused.
+  const { estMin, ...old } = q[1];
+  assert.throws(() => movedId([q[0], old, q[2]], "b1", "head"), /would wait for itself/);
   assert.throws(() => movedId(q, "nope", "head"), /no ticket/);
   assert.throws(() => movedId([t(1000, "a"), t(1001, "b"), t(5000, "c")], "c", "a"), /no room/);
   // Two files for one job (a move racing its grant): the granted one stays.
