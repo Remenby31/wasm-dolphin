@@ -68,6 +68,11 @@ export const DISPLAYS = Object.freeze(["headless"]);
 const ARGS = [
   "--no-first-run",
   "--no-default-browser-check",
+  // Chrome for Testing opens a visible macOS keychain dialog even headless
+  // without these (research/deep-memory-footprint.md). Playwright passes them
+  // by default; stated here so no launch depends on its defaults.
+  "--use-mock-keychain",
+  "--password-store=basic",
   "--enable-unsafe-webgpu",
   // Audio must run without a user gesture so underruns and silence can be measured.
   "--autoplay-policy=no-user-gesture-required",

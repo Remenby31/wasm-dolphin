@@ -14,6 +14,7 @@ import { parseDolHeader } from "./dol.js";
 import { decodeWgpuSamplerState } from "./wgpu-sampler-state.js";
 import { gxClearDepthToStored, gxDepthState } from "./wgpu-depth-state.js";
 import { clampSourceRect, createWgpuExactCapture, packReadbackRows } from "./wgpu-exact-capture.js";
+import { createUniqueFrameCounter, hashRows, sampleRowOffsets } from "./harness-unique-frames.js";
 import { decodePrebuiltCache } from "./prebuilt-jit-cache-format.js";
 import {
   AOT_COMPILER_WORKER_NAME,
@@ -150,6 +151,7 @@ import {
   hashWgpuVisualSample
 } from "./wgpu-visual-cadence.js";
 import { createCoreLifecycle } from "./core-lifecycle.js";
+import { PipelinePrewarm } from "./wgpu-pipeline-prewarm.js";
 import { BOOT_FILE_HEAD_BYTES, bootFileKind, checkExecutable, executableGameId } from "./boot-file.js";
 import {
   USER_DATA_ROOT,
@@ -303,6 +305,21 @@ function harnessAxHleStats({ reset } = {}) {
   const copy = () => Array.from(new Uint8Array(heap.buffer, ptr, size));
   return { bytes: copy(), again: copy() };
 }
+// Guest memory accesses per instruction (patch 0104,
+// harness/lib/mem-access-stats.mjs): reset >= 0 zeroes and turns the
+// counters on at the next slice; copied twice so a torn read is refused.
+function harnessMemAccessStats({ reset } = {}) {
+  if (!harnessEnabled) return { error: "harness hooks are off" };
+  const stats = moduleInstance?._DolphinWeb_MemAccessStats;
+  if (!stats) return { error: "core has no DolphinWeb_MemAccessStats" };
+  const ptr = stats(Number.isInteger(reset) && reset >= 0 ? reset : -1) >>> 0;
+  const heap = moduleInstance.HEAPU8;
+  if (!ptr || ptr + 8 > heap.length) return { error: `DolphinWeb_MemAccessStats returned ${ptr}` };
+  const size = Math.min(new DataView(heap.buffer, ptr, 8).getUint32(4, true), 192);
+  if (ptr + size > heap.length) return { error: `memory access stats of ${size} bytes past the heap` };
+  const copy = () => Array.from(new Uint8Array(heap.buffer, ptr, size));
+  return { bytes: copy(), again: copy() };
+}
 // The core's first region installs, [ms, bytes, path] each (path 0 first
 // attempt, 1 after the worker's ready byte, 2 cold); null with an older core.
 function harnessRegionInstallSamples(heap) {
@@ -380,6 +397,12 @@ let wgpuRendererWorkerProbe = "off";
 let wgpuVisualCadenceEnabled = false;
 // Mirrors the loaded core's videoBackend for code outside loadCore's scope.
 let hardwareVideoBackend = false;
+// video=wgpu: pipelines seen in earlier sessions, compiled at boot
+// (src/wgpu-pipeline-prewarm.js). null when off (?wgpuprewarm=0) or not wgpu.
+let wgpuPipelinePrewarmEnabled = true;
+let pipelinePrewarm = null;
+// The loaded core's identity: a pipeline list belongs to one core build.
+let coreBuildFingerprint = "";
 let wgpuVisualCadenceResources = null;
 let wgpuVisualCadenceTelemetry = createWgpuVisualCadenceTelemetry(false);
 let wgpuVisualCadenceSequence = 0;
@@ -1120,10 +1143,54 @@ function readbackWgpuPresentSource() {
   });
 }
 
+// Unique images (harness only, src/harness-unique-frames.js): a few full rows
+// of the presented WebGPU rectangle read back and hashed, at each present
+// while the harness has the counter on.
+const harnessUniqueFrames = createUniqueFrameCounter();
+// Readbacks done since the worker started: 0 as long as the counter was
+// never on (the harness checks it before starting the counter).
+let harnessUniqueReadbacks = 0;
+function readbackWgpuPresentRowsHash() {
+  harnessUniqueReadbacks += 1;
+  const shown = wgpuPresentedSource;
+  const entry = shown?.textureId ? webGpuObjects.textures.get(shown.textureId) : null;
+  if (!entry || !renderGpu || !shown.rect) throw new Error("no presented WebGPU texture to sample");
+  const rect = clampSourceRect(shown.rect, entry.tex.width, entry.tex.height);
+  if (!rect) throw new Error("presented rectangle lies outside its texture");
+  const rows = sampleRowOffsets(rect.h);
+  const bytesPerRow = Math.ceil(rect.w * 4 / 256) * 256;
+  const dev = renderGpu.device;
+  const buffer = dev.createBuffer({ size: bytesPerRow * rows.length, usage: 0x1 | 0x8 });
+  const encoder = dev.createCommandEncoder({ label: "harness-unique-frames" });
+  rows.forEach((row, i) => encoder.copyTextureToBuffer({ texture: entry.tex, origin: { x: rect.x, y: rect.y + row, z: 0 } },
+    { buffer, offset: i * bytesPerRow, bytesPerRow }, { width: rect.w, height: 1, depthOrArrayLayers: 1 }));
+  dev.queue.submit([encoder.finish()]);
+  return buffer.mapAsync(0x1).then(() => {
+    const h = hashRows(new Uint8Array(buffer.getMappedRange()), rect.w * 4, bytesPerRow, rows.length);
+    buffer.unmap();
+    buffer.destroy();
+    return h;
+  });
+}
+
+async function harnessUniqueFramesRequest({ action } = {}) {
+  if (!harnessEnabled) return { error: "harness hooks are off" };
+  if (action === "start") {
+    if (!(harnessVideoBackend === "WebGPU-Real" || harnessVideoBackend === "WebGPU")) return { error: `unique frames: WebGPU presents only (backend ${harnessVideoBackend ?? "unknown"})` };
+    harnessUniqueFrames.start();
+    return { started: true };
+  }
+  if (action === "stop") return { ...(await harnessUniqueFrames.stop()), readbacksTotal: harnessUniqueReadbacks };
+  if (action === "status") return { active: harnessUniqueFrames.active, readbacksTotal: harnessUniqueReadbacks };
+  return { error: `unique frames: action ${action}` };
+}
+
 async function handleMessage(type, payload) {
   // P6: blocks waiting for their pack go out when the saves do (page hidden
   // or closed) and on stop; their outcome is not the saves'.
   if (type === "flushUserData" || type === "stop") void dolphinJitBlockStore?.flush().catch(() => {});
+  if (type === "flushUserData" || type === "stop") void pipelinePrewarm?.flush();
+  if (type === "stop") pipelinePrewarm?.stop();
   switch (type) {
     case "load":
       if (!moduleInstance) {
@@ -1286,6 +1353,7 @@ async function handleMessage(type, payload) {
         wgpuMappedDrainCoalescing: payload.wgpuMappedDrainCoalescing,
         wgpuRendererWorkerProbe: payload.wgpuRendererWorkerProbe,
         wgpuVisualCadence: payload.wgpuVisualCadence,
+        wgpuPipelinePrewarm: payload.wgpuPipelinePrewarm,
         wgpuPassPackageProjection: payload.wgpuPassPackageProjection,
         wgpuUploadRunProjection: payload.wgpuUploadRunProjection,
         wgpuUboComputeProjection: payload.wgpuUboComputeProjection,
@@ -1459,14 +1527,20 @@ async function handleMessage(type, payload) {
       return { enabled: true, coreHooks: Boolean(moduleInstance?._DolphinWeb_HarnessEnable), coreLoaded: Boolean(moduleInstance) };
     case "validationReadTimeline":
       return readHarnessTimeline();
+    case "validationUniqueFrames":
+      return harnessUniqueFramesRequest(payload);
     case "validationPcSampler":
       return harnessPcSampler(payload);
     case "validationReadJitRegionStats":
       return harnessJitRegionStats(payload);
     case "validationReadAxHleStats":
       return harnessAxHleStats(payload);
+    case "validationReadMemAccessStats":
+      return harnessMemAccessStats(payload);
     case "validationCaptureAtVi":
       return captureAtViOutput(payload);
+    case "validationReadPipelinePrewarm":
+      return pipelinePrewarm ? pipelinePrewarm.snapshot() : { enabled: false, why: !hardwareVideoBackend ? "not video=wgpu" : !wgpuPipelinePrewarmEnabled ? "wgpuprewarm=0" : "not started" };
     case "validationReadDetTrace":
       return readDetTrace(payload);
     case "validationReadWgpuReplayState":
@@ -1902,6 +1976,7 @@ async function loadCore({
   wgpuMappedDrainCoalescing: requestedWgpuMappedDrainCoalescing = false,
   wgpuRendererWorkerProbe: requestedWgpuRendererWorkerProbe = "off",
   wgpuVisualCadence: requestedWgpuVisualCadence = false,
+  wgpuPipelinePrewarm: requestedWgpuPipelinePrewarm = true,
   wgpuPassPackageProjection: requestedWgpuPassPackageProjection = false,
   wgpuUploadRunProjection: requestedWgpuUploadRunProjection = false,
   wgpuUboComputeProjection: requestedWgpuUboComputeProjection = false,
@@ -2072,6 +2147,9 @@ async function loadCore({
   }
   destroyWgpuVisualCadenceResources();
   hardwareVideoBackend = videoBackend === "WebGPU-Real";
+  wgpuPipelinePrewarmEnabled = requestedWgpuPipelinePrewarm !== false;
+  pipelinePrewarm?.stop();
+  pipelinePrewarm = null;
   wgpuVisualCadenceEnabled = Boolean(requestedWgpuVisualCadence);
   wgpuVisualCadenceTelemetry = createWgpuVisualCadenceTelemetry(
     wgpuVisualCadenceEnabled
@@ -2282,6 +2360,7 @@ async function loadCore({
   aotFirstLaunchEnabled = aotFirstLaunch === true;
   dolphinJitBootLoadComplete = false;
   dolphinJitBootLoadedEntries = 0;
+  coreBuildFingerprint = String(buildFingerprint ?? "");
   if (!noJitCache) {
     await reconcileJitCacheWithBuild(buildFingerprint);
   } else {
@@ -3548,6 +3627,7 @@ async function mountFile(file) {
     api.pumpHostJobs?.();
     console.log(`[boot-phase] api.pumpHostJobs() took ${(performance.now() - _t_pump).toFixed(1)}ms`);
     if (coreBoot.accepted) void startAotFirstLaunchAfterBoot();
+    if (coreBoot.accepted) void startPipelinePrewarm(bootedGame.gameId);
   } else if (api.bootDisc) {
     coreBoot.skippedReason = `Disc image is too small for full CPU boot (${file.size} bytes)`;
   }
@@ -14517,6 +14597,7 @@ function drainWebGpuCmdRing(source = "presentation") {
           };
           wgpuNextPresentSource = null;
           wgpuExactCapture.onPresent(readbackWgpuPresentSource);
+          if (harnessUniqueFrames.active) harnessUniqueFrames.onPresent(readbackWgpuPresentRowsHash);
           scheduleDetachedWgpuBitmap(q);
           webGpuExecStats.present++;
           if (webGpuExecStats.present - webGpuExecStats.lastLog >= 120) {
@@ -14834,6 +14915,28 @@ function finishWebGpuDrain(startedAt, processed) {
     WGPU_DRAIN_DURATION_BUCKET_BOUNDS_MS,
     elapsed
   );
+}
+
+// video=wgpu: load this game's pipeline list and compile it while the game
+// boots. Created before the first await, so that every shader the replay
+// creates from now on is noted and its pipelines can be recorded.
+async function startPipelinePrewarm(gameId) {
+  if (!hardwareVideoBackend || !wgpuPipelinePrewarmEnabled || !renderGpu || !gameId) return;
+  const prewarm = new PipelinePrewarm();
+  pipelinePrewarm?.stop();
+  pipelinePrewarm = prewarm;
+  try { prewarm.root = await navigator.storage.getDirectory(); } catch { /* memory only */ }
+  const loaded = await prewarm.load(gameId, coreBuildFingerprint);
+  if (!loaded || pipelinePrewarm !== prewarm || !renderGpu) return;
+  const device = renderGpu.device;
+  // Stops at a core reload or a lost device (renderGpu replaced or cleared).
+  const alive = () => pipelinePrewarm === prewarm && renderGpu?.device === device;
+  const stats = await prewarm.prewarm(device, (samplingKey) => {
+    const [u, n] = samplingKey.split("/").map(Number);
+    return getFixedLayouts(u, n).pipelineLayout;
+  }, { alive });
+  console.log(`[wgpu-prewarm] ${gameId}: ${stats.compiled}/${stats.loaded} pipelines compiled in ${stats.prewarmMs} ms` +
+    (stats.failed ? `, ${stats.failed} failed (${stats.lastError})` : ""));
 }
 
 // Day-29: build a real GPURenderPipeline from a bridge-translated
@@ -15220,9 +15323,14 @@ function resolvePipeline(pipelineId, colorFmt, depthFmt, dbg, revZ, samplingKey 
     vpDiagFinalCmp.set(key, (vpDiagFinalCmp.get(key) || 0) + 1);
   }
   let pipe = null;
+  const prewarmEntry = pipelinePrewarm?.keyFor(d, {
+    vsId: tpl.vsId, fsId: tpl.fsId, samplingKey,
+    vsModule: webGpuObjects.shaders.get(tpl.vsId), fsModule: webGpuObjects.shaders.get(tpl.fsId)
+  }) ?? null;
+  const prewarmed = prewarmEntry ? pipelinePrewarm.take(prewarmEntry.key) : null;
   try {
     renderGpu.device.pushErrorScope("validation");
-    pipe = renderGpu.device.createRenderPipeline(d);
+    pipe = prewarmed ?? renderGpu.device.createRenderPipeline(d);
     if (pipe && d.depthStencil) {
       vpDiagPipeFinalDs.set(pipe, { cmp: d.depthStencil.depthCompare,
                                     write: !!d.depthStencil.depthWriteEnabled });
@@ -15242,6 +15350,7 @@ function resolvePipeline(pipelineId, colorFmt, depthFmt, dbg, revZ, samplingKey 
         }
       } else {
         webGpuPcfg.ok += 1;
+        pipelinePrewarm?.record(prewarmEntry);
         if (webGpuPcfg.ok <= 3 || webGpuPcfg.ok % 128 === 0) {
           console.log(`[webgpu-pcfg] variant OK ${key} ` +
             `[ok=${webGpuPcfg.ok} fail=${webGpuPcfg.fail}]`);
@@ -15525,6 +15634,7 @@ function replayCreateShader(id, blobPtr, blobLen, stage) {
     return;
   }
   webGpuObjects.shaders.set(id, module);
+  pipelinePrewarm?.noteShader(id, wgsl);
   if (uvForcedWgsl) {
     try {
       webGpuObjects.shadersUvForced.set(id,

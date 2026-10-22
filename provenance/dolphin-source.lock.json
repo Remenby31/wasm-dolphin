@@ -25,7 +25,7 @@
       "commit": "01e0577914a75a2569c846778c2f93aa8e6feddd"
     }
   },
-  "patchSeriesSha256": "f1b3b0afbf3decf4857e16e53f36d951491edfc20e0e11eb5f2dd2e2e31afa89",
+  "patchSeriesSha256": "a61dd27dee2f3fb5c430e9a64535729c0c616af6d008957e1699eeb4e6548c89",
   "patches": [
     {
       "order": 1,
@@ -671,12 +671,20 @@
       "order": 81,
       "cwd": ".",
       "hashMode": "lf-normalized",
+      "path": "patches/dolphin-wasm/snapshot/0097-embed-filtered-gamesettings.patch",
+      "size": 975,
+      "sha256": "6726edf3d4ff8937f77085e593020d9f351444e0b02d4c75e2cdea510fefc5a0"
+    },
+    {
+      "order": 82,
+      "cwd": ".",
+      "hashMode": "lf-normalized",
       "path": "patches/dolphin-wasm/snapshot/0099-ax-hle-timing.patch",
       "size": 3424,
       "sha256": "fcf883f10294f89b4660891765bba842259213b7ebebbf80e6815cb0b083f6b5"
     },
     {
-      "order": 82,
+      "order": 83,
       "cwd": ".",
       "hashMode": "lf-normalized",
       "path": "patches/dolphin-wasm/snapshot/0103-fma-ctz-as-clz.patch",
@@ -684,7 +692,7 @@
       "sha256": "66260aea20f5cacb8578da119dfe5cd2606f30f6bcd5bcb040ec142a3393f55a"
     },
     {
-      "order": 83,
+      "order": 84,
       "cwd": "Externals/SFML/SFML",
       "hashMode": "lf-normalized",
       "path": "patches/dolphin-wasm/submodules/0001-sfml-emscripten-config.patch",
@@ -692,7 +700,7 @@
       "sha256": "f82197a21fe982ad83f6ee7bbf5a03839b1cebd4d64da3eab11263842bf61d89"
     },
     {
-      "order": 84,
+      "order": 85,
       "cwd": "Externals/xxhash/xxHash",
       "hashMode": "lf-normalized",
       "path": "patches/dolphin-wasm/submodules/0002-xxhash-wasm-simd-scalar.patch",
