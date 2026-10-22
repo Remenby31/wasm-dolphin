@@ -4,7 +4,7 @@
 import assert from "node:assert/strict";
 import test from "node:test";
 
-import { armEffects, GUEST_HZ, instructionsPerGuestCycle, laneOf, parsePerfCsv } from "../harness/probes/race-multi.mjs";
+import { armEffects, bootOrder, GUEST_HZ, instructionsPerGuestCycle, laneOf, parsePerfCsv } from "../harness/probes/race-multi.mjs";
 
 test("race-multi: a cyclic Latin square, every arm on every lane equally", () => {
   const seen = Array.from({ length: 3 }, () => [0, 0, 0]);
@@ -38,4 +38,20 @@ test("race-multi: perf counts summed over both PMUs, per guest cycle", () => {
   const cold = { speed: 50, windowMs: 20000, counters: { instructions: 2 * 10 * GUEST_HZ } };
   assert.equal(instructionsPerGuestCycle(cold), 2);
   assert.equal(instructionsPerGuestCycle({ speed: 50, windowMs: 20000, counters: { error: "x" } }), null);
+});
+
+test("race-multi: boot order rotated too, independently of the lanes", () => {
+  const firsts = [0, 0, 0], laneOfFirst = new Set();
+  for (let run = 1; run <= 6; run += 1) {
+    const order = bootOrder(run, 3);
+    assert.deepEqual([...order].sort(), [0, 1, 2]);
+    firsts[order[0]] += 1;
+    laneOfFirst.add(laneOf(order[0], run, 3));
+  }
+  assert.deepEqual(firsts, [2, 2, 2]); // each arm boots first twice
+  assert.equal(laneOfFirst.size, 3); // the first booted visits every lane
+  // Orthogonal for 3 arms: each (lane, boot rank) pair once per 3 runs.
+  const pairs = new Set();
+  for (let run = 1; run <= 3; run += 1) bootOrder(run, 3).forEach((a, rank) => pairs.add(`${laneOf(a, run, 3)}/${rank}`));
+  assert.equal(pairs.size, 9);
 });

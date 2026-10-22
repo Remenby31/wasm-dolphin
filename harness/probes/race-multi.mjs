@@ -120,6 +120,12 @@ export function instructionsPerGuestCycle(cold) {
 
 // Lane of arm `arm` in run `run` (1-based runs): a cyclic Latin square.
 export const laneOf = (arm, run, lanes) => (arm + run - 1) % lanes;
+// The order the arms boot in, rotated each run: each arm boots first,
+// second… equally often (over runs a multiple of the arms). Arm a's rank is
+// a - (run - 1) and its lane a + (run - 1): for an odd number of arms the
+// two Latin squares are orthogonal, every (lane, rank) pair occurs, so the
+// boot order does not stand in for the lane.
+export const bootOrder = (run, arms) => Array.from({ length: arms }, (_, k) => (k + run - 1) % arms);
 
 const sd = (xs) => {
   if (xs.length < 2) return null;
@@ -199,19 +205,22 @@ async function main() {
       const sessions = [];
       const record = { run: r, arms: [] };
       try {
-        // Boot every arm on its lane (the pinning is read when Chromium starts).
-        for (let a = 0; a < arms.length; a += 1) {
+        // Boot every arm on its lane (the pinning is read when Chromium
+        // starts), in an order rotated too: the first arm booted once came
+        // out ~1.5 % ahead of the others (2026-10-22 A/A).
+        sessions.length = arms.length;
+        record.arms = new Array(arms.length);
+        for (const a of bootOrder(r, arms.length)) {
           const lane = laneOf(a, r, lanes.length);
           process.env.SPARK_CHROME_CPUS = lanes[lane];
-          const s = await openSession({ base: servers[a].base, server: servers[a], query: o.query, iso: path.resolve(values.iso), routes: { [STATE_ROUTE]: path.resolve(values.state) } });
-          sessions.push(s);
-          record.arms.push({ arm: a, lane, cpus: lanes[lane], url: s.url, served: servers[a].identity, core: s.core });
+          sessions[a] = await openSession({ base: servers[a].base, server: servers[a], query: o.query, iso: path.resolve(values.iso), routes: { [STATE_ROUTE]: path.resolve(values.state) } });
+          record.arms[a] = { arm: a, lane, cpus: lanes[lane], bootRank: bootOrder(r, arms.length).indexOf(a), url: sessions[a].url, served: servers[a].identity, core: sessions[a].core };
         }
         // The windows together.
         const results = await Promise.allSettled(sessions.map((s) => measure(s, o)));
         results.forEach((res, a) => { if (res.status === "fulfilled") record.arms[a].cold = res.value; else record.arms[a].error = String(res.reason?.message ?? res.reason).slice(0, 300); });
       } finally {
-        for (const s of sessions) await s.close().catch(() => {});
+        for (const s of sessions) await s?.close().catch(() => {});
       }
       for (const x of record.arms) if (x.cold) x.cold.instructionsPerGuestCycle = instructionsPerGuestCycle(x.cold);
       console.log(`[race-multi] run ${r}: ${record.arms.map((x) => `arm${x.arm}@lane${x.lane} ${x.error ?? `${x.cold.speed} %${x.cold.instructionsPerGuestCycle ? ` ${round(x.cold.instructionsPerGuestCycle, 3)} insn/guest cycle` : ""}${x.cold.overloaded ? " OVERLOADED" : ""}`}`).join(" | ")}`);
