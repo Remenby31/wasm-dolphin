@@ -424,7 +424,7 @@ test("no region fragment embeds the RAM or L1 address", { skip: skip || (!core?.
   let fragments = 0, heapRelocs = 0;
   for (let n = 0; n < 300; n++) {
     const words = randomProgram(r, 48);
-    core.load(CODE, Uint8Array.from(words.flatMap((w) => [w >>> 24, (w >>> 16) & 0xff, (w >>> 8) & 0xff, w & 0xff])));
+    core.load(CODE, Uint8Array.from(Array.from(words).flatMap((w) => [w >>> 24, (w >>> 16) & 0xff, (w >>> 8) & 0xff, w & 0xff])));
     const fragment = core.translate(CODE, { ranges: [[CODE, CODE + 4 * words.length]] });
     if (!fragment) continue;
     fragments += 1;
