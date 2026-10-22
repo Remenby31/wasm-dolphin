@@ -24,8 +24,8 @@
 // --sec, and records every console line (repeated "Invalid read" counted, not
 // kept), the RSS of the profile's Chrome processes by type each second (the
 // run stops above --cap-mb) and the core's frame. Verdicts:
-// - pass: modules loaded from the region cache before the boot (P7's install
-//   event, not live translations), regions installed, 0 "Invalid read", more
+// - pass: modules loaded from the region cache (P7's install events, before
+//   the boot and after the first image; not live translations), regions installed, 0 "Invalid read", more
 //   than --min-frames, under the cap;
 // - refused-layout: the heap moved, every cached region refused for its
 //   layout, and the game still correct (0 "Invalid read", frames): the guard
@@ -147,7 +147,9 @@ for (let run = 1; run <= Number(values.runs); run += 1) {
   const frames = Math.max(0, ...r.samples.map((s) => s.frame ?? 0));
   const peak = Math.max(0, ...r.samples.map((s) => s.totalMB));
   const installed = r.regions?.regionsInstalled ?? 0;
-  const fromCache = r.aot?.install?.loaded ?? 0;
+  // Before the boot (the boot set) and after the first image (the rest).
+  const beforeBoot = r.aot?.install?.loaded ?? 0;
+  const fromCache = beforeBoot + (r.aot?.afterFirstImage?.loaded ?? 0);
   const healthy = [
     r.error && `error: ${r.error}`,
     r.capped && `memory cap (${r.capped.totalMB} MB: ${JSON.stringify(r.capped.byType)})`,
@@ -161,8 +163,8 @@ for (let run = 1; run <= Number(values.runs); run += 1) {
   const refusedLayout = !healthy.length && !(installed > 0) && r.layoutRefused > 0;
   const why = refusedLayout ? [] : [...healthy, ...(healthy.length || installed > 0 ? [] : [`no region installed${result_layout(r)}`])];
   const verdict = refusedLayout ? "refused-layout" : why.length ? "fail" : "pass";
-  log(`run ${run}: ${verdict === "fail" ? `FAIL (${why.join("; ")})` : verdict}; frames ${frames}, peak ${peak} MB, from cache ${fromCache}, regions ${JSON.stringify(r.regions && { installed, refused: r.regions.regionsRefused, layoutRefused: r.layoutRefused, heapPatched: r.heapPatched, dropped: r.regions.regionsDropped })}`);
+  log(`run ${run}: ${verdict === "fail" ? `FAIL (${why.join("; ")})` : verdict}; frames ${frames}, peak ${peak} MB, from cache ${fromCache} (${beforeBoot} before the boot), regions ${JSON.stringify(r.regions && { installed, refused: r.regions.regionsRefused, layoutRefused: r.layoutRefused, heapPatched: r.heapPatched, dropped: r.regions.regionsDropped })}`);
   if (verdict === "fail") failed += 1;
-  if (outDir) writeFileSync(path.join(outDir, `run${run}.json`), JSON.stringify({ ...r, frames, peak, fromCache, verdict, why }, null, 1));
+  if (outDir) writeFileSync(path.join(outDir, `run${run}.json`), JSON.stringify({ ...r, frames, peak, fromCache, beforeBoot, verdict, why }, null, 1));
 }
 process.exit(failed ? 1 : 0);

@@ -110,6 +110,7 @@ function launch(p, { translator = standInTranslator(), compile, plan = makePlan(
       return { module };
     }),
     retain: (key, module) => retained.set(key, module),
+    loadBeforeBoot: true, // the loader's budget and caps (the engine loads after the first image)
     ...extra
   });
   return { flow, retained, compiled, translator, builds: () => builds };
@@ -469,6 +470,29 @@ test("planning runs in a worker of its own; its failure or silence rejects", asy
   await assert.rejects(planDiscInWorker(file, { createWorker: fakeWorker(() => {}), timeoutMs: 5 }), /timed out/);
 });
 
+// TTFF of a second launch (+0.8 s when the whole cache loaded before the
+// boot): nothing loads before the boot, the cache after the first image, as a
+// second "install" event. (A "boot set" of the modules whose code ran before
+// the first image was tried: at region granularity it held all 143 modules
+// of a commercial disc, and the first image came no sooner.)
+test("a second launch loads nothing before the boot and the region cache after the first image", async () => {
+  const p = profile();
+  await launch(p).flow.start();
+  const second = launch(p, { loadBeforeBoot: false });
+  const report = await second.flow.installBeforeBoot();
+  assert.equal(report.loaded, 0, "nothing before the boot");
+  assert.equal(second.retained.size, 0);
+  const total = report.deferred;
+  assert.ok(total >= 6);
+  const rest = await second.flow.loadRest();
+  assert.equal(rest.loaded, total, "the whole cache after the first image");
+  assert.equal(second.retained.size, total);
+  const installs = ofType(second.flow, "install");
+  assert.deepEqual(installs.map((e) => [e.loaded, e.after ?? null]), [[0, null], [total, "first-image"]]);
+  await second.flow.start();
+  assert.equal(second.compiled.length, 0, "0 region recompiled");
+});
+
 // Review of #62 (P1-3): a cached module the core refuses (translated for
 // another heap layout) is translated again from guest memory after the boot,
 // its cache entry overwritten and the new module installed; the next launch
@@ -530,4 +554,20 @@ test("a refusal at the end of the run gets one more run; retranslations stop aft
     await next.flow.start();
     assert.deepEqual(next.compiled, again ? [key] : [], again ? "translated again" : "after 3 launches, left as it is");
   }
+});
+
+// Review of #86: before the boot the region cache is not even opened (its
+// index read cost ~110 ms of the launch); everything happens in loadRest().
+test("a second launch reads nothing of the region cache before the boot", async () => {
+  const p = profile();
+  await launch(p).flow.start();
+  let opened = 0;
+  const second = launch(p, {
+    loadBeforeBoot: false,
+    openCache: (identity) => { opened += 1; return openAotCache({ ...identity, baseUrl: BASE, cacheStorage: p.storage, serviceWorker: false }); }
+  });
+  await second.flow.installBeforeBoot();
+  assert.equal(opened, 0, "no cache I/O before the boot");
+  const rest = await second.flow.loadRest();
+  assert.ok(opened > 0 && rest.loaded > 0, "the cache after the first image");
 });
