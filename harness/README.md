@@ -218,7 +218,9 @@ node harness/remote/spark-run.mjs --build <ref>           # its core built on th
   hand while a job from before this change waits on it: such a job keeps
   its old name and would wait for itself. Compare sides of one pair only, never a lane with the
   other. `--chrome-cpus` / `--node-cpus` override the pinning.
-- `--build <ref>` (a commit of the fork) builds its core on the bench with
+- `--build <ref>` (a commit of the fork; at most 3 builds of one agent,
+  counted by its Mac worktree's name, wait or run at once, beyond which
+  spark-run refuses: wait for one of yours to go through) builds its core on the bench with
   the pinned toolchain (`build-core-repro.mjs --install --reset-vendor
   --ccache`, linux-arm64) in one build checkout, `~/salon-bench/build/work`,
   whose CMake tree, Dolphin sources and ccache carry over (~7 min cold, 1-3.5

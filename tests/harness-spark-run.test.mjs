@@ -9,7 +9,7 @@ import path from "node:path";
 import test from "node:test";
 
 import { kpiTable } from "../harness/lib/kpi.mjs";
-import { estimateMin, eta, isBuildProcess, move, movedId, nextStep, readTickets, waitTurn } from "../harness/remote/spark-queue.mjs";
+import { estimateMin, eta, isBuildProcess, MAX_BUILDS_PER_OWNER, move, movedId, nextStep, ownerBuilds, readTickets, waitTurn } from "../harness/remote/spark-queue.mjs";
 import { benchQuery, benchRaceArgs, builtOnBenchTest, launchCommand, RACE_QUERY, runId, sh, stampSummary } from "../harness/remote/spark-run.mjs";
 
 const race = (extra = {}) => ({
@@ -201,4 +201,13 @@ test("spark-run: a core counts as built on the bench only when the bench built i
   } finally {
     rmSync(dir, { recursive: true, force: true });
   }
+});
+
+test("spark queue: an agent's builds are counted for the cap of 3", () => {
+  const b = (name, owner, lane = null) => ({ kind: "build", name, owner, lane });
+  const q = [b("a1", "wt-jit", "a b"), b("a2", "wt-jit"), b("a3", "wt-jit"), b("r1", "wt-robust"), { kind: "pair", name: "p", owner: "wt-jit" }, b("old", undefined), b("w", "wt-jit", "none")];
+  assert.equal(MAX_BUILDS_PER_OWNER, 3);
+  assert.deepEqual(ownerBuilds(q, "wt-jit").map((t) => t.name), ["a1", "a2", "a3"]); // running and waiting; no pair, no neutral ticket
+  assert.equal(ownerBuilds(q, "wt-robust").length, 1);
+  assert.equal(ownerBuilds(q, "wt-kpi").length, 0);
 });

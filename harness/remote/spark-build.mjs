@@ -25,7 +25,11 @@ import path from "node:path";
 import { acquirePerfLock } from "../lib/perf-lock.mjs";
 import { done, laneLock, LANES, waitTurn } from "./spark-queue.mjs";
 
-const [commit, ...rest] = process.argv.slice(2);
+const [commit, ...args] = process.argv.slice(2);
+// --owner <name>: the agent's worktree (spark-run), for the per-agent cap.
+const ownerAt = args.indexOf("--owner");
+const owner = ownerAt >= 0 ? args[ownerAt + 1] : null;
+const rest = ownerAt >= 0 ? args.filter((_, i) => i !== ownerAt && i !== ownerAt + 1) : args;
 if (!/^[0-9a-f]{40}$/.test(commit ?? "")) throw new Error("usage: spark-build.mjs <full commit sha> [build-core-repro options]");
 const B = path.join(os.homedir(), "salon-bench", "build");
 const clone = path.join(B, "wasm-dolphin");
@@ -65,7 +69,7 @@ if (existsSync(path.join(wt, ".git"))) throw new Error(`${wt} is a worktree of a
 run("git", ["fetch", "--quiet", "origin"], clone);
 // Its turn in the bench's queue, then every lane's lock, always in the same
 // order: a build on 16 jobs would disturb a pair in either cluster.
-await waitTurn({ pid: process.pid, kind: "build", name: commit.slice(0, 12), log: (m) => console.log(`[spark-build] ${m}`) });
+await waitTurn({ pid: process.pid, kind: "build", name: commit.slice(0, 12), owner, log: (m) => console.log(`[spark-build] ${m}`) });
 process.once("exit", () => done(process.pid));
 const releases = [];
 for (const dir of LANES.map((l) => laneLock(l))) {

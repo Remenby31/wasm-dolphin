@@ -180,11 +180,11 @@ export function laneBusy(lane, { bench = BENCH_DIR, tickets = [] } = {}) {
   return lane !== "a" && untrackedBuilds(tickets).length > 0;
 }
 
-export async function waitTurn({ pid, kind, lanes = "auto", name, estMin = null, bench = BENCH_DIR, pollSec = 15, log = () => {} }) {
+export async function waitTurn({ pid, kind, lanes = "auto", name, estMin = null, owner = null, bench = BENCH_DIR, pollSec = 15, log = () => {} }) {
   if (!["pair", "build"].includes(kind)) throw new Error(`--kind ${kind}: pair or build`);
   if (!["auto", ...LANES].includes(lanes)) throw new Error(`--lanes ${lanes}: auto, ${LANES.join(", ")}`);
   mkdirSync(queueDir(bench), { recursive: true });
-  const me = { id: `${String(Date.now()).padStart(15, "0")}-${pid}.json`, pid, host: os.hostname(), kind, lanes, name, estMin, at: new Date().toISOString(), lane: null };
+  const me = { id: `${String(Date.now()).padStart(15, "0")}-${pid}.json`, pid, host: os.hostname(), kind, lanes, name, estMin, owner, at: new Date().toISOString(), lane: null };
   writeTicket(bench, me);
   let said = null;
   for (;;) {
@@ -205,6 +205,13 @@ export async function waitTurn({ pid, kind, lanes = "auto", name, estMin = null,
   }
 }
 
+// Builds an agent may have queued or running at once (judge, 2026-10-22: a
+// bisection once queued 14, ~2 h of bench for everyone else).
+export const MAX_BUILDS_PER_OWNER = 3;
+// `owner`'s builds in the queue, waiting or running (tickets of a harness
+// before owners have none and are not counted).
+export const ownerBuilds = (tickets, owner) => tickets.filter((t) => t.kind === "build" && t.lane !== "none" && t.owner === owner);
+
 export function done(pid, bench = BENCH_DIR) {
   for (const t of readTickets(bench)) if (t.pid === pid && t.host === os.hostname()) rmSync(path.join(queueDir(bench), t.id), { force: true });
 }
@@ -213,7 +220,7 @@ async function main() {
   const [cmd, ...rest] = process.argv.slice(2);
   const { values, positionals } = parseArgs({ args: rest, allowPositionals: true, options: {
     pid: { type: "string" }, kind: { type: "string" }, lanes: { type: "string", default: "auto" }, name: { type: "string", default: "" },
-    eta: { type: "boolean", default: false }, after: { type: "string" }, "as-judge": { type: "boolean", default: false }
+    eta: { type: "boolean", default: false }, json: { type: "boolean", default: false }, after: { type: "string" }, "as-judge": { type: "boolean", default: false }
   } });
   if (cmd === "list") {
     // A running ticket of an older harness has no grantedAt: its lane lock's
@@ -221,6 +228,7 @@ async function main() {
     const lockStart = (lane) => { try { return JSON.parse(readFileSync(path.join(laneLock(lane), "owner"), "utf8")).startedAt; } catch { return null; } };
     const tickets = readTickets().map((t) => (t.lane && t.lane !== "none" && !t.grantedAt ? { ...t, grantedAt: lockStart(t.lane.split(" ")[0]) ?? undefined } : t));
     const rows = values.eta ? eta(tickets) : tickets;
+    if (values.json) return console.log(JSON.stringify(rows));
     for (const t of rows) console.log(`${t.at} ${t.kind} ${t.name} lanes:${t.lanes} ${t.lane ? `running in ${t.lane}` : "waiting"} pid ${t.pid}${values.eta && t.lane !== "none" ? ` | starts in ~${t.startsIn} min, ends in ~${t.endsIn} min` : ""}`);
     return;
   }
