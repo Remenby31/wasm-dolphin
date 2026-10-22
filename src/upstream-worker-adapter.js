@@ -98,6 +98,7 @@ export class UpstreamWorkerAdapter {
     correctTimeDrift = false,
     coreLog = false,
     memcardSlotB = false,
+    efbAccess = false,
     savesMode = "",
     efbDiag = false,
     jitVerbose = false,
@@ -140,6 +141,7 @@ export class UpstreamWorkerAdapter {
     wgpuMappedDrainCoalescing = false,
     wgpuRendererWorkerProbe = "off",
     wgpuVisualCadence = false,
+    wgpuPipelinePrewarm = true,
     gpuCompletionDiagnostics = false,
     wgpuDirtyRangeProjection = false,
     wgpuPassPackageProjection = false,
@@ -200,6 +202,7 @@ export class UpstreamWorkerAdapter {
     this.correctTimeDrift = Boolean(correctTimeDrift);
     this.coreLog = Boolean(coreLog);
     this.memcardSlotB = Boolean(memcardSlotB);
+    this.efbAccess = Boolean(efbAccess);
     this.savesMode = String(savesMode || "");
     this.userData = null;
     this.efbDiag = Boolean(efbDiag);
@@ -249,6 +252,7 @@ export class UpstreamWorkerAdapter {
       "canary", "inline-upload", "worker-upload", "null-drain"
     ]).has(wgpuRendererWorkerProbe) ? wgpuRendererWorkerProbe : "off";
     this.wgpuVisualCadence = Boolean(wgpuVisualCadence);
+    this.wgpuPipelinePrewarm = wgpuPipelinePrewarm !== false;
     this.gpuCompletionDiagnostics = Boolean(gpuCompletionDiagnostics);
     this.wgpuDirtyRangeProjection = Boolean(wgpuDirtyRangeProjection);
     this.wgpuPassPackageProjection = Boolean(wgpuPassPackageProjection);
@@ -409,6 +413,7 @@ export class UpstreamWorkerAdapter {
       correctTimeDrift: this.correctTimeDrift,
       coreLog: this.coreLog,
       memcardSlotB: this.memcardSlotB,
+      efbAccess: this.efbAccess,
       savesMode: this.savesMode,
       efbDiag: this.efbDiag,
       jitVerbose: this.jitVerbose,
@@ -451,6 +456,7 @@ export class UpstreamWorkerAdapter {
       wgpuMappedDrainCoalescing: this.wgpuMappedDrainCoalescing,
       wgpuRendererWorkerProbe: this.wgpuRendererWorkerProbe,
       wgpuVisualCadence: this.wgpuVisualCadence,
+      wgpuPipelinePrewarm: this.wgpuPipelinePrewarm,
       gpuCompletionDiagnostics: this.gpuCompletionDiagnostics,
       wgpuDirtyRangeProjection: this.wgpuDirtyRangeProjection,
       wgpuPassPackageProjection: this.wgpuPassPackageProjection,

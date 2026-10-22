@@ -57,6 +57,7 @@ import {
 } from "./input-latency-telemetry.js";
 import { requestedInputPhotonMarkerConfig } from "./input-visual-marker.js";
 import { requestedWgpuVisualCadence } from "./wgpu-visual-cadence.js";
+import { requestedWgpuPipelinePrewarm } from "./wgpu-pipeline-prewarm.js";
 import { requestedWgpuSparseUbo } from "./wgpu-sparse-ubo-copy-forward.js";
 
 const DEMO_WIDTH = 320;
@@ -107,6 +108,8 @@ export class EmulatorHost {
     this.correctTimeDrift = requestedCorrectTimeDrift();
     this.coreLog = requestedCoreLog();
     this.memcardSlotB = new URLSearchParams(window.location.search).get("memcardb") === "1";
+    // CPU reads of the EFB (peeks), off by default as in Dolphin (EFBAccessEnable).
+    this.efbAccess = new URLSearchParams(window.location.search).get("efbaccess") === "1";
     this.savesMode = new URLSearchParams(window.location.search).get("saves") === "off" ? "off" : "";
     this.efbDiag = requestedEfbDiag();
     this.jitVerbose = new URLSearchParams(window.location.search).get("jitverbose") === "1";
@@ -177,6 +180,7 @@ export class EmulatorHost {
     this.wgpuVisualCadence = requestedWgpuVisualCadence(window.location.search, {
       hardwareVideo: this.videoBackend === "WebGPU-Real"
     });
+    this.wgpuPipelinePrewarm = requestedWgpuPipelinePrewarm(window.location.search);
     this.gpuCompletionDiagnostics = requestedGpuCompletionDiagnostics(window.location.search);
     this.wgpuDirtyRangeProjection = requestedWgpuDirtyRangeProjection(window.location.search);
     this.wgpuPassPackageProjection = requestedWgpuPassPackageProjection(
@@ -404,6 +408,7 @@ export class EmulatorHost {
             correctTimeDrift: this.correctTimeDrift,
             coreLog: this.coreLog,
             memcardSlotB: this.memcardSlotB,
+            efbAccess: this.efbAccess,
             savesMode: this.savesMode,
             efbDiag: this.efbDiag,
             jitVerbose: this.jitVerbose,
@@ -445,6 +450,7 @@ export class EmulatorHost {
             wgpuMappedDrainCoalescing: this.wgpuMappedDrainCoalescing,
             wgpuRendererWorkerProbe: this.wgpuRendererWorkerProbe,
             wgpuVisualCadence: this.wgpuVisualCadence,
+            wgpuPipelinePrewarm: this.wgpuPipelinePrewarm,
             gpuCompletionDiagnostics: this.gpuCompletionDiagnostics,
             wgpuDirtyRangeProjection: this.wgpuDirtyRangeProjection,
             wgpuPassPackageProjection: this.wgpuPassPackageProjection,

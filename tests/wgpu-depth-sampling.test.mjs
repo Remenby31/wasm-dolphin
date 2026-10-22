@@ -54,7 +54,7 @@ function harness() {
     vpDiagBgTexByBinding: new Map(), vpDiagFinalCmp: new Map(), vpDiagPipeFinalDs: new Map(),
     REVZ_COMPARE_FLIP: false, REVZ_COMPARE_FLIP_ALL: false, DIAG_DEPTH_ALWAYS: false,
     webGpuPcfg: { ok: 0, fail: 0 }, recordRendererError: (...args) => errors.push(args),
-    wgpuConsumerStateCacheEnabled: false,
+    wgpuConsumerStateCacheEnabled: false, pipelinePrewarm: null,
     webGpuExecStats: { setPipe: 0, missPipe: 0, setBg: 0, missBg: 0 },
     frameCapPush() {}, frameCapActive: () => false, WGPU_DYN_OFF_SCRATCH: new Uint32Array(4),
     WGPU_CMD_OP_SET_PIPELINE: 11, WGPU_CMD_OP_SET_BIND_GROUP: 12,

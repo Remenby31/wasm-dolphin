@@ -76,7 +76,9 @@ export function expandMatrix(spec, { env = process.env } = {}) {
           run,
           game: { ...game, iso: expandEnv(game.iso, env) },
           config,
-          query: resolveQuery(config),
+          // A game's own `set` (e.g. a feature only it exercises) applies
+          // to every config it runs under.
+          query: resolveQuery(game.set ? { ...config, set: { ...config.set, ...game.set } } : config),
           label: `${game.id}__${config.id}__r${run}`
         });
       }
