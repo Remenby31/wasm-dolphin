@@ -18,7 +18,7 @@ import { runChecks } from "./lib/correctness.mjs";
 import { browserInfo, isOverloaded, waitForLoad } from "./lib/env.mjs";
 import { createFreezeWatch, probeWorker } from "./lib/freeze-probe.mjs";
 import { acquirePerfLock } from "./lib/perf-lock.mjs";
-import { correctnessGate, crossCommitGate, decide, infraCrashGate, findingsGate, gateMarkdown, mergeGates, perfReport, runsByCell } from "./lib/gate.mjs";
+import { correctnessGate, crossCommitGate, expectedFailures, decide, infraCrashGate, findingsGate, gateMarkdown, mergeGates, perfReport, runsByCell } from "./lib/gate.mjs";
 import { renderChecks, renderVsBaseline } from "./lib/render-check.mjs";
 import { IDENTITY_FILE } from "./lib/server.mjs";
 import { mergeTimeline } from "./lib/timeline.mjs";
@@ -733,7 +733,8 @@ function gateFromDirs(baseDir, candDir, { accept = [], known = [] } = {}) {
   const read = (d) => JSON.parse(readFileSync(path.join(d, "summary.json"), "utf8"));
   const optional = (d, f) => (existsSync(path.join(d, f)) ? JSON.parse(readFileSync(path.join(d, f), "utf8")) : null);
   const base = read(baseDir), cand = read(candDir);
-  const gates = [correctnessGate(base.cells, cand.cells), infraCrashGate(base.results, cand.results), crossCommitGate(renderVsBaseline(base.results, cand.results, { accept, known: [...knownFailures(), ...known] }))];
+  const allKnown = [...knownFailures(), ...known];
+  const gates = [correctnessGate(base.cells, cand.cells, { expected: expectedFailures(allKnown) }), infraCrashGate(base.results, cand.results), crossCommitGate(renderVsBaseline(base.results, cand.results, { accept, known: allKnown }))];
   for (const [name, file, pick] of [["fuzz", "fuzz.json", (r) => r.results.flatMap((x) => x.findings.map((f) => ({ ...f, iso: x.iso })))], ["pads", "pads.json", (r) => padFindings(r)]]) {
     const b = optional(baseDir, file), c = optional(candDir, file);
     if (b || c) gates.push(findingsGate(name, b ? pick(b) : [], c ? pick(c) : null));

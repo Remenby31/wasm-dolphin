@@ -21,7 +21,26 @@ export const PERF_METRICS = Object.freeze({ speed: "higher", vis: "higher", fram
 
 const key = (c) => `${c.game}\u0000${c.config}`;
 
-export function correctnessGate(baselineCells, candidateCells) {
+// Expected failures (harness/known-failures.json, "mode": "expected-fail"):
+// a check main is known to fail until a named follow-up fixes it, e.g. a
+// test added before its implementation. Its failure is XFAIL, reported and
+// not blocking, whatever the baseline did; a pass is XPASS and blocks, so the
+// PR that fixes it must also remove the entry. `until` names that follow-up.
+export const EXPECTED_FAIL = "expected-fail";
+export function expectedFailures(known = []) {
+  const out = new Map();
+  for (const x of known) {
+    if (x.mode !== EXPECTED_FAIL) continue;
+    if (!CHECKS.includes(x.check)) throw new Error(`known-failures: expected-fail ${x.cell} needs a check among ${CHECKS.join(", ")}, not "${x.check}"`);
+    for (const field of ["reason", "until"]) {
+      if (typeof x[field] !== "string" || !x[field].trim()) throw new Error(`known-failures: expected-fail ${x.cell} needs a ${field}`);
+    }
+    out.set(`${x.cell}\u0000${x.check}`, { reason: x.reason.trim(), until: x.until.trim() });
+  }
+  return out;
+}
+
+export function correctnessGate(baselineCells, candidateCells, { expected = new Map() } = {}) {
   const base = new Map(baselineCells.map((c) => [key(c), c]));
   const rows = [];
   for (const cand of candidateCells) {
@@ -35,10 +54,14 @@ export function correctnessGate(baselineCells, candidateCells) {
       // crash signature where the baseline crashed differently, or could not
       // be judged, is a regression.
       const same = check !== "crash" || b?.checks?.crash?.detail === cand.checks?.crash?.detail;
-      if (cs === "fail") status = bs === "fail" && same ? "known-failure" : "regressed";
+      const xf = expected.get(`${cand.game}/${cand.config}\u0000${check}`);
+      let detail = cand.checks?.[check]?.detail ?? null;
+      if (xf && cs === "fail") { status = "xfail"; detail = `expected to fail until ${xf.until}: ${xf.reason}`; }
+      else if (xf && cs === "pass") { status = "xpass"; detail = `passes but is listed as expected-fail (until ${xf.until}): remove its entry from harness/known-failures.json`; }
+      else if (cs === "fail") status = bs === "fail" && same ? "known-failure" : "regressed";
       else if (cs === "unjudged") status = bs === "unjudged" ? "not-covered" : "inconclusive";
       else status = bs === "fail" ? "fixed" : "ok";
-      rows.push({ game: cand.game, config: cand.config, check, baseline: bs, candidate: cs, status, detail: cand.checks?.[check]?.detail ?? null });
+      rows.push({ game: cand.game, config: cand.config, check, baseline: bs, candidate: cs, status, detail });
     }
   }
   for (const b of base.values()) rows.push({ game: b.game, config: b.config, check: "*", baseline: "present", candidate: null, status: "missing" });
@@ -62,7 +85,7 @@ export function findingsGate(name, baselineFindings, candidateFindings) {
 }
 
 function summarize(rows) {
-  const blocking = rows.filter((r) => r.status === "regressed" || r.status === "missing" || r.status === "inconclusive");
+  const blocking = rows.filter((r) => r.status === "regressed" || r.status === "missing" || r.status === "inconclusive" || r.status === "xpass");
   return {
     ok: rows.length > 0 && blocking.length === 0,
     inconclusive: rows.length === 0 || (blocking.length > 0 && blocking.every((r) => r.status === "inconclusive")),
@@ -180,6 +203,9 @@ export function gateMarkdown({ correctness, perf = [] }) {
   const lines = ["## Correctness (blocking)", "", "| Game | Config | Check | Baseline | Candidate | Status |", "|---|---|---|---|---|---|"];
   for (const r of correctness.rows) if (r.status !== "ok") lines.push(`| ${r.game} | ${r.config} | ${r.check} | ${r.baseline ?? "–"} | ${r.candidate ?? "–"} | ${r.status} |`);
   const infra = correctness.rows.filter((r) => r.status === "infra-crash");
+  for (const r of correctness.rows.filter((x) => x.status === "xfail" || x.status === "xpass")) {
+    lines.push("", `${r.status === "xpass" ? "**XPASS (blocks)**" : "XFAIL (not blocking)"} ${r.game}/${r.config} ${r.check}: ${r.detail}`);
+  }
   lines.push("", `${correctness.rows.filter((r) => r.status === "ok").length} check(s) ok.${infra.length ? ` ${infra.length} infra crash(es): a Chrome renderer crash that did not happen again on a second run (not blocking; counted in harness/results/infra-crashes.jsonl).` : ""}`, "");
   lines.push("## Performance (paired; blocks only a confirmed ≥ 15 % regression)", "", "| Game | Config | Metric | Pairs | Median change | Regressed |", "|---|---|---|---|---|---|");
   for (const r of perf) lines.push(`| ${r.game} | ${r.config} | ${r.metric} | ${r.pairs} (${r.confirmations ?? 0} confirmation) | ${r.median == null ? "–" : `${Math.round(r.median * 1000) / 10} %`} | ${r.regressed ? "yes, confirmed" : r.inconclusive ? "worse, confirmations unmeasured" : r.worse ? "worse, not confirmed" : "no"} |`);
@@ -189,7 +215,7 @@ export function gateMarkdown({ correctness, perf = [] }) {
     : d.reason === "inconclusive"
       ? "Gate: INCONCLUSIF, blocking (a check, or a performance confirmation, could not be judged on the candidate)."
       : d.reason === "correctness"
-        ? `Gate: FAIL (${correctness.blocking.length} correctness regression(s)).`
+        ? `Gate: FAIL (${correctness.blocking.length} correctness regression(s)${correctness.blocking.some((r) => r.status === "xpass") ? ", including an expected failure that now passes: remove its entry" : ""}).`
         : `Gate: FAIL (confirmed performance regression: ${perf.filter((r) => r.regressed).map((r) => `${r.game}/${r.config} ${r.metric}`).join(", ")}).`;
   lines.push("", text);
   return lines.join("\n");

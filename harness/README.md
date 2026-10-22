@@ -427,6 +427,14 @@ Each check of each run is pass, fail or **unjudged** (with the reason: no VI
 timeline in this core, capture refused for a hardware renderer, scripted
 inputs without a savestate, …). Machine load changes none of them.
 
+**Expected failures.** A test added before its implementation fails on main
+by design. List it in `harness/known-failures.json` with `"mode":
+"expected-fail"`, its `check` (crash, errors, coreFreeze, render or audio), a
+`reason` and `until` (the follow-up that fixes it). Its failure is **XFAIL**,
+shown with the reason and never blocking, whatever the baseline did; a pass is
+**XPASS** and blocks, so the PR that fixes it also removes the entry. Only that
+check of that cell is relaxed.
+
 **`harness/run ab <spec>`** exports the served files of `--baseline-ref`
 (default `origin/main`) with `git archive`, runs the matrix (and the spec's
 `fuzz` discs and `pads`) on both sides, alternating which side goes first on

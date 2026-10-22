@@ -9,7 +9,7 @@ import path from "node:path";
 import test from "node:test";
 
 import { cellChecks, runChecks } from "../harness/lib/correctness.mjs";
-import { correctnessGate, decide, findingsGate, perfReport, runsByCell } from "../harness/lib/gate.mjs";
+import { correctnessGate, expectedFailures, decide, findingsGate, gateMarkdown, perfReport, runsByCell } from "../harness/lib/gate.mjs";
 import { summarizeMatrix } from "../harness/lib/matrix.mjs";
 import { summarizeRun } from "../harness/lib/metrics.mjs";
 import { renderChecks } from "../harness/lib/render-check.mjs";
@@ -107,6 +107,38 @@ test("correctness gate: regressions and unjudgeable candidates block, shared fai
   const loaded = record({ overloaded: true, summary: { ...record().summary, errorCount: 5 } });
   assert.equal(cellChecks([record(), loaded]).errors.status, "fail");
   assert.equal(runChecks(record()).coreFreeze.status, "pass");
+});
+
+test("expected failures: XFAIL reported without blocking, XPASS blocks until the entry goes", () => {
+  const known = [{ cell: "g/c", check: "render", mode: "expected-fail", reason: "readback is a stub", until: "PR #99" }];
+  const expected = expectedFailures(known);
+  const failing = { ...ok, render: { status: "fail", detail: "missing-detail" } };
+  // The baseline passes (it could not exercise the feature) or fails alike.
+  for (const base of [ok, failing]) {
+    const g = correctnessGate(cells([["c", base]]), cells([["c", failing]]), { expected });
+    assert.equal(g.ok, true);
+    const row = g.rows.find((r) => r.check === "render");
+    assert.equal(row.status, "xfail");
+    assert.match(row.detail, /until PR #99: readback is a stub/);
+  }
+  const xpass = correctnessGate(cells([["c", failing]]), cells([["c", ok]]), { expected });
+  assert.equal(xpass.ok, false);
+  assert.equal(xpass.rows.find((r) => r.check === "render").status, "xpass");
+  assert.match(gateMarkdown({ correctness: xpass }), /XPASS \(blocks\)[\s\S]*remove its entry/);
+  // Only the listed check of the listed cell is relaxed.
+  const crash = { ...failing, crash: { status: "fail", detail: "x" } };
+  assert.equal(correctnessGate(cells([["c", ok]]), cells([["c", crash]]), { expected }).ok, false);
+  assert.equal(correctnessGate(cells([["d", ok]]), cells([["d", failing]]), { expected }).ok, false);
+  // Entries must say why and until when; renderVsBaseline keeps its own modes.
+  assert.throws(() => expectedFailures([{ ...known[0], until: "" }]), /needs a until/);
+  assert.throws(() => expectedFailures([{ ...known[0], check: "renderVsBaseline" }]), /needs a check among/);
+});
+
+test("the committed known-failures.json parses for both gates", async () => {
+  const { readFileSync } = await import("node:fs");
+  const known = JSON.parse(readFileSync(new URL("../harness/known-failures.json", import.meta.url), "utf8"));
+  assert.doesNotThrow(() => expectedFailures(known));
+  assert.ok(expectedFailures(known).has("efbpeek/wgpu-interp\u0000render"));
 });
 
 test("fuzz and pads findings: new kinds regress, a missing result is inconclusive", () => {
