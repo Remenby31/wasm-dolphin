@@ -1,7 +1,7 @@
 diff --git a/Source/Core/Core/PowerPC/CachedInterpreter/CachedInterpreter.cpp b/Source/Core/Core/PowerPC/CachedInterpreter/CachedInterpreter.cpp
 --- a/Source/Core/Core/PowerPC/CachedInterpreter/CachedInterpreter.cpp
 +++ b/Source/Core/Core/PowerPC/CachedInterpreter/CachedInterpreter.cpp
-@@ -488,8 +488,271 @@
+@@ -488,7 +488,302 @@
  // ExecuteOneBlock loops through JIT/interpret blocks until downcount=0.
  std::atomic<u32> s_runloop_advance_max_us{0};
  std::atomic<u32> s_runloop_exec_max_us{0};
@@ -16,7 +16,9 @@ diff --git a/Source/Core/Core/PowerPC/CachedInterpreter/CachedInterpreter.cpp b/
 +// interpreter instead of a direct RAM access, are counted where they happen;
 +// the memory instructions a cached-interpreter block interprets are slow
 +// every time and counted with its entry. Regions add an estimate: their
-+// cycles times their code's static accesses per cycle.
++// cycles times their code's static accesses per cycle. Block ends also count
++// the instructions that write or read the condition register (a CR field)
++// and XER's carry, for the lazy-CR lever (research/deep-cr-flags.md).
 +namespace
 +{
 +enum MemKind : u32
@@ -55,14 +57,26 @@ diff --git a/Source/Core/Core/PowerPC/CachedInterpreter/CachedInterpreter.cpp b/
 +  }
 +}
 +
++// Instructions that write a CR field (cmp*, Rc=1, CR logic, mtcrf...), read
++// one (a conditional bc, CR logic, mfcr...), set XER[CA], read it.
++enum FlagCount : u32
++{
++  kCrWrites,
++  kCrReads,
++  kCaWrites,
++  kCaReads,
++  kFlagCounts
++};
++
 +struct MemStaticCounts
 +{
 +  u16 instructions = 0;
 +  std::array<u16, kMemKinds> accesses{};
 +  std::array<u16, kMemKinds> interpreted{};  // run by the interpreter: slow every time
 +  u16 flags = 0;  // bit 0: a wasm block end
++  std::array<u16, kFlagCounts> flag_ops{};
 +};
-+static_assert(sizeof(MemStaticCounts) == 28);
++static_assert(sizeof(MemStaticCounts) == 36);
 +
 +// The counts of the block being emitted, from its start.
 +struct MemCountBuilder
@@ -70,12 +84,19 @@ diff --git a/Source/Core/Core/PowerPC/CachedInterpreter/CachedInterpreter.cpp b/
 +  u32 instructions = 0;
 +  std::array<u32, kMemKinds> accesses{};
 +  std::array<u32, kMemKinds> interpreted{};
++  std::array<u32, kFlagCounts> flag_ops{};
 +
 +  void Add(const PPCAnalyst::CodeOp& op)
 +  {
 +    ++instructions;
-+    if (const int kind = op.skip ? -1 : MemAccessKind(op.opinfo, op.inst); kind >= 0)
++    if (op.skip)
++      return;
++    if (const int kind = MemAccessKind(op.opinfo, op.inst); kind >= 0)
 +      ++accesses[kind];
++    flag_ops[kCrWrites] += op.crOut.Count() != 0 ? 1 : 0;
++    flag_ops[kCrReads] += op.crIn.Count() != 0 ? 1 : 0;
++    flag_ops[kCaWrites] += op.outputCA ? 1 : 0;
++    flag_ops[kCaReads] += op.wantsCA ? 1 : 0;
 +  }
 +  void Interpreted(const PPCAnalyst::CodeOp& op)
 +  {
@@ -90,6 +111,8 @@ diff --git a/Source/Core/Core/PowerPC/CachedInterpreter/CachedInterpreter.cpp b/
 +      accesses[k] += other.accesses[k];
 +      interpreted[k] += other.interpreted[k];
 +    }
++    for (u32 k = 0; k < kFlagCounts; ++k)
++      flag_ops[k] += other.flag_ops[k];
 +  }
 +};
 +
@@ -107,6 +130,7 @@ diff --git a/Source/Core/Core/PowerPC/CachedInterpreter/CachedInterpreter.cpp b/
 +  u64 instructions = 0;
 +  std::array<u64, kMemKinds> accesses{};
 +  std::array<u64, kMemKinds> slow{};
++  std::array<u64, kFlagCounts> flag_ops{};
 +  u64 cycles_covered = 0;
 +  double cycles_total = 0, region_accesses = 0, region_instructions = 0;
 +};
@@ -115,7 +139,8 @@ diff --git a/Source/Core/Core/PowerPC/CachedInterpreter/CachedInterpreter.cpp b/
 +std::atomic<bool> s_mem_stats_reset{false};
 +
 +// Layout v1, agreed with the harness (lib/mem-access-stats.mjs): written as
-+// a whole at each slice boundary while on; readers copy it twice.
++// a whole at each slice boundary while on; readers copy it twice. The flag
++// counts sit in v1's spares (readers of the first v1 ignore them).
 +struct MemAccessStatsV1
 +{
 +  u32 version = 1;
@@ -127,12 +152,13 @@ diff --git a/Source/Core/Core/PowerPC/CachedInterpreter/CachedInterpreter.cpp b/
 +  std::array<double, kMemKinds> slow{};
 +  double cycles_covered = 0, cycles_total = 0, region_accesses = 0, region_instructions = 0,
 +         static_saturations = 0;
-+  std::array<double, 4> spare{};
++  std::array<double, kFlagCounts> flag_ops{};  // blocks: CR writes, CR reads, CA writes, CA reads
 +};
 +static_assert(sizeof(MemAccessStatsV1) == 192);
 +static_assert(offsetof(MemAccessStatsV1, slow) == 72 &&
 +              offsetof(MemAccessStatsV1, cycles_covered) == 120 &&
-+              offsetof(MemAccessStatsV1, static_saturations) == 152);
++              offsetof(MemAccessStatsV1, static_saturations) == 152 &&
++              offsetof(MemAccessStatsV1, flag_ops) == 160);
 +alignas(8) MemAccessStatsV1 s_mem_stats_view;
 +
 +u32 InternMemCounts(const MemCountBuilder& b, u16 flags)
@@ -151,6 +177,8 @@ diff --git a/Source/Core/Core/PowerPC/CachedInterpreter/CachedInterpreter.cpp b/
 +    c.accesses[k] = clamp(b.accesses[k]);
 +    c.interpreted[k] = clamp(b.interpreted[k]);
 +  }
++  for (u32 k = 0; k < kFlagCounts; ++k)
++    c.flag_ops[k] = clamp(b.flag_ops[k]);
 +  u64 key = 0xcbf29ce484222325ull;
 +  const auto* bytes = reinterpret_cast<const u8*>(&c);
 +  for (std::size_t i = 0; i < sizeof(c); ++i)
@@ -188,6 +216,8 @@ diff --git a/Source/Core/Core/PowerPC/CachedInterpreter/CachedInterpreter.cpp b/
 +    s_mem_totals.accesses[k] += c.accesses[k];
 +    s_mem_totals.slow[k] += c.interpreted[k];
 +  }
++  for (u32 k = 0; k < kFlagCounts; ++k)
++    s_mem_totals.flag_ops[k] += c.flag_ops[k];
 +  s_mem_totals.cycles_covered += downcount;
 +}
 +
@@ -221,6 +251,8 @@ diff --git a/Source/Core/Core/PowerPC/CachedInterpreter/CachedInterpreter.cpp b/
 +  v.region_accesses = s_mem_totals.region_accesses;
 +  v.region_instructions = s_mem_totals.region_instructions;
 +  v.static_saturations = s_mem_static_saturations;
++  for (u32 k = 0; k < kFlagCounts; ++k)
++    v.flag_ops[k] = static_cast<double>(s_mem_totals.flag_ops[k]);
 +}
 +
 +// At a slice boundary, on the CPU thread: a requested reset zeroes the totals
@@ -234,7 +266,7 @@ diff --git a/Source/Core/Core/PowerPC/CachedInterpreter/CachedInterpreter.cpp b/
 +  PublishMemStats();
 +}
  }  // namespace
- 
++
 +#ifdef __EMSCRIPTEN__
 +// reset >= 0: zero the totals and count from the next slice boundary on;
 +// < 0: only read. Returns the MemAccessStatsV1 address.
@@ -269,11 +301,10 @@ diff --git a/Source/Core/Core/PowerPC/CachedInterpreter/CachedInterpreter.cpp b/
 +  return MemAccessKind(PPCTables::GetOpInfo(inst, 0), inst);
 +}
 +#endif
-+
+ 
  // §28cd spike audit recorders. Called from EM_JS compile-block JS body
  // (different pthread than the main thread that reads stats); routes
- // through atomic globals for cross-thread visibility.
-@@ -1963,36 +2226,42 @@
+@@ -1963,36 +2258,42 @@
  extern "C" u32 DolphinWeb_CachedInterpreterReadU32(int state_ptr, u32 address)
  {
    (void)state_ptr;
@@ -316,7 +347,7 @@ diff --git a/Source/Core/Core/PowerPC/CachedInterpreter/CachedInterpreter.cpp b/
    Core::System::GetInstance().GetMMU().Write<u16>(value, address);
  }
  
-@@ -2038,6 +2307,7 @@
+@@ -2038,6 +2339,7 @@
    }
    else
    {
@@ -324,7 +355,7 @@ diff --git a/Source/Core/Core/PowerPC/CachedInterpreter/CachedInterpreter.cpp b/
      const u32 temp = Core::System::GetInstance().GetMMU().Read<u32>(address);
      if ((ppc_state.Exceptions & EXCEPTION_DSI) == 0)
        ppc_state.ps[fd].Fill(ConvertToDouble(temp));
-@@ -2061,6 +2331,7 @@
+@@ -2061,6 +2363,7 @@
    }
    else
    {
@@ -332,7 +363,7 @@ diff --git a/Source/Core/Core/PowerPC/CachedInterpreter/CachedInterpreter.cpp b/
      Core::System::GetInstance().GetMMU().Write<u32>(ConvertToSingle(ppc_state.ps[fs].PS0AsU64()),
                                                      address);
    }
-@@ -2083,6 +2354,7 @@
+@@ -2083,6 +2386,7 @@
    }
    else
    {
@@ -340,7 +371,7 @@ diff --git a/Source/Core/Core/PowerPC/CachedInterpreter/CachedInterpreter.cpp b/
      const u64 temp = Core::System::GetInstance().GetMMU().Read<u64>(address);
      if ((ppc_state.Exceptions & EXCEPTION_DSI) == 0)
        ppc_state.ps[fd].SetPS0(temp);
-@@ -2434,6 +2706,7 @@
+@@ -2434,6 +2738,7 @@
        return DolphinWeb_CachedInterpreterCheckProgramOrDsi(ppc_state, current_pc, downcount) ? 1 :
                                                                                                 0;
    }
@@ -348,7 +379,7 @@ diff --git a/Source/Core/Core/PowerPC/CachedInterpreter/CachedInterpreter.cpp b/
    Interpreter::GetInterpreterOp(inst)(interpreter, inst);
    return DolphinWeb_CachedInterpreterCheckProgramOrDsi(ppc_state, current_pc, downcount) ? 1 : 0;
  }
-@@ -2472,6 +2745,7 @@
+@@ -2472,6 +2777,7 @@
        static_cast<std::uintptr_t>(state_ptr));
    const UGeckoInstruction inst{inst_hex};
    ++s_wasm_system_key_counts[(inst.OPCD << 10) | inst.SUBOP10];
@@ -356,7 +387,7 @@ diff --git a/Source/Core/Core/PowerPC/CachedInterpreter/CachedInterpreter.cpp b/
  
    if (inst.OPCD == 46 || inst.OPCD == 47)
    {
-@@ -2697,6 +2971,11 @@
+@@ -2697,6 +3003,11 @@
    const UGeckoInstruction inst{inst_hex};
    const GekkoOPInfo* opinfo = PPCTables::GetOpInfo(inst, current_pc);
    ++s_wasm_helper_call_count;
@@ -368,7 +399,7 @@ diff --git a/Source/Core/Core/PowerPC/CachedInterpreter/CachedInterpreter.cpp b/
    ++s_wasm_helper_key_counts[(inst.OPCD << 10) | inst.SUBOP10];
    if (inst.OPCD == 31 && inst.SUBOP10 == 339)
      ++s_wasm_helper_mfspr_counts[DecodeMfsprIndex(inst)];
-@@ -9196,6 +9475,8 @@
+@@ -9196,6 +9507,8 @@
    // is caught here.
    u32 ram_base = 0;
    u32 l1_base = 0;
@@ -377,7 +408,7 @@ diff --git a/Source/Core/Core/PowerPC/CachedInterpreter/CachedInterpreter.cpp b/
  };
  
  // The RAM and L1 host addresses of this session (tests: the RAM shifted by
-@@ -9570,6 +9851,39 @@
+@@ -9570,6 +9883,39 @@
  // On the CPU thread at a slice boundary: compile and map queued regions. A
  // region with an entry HLE hooks is left out (the block path replaces that
  // function; a region would run its original code).
@@ -417,7 +448,7 @@ diff --git a/Source/Core/Core/PowerPC/CachedInterpreter/CachedInterpreter.cpp b/
  void InstallRegion(PendingRegion& pending, int handle)
  {
    s_region_stats.regions_installed += 1;
-@@ -9577,6 +9891,7 @@
+@@ -9577,6 +9923,7 @@
    s_regions.push_back({handle, std::move(pending.entries), std::move(pending.ranges),
                         std::move(pending.members), true, true, pending.layout_hash,
                         pending.ram_base, pending.l1_base});
@@ -425,7 +456,7 @@ diff --git a/Source/Core/Core/PowerPC/CachedInterpreter/CachedInterpreter.cpp b/
    for (const u32 pc : s_regions.back().entries)
    {
      s_region_at.emplace(pc, index);  // an entry already mapped keeps its region
-@@ -9929,6 +10244,8 @@
+@@ -9929,6 +10276,8 @@
    const auto run = reinterpret_cast<RegionFunction>(
        static_cast<std::uintptr_t>(s_regions[it->second].handle));
    const s32 downcount = ppc_state.downcount;
@@ -434,7 +465,7 @@ diff --git a/Source/Core/Core/PowerPC/CachedInterpreter/CachedInterpreter.cpp b/
    int code;
    if (s_region_stats_on && s_region_stats.sample_every != 0)
    {
-@@ -9944,6 +10261,12 @@
+@@ -9944,6 +10293,12 @@
    else
    {
      code = run(static_cast<int>(reinterpret_cast<std::uintptr_t>(&ppc_state)));
@@ -447,7 +478,7 @@ diff --git a/Source/Core/Core/PowerPC/CachedInterpreter/CachedInterpreter.cpp b/
    }
    if (s_region_stats_on)
    {
-@@ -10094,6 +10417,7 @@
+@@ -10094,6 +10449,7 @@
  {
    ServiceRegionInstalls();
    ApplyRegionStatsRequest();
@@ -455,7 +486,7 @@ diff --git a/Source/Core/Core/PowerPC/CachedInterpreter/CachedInterpreter.cpp b/
  }
  
  // {u32 count, u32 capacity, then count x {f32 ms, u32 bytes, u32 path}}: the
-@@ -10127,6 +10451,7 @@
+@@ -10127,6 +10483,7 @@
  // Stats as the CPU thread publishes them (tests: no slice boundary here).
  extern "C" EMSCRIPTEN_KEEPALIVE void DolphinWeb_AotPublishStatsForTest()
  {
@@ -463,7 +494,7 @@ diff --git a/Source/Core/Core/PowerPC/CachedInterpreter/CachedInterpreter.cpp b/
    ApplyRegionStatsRequest();
    PublishRegionStats();
  }
-@@ -10559,6 +10884,7 @@
+@@ -10559,6 +10916,7 @@
      RetryDeferredWasmBlocks(*this);
      ServiceRegionInstalls();
      ApplyRegionStatsRequest();
@@ -471,7 +502,7 @@ diff --git a/Source/Core/Core/PowerPC/CachedInterpreter/CachedInterpreter.cpp b/
      // Start new timing slice
      // Metrics-off runs avoid all per-slice clocks. BeginSlice also resets
      // the exclusive wait/work attribution for this one CoreTiming slice.
-@@ -10615,6 +10941,11 @@
+@@ -10615,6 +10973,11 @@
      } while (m_ppc_state.downcount > 0 && *state_ptr == CPU::State::Running);
  #ifdef __EMSCRIPTEN__
      s_sampling_lookups = false;
@@ -483,7 +514,7 @@ diff --git a/Source/Core/Core/PowerPC/CachedInterpreter/CachedInterpreter.cpp b/
      if (region_stats)
      {
        s_region_stats.total_cycles += static_cast<double>(slice_downcount - m_ppc_state.downcount);
-@@ -10718,6 +11049,8 @@
+@@ -10718,6 +11081,8 @@
  #line 8200
    ppc_state.pc = ppc_state.npc;
    ppc_state.downcount -= operands.downcount;
@@ -492,7 +523,7 @@ diff --git a/Source/Core/Core/PowerPC/CachedInterpreter/CachedInterpreter.cpp b/
    UpdatePerformanceMonitorIfNeeded(operands.downcount, operands.num_load_stores,
                                     operands.num_fp_inst, ppc_state);
    if constexpr (profiled)
-@@ -11563,6 +11896,8 @@
+@@ -11563,6 +11928,8 @@
    const u32 ram_size = system.GetMemory().GetRamSizeReal();
    const bool in_ram = !ppc_state.msr.LE && ram != nullptr && offset < ram_size &&
                        ram_size - offset >= sizeof(u32);
@@ -501,7 +532,7 @@ diff --git a/Source/Core/Core/PowerPC/CachedInterpreter/CachedInterpreter.cpp b/
  
    if (load)
    {
-@@ -11641,6 +11976,8 @@
+@@ -11641,6 +12008,8 @@
    const u32 bytes = (load_half || store_half) ? sizeof(u16) : sizeof(u8);
    const bool in_ram = !ppc_state.msr.LE && ram != nullptr && offset < ram_size &&
                        ram_size - offset >= bytes;
@@ -510,7 +541,7 @@ diff --git a/Source/Core/Core/PowerPC/CachedInterpreter/CachedInterpreter.cpp b/
  
    if (load_byte)
    {
-@@ -11712,6 +12049,8 @@
+@@ -11712,6 +12081,8 @@
    const u32 ram_size = system.GetMemory().GetRamSizeReal();
    const bool in_ram = !ppc_state.msr.LE && ram != nullptr && offset < ram_size &&
                        ram_size - offset >= bytes;
@@ -519,7 +550,7 @@ diff --git a/Source/Core/Core/PowerPC/CachedInterpreter/CachedInterpreter.cpp b/
  
    if (load)
    {
-@@ -12075,6 +12414,8 @@
+@@ -12075,6 +12446,8 @@
    const u32 bytes = load_double ? sizeof(u64) : sizeof(u32);
    const bool in_ram =
        !ppc_state.msr.LE && ram != nullptr && offset < ram_size && ram_size - offset >= bytes;
@@ -528,7 +559,7 @@ diff --git a/Source/Core/Core/PowerPC/CachedInterpreter/CachedInterpreter.cpp b/
  
    if (load_single)
    {
-@@ -13168,6 +13509,8 @@
+@@ -13168,6 +13541,8 @@
    {
      ppc_state.pc = ppc_state.npc;
      ppc_state.downcount -= operands.downcount;
@@ -537,7 +568,7 @@ diff --git a/Source/Core/Core/PowerPC/CachedInterpreter/CachedInterpreter.cpp b/
      UpdatePerformanceMonitorIfNeeded(operands.downcount, operands.num_load_stores,
                                       operands.num_fp_inst, ppc_state);
  #if DOLPHIN_WEB_STATIC_EXIT_LINKS
-@@ -13250,6 +13593,7 @@
+@@ -13250,6 +13625,7 @@
    u32 prefix_count = 0;
    u32 prefix_loadstores = 0;
    u32 prefix_fpinst = 0;
@@ -545,7 +576,7 @@ diff --git a/Source/Core/Core/PowerPC/CachedInterpreter/CachedInterpreter.cpp b/
    bool prefix_ended_block = false;
    for (u32 i = 0; i < code_block.m_num_instructions; ++i)
    {
-@@ -13297,6 +13641,7 @@
+@@ -13297,6 +13673,7 @@
      }
  
      prefix_downcount += op.opinfo->num_cycles;
@@ -553,7 +584,7 @@ diff --git a/Source/Core/Core/PowerPC/CachedInterpreter/CachedInterpreter.cpp b/
      if (op.opinfo->flags & FL_LOADSTORE)
        ++prefix_loadstores;
      if (op.opinfo->flags & FL_USE_FPU)
-@@ -13318,6 +13663,7 @@
+@@ -13318,6 +13695,7 @@
    std::vector<PPCAnalyst::CodeOp> merge_storage;
    bool did_merge = false;
    u32 merge_downcount = 0, merge_loadstores = 0, merge_fpinst = 0, merge_next_pc = 0;
@@ -561,7 +592,7 @@ diff --git a/Source/Core/Core/PowerPC/CachedInterpreter/CachedInterpreter.cpp b/
    bool merge_write_npc = false;
    if (prefix_count < MIN_WASM_PREFIX_INSTRUCTIONS)
    {
-@@ -13362,6 +13708,7 @@
+@@ -13362,6 +13740,7 @@
          merge_downcount = prefix_downcount;  // already includes A's bx cycles
          merge_loadstores = prefix_loadstores;
          merge_fpinst = prefix_fpinst;
@@ -569,7 +600,7 @@ diff --git a/Source/Core/Core/PowerPC/CachedInterpreter/CachedInterpreter.cpp b/
          u32 cur_target = term.branchTo;
          u32 chain_blocks = 0;
          bool chained_ok = false;  // included >=1 target block
-@@ -13395,6 +13742,7 @@
+@@ -13395,6 +13774,7 @@
            }
            // validate + scan this block (same guard set as the original B-walk)
            u32 c_count = 0, c_dc = 0, c_ls = 0, c_fp = 0;
@@ -577,7 +608,7 @@ diff --git a/Source/Core/Core/PowerPC/CachedInterpreter/CachedInterpreter.cpp b/
            bool c_ended = false, c_ok = true;
            for (u32 j = 0; j < c_block.m_num_instructions; ++j)
            {
-@@ -13411,6 +13759,7 @@
+@@ -13411,6 +13791,7 @@
                break;
              }
              c_dc += cop.opinfo->num_cycles;
@@ -585,7 +616,7 @@ diff --git a/Source/Core/Core/PowerPC/CachedInterpreter/CachedInterpreter.cpp b/
              if (cop.opinfo->flags & FL_LOADSTORE)
                ++c_ls;
              if (cop.opinfo->flags & FL_USE_FPU)
-@@ -13465,6 +13814,7 @@
+@@ -13465,6 +13846,7 @@
            merge_loadstores += c_ls;
            merge_fpinst += c_fp;
            merge_downcount += c_dc;
@@ -593,7 +624,7 @@ diff --git a/Source/Core/Core/PowerPC/CachedInterpreter/CachedInterpreter.cpp b/
            if (can_continue)
            {
              for (u32 j = 0; j + 1 < c_count; ++j)
-@@ -13675,6 +14025,7 @@
+@@ -13675,6 +14057,7 @@
    js.downcountAmount = eff_downcount;
    js.numLoadStoreInst = eff_loadstores;
    js.numFloatingPointInst = eff_fpinst;
@@ -601,7 +632,7 @@ diff --git a/Source/Core/Core/PowerPC/CachedInterpreter/CachedInterpreter.cpp b/
    // Merged regions are always a clean fused end block (B covers all of B
    // or ends in a branch) — never the partial non-fused tail below.
    const bool fuse_end_block =
-@@ -13697,14 +14048,16 @@
+@@ -13697,14 +14080,16 @@
        GetWritableCodePtr() + sizeof(AnyCallback));
    Write(RunWasmBlock,
          {handle, block_next_pc, eff_downcount, eff_loadstores, eff_fpinst,
@@ -620,7 +651,7 @@ diff --git a/Source/Core/Core/PowerPC/CachedInterpreter/CachedInterpreter.cpp b/
  #endif
  #line 11084
  
-@@ -13724,6 +14077,7 @@
+@@ -13724,6 +14109,7 @@
      js.compilerPC = op.address;
      js.instructionsLeft = (code_block.m_num_instructions - 1) - i;
      js.downcountAmount += op.opinfo->num_cycles;
@@ -628,7 +659,7 @@ diff --git a/Source/Core/Core/PowerPC/CachedInterpreter/CachedInterpreter.cpp b/
      if (op.opinfo->flags & FL_LOADSTORE)
        ++js.numLoadStoreInst;
      if (op.opinfo->flags & FL_USE_FPU)
-@@ -13748,6 +14102,7 @@
+@@ -13748,6 +14134,7 @@
        if ((jo.memcheck && (op.opinfo->flags & FL_LOADSTORE) != 0) ||
            (!op.canEndBlock && ShouldHandleFPExceptionForInstruction(&op)))
        {
@@ -636,7 +667,7 @@ diff --git a/Source/Core/Core/PowerPC/CachedInterpreter/CachedInterpreter.cpp b/
          const InterpretAndCheckExceptionsOperands operands = {
              {interpreter, Interpreter::GetInterpreterOp(op.inst), js.compilerPC, op.inst},
              power_pc,
-@@ -13763,6 +14118,7 @@
+@@ -13763,6 +14150,7 @@
          TryWriteOsInterruptFunction(i, power_pc);
          if (!TryWriteDcbxLoop(i, power_pc) && !TryWriteFastInstruction(op, power_pc))
          {
@@ -644,7 +675,7 @@ diff --git a/Source/Core/Core/PowerPC/CachedInterpreter/CachedInterpreter.cpp b/
            const InterpretOperands operands = {interpreter, Interpreter::GetInterpreterOp(op.inst),
                                                js.compilerPC, op.inst};
            Write(op.canEndBlock ? CallbackCast(Interpret<true>) : CallbackCast(Interpret<false>),
-@@ -16186,7 +16542,8 @@
+@@ -16186,7 +16574,8 @@
    {
      auto* const emitted = reinterpret_cast<EndBlockOperands<true>*>(
          GetWritableCodePtr() + sizeof(AnyCallback));
@@ -654,7 +685,7 @@ diff --git a/Source/Core/Core/PowerPC/CachedInterpreter/CachedInterpreter.cpp b/
                             js.curBlock->profile_data.get()});
      if (!HasWriteFailed())
        RegisterStaticExitLinks(&emitted->links);
-@@ -16195,7 +16552,8 @@
+@@ -16195,7 +16584,8 @@
    {
      auto* const emitted = reinterpret_cast<EndBlockOperands<false>*>(
          GetWritableCodePtr() + sizeof(AnyCallback));
@@ -664,7 +695,7 @@ diff --git a/Source/Core/Core/PowerPC/CachedInterpreter/CachedInterpreter.cpp b/
      if (!HasWriteFailed())
        RegisterStaticExitLinks(&emitted->links);
    }
-@@ -16206,12 +16564,14 @@
+@@ -16206,12 +16596,14 @@
  {
    if (IsProfilingEnabled())
    {
@@ -681,7 +712,7 @@ diff --git a/Source/Core/Core/PowerPC/CachedInterpreter/CachedInterpreter.cpp b/
    }
  }
  
-@@ -16334,6 +16694,7 @@
+@@ -16334,6 +16726,7 @@
    js.numLoadStoreInst = 0;
    js.numFloatingPointInst = 0;
    js.curBlock = b;
@@ -689,7 +720,7 @@ diff --git a/Source/Core/Core/PowerPC/CachedInterpreter/CachedInterpreter.cpp b/
  
    auto& interpreter = m_system.GetInterpreter();
    auto& power_pc = m_system.GetPowerPC();
-@@ -16369,6 +16730,7 @@
+@@ -16369,6 +16762,7 @@
      js.compilerPC = op.address;
      js.instructionsLeft = (code_block.m_num_instructions - 1) - i;
      js.downcountAmount += op.opinfo->num_cycles;
@@ -697,7 +728,7 @@ diff --git a/Source/Core/Core/PowerPC/CachedInterpreter/CachedInterpreter.cpp b/
      if (op.opinfo->flags & FL_LOADSTORE)
        ++js.numLoadStoreInst;
      if (op.opinfo->flags & FL_USE_FPU)
-@@ -16394,6 +16756,7 @@
+@@ -16394,6 +16788,7 @@
        if ((jo.memcheck && (op.opinfo->flags & FL_LOADSTORE) != 0) ||
            (!op.canEndBlock && ShouldHandleFPExceptionForInstruction(&op)))
        {
@@ -705,7 +736,7 @@ diff --git a/Source/Core/Core/PowerPC/CachedInterpreter/CachedInterpreter.cpp b/
          const InterpretAndCheckExceptionsOperands operands = {
              {interpreter, Interpreter::GetInterpreterOp(op.inst), js.compilerPC, op.inst},
              power_pc,
-@@ -16409,6 +16772,7 @@
+@@ -16409,6 +16804,7 @@
          TryWriteOsInterruptFunction(i, power_pc);
          if (!TryWriteDcbxLoop(i, power_pc) && !TryWriteFastInstruction(op, power_pc))
          {

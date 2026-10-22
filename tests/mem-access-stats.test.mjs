@@ -23,7 +23,8 @@ const m = core?.module;
 const FIELDS = ["guestInstructions",
   "intLoad", "intStore", "fpLoad", "fpStore", "psqLoad", "psqStore",
   "slowIntLoad", "slowIntStore", "slowFpLoad", "slowFpStore", "slowPsqLoad", "slowPsqStore",
-  "cyclesCovered", "cyclesTotal", "regionAccessesEstimated", "regionInstructionsEstimated", "staticSaturations"];
+  "cyclesCovered", "cyclesTotal", "regionAccessesEstimated", "regionInstructionsEstimated", "staticSaturations",
+  "crWrites", "crReads", "caWrites", "caReads"]; // the last four in v1's spares
 
 // reset >= 0 asks for a reset at the next slice boundary; the Node core has
 // no CPU loop, so the test applies it (serviceRegions) and publishes.
@@ -33,7 +34,7 @@ function memStats(reset = -1, { boundary = false } = {}) {
   m._DolphinWeb_AotPublishStatsForTest();
   const head = new Uint32Array(m.HEAPU8.buffer, p, 4);
   const f = new Float64Array(m.HEAPU8.buffer, p + 16, 22);
-  return { version: head[0], sizeBytes: head[1], on: head[2], reserved: head[3], ...Object.fromEntries(FIELDS.map((n, i) => [n, f[i]])), spare: Array.from(f.subarray(18)) };
+  return { version: head[0], sizeBytes: head[1], on: head[2], reserved: head[3], ...Object.fromEntries(FIELDS.map((n, i) => [n, f[i]])) };
 }
 
 test("layout v1: 192 bytes, off until a reset reaches a slice boundary, then on and zero", { skip }, () => {
@@ -43,7 +44,6 @@ test("layout v1: 192 bytes, off until a reset reaches a slice boundary, then on 
   const after = memStats(-1, { boundary: true });
   assert.equal(after.on, 1);
   for (const n of FIELDS) assert.equal(after[n], 0, n);
-  assert.deepEqual(after.spare, [0, 0, 0, 0]);
 });
 
 const D = (op, rd = 3, ra = 1) => ((op << 26) | (rd << 21) | (ra << 16)) >>> 0;
@@ -120,7 +120,7 @@ test("regions add their cycles times their code's static accesses and instructio
     `accesses per instruction ${s.regionAccessesEstimated / s.regionInstructionsEstimated} vs ${accesses}/${words}`);
   // No block path and no slice here: nothing counted, no slow access (the
   // stack is in MEM1).
-  for (const n of ["guestInstructions", "intLoad", "intStore", "cyclesCovered", "cyclesTotal", "slowIntLoad", "slowIntStore", "staticSaturations"]) {
+  for (const n of ["guestInstructions", "intLoad", "intStore", "cyclesCovered", "cyclesTotal", "slowIntLoad", "slowIntStore", "staticSaturations", "crWrites", "crReads", "caWrites", "caReads"]) {
     assert.equal(s[n], 0, n);
   }
 

@@ -276,6 +276,10 @@ boundary, so read it twice.
   execution). They include those of regions.
 - **Regions**: their cycles times their code's static accesses and
   instructions per cycle, computed at install.
+- **Flags** (v1's spares, offsets 160 to 184): block instructions that write
+  a CR field, read one, set XER[CA], read it (the analyzer's `crOut`, `crIn`,
+  `outputCA`, `wantsCA`), for the lazy-CR lever
+  (research/deep-cr-flags.md). Blocks only, like the accesses.
 
 Cost with stats off: one load and branch per block end. Tests:
 `tests/mem-access-stats.test.mjs` (the Node core has no CachedInterpreter
