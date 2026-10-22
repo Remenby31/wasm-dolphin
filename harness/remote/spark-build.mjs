@@ -18,7 +18,7 @@
 // (sources fetched again, every file compiled: ~7 min).
 //   node harness/remote/spark-build.mjs <commit> [--jobs 16]
 import { spawnSync } from "node:child_process";
-import { cpSync, existsSync, mkdirSync, renameSync, rmSync, writeFileSync } from "node:fs";
+import { cpSync, existsSync, mkdirSync, readFileSync, renameSync, rmSync, writeFileSync } from "node:fs";
 import os from "node:os";
 import path from "node:path";
 
@@ -45,7 +45,17 @@ const run = (cmd, args, cwd) => {
   if (r.status !== 0) throw new Error(`${cmd} ${args[0]}: exit ${r.status}`);
 };
 
-if (existsSync(path.join(wt, "cores", "dolphin", "dolphin-core-upstream.wasm"))) {
+// Built on the bench: an exported tree (builtOn spark), or an older
+// per-commit worktree whose cores/ --install changed. Not a mere wasm: every
+// checkout carries the committed CI core.
+export function builtOnBench(dir) {
+  if (!existsSync(path.join(dir, "cores", "dolphin", "dolphin-core-upstream.wasm"))) return false;
+  try { if (JSON.parse(readFileSync(path.join(dir, ".harness-identity.json"), "utf8")).builtOn === "spark") return true; } catch {}
+  if (!existsSync(path.join(dir, ".git"))) return false;
+  const r = spawnSync("git", ["-C", dir, "status", "--porcelain", "--", "cores"], { encoding: "utf8" });
+  return r.status === 0 && r.stdout.trim() !== "";
+}
+if (builtOnBench(wt)) {
   console.log(`[spark-build] already built: --candidate spark:${commit}`);
   process.exit(0);
 }
