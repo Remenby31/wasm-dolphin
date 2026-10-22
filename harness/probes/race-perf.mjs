@@ -190,10 +190,12 @@ async function measure(session, o) {
     // window (its GPU readbacks never weigh on the speed), before the stats.
     let uniqueFrames = null;
     if (o.uniqueFrames) {
+      // Off until now: no readback may have happened (readbacksBefore 0).
+      const before = await workerRequest(page, "validationUniqueFrames", { action: "status" }, 10000);
       const started = await workerRequest(page, "validationUniqueFrames", { action: "start" }, 10000);
       if (started?.started) {
         await new Promise((r) => setTimeout(r, o.uniqueFrames * 1000));
-        uniqueFrames = await workerRequest(page, "validationUniqueFrames", { action: "stop" }, 20000);
+        uniqueFrames = { ...(await workerRequest(page, "validationUniqueFrames", { action: "stop" }, 20000)), readbacksBefore: before?.readbacksTotal ?? null };
       } else {
         uniqueFrames = { error: started?.error ?? "unique-frame counter did not start" };
       }

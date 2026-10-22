@@ -1147,7 +1147,11 @@ function readbackWgpuPresentSource() {
 // of the presented WebGPU rectangle read back and hashed, at each present
 // while the harness has the counter on.
 const harnessUniqueFrames = createUniqueFrameCounter();
+// Readbacks done since the worker started: 0 as long as the counter was
+// never on (the harness checks it before starting the counter).
+let harnessUniqueReadbacks = 0;
 function readbackWgpuPresentRowsHash() {
+  harnessUniqueReadbacks += 1;
   const shown = wgpuPresentedSource;
   const entry = shown?.textureId ? webGpuObjects.textures.get(shown.textureId) : null;
   if (!entry || !renderGpu || !shown.rect) throw new Error("no presented WebGPU texture to sample");
@@ -1176,7 +1180,8 @@ async function harnessUniqueFramesRequest({ action } = {}) {
     harnessUniqueFrames.start();
     return { started: true };
   }
-  if (action === "stop") return harnessUniqueFrames.stop();
+  if (action === "stop") return { ...(await harnessUniqueFrames.stop()), readbacksTotal: harnessUniqueReadbacks };
+  if (action === "status") return { active: harnessUniqueFrames.active, readbacksTotal: harnessUniqueReadbacks };
   return { error: `unique frames: action ${action}` };
 }
 
