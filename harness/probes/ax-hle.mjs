@@ -27,7 +27,7 @@ import { pathToFileURL } from "node:url";
 import { parseArgs } from "node:util";
 
 import { ensureServer, loadHarnessState, REPO_ROOT, workerRequest } from "../lib/browser.mjs";
-import { calmThenLock, loadGaveUp, waitForLoad } from "../lib/env.mjs";
+import { calmLock, loadGaveUp } from "../lib/env.mjs";
 import { PRESETS } from "../lib/matrix.mjs";
 import { acquirePerfLock } from "../lib/perf-lock.mjs";
 import { chromeInfo, probeOutDir } from "../lib/probe-out.mjs";
@@ -44,8 +44,8 @@ async function readAx(page, reset = -1) {
   return consistentAxRead(decodeAxStats(r.bytes), decodeAxStats(r.again));
 }
 
-async function measureRun(o, server) {
-  const loadGate = await waitForLoad({ maxLoad: o.maxLoad, waitSec: o.loadWait, log: (m) => console.log(`[ax-hle] ${m}`) });
+// loadGate: the load before the run (calmLock: never waited for under the lock).
+async function measureRun(o, server, loadGate) {
   const record = { loadGate };
   if (loadGaveUp(loadGate)) return record;
   const routes = o.state ? { [STATE_ROUTE]: o.state } : {};
@@ -117,14 +117,14 @@ async function main() {
   };
   const calmWait = values["calm-wait"] == null ? lockWait : num(values, "calm-wait", { min: 0 });
   const log = (m) => console.log(`[ax-hle] ${m}`);
-  const releaseLock = await calmThenLock({ maxLoad: o.maxLoad, calmWait, log: (m) => log(`before the lock: ${m}`), acquire: () => acquirePerfLock({ name: `harness ax-hle (${REPO_ROOT})`, waitSec: lockWait, log }) });
+  const lock = await calmLock({ maxLoad: o.maxLoad, calmWait, log: (m) => log(`before the lock: ${m}`), acquire: () => acquirePerfLock({ name: `harness ax-hle (${REPO_ROOT})`, waitSec: lockWait, log }) });
   const outDir = probeOutDir("ax-hle", o.iso, values.out);
   const server = await ensureServer({ port: o.port, root: REPO_ROOT });
   const records = [];
   let gaveUp = null;
   try {
     for (let run = 1; run <= o.runs; run += 1) {
-      const r = await measureRun(o, server);
+      const r = await measureRun(o, server, await lock.waitCalmUnlocked({ waitSec: o.loadWait }));
       records.push(r);
       writeFileSync(path.join(outDir, `run${run}.json`), JSON.stringify(r, null, 1) + "\n");
       gaveUp = loadGaveUp(r.loadGate);
@@ -133,7 +133,7 @@ async function main() {
     }
   } finally {
     await server.stop();
-    releaseLock();
+    lock.release();
   }
   const summary = {
     probe: "ax-hle", at: new Date().toISOString(), chrome: chromeInfo(), served: server.identity,
