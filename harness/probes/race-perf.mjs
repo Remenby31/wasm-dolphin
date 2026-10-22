@@ -153,7 +153,7 @@ export function rendererThreads(profileDir) {
 }
 
 // Load the scene, hold the key, settle, then a window with no page call.
-async function measure(session, o) {
+export async function measure(session, o) {
   const { page } = session;
   const loaded = await loadHarnessState(page, session.url);
   if (!loaded?.loaded) throw new Error(`savestate load failed: ${JSON.stringify(loaded)}`);
