@@ -32,25 +32,56 @@ export function loadAllowlist(path = DEFAULT_ALLOWLIST) {
   return list;
 }
 
-// The allowed keys of one INI text, as the INI the core embeds, or null when
-// none is there. A later line of the same key wins, as in Dolphin's IniFile.
-export function filterIni(text, allowlist) {
-  const wanted = new Map(allowlist.keys.map((k) => [`${k.section}\u0000${k.key}`, k]));
-  const found = new Map();
+// One INI line as Common::IniFile::Load reads it: a section header when the
+// untrimmed line starts with '[' (the name runs to the first ']', untrimmed;
+// no ']', no header), else a key line: '#' first is a comment, '$' '+' '*'
+// first or no '=' a raw line, otherwise key = trimmed text before the first
+// '=', value = trimmed text after it without surrounding quotes.
+function readIni(text) {
+  const out = [];
   let section = null;
-  for (const raw of text.replace(/\r\n?/g, "\n").split("\n")) {
-    const line = raw.trim();
-    if (!line || line.startsWith("#") || line.startsWith(";")) continue;
-    const header = /^\[([^\]]+)\]$/.exec(line);
-    if (header) {
-      section = header[1];
+  const lines = text.replace(/^\uFEFF/, "").split("\n");
+  for (let raw of lines) {
+    if (raw.endsWith("\r")) raw = raw.slice(0, -1);
+    if (!raw) continue;
+    if (raw[0] === "[") {
+      const end = raw.indexOf("]");
+      if (end >= 0) section = raw.slice(1, end);
       continue;
     }
-    const eq = line.indexOf("=");
-    if (section === null || eq < 0) continue;
-    const key = line.slice(0, eq).trim();
-    const id = `${section}\u0000${key}`;
-    if (wanted.has(id)) found.set(id, line.slice(eq + 1).trim());
+    if (section === null || raw[0] === "#" || "$+*".includes(raw[0])) continue;
+    const eq = raw.indexOf("=");
+    if (eq < 0) continue;
+    const key = raw.slice(0, eq).trim();
+    let value = raw.slice(eq + 1).trim();
+    if (value.length >= 2 && value.startsWith('"') && value.endsWith('"')) value = value.slice(1, -1);
+    out.push({ section, key, value });
+  }
+  return out;
+}
+
+// GameConfigLoader maps the legacy section "Core" (exact) and "Dolphin.Core"
+// (System.Section, Main's system is named "Dolphin") to Main/Core. The filter
+// keeps a key only under those exact spellings. A line whose key matches an
+// allowlisted key in any other spelling or section (core, mmu, [Main.Core],
+// [Video]...) stops the build: Dolphin's handling of those depends on the
+// order the disc's files merge in, so a person decides.
+const SECTION_SPELLINGS = { Core: ["Core", "Dolphin.Core"] };
+
+// The allowed keys of one INI text, as the INI the core embeds, or null when
+// none is there. A later line of the same key wins, as in Dolphin's IniFile.
+export function filterIni(text, allowlist, name = "<ini>") {
+  const found = new Map();
+  for (const { section, key, value } of readIni(text)) {
+    for (const k of allowlist.keys) {
+      if (key.toLowerCase() !== k.key.toLowerCase()) continue;
+      const spellings = SECTION_SPELLINGS[k.section] ?? [k.section];
+      if (key === k.key && spellings.includes(section)) {
+        found.set(`${k.section}\u0000${k.key}`, value);
+      } else {
+        throw new Error(`${name}: "${key}" under [${section}] is not a spelling the filter knows for [${k.section}] ${k.key}`);
+      }
+    }
   }
   if (!found.size) return null;
   let out = "";
@@ -76,7 +107,7 @@ export function buildGameSettings(sourceDir, outputDir, allowlist = loadAllowlis
   const written = [];
   const names = readdirSync(sourceDir).filter((n) => n.endsWith(".ini") && discIds.test(n)).sort();
   for (const name of names) {
-    const out = filterIni(readFileSync(join(sourceDir, name), "utf8"), allowlist);
+    const out = filterIni(readFileSync(join(sourceDir, name), "utf8"), allowlist, name);
     if (out === null) continue;
     writeFileSync(join(outputDir, name), out);
     written.push(name);

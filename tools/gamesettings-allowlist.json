@@ -1,7 +1,7 @@
 {
   "version": 1,
   "about": "Keys of Dolphin's per-game settings (vendor/dolphin/Data/Sys/GameSettings) that the core build keeps and embeds at /dolphin-sys/GameSettings (tools/gamesettings-filter.mjs). Every other key is left out: add one only with its reason and, when it can change speed or what the game shows, a measurement.",
-  "discIds": "^[GDP]",
+  "discIds": "^[GDPU]",
   "keys": [
     {
       "section": "Core",

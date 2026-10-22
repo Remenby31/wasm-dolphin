@@ -17,8 +17,10 @@ Every GPU→CPU read of the hardware renderer returns zeros:
 
 Two things hide the bug:
 
-1. **No GameINI ships with the core.** `Data/Sys/GameSettings` is not in the
-   virtual file system, so Dolphin's defaults apply to every disc:
+1. **The core ships no rendering GameINI key.** Since patch 0097 it embeds
+   only the allowlisted keys of `Data/Sys/GameSettings`
+   (`tools/gamesettings-allowlist.json`: `[Core] MMU`), so for the video
+   settings Dolphin's defaults apply to every disc:
    `EFBAccessEnable=false` (peeks are skipped and read 0 on any backend),
    `EFBToTextureEnable=true` and `XFBToTextureEnable=true` (copies stay on the
    GPU). Upstream turns EFB access on for 13 GameCube IDs (`GMS`, `GZL`,

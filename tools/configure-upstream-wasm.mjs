@@ -173,6 +173,7 @@ const wasmDebugProbeFlags = "-O0 -fno-lto";
 // /dolphin-sys/GameSettings where GameConfigLoader looks for them.
 const gameSettingsDir = resolve(buildDir, "gamesettings");
 const gameSettingsFiles = buildGameSettings(resolve(sourceDir, "Data/Sys/GameSettings"), gameSettingsDir);
+if (!gameSettingsFiles.length) throw new Error("gamesettings: no disc file kept; is vendor/dolphin/Data/Sys/GameSettings there?");
 console.log(`gamesettings: ${gameSettingsFiles.length} disc files with allowlisted keys`);
 
 const cmakeArgs = [

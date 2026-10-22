@@ -3,13 +3,14 @@
 //
 // Dolphin's per-game settings in the core (patch 0097): the build keeps the
 // GameCube discs' INIs with only the allowlisted keys and embeds them where
-// GameConfigLoader reads them. Synthetic discs only (TST01, ...).
+// GameConfigLoader reads them. Synthetic discs only (TST01, TSTE01, ...).
 
 import assert from "node:assert/strict";
 import { mkdtempSync, readFileSync, readdirSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import test from "node:test";
+import { fileURLToPath } from "node:url";
 
 import { buildGameSettings, filterIni, loadAllowlist } from "../tools/gamesettings-filter.mjs";
 import { loadAotCore } from "./helpers/aot-core-equivalence.mjs";
@@ -37,10 +38,27 @@ test("the filter keeps only allowlisted keys, LF, in allowlist order", () => {
   assert.equal(filterIni(FULL, allowlist), "[Core]\nMMU = True\n");
 });
 
-test("a file with no allowlisted key gives nothing; comments, codes and other sections never pass", () => {
+test("a file with no allowlisted key gives nothing; comments, codes and other keys never pass", () => {
   assert.equal(filterIni("[Core]\n[OnFrame]\n[ActionReplay]\n$Code\n01234567 89ABCDEF\n", allowlist), null);
-  assert.equal(filterIni("MMU = True\n[Video_Settings]\nMMU = True\n", allowlist), null, "MMU outside [Core]");
-  assert.equal(filterIni("[Core]\n# MMU = True\n", allowlist), null, "a commented key");
+  assert.equal(filterIni("[Core]\n# MMU = True\n", allowlist), null, "a comment");
+  assert.equal(filterIni("[ActionReplay]\n$MMU = True\n", allowlist), null, "a raw code line");
+  assert.equal(filterIni("MMU = True\n", allowlist), null, "no section yet: Dolphin ignores it");
+});
+
+test("section headers as Dolphin reads them: untrimmed '[' first, the name up to the first ']'", () => {
+  assert.equal(filterIni("[Core] ; x\nMMU = True\n", allowlist), "[Core]\nMMU = True\n", "text after ']' ignored");
+  assert.equal(filterIni("[Core]\n  [Video_Settings]\nMMU = True\n", allowlist), "[Core]\nMMU = True\n", "an indented line is no header");
+  assert.throws(() => filterIni("[Core]\n[Video_Settings] ; x\nMMU = True\n", allowlist), /Video_Settings/, "a header with text after ']' still starts a section");
+});
+
+test("[Dolphin.Core] is the other spelling Dolphin maps to Main/Core; values lose their quotes", () => {
+  assert.equal(filterIni('[Dolphin.Core]\nMMU = "False"\n', allowlist), "[Core]\nMMU = False\n");
+});
+
+test("any other spelling or section of an allowlisted key stops the build", () => {
+  for (const ini of ["[core]\nMMU = False\n", "[Core]\nmmu = False\n", "[Main.Core]\nMMU = False\n", "[Video]\nMMU = True\n"]) {
+    assert.throws(() => filterIni(ini, allowlist, "TST99.ini"), /TST99\.ini/, JSON.stringify(ini));
+  }
 });
 
 test("a later line of the same key wins, as in Dolphin's IniFile", () => {
@@ -52,7 +70,7 @@ test("the build is deterministic: same sources, same files and bytes, in name or
   writeFileSync(join(src, "TST02.ini"), "[Core]\nCPUThread = False\n");
   writeFileSync(join(src, "TST01.ini"), FULL);
   writeFileSync(join(src, "RST01.ini"), "[Core]\nMMU = True\n"); // not a disc of the list
-  writeFileSync(join(src, "TST01r1.ini"), "[Core]\r\nMMU = False\r\n");
+  writeFileSync(join(src, "TST01r1.ini"), "﻿[Core]\r\nMMU = False\r\n");
   const runs = [0, 1].map(() => {
     const out = mkdtempSync(join(tmpdir(), "gs-out-"));
     const written = buildGameSettings(src, out, allowlist);
@@ -69,21 +87,23 @@ test("the shipped allowlist: version 1, a reason per key, GameCube discs only", 
   assert.equal(shipped.version, 1);
   assert.ok(shipped.keys.length > 0);
   for (const k of shipped.keys) assert.ok(k.section && k.key && k.why.length > 20, `${k.section}.${k.key} has a reason`);
-  assert.equal(shipped.discIds, "^[GDP]");
+  assert.equal(shipped.discIds, "^[GDPU]");
 });
 
-test("Dolphin's own folder gives only allowlisted keys", () => {
-  const src = new URL("../vendor/dolphin/Data/Sys/GameSettings", import.meta.url);
+test("Dolphin's own folder passes the filter and gives only allowlisted keys", (t) => {
+  const src = fileURLToPath(new URL("../vendor/dolphin/Data/Sys/GameSettings", import.meta.url));
   let entries;
   try {
     entries = readdirSync(src);
   } catch {
-    return; // no vendor tree
+    t.skip("no vendor tree");
+    return;
   }
   assert.ok(entries.length > 0);
   const out = mkdtempSync(join(tmpdir(), "gs-dolphin-"));
   const shipped = loadAllowlist();
-  const written = buildGameSettings(src.pathname, out, shipped);
+  const written = buildGameSettings(src, out, shipped);
+  assert.ok(written.length > 0);
   const allowed = new Set(shipped.keys.map((k) => k.key));
   for (const name of written) {
     for (const line of readFileSync(join(out, name), "utf8").split("\n")) {
@@ -96,15 +116,23 @@ test("Dolphin's own folder gives only allowlisted keys", () => {
 const core = await loadAotCore();
 const coreSkip = core && typeof core.module._GameConfigMmuForTest === "function" ? false : "the core predates 0097 (CI builds this branch's core)";
 
-test("the core's game config applies an embedded disc INI: MMU = True gives the MMU mode", { skip: coreSkip }, () => {
+test("the core embeds the filtered INIs, and its game config applies them in Dolphin's order", { skip: coreSkip }, () => {
   const m = core.module;
-  try {
-    m.FS.mkdirTree("/dolphin-sys/GameSettings");
-  } catch {
-    // already there
+  const dir = "/dolphin-sys/GameSettings";
+  const embedded = m.FS.readdir(dir).filter((n) => n.endsWith(".ini"));
+  assert.ok(embedded.length > 0, "the build embedded the filtered INIs");
+  for (const name of embedded) {
+    assert.match(m.FS.readFile(`${dir}/${name}`, { encoding: "utf8" }), /^\[Core\]\nMMU = (True|False)\n$/, name);
   }
-  m.FS.writeFile("/dolphin-sys/GameSettings/TST01.ini", "[Core]\nMMU = True\n");
-  const mmu = (id) => m.ccall("GameConfigMmuForTest", "number", ["string", "number"], [id, 0]);
-  assert.equal(mmu("TST01"), 1, "the disc's INI sets the MMU");
-  assert.equal(mmu("TST02"), 0, "a disc without an INI keeps the default");
+  // Synthetic discs: ID3, then ID6, then ID6rN, the later file winning.
+  const fixtures = { "TST.ini": "[Core]\nMMU = True\n", "TSTE01r1.ini": "[Core]\nMMU = False\n" };
+  for (const [name, text] of Object.entries(fixtures)) m.FS.writeFile(`${dir}/${name}`, text);
+  try {
+    const mmu = (id, revision) => m.ccall("GameConfigMmuForTest", "number", ["string", "number"], [id, revision]);
+    assert.equal(mmu("TSTE01", 0), 1, "the ID3 file sets the MMU");
+    assert.equal(mmu("TSTE01", 1), 0, "revision 1's file turns it off again");
+    assert.equal(mmu("XYZE01", 0), 0, "a disc without an INI keeps the default");
+  } finally {
+    for (const name of Object.keys(fixtures)) m.FS.unlink(`${dir}/${name}`);
+  }
 });
