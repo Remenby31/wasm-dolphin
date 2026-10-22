@@ -15,6 +15,7 @@
 //     [--max-load L] [--load-wait 300] [--lock-wait 1800]
 //     [--pcsample [periodMs]] [--symbols functions.json] [--out dir]
 //     [--region-sample N [--region-secs 10]] [--idle-secs N] [--baseline-query "..."]
+//     [--calm-wait S (default --lock-wait): wait for load ≤ --max-load before taking the lock]
 //     [--chrome-args "--flag …"] [--baseline-chrome-args "--flag …"]
 //
 // - Pairing and interleaving: run i measures both sides back to back, the
@@ -75,7 +76,7 @@ import { PRESETS } from "../lib/matrix.mjs";
 import { claim, release } from "../lib/ownership.mjs";
 import { acquirePerfLock } from "../lib/perf-lock.mjs";
 import { openSession, rebootSession } from "../lib/session.mjs";
-import { waitForLoad } from "../lib/env.mjs";
+import { calmThenLock, loadGaveUp, waitForLoad } from "../lib/env.mjs";
 import { describe, median, percentile, round } from "../lib/stats.mjs";
 import { coreStats, hitchList, mergeTimeline, presentationStats } from "../lib/timeline.mjs";
 import { consistentRead, decodeRegionStats, poolStats, regionShares, topMisses } from "../lib/jit-region-stats.mjs";
@@ -348,7 +349,7 @@ async function main() {
       iso: { type: "string" }, state: { type: "string" },
       baseline: { type: "string" }, candidate: { type: "string" },
       config: { type: "string", default: "wgpu" }, query: { type: "string" },
-      runs: { type: "string", default: "4" }, "min-pairs": { type: "string" }, "load-wait": { type: "string", default: "300" }, warmup: { type: "string", default: "25" }, secs: { type: "string", default: "20" },
+      runs: { type: "string", default: "4" }, "min-pairs": { type: "string" }, "load-wait": { type: "string", default: "300" }, "calm-wait": { type: "string" }, warmup: { type: "string", default: "25" }, secs: { type: "string", default: "20" },
       hold: { type: "string", default: "KeyX" }, warm: { type: "boolean", default: false },
       "max-load": { type: "string" }, "lock-wait": { type: "string", default: "1800" },
       pcsample: { type: "string" }, symbols: { type: "string" }, "region-sample": { type: "string" }, "region-secs": { type: "string", default: "10" }, "idle-secs": { type: "string" }, "baseline-query": { type: "string" }, "chrome-args": { type: "string" }, "baseline-chrome-args": { type: "string" },
@@ -400,7 +401,12 @@ async function main() {
   process.once("exit", dropExports);
   sides.candidate = { ...resolveSide("candidate", values.candidate), chromeArgs };
   if (values.baseline) sides.baseline = { ...resolveSide("baseline", values.baseline), query: baselineQuery, chromeArgs: baselineChromeArgs };
-  const releaseLock = await acquirePerfLock({ name: `harness race-perf (${REPO_ROOT})`, waitSec: lockWait, log: (m) => console.log(`[race-perf] ${m}`) });
+  // A calm machine first (--calm-wait, default --lock-wait), then the lock.
+  const calmWait = values["calm-wait"] == null ? lockWait : num(values, "calm-wait", { min: 0 });
+  const releaseLock = await calmThenLock({
+    maxLoad: o.maxLoad, calmWait, log: (m) => console.log(`[race-perf] before the lock: ${m}`),
+    acquire: () => acquirePerfLock({ name: `harness race-perf (${REPO_ROOT})`, waitSec: lockWait, log: (m) => console.log(`[race-perf] ${m}`) })
+  });
   // A local-only disc never writes into the repo.
   const stamp = `${new Date().toISOString().replace(/[:.]/g, "-").slice(0, 19)}-${process.pid}-${randomBytes(3).toString("hex")}`;
   const outDir = values.out ? path.resolve(values.out) : localOnly
@@ -411,13 +417,16 @@ async function main() {
   claim(outDir, REPO_ROOT, "results");
 
   const records = [];
+  let gaveUp = null;
   try {
-    for (let run = 1; run <= o.runs; run += 1) {
+    for (let run = 1; run <= o.runs && !gaveUp; run += 1) {
       const record = { run };
       for (const name of sideOrder(run).filter((n) => sides[n])) {
         record[name] = await measureSide(sides[name], o);
         const r = record[name];
         console.log(`[race-perf] run ${run} ${name}: ${r.error ?? brief(r.cold)}${r.warm ? ` | warm: ${brief(r.warm)}` : ""}`);
+        gaveUp = loadGaveUp(r.loadGate);
+        if (gaveUp) { console.warn(`[race-perf] run ${run} ${name}: ${gaveUp}`); break; }
       }
       writeFileSync(path.join(outDir, `run${run}.json`), JSON.stringify(record, null, 1) + "\n");
       records.push(record);
@@ -456,7 +465,7 @@ async function main() {
     chrome,
     iso: path.basename(iso), state: path.basename(state), query: o.query, baselineQuery: sides.baseline?.query ?? null, warmupSec: o.warmup, secs: o.secs, hold: o.hold, maxLoad: o.maxLoad,
     sides: Object.fromEntries(Object.entries(sides).map(([n, s]) => [n, s.label])),
-    runs: runsDone.length, failed,
+    runs: runsDone.length, failed, gaveUp,
     candidate: { cold: summarize("candidate", "cold"), warm: summarize("candidate", "warm") },
     baseline: sides.baseline ? { cold: summarize("baseline", "cold"), warm: summarize("baseline", "warm") } : null,
     change: sides.baseline ? pairedSpeedChange(runsDone.filter((r) => good(r.baseline) && good(r.candidate)), { minPairs: o.minPairs }) : null,
