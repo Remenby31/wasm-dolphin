@@ -526,6 +526,27 @@ test("ttff memory guard: RSS per process type of one profile, and the reason a c
   assert.match(row.why, /run 1 : cut: Chrome at 9842 MB > 9000 MB \(browser 7436 MB/);
 });
 
+test("aot-warm-launch: time to full speed from the per-second speed series, one slow second restarting the count", async () => {
+  const { fullSpeedAt, speedSeries } = await import("../harness/lib/timeline.mjs");
+  // 60 VI outputs per host second; the emulated rate follows `speeds`.
+  const vi = [];
+  let ticks = 0;
+  const speeds = [100, 100, 80, 100, 100, 100, 100, 100, 62, 62];
+  speeds.forEach((pct, second) => {
+    for (let k = 0; k < 60; k += 1) {
+      vi.push({ t: 1000 * second + (1000 * k) / 60, ticks });
+      ticks += (pct / 100) * (486e6 / 60);
+    }
+  });
+  vi.push({ t: 1000 * speeds.length, ticks });
+  const series = speedSeries(vi, 486e6);
+  assert.deepEqual(series.map((x) => Math.round(x.speed)), speeds);
+  assert.equal(fullSpeedAt(series), 3000, "the 80 % second at 2 s moves it to 3 s");
+  assert.equal(fullSpeedAt(series.slice(0, 7)), null, "four seconds after the dip are not five");
+  assert.equal(fullSpeedAt([]), null);
+  assert.deepEqual(speedSeries(vi, 0), []);
+});
+
 test("aot-warm-launch: a seeded profile is measured on the origin it was seeded on", async (t) => {
   const { SEED_FILE, seedOriginCheck } = await import("../harness/lib/seed-origin.mjs");
   const dir = mkdtempSync(path.join(os.tmpdir(), "seed-origin-test-"));
