@@ -289,7 +289,11 @@ function harnessJitRegionStats({ sampleEvery } = {}) {
   // layoutRefused: queued regions refused for another heap layout (0078), null
   // with an older core.
   const layoutRefused = moduleInstance._DolphinWeb_AotLayoutRefused ? (moduleInstance._DolphinWeb_AotLayoutRefused() >>> 0) + aotLayoutSkipped : null;
-  return { bytes: copy(), again: copy(), installSamples: harnessRegionInstallSamples(heap), layoutRefused };
+  // layoutHash: this launch's heap layout as the region modules see it (the
+  // hash the cache is keyed on, 0078); it varies between launches of one
+  // build, and with it the host work per guest cycle (bench, 2026-10-22).
+  const layoutHash = moduleInstance._DolphinWeb_AotLayoutHash ? moduleInstance._DolphinWeb_AotLayoutHash() >>> 0 : null;
+  return { bytes: copy(), again: copy(), installSamples: harnessRegionInstallSamples(heap), layoutRefused, layoutHash };
 }
 // AX HLE timing (patch 0099, harness/lib/ax-hle-stats.mjs): reset >= 0
 // zeroes and turns the counters on from the next mail; copied twice so the

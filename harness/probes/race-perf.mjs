@@ -266,7 +266,10 @@ export function regionRecord(reply) {
   const p4 = regionShares(stats);
   const samples = {
     ...(Array.isArray(reply.installSamples) ? { installSamples: reply.installSamples } : {}),
-    ...(Number.isInteger(reply.layoutRefused) ? { layoutRefused: reply.layoutRefused } : {})
+    ...(Number.isInteger(reply.layoutRefused) ? { layoutRefused: reply.layoutRefused } : {}),
+    // The launch's heap layout (hash): it varies between launches, and the
+    // host work per guest cycle with it (bench, 2026-10-22).
+    ...(Number.isInteger(reply.layoutHash) ? { layoutHash: reply.layoutHash } : {})
   };
   return p4.error ? { p4: null, p4Why: p4.error, ...samples } : { p4, p4Raw: stats, ...samples };
 }
