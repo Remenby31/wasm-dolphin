@@ -18,14 +18,18 @@
 // (sources fetched again, every file compiled: ~7 min).
 //   node harness/remote/spark-build.mjs <commit> [--jobs 16]
 import { spawnSync } from "node:child_process";
-import { cpSync, existsSync, mkdirSync, renameSync, rmSync, writeFileSync } from "node:fs";
+import { cpSync, existsSync, mkdirSync, readFileSync, renameSync, rmSync, writeFileSync } from "node:fs";
 import os from "node:os";
 import path from "node:path";
 
 import { acquirePerfLock } from "../lib/perf-lock.mjs";
 import { done, laneLock, LANES, waitTurn } from "./spark-queue.mjs";
 
-const [commit, ...rest] = process.argv.slice(2);
+const [commit, ...args] = process.argv.slice(2);
+// --owner <name>: the agent's worktree (spark-run), for the per-agent cap.
+const ownerAt = args.indexOf("--owner");
+const owner = ownerAt >= 0 ? args[ownerAt + 1] : null;
+const rest = ownerAt >= 0 ? args.filter((_, i) => i !== ownerAt && i !== ownerAt + 1) : args;
 if (!/^[0-9a-f]{40}$/.test(commit ?? "")) throw new Error("usage: spark-build.mjs <full commit sha> [build-core-repro options]");
 const B = path.join(os.homedir(), "salon-bench", "build");
 const clone = path.join(B, "wasm-dolphin");
@@ -45,7 +49,17 @@ const run = (cmd, args, cwd) => {
   if (r.status !== 0) throw new Error(`${cmd} ${args[0]}: exit ${r.status}`);
 };
 
-if (existsSync(path.join(wt, "cores", "dolphin", "dolphin-core-upstream.wasm"))) {
+// Built on the bench: an exported tree (builtOn spark), or an older
+// per-commit worktree whose cores/ --install changed. Not a mere wasm: every
+// checkout carries the committed CI core.
+export function builtOnBench(dir) {
+  if (!existsSync(path.join(dir, "cores", "dolphin", "dolphin-core-upstream.wasm"))) return false;
+  try { if (JSON.parse(readFileSync(path.join(dir, ".harness-identity.json"), "utf8")).builtOn === "spark") return true; } catch {}
+  if (!existsSync(path.join(dir, ".git"))) return false;
+  const r = spawnSync("git", ["-C", dir, "status", "--porcelain", "--", "cores"], { encoding: "utf8" });
+  return r.status === 0 && r.stdout.trim() !== "";
+}
+if (builtOnBench(wt)) {
   console.log(`[spark-build] already built: --candidate spark:${commit}`);
   process.exit(0);
 }
@@ -55,7 +69,7 @@ if (existsSync(path.join(wt, ".git"))) throw new Error(`${wt} is a worktree of a
 run("git", ["fetch", "--quiet", "origin"], clone);
 // Its turn in the bench's queue, then every lane's lock, always in the same
 // order: a build on 16 jobs would disturb a pair in either cluster.
-await waitTurn({ pid: process.pid, kind: "build", name: commit.slice(0, 12), log: (m) => console.log(`[spark-build] ${m}`) });
+await waitTurn({ pid: process.pid, kind: "build", name: commit.slice(0, 12), owner, log: (m) => console.log(`[spark-build] ${m}`) });
 process.once("exit", () => done(process.pid));
 const releases = [];
 for (const dir of LANES.map((l) => laneLock(l))) {
