@@ -25,7 +25,7 @@
       "commit": "01e0577914a75a2569c846778c2f93aa8e6feddd"
     }
   },
-  "patchSeriesSha256": "fd637d08c0db7557f7bd3a82684ab84855ab56a2d910ef6d04079222536f314d",
+  "patchSeriesSha256": "f68f365ec15e9f51b4eb5f6c56efe51a6367dd30c02db1855eae5303a8ce01d6",
   "patches": [
     {
       "order": 1,
@@ -639,9 +639,9 @@
       "order": 77,
       "cwd": ".",
       "hashMode": "lf-normalized",
-      "path": "patches/dolphin-wasm/snapshot/0085-region-recheck-after-invalidation.patch",
-      "size": 3125,
-      "sha256": "e3a6163c1b03814b8461c96a2fdfafc6d173a45b6b0a8084ffe68126fdf3d912"
+      "path": "patches/dolphin-wasm/snapshot/0091-no-wasm-code-under-mmu.patch",
+      "size": 3471,
+      "sha256": "d169775dc85c7e756561439fb1da2f749d3a774f0abd2b0dc0116017ed67a46d"
     },
     {
       "order": 78,

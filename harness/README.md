@@ -96,6 +96,11 @@ node harness/probes/race-perf.mjs --iso ../roms/<disc>.iso --state ../measures/h
 - Load, as in the matrix (`lib/env.mjs`): each side first waits up to
   `--load-wait` s for the 1-minute load to drop under `--max-load` (default
   a quarter of the cores); a window whose median load is above it fails.
+- race-perf and ttff wait for a calm machine (load ≤ `--max-load`) before
+  they take the perf lock, up to `--calm-wait` (default `--lock-wait`); not
+  calm by then, they stop without the lock and without measuring. Under the
+  lock, a run whose load gate does not open within `--load-wait` gives the
+  remaining runs up (`gaveUp` in summary.json) and the lock goes back.
 - The shared perf lock (`~/projects/gc-web-emu/.perf-lock`, PROGRAM.md) is
   taken before the first launch and released on every exit, Ctrl-C
   included; `--lock-wait` bounds the wait (60 s polls). `harness/run ab`
@@ -127,6 +132,14 @@ node harness/probes/race-perf.mjs --iso ../roms/<disc>.iso --state ../measures/h
   the last being the place in the scene whatever the speed, so two runs or
   two sides can be lined up; over 200 the longest are kept, in time order,
   with `count`.
+- `--chrome-args "--flag …"` adds Chromium flags on both sides;
+  `--baseline-chrome-args` replaces them on the baseline side, so one tree is
+  compared with itself under two Chromium configurations (e.g.
+  `--baseline-chrome-args=--js-flags=--no-liftoff`; write a value that
+  starts with `--` after `=`). Headless, debugging and profile flags are
+  refused. The flags are recorded in `summary.json` (`chrome.sideArgs`), and
+  kpi-report never takes such a result as stock Chrome. Each run records
+  `bootMs` (Chrome launch to session ready); `cold.bootMs` per side.
 - Region JIT counters (P4): off by default, the speed windows never carry
   them. With `--region-sample N`, a separate stats window of `--region-secs`
   (default 10) follows each speed window: it resets the core's
@@ -194,12 +207,23 @@ node harness/remote/spark-run.mjs --build <ref>           # its core built on th
   before them timed out. Every job now drops a ticket in
   `~/salon-bench/queue/` (arrival time, its pid) and starts only when no
   older waiting ticket could use a lane it wants and that lane is free; a
-  build wants both. `node harness/remote/spark-queue.mjs list` on the Spark
-  shows the queue. Pairs wait up to 4 h by default (`--lock-wait`). Compare sides of one pair only, never a lane with the
+  build wants both. On the Spark, `node harness/remote/spark-queue.mjs list
+  --eta` shows the queue with each job's estimated start and end (from its
+  race-perf options; ~8 min a build). Pairs wait up to 4 h by default
+  (`--lock-wait`).
+- **Reordering is the judge's call:** `spark-queue.mjs move <name> --after
+  <name|head> --as-judge` renames a waiting ticket between its new
+  neighbours (logged in `queue/moves.log`). A waiting job finds its ticket by
+  its pid at every poll, so it follows the move. Never rename a ticket by
+  hand while a job from before this change waits on it: such a job keeps
+  its old name and would wait for itself. Compare sides of one pair only, never a lane with the
   other. `--chrome-cpus` / `--node-cpus` override the pinning.
 - `--build <ref>` (a commit of the fork) builds its core on the bench with
-  the pinned toolchain (`build-core-repro.mjs --install`, linux-arm64, ~8
-  min) in `~/salon-bench/build/wt/<commit>`, in its turn, holding both
+  the pinned toolchain (`build-core-repro.mjs --install --reset-vendor
+  --ccache`, linux-arm64) in one build checkout, `~/salon-bench/build/work`,
+  whose CMake tree, Dolphin sources and ccache carry over (~7 min cold, 1-3.5
+  min after another commit; the core's bytes do not depend on the path), and
+  exports the tree it serves to `~/salon-bench/build/wt/<commit>`, in its turn, holding both
   lanes' locks (lane `b` also waits while a build of an older harness,
   without a ticket, exists);
   `--candidate spark:<ref>` / `--baseline spark:<ref>` then serve that

@@ -40,6 +40,21 @@ export async function waitForLoad({ maxLoad, waitSec = 60, pollSec = 5, log = ()
   return { load: Math.round(load * 100) / 100, limit, ok: load <= limit };
 }
 
+// Waits for a calm machine first, then takes the perf lock (`acquire`):
+// never hold the lock while waiting on a load that may not come down
+// (2026-10-22, a race-perf held the Mac lock 1 h 52 behind a load of 25
+// from a VM outside the program, blocking the whole queue). Not calm within
+// `calmWait`: refused, no lock taken, nothing measured.
+export async function calmThenLock({ maxLoad, calmWait, acquire, log = () => {}, wait = waitForLoad }) {
+  const calm = await wait({ maxLoad, waitSec: calmWait, pollSec: 30, log });
+  if (!calm.ok) throw new Error(`machine not calm: load ${calm.load} > ${calm.limit} after ${calmWait} s; no lock taken, nothing measured`);
+  return acquire();
+}
+
+// Under the lock, a load gate that did not open (still loaded after
+// --load-wait): the remaining runs are given up, the lock goes back.
+export const loadGaveUp = (gate) => (gate && gate.ok === false ? `load ${gate.load} > ${gate.limit} after --load-wait: remaining runs given up, lock released` : null);
+
 // A run is overloaded when the median 1-minute load during it exceeds the limit.
 export function isOverloaded(cpuSamples, maxLoad) {
   const v = cpuSamples.map((c) => c.load1).filter(Number.isFinite).sort((a, b) => a - b);

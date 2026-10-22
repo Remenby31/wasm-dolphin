@@ -72,7 +72,7 @@ export function trunkSide(r, trunk, { config = null } = {}) {
 
 // Speed measured on this Mac's stock Chrome: an E-core wrapper or extra
 // flags measure something else (the P9 extrapolation).
-export const stockChrome = (json) => !json.chrome || (json.chrome.path === "chrome stable" && !json.chrome.args);
+export const stockChrome = (json) => !json.chrome || (json.chrome.path === "chrome stable" && !json.chrome.args && !Object.keys(json.chrome.sideArgs ?? {}).length);
 
 // Absolute numbers (race speed, p99, shares) come from night measures, run
 // with a load limit of 6 at most (rule of 2026-10-20); day pairs at a higher
