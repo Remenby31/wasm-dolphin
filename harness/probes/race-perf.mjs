@@ -187,6 +187,10 @@ export async function measure(session, o) {
     // just after the window, from node only (no page call inside it).
     if (o.onWindow) await o.onWindow("start", session);
     await readTimeline(page); // drop everything before the window
+    // The emulated time this host-time window covers (judge, 2026-10-22: a
+    // faster side covers more of the scene): core ticks just before and just
+    // after, outside the window.
+    const ticksBefore = (await readCoreProgress(page).catch(() => null))?.coreTicks ?? null;
     const t0 = await page.evaluate(() => performance.timeOrigin + performance.now());
     // The window: node timers only. The rings (VI 8192, presents 16384)
     // hold far more than a window, so nothing is read until it ends.
@@ -210,6 +214,7 @@ export async function measure(session, o) {
     threads.push(rendererThreads(session.profileDir));
     const info = await readFrameInfo(page);
     const progress = await readCoreProgress(page);
+    const ticksAfter = progress?.coreTicks ?? null;
     const timeline = mergeTimeline([chunk]);
     const core = coreStats(timeline, { ticksPerSecond: progress?.coreTicksPerSecond, until: t1 });
     const pres = presentationStats(timeline);
@@ -251,6 +256,9 @@ export async function measure(session, o) {
     const pipeline = regionEnd ? null : await workerRequest(page, "validationReadJitRegionStats", {}, 10000).catch(() => null);
     return {
       windowMs: Math.round(t1 - t0),
+      // Guest seconds this window covered (core ticks / ticks per second);
+      // the reads bracket the window, so a few host ms more than windowMs.
+      guestCovered: guestCovered(ticksBefore, ticksAfter, progress?.coreTicksPerSecond),
       load1: { min: round(Math.min(...loads), 2), median: round(medianLoad, 2), max: round(Math.max(...loads), 2), limit: o.maxLoad },
       overloaded: medianLoad > o.maxLoad,
       complete: timeline.complete,
@@ -288,6 +296,13 @@ export async function measure(session, o) {
 export function withheldOnOverlap(change, overlaps) {
   if (!change || !overlaps.length) return change;
   return { ...change, median: null, withheld: `perf lock overlap: ${overlaps.map((x) => `${x.at}: ${x.why}`).join("; ")}` };
+}
+
+export function guestCovered(before, after, ticksPerSecond) {
+  const n = (v) => (typeof v === "bigint" ? Number(v) : typeof v === "string" ? Number(v) : v);
+  const b = n(before), a = n(after), tps = n(ticksPerSecond);
+  if (![b, a, tps].every(Number.isFinite) || tps <= 0 || a < b) return null;
+  return { ticks: a - b, seconds: Math.round(((a - b) / tps) * 1000) / 1000 };
 }
 
 // p4 of one stats window, or null and why (not asked, no export, torn or
@@ -600,6 +615,7 @@ async function main() {
       viP99Ms: describe(m.map((x) => x.viIntervalMs.p99)), presentP99Ms: describe(m.map((x) => x.presentIntervalMs.p99)),
       hitchesPerMin: describe(m.map((x) => x.hitchesPerMin)), busiestThread: describe(m.map((x) => x.rendererThreads.at(-1)?.busiest)),
       presentsPerSecond: describe(m.map((x) => x.presentsPerSecond)),
+      guestSecondsCovered: describe(m.map((x) => x.guestCovered?.seconds), 3),
       ...(m.some((x) => x.display) ? {
         displayedPerSecond: describe(m.map((x) => x.display?.displayedPerSecond)),
         displayedP95: describe(m.map((x) => x.display?.displayedP95)),
