@@ -289,6 +289,36 @@ function harnessJitRegionStats({ sampleEvery } = {}) {
   const layoutRefused = moduleInstance._DolphinWeb_AotLayoutRefused ? (moduleInstance._DolphinWeb_AotLayoutRefused() >>> 0) + aotLayoutSkipped : null;
   return { bytes: copy(), again: copy(), installSamples: harnessRegionInstallSamples(heap), layoutRefused };
 }
+// AX HLE timing (patch 0099, harness/lib/ax-hle-stats.mjs): reset >= 0
+// zeroes and turns the counters on from the next mail; copied twice so the
+// harness can refuse a torn read.
+function harnessAxHleStats({ reset } = {}) {
+  if (!harnessEnabled) return { error: "harness hooks are off" };
+  const stats = moduleInstance?._DolphinWeb_AxHleStats;
+  if (!stats) return { error: "core has no DolphinWeb_AxHleStats" };
+  const ptr = stats(Number.isInteger(reset) && reset >= 0 ? reset : -1) >>> 0;
+  const heap = moduleInstance.HEAPU8;
+  if (!ptr || ptr + 8 > heap.length) return { error: `DolphinWeb_AxHleStats returned ${ptr}` };
+  const size = Math.min(new DataView(heap.buffer, ptr, 8).getUint32(4, true), 64);
+  if (ptr + size > heap.length) return { error: `AX stats of ${size} bytes past the heap` };
+  const copy = () => Array.from(new Uint8Array(heap.buffer, ptr, size));
+  return { bytes: copy(), again: copy() };
+}
+// Guest memory accesses per instruction (patch 0104,
+// harness/lib/mem-access-stats.mjs): reset >= 0 zeroes and turns the
+// counters on at the next slice; copied twice so a torn read is refused.
+function harnessMemAccessStats({ reset } = {}) {
+  if (!harnessEnabled) return { error: "harness hooks are off" };
+  const stats = moduleInstance?._DolphinWeb_MemAccessStats;
+  if (!stats) return { error: "core has no DolphinWeb_MemAccessStats" };
+  const ptr = stats(Number.isInteger(reset) && reset >= 0 ? reset : -1) >>> 0;
+  const heap = moduleInstance.HEAPU8;
+  if (!ptr || ptr + 8 > heap.length) return { error: `DolphinWeb_MemAccessStats returned ${ptr}` };
+  const size = Math.min(new DataView(heap.buffer, ptr, 8).getUint32(4, true), 192);
+  if (ptr + size > heap.length) return { error: `memory access stats of ${size} bytes past the heap` };
+  const copy = () => Array.from(new Uint8Array(heap.buffer, ptr, size));
+  return { bytes: copy(), again: copy() };
+}
 // The core's first region installs, [ms, bytes, path] each (path 0 first
 // attempt, 1 after the worker's ready byte, 2 cold); null with an older core.
 function harnessRegionInstallSamples(heap) {
@@ -1241,6 +1271,7 @@ async function handleMessage(type, payload) {
         correctTimeDrift: payload.correctTimeDrift,
         coreLog: payload.coreLog,
         memcardSlotB: payload.memcardSlotB,
+        efbAccess: payload.efbAccess,
         efbDiag: payload.efbDiag,
         jitVerbose: payload.jitVerbose,
         frameCap: payload.frameCap,
@@ -1457,6 +1488,10 @@ async function handleMessage(type, payload) {
       return harnessPcSampler(payload);
     case "validationReadJitRegionStats":
       return harnessJitRegionStats(payload);
+    case "validationReadAxHleStats":
+      return harnessAxHleStats(payload);
+    case "validationReadMemAccessStats":
+      return harnessMemAccessStats(payload);
     case "validationCaptureAtVi":
       return captureAtViOutput(payload);
     case "validationReadPipelinePrewarm":
@@ -1856,6 +1891,7 @@ async function loadCore({
   correctTimeDrift = false,
   coreLog = false,
   memcardSlotB = false,
+  efbAccess = false,
   efbDiag = false,
   jitVerbose = false,
   frameCap = 0,
@@ -2330,6 +2366,7 @@ async function loadCore({
     dolphinCorrectTimeDrift: Boolean(correctTimeDrift),
     dolphinCoreLog: Boolean(coreLog),
     dolphinMemcardSlotB: Boolean(memcardSlotB),
+    dolphinEfbAccess: Boolean(efbAccess),
     // Ranks the instructions that block JIT compilation (?jitverbose=1).
     dolphinWebVerbosePpcJit: Boolean(jitVerbose),
     dolphinFrameCap: (frameCapTarget = Number(frameCap) || 0),

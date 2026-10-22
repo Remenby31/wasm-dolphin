@@ -132,6 +132,16 @@ node harness/probes/race-perf.mjs --iso ../roms/<disc>.iso --state ../measures/h
   the last being the place in the scene whatever the speed, so two runs or
   two sides can be lined up; over 200 the longest are kept, in time order,
   with `count`.
+- `--mem-stats` (patch 0104): guest memory accesses per instruction, read in
+  the stats window after the speed window (with `--region-sample`, the same
+  window). `summary.json` → `memAccess` (and `baselineMemAccess`):
+  `accessesPerInstruction` over the counted blocks, `coverage` (their share of
+  the window's cycles), loads/stores per instruction, `byKind`
+  (int/fp/psq load/store), `slowShare` (slow-path calls over all accesses),
+  and, with aot=1, the region part estimated apart
+  (`regionAccessesPerInstructionEstimated`, `withRegionsEstimated`), never
+  merged into the counted figure. A core without the export gives
+  `memAccess: null` and `memAccessWhy`.
 - `--chrome-args "--flag …"` adds Chromium flags on both sides;
   `--baseline-chrome-args` replaces them on the baseline side, so one tree is
   compared with itself under two Chromium configurations (e.g.
@@ -209,7 +219,7 @@ node harness/remote/spark-run.mjs --build <ref>           # its core built on th
   older waiting ticket could use a lane it wants and that lane is free; a
   build wants both. On the Spark, `node harness/remote/spark-queue.mjs list
   --eta` shows the queue with each job's estimated start and end (from its
-  race-perf options; ~8 min a build). Pairs wait up to 4 h by default
+  race-perf options; ~3 min a build). Pairs wait up to 4 h by default
   (`--lock-wait`).
 - **Reordering is the judge's call:** `spark-queue.mjs move <name> --after
   <name|head> --as-judge` renames a waiting ticket between its new
@@ -218,9 +228,14 @@ node harness/remote/spark-run.mjs --build <ref>           # its core built on th
   hand while a job from before this change waits on it: such a job keeps
   its old name and would wait for itself. Compare sides of one pair only, never a lane with the
   other. `--chrome-cpus` / `--node-cpus` override the pinning.
-- `--build <ref>` (a commit of the fork) builds its core on the bench with
-  the pinned toolchain (`build-core-repro.mjs --install`, linux-arm64, ~8
-  min) in `~/salon-bench/build/wt/<commit>`, in its turn, holding both
+- `--build <ref>` (a commit of the fork; at most 3 builds of one agent,
+  counted by its Mac worktree's name, wait or run at once, beyond which
+  spark-run refuses: wait for one of yours to go through) builds its core on the bench with
+  the pinned toolchain (`build-core-repro.mjs --install --reset-vendor
+  --ccache`, linux-arm64) in one build checkout, `~/salon-bench/build/work`,
+  whose CMake tree, Dolphin sources and ccache carry over (~7 min cold, 1-3.5
+  min after another commit; the core's bytes do not depend on the path), and
+  exports the tree it serves to `~/salon-bench/build/wt/<commit>`, in its turn, holding both
   lanes' locks (lane `b` also waits while a build of an older harness,
   without a ticket, exists);
   `--candidate spark:<ref>` / `--baseline spark:<ref>` then serve that
@@ -284,6 +299,31 @@ from the savestate; local only). In dual core the race gives several pictures
 per commit, so `rec` and `wgpu` are listed `report-only` for renderVsBaseline
 (kept for perf and the other checks); `rec-single` and `wgpu-single` run on the
 fixed clock and carry the exact render comparison.
+
+## AX HLE share of the CPU thread
+
+`harness/probes/ax-hle.mjs` measures how much of the CPU thread goes into the
+AX HLE audio synthesis, which runs a whole command list synchronously inside
+the DSP mailbox MMIO write (research/deep-thread-budget.md §2). It reads the
+core counters of patch 0099 (`DolphinWeb_AxHleStats`, layout in
+`lib/ax-hle-stats.mjs`, worker message `validationReadAxHleStats`), off until
+the probe resets them:
+
+```
+node harness/probes/ax-hle.mjs --iso ../roms/<disc>.iso --port 8092 \
+  (--state ../measures/harness/race-after.sav | --steps harness/probes/local-menu-steps.json) \
+  [--query "..."] [--runs 3] [--warmup 20] [--secs 20] [--max-load 6]
+```
+
+Per run: the scene (a savestate, or input steps such as the loaded menu of
+`local-menu-steps.json`), `--warmup`, then a window of `--secs` with the
+counters on (two clock reads per mail, a few hundred per second).
+`summary.json` gives `shareOfWindow` (host time in the mail handling over the
+core's window), `shareOfActive` (the same over the CPU thread's occupancy,
+the busiest renderer thread sampled in the window, so a capped scene that
+sleeps in the throttle is not understated), `msPerSecond`, `mailsPerSecond`,
+`meanMailUs` and `mailMaxMs`, medians of the good runs. Calm machine first,
+then the perf lock, as race-perf.
 
 ## Freeze probes
 
@@ -421,6 +461,23 @@ Per (game, config) cell, the **correctness checks** (`lib/correctness.mjs`):
 Each check of each run is pass, fail or **unjudged** (with the reason: no VI
 timeline in this core, capture refused for a hardware renderer, scripted
 inputs without a savestate, …). Machine load changes none of them.
+
+**Expected failures.** A test added before its implementation fails on main
+by design. List it in `harness/known-failures.json` with `"mode":
+"expected-fail"`, its `cell` (`game/config`), `check` (crash, errors,
+coreFreeze, render or audio), `reason`, `until` (the follow-up that fixes it)
+and `detail`, a regular expression the failure's detail must match (how it is
+expected to fail). That failure is **XFAIL**, shown with the reason and never
+blocking; any other failure of the cell, and a blank picture always, stays a
+regression. A pass is **XPASS** and blocks, so the PR that fixes it also
+removes the entry. An entry for a game the run has but a cell it does not is
+stale and blocks; other matrices do not judge it.
+
+The list is read from the candidate's tree, so a PR can break a check and
+declare it expected-fail in the same change. The gate therefore marks every
+XFAIL whose baseline passes the check (a new entry, or a feature main cannot
+exercise) with a warning (⚠): the reviewer must find its justification in
+the PR.
 
 **`harness/run ab <spec>`** exports the served files of `--baseline-ref`
 (default `origin/main`) with `git archive`, runs the matrix (and the spec's
