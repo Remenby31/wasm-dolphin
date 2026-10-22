@@ -1,0 +1,42 @@
+diff --git a/Source/Core/Core/PowerPC/CachedInterpreter/CachedInterpreter.cpp b/Source/Core/Core/PowerPC/CachedInterpreter/CachedInterpreter.cpp
+--- a/Source/Core/Core/PowerPC/CachedInterpreter/CachedInterpreter.cpp
++++ b/Source/Core/Core/PowerPC/CachedInterpreter/CachedInterpreter.cpp
+@@ -11169,7 +11169,10 @@ static void FastUpdateCR0(PowerPC::PowerPCState& ppc_state, u32 value)
+   ppc_state.cr.fields[0] = cr_val;
+ }
+ 
+-static bool TryFastRamWordLoadStore(Core::System& system, PowerPC::PowerPCState& ppc_state,
++// 0101: the TryFastRam* helpers are forced inline into their callers (the
++// per-instruction fast callbacks): each is past the size LLVM inlines on its
++// own, and a call per memory access is what they exist to avoid.
++__attribute__((always_inline)) static bool TryFastRamWordLoadStore(Core::System& system, PowerPC::PowerPCState& ppc_state,
+                                     UGeckoInstruction inst)
+ {
+   const bool indexed = inst.OPCD == 31;
+@@ -11238,7 +11241,7 @@ static bool TryFastRamWordLoadStore(Core::System& system, PowerPC::PowerPCState&
+   return true;
+ }
+ 
+-static bool TryFastRamByteHalfLoadStore(Core::System& system, PowerPC::PowerPCState& ppc_state,
++__attribute__((always_inline)) static bool TryFastRamByteHalfLoadStore(Core::System& system, PowerPC::PowerPCState& ppc_state,
+                                         UGeckoInstruction inst)
+ {
+   const bool indexed = inst.OPCD == 31;
+@@ -11326,7 +11329,7 @@ static bool TryFastRamByteHalfLoadStore(Core::System& system, PowerPC::PowerPCSt
+   return true;
+ }
+ 
+-static bool TryFastRamMultiwordLoadStore(Core::System& system, PowerPC::PowerPCState& ppc_state,
++__attribute__((always_inline)) static bool TryFastRamMultiwordLoadStore(Core::System& system, PowerPC::PowerPCState& ppc_state,
+                                          UGeckoInstruction inst)
+ {
+   const bool load = inst.OPCD == 46;
+@@ -11676,7 +11679,7 @@ static void SetFastFI(PowerPC::PowerPCState& ppc_state, u32 fi)
+   ppc_state.fpscr.FI = fi;
+ }
+ 
+-static bool TryFastRamFloatLoadStore(Core::System& system, PowerPC::PowerPCState& ppc_state,
++__attribute__((always_inline)) static bool TryFastRamFloatLoadStore(Core::System& system, PowerPC::PowerPCState& ppc_state,
+                                      UGeckoInstruction inst)
+ {
+   const bool indexed = inst.OPCD == 31;
