@@ -51,6 +51,52 @@ export async function calmThenLock({ maxLoad, calmWait, acquire, log = () => {},
   return acquire();
 }
 
+// Under the lock, before each side: a loaded machine never keeps the lock
+// (2026-10-22, a pair waited 60 min on --load-wait while holding the Mac
+// lock). The lock goes back at once, the calm is awaited outside it (up to
+// `waitSec`), then the lock is taken again in its turn (`acquire`). Returns
+// the lock now held (null: never calm, given up, no lock held), the gate,
+// and whether the lock was let go meanwhile (the run is then played again).
+export async function calmUnderLock({ lock, maxLoad, waitSec, acquire, log = () => {}, load = () => os.loadavg()[0], wait = waitForLoad }) {
+  const limit = loadLimit(maxLoad);
+  const now = load();
+  const gate = { load: Math.round(now * 100) / 100, limit, ok: true };
+  // Calm. No lock held (a gate gave up before): taken again in its turn.
+  if (now <= limit) return lock ? { lock, gate, relocked: false } : { lock: await acquire(), gate, relocked: true };
+  log(`load ${now.toFixed(1)} > ${limit}: ${lock ? "perf lock released while waiting for calm" : "waiting for calm before taking the perf lock again"}`);
+  lock?.();
+  const calm = await wait({ maxLoad, waitSec, pollSec: 30, log });
+  if (!calm.ok) return { lock: null, gate: calm, relocked: false };
+  return { lock: await acquire(), gate: calm, relocked: true };
+}
+
+// A perf lock never held while waiting for the load, for every probe: taken
+// once the machine is calm (calmThenLock), then before each run
+// waitCalmUnlocked() checks the load and, loaded, gives the lock back
+// during the wait and takes it again in turn (calmUnderLock). The gate it
+// returns says whether the lock went back (relocked). `acquire` null: no
+// lock (--no-lock), the gate only waits. release() lets go of what is held.
+// retakeOnGiveUp (ab): a gate still loaded after waitSec takes the lock
+// again anyway, since the campaign goes on and measures under it (the cell
+// is judged overloaded); a probe that stops on a give-up leaves it off.
+export async function calmLock({ maxLoad, calmWait, acquire, log = () => {}, wait = waitForLoad, load, retakeOnGiveUp = false }) {
+  let held = acquire ? await calmThenLock({ maxLoad, calmWait, acquire, log, wait }) : null;
+  return {
+    async waitCalmUnlocked({ waitSec, log: gateLog = log }) {
+      if (!acquire) return { ...(await wait({ maxLoad, waitSec, log: gateLog })), relocked: false };
+      const g = await calmUnderLock({ lock: held, maxLoad, waitSec, acquire, log: gateLog, wait, ...(load ? { load } : {}) });
+      held = g.lock;
+      if (!held && retakeOnGiveUp) {
+        gateLog(`load ${g.gate.load} > ${g.gate.limit} after ${waitSec} s: perf lock taken again, the run goes on under it`);
+        held = await acquire();
+      }
+      return { ...g.gate, relocked: g.relocked || Boolean(held && retakeOnGiveUp && !g.lock) };
+    },
+    check: () => held?.check?.(),
+    release() { const r = held; held = null; r?.(); }
+  };
+}
+
 // Under the lock, a load gate that did not open (still loaded after
 // --load-wait): the remaining runs are given up, the lock goes back.
 export const loadGaveUp = (gate) => (gate && gate.ok === false ? `load ${gate.load} > ${gate.limit} after --load-wait: remaining runs given up, lock released` : null);

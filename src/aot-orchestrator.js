@@ -83,6 +83,8 @@ export function createAotFirstLaunch({
   let disposed = false;
   let errorEvents = 0;
   let errorsDropped = 0;
+  let started = false; // start() was called: the boot is behind
+  let retranslated = 0;
   const run = runId ?? Math.random().toString(36).slice(2, 10);
 
   function record(type, detail) {
@@ -185,13 +187,27 @@ export function createAotFirstLaunch({
     async start({ resume = true, ifGeneration = generation } = {}) {
       if (!supported || disposed || ifGeneration !== generation) return;
       running = true;
+      started = true;
       lastState = "running";
       try {
         await optimizer.start({ resume });
+        // Marked stale after the run's last module: one more run for them.
+        if (optimizer.stale.size && !disposed && ifGeneration === generation) await optimizer.start({ resume: true });
       } finally {
         running = false;
         if (lastState === "running") lastState = "partial"; // cancelled or fatal
       }
+    },
+
+    // A module from the cache the core cannot run here (translated for another
+    // heap layout): translated again from guest memory, live, and its cache
+    // entry overwritten, instead of being lost for every launch. Once per key
+    // and launch, 3 launches at most. True when queued.
+    retranslate(key) {
+      if (!supported || disposed || !optimizer.markStale(key)) return false;
+      retranslated += 1;
+      if (started && !running) void this.start({ resume: true });
+      return true;
     },
 
     get generation() {
@@ -217,7 +233,7 @@ export function createAotFirstLaunch({
       return out;
     },
 
-    stats: () => ({ loader: loader.stats() })
+    stats: () => ({ loader: loader.stats(), retranslated })
   };
 }
 
@@ -279,7 +295,10 @@ export function coreAssembleOptions(m) {
   }
   // The core's memory never grows (INITIAL_MEMORY = DOLPHIN_WASM_MEMORY_PAGES):
   // its size is the maximum the region modules declare.
-  return { helperNames: names, assemble: { helpers, pcOffset, memoryPages: m.HEAPU8.buffer.byteLength / 65536 } };
+  // chain: region modules tail-call the next region when the core exports
+  // the chaining helper (patch 0102); an older core cannot link them.
+  return { helperNames: names, assemble: { helpers, pcOffset, memoryPages: m.HEAPU8.buffer.byteLength / 65536,
+    chain: typeof m._DolphinWeb_RegionChainHelper === "function" } };
 }
 
 // [ramBase, l1Base] of the core's session (_DolphinWeb_AotRegionHeapBases).
