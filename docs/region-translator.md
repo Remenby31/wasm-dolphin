@@ -215,3 +215,31 @@ cache translated in a session without the MMU (`RegionInstallable`,
 counted by `DolphinWeb_AotRegionsSkippedMmu`). MMU games keep the
 CachedInterpreter with `aot=1`. Lifted once faults are delivered from our
 code (deferred delivery on the slow paths: backlog).
+
+## Memory-access counts (patch 0104, 2026-10-22)
+
+`DolphinWeb_MemAccessStats(reset)` returns a 192-byte struct, layout v1
+agreed with the harness (`race-perf --mem-stats`): guest instructions,
+memory instructions by kind (integer, FP and paired-quantized loads and
+stores), slow accesses by kind, `cyclesCovered`/`cyclesTotal`, the regions'
+estimates and `staticSaturations`. `reset >= 0` zeroes it and turns counting
+on at the next slice boundary; the CPU thread writes the struct whole at each
+boundary, so read it twice.
+
+- **Blocks**: every block end (`EndBlock`, a `RunWasmBlock` that ends its
+  block) carries an index into interned static counts taken where its
+  downcount is, so the counts and the cycles they cover agree. Executions
+  that leave a block early (an exception, a halted wasm block) are not
+  counted and show in `cyclesCovered`.
+- **Slow accesses**: served by Dolphin's MMU or interpreter instead of a
+  direct RAM access: the emitter's `read_*`/`write_*`, `lfs`/`lfd`/`stfs`
+  helpers, memory instructions the helpers hand to the interpreter, the
+  cached interpreter's fast instructions outside MEM1, and the memory
+  instructions a cached-interpreter block interprets (static, every
+  execution). They include those of regions.
+- **Regions**: their cycles times their code's static accesses and
+  instructions per cycle, computed at install.
+
+Cost with stats off: one load and branch per block end. Tests:
+`tests/mem-access-stats.test.mjs` (the Node core has no CachedInterpreter
+instance: block counts are checked in a browser run).
