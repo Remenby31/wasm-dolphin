@@ -4,7 +4,7 @@
 import assert from "node:assert/strict";
 import test from "node:test";
 
-import { armEffects, laneOf } from "../harness/probes/race-multi.mjs";
+import { armEffects, GUEST_HZ, instructionsPerGuestCycle, laneOf, parsePerfCsv } from "../harness/probes/race-multi.mjs";
 
 test("race-multi: a cyclic Latin square, every arm on every lane equally", () => {
   const seen = Array.from({ length: 3 }, () => [0, 0, 0]);
@@ -29,4 +29,13 @@ test("race-multi: arm effects survive lane differences and run-wide noise", () =
   assert.equal(e.residualSd, 0);
   // The raw per-run ratios carry the lanes' differences; their median does not cancel them in general.
   assert.ok(e.arms[0].sd > 1);
+});
+
+test("race-multi: perf counts summed over both PMUs, per guest cycle", () => {
+  const csv = "# started on Thu Oct 22 10:07:59 2026\n\n<not counted>,,armv8_pmuv3_0/instructions/u,0,0.00,,\n<not counted>,,armv8_pmuv3_0/cycles/u,0,0.00,,\n22921628025,,armv8_pmuv3_1/instructions/u,1468754848,100.00,4.01,insn per cycle\n5714995397,,armv8_pmuv3_1/cycles/u,1468752096,100.00,,\n";
+  assert.deepEqual(parsePerfCsv(csv), { instructions: 22921628025, cycles: 5714995397 });
+  // 20 s at 50 % speed = 10 emulated seconds = 4.86e9 guest cycles.
+  const cold = { speed: 50, windowMs: 20000, counters: { instructions: 2 * 10 * GUEST_HZ } };
+  assert.equal(instructionsPerGuestCycle(cold), 2);
+  assert.equal(instructionsPerGuestCycle({ speed: 50, windowMs: 20000, counters: { error: "x" } }), null);
 });

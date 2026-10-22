@@ -164,6 +164,9 @@ export async function measure(session, o) {
     // the run says why it has no PC histogram.
     const pcStart = o.pcsample ? await workerRequest(page, "validationPcSampler", { action: "start", periodMs: o.pcsample }, 10000) : null;
     const sampling = Boolean(pcStart?.started);
+    // o.onWindow (race-multi's hardware counters): called just before and
+    // just after the window, from node only (no page call inside it).
+    if (o.onWindow) await o.onWindow("start", session);
     await readTimeline(page); // drop everything before the window
     const t0 = await page.evaluate(() => performance.timeOrigin + performance.now());
     // The window: node timers only. The rings (VI 8192, presents 16384)
@@ -174,6 +177,7 @@ export async function measure(session, o) {
       loads.push(os.loadavg()[0]);
       if (s === Math.floor(o.secs / 2)) threads.push(rendererThreads(session.profileDir));
     }
+    const counters = o.onWindow ? await o.onWindow("end", session) : undefined;
     const chunk = await readTimeline(page);
     const t1 = await page.evaluate(() => performance.timeOrigin + performance.now());
     const pc = sampling ? await workerRequest(page, "validationPcSampler", { action: "stop" }, 20000) : pcStart && { error: pcStart.error ?? "not started" };
@@ -234,6 +238,7 @@ export async function measure(session, o) {
       freezes: { core: core.freezes?.length ?? 0, present: pres.freezes.length },
       pc: pc && !pc.error ? summarizePcSamples(pc, { functions: o.functions }) : pc,
       ...regionRecord(regionEnd),
+      ...(counters ? { counters } : {}),
       ...(o.memStats ? memRecord(memEnd) : {})
     };
   } finally {
