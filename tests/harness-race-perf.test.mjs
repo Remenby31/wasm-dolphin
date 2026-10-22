@@ -9,7 +9,7 @@ import path from "node:path";
 import test from "node:test";
 
 import { acquirePerfLock, lockIntegrity, queueDir, readLockOwner, ticketsAhead } from "../harness/lib/perf-lock.mjs";
-import { chromeArgsOf, lockOverlapAt, num, pairedSpeedChange, regionPipeline, sideOrder, withheldOnOverlap } from "../harness/probes/race-perf.mjs";
+import { chromeArgsOf, guestCovered, lockOverlapAt, num, pairedSpeedChange, regionPipeline, sideOrder, withheldOnOverlap } from "../harness/probes/race-perf.mjs";
 import { stockChrome } from "../harness/lib/kpi.mjs";
 import { calmThenLock, loadGaveUp } from "../harness/lib/env.mjs";
 import { summarizePcSamples } from "../src/harness-pc-sampler.js";
@@ -488,6 +488,14 @@ test("race-perf: the region pipeline counters of a stats reply", () => {
     { layoutRefused: 143, heapPatched: 0, heapPatchedBytes: 0, heapPatchFailed: 0 });
   assert.deepEqual(regionPipeline({ layoutRefused: 0 }), { layoutRefused: 0 }, "an engine before 0084: no heap counters");
   assert.deepEqual(regionPipeline({}), {}, "an engine before 0078");
+});
+
+test("race-perf: the guest time a host-time window covered", () => {
+  assert.deepEqual(guestCovered(1000, 486001000, 486000000), { ticks: 486000000, seconds: 1 });
+  assert.deepEqual(guestCovered("0", "972000000", 486000000), { ticks: 972000000, seconds: 2 });
+  assert.equal(guestCovered(null, 5, 486000000), null);
+  assert.equal(guestCovered(10, 5, 486000000), null);
+  assert.equal(guestCovered(1, 5, 0), null);
 });
 
 test("load under the lock: a loaded machine gives the lock back while waiting, then takes it again in turn", async () => {
