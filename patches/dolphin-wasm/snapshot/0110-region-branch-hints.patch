@@ -1,7 +1,60 @@
 diff --git a/Source/Core/Core/PowerPC/CachedInterpreter/CachedInterpreter.cpp b/Source/Core/Core/PowerPC/CachedInterpreter/CachedInterpreter.cpp
 --- a/Source/Core/Core/PowerPC/CachedInterpreter/CachedInterpreter.cpp
 +++ b/Source/Core/Core/PowerPC/CachedInterpreter/CachedInterpreter.cpp
-@@ -2853,9 +2853,20 @@ struct WasmFragmentRelocs
+@@ -412,6 +412,9 @@ u32 s_wasm_prefix_instruction_sum = 0;
+ u32 s_wasm_prefix_instruction_max = 0;
+ std::array<u32, 5> s_wasm_prefix_histogram{};
+ u32 s_wasm_helper_call_count = 0;
++// 0110: calls of the memory helpers (read/write_u8/u16/u32): the slow paths
++// the branch hints mark unlikely, and where cached GPRs are stored.
++u32 s_wasm_mem_helper_count = 0;
+ u32 s_wasm_helper_halt_count = 0;
+ u32 s_wasm_system_call_count = 0;
+ u32 s_wasm_fp_call_count = 0;
+@@ -1967,36 +1970,42 @@ u32 DecodeMtsprIndex(UGeckoInstruction inst)
+ extern "C" u32 DolphinWeb_CachedInterpreterReadU32(int state_ptr, u32 address)
+ {
+   (void)state_ptr;
++  ++s_wasm_mem_helper_count;
+   return Core::System::GetInstance().GetMMU().Read<u32>(address);
+ }
+ 
+ extern "C" void DolphinWeb_CachedInterpreterWriteU32(int state_ptr, u32 address, u32 value)
+ {
+   (void)state_ptr;
++  ++s_wasm_mem_helper_count;
+   Core::System::GetInstance().GetMMU().Write<u32>(value, address);
+ }
+ 
+ extern "C" u32 DolphinWeb_CachedInterpreterReadU8(int state_ptr, u32 address)
+ {
+   (void)state_ptr;
++  ++s_wasm_mem_helper_count;
+   return Core::System::GetInstance().GetMMU().Read<u8>(address);
+ }
+ 
+ extern "C" void DolphinWeb_CachedInterpreterWriteU8(int state_ptr, u32 address, u32 value)
+ {
+   (void)state_ptr;
++  ++s_wasm_mem_helper_count;
+   Core::System::GetInstance().GetMMU().Write<u8>(value, address);
+ }
+ 
+ extern "C" u32 DolphinWeb_CachedInterpreterReadU16(int state_ptr, u32 address)
+ {
+   (void)state_ptr;
++  ++s_wasm_mem_helper_count;
+   return Core::System::GetInstance().GetMMU().Read<u16>(address);
+ }
+ 
+ extern "C" void DolphinWeb_CachedInterpreterWriteU16(int state_ptr, u32 address, u32 value)
+ {
+   (void)state_ptr;
++  ++s_wasm_mem_helper_count;
+   Core::System::GetInstance().GetMMU().Write<u16>(value, address);
+ }
+ 
+@@ -2853,9 +2862,20 @@ struct WasmFragmentRelocs
    std::vector<Reloc> relocs;
    std::vector<u8> code;  // the function body (locals, expression, end) once built
    u32 cycles = 0;        // what the block's RunWasmBlock would take from downcount
@@ -22,7 +75,7 @@ diff --git a/Source/Core/Core/PowerPC/CachedInterpreter/CachedInterpreter.cpp b/
  void EmitPaddedU32Leb(std::vector<u8>& out, u32 value)
  {
    for (int i = 0; i < 4; ++i, value >>= 7)
-@@ -4238,6 +4249,7 @@ void EmitReadU32MaybeDirect(std::vector<u8>& body, const WasmStateLayout& layout
+@@ -4238,6 +4258,7 @@ void EmitReadU32MaybeDirect(std::vector<u8>& body, const WasmStateLayout& layout
    EmitU32Leb(body, 3);
    EmitI32Const(body, layout.ram_size_real - sizeof(u32));
    body.push_back(0x4d);
@@ -30,7 +83,7 @@ diff --git a/Source/Core/Core/PowerPC/CachedInterpreter/CachedInterpreter.cpp b/
    body.push_back(0x04);
    body.push_back(0x7f);
    EmitHeapBase(body, layout.ram_base, WASM_HEAP_RAM);
-@@ -4263,6 +4275,7 @@ void EmitReadU8MaybeDirect(std::vector<u8>& body, const WasmStateLayout& layout)
+@@ -4263,6 +4284,7 @@ void EmitReadU8MaybeDirect(std::vector<u8>& body, const WasmStateLayout& layout)
    EmitU32Leb(body, 3);
    EmitI32Const(body, layout.ram_size_real - sizeof(u8));
    body.push_back(0x4d);
@@ -38,7 +91,7 @@ diff --git a/Source/Core/Core/PowerPC/CachedInterpreter/CachedInterpreter.cpp b/
    body.push_back(0x04);
    body.push_back(0x7f);
    EmitHeapBase(body, layout.ram_base, WASM_HEAP_RAM);
-@@ -4286,6 +4299,7 @@ void EmitReadU16MaybeDirect(std::vector<u8>& body, const WasmStateLayout& layout
+@@ -4286,6 +4308,7 @@ void EmitReadU16MaybeDirect(std::vector<u8>& body, const WasmStateLayout& layout
    EmitU32Leb(body, 3);
    EmitI32Const(body, layout.ram_size_real - sizeof(u16));
    body.push_back(0x4d);
@@ -46,7 +99,7 @@ diff --git a/Source/Core/Core/PowerPC/CachedInterpreter/CachedInterpreter.cpp b/
    body.push_back(0x04);
    body.push_back(0x7f);
    EmitHeapBase(body, layout.ram_base, WASM_HEAP_RAM);
-@@ -4325,6 +4339,7 @@ void EmitWriteU32MaybeDirect(std::vector<u8>& body, const WasmStateLayout& layou
+@@ -4325,6 +4348,7 @@ void EmitWriteU32MaybeDirect(std::vector<u8>& body, const WasmStateLayout& layou
    EmitU32Leb(body, 3);
    EmitI32Const(body, layout.ram_size_real - sizeof(u32));
    body.push_back(0x4d);
@@ -54,7 +107,7 @@ diff --git a/Source/Core/Core/PowerPC/CachedInterpreter/CachedInterpreter.cpp b/
    body.push_back(0x04);
    body.push_back(0x40);
    EmitBswap32FromLocal(body, 2);
-@@ -4352,6 +4367,7 @@ void EmitWriteU8MaybeDirect(std::vector<u8>& body, const WasmStateLayout& layout
+@@ -4352,6 +4376,7 @@ void EmitWriteU8MaybeDirect(std::vector<u8>& body, const WasmStateLayout& layout
    EmitU32Leb(body, 3);
    EmitI32Const(body, layout.ram_size_real - sizeof(u8));
    body.push_back(0x4d);
@@ -62,7 +115,7 @@ diff --git a/Source/Core/Core/PowerPC/CachedInterpreter/CachedInterpreter.cpp b/
    body.push_back(0x04);
    body.push_back(0x40);
    EmitHeapBase(body, layout.ram_base, WASM_HEAP_RAM);
-@@ -4377,6 +4393,7 @@ void EmitWriteU16MaybeDirect(std::vector<u8>& body, const WasmStateLayout& layou
+@@ -4377,6 +4402,7 @@ void EmitWriteU16MaybeDirect(std::vector<u8>& body, const WasmStateLayout& layou
    EmitU32Leb(body, 3);
    EmitI32Const(body, layout.ram_size_real - sizeof(u16));
    body.push_back(0x4d);
@@ -70,7 +123,7 @@ diff --git a/Source/Core/Core/PowerPC/CachedInterpreter/CachedInterpreter.cpp b/
    body.push_back(0x04);
    body.push_back(0x40);
    EmitBswap16FromLocal(body, 2);
-@@ -4488,6 +4505,7 @@ bool EmitFmhTryRangeCheck(std::vector<u8>& body, const WasmStateLayout& layout,
+@@ -4488,6 +4514,7 @@ bool EmitFmhTryRangeCheck(std::vector<u8>& body, const WasmStateLayout& layout,
  
  void EmitImportedHaltCheck(std::vector<u8>& body)
  {
@@ -78,7 +131,16 @@ diff --git a/Source/Core/Core/PowerPC/CachedInterpreter/CachedInterpreter.cpp b/
    body.push_back(0x04);
    body.push_back(0x40);
    // A block module returns 1 (halted); a region fragment 2 (stopped), since 1
-@@ -15628,6 +15646,7 @@ struct FragmentBlock
+@@ -14450,7 +14477,7 @@ extern "C" const char* GetPpcWasmHelperStats()
+       << " lfs:" << s_wasm_lfs_call_count << " stfs:" << s_wasm_stfs_call_count
+       << " lfd:" << s_wasm_lfd_call_count << " fmr:" << s_wasm_fmr_call_count
+       << " fctiwz:" << s_wasm_fctiwz_call_count << " psqfast:" << s_wasm_psq_fast_c_count
+-      << " gpfifo:" << s_wasm_gpfifo_fastcheck_count;
++      << " gpfifo:" << s_wasm_gpfifo_fastcheck_count << " mem:" << s_wasm_mem_helper_count;
+   if (s_fast_dcbx_loop_blocks != 0)
+   {
+     out << " | dcbloop blocks:" << s_fast_dcbx_loop_blocks
+@@ -15628,6 +15655,7 @@ struct FragmentBlock
    u32 start = 0;
    std::vector<u8> expr;
    std::vector<WasmFragmentRelocs::Reloc> relocs;  // offsets in expr
@@ -86,7 +148,7 @@ diff --git a/Source/Core/Core/PowerPC/CachedInterpreter/CachedInterpreter.cpp b/
    u32 cycles = 0;
    std::vector<u32> successors;
    u32 jump_target = UINT32_MAX;
-@@ -15742,6 +15761,8 @@ bool BuildFragmentBlock(Core::System& system, u32 pc, u32 limit, FragmentBlock*
+@@ -15742,6 +15770,8 @@ bool BuildFragmentBlock(Core::System& system, u32 pc, u32 limit, FragmentBlock*
    out->relocs = fragment.relocs;
    for (auto& reloc : out->relocs)
      reloc.offset -= WASM_BLOCK_LOCALS.size();
@@ -95,7 +157,7 @@ diff --git a/Source/Core/Core/PowerPC/CachedInterpreter/CachedInterpreter.cpp b/
    out->cycles = fragment.cycles;
    if (!ends_with_branch)
    {
-@@ -15778,8 +15799,9 @@ struct RegionFragment
+@@ -15778,8 +15808,9 @@ struct RegionFragment
    struct Reloc
    {
      u32 offset;
@@ -107,7 +169,7 @@ diff --git a/Source/Core/Core/PowerPC/CachedInterpreter/CachedInterpreter.cpp b/
    };
    std::vector<Reloc> relocs;
  };
-@@ -15896,6 +15918,8 @@ bool BuildRegionFragment(Core::System& system, u32 entry_pc, std::span<const u32
+@@ -15896,6 +15927,8 @@ bool BuildRegionFragment(Core::System& system, u32 entry_pc, std::span<const u32
        out->relocs.push_back({at + static_cast<u32>(reloc.offset), 0,
                               static_cast<u32>(it - WASM_IMPORT_NAMES.begin())});
      }
@@ -116,7 +178,7 @@ diff --git a/Source/Core/Core/PowerPC/CachedInterpreter/CachedInterpreter.cpp b/
      EmitLocalGet(code, 0);
      EmitLocalGet(code, 0);
      load(npc_offset);
-@@ -15909,6 +15933,7 @@ bool BuildRegionFragment(Core::System& system, u32 entry_pc, std::span<const u32
+@@ -15909,6 +15942,7 @@ bool BuildRegionFragment(Core::System& system, u32 entry_pc, std::span<const u32
      EmitLocalGet(code, 0);
      load(downcount_offset);
      EmitI32Const(code, 0);
@@ -124,7 +186,7 @@ diff --git a/Source/Core/Core/PowerPC/CachedInterpreter/CachedInterpreter.cpp b/
      code.insert(code.end(), {0x4c, 0x04, 0x40});  // i32.le_s; if
      EmitI32Const(code, 0);
      code.insert(code.end(), {0x0f, 0x0b});  // return; end
-@@ -15988,8 +16013,9 @@ namespace
+@@ -15988,8 +16022,9 @@ namespace
  // ps_neg/mr/nabs/abs compiled inline (3 and 4 are taken by 0084 and 0083).
  // 6 (0105): FPU ops outside the direct tier stay in the region, interpreted.
  // 7 (0108): region byte swaps as two rotates. 8 (0109): regions of up to
