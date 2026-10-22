@@ -25,7 +25,7 @@
       "commit": "01e0577914a75a2569c846778c2f93aa8e6feddd"
     }
   },
-  "patchSeriesSha256": "5a08bd1accca17e438a0b97231ef5200f4c516e650224dc284ee27d331581c20",
+  "patchSeriesSha256": "7b1d6790290ec761efbb39b153b017efbcfa8b15472e33df390e40077718445d",
   "patches": [
     {
       "order": 1,
@@ -640,11 +640,19 @@
       "cwd": ".",
       "hashMode": "lf-normalized",
       "path": "patches/dolphin-wasm/snapshot/0087-native-ps-sum-neg-res.patch",
-      "size": 11748,
-      "sha256": "468d5c2140edcd060f246c759dcc2cb6aef41c36b8e6fa014782484c03eed243"
+      "size": 12319,
+      "sha256": "5ada2f6672663d1014ed0fc026dde0ce951232727c131d4d1f9a1f97d2703060"
     },
     {
       "order": 78,
+      "cwd": ".",
+      "hashMode": "lf-normalized",
+      "path": "patches/dolphin-wasm/snapshot/0088-region-idle-loops-outside.patch",
+      "size": 2762,
+      "sha256": "15c7127637fa3550e9a8d7d6850afb80f53548d7536a5252ed75e416bebab9d0"
+    },
+    {
+      "order": 79,
       "cwd": ".",
       "hashMode": "lf-normalized",
       "path": "patches/dolphin-wasm/snapshot/0091-no-wasm-code-under-mmu.patch",
@@ -652,7 +660,7 @@
       "sha256": "d169775dc85c7e756561439fb1da2f749d3a774f0abd2b0dc0116017ed67a46d"
     },
     {
-      "order": 79,
+      "order": 80,
       "cwd": ".",
       "hashMode": "lf-normalized",
       "path": "patches/dolphin-wasm/snapshot/0099-ax-hle-timing.patch",
@@ -660,7 +668,7 @@
       "sha256": "fcf883f10294f89b4660891765bba842259213b7ebebbf80e6815cb0b083f6b5"
     },
     {
-      "order": 80,
+      "order": 81,
       "cwd": "Externals/SFML/SFML",
       "hashMode": "lf-normalized",
       "path": "patches/dolphin-wasm/submodules/0001-sfml-emscripten-config.patch",
@@ -668,7 +676,7 @@
       "sha256": "f82197a21fe982ad83f6ee7bbf5a03839b1cebd4d64da3eab11263842bf61d89"
     },
     {
-      "order": 81,
+      "order": 82,
       "cwd": "Externals/xxhash/xxHash",
       "hashMode": "lf-normalized",
       "path": "patches/dolphin-wasm/submodules/0002-xxhash-wasm-simd-scalar.patch",

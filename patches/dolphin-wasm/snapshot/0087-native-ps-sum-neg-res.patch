@@ -283,3 +283,15 @@ diff --git a/Source/Core/Core/PowerPC/CachedInterpreter/CachedInterpreter.cpp b/
      return false;
  
    case 10:  // cmpli
+@@ -15289,8 +15509,9 @@ namespace
+ {
+ // Bumped whenever the code the translator emits changes (cache keys).
+ // 2: modules carry their heap layout (region-layout); version 1 modules have
+-// none and would never install.
+-constexpr u32 AOT_COMPILER_VERSION = 2;
++// none and would never install. 5 (0087): ps_sum0/1, ps_res, fres and
++// ps_neg/mr/nabs/abs compiled inline (3 and 4 are taken by 0084 and 0083).
++constexpr u32 AOT_COMPILER_VERSION = 5;
+ constexpr u32 AOT_MAX_FRAGMENT_BYTES = 1u << 20;
+ thread_local std::vector<u32> t_aot_out;
+ u8* s_aot_ram = nullptr;

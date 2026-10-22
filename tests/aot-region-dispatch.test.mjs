@@ -9,9 +9,11 @@
 import assert from "node:assert/strict";
 import { createHash } from "node:crypto";
 import test from "node:test";
+import { fileURLToPath } from "node:url";
 
 import { imageFromDol } from "../src/aot-image.js";
 import { planDol } from "../src/aot-plan.js";
+import { coreStatus } from "../tools/core-artifacts.mjs";
 import { assembleRegion } from "../src/aot-region-module.js";
 import { asm, assemble, buildDol } from "./aot-asm.mjs";
 import { HELPER_SIGNATURES, STOP, functionFragments, loadAotCore, regionGroups, seedGprs } from "./helpers/aot-core-equivalence.mjs";
@@ -373,4 +375,40 @@ test("under the MMU queued regions are not installed, and the skips are counted"
   } finally {
     core.setMMUMode(false);
   }
+});
+
+// 0088: an idle loop inside a region (a block looping to its own start,
+// PPCAnalyzer::IsBusyWaitLoop) must come back to the dispatcher, where the
+// block path's CheckIdle skips it (CoreTiming::Idle). Before, the region cut
+// the block before its branch, went on at the branch's address (no idle loop
+// seen from there) and spun inside the region until the slice ran out. The
+// Node core has no CPU loop to run CheckIdle, so the test checks what the
+// skip needs: the region stops at the loop's start, a few cycles in.
+const idleSkip88 = skip || ((await coreStatus(fileURLToPath(new URL("..", import.meta.url)))).current
+  ? false : "the core in cores/dolphin predates these sources (CI builds this branch's core)");
+test("an idle loop inside a region returns to the dispatcher at its start instead of spinning to the end of the slice", { skip: idleSkip88 }, () => {
+  const IDLE = assemble(TEXT, [
+    "wait", asm.addi(5, 5, 1),
+    "wait_loop", lwz(3, 4, 0), asm.cmplwi(3, 0), (pc, l) => asm.beq(pc, l.wait_loop),
+    "after", asm.addi(6, 6, 1), asm.blr()
+  ]);
+  const dol = buildDol({ textAddr: TEXT, text: IDLE.words, entry: IDLE.labels.wait });
+  const { image, entryPoint } = imageFromDol(dol);
+  const plan = planDol({ image, entryPoint, gameId: "TEST01", dolBytes: dol, options: { gapFill: false } });
+  for (const s of image.segments) core.load(s.start, s.bytes);
+  core.invalidate(TEXT, 4 * IDLE.words.length);
+  core.setRegionsEnabled(true);
+  for (const group of regionGroups(plan, 100)) {
+    const fragments = group.flatMap(functionFragments(core));
+    const { bytes, entries } = assembleRegion(fragments, { helpers: HELPER_SIGNATURES, pcOffset: core.pcOffset, memoryPages: core.memoryPages });
+    core.queueRegion(bytes, entries.map(([pc]) => pc), group.map((f) => ({ ranges: f.ranges, hash: f.hash })));
+  }
+  core.serviceRegions();
+  const gprs = seedGprs(1);
+  gprs[4] = 0x80100000; // a zero word: the loop never ends by itself
+  const budget = 400000;
+  core.reset(gprs, IDLE.labels.wait, STOP, budget);
+  assert.equal(core.dispatchRegion(), 1, "the region runs from its entry");
+  assert.equal(core.pc() >>> 0, IDLE.labels.wait_loop, "back to the dispatcher at the idle loop's start");
+  assert.ok(budget - core.downcount() < 100, `only the block before the loop ran (${budget - core.downcount()} cycles), not the slice`);
 });
