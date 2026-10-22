@@ -55,7 +55,7 @@ test("the core translates a block into a fragment the region assembler links", {
   for (const r of fragment.relocs) if (r.kind === "import") assert.ok(HELPER_SIGNATURES[r.name], `known helper ${r.name}`);
   const { bytes, entries } = assembleRegion([fragment], { helpers: HELPER_SIGNATURES, pcOffset: core.pcOffset, memoryPages: core.memoryPages });
   assert.deepEqual(entries, [[DOUBLE, 0]]);
-  assert.deepEqual(fragment.relocs.map((r) => r.kind), ["dispatch"], "blr leaves through the dispatcher");
+  assert.deepEqual(fragment.relocs.map((r) => r.kind).filter((k) => k !== "hint"), ["dispatch"], "blr leaves through the dispatcher");
   assert.ok(core.compile(bytes) > 0, "the core compiles and links the region module");
   assert.deepEqual(regionModuleEntries(new WebAssembly.Module(bytes)), [DOUBLE], "entries travel with the module (cache loads)");
 });

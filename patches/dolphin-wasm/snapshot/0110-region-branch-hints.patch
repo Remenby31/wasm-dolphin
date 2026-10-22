@@ -1,0 +1,138 @@
+diff --git a/Source/Core/Core/PowerPC/CachedInterpreter/CachedInterpreter.cpp b/Source/Core/Core/PowerPC/CachedInterpreter/CachedInterpreter.cpp
+--- a/Source/Core/Core/PowerPC/CachedInterpreter/CachedInterpreter.cpp
++++ b/Source/Core/Core/PowerPC/CachedInterpreter/CachedInterpreter.cpp
+@@ -2853,9 +2853,20 @@ struct WasmFragmentRelocs
+   std::vector<Reloc> relocs;
+   std::vector<u8> code;  // the function body (locals, expression, end) once built
+   u32 cycles = 0;        // what the block's RunWasmBlock would take from downcount
++  // Patch 0110: offsets of the body's `if` opcodes and whether their true arm
++  // is likely (the fast memory path) or not (a halt): the region module
++  // carries them as wasm branch hints.
++  std::vector<std::pair<std::size_t, u8>> hints;
+ };
+ thread_local WasmFragmentRelocs* s_wasm_fragment_relocs = nullptr;
+ 
++// Records the `if` about to be emitted at body.size() (fragment mode only).
++inline void HintNextIf(const std::vector<u8>& body, bool likely)
++{
++  if (s_wasm_fragment_relocs)
++    s_wasm_fragment_relocs->hints.emplace_back(body.size(), likely ? 1 : 0);
++}
++
+ void EmitPaddedU32Leb(std::vector<u8>& out, u32 value)
+ {
+   for (int i = 0; i < 4; ++i, value >>= 7)
+@@ -4238,6 +4249,7 @@ void EmitReadU32MaybeDirect(std::vector<u8>& body, const WasmStateLayout& layout
+   EmitU32Leb(body, 3);
+   EmitI32Const(body, layout.ram_size_real - sizeof(u32));
+   body.push_back(0x4d);
++  HintNextIf(body, true);  // fast path in RAM
+   body.push_back(0x04);
+   body.push_back(0x7f);
+   EmitHeapBase(body, layout.ram_base, WASM_HEAP_RAM);
+@@ -4263,6 +4275,7 @@ void EmitReadU8MaybeDirect(std::vector<u8>& body, const WasmStateLayout& layout)
+   EmitU32Leb(body, 3);
+   EmitI32Const(body, layout.ram_size_real - sizeof(u8));
+   body.push_back(0x4d);
++  HintNextIf(body, true);  // fast path in RAM
+   body.push_back(0x04);
+   body.push_back(0x7f);
+   EmitHeapBase(body, layout.ram_base, WASM_HEAP_RAM);
+@@ -4286,6 +4299,7 @@ void EmitReadU16MaybeDirect(std::vector<u8>& body, const WasmStateLayout& layout
+   EmitU32Leb(body, 3);
+   EmitI32Const(body, layout.ram_size_real - sizeof(u16));
+   body.push_back(0x4d);
++  HintNextIf(body, true);  // fast path in RAM
+   body.push_back(0x04);
+   body.push_back(0x7f);
+   EmitHeapBase(body, layout.ram_base, WASM_HEAP_RAM);
+@@ -4325,6 +4339,7 @@ void EmitWriteU32MaybeDirect(std::vector<u8>& body, const WasmStateLayout& layou
+   EmitU32Leb(body, 3);
+   EmitI32Const(body, layout.ram_size_real - sizeof(u32));
+   body.push_back(0x4d);
++  HintNextIf(body, true);  // fast path in RAM
+   body.push_back(0x04);
+   body.push_back(0x40);
+   EmitBswap32FromLocal(body, 2);
+@@ -4352,6 +4367,7 @@ void EmitWriteU8MaybeDirect(std::vector<u8>& body, const WasmStateLayout& layout
+   EmitU32Leb(body, 3);
+   EmitI32Const(body, layout.ram_size_real - sizeof(u8));
+   body.push_back(0x4d);
++  HintNextIf(body, true);  // fast path in RAM
+   body.push_back(0x04);
+   body.push_back(0x40);
+   EmitHeapBase(body, layout.ram_base, WASM_HEAP_RAM);
+@@ -4377,6 +4393,7 @@ void EmitWriteU16MaybeDirect(std::vector<u8>& body, const WasmStateLayout& layou
+   EmitU32Leb(body, 3);
+   EmitI32Const(body, layout.ram_size_real - sizeof(u16));
+   body.push_back(0x4d);
++  HintNextIf(body, true);  // fast path in RAM
+   body.push_back(0x04);
+   body.push_back(0x40);
+   EmitBswap16FromLocal(body, 2);
+@@ -4488,6 +4505,7 @@ bool EmitFmhTryRangeCheck(std::vector<u8>& body, const WasmStateLayout& layout,
+ 
+ void EmitImportedHaltCheck(std::vector<u8>& body)
+ {
++  HintNextIf(body, false);  // a helper rarely halts
+   body.push_back(0x04);
+   body.push_back(0x40);
+   // A block module returns 1 (halted); a region fragment 2 (stopped), since 1
+@@ -15628,6 +15646,7 @@ struct FragmentBlock
+   u32 start = 0;
+   std::vector<u8> expr;
+   std::vector<WasmFragmentRelocs::Reloc> relocs;  // offsets in expr
++  std::vector<std::pair<u32, u8>> hints;          // 0110: `if` offsets in expr, likely
+   u32 cycles = 0;
+   std::vector<u32> successors;
+   u32 jump_target = UINT32_MAX;
+@@ -15742,6 +15761,8 @@ bool BuildFragmentBlock(Core::System& system, u32 pc, u32 limit, FragmentBlock*
+   out->relocs = fragment.relocs;
+   for (auto& reloc : out->relocs)
+     reloc.offset -= WASM_BLOCK_LOCALS.size();
++  for (const auto& [at, likely] : fragment.hints)
++    out->hints.emplace_back(static_cast<u32>(at - WASM_BLOCK_LOCALS.size()), likely);
+   out->cycles = fragment.cycles;
+   if (!ends_with_branch)
+   {
+@@ -15778,8 +15799,9 @@ struct RegionFragment
+   struct Reloc
+   {
+     u32 offset;
+-    u32 kind;   // 0 import, 1 jump, 2 dispatch, 3 heap site
+-    u32 value;  // helper index, target pc, 0, heap: base (bit 0) and form (bit 1)
++    u32 kind;   // 0 import, 1 jump, 2 dispatch, 3 heap site, 4 branch hint (0110)
++    u32 value;  // helper index, target pc, 0, heap: base (bit 0) and form (bit 1),
++                // hint: 1 if the `if` at offset is likely
+   };
+   std::vector<Reloc> relocs;
+ };
+@@ -15896,6 +15918,8 @@ bool BuildRegionFragment(Core::System& system, u32 entry_pc, std::span<const u32
+       out->relocs.push_back({at + static_cast<u32>(reloc.offset), 0,
+                              static_cast<u32>(it - WASM_IMPORT_NAMES.begin())});
+     }
++    for (const auto& [offset, likely] : b.hints)
++      out->relocs.push_back({at + offset, 4, likely});
+     EmitLocalGet(code, 0);
+     EmitLocalGet(code, 0);
+     load(npc_offset);
+@@ -15909,6 +15933,7 @@ bool BuildRegionFragment(Core::System& system, u32 entry_pc, std::span<const u32
+     EmitLocalGet(code, 0);
+     load(downcount_offset);
+     EmitI32Const(code, 0);
++    out->relocs.push_back({static_cast<u32>(code.size()) + 1, 4, 0});  // downcount out: unlikely
+     code.insert(code.end(), {0x4c, 0x04, 0x40});  // i32.le_s; if
+     EmitI32Const(code, 0);
+     code.insert(code.end(), {0x0f, 0x0b});  // return; end
+@@ -15988,8 +16013,9 @@ namespace
+ // ps_neg/mr/nabs/abs compiled inline (3 and 4 are taken by 0084 and 0083).
+ // 6 (0105): FPU ops outside the direct tier stay in the region, interpreted.
+ // 7 (0108): region byte swaps as two rotates. 8 (0109): regions of up to
+-// 256 blocks, under a 480 KB cap.
+-constexpr u32 AOT_COMPILER_VERSION = 8;
++// 256 blocks, under a 480 KB cap. 9 (0110): region modules carry wasm branch
++// hints.
++constexpr u32 AOT_COMPILER_VERSION = 9;
+ constexpr u32 AOT_MAX_FRAGMENT_BYTES = 1u << 20;
+ thread_local std::vector<u32> t_aot_out;
+ u8* s_aot_ram = nullptr;

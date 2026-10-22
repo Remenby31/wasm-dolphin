@@ -311,6 +311,16 @@ on functions of ~750 KB, and at 256 blocks a few functions of a commercial
 disc reached ~660 KB. Region modules get larger (median 2.2 KB) and a
 translate slice gets longer. Compiler version 8.
 
+## Branch hints (patch 0110, 2026-10-22)
+
+The core marks the `if` opcodes of region code whose outcome it knows:
+the fast memory path (the address is in RAM) is likely, while a halt after a
+helper and the downcount running out are unlikely. They travel as reloc
+kind 4 (offset, 1 when likely) and patch nothing. The assembler writes them
+as a `metadata.code.branch_hint` custom section (wasm branch hinting) before
+the code section, so V8 lays out the cold arms out of line. An engine that
+doesn't know the section ignores it. Compiler version 9.
+
 ## MMU mode (patch 0091, with dispatch's 0090, 2026-10-22)
 
 Under the MMU (bMMU, set by a game's INI) no wasm code of ours runs. The
