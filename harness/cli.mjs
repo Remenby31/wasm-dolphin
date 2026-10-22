@@ -767,7 +767,7 @@ export async function abCompare({ spec, specDir, values, dir, baseline, candidat
   // (calmLock; each cell's gate goes through abLock).
   const lockWait = Number(values["lock-wait"] ?? 1800);
   const log = (m) => console.log(`[harness] ${m}`);
-  abLock = await calmLock({ maxLoad: Number(spec.maxLoad), calmWait: lockWait, log: (m) => log(`before the lock: ${m}`), acquire: () => acquirePerfLock({ name: `harness ab ${spec.name ?? "matrix"} (${REPO_ROOT})`, waitSec: lockWait, log }) });
+  abLock = await calmLock({ maxLoad: Number(spec.maxLoad), calmWait: lockWait, log: (m) => log(`before the lock: ${m}`), acquire: () => acquirePerfLock({ name: `harness ab ${spec.name ?? "matrix"} (${REPO_ROOT})`, waitSec: lockWait, log }), retakeOnGiveUp: true });
   try {
     return await abCompareLocked({ spec, specDir, values, dir, baseline, candidate, accept, known, plan });
   } finally {
