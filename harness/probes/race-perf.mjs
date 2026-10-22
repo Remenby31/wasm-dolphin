@@ -17,6 +17,7 @@
 //     [--display] [--unique-frames secs] [--region-sample N [--region-secs 10]] [--mem-stats] [--baseline-query "..."]
 //     [--calm-wait S (default --lock-wait): wait for load ≤ --max-load before taking the lock]
 //     [--chrome-args "--flag …"] [--baseline-chrome-args "--flag …"]
+//     [--emulated-window S [--emulated-warmup W (default --warmup)] [--emulated-poll-ms 100]]
 //
 // - Pairing and interleaving: run i measures both sides back to back, the
 //   order alternating (base, head | head, base | …), so drift on the machine
@@ -43,6 +44,16 @@
 //   summary.json (chrome.sideArgs): such a result is never stock Chrome for
 //   kpi-report. Each run also records bootMs, from the Chrome launch to the
 //   session ready (boot, compilations included).
+// - --emulated-window S: the window is S GUEST seconds instead of --secs host
+//   seconds. With a host-time window the faster side covers another stretch
+//   of the scene (another idle share), which biases the pair (PROGRAM.md,
+//   2026-10-22). Each run loads the savestate, pauses, presses the key,
+//   resumes, runs W guest seconds, then measures S guest seconds; node polls
+//   the core's ticks every --emulated-poll-ms during the window (the one
+//   page call allowed in it). speed is then guest seconds covered over host
+//   seconds; the run records guestTicksStart/End, guestSecondsCovered,
+//   hostMs, overshootTicks and speedVi (the VI timeline's, same span), and
+//   --counters are divided by the ticks covered.
 // - --warm boots again in the same profile (JIT cache in IndexedDB) and
 //   measures again: cold and warm caches on the same run.
 // - Region JIT counters (P4, lib/jit-region-stats.mjs): off by default. With
@@ -78,6 +89,7 @@ import { consistentRead, decodeRegionStats, poolStats, regionShares, topMisses }
 import { consistentMemRead, decodeMemStats, memAccessShares, poolMemStats } from "../lib/mem-access-stats.mjs";
 import { summarizePcSamples } from "../../src/harness-pc-sampler.js";
 import { checkPerfAccess, instructionsPerGuestCycle, perfCounters } from "../lib/perf-counters.mjs";
+import { emulatedStart } from "../lib/emulated-window.mjs";
 
 const HOMEBREW_OUT = path.join(REPO_ROOT, "harness", "homebrew", "out");
 export const STATE_ROUTE = "**/__harness_state.sav";
@@ -158,9 +170,12 @@ export async function measure(session, o) {
   const { page } = session;
   const loaded = await loadHarnessState(page, session.url);
   if (!loaded?.loaded) throw new Error(`savestate load failed: ${JSON.stringify(loaded)}`);
-  if (o.hold) await page.keyboard.down(o.hold);
+  // --emulated-window: the key is pressed while the core is paused, and the
+  // warmup and the window are counted in guest seconds (lib/emulated-window.mjs).
+  if (o.hold && !o.emulatedWindow) await page.keyboard.down(o.hold);
   try {
-    await page.waitForTimeout(o.warmup * 1000);
+    const emu = o.emulatedWindow ? await emulatedStart(page, { warmup: o.emulatedWarmup, pollMs: o.emulatedPollMs, press: o.hold ? () => page.keyboard.down(o.hold) : undefined }) : null;
+    if (!emu) await page.waitForTimeout(o.warmup * 1000);
     // A core without the sampler export (older trunk) is measured anyway;
     // the run says why it has no PC histogram.
     const pcStart = o.pcsample ? await workerRequest(page, "validationPcSampler", { action: "start", periodMs: o.pcsample }, 10000) : null;
@@ -173,7 +188,14 @@ export async function measure(session, o) {
     // The window: node timers only. The rings (VI 8192, presents 16384)
     // hold far more than a window, so nothing is read until it ends.
     const loads = [], threads = [];
-    for (let s = 0; s < o.secs; s += 1) {
+    // Emulated: node polls the guest ticks (one worker call per poll).
+    const emulated = emu && await emu.window(o.emulatedWindow, {
+      poll: (t, fraction) => {
+        loads.push(os.loadavg()[0]);
+        if (fraction >= 0.5 && threads.length === 0) threads.push(rendererThreads(session.profileDir));
+      }
+    });
+    for (let s = 0; !emu && s < o.secs; s += 1) {
       await new Promise((r) => setTimeout(r, 1000));
       loads.push(os.loadavg()[0]);
       if (s === Math.floor(o.secs / 2)) threads.push(rendererThreads(session.profileDir));
@@ -229,7 +251,10 @@ export async function measure(session, o) {
       load1: { min: round(Math.min(...loads), 2), median: round(medianLoad, 2), max: round(Math.max(...loads), 2), limit: o.maxLoad },
       overloaded: medianLoad > o.maxLoad,
       complete: timeline.complete,
-      speed: round(core.speed), speedP5: round(core.speedP5), speedMin: round(core.speedMin),
+      // Emulated: the speed over the guest seconds the window covered (the
+      // VI timeline's own over the same span kept as speedVi).
+      ...(emulated ? { ...emulated, speed: emulated.speed, speedVi: round(core.speed) } : { speed: round(core.speed) }),
+      speedP5: round(core.speedP5), speedMin: round(core.speedMin),
       gameFps: info?.vis ?? null,
       presents: pres.presents, viOutputs: timeline.vi.length,
       // --display: what the screen showed (one worker rAF per BeginFrame).
@@ -413,6 +438,7 @@ async function main() {
       baseline: { type: "string" }, candidate: { type: "string" },
       config: { type: "string", default: "wgpu" }, query: { type: "string" },
       runs: { type: "string", default: "4" }, "min-pairs": { type: "string" }, "load-wait": { type: "string", default: "300" }, "calm-wait": { type: "string" }, warmup: { type: "string", default: "25" }, secs: { type: "string", default: "20" },
+      "emulated-window": { type: "string" }, "emulated-warmup": { type: "string" }, "emulated-poll-ms": { type: "string", default: "100" },
       hold: { type: "string", default: "KeyX" }, warm: { type: "boolean", default: false },
       "max-load": { type: "string" }, "lock-wait": { type: "string", default: "1800" },
       pcsample: { type: "string" }, symbols: { type: "string" }, "region-sample": { type: "string" }, "region-secs": { type: "string", default: "10" }, counters: { type: "boolean", default: false }, "unique-frames": { type: "string" }, display: { type: "boolean", default: false }, "mem-stats": { type: "boolean", default: false }, "baseline-query": { type: "string" }, "chrome-args": { type: "string" }, "baseline-chrome-args": { type: "string" },
@@ -445,6 +471,13 @@ async function main() {
     iso, state, port: num(values, "port", { min: 1, int: true }), query, runs,
     minPairs: values["min-pairs"] ? num(values, "min-pairs", { min: 2, int: true }) : Math.min(runs, 4),
     warmup: num(values, "warmup", { min: 0 }), secs: num(values, "secs", { min: 2, int: true }),
+    // --emulated-window S: S guest seconds after --emulated-warmup W guest
+    // seconds (default: --warmup), ticks polled every --emulated-poll-ms.
+    ...(values["emulated-window"] ? {
+      emulatedWindow: num(values, "emulated-window", { min: 1 }),
+      emulatedWarmup: values["emulated-warmup"] == null ? num(values, "warmup", { min: 0 }) : num(values, "emulated-warmup", { min: 0 }),
+      emulatedPollMs: num(values, "emulated-poll-ms", { min: 10, int: true })
+    } : {}),
     hold: values.hold || null, warm: values.warm,
     maxLoad: values["max-load"] ? num(values, "max-load", { min: 0.1 }) : Math.max(2, os.cpus().length / 4),
     loadWait: num(values, "load-wait", { min: 0 }),
@@ -557,7 +590,9 @@ async function main() {
   const summary = {
     probe: "race-perf", at: new Date().toISOString(),
     chrome,
-    iso: path.basename(iso), state: path.basename(state), query: o.query, baselineQuery: sides.baseline?.query ?? null, warmupSec: o.warmup, secs: o.secs, hold: o.hold, maxLoad: o.maxLoad,
+    iso: path.basename(iso), state: path.basename(state), query: o.query, baselineQuery: sides.baseline?.query ?? null, warmupSec: o.warmup, secs: o.secs,
+    // Window in guest seconds (null: host seconds, --secs).
+    emulatedWindow: o.emulatedWindow ? { secs: o.emulatedWindow, warmup: o.emulatedWarmup, pollMs: o.emulatedPollMs } : null, hold: o.hold, maxLoad: o.maxLoad,
     sides: Object.fromEntries(Object.entries(sides).map(([n, s]) => [n, s.label])),
     runs: runsDone.length, failed, gaveUp,
     candidate: { cold: summarize("candidate", "cold"), warm: summarize("candidate", "warm") },

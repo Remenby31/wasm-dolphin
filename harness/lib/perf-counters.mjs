@@ -34,7 +34,7 @@ export function parsePerfCsv(text) {
 
 // The busiest thread of the renderer(s) of `profileDir`, from /proc ticks
 // over `ms`: the emulated CPU thread in a race (saturated).
-async function busiestThread(profileDir, ms = 500) {
+export async function busiestThread(profileDir, ms = 500) {
   const ps = execFileSync("ps", ["-A", "-o", "pid=,args="], { encoding: "utf8", maxBuffer: 32 << 20 });
   const pids = ps.split("\n").filter((l) => l.includes(profileDir) && l.includes("--type=renderer")).map((l) => l.trim().split(/\s+/)[0]);
   const ticks = () => {
@@ -80,10 +80,14 @@ export function perfCounters(outDir = mkdtempSync(path.join(os.tmpdir(), "perf-c
   };
 }
 
-// Host instructions per guest cycle of one window (race-perf's record).
+// Host instructions per guest cycle of one window (race-perf's record): over
+// the guest ticks it covered when known (--emulated-window), else from its
+// speed and host length.
 export function instructionsPerGuestCycle(cold) {
   const c = cold?.counters;
-  if (!c || c.error || !c.instructions || !cold.speed || !cold.windowMs) return null;
+  if (!c || c.error || !c.instructions) return null;
+  if (cold.guestTicks > 0) return c.instructions / cold.guestTicks;
+  if (!cold.speed || !cold.windowMs) return null;
   return c.instructions / ((cold.speed / 100) * GUEST_HZ * (cold.windowMs / 1000));
 }
 

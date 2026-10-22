@@ -2,9 +2,15 @@
 // SPDX-License-Identifier: MIT
 
 import assert from "node:assert/strict";
+import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, symlinkSync, writeFileSync } from "node:fs";
+import os from "node:os";
+import path from "node:path";
 import test from "node:test";
 
-import { armEffects, bootOrder, GUEST_HZ, instructionsPerGuestCycle, laneOf, parsePerfCsv } from "../harness/probes/race-multi.mjs";
+import { claim, OWNER_FILE } from "../harness/lib/ownership.mjs";
+import { copySeedProfile } from "../harness/lib/session.mjs";
+
+import { armEffects, barrier, bootOrder, chromeLogLines, parseJitStats, GUEST_HZ, instructionsPerGuestCycle, laneOf, parsePerfCsv, waitRegionsQuiescent } from "../harness/probes/race-multi.mjs";
 
 test("race-multi: a cyclic Latin square, every arm on every lane equally", () => {
   const seen = Array.from({ length: 3 }, () => [0, 0, 0]);
@@ -54,4 +60,95 @@ test("race-multi: boot order rotated too, independently of the lanes", () => {
   const pairs = new Set();
   for (let run = 1; run <= 3; run += 1) bootOrder(run, 3).forEach((a, rank) => pairs.add(`${laneOf(a, run, 3)}/${rank}`));
   assert.equal(pairs.size, 9);
+});
+
+test("race-multi --aot-seed: the window waits for a quiescent region pipeline", async () => {
+  const seq = (states) => { let i = 0; return async () => states[Math.min(i++, states.length - 1)]; };
+  const p = (queued, installed, refused = 0, dropped = 0) => ({ queued, installed, refused, dropped, pending: queued - installed - refused - dropped });
+  const fast = { everyMs: 0, sleep: async () => {} };
+  // Installs still arriving, then stable for 3 reads.
+  const g = await waitRegionsQuiescent(seq([p(140, 90), p(140, 130), p(143, 140, 3), p(143, 140, 3), p(143, 140, 3)]), fast);
+  assert.equal(g.quiescent, true);
+  assert.equal(g.installed, 140);
+  assert.equal(g.pending, 0);
+  // Pending forever: refused after the timeout, with what was left.
+  const stuck = await waitRegionsQuiescent(seq([p(143, 100)]), { ...fast, timeoutMs: -1 });
+  assert.equal(stuck.quiescent, false);
+  assert.match(stuck.why, /43 pending/);
+  // A core without the region pipeline says so.
+  assert.equal((await waitRegionsQuiescent(async () => null, fast)).why, "no region pipeline in this core");
+});
+
+test("race-multi --aot-seed: the arms open their windows together", async () => {
+  const arrive = barrier(3, 1000);
+  const order = [];
+  const arm = (i, delay) => new Promise((r) => setTimeout(r, delay)).then(arrive).then((all) => order.push([i, all]));
+  await Promise.all([arm(0, 30), arm(1, 0), arm(2, 60)]);
+  assert.deepEqual(order.map(([, all]) => all), [true, true, true]);
+  // An arm that never comes: the others go after the timeout, told so.
+  const lone = barrier(2, 20);
+  assert.equal(await lone(), false);
+});
+
+test("seed profile: copied with its caches, never its locks nor its owner", () => {
+  const root = mkdtempSync(path.join(os.tmpdir(), "seed-profile-"));
+  try {
+    const seed = path.join(root, "seed"), dest = path.join(root, "dest");
+    mkdirSync(path.join(seed, "Default", "File System"), { recursive: true });
+    writeFileSync(path.join(seed, "Default", "File System", "regions.bin"), "cache");
+    writeFileSync(path.join(seed, OWNER_FILE), JSON.stringify({ pid: 1 }));
+    symlinkSync("spark-5512-123", path.join(seed, "SingletonLock"));
+    mkdirSync(dest);
+    copySeedProfile(seed, dest);
+    assert.equal(readFileSync(path.join(dest, "Default", "File System", "regions.bin"), "utf8"), "cache");
+    assert.equal(existsSync(path.join(dest, OWNER_FILE)), false);
+    assert.equal(existsSync(path.join(dest, "SingletonLock")), false);
+    // The copy can be claimed (2026-10-22: the copied marker made it "already claimed").
+    assert.doesNotThrow(() => claim(dest, root, "chrome-profile"));
+  } finally {
+    rmSync(root, { recursive: true, force: true });
+  }
+});
+
+test("race-multi --aot-seed: a stable count below the seed's is not done", async () => {
+  const seq = (states) => { let i = 0; return async () => states[Math.min(i++, states.length - 1)]; };
+  const p = (installed) => ({ queued: 0, installed, refused: 0, dropped: 0, pending: 0 });
+  const fast = { everyMs: 0, sleep: async () => {} };
+  // 0 installed and stable: done without a target, not with the seed's 143.
+  assert.equal((await waitRegionsQuiescent(seq([p(0)]), fast)).quiescent, true);
+  const ko = await waitRegionsQuiescent(seq([p(0)]), { ...fast, target: 143, timeoutMs: -1 });
+  assert.equal(ko.quiescent, false);
+  assert.match(ko.why, /0 installed, 143 expected/);
+  assert.equal((await waitRegionsQuiescent(seq([p(100), p(143), p(143), p(143)]), { ...fast, target: 143 })).installed, 143);
+});
+
+test("race-multi: the boot's console lines about regions, from chrome.log", () => {
+  const dir = mkdtempSync(path.join(os.tmpdir(), "chrome-log-"));
+  try {
+    writeFileSync(path.join(dir, "chrome.log"), [
+      "[1:1:1022/1:INFO:CONSOLE(1)] \"aot: 143 region modules installed before boot\", source: x",
+      "[1:1:1022/1:INFO:CONSOLE(2)] \"jit-cache: discio recorded 100 new compiles (cache size=2917)\", source: x",
+      "[1:1:1022/1:INFO:CONSOLE(3)] \"unrelated\", source: x",
+      "[1:1:1022/1:WARNING:x.cc] aot outside the console"
+    ].join("\n"));
+    const lines = chromeLogLines(dir);
+    assert.equal(lines.length, 2);
+    assert.match(lines[0], /143 region modules/);
+    assert.deepEqual(chromeLogLines(path.join(dir, "missing")), []);
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test("race-multi: the JIT's counters from the page's frame info", () => {
+  const text = "tier:guarded hotcounts:off jit attempts:4175 compiled:1472 full:1463 partial:9 mixed:0/32768 short:1212/1196 merge:0 regalloc:49 emitfail:0 compilefail:0 enginereject:0 blacklisthit:0 transientreject:3 offthreaddefer:1491 tablefull:0 fmad:0 | imports system:551 | rej19/50:7 reject:33 0 calls";
+  const j = parseJitStats(text);
+  assert.equal(j.attempts, 4175);
+  assert.equal(j.compiled, 1472);
+  assert.equal(j.transientreject, 3);
+  assert.equal(j.blacklisthit, 0);
+  assert.equal(j.offthreaddefer, 1491);
+  assert.equal(j.reject, 33);
+  assert.equal(j.system, undefined); // past the JIT's own segment
+  assert.deepEqual(parseJitStats(null), {});
 });

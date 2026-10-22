@@ -428,6 +428,58 @@ test("race-perf: a change measured during a lock overlap is withheld", () => {
   assert.match(w.withheld, /perf lock overlap: before run 3: another living holder/);
 });
 
+// A page whose core runs `rate` ticks per node ms from `start`; pause and
+// resume are counted, everything else answered as the core would.
+function fakeCorePage({ rate = 1000, start = 5000, perSecond = 486_000_000 } = {}) {
+  const t0 = Date.now(), calls = [];
+  return {
+    calls,
+    evaluate: async (_fn, [type]) => {
+      calls.push(type);
+      if (type === "validationReadCoreProgress") return { coreTicks: start + Math.floor((Date.now() - t0) * rate), coreTicksPerSecond: perSecond };
+      return { ok: true };
+    }
+  };
+}
+
+test("emulated window: covers at least S guest seconds after W, from a paused key press", async () => {
+  const { emulatedStart } = await import("../harness/lib/emulated-window.mjs");
+  // 1000 ticks per ms and 10 000 ticks per guest second: 10 ms per guest second.
+  const page = fakeCorePage({ rate: 1000, perSecond: 10_000 });
+  const order = [];
+  const run = await emulatedStart(page, { warmup: 2, pollMs: 5, press: async () => order.push(page.calls.at(-1)) });
+  assert.deepEqual(order, ["pause"], "the key goes down while the core is paused");
+  assert.ok(page.calls.includes("resume"));
+  const fractions = [];
+  const r = await run.window(3, { poll: (_t, f) => fractions.push(f) });
+  assert.ok(r.guestTicksStart - run.t0.ticks >= 20_000, "warmup of 2 guest seconds");
+  assert.equal(r.guestTicks, r.guestTicksEnd - r.guestTicksStart);
+  assert.ok(r.guestTicks >= 30_000 && r.overshootTicks >= 0);
+  assert.equal(r.guestSecondsCovered, r.guestTicks / 10_000);
+  assert.ok(fractions.at(-1) >= 1 && fractions.length >= 2);
+  assert.deepEqual(r.emulatedWindow, { secs: 3, warmup: 2, pollMs: 5, polls: fractions.length });
+});
+
+test("emulated window: speed is guest seconds over host seconds; a core without ticks is refused", async () => {
+  const { emulatedRecord, emulatedStart } = await import("../harness/lib/emulated-window.mjs");
+  const r = emulatedRecord({
+    t0: { ticks: 0, perSecond: 486e6 }, begin: { ticks: 486e6, at: 1000 }, end: { ticks: 486e6 * 6 + 100, at: 11000, polls: 99 },
+    target: 486e6 * 6, secs: 5, warmup: 1, pollMs: 100
+  });
+  assert.equal(r.overshootTicks, 100);
+  assert.equal(r.hostMs, 10000);
+  assert.equal(r.speed, 50);
+  assert.equal(r.warmupTicks, 486e6);
+  const dead = { evaluate: async (_fn, [type]) => (type === "validationReadCoreProgress" ? { error: "Unknown upstream worker message" } : { ok: true }) };
+  await assert.rejects(emulatedStart(dead, { warmup: 1 }), /no guest ticks/);
+});
+
+test("emulated window: counters are divided by the ticks covered when known", async () => {
+  const { instructionsPerGuestCycle } = await import("../harness/lib/perf-counters.mjs");
+  assert.equal(instructionsPerGuestCycle({ counters: { instructions: 4e9 }, guestTicks: 1e8, speed: 50, windowMs: 1 }), 40);
+  assert.equal(instructionsPerGuestCycle({ counters: { instructions: 486e6 }, speed: 100, windowMs: 1000 }), 1);
+});
+
 // 2026-10-22: a launch on a loaded machine ran without its region cache, every
 // module set aside by the engine for another heap layout before the core saw
 // it. The counters are read whatever the options, so the run says so.
