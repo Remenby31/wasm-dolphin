@@ -57,16 +57,33 @@ export function servedSides(r) {
   }
 }
 
-// The side of `r` that measured trunk (candidate first), or null.
-// `config` (race-perf rows): "default" wants a side without aot=1, "aot" one
-// with it (decision of 2026-10-20: the default is what players have today,
-// aot=1 the track of piste 3).
+// Configurations of the race-perf and TTFF rows (judge, 2026-10-22): the
+// product is what the Salon site ships (video=software, no aot: salon
+// packages/core/src/emulator.ts BASE_PARAMS) and is what the global status
+// counts; the hardware renderer (video=wgpu, "default"/"aot") and aot=1 are
+// trajectory rows.
+export const CONFIGS = {
+  product: { aot: false, product: true, label: "config produit (video=software, sans aot)" },
+  productAot: { aot: true, product: true, label: "config produit avec aot=1" },
+  default: { aot: false, product: false, label: "rendu matériel (video=wgpu), sans aot=1" },
+  aot: { aot: true, product: false, label: "rendu matériel (video=wgpu), aot=1" }
+};
+const queryOf = (j, side, kind) => new URLSearchParams(String((kind === "ttff" || side !== "baseline" ? j.query : j.baselineQuery ?? j.query) ?? ""));
+// The product config renders in software; any other video backend is not it.
+export const sideIsProduct = (j, side, kind = "race-perf") => queryOf(j, side, kind).get("video") === "software";
+export function fitsConfig(r, side, config) {
+  if (!config || !["race-perf", "ttff"].includes(r.kind)) return true;
+  const want = CONFIGS[config];
+  const aot = r.kind === "ttff" ? ttffHasAot(r.json) : sideHasAot(r.json, side);
+  return aot === want.aot && sideIsProduct(r.json, side, r.kind) === want.product;
+}
+
+// The side of `r` that measured trunk (candidate first) in `config`, or null.
 export function trunkSide(r, trunk, { config = null } = {}) {
   const sides = servedSides(r);
   const onTrunk = (s) => s && s.dirty === false && typeof s.commit === "string" && trunk.has(s.commit);
   const order = r.kind === "race-perf" ? ["candidate", "baseline"] : ["candidate"];
-  const fits = (n) => !config || !["race-perf", "ttff"].includes(r.kind) || (config === "aot") === (r.kind === "ttff" ? ttffHasAot(r.json) : sideHasAot(r.json, n));
-  const side = order.find((n) => onTrunk(sides[n]) && fits(n));
+  const side = order.find((n) => onTrunk(sides[n]) && fitsConfig(r, n, config));
   return side ? { side, commit: sides[side].commit } : null;
 }
 
@@ -107,7 +124,7 @@ export function ttffHasAot(j) {
 // The switches a race-perf side booted with (its own query: --baseline-query).
 export function sideFlags(j, side) {
   const q = new URLSearchParams(String((side === "baseline" ? j.baselineQuery ?? j.query : j.query) ?? ""));
-  return ["aot", "jitoffthread", "aotcompiler"].filter((k) => q.has(k))
+  return ["video", "speed", "aot", "jitoffthread", "aotcompiler"].filter((k) => q.has(k))
     .map((k) => (k === "aot" && q.get(k) === "1" && !sideHasAot(j, side) ? "aot=1 sans effet (cœur sans régions)" : `${k}=${q.get(k)}`)).join("&") || null;
 }
 const cold = (j, side) => j[side]?.cold ?? null;
@@ -152,10 +169,13 @@ const DISPATCH_CAVEAT = "indicateur gonflé par l'instrumentation : en mode stat
 // read(json, side, kind) → value; failures(json, side, kind) → reasons that make the row KO.
 export const KPI_ROWS = [
   { id: "pcSpeed", group: "North star", label: "Vitesse course, PC grand public milieu de gamme (modèle P9)", target: 95, unit: "%", better: "higher", from: "manual" },
-  // Default and aot=1 apart; the global status counts the default (counted:
-  // false: shown, verdict given, left out of the counts).
-  { id: "macSpeed", group: "Leviers", label: "Vitesse course, Mac M4 Pro, défaut", target: 160, unit: "%", better: "higher", from: "race-perf", config: "default", read: (j, s) => med(cold(j, s)?.speed), failures: raceFailures },
-  { id: "macSpeedAot", group: "Leviers", label: "Vitesse course, Mac M4 Pro, aot=1 (trajectoire piste 3, hors statut global)", target: 160, unit: "%", better: "higher", from: "race-perf", config: "aot", counted: false, read: (j, s) => med(cold(j, s)?.speed), failures: raceFailures },
+  // The product config counts in the global status; the hardware renderer
+  // and aot=1 are trajectory rows (counted: false: shown, verdict given, left
+  // out of the counts). Judge, 2026-10-22.
+  { id: "macSpeedProduct", group: "Leviers", label: "Vitesse course, Mac M4 Pro, config produit (video=software, ce que voit le joueur)", target: 160, unit: "%", better: "higher", from: "race-perf", config: "product", read: (j, s) => med(cold(j, s)?.speed), failures: raceFailures },
+  { id: "macSpeedProductAot", group: "Leviers", label: "Vitesse course, Mac M4 Pro, config produit avec aot=1 (trajectoire, hors statut global)", target: 160, unit: "%", better: "higher", from: "race-perf", config: "productAot", counted: false, read: (j, s) => med(cold(j, s)?.speed), failures: raceFailures },
+  { id: "macSpeed", group: "Leviers", label: "Vitesse course, Mac M4 Pro, rendu matériel wgpu (trajectoire, hors statut global)", target: 160, unit: "%", better: "higher", from: "race-perf", config: "default", counted: false, read: (j, s) => med(cold(j, s)?.speed), failures: raceFailures },
+  { id: "macSpeedAot", group: "Leviers", label: "Vitesse course, Mac M4 Pro, wgpu + aot=1 (trajectoire piste 3, hors statut global)", target: 160, unit: "%", better: "higher", from: "race-perf", config: "aot", counted: false, read: (j, s) => med(cold(j, s)?.speed), failures: raceFailures },
   // Outside idle skip only (PROGRAM.md, 2026-10-20): a core without
   // idleCycles gives the raw share, shown in the reason, not as the KPI.
   { id: "regionCycleShare", group: "Leviers", label: "Part des cycles invités en régions, hors idle skip", target: 0.9, unit: "share", better: "higher", from: "race-perf", config: "aot", read: (j, s) => (p4Of(j, s)?.cycleBasis === "outside idle skip" ? p4Of(j, s).regionCycleShare : null), why: (j, s) => (p4Of(j, s)?.regionCycleShare != null ? `cœur sans idleCycles : part brute ${Math.round(p4Of(j, s).regionCycleShare * 1000) / 10} %, idle compris` : p4Why(j, s)), detail: (j, s) => idleNote(p4Of(j, s)), failures: raceFailures },
@@ -165,13 +185,16 @@ export const KPI_ROWS = [
   { id: "oracleDivergences", group: "Garde-fous", label: "Divergences à l'oracle (fuzz différentiel)", target: 0, unit: "", better: "zero", from: "fuzz", read: (j) => j.results.reduce((n, r) => n + (r.findings?.length ?? 0), 0) },
   { id: "gateGreen", group: "Garde-fous", label: "Gate de correction vert", target: true, unit: "", better: "true", from: "gate", read: (j) => Boolean(j.decision?.ok), detail: (j) => (j.decision?.ok ? null : j.decision?.reason ?? null) },
   { id: "freezes", group: "Garde-fous", label: "Gels sur 10 courses", target: 0, unit: "", better: "zero", from: ["freeze-loop", "wgpu-freeze"], read: (j, s, kind) => (kind === "freeze-loop" ? j.results.filter((r) => r.checks?.coreFreeze?.status === "fail").length : j.runs.filter((r) => r.verdict === "frozen").length), detail: (j, s, kind) => `sur ${(kind === "freeze-loop" ? j.results : j.runs).length} courses`, failures: (j, s, kind) => (kind === "freeze-loop" ? j.results.filter((r) => r.checks?.coreFreeze?.status === "unjudged").map((r) => `run ${r.run} non jugé`) : j.runs.filter((r) => r.verdict === "unjudged" || r.verdict === "crash").map((r) => `run ${r.run} : ${r.verdict}`)) },
-  { id: "raceFrameP99", group: "Garde-fous", label: "p99 frame course, défaut", target: 33, unit: "ms", better: "lower", from: "race-perf", config: "default", read: (j, s) => med(cold(j, s)?.presentP99Ms), failures: raceFailures },
-  { id: "raceFrameP99Aot", group: "Garde-fous", label: "p99 frame course, aot=1 (hors statut global)", target: 33, unit: "ms", better: "lower", from: "race-perf", config: "aot", counted: false, read: (j, s) => med(cold(j, s)?.presentP99Ms), failures: raceFailures },
+  { id: "raceFrameP99Product", group: "Garde-fous", label: "p99 frame course, config produit", target: 33, unit: "ms", better: "lower", from: "race-perf", config: "product", read: (j, s) => med(cold(j, s)?.presentP99Ms), failures: raceFailures },
+  { id: "raceFrameP99", group: "Garde-fous", label: "p99 frame course, rendu matériel wgpu (trajectoire, hors statut global)", target: 33, unit: "ms", better: "lower", from: "race-perf", config: "default", counted: false, read: (j, s) => med(cold(j, s)?.presentP99Ms), failures: raceFailures },
+  { id: "raceFrameP99Aot", group: "Garde-fous", label: "p99 frame course, wgpu + aot=1 (hors statut global)", target: 33, unit: "ms", better: "lower", from: "race-perf", config: "aot", counted: false, read: (j, s) => med(cold(j, s)?.presentP99Ms), failures: raceFailures },
   { id: "aotcompilerMemory", group: "Garde-fous", label: "Surcoût mémoire aotcompiler", target: 150, unit: "Mo", better: "lower", from: "manual" },
   { id: "optimisationMs", group: "Expérience joueur", label: "Durée d'optimisation au 1er lancement", target: 60000, unit: "ms", better: "lower", from: "first-launch", read: (j) => j.p7?.durationMs ?? null, why: (j) => j.p7Why ?? null, failures: (j) => (j.p7?.failedFirst ?? []).map((f) => `run ${f.run} : ${f.why}`) },
   { id: "secondLaunchRecompiled", group: "Expérience joueur", label: "Régions recompilées au 2e lancement", target: 0, unit: "", better: "zero", from: "first-launch", read: (j) => j.p7?.secondLaunchCompiled ?? null, why: (j) => j.p7Why ?? null, failures: (j) => [...(j.p7?.failedFirst ?? []), ...(j.p7?.failedSecond ?? [])].map((f) => `run ${f.run} : ${f.why}`) },
-  { id: "ttffCold", group: "Expérience joueur", label: "Time-to-first-frame, à froid, défaut", target: 10000, unit: "ms", better: "lower", from: "ttff", config: "default", read: (j) => med(j.cold?.firstContentMs), why: (j) => ttffWhy(j, "cold"), failures: (j) => launchFailures(j.cold) },
-  { id: "ttffWarm", group: "Expérience joueur", label: "Time-to-first-frame, à chaud, défaut", target: 10000, unit: "ms", better: "lower", from: "ttff", config: "default", read: (j) => med(j.warm?.firstContentMs), why: (j) => ttffWhy(j, "warm"), failures: (j) => launchFailures(j.warm) },
+  { id: "ttffColdProduct", group: "Expérience joueur", label: "Time-to-first-frame, à froid, config produit", target: 10000, unit: "ms", better: "lower", from: "ttff", config: "product", read: (j) => med(j.cold?.firstContentMs), why: (j) => ttffWhy(j, "cold"), failures: (j) => launchFailures(j.cold) },
+  { id: "ttffWarmProduct", group: "Expérience joueur", label: "Time-to-first-frame, à chaud, config produit", target: 10000, unit: "ms", better: "lower", from: "ttff", config: "product", read: (j) => med(j.warm?.firstContentMs), why: (j) => ttffWhy(j, "warm"), failures: (j) => launchFailures(j.warm) },
+  { id: "ttffCold", group: "Expérience joueur", label: "Time-to-first-frame, à froid, rendu matériel wgpu (hors statut global)", target: 10000, unit: "ms", better: "lower", from: "ttff", config: "default", counted: false, read: (j) => med(j.cold?.firstContentMs), why: (j) => ttffWhy(j, "cold"), failures: (j) => launchFailures(j.cold) },
+  { id: "ttffWarm", group: "Expérience joueur", label: "Time-to-first-frame, à chaud, rendu matériel wgpu (hors statut global)", target: 10000, unit: "ms", better: "lower", from: "ttff", config: "default", counted: false, read: (j) => med(j.warm?.firstContentMs), why: (j) => ttffWhy(j, "warm"), failures: (j) => launchFailures(j.warm) },
   { id: "ttffColdAot", group: "Expérience joueur", label: "Time-to-first-frame, à froid, aot=1 (hors statut global)", target: 10000, unit: "ms", better: "lower", from: "ttff", config: "aot", counted: false, read: (j) => med(j.cold?.firstContentMs), failures: (j) => launchFailures(j.cold) },
   // The second launch counts as such only with the region cache installed at boot.
   { id: "ttffWarmAot", group: "Expérience joueur", label: "Time-to-first-frame, 2e lancement, aot=1 (avec cache de régions, hors statut global)", target: 10000, unit: "ms", better: "lower", from: "ttff", config: "aot", counted: false, read: (j) => med(j.warm?.firstContentMs), detail: (j) => warmRegionNote(j.aot?.warm), failures: (j) => launchFailures(j.warm) },
@@ -207,7 +230,7 @@ export function kpiTable(results, manual = {}, { trunk = new Set(), accept = { "
     const refused = ofKinds.length - all.length;
     const onTrunk = all.map((r) => ({ r, t: trunkSide(r, trunk, { config: row.config }) })).filter((x) => x.t).sort((a, b) => resultTime(b.r) - resultTime(a.r));
     if (!onTrunk.length && row.config && all.some((r) => trunkSide(r, trunk))) {
-      return { ...base, value: null, status: "n/a", nature: "n/a", why: `aucune ${kinds.join(" / ")} ${row.config === "aot" ? "avec aot=1" : "par défaut (sans aot=1)"} sur trunk` };
+      return { ...base, value: null, status: "n/a", nature: "n/a", why: `aucune ${kinds.join(" / ")} en ${CONFIGS[row.config].label} sur trunk` };
     }
     if (!onTrunk.length) return { ...base, value: null, status: "n/a", nature: "n/a", why: `aucun résultat ${kinds.join(" / ")} sur un commit propre de trunk (${all.length} hors trunk ignoré(s)${refused ? `, ${refused} hors règle ignoré(s) : Chrome non standard ou mesure de jour, max-load > ${ABSOLUTE_MAX_LOAD}` : ""})` };
     const { r, t } = onTrunk[0];
@@ -245,7 +268,7 @@ export function candidateColumn(r, { label = null, note = null } = {}) {
   for (const row of KPI_ROWS) {
     if (![row.from].flat().includes("race-perf")) continue;
     // A row of the other configuration (default vs aot=1) stays empty.
-    if (row.config && (row.config === "aot") !== sideHasAot(r.json, "candidate")) continue;
+    if (!fitsConfig(r, "candidate", row.config)) continue;
     const value = row.read(r.json, "candidate", r.kind);
     const failures = row.failures?.(r.json, "candidate", r.kind) ?? [];
     values[row.id] = { value, status: failures.length ? "KO" : statusOf(meets(row, value)), why: failures.length ? `${failures.length} run(s) en échec` : value == null ? row.why?.(r.json, "candidate") ?? null : null };
