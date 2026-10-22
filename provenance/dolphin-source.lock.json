@@ -25,7 +25,7 @@
       "commit": "01e0577914a75a2569c846778c2f93aa8e6feddd"
     }
   },
-  "patchSeriesSha256": "c2e7030370987bbd10206262ac4796fdae3db2ed5bdb2a957d3bb1ea21e69998",
+  "patchSeriesSha256": "79d8e005be936280ded032eac5ccd9f9afe723cd898cffdab5f04ce1fff1899e",
   "patches": [
     {
       "order": 1,
@@ -647,7 +647,7 @@
       "order": 78,
       "cwd": ".",
       "hashMode": "lf-normalized",
-      "path": "patches/dolphin-wasm/snapshot/0092-regions-flag-plain.patch",
+      "path": "patches/dolphin-wasm/snapshot/0096-regions-flag-plain.patch",
       "size": 2787,
       "sha256": "59105dd7ced59df3997d44acf07a344b3e1b6d62c2950aa8b8a75e056430929a"
     },
