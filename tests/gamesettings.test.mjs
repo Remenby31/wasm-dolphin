@@ -54,6 +54,7 @@ test("section headers as Dolphin reads them: untrimmed '[' first, the name up to
 test("[Dolphin.Core] and [Graphics.Settings] are the other spellings Dolphin maps; values lose their quotes", () => {
   assert.equal(filterIni('[Dolphin.Core]\nMMU = "False"\n', allowlist), "[Core]\nMMU = False\n");
   assert.equal(filterIni("[Graphics.Settings]\nSafeTextureCacheColorSamples = 0\n", allowlist), "[Video_Settings]\nSafeTextureCacheColorSamples = 0\n");
+  assert.equal(filterIni("[Graphics.Hacks]\nXFBToTextureEnable = False\n", allowlist), "[Video_Hacks]\nXFBToTextureEnable = False\n");
 });
 
 test("an empty value is kept: Dolphin reads it as no value, the default", () => {
@@ -62,7 +63,8 @@ test("an empty value is kept: Dolphin reads it as no value, the default", () => 
 
 test("any other spelling or section of an allowlisted key stops the build", () => {
   for (const ini of ["[core]\nMMU = False\n", "[Core]\nmmu = False\n", "[Main.Core]\nMMU = False\n", "[Video]\nMMU = True\n",
-    "[video_settings]\nSafeTextureCacheColorSamples = 0\n", "[GFX.Settings]\nSafeTextureCacheColorSamples = 0\n", "[Video_Hacks]\nSafeTextureCacheColorSamples = 0\n"]) {
+    "[video_settings]\nSafeTextureCacheColorSamples = 0\n", "[GFX.Settings]\nSafeTextureCacheColorSamples = 0\n", "[Video_Hacks]\nSafeTextureCacheColorSamples = 0\n",
+    "[video_hacks]\nXFBToTextureEnable = False\n", "[Video_Settings]\nXFBToTextureEnable = False\n"]) {
     assert.throws(() => filterIni(ini, allowlist, "TST99.ini"), /TST99\.ini/, JSON.stringify(ini));
   }
 });
@@ -120,7 +122,9 @@ test("Dolphin's own folder passes the filter and gives only allowlisted keys", (
 });
 
 const core = await loadAotCore();
-const coreSkip = core && typeof core.module._GameConfigValueForTest === "function" ? false : "the core predates 0097 v2 (CI builds this branch's core)";
+// A core that does not know the newest allowlisted setting answers -2 for it.
+const knowsXfb = () => core.module.ccall("GameConfigValueForTest", "number", ["string", "number", "string"], ["XYZE01", 0, "XFBToTextureEnable"]) !== -2;
+const coreSkip = core && typeof core.module._GameConfigValueForTest === "function" && knowsXfb() ? false : "the core predates 0097 v3 (CI builds this branch's core)";
 
 test("the core embeds the filtered INIs, and its game config applies them in Dolphin's order", { skip: coreSkip }, () => {
   const m = core.module;
@@ -130,11 +134,11 @@ test("the core embeds the filtered INIs, and its game config applies them in Dol
   for (const name of embedded) {
     const text = m.FS.readFile(`${dir}/${name}`, { encoding: "utf8" });
     assert.ok(text.length > 0, name);
-    assert.match(text, /^(\[Core\]\nMMU = (True|False)\n)?(\[Video_Settings\]\nSafeTextureCacheColorSamples = \d*\n)?$/, name);
+    assert.match(text, /^(\[Core\]\nMMU = (True|False)\n)?(\[Video_Settings\]\nSafeTextureCacheColorSamples = \d*\n)?(\[Video_Hacks\]\nXFBToTextureEnable = (True|False)\n)?$/, name);
   }
   // Synthetic discs: ID3, then ID6, then ID6rN, the later file winning.
   const fixtures = {
-    "TST.ini": "[Core]\nMMU = True\n[Video_Settings]\nSafeTextureCacheColorSamples = 512\n",
+    "TST.ini": "[Core]\nMMU = True\n[Video_Settings]\nSafeTextureCacheColorSamples = 512\n[Video_Hacks]\nXFBToTextureEnable = False\n",
     "TSTE01r1.ini": "[Core]\nMMU = False\n[Video_Settings]\nSafeTextureCacheColorSamples = 0\n"
   };
   for (const [name, text] of Object.entries(fixtures)) m.FS.writeFile(`${dir}/${name}`, text);
@@ -146,6 +150,8 @@ test("the core embeds the filtered INIs, and its game config applies them in Dol
     assert.equal(value("TSTE01", 0, "SafeTextureCacheColorSamples"), 512, "the ID3 file sets the samples");
     assert.equal(value("TSTE01", 1, "SafeTextureCacheColorSamples"), 0, "revision 1's file: all samples");
     assert.equal(value("XYZE01", 0, "SafeTextureCacheColorSamples"), 128, "Dolphin's default");
+    assert.equal(value("TSTE01", 0, "XFBToTextureEnable"), 0, "the ID3 file keeps the XFB copy to RAM");
+    assert.equal(value("XYZE01", 0, "XFBToTextureEnable"), 1, "Dolphin's default skips it");
     assert.equal(value("TSTE01", 0, "CPUThread"), -2, "only allowlisted settings");
   } finally {
     for (const name of Object.keys(fixtures)) m.FS.unlink(`${dir}/${name}`);
