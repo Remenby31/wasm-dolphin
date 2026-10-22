@@ -24,9 +24,12 @@
 //   hits both sides alike; the change is the median of per-run ratios.
 // - Speed is the core's own (VI ticks over host time from the VI timeline),
 //   never the page's gameSpeed (5-8 points higher): one measure only.
-// - Machine load: as in the matrix (env.mjs), each side first waits up to
-//   --load-wait s for the 1-minute load to drop under --max-load (default: a
-//   quarter of the cores); a window whose median load is above it fails.
+// - Machine load: the 1-minute load must be under --max-load (default: a
+//   quarter of the cores) before each side, and a window whose median load
+//   is above it fails. Never waited for under the perf lock: loaded, the
+//   lock goes back, the calm is awaited up to --load-wait s outside it, the
+//   lock is taken again in turn and the run played again (both sides); at
+//   most 3 times, and no calm within --load-wait gives the runs up.
 // - The runs are even and the pairs balanced in order (trunk first as often
 //   as head first), with at least --min-pairs valid pairs; otherwise the
 //   change is withheld and the probe exits non-zero.
@@ -82,7 +85,7 @@ import { PRESETS } from "../lib/matrix.mjs";
 import { claim, release } from "../lib/ownership.mjs";
 import { acquirePerfLock } from "../lib/perf-lock.mjs";
 import { openSession, rebootSession } from "../lib/session.mjs";
-import { calmThenLock, loadGaveUp, waitForLoad } from "../lib/env.mjs";
+import { calmThenLock, calmUnderLock, loadGaveUp } from "../lib/env.mjs";
 import { describe, median, percentile, round } from "../lib/stats.mjs";
 import { coreStats, displayStats, hitchList, mergeTimeline, presentationStats } from "../lib/timeline.mjs";
 import { consistentRead, decodeRegionStats, poolStats, regionShares, topMisses } from "../lib/jit-region-stats.mjs";
@@ -373,10 +376,12 @@ export function p4Summary(runs, sides, good = (r) => r && !r.error) {
   };
 }
 
-async function measureSide(side, o) {
-  // As the matrix does (env.mjs): wait for the machine to calm down first,
-  // then judge the window on its median load.
-  const loadGate = await waitForLoad({ maxLoad: o.maxLoad, waitSec: o.loadWait, log: (m) => console.log(`[race-perf] ${side.name}: ${m}`) });
+// Times a pair may let the lock go for the load before giving its runs up.
+const MAX_RELOCKS = 3;
+
+// loadGate: the load before the side (calmUnderLock, outside the lock when
+// loaded); the window is then judged on its median load.
+async function measureSide(side, o, loadGate) {
   const server = await ensureServer({ port: o.port, root: side.root, coreCandidates: o.coreCandidates });
   try {
     const bootStart = performance.now();
@@ -504,10 +509,8 @@ async function main() {
   if (values.baseline) sides.baseline = { ...resolveSide("baseline", values.baseline), query: baselineQuery, chromeArgs: baselineChromeArgs };
   // A calm machine first (--calm-wait, default --lock-wait), then the lock.
   const calmWait = values["calm-wait"] == null ? lockWait : num(values, "calm-wait", { min: 0 });
-  const releaseLock = await calmThenLock({
-    maxLoad: o.maxLoad, calmWait, log: (m) => console.log(`[race-perf] before the lock: ${m}`),
-    acquire: () => acquirePerfLock({ name: `harness race-perf (${REPO_ROOT})`, waitSec: lockWait, log: (m) => console.log(`[race-perf] ${m}`) })
-  });
+  const acquire = () => acquirePerfLock({ name: `harness race-perf (${REPO_ROOT})`, waitSec: lockWait, log: (m) => console.log(`[race-perf] ${m}`) });
+  let releaseLock = await calmThenLock({ maxLoad: o.maxLoad, calmWait, log: (m) => console.log(`[race-perf] before the lock: ${m}`), acquire });
   // A local-only disc never writes into the repo.
   const stamp = `${new Date().toISOString().replace(/[:.]/g, "-").slice(0, 19)}-${process.pid}-${randomBytes(3).toString("hex")}`;
   const outDir = values.out ? path.resolve(values.out) : localOnly
@@ -528,22 +531,37 @@ async function main() {
   };
   checkLock("taken");
   try {
+    let relocks = 0;
     for (let run = 1; run <= o.runs && !gaveUp; run += 1) {
       checkLock(`before run ${run}`);
       const record = { run };
+      let replay = false;
       for (const name of sideOrder(run).filter((n) => sides[n])) {
-        record[name] = await measureSide(sides[name], o);
+        // Loaded: the lock goes back during the wait (--load-wait), and the
+        // run is played again once it is taken back, both sides together.
+        const g = await calmUnderLock({ lock: releaseLock, maxLoad: o.maxLoad, waitSec: o.loadWait, acquire, log: (m) => console.log(`[race-perf] run ${run} ${name}: ${m}`) });
+        releaseLock = g.lock;
+        gaveUp = loadGaveUp(g.gate);
+        if (gaveUp) { console.warn(`[race-perf] run ${run} ${name}: ${gaveUp}`); break; }
+        if (g.relocked) {
+          relocks += 1;
+          checkLock(`taken again in run ${run}`);
+          if (relocks > MAX_RELOCKS) { gaveUp = `the lock was let go for the load ${relocks} times: remaining runs given up`; console.warn(`[race-perf] ${gaveUp}`); break; }
+          replay = true;
+          break;
+        }
+        record[name] = await measureSide(sides[name], o, g.gate);
         const r = record[name];
         console.log(`[race-perf] run ${run} ${name}: ${r.error ?? brief(r.cold)}${r.warm ? ` | warm: ${brief(r.warm)}` : ""}`);
-        gaveUp = loadGaveUp(r.loadGate);
-        if (gaveUp) { console.warn(`[race-perf] run ${run} ${name}: ${gaveUp}`); break; }
       }
+      if (replay) { console.log(`[race-perf] run ${run} played again (lock taken back)`); run -= 1; continue; }
+      if (gaveUp && !Object.keys(sides).some((n) => record[n])) break;
       writeFileSync(path.join(outDir, `run${run}.json`), JSON.stringify(record, null, 1) + "\n");
       records.push(record);
     }
     checkLock("end");
   } finally {
-    releaseLock();
+    releaseLock?.();
     dropExports();
   }
   const runsDone = records;

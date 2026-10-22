@@ -51,6 +51,23 @@ export async function calmThenLock({ maxLoad, calmWait, acquire, log = () => {},
   return acquire();
 }
 
+// Under the lock, before each side: a loaded machine never keeps the lock
+// (2026-10-22, a pair waited 60 min on --load-wait while holding the Mac
+// lock). The lock goes back at once, the calm is awaited outside it (up to
+// `waitSec`), then the lock is taken again in its turn (`acquire`). Returns
+// the lock now held (null: never calm, given up, no lock held), the gate,
+// and whether the lock was let go meanwhile (the run is then played again).
+export async function calmUnderLock({ lock, maxLoad, waitSec, acquire, log = () => {}, load = () => os.loadavg()[0], wait = waitForLoad }) {
+  const limit = loadLimit(maxLoad);
+  const now = load();
+  if (now <= limit) return { lock, gate: { load: Math.round(now * 100) / 100, limit, ok: true }, relocked: false };
+  log(`load ${now.toFixed(1)} > ${limit}: perf lock released while waiting for calm`);
+  lock();
+  const calm = await wait({ maxLoad, waitSec, pollSec: 30, log });
+  if (!calm.ok) return { lock: null, gate: calm, relocked: false };
+  return { lock: await acquire(), gate: calm, relocked: true };
+}
+
 // Under the lock, a load gate that did not open (still loaded after
 // --load-wait): the remaining runs are given up, the lock goes back.
 export const loadGaveUp = (gate) => (gate && gate.ok === false ? `load ${gate.load} > ${gate.limit} after --load-wait: remaining runs given up, lock released` : null);

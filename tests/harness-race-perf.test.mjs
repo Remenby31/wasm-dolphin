@@ -489,3 +489,27 @@ test("race-perf: the region pipeline counters of a stats reply", () => {
   assert.deepEqual(regionPipeline({ layoutRefused: 0 }), { layoutRefused: 0 }, "an engine before 0084: no heap counters");
   assert.deepEqual(regionPipeline({}), {}, "an engine before 0078");
 });
+
+test("load under the lock: a loaded machine gives the lock back while waiting, then takes it again in turn", async () => {
+  const { calmUnderLock } = await import("../harness/lib/env.mjs");
+  const events = [];
+  const lock = () => events.push("release");
+  const acquire = async () => { events.push("acquire"); return () => events.push("release2"); };
+  const wait = async () => { events.push("wait"); return { load: 1, limit: 4, ok: true }; };
+  // Calm: the lock is kept, nothing waited for.
+  const calm = await calmUnderLock({ lock, maxLoad: 4, waitSec: 300, acquire, wait, load: () => 2 });
+  assert.equal(calm.lock, lock);
+  assert.equal(calm.relocked, false);
+  assert.deepEqual(events, []);
+  // Loaded: released BEFORE the wait, taken again after it.
+  const loaded = await calmUnderLock({ lock, maxLoad: 4, waitSec: 300, acquire, wait, load: () => 9 });
+  assert.deepEqual(events, ["release", "wait", "acquire"]);
+  assert.equal(loaded.relocked, true);
+  assert.notEqual(loaded.lock, lock);
+  // Never calm: released, not taken again, given up with no lock held.
+  events.length = 0;
+  const never = await calmUnderLock({ lock, maxLoad: 4, waitSec: 300, acquire, wait: async () => ({ load: 9, limit: 4, ok: false }), load: () => 9 });
+  assert.deepEqual(events, ["release"]);
+  assert.equal(never.lock, null);
+  assert.match(loadGaveUp(never.gate), /given up, lock released/);
+});
