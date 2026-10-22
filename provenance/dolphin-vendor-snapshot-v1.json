@@ -3,8 +3,8 @@
   "normalization": "git-blob-lf",
   "root": {
     "baseCommit": "e22551eae1c84a7e4d0b6a5c519ef4ed4ef69df1",
-    "resultTree": "a27a4acd9977e0546f9f1340dbc4a8bea6053a88",
-    "changedPathCount": 127,
+    "resultTree": "1985c84672ad988d2e1e4704eec74284e125d63d",
+    "changedPathCount": 128,
     "records": [
       {
         "path": "CMakeLists.txt",
@@ -187,6 +187,15 @@
         "sha256": "644208a159af08fe7380d76bdbf37102ca55a6c79bee986e7672f804d777294d"
       },
       {
+        "path": "Source/Core/Core/HW/DSPHLE/DSPHLE.cpp",
+        "status": "M",
+        "mode": "100644",
+        "baseBlob": "c8fc1317deab75dc88283756faaf235276d281fc",
+        "resultBlob": "b7f972c2e71198627db65f029df2b6291f166b39",
+        "size": 8719,
+        "sha256": "1cdf9922d2df9884f5c45e073f95da8a17c56b16f9a04405932f76b4f6f40009"
+      },
+      {
         "path": "Source/Core/Core/HW/DVD/AMMediaboard.cpp",
         "status": "M",
         "mode": "100644",
@@ -344,9 +353,9 @@
         "status": "M",
         "mode": "100644",
         "baseBlob": "3ec24a30162d97c99c2454af6af89d480d90c29d",
-        "resultBlob": "5234dd01ce82011cda1543c7ba3e1e5be0a1d8be",
-        "size": 576289,
-        "sha256": "7cf499c300c4e64d740fa4371528c7fdb71849c94b844e1a3105bc2c35621423"
+        "resultBlob": "3500c1b4725c4eea6477756bf1acfc56733631e3",
+        "size": 579806,
+        "sha256": "61fb7e737ef876b5484a6b8d5b4d14c15612bbdbe4460d5caeea69921e63921a"
       },
       {
         "path": "Source/Core/Core/PowerPC/CachedInterpreter/CachedInterpreter.h",
@@ -434,9 +443,9 @@
         "status": "M",
         "mode": "100644",
         "baseBlob": "f229be35f2892ca4f5072f9b81b5d78df395a1ad",
-        "resultBlob": "1f22b181a58cad5b41380d9f069fe1f2c59f19b1",
-        "size": 11096,
-        "sha256": "692ea5341d21e177d6cf8299b5da200b240037664f259ad1a35cc251ba6b87a4"
+        "resultBlob": "491956eb01b2b353b8b346daa46d603ead415533",
+        "size": 11196,
+        "sha256": "6e4e378e29f1b9bfb862238f168fcef49c27ebd60c272875d42e53a7659d58f0"
       },
       {
         "path": "Source/Core/Core/PowerPC/PPCAnalyst.cpp",
@@ -1185,5 +1194,5 @@
       ]
     }
   ],
-  "contentSha256": "edffd717f493834273df54729484c56c01348e908a60f5a10dff39f74282ab08"
+  "contentSha256": "5977c4ac5a079071a71a36daa25d98d59c14e4e1fede25b8d09163bd764a8b99"
 }

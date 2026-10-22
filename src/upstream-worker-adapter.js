@@ -99,6 +99,7 @@ export class UpstreamWorkerAdapter {
     correctTimeDrift = false,
     coreLog = false,
     memcardSlotB = false,
+    efbAccess = false,
     savesMode = "",
     efbDiag = false,
     jitVerbose = false,
@@ -201,6 +202,7 @@ export class UpstreamWorkerAdapter {
     this.correctTimeDrift = Boolean(correctTimeDrift);
     this.coreLog = Boolean(coreLog);
     this.memcardSlotB = Boolean(memcardSlotB);
+    this.efbAccess = Boolean(efbAccess);
     this.savesMode = String(savesMode || "");
     this.userData = null;
     this.efbDiag = Boolean(efbDiag);
@@ -420,6 +422,7 @@ export class UpstreamWorkerAdapter {
       correctTimeDrift: this.correctTimeDrift,
       coreLog: this.coreLog,
       memcardSlotB: this.memcardSlotB,
+      efbAccess: this.efbAccess,
       savesMode: this.savesMode,
       efbDiag: this.efbDiag,
       jitVerbose: this.jitVerbose,

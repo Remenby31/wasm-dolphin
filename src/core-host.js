@@ -107,6 +107,8 @@ export class EmulatorHost {
     this.correctTimeDrift = requestedCorrectTimeDrift();
     this.coreLog = requestedCoreLog();
     this.memcardSlotB = new URLSearchParams(window.location.search).get("memcardb") === "1";
+    // CPU reads of the EFB (peeks), off by default as in Dolphin (EFBAccessEnable).
+    this.efbAccess = new URLSearchParams(window.location.search).get("efbaccess") === "1";
     this.savesMode = new URLSearchParams(window.location.search).get("saves") === "off" ? "off" : "";
     this.efbDiag = requestedEfbDiag();
     this.jitVerbose = new URLSearchParams(window.location.search).get("jitverbose") === "1";
@@ -404,6 +406,7 @@ export class EmulatorHost {
             correctTimeDrift: this.correctTimeDrift,
             coreLog: this.coreLog,
             memcardSlotB: this.memcardSlotB,
+            efbAccess: this.efbAccess,
             savesMode: this.savesMode,
             efbDiag: this.efbDiag,
             jitVerbose: this.jitVerbose,
