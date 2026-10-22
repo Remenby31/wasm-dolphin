@@ -733,7 +733,10 @@ void EnsureRuntime()
   Config::SetBase(Config::MAIN_OVERCLOCK_ENABLE, true);
   Config::SetBase(Config::MAIN_OVERCLOCK, s_cpu_overclock);
   Config::SetBase(Config::MAIN_PRECISION_FRAME_TIMING, false);
-  Config::SetBase(Config::MAIN_RUSH_FRAME_PRESENTATION, true);
+  // Experiment (exp/wgpu-no-rush): on wgpu the worker presents as soon as a
+  // frame arrives, ignoring the presentation time SmoothEarlyPresentation
+  // computes, so rushing 2-3 cheap frames ahead shows as bursts.
+  Config::SetBase(Config::MAIN_RUSH_FRAME_PRESENTATION, s_video_backend != "WebGPU");
   Config::SetBase(Config::MAIN_SMOOTH_EARLY_PRESENTATION, true);
   Config::SetBase(Config::MAIN_SYNC_ON_SKIP_IDLE, false);
   Config::SetBase(Config::MAIN_ACCURATE_FMADDS, false);
