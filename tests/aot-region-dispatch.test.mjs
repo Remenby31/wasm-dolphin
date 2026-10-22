@@ -503,3 +503,47 @@ test("FPU ops outside the direct tier run inside the region, interpreted, like t
   assert.equal(got.ran, 1);
   core.invalidate(TEXT, 4 * FPU.words.length);
 });
+
+// Lever G (0102 experiment): downcount lives in a local of the fragment, written
+// to state before every helper call and read back after: a helper that lowers
+// it (an interrupt raised through ForceExceptionCheck; here a test hook in the
+// interpret helper, the test core has no CoreTiming) stops the region at the
+// end of that block, where the interpreter with the same drop is.
+const DC_TEXT = 0x8000c100;
+const mffsOp = (d) => (63 << 26) | (d << 21) | (583 << 1);
+const DC = assemble(DC_TEXT, [
+  "f", asm.addi(4, 4, 1), (pc, l) => asm.b(pc, l.f2),
+  "f2", asm.addi(4, 4, 2), mffsOp(6), asm.addi(4, 4, 3), (pc, l) => asm.b(pc, l.f3),
+  "f3", asm.addi(4, 4, 4), (pc, l) => asm.b(pc, l.f4),
+  "f4", asm.addi(4, 4, 5), asm.blr()
+]);
+
+test("a helper that lowers downcount stops the region at the end of its block (lever G)", { skip: chainSkip || (!core?.has("DolphinWeb_AotTestDropDowncountOnNextHelper") && "core without the helper downcount hook") }, () => {
+  const dol = buildDol({ textAddr: DC_TEXT, text: DC.words, entry: DC.labels.f });
+  const { image, entryPoint } = imageFromDol(dol);
+  const plan = planDol({ image, entryPoint, gameId: "TEST01", dolBytes: dol, options: { gapFill: false } });
+  for (const seg of image.segments) core.load(seg.start, seg.bytes);
+  core.reset(seedGprs(DC.labels.f), DC.labels.f, STOP, 400000); // MSR.FP on while translating
+  core.setRegionsEnabled(true);
+  queueAll(plan, 100, true);
+  serviceAll();
+  const mffsPc = DC.labels.f2 + 4, DROP = 100000;
+  core.reset(seedGprs(DC.labels.f), DC.labels.f, STOP, 1000);
+  core.module._DolphinWeb_AotTestDropDowncountOnNextHelper(DROP);
+  assert.equal(core.dispatchRegion(), 1);
+  const got = { pc: core.pc(), state: core.state(), downcount: core.downcount() };
+  core.module._DolphinWeb_AotTestDropDowncountOnNextHelper(0);
+  assert.ok(got.downcount <= 0, `stopped on downcount (${got.downcount})`);
+  assert.notEqual(got.pc, STOP, "not run to the end of the call");
+  assert.equal(got.pc, DC.labels.f3, "at the end of the block that called the helper");
+  // The interpreter, with the same drop at the same instruction, up to that pc.
+  core.reset(seedGprs(DC.labels.f), DC.labels.f, STOP, 1000);
+  for (let n = 0; n < 1000 && core.pc() !== got.pc; n++) {
+    if (core.pc() === mffsPc) core.setDowncount(core.downcount() - DROP);
+    assert.equal(core.interpretOne(), 0);
+  }
+  assert.equal(core.pc(), got.pc);
+  assert.equal(core.downcount(), got.downcount);
+  assert.deepEqual(core.state(), got.state);
+  core.invalidate(DC_TEXT, 4 * DC.words.length);
+});
