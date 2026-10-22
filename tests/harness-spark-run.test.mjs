@@ -9,8 +9,8 @@ import path from "node:path";
 import test from "node:test";
 
 import { kpiTable } from "../harness/lib/kpi.mjs";
-import { estimateMin, eta, isBuildProcess, move, movedId, nextStep, readTickets, waitTurn } from "../harness/remote/spark-queue.mjs";
-import { benchQuery, benchRaceArgs, launchCommand, RACE_QUERY, runId, sh, stampSummary } from "../harness/remote/spark-run.mjs";
+import { estimateMin, eta, isBuildProcess, MAX_BUILDS_PER_OWNER, move, movedId, nextStep, ownerBuilds, readTickets, waitTurn } from "../harness/remote/spark-queue.mjs";
+import { benchQuery, benchRaceArgs, builtOnBenchTest, launchCommand, RACE_QUERY, runId, sh, stampSummary } from "../harness/remote/spark-run.mjs";
 
 const race = (extra = {}) => ({
   kind: "race-perf", file: "race",
@@ -118,7 +118,7 @@ test("spark queue: a build is the node process, never the shell that started it"
 test("spark queue: the judge moves a waiting ticket, the waiter follows it", async () => {
   const bench = mkdtempSync(path.join(os.tmpdir(), "spark-queue-"));
   const q = path.join(bench, "queue");
-  const ticket = (ms, pid, name, lane = null) => writeFileSync(path.join(q, `${String(ms).padStart(15, "0")}-${pid}.json`), JSON.stringify({ pid, host: os.hostname(), kind: "pair", lanes: "a", name, lane }));
+  const ticket = (ms, pid, name, lane = null) => writeFileSync(path.join(q, `${String(ms).padStart(15, "0")}-${pid}.json`), JSON.stringify({ pid, host: os.hostname(), kind: "pair", lanes: "a", name, lane, estMin: null }));
   try {
     mkdirSync(q);
     // Live pids: ours and our parent's stand for other jobs.
@@ -144,12 +144,15 @@ test("spark queue: the judge moves a waiting ticket, the waiter follows it", asy
 });
 
 test("spark queue: move refuses what would break the order, a duplicate keeps the granted copy", () => {
-  const t = (ms, name, lane = null, pid = ms) => ({ id: `${String(ms).padStart(15, "0")}-${pid}.json`, name, lane, pid });
+  const t = (ms, name, lane = null, pid = ms) => ({ id: `${String(ms).padStart(15, "0")}-${pid}.json`, name, lane, pid, estMin: null });
   const q = [t(1000, "run", "a"), t(5000, "b1"), t(9000, "b2"), t(9001, "b3")];
   assert.equal(movedId(q, "b3", "head"), "000000000003000-9001.json"); // between run and b1
   assert.equal(movedId(q, "b1", "b3"), "000000000010001-5000.json"); // to the end
   assert.throws(() => movedId(q, "b1", "b2"), /no room between b2 and b3/); // 9000 and 9001
   assert.throws(() => movedId(q, "run", "head"), /already running/);
+  // An old waiter (no estMin) cannot follow a rename: refused.
+  const { estMin, ...old } = q[1];
+  assert.throws(() => movedId([q[0], old, q[2]], "b1", "head"), /would wait for itself/);
   assert.throws(() => movedId(q, "nope", "head"), /no ticket/);
   assert.throws(() => movedId([t(1000, "a"), t(1001, "b"), t(5000, "c")], "c", "a"), /no room/);
   // Two files for one job (a move racing its grant): the granted one stays.
@@ -168,7 +171,7 @@ test("spark queue: move refuses what would break the order, a duplicate keeps th
 test("spark queue: estimated durations and each job's wait", () => {
   assert.equal(estimateMin("pair", ["--runs", "6", "--baseline", "/b", "--candidate", "/c"]), 13); // 6 × 2 × 65 s
   assert.equal(estimateMin("pair", ["--runs", "4", "--warmup", "10", "--secs", "10"]), 3); // one side
-  assert.equal(estimateMin("build"), 8);
+  assert.equal(estimateMin("build"), 3);
   const now = Date.parse("2026-10-22T00:30:00Z");
   const rows = eta([
     { id: "1", kind: "pair", name: "r", lane: "a", estMin: 13, grantedAt: "2026-10-22T00:25:00Z" },
@@ -176,5 +179,35 @@ test("spark queue: estimated durations and each job's wait", () => {
     { id: "3", kind: "pair", name: "p", estMin: 10 },
     { id: "4", kind: "build", name: "k" }
   ], now);
-  assert.deepEqual(rows.map((r) => [r.name, r.startsIn, r.endsIn]), [["r", 0, 8], ["p", 8, 18], ["k", 18, 26]]);
+  assert.deepEqual(rows.map((r) => [r.name, r.startsIn, r.endsIn]), [["r", 0, 8], ["p", 8, 18], ["k", 18, 21]]);
+});
+
+test("spark-run: a core counts as built on the bench only when the bench built it", () => {
+  const dir = mkdtempSync(path.join(os.tmpdir(), "spark-built-"));
+  const built = (d) => { try { execFileSync("sh", ["-c", builtOnBenchTest(d)]); return true; } catch { return false; } };
+  const core = (d, bytes = "ci") => { mkdirSync(path.join(d, "cores", "dolphin"), { recursive: true }); writeFileSync(path.join(d, "cores", "dolphin", "dolphin-core-upstream.wasm"), bytes); };
+  const git = (d, ...a) => execFileSync("git", ["-C", d, "-c", "user.email=t@t", "-c", "user.name=t", ...a], { stdio: "ignore" });
+  try {
+    const plain = path.join(dir, "plain"); core(plain);
+    assert.equal(built(plain), false); // a wasm alone proves nothing
+    const exported = path.join(dir, "exported"); core(exported);
+    writeFileSync(path.join(exported, ".harness-identity.json"), JSON.stringify({ commit: "c", builtOn: "spark" }));
+    assert.equal(built(exported), true);
+    // A checkout with the committed CI core (2026-10-22: four of these passed for built).
+    const wt = path.join(dir, "wt"); core(wt); git(wt, "init", "-q"); git(wt, "add", "."); git(wt, "commit", "-qm", "ci core");
+    assert.equal(built(wt), false);
+    core(wt, "bench"); // what --install leaves
+    assert.equal(built(wt), true);
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test("spark queue: an agent's builds are counted for the cap of 3", () => {
+  const b = (name, owner, lane = null) => ({ kind: "build", name, owner, lane });
+  const q = [b("a1", "wt-jit", "a b"), b("a2", "wt-jit"), b("a3", "wt-jit"), b("r1", "wt-robust"), { kind: "pair", name: "p", owner: "wt-jit" }, b("old", undefined), b("w", "wt-jit", "none")];
+  assert.equal(MAX_BUILDS_PER_OWNER, 3);
+  assert.deepEqual(ownerBuilds(q, "wt-jit").map((t) => t.name), ["a1", "a2", "a3"]); // running and waiting; no pair, no neutral ticket
+  assert.equal(ownerBuilds(q, "wt-robust").length, 1);
+  assert.equal(ownerBuilds(q, "wt-kpi").length, 0);
 });
