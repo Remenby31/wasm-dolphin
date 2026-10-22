@@ -370,6 +370,8 @@ let hardwareVideoBackend = false;
 // (src/wgpu-pipeline-prewarm.js). null when off (?wgpuprewarm=0) or not wgpu.
 let wgpuPipelinePrewarmEnabled = true;
 let pipelinePrewarm = null;
+// The loaded core's identity: a pipeline list belongs to one core build.
+let coreBuildFingerprint = "";
 let wgpuVisualCadenceResources = null;
 let wgpuVisualCadenceTelemetry = createWgpuVisualCadenceTelemetry(false);
 let wgpuVisualCadenceSequence = 0;
@@ -1115,6 +1117,7 @@ async function handleMessage(type, payload) {
   // or closed) and on stop; their outcome is not the saves'.
   if (type === "flushUserData" || type === "stop") void dolphinJitBlockStore?.flush().catch(() => {});
   if (type === "flushUserData" || type === "stop") void pipelinePrewarm?.flush();
+  if (type === "stop") pipelinePrewarm?.stop();
   switch (type) {
     case "load":
       if (!moduleInstance) {
@@ -2064,6 +2067,7 @@ async function loadCore({
   destroyWgpuVisualCadenceResources();
   hardwareVideoBackend = videoBackend === "WebGPU-Real";
   wgpuPipelinePrewarmEnabled = requestedWgpuPipelinePrewarm !== false;
+  pipelinePrewarm?.stop();
   pipelinePrewarm = null;
   wgpuVisualCadenceEnabled = Boolean(requestedWgpuVisualCadence);
   wgpuVisualCadenceTelemetry = createWgpuVisualCadenceTelemetry(
@@ -2275,6 +2279,7 @@ async function loadCore({
   aotFirstLaunchEnabled = aotFirstLaunch === true;
   dolphinJitBootLoadComplete = false;
   dolphinJitBootLoadedEntries = 0;
+  coreBuildFingerprint = String(buildFingerprint ?? "");
   if (!noJitCache) {
     await reconcileJitCacheWithBuild(buildFingerprint);
   } else {
@@ -14830,21 +14835,23 @@ function finishWebGpuDrain(startedAt, processed) {
 }
 
 // video=wgpu: load this game's pipeline list and compile it while the game
-// boots. Shaders the replay already created before the list was read are
-// noted again so their pipelines can be recorded.
+// boots. Created before the first await, so that every shader the replay
+// creates from now on is noted and its pipelines can be recorded.
 async function startPipelinePrewarm(gameId) {
   if (!hardwareVideoBackend || !wgpuPipelinePrewarmEnabled || !renderGpu || !gameId) return;
-  // Set before the first await: the replay's next shaders must be noted.
   const prewarm = new PipelinePrewarm();
+  pipelinePrewarm?.stop();
   pipelinePrewarm = prewarm;
   try { prewarm.root = await navigator.storage.getDirectory(); } catch { /* memory only */ }
-  const loaded = await prewarm.load(gameId);
+  const loaded = await prewarm.load(gameId, coreBuildFingerprint);
   if (!loaded || pipelinePrewarm !== prewarm || !renderGpu) return;
   const device = renderGpu.device;
+  // Stops at a core reload or a lost device (renderGpu replaced or cleared).
+  const alive = () => pipelinePrewarm === prewarm && renderGpu?.device === device;
   const stats = await prewarm.prewarm(device, (samplingKey) => {
     const [u, n] = samplingKey.split("/").map(Number);
     return getFixedLayouts(u, n).pipelineLayout;
-  });
+  }, { alive });
   console.log(`[wgpu-prewarm] ${gameId}: ${stats.compiled}/${stats.loaded} pipelines compiled in ${stats.prewarmMs} ms` +
     (stats.failed ? `, ${stats.failed} failed (${stats.lastError})` : ""));
 }
