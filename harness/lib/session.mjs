@@ -23,10 +23,17 @@ process.on("exit", () => {
 });
 
 // `launch` is a seam for tests; it defaults to the headless launchChrome.
-export async function openSession({ base, server = null, query, iso, display = "headless", gamepads = null, keepProfile = false, routes = {}, launch = launchChrome, harness = {}, chromeArgs = [] }) {
+export async function openSession({ base, server = null, query, iso, display = "headless", gamepads = null, keepProfile = false, routes = {}, launch = launchChrome, harness = {}, chromeArgs = [], seedProfile = null }) {
   // Fail before Chrome exists: a missing disc must not cost a browser.
   if (!iso || !existsSync(iso)) throw new Error(`disc image not found: ${iso}`);
   const profileDir = mkdtempSync(path.join(os.tmpdir(), "gc-harness-profile-"));
+  // seedProfile: start from a copy of a kept profile (its caches, e.g. a
+  // warm region cache), without the dead browser's singleton locks. The
+  // copy is used on the origin it was seeded on (caches are per origin).
+  if (seedProfile) {
+    cpSync(seedProfile, profileDir, { recursive: true, verbatimSymlinks: true });
+    for (const lock of ["SingletonLock", "SingletonSocket", "SingletonCookie"]) rmSync(path.join(profileDir, lock), { force: true });
+  }
   const releaseProfile = claim(profileDir, REPO_ROOT, "chrome-profile");
   if (!keepProfile) liveProfiles.add(profileDir);
   let context = null;

@@ -4,7 +4,7 @@
 import assert from "node:assert/strict";
 import test from "node:test";
 
-import { armEffects, bootOrder, GUEST_HZ, instructionsPerGuestCycle, laneOf, parsePerfCsv } from "../harness/probes/race-multi.mjs";
+import { armEffects, barrier, bootOrder, GUEST_HZ, instructionsPerGuestCycle, laneOf, parsePerfCsv, waitRegionsQuiescent } from "../harness/probes/race-multi.mjs";
 
 test("race-multi: a cyclic Latin square, every arm on every lane equally", () => {
   const seen = Array.from({ length: 3 }, () => [0, 0, 0]);
@@ -54,4 +54,32 @@ test("race-multi: boot order rotated too, independently of the lanes", () => {
   const pairs = new Set();
   for (let run = 1; run <= 3; run += 1) bootOrder(run, 3).forEach((a, rank) => pairs.add(`${laneOf(a, run, 3)}/${rank}`));
   assert.equal(pairs.size, 9);
+});
+
+test("race-multi --aot-seed: the window waits for a quiescent region pipeline", async () => {
+  const seq = (states) => { let i = 0; return async () => states[Math.min(i++, states.length - 1)]; };
+  const p = (queued, installed, refused = 0, dropped = 0) => ({ queued, installed, refused, dropped, pending: queued - installed - refused - dropped });
+  const fast = { everyMs: 0, sleep: async () => {} };
+  // Installs still arriving, then stable for 3 reads.
+  const g = await waitRegionsQuiescent(seq([p(140, 90), p(140, 130), p(143, 140, 3), p(143, 140, 3), p(143, 140, 3)]), fast);
+  assert.equal(g.quiescent, true);
+  assert.equal(g.installed, 140);
+  assert.equal(g.pending, 0);
+  // Pending forever: refused after the timeout, with what was left.
+  const stuck = await waitRegionsQuiescent(seq([p(143, 100)]), { ...fast, timeoutMs: -1 });
+  assert.equal(stuck.quiescent, false);
+  assert.match(stuck.why, /43 pending/);
+  // A core without the region pipeline says so.
+  assert.equal((await waitRegionsQuiescent(async () => null, fast)).why, "no region pipeline in this core");
+});
+
+test("race-multi --aot-seed: the arms open their windows together", async () => {
+  const arrive = barrier(3, 1000);
+  const order = [];
+  const arm = (i, delay) => new Promise((r) => setTimeout(r, delay)).then(arrive).then((all) => order.push([i, all]));
+  await Promise.all([arm(0, 30), arm(1, 0), arm(2, 60)]);
+  assert.deepEqual(order.map(([, all]) => all), [true, true, true]);
+  // An arm that never comes: the others go after the timeout, told so.
+  const lone = barrier(2, 20);
+  assert.equal(await lone(), false);
 });
