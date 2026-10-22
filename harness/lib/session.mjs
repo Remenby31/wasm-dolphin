@@ -10,7 +10,7 @@ import { installMonitor } from "./monitor.mjs";
 import { encodePng } from "./png.mjs";
 import { checkCore, recordCoreFetches } from "./core-identity.mjs";
 import { withDeterministicClock } from "./matrix.mjs";
-import { claim } from "./ownership.mjs";
+import { OWNER_FILE, claim } from "./ownership.mjs";
 import { machineSnapshot, sampleChromeCpu } from "./system.mjs";
 
 // Profiles of the sessions still open in this process. A process that ends
@@ -23,6 +23,14 @@ process.on("exit", () => {
 });
 
 // `launch` is a seam for tests; it defaults to the headless launchChrome.
+// A kept profile copied into `dest`: its caches, without the dead
+// browser's singleton locks nor the seed's ownership marker (the copy is
+// claimed afresh by its own session).
+export function copySeedProfile(seed, dest) {
+  cpSync(seed, dest, { recursive: true, verbatimSymlinks: true });
+  for (const f of ["SingletonLock", "SingletonSocket", "SingletonCookie", OWNER_FILE]) rmSync(path.join(dest, f), { force: true });
+}
+
 export async function openSession({ base, server = null, query, iso, display = "headless", gamepads = null, keepProfile = false, routes = {}, launch = launchChrome, harness = {}, chromeArgs = [], seedProfile = null }) {
   // Fail before Chrome exists: a missing disc must not cost a browser.
   if (!iso || !existsSync(iso)) throw new Error(`disc image not found: ${iso}`);
@@ -30,10 +38,7 @@ export async function openSession({ base, server = null, query, iso, display = "
   // seedProfile: start from a copy of a kept profile (its caches, e.g. a
   // warm region cache), without the dead browser's singleton locks. The
   // copy is used on the origin it was seeded on (caches are per origin).
-  if (seedProfile) {
-    cpSync(seedProfile, profileDir, { recursive: true, verbatimSymlinks: true });
-    for (const lock of ["SingletonLock", "SingletonSocket", "SingletonCookie"]) rmSync(path.join(profileDir, lock), { force: true });
-  }
+  if (seedProfile) copySeedProfile(seedProfile, profileDir);
   const releaseProfile = claim(profileDir, REPO_ROOT, "chrome-profile");
   if (!keepProfile) liveProfiles.add(profileDir);
   let context = null;

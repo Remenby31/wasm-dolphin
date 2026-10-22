@@ -2,7 +2,13 @@
 // SPDX-License-Identifier: MIT
 
 import assert from "node:assert/strict";
+import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, symlinkSync, writeFileSync } from "node:fs";
+import os from "node:os";
+import path from "node:path";
 import test from "node:test";
+
+import { claim, OWNER_FILE } from "../harness/lib/ownership.mjs";
+import { copySeedProfile } from "../harness/lib/session.mjs";
 
 import { armEffects, barrier, bootOrder, GUEST_HZ, instructionsPerGuestCycle, laneOf, parsePerfCsv, waitRegionsQuiescent } from "../harness/probes/race-multi.mjs";
 
@@ -82,4 +88,24 @@ test("race-multi --aot-seed: the arms open their windows together", async () => 
   // An arm that never comes: the others go after the timeout, told so.
   const lone = barrier(2, 20);
   assert.equal(await lone(), false);
+});
+
+test("seed profile: copied with its caches, never its locks nor its owner", () => {
+  const root = mkdtempSync(path.join(os.tmpdir(), "seed-profile-"));
+  try {
+    const seed = path.join(root, "seed"), dest = path.join(root, "dest");
+    mkdirSync(path.join(seed, "Default", "File System"), { recursive: true });
+    writeFileSync(path.join(seed, "Default", "File System", "regions.bin"), "cache");
+    writeFileSync(path.join(seed, OWNER_FILE), JSON.stringify({ pid: 1 }));
+    symlinkSync("spark-5512-123", path.join(seed, "SingletonLock"));
+    mkdirSync(dest);
+    copySeedProfile(seed, dest);
+    assert.equal(readFileSync(path.join(dest, "Default", "File System", "regions.bin"), "utf8"), "cache");
+    assert.equal(existsSync(path.join(dest, OWNER_FILE)), false);
+    assert.equal(existsSync(path.join(dest, "SingletonLock")), false);
+    // The copy can be claimed (2026-10-22: the copied marker made it "already claimed").
+    assert.doesNotThrow(() => claim(dest, root, "chrome-profile"));
+  } finally {
+    rmSync(root, { recursive: true, force: true });
+  }
 });
