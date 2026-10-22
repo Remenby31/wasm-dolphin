@@ -452,6 +452,23 @@ Each check of each run is pass, fail or **unjudged** (with the reason: no VI
 timeline in this core, capture refused for a hardware renderer, scripted
 inputs without a savestate, …). Machine load changes none of them.
 
+**Expected failures.** A test added before its implementation fails on main
+by design. List it in `harness/known-failures.json` with `"mode":
+"expected-fail"`, its `cell` (`game/config`), `check` (crash, errors,
+coreFreeze, render or audio), `reason`, `until` (the follow-up that fixes it)
+and `detail`, a regular expression the failure's detail must match (how it is
+expected to fail). That failure is **XFAIL**, shown with the reason and never
+blocking; any other failure of the cell, and a blank picture always, stays a
+regression. A pass is **XPASS** and blocks, so the PR that fixes it also
+removes the entry. An entry for a game the run has but a cell it does not is
+stale and blocks; other matrices do not judge it.
+
+The list is read from the candidate's tree, so a PR can break a check and
+declare it expected-fail in the same change. The gate therefore marks every
+XFAIL whose baseline passes the check (a new entry, or a feature main cannot
+exercise) with a warning (⚠): the reviewer must find its justification in
+the PR.
+
 **`harness/run ab <spec>`** exports the served files of `--baseline-ref`
 (default `origin/main`) with `git archive`, runs the matrix (and the spec's
 `fuzz` discs and `pads`) on both sides, alternating which side goes first on
