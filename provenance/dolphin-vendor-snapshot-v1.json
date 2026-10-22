@@ -3,8 +3,8 @@
   "normalization": "git-blob-lf",
   "root": {
     "baseCommit": "e22551eae1c84a7e4d0b6a5c519ef4ed4ef69df1",
-    "resultTree": "38c26d911167e2e32984f5ec7f4f5095d329eb07",
-    "changedPathCount": 133,
+    "resultTree": "4d589feb6c901eca6ffd0a52726369140acce89c",
+    "changedPathCount": 135,
     "records": [
       {
         "path": "CMakeLists.txt",
@@ -194,6 +194,24 @@
         "resultBlob": "7eb5dc98fab1fc741d35a9fa81f46c7fafa37004",
         "size": 28440,
         "sha256": "d098e105d14c05f06f157567167b5ed51fd5706a06bfc8e9646aea7fbf5de2a1"
+      },
+      {
+        "path": "Source/Core/Core/FifoPlayer/FifoDataFile.cpp",
+        "status": "M",
+        "mode": "100644",
+        "baseBlob": "f795d5f08a2b4fd654906d35874213facbf29402",
+        "resultBlob": "071cdeca84fa2ed126daad7662dc675369f4f91e",
+        "size": 13699,
+        "sha256": "e77d5ac4c2bdc68992579cb621d63abbc233d04319fb49de5a73ef4a6efea3db"
+      },
+      {
+        "path": "Source/Core/Core/FifoPlayer/FifoPlayer.cpp",
+        "status": "M",
+        "mode": "100644",
+        "baseBlob": "f0c62d4e3f2c0f78a9821836d5473f141b122ecf",
+        "resultBlob": "16eefeb9c0e5bcbeb2f0553bc431535472fa2603",
+        "size": 23530,
+        "sha256": "bce87543d1832808f5652a2208aa5524ea17fc7a0dcd840aaecd065ba0f753af"
       },
       {
         "path": "Source/Core/Core/HW/DSPHLE/DSPHLE.cpp",
@@ -1239,5 +1257,5 @@
       ]
     }
   ],
-  "contentSha256": "c05113b71de126ad0ecf3653db97d173ba63229e2e4ac4207bb6ec5ce131c36a"
+  "contentSha256": "36ea736c356577ef8264a33f538173db5a3be5c4113b80c6cd9657e55b4d9e63"
 }

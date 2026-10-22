@@ -1311,6 +1311,8 @@ EMSCRIPTEN_KEEPALIVE std::uint32_t DolphinWeb_HarnessLoadGeneration() { return s
 // replayed on every backend without its CPU side. State: 0 idle,
 // 1 recording, 2 saved, 3 failed.
 static std::atomic<int> s_fifo_record_state{0};
+// A cancelled recording's late callback must not report into the next one.
+static std::atomic<unsigned> s_fifo_record_generation{0};
 static std::string s_fifo_record_path;
 EMSCRIPTEN_KEEPALIVE int DolphinWeb_HarnessFifoRecord(int frames, const char* path)
 {
@@ -1320,14 +1322,26 @@ EMSCRIPTEN_KEEPALIVE int DolphinWeb_HarnessFifoRecord(int frames, const char* pa
     return 0;
   }
   s_fifo_record_path = path;
+  const unsigned generation = s_fifo_record_generation.fetch_add(1, std::memory_order_acq_rel) + 1;
   s_fifo_record_state.store(1, std::memory_order_release);
   auto& recorder = Core::System::GetInstance().GetFifoRecorder();
-  recorder.StartRecording(frames, [&recorder] {
+  recorder.StartRecording(frames, [&recorder, generation] {
+    if (s_fifo_record_generation.load(std::memory_order_acquire) != generation)
+      return;
     FifoDataFile* file = recorder.GetRecordedFile();
     const bool saved = file && file->Save(s_fifo_record_path);
     s_fifo_record_state.store(saved ? 2 : 3, std::memory_order_release);
   });
   return 1;
+}
+// After a timeout: ends the recording and frees the recorder for a new one.
+EMSCRIPTEN_KEEPALIVE void DolphinWeb_HarnessFifoRecordCancel()
+{
+  if (s_fifo_record_state.load(std::memory_order_acquire) != 1)
+    return;
+  s_fifo_record_generation.fetch_add(1, std::memory_order_acq_rel);
+  Core::System::GetInstance().GetFifoRecorder().StopRecording();
+  s_fifo_record_state.store(0, std::memory_order_release);
 }
 EMSCRIPTEN_KEEPALIVE int DolphinWeb_HarnessFifoRecordState() { return s_fifo_record_state.load(std::memory_order_acquire); }
 

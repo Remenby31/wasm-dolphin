@@ -681,9 +681,12 @@ finding; `out/cpufuzz*.symbols.json` maps a PC back to a program.
 **FIFO logs.** `probes/fifo-record.mjs --iso homebrew/out/<name>.iso --port N`
 boots one of our homebrews on the software renderer (cpu=single) and has the
 core's FifoRecorder save the next frames as `homebrew/out/<name>.dff`
-(FifoPlayer's format). The app boots a `.dff` like a disc, and
+(FifoPlayer's format). With `?fifolog=1` (harness only: the app neither
+offers nor boots a `.dff` otherwise) a log boots like a disc, and
 `matrices/fifo-homebrew.json` replays the logs on each backend against the
-exact software reference (`fastsw=0`): the same GPU commands, without the homebrew's CPU side, so wgpu is compared with the software rasterizer pixel for pixel (within the cross-renderer tolerance).
+exact software reference (`fastsw=0`): the same GPU commands, without the
+homebrew's CPU side, so wgpu is compared with the software rasterizer at
+SSIM ≥ 0.99 (the matrix's `renderMatch`; 0.9 by default).
 Record them after `homebrew/build.sh`. Only our homebrews are recorded; no
 third-party FIFO logs (they contain game content).
 

@@ -17,6 +17,9 @@ const ELFDATA2MSB = 2;
 const EM_PPC = 20;
 // FifoDataFile's FILE_ID, the first word of its header, little-endian.
 const DFF_FILE_ID = 0x0d01f1f0;
+// FileHeader (packed): char gameid[8] at 96; "00000000" is the default id.
+const DFF_GAME_ID_OFFSET = 96;
+const DFF_DEFAULT_GAME_ID = "00000000";
 
 export function bootFileKind(name) {
   const lower = String(name || "").toLowerCase();
@@ -55,9 +58,21 @@ export function checkExecutable(kind, head, size) {
     if (size < 4 || new DataView(head.buffer, head.byteOffset, head.byteLength).getUint32(0, true) !== DFF_FILE_ID) {
       throw new Error("Not a FIFO log: bad magic");
     }
-    return { kind, entryPoint: null };
+    return { kind, entryPoint: null, gameId: dffGameId(head) };
   }
   throw new Error(`${kind} is not an executable`);
+}
+
+// The game ID a FIFO log carries (FifoDataFile::Load), "" when it has the
+// default one: Dolphin then keeps no game metadata for it.
+export function dffGameId(head) {
+  const bytes = head.subarray(DFF_GAME_ID_OFFSET, DFF_GAME_ID_OFFSET + 8);
+  let id = "";
+  for (const b of bytes) {
+    if (b === 0) break;
+    id += String.fromCharCode(b);
+  }
+  return id === DFF_DEFAULT_GAME_ID ? "" : id;
 }
 
 // SConfig::MakeGameID: the game ID Dolphin gives an executable, which names

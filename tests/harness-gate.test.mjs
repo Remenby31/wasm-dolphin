@@ -223,3 +223,20 @@ test("round 3: `harness/run gate` on persisted results gives the persisted decis
   assert.equal(gate("slow").status, 1);
   assert.match(gate("broken").stdout, /correctness regression/);
 });
+
+// #111 review: a matrix may ask cross-renderer pictures for a closer SSIM
+// than the default 0.9 ("renderMatch").
+test("render check: renderMatch raises the cross-renderer SSIM threshold", () => {
+  const W = 64, H = 48;
+  const img = (amp) => ({ width: W, height: H, data: new Uint8Array(W * H * 4).map((_, i) => ((((i >> 2) % W) >> 3) & 1 ? 200 : 30) + (((i * 7919) % 13) < 2 ? amp : 0)) });
+  const frames = { ref: img(0), near: img(4), loose: img(10) };
+  const recs = () => [
+    { ...record(), config: "sw", label: "a", url: "http://x/?video=software&cpu=single", capture: { file: "ref", index: 300 } },
+    { ...record(), config: "near", label: "b", url: "http://x/?video=wgpu&cpu=single", capture: { file: "near", index: 300 } },
+    { ...record(), config: "loose", label: "c", url: "http://x/?video=wgpu&cpu=single", capture: { file: "loose", index: 300 } }
+  ];
+  assert.deepEqual(renderChecks(recs(), "sw", (f) => frames[f]).map((r) => r.render.status), ["pass", "pass", "pass"]);
+  const strict = renderChecks(recs(), "sw", (f) => frames[f], { match: 0.99 });
+  assert.deepEqual(strict.map((r) => r.render.status), ["pass", "pass", "fail"]);
+  assert.ok(strict[2].render.ssim < 0.99);
+});

@@ -258,6 +258,8 @@ const PRESENTATION_HISTOGRAM_BUCKETS_MS = [8, 12, 16, 20, 24, 33, 50, 100, 200];
 // clock emscripten_get_now() gives the core's VI ring.
 const harnessNow = () => performance.timeOrigin + performance.now();
 let harnessEnabled = false;
+// ?fifolog=1: a .dff may boot (FifoPlayer). Harness only, set at loadCore.
+let fifoLogBoot = false;
 let harnessPcSamplerRun = null;
 
 // QA harness only: start / stop the guest-PC sampler (harness-pc-sampler.js).
@@ -1157,7 +1159,10 @@ async function recordFifoLog({ frames = 10, timeoutMs = 60000 } = {}) {
     const state = m._DolphinWeb_HarnessFifoRecordState();
     if (state === 2) break;
     if (state === 3) throw new Error("FifoRecorder could not save the log");
-    if (performance.now() > end) throw new Error(`no FIFO log after ${timeoutMs} ms (${frames} frames)`);
+    if (performance.now() > end) {
+      m._DolphinWeb_HarnessFifoRecordCancel?.();
+      throw new Error(`no FIFO log after ${timeoutMs} ms (${frames} frames)`);
+    }
     await new Promise((resolve) => setTimeout(resolve, 20));
   }
   const bytes = fs.readFile(path);
@@ -1433,6 +1438,7 @@ async function handleMessage(type, payload) {
         coreLog: payload.coreLog,
         memcardSlotB: payload.memcardSlotB,
         efbAccess: payload.efbAccess,
+        fifoLog: payload.fifoLog,
         efbDiag: payload.efbDiag,
         jitVerbose: payload.jitVerbose,
         frameCap: payload.frameCap,
@@ -2083,6 +2089,7 @@ async function loadCore({
   coreLog = false,
   memcardSlotB = false,
   efbAccess = false,
+  fifoLog = false,
   efbDiag = false,
   jitVerbose = false,
   frameCap = 0,
@@ -2132,6 +2139,7 @@ async function loadCore({
   wgpuSemanticRuntime: requestedWgpuSemanticRuntime = false,
   oglSabEnabled = false
 } = {}) {
+  fifoLogBoot = Boolean(fifoLog);
   if (moduleInstance) {
     return moduleInstance;
   }
@@ -3740,6 +3748,8 @@ async function mountFile(file) {
   // GenerateFromFile boots it directly (a .dff through FifoPlayer),
   // whatever its size.
   const bootKind = bootFileKind(safeName);
+  // FifoPlayer replays a log's memory updates as given: harness only (?fifolog=1).
+  if (bootKind === "dff" && !fifoLogBoot) throw new Error("FIFO logs (.dff) boot only with ?fifolog=1 (harness)");
   let executable = null;
   if (bootKind === "disc") {
     const _t_mount = performance.now();
@@ -3788,7 +3798,10 @@ async function mountFile(file) {
     if (executable && !coreBoot.accepted) {
       throw new Error(`Dolphin refused the ${bootKind}: ${api.getCoreStatus?.() || "no status"}`);
     }
-    bootedGame = executable
+    bootedGame = bootKind === "dff"
+      // SConfig sets NTSC-U and the log's game ID for a FIFO log.
+      ? { kind: bootKind, gameId: executable.gameId || executableGameId(path), region: "NTSC-U" }
+      : executable
       // An executable has no region: Dolphin falls back to its default one,
       // PAL in the browser (no host locale; observed as GC/EUR).
       ? { kind: bootKind, gameId: executableGameId(path), region: "PAL" }

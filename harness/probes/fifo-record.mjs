@@ -28,11 +28,18 @@ const { values } = parseArgs({
 });
 if (!values.iso || !values.port) throw new Error("usage: fifo-record.mjs --iso harness/homebrew/out/<name>.iso --port N [--frames 10]");
 const iso = path.resolve(values.iso);
-if (!iso.startsWith(HOMEBREW_OUT)) throw new Error("only our homebrews are recorded (harness/homebrew/out)");
+if (!iso.startsWith(HOMEBREW_OUT + path.sep)) throw new Error("only our homebrews are recorded (harness/homebrew/out)");
+if (!values.out && !iso.endsWith(".iso")) throw new Error("--out is required unless the input is an .iso");
 const out = path.resolve(values.out ?? iso.replace(/\.iso$/, ".dff"));
+if (out === iso) throw new Error("--out must not be the input");
+// The preset carries cpu=dual: set (not append) cpu=single so the log is
+// recorded single-threaded.
+const query = new URLSearchParams(PRESETS["sw-interp"]);
+query.set("cpu", "single");
+query.set("metrics", "1");
 
 const server = await ensureServer({ port: values.port });
-const session = await openSession({ base: server.base, server, query: `${PRESETS["sw-interp"]}&cpu=single&metrics=1`, iso });
+const session = await openSession({ base: server.base, server, query: query.toString(), iso });
 try {
   await session.page.waitForTimeout(Number(values.settle) * 1000);
   // Bytes cross the page as base64, as captureAtVi does.

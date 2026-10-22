@@ -9,7 +9,8 @@
       "iso": "harness/homebrew/out/gxscene.dff",
       "static": true,
       "set": {
-        "cpu": "single"
+        "cpu": "single",
+        "fifolog": "1"
       }
     }
   ],
@@ -26,5 +27,6 @@
       "preset": "wgpu-nojit"
     }
   ],
-  "reference": "sw-exact"
+  "reference": "sw-exact",
+  "renderMatch": 0.99
 }
