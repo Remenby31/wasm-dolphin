@@ -555,3 +555,19 @@ test("a refusal at the end of the run gets one more run; retranslations stop aft
     assert.deepEqual(next.compiled, again ? [key] : [], again ? "translated again" : "after 3 launches, left as it is");
   }
 });
+
+// Review of #86: before the boot the region cache is not even opened (its
+// index read cost ~110 ms of the launch); everything happens in loadRest().
+test("a second launch reads nothing of the region cache before the boot", async () => {
+  const p = profile();
+  await launch(p).flow.start();
+  let opened = 0;
+  const second = launch(p, {
+    loadBeforeBoot: false,
+    openCache: (identity) => { opened += 1; return openAotCache({ ...identity, baseUrl: BASE, cacheStorage: p.storage, serviceWorker: false }); }
+  });
+  await second.flow.installBeforeBoot();
+  assert.equal(opened, 0, "no cache I/O before the boot");
+  const rest = await second.flow.loadRest();
+  assert.ok(opened > 0 && rest.loaded > 0, "the cache after the first image");
+});

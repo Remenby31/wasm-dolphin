@@ -90,6 +90,15 @@ async function launch({ base, query, iso, profileDir, timeoutSec, settleSec = 0,
     // with --settle, the browser stays open until it is done (after the
     // measured interval), so the next launch on this profile has the cache.
     result.aot = aotLaunchInfo(await workerRequest(page, "validationReadAotProgress", {}, 10000));
+    // The region cache loads after the first image (#86): the core's count is
+    // read once that second install event is in, 15 s at most.
+    if (result.aot && !aotInactive(result.aot.state)) {
+      const end = Date.now() + 15000;
+      while (Date.now() < end && !result.aot.afterFirstImage && !result.aot.install?.loaded) {
+        await page.waitForTimeout(500);
+        result.aot = aotLaunchInfo(await workerRequest(page, "validationReadAotProgress", {}, 10000)) ?? result.aot;
+      }
+    }
     if (result.aot) result.aot.core = coreRegions(await workerRequest(page, "validationReadJitRegionStats", {}, 10000), decodeRegionStats);
     if (settleSec > 0 && result.aot && !aotInactive(result.aot.state)) {
       const settleEnd = Date.now() + settleSec * 1000;

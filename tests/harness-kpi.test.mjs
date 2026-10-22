@@ -486,13 +486,17 @@ test("KPI: TTFF default and aot=1 apart; a second launch without the region cach
 test("ttff: the optimisation as each launch saw it, and whether the warm launch had the region cache", () => {
   assert.equal(aotLaunchInfo({ error: "Unknown upstream worker message: validationReadAotProgress" }), null);
   const info = aotLaunchInfo({ schema: "wasm-dolphin.aot-progress.v1", state: "complete", events: [{ type: "install", loaded: 143, failed: 0, deferred: 0, ms: 40 }, { type: "done", ms: 3400, compiled: 0, total: 143 }] });
-  assert.deepEqual(info, { state: "complete", install: { loaded: 143, failed: 0, deferred: 0, ms: 40 }, done: { ms: 3400, compiled: 0, total: 143 } });
+  assert.deepEqual(info, { state: "complete", install: { loaded: 143, failed: 0, deferred: 0, ms: 40 }, fromCache: 143, done: { ms: 3400, compiled: 0, total: 143 } });
+  // The cache loaded after the first image (#86): a second install event.
+  const late = aotLaunchInfo({ schema: "wasm-dolphin.aot-progress.v1", state: "complete", events: [{ type: "install", loaded: 0, failed: 0, deferred: 143, ms: 3 }, { type: "install", loaded: 143, failed: 0, deferred: 0, ms: 380, after: "first-image" }] });
+  assert.deepEqual([late.install.loaded, late.afterFirstImage.loaded, late.fromCache], [0, 143, 143]);
   const runs = [
     { run: 1, cold: { aot: { state: "running", install: null, settled: { state: "complete", ms: 3400 } } }, warm: { aot: info } },
-    { run: 2, cold: { aot: { state: "running", install: null } }, warm: { aot: { ...info, install: { loaded: 0 } } } }
+    { run: 2, cold: { aot: { state: "running", install: null } }, warm: { aot: { ...info, install: { loaded: 0 }, fromCache: 0 } } },
+    { run: 3, cold: { aot: { state: "running", install: null } }, warm: { aot: late } }
   ];
   const s = summarizeAot(runs);
-  assert.deepEqual(s.warm.regionsInstalled, [143, 0]);
+  assert.deepEqual(s.warm.regionsInstalled, [143, 0, 143], "a launch whose cache came after the first image counts");
   assert.equal(s.warm.withRegionCache, false); // one warm launch without the cache
   assert.equal(s.cold.withRegionCache, false);
   assert.equal(summarizeAot([{ run: 1, cold: {}, warm: {} }]), null); // an engine without P7

@@ -7195,7 +7195,10 @@ export async function prepareAotFirstLaunch(file, {
       const keyed = mod ? regionBlockCacheKey(region.bytes).then((k) => {
         if (dolphinJitCacheMap.size < DOLPHIN_JIT_CACHE_MAX) dolphinJitCacheMap.set(k, mod);
       }) : Promise.resolve();
-      keyed.catch(() => {}).then(() => queueAotRegionAfterBoot(module, region));
+      // In the order the loader hands them over (compile order, hottest
+      // first): the digest and the queueing are chained, not raced (review
+      // of #86).
+      aotQueueChain = aotQueueChain.then(() => keyed.catch(() => {})).then(() => queueAotRegionAfterBoot(module, region));
     },
     retain: (key, mod, bytes) => {
       // Also under the key the CPU thread's compile looks up (the SHA-256 of
@@ -7244,7 +7247,10 @@ export function startAotFirstLaunchAfterBoot(flow = aotFirstLaunch) {
   void whenCoreRamReady(moduleInstance).then((ready) => {
     if (!ready) return;
     aotCoreBooted = true;
-    for (const [module, region] of aotRegionsBeforeBoot.splice(0)) void queueAotRegion(module, region).catch(() => {});
+    const waiting = aotRegionsBeforeBoot.splice(0);
+    aotQueueChain = aotQueueChain.then(async () => {
+      for (const [module, region] of waiting) await queueAotRegion(module, region).catch(() => {});
+    });
   });
   if (!flow?.supported) return Promise.resolve();
   const generation = flow.generation;
@@ -7258,6 +7264,8 @@ export function startAotFirstLaunchAfterBoot(flow = aotFirstLaunch) {
 }
 // The first presented image of this boot, or false after `timeoutMs`. No
 // running core (tests): at once.
+export const aotWhenFirstImageForTest = (module, options) => aotWhenFirstImage(module, options);
+export const recordPresentedFrameForTest = (coreFrame) => recordPresentedFrame(coreFrame);
 const aotFirstImageWaiters = [];
 function aotWhenFirstImage(module, { timeoutMs = 15000 } = {}) {
   if (!module) return Promise.resolve(false);
@@ -7289,9 +7297,11 @@ async function whenCoreRamReady(module, { timeoutMs = 60000, everyMs = 50 } = {}
   return false;
 }
 const aotRegionsBeforeBoot = [];
+let aotQueueChain = Promise.resolve();
 function queueAotRegionAfterBoot(module, region) {
-  if (aotCoreBooted) void queueAotRegion(module, region).catch(() => {});
-  else aotRegionsBeforeBoot.push([module, region]);
+  if (aotCoreBooted) return queueAotRegion(module, region).catch(() => {});
+  aotRegionsBeforeBoot.push([module, region]);
+  return undefined;
 }
 // The CPU thread's module-map key for these bytes (DolphinWeb_MakeWasmBlockCacheKey).
 async function regionBlockCacheKey(bytes) {
