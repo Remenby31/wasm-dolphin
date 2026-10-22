@@ -10,7 +10,7 @@ import test from "node:test";
 
 import { kpiTable } from "../harness/lib/kpi.mjs";
 import { estimateMin, eta, isBuildProcess, move, movedId, nextStep, readTickets, waitTurn } from "../harness/remote/spark-queue.mjs";
-import { benchQuery, benchRaceArgs, launchCommand, RACE_QUERY, runId, sh, stampSummary } from "../harness/remote/spark-run.mjs";
+import { benchQuery, benchRaceArgs, builtOnBenchTest, launchCommand, RACE_QUERY, runId, sh, stampSummary } from "../harness/remote/spark-run.mjs";
 
 const race = (extra = {}) => ({
   kind: "race-perf", file: "race",
@@ -180,4 +180,25 @@ test("spark queue: estimated durations and each job's wait", () => {
     { id: "4", kind: "build", name: "k" }
   ], now);
   assert.deepEqual(rows.map((r) => [r.name, r.startsIn, r.endsIn]), [["r", 0, 8], ["p", 8, 18], ["k", 18, 26]]);
+});
+
+test("spark-run: a core counts as built on the bench only when the bench built it", () => {
+  const dir = mkdtempSync(path.join(os.tmpdir(), "spark-built-"));
+  const built = (d) => { try { execFileSync("sh", ["-c", builtOnBenchTest(d)]); return true; } catch { return false; } };
+  const core = (d, bytes = "ci") => { mkdirSync(path.join(d, "cores", "dolphin"), { recursive: true }); writeFileSync(path.join(d, "cores", "dolphin", "dolphin-core-upstream.wasm"), bytes); };
+  const git = (d, ...a) => execFileSync("git", ["-C", d, "-c", "user.email=t@t", "-c", "user.name=t", ...a], { stdio: "ignore" });
+  try {
+    const plain = path.join(dir, "plain"); core(plain);
+    assert.equal(built(plain), false); // a wasm alone proves nothing
+    const exported = path.join(dir, "exported"); core(exported);
+    writeFileSync(path.join(exported, ".harness-identity.json"), JSON.stringify({ commit: "c", builtOn: "spark" }));
+    assert.equal(built(exported), true);
+    // A checkout with the committed CI core (2026-10-22: four of these passed for built).
+    const wt = path.join(dir, "wt"); core(wt); git(wt, "init", "-q"); git(wt, "add", "."); git(wt, "commit", "-qm", "ci core");
+    assert.equal(built(wt), false);
+    core(wt, "bench"); // what --install leaves
+    assert.equal(built(wt), true);
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
 });
