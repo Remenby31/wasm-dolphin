@@ -17,7 +17,9 @@
 //   fp_store, psq_load, psq_store; the same six on the slow path;
 //   cyclesCovered, cyclesTotal; regionAccessesEstimated,
 //   regionInstructionsEstimated; staticSaturations (u16 compile-time counts
-//   that saturated, cumulative, never reset); four spares.
+//   that saturated, cumulative, never reset); then, at +160..+184 (v1's
+//   spares, filled since 0104 at 4c6122e): CR writes, CR reads, CA writes,
+//   CA reads on the counted blocks.
 // DolphinWeb_MemAccessStats(n): n >= 0 zeroes and turns on at the next slice;
 // n < 0 only reads. The core writes it at each slice boundary.
 import { round } from "./stats.mjs";
@@ -25,9 +27,14 @@ import { round } from "./stats.mjs";
 export const MEM_STATS_VERSION = 1;
 export const MEM_STATS_BYTES = 192;
 export const KINDS = ["intLoad", "intStore", "fpLoad", "fpStore", "psqLoad", "psqStore"];
+export const FLAGS = ["crWrite", "crRead", "caWrite", "caRead"];
 const F64 = [
   "guestInstructions", ...KINDS.map((k) => `access.${k}`), ...KINDS.map((k) => `slow.${k}`),
-  "cyclesCovered", "cyclesTotal", "regionAccessesEstimated", "regionInstructionsEstimated", "staticSaturations"
+  "cyclesCovered", "cyclesTotal", "regionAccessesEstimated", "regionInstructionsEstimated", "staticSaturations",
+  // In v1's spares since 0104 at 4c6122e (0 before): on the counted blocks,
+  // instructions that write a CR field, read one, set XER[CA], read it
+  // (research/deep-cr-flags.md, the lazy-CR lever).
+  ...FLAGS.map((f) => `flag.${f}`)
 ];
 // Counters that only grow while on (checked for tears); staticSaturations is
 // cumulative too.
@@ -87,6 +94,9 @@ export function memAccessShares(s) {
     slowByKind: Object.fromEntries(KINDS.map((k) => [k, share(s[`slow.${k}`], slow)])),
     regionAccessesPerInstructionEstimated: regions ? share(s.regionAccessesEstimated, s.regionInstructionsEstimated) : null,
     withRegionsEstimated: regions ? share(counted + s.regionAccessesEstimated, s.guestInstructions + s.regionInstructionsEstimated) : null,
+    // Condition-register and carry traffic per instruction, counted blocks
+    // only (all 0 on a core before 4c6122e).
+    flagsPerInstruction: Object.fromEntries(FLAGS.map((f) => [f, share(s[`flag.${f}`], s.guestInstructions)])),
     guestInstructions: s.guestInstructions,
     staticSaturations: s.staticSaturations
   };

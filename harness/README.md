@@ -154,6 +154,26 @@ node harness/probes/race-perf.mjs --iso ../roms/<disc>.iso --state ../measures/h
   past 6 readbacks in flight, `errors`) and `uniqueFpsEstimate` = the speed
   window's presents/s × that share; `cold.uniqueShare` and
   `cold.uniqueFpsEstimate` per side. WebGPU presents only (`video=wgpu`).
+- `--headroom [--frames-per-vi-ref R]` (patch 0113, research/deep-headroom-kpi.md):
+  the program's main KPI, measured at `speed=1` where the game runs as the
+  player sees it. The core counters (`DolphinWeb_HeadroomStats`: throttle
+  sleep of the CPU thread, its FlushGpu waits, GPU-thread work, XFB copies)
+  are reset just before the window and read just after, with the core ticks:
+  `maxSpeedCpu` = guest s / (host s − sleep − FlushGpu wait) (Dolphin's
+  "Max"), `maxSpeedGpu` = guest s / (GPU work − waits on the render worker
+  for ring or upload space; null with the deterministic GPU thread),
+  `headroom` = the smaller one; guest s from the core's own ticks, written
+  at the same instant as its host window. PushBlockingEvent and SyncGPU
+  waits (off by default) count as CPU busy time;
+  plus `throttleSleepShare` and `xfbCopiesPerVi` (`cold.headroom` per run,
+  medians per side). Under 2 % of sleep the game runs below 100 %
+  (`headroomApplies` false): the speed is then the number.
+  Validity (every run, `lib/headroom.mjs` `invalidReasons`): a ring overflow
+  (`complete` false), a speed above its target × 1.02, no unique image in
+  the `--unique-frames` window, or game frames per VI off `--frames-per-vi-ref`
+  by more than 10 % set the run aside, with the reasons. `speed=unlimited` is
+  refused unless the query turns SyncOnSkipIdle on (`synconidle=1`): with it
+  off, emulated time runs ahead of the rendering.
 - `--mem-stats` (patch 0104): guest memory accesses per instruction, read in
   the stats window after the speed window (with `--region-sample`, the same
   window). `summary.json` → `memAccess` (and `baselineMemAccess`):
@@ -162,7 +182,9 @@ node harness/probes/race-perf.mjs --iso ../roms/<disc>.iso --state ../measures/h
   (int/fp/psq load/store), `slowShare` (slow-path calls over all accesses),
   and, with aot=1, the region part estimated apart
   (`regionAccessesPerInstructionEstimated`, `withRegionsEstimated`), never
-  merged into the counted figure. A core without the export gives
+  merged into the counted figure; `flagsPerInstruction` (CR writes, CR
+  reads, XER[CA] writes and reads per instruction, counted blocks, 0104 at
+  4c6122e and later). A core without the export gives
   `memAccess: null` and `memAccessWhy`.
 - `--chrome-args "--flag …"` adds Chromium flags on both sides;
   `--baseline-chrome-args` replaces them on the baseline side, so one tree is
