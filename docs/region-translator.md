@@ -321,6 +321,24 @@ as a `metadata.code.branch_hint` custom section (wasm branch hinting) before
 the code section, so V8 lays out the cold arms out of line. An engine that
 doesn't know the section ignores it. Compiler version 9.
 
+## Lazy CR and fused compare-branch (patch 0111, 2026-10-22)
+
+A compare (`cmp*`, Rc=1) in region code was a three-way `if/else` that
+wrote two words and read `xer_so_ov` (51 wasm instructions). It is now
+one i64 store: A - B with both operands extended (signed or not), and bit
+59 (SO) cleared. In Dolphin's format that reads as the interpreter's: LT
+is bit 62, GT is (s64) > 0, EQ is a zero low word. A `bc` later in the
+block on that field compares the operands again, as long as no op in
+between writes them or the field (`regsOut`, `crOut`, `system` and the HLE
+calls). The store stays, so every exit sees the exact CR.
+
+SO must be clear for this. Regions refuse to run while XER.SO is set
+(TryRunRegion, RegionWouldRun, RegionChainNext), and the ops that can set
+it (`mtxer`, `mcrxr`, the OE forms) run outside them. Research note:
+`research/deep-cr-flags.md` (R1). The lazy store without the fused branch
+was slower on unpredictable branches, so they ship together. Compiler
+version 10.
+
 ## MMU mode (patch 0091, with dispatch's 0090, 2026-10-22)
 
 Under the MMU (bMMU, set by a game's INI) no wasm code of ours runs. The
