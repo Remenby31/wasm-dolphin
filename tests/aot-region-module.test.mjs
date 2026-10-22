@@ -1,7 +1,7 @@
 import assert from "node:assert/strict";
 import test from "node:test";
 
-import { assembleRegion, groupRegions, paddedUleb, patchRegionHeap, regionHeapOfBytes, regionModuleLayout } from "../src/aot-region-module.js";
+import { assembleRegion, groupRegions, paddedSleb, paddedUleb, patchRegionHeap, regionHeapOfBytes, regionModuleLayout } from "../src/aot-region-module.js";
 
 // Synthetic fragments in the translator's shape. State layout of the tests:
 // pc at +0, a counter at +4, LR at +8, state at address 64.
@@ -214,13 +214,13 @@ test("aot region: the translation layout is carried by the module, mixed layouts
 // Patch 0084: a load's memarg offset holds the RAM address plus a byte
 // offset (a heap site); the module lists its sites, and a copy patched for
 // another heap runs there.
-test("aot region: heap sites are listed and a module patched for another heap runs there", async () => {
+test("aot region: memarg-offset heap sites are listed and a module patched for another heap runs there", async () => {
   const site = (base) => ({ kind: "heap", name: "ram_base", base });
   // COUNT = mem[ram_base + 16]; state.pc = outside; return 0
   const code = [0x00, ...get, ...konst(0), 0x28, 0x02]; // store address; guest offset 0; i32.load
   const at = code.length;
   code.push(...paddedUleb(1024 + 16), 0x36, 0x02, COUNT, ...store(PC, konst(0x80009000)), ...konst(0), 0x0b);
-  const G = { entry: 0x3000, entries: [0x3000], code: Uint8Array.from(code), relocs: [{ offset: at, ...site() }], heapBases: [1024, 4096] };
+  const G = { entry: 0x3000, entries: [0x3000], code: Uint8Array.from(code), relocs: [{ offset: at, ...site(), form: "offset" }], heapBases: [1024, 4096] };
   const region = assembleRegion([G], { helpers: HELPERS, pcOffset: PC, memoryPages: 1 });
   const heap = regionHeapOfBytes(region.bytes);
   assert.equal(heap.ramBase, 1024);
@@ -246,4 +246,36 @@ test("aot region: heap sites are listed and a module patched for another heap ru
   assert.throws(() => assembleRegion([{ ...G, heapBases: [8192, 4096] }], { helpers: HELPERS, pcOffset: PC, memoryPages: 1 }), /does not hold ram_base/);
   assert.throws(() => assembleRegion([{ ...G, heapBases: undefined }], { helpers: HELPERS, pcOffset: PC, memoryPages: 1 }), /heapBases required/);
   assert.throws(() => assembleRegion([G, { ...G, entry: 0x4000, entries: [0x4000], heapBases: [2048, 4096] }], { helpers: HELPERS, pcOffset: PC, memoryPages: 1 }), /different heaps/);
+});
+
+// The form the core emits (0084): main's i32.const base; offset; i32.add,
+// with the base as a 5-byte padded signed LEB listed as a site.
+test("aot region: i32.const heap sites hold the base itself and are patched in place", async () => {
+  // COUNT = mem[ram_base + 16]
+  const code = [0x00, ...get, 0x41];
+  const at = code.length;
+  code.push(...paddedSleb(1024), ...konst(16), 0x6a, 0x28, 0x02, 0x00, 0x36, 0x02, COUNT, ...store(PC, konst(0x80009000)), ...konst(0), 0x0b);
+  const G = { entry: 0x3000, entries: [0x3000], code: Uint8Array.from(code), relocs: [{ offset: at, kind: "heap", name: "ram_base" }], heapBases: [1024, 4096] };
+  const region = assembleRegion([G], { helpers: HELPERS, pcOffset: PC, memoryPages: 1 });
+  const [s0] = regionHeapOfBytes(region.bytes).sites;
+  assert.deepEqual([s0.kind, s0.form], [0, 0]);
+  assert.equal(region.bytes[s0.offset - 1], 0x41, "an i32.const");
+  const memory = new WebAssembly.Memory({ initial: 1, maximum: 1, shared: true });
+  const u32 = new Uint32Array(memory.buffer);
+  for (const ramBase of [1024, 2048, 0x7ff0]) {
+    const bytes = patchRegionHeap(region.bytes, { ramBase, l1Base: 4096 });
+    assert.deepEqual(Array.from(bytes.subarray(s0.offset, s0.offset + 5)), paddedSleb(ramBase), "the immediate is the base");
+    // outside the 5 bytes of the site and the section's bases, the bytes do not move
+    const diff = Array.from(bytes).flatMap((b, i) => (b !== region.bytes[i] ? [i] : []));
+    assert.ok(diff.every((i) => (i >= s0.offset && i < s0.offset + 5) || i > bytes.length - 64), `only the site and the section change (${diff})`);
+    u32[(ramBase + 16) / 4] = ramBase + 7;
+    const { instance } = await WebAssembly.instantiate(bytes, { env: { memory, bump: () => {}, read_u32: () => 0 } });
+    u32[(STATE + PC) / 4] = 0x3000;
+    assert.equal(instance.exports.f(STATE), 0);
+    assert.equal(u32[(STATE + COUNT) / 4], ramBase + 7, `reads at ${ramBase}`);
+  }
+  // A negative base (a heap over 2 GiB) keeps its sign extension.
+  assert.deepEqual(paddedSleb(0x80001000), [0x80, 0xa0, 0x80, 0x80, 0x78]);
+  // The site must hold the base exactly.
+  assert.throws(() => assembleRegion([{ ...G, heapBases: [1040, 4096] }], { helpers: HELPERS, pcOffset: PC, memoryPages: 1 }), /does not hold ram_base/);
 });

@@ -15,11 +15,14 @@
 //                       the exit stub when targetPc is outside the region
 //            "dispatch" return_call to the region dispatcher (blr, bctr),
 //                       state.pc already written
-//            "heap"     the memarg offset of a load or store, holding the host
-//                       address of the emulated RAM or L1 (`name`, one of
-//                       REGION_HEAP_NAMES) plus a byte offset: left as is,
-//                       listed in the module's "region-heap" section, so a
-//                       module can be patched for another heap (patch 0084)
+//            "heap"     a 5-byte padded LEB holding the host address of the
+//                       emulated RAM or L1 (`name`, one of REGION_HEAP_NAMES):
+//                       the immediate of an i32.const (`form` "const", signed
+//                       LEB, the base itself) or the memarg offset of an
+//                       access ("offset", unsigned, base + byte offset; for x64
+//                       later). Left as is, listed in the module's
+//                       "region-heap" section, so a module can be patched for
+//                       another heap (patch 0084)
 //
 // Module: imports env.memory (shared) and the helpers used, exports one
 // function `f` = the dispatcher: (state) -> 0 continue at state.pc, 1 state.pc
@@ -144,8 +147,9 @@ export const REGION_LAYOUT_SECTION = "region-layout";
 
 // Custom section "region-heap": the RAM and L1 addresses the module's heap
 // sites hold, then its sites: u32 LE each, [ramBase, l1Base, count,
-// (kind << 31 | byte offset in the module) ...]. Each site is a 5-byte padded
-// LEB, the memarg offset of an access: base + a small byte offset.
+// (kind << 31 | form << 30 | byte offset in the module) ...]; kind 0 RAM,
+// 1 L1; form 0 an i32.const's signed LEB (the base), 1 a memarg offset's
+// unsigned LEB (base + a byte offset under 64 KiB). Each is 5 bytes padded.
 export const REGION_HEAP_SECTION = "region-heap";
 
 // { ramBase, l1Base, sites: [{ offset, kind }] } of a module's bytes (read
@@ -171,7 +175,7 @@ export function regionHeapOfBytes(bytes) {
         const word = (i) => words.getUint32(4 * i, true);
         const count = word(2);
         if (3 + count !== (end - at.p) / 4) return null;
-        const sites = Array.from({ length: count }, (_, i) => ({ offset: word(3 + i) & 0x7fffffff, kind: word(3 + i) >>> 31 }));
+        const sites = Array.from({ length: count }, (_, i) => ({ offset: word(3 + i) & 0x3fffffff, kind: word(3 + i) >>> 31, form: (word(3 + i) >>> 30) & 1 }));
         return { ramBase: word(0), l1Base: word(1), sites };
       }
     }
@@ -180,8 +184,32 @@ export function regionHeapOfBytes(bytes) {
   return null;
 }
 
-function readPadded(b, at) {
-  return (b[at] & 0x7f) | ((b[at + 1] & 0x7f) << 7) | ((b[at + 2] & 0x7f) << 14) | ((b[at + 3] & 0x7f) << 21) | ((b[at + 4] & 0x0f) * 2 ** 28);
+// A 5-byte padded LEB at `at`, as a u32 (signed: an i32.const's immediate).
+function readPadded(b, at, signed = false) {
+  const low = ((b[at] & 0x7f) | ((b[at + 1] & 0x7f) << 7) | ((b[at + 2] & 0x7f) << 14) | ((b[at + 3] & 0x7f) << 21)) >>> 0;
+  const top = b[at + 4];
+  if (b[at] < 0x80 || b[at + 1] < 0x80 || b[at + 2] < 0x80 || b[at + 3] < 0x80 || top & 0x80) return null; // not padded to 5 bytes
+  if (signed) {
+    const high = top & 0x0f, ext = top & 0x70; // bits 28..31, then the sign extension of bit 31
+    if (ext !== (high & 0x08 ? 0x70 : 0)) return null;
+    return (low + high * 2 ** 28) >>> 0;
+  }
+  return top & 0x70 ? null : (low + (top & 0x0f) * 2 ** 28) >>> 0;
+}
+
+// 5-byte padded signed LEB of a u32 taken as an i32 (an i32.const's immediate).
+export function paddedSleb(v) {
+  const s = v | 0;
+  return [0x80 | (s & 0x7f), 0x80 | ((s >> 7) & 0x7f), 0x80 | ((s >> 14) & 0x7f), 0x80 | ((s >> 21) & 0x7f), (s >> 28) & 0x7f];
+}
+
+const HEAP_FORMS = ["const", "offset"];
+// The base a site holds and its slack: an i32.const holds the base itself, a
+// memarg offset the base plus a byte offset under 64 KiB.
+function siteHolds(b, at, form, base) {
+  const value = readPadded(b, at, form === 0);
+  if (value === null) return false;
+  return form === 0 ? value === base >>> 0 : ((value - base) >>> 0) < 0x10000;
 }
 
 // A copy of the module's bytes with its heap sites (and its "region-heap"
@@ -194,10 +222,10 @@ export function patchRegionHeap(bytes, { ramBase, l1Base }) {
   if (!delta[0] && !delta[1]) return bytes;
   const out = Uint8Array.from(bytes);
   const bases = [heap.ramBase, heap.l1Base];
-  for (const { offset, kind } of heap.sites) {
-    const value = readPadded(out, offset);
-    if (out[offset + 4] & 0xf0 || ((value - bases[kind]) >>> 0) >= 0x10000) throw new Error(`region: heap site at ${offset} does not hold its base`);
-    out.set(paddedUleb((value + delta[kind]) >>> 0), offset);
+  for (const { offset, kind, form } of heap.sites) {
+    if (!siteHolds(out, offset, form, bases[kind])) throw new Error(`region: heap site at ${offset} does not hold its base`);
+    const value = (readPadded(out, offset, form === 0) + delta[kind]) >>> 0;
+    out.set(form === 0 ? paddedSleb(value) : paddedUleb(value), offset);
   }
   // the section's two bases (its content follows its name)
   const marker = new TextEncoder().encode(REGION_HEAP_SECTION);
@@ -256,7 +284,7 @@ export function assembleRegion(fragments, { helpers, pcOffset, memoryPages, memo
 
   // Patch relocation sites.
   const TEMPLATE = paddedUleb(0);
-  const heapSites = []; // [fragment, offset in its body, kind]
+  const heapSites = []; // [fragment, offset in its body, kind, form]
   if (!heapBases) {
     const all = new Set(fragments.filter((f) => f.heapBases).map((f) => `${f.heapBases[0] >>> 0}:${f.heapBases[1] >>> 0}`));
     if (all.size > 1) throw new Error("region: fragments translated for different heaps");
@@ -272,14 +300,16 @@ export function assembleRegion(fragments, { helpers, pcOffset, memoryPages, memo
       for (const o of offsets) if (Math.abs(o - r.offset) < 5) throw new Error(`region: overlapping relocs at ${r.offset}`);
       offsets.add(r.offset);
       if (r.kind === "heap") {
-        // A memarg offset (after the opcode and its alignment byte) holding
-        // its base plus a byte offset, left as is and listed.
+        // Left as is and listed: an i32.const of its base (after 0x41), or a
+        // memarg offset of its base plus a byte offset.
         const kind = REGION_HEAP_NAMES.indexOf(r.name);
+        const form = HEAP_FORMS.indexOf(r.form ?? "const");
         if (kind < 0) throw new Error(`region: unknown heap site ${r.name}`);
+        if (form < 0) throw new Error(`region: unknown heap site form ${r.form}`);
+        if (form === 0 && code[r.offset - 1] !== OP.i32Const) throw new Error(`region: heap site at ${r.offset} is not an i32.const`);
         if (!Array.isArray(heapBases) || heapBases.length !== 2) throw new Error("region: heapBases required for heap sites");
-        const value = readPadded(code, r.offset);
-        if (code[r.offset + 4] & 0xf0 || ((value - heapBases[kind]) >>> 0) >= 0x10000) throw new Error(`region: heap site at ${r.offset} does not hold ${r.name}`);
-        heapSites.push([fi, r.offset, kind]);
+        if (!siteHolds(code, r.offset, form, heapBases[kind])) throw new Error(`region: heap site at ${r.offset} does not hold ${r.name}`);
+        heapSites.push([fi, r.offset, kind, form]);
         continue;
       }
       if (TEMPLATE.some((b, i) => code[r.offset + i] !== b)) throw new Error(`region: reloc at ${r.offset} is not a padded zero`);
@@ -367,7 +397,7 @@ export function assembleRegion(fragments, { helpers, pcOffset, memoryPages, memo
   section(out, 0, custom);
   if (heapSites.length) {
     const words = [heapBases[0] >>> 0, heapBases[1] >>> 0, heapSites.length,
-      ...heapSites.map(([fi, offset, kind]) => ((kind << 31) | (codeAt + bodyAt[fi] + offset)) >>> 0)];
+      ...heapSites.map(([fi, offset, kind, form]) => ((kind << 31) | (form << 30) | (codeAt + bodyAt[fi] + offset)) >>> 0)];
     const tag = [];
     name(tag, REGION_HEAP_SECTION);
     for (const w of words) tag.push(w & 0xff, (w >>> 8) & 0xff, (w >>> 16) & 0xff, (w >>> 24) & 0xff);

@@ -228,8 +228,8 @@ export function createAotFirstLaunch({
 //   thread_local, guest code read from physical RAM through the BAT views).
 //   ptr -> [status, entry, codeLength, entryCount, relocCount, reserved],
 //   entries (u32 each), relocs (offset, kind, value: 0 import by helper
-//   index, 1 jump to value, 2 dispatch, 3 heap site by REGION_HEAP_NAMES
-//   index), code. Valid until the next call on
+//   index, 1 jump to value, 2 dispatch, 3 heap site: bit 0 REGION_HEAP_NAMES
+//   index, bit 1 the form, 0 an i32.const, 1 a memarg offset), code. Valid until the next call on
 //   the same thread; 0 is an internal error.
 // _DolphinWeb_AotKeyParts(ptr) writes [compilerVersion, codegenMask].
 // _DolphinWeb_JitHelperName(i) / _DolphinWeb_JitHelperSignature(i): helper
@@ -340,7 +340,7 @@ function translateOne(m, f, { mask, maxBlocks, names }) {
     const [offset, kind, value] = words.subarray(entryCount + 3 * i, entryCount + 3 * i + 3);
     if (kind === 0) return { offset, kind: "import", name: names[value] };
     if (kind === 1) return { offset, kind: "jump", targetPc: value };
-    if (kind === 3) return { offset, kind: "heap", name: REGION_HEAP_NAMES[value] };
+    if (kind === 3) return { offset, kind: "heap", name: REGION_HEAP_NAMES[value & 1], form: value & 2 ? "offset" : "const" };
     return { offset, kind: "dispatch" };
   });
   const at = p + 24 + 4 * (entryCount + 3 * relocCount);

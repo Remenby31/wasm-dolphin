@@ -103,7 +103,7 @@ export async function loadAotCore(coreDir = new URL("../../cores/dolphin/", impo
         const [offset, kind, value] = words.subarray(entryCount + 3 * i, entryCount + 3 * i + 3);
         if (kind === 0) return { offset, kind: "import", name: helperNames[value] };
         if (kind === 1) return { offset, kind: "jump", targetPc: value };
-        if (kind === 3) return { offset, kind: "heap", name: REGION_HEAP_NAMES[value] };
+        if (kind === 3) return { offset, kind: "heap", name: REGION_HEAP_NAMES[value & 1], form: value & 2 ? "offset" : "const" };
         return { offset, kind: "dispatch" };
       });
       const at = p + 16 + 4 * (entryCount + 3 * relocCount);

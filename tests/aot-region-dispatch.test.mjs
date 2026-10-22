@@ -12,7 +12,7 @@ import test from "node:test";
 
 import { imageFromDol } from "../src/aot-image.js";
 import { planDol } from "../src/aot-plan.js";
-import { assembleRegion, paddedUleb, patchRegionHeap, regionHeapOfBytes } from "../src/aot-region-module.js";
+import { assembleRegion, paddedSleb, paddedUleb, patchRegionHeap, regionHeapOfBytes } from "../src/aot-region-module.js";
 import { asm, assemble, buildDol } from "./aot-asm.mjs";
 import { HELPER_SIGNATURES, STOP, functionFragments, loadAotCore, regionGroups, seedGprs } from "./helpers/aot-core-equivalence.mjs";
 import { makeRng, randomProgram } from "./helpers/jit-oracle.mjs";
@@ -435,7 +435,13 @@ test("no region fragment holds the RAM or L1 address outside its heap sites", { 
     const fragment = core.translate(CODE, { ranges: [[CODE, CODE + 4 * words.length]] });
     if (!fragment) continue;
     fragments += 1;
-    sites += fragment.relocs.filter((x) => x.kind === "heap").length;
+    for (const site of fragment.relocs.filter((x) => x.kind === "heap")) {
+      sites += 1;
+      // main's i32.const of the base, padded to 5 bytes
+      assert.equal(site.form, "const");
+      assert.equal(fragment.code[site.offset - 1], 0x41, "an i32.const");
+      assert.deepEqual(Array.from(fragment.code.subarray(site.offset, site.offset + 5)), paddedSleb(base[site.name === "ram_base" ? 0 : 1]), "it holds the base");
+    }
     assert.deepEqual(strayAddresses(fragment, base), [], `program ${n}: an address outside the heap sites`);
   }
   core.invalidate(CODE, 4 * 48);
