@@ -7289,12 +7289,14 @@ async function regionBlockCacheKey(bytes) {
 // a hit in V8's native module cache; it then runs it for its entries.
 // members: [{ ranges, hash }] per function, the plan's FNV-1a 64 of its code:
 // the core installs nothing whose code changed since the translation.
-async function queueAotRegion(module, { bytes, entries, members, layout = 0 }) {
+async function queueAotRegion(module, { key, bytes, entries, members, layout = 0 }, flow = aotFirstLaunch) {
   if (typeof module?._DolphinWeb_AotQueueRegion !== "function" || !bytes?.length || !entries?.length || !members?.length) return;
   // Translated for another heap layout: the core would refuse it; not even
-  // copied into its heap (counted).
+  // copied into its heap (counted). Translated again from guest memory, its
+  // cache entry overwritten (the new module comes back through install).
   if (typeof module._DolphinWeb_AotLayoutHash === "function" && (layout >>> 0) !== (module._DolphinWeb_AotLayoutHash() >>> 0)) {
     aotLayoutSkipped += 1;
+    if (key) flow?.retranslate?.(key);
     return;
   }
   // Its heap sites hold the RAM and L1 addresses of the session that
@@ -7323,8 +7325,8 @@ async function queueAotRegion(module, { bytes, entries, members, layout = 0 }) {
       // thrown away (counted; up to the whole cache when the heap moved).
       aotHeapPatched += 1;
       aotHeapPatchedBytes += bytes.length;
-      const key = await regionBlockCacheKey(patched);
-      const compiled = await precompileAotRegion(key, patched);
+      const patchedKey = await regionBlockCacheKey(patched);
+      const compiled = await precompileAotRegion(patchedKey, patched);
       if (!compiled.module) {
         aotHeapPatchFailed += 1;
         return;
@@ -7350,6 +7352,7 @@ async function queueAotRegion(module, { bytes, entries, members, layout = 0 }) {
     module._free(w);
   }
 }
+export const queueAotRegionForTest = queueAotRegion;
 // A region module of the first launch: compiled off the CPU thread when the
 // compiler worker is on (?aotcompiler=1), kept alive under its key.
 async function precompileAotRegion(key, bytes) {

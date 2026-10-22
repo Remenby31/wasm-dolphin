@@ -468,3 +468,66 @@ test("planning runs in a worker of its own; its failure or silence rejects", asy
   await assert.rejects(planDiscInWorker(file, { createWorker: fakeWorker((w) => w.onmessage({ data: { ok: false, message: "bad DOL" } })) }), /bad DOL/);
   await assert.rejects(planDiscInWorker(file, { createWorker: fakeWorker(() => {}), timeoutMs: 5 }), /timed out/);
 });
+
+// Review of #62 (P1-3): a cached module the core refuses (translated for
+// another heap layout) is translated again from guest memory after the boot,
+// its cache entry overwritten and the new module installed; the next launch
+// loads the new one. Once per key and launch, whether the refusal comes
+// before the start after the boot or after the run.
+test("a module refused at install is translated again live and its cache entry rewritten", async () => {
+  const p = profile();
+  await launch(p).flow.start();
+  for (const when of ["before-start", "after-run"]) {
+    const installs = [];
+    const next = launch(p, { install: (r) => installs.push(r) });
+    await next.flow.installBeforeBoot();
+    installs.length = 0; // the cached modules, handed at load
+    const key = [...next.retained.keys()][1];
+    if (when === "after-run") {
+      await next.flow.start();
+      assert.equal(next.translator.translated.length, 0, "a second launch translates nothing");
+    }
+    assert.equal(await next.flow.retranslate(key), true);
+    assert.equal(await next.flow.retranslate(key), false, "once per launch");
+    if (when === "before-start") await next.flow.start();
+    for (let i = 0; i < 100 && !installs.length; i++) await new Promise((r) => setTimeout(r, 5));
+    assert.deepEqual(next.compiled, [key], `${when}: only that module, compiled again`);
+    assert.ok(next.translator.translated.length > 0 && next.translator.translated.length <= 4);
+    assert.deepEqual(installs.map((r) => r.key), [key], "handed to the core");
+    assert.equal(next.flow.stats().retranslated, 1);
+  }
+  assert.equal(await launch(p).flow.retranslate("region-v1:unknown"), false, "no plan, nothing to do");
+  const last = launch(p);
+  assert.equal((await last.flow.installBeforeBoot()).failed.length, 0, "the rewritten entries load");
+});
+
+// Review of #72: a key marked after the run's last module but before its end
+// (here, from the "done" event) gets one more run; and a key the core keeps
+// refusing is translated again 3 launches at most.
+test("a refusal at the end of the run gets one more run; retranslations stop after 3 launches", async () => {
+  const p = profile();
+  await launch(p).flow.start();
+  let key = null;
+  const installs = [];
+  let flow;
+  const late = launch(p, {
+    install: (r) => installs.push(r.key),
+    onEvent: (e) => { if (e.type === "done" && key && !late.asked) { late.asked = true; void flow.retranslate(key); } }
+  });
+  flow = late.flow;
+  await flow.installBeforeBoot();
+  installs.length = 0;
+  key = [...late.retained.keys()][0];
+  await flow.start();
+  for (let i = 0; i < 100 && !installs.length; i++) await new Promise((r) => setTimeout(r, 5));
+  assert.deepEqual(late.compiled, [key], "translated again by the second run");
+  assert.deepEqual(installs, [key]);
+  // that was launch 1 for this key: two more, then never
+  for (const again of [true, true, false]) {
+    const next = launch(p);
+    await next.flow.installBeforeBoot();
+    next.flow.retranslate(key); // before the start: counted when the run reads the attempts
+    await next.flow.start();
+    assert.deepEqual(next.compiled, again ? [key] : [], again ? "translated again" : "after 3 launches, left as it is");
+  }
+});
