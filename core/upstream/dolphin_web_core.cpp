@@ -736,7 +736,14 @@ void EnsureRuntime()
   Config::SetBase(Config::MAIN_PRECISION_FRAME_TIMING, false);
   Config::SetBase(Config::MAIN_RUSH_FRAME_PRESENTATION, true);
   Config::SetBase(Config::MAIN_SMOOTH_EARLY_PRESENTATION, true);
-  Config::SetBase(Config::MAIN_SYNC_ON_SKIP_IDLE, false);
+  // ?synconidle=1 (Module['dolphinSyncOnSkipIdle']): Dolphin's default, where
+  // every idle skip waits for the GPU thread to drain its FIFO (FlushGpu).
+  // Off here since the first import (2026-05-06, no reason recorded); being
+  // measured against the default.
+  const bool sync_on_skip_idle =
+      EM_ASM_INT({ return (typeof Module !== 'undefined' &&
+                           Module['dolphinSyncOnSkipIdle']) ? 1 : 0; }) != 0;
+  Config::SetBase(Config::MAIN_SYNC_ON_SKIP_IDLE, sync_on_skip_idle);
   Config::SetBase(Config::MAIN_ACCURATE_FMADDS, false);
   Config::SetBase(Config::MAIN_ENABLE_CHEATS, false);
   Config::SetBase(Config::MAIN_OSD_MESSAGES, false);
