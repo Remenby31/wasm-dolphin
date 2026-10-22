@@ -14,7 +14,7 @@
 //     [--runs 4 (even with --baseline)] [--min-pairs 4] [--hold KeyX] [--warm]
 //     [--max-load L] [--load-wait 300] [--lock-wait 1800]
 //     [--pcsample [periodMs]] [--symbols functions.json] [--out dir]
-//     [--unique-frames secs] [--region-sample N [--region-secs 10]] [--mem-stats] [--baseline-query "..."]
+//     [--display] [--unique-frames secs] [--region-sample N [--region-secs 10]] [--mem-stats] [--baseline-query "..."]
 //     [--calm-wait S (default --lock-wait): wait for load ≤ --max-load before taking the lock]
 //     [--chrome-args "--flag …"] [--baseline-chrome-args "--flag …"]
 //
@@ -73,7 +73,7 @@ import { acquirePerfLock } from "../lib/perf-lock.mjs";
 import { openSession, rebootSession } from "../lib/session.mjs";
 import { calmThenLock, loadGaveUp, waitForLoad } from "../lib/env.mjs";
 import { describe, median, percentile, round } from "../lib/stats.mjs";
-import { coreStats, hitchList, mergeTimeline, presentationStats } from "../lib/timeline.mjs";
+import { coreStats, displayStats, hitchList, mergeTimeline, presentationStats } from "../lib/timeline.mjs";
 import { consistentRead, decodeRegionStats, poolStats, regionShares, topMisses } from "../lib/jit-region-stats.mjs";
 import { consistentMemRead, decodeMemStats, memAccessShares, poolMemStats } from "../lib/mem-access-stats.mjs";
 import { summarizePcSamples } from "../../src/harness-pc-sampler.js";
@@ -227,6 +227,8 @@ export async function measure(session, o) {
       speed: round(core.speed), speedP5: round(core.speedP5), speedMin: round(core.speedMin),
       gameFps: info?.vis ?? null,
       presents: pres.presents, viOutputs: timeline.vi.length,
+      // --display: what the screen showed (one worker rAF per BeginFrame).
+      ...(o.display ? { display: displayStats(timeline) } : {}),
       presentsPerSecond: round(pres.presents / ((t1 - t0) / 1000), 1),
       ...(o.uniqueFrames ? { uniqueFrames, uniqueFpsEstimate: uniqueFrames?.uniqueShare == null ? null : round((pres.presents / ((t1 - t0) / 1000)) * uniqueFrames.uniqueShare, 1) } : {}),
       viIntervalMs: { p50: round(percentile(viMs, 50)), p99: round(percentile(viMs, 99)), max: round(viMs.length ? Math.max(...viMs) : null) },
@@ -247,6 +249,13 @@ export async function measure(session, o) {
   }
 }
 
+// A change measured while another harness held the perf lock too is not a
+// measure: withheld, with the overlap as the reason.
+export function withheldOnOverlap(change, overlaps) {
+  if (!change || !overlaps.length) return change;
+  return { ...change, median: null, withheld: `perf lock overlap: ${overlaps.map((x) => `${x.at}: ${x.why}`).join("; ")}` };
+}
+
 // p4 of one stats window, or null and why (not asked, no export, torn or
 // inconsistent counters).
 export function regionRecord(reply) {
@@ -257,7 +266,11 @@ export function regionRecord(reply) {
   const p4 = regionShares(stats);
   const samples = {
     ...(Array.isArray(reply.installSamples) ? { installSamples: reply.installSamples } : {}),
-    ...(Number.isInteger(reply.layoutRefused) ? { layoutRefused: reply.layoutRefused } : {})
+    ...(Number.isInteger(reply.layoutRefused) ? { layoutRefused: reply.layoutRefused } : {}),
+    // The launch's heap layout (hash): it varies between launches, and the
+    // host work per guest cycle with it (bench, 2026-10-22).
+    ...(Number.isInteger(reply.layoutHash) ? { layoutHash: reply.layoutHash } : {}),
+    ...(reply.layout ? { layout: reply.layout } : {})
   };
   return p4.error ? { p4: null, p4Why: p4.error, ...samples } : { p4, p4Raw: stats, ...samples };
 }
@@ -327,7 +340,7 @@ async function measureSide(side, o) {
   const server = await ensureServer({ port: o.port, root: side.root, coreCandidates: o.coreCandidates });
   try {
     const bootStart = performance.now();
-    const session = await openSession({ base: server.base, server, query: side.query ?? o.query, iso: o.iso, routes: { [STATE_ROUTE]: o.state }, chromeArgs: side.chromeArgs ?? [] });
+    const session = await openSession({ base: server.base, server, query: side.query ?? o.query, iso: o.iso, routes: { [STATE_ROUTE]: o.state }, chromeArgs: side.chromeArgs ?? [], harness: o.display ? { displayed: true } : {} });
     const record = { url: session.url, served: server.identity, core: session.core, loadGate, bootMs: round(performance.now() - bootStart, 0) };
     try {
       record.cold = await measure(session, o);
@@ -387,7 +400,7 @@ async function main() {
       runs: { type: "string", default: "4" }, "min-pairs": { type: "string" }, "load-wait": { type: "string", default: "300" }, "calm-wait": { type: "string" }, warmup: { type: "string", default: "25" }, secs: { type: "string", default: "20" },
       hold: { type: "string", default: "KeyX" }, warm: { type: "boolean", default: false },
       "max-load": { type: "string" }, "lock-wait": { type: "string", default: "1800" },
-      pcsample: { type: "string" }, symbols: { type: "string" }, "region-sample": { type: "string" }, "region-secs": { type: "string", default: "10" }, counters: { type: "boolean", default: false }, "unique-frames": { type: "string" }, "mem-stats": { type: "boolean", default: false }, "baseline-query": { type: "string" }, "chrome-args": { type: "string" }, "baseline-chrome-args": { type: "string" },
+      pcsample: { type: "string" }, symbols: { type: "string" }, "region-sample": { type: "string" }, "region-secs": { type: "string", default: "10" }, counters: { type: "boolean", default: false }, "unique-frames": { type: "string" }, display: { type: "boolean", default: false }, "mem-stats": { type: "boolean", default: false }, "baseline-query": { type: "string" }, "chrome-args": { type: "string" }, "baseline-chrome-args": { type: "string" },
       "core-candidate": { type: "string", multiple: true, default: [] },
       port: { type: "string", default: process.env.HARNESS_PORT }, out: { type: "string" }
     },
@@ -428,6 +441,7 @@ async function main() {
     ...(values.counters ? (checkPerfAccess(), { onWindow: perfCounters() }) : {}),
     uniqueFrames: values["unique-frames"] == null ? null : num(values, "unique-frames", { min: 2 }),
     memStats: values["mem-stats"],
+    display: values.display,
     functions: values.symbols ? JSON.parse(readFileSync(values.symbols, "utf8")).sort((a, b) => a[0] - b[0]) : null,
     coreCandidates: values["core-candidate"]
   };
@@ -457,8 +471,17 @@ async function main() {
 
   const records = [];
   let gaveUp = null;
+  // Two holders of the perf lock at once would measure on a shared machine:
+  // checked when taken, before each run and at the end (lockIntegrity).
+  const lockOverlap = [];
+  const checkLock = (at) => {
+    const c = releaseLock.check?.();
+    if (c && !c.ok) { lockOverlap.push({ at, why: c.why }); console.warn(`[race-perf] perf lock overlap detected (${at}): ${c.why}`); }
+  };
+  checkLock("taken");
   try {
     for (let run = 1; run <= o.runs && !gaveUp; run += 1) {
+      checkLock(`before run ${run}`);
       const record = { run };
       for (const name of sideOrder(run).filter((n) => sides[n])) {
         record[name] = await measureSide(sides[name], o);
@@ -470,6 +493,7 @@ async function main() {
       writeFileSync(path.join(outDir, `run${run}.json`), JSON.stringify(record, null, 1) + "\n");
       records.push(record);
     }
+    checkLock("end");
   } finally {
     releaseLock();
     dropExports();
@@ -485,6 +509,14 @@ async function main() {
       viP99Ms: describe(m.map((x) => x.viIntervalMs.p99)), presentP99Ms: describe(m.map((x) => x.presentIntervalMs.p99)),
       hitchesPerMin: describe(m.map((x) => x.hitchesPerMin)), busiestThread: describe(m.map((x) => x.rendererThreads.at(-1)?.busiest)),
       presentsPerSecond: describe(m.map((x) => x.presentsPerSecond)),
+      ...(m.some((x) => x.display) ? {
+        displayedPerSecond: describe(m.map((x) => x.display?.displayedPerSecond)),
+        displayedP95: describe(m.map((x) => x.display?.displayedP95)),
+        droppedPerMin: describe(m.map((x) => x.display?.droppedPerMin)),
+        judderPct: describe(m.map((x) => x.display?.judderPct)),
+        offOneVsyncPct: describe(m.map((x) => x.display?.offOneVsyncPct)),
+        displayWhy: [...new Set(m.map((x) => (x.display?.supported === false ? x.display.why : null)).filter(Boolean))].join("; ") || null
+      } : {}),
       // Unique images (--unique-frames): measured in their own window; the
       // speed window's presents/s × that window's share of new images.
       ...(m.some((x) => x.uniqueFrames) ? {
@@ -515,7 +547,9 @@ async function main() {
     runs: runsDone.length, failed, gaveUp,
     candidate: { cold: summarize("candidate", "cold"), warm: summarize("candidate", "warm") },
     baseline: sides.baseline ? { cold: summarize("baseline", "cold"), warm: summarize("baseline", "warm") } : null,
-    change: sides.baseline ? pairedSpeedChange(runsDone.filter((r) => good(r.baseline) && good(r.candidate)), { minPairs: o.minPairs }) : null,
+    change: sides.baseline ? withheldOnOverlap(pairedSpeedChange(runsDone.filter((r) => good(r.baseline) && good(r.candidate)), { minPairs: o.minPairs }), lockOverlap) : null,
+    // Checks of the perf lock that found another holder (empty: none).
+    lockOverlap,
     // --counters: the same pairing on host instructions per guest cycle (lower is better).
     ...(o.onWindow && sides.baseline ? { counterChange: pairedSpeedChange(runsDone.filter((r) => good(r.baseline) && good(r.candidate)), { metric: "instructionsPerGuestCycle", minPairs: o.minPairs }) } : {}),
     pcsample: pcNote,
@@ -529,7 +563,7 @@ async function main() {
   writeFileSync(path.join(outDir, "summary.json"), JSON.stringify(summary, null, 1) + "\n");
   const med = (n) => summary[n]?.cold?.speed?.median ?? "-";
   console.log(`[race-perf] ${sides.baseline ? `baseline ${med("baseline")} % → candidate ${med("candidate")} %, paired change ${summary.change.median ?? `withheld (${summary.change.withheld})`}${summary.change.median != null ? ` % over ${summary.change.pairs} pairs` : ""}` : `speed median ${med("candidate")} %`}${failed.length ? `; ${failed.length} failed run(s): ${failed.map((f) => `r${f.run} ${f.side} ${f.why}`).join(", ")}` : ""} -> ${outDir}`);
-  process.exitCode = failed.length || summary.change?.withheld ? 1 : 0;
+  process.exitCode = failed.length || summary.change?.withheld || lockOverlap.length ? 1 : 0;
 }
 
 if (import.meta.url === pathToFileURL(process.argv[1] ?? "").href) await main();
