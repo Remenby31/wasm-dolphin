@@ -1,7 +1,7 @@
 import assert from "node:assert/strict";
 import test from "node:test";
 
-import { assembleRegion, groupRegions, paddedSleb, paddedUleb, patchRegionHeap, regionHeapOfBytes, regionModuleLayout } from "../src/aot-region-module.js";
+import { assembleRegion, groupRegions, paddedSleb, paddedUleb, patchRegionHeap, regionHeapOfBytes, regionModuleKey, regionModuleLayout } from "../src/aot-region-module.js";
 
 // Synthetic fragments in the translator's shape. State layout of the tests:
 // pc at +0, a counter at +4, LR at +8, state at address 64.
@@ -56,13 +56,17 @@ function program() {
   return [A, B];
 }
 
-async function instantiate(region, { onBump = () => {} } = {}) {
-  const memory = new WebAssembly.Memory({ initial: 1, maximum: 1, shared: true });
+// The core's side of region chaining (patch 0102): region_chain(state) picks
+// the next region's table index in `table`, 0 to return to the dispatcher.
+const noChain = () => ({ region_chain: () => 0, table: new WebAssembly.Table({ element: "anyfunc", initial: 1 }) });
+
+async function instantiate(region, { onBump = () => {}, memory = new WebAssembly.Memory({ initial: 1, maximum: 1, shared: true }), chain = noChain() } = {}) {
   const { instance } = await WebAssembly.instantiate(region.bytes, {
-    env: { memory, bump: onBump, read_u32: () => 0 }
+    env: { memory, bump: onBump, read_u32: () => 0, ...chain }
   });
   const u32 = new Uint32Array(memory.buffer);
   return {
+    f: instance.exports.f,
     run(pc) { u32[(STATE + PC) / 4] = pc; return instance.exports.f(STATE); },
     word: (off) => u32[(STATE + off) / 4],
     set: (off, v) => { u32[(STATE + off) / 4] = v; },
@@ -148,6 +152,59 @@ test("aot region: a dispatch to a PC outside the region returns 0 (code ran), th
   assert.equal(r.word(COUNT), 0);
 });
 
+test("aot region: an exit tail-calls the region region_chain picks, in the core's table (patch 0102)", async () => {
+  // Region 1 = A alone: its call to B (0x2000) leaves the region. Region 2 =
+  // B: returns through LR (0x1004), outside region 2, back into region 1.
+  const [A, B] = program();
+  const memory = new WebAssembly.Memory({ initial: 1, maximum: 1, shared: true });
+  const table = new WebAssembly.Table({ element: "anyfunc", initial: 3 });
+  const owner = new Map([[0x1000, 1], [0x1004, 1], [0x1008, 1], [0x2000, 2]]);
+  const asked = [];
+  let budget = Infinity; // exits the core lets chain
+  const region_chain = (state) => {
+    const pc = new Uint32Array(memory.buffer)[(state + PC) / 4];
+    asked.push(pc);
+    return budget-- > 0 ? owner.get(pc) ?? 0 : 0;
+  };
+  const opts = { helpers: HELPERS, pcOffset: PC, memoryPages: 1, chain: true };
+  const r1 = await instantiate(assembleRegion([A], opts), { memory, chain: { region_chain, table } });
+  const r2 = await instantiate(assembleRegion([B], opts), { memory, chain: { region_chain, table } });
+  table.set(1, r1.f);
+  table.set(2, r2.f);
+  // A(0x1000) -> stub -> region 2: B -> dispatch miss -> stub -> region 1:
+  // A(0x1004) -> stub (0x80009000: no region) -> 0.
+  assert.equal(r1.run(0x1000), 0);
+  assert.equal(r1.word(COUNT), 111, "both regions ran within one call");
+  assert.equal(r1.word(PC), 0x80009000);
+  assert.deepEqual(asked, [0x2000, 0x1004, 0x80009000]);
+  // Refused: the first exit returns to the dispatcher, state.pc written.
+  r1.reset(); asked.length = 0; budget = 0;
+  assert.equal(r1.run(0x1000), 0);
+  assert.equal(r1.word(COUNT), 1);
+  assert.equal(r1.word(PC), 0x2000);
+  assert.deepEqual(asked, [0x2000]);
+});
+
+test("aot region: chained modules are keyed region-v2, the others region-v1", async () => {
+  const members = [{ entry: 0x1000, sha256: "a".repeat(64) }, { entry: 0x2000, sha256: "b".repeat(64) }];
+  const parts = { compilerVersion: 5, codegenMask: 0 };
+  assert.match(await regionModuleKey(members, parts), /^region-v1:00000005:00000000:[0-9a-f]{64}$/);
+  const chained = await regionModuleKey(members, { ...parts, chain: true });
+  assert.match(chained, /^region-v2:00000005:00000000:[0-9a-f]{64}$/);
+  assert.equal(chained.slice(10), (await regionModuleKey(members, parts)).slice(10), "same members, same hash");
+});
+
+test("aot region: without chain (a core before 0102) the module imports neither region_chain nor the table", () => {
+  const opts = { helpers: HELPERS, pcOffset: PC, memoryPages: 1 };
+  const names = (o) => WebAssembly.Module.imports(new WebAssembly.Module(assembleRegion(program(), o).bytes)).map((i) => i.name);
+  assert.deepEqual(names(opts), ["memory", "bump"]);
+  assert.deepEqual(names({ ...opts, chain: true }), ["memory", "bump", "region_chain", "table"]);
+  // both expose the fragments for the warm-up
+  for (const o of [opts, { ...opts, chain: true }]) {
+    assert.deepEqual(WebAssembly.Module.exports(new WebAssembly.Module(assembleRegion(program(), o).bytes)).map((e) => e.name), ["f", "fragments"]);
+  }
+});
+
 test("aot region: a name section names the region's functions r<lowest entry>_f<entry> (profiles), and costs nothing to the code", async () => {
   const opts = { helpers: HELPERS, pcOffset: PC, memoryPages: 1 };
   const named = assembleRegion(program(), opts).bytes, bare = assembleRegion(program(), { ...opts, names: false }).bytes;
@@ -176,7 +233,7 @@ test("aot region: the fragments table lets a warm-up call every fragment", async
   assert.equal(result.calls, 3);
   // B's call to its helper proves a fragment body ran (the warm-up's helpers are stubs);
   // check directly that the table holds the fragments in order
-  const instance = new WebAssembly.Instance(module, { env: { memory: new WebAssembly.Memory({ initial: 1, maximum: 1, shared: true }), bump: () => notes.push("bump"), read_u32: () => 0 } });
+  const instance = new WebAssembly.Instance(module, { env: { memory: new WebAssembly.Memory({ initial: 1, maximum: 1, shared: true }), bump: () => notes.push("bump"), read_u32: () => 0, ...noChain() } });
   assert.equal(instance.exports.fragments.length, 2);
   instance.exports.fragments.get(1)(STATE);
   assert.deepEqual(notes, ["bump"], "table entry 1 is fragment B");
@@ -261,6 +318,31 @@ test("aot region: memarg-offset heap sites are listed and a module patched for a
   assert.throws(() => assembleRegion([{ ...G, heapBases: [8192, 4096] }], { helpers: HELPERS, pcOffset: PC, memoryPages: 1 }), /does not hold ram_base/);
   assert.throws(() => assembleRegion([{ ...G, heapBases: undefined }], { helpers: HELPERS, pcOffset: PC, memoryPages: 1 }), /heapBases required/);
   assert.throws(() => assembleRegion([G, { ...G, entry: 0x4000, entries: [0x4000], heapBases: [2048, 4096] }], { helpers: HELPERS, pcOffset: PC, memoryPages: 1 }), /different heaps/);
+});
+
+// Chaining (0102), heap sites (0084) and names together: the chained module's
+// sites are listed at their place, it is patched for another heap, carries
+// its names, and its exit still asks region_chain.
+test("aot region: a chained module with heap sites and names is patched and runs (0102 with 0084)", async () => {
+  const code = [0x00, ...get, ...konst(0), 0x28, 0x02];
+  const at = code.length;
+  code.push(...paddedUleb(1024 + 16), 0x36, 0x02, COUNT, ...store(PC, konst(0x80009000)), ...get, 0x12, ...paddedUleb(0), 0x0b);
+  const G = { entry: 0x3000, entries: [0x3000], code: Uint8Array.from(code), relocs: [{ offset: at, kind: "heap", name: "ram_base", form: "offset" }, { offset: code.length - 6, kind: "jump", targetPc: 0x80009000 }], heapBases: [1024, 4096] };
+  const region = assembleRegion([G], { helpers: HELPERS, pcOffset: PC, memoryPages: 1, chain: true });
+  const heap = regionHeapOfBytes(region.bytes);
+  assert.deepEqual(Array.from(region.bytes.subarray(heap.sites[0].offset, heap.sites[0].offset + 5)), paddedUleb(1040));
+  assert.ok(new TextDecoder().decode(WebAssembly.Module.customSections(new WebAssembly.Module(region.bytes), "name")[0]).includes("r00003000_f00003000"));
+  const memory = new WebAssembly.Memory({ initial: 1, maximum: 1, shared: true });
+  const u32 = new Uint32Array(memory.buffer);
+  const asked = [];
+  const chain = { region_chain: (state) => { asked.push(u32[(state + PC) / 4]); return 0; }, table: new WebAssembly.Table({ element: "anyfunc", initial: 1 }) };
+  const bytes = patchRegionHeap(region.bytes, { ramBase: 2048, l1Base: 4096 });
+  u32[(2048 + 16) / 4] = 2055;
+  const { instance } = await WebAssembly.instantiate(bytes, { env: { memory, bump: () => {}, read_u32: () => 0, ...chain } });
+  u32[(STATE + PC) / 4] = 0x3000;
+  assert.equal(instance.exports.f(STATE), 0);
+  assert.equal(u32[(STATE + COUNT) / 4], 2055, "read through the patched site");
+  assert.deepEqual(asked, [0x80009000], "the exit asked for the next region");
 });
 
 // The form the core emits (0084): main's i32.const base; offset; i32.add,
