@@ -148,6 +148,21 @@ test("aot region: a dispatch to a PC outside the region returns 0 (code ran), th
   assert.equal(r.word(COUNT), 0);
 });
 
+test("aot region: a name section names the region's functions r<lowest entry>_f<entry> (profiles), and costs nothing to the code", async () => {
+  const opts = { helpers: HELPERS, pcOffset: PC, memoryPages: 1 };
+  const named = assembleRegion(program(), opts).bytes, bare = assembleRegion(program(), { ...opts, names: false }).bytes;
+  const [section] = WebAssembly.Module.customSections(new WebAssembly.Module(named), "name");
+  assert.ok(section, "a name section");
+  const text = new TextDecoder().decode(section);
+  for (const n of ["r00001000_dispatch", "r00001000_inner", "r00001000_exit", "r00001000_f00001000", "r00001000_f00002000"]) assert.ok(text.includes(n), n);
+  assert.equal(WebAssembly.Module.customSections(new WebAssembly.Module(bare), "name").length, 0);
+  // The code is the same: the module without names is a prefix of the one with them.
+  assert.deepEqual(Array.from(named.slice(0, bare.length)), Array.from(bare));
+  const r = await instantiate(assembleRegion(program(), opts));
+  assert.equal(r.run(0x1000), 0);
+  assert.equal(r.word(COUNT), 111);
+});
+
 test("aot region: the fragments table lets a warm-up call every fragment", async () => {
   const { compileAndWarm, createWarmer } = await import("../src/aot-compiler-worker.js");
   const [A, B] = program();
@@ -265,9 +280,11 @@ test("aot region: i32.const heap sites hold the base itself and are patched in p
   for (const ramBase of [1024, 2048, 0x7ff0]) {
     const bytes = patchRegionHeap(region.bytes, { ramBase, l1Base: 4096 });
     assert.deepEqual(Array.from(bytes.subarray(s0.offset, s0.offset + 5)), paddedSleb(ramBase), "the immediate is the base");
-    // outside the 5 bytes of the site and the section's bases, the bytes do not move
+    // outside the 5 bytes of the site and the section's two bases, the bytes do not move
+    const marker = new TextEncoder().encode("region-heap");
+    const basesAt = bytes.findIndex((_, i) => marker.every((c, k) => bytes[i + k] === c)) + marker.length;
     const diff = Array.from(bytes).flatMap((b, i) => (b !== region.bytes[i] ? [i] : []));
-    assert.ok(diff.every((i) => (i >= s0.offset && i < s0.offset + 5) || i > bytes.length - 64), `only the site and the section change (${diff})`);
+    assert.ok(diff.every((i) => (i >= s0.offset && i < s0.offset + 5) || (i >= basesAt && i < basesAt + 8)), `only the site and the section change (${diff})`);
     u32[(ramBase + 16) / 4] = ramBase + 7;
     const { instance } = await WebAssembly.instantiate(bytes, { env: { memory, bump: () => {}, read_u32: () => 0 } });
     u32[(STATE + PC) / 4] = 0x3000;
@@ -297,8 +314,8 @@ test("aot region: a malformed heap section throws; sites are checked even when n
   bad[nameAt + name.length + 8] += 1;
   assert.throws(() => regionHeapOfBytes(bad), /malformed module/);
   assert.throws(() => patchRegionHeap(bad, { ramBase: 2048, l1Base: 4096 }), /malformed module/);
-  // a section running past the end of the bytes
-  assert.throws(() => regionHeapOfBytes(bytes.subarray(0, bytes.length - 3)), /malformed module/);
+  // a section running past the end of the bytes (cut inside region-heap)
+  assert.throws(() => regionHeapOfBytes(bytes.subarray(0, nameAt + name.length + 6)), /malformed module/);
   // a site that does not hold its base, same bases: still refused
   const tampered = Uint8Array.from(bytes);
   tampered.set(paddedSleb(1028), heap.sites[0].offset);

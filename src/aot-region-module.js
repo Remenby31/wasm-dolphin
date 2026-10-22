@@ -269,7 +269,7 @@ export function regionModuleEntries(module) {
   return Array.from(new Uint32Array(section.slice(0)));
 }
 
-export function assembleRegion(fragments, { helpers, pcOffset, memoryPages, memoryMinPages = 1, sharedMemory = true, heapBases = null }) {
+export function assembleRegion(fragments, { helpers, pcOffset, memoryPages, memoryMinPages = 1, sharedMemory = true, heapBases = null, names = true }) {
   if (!Array.isArray(fragments) || !fragments.length) throw new Error("region: no fragments");
   if (!Number.isInteger(pcOffset) || pcOffset < 0) throw new Error("region: pcOffset required");
   if (!Number.isInteger(memoryPages) || memoryPages < 1) throw new Error("region: memoryPages (the core's maximum) required");
@@ -432,6 +432,28 @@ export function assembleRegion(fragments, { helpers, pcOffset, memoryPages, memo
     name(tag, REGION_LAYOUT_SECTION);
     tag.push(layout & 0xff, (layout >>> 8) & 0xff, (layout >>> 16) & 0xff, (layout >>> 24) & 0xff);
     section(out, 0, tag);
+  }
+
+  // Custom section "name" (wasm spec, appendix "Name Section"): profilers see
+  // the region and the guest PC instead of wasm-function[N]. V8 names code
+  // with it (WasmCode::DebugName, wasm-code-manager.cc:280-293) in its
+  // jitdump / perf map / DevTools profiles; codegen ignores it. Region id =
+  // its lowest entry PC: stable across sessions, unique (an entry belongs to
+  // one region), no plumbing. Names: r<id>_f<entry PC> for a fragment,
+  // r<id>_dispatch / _inner / _exit for the three local helpers.
+  if (names) {
+    const hex = (pc) => (pc >>> 0).toString(16).padStart(8, "0");
+    const rid = `r${hex(sortedEntries[0][0])}`;
+    const fnNames = [[DISPATCHER, `${rid}_dispatch`], [INNER, `${rid}_inner`], [STUB, `${rid}_exit`],
+      ...fragments.map((f, i) => [FIRST + i, `${rid}_f${hex(f.entry)}`])];
+    const sub = (id, body) => { const o = [id]; uleb(o, body.length); for (const b of body) o.push(b); return o; };
+    const modName = []; name(modName, rid);
+    const fnMap = []; uleb(fnMap, fnNames.length);
+    for (const [index, n] of fnNames) { uleb(fnMap, index); name(fnMap, n); }
+    const ns = []; name(ns, "name");
+    for (const b of sub(0, modName)) ns.push(b);
+    for (const b of sub(1, fnMap)) ns.push(b);
+    section(out, 0, ns);
   }
 
   return {

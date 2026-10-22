@@ -25,7 +25,7 @@
       "commit": "01e0577914a75a2569c846778c2f93aa8e6feddd"
     }
   },
-  "patchSeriesSha256": "619f1f866a39f2d7d5b7c6b945fb5abfc2734400da402fb3d5f7e21f12bd79bf",
+  "patchSeriesSha256": "d86480b0b0cf34a7e9843b1f82ed188267f70666196119e2e277f73d631e9625",
   "patches": [
     {
       "order": 1,
@@ -693,6 +693,14 @@
     },
     {
       "order": 84,
+      "cwd": ".",
+      "hashMode": "lf-normalized",
+      "path": "patches/dolphin-wasm/snapshot/0103-fma-ctz-as-clz.patch",
+      "size": 1581,
+      "sha256": "66260aea20f5cacb8578da119dfe5cd2606f30f6bcd5bcb040ec142a3393f55a"
+    },
+    {
+      "order": 85,
       "cwd": "Externals/SFML/SFML",
       "hashMode": "lf-normalized",
       "path": "patches/dolphin-wasm/submodules/0001-sfml-emscripten-config.patch",
@@ -700,7 +708,7 @@
       "sha256": "f82197a21fe982ad83f6ee7bbf5a03839b1cebd4d64da3eab11263842bf61d89"
     },
     {
-      "order": 85,
+      "order": 86,
       "cwd": "Externals/xxhash/xxHash",
       "hashMode": "lf-normalized",
       "path": "patches/dolphin-wasm/submodules/0002-xxhash-wasm-simd-scalar.patch",
