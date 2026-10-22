@@ -1,7 +1,7 @@
 import assert from "node:assert/strict";
 import test from "node:test";
 
-import { READBACK_LOST, READBACK_OK, WgpuReadback, copyRows, paddedBytesPerRow } from "../src/wgpu-readback.js";
+import { READBACK_LOST, READBACK_OK, WgpuReadback, copyRows, paddedBytesPerRow, unwrapSeq } from "../src/wgpu-readback.js";
 
 // A device whose buffers map when the test says so, in any order.
 function fakeDevice() {
@@ -160,4 +160,11 @@ test("a rectangle outside the heap or with overlapping rows is refused, the buff
     assert.equal(rb.stats.rejected, 1);
     assert.ok(heap.every((b) => b === 0), "nothing written");
   }
+});
+
+test("the 16-bit seq of a record unwraps against the slot's last completed copy", () => {
+  assert.equal(unwrapSeq(0, 1), 1);
+  assert.equal(unwrapSeq(5, 7), 7, "two in flight");
+  assert.equal(unwrapSeq(0xFFFF, 0), 0x10000, "across the 16-bit wrap");
+  assert.equal(unwrapSeq(0x1FFFE, 3), 0x20003);
 });

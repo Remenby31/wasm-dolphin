@@ -19,6 +19,13 @@ const MAP_READ = 0x0001;
 const COPY_DST = 0x0008;
 const MAP_MODE_READ = 0x0001;
 
+// The command record carries the low 16 bits of a copy's seq; the full seq
+// follows the slot's last completed one (a handful of copies are in flight
+// at most, never 65536).
+export function unwrapSeq(last, seq16) {
+  return (last >>> 0) + (((seq16 & 0xFFFF) - (last & 0xFFFF)) & 0xFFFF);
+}
+
 // WebGPU copies rows of a multiple of 256 bytes.
 export const paddedBytesPerRow = (rowBytes) => Math.ceil(rowBytes / 256) * 256;
 

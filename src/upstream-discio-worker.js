@@ -150,6 +150,7 @@ import {
   hashWgpuVisualSample
 } from "./wgpu-visual-cadence.js";
 import { createCoreLifecycle } from "./core-lifecycle.js";
+import { READBACK_LOST, WgpuReadback, unwrapSeq } from "./wgpu-readback.js";
 import { BOOT_FILE_HEAD_BYTES, bootFileKind, checkExecutable, executableGameId } from "./boot-file.js";
 import {
   USER_DATA_ROOT,
@@ -380,6 +381,19 @@ let wgpuRendererWorkerProbe = "off";
 let wgpuVisualCadenceEnabled = false;
 // Mirrors the loaded core's videoBackend for code outside loadCore's scope.
 let hardwareVideoBackend = false;
+// Staging-texture readbacks of the hardware renderer, per device.
+let wgpuReadback = null;
+function readbackFor(device) {
+  if (wgpuReadback?.device !== device) {
+    wgpuReadback?.reset();
+    wgpuReadback = new WgpuReadback({
+      device,
+      heap: () => moduleInstance.HEAPU8,
+      words: () => new Int32Array(moduleInstance.HEAPU8.buffer)
+    });
+  }
+  return wgpuReadback;
+}
 let wgpuVisualCadenceResources = null;
 let wgpuVisualCadenceTelemetry = createWgpuVisualCadenceTelemetry(false);
 let wgpuVisualCadenceSequence = 0;
@@ -7810,6 +7824,8 @@ const WGPU_CMD_OP_BLIT_TEXTURE = 24;
 const WGPU_CMD_OP_CLEAR_RECT = 25;
 const WGPU_CMD_OP_VI_TAG = 26;
 const WGPU_CMD_OP_PRESENT_SOURCE = 27;
+// Readback of a staging texture (EFB peeks, copies to RAM): src/wgpu-readback.js.
+const WGPU_CMD_OP_COPY_TO_STAGING = 28;
 // ClearRect uses the full attachment viewport and [0,1] depth range, so its
 // scissor alone determines coverage and its depth is independent of game state.
 // A/B switch: false restores the original game-viewport-dependent clear.
@@ -14592,6 +14608,33 @@ function drainWebGpuCmdRing(source = "presentation") {
               a4 & 0xFFFF, a4 >>> 16, a5 & 0xFFFF, a5 >>> 16,
               a6 & 0xFF, (a6 >>> 8) & 0xFF, (a6 >>> 16) & 0xFF, (a6 >>> 24) & 0xFF);
           }
+          break;
+        }
+        case WGPU_CMD_OP_COPY_TO_STAGING: {
+          const rb = readbackFor(dev);
+          const source = webGpuObjects.textures.get(u32[recWord + 1]);
+          const a1 = u32[recWord + 2], a2 = u32[recWord + 3], a3 = u32[recWord + 4];
+          const wordIndex = u32[recWord + 7] >>> 2;
+          const words = new Int32Array(moduleInstance.HEAPU8.buffer);
+          const copy = {
+            slot: wordIndex, wordIndex,
+            seq: unwrapSeq(Atomics.load(words, wordIndex), a3 >>> 16),
+            texture: source?.tex, mipLevel: (a3 >>> 8) & 0xF,
+            origin: { x: a1 & 0xFFFF, y: a1 >>> 16, z: a3 & 0xFF },
+            width: a2 & 0xFFFF, height: a2 >>> 16, texelSize: (a3 >>> 12) & 0xF,
+            heapPtr: u32[recWord + 5], dstStride: u32[recWord + 6]
+          };
+          if (!source) {
+            wgpuReplayClassifier?.recordMissingResource({ kind: "readback-source", id: u32[recWord + 1] });
+            rb.publish(copy, READBACK_LOST);
+            break;
+          }
+          // After everything recorded before it, in its own submission, so
+          // the map can start right away.
+          endPass("readback", read);
+          rb.record(ensureEnc(), copy);
+          submitEnc("readback");
+          void rb.submitted();
           break;
         }
         case WGPU_CMD_OP_VI_TAG:

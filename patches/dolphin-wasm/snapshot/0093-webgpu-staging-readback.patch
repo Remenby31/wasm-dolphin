@@ -1,0 +1,225 @@
+diff --git a/Source/Core/VideoBackends/WebGPU/WebGPUCommandStream.cpp b/Source/Core/VideoBackends/WebGPU/WebGPUCommandStream.cpp
+--- a/Source/Core/VideoBackends/WebGPU/WebGPUCommandStream.cpp
++++ b/Source/Core/VideoBackends/WebGPU/WebGPUCommandStream.cpp
+@@ -1447,6 +1447,34 @@
+   rec.arg.u[1] = y;
+   rec.arg.u[2] = w;
+   rec.arg.u[3] = h;
++  return Push(rec);
++}
++
++static u32 Pack16(u32 lo, u32 hi);
++
++bool WebGPUCommandStream::PushCopyToStaging(u32 src_id, u32 x, u32 y, u32 w, u32 h, u32 layer,
++                                            u32 level, u32 texel_size, u32 seq, u32 dst_ptr,
++                                            u32 dst_stride, u32 words_ptr)
++{
++  if (!m_header || src_id == 0 || w == 0 || h == 0 || dst_ptr == 0 || words_ptr == 0)
++    return false;
++  // Like a blit, a readback cannot run ahead of an unpublished pass that
++  // produces its source: the caller ends the pass first.
++  if (m_pass_staging)
++  {
++    PoisonPass();
++    return false;
++  }
++  CmdRecord rec{};
++  rec.op = static_cast<u32>(CmdOp::CopyToStaging);
++  rec.arg.u[0] = src_id;
++  rec.arg.u[1] = Pack16(x, y);
++  rec.arg.u[2] = Pack16(w, h);
++  rec.arg.u[3] = (layer & 0xFFu) | ((level & 0xFu) << 8) | ((texel_size & 0xFu) << 12) |
++                 ((seq & 0xFFFFu) << 16);
++  rec.arg.u[4] = dst_ptr;
++  rec.arg.u[5] = dst_stride;
++  rec.arg.u[6] = words_ptr;
+   return Push(rec);
+ }
+ 
+diff --git a/Source/Core/VideoBackends/WebGPU/WebGPUCommandStream.h b/Source/Core/VideoBackends/WebGPU/WebGPUCommandStream.h
+--- a/Source/Core/VideoBackends/WebGPU/WebGPUCommandStream.h
++++ b/Source/Core/VideoBackends/WebGPU/WebGPUCommandStream.h
+@@ -151,6 +151,16 @@
+   // backbuffer pass of the same present.
+   //   u0=x u1=y u2=w u3=h
+   PresentSource = 27,
++  // GPU -> CPU readback of a staging texture (EFB peeks, EFB/XFB copies to
++  // RAM). Outside any pass. The consumer copies the rectangle into a
++  // MAP_READ buffer, submits, maps it, writes the texels into the wasm heap
++  // at dstPtr (rows dstStride bytes apart), then publishes the copy's seq in
++  // the shared word at wordsPtr ([0] = last completed seq, [1] = status:
++  // 0 ok, 1 lost) and notifies it (src/wgpu-readback.js).
++  //   u0=srcId u1=(x|y<<16) u2=(w|h<<16)
++  //   u3=(layer | level<<8 | texelSize<<12 | seq16<<16)
++  //   u4=dstPtr u5=dstStride u6=wordsPtr
++  CopyToStaging = 28,
+ };
+ 
+ // Stable producer attribution for UploadBuffer records. The value is carried
+@@ -406,6 +416,9 @@
+   bool PushViTag(u32 vi_since_boot, u32 vi_since_load, u64 ticks, u32 load_generation);
+   bool PushPresentSource(u32 x, u32 y, u32 w, u32 h);
+   bool PushDestroy(u32 class_tag, u32 id);
++  // Readback of a staging texture (CmdOp::CopyToStaging); outside any pass.
++  bool PushCopyToStaging(u32 src_id, u32 x, u32 y, u32 w, u32 h, u32 layer, u32 level,
++                         u32 texel_size, u32 seq, u32 dst_ptr, u32 dst_stride, u32 words_ptr);
+   // GPU texture blit. Coords/dims are clamped to 16 bits (EFB/XFB
+   // never exceed that); layers/levels to 8 bits. No-op if either id
+   // is 0 (CPU-only fallback path still ran the memcpy).
+diff --git a/Source/Core/VideoBackends/WebGPU/WebGPUGfx.h b/Source/Core/VideoBackends/WebGPU/WebGPUGfx.h
+--- a/Source/Core/VideoBackends/WebGPU/WebGPUGfx.h
++++ b/Source/Core/VideoBackends/WebGPU/WebGPUGfx.h
+@@ -107,6 +107,10 @@
+                     const MathUtil::Rectangle<int>& dst_rect,
+                     const AbstractTexture* src_texture,
+                     const MathUtil::Rectangle<int>& src_rect) override;
++
++  // Publishes the pass being recorded, if any, before an operation that
++  // must run after it outside any pass (a readback).
++  bool EndPassForImmediateOp() { return EndPassIfOpen(); }
+ 
+ private:
+   float m_clear_r = 0.05f;
+diff --git a/Source/Core/VideoBackends/WebGPU/WebGPUTexture.cpp b/Source/Core/VideoBackends/WebGPU/WebGPUTexture.cpp
+--- a/Source/Core/VideoBackends/WebGPU/WebGPUTexture.cpp
++++ b/Source/Core/VideoBackends/WebGPU/WebGPUTexture.cpp
+@@ -6,7 +6,14 @@
+ #include <algorithm>
+ #include <cstring>
+ 
++#include "Common/Logging/Log.h"
+ #include "VideoBackends/WebGPU/WebGPUCommandStream.h"
++#include "VideoBackends/WebGPU/WebGPUGfx.h"
++#include "VideoCommon/AbstractGfx.h"
++#ifdef __EMSCRIPTEN__
++#include <emscripten/emscripten.h>
++#include <emscripten/threading.h>
++#endif
+ 
+ namespace WebGPU
+ {
+@@ -213,16 +220,73 @@
+   m_map_stride = m_texel_size * config.width;
+ }
+ 
+-WebGPUStagingTexture::~WebGPUStagingTexture() = default;
++WebGPUStagingTexture::~WebGPUStagingTexture()
++{
++  // A copy still in flight would write into freed memory: wait for it, and
++  // if it never lands (device lost mid-copy), leak the buffer rather than
++  // free it under the worker.
++  if (!WaitForCopies(1000))
++  {
++    static std::vector<std::vector<u8>> s_orphans;
++    s_orphans.push_back(std::move(m_buffer));
++  }
++}
+ 
+-void WebGPUStagingTexture::CopyFromTexture(const AbstractTexture* /* src */,
+-                                           const MathUtil::Rectangle<int>& /* src_rect */,
+-                                           u32 /* src_layer */, u32 /* src_level */,
+-                                           const MathUtil::Rectangle<int>& /* dst_rect */)
++void WebGPUStagingTexture::CopyFromTexture(const AbstractTexture* src,
++                                           const MathUtil::Rectangle<int>& src_rect,
++                                           u32 src_layer, u32 src_level,
++                                           const MathUtil::Rectangle<int>& dst_rect)
+ {
++  const u32 src_id = src ? static_cast<const WebGPUTexture*>(src)->GetBridgeId() : 0;
++  if (src_id == 0 || src_rect.GetWidth() <= 0 || src_rect.GetHeight() <= 0 ||
++      dst_rect.GetWidth() != src_rect.GetWidth() || dst_rect.GetHeight() != src_rect.GetHeight() ||
++      dst_rect.left < 0 || dst_rect.top < 0 ||
++      static_cast<u32>(dst_rect.right) > m_config.width ||
++      static_cast<u32>(dst_rect.bottom) > m_config.height || m_texel_size > 15)
++  {
++    return;
++  }
++  // The copy runs after everything recorded so far, the pass that drew the
++  // source included.
++  static_cast<WebGPUGfx*>(g_gfx.get())->EndPassForImmediateOp();
++  u8* dst = m_buffer.data() + static_cast<size_t>(dst_rect.top) * m_map_stride +
++            static_cast<size_t>(dst_rect.left) * m_texel_size;
++  const u32 seq = m_issued + 1;
++  if (!GetCommandStream().PushCopyToStaging(
++          src_id, static_cast<u32>(src_rect.left), static_cast<u32>(src_rect.top),
++          static_cast<u32>(src_rect.GetWidth()), static_cast<u32>(src_rect.GetHeight()), src_layer,
++          src_level, static_cast<u32>(m_texel_size), seq,
++          static_cast<u32>(reinterpret_cast<uintptr_t>(dst)), static_cast<u32>(m_map_stride),
++          static_cast<u32>(reinterpret_cast<uintptr_t>(&m_words[0]))))
++  {
++    return;
++  }
++  m_issued = seq;
+   m_needs_flush = true;
+ }
+ 
++bool WebGPUStagingTexture::WaitForCopies(u32 timeout_ms)
++{
++  if (static_cast<u32>(m_words[0].load(std::memory_order_acquire)) >= m_issued)
++    return true;
++#ifdef __EMSCRIPTEN__
++  const double deadline = emscripten_get_now() + timeout_ms;
++  for (;;)
++  {
++    const s32 done = m_words[0].load(std::memory_order_acquire);
++    if (static_cast<u32>(done) >= m_issued)
++      return true;
++    const double left = deadline - emscripten_get_now();
++    if (left <= 0)
++      return false;
++    emscripten_futex_wait(reinterpret_cast<volatile void*>(&m_words[0]),
++                          static_cast<u32>(done), left);
++  }
++#else
++  return false;
++#endif
++}
++
+ void WebGPUStagingTexture::CopyToTexture(const MathUtil::Rectangle<int>& /* src_rect */,
+                                           AbstractTexture* /* dst */,
+                                           const MathUtil::Rectangle<int>& /* dst_rect */,
+@@ -242,6 +306,18 @@
+ 
+ void WebGPUStagingTexture::Flush()
+ {
++  // Waits only for what is not back yet: a copy issued ahead (the EFB peek
++  // cache's RefreshPeekCache) has usually landed by the time it is read.
++  if (!WaitForCopies(500))
++  {
++    static bool s_logged = false;
++    if (!s_logged)
++    {
++      s_logged = true;
++      WARN_LOG_FMT(VIDEO, "WebGPU readback: copy {} not back after 500 ms, using older texels",
++                   m_issued);
++    }
++  }
+   m_needs_flush = false;
+ }
+ 
+diff --git a/Source/Core/VideoBackends/WebGPU/WebGPUTexture.h b/Source/Core/VideoBackends/WebGPU/WebGPUTexture.h
+--- a/Source/Core/VideoBackends/WebGPU/WebGPUTexture.h
++++ b/Source/Core/VideoBackends/WebGPU/WebGPUTexture.h
+@@ -4,6 +4,7 @@
+ #pragma once
+ 
+ #include <memory>
++#include <atomic>
+ #include <vector>
+ 
+ #include "Common/CommonTypes.h"
+@@ -74,7 +75,15 @@
+   void Flush() override;
+ 
+ private:
++  // Readback (docs/wgpu-efb-readback-design.md): copies issued to the
++  // worker, and the two shared words it completes them in: [0] the last
++  // completed copy, [1] its status (0 ok, 1 lost). The worker writes the
++  // texels straight into m_buffer, so neither may move or be freed while a
++  // copy is in flight (see the destructor).
++  bool WaitForCopies(u32 timeout_ms);
+   std::vector<u8> m_buffer;
++  alignas(8) std::atomic<s32> m_words[2] = {};
++  u32 m_issued = 0;
+ };
+ 
+ class WebGPUFramebuffer final : public AbstractFramebuffer
