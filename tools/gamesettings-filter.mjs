@@ -60,14 +60,19 @@ function readIni(text) {
   return out;
 }
 
-// GameConfigLoader maps a legacy section (exact: "Core", "Video_Settings")
-// and its System.Section form ("Dolphin.Core": Main's system is named
-// "Dolphin"; "Graphics.Settings": GFX's is "Graphics") to the same place. The
+// GameConfigLoader maps a legacy section (exact: "Core", "Video_Settings",
+// "Video_Hacks") and its System.Section form ("Dolphin.Core": Main's system
+// is named "Dolphin"; "Graphics.Settings", "Graphics.Hacks": GFX's is
+// "Graphics") to the same place. The
 // filter keeps a key only under those exact spellings. A line whose key matches an
 // allowlisted key in any other spelling or section (core, mmu, [Main.Core],
 // [Video]...) stops the build: Dolphin's handling of those depends on the
 // order the disc's files merge in, so a person decides.
-const SECTION_SPELLINGS = { Core: ["Core", "Dolphin.Core"], Video_Settings: ["Video_Settings", "Graphics.Settings"] };
+const SECTION_SPELLINGS = {
+  Core: ["Core", "Dolphin.Core"],
+  Video_Settings: ["Video_Settings", "Graphics.Settings"],
+  Video_Hacks: ["Video_Hacks", "Graphics.Hacks"]
+};
 
 // The allowed keys of one INI text, as the INI the core embeds, or null when
 // none is there. A later line of the same key wins, as in Dolphin's IniFile.

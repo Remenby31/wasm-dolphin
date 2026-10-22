@@ -1040,7 +1040,8 @@ int SetCpuThread(int enabled)
 // Tests (patch 0097): the value Dolphin's game config gives an allowlisted
 // setting (tools/gamesettings-allowlist.json) for a disc ID and revision from
 // the INIs under /dolphin-sys/GameSettings, as the game's boot reads it: MMU
-// (System::Initialize, IsMMUMode) and SafeTextureCacheColorSamples; booleans
+// (System::Initialize, IsMMUMode), SafeTextureCacheColorSamples and
+// XFBToTextureEnable (GFX_HACK_SKIP_XFB_COPY_TO_RAM); booleans
 // as 0/1. The global game layer is added for the read and removed after; -1
 // when a game's layer is already there (a game is running), which this must
 // not replace, -2 for a setting it does not know.
@@ -1050,13 +1051,15 @@ EMSCRIPTEN_KEEPALIVE
 int GameConfigValueForTest(const char* game_id, int revision, const char* setting)
 {
   const std::string_view name = setting;
-  if (name != "MMU" && name != "SafeTextureCacheColorSamples")
+  if (name != "MMU" && name != "SafeTextureCacheColorSamples" && name != "XFBToTextureEnable")
     return -2;
   if (Config::GetLayer(Config::LayerType::GlobalGame))
     return -1;
   Config::AddLayer(ConfigLoaders::GenerateGlobalGameConfigLoader(game_id, static_cast<u16>(revision)));
-  const int value = name == "MMU" ? (Config::Get(Config::MAIN_MMU) ? 1 : 0) :
-                                    Config::Get(Config::GFX_SAFE_TEXTURE_CACHE_COLOR_SAMPLES);
+  const int value =
+      name == "MMU"                  ? (Config::Get(Config::MAIN_MMU) ? 1 : 0) :
+      name == "XFBToTextureEnable"   ? (Config::Get(Config::GFX_HACK_SKIP_XFB_COPY_TO_RAM) ? 1 : 0) :
+                                       Config::Get(Config::GFX_SAFE_TEXTURE_CACHE_COLOR_SAMPLES);
   Config::RemoveLayer(Config::LayerType::GlobalGame);
   return value;
 }
