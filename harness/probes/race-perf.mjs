@@ -260,7 +260,7 @@ export async function measure(session, o) {
       overloaded: medianLoad > o.maxLoad,
       complete: timeline.complete,
       timelineLost: timeline.lost,
-      ...(o.headroom ? { headroom: hrStart?.error ? { error: hrStart.error } : hrEnd?.error ? { error: hrEnd.error } : headroomOf(hrEnd.stats, { guestSeconds: (hrEnd.ticks - hrStart.ticks) / (hrEnd.tps || 1), viOutputs: timeline.vi.length }) } : {}),
+      ...(o.headroom ? { headroom: hrStart?.error ? { error: hrStart.error } : hrEnd?.error ? { error: hrEnd.error } : headroomOf(hrEnd.stats, { guestSeconds: (hrEnd.ticks - hrStart.ticks) / (hrEnd.tps || 1), ticksPerSecond: hrEnd.tps, viOutputs: timeline.vi.length }) } : {}),
       // Emulated: the speed over the guest seconds the window covered (the
       // VI timeline's own over the same span kept as speedVi).
       ...(emulated ? { ...emulated, speed: emulated.speed, speedVi: round(core.speed) } : { speed: round(core.speed) }),

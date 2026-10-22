@@ -160,7 +160,11 @@ node harness/probes/race-perf.mjs --iso ../roms/<disc>.iso --state ../measures/h
   sleep of the CPU thread, its FlushGpu waits, GPU-thread work, XFB copies)
   are reset just before the window and read just after, with the core ticks:
   `maxSpeedCpu` = guest s / (host s − sleep − FlushGpu wait) (Dolphin's
-  "Max"), `maxSpeedGpu` = guest s / GPU work, `headroom` = the smaller one,
+  "Max"), `maxSpeedGpu` = guest s / (GPU work − waits on the render worker
+  for ring or upload space; null with the deterministic GPU thread),
+  `headroom` = the smaller one; guest s from the core's own ticks, written
+  at the same instant as its host window. PushBlockingEvent and SyncGPU
+  waits (off by default) count as CPU busy time;
   plus `throttleSleepShare` and `xfbCopiesPerVi` (`cold.headroom` per run,
   medians per side). Under 2 % of sleep the game runs below 100 %
   (`headroomApplies` false): the speed is then the number.

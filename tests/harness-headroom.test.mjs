@@ -9,11 +9,11 @@ import test from "node:test";
 import { consistentHeadroomRead, decodeHeadroomStats, headroomOf, invalidReasons, querySpeed, unlimitedAllowed } from "../harness/lib/headroom.mjs";
 
 function hrBytes(v = {}) {
-  const view = new DataView(new ArrayBuffer(80));
+  const view = new DataView(new ArrayBuffer(96));
   view.setUint32(0, v.version ?? 1, true);
-  view.setUint32(4, v.size ?? 80, true);
+  view.setUint32(4, v.size ?? 96, true);
   view.setUint32(8, v.on ?? 1, true);
-  [v.windowUs ?? 0, v.cpuSleepUs ?? 0, v.gpuWorkUs ?? 0, v.xfbCopies ?? 0, v.rushSkips ?? 0, v.flushGpuWaitUs ?? 0, v.flushGpuWaits ?? 0].forEach((x, i) => view.setFloat64(16 + 8 * i, x, true));
+  [v.windowUs ?? 0, v.cpuSleepUs ?? 0, v.gpuWorkUs ?? 0, v.xfbCopies ?? 0, v.rushSkips ?? 0, v.flushGpuWaitUs ?? 0, v.flushGpuWaits ?? 0, v.gpuConsumerWaitUs ?? 0, v.guestTicks ?? 0].forEach((x, i) => view.setFloat64(16 + 8 * i, x, true));
   return Array.from(new Uint8Array(view.buffer));
 }
 
@@ -36,6 +36,17 @@ test("headroom: Dolphin's Max on the CPU thread, the GPU bound, the smaller one"
   assert.match(decodeHeadroomStats(hrBytes({ windowUs: 1e6, cpuSleepUs: 2e6 })).error, /CPU waits/);
   assert.match(consistentHeadroomRead(s, decodeHeadroomStats(hrBytes({ windowUs: 1, cpuSleepUs: 0 }))).error, /torn read/);
   assert.match(headroomOf(decodeHeadroomStats(hrBytes({ on: 0 })), { guestSeconds: 1 }).error, /not on/);
+});
+
+test("headroom: waiting on the render worker is not GPU work; guest time from the core's own ticks", () => {
+  // GPU passes 5 s, 2 s of which waiting for ring space: 3 s of work.
+  const s = decodeHeadroomStats(hrBytes({ windowUs: 10e6, cpuSleepUs: 4e6, gpuWorkUs: 5e6, gpuConsumerWaitUs: 2e6, guestTicks: 4860e6 }));
+  const h = headroomOf(s, { guestSeconds: 99, ticksPerSecond: 486e6 });
+  assert.equal(h.guestSeconds, 10); // guestTicks / tps wins over the harness's reads
+  assert.equal(h.maxSpeedGpu, 3.3333);
+  assert.equal(h.gpuConsumerWaitShare, 0.2);
+  // An older v1 struct without guestTicks: the harness's guest seconds.
+  assert.equal(headroomOf(decodeHeadroomStats(hrBytes({ windowUs: 10e6, cpuSleepUs: 4e6, gpuWorkUs: 3e6 })), { guestSeconds: 9, ticksPerSecond: 486e6 }).guestSeconds, 9);
 });
 
 test("validity: ring overflow, speed above its target, no unique image, game frames per VI off the reference", () => {

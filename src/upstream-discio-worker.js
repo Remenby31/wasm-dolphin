@@ -362,9 +362,12 @@ function harnessHeadroomStats({ reset } = {}) {
   const ptr = stats(Number.isInteger(reset) && reset >= 0 ? reset : -1) >>> 0;
   const heap = moduleInstance.HEAPU8;
   if (!ptr || ptr + 8 > heap.length) return { error: `DolphinWeb_HeadroomStats returned ${ptr}` };
-  const size = Math.min(new DataView(heap.buffer, ptr, 8).getUint32(4, true), 80);
+  const size = Math.min(new DataView(heap.buffer, ptr, 8).getUint32(4, true), 96);
   if (ptr + size > heap.length) return { error: `headroom stats of ${size} bytes past the heap` };
-  const copy = () => Array.from(new Uint8Array(heap.buffer, ptr, size));
+  if (ptr % 8 !== 0 || size % 8 !== 0) return { error: `headroom stats at ${ptr} (${size} bytes): not 8-aligned` };
+  // Whole f64 reads (an aligned Float64Array), never a double split across
+  // two byte loads while a thread writes it.
+  const copy = () => Array.from(new Uint8Array(new Float64Array(heap.buffer, ptr, size / 8).slice().buffer));
   return { bytes: copy(), again: copy() };
 }
 
