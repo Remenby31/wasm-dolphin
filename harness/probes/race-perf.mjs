@@ -77,6 +77,7 @@ import { coreStats, hitchList, mergeTimeline, presentationStats } from "../lib/t
 import { consistentRead, decodeRegionStats, poolStats, regionShares, topMisses } from "../lib/jit-region-stats.mjs";
 import { consistentMemRead, decodeMemStats, memAccessShares, poolMemStats } from "../lib/mem-access-stats.mjs";
 import { summarizePcSamples } from "../../src/harness-pc-sampler.js";
+import { checkPerfAccess, instructionsPerGuestCycle, perfCounters } from "../lib/perf-counters.mjs";
 
 const HOMEBREW_OUT = path.join(REPO_ROOT, "harness", "homebrew", "out");
 export const STATE_ROUTE = "**/__harness_state.sav";
@@ -153,7 +154,7 @@ export function rendererThreads(profileDir) {
 }
 
 // Load the scene, hold the key, settle, then a window with no page call.
-async function measure(session, o) {
+export async function measure(session, o) {
   const { page } = session;
   const loaded = await loadHarnessState(page, session.url);
   if (!loaded?.loaded) throw new Error(`savestate load failed: ${JSON.stringify(loaded)}`);
@@ -164,6 +165,9 @@ async function measure(session, o) {
     // the run says why it has no PC histogram.
     const pcStart = o.pcsample ? await workerRequest(page, "validationPcSampler", { action: "start", periodMs: o.pcsample }, 10000) : null;
     const sampling = Boolean(pcStart?.started);
+    // o.onWindow (race-multi's hardware counters): called just before and
+    // just after the window, from node only (no page call inside it).
+    if (o.onWindow) await o.onWindow("start", session);
     await readTimeline(page); // drop everything before the window
     const t0 = await page.evaluate(() => performance.timeOrigin + performance.now());
     // The window: node timers only. The rings (VI 8192, presents 16384)
@@ -174,6 +178,7 @@ async function measure(session, o) {
       loads.push(os.loadavg()[0]);
       if (s === Math.floor(o.secs / 2)) threads.push(rendererThreads(session.profileDir));
     }
+    const counters = o.onWindow ? await o.onWindow("end", session) : undefined;
     const chunk = await readTimeline(page);
     const t1 = await page.evaluate(() => performance.timeOrigin + performance.now());
     const pc = sampling ? await workerRequest(page, "validationPcSampler", { action: "stop" }, 20000) : pcStart && { error: pcStart.error ?? "not started" };
@@ -234,6 +239,7 @@ async function measure(session, o) {
       freezes: { core: core.freezes?.length ?? 0, present: pres.freezes.length },
       pc: pc && !pc.error ? summarizePcSamples(pc, { functions: o.functions }) : pc,
       ...regionRecord(regionEnd),
+      ...(counters ? { counters } : {}),
       ...(o.memStats ? memRecord(memEnd) : {})
     };
   } finally {
@@ -325,6 +331,7 @@ async function measureSide(side, o) {
     const record = { url: session.url, served: server.identity, core: session.core, loadGate, bootMs: round(performance.now() - bootStart, 0) };
     try {
       record.cold = await measure(session, o);
+      if (record.cold.counters) record.cold.instructionsPerGuestCycle = instructionsPerGuestCycle(record.cold);
       if (o.warm) {
         record.warmCore = await rebootSession(session, server);
         record.warm = await measure(session, o);
@@ -380,7 +387,7 @@ async function main() {
       runs: { type: "string", default: "4" }, "min-pairs": { type: "string" }, "load-wait": { type: "string", default: "300" }, "calm-wait": { type: "string" }, warmup: { type: "string", default: "25" }, secs: { type: "string", default: "20" },
       hold: { type: "string", default: "KeyX" }, warm: { type: "boolean", default: false },
       "max-load": { type: "string" }, "lock-wait": { type: "string", default: "1800" },
-      pcsample: { type: "string" }, symbols: { type: "string" }, "region-sample": { type: "string" }, "region-secs": { type: "string", default: "10" }, "unique-frames": { type: "string" }, "mem-stats": { type: "boolean", default: false }, "baseline-query": { type: "string" }, "chrome-args": { type: "string" }, "baseline-chrome-args": { type: "string" },
+      pcsample: { type: "string" }, symbols: { type: "string" }, "region-sample": { type: "string" }, "region-secs": { type: "string", default: "10" }, counters: { type: "boolean", default: false }, "unique-frames": { type: "string" }, "mem-stats": { type: "boolean", default: false }, "baseline-query": { type: "string" }, "chrome-args": { type: "string" }, "baseline-chrome-args": { type: "string" },
       "core-candidate": { type: "string", multiple: true, default: [] },
       port: { type: "string", default: process.env.HARNESS_PORT }, out: { type: "string" }
     },
@@ -416,6 +423,9 @@ async function main() {
     pcsample: values.pcsample ? num(values, "pcsample", { min: 0.05 }) : null,
     regionSample: values["region-sample"] == null ? null : num(values, "region-sample", { min: 0, int: true }),
     regionSecs: num(values, "region-secs", { min: 1 }),
+    // --counters (Linux perf): host instructions per guest cycle of the
+    // emulated CPU thread, per window (lib/perf-counters.mjs).
+    ...(values.counters ? (checkPerfAccess(), { onWindow: perfCounters() }) : {}),
     uniqueFrames: values["unique-frames"] == null ? null : num(values, "unique-frames", { min: 2 }),
     memStats: values["mem-stats"],
     functions: values.symbols ? JSON.parse(readFileSync(values.symbols, "utf8")).sort((a, b) => a[0] - b[0]) : null,
@@ -506,6 +516,8 @@ async function main() {
     candidate: { cold: summarize("candidate", "cold"), warm: summarize("candidate", "warm") },
     baseline: sides.baseline ? { cold: summarize("baseline", "cold"), warm: summarize("baseline", "warm") } : null,
     change: sides.baseline ? pairedSpeedChange(runsDone.filter((r) => good(r.baseline) && good(r.candidate)), { minPairs: o.minPairs }) : null,
+    // --counters: the same pairing on host instructions per guest cycle (lower is better).
+    ...(o.onWindow && sides.baseline ? { counterChange: pairedSpeedChange(runsDone.filter((r) => good(r.baseline) && good(r.candidate)), { metric: "instructionsPerGuestCycle", minPairs: o.minPairs }) } : {}),
     pcsample: pcNote,
     // P4 counters (KPI: region and dispatch shares), cold stats windows of good runs.
     ...p4Summary(runsDone, sides, good),
