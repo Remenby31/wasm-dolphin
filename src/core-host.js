@@ -57,6 +57,7 @@ import {
 } from "./input-latency-telemetry.js";
 import { requestedInputPhotonMarkerConfig } from "./input-visual-marker.js";
 import { requestedWgpuVisualCadence } from "./wgpu-visual-cadence.js";
+import { requestedWgpuPipelinePrewarm } from "./wgpu-pipeline-prewarm.js";
 import { requestedWgpuSparseUbo } from "./wgpu-sparse-ubo-copy-forward.js";
 
 const DEMO_WIDTH = 320;
@@ -179,6 +180,7 @@ export class EmulatorHost {
     this.wgpuVisualCadence = requestedWgpuVisualCadence(window.location.search, {
       hardwareVideo: this.videoBackend === "WebGPU-Real"
     });
+    this.wgpuPipelinePrewarm = requestedWgpuPipelinePrewarm(window.location.search);
     this.gpuCompletionDiagnostics = requestedGpuCompletionDiagnostics(window.location.search);
     this.wgpuDirtyRangeProjection = requestedWgpuDirtyRangeProjection(window.location.search);
     this.wgpuPassPackageProjection = requestedWgpuPassPackageProjection(
@@ -448,6 +450,7 @@ export class EmulatorHost {
             wgpuMappedDrainCoalescing: this.wgpuMappedDrainCoalescing,
             wgpuRendererWorkerProbe: this.wgpuRendererWorkerProbe,
             wgpuVisualCadence: this.wgpuVisualCadence,
+            wgpuPipelinePrewarm: this.wgpuPipelinePrewarm,
             gpuCompletionDiagnostics: this.gpuCompletionDiagnostics,
             wgpuDirtyRangeProjection: this.wgpuDirtyRangeProjection,
             wgpuPassPackageProjection: this.wgpuPassPackageProjection,

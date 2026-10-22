@@ -1,0 +1,297 @@
+diff --git a/Source/Core/Core/PowerPC/CachedInterpreter/CachedInterpreter.cpp b/Source/Core/Core/PowerPC/CachedInterpreter/CachedInterpreter.cpp
+--- a/Source/Core/Core/PowerPC/CachedInterpreter/CachedInterpreter.cpp
++++ b/Source/Core/Core/PowerPC/CachedInterpreter/CachedInterpreter.cpp
+@@ -358,6 +358,9 @@ constexpr u32 DOLPHIN_WEB_ENABLE_FASTMEM_HOIST = 1u << 23;
+ // Inline exact FMA (TwoProduct + round-to-odd sum). Set: every FMA-family op
+ // calls the `fma` import (the interpreter's NI_madd_msub) instead.
+ constexpr u32 DOLPHIN_WEB_DISABLE_INLINE_FMA = 1u << 26;  // 24 and 25: clear-rect (WebGPU)
++// 0087: ps_sum0/1, ps_neg/mr/nabs/abs, fres and ps_res emitted in the block
++// (on by default; the bit sends them back to the interpreter).
++constexpr u32 DOLPHIN_WEB_DISABLE_NATIVE_PS = 1u << 29;
+ // §28ce burst smearing: when ENABLED (gate bit CLEARED), TryWriteWasmBlock
+ // returns false (falls to interpret) once this many compiles OR this much
+ // compile wall time have happened in the current CoreTiming slice. Smears
+@@ -5144,7 +5147,7 @@ void EmitExactMulAddSub(std::vector<u8>& body, const WasmStateLayout& layout,
+ // local 3. `unrounded`, when given, receives the value before rounding.
+ void EmitFpArithLane(std::vector<u8>& body, const WasmStateLayout& layout, UGeckoInstruction inst,
+                      FpArithKind kind, bool single, u32 lane, u32 c_lane, u32 dst,
+-                     bool negate = false, u32 unrounded = UINT32_MAX)
++                     bool negate = false, u32 unrounded = UINT32_MAX, u32 b_lane = UINT32_MAX)
+ {
+   EmitStateLoadF64(body, PsOffset(layout, inst.FA, lane));
+   if (kind == FpArithKind::MulAdd || kind == FpArithKind::MulSub)
+@@ -5171,7 +5174,7 @@ void EmitFpArithLane(std::vector<u8>& body, const WasmStateLayout& layout, UGeck
+   }
+   else
+   {
+-    EmitStateLoadF64(body, PsOffset(layout, inst.FB, lane));
++    EmitStateLoadF64(body, PsOffset(layout, inst.FB, b_lane == UINT32_MAX ? lane : b_lane));
+     body.push_back(kind == FpArithKind::Add ? 0xa0 : kind == FpArithKind::Sub ? 0xa1 : 0xa3);
+   }
+   body.push_back(0x22);
+@@ -5967,6 +5970,211 @@ void EmitPairedSingleScalarMulAdd(std::vector<u8>& body, const WasmStateLayout&
+ }
+ 
+ 
++// 0087: ps_sum0 / ps_sum1 as the interpreter: the sum lane gets
++// ForceSingle(NI_add(a.ps0, b.ps1)), the other lane ForceSingle(c) of that
++// lane, FPRF comes from the sum. Inline when both results are zero or normal
++// singles (no exception, no NI flush); everything else takes the helper.
++void EmitPairedSingleSum(std::vector<u8>& body, const WasmStateLayout& layout,
++                         const PPCAnalyst::CodeOp& op, u32 downcount)
++{
++  const UGeckoInstruction inst = op.inst;
++  const u32 sum_lane = inst.SUBOP5 == 11 ? 1 : 0, other_lane = 1 - sum_lane;
++  const u32 sum = WasmFpScratchLocal(0), other = WasmFpScratchLocal(1);
++  EmitFpFastPathMsrCondition(body, layout);
++  body.push_back(0x04);
++  body.push_back(0x40);
++  EmitI32Const(body, 1);
++  EmitLocalSet(body, 3);
++  EmitFpArithLane(body, layout, inst, FpArithKind::Add, true, 0, 0, sum, false, UINT32_MAX, 1);
++  EmitStateLoadF64(body, PsOffset(layout, inst.FC, other_lane));
++  body.push_back(0x22);  // local.tee
++  EmitU32Leb(body, other);
++  EmitIsZeroOrNormalSingleResult(body);
++  EmitLocalGet(body, 3);
++  body.push_back(0x71);
++  EmitLocalSet(body, 3);
++  EmitLocalGet(body, other);
++  body.push_back(0xb6);  // f32.demote_f64
++  body.push_back(0xbb);  // f64.promote_f32
++  EmitLocalSet(body, other);
++  EmitLocalGet(body, 3);
++  body.push_back(0x04);
++  body.push_back(0x40);
++  EmitStoreFprLaneFromLocal(body, layout, inst.FD, sum_lane, sum);
++  EmitStoreFprLaneFromLocal(body, layout, inst.FD, other_lane, other);
++  EmitSetFprfZeroOrNormal(body, layout, sum, 0, op.wantsFPRF);
++  body.push_back(0x05);
++  EmitFpCall(body, op, downcount);
++  body.push_back(0x0b);
++  body.push_back(0x05);
++  EmitFpCall(body, op, downcount);
++  body.push_back(0x0b);
++}
++
++// 0087: ps_neg, ps_mr, ps_nabs, ps_abs: the sign bit of each lane of frB, no
++// FPSCR bit (the Rc forms stay with the helper).
++void EmitPairedSingleUnaryBitExact(std::vector<u8>& body, const WasmStateLayout& layout,
++                                   const PPCAnalyst::CodeOp& op, u32 downcount)
++{
++  const UGeckoInstruction inst = op.inst;
++  EmitFpuAvailableOrFallback(body, op, layout, downcount);
++  for (u32 lane = 0; lane < 2; ++lane)
++  {
++    EmitStateStoreU32Prefix(body);
++    EmitStateLoadI64(body, PsOffset(layout, inst.FB, lane));
++    if (inst.SUBOP10 == 40)  // ps_neg
++    {
++      EmitI64Const(body, u64{1} << 63);
++      body.push_back(0x85);  // i64.xor
++    }
++    else if (inst.SUBOP10 == 136)  // ps_nabs
++    {
++      EmitI64Const(body, u64{1} << 63);
++      body.push_back(0x84);  // i64.or
++    }
++    else if (inst.SUBOP10 == 264)  // ps_abs
++    {
++      EmitI64Const(body, ~(u64{1} << 63));
++      body.push_back(0x83);  // i64.and
++    }
++    EmitStateStoreI64Suffix(body, PsOffset(layout, inst.FD, lane));
++  }
++  body.push_back(0x05);
++  EmitFpCall(body, op, downcount);
++  body.push_back(0x0b);
++}
++
++// [] -> []: Common::ApproximateReciprocal of lane `lane` of frB into f64
++// local `dst`, ANDing into i32 local 3 whether the operand's exponent is in
++// [895, 1149), the one range where the interpreter's fres and ps_res only
++// read the 32-entry fres_expected table (in place in the core's memory) and
++// touch no FPSCR bit but FPRF. The result is then a normal single.
++void EmitApproximateReciprocalLane(std::vector<u8>& body, const WasmStateLayout& layout,
++                                   u32 fb, u32 lane, u32 dst)
++{
++  const u32 table = static_cast<u32>(reinterpret_cast<std::uintptr_t>(Common::fres_expected.data()));
++  static_assert(sizeof(Common::BaseAndDec) == 8);
++  EmitStateLoadI64(body, PsOffset(layout, fb, lane));
++  EmitLocalSet(body, 4);  // local 4 = bits(b)
++  // (exponent - (895 << 52)) < (254 << 52), unsigned
++  EmitLocalGet(body, 4);
++  EmitI64Const(body, u64{0x7ff} << 52);
++  body.push_back(0x83);
++  EmitI64Const(body, u64{895} << 52);
++  body.push_back(0x7d);
++  EmitI64Const(body, u64{254} << 52);
++  body.push_back(0x54);  // i64.lt_u
++  EmitLocalGet(body, 3);
++  body.push_back(0x71);
++  EmitLocalSet(body, 3);
++  // i = mantissa >> 37 (15 bits)
++  EmitLocalGet(body, 4);
++  EmitI64Const(body, (u64{1} << 52) - 1);
++  body.push_back(0x83);
++  EmitI64Const(body, 37);
++  body.push_back(0x88);  // i64.shr_u
++  body.push_back(0xa7);  // i32.wrap_i64
++  EmitLocalSet(body, 2);
++  // entry = &table[i / 1024]
++  EmitLocalGet(body, 2);
++  EmitI32Const(body, 10);
++  body.push_back(0x76);  // i32.shr_u
++  EmitI32Const(body, 3);
++  body.push_back(0x74);  // i32.shl
++  EmitI32Const(body, table);
++  body.push_back(0x6a);
++  EmitLocalSet(body, 7);
++  // sign | ((0x7fd << 52) - exponent) | (base - (dec * (i % 1024) + 1) / 2) << 29
++  EmitLocalGet(body, 4);
++  EmitI64Const(body, u64{1} << 63);
++  body.push_back(0x83);
++  EmitI64Const(body, u64{0x7fd} << 52);
++  EmitLocalGet(body, 4);
++  EmitI64Const(body, u64{0x7ff} << 52);
++  body.push_back(0x83);
++  body.push_back(0x7d);  // i64.sub
++  body.push_back(0x84);  // i64.or
++  EmitLocalGet(body, 7);
++  body.push_back(0x28);  // i32.load base
++  body.push_back(0x02);
++  EmitU32Leb(body, 0);
++  EmitLocalGet(body, 7);
++  body.push_back(0x28);  // i32.load dec
++  body.push_back(0x02);
++  EmitU32Leb(body, 4);
++  EmitLocalGet(body, 2);
++  EmitI32Const(body, 1023);
++  body.push_back(0x71);
++  body.push_back(0x6c);  // i32.mul
++  EmitI32Const(body, 1);
++  body.push_back(0x6a);  // i32.add
++  EmitI32Const(body, 2);
++  body.push_back(0x6d);  // i32.div_s (truncating, as in C++)
++  body.push_back(0x6b);  // i32.sub
++  body.push_back(0xac);  // i64.extend_i32_s
++  EmitI64Const(body, 29);
++  body.push_back(0x86);  // i64.shl
++  body.push_back(0x84);  // i64.or
++  body.push_back(0xbf);  // f64.reinterpret_i64
++  EmitLocalSet(body, dst);
++}
++
++// 0087: fres (both lanes get the estimate) and ps_res (one per lane), FPRF
++// from ps0, inline for operands in the table's range; the rest (zero,
++// denormal, extreme exponents, inf, NaN, ZX/VXSNAN) takes the helper.
++void EmitApproximateReciprocal(std::vector<u8>& body, const WasmStateLayout& layout,
++                               const PPCAnalyst::CodeOp& op, u32 downcount)
++{
++  const UGeckoInstruction inst = op.inst;
++  const bool paired = inst.OPCD == 4;
++  const u32 r0 = WasmFpScratchLocal(0), r1 = WasmFpScratchLocal(1);
++  EmitFpFastPathMsrCondition(body, layout);
++  body.push_back(0x04);
++  body.push_back(0x40);
++  EmitI32Const(body, 1);
++  EmitLocalSet(body, 3);
++  EmitApproximateReciprocalLane(body, layout, inst.FB, 0, r0);
++  if (paired)
++    EmitApproximateReciprocalLane(body, layout, inst.FB, 1, r1);
++  EmitLocalGet(body, 3);
++  body.push_back(0x04);
++  body.push_back(0x40);
++  EmitStoreFprLaneFromLocal(body, layout, inst.FD, 0, r0);
++  EmitStoreFprLaneFromLocal(body, layout, inst.FD, 1, paired ? r1 : r0);
++  EmitSetFprfZeroOrNormal(body, layout, r0, 0, op.wantsFPRF);
++  body.push_back(0x05);
++  EmitFpCall(body, op, downcount);
++  body.push_back(0x0b);
++  body.push_back(0x05);
++  EmitFpCall(body, op, downcount);
++  body.push_back(0x0b);
++}
++
++bool IsPairedSingleNativeOp(UGeckoInstruction inst)
++{
++  if (inst.Rc || DolphinWebHelperDisabled(DOLPHIN_WEB_DISABLE_NATIVE_PS))
++    return false;
++  if (inst.OPCD == 59)
++    return inst.SUBOP5 == 24;  // fres
++  if (inst.OPCD != 4)
++    return false;
++  return inst.SUBOP5 == 10 || inst.SUBOP5 == 11 || inst.SUBOP5 == 24 ||  // ps_sum0/1, ps_res
++         inst.SUBOP10 == 40 || inst.SUBOP10 == 72 || inst.SUBOP10 == 136 ||
++         inst.SUBOP10 == 264;  // ps_neg, ps_mr, ps_nabs, ps_abs
++}
++
++void EmitPairedSingleNativeOp(std::vector<u8>& body, const WasmStateLayout& layout,
++                              const PPCAnalyst::CodeOp& op, u32 downcount)
++{
++  const UGeckoInstruction inst = op.inst;
++  if (inst.SUBOP5 == 24)
++    EmitApproximateReciprocal(body, layout, op, downcount);
++  else if (inst.SUBOP5 == 10 || inst.SUBOP5 == 11)
++    EmitPairedSingleSum(body, layout, op, downcount);
++  else
++    EmitPairedSingleUnaryBitExact(body, layout, op, downcount);
++}
++
+ bool IsPairedSingleMergeSubop(u32 subop10)
+ {
+   return subop10 == 528 || subop10 == 560 || subop10 == 592 || subop10 == 624;
+@@ -6186,11 +6394,13 @@ bool IsPpcWasmSpecializedFpuInstruction(UGeckoInstruction inst)
+   case 55:  // stfdu
+     return true;
+   case 4:
+-    return (IsPairedSingleMergeSubop(inst.SUBOP10) ||
+-            IsPairedSingleArithmeticSubop(inst.SUBOP5)) &&
+-           !inst.Rc;
++    return ((IsPairedSingleMergeSubop(inst.SUBOP10) ||
++             IsPairedSingleArithmeticSubop(inst.SUBOP5)) &&
++            !inst.Rc) ||
++           IsPairedSingleNativeOp(inst);
+   case 59:
+-    return IsSinglePrecisionArithmeticSubop(inst.SUBOP5) && !inst.Rc;
++    return (IsSinglePrecisionArithmeticSubop(inst.SUBOP5) && !inst.Rc) ||
++           IsPairedSingleNativeOp(inst);
+   default:
+     return false;
+   }
+@@ -6889,6 +7099,11 @@ bool EmitWasmSupportedIntegerInstruction(std::vector<u8>& body, const WasmStateL
+       EmitPairedSingleMulAddSub(body, layout, op, downcount);
+       return true;
+     }
++    if (IsPairedSingleNativeOp(inst))
++    {
++      EmitPairedSingleNativeOp(body, layout, op, downcount);
++      return true;
++    }
+     return false;
+ 
+   case 48:  // lfs
+@@ -6932,6 +7147,11 @@ bool EmitWasmSupportedIntegerInstruction(std::vector<u8>& body, const WasmStateL
+       EmitSinglePrecisionArithmetic(body, layout, op, downcount);
+       return true;
+     }
++    if (IsPairedSingleNativeOp(inst))
++    {
++      EmitPairedSingleNativeOp(body, layout, op, downcount);
++      return true;
++    }
+     return false;
+ 
+   case 10:  // cmpli
+@@ -15338,8 +15558,9 @@ namespace
+ {
+ // Bumped whenever the code the translator emits changes (cache keys).
+ // 2: modules carry their heap layout (region-layout); version 1 modules have
+-// none and would never install.
+-constexpr u32 AOT_COMPILER_VERSION = 2;
++// none and would never install. 5 (0087): ps_sum0/1, ps_res, fres and
++// ps_neg/mr/nabs/abs compiled inline (3 and 4 are taken by 0084 and 0083).
++constexpr u32 AOT_COMPILER_VERSION = 5;
+ constexpr u32 AOT_MAX_FRAGMENT_BYTES = 1u << 20;
+ thread_local std::vector<u32> t_aot_out;
+ u8* s_aot_ram = nullptr;

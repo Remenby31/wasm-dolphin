@@ -153,7 +153,7 @@ async function main() {
     writeFileSync(path.join(values.out, `${name}.md`), md + "\n");
     writeFileSync(path.join(values.out, `${name}.json`), json);
   }
-  console.log(values.print ? md : `[kpi-report] ${counted.filter((r) => r.status === "OK").length} OK, ${counted.filter((r) => r.status === "KO").length} KO, ${counted.filter((r) => r.status === "n/a").length} n/a (global status: ${counted.length} rows; ${rows.length - counted.length} aot=1 rows apart) over ${results.length} results -> ${path.join(values.out, "latest.md")}`);
+  console.log(values.print ? md : `[kpi-report] ${counted.filter((r) => r.status === "OK").length} OK, ${counted.filter((r) => r.status === "KO").length} KO, ${counted.filter((r) => r.status === "n/a").length} n/a (global status: ${counted.length} rows; ${rows.length - counted.length} trajectory rows apart: wgpu, aot=1) over ${results.length} results -> ${path.join(values.out, "latest.md")}`);
 }
 
 if (import.meta.url === pathToFileURL(process.argv[1] ?? "").href) await main();
