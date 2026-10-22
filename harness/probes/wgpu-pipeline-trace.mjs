@@ -161,6 +161,10 @@ if (process.argv[1] && import.meta.url.endsWith(path.basename(process.argv[1])))
       launches.push({ launch, events: chunks.length, prewarm, presentGaps, ...summarize(chunks) });
       console.log(JSON.stringify(launches.at(-1), null, 2).slice(0, 3000));
       if (values.relaunch && launch < Number(values.launches)) {
+        // As a closing tab does: pagehide makes the page save its data
+        // (flushUserData), the pipeline list included.
+        await session.page.evaluate(() => window.dispatchEvent(new Event("pagehide"))).catch(() => {});
+        await session.page.waitForTimeout(2000);
         await session.close();
         session = await new Promise((r) => setTimeout(() => r(null), 2000));
       }
