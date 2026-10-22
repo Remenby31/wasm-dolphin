@@ -1,0 +1,56 @@
+diff --git a/Source/Core/Core/PowerPC/CachedInterpreter/CachedInterpreter.cpp b/Source/Core/Core/PowerPC/CachedInterpreter/CachedInterpreter.cpp
+--- a/Source/Core/Core/PowerPC/CachedInterpreter/CachedInterpreter.cpp
++++ b/Source/Core/Core/PowerPC/CachedInterpreter/CachedInterpreter.cpp
+@@ -14998,6 +14998,9 @@ struct FragmentBlock
+   // after icbi, sc, rfi, mtmsr...): the region returns to the dispatcher
+   // there, as the block JIT does, so invalidated code is never run on.
+   bool exits = false;
++  // 0088: set when the block was left out because it holds an idle loop:
++  // the region picks up again after the whole block (the loop's exit).
++  u32 outside_until = 0;
+ };
+ 
+ // Locals of a block body without the fastmem hoist (the only layout a
+@@ -15023,11 +15026,26 @@ bool BuildFragmentBlock(Core::System& system, u32 pc, u32 limit, FragmentBlock*
+   const u32 next_pc = analyzer.Analyze(pc, &block, &buffer, max_ops);
+   if (block.m_memory_exception || block.m_num_instructions == 0)
+     return false;
++  // 0088: a block holding an idle loop (a branch to its own start that
++  // Dolphin's analyzer marks branchIsIdleLoop) stays out of the region whole.
++  // Cut before the branch, the region would go on at the branch's address,
++  // where the analyzer no longer sees an idle loop (the branch does not
++  // target that block's start): the loop would spin inside the region and
++  // never reach CoreTiming::Idle. Outside, the block path runs it from its
++  // start with CheckIdle, as without regions.
++  for (u32 i = 0; i < block.m_num_instructions; ++i)
++  {
++    if (buffer[i].branchIsIdleLoop)
++    {
++      out->outside_until = next_pc;
++      return false;
++    }
++  }
+   u32 prefix = 0;
+   for (; prefix < block.m_num_instructions; ++prefix)
+   {
+     const PPCAnalyst::CodeOp& op = buffer[prefix];
+-    if (op.branchIsIdleLoop || !IsPpcWasmDirectInstructionCandidate(op) ||
++    if (!IsPpcWasmDirectInstructionCandidate(op) ||
+         ((op.opinfo->flags & FL_USE_FPU) != 0 && !ppc.msr.FP && !t_aot_translating))
+       break;
+     if (op.canEndBlock)
+@@ -15144,9 +15162,11 @@ bool BuildRegionFragment(Core::System& system, u32 entry_pc, std::span<const u32
+     {
+       if (pc == entry_pc)
+         return false;
+-      // Stays outside (dispatch); the region picks up again after it.
+-      if (inside(pc + 4) && seen.insert(pc + 4).second)
+-        work.push_back(pc + 4);
++      // Stays outside (dispatch); the region picks up again after it (after
++      // the whole block for an idle loop, 0088).
++      const u32 resume = fb.outside_until ? fb.outside_until : pc + 4;
++      if (inside(resume) && seen.insert(resume).second)
++        work.push_back(resume);
+       continue;
+     }
+     for (const u32 next : fb.successors)

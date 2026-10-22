@@ -14,7 +14,7 @@
 //     [--runs 4 (even with --baseline)] [--min-pairs 4] [--hold KeyX] [--warm]
 //     [--max-load L] [--load-wait 300] [--lock-wait 1800]
 //     [--pcsample [periodMs]] [--symbols functions.json] [--out dir]
-//     [--region-sample N [--region-secs 10]] [--idle-secs N] [--baseline-query "..."]
+//     [--display] [--unique-frames secs] [--region-sample N [--region-secs 10]] [--mem-stats] [--idle-secs N] [--steps file] [--baseline-query "..."]
 //     [--calm-wait S (default --lock-wait): wait for load ≤ --max-load before taking the lock]
 //     [--chrome-args "--flag …"] [--baseline-chrome-args "--flag …"]
 //
@@ -78,14 +78,16 @@ import { acquirePerfLock } from "../lib/perf-lock.mjs";
 import { openSession, rebootSession } from "../lib/session.mjs";
 import { calmThenLock, loadGaveUp, waitForLoad } from "../lib/env.mjs";
 import { describe, median, percentile, round } from "../lib/stats.mjs";
-import { coreStats, hitchList, mergeTimeline, presentationStats } from "../lib/timeline.mjs";
+import { coreStats, displayStats, hitchList, mergeTimeline, presentationStats } from "../lib/timeline.mjs";
 import { consistentRead, decodeRegionStats, poolStats, regionShares, topMisses } from "../lib/jit-region-stats.mjs";
+import { consistentMemRead, decodeMemStats, memAccessShares, poolMemStats } from "../lib/mem-access-stats.mjs";
 import { idleRecord, summarizeIdle } from "../lib/idle-stats.mjs";
 import { runSteps, validateSteps } from "../lib/steps.mjs";
 import { summarizePcSamples } from "../../src/harness-pc-sampler.js";
+import { checkPerfAccess, instructionsPerGuestCycle, perfCounters } from "../lib/perf-counters.mjs";
 
 const HOMEBREW_OUT = path.join(REPO_ROOT, "harness", "homebrew", "out");
-const STATE_ROUTE = "**/__harness_state.sav";
+export const STATE_ROUTE = "**/__harness_state.sav";
 
 export function sideOrder(run) {
   return run % 2 === 1 ? ["baseline", "candidate"] : ["candidate", "baseline"];
@@ -142,7 +144,7 @@ function threadCpus(pid) {
 }
 
 // The renderer of this profile and the CPU of its busiest threads.
-function rendererThreads(profileDir) {
+export function rendererThreads(profileDir) {
   if (!["darwin", "linux"].includes(process.platform)) return { error: `no per-thread CPU on ${process.platform}` };
   try {
     const ps = execFileSync("ps", ["-A", "-o", "pid=,command="], { encoding: "utf8", maxBuffer: 32 << 20 });
@@ -159,7 +161,7 @@ function rendererThreads(profileDir) {
 }
 
 // Load the scene, hold the key, settle, then a window with no page call.
-async function measure(session, o) {
+export async function measure(session, o) {
   const { page } = session;
   // The scene: input steps from the boot (--steps, e.g. a loaded menu) or
   // the savestate.
@@ -176,6 +178,9 @@ async function measure(session, o) {
     // the run says why it has no PC histogram.
     const pcStart = o.pcsample ? await workerRequest(page, "validationPcSampler", { action: "start", periodMs: o.pcsample }, 10000) : null;
     const sampling = Boolean(pcStart?.started);
+    // o.onWindow (race-multi's hardware counters): called just before and
+    // just after the window, from node only (no page call inside it).
+    if (o.onWindow) await o.onWindow("start", session);
     await readTimeline(page); // drop everything before the window
     const t0 = await page.evaluate(() => performance.timeOrigin + performance.now());
     // The window: node timers only. The rings (VI 8192, presents 16384)
@@ -186,6 +191,7 @@ async function measure(session, o) {
       loads.push(os.loadavg()[0]);
       if (s === Math.floor(o.secs / 2)) threads.push(rendererThreads(session.profileDir));
     }
+    const counters = o.onWindow ? await o.onWindow("end", session) : undefined;
     const chunk = await readTimeline(page);
     const t1 = await page.evaluate(() => performance.timeOrigin + performance.now());
     const pc = sampling ? await workerRequest(page, "validationPcSampler", { action: "stop" }, 20000) : pcStart && { error: pcStart.error ?? "not started" };
@@ -198,15 +204,39 @@ async function measure(session, o) {
     const viMs = timeline.vi.slice(1).map((v, i) => v.t - timeline.vi[i].t);
     const xfbDt = /xfb_dt:([\d.]+) avg:([\d.]+) max:([\d.]+)/.exec(String(info?.ppcWasmHelperStats ?? ""));
     const medianLoad = median(loads);
-    // The stats window, after everything the speed window reads.
-    let regionEnd = null;
-    if (o.regionSample != null) {
-      regionEnd = await workerRequest(page, "validationReadJitRegionStats", { sampleEvery: o.regionSample }, 10000);
-      if (!regionEnd?.error) {
-        await new Promise((r) => setTimeout(r, o.regionSecs * 1000));
-        regionEnd = await workerRequest(page, "validationReadJitRegionStats", {}, 10000);
+    // Unique images (--unique-frames): a window of its own after the speed
+    // window (its GPU readbacks never weigh on the speed), before the stats.
+    let uniqueFrames = null;
+    if (o.uniqueFrames) {
+      // Off until now: no readback may have happened (readbacksBefore 0).
+      const before = await workerRequest(page, "validationUniqueFrames", { action: "status" }, 10000);
+      const started = await workerRequest(page, "validationUniqueFrames", { action: "start" }, 10000);
+      if (started?.started) {
+        await new Promise((r) => setTimeout(r, o.uniqueFrames * 1000));
+        uniqueFrames = { ...(await workerRequest(page, "validationUniqueFrames", { action: "stop" }, 20000)), readbacksBefore: before?.readbacksTotal ?? null };
+      } else {
+        uniqueFrames = { error: started?.error ?? "unique-frame counter did not start" };
       }
     }
+    // The stats window, after everything the speed window reads.
+    // --mem-stats (0104) shares that window: both are reset together and
+    // read after it.
+    let regionEnd = null, memEnd = null;
+    if (o.regionSample != null || o.memStats) {
+      if (o.regionSample != null) regionEnd = await workerRequest(page, "validationReadJitRegionStats", { sampleEvery: o.regionSample }, 10000);
+      if (o.memStats) memEnd = await workerRequest(page, "validationReadMemAccessStats", { reset: 0 }, 10000);
+      const live = (r) => r && !r.error;
+      if (live(regionEnd) || live(memEnd)) {
+        await new Promise((r) => setTimeout(r, o.regionSecs * 1000));
+        if (live(regionEnd)) regionEnd = await workerRequest(page, "validationReadJitRegionStats", {}, 10000);
+        if (live(memEnd)) memEnd = await workerRequest(page, "validationReadMemAccessStats", {}, 10000);
+      }
+    }
+    // Regions the engine set aside without the core ever seeing them (another
+    // heap layout, 0078; heap patches, 0084): read even without
+    // --region-sample, so that a launch running without its region cache
+    // never goes unnoticed (2026-10-22: 0/143 on a loaded machine).
+    const pipeline = regionEnd ? null : await workerRequest(page, "validationReadJitRegionStats", {}, 10000).catch(() => null);
     let idleEnd = null;
     if (o.idleSecs != null) {
       idleEnd = await workerRequest(page, "validationReadIdleStats", { reset: true }, 10000);
@@ -223,6 +253,10 @@ async function measure(session, o) {
       speed: round(core.speed), speedP5: round(core.speedP5), speedMin: round(core.speedMin),
       gameFps: info?.vis ?? null,
       presents: pres.presents, viOutputs: timeline.vi.length,
+      // --display: what the screen showed (one worker rAF per BeginFrame).
+      ...(o.display ? { display: displayStats(timeline) } : {}),
+      presentsPerSecond: round(pres.presents / ((t1 - t0) / 1000), 1),
+      ...(o.uniqueFrames ? { uniqueFrames, uniqueFpsEstimate: uniqueFrames?.uniqueShare == null ? null : round((pres.presents / ((t1 - t0) / 1000)) * uniqueFrames.uniqueShare, 1) } : {}),
       viIntervalMs: { p50: round(percentile(viMs, 50)), p99: round(percentile(viMs, 99)), max: round(viMs.length ? Math.max(...viMs) : null) },
       presentIntervalMs: { p50: round(pres.frameP50), p99: round(pres.frameP99), max: round(pres.frameMax) },
       hitchesPerMin: round(pres.hitchesPerMin),
@@ -233,11 +267,21 @@ async function measure(session, o) {
       freezes: { core: core.freezes?.length ?? 0, present: pres.freezes.length },
       pc: pc && !pc.error ? summarizePcSamples(pc, { functions: o.functions }) : pc,
       ...regionRecord(regionEnd),
+      ...(pipeline && !pipeline.error ? regionPipeline(pipeline) : {}),
+      ...(counters ? { counters } : {}),
+      ...(o.memStats ? memRecord(memEnd) : {}),
       ...(o.idleSecs != null ? idleRecord(idleEnd) : {})
     };
   } finally {
     if (o.hold) await page.keyboard.up(o.hold).catch(() => {});
   }
+}
+
+// A change measured while another harness held the perf lock too is not a
+// measure: withheld, with the overlap as the reason.
+export function withheldOnOverlap(change, overlaps) {
+  if (!change || !overlaps.length) return change;
+  return { ...change, median: null, withheld: `perf lock overlap: ${overlaps.map((x) => `${x.at}: ${x.why}`).join("; ")}` };
 }
 
 // p4 of one stats window, or null and why (not asked, no export, torn or
@@ -250,9 +294,43 @@ export function regionRecord(reply) {
   const p4 = regionShares(stats);
   const samples = {
     ...(Array.isArray(reply.installSamples) ? { installSamples: reply.installSamples } : {}),
-    ...(Number.isInteger(reply.layoutRefused) ? { layoutRefused: reply.layoutRefused } : {})
+    // layoutRefused, the launch's heap layout (it varies between launches, and
+    // the host work per guest cycle with it, bench 2026-10-22), and the 0084
+    // heap patches
+    ...regionPipeline(reply)
   };
   return p4.error ? { p4: null, p4Why: p4.error, ...samples } : { p4, p4Raw: stats, ...samples };
+}
+
+// The region pipeline counters a stats reply carries besides the stats.
+export function regionPipeline(reply) {
+  return {
+    ...(Number.isInteger(reply.layoutRefused) ? { layoutRefused: reply.layoutRefused } : {}),
+    ...(Number.isInteger(reply.layoutHash) ? { layoutHash: reply.layoutHash } : {}),
+    ...(reply.layout ? { layout: reply.layout } : {}),
+    ...(Number.isInteger(reply.heapPatched) ? { heapPatched: reply.heapPatched, heapPatchedBytes: reply.heapPatchedBytes ?? null, heapPatchFailed: reply.heapPatchFailed ?? null } : {})
+  };
+}
+
+// Memory accesses per instruction of one stats window (0104), or null and why.
+export function memRecord(reply) {
+  if (!reply) return { memAccess: null, memAccessWhy: "not asked (no --mem-stats)" };
+  if (reply.error) return { memAccess: null, memAccessWhy: /Unknown upstream worker message/.test(reply.error) ? "engine without validationReadMemAccessStats" : reply.error };
+  const stats = consistentMemRead(decodeMemStats(reply.bytes), decodeMemStats(reply.again));
+  if (stats.error) return { memAccess: null, memAccessWhy: stats.error };
+  const shares = memAccessShares(stats);
+  return shares.error ? { memAccess: null, memAccessWhy: shares.error } : { memAccess: shares, memRaw: stats };
+}
+
+// One side's memory access ratio over its stats windows (pooled counters).
+export function summarizeMem(windows) {
+  const recs = windows.filter(Boolean);
+  const raw = recs.map((w) => w.memRaw).filter(Boolean);
+  const why = [...new Set(recs.filter((w) => !w.memRaw).map((w) => w.memAccessWhy).filter(Boolean))].join("; ") || "no window";
+  if (!raw.length) return { memAccess: null, why };
+  const pooled = memAccessShares(poolMemStats(raw));
+  if (pooled.error) return { memAccess: null, why: pooled.error };
+  return { memAccess: { ...pooled, windows: raw.length, missingWindows: recs.length - raw.length }, why: raw.length < recs.length ? why : null };
 }
 
 // One side's p4 over its stats windows: shares of the pooled counters (so
@@ -272,6 +350,12 @@ export function summarizeP4(windows) {
     ? { ...Object.fromEntries(Object.entries(sum.diagnostics).filter(([k]) => !/^topMiss|^spare$/.test(k))), topMisses: topMisses(raw.at(-1)) }
     : null;
   return { p4: { ...pooled, windows: raw.length, missingWindows: recs.length - raw.length, diagnostics }, why: raw.length < recs.length ? why : null };
+}
+
+export function memSummary(runs, sides, good = (r) => r && !r.error) {
+  const side = (n) => summarizeMem(runs.map((r) => r[n]).filter(good).map((r) => r.cold));
+  const c = side("candidate"), b = sides.baseline ? side("baseline") : null;
+  return { memAccess: c.memAccess, memAccessWhy: c.why, baselineMemAccess: b?.memAccess ?? null, baselineMemAccessWhy: b?.why ?? null };
 }
 
 // p4 / baselineP4 and their reasons; the sides are compared only when both
@@ -300,10 +384,11 @@ async function measureSide(side, o) {
   const server = await ensureServer({ port: o.port, root: side.root, coreCandidates: o.coreCandidates });
   try {
     const bootStart = performance.now();
-    const session = await openSession({ base: server.base, server, query: side.query ?? o.query, iso: o.iso, routes: { [STATE_ROUTE]: o.state }, chromeArgs: side.chromeArgs ?? [] });
+    const session = await openSession({ base: server.base, server, query: side.query ?? o.query, iso: o.iso, routes: { [STATE_ROUTE]: o.state }, chromeArgs: side.chromeArgs ?? [], harness: o.display ? { displayed: true } : {} });
     const record = { url: session.url, served: server.identity, core: session.core, loadGate, bootMs: round(performance.now() - bootStart, 0) };
     try {
       record.cold = await measure(session, o);
+      if (record.cold.counters) record.cold.instructionsPerGuestCycle = instructionsPerGuestCycle(record.cold);
       if (o.warm) {
         record.warmCore = await rebootSession(session, server);
         record.warm = await measure(session, o);
@@ -348,7 +433,7 @@ function resolveSide(name, spec) {
   return { name, label: spec, root: exportRef(spec), temp: true };
 }
 
-const brief = (m) => m && `speed ${m.speed} % (p5 ${m.speedP5}) game ${m.gameFps} fps vi p99 ${m.viIntervalMs.p99} ms hitches ${m.hitchesPerMin}/min busiest thread ${m.rendererThreads.at(-1)?.busiest} % load ${m.load1.median}${m.overloaded ? " OVERLOADED" : ""}${m.pc?.samples ? ` pc ${m.pc.samples} samples` : ""}`;
+const brief = (m) => m && `speed ${m.speed} % (p5 ${m.speedP5}) game ${m.gameFps} fps vi p99 ${m.viIntervalMs.p99} ms hitches ${m.hitchesPerMin}/min busiest thread ${m.rendererThreads.at(-1)?.busiest} % load ${m.load1.median}${m.overloaded ? " OVERLOADED" : ""}${m.pc?.samples ? ` pc ${m.pc.samples} samples` : ""}${m.layoutRefused > 0 ? ` REGIONS REFUSED FOR THE HEAP LAYOUT ${m.layoutRefused}` : ""}${m.heapPatched > 0 ? ` heap-patched ${m.heapPatched}` : ""}`;
 
 async function main() {
   const { values } = parseArgs({
@@ -359,7 +444,7 @@ async function main() {
       runs: { type: "string", default: "4" }, "min-pairs": { type: "string" }, "load-wait": { type: "string", default: "300" }, "calm-wait": { type: "string" }, warmup: { type: "string", default: "25" }, secs: { type: "string", default: "20" },
       hold: { type: "string", default: "KeyX" }, warm: { type: "boolean", default: false },
       "max-load": { type: "string" }, "lock-wait": { type: "string", default: "1800" },
-      pcsample: { type: "string" }, symbols: { type: "string" }, "region-sample": { type: "string" }, "region-secs": { type: "string", default: "10" }, "idle-secs": { type: "string" }, steps: { type: "string" }, "baseline-query": { type: "string" }, "chrome-args": { type: "string" }, "baseline-chrome-args": { type: "string" },
+      pcsample: { type: "string" }, symbols: { type: "string" }, "region-sample": { type: "string" }, "region-secs": { type: "string", default: "10" }, counters: { type: "boolean", default: false }, "unique-frames": { type: "string" }, display: { type: "boolean", default: false }, "mem-stats": { type: "boolean", default: false }, "idle-secs": { type: "string" }, steps: { type: "string" }, "baseline-query": { type: "string" }, "chrome-args": { type: "string" }, "baseline-chrome-args": { type: "string" },
       "core-candidate": { type: "string", multiple: true, default: [] },
       port: { type: "string", default: process.env.HARNESS_PORT }, out: { type: "string" }
     },
@@ -399,6 +484,12 @@ async function main() {
     pcsample: values.pcsample ? num(values, "pcsample", { min: 0.05 }) : null,
     regionSample: values["region-sample"] == null ? null : num(values, "region-sample", { min: 0, int: true }),
     regionSecs: num(values, "region-secs", { min: 1 }),
+    // --counters (Linux perf): host instructions per guest cycle of the
+    // emulated CPU thread, per window (lib/perf-counters.mjs).
+    ...(values.counters ? (checkPerfAccess(), { onWindow: perfCounters() }) : {}),
+    uniqueFrames: values["unique-frames"] == null ? null : num(values, "unique-frames", { min: 2 }),
+    memStats: values["mem-stats"],
+    display: values.display,
     idleSecs: values["idle-secs"] == null ? null : num(values, "idle-secs", { min: 1 }),
     functions: values.symbols ? JSON.parse(readFileSync(values.symbols, "utf8")).sort((a, b) => a[0] - b[0]) : null,
     coreCandidates: values["core-candidate"]
@@ -429,8 +520,17 @@ async function main() {
 
   const records = [];
   let gaveUp = null;
+  // Two holders of the perf lock at once would measure on a shared machine:
+  // checked when taken, before each run and at the end (lockIntegrity).
+  const lockOverlap = [];
+  const checkLock = (at) => {
+    const c = releaseLock.check?.();
+    if (c && !c.ok) { lockOverlap.push({ at, why: c.why }); console.warn(`[race-perf] perf lock overlap detected (${at}): ${c.why}`); }
+  };
+  checkLock("taken");
   try {
     for (let run = 1; run <= o.runs && !gaveUp; run += 1) {
+      checkLock(`before run ${run}`);
       const record = { run };
       for (const name of sideOrder(run).filter((n) => sides[n])) {
         record[name] = await measureSide(sides[name], o);
@@ -442,6 +542,7 @@ async function main() {
       writeFileSync(path.join(outDir, `run${run}.json`), JSON.stringify(record, null, 1) + "\n");
       records.push(record);
     }
+    checkLock("end");
   } finally {
     releaseLock();
     dropExports();
@@ -456,6 +557,22 @@ async function main() {
       speed: describe(m.map((x) => x.speed)), gameFps: describe(m.map((x) => x.gameFps)),
       viP99Ms: describe(m.map((x) => x.viIntervalMs.p99)), presentP99Ms: describe(m.map((x) => x.presentIntervalMs.p99)),
       hitchesPerMin: describe(m.map((x) => x.hitchesPerMin)), busiestThread: describe(m.map((x) => x.rendererThreads.at(-1)?.busiest)),
+      presentsPerSecond: describe(m.map((x) => x.presentsPerSecond)),
+      ...(m.some((x) => x.display) ? {
+        displayedPerSecond: describe(m.map((x) => x.display?.displayedPerSecond)),
+        displayedP95: describe(m.map((x) => x.display?.displayedP95)),
+        droppedPerMin: describe(m.map((x) => x.display?.droppedPerMin)),
+        judderPct: describe(m.map((x) => x.display?.judderPct)),
+        offOneVsyncPct: describe(m.map((x) => x.display?.offOneVsyncPct)),
+        displayWhy: [...new Set(m.map((x) => (x.display?.supported === false ? x.display.why : null)).filter(Boolean))].join("; ") || null
+      } : {}),
+      // Unique images (--unique-frames): measured in their own window; the
+      // speed window's presents/s × that window's share of new images.
+      ...(m.some((x) => x.uniqueFrames) ? {
+        uniqueShare: describe(m.map((x) => x.uniqueFrames?.uniqueShare), 4),
+        uniqueFpsEstimate: describe(m.map((x) => x.uniqueFpsEstimate)),
+        uniqueFramesWhy: [...new Set(m.map((x) => x.uniqueFrames?.error).filter(Boolean))].join("; ") || null
+      } : {}),
       ...(phase === "cold" ? { bootMs: describe(runsDone.map((r) => r[name]).filter(good).map((r) => r.bootMs).filter((v) => v != null)) } : {})
     };
   };
@@ -479,10 +596,16 @@ async function main() {
     runs: runsDone.length, failed, gaveUp,
     candidate: { cold: summarize("candidate", "cold"), warm: summarize("candidate", "warm") },
     baseline: sides.baseline ? { cold: summarize("baseline", "cold"), warm: summarize("baseline", "warm") } : null,
-    change: sides.baseline ? pairedSpeedChange(runsDone.filter((r) => good(r.baseline) && good(r.candidate)), { minPairs: o.minPairs }) : null,
+    change: sides.baseline ? withheldOnOverlap(pairedSpeedChange(runsDone.filter((r) => good(r.baseline) && good(r.candidate)), { minPairs: o.minPairs }), lockOverlap) : null,
+    // Checks of the perf lock that found another holder (empty: none).
+    lockOverlap,
+    // --counters: the same pairing on host instructions per guest cycle (lower is better).
+    ...(o.onWindow && sides.baseline ? { counterChange: pairedSpeedChange(runsDone.filter((r) => good(r.baseline) && good(r.candidate)), { metric: "instructionsPerGuestCycle", minPairs: o.minPairs }) } : {}),
     pcsample: pcNote,
     // P4 counters (KPI: region and dispatch shares), cold stats windows of good runs.
     ...p4Summary(runsDone, sides, good),
+    // Memory accesses per instruction (0104), cold stats windows of good runs.
+    ...(o.memStats ? memSummary(runsDone, sides, good) : {}),
     // Idle-skip counters (--idle-secs), cold stats windows of good runs.
     ...(o.idleSecs != null ? idleSummary(runsDone, sides, good) : {}),
     // What each side served (commit, dirty), for kpi-report: from its first good run.
@@ -491,7 +614,7 @@ async function main() {
   writeFileSync(path.join(outDir, "summary.json"), JSON.stringify(summary, null, 1) + "\n");
   const med = (n) => summary[n]?.cold?.speed?.median ?? "-";
   console.log(`[race-perf] ${sides.baseline ? `baseline ${med("baseline")} % → candidate ${med("candidate")} %, paired change ${summary.change.median ?? `withheld (${summary.change.withheld})`}${summary.change.median != null ? ` % over ${summary.change.pairs} pairs` : ""}` : `speed median ${med("candidate")} %`}${failed.length ? `; ${failed.length} failed run(s): ${failed.map((f) => `r${f.run} ${f.side} ${f.why}`).join(", ")}` : ""} -> ${outDir}`);
-  process.exitCode = failed.length || summary.change?.withheld ? 1 : 0;
+  process.exitCode = failed.length || summary.change?.withheld || lockOverlap.length ? 1 : 0;
 }
 
 if (import.meta.url === pathToFileURL(process.argv[1] ?? "").href) await main();

@@ -29,7 +29,7 @@
 // time since the start of this run.
 import { AotOptimizer } from "./aot-optimizer.js";
 import { createAotRegionLoader } from "./aot-region-loader.js";
-import { regionModuleEntries, regionModuleLayout } from "./aot-region-module.js";
+import { REGION_HEAP_NAMES, regionModuleEntries, regionModuleLayout } from "./aot-region-module.js";
 
 export const AOT_FIRST_LAUNCH_PARAM = "aot";
 export const AOT_PROGRESS_SCHEMA = "wasm-dolphin.aot-progress.v1";
@@ -83,6 +83,8 @@ export function createAotFirstLaunch({
   let disposed = false;
   let errorEvents = 0;
   let errorsDropped = 0;
+  let started = false; // start() was called: the boot is behind
+  let retranslated = 0;
   const run = runId ?? Math.random().toString(36).slice(2, 10);
 
   function record(type, detail) {
@@ -185,13 +187,27 @@ export function createAotFirstLaunch({
     async start({ resume = true, ifGeneration = generation } = {}) {
       if (!supported || disposed || ifGeneration !== generation) return;
       running = true;
+      started = true;
       lastState = "running";
       try {
         await optimizer.start({ resume });
+        // Marked stale after the run's last module: one more run for them.
+        if (optimizer.stale.size && !disposed && ifGeneration === generation) await optimizer.start({ resume: true });
       } finally {
         running = false;
         if (lastState === "running") lastState = "partial"; // cancelled or fatal
       }
+    },
+
+    // A module from the cache the core cannot run here (translated for another
+    // heap layout): translated again from guest memory, live, and its cache
+    // entry overwritten, instead of being lost for every launch. Once per key
+    // and launch, 3 launches at most. True when queued.
+    retranslate(key) {
+      if (!supported || disposed || !optimizer.markStale(key)) return false;
+      retranslated += 1;
+      if (started && !running) void this.start({ resume: true });
+      return true;
     },
 
     get generation() {
@@ -217,7 +233,7 @@ export function createAotFirstLaunch({
       return out;
     },
 
-    stats: () => ({ loader: loader.stats() })
+    stats: () => ({ loader: loader.stats(), retranslated })
   };
 }
 
@@ -228,7 +244,8 @@ export function createAotFirstLaunch({
 //   thread_local, guest code read from physical RAM through the BAT views).
 //   ptr -> [status, entry, codeLength, entryCount, relocCount, reserved],
 //   entries (u32 each), relocs (offset, kind, value: 0 import by helper
-//   index, 1 jump to value, 2 dispatch), code. Valid until the next call on
+//   index, 1 jump to value, 2 dispatch, 3 heap site: bit 0 REGION_HEAP_NAMES
+//   index, bit 1 the form, 0 an i32.const, 1 a memarg offset), code. Valid until the next call on
 //   the same thread; 0 is an internal error.
 // _DolphinWeb_AotKeyParts(ptr) writes [compilerVersion, codegenMask].
 // _DolphinWeb_JitHelperName(i) / _DolphinWeb_JitHelperSignature(i): helper
@@ -281,6 +298,17 @@ export function coreAssembleOptions(m) {
   return { helperNames: names, assemble: { helpers, pcOffset, memoryPages: m.HEAPU8.buffer.byteLength / 65536 } };
 }
 
+// [ramBase, l1Base] of the core's session (_DolphinWeb_AotRegionHeapBases).
+export function coreHeapBases(m) {
+  const p = m._malloc(8);
+  try {
+    m._DolphinWeb_AotRegionHeapBases(p);
+    return Array.from(new Uint32Array(m.HEAPU8.buffer, p, 2));
+  } finally {
+    m._free(p);
+  }
+}
+
 // The translator the optimiser drives, over the core's export. Translates
 // for at most `sliceMs` per call and answers "budget" for the rest: the discio
 // worker also serves the core's disc reads, so it yields between slices.
@@ -328,10 +356,13 @@ function translateOne(m, f, { mask, maxBlocks, names }) {
     const [offset, kind, value] = words.subarray(entryCount + 3 * i, entryCount + 3 * i + 3);
     if (kind === 0) return { offset, kind: "import", name: names[value] };
     if (kind === 1) return { offset, kind: "jump", targetPc: value };
+    if (kind === 3) return { offset, kind: "heap", name: REGION_HEAP_NAMES[value & 1], form: value & 2 ? "offset" : "const" };
     return { offset, kind: "dispatch" };
   });
   const at = p + 24 + 4 * (entryCount + 3 * relocCount);
   // layout: the core's heap layout hash the code embeds (0 from a core
   // before the layout guard): the region module carries it to the install.
-  return { entry: f.entry, fragment: { entry, entries, code: m.HEAPU8.slice(at, at + codeLength), relocs, layout } };
+  // heapBases: the RAM and L1 addresses its heap sites hold (0084).
+  const heapBases = typeof m._DolphinWeb_AotRegionHeapBases === "function" ? coreHeapBases(m) : null;
+  return { entry: f.entry, fragment: { entry, entries, code: m.HEAPU8.slice(at, at + codeLength), relocs, layout, ...(heapBases ? { heapBases } : {}) } };
 }

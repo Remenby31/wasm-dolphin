@@ -1,27 +1,27 @@
 {
   "schemaVersion": 1,
   "abiVersion": 1,
-  "coreId": "sha256:c978f3f3022c972bdec7093e5275bc44f00bd2091e0bbc2bddbbfce8f6be33ad",
+  "coreId": "sha256:43656acf26b3ea909e4fb2f52787f348295e40a61b67be5bc0bd688ce902c648",
   "upstreamCommit": "e22551eae1c84a7e4d0b6a5c519ef4ed4ef69df1",
   "artifacts": [
     {
       "path": "cores/dolphin/dolphin-core-upstream.js",
       "hashMode": "lf-normalized",
-      "size": 279208,
-      "sha256": "e73038b8e7cfdb804dae53147aeec0d1f6cf8c8f39d4434407e23af138206cf5"
+      "size": 279734,
+      "sha256": "258bd30f7373b24abe50a9ad96cc9b16c85d5362126e2afe3de95d74288e7101"
     },
     {
       "path": "cores/dolphin/dolphin-core-upstream.wasm",
-      "size": 13074916,
-      "sha256": "c978f3f3022c972bdec7093e5275bc44f00bd2091e0bbc2bddbbfce8f6be33ad"
+      "size": 13091397,
+      "sha256": "43656acf26b3ea909e4fb2f52787f348295e40a61b67be5bc0bd688ce902c648"
     }
   ],
   "contractSources": [
     {
       "path": "core/upstream/dolphin_web_discio.cpp",
       "hashMode": "lf-normalized",
-      "size": 64807,
-      "sha256": "53562ca70640759cf2a65630122dcb1b216a097fb648315da13f2edea854e032"
+      "size": 68463,
+      "sha256": "6e2a5bf67519a1e1bbbe6d99d4c1c8f837ab72849564e3efddd0742cfebca078"
     },
     {
       "path": "core/upstream/dolphin_web_raster_profile.h",
@@ -44,8 +44,8 @@
     {
       "path": "core/upstream/dolphin_web_core.cpp",
       "hashMode": "lf-normalized",
-      "size": 52827,
-      "sha256": "e1f0f91237f5be969194d49495ffde43318f9f0c24d01219badd5e5fe5708957"
+      "size": 54085,
+      "sha256": "0d3f687c4897d4e84d467731f83c545471ab09cdcd302b1c32bfb11fa74a9c29"
     },
     {
       "path": "src/app.js",
@@ -86,8 +86,8 @@
     {
       "path": "src/core-host.js",
       "hashMode": "lf-normalized",
-      "size": 68881,
-      "sha256": "126d6794f8ad9e007212d5443ae36be9ce7a4c79e2ec0808546399e45e6f7c5b"
+      "size": 72754,
+      "sha256": "b8411c1528c63051576ca04c1bd5a9424be35acc122cbfe16fea676b3220d7ed"
     },
     {
       "path": "src/diagnostic-log-filter.js",
@@ -140,8 +140,8 @@
     {
       "path": "src/upstream-discio-worker.js",
       "hashMode": "lf-normalized",
-      "size": 691043,
-      "sha256": "89f7f94089abd540f67f91d8aab5330880d8ee5330d44b768de94e80513d4bd1"
+      "size": 706903,
+      "sha256": "98bbda4b122aa9aef66b9bac799c47783eeb5af464312e550c4333a93011da90"
     },
     {
       "path": "src/wgpu-renderer-worker-probe.js",
@@ -164,8 +164,8 @@
     {
       "path": "src/upstream-worker-adapter.js",
       "hashMode": "lf-normalized",
-      "size": 47331,
-      "sha256": "4efeaf94cf954da38dd86384dd43710813049d6a98be497530b789c700e13620"
+      "size": 52093,
+      "sha256": "8dd85d4553cd010050279495459b1b29e939c1a680df7a81ee1e46125ec65884"
     },
     {
       "path": "src/upstream-worker-protocol.js",
@@ -371,6 +371,7 @@
     "_DolphinWeb_AotDispatchRegionForTest",
     "_DolphinWeb_AotForgetRegionsForTest",
     "_DolphinWeb_AotInvalidateForTest",
+    "_DolphinWeb_AotInvalidateForcedForTest",
     "_DolphinWeb_AotKeyParts",
     "_DolphinWeb_AotLayoutHash",
     "_DolphinWeb_AotLayoutRefused",
@@ -380,6 +381,7 @@
     "_DolphinWeb_AotPublishStatsForTest",
     "_DolphinWeb_AotQueueRegion",
     "_DolphinWeb_AotRamReady",
+    "_DolphinWeb_AotRegionRechecks",
     "_DolphinWeb_AotRegionsSkippedMmu",
     "_DolphinWeb_AotRunRegionForTest",
     "_DolphinWeb_AotServiceRegionsForTest",
@@ -395,6 +397,7 @@
     "_DolphinWeb_AotTranslate",
     "_DolphinWeb_AotTranslateForTest",
     "_DolphinWeb_AotUnverifyForTest",
+    "_DolphinWeb_AxHleStats",
     "_DolphinWeb_EmulatedRtc",
     "_DolphinWeb_FmaIsMusl",
     "_DolphinWeb_GpuSyncDiag",
@@ -451,6 +454,7 @@
     "_FrameBuffer",
     "_FrameHeight",
     "_FrameWidth",
+    "_GameConfigMmuForTest",
     "_GetApploaderDate",
     "_GetApploaderSize",
     "_GetAudioStats",
@@ -631,6 +635,9 @@
       "setInputState",
       "start",
       "stop",
+      "streamCapture",
+      "streamCaptureStats",
+      "streamCaptureStop",
       "validationAotCacheProbe",
       "validationBeginWgpuRendererProbeMeasurement",
       "validationCaptureAtVi",
@@ -641,15 +648,19 @@
       "validationFinalizeWgpuReplay",
       "validationPcSampler",
       "validationReadAotProgress",
+      "validationReadAxHleStats",
       "validationReadCoreProgress",
       "validationReadDetTrace",
       "validationReadIdleStats",
       "validationReadJitCacheReadiness",
       "validationReadJitRegionStats",
+      "validationReadMemAccessStats",
+      "validationReadPipelinePrewarm",
       "validationReadTimeline",
       "validationReadWgpuReplayState",
       "validationSetCorePaused",
-      "validationSetWgpuPerturbation"
+      "validationSetWgpuPerturbation",
+      "validationUniqueFrames"
     ],
     "notificationFields": {
       "detachedOglFrame": [

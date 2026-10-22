@@ -33,6 +33,7 @@
 #include "Core/Config/GraphicsSettings.h"
 #include "Core/Config/MainSettings.h"
 #include "Core/ConfigLoaders/BaseConfigLoader.h"
+#include "Core/ConfigLoaders/GameConfigLoader.h"
 #include "Core/ConfigManager.h"
 #include "Core/HW/SI/SI_Device.h"
 #include "Core/Core.h"
@@ -757,6 +758,12 @@ void EnsureRuntime()
   Config::SetBase(Config::MAIN_AUDIO_MUTED, false);
   Config::SetBase(Config::GFX_HACK_SKIP_XFB_COPY_TO_RAM, s_video_backend == "OGL");
   Config::SetBase(Config::GFX_HACK_COPY_EFB_SCALED, false);
+  // ?efbaccess=1 (Module['dolphinEfbAccess']): CPU reads and writes of the
+  // EFB, off by default as in Dolphin; upstream turns them on per game
+  // (GameINI), which this build does not ship yet.
+  const bool efb_access = EM_ASM_INT({ return (typeof Module !== 'undefined' &&
+                                               Module['dolphinEfbAccess']) ? 1 : 0; }) != 0;
+  Config::SetBase(Config::GFX_HACK_EFB_ACCESS_ENABLE, efb_access);
   // Fill the canvas with the XFB, as the software presenter does. Dolphin's
   // default analog aspect pillarboxes a 640-wide XFB to ~583 pixels, so the
   // hardware path showed every game narrower than the software one.
@@ -1014,6 +1021,24 @@ int SetCpuThread(int enabled)
 
   s_cpu_thread = enabled != 0;
   return 1;
+}
+
+// Tests (patch 0097): the MMU setting Dolphin's game config gives a disc ID
+// and revision from the INIs under /dolphin-sys/GameSettings, as
+// System::Initialize reads it at boot (IsMMUMode). The global game layer is
+// added for the read and removed after; -1 when a game's layer is already
+// there (a game is running), which this must not replace.
+#ifdef __EMSCRIPTEN__
+EMSCRIPTEN_KEEPALIVE
+#endif
+int GameConfigMmuForTest(const char* game_id, int revision)
+{
+  if (Config::GetLayer(Config::LayerType::GlobalGame))
+    return -1;
+  Config::AddLayer(ConfigLoaders::GenerateGlobalGameConfigLoader(game_id, static_cast<u16>(revision)));
+  const bool mmu = Config::Get(Config::MAIN_MMU);
+  Config::RemoveLayer(Config::LayerType::GlobalGame);
+  return mmu ? 1 : 0;
 }
 
 // Tests: `count` alerts through the relay, all the same text when

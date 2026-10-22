@@ -15,7 +15,7 @@ export const HITCH_MS = 1000 / 60 * 2; // more than 2 frames at 60 Hz
 // A chunk that could not be read makes the timeline incomplete: a missing
 // final read would otherwise hide a core that stopped at the end.
 export function mergeTimeline(chunks) {
-  const out = { presents: [], vi: [], lost: { presents: 0, vi: 0 }, viSupported: true, viWhy: null, failedReads: 0, complete: true };
+  const out = { presents: [], vi: [], lost: { presents: 0, vi: 0 }, viSupported: true, viWhy: null, failedReads: 0, complete: true, displayed: [], displayedLost: 0, displayedWhy: null };
   if (!chunks.length) out.complete = false;
   for (const c of chunks) {
     if (!c || c.error) { out.failedReads += 1; out.complete = false; continue; }
@@ -24,6 +24,10 @@ export function mergeTimeline(chunks) {
     if (!c.vi?.supported) { out.viSupported = false; out.viWhy = c.vi?.why ?? out.viWhy; }
     c.vi?.t?.forEach((t, i) => out.vi.push({ t, ticks: c.vi.ticks[i], sinceBoot: c.vi.sinceBoot[i], sinceLoad: c.vi.sinceLoad[i] }));
     out.lost.vi += c.vi?.lost ?? 0;
+    // What each BeginFrame put on screen (worker rAF, when the harness asked).
+    if (c.displayed) c.displayed.t.forEach((t, i) => out.displayed.push({ t, submits: c.displayed.submits[i], vi: c.displayed.vi[i] }));
+    else out.displayedWhy = c.displayedWhy ?? out.displayedWhy ?? "engine without the display counter";
+    out.displayedLost += c.displayedLost ?? 0;
   }
   if (out.lost.presents || out.lost.vi) out.complete = false;
   // Both rings must be on one clock (timeOrigin + now). Presentations and VI
@@ -36,9 +40,50 @@ export function mergeTimeline(chunks) {
   return out;
 }
 
+// What the screen showed (research/deep-frame-pacing.md §3.1): Chrome keeps
+// only the last picture submitted between two BeginFrames, so the submitted
+// presents overstate what is seen. One entry per BeginFrame (worker rAF):
+// submits 0 = nothing new, 1 = one picture shown, n > 1 = n - 1 dropped.
+// vsyncMs is the median BeginFrame interval (16.7 ms in headless Chrome,
+// whatever the real screen). judderPct: displayed intervals that are not the
+// dominant number of vsyncs (uneven pacing; a steady 30 fps is not judder);
+// offOneVsyncPct: displayed intervals other than one vsync.
+export function displayStats(timeline) {
+  const frames = timeline.displayed ?? [];
+  if (frames.length < 3) return { supported: false, why: timeline.displayedWhy ?? "no BeginFrame in the window" };
+  const begin = frames.slice(1).map((f, i) => f.t - frames[i].t);
+  const vsyncMs = percentile(begin, 50);
+  const shown = frames.filter((f) => f.submits > 0);
+  const shownMs = shown.slice(1).map((f, i) => f.t - shown[i].t);
+  const vsyncs = shownMs.map((ms) => Math.max(1, Math.round(ms / vsyncMs)));
+  const counts = new Map();
+  for (const v of vsyncs) counts.set(v, (counts.get(v) ?? 0) + 1);
+  const mode = [...counts.entries()].sort((a, b) => b[1] - a[1] || a[0] - b[0])[0]?.[0] ?? null;
+  const spanS = (frames.at(-1).t - frames[0].t) / 1000;
+  const submitted = frames.reduce((n, f) => n + f.submits, 0);
+  const dropped = frames.reduce((n, f) => n + Math.max(0, f.submits - 1), 0);
+  const pct = (n, d) => (d ? Math.round((n / d) * 1000) / 10 : null);
+  return {
+    supported: true,
+    vsyncMs: Math.round(vsyncMs * 100) / 100,
+    beginFrames: frames.length,
+    displayedPerSecond: spanS > 0 ? Math.round((shown.length / spanS) * 10) / 10 : null,
+    submittedPerSecond: spanS > 0 ? Math.round((submitted / spanS) * 10) / 10 : null,
+    dropped,
+    droppedPerMin: spanS > 0 ? Math.round((dropped / spanS) * 600) / 10 : null,
+    displayedP50: percentile(shownMs, 50), displayedP95: percentile(shownMs, 95), displayedP99: percentile(shownMs, 99),
+    dominantVsyncs: mode,
+    judderPct: pct(vsyncs.filter((v) => v !== mode).length, vsyncs.length),
+    offOneVsyncPct: pct(vsyncs.filter((v) => v !== 1).length, vsyncs.length),
+    noUpdatePct: pct(frames.filter((f) => f.submits === 0).length, frames.length),
+    lost: timeline.displayedLost ?? 0
+  };
+}
+
 export function windowOf(timeline, t0, t1) {
   return {
     ...timeline,
+    displayed: (timeline.displayed ?? []).filter((f) => f.t >= t0 && f.t <= t1),
     presents: timeline.presents.filter((p) => p.t >= t0 && p.t <= t1),
     vi: timeline.vi.filter((v) => v.t >= t0 && v.t <= t1)
   };

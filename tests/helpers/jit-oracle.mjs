@@ -326,7 +326,7 @@ export const generate = (name, r) => CATALOG_BY_NAME.get(name)(r);
 // A straight-line block of random instructions, optionally with a forward
 // conditional skip and a CTR loop like the cpufuzz homebrew, then blr.
 const FP_CHAIN = CATALOG.filter(([n]) =>
-  /^(f(add|sub|mul|div|madd|msub|nmadd|nmsub)s?|frsp|fctiwz?|fcmp[uo]|mffs|fsel|fres|frsqrte|ps_(add|sub|mul|madd|msub|nmadd|nmsub|muls[01]|madds[01]))$/.test(n));
+  /^(f(add|sub|mul|div|madd|msub|nmadd|nmsub)s?|frsp|fctiwz?|fcmp[uo]|mffs|fsel|fres|frsqrte|ps_(add|sub|mul|madd|msub|nmadd|nmsub|muls[01]|madds[01]|sum[01]|res|neg|mr|nabs|abs))$/.test(n));
 
 // Not in programs: a random GQR value can select a reserved quantization
 // type, which the hardware leaves undefined (the interpreter panics on it).
