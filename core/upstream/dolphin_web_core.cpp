@@ -16,6 +16,7 @@
 #include <memory>
 #include <span>
 #include <string>
+#include <string_view>
 #include <vector>
 
 #include "AudioCommon/AudioCommon.h"
@@ -1030,22 +1031,37 @@ int SetCpuThread(int enabled)
   return 1;
 }
 
-// Tests (patch 0097): the MMU setting Dolphin's game config gives a disc ID
-// and revision from the INIs under /dolphin-sys/GameSettings, as
-// System::Initialize reads it at boot (IsMMUMode). The global game layer is
-// added for the read and removed after; -1 when a game's layer is already
-// there (a game is running), which this must not replace.
+// Tests (patch 0097): the value Dolphin's game config gives an allowlisted
+// setting (tools/gamesettings-allowlist.json) for a disc ID and revision from
+// the INIs under /dolphin-sys/GameSettings, as the game's boot reads it: MMU
+// (System::Initialize, IsMMUMode) and SafeTextureCacheColorSamples; booleans
+// as 0/1. The global game layer is added for the read and removed after; -1
+// when a game's layer is already there (a game is running), which this must
+// not replace, -2 for a setting it does not know.
+#ifdef __EMSCRIPTEN__
+EMSCRIPTEN_KEEPALIVE
+#endif
+int GameConfigValueForTest(const char* game_id, int revision, const char* setting)
+{
+  const std::string_view name = setting;
+  if (name != "MMU" && name != "SafeTextureCacheColorSamples")
+    return -2;
+  if (Config::GetLayer(Config::LayerType::GlobalGame))
+    return -1;
+  Config::AddLayer(ConfigLoaders::GenerateGlobalGameConfigLoader(game_id, static_cast<u16>(revision)));
+  const int value = name == "MMU" ? (Config::Get(Config::MAIN_MMU) ? 1 : 0) :
+                                    Config::Get(Config::GFX_SAFE_TEXTURE_CACHE_COLOR_SAMPLES);
+  Config::RemoveLayer(Config::LayerType::GlobalGame);
+  return value;
+}
+
+// The MMU only (the first 0097 test; kept: the ABI manifest lists it).
 #ifdef __EMSCRIPTEN__
 EMSCRIPTEN_KEEPALIVE
 #endif
 int GameConfigMmuForTest(const char* game_id, int revision)
 {
-  if (Config::GetLayer(Config::LayerType::GlobalGame))
-    return -1;
-  Config::AddLayer(ConfigLoaders::GenerateGlobalGameConfigLoader(game_id, static_cast<u16>(revision)));
-  const bool mmu = Config::Get(Config::MAIN_MMU);
-  Config::RemoveLayer(Config::LayerType::GlobalGame);
-  return mmu ? 1 : 0;
+  return GameConfigValueForTest(game_id, revision, "MMU");
 }
 
 // Tests: `count` alerts through the relay, all the same text when
