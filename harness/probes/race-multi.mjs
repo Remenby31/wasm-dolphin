@@ -77,6 +77,7 @@ import { median, round } from "../lib/stats.mjs";
 import { measure, num } from "./race-perf.mjs";
 import { loadHarnessState, readCoreProgress } from "../lib/browser.mjs";
 import { workerRequest } from "../lib/browser.mjs";
+import { emulatedWindow, ticksNow } from "../lib/emulated-window.mjs";
 import { decodeRegionStats } from "../lib/jit-region-stats.mjs";
 import { busiestThread, checkPerfAccess, instructionsPerGuestCycle, perfCounters } from "../lib/perf-counters.mjs";
 import { execFileSync, spawn } from "node:child_process";
@@ -168,43 +169,21 @@ async function jitStats(page) {
   return text ? parseJitStats(text) : null;
 }
 
-// Guest ticks now (validationReadCoreProgress), as numbers.
-async function ticksNow(page) {
-  const p = await readCoreProgress(page);
-  return { ticks: Number(p?.coreTicks ?? NaN), perSecond: Number(p?.coreTicksPerSecond ?? NaN), at: Date.now() };
-}
-
-async function waitTicks(page, target, { everyMs = 100, timeoutMs = 600000 } = {}) {
-  const end = Date.now() + timeoutMs;
-  for (;;) {
-    const t = await ticksNow(page);
-    if (t.ticks >= target || Date.now() > end) return t;
-    await new Promise((r) => setTimeout(r, everyMs));
-  }
-}
-
-// --emulated-window: one arm's window of exactly `secs` guest seconds after
-// `warmup` guest seconds, the key pressed while paused (a fixed emulated tick).
+// --emulated-window: one arm's window of exactly S guest seconds after W of
+// warmup, the key pressed while paused (lib/emulated-window.mjs).
 async function measureEmulated(session, o, counters) {
   const { page } = session;
   const loaded = await loadHarnessState(page, session.url);
   if (!loaded?.loaded) throw new Error(`savestate load failed: ${JSON.stringify(loaded)}`);
-  await workerRequest(page, "pause", {}, 30000);
-  if (o.hold) await page.keyboard.down(o.hold);
-  await workerRequest(page, "resume", {}, 30000);
   try {
-    const t0 = await ticksNow(page);
-    if (!Number.isFinite(t0.ticks) || !Number.isFinite(t0.perSecond)) throw new Error("no guest ticks from this core");
-    const start = await waitTicks(page, t0.ticks + o.emulatedWarmup * t0.perSecond);
-    if (counters) await counters("start", session);
-    const begin = await ticksNow(page);
-    const end = await waitTicks(page, begin.ticks + o.emulatedWindow * t0.perSecond);
-    const c = counters ? await counters("end", session) : undefined;
-    const guestTicks = end.ticks - begin.ticks, windowMs = end.at - begin.at;
+    const { record, finished: c } = await emulatedWindow(page, { secs: o.emulatedWindow, warmup: o.emulatedWarmup, pollMs: o.emulatedPollMs }, {
+      press: o.hold ? () => page.keyboard.down(o.hold) : undefined,
+      start: counters ? () => counters("start", session) : undefined,
+      end: counters ? () => counters("end", session) : undefined
+    });
     return {
-      emulatedWindow: true, windowMs, guestTicks, warmupTicks: begin.ticks - t0.ticks, lateStartTicks: begin.ticks - start.ticks,
-      speed: round((guestTicks / t0.perSecond / (windowMs / 1000)) * 100, 2),
-      ...(c ? { counters: c, instructionsPerGuestTick: c.instructions ? c.instructions / guestTicks : null } : {}),
+      ...record, windowMs: record.hostMs,
+      ...(c ? { counters: c, instructionsPerGuestTick: c.instructions ? c.instructions / record.guestTicks : null } : {}),
       jit: await jitStats(page)
     };
   } finally {
@@ -261,7 +240,7 @@ async function main() {
       lock: { type: "string", multiple: true, default: [] }, "lock-wait": { type: "string", default: "14400" }, out: { type: "string" },
       counters: { type: "boolean", default: false }, "aot-seed": { type: "boolean", default: false }, "seed-sec": { type: "string", default: "600" },
       "gate-sec": { type: "string", default: "120" }, "isolated-boot": { type: "boolean", default: false }, "settle-sec": { type: "string", default: "10" },
-      "perf-record": { type: "boolean", default: false }, "emulated-window": { type: "string" }, "emulated-warmup": { type: "string", default: "10" }
+      "perf-record": { type: "boolean", default: false }, "emulated-window": { type: "string" }, "emulated-warmup": { type: "string", default: "10" }, "emulated-poll-ms": { type: "string", default: "100" }
     }
   });
   const lanes = String(values.lanes ?? "").split(";").map((l) => l.trim()).filter(Boolean);
@@ -307,6 +286,7 @@ async function main() {
   if (values["emulated-window"]) {
     o.emulatedWindow = num(values, "emulated-window", { min: 1 });
     o.emulatedWarmup = num(values, "emulated-warmup", { min: 0 });
+    o.emulatedPollMs = num(values, "emulated-poll-ms", { min: 10, int: true });
   }
   let arrive = null;
   o.onWindow = async (phase, session) => {
