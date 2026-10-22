@@ -12,7 +12,7 @@
 //   node harness/probes/race-multi.mjs --iso disc.iso --state scene.sav --port N
 //     --arm <dir> --arm <dir> [--arm <dir> …]      (the first is the baseline)
 //     --lanes "5,6,7;15,16,17;8,9,19" [--query …] [--runs 6] [--warmup 25] [--secs 20]
-//     [--max-load L] [--lock <dir/.perf-lock> …] [--counters] [--aot-seed [--seed-sec 600]]
+//     [--max-load L] [--lock <dir/.perf-lock> …] [--counters] [--aot-seed [--seed-sec 600] [--max-discards 3]]
 //     [--isolated-boot [--settle-sec 10]] [--perf-record]
 //     [--emulated-window <guest s> [--emulated-warmup <guest s>]] [--out dir]
 //
@@ -38,7 +38,11 @@
 //   Before each window, every arm waits until its core has no region pending
 //   (queued = installed + refused + dropped) and its installed count holds
 //   for 3 reads, then all arms open their windows together; the counts are
-//   recorded per arm (regionGate) and compared (regionCountsEqual).
+//   recorded per arm (regionGate) and compared (regionCountsEqual). A run
+//   where an arm lacks some of its seed's regions (layoutRefused, gate
+//   timed out) is discarded whole, the waiting having shifted the other
+//   arms too, and played again with the same rotation, up to
+//   --max-discards (3) in all.
 // - --isolated-boot: an arm booting while the others already emulate can
 //   come up differently (2026-10-22: the cached regions refused for heap
 //   layout on such arms, ~6 % fewer host instructions per guest cycle
@@ -192,6 +196,22 @@ async function measureEmulated(session, o, hook) {
   }
 }
 
+// Why a run must be discarded under --aot-seed (null: keep it): an arm
+// without all its seeded regions measures another codegen, and the barrier
+// it held up shifted the other arms too (multi-aba-emu-0087b, 2026-10-22).
+export function discardReason(arms, targets) {
+  const bad = arms.map((x, a) => {
+    const g = x.regionGate;
+    if (!g) return `no region gate on arm ${a}`;
+    if (g.layoutRefused > 0) return `layoutRefused on arm ${a} (${g.layoutRefused})`;
+    const want = targets[a];
+    if (Number.isInteger(want) && g.installed !== want) return `arm ${a} installed ${g.installed ?? "?"} of ${want} regions`;
+    if (!g.quiescent) return `arm ${a}: ${g.why ?? "regions not quiescent"}`;
+    return null;
+  }).filter(Boolean);
+  return bad.length ? bad.join("; ") : null;
+}
+
 // A barrier for `n` arms, released when all arrived or after `timeoutMs`.
 export function barrier(n, timeoutMs = 180000) {
   let arrived = 0, open;
@@ -240,7 +260,7 @@ async function main() {
       hold: { type: "string", default: "KeyX" }, "max-load": { type: "string" },
       lock: { type: "string", multiple: true, default: [] }, "lock-wait": { type: "string", default: "14400" }, out: { type: "string" },
       counters: { type: "boolean", default: false }, "aot-seed": { type: "boolean", default: false }, "seed-sec": { type: "string", default: "600" },
-      "gate-sec": { type: "string", default: "120" }, "isolated-boot": { type: "boolean", default: false }, "settle-sec": { type: "string", default: "10" },
+      "gate-sec": { type: "string", default: "120" }, "max-discards": { type: "string", default: "3" }, "isolated-boot": { type: "boolean", default: false }, "settle-sec": { type: "string", default: "10" },
       "perf-record": { type: "boolean", default: false }, "emulated-window": { type: "string" }, "emulated-warmup": { type: "string", default: "10" }, "emulated-poll-ms": { type: "string", default: "100" }
     }
   });
@@ -316,7 +336,7 @@ async function main() {
     return counters ? counters(phase, session) : undefined;
   };
   const servers = [];
-  const records = [];
+  const records = [], discarded = [];
   const seeds = [];
   const seedRegions = new Map();
   try {
@@ -348,9 +368,12 @@ async function main() {
       if (!seeded.every((x) => x.ok)) throw new Error("--aot-seed: an arm's first launch did not finish its optimisation");
       seeds.push(...seeded.map((x) => x.profile));
     }
+    // A discarded run is played again with the same rotation (r), so the
+    // Latin square stays complete; at most --max-discards in all.
+    const maxDiscards = num(values, "max-discards", { min: 0, int: true });
     for (let r = 1; r <= runs; r += 1) {
       const sessions = [];
-      const record = { run: r, arms: [] };
+      const record = { run: r, attempt: discarded.filter((d) => d.run === r).length + 1, arms: [] };
       try {
         // Boot every arm on its lane (the pinning is read when Chromium
         // starts), in an order rotated too: the first arm booted once came
@@ -415,6 +438,16 @@ async function main() {
         console.log(`[race-multi] run ${r} regions installed per arm: ${counts.join(" / ")}${record.regionCountsEqual ? "" : " (NOT EQUAL)"}; layoutRefused ${record.arms.map((x) => x.regionGate?.layoutRefused ?? "-").join(" / ")}; heapPatched ${record.arms.map((x) => x.regionGate?.heapPatched ?? "-").join(" / ")}; boot rank ${record.arms.map((x) => x.bootRank).join(" / ")}; quiescent ${record.arms.map((x) => (x.regionGate?.quiescent ? `${x.regionGate.ms} ms` : x.regionGate?.why ?? "?")).join(" / ")}`);
       }
       console.log(`[race-multi] run ${r}: ${record.arms.map((x) => `arm${x.arm}@lane${x.lane} ${x.error ?? `${x.cold.speed} %${x.cold.instructionsPerGuestCycle ? ` ${round(x.cold.instructionsPerGuestCycle, 3)} insn/guest cycle` : ""}${x.cold.overloaded ? " OVERLOADED" : ""}`}`).join(" | ")}`);
+      const why = values["aot-seed"] ? discardReason(record.arms, record.arms.map((_, a) => seedRegions.get(a) ?? null)) : null;
+      if (why) {
+        record.discarded = why;
+        discarded.push({ run: r, attempt: record.attempt, why });
+        writeFileSync(path.join(outDir, `run${r}-discarded-${record.attempt}.json`), JSON.stringify(record, null, 1) + "\n");
+        console.log(`[race-multi] run ${r} discarded: ${why}${discarded.length <= maxDiscards ? " (played again)" : ` (more than --max-discards ${maxDiscards}: stopping)`}`);
+        if (discarded.length > maxDiscards) break;
+        r -= 1;
+        continue;
+      }
       writeFileSync(path.join(outDir, `run${r}.json`), JSON.stringify(record, null, 1) + "\n");
       records.push(record);
     }
@@ -442,7 +475,7 @@ async function main() {
     for (const release of releases) release();
   }
   const good = records.filter((r) => r.arms.every((x) => x.cold && !x.cold.overloaded));
-  const full = good.length === records.length;
+  const full = good.length === records.length && records.length === runs;
   const effects = full ? armEffects(good.map((r) => r.arms.map((x) => x.cold.speed)), good.map((r) => r.arms.map((x) => x.lane))) : null;
   // The same analysis on host instructions per guest cycle (lower is better).
   const ipg = good.map((r) => r.arms.map((x) => x.cold.instructionsPerGuestCycle));
@@ -454,7 +487,9 @@ async function main() {
     // --aot-seed: installed regions per run and arm, and whether every run had them equal.
     regionCounts: values["aot-seed"] ? records.map((r) => r.arms.map((x) => x.regionGate?.installed ?? null)) : null,
     regionCountsEqual: values["aot-seed"] ? records.every((r) => r.regionCountsEqual) : null,
-    effects, counterEffects, withheld: full ? null : `${records.length - good.length} run(s) with a failed or overloaded arm: the Latin square is incomplete`
+    // Runs discarded (and played again) for an arm without all its regions.
+    discarded,
+    effects, counterEffects, withheld: full ? null : records.length < runs ? `${runs - records.length} run(s) missing after ${discarded.length} discarded: the Latin square is incomplete` : `${records.length - good.length} run(s) with a failed or overloaded arm: the Latin square is incomplete`
   };
   writeFileSync(path.join(outDir, "summary.json"), JSON.stringify(summary, null, 1) + "\n");
   if (effects) for (const e of effects.arms) console.log(`[race-multi] arm ${e.arm} vs arm 0: median ${e.median} % (sd ${e.sd}, per run ${e.perRun.join(" ")}), lane-corrected ${e.laneCorrected} %`);
