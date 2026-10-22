@@ -110,6 +110,7 @@ export class UpstreamWorkerAdapter {
     jitOffThread = true,
     aotCompiler = true,
     aotFirstLaunch = false,
+    regionChain = true,
     onAotProgress = () => {},
     collectMetrics = false,
     legacyOneWayAck = false,
@@ -215,6 +216,7 @@ export class UpstreamWorkerAdapter {
     this.jitOffThread = jitOffThread !== false;
     this.aotCompiler = aotCompiler !== false;
     this.aotFirstLaunch = aotFirstLaunch === true;
+    this.regionChain = regionChain !== false;
     this.onAotProgress = onAotProgress;
     this.collectMetrics = Boolean(collectMetrics);
     this.legacyOneWayAck = Boolean(legacyOneWayAck);
@@ -435,6 +437,7 @@ export class UpstreamWorkerAdapter {
       jitOffThread: this.jitOffThread,
       aotCompiler: this.aotCompiler,
       aotFirstLaunch: this.aotFirstLaunch,
+      regionChain: this.regionChain,
       collectMetrics: this.collectMetrics,
       legacyOneWayAck: this.legacyOneWayAck,
       coreSelection: this.coreSelectionTelemetry(window.location.href),

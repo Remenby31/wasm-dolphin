@@ -46,11 +46,11 @@ function setup() {
 }
 
 // Every region of the plan, queued as P7 would (members with the plan's hashes).
-function queueAll(plan) {
+function queueAll(plan, maxFunctions = 100, chain = false) {
   let entries = 0;
-  for (const group of regionGroups(plan, 100)) {
+  for (const group of regionGroups(plan, maxFunctions)) {
     const fragments = group.flatMap(functionFragments(core));
-    const { bytes, entries: mapped } = assembleRegion(fragments, { helpers: HELPER_SIGNATURES, pcOffset: core.pcOffset, memoryPages: core.memoryPages });
+    const { bytes, entries: mapped } = assembleRegion(fragments, { helpers: HELPER_SIGNATURES, pcOffset: core.pcOffset, memoryPages: core.memoryPages, chain });
     core.queueRegion(bytes, mapped.map(([pc]) => pc), group.map((f) => ({ ranges: f.ranges, hash: f.hash })));
     entries += mapped.length;
   }
@@ -559,6 +559,124 @@ test("a core shutdown forgets every region: installed, waiting and queued", { sk
   assert.ok(before >= 0);
 });
 
+// Region chaining (patch 0102): a region leaving for another region's entry
+// tail-calls it (env.region_chain picks it, env.table holds it) instead of
+// returning to the dispatcher. One region per function here, so every call
+// and every return crosses regions.
+const chainSkip = skip || (!core?.has("DolphinWeb_JitRegionChainStats") && "core without region chaining (patch 0102)");
+function installedOnePerFunction() {
+  const plan = setup();
+  core.setRegionsEnabled(true);
+  queueAll(plan, 1, true);
+  serviceAll();
+  return plan;
+}
+// A slice installs what fits its time budget: on a loaded machine the rest
+// waits for the next slices. Serve them until nothing more is installed.
+function serviceAll() {
+  let count = -1;
+  for (let i = 0; i < 50 && core.regionCount() !== count; i++) {
+    count = core.regionCount();
+    core.serviceRegions();
+  }
+}
+
+test("chained regions run a whole call in one dispatch, like the interpreter", { skip: chainSkip }, () => {
+  installedOnePerFunction();
+  const reference = runCall(PROGRAM.labels.main, { regions: false });
+  try {
+    core.setRegionChaining(false);
+    core.regionStats(0);
+    const unchained = runCall(PROGRAM.labels.main, { regions: true });
+    assert.deepEqual(unchained.state, reference.state);
+    assert.equal(unchained.downcount, reference.downcount);
+    assert.equal(core.regionChainStats().chained, 0, "off: every exit goes back to the dispatcher");
+    core.setRegionChaining(true);
+    core.regionStats(0);
+    const chained = runCall(PROGRAM.labels.main, { regions: true });
+    assert.deepEqual(chained.state, reference.state);
+    assert.equal(chained.downcount, reference.downcount);
+    assert.equal(chained.interpreted, 0);
+    assert.equal(chained.ran, 1, "main, double, main, count, main: one dispatch");
+    assert.ok(unchained.ran >= 4, `unchained dispatches (${unchained.ran})`);
+    const chain = core.regionChainStats();
+    assert.equal(chain.chained, unchained.ran - 1, "one chain per dispatcher round trip saved");
+    assert.equal(core.regionStats().regionCalls, 1);
+  } finally {
+    core.setRegionChaining(true);
+  }
+});
+
+test("chaining stops when downcount runs out, at the interpreter's state", { skip: chainSkip }, () => {
+  installedOnePerFunction();
+  // Budgets that end inside main, double, count's loop and between them.
+  for (const budget of [1, 3, 5, 8, 13, 21, 34]) {
+    core.reset(seedGprs(PROGRAM.labels.main), PROGRAM.labels.main, STOP, budget);
+    core.regionStats(0);
+    assert.equal(core.dispatchRegion(), 1);
+    const got = { state: core.state(), downcount: core.downcount() };
+    assert.ok(got.downcount <= 0 || core.pc() === STOP, `budget ${budget}: stopped on downcount`);
+    // The interpreter from the same start until it spent the same cycles.
+    core.reset(seedGprs(PROGRAM.labels.main), PROGRAM.labels.main, STOP, budget);
+    for (let n = 0; n < 100000 && core.downcount() > got.downcount; n++) assert.equal(core.interpretOne(), 0);
+    assert.equal(core.downcount(), got.downcount, `budget ${budget}`);
+    assert.deepEqual(core.state(), got.state, `budget ${budget}`);
+  }
+});
+
+test("a dropped region is never chained to, even after a chain into it", { skip: chainSkip }, () => {
+  installedOnePerFunction();
+  core.setRegionChaining(true);
+  assert.equal(runCall(PROGRAM.labels.main, { regions: true }).ran, 1, "main chains into double");
+  patchDouble();
+  core.invalidate(PROGRAM.labels.double, 4); // drops double's region
+  core.regionStats(0);
+  const got = runCall(PROGRAM.labels.main, { regions: true });
+  const reference = runCall(PROGRAM.labels.main, { regions: false });
+  assert.deepEqual(got.state, reference.state, "the patched double ran, not its old region");
+  assert.ok(got.interpreted > 0, "double interpreted");
+  assert.ok(core.regionChainStats().noRegion >= 1);
+});
+
+// A loop that never leaves, across two regions: spin calls tick and branches
+// back. Chaining tests downcount at every crossing, as the dispatcher loop
+// does (an interrupt or a scheduled event ends the slice through downcount,
+// CoreTiming::ForceExceptionCheck): one dispatch ends when downcount is
+// spent, never later, at the interpreter's state.
+// Its own text: since 0085 an invalidation keeps a region whose code is still
+// checkable (to be verified before it runs), and an entry already mapped
+// keeps its region, so code loaded over PROGRAM's would not get its own.
+const SPIN_TEXT = 0x80008100;
+const SPIN = assemble(SPIN_TEXT, [
+  "spin", asm.addi(4, 4, 1), (pc, l) => asm.bl(pc, l.tick), (pc, l) => asm.b(pc, l.spin),
+  "tick", asm.addi(5, 5, 1), asm.blr()
+]);
+
+test("a loop across chained regions that never exits stops on downcount, like the interpreter", { skip: chainSkip }, () => {
+  const dol = buildDol({ textAddr: SPIN_TEXT, text: SPIN.words, entry: SPIN.labels.spin });
+  const { image, entryPoint } = imageFromDol(dol);
+  const plan = planDol({ image, entryPoint, gameId: "TEST01", dolBytes: dol, options: { gapFill: false } });
+  for (const seg of image.segments) core.load(seg.start, seg.bytes);
+  core.setRegionsEnabled(true);
+  core.setRegionChaining(true);
+  queueAll(plan, 1, true);
+  serviceAll();
+  for (const budget of [7, 100, 5000, 200000]) {
+    core.reset(seedGprs(SPIN.labels.spin), SPIN.labels.spin, STOP, budget);
+    core.regionStats(0);
+    assert.equal(core.dispatchRegion(), 1, `budget ${budget}`);
+    const got = { state: core.state(), downcount: core.downcount() };
+    assert.ok(got.downcount <= 0, `budget ${budget}: stopped on downcount (${got.downcount})`);
+    const chain = core.regionChainStats();
+    if (budget >= 100) assert.ok(chain.chained > 2, `budget ${budget}: chained ${chain.chained}`);
+    core.reset(seedGprs(SPIN.labels.spin), SPIN.labels.spin, STOP, budget);
+    for (let n = 0; n < 1e6 && core.downcount() > got.downcount; n++) assert.equal(core.interpretOne(), 0);
+    assert.equal(core.downcount(), got.downcount, `budget ${budget}`);
+    assert.deepEqual(core.state(), got.state, `budget ${budget}`);
+  }
+  core.invalidate(SPIN_TEXT, 4 * SPIN.words.length);
+});
+
 // 0091 (with dispatch's 0090): under the MMU no region is installed, not even
 // one queued before (a cache translated in a session without it), since
 // region code does not stop at a DSI. The block path runs the code.
@@ -619,24 +737,27 @@ test("an idle loop inside a region returns to the dispatcher at its start instea
 
 // Patch 0107: the CPU thread's throttle sleep installs ready regions (no
 // frame pays for them), counted apart and kept out of installMaxSliceMs.
+// [installs, ms x 100, worst lateness past the deadline x 100, slice installs
+// after the sleep wait ran out] (the last two with the review's fixes).
+function sleepCounters() {
+  const p = core.module._malloc(16);
+  try {
+    new Uint32Array(core.module.HEAPU8.buffer, p, 4).fill(0);
+    core.module._DolphinWeb_AotRegionSleepInstalls(p);
+    return Array.from(new Uint32Array(core.module.HEAPU8.buffer, p, 4));
+  } finally {
+    core.module._free(p);
+  }
+}
 test("a throttle sleep window installs queued regions", { skip: skip || (typeof core?.module._DolphinWeb_AotRegionSleepWindowForTest !== "function" && "core without installs in throttle sleeps (0107)") }, () => {
   const plan = setup();
   core.setRegionsEnabled(true);
   const before = core.regionCount();
-  const counters = () => {
-    const p = core.module._malloc(8);
-    try {
-      core.module._DolphinWeb_AotRegionSleepInstalls(p);
-      return Array.from(new Uint32Array(core.module.HEAPU8.buffer, p, 2));
-    } finally {
-      core.module._free(p);
-    }
-  };
-  const [installs] = counters();
+  const [installs] = sleepCounters();
   queueAll(plan);
   core.module._DolphinWeb_AotRegionSleepWindowForTest(50); // a 50 ms sleep, as the throttle gives it
   assert.ok(core.regionCount() > before, "installed in the sleep window");
-  assert.ok(counters()[0] > installs, "counted as sleep installs");
+  assert.ok(sleepCounters()[0] > installs, "counted as sleep installs");
   const reference = runCall(PROGRAM.labels.main, { regions: false });
   assert.deepEqual(runCall(PROGRAM.labels.main, { regions: true }).state, reference.state);
   // A window with no time left installs nothing more.
@@ -644,4 +765,67 @@ test("a throttle sleep window installs queued regions", { skip: skip || (typeof 
   const after = core.regionCount();
   core.module._DolphinWeb_AotRegionSleepWindowForTest(0);
   assert.equal(core.regionCount(), after);
+});
+
+// A module too large for a slice (its estimate over the 2.5 ms target) waits
+// for a sleep window, the boot window included (setup() forgets the regions,
+// so these slices are the session's first), and at most the sleep wait from
+// when it became installable: with #86 every module is posted at once, and
+// one whose ready byte comes late must not skip the wait.
+const largeSkip = offThreadSkip || (typeof core?.module._DolphinWeb_AotSetInstallCostForTest !== "function" && "core without the 0107 review's test hooks");
+function withLargeModules(plan, fn) {
+  const sizes = regionModules(plan).map((bytes) => bytes.length);
+  // Each module estimated at 3 ms or more: too large for a slice.
+  const saved = core.module._DolphinWeb_AotSetInstallCostForTest(3 / Math.min(...sizes));
+  try {
+    return fn(3 * Math.max(...sizes) / Math.min(...sizes) * sizes.length);
+  } finally {
+    core.module._DolphinWeb_AotSetInstallCostForTest(saved);
+    core.module._DolphinWeb_AotSetSleepWaitForTest(2000);
+  }
+}
+const spin = (ms) => { const end = performance.now() + ms; while (performance.now() < end); };
+
+test("a large ready module waits for a sleep window instead of costing a slice, boot window included", { skip: largeSkip }, () => {
+  withOffThreadCompile((requests) => {
+    const plan = setup();
+    assert.deepEqual(sleepCounters(), [0, 0, 0, 0], "reset with the session's regions");
+    core.setRegionsEnabled(true);
+    withLargeModules(plan, (windowMs) => {
+      const before = core.regionCount();
+      const entries = queueAll(plan);
+      core.serviceRegions();
+      for (const r of requests()) Atomics.store(core.module.HEAPU8, r.readyPtr + r.readySlot, 1);
+      for (let slice = 0; slice < 20; slice++) core.serviceRegions();
+      assert.equal(core.regionCount(), before, "ready, but no slice installs it");
+      core.module._DolphinWeb_AotRegionSleepWindowForTest(windowMs + 50);
+      assert.equal(core.regionCount(), before + entries, "installed in the sleep window");
+      const [installs, , lateBy, expired] = sleepCounters();
+      assert.ok(installs >= 1);
+      assert.equal(lateBy, 0, "the window's deadline was kept");
+      assert.equal(expired, 0);
+    });
+  });
+});
+
+test("a large module's sleep wait counts from when it became installable; past it a slice installs it", { skip: largeSkip }, () => {
+  withOffThreadCompile((requests) => {
+    const plan = setup();
+    core.setRegionsEnabled(true);
+    withLargeModules(plan, () => {
+      core.module._DolphinWeb_AotSetSleepWaitForTest(40); // 2 s in production
+      const before = core.regionCount();
+      const entries = queueAll(plan);
+      core.serviceRegions();
+      spin(60); // the worker answers after the sleep wait, counted from the post
+      for (const r of requests()) Atomics.store(core.module.HEAPU8, r.readyPtr + r.readySlot, 1);
+      core.serviceRegions();
+      assert.equal(core.regionCount(), before, "the wait starts now, not at the post");
+      spin(60); // no sleep came: the wait runs out
+      for (let slice = 0; slice < 50 && core.regionCount() < before + entries; slice++) core.serviceRegions();
+      assert.equal(core.regionCount(), before + entries, "a scene that never sleeps still gets its regions");
+      assert.ok(sleepCounters()[3] >= 1, "counted as installed after the wait ran out");
+      assert.equal(sleepCounters()[0], 0, "no sleep install");
+    });
+  });
 });

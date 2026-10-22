@@ -8,6 +8,12 @@
       "key": "MMU",
       "why": "Correctness: games that need address translation run wrong without it. Under the MMU the block JIT refuses every block (jo.memcheck) and no region is translated or installed (0091), so those games run correct on the cached interpreter.",
       "measured": "No effect on the measurement disc (its [Core] section is empty)."
+    },
+    {
+      "section": "Video_Settings",
+      "key": "SafeTextureCacheColorSamples",
+      "why": "Correctness: games that need a safer texture cache hash more samples of each texture (or all, 0) so updates to texture memory are seen. VideoCommon reads it on the CPU side, the same on every backend (the rendering agent checked wgpu, 2026-10-22).",
+      "measured": "No effect on the measurement disc (its INI sets no [Video_Settings] key). Larger values cost CPU time in the games that set them, as on Dolphin desktop."
     }
   ]
 }

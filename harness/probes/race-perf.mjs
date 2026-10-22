@@ -303,7 +303,8 @@ export function regionRecord(reply) {
     // layoutRefused, the launch's heap layout (it varies between launches, and
     // the host work per guest cycle with it, bench 2026-10-22), and the 0084
     // heap patches
-    ...regionPipeline(reply)
+    ...regionPipeline(reply),
+    ...(reply.regionChain ? { regionChain: reply.regionChain } : {})
   };
   return p4.error ? { p4: null, p4Why: p4.error, ...samples } : { p4, p4Raw: stats, ...samples };
 }
@@ -314,7 +315,9 @@ export function regionPipeline(reply) {
     ...(Number.isInteger(reply.layoutRefused) ? { layoutRefused: reply.layoutRefused } : {}),
     ...(Number.isInteger(reply.layoutHash) ? { layoutHash: reply.layoutHash } : {}),
     ...(reply.layout ? { layout: reply.layout } : {}),
-    ...(Number.isInteger(reply.heapPatched) ? { heapPatched: reply.heapPatched, heapPatchedBytes: reply.heapPatchedBytes ?? null, heapPatchFailed: reply.heapPatchFailed ?? null } : {})
+    ...(Number.isInteger(reply.heapPatched) ? { heapPatched: reply.heapPatched, heapPatchedBytes: reply.heapPatchedBytes ?? null, heapPatchFailed: reply.heapPatchFailed ?? null } : {}),
+    // 0107: installs in throttle sleeps and the worst lateness they caused
+    ...(reply.regionSleep ? { regionSleep: reply.regionSleep } : {})
   };
 }
 
@@ -355,6 +358,18 @@ export function summarizeP4(windows) {
   const diagnostics = sum.diagnostics
     ? { ...Object.fromEntries(Object.entries(sum.diagnostics).filter(([k]) => !/^topMiss|^spare$/.test(k))), topMisses: topMisses(raw.at(-1)) }
     : null;
+  // Region chaining (patch 0102), summed over the windows that have it.
+  const chains = recs.map((w) => w.regionChain).filter(Boolean);
+  if (diagnostics && chains.length) {
+    diagnostics.regionChain = { enabled: chains.every((c) => c.enabled === 1) ? 1 : 0 };
+    for (const k of ["chained", "outOfTime", "noRegion", "refused"]) diagnostics.regionChain[k] = chains.reduce((a, c) => a + (c[k] ?? 0), 0);
+    // The most frequent transitions back to the dispatcher, summed by pc.
+    for (const k of ["exitTargets", "breakEntries"]) {
+      const sum = new Map();
+      for (const c of chains) for (const [pc, n] of c[k] ?? []) sum.set(pc, (sum.get(pc) ?? 0) + n);
+      if (sum.size) diagnostics.regionChain[k] = [...sum].sort((a, b) => b[1] - a[1]).slice(0, 12);
+    }
+  }
   return { p4: { ...pooled, windows: raw.length, missingWindows: recs.length - raw.length, diagnostics }, why: raw.length < recs.length ? why : null };
 }
 
@@ -374,6 +389,14 @@ export function p4Summary(runs, sides, good = (r) => r && !r.error) {
     baselineP4: b?.p4 ?? null, baselineP4Why: b?.why ?? null,
     p4Compare: !b ? null : c.p4 && b.p4 ? "both sides" : c.p4 || b.p4 ? `withheld: counters on the ${c.p4 ? "candidate" : "baseline"} only` : "neither side"
   };
+}
+
+// The overlap seen by the lock held now, or null. No lock held (given up
+// for the load: the lock went back and was never taken again): nothing to
+// check, never a TypeError.
+export function lockOverlapAt(release, at) {
+  const c = release?.check?.();
+  return c && !c.ok ? { at, why: c.why } : null;
 }
 
 // Times a pair may let the lock go for the load before giving its runs up.
@@ -526,8 +549,8 @@ async function main() {
   // checked when taken, before each run and at the end (lockIntegrity).
   const lockOverlap = [];
   const checkLock = (at) => {
-    const c = releaseLock.check?.();
-    if (c && !c.ok) { lockOverlap.push({ at, why: c.why }); console.warn(`[race-perf] perf lock overlap detected (${at}): ${c.why}`); }
+    const overlap = lockOverlapAt(releaseLock, at);
+    if (overlap) { lockOverlap.push(overlap); console.warn(`[race-perf] perf lock overlap detected (${at}): ${overlap.why}`); }
   };
   checkLock("taken");
   try {

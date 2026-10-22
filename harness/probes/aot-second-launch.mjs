@@ -115,6 +115,7 @@ async function launchOnce(profileDir) {
         result.regions = r?.bytes ? decodeRegionStats(r.bytes).diagnostics ?? null : null;
         result.layoutRefused = Number.isInteger(r?.layoutRefused) ? r.layoutRefused : null;
         result.heapPatched = Number.isInteger(r?.heapPatched) ? r.heapPatched : null;
+        result.regionSleep = r?.regionSleep ?? null; // 0107: sleep installs, worst lateness
         result.aot = aotLaunchInfo(await workerRequest(page, "validationReadAotProgress", {}, 10000).catch(() => null));
       })(),
       (async () => { while (!stop) await new Promise((res) => setTimeout(res, 500)); throw new Error(`over ${values["cap-mb"]} MB`); })(),
@@ -163,7 +164,7 @@ for (let run = 1; run <= Number(values.runs); run += 1) {
   const refusedLayout = !healthy.length && !(installed > 0) && r.layoutRefused > 0;
   const why = refusedLayout ? [] : [...healthy, ...(healthy.length || installed > 0 ? [] : [`no region installed${result_layout(r)}`])];
   const verdict = refusedLayout ? "refused-layout" : why.length ? "fail" : "pass";
-  log(`run ${run}: ${verdict === "fail" ? `FAIL (${why.join("; ")})` : verdict}; frames ${frames}, peak ${peak} MB, from cache ${fromCache} (${beforeBoot} before the boot), regions ${JSON.stringify(r.regions && { installed, refused: r.regions.regionsRefused, layoutRefused: r.layoutRefused, heapPatched: r.heapPatched, dropped: r.regions.regionsDropped })}`);
+  log(`run ${run}: ${verdict === "fail" ? `FAIL (${why.join("; ")})` : verdict}; frames ${frames}, peak ${peak} MB, from cache ${fromCache} (${beforeBoot} before the boot), regions ${JSON.stringify(r.regions && { installed, refused: r.regions.regionsRefused, layoutRefused: r.layoutRefused, heapPatched: r.heapPatched, dropped: r.regions.regionsDropped, installMaxSliceMs: r.regions.installMaxSliceMs, installBootMaxSliceMs: r.regions.installBootMaxSliceMs })}${r.regionSleep ? `, sleep ${JSON.stringify(r.regionSleep)}` : ""}`);
   if (verdict === "fail") failed += 1;
   if (outDir) writeFileSync(path.join(outDir, `run${run}.json`), JSON.stringify({ ...r, frames, peak, fromCache, beforeBoot, verdict, why }, null, 1));
 }

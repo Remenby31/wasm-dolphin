@@ -330,7 +330,44 @@ function harnessJitRegionStats({ sampleEvery } = {}) {
   // heapPatched: cached modules whose heap sites were moved to this session's
   // (0084), the bytes of their unpatched compiles, and patched compiles refused.
   return { bytes: copy(), again: copy(), installSamples: harnessRegionInstallSamples(heap), layoutRefused, layoutHash, layout: harnessHeapLayout(moduleInstance),
-    heapPatched: aotHeapPatched, heapPatchedBytes: aotHeapPatchedBytes, heapPatchFailed: aotHeapPatchFailed };
+    heapPatched: aotHeapPatched, heapPatchedBytes: aotHeapPatchedBytes, heapPatchFailed: aotHeapPatchFailed,
+    regionChain: harnessRegionChainStats(heap), regionSleep: harnessRegionSleepStats() };
+}
+// Installs in the CPU thread's throttle sleeps (patch 0107): how many, their
+// host time, the worst lateness past a sleep's deadline they caused (the
+// frame they would delay) and the slice installs of large modules whose wait
+// for a sleep ran out. Null with an older core.
+function harnessRegionSleepStats() {
+  const m = moduleInstance;
+  if (!m?._DolphinWeb_AotRegionSleepInstalls || !m._malloc) return null;
+  const p = m._malloc(16);
+  try {
+    new Uint32Array(m.HEAPU8.buffer, p, 4).fill(0);
+    m._DolphinWeb_AotRegionSleepInstalls(p);
+    const w = new Uint32Array(m.HEAPU8.buffer, p, 4);
+    return { installs: w[0], ms: w[1] / 100, overshootMaxMs: w[2] / 100, waitExpired: w[3] };
+  } finally {
+    m._free?.(p);
+  }
+}
+// Region chaining counters (patch 0102), reset with the region stats; null
+// with an older core.
+function harnessRegionChainStats(heap) {
+  const at = moduleInstance?._DolphinWeb_JitRegionChainStats?.() >>> 0;
+  if (!at || at + 40 > heap.length) return null;
+  const view = new DataView(heap.buffer, at, 40);
+  const f = (i) => view.getFloat64(8 + 8 * i, true);
+  return { enabled: view.getUint32(4, true), chained: f(0), outOfTime: f(1), noRegion: f(2), refused: f(3), ...harnessRegionTransitionTop(heap) };
+}
+// Where chains of regions leave for code without a region, and which region
+// entries block chains reach: [pc hex, count], most frequent first (0102).
+function harnessRegionTransitionTop(heap) {
+  const at = moduleInstance?._DolphinWeb_JitRegionTransitionTop?.() >>> 0;
+  const TOP = 12, SIZE = 4 * 2 * (1 + 2 * TOP);
+  if (!at || at + SIZE > heap.length) return {};
+  const u32 = new Uint32Array(heap.buffer.slice(at, at + SIZE));
+  const list = (base) => Array.from({ length: Math.min(u32[base], TOP) }, (_, i) => [`0x${u32[base + 1 + 2 * i].toString(16).padStart(8, "0")}`, u32[base + 2 + 2 * i]]);
+  return { exitTargets: list(0), breakEntries: list(1 + 2 * TOP) };
 }
 // AX HLE timing (patch 0099, harness/lib/ax-hle-stats.mjs): reset >= 0
 // zeroes and turns the counters on from the next mail; copied twice so the
@@ -1377,6 +1414,7 @@ async function handleMessage(type, payload) {
         jitOffThread: payload.jitOffThread,
         aotCompiler: payload.aotCompiler,
         aotFirstLaunch: payload.aotFirstLaunch,
+        regionChain: payload.regionChain,
         reportedCoreSelection: payload.coreSelection,
         wgpuReplayDiagnostics: payload.wgpuReplayDiagnostics,
         wgpuDeepReplayDiagnostics: payload.wgpuDeepReplayDiagnostics,
@@ -2021,6 +2059,7 @@ async function loadCore({
   jitOffThread = true,
   aotCompiler = true,
   aotFirstLaunch = false,
+  regionChain = true,
   reportedCoreSelection = null,
   wgpuReplayDiagnostics = false,
   wgpuDeepReplayDiagnostics: requestedWgpuDeepReplayDiagnostics = false,
@@ -2689,6 +2728,7 @@ async function loadCore({
   api.setPpcWasmJitOffThread?.(jitOffThread !== false && !noJitCache ? 1 : 0);
   // Region modules (P4) run in the dispatcher with aot=1, their only producer.
   api.setJitRegionsEnabled?.(aotFirstLaunch ? 1 : 0);
+  api.setJitRegionChaining?.(regionChain !== false ? 1 : 0);
   api.setPpcProfileEnabled?.(ppcProfile ? 1 : 0);
   api.setWebGpuUploadArenaMiB?.(wgpuUploadArenaMiB, collectMetrics ? 1 : 0);
   api.setWebGpuProducerProfileEnabled?.(wgpuProducerProfileRequested ? 1 : 0);
@@ -2816,6 +2856,7 @@ function bindApi(module) {
     setPpcWasmJitWarmup: optionalCwrap("SetPpcWasmJitWarmup", null, ["number", "number"]),
     setPpcWasmJitOffThread: optionalCwrap("SetPpcWasmJitOffThread", null, ["number"]),
     setJitRegionsEnabled: optionalCwrap("DolphinWeb_JitSetRegionsEnabled", null, ["number"]),
+    setJitRegionChaining: optionalCwrap("DolphinWeb_JitSetRegionChaining", null, ["number"]),
     getPpcWasmJitEngagedFrame: optionalCwrap("GetPpcWasmJitEngagedFrame", "number", []),
     getPpcWasmJitArmStartFrame: optionalCwrap("GetPpcWasmJitArmStartFrame", "number", []),
     setPpcWasmJitEnabled:
