@@ -132,6 +132,18 @@ node harness/probes/race-perf.mjs --iso ../roms/<disc>.iso --state ../measures/h
   the last being the place in the scene whatever the speed, so two runs or
   two sides can be lined up; over 200 the longest are kept, in time order,
   with `count`.
+- `--display`: what the screen showed, not what the worker submitted
+  (research/deep-frame-pacing.md §3.1: Chrome keeps only the last picture
+  submitted between two BeginFrames). The worker counts its presents per
+  BeginFrame (one rAF per BeginFrame, `src/wgpu-display-counter.js`, on
+  only when asked). Each run gets `display` (`lib/timeline.mjs`
+  `displayStats`): `vsyncMs` (median BeginFrame interval: 16.7 ms in
+  headless Chrome, whatever the real screen), `displayedPerSecond`,
+  `submittedPerSecond`, `dropped` / `droppedPerMin`, `displayedP50/P95/P99`
+  (intervals between pictures shown), `judderPct` (shown intervals that are
+  not the dominant number of vsyncs: a steady 30 fps is not judder),
+  `offOneVsyncPct`, `noUpdatePct`. Per side: `cold.displayedPerSecond`,
+  `displayedP95`, `droppedPerMin`, `judderPct`, `offOneVsyncPct`.
 - `--unique-frames secs`: unique images, in a window of its own after the
   speed window (its GPU readbacks never weigh on the speed). At each WebGPU
   present the worker reads back 8 full rows of the presented rectangle,
