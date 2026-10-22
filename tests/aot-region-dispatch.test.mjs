@@ -617,9 +617,9 @@ test("an idle loop inside a region returns to the dispatcher at its start instea
   assert.ok(budget - core.downcount() < 100, `only the block before the loop ran (${budget - core.downcount()} cycles), not the slice`);
 });
 
-// Patch 0086: the CPU thread's throttle sleep installs ready regions (no
+// Patch 0107: the CPU thread's throttle sleep installs ready regions (no
 // frame pays for them), counted apart and kept out of installMaxSliceMs.
-test("a throttle sleep window installs queued regions", { skip: skip || (typeof core?.module._DolphinWeb_AotRegionSleepWindowForTest !== "function" && "core without installs in throttle sleeps (0086)") }, () => {
+test("a throttle sleep window installs queued regions", { skip: skip || (typeof core?.module._DolphinWeb_AotRegionSleepWindowForTest !== "function" && "core without installs in throttle sleeps (0107)") }, () => {
   const plan = setup();
   core.setRegionsEnabled(true);
   const before = core.regionCount();

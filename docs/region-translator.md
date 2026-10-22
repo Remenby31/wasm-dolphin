@@ -253,7 +253,7 @@ counted by `DolphinWeb_AotRegionsSkippedMmu`). MMU games keep the
 CachedInterpreter with `aot=1`. Lifted once faults are delivered from our
 code (deferred delivery on the slow paths: backlog).
 
-## Installs in the throttle sleep (patch 0086, 2026-10-22)
+## Installs in the throttle sleep (patch 0107, 2026-10-22)
 
 Installing a region is a synchronous `new WebAssembly.Module` on the CPU
 thread: a hit in V8's native module cache, but V8 reads all the wire bytes to

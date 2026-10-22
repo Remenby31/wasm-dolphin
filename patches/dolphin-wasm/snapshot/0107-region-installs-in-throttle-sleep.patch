@@ -7,7 +7,7 @@ diff --git a/Source/Core/Core/CoreTiming.cpp b/Source/Core/Core/CoreTiming.cpp
  
 +#ifdef __EMSCRIPTEN__
 +// Region modules ready to install use the CPU thread's throttle sleep, where
-+// an install costs no frame (CachedInterpreter.cpp, patch 0086).
++// an install costs no frame (CachedInterpreter.cpp, patch 0107).
 +void DolphinWeb_RegionInstallsWhileIdle(std::chrono::steady_clock::time_point deadline);
 +#endif
 +
@@ -36,7 +36,7 @@ diff --git a/Source/Core/Core/PowerPC/CachedInterpreter/CachedInterpreter.cpp b/
  constexpr double REGION_SLICE_TARGET_MS = 2.5;
 -double s_install_ms_per_byte = 0.8e-6;
 +double s_install_ms_per_byte = 1.7e-6;
-+// Patch 0086: past the boot, a module whose estimate exceeds the slice target
++// Patch 0107: past the boot, a module whose estimate exceeds the slice target
 +// waits for a throttle sleep of the CPU thread (DolphinWeb_RegionInstallsWhileIdle,
 +// where an install costs no frame), at most this long: a scene that never
 +// sleeps still gets its regions, one per slice.
@@ -134,7 +134,7 @@ diff --git a/Source/Core/Core/PowerPC/CachedInterpreter/CachedInterpreter.cpp b/
    ApplyRegionStatsRequest();
  }
  
-+// CoreTiming's throttle sleep on the CPU thread (patch 0086): the time until
++// CoreTiming's throttle sleep on the CPU thread (patch 0107): the time until
 +// `deadline` installs ready regions instead of sleeping through it; the rest
 +// is slept as before.
 +void DolphinWeb_RegionInstallsWhileIdle(std::chrono::steady_clock::time_point deadline)
