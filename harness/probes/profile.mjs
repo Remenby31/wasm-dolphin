@@ -17,7 +17,7 @@
 //     (--samply <out>/profile.json.gz | --perf-script samples.txt) --window <out>/window.json
 //   On the Spark bench: harness/remote/spark-profile.sh (FIFO queue, lane a).
 //
-//   [--state scene.sav] [--tree <checkout> (default: this one)] [--warmup 40] [--secs 20] [--port 8791]
+//   [--state scene.sav] [--tree <checkout> (default: this one)] [--serve <dir> (default: --tree)] [--warmup 40] [--secs 20] [--port 8791]
 //   [--chrome <path>] [--js-flags "..."]
 //
 // The jitdump weighs ~417 MB for 75 s: --out must be outside the repository
@@ -37,7 +37,7 @@ import { parseArgs } from "node:util";
 
 const { values: o } = parseArgs({
   options: {
-    tree: { type: "string" }, iso: { type: "string" }, out: { type: "string" }, state: { type: "string" },
+    tree: { type: "string" }, iso: { type: "string" }, out: { type: "string" }, state: { type: "string" }, serve: { type: "string" },
     query: { type: "string", default: "core=upstream&video=wgpu&presenter=webgpu&cpu=dual&speed=1&wasmjit=1&jitwarmup=60&oc=1&aot=1" },
     warmup: { type: "string", default: "40" }, secs: { type: "string", default: "20" }, port: { type: "string", default: "8791" },
     chrome: { type: "string" }, "js-flags": { type: "string", default: "" }, perf: { type: "string" }, freq: { type: "string", default: "4999" }
@@ -59,7 +59,9 @@ const { acquirePerfLock } = await lib("perf-lock.mjs");
 // (flag-definitions.h:4479): the v8.log goes next to the dump, one file.
 const jsFlags = ["--perf-prof", `--perf-prof-path=${jitDir}`, "--no-logfile-per-isolate", `--logfile=${path.join(jitDir, "v8.log")}`, ...o["js-flags"].split(/\s+/).filter(Boolean)];
 const chromeArgs = ["--no-sandbox", `--js-flags=${jsFlags.join(" ")}`];
-const server = await ensureServer({ port: Number(o.port), root: tree });
+// --serve: the tree to serve (e.g. a bench build, which holds only cores/
+// src/ tools/), when the harness libraries come from --tree.
+const server = await ensureServer({ port: Number(o.port), root: o.serve ? path.resolve(o.serve) : tree });
 const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
 const log = (m) => console.log(`[profile] ${new Date().toISOString().slice(11, 19)} ${m}`);
 
