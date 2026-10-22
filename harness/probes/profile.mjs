@@ -17,7 +17,7 @@
 //     (--samply <out>/profile.json.gz | --perf-script samples.txt) --window <out>/window.json
 //   On the Spark bench: harness/remote/spark-profile.sh (FIFO queue, lane a).
 //
-//   [--tree <checkout> (default: this one)] [--warmup 40] [--secs 20] [--port 8791]
+//   [--state scene.sav] [--tree <checkout> (default: this one)] [--warmup 40] [--secs 20] [--port 8791]
 //   [--chrome <path>] [--js-flags "..."]
 //
 // The jitdump weighs ~417 MB for 75 s: --out must be outside the repository
@@ -37,7 +37,7 @@ import { parseArgs } from "node:util";
 
 const { values: o } = parseArgs({
   options: {
-    tree: { type: "string" }, iso: { type: "string" }, out: { type: "string" },
+    tree: { type: "string" }, iso: { type: "string" }, out: { type: "string" }, state: { type: "string" },
     query: { type: "string", default: "core=upstream&video=wgpu&presenter=webgpu&cpu=dual&speed=1&wasmjit=1&jitwarmup=60&oc=1&aot=1" },
     warmup: { type: "string", default: "40" }, secs: { type: "string", default: "20" }, port: { type: "string", default: "8791" },
     chrome: { type: "string" }, "js-flags": { type: "string", default: "" }, perf: { type: "string" }, freq: { type: "string", default: "4999" }
@@ -51,7 +51,7 @@ mkdirSync(jitDir, { recursive: true });
 if (o.chrome) process.env.HARNESS_CHROME_PATH = path.resolve(o.chrome);
 
 const lib = (f) => import(pathToFileURL(path.join(tree, "harness", "lib", f)).href);
-const { ensureServer, readCoreProgress, workerRequest } = await lib("browser.mjs");
+const { ensureServer, loadHarnessState, readCoreProgress, workerRequest } = await lib("browser.mjs");
 const { openSession } = await lib("session.mjs");
 const { acquirePerfLock } = await lib("perf-lock.mjs");
 
@@ -69,8 +69,16 @@ const freeLock = !process.env.PROFILE_NO_LOCK && (process.platform === "darwin" 
 log(`chrome args: ${chromeArgs.join(" ")}`);
 let perf = null, session = null;
 try {
-  session = await openSession({ base: server.base, server, query: o.query, iso: path.resolve(o.iso), chromeArgs });
+  // --state: the scene to profile (a savestate, as race-perf loads it);
+  // without it, whatever the disc shows after boot.
+  const routes = o.state ? { "**/__harness_state.sav": path.resolve(o.state) } : {};
+  session = await openSession({ base: server.base, server, query: o.query, iso: path.resolve(o.iso), chromeArgs, routes });
   const { page } = session;
+  if (o.state) {
+    const loaded = await loadHarnessState(page, session.url);
+    if (!loaded?.loaded) throw new Error(`savestate load failed: ${JSON.stringify(loaded)}`);
+    log(`savestate ${path.basename(o.state)} loaded`);
+  }
   log(`booted; warm-up ${o.warmup} s`);
   await sleep(Number(o.warmup) * 1000);
   const aot = await workerRequest(page, "validationReadAotProgress", {}, 10000).catch((e) => ({ error: String(e) }));

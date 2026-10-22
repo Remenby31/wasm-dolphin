@@ -31,7 +31,8 @@ mkdir -p "$out"
   export SPARK_CHROMIUM="$(ls -d "$B"/ms-playwright/chromium-*/chrome-linux*/chrome | sort -V | tail -1)"
   export SPARK_CHROME_CPUS=15-19
   echo "[spark-profile] $(date -Is) $("$SPARK_CHROMIUM" --version) perf=$PERF paranoid=$(cat /proc/sys/kernel/perf_event_paranoid)"
-  taskset -c 10-14 node harness/probes/profile.mjs --tree "$PWD" --iso "$iso" --out "$out" --port 8090 \
+  taskset -c 10-14 node harness/probes/profile.mjs --tree "$PWD" --iso "$iso" --out "$out" --port 8090 ${STATE:+--state "$STATE"} \
+    --query "${QUERY:-core=upstream&video=null&presenter=2d&cpu=dual&speed=1&wasmjit=1&jitwarmup=60&oc=1&aot=1}" \
     --perf "$PERF" --freq 4999 --warmup "${WARMUP:-45}" --secs "${SECS:-20}"
   echo "[spark-profile] run exit $?"
   [ -s "$out/perf.data" ] || { echo "[spark-profile] no perf.data"; exit 3; }
