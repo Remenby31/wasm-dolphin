@@ -1,0 +1,19 @@
+diff --git a/Source/Core/Core/CMakeLists.txt b/Source/Core/Core/CMakeLists.txt
+--- a/Source/Core/Core/CMakeLists.txt
++++ b/Source/Core/Core/CMakeLists.txt
+@@ -961,4 +961,15 @@ if(EMSCRIPTEN AND DOLPHIN_WASM_CORE_SOURCE)
+     "--pre-js"
+     "${DOLPHIN_WASM_JIT_CACHE_PRE_JS}"
+   )
++  # Patch 0097: Dolphin's per-game settings, which GameConfigLoader reads from
++  # File::GetSysDirectory()/GameSettings. tools/configure-upstream-wasm.mjs
++  # filters them (tools/gamesettings-filter.mjs: GameCube discs, allowlisted
++  # keys only) into the build tree and passes the directory here.
++  if(DOLPHIN_WEB_GAMESETTINGS_DIR)
++    target_link_options(dolphin_web_core PRIVATE
++      "SHELL:--embed-file ${DOLPHIN_WEB_GAMESETTINGS_DIR}@/dolphin-sys/GameSettings"
++    )
++    file(GLOB DOLPHIN_WEB_GAMESETTINGS_FILES "${DOLPHIN_WEB_GAMESETTINGS_DIR}/*.ini")
++    set_property(TARGET dolphin_web_core APPEND PROPERTY LINK_DEPENDS ${DOLPHIN_WEB_GAMESETTINGS_FILES})
++  endif()
+ endif()
