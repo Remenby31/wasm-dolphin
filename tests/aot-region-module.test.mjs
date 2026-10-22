@@ -148,6 +148,21 @@ test("aot region: a dispatch to a PC outside the region returns 0 (code ran), th
   assert.equal(r.word(COUNT), 0);
 });
 
+test("aot region: a name section names the region's functions r<lowest entry>_f<entry> (profiles), and costs nothing to the code", async () => {
+  const opts = { helpers: HELPERS, pcOffset: PC, memoryPages: 1 };
+  const named = assembleRegion(program(), opts).bytes, bare = assembleRegion(program(), { ...opts, names: false }).bytes;
+  const [section] = WebAssembly.Module.customSections(new WebAssembly.Module(named), "name");
+  assert.ok(section, "a name section");
+  const text = new TextDecoder().decode(section);
+  for (const n of ["r00001000_dispatch", "r00001000_inner", "r00001000_exit", "r00001000_f00001000", "r00001000_f00002000"]) assert.ok(text.includes(n), n);
+  assert.equal(WebAssembly.Module.customSections(new WebAssembly.Module(bare), "name").length, 0);
+  // The code is the same: the module without names is a prefix of the one with them.
+  assert.deepEqual(Array.from(named.slice(0, bare.length)), Array.from(bare));
+  const r = await instantiate(assembleRegion(program(), opts));
+  assert.equal(r.run(0x1000), 0);
+  assert.equal(r.word(COUNT), 111);
+});
+
 test("aot region: the fragments table lets a warm-up call every fragment", async () => {
   const { compileAndWarm, createWarmer } = await import("../src/aot-compiler-worker.js");
   const [A, B] = program();
