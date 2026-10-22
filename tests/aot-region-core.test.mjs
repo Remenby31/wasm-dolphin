@@ -54,10 +54,7 @@ test("the core translates a block into a fragment the region assembler links", {
   for (const r of fragment.relocs) if (r.kind === "import") assert.ok(HELPER_SIGNATURES[r.name], `known helper ${r.name}`);
   const { bytes, entries } = assembleRegion([fragment], { helpers: HELPER_SIGNATURES, pcOffset: core.pcOffset, memoryPages: core.memoryPages });
   assert.deepEqual(entries, [[DOUBLE, 0]]);
-  // The prologue reads the RAM and L1 addresses once (0084), then blr leaves
-  // through the dispatcher.
-  assert.deepEqual(fragment.relocs.map((r) => r.kind), ["global", "global", "dispatch"], "blr leaves through the dispatcher");
-  assert.deepEqual(fragment.relocs.slice(0, 2).map((r) => r.name), ["ram_base", "l1_base"]);
+  assert.deepEqual(fragment.relocs.map((r) => r.kind), ["dispatch"], "blr leaves through the dispatcher");
   assert.ok(core.compile(bytes) > 0, "the core compiles and links the region module");
   assert.deepEqual(regionModuleEntries(new WebAssembly.Module(bytes)), [DOUBLE], "entries travel with the module (cache loads)");
 });

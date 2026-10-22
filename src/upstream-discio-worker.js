@@ -286,7 +286,8 @@ function harnessJitRegionStats({ sampleEvery } = {}) {
   // layoutRefused: queued regions refused for another heap layout (0078), null
   // with an older core.
   const layoutRefused = moduleInstance._DolphinWeb_AotLayoutRefused ? (moduleInstance._DolphinWeb_AotLayoutRefused() >>> 0) + aotLayoutSkipped : null;
-  return { bytes: copy(), again: copy(), installSamples: harnessRegionInstallSamples(heap), layoutRefused };
+  // heapPatched: cached modules whose heap sites were moved to this session's (0084).
+  return { bytes: copy(), again: copy(), installSamples: harnessRegionInstallSamples(heap), layoutRefused, heapPatched: aotHeapPatched };
 }
 // The core's first region installs, [ms, bytes, path] each (path 0 first
 // attempt, 1 after the worker's ready byte, 2 cold); null with an older core.
@@ -3467,6 +3468,7 @@ async function mountFile(file) {
   aotCoreBooted = false;
   aotRegionsBeforeBoot.length = 0;
   aotLayoutSkipped = 0;
+  aotHeapPatched = 0;
   aotDiscKey = null;
   aotDiscKeyPromise = null;
   aotDiscFile = file;
@@ -7076,7 +7078,7 @@ export function startAotFirstLaunchAfterBoot(flow = aotFirstLaunch) {
   void whenCoreRamReady(moduleInstance).then((ready) => {
     if (!ready) return;
     aotCoreBooted = true;
-    for (const [module, region] of aotRegionsBeforeBoot.splice(0)) queueAotRegion(module, region);
+    for (const [module, region] of aotRegionsBeforeBoot.splice(0)) void queueAotRegion(module, region).catch(() => {});
   });
   if (!flow?.supported) return Promise.resolve();
   const generation = flow.generation;
@@ -7092,6 +7094,7 @@ export function startAotFirstLaunchAfterBoot(flow = aotFirstLaunch) {
 // say it exists (DolphinWeb_AotRamReady), polled, up to 60 s.
 let aotCoreBooted = false;
 let aotLayoutSkipped = 0;
+let aotHeapPatched = 0; // cached region modules patched for this session's heap (0084)
 async function whenCoreRamReady(module, { timeoutMs = 60000, everyMs = 50 } = {}) {
   if (typeof module?._DolphinWeb_AotRamReady !== "function") return true; // older core: as before
   const start = performance.now();
@@ -7103,7 +7106,7 @@ async function whenCoreRamReady(module, { timeoutMs = 60000, everyMs = 50 } = {}
 }
 const aotRegionsBeforeBoot = [];
 function queueAotRegionAfterBoot(module, region) {
-  if (aotCoreBooted) queueAotRegion(module, region);
+  if (aotCoreBooted) void queueAotRegion(module, region).catch(() => {});
   else aotRegionsBeforeBoot.push([module, region]);
 }
 // The CPU thread's module-map key for these bytes (DolphinWeb_MakeWasmBlockCacheKey).
@@ -7117,13 +7120,37 @@ async function regionBlockCacheKey(bytes) {
 // a hit in V8's native module cache; it then runs it for its entries.
 // members: [{ ranges, hash }] per function, the plan's FNV-1a 64 of its code:
 // the core installs nothing whose code changed since the translation.
-function queueAotRegion(module, { bytes, entries, members, layout = 0 }) {
+async function queueAotRegion(module, { bytes, entries, members, layout = 0 }) {
   if (typeof module?._DolphinWeb_AotQueueRegion !== "function" || !bytes?.length || !entries?.length || !members?.length) return;
   // Translated for another heap layout: the core would refuse it; not even
   // copied into its heap (counted).
   if (typeof module._DolphinWeb_AotLayoutHash === "function" && (layout >>> 0) !== (module._DolphinWeb_AotLayoutHash() >>> 0)) {
     aotLayoutSkipped += 1;
     return;
+  }
+  // Its heap sites hold the RAM and L1 addresses of the session that
+  // translated it (patch 0084): moved to this session's, and the patched
+  // bytes compiled off the CPU thread and kept under their key, as the CPU
+  // thread's compile request looks them up.
+  let heapBases = [0, 0];
+  if (typeof module._DolphinWeb_AotRegionHeapBases === "function") {
+    const { coreHeapBases } = await import("./aot-orchestrator.js");
+    const { patchRegionHeap } = await import("./aot-region-module.js");
+    heapBases = coreHeapBases(module);
+    let patched;
+    try {
+      patched = patchRegionHeap(bytes, { ramBase: heapBases[0], l1Base: heapBases[1] });
+    } catch {
+      aotLayoutSkipped += 1; // a module whose sites do not hold its bases: never queued
+      return;
+    }
+    if (patched !== bytes) {
+      aotHeapPatched += 1;
+      const key = await regionBlockCacheKey(patched);
+      const compiled = await precompileAotRegion(key, patched);
+      if (!compiled.module) return;
+      bytes = patched;
+    }
   }
   const ranges = members.flatMap((m) => m.ranges);
   const triples = members.flatMap((m) => [m.ranges.length, m.hash ? parseInt(m.hash.slice(8), 16) : 0, m.hash ? parseInt(m.hash.slice(0, 8), 16) : 0]);
@@ -7134,7 +7161,8 @@ function queueAotRegion(module, { bytes, entries, members, layout = 0 }) {
     module.HEAPU8.set(bytes, b);
     new Uint32Array(module.HEAPU8.buffer, w, words.length).set(words);
     const rangesAt = w + 4 * entries.length, membersAt = rangesAt + 8 * ranges.length;
-    module._DolphinWeb_AotQueueRegion(b, bytes.length, w, entries.length, rangesAt, ranges.length, membersAt, members.length, layout >>> 0);
+    module._DolphinWeb_AotQueueRegion(b, bytes.length, w, entries.length, rangesAt, ranges.length, membersAt, members.length, layout >>> 0,
+      heapBases[0] >>> 0, heapBases[1] >>> 0);
   } finally {
     module._free(b);
     module._free(w);

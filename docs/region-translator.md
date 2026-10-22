@@ -196,19 +196,26 @@ million console lines, the browser process at 7-14 GB).
 - [ ] **Retranslate after a layout refusal**: compare a cached module's
   layout with the core's once the RAM exists, mark the key not done, translate
   it again and overwrite the entry (review of #62, P1-3).
-- [x] **Position-independent region code** (patch 0084): region fragments
-  read RAM and L1 from imported immutable globals (`env.ram_base`,
-  `env.l1_base`, reloc kind 3 "global", a `global.get` of a padded zero the
-  assembler renumbers) instead of `i32.const`; the core passes their values
-  when it instantiates a region. A fragment copies both into two locals at
-  its entry and every access reads a local: one `global.get` per access cost
-  0.8 % of the race with aot=1 (Spark pair p1-heap-globals-aot1). `WasmLayoutHash` leaves the two addresses
-  out, so a moved heap no longer refuses (and wastes) the cache; the guard
-  still refuses a change of any other field (offsets in the CPU state, RAM
-  and L1 sizes). Block modules keep the constants: their bytes and keys are
-  unchanged. Compiler version 3 (modules of version 2 embed the addresses).
-  Tests: `DolphinWeb_AotLayoutShiftForTest` (the RAM moved: still installs)
-  and `DolphinWeb_AotLayoutShiftFieldForTest` (another field: refused).
+- [x] **Position-independent region code** (patch 0084): a region access
+  pushes the guest offset alone and its memarg offset holds the RAM or L1
+  address plus the byte offset, a 5-byte padded LEB listed as a heap site
+  (reloc kind 3; the module's `region-heap` section: the bases it holds and
+  its sites). V8 folds a memarg offset into the addressing mode: no
+  `i32.add`, no global read. Tried first: imported globals (−0.8 % on the
+  race with aot=1, Spark pair p1-heap-globals-aot1), then the globals copied
+  into locals at fragment entry (−0.6 %, p1-heap-locals-aot1).
+  Discio patches a cached module's sites to this session's bases
+  (`patchRegionHeap`) and compiles the patched bytes off the CPU thread
+  before it queues them; `DolphinWeb_AotQueueRegion` takes the bases the
+  sites hold, and the core refuses a region whose bases are not this
+  session's, at install and when an installed one is checked again (a RAM
+  allocated again under it, #62 P1-1). `WasmLayoutHash` leaves the two
+  addresses out; the other fields stay guarded. Block modules keep
+  `i32.const` + `i32.add`: their bytes and keys are unchanged. Compiler
+  version 3. Tests: a module patched for another heap runs there; a module
+  with another session's bases is refused, and runs once patched back; the
+  RAM moved under an installed region drops it; no fragment immediate holds
+  a heap address outside its listed sites.
 - [ ] **35 regions dropped on every second launch** (KPI, d18249e, and locally): installed during the OS init, they are dropped by invalidations (icbi or DMA) over their ranges; the code then runs in the block JIT for the session. Log the invalidations that drop them; consider re-verifying (plan hashes) instead of dropping when the code is unchanged.
 - [ ] **Second-launch TTFF +0.8 s** (first core frame 1.55 s against 0.72 s cold): the region cache read and compiled before the boot (`installBeforeBoot`). Load fewer modules before the boot, the rest after (target 10 s, today 2.05 s).
 
