@@ -562,3 +562,41 @@ test("load give-up after --load-wait: no lock held, the lock checks pass cleanly
   assert.deepEqual(lockOverlapAt(Object.assign(() => {}, { check: () => ({ ok: false, why: "another holder" }) }), "before run 2"), { at: "before run 2", why: "another holder" });
   assert.equal(lockOverlapAt(Object.assign(() => {}, { check: () => ({ ok: true }) }), "x"), null);
 });
+
+test("ab: load > max-load at the start of a run → release, calm wait, retake, no exception (even after a give-up)", async () => {
+  const { calmLock, calmUnderLock } = await import("../harness/lib/env.mjs");
+  const events = [];
+  let n = 0;
+  const acquire = async () => { const id = ++n; events.push(`acquire${id}`); return Object.assign(() => events.push(`release${id}`), { check: () => ({ ok: true }) }); };
+  let calmAfterWait = true;
+  const wait = async () => { events.push("wait"); return calmAfterWait ? { load: 1, limit: 4, ok: true } : { load: 9, limit: 4, ok: false }; };
+  let load = 1;
+  const lock = await calmLock({ maxLoad: 4, calmWait: 60, acquire, wait, load: () => load, retakeOnGiveUp: true });
+  events.length = 0;
+  // Loaded at the start of a run, calm within the wait: released, waited, retaken.
+  load = 9;
+  assert.equal((await lock.waitCalmUnlocked({ waitSec: 60 })).ok, true);
+  assert.deepEqual(events, ["release1", "wait", "acquire2"]);
+  // Loaded and never calm (the 2026-10-22 crash): released, waited, and taken again anyway for the cell.
+  events.length = 0;
+  calmAfterWait = false;
+  const gaveUp = await lock.waitCalmUnlocked({ waitSec: 60 });
+  assert.equal(gaveUp.ok, false);
+  assert.deepEqual(events, ["release2", "wait", "acquire3"]);
+  // The next run, loaded again: no TypeError, the lock it holds goes back.
+  events.length = 0;
+  await assert.doesNotReject(lock.waitCalmUnlocked({ waitSec: 60 }));
+  assert.deepEqual(events, ["release3", "wait", "acquire4"]);
+  lock.release();
+  assert.deepEqual(events.slice(-1), ["release4"]);
+  // Without retake (ttff, ax-hle, first-launch stop on a give-up), a later gate with no lock held
+  // never calls null: calm, it takes the lock; loaded, it waits first.
+  events.length = 0;
+  const calm = await calmUnderLock({ lock: null, maxLoad: 4, waitSec: 1, acquire, wait, load: () => 1 });
+  assert.equal(calm.relocked, true);
+  assert.deepEqual(events, ["acquire5"]);
+  events.length = 0;
+  calmAfterWait = true;
+  await assert.doesNotReject(calmUnderLock({ lock: null, maxLoad: 4, waitSec: 1, acquire, wait, load: () => 9 }));
+  assert.deepEqual(events, ["wait", "acquire6"]);
+});
