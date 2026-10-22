@@ -60,6 +60,7 @@ export class AotOptimizer extends EventTarget {
     this.keyParts = keyParts;
     if (!assemble && !assembleOptions) throw new Error("aot-optimizer: assembleOptions (helpers, pcOffset, memoryPages from the core) required");
     this.assemble = assemble ?? ((fragments) => assembleRegion(fragments, assembleOptions).bytes);
+    this.chain = Boolean(assembleOptions?.chain); // chained modules have their own keys (region-v2)
     this.compile = compile;
     // install({ key, bytes, entries, layout, members }): hands a compiled module to the
     // core's dispatcher (_DolphinWeb_AotQueueRegion). Optional.
@@ -182,7 +183,7 @@ export class AotOptimizer extends EventTarget {
           members,
           rank: Math.min(...members.map((f) => rankOf.get(f))),
           weight: members.reduce((n, f) => n + functionWeight(f), 0),
-          key: await regionModuleKey(members, this.keyParts)
+          key: await regionModuleKey(members, { ...this.keyParts, chain: this.chain })
         });
       }
     }

@@ -128,6 +128,26 @@ test("aot optimizer: core slices (budget), waits before boot (not-ready), skips 
   assert.deepEqual(await o.status(), { state: "complete", fraction: 1 });
 });
 
+// A core with region chaining (patch 0102) gets chained modules under their
+// own keys: a module cached before it (region-v1, no chaining stub) is never
+// found for it, nor a chained one for an older core.
+test("aot optimizer: with chain the modules are keyed region-v2 and chain; a region-v1 cache entry is never taken", async () => {
+  const cache = fakeCache();
+  const plain = optimizer({ cache: fakeCache(), keyParts: { compilerVersion: 5, codegenMask: 0 } });
+  await plain.o.start();
+  const v1 = new Set(plain.o.regions.map((u) => u.key));
+  assert.ok([...v1].every((k) => k.startsWith("region-v1:")));
+  const { o } = optimizer({ cache, keyParts: { compilerVersion: 5, codegenMask: 0 }, assembleOptions: { helpers: {}, pcOffset: 0, memoryPages: 1, chain: true } });
+  await o.start();
+  assert.ok(o.regions.length > 0);
+  for (const u of o.regions) {
+    assert.match(u.key, /^region-v2:00000005:00000000:[0-9a-f]{64}$/);
+    assert.equal(v1.has(u.key), false, "never a region-v1 key");
+    const names = WebAssembly.Module.imports(new WebAssembly.Module(cache.persisted.get(u.key))).map((i) => i.name);
+    assert.ok(names.includes("region_chain") && names.includes("table"), "a chained module");
+  }
+});
+
 test("aot optimizer: a module's key is regionModuleKey of its planned members; stored bytes are an assembled module", async () => {
   const { regionModuleKey } = await import("../src/aot-region-module.js");
   const cache = fakeCache();

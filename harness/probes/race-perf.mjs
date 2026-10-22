@@ -303,7 +303,8 @@ export function regionRecord(reply) {
     // layoutRefused, the launch's heap layout (it varies between launches, and
     // the host work per guest cycle with it, bench 2026-10-22), and the 0084
     // heap patches
-    ...regionPipeline(reply)
+    ...regionPipeline(reply),
+    ...(reply.regionChain ? { regionChain: reply.regionChain } : {})
   };
   return p4.error ? { p4: null, p4Why: p4.error, ...samples } : { p4, p4Raw: stats, ...samples };
 }
@@ -355,6 +356,18 @@ export function summarizeP4(windows) {
   const diagnostics = sum.diagnostics
     ? { ...Object.fromEntries(Object.entries(sum.diagnostics).filter(([k]) => !/^topMiss|^spare$/.test(k))), topMisses: topMisses(raw.at(-1)) }
     : null;
+  // Region chaining (patch 0102), summed over the windows that have it.
+  const chains = recs.map((w) => w.regionChain).filter(Boolean);
+  if (diagnostics && chains.length) {
+    diagnostics.regionChain = { enabled: chains.every((c) => c.enabled === 1) ? 1 : 0 };
+    for (const k of ["chained", "outOfTime", "noRegion", "refused"]) diagnostics.regionChain[k] = chains.reduce((a, c) => a + (c[k] ?? 0), 0);
+    // The most frequent transitions back to the dispatcher, summed by pc.
+    for (const k of ["exitTargets", "breakEntries"]) {
+      const sum = new Map();
+      for (const c of chains) for (const [pc, n] of c[k] ?? []) sum.set(pc, (sum.get(pc) ?? 0) + n);
+      if (sum.size) diagnostics.regionChain[k] = [...sum].sort((a, b) => b[1] - a[1]).slice(0, 12);
+    }
+  }
   return { p4: { ...pooled, windows: raw.length, missingWindows: recs.length - raw.length, diagnostics }, why: raw.length < recs.length ? why : null };
 }
 
