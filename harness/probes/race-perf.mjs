@@ -269,7 +269,8 @@ export function regionRecord(reply) {
     ...(Number.isInteger(reply.layoutRefused) ? { layoutRefused: reply.layoutRefused } : {}),
     // The launch's heap layout (hash): it varies between launches, and the
     // host work per guest cycle with it (bench, 2026-10-22).
-    ...(Number.isInteger(reply.layoutHash) ? { layoutHash: reply.layoutHash } : {})
+    ...(Number.isInteger(reply.layoutHash) ? { layoutHash: reply.layoutHash } : {}),
+    ...(reply.layout ? { layout: reply.layout } : {})
   };
   return p4.error ? { p4: null, p4Why: p4.error, ...samples } : { p4, p4Raw: stats, ...samples };
 }

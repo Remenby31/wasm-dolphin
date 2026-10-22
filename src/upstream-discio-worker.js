@@ -276,6 +276,37 @@ async function harnessPcSampler({ action, periodMs } = {}) {
 // by harness/lib/jit-region-stats.mjs. sampleEvery >= 0 switches them on and
 // resets them; absent, they are only read. Copied twice, back to back, so the
 // harness can refuse a torn read; the size comes from the struct's header.
+// Where this launch's emulated memory sits in the wasm heap: ram and L1
+// bases and sizes (WasmStateLayout words 15-18, _DolphinWeb_AotLayoutWords,
+// 0078), the region heap bases where the core has them (0084), the heap size
+// and the stack pointer. Read only; null fields when the core lacks an export.
+function harnessHeapLayout(m) {
+  if (!m) return null;
+  const out = { heapBytes: m.HEAPU8?.buffer?.byteLength ?? null, ramBase: null, ramSize: null, l1Base: null, l1Size: null, heapBases: null, stack: null };
+  if (typeof m._DolphinWeb_AotLayoutWords === "function" && typeof m._malloc === "function") {
+    const p = m._malloc(32 * 4);
+    try {
+      m._DolphinWeb_AotLayoutWords(p, 32);
+      const w = new Uint32Array(m.HEAPU8.buffer, p, 32);
+      Object.assign(out, { ramBase: w[15] >>> 0, ramSize: w[16] >>> 0, l1Base: w[17] >>> 0, l1Size: w[18] >>> 0 });
+    } finally {
+      m._free?.(p);
+    }
+  }
+  if (typeof m._DolphinWeb_AotRegionHeapBases === "function" && typeof m._malloc === "function") {
+    const p = m._malloc(8);
+    try {
+      m._DolphinWeb_AotRegionHeapBases(p);
+      const w = new Uint32Array(m.HEAPU8.buffer, p, 2);
+      out.heapBases = [w[0] >>> 0, w[1] >>> 0];
+    } finally {
+      m._free?.(p);
+    }
+  }
+  if (typeof m.stackSave === "function") out.stack = m.stackSave() >>> 0;
+  return out;
+}
+
 function harnessJitRegionStats({ sampleEvery } = {}) {
   if (!harnessEnabled) return { error: "harness hooks are off" };
   const stats = moduleInstance?._DolphinWeb_JitRegionStats;
@@ -293,7 +324,7 @@ function harnessJitRegionStats({ sampleEvery } = {}) {
   // hash the cache is keyed on, 0078); it varies between launches of one
   // build, and with it the host work per guest cycle (bench, 2026-10-22).
   const layoutHash = moduleInstance._DolphinWeb_AotLayoutHash ? moduleInstance._DolphinWeb_AotLayoutHash() >>> 0 : null;
-  return { bytes: copy(), again: copy(), installSamples: harnessRegionInstallSamples(heap), layoutRefused, layoutHash };
+  return { bytes: copy(), again: copy(), installSamples: harnessRegionInstallSamples(heap), layoutRefused, layoutHash, layout: harnessHeapLayout(moduleInstance) };
 }
 // AX HLE timing (patch 0099, harness/lib/ax-hle-stats.mjs): reset >= 0
 // zeroes and turns the counters on from the next mail; copied twice so the
