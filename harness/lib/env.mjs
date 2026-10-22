@@ -68,6 +68,26 @@ export async function calmUnderLock({ lock, maxLoad, waitSec, acquire, log = () 
   return { lock: await acquire(), gate: calm, relocked: true };
 }
 
+// A perf lock never held while waiting for the load, for every probe: taken
+// once the machine is calm (calmThenLock), then before each run
+// waitCalmUnlocked() checks the load and, loaded, gives the lock back
+// during the wait and takes it again in turn (calmUnderLock). The gate it
+// returns says whether the lock went back (relocked). `acquire` null: no
+// lock (--no-lock), the gate only waits. release() lets go of what is held.
+export async function calmLock({ maxLoad, calmWait, acquire, log = () => {}, wait = waitForLoad, load }) {
+  let held = acquire ? await calmThenLock({ maxLoad, calmWait, acquire, log, wait }) : null;
+  return {
+    async waitCalmUnlocked({ waitSec, log: gateLog = log }) {
+      if (!acquire) return { ...(await wait({ maxLoad, waitSec, log: gateLog })), relocked: false };
+      const g = await calmUnderLock({ lock: held, maxLoad, waitSec, acquire, log: gateLog, wait, ...(load ? { load } : {}) });
+      held = g.lock;
+      return { ...g.gate, relocked: g.relocked };
+    },
+    check: () => held?.check?.(),
+    release() { const r = held; held = null; r?.(); }
+  };
+}
+
 // Under the lock, a load gate that did not open (still loaded after
 // --load-wait): the remaining runs are given up, the lock goes back.
 export const loadGaveUp = (gate) => (gate && gate.ok === false ? `load ${gate.load} > ${gate.limit} after --load-wait: remaining runs given up, lock released` : null);

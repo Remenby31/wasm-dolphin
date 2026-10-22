@@ -513,3 +513,36 @@ test("load under the lock: a loaded machine gives the lock back while waiting, t
   assert.equal(never.lock, null);
   assert.match(loadGaveUp(never.gate), /given up, lock released/);
 });
+
+test("calmLock: every probe's load gate gives the lock back while waiting; --no-lock only waits", async () => {
+  const { calmLock } = await import("../harness/lib/env.mjs");
+  const events = [];
+  let n = 0;
+  const acquire = async () => { const id = ++n; events.push(`acquire${id}`); const r = () => events.push(`release${id}`); return r; };
+  const wait = async ({ waitSec }) => { events.push(`wait${waitSec}`); return { load: 1, limit: 4, ok: true }; };
+  let load = 1;
+  const lock = await calmLock({ maxLoad: 4, calmWait: 7, acquire, wait, load: () => load });
+  assert.deepEqual(events, ["wait7", "acquire1"], "calm first, then the lock");
+  assert.equal((await lock.waitCalmUnlocked({ waitSec: 300 })).relocked, false);
+  load = 9;
+  const g = await lock.waitCalmUnlocked({ waitSec: 300 });
+  assert.equal(g.relocked, true);
+  assert.deepEqual(events.slice(2), ["release1", "wait300", "acquire2"], "released before the wait, taken again after");
+  lock.release();
+  lock.release();
+  assert.deepEqual(events.slice(5), ["release2"], "release lets go of the lock held now, once");
+  const none = await calmLock({ maxLoad: 4, calmWait: 7, acquire: null, wait });
+  events.length = 0;
+  assert.equal((await none.waitCalmUnlocked({ waitSec: 5 })).ok, true);
+  assert.deepEqual(events, ["wait5"]);
+});
+
+test("calmLock: no probe waits for the load on its own any more (the pattern does not come back)", () => {
+  const dir = path.join(import.meta.dirname, "..", "harness");
+  const files = ["probes/race-perf.mjs", "probes/ttff.mjs", "probes/ax-hle.mjs", "probes/first-launch.mjs", "cli.mjs"];
+  for (const f of files) {
+    const src = readFileSync(path.join(dir, f), "utf8");
+    const direct = src.split("\n").filter((l) => /\bwaitForLoad\(/.test(l) && !/abLock \?/.test(l));
+    assert.deepEqual(direct, [], `${f} calls waitForLoad outside calmLock / calmUnderLock`);
+  }
+});
