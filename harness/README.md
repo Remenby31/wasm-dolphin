@@ -162,7 +162,9 @@ node harness/probes/race-perf.mjs --iso ../roms/<disc>.iso --state ../measures/h
   (int/fp/psq load/store), `slowShare` (slow-path calls over all accesses),
   and, with aot=1, the region part estimated apart
   (`regionAccessesPerInstructionEstimated`, `withRegionsEstimated`), never
-  merged into the counted figure. A core without the export gives
+  merged into the counted figure; `flagsPerInstruction` (CR writes, CR
+  reads, XER[CA] writes and reads per instruction, counted blocks, 0104 at
+  4c6122e and later). A core without the export gives
   `memAccess: null` and `memAccessWhy`.
 - `--chrome-args "--flag …"` adds Chromium flags on both sides;
   `--baseline-chrome-args` replaces them on the baseline side, so one tree is
