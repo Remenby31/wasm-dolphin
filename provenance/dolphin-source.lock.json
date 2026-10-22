@@ -25,7 +25,7 @@
       "commit": "01e0577914a75a2569c846778c2f93aa8e6feddd"
     }
   },
-  "patchSeriesSha256": "3bb13b0223e5c475ac230c880ab516c27ee8dbaaf3b3e745e8a067e982c242d8",
+  "patchSeriesSha256": "367ff50c67b88abc43841ba4e308dbfa509383aa2cf4b4ed5c516674fe8e3ad7",
   "patches": [
     {
       "order": 1,
@@ -640,8 +640,8 @@
       "cwd": ".",
       "hashMode": "lf-normalized",
       "path": "patches/dolphin-wasm/snapshot/0089-idle-skip-stats-and-fast-forward.patch",
-      "size": 26447,
-      "sha256": "20d55bc0470f824f376eab818c1984423869cc0dd38216fc7fd114f32cefeb57"
+      "size": 26624,
+      "sha256": "f76376faa9d1d0bb5a1acd3c5bf754a011a46a1ac3ba6201aa5aff59df3eb20b"
     },
     {
       "order": 78,

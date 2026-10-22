@@ -1,5 +1,5 @@
 diff --git a/Source/Core/Core/CoreTiming.cpp b/Source/Core/Core/CoreTiming.cpp
-index df7f282ee4..8b87a21f47 100644
+index df7f282ee4..941908119e 100644
 --- a/Source/Core/Core/CoreTiming.cpp
 +++ b/Source/Core/Core/CoreTiming.cpp
 @@ -22,6 +22,7 @@
@@ -145,12 +145,15 @@ index df7f282ee4..8b87a21f47 100644
    p.Do(m_fake_dec_start_value);
    p.Do(m_fake_dec_start_ticks);
    p.Do(m_globals.fake_TB_start_value);
-@@ -379,6 +485,39 @@ void CoreTimingManager::Advance()
+@@ -379,6 +485,42 @@ void CoreTimingManager::Advance()
    int cyclesExecuted = m_globals.slice_length - DowncountToCycles(ppc_state.downcount);
    m_globals.global_timer += cyclesExecuted;
  
 +#ifdef __EMSCRIPTEN__
-+  if (IdleStats::g_request.exchange(-1, std::memory_order_acq_rel) >= 0)
++  // A plain load first: the exchange (a locked RMW) only when the harness
++  // asked, not at every slice.
++  if (IdleStats::g_request.load(std::memory_order_relaxed) >= 0 &&
++      IdleStats::g_request.exchange(-1, std::memory_order_acq_rel) >= 0)
 +  {
 +    IdleStats::g_stats = IdleStats::Stats{};
 +    IdleStats::g_stats.size_bytes = sizeof(IdleStats::Stats);
@@ -185,7 +188,7 @@ index df7f282ee4..8b87a21f47 100644
  #ifdef __EMSCRIPTEN__
    // §27e: is the CPU thread / CoreTiming still advancing after the
    // post-load backlog drains? Logs global_timer + event-queue depth.
-@@ -460,11 +599,19 @@ void CoreTimingManager::Advance()
+@@ -460,11 +602,19 @@ void CoreTimingManager::Advance()
  
    m_is_global_timer_sane = true;
  
@@ -205,7 +208,7 @@ index df7f282ee4..8b87a21f47 100644
  #if defined(DOLPHIN_WEB_DET_TRACE) && DOLPHIN_WEB_DET_TRACE
      DolphinWeb::DetTrace::Record(DolphinWeb::DetTrace::Run, evt.type->name,
                                   static_cast<u64>(evt.time), m_globals.global_timer - evt.time);
-@@ -494,6 +641,32 @@ void CoreTimingManager::Advance()
+@@ -494,6 +644,32 @@ void CoreTimingManager::Advance()
              static_cast<int>(callback_us));
        }
      }
@@ -238,7 +241,7 @@ index df7f282ee4..8b87a21f47 100644
      else
      {
        evt.type->callback(m_system, evt.userdata, m_globals.global_timer - evt.time);
-@@ -502,6 +675,38 @@ void CoreTimingManager::Advance()
+@@ -502,6 +678,38 @@ void CoreTimingManager::Advance()
      evt.type->callback(m_system, evt.userdata, m_globals.global_timer - evt.time);
  #endif
    }
@@ -277,7 +280,7 @@ index df7f282ee4..8b87a21f47 100644
  
    m_is_global_timer_sane = false;
  
-@@ -519,6 +724,24 @@ void CoreTimingManager::Advance()
+@@ -519,6 +727,24 @@ void CoreTimingManager::Advance()
    // until the next slice:
    //        Pokemon Box refuses to boot if the first exception from the audio DMA is received late
    power_pc.CheckExternalExceptions();
@@ -302,7 +305,7 @@ index df7f282ee4..8b87a21f47 100644
  }
  
  TimePoint CoreTimingManager::CalculateTargetHostTimeInternal(s64 target_cycle)
-@@ -722,7 +945,7 @@ void CoreTimingManager::AdjustEventQueueTimes(u32 new_ppc_clock, u32 old_ppc_clo
+@@ -722,7 +948,7 @@ void CoreTimingManager::AdjustEventQueueTimes(u32 new_ppc_clock, u32 old_ppc_clo
    }
  }
  
@@ -311,7 +314,7 @@ index df7f282ee4..8b87a21f47 100644
  {
    if (m_config_sync_on_skip_idle)
    {
-@@ -733,9 +956,54 @@ void CoreTimingManager::Idle()
+@@ -733,9 +959,54 @@ void CoreTimingManager::Idle()
    }
  
    auto& ppc_state = m_system.GetPPCState();
@@ -464,10 +467,10 @@ index 2fa67037f1..cb51305a24 100644
      }
    }
 diff --git a/Source/Core/Core/PowerPC/CachedInterpreter/CachedInterpreter.cpp b/Source/Core/Core/PowerPC/CachedInterpreter/CachedInterpreter.cpp
-index 253cc6f686..0021225832 100644
+index 5234dd01ce..985738b7b6 100644
 --- a/Source/Core/Core/PowerPC/CachedInterpreter/CachedInterpreter.cpp
 +++ b/Source/Core/Core/PowerPC/CachedInterpreter/CachedInterpreter.cpp
-@@ -10380,7 +10380,7 @@ s32 CachedInterpreter::CheckBreakpoint(PowerPC::PowerPCState& ppc_state,
+@@ -10393,7 +10393,7 @@ s32 CachedInterpreter::CheckBreakpoint(PowerPC::PowerPCState& ppc_state,
  s32 CachedInterpreter::CheckIdle(PowerPC::PowerPCState& ppc_state,
                                   const CheckIdleOperands& operands)
  {
@@ -476,7 +479,7 @@ index 253cc6f686..0021225832 100644
    if (ppc_state.npc == idle_pc)
    {
  #ifdef __EMSCRIPTEN__
-@@ -10388,19 +10388,19 @@ s32 CachedInterpreter::CheckIdle(PowerPC::PowerPCState& ppc_state,
+@@ -10401,19 +10401,19 @@ s32 CachedInterpreter::CheckIdle(PowerPC::PowerPCState& ppc_state,
      if (s_sampling_lookups)  // timing on
      {
        const auto start = std::chrono::steady_clock::now();
@@ -499,7 +502,7 @@ index 253cc6f686..0021225832 100644
  #endif
    }
    return sizeof(AnyCallback) + sizeof(operands);
-@@ -13340,7 +13340,7 @@ bool CachedInterpreter::TryWriteWasmBlock(u32 nextPC)
+@@ -13353,7 +13353,7 @@ bool CachedInterpreter::TryWriteWasmBlock(u32 nextPC)
        }
  
        if (op.branchIsIdleLoop)
@@ -508,7 +511,7 @@ index 253cc6f686..0021225832 100644
  #if DOLPHIN_WEB_STATIC_EXIT_LINKS
        if (op.canEndBlock)
          WriteEndBlock(i == static_link_op_index ?
-@@ -15893,7 +15893,7 @@ bool CachedInterpreter::DoJit(u32 em_address, JitBlock* b, u32 nextPC)
+@@ -15925,7 +15925,7 @@ bool CachedInterpreter::DoJit(u32 em_address, JitBlock* b, u32 nextPC)
        }
  
        if (op.branchIsIdleLoop)
