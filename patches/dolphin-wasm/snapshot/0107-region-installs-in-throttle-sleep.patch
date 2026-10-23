@@ -204,7 +204,7 @@ diff --git a/Source/Core/Core/PowerPC/CachedInterpreter/CachedInterpreter.cpp b/
 +    // A module whose ready byte never came (the ready wait ran out) compiles
 +    // cold, synchronously: far more than the cache-hit estimate a sleep
 +    // window is sized with, so it stays at slice boundaries (review of #124).
-+    const answered = ready || pending.signalled;
++    const bool answered = ready || pending.signalled;
 +    if ((!answered && !expired) || !room(pending.bytes.size(), false) ||
 +        (answered ? may_wait_for_sleep(pending) : deadline.has_value()))
      {
