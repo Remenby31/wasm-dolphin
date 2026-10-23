@@ -91,6 +91,28 @@ export function trunkSide(r, trunk, { config = null } = {}) {
 
 // Speed measured on this Mac's stock Chrome: an E-core wrapper or extra
 // flags measure something else (the P9 extrapolation).
+// What a side ran on, for comparing two summaries: the machine (spark-run
+// stamps `host`; none = this Mac) and the Chrome arguments, shared and the
+// side's own. Absent arguments are none: before PR #145 a Spark summary had
+// none (race-multi recorded no chrome at all), after it the V8 flag; the two
+// must never be compared.
+export function setupOf(json, side = "candidate") {
+  const args = [json?.chrome?.args ?? "", json?.chrome?.sideArgs?.[side] ?? ""].map((a) => String(a).trim()).filter(Boolean).join(" ");
+  return { host: json?.host ?? null, chromePath: json?.chrome?.path ?? null, chromeArgs: args };
+}
+
+// Why two setups are not comparable ([] when they are).
+export function setupDifferences(a, b) {
+  const why = [];
+  if (a.host !== b.host) why.push(`machine ${a.host ?? "Mac"} ≠ ${b.host ?? "Mac"}`);
+  if (a.chromeArgs !== b.chromeArgs) why.push(`arguments Chrome « ${a.chromeArgs || "aucun"} » ≠ « ${b.chromeArgs || "aucun"} »`);
+  if (a.chromePath && b.chromePath && a.chromePath !== b.chromePath) why.push(`Chrome ${a.chromePath} ≠ ${b.chromePath}`);
+  return why;
+}
+
+// Trunk's race rows: this Mac's stock Chrome, no arguments (absoluteRace).
+export const TRUNK_SETUP = Object.freeze({ host: null, chromePath: "chrome stable", chromeArgs: "" });
+
 export const stockChrome = (json) => !json.chrome || (json.chrome.path === "chrome stable" && !json.chrome.args && !Object.keys(json.chrome.sideArgs ?? {}).length);
 
 // Absolute numbers (race speed, p99, shares) come from night measures, run
@@ -297,7 +319,9 @@ export function candidateColumn(r, { label = null, note = null } = {}) {
   const served = servedSides(r).candidate;
   const query = new URLSearchParams(String(r.json.query ?? ""));
   const flags = ["aot", "wasmjit", "jitoffthread"].filter((k) => query.has(k)).map((k) => `${k}=${query.get(k)}`).join("&");
-  const header = { label: label ?? String(r.json.sides?.candidate ?? "candidate").split("/").pop(), note, maxLoad: r.json.maxLoad ?? null, source: r.file, commit: served?.commit ?? null, dirty: served?.dirty ?? null, flags, at: new Date(resultTime(r)).toISOString() };
+  const header = { label: label ?? String(r.json.sides?.candidate ?? "candidate").split("/").pop(), note, maxLoad: r.json.maxLoad ?? null, source: r.file, commit: served?.commit ?? null, dirty: served?.dirty ?? null, flags, at: new Date(resultTime(r)).toISOString(),
+    // Another machine or other Chrome arguments than trunk's rows: shown, flagged.
+    setupDifferences: setupDifferences(setupOf(r.json, "candidate"), TRUNK_SETUP) };
   const values = {};
   for (const row of KPI_ROWS) {
     if (![row.from].flat().includes("race-perf")) continue;
@@ -329,6 +353,7 @@ export function kpiMarkdown(rows, { at = new Date().toISOString(), uptime = null
   }
   if (candidate) {
     lines.push(`Colonne « Candidat » : \`${candidate.label}\`${candidate.note ? `, ${candidate.note}` : ""}${candidate.flags ? ` (${candidate.flags})` : ""}${candidate.maxLoad != null ? `, max-load ${candidate.maxLoad}` : ""}, \`${candidate.source}\` @ ${candidate.commit ? candidate.commit.slice(0, 8) : "?"}${candidate.dirty ? " avec modifications locales" : ""}, ${candidate.at.slice(0, 16)}. Mesure d'une branche avant fusion, à titre de comparaison : elle ne compte pas dans l'état des KPI.`, "");
+    if (candidate.setupDifferences?.length) lines.push(`**Candidat NON comparable aux lignes de trunk** : ${candidate.setupDifferences.join(" ; ")}.`, "");
   }
   return lines.join("\n");
 }
