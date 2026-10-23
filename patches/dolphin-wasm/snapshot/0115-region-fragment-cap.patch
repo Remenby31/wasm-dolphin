@@ -11,7 +11,7 @@ diff --git a/Source/Core/Core/PowerPC/CachedInterpreter/CachedInterpreter.cpp b/
 +  // 500 KB of body): measured in a race, the three fragments past it never
 +  // left Liftoff in 157 s, while fragments of 570-760 KB of baseline code
 +  // did. The blocks left out run outside the region.
-+  constexpr std::size_t max_fragment_bytes = 400000;
++  constexpr std::size_t max_fragment_bytes = 96000;
 +  std::size_t fragment_bytes = 0;
 +  while (!work.empty() && blocks.size() < max_blocks && fragment_bytes < max_fragment_bytes)
    {
@@ -30,9 +30,9 @@ diff --git a/Source/Core/Core/PowerPC/CachedInterpreter/CachedInterpreter.cpp b/
  // none and would never install. 5 (0087): ps_sum0/1, ps_res, fres and
  // ps_neg/mr/nabs/abs compiled inline (3 and 4 are taken by 0084 and 0083).
 -constexpr u32 AOT_COMPILER_VERSION = 5;
-+// 13 (0115): fragments capped at 400 KB of code (6-12 are taken by the
-+// region codegen patches 0105-0114).
-+constexpr u32 AOT_COMPILER_VERSION = 13;
++// 14 (0115, 96 KB arm): fragments capped at 96 KB of code (6-13 are taken by the
++// region codegen patches 0105-0114 and the 400 KB arm).
++constexpr u32 AOT_COMPILER_VERSION = 14;
  constexpr u32 AOT_MAX_FRAGMENT_BYTES = 1u << 20;
  thread_local std::vector<u32> t_aot_out;
  u8* s_aot_ram = nullptr;

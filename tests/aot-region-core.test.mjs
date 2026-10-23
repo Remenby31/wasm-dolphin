@@ -181,7 +181,7 @@ const compilerVersion = () => {
   const p = core.module._malloc(8);
   try { core.module._DolphinWeb_AotKeyParts(p); return new Uint32Array(core.module.HEAPU8.buffer, p, 2)[0]; } finally { core.module._free(p); }
 };
-test("a fragment stops taking blocks past 400 KB of code (0115)", { skip: skip || (compilerVersion() < 13 && "core before 0115 (compiler version < 13)") }, () => {
+test("a fragment stops taking blocks past 96 KB of code (0115, 96 KB arm)", { skip: skip || (compilerVersion() < 14 && "core before the 96 KB arm of 0115 (compiler version < 14)") }, () => {
   const cmpwi0 = (a) => (11 << 26) | (a << 16);
   const items = ["big"];
   for (let b = 0; b < 64; b++) {
@@ -195,7 +195,7 @@ test("a fragment stops taking blocks past 400 KB of code (0115)", { skip: skip |
   for (const s of image.segments) core.load(s.start, s.bytes);
   const fragment = core.translate(big.labels.big, { ranges: [[BIG_TEXT, BIG_TEXT + 4 * big.words.length]], maxBlocks: 256 });
   assert.ok(fragment, "translated");
-  if (fragment.code.length < 400000) return; // a translator that emits less per op stays under the cap whole
+  if (fragment.code.length < 96000) return; // a translator that emits less per op stays under the cap whole
   assert.ok(fragment.entries.length < 65, `${fragment.entries.length} blocks`);
-  assert.ok(fragment.code.length < 400000 + 80000, `${fragment.code.length} bytes`);
+  assert.ok(fragment.code.length < 96000 + 80000, `${fragment.code.length} bytes`);
 });
