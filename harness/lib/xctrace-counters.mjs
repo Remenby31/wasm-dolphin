@@ -196,11 +196,14 @@ export function removeNewKtraces(before, after, { isOpen = heldOpen, remove = (f
 }
 
 // The ktraces our windows created that were still open: add(), retried at
-// each sweep(), waited for by finish() (bounded), which returns those left.
+// each sweep() and every sweepSec in between (race-perf can wait minutes
+// for a calm machine between windows), waited for by finish() (bounded),
+// which returns those left.
 // DTServiceHub, which holds the last one, exits ~10 min after the last
 // recording (2026-10-23): finish waits 15 min by default.
-export function createKtraceJanitor({ isOpen = heldOpen, remove = (f) => rmSync(f, { force: true }), log = (m) => console.log(m) } = {}) {
+export function createKtraceJanitor({ isOpen = heldOpen, remove = (f) => rmSync(f, { force: true }), log = (m) => console.log(m), sweepSec = 20 } = {}) {
   const pending = new Set();
+  let timer = null;
   const sweep = () => {
     const out = { removed: [], open: [] };
     for (const f of [...pending]) {
@@ -208,6 +211,7 @@ export function createKtraceJanitor({ isOpen = heldOpen, remove = (f) => rmSync(
       if (r.keptOpen.length) out.open.push(f); else { pending.delete(f); out.removed.push(...r.removed); }
     }
     if (out.removed.length) log(`[xctrace] ktrace: ${out.removed.length} removed later, once closed: ${out.removed.join(" ")}`);
+    if (!pending.size && timer) { clearInterval(timer); timer = null; }
     return out;
   };
   const finish = async ({ waitSec = 900, pollSec = 15 } = {}) => {
@@ -220,7 +224,11 @@ export function createKtraceJanitor({ isOpen = heldOpen, remove = (f) => rmSync(
     if (left.length) log(`[xctrace] ktrace still open after ${waitSec} s, left: ${left.join(" ")}`);
     return { ktraceLeft: left };
   };
-  return { add: (files) => { for (const f of files) pending.add(f); }, sweep, finish, pending: () => [...pending] };
+  const add = (files) => {
+    for (const f of files) pending.add(f);
+    if (pending.size && !timer && sweepSec > 0) { timer = setInterval(sweep, sweepSec * 1000); timer.unref(); }
+  };
+  return { add, sweep, finish, pending: () => [...pending] };
 }
 
 // Free space (GB) of the volume holding `dir`.
@@ -228,8 +236,12 @@ export function freeDiskGB(dir = os.tmpdir()) {
   const s = statfsSync(dir);
   return (s.bavail * s.bsize) / 1e9;
 }
-// Under this, a campaign with xctrace stops (race-perf gives up its runs).
+// A window needs this much free disk before it records: the floor plus what
+// one window may write (2026-10-23, a 20 s window: ~4 GB of ktrace, ~7 GB
+// more in $TMPDIR during the export, freed after), or race-perf gives up.
 export const XCTRACE_MIN_FREE_GB = 25;
+export const XCTRACE_WINDOW_GB = 5;
+export const xctraceNeedGB = () => XCTRACE_MIN_FREE_GB + XCTRACE_WINDOW_GB;
 
 export function checkXctrace() {
   if (process.platform !== "darwin") throw new Error("--counters with xctrace: macOS only");
@@ -250,7 +262,7 @@ export function xctraceCounters({ mode = "delivery", pidOf, readyTimeoutMs = 600
     if (phase === "start") {
       sweep();
       const free = freeDiskGB();
-      if (free < XCTRACE_MIN_FREE_GB) return live.set(session, { error: `disk: ${round(free, 1)} GB free < ${XCTRACE_MIN_FREE_GB} GB` });
+      if (free < xctraceNeedGB()) return live.set(session, { error: `disk: ${round(free, 1)} GB free < ${xctraceNeedGB()} GB (${XCTRACE_MIN_FREE_GB} + ${XCTRACE_WINDOW_GB} for the window)` });
       const ktraces = listKtraces();
       const pid = pidOf(session);
       if (!pid) return live.set(session, { error: "no renderer to attach to" });
