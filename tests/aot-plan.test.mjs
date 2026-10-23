@@ -326,3 +326,9 @@ test("aot profile v3: sample weights round trip, halve at a new session, add up 
   assert.deepEqual(decodeProfile(v2).blocks, [[0x80003100, 0x80003104, 3, 0, 0]]);
 });
 
+test("aot profile v3: a truncated file is refused; weights are clamped to a u32", () => {
+  const bytes = encodeProfile({ sessions: 1, blocks: [[0x80003100, 0x80003104, 1, 0, 2 ** 40]] });
+  assert.equal(decodeProfile(bytes).blocks[0][4], 0xffffffff, "clamped");
+  assert.equal(decodeProfile(bytes.subarray(0, bytes.length - 2)), null, "truncated");
+});
+

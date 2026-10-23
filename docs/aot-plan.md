@@ -225,7 +225,8 @@ u32 count, count x (u32 start, u32 end, u16 seen, u16 flags, u32 weight)
 `seen` counts the sessions that ran the block, `flags` bit0 = real mode,
 `weight` the guest-PC samples taken in it (version 3; halved at each new
 session, so it follows what the player runs now). Version 2 files (12-byte
-entries, no weight) still read, with weight 0.
+entries, no weight) still read, with weight 0. A build from before version 3 reads a v3 file as
+no profile and rewrites it as v2: the weights are lost, nothing else.
 
 **The profile stays on the player's machine.** It holds addresses and counts
 only, never guest bytes, in this origin's OPFS; nothing but the next plan of
