@@ -249,3 +249,49 @@ test("spark-queue: a multi takes the whole bench, in order of arrival, its estim
   assert.equal(estimateMin("multi", ["--runs", "6"]), 13);
   assert.equal(estimateMin("multi", ["--runs", "12"]), 22);
 });
+
+test("Spark Chromium: the bench's store-check flag is added once and merged with a probe's own --js-flags", () => {
+  const dir = mkdtempSync(path.join(os.tmpdir(), "chrome-pinned-"));
+  try {
+    // taskset and Chromium stand-ins: print the arguments Chromium would get, one a line.
+    writeFileSync(path.join(dir, "taskset"), "#!/bin/sh\nshift 2\nexec \"$@\"\n", { mode: 0o755 });
+    writeFileSync(path.join(dir, "chromium"), "#!/bin/sh\nfor a in \"$@\"; do echo \"$a\"; done\n", { mode: 0o755 });
+    const pinned = path.resolve(import.meta.dirname, "../harness/remote/chrome-pinned.sh");
+    const run = (...args) => execFileSync("sh", [pinned, ...args], { encoding: "utf8", env: { ...process.env, PATH: `${dir}:${process.env.PATH}`, SPARK_CHROMIUM: path.join(dir, "chromium") } }).trim().split("\n");
+    assert.deepEqual(run("--headless", "--js-flags=--no-liftoff", "--js-flags=--wasm-partial-oob-writes-are-noops", "about:blank"),
+      ["--headless", "about:blank", "--js-flags=--no-liftoff --wasm-partial-oob-writes-are-noops"]);
+    assert.deepEqual(run("--headless", "a b"), ["--headless", "a b"], "no --js-flags: nothing added, spaces kept");
+    // Both bench launchers add the flag through HARNESS_CHROME_ARGS (recorded in every summary).
+    for (const f of ["spark-race.sh", "spark-multi.sh"]) {
+      const src = readFileSync(path.resolve(import.meta.dirname, "../harness/remote", f), "utf8");
+      assert.match(src, /export HARNESS_CHROME_ARGS="\$\{HARNESS_CHROME_ARGS:\+\$HARNESS_CHROME_ARGS \}--js-flags=--wasm-partial-oob-writes-are-noops"/, f);
+    }
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test("spark-run --multi: a KPI scene is measured with its pinned protocol (heavy intro), the caller's options still win", async () => {
+  const { multiRaceArgs, multiSceneCheck, sceneMultiArgs } = await import("../harness/remote/spark-run.mjs");
+  const { sceneName } = await import("../harness/probes/race-multi.mjs");
+  const base = { iso: "i", state: "s", runs: "6", armDirs: ["a", "b", "a"] };
+  const last = (args, o) => args[args.lastIndexOf(o) + 1];
+  // The heavy intro: warmup 1, window 6, no key, over the race defaults.
+  const heavy = multiRaceArgs({ ...base, extra: sceneMultiArgs("heavy-intro-13s.sav") });
+  assert.equal(last(heavy, "--emulated-window"), "6");
+  assert.equal(last(heavy, "--emulated-warmup"), "1");
+  assert.equal(last(heavy, "--hold"), "");
+  assert.deepEqual(multiSceneCheck("heavy-intro-13s.sav", heavy).errors, []);
+  assert.deepEqual(multiSceneCheck("heavy-intro-13s.sav", heavy).warnings, []);
+  // The race defaults on the heavy scene (jit-0121b-heavy): refused, the window leaves the heavy phase.
+  assert.match(multiSceneCheck("heavy-intro-13s.sav", multiRaceArgs(base)).errors.join(), /leaves the heavy phase/);
+  // A scene without a protocol keeps the race defaults.
+  assert.deepEqual(sceneMultiArgs("race-after.sav"), []);
+  assert.equal(multiSceneCheck("race-after.sav", multiRaceArgs(base)).protocol, null);
+  // The caller's option after -- still wins (and is checked).
+  const longer = multiRaceArgs({ ...base, extra: [...sceneMultiArgs("heavy-intro-13s.sav"), "--emulated-window", "12"] });
+  assert.match(multiSceneCheck("heavy-intro-13s.sav", longer).errors.join(), /12 s window/);
+  // race-multi sees the bench's copy, renamed with its content hash.
+  assert.equal(sceneName("/home/admin/salon-bench/roms/heavy-intro-13s-f3ea52d2e166.sav"), "heavy-intro-13s.sav");
+  assert.equal(sceneName("race-after.sav"), "race-after.sav");
+});

@@ -19,17 +19,37 @@ export const GUEST_HZ = 486_000_000;
 // pinned lane's type needs no knowing.
 const PMUS = ["armv8_pmuv3_0", "armv8_pmuv3_1"];
 
-// perf stat -x, output: counts summed per event name across PMUs.
+// Front-end and back-end events of the X925/A725 PMUs (--counter-events
+// frontend): where the cycles of a low-IPC thread go. Five, so that with
+// instructions they fit the six programmable counters (cycles has its own)
+// and nothing is multiplexed.
+export const FRONTEND_EVENTS = ["stall_frontend", "stall_backend", "l1i_cache_refill", "itlb_walk", "br_mis_pred_retired"];
+
+// perf stat -x, output: counts summed per event name across PMUs, and the
+// smallest share of the window an event was counted in (multiplexing: under
+// 100 %, perf scaled its count).
 export function parsePerfCsv(text) {
   const out = { instructions: 0, cycles: 0 };
+  let counted = 100;
   for (const line of text.split("\n")) {
-    const [count, , event] = line.split(",");
+    const [count, , event, , pct] = line.split(",");
     const n = Number(count);
-    if (!Number.isFinite(n) || !event) continue; // "<not counted>", comments
-    if (/\/instructions\//.test(event)) out.instructions += n;
-    else if (/\/cycles\//.test(event)) out.cycles += n;
+    const name = /^[^/]+\/([^/]+)\//.exec(event ?? "")?.[1];
+    if (!Number.isFinite(n) || !name) continue; // "<not counted>", comments
+    out[name] = (out[name] ?? 0) + n;
+    if (Number.isFinite(Number(pct)) && Number(pct) > 0) counted = Math.min(counted, Number(pct));
   }
+  if (Object.keys(out).length > 2) out.countedPct = counted;
   return out;
+}
+
+// The events of --counter-events: "frontend" or a comma-separated list of
+// PMU event names (as in /sys/bus/event_source/devices/armv8_pmuv3_1/events).
+export function counterEvents(spec) {
+  if (!spec) return [];
+  const list = spec === "frontend" ? FRONTEND_EVENTS : spec.split(",").map((e) => e.trim()).filter(Boolean);
+  for (const e of list) if (!/^[a-z0-9_]+$/.test(e) || e === "instructions" || e === "cycles") throw new Error(`--counter-events: bad event ${e}`);
+  return list;
 }
 
 // The busiest thread of the renderer(s) of `profileDir`, from /proc ticks
@@ -55,14 +75,15 @@ export async function busiestThread(profileDir, ms = 500) {
 
 // o.onWindow for race-perf's measure(): perf stat on the busiest thread for
 // the window of each session.
-export function perfCounters(outDir = mkdtempSync(path.join(os.tmpdir(), "perf-counters-"))) {
+// `extra`: more PMU events (counterEvents), counted on the same thread and window.
+export function perfCounters(outDir = mkdtempSync(path.join(os.tmpdir(), "perf-counters-")), { extra = [] } = {}) {
   const live = new Map();
   return async (phase, session) => {
     if (phase === "start") {
       const tid = await busiestThread(session.profileDir);
       if (!tid) return live.set(session, { error: "no renderer thread" });
       const file = path.join(outDir, `perf-${tid}-${randomBytes(3).toString("hex")}.csv`);
-      const events = PMUS.flatMap((p) => [`${p}/instructions/u`, `${p}/cycles/u`]).join(",");
+      const events = PMUS.flatMap((p) => ["instructions", "cycles", ...extra].map((e) => `${p}/${e}/u`)).join(",");
       const proc = spawn("perf", ["stat", "-x,", "-e", events, "-t", tid, "-o", file], { stdio: "ignore" });
       live.set(session, { proc, file, tid, comm: (() => { try { return readFileSync(`/proc/${tid}/comm`, "utf8").trim(); } catch { return null; } })() });
       return;
@@ -91,6 +112,18 @@ export function instructionsPerGuestCycle(cold) {
   return c.instructions / ((cold.speed / 100) * GUEST_HZ * (cold.windowMs / 1000));
 }
 
+
+// Host cycles per guest cycle of one window, as instructionsPerGuestCycle:
+// the metric that decides when a change moves the IPC (instructions alone
+// read region code 29 % cheaper where its cycles were equal, aot on/off
+// 2026-10-23).
+export function cyclesPerGuestCycle(cold) {
+  const c = cold?.counters;
+  if (!c || c.error || !c.cycles) return null;
+  if (cold.guestTicks > 0) return c.cycles / cold.guestTicks;
+  if (!cold.speed || !cold.windowMs) return null;
+  return c.cycles / ((cold.speed / 100) * GUEST_HZ * (cold.windowMs / 1000));
+}
 
 // Refuses when the kernel would refuse perf (not persistent: back to 4 on reboot).
 export function checkPerfAccess() {

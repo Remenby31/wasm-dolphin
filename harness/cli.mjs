@@ -369,7 +369,7 @@ function noteInfraCrash(file, dir, entry) {
 }
 
 function finishRecords(records, spec) {
-  renderChecks(records, spec.reference);
+  renderChecks(records, spec.reference, undefined, spec.renderMatch == null ? {} : { match: spec.renderMatch });
   for (const r of records) {
     r.checks = runChecks(r);
     r.flags = runFlags(r);

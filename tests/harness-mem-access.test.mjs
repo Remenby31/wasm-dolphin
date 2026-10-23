@@ -44,6 +44,8 @@ test("memory access stats: layout v1 at the agreed offsets; other layouts and ba
   assert.match(decodeMemStats(memBytes({ size: 128 })).error, /needs 192/);
   assert.match(decodeMemStats(memBytes({ ...BLOCKS, cyclesCovered: 3000 })).error, /cyclesCovered 3000 > cyclesTotal 2000/);
   assert.match(consistentMemRead(s, decodeMemStats(memBytes({ ...BLOCKS, instructions: 10 }))).error, /torn read \(guestInstructions/);
+  assert.equal(consistentMemRead(s, decodeMemStats(memBytes(BLOCKS))), s, "identical copies are trusted");
+  assert.match(consistentMemRead(s, decodeMemStats(memBytes({ ...BLOCKS, instructions: 1001 }))).error, /written between the two copies \(guestInstructions/);
 });
 
 test("memory access ratio: counted blocks, coverage, the region part estimated apart, the slow path", () => {

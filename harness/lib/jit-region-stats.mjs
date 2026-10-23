@@ -78,6 +78,9 @@ export function decodeRegionStats(bytes) {
       const spare = view.getUint32(12, true);
       out.diagnostics.installFallbacks = spare & 0xffff;
       out.diagnostics.installBootMaxSliceMs = (spare >>> 16) / 10;
+      // The worst install slice, boot window included (review of #86: since
+      // the cache loads after the first image, the boot window falls in play).
+      out.diagnostics.installWorstSliceMs = Math.max(out.diagnostics.installMaxSliceMs ?? 0, out.diagnostics.installBootMaxSliceMs);
     }
     for (const name of DIAG_COUNTERS) {
       const v = out.diagnostics[name];

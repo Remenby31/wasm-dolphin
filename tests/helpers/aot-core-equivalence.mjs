@@ -269,10 +269,30 @@ export function compareCall(core, regionAt, start) {
         if (raised) return done("exception");
         continue;
       }
-      regionRuns += 1;
       const code = core.runRegion(handle);
+      if (code === 4) {
+        // Refused by the mode (0121: MSR LE/FE0/FE1, HID2.LSQE): the CPU loop
+        // runs blocks here, as the interpreter does.
+        const raised = core.interpretOne();
+        interpCycles += before - core.downcount();
+        if (raised) return done("exception");
+        continue;
+      }
+      regionRuns += 1;
       regionCycles += before - core.downcount();
-      if (code === 1) throw new Error(`region refused its own entry ${pc.toString(16)}`);
+      if (code === 1) {
+        // 0111: with XER.SO set a fragment refuses to run (returns 1 before
+        // touching the state); the dispatcher then runs the block path. The
+        // program itself may set SO (mtxer runs outside regions).
+        if ((core.state()[33] >>> 31) === 1 && core.pc() === pc && core.downcount() === before) {
+          regionRuns -= 1;
+          const raised = core.interpretOne();
+          interpCycles += before - core.downcount();
+          if (raised) return done("exception");
+          continue;
+        }
+        throw new Error(`region refused its own entry ${pc.toString(16)}`);
+      }
       if (code === 3) return done("exception");
     }
   };
@@ -360,9 +380,9 @@ export function checkCoreSlice({ core, plan, image, slice, slices, maxFunctions 
   return report;
 }
 
-const ORACLE_CODE = 0x80003000;
+export const ORACLE_CODE = 0x80003000;
 
-function bigEndian(words) {
+export function bigEndian(words) {
   const out = new Uint8Array(4 * words.length);
   const v = new DataView(out.buffer);
   words.forEach((w, i) => v.setUint32(4 * i, w >>> 0, false));
@@ -371,6 +391,27 @@ function bigEndian(words) {
 
 // The oracle's random programs (jit-oracle.mjs), one fragment each, from its
 // random states, with a full and a small cycle budget (mid-region exits).
+// One program at ORACLE_CODE, translated as a region while `translateState`
+// is loaded (its MSR decides which FPU ops the translator takes), then run
+// from `state` by the interpreter alone and by the region (compareCall).
+export function compareRegionProgram(core, words, state, { translateState = state, mask = PRODUCTION_DISABLE_MASK, budget = 400000 } = {}) {
+  core.load(ORACLE_CODE, bigEndian(words));
+  core.loadState(translateState, ORACLE_CODE);
+  const fragment = core.translate(ORACLE_CODE, { mask, ranges: [[ORACLE_CODE, ORACLE_CODE + 4 * words.length]] });
+  if (!fragment) return { translated: false };
+  const { bytes } = assembleRegion([fragment], { helpers: HELPER_SIGNATURES, pcOffset: core.pcOffset, memoryPages: core.memoryPages });
+  const handle = core.compile(bytes);
+  if (handle <= 0) throw new Error(`core rejected a region module (${handle})`);
+  const regionAt = new Map(fragment.entries.map((pc) => [pc >>> 0, handle]));
+  const baseline = core.ram().slice();
+  const result = compareCall(core, regionAt, () => {
+    core.ram().set(baseline);
+    core.loadState(state, ORACLE_CODE);
+    core.setDowncount(budget);
+  });
+  return { translated: true, fragment, ...result };
+}
+
 export function runOracleProgramsAsRegions(core, { seed, count, length, mask }) {
   const r = makeRng(seed);
   const tally = { programs: 0, translated: 0, compared: 0, equal: 0, trap: 0, ends: {}, regionRuns: 0, mismatches: [] };
@@ -389,11 +430,26 @@ export function runOracleProgramsAsRegions(core, { seed, count, length, mask }) 
     const regionAt = new Map(fragment.entries.map((pc) => [pc >>> 0, handle]));
     const baseline = core.ram().slice();
     for (const budget of [400000, smallBudget]) {
-      const result = compareCall(core, regionAt, () => {
+      const call = (start) => compareCall(core, regionAt, () => {
         core.ram().set(baseline);
-        core.loadState(state, ORACLE_CODE);
+        core.loadState(start, ORACLE_CODE);
         core.setDowncount(budget);
       });
+      let result = call(state);
+      // 0111: regions do not run with XER.SO set (their compares store CR
+      // fields without it): from a state with SO set, compareCall runs the
+      // interpreter where a fragment refuses. The program is also compared
+      // from the same state with SO clear, so its regions run.
+      if ((state[33] >>> 31) === 1 && core.has?.("DolphinWeb_AotKeyParts")) {
+        const clear = state.slice();
+        clear[33] = (clear[33] & 0x7fffffff) >>> 0;
+        const again = call(clear);
+        if (!again.trap) {
+          tally.soCleared = (tally.soCleared ?? 0) + 1;
+          if (again.error) tally.mismatches.push({ n, budget, soCleared: true, error: again.error });
+          else if (!again.equal) tally.mismatches.push({ n, budget, soCleared: true, program: Array.from(words, (w) => w.toString(16)), ...again.difference });
+        }
+      }
       if (result.trap) { tally.trap += 1; continue; }
       tally.compared += 1;
       if (result.error) { tally.mismatches.push({ n, budget, error: result.error }); continue; }

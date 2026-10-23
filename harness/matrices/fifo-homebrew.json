@@ -1,0 +1,32 @@
+{
+  "name": "fifo-homebrew",
+  "runs": 2,
+  "warmupSec": 4,
+  "sampleSec": 8,
+  "games": [
+    {
+      "id": "gxscene-fifo",
+      "iso": "harness/homebrew/out/gxscene.dff",
+      "static": true,
+      "set": {
+        "cpu": "single",
+        "fifolog": "1"
+      }
+    }
+  ],
+  "configs": [
+    {
+      "id": "sw-exact",
+      "preset": "sw-interp",
+      "set": {
+        "fastsw": "0"
+      }
+    },
+    {
+      "id": "wgpu-interp",
+      "preset": "wgpu-nojit"
+    }
+  ],
+  "reference": "sw-exact",
+  "renderMatch": 0.99
+}

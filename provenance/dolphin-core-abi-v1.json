@@ -1,27 +1,27 @@
 {
   "schemaVersion": 1,
   "abiVersion": 1,
-  "coreId": "sha256:615b14b46cd26db61f40e18768ef1f697c9ff51170820bf24564a5c22879d881",
+  "coreId": "sha256:fdd3b0e8a0e347c1579696b4accedd0d0641f3ff6ba1feef41b0d4cf9c60d0c7",
   "upstreamCommit": "e22551eae1c84a7e4d0b6a5c519ef4ed4ef69df1",
   "artifacts": [
     {
       "path": "cores/dolphin/dolphin-core-upstream.js",
       "hashMode": "lf-normalized",
-      "size": 281120,
-      "sha256": "ffd0941dacc651c57b71963ddd0c283a3d5232b7c303864ff8e1e5d93ce73dd2"
+      "size": 282487,
+      "sha256": "4ff9ec4f1a572809a470ae7b0b496fbdcc5b232218c064fd8988f60f90429240"
     },
     {
       "path": "cores/dolphin/dolphin-core-upstream.wasm",
-      "size": 13115012,
-      "sha256": "615b14b46cd26db61f40e18768ef1f697c9ff51170820bf24564a5c22879d881"
+      "size": 13144303,
+      "sha256": "fdd3b0e8a0e347c1579696b4accedd0d0641f3ff6ba1feef41b0d4cf9c60d0c7"
     }
   ],
   "contractSources": [
     {
       "path": "core/upstream/dolphin_web_discio.cpp",
       "hashMode": "lf-normalized",
-      "size": 69240,
-      "sha256": "2f8215056ade5918a5ff8a85f2e508f82f64ab43ecc4108a62535ebb3bd6743b"
+      "size": 71204,
+      "sha256": "273e374722702266de9a214f174a087eefd1a3db93fbd9d615016e8e270d6f63"
     },
     {
       "path": "core/upstream/dolphin_web_raster_profile.h",
@@ -44,8 +44,8 @@
     {
       "path": "core/upstream/dolphin_web_core.cpp",
       "hashMode": "lf-normalized",
-      "size": 55870,
-      "sha256": "fba967d3fb529f761814975c45bec68beab7e00a0a2bb46c11f1bbac755fd7dd"
+      "size": 56394,
+      "sha256": "262ba9f9866bf82f6f3e494c583dc665f52bd4bc043a72d99bd60bb300b01c63"
     },
     {
       "path": "src/app.js",
@@ -86,8 +86,8 @@
     {
       "path": "src/core-host.js",
       "hashMode": "lf-normalized",
-      "size": 73979,
-      "sha256": "7c00584a3940140891ea33d9e7666714403d3e78d3dd75f9776127329498dcee"
+      "size": 74404,
+      "sha256": "2cf0ccab5c30becb33008787a16b64a2665a4b734478c60043aca39a36ec6e37"
     },
     {
       "path": "src/diagnostic-log-filter.js",
@@ -140,8 +140,8 @@
     {
       "path": "src/upstream-discio-worker.js",
       "hashMode": "lf-normalized",
-      "size": 708876,
-      "sha256": "337e90580b7646dfb3083eb62c94a0101ca0dbb2a538d63a2f2256f66d8cf0ae"
+      "size": 717516,
+      "sha256": "9be70d83ab53272e64460bf066996619ec3633a46191ae964de6ad44a7eba338"
     },
     {
       "path": "src/wgpu-renderer-worker-probe.js",
@@ -164,8 +164,8 @@
     {
       "path": "src/upstream-worker-adapter.js",
       "hashMode": "lf-normalized",
-      "size": 52377,
-      "sha256": "04998ea67c90296abdd9e0c28beea82e51383b2c716c84607023ae665b7480b1"
+      "size": 52566,
+      "sha256": "b6d837303588048a666b68616156fb692d6c95a426ea5108c081c4aad04c8f1f"
     },
     {
       "path": "src/upstream-worker-protocol.js",
@@ -384,10 +384,14 @@
     "_DolphinWeb_AotRamReady",
     "_DolphinWeb_AotRegionHeapBases",
     "_DolphinWeb_AotRegionRechecks",
+    "_DolphinWeb_AotRegionSleepInstalls",
+    "_DolphinWeb_AotRegionSleepWindowForTest",
     "_DolphinWeb_AotRegionsSkippedMmu",
     "_DolphinWeb_AotRunRegionForTest",
     "_DolphinWeb_AotServiceRegionsForTest",
+    "_DolphinWeb_AotSetInstallCostForTest",
     "_DolphinWeb_AotSetReadyWaitForTest",
+    "_DolphinWeb_AotSetSleepWaitForTest",
     "_DolphinWeb_AotTestInterpretOne",
     "_DolphinWeb_AotTestLoadState",
     "_DolphinWeb_AotTestRam",
@@ -416,6 +420,9 @@
     "_DolphinWeb_HarnessDisarmCapture",
     "_DolphinWeb_HarnessEnable",
     "_DolphinWeb_HarnessEnabled",
+    "_DolphinWeb_HarnessFifoRecord",
+    "_DolphinWeb_HarnessFifoRecordCancel",
+    "_DolphinWeb_HarnessFifoRecordState",
     "_DolphinWeb_HarnessLoadGeneration",
     "_DolphinWeb_HarnessPcAddress",
     "_DolphinWeb_HarnessViRing",
@@ -453,6 +460,9 @@
     "_DolphinWeb_JitStateLayout",
     "_DolphinWeb_JitTableFull",
     "_DolphinWeb_JitTransientRejectCount",
+    "_DolphinWeb_MemAccessKindForTest",
+    "_DolphinWeb_MemAccessStaticAt",
+    "_DolphinWeb_MemAccessStats",
     "_DolphinWeb_RecordCacheHit",
     "_DolphinWeb_RecordCacheMiss",
     "_DolphinWeb_RecordInstanceUs",
@@ -654,6 +664,7 @@
       "validationCaptureAtVi",
       "validationEnableGpuSyncDiag",
       "validationEnableHarness",
+      "validationFifoRecord",
       "validationFinalizeWgpuMappedDrain",
       "validationFinalizeWgpuRendererProbe",
       "validationFinalizeWgpuReplay",

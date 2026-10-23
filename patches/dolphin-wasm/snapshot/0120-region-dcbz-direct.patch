@@ -1,0 +1,12 @@
+diff --git a/Source/Core/Core/PowerPC/CachedInterpreter/CachedInterpreter.cpp b/Source/Core/Core/PowerPC/CachedInterpreter/CachedInterpreter.cpp
+--- a/Source/Core/Core/PowerPC/CachedInterpreter/CachedInterpreter.cpp
++++ b/Source/Core/Core/PowerPC/CachedInterpreter/CachedInterpreter.cpp
+@@ -8548,6 +8548,8 @@
+     case 824:  // srawix
+     case 922:  // extshx
+     case 954:  // extsbx
++    case 1014: // dcbz (patch 0120): EmitDcbz zeroes a MEM1 line inline, else
++               // the system helper (no DCE: alignment; elsewhere: the MMU)
+       return true;
+     case 8:    // subfcx
+     case 10:   // addcx

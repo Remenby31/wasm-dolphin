@@ -28,6 +28,7 @@ test("headroom: Dolphin's Max on the CPU thread, the GPU bound, the smaller one"
   assert.equal(h.headroomApplies, true);
   assert.equal(h.throttleSleepShare, 0.4);
   assert.equal(h.xfbCopiesPerVi, 0.5);
+  assert.equal(h.gameFramesPerSecond, 30); // 300 XFB copies over 10 host s
   // The GPU as the bound.
   assert.equal(headroomOf(decodeHeadroomStats(hrBytes({ windowUs: 10e6, cpuSleepUs: 6e6, gpuWorkUs: 8e6 })), { guestSeconds: 10 }).headroom, 1.25);
   // Below 100 %: no sleep, the speed is the number.
@@ -54,6 +55,10 @@ test("validity: ring overflow, speed above its target, no unique image, game fra
   assert.match(invalidReasons({ complete: false, timelineLost: { vi: 6190, presents: 0 }, speed: 1650 }, {})[0], /ring overflowed: 6190 VI/);
   assert.match(invalidReasons({ complete: true, speed: 170 }, { target: 1.6 })[0], /above the target 160 %/);
   assert.deepEqual(invalidReasons({ complete: true, speed: 160 }, { target: 1.6 }), []);
+  // A frozen renderer: nothing presented, no game frame; uniqueShare is null, not 0.
+  const frozen = { complete: true, speed: 160.1, uniqueFrames: { ok: true, windowMs: 8004, presents: 0, compared: 0, uniqueShare: null }, headroom: { xfbCopiesPerVi: 0 } };
+  assert.deepEqual(invalidReasons(frozen, { target: 1.6 }), ["no present in the unique-frames window (rendering frozen)", "no game frame (XFB copy) in the window (rendering frozen)"]);
+  assert.deepEqual(invalidReasons({ complete: true, speed: 100, uniqueFrames: { ok: true, windowMs: 8000, presents: 480, uniqueShare: 0.25 }, headroom: { xfbCopiesPerVi: 1 } }, { target: 1 }), []);
   assert.match(invalidReasons({ complete: true, uniqueFrames: { uniqueShare: 0 } })[0], /no unique image/);
   assert.match(invalidReasons({ complete: true, headroom: { xfbCopiesPerVi: 0.2 } }, { framesPerViRef: 0.48 })[0], /outside ±10 % of 0.48/);
   assert.deepEqual(invalidReasons({ complete: true, headroom: { xfbCopiesPerVi: 0.5 } }, { framesPerViRef: 0.48 }), []);

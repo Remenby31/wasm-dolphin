@@ -52,6 +52,14 @@ if (!core) {
   process.exit(2);
 }
 const masks = { both: [0, REGALLOC_OFF], on: [0], off: [REGALLOC_OFF] }[regalloc];
+// --fprf: FPRF on for every tier (Config::MAIN_FPRF, patch 0121); off by default.
+if (args.includes("--fprf")) {
+  if (!core.has("DolphinWeb_SetFprfForTest")) {
+    console.error("--fprf: this core predates patch 0121");
+    process.exit(2);
+  }
+  core.setFprf(true);
+}
 
 const findings = new Map(); // key -> {count, example}
 let compared = 0, notCompiled = 0, rejected = 0, raisedException = 0;
