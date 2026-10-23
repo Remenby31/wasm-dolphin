@@ -240,6 +240,9 @@ export async function measure(session, o) {
     const pres = presentationStats(timeline);
     const viMs = timeline.vi.slice(1).map((v, i) => v.t - timeline.vi[i].t);
     const xfbDt = /xfb_dt:([\d.]+) avg:([\d.]+) max:([\d.]+)/.exec(String(info?.ppcWasmHelperStats ?? ""));
+    // CachedInterpreter code space (patch 0138): cache clears (all, and
+    // because the space was full) and the highest offset written, since boot.
+    const code = /codeclears:(\d+) codefull:(\d+) codehighkib:(\d+) codesizemib:(\d+)/.exec(String(info?.ppcWasmHelperStats ?? ""));
     const medianLoad = median(loads);
     // Unique images (--unique-frames): a window of its own after the speed
     // window (its GPU readbacks never weigh on the speed), before the stats.
@@ -310,6 +313,7 @@ export async function measure(session, o) {
       // Where they happen (timeline.mjs): [ms into the window, interval ms, VI since load].
       hitchList: hitchList(timeline, { origin: t0 }),
       coreprofXfbDtMaxMs: xfbDt ? Number(xfbDt[3]) : null,
+      codeSpace: code ? { clears: Number(code[1]), fullClears: Number(code[2]), highKiB: Number(code[3]), sizeMiB: Number(code[4]) } : null,
       rendererThreads: threads,
       freezes: { core: core.freezes?.length ?? 0, present: pres.freezes.length },
       pc: pc && !pc.error ? summarizePcSamples(pc, { functions: o.functions }) : pc,

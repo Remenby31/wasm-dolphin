@@ -94,6 +94,7 @@ export class EmulatorHost {
     this.ppcWasmJitWarmupFrames = requestedPpcWasmJitWarmupFrames(this.videoBackend);
     this.ppcProfile = requestedPpcProfile();
     this.gpuSpinMicros = requestedGpuSpinMicros();
+    this.codeSpaceMiB = requestedCodeSpaceMiB();
     this.cpuOverclock = requestedCpuOverclock();
     this.emulationSpeed = requestedEmulationSpeed();
     this.presentationScale = requestedPresentationScale();
@@ -363,6 +364,7 @@ export class EmulatorHost {
             ppcWasmJitWarmupFrames: this.ppcWasmJitWarmupFrames,
             ppcProfile: this.ppcProfile,
             gpuSpinMicros: this.gpuSpinMicros,
+            codeSpaceMiB: this.codeSpaceMiB,
             cpuOverclock: this.cpuOverclock,
             emulationSpeed: this.emulationSpeed,
             presentationScale: this.presentationScale,
@@ -411,6 +413,7 @@ export class EmulatorHost {
             ppcWasmJitWarmupFrames: this.ppcWasmJitWarmupFrames,
             ppcProfile: this.ppcProfile,
             gpuSpinMicros: this.gpuSpinMicros,
+            codeSpaceMiB: this.codeSpaceMiB,
             cpuOverclock: this.cpuOverclock,
             emulationSpeed: this.emulationSpeed,
             presentationScale: this.presentationScale,
@@ -1418,6 +1421,12 @@ export function parseGpuSpinMicros(raw) {
   if (/^\d{1,7}$/.test(raw) && Number(raw) <= MAX_GPU_SPIN_MICROS) return Number(raw);
   console.warn(`?gpuspin=${JSON.stringify(raw)} ignored: expected -1 or an integer from 0 to ${MAX_GPU_SPIN_MICROS} (microseconds); using ${DEFAULT_GPU_SPIN_MICROS}`);
   return DEFAULT_GPU_SPIN_MICROS;
+}
+// ?codespace=<MiB> (patch 0138): the CachedInterpreter code space, 4 to 128
+// MiB; absent or invalid, the core's default (32). For measurements.
+function requestedCodeSpaceMiB() {
+  const raw = new URLSearchParams(window.location.search).get("codespace");
+  return raw != null && /^\d{1,3}$/.test(raw) && Number(raw) >= 4 && Number(raw) <= 128 ? Number(raw) : null;
 }
 function requestedGpuSpinMicros() {
   return parseGpuSpinMicros(new URLSearchParams(window.location.search).get("gpuspin"));

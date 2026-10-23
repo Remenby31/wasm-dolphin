@@ -85,6 +85,7 @@ export class UpstreamWorkerAdapter {
     ppcWasmJitWarmupFrames = 60,
     ppcProfile = false,
     gpuSpinMicros = -1,
+    codeSpaceMiB = null,
     cpuOverclock = 1,
     emulationSpeed = 1,
     presentationScale = 1,
@@ -196,6 +197,7 @@ export class UpstreamWorkerAdapter {
     this.ppcWasmJitWarmupFrames = ppcWasmJitWarmupFrames;
     this.ppcProfile = Boolean(ppcProfile);
     this.gpuSpinMicros = Number.isInteger(gpuSpinMicros) ? gpuSpinMicros : -1;
+    this.codeSpaceMiB = Number.isInteger(codeSpaceMiB) ? codeSpaceMiB : null;
     this.cpuOverclock = cpuOverclock;
     this.emulationSpeed = emulationSpeed;
     this.presentationScale = presentationScale;
@@ -424,6 +426,7 @@ export class UpstreamWorkerAdapter {
       ppcWasmJitWarmupFrames: this.ppcWasmJitWarmupFrames,
       ppcProfile: this.ppcProfile,
       gpuSpinMicros: this.gpuSpinMicros,
+      codeSpaceMiB: this.codeSpaceMiB,
       cpuOverclock: this.cpuOverclock,
       emulationSpeed: this.emulationSpeed,
       presentationScale: this.presentationScale,

@@ -1,0 +1,99 @@
+diff --git a/Source/Core/Core/PowerPC/CachedInterpreter/CachedInterpreter.cpp b/Source/Core/Core/PowerPC/CachedInterpreter/CachedInterpreter.cpp
+index 5a686ff863..7a37c13769 100644
+--- a/Source/Core/Core/PowerPC/CachedInterpreter/CachedInterpreter.cpp
++++ b/Source/Core/Core/PowerPC/CachedInterpreter/CachedInterpreter.cpp
+@@ -9762,6 +9762,28 @@ extern std::atomic<bool> s_region_core_active;
+ }  // namespace
+ #endif
+ 
++#ifdef __EMSCRIPTEN__
++namespace
++{
++// Patch 0138: the code space (callbacks and operands only, the WASM bodies
++// live in their own modules) is 32 MiB instead of Jit64's 128 MiB. Under
++// Emscripten the allocation is a memalign + memset that dirties all of it at
++// boot. ?codespace=<MiB> (DolphinWeb_SetCodeSpaceMiB, before the boot) sets
++// it for a measurement. Counters in GetPpcWasmHelperStats: cache clears in
++// all, those because the space was full, and the highest offset written.
++std::atomic<u32> s_code_space_mib{32};
++std::atomic<u32> s_code_clears{0};
++std::atomic<u32> s_code_full_clears{0};
++std::atomic<u32> s_code_high_kib{0};
++}  // namespace
++
++extern "C" EMSCRIPTEN_KEEPALIVE void DolphinWeb_SetCodeSpaceMiB(int mib)
++{
++  if (mib >= 4 && mib <= 128)
++    s_code_space_mib.store(static_cast<u32>(mib), std::memory_order_relaxed);
++}
++#endif
++
+ void CachedInterpreter::Init()
+ {
+ #if DOLPHIN_WEB_STATIC_EXIT_LINKS && DOLPHIN_WEB_STATIC_EXIT_LINK_STATS
+@@ -9773,7 +9795,11 @@ void CachedInterpreter::Init()
+   s_region_core_active.store(true, std::memory_order_relaxed);
+ #endif
+ 
++#ifdef __EMSCRIPTEN__
++  AllocCodeSpace(size_t{s_code_space_mib.load(std::memory_order_relaxed)} << 20);
++#else
+   AllocCodeSpace(CODE_SIZE);
++#endif
+   ResetFreeMemoryRanges();
+ 
+   jo.enableBlocklink = false;
+@@ -15274,6 +15300,10 @@ extern "C" const char* GetPpcWasmHelperStats()
+       << " transientreject:" << s_wasm_transient_reject_count.load(std::memory_order_relaxed)
+       << " offthreaddefer:" << s_wasm_off_thread_defer_count
+       << " tablefull:" << (s_wasm_table_full.load(std::memory_order_relaxed) ? 1 : 0)
++      << " codeclears:" << s_code_clears.load(std::memory_order_relaxed)
++      << " codefull:" << s_code_full_clears.load(std::memory_order_relaxed)
++      << " codehighkib:" << s_code_high_kib.load(std::memory_order_relaxed)
++      << " codesizemib:" << s_code_space_mib.load(std::memory_order_relaxed)
+       << " fmad:" << s_wasm_fma_import_counts[0].load(std::memory_order_relaxed) +
+                          s_wasm_fma_import_counts[1].load(std::memory_order_relaxed)
+       << " fmas:" << s_wasm_fma_import_counts[2].load(std::memory_order_relaxed) +
+@@ -17586,6 +17616,10 @@ void CachedInterpreter::Jit(u32 em_address, bool clear_cache_and_retry_on_failur
+ #endif
+   if (IsAlmostFull() || SConfig::GetInstance().bJITNoBlockCache)
+   {
++#ifdef __EMSCRIPTEN__
++    if (IsAlmostFull())
++      s_code_full_clears.fetch_add(1, std::memory_order_relaxed);
++#endif
+     ClearCache();
+   }
+   FreeRanges();
+@@ -17616,6 +17650,13 @@ void CachedInterpreter::Jit(u32 em_address, bool clear_cache_and_retry_on_failur
+       // Mark the memory region that this code block uses in the RangeSizeSet.
+       if (b->near_begin != b->near_end)
+         m_free_ranges.erase(b->near_begin, b->near_end);
++#ifdef __EMSCRIPTEN__
++      {
++        const u32 high = static_cast<u32>((b->near_end - region) >> 10);
++        if (high > s_code_high_kib.load(std::memory_order_relaxed))
++          s_code_high_kib.store(high, std::memory_order_relaxed);
++      }
++#endif
+ 
+ #if DOLPHIN_WEB_STATIC_EXIT_LINKS
+       m_block_cache.FinalizeBlock(*b, jo.enableBlocklink || StaticExitLinksEnabled(),
+@@ -17641,6 +17682,9 @@ void CachedInterpreter::Jit(u32 em_address, bool clear_cache_and_retry_on_failur
+   if (clear_cache_and_retry_on_failure)
+   {
+     WARN_LOG_FMT(DYNA_REC, "flushing code caches, please report if this happens a lot");
++#ifdef __EMSCRIPTEN__
++    s_code_full_clears.fetch_add(1, std::memory_order_relaxed);
++#endif
+     ClearCache();
+     Jit(em_address, false);
+     return;
+@@ -17812,6 +17856,7 @@ void CachedInterpreter::ClearCache()
+ #endif
+ #line 12477
+ #ifdef __EMSCRIPTEN__
++  s_code_clears.fetch_add(1, std::memory_order_relaxed);
+   s_deferred_wasm_queues.erase(this);
+   ClearOffThreadAndRegionState();
+ #endif
