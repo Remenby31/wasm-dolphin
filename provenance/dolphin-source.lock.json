@@ -25,7 +25,7 @@
       "commit": "01e0577914a75a2569c846778c2f93aa8e6feddd"
     }
   },
-  "patchSeriesSha256": "4d596a28d6670c8b5a4f62baa88d2f166089a1a78fc76e20004c0a0eef3827da",
+  "patchSeriesSha256": "f2e9552259a434997c59e5faf7574cb5c56ed0b55b30444ea4813d71dfa32eea",
   "patches": [
     {
       "order": 1,
@@ -831,12 +831,20 @@
       "order": 101,
       "cwd": ".",
       "hashMode": "lf-normalized",
-      "path": "patches/dolphin-wasm/snapshot/0127-dead-gpr-prologue-loads.patch",
-      "size": 2178,
-      "sha256": "cae19f41a80255189fd871620987baefabf7a329a0df144e1d7fc57c8b0c122d"
+      "path": "patches/dolphin-wasm/snapshot/0129-fused-relaxed-madd.patch",
+      "size": 7879,
+      "sha256": "606b0deff8a951682242300e55105b3e9c0ce0fac4c5d67f54ef67ed65659600"
     },
     {
       "order": 102,
+      "cwd": ".",
+      "hashMode": "lf-normalized",
+      "path": "patches/dolphin-wasm/snapshot/0134-dead-gpr-prologue-loads.patch",
+      "size": 2369,
+      "sha256": "ab89ff56313de0cab915420ab1f9e4eb941fd3ce17e0be034d11462dc76681b7"
+    },
+    {
+      "order": 103,
       "cwd": "Externals/SFML/SFML",
       "hashMode": "lf-normalized",
       "path": "patches/dolphin-wasm/submodules/0001-sfml-emscripten-config.patch",
@@ -844,7 +852,7 @@
       "sha256": "f82197a21fe982ad83f6ee7bbf5a03839b1cebd4d64da3eab11263842bf61d89"
     },
     {
-      "order": 103,
+      "order": 104,
       "cwd": "Externals/xxhash/xxHash",
       "hashMode": "lf-normalized",
       "path": "patches/dolphin-wasm/submodules/0002-xxhash-wasm-simd-scalar.patch",

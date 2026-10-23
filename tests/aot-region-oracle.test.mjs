@@ -108,13 +108,13 @@ test("psq_lux kept in the region updates a GPR the block had cached dirty, like 
   assert.equal(r.got.end, "stop");
 });
 
-// 0127: a GPR the block writes before reading it is not loaded in the
+// 0134 (was 0127): a GPR the block writes before reading it is not loaded in the
 // prologue. Written first by a load whose fast path fails (a helper writes
 // it, the slow path reloads it), by an immediate, and read right after,
 // against the interpreter.
 const lwz = (d, a, off) => (32 << 26) | (d << 21) | (a << 16) | (off & 0xffff);
-const deadSkip = skip || (compilerVersion() < 19 && "core before 0127 (compiler version < 19)");
-test("GPRs written before read are not loaded, the slow path and the reads after agree with the interpreter (0127)", { skip: deadSkip }, () => {
+const deadSkip = skip || (compilerVersion() < 26 && "core before 0134 (compiler version < 26)");
+test("GPRs written before read are not loaded, the slow path and the reads after agree with the interpreter (0134)", { skip: deadSkip }, () => {
   const cases = [
     ["slow-path load", [lwz(5, 6, 0), add(7, 5, 5), addi(5, 5, 1), BLR], (s) => { s[6] = 0x00100080; }],
     ["fast-path load", [lwz(5, 6, 4), add(7, 5, 5), BLR], (s) => { s[6] = 0x80004000; }],
@@ -130,7 +130,7 @@ test("GPRs written before read are not loaded, the slow path and the reads after
   }
 });
 
-test("a GPR written first by a load whose slow path halts keeps its value (0127, lmw)", { skip: deadSkip }, () => {
+test("a GPR written first by a load whose slow path halts keeps its value (0134, lmw)", { skip: deadSkip }, () => {
   // lmw r29, 2(r1): unaligned, the helper takes an alignment exception before
   // writing r29..r31; their values must stay as they were.
   const lmw = (d, a, off) => (46 << 26) | (d << 21) | (a << 16) | (off & 0xffff);
@@ -140,7 +140,7 @@ test("a GPR written first by a load whose slow path halts keeps its value (0127,
   assert.ok(r.equal, JSON.stringify(r.difference));
 });
 
-test("a load that faults before the integer write of an unloaded GPR leaves that GPR as it was (0127)", { skip: deadSkip }, () => {
+test("a load that faults before the integer write of an unloaded GPR leaves that GPR as it was (0134)", { skip: deadSkip }, () => {
   // The halt's flush is emitted before the later write: r5 is neither loaded
   // nor dirty there, and must keep its value. The faulting load is a lwz from
   // 0x00004000, which no BAT maps: a DSI, which halts the region. (Neither an

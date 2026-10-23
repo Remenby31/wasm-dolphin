@@ -337,19 +337,17 @@ export class AotOptimizer extends EventTarget {
       this.emit("optimization-progress", { ...this.progress(doneSet), ms: ms() });
       // Modules marked stale while this run goes are appended to its work.
       const queued = new Set(todo.map((u) => u.key));
-      for (let n = 0; ; n++) {
-        if (n >= todo.length) {
-          for (const u of this.regions) if (this.stale.has(u.key) && !queued.has(u.key)) { queued.add(u.key); todo.push(u); }
-        }
-        if (n >= todo.length || this.cancelled) break;
-        const unit = todo[n];
-        this.stale.delete(unit.key);
-        const result = await this.translateUnit(unit);
-        if (!result || this.cancelled) break;
-        if (result.notReady) {
-          this.emit("optimization-error", { message: "the core is not ready to translate; resumed at the next launch", fatal: false });
-          return;
-        }
+      // Module n+1 is translated (on this worker, in slices) while module n
+      // compiles (another worker), installs and goes to the cache: the
+      // finishing steps are chained, so modules install in order, but the
+      // translation no longer waits for them (research deep-first-minute §1.3).
+      let finishing = Promise.resolve();
+      // A cancel (tab closing, another disc, aotCancel) is no verdict on a
+      // module: what compiled still installs (the worker drops it if the
+      // disc changed), but nothing is stored, deferred or blacklisted, so
+      // the next launch translates it again (review of #144).
+      const finish = async (unit, result) => {
+        if (this.cancelled) return;
         for (const x of result.refused) {
           this.emit("optimization-error", { message: `function ${x.entry.toString(16)}: ${x.reason}`, fatal: false });
         }
@@ -375,7 +373,10 @@ export class AotOptimizer extends EventTarget {
             } catch (error) {
               out = { reason: String(error?.message || error) };
             }
-            if (this.cancelled) break;
+            if (this.cancelled) {
+              if (out?.module) this.install?.({ key: unit.key, bytes, entries: fragments.flatMap((fr) => fr.entries), layout: fragments[0]?.layout ?? 0, members: unit.members.map((f) => ({ ranges: f.ranges, hash: f.hash })) });
+              return;
+            }
             if (!out?.module) {
               const reason = out?.reason ?? "compile";
               if (reason === "compile" || reason === "link") failure = `engine-reject: ${reason}`;
@@ -386,14 +387,17 @@ export class AotOptimizer extends EventTarget {
           if (bytes) {
             const entries = fragments.flatMap((fr) => fr.entries);
             const ranges = unit.members.flatMap((f) => f.ranges);
+            const region = { key: unit.key, bytes, entries, layout: fragments[0]?.layout ?? 0, members: unit.members.map((f) => ({ ranges: f.ranges, hash: f.hash })) };
+            // Installed as soon as it compiled, before the cache write: the
+            // session runs it even if the write then fails (quota).
+            this.install?.(region);
             const stored = await session.put([{ key: unit.key, bytes, meta: { members: unit.members.length, translated: result.fragments.length, entries, ranges } }]);
-            if (this.cancelled) break;
+            if (this.cancelled) return; // the cache refused the write as cancelled: no verdict
             const reason = stored.failed?.[0]?.reason ?? null;
             if (reason === "quota") wait = "quota";
             else failure = reason;
             if (!reason) {
               compiled++;
-              this.install?.({ key: unit.key, bytes, entries, layout: fragments[0]?.layout ?? 0, members: unit.members.map((f) => ({ ranges: f.ranges, hash: f.hash })) });
               if (this.attempts.delete(unit.key)) await this.saveAttempts();
             }
           }
@@ -410,6 +414,33 @@ export class AotOptimizer extends EventTarget {
         }
         doneSet.add(unit.key); // stored, or handled (left to the JIT): progress must reach 100 %
         this.emit("optimization-progress", { ...this.progress(doneSet), ms: ms() });
+      };
+      // A finishing step that throws (a failed blacklist or attempts write)
+      // is reported, never left as an unhandled rejection, and every way out
+      // of the loop waits for the last one.
+      const schedule = (unit, result) => finish(unit, result).catch((error) => {
+        this.emit("optimization-error", { message: `module ${unit.key}: ${error?.message || error}`, fatal: false });
+      });
+      try {
+        for (let n = 0; ; n++) {
+          if (n >= todo.length) {
+            await finishing; // its stale marks are appended below
+            for (const u of this.regions) if (this.stale.has(u.key) && !queued.has(u.key)) { queued.add(u.key); todo.push(u); }
+          }
+          if (n >= todo.length || this.cancelled) break;
+          const unit = todo[n];
+          this.stale.delete(unit.key);
+          const result = await this.translateUnit(unit);
+          await finishing;
+          if (!result || this.cancelled) break;
+          if (result.notReady) {
+            this.emit("optimization-error", { message: "the core is not ready to translate; resumed at the next launch", fatal: false });
+            return;
+          }
+          finishing = schedule(unit, result);
+        }
+      } finally {
+        await finishing;
       }
       if (!this.cancelled) this.emit("optimization-done", { total: this.regions.length, refused: refused.size, compiled, deferred, ms: ms() });
     } catch (error) {
@@ -519,7 +550,8 @@ export function fakeCache({ persisted = new Map(), quotaKeys = new Set(), blackl
       async put(entries) {
         const failed = [];
         for (const e of entries) {
-          if (cancelled) break;
+          // As the real cache (aot-cache.js put): a cancelled session refuses.
+          if (cancelled) { failed.push({ key: e.key, reason: "cancelled" }); continue; }
           if (quotaKeys.has(e.key)) failed.push({ key: e.key, reason: "quota" });
           else persisted.set(e.key, e.bytes);
         }

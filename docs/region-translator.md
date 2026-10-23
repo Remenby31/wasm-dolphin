@@ -437,7 +437,7 @@ so their bytes and cache keys don't change. Compiler version 17. (Written
 as 0108 on the region stack; renumbered after 0111 so the series applies
 in order.)
 
-## Dead GPR loads in the block prologue (patch 0127, 2026-10-23)
+## Dead GPR loads in the block prologue (patch 0134, was 0127, 2026-10-23)
 
 The GPR cache's prologue loaded every GPR a block reads or writes. A GPR
 whose first access in the block is a write by a plain integer op (type
@@ -448,4 +448,4 @@ flags are set when an op is emitted: a GPR that a load or an FPU op writes
 on its fast path only would be stored unloaded by a halt on its slow path.
 A first version counted every write and lost GPRs on an unaligned lmw's
 exception (cpufuzz). Skipped ops neither read nor write. Compiler version
-19.
+26.
