@@ -26,8 +26,8 @@ diff --git a/Source/Core/Core/State.cpp b/Source/Core/Core/State.cpp
 +  // under DoState (a decode finishing after the load wrote its pre-load read
 +  // pointer and distance over the loaded ones, and the GPU idled for good).
 +  auto& fifo = system.GetFifo();
-+  fifo.PauseForSavestate();
-+  Common::ScopeGuard resume_fifo([&] { fifo.ResumeAfterSavestate(); });
++  const bool fifo_paused = fifo.PauseForSavestate();
++  Common::ScopeGuard resume_fifo([&] { fifo.ResumeAfterSavestate(fifo_paused); });
 +
    bool is_wii = system.IsWii() || system.IsMIOS();
    const bool is_wii_currently = is_wii;
@@ -74,14 +74,16 @@ diff --git a/Source/Core/VideoCommon/Fifo.cpp b/Source/Core/VideoCommon/Fifo.cpp
  
  #include "Core/Config/MainSettings.h"
  #include "Core/ConfigManager.h"
-@@ -105,6 +107,85 @@
+@@ -103,6 +105,88 @@
+ {
+   if (was_running)
      EmulatorState(true);
- }
- 
-+void FifoManager::PauseForSavestate()
++}
++
++bool FifoManager::PauseForSavestate()
 +{
 +  if (!m_system.IsDualCoreMode() || m_use_deterministic_gpu_thread)
-+    return;
++    return false;
 +
 +  // A payload that is decoding may span the whole load (on WebGPU a FIFO
 +  // backlog takes hundreds of milliseconds) and would then write its
@@ -118,6 +120,7 @@ diff --git a/Source/Core/VideoCommon/Fifo.cpp b/Source/Core/VideoCommon/Fifo.cpp
 +  stats.last_us.store(waited_us, std::memory_order_relaxed);
 +  if (waited_us > stats.max_us.load(std::memory_order_relaxed))
 +    stats.max_us.store(waited_us, std::memory_order_relaxed);
++  return true;
 +}
 +
 +void FifoManager::WaitForFifoChunk()
@@ -149,18 +152,18 @@ diff --git a/Source/Core/VideoCommon/Fifo.cpp b/Source/Core/VideoCommon/Fifo.cpp
 +    stats.read_disable_max_us.store(waited_us, std::memory_order_relaxed);
 +}
 +
-+void FifoManager::ResumeAfterSavestate()
++void FifoManager::ResumeAfterSavestate(const bool counted)
 +{
-+  if (!m_system.IsDualCoreMode() || m_use_deterministic_gpu_thread)
++  // Whatever the mode is now (DoState may switch it): a counted pause is
++  // always undone, or the GPU loop would skip the FIFO for good.
++  if (!counted)
 +    return;
 +  if (m_savestate_pauses.fetch_sub(1) == 1)
 +    m_gpu_mainloop.Wakeup();
-+}
-+
+ }
+ 
  void FifoManager::Init()
- {
-   if (!m_config_callback_id)
-@@ -344,6 +425,12 @@
+@@ -344,6 +428,12 @@
  #endif
  
          // Do nothing while paused
@@ -173,7 +176,7 @@ diff --git a/Source/Core/VideoCommon/Fifo.cpp b/Source/Core/VideoCommon/Fifo.cpp
          if (!m_emu_running_state.IsSet())
            return;
  
-@@ -399,7 +486,17 @@
+@@ -399,7 +489,17 @@
                   !AtBreakpoint(m_system))
            {
              if (m_config_sync_gpu && m_sync_ticks.load() < m_config_sync_gpu_min_distance)
@@ -191,7 +194,7 @@ diff --git a/Source/Core/VideoCommon/Fifo.cpp b/Source/Core/VideoCommon/Fifo.cpp
  #ifdef __EMSCRIPTEN__
              hr_work = true;
  #endif
-@@ -475,6 +572,8 @@
+@@ -475,6 +575,8 @@
                }
              }
  
@@ -203,14 +206,15 @@ diff --git a/Source/Core/VideoCommon/Fifo.cpp b/Source/Core/VideoCommon/Fifo.cpp
 diff --git a/Source/Core/VideoCommon/Fifo.h b/Source/Core/VideoCommon/Fifo.h
 --- a/Source/Core/VideoCommon/Fifo.h
 +++ b/Source/Core/VideoCommon/Fifo.h
-@@ -54,6 +54,29 @@
+@@ -54,6 +54,30 @@
    void DoState(PointerWrap& f);
    void PauseAndLock();
    void RestoreState(bool was_running);
 +  // Savestates (load and save): no GPU payload decodes the FIFO while
 +  // State::DoState reads or restores the CP FIFO (patch 0116). Calls nest.
-+  void PauseForSavestate();
-+  void ResumeAfterSavestate();
++  // Returns whether the pause counted; only a counted pause is resumed.
++  bool PauseForSavestate();
++  void ResumeAfterSavestate(bool counted);
 +  // GP reads just turned off by the CPU (GXSetGPFifo and the like, before it
 +  // rewrites the FIFO pointers): returns once the chunk the GPU loop was
 +  // decoding, if any, has stored its read pointer and distance (patch 0116).
@@ -233,7 +237,7 @@ diff --git a/Source/Core/VideoCommon/Fifo.h b/Source/Core/VideoCommon/Fifo.h
    void UpdateWantDeterminism(bool want);
    bool UseDeterministicGPUThread() const { return m_use_deterministic_gpu_thread; }
    bool UseSyncGPU() const { return m_config_sync_gpu; }
-@@ -90,6 +113,15 @@
+@@ -90,6 +114,15 @@
    static constexpr u32 FIFO_SIZE = 2 * 1024 * 1024;
  
    Common::BlockingLoop m_gpu_mainloop;
