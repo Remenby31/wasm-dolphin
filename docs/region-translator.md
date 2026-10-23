@@ -448,7 +448,10 @@ region code whose outcome it knows:
 
 The hints travel as reloc kind 4 (offset of the `if`, 1 when likely) and
 patch nothing. The assembler counts a hint that does not land on an `if`
-(`hintsDropped`, 0 on every oracle program). The assembler writes them as a `metadata.code.branch_hint`
+(`hintsDropped`, 0 on every oracle program), and a second hint on the same
+`if`. V8 drops the whole section, silently, on any broken rule (offsets
+strictly increasing, size 1, nothing left over): the tests read every
+oracle module's section with those rules (`tests/helpers/branch-hints.mjs`). The assembler writes them as a `metadata.code.branch_hint`
 custom section (wasm branch hinting, on by default in V8) before the code
 section. TurboFan then lays the cold arms out of line, away from the hot
 path. An engine that doesn't know the section ignores it.

@@ -15,6 +15,8 @@ import { planDol } from "../src/aot-plan.js";
 import { assembleRegion, regionModuleEntries } from "../src/aot-region-module.js";
 import { asm, assemble, buildDol } from "./aot-asm.mjs";
 import { HELPER_SIGNATURES, checkCoreSlice, loadAotCore } from "./helpers/aot-core-equivalence.mjs";
+import { checkBranchHintSection } from "./helpers/branch-hints.mjs";
+
 
 const core = await loadAotCore();
 const skip = !core && "core without _DolphinWeb_AotTranslateForTest (patch 0075)";
@@ -225,6 +227,7 @@ test("a translated lwz carries branch hints on its ifs, and the module a branch_
   assert.ok(hints.filter((h) => !h.likely).length >= 2, "SO guard and downcount unlikely");
   const { bytes, hintsDropped } = assembleRegion([fragment], { helpers: HELPER_SIGNATURES, pcOffset: core.pcOffset, memoryPages: core.memoryPages });
   assert.equal(hintsDropped, 0, "no hint of the core falls off an `if`");
+  assert.deepEqual(checkBranchHintSection(bytes).errors, [], "a branch_hint section V8 keeps");
   const [section] = WebAssembly.Module.customSections(new WebAssembly.Module(bytes), "metadata.code.branch_hint");
   assert.ok(section, "the module carries the hints");
   assert.ok(core.compile(bytes) > 0, "the core compiles and links the hinted module");
