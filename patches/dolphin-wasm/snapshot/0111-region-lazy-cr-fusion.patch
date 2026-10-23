@@ -193,7 +193,7 @@ diff --git a/Source/Core/Core/PowerPC/CachedInterpreter/CachedInterpreter.cpp b/
      EmitI32Const(body, (inst.BO >> 3) & 1);
      body.push_back(0x46);
    }
-@@ -8913,13 +9058,21 @@ std::vector<u8> BuildWasmCachedInterpreterBlock(std::span<const PPCAnalyst::Code
+@@ -8915,13 +9060,21 @@ std::vector<u8> BuildWasmCachedInterpreterBlock(std::span<const PPCAnalyst::Code
    }
  
    u32 downcount = 0;
@@ -214,9 +214,9 @@ diff --git a/Source/Core/Core/PowerPC/CachedInterpreter/CachedInterpreter.cpp b/
 +    t_region_op = nullptr;
 +    if (!emitted)
      {
-       if (!allow_interpret_fallback)
-       {
-@@ -9955,9 +10108,10 @@ bool TryRunRegion(PowerPC::PowerPCState& ppc_state)
+       // Region code (0105) interprets only the FPU ops RegionInterpretsInline
+       // admits; any other op the emitter refuses fails the block, as without
+@@ -9960,9 +10113,10 @@ bool TryRunRegion(PowerPC::PowerPCState& ppc_state)
  {
    if (!RegionFilterHas(ppc_state.pc))
      return false;
@@ -229,7 +229,7 @@ diff --git a/Source/Core/Core/PowerPC/CachedInterpreter/CachedInterpreter.cpp b/
    {
      if (s_region_stats_on)
        s_region_stats.mode_refusals += 1;
-@@ -10030,7 +10184,7 @@ inline bool RegionWouldRun(const PowerPC::PowerPCState& ppc_state)
+@@ -10035,7 +10189,7 @@ inline bool RegionWouldRun(const PowerPC::PowerPCState& ppc_state)
  {
    if (!s_regions_enabled.load(std::memory_order_relaxed) || !RegionFilterHas(ppc_state.pc) ||
        !ppc_state.msr.IR || !ppc_state.msr.DR || !ppc_state.msr.FP ||
@@ -238,7 +238,7 @@ diff --git a/Source/Core/Core/PowerPC/CachedInterpreter/CachedInterpreter.cpp b/
        FindRegionIndex(ppc_state.pc) == NO_REGION)
      return false;
    if (s_region_stats_on)
-@@ -10101,7 +10255,7 @@ int RegionChainNext(int state_ptr)
+@@ -10106,7 +10260,7 @@ int RegionChainNext(int state_ptr)
    const InstalledRegion& region = s_regions[index];
    if (!region.verified || !s_regions_enabled.load(std::memory_order_relaxed) ||
        !ppc_state.msr.IR || !ppc_state.msr.DR || !ppc_state.msr.FP ||
@@ -247,7 +247,7 @@ diff --git a/Source/Core/Core/PowerPC/CachedInterpreter/CachedInterpreter.cpp b/
    {
      stats.refused += 1;
      return 0;
-@@ -15649,6 +15803,20 @@ bool RegionInterpretsInline(const PPCAnalyst::CodeOp& op)
+@@ -15656,6 +15810,20 @@ bool RegionInterpretsInline(const PPCAnalyst::CodeOp& op)
    return !(inst.OPCD == 4 && inst.SUBOP10 == 1014);  // dcbz_l: a cache op
  }
  
@@ -268,7 +268,7 @@ diff --git a/Source/Core/Core/PowerPC/CachedInterpreter/CachedInterpreter.cpp b/
  bool BuildFragmentBlock(Core::System& system, u32 pc, u32 limit, FragmentBlock* out)
  {
    auto& ppc = system.GetPPCState();
-@@ -15681,7 +15849,8 @@ bool BuildFragmentBlock(Core::System& system, u32 pc, u32 limit, FragmentBlock*
+@@ -15688,7 +15856,8 @@ bool BuildFragmentBlock(Core::System& system, u32 pc, u32 limit, FragmentBlock*
    {
      const PPCAnalyst::CodeOp& op = buffer[prefix];
      if ((!IsPpcWasmDirectInstructionCandidate(op) && !RegionInterpretsInline(op)) ||
@@ -278,7 +278,7 @@ diff --git a/Source/Core/Core/PowerPC/CachedInterpreter/CachedInterpreter.cpp b/
        break;
      if (op.canEndBlock)
      {
-@@ -15845,6 +16014,16 @@ bool BuildRegionFragment(Core::System& system, u32 entry_pc, std::span<const u32
+@@ -15852,6 +16021,16 @@ bool BuildRegionFragment(Core::System& system, u32 entry_pc, std::span<const u32
    code.assign(WASM_BLOCK_LOCALS.begin(), WASM_BLOCK_LOCALS.end());
    code[0] = 0x07;
    code.insert(code.end(), {0x01, 0x7f});  // the dispatch pc
@@ -295,7 +295,7 @@ diff --git a/Source/Core/Core/PowerPC/CachedInterpreter/CachedInterpreter.cpp b/
    code.insert(code.end(), {0x03, 0x40});  // loop
    EmitLocalGet(code, 0);
    load(pc_offset);
-@@ -15962,7 +16141,9 @@ namespace
+@@ -15969,7 +16148,9 @@ namespace
  // none and would never install. 5 (0087): ps_sum0/1, ps_res, fres and
  // ps_neg/mr/nabs/abs compiled inline (3 and 4 are taken by 0084 and 0083).
  // 6 (0105): FPU ops outside the direct tier stay in the region, interpreted.
