@@ -325,6 +325,7 @@ test("KPI report: files classified by content; manual.json errors become reasons
   assert.deepEqual(servedSides(results.find((r) => r.kind === "race-perf")).candidate, served("T1"));
   assert.deepEqual(servedSides(results.find((r) => r.kind === "gate")).candidate, served("T1"));
   assert.equal(classify({ probe: "first-launch" }), "first-launch");
+  assert.equal(classify({ probe: "first-launch-ramp" }), "first-launch-ramp");
   assert.equal(classify(null), null);
 
   put("m1.json", "{ broken");
@@ -334,7 +335,7 @@ test("KPI report: files classified by content; manual.json errors become reasons
   const rows = (m) => Object.fromEntries(kpiTable([], m, { trunk: TRUNK }).map((r) => [r.id, r]));
   assert.match(rows(readManual(path.join(root, "m1.json"))).pcSpeed.why, /illisible/);
   assert.match(rows(readManual(path.join(root, "m2.json"))).pcSpeed.why, /non numérique/);
-  assert.equal(KPI_ROWS.length, 30);
+  assert.equal(KPI_ROWS.length, 32);
   // Every TTFF run overloaded: n/a, and the row says so.
   const over = { kind: "ttff", file: "o", json: { probe: "ttff", at: "2026-10-19T11:00:00Z", served: served("T1"), runs: 3, overloadedRuns: [1, 2, 3], cold: null, warm: null } };
   assert.match(kpiTable([over], {}, { trunk: TRUNK }).find((r) => r.id === "ttffCold").why, /runs 1, 2, 3 lancées sur machine surchargée/);
