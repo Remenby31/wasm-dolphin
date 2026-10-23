@@ -436,3 +436,20 @@ masks and ors). Blocks keep the old form,
 so their bytes and cache keys don't change. Compiler version 17. (Written
 as 0108 on the region stack; renumbered after 0111 so the series applies
 in order.)
+
+## Frame in locals (patch 0128, 2026-10-23)
+
+A fragment block used to end with `pc ← npc` through the state, then a
+load, subtract, store and reload of downcount: 2 loads and 3 stores per
+block. A fragment now keeps pc (56), npc (57) and downcount (58) in locals:
+- Its blocks write npc to the local.
+- The block tail is `pc = npc ; downcount -= cycles ; if downcount <= 0`.
+- pc, npc and downcount are written back before every return and every
+  tail call (downcount out, an exiting block, a jump out, the dispatch).
+
+Every helper call stores downcount before it and reloads it after, since
+an exception takes the cycles spent and a helper may lower it. A helper
+other than the memory and FPU ones (`system`, the HLE calls) also gets pc
+and npc stored before it and npc reloaded after it. A helper that halts
+leaves its own pc, npc and downcount in the state, and the fragment
+returns 2 without writing them back. Compiler version 20.

@@ -107,3 +107,21 @@ test("psq_lux kept in the region updates a GPR the block had cached dirty, like 
   expectSame(r, "psq_lux");
   assert.equal(r.got.end, "stop");
 });
+
+// 0128: a memory helper that halts inside a fragment (lfs with MSR.FP clear:
+// FP unavailable in the helper) leaves pc, npc and downcount as the
+// interpreter does, after ops that moved the frame locals.
+const lfsOp = (d, a, off) => (48 << 26) | (d << 21) | (a << 16) | (off & 0xffff);
+const frameSkip = skip || (compilerVersion() < 20 && "core before 0128 (compiler version < 20)");
+test("a memory helper that halts in a fragment leaves pc, npc and downcount like the interpreter (0128)", { skip: frameSkip }, () => {
+  const program = [addi(3, 3, 1), addi(4, 4, 2), lfsOp(1, 5, 0), addi(3, 3, 1), BLR];
+  const translateState = baseState(41);
+  translateState[5] = 0x80004000;
+  const state = translateState.slice();
+  state[37] &= ~MSR_FP;
+  const r = compareRegionProgram(core, program, state, { translateState });
+  assert.ok(r.translated && !r.trap && !r.error, `${r.error ?? "trap or untranslated"}`);
+  assert.ok(r.got.regionRuns >= 1, "the region ran");
+  assert.ok(r.equal, JSON.stringify(r.difference));
+  assert.equal(r.got.end, "exception");
+});

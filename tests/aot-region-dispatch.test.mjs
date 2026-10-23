@@ -1180,3 +1180,56 @@ test("a compare's field or operands rewritten in the region (fcmpu, ps_cmpu0, lm
   assert.equal(got.downcount, reference.downcount);
   assert.equal(got.interpreted, 0, "no op left the region");
 });
+
+// 0128: a fragment keeps pc, npc and downcount in locals and writes them back
+// at its exits. A loop over memory with an FPU op kept in the region (a
+// helper call: downcount flushed and reloaded around it), run to the end and
+// stopped on downcount at every budget, against the interpreter.
+const FRAME_TEXT = 0x80015100;
+const bltFrame = (from, to) => asm.bc(12, 0, from, to);
+const FRAME = assemble(FRAME_TEXT, [
+  "main", asm.mflr(0), asm.stwu(1, 1, -16), stw(0, 1, 20), (pc, l) => asm.bl(pc, l.loop),
+  lwz(0, 1, 20), asm.addi(1, 1, 16), mtlr(0), asm.blr(),
+  "loop", asm.lis(5, DATA >>> 16), asm.ori(5, 5, DATA & 0xffff), asm.li(8, 0), asm.li(10, 0),
+  lfs(1, 5, 0), lfs(2, 5, 4),
+  "body", lwz(9, 5, 8), add(10, 10, 9), stw(10, 5, 12), faddsRc(3, 1, 2), asm.addi(8, 8, 1),
+  asm.addi(9, 9, 3), stw(9, 5, 8), asm.cmplwi(8, 5), (pc, l) => bltFrame(pc, l.body),
+  stfd(3, 5, 16), asm.blr()
+]);
+
+test("pc, npc and downcount in locals end like the interpreter, at the end and on downcount at every budget (0128)", { skip: chainSkip || (core?.has("DolphinWeb_AotKeyParts") && keyVersion() < 20 && "core before 0128 (compiler version < 20)") }, () => {
+  const dol = buildDol({ textAddr: FRAME_TEXT, text: FRAME.words, entry: FRAME.labels.main });
+  const { image, entryPoint } = imageFromDol(dol);
+  const plan = planDol({ image, entryPoint, gameId: "TEST01", dolBytes: dol, options: { gapFill: false } });
+  for (const seg of image.segments) core.load(seg.start, seg.bytes);
+  const data = new DataView(new ArrayBuffer(24));
+  data.setFloat32(0, 1.5); data.setFloat32(4, -3.25); data.setUint32(8, 7);
+  const loadData = () => core.load(DATA, new Uint8Array(data.buffer));
+  loadData();
+  core.reset(seedGprs(FRAME.labels.main), FRAME.labels.main, STOP, 400000);
+  core.setRegionsEnabled(true);
+  core.setRegionChaining(true);
+  queueAll(plan, 1, true);
+  serviceAll();
+  loadData();
+  const reference = runCall(FRAME.labels.main, { regions: false });
+  loadData();
+  const got = runCall(FRAME.labels.main, { regions: true });
+  assert.deepEqual(got.state, reference.state);
+  assert.equal(got.downcount, reference.downcount);
+  assert.equal(got.interpreted, 0, "no op left the region");
+  for (const budget of [1, 2, 4, 9, 17, 30, 47, 64]) {
+    loadData();
+    core.reset(seedGprs(FRAME.labels.main), FRAME.labels.main, STOP, budget);
+    core.dispatchRegion();
+    const stopped = { state: core.state(), downcount: core.downcount(), pc: core.pc() };
+    loadData();
+    core.reset(seedGprs(FRAME.labels.main), FRAME.labels.main, STOP, budget);
+    for (let n = 0; n < 100000 && core.downcount() > stopped.downcount; n++) assert.equal(core.interpretOne(), 0);
+    assert.equal(core.downcount(), stopped.downcount, `budget ${budget}`);
+    assert.equal(core.pc(), stopped.pc, `budget ${budget}: pc`);
+    assert.deepEqual(core.state(), stopped.state, `budget ${budget}`);
+  }
+  core.invalidate(FRAME_TEXT, 4 * FRAME.words.length);
+  core.module._DolphinWeb_AotForgetRegionsForTest?.();
+});
