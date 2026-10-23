@@ -35,7 +35,10 @@ export function summarizeLaunch(events) {
   const start = ev.find((e) => e.type === "start");
   const done = ev.find((e) => e.type === "done");
   const errors = ev.filter((e) => e.type === "error");
-  const install = ev.find((e) => e.type === "install") ?? null;
+  // Before the boot, then (since the cache loads after the first image) a
+  // second event { after: "first-image" }: both count as loaded from the cache.
+  const installs = ev.filter((e) => e.type === "install");
+  const install = installs[0] ?? null;
   const progress = ev.filter((e) => e.type === "progress");
   const fractions = progress.map((e) => e.fraction).filter(Number.isFinite);
   const monotonic = fractions.every((f, i) => i === 0 || f >= fractions[i - 1]);
@@ -52,7 +55,10 @@ export function summarizeLaunch(events) {
     compiled: done?.compiled ?? null,
     progressEvents: progress.length,
     monotonic,
-    install: install && { loaded: install.loaded ?? null, failed: install.failed ?? null, deferred: install.deferred ?? null, ms: install.ms ?? null },
+    install: install && {
+      loaded: installs.reduce((n, e) => n + (e.loaded ?? 0), 0), beforeBoot: install.after ? 0 : install.loaded ?? null,
+      failed: installs.reduce((n, e) => n + (e.failed ?? 0), 0), deferred: install.deferred ?? null, ms: install.ms ?? null
+    },
     errors: errors.map((e) => ({ message: e.message, fatal: Boolean(e.fatal) })),
     window: start ? { from: start.t, to: done?.t ?? ev.at(-1).t } : null
   };

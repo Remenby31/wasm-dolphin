@@ -25,7 +25,7 @@
       "commit": "01e0577914a75a2569c846778c2f93aa8e6feddd"
     }
   },
-  "patchSeriesSha256": "eb51f1e6fc0ecc358e2de4495da65d9215eab8243fdc6f641a6f4ee3fa0ad747",
+  "patchSeriesSha256": "47ad550a51a04a5177ca16d221a228a8ce2596ac3ee5f275a0dcb84812f20d4a",
   "patches": [
     {
       "order": 1,
@@ -735,12 +735,20 @@
       "order": 89,
       "cwd": ".",
       "hashMode": "lf-normalized",
+      "path": "patches/dolphin-wasm/snapshot/0107-region-installs-in-throttle-sleep.patch",
+      "size": 14861,
+      "sha256": "ab1cff9cf64a939235aac58fb6517a0ce8c375233edb3043dcfda018b16efaa4"
+    },
+    {
+      "order": 90,
+      "cwd": ".",
+      "hashMode": "lf-normalized",
       "path": "patches/dolphin-wasm/snapshot/0113-headroom-counters.patch",
       "size": 12231,
       "sha256": "704fdcdba2d3d8b39edc38a158acfb884fa4cdd77a52eee31658a9ed4616fcc0"
     },
     {
-      "order": 90,
+      "order": 91,
       "cwd": ".",
       "hashMode": "lf-normalized",
       "path": "patches/dolphin-wasm/snapshot/0115-region-fragment-cap.patch",
@@ -748,7 +756,7 @@
       "sha256": "5409fe285c7a919e11f465f957b6d18769abfa9aaaea6f8a127c21fe9478ec3a"
     },
     {
-      "order": 91,
+      "order": 92,
       "cwd": "Externals/SFML/SFML",
       "hashMode": "lf-normalized",
       "path": "patches/dolphin-wasm/submodules/0001-sfml-emscripten-config.patch",
@@ -756,7 +764,7 @@
       "sha256": "f82197a21fe982ad83f6ee7bbf5a03839b1cebd4d64da3eab11263842bf61d89"
     },
     {
-      "order": 92,
+      "order": 93,
       "cwd": "Externals/xxhash/xxHash",
       "hashMode": "lf-normalized",
       "path": "patches/dolphin-wasm/submodules/0002-xxhash-wasm-simd-scalar.patch",

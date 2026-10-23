@@ -1,0 +1,318 @@
+diff --git a/Source/Core/Core/CoreTiming.cpp b/Source/Core/Core/CoreTiming.cpp
+--- a/Source/Core/Core/CoreTiming.cpp
++++ b/Source/Core/Core/CoreTiming.cpp
+@@ -50,6 +50,12 @@
+ #include "VideoCommon/VideoConfig.h"
+ #include "VideoCommon/VideoEvents.h"
+ 
++#ifdef __EMSCRIPTEN__
++// Region modules ready to install use the CPU thread's throttle sleep, where
++// an install costs no frame (CachedInterpreter.cpp, patch 0107).
++void DolphinWeb_RegionInstallsWhileIdle(std::chrono::steady_clock::time_point deadline);
++#endif
++
+ namespace CoreTiming
+ {
+ static constexpr int MAX_SLICE_LENGTH = 20000;
+@@ -550,6 +556,9 @@ void CoreTimingManager::SleepUntil(TimePoint time_point)
+ 
+   if (Core::IsCPUThread())
+   {
++#ifdef __EMSCRIPTEN__
++    ::DolphinWeb_RegionInstallsWhileIdle(time_point);
++#endif
+     const TimePoint time = Clock::now();
+ 
+     // §28cr3 revert busy-spin: profiler probe showed the per-VBL throttle
+diff --git a/Source/Core/Core/PowerPC/CachedInterpreter/CachedInterpreter.cpp b/Source/Core/Core/PowerPC/CachedInterpreter/CachedInterpreter.cpp
+--- a/Source/Core/Core/PowerPC/CachedInterpreter/CachedInterpreter.cpp
++++ b/Source/Core/Core/PowerPC/CachedInterpreter/CachedInterpreter.cpp
+@@ -9119,6 +9119,14 @@ CachedInterpreter::CachedInterpreter(Core::System& system) : JitBase(system), m_
+ 
+ CachedInterpreter::~CachedInterpreter() = default;
+ 
++#ifdef __EMSCRIPTEN__
++namespace
++{
++// Patch 0107: the throttle sleep installs regions only while this core runs.
++extern std::atomic<bool> s_region_core_active;
++}  // namespace
++#endif
++
+ void CachedInterpreter::Init()
+ {
+ #if DOLPHIN_WEB_STATIC_EXIT_LINKS && DOLPHIN_WEB_STATIC_EXIT_LINK_STATS
+@@ -9126,6 +9134,9 @@ void CachedInterpreter::Init()
+ #endif
+ #line 7757
+   RefreshConfig();
++#ifdef __EMSCRIPTEN__
++  s_region_core_active.store(true, std::memory_order_relaxed);
++#endif
+ 
+   AllocCodeSpace(CODE_SIZE);
+   ResetFreeMemoryRanges();
+@@ -9151,6 +9162,7 @@ void CachedInterpreter::Shutdown()
+ #endif
+ #ifdef __EMSCRIPTEN__
+   ForgetAllRegions();
++  s_region_core_active.store(false, std::memory_order_relaxed);
+ #endif
+ #line 7773
+ #ifdef __EMSCRIPTEN__
+@@ -9414,6 +9426,9 @@ struct PendingRegion
+   // a cached module to this session's before it queues it.
+   u32 ram_base = 0;
+   u32 l1_base = 0;
++  // Patch 0107: when a slice first found its module installable (ready byte
++  // or the ready wait over); a large one waits for a sleep window from then.
++  std::optional<std::chrono::steady_clock::time_point> installable_since;
+ };
+ std::mutex s_region_queue_mutex;
+ std::vector<PendingRegion> s_region_queue;
+@@ -9437,9 +9452,29 @@ constexpr double REGION_BOOT_SLICE_MS = 8.0;
+ std::optional<std::chrono::steady_clock::time_point> s_region_service_start;
+ // Past the boot a slice stops installing when the next module's estimated
+ // cost would take it over this; estimate = size x the measured cost per byte
+-// (copy out of the heap and V8's lookup by wire bytes, ~0.7 ms/MB).
++// (copy out of the heap and V8's lookup by wire bytes: 1.7 ms/MB measured on
++// the bench, 2026-10-22, not the 0.7 first assumed).
+ constexpr double REGION_SLICE_TARGET_MS = 2.5;
+-double s_install_ms_per_byte = 0.8e-6;
++double s_install_ms_per_byte = 1.7e-6;
++// Patch 0107: a module whose ready byte the CPU thread saw waits for a
++// throttle sleep of the CPU thread (DolphinWeb_RegionInstallsWhileIdle, where
++// an install costs no frame), at most this long from when it became
++// installable, boot window included: with #86 the region cache loads after
++// the first image, so the boot window is play. A scene that never sleeps
++// still gets its regions, in slices of the slice target.
++std::chrono::milliseconds s_region_sleep_wait{2000};  // tests change it
++// What an install in a sleep window leaves before the deadline (its estimate
++// can be off by the jitter measured on the bench).
++constexpr double REGION_SLEEP_MARGIN_MS = 1.0;
++std::atomic<bool> s_region_core_active{false};  // a CachedInterpreter runs
++u32 s_region_sleep_installs = 0;     // installs done in throttle sleeps
++double s_region_sleep_used_ms = 0;   // host time they took
++// The worst lateness past the sleep's deadline after its installs: the frame
++// those installs would have delayed (0: none ran late).
++double s_region_sleep_overshoot_max_ms = 0;
++// Installs a slice boundary did for a large module after its sleep wait ran
++// out (the path that may cost a frame).
++u32 s_region_sleep_wait_expired = 0;
+ double s_region_boot_max_slice_ms = 0;  // published in the header's spare u32
+ u32 s_region_install_fallbacks = 0;     // likewise
+ 
+@@ -9618,6 +9653,10 @@ void ForgetAllRegions()
+   std::fill(s_region_pages.begin(), s_region_pages.end(), 0);
+   s_region_waiting.clear();
+   s_region_service_start.reset();
++  s_region_sleep_installs = 0;
++  s_region_sleep_used_ms = 0;
++  s_region_sleep_overshoot_max_ms = 0;
++  s_region_sleep_wait_expired = 0;
+   std::lock_guard lock(s_region_queue_mutex);
+   s_region_queue.clear();
+   s_region_queue_nonempty.store(false, std::memory_order_release);
+@@ -9788,24 +9827,68 @@ bool TryInstallRegion(PendingRegion& pending, int ready_bits_ptr, double& spent_
+   return true;
+ }
+ 
+-void ServiceRegionInstalls()
++// deadline: in a throttle sleep of the CPU thread, install while the next
++// module's estimate fits before it (no frame is paid); none: a slice
++// boundary.
++void ServiceRegionInstalls(std::optional<std::chrono::steady_clock::time_point> deadline = {})
+ {
++  // The boot window (REGION_BOOT_WINDOW, larger slices) opens at the CPU
++  // thread's first slice boundary, not at the first install: since the
++  // region cache loads after the first image (#86), the first install comes
++  // in play, where the boot's budget would cost frames (review of #86).
++  if (!s_region_service_start && !deadline)
++    s_region_service_start = std::chrono::steady_clock::now();
+   if (s_region_waiting.empty() && !s_region_queue_nonempty.load(std::memory_order_acquire))
+     return;
+   const auto now = std::chrono::steady_clock::now();
+   if (!s_region_service_start)
+     s_region_service_start = now;
+   const bool boot = now - *s_region_service_start < REGION_BOOT_WINDOW;
++  const u32 installed_before = s_region_stats.regions_installed;
++  // A ready module waits for a sleep window, the sleep wait at most from when
++  // a slice first found it installable (not from its post: with #86 every
++  // module is posted at once, and one ready late would otherwise skip the
++  // wait).
++  const auto may_wait_for_sleep = [&](PendingRegion& pending) {
++    if (deadline)
++      return false;
++    if (!pending.installable_since)
++      pending.installable_since = now;
++    if (now - *pending.installable_since < s_region_sleep_wait)
++      return true;
++    s_region_sleep_wait_expired += 1;
++    return false;
++  };
+   const int ready_bits_ptr = s_wasm_off_thread_compile.load(std::memory_order_relaxed) ?
+                                  static_cast<int>(DolphinWeb_JitReadyBitsPtr()) :
+                                  0;
+   double spent_ms = 0;
+   u32 n = 0;
+-  // Room in this slice for a module of `bytes`: always for the first one.
+-  const auto room = [&](std::size_t bytes) {
++  // Room in this slice for a module of `bytes`: always for the first one at
++  // a slice boundary; in a sleep window, while it fits before the deadline.
++  // `boot_budget`: the boot window's larger slices (a module handed over
++  // before the boot, a repost); a ready module whose sleep wait ran out gets
++  // the slice target only.
++  const auto room = [&](std::size_t bytes, bool boot_budget = true) {
+     const double estimate = spent_ms + bytes * s_install_ms_per_byte;
+-    return n == 0 || (boot ? estimate <= REGION_BOOT_SLICE_MS :
+-                             n < REGION_INSTALLS_PER_SLICE && estimate <= REGION_SLICE_TARGET_MS);
++    if (deadline)
++    {
++      const double left =
++          std::chrono::duration<double, std::milli>(*deadline - now).count() - REGION_SLEEP_MARGIN_MS;
++      return estimate <= left;
++    }
++    return n == 0 || (boot && boot_budget ?
++                          estimate <= REGION_BOOT_SLICE_MS :
++                          n < REGION_INSTALLS_PER_SLICE && estimate <= REGION_SLICE_TARGET_MS);
++  };
++  // The checks scan the module's heap sites and hash its guest code: their
++  // time counts in the slice (or the sleep) like the compile's.
++  const auto installable = [&](const PendingRegion& pending) {
++    const auto start = std::chrono::steady_clock::now();
++    const bool ok = RegionInstallable(pending);
++    spent_ms +=
++        std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now() - start).count();
++    return ok;
+   };
+   // Waiting regions whose module the worker has compiled (or that waited too
+   // long) first: their compile is the cheap one.
+@@ -9825,7 +9908,7 @@ void ServiceRegionInstalls()
+       }
+       pending.repost = false;
+       ++n;
+-      if (!RegionInstallable(pending) ||
++      if (!installable(pending) ||
+           TryInstallRegion(pending, ready_bits_ptr, spent_ms, InstallPath::First))
+       {
+         s_region_waiting[i] = std::move(s_region_waiting.back());
+@@ -9840,19 +9923,23 @@ void ServiceRegionInstalls()
+     const bool ready =
+         s_wasm_jit_ready_bits[pending.slot].load(std::memory_order_acquire) != 0;
+     const bool expired = now - pending.posted > s_region_ready_wait;
+-    if ((!ready && !pending.signalled && !expired) || !room(pending.bytes.size()))
++    // A module whose ready byte never came (the ready wait ran out) compiles
++    // cold, synchronously: far more than the cache-hit estimate a sleep
++    // window is sized with, so it stays at slice boundaries (review of #124).
++    const bool answered = ready || pending.signalled;
++    if ((!answered && !expired) || !room(pending.bytes.size(), false) ||
++        (answered ? may_wait_for_sleep(pending) : deadline.has_value()))
+     {
+       ++i;
+       continue;
+     }
+     ++n;
+-    const bool answered = ready || pending.signalled;
+     if (!answered)
+       s_region_install_fallbacks += 1;
+     // Its own bytes, synchronously, unless the byte is still set (the request
+     // path then clears the in-flight mark): a hit either way once answered.
+     // Waited past a slice where the game may have reloaded its code.
+-    if (!RegionInstallable(pending) ||
++    if (!installable(pending) ||
+         TryInstallRegion(pending, ready && ready_bits_ptr ? ready_bits_ptr : 0, spent_ms,
+                          answered ? InstallPath::Ready : InstallPath::Cold))
+     {
+@@ -9871,11 +9958,14 @@ void ServiceRegionInstalls()
+       std::lock_guard lock(s_region_queue_mutex);
+       if (s_region_queue.empty() || !room(s_region_queue.front().bytes.size()))
+         break;
++      // Queued modules never wait for a sleep window: queueing only posts
++      // them (or installs one handed over before the boot), the wait for a
++      // window applies once their module is ready (above).
+       pending = std::move(s_region_queue.front());
+       s_region_queue.erase(s_region_queue.begin());
+       s_region_queue_nonempty.store(!s_region_queue.empty(), std::memory_order_release);
+     }
+-    if (!RegionInstallable(pending))
++    if (!installable(pending))
+       continue;
+     // A module handed to this pthread before the boot is installed at once;
+     // any other is posted to the compiler worker and waits for its byte.
+@@ -9884,6 +9974,22 @@ void ServiceRegionInstalls()
+                           InstallPath::First))
+       s_region_waiting.push_back(std::move(pending));
+   }
++  if (deadline)
++  {
++    // Not a frame: kept out of installMaxSliceMs, but how late the sleep
++    // ends past its deadline is the frame these installs delayed.
++    s_region_sleep_used_ms += spent_ms;
++    const u32 installed = s_region_stats.regions_installed - installed_before;
++    s_region_sleep_installs += installed;
++    if (spent_ms > 0)
++    {
++      const double late = std::chrono::duration<double, std::milli>(
++                              std::chrono::steady_clock::now() - *deadline)
++                              .count();
++      s_region_sleep_overshoot_max_ms = std::max(s_region_sleep_overshoot_max_ms, late);
++    }
++    return;
++  }
+   if (!boot)
+     s_region_stats.install_max_slice_ms = std::max(s_region_stats.install_max_slice_ms, spent_ms);
+   else
+@@ -10266,6 +10372,53 @@ extern "C" EMSCRIPTEN_KEEPALIVE void DolphinWeb_AotServiceRegionsForTest()
+   ApplyRegionStatsRequest();
+ }
+ 
++// CoreTiming's throttle sleep on the CPU thread (patch 0107): the time until
++// `deadline` installs ready regions instead of sleeping through it; the rest
++// is slept as before.
++void DolphinWeb_RegionInstallsWhileIdle(std::chrono::steady_clock::time_point deadline)
++{
++  // Any CPU core sleeps here (Interpreter, FifoPlayer): only the
++  // CachedInterpreter runs regions.
++  if (s_regions_enabled.load(std::memory_order_relaxed) &&
++      s_region_core_active.load(std::memory_order_relaxed))
++    ServiceRegionInstalls(deadline);
++}
++
++// Tests: a sleep window of `ms` from now, as the throttle would give it.
++extern "C" EMSCRIPTEN_KEEPALIVE void DolphinWeb_AotRegionSleepWindowForTest(double ms)
++{
++  ServiceRegionInstalls(std::chrono::steady_clock::now() +
++                        std::chrono::duration_cast<std::chrono::steady_clock::duration>(
++                            std::chrono::duration<double, std::milli>(ms)));
++}
++
++// Tests: how long a large module waits for a sleep window (ms).
++extern "C" EMSCRIPTEN_KEEPALIVE void DolphinWeb_AotSetSleepWaitForTest(int ms)
++{
++  s_region_sleep_wait = std::chrono::milliseconds(ms);
++}
++
++// Tests: the estimated install cost per module byte (ms), so that a test
++// module counts as one too large for a slice.
++extern "C" EMSCRIPTEN_KEEPALIVE double DolphinWeb_AotSetInstallCostForTest(double ms_per_byte)
++{
++  const double before = s_install_ms_per_byte;
++  s_install_ms_per_byte = ms_per_byte;
++  return before;
++}
++
++// [installs done in throttle sleeps, host time they took in 0.01 ms, worst
++// lateness past a sleep's deadline after its installs in 0.01 ms, installs a
++// slice did after a large module's sleep wait ran out]. Read by the region
++// stats request; reset with the session's regions (ForgetAllRegions).
++extern "C" EMSCRIPTEN_KEEPALIVE void DolphinWeb_AotRegionSleepInstalls(u32* out)
++{
++  out[0] = s_region_sleep_installs;
++  out[1] = static_cast<u32>(std::min(s_region_sleep_used_ms * 100.0, 4e9));
++  out[2] = static_cast<u32>(std::min(std::max(s_region_sleep_overshoot_max_ms, 0.0) * 100.0, 4e9));
++  out[3] = s_region_sleep_wait_expired;
++}
++
+ // {u32 count, u32 capacity, then count x {f32 ms, u32 bytes, u32 path}}: the
+ // session's first region installs (path: 0 first attempt, 1 after the ready
+ // byte, 2 cold). Written by the CPU thread only, read by the harness.
