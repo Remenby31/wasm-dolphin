@@ -7377,7 +7377,7 @@ export async function prepareAotFirstLaunch(file, {
     return;
   }
   const generation = aotDiscGeneration;
-  const [{ coreAotKeyParts, coreAssembleOptions, coreRegionTranslator, createAotFirstLaunch }, { OpfsPlanStore }, { AotProfileStore, blocksFromPcSamples }, { planDiscInWorker }, { fileReader, planDisc }, { createProfileRecorder, startHotSampler }] =
+  const [{ coreAotKeyParts, coreAssembleOptions, coreRegionTranslator, createAotFirstLaunch }, { OpfsPlanStore }, { AotProfileStore, blocksFromPcSamples }, { planDiscInWorker }, { fileReader, planDisc }, { createProfileRecorder, guestPcAddress, startHotSampler }] =
     await Promise.all([import("./aot-orchestrator.js"), import("./aot-optimizer.js"), import("./aot-profile.js"), import("./aot-plan-worker.js"), import("./aot-recomp.js"), import("./aot-hot-sampler.js")]);
   const discKey = await readDiscKey();
   if (generation !== aotDiscGeneration) return;
@@ -7442,7 +7442,7 @@ export async function prepareAotFirstLaunch(file, {
   // profile (OPFS, per disc, addresses and sample counts only; never sent or
   // shared): the next plan orders by it and forms hot fragments from it.
   aotProfileTarget = opfs && discKey
-    ? { flow, startHotSampler, record: createProfileRecorder({ store: new AotProfileStore(opfs), discKey, blocksFromPcSamples }) }
+    ? { flow, startHotSampler, guestPcAddress, record: createProfileRecorder({ store: new AotProfileStore(opfs), discKey, blocksFromPcSamples }) }
     : null;
   const blockKeys = [];
   if (!flow.supported) {
@@ -7495,7 +7495,7 @@ export function startAotFirstLaunchAfterBoot(flow = aotFirstLaunch) {
     // own reading the guest PC, nothing on the CPU thread).
     aotHotSampler?.stop();
     aotHotSampler = aotProfileTarget?.flow === flow
-      ? aotProfileTarget.startHotSampler({ buffer: moduleInstance?.HEAPU8?.buffer, pcAddress: moduleInstance?._DolphinWeb_HarnessPcAddress?.() ?? 0, periodMs: AOT_PROFILE_SAMPLE_MS })
+      ? aotProfileTarget.startHotSampler({ buffer: moduleInstance?.HEAPU8?.buffer, pcAddress: aotProfileTarget.guestPcAddress(moduleInstance), periodMs: AOT_PROFILE_SAMPLE_MS })
       : null;
     startAotProfileRecorder(flow, aotHotSampler);
     return flow.loadRest();
