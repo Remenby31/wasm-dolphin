@@ -35,7 +35,7 @@ const FULL = [
 ].join("\r\n");
 
 test("the filter keeps only allowlisted keys, LF, in allowlist order", () => {
-  assert.equal(filterIni(FULL, allowlist), "[Core]\nMMU = True\n[Video_Settings]\nSafeTextureCacheColorSamples = 512\n");
+  assert.equal(filterIni(FULL, allowlist), "[Core]\nMMU = True\nFPRF = True\n[Video_Settings]\nSafeTextureCacheColorSamples = 512\n");
 });
 
 test("a file with no allowlisted key gives nothing; comments, codes and other keys never pass", () => {
@@ -86,7 +86,7 @@ test("the build is deterministic: same sources, same files and bytes, in name or
   });
   assert.deepEqual(runs[0].written, ["TST01.ini", "TST01r1.ini"]);
   assert.deepEqual(runs[0].files, runs[1].files);
-  assert.equal(runs[0].files[0][1].toString(), "[Core]\nMMU = True\n[Video_Settings]\nSafeTextureCacheColorSamples = 512\n");
+  assert.equal(runs[0].files[0][1].toString(), "[Core]\nMMU = True\nFPRF = True\n[Video_Settings]\nSafeTextureCacheColorSamples = 512\n");
   assert.equal(runs[0].files[1][1].toString(), "[Core]\nMMU = False\n");
 });
 
@@ -123,8 +123,8 @@ test("Dolphin's own folder passes the filter and gives only allowlisted keys", (
 
 const core = await loadAotCore();
 // A core that does not know the newest allowlisted setting answers -2 for it.
-const knowsXfb = () => core.module.ccall("GameConfigValueForTest", "number", ["string", "number", "string"], ["XYZE01", 0, "XFBToTextureEnable"]) !== -2;
-const coreSkip = core && typeof core.module._GameConfigValueForTest === "function" && knowsXfb() ? false : "the core predates 0097 v3 (CI builds this branch's core)";
+const knowsXfb = () => core.module.ccall("GameConfigValueForTest", "number", ["string", "number", "string"], ["XYZE01", 0, "FPRF"]) !== -2;
+const coreSkip = core && typeof core.module._GameConfigValueForTest === "function" && knowsXfb() ? false : "the core predates FPRF in the allowlist (patch 0121; CI builds this branch's core)";
 
 test("the core embeds the filtered INIs, and its game config applies them in Dolphin's order", { skip: coreSkip }, () => {
   const m = core.module;
@@ -134,11 +134,11 @@ test("the core embeds the filtered INIs, and its game config applies them in Dol
   for (const name of embedded) {
     const text = m.FS.readFile(`${dir}/${name}`, { encoding: "utf8" });
     assert.ok(text.length > 0, name);
-    assert.match(text, /^(\[Core\]\nMMU = (True|False)\n)?(\[Video_Settings\]\nSafeTextureCacheColorSamples = \d*\n)?(\[Video_Hacks\]\nXFBToTextureEnable = (True|False)\n)?$/, name);
+    assert.match(text, /^(\[Core\]\n(MMU = (True|False)\n)?(FPRF = (True|False)\n)?)?(\[Video_Settings\]\nSafeTextureCacheColorSamples = \d*\n)?(\[Video_Hacks\]\nXFBToTextureEnable = (True|False)\n)?$/, name);
   }
   // Synthetic discs: ID3, then ID6, then ID6rN, the later file winning.
   const fixtures = {
-    "TST.ini": "[Core]\nMMU = True\n[Video_Settings]\nSafeTextureCacheColorSamples = 512\n[Video_Hacks]\nXFBToTextureEnable = False\n",
+    "TST.ini": "[Core]\nMMU = True\nFPRF = True\n[Video_Settings]\nSafeTextureCacheColorSamples = 512\n[Video_Hacks]\nXFBToTextureEnable = False\n",
     "TSTE01r1.ini": "[Core]\nMMU = False\n[Video_Settings]\nSafeTextureCacheColorSamples = 0\n"
   };
   for (const [name, text] of Object.entries(fixtures)) m.FS.writeFile(`${dir}/${name}`, text);
@@ -151,6 +151,8 @@ test("the core embeds the filtered INIs, and its game config applies them in Dol
     assert.equal(value("TSTE01", 1, "SafeTextureCacheColorSamples"), 0, "revision 1's file: all samples");
     assert.equal(value("XYZE01", 0, "SafeTextureCacheColorSamples"), 128, "Dolphin's default");
     assert.equal(value("TSTE01", 0, "XFBToTextureEnable"), 0, "the ID3 file keeps the XFB copy to RAM");
+    assert.equal(value("TSTE01", 0, "FPRF"), 1, "the ID3 file turns FPRF on");
+    assert.equal(value("XYZE01", 0, "FPRF"), 0, "Dolphin's default: FPRF off");
     assert.equal(value("XYZE01", 0, "XFBToTextureEnable"), 1, "Dolphin's default skips it");
     assert.equal(value("TSTE01", 0, "CPUThread"), -2, "only allowlisted settings");
   } finally {

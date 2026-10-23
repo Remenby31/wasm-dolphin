@@ -1,0 +1,131 @@
+diff --git a/Source/Core/Core/PowerPC/PowerPC.h b/Source/Core/Core/PowerPC/PowerPC.h
+--- a/Source/Core/Core/PowerPC/PowerPC.h
++++ b/Source/Core/Core/PowerPC/PowerPC.h
+@@ -3,6 +3,7 @@
+ 
+ #pragma once
+ 
++#include <atomic>
+ #include <array>
+ #include <cstddef>
+ #include <span>
+@@ -47,6 +48,13 @@
+ };
+ 
+ // TLB cache
++// Patch 0121: whether FPSCR.FPRF is computed from FP results
++// (Config::MAIN_FPRF, false by default as upstream; a game's INI turns it on).
++// Every tier follows it, the interpreter included (upstream's interpreter
++// always computes FPRF, only its JITs follow the setting): blocks, regions
++// and the interpreter stay identical bit for bit, as the oracles check.
++extern std::atomic<bool> g_fprf_emulation;
++
+ constexpr size_t TLB_SIZE = 128;
+ constexpr size_t NUM_TLBS = 2;
+ constexpr size_t TLB_WAYS = 2;
+diff --git a/Source/Core/Core/PowerPC/PowerPC.cpp b/Source/Core/Core/PowerPC/PowerPC.cpp
+--- a/Source/Core/Core/PowerPC/PowerPC.cpp
++++ b/Source/Core/Core/PowerPC/PowerPC.cpp
+@@ -250,10 +250,13 @@
+   return CPUCore::CachedInterpreter;
+ #endif
+ }
++
++std::atomic<bool> g_fprf_emulation{false};
+ 
+ void PowerPCManager::RefreshConfig()
+ {
+   const bool old_enable_dcache = m_ppc_state.m_enable_dcache;
++  g_fprf_emulation.store(Config::Get(Config::MAIN_FPRF), std::memory_order_relaxed);
+ 
+   m_ppc_state.m_enable_dcache = Config::Get(Config::MAIN_ACCURATE_CPU_CACHE);
+ 
+@@ -688,12 +691,14 @@
+ 
+ void PowerPCState::UpdateFPRFDouble(double dvalue)
+ {
+-  fpscr.FPRF = Common::ClassifyDouble(dvalue);
++  if (g_fprf_emulation.load(std::memory_order_relaxed))
++    fpscr.FPRF = Common::ClassifyDouble(dvalue);
+ }
+ 
+ void PowerPCState::UpdateFPRFSingle(float fvalue)
+ {
+-  fpscr.FPRF = Common::ClassifyFloat(fvalue);
++  if (g_fprf_emulation.load(std::memory_order_relaxed))
++    fpscr.FPRF = Common::ClassifyFloat(fvalue);
+ }
+ 
+ void RoundingModeUpdated(PowerPCState& ppc_state)
+diff --git a/Source/Core/Core/PowerPC/CachedInterpreter/CachedInterpreter.cpp b/Source/Core/Core/PowerPC/CachedInterpreter/CachedInterpreter.cpp
+--- a/Source/Core/Core/PowerPC/CachedInterpreter/CachedInterpreter.cpp
++++ b/Source/Core/Core/PowerPC/CachedInterpreter/CachedInterpreter.cpp
+@@ -4739,6 +4739,20 @@
+ void EmitSetFprfZeroOrNormal(std::vector<u8>& body, const WasmStateLayout& layout,
+                              u32 value_local, u32 clear_extra = 0, bool wanted = true)
+ {
++  // Patch 0121: FPRF off (Config::MAIN_FPRF, the default): no tier computes
++  // it, the interpreter's UpdateFPRF* included; only the other bits clear.
++  if (!PowerPC::g_fprf_emulation.load(std::memory_order_relaxed))
++  {
++    if (clear_extra)
++    {
++      EmitStateStoreU32Prefix(body);
++      EmitStateLoadU32(body, layout.fpscr_offset);
++      EmitI32Const(body, ~clear_extra);
++      body.push_back(0x71);
++      EmitStateStoreU32Suffix(body, layout.fpscr_offset);
++    }
++    return;
++  }
+   if (!wanted)
+   {
+     // The analyzer proved a later op of this block rewrites FPRF before
+@@ -9155,6 +9169,8 @@
+ namespace
+ {
+ void ForgetAllRegions();
++// The FPRF mode (PowerPC::g_fprf_emulation) the JIT cache was emitted for.
++bool s_emitted_fprf = false;
+ }
+ 
+ void CachedInterpreter::Shutdown()
+@@ -10884,6 +10900,17 @@
+     RetryDeferredWasmBlocks(*this);
+     ServiceRegionInstalls();
+     ApplyRegionStatsRequest();
++#ifdef __EMSCRIPTEN__
++    // Patch 0121: code emitted for the other FPRF mode (a game's INI loaded,
++    // a setting changed) is dropped, blocks and regions alike.
++    if (const bool fprf = PowerPC::g_fprf_emulation.load(std::memory_order_relaxed);
++        fprf != s_emitted_fprf)
++    {
++      s_emitted_fprf = fprf;
++      ClearCache();
++      ForgetAllRegions();
++    }
++#endif
+     // Start new timing slice
+     // Metrics-off runs avoid all per-slice clocks. BeginSlice also resets
+     // the exclusive wait/work attribution for this one CoreTiming slice.
+@@ -16294,9 +16321,19 @@
+ extern "C" EMSCRIPTEN_KEEPALIVE void DolphinWeb_AotKeyParts(u32* out)
+ {
+   out[0] = AOT_COMPILER_VERSION;
+-  out[1] = s_dolphin_web_disable_mask.load(std::memory_order_relaxed);
++  // Bit 31 (no disable bit uses it): FPRF on (patch 0121), regions translated
++  // with and without it never share a cache entry.
++  out[1] = s_dolphin_web_disable_mask.load(std::memory_order_relaxed) |
++           (PowerPC::g_fprf_emulation.load(std::memory_order_relaxed) ? 1u << 31 : 0u);
+ }
+ 
++// Tests: FPRF on or off for every tier, as Config::MAIN_FPRF would set it
++// (the JIT cache and regions of the other mode are dropped by the caller).
++extern "C" EMSCRIPTEN_KEEPALIVE void DolphinWeb_SetFprfForTest(int on)
++{
++  PowerPC::g_fprf_emulation.store(on != 0, std::memory_order_relaxed);
++}
++
+ // Helper signatures in import order, "params>results" (BuildWasmCachedInterpreterBlock's types).
+ extern "C" EMSCRIPTEN_KEEPALIVE const char* DolphinWeb_JitHelperSignature(u32 index)
+ {
