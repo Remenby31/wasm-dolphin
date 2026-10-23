@@ -165,7 +165,10 @@ node harness/probes/race-perf.mjs --iso ../roms/<disc>.iso --state ../measures/h
   `headroom` = the smaller one; guest s from the core's own ticks, written
   at the same instant as its host window. PushBlockingEvent and SyncGPU
   waits (off by default) count as CPU busy time;
-  plus `throttleSleepShare` and `xfbCopiesPerVi` (`cold.headroom` per run,
+  plus `throttleSleepShare`, `xfbCopiesPerVi` and `gameFramesPerSecond`
+  (XFB copies per host second: the game images the player gets, the product
+  KPI while SyncOnSkipIdle is off, since the product's emulated time then
+  runs ahead of its rendering) (`cold.headroom` per run,
   medians per side). Under 2 % of sleep the game runs below 100 %
   (`headroomApplies` false): the speed is then the number.
   Validity (every run, `lib/headroom.mjs` `invalidReasons`): a ring overflow
