@@ -183,15 +183,19 @@ export function createAotFirstLaunch({
 
     // After the first image: what installBeforeBoot left, as a second
     // "install" event (after: "first-image").
+    // A cancel() or dispose() (another disc mounted, a stop) before or during
+    // it: nothing loads.
     async loadRest() {
-      if (!supported) return { loaded: 0, failed: [], deferred: 0 };
+      if (!supported || disposed) return { loaded: 0, failed: [], deferred: 0 };
       const t0 = now();
+      const ifGeneration = generation;
       let report;
       if (deferredLoad) {
         // The whole cache, in compile order (hottest first), with no budget.
         deferredLoad = false;
         try {
           const keys = await optimizer.bootKeys();
+          if (disposed || ifGeneration !== generation) return { loaded: 0, failed: [], deferred: 0, cancelled: true };
           report = await loader.load({ ...identity, keys, maxModules: maxBootModules, maxBytes: maxBootBytes });
         } catch (error) {
           report = { loaded: 0, failed: [], deferred: 0, error: String(error?.message || error) };
@@ -252,6 +256,7 @@ export function createAotFirstLaunch({
 
     cancel() {
       generation++;
+      deferredLoad = false; // the cache deferred to the first image never loads
       optimizer?.cancel();
       loader.cancel();
     },

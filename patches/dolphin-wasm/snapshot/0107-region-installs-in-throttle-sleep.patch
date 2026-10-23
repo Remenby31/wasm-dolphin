@@ -1,7 +1,7 @@
 diff --git a/Source/Core/Core/CoreTiming.cpp b/Source/Core/Core/CoreTiming.cpp
 --- a/Source/Core/Core/CoreTiming.cpp
 +++ b/Source/Core/Core/CoreTiming.cpp
-@@ -47,6 +47,12 @@
+@@ -50,6 +50,12 @@
  #include "VideoCommon/VideoConfig.h"
  #include "VideoCommon/VideoEvents.h"
  
@@ -14,7 +14,7 @@ diff --git a/Source/Core/Core/CoreTiming.cpp b/Source/Core/Core/CoreTiming.cpp
  namespace CoreTiming
  {
  static constexpr int MAX_SLICE_LENGTH = 20000;
-@@ -547,6 +553,9 @@ void CoreTimingManager::SleepUntil(TimePoint time_point)
+@@ -550,6 +556,9 @@ void CoreTimingManager::SleepUntil(TimePoint time_point)
  
    if (Core::IsCPUThread())
    {
@@ -196,17 +196,25 @@ diff --git a/Source/Core/Core/PowerPC/CachedInterpreter/CachedInterpreter.cpp b/
            TryInstallRegion(pending, ready_bits_ptr, spent_ms, InstallPath::First))
        {
          s_region_waiting[i] = std::move(s_region_waiting.back());
-@@ -9840,7 +9923,8 @@ void ServiceRegionInstalls()
+@@ -9840,19 +9923,23 @@ void ServiceRegionInstalls()
      const bool ready =
          s_wasm_jit_ready_bits[pending.slot].load(std::memory_order_acquire) != 0;
      const bool expired = now - pending.posted > s_region_ready_wait;
 -    if ((!ready && !pending.signalled && !expired) || !room(pending.bytes.size()))
-+    if ((!ready && !pending.signalled && !expired) || !room(pending.bytes.size(), false) ||
-+        may_wait_for_sleep(pending))
++    // A module whose ready byte never came (the ready wait ran out) compiles
++    // cold, synchronously: far more than the cache-hit estimate a sleep
++    // window is sized with, so it stays at slice boundaries (review of #124).
++    const answered = ready || pending.signalled;
++    if ((!answered && !expired) || !room(pending.bytes.size(), false) ||
++        (answered ? may_wait_for_sleep(pending) : deadline.has_value()))
      {
        ++i;
        continue;
-@@ -9852,7 +9936,7 @@ void ServiceRegionInstalls()
+     }
+     ++n;
+-    const bool answered = ready || pending.signalled;
+     if (!answered)
+       s_region_install_fallbacks += 1;
      // Its own bytes, synchronously, unless the byte is still set (the request
      // path then clears the in-flight mark): a hit either way once answered.
      // Waited past a slice where the game may have reloaded its code.
@@ -215,7 +223,7 @@ diff --git a/Source/Core/Core/PowerPC/CachedInterpreter/CachedInterpreter.cpp b/
          TryInstallRegion(pending, ready && ready_bits_ptr ? ready_bits_ptr : 0, spent_ms,
                           answered ? InstallPath::Ready : InstallPath::Cold))
      {
-@@ -9871,11 +9955,14 @@ void ServiceRegionInstalls()
+@@ -9871,11 +9958,14 @@ void ServiceRegionInstalls()
        std::lock_guard lock(s_region_queue_mutex);
        if (s_region_queue.empty() || !room(s_region_queue.front().bytes.size()))
          break;
@@ -231,7 +239,7 @@ diff --git a/Source/Core/Core/PowerPC/CachedInterpreter/CachedInterpreter.cpp b/
        continue;
      // A module handed to this pthread before the boot is installed at once;
      // any other is posted to the compiler worker and waits for its byte.
-@@ -9884,6 +9971,22 @@ void ServiceRegionInstalls()
+@@ -9884,6 +9974,22 @@ void ServiceRegionInstalls()
                            InstallPath::First))
        s_region_waiting.push_back(std::move(pending));
    }
@@ -254,7 +262,7 @@ diff --git a/Source/Core/Core/PowerPC/CachedInterpreter/CachedInterpreter.cpp b/
    if (!boot)
      s_region_stats.install_max_slice_ms = std::max(s_region_stats.install_max_slice_ms, spent_ms);
    else
-@@ -10266,6 +10369,53 @@ extern "C" EMSCRIPTEN_KEEPALIVE void DolphinWeb_AotServiceRegionsForTest()
+@@ -10266,6 +10372,53 @@ extern "C" EMSCRIPTEN_KEEPALIVE void DolphinWeb_AotServiceRegionsForTest()
    ApplyRegionStatsRequest();
  }
  

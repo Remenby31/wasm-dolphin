@@ -829,6 +829,30 @@ test("any ready module waits for a sleep window: with #86 the boot window is pla
   });
 });
 
+// Review of #124: a module whose ready byte never came compiles cold,
+// synchronously, far over the cache-hit estimate a sleep window is sized
+// with: never in a sleep, at a slice boundary only.
+test("a cold install (no ready byte) never runs in a sleep window, only at a slice boundary", { skip: largeSkip }, () => {
+  withOffThreadCompile(() => {
+    const plan = setup();
+    core.setRegionsEnabled(true);
+    core.module._DolphinWeb_AotSetSleepWaitForTest(2000);
+    const before = core.regionCount();
+    const entries = queueAll(plan);
+    core.serviceRegions(); // posted; the worker never answers
+    core.module._DolphinWeb_AotSetReadyWaitForTest(0); // 5 s in production
+    try {
+      core.module._DolphinWeb_AotRegionSleepWindowForTest(1000);
+      assert.equal(core.regionCount(), before, "no cold compile in the sleep");
+      for (let slice = 0; slice < 300 && core.regionCount() < before + entries; slice++) core.serviceRegions();
+      assert.equal(core.regionCount(), before + entries, "cold, at slice boundaries");
+      assert.equal(lastInstallPath(), 2, "sampled as cold");
+    } finally {
+      core.module._DolphinWeb_AotSetReadyWaitForTest(5000);
+    }
+  });
+});
+
 test("a large module's sleep wait counts from when it became installable; past it a slice installs it", { skip: largeSkip }, () => {
   withOffThreadCompile((requests) => {
     const plan = setup();
