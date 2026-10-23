@@ -415,8 +415,15 @@ function harnessMemAccessStats({ reset } = {}) {
   if (!ptr || ptr + 8 > heap.length) return { error: `DolphinWeb_MemAccessStats returned ${ptr}` };
   const size = Math.min(new DataView(heap.buffer, ptr, 8).getUint32(4, true), 192);
   if (ptr + size > heap.length) return { error: `memory access stats of ${size} bytes past the heap` };
+  // A seqlock read: copy until two consecutive copies agree (the core writes
+  // the struct whole at a slice boundary), at most 8 times.
   const copy = () => Array.from(new Uint8Array(heap.buffer, ptr, size));
-  return { bytes: copy(), again: copy() };
+  let bytes = copy(), again = copy();
+  for (let i = 0; i < 8 && bytes.some((b, j) => b !== again[j]); i++) {
+    bytes = again;
+    again = copy();
+  }
+  return { bytes, again };
 }
 // The core's first region installs, [ms, bytes, path] each (path 0 first
 // attempt, 1 after the worker's ready byte, 2 cold); null with an older core.

@@ -303,7 +303,10 @@ memory instructions by kind (integer, FP and paired-quantized loads and
 stores), slow accesses by kind, `cyclesCovered`/`cyclesTotal`, the regions'
 estimates and `staticSaturations`. `reset >= 0` zeroes it and turns counting
 on at the next slice boundary; the CPU thread writes the struct whole at each
-boundary, so read it twice.
+boundary, so read it as a seqlock (copies until two agree). The first reset
+clears the JIT cache: race-perf resets, waits `--mem-warm` seconds, then
+resets again for its window, so recompiles stay out of it. Slow accesses are
+counted once per instruction, after it ran, and not when it faulted.
 
 - **Blocks**: every block end (`EndBlock`, a `RunWasmBlock` that ends its
   block) carries an index into interned static counts taken where its
@@ -317,7 +320,9 @@ boundary, so read it twice.
   instructions a cached-interpreter block interprets (static, every
   execution). They include those of regions.
 - **Regions**: their cycles times their code's static accesses and
-  instructions per cycle, computed at install.
+  instructions per cycle, computed while counting (at install, or for every
+  installed region when counting starts). Added with the region stats on
+  only, so region dispatch is main's otherwise; race-perf resets both.
 - **Flags** (v1's spares, offsets 160 to 184): block instructions that write
   a CR field, read one, set XER[CA], read it (the analyzer's `crOut`, `crIn`,
   `outputCA`, `wantsCA`), for the lazy-CR lever

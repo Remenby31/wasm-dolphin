@@ -14,7 +14,7 @@
 //     [--runs 4 (even with --baseline)] [--min-pairs 4] [--hold KeyX] [--warm]
 //     [--max-load L] [--load-wait 300] [--lock-wait 1800]
 //     [--pcsample [periodMs]] [--symbols functions.json] [--out dir]
-//     [--headroom [--frames-per-vi-ref R]] [--display] [--unique-frames secs] [--region-sample N [--region-secs 10]] [--mem-stats] [--baseline-query "..."]
+//     [--headroom [--frames-per-vi-ref R]] [--display] [--unique-frames secs] [--region-sample N [--region-secs 10]] [--mem-stats [--mem-warm 5]] [--baseline-query "..."]
 //     [--calm-wait S (default --lock-wait): wait for load ≤ --max-load before taking the lock]
 //     [--chrome-args "--flag …"] [--baseline-chrome-args "--flag …"]
 //     [--emulated-window S [--emulated-warmup W (default --warmup)] [--emulated-poll-ms 100]]
@@ -241,9 +241,16 @@ export async function measure(session, o) {
       }
     }
     // The stats window, after everything the speed window reads.
-    // --mem-stats (0104) shares that window: both are reset together and
-    // read after it.
+    // --mem-stats (0117) shares that window: both are reset together and
+    // read after it. The core's first reset clears the JIT cache (blocks are
+    // emitted again with their counts), so it is made --mem-warm seconds
+    // before the window, and the window starts with a second reset (no cache
+    // clear): the recompiles and interpreted runs stay out of it.
     let regionEnd = null, memEnd = null;
+    if (o.memStats && o.memWarm > 0) {
+      const first = await workerRequest(page, "validationReadMemAccessStats", { reset: 0 }, 10000);
+      if (first && !first.error) await new Promise((r) => setTimeout(r, o.memWarm * 1000));
+    }
     if (o.regionSample != null || o.memStats) {
       if (o.regionSample != null) regionEnd = await workerRequest(page, "validationReadJitRegionStats", { sampleEvery: o.regionSample }, 10000);
       if (o.memStats) memEnd = await workerRequest(page, "validationReadMemAccessStats", { reset: 0 }, 10000);
@@ -503,7 +510,7 @@ async function main() {
       "emulated-window": { type: "string" }, "emulated-warmup": { type: "string" }, "emulated-poll-ms": { type: "string", default: "100" },
       hold: { type: "string", default: "KeyX" }, warm: { type: "boolean", default: false },
       "max-load": { type: "string" }, "lock-wait": { type: "string", default: "1800" },
-      pcsample: { type: "string" }, symbols: { type: "string" }, "region-sample": { type: "string" }, "region-secs": { type: "string", default: "10" }, counters: { type: "boolean", default: false }, "unique-frames": { type: "string" }, display: { type: "boolean", default: false }, "mem-stats": { type: "boolean", default: false }, headroom: { type: "boolean", default: false }, "frames-per-vi-ref": { type: "string" }, "baseline-query": { type: "string" }, "chrome-args": { type: "string" }, "baseline-chrome-args": { type: "string" },
+      pcsample: { type: "string" }, symbols: { type: "string" }, "region-sample": { type: "string" }, "region-secs": { type: "string", default: "10" }, counters: { type: "boolean", default: false }, "unique-frames": { type: "string" }, display: { type: "boolean", default: false }, "mem-stats": { type: "boolean", default: false }, "mem-warm": { type: "string", default: "5" }, headroom: { type: "boolean", default: false }, "frames-per-vi-ref": { type: "string" }, "baseline-query": { type: "string" }, "chrome-args": { type: "string" }, "baseline-chrome-args": { type: "string" },
       "core-candidate": { type: "string", multiple: true, default: [] },
       port: { type: "string", default: process.env.HARNESS_PORT }, out: { type: "string" }
     },
@@ -557,6 +564,7 @@ async function main() {
     ...(values.counters ? (checkPerfAccess(), { onWindow: perfCounters() }) : {}),
     uniqueFrames: values["unique-frames"] == null ? null : num(values, "unique-frames", { min: 2 }),
     memStats: values["mem-stats"],
+    memWarm: num(values, "mem-warm", { min: 0 }),
     headroom: values.headroom,
     framesPerViRef: values["frames-per-vi-ref"] == null ? null : num(values, "frames-per-vi-ref", { min: 0.01 }),
     display: values.display,

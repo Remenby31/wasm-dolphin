@@ -77,7 +77,7 @@ const PROGRAM = assemble(TEXT, [
   "count_done", asm.blr()
 ]);
 
-test("regions add their cycles times their code's static accesses and instructions per cycle", { skip }, () => {
+test("regions add their cycles times their code's static accesses and instructions per cycle (with the region stats on)", { skip }, () => {
   const dol = buildDol({ textAddr: TEXT, text: PROGRAM.words, entry: PROGRAM.labels.main });
   const { image, entryPoint } = imageFromDol(dol);
   const plan = planDol({ image, entryPoint, gameId: "TEST01", dolBytes: dol, options: { gapFill: false } });
@@ -104,6 +104,7 @@ test("regions add their cycles times their code's static accesses and instructio
   }
   assert.ok(words > 0 && accesses > 0);
 
+  core.regionStats(0); // the estimates ride on the region stats, as in race-perf's stats window
   memStats(0, { boundary: true });
   core.reset(seedGprs(PROGRAM.labels.main), PROGRAM.labels.main, STOP, 400000);
   let ran = 0;
