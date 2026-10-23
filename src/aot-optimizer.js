@@ -323,6 +323,7 @@ export class AotOptimizer extends EventTarget {
     const t0 = this.now();
     const ms = () => Math.round(this.now() - t0);
     let compiled = 0, deferred = 0;
+    this.budgetRefused = 0; // per run: the done event reports this run's
     try {
       await this.getPlan();
       const session = await this.openSession();

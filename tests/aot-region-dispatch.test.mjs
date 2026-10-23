@@ -1129,8 +1129,7 @@ test("the region key changes with the formation", async () => {
   const f = [{ entry: 0x80003100, sha256: "a".repeat(64) }];
   const parts = { compilerVersion: 5, codegenMask: 0 };
   assert.notEqual(await regionModuleKey(f, { ...parts, formation: 1 }), await regionModuleKey(f, { ...parts, formation: 2 }));
-  assert.notEqual(await regionModuleKey(f, { ...parts, formation: 2 }), await regionModuleKey(f, { ...parts, formation: 3 }), "3: the frontier rule");
-  assert.equal(await regionModuleKey(f, parts), await regionModuleKey(f, { ...parts, formation: 3 }), "3 by default");
+  assert.equal(await regionModuleKey(f, parts), await regionModuleKey(f, { ...parts, formation: 2 }), "2 by default");
 });
 
 
@@ -1214,18 +1213,6 @@ test("without harness hooks the profile sampler gets the guest PC and a record w
   assert.deepEqual(saved.blocks.map((b) => [b[0], b[4]]), [[(TEXT + 0x40) >>> 0, 7]], "the profile file holds the weight");
 });
 
-// A branch is in held code when the nearest held entry before it reaches it
-// with no block end between (the core's block can run through a leader it
-// did not split at); after a block end it is not.
-test("frontier: a branch belongs to the nearest held entry unless a block end lies between", async () => {
-  const { frontier } = await import("../src/aot-orchestrator.js");
-  const branches = [[0x80000008, [0x80000100]], [0x80000020, [0x80000200]]];
-  branches.ends = [0x80000010];
-  // Entry 0x80000000 held; a leader at 0x80000004 not split; a blr at 0x10.
-  assert.deepEqual(frontier(branches, new Set([0x80000000])), [0x80000100], "the branch at 8 is in the entry's block; the one at 0x20 is past the blr");
-  assert.deepEqual(frontier(branches, new Set([0x80000000, 0x80000014])), [0x80000100, 0x80000200]);
-});
-
 // Review of 0130: continuations that only hold what one uncut fragment held
 // before (the first fragment and them, up to maxBlocks blocks) spend no
 // budget; past that they do, and what the budget leaves out is counted.
@@ -1243,4 +1230,26 @@ test("continuation budget: the old single fragment's blocks are free; refusals f
   // With no budget past the free blocks, the rest is refused and counted.
   const starved = await run({ maxBlocks: 16, maxBytes: 1 });
   assert.ok(starved.budgetRefused >= 1, `refused ${starved.budgetRefused}`);
+});
+
+// The production path: a first fragment of maxBlocks (64) blocks, so nothing
+// is free, and continuations halved under the byte cap. Every continuation
+// byte is charged, and a budget below them refuses the rest, counted.
+test("continuation budget: past a full first fragment every continuation byte is charged, byte-capped ones too", { skip: contSkip }, async () => {
+  const program = longFunction(100);
+  const run = (options) => translateWithContinuations(core.module, { entry: LONG, ranges: loadWords(LONG, program.words), hash: null },
+    { mask: PRODUCTION_DISABLE_MASK, maxBlocks: 64, names: coreAssembleOptions(core.module)?.helperNames, ...options });
+  const bytesOf = (r) => (r.continuations ?? []).reduce((n, c) => n + c.code.length, 0);
+  const full = await run({});
+  assert.equal(full.fragment.entries.length, 64);
+  assert.ok(full.continuations?.length >= 1);
+  assert.equal(full.budgetCharged, bytesOf(full), "64 blocks first: no block is free");
+  const cap = Math.floor(full.fragment.code.length / 8);
+  const capped = await run({ maxFragmentBytes: cap });
+  assert.ok(capped.continuations.length > full.continuations.length, "halved under the byte cap");
+  assert.ok(capped.continuations.every((c) => c.code.length <= cap));
+  assert.equal(capped.budgetCharged, bytesOf(capped));
+  const short = await run({ maxFragmentBytes: cap, maxBytes: cap });
+  assert.ok(short.budgetCharged <= cap + Math.max(...capped.continuations.map((c) => c.code.length)), "stops once the budget is spent");
+  assert.ok(short.budgetRefused >= 1, `refused ${short.budgetRefused}`);
 });

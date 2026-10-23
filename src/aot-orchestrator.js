@@ -518,13 +518,12 @@ export function functionBranches(m, ranges) {
 }
 
 // The leaders that the blocks held already reach and that none holds, in
-// address order. A branch is in held code when the nearest held entry at or
-// before it reaches it with no block end between them (the core's block can
-// run through a leader it did not split at, e.g. a loop head right after the
-// entry); a word that only looks like a branch (a literal after a blr) is in
-// no block.
+// address order. A branch belongs to the block of the nearest block start
+// at or before it (held entries and all leaders), unless a block end lies
+// between them: the leaders a held block reaches are the frontier; a word
+// that only looks like a branch (a literal after a blr) is in no block.
 export function frontier(branches, owned) {
-  const starts = [...owned].sort((a, b) => a - b);
+  const starts = [...new Set([...owned, ...branches.flatMap(([, l]) => l)])].sort((a, b) => a - b);
   const blockOf = (a) => {
     let lo = 0, hi = starts.length - 1, at = null;
     while (lo <= hi) { const mid = (lo + hi) >> 1; if (starts[mid] <= a) { at = starts[mid]; lo = mid + 1; } else hi = mid - 1; }
@@ -535,7 +534,7 @@ export function frontier(branches, owned) {
   const out = new Set();
   for (const [a, leaders] of branches) {
     const start = blockOf(a);
-    if (start === null || endBetween(start, a)) continue;
+    if (!owned.has(start) || endBetween(start, a)) continue;
     for (const pc of leaders) if (!owned.has(pc)) out.add(pc);
   }
   return [...out].sort((a, b) => a - b);
