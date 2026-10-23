@@ -5,7 +5,7 @@ import test from "node:test";
 import { CONF_POINTER, CONF_PROFILE } from "../src/aot-discovery.js";
 import { walkFst } from "../src/aot-disc.js";
 import {
-  AotProfileStore, blocksFromCoreDump, blocksFromPcSamples, decodeProfile, encodeProfile, mergeProfiles, normalizeRanges
+  AotProfileStore, profileKey, blocksFromCoreDump, blocksFromPcSamples, decodeProfile, encodeProfile, mergeProfiles, normalizeRanges
 } from "../src/aot-profile.js";
 import { hintsMatch, loadHints, parseHints } from "../src/aot-hints.js";
 import { imageFromDol } from "../src/aot-image.js";
@@ -409,5 +409,18 @@ test("aot plan: hot ranges hold under ±30 % noise on the weights (hysteresis), 
   // Crossing by ×2 changes the set.
   applyProfileHotRanges(plan, { sessions: 1, blocks: blocksFromPcSamples([[t.labels.loop, 4000], [t.labels.edge, 0], [t.labels.cold5, 200]]) });
   assert.notEqual(JSON.stringify(f().hotRanges), first);
+});
+
+// The engine's disc keys hold a ':' that a profile file name refuses: every
+// read and write of #165 threw ("invalid disc key"), so nothing was ever
+// recorded. profileKey maps them, as the plan store does.
+test("aot profile: an engine disc key records and loads through profileKey", async () => {
+  const discKey = "disc-sha256-v1:" + "ab".repeat(32);
+  const store = new AotProfileStore(fakeOpfs(), { locks: null });
+  await assert.rejects(store.record(discKey, blocksFromPcSamples([[0x80003100, 3]])), /invalid disc key/, "the raw key is refused");
+  const key = profileKey(discKey);
+  assert.match(key, /^[0-9A-Za-z_-]{1,128}$/);
+  await store.record(key, blocksFromPcSamples([[0x80003100, 3]]));
+  assert.deepEqual((await store.load(key)).blocks.map((b) => [b[0], b[4]]), [[0x80003100, 3]]);
 });
 

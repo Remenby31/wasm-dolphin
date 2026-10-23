@@ -122,6 +122,14 @@ export function decodeProfile(bytes) {
   return { sessions: v.getUint32(12, true), gameId, dolHash, blocks: normalizeRanges(blocks) };
 }
 
+// The profile key of a disc key: the engine's disc keys
+// ("disc-sha256-v1:<hex>") hold a ':', which a profile file name refuses, so
+// every read and write of #165 threw and nothing was recorded. Mapped the way
+// the plan store maps its key (aot-orchestrator planKey).
+export function profileKey(discKey) {
+  return String(discKey).replace(/[^0-9A-Za-z_-]/g, "_").slice(0, 128);
+}
+
 // Profile key: one file per disc identity (e.g. the disc fingerprint the JIT
 // cache uses). Restricted so it is a safe file name.
 function fileName(discKey) {

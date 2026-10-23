@@ -154,7 +154,7 @@ import {
 import { createCoreLifecycle } from "./core-lifecycle.js";
 import { WgpuReadback, unwrapSeq } from "./wgpu-readback.js";
 import { createDisplayCounter, startDisplayLoop } from "./wgpu-display-counter.js";
-import { PipelinePrewarm } from "./wgpu-pipeline-prewarm.js";
+import { PipelinePrewarm, wgslHash } from "./wgpu-pipeline-prewarm.js";
 import { BOOT_FILE_HEAD_BYTES, bootFileKind, checkExecutable, executableGameId } from "./boot-file.js";
 import {
   USER_DATA_ROOT,
@@ -261,6 +261,9 @@ const PRESENTATION_HISTOGRAM_BUCKETS_MS = [8, 12, 16, 20, 24, 33, 50, 100, 200];
 const harnessNow = () => performance.timeOrigin + performance.now();
 let harnessEnabled = false;
 // ?fifolog=1: a .dff may boot (FifoPlayer). Harness only, set at loadCore.
+// Harness (validationWgslCorpus): WGSL by hash, null when off.
+let harnessWgslCorpus = null;
+const HARNESS_WGSL_CORPUS_MAX = 20000;
 let fifoLogBoot = false;
 // ?wgpumask=a,b: optional WebGPU features the device is created without, as
 // on a browser that lacks them (harness only, set at loadCore).
@@ -1760,6 +1763,20 @@ async function handleMessage(type, payload) {
       return captureAtViOutput(payload);
     case "validationFifoRecord":
       return recordFifoLog(payload);
+    case "validationWgslCorpus":
+      // Harness: the WGSL of every shader module the replay created, one per
+      // hash (offline Tint -> HLSL -> DXC, tools/wgsl-hlsl-corpus.mjs).
+      // start: on from now; read: the modules so far; stop: off and freed.
+      if (!harnessEnabled) return { error: "harness hooks are off" };
+      if (payload.action === "start") harnessWgslCorpus ??= new Map();
+      else if (payload.action === "stop") harnessWgslCorpus = null;
+      return {
+        on: Boolean(harnessWgslCorpus),
+        shaders: payload.action === "read" && harnessWgslCorpus
+          ? [...harnessWgslCorpus].map(([hash, v]) => ({ hash, stage: v.stage, wgsl: v.wgsl }))
+          : undefined,
+        count: harnessWgslCorpus?.size ?? 0
+      };
     case "validationReadPipelinePrewarm":
       return pipelinePrewarm ? pipelinePrewarm.snapshot() : { enabled: false, why: !hardwareVideoBackend ? "not video=wgpu" : !wgpuPipelinePrewarmEnabled ? "wgpuprewarm=0" : "not started" };
     case "validationReadDetTrace":
@@ -7377,7 +7394,7 @@ export async function prepareAotFirstLaunch(file, {
     return;
   }
   const generation = aotDiscGeneration;
-  const [{ coreAotKeyParts, coreAssembleOptions, coreRegionTranslator, createAotFirstLaunch }, { OpfsPlanStore }, { AotProfileStore, blocksFromPcSamples }, { planDiscInWorker }, { fileReader, planDisc }, { createProfileRecorder, guestPcAddress, startHotSampler }] =
+  const [{ coreAotKeyParts, coreAssembleOptions, coreRegionTranslator, createAotFirstLaunch }, { OpfsPlanStore }, { AotProfileStore, blocksFromPcSamples, profileKey }, { planDiscInWorker }, { fileReader, planDisc }, { createProfileRecorder, guestPcAddress, startHotSampler }] =
     await Promise.all([import("./aot-orchestrator.js"), import("./aot-optimizer.js"), import("./aot-profile.js"), import("./aot-plan-worker.js"), import("./aot-recomp.js"), import("./aot-hot-sampler.js")]);
   const discKey = await readDiscKey();
   if (generation !== aotDiscGeneration) return;
@@ -7391,7 +7408,7 @@ export async function prepareAotFirstLaunch(file, {
     discKey,
     coreHash,
     // The local profile's weights shape each large function's hot fragment.
-    loadProfile: () => (opfs ? new AotProfileStore(opfs).load(discKey) : null),
+    loadProfile: () => (opfs ? new AotProfileStore(opfs).load(profileKey(discKey)) : null),
     keyParts,
     translator,
     assembleOptions: core?.assemble,
@@ -7401,7 +7418,7 @@ export async function prepareAotFirstLaunch(file, {
     // in a worker of its own, never on this one, which serves the core's
     // disc reads. Without workers (tests), in place.
     buildPlan: async () => {
-      const profile = opfs ? await new AotProfileStore(opfs).load(discKey).catch(() => null) : null;
+      const profile = opfs ? await new AotProfileStore(opfs).load(profileKey(discKey)).catch(() => null) : null;
       return typeof Worker === "function" ? planDiscInWorker(file, { profile }) : planDisc(fileReader(file), { profile });
     },
     compile: precompileAotRegion,
@@ -7442,7 +7459,7 @@ export async function prepareAotFirstLaunch(file, {
   // profile (OPFS, per disc, addresses and sample counts only; never sent or
   // shared): the next plan orders by it and forms hot fragments from it.
   aotProfileTarget = opfs && discKey
-    ? { flow, startHotSampler, guestPcAddress, record: createProfileRecorder({ store: new AotProfileStore(opfs), discKey, blocksFromPcSamples }) }
+    ? { flow, startHotSampler, guestPcAddress, record: createProfileRecorder({ store: new AotProfileStore(opfs), discKey: profileKey(discKey), blocksFromPcSamples }) }
     : null;
   const blockKeys = [];
   if (!flow.supported) {
@@ -16079,6 +16096,10 @@ function replayCreateShader(id, blobPtr, blobLen, stage) {
   }
   webGpuObjects.shaders.set(id, module);
   pipelinePrewarm?.noteShader(id, wgsl);
+  if (harnessWgslCorpus && harnessWgslCorpus.size < HARNESS_WGSL_CORPUS_MAX) {
+    const hash = wgslHash(wgsl);
+    if (!harnessWgslCorpus.has(hash)) harnessWgslCorpus.set(hash, { stage, wgsl });
+  }
   if (uvForcedWgsl) {
     try {
       webGpuObjects.shadersUvForced.set(id,
