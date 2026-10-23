@@ -14,8 +14,9 @@
 //       The same, for the index against HEAD (tools/hooks/pre-commit).
 //   node tools/core-artifacts.mjs restore --base <ref>
 //       Put <ref>'s core back, keeping this branch's source-side ABI changes.
-//   node tools/core-artifacts.mjs publish-plan --artifact <dir> --built-sha256 <sha> --out <plan.json>
-//       CI on main: commit a built core onto main's current HEAD, or say why not.
+//   node tools/core-artifacts.mjs publish-plan --artifact <dir> --built-sha256 <sha> --out <plan.json> [--republish]
+//       CI on main: commit a built core onto main's current HEAD, or say why not
+//       (--republish: a core from an earlier run, see republishDifferences).
 //   node tools/core-artifacts.mjs fetch <sha256> [--repo owner/name]
 //       Materialise an exact core under build/core-candidates/<sha256>/.
 
@@ -234,6 +235,29 @@ export function buildIdentityDifferences(buildInfo, cwd = root) {
   return reasons;
 }
 
+// A core republished from an earlier run (core-build.yml's from_run input)
+// was built at another commit than HEAD. Beyond the build identity, the
+// sources its ABI manifest hashes (contractSources) must be HEAD's, byte for
+// byte, at that commit, whose tree was clean: a merge that touches only them
+// still gets a full run.
+export function republishDifferences(buildInfo, cwd = root) {
+  const commit = buildInfo.repository?.commit;
+  if (!/^[0-9a-f]{40}$/.test(commit ?? "")) return ["the build record names no commit"];
+  if (buildInfo.repository?.cleanTree !== true) return ["the core was built from a tree with local changes"];
+  if (git(["cat-file", "-e", `${commit}^{commit}`], { cwd }) == null) return [`the built commit ${commit} is not in this checkout`];
+  const contractPaths = (ref) => {
+    const abi = readAt(ref, ABI_PATH, cwd);
+    return abi ? JSON.parse(abi).contractSources?.map((source) => source.path) ?? null : null;
+  };
+  const head = contractPaths("HEAD");
+  const built = contractPaths(commit);
+  if (!head || !built) return ["no ABI contract sources to compare"];
+  if (JSON.stringify(head) !== JSON.stringify(built)) return ["the ABI contract source list differs"];
+  const changed = git(["diff", "--name-only", commit, "HEAD", "--", ...head], { cwd });
+  if (changed == null) return ["git diff of the ABI contract sources failed"];
+  return changed ? changed.split("\n").map((path) => `ABI contract source ${path} differs`) : [];
+}
+
 // main commits CI's build. A core built elsewhere from the same sources is
 // current (core:status) but has other bytes (the Rust part depends on the
 // build host, docs/repro-build.md), so "none" requires the committed .wasm to
@@ -260,6 +284,8 @@ export async function publishPlan({
   cwd = root,
   status = coreStatus,
   identityDifferences = (built) => buildIdentityDifferences(built, cwd),
+  republish = false,
+  republishCheck = (built) => republishDifferences(built, cwd),
   regenerate = () => {
     // Logs go to stderr: stdout carries the plan only.
     const result = spawnSync(process.execPath, ["tools/update-core-abi.mjs", "--write"],
@@ -290,7 +316,7 @@ export async function publishPlan({
       reason: "the committed core is byte for byte the core this run built" };
   }
   const built = JSON.parse(readFileSync(join(artifactDir, "dolphin-core-upstream.build.json"), "utf8"));
-  const differences = identityDifferences(built);
+  const differences = [...identityDifferences(built), ...(republish ? republishCheck(built) : [])];
   if (differences.length > 0) {
     return { schemaVersion: 1, action: "dispatch", reasons: differences,
       reason: "the core was built from other sources than main's current tip" };
@@ -418,7 +444,8 @@ if (process.argv[1] === fileURLToPath(import.meta.url)) {
       const out = option("--out");
       if (!out) throw new Error("publish-plan needs --out <plan.json>");
       const plan = await publishPlan({ artifactDir: resolve(artifactDir), builtSha256: option("--built-sha256"),
-        cwd: resolve(option("--checkout", root)), message: option("--message", "Build the core") });
+        cwd: resolve(option("--checkout", root)), message: option("--message", "Build the core"),
+        republish: rest.includes("--republish") });
       if (!PUBLISH_ACTIONS.includes(plan.action)) throw new Error(`invalid plan ${JSON.stringify(plan)}`);
       writeFileSync(out, `${JSON.stringify(plan)}\n`);
     } else if (command === "fetch") {

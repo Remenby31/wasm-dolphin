@@ -22,6 +22,11 @@ mkdir -p "$B/lanes/b"
   export PLAYWRIGHT_MODULE="$B/pw/node_modules/playwright/index.mjs"
   export HARNESS_PRIVATE_OUT="$B/results"
   export HARNESS_CHROME_PATH="$PWD/harness/remote/chrome-pinned.sh"
+  # The codegen of the targets (Mac arm64, x64): V8 keeps an explicit bounds
+  # check on every wasm store wider than a byte on arm64 outside macOS
+  # (wasm_partial_oob_writes_are_noops false there, V8 15.6
+  # flag-definitions.h), ~4 instructions a store the targets never run.
+  export HARNESS_CHROME_ARGS="${HARNESS_CHROME_ARGS:+$HARNESS_CHROME_ARGS }--js-flags=--wasm-partial-oob-writes-are-noops"
   export SPARK_CHROMIUM="$(ls -d "$B"/ms-playwright/chromium-*/chrome-linux*/chrome | sort -V | tail -1)"
   echo "[spark-multi] $(date -Is) $(hostname) lanes $lane uptime:$(uptime)"
   echo "[spark-multi] chromium: $("$SPARK_CHROMIUM" --version), node on 10-14, perf_event_paranoid=$(cat /proc/sys/kernel/perf_event_paranoid)"
