@@ -25,7 +25,10 @@ const videoOf = (url) => {
   }
 };
 
-export function renderChecks(records, reference, loadFrame = (file) => (existsSync(file ?? "") ? decodePng(readFileSync(file)) : null)) {
+// `match`: the SSIM a cross-renderer picture needs (matrix "renderMatch";
+// default DEFAULT_THRESHOLDS.match).
+export function renderChecks(records, reference, loadFrame = (file) => (existsSync(file ?? "") ? decodePng(readFileSync(file)) : null), { match = DEFAULT_THRESHOLDS.match } = {}) {
+  const thresholds = { ...DEFAULT_THRESHOLDS, match };
   const frames = new Map();
   const load = (file) => {
     if (!file) return null;
@@ -55,7 +58,7 @@ export function renderChecks(records, reference, loadFrame = (file) => (existsSy
       r.render = { status: "unjudged", detail: `not blank; reference ${ref.label} runs another cpu mode (${cpuOf(ref.url)}): VI output N is not the same emulated frame` };
       continue;
     }
-    const { blockMap, ...score } = compareFrames(refFrame, frame);
+    const { blockMap, ...score } = compareFrames(refFrame, frame, { thresholds });
     const verdict = identical(refFrame, frame) ? "identical" : score.verdict;
     // Same renderer, same emulated frame: the pictures must be the same
     // bytes (a still scene shifted by 4 px is a failure, not a "match").

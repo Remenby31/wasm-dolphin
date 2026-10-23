@@ -101,6 +101,7 @@ export class UpstreamWorkerAdapter {
     coreLog = false,
     memcardSlotB = false,
     efbAccess = false,
+    fifoLog = false,
     efbCopyRam = false,
     savesMode = "",
     efbDiag = false,
@@ -208,6 +209,7 @@ export class UpstreamWorkerAdapter {
     this.coreLog = Boolean(coreLog);
     this.memcardSlotB = Boolean(memcardSlotB);
     this.efbAccess = Boolean(efbAccess);
+    this.fifoLog = Boolean(fifoLog);
     this.efbCopyRam = Boolean(efbCopyRam);
     this.savesMode = String(savesMode || "");
     this.userData = null;
@@ -432,6 +434,7 @@ export class UpstreamWorkerAdapter {
       coreLog: this.coreLog,
       memcardSlotB: this.memcardSlotB,
       efbAccess: this.efbAccess,
+      fifoLog: this.fifoLog,
       efbCopyRam: this.efbCopyRam,
       savesMode: this.savesMode,
       efbDiag: this.efbDiag,

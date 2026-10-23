@@ -1,0 +1,932 @@
+diff --git a/Source/Core/Core/PowerPC/CachedInterpreter/CachedInterpreter.cpp b/Source/Core/Core/PowerPC/CachedInterpreter/CachedInterpreter.cpp
+--- a/Source/Core/Core/PowerPC/CachedInterpreter/CachedInterpreter.cpp
++++ b/Source/Core/Core/PowerPC/CachedInterpreter/CachedInterpreter.cpp
+@@ -493,7 +493,334 @@
+ std::atomic<u32> s_runloop_advance_max_us{0};
+ std::atomic<u32> s_runloop_exec_max_us{0};
+ }  // namespace
++
++// Memory-access counts (patch 0117, DolphinWeb_MemAccessStats). Every block
++// end (EndBlock, a RunWasmBlock that ends its block) carries an index into
++// s_mem_static: the guest instructions and memory instructions by kind from
++// the block's start to that end, counted where its downcount is, so the
++// counts and the cycles they cover agree. While stats are on, each block end
++// that runs adds its entry once. Slow accesses, served by Dolphin's MMU or
++// interpreter instead of a direct RAM access, are counted where they happen;
++// the memory instructions a cached-interpreter block interprets are slow
++// every time and counted with its entry. Regions add an estimate: their
++// cycles times their code's static accesses per cycle. Block ends also count
++// the instructions that write or read the condition register (a CR field)
++// and XER's carry, for the lazy-CR lever (research/deep-cr-flags.md).
++namespace
++{
++enum MemKind : u32
++{
++  kIntLoad,
++  kIntStore,
++  kFpLoad,
++  kFpStore,
++  kPsqLoad,
++  kPsqStore,
++  kMemKinds
++};
++
++// The kind of a memory instruction, or -1. Cache operations (dcbz, dcbz_l)
++// and eciwx/ecowx are not counted.
++int MemAccessKind(const GekkoOPInfo* info, UGeckoInstruction inst)
++{
++  switch (info->type)
++  {
++  case OpType::Load:
++    return kIntLoad;
++  case OpType::Store:
++    return kIntStore;
++  case OpType::LoadFP:
++    return kFpLoad;
++  case OpType::StoreFP:
++    return kFpStore;
++  case OpType::LoadPS:
++    return kPsqLoad;
++  case OpType::StorePS:
++    return kPsqStore;
++  case OpType::System:
++    return inst.OPCD == 46 ? kIntLoad : inst.OPCD == 47 ? kIntStore : -1;  // lmw, stmw
++  default:
++    return -1;
++  }
++}
++
++// Instructions that write a CR field (cmp*, Rc=1, CR logic, mtcrf...), read
++// one (a conditional bc, CR logic, mfcr...), set XER[CA], read it.
++enum FlagCount : u32
++{
++  kCrWrites,
++  kCrReads,
++  kCaWrites,
++  kCaReads,
++  kFlagCounts
++};
++
++struct MemStaticCounts
++{
++  u16 instructions = 0;
++  std::array<u16, kMemKinds> accesses{};
++  std::array<u16, kMemKinds> interpreted{};  // run by the interpreter: slow every time
++  u16 flags = 0;  // bit 0: a wasm block end
++  std::array<u16, kFlagCounts> flag_ops{};
++};
++static_assert(sizeof(MemStaticCounts) == 36);
++
++// The counts of the block being emitted, from its start.
++struct MemCountBuilder
++{
++  u32 instructions = 0;
++  std::array<u32, kMemKinds> accesses{};
++  std::array<u32, kMemKinds> interpreted{};
++  std::array<u32, kFlagCounts> flag_ops{};
++
++  void Add(const PPCAnalyst::CodeOp& op)
++  {
++    ++instructions;
++    if (op.skip)
++      return;
++    if (const int kind = MemAccessKind(op.opinfo, op.inst); kind >= 0)
++      ++accesses[kind];
++    flag_ops[kCrWrites] += op.crOut.Count() != 0 ? 1 : 0;
++    flag_ops[kCrReads] += op.crIn.Count() != 0 ? 1 : 0;
++    flag_ops[kCaWrites] += op.outputCA ? 1 : 0;
++    flag_ops[kCaReads] += (op.opinfo->flags & FL_READ_CA) != 0 ? 1 : 0;  // wantsCA is liveness
++  }
++  void Interpreted(const PPCAnalyst::CodeOp& op)
++  {
++    if (const int kind = MemAccessKind(op.opinfo, op.inst); kind >= 0)
++      ++interpreted[kind];
++  }
++  void Add(const MemCountBuilder& other)
++  {
++    instructions += other.instructions;
++    for (u32 k = 0; k < kMemKinds; ++k)
++    {
++      accesses[k] += other.accesses[k];
++      interpreted[k] += other.interpreted[k];
++    }
++    for (u32 k = 0; k < kFlagCounts; ++k)
++      flag_ops[k] += other.flag_ops[k];
++  }
++};
++
++MemCountBuilder s_mem_block_counts;  // CPU thread, while a block is emitted
++// Distinct counts, interned: blocks share a few thousand of them. Entries are
++// never freed, so an index stays valid after its block is gone.
++std::vector<MemStaticCounts> s_mem_static(1);  // [0]: no counts
++std::unordered_map<u64, u32> s_mem_static_index;
++constexpr std::size_t MEM_STATIC_MAX = 1u << 20;
++std::unordered_map<u32, u32> s_mem_static_at;  // block start -> its last end's entry
++double s_mem_static_saturations = 0;            // counts past 65535, cumulative
++
++struct MemAccessTotals
++{
++  u64 instructions = 0;
++  std::array<u64, kMemKinds> accesses{};
++  std::array<u64, kMemKinds> slow{};
++  std::array<u64, kFlagCounts> flag_ops{};
++  u64 cycles_covered = 0;
++  double cycles_total = 0, region_accesses = 0, region_instructions = 0;
++};
++MemAccessTotals s_mem_totals;
++bool s_mem_stats_on = false;
++std::atomic<bool> s_mem_stats_reset{false};
+ 
++// Layout v1, agreed with the harness (lib/mem-access-stats.mjs): written as
++// a whole at each slice boundary while on; readers copy it twice. The flag
++// counts sit in v1's spares (readers of the first v1 ignore them).
++struct MemAccessStatsV1
++{
++  u32 version = 1;
++  u32 size_bytes = 192;
++  u32 on = 0;
++  u32 reserved = 0;
++  double instructions = 0;
++  std::array<double, kMemKinds> accesses{};
++  std::array<double, kMemKinds> slow{};
++  double cycles_covered = 0, cycles_total = 0, region_accesses = 0, region_instructions = 0,
++         static_saturations = 0;
++  std::array<double, kFlagCounts> flag_ops{};  // blocks: CR writes, CR reads, CA writes, CA reads
++};
++static_assert(sizeof(MemAccessStatsV1) == 192);
++static_assert(offsetof(MemAccessStatsV1, slow) == 72 &&
++              offsetof(MemAccessStatsV1, cycles_covered) == 120 &&
++              offsetof(MemAccessStatsV1, static_saturations) == 152 &&
++              offsetof(MemAccessStatsV1, flag_ops) == 160);
++alignas(8) MemAccessStatsV1 s_mem_stats_view;
++
++u32 InternMemCounts(const MemCountBuilder& b, u16 flags)
++{
++  MemStaticCounts c;
++  c.flags = flags;
++  const auto clamp = [](u32 v) -> u16 {
++    if (v <= 0xffff)
++      return static_cast<u16>(v);
++    s_mem_static_saturations += 1;
++    return 0xffff;
++  };
++  c.instructions = clamp(b.instructions);
++  for (u32 k = 0; k < kMemKinds; ++k)
++  {
++    c.accesses[k] = clamp(b.accesses[k]);
++    c.interpreted[k] = clamp(b.interpreted[k]);
++  }
++  for (u32 k = 0; k < kFlagCounts; ++k)
++    c.flag_ops[k] = clamp(b.flag_ops[k]);
++  u64 key = 0xcbf29ce484222325ull;
++  const auto* bytes = reinterpret_cast<const u8*>(&c);
++  for (std::size_t i = 0; i < sizeof(c); ++i)
++    key = (key ^ bytes[i]) * 0x100000001b3ull;
++  if (const auto it = s_mem_static_index.find(key); it != s_mem_static_index.end())
++  {
++    if (std::memcmp(&s_mem_static[it->second], &c, sizeof(c)) == 0)
++      return it->second;
++  }
++  if (s_mem_static.size() >= MEM_STATIC_MAX)
++    return 0;  // not counted: shows in cycles_covered
++  const u32 index = static_cast<u32>(s_mem_static.size());
++  s_mem_static.push_back(c);
++  s_mem_static_index.emplace(key, index);
++  return index;
++}
++
++// The entry of the block end being written; the last one written for a block
++// stands for the whole block (DolphinWeb_MemAccessStaticAt).
++u32 BlockEndMemCounts(u32 block_start, bool wasm)
++{
++  const u32 index = InternMemCounts(s_mem_block_counts, wasm ? 1 : 0);
++  s_mem_static_at[block_start] = index;
++  return index;
++}
++
++void CountMemBlockEnd(u32 index, u32 downcount)
++{
++  if (index == 0)
++    return;
++  const MemStaticCounts& c = s_mem_static[index];
++  s_mem_totals.instructions += c.instructions;
++  for (u32 k = 0; k < kMemKinds; ++k)
++  {
++    s_mem_totals.accesses[k] += c.accesses[k];
++    s_mem_totals.slow[k] += c.interpreted[k];
++  }
++  for (u32 k = 0; k < kFlagCounts; ++k)
++    s_mem_totals.flag_ops[k] += c.flag_ops[k];
++  s_mem_totals.cycles_covered += downcount;
++}
++
++// Counted after the access, once per instruction, and not when it faulted
++// (the instruction runs again after the exception). kind kMemKinds: not
++// counted (the later words of lmw/stmw).
++constexpr u32 kFaults = EXCEPTION_DSI | EXCEPTION_PROGRAM | EXCEPTION_ALIGNMENT |
++                        EXCEPTION_FPU_UNAVAILABLE;
++inline void CountSlowMemAccess(u32 kind)
++{
++  if (s_mem_stats_on && kind < kMemKinds) [[unlikely]]
++  {
++    if ((Core::System::GetInstance().GetPPCState().Exceptions & kFaults) == 0)
++      ++s_mem_totals.slow[kind];
++  }
++}
++
++// The MMU arm of a fast RAM instruction (the RAM arm is unchanged).
++template <typename T>
++T SlowMemRead(Core::System& system, u32 kind, u32 address)
++{
++  const T value = system.GetMMU().Read<T>(address);
++  CountSlowMemAccess(kind);
++  return value;
++}
++template <typename T>
++void SlowMemWrite(Core::System& system, u32 kind, T value, u32 address)
++{
++  system.GetMMU().Write<T>(value, address);
++  CountSlowMemAccess(kind);
++}
++
++// A memory instruction a helper handed to the interpreter, once it ran
++// (before its exception, if any, is delivered).
++inline void CountSlowMemInstruction(UGeckoInstruction inst, u32 pc)
++{
++  if (!s_mem_stats_on) [[likely]]
++    return;
++  if (const int kind = MemAccessKind(PPCTables::GetOpInfo(inst, pc), inst); kind >= 0)
++    CountSlowMemAccess(static_cast<u32>(kind));
++}
++
++void PublishMemStats()
++{
++  MemAccessStatsV1& v = s_mem_stats_view;
++  v.on = s_mem_stats_on ? 1 : 0;
++  v.instructions = static_cast<double>(s_mem_totals.instructions);
++  for (u32 k = 0; k < kMemKinds; ++k)
++  {
++    v.accesses[k] = static_cast<double>(s_mem_totals.accesses[k]);
++    v.slow[k] = static_cast<double>(s_mem_totals.slow[k]);
++  }
++  // A halted wasm block was counted whole before it ran: never more than
++  // the window's cycles.
++  v.cycles_covered = std::min(static_cast<double>(s_mem_totals.cycles_covered),
++                              s_mem_totals.cycles_total);
++  v.cycles_total = s_mem_totals.cycles_total;
++  v.region_accesses = s_mem_totals.region_accesses;
++  v.region_instructions = s_mem_totals.region_instructions;
++  v.static_saturations = s_mem_static_saturations;
++  for (u32 k = 0; k < kFlagCounts; ++k)
++    v.flag_ops[k] = static_cast<double>(s_mem_totals.flag_ops[k]);
++}
++
++// At a slice boundary, on the CPU thread: a requested reset zeroes the totals
++// and turns counting on.
++// Returns whether counting just started: the caller drops the JIT cache so
++// every block is emitted again with its CountMemBlock.
++bool ApplyMemStatsRequest()
++{
++  if (!s_mem_stats_reset.load(std::memory_order_relaxed) ||
++      !s_mem_stats_reset.exchange(false, std::memory_order_acq_rel))
++    return false;
++  const bool started = !s_mem_stats_on;
++  s_mem_totals = {};
++  s_mem_stats_on = true;
++  PublishMemStats();
++  return started;
++}
++}  // namespace
++
++#ifdef __EMSCRIPTEN__
++// reset >= 0: zero the totals and count from the next slice boundary on;
++// < 0: only read. Returns the MemAccessStatsV1 address.
++extern "C" EMSCRIPTEN_KEEPALIVE u32 DolphinWeb_MemAccessStats(int reset)
++{
++  if (reset >= 0)
++    s_mem_stats_reset.store(true, std::memory_order_release);
++  return static_cast<u32>(reinterpret_cast<std::uintptr_t>(&s_mem_stats_view));
++}
++
++// Debugging and tests: {u16 instructions, int_load, int_store, fp_load,
++// fp_store, psq_load, psq_store, flags} of the block starting at pc (its last
++// end: the whole block), 0 when none was emitted. flags bit 0: a wasm block.
++// Read it with the CPU thread paused.
++extern "C" EMSCRIPTEN_KEEPALIVE u32 DolphinWeb_MemAccessStaticAt(u32 pc)
++{
++  static std::array<u16, 8> out;
++  const auto it = s_mem_static_at.find(pc);
++  if (it == s_mem_static_at.end() || it->second == 0)
++    return 0;
++  const MemStaticCounts& c = s_mem_static[it->second];
++  out[0] = c.instructions;
++  std::copy(c.accesses.begin(), c.accesses.end(), out.begin() + 1);
++  out[7] = c.flags;
++  return static_cast<u32>(reinterpret_cast<std::uintptr_t>(out.data()));
++}
++
++// Tests: the kind MemAccessStats counts an instruction under, or -1.
++extern "C" EMSCRIPTEN_KEEPALIVE int DolphinWeb_MemAccessKindForTest(u32 inst_hex)
++{
++  const UGeckoInstruction inst{inst_hex};
++  return MemAccessKind(PPCTables::GetOpInfo(inst, 0), inst);
++}
++#endif
++
+ // §28cd spike audit recorders. Called from EM_JS compile-block JS body
+ // (different pthread than the main thread that reads stats); routes
+ // through atomic globals for cross-thread visibility.
+@@ -1967,37 +2294,46 @@
+ extern "C" u32 DolphinWeb_CachedInterpreterReadU32(int state_ptr, u32 address)
+ {
+   (void)state_ptr;
+-  return Core::System::GetInstance().GetMMU().Read<u32>(address);
++  const u32 value = Core::System::GetInstance().GetMMU().Read<u32>(address);
++  CountSlowMemAccess(kIntLoad);
++  return value;
+ }
+ 
+ extern "C" void DolphinWeb_CachedInterpreterWriteU32(int state_ptr, u32 address, u32 value)
+ {
+   (void)state_ptr;
+   Core::System::GetInstance().GetMMU().Write<u32>(value, address);
++  CountSlowMemAccess(kIntStore);
+ }
+ 
+ extern "C" u32 DolphinWeb_CachedInterpreterReadU8(int state_ptr, u32 address)
+ {
+   (void)state_ptr;
+-  return Core::System::GetInstance().GetMMU().Read<u8>(address);
++  const u32 value = Core::System::GetInstance().GetMMU().Read<u8>(address);
++  CountSlowMemAccess(kIntLoad);
++  return value;
+ }
+ 
+ extern "C" void DolphinWeb_CachedInterpreterWriteU8(int state_ptr, u32 address, u32 value)
+ {
+   (void)state_ptr;
+   Core::System::GetInstance().GetMMU().Write<u8>(value, address);
++  CountSlowMemAccess(kIntStore);
+ }
+ 
+ extern "C" u32 DolphinWeb_CachedInterpreterReadU16(int state_ptr, u32 address)
+ {
+   (void)state_ptr;
+-  return Core::System::GetInstance().GetMMU().Read<u16>(address);
++  const u32 value = Core::System::GetInstance().GetMMU().Read<u16>(address);
++  CountSlowMemAccess(kIntLoad);
++  return value;
+ }
+ 
+ extern "C" void DolphinWeb_CachedInterpreterWriteU16(int state_ptr, u32 address, u32 value)
+ {
+   (void)state_ptr;
+   Core::System::GetInstance().GetMMU().Write<u16>(value, address);
++  CountSlowMemAccess(kIntStore);
+ }
+ 
+ bool DolphinWeb_CachedInterpreterCheckFpu(PowerPC::PowerPCState& ppc_state, u32 current_pc,
+@@ -2043,6 +2379,7 @@
+   else
+   {
+     const u32 temp = Core::System::GetInstance().GetMMU().Read<u32>(address);
++    CountSlowMemAccess(kFpLoad);
+     if ((ppc_state.Exceptions & EXCEPTION_DSI) == 0)
+       ppc_state.ps[fd].Fill(ConvertToDouble(temp));
+   }
+@@ -2067,6 +2404,7 @@
+   {
+     Core::System::GetInstance().GetMMU().Write<u32>(ConvertToSingle(ppc_state.ps[fs].PS0AsU64()),
+                                                     address);
++    CountSlowMemAccess(kFpStore);
+   }
+ 
+   return DolphinWeb_CachedInterpreterCheckProgramOrDsi(ppc_state, current_pc, downcount) ? 1 : 0;
+@@ -2088,6 +2426,7 @@
+   else
+   {
+     const u64 temp = Core::System::GetInstance().GetMMU().Read<u64>(address);
++    CountSlowMemAccess(kFpLoad);
+     if ((ppc_state.Exceptions & EXCEPTION_DSI) == 0)
+       ppc_state.ps[fd].SetPS0(temp);
+   }
+@@ -2439,6 +2778,7 @@
+                                                                                                0;
+   }
+   Interpreter::GetInterpreterOp(inst)(interpreter, inst);
++  CountSlowMemInstruction(inst, current_pc);
+   return DolphinWeb_CachedInterpreterCheckProgramOrDsi(ppc_state, current_pc, downcount) ? 1 : 0;
+ }
+ 
+@@ -2503,6 +2843,7 @@
+           break;
+       }
+     }
++    CountSlowMemAccess(inst.OPCD == 46 ? kIntLoad : kIntStore);
+     return DolphinWeb_CachedInterpreterCheckProgramOrDsi(ppc_state, current_pc, downcount) ? 1 : 0;
+   }
+ 
+@@ -2734,6 +3075,11 @@
+   }
+ 
+   Interpreter::GetInterpreterOp(inst)(interpreter, inst);
++  if (s_mem_stats_on) [[unlikely]]
++  {
++    if (const int kind = MemAccessKind(opinfo, inst); kind >= 0)
++      CountSlowMemAccess(static_cast<u32>(kind));
++  }
+   if ((ppc_state.Exceptions & (EXCEPTION_DSI | EXCEPTION_PROGRAM)) != 0)
+   {
+     ppc_state.pc = current_pc;
+@@ -9214,6 +9560,8 @@
+   // is caught here.
+   u32 ram_base = 0;
+   u32 l1_base = 0;
++  // Its code's memory instructions and instructions per cycle (patch 0117).
++  double accesses_per_cycle = 0, instructions_per_cycle = 0;
+ };
+ 
+ // The RAM and L1 host addresses of this session (tests: the RAM shifted by
+@@ -9676,6 +10024,50 @@
+ // On the CPU thread at a slice boundary: compile and map queued regions. A
+ // region with an entry HLE hooks is left out (the block path replaces that
+ // function; a region would run its original code).
++// The static memory instructions and instructions per cycle of the code in
++// `ranges` (pairs, effective addresses in MEM1), as the interpreter counts
++// cycles; words it cannot read are left out.
++void RegionStaticRates(InstalledRegion& region)
++{
++  auto& memory = Core::System::GetInstance().GetMemory();
++  const u8* ram = memory.GetRAM();
++  const u32 ram_size = memory.GetRamSizeReal();
++  if (!ram)
++    return;
++  double cycles = 0, instructions = 0, accesses = 0;
++  for (std::size_t r = 0; r + 1 < region.ranges.size(); r += 2)
++  {
++    for (u32 a = region.ranges[r]; a < region.ranges[r + 1]; a += 4)
++    {
++      const u32 physical = a & 0x01ffffff;
++      if (((a >> 28) != 0x8 && (a >> 28) != 0xc) || physical + 4 > ram_size)
++        continue;
++      const UGeckoInstruction inst{ReadRamU32BE(ram, physical)};
++      const GekkoOPInfo* info = PPCTables::GetOpInfo(inst, a);
++      cycles += info->num_cycles;
++      instructions += 1;
++      if (MemAccessKind(info, inst) >= 0)
++        accesses += 1;
++    }
++  }
++  if (cycles > 0)
++  {
++    region.accesses_per_cycle = accesses / cycles;
++    region.instructions_per_cycle = instructions / cycles;
++  }
++}
++
++// When memory-access counting starts: the rates of the regions installed
++// before (installs compute them only while counting).
++void RegionStaticRatesForAll()
++{
++  for (InstalledRegion& region : s_regions)
++  {
++    if (region.live)
++      RegionStaticRates(region);
++  }
++}
++
+ void InstallRegion(PendingRegion& pending, int handle)
+ {
+   s_region_stats.regions_installed += 1;
+@@ -9683,6 +10075,8 @@
+   s_regions.push_back({handle, std::move(pending.entries), std::move(pending.ranges),
+                        std::move(pending.members), true, true, pending.layout_hash,
+                        pending.ram_base, pending.l1_base});
++  if (s_mem_stats_on)  // otherwise computed when counting starts
++    RegionStaticRates(s_regions.back());
+   for (const u32 pc : s_regions.back().entries)
+   {
+     s_region_at.emplace(pc, index);  // an entry already mapped keeps its region
+@@ -10124,6 +10518,14 @@
+   if (s_region_stats_on)
+   {
+     s_region_stats.region_calls += 1;
++    // Memory-access estimates ride on the region stats (race-perf resets
++    // both for its stats window): the dispatch path with stats off is main's.
++    if (s_mem_stats_on)
++    {
++      const double cycles = static_cast<double>(downcount - ppc_state.downcount);
++      s_mem_totals.region_accesses += cycles * s_regions[index].accesses_per_cycle;
++      s_mem_totals.region_instructions += cycles * s_regions[index].instructions_per_cycle;
++    }
+     s_region_stats.region_cycles += static_cast<double>(downcount - ppc_state.downcount);
+     if (code == 1)
+       s_region_stats.region_not_entry += 1;
+@@ -10372,6 +10774,8 @@
+ {
+   ServiceRegionInstalls();
+   ApplyRegionStatsRequest();
++  if (ApplyMemStatsRequest())
++    RegionStaticRatesForAll();
+ }
+ 
+ // CoreTiming's throttle sleep on the CPU thread (patch 0107): the time until
+@@ -10452,6 +10856,7 @@
+ // Stats as the CPU thread publishes them (tests: no slice boundary here).
+ extern "C" EMSCRIPTEN_KEEPALIVE void DolphinWeb_AotPublishStatsForTest()
+ {
++  PublishMemStats();
+   ApplyRegionStatsRequest();
+   PublishRegionStats();
+ }
+@@ -10884,6 +11289,11 @@
+     RetryDeferredWasmBlocks(*this);
+     ServiceRegionInstalls();
+     ApplyRegionStatsRequest();
++    if (ApplyMemStatsRequest())
++    {
++      ClearCache();
++      RegionStaticRatesForAll();
++    }
+     // Start new timing slice
+     // Metrics-off runs avoid all per-slice clocks. BeginSlice also resets
+     // the exclusive wait/work attribution for this one CoreTiming slice.
+@@ -10940,6 +11350,11 @@
+     } while (m_ppc_state.downcount > 0 && *state_ptr == CPU::State::Running);
+ #ifdef __EMSCRIPTEN__
+     s_sampling_lookups = false;
++    if (s_mem_stats_on)
++    {
++      s_mem_totals.cycles_total += static_cast<double>(slice_downcount - m_ppc_state.downcount);
++      PublishMemStats();
++    }
+     if (region_stats)
+     {
+       s_region_stats.total_cycles += static_cast<double>(slice_downcount - m_ppc_state.downcount);
+@@ -11094,9 +11509,25 @@
+   const auto& [system, current_pc, hook_index] = operands;
+   ppc_state.pc = current_pc;
+   HLE::Execute(Core::CPUThreadGuard{system}, current_pc, hook_index);
++  return sizeof(AnyCallback) + sizeof(operands);
++}
++
++s32 CachedInterpreter::CountMemBlock(PowerPC::PowerPCState& ppc_state,
++                                     const CountMemBlockOperands& operands)
++{
++  CountMemBlockEnd(operands.index, operands.downcount);
+   return sizeof(AnyCallback) + sizeof(operands);
+ }
+ 
++// Patch 0117: only while stats are on (blocks emitted before are dropped
++// with the cache at the reset); a wasm block's count stands before it (a
++// halted run counts too), an interpreted one's before its EndBlock.
++void CachedInterpreter::WriteCountMemBlock(bool wasm)
++{
++  if (s_mem_stats_on)
++    Write(CountMemBlock, {BlockEndMemCounts(js.blockStart, wasm), js.downcountAmount});
++}
++
+ s32 CachedInterpreter::WriteBrokenBlockNPC(PowerPC::PowerPCState& ppc_state,
+                                            const WriteBrokenBlockNPCOperands& operands)
+ {
+@@ -11891,7 +12322,7 @@
+ 
+   if (load)
+   {
+-    const u32 value = in_ram ? ReadRamU32BE(ram, offset) : system.GetMMU().Read<u32>(address);
++    const u32 value = in_ram ? ReadRamU32BE(ram, offset) : SlowMemRead<u32>(system, kIntLoad, address);
+     if ((ppc_state.Exceptions & EXCEPTION_DSI) == 0)
+     {
+       ppc_state.gpr[inst.RD] = value;
+@@ -11913,7 +12344,7 @@
+     if (in_ram)
+       WriteRamU32BE(ram, offset, ppc_state.gpr[inst.RS]);
+     else
+-      system.GetMMU().Write<u32>(ppc_state.gpr[inst.RS], address);
++      SlowMemWrite<u32>(system, kIntStore, ppc_state.gpr[inst.RS], address);
+ 
+     if ((ppc_state.Exceptions & EXCEPTION_DSI) == 0 && update)
+       ppc_state.gpr[inst.RA] = address;
+@@ -11969,7 +12400,7 @@
+ 
+   if (load_byte)
+   {
+-    const u32 value = in_ram ? ram[offset] : system.GetMMU().Read<u8>(address);
++    const u32 value = in_ram ? ram[offset] : SlowMemRead<u8>(system, kIntLoad, address);
+     if ((ppc_state.Exceptions & EXCEPTION_DSI) == 0)
+     {
+       ppc_state.gpr[inst.RD] = value;
+@@ -11983,7 +12414,7 @@
+     if (in_ram)
+       ram[offset] = static_cast<u8>(ppc_state.gpr[inst.RS]);
+     else
+-      system.GetMMU().Write<u8>(static_cast<u8>(ppc_state.gpr[inst.RS]), address);
++      SlowMemWrite<u8>(system, kIntStore, static_cast<u8>(ppc_state.gpr[inst.RS]), address);
+ 
+     if ((ppc_state.Exceptions & EXCEPTION_DSI) == 0 && update)
+       ppc_state.gpr[inst.RA] = address;
+@@ -11991,7 +12422,7 @@
+   }
+   else if (load_half)
+   {
+-    const u16 raw = in_ram ? ReadRamU16BE(ram, offset) : system.GetMMU().Read<u16>(address);
++    const u16 raw = in_ram ? ReadRamU16BE(ram, offset) : SlowMemRead<u16>(system, kIntLoad, address);
+     const bool algebraic = inst.OPCD == 42 || inst.OPCD == 43 ||
+                            (indexed && (inst.SUBOP10 == 343 || inst.SUBOP10 == 375));
+     const u32 value = algebraic ? static_cast<u32>(static_cast<s32>(static_cast<s16>(raw))) :
+@@ -12009,7 +12440,7 @@
+     if (in_ram)
+       WriteRamU16BE(ram, offset, static_cast<u16>(ppc_state.gpr[inst.RS]));
+     else
+-      system.GetMMU().Write<u16>(static_cast<u16>(ppc_state.gpr[inst.RS]), address);
++      SlowMemWrite<u16>(system, kIntStore, static_cast<u16>(ppc_state.gpr[inst.RS]), address);
+ 
+     if ((ppc_state.Exceptions & EXCEPTION_DSI) == 0 && update)
+       ppc_state.gpr[inst.RA] = address;
+@@ -12044,7 +12475,7 @@
+     {
+       const u32 address = start_address + i * sizeof(u32);
+       const u32 value = in_ram ? ReadRamU32BE(ram, offset + i * sizeof(u32)) :
+-                                 system.GetMMU().Read<u32>(address);
++                                 SlowMemRead<u32>(system, kMemKinds, address);
+       if ((ppc_state.Exceptions & EXCEPTION_DSI) != 0)
+         break;
+       ppc_state.gpr[inst.RD + i] = value;
+@@ -12059,11 +12490,14 @@
+       if (in_ram)
+         WriteRamU32BE(ram, offset + i * sizeof(u32), value);
+       else
+-        system.GetMMU().Write<u32>(value, address);
++        SlowMemWrite<u32>(system, kMemKinds, value, address);
+       if ((ppc_state.Exceptions & EXCEPTION_DSI) != 0)
+         break;
+     }
+   }
++  // Once the whole instruction ran (a fault on a later word runs it again).
++  if (!in_ram)
++    CountSlowMemAccess(load ? kIntLoad : kIntStore);
+ 
+   DOLPHIN_WEB_HOT_COUNT(++s_fast_multiword_mem_ops);
+   return true;
+@@ -12403,7 +12837,7 @@
+ 
+   if (load_single)
+   {
+-    const u32 value = in_ram ? ReadRamU32BE(ram, offset) : system.GetMMU().Read<u32>(address);
++    const u32 value = in_ram ? ReadRamU32BE(ram, offset) : SlowMemRead<u32>(system, kFpLoad, address);
+     if ((ppc_state.Exceptions & EXCEPTION_DSI) == 0)
+       ppc_state.ps[inst.FD].Fill(ConvertToDouble(value));
+ 
+@@ -12414,7 +12848,7 @@
+   }
+   else if (load_double)
+   {
+-    const u64 value = in_ram ? ReadRamU64BE(ram, offset) : system.GetMMU().Read<u64>(address);
++    const u64 value = in_ram ? ReadRamU64BE(ram, offset) : SlowMemRead<u64>(system, kFpLoad, address);
+     if ((ppc_state.Exceptions & EXCEPTION_DSI) == 0)
+       ppc_state.ps[inst.FD].SetPS0(value);
+     DOLPHIN_WEB_HOT_COUNT(++s_fast_float_lfd_ops);
+@@ -12427,7 +12861,7 @@
+     if (in_ram)
+       WriteRamU32BE(ram, offset, value);
+     else
+-      system.GetMMU().Write<u32>(value, address);
++      SlowMemWrite<u32>(system, kFpStore, value, address);
+ 
+     if (store_integer_word)
+       DOLPHIN_WEB_HOT_COUNT(++s_fast_float_stfiwx_ops);
+@@ -13575,6 +14009,7 @@
+   u32 prefix_count = 0;
+   u32 prefix_loadstores = 0;
+   u32 prefix_fpinst = 0;
++  MemCountBuilder prefix_mem;
+   bool prefix_ended_block = false;
+   for (u32 i = 0; i < code_block.m_num_instructions; ++i)
+   {
+@@ -13622,6 +14057,7 @@
+     }
+ 
+     prefix_downcount += op.opinfo->num_cycles;
++    prefix_mem.Add(op);
+     if (op.opinfo->flags & FL_LOADSTORE)
+       ++prefix_loadstores;
+     if (op.opinfo->flags & FL_USE_FPU)
+@@ -13643,6 +14079,7 @@
+   std::vector<PPCAnalyst::CodeOp> merge_storage;
+   bool did_merge = false;
+   u32 merge_downcount = 0, merge_loadstores = 0, merge_fpinst = 0, merge_next_pc = 0;
++  MemCountBuilder merge_mem;
+   bool merge_write_npc = false;
+   if (prefix_count < MIN_WASM_PREFIX_INSTRUCTIONS)
+   {
+@@ -13687,6 +14124,7 @@
+         merge_downcount = prefix_downcount;  // already includes A's bx cycles
+         merge_loadstores = prefix_loadstores;
+         merge_fpinst = prefix_fpinst;
++        merge_mem = prefix_mem;
+         u32 cur_target = term.branchTo;
+         u32 chain_blocks = 0;
+         bool chained_ok = false;  // included >=1 target block
+@@ -13720,6 +14158,7 @@
+           }
+           // validate + scan this block (same guard set as the original B-walk)
+           u32 c_count = 0, c_dc = 0, c_ls = 0, c_fp = 0;
++          MemCountBuilder c_mem;
+           bool c_ended = false, c_ok = true;
+           for (u32 j = 0; j < c_block.m_num_instructions; ++j)
+           {
+@@ -13736,6 +14175,7 @@
+               break;
+             }
+             c_dc += cop.opinfo->num_cycles;
++            c_mem.Add(cop);
+             if (cop.opinfo->flags & FL_LOADSTORE)
+               ++c_ls;
+             if (cop.opinfo->flags & FL_USE_FPU)
+@@ -13790,6 +14230,7 @@
+           merge_loadstores += c_ls;
+           merge_fpinst += c_fp;
+           merge_downcount += c_dc;
++          merge_mem.Add(c_mem);
+           if (can_continue)
+           {
+             for (u32 j = 0; j + 1 < c_count; ++j)
+@@ -14000,6 +14441,7 @@
+   js.downcountAmount = eff_downcount;
+   js.numLoadStoreInst = eff_loadstores;
+   js.numFloatingPointInst = eff_fpinst;
++  s_mem_block_counts = did_merge ? merge_mem : prefix_mem;
+   // Merged regions are always a clean fused end block (B covers all of B
+   // or ends in a branch) — never the partial non-fused tail below.
+   const bool fuse_end_block =
+@@ -14018,6 +14460,8 @@
+         static_links = StaticExitLinks::Branch(terminal->inst.hex, terminal->address);
+     }
+   }
++  if (fuse_end_block)
++    WriteCountMemBlock(true);
+   auto* const emitted = reinterpret_cast<WasmBlockOperands*>(
+       GetWritableCodePtr() + sizeof(AnyCallback));
+   Write(RunWasmBlock,
+@@ -14027,6 +14471,8 @@
+     RegisterStaticExitLinks(&emitted->links);
+ #else
+ #line 11081
++  if (fuse_end_block)
++    WriteCountMemBlock(true);
+   Write(RunWasmBlock,
+         {handle, block_next_pc, eff_downcount, eff_loadstores, eff_fpinst,
+          static_cast<s32>(fuse_end_block ? 1 : 0)});
+@@ -14049,6 +14495,7 @@
+     js.compilerPC = op.address;
+     js.instructionsLeft = (code_block.m_num_instructions - 1) - i;
+     js.downcountAmount += op.opinfo->num_cycles;
++    s_mem_block_counts.Add(op);
+     if (op.opinfo->flags & FL_LOADSTORE)
+       ++js.numLoadStoreInst;
+     if (op.opinfo->flags & FL_USE_FPU)
+@@ -14073,6 +14520,7 @@
+       if ((jo.memcheck && (op.opinfo->flags & FL_LOADSTORE) != 0) ||
+           (!op.canEndBlock && ShouldHandleFPExceptionForInstruction(&op)))
+       {
++        s_mem_block_counts.Interpreted(op);
+         const InterpretAndCheckExceptionsOperands operands = {
+             {interpreter, Interpreter::GetInterpreterOp(op.inst), js.compilerPC, op.inst},
+             power_pc,
+@@ -14088,6 +14536,7 @@
+         TryWriteOsInterruptFunction(i, power_pc);
+         if (!TryWriteDcbxLoop(i, power_pc) && !TryWriteFastInstruction(op, power_pc))
+         {
++          s_mem_block_counts.Interpreted(op);
+           const InterpretOperands operands = {interpreter, Interpreter::GetInterpreterOp(op.inst),
+                                               js.compilerPC, op.inst};
+           Write(op.canEndBlock ? CallbackCast(Interpret<true>) : CallbackCast(Interpret<false>),
+@@ -16509,6 +16958,7 @@
+ {
+   if (IsProfilingEnabled())
+   {
++    WriteCountMemBlock(false);
+     auto* const emitted = reinterpret_cast<EndBlockOperands<true>*>(
+         GetWritableCodePtr() + sizeof(AnyCallback));
+     Write(EndBlock<true>, {{js.downcountAmount, js.numLoadStoreInst, js.numFloatingPointInst, links},
+@@ -16518,6 +16968,7 @@
+   }
+   else
+   {
++    WriteCountMemBlock(false);
+     auto* const emitted = reinterpret_cast<EndBlockOperands<false>*>(
+         GetWritableCodePtr() + sizeof(AnyCallback));
+     Write(EndBlock<false>, {js.downcountAmount, js.numLoadStoreInst, js.numFloatingPointInst, links});
+@@ -16531,11 +16982,13 @@
+ {
+   if (IsProfilingEnabled())
+   {
++    WriteCountMemBlock(false);
+     Write(EndBlock<true>, {{js.downcountAmount, js.numLoadStoreInst, js.numFloatingPointInst},
+                            js.curBlock->profile_data.get()});
+   }
+   else
+   {
++    WriteCountMemBlock(false);
+     Write(EndBlock<false>, {js.downcountAmount, js.numLoadStoreInst, js.numFloatingPointInst});
+   }
+ }
+@@ -16659,6 +17112,7 @@
+   js.numLoadStoreInst = 0;
+   js.numFloatingPointInst = 0;
+   js.curBlock = b;
++  s_mem_block_counts = {};
+ 
+   auto& interpreter = m_system.GetInterpreter();
+   auto& power_pc = m_system.GetPowerPC();
+@@ -16694,6 +17148,7 @@
+     js.compilerPC = op.address;
+     js.instructionsLeft = (code_block.m_num_instructions - 1) - i;
+     js.downcountAmount += op.opinfo->num_cycles;
++    s_mem_block_counts.Add(op);
+     if (op.opinfo->flags & FL_LOADSTORE)
+       ++js.numLoadStoreInst;
+     if (op.opinfo->flags & FL_USE_FPU)
+@@ -16719,6 +17174,7 @@
+       if ((jo.memcheck && (op.opinfo->flags & FL_LOADSTORE) != 0) ||
+           (!op.canEndBlock && ShouldHandleFPExceptionForInstruction(&op)))
+       {
++        s_mem_block_counts.Interpreted(op);
+         const InterpretAndCheckExceptionsOperands operands = {
+             {interpreter, Interpreter::GetInterpreterOp(op.inst), js.compilerPC, op.inst},
+             power_pc,
+@@ -16734,6 +17190,7 @@
+         TryWriteOsInterruptFunction(i, power_pc);
+         if (!TryWriteDcbxLoop(i, power_pc) && !TryWriteFastInstruction(op, power_pc))
+         {
++          s_mem_block_counts.Interpreted(op);
+           const InterpretOperands operands = {interpreter, Interpreter::GetInterpreterOp(op.inst),
+                                               js.compilerPC, op.inst};
+           Write(op.canEndBlock ? CallbackCast(Interpret<true>) : CallbackCast(Interpret<false>),
+diff --git a/Source/Core/Core/PowerPC/CachedInterpreter/CachedInterpreter.h b/Source/Core/Core/PowerPC/CachedInterpreter/CachedInterpreter.h
+--- a/Source/Core/Core/PowerPC/CachedInterpreter/CachedInterpreter.h
++++ b/Source/Core/Core/PowerPC/CachedInterpreter/CachedInterpreter.h
+@@ -61,6 +61,7 @@
+   void ExecuteOneBlock(bool allow_redispatch = true);
+ 
+   bool HandleFunctionHooking(u32 address);
++  void WriteCountMemBlock(bool wasm);
+ #if DOLPHIN_WEB_STATIC_EXIT_LINKS
+   void WriteEndBlock(StaticExitLinks::Descriptor links = {});
+   void RegisterStaticExitLinks(StaticExitLinks::Descriptor* links);
+@@ -103,6 +104,7 @@
+   struct DcbxLoopOperands;
+   struct HLEFunctionOperands;
+   struct WriteBrokenBlockNPCOperands;
++  struct CountMemBlockOperands;
+   struct CheckHaltOperands;
+   struct CheckIdleOperands;
+ #ifdef __EMSCRIPTEN__
+@@ -199,6 +201,8 @@
+   static s32 WriteBrokenBlockNPC(PowerPC::PowerPCState& ppc_state,
+                                  const WriteBrokenBlockNPCOperands& operands);
+   static s32 WriteBrokenBlockNPC(std::ostream& stream, const WriteBrokenBlockNPCOperands& operands);
++  static s32 CountMemBlock(PowerPC::PowerPCState& ppc_state, const CountMemBlockOperands& operands);
++  static s32 CountMemBlock(std::ostream& stream, const CountMemBlockOperands& operands);
+   static s32 CheckFPU(PowerPC::PowerPCState& ppc_state, const CheckHaltOperands& operands);
+   static s32 CheckFPU(std::ostream& stream, const CheckHaltOperands& operands);
+   static s32 CheckBreakpoint(PowerPC::PowerPCState& ppc_state, const CheckHaltOperands& operands);
+@@ -323,6 +327,14 @@
+ {
+   u32 current_pc;
+   u32 : 32;
++};
++
++// Patch 0117: written before a block end only while memory-access stats are
++// on (a reset clears the cache), so the path with stats off is main's.
++struct CachedInterpreter::CountMemBlockOperands
++{
++  u32 index;      // its static counts, s_mem_static
++  u32 downcount;  // the cycles of the block end it stands before
+ };
+ 
+ struct CachedInterpreter::CheckHaltOperands
+diff --git a/Source/Core/Core/PowerPC/CachedInterpreter/CachedInterpreter_Disassembler.cpp b/Source/Core/Core/PowerPC/CachedInterpreter/CachedInterpreter_Disassembler.cpp
+--- a/Source/Core/Core/PowerPC/CachedInterpreter/CachedInterpreter_Disassembler.cpp
++++ b/Source/Core/Core/PowerPC/CachedInterpreter/CachedInterpreter_Disassembler.cpp
+@@ -89,6 +89,12 @@
+   return sizeof(AnyCallback) + sizeof(operands);
+ }
+ 
++s32 CachedInterpreter::CountMemBlock(std::ostream& stream, const CountMemBlockOperands& operands)
++{
++  fmt::println(stream, "CountMemBlock(index={}, downcount={})", operands.index, operands.downcount);
++  return sizeof(AnyCallback) + sizeof(operands);
++}
++
+ s32 CachedInterpreter::CheckFPU(std::ostream& stream, const CheckHaltOperands& operands)
+ {
+   const auto& [power_pc, current_pc, downcount] = operands;
+@@ -344,6 +350,7 @@
+       LOOKUP_KV(CachedInterpreter::InterpretAndCheckExceptions<true>),
+       LOOKUP_KV(CachedInterpreter::HLEFunction),
+       LOOKUP_KV(CachedInterpreter::WriteBrokenBlockNPC),
++      LOOKUP_KV(CachedInterpreter::CountMemBlock),
+       LOOKUP_KV(CachedInterpreter::CheckFPU),
+       LOOKUP_KV(CachedInterpreter::CheckBreakpoint),
+       LOOKUP_KV(CachedInterpreter::CheckIdle),
