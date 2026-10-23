@@ -446,9 +446,13 @@ export function assembleRegion(fragments, { helpers, pcOffset, memoryPages, memo
   // the section ignores it.
   let hintsDropped = 0;
   const onIf = (f, r) => Number.isInteger(r.offset) && r.offset >= 0 && r.offset < f.code.length && f.code[r.offset] === OP.if;
+  // Offsets must be strictly increasing within a function (V8 drops the
+  // whole section otherwise, silently): a second hint on the same `if` is
+  // dropped too (the first one kept) and counted.
   const hinted = fragments.map((f, i) => [FIRST + i, (f.relocs ?? []).filter((r) => r.kind === "hint")
     .filter((r) => onIf(f, r) || (hintsDropped++, false))
-    .sort((a, b) => a.offset - b.offset)]).filter(([, hs]) => hs.length);
+    .sort((a, b) => a.offset - b.offset)
+    .filter((r, j, hs) => j === 0 || r.offset !== hs[j - 1].offset || (hintsDropped++, false))]).filter(([, hs]) => hs.length);
   if (hinted.length) {
     const hints = [];
     name(hints, "metadata.code.branch_hint");

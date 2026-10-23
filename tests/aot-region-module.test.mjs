@@ -2,6 +2,8 @@ import assert from "node:assert/strict";
 import test from "node:test";
 
 import { assembleRegion, groupRegions, paddedSleb, paddedUleb, patchRegionHeap, regionHeapOfBytes, regionModuleKey, regionModuleLayout } from "../src/aot-region-module.js";
+import { checkBranchHintSection } from "./helpers/branch-hints.mjs";
+
 
 // Synthetic fragments in the translator's shape. State layout of the tests:
 // pc at +0, a counter at +4, LR at +8, state at address 64.
@@ -233,6 +235,18 @@ test("aot region: branch hints from the core become a metadata.code.branch_hint 
   assert.equal(bytes[0], 1, "one function hinted");
   assert.deepEqual(Array.from(bytes.slice(2)), [1, ifAt, 1, 0], "one hint: offset, size 1, unlikely");
   assert.equal(region.hintsDropped, 1, "the hint off an `if` is counted");
+  assert.deepEqual(checkBranchHintSection(region.bytes).errors, [], "a section V8 keeps");
+  // Two hints on the same `if`: the second is dropped (offsets must be
+  // strictly increasing, or V8 drops the whole section).
+  const twice = assembleRegion([{ ...A, relocs: [...A.relocs, { offset: ifAt, kind: "hint", likely: false }, { offset: ifAt, kind: "hint", likely: true }] }, B], opts);
+  assert.equal(twice.hintsDropped, 1, "the duplicate is counted");
+  assert.deepEqual(checkBranchHintSection(twice.bytes), { hints: 1, errors: [] });
+  // The checker sees what V8 would reject: a hint off an `if`, a duplicate.
+  const bad = Uint8Array.from(twice.bytes);
+  const [sectionBytes] = WebAssembly.Module.customSections(new WebAssembly.Module(bad), "metadata.code.branch_hint");
+  const at = bad.findIndex((_, k) => new Uint8Array(sectionBytes).every((x, m) => bad[k + m] === x));
+  bad[at + new Uint8Array(sectionBytes).length - 3] = 1; // the offset: on the body's local count, not an `if`
+  assert.ok(checkBranchHintSection(bad).errors.length > 0, "a hint off an `if` is caught");
   const r = await instantiate(region);
   assert.equal(r.run(0x1000), 0, "runs as before");
   assert.equal(r.word(COUNT), 111);
