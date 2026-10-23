@@ -142,17 +142,18 @@ test("a GPR written first by a load whose slow path halts keeps its value (0127,
 
 test("a load that faults before the integer write of an unloaded GPR leaves that GPR as it was (0127)", { skip: deadSkip }, () => {
   // The halt's flush is emitted before the later write: r5 is neither loaded
-  // nor dirty there, and must keep its value. The faulting load is an
-  // unaligned lmw (alignment). (An lfs with MSR.FP clear does not fault in a
-  // region: since 0121 region code takes FP for granted.)
-  const lmw = (d, a, off) => (46 << 26) | (d << 21) | (a << 16) | (off & 0xffff);
+  // nor dirty there, and must keep its value. The faulting load is a lwz from
+  // 0x00004000, which no BAT maps: a DSI, which halts the region. (Neither an
+  // unaligned access, whose alignment exception stays pending to the block's
+  // end as in Dolphin's JITs, nor an lfs with MSR.FP clear, which regions
+  // take for granted since 0121, halts one.)
   const cases = [
-    ["lmw (alignment)", [lmw(29, 1, 2), addi(5, 0, 1), add(7, 5, 5), BLR], null],
-    ["lmw (alignment), r5 read before", [add(7, 5, 5), lmw(29, 1, 2), addi(5, 0, 1), BLR], null]
+    ["lwz (DSI)", [lwz(6, 1, 0), addi(5, 0, 1), add(7, 5, 5), BLR], null],
+    ["lwz (DSI), r5 read before", [add(7, 5, 5), lwz(6, 1, 0), addi(5, 0, 1), BLR], null]
   ];
   for (const [what, program, run] of cases) {
     const translateState = baseState(33);
-    translateState[9] = 0x80004000;
+    translateState[9] = 0x00004000;
     const state = translateState.slice();
     run?.(state);
     const r = compareRegionProgram(core, program, state, { translateState });
