@@ -21,7 +21,7 @@
 // the buckets weighted by their cycles. They compare two sides on this Mac,
 // never the Mac with the Spark (other definitions).
 import { execFileSync, spawn } from "node:child_process";
-import { mkdtempSync, rmSync, writeFileSync } from "node:fs";
+import { mkdtempSync, readdirSync, rmSync, statfsSync, statSync, writeFileSync } from "node:fs";
 import os from "node:os";
 import path from "node:path";
 
@@ -122,6 +122,48 @@ export function perKiloGuestCycles(cold) {
   return out;
 }
 
+// xctrace also leaves its raw kernel trace in $TMPDIR (instruments*.ktrace,
+// 0.1-4 GB each), outside the .trace it saves (2026-10-23: ~6.8 GB in an
+// afternoon). Listed before and after each window: the new ones that no
+// process holds open are deleted, by the paths the listing returned.
+export function listKtraces(dir = os.tmpdir()) {
+  try {
+    return readdirSync(dir).filter((f) => /^instruments.*\.ktrace$/.test(f)).map((f) => path.join(dir, f));
+  } catch {
+    return [];
+  }
+}
+
+// Whether a process has `file` open (lsof exits 1 when none does).
+function heldOpen(file) {
+  try { execFileSync("lsof", ["-t", file], { stdio: ["ignore", "pipe", "ignore"] }); return true; } catch { return false; }
+}
+
+// Deletes the ktraces in `after` but not in `before` that nobody holds open.
+export function removeNewKtraces(before, after, { isOpen = heldOpen, remove = (f) => rmSync(f, { force: true }), sizeOf = (f) => statSync(f).size } = {}) {
+  const was = new Set(before);
+  const out = { removed: [], removedMB: 0, keptOpen: [] };
+  for (const f of after) {
+    if (was.has(f)) continue;
+    if (isOpen(f)) { out.keptOpen.push(f); continue; }
+    let size = 0;
+    try { size = sizeOf(f); } catch {}
+    remove(f);
+    out.removed.push(path.basename(f));
+    out.removedMB += size / 1048576;
+  }
+  out.removedMB = round(out.removedMB, 0);
+  return out;
+}
+
+// Free space (GB) of the volume holding `dir`.
+export function freeDiskGB(dir = os.tmpdir()) {
+  const s = statfsSync(dir);
+  return (s.bavail * s.bsize) / 1e9;
+}
+// Under this, a campaign with xctrace stops (race-perf gives up its runs).
+export const XCTRACE_MIN_FREE_GB = 25;
+
 export function checkXctrace() {
   if (process.platform !== "darwin") throw new Error("--counters with xctrace: macOS only");
   try { execFileSync("xcrun", ["xctrace", "version"], { stdio: "ignore" }); } catch { throw new Error("--counters: xcrun xctrace not found (Xcode)"); }
@@ -137,6 +179,9 @@ export function xctraceCounters({ mode = "delivery", pidOf, readyTimeoutMs = 600
   const live = new Map();
   return async (phase, session) => {
     if (phase === "start") {
+      const free = freeDiskGB();
+      if (free < XCTRACE_MIN_FREE_GB) return live.set(session, { error: `disk: ${round(free, 1)} GB free < ${XCTRACE_MIN_FREE_GB} GB` });
+      const ktraces = listKtraces();
       const pid = pidOf(session);
       if (!pid) return live.set(session, { error: "no renderer to attach to" });
       const trace = mkdtempSync(path.join(dir, "run-"));
@@ -151,11 +196,14 @@ export function xctraceCounters({ mode = "delivery", pidOf, readyTimeoutMs = 600
         proc.once("exit", () => { clearTimeout(timer); resolve(false); });
       });
       if (!ready) {
+        const exited = proc.exitCode != null ? null : new Promise((r) => proc.once("exit", r));
         proc.kill("SIGINT");
+        await exited;
         rmSync(trace, { recursive: true, force: true });
+        removeNewKtraces(ktraces, listKtraces());
         return live.set(session, { error: `xctrace did not start: ${out.trim().slice(-200)}` });
       }
-      live.set(session, { proc, trace, file, pid, out: () => out, startedAt: Date.now() });
+      live.set(session, { proc, trace, file, pid, out: () => out, startedAt: Date.now(), ktraces });
       return;
     }
     const c = live.get(session);
@@ -182,6 +230,8 @@ export function xctraceCounters({ mode = "delivery", pidOf, readyTimeoutMs = 600
       return { tool: "xctrace", mode, error: String(error?.message || error).slice(0, 300) };
     } finally {
       rmSync(c.trace, { recursive: true, force: true });
+      const k = removeNewKtraces(c.ktraces, listKtraces());
+      if (k.removed.length || k.keptOpen.length) console.log(`[xctrace] ktrace: ${k.removed.length} removed (${k.removedMB} MB)${k.keptOpen.length ? `, ${k.keptOpen.length} still open, kept: ${k.keptOpen.join(" ")}` : ""}`);
     }
   };
 }

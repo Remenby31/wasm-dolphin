@@ -2,9 +2,12 @@
 // SPDX-License-Identifier: MIT
 
 import assert from "node:assert/strict";
+import { existsSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
+import os from "node:os";
+import path from "node:path";
 import test from "node:test";
 
-import { parseMetricRows, perKiloGuestCycles, recordingOptions, threadMetrics, XCTRACE_MODES } from "../harness/lib/xctrace-counters.mjs";
+import { freeDiskGB, listKtraces, parseMetricRows, perKiloGuestCycles, recordingOptions, removeNewKtraces, threadMetrics, XCTRACE_MODES } from "../harness/lib/xctrace-counters.mjs";
 
 // MetricTable as `xctrace export` writes it: each value once (id), then refs.
 const thread = (id, tid, name) => `<thread id="${id}" fmt="${name}"><tid id="${id + 1}" fmt="0x${tid.toString(16)}">${tid}</tid><process id="${id + 2}" fmt="p (1)"><pid id="${id + 3}" fmt="1">1</pid></process></thread>`;
@@ -48,4 +51,21 @@ test("xctrace: recording options per guided mode; an unknown mode is refused", (
   assert.equal(o.countingLevel, "EL0");
   assert.equal(recordingOptions("discarded")["CPU Counters"].selectedCountingModeDisplayName, XCTRACE_MODES.discarded.display);
   assert.throws(() => recordingOptions("frontend"), /one of delivery, discarded/);
+});
+
+test("xctrace: the raw ktraces a window left in $TMPDIR are removed, unless held open or there before", (t) => {
+  const dir = mkdtempSync(path.join(os.tmpdir(), "ktrace-test-"));
+  t.after(() => rmSync(dir, { recursive: true, force: true }));
+  const make = (name) => { writeFileSync(path.join(dir, name), "x".repeat(1024)); return path.join(dir, name); };
+  const old = make("instrumentsOLD.ktrace");
+  make("other.trace");
+  const before = listKtraces(dir);
+  assert.deepEqual(before, [old]);
+  const done = make("instrumentsAAA.ktrace"), open = make("instrumentsBBB.ktrace");
+  const r = removeNewKtraces(before, listKtraces(dir), { isOpen: (f) => f === open });
+  assert.deepEqual(r.removed, ["instrumentsAAA.ktrace"]);
+  assert.deepEqual(r.keptOpen, [open]);
+  assert.ok(!existsSync(done));
+  assert.ok(existsSync(old) && existsSync(open));
+  assert.ok(freeDiskGB(dir) > 0);
 });

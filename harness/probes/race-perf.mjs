@@ -102,7 +102,7 @@ import { consistentMemRead, decodeMemStats, memAccessShares, poolMemStats } from
 import { consistentHeadroomRead, decodeHeadroomStats, headroomOf, invalidReasons, querySpeed, unlimitedAllowed } from "../lib/headroom.mjs";
 import { summarizePcSamples } from "../../src/harness-pc-sampler.js";
 import { checkPerfAccess, counterEvents, cyclesPerGuestCycle, instructionsPerGuestCycle, perfCounters } from "../lib/perf-counters.mjs";
-import { checkXctrace, perKiloGuestCycles, XCTRACE_MODES, xctraceCounters } from "../lib/xctrace-counters.mjs";
+import { checkXctrace, freeDiskGB, perKiloGuestCycles, XCTRACE_MIN_FREE_GB, xctraceCounters } from "../lib/xctrace-counters.mjs";
 import { emulatedStart } from "../lib/emulated-window.mjs";
 
 const HOMEBREW_OUT = path.join(REPO_ROOT, "harness", "homebrew", "out");
@@ -601,7 +601,7 @@ async function main() {
     // lib/xctrace-counters.mjs): host cycles and the mode's fractions;
     // --counter-events names the mode (delivery by default).
     ...(values.counters && process.platform === "darwin"
-      ? (checkXctrace(), { onWindow: xctraceCounters({ mode: values["counter-events"] ?? "delivery", pidOf: (session) => rendererThreads(session.profileDir)?.pid }) })
+      ? (checkXctrace(), { xctrace: true, onWindow: xctraceCounters({ mode: values["counter-events"] ?? "delivery", pidOf: (session) => rendererThreads(session.profileDir)?.pid }) })
       : values.counters ? (checkPerfAccess(), { onWindow: perfCounters(undefined, { extra: counterEvents(values["counter-events"]) }) }) : {}),
     uniqueFrames: values["unique-frames"] == null ? null : num(values, "unique-frames", { min: 2 }),
     memStats: values["mem-stats"],
@@ -659,6 +659,12 @@ async function main() {
     const loadRetries = new Map();
     for (let run = 1; run <= o.runs && !gaveUp; run += 1) {
       checkLock(`before run ${run}`);
+      // xctrace traces are large: the campaign stops before the disk fills.
+      if (o.xctrace && freeDiskGB() < XCTRACE_MIN_FREE_GB) {
+        gaveUp = `disk: ${round(freeDiskGB(), 1)} GB free < ${XCTRACE_MIN_FREE_GB} GB (xctrace): remaining runs given up`;
+        console.warn(`[race-perf] ${gaveUp}`);
+        break;
+      }
       const record = { run, loadRetries: loadRetries.get(run) ?? 0 };
       let replay = false;
       for (const name of sideOrder(run).filter((n) => sides[n])) {
