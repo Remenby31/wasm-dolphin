@@ -327,5 +327,20 @@ export function xctraceCounters({ mode = "delivery", pidOf, readyTimeoutMs = 600
   // up to waitSec for the ktraces still open to close, deletes them, and
   // returns those still open then (paths, for whoever cleans up).
   onWindow.finish = janitor.finish;
+  // A window that will never end (race-perf --run-timeout): the recording
+  // stops, the trace and this window's ktraces go.
+  onWindow.abort = async (session) => {
+    const c = live.get(session);
+    live.delete(session);
+    if (!c || c.error) return;
+    const exited = c.proc.exitCode != null ? null : new Promise((r) => c.proc.once("exit", r));
+    c.proc.kill("SIGINT");
+    await Promise.race([exited, new Promise((r) => setTimeout(r, 30000))]);
+    if (c.proc.exitCode == null) c.proc.kill("SIGKILL");
+    rmSync(c.trace, { recursive: true, force: true });
+    const k = removeNewKtraces(c.ktraces, listKtraces());
+    janitor.add(k.keptOpen);
+    if (k.keptOpen.length) releaseOurHub(k.keptOpen);
+  };
   return onWindow;
 }

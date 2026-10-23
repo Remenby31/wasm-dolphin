@@ -88,7 +88,7 @@ export async function busiestThread(profileDir, ms = 500, { withShare = false } 
 // `extra`: more PMU events (counterEvents), counted on the same thread and window.
 export function perfCounters(outDir = mkdtempSync(path.join(os.tmpdir(), "perf-counters-")), { extra = [] } = {}) {
   const live = new Map();
-  return async (phase, session) => {
+  const onWindow = async (phase, session) => {
     if (phase === "start") {
       const tid = await busiestThread(session.profileDir);
       if (!tid) return live.set(session, { error: "no renderer thread" });
@@ -109,6 +109,15 @@ export function perfCounters(outDir = mkdtempSync(path.join(os.tmpdir(), "perf-c
     rmSync(c.file, { force: true });
     return { tid: Number(c.tid), thread: c.comm, ...counts, ipc: counts.cycles ? round(counts.instructions / counts.cycles, 3) : null };
   };
+  // A window that will never end (race-perf --run-timeout): perf stops.
+  onWindow.abort = async (session) => {
+    const c = live.get(session);
+    live.delete(session);
+    if (!c || c.error) return;
+    c.proc.kill("SIGINT");
+    rmSync(c.file, { force: true });
+  };
+  return onWindow;
 }
 
 // Host instructions per guest cycle of one window (race-perf's record): over

@@ -124,3 +124,14 @@ test("CI bench: a pair whose sides ran on two CPU models is set aside; the repor
   assert.equal(xeon.inDecisionSet, false); // σ per run ≥ 3 %: recorded, not counted
   assert.match(reportMarkdown(r), /\| footprint-256 \| Xeon 6973P-C \|.*\| no \(σ per run ≥ 3 %\) \|/);
 });
+
+test("race-perf --run-timeout: a measure that never ends fails its run instead of holding the lock", async () => {
+  const { withRunTimeout } = await import("../harness/probes/race-perf.mjs");
+  const never = new Promise(() => {});
+  await assert.rejects(withRunTimeout(never, 30, "cold window"), (e) => e.runTimeout === true && /cold window timed out after 0\.03 s/.test(e.message));
+  assert.equal(await withRunTimeout(Promise.resolve(7), 1000, "w"), 7);
+  assert.equal(withRunTimeout(never, 0, "w"), never); // 0: no limit
+  const late = new Promise((_, reject) => setTimeout(() => reject(new Error("late")), 60));
+  await assert.rejects(withRunTimeout(late, 20, "w"), /timed out/); // the late rejection is swallowed
+  await new Promise((r) => setTimeout(r, 80));
+});
