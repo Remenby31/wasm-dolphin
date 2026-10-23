@@ -131,7 +131,7 @@ static void ResetOffThreadCompiles() {}
 static void UnverifyAllRegions() {}
 static void RepostWaitingRegions() {}
 static void ClearOffThreadAndRegionState() {}
-// Code-space counters (patch 0138): counted, not checked here.
+// Code-space counter (patch 0138): ClearCache counts itself here.
 std::atomic<u32> s_code_clears{0};
 static void ForgetAllRegions() {}
 void Host_JitCacheInvalidation() {}
@@ -241,7 +241,9 @@ int main()
     Fixture f; int state = 0; auto d = L::Fallthrough(0x2000);
     const auto epoch = f.cache.StaticLinkEpoch(); L::Scope context(&f.cache, &state, epoch, 2); L::Publish(&state, &d);
     s_deferred_wasm_queues[&f.emitter].Defer(0x2000, 2, f.storage.data());
+    const u32 clears = s_code_clears.load();
     f.emitter.ClearCache();
+    require(s_code_clears.load() == clears + 1, "every ClearCache counts once in codeclears (0138)");
     require(f.cache.StaticLinkEpoch() >= epoch + 2, "full clear/reset must advance even with zero live blocks");
     require(!s_deferred_wasm_queues.contains(&f.emitter) && f.cache.GetRangesToFree().empty(), "full clear purges deferred queue/ranges");
     require(context.Resolve(&f.cache, &state, f.cache.StaticLinkEpoch(), 2, 0x2000).decision == L::Decision::EpochMismatch, "full storage reset invalidates source context");
