@@ -329,3 +329,11 @@ test("aot optimizer: a finishing step that fails is reported and the run still e
   assert.ok(events.some(([t, d]) => t === "optimization-error" && /disk full/.test(d.message)), "reported");
   assert.equal(events.at(-1)[0], "optimization-done", "the run ends");
 });
+
+test("aot optimizer: a profile that fails to load is no profile (today's formation), never a failed run", async () => {
+  const { o, events } = optimizer({ loadProfile: async () => { throw new Error("corrupt profile"); } });
+  await o.start();
+  assert.equal(events.at(-1)[0], "optimization-done");
+  assert.ok(o.regions.every((u) => u.members.every((f) => !f.hotRanges)));
+});
+

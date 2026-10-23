@@ -1129,7 +1129,8 @@ test("the region key changes with the formation", async () => {
   const f = [{ entry: 0x80003100, sha256: "a".repeat(64) }];
   const parts = { compilerVersion: 5, codegenMask: 0 };
   assert.notEqual(await regionModuleKey(f, { ...parts, formation: 1 }), await regionModuleKey(f, { ...parts, formation: 2 }));
-  assert.equal(await regionModuleKey(f, parts), await regionModuleKey(f, { ...parts, formation: 2 }), "2 by default");
+  assert.notEqual(await regionModuleKey(f, { ...parts, formation: 2 }), await regionModuleKey(f, { ...parts, formation: 3 }), "3: the frontier rule of #167");
+  assert.equal(await regionModuleKey(f, parts), await regionModuleKey(f, { ...parts, formation: 3 }), "3 by default");
 });
 
 
@@ -1211,6 +1212,7 @@ test("hot/cold formation: the first fragment holds the hot blocks, the cold ones
   const fragments = claimEntries([r.fragment, ...r.continuations]);
   const held = new Set(fragments.flatMap((x) => x.entries));
   assert.ok(held.has(t.labels.cold0) && held.has(t.labels.cold60), "the cold blocks are held too");
+  for (const [, e] of f.hotRanges) if (e < f.ranges.at(-1)[1] && t.words[(e - LONG) / 4 - 1] >>> 26 !== 18) assert.ok(held.has(e), `the fall-through out of a hot range (${e.toString(16)}) is an entry`);
   const { bytes: mod, entries } = assembleRegion(fragments, { helpers: HELPER_SIGNATURES, pcOffset: core.pcOffset, memoryPages: core.memoryPages });
   core.setRegionsEnabled(true);
   core.queueRegion(mod, entries.map(([pc]) => pc), [{ ranges: f.ranges, hash: null }]);
@@ -1220,3 +1222,16 @@ test("hot/cold formation: the first fragment holds the hot blocks, the cold ones
   assert.deepEqual(got.state, reference.state);
   assert.equal(got.interpreted, 0, "everything ran in regions");
 });
+
+// #167: a branch is in held code when the nearest held entry before it
+// reaches it with no block end between (the core's block can run through a
+// leader it did not split at); after a block end it is not.
+test("frontier: a branch belongs to the nearest held entry unless a block end lies between", async () => {
+  const { frontier } = await import("../src/aot-orchestrator.js");
+  const branches = [[0x80000008, [0x80000100]], [0x80000020, [0x80000200]]];
+  branches.ends = [0x80000010];
+  // Entry 0x80000000 held; a leader at 0x80000004 not split; a blr at 0x10.
+  assert.deepEqual(frontier(branches, new Set([0x80000000])), [0x80000100], "the branch at 8 is in the entry's block; the one at 0x20 is past the blr");
+  assert.deepEqual(frontier(branches, new Set([0x80000000, 0x80000014])), [0x80000100, 0x80000200]);
+});
+

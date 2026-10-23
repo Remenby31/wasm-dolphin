@@ -152,8 +152,10 @@ export class AotOptimizer extends EventTarget {
       await this.planStore?.save(this.discKey, plan).catch(() => {});
     }
     if (this.loadProfile) {
+      // A missing or corrupt profile is no profile: today's formation.
       const profile = await Promise.resolve().then(() => this.loadProfile()).catch(() => null);
-      applyProfileHotRanges(plan, profile);
+      // Saved when they changed: the next load starts from these (hysteresis).
+      if (applyProfileHotRanges(plan, profile)) await this.planStore?.save(this.discKey, plan).catch(() => {});
     }
     // Region modules, in compile order: each module takes the place of its
     // first member in orderedRegions. Groups are kept across plan rebuilds (a

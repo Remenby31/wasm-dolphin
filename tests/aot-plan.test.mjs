@@ -379,3 +379,35 @@ test("aot plan: applyProfileHotRanges sets the hot ranges of a stored plan from 
   assert.equal(f().hotRanges, undefined, "removed");
 });
 
+// Review of #167: the hot ranges are in the region key, and weights move
+// every session; within ±30 % noise the set (and so the key) holds.
+test("aot plan: hot ranges hold under ±30 % noise on the weights (hysteresis), and a block between hot blocks is hot", () => {
+  const t = assemble(TEXT, [
+    "entry", asm.li(3, 0), asm.cmplwi(3, 9), (pc, l) => asm.beq(pc, l.cold0),
+    "pre", asm.li(4, 0),
+    "loop", asm.addi(3, 3, 1), asm.cmplwi(3, 100), (pc, l) => asm.beq(pc, l.cold0),
+    "edge", asm.addi(5, 5, 1), (pc, l) => asm.b(pc, l.loop),
+    ...Array.from({ length: 120 }, (_, i) => [`cold${i}`, asm.addi(6, 6, 1), asm.cmplwi(6, i), (pc, l) => asm.beq(pc, l.out)]).flat(),
+    "out", asm.blr()
+  ]);
+  const dol = buildDol({ textAddr: TEXT, text: t.words, entry: t.labels.entry });
+  const { image, entryPoint } = imageFromDol(dol);
+  const plan = planDol({ image, entryPoint, options: { gapFill: false } });
+  const f = () => plan.modules[0].functions.find((x) => x.entry === t.labels.entry);
+  // edge sits right at the 0.25 % threshold: noise alone would flip it.
+  const weights = (k) => [[t.labels.loop, Math.round(4000 * k())], [t.labels.edge, Math.round(10 * k())], [t.labels.cold5, 1]];
+  let seed = 7;
+  const noise = () => { seed = (seed * 1103515245 + 12345) & 0x7fffffff; return 0.7 + 0.6 * (seed / 0x7fffffff); };
+  applyProfileHotRanges(plan, { sessions: 1, blocks: blocksFromPcSamples(weights(() => 1)) });
+  const first = JSON.stringify(f().hotRanges);
+  const inHot = (pc) => f().hotRanges.some(([s, e]) => pc >= s && pc < e);
+  assert.ok(inHot(t.labels.pre), "the preheader, between the entry and the loop, is hot");
+  for (let i = 0; i < 20; i++) {
+    assert.equal(applyProfileHotRanges(plan, { sessions: 1, blocks: blocksFromPcSamples(weights(noise)) }), 0, `load ${i}: no change`);
+    assert.equal(JSON.stringify(f().hotRanges), first);
+  }
+  // Crossing by ×2 changes the set.
+  applyProfileHotRanges(plan, { sessions: 1, blocks: blocksFromPcSamples([[t.labels.loop, 4000], [t.labels.edge, 0], [t.labels.cold5, 200]]) });
+  assert.notEqual(JSON.stringify(f().hotRanges), first);
+});
+

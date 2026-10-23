@@ -448,6 +448,11 @@ export async function translateWithContinuations(m, f, { mask, maxBlocks, names,
   const first = translateOne(m, hot ? { ...f, ranges: hot } : f, { mask, maxBlocks, names });
   if (!first.fragment || maxContinuations <= 0 || (!hot && !capped(first.fragment, maxBlocks, maxFragmentBytes))) return first;
   const branches = functionBranches(m, f.ranges);
+  // A hot block that falls through into a cold one (no branch there): the
+  // end of each hot range is reached by fall-through unless the instruction
+  // before it never falls through (review of #167).
+  const ends = new Set(branches.ends ?? []);
+  const fallsOut = () => (hot ?? []).map(([, e]) => e >>> 0).filter((e) => f.ranges.some(([s, x]) => e >= s && e < x) && !ends.has(e - 4));
   const owned = new Set(first.fragment.entries.map((pc) => pc >>> 0));
   const tried = new Set();
   const continuations = [];
@@ -455,7 +460,7 @@ export async function translateWithContinuations(m, f, { mask, maxBlocks, names,
   let oversize = 0;
   for (;;) {
     if (continuations.length >= maxContinuations || bytes <= 0) break;
-    const pc = frontier(branches, owned).find((x) => !tried.has(x));
+    const pc = [...frontier(branches, owned), ...fallsOut()].find((x) => !tried.has(x) && !owned.has(x));
     if (pc === undefined) break;
     tried.add(pc);
     await slice();

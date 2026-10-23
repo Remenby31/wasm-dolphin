@@ -89,29 +89,65 @@ export function mergeRanges(ranges) {
 // of at least HOT_MIN_BYTES whose blocks the local profile weighed with at
 // least HOT_MIN_SAMPLES samples gets `hotRanges`, its blocks holding at least
 // HOT_BLOCK_SHARE of its samples (HHVM's PGOMinBlockCountPercent, 0.23 %),
-// plus its entry block. The translator forms its first fragment from them and
-// the rest in cold fragments, so the hot path stays compact (I-cache). None
-// when the hot blocks are most of the code anyway.
+// plus its entry and the blocks on a path between hot blocks (a loop
+// preheader). The translator forms its first fragment from them and the rest
+// in cold fragments, so the hot path stays compact (I-cache). None when the
+// hot blocks are most of the code anyway.
+// The hot ranges are in the region key, and the weights move every session
+// (halved, then the session's added): `previous` (the ranges the stored plan
+// had) keeps the set unless the weights cross by ×2 (a hot block turns cold
+// under half the share, a cold one hot over twice it; the function's floor
+// and cap the same), so a return visit does not translate its modules again
+// over noise (review of #167).
 export const HOT_MIN_BYTES = 1024;
 export const HOT_MIN_SAMPLES = 200;
 export const HOT_BLOCK_SHARE = 0.0025;
 const HOT_MAX_SHARE = 0.8;
-export function hotRanges(fBlocks, blocks, entry, weightIn) {
+const HOT_KEEP_MAX_SHARE = 0.9;
+export function hotRanges(fBlocks, blocks, entry, weightIn, { edges = null, previous = null } = {}) {
   const spans = fBlocks.map((b) => [blocks.start[b], blocks.end[b]]);
   const size = spans.reduce((n, [s, e]) => n + e - s, 0);
   if (size < HOT_MIN_BYTES) return null;
   const weights = spans.map(([s, e]) => weightIn(s, e));
   const total = weights.reduce((n, w) => n + w, 0);
-  if (total < HOT_MIN_SAMPLES) return null;
-  const hot = spans.filter(([s], i) => s === entry || weights[i] >= HOT_BLOCK_SHARE * total);
-  const hotSize = hot.reduce((n, [s, e]) => n + e - s, 0);
-  return hotSize < HOT_MAX_SHARE * size ? mergeRanges(hot) : null;
+  const had = previous?.length ? (pc) => previous.some(([s, e]) => pc >= s && pc < e) : null;
+  if (total < (had ? HOT_MIN_SAMPLES / 2 : HOT_MIN_SAMPLES)) return null;
+  const share = (i) => weights[i] / total;
+  const hot = new Set();
+  spans.forEach(([s], i) => {
+    const threshold = !had ? HOT_BLOCK_SHARE : had(s) ? HOT_BLOCK_SHARE / 2 : HOT_BLOCK_SHARE * 2;
+    if (s === entry || share(i) >= threshold) hot.add(fBlocks[i]);
+  });
+  // A block between hot blocks (a hot predecessor and a hot successor) is on
+  // the hot path: entry, preheader, loop.
+  if (edges) {
+    const inside = new Set(fBlocks);
+    const preds = new Map(), succs = new Map();
+    for (let k = 0; k < edges.from.length; k++) {
+      const a = edges.from[k], b = edges.to[k];
+      if (!inside.has(a) || !inside.has(b)) continue;
+      (succs.get(a) ?? succs.set(a, []).get(a)).push(b);
+      (preds.get(b) ?? preds.set(b, []).get(b)).push(a);
+    }
+    for (let changed = true, rounds = 0; changed && rounds < 8; rounds++) {
+      changed = false;
+      for (const b of fBlocks) {
+        if (hot.has(b)) continue;
+        if ((preds.get(b) ?? []).some((x) => hot.has(x)) && (succs.get(b) ?? []).some((x) => hot.has(x))) { hot.add(b); changed = true; }
+      }
+    }
+  }
+  const hotSpans = fBlocks.filter((b) => hot.has(b)).map((b) => [blocks.start[b], blocks.end[b]]);
+  const hotSize = hotSpans.reduce((n, [s, e]) => n + e - s, 0);
+  return hotSize < (had ? HOT_KEEP_MAX_SHARE : HOT_MAX_SHARE) * size ? mergeRanges(hotSpans) : null;
 }
 
 // The hot ranges of every function of a plan, from the player's current
 // local profile (a stored plan was built without it, or with an older one):
-// set where the weights make some, removed elsewhere. Uses the plan's block
-// columns (start, end, owning function); returns the plan.
+// set where the weights make some, removed elsewhere, the previous ones kept
+// within the hysteresis. Uses the plan's block and edge columns. Returns how
+// many functions changed (the caller saves the plan then, so the next load
+// starts from these).
 export function applyProfileHotRanges(plan, profile) {
   const samples = (profile?.blocks ?? []).filter((b) => (b[4] ?? 0) > 0).sort((a, b) => a[0] - b[0]);
   const starts = samples.map((b) => b[0]);
@@ -120,16 +156,18 @@ export function applyProfileHotRanges(plan, profile) {
     for (let i = lowerBound(starts, s); i < starts.length && starts[i] < e; i++) w += samples[i][4];
     return w;
   };
+  let changed = 0;
   for (const m of [...plan.modules, ...(plan.rels ?? []).filter((r) => r.functions)]) {
     const byFunction = new Map();
     m.blocks.func.forEach((f, b) => { if (f >= 0) (byFunction.get(f) ?? byFunction.set(f, []).get(f)).push(b); });
     m.functions.forEach((f, i) => {
-      const hot = samples.length ? hotRanges(byFunction.get(i) ?? [], m.blocks, f.entry, weightIn) : null;
+      const hot = samples.length ? hotRanges(byFunction.get(i) ?? [], m.blocks, f.entry, weightIn, { edges: m.edges, previous: f.hotRanges }) : null;
+      if (JSON.stringify(hot ?? null) !== JSON.stringify(f.hotRanges ?? null)) changed++;
       if (hot) f.hotRanges = hot;
       else delete f.hotRanges;
     });
   }
-  return plan;
+  return changed;
 }
 
 // Turn a discovery result into the plan section of one module.
@@ -159,7 +197,7 @@ export function planModule(result, { id = 0, kind = "dol", read32, profile = nul
       }
       for (let i = lowerBound(profileStarts, s); i < profileStarts.length && profileStarts[i] < e; i++) profileHits += profile[i][2] ?? 1;
     }
-    const hot = profile ? hotRanges(f.blocks, blocks, f.entry, weightIn) : null;
+    const hot = profile ? hotRanges(f.blocks, blocks, f.entry, weightIn, { edges }) : null;
     return {
       entry: f.entry,
       confidence: f.confidence,
