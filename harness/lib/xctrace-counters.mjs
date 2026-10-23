@@ -161,6 +161,8 @@ export function removeNewKtraces(before, after, { isOpen = heldOpen, remove = (f
 
 // The ktraces our windows created that were still open: add(), retried at
 // each sweep(), waited for by finish() (bounded), which returns those left.
+// DTServiceHub, which holds the last one, exits ~10 min after the last
+// recording (2026-10-23): finish waits 15 min by default.
 export function createKtraceJanitor({ isOpen = heldOpen, remove = (f) => rmSync(f, { force: true }), log = (m) => console.log(m) } = {}) {
   const pending = new Set();
   const sweep = () => {
@@ -172,7 +174,7 @@ export function createKtraceJanitor({ isOpen = heldOpen, remove = (f) => rmSync(
     if (out.removed.length) log(`[xctrace] ktrace: ${out.removed.length} removed later, once closed: ${out.removed.join(" ")}`);
     return out;
   };
-  const finish = async ({ waitSec = 600, pollSec = 15 } = {}) => {
+  const finish = async ({ waitSec = 900, pollSec = 15 } = {}) => {
     const end = Date.now() + waitSec * 1000;
     let left = sweep().open;
     while (left.length && Date.now() < end) {
