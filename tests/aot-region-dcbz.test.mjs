@@ -16,7 +16,7 @@ import { HELPER_SIGNATURES, ORACLE_CODE, bigEndian, compareCall, loadAotCore } f
 import { PRODUCTION_DISABLE_MASK, makeRng, randomState } from "./helpers/jit-oracle.mjs";
 
 const core = await loadAotCore();
-const skip = !core?.has("DolphinWeb_AotTestLoadState") && "core without the region test exports (patch 0075)";
+const regionSkip = !core?.has("DolphinWeb_AotTestLoadState") && "core without the region test exports (patch 0075)";
 
 const dcbz = (ra, rb) => ((31 << 26) | (ra << 16) | (rb << 11) | (1014 << 1)) >>> 0;
 const dcbzL = (ra, rb) => ((4 << 26) | (ra << 16) | (rb << 11) | (1014 << 1)) >>> 0;
@@ -38,6 +38,10 @@ function translate(words) {
   core.load(ORACLE_CODE, bigEndian(words));
   return core.translate(ORACLE_CODE, { mask: PRODUCTION_DISABLE_MASK, ranges: [[ORACLE_CODE, ORACLE_CODE + 4 * words.length]] });
 }
+
+// A core before 0120 translates no block starting with dcbz (CI builds this
+// branch's core and runs the tests on it).
+const skip = regionSkip || (!translate([dcbz(3, 4), BLR]) && "core before patch 0120 (dcbz on the direct tier)");
 
 test("a block starting with dcbz is translated into a region; dcbz_l is not", { skip }, () => {
   assert.ok(translate(PROGRAM), "dcbz first: a fragment");
