@@ -8,7 +8,7 @@
 //     --scene race|heavy --steps steps.json [--sec 90] [--plateau FROM-TO]
 //     [--config rec | --query "..."] [--runs 3]
 //     [--max-load L] [--load-wait 300] [--lock-wait 1800 | --no-lock] [--out dir]
-//     [--visits N [--counters [--counter-events frontend]]]
+//     [--visits N [--counters [--counter-events frontend]] [--region-chain]]
 //
 // The player's very first launch with the region recompiler: each run opens
 // a new, empty Chrome profile (no seed: aot-warm-launch needs a seeded one),
@@ -38,6 +38,12 @@
 // last region was installed (host ms from t0 and guest seconds from boot).
 // --counters adds the emulated CPU thread's host instructions and cycles per
 // guest cycle over the scene's window (lib/perf-counters.mjs, Linux).
+// --region-chain turns the region counters on (counters only, no host-time
+// sampling) for the same window and records the region chaining (patch
+// 0102: chained, outOfTime, noRegion, refused, the top exit targets): how
+// region-to-region transitions go once #167 splits hot and cold. The
+// counters cost the same on both sides of a pair, not nothing: compare a
+// --region-chain run only with another.
 import { mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import os from "node:os";
 import path from "node:path";
@@ -102,6 +108,14 @@ export function visitRegions(events, regions, { t0, ticksAtBoot, ticksPerSecond 
   };
 }
 
+// The region chaining counters of a stats reply, or why there are none.
+export function regionChainOf(reply) {
+  if (!reply || reply.error) return { error: reply?.error ?? "no reply" };
+  const c = reply.regionChain;
+  if (!c) return { error: "engine without region chaining counters (0102)" };
+  return { enabled: c.enabled, chained: c.chained, outOfTime: c.outOfTime, noRegion: c.noRegion, refused: c.refused, exitTargets: c.exitTargets ?? [], breakEntries: c.breakEntries ?? [] };
+}
+
 // The local profile's size on disk after a visit, or null when there is none.
 export const profileBytes = (files) => (Array.isArray(files) && files.length ? files.reduce((n, f) => n + f.bytes, 0) : null);
 
@@ -123,7 +137,7 @@ async function measureRun(o, server, loadGate) {
       if (visit.regionFacts) visit.churn = churnOf(visit.regionFacts);
       visit.profileBytes = profileBytes(visit.profileFiles);
       record.visits.push(visit);
-      console.log(`[ramp] visit ${v}: ${visit.error ?? `profile ${visit.profileBytes ?? "NONE"} bytes, compiled ${visit.regionFacts?.compiled ?? "-"}, from cache ${visit.regionFacts?.fromCache ?? "-"}, installed ${visit.regionFacts?.installedAtEnd ?? "-"}, last install at ${visit.regionFacts?.lastInstallMs ?? "-"} ms, churn ${visit.churn ?? "-"}${visit.cyclesPerGuestCycle ? `, ${round(visit.cyclesPerGuestCycle, 3)} cycles per guest cycle` : ""}`}`);
+      console.log(`[ramp] visit ${v}: ${visit.error ?? `profile ${visit.profileBytes ?? "NONE"} bytes${visit.regionChain && !visit.regionChain.error ? `, chained ${visit.regionChain.chained}, noRegion ${visit.regionChain.noRegion}` : ""}, compiled ${visit.regionFacts?.compiled ?? "-"}, from cache ${visit.regionFacts?.fromCache ?? "-"}, installed ${visit.regionFacts?.installedAtEnd ?? "-"}, last install at ${visit.regionFacts?.lastInstallMs ?? "-"} ms, churn ${visit.churn ?? "-"}${visit.cyclesPerGuestCycle ? `, ${round(visit.cyclesPerGuestCycle, 3)} cycles per guest cycle` : ""}`}`);
       if (visit.error) break;
     }
     return record;
@@ -147,6 +161,7 @@ export function summarizeVisits(records, visits) {
       withoutProfile: rows.filter((x) => x.profileBytes == null).length, installedAtEnd: med((x) => x.regionFacts?.installedAtEnd),
       lastInstallMs: med((x) => x.regionFacts?.lastInstallMs), lastInstallGuestSec: med((x) => x.regionFacts?.lastInstallGuestSec),
       plateauSpeed: med((x) => x.ramp?.plateauSpeed),
+      chained: med((x) => x.regionChain?.chained), noRegion: med((x) => x.regionChain?.noRegion), outOfTime: med((x) => x.regionChain?.outOfTime),
       instructionsPerGuestCycle: med((x) => x.instructionsPerGuestCycle), cyclesPerGuestCycle: med((x) => x.cyclesPerGuestCycle)
     });
   }
@@ -192,11 +207,17 @@ async function measureVisit(o, server, profileDir) {
     const session = { profileDir };
     if (o.counters) await o.counters("start", session);
     const sceneTicks = o.counters ? await ticksNow() : NaN;
+    // sampleEvery 0: counters on and reset, no host-time sampling.
+    const chainOn = o.regionChain ? await workerRequest(page, "validationReadJitRegionStats", { sampleEvery: 0 }, 10000).catch((e) => ({ error: String(e.message || e) })) : null;
     await page.waitForTimeout(o.sec * 1000);
     if (o.counters) {
       const c = await o.counters("end", session);
       const w = { counters: c, guestTicks: (await ticksNow()) - sceneTicks };
       Object.assign(record, { counters: c, guestTicks: w.guestTicks, instructionsPerGuestCycle: instructionsPerGuestCycle(w), cyclesPerGuestCycle: cyclesPerGuestCycle(w) });
+    }
+    if (chainOn) {
+      const reply = chainOn.error ? chainOn : await workerRequest(page, "validationReadJitRegionStats", {}, 10000).catch((e) => ({ error: String(e.message || e) }));
+      record.regionChain = regionChainOf(reply);
     }
     draining = false;
     await drain;
@@ -242,7 +263,7 @@ async function main() {
       iso: { type: "string" }, scene: { type: "string" }, steps: { type: "string" }, sec: { type: "string", default: "90" }, plateau: { type: "string" },
       config: { type: "string", default: "rec" }, query: { type: "string" }, runs: { type: "string", default: "3" },
       "max-load": { type: "string" }, "load-wait": { type: "string", default: "300" }, "lock-wait": { type: "string", default: "1800" }, "calm-wait": { type: "string" }, "no-lock": { type: "boolean", default: false },
-      visits: { type: "string", default: "1" }, counters: { type: "boolean", default: false }, "counter-events": { type: "string" },
+      visits: { type: "string", default: "1" }, counters: { type: "boolean", default: false }, "counter-events": { type: "string" }, "region-chain": { type: "boolean", default: false },
       port: { type: "string", default: process.env.HARNESS_PORT }, out: { type: "string" }
     }
   });
@@ -262,7 +283,7 @@ async function main() {
     iso, steps, query: base.toString(), plateau, nativeFps: SCENE_NATIVE_FRAMES_PER_VI[scene.state].framesPerVi * VI_PER_SECOND, sec: num(values, "sec", { min: 10 }), runs: num(values, "runs", { min: 1, int: true }),
     maxLoad: values["max-load"] ? num(values, "max-load", { min: 0.1 }) : Math.max(2, os.cpus().length / 4),
     loadWait: num(values, "load-wait", { min: 0 }), port: num(values, "port", { min: 1, int: true }),
-    visits: num(values, "visits", { min: 1, int: true })
+    visits: num(values, "visits", { min: 1, int: true }), regionChain: values["region-chain"]
   };
   // The profile is written every minute: a shorter visit may leave none.
   if (o.visits > 1 && o.sec < 70) throw new Error(`--visits: --sec ${o.sec} is under 70 s (the profile is written every minute)`);
