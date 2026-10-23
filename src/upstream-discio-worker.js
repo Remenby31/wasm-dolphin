@@ -268,6 +268,14 @@ let fifoLogBoot = false;
 // ?wgpumask=a,b: optional WebGPU features the device is created without, as
 // on a browser that lacks them (harness only, set at loadCore).
 let wgpuMaskedFeatures = new Set();
+// ?wgpufallback=1 (harness): keep a CPU fallback adapter; refused otherwise.
+let wgpuAcceptFallbackAdapter = false;
+// A CPU adapter is no usable GPU: Chrome without a GPU (a GitHub Windows
+// runner, 2026-10-23) gives a SwiftShader fallback adapter instead of none,
+// and both the replay and the presenter would run on the CPU.
+export function isFallbackAdapterInfo(info) {
+  return info?.isFallbackAdapter === true || info?.architecture === "swiftshader";
+}
 export function parseWgpuMask(mask) {
   return new Set(String(mask || "").split(",").map((f) => f.trim()).filter(Boolean));
 }
@@ -1514,6 +1522,7 @@ async function handleMessage(type, payload) {
         fifoLog: payload.fifoLog,
         efbCopyRam: payload.efbCopyRam,
         wgpuMask: payload.wgpuMask,
+        wgpuFallback: payload.wgpuFallback,
         efbDiag: payload.efbDiag,
         jitVerbose: payload.jitVerbose,
         frameCap: payload.frameCap,
@@ -2185,6 +2194,7 @@ async function loadCore({
   fifoLog = false,
   efbCopyRam = false,
   wgpuMask = "",
+  wgpuFallback = false,
   efbDiag = false,
   jitVerbose = false,
   frameCap = 0,
@@ -2237,6 +2247,7 @@ async function loadCore({
 } = {}) {
   fifoLogBoot = Boolean(fifoLog);
   wgpuMaskedFeatures = parseWgpuMask(wgpuMask);
+  wgpuAcceptFallbackAdapter = Boolean(wgpuFallback);
   if (moduleInstance) {
     return moduleInstance;
   }
@@ -5937,6 +5948,10 @@ async function createWebGpuPresenter(canvas) {
   const adapter = await gpu.requestAdapter({ powerPreference: wgpuPowerPreference });
   if (!adapter) {
     throw new Error(`WebGPU adapter request (${wgpuPowerPreference}) returned null`);
+  }
+  if (isFallbackAdapterInfo(adapter.info) && !wgpuAcceptFallbackAdapter) {
+    // As no adapter: the presenter falls back to WebGL, video=wgpu fails.
+    throw new Error(`WebGPU adapter is a CPU fallback (${adapter.info?.architecture || "isFallbackAdapter"}): no usable GPU`);
   }
 
   let adapterInfo = adapter.info || null;

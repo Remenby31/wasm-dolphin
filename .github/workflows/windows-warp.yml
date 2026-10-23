@@ -57,11 +57,12 @@ jobs:
           path: harness/homebrew/out
       - name: Playwright (driver only; the runner's Chrome stable is used)
         run: npm i -g playwright@1.56.1
-      # First run (2026-10-23): without flags, headless Chrome 156 on this
-      # GPU-less runner gives a SwiftShader fallback adapter (Vulkan), not
-      # null. Recorded, not judged: which adapter each setting gives.
+      # The harness passes --enable-unsafe-webgpu by default; this probe drops
+      # it to see what a player's Chrome gets on a GPU-less PC. Recorded, not
+      # judged (runs 1-2 had the flag, through the harness default, and got
+      # a SwiftShader fallback adapter).
       - name: "No flag: the adapter a GPU-less Windows Chrome gives"
-        run: node harness/probes/webgpu-adapter.mjs --port 8102 --out webgpu-adapter-default.json
+        run: node harness/probes/webgpu-adapter.mjs --port 8102 --no-unsafe-webgpu --out webgpu-adapter-default.json
       - name: "With --enable-unsafe-webgpu"
         env:
           HARNESS_CHROME_ARGS: --enable-unsafe-webgpu

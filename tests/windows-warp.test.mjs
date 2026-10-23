@@ -18,7 +18,7 @@ test("the Windows WARP workflow is manual and keeps --enable-unsafe-webgpu in it
   assert.match(warp, /runs-on: windows-/);
   for (const uses of wf.match(/uses: \S+/g)) assert.match(uses, /@[0-9a-f]{40}$/, `${uses} is pinned by SHA`);
   // Without flags the adapter is recorded (first run: a SwiftShader fallback, not null).
-  assert.match(warp, /webgpu-adapter\.mjs --port \d+ --out webgpu-adapter-default\.json/);
+  assert.match(warp, /webgpu-adapter\.mjs --port \d+ --no-unsafe-webgpu --out webgpu-adapter-default\.json/);
 });
 
 test("the WARP matrix compares wgpu with the exact software renderer, single core", async () => {
@@ -28,4 +28,24 @@ test("the WARP matrix compares wgpu with the exact software renderer, single cor
   assert.ok(m.configs.some((c) => c.preset === "wgpu-nojit"));
   assert.ok(m.games.every((g) => g.set?.cpu === "single"));
   assert.ok(m.games.every((g) => g.iso.startsWith("harness/homebrew/out/")), "homebrews only, no ROM");
+});
+
+// A CPU fallback adapter (what Chrome gives a GPU-less Windows runner) is no
+// usable GPU for the app; only the harness keeps it (?wgpufallback=1).
+test("a fallback WebGPU adapter counts as none unless the harness asks for it", async () => {
+  const [host, adapter, worker] = await Promise.all(
+    ["../src/core-host.js", "../src/upstream-worker-adapter.js", "../src/upstream-discio-worker.js"].map(read)
+  );
+  const body = worker.match(/export function isFallbackAdapterInfo\(info\) \{\n([\s\S]*?)\n\}/)[1];
+  const isFallbackAdapterInfo = new Function("info", body);
+  assert.equal(isFallbackAdapterInfo({ isFallbackAdapter: true, vendor: "google", architecture: "swiftshader" }), true);
+  assert.equal(isFallbackAdapterInfo({ isFallbackAdapter: false, architecture: "swiftshader" }), true);
+  assert.equal(isFallbackAdapterInfo({ isFallbackAdapter: false, vendor: "apple", architecture: "metal-3" }), false);
+  assert.equal(isFallbackAdapterInfo(null), false);
+  assert.match(worker, /if \(isFallbackAdapterInfo\(adapter\.info\) && !wgpuAcceptFallbackAdapter\) \{\n[^\n]*\n\s*throw new Error/);
+  assert.match(host, /get\("wgpufallback"\) === "1"/);
+  assert.match(adapter, /wgpuFallback: this\.wgpuFallback,/);
+  assert.match(worker, /wgpuFallback: payload\.wgpuFallback,/);
+  const m = JSON.parse(await read("../harness/matrices/windows-warp.json"));
+  assert.equal(m.configs.find((c) => c.id === "wgpu-interp").set.wgpufallback, "1");
 });

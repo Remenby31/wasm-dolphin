@@ -9,6 +9,8 @@
 // --enable-unsafe-webgpu (HARNESS_CHROME_ARGS) it should get WARP.
 //
 //   node harness/probes/webgpu-adapter.mjs --port N [--expect adapter|none] [--out file.json]
+//     [--no-unsafe-webgpu]   (the harness passes --enable-unsafe-webgpu by default:
+//                            without it, Chrome as a player has it)
 import { writeFileSync } from "node:fs";
 import { parseArgs } from "node:util";
 
@@ -18,12 +20,16 @@ import os from "node:os";
 import path from "node:path";
 
 const { values } = parseArgs({
-  options: { port: { type: "string", default: process.env.HARNESS_PORT }, expect: { type: "string" }, out: { type: "string" } },
+  options: {
+    port: { type: "string", default: process.env.HARNESS_PORT }, expect: { type: "string" }, out: { type: "string" },
+    "no-unsafe-webgpu": { type: "boolean", default: false },
+  },
 });
 if (!values.port) throw new Error("usage: webgpu-adapter.mjs --port N [--expect adapter|none]");
 
 const server = await ensureServer({ port: values.port });
-const context = await launchChrome({ profileDir: mkdtempSync(path.join(os.tmpdir(), "gc-adapter-")) });
+const unsafeWebgpu = !values["no-unsafe-webgpu"];
+const context = await launchChrome({ profileDir: mkdtempSync(path.join(os.tmpdir(), "gc-adapter-")), unsafeWebgpu });
 let r;
 try {
   const page = await context.newPage();
@@ -52,6 +58,7 @@ try {
   await context.close();
 }
 r.chromeArgs = process.env.HARNESS_CHROME_ARGS ?? "";
+r.unsafeWebgpu = unsafeWebgpu;
 console.log(`[webgpu-adapter] ${JSON.stringify(r)}`);
 if (values.out) writeFileSync(values.out, JSON.stringify(r, null, 1));
 const got = r.adapter ? "adapter" : "none";

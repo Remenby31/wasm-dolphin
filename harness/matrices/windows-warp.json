@@ -11,7 +11,7 @@
   ],
   "configs": [
     { "id": "sw-exact", "preset": "sw-interp", "set": { "fastsw": "0" } },
-    { "id": "wgpu-interp", "preset": "wgpu-nojit" }
+    { "id": "wgpu-interp", "preset": "wgpu-nojit", "set": { "wgpufallback": "1" } }
   ],
   "reference": "sw-exact",
   "renderMatch": 0.99
