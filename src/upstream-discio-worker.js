@@ -7381,6 +7381,19 @@ let aotFirstLaunchEnabled = false;
 let aotFirstLaunch = null;
 const AOT_PROGRESS_SCHEMA = "wasm-dolphin.aot-progress.v1";
 const DOLPHIN_AOT_BOOT_BYTES = 192 << 20; // region modules retained before boot, at most
+// Test seams: the mounted file's key state as a mount sets it (the key then
+// read by readMountedDiscKey, by kind), and the plan worker's factory.
+export function setAotMountedFileForTest(file, kind = "disc") {
+  aotDiscGeneration += 1;
+  aotDiscKey = null;
+  aotDiscKeyPromise = null;
+  aotDiscFile = file;
+  aotDiscKind = kind;
+}
+let aotPlannerWorkerForTest = null;
+export function setAotPlannerWorkerForTest(createWorker) {
+  aotPlannerWorkerForTest = createWorker ?? null;
+}
 export function setAotFirstLaunchEnabledForTest(enabled) {
   aotFirstLaunchEnabled = enabled === true;
   aotFirstLaunch?.dispose();
@@ -7471,6 +7484,7 @@ export async function prepareAotFirstLaunch(file, {
     buildPlan: async () => {
       const profile = opfs ? await new AotProfileStore(opfs).load(profileKey(discKey)).catch((error) => noteAotProfileReadFailure(error)) : null;
       aotPlanProfileForTest = profile;
+      if (aotPlannerWorkerForTest) return planDiscInWorker(file, { profile, kind, createWorker: aotPlannerWorkerForTest });
       if (typeof Worker === "function") return planDiscInWorker(file, { profile, kind });
       return kind === "dol" ? planDolFile(fileReader(file), file.size, { profile }) : planDisc(fileReader(file), { profile });
     },
