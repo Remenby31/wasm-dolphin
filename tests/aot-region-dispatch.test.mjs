@@ -1129,7 +1129,8 @@ test("the region key changes with the formation", async () => {
   const f = [{ entry: 0x80003100, sha256: "a".repeat(64) }];
   const parts = { compilerVersion: 5, codegenMask: 0 };
   assert.notEqual(await regionModuleKey(f, { ...parts, formation: 1 }), await regionModuleKey(f, { ...parts, formation: 2 }));
-  assert.equal(await regionModuleKey(f, parts), await regionModuleKey(f, { ...parts, formation: 2 }), "2 by default");
+  assert.notEqual(await regionModuleKey(f, { ...parts, formation: 2 }), await regionModuleKey(f, { ...parts, formation: 3 }), "3: frontier rule and shared budget");
+  assert.equal(await regionModuleKey(f, parts), await regionModuleKey(f, { ...parts, formation: 3 }), "3 by default");
 });
 
 
@@ -1252,4 +1253,58 @@ test("continuation budget: past a full first fragment every continuation byte is
   const short = await run({ maxFragmentBytes: cap, maxBytes: cap });
   assert.ok(short.budgetCharged <= cap + Math.max(...capped.continuations.map((c) => c.code.length)), "stops once the budget is spent");
   assert.ok(short.budgetRefused >= 1, `refused ${short.budgetRefused}`);
+});
+
+// A branch is in held code when the nearest held entry before it reaches it
+// with no block end between (the core's block can run through a leader it
+// did not split at); after a block end it is not.
+test("frontier: a branch belongs to the nearest held entry unless a block end lies between", async () => {
+  const { frontier } = await import("../src/aot-orchestrator.js");
+  const branches = [[0x80000008, [0x80000100]], [0x80000020, [0x80000200]]];
+  branches.ends = [0x80000010];
+  assert.deepEqual(frontier(branches, new Set([0x80000000])), [0x80000100], "the branch at 8 is in the entry's block; the one at 0x20 is past the blr");
+  assert.deepEqual(frontier(branches, new Set([0x80000000, 0x80000014])), [0x80000100, 0x80000200]);
+  // A leader the core did not split at (0x80000004, the head of a loop a
+  // later branch targets): the branch at 8 is still in the held entry's
+  // block. The old rule gave it to that leader, which no fragment holds,
+  // and left its target out (an exit to code with no region: 0x800f5fc4,
+  // the heavy scene's first one).
+  const loop = [[0x80000008, [0x80000100]], [0x80000030, [0x80000004]]];
+  loop.ends = [0x80000010, 0x80000030];
+  assert.deepEqual(frontier(loop, new Set([0x80000000])), [0x80000100]);
+});
+
+// A function refused continuations for lack of budget resumes its frontier
+// where it stopped: in two steps it holds what one step with the whole
+// budget holds, and nothing is translated twice.
+test("continuation budget: resume goes on from where the budget stopped", { skip: contSkip }, async () => {
+  const program = longFunction(100);
+  const f = { entry: LONG, ranges: loadWords(LONG, program.words), hash: null };
+  const options = { mask: PRODUCTION_DISABLE_MASK, maxBlocks: 16, names: coreAssembleOptions(core.module)?.helperNames };
+  const whole = await translateWithContinuations(core.module, f, options);
+  assert.ok(!whole.budgetRefused && !whole.resume);
+  const short = await translateWithContinuations(core.module, f, { ...options, maxBytes: 1 });
+  assert.ok(short.budgetRefused >= 1 && typeof short.resume === "function");
+  const more = await short.resume(1 << 20);
+  assert.equal(more.budgetRefused, 0);
+  const held = (fs) => new Set(fs.flatMap((x) => x.entries)).size;
+  assert.equal(held([short.fragment, ...(short.continuations ?? []), ...more.continuations]), held([whole.fragment, ...whole.continuations]));
+  assert.equal((short.budgetCharged ?? 0) + more.budgetCharged, whole.budgetCharged, "the same bytes charged");
+  const entries = [...(short.continuations ?? []), ...more.continuations].map((x) => x.entry);
+  assert.equal(new Set(entries).size, entries.length, "no continuation translated twice");
+});
+
+// A large member's share: what is left of the module's budget over the
+// large members left (largeLeft), so the first ones no longer take it all.
+test("continuation budget: a large member gets an even share of what the module has left", { skip: contSkip }, async () => {
+  const program = longFunction(100);
+  const t = coreRegionTranslator(core.module, { maxBlocks: 16, yieldNow: async () => {} });
+  const f = { entry: LONG, ranges: loadWords(LONG, program.words), hash: null, flags: 0, extraEntries: [] };
+  const [alone] = await t.translate([{ ...f, continuationBytesUsed: 0, largeLeft: 1 }]);
+  const [shared] = await t.translate([{ ...f, continuationBytesUsed: t.unitContinuationBytes - 8000, largeLeft: 4 }]);
+  assert.ok(!alone.budgetRefused, "alone: the whole budget");
+  assert.ok(shared.budgetRefused >= 1, `a quarter of 8000 bytes is short of the ${alone.budgetCharged} it needs alone`);
+  const biggest = Math.max(...(shared.continuations ?? [{ code: [] }]).map((c) => c.code.length));
+  assert.ok(alone.budgetCharged > 2000);
+  assert.ok(shared.budgetCharged <= 2000 + biggest, `charged ${shared.budgetCharged}`);
 });
