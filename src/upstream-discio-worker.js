@@ -331,7 +331,24 @@ function harnessJitRegionStats({ sampleEvery } = {}) {
   // (0084), the bytes of their unpatched compiles, and patched compiles refused.
   return { bytes: copy(), again: copy(), installSamples: harnessRegionInstallSamples(heap), layoutRefused, layoutHash, layout: harnessHeapLayout(moduleInstance),
     heapPatched: aotHeapPatched, heapPatchedBytes: aotHeapPatchedBytes, heapPatchFailed: aotHeapPatchFailed,
-    regionChain: harnessRegionChainStats(heap) };
+    regionChain: harnessRegionChainStats(heap), regionSleep: harnessRegionSleepStats() };
+}
+// Installs in the CPU thread's throttle sleeps (patch 0107): how many, their
+// host time, the worst lateness past a sleep's deadline they caused (the
+// frame they would delay) and the slice installs of large modules whose wait
+// for a sleep ran out. Null with an older core.
+function harnessRegionSleepStats() {
+  const m = moduleInstance;
+  if (!m?._DolphinWeb_AotRegionSleepInstalls || !m._malloc) return null;
+  const p = m._malloc(16);
+  try {
+    new Uint32Array(m.HEAPU8.buffer, p, 4).fill(0);
+    m._DolphinWeb_AotRegionSleepInstalls(p);
+    const w = new Uint32Array(m.HEAPU8.buffer, p, 4);
+    return { installs: w[0], ms: w[1] / 100, overshootMaxMs: w[2] / 100, waitExpired: w[3] };
+  } finally {
+    m._free?.(p);
+  }
 }
 // Region chaining counters (patch 0102), reset with the region stats; null
 // with an older core.

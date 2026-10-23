@@ -58,6 +58,7 @@ test("region stats: layout versions 1 and 2 decoded each their own way, any othe
   // The v2 header's spare u32 counts the regions compiled cold (no ready byte).
   const packed = decodeRegionStats(statsBytes256({ version: 2, f64, reserved: (57 << 16) | 3 })).diagnostics;
   assert.deepEqual([packed.installFallbacks, packed.installBootMaxSliceMs], [3, 5.7]); // high 16 bits: boot max x 10
+  assert.equal(packed.installWorstSliceMs, Math.max(packed.installMaxSliceMs, 5.7), "the worst slice, boot window included");
   assert.equal("topMiss3Pc" in v2.diagnostics, false);
   assert.equal(topMisses(v2).length, 0); // no top miss set in this read
   // v1 may come without diagnostics (88 bytes); v2 never.
