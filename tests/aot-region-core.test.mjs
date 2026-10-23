@@ -108,10 +108,12 @@ test("a planted translator bug is caught", { skip }, () => {
   assert.ok(report.mismatches.some((m) => m.state), "on the registers");
 });
 
-// The cpufuzz homebrew (ours, MIT), when built.
-const CPUFUZZ = new URL("../harness/homebrew/out/cpufuzz.dol", import.meta.url);
+// The cpufuzz homebrew (ours, MIT): the committed fixture
+// (harness/homebrew/fixtures, rebuilt identically by rebuild-fixtures.sh), so
+// CI runs it on the core it builds.
+const CPUFUZZ = new URL("../harness/homebrew/fixtures/cpufuzz.dol", import.meta.url);
 test("cpufuzz over 4 slices: regions end like the interpreter", {
-  skip: skip || (!existsSync(CPUFUZZ) && "harness/homebrew/out/cpufuzz.dol not built"), timeout: 600000
+  skip: skip || (!existsSync(CPUFUZZ) && "harness/homebrew/fixtures/cpufuzz.dol missing"), timeout: 600000
 }, (t) => {
   const s = setup(readFileSync(CPUFUZZ));
   const total = { functions: 0, translated: 0, checked: 0, equal: 0, regionRuns: 0, regionCycles: 0, interpCycles: 0, ends: {}, mismatches: [], skipped: {} };
