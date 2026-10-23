@@ -35,6 +35,7 @@ function region() {
   // whatever the MSR): translate from an FP-on state.
   const state = randomState(makeRng(0x121));
   state[MSR] = 0x00002032;
+  state[33] = 0;
   core.loadState(state, ORACLE_CODE);
   core.load(ORACLE_CODE, bigEndian(PROGRAM));
   const fragment = core.translate(ORACLE_CODE, { mask: PRODUCTION_DISABLE_MASK, ranges: [[ORACLE_CODE, ORACLE_CODE + 4 * PROGRAM.length]] });
@@ -48,6 +49,7 @@ function region() {
 function run(regionAt, msr) {
   const state = randomState(makeRng(0x121));
   state[MSR] = msr;
+  state[33] = 0; // XER clear (0111 refuses SO)
   const baseline = core.ram().slice();
   return compareCall(core, regionAt, () => {
     core.ram().set(baseline);
@@ -85,6 +87,8 @@ test("mtmsr setting FE0 inside a fragment: the region stops there, the interpret
   const words = [A(63, 1, 2, 3, 0, 21), mfmsr, ori, mtmsr, A(63, 4, 1, 3, 0, 21), 0x4e800020];
   const state = randomState(makeRng(0x122));
   state[MSR] = 0x00002032;
+  state[33] = 0; // XER clear: with SO set a fragment refuses to run (0111)
+  state[36] = 0; // FPSCR: no enable, no sticky bit
   core.loadState(state, ORACLE_CODE);
   core.load(ORACLE_CODE, bigEndian(words));
   const fragment = core.translate(ORACLE_CODE, { mask: PRODUCTION_DISABLE_MASK, ranges: [[ORACLE_CODE, ORACLE_CODE + 4 * words.length]] });

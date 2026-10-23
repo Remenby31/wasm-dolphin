@@ -83,6 +83,15 @@ test("an enabled FP exception (FE0/FE1, VE) of an FPU op kept in the region is a
   state.set([...f64Words(Infinity), ...f64Words(Infinity)], 48 + 1 * 4);
   state.set([...f64Words(-Infinity), ...f64Words(-Infinity)], 48 + 2 * 4); // inf + -inf: VXISI
   const r = compareRegionProgram(core, program, state);
+  if (core.has("DolphinWeb_RegionGuardRefusals")) {
+    // 0121: no region is entered with FE0/FE1 set (its code takes them clear):
+    // the CPU loop runs blocks there, and the exception is the interpreter's.
+    assert.ok(r.translated && !r.trap && !r.error, JSON.stringify(r.error ?? r.difference));
+    assert.equal(r.got.regionRuns, 0, "refused by the 0121 guards");
+    assert.ok(r.equal, JSON.stringify(r.difference));
+    assert.equal(r.got.end, "exception");
+    return;
+  }
   expectSame(r, "program exception");
   assert.equal(r.got.end, "exception");
 });
