@@ -6,7 +6,7 @@
 // The committed core therefore always comes from CI, and main's history is the
 // index from a core hash to its exact bytes. See docs/repro-build.md.
 //
-//   node tools/core-artifacts.mjs status [--require-current]
+//   node tools/core-artifacts.mjs status [--checkout <dir>] [--require-current]
 //       Was cores/dolphin built from this checkout's sources and locks?
 //   node tools/core-artifacts.mjs check --base <ref> [--mode warn|enforce]
 //       Does this branch change core-derived content relative to <ref>?
@@ -402,7 +402,9 @@ if (process.argv[1] === fileURLToPath(import.meta.url)) {
   };
   try {
     if (command === "status") {
-      const status = await coreStatus();
+      // --checkout <dir>: another tree (an exported ref), judged by this
+      // tree's code (the CI bench: a ref never certifies its own core).
+      const status = await coreStatus(resolve(option("--checkout", root)));
       console.log(status.current
         ? `cores/dolphin (${status.coreId}) is the build of these sources.`
         : `cores/dolphin (${status.coreId}) is not the build of these sources:\n  ${status.reasons.join("\n  ")}`);
