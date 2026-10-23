@@ -489,11 +489,13 @@ block. A fragment now keeps pc (56), npc (57) and downcount (58) in locals:
 - Its blocks write npc to the local.
 - The block tail is `pc = npc ; downcount -= cycles ; br_if (downcount <= 0) $X`.
 - pc, npc and downcount are written back before every return and every
-  tail call. The returns of 0 (downcount out, an exiting block) all branch to
-  one shared exit `$X` around the loop, which writes them back once: the
-  first version wrote them back in every block's tail and lost 0.9 % of
-  cycles on the race (front end); a jump out and the dispatch write them
-  back before their tail call.
+  tail call. Running out of downcount branches to one shared exit `$X`
+  around the loop, which writes them back once: the first version wrote them
+  back in every block's tail and lost 0.9 % of cycles on the race (front
+  end). `$X` is only reached by those `br_if`, all hinted unlikely (0131), so
+  V8 lays it out of line: it defers a block only when all its predecessors
+  are unlikely edges. An exiting block (sc, rfi…), a jump out and the
+  dispatch write them back themselves.
 
 Every helper call that takes the state stores downcount before it and
 reloads it after: an exception takes the cycles spent, and a memory helper

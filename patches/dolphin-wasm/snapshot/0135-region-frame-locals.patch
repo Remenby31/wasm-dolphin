@@ -131,7 +131,7 @@ diff --git a/Source/Core/Core/PowerPC/CachedInterpreter/CachedInterpreter.cpp b/
    // 0111: compares store CR fields without SO (EmitLazyCrStore): with XER.SO
    // set the fragment does not run (1, as a pc that is not an entry). The
    // dispatcher and region chaining refuse first; this covers a direct call.
-@@ -16866,9 +16934,20 @@ bool BuildRegionFragment(Core::System& system, u32 entry_pc, std::span<const u32
+@@ -16866,9 +16934,21 @@ bool BuildRegionFragment(Core::System& system, u32 entry_pc, std::span<const u32
    // that its npc names (a static successor), else back to the head. Before,
    // reaching block k took k failed compares, each a taken jump on its own
    // cache line between two bodies: up to 64 lines of dispatch per fragment.
@@ -140,10 +140,11 @@ diff --git a/Source/Core/Core/PowerPC/CachedInterpreter/CachedInterpreter.cpp b/
 -  EmitLocalSet(code, WASM_FRAGMENT_PC_LOCAL);
 +  // 0135: pc (the dispatch pc), npc and downcount live in locals for the
 +  // whole fragment, written back (flush_frame) before it returns or tail
-+  // calls. Every exit that returns 0 (downcount out, an exiting block) goes
-+  // to one shared exit, $X, around the loop: the write-back is emitted once,
-+  // not in each block's tail. A halt returns 2 where it happens: its helper
-+  // wrote the state.
++  // calls. Running out of downcount goes to one shared exit, $X, around the
++  // loop: the write-back is emitted once, not in each block's tail, and $X's
++  // only predecessors are those br_if, all hinted unlikely (0131), so V8
++  // lays it out of line. A halt returns 2 where it happens: its helper wrote
++  // the state.
 +  EmitLoadStateToLocal(code, pc_offset, WASM_FRAME_PC_LOCAL);
 +  EmitLoadStateToLocal(code, pc_offset, WASM_FRAME_NPC_LOCAL);
 +  EmitLoadStateToLocal(code, downcount_offset, WASM_FRAME_DOWNCOUNT_LOCAL);
@@ -155,7 +156,7 @@ diff --git a/Source/Core/Core/PowerPC/CachedInterpreter/CachedInterpreter.cpp b/
    const u32 n = static_cast<u32>(blocks.size());
    u32 lowest = UINT32_MAX, highest = 0;
    for (const auto& b : blocks)
-@@ -16877,6 +16956,7 @@ bool BuildRegionFragment(Core::System& system, u32 entry_pc, std::span<const u32
+@@ -16877,6 +16957,7 @@ bool BuildRegionFragment(Core::System& system, u32 entry_pc, std::span<const u32
      highest = std::max(highest, b.start);
    }
    const u32 span = (highest - lowest) / 4 + 1;
@@ -163,7 +164,7 @@ diff --git a/Source/Core/Core/PowerPC/CachedInterpreter/CachedInterpreter.cpp b/
    code.insert(code.end(), {0x03, 0x40});  // loop $L
    code.insert(code.end(), {0x02, 0x40});  // block $D
    for (u32 i = 0; i < n; ++i)
-@@ -16939,34 +17019,31 @@ bool BuildRegionFragment(Core::System& system, u32 entry_pc, std::span<const u32
+@@ -16939,34 +17020,34 @@ bool BuildRegionFragment(Core::System& system, u32 entry_pc, std::span<const u32
        out->relocs.push_back({at + static_cast<u32>(reloc.offset), 0,
                               static_cast<u32>(it - WASM_IMPORT_NAMES.begin())});
      }
@@ -204,10 +205,11 @@ diff --git a/Source/Core/Core/PowerPC/CachedInterpreter/CachedInterpreter.cpp b/
 +    EmitU32Leb(code, exit_depth);
      if (b.exits)
      {
--      EmitI32Const(code, 0);
--      code.push_back(0x0f);  // return
-+      code.push_back(0x0c);  // br $X
-+      EmitU32Leb(code, exit_depth);
++      // Not through $X: V8 lays a block out of line only when all its
++      // predecessors are unlikely edges, and this one is unconditional.
++      flush_frame();
+       EmitI32Const(code, 0);
+       code.push_back(0x0f);  // return
      }
      else if (b.jump_target != UINT32_MAX && !index_of.contains(b.jump_target))
      {
@@ -215,7 +217,7 @@ diff --git a/Source/Core/Core/PowerPC/CachedInterpreter/CachedInterpreter.cpp b/
        EmitLocalGet(code, 0);
        reloc_site(1, b.jump_target);
      }
-@@ -16993,9 +17070,13 @@ bool BuildRegionFragment(Core::System& system, u32 entry_pc, std::span<const u32
+@@ -16993,9 +17074,13 @@ bool BuildRegionFragment(Core::System& system, u32 entry_pc, std::span<const u32
      }
    }
    code.push_back(0x0b);  // end $D: no block of this fragment
@@ -230,7 +232,7 @@ diff --git a/Source/Core/Core/PowerPC/CachedInterpreter/CachedInterpreter.cpp b/
    return true;
  }
  }  // namespace
-@@ -17058,8 +17139,9 @@ namespace
+@@ -17058,8 +17143,9 @@ namespace
  // rotates (11-15 are taken by 0112-0119). 21 (0129): fused relaxed_madd mode
  // (18 retired, 19 and 20 are 0127's and 0128's). 23 (0131): region modules
  // carry wasm branch hints (22 is 0130's). 25 (0133): a fragment's head finds
