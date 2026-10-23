@@ -131,6 +131,8 @@ static void ResetOffThreadCompiles() {}
 static void UnverifyAllRegions() {}
 static void RepostWaitingRegions() {}
 static void ClearOffThreadAndRegionState() {}
+// Code-space counters (patch 0138): counted, not checked here.
+std::atomic<u32> s_code_clears{0};
 static void ForgetAllRegions() {}
 void Host_JitCacheInvalidation() {}
 #define __EMSCRIPTEN__ 1
