@@ -342,32 +342,38 @@ test("aot optimizer: budgetRefused in optimization-done counts this run's refusa
   assert.equal(events.findLast(([t]) => t === "optimization-done")[1].budgetRefused, first, "a second run does not add the first's");
 });
 
-test("aot optimizer: the module's leftover continuation budget goes back evenly to the members refused for lack of it", async () => {
-  // Two refused members per module: each asks for more, gets an even share
-  // of what is left, and is refused no longer once it got 300 bytes.
+test("aot optimizer: the module's leftover continuation budget goes back to the members refused for lack of it, never past it", async () => {
+  // Three refused members per module, each charged 100 by its first pass:
+  // the first two want 300 more each, the third is at its own cap
+  // (exhausted: it leaves the rounds). A member's share is what is left at
+  // its turn over the members still to come; the translator never goes past
+  // its limit.
   const UNIT = 1000;
   const calls = [];
   const base = fakeTranslator();
   const fragment = (pc) => ({ entry: pc, entries: [pc], code: Uint8Array.from([0x00, 0x41, 0x00, 0x0b]), relocs: [] });
-  let refusedSoFar = 0;
+  const wants = [300, 300, 0];
+  let k = 0;
   const translator = {
     unitContinuationBytes: UNIT,
     translate: async (batch) => (await base.translate(batch)).map((r, n) => {
-      if (!r.fragment || refusedSoFar >= 2) return r;
-      refusedSoFar++;
+      if (!r.fragment || k >= wants.length) return r;
+      const want = wants[k++], entry = batch[n].entry;
+      if (!want) return { ...r, budgetCharged: 100, budgetRefused: 2 }; // capped: no resume
       let got = 0;
-      return { ...r, budgetCharged: 100, budgetRefused: 3, resume: async (limit) => {
-        calls.push([batch[n].entry, limit]);
-        const take = Math.min(limit, 300 - got);
+      return { ...r, budgetCharged: 100, budgetRefused: 3, resume: async (limit, elsewhere) => {
+        calls.push([entry, limit, elsewhere]);
+        const take = Math.min(limit, want - got);
         got += take;
-        return { continuations: [fragment(batch[n].entry + 0x10000)], budgetCharged: take, budgetRefused: got >= 300 ? 0 : 1 };
+        return { continuations: [fragment(entry + 0x10000)], budgetCharged: take, budgetRefused: got >= want ? 0 : 1 };
       } };
     })
   };
   const { o, events } = optimizer({ translator, maxFunctions: 100 });
   await o.start({ resume: false });
-  const [a, b] = calls;
-  assert.equal(a[1], b[1], "an even share each");
-  assert.equal(a[1], Math.floor((UNIT - 200) / 2), "of what the module has left");
-  assert.equal(events.findLast(([t]) => t === "optimization-done")[1].budgetRefused, 0, "both topped up: nothing refused in the end");
+  const left = UNIT - 300;
+  assert.deepEqual(calls.slice(0, 2).map((c) => c[1]), [Math.floor(left / 2), left - 300], "the first an even share, the next what is left at its turn");
+  assert.equal(calls.length, 2, "the capped member never resumes; both others are done after one round");
+  assert.ok(calls[0][2] instanceof Set && calls[0][2].size > 0, "the entries the module holds are passed (no continuation starts there)");
+  assert.equal(events.findLast(([t]) => t === "optimization-done")[1].budgetRefused, 2, "only the capped member's refusals are left");
 });

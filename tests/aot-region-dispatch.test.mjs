@@ -1308,3 +1308,25 @@ test("continuation budget: a large member gets an even share of what the module 
   assert.ok(alone.budgetCharged > 2000);
   assert.ok(shared.budgetCharged <= 2000 + biggest, `charged ${shared.budgetCharged}`);
 });
+
+// Review of #189: no continuation is kept past the budget it was given (a
+// fragment that would overshoot goes back to the frontier), in the first
+// pass and in a resume, so a module never ends past its budget.
+test("continuation budget: never charged past the limit, first pass or resume", { skip: contSkip }, async () => {
+  const program = longFunction(100);
+  const f = { entry: LONG, ranges: loadWords(LONG, program.words), hash: null };
+  const options = { mask: PRODUCTION_DISABLE_MASK, maxBlocks: 16, names: coreAssembleOptions(core.module)?.helperNames };
+  const whole = await translateWithContinuations(core.module, f, options);
+  const sizes = (whole.continuations ?? []).map((c) => c.code.length);
+  for (const limit of [1, Math.floor(whole.budgetCharged / 3), Math.floor(whole.budgetCharged / 2) + 1]) {
+    const r = await translateWithContinuations(core.module, f, { ...options, maxBytes: limit });
+    assert.ok((r.budgetCharged ?? 0) <= limit, `first pass: ${r.budgetCharged} <= ${limit}`);
+    assert.ok(r.budgetRefused >= 1 && r.resume);
+    const more = await r.resume(limit);
+    assert.ok(more.budgetCharged <= limit, `resume: ${more.budgetCharged} <= ${limit}`);
+  }
+  assert.ok(sizes.length > 1);
+  // A member whose own cap is reached is not offered more (no resume).
+  const capped = await translateWithContinuations(core.module, f, { ...options, maxContinuations: 1 });
+  assert.ok(capped.budgetRefused >= 1 && !capped.resume, "at its own cap: no resume");
+});
