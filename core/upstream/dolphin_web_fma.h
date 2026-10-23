@@ -2,7 +2,9 @@
 // SPDX-License-Identifier: GPL-2.0-or-later
 //
 // fma() from musl libc (src/math/fma.c, MIT license, Copyright 2005-2020 Rich
-// Felker et al.), unchanged but for names. The core also links naga's Rust
+// Felker et al.), unchanged but for names and current musl's z == 0 case
+// (`return x*y;`, 2024: the older `x*y + z` lost the sign of an underflowed
+// product). The core also links naga's Rust
 // compiler_builtins, whose weak fma() double-rounds (a*c + b near a midpoint
 // of the result, e.g. b = 0x438fbd2f3eb1057e, a*c = 16 + 5e-19: it returns b,
 // the exact sum rounds to b - ulp) and won the link over musl's. Gekko rounds
@@ -87,8 +89,11 @@ extern "C" double fma(double x, double y, double z)
   if (nx.e >= ZEROINFNAN || ny.e >= ZEROINFNAN)
     return x*y + z;
   if (nz.e >= ZEROINFNAN) {
-    if (nz.e > ZEROINFNAN) /* z==0 */
-      return x*y + z;
+    /* z==0: x*y alone (x, y nonzero and finite here). Not x*y + z: an
+       underflowed x*y rounds to -0 and -0 + +0 is +0, where the exact
+       sum is negative (current musl has the same fix). */
+    if (nz.e > ZEROINFNAN)
+      return x*y;
     return z;
   }
 

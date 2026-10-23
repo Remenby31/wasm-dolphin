@@ -103,6 +103,7 @@ export class UpstreamWorkerAdapter {
     efbAccess = false,
     fifoLog = false,
     efbCopyRam = false,
+    wgpuMask = "",
     savesMode = "",
     efbDiag = false,
     jitVerbose = false,
@@ -212,6 +213,7 @@ export class UpstreamWorkerAdapter {
     this.efbAccess = Boolean(efbAccess);
     this.fifoLog = Boolean(fifoLog);
     this.efbCopyRam = Boolean(efbCopyRam);
+    this.wgpuMask = String(wgpuMask || "");
     this.savesMode = String(savesMode || "");
     this.userData = null;
     this.efbDiag = Boolean(efbDiag);
@@ -438,6 +440,7 @@ export class UpstreamWorkerAdapter {
       efbAccess: this.efbAccess,
       fifoLog: this.fifoLog,
       efbCopyRam: this.efbCopyRam,
+      wgpuMask: this.wgpuMask,
       savesMode: this.savesMode,
       efbDiag: this.efbDiag,
       jitVerbose: this.jitVerbose,
