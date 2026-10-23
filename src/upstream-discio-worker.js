@@ -483,18 +483,28 @@ let wgpuRendererWorkerProbe = "off";
 let wgpuVisualCadenceEnabled = false;
 // Mirrors the loaded core's videoBackend for code outside loadCore's scope.
 let hardwareVideoBackend = false;
-// Staging-texture readbacks of the hardware renderer, per device.
+// Staging-texture readbacks of the hardware renderer, per device and per
+// core module: the heap is the one the copies were issued in.
 let wgpuReadback = null;
 function readbackFor(device) {
-  if (wgpuReadback?.device !== device) {
-    wgpuReadback?.reset();
+  if (wgpuReadback?.device !== device || wgpuReadback.module !== moduleInstance) {
+    releaseWgpuReadback();
+    const module = moduleInstance;
     wgpuReadback = new WgpuReadback({
       device,
-      heap: () => moduleInstance.HEAPU8,
-      words: () => new Int32Array(moduleInstance.HEAPU8.buffer)
+      heap: () => module.HEAPU8,
+      words: () => new Int32Array(module.HEAPU8.buffer)
     });
+    wgpuReadback.module = module;
   }
   return wgpuReadback;
+}
+// Every copy in flight or still in the ring is released as LOST, and what
+// lands later is dropped. Before the consumer is marked failed: the core
+// then stops waiting for copies and frees their memory (patch 0093).
+function releaseWgpuReadback() {
+  wgpuReadback?.reset();
+  wgpuReadback = null;
 }
 // video=wgpu: pipelines seen in earlier sessions, compiled at boot
 // (src/wgpu-pipeline-prewarm.js). null when off (?wgpuprewarm=0) or not wgpu.
@@ -2527,6 +2537,7 @@ async function loadCore({
       : undefined;
 
   const _t_factory = performance.now();
+  releaseWgpuReadback();
   moduleInstance = await factory({
     noInitialRun: true,
     canvas: videoBackend === "OGL" ? moduleCanvas || undefined : undefined,
@@ -9448,6 +9459,7 @@ function markWgpuReplayFatal(scope, detail) {
   if (wgpuMappedStagingPool?.snapshot().pendingUploads > 0) {
     wgpuMappedStagingPool.invalidate(`fatal ${scope}: ${detail || "unknown"}`);
   }
+  releaseWgpuReadback();
   const errorCode = scope === "device-lost"
     ? WGPU_CONSUMER_ERROR_DEVICE_LOST
     : scope === "submit-error"

@@ -73,7 +73,12 @@ CPU peeks, the data is usually back. The staging texture only has to make
   reloading). The late copy may still land, so the block is orphaned (kept,
   never freed) and the texture goes on with a fresh copy of it; the
   destructor does the same after 1 s. A late copy only ever writes into
-  memory nobody reads.
+  memory nobody reads. Orphans from Flush are capped (64 MiB); past it the
+  block is kept and a late copy may tear texels, never touch freed memory.
+- Once the consumer has failed (device lost, replay fatal: the ring header's
+  consumer state), no copy is pushed and none is waited for: the worker
+  released every copy it tracked before marking itself failed, and never
+  runs the rest of the ring.
 - `Map()` stays trivial (the buffer is always mapped on the host side).
 - Upload staging (`StagingTextureType::Upload`/`Mutable`) is out of scope.
 
@@ -87,7 +92,9 @@ copying from `depth24plus`); keep the existing colour-pass fallback otherwise.
   `MAP_READ|COPY_DST` buffer (`bytesPerRow` rounded to 256) in its own
   encoder and submission, inside a validation error scope: a bad copy spoils
   no draw, and a rejected one is LOST, never OK with a pooled buffer's old
-  bytes. Then `mapAsync(READ)`. The pool is capped in bytes.
+  bytes; its buffer is destroyed, never pooled. Then `mapAsync(READ)`. The
+  pool is capped in bytes. On a fatal error, a new device or a new core
+  module, the readback is reset first.
 - On resolve: pack rows into the tight host layout at `heap ptr`
   (`packReadbackRows`, already used by the harness capture), then
   `Atomics.store(seqWord, seq)` + `Atomics.notify`. Unmap, return the buffer

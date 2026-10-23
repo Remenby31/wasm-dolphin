@@ -56,13 +56,15 @@ diff --git a/Source/Core/VideoBackends/WebGPU/WebGPUCommandStream.h b/Source/Cor
  };
  
  // Stable producer attribution for UploadBuffer records. The value is carried
-@@ -406,6 +416,9 @@
+@@ -406,6 +416,11 @@
    bool PushViTag(u32 vi_since_boot, u32 vi_since_load, u64 ticks, u32 load_generation);
    bool PushPresentSource(u32 x, u32 y, u32 w, u32 h);
    bool PushDestroy(u32 class_tag, u32 id);
 +  // Readback of a staging texture (CmdOp::CopyToStaging); outside any pass.
 +  bool PushCopyToStaging(u32 src_id, u32 x, u32 y, u32 w, u32 h, u32 layer, u32 level,
 +                         u32 texel_size, u32 seq, u32 dst_ptr, u32 dst_stride, u32 words_ptr);
++  // The consumer failed (device lost, replay fatal): no readback will run.
++  bool ReadbackConsumerFailed() const { return ConsumerFailed(); }
    // GPU texture blit. Coords/dims are clamped to 16 bits (EFB/XFB
    // never exceed that); layers/levels to 8 bits. No-op if either id
    // is 0 (CPU-only fallback path still ran the memcpy).
@@ -98,7 +100,7 @@ diff --git a/Source/Core/VideoBackends/WebGPU/WebGPUTexture.cpp b/Source/Core/Vi
  
  namespace WebGPU
  {
-@@ -208,21 +215,93 @@
+@@ -208,21 +215,112 @@
    // the AbstractStagingTexture interface produces zero-filled pixels
    // (rather than reading uninitialized memory). Real WebGPU storage
    // comes later.
@@ -126,9 +128,15 @@ diff --git a/Source/Core/VideoBackends/WebGPU/WebGPUTexture.cpp b/Source/Core/Vi
 -                                           const MathUtil::Rectangle<int>& /* dst_rect */)
 +// Blocks a late copy may still write into, texels and words alike.
 +static std::vector<std::unique_ptr<StagingReadbackBlock>> s_orphaned_blocks;
++static size_t s_orphaned_bytes = 0;
++// Past this, a Flush that times out keeps its block: a late copy may then
++// tear texels being read, never write freed memory.
++static constexpr size_t MAX_ORPHANED_BYTES = 64 << 20;
 +
-+void WebGPUStagingTexture::OrphanBlock(bool keep_texels)
++bool WebGPUStagingTexture::OrphanBlock(bool keep_texels)
  {
++  if (keep_texels && s_orphaned_bytes + m_block->texels.size() > MAX_ORPHANED_BYTES)
++    return false;
 +  auto fresh = std::make_unique<StagingReadbackBlock>();
 +  if (keep_texels)
 +  {
@@ -136,9 +144,11 @@ diff --git a/Source/Core/VideoBackends/WebGPU/WebGPUTexture.cpp b/Source/Core/Vi
 +    // Everything issued so far is settled as far as the fresh block goes.
 +    fresh->words[0].store(static_cast<s32>(m_issued), std::memory_order_release);
 +  }
++  s_orphaned_bytes += m_block->texels.size();
 +  s_orphaned_blocks.push_back(std::move(m_block));
 +  m_block = std::move(fresh);
 +  m_map_pointer = reinterpret_cast<char*>(m_block->texels.data());
++  return true;
 +}
 +
 +void WebGPUStagingTexture::CopyFromTexture(const AbstractTexture* src,
@@ -155,6 +165,9 @@ diff --git a/Source/Core/VideoBackends/WebGPU/WebGPUTexture.cpp b/Source/Core/Vi
 +  {
 +    return;
 +  }
++  // No consumer to run it (device lost, replay failed): the texels stay.
++  if (GetCommandStream().ReadbackConsumerFailed())
++    return;
 +  // The copy runs after everything recorded so far, the pass that drew the
 +  // source included.
 +  static_cast<WebGPUGfx*>(g_gfx.get())->EndPassForImmediateOp();
@@ -185,11 +198,19 @@ diff --git a/Source/Core/VideoBackends/WebGPU/WebGPUTexture.cpp b/Source/Core/Vi
 +    const s32 done = m_block->words[0].load(std::memory_order_acquire);
 +    if (static_cast<u32>(done) >= m_issued)
 +      return true;
++    // A failed consumer released what it had (src/wgpu-readback.js reset,
++    // before it marked itself failed) and never runs the rest of the ring:
++    // nothing will write into this block any more. Settle the copies.
++    if (GetCommandStream().ReadbackConsumerFailed())
++    {
++      m_block->words[0].store(static_cast<s32>(m_issued), std::memory_order_release);
++      return true;
++    }
 +    const double left = deadline - emscripten_get_now();
 +    if (left <= 0)
 +      return false;
 +    emscripten_futex_wait(reinterpret_cast<volatile void*>(&m_block->words[0]),
-+                          static_cast<u32>(done), left);
++                          static_cast<u32>(done), std::min(left, 20.0));
 +  }
 +#else
 +  return false;
@@ -199,7 +220,7 @@ diff --git a/Source/Core/VideoBackends/WebGPU/WebGPUTexture.cpp b/Source/Core/Vi
  void WebGPUStagingTexture::CopyToTexture(const MathUtil::Rectangle<int>& /* src_rect */,
                                            AbstractTexture* /* dst */,
                                            const MathUtil::Rectangle<int>& /* dst_rect */,
-@@ -242,6 +321,20 @@
+@@ -242,6 +340,29 @@
  
  void WebGPUStagingTexture::Flush()
  {
@@ -215,7 +236,16 @@ diff --git a/Source/Core/VideoBackends/WebGPU/WebGPUTexture.cpp b/Source/Core/Vi
 +                   m_issued);
 +    }
 +    // The late copy may still land: not into texels being read now.
-+    OrphanBlock(true);
++    if (!OrphanBlock(true))
++    {
++      static bool s_cap_logged = false;
++      if (!s_cap_logged)
++      {
++        s_cap_logged = true;
++        WARN_LOG_FMT(VIDEO, "WebGPU readback: orphaned blocks reach {} bytes, reusing the block",
++                     s_orphaned_bytes);
++      }
++    }
 +  }
    m_needs_flush = false;
  }
@@ -257,7 +287,7 @@ diff --git a/Source/Core/VideoBackends/WebGPU/WebGPUTexture.h b/Source/Core/Vide
 +  // words while they are in flight. A copy that does not come back in time
 +  // may still land, so the block is then orphaned, never freed (OrphanBlock).
 +  bool WaitForCopies(u32 timeout_ms);
-+  void OrphanBlock(bool keep_texels);
++  bool OrphanBlock(bool keep_texels);
 +  std::unique_ptr<StagingReadbackBlock> m_block;
 +  u32 m_issued = 0;
  };

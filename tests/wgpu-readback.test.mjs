@@ -224,3 +224,58 @@ test("the 16-bit seq of a record unwraps against the slot's last completed copy"
   assert.equal(unwrapSeq(0xFFFF, 0), 0x10000, "across the 16-bit wrap");
   assert.equal(unwrapSeq(0x1FFFE, 3), 0x20003);
 });
+
+// #125 re-review: a rejected buffer (out of memory, say) went back to the
+// pool and spoiled every later copy of its size.
+test("a buffer from a rejected or unmappable copy is destroyed, never pooled", async () => {
+  for (const how of ["rejectNext", "fail"]) {
+    const { device, rb } = setup();
+    if (how === "rejectNext") device.rejectNext = true;
+    const first = rb.issue(device.queue, copyOf(1));
+    await flush();
+    if (how === "fail") device.created[0].fail();
+    await first;
+    assert.equal(device.created[0].destroyed, true, how);
+    const second = rb.issue(device.queue, copyOf(2));
+    await flush();
+    assert.equal(device.created.length, 2, "the next copy gets a fresh buffer");
+    device.created[1].land();
+    await second;
+  }
+});
+
+// #125 re-review: after a device loss or a fatal replay error, the drain
+// stops, so copies left in the ring are never published; the core used to
+// wait 500 ms and orphan a block on every Flush. Now the worker releases
+// what it tracks before marking the consumer failed, and the core neither
+// pushes nor waits for a copy once the consumer has failed.
+test("a failed consumer releases its copies first; the core then neither pushes nor waits", async () => {
+  const { readFile } = await import("node:fs/promises");
+  const read = (p) => readFile(new URL(p, import.meta.url), "utf8");
+  const [worker, patch] = await Promise.all([
+    read("../src/upstream-discio-worker.js"),
+    read("../patches/dolphin-wasm/snapshot/0093-webgpu-staging-readback.patch")
+  ]);
+  const fatal = worker.slice(worker.indexOf("function markWgpuReplayFatal("));
+  const release = fatal.indexOf("releaseWgpuReadback();");
+  assert.ok(release > 0 && release < fatal.indexOf("emergencyFail("), "released before the consumer is marked failed");
+  assert.match(worker, /wgpuReadback\.module !== moduleInstance/, "a new core module gets a new readback");
+  assert.match(worker, /releaseWgpuReadback\(\);\n  moduleInstance = await factory/, "released before a core loads");
+  const added = patch.split("\n").filter((l) => l.startsWith("+")).join("\n");
+  assert.match(added, /if \(GetCommandStream\(\)\.ReadbackConsumerFailed\(\)\)\n\+    return;/, "no copy pushed");
+  assert.match(added, /ReadbackConsumerFailed\(\)\)\n\+    \{\n\+      m_block->words\[0\]\.store\(static_cast<s32>\(m_issued\)/, "the wait settles");
+  assert.match(added, /MAX_ORPHANED_BYTES/, "orphaned blocks are capped");
+
+  // The worker side of it: a slot with a copy in flight is released as LOST
+  // up to its last recorded seq, and the copy landing later writes nothing.
+  const { device, heap, words, rb } = setup();
+  const inFlight = rb.issue(device.queue, copyOf(1));
+  rb.issue(device.queue, copyOf(2, { heapPtr: 300 }));
+  await flush();
+  rb.reset();
+  assert.equal(Atomics.load(words, 0), 2);
+  assert.equal(Atomics.load(words, 1), READBACK_LOST);
+  device.created[0].land();
+  await inFlight;
+  assert.ok(heap.every((b) => b === 0));
+});

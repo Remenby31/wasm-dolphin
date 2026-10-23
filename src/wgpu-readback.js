@@ -153,19 +153,17 @@ export class WgpuReadback {
       return;
     }
     if (rejected) {
-      if (buffer) this.giveBack(buffer, size);
+      // The buffer itself may be what the device rejected (out of memory):
+      // never pooled again.
+      buffer?.destroy();
       this.finish(entry, "lost", null, "failed");
       return;
     }
     try {
       await buffer.mapAsync(MAP_MODE_READ);
     } catch {
-      if (generation === this.generation) {
-        this.giveBack(buffer, size);
-        this.finish(entry, "lost", null, "failed");
-      } else {
-        buffer.destroy();
-      }
+      buffer.destroy();
+      if (generation === this.generation) this.finish(entry, "lost", null, "failed");
       return;
     }
     if (generation !== this.generation) {
