@@ -557,7 +557,9 @@ async function main() {
     maxLoad: values["max-load"] ? num(values, "max-load", { min: 0.1 }) : Math.max(2, os.cpus().length / 4),
     loadWait: num(values, "load-wait", { min: 0 }),
     pcsample: values.pcsample ? num(values, "pcsample", { min: 0.05 }) : null,
-    regionSample: values["region-sample"] == null ? null : num(values, "region-sample", { min: 0, int: true }),
+    // --mem-stats needs the region counters (its region estimates ride on
+    // them): on without timers (0) unless --region-sample says otherwise.
+    regionSample: values["region-sample"] == null ? (values["mem-stats"] ? 0 : null) : num(values, "region-sample", { min: 0, int: true }),
     regionSecs: num(values, "region-secs", { min: 1 }),
     // --counters (Linux perf): host instructions per guest cycle of the
     // emulated CPU thread, per window (lib/perf-counters.mjs).
