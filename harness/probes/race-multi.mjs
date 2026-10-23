@@ -82,6 +82,7 @@ import { measure, num } from "./race-perf.mjs";
 import { loadHarnessState, readCoreProgress } from "../lib/browser.mjs";
 import { workerRequest } from "../lib/browser.mjs";
 import { emulatedWindow, ticksNow } from "../lib/emulated-window.mjs";
+import { chromeInfo } from "../lib/probe-out.mjs";
 import { decodeRegionStats } from "../lib/jit-region-stats.mjs";
 import { busiestThread, checkPerfAccess, instructionsPerGuestCycle, perfCounters } from "../lib/perf-counters.mjs";
 import { execFileSync, spawn } from "node:child_process";
@@ -481,7 +482,9 @@ async function main() {
   const ipg = good.map((r) => r.arms.map((x) => x.cold.instructionsPerGuestCycle));
   const counterEffects = full && values.counters && ipg.every((row) => row.every((v) => v > 0)) ? armEffects(ipg, good.map((r) => r.arms.map((x) => x.lane))) : null;
   const summary = {
-    probe: "race-multi", at: new Date().toISOString(), query: o.query, warmupSec: o.warmup, secs: o.secs, maxLoad: o.maxLoad,
+    probe: "race-multi", at: new Date().toISOString(),
+    // Which Chromium and its extra flags (the bench's --js-flags among them).
+    chrome: chromeInfo(), query: o.query, warmupSec: o.warmup, secs: o.secs, maxLoad: o.maxLoad,
     arms, lanes, runs: records.length, validRuns: good.length,
     // A lane estimate needs every run (the Latin square incomplete otherwise).
     // --aot-seed: installed regions per run and arm, and whether every run had them equal.
