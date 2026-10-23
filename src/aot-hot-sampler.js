@@ -37,6 +37,14 @@ const SOURCE = `onmessage = (e) => {
   close();
 };`;
 
+// The guest PC's address in the core's heap: the ungated export (the harness
+// one returns 0 unless the harness hooks are on, which the product never
+// does: a product build recorded no profile), the harness one on an older
+// core, else 0.
+export function guestPcAddress(m) {
+  return m?._DolphinWeb_GuestPcAddress?.() || m?._DolphinWeb_HarnessPcAddress?.() || 0;
+}
+
 // Starts sampling; null without a shared heap or a PC address.
 export function startHotSampler({ buffer, pcAddress, periodMs = 10, postMs = 500, frozenMs = 1000,
   createWorker = (url) => new Worker(url, { name: "aot-hot-sampler" }) }) {
