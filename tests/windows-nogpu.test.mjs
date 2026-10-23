@@ -2,30 +2,31 @@ import assert from "node:assert/strict";
 import { readFile } from "node:fs/promises";
 import test from "node:test";
 
-// .github/workflows/windows-warp.yml: WebGPU on D3D12 through WARP, on a
-// GPU-less GitHub Windows runner. The unsafe flag must stay confined to that
-// manual job, and the matrix must judge correctness only.
+// .github/workflows/windows-nogpu.yml: what a player's Chrome does on a
+// GPU-less PC, on a GitHub Windows runner. Runs 1-3 (2026-10-23): no adapter
+// without flags; a SwiftShader fallback adapter (wgpu device lost, never
+// WARP) with --enable-unsafe-webgpu, the harness default.
 const read = (p) => readFile(new URL(p, import.meta.url), "utf8");
 
-test("the Windows WARP workflow is manual and keeps --enable-unsafe-webgpu in its own job", async () => {
-  const wf = await read("../.github/workflows/windows-warp.yml");
+test("the Windows no-GPU workflow is manual, pinned, and checks the no-flag adapter", async () => {
+  const wf = await read("../.github/workflows/windows-nogpu.yml");
   const on = wf.match(/^on:\n((?:  .*\n)+)/m)[1];
   assert.match(on, /workflow_dispatch/);
   assert.doesNotMatch(on, /pull_request|push|schedule/);
-  const warp = wf.slice(wf.indexOf("\n  warp:"));
-  assert.equal(wf.split("--enable-unsafe-webgpu").length - 1 - (wf.match(/^#.*--enable-unsafe-webgpu/gm) ?? []).length,
-    warp.split("--enable-unsafe-webgpu").length - 1, "the flag appears only in the warp job");
-  assert.match(warp, /runs-on: windows-/);
+  const job = wf.slice(wf.indexOf("\n  nogpu:"));
+  assert.match(job, /runs-on: windows-/);
   for (const uses of wf.match(/uses: \S+/g)) assert.match(uses, /@[0-9a-f]{40}$/, `${uses} is pinned by SHA`);
-  // Without the harness's unsafe flag, the adapter a player's Chrome gets is recorded.
-  assert.match(warp, /webgpu-adapter\.mjs --port \d+ --no-unsafe-webgpu --out webgpu-adapter-default\.json/);
+  // A player's Chrome (without the harness's unsafe flag) gets no adapter.
+  assert.match(job, /webgpu-adapter\.mjs --port \d+ --no-unsafe-webgpu --expect none/);
+  // No step adds Chrome flags of its own.
+  assert.doesNotMatch(wf, /HARNESS_CHROME_ARGS/);
 });
 
-test("the WARP matrix compares wgpu with the exact software renderer, single core", async () => {
-  const m = JSON.parse(await read("../harness/matrices/windows-warp.json"));
-  assert.equal(m.reference, "sw-exact");
-  assert.equal(m.configs.find((c) => c.id === "sw-exact").set.fastsw, "0");
-  assert.ok(m.configs.some((c) => c.preset === "wgpu-nojit"));
+test("the no-GPU matrix runs the product's software path with both presenter fallbacks", async () => {
+  const m = JSON.parse(await read("../harness/matrices/windows-nogpu.json"));
+  assert.equal(m.reference, "sw-product");
+  assert.deepEqual(m.configs.map((c) => c.preset), ["sw-interp", "sw-interp"]);
+  assert.equal(m.configs.find((c) => c.id === "sw-2d").set.presenter, "2d");
   assert.ok(m.games.every((g) => g.set?.cpu === "single"));
   assert.ok(m.games.every((g) => g.iso.startsWith("harness/homebrew/out/")), "homebrews only, no ROM");
 });
@@ -46,6 +47,4 @@ test("a fallback WebGPU adapter counts as none unless the harness asks for it", 
   assert.match(host, /get\("wgpufallback"\) === "1"/);
   assert.match(adapter, /wgpuFallback: this\.wgpuFallback,/);
   assert.match(worker, /wgpuFallback: payload\.wgpuFallback,/);
-  const m = JSON.parse(await read("../harness/matrices/windows-warp.json"));
-  assert.equal(m.configs.find((c) => c.id === "wgpu-interp").set.wgpufallback, "1");
 });

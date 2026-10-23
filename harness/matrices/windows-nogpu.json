@@ -1,5 +1,5 @@
 {
-  "name": "windows-warp",
+  "name": "windows-nogpu",
   "runs": 1,
   "warmupSec": 10,
   "sampleSec": 10,
@@ -10,9 +10,8 @@
     { "id": "ramcopy", "iso": "harness/homebrew/out/ramcopy.iso", "static": true, "set": { "efbcopyram": "1", "cpu": "single" } }
   ],
   "configs": [
-    { "id": "sw-exact", "preset": "sw-interp", "set": { "fastsw": "0" } },
-    { "id": "wgpu-interp", "preset": "wgpu-nojit", "set": { "wgpufallback": "1" } }
+    { "id": "sw-product", "preset": "sw-interp" },
+    { "id": "sw-2d", "preset": "sw-interp", "set": { "presenter": "2d" } }
   ],
-  "reference": "sw-exact",
-  "renderMatch": 0.99
+  "reference": "sw-product"
 }
