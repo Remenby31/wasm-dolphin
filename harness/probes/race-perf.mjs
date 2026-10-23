@@ -56,6 +56,10 @@
 //   perKiloGuestCycles (host cycles, and the cycles each fraction stands
 //   for, per 1000 guest cycles), with perKiloChange in a pair. Each trace
 //   (~150 MB a second) is deleted once read.
+// - A homebrew (harness/homebrew/out or the committed fixtures, the only discs
+//   allowed in CI) needs no --state: it is measured from its boot.
+//   --pin-cpu-thread N (Linux) then moves the busiest renderer thread, the
+//   emulated CPU thread, alone onto vCPU N (.github/workflows/bench.yml).
 // - --emulated-window S: the window is S GUEST seconds instead of --secs host
 //   seconds. With a host-time window the faster side covers another stretch
 //   of the scene (another idle share), which biases the pair (PROGRAM.md,
@@ -101,12 +105,31 @@ import { consistentRead, decodeRegionStats, poolStats, regionShares, topMisses }
 import { consistentMemRead, decodeMemStats, memAccessShares, poolMemStats } from "../lib/mem-access-stats.mjs";
 import { consistentHeadroomRead, decodeHeadroomStats, headroomOf, invalidReasons, querySpeed, unlimitedAllowed } from "../lib/headroom.mjs";
 import { summarizePcSamples } from "../../src/harness-pc-sampler.js";
-import { checkPerfAccess, counterEvents, cyclesPerGuestCycle, instructionsPerGuestCycle, perfCounters } from "../lib/perf-counters.mjs";
+import { busiestThread, checkPerfAccess, counterEvents, cyclesPerGuestCycle, instructionsPerGuestCycle, perfCounters } from "../lib/perf-counters.mjs";
 import { checkXctrace, freeDiskGB, perKiloGuestCycles, XCTRACE_MIN_FREE_GB, xctraceCounters } from "../lib/xctrace-counters.mjs";
 import { emulatedStart } from "../lib/emulated-window.mjs";
 
 const HOMEBREW_OUT = path.join(REPO_ROOT, "harness", "homebrew", "out");
+// Our homebrews only (no game content): built locally (out/) or the
+// committed fixtures; the only discs race-perf runs in CI.
+const HOMEBREW_FIXTURES = path.join(REPO_ROOT, "harness", "homebrew", "fixtures");
+export const isHomebrew = (iso) => [HOMEBREW_OUT, HOMEBREW_FIXTURES].some((d) => iso.startsWith(d + path.sep));
 export const STATE_ROUTE = "**/__harness_state.sav";
+
+// The busiest renderer thread (the emulated CPU thread once the game runs)
+// moved alone onto `cpu` (taskset -p); { tid, cpu } or { error }.
+export async function pinBusiestThread(profileDir, cpu) {
+  if (process.platform !== "linux") return { error: "--pin-cpu-thread: Linux only" };
+  try {
+    const tid = await busiestThread(profileDir);
+    if (!tid) return { error: "no renderer thread" };
+    execFileSync("taskset", ["-p", "-c", String(cpu), String(tid)], { stdio: "ignore" });
+    const comm = readFileSync(`/proc/${tid}/comm`, "utf8").trim();
+    return { tid: Number(tid), thread: comm, cpu };
+  } catch (error) {
+    return { error: String(error?.message || error).slice(0, 200) };
+  }
+}
 
 export function sideOrder(run) {
   return run % 2 === 1 ? ["baseline", "candidate"] : ["candidate", "baseline"];
@@ -182,8 +205,15 @@ export function rendererThreads(profileDir) {
 // Load the scene, hold the key, settle, then a window with no page call.
 export async function measure(session, o) {
   const { page } = session;
-  const loaded = await loadHarnessState(page, session.url);
-  if (!loaded?.loaded) throw new Error(`savestate load failed: ${JSON.stringify(loaded)}`);
+  // A homebrew (no savestate) is measured from its boot.
+  if (o.state) {
+    const loaded = await loadHarnessState(page, session.url);
+    if (!loaded?.loaded) throw new Error(`savestate load failed: ${JSON.stringify(loaded)}`);
+  }
+  // --pin-cpu-thread N (Linux): the emulated CPU thread alone on vCPU N
+  // (the CI bench leaves its SMT sibling idle and the rest of Chrome on the
+  // other core, through HARNESS_CHROME_PATH's taskset).
+  const pinned = o.pinCpuThread != null ? await pinBusiestThread(session.profileDir, o.pinCpuThread) : null;
   // --emulated-window: the key is pressed while the core is paused, and the
   // warmup and the window are counted in guest seconds (lib/emulated-window.mjs).
   if (o.hold && !o.emulatedWindow) await page.keyboard.down(o.hold);
@@ -316,6 +346,7 @@ export async function measure(session, o) {
       ...regionRecord(regionEnd),
       ...(pipeline && !pipeline.error ? regionPipeline(pipeline) : {}),
       ...(counters ? { counters } : {}),
+      ...(pinned ? { pinned } : {}),
       ...(o.memStats ? memRecord(memEnd) : {})
     };
   } finally {
@@ -477,7 +508,7 @@ async function measureSide(side, o, loadGate) {
   const server = await ensureServer({ port: o.port, root: side.root, coreCandidates: o.coreCandidates });
   try {
     const bootStart = performance.now();
-    const session = await openSession({ base: server.base, server, query: side.query ?? o.query, iso: o.iso, routes: { [STATE_ROUTE]: o.state }, chromeArgs: side.chromeArgs ?? [], harness: o.display ? { displayed: true } : {} });
+    const session = await openSession({ base: server.base, server, query: side.query ?? o.query, iso: o.iso, routes: o.state ? { [STATE_ROUTE]: o.state } : {}, chromeArgs: side.chromeArgs ?? [], harness: o.display ? { displayed: true } : {} });
     const record = { url: session.url, served: server.identity, core: session.core, loadGate, bootMs: round(performance.now() - bootStart, 0) };
     try {
       record.cold = await measure(session, o);
@@ -542,18 +573,19 @@ async function main() {
       "emulated-window": { type: "string" }, "emulated-warmup": { type: "string" }, "emulated-poll-ms": { type: "string", default: "100" },
       hold: { type: "string", default: "KeyX" }, warm: { type: "boolean", default: false },
       "max-load": { type: "string" }, "lock-wait": { type: "string", default: "1800" },
-      pcsample: { type: "string" }, symbols: { type: "string" }, "region-sample": { type: "string" }, "region-secs": { type: "string", default: "10" }, counters: { type: "boolean", default: false }, "counter-events": { type: "string" }, "unique-frames": { type: "string" }, display: { type: "boolean", default: false }, "mem-stats": { type: "boolean", default: false }, "mem-warm": { type: "string", default: "5" }, headroom: { type: "boolean", default: false }, "frames-per-vi-ref": { type: "string" }, "baseline-query": { type: "string" }, "chrome-args": { type: "string" }, "baseline-chrome-args": { type: "string" },
+      pcsample: { type: "string" }, symbols: { type: "string" }, "region-sample": { type: "string" }, "region-secs": { type: "string", default: "10" }, counters: { type: "boolean", default: false }, "counter-events": { type: "string" }, "pin-cpu-thread": { type: "string" }, "unique-frames": { type: "string" }, display: { type: "boolean", default: false }, "mem-stats": { type: "boolean", default: false }, "mem-warm": { type: "string", default: "5" }, headroom: { type: "boolean", default: false }, "frames-per-vi-ref": { type: "string" }, "baseline-query": { type: "string" }, "chrome-args": { type: "string" }, "baseline-chrome-args": { type: "string" },
       "core-candidate": { type: "string", multiple: true, default: [] },
       port: { type: "string", default: process.env.HARNESS_PORT }, out: { type: "string" }
     },
     allowPositionals: false
   });
-  if (!values.iso || !values.state || !values.port) {
+  // A homebrew boots into its workload: no savestate needed (CI bench).
+  if (!values.iso || !values.port || (!values.state && !isHomebrew(path.resolve(values.iso)))) {
     throw new Error("usage: race-perf.mjs --iso disc.iso --state scene.sav --port N (or HARNESS_PORT) [--baseline ref|dir] [--candidate ref|dir] [--runs 4] [--warmup 25] [--secs 20] [--warm] [--max-load L] [--pcsample 0.25]");
   }
-  const iso = path.resolve(values.iso), state = path.resolve(values.state);
-  for (const f of [iso, state]) if (!existsSync(f)) throw new Error(`not found: ${f}`);
-  const localOnly = !iso.startsWith(HOMEBREW_OUT);
+  const iso = path.resolve(values.iso), state = values.state ? path.resolve(values.state) : null;
+  for (const f of [iso, state].filter(Boolean)) if (!existsSync(f)) throw new Error(`not found: ${f}`);
+  const localOnly = !isHomebrew(iso);
   if (localOnly && process.env.CI) throw new Error("this disc is local-only and must never run in CI");
   const query = `${values.query ?? PRESETS[values.config] ?? values.config}&metrics=1`;
   // --baseline-query: the baseline side boots with its own query (same tree
@@ -604,18 +636,19 @@ async function main() {
       ? (checkXctrace(), { xctrace: true, onWindow: xctraceCounters({ mode: values["counter-events"] ?? "delivery", pidOf: (session) => rendererThreads(session.profileDir)?.pid }) })
       : values.counters ? (checkPerfAccess(), { onWindow: perfCounters(undefined, { extra: counterEvents(values["counter-events"]) }) }) : {}),
     uniqueFrames: values["unique-frames"] == null ? null : num(values, "unique-frames", { min: 2 }),
+    pinCpuThread: values["pin-cpu-thread"] == null ? null : num(values, "pin-cpu-thread", { min: 0, int: true }),
     memStats: values["mem-stats"],
     memWarm: num(values, "mem-warm", { min: 0 }),
     headroom: values.headroom,
     // A KPI scene's pinned protocol (matrix.mjs SCENE_PROTOCOLS): region
     // stats over the window itself where the scene asks for it.
-    regionInWindow: Boolean(SCENE_PROTOCOLS[path.basename(state)]?.regionStatsInWindow),
+    regionInWindow: Boolean(state && SCENE_PROTOCOLS[path.basename(state)]?.regionStatsInWindow),
     framesPerViRef: values["frames-per-vi-ref"] == null ? null : num(values, "frames-per-vi-ref", { min: 0.01 }),
     display: values.display,
     functions: values.symbols ? JSON.parse(readFileSync(values.symbols, "utf8")).sort((a, b) => a[0] - b[0]) : null,
     coreCandidates: values["core-candidate"]
   };
-  const sceneCheck = sceneProtocolCheck(path.basename(state), {
+  const sceneCheck = sceneProtocolCheck(state ? path.basename(state) : null, {
     warmup: o.emulatedWindow ? o.emulatedWarmup : o.warmup, window: o.emulatedWindow ?? o.secs, emulated: Boolean(o.emulatedWindow),
     hold: o.hold, regionSample: o.regionSample, regionStatsInWindow: o.regionInWindow
   });
@@ -766,10 +799,10 @@ async function main() {
   if (process.env.HARNESS_CHROME_PATH || process.env.HARNESS_CHROME_ARGS) console.warn(`[race-perf] Chrome: ${chrome.path}${chrome.args ? ` ${chrome.args}` : ""}`);
   for (const [n, a] of Object.entries(sideArgs)) console.warn(`[race-perf] Chrome flags on the ${n}: ${a}`);
   const summary = {
-    sceneProtocol: sceneCheck.protocol ? { state: path.basename(state), ...sceneCheck.protocol, warnings: sceneCheck.warnings } : null,
+    sceneProtocol: sceneCheck.protocol ? { state: state && path.basename(state), ...sceneCheck.protocol, warnings: sceneCheck.warnings } : null,
     probe: "race-perf", at: new Date().toISOString(),
     chrome,
-    iso: path.basename(iso), state: path.basename(state), query: o.query, baselineQuery: sides.baseline?.query ?? null, warmupSec: o.warmup, secs: o.secs,
+    iso: path.basename(iso), state: state && path.basename(state), query: o.query, baselineQuery: sides.baseline?.query ?? null, warmupSec: o.warmup, secs: o.secs,
     // Window in guest seconds (null: host seconds, --secs).
     emulatedWindow: o.emulatedWindow ? { secs: o.emulatedWindow, warmup: o.emulatedWarmup, pollMs: o.emulatedPollMs } : null, hold: o.hold, maxLoad: o.maxLoad,
     sides: Object.fromEntries(Object.entries(sides).map(([n, s]) => [n, s.label])),

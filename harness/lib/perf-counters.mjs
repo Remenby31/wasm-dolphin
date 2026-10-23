@@ -16,8 +16,17 @@ import { round } from "./stats.mjs";
 export const GUEST_HZ = 486_000_000;
 // User-mode counts on every core type's PMU (one per cluster type on the
 // Spark: armv8_pmuv3_0 the A725s, armv8_pmuv3_1 the X925s); summed, so the
-// pinned lane's type needs no knowing.
-const PMUS = ["armv8_pmuv3_0", "armv8_pmuv3_1"];
+// pinned lane's type needs no knowing. Read from sysfs, so another arm64
+// machine (the CI bench's Neoverse N2 runner) counts on its own PMUs.
+const SPARK_PMUS = ["armv8_pmuv3_0", "armv8_pmuv3_1"];
+export function armPmus(dir = "/sys/bus/event_source/devices") {
+  try {
+    const found = readdirSync(dir).filter((d) => /^armv8_pmuv3/.test(d)).sort();
+    return found.length ? found : SPARK_PMUS;
+  } catch {
+    return SPARK_PMUS;
+  }
+}
 
 // Front-end and back-end events of the X925/A725 PMUs (--counter-events
 // frontend): where the cycles of a low-IPC thread go. Five, so that with
@@ -83,7 +92,7 @@ export function perfCounters(outDir = mkdtempSync(path.join(os.tmpdir(), "perf-c
       const tid = await busiestThread(session.profileDir);
       if (!tid) return live.set(session, { error: "no renderer thread" });
       const file = path.join(outDir, `perf-${tid}-${randomBytes(3).toString("hex")}.csv`);
-      const events = PMUS.flatMap((p) => ["instructions", "cycles", ...extra].map((e) => `${p}/${e}/u`)).join(",");
+      const events = armPmus().flatMap((p) => ["instructions", "cycles", ...extra].map((e) => `${p}/${e}/u`)).join(",");
       const proc = spawn("perf", ["stat", "-x,", "-e", events, "-t", tid, "-o", file], { stdio: "ignore" });
       live.set(session, { proc, file, tid, comm: (() => { try { return readFileSync(`/proc/${tid}/comm`, "utf8").trim(); } catch { return null; } })() });
       return;

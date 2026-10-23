@@ -1,0 +1,140 @@
+name: bench (homebrew A/A pilot, x64 + arm64, manual)
+
+# The CI bench pilot (research/deep-x64-ci-bench.md §6.1 P0): the noise of a
+# wall-time measure on the free GitHub runners, per CPU model, before any
+# A/B. Manual only (workflow_dispatch), never on a pull request or a push to
+# main; a push to a bench/** branch runs it too, to try the workflow itself.
+#
+# - Workload: our homebrews only (harness/homebrew, MIT, no game content):
+#   the committed cpufuzz.dol fixture, booted directly. NEVER a disc, a
+#   savestate or anything derived from a game in CI.
+# - A/A: the same tree served as both sides of race-perf, in ABBA order
+#   (race-perf alternates which side goes first), video=null, cpu=single,
+#   unlimited speed, a window in emulated time.
+# - Pinning: Chrome and node on every vCPU but cpu 0 and its SMT sibling;
+#   race-perf moves the emulated CPU thread alone onto cpu 0
+#   (--pin-cpu-thread). On the 4-vCPU x64 runner (2 cores x 2 threads) the
+#   CPU thread gets one physical core.
+# - The machine: lscpu, the SMT topology, the kernel, and whether a PMU is
+#   usable (perf stat instructions/cycles; perf silently falls back from
+#   cycles to cpu-clock, so "<not supported>" is looked for). On arm64
+#   (Neoverse N2) --counters adds perf stat on the CPU thread: host
+#   instructions and cycles per guest cycle, L1i refills, front-end stalls.
+# - Report: harness/remote/bench-aa.mjs, σ per run and per pair, per job,
+#   in the job summary and the bench-<runner>-<job> artifact.
+
+on:
+  workflow_dispatch:
+    inputs:
+      runs:
+        description: ABBA runs per job (each run measures both sides)
+        type: number
+        default: 10
+      window:
+        description: Emulated seconds per window
+        type: number
+        default: 10
+  push:
+    branches: ["bench/**"]
+
+permissions: {}
+
+concurrency:
+  group: bench-${{ github.ref }}
+  cancel-in-progress: false
+
+jobs:
+  aa:
+    name: A/A ${{ matrix.runner }} job ${{ matrix.job }}
+    strategy:
+      fail-fast: false
+      matrix:
+        runner: [ubuntu-24.04, ubuntu-24.04-arm]
+        job: [1, 2, 3]
+    runs-on: ${{ matrix.runner }}
+    timeout-minutes: 180
+    permissions:
+      contents: read
+    env:
+      RUNS: ${{ inputs.runs || 10 }}
+      WINDOW: ${{ inputs.window || 10 }}
+      OUT: ${{ github.workspace }}/bench-out
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+        with:
+          persist-credentials: false
+
+      - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4
+        with:
+          node-version: 24.12.0
+
+      # Playwright's Chromium (Chrome has no Linux arm64 build): the same
+      # browser on both architectures. Installed outside the checkout.
+      - name: Chromium
+        run: |
+          npm install --prefix "$RUNNER_TEMP/pw" --no-audit --no-fund playwright@1.56.1
+          (cd "$RUNNER_TEMP/pw" && npx playwright install --with-deps chromium)
+          {
+            echo "PLAYWRIGHT_MODULE=$RUNNER_TEMP/pw/node_modules/playwright/index.mjs"
+            echo "SPARK_CHROMIUM=$(cd "$RUNNER_TEMP/pw" && node -p "require('playwright').chromium.executablePath()")"
+          } >> "$GITHUB_ENV"
+          # Ubuntu 24.04 blocks the unprivileged user namespaces Chromium's sandbox needs.
+          sudo sysctl -w kernel.apparmor_restrict_unprivileged_userns=0
+
+      - name: The machine (CPU model, SMT topology, PMU)
+        shell: bash
+        run: |
+          set -euo pipefail
+          mkdir -p "$OUT"
+          lscpu | tee "$OUT/lscpu.txt"
+          for c in /sys/devices/system/cpu/cpu[0-9]*; do echo "$(basename "$c"): $(cat "$c/topology/thread_siblings_list")"; done | tee "$OUT/siblings.txt"
+          uname -a | tee "$OUT/uname.txt"
+          sudo apt-get install -y -qq "linux-tools-$(uname -r)" linux-tools-common > /dev/null 2>&1 || sudo apt-get install -y -qq linux-tools-generic > /dev/null 2>&1 || true
+          sudo sysctl -w kernel.perf_event_paranoid=1 || true
+          pmu=none
+          if command -v perf > /dev/null && perf stat -x, -e instructions:u,cycles:u -- true 2> "$OUT/perf-probe.txt"; then
+            grep -q "not supported" "$OUT/perf-probe.txt" || pmu=yes
+          fi
+          cat "$OUT/perf-probe.txt" || true
+          (sudo dmesg | grep -i "performance events" || true) | tee "$OUT/dmesg-pmu.txt"
+          # cpu 0 and its SMT sibling for the CPU thread; everything else elsewhere.
+          sib=$(cat /sys/devices/system/cpu/cpu0/topology/thread_siblings_list)
+          others=$(node -e '
+            const expand = (l) => l.split(",").flatMap((r) => { const [a, b = a] = r.split("-").map(Number); return Array.from({ length: b - a + 1 }, (_, i) => a + i); });
+            const all = expand(require("fs").readFileSync("/sys/devices/system/cpu/online", "utf8").trim());
+            const sib = new Set(expand(process.argv[1]));
+            console.log(all.filter((c) => !sib.has(c)).join(","));' "$sib")
+          { echo "SPARK_CHROME_CPUS=$others"; echo "OTHER_CPUS=$others"; echo "PMU=$pmu"; } >> "$GITHUB_ENV"
+          node -e '
+            const fs = require("fs"); const l = fs.readFileSync(process.argv[1], "utf8");
+            const get = (k) => (l.match(new RegExp("^" + k + ":\\s*(.*)$", "m")) ?? [])[1] ?? null;
+            fs.writeFileSync(process.argv[2], JSON.stringify({ runner: process.argv[3], job: Number(process.argv[4]), arch: get("Architecture"), cpuModel: get("Model name"), cpus: get("CPU\\(s\\)"), threadsPerCore: get("Thread\\(s\\) per core"), l1i: get("L1i cache"), l2: get("L2 cache"), cpu0Siblings: process.argv[5], otherCpus: process.argv[6], pmu: process.argv[7] }, null, 1));
+          ' "$OUT/lscpu.txt" "$OUT/machine.json" "${{ matrix.runner }}" "${{ matrix.job }}" "$sib" "$others" "$pmu"
+          cat "$OUT/machine.json"
+
+      - name: A/A on the cpufuzz fixture (ABBA, CPU thread pinned)
+        shell: bash
+        env:
+          HARNESS_CHROME_PATH: ${{ github.workspace }}/harness/remote/chrome-pinned.sh
+          HARNESS_PERF_LOCK: ${{ runner.temp }}/perf-lock
+        run: |
+          set -euo pipefail
+          counters=()
+          if [ "$PMU" = yes ] && [ "$(uname -m)" = aarch64 ]; then counters=(--counters --counter-events frontend); fi
+          taskset -c "$OTHER_CPUS" node harness/probes/race-perf.mjs \
+            --iso harness/homebrew/fixtures/cpufuzz.dol --port 8090 --baseline . \
+            --query "core=upstream&video=null&cpu=single&speed=unlimited&synconidle=1&wasmjit=1&jitwarmup=60" \
+            --hold "" --runs "$RUNS" --warmup 5 --emulated-warmup 5 --emulated-window "$WINDOW" \
+            --pin-cpu-thread 0 --max-load 8 --load-wait 60 --lock-wait 60 --calm-wait 60 \
+            "${counters[@]}" --out "$OUT/aa"
+          node harness/remote/bench-aa.mjs "$OUT/aa" "$OUT/machine.json" | tee -a "$GITHUB_STEP_SUMMARY"
+          # The machine at the end: a live migration would change the model.
+          lscpu | grep "Model name" | tee "$OUT/model-end.txt"
+
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        if: always()
+        with:
+          name: bench-${{ matrix.runner }}-${{ matrix.job }}
+          path: bench-out/
+          if-no-files-found: warn
+          retention-days: 30
