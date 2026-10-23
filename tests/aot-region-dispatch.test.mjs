@@ -739,8 +739,9 @@ test("an idle loop inside a region returns to the dispatcher at its start instea
   assert.ok(budget - core.downcount() < 100, `only the block before the loop ran (${budget - core.downcount()} cycles), not the slice`);
 });
 
-// FPU ops the direct tier does not emit (the Rc forms, mffs, ps_merge00, ...)
-// stay in the region as interpreter calls (patch 0105, compiler version 6)
+// FPU ops the direct tier does not emit (the Rc forms such as fadds., mffs)
+// stay in the region as helper calls (patch 0105, compiler version 6;
+// ps_merge00 is direct-tier code, here as a neighbour)
 // instead of leaving it: the whole call runs in region code, nothing is
 // interpreted outside, at the interpreter's state. Its own text (see SPIN).
 const FPU_TEXT = 0x8000a100, DATA = 0x80004000;

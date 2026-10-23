@@ -25,7 +25,7 @@
       "commit": "01e0577914a75a2569c846778c2f93aa8e6feddd"
     }
   },
-  "patchSeriesSha256": "49d7e4dc1a5fee3e80734f975976ea8b2aa63fce2db3c816c950eb102a654c6a",
+  "patchSeriesSha256": "0bbfabe5bbec6a617c9f4a30168e57c57707375246a3ad4c85efca46b2b8019f",
   "patches": [
     {
       "order": 1,
@@ -736,8 +736,8 @@
       "cwd": ".",
       "hashMode": "lf-normalized",
       "path": "patches/dolphin-wasm/snapshot/0105-region-fpu-inline.patch",
-      "size": 3338,
-      "sha256": "7c460b1bc3d5a9c2dcd1558007ba31b09a222476658c3e03ee0684d92646cc2e"
+      "size": 4500,
+      "sha256": "6158e6ed52c559b2c7b31e4abcb14355a986cd69ef08788c00032419920bec07"
     },
     {
       "order": 90,

@@ -289,11 +289,16 @@ the paired-single ops 0087 leaves to helpers, ...) used to end the
 region's block: the region left for one op, the cached interpreter ran the
 rest of the block, and the block chain came back at the next region entry
 (~240 000 times a second on the race before 0087). In region translation it
-is now an `EmitInterpretCall` (the mixed tier's `allow_interpret_fallback`:
-GPR cache flushed and reloaded, a halt returns 2). Only computational FPU
-ops (`RegionInterpretsInline`): system, cache and branch ops, which may
-change the MSR, the translation or the code, still end the region, which
-does not check the CPU's mode between its blocks. Compiler version 6.
+is now a helper call, `EmitFpCall` or `EmitInterpretCall` (the mixed tier's
+`allow_interpret_fallback`): dirty GPRs are stored before it, its outputs
+are reloaded after it, and a halt returns 2. That is every FPU op that
+cannot end a block (`RegionInterpretsInline`), the paired-single loads and
+stores included: `psq_lx`, `psq_stx`, `psq_lux`, `psq_stux`, and
+`psq_lu`/`psq_stu` with rA = 0 now run inside the region. System, cache and
+branch ops, which may change the MSR, the translation or the code, still end
+the region, which does not check the CPU's mode between its blocks. In
+region code the fallback only takes those ops: any other op the emitter
+refuses fails the block. Compiler version 6.
 
 ## MMU mode (patch 0091, with dispatch's 0090, 2026-10-22)
 
