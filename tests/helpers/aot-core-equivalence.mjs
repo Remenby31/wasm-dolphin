@@ -96,7 +96,8 @@ export async function loadAotCore(coreDir = new URL("../../cores/dolphin/", impo
         m._free(r);
       }
       if (!p) return null;
-      const [entry, codeLength, entryCount, relocCount] = new Uint32Array(m.HEAPU8.buffer, p, 4);
+      const [entry, codeLength, countWord, relocCount] = new Uint32Array(m.HEAPU8.buffer, p, 4);
+      const entryCount = countWord & 0x7fffffff, bytesCapped = countWord >>> 31 === 1; // 0130: bit 31, left out at the byte cap
       const words = new Uint32Array(m.HEAPU8.buffer, p + 16, entryCount + 3 * relocCount);
       const entries = Array.from(words.subarray(0, entryCount));
       const relocs = Array.from({ length: relocCount }, (_, i) => {
@@ -107,7 +108,7 @@ export async function loadAotCore(coreDir = new URL("../../cores/dolphin/", impo
         return { offset, kind: "dispatch" };
       });
       const at = p + 16 + 4 * (entryCount + 3 * relocCount);
-      return { entry, entries, code: m.HEAPU8.slice(at, at + codeLength), relocs, ...(heapBases() ? { heapBases: heapBases() } : {}) };
+      return { entry, entries, code: m.HEAPU8.slice(at, at + codeLength), relocs, ...(bytesCapped ? { bytesCapped } : {}), ...(heapBases() ? { heapBases: heapBases() } : {}) };
     },
     // Handle of the compiled module in the core's table (> 0), as for a block.
     compile(bytes) {

@@ -422,9 +422,10 @@ export function coreRegionTranslator(m, { mask, helperNames, maxBlocks = 64, max
 // region's exit there becomes a direct return_call, and claimEntries (at
 // assembly) keeps each PC's first owner. A fragment is capped when it holds
 // maxBlocks blocks or its code reaches REGION_FRAGMENT_MAX_BYTES (the byte
-// cap of patch 0115, #131: its discovery stops once the code reaches it).
-// Each continuation stays under that cap on its own (fewer blocks until it
-// fits; a single block over it is refused and stays an exit). At most
+// cap of patch 0130: the core stops taking blocks there and says so).
+// Each continuation stays under that cap on its own (the core's own cap, or
+// fewer blocks until it fits; a single block over it is refused and stays an
+// exit). At most
 // maxContinuations fragments and maxBytes of them per function, and
 // REGION_UNIT_CONTINUATION_MAX_BYTES per module: a module must still fit a
 // throttle sleep (0107, ~1.7 ms/MB). A leader that does not translate (a
@@ -433,7 +434,12 @@ export const REGION_FRAGMENT_MAX_BYTES = 96000;
 export const REGION_CONTINUATION_MAX_BYTES = 2 << 20;
 export const REGION_UNIT_CONTINUATION_MAX_BYTES = 1 << 20;
 export const REGION_MAX_CONTINUATIONS = 31;
-const capped = (fragment, maxBlocks, maxFragmentBytes) => fragment.entries.length >= maxBlocks || fragment.code.length >= maxFragmentBytes;
+// The core caps a fragment on its blocks' bodies (0130) and says so
+// (bytesCapped): such a fragment is taken as it is, though its code (bodies,
+// tails and head) is a little over maxFragmentBytes. The code length still
+// bounds what a core without the cap returns.
+const capped = (fragment, maxBlocks, maxFragmentBytes) => fragment.entries.length >= maxBlocks || fragment.bytesCapped === true || fragment.code.length >= maxFragmentBytes;
+const oversized = (fragment, maxFragmentBytes) => !fragment.bytesCapped && fragment.code.length > maxFragmentBytes;
 export async function translateWithContinuations(m, f, { mask, maxBlocks, names, maxContinuations = REGION_MAX_CONTINUATIONS,
   maxBytes = REGION_CONTINUATION_MAX_BYTES, maxFragmentBytes = REGION_FRAGMENT_MAX_BYTES, slice = async () => {} }) {
   const first = translateOne(m, f, { mask, maxBlocks, names });
@@ -451,12 +457,12 @@ export async function translateWithContinuations(m, f, { mask, maxBlocks, names,
     tried.add(pc);
     await slice();
     let next = translateOne(m, { ...f, entry: pc }, { mask, maxBlocks, names });
-    for (let blocks = maxBlocks; next.fragment && next.fragment.code.length > maxFragmentBytes && blocks > 1;) {
+    for (let blocks = maxBlocks; next.fragment && oversized(next.fragment, maxFragmentBytes) && blocks > 1;) {
       blocks = Math.max(1, blocks >> 1);
       next = translateOne(m, { ...f, entry: pc }, { mask, maxBlocks: blocks, names });
     }
     if (!next.fragment) continue;
-    if (next.fragment.code.length > maxFragmentBytes) { oversize += 1; continue; } // one block alone: left an exit
+    if (oversized(next.fragment, maxFragmentBytes)) { oversize += 1; continue; } // one block alone: left an exit
     for (const e of next.fragment.entries) owned.add(e >>> 0);
     continuations.push(next.fragment);
     bytes -= next.fragment.code.length;
@@ -531,7 +537,9 @@ function translateOne(m, f, { mask, maxBlocks, names }) {
     m._free(r);
   }
   if (!p) return { entry: f.entry, reason: "untranslatable" };
-  const [status, entry, codeLength, entryCount, relocCount, layout] = new Uint32Array(m.HEAPU8.buffer, p, 6);
+  const [status, entry, codeLength, countWord, relocCount, layout] = new Uint32Array(m.HEAPU8.buffer, p, 6);
+  // 0130: bit 31 of the entry count, the core left blocks out at its byte cap.
+  const entryCount = countWord & 0x7fffffff, bytesCapped = countWord >>> 31 === 1;
   if (status !== 0) return { entry: f.entry, reason: TRANSLATE_STATUS[status] ?? "untranslatable" };
   const words = new Uint32Array(m.HEAPU8.buffer, p + 24, entryCount + 3 * relocCount);
   const entries = Array.from(words.subarray(0, entryCount));
@@ -547,5 +555,5 @@ function translateOne(m, f, { mask, maxBlocks, names }) {
   // before the layout guard): the region module carries it to the install.
   // heapBases: the RAM and L1 addresses its heap sites hold (0084).
   const heapBases = typeof m._DolphinWeb_AotRegionHeapBases === "function" ? coreHeapBases(m) : null;
-  return { entry: f.entry, fragment: { entry, entries, code: m.HEAPU8.slice(at, at + codeLength), relocs, layout, ...(heapBases ? { heapBases } : {}) } };
+  return { entry: f.entry, fragment: { entry, entries, code: m.HEAPU8.slice(at, at + codeLength), relocs, layout, ...(bytesCapped ? { bytesCapped } : {}), ...(heapBases ? { heapBases } : {}) } };
 }

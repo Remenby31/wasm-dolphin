@@ -11,6 +11,7 @@ import test from "node:test";
 import { fileURLToPath } from "node:url";
 
 import { imageFromDol } from "../src/aot-image.js";
+import { REGION_FRAGMENT_MAX_BYTES } from "../src/aot-orchestrator.js";
 import { planDol } from "../src/aot-plan.js";
 import { assembleRegion, regionModuleEntries } from "../src/aot-region-module.js";
 import { asm, assemble, buildDol } from "./aot-asm.mjs";
@@ -174,6 +175,13 @@ test("under the MMU the translator refuses every entry, and translates again onc
   assert.ok(core.translate(DOUBLE), "translated with the MMU off");
 });
 
+// 0130: a fragment stops taking blocks once their bodies reach 96 000 bytes
+// (V8's optimizing tier gives up on much bigger functions), and the core says
+// so (bit 31 of the entry count): 64 blocks of 120 loads and stores would make
+// far more; the fragment keeps a prefix of them, and the orchestrator starts
+// continuations for the rest.
+const BIG_TEXT = 0x80020100;
+
 // 0126: region code swaps the bytes of a 32-bit value as
 // (rotl(x, 8) & 0x00ff00ff) | (rotr(x, 8) & 0xff00ff00). The exact bytes
 // EmitBswap32FromLocal emits, run against a reference bswap32 on edge values
@@ -183,6 +191,30 @@ const compilerVersion = () => {
   const p = core.module._malloc(8);
   try { core.module._DolphinWeb_AotKeyParts(p); return new Uint32Array(core.module.HEAPU8.buffer, p, 2)[0]; } finally { core.module._free(p); }
 };
+test("a fragment stops taking blocks at 96 KB of code (0130)", { skip: skip || (compilerVersion() < 22 && "core before 0130 (compiler version < 22)") }, () => {
+  const cmpwi0 = (a) => (11 << 26) | (a << 16);
+  const items = ["big"];
+  for (let b = 0; b < 64; b++) {
+    for (let k = 0; k < 60; k++) items.push(lwz(5, 1, 8), stw(5, 1, 12));
+    items.push(cmpwi0(3), ((pc, l) => asm.beq(pc, l[`b${b + 1}`])), `b${b + 1}`);
+  }
+  items.push(asm.blr());
+  const big = assemble(BIG_TEXT, items);
+  const dol = buildDol({ textAddr: BIG_TEXT, text: big.words, entry: big.labels.big });
+  const { image } = imageFromDol(dol);
+  for (const s of image.segments) core.load(s.start, s.bytes);
+  const fragment = core.translate(big.labels.big, { ranges: [[BIG_TEXT, BIG_TEXT + 4 * big.words.length]], maxBlocks: 256 });
+  assert.ok(fragment, "translated");
+  // 64 blocks of 120 loads and stores are far over the cap with any emitter.
+  assert.ok(fragment.bytesCapped, "the core says it left blocks out at its byte cap");
+  assert.ok(fragment.entries.length < 65, `${fragment.entries.length} blocks`);
+  assert.ok(fragment.code.length >= REGION_FRAGMENT_MAX_BYTES, "the blocks' bodies reach the cap");
+  assert.ok(fragment.code.length < REGION_FRAGMENT_MAX_BYTES + 80000, `${fragment.code.length} bytes`);
+  // The same function with room for every block: not capped, no flag.
+  const small = core.translate(big.labels.big, { ranges: [[BIG_TEXT, BIG_TEXT + 4 * big.words.length]], maxBlocks: 2 });
+  assert.equal(small.bytesCapped, undefined, "two blocks stay under the cap");
+});
+
 const sleb = (v) => { const o = []; for (;;) { const b = v & 0x7f; v >>= 7; if ((v === 0 && !(b & 0x40)) || (v === -1 && (b & 0x40))) { o.push(b); return o; } o.push(b | 0x80); } };
 // EmitBswap32FromLocal(local): the memory emitters swap from local 2.
 const rotateSwap = (local) => [0x20, local, 0x41, 8, 0x77, 0x41, ...sleb(0x00ff00ff), 0x71, 0x20, local, 0x41, 8, 0x78, 0x41, ...sleb(0xff00ff00 | 0), 0x71, 0x72];

@@ -407,7 +407,7 @@ C and #75's chaining are intra-module).
 ## Continuation fragments (2026-10-23)
 
 A function whose first fragment is capped (64 blocks, or 96 000 bytes of
-code: the byte cap of 0115) used to leave its other blocks to the dispatcher
+code: the byte cap of 0130) used to leave its other blocks to the dispatcher
 and the block JIT at every pass: in a CPU-bound intro scene 77 % of the CPU
 thread's time, 2.2 M region exits per 4 s to PCs of the same function that no
 fragment held. `translateWithContinuations` (aot-orchestrator.js) now decodes
@@ -436,3 +436,20 @@ masks and ors). Blocks keep the old form,
 so their bytes and cache keys don't change. Compiler version 17. (Written
 as 0108 on the region stack; renumbered after 0111 so the series applies
 in order.)
+
+## Fragment size cap (patch 0130, 2026-10-23)
+
+A fragment stops taking blocks once their bodies hold 96 000 bytes of code;
+the blocks left out run in continuation fragments, or outside the region.
+The core says so (bit 31 of the entry count it returns): the orchestrator
+(`translateWithContinuations`, same constant `REGION_FRAGMENT_MAX_BYTES`)
+then starts continuations, and takes a continuation the core capped as it
+is. Its code (bodies, tails and head) is a little over the cap, so a size
+check alone would halve and translate it again. In a race on main, the three
+fragments of more than ~1.7 MB of Liftoff code (about 500 KB of body) never
+reached TurboFan in 157 s, while fragments of 570 to 760 KB of Liftoff code
+did: V8's optimizing tier gives up on functions that big. 96 KB of wasm body
+is also under JavaScriptCore's 100,000-byte limit for its optimizing tier.
+Compiler version 22 (18 to 21 are taken by 0123 and 0127 to 0129). First
+measured as 0115 (#131, counting a 64-byte tail per block); renumbered so
+the series applies in order.
