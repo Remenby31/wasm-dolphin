@@ -65,6 +65,7 @@ export function createAotFirstLaunch({
   bootBudgetMs = 1500,
   maxBootModules = Infinity,
   maxBootBytes = Infinity, // what the launch may retain, in bytes of region modules
+  loadBeforeBoot = false, // true: the cache loads before the boot (under bootBudgetMs), as before
   maxErrorEvents = 64, // per run: a flood of refusals never pushes out install/start
   runId = null,
   tuning = {}, // AotOptimizer options: maxAttempts, notReadyDelayMs, maxNotReadyWaits
@@ -84,6 +85,7 @@ export function createAotFirstLaunch({
   let errorEvents = 0;
   let errorsDropped = 0;
   let started = false; // start() was called: the boot is behind
+  let deferredLoad = false; // the cache is read after the first image (loadRest)
   let retranslated = 0;
   const run = runId ?? Math.random().toString(36).slice(2, 10);
 
@@ -141,9 +143,10 @@ export function createAotFirstLaunch({
     supported,
     identity,
 
-    // Next launches: the modules the cache holds for this disc, in compile
-    // order, retained before the boot under `bootBudgetMs`; the rest after
-    // the boot with loadRest(). Never throws: a failure costs only speed.
+    // Next launches: opens the region cache for the modules it holds for
+    // this disc, in compile order; they load after the first image with
+    // loadRest() (loadBeforeBoot: before the boot, under `bootBudgetMs`).
+    // Never throws: a failure costs only speed.
     async installBeforeBoot() {
       if (!supported) return { loaded: 0, failed: [], deferred: 0, ms: 0, unsupported: true };
       const t0 = now();
@@ -157,8 +160,19 @@ export function createAotFirstLaunch({
           record("install", { loaded: 0, failed: 0, deferred: 0, ms, firstLaunch: true });
           return { loaded: 0, failed: [], deferred: 0, ms, firstLaunch: true };
         }
-        const keys = await optimizer.bootKeys();
-        report = await loader.load({ ...identity, keys, budgetMs: bootBudgetMs, maxModules: maxBootModules, maxBytes: maxBootBytes });
+        // Before the boot, nothing by default (loadBeforeBoot = false): the
+        // whole cache read and compiled first delayed the first image of a
+        // second launch by 0.8 s, and the boot does not need the regions (a
+        // first launch never has them there). They load after the first
+        // image (loadRest), as the optimisation of a first launch does; even
+        // the cache's index (has() over every key, ~110 ms) is read then.
+        if (!loadBeforeBoot) {
+          deferredLoad = true;
+          report = { loaded: 0, failed: [], deferred: optimizer.regions?.length ?? 0, ms: 0 };
+        } else {
+          const keys = await optimizer.bootKeys();
+          report = await loader.load({ ...identity, keys, budgetMs: bootBudgetMs, maxModules: maxBootModules, maxBytes: maxBootBytes });
+        }
       } catch (error) {
         report = { loaded: 0, failed: [], deferred: 0, ms: 0, error: String(error?.message || error) };
       }
@@ -167,7 +181,33 @@ export function createAotFirstLaunch({
       return { ...report, ms };
     },
 
-    loadRest: () => (supported ? loader.loadRest() : Promise.resolve({ loaded: 0, failed: [], deferred: 0 })),
+    // After the first image: what installBeforeBoot left, as a second
+    // "install" event (after: "first-image").
+    // A cancel() or dispose() (another disc mounted, a stop) before or during
+    // it: nothing loads.
+    async loadRest() {
+      if (!supported || disposed) return { loaded: 0, failed: [], deferred: 0 };
+      const t0 = now();
+      const ifGeneration = generation;
+      let report;
+      if (deferredLoad) {
+        // The whole cache, in compile order (hottest first), with no budget.
+        deferredLoad = false;
+        try {
+          const keys = await optimizer.bootKeys();
+          if (disposed || ifGeneration !== generation) return { loaded: 0, failed: [], deferred: 0, cancelled: true };
+          report = await loader.load({ ...identity, keys, maxModules: maxBootModules, maxBytes: maxBootBytes });
+        } catch (error) {
+          report = { loaded: 0, failed: [], deferred: 0, error: String(error?.message || error) };
+        }
+      } else {
+        report = await loader.loadRest();
+      }
+      if (report.loaded || report.failed.length) {
+        record("install", { loaded: report.loaded, failed: report.failed.length, deferred: report.deferred, ms: Math.round(now() - t0), after: "first-image" });
+      }
+      return report;
+    },
 
     async status() {
       if (!supported) return { state: "unsupported", fraction: 0 };
@@ -216,6 +256,7 @@ export function createAotFirstLaunch({
 
     cancel() {
       generation++;
+      deferredLoad = false; // the cache deferred to the first image never loads
       optimizer?.cancel();
       loader.cancel();
     },
@@ -315,27 +356,146 @@ export function coreHeapBases(m) {
 // The translator the optimiser drives, over the core's export. Translates
 // for at most `sliceMs` per call and answers "budget" for the rest: the discio
 // worker also serves the core's disc reads, so it yields between slices.
-export function coreRegionTranslator(m, { mask, helperNames, maxBlocks = 64, sliceMs = 8, now = () => performance.now(),
+// maxContinuations: fragments translated after a function's first one, from
+// its frontier (see translateWithContinuations).
+export function coreRegionTranslator(m, { mask, helperNames, maxBlocks = 64, maxContinuations = REGION_MAX_CONTINUATIONS, sliceMs = 8, now = () => performance.now(),
   yieldNow = () => new Promise((r) => setTimeout(r, 0)) } = {}) {
   if (typeof m?._DolphinWeb_AotTranslate !== "function") return null;
   const names = helperNames ?? coreAssembleOptions(m)?.helperNames ?? [];
   return {
     async translate(batch) {
       await yieldNow();
-      const t0 = now();
+      let t0 = now();
       const out = [];
+      // The continuations of a function also yield to the worker once the
+      // slice is spent (review of #138): it serves the core's disc reads.
+      const slice = async () => {
+        if (now() - t0 < sliceMs) return;
+        await yieldNow();
+        t0 = now();
+      };
+      // Continuation bytes left for this module (a unit; review of #138):
+      // the optimiser says how many its earlier batches used.
+      let unitBytes = REGION_UNIT_CONTINUATION_MAX_BYTES - (batch[0]?.continuationBytesUsed ?? 0);
       for (const [n, f] of batch.entries()) {
         if (n && now() - t0 >= sliceMs) {
           out.push({ entry: f.entry, reason: "budget" });
           break;
         }
-        const r = translateOne(m, f, { mask, maxBlocks, names });
+        const r = await translateWithContinuations(m, f, { mask, maxBlocks, names, maxContinuations, maxBytes: unitBytes, slice });
+        for (const c of r.continuations ?? []) unitBytes -= c.code.length;
         out.push(r);
         if (r.reason === "budget" || r.reason === "not-ready") break;
       }
       return out;
     }
   };
+}
+
+// A function whose blocks do not fit one fragment (the 64-block cap) left
+// the rest to the dispatcher and the block JIT at every pass: 77 % of a
+// CPU-bound intro scene's time (2026-10-23, 2.2 M region exits per 4 s to
+// PCs of the same function that no fragment held). When the first fragment
+// is capped, its frontier (the leaders that branches inside blocks it holds
+// reach, decoded from guest memory) starts continuation fragments of the
+// same function, in the same module, until no frontier is left: the
+// region's exit there becomes a direct return_call, and claimEntries (at
+// assembly) keeps each PC's first owner. A fragment is capped when it holds
+// maxBlocks blocks or its code reaches REGION_FRAGMENT_MAX_BYTES (the byte
+// cap of patch 0115, #131: its discovery stops once the code reaches it).
+// Each continuation stays under that cap on its own (fewer blocks until it
+// fits; a single block over it is refused and stays an exit). At most
+// maxContinuations fragments and maxBytes of them per function, and
+// REGION_UNIT_CONTINUATION_MAX_BYTES per module: a module must still fit a
+// throttle sleep (0107, ~1.7 ms/MB). A leader that does not translate (a
+// first op the translator refuses) stays an exit, as before.
+export const REGION_FRAGMENT_MAX_BYTES = 96000;
+export const REGION_CONTINUATION_MAX_BYTES = 2 << 20;
+export const REGION_UNIT_CONTINUATION_MAX_BYTES = 1 << 20;
+export const REGION_MAX_CONTINUATIONS = 31;
+const capped = (fragment, maxBlocks, maxFragmentBytes) => fragment.entries.length >= maxBlocks || fragment.code.length >= maxFragmentBytes;
+export async function translateWithContinuations(m, f, { mask, maxBlocks, names, maxContinuations = REGION_MAX_CONTINUATIONS,
+  maxBytes = REGION_CONTINUATION_MAX_BYTES, maxFragmentBytes = REGION_FRAGMENT_MAX_BYTES, slice = async () => {} }) {
+  const first = translateOne(m, f, { mask, maxBlocks, names });
+  if (!first.fragment || maxContinuations <= 0 || !capped(first.fragment, maxBlocks, maxFragmentBytes)) return first;
+  const branches = functionBranches(m, f.ranges);
+  const owned = new Set(first.fragment.entries.map((pc) => pc >>> 0));
+  const tried = new Set();
+  const continuations = [];
+  let bytes = Math.min(maxBytes, REGION_CONTINUATION_MAX_BYTES);
+  let oversize = 0;
+  for (;;) {
+    if (continuations.length >= maxContinuations || bytes <= 0) break;
+    const pc = frontier(branches, owned).find((x) => !tried.has(x));
+    if (pc === undefined) break;
+    tried.add(pc);
+    await slice();
+    let next = translateOne(m, { ...f, entry: pc }, { mask, maxBlocks, names });
+    for (let blocks = maxBlocks; next.fragment && next.fragment.code.length > maxFragmentBytes && blocks > 1;) {
+      blocks = Math.max(1, blocks >> 1);
+      next = translateOne(m, { ...f, entry: pc }, { mask, maxBlocks: blocks, names });
+    }
+    if (!next.fragment) continue;
+    if (next.fragment.code.length > maxFragmentBytes) { oversize += 1; continue; } // one block alone: left an exit
+    for (const e of next.fragment.entries) owned.add(e >>> 0);
+    continuations.push(next.fragment);
+    bytes -= next.fragment.code.length;
+  }
+  return { ...first, ...(continuations.length ? { continuations } : {}), ...(oversize ? { oversize } : {}) };
+}
+
+// The direct branches of the code in `ranges` ([start, end) guest
+// addresses), read from the emulated RAM (big-endian): [address, leaders it
+// makes] for each b and bc without link (its target inside the ranges, and
+// for a bc the next instruction), in address order; `ends` lists the
+// instructions after which a block never falls through (b, blr and bctr
+// always taken, rfi).
+export function functionBranches(m, ranges) {
+  const out = [];
+  out.ends = [];
+  if (typeof m._DolphinWeb_AotRegionHeapBases !== "function") return out;
+  const ram = coreHeapBases(m)[0];
+  const inside = (pc) => ranges.some(([s, e]) => pc >= s && pc < e);
+  const view = new DataView(m.HEAPU8.buffer);
+  for (const [s, e] of ranges) {
+    for (let a = s >>> 0; a < e >>> 0; a += 4) {
+      const w = view.getUint32(ram + (a & 0x01ffffff), false);
+      const op = w >>> 26;
+      const xo = (w >>> 1) & 0x3ff;
+      if ((op === 18 && !(w & 1)) || (op === 19 && (xo === 50 || ((xo === 16 || xo === 528) && ((w >>> 21) & 0x14) === 0x14)))) out.ends.push(a >>> 0);
+      if ((op !== 16 && op !== 18) || (w & 1)) continue; // b/bc without link
+      const disp = op === 18 ? ((w & 0x03fffffc) << 6) >> 6 : ((w & 0xfffc) << 16) >> 16;
+      const target = ((w & 2) ? disp : a + disp) >>> 0;
+      const leaders = [target, ...(op === 16 ? [(a + 4) >>> 0] : [])].filter(inside);
+      out.push([a >>> 0, leaders]);
+    }
+  }
+  out.sort((x, y) => x[0] - y[0]);
+  out.ends.sort((x, y) => x - y);
+  return out;
+}
+
+// The leaders that the blocks held already reach and that none holds, in
+// address order. A branch belongs to the block of the nearest block start
+// at or before it (held entries and all leaders), unless a block end lies
+// between them: the leaders a held block reaches are the frontier; a word
+// that only looks like a branch (a literal after a blr) is in no block.
+export function frontier(branches, owned) {
+  const starts = [...new Set([...owned, ...branches.flatMap(([, l]) => l)])].sort((a, b) => a - b);
+  const blockOf = (a) => {
+    let lo = 0, hi = starts.length - 1, at = null;
+    while (lo <= hi) { const mid = (lo + hi) >> 1; if (starts[mid] <= a) { at = starts[mid]; lo = mid + 1; } else hi = mid - 1; }
+    return at;
+  };
+  const ends = branches.ends ?? [];
+  const endBetween = (from, to) => ends.some((e) => e >= from && e < to);
+  const out = new Set();
+  for (const [a, leaders] of branches) {
+    const start = blockOf(a);
+    if (!owned.has(start) || endBetween(start, a)) continue;
+    for (const pc of leaders) if (!owned.has(pc)) out.add(pc);
+  }
+  return [...out].sort((a, b) => a - b);
 }
 
 function translateOne(m, f, { mask, maxBlocks, names }) {

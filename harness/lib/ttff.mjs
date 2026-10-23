@@ -112,15 +112,21 @@ export function installContentWatcher() {
 
 // The first-launch optimisation (P7) as one launch saw it, from
 // validationReadAotProgress (lib/aot-progress.mjs): its state, and the
-// regions installed from the cache before boot (the "install" event: a
-// second launch with the cache has loaded > 0). Null for an engine without P7.
+// regions loaded from the cache (the "install" events: before the boot, then
+// after the first image; a second launch with the cache has loaded > 0).
+// Null for an engine without P7.
 export function aotLaunchInfo(reply) {
   if (!reply || reply.error || !reply.schema) return null;
-  const install = (reply.events ?? []).find((e) => e.type === "install");
+  const install = (reply.events ?? []).find((e) => e.type === "install" && !e.after);
+  // Modules of the cache loaded after the first image (only the boot set
+  // loads before the boot): a second "install" event.
+  const rest = (reply.events ?? []).filter((e) => e.type === "install" && e.after === "first-image");
   const done = (reply.events ?? []).find((e) => e.type === "done");
   return {
     state: reply.state ?? null,
     install: install ? { loaded: install.loaded ?? null, failed: install.failed ?? null, deferred: install.deferred ?? null, ms: install.ms ?? null } : null,
+    ...(rest.length ? { afterFirstImage: { loaded: rest.reduce((n, e) => n + (e.loaded ?? 0), 0) } } : {}),
+    fromCache: (install?.loaded ?? 0) + rest.reduce((n, e) => n + (e.loaded ?? 0), 0),
     done: done ? { ms: done.ms ?? null, compiled: done.compiled ?? null, total: done.total ?? null } : null
   };
 }
@@ -145,8 +151,9 @@ export function summarizeAot(runs) {
   const phase = (name) => {
     const infos = runs.map((r) => r[name]?.aot).filter(Boolean);
     if (!infos.length) return null;
-    // The core's own count when it gives one, else the P7 install event.
-    const loaded = infos.map((a) => a.core?.installed ?? a.install?.loaded ?? 0);
+    // The core's own count when it gives one (read once the cache had time to
+    // load after the first image), else the P7 install events.
+    const loaded = infos.map((a) => a.core?.installed ?? a.fromCache ?? a.install?.loaded ?? 0);
     return {
       states: [...new Set(infos.map((a) => a.state))],
       regionsInstalled: loaded,

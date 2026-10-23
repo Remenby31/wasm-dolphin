@@ -249,3 +249,24 @@ test("spark-queue: a multi takes the whole bench, in order of arrival, its estim
   assert.equal(estimateMin("multi", ["--runs", "6"]), 13);
   assert.equal(estimateMin("multi", ["--runs", "12"]), 22);
 });
+
+test("Spark Chromium: the bench's store-check flag is added once and merged with a probe's own --js-flags", () => {
+  const dir = mkdtempSync(path.join(os.tmpdir(), "chrome-pinned-"));
+  try {
+    // taskset and Chromium stand-ins: print the arguments Chromium would get, one a line.
+    writeFileSync(path.join(dir, "taskset"), "#!/bin/sh\nshift 2\nexec \"$@\"\n", { mode: 0o755 });
+    writeFileSync(path.join(dir, "chromium"), "#!/bin/sh\nfor a in \"$@\"; do echo \"$a\"; done\n", { mode: 0o755 });
+    const pinned = path.resolve(import.meta.dirname, "../harness/remote/chrome-pinned.sh");
+    const run = (...args) => execFileSync("sh", [pinned, ...args], { encoding: "utf8", env: { ...process.env, PATH: `${dir}:${process.env.PATH}`, SPARK_CHROMIUM: path.join(dir, "chromium") } }).trim().split("\n");
+    assert.deepEqual(run("--headless", "--js-flags=--no-liftoff", "--js-flags=--wasm-partial-oob-writes-are-noops", "about:blank"),
+      ["--headless", "about:blank", "--js-flags=--no-liftoff --wasm-partial-oob-writes-are-noops"]);
+    assert.deepEqual(run("--headless", "a b"), ["--headless", "a b"], "no --js-flags: nothing added, spaces kept");
+    // Both bench launchers add the flag through HARNESS_CHROME_ARGS (recorded in every summary).
+    for (const f of ["spark-race.sh", "spark-multi.sh"]) {
+      const src = readFileSync(path.resolve(import.meta.dirname, "../harness/remote", f), "utf8");
+      assert.match(src, /export HARNESS_CHROME_ARGS="\$\{HARNESS_CHROME_ARGS:\+\$HARNESS_CHROME_ARGS \}--js-flags=--wasm-partial-oob-writes-are-noops"/, f);
+    }
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});

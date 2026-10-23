@@ -160,6 +160,8 @@ test("race-multi: a run where an arm lacks some of its seeded regions is discard
   assert.equal(discardReason([{ regionGate: ok }, { regionGate: { installed: 0, layoutRefused: 143, quiescent: false, why: "0 installed, 143 expected" } }], [143, 143]),
     "layoutRefused on arm 1 (143)");
   assert.match(discardReason([{ regionGate: { ...ok, installed: 140 } }, { regionGate: ok }], [143, 143]), /arm 0 installed 140 of 143/);
+  assert.equal(discardReason([{ regionGate: ok }, { regionGate: ok }], [142, 143]), null, "more regions than the seed reached: kept");
+  assert.match(discardReason([{ regionGate: { ...ok, installed: undefined } }], [142]), /arm 0 installed \? of 142/);
   assert.match(discardReason([{ regionGate: null }, { regionGate: ok }], [143, 143]), /no region gate on arm 0/);
   assert.match(discardReason([{ regionGate: { ...ok, quiescent: false, why: "still compiling" } }], [null]), /arm 0: still compiling/);
 });

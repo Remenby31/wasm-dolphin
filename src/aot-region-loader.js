@@ -113,7 +113,10 @@ export function createAotRegionLoader({ openCache, retain, now = () => performan
   return {
     // identity: { discKey, coreHash, compilerVersion, flagsMask } (openAotCache).
     // maxModules / maxBytes: what this launch may retain in all (load + loadRest).
-    async load({ keys = [], budgetMs = Infinity, batchSize = DEFAULT_REGION_BATCH, maxModules = Infinity, maxBytes = Infinity, ...identity } = {}) {
+    // eager: how many of `keys` (the first ones) load now; the rest waits for
+    // loadRest() (the boot needs only some regions; the rest comes after the
+    // first image).
+    async load({ keys = [], budgetMs = Infinity, batchSize = DEFAULT_REGION_BATCH, maxModules = Infinity, maxBytes = Infinity, eager = Infinity, ...identity } = {}) {
       if (current) {
         current.cancelled = true;
         current.session?.cancel?.();
@@ -135,7 +138,13 @@ export function createAotRegionLoader({ openCache, retain, now = () => performan
         }
         return true;
       });
-      return loadKeys(run, wanted, { budgetMs, batchSize });
+      const first = Number.isFinite(eager) ? wanted.slice(0, Math.max(0, eager)) : wanted;
+      const report = await loadKeys(run, first, { budgetMs, batchSize });
+      if (first.length < wanted.length && live(run)) {
+        run.deferred.push(...wanted.slice(first.length));
+        report.deferred = run.deferred.length;
+      }
+      return report;
     },
 
     // What the budget cut in the latest load(), with no budget (after boot:

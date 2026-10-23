@@ -14,7 +14,9 @@ import { fileURLToPath } from "node:url";
 import { imageFromDol } from "../src/aot-image.js";
 import { planDol } from "../src/aot-plan.js";
 import { coreStatus } from "../tools/core-artifacts.mjs";
-import { assembleRegion, paddedSleb, paddedUleb, patchRegionHeap, regionHeapOfBytes } from "../src/aot-region-module.js";
+import { assembleRegion, claimEntries, regionModuleKey, paddedSleb, paddedUleb, patchRegionHeap, regionHeapOfBytes } from "../src/aot-region-module.js";
+import { coreAssembleOptions, coreRegionTranslator, translateWithContinuations } from "../src/aot-orchestrator.js";
+import { PRODUCTION_DISABLE_MASK } from "./helpers/jit-oracle.mjs";
 import { asm, assemble, buildDol } from "./aot-asm.mjs";
 import { HELPER_SIGNATURES, STOP, functionFragments, loadAotCore, regionGroups, seedGprs } from "./helpers/aot-core-equivalence.mjs";
 import { makeRng, randomProgram } from "./helpers/jit-oracle.mjs";
@@ -235,9 +237,13 @@ function withOffThreadCompile(fn) {
   const savedCache = m._dolphinJitCache;
   m._dolphinJitCache = new Map(); // the pthread's module map (pre-js), empty
   m._SetPpcWasmJitOffThread(1);
+  // 0107: a ready module waits for a throttle sleep (2 s at most); these
+  // tests install at slice boundaries, as after that wait.
+  m._DolphinWeb_AotSetSleepWaitForTest?.(0);
   try {
     return fn(posted.filter.bind(posted, (msg) => msg.type === "dolphin-jit-compile-request"));
   } finally {
+    m._DolphinWeb_AotSetSleepWaitForTest?.(2000);
     m._SetPpcWasmJitOffThread(0);
     m._dolphinJitCache = savedCache;
     globalThis._dolphinJitInflight?.clear();
@@ -735,8 +741,9 @@ test("an idle loop inside a region returns to the dispatcher at its start instea
   assert.ok(budget - core.downcount() < 100, `only the block before the loop ran (${budget - core.downcount()} cycles), not the slice`);
 });
 
-// FPU ops the direct tier does not emit (the Rc forms, mffs, ps_merge00, ...)
-// stay in the region as interpreter calls (patch 0105, compiler version 6)
+// FPU ops the direct tier does not emit (the Rc forms such as fadds., mffs)
+// stay in the region as helper calls (patch 0105, compiler version 6;
+// ps_merge00 is direct-tier code, here as a neighbour)
 // instead of leaving it: the whole call runs in region code, nothing is
 // interpreted outside, at the interpreter's state. Its own text (see SPIN).
 const FPU_TEXT = 0x8000a100, DATA = 0x80004000;
@@ -886,3 +893,242 @@ for (const [name, setter] of [["addo", [addo(7, 5, 5)]], ["mtxer", [asm.lis(9, 0
     assert.ok(got.interpreted >= 1, "the SO setter ran outside regions");
   });
 }
+
+// Patch 0107: the CPU thread's throttle sleep installs ready regions (no
+// frame pays for them), counted apart and kept out of installMaxSliceMs.
+// [installs, ms x 100, worst lateness past the deadline x 100, slice installs
+// after the sleep wait ran out] (the last two with the review's fixes).
+function sleepCounters() {
+  const p = core.module._malloc(16);
+  try {
+    new Uint32Array(core.module.HEAPU8.buffer, p, 4).fill(0);
+    core.module._DolphinWeb_AotRegionSleepInstalls(p);
+    return Array.from(new Uint32Array(core.module.HEAPU8.buffer, p, 4));
+  } finally {
+    core.module._free(p);
+  }
+}
+test("a throttle sleep window installs queued regions", { skip: skip || (typeof core?.module._DolphinWeb_AotRegionSleepWindowForTest !== "function" && "core without installs in throttle sleeps (0107)") }, () => {
+  const plan = setup();
+  core.setRegionsEnabled(true);
+  const before = core.regionCount();
+  const [installs] = sleepCounters();
+  queueAll(plan);
+  core.module._DolphinWeb_AotRegionSleepWindowForTest(50); // a 50 ms sleep, as the throttle gives it
+  assert.ok(core.regionCount() > before, "installed in the sleep window");
+  assert.ok(sleepCounters()[0] > installs, "counted as sleep installs");
+  const reference = runCall(PROGRAM.labels.main, { regions: false });
+  assert.deepEqual(runCall(PROGRAM.labels.main, { regions: true }).state, reference.state);
+  // A window with no time left installs nothing more.
+  queueAll(setup());
+  const after = core.regionCount();
+  core.module._DolphinWeb_AotRegionSleepWindowForTest(0);
+  assert.equal(core.regionCount(), after);
+});
+
+// A module too large for a slice (its estimate over the 2.5 ms target) waits
+// for a sleep window, the boot window included (setup() forgets the regions,
+// so these slices are the session's first), and at most the sleep wait from
+// when it became installable: with #86 every module is posted at once, and
+// one whose ready byte comes late must not skip the wait.
+const largeSkip = offThreadSkip || (typeof core?.module._DolphinWeb_AotSetInstallCostForTest !== "function" && "core without the 0107 review's test hooks");
+function withLargeModules(plan, fn) {
+  const sizes = regionModules(plan).map((bytes) => bytes.length);
+  // Each module estimated at 3 ms or more: too large for a slice.
+  const saved = core.module._DolphinWeb_AotSetInstallCostForTest(3 / Math.min(...sizes));
+  core.module._DolphinWeb_AotSetSleepWaitForTest(2000); // the production wait
+  try {
+    return fn(3 * Math.max(...sizes) / Math.min(...sizes) * sizes.length);
+  } finally {
+    core.module._DolphinWeb_AotSetInstallCostForTest(saved);
+    core.module._DolphinWeb_AotSetSleepWaitForTest(2000);
+  }
+}
+const spin = (ms) => { const end = performance.now() + ms; while (performance.now() < end); };
+
+test("a large ready module waits for a sleep window instead of costing a slice, boot window included", { skip: largeSkip }, () => {
+  withOffThreadCompile((requests) => {
+    const plan = setup();
+    assert.deepEqual(sleepCounters(), [0, 0, 0, 0], "reset with the session's regions");
+    core.setRegionsEnabled(true);
+    withLargeModules(plan, (windowMs) => {
+      const before = core.regionCount();
+      const entries = queueAll(plan);
+      core.serviceRegions();
+      for (const r of requests()) Atomics.store(core.module.HEAPU8, r.readyPtr + r.readySlot, 1);
+      for (let slice = 0; slice < 20; slice++) core.serviceRegions();
+      assert.equal(core.regionCount(), before, "ready, but no slice installs it");
+      core.module._DolphinWeb_AotRegionSleepWindowForTest(windowMs + 50);
+      assert.equal(core.regionCount(), before + entries, "installed in the sleep window");
+      const [installs, , lateBy, expired] = sleepCounters();
+      assert.ok(installs >= 1);
+      assert.equal(lateBy, 0, "the window's deadline was kept");
+      assert.equal(expired, 0);
+    });
+  });
+});
+
+test("any ready module waits for a sleep window: with #86 the boot window is play", { skip: largeSkip }, () => {
+  withOffThreadCompile((requests) => {
+    const plan = setup();
+    core.setRegionsEnabled(true);
+    core.module._DolphinWeb_AotSetSleepWaitForTest(2000);
+    const before = core.regionCount();
+    const entries = queueAll(plan);
+    core.serviceRegions();
+    for (const r of requests()) Atomics.store(core.module.HEAPU8, r.readyPtr + r.readySlot, 1);
+    for (let slice = 0; slice < 20; slice++) core.serviceRegions();
+    assert.equal(core.regionCount(), before, "small modules too: no slice installs them while a sleep may come");
+    core.module._DolphinWeb_AotRegionSleepWindowForTest(200);
+    assert.equal(core.regionCount(), before + entries);
+  });
+});
+
+// Review of #124: a module whose ready byte never came compiles cold,
+// synchronously, far over the cache-hit estimate a sleep window is sized
+// with: never in a sleep, at a slice boundary only.
+test("a cold install (no ready byte) never runs in a sleep window, only at a slice boundary", { skip: largeSkip }, () => {
+  withOffThreadCompile(() => {
+    const plan = setup();
+    core.setRegionsEnabled(true);
+    core.module._DolphinWeb_AotSetSleepWaitForTest(2000);
+    const before = core.regionCount();
+    const entries = queueAll(plan);
+    core.serviceRegions(); // posted; the worker never answers
+    core.module._DolphinWeb_AotSetReadyWaitForTest(0); // 5 s in production
+    try {
+      core.module._DolphinWeb_AotRegionSleepWindowForTest(1000);
+      assert.equal(core.regionCount(), before, "no cold compile in the sleep");
+      for (let slice = 0; slice < 300 && core.regionCount() < before + entries; slice++) core.serviceRegions();
+      assert.equal(core.regionCount(), before + entries, "cold, at slice boundaries");
+      assert.equal(lastInstallPath(), 2, "sampled as cold");
+    } finally {
+      core.module._DolphinWeb_AotSetReadyWaitForTest(5000);
+    }
+  });
+});
+
+test("a large module's sleep wait counts from when it became installable; past it a slice installs it", { skip: largeSkip }, () => {
+  withOffThreadCompile((requests) => {
+    const plan = setup();
+    core.setRegionsEnabled(true);
+    withLargeModules(plan, () => {
+      core.module._DolphinWeb_AotSetSleepWaitForTest(40); // 2 s in production
+      const before = core.regionCount();
+      const entries = queueAll(plan);
+      core.serviceRegions();
+      spin(60); // the worker answers after the sleep wait, counted from the post
+      for (const r of requests()) Atomics.store(core.module.HEAPU8, r.readyPtr + r.readySlot, 1);
+      core.serviceRegions();
+      assert.equal(core.regionCount(), before, "the wait starts now, not at the post");
+      spin(60); // no sleep came: the wait runs out
+      for (let slice = 0; slice < 50 && core.regionCount() < before + entries; slice++) core.serviceRegions();
+      assert.equal(core.regionCount(), before + entries, "a scene that never sleeps still gets its regions");
+      assert.ok(sleepCounters()[3] >= 1, "counted as installed after the wait ran out");
+      assert.equal(sleepCounters()[0], 0, "no sleep install");
+    });
+  });
+});
+
+// Continuation fragments (2026-10-23): a function of more blocks than one
+// fragment holds (the 64-block cap) left the rest to the dispatcher and the
+// block JIT at every pass (2.2 M exits per 4 s in a CPU-bound intro scene).
+// The production translator now forms continuation fragments from the
+// frontier, in the same module: one region call runs the whole function.
+const LONG = 0x80020000;
+const longFunction = (blocks) => assemble(LONG, [
+  ...Array.from({ length: blocks }, () => [asm.addi(3, 3, 1), asm.cmplwi(3, 0xffff), (pc, l) => asm.beq(pc, l.out)]).flat(),
+  "out", asm.blr()
+]);
+const contSkip = skip || (typeof core?.module._DolphinWeb_AotTranslate !== "function" && "core without the production translator");
+for (const maxContinuations of [0, 7]) {
+  test(`a function past the 64-block cap ${maxContinuations ? "runs in one region call with continuation fragments" : "exits to the dispatcher at the cap without them"}`, { skip: contSkip }, async () => {
+    const program = longFunction(100);
+    const bytes = new Uint8Array(4 * program.words.length);
+    new DataView(bytes.buffer).setUint32(0, 0);
+    program.words.forEach((w, i) => new DataView(bytes.buffer).setUint32(4 * i, w >>> 0));
+    core.load(LONG, bytes);
+    core.invalidate(LONG, bytes.length);
+    core.module._DolphinWeb_AotForgetRegionsForTest?.();
+    const ranges = [[LONG, LONG + bytes.length]];
+    const translator = coreRegionTranslator(core.module, { mask: PRODUCTION_DISABLE_MASK, helperNames: coreAssembleOptions(core.module)?.helperNames, maxContinuations, yieldNow: async () => {} });
+    const [r] = await translator.translate([{ entry: LONG, ranges, hash: null }]);
+    assert.ok(r.fragment, r.reason);
+    assert.equal(r.fragment.entries.length, 64, "the first fragment is capped");
+    const fragments = claimEntries([r.fragment, ...(r.continuations ?? [])]);
+    assert.equal(fragments.length, maxContinuations ? 2 : 1);
+    const owned = new Set(fragments.flatMap((f) => f.entries));
+    assert.equal(owned.size, maxContinuations ? 101 : 64, "every block start is an entry of one fragment");
+    const { bytes: mod, entries } = assembleRegion(fragments, { helpers: HELPER_SIGNATURES, pcOffset: core.pcOffset, memoryPages: core.memoryPages });
+    core.setRegionsEnabled(true);
+    core.queueRegion(mod, entries.map(([pc]) => pc), [{ ranges, hash: null }]);
+    core.serviceRegions();
+    const reference = runCall(LONG, { regions: false });
+    const got = runCall(LONG, { regions: true });
+    assert.deepEqual(got.state, reference.state);
+    if (maxContinuations) {
+      assert.equal(got.ran, 1, "one region call");
+      assert.equal(got.interpreted, 0);
+    } else {
+      assert.ok(got.interpreted > 0, "past the cap: back to the dispatcher");
+    }
+  });
+}
+
+// Review of #138: the continuation limits, and what is never followed.
+const loadWords = (at, words) => {
+  const bytes = new Uint8Array(4 * words.length);
+  words.forEach((w, i) => new DataView(bytes.buffer).setUint32(4 * i, w >>> 0));
+  core.load(at, bytes);
+  core.invalidate(at, bytes.length);
+  return [[at, at + bytes.length]];
+};
+const RFI = 0x4c000064;
+const continuationsOf = (program, options = {}) => translateWithContinuations(core.module, { entry: program.labels.start ?? LONG, ranges: loadWords(LONG, program.words), hash: null },
+  { mask: PRODUCTION_DISABLE_MASK, maxBlocks: 64, names: coreAssembleOptions(core.module)?.helperNames, ...options });
+
+test("continuations: each under the byte cap (halved until it fits), within the count and byte limits", { skip: contSkip }, async () => {
+  const program = longFunction(100);
+  const whole = await continuationsOf(program);
+  const size = whole.continuations[0].code.length;
+  const halved = await continuationsOf(program, { maxFragmentBytes: Math.floor(size / 3) });
+  assert.ok(halved.continuations.length > 1);
+  assert.ok(halved.continuations.every((c) => c.code.length <= Math.floor(size / 3)), "each under the cap");
+  assert.equal(new Set(claimEntries([halved.fragment, ...halved.continuations]).flatMap((f) => f.entries)).size, 101, "the same blocks");
+  const one = await continuationsOf(program, { maxFragmentBytes: Math.floor(size / 3), maxContinuations: 1 });
+  assert.equal(one.continuations.length, 1, "maxContinuations");
+  const bytes = await continuationsOf(program, { maxFragmentBytes: Math.floor(size / 3), maxBytes: 1 });
+  assert.equal(bytes.continuations.length, 1, "the byte budget stops after the fragment that spends it");
+  const tiny = await continuationsOf(program, { maxFragmentBytes: 16 });
+  assert.equal(tiny.continuations, undefined, "a single block over the cap is refused");
+  assert.ok(tiny.oversize >= 1);
+});
+
+test("continuations: a leader that does not translate stays an exit; a data word that looks like a branch is not followed", { skip: contSkip }, async () => {
+  // 64 blocks, then a bc whose fall-through starts with rfi (refused as a
+  // first op) and whose target goes on; after the blr, a literal that
+  // decodes as `b` to a label no held block reaches.
+  const program = assemble(LONG, [
+    ...Array.from({ length: 64 }, () => [asm.addi(3, 3, 1), asm.cmplwi(3, 0xffff), (pc, l) => asm.beq(pc, l.out)]).flat(),
+    asm.cmplwi(3, 0), (pc, l) => asm.beq(pc, l.after),
+    RFI,
+    "after", asm.addi(4, 4, 1), asm.cmplwi(4, 0xffff), (pc, l) => asm.beq(pc, l.out),
+    "out", asm.blr(),
+    (pc, l) => asm.b(pc, l.island),
+    "island", asm.addi(5, 5, 1), asm.blr()
+  ]);
+  const r = await continuationsOf(program);
+  const held = new Set(claimEntries([r.fragment, ...(r.continuations ?? [])]).flatMap((f) => f.entries));
+  const rfiAt = program.words.indexOf(RFI) * 4 + LONG;
+  assert.equal(held.has(rfiAt), false, "the rfi block is no entry");
+  assert.ok(held.has(program.labels.after), "past it, the frontier goes on");
+  assert.equal(held.has(program.labels.island), false, "the literal's target is never translated");
+});
+
+test("the region key changes with the formation", async () => {
+  const f = [{ entry: 0x80003100, sha256: "a".repeat(64) }];
+  const parts = { compilerVersion: 5, codegenMask: 0 };
+  assert.notEqual(await regionModuleKey(f, { ...parts, formation: 1 }), await regionModuleKey(f, { ...parts, formation: 2 }));
+  assert.equal(await regionModuleKey(f, parts), await regionModuleKey(f, { ...parts, formation: 2 }), "2 by default");
+});
+
