@@ -455,7 +455,7 @@ end body₀  end body₁ …  end body(N-1)  end($D) return_call dispatch  end($
 ```
 
 - **Head.** One `br_table` (TurboFan emits a jump table: one indirect branch, the table on the data side).
-- **Wide span.** Past a span of 4096 words, the head is a compact `br_if` chain.
+- **Sparse blocks.** When the blocks fill less than a quarter of their span (span > 4 × blocks), the head is a compact `br_if` chain: a sparse table would cost wasm bytes and a big jump table for few blocks.
 - **Body tail.** It keeps the new pc in the dispatch-pc local. It branches directly (`br_if $bj`) to a later body that its npc names (a static successor), and goes back to the head otherwise.
 - **Unchanged.** The per-block tail (pc, downcount, its exits) and the entries.
 
