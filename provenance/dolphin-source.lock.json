@@ -25,7 +25,7 @@
       "commit": "01e0577914a75a2569c846778c2f93aa8e6feddd"
     }
   },
-  "patchSeriesSha256": "5c21298a2734b5a847bb43d9cef505c5aa0b197fe1acac15559e3884ddd04c90",
+  "patchSeriesSha256": "bfeb72d4e82ec69ff9258c68c5eeaa7a2edbeed9970a92cf4db85d063ccc65e8",
   "patches": [
     {
       "order": 1,
@@ -760,11 +760,19 @@
       "cwd": ".",
       "hashMode": "lf-normalized",
       "path": "patches/dolphin-wasm/snapshot/0117-mem-access-stats.patch",
-      "size": 35729,
-      "sha256": "8650d36466b3aea540bad3f46bbd7f51a3635cc683cae7cc13dd769bbca57aaa"
+      "size": 35779,
+      "sha256": "90a96cfa1c69892a076cf4c61dd86c969b26d922bc0132ad9e945d4ec125eb49"
     },
     {
       "order": 93,
+      "cwd": ".",
+      "hashMode": "lf-normalized",
+      "path": "patches/dolphin-wasm/snapshot/0120-region-dcbz-direct.patch",
+      "size": 614,
+      "sha256": "20970aa1d59cb3b77e382fa46d99581adf63c421e1856d4b29033ebab97bef63"
+    },
+    {
+      "order": 94,
       "cwd": "Externals/SFML/SFML",
       "hashMode": "lf-normalized",
       "path": "patches/dolphin-wasm/submodules/0001-sfml-emscripten-config.patch",
@@ -772,7 +780,7 @@
       "sha256": "f82197a21fe982ad83f6ee7bbf5a03839b1cebd4d64da3eab11263842bf61d89"
     },
     {
-      "order": 94,
+      "order": 95,
       "cwd": "Externals/xxhash/xxHash",
       "hashMode": "lf-normalized",
       "path": "patches/dolphin-wasm/submodules/0002-xxhash-wasm-simd-scalar.patch",
