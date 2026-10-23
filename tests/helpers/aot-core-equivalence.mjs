@@ -21,6 +21,8 @@ import { readFileSync } from "node:fs";
 import { orderedRegions } from "../../src/aot-plan.js";
 import { REGION_HEAP_NAMES, assembleRegion, groupRegions } from "../../src/aot-region-module.js";
 import { PRODUCTION_DISABLE_MASK, makeRng, randomProgram, randomState } from "./jit-oracle.mjs";
+import { checkBranchHintSection } from "./branch-hints.mjs";
+
 
 // Signatures of the block module's import types (BuildWasmCachedInterpreterBlock).
 const T1 = { params: ["i32", "i32"], results: ["i32"] };
@@ -415,7 +417,7 @@ export function compareRegionProgram(core, words, state, { translateState = stat
 
 export function runOracleProgramsAsRegions(core, { seed, count, length, mask }) {
   const r = makeRng(seed);
-  const tally = { programs: 0, translated: 0, compared: 0, equal: 0, trap: 0, ends: {}, regionRuns: 0, hintsDropped: 0, mismatches: [] };
+  const tally = { programs: 0, translated: 0, compared: 0, equal: 0, trap: 0, ends: {}, regionRuns: 0, hintsDropped: 0, hintsChecked: 0, hintSectionErrors: [], mismatches: [] };
   for (let n = 0; n < count; n++) {
     const words = randomProgram(r, length);
     const state = randomState(r);
@@ -427,6 +429,10 @@ export function runOracleProgramsAsRegions(core, { seed, count, length, mask }) 
     tally.translated += 1;
     const { bytes, hintsDropped } = assembleRegion([fragment], { helpers: HELPER_SIGNATURES, pcOffset: core.pcOffset, memoryPages: core.memoryPages });
     tally.hintsDropped += hintsDropped ?? 0; // 0131: a core hint off an `if`
+    // The branch_hint section as V8 reads it: any broken rule drops it all.
+    const hintCheck = checkBranchHintSection(bytes);
+    tally.hintSectionErrors.push(...hintCheck.errors.slice(0, 2));
+    tally.hintsChecked += hintCheck.hints;
     const handle = core.compile(bytes);
     if (handle <= 0) throw new Error(`core rejected a region module (${handle})`);
     const regionAt = new Map(fragment.entries.map((pc) => [pc >>> 0, handle]));
