@@ -154,6 +154,16 @@ node harness/probes/race-perf.mjs --iso ../roms/<disc>.iso --state ../measures/h
   past 6 readbacks in flight, `errors`) and `uniqueFpsEstimate` = the speed
   window's presents/s × that share; `cold.uniqueShare` and
   `cold.uniqueFpsEstimate` per side. WebGPU presents only (`video=wgpu`).
+- **Scene protocols** (`lib/matrix.mjs` `SCENE_PROTOCOLS`, judge 2026-10-23):
+  a KPI scene can pin how it is measured, by savestate name. The heavy intro
+  (`heavy-intro-13s.sav`) is a short phase, about 9 guest seconds from that
+  state: `--emulated-warmup 1 --emulated-window 6 --hold ""`, and with
+  `--region-sample` the region stats are reset and read around that same
+  window (not in a stats window after it, which would read another phase).
+  race-perf refuses a window over 8 s on it (an ew20 read 100 % / headroom
+  1.16 where 6 s read 57-62 % / 0.56) and warns about a longer warmup, a held
+  key or a host-time window; `summary.sceneProtocol` records the protocol and
+  the warnings.
 - `--headroom [--frames-per-vi-ref R]` (patch 0113, research/deep-headroom-kpi.md):
   the program's main KPI, measured at `speed=1` where the game runs as the
   player sees it. The core counters (`DolphinWeb_HeadroomStats`: throttle

@@ -48,6 +48,34 @@ export const SCENE_NATIVE_FRAMES_PER_VI = Object.freeze({
 });
 export const VI_PER_SECOND = 60;
 
+// Measurement protocol pinned per KPI scene (judge, 2026-10-23). The heavy
+// intro is a short phase: from this state, ~9 guest seconds of the heavy
+// part, then the scene moves on. A 20 s window dilutes it (an ew20 read
+// 100 % / headroom 1.16 / regionCycleShare 0.92 where 6 s read 57-62 % /
+// 0.56), so its window, its warmup and its region stats are fixed: region
+// stats on the same span as the window (regionStatsInWindow), not after it.
+export const SCENE_PROTOCOLS = Object.freeze({
+  "heavy-intro-13s.sav": {
+    warmup: 1, emulatedWindow: 6, maxWindowSec: 8, regionStatsInWindow: true, hold: null,
+    why: "heavy phase of ~9 guest s after this state: warmup 1, emulated window 6 (8 at most), region stats over the same span, no key held"
+  }
+});
+
+// What a run's settings break of its scene's protocol: errors refuse the run,
+// warnings are printed and recorded. window: the guest seconds of an
+// emulated window, or the host seconds of a host-time one.
+export function sceneProtocolCheck(state, { warmup, window, emulated, hold, regionSample, regionStatsInWindow }) {
+  const p = SCENE_PROTOCOLS[state];
+  if (!p) return { protocol: null, errors: [], warnings: [] };
+  const errors = [], warnings = [];
+  if (window > p.maxWindowSec) errors.push(`${state}: a ${window} s window leaves the heavy phase (at most ${p.maxWindowSec}; protocol: --emulated-window ${p.emulatedWindow})`);
+  if (!emulated) warnings.push(`${state}: host-time window; the protocol is --emulated-window ${p.emulatedWindow} --emulated-warmup ${p.warmup}`);
+  if (warmup > p.warmup * 2) warnings.push(`${state}: warmup ${warmup} s eats into the heavy phase (protocol ${p.warmup})`);
+  if (p.hold === null && hold) warnings.push(`${state}: key ${hold} held; the protocol holds none (--hold "")`);
+  if (regionSample != null && p.regionStatsInWindow && !regionStatsInWindow) warnings.push(`${state}: region stats after the window would read another phase`);
+  return { protocol: p, errors, warnings };
+}
+
 // The useful-frames target of a scene (images per host second), or null
 // when the scene has no measured reference.
 export function gameFpsTarget(state, share = 0.95) {
