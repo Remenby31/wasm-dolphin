@@ -140,25 +140,20 @@ test("a GPR written first by a load whose slow path halts keeps its value (0134,
   assert.ok(r.equal, JSON.stringify(r.difference));
 });
 
-test("a load that faults before the integer write of an unloaded GPR leaves that GPR as it was (0134)", { skip: deadSkip }, () => {
-  // The halt's flush is emitted before the later write: r5 is neither loaded
-  // nor dirty there, and must keep its value. The faulting load is a lwz from
-  // 0x00004000, which no BAT maps: a DSI, which halts the region. (Neither an
-  // unaligned access, whose alignment exception stays pending to the block's
-  // end as in Dolphin's JITs, nor an lfs with MSR.FP clear, which regions
-  // take for granted since 0121, halts one.)
+test("a misaligned lmw before the integer write of an unloaded GPR leaves that GPR like the interpreter (0134)", { skip: deadSkip }, () => {
+  // r5 is neither loaded nor dirty before its write: whatever the helper does
+  // on the misaligned lmw (slow path), r5 must end as the interpreter leaves
+  // it. (Without MMU emulation an unmapped address neither faults nor halts:
+  // loads read 0, stores are dropped; so the misaligned lmw, the case cpufuzz
+  // caught, is the slow path tested, against the interpreter.)
+  const lmw = (d, a, off) => (46 << 26) | (d << 21) | (a << 16) | (off & 0xffff);
   const cases = [
-    ["lwz (DSI)", [lwz(6, 1, 0), addi(5, 0, 1), add(7, 5, 5), BLR], null],
-    ["lwz (DSI), r5 read before", [add(7, 5, 5), lwz(6, 1, 0), addi(5, 0, 1), BLR], null]
+    ["lmw (misaligned)", [lmw(29, 1, 2), addi(5, 0, 1), add(7, 5, 5), BLR]],
+    ["lmw (misaligned), r5 read before", [add(7, 5, 5), lmw(29, 1, 2), addi(5, 0, 1), BLR]]
   ];
-  for (const [what, program, run] of cases) {
-    const translateState = baseState(33);
-    translateState[9] = 0x00004000;
-    const state = translateState.slice();
-    run?.(state);
-    const r = compareRegionProgram(core, program, state, { translateState });
+  for (const [what, program] of cases) {
+    const r = compareRegionProgram(core, program, baseState(33));
     assert.ok(r.translated && !r.trap && !r.error, `${what}: ${r.error ?? "trap or untranslated"}`);
-    assert.equal(r.got.end, "exception", `${what}: faults`);
     assert.ok(r.equal, `${what}: ${JSON.stringify(r.difference)}`);
   }
 });
