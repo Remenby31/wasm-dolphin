@@ -326,12 +326,16 @@ code: the byte cap of 0115) used to leave its other blocks to the dispatcher
 and the block JIT at every pass: in a CPU-bound intro scene 77 % of the CPU
 thread's time, 2.2 M region exits per 4 s to PCs of the same function that no
 fragment held. `translateWithContinuations` (aot-orchestrator.js) now decodes
-the function's block leaders from guest memory (targets of b/bc without link
-and bc fall-throughs, inside its ranges) and translates each one no fragment
-holds as a continuation fragment of the same module: the jump there is a
-direct return_call, `claimEntries` keeps each PC's first owner. Each
-continuation stays under 96 000 bytes on its own (fewer blocks until it
-fits); at most 2 MB and 31 continuations per function. The formation (2) is
+the function's direct branches from guest memory and follows its frontier:
+the leaders (targets of b/bc without link, bc fall-throughs, inside its
+ranges) that a branch in a held block reaches and no fragment holds. Each
+starts a continuation fragment of the same module: the jump there is a
+direct return_call, `claimEntries` keeps each PC's first owner. A literal
+after a block end is in no block, so it is never followed. Each continuation
+stays under 96 000 bytes on its own (fewer blocks until it fits, a single
+block over it is refused); at most 31 continuations and 2 MB per function,
+1 MB per module (it must still fit a throttle sleep), and the translator
+yields to the worker inside a function's continuations. The formation (2) is
 hashed into the region key, so a cache formed before is translated again.
 Measured (Mac, aot=1, seeded, video=null, emulated window 6 guest s): the
 intro scene +31.3 % (regionCycleShare 0.55 → 0.90), the race at its cap with

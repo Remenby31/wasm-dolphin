@@ -272,11 +272,12 @@ export class AotOptimizer extends EventTarget {
     const fragments = [];
     const refused = [];
     let i = 0, waits = 0;
+    let continuationBytesUsed = 0; // continuation fragments of this module so far (the translator caps them)
     while (i < unit.members.length) {
       if (this.cancelled) return null;
       const slice = unit.members.slice(i, i + this.batchSize);
       const batch = slice.map((f) => ({
-        module: unit.module, entry: f.entry, flags: f.flags ?? 0, hash: f.hash, ranges: f.ranges, extraEntries: f.extraEntries ?? []
+        module: unit.module, entry: f.entry, flags: f.flags ?? 0, hash: f.hash, ranges: f.ranges, extraEntries: f.extraEntries ?? [], continuationBytesUsed
       }));
       const translated = await this.translator.translate(batch);
       if (this.cancelled) return null;
@@ -286,6 +287,7 @@ export class AotOptimizer extends EventTarget {
         if (r.reason === "not-ready") { wait = true; break; }
         if (n >= batch.length || (r.entry !== undefined && r.entry !== batch[n].entry)) throw new Error("translator results out of order");
         consumed++;
+        for (const c of r.continuations ?? []) continuationBytesUsed += c.code.length;
         if (r.fragment) fragments.push(r.fragment, ...(r.continuations ?? []));
         else refused.push({ entry: batch[n].entry, reason: r.reason ?? "untranslatable" });
       }
