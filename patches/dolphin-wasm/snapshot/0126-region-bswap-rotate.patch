@@ -28,14 +28,14 @@ diff --git a/Source/Core/Core/PowerPC/CachedInterpreter/CachedInterpreter.cpp b/
    EmitLocalGet(body, local_index);
    EmitI32Const(body, 0xff);
    body.push_back(0x71);
-@@ -16784,8 +16802,9 @@ namespace
- // ps_neg/mr/nabs/abs compiled inline (3 and 4 are taken by 0084 and 0083).
+@@ -16839,8 +16857,9 @@ namespace
  // 6 (0105): FPU ops outside the direct tier stay in the region, interpreted.
  // 10 (0111): compares store their CR field as one i64, bc fused (7-9 are
--// taken by 0108-0110).
--constexpr u32 AOT_COMPILER_VERSION = 10;
-+// taken by 0108-0110). 17 (0126): region byte swaps as two rotates (11-16
-+// are taken by 0112-0119 and 0121).
+ // taken by 0108-0110). 16 (0121): region code takes MSR LE/FE0/FE1 and
+-// HID2.LSQE for granted (15 is 0119's).
+-constexpr u32 AOT_COMPILER_VERSION = 16;
++// HID2.LSQE for granted (15 is 0119's). 17 (0126): region byte swaps as two
++// rotates (11-15 are taken by 0112-0119).
 +constexpr u32 AOT_COMPILER_VERSION = 17;
  constexpr u32 AOT_MAX_FRAGMENT_BYTES = 1u << 20;
  thread_local std::vector<u32> t_aot_out;
