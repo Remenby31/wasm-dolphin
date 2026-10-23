@@ -3,8 +3,8 @@
   "normalization": "git-blob-lf",
   "root": {
     "baseCommit": "e22551eae1c84a7e4d0b6a5c519ef4ed4ef69df1",
-    "resultTree": "9284bd8aad5465e6acced8bc5baa1713dccf9466",
-    "changedPathCount": 137,
+    "resultTree": "5bb6cd7449a392b66396a8b83d423ae2cab62f04",
+    "changedPathCount": 140,
     "records": [
       {
         "path": "CMakeLists.txt",
@@ -214,6 +214,15 @@
         "sha256": "bce87543d1832808f5652a2208aa5524ea17fc7a0dcd840aaecd065ba0f753af"
       },
       {
+        "path": "Source/Core/Core/HW/DSP.cpp",
+        "status": "M",
+        "mode": "100644",
+        "baseBlob": "ae46113e79d3648064166599853f2e2ad93ae502",
+        "resultBlob": "9064a69e3baa95441dfac0b227da4665ddb01101",
+        "size": 22597,
+        "sha256": "0c4e3c33b3cf03273dd79695a2c496b1ab991001a4feef71d04687b5546a4399"
+      },
+      {
         "path": "Source/Core/Core/HW/DSPHLE/DSPHLE.cpp",
         "status": "M",
         "mode": "100644",
@@ -329,6 +338,24 @@
         "resultBlob": "a10df998150ac9a2af94dc0776c3c36a6b14dbfc",
         "size": 2337,
         "sha256": "3b8c73b8e699817be2481bb09ff25ee18d35df5bfc0b65336fcddcef2f4a89bb"
+      },
+      {
+        "path": "Source/Core/Core/HW/Memmap.cpp",
+        "status": "M",
+        "mode": "100644",
+        "baseBlob": "e6d8fd56a55b7fdf20e24f12f66f44532a85efbf",
+        "resultBlob": "0b774293dc0be5eabb3de98a0d4006404ec06032",
+        "size": 28610,
+        "sha256": "69b491208f16086db001b71d7ef0e362abc8d7432732391f19517e19f75470b5"
+      },
+      {
+        "path": "Source/Core/Core/HW/Memmap.h",
+        "status": "M",
+        "mode": "100644",
+        "baseBlob": "baa910cc70d697285850cdb0c3a8cde34bd66070",
+        "resultBlob": "1817564872a9d7876d43b82ef01d27a2737b566a",
+        "size": 11182,
+        "sha256": "53c528f6fbce7aae221873b074d8afa6b5ad68efe57a94bceaac2e198fd68825"
       },
       {
         "path": "Source/Core/Core/HW/Triforce/ICCardReader.cpp",
@@ -1275,5 +1302,5 @@
       ]
     }
   ],
-  "contentSha256": "6dcd96e6b5f423055c8d11223e6f9f7b47b1eb389a8001756c475a2423839079"
+  "contentSha256": "5b434afd6a0c7c2a17dd9b8347affcdc209ef3213cbc7a0527371221bce74f20"
 }
