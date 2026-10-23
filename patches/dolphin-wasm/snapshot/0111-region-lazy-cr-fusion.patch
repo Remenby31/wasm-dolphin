@@ -1,0 +1,321 @@
+diff --git a/Source/Core/Core/PowerPC/CachedInterpreter/CachedInterpreter.cpp b/Source/Core/Core/PowerPC/CachedInterpreter/CachedInterpreter.cpp
+--- a/Source/Core/Core/PowerPC/CachedInterpreter/CachedInterpreter.cpp
++++ b/Source/Core/Core/PowerPC/CachedInterpreter/CachedInterpreter.cpp
+@@ -2856,6 +2856,35 @@ struct WasmFragmentRelocs
+ };
+ thread_local WasmFragmentRelocs* s_wasm_fragment_relocs = nullptr;
+ 
++// Patch 0111: in region code a compare (cmp*, Rc=1) stores its CR field as
++// one i64, and a bc on that field later in the block decides on the
++// compare's own operands while they are intact (no op in between writes
++// them or the field). Valid only while a fragment block is emitted.
++struct FusedCr
++{
++  bool valid = false;
++  bool is_signed = true;
++  bool rb_is_reg = false;
++  u32 field = 0;
++  u32 ra = 0;
++  u32 rb = 0;   // with rb_is_reg
++  u32 imm = 0;  // otherwise: the immediate, as an i32
++  BitSet32 gprs;
++};
++thread_local FusedCr t_fused_cr;
++// The op being emitted in a fragment block (the destination of an Rc=1 op).
++thread_local const PPCAnalyst::CodeOp* t_region_op = nullptr;
++
++// 0111: the helpers that never write a GPR (by name, so an import added to
++// WASM_IMPORT_NAMES is treated as writing GPRs until listed here).
++bool ImportKeepsGprs(std::string_view name)
++{
++  constexpr std::array<std::string_view, 14> keeps = {
++      "read_u32", "write_u32", "read_u8", "write_u8", "read_u16", "write_u16", "lfs",
++      "stfs",     "lfd",       "fmr",     "fp",      "fctiwz",    "interpret", "fma"};
++  return std::find(keeps.begin(), keeps.end(), name) != keeps.end();
++}
++
+ void EmitPaddedU32Leb(std::vector<u8>& out, u32 value)
+ {
+   for (int i = 0; i < 4; ++i, value >>= 7)
+@@ -2872,6 +2901,12 @@ void EmitCallImport(std::vector<u8>& body, u32 index)
+     return;
+   }
+   // The site holds a padded zero until the region assembler patches it.
++  // 0111: a recorded compare survives only the helpers known not to write
++  // GPRs (the memory and FPU helpers; interpret's writes are its op's
++  // regsOut, checked before each op). Any other import, `system`, the HLE
++  // calls and any added later, may write any GPR.
++  if (!ImportKeepsGprs(WASM_IMPORT_NAMES[index]))
++    t_fused_cr.valid = false;
+   s_wasm_fragment_relocs->relocs.push_back({body.size(), WASM_IMPORT_NAMES[index]});
+   EmitPaddedU32Leb(body, 0);
+ }
+@@ -3292,9 +3327,103 @@ void EmitStoreCrField(std::vector<u8>& body, const WasmStateLayout& layout, u32
+   EmitStateStoreU32Suffix(body, field_offset + sizeof(u32));
+ }
+ 
++void EmitI64Const(std::vector<u8>& body, u64 value);
++void EmitLazyCrFieldTail(std::vector<u8>& body, const WasmStateLayout& layout, u32 field);
++
++// Region code (0111): the CR field as one i64, A - B with both extended as
++// the compare is signed or not, SO (bit 59) cleared: regions only run with
++// XER.SO clear (TryRunRegion, RegionChainNext) and never set it (mtxer and
++// mcrxr stay outside them). The format's other bits then read as the
++// interpreter's: LT bit 62, GT (s64) > 0, EQ the low word zero.
++void EmitLazyCrStore(std::vector<u8>& body, const WasmStateLayout& layout, const FusedCr& c)
++{
++  EmitLocalGet(body, 0);
++  EmitStateLoadU32(body, GprOffset(layout, c.ra));
++  body.push_back(c.is_signed ? 0xac : 0xad);  // i64.extend_i32_s / _u
++  if (c.rb_is_reg)
++  {
++    EmitStateLoadU32(body, GprOffset(layout, c.rb));
++    body.push_back(c.is_signed ? 0xac : 0xad);
++  }
++  else
++  {
++    EmitI64Const(body, c.is_signed ? static_cast<u64>(static_cast<s64>(static_cast<s32>(c.imm))) :
++                                     static_cast<u64>(c.imm));
++  }
++  body.push_back(0x7d);  // i64.sub
++  EmitLazyCrFieldTail(body, layout, c.field);
++}
++
++// The CR bit `bit` (LT, GT or EQ of the recorded field) from the operands.
++void EmitFusedCrBit(std::vector<u8>& body, const WasmStateLayout& layout, const FusedCr& c,
++                    u32 bit)
++{
++  EmitStateLoadU32(body, GprOffset(layout, c.ra));
++  if (c.rb_is_reg)
++    EmitStateLoadU32(body, GprOffset(layout, c.rb));
++  else
++    EmitI32Const(body, c.imm);
++  switch (bit & 3)
++  {
++  case 0:
++    body.push_back(c.is_signed ? 0x48 : 0x49);  // i32.lt_s / _u
++    break;
++  case 1:
++    body.push_back(c.is_signed ? 0x4a : 0x4b);  // i32.gt_s / _u
++    break;
++  default:
++    body.push_back(0x46);  // i32.eq
++    break;
++  }
++}
++
++// The i64 on the stack (a difference or a sign-extended result) as a CR
++// field: bit 59 (SO) cleared and, when it is 0, bit 63 set, as the
++// interpreter's Helper_UpdateCR0 and PPCToInternal do: an EQ field is never
++// 0, so code that reads GT as "bit 63 clear" (EmitCrFieldToPpcBits) stays
++// right. Uses i64 local 4. Then the store.
++void EmitLazyCrFieldTail(std::vector<u8>& body, const WasmStateLayout& layout, u32 field)
++{
++  EmitI64Const(body, ~(u64{1} << 59));
++  body.push_back(0x83);  // i64.and
++  body.push_back(0x22);  // local.tee 4
++  EmitU32Leb(body, 4);
++  EmitLocalGet(body, 4);
++  body.push_back(0x50);  // i64.eqz
++  body.push_back(0xad);  // i64.extend_i32_u
++  EmitI64Const(body, 63);
++  body.push_back(0x86);  // i64.shl
++  body.push_back(0x84);  // i64.or
++  body.push_back(0x37);  // i64.store
++  body.push_back(0x03);
++  EmitU32Leb(body, CrFieldOffset(layout, field));
++}
++
++// In region code, stores the compare lazily and records it; false elsewhere.
++bool EmitRegionCompare(std::vector<u8>& body, const WasmStateLayout& layout, FusedCr c)
++{
++  if (!s_wasm_fragment_relocs)
++    return false;
++  c.gprs = BitSet32{};
++  c.gprs[c.ra] = true;
++  if (c.rb_is_reg)
++    c.gprs[c.rb] = true;
++  EmitLazyCrStore(body, layout, c);
++  c.valid = true;
++  t_fused_cr = c;
++  return true;
++}
++
+ void EmitCompareImmediate(std::vector<u8>& body, const WasmStateLayout& layout,
+                           UGeckoInstruction inst, bool is_signed)
+ {
++  if (EmitRegionCompare(body, layout,
++                        {.is_signed = is_signed,
++                         .field = inst.CRFD,
++                         .ra = inst.RA,
++                         .imm = is_signed ? static_cast<u32>(static_cast<s32>(inst.SIMM_16)) :
++                                            inst.UIMM}))
++    return;
+   EmitStateLoadU32(body, GprOffset(layout, inst.RA));
+   EmitI32Const(body, is_signed ? static_cast<u32>(static_cast<s32>(inst.SIMM_16)) : inst.UIMM);
+   body.push_back(is_signed ? 0x48 : 0x49);
+@@ -3316,6 +3445,24 @@ void EmitCompareImmediate(std::vector<u8>& body, const WasmStateLayout& layout,
+ 
+ void EmitUpdateCr0FromLocal(std::vector<u8>& body, const WasmStateLayout& layout, u32 local_index)
+ {
++  if (s_wasm_fragment_relocs)
++  {
++    // CR0 from the result (sign extended, SO clear, as EmitLazyCrStore). A
++    // later bc reads the result back from its destination GPR, when the op
++    // writes exactly one.
++    EmitLocalGet(body, 0);
++    EmitLocalGet(body, local_index);
++    body.push_back(0xac);  // i64.extend_i32_s
++    EmitLazyCrFieldTail(body, layout, 0);
++    t_fused_cr.valid = false;
++    if (t_region_op && t_region_op->regsOut.Count() == 1)
++    {
++      const u32 rd = static_cast<u32>(*t_region_op->regsOut.begin());
++      t_fused_cr = {.valid = true, .is_signed = true, .field = 0, .ra = rd, .imm = 0};
++      t_fused_cr.gprs[rd] = true;
++    }
++    return;
++  }
+   EmitLocalGet(body, local_index);
+   EmitI32Const(body, 0);
+   body.push_back(0x48);
+@@ -3366,6 +3513,13 @@ void EmitAddic(std::vector<u8>& body, const WasmStateLayout& layout, UGeckoInstr
+ void EmitCompareRegister(std::vector<u8>& body, const WasmStateLayout& layout,
+                          UGeckoInstruction inst, bool is_signed)
+ {
++  if (EmitRegionCompare(body, layout,
++                        {.is_signed = is_signed,
++                         .rb_is_reg = true,
++                         .field = inst.CRFD,
++                         .ra = inst.RA,
++                         .rb = inst.RB}))
++    return;
+   EmitStateLoadU32(body, GprOffset(layout, inst.RA));
+   EmitStateLoadU32(body, GprOffset(layout, inst.RB));
+   body.push_back(is_signed ? 0x48 : 0x49);
+@@ -3764,7 +3918,11 @@ void EmitConditionalBranch(std::vector<u8>& body, const WasmStateLayout& layout,
+   }
+   else
+   {
+-    EmitCrBit(body, layout, inst.BI);
++    if (s_wasm_fragment_relocs && t_fused_cr.valid && t_fused_cr.field == inst.BI >> 2 &&
++        (inst.BI & 3) != 3)
++      EmitFusedCrBit(body, layout, t_fused_cr, inst.BI);
++    else
++      EmitCrBit(body, layout, inst.BI);
+     EmitI32Const(body, (inst.BO >> 3) & 1);
+     body.push_back(0x46);
+   }
+@@ -8915,13 +9073,21 @@ std::vector<u8> BuildWasmCachedInterpreterBlock(std::span<const PPCAnalyst::Code
+   }
+ 
+   u32 downcount = 0;
++  t_fused_cr.valid = false;
+   for (const PPCAnalyst::CodeOp& op : ops)
+   {
+     downcount += op.opinfo->num_cycles;
+     if (op.skip)
+       continue;
+ 
+-    if (!EmitWasmSupportedIntegerInstruction(body, layout, op, downcount))
++    // 0111: an op that writes the recorded compare's operands or field ends it.
++    if (t_fused_cr.valid && ((op.regsOut & t_fused_cr.gprs).Count() != 0 ||
++                             op.crOut[t_fused_cr.field]))
++      t_fused_cr.valid = false;
++    t_region_op = &op;
++    const bool emitted = EmitWasmSupportedIntegerInstruction(body, layout, op, downcount);
++    t_region_op = nullptr;
++    if (!emitted)
+     {
+       // Region code (0105) interprets only the FPU ops RegionInterpretsInline
+       // admits; any other op the emitter refuses fails the block, as without
+@@ -9960,9 +10126,10 @@ bool TryRunRegion(PowerPC::PowerPCState& ppc_state)
+ {
+   if (!RegionFilterHas(ppc_state.pc))
+     return false;
+-  // Regions keep no performance monitor counts (the block path does).
++  // Regions keep no performance monitor counts (the block path does), and
++  // run with XER.SO clear (0111: their compares store CR fields without it).
+   if (!ppc_state.msr.IR || !ppc_state.msr.DR || !ppc_state.msr.FP ||
+-      (ppc_state.feature_flags & FEATURE_FLAG_PERFMON) != 0)
++      (ppc_state.feature_flags & FEATURE_FLAG_PERFMON) != 0 || (ppc_state.xer_so_ov & 2) != 0)
+   {
+     if (s_region_stats_on)
+       s_region_stats.mode_refusals += 1;
+@@ -10035,7 +10202,7 @@ inline bool RegionWouldRun(const PowerPC::PowerPCState& ppc_state)
+ {
+   if (!s_regions_enabled.load(std::memory_order_relaxed) || !RegionFilterHas(ppc_state.pc) ||
+       !ppc_state.msr.IR || !ppc_state.msr.DR || !ppc_state.msr.FP ||
+-      (ppc_state.feature_flags & FEATURE_FLAG_PERFMON) != 0 ||
++      (ppc_state.feature_flags & FEATURE_FLAG_PERFMON) != 0 || (ppc_state.xer_so_ov & 2) != 0 ||
+       FindRegionIndex(ppc_state.pc) == NO_REGION)
+     return false;
+   if (s_region_stats_on)
+@@ -10106,7 +10273,7 @@ int RegionChainNext(int state_ptr)
+   const InstalledRegion& region = s_regions[index];
+   if (!region.verified || !s_regions_enabled.load(std::memory_order_relaxed) ||
+       !ppc_state.msr.IR || !ppc_state.msr.DR || !ppc_state.msr.FP ||
+-      (ppc_state.feature_flags & FEATURE_FLAG_PERFMON) != 0)
++      (ppc_state.feature_flags & FEATURE_FLAG_PERFMON) != 0 || (ppc_state.xer_so_ov & 2) != 0)
+   {
+     stats.refused += 1;
+     return 0;
+@@ -15656,6 +15823,20 @@ bool RegionInterpretsInline(const PPCAnalyst::CodeOp& op)
+   return !(inst.OPCD == 4 && inst.SUBOP10 == 1014);  // dcbz_l: a cache op
+ }
+ 
++// 0111: the ops that may set XER.SO (mtxer, mcrxr, the OE forms) run
++// outside regions, which rely on SO staying clear inside them.
++bool RegionMaySetSo(const PPCAnalyst::CodeOp& op)
++{
++  const UGeckoInstruction inst = op.inst;
++  if (inst.OPCD != 31)
++    return false;
++  if (inst.SUBOP10 == 512)  // mcrxr
++    return true;
++  if (inst.SUBOP10 == 467 && ((inst.SPRU << 5) | (inst.SPRL & 0x1F)) == SPR_XER)  // mtspr
++    return true;
++  return (op.opinfo->flags & FL_SET_OE) != 0 && inst.OE;
++}
++
+ bool BuildFragmentBlock(Core::System& system, u32 pc, u32 limit, FragmentBlock* out)
+ {
+   auto& ppc = system.GetPPCState();
+@@ -15688,7 +15869,8 @@ bool BuildFragmentBlock(Core::System& system, u32 pc, u32 limit, FragmentBlock*
+   {
+     const PPCAnalyst::CodeOp& op = buffer[prefix];
+     if ((!IsPpcWasmDirectInstructionCandidate(op) && !RegionInterpretsInline(op)) ||
+-        ((op.opinfo->flags & FL_USE_FPU) != 0 && !ppc.msr.FP && !t_aot_translating))
++        ((op.opinfo->flags & FL_USE_FPU) != 0 && !ppc.msr.FP && !t_aot_translating) ||
++        RegionMaySetSo(op))
+       break;
+     if (op.canEndBlock)
+     {
+@@ -15852,6 +16034,16 @@ bool BuildRegionFragment(Core::System& system, u32 entry_pc, std::span<const u32
+   code.assign(WASM_BLOCK_LOCALS.begin(), WASM_BLOCK_LOCALS.end());
+   code[0] = 0x07;
+   code.insert(code.end(), {0x01, 0x7f});  // the dispatch pc
++  // 0111: compares store CR fields without SO (EmitLazyCrStore): with XER.SO
++  // set the fragment does not run (1, as a pc that is not an entry). The
++  // dispatcher and region chaining refuse first; this covers a direct call.
++  EmitLocalGet(code, 0);
++  code.insert(code.end(), {0x2d, 0x00});  // i32.load8_u
++  EmitU32Leb(code, static_cast<u32>(reinterpret_cast<std::uintptr_t>(&ppc.xer_so_ov) - base));
++  EmitI32Const(code, 2);
++  code.insert(code.end(), {0x71, 0x04, 0x40});  // i32.and; if
++  EmitI32Const(code, 1);
++  code.insert(code.end(), {0x0f, 0x0b});  // return; end
+   code.insert(code.end(), {0x03, 0x40});  // loop
+   EmitLocalGet(code, 0);
+   load(pc_offset);
+@@ -15969,7 +16161,9 @@ namespace
+ // none and would never install. 5 (0087): ps_sum0/1, ps_res, fres and
+ // ps_neg/mr/nabs/abs compiled inline (3 and 4 are taken by 0084 and 0083).
+ // 6 (0105): FPU ops outside the direct tier stay in the region, interpreted.
+-constexpr u32 AOT_COMPILER_VERSION = 6;
++// 10 (0111): compares store their CR field as one i64, bc fused (7-9 are
++// taken by 0108-0110).
++constexpr u32 AOT_COMPILER_VERSION = 10;
+ constexpr u32 AOT_MAX_FRAGMENT_BYTES = 1u << 20;
+ thread_local std::vector<u32> t_aot_out;
+ u8* s_aot_ram = nullptr;

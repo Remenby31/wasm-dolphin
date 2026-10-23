@@ -608,3 +608,11 @@ test("ab: load > max-load at the start of a run → release, calm wait, retake, 
   await assert.doesNotReject(calmUnderLock({ lock: null, maxLoad: 4, waitSec: 1, acquire, wait, load: () => 9 }));
   assert.deepEqual(events, ["wait", "acquire6"]);
 });
+
+test("race-perf: pairs on the warm windows and on cycles per guest cycle", () => {
+  const run = (n, b, c) => ({ run: n, baseline: { cold: { speed: 50, cyclesPerGuestCycle: b }, warm: { speed: b * 5 } }, candidate: { cold: { speed: 50, cyclesPerGuestCycle: c }, warm: { speed: c * 5 } } });
+  const runs = [run(1, 10, 11), run(2, 10, 11), run(3, 10, 11), run(4, 10, 11)];
+  assert.equal(pairedSpeedChange(runs, { metric: "cyclesPerGuestCycle" }).median, 10);
+  assert.equal(pairedSpeedChange(runs, { phase: "warm" }).median, 10);
+  assert.equal(pairedSpeedChange(runs).median, 0, "cold speed by default");
+});

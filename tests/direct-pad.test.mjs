@@ -4,7 +4,7 @@ import { mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join, resolve } from "node:path";
 import test from "node:test";
-import { DIRECT_PAD_LAYOUT, DIRECT_PAD_PORTS, DIRECT_PAD_SLOTS, DirectPad, SLOT } from "../src/direct-pad.js";
+import { DIRECT_PAD_LAYOUT, DIRECT_PAD_MAX_TAPS, DIRECT_PAD_PORTS, DIRECT_PAD_SLOTS, DirectPad, SLOT } from "../src/direct-pad.js";
 
 const root = resolve(import.meta.dirname, "..");
 const compiler = process.env.CXX || "c++";
@@ -138,4 +138,79 @@ test("SI poll side: a second tap during the hold is reported after a release, no
   } finally {
     rmSync(dir, { recursive: true, force: true });
   }
+});
+
+// The gold-standard case: a burst lost across a gap that covered three
+// presses of A. The next packet's counter says 3: the poll must report three
+// separate presses, not one.
+const countsProgram = String.raw`
+#include <cstdio>
+#include "dolphin_web_direct_pad.h"
+using namespace DolphinWeb::DirectPad;
+int main() {
+  static Block block{};
+  auto* p = block.slots[1];
+  p[SEQ] = 2; p[CONNECTED] = 1; p[MASK] = 0; p[ENABLED] = 1;
+  p[TAPS] = 3u;                 // A (button 0): 3 presses
+  p[TAPS_HIGH] = 2u << 4;       // D_DOWN (button 9): 2 presses
+  TapLatch latch;
+  bool direct = false;
+  std::uint32_t reported = 0;
+  auto none = [] { return State{}; };
+  for (int poll = 0; poll < 24; ++poll)
+    PollPort(p, latch, poll / 2, poll, none, &reported, &direct);
+  std::printf("%u %u %u %u", p[PRESSES + 0].load(), p[PRESSES + 9].load(), p[TAPS].load(), p[TAPS_HIGH].load());
+}
+`;
+
+test("SI poll side: three presses revealed at once are three presses for the game", { skip: !hasCompiler && "no C++ compiler" }, () => {
+  const dir = mkdtempSync(join(tmpdir(), "direct-pad-counts-"));
+  try {
+    writeFileSync(join(dir, "main.cpp"), countsProgram);
+    const exe = join(dir, "main");
+    const built = spawnSync(compiler, ["-std=c++20", "-I", join(root, "core/upstream"), join(dir, "main.cpp"), "-o", exe], { encoding: "utf8" });
+    assert.equal(built.status, 0, built.stderr);
+    const run = spawnSync(exe, { encoding: "utf8" });
+    // 3 edges of A, 2 of D_DOWN, both counter words consumed.
+    assert.equal(run.stdout.trim(), "3 2 0 0");
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+// The same burst while A is still held: the next packet says "A held, 3 more
+// presses". The release windows between them must hide the held state, or
+// the game sees one long press.
+const heldProgram = countsProgram.replace("p[MASK] = 0;", "p[MASK] = 1u;").replace(
+  'std::printf("%u %u %u %u", p[PRESSES + 0].load(), p[PRESSES + 9].load(), p[TAPS].load(), p[TAPS_HIGH].load());',
+  'std::printf("%u %u", p[PRESSES + 0].load(), reported & 1u);'
+);
+
+test("SI poll side: three presses revealed while the button is held are three presses, then held", { skip: !hasCompiler && "no C++ compiler" }, () => {
+  const dir = mkdtempSync(join(tmpdir(), "direct-pad-held-"));
+  try {
+    writeFileSync(join(dir, "main.cpp"), heldProgram);
+    const exe = join(dir, "main");
+    const built = spawnSync(compiler, ["-std=c++20", "-I", join(root, "core/upstream"), join(dir, "main.cpp"), "-o", exe], { encoding: "utf8" });
+    assert.equal(built.status, 0, built.stderr);
+    const run = spawnSync(exe, { encoding: "utf8" });
+    // 3 edges of A, and A still reported pressed after the last one.
+    assert.equal(run.stdout.trim(), "3 1");
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test("page side: per-button tap counts, 4 bits each, added and saturated", () => {
+  const memory = new SharedArrayBuffer(4096);
+  const pad = new DirectPad(memory, 512, DIRECT_PAD_LAYOUT);
+  const v = new Int32Array(memory, 512);
+  const b = 1 * DIRECT_PAD_SLOTS;
+  pad.tap(1, 0b1);                                   // mask: A once
+  pad.tap(1, [2, 0, 0, 0, 0, 0, 0, 0, 0, 3, 0, 0]);  // A twice more, D_DOWN 3
+  assert.equal(v[b + SLOT.TAPS] & 0xf, 3);
+  assert.equal((v[b + SLOT.TAPS_HIGH] >>> 4) & 0xf, 3);
+  pad.tap(1, [20]);                                  // capped: what one poll can use
+  assert.equal(v[b + SLOT.TAPS] & 0xf, DIRECT_PAD_MAX_TAPS);
+  assert.equal((v[b + SLOT.TAPS] >>> 4) & 0xf, 0, "no carry into B");
 });

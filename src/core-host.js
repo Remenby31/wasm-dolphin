@@ -715,12 +715,13 @@ export class EmulatorHost {
     return Boolean(this.adapter.enableRemotePad?.(port, Boolean(enabled)));
   }
 
-  // Buttons pressed and maybe already released (press counters of a streamed
-  // guest): the SI poll holds them until a poll of a later frame read them.
-  // False when the core cannot: the caller must hold them itself.
-  tapPad(port, buttons) {
+  // Presses maybe already released (press counters of a streamed guest): a
+  // button mask, or 12 per-button counts when several presses of a button
+  // arrive at once. The SI poll reports each of them. False when the core
+  // cannot: the caller must hold them itself.
+  tapPad(port, presses) {
     if (!isPadPort(port)) return false;
-    return Boolean(this.adapter.tapPad?.(port, buttons));
+    return Boolean(this.adapter.tapPad?.(port, presses));
   }
 
   // { pollCount, appliedSeq, appliedRxTime, pollTime, rumble, rumbleGeneration,

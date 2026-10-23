@@ -25,6 +25,7 @@ export function classify(json, file = "") {
   if (json.probe === "race-perf" || (json.state && json.candidate && "change" in json && json.query)) return "race-perf";
   if (json.probe === "ttff") return "ttff";
   if (json.probe === "first-launch") return "first-launch";
+  if (json.probe === "first-launch-ramp") return "first-launch-ramp";
   if (json.decision && json.correctness) return "gate";
   if (json.interpQuery && json.jitQuery && Array.isArray(json.results)) return "fuzz";
   if (json.spec?.name && /freeze/.test(json.spec.name) && Array.isArray(json.results)) return "freeze-loop";
@@ -74,9 +75,11 @@ const queryOf = (j, side, kind) => new URLSearchParams(String((kind === "ttff" |
 // The product config renders in software; any other video backend is not it.
 export const sideIsProduct = (j, side, kind = "race-perf") => queryOf(j, side, kind).get("video") === "software";
 export function fitsConfig(r, side, config) {
-  if (!config || !["race-perf", "ttff"].includes(r.kind)) return true;
+  if (!config || !["race-perf", "ttff", "first-launch-ramp"].includes(r.kind)) return true;
   const want = CONFIGS[config];
-  const aot = r.kind === "ttff" ? ttffHasAot(r.json) : sideHasAot(r.json, side);
+  const aot = r.kind === "ttff" ? ttffHasAot(r.json)
+    : r.kind === "first-launch-ramp" ? queryOf(r.json, side, r.kind).get("aot") === "1"
+    : sideHasAot(r.json, side);
   return aot === want.aot && sideIsProduct(r.json, side, r.kind) === want.product;
 }
 
@@ -176,6 +179,8 @@ const p4Why = (j, side) => {
 const raceFailures = (j, side) => (j.failed ?? []).filter((f) => f.side === side && f.why !== "overloaded" && f.why !== "infra").map((f) => `run ${f.run} : ${f.why}`);
 const launchFailures = (phase) => (phase?.failed ?? []).map((f) => `run ${f.run} : ${f.error}`);
 // Why a TTFF phase has no value: runs left out (overloaded machine, Chrome lost by the harness).
+const rampFailures = (j) => (j.failed ?? []).map((f) => `run ${f.run} : ${f.why}`);
+const rampDetail = (j) => `images de jeu utiles depuis le début de la scène : 95 % à ${j.timeToFullMs?.median ?? "n/a"} ms, plateau ${j.plateauSpeed?.median ?? "?"} %, 90 % du plateau à ${j.timeToTail90Ms?.median ?? "n/a"} ms ; vitesse VI plateau ${j.vi?.plateauSpeed?.median ?? "?"} % ; régions ${j.regionsAt90?.median ?? "?"} à 90 % / ${j.regionsAtEnd?.median ?? "?"} en fin (${j.windowSec} s après la scène)`;
 const ttffWhy = (j, phase) => [
   j.overloadedRuns?.length ? `runs ${j.overloadedRuns.join(", ")} lancées sur machine surchargée, exclues` : null,
   j[phase]?.infra?.length ? `runs ${j[phase].infra.map((x) => x.run).join(", ")} perdues par le harnais (pipe CDP), exclues` : null
@@ -241,6 +246,17 @@ export const KPI_ROWS = [
   { id: "aotcompilerMemory", group: "Garde-fous", label: "Surcoût mémoire aotcompiler", target: 150, unit: "Mo", better: "lower", from: "manual" },
   { id: "optimisationMs", group: "Expérience joueur", label: "Durée d'optimisation au 1er lancement", target: 60000, unit: "ms", better: "lower", from: "first-launch", read: (j) => j.p7?.durationMs ?? null, why: (j) => j.p7Why ?? null, failures: (j) => (j.p7?.failedFirst ?? []).map((f) => `run ${f.run} : ${f.why}`) },
   { id: "secondLaunchRecompiled", group: "Expérience joueur", label: "Régions recompilées au 2e lancement", target: 0, unit: "", better: "zero", from: "first-launch", read: (j) => j.p7?.secondLaunchCompiled ?? null, why: (j) => j.p7Why ?? null, failures: (j) => [...(j.p7?.failedFirst ?? []), ...(j.p7?.failedSecond ?? [])].map((f) => `run ${f.run} : ${f.why}`) },
+  // First-launch ramp (first-launch-ramp.mjs): a fresh profile, aot=1, time
+  // from the scene's start to 90 % of its native useful game frames per
+  // second, held 5 s. Only results on that metric: the first version read
+  // the VI speed, which the decoupled product holds at 100 % whatever the
+  // game frames do (2026-10-23). Target 15 s; the heavy scene is CPU-bound under 90 % (2026-10-23: ~60 %),
+  // so it stays out of the global status and its detail gives the plateau.
+  { id: "firstLaunchRampRace", group: "Expérience joueur", label: "Rampe du 1er lancement, config produit (profil vierge, aot=1) : temps jusqu'à 90 % des images de jeu utiles, course", target: 15000, unit: "ms", better: "lower", from: "first-launch-ramp", config: "productAot", match: (j) => j.scene === "race" && j.metric === "game", read: (j) => j.timeTo90Ms?.median ?? null, detail: rampDetail, failures: rampFailures },
+  { id: "firstLaunchRampHeavy", group: "Expérience joueur", label: "Rampe du 1er lancement, config produit (profil vierge, aot=1) : temps jusqu'à 90 % des images de jeu utiles, scène lourde (hors statut global)", target: 15000, unit: "ms", better: "lower", from: "first-launch-ramp", config: "productAot", counted: false, match: (j) => j.scene === "heavy" && j.metric === "game", read: (j) => j.timeTo90Ms?.median ?? null, detail: rampDetail, failures: rampFailures },
+  // The target product once the wgpu freeze fix (0116) is in (judge, 2026-10-23).
+  { id: "firstLaunchRampRaceWgpu", group: "Expérience joueur", label: "Rampe du 1er lancement, rendu matériel wgpu + aot=1 (profil vierge) : temps jusqu'à 90 % des images de jeu utiles, course (hors statut global)", target: 15000, unit: "ms", better: "lower", from: "first-launch-ramp", config: "aot", counted: false, match: (j) => j.scene === "race" && j.metric === "game", read: (j) => j.timeTo90Ms?.median ?? null, detail: rampDetail, failures: rampFailures },
+  { id: "firstLaunchRampHeavyWgpu", group: "Expérience joueur", label: "Rampe du 1er lancement, rendu matériel wgpu + aot=1 (profil vierge) : temps jusqu'à 90 % des images de jeu utiles, scène lourde (hors statut global)", target: 15000, unit: "ms", better: "lower", from: "first-launch-ramp", config: "aot", counted: false, match: (j) => j.scene === "heavy" && j.metric === "game", read: (j) => j.timeTo90Ms?.median ?? null, detail: rampDetail, failures: rampFailures },
   { id: "ttffColdProduct", group: "Expérience joueur", label: "Time-to-first-frame, à froid, config produit", target: 10000, unit: "ms", better: "lower", from: "ttff", config: "product", read: (j) => med(j.cold?.firstContentMs), why: (j) => ttffWhy(j, "cold"), failures: (j) => launchFailures(j.cold) },
   { id: "ttffWarmProduct", group: "Expérience joueur", label: "Time-to-first-frame, à chaud, config produit", target: 10000, unit: "ms", better: "lower", from: "ttff", config: "product", read: (j) => med(j.warm?.firstContentMs), why: (j) => ttffWhy(j, "warm"), failures: (j) => launchFailures(j.warm) },
   { id: "ttffCold", group: "Expérience joueur", label: "Time-to-first-frame, à froid, rendu matériel wgpu (hors statut global)", target: 10000, unit: "ms", better: "lower", from: "ttff", config: "default", counted: false, read: (j) => med(j.cold?.firstContentMs), why: (j) => ttffWhy(j, "cold"), failures: (j) => launchFailures(j.cold) },
@@ -264,7 +280,7 @@ export function meets(row, value) {
 // results: [{ kind, json, file, mtimeMs, extra? }]; trunk: Set of the
 // commits of origin/main's first-parent history; manual: { id → { value,
 // source, at, note } } or { error } when the file could not be read.
-export function kpiTable(results, manual = {}, { trunk = new Set(), accept = { "race-perf": absoluteRace } } = {}) {
+export function kpiTable(results, manual = {}, { trunk = new Set(), accept = { "race-perf": absoluteRace, "first-launch-ramp": absoluteRace } } = {}) {
   return KPI_ROWS.map((row) => {
     const base = { id: row.id, group: row.group, label: row.label, target: row.target, unit: row.unit, better: row.better, counted: row.counted !== false, caveat: row.caveat ?? null };
     if (row.from === "manual") {
@@ -275,7 +291,7 @@ export function kpiTable(results, manual = {}, { trunk = new Set(), accept = { "
       return { ...base, value: m.value, status: statusOf(meets(row, m.value)), nature: "declared", source: m.source ?? null, at: m.at ?? null, detail: m.note ?? null };
     }
     const kinds = [row.from].flat();
-    const ofKinds = results.filter((r) => kinds.includes(r.kind));
+    const ofKinds = results.filter((r) => kinds.includes(r.kind) && (!row.match || row.match(r.json)));
     const all = ofKinds.filter((r) => !accept[r.kind] || accept[r.kind](r.json));
     const refused = ofKinds.length - all.length;
     const onTrunk = all.map((r) => ({ r, t: trunkSide(r, trunk, { config: row.config }) })).filter((x) => x.t).sort((a, b) => resultTime(b.r) - resultTime(a.r));

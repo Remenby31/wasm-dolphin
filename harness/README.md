@@ -302,12 +302,13 @@ node harness/remote/spark-run.mjs --build <ref>           # its core built on th
 ## KPI probes and report
 
 The program's KPIs (PROGRAM.md, « KPI du programme ») that race-perf does not
-cover have their own probes. Both are timing measures: they take the perf
+cover have their own probes. They are timing measures: they take the perf
 lock and run in the MESURE slots only, headless, three runs by default.
 
 ```sh
 node harness/probes/ttff.mjs --iso ../roms/<disc>.iso --port 8082 [--config wgpu] [--runs 3]
 node harness/probes/first-launch.mjs --iso ../roms/<disc>.iso --port 8082 [--runs 3] [--timeout 600]
+node harness/probes/first-launch-ramp.mjs --iso ../roms/<disc>.iso --port 8082 --scene race --steps race-steps.json [--sec 90]
 node harness/kpi-report.mjs [--print]
 ```
 
@@ -325,7 +326,23 @@ node harness/kpi-report.mjs [--print]
   `lib/aot-progress.mjs`. A launch without "done" (or a second launch without
   its compiled count) is a failure with its reason. An engine without P7
   answers `p7: null` and n/a, exit 0.
-- Both record the served tree (commit, dirty) and the Chrome that ran, and
+- `first-launch-ramp.mjs`: a player's very first launch with `aot=1`
+  (added to `--config rec` unless the query says otherwise), on a new, empty
+  profile (no seed, unlike aot-warm-launch): disc handed over, then
+  `--steps` (to the race, or a click and the intro for `--scene heavy`),
+  then `--sec` seconds. Every second it drains the VI ring, reads the region
+  pipeline (`validationReadJitRegionStats`, read only) and the core's XFB
+  copies (`validationReadHeadroomStats`, on once after the boot). The KPI
+  is on useful game frames: the product runs decoupled, its VI speed stays
+  at 100 % while the game frames fall behind. Per run (`lib/ramp.mjs`),
+  from the scene's start: time to 90 % and to 95 % of the scene's native
+  game frames per second (`SCENE_NATIVE_FRAMES_PER_VI`) held 5 s, the
+  plateau (`--plateau FROM-TO` seconds, default the heavy intro 0-17 s, the
+  race's last 10 s), the time to 90 % of that plateau; the VI speed ramp
+  apart; the per-second game, VI and installed/queued region series. KPI:
+  time to 90 %, target 15 s, one row per scene; a run that never reaches
+  90 % fails the row.
+- They all record the served tree (commit, dirty) and the Chrome that ran, and
   leave out runs started on an overloaded machine (listed). `--no-lock`
   checks the plumbing in a CORRECTION slot; such results are not measures.
 - `kpi-report.mjs`: reads only. It classifies by content every `summary.json`,
@@ -333,9 +350,9 @@ node harness/kpi-report.mjs [--print]
   `harness/results`, and keeps only results measured on a clean commit of
   origin/main's first-parent history (`served`, or the run files next to an
   older summary; fetch origin first). Each KPI reads one result, the newest
-  of its kinds on trunk (race-perf: stock Chrome and night measures only,
-  a load limit of 6 at most, day pairs being relative; trunk's side of an
-  A/B), shown with its file, commit and date; it never falls back on an
+  of its kinds on trunk (race-perf and first-launch-ramp: stock Chrome on
+  this Mac and a load limit (`--max-load`) of 6 at most, whatever the hour;
+  runs at a higher limit only compare two sides; trunk's side of an A/B), shown with its file, commit and date; it never falls back on an
   older one. Failed runs make the row KO with their reasons. Output:
   `../measures/kpi/latest.{md,json}` and a dated copy, in PROGRAM.md's order,
   each row measured, declared or n/a. What no probe measures yet (PC
@@ -424,6 +441,15 @@ apart, and stores it in the run's JSON as `freezeProbes` (at most 3
 episodes per run, each state cut at 64 KB). A served worker without that
 message gets none and the episode is recorded as `unsupported`. Evidence
 only: freezes are judged by coreFreeze as before.
+
+A third kind shows neither: the guest runs at speed, VI and presents go on,
+and the game draws nothing (no EFB-to-XFB copy). `probes/savestate-cycles.mjs`
+checks it around savestates: after the first load and after each of N loads
+or save-then-load cycles, XFB copies (headroom) and DrawDone signals
+(GPU sync) must move within `--settle` seconds; a stall fails the probe and
+prints the CP FIFO. Before patch 0116, the first load after boot on
+`video=wgpu` left the FIFO empty with commands pending (`rwDistance` 0,
+read != write).
 
 ## Renderer crashes
 
