@@ -3700,6 +3700,8 @@ async function mountFile(file) {
   aotFirstLaunch = null;
   aotCoreBooted = false;
   aotRegionsBeforeBoot.length = 0;
+  // The previous disc's flow never sees this disc's first image (review of #86).
+  for (const resolve of aotFirstImageWaiters.splice(0)) resolve(false);
   aotLayoutSkipped = 0;
   aotHeapPatched = 0;
   aotHeapPatchedBytes = 0;
@@ -7278,8 +7280,15 @@ export async function prepareAotFirstLaunch(file, {
       }) : Promise.resolve();
       // In the order the loader hands them over (compile order, hottest
       // first): the digest and the queueing are chained, not raced (review
-      // of #86).
-      aotQueueChain = aotQueueChain.then(() => keyed.catch(() => {})).then(() => queueAotRegionAfterBoot(module, region));
+      // of #86). A module's heap patch and its compile start at once, in
+      // parallel with the others; only the queueing waits its turn. Nothing
+      // of a disc unmounted since (aotDiscGeneration) is queued.
+      if (generation !== aotDiscGeneration) return;
+      const prepared = aotCoreBooted ? prepareAotRegion(module, region).catch(() => null) : null;
+      aotQueueChain = aotQueueChain.then(() => keyed.catch(() => {})).then(() => {
+        if (generation !== aotDiscGeneration) return undefined;
+        return prepared ? prepared.then((p) => p && submitAotRegion(module, p)) : queueAotRegionAfterBoot(module, region);
+      }).catch(() => {});
     },
     retain: (key, mod, bytes) => {
       // Also under the key the CPU thread's compile looks up (the SHA-256 of
@@ -7325,8 +7334,9 @@ export async function prepareAotFirstLaunch(file, {
 // optimisation. A cancel (aotCancel, stop) or a remount in between wins: the
 // start is dropped.
 export function startAotFirstLaunchAfterBoot(flow = aotFirstLaunch) {
+  const disc = aotDiscGeneration;
   void whenCoreRamReady(moduleInstance).then((ready) => {
-    if (!ready) return;
+    if (!ready || disc !== aotDiscGeneration) return;
     aotCoreBooted = true;
     const waiting = aotRegionsBeforeBoot.splice(0);
     aotQueueChain = aotQueueChain.then(async () => {
@@ -7338,6 +7348,9 @@ export function startAotFirstLaunchAfterBoot(flow = aotFirstLaunch) {
   // Nothing was loaded before the boot: the region cache, and the
   // optimisation, after the first image (TTFF of a second launch).
   return aotWhenFirstImage(moduleInstance).then(() => {
+    // A remount meanwhile woke this flow: its disc is gone (loadRest of a
+    // disposed flow loads nothing either).
+    if (aotFirstLaunch !== flow) return undefined;
     return flow.loadRest();
   }).catch(() => {}).then(() => {
     if (aotFirstLaunch === flow) return flow.start({ resume: true, ifGeneration: generation });
@@ -7395,15 +7408,21 @@ async function regionBlockCacheKey(bytes) {
 // a hit in V8's native module cache; it then runs it for its entries.
 // members: [{ ranges, hash }] per function, the plan's FNV-1a 64 of its code:
 // the core installs nothing whose code changed since the translation.
-async function queueAotRegion(module, { key, bytes, entries, members, layout = 0 }, flow = aotFirstLaunch) {
-  if (typeof module?._DolphinWeb_AotQueueRegion !== "function" || !bytes?.length || !entries?.length || !members?.length) return;
+async function queueAotRegion(module, region, flow = aotFirstLaunch) {
+  const prepared = await prepareAotRegion(module, region, flow);
+  if (prepared) submitAotRegion(module, prepared);
+}
+// The part of queueAotRegion that may run alongside other modules' (heap
+// patch, compile of the patched bytes): what to queue, or null.
+async function prepareAotRegion(module, { key, bytes, entries, members, layout = 0 }, flow = aotFirstLaunch) {
+  if (typeof module?._DolphinWeb_AotQueueRegion !== "function" || !bytes?.length || !entries?.length || !members?.length) return null;
   // Translated for another heap layout: the core would refuse it; not even
   // copied into its heap (counted). Translated again from guest memory, its
   // cache entry overwritten (the new module comes back through install).
   if (typeof module._DolphinWeb_AotLayoutHash === "function" && (layout >>> 0) !== (module._DolphinWeb_AotLayoutHash() >>> 0)) {
     aotLayoutSkipped += 1;
     if (key) flow?.retranslate?.(key);
-    return;
+    return null;
   }
   // Its heap sites hold the RAM and L1 addresses of the session that
   // translated it (patch 0084): moved to this session's, and the patched
@@ -7424,7 +7443,7 @@ async function queueAotRegion(module, { key, bytes, entries, members, layout = 0
       heap = regionHeapOfBytes(patched);
     } catch {
       aotLayoutSkipped += 1; // a malformed section or a site that does not hold its base: never queued
-      return;
+      return null;
     }
     if (patched !== bytes) {
       // The module the cache loader compiled from the unpatched bytes is
@@ -7435,13 +7454,18 @@ async function queueAotRegion(module, { key, bytes, entries, members, layout = 0
       const compiled = await precompileAotRegion(patchedKey, patched);
       if (!compiled.module) {
         aotHeapPatchFailed += 1;
-        return;
+        return null;
       }
       bytes = patched;
     }
-    if (generation !== aotDiscGeneration) return; // another disc meanwhile
+    if (generation !== aotDiscGeneration) return null; // another disc meanwhile
     if (heap) heapBases = [heap.ramBase, heap.l1Base];
   }
+  return { generation: aotDiscGeneration, bytes, entries, members, layout, heapBases };
+}
+// Copies a prepared region into the core's heap and queues it (in order).
+function submitAotRegion(module, { generation, bytes, entries, members, layout, heapBases }) {
+  if (generation !== aotDiscGeneration) return; // another disc since it was prepared
   const ranges = members.flatMap((m) => m.ranges);
   const triples = members.flatMap((m) => [m.ranges.length, m.hash ? parseInt(m.hash.slice(8), 16) : 0, m.hash ? parseInt(m.hash.slice(0, 8), 16) : 0]);
   const words = [...entries, ...ranges.flat(), ...triples].map((v) => v >>> 0);

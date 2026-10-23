@@ -571,3 +571,28 @@ test("a second launch reads nothing of the region cache before the boot", async 
   const rest = await second.flow.loadRest();
   assert.ok(opened > 0 && rest.loaded > 0, "the cache after the first image");
 });
+
+// Review of #86 (adversarial): another disc mounted before this one's first
+// image disposes its flow; a stray wake-up must not load its whole cache
+// (up to 192 MB) and queue it into the new disc's heap. A cancel (aotCancel)
+// stops the deferred load the same way.
+test("a disposed or cancelled second launch loads nothing of its deferred cache", async () => {
+  const p = profile();
+  await launch(p).flow.start();
+  for (const stop of ["dispose", "cancel"]) {
+    const second = launch(p, { loadBeforeBoot: false });
+    const report = await second.flow.installBeforeBoot();
+    assert.ok(report.deferred >= 6);
+    second.flow[stop]();
+    const rest = await second.flow.loadRest();
+    assert.equal(rest.loaded, 0, `nothing loads after ${stop}()`);
+    assert.equal(second.retained.size, 0, `nothing retained after ${stop}()`);
+  }
+  // Cancelled while loadRest reads the cache's index: nothing loads either.
+  const third = launch(p, { loadBeforeBoot: false });
+  await third.flow.installBeforeBoot();
+  const rest = third.flow.loadRest();
+  third.flow.dispose();
+  assert.equal((await rest).loaded, 0);
+  assert.equal(third.retained.size, 0);
+});
