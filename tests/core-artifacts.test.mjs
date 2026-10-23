@@ -519,10 +519,10 @@ function pushFixture() {
   mkdirSync(hooks);
   writeFileSync(path.join(hooks, "pre-push"), `#!/bin/sh\ntouch "${path.join(dir, "hook-ran")}"\n`, { mode: 0o755 });
   writeFileSync(path.join(dir, "gitconfig"), `[core]\n\thooksPath = ${hooks}\n`);
-  const run = ({ action = "commit", attempt = 0, republish = 0, sourceRun = "100", sha }) => spawnSync("bash", ["-c", pushStepScript()], {
+  const run = ({ action = "commit", attempt = 0, republish = 0, sourceRun = "100", fetch = "", sha }) => spawnSync("bash", ["-c", pushStepScript()], {
     cwd: dir, encoding: "utf8",
     env: { ...process.env, PATH: `${bin}:${process.env.PATH}`, HOME: dir, GIT_CONFIG_GLOBAL: path.join(dir, "gitconfig"),
-      ACTION: action, BASE: base, SHA256: sha, ATTEMPT: String(attempt), REPUBLISH: String(republish), SOURCE_RUN: sourceRun, PUBLISH: publish,
+      ACTION: action, BASE: base, SHA256: sha, ATTEMPT: String(attempt), REPUBLISH: String(republish), SOURCE_RUN: sourceRun, FETCH: fetch, PUBLISH: publish,
       REMOTE: `file://${remote}`, TOKEN: "dummy-token", GITHUB_REPOSITORY: "o/r" }
   });
   const ghCalls = () => (existsSync(path.join(dir, "gh.log")) ? readFileSync(path.join(dir, "gh.log"), "utf8") : "");
@@ -640,6 +640,20 @@ test("push-core republishes when main moved, hands over when sources changed, 3 
     assert.equal(sources.status, 0, sources.stderr);
     assert.match(f.ghCalls(), /attempt=3/);
 
+    // The core of from_run could not be taken: a full run, whatever the plan.
+    const lost = f.run({ sha: hash, action: "", attempt: 1, republish: 2, fetch: "failure" });
+    assert.equal(lost.status, 0, lost.stderr);
+    assert.match(lost.stdout, /run 100's core could not be taken; handing over to attempt 2/);
+    assert.match(f.ghCalls(), /--ref main -f attempt=2\n$/);
+    // Counters are non-negative integers, or nothing is dispatched.
+    const calls = f.ghCalls();
+    for (const bad of [{ attempt: -50 }, { republish: -1 }, { attempt: "1; echo x" }]) {
+      const refused = f.run({ sha: hash, action: "dispatch", ...bad });
+      assert.notEqual(refused.status, 0, JSON.stringify(bad));
+      assert.match(refused.stdout, /invalid attempt/);
+    }
+    assert.equal(f.ghCalls(), calls);
+
     const exhausted = f.run({ sha: hash, action: "dispatch", attempt: 3 });
     assert.notEqual(exhausted.status, 0, "the fourth hand-over fails the job instead");
     assert.doesNotMatch(f.ghCalls(), /attempt=4/);
@@ -684,6 +698,13 @@ test("main's runs build main's tip, queue, and keep the token out of every job t
   }
   const push = jobs.find((job) => job.startsWith("push-core:"));
   assert.match(push, /needs\.prepare-core-commit\.result == 'success'/);
+  // A cancelled run hands nothing over (always() would override the cancel);
+  // a failed build publishes nothing; a failed fetch-run-core hands over.
+  assert.doesNotMatch(workflow, /always\(\)/);
+  assert.match(prepare, /if: >-\n\s+!cancelled\(\) && /);
+  assert.match(push, /if: >-\n\s+!cancelled\(\) && \(\(needs\.prepare-core-commit\.result == 'success' &&[\s\S]*\|\|\s+needs\.fetch-run-core\.result == 'failure'\)/);
+  assert.match(push, /download-artifact[^\n]*\n\s+if: needs\.prepare-core-commit\.result == 'success'/);
+  assert.match(push, /FETCH: \$\{\{ needs\.fetch-run-core\.result \}\}/);
   assert.match(prepare, /jq -er '\.action/);
   assert.doesNotMatch(prepare, /github\.token|secrets\./);
 });

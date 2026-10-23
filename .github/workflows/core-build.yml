@@ -480,7 +480,7 @@ jobs:
     needs: [build, rebuild-from-source-archive, fetch-run-core]
     # Both builds of this run, or a core fetched from an earlier run.
     if: >-
-      always() && github.ref == 'refs/heads/main' && github.event_name != 'pull_request' &&
+      !cancelled() && github.ref == 'refs/heads/main' && github.event_name != 'pull_request' &&
       ((needs.build.result == 'success' && needs.rebuild-from-source-archive.result == 'success') ||
       needs.fetch-run-core.result == 'success')
     runs-on: ubuntu-24.04
@@ -561,12 +561,16 @@ jobs:
   #   run that built it), which costs no build; after 3 republications, to a
   #   new full run.
   # - dispatch (main's sources moved during the build): hand over to a new run.
+  # - fetch-run-core failed (API error, expired artifact, run refused): hand
+  #   over to a new full run.
   # Hand-overs carry an attempt counter; after 3, the job fails instead.
+  # !cancelled(): a run a maintainer cancelled hands nothing over.
   push-core:
     needs: [build, fetch-run-core, prepare-core-commit]
     if: >-
-      always() && needs.prepare-core-commit.result == 'success' &&
-      (needs.prepare-core-commit.outputs.action == 'commit' || needs.prepare-core-commit.outputs.action == 'dispatch')
+      !cancelled() && ((needs.prepare-core-commit.result == 'success' &&
+      (needs.prepare-core-commit.outputs.action == 'commit' || needs.prepare-core-commit.outputs.action == 'dispatch')) ||
+      needs.fetch-run-core.result == 'failure')
     runs-on: ubuntu-24.04
     timeout-minutes: 10
     permissions:
@@ -577,6 +581,7 @@ jobs:
       cancel-in-progress: false
     steps:
       - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4
+        if: needs.prepare-core-commit.result == 'success'
         with:
           name: core-commit
           path: ${{ runner.temp }}/publish
@@ -590,11 +595,14 @@ jobs:
           ATTEMPT: ${{ inputs.attempt || 0 }}
           REPUBLISH: ${{ inputs.republish || 0 }}
           SOURCE_RUN: ${{ inputs.from_run || github.run_id }}
+          FETCH: ${{ needs.fetch-run-core.result }}
           PUBLISH: ${{ runner.temp }}/publish
           REMOTE: https://github.com/${{ github.repository }}.git
           TOKEN: ${{ github.token }}
         run: |
           set -euo pipefail
+          # Counters come from workflow_dispatch inputs: non-negative integers only.
+          [[ "$ATTEMPT" =~ ^[0-9]+$ && "$REPUBLISH" =~ ^[0-9]+$ ]] || { echo "::error::invalid attempt=$ATTEMPT republish=$REPUBLISH"; exit 1; }
           handover() {
             if [ "$ATTEMPT" -ge 3 ]; then
               echo "::error::main's core is still not published after $ATTEMPT hand-overs: $1"
@@ -614,6 +622,10 @@ jobs:
             GH_TOKEN="$TOKEN" gh workflow run core-build.yml -R "$GITHUB_REPOSITORY" --ref main \
               -f attempt="$ATTEMPT" -f from_run="$SOURCE_RUN" -f republish=$((REPUBLISH + 1))
           }
+          if [ "$FETCH" = failure ]; then
+            handover "run $SOURCE_RUN's core could not be taken"
+            exit 0
+          fi
           jq -e --arg action "$ACTION" '.schemaVersion == 1 and .action == $action' "$PUBLISH/plan.json" > /dev/null
           if [ "$ACTION" = dispatch ]; then
             handover "main's sources changed during the build"
