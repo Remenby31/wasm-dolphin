@@ -1267,3 +1267,22 @@ test("without harness hooks the profile sampler gets the guest PC and a record w
   assert.deepEqual(saved.blocks.map((b) => [b[0], b[4]]), [[(TEXT + 0x40) >>> 0, 7]], "the profile file holds the weight");
 });
 
+// Review of 0130/#167: continuations that only hold what one uncut fragment
+// held before (the first fragment and them, up to maxBlocks blocks) spend no
+// budget; past that they do, and what the budget leaves out is counted.
+test("continuation budget: the old single fragment's blocks are free; refusals for lack of budget are counted", { skip: contSkip }, async () => {
+  const program = longFunction(100);
+  const run = (options) => translateWithContinuations(core.module, { entry: LONG, ranges: loadWords(LONG, program.words), hash: null },
+    { mask: PRODUCTION_DISABLE_MASK, maxBlocks: 64, names: coreAssembleOptions(core.module)?.helperNames, ...options });
+  // A first fragment cut at 16 blocks: its continuations up to 64 blocks in all are free.
+  const cut = await run({ maxBlocks: 16 });
+  const blocksOf = (r) => [r.fragment, ...(r.continuations ?? [])].reduce((n, x) => n + x.entries.length, 0);
+  assert.ok(blocksOf(cut) > 64);
+  assert.ok(cut.budgetCharged > 0, "past 64 blocks: charged");
+  const within = await run({ maxBlocks: 16, maxContinuations: 3 }); // 16 + 3 × 16 = 64 blocks
+  assert.equal(within.budgetCharged, 0, "within the old fragment's 64 blocks: free");
+  // With no budget past the free blocks, the rest is refused and counted.
+  const starved = await run({ maxBlocks: 16, maxBytes: 1 });
+  assert.ok(starved.budgetRefused >= 1, `refused ${starved.budgetRefused}`);
+});
+
