@@ -77,6 +77,10 @@ export function headroomOf(s, { guestSeconds = null, ticksPerSecond = null, viOu
     gpuConsumerWaitShare: round(consumerS / hostS, 4),
     rushSkips: s.rushSkips,
     xfbCopiesPerVi: viOutputs > 0 ? round(s.xfbCopies / viOutputs, 4) : null,
+    // The product KPI (judge, 2026-10-23): game images the player gets per
+    // host second, XFB copies over the host window. Unlike the speed, it does
+    // not count emulated time that ran ahead of the rendering.
+    gameFramesPerSecond: round(s.xfbCopies / hostS, 2),
     guestSeconds: round(guestSeconds, 3)
   };
 }

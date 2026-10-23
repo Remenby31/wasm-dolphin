@@ -657,6 +657,7 @@ async function main() {
         maxSpeedGpu: describe(m.map((x) => x.headroom?.maxSpeedGpu), 4),
         throttleSleepShare: describe(m.map((x) => x.headroom?.throttleSleepShare), 4),
         xfbCopiesPerVi: describe(m.map((x) => x.headroom?.xfbCopiesPerVi), 4),
+        gameFramesPerSecond: describe(m.map((x) => x.headroom?.gameFramesPerSecond), 2),
         headroomApplies: m.every((x) => x.headroom?.headroomApplies),
         headroomWhy: [...new Set(m.map((x) => x.headroom?.error).filter(Boolean))].join("; ") || null
       } : {}),
