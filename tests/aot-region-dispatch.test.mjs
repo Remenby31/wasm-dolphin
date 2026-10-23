@@ -1098,7 +1098,10 @@ test("continuations: each under the byte cap (halved until it fits), within the 
   const one = await continuationsOf(program, { maxFragmentBytes: Math.floor(size / 3), maxContinuations: 1 });
   assert.equal(one.continuations.length, 1, "maxContinuations");
   const bytes = await continuationsOf(program, { maxFragmentBytes: Math.floor(size / 3), maxBytes: 1 });
-  assert.equal(bytes.continuations.length, 1, "the byte budget stops after the fragment that spends it");
+  // Never past the byte budget (review of #189): the first charged fragment
+  // would overshoot 1 byte, so none is kept, and it is refused.
+  assert.equal(bytes.continuations, undefined, "nothing kept past the byte budget");
+  assert.ok(bytes.budgetRefused >= 1 && bytes.resume, "refused, and resumable with more");
   const tiny = await continuationsOf(program, { maxFragmentBytes: 16 });
   assert.equal(tiny.continuations, undefined, "a single block over the cap is refused");
   assert.ok(tiny.oversize >= 1);
