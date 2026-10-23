@@ -1278,10 +1278,16 @@ async function captureAtViOutput({ index, ahead, fromLoad = false, timeoutMs = 6
 async function captureAtViOutputWgpu(index, fromLoad, timeoutMs) {
   const generation = moduleInstance?._DolphinWeb_HarnessLoadGeneration?.() >>> 0;
   const { id, promise } = wgpuExactCapture.arm(index, fromLoad, generation);
-  const timer = setTimeout(() => wgpuExactCapture.cancel(id, new Error(
-    wgpuExactCapture.tagsSeen === 0
-      ? "core does not tag WebGPU presents with VI outputs (rebuild the core)"
-      : `VI output ${index} never reached within ${timeoutMs} ms`)), timeoutMs);
+  const timer = setTimeout(() => {
+    // Where it stood, for a run on another machine (the Windows runner).
+    const m = moduleInstance;
+    const state = `harnessEnabled ${harnessEnabled}, core VI since boot ${m?._DolphinWeb_HarnessViSinceBoot?.() ?? "?"}, ` +
+      `queue submissions ${webGpuCausalStats?.queueSubmissionCount ?? "?"}, VI tags seen ${wgpuExactCapture.tagsSeen}, ` +
+      `video ${harnessVideoBackend}, adapter ${rendererDiagnostics?.adapter?.architecture ?? rendererDiagnostics?.adapter?.vendor ?? "?"}`;
+    wgpuExactCapture.cancel(id, new Error(wgpuExactCapture.tagsSeen === 0
+      ? `core does not tag WebGPU presents with VI outputs (rebuild the core) [${state}]`
+      : `VI output ${index} never reached within ${timeoutMs} ms [${state}]`));
+  }, timeoutMs);
   try {
     return await promise;
   } finally {
