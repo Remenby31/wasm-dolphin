@@ -111,6 +111,8 @@ export class EmulatorHost {
     this.memcardSlotB = new URLSearchParams(window.location.search).get("memcardb") === "1";
     // CPU reads of the EFB (peeks), off by default as in Dolphin (EFBAccessEnable).
     this.efbAccess = new URLSearchParams(window.location.search).get("efbaccess") === "1";
+    // Harness: FIFO logs (.dff) may boot. Off for the app (FifoPlayer trusts the log).
+    this.fifoLog = new URLSearchParams(window.location.search).get("fifolog") === "1";
     // EFB copies written to guest RAM too (Dolphin's EFBToTextureEnable=False).
     this.efbCopyRam = new URLSearchParams(window.location.search).get("efbcopyram") === "1";
     this.savesMode = new URLSearchParams(window.location.search).get("saves") === "off" ? "off" : "";
@@ -416,6 +418,7 @@ export class EmulatorHost {
             coreLog: this.coreLog,
             memcardSlotB: this.memcardSlotB,
             efbAccess: this.efbAccess,
+            fifoLog: this.fifoLog,
             efbCopyRam: this.efbCopyRam,
             savesMode: this.savesMode,
             efbDiag: this.efbDiag,

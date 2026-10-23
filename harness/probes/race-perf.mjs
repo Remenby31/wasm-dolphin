@@ -14,7 +14,7 @@
 //     [--runs 4 (even with --baseline)] [--min-pairs 4] [--hold KeyX] [--warm]
 //     [--max-load L] [--load-wait 300] [--lock-wait 1800]
 //     [--pcsample [periodMs]] [--symbols functions.json] [--out dir]
-//     [--headroom [--frames-per-vi-ref R]] [--display] [--unique-frames secs] [--region-sample N [--region-secs 10]] [--mem-stats] [--baseline-query "..."]
+//     [--headroom [--frames-per-vi-ref R]] [--display] [--unique-frames secs] [--region-sample N [--region-secs 10]] [--mem-stats [--mem-warm 5]] [--baseline-query "..."]
 //     [--calm-wait S (default --lock-wait): wait for load ≤ --max-load before taking the lock]
 //     [--chrome-args "--flag …"] [--baseline-chrome-args "--flag …"]
 //     [--emulated-window S [--emulated-warmup W (default --warmup)] [--emulated-poll-ms 100]]
@@ -81,7 +81,7 @@ import { parseArgs } from "node:util";
 
 import { exportRef } from "../cli.mjs";
 import { ensureServer, loadHarnessState, readCoreProgress, readFrameInfo, readTimeline, REPO_ROOT, workerRequest } from "../lib/browser.mjs";
-import { PRESETS } from "../lib/matrix.mjs";
+import { PRESETS, SCENE_PROTOCOLS, sceneProtocolCheck } from "../lib/matrix.mjs";
 import { claim, release } from "../lib/ownership.mjs";
 import { acquirePerfLock } from "../lib/perf-lock.mjs";
 import { openSession, rebootSession } from "../lib/session.mjs";
@@ -191,6 +191,10 @@ export async function measure(session, o) {
     // --headroom (0113): the counters reset and the core ticks read just
     // before the window, both read again just after it.
     const hrStart = o.headroom ? await headroomRead(page, 0) : null;
+    // A scene whose region stats must cover the window itself (matrix.mjs
+    // regionStatsInWindow): reset now, read just after the window.
+    const regionInWindow = o.regionInWindow && o.regionSample != null;
+    if (regionInWindow) await workerRequest(page, "validationReadJitRegionStats", { sampleEvery: o.regionSample }, 10000);
     // The emulated time this host-time window covers (judge, 2026-10-22: a
     // faster side covers more of the scene): core ticks just before and just
     // after, outside the window.
@@ -212,6 +216,7 @@ export async function measure(session, o) {
       if (s === Math.floor(o.secs / 2)) threads.push(rendererThreads(session.profileDir));
     }
     const hrEnd = hrStart && !hrStart.error ? await headroomRead(page) : null;
+    const regionInWindowEnd = regionInWindow ? await workerRequest(page, "validationReadJitRegionStats", {}, 10000) : null;
     const counters = o.onWindow ? await o.onWindow("end", session) : undefined;
     const chunk = await readTimeline(page);
     const t1 = await page.evaluate(() => performance.timeOrigin + performance.now());
@@ -241,11 +246,18 @@ export async function measure(session, o) {
       }
     }
     // The stats window, after everything the speed window reads.
-    // --mem-stats (0104) shares that window: both are reset together and
-    // read after it.
-    let regionEnd = null, memEnd = null;
-    if (o.regionSample != null || o.memStats) {
-      if (o.regionSample != null) regionEnd = await workerRequest(page, "validationReadJitRegionStats", { sampleEvery: o.regionSample }, 10000);
+    // --mem-stats (0117) shares that window: both are reset together and
+    // read after it. The core's first reset clears the JIT cache (blocks are
+    // emitted again with their counts), so it is made --mem-warm seconds
+    // before the window, and the window starts with a second reset (no cache
+    // clear): the recompiles and interpreted runs stay out of it.
+    let regionEnd = regionInWindowEnd, memEnd = null;
+    if (o.memStats && o.memWarm > 0) {
+      const first = await workerRequest(page, "validationReadMemAccessStats", { reset: 0 }, 10000);
+      if (first && !first.error) await new Promise((r) => setTimeout(r, o.memWarm * 1000));
+    }
+    if ((o.regionSample != null && !regionInWindow) || o.memStats) {
+      if (o.regionSample != null && !regionInWindow) regionEnd = await workerRequest(page, "validationReadJitRegionStats", { sampleEvery: o.regionSample }, 10000);
       if (o.memStats) memEnd = await workerRequest(page, "validationReadMemAccessStats", { reset: 0 }, 10000);
       const live = (r) => r && !r.error;
       if (live(regionEnd) || live(memEnd)) {
@@ -503,7 +515,7 @@ async function main() {
       "emulated-window": { type: "string" }, "emulated-warmup": { type: "string" }, "emulated-poll-ms": { type: "string", default: "100" },
       hold: { type: "string", default: "KeyX" }, warm: { type: "boolean", default: false },
       "max-load": { type: "string" }, "lock-wait": { type: "string", default: "1800" },
-      pcsample: { type: "string" }, symbols: { type: "string" }, "region-sample": { type: "string" }, "region-secs": { type: "string", default: "10" }, counters: { type: "boolean", default: false }, "unique-frames": { type: "string" }, display: { type: "boolean", default: false }, "mem-stats": { type: "boolean", default: false }, headroom: { type: "boolean", default: false }, "frames-per-vi-ref": { type: "string" }, "baseline-query": { type: "string" }, "chrome-args": { type: "string" }, "baseline-chrome-args": { type: "string" },
+      pcsample: { type: "string" }, symbols: { type: "string" }, "region-sample": { type: "string" }, "region-secs": { type: "string", default: "10" }, counters: { type: "boolean", default: false }, "unique-frames": { type: "string" }, display: { type: "boolean", default: false }, "mem-stats": { type: "boolean", default: false }, "mem-warm": { type: "string", default: "5" }, headroom: { type: "boolean", default: false }, "frames-per-vi-ref": { type: "string" }, "baseline-query": { type: "string" }, "chrome-args": { type: "string" }, "baseline-chrome-args": { type: "string" },
       "core-candidate": { type: "string", multiple: true, default: [] },
       port: { type: "string", default: process.env.HARNESS_PORT }, out: { type: "string" }
     },
@@ -550,19 +562,31 @@ async function main() {
     maxLoad: values["max-load"] ? num(values, "max-load", { min: 0.1 }) : Math.max(2, os.cpus().length / 4),
     loadWait: num(values, "load-wait", { min: 0 }),
     pcsample: values.pcsample ? num(values, "pcsample", { min: 0.05 }) : null,
-    regionSample: values["region-sample"] == null ? null : num(values, "region-sample", { min: 0, int: true }),
+    // --mem-stats needs the region counters (its region estimates ride on
+    // them): on without timers (0) unless --region-sample says otherwise.
+    regionSample: values["region-sample"] == null ? (values["mem-stats"] ? 0 : null) : num(values, "region-sample", { min: 0, int: true }),
     regionSecs: num(values, "region-secs", { min: 1 }),
     // --counters (Linux perf): host instructions per guest cycle of the
     // emulated CPU thread, per window (lib/perf-counters.mjs).
     ...(values.counters ? (checkPerfAccess(), { onWindow: perfCounters() }) : {}),
     uniqueFrames: values["unique-frames"] == null ? null : num(values, "unique-frames", { min: 2 }),
     memStats: values["mem-stats"],
+    memWarm: num(values, "mem-warm", { min: 0 }),
     headroom: values.headroom,
+    // A KPI scene's pinned protocol (matrix.mjs SCENE_PROTOCOLS): region
+    // stats over the window itself where the scene asks for it.
+    regionInWindow: Boolean(SCENE_PROTOCOLS[path.basename(state)]?.regionStatsInWindow),
     framesPerViRef: values["frames-per-vi-ref"] == null ? null : num(values, "frames-per-vi-ref", { min: 0.01 }),
     display: values.display,
     functions: values.symbols ? JSON.parse(readFileSync(values.symbols, "utf8")).sort((a, b) => a[0] - b[0]) : null,
     coreCandidates: values["core-candidate"]
   };
+  const sceneCheck = sceneProtocolCheck(path.basename(state), {
+    warmup: o.emulatedWindow ? o.emulatedWarmup : o.warmup, window: o.emulatedWindow ?? o.secs, emulated: Boolean(o.emulatedWindow),
+    hold: o.hold, regionSample: o.regionSample, regionStatsInWindow: o.regionInWindow
+  });
+  if (sceneCheck.errors.length) throw new Error(`scene protocol: ${sceneCheck.errors.join("; ")}`);
+  for (const w of sceneCheck.warnings) console.warn(`[race-perf] scene protocol: ${w}`);
   const lockWait = num(values, "lock-wait", { min: 0 });
 
   const sides = {};
@@ -693,6 +717,7 @@ async function main() {
   if (process.env.HARNESS_CHROME_PATH || process.env.HARNESS_CHROME_ARGS) console.warn(`[race-perf] Chrome: ${chrome.path}${chrome.args ? ` ${chrome.args}` : ""}`);
   for (const [n, a] of Object.entries(sideArgs)) console.warn(`[race-perf] Chrome flags on the ${n}: ${a}`);
   const summary = {
+    sceneProtocol: sceneCheck.protocol ? { state: path.basename(state), ...sceneCheck.protocol, warnings: sceneCheck.warnings } : null,
     probe: "race-perf", at: new Date().toISOString(),
     chrome,
     iso: path.basename(iso), state: path.basename(state), query: o.query, baselineQuery: sides.baseline?.query ?? null, warmupSec: o.warmup, secs: o.secs,

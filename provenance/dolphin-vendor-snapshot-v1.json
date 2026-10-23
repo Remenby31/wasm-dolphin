@@ -3,8 +3,8 @@
   "normalization": "git-blob-lf",
   "root": {
     "baseCommit": "e22551eae1c84a7e4d0b6a5c519ef4ed4ef69df1",
-    "resultTree": "620b957e3a98a360d9e60c22f750e3f527ee42b3",
-    "changedPathCount": 133,
+    "resultTree": "ad34d6614d83fa5f44719540e4bab2aa5a2684bf",
+    "changedPathCount": 135,
     "records": [
       {
         "path": "CMakeLists.txt",
@@ -196,6 +196,24 @@
         "sha256": "14bb7d283b6588c7e6a10d281eb1a4b49e303013b4e8b15b4a625d5b23f88a6f"
       },
       {
+        "path": "Source/Core/Core/FifoPlayer/FifoDataFile.cpp",
+        "status": "M",
+        "mode": "100644",
+        "baseBlob": "f795d5f08a2b4fd654906d35874213facbf29402",
+        "resultBlob": "071cdeca84fa2ed126daad7662dc675369f4f91e",
+        "size": 13699,
+        "sha256": "e77d5ac4c2bdc68992579cb621d63abbc233d04319fb49de5a73ef4a6efea3db"
+      },
+      {
+        "path": "Source/Core/Core/FifoPlayer/FifoPlayer.cpp",
+        "status": "M",
+        "mode": "100644",
+        "baseBlob": "f0c62d4e3f2c0f78a9821836d5473f141b122ecf",
+        "resultBlob": "16eefeb9c0e5bcbeb2f0553bc431535472fa2603",
+        "size": 23530,
+        "sha256": "bce87543d1832808f5652a2208aa5524ea17fc7a0dcd840aaecd065ba0f753af"
+      },
+      {
         "path": "Source/Core/Core/HW/DSPHLE/DSPHLE.cpp",
         "status": "M",
         "mode": "100644",
@@ -362,18 +380,18 @@
         "status": "M",
         "mode": "100644",
         "baseBlob": "3ec24a30162d97c99c2454af6af89d480d90c29d",
-        "resultBlob": "54887d2e932c80ad4f84d53c04929f5da50ef8c0",
-        "size": 611691,
-        "sha256": "f85769e312380c77d3b8edf7b1d56cc5953fb608b0de19d8f8caad905fef8ec9"
+        "resultBlob": "fe8d786d885c24b81f6eb57374cce2695ac5560c",
+        "size": 627973,
+        "sha256": "bd273e1b45682f8b90e70d670f39935717d9ae4d513115c10fccd5502f5a05c4"
       },
       {
         "path": "Source/Core/Core/PowerPC/CachedInterpreter/CachedInterpreter.h",
         "status": "M",
         "mode": "100644",
         "baseBlob": "dd940e89a2fe1ce7bc6a4a0038a4be8fa112e67e",
-        "resultBlob": "3b7577ab6b9f9d87d611320d3030cd55c22a35da",
-        "size": 13801,
-        "sha256": "45ecb8392edd94c516950c03a276a364117334709439eb4db52e54a741fd4635"
+        "resultBlob": "3aca8da393446e0b1c181e06adf5100ccc8f7d38",
+        "size": 14383,
+        "sha256": "7cf426da24020b4398032f301055e34de9732d898d21548bddbabcd584a1e6ae"
       },
       {
         "path": "Source/Core/Core/PowerPC/CachedInterpreter/CachedInterpreterBlockCache.cpp",
@@ -407,9 +425,9 @@
         "status": "M",
         "mode": "100644",
         "baseBlob": "665329729eb6b90d95aac910244fb60976d634b4",
-        "resultBlob": "2185ae96d9517aee5ca191433e140312dd1bcb02",
-        "size": 16182,
-        "sha256": "8122d046d12e71bee89a238311addcd133c1b3db91290c7af502b2dca748c673"
+        "resultBlob": "5849692dd38c09cc1be64082e5a0376310de7aea",
+        "size": 16486,
+        "sha256": "88c10ca3a06ad60db5af6684a8040e6676c51182c40d5254abc058afc87142a5"
       },
       {
         "path": "Source/Core/Core/PowerPC/CachedInterpreter/WasmDeferredCompileQueue.h",
@@ -1239,5 +1257,5 @@
       ]
     }
   ],
-  "contentSha256": "a70d3ff2ef360d78f3a9da5da77650c3dd6888be0fd59beb399b5f4d90b475ba"
+  "contentSha256": "8a674e93715a73fb7c1de6077941200830806ad6fd728b7443a91e871a53156f"
 }

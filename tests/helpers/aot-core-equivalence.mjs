@@ -360,9 +360,9 @@ export function checkCoreSlice({ core, plan, image, slice, slices, maxFunctions 
   return report;
 }
 
-const ORACLE_CODE = 0x80003000;
+export const ORACLE_CODE = 0x80003000;
 
-function bigEndian(words) {
+export function bigEndian(words) {
   const out = new Uint8Array(4 * words.length);
   const v = new DataView(out.buffer);
   words.forEach((w, i) => v.setUint32(4 * i, w >>> 0, false));
