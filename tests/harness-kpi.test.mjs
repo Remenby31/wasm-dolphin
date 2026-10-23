@@ -647,3 +647,18 @@ test("setup: two Spark summaries with and without the V8 flag differ; absent arg
   assert.deepEqual(setupDifferences(setupOf(pair, "candidate"), setupOf(pair, "baseline")), ["arguments Chrome « --x » ≠ « aucun »"]);
   assert.deepEqual(setupDifferences(setupOf({ chrome: { path: "chrome stable" } }), TRUNK_SETUP), []);
 });
+
+// 0106: GameCube RAM and L1 are static, so a heap shift no longer moves them:
+// nothing to patch and nothing refused is "not-applicable", never a failure.
+// Where the RAM still moves, the shift case keeps its rules.
+test("aot-second-launch: a heap shift that cannot move a static RAM is not-applicable; where it moves, patches are required", async () => {
+  const { secondLaunchVerdict } = await import("../harness/lib/second-launch-verdict.mjs");
+  const base = { frames: 6000, fromCache: 143, installed: 143, heapShift: true, minFrames: 3000 };
+  assert.equal(secondLaunchVerdict({ heapPatched: 0, layoutRefused: 0 }, base).verdict, "not-applicable", "static RAM (0106)");
+  assert.equal(secondLaunchVerdict({ heapPatched: 143, layoutRefused: 0 }, base).verdict, "pass", "the RAM moved and every module was patched");
+  const refused = secondLaunchVerdict({ heapPatched: 0, layoutRefused: 143 }, { ...base, installed: 0 });
+  assert.equal(refused.verdict, "fail", "moved but refused: a failure");
+  assert.match(refused.why.join(";"), /refused for their layout/);
+  assert.equal(secondLaunchVerdict({ heapPatched: 0, layoutRefused: 0 }, { ...base, heapShift: false }).verdict, "pass", "no shift asked: a plain pass");
+  assert.equal(secondLaunchVerdict({ heapPatched: 0, layoutRefused: 0 }, { ...base, frames: 10 }).verdict, "fail", "the other checks still hold");
+});
