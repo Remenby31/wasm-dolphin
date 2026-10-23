@@ -25,7 +25,7 @@
       "commit": "01e0577914a75a2569c846778c2f93aa8e6feddd"
     }
   },
-  "patchSeriesSha256": "211cd4039ba8572c08f5364cf94b234a5adf6fd66d0d6379f6f09ebf465e8dbe",
+  "patchSeriesSha256": "5df64454259893f490b67f208247b7279cbb088274d954ac0c08fa688b983ef5",
   "patches": [
     {
       "order": 1,
@@ -759,12 +759,20 @@
       "order": 92,
       "cwd": ".",
       "hashMode": "lf-normalized",
+      "path": "patches/dolphin-wasm/snapshot/0106-static-gamecube-ram-views.patch",
+      "size": 5733,
+      "sha256": "fd3caa46e1417441adf6b6056c36e20825a256d2e88a32062a59279fb06192fe"
+    },
+    {
+      "order": 93,
+      "cwd": ".",
+      "hashMode": "lf-normalized",
       "path": "patches/dolphin-wasm/snapshot/0107-region-installs-in-throttle-sleep.patch",
       "size": 14861,
       "sha256": "ab1cff9cf64a939235aac58fb6517a0ce8c375233edb3043dcfda018b16efaa4"
     },
     {
-      "order": 93,
+      "order": 94,
       "cwd": ".",
       "hashMode": "lf-normalized",
       "path": "patches/dolphin-wasm/snapshot/0111-region-lazy-cr-fusion.patch",
@@ -772,7 +780,7 @@
       "sha256": "48dcbba73dfaad2e723f46b11215f0f1eeeb35c920b5c052db5d9b9c13494053"
     },
     {
-      "order": 94,
+      "order": 95,
       "cwd": ".",
       "hashMode": "lf-normalized",
       "path": "patches/dolphin-wasm/snapshot/0113-headroom-counters.patch",
@@ -780,7 +788,7 @@
       "sha256": "704fdcdba2d3d8b39edc38a158acfb884fa4cdd77a52eee31658a9ed4616fcc0"
     },
     {
-      "order": 95,
+      "order": 96,
       "cwd": ".",
       "hashMode": "lf-normalized",
       "path": "patches/dolphin-wasm/snapshot/0116-savestate-pauses-gpu-loop.patch",
@@ -788,7 +796,7 @@
       "sha256": "c9e0ec9e4ba2bd2319885d17da406231a2643ebface5343cb9ff8969bb70721e"
     },
     {
-      "order": 96,
+      "order": 97,
       "cwd": ".",
       "hashMode": "lf-normalized",
       "path": "patches/dolphin-wasm/snapshot/0117-mem-access-stats.patch",
@@ -796,7 +804,7 @@
       "sha256": "90a96cfa1c69892a076cf4c61dd86c969b26d922bc0132ad9e945d4ec125eb49"
     },
     {
-      "order": 97,
+      "order": 98,
       "cwd": ".",
       "hashMode": "lf-normalized",
       "path": "patches/dolphin-wasm/snapshot/0120-region-dcbz-direct.patch",
@@ -804,7 +812,7 @@
       "sha256": "20970aa1d59cb3b77e382fa46d99581adf63c421e1856d4b29033ebab97bef63"
     },
     {
-      "order": 98,
+      "order": 99,
       "cwd": ".",
       "hashMode": "lf-normalized",
       "path": "patches/dolphin-wasm/snapshot/0121-entry-guards-fprf-setting.patch",
@@ -812,7 +820,7 @@
       "sha256": "a6042d288edc1f515a213ebfb5b291f501a852ff1b0c7cb8840ec28f4154db92"
     },
     {
-      "order": 99,
+      "order": 100,
       "cwd": ".",
       "hashMode": "lf-normalized",
       "path": "patches/dolphin-wasm/snapshot/0122-region-sleep-install-estimate.patch",
@@ -820,7 +828,7 @@
       "sha256": "1ba2ead55f449857191f128f0e8f68d493df86fa3bee1caf608c556ef7285628"
     },
     {
-      "order": 100,
+      "order": 101,
       "cwd": ".",
       "hashMode": "lf-normalized",
       "path": "patches/dolphin-wasm/snapshot/0126-region-bswap-rotate.patch",
@@ -828,7 +836,7 @@
       "sha256": "8e14dde6571136ca44c07d203b4c593af9b2c70e13119443abb7738dc0cacdbd"
     },
     {
-      "order": 101,
+      "order": 102,
       "cwd": ".",
       "hashMode": "lf-normalized",
       "path": "patches/dolphin-wasm/snapshot/0129-fused-relaxed-madd.patch",
@@ -836,7 +844,7 @@
       "sha256": "606b0deff8a951682242300e55105b3e9c0ce0fac4c5d67f54ef67ed65659600"
     },
     {
-      "order": 102,
+      "order": 103,
       "cwd": ".",
       "hashMode": "lf-normalized",
       "path": "patches/dolphin-wasm/snapshot/0131-region-branch-hints.patch",
@@ -844,7 +852,7 @@
       "sha256": "825f31ce47070dc81d91c79f6bf8b14cf9ba1578f22f220ceb74a0f197b99c2e"
     },
     {
-      "order": 103,
+      "order": 104,
       "cwd": ".",
       "hashMode": "lf-normalized",
       "path": "patches/dolphin-wasm/snapshot/0133-region-br-table-dispatch.patch",
@@ -852,7 +860,7 @@
       "sha256": "caef2915a154990f1ca2cc51dd93b7724af85d320ec92e226f7d2371a57ab380"
     },
     {
-      "order": 104,
+      "order": 105,
       "cwd": ".",
       "hashMode": "lf-normalized",
       "path": "patches/dolphin-wasm/snapshot/0138-cached-interpreter-code-space-32m.patch",
@@ -860,7 +868,7 @@
       "sha256": "3e1c2edf136e19d38fd6d3849fa9cc6a4c05de1b93af1d24e41ca8ef8c4c2822"
     },
     {
-      "order": 105,
+      "order": 106,
       "cwd": "Externals/SFML/SFML",
       "hashMode": "lf-normalized",
       "path": "patches/dolphin-wasm/submodules/0001-sfml-emscripten-config.patch",
@@ -868,7 +876,7 @@
       "sha256": "f82197a21fe982ad83f6ee7bbf5a03839b1cebd4d64da3eab11263842bf61d89"
     },
     {
-      "order": 106,
+      "order": 107,
       "cwd": "Externals/xxhash/xxHash",
       "hashMode": "lf-normalized",
       "path": "patches/dolphin-wasm/submodules/0002-xxhash-wasm-simd-scalar.patch",
