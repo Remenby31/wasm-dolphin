@@ -85,6 +85,29 @@ export function mergeRanges(ranges) {
   return out;
 }
 
+// Hot/cold formation (research deep-region-partitioning §3.1): a function
+// of at least HOT_MIN_BYTES whose blocks the local profile weighed with at
+// least HOT_MIN_SAMPLES samples gets `hotRanges`, its blocks holding at least
+// HOT_BLOCK_SHARE of its samples (HHVM's PGOMinBlockCountPercent, 0.23 %),
+// plus its entry block. The translator forms its first fragment from them and
+// the rest in cold fragments, so the hot path stays compact (I-cache). None
+// when the hot blocks are most of the code anyway.
+export const HOT_MIN_BYTES = 1024;
+export const HOT_MIN_SAMPLES = 200;
+export const HOT_BLOCK_SHARE = 0.0025;
+const HOT_MAX_SHARE = 0.8;
+export function hotRanges(fBlocks, blocks, entry, weightIn) {
+  const spans = fBlocks.map((b) => [blocks.start[b], blocks.end[b]]);
+  const size = spans.reduce((n, [s, e]) => n + e - s, 0);
+  if (size < HOT_MIN_BYTES) return null;
+  const weights = spans.map(([s, e]) => weightIn(s, e));
+  const total = weights.reduce((n, w) => n + w, 0);
+  if (total < HOT_MIN_SAMPLES) return null;
+  const hot = spans.filter(([s], i) => s === entry || weights[i] >= HOT_BLOCK_SHARE * total);
+  const hotSize = hot.reduce((n, [s, e]) => n + e - s, 0);
+  return hotSize < HOT_MAX_SHARE * size ? mergeRanges(hot) : null;
+}
+
 // Turn a discovery result into the plan section of one module.
 // `profile`: normalised profile blocks, to count how often each region was seen.
 export function planModule(result, { id = 0, kind = "dol", read32, profile = null, extra = {} } = {}) {
@@ -96,6 +119,12 @@ export function planModule(result, { id = 0, kind = "dol", read32, profile = nul
   for (const site of result.indirectSites) for (const x of site.resolved ?? []) outside.add(x);
   const outsideSorted = [...outside].sort((a, b) => a - b);
   const profileStarts = profile ? profile.map((b) => b[0]) : [];
+  // Sample weights (profile v3) inside [s, e).
+  const weightIn = (s, e) => {
+    let w = 0;
+    for (let i = lowerBound(profileStarts, s); i < profileStarts.length && profileStarts[i] < e; i++) w += profile[i][4] ?? 0;
+    return w;
+  };
   const functions = result.functions.map((f) => {
     const ranges = mergeRanges(f.blocks.map((b) => [blocks.start[b], blocks.end[b]]));
     const extraEntries = [];
@@ -106,6 +135,7 @@ export function planModule(result, { id = 0, kind = "dol", read32, profile = nul
       }
       for (let i = lowerBound(profileStarts, s); i < profileStarts.length && profileStarts[i] < e; i++) profileHits += profile[i][2] ?? 1;
     }
+    const hot = profile ? hotRanges(f.blocks, blocks, f.entry, weightIn) : null;
     return {
       entry: f.entry,
       confidence: f.confidence,
@@ -113,6 +143,7 @@ export function planModule(result, { id = 0, kind = "dol", read32, profile = nul
       flags: 0,
       ranges,
       extraEntries,
+      ...(hot ? { hotRanges: hot } : {}),
       profileHits,
       hash: read32 ? regionHash(read32, ranges) : null,
       sha256: read32 ? regionSha256(read32, ranges) : null
@@ -251,6 +282,7 @@ export function validatePlan(plan) {
       if (f.sha256 != null && !/^[0-9a-f]{64}$/.test(f.sha256)) fail("bad sha256");
       if (!isU32(f.flags ?? 0)) fail("bad flags");
       for (const x of f.extraEntries ?? []) if (!isWord(x) || !within(f.ranges, x)) fail("extra entry outside its region");
+      for (const [s, e] of f.hotRanges ?? []) if (!isWord(s) || !isWord(e) || e <= s || !within(f.ranges, s) || !within(f.ranges, e - 4)) fail("hot range outside its region");
     }
     for (const t of m.jumpTables ?? []) {
       if (!isWord(t.site) || !isWord(t.table) || !Array.isArray(t.targets) || t.targets.length !== t.count || !t.targets.every(isWord)) fail("bad jump table");

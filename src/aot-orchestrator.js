@@ -436,8 +436,16 @@ export const REGION_MAX_CONTINUATIONS = 31;
 const capped = (fragment, maxBlocks, maxFragmentBytes) => fragment.entries.length >= maxBlocks || fragment.code.length >= maxFragmentBytes;
 export async function translateWithContinuations(m, f, { mask, maxBlocks, names, maxContinuations = REGION_MAX_CONTINUATIONS,
   maxBytes = REGION_CONTINUATION_MAX_BYTES, maxFragmentBytes = REGION_FRAGMENT_MAX_BYTES, slice = async () => {} }) {
-  const first = translateOne(m, f, { mask, maxBlocks, names });
-  if (!first.fragment || maxContinuations <= 0 || !capped(first.fragment, maxBlocks, maxFragmentBytes)) return first;
+  // Hot/cold formation (plan `hotRanges`, from the player's local profile):
+  // the first fragment holds the hot blocks only, so the hot path stays
+  // compact; the frontier then forms the cold fragments, over the ranges
+  // without the hot blocks (they never copy the hot path), and a hot block
+  // the first fragment left out gets a hot continuation.
+  const hot = f.hotRanges?.length ? f.hotRanges : null;
+  const cold = hot ? subtractRanges(f.ranges, hot) : null;
+  const rangesFor = (pc) => (!hot ? f.ranges : hot.some(([s, e]) => pc >= s && pc < e) ? hot : cold);
+  const first = translateOne(m, hot ? { ...f, ranges: hot } : f, { mask, maxBlocks, names });
+  if (!first.fragment || maxContinuations <= 0 || (!hot && !capped(first.fragment, maxBlocks, maxFragmentBytes))) return first;
   const branches = functionBranches(m, f.ranges);
   const owned = new Set(first.fragment.entries.map((pc) => pc >>> 0));
   const tried = new Set();
@@ -450,10 +458,11 @@ export async function translateWithContinuations(m, f, { mask, maxBlocks, names,
     if (pc === undefined) break;
     tried.add(pc);
     await slice();
-    let next = translateOne(m, { ...f, entry: pc }, { mask, maxBlocks, names });
+    const ranges = rangesFor(pc);
+    let next = translateOne(m, { ...f, entry: pc, ranges }, { mask, maxBlocks, names });
     for (let blocks = maxBlocks; next.fragment && next.fragment.code.length > maxFragmentBytes && blocks > 1;) {
       blocks = Math.max(1, blocks >> 1);
-      next = translateOne(m, { ...f, entry: pc }, { mask, maxBlocks: blocks, names });
+      next = translateOne(m, { ...f, entry: pc, ranges }, { mask, maxBlocks: blocks, names });
     }
     if (!next.fragment) continue;
     if (next.fragment.code.length > maxFragmentBytes) { oversize += 1; continue; } // one block alone: left an exit
@@ -462,6 +471,21 @@ export async function translateWithContinuations(m, f, { mask, maxBlocks, names,
     bytes -= next.fragment.code.length;
   }
   return { ...first, ...(continuations.length ? { continuations } : {}), ...(oversize ? { oversize } : {}) };
+}
+
+// `ranges` without `minus` (both sorted [start, end) lists).
+export function subtractRanges(ranges, minus) {
+  const out = [];
+  for (const [s0, e0] of ranges) {
+    let s = s0;
+    for (const [ms, me] of minus) {
+      if (me <= s || ms >= e0) continue;
+      if (ms > s) out.push([s, ms]);
+      s = Math.max(s, me);
+    }
+    if (s < e0) out.push([s, e0]);
+  }
+  return out;
 }
 
 // The direct branches of the code in `ranges` ([start, end) guest
@@ -496,12 +520,13 @@ export function functionBranches(m, ranges) {
 }
 
 // The leaders that the blocks held already reach and that none holds, in
-// address order. A branch belongs to the block of the nearest block start
-// at or before it (held entries and all leaders), unless a block end lies
-// between them: the leaders a held block reaches are the frontier; a word
-// that only looks like a branch (a literal after a blr) is in no block.
+// address order. A branch is in held code when the nearest held entry at or
+// before it reaches it with no block end between them (the core's block can
+// run through a leader it did not split at, e.g. a loop head right after the
+// entry); a word that only looks like a branch (a literal after a blr) is in
+// no block.
 export function frontier(branches, owned) {
-  const starts = [...new Set([...owned, ...branches.flatMap(([, l]) => l)])].sort((a, b) => a - b);
+  const starts = [...owned].sort((a, b) => a - b);
   const blockOf = (a) => {
     let lo = 0, hi = starts.length - 1, at = null;
     while (lo <= hi) { const mid = (lo + hi) >> 1; if (starts[mid] <= a) { at = starts[mid]; lo = mid + 1; } else hi = mid - 1; }
@@ -512,7 +537,7 @@ export function frontier(branches, owned) {
   const out = new Set();
   for (const [a, leaders] of branches) {
     const start = blockOf(a);
-    if (!owned.has(start) || endBetween(start, a)) continue;
+    if (start === null || endBetween(start, a)) continue;
     for (const pc of leaders) if (!owned.has(pc)) out.add(pc);
   }
   return [...out].sort((a, b) => a - b);

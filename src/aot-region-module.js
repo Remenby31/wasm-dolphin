@@ -600,7 +600,10 @@ export async function regionModuleKey(functions, { compilerVersion, codegenMask,
   const text = (formation > 1 ? `formation:${formation};` : "") + functions.map((f) => {
     if (!/^[0-9a-f]{64}$/.test(f.sha256 ?? "")) throw new Error(`region: function ${f.entry?.toString(16)} has no sha256`);
     const extra = [...(f.extraEntries ?? [])].map((pc) => (pc >>> 0)).sort((a, b) => a - b).map((pc) => pc.toString(16)).join(",");
-    return `${(f.entry >>> 0).toString(16)}:${f.sha256}:${extra};`;
+    // Hot/cold formation: the hot blocks shape the module (only present for
+    // a weighed function, so other keys are unchanged).
+    const hot = f.hotRanges?.length ? `:h${f.hotRanges.map(([s, e]) => `${(s >>> 0).toString(16)}-${(e >>> 0).toString(16)}`).join(",")}` : "";
+    return `${(f.entry >>> 0).toString(16)}:${f.sha256}:${extra}${hot};`;
   }).join("");
   const digest = new Uint8Array(await globalThis.crypto.subtle.digest("SHA-256", new TextEncoder().encode(text)));
   const hex = Array.from(digest, (b) => b.toString(16).padStart(2, "0")).join("");

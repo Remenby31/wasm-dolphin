@@ -1180,3 +1180,43 @@ test("a compare's field or operands rewritten in the region (fcmpu, ps_cmpu0, lm
   assert.equal(got.downcount, reference.downcount);
   assert.equal(got.interpreted, 0, "no op left the region");
 });
+
+// Hot/cold formation (step B): with the plan's hotRanges, the first
+// fragment holds the hot blocks only, the cold ones go to continuation
+// fragments of the same module, and the module runs like the interpreter.
+test("hot/cold formation: the first fragment holds the hot blocks, the cold ones are continuations, results unchanged", { skip: contSkip }, async () => {
+  const { blocksFromPcSamples } = await import("../src/aot-profile.js");
+  const t = assemble(LONG, [
+    "entry", asm.li(3, 0),
+    "loop", asm.addi(3, 3, 1), asm.cmplwi(3, 100), (pc, l) => asm.beq(pc, l.cold0),
+    asm.addi(4, 4, 1), asm.cmplwi(4, 7), (pc, l) => asm.beq(pc, l.loop2),
+    "loop2", asm.addi(5, 5, 1), (pc, l) => asm.b(pc, l.loop),
+    ...Array.from({ length: 120 }, (_, i) => [`cold${i}`, asm.addi(6, 6, 1), asm.cmplwi(6, i), (pc, l) => asm.beq(pc, l.out)]).flat(),
+    "out", asm.blr()
+  ]);
+  const dol = buildDol({ textAddr: LONG, text: t.words, entry: t.labels.entry });
+  const { image, entryPoint } = imageFromDol(dol);
+  const samples = [[t.labels.loop, 400], [t.labels.loop + 4, 300], [t.labels.loop2, 300]];
+  const plan = planDol({ image, entryPoint, profile: { sessions: 1, blocks: blocksFromPcSamples(samples) }, options: { gapFill: false } });
+  const f = plan.modules[0].functions.find((x) => x.entry === t.labels.entry);
+  assert.ok(f.hotRanges?.length);
+  for (const s of image.segments) core.load(s.start, s.bytes);
+  core.invalidate(LONG, 4 * t.words.length);
+  core.module._DolphinWeb_AotForgetRegionsForTest?.();
+  const r = await translateWithContinuations(core.module, { entry: f.entry, ranges: f.ranges, hotRanges: f.hotRanges, hash: null },
+    { mask: PRODUCTION_DISABLE_MASK, maxBlocks: 64, names: coreAssembleOptions(core.module)?.helperNames });
+  const inHot = (pc) => f.hotRanges.some(([s, e]) => pc >= s && pc < e);
+  assert.ok(r.fragment.entries.every(inHot), "the first fragment: hot blocks only");
+  assert.ok(r.continuations?.length >= 1, "cold continuations");
+  const fragments = claimEntries([r.fragment, ...r.continuations]);
+  const held = new Set(fragments.flatMap((x) => x.entries));
+  assert.ok(held.has(t.labels.cold0) && held.has(t.labels.cold60), "the cold blocks are held too");
+  const { bytes: mod, entries } = assembleRegion(fragments, { helpers: HELPER_SIGNATURES, pcOffset: core.pcOffset, memoryPages: core.memoryPages });
+  core.setRegionsEnabled(true);
+  core.queueRegion(mod, entries.map(([pc]) => pc), [{ ranges: f.ranges, hash: null }]);
+  core.serviceRegions();
+  const reference = runCall(t.labels.entry, { regions: false });
+  const got = runCall(t.labels.entry, { regions: true });
+  assert.deepEqual(got.state, reference.state);
+  assert.equal(got.interpreted, 0, "everything ran in regions");
+});

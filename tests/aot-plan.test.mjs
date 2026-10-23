@@ -326,3 +326,33 @@ test("aot profile v3: sample weights round trip, halve at a new session, add up 
   assert.deepEqual(decodeProfile(v2).blocks, [[0x80003100, 0x80003104, 3, 0, 0]]);
 });
 
+
+// Hot/cold formation (step B): a large function whose blocks the local
+// profile weighed gets hotRanges, its blocks with at least 0.25 % of its
+// samples plus its entry; an unweighed one gets none, nor does a small one.
+function hotColdFunction() {
+  // entry; a hot loop of 4 blocks; 120 cold blocks (> 1 KB of code); blr.
+  return assemble(TEXT, [
+    "entry", asm.li(3, 0),
+    "loop", asm.addi(3, 3, 1), asm.cmplwi(3, 100), (pc, l) => asm.beq(pc, l.cold0),
+    asm.addi(4, 4, 1), asm.cmplwi(4, 7), (pc, l) => asm.beq(pc, l.loop2),
+    "loop2", asm.addi(5, 5, 1), (pc, l) => asm.b(pc, l.loop),
+    ...Array.from({ length: 120 }, (_, i) => [`cold${i}`, asm.addi(6, 6, 1), asm.cmplwi(6, i), (pc, l) => asm.beq(pc, l.out)]).flat(),
+    "out", asm.blr()
+  ]);
+}
+test("aot plan: hotRanges from the profile's sample weights, for a large weighed function only", () => {
+  const t = hotColdFunction();
+  const dol = buildDol({ textAddr: TEXT, text: t.words, entry: t.labels.entry });
+  const { image, entryPoint } = imageFromDol(dol);
+  const plain = planDol({ image, entryPoint, options: { gapFill: false } });
+  assert.equal(plain.modules[0].functions.find((f) => f.entry === t.labels.entry).hotRanges, undefined, "no profile, no hot ranges");
+  const samples = [[t.labels.loop, 400], [t.labels.loop + 4, 300], [t.labels.loop2, 300], [t.labels.cold0 + 4, 1]];
+  const plan = planDol({ image, entryPoint, profile: { sessions: 1, blocks: blocksFromPcSamples(samples) }, options: { gapFill: false } });
+  const f = plan.modules[0].functions.find((x) => x.entry === t.labels.entry);
+  assert.ok(f.hotRanges?.length, "hot ranges");
+  const inHot = (pc) => f.hotRanges.some(([s, e]) => pc >= s && pc < e);
+  assert.ok(inHot(t.labels.entry) && inHot(t.labels.loop) && inHot(t.labels.loop2), "the entry and the loop");
+  assert.ok(!inHot(t.labels.cold0) && !inHot(t.labels.cold60), "not the cold blocks (one sample in cold0 is under 0.25 %)");
+  validatePlan(plan);
+});

@@ -277,7 +277,7 @@ export class AotOptimizer extends EventTarget {
       if (this.cancelled) return null;
       const slice = unit.members.slice(i, i + this.batchSize);
       const batch = slice.map((f) => ({
-        module: unit.module, entry: f.entry, flags: f.flags ?? 0, hash: f.hash, ranges: f.ranges, extraEntries: f.extraEntries ?? [], continuationBytesUsed
+        module: unit.module, entry: f.entry, flags: f.flags ?? 0, hash: f.hash, ranges: f.ranges, extraEntries: f.extraEntries ?? [], ...(f.hotRanges ? { hotRanges: f.hotRanges } : {}), continuationBytesUsed
       }));
       const translated = await this.translator.translate(batch);
       if (this.cancelled) return null;
