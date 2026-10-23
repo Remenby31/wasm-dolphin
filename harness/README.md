@@ -343,6 +343,12 @@ node harness/kpi-report.mjs [--print]
   `../measures/kpi/manual.json`:
   `{ "<kpi id>": { "value": <number>, "source": "…", "at": "…", "note": "…" } }`;
   an unreadable file turns those rows into n/a with the reason.
+  `--candidate <race-perf summary.json>` adds a column beside trunk's; a
+  candidate measured on another machine (`host`) or with other Chrome
+  arguments than trunk's stock Chrome is shown but flagged as not
+  comparable (`setupOf` / `setupDifferences` in `lib/kpi.mjs`: absent
+  arguments count as none, so Spark summaries from before and after the V8
+  flag of PR #145 never compare).
   A **candidate** column (a PR's head, measured before it merges) can sit
   beside trunk: `--candidate <race-perf summary.json> [--candidate-label …]`,
   or `../measures/kpi/candidate.json` `{ "summary": "<path from the program
