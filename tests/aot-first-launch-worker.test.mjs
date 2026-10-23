@@ -148,3 +148,51 @@ test("the first-image wait: woken by the first presented frame, or by its timeou
   assert.equal(woken, true, "the first presented frame wakes it");
   assert.equal(await worker.aotWhenFirstImageForTest({}, { timeoutMs: 30 }), false, "no frame: the timeout");
 });
+
+// Review of #173: the worker's profile wiring with an engine disc key (a
+// ':' in it). The recorder writes the profile, the probes see it, and the
+// next plan build receives it. Reverting profileKey in the worker fails this.
+function fakeOpfs() {
+  const notFound = () => Object.assign(new Error("missing"), { name: "NotFoundError" });
+  const dir = () => {
+    const files = new Map(), dirs = new Map();
+    return {
+      async getDirectoryHandle(name, { create } = {}) {
+        if (!dirs.has(name)) { if (!create) throw notFound(); dirs.set(name, dir()); }
+        return dirs.get(name);
+      },
+      async getFileHandle(name, { create } = {}) {
+        if (!files.has(name) && !create) throw notFound();
+        if (!files.has(name)) files.set(name, new Uint8Array());
+        return {
+          getFile: async () => ({ size: files.get(name).length, arrayBuffer: async () => files.get(name).slice().buffer, text: async () => new TextDecoder().decode(files.get(name)) }),
+          createWritable: async () => {
+            let pending = new Uint8Array();
+            return { write: async (b) => { pending = typeof b === "string" ? new TextEncoder().encode(b) : new Uint8Array(b.buffer ?? b); }, close: async () => { files.set(name, pending); }, abort: async () => {} };
+          }
+        };
+      },
+      async removeEntry(name) { if (!files.delete(name)) throw notFound(); },
+      async *entries() { for (const [n] of files) yield [n, null]; }
+    };
+  };
+  return dir();
+}
+
+test("the local profile: an engine disc key records, the probes see it, the next plan build receives it", async (t) => {
+  const { worker } = await loadWorker(t);
+  worker.setAotFirstLaunchEnabledForTest(true);
+  const opfs = fakeOpfs();
+  const options = { module: fakeCore(), readDiscKey: async () => DISC, coreHash: CORE, cacheStorage: fakeCacheStorage(), storageRoot: () => opfs };
+  await worker.prepareAotFirstLaunch({}, options);
+  assert.ok(DISC.includes(":"), "an engine disc key");
+  const saved = await worker.recordAotProfileForTest([[0x80003100, 5], [0x80003104, 2]]);
+  assert.ok(saved, "recorded");
+  const { profile } = await worker.handleAotMessage("validationReadAotProgress");
+  assert.deepEqual([profile.opfs, profile.records, profile.writeFailures, profile.readFailures], [true, 1, 0, 0]);
+  // The next plan build (the flow's start) loads it.
+  await worker.startAotFirstLaunchAfterBoot();
+  const planned = worker.aotPlanProfileReadForTest();
+  assert.deepEqual(planned?.blocks.map((b) => [b[0], b[4]]), [[0x80003100, 5], [0x80003104, 2]], "the plan build got the weights");
+  worker.setAotFirstLaunchEnabledForTest(false);
+});

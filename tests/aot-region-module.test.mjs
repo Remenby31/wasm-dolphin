@@ -220,6 +220,26 @@ test("aot region: a name section names the region's functions r<lowest entry>_f<
   assert.equal(r.word(COUNT), 111);
 });
 
+test("aot region: branch hints from the core become a metadata.code.branch_hint section (0131)", async () => {
+  // A: if (state.pc == 0x1000) { ... } with its `if` hinted unlikely; a hint on a non-`if` byte is dropped.
+  const [A, B] = program();
+  const ifAt = Array.from(A.code).indexOf(0x04);
+  const hinted = { ...A, relocs: [...A.relocs, { offset: ifAt, kind: "hint", likely: false }, { offset: 1, kind: "hint", likely: true }] };
+  const opts = { helpers: HELPERS, pcOffset: PC, memoryPages: 1 };
+  const region = assembleRegion([hinted, B], opts);
+  const [section] = WebAssembly.Module.customSections(new WebAssembly.Module(region.bytes), "metadata.code.branch_hint");
+  assert.ok(section, "section present");
+  const bytes = new Uint8Array(section);
+  assert.equal(bytes[0], 1, "one function hinted");
+  assert.deepEqual(Array.from(bytes.slice(2)), [1, ifAt, 1, 0], "one hint: offset, size 1, unlikely");
+  assert.equal(region.hintsDropped, 1, "the hint off an `if` is counted");
+  const r = await instantiate(region);
+  assert.equal(r.run(0x1000), 0, "runs as before");
+  assert.equal(r.word(COUNT), 111);
+  // without hints, no section
+  assert.equal(WebAssembly.Module.customSections(new WebAssembly.Module(assembleRegion([A, B], opts).bytes), "metadata.code.branch_hint").length, 0);
+});
+
 test("aot region: the fragments table lets a warm-up call every fragment", async () => {
   const { compileAndWarm, createWarmer } = await import("../src/aot-compiler-worker.js");
   const [A, B] = program();

@@ -102,6 +102,9 @@ export function visitRegions(events, regions, { t0, ticksAtBoot, ticksPerSecond 
   };
 }
 
+// The local profile's size on disk after a visit, or null when there is none.
+export const profileBytes = (files) => (Array.isArray(files) && files.length ? files.reduce((n, f) => n + f.bytes, 0) : null);
+
 // Region keys that came or went between two visits are not readable from
 // the engine; the modules a visit had to translate (compiled) over those it
 // ended with is the churn: 0 once the formation is stable.
@@ -118,8 +121,9 @@ async function measureRun(o, server, loadGate) {
     for (let v = 1; v <= o.visits; v += 1) {
       const visit = { visit: v, ...(await measureVisit(o, server, profileDir)) };
       if (visit.regionFacts) visit.churn = churnOf(visit.regionFacts);
+      visit.profileBytes = profileBytes(visit.profileFiles);
       record.visits.push(visit);
-      console.log(`[ramp] visit ${v}: ${visit.error ?? `compiled ${visit.regionFacts?.compiled ?? "-"}, from cache ${visit.regionFacts?.fromCache ?? "-"}, installed ${visit.regionFacts?.installedAtEnd ?? "-"}, last install at ${visit.regionFacts?.lastInstallMs ?? "-"} ms, churn ${visit.churn ?? "-"}${visit.cyclesPerGuestCycle ? `, ${round(visit.cyclesPerGuestCycle, 3)} cycles per guest cycle` : ""}`}`);
+      console.log(`[ramp] visit ${v}: ${visit.error ?? `profile ${visit.profileBytes ?? "NONE"} bytes, compiled ${visit.regionFacts?.compiled ?? "-"}, from cache ${visit.regionFacts?.fromCache ?? "-"}, installed ${visit.regionFacts?.installedAtEnd ?? "-"}, last install at ${visit.regionFacts?.lastInstallMs ?? "-"} ms, churn ${visit.churn ?? "-"}${visit.cyclesPerGuestCycle ? `, ${round(visit.cyclesPerGuestCycle, 3)} cycles per guest cycle` : ""}`}`);
       if (visit.error) break;
     }
     return record;
@@ -138,7 +142,9 @@ export function summarizeVisits(records, visits) {
     out.push({
       visit: v, runs: rows.length,
       compiled: med((x) => x.regionFacts?.compiled), churn: med((x) => x.churn), budgetRefused: med((x) => x.regionFacts?.budgetRefused),
-      fromCache: med((x) => x.regionFacts?.fromCache), installedAtEnd: med((x) => x.regionFacts?.installedAtEnd),
+      fromCache: med((x) => x.regionFacts?.fromCache), profileBytes: med((x) => x.profileBytes),
+      // Visits without a local profile on disk: the weights were never written.
+      withoutProfile: rows.filter((x) => x.profileBytes == null).length, installedAtEnd: med((x) => x.regionFacts?.installedAtEnd),
       lastInstallMs: med((x) => x.regionFacts?.lastInstallMs), lastInstallGuestSec: med((x) => x.regionFacts?.lastInstallGuestSec),
       plateauSpeed: med((x) => x.ramp?.plateauSpeed),
       instructionsPerGuestCycle: med((x) => x.instructionsPerGuestCycle), cyclesPerGuestCycle: med((x) => x.cyclesPerGuestCycle)
@@ -196,7 +202,20 @@ async function measureVisit(o, server, profileDir) {
     await drain;
     // The profile, the JIT cache and the prewarm written before the close
     // (a headless close may skip pagehide): the next visit reads them.
-    if (o.visits > 1) record.flushed = await page.evaluate(() => window.__host?.adapter?.flushUserData?.().then(() => true, (e) => String(e?.message || e)) ?? "no adapter").catch((e) => String(e.message || e));
+    if (o.visits > 1) {
+      record.flushed = await page.evaluate(() => window.__host?.adapter?.flushUserData?.().then(() => true, (e) => String(e?.message || e)) ?? "no adapter").catch((e) => String(e.message || e));
+      // The local profile on disk (OPFS aot-profile/, src/aot-profile.js):
+      // a visit that leaves none (a profile never written, #173) measures
+      // two identical formations.
+      record.profileFiles = await page.evaluate(async () => {
+        try {
+          const dir = await (await navigator.storage.getDirectory()).getDirectoryHandle("aot-profile");
+          const out = [];
+          for await (const [name, h] of dir.entries()) if (h.kind === "file") out.push({ name, bytes: (await h.getFile()).size });
+          return out;
+        } catch (e) { return { error: String(e?.name || e) }; }
+      }).catch((e) => ({ error: String(e.message || e) }));
+    }
     chunks.push(await readTimeline(page).catch((e) => ({ error: String(e.message || e) })));
     const timeline = mergeTimeline(chunks);
     const tps = (await workerRequest(page, "validationReadCoreProgress", {}, 15000).catch(() => null))?.coreTicksPerSecond ?? null;
@@ -283,7 +302,7 @@ async function main() {
   };
   writeFileSync(path.join(outDir, "summary.json"), JSON.stringify(summary, null, 1) + "\n");
   if (o.visits > 1) {
-    for (const v of summary.visitSummary) log(`visit ${v.visit}: compiled ${v.compiled}, churn ${v.churn}, last install ${v.lastInstallMs} ms (${v.lastInstallGuestSec} guest s), from cache ${v.fromCache}${v.cyclesPerGuestCycle != null ? `, ${v.cyclesPerGuestCycle} cycles per guest cycle` : ""} (medians over ${v.runs} run(s))`);
+    for (const v of summary.visitSummary) log(`visit ${v.visit}: profile ${v.profileBytes ?? "NONE"} bytes${v.withoutProfile ? ` (${v.withoutProfile} run(s) without one)` : ""}, compiled ${v.compiled}, churn ${v.churn}, last install ${v.lastInstallMs} ms (${v.lastInstallGuestSec} guest s), from cache ${v.fromCache}${v.cyclesPerGuestCycle != null ? `, ${v.cyclesPerGuestCycle} cycles per guest cycle` : ""} (medians over ${v.runs} run(s))`);
     log(`-> ${outDir}`);
     process.exitCode = records.every((r) => r.visits?.length === o.visits && r.visits.every((v) => !v.error)) ? 0 : 1;
     return;

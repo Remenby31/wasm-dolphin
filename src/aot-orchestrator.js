@@ -540,6 +540,7 @@ function translateOne(m, f, { mask, maxBlocks, names }) {
     if (kind === 0) return { offset, kind: "import", name: names[value] };
     if (kind === 1) return { offset, kind: "jump", targetPc: value };
     if (kind === 3) return { offset, kind: "heap", name: REGION_HEAP_NAMES[value & 1], form: value & 2 ? "offset" : "const" };
+    if (kind === 4) return { offset, kind: "hint", likely: value === 1 }; // an `if` and whether its true arm is likely (0131)
     return { offset, kind: "dispatch" };
   });
   const at = p + 24 + 4 * (entryCount + 3 * relocCount);
