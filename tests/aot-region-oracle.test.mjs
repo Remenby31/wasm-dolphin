@@ -139,3 +139,25 @@ test("a GPR written first by a load whose slow path halts keeps its value (0127,
   assert.ok(r.translated && !r.trap && !r.error, `${r.error ?? "trap or untranslated"}`);
   assert.ok(r.equal, JSON.stringify(r.difference));
 });
+
+test("a load that faults before the integer write of an unloaded GPR leaves that GPR as it was (0127)", { skip: deadSkip }, () => {
+  // The halt's flush is emitted before the later write: r5 is neither loaded
+  // nor dirty there, and must keep its value. Two faulting loads: an
+  // unaligned lmw (alignment) and an lfs with MSR.FP clear (FP unavailable).
+  const lmw = (d, a, off) => (46 << 26) | (d << 21) | (a << 16) | (off & 0xffff);
+  const lfsOp = (d, a, off) => (48 << 26) | (d << 21) | (a << 16) | (off & 0xffff);
+  const cases = [
+    ["lmw (alignment)", [lmw(29, 1, 2), addi(5, 0, 1), add(7, 5, 5), BLR], null],
+    ["lfs (FP unavailable)", [lfsOp(1, 9, 0), addi(5, 0, 1), add(7, 5, 5), BLR], (s) => { s[37] &= ~MSR_FP; }]
+  ];
+  for (const [what, program, run] of cases) {
+    const translateState = baseState(33);
+    translateState[9] = 0x80004000;
+    const state = translateState.slice();
+    run?.(state);
+    const r = compareRegionProgram(core, program, state, { translateState });
+    assert.ok(r.translated && !r.trap && !r.error, `${what}: ${r.error ?? "trap or untranslated"}`);
+    assert.equal(r.got.end, "exception", `${what}: faults`);
+    assert.ok(r.equal, `${what}: ${JSON.stringify(r.difference)}`);
+  }
+});
