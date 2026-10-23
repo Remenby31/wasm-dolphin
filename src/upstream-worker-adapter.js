@@ -716,14 +716,15 @@ export class UpstreamWorkerAdapter {
     return true;
   }
 
-  // Buttons pressed since the last update and maybe already released: the SI
-  // poll keeps them until a poll of a later frame reported them. False when
-  // the core cannot (no direct block, or not a guest's port): the caller holds
-  // them itself.
-  tapPad(port, buttons) {
+  // Presses since the last update, maybe already released: a button mask
+  // (one each) or per-button counts (12 numbers; several presses of a button
+  // revealed at once by a lossy channel). The SI poll reports each, with a
+  // release window between two presses of a button. False when the core
+  // cannot (no direct block, or not a guest's port): the caller holds them.
+  tapPad(port, presses) {
     if (!this.directPad || !this.directPadWrites || !this.remotePads.has(port)) return false;
     if (!this.padPorts.ports[port]?.connected) return false;
-    this.directPad.tap(port, buttons >>> 0);
+    this.directPad.tap(port, Array.isArray(presses) ? presses : presses >>> 0);
     return true;
   }
 
