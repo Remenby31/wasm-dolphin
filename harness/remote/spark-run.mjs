@@ -48,7 +48,7 @@ import { pathToFileURL } from "node:url";
 import { parseArgs } from "node:util";
 
 import { exportRef } from "../cli.mjs";
-import { PRESETS } from "../lib/matrix.mjs";
+import { PRESETS, SCENE_PROTOCOLS, sceneProtocolCheck } from "../lib/matrix.mjs";
 import { REPO_ROOT } from "../lib/browser.mjs";
 import { IDENTITY_FILE, snapshotTree } from "../lib/server.mjs";
 import { MAX_BUILDS_PER_OWNER, ownerBuilds } from "./spark-queue.mjs";
@@ -100,6 +100,28 @@ export function multiArms(baseline, candidates) {
 export function multiRaceArgs({ iso, state, runs, armDirs, extra = [] }) {
   if (Number(runs) % armDirs.length) throw new Error(`--runs ${runs}: a multiple of ${armDirs.length} with --multi (each arm visits each lane equally)`);
   return ["--iso", iso, "--state", state, "--runs", String(runs), ...armDirs.flatMap((d) => ["--arm", d]), "--lanes", MULTI_LANES, ...MULTI_ARGS, "--query", MULTI_QUERY, ...extra];
+}
+
+// A KPI scene's pinned protocol (matrix.mjs SCENE_PROTOCOLS) as race-multi
+// options, put before the caller's own: the heavy intro measured with the
+// race's 15 + 10 s and the key held left its ~9 s heavy phase, and the arms
+// read different stretches (jit-0121b-heavy, 2026-10-23: A/A -1.48 %,
+// residual 1-2 %, against 0.05 % with the protocol).
+export function sceneMultiArgs(scene) {
+  const p = SCENE_PROTOCOLS[scene];
+  return p ? ["--emulated-window", String(p.emulatedWindow), "--emulated-warmup", String(p.warmup), ...(p.hold == null ? ["--hold", ""] : ["--hold", p.hold])] : [];
+}
+
+// The value race-multi will see for an option (its last occurrence).
+const lastOpt = (args, name) => { const i = args.lastIndexOf(name); return i >= 0 ? args[i + 1] : undefined; };
+
+// The final race-multi arguments against the scene's protocol: errors
+// refuse the job, warnings are printed and kept in spark.json.
+export function multiSceneCheck(scene, raceArgs) {
+  return sceneProtocolCheck(scene, {
+    warmup: Number(lastOpt(raceArgs, "--emulated-warmup")), window: Number(lastOpt(raceArgs, "--emulated-window")),
+    emulated: raceArgs.includes("--emulated-window"), hold: lastOpt(raceArgs, "--hold") ?? "KeyX"
+  });
 }
 
 // Refuses an arm whose commit predates the layout fix (unknown: refused).
@@ -450,13 +472,19 @@ async function multi(host, values, positionals) {
   const iso = benchDisc(host, values.iso);
   const home = ssh(host, "printf %s \"$HOME\"").out;
   const abs = (p) => `${home}/${p}`;
-  const raceArgs = multiRaceArgs({ iso: abs(iso), state: abs(state), runs: values.runs, armDirs: specs.map((s) => abs(pushed.get(s).dest)), extra: positionals });
+  const scene = path.basename(values.state);
+  const raceArgs = multiRaceArgs({ iso: abs(iso), state: abs(state), runs: values.runs, armDirs: specs.map((s) => abs(pushed.get(s).dest)), extra: [...sceneMultiArgs(scene), ...positionals] });
+  const sceneCheck = multiSceneCheck(scene, raceArgs);
+  if (sceneCheck.errors.length) throw new Error(`scene protocol: ${sceneCheck.errors.join("; ")}`);
+  for (const w of sceneCheck.warnings) console.warn(`[spark-run] scene protocol: ${w}`);
+  if (sceneCheck.protocol) console.log(`[spark-run] ${scene}: pinned protocol (${sceneCheck.protocol.why})`);
   const outDir = abs(`${BENCH}/results/${date}/${name}`);
   const meta = {
     host: "spark", mode: "multi", hostname: ssh(host, "hostname").out.trim(), at: new Date().toISOString(),
     harness: { from: REPO_ROOT, key: path.basename(harness.dest) },
     arms: specs.map((s) => ({ spec: s, dest: pushed.get(s).dest, source: pushed.get(s).source ?? null })),
-    raceArgs
+    raceArgs,
+    sceneProtocol: sceneCheck.protocol ? { scene, ...sceneCheck.protocol, warnings: sceneCheck.warnings } : null
   };
   ssh(host, multiLaunchCommand({ harnessDir: abs(harness.dest), outDir, raceArgs }));
   mkdirSync(path.join(MEASURES, date, name), { recursive: true });
