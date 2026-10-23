@@ -25,7 +25,7 @@
       "commit": "01e0577914a75a2569c846778c2f93aa8e6feddd"
     }
   },
-  "patchSeriesSha256": "50e8a8df4142046645f94fcdac5f0ca51cab1647884aaa0cf1040c05a235f81f",
+  "patchSeriesSha256": "d01b75cd8a765a230359324d0c547ec5137d0e21e2b90b3ec390f4086d256c8a",
   "patches": [
     {
       "order": 1,
@@ -840,8 +840,8 @@
       "cwd": ".",
       "hashMode": "lf-normalized",
       "path": "patches/dolphin-wasm/snapshot/0130-region-fragment-cap.patch",
-      "size": 2301,
-      "sha256": "16deadedf83258250b6b7b2039b8883ae09326fc53553443e07b30af142e7c0c"
+      "size": 4131,
+      "sha256": "68157b0a05f8ca54d18dedff42d2b23700d9fd24c36846e0692ba463edd3ef91"
     },
     {
       "order": 103,

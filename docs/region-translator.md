@@ -441,9 +441,11 @@ in order.)
 
 A fragment stops taking blocks once their bodies hold 96 000 bytes of code;
 the blocks left out run in continuation fragments, or outside the region.
-The fragment's code (bodies plus tails and dispatch) is then at least that
-size, so `translateWithContinuations` (same constant,
-`REGION_FRAGMENT_MAX_BYTES`) sees it as capped. In a race on main, the three
+The core says so (bit 31 of the entry count it returns): the orchestrator
+(`translateWithContinuations`, same constant `REGION_FRAGMENT_MAX_BYTES`)
+then starts continuations, and takes a continuation the core capped as it
+is. Its code (bodies, tails and head) is a little over the cap, so a size
+check alone would halve and translate it again. In a race on main, the three
 fragments of more than ~1.7 MB of Liftoff code (about 500 KB of body) never
 reached TurboFan in 157 s, while fragments of 570 to 760 KB of Liftoff code
 did: V8's optimizing tier gives up on functions that big. 96 KB of wasm body

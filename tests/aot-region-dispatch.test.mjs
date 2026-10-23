@@ -1125,6 +1125,32 @@ test("continuations: a leader that does not translate stays an exit; a data word
   assert.equal(held.has(program.labels.island), false, "the literal's target is never translated");
 });
 
+// 0130: the core caps a fragment at 96 000 bytes of block bodies and says
+// so (bytesCapped). The orchestrator starts continuations from it and takes a
+// continuation the core capped as it is: one translation per continuation,
+// none halved and translated again, though its code is a little over the cap.
+test("a fragment the core capped at its byte cap gets continuations, each translated once (0130)", { skip: contSkip || (keyVersion() < 22 && "core before 0130 (compiler version < 22)") }, async () => {
+  const lwz = (d, a, off) => (32 << 26) | (d << 21) | (a << 16) | (off & 0xffff);
+  const stw = (s, a, off) => (36 << 26) | (s << 21) | (a << 16) | (off & 0xffff);
+  const items = ["start"];
+  for (let b = 0; b < 48; b++) {
+    for (let k = 0; k < 60; k++) items.push(lwz(5, 1, 8), stw(5, 1, 12));
+    items.push(asm.cmplwi(3, 0), (pc, l) => asm.beq(pc, l[`b${b + 1}`]), `b${b + 1}`);
+  }
+  items.push(asm.blr());
+  const program = assemble(LONG, items);
+  let calls = 0;
+  const counting = new Proxy(core.module, { get: (m, k) => k === "_DolphinWeb_AotTranslate" ? (...a) => { calls += 1; return m._DolphinWeb_AotTranslate(...a); } : m[k] });
+  const r = await translateWithContinuations(counting, { entry: program.labels.start, ranges: loadWords(LONG, program.words), hash: null },
+    { mask: PRODUCTION_DISABLE_MASK, maxBlocks: 256, names: coreAssembleOptions(core.module)?.helperNames });
+  assert.ok(r.fragment?.bytesCapped, "the first fragment is capped by its bytes");
+  assert.ok(r.fragment.entries.length < 97, `${r.fragment.entries.length} blocks`);
+  assert.ok(r.continuations?.length >= 1, "continuations follow");
+  assert.equal(calls, 1 + r.continuations.length, "each continuation translated once");
+  const held = new Set(claimEntries([r.fragment, ...r.continuations]).flatMap((f) => f.entries));
+  for (let b = 1; b <= 48; b++) assert.ok(held.has(program.labels[`b${b}`]), `block b${b} held`);
+});
+
 test("the region key changes with the formation", async () => {
   const f = [{ entry: 0x80003100, sha256: "a".repeat(64) }];
   const parts = { compilerVersion: 5, codegenMask: 0 };

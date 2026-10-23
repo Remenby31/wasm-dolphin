@@ -176,9 +176,9 @@ test("under the MMU the translator refuses every entry, and translates again onc
 });
 
 // 0130: a fragment stops taking blocks once their bodies reach 96 000 bytes
-// (V8's optimizing tier gives up on much bigger functions). 64 blocks of 120
-// loads and stores would make far more; the fragment keeps a prefix of them,
-// and its code reaches REGION_FRAGMENT_MAX_BYTES, so the orchestrator starts
+// (V8's optimizing tier gives up on much bigger functions), and the core says
+// so (bit 31 of the entry count): 64 blocks of 120 loads and stores would make
+// far more; the fragment keeps a prefix of them, and the orchestrator starts
 // continuations for the rest.
 const BIG_TEXT = 0x80020100;
 
@@ -205,10 +205,14 @@ test("a fragment stops taking blocks at 96 KB of code (0130)", { skip: skip || (
   for (const s of image.segments) core.load(s.start, s.bytes);
   const fragment = core.translate(big.labels.big, { ranges: [[BIG_TEXT, BIG_TEXT + 4 * big.words.length]], maxBlocks: 256 });
   assert.ok(fragment, "translated");
-  if (fragment.code.length < REGION_FRAGMENT_MAX_BYTES) return; // a translator that emits less per op stays under the cap whole
+  // 64 blocks of 120 loads and stores are far over the cap with any emitter.
+  assert.ok(fragment.bytesCapped, "the core says it left blocks out at its byte cap");
   assert.ok(fragment.entries.length < 65, `${fragment.entries.length} blocks`);
-  assert.ok(fragment.code.length >= REGION_FRAGMENT_MAX_BYTES, "a capped fragment reads as capped to the orchestrator");
+  assert.ok(fragment.code.length >= REGION_FRAGMENT_MAX_BYTES, "the blocks' bodies reach the cap");
   assert.ok(fragment.code.length < REGION_FRAGMENT_MAX_BYTES + 80000, `${fragment.code.length} bytes`);
+  // The same function with room for every block: not capped, no flag.
+  const small = core.translate(big.labels.big, { ranges: [[BIG_TEXT, BIG_TEXT + 4 * big.words.length]], maxBlocks: 2 });
+  assert.equal(small.bytesCapped, undefined, "two blocks stay under the cap");
 });
 
 const sleb = (v) => { const o = []; for (;;) { const b = v & 0x7f; v >>= 7; if ((v === 0 && !(b & 0x40)) || (v === -1 && (b & 0x40))) { o.push(b); return o; } o.push(b | 0x80); } };

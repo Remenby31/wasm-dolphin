@@ -1,7 +1,18 @@
 diff --git a/Source/Core/Core/PowerPC/CachedInterpreter/CachedInterpreter.cpp b/Source/Core/Core/PowerPC/CachedInterpreter/CachedInterpreter.cpp
 --- a/Source/Core/Core/PowerPC/CachedInterpreter/CachedInterpreter.cpp
 +++ b/Source/Core/Core/PowerPC/CachedInterpreter/CachedInterpreter.cpp
-@@ -16754,7 +16754,16 @@ bool BuildRegionFragment(Core::System& system, u32 entry_pc, std::span<const u32
+@@ -16719,6 +16719,10 @@ struct RegionFragment
+     u32 value;  // helper index, target pc, 0, heap: base (bit 0) and form (bit 1)
+   };
+   std::vector<Reloc> relocs;
++  // 0130: blocks were left out at the byte cap. Bit 31 of the entry count
++  // the translators return, so the orchestrator starts continuations and
++  // takes the fragment as it is (its code exceeds the cap by the tails).
++  bool bytes_capped = false;
+ };
+ 
+ // The blocks of a function reachable from its entry through static
+@@ -16754,7 +16758,15 @@ bool BuildRegionFragment(Core::System& system, u32 entry_pc, std::span<const u32
    std::vector<FragmentBlock> blocks;
    std::vector<u32> work{entry_pc};
    std::unordered_set<u32> seen{entry_pc};
@@ -11,23 +22,35 @@ diff --git a/Source/Core/Core/PowerPC/CachedInterpreter/CachedInterpreter.cpp b/
 +  // baseline code (about 500 KB of body): in a race, the three fragments past
 +  // it never left Liftoff in 157 s. The blocks left out run outside the
 +  // region, or in a continuation fragment (src/aot-orchestrator.js,
-+  // REGION_FRAGMENT_MAX_BYTES: same value; the fragment's code is at least the
-+  // sum counted here, so the orchestrator sees every capped fragment).
++  // REGION_FRAGMENT_MAX_BYTES: same value), which the core marks as capped.
 +  constexpr std::size_t max_fragment_bytes = 96000;
 +  std::size_t fragment_bytes = 0;
 +  while (!work.empty() && blocks.size() < max_blocks && fragment_bytes < max_fragment_bytes)
    {
      const u32 pc = work.front();
      work.erase(work.begin());
-@@ -16777,6 +16786,7 @@ bool BuildRegionFragment(Core::System& system, u32 entry_pc, std::span<const u32
+@@ -16777,8 +16789,10 @@ bool BuildRegionFragment(Core::System& system, u32 entry_pc, std::span<const u32
        if ((next & 3) == 0 && inside(next) && seen.insert(next).second)
          work.push_back(next);
      }
 +    fragment_bytes += fb.expr.size();
      blocks.push_back(std::move(fb));
    }
++  out->bytes_capped = !work.empty() && fragment_bytes >= max_fragment_bytes;
    std::unordered_set<u32> starts;
-@@ -16937,8 +16947,9 @@ namespace
+   for (const auto& b : blocks)
+     starts.insert(b.start);
+@@ -16906,7 +16920,8 @@ extern "C" EMSCRIPTEN_KEEPALIVE const u32* DolphinWeb_AotTranslateForTest(
+     return nullptr;
+   auto& out = s_aot_translate_out;
+   out.assign({entry_pc, static_cast<u32>(fragment.code.size()),
+-              static_cast<u32>(fragment.entries.size()),
++              static_cast<u32>(fragment.entries.size()) |
++                  (fragment.bytes_capped ? 0x80000000u : 0u),
+               static_cast<u32>(fragment.relocs.size())});
+   out.insert(out.end(), fragment.entries.begin(), fragment.entries.end());
+   for (const auto& reloc : fragment.relocs)
+@@ -16937,8 +16952,9 @@ namespace
  // taken by 0108-0110). 16 (0121): region code takes MSR LE/FE0/FE1 and
  // HID2.LSQE for granted (15 is 0119's). 17 (0126): region byte swaps as two
  // rotates (11-15 are taken by 0112-0119). 21 (0129): fused relaxed_madd mode
@@ -39,3 +62,14 @@ diff --git a/Source/Core/Core/PowerPC/CachedInterpreter/CachedInterpreter.cpp b/
  constexpr u32 AOT_MAX_FRAGMENT_BYTES = 1u << 20;
  thread_local std::vector<u32> t_aot_out;
  u8* s_aot_ram = nullptr;
+@@ -17037,7 +17053,9 @@ extern "C" EMSCRIPTEN_KEEPALIVE const u32* DolphinWeb_AotTranslate(u32 entry_pc,
+ 
+   auto& out = t_aot_out;
+   out.assign({0, entry_pc, static_cast<u32>(fragment.code.size()),
+-              static_cast<u32>(fragment.entries.size()), static_cast<u32>(fragment.relocs.size()),
++              static_cast<u32>(fragment.entries.size()) |
++                  (fragment.bytes_capped ? 0x80000000u : 0u),
++              static_cast<u32>(fragment.relocs.size()),
+               WasmLayoutHash(CurrentWasmStateLayout(Core::System::GetInstance()))});
+   out.insert(out.end(), fragment.entries.begin(), fragment.entries.end());
+   for (const auto& reloc : fragment.relocs)
