@@ -25,7 +25,7 @@
       "commit": "01e0577914a75a2569c846778c2f93aa8e6feddd"
     }
   },
-  "patchSeriesSha256": "fbb12cf9685ce8bdce0000d80c0c7d525e16f41b525513dd12ac666a1ca1783c",
+  "patchSeriesSha256": "ef9432eac795645129a632fb46a469d708213ef86f25ff2809d9e53840b635ad",
   "patches": [
     {
       "order": 1,
@@ -743,12 +743,20 @@
       "order": 90,
       "cwd": ".",
       "hashMode": "lf-normalized",
+      "path": "patches/dolphin-wasm/snapshot/0107-region-installs-in-throttle-sleep.patch",
+      "size": 14861,
+      "sha256": "ab1cff9cf64a939235aac58fb6517a0ce8c375233edb3043dcfda018b16efaa4"
+    },
+    {
+      "order": 91,
+      "cwd": ".",
+      "hashMode": "lf-normalized",
       "path": "patches/dolphin-wasm/snapshot/0113-headroom-counters.patch",
       "size": 12231,
       "sha256": "704fdcdba2d3d8b39edc38a158acfb884fa4cdd77a52eee31658a9ed4616fcc0"
     },
     {
-      "order": 91,
+      "order": 92,
       "cwd": "Externals/SFML/SFML",
       "hashMode": "lf-normalized",
       "path": "patches/dolphin-wasm/submodules/0001-sfml-emscripten-config.patch",
@@ -756,7 +764,7 @@
       "sha256": "f82197a21fe982ad83f6ee7bbf5a03839b1cebd4d64da3eab11263842bf61d89"
     },
     {
-      "order": 92,
+      "order": 93,
       "cwd": "Externals/xxhash/xxHash",
       "hashMode": "lf-normalized",
       "path": "patches/dolphin-wasm/submodules/0002-xxhash-wasm-simd-scalar.patch",

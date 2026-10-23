@@ -133,3 +133,18 @@ test("a cached region under another layout goes to retranslation, never into the
   assert.equal(queued[0][8], 0x1234, "queued with its layout");
   assert.deepEqual(asked, ["region-v1:k"], "no retranslation under the core's layout");
 });
+
+// Review of #86: the region cache waits for the first presented image (or
+// the timeout), never more; with no running core, not at all.
+test("the first-image wait: woken by the first presented frame, or by its timeout", async (t) => {
+  const { worker } = await loadWorker(t);
+  assert.equal(await worker.aotWhenFirstImageForTest(null), false, "no core: at once");
+  let woken = null;
+  const waiting = worker.aotWhenFirstImageForTest({}, { timeoutMs: 5000 }).then((v) => { woken = v; });
+  await new Promise((r) => setTimeout(r, 20));
+  assert.equal(woken, null, "still waiting before a frame");
+  worker.recordPresentedFrameForTest(1);
+  await waiting;
+  assert.equal(woken, true, "the first presented frame wakes it");
+  assert.equal(await worker.aotWhenFirstImageForTest({}, { timeoutMs: 30 }), false, "no frame: the timeout");
+});
