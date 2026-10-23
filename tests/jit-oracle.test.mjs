@@ -111,13 +111,20 @@ test("FPRF stays the interpreter's when a later op keeps it (VE=1 invalid op)", 
   setF(5, 0x7ff00000);
   setF(6, 0x7ff00000);
   const program = Uint32Array.from([A(63, 1, 2, 3, 0, 21), A(63, 4, 5, 6, 0, 20), 0x4e800020]);
-  for (const fpscr of [0x80, 0x10, 0x00]) {
-    state[36] = fpscr;
-    for (const mask of [SHORT_PREFIX_MASK, SHORT_PREFIX_MASK | REGALLOC_OFF]) {
-      const result = core.run(program, state, mask);
-      assert.equal(result.compiledBlocks, 1);
-      assertSame(result, `fpscr ${hex(fpscr)} mask ${hex(mask)}`);
+  // FPRF is computed only with FPRF on (patch 0121): this case needs it on.
+  const fprf = core.has("DolphinWeb_SetFprfForTest");
+  if (fprf) core.setFprf(true);
+  try {
+    for (const fpscr of [0x80, 0x10, 0x00]) {
+      state[36] = fpscr;
+      for (const mask of [SHORT_PREFIX_MASK, SHORT_PREFIX_MASK | REGALLOC_OFF]) {
+        const result = core.run(program, state, mask);
+        assert.equal(result.compiledBlocks, 1);
+        assertSame(result, `fpscr ${hex(fpscr)} mask ${hex(mask)}`);
+      }
     }
+  } finally {
+    if (fprf) core.setFprf(false);
   }
 });
 

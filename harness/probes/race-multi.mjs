@@ -12,7 +12,7 @@
 //   node harness/probes/race-multi.mjs --iso disc.iso --state scene.sav --port N
 //     --arm <dir> --arm <dir> [--arm <dir> …]      (the first is the baseline)
 //     --lanes "5,6,7;15,16,17;8,9,19" [--query …] [--runs 6] [--warmup 25] [--secs 20]
-//     [--max-load L] [--lock <dir/.perf-lock> …] [--counters] [--aot-seed [--seed-sec 600] [--max-discards 3]]
+//     [--max-load L] [--lock <dir/.perf-lock> …] [--counters [--counter-events frontend|e1,e2]] [--aot-seed [--seed-sec 600] [--max-discards 3]]
 //     [--isolated-boot [--settle-sec 10]] [--perf-record]
 //     [--emulated-window <guest s> [--emulated-warmup <guest s>]] [--out dir]
 //
@@ -57,7 +57,13 @@
 // - Every arm's window records its guest ticks at both ends (emulated) and
 //   its JIT counters at the end (jit: compiled, rejections, transient
 //   rejections…); with --counters, host instructions are divided by the
-//   ticks the window actually covered (instructionsPerGuestTick).
+//   ticks the window actually covered (instructionsPerGuestTick), and so
+//   are its host cycles: summary.cycleEffects, which decide whenever a change
+//   moves the IPC (region code: 29 % fewer instructions, the same cycles).
+//   --counter-events frontend (stall_frontend, stall_backend,
+//   l1i_cache_refill, itlb_walk, br_mis_pred_retired) or a list counts more
+//   PMU events on the same thread: summary.eventStats, per arm per 1000
+//   guest cycles; counters.countedPct < 100 means perf multiplexed them.
 // - --emulated-window S: the window is S GUEST seconds, not host seconds.
 //   With a host-time window a faster arm covers another stretch of the
 //   scene (another idle share): two arms then differ in host work per guest
@@ -84,7 +90,7 @@ import { workerRequest } from "../lib/browser.mjs";
 import { emulatedWindow, ticksNow } from "../lib/emulated-window.mjs";
 import { chromeInfo } from "../lib/probe-out.mjs";
 import { decodeRegionStats } from "../lib/jit-region-stats.mjs";
-import { busiestThread, checkPerfAccess, instructionsPerGuestCycle, perfCounters } from "../lib/perf-counters.mjs";
+import { busiestThread, checkPerfAccess, counterEvents, cyclesPerGuestCycle, instructionsPerGuestCycle, perfCounters } from "../lib/perf-counters.mjs";
 import { execFileSync, spawn } from "node:child_process";
 import { existsSync, readdirSync, statSync } from "node:fs";
 
@@ -219,6 +225,20 @@ export function discardReason(arms, targets) {
 // bench's copy (heavy-intro-13s-f3ea52d2e166.sav → heavy-intro-13s.sav).
 export const sceneName = (file) => path.basename(String(file)).replace(/-[0-9a-f]{12}(?=\.sav$)/, "");
 
+// --counter-events: for each event, its median per arm per 1000 guest
+// cycles, and its lane-corrected change against arm 0 (armEffects; an event
+// at zero somewhere gets no change).
+export function frontEndStats(runs, events) {
+  const laneOf = runs.map((r) => r.arms.map((x) => x.lane));
+  const out = {};
+  for (const ev of events) {
+    const rate = runs.map((r) => r.arms.map((x) => ((x.cold.counters?.[ev] ?? NaN) / x.cold.guestTicks) * 1000));
+    const perArm = rate[0].map((_, a) => round(median(rate.map((row) => row[a])), 3));
+    out[ev] = { perArm, effects: rate.every((row) => row.every((v) => v > 0)) ? armEffects(rate, laneOf) : null };
+  }
+  return out;
+}
+
 // A barrier for `n` arms, released when all arrived or after `timeoutMs`.
 export function barrier(n, timeoutMs = 180000) {
   let arrived = 0, open;
@@ -266,7 +286,7 @@ async function main() {
       runs: { type: "string", default: "6" }, warmup: { type: "string", default: "25" }, secs: { type: "string", default: "20" },
       hold: { type: "string", default: "KeyX" }, "max-load": { type: "string" },
       lock: { type: "string", multiple: true, default: [] }, "lock-wait": { type: "string", default: "14400" }, out: { type: "string" },
-      counters: { type: "boolean", default: false }, "aot-seed": { type: "boolean", default: false }, "seed-sec": { type: "string", default: "600" },
+      counters: { type: "boolean", default: false }, "counter-events": { type: "string" }, "aot-seed": { type: "boolean", default: false }, "seed-sec": { type: "string", default: "600" },
       "gate-sec": { type: "string", default: "120" }, "max-discards": { type: "string", default: "3" }, "isolated-boot": { type: "boolean", default: false }, "settle-sec": { type: "string", default: "10" },
       "perf-record": { type: "boolean", default: false }, "emulated-window": { type: "string" }, "emulated-warmup": { type: "string", default: "10" }, "emulated-poll-ms": { type: "string", default: "100" }
     }
@@ -288,7 +308,10 @@ async function main() {
   for (const dir of values.lock) releases.push(await acquirePerfLock({ dir, name: `race-multi (${REPO_ROOT})`, waitSec: num(values, "lock-wait", { min: 0 }), log: (m) => console.log(`[race-multi] ${m}`) }));
   const outDir = path.resolve(values.out ?? path.join(REPO_ROOT, "..", "measures", "harness", `race-multi-${Date.now()}-${randomBytes(3).toString("hex")}`));
   mkdirSync(outDir, { recursive: true });
-  const counters = values.counters ? (checkPerfAccess(), perfCounters(outDir)) : null;
+  // --counter-events frontend|e1,e2: more PMU events on the same thread and window.
+  const extraEvents = counterEvents(values["counter-events"]);
+  if (extraEvents.length && !values.counters) throw new Error("--counter-events needs --counters");
+  const counters = values.counters ? (checkPerfAccess(), perfCounters(outDir, { extra: extraEvents })) : null;
   if (values["perf-record"]) checkPerfAccess();
   // --perf-record: per session, its jitdump directory, perf process and window.
   const recordings = new Map();
@@ -443,6 +466,7 @@ async function main() {
         }
         // One name for the analysis: per tick when the ticks are known, else from the speed.
         x.cold.instructionsPerGuestCycle = x.cold.instructionsPerGuestTick ?? instructionsPerGuestCycle(x.cold);
+        x.cold.cyclesPerGuestCycle = cyclesPerGuestCycle(x.cold);
       });
       record.arms.forEach((x, a) => { x.regionGate = gates.get(sessions[a]) ?? null; });
       if (values["aot-seed"]) {
@@ -492,7 +516,15 @@ async function main() {
   const effects = full ? armEffects(good.map((r) => r.arms.map((x) => x.cold.speed)), good.map((r) => r.arms.map((x) => x.lane))) : null;
   // The same analysis on host instructions per guest cycle (lower is better).
   const ipg = good.map((r) => r.arms.map((x) => x.cold.instructionsPerGuestCycle));
-  const counterEffects = full && values.counters && ipg.every((row) => row.every((v) => v > 0)) ? armEffects(ipg, good.map((r) => r.arms.map((x) => x.lane))) : null;
+  const laneOf = good.map((r) => r.arms.map((x) => x.lane));
+  const counterEffects = full && values.counters && ipg.every((row) => row.every((v) => v > 0)) ? armEffects(ipg, laneOf) : null;
+  // And on host CYCLES per guest cycle: when a change moves the IPC, the
+  // instructions mislead and these decide (PROGRAM.md, 2026-10-23).
+  const cpg = good.map((r) => r.arms.map((x) => x.cold.cyclesPerGuestCycle));
+  const cycleEffects = full && values.counters && cpg.every((row) => row.every((v) => v > 0)) ? armEffects(cpg, laneOf) : null;
+  // --counter-events: per arm, each event per 1000 guest cycles (median over
+  // the runs), and its lane-corrected change against arm 0.
+  const eventStats = full && extraEvents.length ? frontEndStats(good, extraEvents) : null;
   const summary = {
     probe: "race-multi", at: new Date().toISOString(),
     // Which Chromium and its extra flags (the bench's --js-flags among them).
@@ -505,11 +537,13 @@ async function main() {
     regionCountsEqual: values["aot-seed"] ? records.every((r) => r.regionCountsEqual) : null,
     // Runs discarded (and played again) for an arm without all its regions.
     discarded,
-    effects, counterEffects, withheld: full ? null : records.length < runs ? `${runs - records.length} run(s) missing after ${discarded.length} discarded: the Latin square is incomplete` : `${records.length - good.length} run(s) with a failed or overloaded arm: the Latin square is incomplete`
+    effects, counterEffects, cycleEffects, eventStats, withheld: full ? null : records.length < runs ? `${runs - records.length} run(s) missing after ${discarded.length} discarded: the Latin square is incomplete` : `${records.length - good.length} run(s) with a failed or overloaded arm: the Latin square is incomplete`
   };
   writeFileSync(path.join(outDir, "summary.json"), JSON.stringify(summary, null, 1) + "\n");
   if (effects) for (const e of effects.arms) console.log(`[race-multi] arm ${e.arm} vs arm 0: median ${e.median} % (sd ${e.sd}, per run ${e.perRun.join(" ")}), lane-corrected ${e.laneCorrected} %`);
   if (counterEffects) for (const e of counterEffects.arms) console.log(`[race-multi] arm ${e.arm} vs arm 0, host instructions per guest cycle: median ${e.median} % (sd ${e.sd}, per run ${e.perRun.join(" ")}), lane-corrected ${e.laneCorrected} %`);
+  if (cycleEffects) for (const e of cycleEffects.arms) console.log(`[race-multi] arm ${e.arm} vs arm 0, host CYCLES per guest cycle: median ${e.median} % (sd ${e.sd}, per run ${e.perRun.join(" ")}), lane-corrected ${e.laneCorrected} % (residual ${cycleEffects.residualSd} %)`);
+  if (eventStats) for (const [ev, st] of Object.entries(eventStats)) console.log(`[race-multi] ${ev} per 1000 guest cycles: ${st.perArm.map((v, a) => `arm${a} ${v}`).join(" | ")}${st.effects ? `; vs arm 0 ${st.effects.arms.map((e) => `arm${e.arm} ${e.laneCorrected} %`).join(", ")}` : ""}`);
   console.log(`[race-multi] lanes vs lane 0: ${effects ? effects.lanes.join(" / ") : "-"} %, residual sd ${effects?.residualSd ?? "-"} % -> ${outDir}`);
   process.exitCode = full ? 0 : 1;
 }

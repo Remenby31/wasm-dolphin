@@ -25,7 +25,7 @@
       "commit": "01e0577914a75a2569c846778c2f93aa8e6feddd"
     }
   },
-  "patchSeriesSha256": "bb6a5dd7388fcf99d30fe5e49837286897055e85e02b7514540850edf63817e8",
+  "patchSeriesSha256": "6033820d0a5c48836b0b105791412bf33fd5fe5357f44c3b3bb838b0130ce648",
   "patches": [
     {
       "order": 1,
@@ -807,20 +807,28 @@
       "order": 98,
       "cwd": ".",
       "hashMode": "lf-normalized",
-      "path": "patches/dolphin-wasm/snapshot/0122-region-sleep-install-estimate.patch",
-      "size": 3824,
-      "sha256": "1ba2ead55f449857191f128f0e8f68d493df86fa3bee1caf608c556ef7285628"
+      "path": "patches/dolphin-wasm/snapshot/0121-entry-guards-fprf-setting.patch",
+      "size": 15583,
+      "sha256": "a6042d288edc1f515a213ebfb5b291f501a852ff1b0c7cb8840ec28f4154db92"
     },
     {
       "order": 99,
       "cwd": ".",
       "hashMode": "lf-normalized",
-      "path": "patches/dolphin-wasm/snapshot/0126-region-bswap-rotate.patch",
-      "size": 1835,
-      "sha256": "f9de50e23597af3689b6e57ba1dca3ca18459583315975ecc5b791bcbc486318"
+      "path": "patches/dolphin-wasm/snapshot/0122-region-sleep-install-estimate.patch",
+      "size": 3824,
+      "sha256": "1ba2ead55f449857191f128f0e8f68d493df86fa3bee1caf608c556ef7285628"
     },
     {
       "order": 100,
+      "cwd": ".",
+      "hashMode": "lf-normalized",
+      "path": "patches/dolphin-wasm/snapshot/0126-region-bswap-rotate.patch",
+      "size": 1856,
+      "sha256": "8e14dde6571136ca44c07d203b4c593af9b2c70e13119443abb7738dc0cacdbd"
+    },
+    {
+      "order": 101,
       "cwd": "Externals/SFML/SFML",
       "hashMode": "lf-normalized",
       "path": "patches/dolphin-wasm/submodules/0001-sfml-emscripten-config.patch",
@@ -828,7 +836,7 @@
       "sha256": "f82197a21fe982ad83f6ee7bbf5a03839b1cebd4d64da3eab11263842bf61d89"
     },
     {
-      "order": 101,
+      "order": 102,
       "cwd": "Externals/xxhash/xxHash",
       "hashMode": "lf-normalized",
       "path": "patches/dolphin-wasm/submodules/0002-xxhash-wasm-simd-scalar.patch",
