@@ -72,7 +72,7 @@ test("xctrace: the raw ktraces a window left in $TMPDIR are removed, unless held
 
 test("xctrace: a ktrace still open at the end of its window is removed later, once closed", async () => {
   const open = new Set(["/t/instrumentsA.ktrace"]), removed = [], logs = [];
-  const j = createKtraceJanitor({ isOpen: (f) => open.has(f), remove: (f) => removed.push(f), log: (m) => logs.push(m) });
+  const j = createKtraceJanitor({ isOpen: (f) => open.has(f), remove: (f) => removed.push(f), log: (m) => logs.push(m), sweepSec: 0 });
   j.add(["/t/instrumentsA.ktrace"]);
   assert.deepEqual(j.sweep(), { removed: [], open: ["/t/instrumentsA.ktrace"] });
   assert.deepEqual(removed, []);
@@ -84,4 +84,14 @@ test("xctrace: a ktrace still open at the end of its window is removed later, on
   j.add(["/t/instrumentsB.ktrace"]);
   open.add("/t/instrumentsB.ktrace");
   assert.deepEqual(await j.finish({ waitSec: 0.05, pollSec: 0.01 }), { ktraceLeft: ["/t/instrumentsB.ktrace"] });
+});
+
+test("xctrace: open ktraces are swept periodically too, not only at the windows", async () => {
+  const open = new Set(["/t/instrumentsC.ktrace"]), removed = [];
+  const j = createKtraceJanitor({ isOpen: (f) => open.has(f), remove: (f) => removed.push(f), log: () => {}, sweepSec: 0.02 });
+  j.add(["/t/instrumentsC.ktrace"]);
+  open.clear(); // closed while race-perf waits between windows
+  await new Promise((r) => setTimeout(r, 80));
+  assert.deepEqual(removed, ["/t/instrumentsC.ktrace"]);
+  assert.deepEqual(j.pending(), []);
 });

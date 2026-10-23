@@ -102,7 +102,7 @@ import { consistentMemRead, decodeMemStats, memAccessShares, poolMemStats } from
 import { consistentHeadroomRead, decodeHeadroomStats, headroomOf, invalidReasons, querySpeed, unlimitedAllowed } from "../lib/headroom.mjs";
 import { summarizePcSamples } from "../../src/harness-pc-sampler.js";
 import { checkPerfAccess, counterEvents, cyclesPerGuestCycle, instructionsPerGuestCycle, perfCounters } from "../lib/perf-counters.mjs";
-import { checkXctrace, freeDiskGB, perKiloGuestCycles, XCTRACE_MIN_FREE_GB, xctraceCounters } from "../lib/xctrace-counters.mjs";
+import { checkXctrace, freeDiskGB, perKiloGuestCycles, xctraceCounters, xctraceNeedGB } from "../lib/xctrace-counters.mjs";
 import { emulatedStart } from "../lib/emulated-window.mjs";
 
 const HOMEBREW_OUT = path.join(REPO_ROOT, "harness", "homebrew", "out");
@@ -660,8 +660,8 @@ async function main() {
     for (let run = 1; run <= o.runs && !gaveUp; run += 1) {
       checkLock(`before run ${run}`);
       // xctrace traces are large: the campaign stops before the disk fills.
-      if (o.xctrace && freeDiskGB() < XCTRACE_MIN_FREE_GB) {
-        gaveUp = `disk: ${round(freeDiskGB(), 1)} GB free < ${XCTRACE_MIN_FREE_GB} GB (xctrace): remaining runs given up`;
+      if (o.xctrace && freeDiskGB() < xctraceNeedGB()) {
+        gaveUp = `disk: ${round(freeDiskGB(), 1)} GB free < ${xctraceNeedGB()} GB (xctrace): remaining runs given up`;
         console.warn(`[race-perf] ${gaveUp}`);
         break;
       }
@@ -684,6 +684,9 @@ async function main() {
         record[name] = await measureSide(sides[name], o, g.gate);
         const r = record[name];
         console.log(`[race-perf] run ${run} ${name}: ${r.error ?? brief(r.cold)}${r.warm ? ` | warm: ${brief(r.warm)}` : ""}`);
+        // A window xctrace refused for the disk: the campaign stops there.
+        const disk = [r.cold, r.warm].map((w) => w?.counters?.error).find((e) => /^disk:/.test(e ?? ""));
+        if (o.xctrace && disk) { gaveUp = `${disk}: remaining runs given up`; console.warn(`[race-perf] ${gaveUp}`); break; }
       }
       if (replay) { loadRetries.set(run, (loadRetries.get(run) ?? 0) + 1); console.log(`[race-perf] run ${run} played again (lock taken back)`); run -= 1; continue; }
       if (gaveUp && !Object.keys(sides).some((n) => record[n])) break;
