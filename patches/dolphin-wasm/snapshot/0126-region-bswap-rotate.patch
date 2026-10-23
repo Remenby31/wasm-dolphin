@@ -34,9 +34,9 @@ diff --git a/Source/Core/Core/PowerPC/CachedInterpreter/CachedInterpreter.cpp b/
  // 10 (0111): compares store their CR field as one i64, bc fused (7-9 are
 -// taken by 0108-0110).
 -constexpr u32 AOT_COMPILER_VERSION = 10;
-+// taken by 0108-0110). 16 (0126): region byte swaps as two rotates (11-15
-+// are taken by the region patches 0112-0119).
-+constexpr u32 AOT_COMPILER_VERSION = 16;
++// taken by 0108-0110). 17 (0126): region byte swaps as two rotates (11-16
++// are taken by 0112-0119 and 0121).
++constexpr u32 AOT_COMPILER_VERSION = 17;
  constexpr u32 AOT_MAX_FRAGMENT_BYTES = 1u << 20;
  thread_local std::vector<u32> t_aot_out;
  u8* s_aot_ram = nullptr;
