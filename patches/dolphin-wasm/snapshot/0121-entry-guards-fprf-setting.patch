@@ -206,7 +206,7 @@ diff --git a/Source/Core/Core/PowerPC/CachedInterpreter/CachedInterpreter.cpp b/
    EmitStateLoadU32(body, SprOffset(layout, SPR_GQR0 + inst.I));
    if (!store)
    {
-@@ -6838,25 +6868,11 @@
+@@ -6838,23 +6868,9 @@
                                         UGeckoInstruction inst, bool store, u32 type, u32 scale,
                                         u32 element_bytes, bool l1_cache)
  {
@@ -219,21 +219,19 @@ diff --git a/Source/Core/Core/PowerPC/CachedInterpreter/CachedInterpreter.cpp b/
  
 -  EmitStateLoadU32(body, layout.msr_offset);
 -  EmitI32Const(body, 1);
-+  EmitHid2LsqeSet(body, layout);
-   body.push_back(0x71);
+-  body.push_back(0x71);
 -  body.push_back(0x45);
 -  body.push_back(0x71);
- 
+-
 -  EmitStateLoadU32(body, SprOffset(layout, SPR_HID2));
 -  EmitI32Const(body, 1u << 31);
 -  body.push_back(0x71);
 -  EmitI32Const(body, 0);
 -  body.push_back(0x47);
--  body.push_back(0x71);
--
++  EmitHid2LsqeSet(body, layout);
+   body.push_back(0x71);
+ 
    EmitStateLoadU32(body, SprOffset(layout, SPR_GQR0 + inst.I));
-   if (store)
-   {
 @@ -6893,23 +6909,9 @@
  void EmitPsqGatherPipeFloatStoreCondition(std::vector<u8>& body, const WasmStateLayout& layout,
                                            UGeckoInstruction inst)
@@ -356,13 +354,20 @@ diff --git a/Source/Core/Core/PowerPC/CachedInterpreter/CachedInterpreter.cpp b/
  }
  
  // Helper signatures in import order, "params>results" (BuildWasmCachedInterpreterBlock's types).
-@@ -16849,6 +16889,9 @@
+@@ -16844,11 +16884,15 @@
+ // Runs a region module compiled by DolphinWeb_JitCompileBytesForTest on the
+ // test CPU: 0 continue at pc, 1 not an entry, 2 stopped, 3 stopped in an
+ // exception handler (taken by a helper, or pending and taken here as the CPU
+-// loop would).
++// loop would), 4 refused by the mode (RegionGuardsHold, 0121).
+ extern "C" EMSCRIPTEN_KEEPALIVE int DolphinWeb_AotRunRegionForTest(int handle)
  {
    auto& system = Core::System::GetInstance();
    auto& ppc = system.GetPPCState();
-+  // 0121: as TryRunRegion, no region where its code's guards do not hold.
++  // 0121: as TryRunRegion, no region where its code's guards do not hold
++  // (4: refused by the mode, the CPU loop runs blocks there).
 +  if (!RegionGuardsHold(ppc))
-+    return 1;
++    return 4;
    const int code = DolphinWeb_CachedInterpreterRunWasmBlockForTest(
        handle, static_cast<int>(reinterpret_cast<std::uintptr_t>(&ppc)));
    if (code != 2)

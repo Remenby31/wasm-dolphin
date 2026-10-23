@@ -31,6 +31,11 @@ const MSR = 37;
 const LE = 1, FE1 = 1 << 8, FE0 = 1 << 11;
 
 function region() {
+  // The test translator takes FP ops with MSR.FP on only (production's does
+  // whatever the MSR): translate from an FP-on state.
+  const state = randomState(makeRng(0x121));
+  state[MSR] = 0x00002032;
+  core.loadState(state, ORACLE_CODE);
   core.load(ORACLE_CODE, bigEndian(PROGRAM));
   const fragment = core.translate(ORACLE_CODE, { mask: PRODUCTION_DISABLE_MASK, ranges: [[ORACLE_CODE, ORACLE_CODE + 4 * PROGRAM.length]] });
   assert.ok(fragment, "the FP program is a fragment");

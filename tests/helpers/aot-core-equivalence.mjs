@@ -269,8 +269,16 @@ export function compareCall(core, regionAt, start) {
         if (raised) return done("exception");
         continue;
       }
-      regionRuns += 1;
       const code = core.runRegion(handle);
+      if (code === 4) {
+        // Refused by the mode (0121: MSR LE/FE0/FE1, HID2.LSQE): the CPU loop
+        // runs blocks here, as the interpreter does.
+        const raised = core.interpretOne();
+        interpCycles += before - core.downcount();
+        if (raised) return done("exception");
+        continue;
+      }
+      regionRuns += 1;
       regionCycles += before - core.downcount();
       if (code === 1) throw new Error(`region refused its own entry ${pc.toString(16)}`);
       if (code === 3) return done("exception");
