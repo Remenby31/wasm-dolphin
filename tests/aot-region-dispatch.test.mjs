@@ -1132,3 +1132,51 @@ test("the region key changes with the formation", async () => {
   assert.equal(await regionModuleKey(f, parts), await regionModuleKey(f, { ...parts, formation: 2 }), "2 by default");
 });
 
+
+// 0111, review: a recorded compare must not survive an op that writes its
+// field or its operands, even one kept in the region as a helper call (0105):
+// fcmpu and ps_cmpu0 into the compared field, lmw over a compared register;
+// a cmplwi with a high immediate; crxor and mcrf reading the stored field.
+const CR2_TEXT = 0x80014100;
+const fcmpu = (crf, a, b) => (63 << 26) | (crf << 23) | (a << 16) | (b << 11);
+const psCmpu0 = (crf, a, b) => (4 << 26) | (crf << 23) | (a << 16) | (b << 11);
+const lmw = (d, a, off) => (46 << 26) | (d << 21) | (a << 16) | (off & 0xffff);
+const crxor = (bt, ba, bb) => (19 << 26) | (bt << 21) | (ba << 16) | (bb << 11) | (193 << 1);
+const mcrf = (d, s) => (19 << 26) | (d << 23) | (s << 18);
+const CR2 = assemble(CR2_TEXT, [
+  "main", asm.mflr(0), asm.stwu(1, 1, -32), stw(0, 1, 36), stw(29, 1, 8), stw(30, 1, 12), stw(31, 1, 16), (pc, l) => asm.bl(pc, l.f),
+  lwz(29, 1, 8), lwz(30, 1, 12), lwz(31, 1, 16), lwz(0, 1, 36), asm.addi(1, 1, 32), mtlr(0), asm.blr(),
+  "f", asm.lis(5, DATA >>> 16), asm.ori(5, 5, DATA & 0xffff), lfs(1, 5, 0), lfs(2, 5, 4), asm.li(6, 1), asm.li(30, 5), asm.li(3, 0),
+  cmpw(3, 6, 30), fcmpu(3, 1, 2), (pc, l) => blt(pc, l.l1, 3), asm.addi(3, 3, 1),
+  "l1", cmpw(7, 6, 30), psCmpu0(7, 1, 2), (pc, l) => blt(pc, l.l2, 7), asm.addi(3, 3, 2),
+  "l2", asm.cmplwi(6, 0xfff0), (pc, l) => blt(pc, l.l3), asm.addi(3, 3, 4),
+  "l3", cmpw(0, 30, 6), lmw(29, 5, 0), (pc, l) => asm.bgt(pc, l.l4), asm.addi(3, 3, 8),
+  "l4", cmpw(4, 6, 6), crxor(22, 18, 16), mcrf(6, 4), (pc, l) => asm.beq(pc, l.l5, 6), asm.addi(3, 3, 16),
+  "l5", (pc, l) => asm.beq(pc, l.l6, 5), asm.addi(3, 3, 32),
+  "l6", mfcr(8), asm.blr()
+]);
+
+test("a compare's field or operands rewritten in the region (fcmpu, ps_cmpu0, lmw), cmplwi high, crxor and mcrf: like the interpreter (0111)", { skip: crSkip }, () => {
+  const dol = buildDol({ textAddr: CR2_TEXT, text: CR2.words, entry: CR2.labels.main });
+  const { image, entryPoint } = imageFromDol(dol);
+  const plan = planDol({ image, entryPoint, gameId: "TEST01", dolBytes: dol, options: { gapFill: false } });
+  for (const seg of image.segments) core.load(seg.start, seg.bytes);
+  const data = new DataView(new ArrayBuffer(16));
+  data.setFloat32(0, 1.5); data.setFloat32(4, -3.25); data.setUint32(8, 0x80000000); data.setUint32(12, 7);
+  const loadData = () => core.load(DATA, new Uint8Array(data.buffer));
+  loadData();
+  core.reset(seedGprs(CR2.labels.main), CR2.labels.main, STOP, 400000);
+  core.setRegionsEnabled(true);
+  core.setRegionChaining(true);
+  queueAll(plan, 1, true);
+  serviceAll();
+  loadData();
+  const reference = runCall(CR2.labels.main, { regions: false });
+  loadData();
+  const got = runCall(CR2.labels.main, { regions: true });
+  core.invalidate(CR2_TEXT, 4 * CR2.words.length);
+  core.module._DolphinWeb_AotForgetRegionsForTest?.();
+  assert.deepEqual(got.state, reference.state);
+  assert.equal(got.downcount, reference.downcount);
+  assert.equal(got.interpreted, 0, "no op left the region");
+});
