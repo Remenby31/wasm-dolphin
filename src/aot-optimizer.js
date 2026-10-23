@@ -315,26 +315,34 @@ export class AotOptimizer extends EventTarget {
       if (wait && ++waits > this.maxNotReadyWaits) return { notReady: true };
       if (wait || !consumed) await this.sleep(wait ? this.notReadyDelayMs : 0);
     }
-    // Rounds: what is left is split evenly among the members still refused,
-    // until none is or a round charges nothing.
+    // Rounds: each member still refused gets an even share of what is left
+    // at its turn (never past it: the translator keeps no continuation past
+    // its limit), until none is refused or a round charges nothing; then one
+    // last pass offers each the whole of what is left (a next continuation
+    // bigger than every even share). A member at its own cap leaves the
+    // rounds; a continuation never starts at an entry the module holds.
     const unitBytes = this.translator.unitContinuationBytes;
-    let waiting = starved.map((r) => ({ resume: r.resume, refused: r.budgetRefused ?? 0 }));
+    const claimed = new Set(fragments.flatMap((x) => x.entries.map((pc) => pc >>> 0)));
+    let waiting = starved.map((r) => ({ resume: r.resume, refused: r.budgetRefused ?? 0, exhausted: false }));
+    let whole = false;
     while (waiting.length) {
-      const left = unitBytes - continuationBytesUsed;
-      if (!(left > 0)) break;
-      const share = Math.floor(left / waiting.length);
       let spent = 0;
-      for (const w of waiting) {
+      for (const [k, w] of waiting.entries()) {
+        const left = unitBytes - continuationBytesUsed;
+        if (!(left > 0)) break;
         if (this.cancelled) return null;
-        const more = await w.resume(share);
+        const more = await w.resume(whole ? left : Math.floor(left / (waiting.length - k)), claimed);
+        continuationBytesUsed += more.budgetCharged ?? 0;
         spent += more.budgetCharged ?? 0;
         unitRefused += (more.budgetRefused ?? 0) - w.refused;
         w.refused = more.budgetRefused ?? 0;
+        w.exhausted = Boolean(more.exhausted);
+        for (const x of more.continuations ?? []) for (const pc of x.entries) claimed.add(pc >>> 0);
         fragments.push(...(more.continuations ?? []));
       }
-      continuationBytesUsed += spent;
-      if (!spent) break;
-      waiting = waiting.filter((w) => w.refused > 0);
+      waiting = waiting.filter((w) => w.refused > 0 && !w.exhausted);
+      if (!(unitBytes - continuationBytesUsed > 0) || whole) break;
+      if (!spent) whole = true;
     }
     this.budgetRefused += unitRefused;
     return { fragments, refused };

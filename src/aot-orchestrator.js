@@ -463,15 +463,21 @@ export async function translateWithContinuations(m, f, { mask, maxBlocks, names,
   let freeBlocks = Math.max(0, REGION_UNCUT_BLOCKS - first.fragment.entries.length);
   let fnBytes = REGION_CONTINUATION_MAX_BYTES; // the function's own cap, over every grow
   let oversize = 0;
-  const next_ = () => [...new Set([...frontier(branches, owned), ...seeds])].filter((x) => !tried.has(x) && !owned.has(x)).sort((a, b) => a - b);
-  // Continuations from the frontier until it is empty or `limit` bytes are
-  // charged; what is left waiting is refused for lack of budget.
-  const grow = async (limit) => {
+  // `elsewhere`: entries another member of the module already holds (a
+  // continuation started there would be dropped at assembly, its bytes
+  // charged for nothing).
+  const next_ = (elsewhere) => [...new Set([...frontier(branches, owned), ...seeds])].filter((x) => !tried.has(x) && !owned.has(x) && !elsewhere?.has(x)).sort((a, b) => a - b);
+  // Continuations from the frontier until it is empty or the next one would
+  // cost more than `limit` (never past it: that one goes back to the
+  // frontier, for a later share); what is left waiting is refused for lack
+  // of budget. `exhausted`: the function's own cap is reached (no share can
+  // help it any more).
+  const grow = async (limit, elsewhere = null) => {
     let bytes = Math.min(limit, fnBytes);
     let charged = 0, refused = 0;
     const added = [];
     for (;;) {
-      const waiting = next_();
+      const waiting = next_(elsewhere);
       if (!waiting.length) break;
       if (continuations.length >= maxContinuations || bytes <= 0) {
         refused = waiting.length; // left as exits for lack of budget
@@ -487,32 +493,38 @@ export async function translateWithContinuations(m, f, { mask, maxBlocks, names,
       }
       if (!next.fragment) continue;
       if (next.fragment.code.length > maxFragmentBytes) { oversize += 1; continue; } // one block alone: left an exit
-      for (const e of next.fragment.entries) owned.add(e >>> 0);
-      continuations.push(next.fragment);
-      added.push(next.fragment);
       // The share of this fragment within the old single fragment's blocks is free.
       const n = next.fragment.entries.length;
       const free = Math.min(freeBlocks, n);
-      freeBlocks -= free;
       const cost = Math.round(next.fragment.code.length * (n - free) / Math.max(1, n));
+      if (cost > bytes) {
+        tried.delete(pc); // past the budget: back to the frontier
+        refused = next_(elsewhere).length;
+        break;
+      }
+      freeBlocks -= free;
+      for (const e of next.fragment.entries) owned.add(e >>> 0);
+      continuations.push(next.fragment);
+      added.push(next.fragment);
       bytes -= cost;
       charged += cost;
     }
     fnBytes -= charged;
-    return { added, charged, refused };
+    return { added, charged, refused, exhausted: refused > 0 && (continuations.length >= maxContinuations || fnBytes <= 0) };
   };
-  const { charged, refused } = await grow(maxBytes);
+  const { charged, refused, exhausted } = await grow(maxBytes);
   return {
     ...first, ...(continuations.length ? { continuations: [...continuations], budgetCharged: charged } : {}), ...(oversize ? { oversize } : {}),
-    ...(refused ? {
-      budgetRefused: refused,
+    ...(refused ? { budgetRefused: refused } : {}),
+    ...(refused && !exhausted ? {
       // The module's leftover budget, once its other functions took their
       // share: this function's frontier goes on where it stopped (nothing
-      // translated again). The new continuations, what they cost, and what
-      // is still refused.
-      resume: async (limit) => {
-        const more = await grow(limit);
-        return { continuations: more.added, budgetCharged: more.charged, budgetRefused: more.refused };
+      // translated again), never past `limit`, and not from an entry another
+      // member holds (`elsewhere`). The new continuations, what they cost,
+      // what is still refused, and whether the function's own cap is reached.
+      resume: async (limit, elsewhere = null) => {
+        const more = await grow(limit, elsewhere);
+        return { continuations: more.added, budgetCharged: more.charged, budgetRefused: more.refused, exhausted: more.exhausted };
       }
     } : {})
   };
