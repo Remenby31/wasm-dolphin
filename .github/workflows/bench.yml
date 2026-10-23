@@ -133,6 +133,9 @@ jobs:
       CANDIDATE: ${{ inputs.candidate }}
       CANDIDATE_QUERY: ${{ inputs.candidate_query }}
       # A bench/** push calibrates footprint against the game's regions: aot=1.
+      # With aot=1, the region pipeline is read after each window
+      # (--region-sample 0: counters only): regions installed and their
+      # share of guest cycles per side, so a pair without regions shows.
       AOT: ${{ (github.event_name == 'push' || inputs.aot) && '&aot=1' || '' }}
       OUT: ${{ github.workspace }}/bench-out
     steps:
@@ -248,6 +251,7 @@ jobs:
           fi
           taskset -c "$OTHER_CPUS" node harness/probes/race-perf.mjs \
             --iso "$dol" --port 8090 "${sides[@]}" "${queries[@]}" \
+            ${AOT:+--region-sample 0 --region-secs 3} \
             --hold "" --runs "$RUNS" --warmup 5 --emulated-warmup 5 --emulated-window "$WINDOW" \
             --pin-cpu-thread 0 --max-load 8 --load-wait 60 --lock-wait 60 --calm-wait 60 \
             "${counters[@]}" --out "$OUT/aa"
