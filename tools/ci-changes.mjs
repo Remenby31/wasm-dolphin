@@ -37,7 +37,7 @@ export const NON_BUILD_TOOLS = Object.freeze([
   /^tools\/_(probe|run)-[\w-]+\.mjs$/,
   /^tools\/[\w-]+\.ps1$/,
   /^tools\/perf-configs\//,
-  /^tools\/(benchmark-url|boot-matrix|cpu-profile-analyze|cpu-profile-capture|jit-diagnostics-analyze|jit-split-analyze|menu-progress-validate|perf-ab|perf-artifacts|perf-regression-gate|reap-stale-browsers|score-blockmerge-ab|serve|validate-wgpu-scheduling-screening|validate-wgpu-ubo-screening|validate-wgpu-upload-attribution|windows-process-affinity)\.mjs$/
+  /^tools\/(benchmark-url|boot-matrix|cpu-profile-analyze|cpu-profile-capture|jit-diagnostics-analyze|jit-split-analyze|menu-progress-validate|perf-ab|perf-artifacts|perf-regression-gate|reap-stale-browsers|score-blockmerge-ab|serve|validate-wgpu-scheduling-screening|validate-wgpu-ubo-screening|validate-wgpu-upload-attribution|wgsl-hlsl-corpus|windows-process-affinity)\.mjs$/
 ]);
 
 const isCoreInput = (path) =>

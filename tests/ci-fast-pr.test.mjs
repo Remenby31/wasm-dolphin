@@ -24,7 +24,7 @@ test("pull requests that touch no core input skip the core build", () => {
     ["harness/run.mjs", "README.md", "package.json"],
     // Contract hashes follow src/; the binary fields are guarded separately.
     ["src/upstream-worker-adapter.js", "provenance/dolphin-core-abi-v1.json"],
-    ["tools/serve.mjs", "tools/perf-ab.mjs", "tools/_run-jitsplit-on.mjs", "tools/ab-fmh.ps1",
+    ["tools/serve.mjs", "tools/perf-ab.mjs", "tools/_run-jitsplit-on.mjs", "tools/ab-fmh.ps1", "tools/wgsl-hlsl-corpus.mjs",
       "tools/perf-configs/mkwii.json"]
   ]) {
     assert.deepEqual(needsCoreBuild(paths), { core: false, inputs: [] }, paths.join(" "));
