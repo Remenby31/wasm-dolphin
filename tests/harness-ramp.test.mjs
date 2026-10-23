@@ -95,3 +95,36 @@ test("ramp KPI rows: one per scene, game-frame results only, max-load 6 at most,
   const old = rows([summary("race", { metric: undefined })]);
   assert.equal(old.firstLaunchRampRace.status, "n/a");
 });
+
+test("first-launch-ramp --visits: a visit's region facts, its churn, and the medians per visit", async () => {
+  const { churnOf, summarizeVisits, visitRegions } = await import("../harness/probes/first-launch-ramp.mjs");
+  const events = [
+    { t: 1, type: "install", loaded: 120, failed: 0 }, { t: 2, type: "install", loaded: 20, failed: 1, after: "first-image" },
+    { t: 50, type: "done", total: 145, refused: 2, compiled: 5, deferred: 0, budgetRefused: 0, ms: 4000 }
+  ];
+  const regions = [{ t: 1100, installed: 120, ticks: 486e6 }, { t: 2100, installed: 140, ticks: 2 * 486e6 }, { t: 3100, installed: 145, ticks: 3 * 486e6 }, { t: 4100, installed: 145, ticks: 4 * 486e6 }];
+  const f = visitRegions(events, regions, { t0: 1000, ticksAtBoot: 0, ticksPerSecond: 486e6 });
+  assert.deepEqual(f, {
+    done: { total: 145, refused: 2, compiled: 5, deferred: 0, budgetRefused: 0, ms: 4000 },
+    compiled: 5, budgetRefused: 0, fromCache: 140, installFailed: 1, installedAtEnd: 145, lastInstallMs: 2100, lastInstallGuestSec: 3
+  });
+  assert.equal(churnOf(f), 0.0345);
+  assert.equal(churnOf({ compiled: null, installedAtEnd: 145 }), null, "no done event: no churn");
+  // An engine before #167: no budgetRefused, kept as null.
+  assert.equal(visitRegions([{ t: 1, type: "done", compiled: 0 }], [], { t0: 0, ticksAtBoot: 0, ticksPerSecond: 1 }).budgetRefused, null);
+  const run = (c1, c2) => ({ visits: [{ visit: 1, regionFacts: { compiled: c1, installedAtEnd: 100 }, churn: c1 / 100 }, { visit: 2, regionFacts: { compiled: c2, installedAtEnd: 100 }, churn: c2 / 100 }] });
+  const sum = summarizeVisits([run(100, 4), run(100, 2), { visits: [{ visit: 1, error: "boot" }] }], 2);
+  assert.equal(sum[0].runs, 2, "a failed visit is left out");
+  assert.equal(sum[0].compiled, 100);
+  assert.equal(sum[1].churn, 0.03);
+});
+
+test("first-launch-ramp --visits: the local profile's size on disk per visit, and visits without one", async () => {
+  const { profileBytes, summarizeVisits } = await import("../harness/probes/first-launch-ramp.mjs");
+  assert.equal(profileBytes([{ name: "disc-sha256-v1_ab.bin", bytes: 12000 }, { name: "x.tmp", bytes: 100 }]), 12100);
+  assert.equal(profileBytes([]), null, "no file: no profile");
+  assert.equal(profileBytes({ error: "NotFoundError" }), null, "no aot-profile directory");
+  const sum = summarizeVisits([{ visits: [{ visit: 1, profileBytes: 12000 }] }, { visits: [{ visit: 1, profileBytes: null }] }], 1);
+  assert.equal(sum[0].withoutProfile, 1);
+  assert.equal(sum[0].profileBytes, 12000);
+});

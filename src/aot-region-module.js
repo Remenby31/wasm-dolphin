@@ -43,7 +43,7 @@
 export const REGION_HEAP_NAMES = Object.freeze(["ram_base", "l1_base"]);
 
 const TYPE_STATE = 0; // (i32) -> i32: dispatcher, stub, fragments
-const OP = { localGet: 0x20, localSet: 0x21, localTee: 0x22, call: 0x10, i32Load: 0x28, i32Const: 0x41, i32Eq: 0x46, i32LtU: 0x49, if: 0x04, end: 0x0b, return: 0x0f, returnCall: 0x12, returnCallIndirect: 0x13 };
+const OP = { localGet: 0x20, localSet: 0x21, localTee: 0x22, call: 0x10, i32Load: 0x28, i32Const: 0x41, i32Eq: 0x46, i32LtU: 0x49, if: 0x04, brIf: 0x0d, end: 0x0b, return: 0x0f, returnCall: 0x12, returnCallIndirect: 0x13 };
 const VAL = { i32: 0x7f, i64: 0x7e, f32: 0x7d, f64: 0x7c };
 
 function uleb(out, v) {
@@ -328,6 +328,7 @@ export function assembleRegion(fragments, { helpers, pcOffset, memoryPages, memo
     const code = Uint8Array.from(f.code);
     const offsets = new Set();
     for (const r of f.relocs ?? []) {
+      if (r.kind === "hint") continue; // branch hints patch nothing (metadata.code.branch_hint below)
       if (!Number.isInteger(r.offset) || r.offset < 1 || r.offset + 5 > code.length) throw new Error(`region: reloc outside the code at ${r.offset}`);
       // A site is a padded zero after the instruction it patches: call for a
       // helper, return_call for a jump or a dispatch. Sites never overlap.
@@ -434,6 +435,32 @@ export function assembleRegion(fragments, { helpers, pcOffset, memoryPages, memo
   uleb(code, stub.length); append(stub);
   const bodyAt = [];
   for (const b of bodies) { uleb(code, b.length); bodyAt.push(code.length); append(b); }
+  // Custom section "metadata.code.branch_hint" (wasm branch hinting, before
+  // the code section): per fragment, the `if` opcodes the core marked and
+  // whether their true arm is likely (a fast path) or not (a halt, the
+  // downcount running out), so V8 lays the cold arms out of line, away from
+  // the hot code in the instruction cache. Offsets are from the start of the
+  // function body, as the fragment's own code starts. A hint off an `if` is
+  // dropped and counted (hintsDropped: V8 drops a malformed section silently,
+  // so a drift of the core's offsets must show); an engine that doesn't know
+  // the section ignores it.
+  let hintsDropped = 0;
+  // An `if` or a `br_if` (0135: the downcount check branches to the shared exit).
+  const onIf = (f, r) => Number.isInteger(r.offset) && r.offset >= 0 && r.offset < f.code.length && (f.code[r.offset] === OP.if || f.code[r.offset] === OP.brIf);
+  const hinted = fragments.map((f, i) => [FIRST + i, (f.relocs ?? []).filter((r) => r.kind === "hint")
+    .filter((r) => onIf(f, r) || (hintsDropped++, false))
+    .sort((a, b) => a.offset - b.offset)]).filter(([, hs]) => hs.length);
+  if (hinted.length) {
+    const hints = [];
+    name(hints, "metadata.code.branch_hint");
+    uleb(hints, hinted.length);
+    for (const [fn, hs] of hinted) {
+      uleb(hints, fn);
+      uleb(hints, hs.length);
+      for (const h of hs) { uleb(hints, h.offset); hints.push(0x01, h.likely ? 0x01 : 0x00); }
+    }
+    section(out, 0, hints);
+  }
   const codeAt = out.length + 1 + ulebLength(code.length); // the section's id and size first
   section(out, 10, code);
 
@@ -492,7 +519,8 @@ export function assembleRegion(fragments, { helpers, pcOffset, memoryPages, memo
     bytes: Uint8Array.from(out),
     layout,
     entries: sortedEntries.map(([pc, fn]) => [pc, fn - FIRST]),
-    helpers: helperNames
+    helpers: helperNames,
+    hintsDropped
   };
 }
 

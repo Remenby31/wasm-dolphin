@@ -55,7 +55,7 @@ test("the core translates a block into a fragment the region assembler links", {
   for (const r of fragment.relocs) if (r.kind === "import") assert.ok(HELPER_SIGNATURES[r.name], `known helper ${r.name}`);
   const { bytes, entries } = assembleRegion([fragment], { helpers: HELPER_SIGNATURES, pcOffset: core.pcOffset, memoryPages: core.memoryPages });
   assert.deepEqual(entries, [[DOUBLE, 0]]);
-  assert.deepEqual(fragment.relocs.map((r) => r.kind), ["dispatch"], "blr leaves through the dispatcher");
+  assert.deepEqual(fragment.relocs.map((r) => r.kind).filter((k) => k !== "hint"), ["dispatch"], "blr leaves through the dispatcher");
   assert.ok(core.compile(bytes) > 0, "the core compiles and links the region module");
   assert.deepEqual(regionModuleEntries(new WebAssembly.Module(bytes)), [DOUBLE], "entries travel with the module (cache loads)");
 });
@@ -206,4 +206,26 @@ test("a translated lwz carries the rotate byte swap (0126)", { skip: skip || (co
   const code = Array.from(fragment.code);
   const seq = rotateSwap(2);
   assert.ok(code.some((_, i) => seq.every((b, j) => code[i + j] === b)), "the rotate sequence is in the fragment");
+});
+
+// 0131: region code marks its `if`s whose outcome it knows. A lwz's RAM fast
+// path is likely; the SO guard at entry and the downcount running out are
+// not (its slow path calls the read helper without a halt check). Every hint
+// lands on an `if`, and the assembled module carries them as a
+// metadata.code.branch_hint section.
+test("a translated lwz carries branch hints on its ifs, and the module a branch_hint section (0131)", { skip: skip || (compilerVersion() < 23 && "core before 0131 (compiler version < 23)") }, () => {
+  const lwzR3 = (32 << 26) | (3 << 21) | (4 << 16) | 8;
+  const at = 0x80021200;
+  core.load(at, Uint8Array.of(lwzR3 >>> 24, (lwzR3 >>> 16) & 0xff, (lwzR3 >>> 8) & 0xff, lwzR3 & 0xff, 0x4e, 0x80, 0x00, 0x20));
+  const fragment = core.translate(at, { ranges: [[at, at + 8]] });
+  assert.ok(fragment, "translated");
+  const hints = fragment.relocs.filter((r) => r.kind === "hint");
+  for (const h of hints) assert.ok([0x04, 0x0d].includes(fragment.code[h.offset]), `the hint at ${h.offset} is on an if or a br_if (0135: the downcount check)`);
+  assert.ok(hints.some((h) => h.likely), "the RAM fast path is likely");
+  assert.ok(hints.filter((h) => !h.likely).length >= 2, "SO guard and downcount unlikely");
+  const { bytes, hintsDropped } = assembleRegion([fragment], { helpers: HELPER_SIGNATURES, pcOffset: core.pcOffset, memoryPages: core.memoryPages });
+  assert.equal(hintsDropped, 0, "no hint of the core falls off an `if`");
+  const [section] = WebAssembly.Module.customSections(new WebAssembly.Module(bytes), "metadata.code.branch_hint");
+  assert.ok(section, "the module carries the hints");
+  assert.ok(core.compile(bytes) > 0, "the core compiles and links the hinted module");
 });
