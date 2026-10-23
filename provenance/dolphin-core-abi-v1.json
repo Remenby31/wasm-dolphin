@@ -1,27 +1,27 @@
 {
   "schemaVersion": 1,
   "abiVersion": 1,
-  "coreId": "sha256:2fd0c5338159e2837c1148642a999bee60ad133a69868dfd602520d3054fa677",
+  "coreId": "sha256:615b14b46cd26db61f40e18768ef1f697c9ff51170820bf24564a5c22879d881",
   "upstreamCommit": "e22551eae1c84a7e4d0b6a5c519ef4ed4ef69df1",
   "artifacts": [
     {
       "path": "cores/dolphin/dolphin-core-upstream.js",
       "hashMode": "lf-normalized",
-      "size": 280221,
-      "sha256": "3de3f5a27aa333d5f23e71e923db00f441d10e4677a35e4cef568cf6508a2345"
+      "size": 281120,
+      "sha256": "ffd0941dacc651c57b71963ddd0c283a3d5232b7c303864ff8e1e5d93ce73dd2"
     },
     {
       "path": "cores/dolphin/dolphin-core-upstream.wasm",
-      "size": 13097040,
-      "sha256": "2fd0c5338159e2837c1148642a999bee60ad133a69868dfd602520d3054fa677"
+      "size": 13115012,
+      "sha256": "615b14b46cd26db61f40e18768ef1f697c9ff51170820bf24564a5c22879d881"
     }
   ],
   "contractSources": [
     {
       "path": "core/upstream/dolphin_web_discio.cpp",
       "hashMode": "lf-normalized",
-      "size": 68463,
-      "sha256": "6e2a5bf67519a1e1bbbe6d99d4c1c8f837ab72849564e3efddd0742cfebca078"
+      "size": 69240,
+      "sha256": "2f8215056ade5918a5ff8a85f2e508f82f64ab43ecc4108a62535ebb3bd6743b"
     },
     {
       "path": "core/upstream/dolphin_web_raster_profile.h",
@@ -44,8 +44,8 @@
     {
       "path": "core/upstream/dolphin_web_core.cpp",
       "hashMode": "lf-normalized",
-      "size": 54085,
-      "sha256": "0d3f687c4897d4e84d467731f83c545471ab09cdcd302b1c32bfb11fa74a9c29"
+      "size": 55870,
+      "sha256": "fba967d3fb529f761814975c45bec68beab7e00a0a2bb46c11f1bbac755fd7dd"
     },
     {
       "path": "src/app.js",
@@ -86,8 +86,8 @@
     {
       "path": "src/core-host.js",
       "hashMode": "lf-normalized",
-      "size": 72610,
-      "sha256": "8c2c36149fd4fc343cea36d1d6d64e6f4546671f12fb45555140687231328f77"
+      "size": 73979,
+      "sha256": "7c00584a3940140891ea33d9e7666714403d3e78d3dd75f9776127329498dcee"
     },
     {
       "path": "src/diagnostic-log-filter.js",
@@ -140,8 +140,8 @@
     {
       "path": "src/upstream-discio-worker.js",
       "hashMode": "lf-normalized",
-      "size": 707053,
-      "sha256": "c8b70e36531e9a96c1de51f681fb81ecbf3ed76139df2f0de410e0dbdf42ab0a"
+      "size": 708876,
+      "sha256": "337e90580b7646dfb3083eb62c94a0101ca0dbb2a538d63a2f2256f66d8cf0ae"
     },
     {
       "path": "src/wgpu-renderer-worker-probe.js",
@@ -164,8 +164,8 @@
     {
       "path": "src/upstream-worker-adapter.js",
       "hashMode": "lf-normalized",
-      "size": 52233,
-      "sha256": "35aa64753458384dc960ebcf6a556749cd9abc4fa4341a4919ae92befd9a6bc2"
+      "size": 52377,
+      "sha256": "04998ea67c90296abdd9e0c28beea82e51383b2c716c84607023ae665b7480b1"
     },
     {
       "path": "src/upstream-worker-protocol.js",
@@ -423,6 +423,7 @@
     "_DolphinWeb_HarnessViRingHead",
     "_DolphinWeb_HarnessViSinceBoot",
     "_DolphinWeb_HarnessViSinceLoad",
+    "_DolphinWeb_HeadroomStats",
     "_DolphinWeb_JitArmedStepForTest",
     "_DolphinWeb_JitCompileBytesForTest",
     "_DolphinWeb_JitCompileBytesInPlaceForTest",
@@ -442,9 +443,12 @@
     "_DolphinWeb_JitOracleMessage",
     "_DolphinWeb_JitOracleRun",
     "_DolphinWeb_JitReadyBitsPtr",
+    "_DolphinWeb_JitRegionChainStats",
     "_DolphinWeb_JitRegionCount",
     "_DolphinWeb_JitRegionInstallSamples",
     "_DolphinWeb_JitRegionStats",
+    "_DolphinWeb_JitRegionTransitionTop",
+    "_DolphinWeb_JitSetRegionChaining",
     "_DolphinWeb_JitSetRegionsEnabled",
     "_DolphinWeb_JitStateLayout",
     "_DolphinWeb_JitTableFull",
@@ -454,11 +458,14 @@
     "_DolphinWeb_RecordInstanceUs",
     "_DolphinWeb_RecordModuleUs",
     "_DolphinWeb_RecordWasmCompileError",
+    "_DolphinWeb_RegionChainHelper",
+    "_DolphinWeb_SetGpuSpinBudget",
     "_FlushMemoryCards",
     "_FrameBuffer",
     "_FrameHeight",
     "_FrameWidth",
     "_GameConfigMmuForTest",
+    "_GameConfigValueForTest",
     "_GetApploaderDate",
     "_GetApploaderSize",
     "_GetAudioStats",
@@ -655,6 +662,7 @@
       "validationReadAxHleStats",
       "validationReadCoreProgress",
       "validationReadDetTrace",
+      "validationReadHeadroomStats",
       "validationReadJitCacheReadiness",
       "validationReadJitRegionStats",
       "validationReadMemAccessStats",
