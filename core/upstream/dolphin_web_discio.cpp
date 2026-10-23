@@ -1309,6 +1309,13 @@ EMSCRIPTEN_KEEPALIVE std::uintptr_t DolphinWeb_HarnessPcAddress()
     return 0;
   return reinterpret_cast<std::uintptr_t>(&Core::System::GetInstance().GetPPCState().pc);
 }
+// Address of PowerPCState::pc for the player's local region profile
+// (src/aot-hot-sampler.js, ?aot=1 only): the same read-only word as above,
+// not gated on the harness hooks, which the product never turns on.
+EMSCRIPTEN_KEEPALIVE std::uintptr_t DolphinWeb_GuestPcAddress()
+{
+  return reinterpret_cast<std::uintptr_t>(&Core::System::GetInstance().GetPPCState().pc);
+}
 EMSCRIPTEN_KEEPALIVE std::uint32_t DolphinWeb_HarnessViRingCapacity() { return HARNESS_VI_RING_CAPACITY; }
 EMSCRIPTEN_KEEPALIVE std::uint32_t DolphinWeb_HarnessViRingHead() { return s_harness_vi_head.load(std::memory_order_acquire); }
 EMSCRIPTEN_KEEPALIVE std::uint32_t DolphinWeb_HarnessLoadGeneration() { return s_harness_load_generation.load(std::memory_order_acquire); }

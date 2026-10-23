@@ -1180,3 +1180,36 @@ test("a compare's field or operands rewritten in the region (fcmpu, ps_cmpu0, lm
   assert.equal(got.downcount, reference.downcount);
   assert.equal(got.interpreted, 0, "no op left the region");
 });
+
+// The local profile in a product build (harness hooks off): the sampler gets
+// the guest PC's address and a record writes the profile file. A product
+// build of #165 got 0 from the harness-only export and recorded nothing.
+const pcSkip = skip || (typeof core?.module._DolphinWeb_GuestPcAddress !== "function" && "core without DolphinWeb_GuestPcAddress");
+test("without harness hooks the profile sampler gets the guest PC and a record writes the profile", { skip: pcSkip }, async () => {
+  const { guestPcAddress, startHotSampler, createProfileRecorder } = await import("../src/aot-hot-sampler.js");
+  const { AotProfileStore, blocksFromPcSamples } = await import("../src/aot-profile.js");
+  const m = core.module;
+  if (typeof m._DolphinWeb_HarnessPcAddress === "function") assert.equal(m._DolphinWeb_HarnessPcAddress(), 0, "the harness export stays gated");
+  const at = guestPcAddress(m);
+  assert.ok(at > 0 && at % 4 === 0, "an address without the harness");
+  core.reset(seedGprs(1), TEXT + 0x40, STOP, 1000);
+  assert.equal(new Uint32Array(m.HEAPU8.buffer, at, 1)[0] >>> 0, (TEXT + 0x40) >>> 0, "it is the core's PC");
+  // The sampler starts from it (a stand-in worker posts what it counted).
+  let worker;
+  const sampler = startHotSampler({ buffer: new SharedArrayBuffer(16), pcAddress: at, createWorker: () => (worker = { postMessage() {}, terminate() {} }) });
+  assert.ok(sampler);
+  worker.onmessage({ data: [[TEXT + 0x40, 7]] });
+  // A record writes the file, with the weight.
+  const files = new Map();
+  const dir = { getFileHandle: async (name, { create } = {}) => {
+    if (!files.has(name) && !create) throw Object.assign(new Error("missing"), { name: "NotFoundError" });
+    return { getFile: async () => ({ arrayBuffer: async () => (files.get(name) ?? new Uint8Array()).slice().buffer }), createWritable: async () => { let b; return { write: async (x) => { b = new Uint8Array(x); }, close: async () => { files.set(name, b); }, abort: async () => {} }; } };
+  } };
+  const store = new AotProfileStore({ getDirectoryHandle: async () => dir }, { locks: null });
+  const record = createProfileRecorder({ store, discKey: "disc", blocksFromPcSamples });
+  await record(sampler.drain());
+  sampler.stop();
+  const saved = await store.load("disc");
+  assert.deepEqual(saved.blocks.map((b) => [b[0], b[4]]), [[(TEXT + 0x40) >>> 0, 7]], "the profile file holds the weight");
+});
+

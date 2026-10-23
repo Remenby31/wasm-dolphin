@@ -20,8 +20,8 @@
     {
       "path": "core/upstream/dolphin_web_discio.cpp",
       "hashMode": "lf-normalized",
-      "size": 71684,
-      "sha256": "19e4dec6bc36a9bccc7dfe8b0319f4fbac9f7b33844d713b14aab1d8a9654e92"
+      "size": 72056,
+      "sha256": "cbfce8478d96f0d715c869e98562c7692018640fab16cae8db5d1827062d73de"
     },
     {
       "path": "core/upstream/dolphin_web_raster_profile.h",
@@ -140,8 +140,8 @@
     {
       "path": "src/upstream-discio-worker.js",
       "hashMode": "lf-normalized",
-      "size": 721546,
-      "sha256": "d73bfa7b3b0358955caaf4cc93fc2371fbfd0d0d2fe432bfffdbd6cace417384"
+      "size": 721572,
+      "sha256": "34697e580759c03106a835a6d2020eea6a4177d1d378a7764cd8988c6d0d9ef7"
     },
     {
       "path": "src/wgpu-renderer-worker-probe.js",
