@@ -5,7 +5,7 @@ import test from "node:test";
 import { CONF_POINTER, CONF_PROFILE } from "../src/aot-discovery.js";
 import { walkFst } from "../src/aot-disc.js";
 import {
-  AotProfileStore, blocksFromCoreDump, blocksFromPcSamples, decodeProfile, encodeProfile, mergeProfiles, normalizeRanges
+  AotProfileStore, profileKey, blocksFromCoreDump, blocksFromPcSamples, decodeProfile, encodeProfile, mergeProfiles, normalizeRanges
 } from "../src/aot-profile.js";
 import { hintsMatch, loadHints, parseHints } from "../src/aot-hints.js";
 import { imageFromDol } from "../src/aot-image.js";
@@ -330,5 +330,30 @@ test("aot profile v3: a truncated file is refused; weights are clamped to a u32"
   const bytes = encodeProfile({ sessions: 1, blocks: [[0x80003100, 0x80003104, 1, 0, 2 ** 40]] });
   assert.equal(decodeProfile(bytes).blocks[0][4], 0xffffffff, "clamped");
   assert.equal(decodeProfile(bytes.subarray(0, bytes.length - 2)), null, "truncated");
+});
+
+// The engine's disc keys hold a ':' that a profile file name refuses: every
+// read and write of #165 threw ("invalid disc key"), so nothing was ever
+// recorded. profileKey maps them, as the plan store does.
+test("aot profile: an engine disc key records and loads through profileKey", async () => {
+  const discKey = "disc-sha256-v1:" + "ab".repeat(32);
+  const store = new AotProfileStore(fakeOpfs(), { locks: null });
+  await assert.rejects(store.record(discKey, blocksFromPcSamples([[0x80003100, 3]])), /invalid disc key/, "the raw key is refused");
+  const key = profileKey(discKey);
+  assert.match(key, /^[0-9A-Za-z_-]{1,128}$/);
+  await store.record(key, blocksFromPcSamples([[0x80003100, 3]]));
+  assert.deepEqual((await store.load(key)).blocks.map((b) => [b[0], b[4]]), [[0x80003100, 3]]);
+});
+
+test("aot profile: a failed record is counted and warned once, never silent", async () => {
+  const { createProfileRecorder } = await import("../src/aot-hot-sampler.js");
+  const warnings = [];
+  const store = { record: async () => { throw Object.assign(new Error("aot-profile: invalid disc key"), { name: "Error" }); } };
+  const record = createProfileRecorder({ store, discKey: "x", blocksFromPcSamples, warn: (m) => warnings.push(m) });
+  await record([[0x80003100, 1]]);
+  await record([[0x80003100, 1]]);
+  assert.deepEqual(record.stats(), { records: 0, failures: 2, lastError: "Error: aot-profile: invalid disc key" });
+  assert.equal(warnings.length, 1, "warned once");
+  assert.match(warnings[0], /invalid disc key/);
 });
 

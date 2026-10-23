@@ -7345,18 +7345,25 @@ export function setAotFirstLaunchEnabledForTest(enabled) {
 export async function handleAotMessage(type, payload = {}) {
   const idle = aotFirstLaunchEnabled ? "none" : "disabled";
   switch (type) {
-    case "aotStatus":
-      return aotFirstLaunch ? aotFirstLaunch.status() : { state: idle, fraction: 0 };
+    case "aotStatus": {
+      const status = aotFirstLaunch ? await aotFirstLaunch.status() : { state: idle, fraction: 0 };
+      const profile = aotProfileReport();
+      return profile ? { ...status, profile } : status;
+    }
     case "aotOptimize":
       if (aotFirstLaunch?.supported) void aotFirstLaunch.start({ resume: payload?.resume !== false });
       return { started: Boolean(aotFirstLaunch?.supported) };
     case "aotCancel":
       aotFirstLaunch?.cancel();
       return {};
-    case "validationReadAotProgress":
-      return aotFirstLaunch
+    case "validationReadAotProgress": {
+      const progress = aotFirstLaunch
         ? aotFirstLaunch.progress({ drain: payload?.drain === true })
         : { schema: AOT_PROGRESS_SCHEMA, state: idle, events: [] };
+      // The local profile's records and failures (never silent again).
+      const profile = aotProfileReport();
+      return profile ? { ...progress, profile } : progress;
+    }
     default:
       throw new Error(`Unknown aot message: ${type}`);
   }
@@ -7394,7 +7401,7 @@ export async function prepareAotFirstLaunch(file, {
     return;
   }
   const generation = aotDiscGeneration;
-  const [{ coreAotKeyParts, coreAssembleOptions, coreRegionTranslator, createAotFirstLaunch }, { OpfsPlanStore }, { AotProfileStore, blocksFromPcSamples }, { planDiscInWorker }, { fileReader, planDisc }, { createProfileRecorder, guestPcAddress, startHotSampler }] =
+  const [{ coreAotKeyParts, coreAssembleOptions, coreRegionTranslator, createAotFirstLaunch }, { OpfsPlanStore }, { AotProfileStore, blocksFromPcSamples, profileKey }, { planDiscInWorker }, { fileReader, planDisc }, { createProfileRecorder, guestPcAddress, startHotSampler }] =
     await Promise.all([import("./aot-orchestrator.js"), import("./aot-optimizer.js"), import("./aot-profile.js"), import("./aot-plan-worker.js"), import("./aot-recomp.js"), import("./aot-hot-sampler.js")]);
   const discKey = await readDiscKey();
   if (generation !== aotDiscGeneration) return;
@@ -7416,7 +7423,8 @@ export async function prepareAotFirstLaunch(file, {
     // in a worker of its own, never on this one, which serves the core's
     // disc reads. Without workers (tests), in place.
     buildPlan: async () => {
-      const profile = opfs ? await new AotProfileStore(opfs).load(discKey).catch(() => null) : null;
+      const profile = opfs ? await new AotProfileStore(opfs).load(profileKey(discKey)).catch((error) => noteAotProfileReadFailure(error)) : null;
+      aotPlanProfileForTest = profile;
       return typeof Worker === "function" ? planDiscInWorker(file, { profile }) : planDisc(fileReader(file), { profile });
     },
     compile: precompileAotRegion,
@@ -7456,8 +7464,12 @@ export async function prepareAotFirstLaunch(file, {
   // Where this player's game spends its time, recorded into the local
   // profile (OPFS, per disc, addresses and sample counts only; never sent or
   // shared): the next plan orders by it and forms hot fragments from it.
+  // The local profile's health: no OPFS, read and write failures, never
+  // silent (validationReadAotProgress, aotStatus, one console warning).
+  aotProfileHealth = { opfs: Boolean(opfs), readFailures: 0, lastReadError: null, warned: false };
+  if (!opfs) warnAotProfile("no OPFS in this browser: no local region profile");
   aotProfileTarget = opfs && discKey
-    ? { flow, startHotSampler, guestPcAddress, record: createProfileRecorder({ store: new AotProfileStore(opfs), discKey, blocksFromPcSamples }) }
+    ? { flow, startHotSampler, guestPcAddress, record: createProfileRecorder({ store: new AotProfileStore(opfs), discKey: profileKey(discKey), blocksFromPcSamples, warn: warnAotProfile }) }
     : null;
   const blockKeys = [];
   if (!flow.supported) {
@@ -7520,6 +7532,33 @@ export function startAotFirstLaunchAfterBoot(flow = aotFirstLaunch) {
 }
 let aotHotSampler = null;
 let aotProfileTarget = null;
+let aotProfileHealth = null;
+let aotPlanProfileForTest = null;
+function warnAotProfile(message) {
+  if (aotProfileHealth?.warned) return;
+  if (aotProfileHealth) aotProfileHealth.warned = true;
+  console.warn(`aot: ${message.replace(/^aot: /, "")}`);
+}
+function noteAotProfileReadFailure(error) {
+  if (aotProfileHealth) {
+    aotProfileHealth.readFailures += 1;
+    aotProfileHealth.lastReadError = `${error?.name ?? "Error"}: ${error?.message ?? error}`;
+  }
+  warnAotProfile(`the local region profile could not be read (${error?.name ?? "Error"}: ${error?.message ?? error})`);
+  return null;
+}
+// The local profile's state for the probes: OPFS present, records and
+// failures of each kind with the last message.
+function aotProfileReport() {
+  if (!aotProfileHealth) return null;
+  const { warned, ...health } = aotProfileHealth;
+  const writes = aotProfileTarget?.record?.stats?.() ?? null;
+  return { ...health, records: writes?.records ?? 0, writeFailures: writes?.failures ?? 0, lastWriteError: writes?.lastError ?? null };
+}
+// Test seams: record samples as the minute's flush does; the profile the
+// last plan build received.
+export const recordAotProfileForTest = (samples) => aotProfileTarget?.record(samples) ?? null;
+export const aotPlanProfileReadForTest = () => aotPlanProfileForTest;
 let aotProfileTimer = null;
 const AOT_PROFILE_SAMPLE_MS = 10; // one guest PC per 10 ms: enough for block weights
 const AOT_PROFILE_RECORD_MS = 60000;
