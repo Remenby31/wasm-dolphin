@@ -1,24 +1,32 @@
 // Execution profile: guest code blocks seen executing in earlier sessions,
-// kept in OPFS per disc and merged into the next plan. Only addresses are
-// stored, never guest bytes.
+// kept in OPFS per disc and merged into the next plan. Only addresses and
+// counts are stored, never guest bytes. It stays on the player's machine:
+// nothing reads it but this origin's plan, and it is never sent or shared
+// (a shared profile for a commercial disc was set aside: the hint-sheet
+// policy, aot-hints.js).
 //
-// A block is [start, end, seen, flags]: `seen` counts the sessions that ran
-// it (saturating at 0xffff), flags bit0 = real mode (address translation off).
+// A block is [start, end, seen, flags, weight]: `seen` counts the sessions
+// that ran it (saturating at 0xffff), flags bit0 = real mode (address
+// translation off), `weight` the guest-PC samples taken in it (version 3;
+// halved at each new session, so it follows what the player runs now).
 //
-// File layout (little-endian): "SAOTPRF2", u32 version=2, u32 sessions,
+// File layout (little-endian): "SAOTPRF2", u32 version=3, u32 sessions,
 // 8 bytes gameId (ASCII, zero padded), 8 bytes dolHash (FNV-1a 64, big-endian),
-// u32 count, then count x (u32 start, u32 end, u16 seen, u16 flags),
-// ascending by start.
+// u32 count, then count x (u32 start, u32 end, u16 seen, u16 flags, u32
+// weight), ascending by start. Version 2 (no weight, 12-byte entries) reads
+// with weight 0.
 
 export const PROFILE_MAGIC = "SAOTPRF2";
-export const PROFILE_VERSION = 2;
+export const PROFILE_VERSION = 3;
 export const PROFILE_DIR = "aot-profile";
 export const PROFILE_REAL_MODE = 1;
 // Beyond this many blocks the least seen are dropped (ties: the most recently
 // added are kept last); 1 M blocks is ~40x what a long play session runs.
 export const PROFILE_MAX_RANGES = 1 << 20;
 const HEADER = 8 + 4 + 4 + 8 + 8 + 4;
-const ENTRY = 12;
+const ENTRY = 16;
+const ENTRY_V2 = 12;
+const MAX_WEIGHT = 0xffffffff;
 
 // Normalise blocks: drop empty or misaligned ones, sort, merge overlapping
 // blocks of the same mode (adjacent blocks stay separate: each start is an
@@ -27,7 +35,7 @@ export function normalizeRanges(blocks, { max = PROFILE_MAX_RANGES } = {}) {
   const list = [];
   for (const b of blocks) {
     const start = b[0] >>> 0, end = b[1] >>> 0;
-    if (end > start && !(start & 3) && !(end & 3)) list.push([start, end, Math.min(b[2] ?? 1, 0xffff), (b[3] ?? 0) & 0xffff]);
+    if (end > start && !(start & 3) && !(end & 3)) list.push([start, end, Math.min(b[2] ?? 1, 0xffff), (b[3] ?? 0) & 0xffff, Math.min(Math.max(0, Math.round(b[4] ?? 0)), MAX_WEIGHT)]);
   }
   list.sort((a, b) => a[0] - b[0] || a[3] - b[3] || a[1] - b[1]);
   const out = [];
@@ -36,6 +44,7 @@ export function normalizeRanges(blocks, { max = PROFILE_MAX_RANGES } = {}) {
     if (last && r[3] === last[3] && r[0] < last[1]) {
       last[1] = Math.max(last[1], r[1]);
       last[2] = Math.max(last[2], r[2]);
+      last[4] = Math.min(last[4] + r[4], MAX_WEIGHT);
     } else {
       out.push(r);
     }
@@ -50,16 +59,20 @@ function truncate(blocks, max) {
 }
 
 // Merge a stored profile with the blocks of one session: blocks seen again
-// gain one in `seen`.
+// gain one in `seen`. Weights: the stored ones halve when the session is a
+// new one (sessions > 0), and the session's add up; a periodic record of
+// the same session (sessions 0) only adds.
 export function mergeProfiles(stored, session) {
   const key = (b) => `${b[0]}:${b[3] ?? 0}`;
+  const decay = (session?.sessions ?? 0) > 0 ? 0.5 : 1;
   const prior = new Map((stored?.blocks ?? []).map((b) => [key(b), b]));
   const fresh = (session?.blocks ?? []).map((b) => {
     const old = prior.get(key(b));
-    return [b[0], b[1], Math.min((old?.[2] ?? 0) + (b[2] ?? 1), 0xffff), b[3] ?? 0];
+    const seen = (session?.sessions ?? 0) > 0 ? Math.min((old?.[2] ?? 0) + (b[2] ?? 1), 0xffff) : Math.max(old?.[2] ?? 0, b[2] ?? 1);
+    return [b[0], b[1], seen, b[3] ?? 0, Math.floor((old?.[4] ?? 0) * decay) + (b[4] ?? 0)];
   });
   const freshKeys = new Set(fresh.map(key));
-  const kept = (stored?.blocks ?? []).filter((b) => !freshKeys.has(key(b)));
+  const kept = (stored?.blocks ?? []).filter((b) => !freshKeys.has(key(b))).map((b) => [b[0], b[1], b[2], b[3], Math.floor((b[4] ?? 0) * decay)]);
   return {
     gameId: session?.gameId ?? stored?.gameId ?? null,
     dolHash: session?.dolHash ?? stored?.dolHash ?? null,
@@ -81,9 +94,9 @@ export function encodeProfile({ sessions = 0, gameId = null, dolHash = null, blo
     for (let i = 0; i < 8; i++) out[24 + i] = parseInt(dolHash.slice(i * 2, i * 2 + 2), 16);
   }
   v.setUint32(32, ranges.length, true);
-  ranges.forEach(([s, e, seen, flags], i) => {
+  ranges.forEach(([s, e, seen, flags, weight], i) => {
     const o = HEADER + i * ENTRY;
-    v.setUint32(o, s, true); v.setUint32(o + 4, e, true); v.setUint16(o + 8, seen, true); v.setUint16(o + 10, flags, true);
+    v.setUint32(o, s, true); v.setUint32(o + 4, e, true); v.setUint16(o + 8, seen, true); v.setUint16(o + 10, flags, true); v.setUint32(o + 12, weight >>> 0, true);
   });
   return out;
 }
@@ -92,17 +105,19 @@ export function decodeProfile(bytes) {
   const u8 = bytes instanceof Uint8Array ? bytes : new Uint8Array(bytes);
   if (u8.byteLength < HEADER || new TextDecoder().decode(u8.subarray(0, 8)) !== PROFILE_MAGIC) return null;
   const v = new DataView(u8.buffer, u8.byteOffset, u8.byteLength);
-  if (v.getUint32(8, true) !== PROFILE_VERSION) return null;
+  const version = v.getUint32(8, true);
+  if (version !== PROFILE_VERSION && version !== 2) return null;
+  const entry = version === 2 ? ENTRY_V2 : ENTRY;
   const count = v.getUint32(32, true);
-  if (count > PROFILE_MAX_RANGES || HEADER + count * ENTRY !== u8.byteLength) return null;
+  if (count > PROFILE_MAX_RANGES || HEADER + count * entry !== u8.byteLength) return null;
   const id = u8.subarray(16, 24);
   const gameId = id[0] ? new TextDecoder("latin1").decode(id.subarray(0, id.indexOf(0) < 0 ? 8 : id.indexOf(0))) : null;
   const hashBytes = u8.subarray(24, 32);
   const dolHash = hashBytes.some((b) => b) ? Array.from(hashBytes, (b) => b.toString(16).padStart(2, "0")).join("") : null;
   const blocks = [];
   for (let i = 0; i < count; i++) {
-    const o = HEADER + i * ENTRY;
-    blocks.push([v.getUint32(o, true), v.getUint32(o + 4, true), v.getUint16(o + 8, true), v.getUint16(o + 10, true)]);
+    const o = HEADER + i * entry;
+    blocks.push([v.getUint32(o, true), v.getUint32(o + 4, true), v.getUint16(o + 8, true), v.getUint16(o + 10, true), version === 2 ? 0 : v.getUint32(o + 12, true)]);
   }
   return { sessions: v.getUint32(12, true), gameId, dolHash, blocks: normalizeRanges(blocks) };
 }
@@ -154,11 +169,12 @@ export class AotProfileStore {
   }
 
   // Merge the blocks of the session that just ran into the stored profile.
-  // A stored profile of another DOL is replaced.
-  async record(discKey, blocks, { gameId = null, dolHash = null } = {}) {
+  // A stored profile of another DOL is replaced. newSession: false for a
+  // periodic record of a session already counted (weights add, no decay).
+  async record(discKey, blocks, { gameId = null, dolHash = null, newSession = true } = {}) {
     return this.locked(discKey, async () => {
       const stored = await this.load(discKey, { gameId, dolHash });
-      const merged = mergeProfiles(stored, { sessions: 1, gameId, dolHash, blocks: normalizeRanges(blocks) });
+      const merged = mergeProfiles(stored, { sessions: newSession ? 1 : 0, gameId, dolHash, blocks: normalizeRanges(blocks) });
       const handle = await (await this.dir()).getFileHandle(fileName(discKey), { create: true });
       const writable = await handle.createWritable();
       try {
@@ -201,6 +217,10 @@ export function blocksFromCoreDump(u32) {
 // Block starts from a PC sampler. Each sampled PC becomes a one-instruction
 // block: discovery grows it into the full block. `realMode(pc)` tells which
 // samples were taken with translation off (default: below 0x80000000).
+// `pcs`: PCs, or [pc, samples] pairs (the samples become the block's weight).
 export function blocksFromPcSamples(pcs, { realMode = (pc) => pc < 0x80000000 } = {}) {
-  return normalizeRanges([...pcs].map((pc) => [pc, pc + 4, 1, realMode(pc) ? PROFILE_REAL_MODE : 0]));
+  return normalizeRanges([...pcs].map((x) => {
+    const [pc, n] = Array.isArray(x) ? x : [x, 0];
+    return [pc, pc + 4, 1, realMode(pc) ? PROFILE_REAL_MODE : 0, n];
+  }));
 }
