@@ -781,3 +781,108 @@ test("FPU ops outside the direct tier run inside the region, interpreted, like t
   assert.equal(got.ran, 1);
   core.invalidate(FPU_TEXT, 4 * FPU.words.length);
 });
+
+// 0111: region compares store their CR field as one i64 (SO clear) and a bc
+// on it decides on the compare's operands while they are intact. Unsigned
+// and signed compares of a high-bit value, a bc on a false condition, an
+// Rc=1 result overwritten before its bc, andi., a bc in another block of
+// the fragment and one in another region (after a call) that read the
+// stored field, then mfcr reads every field.
+const CR_TEXT = 0x8000e100;
+const cmpw = (crf, a, b) => (31 << 26) | (crf << 23) | (a << 16) | (b << 11);
+const cmplw = (crf, a, b) => cmpw(crf, a, b) | (32 << 1);
+const cmpwi = (crf, a, imm) => (11 << 26) | (crf << 23) | (a << 16) | (imm & 0xffff);
+const andiRc = (a, s, imm) => (28 << 26) | (s << 21) | (a << 16) | (imm & 0xffff);
+const mfcr = (d) => (31 << 26) | (d << 21) | (19 << 1);
+const mtxer = (s) => (31 << 26) | (s << 21) | (1 << 16) | (467 << 1);
+const bne = (from, to, crf = 0) => asm.bc(4, crf * 4 + 2, from, to);
+const blt = (from, to, crf = 0) => asm.bc(12, crf * 4 + 0, from, to);
+const crProgram = (setSo) => assemble(CR_TEXT, [
+  "main", asm.mflr(0), asm.stwu(1, 1, -16), stw(0, 1, 20), ...(setSo ? [asm.li(9, -1), mtxer(9)] : []),
+  (pc, l) => asm.bl(pc, l.cr), lwz(0, 1, 20), asm.addi(1, 1, 16), mtlr(0), asm.blr(),
+  "cr", asm.lis(5, 0x8000), asm.li(6, 1), asm.li(3, 0),
+  cmplw(0, 5, 6), (pc, l) => asm.bgt(pc, l.l1), asm.addi(3, 3, 100),
+  "l1", cmpw(7, 5, 6), (pc, l) => asm.bge(pc, l.l2, 7), asm.addi(3, 3, 1),
+  "l2", add(7, 5, 5) | 1, asm.li(7, 5), (pc, l) => bne(pc, l.l3), asm.addi(3, 3, 10),
+  "l3", cmpwi(1, 6, 1), (pc, l) => asm.beq(pc, l.l4, 1), asm.addi(3, 3, 1000),
+  "l4", andiRc(9, 5, 1), (pc, l) => asm.beq(pc, l.l5), asm.addi(3, 3, 10000),
+  "l5", cmpw(6, 5, 6), (pc, l) => asm.b(pc, l.l6),
+  "l6", (pc, l) => blt(pc, l.l7, 6), asm.addi(3, 3, 100000),
+  "l7", asm.mflr(10), (pc, l) => asm.bl(pc, l.setcr), mtlr(10), (pc, l) => blt(pc, l.l8, 5), asm.addi(3, 3, 1000000),
+  "l8", mfcr(8), asm.blr(),
+  "setcr", cmpwi(5, 6, 2), asm.blr()
+]);
+const crSkip = chainSkip || (core?.has("DolphinWeb_AotKeyParts") && keyVersion() < 10 && "core before 0111 (compiler version < 10)");
+function runCrProgram(setSo) {
+  const prog = crProgram(setSo);
+  const dol = buildDol({ textAddr: CR_TEXT, text: prog.words, entry: prog.labels.main });
+  const { image, entryPoint } = imageFromDol(dol);
+  const plan = planDol({ image, entryPoint, gameId: "TEST01", dolBytes: dol, options: { gapFill: false } });
+  for (const seg of image.segments) core.load(seg.start, seg.bytes);
+  core.reset(seedGprs(prog.labels.main), prog.labels.main, STOP, 400000);
+  core.setRegionsEnabled(true);
+  core.setRegionChaining(true);
+  queueAll(plan, 1, true);
+  serviceAll();
+  const reference = runCall(prog.labels.main, { regions: false });
+  const got = runCall(prog.labels.main, { regions: true });
+  core.invalidate(CR_TEXT, 4 * prog.words.length);
+  core.module._DolphinWeb_AotForgetRegionsForTest?.();
+  return { reference, got };
+}
+
+test("region compares and the bc after them end like the interpreter (0111)", { skip: crSkip }, () => {
+  const { reference, got } = runCrProgram(false);
+  assert.deepEqual(got.state, reference.state);
+  assert.equal(got.downcount, reference.downcount);
+  assert.equal(got.interpreted, 0, "no op left the region");
+  assert.equal(got.ran, 1);
+});
+
+test("with XER.SO set regions do not run, and the CR fields carry SO like the interpreter's (0111)", { skip: crSkip }, () => {
+  const { reference, got } = runCrProgram(true);
+  assert.deepEqual(got.state, reference.state);
+  // main's region runs up to mtxer (which runs outside); past it SO is set
+  // and the call runs interpreted.
+  assert.ok(got.ran <= 1, "refused while SO is set");
+  assert.ok(got.interpreted > 20, `${got.interpreted} instructions outside regions`);
+});
+
+// 0111: XER.SO going 0 -> 1 in the middle of a function. An OE form (addo
+// overflowing), mtxer and mcrxr are not region code (RegionMaySetSo ends
+// the block before them): they run outside, and the fragment entered after
+// them refuses while SO is set. The compares after them, the bc on their
+// field and mfcr must carry SO as the interpreter's do.
+const SO_TEXT = 0x80011100;
+const addo = (d, a, b) => add(d, a, b) | (1 << 10);
+const mcrxr = (crf) => (31 << 26) | (crf << 23) | (512 << 1);
+const soProgram = (setter) => assemble(SO_TEXT, [
+  "main", asm.mflr(0), asm.stwu(1, 1, -16), stw(0, 1, 20), (pc, l) => asm.bl(pc, l.f),
+  lwz(0, 1, 20), asm.addi(1, 1, 16), mtlr(0), asm.blr(),
+  "f", asm.lis(5, 0x8000), asm.li(6, 1), asm.li(3, 0), cmpwi(0, 6, 1), (pc, l) => asm.beq(pc, l.a), asm.addi(3, 3, 1),
+  "a", ...setter, cmpwi(0, 6, 1), (pc, l) => asm.beq(pc, l.b), asm.addi(3, 3, 10),
+  "b", cmpw(7, 6, 5), (pc, l) => asm.bgt(pc, l.c, 7), asm.addi(3, 3, 100),
+  "c", asm.addi(4, 3, 0), mfcr(8), asm.blr()
+]);
+for (const [name, setter] of [["addo", [addo(7, 5, 5)]], ["mtxer", [asm.lis(9, 0x8000), mtxer(9)]], ["mcrxr then mtxer", [asm.lis(9, 0xc000), mtxer(9), mcrxr(2), asm.lis(9, 0x8000), mtxer(9)]]]) {
+  test(`XER.SO set mid-function by ${name}: later compares, a bc on them and mfcr carry SO like the interpreter (0111)`, { skip: crSkip }, () => {
+    const prog = soProgram(setter);
+    const dol = buildDol({ textAddr: SO_TEXT, text: prog.words, entry: prog.labels.main });
+    const { image, entryPoint } = imageFromDol(dol);
+    const plan = planDol({ image, entryPoint, gameId: "TEST01", dolBytes: dol, options: { gapFill: false } });
+    for (const seg of image.segments) core.load(seg.start, seg.bytes);
+    core.reset(seedGprs(prog.labels.main), prog.labels.main, STOP, 400000);
+    core.setRegionsEnabled(true);
+    core.setRegionChaining(true);
+    queueAll(plan, 1, true);
+    serviceAll();
+    const reference = runCall(prog.labels.main, { regions: false });
+    const got = runCall(prog.labels.main, { regions: true });
+    core.invalidate(SO_TEXT, 4 * prog.words.length);
+    core.module._DolphinWeb_AotForgetRegionsForTest?.();
+    assert.deepEqual(got.state, reference.state);
+    assert.equal(got.downcount, reference.downcount);
+    assert.ok(got.ran >= 1, "the function's first blocks ran as a region");
+    assert.ok(got.interpreted >= 1, "the SO setter ran outside regions");
+  });
+}
