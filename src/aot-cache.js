@@ -21,6 +21,7 @@ import {
   aotCacheIdentity,
   aotCacheName,
   canonicalDiscKey,
+  canonicalDolKey,
   classifyAotCacheIdentity,
   isAotEntryKey,
   sha256Hex
@@ -54,6 +55,19 @@ export async function readDiscKeyFromFile(file) {
   const dolSize = Math.max(0x100, ...dolHeader.loadSections.map((s) => s.fileOffset + s.size));
   if (dolSize > MAX_DOL_BYTES || dolOffset + dolSize > file.size) return null;
   return canonicalDiscKey({ header, dol: await read(dolOffset, dolSize), fst: await read(fstOffset, fstSize) });
+}
+
+// The key of a booted .dol (canonicalDolKey): the whole file, when its header
+// parses and it is no bigger than a disc's DOL may be. Null otherwise.
+export async function readDolKeyFromFile(file) {
+  if (!file || typeof file.slice !== "function" || file.size < 0x100 || file.size > MAX_DOL_BYTES) return null;
+  const bytes = new Uint8Array(await file.slice(0, file.size).arrayBuffer());
+  try {
+    parseDolHeader(bytes.subarray(0, 0x100));
+  } catch {
+    return null;
+  }
+  return canonicalDolKey(bytes);
 }
 
 // Registered by the engine page when no site Service Worker controls it.

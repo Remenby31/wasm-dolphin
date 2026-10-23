@@ -1,12 +1,14 @@
 // Strict reader of a region module's metadata.code.branch_hint section
-// (0131), with the rules under which V8 drops the whole section, silently
+// (0131). V8's rules, under which it drops the whole section, silently
 // (module-decoder-impl.h, research/deep-wasm-code-metadata.md §4 lever 6):
-// before the code section; function indices strictly increasing and naming
-// a defined function; offsets strictly increasing within a function; each
-// hint one byte long, 0 or 1; nothing left over. And ours: every offset, in
+// function indices strictly increasing; offsets strictly increasing within
+// a function; each hint one byte long, 0 or 1; nothing left over. Ours
+// (marked "ours" below), stricter than V8's: one section, before the code
+// section; each function index naming a defined function; every offset, in
 // the function's body (locals included), on an `if` or a `br_if`.
-// Returns { hints, errors }: hints counted, every rule broken (none when the
-// section is valid or absent).
+// Returns { hints, errors, entries }: hints counted, every rule broken (none
+// when the section is valid or absent), and each hint read as
+// { fn, offset, likely }.
 
 const SECTION = "metadata.code.branch_hint";
 
@@ -49,8 +51,8 @@ export function checkBranchHintSection(bytes) {
     if (id === 0) {
       const name = r.name();
       if (name === SECTION) {
-        if (hintSection) errors.push("two branch_hint sections");
-        if (codeSeen) errors.push("branch_hint section after the code section");
+        if (hintSection) errors.push("two branch_hint sections"); // ours
+        if (codeSeen) errors.push("branch_hint section after the code section"); // ours
         hintSection = { start: r.at, end };
       }
     } else if (id === 2) {
@@ -78,7 +80,8 @@ export function checkBranchHintSection(bytes) {
     }
     r.at = end;
   }
-  if (!hintSection) return { hints: 0, errors };
+  const entries = [];
+  if (!hintSection) return { hints: 0, errors, entries };
   const h = reader(bytes, hintSection.start);
   let hints = 0, lastFn = -1;
   try {
@@ -88,7 +91,8 @@ export function checkBranchHintSection(bytes) {
       if (fn <= lastFn) errors.push(`function ${fn} after ${lastFn}`);
       lastFn = fn;
       const body = bodies[fn - importedFunctions];
-      if (fn < importedFunctions || !body) errors.push(`function ${fn} is not defined (${importedFunctions} imported, ${definedFunctions} defined)`);
+      if (fn < importedFunctions || !body) errors.push( // ours
+        `function ${fn} is not defined (${importedFunctions} imported, ${definedFunctions} defined)`);
       const count = h.uleb();
       let lastOffset = -1;
       for (let i = 0; i < count; i++) {
@@ -96,16 +100,18 @@ export function checkBranchHintSection(bytes) {
         const size = h.uleb();
         const value = h.byte();
         hints++;
+        entries.push({ fn, offset, likely: value === 1 });
         if (offset <= lastOffset) errors.push(`function ${fn}: offset ${offset} after ${lastOffset}`);
         lastOffset = offset;
         if (size !== 1) errors.push(`function ${fn}: hint size ${size}`);
         if (value > 1) errors.push(`function ${fn}: hint value ${value}`);
-        if (body && !(offset < body.length && (body[offset] === 0x04 || body[offset] === 0x0d))) errors.push(`function ${fn}: offset ${offset} is not on an if or a br_if`);
+        if (body && !(offset < body.length && (body[offset] === 0x04 || body[offset] === 0x0d))) errors.push( // ours
+          `function ${fn}: offset ${offset} is not on an if or a br_if`);
       }
     }
   } catch (e) {
     errors.push(`truncated: ${e.message}`);
   }
   if (h.at !== hintSection.end) errors.push(`${hintSection.end - h.at} bytes left over`);
-  return { hints, errors };
+  return { hints, errors, entries };
 }

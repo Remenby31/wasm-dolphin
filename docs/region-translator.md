@@ -483,3 +483,33 @@ end body₀  end body₁ …  end body(N-1)  end($D) return_call dispatch  end($
 - **Unchanged.** The per-block tail (pc, downcount, its exits) and the entries.
 
 Compiler version 25.
+
+## Frame in locals (patch 0135, was 0128, 2026-10-23)
+
+A fragment block used to end with `pc ← npc` through the state, then a
+load, subtract, store and reload of downcount: 2 loads and 3 stores per
+block. A fragment now keeps pc (56), npc (57) and downcount (58) in locals:
+- Its blocks write npc to the local.
+- The block tail is `pc = npc ; downcount -= cycles ; br_if (downcount <= 0) $X`.
+- pc, npc and downcount are written back before every return and every
+  tail call. Running out of downcount branches to one shared exit `$X`
+  around the loop, which writes them back once: the first version wrote them
+  back in every block's tail and lost 0.9 % of cycles on the race (front
+  end). `$X` is only reached by those `br_if`, all hinted unlikely (0131), so
+  V8 lays it out of line: it defers a block only when all its predecessors
+  are unlikely edges. An exiting block (sc, rfi…), a jump out and the
+  dispatch write them back themselves.
+
+Every helper call that takes the state stores downcount before it and
+reloads it after: an exception takes the cycles spent, and a memory helper
+reaching MMIO reads the time (`CoreTiming::GetTicks` reads downcount) or
+schedules an event, which may lower it. `fma` takes no state: nothing
+around it. A helper
+other than the memory and FPU ones (`system`, the HLE calls) also gets pc
+and npc stored before it and npc reloaded after it. A helper that halts
+leaves its own pc, npc and downcount in the state, and the fragment
+returns 2 without writing them back: memory and FPU helpers never halt
+in a region (no DSI without the MMU, under which no region is installed,
+0090/0091; MSR.FP is never clear in one, 0121), and the MMU mode is fixed at
+boot. The downcount check's branch hint (0131) sits on its `br_if`.
+Compiler version 27.

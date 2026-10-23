@@ -65,6 +65,9 @@ export function classifyJitCacheIdentity({
 // four make up the cache's identity, and the cache's name is derived from it,
 // so a mismatch on any of them never even opens the same cache.
 export const AOT_DISC_KEY_SCHEMA = "disc-sha256-v1";
+// A booted .dol (no disc; e.g. a homebrew): its own namespace, the SHA-256 of
+// the whole file, so it never meets a disc's key.
+export const AOT_DOL_KEY_SCHEMA = "dol-sha256-v1";
 export const AOT_CACHE_SCHEMA = "salon-aot-v1";
 export const AOT_CACHE_NAME_PREFIX = "salon-aot-v1-";
 // Blocks are content-addressed (their key is the SHA-256 of their bytes), so
@@ -72,7 +75,7 @@ export const AOT_CACHE_NAME_PREFIX = "salon-aot-v1-";
 export const AOT_ANY_DISC_KEY = `${AOT_DISC_KEY_SCHEMA}:any`;
 
 const DISC_HEADER_BYTES = 0x440;
-const DISC_KEY_RE = /^disc-sha256-v1:(?:[0-9a-f]{64}|any)$/;
+const DISC_KEY_RE = /^(?:disc-sha256-v1:(?:[0-9a-f]{64}|any)|dol-sha256-v1:[0-9a-f]{64})$/;
 const COMPILER_VERSION_RE = /^[A-Za-z0-9._+-]{1,64}$/;
 // Entry keys travel in URLs and file names: no "/", "?", "#" or "%".
 const AOT_ENTRY_KEY_RE = /^[A-Za-z0-9._:+-]{1,200}$/;
@@ -97,11 +100,16 @@ export async function canonicalDiscKey({ header, dol, fst }) {
   return `${AOT_DISC_KEY_SCHEMA}:${await sha256Hex(concatBytes([h, asBytes(dol), asBytes(fst)]))}`;
 }
 
+// The key of a booted .dol: the SHA-256 of the file.
+export async function canonicalDolKey(dol) {
+  return `${AOT_DOL_KEY_SCHEMA}:${await sha256Hex(asBytes(dol))}`;
+}
+
 // The hex part alone, for names that only accept [0-9A-Za-z_-].
 export function discKeyHex(discKey) {
   const key = String(discKey || "");
   if (!DISC_KEY_RE.test(key)) throw new Error(`not a disc key: ${key || "<missing>"}`);
-  return key.slice(AOT_DISC_KEY_SCHEMA.length + 1);
+  return key.slice(key.indexOf(":") + 1);
 }
 
 export function isAotEntryKey(key) {
