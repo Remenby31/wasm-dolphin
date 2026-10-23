@@ -173,3 +173,36 @@ test("under the MMU the translator refuses every entry, and translates again onc
   }
   assert.ok(core.translate(DOUBLE), "translated with the MMU off");
 });
+
+// 0126: region code swaps the bytes of a 32-bit value as
+// (rotl(x, 8) & 0x00ff00ff) | (rotr(x, 8) & 0xff00ff00). The exact bytes
+// EmitBswap32FromLocal emits, run against a reference bswap32 on edge values
+// and random ones; with a 0126 core, a translated lwz carries that sequence.
+const compilerVersion = () => {
+  if (typeof core?.module?._DolphinWeb_AotKeyParts !== "function") return 0;
+  const p = core.module._malloc(8);
+  try { core.module._DolphinWeb_AotKeyParts(p); return new Uint32Array(core.module.HEAPU8.buffer, p, 2)[0]; } finally { core.module._free(p); }
+};
+const sleb = (v) => { const o = []; for (;;) { const b = v & 0x7f; v >>= 7; if ((v === 0 && !(b & 0x40)) || (v === -1 && (b & 0x40))) { o.push(b); return o; } o.push(b | 0x80); } };
+const ROTATE_SWAP = [0x20, 0, 0x41, 8, 0x77, 0x41, ...sleb(0x00ff00ff), 0x71, 0x20, 0, 0x41, 8, 0x78, 0x41, ...sleb(0xff00ff00 | 0), 0x71, 0x72];
+test("the rotate byte swap of region code is a bswap32, on edge and random values (0126)", () => {
+  const body = [0, ...ROTATE_SWAP, 0x0b];
+  const bytes = Uint8Array.from([0, 0x61, 0x73, 0x6d, 1, 0, 0, 0, 1, 6, 1, 0x60, 1, 0x7f, 1, 0x7f, 3, 2, 1, 0, 7, 5, 1, 1, 0x66, 0, 0, 10, body.length + 2, 1, body.length, ...body]);
+  const swap = new WebAssembly.Instance(new WebAssembly.Module(bytes)).exports.f;
+  const ref = (x) => (((x & 0xff) << 24) | ((x & 0xff00) << 8) | ((x >>> 8) & 0xff00) | (x >>> 24)) >>> 0;
+  const values = [0, 1, 0xff, 0xff00, 0xff0000, 0xff000000, 0xffffffff, 0x80000000, 0x7fffffff, 0x12345678, 0x00ff00ff, 0xff00ff00, 0x01020304, 0xdeadbeef];
+  let s = 0x9e3779b9;
+  for (let i = 0; i < 5000; i++) { s ^= s << 13; s >>>= 0; s ^= s >>> 17; s ^= s << 5; s >>>= 0; values.push(s); }
+  for (const v of values) assert.equal(swap(v | 0) >>> 0, ref(v), `0x${v.toString(16)}`);
+});
+
+test("a translated lwz carries the rotate byte swap (0126)", { skip: skip || (compilerVersion() < 17 && "core before 0126 (compiler version < 17)") }, () => {
+  const lwzR3 = (32 << 26) | (3 << 21) | (4 << 16) | 8;
+  const at = 0x80021100;
+  core.load(at, Uint8Array.of(lwzR3 >>> 24, (lwzR3 >>> 16) & 0xff, (lwzR3 >>> 8) & 0xff, lwzR3 & 0xff, 0x4e, 0x80, 0x00, 0x20));
+  const fragment = core.translate(at, { ranges: [[at, at + 8]] });
+  assert.ok(fragment, "translated");
+  const code = Array.from(fragment.code);
+  const tail = ROTATE_SWAP.slice(2); // after the local.get of the loaded value
+  assert.ok(code.some((_, i) => tail.every((b, j) => code[i + j] === b)), "the rotate sequence is in the fragment");
+});

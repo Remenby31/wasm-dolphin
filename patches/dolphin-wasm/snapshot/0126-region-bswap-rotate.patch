@@ -6,8 +6,8 @@ diff --git a/Source/Core/Core/PowerPC/CachedInterpreter/CachedInterpreter.cpp b/
  }
  
 +// Patch 0126: in region code, the byte swap in the form LLVM emits,
-+// (rotl(x, 8) & 0x00ff00ff) | (rotr(x, 8) & 0xff00ff00), 5 ops instead of
-+// 10. Blocks keep their bytes (and cache keys).
++// (rotl(x, 8) & 0x00ff00ff) | (rotr(x, 8) & 0xff00ff00), 11 wasm instructions
++// instead of 21. Blocks keep their bytes (and cache keys).
  void EmitBswap32FromLocal(std::vector<u8>& body, u32 local_index)
  {
 +  if (s_wasm_fragment_relocs)

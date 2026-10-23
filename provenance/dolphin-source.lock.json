@@ -25,7 +25,7 @@
       "commit": "01e0577914a75a2569c846778c2f93aa8e6feddd"
     }
   },
-  "patchSeriesSha256": "3374877670086dc9775589395ef28dfe51217d8400d6291365394d96a2570d16",
+  "patchSeriesSha256": "ef32abfc7fb735550f870ab4589b00699a17bab7bf9b6e1314f17ab991d0a094",
   "patches": [
     {
       "order": 1,
@@ -808,8 +808,8 @@
       "cwd": ".",
       "hashMode": "lf-normalized",
       "path": "patches/dolphin-wasm/snapshot/0126-region-bswap-rotate.patch",
-      "size": 1820,
-      "sha256": "250a49f0700f329fe4cbf75990bd61c8e36db5f0ee66bc551fbdadc50f23c2be"
+      "size": 1835,
+      "sha256": "f9de50e23597af3689b6e57ba1dca3ca18459583315975ecc5b791bcbc486318"
     },
     {
       "order": 99,
