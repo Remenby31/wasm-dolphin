@@ -137,7 +137,7 @@ for (const [label, fused] of MODES) {
         const p = aot.module._malloc(8);
         try { aot.module._DolphinWeb_AotKeyParts(p); return Array.from(new Uint32Array(aot.module.HEAPU8.buffer, p, 2)); } finally { aot.module._free(p); }
       };
-      assert.equal(keyParts()[0], 21, "compiler version");
+      assert.ok(keyParts()[0] >= 21, "compiler version: 0129 (21) or a later one");
       assert.equal((keyParts()[1] >>> 30) & 1, fused ? 1 : 0, "key parts bit 30");
       assert.equal(aot.module._DolphinWeb_FusedMadd(), fused ? 1 : 0, "the core reads its mode back");
       const r = makeRng(fused ? 0x4ead : 0x4eac);

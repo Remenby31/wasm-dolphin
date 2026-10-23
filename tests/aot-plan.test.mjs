@@ -424,3 +424,15 @@ test("aot profile: an engine disc key records and loads through profileKey", asy
   assert.deepEqual((await store.load(key)).blocks.map((b) => [b[0], b[4]]), [[0x80003100, 3]]);
 });
 
+test("aot profile: a failed record is counted and warned once, never silent", async () => {
+  const { createProfileRecorder } = await import("../src/aot-hot-sampler.js");
+  const warnings = [];
+  const store = { record: async () => { throw Object.assign(new Error("aot-profile: invalid disc key"), { name: "Error" }); } };
+  const record = createProfileRecorder({ store, discKey: "x", blocksFromPcSamples, warn: (m) => warnings.push(m) });
+  await record([[0x80003100, 1]]);
+  await record([[0x80003100, 1]]);
+  assert.deepEqual(record.stats(), { records: 0, failures: 2, lastError: "Error: aot-profile: invalid disc key" });
+  assert.equal(warnings.length, 1, "warned once");
+  assert.match(warnings[0], /invalid disc key/);
+});
+
