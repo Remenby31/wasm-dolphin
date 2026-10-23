@@ -302,12 +302,13 @@ node harness/remote/spark-run.mjs --build <ref>           # its core built on th
 ## KPI probes and report
 
 The program's KPIs (PROGRAM.md, « KPI du programme ») that race-perf does not
-cover have their own probes. Both are timing measures: they take the perf
+cover have their own probes. They are timing measures: they take the perf
 lock and run in the MESURE slots only, headless, three runs by default.
 
 ```sh
 node harness/probes/ttff.mjs --iso ../roms/<disc>.iso --port 8082 [--config wgpu] [--runs 3]
 node harness/probes/first-launch.mjs --iso ../roms/<disc>.iso --port 8082 [--runs 3] [--timeout 600]
+node harness/probes/first-launch-ramp.mjs --iso ../roms/<disc>.iso --port 8082 --scene race --steps race-steps.json [--sec 90]
 node harness/kpi-report.mjs [--print]
 ```
 
@@ -325,7 +326,18 @@ node harness/kpi-report.mjs [--print]
   `lib/aot-progress.mjs`. A launch without "done" (or a second launch without
   its compiled count) is a failure with its reason. An engine without P7
   answers `p7: null` and n/a, exit 0.
-- Both record the served tree (commit, dirty) and the Chrome that ran, and
+- `first-launch-ramp.mjs`: the speed curve of a player's very first launch
+  with `aot=1` (added to `--config rec` unless the query says otherwise), on
+  a new, empty profile (no seed, unlike aot-warm-launch): disc handed over,
+  then `--steps` (to the race, or a click and the intro for `--scene heavy`),
+  then `--sec` seconds. Every second it drains the VI ring and reads the
+  region pipeline (`validationReadJitRegionStats`, read only). Per run
+  (`lib/ramp.mjs`): time to 90 % and to 95 % VI speed held 5 s, the plateau
+  (median of the last 10 s), the time to 90 % of that plateau (a CPU-bound
+  scene never reaches 90 %), and the per-second speed and installed/queued
+  region series. KPI: time to 90 %, target 15 s, one row per scene; a run
+  that never reaches 90 % fails the row.
+- They all record the served tree (commit, dirty) and the Chrome that ran, and
   leave out runs started on an overloaded machine (listed). `--no-lock`
   checks the plumbing in a CORRECTION slot; such results are not measures.
 - `kpi-report.mjs`: reads only. It classifies by content every `summary.json`,
@@ -333,9 +345,9 @@ node harness/kpi-report.mjs [--print]
   `harness/results`, and keeps only results measured on a clean commit of
   origin/main's first-parent history (`served`, or the run files next to an
   older summary; fetch origin first). Each KPI reads one result, the newest
-  of its kinds on trunk (race-perf: stock Chrome and night measures only,
-  a load limit of 6 at most, day pairs being relative; trunk's side of an
-  A/B), shown with its file, commit and date; it never falls back on an
+  of its kinds on trunk (race-perf and first-launch-ramp: stock Chrome on
+  this Mac and a load limit (`--max-load`) of 6 at most, whatever the hour;
+  runs at a higher limit only compare two sides; trunk's side of an A/B), shown with its file, commit and date; it never falls back on an
   older one. Failed runs make the row KO with their reasons. Output:
   `../measures/kpi/latest.{md,json}` and a dated copy, in PROGRAM.md's order,
   each row measured, declared or n/a. What no probe measures yet (PC
@@ -343,6 +355,12 @@ node harness/kpi-report.mjs [--print]
   `../measures/kpi/manual.json`:
   `{ "<kpi id>": { "value": <number>, "source": "…", "at": "…", "note": "…" } }`;
   an unreadable file turns those rows into n/a with the reason.
+  `--candidate <race-perf summary.json>` adds a column beside trunk's; a
+  candidate measured on another machine (`host`) or with other Chrome
+  arguments than trunk's stock Chrome is shown but flagged as not
+  comparable (`setupOf` / `setupDifferences` in `lib/kpi.mjs`: absent
+  arguments count as none, so Spark summaries from before and after the V8
+  flag of PR #145 never compare).
   A **candidate** column (a PR's head, measured before it merges) can sit
   beside trunk: `--candidate <race-perf summary.json> [--candidate-label …]`,
   or `../measures/kpi/candidate.json` `{ "summary": "<path from the program
