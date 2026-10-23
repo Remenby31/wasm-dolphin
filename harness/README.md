@@ -345,9 +345,9 @@ node harness/kpi-report.mjs [--print]
   `harness/results`, and keeps only results measured on a clean commit of
   origin/main's first-parent history (`served`, or the run files next to an
   older summary; fetch origin first). Each KPI reads one result, the newest
-  of its kinds on trunk (race-perf: stock Chrome and night measures only,
-  a load limit of 6 at most, day pairs being relative; trunk's side of an
-  A/B), shown with its file, commit and date; it never falls back on an
+  of its kinds on trunk (race-perf and first-launch-ramp: stock Chrome on
+  this Mac and a load limit (`--max-load`) of 6 at most, whatever the hour;
+  runs at a higher limit only compare two sides; trunk's side of an A/B), shown with its file, commit and date; it never falls back on an
   older one. Failed runs make the row KO with their reasons. Output:
   `../measures/kpi/latest.{md,json}` and a dated copy, in PROGRAM.md's order,
   each row measured, declared or n/a. What no probe measures yet (PC

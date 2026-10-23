@@ -42,7 +42,7 @@ test("ramp summary: medians over the good runs, overloaded runs apart, failures 
   assert.equal(s.targetMs, 15000);
 });
 
-test("ramp KPI rows: one per scene, night measures only, a run under 90 % fails the row", () => {
+test("ramp KPI rows: one per scene, max-load 6 at most, a run under 90 % fails the row", () => {
   const summary = (scene, extra = {}) => ({ kind: "first-launch-ramp", file: scene, json: { probe: "first-launch-ramp", scene, at: "2026-10-23T02:00:00Z", maxLoad: 6, chrome: { path: "chrome stable", args: "" },
     served: { commit: "T1", dirty: false }, windowSec: 60, timeTo90Ms: { median: 12000 }, timeToFullMs: { median: 14000 }, plateauSpeed: { median: 99 }, timeToTail90Ms: { median: 12000 }, regionsAt90: { median: 40 }, regionsAtEnd: { median: 80 }, failed: [], ...extra } });
   const rows = (results) => Object.fromEntries(kpiTable(results, {}, { trunk: new Set(["T1"]) }).map((r) => [r.id, r]));
