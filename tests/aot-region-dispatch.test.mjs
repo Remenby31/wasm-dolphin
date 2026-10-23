@@ -784,6 +784,7 @@ test("FPU ops outside the direct tier run inside the region, interpreted, like t
   assert.equal(got.interpreted, 0, "no op left the region");
   assert.equal(got.ran, 1);
   core.invalidate(FPU_TEXT, 4 * FPU.words.length);
+});
 
 // Patch 0107: the CPU thread's throttle sleep installs ready regions (no
 // frame pays for them), counted apart and kept out of installMaxSliceMs.
