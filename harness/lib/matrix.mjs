@@ -38,6 +38,23 @@ export const SUMMARY_FIELDS = Object.freeze([
   "hitchesPerMin", "audioUnderrunsPerMin", "audioPeak", "errorCount", "cpuTotal", "cpuRenderer", "cpuGpu", "loadAvg"
 ]);
 
+// Each KPI scene's native game frames per VI (judge, 2026-10-23): measured on
+// a coupled reference (wgpu, emulated time tied to the rendering), never
+// guessed. The product KPI's target is 95 % of the scene's native rate, so a
+// scene the game renders at 30 frames/s is not held to 60.
+export const SCENE_NATIVE_FRAMES_PER_VI = Object.freeze({
+  "race-after.sav": { framesPerVi: 1.0, measured: "measures/headroom/20261022/headroom-wgpu-aot-vs-off: wgpu + aot=1 at 100 %, xfbCopiesPerVi 0.9992 (6 runs)" },
+  "heavy-intro-13s.sav": { framesPerVi: 1.0, measured: "measures/headroom/20261023/heavy-headroom-wgpu-aot-vs-off: wgpu, xfbCopiesPerVi 1.00 at 60-62 % (coupled: per VI, not per second)" }
+});
+export const VI_PER_SECOND = 60;
+
+// The useful-frames target of a scene (images per host second), or null
+// when the scene has no measured reference.
+export function gameFpsTarget(state, share = 0.95) {
+  const ref = SCENE_NATIVE_FRAMES_PER_VI[state];
+  return ref ? Math.round(share * VI_PER_SECOND * ref.framesPerVi * 10) / 10 : null;
+}
+
 export function resolveQuery(config) {
   const raw = config.preset ? PRESETS[config.preset] : config.query;
   if (raw == null) throw new Error(`config ${config.id}: unknown preset ${config.preset}`);

@@ -14,7 +14,7 @@
 //     [--runs 4 (even with --baseline)] [--min-pairs 4] [--hold KeyX] [--warm]
 //     [--max-load L] [--load-wait 300] [--lock-wait 1800]
 //     [--pcsample [periodMs]] [--symbols functions.json] [--out dir]
-//     [--display] [--unique-frames secs] [--region-sample N [--region-secs 10]] [--mem-stats] [--baseline-query "..."]
+//     [--headroom [--frames-per-vi-ref R]] [--display] [--unique-frames secs] [--region-sample N [--region-secs 10]] [--mem-stats] [--baseline-query "..."]
 //     [--calm-wait S (default --lock-wait): wait for load ≤ --max-load before taking the lock]
 //     [--chrome-args "--flag …"] [--baseline-chrome-args "--flag …"]
 //     [--emulated-window S [--emulated-warmup W (default --warmup)] [--emulated-poll-ms 100]]
@@ -90,6 +90,7 @@ import { describe, median, percentile, round } from "../lib/stats.mjs";
 import { coreStats, displayStats, hitchList, mergeTimeline, presentationStats } from "../lib/timeline.mjs";
 import { consistentRead, decodeRegionStats, poolStats, regionShares, topMisses } from "../lib/jit-region-stats.mjs";
 import { consistentMemRead, decodeMemStats, memAccessShares, poolMemStats } from "../lib/mem-access-stats.mjs";
+import { consistentHeadroomRead, decodeHeadroomStats, headroomOf, invalidReasons, querySpeed, unlimitedAllowed } from "../lib/headroom.mjs";
 import { summarizePcSamples } from "../../src/harness-pc-sampler.js";
 import { checkPerfAccess, instructionsPerGuestCycle, perfCounters } from "../lib/perf-counters.mjs";
 import { emulatedStart } from "../lib/emulated-window.mjs";
@@ -187,6 +188,13 @@ export async function measure(session, o) {
     // just after the window, from node only (no page call inside it).
     if (o.onWindow) await o.onWindow("start", session);
     await readTimeline(page); // drop everything before the window
+    // --headroom (0113): the counters reset and the core ticks read just
+    // before the window, both read again just after it.
+    const hrStart = o.headroom ? await headroomRead(page, 0) : null;
+    // The emulated time this host-time window covers (judge, 2026-10-22: a
+    // faster side covers more of the scene): core ticks just before and just
+    // after, outside the window.
+    const ticksBefore = (await readCoreProgress(page).catch(() => null))?.coreTicks ?? null;
     const t0 = await page.evaluate(() => performance.timeOrigin + performance.now());
     // The window: node timers only. The rings (VI 8192, presents 16384)
     // hold far more than a window, so nothing is read until it ends.
@@ -203,6 +211,7 @@ export async function measure(session, o) {
       loads.push(os.loadavg()[0]);
       if (s === Math.floor(o.secs / 2)) threads.push(rendererThreads(session.profileDir));
     }
+    const hrEnd = hrStart && !hrStart.error ? await headroomRead(page) : null;
     const counters = o.onWindow ? await o.onWindow("end", session) : undefined;
     const chunk = await readTimeline(page);
     const t1 = await page.evaluate(() => performance.timeOrigin + performance.now());
@@ -210,6 +219,7 @@ export async function measure(session, o) {
     threads.push(rendererThreads(session.profileDir));
     const info = await readFrameInfo(page);
     const progress = await readCoreProgress(page);
+    const ticksAfter = progress?.coreTicks ?? null;
     const timeline = mergeTimeline([chunk]);
     const core = coreStats(timeline, { ticksPerSecond: progress?.coreTicksPerSecond, until: t1 });
     const pres = presentationStats(timeline);
@@ -251,9 +261,14 @@ export async function measure(session, o) {
     const pipeline = regionEnd ? null : await workerRequest(page, "validationReadJitRegionStats", {}, 10000).catch(() => null);
     return {
       windowMs: Math.round(t1 - t0),
+      // Guest seconds this window covered (core ticks / ticks per second);
+      // the reads bracket the window, so a few host ms more than windowMs.
+      guestCovered: guestCovered(ticksBefore, ticksAfter, progress?.coreTicksPerSecond),
       load1: { min: round(Math.min(...loads), 2), median: round(medianLoad, 2), max: round(Math.max(...loads), 2), limit: o.maxLoad },
       overloaded: medianLoad > o.maxLoad,
       complete: timeline.complete,
+      timelineLost: timeline.lost,
+      ...(o.headroom ? { headroom: hrStart?.error ? { error: hrStart.error } : hrEnd?.error ? { error: hrEnd.error } : headroomOf(hrEnd.stats, { guestSeconds: (hrEnd.ticks - hrStart.ticks) / (hrEnd.tps || 1), ticksPerSecond: hrEnd.tps, viOutputs: timeline.vi.length }) } : {}),
       // Emulated: the speed over the guest seconds the window covered (the
       // VI timeline's own over the same span kept as speedVi).
       ...(emulated ? { ...emulated, speed: emulated.speed, speedVi: round(core.speed) } : { speed: round(core.speed) }),
@@ -283,11 +298,30 @@ export async function measure(session, o) {
   }
 }
 
+// Headroom counters (0113) and the core ticks, read together; reset >= 0
+// zeroes and turns the counters on.
+async function headroomRead(page, reset = -1) {
+  const r = await workerRequest(page, "validationReadHeadroomStats", { reset }, 10000).catch((e) => ({ error: String(e.message || e) }));
+  if (r?.error) return { error: /Unknown upstream worker message/.test(r.error) ? "engine without validationReadHeadroomStats" : r.error };
+  const p = await readCoreProgress(page).catch(() => null);
+  const stats = consistentHeadroomRead(decodeHeadroomStats(r.bytes), decodeHeadroomStats(r.again));
+  const ticks = Number(p?.coreTicks), tps = Number(p?.coreTicksPerSecond);
+  if (!Number.isFinite(ticks) || !(tps > 0)) return { error: "no core ticks" };
+  return stats.error ? { error: stats.error } : { stats, ticks, tps };
+}
+
 // A change measured while another harness held the perf lock too is not a
 // measure: withheld, with the overlap as the reason.
 export function withheldOnOverlap(change, overlaps) {
   if (!change || !overlaps.length) return change;
   return { ...change, median: null, withheld: `perf lock overlap: ${overlaps.map((x) => `${x.at}: ${x.why}`).join("; ")}` };
+}
+
+export function guestCovered(before, after, ticksPerSecond) {
+  const n = (v) => (typeof v === "bigint" ? Number(v) : typeof v === "string" ? Number(v) : v);
+  const b = n(before), a = n(after), tps = n(ticksPerSecond);
+  if (![b, a, tps].every(Number.isFinite) || tps <= 0 || a < b) return null;
+  return { ticks: a - b, seconds: Math.round(((a - b) / tps) * 1000) / 1000 };
 }
 
 // p4 of one stats window, or null and why (not asked, no export, torn or
@@ -315,7 +349,9 @@ export function regionPipeline(reply) {
     ...(Number.isInteger(reply.layoutRefused) ? { layoutRefused: reply.layoutRefused } : {}),
     ...(Number.isInteger(reply.layoutHash) ? { layoutHash: reply.layoutHash } : {}),
     ...(reply.layout ? { layout: reply.layout } : {}),
-    ...(Number.isInteger(reply.heapPatched) ? { heapPatched: reply.heapPatched, heapPatchedBytes: reply.heapPatchedBytes ?? null, heapPatchFailed: reply.heapPatchFailed ?? null } : {})
+    ...(Number.isInteger(reply.heapPatched) ? { heapPatched: reply.heapPatched, heapPatchedBytes: reply.heapPatchedBytes ?? null, heapPatchFailed: reply.heapPatchFailed ?? null } : {}),
+    // 0107: installs in throttle sleeps and the worst lateness they caused
+    ...(reply.regionSleep ? { regionSleep: reply.regionSleep } : {})
   };
 }
 
@@ -467,7 +503,7 @@ async function main() {
       "emulated-window": { type: "string" }, "emulated-warmup": { type: "string" }, "emulated-poll-ms": { type: "string", default: "100" },
       hold: { type: "string", default: "KeyX" }, warm: { type: "boolean", default: false },
       "max-load": { type: "string" }, "lock-wait": { type: "string", default: "1800" },
-      pcsample: { type: "string" }, symbols: { type: "string" }, "region-sample": { type: "string" }, "region-secs": { type: "string", default: "10" }, counters: { type: "boolean", default: false }, "unique-frames": { type: "string" }, display: { type: "boolean", default: false }, "mem-stats": { type: "boolean", default: false }, "baseline-query": { type: "string" }, "chrome-args": { type: "string" }, "baseline-chrome-args": { type: "string" },
+      pcsample: { type: "string" }, symbols: { type: "string" }, "region-sample": { type: "string" }, "region-secs": { type: "string", default: "10" }, counters: { type: "boolean", default: false }, "unique-frames": { type: "string" }, display: { type: "boolean", default: false }, "mem-stats": { type: "boolean", default: false }, headroom: { type: "boolean", default: false }, "frames-per-vi-ref": { type: "string" }, "baseline-query": { type: "string" }, "chrome-args": { type: "string" }, "baseline-chrome-args": { type: "string" },
       "core-candidate": { type: "string", multiple: true, default: [] },
       port: { type: "string", default: process.env.HARNESS_PORT }, out: { type: "string" }
     },
@@ -484,6 +520,12 @@ async function main() {
   // --baseline-query: the baseline side boots with its own query (same tree
   // with and without a switch, e.g. aot=1 against the default).
   const baselineQuery = values["baseline-query"] ? `${values["baseline-query"]}&metrics=1` : null;
+  // speed=unlimited decouples emulated time from the rendering while the
+  // core leaves SyncOnSkipIdle off (research/deep-headroom-kpi.md §1): refused
+  // unless the query turns it on (synconidle=1).
+  for (const q of [query, baselineQuery].filter(Boolean)) {
+    if (querySpeed(q) === "unlimited" && !unlimitedAllowed(q)) throw new Error("speed=unlimited without synconidle=1: emulated time runs ahead of the rendering (research/deep-headroom-kpi.md); measure the headroom at speed=1 with --headroom");
+  }
   if (baselineQuery && !values.baseline) throw new Error("--baseline-query needs --baseline");
   // A coreid would pin both sides to one core: trunk against head would
   // then compare a core with itself.
@@ -515,6 +557,8 @@ async function main() {
     ...(values.counters ? (checkPerfAccess(), { onWindow: perfCounters() }) : {}),
     uniqueFrames: values["unique-frames"] == null ? null : num(values, "unique-frames", { min: 2 }),
     memStats: values["mem-stats"],
+    headroom: values.headroom,
+    framesPerViRef: values["frames-per-vi-ref"] == null ? null : num(values, "frames-per-vi-ref", { min: 0.01 }),
     display: values.display,
     functions: values.symbols ? JSON.parse(readFileSync(values.symbols, "utf8")).sort((a, b) => a[0] - b[0]) : null,
     coreCandidates: values["core-candidate"]
@@ -589,7 +633,16 @@ async function main() {
   }
   const runsDone = records;
 
-  const good = (r) => r && !r.error && !r.fatal?.length && !r.cold?.overloaded && !r.warm?.overloaded;
+  // A run that breaks a validity rule (headroom.mjs invalidReasons: ring
+  // overflow, speed above its target, no unique image, game frames per VI
+  // off the reference) is set aside with its reasons.
+  for (const r of records) for (const n of Object.keys(sides)) {
+    const c = r[n]?.cold;
+    if (!c) continue;
+    const why = invalidReasons(c, { target: querySpeed(sides[n].query ?? o.query) === "unlimited" ? null : querySpeed(sides[n].query ?? o.query), framesPerViRef: o.framesPerViRef });
+    if (why.length) c.invalid = why;
+  }
+  const good = (r) => r && !r.error && !r.fatal?.length && !r.cold?.overloaded && !r.warm?.overloaded && !r.cold?.invalid?.length;
   const summarize = (name, phase) => {
     const m = runsDone.map((r) => r[name]).filter(good).map((r) => r[phase]).filter(Boolean);
     if (!m.length) return null;
@@ -598,6 +651,17 @@ async function main() {
       viP99Ms: describe(m.map((x) => x.viIntervalMs.p99)), presentP99Ms: describe(m.map((x) => x.presentIntervalMs.p99)),
       hitchesPerMin: describe(m.map((x) => x.hitchesPerMin)), busiestThread: describe(m.map((x) => x.rendererThreads.at(-1)?.busiest)),
       presentsPerSecond: describe(m.map((x) => x.presentsPerSecond)),
+      ...(m.some((x) => x.headroom) ? {
+        headroom: describe(m.map((x) => x.headroom?.headroom), 4),
+        maxSpeedCpu: describe(m.map((x) => x.headroom?.maxSpeedCpu), 4),
+        maxSpeedGpu: describe(m.map((x) => x.headroom?.maxSpeedGpu), 4),
+        throttleSleepShare: describe(m.map((x) => x.headroom?.throttleSleepShare), 4),
+        xfbCopiesPerVi: describe(m.map((x) => x.headroom?.xfbCopiesPerVi), 4),
+        gameFramesPerSecond: describe(m.map((x) => x.headroom?.gameFramesPerSecond), 2),
+        headroomApplies: m.every((x) => x.headroom?.headroomApplies),
+        headroomWhy: [...new Set(m.map((x) => x.headroom?.error).filter(Boolean))].join("; ") || null
+      } : {}),
+      guestSecondsCovered: describe(m.map((x) => x.guestCovered?.seconds), 3),
       ...(m.some((x) => x.display) ? {
         displayedPerSecond: describe(m.map((x) => x.display?.displayedPerSecond)),
         displayedP95: describe(m.map((x) => x.display?.displayedP95)),
@@ -621,7 +685,7 @@ async function main() {
   const pcSides = o.pcsample ? Object.keys(sides).filter((n) => runsDone.some((r) => r[n]?.cold?.pc?.samples)) : [];
   const pcNote = o.pcsample && pcSides.length < Object.keys(sides).length ? `guest PC sampled on ${pcSides.join(", ") || "no side"} only` : null;
   if (pcNote) console.warn(`[race-perf] warning: ${pcNote}`);
-  const failed = Object.keys(sides).flatMap((n) => runsDone.filter((r) => !good(r[n])).map((r) => ({ run: r.run, side: n, why: r[n]?.infraCrash ? "infra" : r[n]?.error ?? (r[n]?.fatal?.length ? "crash" : "overloaded") })));
+  const failed = Object.keys(sides).flatMap((n) => runsDone.filter((r) => !good(r[n])).map((r) => ({ run: r.run, side: n, why: r[n]?.infraCrash ? "infra" : r[n]?.error ?? (r[n]?.fatal?.length ? "crash" : r[n]?.cold?.invalid?.length ? `invalid: ${r[n].cold.invalid.join("; ")}` : "overloaded") })));
   // Which Chrome ran: a wrapper (HARNESS_CHROME_PATH, e.g. the E-core one) or
   // extra flags left exported would otherwise pass for a regression.
   const sideArgs = Object.fromEntries(Object.entries(sides).filter(([, s]) => s.chromeArgs?.length).map(([n, s]) => [n, s.chromeArgs.join(" ")]));

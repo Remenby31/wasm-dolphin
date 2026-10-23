@@ -17,6 +17,8 @@
 // PC extrapolation, the discovery coverage, the memory cost), or "n/a".
 
 // What a result file is, from its content (never from its directory name).
+import { gameFpsTarget } from "./matrix.mjs";
+
 export function classify(json, file = "") {
   if (!json || typeof json !== "object") return null;
   if (json.locked === false) return null; // a plumbing check (--no-lock), not a measure
@@ -128,6 +130,16 @@ export function sideFlags(j, side) {
     .map((k) => (k === "aot" && q.get(k) === "1" && !sideHasAot(j, side) ? "aot=1 sans effet (cœur sans régions)" : `${k}=${q.get(k)}`)).join("&") || null;
 }
 const cold = (j, side) => j[side]?.cold ?? null;
+// Headroom in % (race-perf --headroom), only where the throttle slept.
+const headroomPct = (j, side) => {
+  const c = cold(j, side);
+  return c?.headroom?.median != null && c.headroomApplies ? Math.round(c.headroom.median * 1000) / 10 : null;
+};
+const headroomWhy = (j, side) => {
+  const c = cold(j, side);
+  if (!c?.headroom) return c?.headroomWhy ?? "pas de mesure --headroom";
+  return c.headroomApplies ? null : "le jeu tourne sous 100 % (pas de sommeil du throttle) : voir la vitesse";
+};
 const p4Of = (j, side) => (side === "baseline" ? j.baselineP4 : j.p4);
 const idleNote = (p) => [
   p?.idleCycleShare != null ? `idle skip : ${Math.round(p.idleCycleShare * 1000) / 10} % des cycles` : null,
@@ -172,7 +184,23 @@ export const KPI_ROWS = [
   // The product config counts in the global status; the hardware renderer
   // and aot=1 are trajectory rows (counted: false: shown, verdict given, left
   // out of the counts). Judge, 2026-10-22.
-  { id: "macSpeedProduct", group: "Leviers", label: "Vitesse course, Mac M4 Pro, config produit (video=software, ce que voit le joueur)", target: 160, unit: "%", better: "higher", from: "race-perf", config: "product", read: (j, s) => med(cold(j, s)?.speed), failures: raceFailures },
+  // The main KPI (judge, 2026-10-22): the headroom at speed=1
+  // (research/deep-headroom-kpi.md), min of the CPU thread's Max and the GPU
+  // bound, from race-perf --headroom; read only from a run that slept in the
+  // throttle (headroomApplies), otherwise the game is under 100 % and the
+  // speed row says it.
+  // The product KPI (judge, 2026-10-23): with SyncOnSkipIdle off the
+  // product's emulated time runs ahead of its rendering, so its speed and
+  // headroom overstate it; what the player gets is the game images per host
+  // second. Target: 95 % of the scene's native rate (matrix.mjs
+  // SCENE_NATIVE_FRAMES_PER_VI, measured on a coupled reference).
+  { id: "macGameFpsProduct", group: "Leviers", label: "Images de jeu utiles par seconde, Mac M4 Pro, config produit", target: null, targetOf: (j) => gameFpsTarget(j.state), unit: "i/s", better: "higher", from: "race-perf", config: "product", read: (j, s) => med(cold(j, s)?.gameFramesPerSecond), why: headroomWhy, failures: raceFailures },
+  { id: "macGameFpsProductAot", group: "Leviers", label: "Images de jeu utiles par seconde, config produit avec aot=1 (trajectoire, hors statut global)", target: null, targetOf: (j) => gameFpsTarget(j.state), unit: "i/s", better: "higher", from: "race-perf", config: "productAot", counted: false, read: (j, s) => med(cold(j, s)?.gameFramesPerSecond), why: headroomWhy, failures: raceFailures },
+  { id: "macHeadroomProduct", group: "Leviers", label: "Marge Mac M4 Pro, config produit (headroom à speed=1, découplée tant que SyncOnSkipIdle=false, hors statut global)", target: 160, unit: "%", better: "higher", from: "race-perf", config: "product", counted: false, read: headroomPct, why: headroomWhy, failures: raceFailures },
+  { id: "macHeadroomProductAot", group: "Leviers", label: "Marge Mac M4 Pro, config produit avec aot=1 (trajectoire, hors statut global)", target: 160, unit: "%", better: "higher", from: "race-perf", config: "productAot", counted: false, read: headroomPct, why: headroomWhy, failures: raceFailures },
+  { id: "macHeadroom", group: "Leviers", label: "Marge Mac M4 Pro, rendu matériel wgpu (KPI CPU/GPU en mode couplé)", target: 160, unit: "%", better: "higher", from: "race-perf", config: "default", read: headroomPct, why: headroomWhy, failures: raceFailures },
+  { id: "macHeadroomAot", group: "Leviers", label: "Marge Mac M4 Pro, wgpu + aot=1 (trajectoire piste 3, hors statut global)", target: 160, unit: "%", better: "higher", from: "race-perf", config: "aot", counted: false, read: headroomPct, why: headroomWhy, failures: raceFailures },
+  { id: "macSpeedProduct", group: "Leviers", label: "Vitesse course, Mac M4 Pro, config produit (vitesse mesurée, plafonnée par speed=, hors statut global)", target: 100, unit: "%", better: "higher", from: "race-perf", config: "product", counted: false, read: (j, s) => med(cold(j, s)?.speed), failures: raceFailures },
   { id: "macSpeedProductAot", group: "Leviers", label: "Vitesse course, Mac M4 Pro, config produit avec aot=1 (trajectoire, hors statut global)", target: 160, unit: "%", better: "higher", from: "race-perf", config: "productAot", counted: false, read: (j, s) => med(cold(j, s)?.speed), failures: raceFailures },
   { id: "macSpeed", group: "Leviers", label: "Vitesse course, Mac M4 Pro, rendu matériel wgpu (trajectoire, hors statut global)", target: 160, unit: "%", better: "higher", from: "race-perf", config: "default", counted: false, read: (j, s) => med(cold(j, s)?.speed), failures: raceFailures },
   { id: "macSpeedAot", group: "Leviers", label: "Vitesse course, Mac M4 Pro, wgpu + aot=1 (trajectoire piste 3, hors statut global)", target: 160, unit: "%", better: "higher", from: "race-perf", config: "aot", counted: false, read: (j, s) => med(cold(j, s)?.speed), failures: raceFailures },
@@ -239,6 +267,12 @@ export function kpiTable(results, manual = {}, { trunk = new Set(), accept = { "
     const failures = row.failures?.(r.json, t.side, r.kind) ?? [];
     if (failures.length) return { ...base, value, status: "KO", nature: "measured", ...source, why: `${failures.length} run(s) en échec : ${failures.join(" ; ")}` };
     if (value == null) return { ...base, value: null, status: "n/a", nature: "n/a", ...source, why: row.why?.(r.json, t.side) ?? "valeur absente du résultat" };
+    // A target that depends on the scene (targetOf): taken from the result.
+    if (row.targetOf) {
+      const target = row.targetOf(r.json);
+      if (target == null) return { ...base, value, status: "n/a", nature: "measured", ...source, why: `scène ${r.json.state ?? "?"} sans référence d'images par VI mesurée (matrix.mjs SCENE_NATIVE_FRAMES_PER_VI)` };
+      return { ...base, target, value, status: statusOf(meets({ ...row, target }, value)), nature: "measured", ...source, detail: row.detail?.(r.json, t.side, r.kind) ?? `cible ${target} i/s = 95 % du rythme natif de la scène ${r.json.state}` };
+    }
     return { ...base, value, status: statusOf(meets(row, value)), nature: "measured", ...source, detail: row.detail?.(r.json, t.side, r.kind) ?? null };
   });
 }
@@ -271,7 +305,8 @@ export function candidateColumn(r, { label = null, note = null } = {}) {
     if (!fitsConfig(r, "candidate", row.config)) continue;
     const value = row.read(r.json, "candidate", r.kind);
     const failures = row.failures?.(r.json, "candidate", r.kind) ?? [];
-    values[row.id] = { value, status: failures.length ? "KO" : statusOf(meets(row, value)), why: failures.length ? `${failures.length} run(s) en échec` : value == null ? row.why?.(r.json, "candidate") ?? null : null };
+    const rowT = row.targetOf ? { ...row, target: row.targetOf(r.json) } : row;
+    values[row.id] = { value, status: failures.length ? "KO" : statusOf(rowT.target == null && row.targetOf ? null : meets(rowT, value)), why: failures.length ? `${failures.length} run(s) en échec` : value == null ? row.why?.(r.json, "candidate") ?? null : null };
   }
   return { ...header, values };
 }

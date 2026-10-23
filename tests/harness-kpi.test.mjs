@@ -58,6 +58,7 @@ test("region stats: layout versions 1 and 2 decoded each their own way, any othe
   // The v2 header's spare u32 counts the regions compiled cold (no ready byte).
   const packed = decodeRegionStats(statsBytes256({ version: 2, f64, reserved: (57 << 16) | 3 })).diagnostics;
   assert.deepEqual([packed.installFallbacks, packed.installBootMaxSliceMs], [3, 5.7]); // high 16 bits: boot max x 10
+  assert.equal(packed.installWorstSliceMs, Math.max(packed.installMaxSliceMs, 5.7), "the worst slice, boot window included");
   assert.equal("topMiss3Pc" in v2.diagnostics, false);
   assert.equal(topMisses(v2).length, 0); // no top miss set in this read
   // v1 may come without diagnostics (88 bytes); v2 never.
@@ -333,7 +334,7 @@ test("KPI report: files classified by content; manual.json errors become reasons
   const rows = (m) => Object.fromEntries(kpiTable([], m, { trunk: TRUNK }).map((r) => [r.id, r]));
   assert.match(rows(readManual(path.join(root, "m1.json"))).pcSpeed.why, /illisible/);
   assert.match(rows(readManual(path.join(root, "m2.json"))).pcSpeed.why, /non numérique/);
-  assert.equal(KPI_ROWS.length, 24);
+  assert.equal(KPI_ROWS.length, 30);
   // Every TTFF run overloaded: n/a, and the row says so.
   const over = { kind: "ttff", file: "o", json: { probe: "ttff", at: "2026-10-19T11:00:00Z", served: served("T1"), runs: 3, overloadedRuns: [1, 2, 3], cold: null, warm: null } };
   assert.match(kpiTable([over], {}, { trunk: TRUNK }).find((r) => r.id === "ttffCold").why, /runs 1, 2, 3 lancées sur machine surchargée/);
@@ -370,7 +371,14 @@ test("KPI: the product config (video=software) counts; wgpu and aot=1 are trajec
   const table = kpiTable([product, wgpu], {}, { trunk: TRUNK });
   const rows = Object.fromEntries(table.map((r) => [r.id, r]));
   // What the player sees today: the product side without aot.
-  assert.deepEqual([rows.macSpeedProduct.value, rows.macSpeedProduct.side, rows.macSpeedProduct.counted], [61, "baseline", true]);
+  assert.deepEqual([rows.macSpeedProduct.value, rows.macSpeedProduct.side, rows.macSpeedProduct.counted], [61, "baseline", false]);
+  // The product is judged on its useful game images (its headroom is
+  // decoupled while SyncOnSkipIdle is off); without --headroom it says so.
+  assert.equal(rows.macGameFpsProduct.counted, true);
+  assert.equal(rows.macHeadroomProduct.counted, false);
+  assert.equal(rows.macHeadroom.counted, true);
+  assert.equal(rows.macHeadroomProduct.status, "n/a");
+  assert.equal(rows.macHeadroomProduct.why, "pas de mesure --headroom");
   assert.match(rows.macSpeedProduct.flags, /video=software&speed=unlimited/);
   // If aot=1 were turned on: trajectory, not counted.
   assert.deepEqual([rows.macSpeedProductAot.value, rows.macSpeedProductAot.counted], [70, false]);
@@ -380,6 +388,45 @@ test("KPI: the product config (video=software) counts; wgpu and aot=1 are trajec
   assert.equal(rows.ttffColdProduct.counted, true);
   assert.equal(rows.ttffCold.counted, false);
   assert.equal(rows.ttffColdProduct.why, "aucun résultat ttff sur un commit propre de trunk (0 hors trunk ignoré(s))");
+});
+
+test("KPI: the headroom row reads race-perf --headroom, only where the throttle slept", () => {
+  const run = (applies) => race("2026-10-22T20:00:00Z", { speed: 100, extra: { query: "video=software&presenter=webgpu&pacing=tick&speed=1&metrics=1", served: { candidate: served("T1") } } });
+  const withHr = (applies) => { const r = run(); r.json.candidate.cold = { ...r.json.candidate.cold, headroom: { median: 1.734 }, headroomApplies: applies }; return r; };
+  const rows = (r) => Object.fromEntries(kpiTable([r], {}, { trunk: TRUNK }).map((x) => [x.id, x]));
+  const ok = rows(withHr(true)).macHeadroomProduct;
+  assert.deepEqual([ok.value, ok.status, ok.counted], [173.4, "OK", false]);
+  const under = rows(withHr(false)).macHeadroomProduct;
+  assert.equal(under.status, "n/a");
+  assert.match(under.why, /sous 100 %/);
+});
+
+test("KPI: useful game images per second, the product KPI", () => {
+  const r = race("2026-10-23T05:00:00Z", { speed: 99.9, extra: { query: "video=software&presenter=webgpu&pacing=tick&speed=1&metrics=1", served: { candidate: served("T1") } } });
+  r.json.candidate.cold = { ...r.json.candidate.cold, headroom: { median: 1.41 }, headroomApplies: true, gameFramesPerSecond: { median: 6.9 } };
+  const rowOf = (state, fps) => {
+    r.json.state = state;
+    r.json.candidate.cold.gameFramesPerSecond = { median: fps };
+    return kpiTable([r], {}, { trunk: TRUNK }).find((x) => x.id === "macGameFpsProduct");
+  };
+  // The race renders at 60 frames/s natively (1.00 per VI): target 57.
+  const race60 = rowOf("race-after.sav", 6.9);
+  assert.deepEqual([race60.value, race60.target, race60.status, race60.counted], [6.9, 57, "KO", true]);
+  assert.equal(rowOf("race-after.sav", 58).status, "OK");
+  // A scene without a measured reference: no target, no verdict.
+  const unknown = rowOf("menu.sav", 30);
+  assert.equal(unknown.status, "n/a");
+  assert.match(unknown.why, /sans référence d'images par VI mesurée/);
+});
+
+test("matrix: each KPI scene's target is 95 % of its measured native rate", async () => {
+  const { gameFpsTarget, SCENE_NATIVE_FRAMES_PER_VI } = await import("../harness/lib/matrix.mjs");
+  assert.equal(gameFpsTarget("race-after.sav"), 57);
+  assert.equal(gameFpsTarget("heavy-intro-13s.sav"), 57);
+  assert.equal(gameFpsTarget("nope.sav"), null);
+  // A 30-frame scene (0.5 per VI) would be held to 28.5, not 57.
+  assert.equal(Math.round(0.95 * 60 * 0.5 * 10) / 10, 28.5);
+  for (const ref of Object.values(SCENE_NATIVE_FRAMES_PER_VI)) assert.match(ref.measured, /^measures\/headroom\//);
 });
 
 test("KPI: a candidate column beside trunk, never in its place", (t) => {
@@ -491,13 +538,17 @@ test("KPI: TTFF default and aot=1 apart; a second launch without the region cach
 test("ttff: the optimisation as each launch saw it, and whether the warm launch had the region cache", () => {
   assert.equal(aotLaunchInfo({ error: "Unknown upstream worker message: validationReadAotProgress" }), null);
   const info = aotLaunchInfo({ schema: "wasm-dolphin.aot-progress.v1", state: "complete", events: [{ type: "install", loaded: 143, failed: 0, deferred: 0, ms: 40 }, { type: "done", ms: 3400, compiled: 0, total: 143 }] });
-  assert.deepEqual(info, { state: "complete", install: { loaded: 143, failed: 0, deferred: 0, ms: 40 }, done: { ms: 3400, compiled: 0, total: 143 } });
+  assert.deepEqual(info, { state: "complete", install: { loaded: 143, failed: 0, deferred: 0, ms: 40 }, fromCache: 143, done: { ms: 3400, compiled: 0, total: 143 } });
+  // The cache loaded after the first image (#86): a second install event.
+  const late = aotLaunchInfo({ schema: "wasm-dolphin.aot-progress.v1", state: "complete", events: [{ type: "install", loaded: 0, failed: 0, deferred: 143, ms: 3 }, { type: "install", loaded: 143, failed: 0, deferred: 0, ms: 380, after: "first-image" }] });
+  assert.deepEqual([late.install.loaded, late.afterFirstImage.loaded, late.fromCache], [0, 143, 143]);
   const runs = [
     { run: 1, cold: { aot: { state: "running", install: null, settled: { state: "complete", ms: 3400 } } }, warm: { aot: info } },
-    { run: 2, cold: { aot: { state: "running", install: null } }, warm: { aot: { ...info, install: { loaded: 0 } } } }
+    { run: 2, cold: { aot: { state: "running", install: null } }, warm: { aot: { ...info, install: { loaded: 0 }, fromCache: 0 } } },
+    { run: 3, cold: { aot: { state: "running", install: null } }, warm: { aot: late } }
   ];
   const s = summarizeAot(runs);
-  assert.deepEqual(s.warm.regionsInstalled, [143, 0]);
+  assert.deepEqual(s.warm.regionsInstalled, [143, 0, 143], "a launch whose cache came after the first image counts");
   assert.equal(s.warm.withRegionCache, false); // one warm launch without the cache
   assert.equal(s.cold.withRegionCache, false);
   assert.equal(summarizeAot([{ run: 1, cold: {}, warm: {} }]), null); // an engine without P7
@@ -524,6 +575,27 @@ test("ttff memory guard: RSS per process type of one profile, and the reason a c
   const row = kpiTable([ttff], {}, { trunk: TRUNK }).find((r) => r.id === "ttffWarmAot");
   assert.equal(row.status, "KO");
   assert.match(row.why, /run 1 : cut: Chrome at 9842 MB > 9000 MB \(browser 7436 MB/);
+});
+
+test("aot-warm-launch: time to full speed from the per-second speed series, one slow second restarting the count", async () => {
+  const { fullSpeedAt, speedSeries } = await import("../harness/lib/timeline.mjs");
+  // 60 VI outputs per host second; the emulated rate follows `speeds`.
+  const vi = [];
+  let ticks = 0;
+  const speeds = [100, 100, 80, 100, 100, 100, 100, 100, 62, 62];
+  speeds.forEach((pct, second) => {
+    for (let k = 0; k < 60; k += 1) {
+      vi.push({ t: 1000 * second + (1000 * k) / 60, ticks });
+      ticks += (pct / 100) * (486e6 / 60);
+    }
+  });
+  vi.push({ t: 1000 * speeds.length, ticks });
+  const series = speedSeries(vi, 486e6);
+  assert.deepEqual(series.map((x) => Math.round(x.speed)), speeds);
+  assert.equal(fullSpeedAt(series), 3000, "the 80 % second at 2 s moves it to 3 s");
+  assert.equal(fullSpeedAt(series.slice(0, 7)), null, "four seconds after the dip are not five");
+  assert.equal(fullSpeedAt([]), null);
+  assert.deepEqual(speedSeries(vi, 0), []);
 });
 
 test("aot-warm-launch: a seeded profile is measured on the origin it was seeded on", async (t) => {

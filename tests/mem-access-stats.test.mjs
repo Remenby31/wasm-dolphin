@@ -1,7 +1,7 @@
 // Copyright 2026 wasm-dolphin contributors
 // SPDX-License-Identifier: GPL-2.0-or-later
 
-// Memory-access counts (patch 0104, DolphinWeb_MemAccessStats): layout v1
+// Memory-access counts (patch 0116, DolphinWeb_MemAccessStats): layout v1
 // agreed with the harness, reset applied at a slice boundary, the kinds of
 // memory instructions, and the regions' estimate (their cycles times their
 // code's static rates). The Node core has no CachedInterpreter instance, so
@@ -17,7 +17,7 @@ import { asm, assemble, buildDol } from "./aot-asm.mjs";
 import { HELPER_SIGNATURES, STOP, functionFragments, loadAotCore, regionGroups, seedGprs } from "./helpers/aot-core-equivalence.mjs";
 
 const core = await loadAotCore();
-const skip = !core?.has("DolphinWeb_MemAccessStats") && "core without memory-access counts (patch 0104)";
+const skip = !core?.has("DolphinWeb_MemAccessStats") && "core without memory-access counts (patch 0116)";
 const m = core?.module;
 
 const FIELDS = ["guestInstructions",

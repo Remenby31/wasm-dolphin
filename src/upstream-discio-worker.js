@@ -331,7 +331,24 @@ function harnessJitRegionStats({ sampleEvery } = {}) {
   // (0084), the bytes of their unpatched compiles, and patched compiles refused.
   return { bytes: copy(), again: copy(), installSamples: harnessRegionInstallSamples(heap), layoutRefused, layoutHash, layout: harnessHeapLayout(moduleInstance),
     heapPatched: aotHeapPatched, heapPatchedBytes: aotHeapPatchedBytes, heapPatchFailed: aotHeapPatchFailed,
-    regionChain: harnessRegionChainStats(heap) };
+    regionChain: harnessRegionChainStats(heap), regionSleep: harnessRegionSleepStats() };
+}
+// Installs in the CPU thread's throttle sleeps (patch 0107): how many, their
+// host time, the worst lateness past a sleep's deadline they caused (the
+// frame they would delay) and the slice installs of large modules whose wait
+// for a sleep ran out. Null with an older core.
+function harnessRegionSleepStats() {
+  const m = moduleInstance;
+  if (!m?._DolphinWeb_AotRegionSleepInstalls || !m._malloc) return null;
+  const p = m._malloc(16);
+  try {
+    new Uint32Array(m.HEAPU8.buffer, p, 4).fill(0);
+    m._DolphinWeb_AotRegionSleepInstalls(p);
+    const w = new Uint32Array(m.HEAPU8.buffer, p, 4);
+    return { installs: w[0], ms: w[1] / 100, overshootMaxMs: w[2] / 100, waitExpired: w[3] };
+  } finally {
+    m._free?.(p);
+  }
 }
 // Region chaining counters (patch 0102), reset with the region stats; null
 // with an older core.
@@ -352,6 +369,25 @@ function harnessRegionTransitionTop(heap) {
   const list = (base) => Array.from({ length: Math.min(u32[base], TOP) }, (_, i) => [`0x${u32[base + 1 + 2 * i].toString(16).padStart(8, "0")}`, u32[base + 2 + 2 * i]]);
   return { exitTargets: list(0), breakEntries: list(1 + 2 * TOP) };
 }
+// Headroom counters (patch 0113, harness/lib/headroom.mjs): reset >= 0
+// zeroes and turns them on (each thread applies it at its next pass); copied
+// twice so a torn read is refused.
+function harnessHeadroomStats({ reset } = {}) {
+  if (!harnessEnabled) return { error: "harness hooks are off" };
+  const stats = moduleInstance?._DolphinWeb_HeadroomStats;
+  if (!stats) return { error: "core has no DolphinWeb_HeadroomStats" };
+  const ptr = stats(Number.isInteger(reset) && reset >= 0 ? reset : -1) >>> 0;
+  const heap = moduleInstance.HEAPU8;
+  if (!ptr || ptr + 8 > heap.length) return { error: `DolphinWeb_HeadroomStats returned ${ptr}` };
+  const size = Math.min(new DataView(heap.buffer, ptr, 8).getUint32(4, true), 96);
+  if (ptr + size > heap.length) return { error: `headroom stats of ${size} bytes past the heap` };
+  if (ptr % 8 !== 0 || size % 8 !== 0) return { error: `headroom stats at ${ptr} (${size} bytes): not 8-aligned` };
+  // Whole f64 reads (an aligned Float64Array), never a double split across
+  // two byte loads while a thread writes it.
+  const copy = () => Array.from(new Uint8Array(new Float64Array(heap.buffer, ptr, size / 8).slice().buffer));
+  return { bytes: copy(), again: copy() };
+}
+
 // AX HLE timing (patch 0099, harness/lib/ax-hle-stats.mjs): reset >= 0
 // zeroes and turns the counters on from the next mail; copied twice so the
 // harness can refuse a torn read.
@@ -1372,6 +1408,7 @@ async function handleMessage(type, payload) {
         ppcWasmJitTier: payload.ppcWasmJitTier,
         ppcWasmJitWarmupFrames: payload.ppcWasmJitWarmupFrames,
         ppcProfile: payload.ppcProfile,
+        gpuSpinMicros: payload.gpuSpinMicros,
         cpuOverclock: payload.cpuOverclock,
         emulationSpeed: payload.emulationSpeed,
         presentationScale: payload.presentationScale,
@@ -1631,6 +1668,8 @@ async function handleMessage(type, payload) {
       return harnessJitRegionStats(payload);
     case "validationReadAxHleStats":
       return harnessAxHleStats(payload);
+    case "validationReadHeadroomStats":
+      return harnessHeadroomStats(payload);
     case "validationReadMemAccessStats":
       return harnessMemAccessStats(payload);
     case "validationCaptureAtVi":
@@ -2017,6 +2056,7 @@ async function loadCore({
   ppcWasmJitTier: requestedPpcWasmJitTier = "guarded",
   ppcWasmJitWarmupFrames: requestedPpcWasmJitWarmupFrames = DEFAULT_WASM_JIT_WARMUP_XFB_FRAMES,
   ppcProfile = false,
+  gpuSpinMicros = -1,
   cpuOverclock = 1,
   emulationSpeed = 1,
   presentationScale = 1,
@@ -2713,6 +2753,7 @@ async function loadCore({
   api.setJitRegionsEnabled?.(aotFirstLaunch ? 1 : 0);
   api.setJitRegionChaining?.(regionChain !== false ? 1 : 0);
   api.setPpcProfileEnabled?.(ppcProfile ? 1 : 0);
+  if (Number.isInteger(gpuSpinMicros) && gpuSpinMicros >= 0) api.setGpuSpinBudget?.(gpuSpinMicros);
   api.setWebGpuUploadArenaMiB?.(wgpuUploadArenaMiB, collectMetrics ? 1 : 0);
   api.setWebGpuProducerProfileEnabled?.(wgpuProducerProfileRequested ? 1 : 0);
   api.setWebGpuDrawProfileEnabled?.(wgpuDrawProfileRequested ? 1 : 0);
@@ -2840,6 +2881,7 @@ function bindApi(module) {
     setPpcWasmJitOffThread: optionalCwrap("SetPpcWasmJitOffThread", null, ["number"]),
     setJitRegionsEnabled: optionalCwrap("DolphinWeb_JitSetRegionsEnabled", null, ["number"]),
     setJitRegionChaining: optionalCwrap("DolphinWeb_JitSetRegionChaining", null, ["number"]),
+    setGpuSpinBudget: optionalCwrap("DolphinWeb_SetGpuSpinBudget", null, ["number"]),
     getPpcWasmJitEngagedFrame: optionalCwrap("GetPpcWasmJitEngagedFrame", "number", []),
     getPpcWasmJitArmStartFrame: optionalCwrap("GetPpcWasmJitArmStartFrame", "number", []),
     setPpcWasmJitEnabled:
@@ -3675,6 +3717,8 @@ async function mountFile(file) {
   aotFirstLaunch = null;
   aotCoreBooted = false;
   aotRegionsBeforeBoot.length = 0;
+  // The previous disc's flow never sees this disc's first image (review of #86).
+  for (const resolve of aotFirstImageWaiters.splice(0)) resolve(false);
   aotLayoutSkipped = 0;
   aotHeapPatched = 0;
   aotHeapPatchedBytes = 0;
@@ -5290,12 +5334,16 @@ function recordVisualFrameHash(hash, sampledSourceFrame = false) {
   lastVisualFrameHash = visualFrameHash;
 }
 
-function recordPresentedFrame(coreFrame) {
+// shownVi: the VI output (since boot) this present shows, when the renderer
+// knows it (video=wgpu: its ViTag); otherwise the core's VI count now, which
+// can already be ahead of the field on screen.
+function recordPresentedFrame(coreFrame, shownVi = null) {
+  if (aotFirstImageWaiters.length) for (const resolve of aotFirstImageWaiters.splice(0)) resolve(true);
   if (harnessEnabled) {
     const slot = (harnessPresentHead % HARNESS_PRESENT_RING) * 3;
     harnessPresentRing[slot] = harnessNow();
     harnessPresentRing[slot + 1] = coreFrame;
-    harnessPresentRing[slot + 2] = moduleInstance?._DolphinWeb_HarnessViSinceBoot?.() ?? -1;
+    harnessPresentRing[slot + 2] = shownVi ?? moduleInstance?._DolphinWeb_HarnessViSinceBoot?.() ?? -1;
     harnessPresentHead += 1;
     if (harnessDisplayStop) harnessDisplay.submit(harnessPresentRing[slot + 2]);
   }
@@ -7247,7 +7295,17 @@ export async function prepareAotFirstLaunch(file, {
       const keyed = mod ? regionBlockCacheKey(region.bytes).then((k) => {
         if (dolphinJitCacheMap.size < DOLPHIN_JIT_CACHE_MAX) dolphinJitCacheMap.set(k, mod);
       }) : Promise.resolve();
-      keyed.catch(() => {}).then(() => queueAotRegionAfterBoot(module, region));
+      // In the order the loader hands them over (compile order, hottest
+      // first): the digest and the queueing are chained, not raced (review
+      // of #86). A module's heap patch and its compile start at once, in
+      // parallel with the others; only the queueing waits its turn. Nothing
+      // of a disc unmounted since (aotDiscGeneration) is queued.
+      if (generation !== aotDiscGeneration) return;
+      const prepared = aotCoreBooted ? prepareAotRegion(module, region).catch(() => null) : null;
+      aotQueueChain = aotQueueChain.then(() => keyed.catch(() => {})).then(() => {
+        if (generation !== aotDiscGeneration) return undefined;
+        return prepared ? prepared.then((p) => p && submitAotRegion(module, p)) : queueAotRegionAfterBoot(module, region);
+      }).catch(() => {});
     },
     retain: (key, mod, bytes) => {
       // Also under the key the CPU thread's compile looks up (the SHA-256 of
@@ -7293,15 +7351,38 @@ export async function prepareAotFirstLaunch(file, {
 // optimisation. A cancel (aotCancel, stop) or a remount in between wins: the
 // start is dropped.
 export function startAotFirstLaunchAfterBoot(flow = aotFirstLaunch) {
+  const disc = aotDiscGeneration;
   void whenCoreRamReady(moduleInstance).then((ready) => {
-    if (!ready) return;
+    if (!ready || disc !== aotDiscGeneration) return;
     aotCoreBooted = true;
-    for (const [module, region] of aotRegionsBeforeBoot.splice(0)) void queueAotRegion(module, region).catch(() => {});
+    const waiting = aotRegionsBeforeBoot.splice(0);
+    aotQueueChain = aotQueueChain.then(async () => {
+      for (const [module, region] of waiting) await queueAotRegion(module, region).catch(() => {});
+    });
   });
   if (!flow?.supported) return Promise.resolve();
   const generation = flow.generation;
-  return flow.loadRest().catch(() => {}).then(() => {
+  // Nothing was loaded before the boot: the region cache, and the
+  // optimisation, after the first image (TTFF of a second launch).
+  return aotWhenFirstImage(moduleInstance).then(() => {
+    // A remount meanwhile woke this flow: its disc is gone (loadRest of a
+    // disposed flow loads nothing either).
+    if (aotFirstLaunch !== flow) return undefined;
+    return flow.loadRest();
+  }).catch(() => {}).then(() => {
     if (aotFirstLaunch === flow) return flow.start({ resume: true, ifGeneration: generation });
+  });
+}
+// The first presented image of this boot, or false after `timeoutMs`. No
+// running core (tests): at once.
+export const aotWhenFirstImageForTest = (module, options) => aotWhenFirstImage(module, options);
+export const recordPresentedFrameForTest = (coreFrame) => recordPresentedFrame(coreFrame);
+const aotFirstImageWaiters = [];
+function aotWhenFirstImage(module, { timeoutMs = 15000 } = {}) {
+  if (!module) return Promise.resolve(false);
+  return new Promise((resolve) => {
+    aotFirstImageWaiters.push(resolve);
+    setTimeout(() => resolve(false), timeoutMs);
   });
 }
 // No region is copied into the core's heap before the core has allocated the
@@ -7327,9 +7408,11 @@ async function whenCoreRamReady(module, { timeoutMs = 60000, everyMs = 50 } = {}
   return false;
 }
 const aotRegionsBeforeBoot = [];
+let aotQueueChain = Promise.resolve();
 function queueAotRegionAfterBoot(module, region) {
-  if (aotCoreBooted) void queueAotRegion(module, region).catch(() => {});
-  else aotRegionsBeforeBoot.push([module, region]);
+  if (aotCoreBooted) return queueAotRegion(module, region).catch(() => {});
+  aotRegionsBeforeBoot.push([module, region]);
+  return undefined;
 }
 // The CPU thread's module-map key for these bytes (DolphinWeb_MakeWasmBlockCacheKey).
 async function regionBlockCacheKey(bytes) {
@@ -7342,15 +7425,21 @@ async function regionBlockCacheKey(bytes) {
 // a hit in V8's native module cache; it then runs it for its entries.
 // members: [{ ranges, hash }] per function, the plan's FNV-1a 64 of its code:
 // the core installs nothing whose code changed since the translation.
-async function queueAotRegion(module, { key, bytes, entries, members, layout = 0 }, flow = aotFirstLaunch) {
-  if (typeof module?._DolphinWeb_AotQueueRegion !== "function" || !bytes?.length || !entries?.length || !members?.length) return;
+async function queueAotRegion(module, region, flow = aotFirstLaunch) {
+  const prepared = await prepareAotRegion(module, region, flow);
+  if (prepared) submitAotRegion(module, prepared);
+}
+// The part of queueAotRegion that may run alongside other modules' (heap
+// patch, compile of the patched bytes): what to queue, or null.
+async function prepareAotRegion(module, { key, bytes, entries, members, layout = 0 }, flow = aotFirstLaunch) {
+  if (typeof module?._DolphinWeb_AotQueueRegion !== "function" || !bytes?.length || !entries?.length || !members?.length) return null;
   // Translated for another heap layout: the core would refuse it; not even
   // copied into its heap (counted). Translated again from guest memory, its
   // cache entry overwritten (the new module comes back through install).
   if (typeof module._DolphinWeb_AotLayoutHash === "function" && (layout >>> 0) !== (module._DolphinWeb_AotLayoutHash() >>> 0)) {
     aotLayoutSkipped += 1;
     if (key) flow?.retranslate?.(key);
-    return;
+    return null;
   }
   // Its heap sites hold the RAM and L1 addresses of the session that
   // translated it (patch 0084): moved to this session's, and the patched
@@ -7371,7 +7460,7 @@ async function queueAotRegion(module, { key, bytes, entries, members, layout = 0
       heap = regionHeapOfBytes(patched);
     } catch {
       aotLayoutSkipped += 1; // a malformed section or a site that does not hold its base: never queued
-      return;
+      return null;
     }
     if (patched !== bytes) {
       // The module the cache loader compiled from the unpatched bytes is
@@ -7382,13 +7471,18 @@ async function queueAotRegion(module, { key, bytes, entries, members, layout = 0
       const compiled = await precompileAotRegion(patchedKey, patched);
       if (!compiled.module) {
         aotHeapPatchFailed += 1;
-        return;
+        return null;
       }
       bytes = patched;
     }
-    if (generation !== aotDiscGeneration) return; // another disc meanwhile
+    if (generation !== aotDiscGeneration) return null; // another disc meanwhile
     if (heap) heapBases = [heap.ramBase, heap.l1Base];
   }
+  return { generation: aotDiscGeneration, bytes, entries, members, layout, heapBases };
+}
+// Copies a prepared region into the core's heap and queues it (in order).
+function submitAotRegion(module, { generation, bytes, entries, members, layout, heapBases }) {
+  if (generation !== aotDiscGeneration) return; // another disc since it was prepared
   const ranges = members.flatMap((m) => m.ranges);
   const triples = members.flatMap((m) => [m.ranges.length, m.hash ? parseInt(m.hash.slice(8), 16) : 0, m.hash ? parseInt(m.hash.slice(0, 8), 16) : 0]);
   const words = [...entries, ...ranges.flat(), ...triples].map((v) => v >>> 0);
@@ -14759,7 +14853,7 @@ function drainWebGpuCmdRing(source = "presentation") {
           cmdRingOwnsCanvas = true;
           // A frame carrying the diagnostic input marker is not streamed.
           if (streamCapture.active && !hardwareInputMarkerApplied) streamCapture.offerCanvas(renderCanvas, api?.getFrame?.() ?? 0);
-          recordPresentedFrame(api?.getFrame?.() ?? 0);
+          recordPresentedFrame(api?.getFrame?.() ?? 0, wgpuExactCapture.currentBoot());
           wgpuPresentedSource = {
             textureId: wgpuLastBackbufferSourceTextureId, rect: wgpuNextPresentSource
           };
