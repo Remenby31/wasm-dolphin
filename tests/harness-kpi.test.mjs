@@ -647,3 +647,25 @@ test("setup: two Spark summaries with and without the V8 flag differ; absent arg
   assert.deepEqual(setupDifferences(setupOf(pair, "candidate"), setupOf(pair, "baseline")), ["arguments Chrome « --x » ≠ « aucun »"]);
   assert.deepEqual(setupDifferences(setupOf({ chrome: { path: "chrome stable" } }), TRUNK_SETUP), []);
 });
+
+// 0106: GameCube RAM and L1 are static, so a heap shift no longer moves them:
+// nothing to patch and nothing refused is "not-applicable", never a failure.
+// Where the RAM still moves, the shift case keeps its rules.
+test("aot-second-launch: a heap shift that cannot move a static RAM is not-applicable; where it moves, patches are required", async () => {
+  const { secondLaunchVerdict } = await import("../harness/lib/second-launch-verdict.mjs");
+  const RAM = 0x1570000;
+  const base = { frames: 6000, fromCache: 143, installed: 143, heapShift: true, minFrames: 3000, referenceRamBase: RAM };
+  const at = (ramBase, extra) => ({ layout: { ramBase }, layoutRefused: 0, ...extra });
+  assert.equal(secondLaunchVerdict(at(RAM, { heapPatched: 0 }), base).verdict, "not-applicable", "the same RAM base as the reference: static RAM (0106)");
+  assert.equal(secondLaunchVerdict(at(RAM + (64 << 20), { heapPatched: 143 }), base).verdict, "pass", "the RAM moved and every module was patched");
+  const silent = secondLaunchVerdict(at(RAM + (64 << 20), { heapPatched: 0 }), base);
+  assert.equal(silent.verdict, "fail", "the RAM moved but nothing was patched: a patcher that stopped is a failure, not not-applicable");
+  assert.match(silent.why.join(";"), /heap shifted but 0 module patched/);
+  assert.equal(secondLaunchVerdict(at(RAM, { heapPatched: 0 }), { ...base, referenceRamBase: null }).verdict, "fail", "no reference: nothing proves the RAM stayed");
+  assert.equal(secondLaunchVerdict(at(RAM, { heapPatched: 5 }), base).verdict, "fail", "the RAM stayed but modules were patched: inconsistent");
+  const refused = secondLaunchVerdict(at(RAM + (64 << 20), { heapPatched: 0, layoutRefused: 143 }), { ...base, installed: 0 });
+  assert.equal(refused.verdict, "fail");
+  assert.equal(secondLaunchVerdict({ heapPatched: 0, layoutRefused: 0 }, { ...base, heapShift: false }).verdict, "pass", "no shift asked: a plain pass");
+  assert.equal(secondLaunchVerdict(at(RAM, { heapPatched: 0 }), { ...base, frames: 10 }).verdict, "fail", "the other checks still hold");
+});
+

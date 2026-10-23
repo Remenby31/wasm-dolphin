@@ -1,7 +1,7 @@
 {
   "schemaVersion": 1,
   "abiVersion": 1,
-  "coreId": "sha256:3cdf28ed55cb72d14f273fe49b075b4a56612e6cb27843dcfa4c899de190469a",
+  "coreId": "sha256:cfc3d5a2139ff2f48bfe2ed3cf9f5acd88cadfdada3d3b33c95e5099afcb0f1c",
   "upstreamCommit": "e22551eae1c84a7e4d0b6a5c519ef4ed4ef69df1",
   "artifacts": [
     {
@@ -12,8 +12,8 @@
     },
     {
       "path": "cores/dolphin/dolphin-core-upstream.wasm",
-      "size": 13171275,
-      "sha256": "3cdf28ed55cb72d14f273fe49b075b4a56612e6cb27843dcfa4c899de190469a"
+      "size": 13171866,
+      "sha256": "cfc3d5a2139ff2f48bfe2ed3cf9f5acd88cadfdada3d3b33c95e5099afcb0f1c"
     }
   ],
   "contractSources": [
@@ -86,8 +86,8 @@
     {
       "path": "src/core-host.js",
       "hashMode": "lf-normalized",
-      "size": 75248,
-      "sha256": "da9ab46f1036ef2296a11e9b3fe7d1d2e2aa4f3f8f206656d7605893b1242ecd"
+      "size": 75510,
+      "sha256": "657ed7659bb5f3d0b9be127edd7e82e94084f301a00afd83a3df969cb7940618"
     },
     {
       "path": "src/diagnostic-log-filter.js",
@@ -140,8 +140,8 @@
     {
       "path": "src/upstream-discio-worker.js",
       "hashMode": "lf-normalized",
-      "size": 726698,
-      "sha256": "96d0c55668029f4ebc04f0fff17e9feef04c082c7e07e1ef79245028f1f17f3c"
+      "size": 727092,
+      "sha256": "8c4ec9240a8a879c3f3258d9e01b2510b2f71a1450063a1f0f40632f20c72413"
     },
     {
       "path": "src/wgpu-renderer-worker-probe.js",

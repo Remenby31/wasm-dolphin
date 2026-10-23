@@ -12,7 +12,7 @@ MACHDEP   := -DGEKKO -mogc -mcpu=750 -meabi -mhard-float
 CFLAGS    := -O2 -Wall -Werror $(MACHDEP) -I$(LIBOGC)/include -Icommon \
              -ffile-prefix-map=$(CURDIR)=. -fno-ident
 LDFLAGS   := $(MACHDEP) -L$(LIBOGC)/lib/cube -Wl,--build-id=none
-PROGRAMS  := padtest consoletest gxscene cpufuzz cpufuzz-nomcrf tonetest smctest efbpeek ramcopy dstalpha
+PROGRAMS  := padtest consoletest gxscene cpufuzz cpufuzz-nomcrf tonetest smctest efbpeek ramcopy dstalpha footprint
 # Selftest mutants (harness/selftest): built from the same sources.
 MUTANTS   := gxscene-nocubes gxscene-color
 
@@ -25,6 +25,17 @@ $(OUT)/%.elf: %/main.c common/marker.h | $(OUT)
 # fuzz keep going past that known crash.
 $(OUT)/cpufuzz-nomcrf.elf: cpufuzz/main.c common/marker.h | $(OUT)
 	$(CC) $(CFLAGS) -DCPUFUZZ_NO_MCRF $< -o $@ $(LDFLAGS) -logc -lm
+
+# The CI bench's front-end workload: main.c plus the PowerPC that
+# footprint/gen.mjs wrote to $(OUT)/footprint_gen.S (build.sh runs it: the
+# toolchain image has no Node).
+$(OUT)/footprint.elf: footprint/main.c $(OUT)/footprint_gen.S common/marker.h | $(OUT)
+	$(CC) $(CFLAGS) footprint/main.c $(OUT)/footprint_gen.S -o $@ $(LDFLAGS) -logc -lm
+
+# Sized variants for the bench's calibration (gen.mjs --functions N wrote
+# $(OUT)/footprint-N_gen.S).
+$(OUT)/footprint-%.elf: footprint/main.c $(OUT)/footprint-%_gen.S common/marker.h | $(OUT)
+	$(CC) $(CFLAGS) footprint/main.c $(OUT)/footprint-$*_gen.S -o $@ $(LDFLAGS) -logc -lm
 
 $(OUT)/gxscene-nocubes.elf: gxscene/main.c | $(OUT)
 	$(CC) $(CFLAGS) -DMUTATE_NO_CUBES $< -o $@ $(LDFLAGS) -logc -lm

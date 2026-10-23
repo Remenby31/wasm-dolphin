@@ -139,3 +139,10 @@ test("first-launch-ramp --region-chain: the chaining counters of a stats reply, 
   assert.equal(sum[0].chained, 15);
   assert.equal(sum[0].noRegion, 5);
 });
+
+test("first-launch-ramp --region-chain: the region cycle share per visit goes into the medians", async () => {
+  const { summarizeVisits } = await import("../harness/probes/first-launch-ramp.mjs");
+  const sum = summarizeVisits([{ visits: [{ visit: 1, regionShares: { regionCycleShare: 0.9, regionStops: 100 } }] }, { visits: [{ visit: 1, regionShares: { regionCycleShare: 0.8, regionStops: 300 } }] }], 1);
+  assert.equal(sum[0].regionCycleShare, 0.85);
+  assert.equal(sum[0].regionStops, 200);
+});

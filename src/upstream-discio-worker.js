@@ -1532,6 +1532,7 @@ async function handleMessage(type, payload) {
         jitOffThread: payload.jitOffThread,
         aotCompiler: payload.aotCompiler,
         aotFirstLaunch: payload.aotFirstLaunch,
+        aotSampleMs: payload.aotSampleMs,
         regionChain: payload.regionChain,
         fusedMadd: payload.fusedMadd,
         reportedCoreSelection: payload.coreSelection,
@@ -2204,6 +2205,7 @@ async function loadCore({
   jitOffThread = true,
   aotCompiler = true,
   aotFirstLaunch = false,
+  aotSampleMs = AOT_PROFILE_SAMPLE_MS,
   regionChain = true,
   fusedMadd = true,
   reportedCoreSelection = null,
@@ -2630,6 +2632,7 @@ async function loadCore({
   dolphinJitCachePersistenceEnabled = !noJitCache;
   dolphinAotCompilerEnabled = aotCompiler !== false;
   aotFirstLaunchEnabled = aotFirstLaunch === true;
+  aotProfileSampleMs = Number.isInteger(aotSampleMs) && aotSampleMs >= 0 ? aotSampleMs : AOT_PROFILE_SAMPLE_MS;
   dolphinJitBootLoadComplete = false;
   dolphinJitBootLoadedEntries = 0;
   coreBuildFingerprint = String(buildFingerprint ?? "");
@@ -7552,8 +7555,9 @@ export function startAotFirstLaunchAfterBoot(flow = aotFirstLaunch) {
     // own reading the guest PC, nothing on the CPU thread).
     aotHotSampler?.stop();
     aotHotSampler = aotProfileTarget?.flow === flow
-      ? aotProfileTarget.startHotSampler({ buffer: moduleInstance?.HEAPU8?.buffer, pcAddress: aotProfileTarget.guestPcAddress(moduleInstance), periodMs: AOT_PROFILE_SAMPLE_MS })
+      ? aotProfileTarget.startHotSampler({ buffer: moduleInstance?.HEAPU8?.buffer, pcAddress: aotProfileTarget.guestPcAddress(moduleInstance), periodMs: aotProfileSampleMs })
       : null;
+    if (!aotHotSampler && aotProfileSampleMs === 0) postStatus("aot: local profile sampler off (?aotsample=0)");
     startAotProfileRecorder(flow, aotHotSampler);
     return flow.loadRest();
   }).catch(() => {}).then(() => {
@@ -7591,6 +7595,7 @@ export const recordAotProfileForTest = (samples) => aotProfileTarget?.record(sam
 export const aotPlanProfileReadForTest = () => aotPlanProfileForTest;
 let aotProfileTimer = null;
 const AOT_PROFILE_SAMPLE_MS = 10; // one guest PC per 10 ms: enough for block weights
+let aotProfileSampleMs = AOT_PROFILE_SAMPLE_MS; // ?aotsample=N (core-host), 0: no sampler
 const AOT_PROFILE_RECORD_MS = 60000;
 // Every minute, and when the tab hides or closes (flushUserData), the
 // emulation pauses or stops, or another disc is mounted, what the sampler

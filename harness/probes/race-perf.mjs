@@ -56,6 +56,13 @@
 //   perKiloGuestCycles (host cycles, and the cycles each fraction stands
 //   for, per 1000 guest cycles), with perKiloChange in a pair. Each trace
 //   (~150 MB a second) is deleted once read.
+// - --run-timeout S (default 1800, 0 = none): a side's measure that has not
+//   ended after S host seconds fails its run (timedOut); the session closes,
+//   the window's counters stop, and two such runs in a row give up the rest.
+// - A homebrew (harness/homebrew/out or the committed fixtures, the only discs
+//   allowed in CI) needs no --state: it is measured from its boot.
+//   --pin-cpu-thread N (Linux) then moves the busiest renderer thread, the
+//   emulated CPU thread, alone onto vCPU N (.github/workflows/bench.yml).
 // - --emulated-window S: the window is S GUEST seconds instead of --secs host
 //   seconds. With a host-time window the faster side covers another stretch
 //   of the scene (another idle share), which biases the pair (PROGRAM.md,
@@ -101,12 +108,42 @@ import { consistentRead, decodeRegionStats, poolStats, regionShares, topMisses }
 import { consistentMemRead, decodeMemStats, memAccessShares, poolMemStats } from "../lib/mem-access-stats.mjs";
 import { consistentHeadroomRead, decodeHeadroomStats, headroomOf, invalidReasons, querySpeed, unlimitedAllowed } from "../lib/headroom.mjs";
 import { summarizePcSamples } from "../../src/harness-pc-sampler.js";
-import { checkPerfAccess, counterEvents, cyclesPerGuestCycle, instructionsPerGuestCycle, perfCounters } from "../lib/perf-counters.mjs";
-import { checkXctrace, freeDiskGB, perKiloGuestCycles, XCTRACE_MIN_FREE_GB, xctraceCounters } from "../lib/xctrace-counters.mjs";
+import { busiestThread, checkPerfAccess, counterEvents, cyclesPerGuestCycle, instructionsPerGuestCycle, perfCounters } from "../lib/perf-counters.mjs";
+import { checkXctrace, freeDiskGB, perKiloGuestCycles, xctraceCounters, xctraceNeedGB } from "../lib/xctrace-counters.mjs";
 import { emulatedStart } from "../lib/emulated-window.mjs";
 
 const HOMEBREW_OUT = path.join(REPO_ROOT, "harness", "homebrew", "out");
+// Our homebrews only (no game content): built locally (out/) or the
+// committed fixtures; the only discs race-perf runs in CI.
+const HOMEBREW_FIXTURES = path.join(REPO_ROOT, "harness", "homebrew", "fixtures");
+export const isHomebrew = (iso) => [HOMEBREW_OUT, HOMEBREW_FIXTURES].some((d) => iso.startsWith(d + path.sep));
 export const STATE_ROUTE = "**/__harness_state.sav";
+
+// The host CPU model (Linux: lscpu "Model name"), read with each window of a
+// pinned run: the CI bench pairs only windows of the same model (a runner
+// can be live-migrated).
+export function cpuModel() {
+  try {
+    return /^Model name:\s*(.+)$/m.exec(execFileSync("lscpu", { encoding: "utf8" }))?.[1]?.trim() ?? null;
+  } catch {
+    return null;
+  }
+}
+
+// The busiest renderer thread (the emulated CPU thread once the game runs)
+// moved alone onto `cpu` (taskset -p); { tid, cpu } or { error }.
+export async function pinBusiestThread(profileDir, cpu) {
+  if (process.platform !== "linux") return { error: "--pin-cpu-thread: Linux only" };
+  try {
+    const best = await busiestThread(profileDir, 1500, { withShare: true });
+    if (!best) return { error: "no renderer thread" };
+    execFileSync("taskset", ["-p", "-c", String(cpu), String(best.tid)], { stdio: "ignore" });
+    const comm = readFileSync(`/proc/${best.tid}/comm`, "utf8").trim();
+    return { tid: Number(best.tid), thread: comm, busyPct: best.busyPct, cpu };
+  } catch (error) {
+    return { error: String(error?.message || error).slice(0, 200) };
+  }
+}
 
 export function sideOrder(run) {
   return run % 2 === 1 ? ["baseline", "candidate"] : ["candidate", "baseline"];
@@ -182,8 +219,12 @@ export function rendererThreads(profileDir) {
 // Load the scene, hold the key, settle, then a window with no page call.
 export async function measure(session, o) {
   const { page } = session;
-  const loaded = await loadHarnessState(page, session.url);
-  if (!loaded?.loaded) throw new Error(`savestate load failed: ${JSON.stringify(loaded)}`);
+  // A homebrew (no savestate) is measured from its boot.
+  if (o.state) {
+    const loaded = await loadHarnessState(page, session.url);
+    if (!loaded?.loaded) throw new Error(`savestate load failed: ${JSON.stringify(loaded)}`);
+  }
+  let pinned = null;
   // --emulated-window: the key is pressed while the core is paused, and the
   // warmup and the window are counted in guest seconds (lib/emulated-window.mjs).
   if (o.hold && !o.emulatedWindow) await page.keyboard.down(o.hold);
@@ -196,6 +237,12 @@ export async function measure(session, o) {
     const sampling = Boolean(pcStart?.started);
     // o.onWindow (race-multi's hardware counters): called just before and
     // just after the window, from node only (no page call inside it).
+    // --pin-cpu-thread N (Linux): the emulated CPU thread alone on vCPU N
+    // (the CI bench leaves its SMT sibling idle and the rest of Chrome on
+    // the other core, through HARNESS_CHROME_PATH's taskset). After the
+    // warmup and over 1.5 s: right after boot a V8 compile thread can be
+    // the busiest (CI pilot, 2026-10-23).
+    if (o.pinCpuThread != null) pinned = await pinBusiestThread(session.profileDir, o.pinCpuThread);
     if (o.onWindow) await o.onWindow("start", session);
     await readTimeline(page); // drop everything before the window
     // --headroom (0113): the counters reset and the core ticks read just
@@ -316,6 +363,7 @@ export async function measure(session, o) {
       ...regionRecord(regionEnd),
       ...(pipeline && !pipeline.error ? regionPipeline(pipeline) : {}),
       ...(counters ? { counters } : {}),
+      ...(pinned ? { pinned, cpuModel: cpuModel() } : {}),
       ...(o.memStats ? memRecord(memEnd) : {})
     };
   } finally {
@@ -473,17 +521,31 @@ const MAX_RELOCKS = 3;
 
 // loadGate: the load before the side (calmUnderLock, outside the lock when
 // loaded); the window is then judged on its median load.
+// `p`, or an error marked runTimeout once `ms` have passed (0: no limit);
+// a late rejection of `p` is swallowed.
+export function withRunTimeout(p, ms, what) {
+  if (!ms) return p;
+  let timer;
+  p.catch(() => {});
+  return Promise.race([p, new Promise((_, reject) => { timer = setTimeout(() => reject(Object.assign(new Error(`${what} timed out after ${ms / 1000} s (--run-timeout)`), { runTimeout: true })), ms); })])
+    .finally(() => clearTimeout(timer));
+}
+
 async function measureSide(side, o, loadGate) {
   const server = await ensureServer({ port: o.port, root: side.root, coreCandidates: o.coreCandidates });
   try {
     const bootStart = performance.now();
-    const session = await openSession({ base: server.base, server, query: side.query ?? o.query, iso: o.iso, routes: { [STATE_ROUTE]: o.state }, chromeArgs: side.chromeArgs ?? [], harness: o.display ? { displayed: true } : {} });
+    const session = await openSession({ base: server.base, server, query: side.query ?? o.query, iso: o.iso, routes: o.state ? { [STATE_ROUTE]: o.state } : {}, chromeArgs: side.chromeArgs ?? [], harness: o.display ? { displayed: true } : {} });
     const record = { url: session.url, served: server.identity, core: session.core, loadGate, bootMs: round(performance.now() - bootStart, 0) };
+    // --run-timeout: a measure that never ends (a hung page or a frozen
+    // core: 64 min under the lock, 2026-10-23) fails the run; the session
+    // closes and the window's counters (o.onWindow.abort) stop.
+    const timed = (p, what) => withRunTimeout(p, o.runTimeoutMs, what);
     try {
-      record.cold = await measure(session, o);
+      record.cold = await timed(measure(session, o), "cold window");
       if (o.warm) {
         record.warmCore = await rebootSession(session, server);
-        record.warm = await measure(session, o);
+        record.warm = await timed(measure(session, o), "warm window");
       }
       // Per guest cycle: host instructions, and host cycles (which decide
       // when a change moves the IPC), for the warm window too (--warm).
@@ -492,6 +554,10 @@ async function measureSide(side, o, loadGate) {
       for (const w of [record.cold, record.warm]) if (w?.counters) Object.assign(w, { instructionsPerGuestCycle: instructionsPerGuestCycle(w), cyclesPerGuestCycle: cyclesPerGuestCycle(w), ...(w.counters.tool === "xctrace" ? { perKiloGuestCycles: perKiloGuestCycles(w) } : {}) });
     } catch (error) {
       record.error = String(error?.message || error).slice(0, 300);
+      if (error?.runTimeout) {
+        record.timedOut = true;
+        await o.onWindow?.abort?.(session);
+      }
       // The harness lost Chrome (CDP pipe fault, lib/browser.mjs): infra.
       if (session.pipeFault()) record.infraCrash = session.pipeFault().message;
     }
@@ -542,18 +608,19 @@ async function main() {
       "emulated-window": { type: "string" }, "emulated-warmup": { type: "string" }, "emulated-poll-ms": { type: "string", default: "100" },
       hold: { type: "string", default: "KeyX" }, warm: { type: "boolean", default: false },
       "max-load": { type: "string" }, "lock-wait": { type: "string", default: "1800" },
-      pcsample: { type: "string" }, symbols: { type: "string" }, "region-sample": { type: "string" }, "region-secs": { type: "string", default: "10" }, counters: { type: "boolean", default: false }, "counter-events": { type: "string" }, "unique-frames": { type: "string" }, display: { type: "boolean", default: false }, "mem-stats": { type: "boolean", default: false }, "mem-warm": { type: "string", default: "5" }, headroom: { type: "boolean", default: false }, "frames-per-vi-ref": { type: "string" }, "baseline-query": { type: "string" }, "chrome-args": { type: "string" }, "baseline-chrome-args": { type: "string" },
+      pcsample: { type: "string" }, symbols: { type: "string" }, "region-sample": { type: "string" }, "region-secs": { type: "string", default: "10" }, counters: { type: "boolean", default: false }, "counter-events": { type: "string" }, "pin-cpu-thread": { type: "string" }, "run-timeout": { type: "string", default: "1800" }, "unique-frames": { type: "string" }, display: { type: "boolean", default: false }, "mem-stats": { type: "boolean", default: false }, "mem-warm": { type: "string", default: "5" }, headroom: { type: "boolean", default: false }, "frames-per-vi-ref": { type: "string" }, "baseline-query": { type: "string" }, "chrome-args": { type: "string" }, "baseline-chrome-args": { type: "string" },
       "core-candidate": { type: "string", multiple: true, default: [] },
       port: { type: "string", default: process.env.HARNESS_PORT }, out: { type: "string" }
     },
     allowPositionals: false
   });
-  if (!values.iso || !values.state || !values.port) {
+  // A homebrew boots into its workload: no savestate needed (CI bench).
+  if (!values.iso || !values.port || (!values.state && !isHomebrew(path.resolve(values.iso)))) {
     throw new Error("usage: race-perf.mjs --iso disc.iso --state scene.sav --port N (or HARNESS_PORT) [--baseline ref|dir] [--candidate ref|dir] [--runs 4] [--warmup 25] [--secs 20] [--warm] [--max-load L] [--pcsample 0.25]");
   }
-  const iso = path.resolve(values.iso), state = path.resolve(values.state);
-  for (const f of [iso, state]) if (!existsSync(f)) throw new Error(`not found: ${f}`);
-  const localOnly = !iso.startsWith(HOMEBREW_OUT);
+  const iso = path.resolve(values.iso), state = values.state ? path.resolve(values.state) : null;
+  for (const f of [iso, state].filter(Boolean)) if (!existsSync(f)) throw new Error(`not found: ${f}`);
+  const localOnly = !isHomebrew(iso);
   if (localOnly && process.env.CI) throw new Error("this disc is local-only and must never run in CI");
   const query = `${values.query ?? PRESETS[values.config] ?? values.config}&metrics=1`;
   // --baseline-query: the baseline side boots with its own query (same tree
@@ -604,18 +671,20 @@ async function main() {
       ? (checkXctrace(), { xctrace: true, onWindow: xctraceCounters({ mode: values["counter-events"] ?? "delivery", pidOf: (session) => rendererThreads(session.profileDir)?.pid }) })
       : values.counters ? (checkPerfAccess(), { onWindow: perfCounters(undefined, { extra: counterEvents(values["counter-events"]) }) }) : {}),
     uniqueFrames: values["unique-frames"] == null ? null : num(values, "unique-frames", { min: 2 }),
+    pinCpuThread: values["pin-cpu-thread"] == null ? null : num(values, "pin-cpu-thread", { min: 0, int: true }),
+    runTimeoutMs: num(values, "run-timeout", { min: 0 }) * 1000,
     memStats: values["mem-stats"],
     memWarm: num(values, "mem-warm", { min: 0 }),
     headroom: values.headroom,
     // A KPI scene's pinned protocol (matrix.mjs SCENE_PROTOCOLS): region
     // stats over the window itself where the scene asks for it.
-    regionInWindow: Boolean(SCENE_PROTOCOLS[path.basename(state)]?.regionStatsInWindow),
+    regionInWindow: Boolean(state && SCENE_PROTOCOLS[path.basename(state)]?.regionStatsInWindow),
     framesPerViRef: values["frames-per-vi-ref"] == null ? null : num(values, "frames-per-vi-ref", { min: 0.01 }),
     display: values.display,
     functions: values.symbols ? JSON.parse(readFileSync(values.symbols, "utf8")).sort((a, b) => a[0] - b[0]) : null,
     coreCandidates: values["core-candidate"]
   };
-  const sceneCheck = sceneProtocolCheck(path.basename(state), {
+  const sceneCheck = sceneProtocolCheck(state ? path.basename(state) : null, {
     warmup: o.emulatedWindow ? o.emulatedWarmup : o.warmup, window: o.emulatedWindow ?? o.secs, emulated: Boolean(o.emulatedWindow),
     hold: o.hold, regionSample: o.regionSample, regionStatsInWindow: o.regionInWindow
   });
@@ -655,13 +724,13 @@ async function main() {
   checkLock("taken");
   try {
     // Times each run was played again after the lock went back for the load.
-    let relocks = 0;
+    let relocks = 0, timeouts = 0;
     const loadRetries = new Map();
     for (let run = 1; run <= o.runs && !gaveUp; run += 1) {
       checkLock(`before run ${run}`);
       // xctrace traces are large: the campaign stops before the disk fills.
-      if (o.xctrace && freeDiskGB() < XCTRACE_MIN_FREE_GB) {
-        gaveUp = `disk: ${round(freeDiskGB(), 1)} GB free < ${XCTRACE_MIN_FREE_GB} GB (xctrace): remaining runs given up`;
+      if (o.xctrace && freeDiskGB() < xctraceNeedGB()) {
+        gaveUp = `disk: ${round(freeDiskGB(), 1)} GB free < ${xctraceNeedGB()} GB (xctrace): remaining runs given up`;
         console.warn(`[race-perf] ${gaveUp}`);
         break;
       }
@@ -684,6 +753,12 @@ async function main() {
         record[name] = await measureSide(sides[name], o, g.gate);
         const r = record[name];
         console.log(`[race-perf] run ${run} ${name}: ${r.error ?? brief(r.cold)}${r.warm ? ` | warm: ${brief(r.warm)}` : ""}`);
+        // Two runs in a row that timed out: the campaign stops (the lock goes).
+        timeouts = r.timedOut ? timeouts + 1 : 0;
+        if (timeouts >= 2) { gaveUp = `${timeouts} runs in a row timed out (--run-timeout ${o.runTimeoutMs / 1000} s): remaining runs given up`; console.warn(`[race-perf] ${gaveUp}`); break; }
+        // A window xctrace refused for the disk: the campaign stops there.
+        const disk = [r.cold, r.warm].map((w) => w?.counters?.error).find((e) => /^disk:/.test(e ?? ""));
+        if (o.xctrace && disk) { gaveUp = `${disk}: remaining runs given up`; console.warn(`[race-perf] ${gaveUp}`); break; }
       }
       if (replay) { loadRetries.set(run, (loadRetries.get(run) ?? 0) + 1); console.log(`[race-perf] run ${run} played again (lock taken back)`); run -= 1; continue; }
       if (gaveUp && !Object.keys(sides).some((n) => record[n])) break;
@@ -766,10 +841,10 @@ async function main() {
   if (process.env.HARNESS_CHROME_PATH || process.env.HARNESS_CHROME_ARGS) console.warn(`[race-perf] Chrome: ${chrome.path}${chrome.args ? ` ${chrome.args}` : ""}`);
   for (const [n, a] of Object.entries(sideArgs)) console.warn(`[race-perf] Chrome flags on the ${n}: ${a}`);
   const summary = {
-    sceneProtocol: sceneCheck.protocol ? { state: path.basename(state), ...sceneCheck.protocol, warnings: sceneCheck.warnings } : null,
+    sceneProtocol: sceneCheck.protocol ? { state: state && path.basename(state), ...sceneCheck.protocol, warnings: sceneCheck.warnings } : null,
     probe: "race-perf", at: new Date().toISOString(),
     chrome,
-    iso: path.basename(iso), state: path.basename(state), query: o.query, baselineQuery: sides.baseline?.query ?? null, warmupSec: o.warmup, secs: o.secs,
+    iso: path.basename(iso), state: state && path.basename(state), query: o.query, baselineQuery: sides.baseline?.query ?? null, warmupSec: o.warmup, secs: o.secs,
     // Window in guest seconds (null: host seconds, --secs).
     emulatedWindow: o.emulatedWindow ? { secs: o.emulatedWindow, warmup: o.emulatedWarmup, pollMs: o.emulatedPollMs } : null, hold: o.hold, maxLoad: o.maxLoad,
     sides: Object.fromEntries(Object.entries(sides).map(([n, s]) => [n, s.label])),

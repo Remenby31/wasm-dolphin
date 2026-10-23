@@ -1,0 +1,306 @@
+name: bench (homebrew A/A pilot, x64 + arm64, manual)
+
+# The CI bench pilot (research/deep-x64-ci-bench.md §6.1 P0): the noise of a
+# wall-time measure on the free GitHub runners, per CPU model, before any
+# A/B. Manual only (workflow_dispatch), never on a pull request or a push to
+# main; a push to a bench/** branch runs it too, to try the workflow itself.
+#
+# - Workload: our homebrews only (harness/homebrew, MIT, no game content),
+#   booted directly as a .dol: footprint (default; built here from
+#   footprint/gen.mjs + main.c, a front end loaded like a game's: several
+#   hundred KB of hot PowerPC, data-dependent branches and jump tables,
+#   inline cold paths, calls through tables, FP and paired singles) or the
+#   committed cpufuzz.dol fixture. NEVER a disc, a savestate or anything
+#   derived from a game in CI.
+# - A/A: the same tree served as both sides of race-perf, in ABBA order
+#   (race-perf alternates which side goes first), video=null, cpu=single,
+#   unlimited speed, a window in emulated time.
+# - Pinning: Chrome and node on every vCPU but cpu 0 and its SMT sibling;
+#   race-perf moves the emulated CPU thread alone onto cpu 0
+#   (--pin-cpu-thread). On the 4-vCPU x64 runner (2 cores x 2 threads) the
+#   CPU thread gets one physical core.
+# - The machine: lscpu, the SMT topology, the kernel, and whether a PMU is
+#   usable (perf stat instructions/cycles; perf silently falls back from
+#   cycles to cpu-clock, so "<not supported>" is looked for). On arm64
+#   (Neoverse N2) --counters adds perf stat on the CPU thread: host
+#   instructions and cycles per guest cycle, L1i refills, front-end stalls.
+# - Report: harness/remote/bench-aa.mjs, σ per run and per pair, per job,
+#   in the job summary and the bench-<runner>-<job> artifact.
+
+on:
+  workflow_dispatch:
+    inputs:
+      runs:
+        description: ABBA runs per job, even (each run measures both sides; the first pair is a warm-up)
+        type: number
+        default: 12
+      window:
+        description: Emulated seconds per window
+        type: number
+        default: 10
+      baseline:
+        description: A/B baseline ref (empty, with candidate empty, for an A/A of this ref). Each side serves its own committed core, which must be the build of its sources
+        type: string
+        default: ''
+      candidate:
+        description: A/B candidate ref
+        type: string
+        default: ''
+      candidate_query:
+        description: 'Extra URL parameters for the candidate side only (&key=value…), e.g. &aotsample=0: one build against itself with a switch'
+        type: string
+        default: ''
+      aot:
+        description: aot=1 on both sides (region levers)
+        type: boolean
+        default: false
+      workloads:
+        description: 'Homebrews to measure, a JSON list: footprint (1024 functions), footprint-64/-128/-256/-512, cpufuzz'
+        type: string
+        default: '["footprint-256"]' 
+  push:
+    branches: ["bench/**"]
+
+permissions: {}
+
+concurrency:
+  group: bench-${{ github.ref }}
+  cancel-in-progress: false
+
+jobs:
+  # footprint.dol from source, with the toolchain image build.sh pins.
+  homebrew:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 20
+    permissions:
+      contents: read
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+        with:
+          persist-credentials: false
+
+      - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4
+        with:
+          node-version: 24.12.0
+
+      - name: Build footprint.dol
+        working-directory: harness/homebrew
+        shell: bash
+        run: |
+          set -euo pipefail
+          # The literal "${DEVKITPPC_IMAGE:-…}" in build.sh, not an expansion.
+          # shellcheck disable=SC2016
+          image=$(sed -n 's/^IMAGE=${DEVKITPPC_IMAGE:-\(.*\)}$/\1/p' build.sh)
+          test -n "$image"
+          mkdir -p out
+          node footprint/gen.mjs > out/footprint_gen.S
+          targets="out/footprint.dol"
+          for n in 64 128 256 512; do node footprint/gen.mjs --functions "$n" > "out/footprint-${n}_gen.S"; targets="$targets out/footprint-$n.dol"; done
+          # shellcheck disable=SC2086
+          docker run --rm --platform linux/amd64 -v "$PWD:/w" -w /w "$image" \
+            sh -c "make -s OUT=out $targets && chown -R $(id -u):$(id -g) out"
+          ls -l out/footprint*.dol
+          sha256sum out/footprint*.dol
+
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        with:
+          name: footprint-dol
+          path: |
+            harness/homebrew/out/footprint*.dol
+            harness/homebrew/out/footprint*.elf
+          if-no-files-found: error
+          retention-days: 30
+
+  aa:
+    needs: homebrew
+    name: ${{ matrix.workload }} ${{ matrix.runner }} job ${{ matrix.job }}
+    strategy:
+      fail-fast: false
+      matrix:
+        runner: [ubuntu-24.04, ubuntu-24.04-arm]
+        job: [1, 2, 3]
+        # A push to bench/** (no inputs) sweeps two footprint sizes.
+        workload: ${{ fromJSON(inputs.workloads || '["footprint-64","footprint-256"]') }}
+    runs-on: ${{ matrix.runner }}
+    timeout-minutes: 180
+    permissions:
+      contents: read
+    env:
+      RUNS: ${{ inputs.runs || 12 }}
+      WINDOW: ${{ inputs.window || 10 }}
+      WORKLOAD: ${{ matrix.workload }}
+      BASELINE: ${{ inputs.baseline }}
+      CANDIDATE: ${{ inputs.candidate }}
+      CANDIDATE_QUERY: ${{ inputs.candidate_query }}
+      # A bench/** push calibrates footprint against the game's regions: aot=1.
+      # With aot=1, the region pipeline is read after each window
+      # (--region-sample 0: counters only): regions installed and their
+      # share of guest cycles per side, so a pair without regions shows.
+      AOT: ${{ (github.event_name == 'push' || inputs.aot) && '&aot=1' || '' }}
+      OUT: ${{ github.workspace }}/bench-out
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+        with:
+          persist-credentials: false
+          # An A/B exports both refs (git archive): the whole history.
+          fetch-depth: 0
+
+      - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4
+        with:
+          node-version: 24.12.0
+
+      - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4
+        with:
+          name: footprint-dol
+          path: harness/homebrew/out
+
+      # Playwright's Chromium (Chrome has no Linux arm64 build): the same
+      # browser on both architectures. Installed outside the checkout.
+      - name: Chromium
+        run: |
+          npm install --prefix "$RUNNER_TEMP/pw" --no-audit --no-fund playwright@1.56.1
+          (cd "$RUNNER_TEMP/pw" && npx playwright install chromium)
+          # The system libraries only when Chromium lacks some (the x64 image
+          # has them; --with-deps there costs ~10 min of apt).
+          chrome=$(cd "$RUNNER_TEMP/pw" && node -p "require('playwright').chromium.executablePath()")
+          if ldd "$chrome" | grep -q "not found"; then (cd "$RUNNER_TEMP/pw" && sudo npx playwright install-deps chromium); fi
+          {
+            echo "PLAYWRIGHT_MODULE=$RUNNER_TEMP/pw/node_modules/playwright/index.mjs"
+            echo "SPARK_CHROMIUM=$(cd "$RUNNER_TEMP/pw" && node -p "require('playwright').chromium.executablePath()")"
+          } >> "$GITHUB_ENV"
+          # Ubuntu 24.04 blocks the unprivileged user namespaces Chromium's sandbox needs.
+          sudo sysctl -w kernel.apparmor_restrict_unprivileged_userns=0
+
+      - name: The machine (CPU model, SMT topology, PMU)
+        shell: bash
+        run: |
+          set -euo pipefail
+          mkdir -p "$OUT"
+          lscpu | tee "$OUT/lscpu.txt"
+          for c in /sys/devices/system/cpu/cpu[0-9]*; do echo "$(basename "$c"): $(cat "$c/topology/thread_siblings_list")"; done | tee "$OUT/siblings.txt"
+          uname -a | tee "$OUT/uname.txt"
+          sudo apt-get install -y -qq "linux-tools-$(uname -r)" linux-tools-common > /dev/null 2>&1 || sudo apt-get install -y -qq linux-tools-generic > /dev/null 2>&1 || true
+          sudo sysctl -w kernel.perf_event_paranoid=1 || true
+          pmu=none
+          if command -v perf > /dev/null && perf stat -x, -e instructions:u,cycles:u -- true 2> "$OUT/perf-probe.txt"; then
+            grep -q "not supported" "$OUT/perf-probe.txt" || pmu=yes
+          fi
+          cat "$OUT/perf-probe.txt" || true
+          (sudo dmesg | grep -i "performance events" || true) | tee "$OUT/dmesg-pmu.txt"
+          # arm64: do the named L1i/iTLB events count? (the first pilot read 0
+          # for l1i_cache_refill and itlb_walk); raw codes beside them:
+          # 0x01 L1I_CACHE_REFILL, 0x02 L1I_TLB_REFILL, 0x14 L1I_CACHE, 0x23 STALL_FRONTEND.
+          if [ "$pmu" = yes ] && [ "$(uname -m)" = aarch64 ]; then
+            (perf list 2>/dev/null | grep -iE "l1i|itlb|stall_frontend" || true) | tee "$OUT/perf-list-l1i.txt"
+            for d in /sys/bus/event_source/devices/armv8_pmuv3*; do p=$(basename "$d"); break; done
+            perf stat -x, -e "$p/l1i_cache_refill/u,$p/l1i_cache/u,$p/itlb_walk/u,$p/stall_frontend/u,r01:u,r14:u,r02:u,r23:u" -- node -e 'let x=0; for (let i=0;i<5e7;i++) x+=Math.sqrt(i); console.log(x)' 2>&1 | tee "$OUT/perf-l1i-probe.txt" || true
+            # The first probe read 0 for L1I_CACHE (0x14) at EL0, impossible
+            # on hardware: all exception levels, and the other names.
+            perf list 2>/dev/null > "$OUT/perf-list.txt" || true
+            sudo perf stat -x, -e "r01,r14,r02,$p/l1i_cache_lmiss/,$p/l1i_tlb/,$p/l1i_tlb_refill/,r23" -- node -e 'let x=0; for (let i=0;i<5e7;i++) x+=Math.sqrt(i); console.log(x)' 2>&1 | tee "$OUT/perf-l1i-probe-all-el.txt" || true
+          fi
+          # cpu 0 and its SMT sibling for the CPU thread; everything else elsewhere.
+          sib=$(cat /sys/devices/system/cpu/cpu0/topology/thread_siblings_list)
+          others=$(node -e '
+            const expand = (l) => l.split(",").flatMap((r) => { const [a, b = a] = r.split("-").map(Number); return Array.from({ length: b - a + 1 }, (_, i) => a + i); });
+            const all = expand(require("fs").readFileSync("/sys/devices/system/cpu/online", "utf8").trim());
+            const sib = new Set(expand(process.argv[1]));
+            console.log(all.filter((c) => !sib.has(c)).join(","));' "$sib")
+          { echo "SPARK_CHROME_CPUS=$others"; echo "OTHER_CPUS=$others"; echo "PMU=$pmu"; } >> "$GITHUB_ENV"
+          node -e '
+            const fs = require("fs"); const l = fs.readFileSync(process.argv[1], "utf8");
+            const get = (k) => (l.match(new RegExp("^" + k + ":\\s*(.*)$", "m")) ?? [])[1] ?? null;
+            fs.writeFileSync(process.argv[2], JSON.stringify({ runner: process.argv[3], job: Number(process.argv[4]), workload: process.env.WORKLOAD, arch: get("Architecture"), cpuModel: get("Model name"), cpus: get("CPU\\(s\\)"), threadsPerCore: get("Thread\\(s\\) per core"), l1i: get("L1i cache"), l2: get("L2 cache"), cpu0Siblings: process.argv[5], otherCpus: process.argv[6], pmu: process.argv[7] }, null, 1));
+          ' "$OUT/lscpu.txt" "$OUT/machine.json" "${{ matrix.runner }}" "${{ matrix.job }}" "$sib" "$others" "$pmu"
+          cat "$OUT/machine.json"
+
+      - name: A/A on the homebrew (ABBA, CPU thread pinned)
+        shell: bash
+        env:
+          HARNESS_CHROME_PATH: ${{ github.workspace }}/harness/remote/chrome-pinned.sh
+          HARNESS_PERF_LOCK: ${{ runner.temp }}/.perf-lock
+        run: |
+          set -euo pipefail
+          counters=()
+          if [ "$PMU" = yes ] && [ "$(uname -m)" = aarch64 ]; then counters=(--counters --counter-events frontend); fi
+          case $WORKLOAD in
+            footprint) dol=harness/homebrew/out/footprint.dol ;;
+            footprint-64|footprint-128|footprint-256|footprint-512) dol="harness/homebrew/out/$WORKLOAD.dol" ;;
+            cpufuzz) dol=harness/homebrew/fixtures/cpufuzz.dol ;;
+            *) echo "unknown workload $WORKLOAD"; exit 1 ;;
+          esac
+          # A/A: this tree on both sides; A/B: the two refs, each with its own
+          # committed core (race-perf exports them; checked current below).
+          sides=(--baseline .)
+          if [ -n "$BASELINE$CANDIDATE" ]; then
+            [ -n "$BASELINE" ] && [ -n "$CANDIDATE" ] || { echo "an A/B needs both baseline and candidate"; exit 1; }
+            for ref in "$BASELINE" "$CANDIDATE"; do
+              d=$(mktemp -d); git archive "$ref" | tar -x -C "$d"
+              # This checkout's tool judges the exported ref: a ref never certifies its own core.
+              node tools/core-artifacts.mjs status --checkout "$d" --require-current || { echo "$ref: its committed core is not the build of its sources"; exit 1; }
+            done
+            sides=(--baseline "$BASELINE" --candidate "$CANDIDATE")
+          fi
+          # candidate_query: the candidate side boots with these parameters
+          # added (race-perf --baseline-query keeps the baseline without them).
+          query="core=upstream&video=null&cpu=single&speed=unlimited&synconidle=1&wasmjit=1&jitwarmup=60$AOT"
+          queries=(--query "$query")
+          if [ -n "$CANDIDATE_QUERY" ]; then
+            [[ "$CANDIDATE_QUERY" =~ ^(\&[a-z0-9_]+=[A-Za-z0-9._-]+)+$ ]] || { echo "candidate_query: &key=value pairs only"; exit 1; }
+            queries=(--query "$query$CANDIDATE_QUERY" --baseline-query "$query")
+          fi
+          taskset -c "$OTHER_CPUS" node harness/probes/race-perf.mjs \
+            --iso "$dol" --port 8090 "${sides[@]}" "${queries[@]}" \
+            ${AOT:+--region-sample 0 --region-secs 3} \
+            --hold "" --runs "$RUNS" --warmup 5 --emulated-warmup 5 --emulated-window "$WINDOW" \
+            --pin-cpu-thread 0 --max-load 8 --load-wait 60 --lock-wait 60 --calm-wait 60 \
+            "${counters[@]}" --out "$OUT/aa"
+          node harness/remote/bench-aa.mjs "$OUT/aa" "$OUT/machine.json" | tee -a "$GITHUB_STEP_SUMMARY"
+          # The machine at the end: a live migration would change the model.
+          lscpu | grep "Model name" | tee "$OUT/model-end.txt"
+
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        if: always()
+        with:
+          name: bench-${{ matrix.workload }}-${{ matrix.runner }}-${{ matrix.job }}
+          path: bench-out/
+          if-no-files-found: warn
+          retention-days: 30
+
+  # All jobs, per CPU model: a pair only counts within one model; a model
+  # whose median σ per run is 3 % or more is recorded, not counted.
+  report:
+    needs: aa
+    if: always()
+    runs-on: ubuntu-24.04
+    timeout-minutes: 10
+    permissions:
+      contents: read
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+        with:
+          persist-credentials: false
+
+      - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4
+        with:
+          node-version: 24.12.0
+
+      - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4
+        with:
+          pattern: bench-*
+          path: ${{ runner.temp }}/benches
+
+      - name: Per model
+        shell: bash
+        run: |
+          set -euo pipefail
+          mapfile -t files < <(find "$RUNNER_TEMP/benches" -name bench.json | sort)
+          [ "${#files[@]}" -gt 0 ] || { echo "no bench.json"; exit 1; }
+          node harness/remote/bench-report.mjs "${files[@]}" | tee -a "$GITHUB_STEP_SUMMARY"
+
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        with:
+          name: bench-report
+          path: report.json
+          if-no-files-found: warn
+          retention-days: 30
