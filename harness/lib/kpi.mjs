@@ -128,6 +128,16 @@ export function sideFlags(j, side) {
     .map((k) => (k === "aot" && q.get(k) === "1" && !sideHasAot(j, side) ? "aot=1 sans effet (cœur sans régions)" : `${k}=${q.get(k)}`)).join("&") || null;
 }
 const cold = (j, side) => j[side]?.cold ?? null;
+// Headroom in % (race-perf --headroom), only where the throttle slept.
+const headroomPct = (j, side) => {
+  const c = cold(j, side);
+  return c?.headroom?.median != null && c.headroomApplies ? Math.round(c.headroom.median * 1000) / 10 : null;
+};
+const headroomWhy = (j, side) => {
+  const c = cold(j, side);
+  if (!c?.headroom) return c?.headroomWhy ?? "pas de mesure --headroom";
+  return c.headroomApplies ? null : "le jeu tourne sous 100 % (pas de sommeil du throttle) : voir la vitesse";
+};
 const p4Of = (j, side) => (side === "baseline" ? j.baselineP4 : j.p4);
 const idleNote = (p) => [
   p?.idleCycleShare != null ? `idle skip : ${Math.round(p.idleCycleShare * 1000) / 10} % des cycles` : null,
@@ -172,7 +182,15 @@ export const KPI_ROWS = [
   // The product config counts in the global status; the hardware renderer
   // and aot=1 are trajectory rows (counted: false: shown, verdict given, left
   // out of the counts). Judge, 2026-10-22.
-  { id: "macSpeedProduct", group: "Leviers", label: "Vitesse course, Mac M4 Pro, config produit (video=software, ce que voit le joueur)", target: 160, unit: "%", better: "higher", from: "race-perf", config: "product", read: (j, s) => med(cold(j, s)?.speed), failures: raceFailures },
+  // The main KPI (judge, 2026-10-22): the headroom at speed=1
+  // (research/deep-headroom-kpi.md), min of the CPU thread's Max and the GPU
+  // bound, from race-perf --headroom; read only from a run that slept in the
+  // throttle (headroomApplies), otherwise the game is under 100 % and the
+  // speed row says it.
+  { id: "macHeadroomProduct", group: "Leviers", label: "Marge Mac M4 Pro, config produit (headroom à speed=1)", target: 160, unit: "%", better: "higher", from: "race-perf", config: "product", read: headroomPct, why: headroomWhy, failures: raceFailures },
+  { id: "macHeadroomProductAot", group: "Leviers", label: "Marge Mac M4 Pro, config produit avec aot=1 (trajectoire, hors statut global)", target: 160, unit: "%", better: "higher", from: "race-perf", config: "productAot", counted: false, read: headroomPct, why: headroomWhy, failures: raceFailures },
+  { id: "macHeadroom", group: "Leviers", label: "Marge Mac M4 Pro, rendu matériel wgpu (trajectoire, hors statut global)", target: 160, unit: "%", better: "higher", from: "race-perf", config: "default", counted: false, read: headroomPct, why: headroomWhy, failures: raceFailures },
+  { id: "macSpeedProduct", group: "Leviers", label: "Vitesse course, Mac M4 Pro, config produit (vitesse mesurée, plafonnée par speed=, hors statut global)", target: 100, unit: "%", better: "higher", from: "race-perf", config: "product", counted: false, read: (j, s) => med(cold(j, s)?.speed), failures: raceFailures },
   { id: "macSpeedProductAot", group: "Leviers", label: "Vitesse course, Mac M4 Pro, config produit avec aot=1 (trajectoire, hors statut global)", target: 160, unit: "%", better: "higher", from: "race-perf", config: "productAot", counted: false, read: (j, s) => med(cold(j, s)?.speed), failures: raceFailures },
   { id: "macSpeed", group: "Leviers", label: "Vitesse course, Mac M4 Pro, rendu matériel wgpu (trajectoire, hors statut global)", target: 160, unit: "%", better: "higher", from: "race-perf", config: "default", counted: false, read: (j, s) => med(cold(j, s)?.speed), failures: raceFailures },
   { id: "macSpeedAot", group: "Leviers", label: "Vitesse course, Mac M4 Pro, wgpu + aot=1 (trajectoire piste 3, hors statut global)", target: 160, unit: "%", better: "higher", from: "race-perf", config: "aot", counted: false, read: (j, s) => med(cold(j, s)?.speed), failures: raceFailures },

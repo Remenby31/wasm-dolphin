@@ -141,17 +141,7 @@ export function coreStats(timeline, { ticksPerSecond, until = null } = {}) {
   // the window.
   if (until != null && vi.length && until - vi.at(-1).t >= CORE_FREEZE_MS) freezes.push({ atMs: vi.at(-1).t, durationMs: Math.round(until - vi.at(-1).t), ongoing: true });
   if (until != null && !vi.length) freezes.push({ atMs: null, durationMs: null, ongoing: true, reason: "no VI output in the window" });
-  const speeds = [];
-  if (ticksPerSecond > 0 && vi.length > 1) {
-    let start = 0;
-    for (let i = 1; i < vi.length; i += 1) {
-      if (vi[i].t - vi[start].t >= 1000) {
-        const emulated = (vi[i].ticks - vi[start].ticks) / ticksPerSecond;
-        speeds.push({ atMs: vi[start].t, speed: (100 * emulated * 1000) / (vi[i].t - vi[start].t) });
-        start = i;
-      }
-    }
-  }
+  const speeds = speedSeries(vi, ticksPerSecond);
   const s = speeds.map((x) => x.speed);
   return {
     supported: true,
@@ -162,4 +152,28 @@ export function coreStats(timeline, { ticksPerSecond, until = null } = {}) {
     speedDips: speeds.filter((x) => x.speed < 90).map((x) => ({ atMs: Math.round(x.atMs), speed: Math.round(x.speed) })),
     freezes
   };
+}
+
+// Emulated speed (%) over each wall-clock second of VI outputs: one sample
+// per second, at the host time it starts.
+export function speedSeries(vi, ticksPerSecond) {
+  const speeds = [];
+  if (!(ticksPerSecond > 0) || vi.length < 2) return speeds;
+  let start = 0;
+  for (let i = 1; i < vi.length; i += 1) {
+    if (vi[i].t - vi[start].t >= 1000) {
+      const emulated = (vi[i].ticks - vi[start].ticks) / ticksPerSecond;
+      speeds.push({ atMs: vi[start].t, speed: (100 * emulated * 1000) / (vi[i].t - vi[start].t) });
+      start = i;
+    }
+  }
+  return speeds;
+}
+
+// When a speed series first holds `speed` % for `seconds` samples in a row
+// (its first sample's atMs), or null. A single slower second restarts the
+// count: it moves the answer by `seconds`, so read it with the series.
+export function fullSpeedAt(speeds, { speed = 95, seconds = 5 } = {}) {
+  const i = speeds.findIndex((_, j) => j + seconds <= speeds.length && speeds.slice(j, j + seconds).every((x) => x.speed >= speed));
+  return i >= 0 ? speeds[i].atMs : null;
 }

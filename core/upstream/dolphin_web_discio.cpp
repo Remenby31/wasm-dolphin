@@ -166,6 +166,9 @@ static_assert(DolphinWeb::DirectPad::DIRECT_PAD_PORTS == PAD_PORT_COUNT);
 std::mutex s_pad_poll_mutex;
 PadPollSnapshot s_pad_poll;
 bool s_using_xfb_frame = false;
+// video=wgpu draws the XFB on the GPU and never shows s_framebuffer: decoding
+// and hashing the guest copy on the CPU thread would be wasted (EnsureRuntime).
+bool s_skip_xfb_decode = false;
 std::string s_video_stats = "xfb:0";
 float s_presentation_scale = 0.5f;
 std::uint32_t s_frame_signal = 0;
@@ -1323,17 +1326,35 @@ void DolphinWeb_OnXfb(const std::uint8_t* xfb, std::uint32_t width, std::uint32_
 
   const int presentation_width = ScaledPresentationDimension(width);
   const int presentation_height = ScaledPresentationDimension(height);
-  DecodeXfbToPresentationBuffer(xfb, width, stride, height, presentation_width,
-                                 presentation_height);
-  const auto decode_done = WebProfileClock::now();
-  s_last_xfb_decode_us = ElapsedMicros(callback_start, decode_done);
-  s_total_xfb_decode_us += s_last_xfb_decode_us;
-  s_max_xfb_decode_us = std::max(s_max_xfb_decode_us, s_last_xfb_decode_us);
-  ++s_xfb_decode_count;
+  if (s_skip_xfb_decode)
+  {
+    // Until the replay's first present owns the canvas, the worker's legacy
+    // loop still blits s_framebuffer, which holds the boot-time metadata
+    // frame: show black instead, once. s_frame keeps counting (it drives
+    // the JIT warmup and the frame telemetry).
+    static bool cleared = false;
+    if (!cleared)
+    {
+      s_framebuffer.fill(0);
+      cleared = true;
+    }
+  }
+  else
+  {
+    DecodeXfbToPresentationBuffer(xfb, width, stride, height, presentation_width,
+                                   presentation_height);
+    const auto decode_done = WebProfileClock::now();
+    s_last_xfb_decode_us = ElapsedMicros(callback_start, decode_done);
+    s_total_xfb_decode_us += s_last_xfb_decode_us;
+    s_max_xfb_decode_us = std::max(s_max_xfb_decode_us, s_last_xfb_decode_us);
+    ++s_xfb_decode_count;
+  }
 
   std::uint32_t hash = 2166136261u;
   std::uint32_t nonzero_samples = 0;
-  const std::size_t frame_bytes = static_cast<std::size_t>(stride) * height;
+  // Without the decode there is no frame to hash; the stats line omits it.
+  const std::size_t frame_bytes =
+      s_skip_xfb_decode ? 0 : static_cast<std::size_t>(stride) * height;
   const std::size_t sample_count = std::min<std::size_t>(frame_bytes / 4, 2048);
   const std::size_t sample_step =
       std::max<std::size_t>(4, ((frame_bytes / std::max<std::size_t>(1, sample_count)) / 4) * 4);
@@ -1358,9 +1379,10 @@ void DolphinWeb_OnXfb(const std::uint8_t* xfb, std::uint32_t width, std::uint32_
 
   std::ostringstream out;
   out << "xfb:" << s_frame << " " << width << "x" << height << " stride:" << stride
-      << " present:" << presentation_width << "x" << presentation_height
-      << " hash:" << std::hex << hash << std::dec << " nz:" << nonzero_samples
-      << " bp:" << g_stats.this_frame.num_bp_loads << " cp:" << g_stats.this_frame.num_cp_loads
+      << " present:" << presentation_width << "x" << presentation_height;
+  if (!s_skip_xfb_decode)
+    out << " hash:" << std::hex << hash << std::dec << " nz:" << nonzero_samples;
+  out << " bp:" << g_stats.this_frame.num_bp_loads << " cp:" << g_stats.this_frame.num_cp_loads
       << " xf:" << g_stats.this_frame.num_xf_loads
       << " prim:" << g_stats.this_frame.num_prims
       << " draw:" << g_stats.this_frame.num_draw_calls
