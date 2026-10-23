@@ -1,0 +1,296 @@
+diff --git a/Source/Core/Core/PowerPC/CachedInterpreter/CachedInterpreter.cpp b/Source/Core/Core/PowerPC/CachedInterpreter/CachedInterpreter.cpp
+--- a/Source/Core/Core/PowerPC/CachedInterpreter/CachedInterpreter.cpp
++++ b/Source/Core/Core/PowerPC/CachedInterpreter/CachedInterpreter.cpp
+@@ -251,7 +251,11 @@ EM_JS(int, DolphinWeb_CachedInterpreterCompileWasmBlock,
+           fast_melee_input_status_call: wasmTable.get(fast_melee_input_status_call_index),
+           fast_melee_status_call: wasmTable.get(fast_melee_status_call_index),
+           fast_melee_service_poll_call: wasmTable.get(fast_melee_service_poll_call_index),
+-          fma: wasmTable.get(fma_index)
++          fma: wasmTable.get(fma_index),
++          // Region chaining (patch 0102): a region's exit stub asks the core
++          // for the next region and tail-calls it through the core's table.
++          region_chain: wasmTable.get(_DolphinWeb_RegionChainHelper()),
++          table: wasmTable
+         }
+       }).exports.f;
+   const inst_t1 = (typeof performance !== "undefined" && performance.now) ? performance.now() : 0;
+@@ -9343,6 +9347,38 @@ inline void RegionFilterAdd(u32 pc)
+   s_region_filter[bit >> 6] |= u64{1} << (bit & 63);
+ }
+ 
++// Patch 0102: a direct-mapped cache of s_region_at (entry pc -> index + 1,
++// 0 empty) for the hot lookups: the dispatcher, block chaining and region
++// chaining. s_region_at holds ~135 000 nodes, one cache miss per find.
++// Cleared whenever s_region_at changes.
++struct RegionLookupSlot
++{
++  u32 pc = 0;
++  u32 index_plus_one = 0;
++};
++std::array<RegionLookupSlot, 8192> s_region_lookup{};
++inline void ClearRegionLookup()
++{
++  s_region_lookup.fill({});
++}
++constexpr u32 NO_REGION = 0xffffffffu;
++[[gnu::noinline]] u32 FindRegionIndexSlow(u32 pc, RegionLookupSlot& slot)
++{
++  const auto it = s_region_at.find(pc);
++  if (it == s_region_at.end())
++    return NO_REGION;
++  slot = {pc, it->second + 1};
++  return it->second;
++}
++// The index in s_regions of the region mapped at entry pc, or NO_REGION.
++inline u32 FindRegionIndex(u32 pc)
++{
++  RegionLookupSlot& slot = s_region_lookup[(pc >> 2) & (s_region_lookup.size() - 1)];
++  if (slot.pc == pc && slot.index_plus_one != 0)
++    return slot.index_plus_one - 1;
++  return FindRegionIndexSlow(pc, slot);
++}
++
+ struct PendingRegion
+ {
+   std::vector<u8> bytes;
+@@ -9400,6 +9436,7 @@ u32 s_region_install_fallbacks = 0;     // likewise
+ // ClearCache: the ready table and the requests in flight were reset.
+ void RepostWaitingRegions();
+ void UnverifyAllRegions();
++void ResetRegionChainStats();  // patch 0102
+ 
+ // The part of CachedInterpreter::ClearCache that concerns off-thread
+ // compiles and regions (a state load may have changed any code).
+@@ -9476,6 +9513,32 @@ struct RegionStats
+ };
+ static_assert(sizeof(RegionStats) == 256);
+ std::unordered_map<u32, double> s_miss_cycles;  // while timing is on
++// Patch 0102 diagnostics, while stats are on: the PCs without a region that
++// chains of regions leave for, and the region entries block chains reach
++// (each a return to the dispatcher). Their most frequent, published by the
++// CPU thread with the stats (DolphinWeb_JitRegionTransitionTop).
++std::unordered_map<u32, u32> s_chain_exit_pcs, s_chain_break_pcs;
++constexpr std::size_t TRANSITION_TOP = 12;
++std::array<u32, 2 * (1 + 2 * TRANSITION_TOP)> s_transition_top{};
++void PublishTransitionTop()
++{
++  std::size_t at = 0;
++  for (const auto* counts : {&s_chain_exit_pcs, &s_chain_break_pcs})
++  {
++    std::vector<std::pair<u32, u32>> top;
++    top.reserve(counts->size());
++    for (const auto& [pc, n] : *counts)
++      top.emplace_back(n, pc);
++    const std::size_t n = std::min(TRANSITION_TOP, top.size());
++    std::partial_sort(top.begin(), top.begin() + n, top.end(), std::greater<>());
++    s_transition_top[at++] = static_cast<u32>(n);
++    for (std::size_t i = 0; i < TRANSITION_TOP; ++i)
++    {
++      s_transition_top[at++] = i < n ? top[i].second : 0;
++      s_transition_top[at++] = i < n ? top[i].first : 0;
++    }
++  }
++}
+ alignas(8) RegionStats s_region_stats;
+ bool s_region_stats_on = false;
+ // Set while one sampled ExecuteOneBlock runs: its block lookups (chained
+@@ -9527,6 +9590,7 @@ void DropRegion(u32 index)
+       s_region_at.erase(it);
+   }
+   ForEachRegionPage(region, -1);
++  ClearRegionLookup();
+   s_region_filter.fill(0);
+   for (const auto& [pc, owner] : s_region_at)
+     RegionFilterAdd(pc);
+@@ -9539,6 +9603,7 @@ void ForgetAllRegions()
+ {
+   s_regions.clear();
+   s_region_at.clear();
++  ClearRegionLookup();
+   s_region_filter.fill(0);
+   std::fill(s_region_pages.begin(), s_region_pages.end(), 0);
+   s_region_waiting.clear();
+@@ -9572,6 +9637,7 @@ void InstallRegion(PendingRegion& pending, int handle)
+     s_region_at.emplace(pc, index);  // an entry already mapped keeps its region
+     RegionFilterAdd(pc);
+   }
++  ClearRegionLookup();
+   ForEachRegionPage(s_regions.back(), +1);
+ }
+ 
+@@ -9839,6 +9905,7 @@ void PublishRegionStats()
+     s_region_stats.top_miss[2 * i] = i < n ? top[i].second : 0;
+     s_region_stats.top_miss[2 * i + 1] = i < n ? top[i].first : 0;
+   }
++  PublishTransitionTop();
+ }
+ 
+ void ApplyRegionStatsRequest()
+@@ -9857,6 +9924,7 @@ void ApplyRegionStatsRequest()
+     s_region_stats.installs_fast = kept.installs_fast;
+     s_region_stats.install_fallbacks = kept.install_fallbacks;
+     s_miss_cycles.clear();
++    ResetRegionChainStats();
+     s_region_stats.sample_every = static_cast<u32>(request);
+     s_last_timed_ms = 0;
+     s_sampled_lookup_ms = 0;
+@@ -9885,14 +9953,14 @@ bool TryRunRegion(PowerPC::PowerPCState& ppc_state)
+       s_region_stats.mode_refusals += 1;
+     return false;
+   }
+-  const auto it = s_region_at.find(ppc_state.pc);
+-  if (it == s_region_at.end())
++  const u32 index = FindRegionIndex(ppc_state.pc);
++  if (index == NO_REGION)
+   {
+     if (s_region_stats_on)
+       s_region_stats.filter_false_hits += 1;
+     return false;
+   }
+-  InstalledRegion& region = s_regions[it->second];
++  InstalledRegion& region = s_regions[index];
+   if (!region.verified)
+   {
+     // The RAM may have been allocated again (a stop and a new boot in the same
+@@ -9904,12 +9972,12 @@ bool TryRunRegion(PowerPC::PowerPCState& ppc_state)
+       s_region_layout_refused += 1;
+     if (moved || !RegionCodeMatchesPlan(region.ranges, region.members))
+     {
+-      DropRegion(it->second);
++      DropRegion(index);
+       return false;
+     }
+     if (!RegionStillCheckable(region.entries, region.members))
+     {
+-      DropRegion(it->second);
++      DropRegion(index);
+       return false;
+     }
+     region.verified = true;
+@@ -9917,7 +9985,7 @@ bool TryRunRegion(PowerPC::PowerPCState& ppc_state)
+   }
+   using RegionFunction = int (*)(int);
+   const auto run = reinterpret_cast<RegionFunction>(
+-      static_cast<std::uintptr_t>(s_regions[it->second].handle));
++      static_cast<std::uintptr_t>(region.handle));
+   const s32 downcount = ppc_state.downcount;
+   int code;
+   if (s_region_stats_on && s_region_stats.sample_every != 0)
+@@ -9953,14 +10021,116 @@ inline bool RegionWouldRun(const PowerPC::PowerPCState& ppc_state)
+   if (!s_regions_enabled.load(std::memory_order_relaxed) || !RegionFilterHas(ppc_state.pc) ||
+       !ppc_state.msr.IR || !ppc_state.msr.DR || !ppc_state.msr.FP ||
+       (ppc_state.feature_flags & FEATURE_FLAG_PERFMON) != 0 ||
+-      !s_region_at.contains(ppc_state.pc))
++      FindRegionIndex(ppc_state.pc) == NO_REGION)
+     return false;
+   if (s_region_stats_on)
++  {
+     s_region_stats.chain_breaks += 1;
++    ++s_chain_break_pcs[ppc_state.pc];
++  }
+   return true;
+ }
++
++// Patch 0102, region chaining. A region leaving for a PC it does not hold
++// (its exit stub: a jump out of the region, or a blr/bctr/bctrl to a PC that
++// is not one of its entries; state.pc and the rest of the state written)
++// calls this through its `region_chain` import: the table index of the
++// region mapped at state.pc, which the stub tail-calls instead of returning
++// 0 to the dispatcher, or 0 to return there. Same conditions as TryRunRegion,
++// plus downcount left (the dispatcher loop's test). The CPU state is not
++// tested, as a region's own loops do not: a pause waits for the slice end.
++// A region not verified since a cache clear is left to TryRunRegion.
++struct RegionChainStats
++{
++  u32 version = 1;
++  u32 enabled = 1;
++  // Exits that went on to the next region; that returned to the dispatcher:
++  // downcount spent, no region entry at pc, refused (mode, not verified,
++  // chaining off).
++  double chained = 0, out_of_time = 0, no_region = 0, refused = 0;
++};
++static_assert(sizeof(RegionChainStats) == 40);
++alignas(8) RegionChainStats s_region_chain_stats;
++
++// ?regionchain=0 (DolphinWeb_JitSetRegionChaining, any thread); the CPU
++// thread reflects it in RegionChainStats::enabled.
++std::atomic<bool> s_region_chain_enabled{true};
++
++void ResetRegionChainStats()
++{
++  s_region_chain_stats = RegionChainStats{};
++  s_region_chain_stats.enabled = s_region_chain_enabled.load(std::memory_order_relaxed) ? 1 : 0;
++  s_chain_exit_pcs.clear();
++  s_chain_break_pcs.clear();
++}
++
++int RegionChainNext(int state_ptr)
++{
++  const auto& ppc_state =
++      *reinterpret_cast<const PowerPC::PowerPCState*>(static_cast<std::uintptr_t>(state_ptr));
++  RegionChainStats& stats = s_region_chain_stats;
++  stats.enabled = s_region_chain_enabled.load(std::memory_order_relaxed) ? 1 : 0;
++  if (!stats.enabled)
++  {
++    stats.refused += 1;
++    return 0;
++  }
++  if (ppc_state.downcount <= 0)
++  {
++    stats.out_of_time += 1;
++    return 0;
++  }
++  const u32 index = RegionFilterHas(ppc_state.pc) ? FindRegionIndex(ppc_state.pc) : NO_REGION;
++  if (index == NO_REGION)
++  {
++    stats.no_region += 1;
++    if (s_region_stats_on)
++      ++s_chain_exit_pcs[ppc_state.pc];
++    return 0;
++  }
++  const InstalledRegion& region = s_regions[index];
++  if (!region.verified || !s_regions_enabled.load(std::memory_order_relaxed) ||
++      !ppc_state.msr.IR || !ppc_state.msr.DR || !ppc_state.msr.FP ||
++      (ppc_state.feature_flags & FEATURE_FLAG_PERFMON) != 0)
++  {
++    stats.refused += 1;
++    return 0;
++  }
++  stats.chained += 1;
++  return region.handle;
++}
+ }  // namespace
+ 
++// The table index of RegionChainNext, imported by region modules as
++// env.region_chain (the import object of DolphinWeb_CachedInterpreterCompileWasmBlock).
++extern "C" EMSCRIPTEN_KEEPALIVE int DolphinWeb_RegionChainHelper()
++{
++  return static_cast<int>(reinterpret_cast<std::uintptr_t>(&RegionChainNext));
++}
++
++// ?regionchain=0 turns region chaining off (every exit returns to the
++// dispatcher, as before 0102); on by default. Any thread.
++extern "C" EMSCRIPTEN_KEEPALIVE void DolphinWeb_JitSetRegionChaining(int enabled)
++{
++  s_region_chain_enabled.store(enabled != 0, std::memory_order_relaxed);
++}
++
++// Two lists, {u32 count, then 12 x {u32 pc, u32 n}}: the PCs without a
++// region that chains of regions left for most often, then the region
++// entries block chains reached most often; while stats are on, published by
++// the CPU thread with the stats.
++extern "C" EMSCRIPTEN_KEEPALIVE u32 DolphinWeb_JitRegionTransitionTop()
++{
++  return static_cast<u32>(reinterpret_cast<std::uintptr_t>(s_transition_top.data()));
++}
++
++// RegionChainStats (40 bytes), counted whether region stats are on or not,
++// reset with them (DolphinWeb_JitRegionStats(n >= 0)).
++extern "C" EMSCRIPTEN_KEEPALIVE u32 DolphinWeb_JitRegionChainStats()
++{
++  return static_cast<u32>(reinterpret_cast<std::uintptr_t>(&s_region_chain_stats));
++}
++
+ // Code at [address, address + size) changed (icbi, DMA, a cache clear):
+ // regions covering it are checked against the plan before they next run, and
+ // dropped then if it changed. From JitInterface.

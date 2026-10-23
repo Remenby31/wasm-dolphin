@@ -10,6 +10,8 @@
 //   node harness/remote/spark-run.mjs --candidate <ref|dir> [--baseline <ref|dir>]
 //     --state <local .sav> [--name n] [--runs 6] [--lane auto|a|b] [--host spark] [--detach]
 //     [--keep-video] [-- <race-perf options: --query, --warmup, --secs, --max-load, …>]
+//   node harness/remote/spark-run.mjs --multi --baseline <ref|dir> --candidate <ref|dir> [--candidate <ref|dir>]
+//     --state <local .sav> [--name n] [--runs 6] [--detach] [-- <race-multi options>]
 //   node harness/remote/spark-run.mjs --fetch <date>/<name>   (a detached run)
 //   node harness/remote/spark-run.mjs --build <ref>            (core built on the bench)
 //
@@ -30,6 +32,14 @@
 //   under the bench's perf lock; the commit must be on the fork), and
 //   `spark:<ref>` then names that worktree as a side: a Linux build, the
 //   same kind as CI's, never compared with a core built on this Mac.
+// - --multi: a codegen change (JIT, regions, dispatch) measured by host
+//   instructions per guest cycle, the official metric (PROGRAM.md,
+//   2026-10-22): race-multi runs every arm at once, one lane of 3 big cores
+//   each, in an emulated window, cpu=single, seeded regions, isolated boot,
+//   --counters. Arms: base, candidate, base (an A/A control) with one
+//   candidate; base and both with two. Every arm's commit must contain the
+//   region layout fix (#71): an older core sometimes refuses all its
+//   regions. Time is not this mode's metric: measure it with a pair.
 import { execFileSync, spawnSync } from "node:child_process";
 import { createHash } from "node:crypto";
 import { existsSync, mkdirSync, readdirSync, readFileSync, rmSync, statSync, writeFileSync } from "node:fs";
@@ -70,6 +80,35 @@ export function runId({ name, candidate, baseline, now = new Date() }) {
 // (PROGRAM.md: video=null is no faster there): so every query's wgpu
 // becomes null, its WebGPU presenter 2d; the rest of the query is kept.
 export const BENCH_LOCK_WAIT = 4 * 3600;
+
+// --multi (validated on multi-aba-emu-0087b: A/A +0.04 %, residual 0.03 %).
+export const MULTI_LANES = "5,6,7;15,16,17;8,9,19";
+export const MULTI_QUERY = "core=upstream&video=null&presenter=2d&cpu=single&speed=1&wasmjit=1&jitwarmup=60&oc=1&aot=1";
+export const MULTI_ARGS = ["--counters", "--aot-seed", "--gate-sec", "60", "--isolated-boot", "--emulated-window", "10", "--emulated-warmup", "15"];
+// The merge of #71 (region layout fix): every arm's commit descends from it.
+export const LAYOUT_FIX = "109a4ce61a9599460761f7412440bf889ff00a54";
+
+// The arms of a multi: three, one per lane.
+export function multiArms(baseline, candidates) {
+  if (!baseline) throw new Error("--multi needs --baseline");
+  if (candidates.length === 1) return [baseline, candidates[0], baseline];
+  if (candidates.length === 2) return [baseline, ...candidates];
+  throw new Error(`--multi: one or two --candidate (got ${candidates.length})`);
+}
+
+// race-multi's arguments; options after -- come last and win.
+export function multiRaceArgs({ iso, state, runs, armDirs, extra = [] }) {
+  if (Number(runs) % armDirs.length) throw new Error(`--runs ${runs}: a multiple of ${armDirs.length} with --multi (each arm visits each lane equally)`);
+  return ["--iso", iso, "--state", state, "--runs", String(runs), ...armDirs.flatMap((d) => ["--arm", d]), "--lanes", MULTI_LANES, ...MULTI_ARGS, "--query", MULTI_QUERY, ...extra];
+}
+
+// Refuses an arm whose commit predates the layout fix (unknown: refused).
+export function checkLayoutFix(spec, commit, isAncestor) {
+  if (!commit) throw new Error(`${spec}: no commit known, cannot check it contains the region layout fix (#71)`);
+  if (!isAncestor(LAYOUT_FIX, commit)) throw new Error(`${spec} (${commit.slice(0, 12)}) predates the region layout fix (#71, ${LAYOUT_FIX.slice(0, 12)}): merge main into it first`);
+}
+
+const gitIsAncestor = (a, b) => spawnSync("git", ["-C", REPO_ROOT, "merge-base", "--is-ancestor", a, b]).status === 0;
 export const RACE_QUERY = "core=upstream&video=wgpu&presenter=webgpu&cpu=dual&speed=1&wasmjit=1&jitwarmup=60&oc=1";
 export function benchQuery(query) {
   const q = new URLSearchParams(PRESETS[query] ?? query);
@@ -119,6 +158,17 @@ export function launchCommand({ harnessDir, outDir, lane = "auto", raceArgs, chr
     `test ! -e ${sh(`${outDir}.log`)}`,
     `cd ${sh(harnessDir)}`,
     `{ ${env ? `${env} ` : ""}setsid nohup sh harness/remote/spark-race.sh ${sh(outDir)} ${sh(lane)} -- ${raceArgs.map(sh).join(" ")} </dev/null >/dev/null 2>&1 & }`,
+    "echo started"
+  ].join(" && ");
+}
+
+// The Spark command that starts a multi detached and returns at once.
+export function multiLaunchCommand({ harnessDir, outDir, raceArgs }) {
+  return [
+    `mkdir -p ${sh(path.posix.dirname(outDir))}`,
+    `test ! -e ${sh(`${outDir}.log`)}`,
+    `cd ${sh(harnessDir)}`,
+    `{ setsid nohup sh harness/remote/spark-multi.sh ${sh(outDir)} -- ${raceArgs.map(sh).join(" ")} </dev/null >/dev/null 2>&1 & }`,
     "echo started"
   ].join(" && ");
 }
@@ -297,6 +347,11 @@ function fetchResult(host, { date, name, meta, exit }) {
     const summary = stampSummary(JSON.parse(readFileSync(summaryFile, "utf8")), bench);
     writeFileSync(summaryFile, JSON.stringify(summary, null, 1) + "\n");
     const c = summary.change;
+    if (summary.probe === "race-multi") {
+      const show = (e) => (e ? e.arms.map((x) => `arm ${x.arm} ${x.laneCorrected} %`).join(", ") : `withheld (${summary.withheld})`);
+      console.log(`[spark-run] host instructions per guest cycle vs arm 0 (lower is better): ${show(summary.counterEffects)}; residual ${summary.counterEffects?.residualSd ?? "-"} %${summary.discarded?.length ? `; ${summary.discarded.length} run(s) discarded` : ""} -> ${local}`);
+      return exit;
+    }
     console.log(`[spark-run] ${c ? `paired change ${c.median ?? `withheld (${c.withheld})`}${c.median != null ? " %" : ""}, per run ${c.perRun.join(" ")}` : `speed ${summary.candidate?.cold?.speed?.median} %`} -> ${local}`);
   } else console.log(`[spark-run] no summary (exit ${exit}), see ${path.join(local, "spark-run.log")}`);
   return exit;
@@ -305,7 +360,7 @@ function fetchResult(host, { date, name, meta, exit }) {
 async function main() {
   const { values, positionals } = parseArgs({
     options: {
-      candidate: { type: "string" }, baseline: { type: "string" }, state: { type: "string" }, iso: { type: "string" },
+      candidate: { type: "string", multiple: true, default: [] }, multi: { type: "boolean", default: false }, baseline: { type: "string" }, state: { type: "string" }, iso: { type: "string" },
       name: { type: "string" }, runs: { type: "string", default: "6" }, lane: { type: "string", default: "auto" },
       host: { type: "string", default: process.env.SPARK_HOST || "spark" },
       "chrome-cpus": { type: "string" }, "node-cpus": { type: "string" }, "keep-video": { type: "boolean", default: false },
@@ -323,6 +378,12 @@ async function main() {
     process.exitCode = await follow(host, { date, name: safeName(name) });
     return;
   }
+  if (values.multi) {
+    process.exitCode = await multi(host, values, positionals);
+    return;
+  }
+  if (values.candidate.length > 1) throw new Error("several --candidate: only with --multi");
+  values.candidate = values.candidate[0];
   if (!values.candidate || !values.state) throw new Error("usage: spark-run.mjs --candidate <ref|dir> [--baseline <ref|dir>] --state <local .sav> [--name n] [--runs 6] [--detach] [-- race-perf options]");
   for (const f of ["--iso", "--state", "--out", "--port", "--runs", "--candidate", "--baseline", "--core-candidate"]) {
     if (positionals.includes(f)) throw new Error(`${f} is set by spark-run, not after --`);
@@ -366,6 +427,46 @@ async function main() {
     return;
   }
   process.exitCode = await follow(host, { date, name, meta });
+}
+
+// --multi: race-multi on the whole bench, base and candidates at once.
+async function multi(host, values, positionals) {
+  if (!values.state) throw new Error("--multi needs --state <local .sav>");
+  for (const f of ["--iso", "--state", "--out", "--port", "--runs", "--arm", "--lanes", "--lock"]) {
+    if (positionals.includes(f)) throw new Error(`${f} is set by spark-run --multi, not after --`);
+  }
+  const specs = multiArms(values.baseline, values.candidate);
+  const { date, name } = runId({ name: values.name, candidate: values.candidate.join("+"), baseline: values.baseline });
+  if (existsSync(path.join(MEASURES, date, name))) throw new Error(`${path.join(MEASURES, date, name)} exists: pick another --name`);
+  const harnessFiles = listFiles(REPO_ROOT, HARNESS_ROOTS, HARNESS_SKIP);
+  const harness = pushTree(host, { root: REPO_ROOT, files: harnessFiles, kind: "harness", key: contentKey(REPO_ROOT, harnessFiles) });
+  const pushed = new Map();
+  for (const spec of new Set(specs)) {
+    const side = await pushSide(host, spec);
+    checkLayoutFix(spec, side.source?.commit, gitIsAncestor);
+    pushed.set(spec, side);
+  }
+  const state = pushState(host, path.resolve(values.state));
+  const iso = benchDisc(host, values.iso);
+  const home = ssh(host, "printf %s \"$HOME\"").out;
+  const abs = (p) => `${home}/${p}`;
+  const raceArgs = multiRaceArgs({ iso: abs(iso), state: abs(state), runs: values.runs, armDirs: specs.map((s) => abs(pushed.get(s).dest)), extra: positionals });
+  const outDir = abs(`${BENCH}/results/${date}/${name}`);
+  const meta = {
+    host: "spark", mode: "multi", hostname: ssh(host, "hostname").out.trim(), at: new Date().toISOString(),
+    harness: { from: REPO_ROOT, key: path.basename(harness.dest) },
+    arms: specs.map((s) => ({ spec: s, dest: pushed.get(s).dest, source: pushed.get(s).source ?? null })),
+    raceArgs
+  };
+  ssh(host, multiLaunchCommand({ harnessDir: abs(harness.dest), outDir, raceArgs }));
+  mkdirSync(path.join(MEASURES, date, name), { recursive: true });
+  writeFileSync(path.join(MEASURES, date, name, "spark.json"), JSON.stringify(meta, null, 1) + "\n");
+  console.log(`[spark-run] multi started on ${host}: ${date}/${name}, arms ${specs.map((s, i) => `${i}=${s}`).join(" ")} (waits for the whole bench in the queue)`);
+  if (values.detach) {
+    console.log(`[spark-run] detached; bring it back with: node harness/remote/spark-run.mjs --fetch ${date}/${name}`);
+    return 0;
+  }
+  return follow(host, { date, name, meta });
 }
 
 if (import.meta.url === pathToFileURL(process.argv[1] ?? "").href) {

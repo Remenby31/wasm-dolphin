@@ -31,7 +31,7 @@ import { pathToFileURL } from "node:url";
 import { parseArgs } from "node:util";
 
 import { ensureServer, launchChrome, readTimeline, REPO_ROOT, workerRequest } from "../lib/browser.mjs";
-import { calmThenLock, loadGaveUp, waitForLoad } from "../lib/env.mjs";
+import { calmLock, loadGaveUp } from "../lib/env.mjs";
 import { PRESETS, withDeterministicClock } from "../lib/matrix.mjs";
 import { claim } from "../lib/ownership.mjs";
 import { acquirePerfLock } from "../lib/perf-lock.mjs";
@@ -148,9 +148,10 @@ async function main() {
   // A calm machine first (--calm-wait, default --lock-wait), then the lock.
   const lockWait = num(values, "lock-wait", { min: 0 });
   const calmWait = values["calm-wait"] == null ? lockWait : num(values, "calm-wait", { min: 0 });
-  const releaseLock = values["no-lock"] ? () => {} : await calmThenLock({
+  // Never waited for the load under the lock (calmLock).
+  const lock = await calmLock({
     maxLoad, calmWait, log: (m) => log(`before the lock: ${m}`),
-    acquire: () => acquirePerfLock({ name: `harness ttff (${REPO_ROOT})`, waitSec: lockWait, log })
+    acquire: values["no-lock"] ? null : () => acquirePerfLock({ name: `harness ttff (${REPO_ROOT})`, waitSec: lockWait, log })
   });
   const outDir = probeOutDir("ttff", iso, values.out);
   const server = await ensureServer({ port, root: REPO_ROOT });
@@ -158,7 +159,7 @@ async function main() {
   let gaveUp = null;
   try {
     for (let run = 1; run <= runs; run += 1) {
-      const loadGate = await waitForLoad({ maxLoad, waitSec: loadWait, log });
+      const loadGate = await lock.waitCalmUnlocked({ waitSec: loadWait, log });
       gaveUp = loadGaveUp(loadGate);
       if (gaveUp) { log(`run ${run}: ${gaveUp}`); break; }
       const profileDir = mkdtempSync(path.join(os.tmpdir(), "gc-harness-ttff-"));
@@ -183,7 +184,7 @@ async function main() {
     }
   } finally {
     await server.stop();
-    releaseLock();
+    lock.release();
   }
   const summary = {
     probe: "ttff", at: new Date().toISOString(), locked: !values["no-lock"], machine: machineSnapshot(),
