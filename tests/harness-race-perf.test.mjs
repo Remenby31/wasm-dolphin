@@ -143,6 +143,8 @@ test("review #22: odd runs and a pinned coreid are refused with --baseline", () 
     assert.match(run(["--query", "core=upstream&coreid=sha256:" + "a".repeat(64)]), /a coreid in --query needs a --baseline-query without it/);
     assert.match(run(["--max-load", "abc"]), /--max-load abc/);
     assert.match(run(["--baseline-query", "core=upstream&coreid=sha256:" + "a".repeat(64)]), /no coreid in --baseline-query/);
+    // On both sides (a coreid in --query and in --baseline-query): refused.
+    assert.match(run(["--query", "core=upstream&coreid=sha256:" + "a".repeat(64), "--baseline-query", "core=upstream&coreid=sha256:" + "b".repeat(64)]), /no coreid in --baseline-query/);
     // Only on the candidate side: accepted (a lever's PR core against trunk's);
     // an invalid --max-load stops it right after, so no run starts.
     const ok = run(["--runs", "2", "--query", "core=upstream&coreid=sha256:" + "a".repeat(64), "--baseline-query", "core=upstream", "--max-load", "abc"]);

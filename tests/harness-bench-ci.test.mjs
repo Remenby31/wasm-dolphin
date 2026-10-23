@@ -152,17 +152,27 @@ test("CI bench: with region stats, a pair where a side installed no region is se
   assert.equal(plain.regions, null);
 });
 
-test("CI bench: a lever's PR core is served only if it is the .wasm its name says, with this tree's binary interface", async () => {
+test("CI bench: a lever's PR core is served only if bound to its bytes, with this tree's binary interface", async () => {
   const { coreCompat } = await import("../harness/remote/core-compat.mjs");
   const { createHash } = await import("node:crypto");
-  const wasm = Buffer.from("a core"), sha = createHash("sha256").update(wasm).digest("hex");
-  const abi = { coreId: `sha256:${sha}`, moduleExports: ["_b", "_a"], runtimeMethods: ["FS"], memoryContract: { pages: 1 }, memoryContractStatus: "ok" };
+  const h = (b) => createHash("sha256").update(b).digest("hex");
+  const wasm = Buffer.from("a core"), sha = h(wasm), glue = "glue\r\n", glueSha = h(Buffer.from("glue\n"));
+  const exportsOf = () => ["_b", "_a"];
+  const buildInfo = { coreId: `sha256:${sha}`, artifacts: { wasm: { sha256: sha }, js: { sha256: glueSha } } };
+  const abi = { coreId: `sha256:${sha}`, runtimeMethods: ["FS"], memoryContract: { pages: 1 }, memoryContractStatus: "ok" };
   const tree = { coreId: "sha256:other", moduleExports: ["_a", "_b"], runtimeMethods: ["FS"], memoryContract: { pages: 1 }, memoryContractStatus: "ok" };
-  assert.deepEqual(coreCompat({ wasm, name: sha, artifactAbi: abi, treeAbi: tree }), []); // export order does not matter
-  assert.match(coreCompat({ wasm, name: "0".repeat(64), artifactAbi: abi, treeAbi: tree })[0], /hashes to/);
-  assert.deepEqual(coreCompat({ wasm, name: sha, artifactAbi: { ...abi, moduleExports: ["_a"] }, treeAbi: tree }), ["moduleExports differs from the tree's core"]);
-  assert.deepEqual(coreCompat({ wasm, name: sha, artifactAbi: { ...abi, memoryContract: { pages: 2 } }, treeAbi: tree }), ["memoryContract differs from the tree's core"]);
-  // The workflow: the run checked, the artifact checked, the coreid on the candidate only.
+  const check = (o) => coreCompat({ wasm, glue, name: sha, buildInfo, artifactAbi: abi, treeAbi: tree, exportsOf, ...o });
+  assert.deepEqual(check({}), []); // export order does not matter; the glue is LF-normalized
+  assert.match(check({ name: "0".repeat(64) })[0], /hashes to/);
+  assert.ok(check({ artifactAbi: { ...abi, coreId: undefined } }).some((w) => /ABI manifest names no core/.test(w))); // coreId mandatory
+  assert.ok(check({ glue: "other glue" }).includes("the glue (.js) is not the one the build record holds"));
+  assert.ok(check({ buildInfo: { ...buildInfo, artifacts: { ...buildInfo.artifacts, wasm: { sha256: "x" } } } }).includes("the build record holds another .wasm"));
+  assert.deepEqual(check({ exportsOf: () => ["_a"] }), ["moduleExports (from the glue) differ from the tree's core"]);
+  assert.deepEqual(check({ artifactAbi: { ...abi, memoryContract: { pages: 2 } } }), ["memoryContract differs from the tree's core"]);
+  // The workflow: main only, this repository's run (no fork), the artifact checked, the coreid on the candidate only.
+  assert.match(workflow, /\[ "\$GITHUB_REF" = refs\/heads\/main \] \|\| \{ echo "candidate_core_run: dispatch from main/);
+  assert.match(workflow, /\.head_repository\.full_name == \$repo/);
+  assert.match(workflow, /\(\.event == "push" or \.event == "pull_request"\)/);
   assert.match(workflow, /\.path == "\.github\/workflows\/core-build\.yml"/);
   assert.match(workflow, /select\(\.name == "build" and \.conclusion == "success"\)/);
   assert.match(workflow, /node harness\/remote\/core-compat\.mjs "\$dir" "\$sha" \./);

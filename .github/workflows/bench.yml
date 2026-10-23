@@ -239,9 +239,15 @@ jobs:
           set -euo pipefail
           [[ "$CANDIDATE_CORE_RUN" =~ ^[0-9]+$ ]] || { echo "candidate_core_run: a run id"; exit 1; }
           [ -z "$BASELINE$CANDIDATE" ] || { echo "candidate_core_run serves this tree on both sides: no baseline/candidate refs"; exit 1; }
+          # The baseline is the dispatched tree: main only.
+          [ "$GITHUB_REF" = refs/heads/main ] || { echo "candidate_core_run: dispatch from main (the baseline is the dispatched tree)"; exit 1; }
           api="repos/$GITHUB_REPOSITORY/actions/runs/$CANDIDATE_CORE_RUN"
           gh api "$api" > "$RUNNER_TEMP/core-run.json"
-          jq -e --arg repo "$GITHUB_REPOSITORY" '.repository.full_name == $repo and .path == ".github/workflows/core-build.yml"' "$RUNNER_TEMP/core-run.json" > /dev/null
+          # This repository's own core-build.yml, from a push or a pull request
+          # whose head is this repository (a fork's PR runs its own workflow
+          # file and could upload any core-<sha>).
+          filter='.repository.full_name == $repo and .head_repository.full_name == $repo and .path == ".github/workflows/core-build.yml" and (.event == "push" or .event == "pull_request")'
+          jq -e --arg repo "$GITHUB_REPOSITORY" "$filter" "$RUNNER_TEMP/core-run.json" > /dev/null
           gh api "$api/jobs?per_page=100" | jq -e '[.jobs[] | select(.name == "build" and .conclusion == "success")] | length == 1' > /dev/null
           names=$(gh api "$api/artifacts?per_page=100" --jq '.artifacts[] | select(.expired | not) | .name' | grep -E '^core-[0-9a-f]{64}$')
           test "$(wc -l <<< "$names")" -eq 1
