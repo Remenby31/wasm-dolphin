@@ -1510,6 +1510,7 @@ async function handleMessage(type, payload) {
         aotCompiler: payload.aotCompiler,
         aotFirstLaunch: payload.aotFirstLaunch,
         regionChain: payload.regionChain,
+        fusedMadd: payload.fusedMadd,
         reportedCoreSelection: payload.coreSelection,
         wgpuReplayDiagnostics: payload.wgpuReplayDiagnostics,
         wgpuDeepReplayDiagnostics: payload.wgpuDeepReplayDiagnostics,
@@ -2166,6 +2167,7 @@ async function loadCore({
   aotCompiler = true,
   aotFirstLaunch = false,
   regionChain = true,
+  fusedMadd = true,
   reportedCoreSelection = null,
   wgpuReplayDiagnostics = false,
   wgpuDeepReplayDiagnostics: requestedWgpuDeepReplayDiagnostics = false,
@@ -2694,11 +2696,11 @@ async function loadCore({
   if (harnessEnabled) moduleInstance._DolphinWeb_HarnessEnable?.(1);
   if (detTraceRequested) moduleInstance._DolphinWeb_DetTraceEnable?.(1);
   if (gpuSyncDiagEnabled) moduleInstance._DolphinWeb_GpuSyncDiagEnable?.(1);
-  // patch 0129: the FMA emitter uses relaxed_madd only where it is fused,
-  // decided once here, before the first compile.
+  // Patch 0129: the FMA emitter uses relaxed_madd only where it is fused,
+  // decided once here, before the first compile (?fusedmadd=0: never).
   relaxedMadd = probeRelaxedMadd();
-  moduleInstance._DolphinWeb_SetFusedMadd?.(relaxedMadd === "fused" ? 1 : 0);
-  postStatus(`relaxed_madd: ${relaxedMadd}${moduleInstance._DolphinWeb_SetFusedMadd ? "" : " (core without patch 0129)"}`);
+  moduleInstance._DolphinWeb_SetFusedMadd?.(relaxedMadd === "fused" && fusedMadd !== false ? 1 : 0);
+  postStatus(`relaxed_madd: ${relaxedMadd}${fusedMadd === false ? ", off (?fusedmadd=0)" : ""}${moduleInstance._DolphinWeb_SetFusedMadd ? "" : " (core without patch 0129)"}`);
   const ownershipTraceSetterAvailable = Boolean(
     api.setWebGpuOwnershipTraceEnabled &&
     api.getWebGpuOwnershipTracePtr &&
