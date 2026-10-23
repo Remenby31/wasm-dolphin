@@ -25,7 +25,7 @@
       "commit": "01e0577914a75a2569c846778c2f93aa8e6feddd"
     }
   },
-  "patchSeriesSha256": "caf9c40b06eff5b7d0cacc44af5bf65c8f2b19df7c3805088b9a1a28da3a332b",
+  "patchSeriesSha256": "c9ad0ef1dbd08a33e2d542d1317457242c855472049e2ee5b0460ec98be8be44",
   "patches": [
     {
       "order": 1,
@@ -752,8 +752,8 @@
       "cwd": ".",
       "hashMode": "lf-normalized",
       "path": "patches/dolphin-wasm/snapshot/0116-savestate-pauses-gpu-loop.patch",
-      "size": 4838,
-      "sha256": "66d85a2e153f3366abf72e34ef5607d02949b0c62649b23f55a271ef856f8cc4"
+      "size": 6203,
+      "sha256": "195a48e8bdd4af8ad52f2f4116aa3bfe1642b724cf324c5021aa1c7e903b9a08"
     },
     {
       "order": 92,

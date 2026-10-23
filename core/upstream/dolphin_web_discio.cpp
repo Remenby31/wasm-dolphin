@@ -1214,6 +1214,7 @@ EMSCRIPTEN_KEEPALIVE const char* DolphinWeb_GpuSyncDiag()
   // Savestate pauses of the GPU loop (patch 0116).
   const auto& sp = system.GetFifo().GetSavestatePauseStats();
   o << ",\"savestatePause\":{\"count\":" << load(sp.count) << ",\"busy\":" << load(sp.busy)
+    << ",\"doneWhileActive\":" << load(sp.done_while_active)
     << ",\"lastUs\":" << load(sp.last_us) << ",\"maxUs\":" << load(sp.max_us) << "}}";
   out = o.str();
   return out.c_str();

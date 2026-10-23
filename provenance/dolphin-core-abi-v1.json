@@ -20,8 +20,8 @@
     {
       "path": "core/upstream/dolphin_web_discio.cpp",
       "hashMode": "lf-normalized",
-      "size": 69532,
-      "sha256": "f9c6f1220776ae0f8675a743e89a781c46df5e7815fc37e40ea91b87cd8b6347"
+      "size": 69593,
+      "sha256": "678606dffa50c21052972f1777bf368cd72a2fa84135b2905bb0c60b7e92c701"
     },
     {
       "path": "core/upstream/dolphin_web_raster_profile.h",
