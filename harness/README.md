@@ -326,17 +326,22 @@ node harness/kpi-report.mjs [--print]
   `lib/aot-progress.mjs`. A launch without "done" (or a second launch without
   its compiled count) is a failure with its reason. An engine without P7
   answers `p7: null` and n/a, exit 0.
-- `first-launch-ramp.mjs`: the speed curve of a player's very first launch
-  with `aot=1` (added to `--config rec` unless the query says otherwise), on
-  a new, empty profile (no seed, unlike aot-warm-launch): disc handed over,
-  then `--steps` (to the race, or a click and the intro for `--scene heavy`),
-  then `--sec` seconds. Every second it drains the VI ring and reads the
-  region pipeline (`validationReadJitRegionStats`, read only). Per run
-  (`lib/ramp.mjs`): time to 90 % and to 95 % VI speed held 5 s, the plateau
-  (median of the last 10 s), the time to 90 % of that plateau (a CPU-bound
-  scene never reaches 90 %), and the per-second speed and installed/queued
-  region series. KPI: time to 90 %, target 15 s, one row per scene; a run
-  that never reaches 90 % fails the row.
+- `first-launch-ramp.mjs`: a player's very first launch with `aot=1`
+  (added to `--config rec` unless the query says otherwise), on a new, empty
+  profile (no seed, unlike aot-warm-launch): disc handed over, then
+  `--steps` (to the race, or a click and the intro for `--scene heavy`),
+  then `--sec` seconds. Every second it drains the VI ring, reads the region
+  pipeline (`validationReadJitRegionStats`, read only) and the core's XFB
+  copies (`validationReadHeadroomStats`, on once after the boot). The KPI
+  is on useful game frames: the product runs decoupled, its VI speed stays
+  at 100 % while the game frames fall behind. Per run (`lib/ramp.mjs`),
+  from the scene's start: time to 90 % and to 95 % of the scene's native
+  game frames per second (`SCENE_NATIVE_FRAMES_PER_VI`) held 5 s, the
+  plateau (`--plateau FROM-TO` seconds, default the heavy intro 0-17 s, the
+  race's last 10 s), the time to 90 % of that plateau; the VI speed ramp
+  apart; the per-second game, VI and installed/queued region series. KPI:
+  time to 90 %, target 15 s, one row per scene; a run that never reaches
+  90 % fails the row.
 - They all record the served tree (commit, dirty) and the Chrome that ran, and
   leave out runs started on an overloaded machine (listed). `--no-lock`
   checks the plumbing in a CORRECTION slot; such results are not measures.
