@@ -151,6 +151,7 @@ import {
   hashWgpuVisualSample
 } from "./wgpu-visual-cadence.js";
 import { createCoreLifecycle } from "./core-lifecycle.js";
+import { WgpuReadback, unwrapSeq } from "./wgpu-readback.js";
 import { createDisplayCounter, startDisplayLoop } from "./wgpu-display-counter.js";
 import { PipelinePrewarm } from "./wgpu-pipeline-prewarm.js";
 import { BOOT_FILE_HEAD_BYTES, bootFileKind, checkExecutable, executableGameId } from "./boot-file.js";
@@ -499,6 +500,31 @@ let wgpuRendererWorkerProbe = "off";
 let wgpuVisualCadenceEnabled = false;
 // Mirrors the loaded core's videoBackend for code outside loadCore's scope.
 let hardwareVideoBackend = false;
+// Staging-texture readbacks of the hardware renderer, per device and per
+// core module: the heap is the one the copies were issued in.
+let wgpuReadback = null;
+function readbackFor(device) {
+  // A failed replay released its readback: none is made again.
+  if (wgpuReplayFatal) return null;
+  if (wgpuReadback?.device !== device || wgpuReadback.module !== moduleInstance) {
+    releaseWgpuReadback();
+    const module = moduleInstance;
+    wgpuReadback = new WgpuReadback({
+      device,
+      heap: () => module.HEAPU8,
+      words: () => new Int32Array(module.HEAPU8.buffer)
+    });
+    wgpuReadback.module = module;
+  }
+  return wgpuReadback;
+}
+// Every copy in flight or still in the ring is released as LOST, and what
+// lands later is dropped. Before the consumer is marked failed: the core
+// then stops waiting for copies and frees their memory (patch 0093).
+function releaseWgpuReadback() {
+  wgpuReadback?.reset();
+  wgpuReadback = null;
+}
 // video=wgpu: pipelines seen in earlier sessions, compiled at boot
 // (src/wgpu-pipeline-prewarm.js). null when off (?wgpuprewarm=0) or not wgpu.
 let wgpuPipelinePrewarmEnabled = true;
@@ -1425,6 +1451,7 @@ async function handleMessage(type, payload) {
         coreLog: payload.coreLog,
         memcardSlotB: payload.memcardSlotB,
         efbAccess: payload.efbAccess,
+        efbCopyRam: payload.efbCopyRam,
         efbDiag: payload.efbDiag,
         jitVerbose: payload.jitVerbose,
         frameCap: payload.frameCap,
@@ -2073,6 +2100,7 @@ async function loadCore({
   coreLog = false,
   memcardSlotB = false,
   efbAccess = false,
+  efbCopyRam = false,
   efbDiag = false,
   jitVerbose = false,
   frameCap = 0,
@@ -2528,6 +2556,7 @@ async function loadCore({
       : undefined;
 
   const _t_factory = performance.now();
+  releaseWgpuReadback();
   moduleInstance = await factory({
     noInitialRun: true,
     canvas: videoBackend === "OGL" ? moduleCanvas || undefined : undefined,
@@ -2549,6 +2578,7 @@ async function loadCore({
     dolphinCoreLog: Boolean(coreLog),
     dolphinMemcardSlotB: Boolean(memcardSlotB),
     dolphinEfbAccess: Boolean(efbAccess),
+    dolphinEfbCopyRam: Boolean(efbCopyRam),
     // Ranks the instructions that block JIT compilation (?jitverbose=1).
     dolphinWebVerbosePpcJit: Boolean(jitVerbose),
     dolphinFrameCap: (frameCapTarget = Number(frameCap) || 0),
@@ -8150,6 +8180,8 @@ const WGPU_CMD_OP_BLIT_TEXTURE = 24;
 const WGPU_CMD_OP_CLEAR_RECT = 25;
 const WGPU_CMD_OP_VI_TAG = 26;
 const WGPU_CMD_OP_PRESENT_SOURCE = 27;
+// Readback of a staging texture (EFB peeks, copies to RAM): src/wgpu-readback.js.
+const WGPU_CMD_OP_COPY_TO_STAGING = 28;
 // ClearRect uses the full attachment viewport and [0,1] depth range, so its
 // scissor alone determines coverage and its depth is independent of game state.
 // A/B switch: false restores the original game-viewport-dependent clear.
@@ -9495,6 +9527,7 @@ function markWgpuReplayFatal(scope, detail) {
   if (wgpuMappedStagingPool?.snapshot().pendingUploads > 0) {
     wgpuMappedStagingPool.invalidate(`fatal ${scope}: ${detail || "unknown"}`);
   }
+  releaseWgpuReadback();
   const errorCode = scope === "device-lost"
     ? WGPU_CONSUMER_ERROR_DEVICE_LOST
     : scope === "submit-error"
@@ -14935,6 +14968,37 @@ function drainWebGpuCmdRing(source = "presentation") {
               a4 & 0xFFFF, a4 >>> 16, a5 & 0xFFFF, a5 >>> 16,
               a6 & 0xFF, (a6 >>> 8) & 0xFF, (a6 >>> 16) & 0xFF, (a6 >>> 24) & 0xFF);
           }
+          break;
+        }
+        case WGPU_CMD_OP_COPY_TO_STAGING: {
+          const rb = readbackFor(dev);
+          if (!rb) break;
+          const source = webGpuObjects.textures.get(u32[recWord + 1]);
+          const a1 = u32[recWord + 2], a2 = u32[recWord + 3], a3 = u32[recWord + 4];
+          const wordIndex = u32[recWord + 7] >>> 2;
+          const words = new Int32Array(moduleInstance.HEAPU8.buffer);
+          const copy = {
+            slot: wordIndex, wordIndex,
+            seq: unwrapSeq(Atomics.load(words, wordIndex), a3 >>> 16),
+            texture: source?.tex, mipLevel: (a3 >>> 8) & 0xF,
+            origin: { x: a1 & 0xFFFF, y: a1 >>> 16, z: a3 & 0xFF },
+            width: a2 & 0xFFFF, height: a2 >>> 16, texelSize: (a3 >>> 12) & 0xF,
+            heapPtr: u32[recWord + 5], dstStride: u32[recWord + 6]
+          };
+          if (!source) {
+            wgpuReplayClassifier?.recordMissingResource({ kind: "readback-source", id: u32[recWord + 1] });
+            rb.lose(copy);
+            break;
+          }
+          // Everything recorded before it is submitted first; the copy then
+          // goes in its own encoder and submission (WgpuReadback.issue), so
+          // the map can start right away and a bad copy spoils no draw.
+          endPass("readback", read);
+          if (!submitEnc("readback") && lastSubmitFailureReason !== "no-command-encoder") {
+            rb.lose(copy);
+            break;
+          }
+          void rb.issue(q, copy);
           break;
         }
         case WGPU_CMD_OP_VI_TAG:
