@@ -11,7 +11,7 @@ import { consistentRead, decodeRegionStats, DIAGNOSTICS, DIAGNOSTICS_BY_VERSION,
 import { p4Summary, regionRecord, summarizeP4 } from "../harness/probes/race-perf.mjs";
 import { aotLaunchInfo, launchTtff, summarizeAot, summarizeTtff } from "../harness/lib/ttff.mjs";
 import { summarizeLaunch, summarizeP7, unavailable } from "../harness/lib/aot-progress.mjs";
-import { candidateColumn, classify, KPI_ROWS, kpiMarkdown, kpiTable, servedSides, sideFlags, sideHasAot, trunkSide } from "../harness/lib/kpi.mjs";
+import { candidateColumn, classify, KPI_ROWS, kpiMarkdown, kpiTable, servedSides, setupDifferences, setupOf, sideFlags, sideHasAot, TRUNK_SETUP, trunkSide } from "../harness/lib/kpi.mjs";
 import { findResults, loadResults, readCandidate, readManual } from "../harness/kpi-report.mjs";
 
 // The struct the core writes (layout v1), as the worker returns it.
@@ -451,6 +451,13 @@ test("KPI: a candidate column beside trunk, never in its place", (t) => {
   assert.match(md, /\| Vitesse course, Mac M4 Pro, wgpu \+ aot=1 [^|]*\| n\/a [^|]*\|.*\| 95\.8 % \(KO\) \|/);
   assert.match(md, /Colonne « Candidat » : `P4 \(#43\)` \(aot=1&wasmjit=1\), max-load 6, `ab` @ B avec modifications locales/);
   assert.doesNotMatch(kpiMarkdown(rows, { at: "T" }), /Candidat/);
+  assert.deepEqual(c.setupDifferences, []);
+  assert.doesNotMatch(md, /NON comparable/);
+  // A Spark candidate, or one run with Chrome arguments, is shown and flagged.
+  const flag = "--js-flags=--wasm-partial-oob-writes-are-noops";
+  const spark = candidateColumn({ ...ab, json: { ...ab.json, host: "spark", chrome: { path: "chrome stable", args: flag } } });
+  assert.deepEqual(spark.setupDifferences, ["machine spark ≠ Mac", `arguments Chrome « ${flag} » ≠ « aucun »`]);
+  assert.match(kpiMarkdown(rows, { at: "T", candidate: spark }), /\*\*Candidat NON comparable aux lignes de trunk\*\* : machine spark ≠ Mac ; arguments Chrome/);
 
   const root = mkdtempSync(path.join(os.tmpdir(), "kpi-candidate-test-"));
   t.after(() => rmSync(root, { recursive: true, force: true }));
@@ -625,4 +632,17 @@ test("ttff: the core's own count of installed regions, not the P7 install event"
   assert.match(row.detail, /SANS cache de régions : refusées pour une autre disposition du tas \(143, 143\)/);
   // An older probe without the core's count falls back on the install event.
   assert.equal(summarizeAot([{ run: 1, warm: { aot: { state: "complete", install } } }]).warm.installedBy, "install event");
+});
+
+test("setup: two Spark summaries with and without the V8 flag differ; absent arguments count as none", () => {
+  const flag = "--js-flags=--wasm-partial-oob-writes-are-noops";
+  const before = setupOf({ host: "spark" }); // race-multi before #145: no chrome at all
+  const beforeEmpty = setupOf({ host: "spark", chrome: { path: "chrome stable", args: "" } });
+  const after = setupOf({ host: "spark", chrome: { path: "chrome stable", args: flag } });
+  assert.deepEqual(setupDifferences(before, beforeEmpty), []);
+  assert.deepEqual(setupDifferences(before, after), [`arguments Chrome « aucun » ≠ « ${flag} »`]);
+  // A side's own arguments (race-perf --chrome-args) belong to that side's setup.
+  const pair = { chrome: { path: "chrome stable", args: "", sideArgs: { candidate: "--x" } } };
+  assert.deepEqual(setupDifferences(setupOf(pair, "candidate"), setupOf(pair, "baseline")), ["arguments Chrome « --x » ≠ « aucun »"]);
+  assert.deepEqual(setupDifferences(setupOf({ chrome: { path: "chrome stable" } }), TRUNK_SETUP), []);
 });
