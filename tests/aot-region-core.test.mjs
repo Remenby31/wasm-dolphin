@@ -209,9 +209,10 @@ test("a translated lwz carries the rotate byte swap (0126)", { skip: skip || (co
 });
 
 // 0131: region code marks its `if`s whose outcome it knows. A lwz's RAM fast
-// path is likely; the SO guard at entry, the halt after its slow-path helper
-// and the downcount running out are not. Every hint lands on an `if`, and the
-// assembled module carries them as a metadata.code.branch_hint section.
+// path is likely; the SO guard at entry and the downcount running out are
+// not (its slow path calls the read helper without a halt check). Every hint
+// lands on an `if`, and the assembled module carries them as a
+// metadata.code.branch_hint section.
 test("a translated lwz carries branch hints on its ifs, and the module a branch_hint section (0131)", { skip: skip || (compilerVersion() < 23 && "core before 0131 (compiler version < 23)") }, () => {
   const lwzR3 = (32 << 26) | (3 << 21) | (4 << 16) | 8;
   const at = 0x80021200;
@@ -221,7 +222,7 @@ test("a translated lwz carries branch hints on its ifs, and the module a branch_
   const hints = fragment.relocs.filter((r) => r.kind === "hint");
   for (const h of hints) assert.equal(fragment.code[h.offset], 0x04, `the hint at ${h.offset} is on an if`);
   assert.ok(hints.some((h) => h.likely), "the RAM fast path is likely");
-  assert.ok(hints.filter((h) => !h.likely).length >= 3, "SO guard, halt and downcount unlikely");
+  assert.ok(hints.filter((h) => !h.likely).length >= 2, "SO guard and downcount unlikely");
   const { bytes } = assembleRegion([fragment], { helpers: HELPER_SIGNATURES, pcOffset: core.pcOffset, memoryPages: core.memoryPages });
   const [section] = WebAssembly.Module.customSections(new WebAssembly.Module(bytes), "metadata.code.branch_hint");
   assert.ok(section, "the module carries the hints");
