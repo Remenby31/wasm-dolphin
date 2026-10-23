@@ -614,6 +614,22 @@ test("the translator's yield is one event-loop turn, chained without the timer c
 });
 
 
+test("?aotsample: the sampler's period in ms, 0 turns it off and no worker is created", async () => {
+  const { aotSamplePeriodRequested, startHotSampler, AOT_SAMPLE_DEFAULT_MS } = await import("../src/aot-hot-sampler.js");
+  assert.equal(aotSamplePeriodRequested(""), AOT_SAMPLE_DEFAULT_MS);
+  assert.equal(aotSamplePeriodRequested("?aot=1&aotsample=0"), 0);
+  assert.equal(aotSamplePeriodRequested("?aotsample=25"), 25);
+  assert.equal(aotSamplePeriodRequested("?aotsample=99999"), 1000, "capped");
+  for (const bad of ["?aotsample=", "?aotsample=-1", "?aotsample=off", "?aotsample=2.5"]) assert.equal(aotSamplePeriodRequested(bad), AOT_SAMPLE_DEFAULT_MS, bad);
+  let created = 0;
+  const createWorker = () => { created++; return { postMessage() {}, terminate() {} }; };
+  assert.equal(startHotSampler({ buffer: new SharedArrayBuffer(16), pcAddress: 8, periodMs: 0, createWorker }), null);
+  assert.equal(created, 0, "?aotsample=0: no worker");
+  const on = startHotSampler({ buffer: new SharedArrayBuffer(16), pcAddress: 8, periodMs: 25, createWorker });
+  assert.equal(created, 1);
+  on.stop();
+});
+
 test("the profile sampler needs a shared heap and a PC address; it drains what it counted since the last drain, and blocks while paused", async () => {
   const { startHotSampler } = await import("../src/aot-hot-sampler.js");
   assert.equal(startHotSampler({ buffer: new ArrayBuffer(16), pcAddress: 8 }), null);
