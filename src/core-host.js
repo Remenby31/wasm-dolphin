@@ -115,6 +115,9 @@ export class EmulatorHost {
     this.fifoLog = new URLSearchParams(window.location.search).get("fifolog") === "1";
     // EFB copies written to guest RAM too (Dolphin's EFBToTextureEnable=False).
     this.efbCopyRam = new URLSearchParams(window.location.search).get("efbcopyram") === "1";
+    // Harness: optional WebGPU features withheld from the device, comma-separated
+    // (e.g. Safari 26 has no dual-source-blending). Empty for the app.
+    this.wgpuMask = new URLSearchParams(window.location.search).get("wgpumask") ?? "";
     this.savesMode = new URLSearchParams(window.location.search).get("saves") === "off" ? "off" : "";
     this.efbDiag = requestedEfbDiag();
     this.jitVerbose = new URLSearchParams(window.location.search).get("jitverbose") === "1";
@@ -420,6 +423,7 @@ export class EmulatorHost {
             efbAccess: this.efbAccess,
             fifoLog: this.fifoLog,
             efbCopyRam: this.efbCopyRam,
+            wgpuMask: this.wgpuMask,
             savesMode: this.savesMode,
             efbDiag: this.efbDiag,
             jitVerbose: this.jitVerbose,
