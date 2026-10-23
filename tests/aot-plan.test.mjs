@@ -106,11 +106,12 @@ test("aot profile: a profile block that decodes as junk is not trusted", () => {
 test("aot profile: binary round trip, identity, merge counts and truncation", () => {
   const p = { sessions: 2, gameId: "TEST01", dolHash: "0123456789abcdef", blocks: [[0x80003100, 0x80003110, 2, 0], [0x80003110, 0x80003120, 1, 0], [0x80004000, 0x80004008, 1, 0], [0x500, 0x600, 1, 1]] };
   const back = decodeProfile(encodeProfile(p));
-  assert.deepEqual(back, { ...p, blocks: [[0x500, 0x600, 1, 1], ...p.blocks.slice(0, 3)] }, "adjacent blocks keep their own start");
+  const w0 = (b) => [...b.slice(0, 4), b[4] ?? 0];
+  assert.deepEqual(back, { ...p, blocks: [[0x500, 0x600, 1, 1], ...p.blocks.slice(0, 3)].map(w0) }, "adjacent blocks keep their own start");
   assert.equal(decodeProfile(new Uint8Array(30)), null);
   const merged = mergeProfiles(p, { sessions: 1, blocks: [[0x80004000, 0x80004008], [0x80005000, 0x80005004]] });
   assert.equal(merged.sessions, 3);
-  assert.deepEqual(merged.blocks.find((b) => b[0] === 0x80004000), [0x80004000, 0x80004008, 2, 0], "seen again: one more session");
+  assert.deepEqual(merged.blocks.find((b) => b[0] === 0x80004000), [0x80004000, 0x80004008, 2, 0, 0], "seen again: one more session");
   const many = Array.from({ length: 10 }, (_, i) => [0x80003000 + i * 8, 0x80003004 + i * 8, i === 7 ? 5 : 1, 0]);
   const kept = normalizeRanges(many, { max: 3 });
   assert.equal(kept.length, 3);
@@ -304,3 +305,24 @@ test("aot hints: an entry that decodes as junk is walked on trial and dropped (r
   const plan = planDol({ image, entryPoint, hints, options: { gapFill: false } });
   assert.ok(!plan.modules[0].blocks.start.includes(t.labels.junk));
 });
+
+// Hot/cold formation (plan B) needs where the time goes inside a function:
+// version 3 keeps the guest-PC samples per block, halved at each new
+// session, local only.
+test("aot profile v3: sample weights round trip, halve at a new session, add up within one; v2 files read with weight 0", () => {
+  const p = { sessions: 1, gameId: "TEST01", dolHash: "0123456789abcdef", blocks: blocksFromPcSamples([[0x80003100, 40], [0x80003104, 2]]) };
+  assert.deepEqual(decodeProfile(encodeProfile(p)).blocks.map((b) => b[4]), [40, 2]);
+  const next = mergeProfiles(p, { sessions: 1, blocks: blocksFromPcSamples([[0x80003100, 10], [0x80004000, 6]]) });
+  assert.deepEqual(next.blocks.map((b) => [b[0], b[4]]), [[0x80003100, 30], [0x80003104, 1], [0x80004000, 6]], "old weights halved, new ones added");
+  const same = mergeProfiles(p, { sessions: 0, blocks: blocksFromPcSamples([[0x80003100, 10]]) });
+  assert.equal(same.sessions, 1, "a periodic record is no new session");
+  assert.deepEqual(same.blocks.map((b) => [b[0], b[2], b[4]]), [[0x80003100, 1, 50], [0x80003104, 1, 2]], "no decay within a session");
+  // A version 2 file (12-byte entries) still reads.
+  const v3 = encodeProfile({ sessions: 1, blocks: [[0x80003100, 0x80003104, 3, 0, 9]] });
+  const v2 = new Uint8Array(36 + 12);
+  v2.set(v3.subarray(0, 36));
+  new DataView(v2.buffer).setUint32(8, 2, true);
+  v2.set(v3.subarray(36, 48), 36);
+  assert.deepEqual(decodeProfile(v2).blocks, [[0x80003100, 0x80003104, 3, 0, 0]]);
+});
+

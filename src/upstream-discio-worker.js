@@ -1,5 +1,6 @@
 import { readViRing } from "./harness-vi-ring.js";
 import { startPcSampler } from "./harness-pc-sampler.js";
+import { startHotSampler } from "./aot-hot-sampler.js";
 import {
   DEFAULT_UPSTREAM_CORE_SHA256,
   DEFAULT_UPSTREAM_CORE_URL,
@@ -3807,6 +3808,14 @@ async function mountFile(file) {
   aotDiscGeneration += 1;
   aotFirstLaunch?.dispose();
   aotFirstLaunch = null;
+  // The previous disc's last samples go to its profile; then a new session.
+  if (aotHotSampler && aotProfileTarget) void recordAotProfile(aotProfileTarget, aotHotSampler);
+  if (aotProfileTimer) clearInterval(aotProfileTimer);
+  aotProfileTimer = null;
+  aotProfileTarget = null;
+  aotProfileSessionRecorded = false;
+  aotHotSampler?.stop();
+  aotHotSampler = null;
   aotCoreBooted = false;
   aotRegionsBeforeBoot.length = 0;
   // The previous disc's flow never sees this disc's first image (review of #86).
@@ -7421,6 +7430,10 @@ export async function prepareAotFirstLaunch(file, {
     onEvent: (event) => self.postMessage({ type: "aot-progress", event })
   });
   aotFirstLaunch = flow;
+  // Where this player's game spends its time, recorded into the local
+  // profile (OPFS, per disc, addresses and sample counts only; never sent or
+  // shared): the next plan orders by it and forms hot fragments from it.
+  aotProfileTarget = opfs && discKey ? { flow, store: new AotProfileStore(opfs), discKey } : null;
   const blockKeys = [];
   if (!flow.supported) {
     postStatus("aot: first-launch optimisation unavailable (no disc key, core hash or translator)");
@@ -7468,10 +7481,42 @@ export function startAotFirstLaunchAfterBoot(flow = aotFirstLaunch) {
     // A remount meanwhile woke this flow: its disc is gone (loadRest of a
     // disposed flow loads nothing either).
     if (aotFirstLaunch !== flow) return undefined;
+    // The local profile's samples, from the first image on (a thread of its
+    // own reading the guest PC, nothing on the CPU thread).
+    aotHotSampler?.stop();
+    aotHotSampler = startHotSampler({ buffer: moduleInstance?.HEAPU8?.buffer, pcAddress: moduleInstance?._DolphinWeb_HarnessPcAddress?.() ?? 0, periodMs: AOT_PROFILE_SAMPLE_MS });
+    startAotProfileRecorder(flow, aotHotSampler);
     return flow.loadRest();
   }).catch(() => {}).then(() => {
     if (aotFirstLaunch === flow) return flow.start({ resume: true, ifGeneration: generation });
   });
+}
+let aotHotSampler = null;
+let aotProfileTarget = null;
+let aotProfileTimer = null;
+let aotProfileSessionRecorded = false;
+const AOT_PROFILE_SAMPLE_MS = 10; // one guest PC per 10 ms: enough for block weights
+const AOT_PROFILE_RECORD_MS = 60000;
+// Every minute, what the sampler counted goes into the local profile: the
+// first record of the session is a new session (older weights halve), the
+// next ones add to it.
+function startAotProfileRecorder(flow, sampler) {
+  if (aotProfileTimer) clearInterval(aotProfileTimer);
+  aotProfileTimer = null;
+  const target = aotProfileTarget;
+  if (!sampler || !target || target.flow !== flow) return;
+  aotProfileTimer = setInterval(() => void recordAotProfile(target, sampler), AOT_PROFILE_RECORD_MS);
+}
+async function recordAotProfile(target, sampler) {
+  const samples = sampler.drain();
+  if (!samples.length || aotProfileTarget !== target) return;
+  try {
+    const { blocksFromPcSamples } = await import("./aot-profile.js");
+    await target.store.record(target.discKey, blocksFromPcSamples(samples), { newSession: !aotProfileSessionRecorded });
+    aotProfileSessionRecorded = true;
+  } catch {
+    // a full or unavailable OPFS only costs the profile
+  }
 }
 // The first presented image of this boot, or false after `timeoutMs`. No
 // running core (tests): at once.

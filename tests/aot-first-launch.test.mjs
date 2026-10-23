@@ -613,3 +613,17 @@ test("the translator's yield is one event-loop turn, chained without the timer c
   assert.ok(ms < 200, `200 chained yields in ${ms.toFixed(1)} ms (a clamped timer chain takes ≥ 800 ms in a browser)`);
 });
 
+
+test("the profile sampler needs a shared heap and a PC address; it drains what it counted since the last drain", async () => {
+  const { startHotSampler } = await import("../src/aot-hot-sampler.js");
+  assert.equal(startHotSampler({ buffer: new ArrayBuffer(16), pcAddress: 8 }), null);
+  assert.equal(startHotSampler({ buffer: new SharedArrayBuffer(16), pcAddress: 0 }), null);
+  // A stand-in worker: what it posts is counted, drained once.
+  let worker;
+  const sampler = startHotSampler({ buffer: new SharedArrayBuffer(16), pcAddress: 8, createWorker: () => (worker = { postMessage() {}, terminate() {} }) });
+  worker.onmessage({ data: [[0x80003100, 3], [0x80003104, 1]] });
+  worker.onmessage({ data: [[0x80003100, 2]] });
+  assert.deepEqual(sampler.drain(), [[0x80003100, 5], [0x80003104, 1]]);
+  assert.deepEqual(sampler.drain(), []);
+  sampler.stop();
+});
