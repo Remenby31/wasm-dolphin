@@ -372,8 +372,12 @@ function fetchResult(host, { date, name, meta, exit }) {
     if (summary.probe === "race-multi") {
       const show = (e) => (e ? e.arms.map((x) => `arm ${x.arm} ${x.laneCorrected} %`).join(", ") : `withheld (${summary.withheld})`);
       console.log(`[spark-run] host instructions per guest cycle vs arm 0 (lower is better): ${show(summary.counterEffects)}; residual ${summary.counterEffects?.residualSd ?? "-"} %${summary.discarded?.length ? `; ${summary.discarded.length} run(s) discarded` : ""} -> ${local}`);
+      // Cycles decide when they part from the instructions beyond their noise (~0.5 %).
+      if (summary.cycleEffects) console.log(`[spark-run] host CYCLES per guest cycle vs arm 0 (lower is better, decides when it parts from the instructions): ${show(summary.cycleEffects)}; residual ${summary.cycleEffects.residualSd} %`);
       return exit;
     }
+    for (const [k, label] of [["counterChange", "host instructions per guest cycle"], ["cycleChange", "host cycles per guest cycle"]]) if (summary[k]) console.log(`[spark-run] ${label}: paired change ${summary[k].median ?? `withheld (${summary[k].withheld})`}${summary[k].median != null ? " %" : ""}`);
+    if (summary.warmChange) console.log(`[spark-run] warm: ${Object.entries(summary.warmChange).map(([m, x]) => `${m} ${x.median ?? "withheld"}${x.median != null ? " %" : ""}`).join(", ")}`);
     console.log(`[spark-run] ${c ? `paired change ${c.median ?? `withheld (${c.withheld})`}${c.median != null ? " %" : ""}, per run ${c.perRun.join(" ")}` : `speed ${summary.candidate?.cold?.speed?.median} %`} -> ${local}`);
   } else console.log(`[spark-run] no summary (exit ${exit}), see ${path.join(local, "spark-run.log")}`);
   return exit;

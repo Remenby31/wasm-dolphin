@@ -165,3 +165,26 @@ test("race-multi: a run where an arm lacks some of its seeded regions is discard
   assert.match(discardReason([{ regionGate: null }, { regionGate: ok }], [143, 143]), /no region gate on arm 0/);
   assert.match(discardReason([{ regionGate: { ...ok, quiescent: false, why: "still compiling" } }], [null]), /arm 0: still compiling/);
 });
+
+test("counters: cycles per guest cycle, extra PMU events per arm, and perf's multiplexing kept", async () => {
+  const { counterEvents, cyclesPerGuestCycle, FRONTEND_EVENTS } = await import("../harness/lib/perf-counters.mjs");
+  const { frontEndStats } = await import("../harness/probes/race-multi.mjs");
+  const csv = [
+    "100,,armv8_pmuv3_1/instructions/u,1,100.00,,", "50,,armv8_pmuv3_1/cycles/u,1,100.00,,",
+    "20,,armv8_pmuv3_1/stall_frontend/u,1,83.50,,", "<not counted>,,armv8_pmuv3_0/stall_frontend/u,0,0.00,,",
+    "7,,armv8_pmuv3_0/l1i_cache_refill/u,1,100.00,,", "3,,armv8_pmuv3_1/l1i_cache_refill/u,1,100.00,,"
+  ].join("\n");
+  assert.deepEqual(parsePerfCsv(csv), { instructions: 100, cycles: 50, stall_frontend: 20, l1i_cache_refill: 10, countedPct: 83.5 });
+  assert.deepEqual(counterEvents("frontend"), FRONTEND_EVENTS);
+  assert.ok(FRONTEND_EVENTS.length <= 5, "with instructions, within the six programmable counters");
+  assert.deepEqual(counterEvents("l1i_cache_refill, itlb_walk"), ["l1i_cache_refill", "itlb_walk"]);
+  assert.throws(() => counterEvents("cycles"), /bad event/);
+  assert.throws(() => counterEvents("x/y"), /bad event/);
+  assert.equal(cyclesPerGuestCycle({ counters: { cycles: 1e9 }, guestTicks: 1e8 }), 10);
+  // Two runs, two arms, lanes rotated: arm 1 has twice the misses of arm 0.
+  const arm = (lane, ticks, ev) => ({ lane, cold: { guestTicks: ticks, counters: { l1i_cache_refill: ev } } });
+  const runs = [{ arms: [arm(0, 1e6, 100), arm(1, 1e6, 200)] }, { arms: [arm(1, 1e6, 100), arm(0, 1e6, 200)] }];
+  const st = frontEndStats(runs, ["l1i_cache_refill"]);
+  assert.deepEqual(st.l1i_cache_refill.perArm, [0.1, 0.2]);
+  assert.equal(Math.round(st.l1i_cache_refill.effects.arms[0].laneCorrected), 100);
+});
