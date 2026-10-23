@@ -282,6 +282,45 @@ million console lines, the browser process at 7-14 GB).
 - [x] **35 regions dropped on every second launch** (KPI, d18249e, and locally): installed during the OS init, they were dropped by invalidations (icbi or DMA) over their ranges, and the code then ran in the block JIT for the session. Patch 0085: an invalidation over an installed region marks it unverified instead; before it next runs it is checked against the plan's hashes (as after a cache clear), and dropped only if its code changed. A region with a member that has no hash, or an HLE hook installed at an entry since, is dropped (a hook changes no byte); a forced invalidation (breakpoints) drops at once, as before; a region already due for a check is skipped by later invalidations. `DolphinWeb_AotRegionRechecks` counts the regions kept for a check, the checks passed and the regions invalidations looked at.
 - [ ] **Second-launch TTFF +0.8 s** (first core frame 1.55 s against 0.72 s cold): the region cache read and compiled before the boot (`installBeforeBoot`). Load fewer modules before the boot, the rest after (target 10 s, today 2.05 s).
 
+## FPU ops interpreted inside a region (patch 0105, 2026-10-22)
+
+An FPU op the direct tier does not emit (the Rc forms, `mffs`, `mtfsf`,
+the paired-single ops 0087 leaves to helpers, ...) used to end the
+region's block: the region left for one op, the cached interpreter ran the
+rest of the block, and the block chain came back at the next region entry
+(~240 000 times a second on the race before 0087). In region translation it
+is now a helper call, `EmitFpCall` or `EmitInterpretCall` (the mixed tier's
+`allow_interpret_fallback`): dirty GPRs are stored before it, its outputs
+are reloaded after it, and a halt returns 2. That is every FPU op that
+cannot end a block (`RegionInterpretsInline`), the paired-single loads and
+stores included: `psq_lx`, `psq_stx`, `psq_lux`, `psq_stux`, and
+`psq_lu`/`psq_stu` with rA = 0 now run inside the region. System, cache and
+branch ops, which may change the MSR, the translation or the code, still end
+the region, which does not check the CPU's mode between its blocks. In
+region code the fallback only takes those ops: any other op the emitter
+refuses fails the block. Compiler version 6.
+
+## Lazy CR and fused compare-branch (patch 0111, 2026-10-22)
+
+A compare (`cmp*`, Rc=1) in region code was a three-way `if/else` that
+wrote two words and read `xer_so_ov` (51 wasm instructions). It is now
+one i64 store: A - B with both operands extended (signed or not), and bit
+59 (SO) cleared. In Dolphin's format that reads as the interpreter's: LT
+is bit 62, GT is (s64) > 0, EQ is a zero low word. A `bc` later in the
+block on that field compares the operands again, as long as no op in
+between writes them or the field (`regsOut`, `crOut`, `system` and the HLE
+calls). The store stays, so every exit sees the exact CR.
+
+SO must be clear for this. Regions refuse to run while XER.SO is set
+(TryRunRegion, RegionWouldRun, RegionChainNext, and each fragment at its
+entry, which returns 1), and the ops that can set it (`mtxer`, `mcrxr`,
+the OE forms) run outside them. A zero difference is stored with bit 63
+set, as the interpreter does: block code reads GT as "bit 63 clear"
+(`mfcr`), so an EQ field must never be 0. In a V8
+microbenchmark the lazy store without the fused branch was slower on
+unpredictable branches (+14 to +30 %), so the two ship together. Compiler
+version 10 (7 to 9 are taken by 0108 to 0110).
+
 ## MMU mode (patch 0091, with dispatch's 0090, 2026-10-22)
 
 Under the MMU (bMMU, set by a game's INI) no wasm code of ours runs. The
@@ -294,6 +333,47 @@ cache translated in a session without the MMU (`RegionInstallable`,
 counted by `DolphinWeb_AotRegionsSkippedMmu`). MMU games keep the
 CachedInterpreter with `aot=1`. Lifted once faults are delivered from our
 code (deferred delivery on the slow paths: backlog).
+
+## Memory-access counts (patch 0117, 2026-10-22)
+
+`DolphinWeb_MemAccessStats(reset)` returns a 192-byte struct, layout v1
+agreed with the harness (`race-perf --mem-stats`): guest instructions,
+memory instructions by kind (integer, FP and paired-quantized loads and
+stores), slow accesses by kind, `cyclesCovered`/`cyclesTotal`, the regions'
+estimates and `staticSaturations`. `reset >= 0` zeroes it and turns counting
+on at the next slice boundary; the CPU thread writes the struct whole at each
+boundary, so read it as a seqlock (copies until two agree). The first reset
+clears the JIT cache: race-perf resets, waits `--mem-warm` seconds, then
+resets again for its window, so recompiles stay out of it. Slow accesses are
+counted once per instruction, after it ran, and not when it faulted.
+
+- **Blocks**: every block end (`EndBlock`, a `RunWasmBlock` that ends its
+  block) carries an index into interned static counts taken where its
+  downcount is, so the counts and the cycles they cover agree. Executions
+  that leave a block early (an exception, a halted wasm block) are not
+  counted and show in `cyclesCovered`.
+- **Slow accesses**: served by Dolphin's MMU or interpreter instead of a
+  direct RAM access: the emitter's `read_*`/`write_*`, `lfs`/`lfd`/`stfs`
+  helpers, memory instructions the helpers hand to the interpreter, the
+  cached interpreter's fast instructions outside MEM1, and the memory
+  instructions a cached-interpreter block interprets (static, every
+  execution). They include those of regions.
+- **Regions**: their cycles times their code's static accesses and
+  instructions per cycle, computed while counting (at install, or for every
+  installed region when counting starts). Added with the region stats on
+  only, so region dispatch is main's otherwise; race-perf resets both.
+- **Flags** (v1's spares, offsets 160 to 184): block instructions that write
+  a CR field, read one, set XER[CA], read it (the analyzer's `crOut`, `crIn`,
+  `outputCA`, `wantsCA`), for the lazy-CR lever
+  (research/deep-cr-flags.md). Blocks only, like the accesses.
+
+Cost with stats off: none on the block path. The counts ride on a
+`CountMemBlock` callback written before each block end only while stats are
+on; the reset clears the JIT cache so every block is emitted again with it
+(a first version that tested a flag in `EndBlock` cost 2 % on the race). The
+slow-path counters sit in the MMU arms and the helpers. Tests:
+`tests/mem-access-stats.test.mjs` (the Node core has no CachedInterpreter
+instance: block counts are checked in a browser run).
 
 ## Installs in the throttle sleep (patch 0107, 2026-10-22)
 
@@ -315,17 +395,59 @@ a running CachedInterpreter installs in its sleeps. The installability checks
 a sleep's deadline after its installs x 100, slice installs after the wait
 ran out], reset with the session's regions, in the region stats reply as
 `regionSleep`; sleep installs stay out of `installMaxSliceMs`. The lateness
-is the proof that no frame paid: 0 when every sleep kept its deadline. If p95 > 3 ms remains, the
+is the proof that no frame paid: 0 when every sleep kept its deadline.
+Patch 0122: with larger modules (continuation fragments) the estimate ran
+short, up to 2.2 ms past a deadline. The installability checks are now learned
+per byte too and added to the estimate, both rates learn from every module of
+64 KB or more (not 256 KB), and in a sleep the time left is read again before
+each install, the next module counted ×1.5 plus the 1 ms margin. If p95 > 3 ms remains, the
 next lever is a size cap with split modules (coordinated with dispatch: lever
 C and #75's chaining are intra-module).
 
-## Fragment size cap (patch 0115, 2026-10-23)
+## Continuation fragments (2026-10-23)
 
-A fragment stops taking blocks once it holds 96 KB of code (the blocks'
-bodies and their tails); the blocks left out run outside the region. In a
-race on main, the three fragments of more than ~1.7 MB of Liftoff code
-(about 500 KB of body) never reached TurboFan in 157 s, while fragments of
-570 to 760 KB of Liftoff code did: V8's optimizing tier gives up on
-functions that big. 96 KB of wasm body is also under JavaScriptCore's 100,000-byte
-limit for its optimizing tier. Compiler version 14 (6 to 13 are taken by the region
-codegen patches 0105 to 0114).
+A function whose first fragment is capped (64 blocks, or 96 000 bytes of
+code: the byte cap of 0130) used to leave its other blocks to the dispatcher
+and the block JIT at every pass: in a CPU-bound intro scene 77 % of the CPU
+thread's time, 2.2 M region exits per 4 s to PCs of the same function that no
+fragment held. `translateWithContinuations` (aot-orchestrator.js) now decodes
+the function's direct branches from guest memory and follows its frontier:
+the leaders (targets of b/bc without link, bc fall-throughs, inside its
+ranges) that a branch in a held block reaches and no fragment holds. Each
+starts a continuation fragment of the same module: the jump there is a
+direct return_call, `claimEntries` keeps each PC's first owner. A literal
+after a block end is in no block, so it is never followed. Each continuation
+stays under 96 000 bytes on its own (fewer blocks until it fits, a single
+block over it is refused); at most 31 continuations and 2 MB per function,
+1 MB per module (it must still fit a throttle sleep), and the translator
+yields to the worker inside a function's continuations. The formation (2) is
+hashed into the region key, so a cache formed before is translated again.
+Measured (Mac, aot=1, seeded, video=null, emulated window 6 guest s): the
+intro scene +31.3 % (regionCycleShare 0.55 → 0.90), the race at its cap with
++1.9 % CPU headroom. A block whose first op the translator refuses (dcbz)
+stays an exit.
+
+## Byte swaps as rotates (patch 0126, 2026-10-23)
+
+In region code, a 32-bit byte swap (32-bit guest loads and stores) is
+`(rotl(x, 8) & 0x00ff00ff) | (rotr(x, 8) & 0xff00ff00)`, the form LLVM
+emits: 11 wasm instructions instead of 21 (local.get, constants, shifts,
+masks and ors). Blocks keep the old form,
+so their bytes and cache keys don't change. Compiler version 17. (Written
+as 0108 on the region stack; renumbered after 0111 so the series applies
+in order.)
+
+## Fragment size cap (patch 0130, 2026-10-23)
+
+A fragment stops taking blocks once their bodies hold 96 000 bytes of code;
+the blocks left out run in continuation fragments, or outside the region.
+The fragment's code (bodies plus tails and dispatch) is then at least that
+size, so `translateWithContinuations` (same constant,
+`REGION_FRAGMENT_MAX_BYTES`) sees it as capped. In a race on main, the three
+fragments of more than ~1.7 MB of Liftoff code (about 500 KB of body) never
+reached TurboFan in 157 s, while fragments of 570 to 760 KB of Liftoff code
+did: V8's optimizing tier gives up on functions that big. 96 KB of wasm body
+is also under JavaScriptCore's 100,000-byte limit for its optimizing tier.
+Compiler version 22 (18 to 21 are taken by 0123 and 0127 to 0129). First
+measured as 0115 (#131, counting a 64-byte tail per block); renumbered so
+the series applies in order.

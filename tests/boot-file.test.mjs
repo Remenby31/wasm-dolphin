@@ -1,7 +1,7 @@
 import assert from "node:assert/strict";
 import test from "node:test";
 
-import { bootFileKind, checkExecutable } from "../src/boot-file.js";
+import { bootFileKind, checkExecutable, dffGameId } from "../src/boot-file.js";
 
 function dol({ entry = 0x80003100, offset = 0x100, size = 0x40 } = {}) {
   const head = new Uint8Array(0x100);
@@ -48,4 +48,42 @@ test("an executable gets Dolphin's file-name game ID", async () => {
   assert.equal(executableGameId("/workerfs/gxSprites.dol"), "ID-gxSprites");
   assert.equal(executableGameId("demo.v2.elf"), "ID-demo.v2");
   assert.equal(executableGameId("noext"), "ID-noext");
+});
+
+test("a FIFO log (.dff) boots through FifoPlayer when its header says so", () => {
+  assert.equal(bootFileKind("gxscene.DFF"), "dff");
+  const head = new Uint8Array(0x100);
+  new DataView(head.buffer).setUint32(0, 0x0d01f1f0, true);
+  assert.deepEqual(checkExecutable("dff", head, 4096), { kind: "dff", entryPoint: null, gameId: "" });
+  assert.throws(() => checkExecutable("dff", new Uint8Array(0x100), 4096), /Not a FIFO log/);
+  const bigEndian = new Uint8Array(0x100);
+  new DataView(bigEndian.buffer).setUint32(0, 0x0d01f1f0, false);
+  assert.throws(() => checkExecutable("dff", bigEndian, 4096), /Not a FIFO log/);
+});
+
+// #111 review: Dolphin names a FIFO log's session after the log's game ID
+// (FileHeader.gameid, 8 bytes at 96), none for the default "00000000".
+test("a FIFO log's game ID comes from its header", () => {
+  const head = new Uint8Array(0x100);
+  new DataView(head.buffer).setUint32(0, 0x0d01f1f0, true);
+  head.set(new TextEncoder().encode("HBRA01"), 96);
+  assert.equal(checkExecutable("dff", head, 4096).gameId, "HBRA01");
+  head.set(new TextEncoder().encode("00000000"), 96);
+  assert.equal(dffGameId(head), "");
+});
+
+// #111 review: FifoPlayer writes a log's memory updates as given, so the
+// app neither offers nor boots a .dff; only ?fifolog=1 (harness) does.
+test("a FIFO log boots only behind ?fifolog=1", async () => {
+  const { readFile } = await import("node:fs/promises");
+  const read = (p) => readFile(new URL(p, import.meta.url), "utf8");
+  const [html, host, adapter, worker] = await Promise.all(
+    ["../index.html", "../src/core-host.js", "../src/upstream-worker-adapter.js", "../src/upstream-discio-worker.js"].map(read)
+  );
+  assert.doesNotMatch(html.match(/id="romInput"[^>]*>/)[0], /\.dff/);
+  assert.match(host, /get\("fifolog"\) === "1"/);
+  assert.match(adapter, /fifoLog: this\.fifoLog/);
+  assert.match(worker, /fifoLog: payload\.fifoLog/);
+  assert.match(worker, /fifoLogBoot = Boolean\(fifoLog\)/);
+  assert.match(worker, /bootKind === "dff" && !fifoLogBoot\) throw/);
 });

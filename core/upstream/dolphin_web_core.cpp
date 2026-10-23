@@ -778,6 +778,11 @@ void EnsureRuntime()
   const bool efb_access = EM_ASM_INT({ return (typeof Module !== 'undefined' &&
                                                Module['dolphinEfbAccess']) ? 1 : 0; }) != 0;
   Config::SetBase(Config::GFX_HACK_EFB_ACCESS_ENABLE, efb_access);
+  // ?efbcopyram=1 (Module['dolphinEfbCopyRam']): EFB copies also land in
+  // guest RAM, as upstream's GameINIs ask with EFBToTextureEnable=False.
+  const bool efb_copy_ram = EM_ASM_INT({ return (typeof Module !== 'undefined' &&
+                                                 Module['dolphinEfbCopyRam']) ? 1 : 0; }) != 0;
+  Config::SetBase(Config::GFX_HACK_SKIP_EFB_COPY_TO_RAM, !efb_copy_ram);
   // Fill the canvas with the XFB, as the software presenter does. Dolphin's
   // default analog aspect pillarboxes a 640-wide XFB to ~583 pixels, so the
   // hardware path showed every game narrower than the software one.
@@ -1040,7 +1045,7 @@ int SetCpuThread(int enabled)
 // Tests (patch 0097): the value Dolphin's game config gives an allowlisted
 // setting (tools/gamesettings-allowlist.json) for a disc ID and revision from
 // the INIs under /dolphin-sys/GameSettings, as the game's boot reads it: MMU
-// (System::Initialize, IsMMUMode), SafeTextureCacheColorSamples and
+// (System::Initialize, IsMMUMode), FPRF (patch 0121), SafeTextureCacheColorSamples and
 // XFBToTextureEnable (GFX_HACK_SKIP_XFB_COPY_TO_RAM); booleans
 // as 0/1. The global game layer is added for the read and removed after; -1
 // when a game's layer is already there (a game is running), which this must
@@ -1051,13 +1056,15 @@ EMSCRIPTEN_KEEPALIVE
 int GameConfigValueForTest(const char* game_id, int revision, const char* setting)
 {
   const std::string_view name = setting;
-  if (name != "MMU" && name != "SafeTextureCacheColorSamples" && name != "XFBToTextureEnable")
+  if (name != "MMU" && name != "FPRF" && name != "SafeTextureCacheColorSamples" &&
+      name != "XFBToTextureEnable")
     return -2;
   if (Config::GetLayer(Config::LayerType::GlobalGame))
     return -1;
   Config::AddLayer(ConfigLoaders::GenerateGlobalGameConfigLoader(game_id, static_cast<u16>(revision)));
   const int value =
       name == "MMU"                  ? (Config::Get(Config::MAIN_MMU) ? 1 : 0) :
+      name == "FPRF"                 ? (Config::Get(Config::MAIN_FPRF) ? 1 : 0) :
       name == "XFBToTextureEnable"   ? (Config::Get(Config::GFX_HACK_SKIP_XFB_COPY_TO_RAM) ? 1 : 0) :
                                        Config::Get(Config::GFX_SAFE_TEXTURE_CACHE_COLOR_SAMPLES);
   Config::RemoveLayer(Config::LayerType::GlobalGame);

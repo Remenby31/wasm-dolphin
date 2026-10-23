@@ -42,6 +42,8 @@ export async function loadOracleCore(coreDir = new URL("../../cores/dolphin/", i
   const view = () => new Uint32Array(module.HEAPU8.buffer, base, MAX_WORDS + 3 * STATE_WORDS + 4);
   return {
     has: (name) => typeof module[`_${name}`] === "function",
+    // Patch 0121: FPRF on or off for every tier (Config::MAIN_FPRF).
+    setFprf: (on) => module._DolphinWeb_SetFprfForTest(on ? 1 : 0),
     // Region modules (P4): pc, npc and downcount offsets in PowerPCState, version.
     stateLayout() {
       const ptr = module._malloc(16);

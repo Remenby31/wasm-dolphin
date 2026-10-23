@@ -104,12 +104,20 @@ function lookup(ip, t) {
 function perfSamples(file) {
   // perf script -F pid,tid,time,ip --ns   (perf record -k mono, same clock as
   // base::TimeTicks on Linux, which stamps the jitdump records)
+  // With perf record -g the ip is not on the header line: the call chain
+  // follows, one frame per indented line, leaf first; the leaf is the sample.
   const out = [];
+  let pending = null;
   for (const line of readFileSync(file, "utf8").split("\n")) {
-    const m = /^\s*(\d+)\/(\d+)\s+(\d+)\.(\d+):\s+([0-9a-f]+)/.exec(line);
-    if (!m) continue;
-    const t = BigInt(m[3]) * 1_000_000_000n + BigInt(m[4].padEnd(9, "0").slice(0, 9));
-    out.push({ pid: +m[1], tid: +m[2], t, ip: BigInt("0x" + m[5]), thread: null, w: 1 }); // perf samples on-CPU only
+    const m = /^\s*(\d+)\/(\d+)\s+(\d+)\.(\d+):\s*([0-9a-f]+)?\s*$/.exec(line);
+    if (m) {
+      const t = BigInt(m[3]) * 1_000_000_000n + BigInt(m[4].padEnd(9, "0").slice(0, 9));
+      const s = { pid: +m[1], tid: +m[2], t, ip: null, thread: null, w: 1 }; // perf samples on-CPU only
+      if (m[5]) { s.ip = BigInt("0x" + m[5]); out.push(s); pending = null; } else pending = s;
+      continue;
+    }
+    const f = pending && /^\s+([0-9a-f]+)\b/.exec(line);
+    if (f) { pending.ip = BigInt("0x" + f[1]); out.push(pending); pending = null; }
   }
   return out;
 }

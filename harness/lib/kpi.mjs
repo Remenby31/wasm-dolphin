@@ -17,12 +17,15 @@
 // PC extrapolation, the discovery coverage, the memory cost), or "n/a".
 
 // What a result file is, from its content (never from its directory name).
+import { gameFpsTarget } from "./matrix.mjs";
+
 export function classify(json, file = "") {
   if (!json || typeof json !== "object") return null;
   if (json.locked === false) return null; // a plumbing check (--no-lock), not a measure
   if (json.probe === "race-perf" || (json.state && json.candidate && "change" in json && json.query)) return "race-perf";
   if (json.probe === "ttff") return "ttff";
   if (json.probe === "first-launch") return "first-launch";
+  if (json.probe === "first-launch-ramp") return "first-launch-ramp";
   if (json.decision && json.correctness) return "gate";
   if (json.interpQuery && json.jitQuery && Array.isArray(json.results)) return "fuzz";
   if (json.spec?.name && /freeze/.test(json.spec.name) && Array.isArray(json.results)) return "freeze-loop";
@@ -89,6 +92,28 @@ export function trunkSide(r, trunk, { config = null } = {}) {
 
 // Speed measured on this Mac's stock Chrome: an E-core wrapper or extra
 // flags measure something else (the P9 extrapolation).
+// What a side ran on, for comparing two summaries: the machine (spark-run
+// stamps `host`; none = this Mac) and the Chrome arguments, shared and the
+// side's own. Absent arguments are none: before PR #145 a Spark summary had
+// none (race-multi recorded no chrome at all), after it the V8 flag; the two
+// must never be compared.
+export function setupOf(json, side = "candidate") {
+  const args = [json?.chrome?.args ?? "", json?.chrome?.sideArgs?.[side] ?? ""].map((a) => String(a).trim()).filter(Boolean).join(" ");
+  return { host: json?.host ?? null, chromePath: json?.chrome?.path ?? null, chromeArgs: args };
+}
+
+// Why two setups are not comparable ([] when they are).
+export function setupDifferences(a, b) {
+  const why = [];
+  if (a.host !== b.host) why.push(`machine ${a.host ?? "Mac"} ≠ ${b.host ?? "Mac"}`);
+  if (a.chromeArgs !== b.chromeArgs) why.push(`arguments Chrome « ${a.chromeArgs || "aucun"} » ≠ « ${b.chromeArgs || "aucun"} »`);
+  if (a.chromePath && b.chromePath && a.chromePath !== b.chromePath) why.push(`Chrome ${a.chromePath} ≠ ${b.chromePath}`);
+  return why;
+}
+
+// Trunk's race rows: this Mac's stock Chrome, no arguments (absoluteRace).
+export const TRUNK_SETUP = Object.freeze({ host: null, chromePath: "chrome stable", chromeArgs: "" });
+
 export const stockChrome = (json) => !json.chrome || (json.chrome.path === "chrome stable" && !json.chrome.args && !Object.keys(json.chrome.sideArgs ?? {}).length);
 
 // Absolute numbers (race speed, p99, shares) come from night measures, run
@@ -152,6 +177,8 @@ const p4Why = (j, side) => {
 const raceFailures = (j, side) => (j.failed ?? []).filter((f) => f.side === side && f.why !== "overloaded" && f.why !== "infra").map((f) => `run ${f.run} : ${f.why}`);
 const launchFailures = (phase) => (phase?.failed ?? []).map((f) => `run ${f.run} : ${f.error}`);
 // Why a TTFF phase has no value: runs left out (overloaded machine, Chrome lost by the harness).
+const rampFailures = (j) => (j.failed ?? []).map((f) => `run ${f.run} : ${f.why}`);
+const rampDetail = (j) => `95 % à ${j.timeToFullMs?.median ?? "n/a"} ms, plateau ${j.plateauSpeed?.median ?? "?"} %, 90 % du plateau à ${j.timeToTail90Ms?.median ?? "n/a"} ms, régions ${j.regionsAt90?.median ?? "?"} à 90 % / ${j.regionsAtEnd?.median ?? "?"} en fin (${j.windowSec} s après la scène)`;
 const ttffWhy = (j, phase) => [
   j.overloadedRuns?.length ? `runs ${j.overloadedRuns.join(", ")} lancées sur machine surchargée, exclues` : null,
   j[phase]?.infra?.length ? `runs ${j[phase].infra.map((x) => x.run).join(", ")} perdues par le harnais (pipe CDP), exclues` : null
@@ -187,9 +214,17 @@ export const KPI_ROWS = [
   // bound, from race-perf --headroom; read only from a run that slept in the
   // throttle (headroomApplies), otherwise the game is under 100 % and the
   // speed row says it.
-  { id: "macHeadroomProduct", group: "Leviers", label: "Marge Mac M4 Pro, config produit (headroom à speed=1)", target: 160, unit: "%", better: "higher", from: "race-perf", config: "product", read: headroomPct, why: headroomWhy, failures: raceFailures },
+  // The product KPI (judge, 2026-10-23): with SyncOnSkipIdle off the
+  // product's emulated time runs ahead of its rendering, so its speed and
+  // headroom overstate it; what the player gets is the game images per host
+  // second. Target: 95 % of the scene's native rate (matrix.mjs
+  // SCENE_NATIVE_FRAMES_PER_VI, measured on a coupled reference).
+  { id: "macGameFpsProduct", group: "Leviers", label: "Images de jeu utiles par seconde, Mac M4 Pro, config produit", target: null, targetOf: (j) => gameFpsTarget(j.state), unit: "i/s", better: "higher", from: "race-perf", config: "product", read: (j, s) => med(cold(j, s)?.gameFramesPerSecond), why: headroomWhy, failures: raceFailures },
+  { id: "macGameFpsProductAot", group: "Leviers", label: "Images de jeu utiles par seconde, config produit avec aot=1 (trajectoire, hors statut global)", target: null, targetOf: (j) => gameFpsTarget(j.state), unit: "i/s", better: "higher", from: "race-perf", config: "productAot", counted: false, read: (j, s) => med(cold(j, s)?.gameFramesPerSecond), why: headroomWhy, failures: raceFailures },
+  { id: "macHeadroomProduct", group: "Leviers", label: "Marge Mac M4 Pro, config produit (headroom à speed=1, découplée tant que SyncOnSkipIdle=false, hors statut global)", target: 160, unit: "%", better: "higher", from: "race-perf", config: "product", counted: false, read: headroomPct, why: headroomWhy, failures: raceFailures },
   { id: "macHeadroomProductAot", group: "Leviers", label: "Marge Mac M4 Pro, config produit avec aot=1 (trajectoire, hors statut global)", target: 160, unit: "%", better: "higher", from: "race-perf", config: "productAot", counted: false, read: headroomPct, why: headroomWhy, failures: raceFailures },
-  { id: "macHeadroom", group: "Leviers", label: "Marge Mac M4 Pro, rendu matériel wgpu (trajectoire, hors statut global)", target: 160, unit: "%", better: "higher", from: "race-perf", config: "default", counted: false, read: headroomPct, why: headroomWhy, failures: raceFailures },
+  { id: "macHeadroom", group: "Leviers", label: "Marge Mac M4 Pro, rendu matériel wgpu (KPI CPU/GPU en mode couplé)", target: 160, unit: "%", better: "higher", from: "race-perf", config: "default", read: headroomPct, why: headroomWhy, failures: raceFailures },
+  { id: "macHeadroomAot", group: "Leviers", label: "Marge Mac M4 Pro, wgpu + aot=1 (trajectoire piste 3, hors statut global)", target: 160, unit: "%", better: "higher", from: "race-perf", config: "aot", counted: false, read: headroomPct, why: headroomWhy, failures: raceFailures },
   { id: "macSpeedProduct", group: "Leviers", label: "Vitesse course, Mac M4 Pro, config produit (vitesse mesurée, plafonnée par speed=, hors statut global)", target: 100, unit: "%", better: "higher", from: "race-perf", config: "product", counted: false, read: (j, s) => med(cold(j, s)?.speed), failures: raceFailures },
   { id: "macSpeedProductAot", group: "Leviers", label: "Vitesse course, Mac M4 Pro, config produit avec aot=1 (trajectoire, hors statut global)", target: 160, unit: "%", better: "higher", from: "race-perf", config: "productAot", counted: false, read: (j, s) => med(cold(j, s)?.speed), failures: raceFailures },
   { id: "macSpeed", group: "Leviers", label: "Vitesse course, Mac M4 Pro, rendu matériel wgpu (trajectoire, hors statut global)", target: 160, unit: "%", better: "higher", from: "race-perf", config: "default", counted: false, read: (j, s) => med(cold(j, s)?.speed), failures: raceFailures },
@@ -209,6 +244,12 @@ export const KPI_ROWS = [
   { id: "aotcompilerMemory", group: "Garde-fous", label: "Surcoût mémoire aotcompiler", target: 150, unit: "Mo", better: "lower", from: "manual" },
   { id: "optimisationMs", group: "Expérience joueur", label: "Durée d'optimisation au 1er lancement", target: 60000, unit: "ms", better: "lower", from: "first-launch", read: (j) => j.p7?.durationMs ?? null, why: (j) => j.p7Why ?? null, failures: (j) => (j.p7?.failedFirst ?? []).map((f) => `run ${f.run} : ${f.why}`) },
   { id: "secondLaunchRecompiled", group: "Expérience joueur", label: "Régions recompilées au 2e lancement", target: 0, unit: "", better: "zero", from: "first-launch", read: (j) => j.p7?.secondLaunchCompiled ?? null, why: (j) => j.p7Why ?? null, failures: (j) => [...(j.p7?.failedFirst ?? []), ...(j.p7?.failedSecond ?? [])].map((f) => `run ${f.run} : ${f.why}`) },
+  // First-launch ramp (first-launch-ramp.mjs): a fresh profile, aot=1, time
+  // to 90 % speed held 5 s. Target 15 s, to be set against the first
+  // measure; the heavy scene is CPU-bound under 90 % (2026-10-23: ~60 %),
+  // so it stays out of the global status and its detail gives the plateau.
+  { id: "firstLaunchRampRace", group: "Expérience joueur", label: "Rampe du 1er lancement (profil vierge, aot=1) : temps jusqu'à 90 % de vitesse, course", target: 15000, unit: "ms", better: "lower", from: "first-launch-ramp", match: (j) => j.scene === "race", read: (j) => j.timeTo90Ms?.median ?? null, detail: rampDetail, failures: rampFailures },
+  { id: "firstLaunchRampHeavy", group: "Expérience joueur", label: "Rampe du 1er lancement (profil vierge, aot=1) : temps jusqu'à 90 % de vitesse, scène lourde (hors statut global)", target: 15000, unit: "ms", better: "lower", from: "first-launch-ramp", counted: false, match: (j) => j.scene === "heavy", read: (j) => j.timeTo90Ms?.median ?? null, detail: rampDetail, failures: rampFailures },
   { id: "ttffColdProduct", group: "Expérience joueur", label: "Time-to-first-frame, à froid, config produit", target: 10000, unit: "ms", better: "lower", from: "ttff", config: "product", read: (j) => med(j.cold?.firstContentMs), why: (j) => ttffWhy(j, "cold"), failures: (j) => launchFailures(j.cold) },
   { id: "ttffWarmProduct", group: "Expérience joueur", label: "Time-to-first-frame, à chaud, config produit", target: 10000, unit: "ms", better: "lower", from: "ttff", config: "product", read: (j) => med(j.warm?.firstContentMs), why: (j) => ttffWhy(j, "warm"), failures: (j) => launchFailures(j.warm) },
   { id: "ttffCold", group: "Expérience joueur", label: "Time-to-first-frame, à froid, rendu matériel wgpu (hors statut global)", target: 10000, unit: "ms", better: "lower", from: "ttff", config: "default", counted: false, read: (j) => med(j.cold?.firstContentMs), why: (j) => ttffWhy(j, "cold"), failures: (j) => launchFailures(j.cold) },
@@ -232,7 +273,7 @@ export function meets(row, value) {
 // results: [{ kind, json, file, mtimeMs, extra? }]; trunk: Set of the
 // commits of origin/main's first-parent history; manual: { id → { value,
 // source, at, note } } or { error } when the file could not be read.
-export function kpiTable(results, manual = {}, { trunk = new Set(), accept = { "race-perf": absoluteRace } } = {}) {
+export function kpiTable(results, manual = {}, { trunk = new Set(), accept = { "race-perf": absoluteRace, "first-launch-ramp": absoluteRace } } = {}) {
   return KPI_ROWS.map((row) => {
     const base = { id: row.id, group: row.group, label: row.label, target: row.target, unit: row.unit, better: row.better, counted: row.counted !== false, caveat: row.caveat ?? null };
     if (row.from === "manual") {
@@ -243,7 +284,7 @@ export function kpiTable(results, manual = {}, { trunk = new Set(), accept = { "
       return { ...base, value: m.value, status: statusOf(meets(row, m.value)), nature: "declared", source: m.source ?? null, at: m.at ?? null, detail: m.note ?? null };
     }
     const kinds = [row.from].flat();
-    const ofKinds = results.filter((r) => kinds.includes(r.kind));
+    const ofKinds = results.filter((r) => kinds.includes(r.kind) && (!row.match || row.match(r.json)));
     const all = ofKinds.filter((r) => !accept[r.kind] || accept[r.kind](r.json));
     const refused = ofKinds.length - all.length;
     const onTrunk = all.map((r) => ({ r, t: trunkSide(r, trunk, { config: row.config }) })).filter((x) => x.t).sort((a, b) => resultTime(b.r) - resultTime(a.r));
@@ -257,6 +298,12 @@ export function kpiTable(results, manual = {}, { trunk = new Set(), accept = { "
     const failures = row.failures?.(r.json, t.side, r.kind) ?? [];
     if (failures.length) return { ...base, value, status: "KO", nature: "measured", ...source, why: `${failures.length} run(s) en échec : ${failures.join(" ; ")}` };
     if (value == null) return { ...base, value: null, status: "n/a", nature: "n/a", ...source, why: row.why?.(r.json, t.side) ?? "valeur absente du résultat" };
+    // A target that depends on the scene (targetOf): taken from the result.
+    if (row.targetOf) {
+      const target = row.targetOf(r.json);
+      if (target == null) return { ...base, value, status: "n/a", nature: "measured", ...source, why: `scène ${r.json.state ?? "?"} sans référence d'images par VI mesurée (matrix.mjs SCENE_NATIVE_FRAMES_PER_VI)` };
+      return { ...base, target, value, status: statusOf(meets({ ...row, target }, value)), nature: "measured", ...source, detail: row.detail?.(r.json, t.side, r.kind) ?? `cible ${target} i/s = 95 % du rythme natif de la scène ${r.json.state}` };
+    }
     return { ...base, value, status: statusOf(meets(row, value)), nature: "measured", ...source, detail: row.detail?.(r.json, t.side, r.kind) ?? null };
   });
 }
@@ -281,7 +328,9 @@ export function candidateColumn(r, { label = null, note = null } = {}) {
   const served = servedSides(r).candidate;
   const query = new URLSearchParams(String(r.json.query ?? ""));
   const flags = ["aot", "wasmjit", "jitoffthread"].filter((k) => query.has(k)).map((k) => `${k}=${query.get(k)}`).join("&");
-  const header = { label: label ?? String(r.json.sides?.candidate ?? "candidate").split("/").pop(), note, maxLoad: r.json.maxLoad ?? null, source: r.file, commit: served?.commit ?? null, dirty: served?.dirty ?? null, flags, at: new Date(resultTime(r)).toISOString() };
+  const header = { label: label ?? String(r.json.sides?.candidate ?? "candidate").split("/").pop(), note, maxLoad: r.json.maxLoad ?? null, source: r.file, commit: served?.commit ?? null, dirty: served?.dirty ?? null, flags, at: new Date(resultTime(r)).toISOString(),
+    // Another machine or other Chrome arguments than trunk's rows: shown, flagged.
+    setupDifferences: setupDifferences(setupOf(r.json, "candidate"), TRUNK_SETUP) };
   const values = {};
   for (const row of KPI_ROWS) {
     if (![row.from].flat().includes("race-perf")) continue;
@@ -289,7 +338,8 @@ export function candidateColumn(r, { label = null, note = null } = {}) {
     if (!fitsConfig(r, "candidate", row.config)) continue;
     const value = row.read(r.json, "candidate", r.kind);
     const failures = row.failures?.(r.json, "candidate", r.kind) ?? [];
-    values[row.id] = { value, status: failures.length ? "KO" : statusOf(meets(row, value)), why: failures.length ? `${failures.length} run(s) en échec` : value == null ? row.why?.(r.json, "candidate") ?? null : null };
+    const rowT = row.targetOf ? { ...row, target: row.targetOf(r.json) } : row;
+    values[row.id] = { value, status: failures.length ? "KO" : statusOf(rowT.target == null && row.targetOf ? null : meets(rowT, value)), why: failures.length ? `${failures.length} run(s) en échec` : value == null ? row.why?.(r.json, "candidate") ?? null : null };
   }
   return { ...header, values };
 }
@@ -312,6 +362,7 @@ export function kpiMarkdown(rows, { at = new Date().toISOString(), uptime = null
   }
   if (candidate) {
     lines.push(`Colonne « Candidat » : \`${candidate.label}\`${candidate.note ? `, ${candidate.note}` : ""}${candidate.flags ? ` (${candidate.flags})` : ""}${candidate.maxLoad != null ? `, max-load ${candidate.maxLoad}` : ""}, \`${candidate.source}\` @ ${candidate.commit ? candidate.commit.slice(0, 8) : "?"}${candidate.dirty ? " avec modifications locales" : ""}, ${candidate.at.slice(0, 16)}. Mesure d'une branche avant fusion, à titre de comparaison : elle ne compte pas dans l'état des KPI.`, "");
+    if (candidate.setupDifferences?.length) lines.push(`**Candidat NON comparable aux lignes de trunk** : ${candidate.setupDifferences.join(" ; ")}.`, "");
   }
   return lines.join("\n");
 }

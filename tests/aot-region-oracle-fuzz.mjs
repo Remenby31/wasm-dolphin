@@ -24,6 +24,8 @@ if (!core?.has("DolphinWeb_AotTestLoadState")) {
   console.error("this core has no region test exports (patch 0075)");
   process.exit(2);
 }
+// --fprf: FPRF on for every tier (Config::MAIN_FPRF, patch 0121); off by default.
+if (args.includes("--fprf")) core.module._DolphinWeb_SetFprfForTest(1);
 const t0 = performance.now();
 const tally = runOracleProgramsAsRegions(core, { seed, count: programs, length, mask });
 console.log(JSON.stringify({ ...tally, mismatches: tally.mismatches.slice(0, 3), mismatchCount: tally.mismatches.length, seconds: Math.round((performance.now() - t0) / 1000) }));

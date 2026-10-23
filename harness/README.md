@@ -154,6 +154,16 @@ node harness/probes/race-perf.mjs --iso ../roms/<disc>.iso --state ../measures/h
   past 6 readbacks in flight, `errors`) and `uniqueFpsEstimate` = the speed
   window's presents/s × that share; `cold.uniqueShare` and
   `cold.uniqueFpsEstimate` per side. WebGPU presents only (`video=wgpu`).
+- **Scene protocols** (`lib/matrix.mjs` `SCENE_PROTOCOLS`, judge 2026-10-23):
+  a KPI scene can pin how it is measured, by savestate name. The heavy intro
+  (`heavy-intro-13s.sav`) is a short phase, about 9 guest seconds from that
+  state: `--emulated-warmup 1 --emulated-window 6 --hold ""`, and with
+  `--region-sample` the region stats are reset and read around that same
+  window (not in a stats window after it, which would read another phase).
+  race-perf refuses a window over 8 s on it (an ew20 read 100 % / headroom
+  1.16 where 6 s read 57-62 % / 0.56) and warns about a longer warmup, a held
+  key or a host-time window; `summary.sceneProtocol` records the protocol and
+  the warnings.
 - `--headroom [--frames-per-vi-ref R]` (patch 0113, research/deep-headroom-kpi.md):
   the program's main KPI, measured at `speed=1` where the game runs as the
   player sees it. The core counters (`DolphinWeb_HeadroomStats`: throttle
@@ -165,7 +175,10 @@ node harness/probes/race-perf.mjs --iso ../roms/<disc>.iso --state ../measures/h
   `headroom` = the smaller one; guest s from the core's own ticks, written
   at the same instant as its host window. PushBlockingEvent and SyncGPU
   waits (off by default) count as CPU busy time;
-  plus `throttleSleepShare` and `xfbCopiesPerVi` (`cold.headroom` per run,
+  plus `throttleSleepShare`, `xfbCopiesPerVi` and `gameFramesPerSecond`
+  (XFB copies per host second: the game images the player gets, the product
+  KPI while SyncOnSkipIdle is off, since the product's emulated time then
+  runs ahead of its rendering) (`cold.headroom` per run,
   medians per side). Under 2 % of sleep the game runs below 100 %
   (`headroomApplies` false): the speed is then the number.
   Validity (every run, `lib/headroom.mjs` `invalidReasons`): a ring overflow
@@ -289,12 +302,13 @@ node harness/remote/spark-run.mjs --build <ref>           # its core built on th
 ## KPI probes and report
 
 The program's KPIs (PROGRAM.md, « KPI du programme ») that race-perf does not
-cover have their own probes. Both are timing measures: they take the perf
+cover have their own probes. They are timing measures: they take the perf
 lock and run in the MESURE slots only, headless, three runs by default.
 
 ```sh
 node harness/probes/ttff.mjs --iso ../roms/<disc>.iso --port 8082 [--config wgpu] [--runs 3]
 node harness/probes/first-launch.mjs --iso ../roms/<disc>.iso --port 8082 [--runs 3] [--timeout 600]
+node harness/probes/first-launch-ramp.mjs --iso ../roms/<disc>.iso --port 8082 --scene race --steps race-steps.json [--sec 90]
 node harness/kpi-report.mjs [--print]
 ```
 
@@ -312,7 +326,18 @@ node harness/kpi-report.mjs [--print]
   `lib/aot-progress.mjs`. A launch without "done" (or a second launch without
   its compiled count) is a failure with its reason. An engine without P7
   answers `p7: null` and n/a, exit 0.
-- Both record the served tree (commit, dirty) and the Chrome that ran, and
+- `first-launch-ramp.mjs`: the speed curve of a player's very first launch
+  with `aot=1` (added to `--config rec` unless the query says otherwise), on
+  a new, empty profile (no seed, unlike aot-warm-launch): disc handed over,
+  then `--steps` (to the race, or a click and the intro for `--scene heavy`),
+  then `--sec` seconds. Every second it drains the VI ring and reads the
+  region pipeline (`validationReadJitRegionStats`, read only). Per run
+  (`lib/ramp.mjs`): time to 90 % and to 95 % VI speed held 5 s, the plateau
+  (median of the last 10 s), the time to 90 % of that plateau (a CPU-bound
+  scene never reaches 90 %), and the per-second speed and installed/queued
+  region series. KPI: time to 90 %, target 15 s, one row per scene; a run
+  that never reaches 90 % fails the row.
+- They all record the served tree (commit, dirty) and the Chrome that ran, and
   leave out runs started on an overloaded machine (listed). `--no-lock`
   checks the plumbing in a CORRECTION slot; such results are not measures.
 - `kpi-report.mjs`: reads only. It classifies by content every `summary.json`,
@@ -320,9 +345,9 @@ node harness/kpi-report.mjs [--print]
   `harness/results`, and keeps only results measured on a clean commit of
   origin/main's first-parent history (`served`, or the run files next to an
   older summary; fetch origin first). Each KPI reads one result, the newest
-  of its kinds on trunk (race-perf: stock Chrome and night measures only,
-  a load limit of 6 at most, day pairs being relative; trunk's side of an
-  A/B), shown with its file, commit and date; it never falls back on an
+  of its kinds on trunk (race-perf and first-launch-ramp: stock Chrome on
+  this Mac and a load limit (`--max-load`) of 6 at most, whatever the hour;
+  runs at a higher limit only compare two sides; trunk's side of an A/B), shown with its file, commit and date; it never falls back on an
   older one. Failed runs make the row KO with their reasons. Output:
   `../measures/kpi/latest.{md,json}` and a dated copy, in PROGRAM.md's order,
   each row measured, declared or n/a. What no probe measures yet (PC
@@ -330,6 +355,12 @@ node harness/kpi-report.mjs [--print]
   `../measures/kpi/manual.json`:
   `{ "<kpi id>": { "value": <number>, "source": "…", "at": "…", "note": "…" } }`;
   an unreadable file turns those rows into n/a with the reason.
+  `--candidate <race-perf summary.json>` adds a column beside trunk's; a
+  candidate measured on another machine (`host`) or with other Chrome
+  arguments than trunk's stock Chrome is shown but flagged as not
+  comparable (`setupOf` / `setupDifferences` in `lib/kpi.mjs`: absent
+  arguments count as none, so Spark summaries from before and after the V8
+  flag of PR #145 never compare).
   A **candidate** column (a PR's head, measured before it merges) can sit
   beside trunk: `--candidate <race-perf summary.json> [--candidate-label …]`,
   or `../measures/kpi/candidate.json` `{ "summary": "<path from the program
@@ -405,6 +436,15 @@ apart, and stores it in the run's JSON as `freezeProbes` (at most 3
 episodes per run, each state cut at 64 KB). A served worker without that
 message gets none and the episode is recorded as `unsupported`. Evidence
 only: freezes are judged by coreFreeze as before.
+
+A third kind shows neither: the guest runs at speed, VI and presents go on,
+and the game draws nothing (no EFB-to-XFB copy). `probes/savestate-cycles.mjs`
+checks it around savestates: after the first load and after each of N loads
+or save-then-load cycles, XFB copies (headroom) and DrawDone signals
+(GPU sync) must move within `--settle` seconds; a stall fails the probe and
+prints the CP FIFO. Before patch 0116, the first load after boot on
+`video=wgpu` left the FIFO empty with commands pending (`rwDistance` 0,
+read != write).
 
 ## Renderer crashes
 
@@ -677,6 +717,18 @@ bits plus a checksum row, read from exact captures only. Rows whose checksum
 does not match are unreadable; nothing is decided from colours.
 Build cpufuzz with `-DONLY_PROGRAM=n` to run a single program while reducing a
 finding; `out/cpufuzz*.symbols.json` maps a PC back to a program.
+
+**FIFO logs.** `probes/fifo-record.mjs --iso homebrew/out/<name>.iso --port N`
+boots one of our homebrews on the software renderer (cpu=single) and has the
+core's FifoRecorder save the next frames as `homebrew/out/<name>.dff`
+(FifoPlayer's format). With `?fifolog=1` (harness only: the app neither
+offers nor boots a `.dff` otherwise) a log boots like a disc, and
+`matrices/fifo-homebrew.json` replays the logs on each backend against the
+exact software reference (`fastsw=0`): the same GPU commands, without the
+homebrew's CPU side, so wgpu is compared with the software rasterizer at
+SSIM ≥ 0.99 (the matrix's `renderMatch`; 0.9 by default).
+Record them after `homebrew/build.sh`. Only our homebrews are recorded; no
+third-party FIFO logs (they contain game content).
 
 ## CI
 
