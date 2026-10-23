@@ -202,7 +202,10 @@ test("interrupted in the middle of the first launch, the next launch resumes whe
   assert.equal(ofType(first.flow, "done").length, 0, "no done after a cancel");
   const stopped = ofType(first.flow, "progress").at(-1);
   assert.ok(stopped.done < total, "interrupted before the end");
-  const doneBefore = first.compiled.length;
+  // Modules handled before the cancel (stored); one that compiled during
+  // the cancel is installed but not stored (no verdict), so it is not
+  // counted (review of #144).
+  const doneBefore = stopped.done;
   assert.ok(doneBefore >= 1);
 
   const second = launch(p);

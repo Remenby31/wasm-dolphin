@@ -292,3 +292,40 @@ test("aot optimizer: the next module translates while the previous one compiles;
   await run;
   assert.deepEqual(installed, o.regions.map((u) => u.key), "installed in compile order");
 });
+
+// Review of #144: a cancel during a module's compile is no verdict. The
+// module still installs (this session runs it), but it is neither stored
+// nor blacklisted, and the next launch translates it again.
+test("aot optimizer: a cancel during a compile installs the module, never blacklists it, and the next launch retries it", async () => {
+  const cache = fakeCache();
+  const installed = [];
+  let first = null;
+  let o;
+  const compile = async (key) => {
+    if (!first) { first = key; o.cancel(); }
+    return { module: {} };
+  };
+  ({ o } = optimizer({ cache, compile, install: (r) => installed.push(r.key) }));
+  await o.start();
+  assert.deepEqual(installed, [first], "installed for this session");
+  const session = await cache({});
+  assert.equal(session.isBlacklisted?.(first) ?? false, false, "not blacklisted");
+  assert.equal((await session.has([first])).has(first), false, "not stored");
+  const again = optimizer({ cache });
+  const retried = [];
+  again.o.install = (r) => retried.push(r.key);
+  await again.o.start();
+  assert.ok(retried.includes(first), "translated again at the next launch");
+});
+
+test("aot optimizer: a finishing step that fails is reported and the run still ends", async () => {
+  const base = fakeCache();
+  const cache = async (identity) => {
+    const s = await base(identity);
+    return { ...s, has: s.has.bind(s), put: s.put.bind(s), cancel: s.cancel?.bind(s), isBlacklisted: s.isBlacklisted?.bind(s), blacklist: async () => { throw new Error("disk full"); } };
+  };
+  const { o, events } = optimizer({ cache, compile: async () => ({ reason: "compile" }) }); // every module refused: blacklist throws
+  await o.start();
+  assert.ok(events.some(([t, d]) => t === "optimization-error" && /disk full/.test(d.message)), "reported");
+  assert.equal(events.at(-1)[0], "optimization-done", "the run ends");
+});
