@@ -1129,7 +1129,8 @@ test("the region key changes with the formation", async () => {
   const f = [{ entry: 0x80003100, sha256: "a".repeat(64) }];
   const parts = { compilerVersion: 5, codegenMask: 0 };
   assert.notEqual(await regionModuleKey(f, { ...parts, formation: 1 }), await regionModuleKey(f, { ...parts, formation: 2 }));
-  assert.equal(await regionModuleKey(f, parts), await regionModuleKey(f, { ...parts, formation: 2 }), "2 by default");
+  assert.notEqual(await regionModuleKey(f, { ...parts, formation: 2 }), await regionModuleKey(f, { ...parts, formation: 3 }), "3: the frontier rule of #167");
+  assert.equal(await regionModuleKey(f, parts), await regionModuleKey(f, { ...parts, formation: 3 }), "3 by default");
 });
 
 
@@ -1181,6 +1182,59 @@ test("a compare's field or operands rewritten in the region (fcmpu, ps_cmpu0, lm
   assert.equal(got.interpreted, 0, "no op left the region");
 });
 
+// Hot/cold formation (step B): with the plan's hotRanges, the first
+// fragment holds the hot blocks only, the cold ones go to continuation
+// fragments of the same module, and the module runs like the interpreter.
+test("hot/cold formation: the first fragment holds the hot blocks, the cold ones are continuations, results unchanged", { skip: contSkip }, async () => {
+  const { blocksFromPcSamples } = await import("../src/aot-profile.js");
+  const t = assemble(LONG, [
+    "entry", asm.li(3, 0),
+    "loop", asm.addi(3, 3, 1), asm.cmplwi(3, 100), (pc, l) => asm.beq(pc, l.cold0),
+    asm.addi(4, 4, 1), asm.cmplwi(4, 7), (pc, l) => asm.beq(pc, l.loop2),
+    "loop2", asm.addi(5, 5, 1), (pc, l) => asm.b(pc, l.loop),
+    ...Array.from({ length: 120 }, (_, i) => [`cold${i}`, asm.addi(6, 6, 1), asm.cmplwi(6, i), (pc, l) => asm.beq(pc, l.out)]).flat(),
+    "out", asm.blr()
+  ]);
+  const dol = buildDol({ textAddr: LONG, text: t.words, entry: t.labels.entry });
+  const { image, entryPoint } = imageFromDol(dol);
+  const samples = [[t.labels.loop, 400], [t.labels.loop + 4, 300], [t.labels.loop2, 300]];
+  const plan = planDol({ image, entryPoint, profile: { sessions: 1, blocks: blocksFromPcSamples(samples) }, options: { gapFill: false } });
+  const f = plan.modules[0].functions.find((x) => x.entry === t.labels.entry);
+  assert.ok(f.hotRanges?.length);
+  for (const s of image.segments) core.load(s.start, s.bytes);
+  core.invalidate(LONG, 4 * t.words.length);
+  core.module._DolphinWeb_AotForgetRegionsForTest?.();
+  const r = await translateWithContinuations(core.module, { entry: f.entry, ranges: f.ranges, hotRanges: f.hotRanges, hash: null },
+    { mask: PRODUCTION_DISABLE_MASK, maxBlocks: 64, names: coreAssembleOptions(core.module)?.helperNames });
+  const inHot = (pc) => f.hotRanges.some(([s, e]) => pc >= s && pc < e);
+  assert.ok(r.fragment.entries.every(inHot), "the first fragment: hot blocks only");
+  assert.ok(r.continuations?.length >= 1, "cold continuations");
+  const fragments = claimEntries([r.fragment, ...r.continuations]);
+  const held = new Set(fragments.flatMap((x) => x.entries));
+  assert.ok(held.has(t.labels.cold0) && held.has(t.labels.cold60), "the cold blocks are held too");
+  for (const [, e] of f.hotRanges) if (e < f.ranges.at(-1)[1] && t.words[(e - LONG) / 4 - 1] >>> 26 !== 18) assert.ok(held.has(e), `the fall-through out of a hot range (${e.toString(16)}) is an entry`);
+  const { bytes: mod, entries } = assembleRegion(fragments, { helpers: HELPER_SIGNATURES, pcOffset: core.pcOffset, memoryPages: core.memoryPages });
+  core.setRegionsEnabled(true);
+  core.queueRegion(mod, entries.map(([pc]) => pc), [{ ranges: f.ranges, hash: null }]);
+  core.serviceRegions();
+  const reference = runCall(t.labels.entry, { regions: false });
+  const got = runCall(t.labels.entry, { regions: true });
+  assert.deepEqual(got.state, reference.state);
+  assert.equal(got.interpreted, 0, "everything ran in regions");
+});
+
+// #167: a branch is in held code when the nearest held entry before it
+// reaches it with no block end between (the core's block can run through a
+// leader it did not split at); after a block end it is not.
+test("frontier: a branch belongs to the nearest held entry unless a block end lies between", async () => {
+  const { frontier } = await import("../src/aot-orchestrator.js");
+  const branches = [[0x80000008, [0x80000100]], [0x80000020, [0x80000200]]];
+  branches.ends = [0x80000010];
+  // Entry 0x80000000 held; a leader at 0x80000004 not split; a blr at 0x10.
+  assert.deepEqual(frontier(branches, new Set([0x80000000])), [0x80000100], "the branch at 8 is in the entry's block; the one at 0x20 is past the blr");
+  assert.deepEqual(frontier(branches, new Set([0x80000000, 0x80000014])), [0x80000100, 0x80000200]);
+});
+
 // The local profile in a product build (harness hooks off): the sampler gets
 // the guest PC's address and a record writes the profile file. A product
 // build of #165 got 0 from the harness-only export and recorded nothing.
@@ -1211,5 +1265,24 @@ test("without harness hooks the profile sampler gets the guest PC and a record w
   sampler.stop();
   const saved = await store.load("disc");
   assert.deepEqual(saved.blocks.map((b) => [b[0], b[4]]), [[(TEXT + 0x40) >>> 0, 7]], "the profile file holds the weight");
+});
+
+// Review of 0130/#167: continuations that only hold what one uncut fragment
+// held before (the first fragment and them, up to maxBlocks blocks) spend no
+// budget; past that they do, and what the budget leaves out is counted.
+test("continuation budget: the old single fragment's blocks are free; refusals for lack of budget are counted", { skip: contSkip }, async () => {
+  const program = longFunction(100);
+  const run = (options) => translateWithContinuations(core.module, { entry: LONG, ranges: loadWords(LONG, program.words), hash: null },
+    { mask: PRODUCTION_DISABLE_MASK, maxBlocks: 64, names: coreAssembleOptions(core.module)?.helperNames, ...options });
+  // A first fragment cut at 16 blocks: its continuations up to 64 blocks in all are free.
+  const cut = await run({ maxBlocks: 16 });
+  const blocksOf = (r) => [r.fragment, ...(r.continuations ?? [])].reduce((n, x) => n + x.entries.length, 0);
+  assert.ok(blocksOf(cut) > 64);
+  assert.ok(cut.budgetCharged > 0, "past 64 blocks: charged");
+  const within = await run({ maxBlocks: 16, maxContinuations: 3 }); // 16 + 3 × 16 = 64 blocks
+  assert.equal(within.budgetCharged, 0, "within the old fragment's 64 blocks: free");
+  // With no budget past the free blocks, the rest is refused and counted.
+  const starved = await run({ maxBlocks: 16, maxBytes: 1 });
+  assert.ok(starved.budgetRefused >= 1, `refused ${starved.budgetRefused}`);
 });
 

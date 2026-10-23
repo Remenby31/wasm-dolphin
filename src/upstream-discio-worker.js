@@ -7414,6 +7414,8 @@ export async function prepareAotFirstLaunch(file, {
   const flow = createAotFirstLaunch({
     discKey,
     coreHash,
+    // The local profile's weights shape each large function's hot fragment.
+    loadProfile: () => (opfs ? new AotProfileStore(opfs).load(profileKey(discKey)).catch((error) => noteAotProfileReadFailure(error)) : null),
     keyParts,
     translator,
     assembleOptions: core?.assemble,

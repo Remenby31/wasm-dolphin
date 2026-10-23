@@ -36,7 +36,7 @@
 // or a full quota get no verdict at once: the module is retried at the next
 // launch, `maxAttempts` launches at most, then blacklisted. Attempts are kept
 // in the plan store (loadAttempts/saveAttempts).
-import { orderedRegions, validatePlan, ANALYZER_VERSION } from "./aot-plan.js";
+import { applyProfileHotRanges, orderedRegions, validatePlan, ANALYZER_VERSION } from "./aot-plan.js";
 import { assembleRegion, claimEntries, groupRegions, regionModuleKey } from "./aot-region-module.js";
 
 export const PLAN_CACHE_DIR = "aot-plan";
@@ -50,7 +50,8 @@ export class AotOptimizer extends EventTarget {
   // keyParts: { compilerVersion, codegenMask } (the core's _DolphinWeb_AotKeyParts)
   constructor({ discKey, buildPlan, translator, openCache, cacheIdentity = {}, keyParts = { compilerVersion: 0, codegenMask: 0 },
     assemble = null, assembleOptions = null, compile = null, install = null, maxFunctions = 100, planStore = null, batchSize = BATCH,
-    notReadyDelayMs = 1000, maxNotReadyWaits = 300, maxAttempts = 3, sleep = (ms) => new Promise((r) => setTimeout(r, ms)), now = () => performance.now() }) {
+    notReadyDelayMs = 1000, maxNotReadyWaits = 300, maxAttempts = 3, sleep = (ms) => new Promise((r) => setTimeout(r, ms)), now = () => performance.now(),
+    loadProfile = null }) {
     super();
     this.discKey = discKey;
     this.buildPlan = buildPlan;
@@ -66,9 +67,16 @@ export class AotOptimizer extends EventTarget {
     // core's dispatcher (_DolphinWeb_AotQueueRegion). Optional.
     this.install = install;
     this.maxFunctions = maxFunctions;
+    // loadProfile(): the player's local profile (aot-profile.js), or null:
+    // its sample weights give each large function its hot ranges at every
+    // plan load (hot/cold formation), whatever profile the plan was built with.
+    this.loadProfile = loadProfile;
     this.planStore = planStore;
     this.now = now;
     this.batchSize = batchSize;
+    // Frontier blocks left as exits because a function's or a module's
+    // continuation budget ran out (in the done event: the probes see it).
+    this.budgetRefused = 0;
     this.notReadyDelayMs = notReadyDelayMs;
     this.maxNotReadyWaits = maxNotReadyWaits;
     this.maxAttempts = maxAttempts;
@@ -145,6 +153,12 @@ export class AotOptimizer extends EventTarget {
     if (!plan) {
       plan = validatePlan(await this.buildPlan());
       await this.planStore?.save(this.discKey, plan).catch(() => {});
+    }
+    if (this.loadProfile) {
+      // A missing or corrupt profile is no profile: today's formation.
+      const profile = await Promise.resolve().then(() => this.loadProfile()).catch(() => null);
+      // Saved when they changed: the next load starts from these (hysteresis).
+      if (applyProfileHotRanges(plan, profile)) await this.planStore?.save(this.discKey, plan).catch(() => {});
     }
     // Region modules, in compile order: each module takes the place of its
     // first member in orderedRegions. Groups are kept across plan rebuilds (a
@@ -277,7 +291,7 @@ export class AotOptimizer extends EventTarget {
       if (this.cancelled) return null;
       const slice = unit.members.slice(i, i + this.batchSize);
       const batch = slice.map((f) => ({
-        module: unit.module, entry: f.entry, flags: f.flags ?? 0, hash: f.hash, ranges: f.ranges, extraEntries: f.extraEntries ?? [], continuationBytesUsed
+        module: unit.module, entry: f.entry, flags: f.flags ?? 0, hash: f.hash, ranges: f.ranges, extraEntries: f.extraEntries ?? [], ...(f.hotRanges ? { hotRanges: f.hotRanges } : {}), continuationBytesUsed
       }));
       const translated = await this.translator.translate(batch);
       if (this.cancelled) return null;
@@ -287,7 +301,8 @@ export class AotOptimizer extends EventTarget {
         if (r.reason === "not-ready") { wait = true; break; }
         if (n >= batch.length || (r.entry !== undefined && r.entry !== batch[n].entry)) throw new Error("translator results out of order");
         consumed++;
-        for (const c of r.continuations ?? []) continuationBytesUsed += c.code.length;
+        continuationBytesUsed += r.budgetCharged ?? 0;
+        this.budgetRefused += r.budgetRefused ?? 0;
         if (r.fragment) fragments.push(r.fragment, ...(r.continuations ?? []));
         else refused.push({ entry: batch[n].entry, reason: r.reason ?? "untranslatable" });
       }
@@ -442,7 +457,7 @@ export class AotOptimizer extends EventTarget {
       } finally {
         await finishing;
       }
-      if (!this.cancelled) this.emit("optimization-done", { total: this.regions.length, refused: refused.size, compiled, deferred, ms: ms() });
+      if (!this.cancelled) this.emit("optimization-done", { total: this.regions.length, refused: refused.size, compiled, deferred, budgetRefused: this.budgetRefused, ms: ms() });
     } catch (error) {
       this.emit("optimization-error", { message: String(error?.message || error), fatal: true });
     }

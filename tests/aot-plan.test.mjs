@@ -10,7 +10,7 @@ import {
 import { hintsMatch, loadHints, parseHints } from "../src/aot-hints.js";
 import { imageFromDol } from "../src/aot-image.js";
 import {
-  PLAN_BINARY_MAGIC, PLAN_SCHEMA, encodePlanRegions, fnv1a64Hex, orderedRegions, planDol, regionHash, validatePlan
+  PLAN_BINARY_MAGIC, PLAN_SCHEMA, applyProfileHotRanges, encodePlanRegions, fnv1a64Hex, orderedRegions, planDol, regionHash, validatePlan
 } from "../src/aot-plan.js";
 import { planDisc } from "../src/aot-recomp.js";
 import { asm, assemble, buildDol } from "./aot-asm.mjs";
@@ -326,10 +326,89 @@ test("aot profile v3: sample weights round trip, halve at a new session, add up 
   assert.deepEqual(decodeProfile(v2).blocks, [[0x80003100, 0x80003104, 3, 0, 0]]);
 });
 
+
+// Hot/cold formation (step B): a large function whose blocks the local
+// profile weighed gets hotRanges, its blocks with at least 0.25 % of its
+// samples plus its entry; an unweighed one gets none, nor does a small one.
+function hotColdFunction() {
+  // entry; a hot loop of 4 blocks; 120 cold blocks (> 1 KB of code); blr.
+  return assemble(TEXT, [
+    "entry", asm.li(3, 0),
+    "loop", asm.addi(3, 3, 1), asm.cmplwi(3, 100), (pc, l) => asm.beq(pc, l.cold0),
+    asm.addi(4, 4, 1), asm.cmplwi(4, 7), (pc, l) => asm.beq(pc, l.loop2),
+    "loop2", asm.addi(5, 5, 1), (pc, l) => asm.b(pc, l.loop),
+    ...Array.from({ length: 120 }, (_, i) => [`cold${i}`, asm.addi(6, 6, 1), asm.cmplwi(6, i), (pc, l) => asm.beq(pc, l.out)]).flat(),
+    "out", asm.blr()
+  ]);
+}
+test("aot plan: hotRanges from the profile's sample weights, for a large weighed function only", () => {
+  const t = hotColdFunction();
+  const dol = buildDol({ textAddr: TEXT, text: t.words, entry: t.labels.entry });
+  const { image, entryPoint } = imageFromDol(dol);
+  const plain = planDol({ image, entryPoint, options: { gapFill: false } });
+  assert.equal(plain.modules[0].functions.find((f) => f.entry === t.labels.entry).hotRanges, undefined, "no profile, no hot ranges");
+  const samples = [[t.labels.loop, 400], [t.labels.loop + 4, 300], [t.labels.loop2, 300], [t.labels.cold0 + 4, 1]];
+  const plan = planDol({ image, entryPoint, profile: { sessions: 1, blocks: blocksFromPcSamples(samples) }, options: { gapFill: false } });
+  const f = plan.modules[0].functions.find((x) => x.entry === t.labels.entry);
+  assert.ok(f.hotRanges?.length, "hot ranges");
+  const inHot = (pc) => f.hotRanges.some(([s, e]) => pc >= s && pc < e);
+  assert.ok(inHot(t.labels.entry) && inHot(t.labels.loop) && inHot(t.labels.loop2), "the entry and the loop");
+  assert.ok(!inHot(t.labels.cold0) && !inHot(t.labels.cold60), "not the cold blocks (one sample in cold0 is under 0.25 %)");
+  validatePlan(plan);
+});
+
 test("aot profile v3: a truncated file is refused; weights are clamped to a u32", () => {
   const bytes = encodeProfile({ sessions: 1, blocks: [[0x80003100, 0x80003104, 1, 0, 2 ** 40]] });
   assert.equal(decodeProfile(bytes).blocks[0][4], 0xffffffff, "clamped");
   assert.equal(decodeProfile(bytes.subarray(0, bytes.length - 2)), null, "truncated");
+});
+
+// A stored plan is built once (first launch, no weights yet): the hot ranges
+// come from the current profile at every load, set or removed.
+test("aot plan: applyProfileHotRanges sets the hot ranges of a stored plan from the current profile, and removes them without weights", () => {
+  const t = hotColdFunction();
+  const dol = buildDol({ textAddr: TEXT, text: t.words, entry: t.labels.entry });
+  const { image, entryPoint } = imageFromDol(dol);
+  const plan = planDol({ image, entryPoint, options: { gapFill: false } });
+  const f = () => plan.modules[0].functions.find((x) => x.entry === t.labels.entry);
+  assert.equal(f().hotRanges, undefined);
+  applyProfileHotRanges(plan, { sessions: 1, blocks: blocksFromPcSamples([[t.labels.loop, 400], [t.labels.loop2, 300]]) });
+  assert.ok(f().hotRanges?.some(([s, e]) => t.labels.loop >= s && t.labels.loop < e), "set from the weights");
+  validatePlan(plan);
+  applyProfileHotRanges(plan, { sessions: 1, blocks: blocksFromPcSamples([t.labels.loop]) }); // no weights (v2)
+  assert.equal(f().hotRanges, undefined, "removed");
+});
+
+// Review of #167: the hot ranges are in the region key, and weights move
+// every session; within ±30 % noise the set (and so the key) holds.
+test("aot plan: hot ranges hold under ±30 % noise on the weights (hysteresis), and a block between hot blocks is hot", () => {
+  const t = assemble(TEXT, [
+    "entry", asm.li(3, 0), asm.cmplwi(3, 9), (pc, l) => asm.beq(pc, l.cold0),
+    "pre", asm.li(4, 0),
+    "loop", asm.addi(3, 3, 1), asm.cmplwi(3, 100), (pc, l) => asm.beq(pc, l.cold0),
+    "edge", asm.addi(5, 5, 1), (pc, l) => asm.b(pc, l.loop),
+    ...Array.from({ length: 120 }, (_, i) => [`cold${i}`, asm.addi(6, 6, 1), asm.cmplwi(6, i), (pc, l) => asm.beq(pc, l.out)]).flat(),
+    "out", asm.blr()
+  ]);
+  const dol = buildDol({ textAddr: TEXT, text: t.words, entry: t.labels.entry });
+  const { image, entryPoint } = imageFromDol(dol);
+  const plan = planDol({ image, entryPoint, options: { gapFill: false } });
+  const f = () => plan.modules[0].functions.find((x) => x.entry === t.labels.entry);
+  // edge sits right at the 0.25 % threshold: noise alone would flip it.
+  const weights = (k) => [[t.labels.loop, Math.round(4000 * k())], [t.labels.edge, Math.round(10 * k())], [t.labels.cold5, 1]];
+  let seed = 7;
+  const noise = () => { seed = (seed * 1103515245 + 12345) & 0x7fffffff; return 0.7 + 0.6 * (seed / 0x7fffffff); };
+  applyProfileHotRanges(plan, { sessions: 1, blocks: blocksFromPcSamples(weights(() => 1)) });
+  const first = JSON.stringify(f().hotRanges);
+  const inHot = (pc) => f().hotRanges.some(([s, e]) => pc >= s && pc < e);
+  assert.ok(inHot(t.labels.pre), "the preheader, between the entry and the loop, is hot");
+  for (let i = 0; i < 20; i++) {
+    assert.equal(applyProfileHotRanges(plan, { sessions: 1, blocks: blocksFromPcSamples(weights(noise)) }), 0, `load ${i}: no change`);
+    assert.equal(JSON.stringify(f().hotRanges), first);
+  }
+  // Crossing by ×2 changes the set.
+  applyProfileHotRanges(plan, { sessions: 1, blocks: blocksFromPcSamples([[t.labels.loop, 4000], [t.labels.edge, 0], [t.labels.cold5, 200]]) });
+  assert.notEqual(JSON.stringify(f().hotRanges), first);
 });
 
 // The engine's disc keys hold a ':' that a profile file name refuses: every
