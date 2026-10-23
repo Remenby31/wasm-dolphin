@@ -410,7 +410,14 @@ export function translateWithContinuations(m, f, { mask, maxBlocks, names, maxCo
   for (const pc of blockLeaders(m, f.ranges)) {
     if (continuations.length >= maxContinuations || bytes >= REGION_CONTINUATION_MAX_BYTES) break;
     if (owned.has(pc)) continue;
-    const next = translateOne(m, { ...f, entry: pc }, { mask, maxBlocks, names });
+    // Each continuation within the byte cap on its own, whatever the core's
+    // own cap (fewer blocks until it fits, one block at least): a fragment
+    // past ~1.7 MB of Liftoff code never reaches TurboFan.
+    let next = translateOne(m, { ...f, entry: pc }, { mask, maxBlocks, names });
+    for (let blocks = maxBlocks; next.fragment && next.fragment.code.length > REGION_FRAGMENT_MAX_BYTES && blocks > 1;) {
+      blocks = Math.max(1, blocks >> 1);
+      next = translateOne(m, { ...f, entry: pc }, { mask, maxBlocks: blocks, names });
+    }
     if (!next.fragment) continue;
     for (const e of next.fragment.entries) owned.add(e >>> 0);
     continuations.push(next.fragment);
