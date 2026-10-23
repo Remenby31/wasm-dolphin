@@ -116,7 +116,7 @@ public:
   bool StaticExitLinksEnabled() const;
   void RegisterStaticExitLinks(L::Descriptor* links);
   void WriteEndBlock(L::Descriptor links = {});
-  void WriteCountMemBlock(bool) {}  // patch 0116: stats off in these groups
+  void WriteCountMemBlock(bool) {}  // patch 0117: stats off in these groups
   struct { JitBlock* curBlock = nullptr; u32 downcountAmount = 7, numLoadStoreInst = 3, numFloatingPointInst = 2; } js;
   using CachedInterpreterEmitter::AnyCallback;
 };

@@ -295,7 +295,7 @@ counted by `DolphinWeb_AotRegionsSkippedMmu`). MMU games keep the
 CachedInterpreter with `aot=1`. Lifted once faults are delivered from our
 code (deferred delivery on the slow paths: backlog).
 
-## Memory-access counts (patch 0116, 2026-10-22)
+## Memory-access counts (patch 0117, 2026-10-22)
 
 `DolphinWeb_MemAccessStats(reset)` returns a 192-byte struct, layout v1
 agreed with the harness (`race-perf --mem-stats`): guest instructions,

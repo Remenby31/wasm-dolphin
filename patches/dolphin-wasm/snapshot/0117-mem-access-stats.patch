@@ -6,7 +6,7 @@ diff --git a/Source/Core/Core/PowerPC/CachedInterpreter/CachedInterpreter.cpp b/
  std::atomic<u32> s_runloop_exec_max_us{0};
  }  // namespace
 +
-+// Memory-access counts (patch 0116, DolphinWeb_MemAccessStats). Every block
++// Memory-access counts (patch 0117, DolphinWeb_MemAccessStats). Every block
 +// end (EndBlock, a RunWasmBlock that ends its block) carries an index into
 +// s_mem_static: the guest instructions and memory instructions by kind from
 +// the block's start to that end, counted where its downcount is, so the
@@ -421,7 +421,7 @@ diff --git a/Source/Core/Core/PowerPC/CachedInterpreter/CachedInterpreter.cpp b/
    // is caught here.
    u32 ram_base = 0;
    u32 l1_base = 0;
-+  // Its code's memory instructions and instructions per cycle (patch 0116).
++  // Its code's memory instructions and instructions per cycle (patch 0117).
 +  double accesses_per_cycle = 0, instructions_per_cycle = 0;
  };
  
@@ -547,7 +547,7 @@ diff --git a/Source/Core/Core/PowerPC/CachedInterpreter/CachedInterpreter.cpp b/
    return sizeof(AnyCallback) + sizeof(operands);
  }
  
-+// Patch 0116: only while stats are on (blocks emitted before are dropped
++// Patch 0117: only while stats are on (blocks emitted before are dropped
 +// with the cache at the reset); a wasm block's count stands before it (a
 +// halted run counts too), an interpreted one's before its EndBlock.
 +void CachedInterpreter::WriteCountMemBlock(bool wasm)
@@ -860,7 +860,7 @@ diff --git a/Source/Core/Core/PowerPC/CachedInterpreter/CachedInterpreter.h b/So
    u32 : 32;
 +};
 +
-+// Patch 0116: written before a block end only while memory-access stats are
++// Patch 0117: written before a block end only while memory-access stats are
 +// on (a reset clears the cache), so the path with stats off is main's.
 +struct CachedInterpreter::CountMemBlockOperands
 +{
