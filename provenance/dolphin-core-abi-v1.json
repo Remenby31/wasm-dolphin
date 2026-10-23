@@ -1,19 +1,19 @@
 {
   "schemaVersion": 1,
   "abiVersion": 1,
-  "coreId": "sha256:fdd3b0e8a0e347c1579696b4accedd0d0641f3ff6ba1feef41b0d4cf9c60d0c7",
+  "coreId": "sha256:bba5f2149312f8dcee66d160c4e2bc71a0351aaea7b12bf8fad3c418b0394710",
   "upstreamCommit": "e22551eae1c84a7e4d0b6a5c519ef4ed4ef69df1",
   "artifacts": [
     {
       "path": "cores/dolphin/dolphin-core-upstream.js",
       "hashMode": "lf-normalized",
-      "size": 282487,
-      "sha256": "4ff9ec4f1a572809a470ae7b0b496fbdcc5b232218c064fd8988f60f90429240"
+      "size": 282917,
+      "sha256": "2cf9cad31426cd05519cc9b9ef460139445906c6c69c4c0422bb46e7889c6109"
     },
     {
       "path": "cores/dolphin/dolphin-core-upstream.wasm",
-      "size": 13144303,
-      "sha256": "fdd3b0e8a0e347c1579696b4accedd0d0641f3ff6ba1feef41b0d4cf9c60d0c7"
+      "size": 13162966,
+      "sha256": "bba5f2149312f8dcee66d160c4e2bc71a0351aaea7b12bf8fad3c418b0394710"
     }
   ],
   "contractSources": [
@@ -408,6 +408,7 @@
     "_DolphinWeb_DirectPadLayout",
     "_DolphinWeb_EmulatedRtc",
     "_DolphinWeb_FmaIsMusl",
+    "_DolphinWeb_FusedMadd",
     "_DolphinWeb_GpuSyncDiag",
     "_DolphinWeb_GpuSyncDiagEnable",
     "_DolphinWeb_HarnessArmCapture",
@@ -469,6 +470,9 @@
     "_DolphinWeb_RecordModuleUs",
     "_DolphinWeb_RecordWasmCompileError",
     "_DolphinWeb_RegionChainHelper",
+    "_DolphinWeb_RegionGuardRefusals",
+    "_DolphinWeb_SetFprfForTest",
+    "_DolphinWeb_SetFusedMadd",
     "_DolphinWeb_SetGpuSpinBudget",
     "_FlushMemoryCards",
     "_FrameBuffer",
