@@ -140,6 +140,9 @@ export class EmulatorHost {
     this.aotFirstLaunch = new URLSearchParams(window.location.search).get("aot") === "1";
     // With aot=1, regions tail-call the next region (patch 0102); ?regionchain=0 turns it off.
     this.regionChain = new URLSearchParams(window.location.search).get("regionchain") !== "0";
+    // Where relaxed_madd is fused the JIT's FMA uses it (patch 0129); ?fusedmadd=0
+    // keeps the exact plain-f64 path (A/B on one core).
+    this.fusedMadd = new URLSearchParams(window.location.search).get("fusedmadd") !== "0";
     this.collectMetrics = requestedCollectMetrics();
     this.legacyOneWayAck = requestedLegacyOneWayAck(window.location.search);
     this.wgpuReplayDiagnostics = requestedWgpuReplayDiagnostics(window.location.search);
@@ -435,6 +438,7 @@ export class EmulatorHost {
             aotCompiler: this.aotCompiler,
             aotFirstLaunch: this.aotFirstLaunch,
             regionChain: this.regionChain,
+            fusedMadd: this.fusedMadd,
             collectMetrics: this.collectMetrics,
             legacyOneWayAck: this.legacyOneWayAck,
             wgpuReplayDiagnostics: this.wgpuReplayDiagnostics,
