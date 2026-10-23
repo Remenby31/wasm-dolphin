@@ -135,3 +135,16 @@ test("race-perf --run-timeout: a measure that never ends fails its run instead o
   await assert.rejects(withRunTimeout(late, 20, "w"), /timed out/); // the late rejection is swallowed
   await new Promise((r) => setTimeout(r, 80));
 });
+
+test("CI bench: with region stats, a pair where a side installed no region is set aside; regions per arm reported", () => {
+  const pin = { thread: "DedicatedWorker", busyPct: 99, cpu: 0 };
+  const side = (speed, installed, share) => ({ speed, pinned: pin, p4: { regionCycleShare: share }, p4Raw: { diagnostics: { regionsInstalled: installed } } });
+  const run = (n, a, b, ib = 140) => ({ run: n, baseline: { cold: side(a, 140, 0.8) }, candidate: { cold: side(b, ib, 0.82) } });
+  const b = benchAA([run(1, 20, 20), run(2, 20, 20), run(3, 20, 21), run(4, 20, 21), run(5, 20, 25, 0), run(6, 20, 21), run(7, 20, 21), run(8, 20, 21)]);
+  assert.ok(b.setAside.some((x) => x.run === 5 && /no region installed \(140 \/ 0\)/.test(x.why)));
+  assert.deepEqual(b.regions, { baseline: { installed: 140, cycleShare: 0.8 }, candidate: { installed: 140, cycleShare: 0.82 } });
+  assert.match(benchMarkdown(b), /Regions \(median per arm\): A 140 installed, 0\.8 of guest cycles; B 140 installed, 0\.82/);
+  // Without region stats (no aot): no region line, nothing set aside for it.
+  const plain = benchAA([run(1, 20, 20), run(2, 20, 20), run(3, 20, 20), run(4, 20, 20)].map((r) => { for (const s of ["baseline", "candidate"]) { delete r[s].cold.p4; delete r[s].cold.p4Raw; } return r; }));
+  assert.equal(plain.regions, null);
+});
