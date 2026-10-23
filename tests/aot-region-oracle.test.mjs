@@ -142,13 +142,13 @@ test("a GPR written first by a load whose slow path halts keeps its value (0127,
 
 test("a load that faults before the integer write of an unloaded GPR leaves that GPR as it was (0127)", { skip: deadSkip }, () => {
   // The halt's flush is emitted before the later write: r5 is neither loaded
-  // nor dirty there, and must keep its value. Two faulting loads: an
-  // unaligned lmw (alignment) and an lfs with MSR.FP clear (FP unavailable).
+  // nor dirty there, and must keep its value. The faulting load is an
+  // unaligned lmw (alignment). (An lfs with MSR.FP clear does not fault in a
+  // region: since 0121 region code takes FP for granted.)
   const lmw = (d, a, off) => (46 << 26) | (d << 21) | (a << 16) | (off & 0xffff);
-  const lfsOp = (d, a, off) => (48 << 26) | (d << 21) | (a << 16) | (off & 0xffff);
   const cases = [
     ["lmw (alignment)", [lmw(29, 1, 2), addi(5, 0, 1), add(7, 5, 5), BLR], null],
-    ["lfs (FP unavailable)", [lfsOp(1, 9, 0), addi(5, 0, 1), add(7, 5, 5), BLR], (s) => { s[37] &= ~MSR_FP; }]
+    ["lmw (alignment), r5 read before", [add(7, 5, 5), lmw(29, 1, 2), addi(5, 0, 1), BLR], null]
   ];
   for (const [what, program, run] of cases) {
     const translateState = baseState(33);
