@@ -109,3 +109,64 @@ test("the worker: a booted .dol goes through the same flow (its key, its plan, t
   assert.ok(translations >= 3, `the .dol's functions went to the translator (${translations})`);
   worker.setAotFirstLaunchEnabledForTest(false);
 });
+
+// Review of #192: the real path, no injected key reader. The worker reads
+// the key from the mounted file by kind (readDolKeyFromFile for a .dol),
+// and the plan worker (installAotPlannerWorker, wired in-process) gets
+// kind "dol" and plans the .dol alone. A disc mount still reads a disc key.
+test("the worker's real path: the dol key read from the mounted file, kind \"dol\" to the plan worker", async (t) => {
+  const workerUrl = new URL("../src/upstream-discio-worker.js", import.meta.url);
+  const originalSelf = globalThis.self;
+  globalThis.self = { location: { href: "http://127.0.0.1:8080/" }, addEventListener() {}, postMessage() {} };
+  t.after(() => {
+    if (originalSelf === undefined) delete globalThis.self;
+    else globalThis.self = originalSelf;
+  });
+  const worker = await import(`${workerUrl.href}?aot-dol-real=${Date.now()}`);
+  const { installAotPlannerWorker } = await import("../src/aot-plan-worker.js");
+  // A plan worker in-process: the real handler, the messages it got.
+  const received = [];
+  const createWorker = () => {
+    const w = { onmessage: null, onerror: null, terminate() {} };
+    const scope = { onmessage: null, postMessage: (data) => queueMicrotask(() => w.onmessage?.({ data })) };
+    installAotPlannerWorker(scope);
+    w.postMessage = (data) => { received.push(data); queueMicrotask(() => scope.onmessage({ data })); };
+    return w;
+  };
+  const { dol } = program();
+  const file = new Blob([dol]);
+  let translations = 0;
+  const heap = new Uint8Array(1 << 16);
+  let top = 1024;
+  const names = new Map();
+  const str = (text) => {
+    if (!names.has(text)) { heap.set(new TextEncoder().encode(`${text}\0`), top); names.set(text, top); top += (text.length + 8) & ~7; }
+    return names.get(text);
+  };
+  const core = {
+    HEAPU8: heap,
+    _malloc: (n) => { const p = top; top += (n + 7) & ~7; return p; },
+    _free: () => {},
+    UTF8ToString: (p) => new TextDecoder().decode(heap.subarray(p, heap.indexOf(0, p))),
+    _DolphinWeb_AotKeyParts: (p) => new Uint32Array(heap.buffer, p, 2).set([7, 0]),
+    _DolphinWeb_JitHelperName: (i) => (i === 0 ? str("read_u32") : 0),
+    _DolphinWeb_JitHelperSignature: (i) => (i === 0 ? str("i32,i32>i32") : 0),
+    _DolphinWeb_JitStateLayout: (p) => new Uint32Array(heap.buffer, p, 4).set([0, 4, 8, 1]),
+    _DolphinWeb_AotTranslate() { translations++; return 0; }
+  };
+  worker.setAotFirstLaunchEnabledForTest(true);
+  worker.setAotPlannerWorkerForTest(createWorker);
+  t.after(() => worker.setAotPlannerWorkerForTest(null));
+  // A disc mount reads a disc key: the .dol's bytes give none.
+  worker.setAotMountedFileForTest(file, "disc");
+  await worker.prepareAotFirstLaunch(file, { kind: "disc", module: core, coreHash: CORE, cacheStorage: fakeCacheStorage(), storageRoot: () => null });
+  assert.equal((await worker.handleAotMessage("validationReadAotProgress")).disc ?? null, null, "no disc key from a .dol");
+  // A .dol mount: its key from the file, its plan from the plan worker.
+  worker.setAotMountedFileForTest(file, "dol");
+  await worker.prepareAotFirstLaunch(file, { kind: "dol", module: core, coreHash: CORE, cacheStorage: fakeCacheStorage(), storageRoot: () => null });
+  assert.equal((await worker.handleAotMessage("validationReadAotProgress")).disc, await canonicalDolKey(dol), "read from the mounted file");
+  await worker.startAotFirstLaunchAfterBoot();
+  assert.deepEqual(received.map((m) => m.kind), ["dol"], "the plan worker got kind dol");
+  assert.ok(translations >= 3, `the plan worker's plan reached the translator (${translations})`);
+  worker.setAotFirstLaunchEnabledForTest(false);
+});

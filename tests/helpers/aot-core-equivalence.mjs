@@ -397,10 +397,10 @@ export function bigEndian(words) {
 // One program at ORACLE_CODE, translated as a region while `translateState`
 // is loaded (its MSR decides which FPU ops the translator takes), then run
 // from `state` by the interpreter alone and by the region (compareCall).
-export function compareRegionProgram(core, words, state, { translateState = state, mask = PRODUCTION_DISABLE_MASK, budget = 400000 } = {}) {
+export function compareRegionProgram(core, words, state, { translateState = state, mask = PRODUCTION_DISABLE_MASK, budget = 400000, ranges = [[ORACLE_CODE, ORACLE_CODE + 4 * words.length]] } = {}) {
   core.load(ORACLE_CODE, bigEndian(words));
   core.loadState(translateState, ORACLE_CODE);
-  const fragment = core.translate(ORACLE_CODE, { mask, ranges: [[ORACLE_CODE, ORACLE_CODE + 4 * words.length]] });
+  const fragment = core.translate(ORACLE_CODE, { mask, ranges });
   if (!fragment) return { translated: false };
   const { bytes } = assembleRegion([fragment], { helpers: HELPER_SIGNATURES, pcOffset: core.pcOffset, memoryPages: core.memoryPages });
   const handle = core.compile(bytes);
