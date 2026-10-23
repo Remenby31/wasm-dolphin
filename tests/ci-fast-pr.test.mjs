@@ -130,7 +130,7 @@ test("main keeps every guarantee; pull requests only read caches", () => {
   }
   // The GPL archive is built on main and rebuilt from alone, on main only.
   assert.match(job("rebuild-from-source-archive"), /if: github\.event_name != 'pull_request'/);
-  assert.match(job("prepare-core-commit"), /needs: \[build, rebuild-from-source-archive\]/);
+  assert.match(job("prepare-core-commit"), /needs: \[build, rebuild-from-source-archive, fetch-run-core\]/);
   // Tests always run on the core this job installed.
   assert.ok(build.indexOf("status --require-current") < build.indexOf("run: npm test"));
 });
