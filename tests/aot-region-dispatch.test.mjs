@@ -741,6 +741,54 @@ test("an idle loop inside a region returns to the dispatcher at its start instea
   assert.ok(budget - core.downcount() < 100, `only the block before the loop ran (${budget - core.downcount()} cycles), not the slice`);
 });
 
+// FPU ops the direct tier does not emit (the Rc forms such as fadds., mffs)
+// stay in the region as helper calls (patch 0105, compiler version 6;
+// ps_merge00 is direct-tier code, here as a neighbour)
+// instead of leaving it: the whole call runs in region code, nothing is
+// interpreted outside, at the interpreter's state. Its own text (see SPIN).
+const FPU_TEXT = 0x8000a100, DATA = 0x80004000;
+const lfs = (d, a, off) => (48 << 26) | (d << 21) | (a << 16) | (off & 0xffff);
+const stfd = (s, a, off) => (54 << 26) | (s << 21) | (a << 16) | (off & 0xffff);
+const faddsRc = (d, a, b) => (59 << 26) | (d << 21) | (a << 16) | (b << 11) | (21 << 1) | 1;
+const mffs = (d) => (63 << 26) | (d << 21) | (583 << 1);
+const psMerge00 = (d, a, b) => (4 << 26) | (d << 21) | (a << 16) | (b << 11) | (528 << 1);
+const FPU = assemble(FPU_TEXT, [
+  "main", asm.mflr(0), asm.stwu(1, 1, -16), stw(0, 1, 20), (pc, l) => asm.bl(pc, l.fpu),
+  lwz(0, 1, 20), asm.addi(1, 1, 16), mtlr(0), asm.blr(),
+  "fpu", asm.lis(5, DATA >>> 16), asm.ori(5, 5, DATA & 0xffff), lfs(1, 5, 0), lfs(2, 5, 4),
+  faddsRc(3, 1, 2), psMerge00(4, 1, 2), mffs(6),
+  stfd(3, 5, 8), stfd(4, 5, 16), stfd(6, 5, 24), asm.addi(6, 6, 1), asm.blr()
+]);
+const keyVersion = () => {
+  const p = core.module._malloc(8);
+  try { core.module._DolphinWeb_AotKeyParts(p); return new Uint32Array(core.module.HEAPU8.buffer, p, 2)[0]; } finally { core.module._free(p); }
+};
+
+test("FPU ops outside the direct tier run inside the region, interpreted, like the interpreter (0105)", { skip: chainSkip || (core?.has("DolphinWeb_AotKeyParts") && keyVersion() < 6 && "core before 0105 (compiler version < 6)") }, () => {
+  const dol = buildDol({ textAddr: FPU_TEXT, text: FPU.words, entry: FPU.labels.main });
+  const { image, entryPoint } = imageFromDol(dol);
+  const plan = planDol({ image, entryPoint, gameId: "TEST01", dolBytes: dol, options: { gapFill: false } });
+  for (const seg of image.segments) core.load(seg.start, seg.bytes);
+  const floats = new DataView(new ArrayBuffer(32));
+  floats.setFloat32(0, 1.5); floats.setFloat32(4, -3.25);
+  const loadData = () => core.load(DATA, new Uint8Array(floats.buffer));
+  loadData();
+  core.reset(seedGprs(FPU.labels.main), FPU.labels.main, STOP, 400000); // MSR.FP on while translating
+  core.setRegionsEnabled(true);
+  core.setRegionChaining(true);
+  queueAll(plan, 1, true);
+  serviceAll();
+  loadData();
+  const reference = runCall(FPU.labels.main, { regions: false });
+  loadData();
+  const got = runCall(FPU.labels.main, { regions: true });
+  assert.deepEqual(got.state, reference.state);
+  assert.equal(got.downcount, reference.downcount);
+  assert.equal(got.interpreted, 0, "no op left the region");
+  assert.equal(got.ran, 1);
+  core.invalidate(FPU_TEXT, 4 * FPU.words.length);
+});
+
 // Patch 0107: the CPU thread's throttle sleep installs ready regions (no
 // frame pays for them), counted apart and kept out of installMaxSliceMs.
 // [installs, ms x 100, worst lateness past the deadline x 100, slice installs

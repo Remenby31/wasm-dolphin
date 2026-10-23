@@ -25,7 +25,7 @@
       "commit": "01e0577914a75a2569c846778c2f93aa8e6feddd"
     }
   },
-  "patchSeriesSha256": "4f04c80b591765c017ffc408d4bffc55a30d4f733bda39cbcc2812ad155f619a",
+  "patchSeriesSha256": "634ed219f1445ea212ab0fadb86c954f1a1b9a5d7e506cd86bf66a665d1732b8",
   "patches": [
     {
       "order": 1,
@@ -751,12 +751,20 @@
       "order": 91,
       "cwd": ".",
       "hashMode": "lf-normalized",
+      "path": "patches/dolphin-wasm/snapshot/0105-region-fpu-inline.patch",
+      "size": 4500,
+      "sha256": "6158e6ed52c559b2c7b31e4abcb14355a986cd69ef08788c00032419920bec07"
+    },
+    {
+      "order": 92,
+      "cwd": ".",
+      "hashMode": "lf-normalized",
       "path": "patches/dolphin-wasm/snapshot/0107-region-installs-in-throttle-sleep.patch",
       "size": 14861,
       "sha256": "ab1cff9cf64a939235aac58fb6517a0ce8c375233edb3043dcfda018b16efaa4"
     },
     {
-      "order": 92,
+      "order": 93,
       "cwd": ".",
       "hashMode": "lf-normalized",
       "path": "patches/dolphin-wasm/snapshot/0113-headroom-counters.patch",
@@ -764,7 +772,7 @@
       "sha256": "704fdcdba2d3d8b39edc38a158acfb884fa4cdd77a52eee31658a9ed4616fcc0"
     },
     {
-      "order": 93,
+      "order": 94,
       "cwd": ".",
       "hashMode": "lf-normalized",
       "path": "patches/dolphin-wasm/snapshot/0117-mem-access-stats.patch",
@@ -772,7 +780,7 @@
       "sha256": "90a96cfa1c69892a076cf4c61dd86c969b26d922bc0132ad9e945d4ec125eb49"
     },
     {
-      "order": 94,
+      "order": 95,
       "cwd": ".",
       "hashMode": "lf-normalized",
       "path": "patches/dolphin-wasm/snapshot/0120-region-dcbz-direct.patch",
@@ -780,7 +788,7 @@
       "sha256": "20970aa1d59cb3b77e382fa46d99581adf63c421e1856d4b29033ebab97bef63"
     },
     {
-      "order": 95,
+      "order": 96,
       "cwd": ".",
       "hashMode": "lf-normalized",
       "path": "patches/dolphin-wasm/snapshot/0122-region-sleep-install-estimate.patch",
@@ -788,7 +796,7 @@
       "sha256": "1ba2ead55f449857191f128f0e8f68d493df86fa3bee1caf608c556ef7285628"
     },
     {
-      "order": 96,
+      "order": 97,
       "cwd": "Externals/SFML/SFML",
       "hashMode": "lf-normalized",
       "path": "patches/dolphin-wasm/submodules/0001-sfml-emscripten-config.patch",
@@ -796,7 +804,7 @@
       "sha256": "f82197a21fe982ad83f6ee7bbf5a03839b1cebd4d64da3eab11263842bf61d89"
     },
     {
-      "order": 97,
+      "order": 98,
       "cwd": "Externals/xxhash/xxHash",
       "hashMode": "lf-normalized",
       "path": "patches/dolphin-wasm/submodules/0002-xxhash-wasm-simd-scalar.patch",
