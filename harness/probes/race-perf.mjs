@@ -349,7 +349,9 @@ export function regionPipeline(reply) {
     ...(Number.isInteger(reply.layoutRefused) ? { layoutRefused: reply.layoutRefused } : {}),
     ...(Number.isInteger(reply.layoutHash) ? { layoutHash: reply.layoutHash } : {}),
     ...(reply.layout ? { layout: reply.layout } : {}),
-    ...(Number.isInteger(reply.heapPatched) ? { heapPatched: reply.heapPatched, heapPatchedBytes: reply.heapPatchedBytes ?? null, heapPatchFailed: reply.heapPatchFailed ?? null } : {})
+    ...(Number.isInteger(reply.heapPatched) ? { heapPatched: reply.heapPatched, heapPatchedBytes: reply.heapPatchedBytes ?? null, heapPatchFailed: reply.heapPatchFailed ?? null } : {}),
+    // 0107: installs in throttle sleeps and the worst lateness they caused
+    ...(reply.regionSleep ? { regionSleep: reply.regionSleep } : {})
   };
 }
 
