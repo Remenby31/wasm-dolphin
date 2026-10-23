@@ -1,0 +1,64 @@
+diff --git a/Source/Core/Core/PowerPC/CachedInterpreter/CachedInterpreter.cpp b/Source/Core/Core/PowerPC/CachedInterpreter/CachedInterpreter.cpp
+--- a/Source/Core/Core/PowerPC/CachedInterpreter/CachedInterpreter.cpp
++++ b/Source/Core/Core/PowerPC/CachedInterpreter/CachedInterpreter.cpp
+@@ -9458,6 +9458,16 @@ std::optional<std::chrono::steady_clock::time_point> s_region_service_start;
+ // the bench, 2026-10-22, not the 0.7 first assumed).
+ constexpr double REGION_SLICE_TARGET_MS = 2.5;
+ double s_install_ms_per_byte = 1.7e-6;
++// Patch 0122: the installability checks (the module's heap sites scanned,
++// its guest code hashed against the plan) cost time per module byte too,
++// learned the same way, and both rates from every module of at least this
++// size (continuation fragments made modules larger and the sleep estimate
++// short: up to 2.2 ms past a sleep's deadline, 2026-10-23).
++double s_check_ms_per_byte = 0.2e-6;
++constexpr std::size_t REGION_RATE_MIN_BYTES = 64u << 10;
++// In a sleep window a module's estimate counts this much more than its
++// learned cost (the rates are averages; one module may cost more).
++constexpr double REGION_SLEEP_ESTIMATE_FACTOR = 1.5;
+ // Patch 0107: a module whose ready byte the CPU thread saw waits for a
+ // throttle sleep of the CPU thread (DolphinWeb_RegionInstallsWhileIdle, where
+ // an install costs no frame), at most this long from when it became
+@@ -9811,7 +9821,7 @@ bool TryInstallRegion(PendingRegion& pending, int ready_bits_ptr, double& spent_
+   }
+   if (ms < 0.5)
+     s_region_stats.installs_fast += 1;
+-  if (handle > 0 && path != InstallPath::Cold && pending.bytes.size() >= (256u << 10))
++  if (handle > 0 && path != InstallPath::Cold && pending.bytes.size() >= REGION_RATE_MIN_BYTES)
+     s_install_ms_per_byte = 0.8 * s_install_ms_per_byte + 0.2 * ms / pending.bytes.size();
+   if (s_install_samples.count < s_install_samples.capacity)
+   {
+@@ -9872,12 +9882,17 @@ void ServiceRegionInstalls(std::optional<std::chrono::steady_clock::time_point>
+   // before the boot, a repost); a ready module whose sleep wait ran out gets
+   // the slice target only.
+   const auto room = [&](std::size_t bytes, bool boot_budget = true) {
+-    const double estimate = spent_ms + bytes * s_install_ms_per_byte;
++    const double cost = bytes * (s_install_ms_per_byte + s_check_ms_per_byte);
++    const double estimate = spent_ms + cost;
+     if (deadline)
+     {
+-      const double left =
+-          std::chrono::duration<double, std::milli>(*deadline - now).count() - REGION_SLEEP_MARGIN_MS;
+-      return estimate <= left;
++      // The time left read again before each install (0122), the next
++      // module's cost with a safety factor, and the margin.
++      const double left = std::chrono::duration<double, std::milli>(
++                              *deadline - std::chrono::steady_clock::now())
++                              .count() -
++                          REGION_SLEEP_MARGIN_MS;
++      return cost * REGION_SLEEP_ESTIMATE_FACTOR <= left;
+     }
+     return n == 0 || (boot && boot_budget ?
+                           estimate <= REGION_BOOT_SLICE_MS :
+@@ -9888,8 +9903,11 @@ void ServiceRegionInstalls(std::optional<std::chrono::steady_clock::time_point>
+   const auto installable = [&](const PendingRegion& pending) {
+     const auto start = std::chrono::steady_clock::now();
+     const bool ok = RegionInstallable(pending);
+-    spent_ms +=
++    const double ms =
+         std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now() - start).count();
++    spent_ms += ms;
++    if (ok && pending.bytes.size() >= REGION_RATE_MIN_BYTES)
++      s_check_ms_per_byte = 0.8 * s_check_ms_per_byte + 0.2 * ms / pending.bytes.size();
+     return ok;
+   };
+   // Waiting regions whose module the worker has compiled (or that waited too

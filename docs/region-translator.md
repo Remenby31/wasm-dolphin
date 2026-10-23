@@ -315,6 +315,11 @@ a running CachedInterpreter installs in its sleeps. The installability checks
 a sleep's deadline after its installs x 100, slice installs after the wait
 ran out], reset with the session's regions, in the region stats reply as
 `regionSleep`; sleep installs stay out of `installMaxSliceMs`. The lateness
-is the proof that no frame paid: 0 when every sleep kept its deadline. If p95 > 3 ms remains, the
+is the proof that no frame paid: 0 when every sleep kept its deadline.
+Patch 0122: with larger modules (continuation fragments) the estimate ran
+short, up to 2.2 ms past a deadline. The installability checks are now learned
+per byte too and added to the estimate, both rates learn from every module of
+64 KB or more (not 256 KB), and in a sleep the time left is read again before
+each install, the next module counted ×1.5 plus the 1 ms margin. If p95 > 3 ms remains, the
 next lever is a size cap with split modules (coordinated with dispatch: lever
 C and #75's chaining are intra-module).
