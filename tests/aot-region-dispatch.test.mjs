@@ -847,3 +847,42 @@ test("with XER.SO set regions do not run, and the CR fields carry SO like the in
   assert.ok(got.ran <= 1, "refused while SO is set");
   assert.ok(got.interpreted > 20, `${got.interpreted} instructions outside regions`);
 });
+
+// 0111: XER.SO going 0 -> 1 in the middle of a function. An OE form (addo
+// overflowing), mtxer and mcrxr are not region code (RegionMaySetSo ends
+// the block before them): they run outside, and the fragment entered after
+// them refuses while SO is set. The compares after them, the bc on their
+// field and mfcr must carry SO as the interpreter's do.
+const SO_TEXT = 0x80011100;
+const addo = (d, a, b) => add(d, a, b) | (1 << 10);
+const mcrxr = (crf) => (31 << 26) | (crf << 23) | (512 << 1);
+const soProgram = (setter) => assemble(SO_TEXT, [
+  "main", asm.mflr(0), asm.stwu(1, 1, -16), stw(0, 1, 20), (pc, l) => asm.bl(pc, l.f),
+  lwz(0, 1, 20), asm.addi(1, 1, 16), mtlr(0), asm.blr(),
+  "f", asm.lis(5, 0x8000), asm.li(6, 1), asm.li(3, 0), cmpwi(0, 6, 1), (pc, l) => asm.beq(pc, l.a), asm.addi(3, 3, 1),
+  "a", ...setter, cmpwi(0, 6, 1), (pc, l) => asm.beq(pc, l.b), asm.addi(3, 3, 10),
+  "b", cmpw(7, 6, 5), (pc, l) => asm.bgt(pc, l.c, 7), asm.addi(3, 3, 100),
+  "c", asm.addi(4, 3, 0), mfcr(8), asm.blr()
+]);
+for (const [name, setter] of [["addo", [addo(7, 5, 5)]], ["mtxer", [asm.lis(9, 0x8000), mtxer(9)]], ["mcrxr then mtxer", [asm.lis(9, 0xc000), mtxer(9), mcrxr(2), asm.lis(9, 0x8000), mtxer(9)]]]) {
+  test(`XER.SO set mid-function by ${name}: later compares, a bc on them and mfcr carry SO like the interpreter (0111)`, { skip: crSkip }, () => {
+    const prog = soProgram(setter);
+    const dol = buildDol({ textAddr: SO_TEXT, text: prog.words, entry: prog.labels.main });
+    const { image, entryPoint } = imageFromDol(dol);
+    const plan = planDol({ image, entryPoint, gameId: "TEST01", dolBytes: dol, options: { gapFill: false } });
+    for (const seg of image.segments) core.load(seg.start, seg.bytes);
+    core.reset(seedGprs(prog.labels.main), prog.labels.main, STOP, 400000);
+    core.setRegionsEnabled(true);
+    core.setRegionChaining(true);
+    queueAll(plan, 1, true);
+    serviceAll();
+    const reference = runCall(prog.labels.main, { regions: false });
+    const got = runCall(prog.labels.main, { regions: true });
+    core.invalidate(SO_TEXT, 4 * prog.words.length);
+    core.module._DolphinWeb_AotForgetRegionsForTest?.();
+    assert.deepEqual(got.state, reference.state);
+    assert.equal(got.downcount, reference.downcount);
+    assert.ok(got.ran >= 1, "the function's first blocks ran as a region");
+    assert.ok(got.interpreted >= 1, "the SO setter ran outside regions");
+  });
+}
