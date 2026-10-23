@@ -69,6 +69,9 @@ export class AotOptimizer extends EventTarget {
     this.planStore = planStore;
     this.now = now;
     this.batchSize = batchSize;
+    // Frontier blocks left as exits because a function's or a module's
+    // continuation budget ran out (in the done event: the probes see it).
+    this.budgetRefused = 0;
     this.notReadyDelayMs = notReadyDelayMs;
     this.maxNotReadyWaits = maxNotReadyWaits;
     this.maxAttempts = maxAttempts;
@@ -287,7 +290,8 @@ export class AotOptimizer extends EventTarget {
         if (r.reason === "not-ready") { wait = true; break; }
         if (n >= batch.length || (r.entry !== undefined && r.entry !== batch[n].entry)) throw new Error("translator results out of order");
         consumed++;
-        for (const c of r.continuations ?? []) continuationBytesUsed += c.code.length;
+        continuationBytesUsed += r.budgetCharged ?? 0;
+        this.budgetRefused += r.budgetRefused ?? 0;
         if (r.fragment) fragments.push(r.fragment, ...(r.continuations ?? []));
         else refused.push({ entry: batch[n].entry, reason: r.reason ?? "untranslatable" });
       }
@@ -442,7 +446,7 @@ export class AotOptimizer extends EventTarget {
       } finally {
         await finishing;
       }
-      if (!this.cancelled) this.emit("optimization-done", { total: this.regions.length, refused: refused.size, compiled, deferred, ms: ms() });
+      if (!this.cancelled) this.emit("optimization-done", { total: this.regions.length, refused: refused.size, compiled, deferred, budgetRefused: this.budgetRefused, ms: ms() });
     } catch (error) {
       this.emit("optimization-error", { message: String(error?.message || error), fatal: true });
     }

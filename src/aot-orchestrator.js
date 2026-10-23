@@ -403,7 +403,7 @@ export function coreRegionTranslator(m, { mask, helperNames, maxBlocks = 64, max
           break;
         }
         const r = await translateWithContinuations(m, f, { mask, maxBlocks, names, maxContinuations, maxBytes: unitBytes, slice });
-        for (const c of r.continuations ?? []) unitBytes -= c.code.length;
+        unitBytes -= r.budgetCharged ?? 0;
         out.push(r);
         if (r.reason === "budget" || r.reason === "not-ready") break;
       }
@@ -433,6 +433,7 @@ export const REGION_FRAGMENT_MAX_BYTES = 96000;
 export const REGION_CONTINUATION_MAX_BYTES = 2 << 20;
 export const REGION_UNIT_CONTINUATION_MAX_BYTES = 1 << 20;
 export const REGION_MAX_CONTINUATIONS = 31;
+export const REGION_UNCUT_BLOCKS = 64; // what one fragment held before continuations: free of budget
 const capped = (fragment, maxBlocks, maxFragmentBytes) => fragment.entries.length >= maxBlocks || fragment.code.length >= maxFragmentBytes;
 export async function translateWithContinuations(m, f, { mask, maxBlocks, names, maxContinuations = REGION_MAX_CONTINUATIONS,
   maxBytes = REGION_CONTINUATION_MAX_BYTES, maxFragmentBytes = REGION_FRAGMENT_MAX_BYTES, slice = async () => {} }) {
@@ -442,12 +443,27 @@ export async function translateWithContinuations(m, f, { mask, maxBlocks, names,
   const owned = new Set(first.fragment.entries.map((pc) => pc >>> 0));
   const tried = new Set();
   const continuations = [];
+  // The budget counts only what goes past the function's old single
+  // fragment: the first fragment and its continuations together, up to
+  // maxBlocks blocks, are the code one uncut fragment held before
+  // continuations (and before a byte cap moved it into them), so they are
+  // free; only the blocks after those spend the
+  // function's budget and the module's (review of 0130: −39 % when the
+  // moved code ran out of budget and fell back to the dispatcher).
+  let freeBlocks = Math.max(0, REGION_UNCUT_BLOCKS - first.fragment.entries.length);
   let bytes = Math.min(maxBytes, REGION_CONTINUATION_MAX_BYTES);
+  let charged = 0;
   let oversize = 0;
+  let budgetRefused = 0;
+  const next_ = () => frontier(branches, owned).filter((x) => !tried.has(x));
   for (;;) {
-    if (continuations.length >= maxContinuations || bytes <= 0) break;
-    const pc = frontier(branches, owned).find((x) => !tried.has(x));
-    if (pc === undefined) break;
+    const waiting = next_();
+    if (!waiting.length) break;
+    if (continuations.length >= maxContinuations || bytes <= 0) {
+      budgetRefused = waiting.length; // left as exits for lack of budget
+      break;
+    }
+    const pc = waiting[0];
     tried.add(pc);
     await slice();
     let next = translateOne(m, { ...f, entry: pc }, { mask, maxBlocks, names });
@@ -459,9 +475,15 @@ export async function translateWithContinuations(m, f, { mask, maxBlocks, names,
     if (next.fragment.code.length > maxFragmentBytes) { oversize += 1; continue; } // one block alone: left an exit
     for (const e of next.fragment.entries) owned.add(e >>> 0);
     continuations.push(next.fragment);
-    bytes -= next.fragment.code.length;
+    // The share of this fragment within the old single fragment's blocks is free.
+    const n = next.fragment.entries.length;
+    const free = Math.min(freeBlocks, n);
+    freeBlocks -= free;
+    const cost = Math.round(next.fragment.code.length * (n - free) / Math.max(1, n));
+    bytes -= cost;
+    charged += cost;
   }
-  return { ...first, ...(continuations.length ? { continuations } : {}), ...(oversize ? { oversize } : {}) };
+  return { ...first, ...(continuations.length ? { continuations, budgetCharged: charged } : {}), ...(oversize ? { oversize } : {}), ...(budgetRefused ? { budgetRefused } : {}) };
 }
 
 // The direct branches of the code in `ranges` ([start, end) guest
@@ -496,12 +518,13 @@ export function functionBranches(m, ranges) {
 }
 
 // The leaders that the blocks held already reach and that none holds, in
-// address order. A branch belongs to the block of the nearest block start
-// at or before it (held entries and all leaders), unless a block end lies
-// between them: the leaders a held block reaches are the frontier; a word
-// that only looks like a branch (a literal after a blr) is in no block.
+// address order. A branch is in held code when the nearest held entry at or
+// before it reaches it with no block end between them (the core's block can
+// run through a leader it did not split at, e.g. a loop head right after the
+// entry); a word that only looks like a branch (a literal after a blr) is in
+// no block.
 export function frontier(branches, owned) {
-  const starts = [...new Set([...owned, ...branches.flatMap(([, l]) => l)])].sort((a, b) => a - b);
+  const starts = [...owned].sort((a, b) => a - b);
   const blockOf = (a) => {
     let lo = 0, hi = starts.length - 1, at = null;
     while (lo <= hi) { const mid = (lo + hi) >> 1; if (starts[mid] <= a) { at = starts[mid]; lo = mid + 1; } else hi = mid - 1; }
@@ -512,7 +535,7 @@ export function frontier(branches, owned) {
   const out = new Set();
   for (const [a, leaders] of branches) {
     const start = blockOf(a);
-    if (!owned.has(start) || endBetween(start, a)) continue;
+    if (start === null || endBetween(start, a)) continue;
     for (const pc of leaders) if (!owned.has(pc)) out.add(pc);
   }
   return [...out].sort((a, b) => a - b);
