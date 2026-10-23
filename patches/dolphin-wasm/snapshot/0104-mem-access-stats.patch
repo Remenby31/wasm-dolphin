@@ -460,8 +460,8 @@ diff --git a/Source/Core/Core/PowerPC/CachedInterpreter/CachedInterpreter.cpp b/
    const auto run = reinterpret_cast<RegionFunction>(
        static_cast<std::uintptr_t>(region.handle));
    const s32 downcount = ppc_state.downcount;
-+  const double accesses_per_cycle = s_regions[it->second].accesses_per_cycle;
-+  const double instructions_per_cycle = s_regions[it->second].instructions_per_cycle;
++  const double accesses_per_cycle = region.accesses_per_cycle;
++  const double instructions_per_cycle = region.instructions_per_cycle;
    int code;
    if (s_region_stats_on && s_region_stats.sample_every != 0)
    {

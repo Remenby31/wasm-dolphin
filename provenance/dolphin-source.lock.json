@@ -25,7 +25,7 @@
       "commit": "01e0577914a75a2569c846778c2f93aa8e6feddd"
     }
   },
-  "patchSeriesSha256": "8322da2453e04801f891764492d83a96d341ad6e444842700a0a90891dc6f0af",
+  "patchSeriesSha256": "c82254fdc8ee438d9c2c62baaf50285bfebe090ec10fa75e61eb1ef90e910213",
   "patches": [
     {
       "order": 1,
@@ -720,8 +720,8 @@
       "cwd": ".",
       "hashMode": "lf-normalized",
       "path": "patches/dolphin-wasm/snapshot/0104-mem-access-stats.patch",
-      "size": 28879,
-      "sha256": "e53160fdd115bd735a1fcfdbde6df6c06347a59f4378f8f6c8ded8e77b42c0dc"
+      "size": 28849,
+      "sha256": "3864605430d3f18dfbd98c64b309d4a99f1c33f9ba03c69efc11fcd16c972aa4"
     },
     {
       "order": 88,
