@@ -140,8 +140,8 @@
     {
       "path": "src/upstream-discio-worker.js",
       "hashMode": "lf-normalized",
-      "size": 727092,
-      "sha256": "8c4ec9240a8a879c3f3258d9e01b2510b2f71a1450063a1f0f40632f20c72413"
+      "size": 727931,
+      "sha256": "7d820393dd4a09d4e5ad2859b1fb2c7646db1b22f4b7ac9c67695ab3a1a3cffc"
     },
     {
       "path": "src/wgpu-renderer-worker-probe.js",
@@ -296,8 +296,8 @@
     {
       "path": "src/jit-cache-identity.js",
       "hashMode": "lf-normalized",
-      "size": 6647,
-      "sha256": "33a9c3d95ea53e227b4eac141b38cd60c7720a6e3dbc98da1d1e8222d4dcce6b"
+      "size": 7018,
+      "sha256": "e5fc6426011c3b897a2c002688365df1fab19ea32080257ba7fd581905a37ec1"
     },
     {
       "path": "src/wgpu-ubo-compute-projection.js",

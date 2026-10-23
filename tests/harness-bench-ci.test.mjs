@@ -34,6 +34,9 @@ test("CI bench: manual or bench/** pushes only, never a disc, read-only token, b
   // An A/B serves each ref's committed core, refused unless it is the build of that ref's sources.
   assert.match(workflow, /node tools\/core-artifacts\.mjs status --checkout "\$d" --require-current \|\| \{ echo "\$ref: its committed core is not the build of its sources"; exit 1; \}/);
   assert.doesNotMatch(workflow, /cd "\$d" && node tools/); // never the ref's own tool
+  // A switch on the candidate side only: validated &key=value pairs, the baseline without them.
+  assert.match(workflow, /\[\[ "\$CANDIDATE_QUERY" =~ \^\(\\&\[a-z0-9_\]\+=\[A-Za-z0-9\._-\]\+\)\+\$ \]\]/);
+  assert.match(workflow, /queries=\(--query "\$query\$CANDIDATE_QUERY" --baseline-query "\$query"\)/);
   assert.match(workflow, /sides=\(--baseline "\$BASELINE" --candidate "\$CANDIDATE"\)/);
   assert.doesNotMatch(workflow, /--state|\.sav\b|roms\/|\.iso\b/);
   assert.match(workflow, /--pin-cpu-thread 0/);

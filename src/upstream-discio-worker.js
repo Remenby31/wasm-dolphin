@@ -23,7 +23,7 @@ import {
   compileFailureReason,
   createAotCompilerClient
 } from "./aot-compiler-worker.js";
-import { migrateLegacyJitIdb, openAotBlockStore, openAotCache, readDiscKeyFromFile } from "./aot-cache.js";
+import { migrateLegacyJitIdb, openAotBlockStore, openAotCache, readDiscKeyFromFile, readDolKeyFromFile } from "./aot-cache.js";
 import {
   JIT_CACHE_ENTRY_KEY_SCHEMA,
   canonicalCoreFingerprint,
@@ -3879,6 +3879,7 @@ async function mountFile(file) {
   aotDiscKey = null;
   aotDiscKeyPromise = null;
   aotDiscFile = file;
+  aotDiscKind = "disc";
   console.log(`[boot-phase] fs.mount(WORKERFS) took ${(performance.now() - _t_workerfs).toFixed(1)}ms (${(file.size / 1048576).toFixed(1)}MiB image)`);
 
   // A .dol/.elf/.dff is no disc: DiscIO cannot open it, and BootDisc's
@@ -3915,9 +3916,13 @@ async function mountFile(file) {
   presentedFrame = 0;
 
   // P7 (?aot=1): the regions cached for this disc are installed before the
-  // boot; the optimisation of the rest starts once the boot is accepted.
-  if (aotFirstLaunchEnabled && bootKind === "disc" && api.bootDisc && file.size >= MIN_FULL_BOOT_BYTES) {
-    await prepareAotFirstLaunch(file);
+  // boot; the optimisation of the rest starts once the boot is accepted. A
+  // booted .dol too (a homebrew, the CI bench's workloads): its own key
+  // namespace (dol-sha256-v1, the file's SHA-256) and plan (the .dol alone).
+  const aotKind = aotBootKind(bootKind, file.size);
+  if (aotFirstLaunchEnabled && aotKind && api.bootDisc) {
+    aotDiscKind = aotKind;
+    await prepareAotFirstLaunch(file, { kind: aotKind });
   }
   if (aotTestHeapShiftBytes && !aotTestHeapPad && moduleInstance?._malloc) {
     aotTestHeapPad = moduleInstance._malloc(aotTestHeapShiftBytes); // kept for the session
@@ -7286,10 +7291,17 @@ let aotDiscKey = null;
 let aotDiscGeneration = 0;
 let aotDiscKeyPromise = null;
 let aotDiscFile = null;
+let aotDiscKind = "disc"; // "dol": a booted .dol, keyed by readDolKeyFromFile
+// Which boots get ?aot=1: a disc as before (a full boot image), and a .dol;
+// nothing else (.elf, .dff, a disc too small to boot).
+export function aotBootKind(bootKind, size) {
+  if (bootKind === "disc") return size >= MIN_FULL_BOOT_BYTES ? "disc" : null;
+  return bootKind === "dol" ? "dol" : null;
+}
 function readMountedDiscKey() {
   if (!aotDiscKeyPromise) {
     const generation = aotDiscGeneration;
-    aotDiscKeyPromise = readDiscKeyFromFile(aotDiscFile).then(
+    aotDiscKeyPromise = (aotDiscKind === "dol" ? readDolKeyFromFile : readDiscKeyFromFile)(aotDiscFile).then(
       (key) => (generation === aotDiscGeneration ? (aotDiscKey = key) : null),
       () => null
     );
@@ -7418,6 +7430,7 @@ function unsupportedAotFlow() {
 // Test seams: `module` stands for the core, `readDiscKey` for the disc key of
 // the mounted file, `cacheStorage` for the browser's.
 export async function prepareAotFirstLaunch(file, {
+  kind = "disc", // "dol": a booted .dol (planDolFile)
   module = moduleInstance,
   readDiscKey = readMountedDiscKey,
   coreHash = aotCoreFingerprint,
@@ -7434,7 +7447,7 @@ export async function prepareAotFirstLaunch(file, {
     return;
   }
   const generation = aotDiscGeneration;
-  const [{ coreAotKeyParts, coreAssembleOptions, coreRegionTranslator, createAotFirstLaunch }, { OpfsPlanStore }, { AotProfileStore, blocksFromPcSamples, profileKey }, { planDiscInWorker }, { fileReader, planDisc }, { createProfileRecorder, guestPcAddress, startHotSampler }] =
+  const [{ coreAotKeyParts, coreAssembleOptions, coreRegionTranslator, createAotFirstLaunch }, { OpfsPlanStore }, { AotProfileStore, blocksFromPcSamples, profileKey }, { planDiscInWorker }, { fileReader, planDisc, planDolFile }, { createProfileRecorder, guestPcAddress, startHotSampler }] =
     await Promise.all([import("./aot-orchestrator.js"), import("./aot-optimizer.js"), import("./aot-profile.js"), import("./aot-plan-worker.js"), import("./aot-recomp.js"), import("./aot-hot-sampler.js")]);
   const discKey = await readDiscKey();
   if (generation !== aotDiscGeneration) return;
@@ -7458,7 +7471,8 @@ export async function prepareAotFirstLaunch(file, {
     buildPlan: async () => {
       const profile = opfs ? await new AotProfileStore(opfs).load(profileKey(discKey)).catch((error) => noteAotProfileReadFailure(error)) : null;
       aotPlanProfileForTest = profile;
-      return typeof Worker === "function" ? planDiscInWorker(file, { profile }) : planDisc(fileReader(file), { profile });
+      if (typeof Worker === "function") return planDiscInWorker(file, { profile, kind });
+      return kind === "dol" ? planDolFile(fileReader(file), file.size, { profile }) : planDisc(fileReader(file), { profile });
     },
     compile: precompileAotRegion,
     // Queued once the module is also kept under its bytes' key: the CPU
