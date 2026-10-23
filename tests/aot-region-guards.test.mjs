@@ -74,3 +74,44 @@ for (const [name, bits] of [["FE0", FE0], ["FE1", FE1], ["FE0 and FE1", FE0 | FE
     assert.ok(after.equal, JSON.stringify(after.difference));
   });
 }
+
+// mtmsr inside a fragment that sets FE0: the fragment ends at the mtmsr (the
+// dispatcher takes over), so the FP op after it never runs as region code
+// built for FE0 = 0; the state is the interpreter's.
+test("mtmsr setting FE0 inside a fragment: the region stops there, the interpreter's state", { skip }, () => {
+  const mfmsr = ((31 << 26) | (5 << 21) | (83 << 1)) >>> 0;
+  const ori = ((24 << 26) | (5 << 21) | (5 << 16) | 0x800) >>> 0; // ori r5,r5,FE0
+  const mtmsr = ((31 << 26) | (5 << 21) | (146 << 1)) >>> 0;
+  const words = [A(63, 1, 2, 3, 0, 21), mfmsr, ori, mtmsr, A(63, 4, 1, 3, 0, 21), 0x4e800020];
+  const state = randomState(makeRng(0x122));
+  state[MSR] = 0x00002032;
+  core.loadState(state, ORACLE_CODE);
+  core.load(ORACLE_CODE, bigEndian(words));
+  const fragment = core.translate(ORACLE_CODE, { mask: PRODUCTION_DISABLE_MASK, ranges: [[ORACLE_CODE, ORACLE_CODE + 4 * words.length]] });
+  assert.ok(fragment);
+  const { bytes } = assembleRegion([fragment], { helpers: HELPER_SIGNATURES, pcOffset: core.pcOffset, memoryPages: core.memoryPages });
+  const handle = core.compile(bytes);
+  const regionAt = new Map(fragment.entries.map((pc) => [pc >>> 0, handle]));
+  const baseline = core.ram().slice();
+  const result = compareCall(core, regionAt, () => {
+    core.ram().set(baseline);
+    core.loadState(state, ORACLE_CODE);
+    core.setDowncount(400000);
+  });
+  assert.ok(!result.error && !result.trap, JSON.stringify(result));
+  assert.ok(result.got.regionRuns >= 1, "the region ran up to the mtmsr");
+  assert.ok(result.equal, JSON.stringify(result.difference));
+});
+
+// A region translated under one FPRF mode carries the layout hash of that
+// mode: under the other it is refused at install (the layout guard).
+test("the FPRF mode is part of the region layout hash", { skip: skip || (!core?.has("DolphinWeb_AotLayoutHash") && "core without the layout hash") }, () => {
+  const hash = () => core.module._DolphinWeb_AotLayoutHash() >>> 0;
+  core.module._DolphinWeb_SetFprfForTest(0);
+  const off = hash();
+  core.module._DolphinWeb_SetFprfForTest(1);
+  const on = hash();
+  core.module._DolphinWeb_SetFprfForTest(0);
+  assert.notEqual(on, off);
+  assert.equal(hash(), off);
+});

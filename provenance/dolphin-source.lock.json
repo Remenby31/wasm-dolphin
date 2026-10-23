@@ -25,7 +25,7 @@
       "commit": "01e0577914a75a2569c846778c2f93aa8e6feddd"
     }
   },
-  "patchSeriesSha256": "64366eb1dbb845754035f4b901b077b5a0ba74d3000c1d5b08da0ecb079cfe08",
+  "patchSeriesSha256": "c7aa557659420b2e90b46024e44a02cef259135cb14b11c42f9b15a8efd847de",
   "patches": [
     {
       "order": 1,
@@ -784,8 +784,8 @@
       "cwd": ".",
       "hashMode": "lf-normalized",
       "path": "patches/dolphin-wasm/snapshot/0121-entry-guards-fprf-setting.patch",
-      "size": 13189,
-      "sha256": "9339394cf488a0581f925b29d0f3168ca185e5c16a2aab8d8766addc951950e3"
+      "size": 14779,
+      "sha256": "32e005a797656306167100ece8823afd33b7752a1df39b80b96dbd5b08ffc37c"
     },
     {
       "order": 96,
