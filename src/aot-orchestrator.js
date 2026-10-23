@@ -353,13 +353,33 @@ export function coreHeapBases(m) {
   }
 }
 
+// One turn of the event loop, through a MessageChannel: a setTimeout(0)
+// chain is clamped to 4 ms after five nested timers, which left 8 ms
+// translation slices a third of the time idle (research deep-first-minute
+// §2.1); a message has no clamp and still lets the worker's other messages
+// (the core's disc reads, compile requests) run between slices.
+export function yieldToEventLoop() {
+  if (typeof MessageChannel !== "function") return new Promise((r) => setTimeout(r, 0));
+  // A channel per turn, closed once it delivered: a port left open would
+  // keep a worker (or Node) alive.
+  return new Promise((r) => {
+    const { port1, port2 } = new MessageChannel();
+    port1.onmessage = () => {
+      port1.close();
+      port2.close();
+      r();
+    };
+    port2.postMessage(0);
+  });
+}
+
 // The translator the optimiser drives, over the core's export. Translates
 // for at most `sliceMs` per call and answers "budget" for the rest: the discio
 // worker also serves the core's disc reads, so it yields between slices.
 // maxContinuations: fragments translated after a function's first one, from
 // its frontier (see translateWithContinuations).
 export function coreRegionTranslator(m, { mask, helperNames, maxBlocks = 64, maxContinuations = REGION_MAX_CONTINUATIONS, sliceMs = 8, now = () => performance.now(),
-  yieldNow = () => new Promise((r) => setTimeout(r, 0)) } = {}) {
+  yieldNow = yieldToEventLoop } = {}) {
   if (typeof m?._DolphinWeb_AotTranslate !== "function") return null;
   const names = helperNames ?? coreAssembleOptions(m)?.helperNames ?? [];
   return {
