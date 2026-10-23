@@ -13,7 +13,7 @@
 //     [--config wgpu | --query "..."] [--warmup 25] [--secs 20]
 //     [--runs 4 (even with --baseline)] [--min-pairs 4] [--hold KeyX] [--warm]
 //     [--max-load L] [--load-wait 300] [--lock-wait 1800]
-//     [--pcsample [periodMs]] [--symbols functions.json] [--out dir]
+//     [--counters [--counter-events frontend|e1,e2]] [--pcsample [periodMs]] [--symbols functions.json] [--out dir]
 //     [--headroom [--frames-per-vi-ref R]] [--display] [--unique-frames secs] [--region-sample N [--region-secs 10]] [--mem-stats [--mem-warm 5]] [--baseline-query "..."]
 //     [--calm-wait S (default --lock-wait): wait for load ≤ --max-load before taking the lock]
 //     [--chrome-args "--flag …"] [--baseline-chrome-args "--flag …"]
@@ -92,7 +92,7 @@ import { consistentRead, decodeRegionStats, poolStats, regionShares, topMisses }
 import { consistentMemRead, decodeMemStats, memAccessShares, poolMemStats } from "../lib/mem-access-stats.mjs";
 import { consistentHeadroomRead, decodeHeadroomStats, headroomOf, invalidReasons, querySpeed, unlimitedAllowed } from "../lib/headroom.mjs";
 import { summarizePcSamples } from "../../src/harness-pc-sampler.js";
-import { checkPerfAccess, instructionsPerGuestCycle, perfCounters } from "../lib/perf-counters.mjs";
+import { checkPerfAccess, counterEvents, cyclesPerGuestCycle, instructionsPerGuestCycle, perfCounters } from "../lib/perf-counters.mjs";
 import { emulatedStart } from "../lib/emulated-window.mjs";
 
 const HOMEBREW_OUT = path.join(REPO_ROOT, "harness", "homebrew", "out");
@@ -106,10 +106,10 @@ export function sideOrder(run) {
 // pair counts only when both sides measured; the conclusion needs at least
 // `minPairs` pairs, as many with trunk first as with head first (drift over
 // a campaign then hits both sides alike), otherwise it is withheld.
-export function pairedSpeedChange(runs, { metric = "speed", minPairs = 4 } = {}) {
+export function pairedSpeedChange(runs, { metric = "speed", minPairs = 4, phase = "cold" } = {}) {
   const pairs = [];
   for (const r of runs) {
-    const b = r.baseline?.cold?.[metric], c = r.candidate?.cold?.[metric];
+    const b = r.baseline?.[phase]?.[metric], c = r.candidate?.[phase]?.[metric];
     if (Number.isFinite(b) && Number.isFinite(c) && b > 0) pairs.push({ run: r.run, first: sideOrder(r.run)[0], ratio: c / b - 1 });
   }
   const baseFirst = pairs.filter((p) => p.first === "baseline").length;
@@ -271,8 +271,11 @@ export async function measure(session, o) {
     // --region-sample, so that a launch running without its region cache
     // never goes unnoticed (2026-10-22: 0/143 on a loaded machine).
     const pipeline = regionEnd ? null : await workerRequest(page, "validationReadJitRegionStats", {}, 10000).catch(() => null);
+    // The FMA emitter's mode (patch 0129): relaxed_madd fused or the plain-f64 path.
+    const relaxedMadd = await workerRequest(page, "validationReadRelaxedMadd", {}, 10000).catch(() => null);
     return {
       windowMs: Math.round(t1 - t0),
+      relaxedMadd: relaxedMadd?.mode ?? null, fusedMadd: relaxedMadd?.coreFused ?? null,
       // Guest seconds this window covered (core ticks / ticks per second);
       // the reads bracket the window, so a few host ms more than windowMs.
       guestCovered: guestCovered(ticksBefore, ticksAfter, progress?.coreTicksPerSecond),
@@ -425,6 +428,16 @@ export function memSummary(runs, sides, good = (r) => r && !r.error) {
   return { memAccess: c.memAccess, memAccessWhy: c.why, baselineMemAccess: b?.memAccess ?? null, baselineMemAccessWhy: b?.why ?? null };
 }
 
+// The FMA emitter's mode per side (patch 0129), as the runs saw it: one value,
+// or "mixed" when the runs disagree.
+export function fusedMaddSummary(runs, sides, good = (r) => r && !r.error) {
+  const side = (n) => {
+    const seen = [...new Set(runs.map((r) => r[n]).filter(good).map((r) => r.cold?.fusedMadd ?? null))];
+    return seen.length === 1 ? seen[0] : seen.length ? "mixed" : null;
+  };
+  return { fusedMadd: side("candidate"), baselineFusedMadd: sides.baseline ? side("baseline") : null };
+}
+
 // p4 / baselineP4 and their reasons; the sides are compared only when both
 // have counters (one side without the export is not a comparison).
 export function p4Summary(runs, sides, good = (r) => r && !r.error) {
@@ -458,11 +471,13 @@ async function measureSide(side, o, loadGate) {
     const record = { url: session.url, served: server.identity, core: session.core, loadGate, bootMs: round(performance.now() - bootStart, 0) };
     try {
       record.cold = await measure(session, o);
-      if (record.cold.counters) record.cold.instructionsPerGuestCycle = instructionsPerGuestCycle(record.cold);
       if (o.warm) {
         record.warmCore = await rebootSession(session, server);
         record.warm = await measure(session, o);
       }
+      // Per guest cycle: host instructions, and host cycles (which decide
+      // when a change moves the IPC), for the warm window too (--warm).
+      for (const w of [record.cold, record.warm]) if (w?.counters) Object.assign(w, { instructionsPerGuestCycle: instructionsPerGuestCycle(w), cyclesPerGuestCycle: cyclesPerGuestCycle(w) });
     } catch (error) {
       record.error = String(error?.message || error).slice(0, 300);
       // The harness lost Chrome (CDP pipe fault, lib/browser.mjs): infra.
@@ -515,7 +530,7 @@ async function main() {
       "emulated-window": { type: "string" }, "emulated-warmup": { type: "string" }, "emulated-poll-ms": { type: "string", default: "100" },
       hold: { type: "string", default: "KeyX" }, warm: { type: "boolean", default: false },
       "max-load": { type: "string" }, "lock-wait": { type: "string", default: "1800" },
-      pcsample: { type: "string" }, symbols: { type: "string" }, "region-sample": { type: "string" }, "region-secs": { type: "string", default: "10" }, counters: { type: "boolean", default: false }, "unique-frames": { type: "string" }, display: { type: "boolean", default: false }, "mem-stats": { type: "boolean", default: false }, "mem-warm": { type: "string", default: "5" }, headroom: { type: "boolean", default: false }, "frames-per-vi-ref": { type: "string" }, "baseline-query": { type: "string" }, "chrome-args": { type: "string" }, "baseline-chrome-args": { type: "string" },
+      pcsample: { type: "string" }, symbols: { type: "string" }, "region-sample": { type: "string" }, "region-secs": { type: "string", default: "10" }, counters: { type: "boolean", default: false }, "counter-events": { type: "string" }, "unique-frames": { type: "string" }, display: { type: "boolean", default: false }, "mem-stats": { type: "boolean", default: false }, "mem-warm": { type: "string", default: "5" }, headroom: { type: "boolean", default: false }, "frames-per-vi-ref": { type: "string" }, "baseline-query": { type: "string" }, "chrome-args": { type: "string" }, "baseline-chrome-args": { type: "string" },
       "core-candidate": { type: "string", multiple: true, default: [] },
       port: { type: "string", default: process.env.HARNESS_PORT }, out: { type: "string" }
     },
@@ -546,6 +561,7 @@ async function main() {
   const baselineChromeArgs = values["baseline-chrome-args"] == null ? chromeArgs : chromeArgsOf(values["baseline-chrome-args"], "baseline-chrome-args");
   if (values["baseline-chrome-args"] != null && !values.baseline) throw new Error("--baseline-chrome-args needs --baseline");
   const runs = num(values, "runs", { min: 1, int: true });
+  if (values["counter-events"] && !values.counters) throw new Error("--counter-events needs --counters");
   if (values.baseline && runs % 2) throw new Error(`--runs ${runs}: with --baseline the runs must be even, so trunk goes first as often as head`);
   const o = {
     iso, state, port: num(values, "port", { min: 1, int: true }), query, runs,
@@ -568,7 +584,8 @@ async function main() {
     regionSecs: num(values, "region-secs", { min: 1 }),
     // --counters (Linux perf): host instructions per guest cycle of the
     // emulated CPU thread, per window (lib/perf-counters.mjs).
-    ...(values.counters ? (checkPerfAccess(), { onWindow: perfCounters() }) : {}),
+    // --counter-events frontend|e1,e2: more PMU events in the same window.
+    ...(values.counters ? (checkPerfAccess(), { onWindow: perfCounters(undefined, { extra: counterEvents(values["counter-events"]) }) }) : {}),
     uniqueFrames: values["unique-frames"] == null ? null : num(values, "unique-frames", { min: 2 }),
     memStats: values["mem-stats"],
     memWarm: num(values, "mem-warm", { min: 0 }),
@@ -658,7 +675,8 @@ async function main() {
   const runsDone = records;
 
   // A run that breaks a validity rule (headroom.mjs invalidReasons: ring
-  // overflow, speed above its target, no unique image, game frames per VI
+  // overflow, speed above its target, no unique image, a frozen renderer
+  // (no present or no game frame), game frames per VI
   // off the reference) is set aside with its reasons.
   for (const r of records) for (const n of Object.keys(sides)) {
     const c = r[n]?.cold;
@@ -734,9 +752,15 @@ async function main() {
     lockOverlap,
     // --counters: the same pairing on host instructions per guest cycle (lower is better).
     ...(o.onWindow && sides.baseline ? { counterChange: pairedSpeedChange(runsDone.filter((r) => good(r.baseline) && good(r.candidate)), { metric: "instructionsPerGuestCycle", minPairs: o.minPairs }) } : {}),
+    // Host cycles per guest cycle: they decide when the instructions and the
+    // IPC move apart (PROGRAM.md, 2026-10-23).
+    ...(o.onWindow && sides.baseline ? { cycleChange: pairedSpeedChange(runsDone.filter((r) => good(r.baseline) && good(r.candidate)), { metric: "cyclesPerGuestCycle", minPairs: o.minPairs }) } : {}),
+    // --warm: the same pairings on the warm windows (the profile's second boot).
+    ...(o.warm && sides.baseline ? { warmChange: Object.fromEntries(["speed", ...(o.onWindow ? ["instructionsPerGuestCycle", "cyclesPerGuestCycle"] : [])].map((m) => [m, pairedSpeedChange(runsDone.filter((r) => good(r.baseline) && good(r.candidate)), { metric: m, minPairs: o.minPairs, phase: "warm" })])) } : {}),
     pcsample: pcNote,
     // P4 counters (KPI: region and dispatch shares), cold stats windows of good runs.
     ...p4Summary(runsDone, sides, good),
+    ...fusedMaddSummary(runsDone, sides, good),
     // Memory accesses per instruction (0104), cold stats windows of good runs.
     ...(o.memStats ? memSummary(runsDone, sides, good) : {}),
     // What each side served (commit, dirty), for kpi-report: from its first good run.

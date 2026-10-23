@@ -10,6 +10,12 @@
       "measured": "No effect on the measurement disc (its [Core] section is empty)."
     },
     {
+      "section": "Core",
+      "key": "FPRF",
+      "why": "Correctness: FPSCR.FPRF is computed from FP results only when the setting is on (patch 0121, as upstream's JITs; every tier of ours follows it, the interpreter included). Games that read FPRF ask for it in their INI.",
+      "measured": "No effect on the measurement disc (its [Core] section is empty). Costs FPRF updates in the games that set it."
+    },
+    {
       "section": "Video_Settings",
       "key": "SafeTextureCacheColorSamples",
       "why": "Correctness: games that need a safer texture cache hash more samples of each texture (or all, 0) so updates to texture memory are seen. VideoCommon reads it on the CPU side, the same on every backend (the rendering agent checked wgpu, 2026-10-22).",

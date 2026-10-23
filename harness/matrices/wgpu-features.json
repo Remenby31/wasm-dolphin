@@ -1,0 +1,20 @@
+{
+  "name": "wgpu-features",
+  "runs": 2,
+  "warmupSec": 4,
+  "sampleSec": 8,
+  "games": [
+    { "id": "dstalpha", "iso": "harness/homebrew/out/dstalpha.iso", "static": true, "set": { "cpu": "single" } },
+    { "id": "gxscene-fifo", "iso": "harness/homebrew/out/gxscene.dff", "static": true, "set": { "cpu": "single", "fifolog": "1" } },
+    { "id": "efbpeek", "iso": "harness/homebrew/out/efbpeek.iso", "static": true, "set": { "efbaccess": "1", "cpu": "single" } },
+    { "id": "ramcopy", "iso": "harness/homebrew/out/ramcopy.iso", "static": true, "set": { "efbcopyram": "1", "cpu": "single" } }
+  ],
+  "configs": [
+    { "id": "sw-exact", "preset": "sw-interp", "set": { "fastsw": "0" } },
+    { "id": "wgpu-interp", "preset": "wgpu-nojit" },
+    { "id": "wgpu-nodualsrc", "preset": "wgpu-nojit", "set": { "wgpumask": "dual-source-blending" } },
+    { "id": "wgpu-safari26", "preset": "wgpu-nojit", "set": { "wgpumask": "dual-source-blending,clip-distances" } }
+  ],
+  "reference": "sw-exact",
+  "renderMatch": 0.99
+}

@@ -202,7 +202,10 @@ test("interrupted in the middle of the first launch, the next launch resumes whe
   assert.equal(ofType(first.flow, "done").length, 0, "no done after a cancel");
   const stopped = ofType(first.flow, "progress").at(-1);
   assert.ok(stopped.done < total, "interrupted before the end");
-  const doneBefore = first.compiled.length;
+  // Modules handled before the cancel (stored); one that compiled during
+  // the cancel is installed but not stored (no verdict), so it is not
+  // counted (review of #144).
+  const doneBefore = stopped.done;
   assert.ok(doneBefore >= 1);
 
   const second = launch(p);
@@ -212,14 +215,17 @@ test("interrupted in the middle of the first launch, the next launch resumes whe
   // the partial cache is installed before boot
   const report = await second.flow.installBeforeBoot();
   assert.ok(report.loaded >= doneBefore);
+  const stored = new Set(second.retained.keys()); // what the first launch stored
   await second.flow.start();
   const [start] = ofType(second.flow, "start");
   assert.equal(start.resumed, true);
   assert.ok(start.done >= doneBefore, "resumes near where it stopped");
   const [done] = ofType(second.flow, "done");
   assert.equal(done.compiled + start.done, total, "the regions already stored are not compiled again");
-  // the regions stored by the first launch are not compiled again
-  for (const key of first.compiled) assert.ok(!second.compiled.includes(key));
+  // the regions stored by the first launch are not compiled again; one that
+  // compiled during the cancel was not stored, so it is retried (#144)
+  for (const key of first.compiled) if (stored.has(key)) assert.ok(!second.compiled.includes(key));
+  assert.ok(first.compiled.filter((key) => !stored.has(key)).length <= 1, "at most the module of the cancel");
   assert.equal(ofType(second.flow, "progress").at(-1).fraction, 1);
   // third launch: complete, nothing left to do
   const third = launch(p);

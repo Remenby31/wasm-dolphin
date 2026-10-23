@@ -12,6 +12,7 @@ import {
   sha256Hex
 } from "./upstream-worker-protocol.js";
 import { parseDolHeader } from "./dol.js";
+import { probeRelaxedMadd } from "./relaxed-madd-probe.js";
 import { decodeWgpuSamplerState } from "./wgpu-sampler-state.js";
 import { gxClearDepthToStored, gxDepthState } from "./wgpu-depth-state.js";
 import { clampSourceRect, createWgpuExactCapture, packReadbackRows } from "./wgpu-exact-capture.js";
@@ -262,6 +263,12 @@ const harnessNow = () => performance.timeOrigin + performance.now();
 let harnessEnabled = false;
 // ?fifolog=1: a .dff may boot (FifoPlayer). Harness only, set at loadCore.
 let fifoLogBoot = false;
+// ?wgpumask=a,b: optional WebGPU features the device is created without, as
+// on a browser that lacks them (harness only, set at loadCore).
+let wgpuMaskedFeatures = new Set();
+export function parseWgpuMask(mask) {
+  return new Set(String(mask || "").split(",").map((f) => f.trim()).filter(Boolean));
+}
 let harnessPcSamplerRun = null;
 
 // QA harness only: start / stop the guest-PC sampler (harness-pc-sampler.js).
@@ -867,6 +874,8 @@ const wgpuDiagPerturb = { presentDelayMs: 0, drainEveryMs: 0 };
 let wgpuDiagLastDrainAt = 0;
 // The core's GPU-sync counters (patch 0080), on only for the freeze probe.
 let gpuSyncDiagEnabled = false;
+// probeRelaxedMadd()'s answer: "fused", "unfused", "unsupported" or "inconsistent".
+let relaxedMadd = null;
 
 // Milliseconds before the next drain the drainEveryMs perturbation allows (0:
 // drain now). The replay pump sleeps that long instead of polling.
@@ -1491,6 +1500,7 @@ async function handleMessage(type, payload) {
         efbAccess: payload.efbAccess,
         fifoLog: payload.fifoLog,
         efbCopyRam: payload.efbCopyRam,
+        wgpuMask: payload.wgpuMask,
         efbDiag: payload.efbDiag,
         jitVerbose: payload.jitVerbose,
         frameCap: payload.frameCap,
@@ -1730,6 +1740,9 @@ async function handleMessage(type, payload) {
       return harnessUniqueFramesRequest(payload);
     case "validationPcSampler":
       return harnessPcSampler(payload);
+    case "validationReadRelaxedMadd":
+      // coreFused: the core's own mode (null: a core without patch 0129).
+      return { mode: relaxedMadd, coreFused: moduleInstance?._DolphinWeb_FusedMadd ? moduleInstance._DolphinWeb_FusedMadd() === 1 : null };
     case "validationReadJitRegionStats":
       return harnessJitRegionStats(payload);
     case "validationReadAxHleStats":
@@ -2143,6 +2156,7 @@ async function loadCore({
   efbAccess = false,
   fifoLog = false,
   efbCopyRam = false,
+  wgpuMask = "",
   efbDiag = false,
   jitVerbose = false,
   frameCap = 0,
@@ -2193,6 +2207,7 @@ async function loadCore({
   oglSabEnabled = false
 } = {}) {
   fifoLogBoot = Boolean(fifoLog);
+  wgpuMaskedFeatures = parseWgpuMask(wgpuMask);
   if (moduleInstance) {
     return moduleInstance;
   }
@@ -2680,6 +2695,11 @@ async function loadCore({
   if (harnessEnabled) moduleInstance._DolphinWeb_HarnessEnable?.(1);
   if (detTraceRequested) moduleInstance._DolphinWeb_DetTraceEnable?.(1);
   if (gpuSyncDiagEnabled) moduleInstance._DolphinWeb_GpuSyncDiagEnable?.(1);
+  // patch 0129: the FMA emitter uses relaxed_madd only where it is fused,
+  // decided once here, before the first compile.
+  relaxedMadd = probeRelaxedMadd();
+  moduleInstance._DolphinWeb_SetFusedMadd?.(relaxedMadd === "fused" ? 1 : 0);
+  postStatus(`relaxed_madd: ${relaxedMadd}${moduleInstance._DolphinWeb_SetFusedMadd ? "" : " (core without patch 0129)"}`);
   const ownershipTraceSetterAvailable = Boolean(
     api.setWebGpuOwnershipTraceEnabled &&
     api.getWebGpuOwnershipTracePtr &&
@@ -5910,10 +5930,12 @@ async function createWebGpuPresenter(canvas) {
   // into clamping.
   // dual-source-blending lets GX destination alpha and source-alpha blending
   // coexist in one draw (see RENDERER_FEATURE_DUAL_SOURCE_BLEND).
-  const wantFeatures = ["clip-distances", "depth-clip-control", "dual-source-blending"];
+  const wantFeatures = ["clip-distances", "depth-clip-control", "dual-source-blending"]
+    .filter((f) => !wgpuMaskedFeatures.has(f));
   const haveFeatures = wantFeatures.filter((f) => adapter.features && adapter.features.has(f));
   console.log("[wgpu-features] got=" + (haveFeatures.join(",") || "none") +
-              " missing=" + (wantFeatures.filter((f) => !haveFeatures.includes(f)).join(",") || "none"));
+              " missing=" + (wantFeatures.filter((f) => !haveFeatures.includes(f)).join(",") || "none") +
+              " masked=" + ([...wgpuMaskedFeatures].join(",") || "none"));
   const device = await adapter.requestDevice(
     haveFeatures.length ? { requiredFeatures: haveFeatures } : undefined);
   rendererDiagnostics.device = {

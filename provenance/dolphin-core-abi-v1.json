@@ -20,8 +20,8 @@
     {
       "path": "core/upstream/dolphin_web_discio.cpp",
       "hashMode": "lf-normalized",
-      "size": 71204,
-      "sha256": "273e374722702266de9a214f174a087eefd1a3db93fbd9d615016e8e270d6f63"
+      "size": 71684,
+      "sha256": "19e4dec6bc36a9bccc7dfe8b0319f4fbac9f7b33844d713b14aab1d8a9654e92"
     },
     {
       "path": "core/upstream/dolphin_web_raster_profile.h",
@@ -38,14 +38,14 @@
     {
       "path": "core/upstream/dolphin_web_fma.h",
       "hashMode": "lf-normalized",
-      "size": 6279,
-      "sha256": "f2b13956b48b67b5013e5d62608a362159273ce15e66ed59c45640affa850054"
+      "size": 6585,
+      "sha256": "6b3c457fb03e3f33170c176ddbe2f6e6f1456df54e46935aad61d489a6a47812"
     },
     {
       "path": "core/upstream/dolphin_web_core.cpp",
       "hashMode": "lf-normalized",
-      "size": 56269,
-      "sha256": "9a72bbb473ce9346080046143c741d4ecc71faf2adad5f8b6dd2c97eb8f4dda5"
+      "size": 56394,
+      "sha256": "262ba9f9866bf82f6f3e494c583dc665f52bd4bc043a72d99bd60bb300b01c63"
     },
     {
       "path": "src/app.js",
@@ -86,8 +86,8 @@
     {
       "path": "src/core-host.js",
       "hashMode": "lf-normalized",
-      "size": 74353,
-      "sha256": "c5aed83f8290b7d1fc91ad2d0bee3d38c87e296375019bb33fe0545c81cefbe5"
+      "size": 74683,
+      "sha256": "493560df06161391d65a478b0f3d424941f8870a8633bf0c8595fc4252fb3bbc"
     },
     {
       "path": "src/diagnostic-log-filter.js",
@@ -140,8 +140,8 @@
     {
       "path": "src/upstream-discio-worker.js",
       "hashMode": "lf-normalized",
-      "size": 718320,
-      "sha256": "fe13630120718d3ba5a742ecbbe27402b531c5f2032244e3ca630a70f0973d76"
+      "size": 719632,
+      "sha256": "e77e4826a1231f7f584d01c418827d81b137aa03d05dd35134c9db86d355bfdf"
     },
     {
       "path": "src/wgpu-renderer-worker-probe.js",
@@ -164,8 +164,8 @@
     {
       "path": "src/upstream-worker-adapter.js",
       "hashMode": "lf-normalized",
-      "size": 52406,
-      "sha256": "4b2fb1bf83e6b0eda2fc2db601e4b1172629644c5a5112260b97f9de9174581a"
+      "size": 52660,
+      "sha256": "b4eb670f836a1e26398c32b293b03163f663f306e6ea41141244788ba85bf924"
     },
     {
       "path": "src/upstream-worker-protocol.js",
@@ -678,6 +678,7 @@
       "validationReadJitRegionStats",
       "validationReadMemAccessStats",
       "validationReadPipelinePrewarm",
+      "validationReadRelaxedMadd",
       "validationReadTimeline",
       "validationReadWgpuReplayState",
       "validationSetCorePaused",

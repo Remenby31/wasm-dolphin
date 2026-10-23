@@ -1,0 +1,431 @@
+diff --git a/Source/Core/Core/PowerPC/PowerPC.h b/Source/Core/Core/PowerPC/PowerPC.h
+--- a/Source/Core/Core/PowerPC/PowerPC.h
++++ b/Source/Core/Core/PowerPC/PowerPC.h
+@@ -3,6 +3,7 @@
+ 
+ #pragma once
+ 
++#include <atomic>
+ #include <array>
+ #include <cstddef>
+ #include <span>
+@@ -47,6 +48,13 @@
+ };
+ 
+ // TLB cache
++// Patch 0121: whether FPSCR.FPRF is computed from FP results
++// (Config::MAIN_FPRF, false by default as upstream; a game's INI turns it on).
++// Every tier follows it, the interpreter included (upstream's interpreter
++// always computes FPRF, only its JITs follow the setting): blocks, regions
++// and the interpreter stay identical bit for bit, as the oracles check.
++extern std::atomic<bool> g_fprf_emulation;
++
+ constexpr size_t TLB_SIZE = 128;
+ constexpr size_t NUM_TLBS = 2;
+ constexpr size_t TLB_WAYS = 2;
+diff --git a/Source/Core/Core/PowerPC/PowerPC.cpp b/Source/Core/Core/PowerPC/PowerPC.cpp
+--- a/Source/Core/Core/PowerPC/PowerPC.cpp
++++ b/Source/Core/Core/PowerPC/PowerPC.cpp
+@@ -250,10 +250,13 @@
+   return CPUCore::CachedInterpreter;
+ #endif
+ }
++
++std::atomic<bool> g_fprf_emulation{false};
+ 
+ void PowerPCManager::RefreshConfig()
+ {
+   const bool old_enable_dcache = m_ppc_state.m_enable_dcache;
++  g_fprf_emulation.store(Config::Get(Config::MAIN_FPRF), std::memory_order_relaxed);
+ 
+   m_ppc_state.m_enable_dcache = Config::Get(Config::MAIN_ACCURATE_CPU_CACHE);
+ 
+@@ -688,12 +691,14 @@
+ 
+ void PowerPCState::UpdateFPRFDouble(double dvalue)
+ {
+-  fpscr.FPRF = Common::ClassifyDouble(dvalue);
++  if (g_fprf_emulation.load(std::memory_order_relaxed))
++    fpscr.FPRF = Common::ClassifyDouble(dvalue);
+ }
+ 
+ void PowerPCState::UpdateFPRFSingle(float fvalue)
+ {
+-  fpscr.FPRF = Common::ClassifyFloat(fvalue);
++  if (g_fprf_emulation.load(std::memory_order_relaxed))
++    fpscr.FPRF = Common::ClassifyFloat(fvalue);
+ }
+ 
+ void RoundingModeUpdated(PowerPCState& ppc_state)
+diff --git a/Source/Core/Core/PowerPC/CachedInterpreter/CachedInterpreter.cpp b/Source/Core/Core/PowerPC/CachedInterpreter/CachedInterpreter.cpp
+--- a/Source/Core/Core/PowerPC/CachedInterpreter/CachedInterpreter.cpp
++++ b/Source/Core/Core/PowerPC/CachedInterpreter/CachedInterpreter.cpp
+@@ -5163,8 +5163,58 @@
+ 
+ // MSR.FP set and FE0 = FE1 = 0: only then can the fast paths skip the
+ // interpreter's floating-point exception check.
++// Patch 0121: set while a region fragment is emitted. A region is entered
++// only with MSR.FP on, LE, FE0 and FE1 off and HID2.LSQE on (TryRunRegion,
++// RegionWouldRun, RegionChainNext: RegionGuardsHold), and nothing inside a
++// fragment can change them: mtmsr, rfi and sc end it, mtspr HID2 is not on the
++// direct tier (it runs outside, the region is entered again after it). So
++// its ops take them for granted instead of testing them one by one. GQRs
++// (mtspr GQR is direct) are still tested per op.
++thread_local bool t_region_guards = false;
++
++// [] -> [i32]: MSR.FP on and MSR.LE off.
++void EmitMsrFpOnLittleEndianOff(std::vector<u8>& body, const WasmStateLayout& layout)
++{
++  if (t_region_guards)
++  {
++    EmitI32Const(body, 1);
++    return;
++  }
++  EmitStateLoadU32(body, layout.msr_offset);
++  EmitI32Const(body, 1u << 13);
++  body.push_back(0x71);
++  EmitI32Const(body, 0);
++  body.push_back(0x47);
++
++  EmitStateLoadU32(body, layout.msr_offset);
++  EmitI32Const(body, 1);
++  body.push_back(0x71);
++  body.push_back(0x45);
++  body.push_back(0x71);
++}
++
++// [] -> [i32]: HID2.LSQE on.
++void EmitHid2LsqeSet(std::vector<u8>& body, const WasmStateLayout& layout)
++{
++  if (t_region_guards)
++  {
++    EmitI32Const(body, 1);
++    return;
++  }
++  EmitStateLoadU32(body, SprOffset(layout, SPR_HID2));
++  EmitI32Const(body, 1u << 31);
++  body.push_back(0x71);
++  EmitI32Const(body, 0);
++  body.push_back(0x47);
++}
++
+ void EmitFpFastPathMsrCondition(std::vector<u8>& body, const WasmStateLayout& layout)
+ {
++  if (t_region_guards)
++  {
++    EmitI32Const(body, 1);  // FP on, FE0 = FE1 = 0: checked at region entry
++    return;
++  }
+   EmitStateLoadU32(body, layout.msr_offset);
+   EmitI32Const(body, (1u << 13) | (1u << 11) | (1u << 8));
+   body.push_back(0x71);  // i32.and
+@@ -5243,6 +5293,20 @@
+ void EmitSetFprfZeroOrNormal(std::vector<u8>& body, const WasmStateLayout& layout,
+                              u32 value_local, u32 clear_extra = 0, bool wanted = true)
+ {
++  // Patch 0121: FPRF off (Config::MAIN_FPRF, the default): no tier computes
++  // it, the interpreter's UpdateFPRF* included; only the other bits clear.
++  if (!PowerPC::g_fprf_emulation.load(std::memory_order_relaxed))
++  {
++    if (clear_extra)
++    {
++      EmitStateStoreU32Prefix(body);
++      EmitStateLoadU32(body, layout.fpscr_offset);
++      EmitI32Const(body, ~clear_extra);
++      body.push_back(0x71);
++      EmitStateStoreU32Suffix(body, layout.fpscr_offset);
++    }
++    return;
++  }
+   if (!wanted)
+   {
+     // The analyzer proved a later op of this block rewrites FPRF before
+@@ -6121,17 +6185,7 @@
+ void EmitAlignedFloatFastPathCondition(std::vector<u8>& body, const WasmStateLayout& layout,
+                                        bool l1_cache, u32 bytes = sizeof(u32))
+ {
+-  EmitStateLoadU32(body, layout.msr_offset);
+-  EmitI32Const(body, 1u << 13);
+-  body.push_back(0x71);
+-  EmitI32Const(body, 0);
+-  body.push_back(0x47);
+-
+-  EmitStateLoadU32(body, layout.msr_offset);
+-  EmitI32Const(body, 1);
+-  body.push_back(0x71);
+-  body.push_back(0x45);
+-  body.push_back(0x71);
++  EmitMsrFpOnLittleEndianOff(body, layout);
+ 
+   EmitLocalGet(body, 1);
+   EmitI32Const(body, 3);
+@@ -6148,17 +6202,7 @@
+ 
+ void EmitGatherPipeFloatStoreCondition(std::vector<u8>& body, const WasmStateLayout& layout)
+ {
+-  EmitStateLoadU32(body, layout.msr_offset);
+-  EmitI32Const(body, 1u << 13);
+-  body.push_back(0x71);
+-  EmitI32Const(body, 0);
+-  body.push_back(0x47);
+-
+-  EmitStateLoadU32(body, layout.msr_offset);
+-  EmitI32Const(body, 1);
+-  body.push_back(0x71);
+-  body.push_back(0x45);
+-  body.push_back(0x71);
++  EmitMsrFpOnLittleEndianOff(body, layout);
+ 
+   EmitLocalGet(body, 1);
+   EmitI32Const(body, 3);
+@@ -6958,24 +7002,10 @@
+ void EmitPsqFloatFastPathCondition(std::vector<u8>& body, const WasmStateLayout& layout,
+                                    UGeckoInstruction inst, bool store)
+ {
+-  EmitStateLoadU32(body, layout.msr_offset);
+-  EmitI32Const(body, 1u << 13);
+-  body.push_back(0x71);
+-  EmitI32Const(body, 0);
+-  body.push_back(0x47);
+-
+-  EmitStateLoadU32(body, layout.msr_offset);
+-  EmitI32Const(body, 1);
+-  body.push_back(0x71);
+-  body.push_back(0x45);
+-  body.push_back(0x71);
++  EmitMsrFpOnLittleEndianOff(body, layout);
+ 
+-  EmitStateLoadU32(body, SprOffset(layout, SPR_HID2));
+-  EmitI32Const(body, 1u << 31);
++  EmitHid2LsqeSet(body, layout);
+   body.push_back(0x71);
+-  EmitI32Const(body, 0);
+-  body.push_back(0x47);
+-  body.push_back(0x71);
+ 
+   EmitStateLoadU32(body, SprOffset(layout, SPR_GQR0 + inst.I));
+   if (!store)
+@@ -6996,25 +7026,11 @@
+                                        UGeckoInstruction inst, bool store, u32 type, u32 scale,
+                                        u32 element_bytes, bool l1_cache)
+ {
+-  EmitStateLoadU32(body, layout.msr_offset);
+-  EmitI32Const(body, 1u << 13);
+-  body.push_back(0x71);
+-  EmitI32Const(body, 0);
+-  body.push_back(0x47);
++  EmitMsrFpOnLittleEndianOff(body, layout);
+ 
+-  EmitStateLoadU32(body, layout.msr_offset);
+-  EmitI32Const(body, 1);
++  EmitHid2LsqeSet(body, layout);
+   body.push_back(0x71);
+-  body.push_back(0x45);
+-  body.push_back(0x71);
+ 
+-  EmitStateLoadU32(body, SprOffset(layout, SPR_HID2));
+-  EmitI32Const(body, 1u << 31);
+-  body.push_back(0x71);
+-  EmitI32Const(body, 0);
+-  body.push_back(0x47);
+-  body.push_back(0x71);
+-
+   EmitStateLoadU32(body, SprOffset(layout, SPR_GQR0 + inst.I));
+   if (store)
+   {
+@@ -7051,25 +7067,11 @@
+ void EmitPsqGatherPipeFloatStoreCondition(std::vector<u8>& body, const WasmStateLayout& layout,
+                                           UGeckoInstruction inst)
+ {
+-  EmitStateLoadU32(body, layout.msr_offset);
+-  EmitI32Const(body, 1u << 13);
+-  body.push_back(0x71);
+-  EmitI32Const(body, 0);
+-  body.push_back(0x47);
++  EmitMsrFpOnLittleEndianOff(body, layout);
+ 
+-  EmitStateLoadU32(body, layout.msr_offset);
+-  EmitI32Const(body, 1);
++  EmitHid2LsqeSet(body, layout);
+   body.push_back(0x71);
+-  body.push_back(0x45);
+-  body.push_back(0x71);
+ 
+-  EmitStateLoadU32(body, SprOffset(layout, SPR_HID2));
+-  EmitI32Const(body, 1u << 31);
+-  body.push_back(0x71);
+-  EmitI32Const(body, 0);
+-  body.push_back(0x47);
+-  body.push_back(0x71);
+-
+   EmitStateLoadU32(body, SprOffset(layout, SPR_GQR0 + inst.I));
+   EmitI32Const(body, 7);
+   body.push_back(0x71);
+@@ -9672,6 +9674,8 @@
+ namespace
+ {
+ void ForgetAllRegions();
++// The FPRF mode (PowerPC::g_fprf_emulation) the JIT cache was emitted for.
++bool s_emitted_fprf = false;
+ }
+ 
+ void CachedInterpreter::Shutdown()
+@@ -10624,6 +10628,24 @@
+ 
+ // Runs the region holding pc. False when there is none (or it refuses the
+ // pc): the caller dispatches a block.
++// Patch 0121: refusals by the guards, per cause (counted with the region
++// stats on): MSR.LE, MSR.FE0, MSR.FE1, HID2.LSQE off. Cumulative.
++std::array<u32, 4> s_region_guard_refusals{};
++
++void CountRegionGuardRefusal(const PowerPC::PowerPCState& ppc_state)
++{
++  s_region_guard_refusals[0] += ppc_state.msr.LE ? 1 : 0;
++  s_region_guard_refusals[1] += ppc_state.msr.FE0 ? 1 : 0;
++  s_region_guard_refusals[2] += ppc_state.msr.FE1 ? 1 : 0;
++  s_region_guard_refusals[3] += HID2(ppc_state).LSQE ? 0 : 1;
++}
++
++// Patch 0121: what region code takes for granted (t_region_guards).
++bool RegionGuardsHold(const PowerPC::PowerPCState& ppc_state)
++{
++  return !ppc_state.msr.LE && !ppc_state.msr.FE0 && !ppc_state.msr.FE1 && HID2(ppc_state).LSQE;
++}
++
+ bool TryRunRegion(PowerPC::PowerPCState& ppc_state)
+ {
+   if (!RegionFilterHas(ppc_state.pc))
+@@ -10631,10 +10653,14 @@
+   // Regions keep no performance monitor counts (the block path does), and
+   // run with XER.SO clear (0111: their compares store CR fields without it).
+   if (!ppc_state.msr.IR || !ppc_state.msr.DR || !ppc_state.msr.FP ||
++      !RegionGuardsHold(ppc_state) ||
+       (ppc_state.feature_flags & FEATURE_FLAG_PERFMON) != 0 || (ppc_state.xer_so_ov & 2) != 0)
+   {
+     if (s_region_stats_on)
++    {
+       s_region_stats.mode_refusals += 1;
++      CountRegionGuardRefusal(ppc_state);
++    }
+     return false;
+   }
+   const u32 index = FindRegionIndex(ppc_state.pc);
+@@ -10712,6 +10738,7 @@
+ {
+   if (!s_regions_enabled.load(std::memory_order_relaxed) || !RegionFilterHas(ppc_state.pc) ||
+       !ppc_state.msr.IR || !ppc_state.msr.DR || !ppc_state.msr.FP ||
++      !RegionGuardsHold(ppc_state) ||
+       (ppc_state.feature_flags & FEATURE_FLAG_PERFMON) != 0 || (ppc_state.xer_so_ov & 2) != 0 ||
+       FindRegionIndex(ppc_state.pc) == NO_REGION)
+     return false;
+@@ -10783,6 +10810,7 @@
+   const InstalledRegion& region = s_regions[index];
+   if (!region.verified || !s_regions_enabled.load(std::memory_order_relaxed) ||
+       !ppc_state.msr.IR || !ppc_state.msr.DR || !ppc_state.msr.FP ||
++      !RegionGuardsHold(ppc_state) ||
+       (ppc_state.feature_flags & FEATURE_FLAG_PERFMON) != 0 || (ppc_state.xer_so_ov & 2) != 0)
+   {
+     stats.refused += 1;
+@@ -11465,7 +11493,20 @@
+     {
+       ClearCache();
+       RegionStaticRatesForAll();
++    }
++#ifdef __EMSCRIPTEN__
++    // Patch 0121: code emitted for the other FPRF mode (a game's INI loaded,
++    // a setting changed) is dropped, blocks and regions alike. Installs and retried
++    // compiles of this slice (above) used the old mode: the flush drops them too;
++    // a mode changes only when a game's INI loads, at boot.
++    if (const bool fprf = PowerPC::g_fprf_emulation.load(std::memory_order_relaxed);
++        fprf != s_emitted_fprf)
++    {
++      s_emitted_fprf = fprf;
++      ClearCache();
++      ForgetAllRegions();
+     }
++#endif
+     // Start new timing slice
+     // Metrics-off runs avoid all per-slice clocks. BeginSlice also resets
+     // the exclusive wait/work attribution for this one CoreTiming slice.
+@@ -16341,6 +16382,13 @@
+       h *= 0x01000193u;
+     }
+   }
++  // 0121: code emitted for the other FPRF mode has another hash, so a region
++  // translated (or cached) under it is never installed (s_region_layout_refused).
++  if (PowerPC::g_fprf_emulation.load(std::memory_order_relaxed))
++  {
++    h ^= 0x46505246u;  // "FPRF"
++    h *= 0x01000193u;
++  }
+   return h != 0 ? h : 1;
+ }
+ 
+@@ -16575,6 +16623,12 @@
+   // Defence in depth with 0090, which keeps such regions from installing.
+   if (system.IsMMUMode())
+     return false;
++  // 0121: the fragment's ops take RegionGuardsHold for granted.
++  t_region_guards = true;
++  struct ResetGuards
++  {
++    ~ResetGuards() { t_region_guards = false; }
++  } reset_guards;
+   // End of the range holding pc, 0 when none does.
+   const auto range_end = [&](u32 pc) -> u32 {
+     for (std::size_t i = 0; i + 1 < ranges.size(); i += 2)
+@@ -16766,8 +16820,9 @@
+ // ps_neg/mr/nabs/abs compiled inline (3 and 4 are taken by 0084 and 0083).
+ // 6 (0105): FPU ops outside the direct tier stay in the region, interpreted.
+ // 10 (0111): compares store their CR field as one i64, bc fused (7-9 are
+-// taken by 0108-0110).
+-constexpr u32 AOT_COMPILER_VERSION = 10;
++// taken by 0108-0110). 16 (0121): region code takes MSR LE/FE0/FE1 and
++// HID2.LSQE for granted (15 is 0119's).
++constexpr u32 AOT_COMPILER_VERSION = 16;
+ constexpr u32 AOT_MAX_FRAGMENT_BYTES = 1u << 20;
+ thread_local std::vector<u32> t_aot_out;
+ u8* s_aot_ram = nullptr;
+@@ -16962,7 +17017,24 @@
+ extern "C" EMSCRIPTEN_KEEPALIVE void DolphinWeb_AotKeyParts(u32* out)
+ {
+   out[0] = AOT_COMPILER_VERSION;
+-  out[1] = s_dolphin_web_disable_mask.load(std::memory_order_relaxed);
++  // Bit 31 (no disable bit uses it): FPRF on (patch 0121), regions translated
++  // with and without it never share a cache entry.
++  out[1] = s_dolphin_web_disable_mask.load(std::memory_order_relaxed) |
++           (PowerPC::g_fprf_emulation.load(std::memory_order_relaxed) ? 1u << 31 : 0u);
++}
++
++// {LE, FE0, FE1, LSQE off}: region entries the 0121 guards refused (counted
++// while the region stats are on; cumulative).
++extern "C" EMSCRIPTEN_KEEPALIVE void DolphinWeb_RegionGuardRefusals(u32* out)
++{
++  std::copy(s_region_guard_refusals.begin(), s_region_guard_refusals.end(), out);
++}
++
++// Tests: FPRF on or off for every tier, as Config::MAIN_FPRF would set it
++// (the JIT cache and regions of the other mode are dropped by the caller).
++extern "C" EMSCRIPTEN_KEEPALIVE void DolphinWeb_SetFprfForTest(int on)
++{
++  PowerPC::g_fprf_emulation.store(on != 0, std::memory_order_relaxed);
+ }
+ 
+ // Helper signatures in import order, "params>results" (BuildWasmCachedInterpreterBlock's types).
+@@ -17063,11 +17135,15 @@
+ // Runs a region module compiled by DolphinWeb_JitCompileBytesForTest on the
+ // test CPU: 0 continue at pc, 1 not an entry, 2 stopped, 3 stopped in an
+ // exception handler (taken by a helper, or pending and taken here as the CPU
+-// loop would).
++// loop would), 4 refused by the mode (RegionGuardsHold, 0121).
+ extern "C" EMSCRIPTEN_KEEPALIVE int DolphinWeb_AotRunRegionForTest(int handle)
+ {
+   auto& system = Core::System::GetInstance();
+   auto& ppc = system.GetPPCState();
++  // 0121: as TryRunRegion, no region where its code's guards do not hold
++  // (4: refused by the mode, the CPU loop runs blocks there).
++  if (!RegionGuardsHold(ppc))
++    return 4;
+   const int code = DolphinWeb_CachedInterpreterRunWasmBlockForTest(
+       handle, static_cast<int>(reinterpret_cast<std::uintptr_t>(&ppc)));
+   if (code != 2)

@@ -111,13 +111,20 @@ test("FPRF stays the interpreter's when a later op keeps it (VE=1 invalid op)", 
   setF(5, 0x7ff00000);
   setF(6, 0x7ff00000);
   const program = Uint32Array.from([A(63, 1, 2, 3, 0, 21), A(63, 4, 5, 6, 0, 20), 0x4e800020]);
-  for (const fpscr of [0x80, 0x10, 0x00]) {
-    state[36] = fpscr;
-    for (const mask of [SHORT_PREFIX_MASK, SHORT_PREFIX_MASK | REGALLOC_OFF]) {
-      const result = core.run(program, state, mask);
-      assert.equal(result.compiledBlocks, 1);
-      assertSame(result, `fpscr ${hex(fpscr)} mask ${hex(mask)}`);
+  // FPRF is computed only with FPRF on (patch 0121): this case needs it on.
+  const fprf = core.has("DolphinWeb_SetFprfForTest");
+  if (fprf) core.setFprf(true);
+  try {
+    for (const fpscr of [0x80, 0x10, 0x00]) {
+      state[36] = fpscr;
+      for (const mask of [SHORT_PREFIX_MASK, SHORT_PREFIX_MASK | REGALLOC_OFF]) {
+        const result = core.run(program, state, mask);
+        assert.equal(result.compiledBlocks, 1);
+        assertSame(result, `fpscr ${hex(fpscr)} mask ${hex(mask)}`);
+      }
     }
+  } finally {
+    if (fprf) core.setFprf(false);
   }
 });
 
@@ -388,6 +395,37 @@ test("an underflowed product is never taken as exact (signed zero, ties at the b
         const result = core.run(Uint32Array.from([A(op, 1, 2, 4, 3, xo), 0x4e800020]), state, SHORT_PREFIX_MASK);
         assert.equal(result.compiledBlocks, 1, `op ${op} xo ${xo}: compiled`);
         assertSame(result, `op ${op} xo ${xo} a ${hex(a)} c ${hex(c)}`);
+      }
+    }
+  }
+});
+
+// The interpreter's fma (core/upstream/dolphin_web_fma.h) once returned
+// x*y + z for z == 0: -2^-600 * 2^-600 rounds to -0, and -0 + +0 is +0, where
+// the exact sum is negative (IEEE and hardware FMA: -0). Run on a core built
+// from these sources only (CI's): main's committed core may predate the fix.
+const zeroAddendSkip = skip || ((await coreStatus(repoRoot)).current ? false : "the core predates these sources (CI builds this branch's core)");
+
+test("FMA of an underflowed product and a zero b keeps the product's sign, interpreter and JIT", { skip: zeroAddendSkip }, () => {
+  const A = (op, t, a, b, c, xo) => ((op << 26) | (t << 21) | (a << 16) | (b << 11) | (c << 6) | (xo << 1)) >>> 0;
+  const state = randomState(makeRng(0x5e0));
+  state[36] = 0;
+  state[37] = 0x00002032;
+  const setF = (i, hi) => state.set([0, hi, 0, hi], 48 + i * 4);
+  setF(2, 0x9a700000); // a = -2^-600
+  setF(3, 0x1a700000); // c = 2^-600
+  for (const b of [0, 0x80000000]) {
+    setF(4, b);
+    // madd/msub: the exact a*c +- b is -2^-1200, so -0; nmadd/nmsub negate it.
+    for (const [op, xos] of [[63, [28, 29, 30, 31]], [59, [28, 29, 30, 31]], [4, [14, 15, 28, 29, 30, 31]]]) {
+      for (const xo of xos) {
+        const result = core.run(Uint32Array.from([A(op, 1, 2, 4, 3, xo), 0x4e800020]), state, SHORT_PREFIX_MASK);
+        const label = `op ${op} xo ${xo} b ${hex(b)}`;
+        assert.equal(result.compiledBlocks, 1, `${label}: compiled`);
+        assertSame(result, label);
+        const want = xo === 30 || xo === 31 ? 0 : 0x80000000;
+        assert.deepEqual([result.interp[48 + 4], result.interp[48 + 5]], [0, want], `${label}: interpreter ps0`);
+        if (op === 4) assert.deepEqual([result.interp[48 + 6], result.interp[48 + 7]], [0, want], `${label}: interpreter ps1`);
       }
     }
   }

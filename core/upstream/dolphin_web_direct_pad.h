@@ -23,7 +23,7 @@
 // src/direct-pad.js; bump DIRECT_PAD_LAYOUT on any change.
 namespace DolphinWeb::DirectPad
 {
-constexpr std::uint32_t DIRECT_PAD_LAYOUT = 1;
+constexpr std::uint32_t DIRECT_PAD_LAYOUT = 2;
 constexpr int DIRECT_PAD_PORTS = 4;
 constexpr int DIRECT_PAD_SLOTS = 36;  // 144 bytes: f64 slots stay 8-byte aligned
 constexpr int DIRECT_PAD_BUTTONS = 12;
@@ -37,7 +37,9 @@ enum Slot : int
   MASK = 3,
   AXES0 = 4,      // stickX | stickY << 8 | cStickX << 16 | cStickY << 24
   AXES1 = 5,      // triggerL | triggerR << 8 | analogA << 16 | analogB << 24
-  TAPS = 6,       // page: Atomics.or; core: exchange(0) at a poll
+  TAPS = 6,       // presses to inject, 4-bit count per button: buttons 0-7 here,
+                  // 8-11 in TAPS_HIGH; page: compare-exchange add (saturating);
+                  // core: exchange(0) at a poll
   INPUT_SEQ = 7,  // caller's sequence number for this state (stream guest seq)
   RX_TIME = 8,    // f64 (slots 8-9): reception time, ms, performance.timeOrigin + now()
   // Written by the core at each poll (once per emulated tick).
@@ -49,6 +51,7 @@ enum Slot : int
   RUMBLE_GEN = 17,       // +1 per rumble change
   PRESSES = 18,          // 18-29: rising edges reported, per button
   REPORTED_MASK = 30,
+  TAPS_HIGH = 31,
   EDGE_POLL_TIME = 32,   // f64 (32-33): poll time of the last rising edge reported
 };
 
@@ -115,13 +118,28 @@ inline bool Read(const std::atomic<std::uint32_t>* port, State* out, int attempt
 // poll of a later frame window has reported it. A second tap of a button
 // still held by the latch is not merged into the first: it waits, the button
 // then reads released for one window, and the tap is reported again (up to
-// MAX_PENDING_TAPS queued per button).
+// MAX_PENDING_TAPS queued per button). The release window hides the button
+// from the current state too: presses revealed together while it is held
+// (the next packet says "held, 3 more presses") are still separate edges;
+// after the last one the held state shows again.
 class TapLatch
 {
 public:
   static constexpr std::uint8_t MAX_PENDING_TAPS = 3;
 
+  // `taps`: one press per set bit (bitmask callers).
   std::uint32_t Poll(std::uint32_t state_mask, std::uint32_t taps, std::uint64_t frame)
+  {
+    std::uint8_t counts[DIRECT_PAD_BUTTONS]{};
+    for (int i = 0; i < DIRECT_PAD_BUTTONS; ++i)
+      counts[i] = (taps >> i) & 1;
+    return PollCounts(state_mask, counts, frame);
+  }
+
+  // `counts[i]` presses of button i since the last poll (a lossy channel
+  // may reveal several at once): the first is reported now, the others are
+  // queued, each after a release window.
+  std::uint32_t PollCounts(std::uint32_t state_mask, const std::uint8_t* counts, std::uint64_t frame)
   {
     for (int i = 0; i < DIRECT_PAD_BUTTONS; ++i)
     {
@@ -133,19 +151,20 @@ public:
         --m_pending[i];
         Arm(i, frame);
       }
-      if (!(taps & bit))
-        continue;
-      if ((m_latched | m_gap) & bit)
+      for (std::uint8_t n = 0; n < counts[i]; ++n)
       {
-        if (m_pending[i] < MAX_PENDING_TAPS)
-          ++m_pending[i];
-      }
-      else
-      {
-        Arm(i, frame);
+        if ((m_latched | m_gap) & bit)
+        {
+          if (m_pending[i] < MAX_PENDING_TAPS)
+            ++m_pending[i];
+        }
+        else
+        {
+          Arm(i, frame);
+        }
       }
     }
-    const std::uint32_t reported = state_mask | m_latched;
+    const std::uint32_t reported = (state_mask & ~m_gap) | m_latched;
     for (int i = 0; i < DIRECT_PAD_BUTTONS; ++i)
     {
       const std::uint32_t bit = 1u << i;
@@ -201,11 +220,18 @@ State PollPort(std::atomic<std::uint32_t>* port, TapLatch& latch, std::uint64_t 
   *direct = Read(port, &s);
   if (!*direct)
     s = fallback();
-  const std::uint32_t taps = *direct ? port[TAPS].exchange(0, std::memory_order_acq_rel) : 0;
+  std::uint8_t counts[DIRECT_PAD_BUTTONS]{};
+  if (*direct)
+  {
+    const std::uint32_t low = port[TAPS].exchange(0, std::memory_order_acq_rel);
+    const std::uint32_t high = port[TAPS_HIGH].exchange(0, std::memory_order_acq_rel);
+    for (int i = 0; i < DIRECT_PAD_BUTTONS; ++i)
+      counts[i] = static_cast<std::uint8_t>(((i < 8 ? low >> (4 * i) : high >> (4 * (i - 8)))) & 0xf);
+  }
   std::uint32_t reported;
   if (s.connected)
   {
-    reported = latch.Poll(s.mask, taps, frame);
+    reported = latch.PollCounts(s.mask, counts, frame);
   }
   else
   {
