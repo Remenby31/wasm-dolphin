@@ -116,15 +116,12 @@ public:
   bool StaticExitLinksEnabled() const;
   void RegisterStaticExitLinks(L::Descriptor* links);
   void WriteEndBlock(L::Descriptor links = {});
-  struct { JitBlock* curBlock = nullptr; u32 blockStart = 0, downcountAmount = 7, numLoadStoreInst = 3, numFloatingPointInst = 2; } js;
+  void WriteCountMemBlock(bool) {}  // patch 0104: stats off in these groups
+  struct { JitBlock* curBlock = nullptr; u32 downcountAmount = 7, numLoadStoreInst = 3, numFloatingPointInst = 2; } js;
   using CachedInterpreterEmitter::AnyCallback;
 };
 /* END_OPERANDS */
 bool s_wasm_jit_enabled = true;
-// Memory-access counts (patch 0104): not exercised by these groups.
-bool s_mem_stats_on = false;
-static u32 BlockEndMemCounts(u32, bool) { return 0; }
-static void CountMemBlockEnd(u32, u32) {}
 std::unordered_map<CachedInterpreter*, DeferredJit::Queue> s_deferred_wasm_queues;
 constexpr unsigned COMPILE_THROTTLE_MAX_PER_SLICE = 8;
 // Off-thread compiles (patch 0074): not exercised by these groups.

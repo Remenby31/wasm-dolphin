@@ -323,6 +323,10 @@ boundary, so read it twice.
   `outputCA`, `wantsCA`), for the lazy-CR lever
   (research/deep-cr-flags.md). Blocks only, like the accesses.
 
-Cost with stats off: one load and branch per block end. Tests:
+Cost with stats off: none on the block path. The counts ride on a
+`CountMemBlock` callback written before each block end only while stats are
+on; the reset clears the JIT cache so every block is emitted again with it
+(a first version that tested a flag in `EndBlock` cost 2 % on the race). The
+slow-path counters sit in the MMU arms and the helpers. Tests:
 `tests/mem-access-stats.test.mjs` (the Node core has no CachedInterpreter
 instance: block counts are checked in a browser run).

@@ -43,7 +43,7 @@ void compare_branch(u32 instruction, u32 pc, u32 lr, u32 ctr, bool condition, bo
   auto descriptor = L::Branch(instruction, pc);
   const u8 code[8]{};
   if (linked) for (u32 i = 0; i < descriptor.count; ++i) L::WriteEntry(&descriptor.cells[i], code);
-  CachedInterpreter::EndBlockOperands<false> new_end{7, 3, 2, 0, descriptor};
+  CachedInterpreter::EndBlockOperands<false> new_end{7, 3, 2, descriptor};
   const auto epoch = f.cache.StaticLinkEpoch(); L::Scope scope(&f.cache, &candidate, epoch, 2);
   BaselineInterpreter::FastBranch(baseline, old_branch); CachedInterpreter::FastBranch(candidate, new_branch);
   BaselineInterpreter::EndBlock<false>(baseline, old_end); CachedInterpreter::EndBlock<false>(candidate, new_end);
@@ -88,7 +88,7 @@ int main()
       Fixture f; PowerPC::PowerPCState baseline, candidate; const u8 code[8]{};
       auto descriptor = L::Fallthrough(0x2000); if (linked) L::WriteEntry(&descriptor.cells[0], code);
       BaselineInterpreter::WasmBlockOperands old_op{1, 0x2000, 7, 3, 2, ending};
-      CachedInterpreter::WasmBlockOperands new_op{1, 0x2000, 7, 3, 2, ending, 0, descriptor};
+      CachedInterpreter::WasmBlockOperands new_op{1, 0x2000, 7, 3, 2, ending, descriptor};
       wasm_call = [halted](s32 handle, PowerPC::PowerPCState& state) { require(handle == 1, "native ABI adapter handle"); state.pc = state.npc = 0x2000; state.gpr[3] = 0x1234; return halted ? 1 : 0; };
       const auto epoch = f.cache.StaticLinkEpoch(); L::Scope scope(&f.cache, &candidate, epoch, 2);
       const auto before_runs = s_wasm_block_run_count;
