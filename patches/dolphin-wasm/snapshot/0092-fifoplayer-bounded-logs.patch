@@ -1,0 +1,59 @@
+diff --git a/Source/Core/Core/FifoPlayer/FifoDataFile.cpp b/Source/Core/Core/FifoPlayer/FifoDataFile.cpp
+--- a/Source/Core/Core/FifoPlayer/FifoDataFile.cpp
++++ b/Source/Core/Core/FifoPlayer/FifoDataFile.cpp
+@@ -350,6 +350,9 @@
+     if (!file.ReadBytes(&srcFrame, sizeof(FileFrameInfo)))
+       return panic_failed_to_read();
+ 
++    // The file decides every size: none may exceed the file itself, so a
++    // damaged or crafted log cannot ask for gigabytes.
++    srcFrame.fifoDataSize = static_cast<u32>(std::min<u64>(srcFrame.fifoDataSize, file.GetSize()));
+     FifoFrameInfo dstFrame;
+     dstFrame.fifoData.resize(srcFrame.fifoDataSize);
+     dstFrame.fifoStart = srcFrame.fifoStart;
+@@ -422,6 +425,8 @@
+ void FifoDataFile::ReadMemoryUpdates(u64 fileOffset, u32 numUpdates,
+                                      std::vector<MemoryUpdate>& memUpdates, File::IOFile& file)
+ {
++  // Sizes from the file, bounded by the file (see Load).
++  numUpdates = static_cast<u32>(std::min<u64>(numUpdates, file.GetSize() / sizeof(FileMemoryUpdate)));
+   memUpdates.resize(numUpdates);
+ 
+   for (u32 i = 0; i < numUpdates; ++i)
+@@ -434,6 +439,7 @@
+     MemoryUpdate& dstUpdate = memUpdates[i];
+     dstUpdate.address = srcUpdate.address;
+     dstUpdate.fifoPosition = srcUpdate.fifoPosition;
++    srcUpdate.dataSize = static_cast<u32>(std::min<u64>(srcUpdate.dataSize, file.GetSize()));
+     dstUpdate.data.resize(srcUpdate.dataSize);
+     dstUpdate.type = static_cast<MemoryUpdate::Type>(srcUpdate.type);
+ 
+diff --git a/Source/Core/Core/FifoPlayer/FifoPlayer.cpp b/Source/Core/Core/FifoPlayer/FifoPlayer.cpp
+--- a/Source/Core/Core/FifoPlayer/FifoPlayer.cpp
++++ b/Source/Core/Core/FifoPlayer/FifoPlayer.cpp
+@@ -486,14 +486,18 @@
+ void FifoPlayer::WriteMemory(const MemoryUpdate& memUpdate)
+ {
+   auto& memory = m_system.GetMemory();
+-  u8* mem = nullptr;
+-
+-  if (memUpdate.address & 0x10000000)
+-    mem = &memory.GetEXRAM()[memUpdate.address & memory.GetExRamMask()];
+-  else
+-    mem = &memory.GetRAM()[memUpdate.address & memory.GetRamMask()];
++  // The log decides the address and the length: a write must land inside
++  // the emulated memory that exists (no EXRAM on a GameCube), or nowhere.
++  // Without this, a crafted log writes anywhere in the host's memory (in
++  // WebAssembly, address 0 and up are the module's own data).
++  const bool exram = (memUpdate.address & 0x10000000) != 0;
++  u8* const base = exram ? memory.GetEXRAM() : memory.GetRAM();
++  const u32 size = exram ? memory.GetExRamSizeReal() : memory.GetRamSizeReal();
++  const u32 offset = memUpdate.address & (exram ? memory.GetExRamMask() : memory.GetRamMask());
++  if (!base || offset >= size || memUpdate.data.size() > size - offset)
++    return;
+ 
+-  std::ranges::copy(memUpdate.data, mem);
++  std::ranges::copy(memUpdate.data, base + offset);
+ }
+ 
+ void FifoPlayer::WriteFifo(const u8* data, u32 start, u32 end)
