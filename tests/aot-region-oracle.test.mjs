@@ -11,7 +11,8 @@
 import assert from "node:assert/strict";
 import test from "node:test";
 
-import { compareRegionProgram, loadAotCore, runOracleProgramsAsRegions } from "./helpers/aot-core-equivalence.mjs";
+import { assembleRegion } from "../src/aot-region-module.js";
+import { HELPER_SIGNATURES, ORACLE_CODE, compareRegionProgram, loadAotCore, runOracleProgramsAsRegions } from "./helpers/aot-core-equivalence.mjs";
 import { PRODUCTION_DISABLE_MASK, SHORT_PREFIX_MASK, makeRng, randomState } from "./helpers/jit-oracle.mjs";
 
 const core = await loadAotCore();
@@ -107,4 +108,76 @@ test("psq_lux kept in the region updates a GPR the block had cached dirty, like 
   const r = compareRegionProgram(core, program, state);
   expectSame(r, "psq_lux");
   assert.equal(r.got.end, "stop");
+});
+
+// 0133: a fragment's head finds the block of the pc with one br_table on
+// rotr(pc - lowest start, 2), or, when the blocks fill less than a quarter of
+// their span, a compact br_if chain;
+// a body goes straight to a later body its npc names. A loop (back edge
+// through the head), a forward branch (direct br_if), a span too wide for the
+// table, each against the interpreter at budgets that stop it mid-loop.
+const sleb = (v) => { const o = []; for (;;) { const b = v & 0x7f; v >>= 7; if ((v === 0 && !(b & 0x40)) || (v === -1 && (b & 0x40))) { o.push(b); return o; } o.push(b | 0x80); } };
+const dispatchSkip = skip || (compilerVersion() < 25 && "core before 0133 (compiler version < 25)");
+test("the br_table head, direct forward edges and the wide-span chain run like the interpreter (0133)", { skip: dispatchSkip }, () => {
+  const cmpw = (a, b) => (31 << 26) | (a << 16) | (b << 11);
+  const cmpwi = (a, imm) => (11 << 26) | (a << 16) | (imm & 0xffff);
+  const bc = (bo, bi, disp) => (16 << 26) | (bo << 21) | (bi << 16) | (disp & 0xfffc);
+  const b = (disp) => (18 << 26) | (disp & 0x3fffffc);
+  const loop = [addi(3, 0, 0), addi(4, 0, 7), addi(3, 3, 1), cmpw(3, 4), bc(12, 0, -8), add(5, 3, 3), BLR];
+  const forward = [cmpwi(3, 0), bc(12, 2, 12), addi(5, 5, 1), addi(6, 6, 1), add(7, 5, 6), BLR];
+  const wide = new Array(0x40).fill(0);
+  wide.splice(0, 3, addi(3, 0, 0), addi(4, 0, 3), b(4 * 0x3c - 8));
+  wide.splice(0x3c, 4, addi(3, 3, 1), cmpw(3, 4), bc(12, 0, -8), BLR);
+  const cases = [["loop", loop, true], ["forward", forward, true], ["sparse span", wide, false]];
+  for (const [what, program, table] of cases) {
+    for (const [budget, seed] of [[400000, 51], [9, 52], [23, 53], [400000, 54]]) {
+      const state = baseState(seed);
+      if (seed === 54) state[11] = 0; // forward: r3 == 0, the branch taken
+      const r = compareRegionProgram(core, program, state, { budget });
+      assert.ok(r.translated && !r.trap && !r.error, `${what}: ${r.error ?? "trap or untranslated"}`);
+      assert.ok(r.got.regionRuns >= 1, `${what}: the region ran`);
+      assert.ok(r.equal, `${what} at ${budget}: ${JSON.stringify(r.difference)}`);
+      assert.ok(r.fragment.entries.length >= 2, `${what}: ${r.fragment.entries.length} blocks`);
+      const code = Array.from(r.fragment.code);
+      const rotrTable = code.some((x, i) => x === 0x78 && code[i + 1] === 0x0e);
+      assert.equal(rotrTable, table, `${what}: br_table head ${table}`);
+    }
+  }
+  // The forward case's taken branch is a direct br_if to the target body:
+  // i32.const target; i32.eq; br_if (the head is a br_table, no br_if there).
+  const target = ORACLE_CODE + 16;
+  const fwd = Array.from(compareRegionProgram(core, forward, baseState(55)).fragment.code);
+  const direct = [0x41, ...sleb(target | 0), 0x46, 0x0d];
+  assert.ok(fwd.some((_, i) => direct.every((x, j) => fwd[i + j] === x)), "a direct br_if to the forward target");
+});
+
+// 0133: the table's boundary (span = 4 × blocks: table; one word more:
+// chain), and a pc the table must not take (below the lowest start, not on a
+// word, between two starts): the fragment does not run (1, not an entry) and
+// leaves the state as it was.
+test("the br_table threshold, and pcs that are not block starts go to the dispatcher (0133)", { skip: dispatchSkip }, () => {
+  const b = (disp) => (18 << 26) | (disp & 0x3fffffc);
+  // Two blocks: `b X` at 0 and `blr` at word X; span X + 1.
+  const jumpTo = (x) => { const w = new Array(x + 1).fill(0); w[0] = b(4 * x); w[x] = BLR; return w; };
+  for (const [x, table] of [[7, true], [8, false]]) {
+    const r = compareRegionProgram(core, jumpTo(x), baseState(60 + x));
+    assert.ok(r.translated && r.equal, `span ${x + 1}: ${JSON.stringify(r.difference ?? r.error)}`);
+    assert.equal(r.fragment.entries.length, 2);
+    const code = Array.from(r.fragment.code);
+    assert.equal(code.some((v, i) => v === 0x78 && code[i + 1] === 0x0e), table, `span ${x + 1}: table ${table}`);
+  }
+  const program = jumpTo(7);
+  const state = baseState(70);
+  const r = compareRegionProgram(core, program, state);
+  const { bytes } = assembleRegion([r.fragment], { helpers: HELPER_SIGNATURES, pcOffset: core.pcOffset, memoryPages: core.memoryPages });
+  const handle = core.compile(bytes);
+  assert.ok(handle > 0);
+  for (const pc of [ORACLE_CODE - 4, ORACLE_CODE - 0x1000, ORACLE_CODE + 2, ORACLE_CODE + 8, ORACLE_CODE + 4 * 8]) {
+    core.loadState(state, pc);
+    core.setDowncount(1000);
+    const before = core.state();
+    assert.equal(core.runRegion(handle), 1, `pc ${pc.toString(16)}: not an entry`);
+    assert.deepEqual(core.state(), before, `pc ${pc.toString(16)}: state untouched`);
+    assert.equal(core.downcount(), 1000);
+  }
 });
