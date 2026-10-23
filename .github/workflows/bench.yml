@@ -46,6 +46,10 @@ on:
         description: A/B candidate ref
         type: string
         default: ''
+      candidate_query:
+        description: 'Extra URL parameters for the candidate side only (&key=value…), e.g. &aotsample=0: one build against itself with a switch'
+        type: string
+        default: ''
       aot:
         description: aot=1 on both sides (region levers)
         type: boolean
@@ -127,6 +131,7 @@ jobs:
       WORKLOAD: ${{ matrix.workload }}
       BASELINE: ${{ inputs.baseline }}
       CANDIDATE: ${{ inputs.candidate }}
+      CANDIDATE_QUERY: ${{ inputs.candidate_query }}
       # A bench/** push calibrates footprint against the game's regions: aot=1.
       AOT: ${{ (github.event_name == 'push' || inputs.aot) && '&aot=1' || '' }}
       OUT: ${{ github.workspace }}/bench-out
@@ -233,9 +238,16 @@ jobs:
             done
             sides=(--baseline "$BASELINE" --candidate "$CANDIDATE")
           fi
+          # candidate_query: the candidate side boots with these parameters
+          # added (race-perf --baseline-query keeps the baseline without them).
+          query="core=upstream&video=null&cpu=single&speed=unlimited&synconidle=1&wasmjit=1&jitwarmup=60$AOT"
+          queries=(--query "$query")
+          if [ -n "$CANDIDATE_QUERY" ]; then
+            [[ "$CANDIDATE_QUERY" =~ ^(\&[a-z0-9_]+=[A-Za-z0-9._-]+)+$ ]] || { echo "candidate_query: &key=value pairs only"; exit 1; }
+            queries=(--query "$query$CANDIDATE_QUERY" --baseline-query "$query")
+          fi
           taskset -c "$OTHER_CPUS" node harness/probes/race-perf.mjs \
-            --iso "$dol" --port 8090 "${sides[@]}" \
-            --query "core=upstream&video=null&cpu=single&speed=unlimited&synconidle=1&wasmjit=1&jitwarmup=60$AOT" \
+            --iso "$dol" --port 8090 "${sides[@]}" "${queries[@]}" \
             --hold "" --runs "$RUNS" --warmup 5 --emulated-warmup 5 --emulated-window "$WINDOW" \
             --pin-cpu-thread 0 --max-load 8 --load-wait 60 --lock-wait 60 --calm-wait 60 \
             "${counters[@]}" --out "$OUT/aa"
