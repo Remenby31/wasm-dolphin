@@ -447,9 +447,30 @@ export function assembleRegion(fragments, { helpers, pcOffset, memoryPages, memo
   let hintsDropped = 0;
   // An `if` or a `br_if` (0135: the downcount check branches to the shared exit).
   const onIf = (f, r) => Number.isInteger(r.offset) && r.offset >= 0 && r.offset < f.code.length && (f.code[r.offset] === OP.if || f.code[r.offset] === OP.brIf);
+  // Offsets must be strictly increasing within a function (V8 drops the
+  // whole section otherwise, silently). Hints on the same offset that agree
+  // are kept once; hints that disagree are all dropped (no guess), counted
+  // in hintsDropped and hintsConflicting.
+  let hintsConflicting = 0;
+  const once = (hs) => {
+    const out = [];
+    for (let j = 0; j < hs.length;) {
+      let k = j;
+      while (k < hs.length && hs[k].offset === hs[j].offset) k++;
+      if (hs.slice(j, k).every((h) => h.likely === hs[j].likely)) {
+        out.push(hs[j]);
+        hintsDropped += k - j - 1;
+      } else {
+        hintsConflicting += k - j;
+        hintsDropped += k - j;
+      }
+      j = k;
+    }
+    return out;
+  };
   const hinted = fragments.map((f, i) => [FIRST + i, (f.relocs ?? []).filter((r) => r.kind === "hint")
     .filter((r) => onIf(f, r) || (hintsDropped++, false))
-    .sort((a, b) => a.offset - b.offset)]).filter(([, hs]) => hs.length);
+    .sort((a, b) => a.offset - b.offset)]).map(([fn, hs]) => [fn, once(hs)]).filter(([, hs]) => hs.length);
   if (hinted.length) {
     const hints = [];
     name(hints, "metadata.code.branch_hint");
@@ -520,7 +541,8 @@ export function assembleRegion(fragments, { helpers, pcOffset, memoryPages, memo
     layout,
     entries: sortedEntries.map(([pc, fn]) => [pc, fn - FIRST]),
     helpers: helperNames,
-    hintsDropped
+    hintsDropped,
+    hintsConflicting
   };
 }
 

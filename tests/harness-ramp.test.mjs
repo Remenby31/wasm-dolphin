@@ -128,3 +128,14 @@ test("first-launch-ramp --visits: the local profile's size on disk per visit, an
   assert.equal(sum[0].withoutProfile, 1);
   assert.equal(sum[0].profileBytes, 12000);
 });
+
+test("first-launch-ramp --region-chain: the chaining counters of a stats reply, or why there are none", async () => {
+  const { regionChainOf, summarizeVisits } = await import("../harness/probes/first-launch-ramp.mjs");
+  const reply = { bytes: new Uint8Array(8), regionChain: { enabled: 1, chained: 900, outOfTime: 3, noRegion: 120, refused: 0, exitTargets: [["0x80001234", 50]], breakEntries: [] } };
+  assert.deepEqual(regionChainOf(reply), { enabled: 1, chained: 900, outOfTime: 3, noRegion: 120, refused: 0, exitTargets: [["0x80001234", 50]], breakEntries: [] });
+  assert.match(regionChainOf({ bytes: new Uint8Array(8) }).error, /without region chaining/);
+  assert.match(regionChainOf({ error: "timeout" }).error, /timeout/);
+  const sum = summarizeVisits([{ visits: [{ visit: 1, regionChain: { chained: 10, noRegion: 4, outOfTime: 0 } }] }, { visits: [{ visit: 1, regionChain: { chained: 20, noRegion: 6, outOfTime: 0 } }] }], 1);
+  assert.equal(sum[0].chained, 15);
+  assert.equal(sum[0].noRegion, 5);
+});

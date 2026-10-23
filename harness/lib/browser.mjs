@@ -82,13 +82,15 @@ const ARGS = [
   "--disable-background-timer-throttling"
 ];
 
-export function chromeLaunchOptions(display = "headless") {
+export function chromeLaunchOptions(display = "headless", { unsafeWebgpu = true } = {}) {
   if (!DISPLAYS.includes(display)) throw new Error(`--display ${display}: the harness only runs headless (no window may appear on this Mac)`);
-  return { headless: true, args: ARGS };
+  // unsafeWebgpu: false launches Chrome as a player has it (no
+  // --enable-unsafe-webgpu), e.g. to see the adapter a GPU-less PC gets.
+  return { headless: true, args: unsafeWebgpu ? ARGS : ARGS.filter((a) => a !== "--enable-unsafe-webgpu") };
 }
 
-export async function launchChrome({ profileDir, display = "headless", args = [] }) {
-  const opts = chromeLaunchOptions(display);
+export async function launchChrome({ profileDir, display = "headless", args = [], unsafeWebgpu = true }) {
+  const opts = chromeLaunchOptions(display, { unsafeWebgpu });
   const { chromium } = await importPlaywright();
   // HARNESS_CHROME_PATH: run this executable instead of Chrome stable, e.g. a
   // wrapper that confines Chrome to the efficiency cores (docs/consumer-perf-extrapolation.md).

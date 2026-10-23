@@ -268,6 +268,14 @@ let fifoLogBoot = false;
 // ?wgpumask=a,b: optional WebGPU features the device is created without, as
 // on a browser that lacks them (harness only, set at loadCore).
 let wgpuMaskedFeatures = new Set();
+// ?wgpufallback=1 (harness): keep a CPU fallback adapter; refused otherwise.
+let wgpuAcceptFallbackAdapter = false;
+// A CPU adapter is no usable GPU: with --enable-unsafe-webgpu (the harness
+// passes it) a GPU-less Chrome gives a SwiftShader fallback adapter, and both
+// the replay and the presenter would run on the CPU.
+export function isFallbackAdapterInfo(info) {
+  return info?.isFallbackAdapter === true || info?.architecture === "swiftshader";
+}
 export function parseWgpuMask(mask) {
   return new Set(String(mask || "").split(",").map((f) => f.trim()).filter(Boolean));
 }
@@ -1278,10 +1286,16 @@ async function captureAtViOutput({ index, ahead, fromLoad = false, timeoutMs = 6
 async function captureAtViOutputWgpu(index, fromLoad, timeoutMs) {
   const generation = moduleInstance?._DolphinWeb_HarnessLoadGeneration?.() >>> 0;
   const { id, promise } = wgpuExactCapture.arm(index, fromLoad, generation);
-  const timer = setTimeout(() => wgpuExactCapture.cancel(id, new Error(
-    wgpuExactCapture.tagsSeen === 0
-      ? "core does not tag WebGPU presents with VI outputs (rebuild the core)"
-      : `VI output ${index} never reached within ${timeoutMs} ms`)), timeoutMs);
+  const timer = setTimeout(() => {
+    // Where it stood, for a run on another machine (the Windows runner).
+    const m = moduleInstance;
+    const state = `harnessEnabled ${harnessEnabled}, core VI since boot ${m?._DolphinWeb_HarnessViSinceBoot?.() ?? "?"}, ` +
+      `queue submissions ${webGpuCausalStats?.queueSubmissionCount ?? "?"}, VI tags seen ${wgpuExactCapture.tagsSeen}, ` +
+      `video ${harnessVideoBackend}, adapter ${rendererDiagnostics?.adapter?.architecture ?? rendererDiagnostics?.adapter?.vendor ?? "?"}`;
+    wgpuExactCapture.cancel(id, new Error(wgpuExactCapture.tagsSeen === 0
+      ? `core does not tag WebGPU presents with VI outputs (rebuild the core) [${state}]`
+      : `VI output ${index} never reached within ${timeoutMs} ms [${state}]`));
+  }, timeoutMs);
   try {
     return await promise;
   } finally {
@@ -1508,6 +1522,7 @@ async function handleMessage(type, payload) {
         fifoLog: payload.fifoLog,
         efbCopyRam: payload.efbCopyRam,
         wgpuMask: payload.wgpuMask,
+        wgpuFallback: payload.wgpuFallback,
         efbDiag: payload.efbDiag,
         jitVerbose: payload.jitVerbose,
         frameCap: payload.frameCap,
@@ -2179,6 +2194,7 @@ async function loadCore({
   fifoLog = false,
   efbCopyRam = false,
   wgpuMask = "",
+  wgpuFallback = false,
   efbDiag = false,
   jitVerbose = false,
   frameCap = 0,
@@ -2231,6 +2247,7 @@ async function loadCore({
 } = {}) {
   fifoLogBoot = Boolean(fifoLog);
   wgpuMaskedFeatures = parseWgpuMask(wgpuMask);
+  wgpuAcceptFallbackAdapter = Boolean(wgpuFallback);
   if (moduleInstance) {
     return moduleInstance;
   }
@@ -2559,6 +2576,15 @@ async function loadCore({
   } else if (detachedWgpuCanvas) {
     preferredPresenterBackend = "webgpu";
     await setupSoftwarePresenter(detachedWgpuCanvas, preferredPresenterBackend);
+  }
+  // video=wgpu needs this worker's WebGPU device: the core asks for an adapter
+  // of its own and would take a CPU fallback the presenter refused, then run
+  // behind a black canvas (the replay has no device). Fail before the core
+  // starts, as without an adapter.
+  if (videoBackend === "WebGPU-Real" && !renderGpu && !isIntentionalBlankWgpuProbe(wgpuRendererWorkerProbe)) {
+    const message = `video=wgpu needs a usable WebGPU adapter; the presenter is ${renderBackend || "none"}`;
+    console.error(`[wgpu] ${message}`);
+    throw new Error(message);
   }
 
   // §28cf boot-phase timing instrumentation. Attributes the ~1s page-load
@@ -5931,6 +5957,10 @@ async function createWebGpuPresenter(canvas) {
   const adapter = await gpu.requestAdapter({ powerPreference: wgpuPowerPreference });
   if (!adapter) {
     throw new Error(`WebGPU adapter request (${wgpuPowerPreference}) returned null`);
+  }
+  if (isFallbackAdapterInfo(adapter.info) && !wgpuAcceptFallbackAdapter) {
+    // As no adapter: the presenter falls back to WebGL, video=wgpu fails.
+    throw new Error(`WebGPU adapter is a CPU fallback (${adapter.info?.architecture || "isFallbackAdapter"}): no usable GPU`);
   }
 
   let adapterInfo = adapter.info || null;
