@@ -329,3 +329,15 @@ test("aot optimizer: a finishing step that fails is reported and the run still e
   assert.ok(events.some(([t, d]) => t === "optimization-error" && /disk full/.test(d.message)), "reported");
   assert.equal(events.at(-1)[0], "optimization-done", "the run ends");
 });
+
+test("aot optimizer: budgetRefused in optimization-done counts this run's refusals only", async () => {
+  const base = fakeTranslator();
+  // Every translated function reports 2 frontier blocks left for lack of budget.
+  const translator = { translate: async (batch) => (await base.translate(batch)).map((r) => (r.fragment ? { ...r, budgetRefused: 2 } : r)) };
+  const { o, events } = optimizer({ translator });
+  await o.start({ resume: false });
+  const first = events.findLast(([t]) => t === "optimization-done")[1].budgetRefused;
+  assert.ok(first > 0);
+  await o.start({ resume: false });
+  assert.equal(events.findLast(([t]) => t === "optimization-done")[1].budgetRefused, first, "a second run does not add the first's");
+});

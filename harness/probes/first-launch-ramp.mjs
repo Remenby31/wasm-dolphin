@@ -52,7 +52,7 @@ import { parseArgs } from "node:util";
 
 import { bootIso, ensureServer, launchChrome, readTimeline, REPO_ROOT, workerRequest } from "../lib/browser.mjs";
 import { calmLock, loadGaveUp } from "../lib/env.mjs";
-import { decodeRegionStats } from "../lib/jit-region-stats.mjs";
+import { decodeRegionStats, regionShares } from "../lib/jit-region-stats.mjs";
 import { checkPerfAccess, counterEvents, cyclesPerGuestCycle, instructionsPerGuestCycle, perfCounters } from "../lib/perf-counters.mjs";
 import { consistentHeadroomRead, decodeHeadroomStats } from "../lib/headroom.mjs";
 import { PRESETS, SCENE_NATIVE_FRAMES_PER_VI, VI_PER_SECOND } from "../lib/matrix.mjs";
@@ -161,6 +161,7 @@ export function summarizeVisits(records, visits) {
       withoutProfile: rows.filter((x) => x.profileBytes == null).length, installedAtEnd: med((x) => x.regionFacts?.installedAtEnd),
       lastInstallMs: med((x) => x.regionFacts?.lastInstallMs), lastInstallGuestSec: med((x) => x.regionFacts?.lastInstallGuestSec),
       plateauSpeed: med((x) => x.ramp?.plateauSpeed),
+      regionCycleShare: med((x) => x.regionShares?.regionCycleShare), regionStops: med((x) => x.regionShares?.regionStops),
       chained: med((x) => x.regionChain?.chained), noRegion: med((x) => x.regionChain?.noRegion), outOfTime: med((x) => x.regionChain?.outOfTime),
       instructionsPerGuestCycle: med((x) => x.instructionsPerGuestCycle), cyclesPerGuestCycle: med((x) => x.cyclesPerGuestCycle)
     });
@@ -218,6 +219,9 @@ async function measureVisit(o, server, profileDir) {
     if (chainOn) {
       const reply = chainOn.error ? chainOn : await workerRequest(page, "validationReadJitRegionStats", {}, 10000).catch((e) => ({ error: String(e.message || e) }));
       record.regionChain = regionChainOf(reply);
+      // The same window's region share of guest cycles (outside idle skip),
+      // calls, non-entry calls and stops; counters only, so no time shares.
+      record.regionShares = reply?.bytes && !reply.error ? regionShares(decodeRegionStats(reply.bytes)) : null;
     }
     draining = false;
     await drain;
