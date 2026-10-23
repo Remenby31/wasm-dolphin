@@ -270,3 +270,28 @@ test("Spark Chromium: the bench's store-check flag is added once and merged with
     rmSync(dir, { recursive: true, force: true });
   }
 });
+
+test("spark-run --multi: a KPI scene is measured with its pinned protocol (heavy intro), the caller's options still win", async () => {
+  const { multiRaceArgs, multiSceneCheck, sceneMultiArgs } = await import("../harness/remote/spark-run.mjs");
+  const { sceneName } = await import("../harness/probes/race-multi.mjs");
+  const base = { iso: "i", state: "s", runs: "6", armDirs: ["a", "b", "a"] };
+  const last = (args, o) => args[args.lastIndexOf(o) + 1];
+  // The heavy intro: warmup 1, window 6, no key, over the race defaults.
+  const heavy = multiRaceArgs({ ...base, extra: sceneMultiArgs("heavy-intro-13s.sav") });
+  assert.equal(last(heavy, "--emulated-window"), "6");
+  assert.equal(last(heavy, "--emulated-warmup"), "1");
+  assert.equal(last(heavy, "--hold"), "");
+  assert.deepEqual(multiSceneCheck("heavy-intro-13s.sav", heavy).errors, []);
+  assert.deepEqual(multiSceneCheck("heavy-intro-13s.sav", heavy).warnings, []);
+  // The race defaults on the heavy scene (jit-0121b-heavy): refused, the window leaves the heavy phase.
+  assert.match(multiSceneCheck("heavy-intro-13s.sav", multiRaceArgs(base)).errors.join(), /leaves the heavy phase/);
+  // A scene without a protocol keeps the race defaults.
+  assert.deepEqual(sceneMultiArgs("race-after.sav"), []);
+  assert.equal(multiSceneCheck("race-after.sav", multiRaceArgs(base)).protocol, null);
+  // The caller's option after -- still wins (and is checked).
+  const longer = multiRaceArgs({ ...base, extra: [...sceneMultiArgs("heavy-intro-13s.sav"), "--emulated-window", "12"] });
+  assert.match(multiSceneCheck("heavy-intro-13s.sav", longer).errors.join(), /12 s window/);
+  // race-multi sees the bench's copy, renamed with its content hash.
+  assert.equal(sceneName("/home/admin/salon-bench/roms/heavy-intro-13s-f3ea52d2e166.sav"), "heavy-intro-13s.sav");
+  assert.equal(sceneName("race-after.sav"), "race-after.sav");
+});

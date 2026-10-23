@@ -282,6 +282,45 @@ million console lines, the browser process at 7-14 GB).
 - [x] **35 regions dropped on every second launch** (KPI, d18249e, and locally): installed during the OS init, they were dropped by invalidations (icbi or DMA) over their ranges, and the code then ran in the block JIT for the session. Patch 0085: an invalidation over an installed region marks it unverified instead; before it next runs it is checked against the plan's hashes (as after a cache clear), and dropped only if its code changed. A region with a member that has no hash, or an HLE hook installed at an entry since, is dropped (a hook changes no byte); a forced invalidation (breakpoints) drops at once, as before; a region already due for a check is skipped by later invalidations. `DolphinWeb_AotRegionRechecks` counts the regions kept for a check, the checks passed and the regions invalidations looked at.
 - [ ] **Second-launch TTFF +0.8 s** (first core frame 1.55 s against 0.72 s cold): the region cache read and compiled before the boot (`installBeforeBoot`). Load fewer modules before the boot, the rest after (target 10 s, today 2.05 s).
 
+## FPU ops interpreted inside a region (patch 0105, 2026-10-22)
+
+An FPU op the direct tier does not emit (the Rc forms, `mffs`, `mtfsf`,
+the paired-single ops 0087 leaves to helpers, ...) used to end the
+region's block: the region left for one op, the cached interpreter ran the
+rest of the block, and the block chain came back at the next region entry
+(~240 000 times a second on the race before 0087). In region translation it
+is now a helper call, `EmitFpCall` or `EmitInterpretCall` (the mixed tier's
+`allow_interpret_fallback`): dirty GPRs are stored before it, its outputs
+are reloaded after it, and a halt returns 2. That is every FPU op that
+cannot end a block (`RegionInterpretsInline`), the paired-single loads and
+stores included: `psq_lx`, `psq_stx`, `psq_lux`, `psq_stux`, and
+`psq_lu`/`psq_stu` with rA = 0 now run inside the region. System, cache and
+branch ops, which may change the MSR, the translation or the code, still end
+the region, which does not check the CPU's mode between its blocks. In
+region code the fallback only takes those ops: any other op the emitter
+refuses fails the block. Compiler version 6.
+
+## Lazy CR and fused compare-branch (patch 0111, 2026-10-22)
+
+A compare (`cmp*`, Rc=1) in region code was a three-way `if/else` that
+wrote two words and read `xer_so_ov` (51 wasm instructions). It is now
+one i64 store: A - B with both operands extended (signed or not), and bit
+59 (SO) cleared. In Dolphin's format that reads as the interpreter's: LT
+is bit 62, GT is (s64) > 0, EQ is a zero low word. A `bc` later in the
+block on that field compares the operands again, as long as no op in
+between writes them or the field (`regsOut`, `crOut`, `system` and the HLE
+calls). The store stays, so every exit sees the exact CR.
+
+SO must be clear for this. Regions refuse to run while XER.SO is set
+(TryRunRegion, RegionWouldRun, RegionChainNext, and each fragment at its
+entry, which returns 1), and the ops that can set it (`mtxer`, `mcrxr`,
+the OE forms) run outside them. A zero difference is stored with bit 63
+set, as the interpreter does: block code reads GT as "bit 63 clear"
+(`mfcr`), so an EQ field must never be 0. In a V8
+microbenchmark the lazy store without the fused branch was slower on
+unpredictable branches (+14 to +30 %), so the two ship together. Compiler
+version 10 (7 to 9 are taken by 0108 to 0110).
+
 ## MMU mode (patch 0091, with dispatch's 0090, 2026-10-22)
 
 Under the MMU (bMMU, set by a game's INI) no wasm code of ours runs. The

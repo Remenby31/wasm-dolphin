@@ -60,7 +60,7 @@ diff --git a/Source/Core/Core/PowerPC/PowerPC.cpp b/Source/Core/Core/PowerPC/Pow
 diff --git a/Source/Core/Core/PowerPC/CachedInterpreter/CachedInterpreter.cpp b/Source/Core/Core/PowerPC/CachedInterpreter/CachedInterpreter.cpp
 --- a/Source/Core/Core/PowerPC/CachedInterpreter/CachedInterpreter.cpp
 +++ b/Source/Core/Core/PowerPC/CachedInterpreter/CachedInterpreter.cpp
-@@ -5005,8 +5005,58 @@
+@@ -5163,8 +5163,58 @@
  
  // MSR.FP set and FE0 = FE1 = 0: only then can the fast paths skip the
  // interpreter's floating-point exception check.
@@ -119,7 +119,7 @@ diff --git a/Source/Core/Core/PowerPC/CachedInterpreter/CachedInterpreter.cpp b/
    EmitStateLoadU32(body, layout.msr_offset);
    EmitI32Const(body, (1u << 13) | (1u << 11) | (1u << 8));
    body.push_back(0x71);  // i32.and
-@@ -5085,6 +5135,20 @@
+@@ -5243,6 +5293,20 @@
  void EmitSetFprfZeroOrNormal(std::vector<u8>& body, const WasmStateLayout& layout,
                               u32 value_local, u32 clear_extra = 0, bool wanted = true)
  {
@@ -140,7 +140,7 @@ diff --git a/Source/Core/Core/PowerPC/CachedInterpreter/CachedInterpreter.cpp b/
    if (!wanted)
    {
      // The analyzer proved a later op of this block rewrites FPRF before
-@@ -5963,17 +6027,7 @@
+@@ -6121,17 +6185,7 @@
  void EmitAlignedFloatFastPathCondition(std::vector<u8>& body, const WasmStateLayout& layout,
                                         bool l1_cache, u32 bytes = sizeof(u32))
  {
@@ -159,7 +159,7 @@ diff --git a/Source/Core/Core/PowerPC/CachedInterpreter/CachedInterpreter.cpp b/
  
    EmitLocalGet(body, 1);
    EmitI32Const(body, 3);
-@@ -5990,17 +6044,7 @@
+@@ -6148,17 +6202,7 @@
  
  void EmitGatherPipeFloatStoreCondition(std::vector<u8>& body, const WasmStateLayout& layout)
  {
@@ -178,7 +178,7 @@ diff --git a/Source/Core/Core/PowerPC/CachedInterpreter/CachedInterpreter.cpp b/
  
    EmitLocalGet(body, 1);
    EmitI32Const(body, 3);
-@@ -6800,25 +6844,11 @@
+@@ -6958,24 +7002,10 @@
  void EmitPsqFloatFastPathCondition(std::vector<u8>& body, const WasmStateLayout& layout,
                                     UGeckoInstruction inst, bool store)
  {
@@ -187,26 +187,25 @@ diff --git a/Source/Core/Core/PowerPC/CachedInterpreter/CachedInterpreter.cpp b/
 -  body.push_back(0x71);
 -  EmitI32Const(body, 0);
 -  body.push_back(0x47);
-+  EmitMsrFpOnLittleEndianOff(body, layout);
- 
+-
 -  EmitStateLoadU32(body, layout.msr_offset);
 -  EmitI32Const(body, 1);
 -  body.push_back(0x71);
 -  body.push_back(0x45);
-+  EmitHid2LsqeSet(body, layout);
-   body.push_back(0x71);
+-  body.push_back(0x71);
++  EmitMsrFpOnLittleEndianOff(body, layout);
  
 -  EmitStateLoadU32(body, SprOffset(layout, SPR_HID2));
 -  EmitI32Const(body, 1u << 31);
--  body.push_back(0x71);
++  EmitHid2LsqeSet(body, layout);
+   body.push_back(0x71);
 -  EmitI32Const(body, 0);
 -  body.push_back(0x47);
 -  body.push_back(0x71);
--
+ 
    EmitStateLoadU32(body, SprOffset(layout, SPR_GQR0 + inst.I));
    if (!store)
-   {
-@@ -6838,25 +6868,11 @@
+@@ -6996,25 +7026,11 @@
                                         UGeckoInstruction inst, bool store, u32 type, u32 scale,
                                         u32 element_bytes, bool l1_cache)
  {
@@ -234,7 +233,7 @@ diff --git a/Source/Core/Core/PowerPC/CachedInterpreter/CachedInterpreter.cpp b/
    EmitStateLoadU32(body, SprOffset(layout, SPR_GQR0 + inst.I));
    if (store)
    {
-@@ -6893,23 +6909,9 @@
+@@ -7051,25 +7067,11 @@
  void EmitPsqGatherPipeFloatStoreCondition(std::vector<u8>& body, const WasmStateLayout& layout,
                                            UGeckoInstruction inst)
  {
@@ -247,20 +246,22 @@ diff --git a/Source/Core/Core/PowerPC/CachedInterpreter/CachedInterpreter.cpp b/
  
 -  EmitStateLoadU32(body, layout.msr_offset);
 -  EmitI32Const(body, 1);
--  body.push_back(0x71);
++  EmitHid2LsqeSet(body, layout);
+   body.push_back(0x71);
 -  body.push_back(0x45);
 -  body.push_back(0x71);
--
+ 
 -  EmitStateLoadU32(body, SprOffset(layout, SPR_HID2));
 -  EmitI32Const(body, 1u << 31);
 -  body.push_back(0x71);
 -  EmitI32Const(body, 0);
 -  body.push_back(0x47);
-+  EmitHid2LsqeSet(body, layout);
-   body.push_back(0x71);
- 
+-  body.push_back(0x71);
+-
    EmitStateLoadU32(body, SprOffset(layout, SPR_GQR0 + inst.I));
-@@ -9501,6 +9503,8 @@
+   EmitI32Const(body, 7);
+   body.push_back(0x71);
+@@ -9672,6 +9674,8 @@
  namespace
  {
  void ForgetAllRegions();
@@ -269,7 +270,7 @@ diff --git a/Source/Core/Core/PowerPC/CachedInterpreter/CachedInterpreter.cpp b/
  }
  
  void CachedInterpreter::Shutdown()
-@@ -10453,16 +10457,38 @@
+@@ -10624,6 +10628,24 @@
  
  // Runs the region holding pc. False when there is none (or it refuses the
  // pc): the caller dispatches a block.
@@ -294,11 +295,12 @@ diff --git a/Source/Core/Core/PowerPC/CachedInterpreter/CachedInterpreter.cpp b/
  bool TryRunRegion(PowerPC::PowerPCState& ppc_state)
  {
    if (!RegionFilterHas(ppc_state.pc))
-     return false;
-   // Regions keep no performance monitor counts (the block path does).
+@@ -10631,10 +10653,14 @@
+   // Regions keep no performance monitor counts (the block path does), and
+   // run with XER.SO clear (0111: their compares store CR fields without it).
    if (!ppc_state.msr.IR || !ppc_state.msr.DR || !ppc_state.msr.FP ||
 +      !RegionGuardsHold(ppc_state) ||
-       (ppc_state.feature_flags & FEATURE_FLAG_PERFMON) != 0)
+       (ppc_state.feature_flags & FEATURE_FLAG_PERFMON) != 0 || (ppc_state.xer_so_ov & 2) != 0)
    {
      if (s_region_stats_on)
 +    {
@@ -308,23 +310,23 @@ diff --git a/Source/Core/Core/PowerPC/CachedInterpreter/CachedInterpreter.cpp b/
      return false;
    }
    const u32 index = FindRegionIndex(ppc_state.pc);
-@@ -10540,6 +10566,7 @@
+@@ -10712,6 +10738,7 @@
  {
    if (!s_regions_enabled.load(std::memory_order_relaxed) || !RegionFilterHas(ppc_state.pc) ||
        !ppc_state.msr.IR || !ppc_state.msr.DR || !ppc_state.msr.FP ||
 +      !RegionGuardsHold(ppc_state) ||
-       (ppc_state.feature_flags & FEATURE_FLAG_PERFMON) != 0 ||
+       (ppc_state.feature_flags & FEATURE_FLAG_PERFMON) != 0 || (ppc_state.xer_so_ov & 2) != 0 ||
        FindRegionIndex(ppc_state.pc) == NO_REGION)
      return false;
-@@ -10611,6 +10638,7 @@
+@@ -10783,6 +10810,7 @@
    const InstalledRegion& region = s_regions[index];
    if (!region.verified || !s_regions_enabled.load(std::memory_order_relaxed) ||
        !ppc_state.msr.IR || !ppc_state.msr.DR || !ppc_state.msr.FP ||
 +      !RegionGuardsHold(ppc_state) ||
-       (ppc_state.feature_flags & FEATURE_FLAG_PERFMON) != 0)
+       (ppc_state.feature_flags & FEATURE_FLAG_PERFMON) != 0 || (ppc_state.xer_so_ov & 2) != 0)
    {
      stats.refused += 1;
-@@ -11293,7 +11321,20 @@
+@@ -11465,7 +11493,20 @@
      {
        ClearCache();
        RegionStaticRatesForAll();
@@ -345,21 +347,21 @@ diff --git a/Source/Core/Core/PowerPC/CachedInterpreter/CachedInterpreter.cpp b/
      // Start new timing slice
      // Metrics-off runs avoid all per-slice clocks. BeginSlice also resets
      // the exclusive wait/work attribution for this one CoreTiming slice.
-@@ -16168,6 +16209,13 @@
-       h ^= (w >> shift) & 0xff;
+@@ -16341,6 +16382,13 @@
        h *= 0x01000193u;
      }
-+  }
+   }
 +  // 0121: code emitted for the other FPRF mode has another hash, so a region
 +  // translated (or cached) under it is never installed (s_region_layout_refused).
 +  if (PowerPC::g_fprf_emulation.load(std::memory_order_relaxed))
 +  {
 +    h ^= 0x46505246u;  // "FPRF"
 +    h *= 0x01000193u;
-   }
++  }
    return h != 0 ? h : 1;
  }
-@@ -16369,6 +16417,12 @@
+ 
+@@ -16575,6 +16623,12 @@
    // Defence in depth with 0090, which keeps such regions from installing.
    if (system.IsMMUMode())
      return false;
@@ -372,7 +374,19 @@ diff --git a/Source/Core/Core/PowerPC/CachedInterpreter/CachedInterpreter.cpp b/
    // End of the range holding pc, 0 when none does.
    const auto range_end = [&](u32 pc) -> u32 {
      for (std::size_t i = 0; i + 1 < ranges.size(); i += 2)
-@@ -16743,7 +16797,24 @@
+@@ -16766,8 +16820,9 @@
+ // ps_neg/mr/nabs/abs compiled inline (3 and 4 are taken by 0084 and 0083).
+ // 6 (0105): FPU ops outside the direct tier stay in the region, interpreted.
+ // 10 (0111): compares store their CR field as one i64, bc fused (7-9 are
+-// taken by 0108-0110).
+-constexpr u32 AOT_COMPILER_VERSION = 10;
++// taken by 0108-0110). 16 (0121): region code takes MSR LE/FE0/FE1 and
++// HID2.LSQE for granted (15 is 0119's).
++constexpr u32 AOT_COMPILER_VERSION = 16;
+ constexpr u32 AOT_MAX_FRAGMENT_BYTES = 1u << 20;
+ thread_local std::vector<u32> t_aot_out;
+ u8* s_aot_ram = nullptr;
+@@ -16962,7 +17017,24 @@
  extern "C" EMSCRIPTEN_KEEPALIVE void DolphinWeb_AotKeyParts(u32* out)
  {
    out[0] = AOT_COMPILER_VERSION;
@@ -398,7 +412,7 @@ diff --git a/Source/Core/Core/PowerPC/CachedInterpreter/CachedInterpreter.cpp b/
  }
  
  // Helper signatures in import order, "params>results" (BuildWasmCachedInterpreterBlock's types).
-@@ -16844,11 +16915,15 @@
+@@ -17063,11 +17135,15 @@
  // Runs a region module compiled by DolphinWeb_JitCompileBytesForTest on the
  // test CPU: 0 continue at pc, 1 not an entry, 2 stopped, 3 stopped in an
  // exception handler (taken by a helper, or pending and taken here as the CPU

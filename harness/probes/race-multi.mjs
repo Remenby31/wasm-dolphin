@@ -74,7 +74,7 @@ import { pathToFileURL } from "node:url";
 import { parseArgs } from "node:util";
 
 import { ensureServer, REPO_ROOT } from "../lib/browser.mjs";
-import { PRESETS } from "../lib/matrix.mjs";
+import { PRESETS, sceneProtocolCheck } from "../lib/matrix.mjs";
 import { acquirePerfLock } from "../lib/perf-lock.mjs";
 import { openSession } from "../lib/session.mjs";
 import { median, round } from "../lib/stats.mjs";
@@ -215,6 +215,10 @@ export function discardReason(arms, targets) {
   return bad.length ? bad.join("; ") : null;
 }
 
+// The scene a savestate is, without the content hash spark-run adds to the
+// bench's copy (heavy-intro-13s-f3ea52d2e166.sav → heavy-intro-13s.sav).
+export const sceneName = (file) => path.basename(String(file)).replace(/-[0-9a-f]{12}(?=\.sav$)/, "");
+
 // A barrier for `n` arms, released when all arrived or after `timeoutMs`.
 export function barrier(n, timeoutMs = 180000) {
   let arrived = 0, open;
@@ -312,6 +316,12 @@ async function main() {
     o.emulatedWarmup = num(values, "emulated-warmup", { min: 0 });
     o.emulatedPollMs = num(values, "emulated-poll-ms", { min: 10, int: true });
   }
+  // A KPI scene's pinned protocol (matrix.mjs), as race-perf checks it.
+  const sceneCheck = sceneProtocolCheck(sceneName(values.state), {
+    warmup: o.emulatedWindow ? o.emulatedWarmup : o.warmup, window: o.emulatedWindow ?? o.secs, emulated: Boolean(o.emulatedWindow), hold: o.hold
+  });
+  if (sceneCheck.errors.length) throw new Error(`scene protocol: ${sceneCheck.errors.join("; ")}`);
+  for (const w of sceneCheck.warnings) console.warn(`[race-multi] scene protocol: ${w}`);
   let arrive = null;
   // The arm's regions before its window: one read of the region pipeline
   // (the launch's layout hash and counts), or with --aot-seed the wait until
@@ -486,7 +496,8 @@ async function main() {
   const summary = {
     probe: "race-multi", at: new Date().toISOString(),
     // Which Chromium and its extra flags (the bench's --js-flags among them).
-    chrome: chromeInfo(), query: o.query, warmupSec: o.warmup, secs: o.secs, maxLoad: o.maxLoad,
+    chrome: chromeInfo(), query: o.query,
+    sceneProtocol: sceneCheck.protocol ? { scene: sceneName(values.state), ...sceneCheck.protocol, warnings: sceneCheck.warnings } : null, warmupSec: o.warmup, secs: o.secs, maxLoad: o.maxLoad,
     arms, lanes, runs: records.length, validRuns: good.length,
     // A lane estimate needs every run (the Latin square incomplete otherwise).
     // --aot-seed: installed regions per run and arm, and whether every run had them equal.
