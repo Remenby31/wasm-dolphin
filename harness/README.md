@@ -302,12 +302,13 @@ node harness/remote/spark-run.mjs --build <ref>           # its core built on th
 ## KPI probes and report
 
 The program's KPIs (PROGRAM.md, « KPI du programme ») that race-perf does not
-cover have their own probes. Both are timing measures: they take the perf
+cover have their own probes. They are timing measures: they take the perf
 lock and run in the MESURE slots only, headless, three runs by default.
 
 ```sh
 node harness/probes/ttff.mjs --iso ../roms/<disc>.iso --port 8082 [--config wgpu] [--runs 3]
 node harness/probes/first-launch.mjs --iso ../roms/<disc>.iso --port 8082 [--runs 3] [--timeout 600]
+node harness/probes/first-launch-ramp.mjs --iso ../roms/<disc>.iso --port 8082 --scene race --steps race-steps.json [--sec 90]
 node harness/kpi-report.mjs [--print]
 ```
 
@@ -325,7 +326,18 @@ node harness/kpi-report.mjs [--print]
   `lib/aot-progress.mjs`. A launch without "done" (or a second launch without
   its compiled count) is a failure with its reason. An engine without P7
   answers `p7: null` and n/a, exit 0.
-- Both record the served tree (commit, dirty) and the Chrome that ran, and
+- `first-launch-ramp.mjs`: the speed curve of a player's very first launch
+  with `aot=1` (added to `--config rec` unless the query says otherwise), on
+  a new, empty profile (no seed, unlike aot-warm-launch): disc handed over,
+  then `--steps` (to the race, or a click and the intro for `--scene heavy`),
+  then `--sec` seconds. Every second it drains the VI ring and reads the
+  region pipeline (`validationReadJitRegionStats`, read only). Per run
+  (`lib/ramp.mjs`): time to 90 % and to 95 % VI speed held 5 s, the plateau
+  (median of the last 10 s), the time to 90 % of that plateau (a CPU-bound
+  scene never reaches 90 %), and the per-second speed and installed/queued
+  region series. KPI: time to 90 %, target 15 s, one row per scene; a run
+  that never reaches 90 % fails the row.
+- They all record the served tree (commit, dirty) and the Chrome that ran, and
   leave out runs started on an overloaded machine (listed). `--no-lock`
   checks the plumbing in a CORRECTION slot; such results are not measures.
 - `kpi-report.mjs`: reads only. It classifies by content every `summary.json`,

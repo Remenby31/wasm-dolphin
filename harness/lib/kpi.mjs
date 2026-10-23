@@ -25,6 +25,7 @@ export function classify(json, file = "") {
   if (json.probe === "race-perf" || (json.state && json.candidate && "change" in json && json.query)) return "race-perf";
   if (json.probe === "ttff") return "ttff";
   if (json.probe === "first-launch") return "first-launch";
+  if (json.probe === "first-launch-ramp") return "first-launch-ramp";
   if (json.decision && json.correctness) return "gate";
   if (json.interpQuery && json.jitQuery && Array.isArray(json.results)) return "fuzz";
   if (json.spec?.name && /freeze/.test(json.spec.name) && Array.isArray(json.results)) return "freeze-loop";
@@ -154,6 +155,8 @@ const p4Why = (j, side) => {
 const raceFailures = (j, side) => (j.failed ?? []).filter((f) => f.side === side && f.why !== "overloaded" && f.why !== "infra").map((f) => `run ${f.run} : ${f.why}`);
 const launchFailures = (phase) => (phase?.failed ?? []).map((f) => `run ${f.run} : ${f.error}`);
 // Why a TTFF phase has no value: runs left out (overloaded machine, Chrome lost by the harness).
+const rampFailures = (j) => (j.failed ?? []).map((f) => `run ${f.run} : ${f.why}`);
+const rampDetail = (j) => `95 % à ${j.timeToFullMs?.median ?? "n/a"} ms, plateau ${j.plateauSpeed?.median ?? "?"} %, 90 % du plateau à ${j.timeToTail90Ms?.median ?? "n/a"} ms, régions ${j.regionsAt90?.median ?? "?"} à 90 % / ${j.regionsAtEnd?.median ?? "?"} en fin (${j.windowSec} s après la scène)`;
 const ttffWhy = (j, phase) => [
   j.overloadedRuns?.length ? `runs ${j.overloadedRuns.join(", ")} lancées sur machine surchargée, exclues` : null,
   j[phase]?.infra?.length ? `runs ${j[phase].infra.map((x) => x.run).join(", ")} perdues par le harnais (pipe CDP), exclues` : null
@@ -219,6 +222,12 @@ export const KPI_ROWS = [
   { id: "aotcompilerMemory", group: "Garde-fous", label: "Surcoût mémoire aotcompiler", target: 150, unit: "Mo", better: "lower", from: "manual" },
   { id: "optimisationMs", group: "Expérience joueur", label: "Durée d'optimisation au 1er lancement", target: 60000, unit: "ms", better: "lower", from: "first-launch", read: (j) => j.p7?.durationMs ?? null, why: (j) => j.p7Why ?? null, failures: (j) => (j.p7?.failedFirst ?? []).map((f) => `run ${f.run} : ${f.why}`) },
   { id: "secondLaunchRecompiled", group: "Expérience joueur", label: "Régions recompilées au 2e lancement", target: 0, unit: "", better: "zero", from: "first-launch", read: (j) => j.p7?.secondLaunchCompiled ?? null, why: (j) => j.p7Why ?? null, failures: (j) => [...(j.p7?.failedFirst ?? []), ...(j.p7?.failedSecond ?? [])].map((f) => `run ${f.run} : ${f.why}`) },
+  // First-launch ramp (first-launch-ramp.mjs): a fresh profile, aot=1, time
+  // to 90 % speed held 5 s. Target 15 s, to be set against the first
+  // measure; the heavy scene is CPU-bound under 90 % (2026-10-23: ~60 %),
+  // so it stays out of the global status and its detail gives the plateau.
+  { id: "firstLaunchRampRace", group: "Expérience joueur", label: "Rampe du 1er lancement (profil vierge, aot=1) : temps jusqu'à 90 % de vitesse, course", target: 15000, unit: "ms", better: "lower", from: "first-launch-ramp", match: (j) => j.scene === "race", read: (j) => j.timeTo90Ms?.median ?? null, detail: rampDetail, failures: rampFailures },
+  { id: "firstLaunchRampHeavy", group: "Expérience joueur", label: "Rampe du 1er lancement (profil vierge, aot=1) : temps jusqu'à 90 % de vitesse, scène lourde (hors statut global)", target: 15000, unit: "ms", better: "lower", from: "first-launch-ramp", counted: false, match: (j) => j.scene === "heavy", read: (j) => j.timeTo90Ms?.median ?? null, detail: rampDetail, failures: rampFailures },
   { id: "ttffColdProduct", group: "Expérience joueur", label: "Time-to-first-frame, à froid, config produit", target: 10000, unit: "ms", better: "lower", from: "ttff", config: "product", read: (j) => med(j.cold?.firstContentMs), why: (j) => ttffWhy(j, "cold"), failures: (j) => launchFailures(j.cold) },
   { id: "ttffWarmProduct", group: "Expérience joueur", label: "Time-to-first-frame, à chaud, config produit", target: 10000, unit: "ms", better: "lower", from: "ttff", config: "product", read: (j) => med(j.warm?.firstContentMs), why: (j) => ttffWhy(j, "warm"), failures: (j) => launchFailures(j.warm) },
   { id: "ttffCold", group: "Expérience joueur", label: "Time-to-first-frame, à froid, rendu matériel wgpu (hors statut global)", target: 10000, unit: "ms", better: "lower", from: "ttff", config: "default", counted: false, read: (j) => med(j.cold?.firstContentMs), why: (j) => ttffWhy(j, "cold"), failures: (j) => launchFailures(j.cold) },
@@ -242,7 +251,7 @@ export function meets(row, value) {
 // results: [{ kind, json, file, mtimeMs, extra? }]; trunk: Set of the
 // commits of origin/main's first-parent history; manual: { id → { value,
 // source, at, note } } or { error } when the file could not be read.
-export function kpiTable(results, manual = {}, { trunk = new Set(), accept = { "race-perf": absoluteRace } } = {}) {
+export function kpiTable(results, manual = {}, { trunk = new Set(), accept = { "race-perf": absoluteRace, "first-launch-ramp": absoluteRace } } = {}) {
   return KPI_ROWS.map((row) => {
     const base = { id: row.id, group: row.group, label: row.label, target: row.target, unit: row.unit, better: row.better, counted: row.counted !== false, caveat: row.caveat ?? null };
     if (row.from === "manual") {
@@ -253,7 +262,7 @@ export function kpiTable(results, manual = {}, { trunk = new Set(), accept = { "
       return { ...base, value: m.value, status: statusOf(meets(row, m.value)), nature: "declared", source: m.source ?? null, at: m.at ?? null, detail: m.note ?? null };
     }
     const kinds = [row.from].flat();
-    const ofKinds = results.filter((r) => kinds.includes(r.kind));
+    const ofKinds = results.filter((r) => kinds.includes(r.kind) && (!row.match || row.match(r.json)));
     const all = ofKinds.filter((r) => !accept[r.kind] || accept[r.kind](r.json));
     const refused = ofKinds.length - all.length;
     const onTrunk = all.map((r) => ({ r, t: trunkSide(r, trunk, { config: row.config }) })).filter((x) => x.t).sort((a, b) => resultTime(b.r) - resultTime(a.r));
