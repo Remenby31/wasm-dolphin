@@ -390,21 +390,31 @@ export function coreRegionTranslator(m, { mask, helperNames, maxBlocks = 64, max
 // its ranges, decoded from guest memory) start continuation fragments of
 // the same function, in the same module: the region's exit there becomes a
 // direct return_call, and claimEntries (at assembly) keeps each PC's first
-// owner. At most maxContinuations more fragments; a leader that does not
-// translate (a first op the translator refuses) stays an exit, as before.
-export const REGION_MAX_CONTINUATIONS = 7;
+// owner. A fragment is capped when it holds maxBlocks blocks or its code
+// reaches REGION_FRAGMENT_MAX_BYTES (the byte cap of patch 0115, #131: its
+// discovery stops once the code reaches it). Continuations stop after
+// maxContinuations fragments or REGION_CONTINUATION_MAX_BYTES of code per
+// function (the 0107 install cost grows with the module, ~1.7 ms/MB); a
+// leader that does not translate (a first op the translator refuses) stays
+// an exit, as before.
+export const REGION_FRAGMENT_MAX_BYTES = 96000;
+export const REGION_CONTINUATION_MAX_BYTES = 2 << 20;
+export const REGION_MAX_CONTINUATIONS = 31;
+const capped = (fragment, maxBlocks) => fragment.entries.length >= maxBlocks || fragment.code.length >= REGION_FRAGMENT_MAX_BYTES;
 export function translateWithContinuations(m, f, { mask, maxBlocks, names, maxContinuations = REGION_MAX_CONTINUATIONS }) {
   const first = translateOne(m, f, { mask, maxBlocks, names });
-  if (!first.fragment || maxContinuations <= 0 || first.fragment.entries.length < maxBlocks) return first;
+  if (!first.fragment || maxContinuations <= 0 || !capped(first.fragment, maxBlocks)) return first;
   const owned = new Set(first.fragment.entries.map((pc) => pc >>> 0));
   const continuations = [];
+  let bytes = 0;
   for (const pc of blockLeaders(m, f.ranges)) {
-    if (continuations.length >= maxContinuations) break;
+    if (continuations.length >= maxContinuations || bytes >= REGION_CONTINUATION_MAX_BYTES) break;
     if (owned.has(pc)) continue;
     const next = translateOne(m, { ...f, entry: pc }, { mask, maxBlocks, names });
     if (!next.fragment) continue;
     for (const e of next.fragment.entries) owned.add(e >>> 0);
     continuations.push(next.fragment);
+    bytes += next.fragment.code.length;
   }
   return continuations.length ? { ...first, continuations } : first;
 }
