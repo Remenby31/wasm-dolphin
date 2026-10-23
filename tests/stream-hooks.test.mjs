@@ -1,7 +1,7 @@
 import assert from "node:assert/strict";
 import test from "node:test";
 
-import { DIRECT_PAD_PORTS, DIRECT_PAD_SLOTS, SLOT } from "../src/direct-pad.js";
+import { DIRECT_PAD_LAYOUT, DIRECT_PAD_PORTS, DIRECT_PAD_SLOTS, SLOT } from "../src/direct-pad.js";
 import { readInputStateSnapshot } from "../src/input-transport.js";
 import { StreamCapture } from "../src/stream-capture.js";
 import { UpstreamWorkerAdapter } from "../src/upstream-worker-adapter.js";
@@ -18,7 +18,7 @@ function adapterWithBlock() {
   adapter.worker = { postMessage: (message) => posted.push(message) };
   adapter.loaded = true;
   const memory = new SharedArrayBuffer(8192);
-  adapter.attachDirectPad({ buffer: memory, offset: 1024, layout: 1 });
+  adapter.attachDirectPad({ buffer: memory, offset: 1024, layout: DIRECT_PAD_LAYOUT });
   const block = new Int32Array(memory, 1024, DIRECT_PAD_PORTS * DIRECT_PAD_SLOTS);
   const slot = (port, name) => block[port * DIRECT_PAD_SLOTS + SLOT[name]];
   return { adapter, posted, slot };
@@ -53,6 +53,9 @@ test("a remote state needs a port given to a guest, plugged in, a newer sequence
   assert.equal(slot(1, "MASK"), 2);
   assert.equal(adapter.tapPad(1, 1), true);
   assert.equal(slot(1, "TAPS"), 1);
+  // Several presses of a button revealed at once go in as counts.
+  assert.equal(adapter.tapPad(1, [2, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 1]), true);
+  assert.deepEqual([slot(1, "TAPS") & 0xf, (slot(1, "TAPS_HIGH") >>> 12) & 0xf], [3, 1]);
 });
 
 test("a packet in flight after the guest was unplugged never plugs it back in", () => {
