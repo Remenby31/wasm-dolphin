@@ -25,7 +25,7 @@
       "commit": "01e0577914a75a2569c846778c2f93aa8e6feddd"
     }
   },
-  "patchSeriesSha256": "57b7fbd79f92636ed3181d31f3a44a1690fc6a5d2cbecee1ff1d7069ace496a6",
+  "patchSeriesSha256": "e3eece97a797de56c70d06d885dbacabc95829e7abc70328ff02ebf561a7cde6",
   "patches": [
     {
       "order": 1,
@@ -840,8 +840,8 @@
       "cwd": ".",
       "hashMode": "lf-normalized",
       "path": "patches/dolphin-wasm/snapshot/0135-region-frame-locals.patch",
-      "size": 9065,
-      "sha256": "395b2914f06b70dd39612981ebc5f0597b597f81136ff226f3260ac380678839"
+      "size": 9310,
+      "sha256": "43c98d4adcc782287d32f438e3541fac48c21dbb2d69320718e9f365e9e347eb"
     },
     {
       "order": 103,

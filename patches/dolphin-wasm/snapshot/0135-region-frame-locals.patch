@@ -1,7 +1,7 @@
 diff --git a/Source/Core/Core/PowerPC/CachedInterpreter/CachedInterpreter.cpp b/Source/Core/Core/PowerPC/CachedInterpreter/CachedInterpreter.cpp
 --- a/Source/Core/Core/PowerPC/CachedInterpreter/CachedInterpreter.cpp
 +++ b/Source/Core/Core/PowerPC/CachedInterpreter/CachedInterpreter.cpp
-@@ -3243,8 +3243,54 @@ void EmitPaddedU32Leb(std::vector<u8>& out, u32 value)
+@@ -3243,8 +3243,57 @@ void EmitPaddedU32Leb(std::vector<u8>& out, u32 value)
    out.push_back(static_cast<u8>(value & 0x7f));
  }
  
@@ -41,10 +41,13 @@ diff --git a/Source/Core/Core/PowerPC/CachedInterpreter/CachedInterpreter.cpp b/
 +
  void EmitCallImport(std::vector<u8>& body, u32 index)
  {
-+  // 0135: every helper reads and may lower state.downcount (an exception
-+  // takes the cycles spent); the others than the memory and FPU helpers
-+  // (system, the HLE calls) may also read pc and write npc.
-+  const bool frame = s_wasm_fragment_relocs && t_fragment_frame.active;
++  // 0135: every helper that takes the state reads and may lower
++  // state.downcount (an exception takes the cycles spent); the others than
++  // the memory and FPU helpers (system, the HLE calls) may also read pc and
++  // write npc. `fma` takes no state (the interpreter's arithmetic on a
++  // scratch one): nothing to write back around it, on the FMA family's path.
++  const bool pure = std::string_view{WASM_IMPORT_NAMES[index]} == "fma";
++  const bool frame = s_wasm_fragment_relocs && t_fragment_frame.active && !pure;
 +  const bool frame_all = frame && !ImportKeepsGprs(WASM_IMPORT_NAMES[index]);
 +  if (frame)
 +    EmitStoreLocalToState(body, WASM_FRAME_DOWNCOUNT_LOCAL, t_fragment_frame.downcount_offset);
@@ -56,7 +59,7 @@ diff --git a/Source/Core/Core/PowerPC/CachedInterpreter/CachedInterpreter.cpp b/
    body.push_back(0x10);  // call
    if (!s_wasm_fragment_relocs)
    {
-@@ -3260,6 +3306,10 @@ void EmitCallImport(std::vector<u8>& body, u32 index)
+@@ -3260,6 +3309,10 @@ void EmitCallImport(std::vector<u8>& body, u32 index)
      t_fused_cr.valid = false;
    s_wasm_fragment_relocs->relocs.push_back({body.size(), WASM_IMPORT_NAMES[index]});
    EmitPaddedU32Leb(body, 0);
@@ -67,7 +70,7 @@ diff --git a/Source/Core/Core/PowerPC/CachedInterpreter/CachedInterpreter.cpp b/
  }
  
  // Region fragments do not take the host addresses of the emulated RAM and L1
-@@ -3528,6 +3578,13 @@ void EmitStateStoreU32Prefix(std::vector<u8>& body)
+@@ -3528,6 +3581,13 @@ void EmitStateStoreU32Prefix(std::vector<u8>& body)
  
  void EmitStateStoreU32Suffix(std::vector<u8>& body, u32 offset)
  {
@@ -81,7 +84,7 @@ diff --git a/Source/Core/Core/PowerPC/CachedInterpreter/CachedInterpreter.cpp b/
    u32 gpr_index;
    if (RegCacheGprIndex(offset, &gpr_index) && s_gpr_rc.present[gpr_index])
    {
-@@ -16743,6 +16800,18 @@ bool BuildRegionFragment(Core::System& system, u32 entry_pc, std::span<const u32
+@@ -16743,6 +16803,18 @@ bool BuildRegionFragment(Core::System& system, u32 entry_pc, std::span<const u32
    {
      ~ResetGuards() { t_region_guards = false; }
    } reset_guards;
@@ -100,7 +103,7 @@ diff --git a/Source/Core/Core/PowerPC/CachedInterpreter/CachedInterpreter.cpp b/
    // End of the range holding pc, 0 when none does.
    const auto range_end = [&](u32 pc) -> u32 {
      for (std::size_t i = 0; i + 1 < ranges.size(); i += 2)
-@@ -16790,14 +16859,6 @@ bool BuildRegionFragment(Core::System& system, u32 entry_pc, std::span<const u32
+@@ -16790,14 +16862,6 @@ bool BuildRegionFragment(Core::System& system, u32 entry_pc, std::span<const u32
    const u32 downcount_offset =
        static_cast<u32>(reinterpret_cast<std::uintptr_t>(&ppc.downcount) - base);
    std::vector<u8>& code = out->code;
@@ -115,7 +118,7 @@ diff --git a/Source/Core/Core/PowerPC/CachedInterpreter/CachedInterpreter.cpp b/
    const auto reloc_site = [&](u32 kind, u32 value) {
      code.push_back(0x12);  // return_call
      out->relocs.push_back({static_cast<u32>(code.size()), kind, value});
-@@ -16805,7 +16866,7 @@ bool BuildRegionFragment(Core::System& system, u32 entry_pc, std::span<const u32
+@@ -16805,7 +16869,7 @@ bool BuildRegionFragment(Core::System& system, u32 entry_pc, std::span<const u32
    };
    code.assign(WASM_BLOCK_LOCALS.begin(), WASM_BLOCK_LOCALS.end());
    code[0] = 0x07;
@@ -124,7 +127,7 @@ diff --git a/Source/Core/Core/PowerPC/CachedInterpreter/CachedInterpreter.cpp b/
    // 0111: compares store CR fields without SO (EmitLazyCrStore): with XER.SO
    // set the fragment does not run (1, as a pc that is not an entry). The
    // dispatcher and region chaining refuse first; this covers a direct call.
-@@ -16816,10 +16877,17 @@ bool BuildRegionFragment(Core::System& system, u32 entry_pc, std::span<const u32
+@@ -16816,10 +16880,17 @@ bool BuildRegionFragment(Core::System& system, u32 entry_pc, std::span<const u32
    code.insert(code.end(), {0x71, 0x04, 0x40});  // i32.and; if
    EmitI32Const(code, 1);
    code.insert(code.end(), {0x0f, 0x0b});  // return; end
@@ -145,7 +148,7 @@ diff --git a/Source/Core/Core/PowerPC/CachedInterpreter/CachedInterpreter.cpp b/
    for (const auto& b : blocks)
    {
      out->entries.push_back(b.start);
-@@ -16842,29 +16910,28 @@ bool BuildRegionFragment(Core::System& system, u32 entry_pc, std::span<const u32
+@@ -16842,29 +16913,28 @@ bool BuildRegionFragment(Core::System& system, u32 entry_pc, std::span<const u32
        out->relocs.push_back({at + static_cast<u32>(reloc.offset), 0,
                               static_cast<u32>(it - WASM_IMPORT_NAMES.begin())});
      }
@@ -184,7 +187,7 @@ diff --git a/Source/Core/Core/PowerPC/CachedInterpreter/CachedInterpreter.cpp b/
        EmitLocalGet(code, 0);
        reloc_site(1, b.jump_target);
      }
-@@ -16874,6 +16941,7 @@ bool BuildRegionFragment(Core::System& system, u32 entry_pc, std::span<const u32
+@@ -16874,6 +16944,7 @@ bool BuildRegionFragment(Core::System& system, u32 entry_pc, std::span<const u32
      }
      code.push_back(0x0b);  // end if
    }
@@ -192,7 +195,7 @@ diff --git a/Source/Core/Core/PowerPC/CachedInterpreter/CachedInterpreter.cpp b/
    EmitLocalGet(code, 0);
    reloc_site(2, 0);
    code.insert(code.end(), {0x0b, 0x00, 0x0b});  // end loop; unreachable; end
-@@ -16937,8 +17005,10 @@ namespace
+@@ -16937,8 +17008,10 @@ namespace
  // taken by 0108-0110). 16 (0121): region code takes MSR LE/FE0/FE1 and
  // HID2.LSQE for granted (15 is 0119's). 17 (0126): region byte swaps as two
  // rotates (11-15 are taken by 0112-0119). 21 (0129): fused relaxed_madd mode

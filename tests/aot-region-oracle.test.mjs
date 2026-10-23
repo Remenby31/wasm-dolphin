@@ -11,7 +11,7 @@
 import assert from "node:assert/strict";
 import test from "node:test";
 
-import { compareRegionProgram, loadAotCore, runOracleProgramsAsRegions } from "./helpers/aot-core-equivalence.mjs";
+import { ORACLE_CODE, compareRegionProgram, loadAotCore, runOracleProgramsAsRegions } from "./helpers/aot-core-equivalence.mjs";
 import { PRODUCTION_DISABLE_MASK, SHORT_PREFIX_MASK, makeRng, randomState } from "./helpers/jit-oracle.mjs";
 
 const core = await loadAotCore();
@@ -120,4 +120,35 @@ test("a memory helper's slow path in a fragment leaves pc, npc and downcount lik
   assert.ok(r.translated && !r.trap && !r.error, `${r.error ?? "trap or untranslated"}`);
   assert.ok(r.got.regionRuns >= 1, "the region ran");
   assert.ok(r.equal, JSON.stringify(r.difference));
+});
+
+// 0135: a helper that does not get pc and npc written before the call (the
+// interpret path, memory and FPU helpers) and a program exception there, after
+// a branch moved the frame locals; and the exits on their own: a b out of the
+// fragment's ranges (jump, return_call) and a bctr to a pc no fragment holds
+// (dispatch). Each against the interpreter, at budgets that stop it midway.
+test("program exceptions after a branch, the jump-out and the dispatch-miss exits end like the interpreter (0135)", { skip: frameSkip }, () => {
+  const b = (disp) => (18 << 26) | (disp & 0x3fffffc);
+  const tw = 0x7fe00008; // tw 31, r0, r0: always traps
+  const mfmsr = (d) => (31 << 26) | (d << 21) | (83 << 1); // privileged under MSR.PR
+  const addis = (d, a, imm) => (15 << 26) | (d << 21) | (a << 16) | (imm & 0xffff);
+  const ori = (a, s, imm) => (24 << 26) | (s << 21) | (a << 16) | (imm & 0xffff);
+  const mtctr = (s) => (31 << 26) | (s << 21) | (9 << 16) | (467 << 1);
+  const BCTR = 0x4e800420;
+  const at = (w) => ORACLE_CODE + 4 * w;
+  const cases = [
+    ["tw after a branch", [addi(3, 3, 1), b(4), tw, addi(3, 3, 1), BLR], (s) => s],
+    ["mfmsr under MSR.PR after a branch", [addi(3, 3, 1), b(4), mfmsr(5), addi(3, 3, 1), BLR], (s) => { s[37] |= 0x4000; return s; }],
+    ["b out of the ranges", [addi(3, 3, 1), b(4), addi(4, 4, 1), BLR], (s) => s, [[at(0), at(2)]]],
+    ["bctr to a pc no fragment holds", [addis(6, 0, at(6) >>> 16), ori(6, 6, at(6) & 0xffff), mtctr(6), BCTR, addi(3, 3, 1), addi(3, 3, 2), addi(4, 4, 1), BLR], (s) => s, [[at(0), at(4)]]]
+  ];
+  for (const [what, program, setUp, ranges] of cases) {
+    for (const [budget, seed] of [[400000, 81], [3, 82], [400000, 83]]) {
+      const state = setUp(baseState(seed));
+      const r = compareRegionProgram(core, program, state, { budget, ...(ranges ? { ranges } : {}) });
+      assert.ok(r.translated && !r.trap && !r.error, `${what}: ${r.error ?? "trap or untranslated"}`);
+      assert.ok(r.got.regionRuns >= 1, `${what}: the region ran`);
+      assert.ok(r.equal, `${what} at ${budget}: ${JSON.stringify(r.difference)}`);
+    }
+  }
 });
