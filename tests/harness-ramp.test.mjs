@@ -118,3 +118,13 @@ test("first-launch-ramp --visits: a visit's region facts, its churn, and the med
   assert.equal(sum[0].compiled, 100);
   assert.equal(sum[1].churn, 0.03);
 });
+
+test("first-launch-ramp --visits: the local profile's size on disk per visit, and visits without one", async () => {
+  const { profileBytes, summarizeVisits } = await import("../harness/probes/first-launch-ramp.mjs");
+  assert.equal(profileBytes([{ name: "disc-sha256-v1_ab.bin", bytes: 12000 }, { name: "x.tmp", bytes: 100 }]), 12100);
+  assert.equal(profileBytes([]), null, "no file: no profile");
+  assert.equal(profileBytes({ error: "NotFoundError" }), null, "no aot-profile directory");
+  const sum = summarizeVisits([{ visits: [{ visit: 1, profileBytes: 12000 }] }, { visits: [{ visit: 1, profileBytes: null }] }], 1);
+  assert.equal(sum[0].withoutProfile, 1);
+  assert.equal(sum[0].profileBytes, 12000);
+});
