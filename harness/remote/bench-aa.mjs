@@ -13,6 +13,8 @@
 //     keeps both orders equal;
 //   - both sides on the same CPU model, and the pinned thread of each a
 //     DedicatedWorker at least 80 % busy (else another thread was pinned);
+//   - with aot=1 (region stats read: race-perf --region-sample), both sides
+//     with regions installed (a side without any does not measure regions);
 //   - then as many AB as BA pairs (the latest extra ones of the larger
 //     order are set aside), so a drift does not favour one side.
 // Per kept pair: lr = 100·ln(candidate / baseline) (symmetric; ≈ % for small
@@ -52,13 +54,16 @@ export function logRatioChange(lrs, { resamples = 2000, seed = 0x9e3779b9 } = {}
 
 export function benchAA(runs, machine = {}) {
   const all = runs
-    .map((r) => ({ run: r.run, a: r.baseline?.cold?.speed, b: r.candidate?.cold?.speed, pins: [r.baseline?.cold?.pinned, r.candidate?.cold?.pinned], models: [r.baseline?.cold?.cpuModel, r.candidate?.cold?.cpuModel] }))
+    .map((r) => ({ run: r.run, a: r.baseline?.cold?.speed, b: r.candidate?.cold?.speed, pins: [r.baseline?.cold?.pinned, r.candidate?.cold?.pinned], models: [r.baseline?.cold?.cpuModel, r.candidate?.cold?.cpuModel],
+      // Regions installed and their share of guest cycles (outside idle), when read.
+      regions: [r.baseline?.cold, r.candidate?.cold].map((c) => (c?.p4Raw ? { installed: c.p4Raw.diagnostics?.regionsInstalled ?? null, cycleShare: c.p4?.regionCycleShare ?? null } : null)) }))
     .filter((p) => Number.isFinite(p.a) && Number.isFinite(p.b) && p.a > 0 && p.b > 0);
   const first = Math.min(...all.map((p) => p.run));
   const sameModel = (p) => !p.models[0] || !p.models[1] || p.models[0] === p.models[1];
   const why = (p) => p.run <= first + 1 ? "warm-up block (runs 1-2)"
     : !sameModel(p) ? `CPU model changed: ${p.models.join(" / ")}`
     : !p.pins.every(goodPin) ? `pinned ${p.pins.map((x) => `${x?.thread ?? "?"} ${x?.busyPct ?? "?"} %`).join(" / ")}`
+    : p.regions.some((x) => x && x.installed === 0) ? `no region installed (${p.regions.map((x) => x?.installed ?? "?").join(" / ")})`
     : null;
   const setAside = all.filter((p) => why(p)).map((p) => ({ run: p.run, why: why(p) }));
   let pairs = all.filter((p) => !why(p));
@@ -83,6 +88,11 @@ export function benchAA(runs, machine = {}) {
     armSigmaPct,
     runSigmaPct: finite.length ? Math.max(...finite) : null,
     change: logRatioChange(lrs),
+    // With region stats: per arm, the median regions installed and region cycle share.
+    regions: pairs.some((p) => p.regions.some(Boolean)) ? Object.fromEntries(["baseline", "candidate"].map((arm, i) => [arm, {
+      installed: median(pairs.map((p) => p.regions[i]?.installed).filter(Number.isFinite)),
+      cycleShare: round(median(pairs.map((p) => p.regions[i]?.cycleShare).filter(Number.isFinite)), 4)
+    }])) : null,
     lrSigmaPct: round(lrSigma, 2),
     pairsFor2Pct: lrSigma == null ? null : Math.max(1, Math.ceil((4 * lrSigma * lrSigma) / 4)),
     drift: { firstThird: round(mean(pairs.slice(0, third).flatMap((p) => [p.a, p.b])), 2), lastThird: round(mean(pairs.slice(-third).flatMap((p) => [p.a, p.b])), 2) },
@@ -102,6 +112,7 @@ export function benchMarkdown(b) {
     "|---|---|---|---|---|---|---|---|---|",
     `| ${b.pairs} | ${b.meanSpeed.baseline} / ${b.meanSpeed.candidate} % | ${b.armSigmaPct.baseline} / ${b.armSigmaPct.candidate} % | ${c.medianPct} % [${c.ci95Pct?.join(", ") ?? "?"}] | ${c.verdict} | ${b.lrSigmaPct} % | ${b.pairsFor2Pct ?? "?"} | ${b.drift.firstThird} → ${b.drift.lastThird} % | ${b.pmu ?? "?"} |`,
     "",
+    ...(b.regions ? [`Regions (median per arm): A ${b.regions.baseline.installed} installed, ${b.regions.baseline.cycleShare} of guest cycles; B ${b.regions.candidate.installed} installed, ${b.regions.candidate.cycleShare}`] : []),
     `Per kept pair (100·ln(B/A)): ${b.perPair.map((p) => `${p.lrPct} (${p.order})`).join(", ")}`,
     `Set aside: ${b.setAside.map((x) => `run ${x.run} (${x.why})`).join(", ") || "none"}`,
     ""
