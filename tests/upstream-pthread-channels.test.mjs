@@ -272,6 +272,21 @@ test("region chaining is on by default; ?regionchain=0 reaches the core through 
   assert.match(source, /api\.setJitRegionChaining\?\.\(regionChain !== false \? 1 : 0\);/);
 });
 
+test("fused relaxed_madd is used where probed fused; ?fusedmadd=0 keeps the exact path, through the host, the adapter and the worker (0129)", async () => {
+  const { UpstreamWorkerAdapter } = await import("../src/upstream-worker-adapter.js");
+  assert.equal(new UpstreamWorkerAdapter().fusedMadd, true);
+  assert.equal(new UpstreamWorkerAdapter({ fusedMadd: false }).fusedMadd, false);
+  const host = await readFile(new URL("../src/core-host.js", import.meta.url), "utf8");
+  assert.match(host, /this\.fusedMadd = new URLSearchParams\(window\.location\.search\)\.get\("fusedmadd"\) !== "0";/);
+  assert.match(host, /\n {12}fusedMadd: this\.fusedMadd,\n/);
+  const adapter = await readFile(new URL("../src/upstream-worker-adapter.js", import.meta.url), "utf8");
+  assert.match(adapter, /\n {6}fusedMadd: this\.fusedMadd,\n/);
+  const source = await readFile(workerUrl, "utf8");
+  assert.match(source, /\n {8}fusedMadd: payload\.fusedMadd,\n/);
+  assert.match(source, /\n  fusedMadd = true,\n/);
+  assert.match(source, /_DolphinWeb_SetFusedMadd\?\.\(relaxedMadd === "fused" && fusedMadd !== false \? 1 : 0\);/);
+});
+
 test("aotcompiler=0 and jitoffthread=0 turn both off: modules compile in place, no worker starts", async (t) => {
   const { aotCompilerRequested, jitOffThreadRequested } = await import("../src/aot-compiler-worker.js");
   assert.equal(aotCompilerRequested("?aotcompiler=0"), false);
