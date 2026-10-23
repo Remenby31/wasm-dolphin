@@ -38,8 +38,8 @@
     {
       "path": "core/upstream/dolphin_web_fma.h",
       "hashMode": "lf-normalized",
-      "size": 6279,
-      "sha256": "f2b13956b48b67b5013e5d62608a362159273ce15e66ed59c45640affa850054"
+      "size": 6585,
+      "sha256": "6b3c457fb03e3f33170c176ddbe2f6e6f1456df54e46935aad61d489a6a47812"
     },
     {
       "path": "core/upstream/dolphin_web_core.cpp",
