@@ -1,0 +1,159 @@
+diff --git a/Source/Core/Core/PowerPC/CachedInterpreter/CachedInterpreter.cpp b/Source/Core/Core/PowerPC/CachedInterpreter/CachedInterpreter.cpp
+--- a/Source/Core/Core/PowerPC/CachedInterpreter/CachedInterpreter.cpp
++++ b/Source/Core/Core/PowerPC/CachedInterpreter/CachedInterpreter.cpp
+@@ -16779,9 +16779,10 @@ bool BuildRegionFragment(Core::System& system, u32 entry_pc, std::span<const u32
+     }
+     blocks.push_back(std::move(fb));
+   }
+-  std::unordered_set<u32> starts;
+-  for (const auto& b : blocks)
+-    starts.insert(b.start);
++  // Block index by start (0133): the order of the bodies in the fragment.
++  std::unordered_map<u32, u32> index_of;
++  for (u32 i = 0; i < blocks.size(); ++i)
++    index_of.emplace(blocks[i].start, i);
+ 
+   auto& ppc = system.GetPPCState();
+   const auto base = reinterpret_cast<std::uintptr_t>(&ppc);
+@@ -16816,16 +16817,68 @@ bool BuildRegionFragment(Core::System& system, u32 entry_pc, std::span<const u32
+   code.insert(code.end(), {0x71, 0x04, 0x40});  // i32.and; if
+   EmitI32Const(code, 1);
+   code.insert(code.end(), {0x0f, 0x0b});  // return; end
+-  code.insert(code.end(), {0x03, 0x40});  // loop
++  // Patch 0133: the loop's head finds the block of the pc with one br_table
++  // (or, past a 4096-word span, a compact chain of br_if at the head), not a
++  // compare in front of each body. Each body follows the end of its own
++  // `block`, nested in pc order of emission:
++  //   loop $L  block $D  block $b(N-1) ... block $b0  <head>  end  body0
++  //   end  body1 ... end  body(N-1)  end($D)  return_call dispatch  end($L)
++  // A br to $bj lands at body j. A body's tail goes straight to a later body
++  // that its npc names (a static successor), else back to the head. Before,
++  // reaching block k took k failed compares, each a taken jump on its own
++  // cache line between two bodies: up to 64 lines of dispatch per fragment.
+   EmitLocalGet(code, 0);
+   load(pc_offset);
+   EmitLocalSet(code, WASM_FRAGMENT_PC_LOCAL);
++  const u32 n = static_cast<u32>(blocks.size());
++  u32 lowest = UINT32_MAX, highest = 0;
+   for (const auto& b : blocks)
+   {
+-    out->entries.push_back(b.start);
++    lowest = std::min(lowest, b.start);
++    highest = std::max(highest, b.start);
++  }
++  constexpr u32 max_table_words = 4096;
++  const u32 span = (highest - lowest) / 4 + 1;
++  code.insert(code.end(), {0x03, 0x40});  // loop $L
++  code.insert(code.end(), {0x02, 0x40});  // block $D
++  for (u32 i = 0; i < n; ++i)
++    code.insert(code.end(), {0x02, 0x40});  // block $b(n-1-i)
++  if (span <= max_table_words)
++  {
++    // (pc - lowest) rotated right by 2: a pc not on a word, or below the
++    // lowest start, is past the table and takes the default ($D).
++    std::vector<u32> table(span, n);
++    for (u32 i = 0; i < n; ++i)
++      table[(blocks[i].start - lowest) / 4] = i;
+     EmitLocalGet(code, WASM_FRAGMENT_PC_LOCAL);
+-    EmitI32Const(code, b.start);
+-    code.insert(code.end(), {0x46, 0x04, 0x40});  // i32.eq; if
++    EmitI32Const(code, lowest);
++    code.push_back(0x6b);  // i32.sub
++    EmitI32Const(code, 2);
++    code.push_back(0x78);  // i32.rotr
++    code.push_back(0x0e);  // br_table
++    EmitU32Leb(code, span);
++    for (const u32 depth : table)
++      EmitU32Leb(code, depth);
++    EmitU32Leb(code, n);
++  }
++  else
++  {
++    for (u32 i = 0; i < n; ++i)
++    {
++      EmitLocalGet(code, WASM_FRAGMENT_PC_LOCAL);
++      EmitI32Const(code, blocks[i].start);
++      code.push_back(0x46);  // i32.eq
++      code.push_back(0x0d);  // br_if $bi
++      EmitU32Leb(code, i);
++    }
++    code.insert(code.end(), {0x0c});  // br $D
++    EmitU32Leb(code, n);
++  }
++  for (u32 k = 0; k < n; ++k)
++  {
++    const auto& b = blocks[k];
++    code.push_back(0x0b);  // end $bk: body k
++    out->entries.push_back(b.start);
+     const u32 at = static_cast<u32>(code.size());
+     code.insert(code.end(), b.expr.begin(), b.expr.end());
+     for (const auto& reloc : b.relocs)
+@@ -16842,9 +16895,12 @@ bool BuildRegionFragment(Core::System& system, u32 entry_pc, std::span<const u32
+       out->relocs.push_back({at + static_cast<u32>(reloc.offset), 0,
+                              static_cast<u32>(it - WASM_IMPORT_NAMES.begin())});
+     }
++    // pc = npc, kept in the dispatch pc local too.
+     EmitLocalGet(code, 0);
+     EmitLocalGet(code, 0);
+     load(npc_offset);
++    code.push_back(0x22);  // local.tee
++    EmitU32Leb(code, WASM_FRAGMENT_PC_LOCAL);
+     store(pc_offset);
+     EmitLocalGet(code, 0);
+     EmitLocalGet(code, 0);
+@@ -16858,22 +16914,40 @@ bool BuildRegionFragment(Core::System& system, u32 entry_pc, std::span<const u32
+     code.insert(code.end(), {0x4c, 0x04, 0x40});  // i32.le_s; if
+     EmitI32Const(code, 0);
+     code.insert(code.end(), {0x0f, 0x0b});  // return; end
++    // Inside body k: $b(k+1) .. $b(n-1) at depths 0 .. n-2-k, then $D, $L.
+     if (b.exits)
+     {
+       EmitI32Const(code, 0);
+       code.push_back(0x0f);  // return
+     }
+-    else if (b.jump_target != UINT32_MAX && !starts.contains(b.jump_target))
++    else if (b.jump_target != UINT32_MAX && !index_of.contains(b.jump_target))
+     {
+       EmitLocalGet(code, 0);
+       reloc_site(1, b.jump_target);
+     }
+     else
+     {
+-      code.insert(code.end(), {0x0c, 0x01});  // br to the loop
++      std::vector<u32> later;
++      for (const u32 next : b.successors)
++      {
++        const auto it = index_of.find(next);
++        if (it != index_of.end() && it->second > k &&
++            std::find(later.begin(), later.end(), it->second) == later.end())
++          later.push_back(it->second);
++      }
++      for (const u32 j : later)
++      {
++        EmitLocalGet(code, WASM_FRAGMENT_PC_LOCAL);
++        EmitI32Const(code, blocks[j].start);
++        code.push_back(0x46);  // i32.eq
++        code.push_back(0x0d);  // br_if $bj
++        EmitU32Leb(code, j - k - 1);
++      }
++      code.push_back(0x0c);  // br $L: the head
++      EmitU32Leb(code, n - k);
+     }
+-    code.push_back(0x0b);  // end if
+   }
++  code.push_back(0x0b);  // end $D: no block of this fragment
+   EmitLocalGet(code, 0);
+   reloc_site(2, 0);
+   code.insert(code.end(), {0x0b, 0x00, 0x0b});  // end loop; unreachable; end
+@@ -16937,8 +17011,9 @@ namespace
+ // taken by 0108-0110). 16 (0121): region code takes MSR LE/FE0/FE1 and
+ // HID2.LSQE for granted (15 is 0119's). 17 (0126): region byte swaps as two
+ // rotates (11-15 are taken by 0112-0119). 21 (0129): fused relaxed_madd mode
+-// (18 retired, 19 and 20 are 0127's and 0128's).
+-constexpr u32 AOT_COMPILER_VERSION = 21;
++// (18 retired, 19 and 20 are 0127's and 0128's). 25 (0133): a fragment's
++// head finds the block by br_table (22-24 are taken by 0130-0132).
++constexpr u32 AOT_COMPILER_VERSION = 25;
+ constexpr u32 AOT_MAX_FRAGMENT_BYTES = 1u << 20;
+ thread_local std::vector<u32> t_aot_out;
+ u8* s_aot_ram = nullptr;

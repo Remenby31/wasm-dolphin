@@ -436,3 +436,27 @@ masks and ors). Blocks keep the old form,
 so their bytes and cache keys don't change. Compiler version 17. (Written
 as 0108 on the region stack; renumbered after 0111 so the series applies
 in order.)
+
+## The fragment's head as a br_table (patch 0133, 2026-10-23)
+
+A fragment used to find its block by a chain at the loop head:
+`if (pc == start₀) { body₀ } if (pc == start₁) { body₁ } …`. Reaching block k
+took k failed compares, each a taken jump on its own cache line between two
+bodies: up to 64 lines of dispatch per fragment, while V8 never turns such a
+chain into a switch (research/deep-icache-layout.md §4.1).
+
+Now each body follows the end of its own `block`, the blocks nested in the
+order of emission:
+
+```
+loop $L  block $D  block $b(N-1) … block $b0
+  br_table on rotr(pc − lowest start, 2)   ; a non-start, misaligned or out-of-span pc → $D
+end body₀  end body₁ …  end body(N-1)  end($D) return_call dispatch  end($L)
+```
+
+- **Head.** One `br_table` (TurboFan emits a jump table: one indirect branch, the table on the data side).
+- **Wide span.** Past a span of 4096 words, the head is a compact `br_if` chain.
+- **Body tail.** It keeps the new pc in the dispatch-pc local. It branches directly (`br_if $bj`) to a later body that its npc names (a static successor), and goes back to the head otherwise.
+- **Unchanged.** The per-block tail (pc, downcount, its exits) and the entries.
+
+Compiler version 25.

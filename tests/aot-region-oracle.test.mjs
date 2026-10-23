@@ -107,3 +107,36 @@ test("psq_lux kept in the region updates a GPR the block had cached dirty, like 
   expectSame(r, "psq_lux");
   assert.equal(r.got.end, "stop");
 });
+
+// 0133: a fragment's head finds the block of the pc with one br_table on
+// rotr(pc - lowest start, 2), or, past a 4096-word span, a compact br_if chain;
+// a body goes straight to a later body its npc names. A loop (back edge
+// through the head), a forward branch (direct br_if), a span too wide for the
+// table, each against the interpreter at budgets that stop it mid-loop.
+const dispatchSkip = skip || (compilerVersion() < 25 && "core before 0133 (compiler version < 25)");
+test("the br_table head, direct forward edges and the wide-span chain run like the interpreter (0133)", { skip: dispatchSkip }, () => {
+  const cmpw = (a, b) => (31 << 26) | (a << 16) | (b << 11);
+  const cmpwi = (a, imm) => (11 << 26) | (a << 16) | (imm & 0xffff);
+  const bc = (bo, bi, disp) => (16 << 26) | (bo << 21) | (bi << 16) | (disp & 0xfffc);
+  const b = (disp) => (18 << 26) | (disp & 0x3fffffc);
+  const loop = [addi(3, 0, 0), addi(4, 0, 7), addi(3, 3, 1), cmpw(3, 4), bc(12, 0, -8), add(5, 3, 3), BLR];
+  const forward = [cmpwi(3, 0), bc(12, 2, 12), addi(5, 5, 1), addi(6, 6, 1), add(7, 5, 6), BLR];
+  const wide = new Array(0x1404).fill(0);
+  wide.splice(0, 3, addi(3, 0, 0), addi(4, 0, 3), b(4 * 0x1400 - 8));
+  wide.splice(0x1400, 4, addi(3, 3, 1), cmpw(3, 4), bc(12, 0, -8), BLR);
+  const cases = [["loop", loop, true], ["forward", forward, true], ["wide span", wide, false]];
+  for (const [what, program, table] of cases) {
+    for (const [budget, seed] of [[400000, 51], [9, 52], [23, 53], [400000, 54]]) {
+      const state = baseState(seed);
+      if (seed === 54) state[11] = 0; // forward: r3 == 0, the branch taken
+      const r = compareRegionProgram(core, program, state, { budget });
+      assert.ok(r.translated && !r.trap && !r.error, `${what}: ${r.error ?? "trap or untranslated"}`);
+      assert.ok(r.got.regionRuns >= 1, `${what}: the region ran`);
+      assert.ok(r.equal, `${what} at ${budget}: ${JSON.stringify(r.difference)}`);
+      assert.ok(r.fragment.entries.length >= 2, `${what}: ${r.fragment.entries.length} blocks`);
+      const code = Array.from(r.fragment.code);
+      const rotrTable = code.some((x, i) => x === 0x78 && code[i + 1] === 0x0e);
+      assert.equal(rotrTable, table, `${what}: br_table head ${table}`);
+    }
+  }
+});
