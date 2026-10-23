@@ -25,7 +25,7 @@
       "commit": "01e0577914a75a2569c846778c2f93aa8e6feddd"
     }
   },
-  "patchSeriesSha256": "589337740c702d6e5ef18c75da6d4a554bd9274afd2b1d828bf33baaa9e33ac4",
+  "patchSeriesSha256": "17251c16d315967d20d147339dc9c19751d29b8a8a256aac26079315f86e9eb3",
   "patches": [
     {
       "order": 1,
@@ -741,6 +741,14 @@
     },
     {
       "order": 90,
+      "cwd": ".",
+      "hashMode": "lf-normalized",
+      "path": "patches/dolphin-wasm/snapshot/0116-savestate-pauses-gpu-loop.patch",
+      "size": 3623,
+      "sha256": "d24373e3a292c0e7ee92f1c5b62e2f9004d33330d475884103ca20a26432f972"
+    },
+    {
+      "order": 91,
       "cwd": "Externals/SFML/SFML",
       "hashMode": "lf-normalized",
       "path": "patches/dolphin-wasm/submodules/0001-sfml-emscripten-config.patch",
@@ -748,7 +756,7 @@
       "sha256": "f82197a21fe982ad83f6ee7bbf5a03839b1cebd4d64da3eab11263842bf61d89"
     },
     {
-      "order": 91,
+      "order": 92,
       "cwd": "Externals/xxhash/xxHash",
       "hashMode": "lf-normalized",
       "path": "patches/dolphin-wasm/submodules/0002-xxhash-wasm-simd-scalar.patch",

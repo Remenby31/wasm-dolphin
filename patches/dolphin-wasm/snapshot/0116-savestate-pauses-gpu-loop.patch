@@ -1,0 +1,94 @@
+diff --git a/Source/Core/Core/State.cpp b/Source/Core/Core/State.cpp
+--- a/Source/Core/Core/State.cpp
++++ b/Source/Core/Core/State.cpp
+@@ -26,6 +26,7 @@
+ #include "Common/FileUtil.h"
+ #include "Common/IOFile.h"
+ #include "Common/Logging/Log.h"
++#include "Common/ScopeGuard.h"
+ #include "Common/MsgHandler.h"
+ #include "Common/Thread.h"
+ #include "Common/TimeUtil.h"
+@@ -48,6 +49,7 @@
+ 
+ #include "UICommon/UICommon.h"
+ 
++#include "VideoCommon/Fifo.h"
+ #include "VideoCommon/FrameDumpFFMpeg.h"
+ #include "VideoCommon/OnScreenDisplay.h"
+ #include "VideoCommon/VideoBackendBase.h"
+@@ -135,6 +137,14 @@
+ 
+ static void DoState(Core::System& system, PointerWrap& p)
+ {
++  // In dual core the load or save runs as a CPU-thread job, after
++  // RunOnCPUThread has let the GPU thread go again: the CP FIFO must not move
++  // under DoState (a decode finishing after the load wrote its pre-load read
++  // pointer and distance over the loaded ones, and the GPU idled for good).
++  auto& fifo = system.GetFifo();
++  const bool fifo_was_running = fifo.PauseForSavestate();
++  Common::ScopeGuard resume_fifo([&] { fifo.ResumeAfterSavestate(fifo_was_running); });
++
+   bool is_wii = system.IsWii() || system.IsMIOS();
+   const bool is_wii_currently = is_wii;
+   p.Do(is_wii);
+diff --git a/Source/Core/VideoCommon/Fifo.cpp b/Source/Core/VideoCommon/Fifo.cpp
+--- a/Source/Core/VideoCommon/Fifo.cpp
++++ b/Source/Core/VideoCommon/Fifo.cpp
+@@ -105,6 +105,41 @@
+     EmulatorState(true);
+ }
+ 
++bool FifoManager::PauseForSavestate()
++{
++  const bool was_running = m_emu_running_state.IsSet();
++  if (!m_system.IsDualCoreMode() || m_use_deterministic_gpu_thread)
++    return was_running;
++
++  // From here a payload only pulls the async requests (the video backend's
++  // DoState among them) and returns before the FIFO.
++  EmulatorState(false);
++
++  // A payload that started earlier may still be decoding, and would write its
++  // read pointer and distance over the state being loaded. Payloads run one
++  // at a time and the loop is done only once a payload started after this
++  // Wakeup has returned, so nothing decodes after the wait. No timeout: the
++  // GPU loop waits on the render worker at most, never on the CPU thread.
++  const bool busy = !m_gpu_mainloop.IsDone();
++  m_gpu_mainloop.Wakeup();
++  int seconds = 0;
++  m_gpu_mainloop.WaitYield(std::chrono::seconds(1), [&seconds] {
++    WARN_LOG_FMT(COMMANDPROCESSOR, "Savestate: the GPU loop is still running after {} s",
++                 ++seconds);
++  });
++  if (busy)
++    INFO_LOG_FMT(COMMANDPROCESSOR, "Savestate: waited for a running GPU loop");
++  return was_running;
++}
++
++void FifoManager::ResumeAfterSavestate(const bool was_running)
++{
++  if (!m_system.IsDualCoreMode() || m_use_deterministic_gpu_thread)
++    return;
++  if (was_running)
++    EmulatorState(true);
++}
++
+ void FifoManager::Init()
+ {
+   if (!m_config_callback_id)
+diff --git a/Source/Core/VideoCommon/Fifo.h b/Source/Core/VideoCommon/Fifo.h
+--- a/Source/Core/VideoCommon/Fifo.h
++++ b/Source/Core/VideoCommon/Fifo.h
+@@ -54,6 +54,11 @@
+   void DoState(PointerWrap& f);
+   void PauseAndLock();
+   void RestoreState(bool was_running);
++  // Savestates (load and save): the GPU loop stops decoding and no payload
++  // runs while State::DoState reads or restores the CP FIFO. Returns whether
++  // the loop was running, for ResumeAfterSavestate.
++  bool PauseForSavestate();
++  void ResumeAfterSavestate(bool was_running);
+   void UpdateWantDeterminism(bool want);
+   bool UseDeterministicGPUThread() const { return m_use_deterministic_gpu_thread; }
+   bool UseSyncGPU() const { return m_config_sync_gpu; }
