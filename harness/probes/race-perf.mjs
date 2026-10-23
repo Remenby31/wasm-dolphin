@@ -121,11 +121,11 @@ export const STATE_ROUTE = "**/__harness_state.sav";
 export async function pinBusiestThread(profileDir, cpu) {
   if (process.platform !== "linux") return { error: "--pin-cpu-thread: Linux only" };
   try {
-    const tid = await busiestThread(profileDir);
-    if (!tid) return { error: "no renderer thread" };
-    execFileSync("taskset", ["-p", "-c", String(cpu), String(tid)], { stdio: "ignore" });
-    const comm = readFileSync(`/proc/${tid}/comm`, "utf8").trim();
-    return { tid: Number(tid), thread: comm, cpu };
+    const best = await busiestThread(profileDir, 1500, { withShare: true });
+    if (!best) return { error: "no renderer thread" };
+    execFileSync("taskset", ["-p", "-c", String(cpu), String(best.tid)], { stdio: "ignore" });
+    const comm = readFileSync(`/proc/${best.tid}/comm`, "utf8").trim();
+    return { tid: Number(best.tid), thread: comm, busyPct: best.busyPct, cpu };
   } catch (error) {
     return { error: String(error?.message || error).slice(0, 200) };
   }
@@ -210,10 +210,7 @@ export async function measure(session, o) {
     const loaded = await loadHarnessState(page, session.url);
     if (!loaded?.loaded) throw new Error(`savestate load failed: ${JSON.stringify(loaded)}`);
   }
-  // --pin-cpu-thread N (Linux): the emulated CPU thread alone on vCPU N
-  // (the CI bench leaves its SMT sibling idle and the rest of Chrome on the
-  // other core, through HARNESS_CHROME_PATH's taskset).
-  const pinned = o.pinCpuThread != null ? await pinBusiestThread(session.profileDir, o.pinCpuThread) : null;
+  let pinned = null;
   // --emulated-window: the key is pressed while the core is paused, and the
   // warmup and the window are counted in guest seconds (lib/emulated-window.mjs).
   if (o.hold && !o.emulatedWindow) await page.keyboard.down(o.hold);
@@ -226,6 +223,12 @@ export async function measure(session, o) {
     const sampling = Boolean(pcStart?.started);
     // o.onWindow (race-multi's hardware counters): called just before and
     // just after the window, from node only (no page call inside it).
+    // --pin-cpu-thread N (Linux): the emulated CPU thread alone on vCPU N
+    // (the CI bench leaves its SMT sibling idle and the rest of Chrome on
+    // the other core, through HARNESS_CHROME_PATH's taskset). After the
+    // warmup and over 1.5 s: right after boot a V8 compile thread can be
+    // the busiest (CI pilot, 2026-10-23).
+    if (o.pinCpuThread != null) pinned = await pinBusiestThread(session.profileDir, o.pinCpuThread);
     if (o.onWindow) await o.onWindow("start", session);
     await readTimeline(page); // drop everything before the window
     // --headroom (0113): the counters reset and the core ticks read just

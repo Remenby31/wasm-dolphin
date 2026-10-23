@@ -63,7 +63,7 @@ export function counterEvents(spec) {
 
 // The busiest thread of the renderer(s) of `profileDir`, from /proc ticks
 // over `ms`: the emulated CPU thread in a race (saturated).
-export async function busiestThread(profileDir, ms = 500) {
+export async function busiestThread(profileDir, ms = 500, { withShare = false } = {}) {
   const ps = execFileSync("ps", ["-A", "-o", "pid=,args="], { encoding: "utf8", maxBuffer: 32 << 20 });
   const pids = ps.split("\n").filter((l) => l.includes(profileDir) && l.includes("--type=renderer")).map((l) => l.trim().split(/\s+/)[0]);
   const ticks = () => {
@@ -79,7 +79,8 @@ export async function busiestThread(profileDir, ms = 500) {
   const b = ticks();
   let best = null;
   for (const [tid, t] of b) if (a.has(tid) && (!best || t - a.get(tid) > best.delta)) best = { tid, delta: t - a.get(tid) };
-  return best?.tid ?? null;
+  // /proc ticks are USER_HZ (100 a second): the share of the interval it ran.
+  return withShare ? (best ? { tid: best.tid, busyPct: Math.round((best.delta * 1000) / ms) } : null) : best?.tid ?? null;
 }
 
 // o.onWindow for race-perf's measure(): perf stat on the busiest thread for

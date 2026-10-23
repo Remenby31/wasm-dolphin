@@ -27,9 +27,9 @@ on:
   workflow_dispatch:
     inputs:
       runs:
-        description: ABBA runs per job (each run measures both sides)
+        description: ABBA runs per job, even (each run measures both sides; the first pair is a warm-up)
         type: number
-        default: 10
+        default: 12
       window:
         description: Emulated seconds per window
         type: number
@@ -56,7 +56,7 @@ jobs:
     permissions:
       contents: read
     env:
-      RUNS: ${{ inputs.runs || 10 }}
+      RUNS: ${{ inputs.runs || 12 }}
       WINDOW: ${{ inputs.window || 10 }}
       OUT: ${{ github.workspace }}/bench-out
     steps:
@@ -101,6 +101,14 @@ jobs:
           fi
           cat "$OUT/perf-probe.txt" || true
           (sudo dmesg | grep -i "performance events" || true) | tee "$OUT/dmesg-pmu.txt"
+          # arm64: do the named L1i/iTLB events count? (the first pilot read 0
+          # for l1i_cache_refill and itlb_walk); raw codes beside them:
+          # 0x01 L1I_CACHE_REFILL, 0x02 L1I_TLB_REFILL, 0x14 L1I_CACHE, 0x23 STALL_FRONTEND.
+          if [ "$pmu" = yes ] && [ "$(uname -m)" = aarch64 ]; then
+            (perf list 2>/dev/null | grep -iE "l1i|itlb|stall_frontend" || true) | tee "$OUT/perf-list-l1i.txt"
+            for d in /sys/bus/event_source/devices/armv8_pmuv3*; do p=$(basename "$d"); break; done
+            perf stat -x, -e "$p/l1i_cache_refill/u,$p/l1i_cache/u,$p/itlb_walk/u,$p/stall_frontend/u,r01:u,r14:u,r02:u,r23:u" -- node -e 'let x=0; for (let i=0;i<5e7;i++) x+=Math.sqrt(i); console.log(x)' 2>&1 | tee "$OUT/perf-l1i-probe.txt" || true
+          fi
           # cpu 0 and its SMT sibling for the CPU thread; everything else elsewhere.
           sib=$(cat /sys/devices/system/cpu/cpu0/topology/thread_siblings_list)
           others=$(node -e '
