@@ -5,9 +5,13 @@ name: bench (homebrew A/A pilot, x64 + arm64, manual)
 # A/B. Manual only (workflow_dispatch), never on a pull request or a push to
 # main; a push to a bench/** branch runs it too, to try the workflow itself.
 #
-# - Workload: our homebrews only (harness/homebrew, MIT, no game content):
-#   the committed cpufuzz.dol fixture, booted directly. NEVER a disc, a
-#   savestate or anything derived from a game in CI.
+# - Workload: our homebrews only (harness/homebrew, MIT, no game content),
+#   booted directly as a .dol: footprint (default; built here from
+#   footprint/gen.mjs + main.c, a front end loaded like a game's: several
+#   hundred KB of hot PowerPC, data-dependent branches and jump tables,
+#   inline cold paths, calls through tables, FP and paired singles) or the
+#   committed cpufuzz.dol fixture. NEVER a disc, a savestate or anything
+#   derived from a game in CI.
 # - A/A: the same tree served as both sides of race-perf, in ABBA order
 #   (race-perf alternates which side goes first), video=null, cpu=single,
 #   unlimited speed, a window in emulated time.
@@ -34,6 +38,11 @@ on:
         description: Emulated seconds per window
         type: number
         default: 10
+      workload:
+        description: Homebrew to measure
+        type: choice
+        options: [footprint, cpufuzz]
+        default: footprint
   push:
     branches: ["bench/**"]
 
@@ -44,7 +53,48 @@ concurrency:
   cancel-in-progress: false
 
 jobs:
+  # footprint.dol from source, with the toolchain image build.sh pins.
+  homebrew:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 20
+    permissions:
+      contents: read
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+        with:
+          persist-credentials: false
+
+      - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4
+        with:
+          node-version: 24.12.0
+
+      - name: Build footprint.dol
+        working-directory: harness/homebrew
+        shell: bash
+        run: |
+          set -euo pipefail
+          # The literal "${DEVKITPPC_IMAGE:-…}" in build.sh, not an expansion.
+          # shellcheck disable=SC2016
+          image=$(sed -n 's/^IMAGE=${DEVKITPPC_IMAGE:-\(.*\)}$/\1/p' build.sh)
+          test -n "$image"
+          mkdir -p out
+          node footprint/gen.mjs > out/footprint_gen.S
+          docker run --rm --platform linux/amd64 -v "$PWD:/w" -w /w "$image" \
+            sh -c "make -s OUT=out out/footprint.dol && chown -R $(id -u):$(id -g) out"
+          ls -l out/footprint.dol out/footprint_gen.S
+          sha256sum out/footprint.dol
+
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        with:
+          name: footprint-dol
+          path: |
+            harness/homebrew/out/footprint.dol
+            harness/homebrew/out/footprint.elf
+          if-no-files-found: error
+          retention-days: 30
+
   aa:
+    needs: homebrew
     name: A/A ${{ matrix.runner }} job ${{ matrix.job }}
     strategy:
       fail-fast: false
@@ -58,6 +108,7 @@ jobs:
     env:
       RUNS: ${{ inputs.runs || 12 }}
       WINDOW: ${{ inputs.window || 10 }}
+      WORKLOAD: ${{ inputs.workload || 'footprint' }}
       OUT: ${{ github.workspace }}/bench-out
     steps:
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
@@ -67,6 +118,11 @@ jobs:
       - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4
         with:
           node-version: 24.12.0
+
+      - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4
+        with:
+          name: footprint-dol
+          path: harness/homebrew/out
 
       # Playwright's Chromium (Chrome has no Linux arm64 build): the same
       # browser on both architectures. Installed outside the checkout.
@@ -124,7 +180,7 @@ jobs:
           ' "$OUT/lscpu.txt" "$OUT/machine.json" "${{ matrix.runner }}" "${{ matrix.job }}" "$sib" "$others" "$pmu"
           cat "$OUT/machine.json"
 
-      - name: A/A on the cpufuzz fixture (ABBA, CPU thread pinned)
+      - name: A/A on the homebrew (ABBA, CPU thread pinned)
         shell: bash
         env:
           HARNESS_CHROME_PATH: ${{ github.workspace }}/harness/remote/chrome-pinned.sh
@@ -133,8 +189,13 @@ jobs:
           set -euo pipefail
           counters=()
           if [ "$PMU" = yes ] && [ "$(uname -m)" = aarch64 ]; then counters=(--counters --counter-events frontend); fi
+          case $WORKLOAD in
+            footprint) dol=harness/homebrew/out/footprint.dol ;;
+            cpufuzz) dol=harness/homebrew/fixtures/cpufuzz.dol ;;
+            *) echo "unknown workload $WORKLOAD"; exit 1 ;;
+          esac
           taskset -c "$OTHER_CPUS" node harness/probes/race-perf.mjs \
-            --iso harness/homebrew/fixtures/cpufuzz.dol --port 8090 --baseline . \
+            --iso "$dol" --port 8090 --baseline . \
             --query "core=upstream&video=null&cpu=single&speed=unlimited&synconidle=1&wasmjit=1&jitwarmup=60" \
             --hold "" --runs "$RUNS" --warmup 5 --emulated-warmup 5 --emulated-window "$WINDOW" \
             --pin-cpu-thread 0 --max-load 8 --load-wait 60 --lock-wait 60 --calm-wait 60 \

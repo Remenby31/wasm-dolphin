@@ -7,6 +7,8 @@ import os from "node:os";
 import path from "node:path";
 import test from "node:test";
 
+import { execFileSync } from "node:child_process";
+
 import { armPmus } from "../harness/lib/perf-counters.mjs";
 import { isHomebrew } from "../harness/probes/race-perf.mjs";
 import { benchAA, benchMarkdown } from "../harness/remote/bench-aa.mjs";
@@ -22,8 +24,11 @@ test("CI bench: manual or bench/** pushes only, never a disc, read-only token, b
   assert.match(workflow, /contents: read/);
   assert.doesNotMatch(workflow, /contents: write|actions: write|secrets\./);
   assert.match(workflow, /runner: \[ubuntu-24\.04, ubuntu-24\.04-arm\]/);
-  // Our homebrew fixture only: no ISO, no savestate, nothing from roms/.
-  assert.match(workflow, /--iso harness\/homebrew\/fixtures\/cpufuzz\.dol/);
+  // Our homebrews only: no ISO, no savestate, nothing from roms/.
+  assert.match(workflow, /footprint\) dol=harness\/homebrew\/out\/footprint\.dol ;;/);
+  assert.match(workflow, /cpufuzz\) dol=harness\/homebrew\/fixtures\/cpufuzz\.dol ;;/);
+  assert.match(workflow, /--iso "\$dol"/);
+  assert.match(workflow, /node footprint\/gen\.mjs > out\/footprint_gen\.S/);
   assert.doesNotMatch(workflow, /--state|\.sav\b|roms\/|\.iso\b/);
   assert.match(workflow, /--pin-cpu-thread 0/);
   assert.match(workflow, /lscpu/);
@@ -63,4 +68,33 @@ test("CI bench A/A: warm-up pair and mispinned pairs set aside; σ per run and p
   assert.deepEqual(b.pinnedThreads, ["DedicatedWorker", "ThreadPoolForeg"]);
   assert.match(benchMarkdown(b), /AMD EPYC 7763[\s\S]*Set aside: run 1 \(warm-up pair\)/);
   assert.equal(benchAA([{ run: 1, baseline: { error: "x" } }]).pairs, 0);
+});
+
+test("footprint: deterministic static PowerPC, calls only forward, jump tables, cold paths, paired singles", () => {
+  const gen = (args = []) => execFileSync(process.execPath, [new URL("../harness/homebrew/footprint/gen.mjs", import.meta.url).pathname, ...args], { encoding: "utf8", maxBuffer: 1 << 28 });
+  const asm = gen(["--functions", "64"]);
+  assert.equal(gen(["--functions", "64"]), asm);
+  assert.notEqual(gen(["--functions", "64", "--seed", "0x1234"]), asm);
+  const fns = [...asm.matchAll(/^fp_f(\d+):$/gm)].map((m) => Number(m[1]));
+  assert.deepEqual(fns, Array.from({ length: 64 }, (_, i) => i));
+  // Calls go to later functions only (no recursion): direct and table entries.
+  let current = -1, back = 0;
+  for (const line of asm.split("\n")) {
+    const f = /^fp_f(\d+):$/.exec(line);
+    if (f) current = Number(f[1]);
+    const call = /^\tbl fp_f(\d+)$/.exec(line);
+    if (call && Number(call[1]) <= current) back += 1;
+  }
+  assert.equal(back, 0);
+  assert.match(asm, /\tbctr$/m);          // jump tables
+  assert.match(asm, /\tbctrl$/m);         // calls through tables
+  assert.match(asm, /rlwinm\. 0,29,0,20,31\n\tbne /); // cold paths, 1 in 4096
+  assert.match(asm, /\t\.long 0xe[0-3]/); // psq_l (opcode 56)
+  assert.match(asm, /\tfmadd|\tfmsub|\tfnmadd/);
+  assert.match(asm, /\.globl fp_run/);
+  assert.match(asm, /fp_function_count:\n\t\.long 64/);
+  // The default: ~1000 functions, several hundred KB of code.
+  const full = gen();
+  const words = full.split("\n").filter((l) => /^\t(?!\.(align|globl|section|text))[a-z.]/.test(l) && !l.includes("fp_f") || /^\t\.long 0x/.test(l)).length;
+  assert.ok(words * 4 > 400 * 1024, `${words * 4} bytes`);
 });
