@@ -50,11 +50,10 @@ on:
         description: aot=1 on both sides (region levers)
         type: boolean
         default: false
-      workload:
-        description: Homebrew to measure
-        type: choice
-        options: [footprint, cpufuzz]
-        default: footprint
+      workloads:
+        description: 'Homebrews to measure, a JSON list: footprint (1024 functions), footprint-64/-128/-256/-512, cpufuzz'
+        type: string
+        default: '["footprint-256"]' 
   push:
     branches: ["bench/**"]
 
@@ -91,28 +90,33 @@ jobs:
           test -n "$image"
           mkdir -p out
           node footprint/gen.mjs > out/footprint_gen.S
+          targets="out/footprint.dol"
+          for n in 64 128 256 512; do node footprint/gen.mjs --functions "$n" > "out/footprint-${n}_gen.S"; targets="$targets out/footprint-$n.dol"; done
+          # shellcheck disable=SC2086
           docker run --rm --platform linux/amd64 -v "$PWD:/w" -w /w "$image" \
-            sh -c "make -s OUT=out out/footprint.dol && chown -R $(id -u):$(id -g) out"
-          ls -l out/footprint.dol out/footprint_gen.S
-          sha256sum out/footprint.dol
+            sh -c "make -s OUT=out $targets && chown -R $(id -u):$(id -g) out"
+          ls -l out/footprint*.dol
+          sha256sum out/footprint*.dol
 
       - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
         with:
           name: footprint-dol
           path: |
-            harness/homebrew/out/footprint.dol
-            harness/homebrew/out/footprint.elf
+            harness/homebrew/out/footprint*.dol
+            harness/homebrew/out/footprint*.elf
           if-no-files-found: error
           retention-days: 30
 
   aa:
     needs: homebrew
-    name: A/A ${{ matrix.runner }} job ${{ matrix.job }}
+    name: ${{ matrix.workload }} ${{ matrix.runner }} job ${{ matrix.job }}
     strategy:
       fail-fast: false
       matrix:
         runner: [ubuntu-24.04, ubuntu-24.04-arm]
         job: [1, 2, 3]
+        # A push to bench/** (no inputs) sweeps two footprint sizes.
+        workload: ${{ fromJSON(inputs.workloads || '["footprint-64","footprint-256"]') }}
     runs-on: ${{ matrix.runner }}
     timeout-minutes: 180
     permissions:
@@ -120,10 +124,11 @@ jobs:
     env:
       RUNS: ${{ inputs.runs || 12 }}
       WINDOW: ${{ inputs.window || 10 }}
-      WORKLOAD: ${{ inputs.workload || 'footprint' }}
+      WORKLOAD: ${{ matrix.workload }}
       BASELINE: ${{ inputs.baseline }}
       CANDIDATE: ${{ inputs.candidate }}
-      AOT: ${{ inputs.aot && '&aot=1' || '' }}
+      # A bench/** push calibrates footprint against the game's regions: aot=1.
+      AOT: ${{ (github.event_name == 'push' || inputs.aot) && '&aot=1' || '' }}
       OUT: ${{ github.workspace }}/bench-out
     steps:
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
@@ -197,7 +202,7 @@ jobs:
           node -e '
             const fs = require("fs"); const l = fs.readFileSync(process.argv[1], "utf8");
             const get = (k) => (l.match(new RegExp("^" + k + ":\\s*(.*)$", "m")) ?? [])[1] ?? null;
-            fs.writeFileSync(process.argv[2], JSON.stringify({ runner: process.argv[3], job: Number(process.argv[4]), arch: get("Architecture"), cpuModel: get("Model name"), cpus: get("CPU\\(s\\)"), threadsPerCore: get("Thread\\(s\\) per core"), l1i: get("L1i cache"), l2: get("L2 cache"), cpu0Siblings: process.argv[5], otherCpus: process.argv[6], pmu: process.argv[7] }, null, 1));
+            fs.writeFileSync(process.argv[2], JSON.stringify({ runner: process.argv[3], job: Number(process.argv[4]), workload: process.env.WORKLOAD, arch: get("Architecture"), cpuModel: get("Model name"), cpus: get("CPU\\(s\\)"), threadsPerCore: get("Thread\\(s\\) per core"), l1i: get("L1i cache"), l2: get("L2 cache"), cpu0Siblings: process.argv[5], otherCpus: process.argv[6], pmu: process.argv[7] }, null, 1));
           ' "$OUT/lscpu.txt" "$OUT/machine.json" "${{ matrix.runner }}" "${{ matrix.job }}" "$sib" "$others" "$pmu"
           cat "$OUT/machine.json"
 
@@ -212,6 +217,7 @@ jobs:
           if [ "$PMU" = yes ] && [ "$(uname -m)" = aarch64 ]; then counters=(--counters --counter-events frontend); fi
           case $WORKLOAD in
             footprint) dol=harness/homebrew/out/footprint.dol ;;
+            footprint-64|footprint-128|footprint-256|footprint-512) dol="harness/homebrew/out/$WORKLOAD.dol" ;;
             cpufuzz) dol=harness/homebrew/fixtures/cpufuzz.dol ;;
             *) echo "unknown workload $WORKLOAD"; exit 1 ;;
           esac
@@ -239,7 +245,7 @@ jobs:
       - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
         if: always()
         with:
-          name: bench-${{ matrix.runner }}-${{ matrix.job }}
+          name: bench-${{ matrix.workload }}-${{ matrix.runner }}-${{ matrix.job }}
           path: bench-out/
           if-no-files-found: warn
           retention-days: 30

@@ -32,6 +32,11 @@ $(OUT)/cpufuzz-nomcrf.elf: cpufuzz/main.c common/marker.h | $(OUT)
 $(OUT)/footprint.elf: footprint/main.c $(OUT)/footprint_gen.S common/marker.h | $(OUT)
 	$(CC) $(CFLAGS) footprint/main.c $(OUT)/footprint_gen.S -o $@ $(LDFLAGS) -logc -lm
 
+# Sized variants for the bench's calibration (gen.mjs --functions N wrote
+# $(OUT)/footprint-N_gen.S).
+$(OUT)/footprint-%.elf: footprint/main.c $(OUT)/footprint-%_gen.S common/marker.h | $(OUT)
+	$(CC) $(CFLAGS) footprint/main.c $(OUT)/footprint-$*_gen.S -o $@ $(LDFLAGS) -logc -lm
+
 $(OUT)/gxscene-nocubes.elf: gxscene/main.c | $(OUT)
 	$(CC) $(CFLAGS) -DMUTATE_NO_CUBES $< -o $@ $(LDFLAGS) -logc -lm
 

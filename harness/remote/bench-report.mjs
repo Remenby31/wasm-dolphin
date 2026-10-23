@@ -7,7 +7,8 @@
 //
 //   node harness/remote/bench-report.mjs <bench.json>… > report.md
 //
-// Each job's bench.json (bench-aa.mjs) lists its kept pairs with their model.
+// Each job's bench.json (bench-aa.mjs) lists its kept pairs with their model;
+// grouped by workload (machine.workload) and model.
 // Per model: the jobs, their σ per run (speeds are only comparable inside a
 // job: another host, another level), and the pair ratios pooled across jobs
 // (relative, so poolable): mean, σ, and the pairs a 2 % change needs at 2 σ
@@ -27,11 +28,13 @@ export function benchReport(benches) {
   for (const b of benches) {
     for (const p of b.perPair ?? []) {
       const model = p.model ?? b.cpuModel ?? "unknown";
-      const m = byModel.get(model) ?? { model, arch: b.arch ?? null, jobs: new Map(), ratios: [] };
+      const workload = b.machine?.workload ?? null;
+      const key = `${workload ?? ""}|${model}`;
+      const m = byModel.get(key) ?? { model, workload, arch: b.arch ?? null, jobs: new Map(), ratios: [] };
       m.ratios.push(p.ratioPct);
       const job = `${b.machine?.runner ?? b.runner ?? "?"}#${b.machine?.job ?? "?"}`;
       m.jobs.set(job, b.runSigmaPct);
-      byModel.set(model, m);
+      byModel.set(key, m);
     }
   }
   const models = [...byModel.values()].map((m) => {
@@ -39,7 +42,7 @@ export function benchReport(benches) {
     const pairSigma = stdev(m.ratios);
     const medianRunSigma = median(runSigma);
     return {
-      model: m.model, arch: m.arch, jobs: [...m.jobs.keys()], runSigmaPctByJob: runSigma, medianRunSigmaPct: round(medianRunSigma, 2),
+      model: m.model, workload: m.workload, arch: m.arch, jobs: [...m.jobs.keys()], runSigmaPctByJob: runSigma, medianRunSigmaPct: round(medianRunSigma, 2),
       pairs: m.ratios.length, pairMeanPct: round(mean(m.ratios), 2), pairSigmaPct: round(pairSigma, 2),
       pairsFor2Pct: pairSigma == null ? null : Math.max(1, Math.ceil((4 * pairSigma * pairSigma) / 4)),
       inDecisionSet: medianRunSigma != null && medianRunSigma < DECISION_MAX_RUN_SIGMA_PCT
@@ -50,11 +53,11 @@ export function benchReport(benches) {
 
 export function reportMarkdown(r) {
   return [
-    "## Bench, per CPU model (pairs only count within one model)",
+    "## Bench, per workload and CPU model (pairs only count within one model)",
     "",
-    "| model | arch | jobs | σ per run (median; per job) | pairs | pair ratio mean / σ | pairs for a 2 % change | decision set |",
-    "|---|---|---|---|---|---|---|---|",
-    ...r.models.map((m) => `| ${m.model} | ${m.arch ?? "?"} | ${m.jobs.length} | ${m.medianRunSigmaPct} % (${m.runSigmaPctByJob.join(", ")}) | ${m.pairs} | ${m.pairMeanPct} / ${m.pairSigmaPct} % | ${m.pairsFor2Pct ?? "?"} | ${m.inDecisionSet ? "yes" : `no (σ per run ≥ ${r.decisionMaxRunSigmaPct} %)`} |`),
+    "| workload | model | arch | jobs | σ per run (median; per job) | pairs | pair ratio mean / σ | pairs for a 2 % change | decision set |",
+    "|---|---|---|---|---|---|---|---|---|",
+    ...r.models.map((m) => `| ${m.workload ?? "?"} | ${m.model} | ${m.arch ?? "?"} | ${m.jobs.length} | ${m.medianRunSigmaPct} % (${m.runSigmaPctByJob.join(", ")}) | ${m.pairs} | ${m.pairMeanPct} / ${m.pairSigmaPct} % | ${m.pairsFor2Pct ?? "?"} | ${m.inDecisionSet ? "yes" : `no (σ per run ≥ ${r.decisionMaxRunSigmaPct} %)`} |`),
     ""
   ].join("\n");
 }

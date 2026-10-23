@@ -27,6 +27,7 @@ test("CI bench: manual or bench/** pushes only, never a disc, read-only token, b
   assert.match(workflow, /runner: \[ubuntu-24\.04, ubuntu-24\.04-arm\]/);
   // Our homebrews only: no ISO, no savestate, nothing from roms/.
   assert.match(workflow, /footprint\) dol=harness\/homebrew\/out\/footprint\.dol ;;/);
+  assert.match(workflow, /footprint-64\|footprint-128\|footprint-256\|footprint-512\) dol="harness\/homebrew\/out\/\$WORKLOAD\.dol" ;;/);
   assert.match(workflow, /cpufuzz\) dol=harness\/homebrew\/fixtures\/cpufuzz\.dol ;;/);
   assert.match(workflow, /--iso "\$dol"/);
   assert.match(workflow, /node footprint\/gen\.mjs > out\/footprint_gen\.S/);
@@ -109,13 +110,14 @@ test("CI bench: a pair whose sides ran on two CPU models is set aside; the repor
   const one = benchAA([run(1, 300, 300), run(2, 300, 303), run(3, 300, 297), run(4, 300, 330, "EPYC 7763", "EPYC 9V74")], { runner: "ubuntu-24.04", job: 1 });
   assert.deepEqual(one.setAside.map((x) => x.why), ["warm-up pair", "CPU model changed: EPYC 7763 / EPYC 9V74"]);
   assert.deepEqual(one.perPair.map((p) => [p.run, p.model, p.ratioPct]), [[2, "EPYC 7763", 1], [3, "EPYC 7763", -1]]);
-  const bench = (model, sigma, ratios, job) => ({ arch: "x86_64", runSigmaPct: sigma, machine: { runner: "ubuntu-24.04", job }, perPair: ratios.map((r, i) => ({ run: i + 2, model, ratioPct: r })) });
-  const r = benchReport([bench("EPYC 7763", 1.5, [1, -1, 0.5], 1), bench("EPYC 7763", 2.5, [-0.5, 0], 2), bench("Xeon 6973P-C", 3.5, [5, -5], 3)]);
-  const epyc = r.models.find((m) => m.model === "EPYC 7763"), xeon = r.models.find((m) => m.model === "Xeon 6973P-C");
+  const bench = (model, sigma, ratios, job, workload = "footprint-256") => ({ arch: "x86_64", runSigmaPct: sigma, machine: { runner: "ubuntu-24.04", job, workload }, perPair: ratios.map((r, i) => ({ run: i + 2, model, ratioPct: r })) });
+  const r = benchReport([bench("EPYC 7763", 1.5, [1, -1, 0.5], 1), bench("EPYC 7763", 2.5, [-0.5, 0], 2), bench("Xeon 6973P-C", 3.5, [5, -5], 3), bench("EPYC 7763", 9, [20, -20], 4, "footprint-64")]);
+  const epyc = r.models.find((m) => m.model === "EPYC 7763" && m.workload === "footprint-256"), xeon = r.models.find((m) => m.model === "Xeon 6973P-C");
+  assert.equal(r.models.find((m) => m.workload === "footprint-64").pairs, 2); // another workload, its own row
   assert.equal(epyc.pairs, 5);
   assert.deepEqual(epyc.jobs, ["ubuntu-24.04#1", "ubuntu-24.04#2"]);
   assert.equal(epyc.medianRunSigmaPct, 2);
   assert.equal(epyc.inDecisionSet, true);
   assert.equal(xeon.inDecisionSet, false); // σ per run ≥ 3 %: recorded, not counted
-  assert.match(reportMarkdown(r), /\| Xeon 6973P-C \|.*\| no \(σ per run ≥ 3 %\) \|/);
+  assert.match(reportMarkdown(r), /\| footprint-256 \| Xeon 6973P-C \|.*\| no \(σ per run ≥ 3 %\) \|/);
 });
