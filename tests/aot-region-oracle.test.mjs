@@ -108,20 +108,16 @@ test("psq_lux kept in the region updates a GPR the block had cached dirty, like 
   assert.equal(r.got.end, "stop");
 });
 
-// 0135 (was 0128): a memory helper that halts inside a fragment (a lwz from 0x00004000,
-// which no BAT maps: a DSI) leaves pc, npc and downcount as the interpreter
-// does, after ops that moved the frame locals. (Neither an unaligned access,
-// whose alignment exception stays pending to the block's end as in Dolphin's
-// JITs, nor MSR.FP clear, which regions take for granted since 0121, halts.)
+// 0135 (was 0128): a memory helper's slow path inside a fragment (a misaligned
+// lmw) leaves pc, npc and downcount as the interpreter does, after ops that
+// moved the frame locals. (Without MMU emulation an unmapped address neither
+// faults nor halts: loads read 0, stores are dropped.)
 const frameSkip = skip || (compilerVersion() < 27 && "core before 0135 (compiler version < 27)");
-test("a memory helper that halts in a fragment leaves pc, npc and downcount like the interpreter (0135)", { skip: frameSkip }, () => {
-  const lwz = (d, a, off) => (32 << 26) | (d << 21) | (a << 16) | (off & 0xffff);
-  const program = [addi(3, 3, 1), addi(4, 4, 2), lwz(6, 1, 0), addi(3, 3, 1), BLR];
-  const state = baseState(41);
-  state[9] = 0x00004000;
-  const r = compareRegionProgram(core, program, state);
+test("a memory helper's slow path in a fragment leaves pc, npc and downcount like the interpreter (0135)", { skip: frameSkip }, () => {
+  const lmw = (d, a, off) => (46 << 26) | (d << 21) | (a << 16) | (off & 0xffff);
+  const program = [addi(3, 3, 1), addi(4, 4, 2), lmw(29, 1, 2), addi(3, 3, 1), BLR];
+  const r = compareRegionProgram(core, program, baseState(41));
   assert.ok(r.translated && !r.trap && !r.error, `${r.error ?? "trap or untranslated"}`);
   assert.ok(r.got.regionRuns >= 1, "the region ran");
-  assert.equal(r.got.end, "exception");
   assert.ok(r.equal, JSON.stringify(r.difference));
 });
