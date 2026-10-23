@@ -118,6 +118,9 @@ export class EmulatorHost {
     // Harness: optional WebGPU features withheld from the device, comma-separated
     // (e.g. Safari 26 has no dual-source-blending). Empty for the app.
     this.wgpuMask = new URLSearchParams(window.location.search).get("wgpumask") ?? "";
+    // Harness: accept a CPU fallback WebGPU adapter (SwiftShader), refused for
+    // the app as no usable GPU (the Windows CI lane has nothing else).
+    this.wgpuFallback = new URLSearchParams(window.location.search).get("wgpufallback") === "1";
     this.savesMode = new URLSearchParams(window.location.search).get("saves") === "off" ? "off" : "";
     this.efbDiag = requestedEfbDiag();
     this.jitVerbose = new URLSearchParams(window.location.search).get("jitverbose") === "1";
@@ -427,6 +430,7 @@ export class EmulatorHost {
             fifoLog: this.fifoLog,
             efbCopyRam: this.efbCopyRam,
             wgpuMask: this.wgpuMask,
+            wgpuFallback: this.wgpuFallback,
             savesMode: this.savesMode,
             efbDiag: this.efbDiag,
             jitVerbose: this.jitVerbose,

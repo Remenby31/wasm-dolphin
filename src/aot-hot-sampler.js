@@ -87,17 +87,29 @@ export function startHotSampler({ buffer, pcAddress, periodMs = 10, postMs = 500
 // a new session (older weights halve), the next ones add to it; which one a
 // record is gets decided before it awaits anything, so two records in flight
 // (a remount during the minute's record) never count the session twice.
-export function createProfileRecorder({ store, discKey, blocksFromPcSamples }) {
+// A failure only costs the profile, but it is never silent (#165 recorded
+// nothing for two bugs in a row and nothing showed): record.stats() counts
+// records and failures with the last error (in validationReadAotProgress),
+// and the first failure is a console warning.
+export function createProfileRecorder({ store, discKey, blocksFromPcSamples, warn = (m) => console.warn(m) }) {
   let recorded = false;
-  return async function record(samples) {
+  const stats = { records: 0, failures: 0, lastError: null };
+  async function record(samples) {
     if (!samples?.length) return null;
     const newSession = !recorded;
     recorded = true;
     try {
-      return await store.record(discKey, blocksFromPcSamples(samples), { newSession });
-    } catch {
-      if (newSession) recorded = false; // a full or unavailable OPFS only costs the profile
+      const out = await store.record(discKey, blocksFromPcSamples(samples), { newSession });
+      stats.records += 1;
+      return out;
+    } catch (error) {
+      if (newSession) recorded = false;
+      stats.failures += 1;
+      stats.lastError = `${error?.name ?? "Error"}: ${error?.message ?? error}`;
+      if (stats.failures === 1) warn(`aot: the local region profile could not be recorded (${stats.lastError})`);
       return null;
     }
-  };
+  }
+  record.stats = () => ({ ...stats });
+  return record;
 }

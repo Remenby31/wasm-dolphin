@@ -190,7 +190,7 @@ test("the worker routes video=wgpu captures to the tagged presents", async () =>
   assert.match(worker, /const WGPU_CMD_OP_PRESENT_SOURCE = 27;/);
   assert.match(worker, /generation: u32\[recWord \+ 5\]/);
   assert.match(worker, /wgpuExactCapture\.arm\(index, fromLoad, generation\)/);
-  assert.match(worker, /setTimeout\(\(\) => wgpuExactCapture\.cancel\(id, /);
+  assert.match(worker, /const timer = setTimeout\(\(\) => \{[\s\S]{0,800}?wgpuExactCapture\.cancel\(id, /);
   // Both savestate paths drop waiting captures before the core loads.
   assert.equal(worker.match(/wgpuExactCapture\.onLoad\(\);/g)?.length, 2);
   // The copy starts at the presented rectangle's origin.

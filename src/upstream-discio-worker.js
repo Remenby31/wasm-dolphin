@@ -154,7 +154,7 @@ import {
 import { createCoreLifecycle } from "./core-lifecycle.js";
 import { WgpuReadback, unwrapSeq } from "./wgpu-readback.js";
 import { createDisplayCounter, startDisplayLoop } from "./wgpu-display-counter.js";
-import { PipelinePrewarm } from "./wgpu-pipeline-prewarm.js";
+import { PipelinePrewarm, wgslHash } from "./wgpu-pipeline-prewarm.js";
 import { BOOT_FILE_HEAD_BYTES, bootFileKind, checkExecutable, executableGameId } from "./boot-file.js";
 import {
   USER_DATA_ROOT,
@@ -261,10 +261,21 @@ const PRESENTATION_HISTOGRAM_BUCKETS_MS = [8, 12, 16, 20, 24, 33, 50, 100, 200];
 const harnessNow = () => performance.timeOrigin + performance.now();
 let harnessEnabled = false;
 // ?fifolog=1: a .dff may boot (FifoPlayer). Harness only, set at loadCore.
+// Harness (validationWgslCorpus): WGSL by hash, null when off.
+let harnessWgslCorpus = null;
+const HARNESS_WGSL_CORPUS_MAX = 20000;
 let fifoLogBoot = false;
 // ?wgpumask=a,b: optional WebGPU features the device is created without, as
 // on a browser that lacks them (harness only, set at loadCore).
 let wgpuMaskedFeatures = new Set();
+// ?wgpufallback=1 (harness): keep a CPU fallback adapter; refused otherwise.
+let wgpuAcceptFallbackAdapter = false;
+// A CPU adapter is no usable GPU: with --enable-unsafe-webgpu (the harness
+// passes it) a GPU-less Chrome gives a SwiftShader fallback adapter, and both
+// the replay and the presenter would run on the CPU.
+export function isFallbackAdapterInfo(info) {
+  return info?.isFallbackAdapter === true || info?.architecture === "swiftshader";
+}
 export function parseWgpuMask(mask) {
   return new Set(String(mask || "").split(",").map((f) => f.trim()).filter(Boolean));
 }
@@ -1275,10 +1286,16 @@ async function captureAtViOutput({ index, ahead, fromLoad = false, timeoutMs = 6
 async function captureAtViOutputWgpu(index, fromLoad, timeoutMs) {
   const generation = moduleInstance?._DolphinWeb_HarnessLoadGeneration?.() >>> 0;
   const { id, promise } = wgpuExactCapture.arm(index, fromLoad, generation);
-  const timer = setTimeout(() => wgpuExactCapture.cancel(id, new Error(
-    wgpuExactCapture.tagsSeen === 0
-      ? "core does not tag WebGPU presents with VI outputs (rebuild the core)"
-      : `VI output ${index} never reached within ${timeoutMs} ms`)), timeoutMs);
+  const timer = setTimeout(() => {
+    // Where it stood, for a run on another machine (the Windows runner).
+    const m = moduleInstance;
+    const state = `harnessEnabled ${harnessEnabled}, core VI since boot ${m?._DolphinWeb_HarnessViSinceBoot?.() ?? "?"}, ` +
+      `queue submissions ${webGpuCausalStats?.queueSubmissionCount ?? "?"}, VI tags seen ${wgpuExactCapture.tagsSeen}, ` +
+      `video ${harnessVideoBackend}, adapter ${rendererDiagnostics?.adapter?.architecture ?? rendererDiagnostics?.adapter?.vendor ?? "?"}`;
+    wgpuExactCapture.cancel(id, new Error(wgpuExactCapture.tagsSeen === 0
+      ? `core does not tag WebGPU presents with VI outputs (rebuild the core) [${state}]`
+      : `VI output ${index} never reached within ${timeoutMs} ms [${state}]`));
+  }, timeoutMs);
   try {
     return await promise;
   } finally {
@@ -1505,6 +1522,7 @@ async function handleMessage(type, payload) {
         fifoLog: payload.fifoLog,
         efbCopyRam: payload.efbCopyRam,
         wgpuMask: payload.wgpuMask,
+        wgpuFallback: payload.wgpuFallback,
         efbDiag: payload.efbDiag,
         jitVerbose: payload.jitVerbose,
         frameCap: payload.frameCap,
@@ -1760,6 +1778,20 @@ async function handleMessage(type, payload) {
       return captureAtViOutput(payload);
     case "validationFifoRecord":
       return recordFifoLog(payload);
+    case "validationWgslCorpus":
+      // Harness: the WGSL of every shader module the replay created, one per
+      // hash (offline Tint -> HLSL -> DXC, tools/wgsl-hlsl-corpus.mjs).
+      // start: on from now; read: the modules so far; stop: off and freed.
+      if (!harnessEnabled) return { error: "harness hooks are off" };
+      if (payload.action === "start") harnessWgslCorpus ??= new Map();
+      else if (payload.action === "stop") harnessWgslCorpus = null;
+      return {
+        on: Boolean(harnessWgslCorpus),
+        shaders: payload.action === "read" && harnessWgslCorpus
+          ? [...harnessWgslCorpus].map(([hash, v]) => ({ hash, stage: v.stage, wgsl: v.wgsl }))
+          : undefined,
+        count: harnessWgslCorpus?.size ?? 0
+      };
     case "validationReadPipelinePrewarm":
       return pipelinePrewarm ? pipelinePrewarm.snapshot() : { enabled: false, why: !hardwareVideoBackend ? "not video=wgpu" : !wgpuPipelinePrewarmEnabled ? "wgpuprewarm=0" : "not started" };
     case "validationReadDetTrace":
@@ -2162,6 +2194,7 @@ async function loadCore({
   fifoLog = false,
   efbCopyRam = false,
   wgpuMask = "",
+  wgpuFallback = false,
   efbDiag = false,
   jitVerbose = false,
   frameCap = 0,
@@ -2214,6 +2247,7 @@ async function loadCore({
 } = {}) {
   fifoLogBoot = Boolean(fifoLog);
   wgpuMaskedFeatures = parseWgpuMask(wgpuMask);
+  wgpuAcceptFallbackAdapter = Boolean(wgpuFallback);
   if (moduleInstance) {
     return moduleInstance;
   }
@@ -2542,6 +2576,15 @@ async function loadCore({
   } else if (detachedWgpuCanvas) {
     preferredPresenterBackend = "webgpu";
     await setupSoftwarePresenter(detachedWgpuCanvas, preferredPresenterBackend);
+  }
+  // video=wgpu needs this worker's WebGPU device: the core asks for an adapter
+  // of its own and would take a CPU fallback the presenter refused, then run
+  // behind a black canvas (the replay has no device). Fail before the core
+  // starts, as without an adapter.
+  if (videoBackend === "WebGPU-Real" && !renderGpu && !isIntentionalBlankWgpuProbe(wgpuRendererWorkerProbe)) {
+    const message = `video=wgpu needs a usable WebGPU adapter; the presenter is ${renderBackend || "none"}`;
+    console.error(`[wgpu] ${message}`);
+    throw new Error(message);
   }
 
   // §28cf boot-phase timing instrumentation. Attributes the ~1s page-load
@@ -5915,6 +5958,10 @@ async function createWebGpuPresenter(canvas) {
   if (!adapter) {
     throw new Error(`WebGPU adapter request (${wgpuPowerPreference}) returned null`);
   }
+  if (isFallbackAdapterInfo(adapter.info) && !wgpuAcceptFallbackAdapter) {
+    // As no adapter: the presenter falls back to WebGL, video=wgpu fails.
+    throw new Error(`WebGPU adapter is a CPU fallback (${adapter.info?.architecture || "isFallbackAdapter"}): no usable GPU`);
+  }
 
   let adapterInfo = adapter.info || null;
   if (!adapterInfo && typeof adapter.requestAdapterInfo === "function") {
@@ -7328,18 +7375,25 @@ export function setAotFirstLaunchEnabledForTest(enabled) {
 export async function handleAotMessage(type, payload = {}) {
   const idle = aotFirstLaunchEnabled ? "none" : "disabled";
   switch (type) {
-    case "aotStatus":
-      return aotFirstLaunch ? aotFirstLaunch.status() : { state: idle, fraction: 0 };
+    case "aotStatus": {
+      const status = aotFirstLaunch ? await aotFirstLaunch.status() : { state: idle, fraction: 0 };
+      const profile = aotProfileReport();
+      return profile ? { ...status, profile } : status;
+    }
     case "aotOptimize":
       if (aotFirstLaunch?.supported) void aotFirstLaunch.start({ resume: payload?.resume !== false });
       return { started: Boolean(aotFirstLaunch?.supported) };
     case "aotCancel":
       aotFirstLaunch?.cancel();
       return {};
-    case "validationReadAotProgress":
-      return aotFirstLaunch
+    case "validationReadAotProgress": {
+      const progress = aotFirstLaunch
         ? aotFirstLaunch.progress({ drain: payload?.drain === true })
         : { schema: AOT_PROGRESS_SCHEMA, state: idle, events: [] };
+      // The local profile's records and failures (never silent again).
+      const profile = aotProfileReport();
+      return profile ? { ...progress, profile } : progress;
+    }
     default:
       throw new Error(`Unknown aot message: ${type}`);
   }
@@ -7377,7 +7431,7 @@ export async function prepareAotFirstLaunch(file, {
     return;
   }
   const generation = aotDiscGeneration;
-  const [{ coreAotKeyParts, coreAssembleOptions, coreRegionTranslator, createAotFirstLaunch }, { OpfsPlanStore }, { AotProfileStore, blocksFromPcSamples }, { planDiscInWorker }, { fileReader, planDisc }, { createProfileRecorder, guestPcAddress, startHotSampler }] =
+  const [{ coreAotKeyParts, coreAssembleOptions, coreRegionTranslator, createAotFirstLaunch }, { OpfsPlanStore }, { AotProfileStore, blocksFromPcSamples, profileKey }, { planDiscInWorker }, { fileReader, planDisc }, { createProfileRecorder, guestPcAddress, startHotSampler }] =
     await Promise.all([import("./aot-orchestrator.js"), import("./aot-optimizer.js"), import("./aot-profile.js"), import("./aot-plan-worker.js"), import("./aot-recomp.js"), import("./aot-hot-sampler.js")]);
   const discKey = await readDiscKey();
   if (generation !== aotDiscGeneration) return;
@@ -7399,7 +7453,8 @@ export async function prepareAotFirstLaunch(file, {
     // in a worker of its own, never on this one, which serves the core's
     // disc reads. Without workers (tests), in place.
     buildPlan: async () => {
-      const profile = opfs ? await new AotProfileStore(opfs).load(discKey).catch(() => null) : null;
+      const profile = opfs ? await new AotProfileStore(opfs).load(profileKey(discKey)).catch((error) => noteAotProfileReadFailure(error)) : null;
+      aotPlanProfileForTest = profile;
       return typeof Worker === "function" ? planDiscInWorker(file, { profile }) : planDisc(fileReader(file), { profile });
     },
     compile: precompileAotRegion,
@@ -7439,8 +7494,12 @@ export async function prepareAotFirstLaunch(file, {
   // Where this player's game spends its time, recorded into the local
   // profile (OPFS, per disc, addresses and sample counts only; never sent or
   // shared): the next plan orders by it and forms hot fragments from it.
+  // The local profile's health: no OPFS, read and write failures, never
+  // silent (validationReadAotProgress, aotStatus, one console warning).
+  aotProfileHealth = { opfs: Boolean(opfs), readFailures: 0, lastReadError: null, warned: false };
+  if (!opfs) warnAotProfile("no OPFS in this browser: no local region profile");
   aotProfileTarget = opfs && discKey
-    ? { flow, startHotSampler, guestPcAddress, record: createProfileRecorder({ store: new AotProfileStore(opfs), discKey, blocksFromPcSamples }) }
+    ? { flow, startHotSampler, guestPcAddress, record: createProfileRecorder({ store: new AotProfileStore(opfs), discKey: profileKey(discKey), blocksFromPcSamples, warn: warnAotProfile }) }
     : null;
   const blockKeys = [];
   if (!flow.supported) {
@@ -7503,6 +7562,33 @@ export function startAotFirstLaunchAfterBoot(flow = aotFirstLaunch) {
 }
 let aotHotSampler = null;
 let aotProfileTarget = null;
+let aotProfileHealth = null;
+let aotPlanProfileForTest = null;
+function warnAotProfile(message) {
+  if (aotProfileHealth?.warned) return;
+  if (aotProfileHealth) aotProfileHealth.warned = true;
+  console.warn(`aot: ${message.replace(/^aot: /, "")}`);
+}
+function noteAotProfileReadFailure(error) {
+  if (aotProfileHealth) {
+    aotProfileHealth.readFailures += 1;
+    aotProfileHealth.lastReadError = `${error?.name ?? "Error"}: ${error?.message ?? error}`;
+  }
+  warnAotProfile(`the local region profile could not be read (${error?.name ?? "Error"}: ${error?.message ?? error})`);
+  return null;
+}
+// The local profile's state for the probes: OPFS present, records and
+// failures of each kind with the last message.
+function aotProfileReport() {
+  if (!aotProfileHealth) return null;
+  const { warned, ...health } = aotProfileHealth;
+  const writes = aotProfileTarget?.record?.stats?.() ?? null;
+  return { ...health, records: writes?.records ?? 0, writeFailures: writes?.failures ?? 0, lastWriteError: writes?.lastError ?? null };
+}
+// Test seams: record samples as the minute's flush does; the profile the
+// last plan build received.
+export const recordAotProfileForTest = (samples) => aotProfileTarget?.record(samples) ?? null;
+export const aotPlanProfileReadForTest = () => aotPlanProfileForTest;
 let aotProfileTimer = null;
 const AOT_PROFILE_SAMPLE_MS = 10; // one guest PC per 10 ms: enough for block weights
 const AOT_PROFILE_RECORD_MS = 60000;
@@ -16077,6 +16163,10 @@ function replayCreateShader(id, blobPtr, blobLen, stage) {
   }
   webGpuObjects.shaders.set(id, module);
   pipelinePrewarm?.noteShader(id, wgsl);
+  if (harnessWgslCorpus && harnessWgslCorpus.size < HARNESS_WGSL_CORPUS_MAX) {
+    const hash = wgslHash(wgsl);
+    if (!harnessWgslCorpus.has(hash)) harnessWgslCorpus.set(hash, { stage, wgsl });
+  }
   if (uvForcedWgsl) {
     try {
       webGpuObjects.shadersUvForced.set(id,
