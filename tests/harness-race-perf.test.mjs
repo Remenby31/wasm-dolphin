@@ -139,9 +139,17 @@ test("review #22: odd runs and a pinned coreid are refused with --baseline", () 
     const args = (extra) => [probe, "--iso", path.join(dir, "d.iso"), "--state", path.join(dir, "s.sav"), "--port", "1", "--baseline", "origin/main", ...extra];
     const run = (extra) => spawnSync(process.execPath, args(extra), { encoding: "utf8", env: { ...process.env, CI: "" } }).stderr;
     assert.match(run(["--runs", "3"]), /runs must be even/);
-    assert.match(run(["--query", "core=upstream&coreid=sha256:" + "a".repeat(64)]), /no coreid in --query/);
+    // A coreid on both sides (no --baseline-query) or on the baseline side is refused.
+    assert.match(run(["--query", "core=upstream&coreid=sha256:" + "a".repeat(64)]), /a coreid in --query needs a --baseline-query without it/);
     assert.match(run(["--max-load", "abc"]), /--max-load abc/);
-    assert.match(run(["--baseline-query", "core=upstream&coreid=sha256:" + "a".repeat(64)]), /no coreid in --query or --baseline-query/);
+    assert.match(run(["--baseline-query", "core=upstream&coreid=sha256:" + "a".repeat(64)]), /no coreid in --baseline-query/);
+    // On both sides (a coreid in --query and in --baseline-query): refused.
+    assert.match(run(["--query", "core=upstream&coreid=sha256:" + "a".repeat(64), "--baseline-query", "core=upstream&coreid=sha256:" + "b".repeat(64)]), /no coreid in --baseline-query/);
+    // Only on the candidate side: accepted (a lever's PR core against trunk's);
+    // an invalid --max-load stops it right after, so no run starts.
+    const ok = run(["--runs", "2", "--query", "core=upstream&coreid=sha256:" + "a".repeat(64), "--baseline-query", "core=upstream", "--max-load", "abc"]);
+    assert.match(ok, /--max-load abc/);
+    assert.doesNotMatch(ok, /coreid/);
   } finally {
     rmSync(dir, { recursive: true, force: true });
   }

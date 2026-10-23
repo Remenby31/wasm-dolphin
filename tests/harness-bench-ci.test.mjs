@@ -36,7 +36,7 @@ test("CI bench: manual or bench/** pushes only, never a disc, read-only token, b
   assert.doesNotMatch(workflow, /cd "\$d" && node tools/); // never the ref's own tool
   // A switch on the candidate side only: validated &key=value pairs, the baseline without them.
   assert.match(workflow, /\[\[ "\$CANDIDATE_QUERY" =~ \^\(\\&\[a-z0-9_\]\+=\[A-Za-z0-9\._-\]\+\)\+\$ \]\]/);
-  assert.match(workflow, /queries=\(--query "\$query\$CANDIDATE_QUERY" --baseline-query "\$query"\)/);
+  assert.match(workflow, /extra="\$CANDIDATE_QUERY"/);
   assert.match(workflow, /sides=\(--baseline "\$BASELINE" --candidate "\$CANDIDATE"\)/);
   assert.doesNotMatch(workflow, /--state|\.sav\b|roms\/|\.iso\b/);
   assert.match(workflow, /--pin-cpu-thread 0/);
@@ -150,4 +150,47 @@ test("CI bench: with region stats, a pair where a side installed no region is se
   // Without region stats (no aot): no region line, nothing set aside for it.
   const plain = benchAA([run(1, 20, 20), run(2, 20, 20), run(3, 20, 20), run(4, 20, 20)].map((r) => { for (const s of ["baseline", "candidate"]) { delete r[s].cold.p4; delete r[s].cold.p4Raw; } return r; }));
   assert.equal(plain.regions, null);
+});
+
+test("CI bench: a lever's PR core is served only if bound to its bytes, with this tree's binary interface", async () => {
+  const { coreCompat } = await import("../harness/remote/core-compat.mjs");
+  const { createHash } = await import("node:crypto");
+  const h = (b) => createHash("sha256").update(b).digest("hex");
+  const wasm = Buffer.from("a core"), sha = h(wasm), glue = "glue\r\n", glueSha = h(Buffer.from("glue\n"));
+  const exportsOf = () => ["_b", "_a"];
+  const buildInfo = { coreId: `sha256:${sha}`, artifacts: { wasm: { sha256: sha }, js: { sha256: glueSha } } };
+  const abi = { coreId: `sha256:${sha}`, runtimeMethods: ["FS"], memoryContract: { pages: 1 }, memoryContractStatus: "ok" };
+  const tree = { coreId: "sha256:other", moduleExports: ["_a", "_b"], runtimeMethods: ["FS"], memoryContract: { pages: 1 }, memoryContractStatus: "ok" };
+  const check = (o) => coreCompat({ wasm, glue, name: sha, buildInfo, artifactAbi: abi, treeAbi: tree, exportsOf, ...o });
+  assert.deepEqual(check({}), []); // export order does not matter; the glue is LF-normalized
+  assert.match(check({ name: "0".repeat(64) })[0], /hashes to/);
+  assert.ok(check({ artifactAbi: { ...abi, coreId: undefined } }).some((w) => /ABI manifest names no core/.test(w))); // coreId mandatory
+  assert.ok(check({ glue: "other glue" }).includes("the glue (.js) is not the one the build record holds"));
+  assert.ok(check({ buildInfo: { ...buildInfo, artifacts: { ...buildInfo.artifacts, wasm: { sha256: "x" } } } }).includes("the build record holds another .wasm"));
+  assert.deepEqual(check({ exportsOf: () => ["_a"] }), ["moduleExports (from the glue) differ from the tree's core"]);
+  assert.deepEqual(check({ artifactAbi: { ...abi, memoryContract: { pages: 2 } } }), ["memoryContract differs from the tree's core"]);
+  // The workflow: main only, this repository's run (no fork), the artifact checked, the coreid on the candidate only.
+  assert.match(workflow, /\[ "\$GITHUB_REF" = refs\/heads\/main \] \|\| \{ echo "candidate_core_run: dispatch from main/);
+  assert.match(workflow, /\.head_repository\.full_name == \$repo/);
+  assert.match(workflow, /\(\.event == "push" or \.event == "pull_request"\)/);
+  assert.match(workflow, /\.path == "\.github\/workflows\/core-build\.yml"/);
+  assert.match(workflow, /select\(\.name == "build" and \.conclusion == "success"\)/);
+  assert.match(workflow, /node harness\/remote\/core-compat\.mjs "\$dir" "\$sha" \./);
+  assert.match(workflow, /extra="\$extra&coreid=sha256:\$CORE_SHA"/);
+  assert.match(workflow, /queries=\(--query "\$query\$extra" --baseline-query "\$query"\)/);
+  assert.equal(workflow.match(/actions: read/g).length, 1); // the aa job only
+});
+
+test("CI bench: --warm runs are read on their warm windows (the second launch, regions installed before boot)", () => {
+  const pin = { thread: "DedicatedWorker", busyPct: 99, cpu: 0 };
+  const w = (speed) => ({ speed, pinned: pin });
+  const run = (n, coldA, coldB, warmA, warmB) => ({ run: n, baseline: { cold: w(coldA), warm: w(warmA) }, candidate: { cold: w(coldB), warm: w(warmB) } });
+  const runs = [1, 2, 3, 4, 5, 6].map((n) => run(n, 20, 20, 20, 22));
+  assert.equal(benchAA(runs).change.medianPct, 0);
+  const warm = benchAA(runs, {}, { phase: "warm" });
+  assert.equal(warm.phase, "warm");
+  assert.equal(warm.change.medianPct, Math.round(100 * Math.log(1.1) * 100) / 100);
+  assert.match(benchMarkdown(warm), /warm windows/);
+  assert.match(workflow, /if \[ "\$PHASE" = warm \]; then warm=\(--warm\); fi/);
+  assert.match(workflow, /bench-aa\.mjs "\$OUT\/aa" "\$OUT\/machine\.json" "\$PHASE"/);
 });
