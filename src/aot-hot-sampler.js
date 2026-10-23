@@ -37,6 +37,16 @@ const SOURCE = `onmessage = (e) => {
   close();
 };`;
 
+// ?aotsample=N: the sampling period in ms (default 10); ?aotsample=0 turns
+// the sampler off (no worker; the local profile records nothing), e.g. to
+// measure what it costs. Anything else is the default.
+export const AOT_SAMPLE_DEFAULT_MS = 10;
+export function aotSamplePeriodRequested(search = "") {
+  const raw = new URLSearchParams(search).get("aotsample");
+  if (raw === null || !/^\d+$/.test(raw)) return AOT_SAMPLE_DEFAULT_MS;
+  return Math.min(Number(raw), 1000);
+}
+
 // The guest PC's address in the core's heap: the ungated export (the harness
 // one returns 0 unless the harness hooks are on, which the product never
 // does: a product build recorded no profile), the harness one on an older
@@ -45,9 +55,11 @@ export function guestPcAddress(m) {
   return m?._DolphinWeb_GuestPcAddress?.() || m?._DolphinWeb_HarnessPcAddress?.() || 0;
 }
 
-// Starts sampling; null without a shared heap or a PC address.
-export function startHotSampler({ buffer, pcAddress, periodMs = 10, postMs = 500, frozenMs = 1000,
+// Starts sampling; null without a shared heap or a PC address, or with a
+// period of 0 (?aotsample=0: no worker at all).
+export function startHotSampler({ buffer, pcAddress, periodMs = AOT_SAMPLE_DEFAULT_MS, postMs = 500, frozenMs = 1000,
   createWorker = (url) => new Worker(url, { name: "aot-hot-sampler" }) }) {
+  if (!(periodMs > 0)) return null;
   if (typeof SharedArrayBuffer === "undefined" || !(buffer instanceof SharedArrayBuffer) || !pcAddress || pcAddress % 4) return null;
   const ctl = new SharedArrayBuffer(8);
   const flag = new Int32Array(ctl);
