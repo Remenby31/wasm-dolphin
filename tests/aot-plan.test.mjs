@@ -10,7 +10,7 @@ import {
 import { hintsMatch, loadHints, parseHints } from "../src/aot-hints.js";
 import { imageFromDol } from "../src/aot-image.js";
 import {
-  PLAN_BINARY_MAGIC, PLAN_SCHEMA, encodePlanRegions, fnv1a64Hex, orderedRegions, planDol, regionHash, validatePlan
+  PLAN_BINARY_MAGIC, PLAN_SCHEMA, applyProfileHotRanges, encodePlanRegions, fnv1a64Hex, orderedRegions, planDol, regionHash, validatePlan
 } from "../src/aot-plan.js";
 import { planDisc } from "../src/aot-recomp.js";
 import { asm, assemble, buildDol } from "./aot-asm.mjs";
@@ -356,3 +356,26 @@ test("aot plan: hotRanges from the profile's sample weights, for a large weighed
   assert.ok(!inHot(t.labels.cold0) && !inHot(t.labels.cold60), "not the cold blocks (one sample in cold0 is under 0.25 %)");
   validatePlan(plan);
 });
+
+test("aot profile v3: a truncated file is refused; weights are clamped to a u32", () => {
+  const bytes = encodeProfile({ sessions: 1, blocks: [[0x80003100, 0x80003104, 1, 0, 2 ** 40]] });
+  assert.equal(decodeProfile(bytes).blocks[0][4], 0xffffffff, "clamped");
+  assert.equal(decodeProfile(bytes.subarray(0, bytes.length - 2)), null, "truncated");
+});
+
+// A stored plan is built once (first launch, no weights yet): the hot ranges
+// come from the current profile at every load, set or removed.
+test("aot plan: applyProfileHotRanges sets the hot ranges of a stored plan from the current profile, and removes them without weights", () => {
+  const t = hotColdFunction();
+  const dol = buildDol({ textAddr: TEXT, text: t.words, entry: t.labels.entry });
+  const { image, entryPoint } = imageFromDol(dol);
+  const plan = planDol({ image, entryPoint, options: { gapFill: false } });
+  const f = () => plan.modules[0].functions.find((x) => x.entry === t.labels.entry);
+  assert.equal(f().hotRanges, undefined);
+  applyProfileHotRanges(plan, { sessions: 1, blocks: blocksFromPcSamples([[t.labels.loop, 400], [t.labels.loop2, 300]]) });
+  assert.ok(f().hotRanges?.some(([s, e]) => t.labels.loop >= s && t.labels.loop < e), "set from the weights");
+  validatePlan(plan);
+  applyProfileHotRanges(plan, { sessions: 1, blocks: blocksFromPcSamples([t.labels.loop]) }); // no weights (v2)
+  assert.equal(f().hotRanges, undefined, "removed");
+});
+

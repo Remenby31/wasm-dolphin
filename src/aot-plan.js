@@ -108,6 +108,30 @@ export function hotRanges(fBlocks, blocks, entry, weightIn) {
   return hotSize < HOT_MAX_SHARE * size ? mergeRanges(hot) : null;
 }
 
+// The hot ranges of every function of a plan, from the player's current
+// local profile (a stored plan was built without it, or with an older one):
+// set where the weights make some, removed elsewhere. Uses the plan's block
+// columns (start, end, owning function); returns the plan.
+export function applyProfileHotRanges(plan, profile) {
+  const samples = (profile?.blocks ?? []).filter((b) => (b[4] ?? 0) > 0).sort((a, b) => a[0] - b[0]);
+  const starts = samples.map((b) => b[0]);
+  const weightIn = (s, e) => {
+    let w = 0;
+    for (let i = lowerBound(starts, s); i < starts.length && starts[i] < e; i++) w += samples[i][4];
+    return w;
+  };
+  for (const m of [...plan.modules, ...(plan.rels ?? []).filter((r) => r.functions)]) {
+    const byFunction = new Map();
+    m.blocks.func.forEach((f, b) => { if (f >= 0) (byFunction.get(f) ?? byFunction.set(f, []).get(f)).push(b); });
+    m.functions.forEach((f, i) => {
+      const hot = samples.length ? hotRanges(byFunction.get(i) ?? [], m.blocks, f.entry, weightIn) : null;
+      if (hot) f.hotRanges = hot;
+      else delete f.hotRanges;
+    });
+  }
+  return plan;
+}
+
 // Turn a discovery result into the plan section of one module.
 // `profile`: normalised profile blocks, to count how often each region was seen.
 export function planModule(result, { id = 0, kind = "dol", read32, profile = null, extra = {} } = {}) {

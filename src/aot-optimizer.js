@@ -36,7 +36,7 @@
 // or a full quota get no verdict at once: the module is retried at the next
 // launch, `maxAttempts` launches at most, then blacklisted. Attempts are kept
 // in the plan store (loadAttempts/saveAttempts).
-import { orderedRegions, validatePlan, ANALYZER_VERSION } from "./aot-plan.js";
+import { applyProfileHotRanges, orderedRegions, validatePlan, ANALYZER_VERSION } from "./aot-plan.js";
 import { assembleRegion, claimEntries, groupRegions, regionModuleKey } from "./aot-region-module.js";
 
 export const PLAN_CACHE_DIR = "aot-plan";
@@ -50,7 +50,8 @@ export class AotOptimizer extends EventTarget {
   // keyParts: { compilerVersion, codegenMask } (the core's _DolphinWeb_AotKeyParts)
   constructor({ discKey, buildPlan, translator, openCache, cacheIdentity = {}, keyParts = { compilerVersion: 0, codegenMask: 0 },
     assemble = null, assembleOptions = null, compile = null, install = null, maxFunctions = 100, planStore = null, batchSize = BATCH,
-    notReadyDelayMs = 1000, maxNotReadyWaits = 300, maxAttempts = 3, sleep = (ms) => new Promise((r) => setTimeout(r, ms)), now = () => performance.now() }) {
+    notReadyDelayMs = 1000, maxNotReadyWaits = 300, maxAttempts = 3, sleep = (ms) => new Promise((r) => setTimeout(r, ms)), now = () => performance.now(),
+    loadProfile = null }) {
     super();
     this.discKey = discKey;
     this.buildPlan = buildPlan;
@@ -66,6 +67,10 @@ export class AotOptimizer extends EventTarget {
     // core's dispatcher (_DolphinWeb_AotQueueRegion). Optional.
     this.install = install;
     this.maxFunctions = maxFunctions;
+    // loadProfile(): the player's local profile (aot-profile.js), or null:
+    // its sample weights give each large function its hot ranges at every
+    // plan load (hot/cold formation), whatever profile the plan was built with.
+    this.loadProfile = loadProfile;
     this.planStore = planStore;
     this.now = now;
     this.batchSize = batchSize;
@@ -145,6 +150,10 @@ export class AotOptimizer extends EventTarget {
     if (!plan) {
       plan = validatePlan(await this.buildPlan());
       await this.planStore?.save(this.discKey, plan).catch(() => {});
+    }
+    if (this.loadProfile) {
+      const profile = await Promise.resolve().then(() => this.loadProfile()).catch(() => null);
+      applyProfileHotRanges(plan, profile);
     }
     // Region modules, in compile order: each module takes the place of its
     // first member in orderedRegions. Groups are kept across plan rebuilds (a

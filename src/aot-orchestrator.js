@@ -60,6 +60,7 @@ export function createAotFirstLaunch({
   retain = () => {}, // (key, module): a module loaded before boot, for the CPU thread
   install = null, // ({ key, bytes, entries, members }): hands a module to the core's dispatcher
   onEvent = () => {}, // every progress event, as it happens
+  loadProfile = null, // () -> the player's local profile: hot/cold formation (AotOptimizer)
   maxFunctions = 100,
   batchSize,
   bootBudgetMs = 1500,
@@ -111,7 +112,7 @@ export function createAotFirstLaunch({
   const planKey = String(discKey).replace(/[^0-9A-Za-z_-]/g, "_").slice(0, 128);
   const optimizer = supported
     ? new AotOptimizer({
-      discKey: planKey, buildPlan, translator, planStore, keyParts, assembleOptions, compile, install, maxFunctions, now,
+      discKey: planKey, buildPlan, translator, planStore, keyParts, assembleOptions, compile, install, maxFunctions, now, loadProfile,
       openCache: () => openCache(identity),
       ...(batchSize ? { batchSize } : {}),
       ...(sleep ? { sleep } : {}),
