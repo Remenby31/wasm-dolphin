@@ -205,7 +205,9 @@ export function discardReason(arms, targets) {
     if (!g) return `no region gate on arm ${a}`;
     if (g.layoutRefused > 0) return `layoutRefused on arm ${a} (${g.layoutRefused})`;
     const want = targets[a];
-    if (Number.isInteger(want) && g.installed !== want) return `arm ${a} installed ${g.installed ?? "?"} of ${want} regions`;
+    // More than the seed is fine: a module the seed's first launch was still
+    // finishing when it reported "done" (regions-0118, 2026-10-23: 143 of 142).
+    if (Number.isInteger(want) && !(g.installed >= want)) return `arm ${a} installed ${g.installed ?? "?"} of ${want} regions`;
     if (!g.quiescent) return `arm ${a}: ${g.why ?? "regions not quiescent"}`;
     return null;
   }).filter(Boolean);
