@@ -12,6 +12,7 @@ import { execFileSync } from "node:child_process";
 import { armPmus } from "../harness/lib/perf-counters.mjs";
 import { isHomebrew } from "../harness/probes/race-perf.mjs";
 import { benchAA, benchMarkdown } from "../harness/remote/bench-aa.mjs";
+import { benchReport, reportMarkdown } from "../harness/remote/bench-report.mjs";
 
 const workflow = readFileSync(new URL("../.github/workflows/bench.yml", import.meta.url), "utf8");
 
@@ -97,4 +98,21 @@ test("footprint: deterministic static PowerPC, calls only forward, jump tables, 
   const full = gen();
   const words = full.split("\n").filter((l) => /^\t(?!\.(align|globl|section|text))[a-z.]/.test(l) && !l.includes("fp_f") || /^\t\.long 0x/.test(l)).length;
   assert.ok(words * 4 > 400 * 1024, `${words * 4} bytes`);
+});
+
+test("CI bench: a pair whose sides ran on two CPU models is set aside; the report pools pairs per model", () => {
+  const pin = { thread: "DedicatedWorker", busyPct: 99, cpu: 0 };
+  const run = (n, a, b, ma = "EPYC 7763", mb = ma) => ({ run: n, baseline: { cold: { speed: a, pinned: pin, cpuModel: ma } }, candidate: { cold: { speed: b, pinned: pin, cpuModel: mb } } });
+  const one = benchAA([run(1, 300, 300), run(2, 300, 303), run(3, 300, 297), run(4, 300, 330, "EPYC 7763", "EPYC 9V74")], { runner: "ubuntu-24.04", job: 1 });
+  assert.deepEqual(one.setAside.map((x) => x.why), ["warm-up pair", "CPU model changed: EPYC 7763 / EPYC 9V74"]);
+  assert.deepEqual(one.perPair.map((p) => [p.run, p.model, p.ratioPct]), [[2, "EPYC 7763", 1], [3, "EPYC 7763", -1]]);
+  const bench = (model, sigma, ratios, job) => ({ arch: "x86_64", runSigmaPct: sigma, machine: { runner: "ubuntu-24.04", job }, perPair: ratios.map((r, i) => ({ run: i + 2, model, ratioPct: r })) });
+  const r = benchReport([bench("EPYC 7763", 1.5, [1, -1, 0.5], 1), bench("EPYC 7763", 2.5, [-0.5, 0], 2), bench("Xeon 6973P-C", 3.5, [5, -5], 3)]);
+  const epyc = r.models.find((m) => m.model === "EPYC 7763"), xeon = r.models.find((m) => m.model === "Xeon 6973P-C");
+  assert.equal(epyc.pairs, 5);
+  assert.deepEqual(epyc.jobs, ["ubuntu-24.04#1", "ubuntu-24.04#2"]);
+  assert.equal(epyc.medianRunSigmaPct, 2);
+  assert.equal(epyc.inDecisionSet, true);
+  assert.equal(xeon.inDecisionSet, false); // σ per run ≥ 3 %: recorded, not counted
+  assert.match(reportMarkdown(r), /\| Xeon 6973P-C \|.*\| no \(σ per run ≥ 3 %\) \|/);
 });

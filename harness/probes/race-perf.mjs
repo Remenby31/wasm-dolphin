@@ -116,6 +116,17 @@ const HOMEBREW_FIXTURES = path.join(REPO_ROOT, "harness", "homebrew", "fixtures"
 export const isHomebrew = (iso) => [HOMEBREW_OUT, HOMEBREW_FIXTURES].some((d) => iso.startsWith(d + path.sep));
 export const STATE_ROUTE = "**/__harness_state.sav";
 
+// The host CPU model (Linux: lscpu "Model name"), read with each window of a
+// pinned run: the CI bench pairs only windows of the same model (a runner
+// can be live-migrated).
+export function cpuModel() {
+  try {
+    return /^Model name:\s*(.+)$/m.exec(execFileSync("lscpu", { encoding: "utf8" }))?.[1]?.trim() ?? null;
+  } catch {
+    return null;
+  }
+}
+
 // The busiest renderer thread (the emulated CPU thread once the game runs)
 // moved alone onto `cpu` (taskset -p); { tid, cpu } or { error }.
 export async function pinBusiestThread(profileDir, cpu) {
@@ -349,7 +360,7 @@ export async function measure(session, o) {
       ...regionRecord(regionEnd),
       ...(pipeline && !pipeline.error ? regionPipeline(pipeline) : {}),
       ...(counters ? { counters } : {}),
-      ...(pinned ? { pinned } : {}),
+      ...(pinned ? { pinned, cpuModel: cpuModel() } : {}),
       ...(o.memStats ? memRecord(memEnd) : {})
     };
   } finally {

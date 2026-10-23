@@ -28,10 +28,16 @@ const goodPin = (p) => !p || (p.thread === "DedicatedWorker" && !(p.busyPct < 80
 
 export function benchAA(runs, machine = {}) {
   const all = runs
-    .map((r) => ({ run: r.run, a: r.baseline?.cold?.speed, b: r.candidate?.cold?.speed, pins: [r.baseline?.cold?.pinned, r.candidate?.cold?.pinned] }))
+    .map((r) => ({ run: r.run, a: r.baseline?.cold?.speed, b: r.candidate?.cold?.speed, pins: [r.baseline?.cold?.pinned, r.candidate?.cold?.pinned], models: [r.baseline?.cold?.cpuModel, r.candidate?.cold?.cpuModel] }))
     .filter((p) => Number.isFinite(p.a) && Number.isFinite(p.b) && p.a > 0);
   const first = Math.min(...all.map((p) => p.run));
-  const setAside = all.filter((p) => p.run === first || !p.pins.every(goodPin)).map((p) => ({ run: p.run, why: p.run === first ? "warm-up pair" : `pinned ${p.pins.map((x) => `${x?.thread ?? "?"} ${x?.busyPct ?? "?"} %`).join(" / ")}` }));
+  // A pair counts only when both sides ran on the same CPU model (judge,
+  // 2026-10-23: stratified by model); unrecorded models are taken as equal.
+  const sameModel = (p) => !p.models[0] || !p.models[1] || p.models[0] === p.models[1];
+  const why = (p) => p.run === first ? "warm-up pair"
+    : !sameModel(p) ? `CPU model changed: ${p.models.join(" / ")}`
+    : `pinned ${p.pins.map((x) => `${x?.thread ?? "?"} ${x?.busyPct ?? "?"} %`).join(" / ")}`;
+  const setAside = all.filter((p) => p.run === first || !sameModel(p) || !p.pins.every(goodPin)).map((p) => ({ run: p.run, why: why(p) }));
   const pairs = all.filter((p) => !setAside.some((x) => x.run === p.run));
   const speeds = pairs.flatMap((p) => [p.a, p.b]);
   const m = mean(speeds);
@@ -47,6 +53,8 @@ export function benchAA(runs, machine = {}) {
     pairMedianPct: round(median(ratios), 2),
     pairSigmaPct: round(stdev(ratios), 2),
     perPairPct: ratios.map((x) => round(x, 2)),
+    // [run, model, ratio %] of each kept pair: the per-model report pools them.
+    perPair: pairs.map((p, i) => ({ run: p.run, model: p.models[1] ?? p.models[0] ?? machine.cpuModel ?? null, ratioPct: round(ratios[i], 3), speeds: [p.a, p.b] })),
     drift: { firstThird: round(mean(pairs.slice(0, third).flatMap((p) => [p.a, p.b])), 2), lastThird: round(mean(pairs.slice(-third).flatMap((p) => [p.a, p.b])), 2) },
     pairsFor2Pct: s == null ? null : Math.max(1, Math.ceil((8 * s * s) / 4)),
     setAside,
