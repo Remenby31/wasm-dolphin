@@ -279,3 +279,24 @@ test("a failed consumer releases its copies first; the core then neither pushes 
   await inFlight;
   assert.ok(heap.every((b) => b === 0));
 });
+
+// #125 third review: the COPY_TO_STAGING case takes the readback, then
+// submitEnc goes fatal (markWgpuReplayFatal resets it and marks the
+// consumer failed), then the case released the copy on that instance: the
+// slot was recreated and LOST stored into words the core may have freed.
+test("a readback released by a fatal submit stores nothing afterwards", async () => {
+  const { device, words, rb } = setup();
+  const held = rb; // taken before submitEnc
+  const submitEnc = () => { held.reset(); return false; }; // fatal inside the submit
+  if (!submitEnc()) held.lose(copyOf(1));
+  await held.issue(device.queue, copyOf(2));
+  held.reset();
+  assert.deepEqual([...words.slice(0, 4)], [0, 0, 0, 0], "no store after the release");
+  assert.equal(device.submits, 0);
+  assert.equal(device.created.length, 0);
+
+  const { readFile } = await import("node:fs/promises");
+  const worker = await readFile(new URL("../src/upstream-discio-worker.js", import.meta.url), "utf8");
+  assert.match(worker, /function readbackFor\(device\) \{\n(?:.*\n)?  if \(wgpuReplayFatal\) return null;/, "no new readback once the replay is fatal");
+  assert.match(worker, /const rb = readbackFor\(dev\);\n\s+if \(!rb\) break;/);
+});

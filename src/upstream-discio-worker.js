@@ -487,6 +487,8 @@ let hardwareVideoBackend = false;
 // core module: the heap is the one the copies were issued in.
 let wgpuReadback = null;
 function readbackFor(device) {
+  // A failed replay released its readback: none is made again.
+  if (wgpuReplayFatal) return null;
   if (wgpuReadback?.device !== device || wgpuReadback.module !== moduleInstance) {
     releaseWgpuReadback();
     const module = moduleInstance;
@@ -14904,6 +14906,7 @@ function drainWebGpuCmdRing(source = "presentation") {
         }
         case WGPU_CMD_OP_COPY_TO_STAGING: {
           const rb = readbackFor(dev);
+          if (!rb) break;
           const source = webGpuObjects.textures.get(u32[recWord + 1]);
           const a1 = u32[recWord + 2], a2 = u32[recWord + 3], a3 = u32[recWord + 4];
           const wordIndex = u32[recWord + 7] >>> 2;

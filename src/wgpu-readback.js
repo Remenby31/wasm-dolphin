@@ -51,6 +51,9 @@ export class WgpuReadback {
     this.words = words;
     this.poolBytes = poolBytes;
     this.generation = 0;
+    // Set by reset(): the copies are released and the core may already have
+    // freed their memory, so nothing is tracked or written any more.
+    this.released = false;
     this.pool = new Map(); // size -> [GPUBuffer]
     this.pooledBytes = 0;
     this.slots = new Map(); // wordIndex -> { published, recorded, entries: Map(seq -> entry) }
@@ -83,6 +86,7 @@ export class WgpuReadback {
   // the replay never saw) will never come: it counts as lost, or the slot
   // would wait for it forever.
   track(c) {
+    if (this.released) return null;
     let slot = this.slots.get(c.wordIndex);
     if (!slot || slot.entries.size === 0) {
       // Idle: start from the shared word (a staging texture may have been
@@ -104,6 +108,7 @@ export class WgpuReadback {
   // A copy that never reaches the GPU (no source texture, replay failure):
   // released as LOST in its turn.
   lose(c) {
+    if (this.released) return;
     const entry = this.track(c);
     if (!entry) {
       this.stats.rejected += 1;
@@ -120,6 +125,7 @@ export class WgpuReadback {
   // stale bytes of a pooled buffer. copy: { seq, texture, mipLevel, origin
   // {x,y,z}, width, height, texelSize, aspect?, heapPtr, dstStride, wordIndex }.
   async issue(queue, copy, now = () => performance.now()) {
+    if (this.released) return;
     const entry = this.track(copy);
     if (!entry) {
       this.stats.rejected += 1;
@@ -231,15 +237,18 @@ export class WgpuReadback {
 
   // The status is written before the seq that publishes it.
   publish(wordIndex, seq, status) {
+    if (this.released) return;
     const words = this.words();
     Atomics.store(words, wordIndex + 1, status);
     Atomics.store(words, wordIndex, seq);
     Atomics.notify(words, wordIndex);
   }
 
-  // Device lost, core reload, savestate load: nothing in flight will land.
-  // Every slot is released up to its last recorded copy.
+  // Device lost, core reload, replay fatal: nothing in flight will land.
+  // Every slot is released up to its last recorded copy, once: after that
+  // the instance is inert (a caller holding it must not write again).
   reset() {
+    if (this.released) return;
     this.generation += 1;
     for (const [wordIndex, slot] of this.slots) {
       for (const entry of slot.entries.values()) {
@@ -252,6 +261,7 @@ export class WgpuReadback {
       if (slot.entries.size > 0) this.publish(wordIndex, slot.recorded, READBACK_LOST);
     }
     this.slots.clear();
+    this.released = true;
     for (const buffers of this.pool.values()) for (const b of buffers) b.destroy();
     this.pool.clear();
     this.pooledBytes = 0;
