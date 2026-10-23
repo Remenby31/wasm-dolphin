@@ -108,16 +108,17 @@ test("psq_lux kept in the region updates a GPR the block had cached dirty, like 
   assert.equal(r.got.end, "stop");
 });
 
-// 0128: a memory helper that halts inside a fragment (an unaligned lmw: the
-// helper takes an alignment exception) leaves pc, npc and downcount as the
-// interpreter does, after ops that moved the frame locals. (MSR.FP clear is
-// not a halt here: since 0121 region code takes FP for granted, and the
-// dispatcher never enters a region without it.)
+// 0128: a memory helper that halts inside a fragment (a lwz from 0x00004000,
+// which no BAT maps: a DSI) leaves pc, npc and downcount as the interpreter
+// does, after ops that moved the frame locals. (Neither an unaligned access,
+// whose alignment exception stays pending to the block's end as in Dolphin's
+// JITs, nor MSR.FP clear, which regions take for granted since 0121, halts.)
 const frameSkip = skip || (compilerVersion() < 20 && "core before 0128 (compiler version < 20)");
 test("a memory helper that halts in a fragment leaves pc, npc and downcount like the interpreter (0128)", { skip: frameSkip }, () => {
-  const lmw = (d, a, off) => (46 << 26) | (d << 21) | (a << 16) | (off & 0xffff);
-  const program = [addi(3, 3, 1), addi(4, 4, 2), lmw(29, 1, 2), addi(3, 3, 1), BLR];
+  const lwz = (d, a, off) => (32 << 26) | (d << 21) | (a << 16) | (off & 0xffff);
+  const program = [addi(3, 3, 1), addi(4, 4, 2), lwz(6, 1, 0), addi(3, 3, 1), BLR];
   const state = baseState(41);
+  state[9] = 0x00004000;
   const r = compareRegionProgram(core, program, state);
   assert.ok(r.translated && !r.trap && !r.error, `${r.error ?? "trap or untranslated"}`);
   assert.ok(r.got.regionRuns >= 1, "the region ran");
