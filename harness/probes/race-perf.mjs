@@ -695,6 +695,9 @@ async function main() {
     releaseLock?.();
     dropExports();
   }
+  // xctrace: its raw ktraces still open at the last window, deleted once
+  // closed (outside the lock: it may wait minutes).
+  const xctraceCleanup = o.onWindow?.finish ? await o.onWindow.finish() : null;
   const runsDone = records;
 
   // A run that breaks a validity rule (headroom.mjs invalidReasons: ring
@@ -771,6 +774,7 @@ async function main() {
     emulatedWindow: o.emulatedWindow ? { secs: o.emulatedWindow, warmup: o.emulatedWarmup, pollMs: o.emulatedPollMs } : null, hold: o.hold, maxLoad: o.maxLoad,
     sides: Object.fromEntries(Object.entries(sides).map(([n, s]) => [n, s.label])),
     runs: runsDone.length, failed, gaveUp,
+    ...(xctraceCleanup ? { xctraceCleanup } : {}),
     // Runs played again after the lock went back for the load: { run: times }.
     loadRetries: Object.fromEntries(runsDone.filter((r) => r.loadRetries).map((r) => [r.run, r.loadRetries])),
     candidate: { cold: summarize("candidate", "cold"), warm: summarize("candidate", "warm") },

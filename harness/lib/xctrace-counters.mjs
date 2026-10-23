@@ -125,7 +125,10 @@ export function perKiloGuestCycles(cold) {
 // xctrace also leaves its raw kernel trace in $TMPDIR (instruments*.ktrace,
 // 0.1-4 GB each), outside the .trace it saves (2026-10-23: ~6.8 GB in an
 // afternoon). Listed before and after each window: the new ones that no
-// process holds open are deleted, by the paths the listing returned.
+// process holds open are deleted, by the paths the listing returned. Those
+// still open (Xcode's DTServiceHub keeps the last one open after the
+// recording ends) are deleted at a later window or at the end of the
+// campaign (finish), once closed.
 export function listKtraces(dir = os.tmpdir()) {
   try {
     return readdirSync(dir).filter((f) => /^instruments.*\.ktrace$/.test(f)).map((f) => path.join(dir, f));
@@ -156,6 +159,32 @@ export function removeNewKtraces(before, after, { isOpen = heldOpen, remove = (f
   return out;
 }
 
+// The ktraces our windows created that were still open: add(), retried at
+// each sweep(), waited for by finish() (bounded), which returns those left.
+export function createKtraceJanitor({ isOpen = heldOpen, remove = (f) => rmSync(f, { force: true }), log = (m) => console.log(m) } = {}) {
+  const pending = new Set();
+  const sweep = () => {
+    const out = { removed: [], open: [] };
+    for (const f of [...pending]) {
+      const r = removeNewKtraces([], [f], { isOpen, remove, sizeOf: () => 0 });
+      if (r.keptOpen.length) out.open.push(f); else { pending.delete(f); out.removed.push(...r.removed); }
+    }
+    if (out.removed.length) log(`[xctrace] ktrace: ${out.removed.length} removed later, once closed: ${out.removed.join(" ")}`);
+    return out;
+  };
+  const finish = async ({ waitSec = 600, pollSec = 15 } = {}) => {
+    const end = Date.now() + waitSec * 1000;
+    let left = sweep().open;
+    while (left.length && Date.now() < end) {
+      await new Promise((r) => setTimeout(r, pollSec * 1000));
+      left = sweep().open;
+    }
+    if (left.length) log(`[xctrace] ktrace still open after ${waitSec} s, left: ${left.join(" ")}`);
+    return { ktraceLeft: left };
+  };
+  return { add: (files) => { for (const f of files) pending.add(f); }, sweep, finish, pending: () => [...pending] };
+}
+
 // Free space (GB) of the volume holding `dir`.
 export function freeDiskGB(dir = os.tmpdir()) {
   const s = statfsSync(dir);
@@ -177,8 +206,11 @@ export function xctraceCounters({ mode = "delivery", pidOf, readyTimeoutMs = 600
   writeFileSync(options, JSON.stringify(recordingOptions(mode)));
   process.once("exit", () => rmSync(dir, { recursive: true, force: true }));
   const live = new Map();
-  return async (phase, session) => {
+  const janitor = createKtraceJanitor();
+  const sweep = janitor.sweep;
+  const onWindow = async (phase, session) => {
     if (phase === "start") {
+      sweep();
       const free = freeDiskGB();
       if (free < XCTRACE_MIN_FREE_GB) return live.set(session, { error: `disk: ${round(free, 1)} GB free < ${XCTRACE_MIN_FREE_GB} GB` });
       const ktraces = listKtraces();
@@ -231,7 +263,14 @@ export function xctraceCounters({ mode = "delivery", pidOf, readyTimeoutMs = 600
     } finally {
       rmSync(c.trace, { recursive: true, force: true });
       const k = removeNewKtraces(c.ktraces, listKtraces());
-      if (k.removed.length || k.keptOpen.length) console.log(`[xctrace] ktrace: ${k.removed.length} removed (${k.removedMB} MB)${k.keptOpen.length ? `, ${k.keptOpen.length} still open, kept: ${k.keptOpen.join(" ")}` : ""}`);
+      janitor.add(k.keptOpen);
+      if (k.removed.length || k.keptOpen.length) console.log(`[xctrace] ktrace: ${k.removed.length} removed (${k.removedMB} MB)${k.keptOpen.length ? `, ${k.keptOpen.length} still open, removed once closed: ${k.keptOpen.join(" ")}` : ""}`);
+      sweep();
     }
   };
+  // The end of the campaign (race-perf, after the lock is released): waits
+  // up to waitSec for the ktraces still open to close, deletes them, and
+  // returns those still open then (paths, for whoever cleans up).
+  onWindow.finish = janitor.finish;
+  return onWindow;
 }

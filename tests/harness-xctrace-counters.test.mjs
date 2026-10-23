@@ -7,7 +7,7 @@ import os from "node:os";
 import path from "node:path";
 import test from "node:test";
 
-import { freeDiskGB, listKtraces, parseMetricRows, perKiloGuestCycles, recordingOptions, removeNewKtraces, threadMetrics, XCTRACE_MODES } from "../harness/lib/xctrace-counters.mjs";
+import { createKtraceJanitor, freeDiskGB, listKtraces, parseMetricRows, perKiloGuestCycles, recordingOptions, removeNewKtraces, threadMetrics, XCTRACE_MODES } from "../harness/lib/xctrace-counters.mjs";
 
 // MetricTable as `xctrace export` writes it: each value once (id), then refs.
 const thread = (id, tid, name) => `<thread id="${id}" fmt="${name}"><tid id="${id + 1}" fmt="0x${tid.toString(16)}">${tid}</tid><process id="${id + 2}" fmt="p (1)"><pid id="${id + 3}" fmt="1">1</pid></process></thread>`;
@@ -68,4 +68,20 @@ test("xctrace: the raw ktraces a window left in $TMPDIR are removed, unless held
   assert.ok(!existsSync(done));
   assert.ok(existsSync(old) && existsSync(open));
   assert.ok(freeDiskGB(dir) > 0);
+});
+
+test("xctrace: a ktrace still open at the end of its window is removed later, once closed", async () => {
+  const open = new Set(["/t/instrumentsA.ktrace"]), removed = [], logs = [];
+  const j = createKtraceJanitor({ isOpen: (f) => open.has(f), remove: (f) => removed.push(f), log: (m) => logs.push(m) });
+  j.add(["/t/instrumentsA.ktrace"]);
+  assert.deepEqual(j.sweep(), { removed: [], open: ["/t/instrumentsA.ktrace"] });
+  assert.deepEqual(removed, []);
+  open.clear(); // DTServiceHub let go
+  assert.deepEqual(await j.finish({ waitSec: 1, pollSec: 0.01 }), { ktraceLeft: [] });
+  assert.deepEqual(removed, ["/t/instrumentsA.ktrace"]);
+  assert.match(logs[0], /1 removed later, once closed/);
+  // Still open past the wait: left, with its path.
+  j.add(["/t/instrumentsB.ktrace"]);
+  open.add("/t/instrumentsB.ktrace");
+  assert.deepEqual(await j.finish({ waitSec: 0.05, pollSec: 0.01 }), { ktraceLeft: ["/t/instrumentsB.ktrace"] });
 });
