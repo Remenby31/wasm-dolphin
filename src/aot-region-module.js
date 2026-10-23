@@ -622,7 +622,7 @@ export function groupRegions(module, order, { maxFunctions = 100 } = {}) {
 // from 2 on (2: continuation fragments from a capped fragment's frontier,
 // aot-orchestrator translateWithContinuations), so that a cache built with
 // another formation is translated again rather than reused.
-export const REGION_FORMATION = 3; // 3: the frontier attributes a branch to the nearest held entry; continuations allocated by priority
+export const REGION_FORMATION = 4; // 3: frontier by nearest held entry, module budget by water-filling; 4: the plan's extra entries seed the frontier
 export async function regionModuleKey(functions, { compilerVersion, codegenMask, chain = false, formation = REGION_FORMATION }) {
   for (const [what, v] of [["compilerVersion", compilerVersion], ["codegenMask", codegenMask]]) {
     if (!Number.isInteger(v) || v < 0 || v > 0xffffffff) throw new Error(`region: ${what} must be a u32`);

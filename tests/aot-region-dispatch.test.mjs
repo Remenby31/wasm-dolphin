@@ -1130,7 +1130,8 @@ test("the region key changes with the formation", async () => {
   const parts = { compilerVersion: 5, codegenMask: 0 };
   assert.notEqual(await regionModuleKey(f, { ...parts, formation: 1 }), await regionModuleKey(f, { ...parts, formation: 2 }));
   assert.notEqual(await regionModuleKey(f, { ...parts, formation: 2 }), await regionModuleKey(f, { ...parts, formation: 3 }), "3: frontier rule and shared budget");
-  assert.equal(await regionModuleKey(f, parts), await regionModuleKey(f, { ...parts, formation: 3 }), "3 by default");
+  assert.notEqual(await regionModuleKey(f, { ...parts, formation: 3 }), await regionModuleKey(f, { ...parts, formation: 4 }), "4: extra entries seed the frontier");
+  assert.equal(await regionModuleKey(f, parts), await regionModuleKey(f, { ...parts, formation: 4 }), "4 by default");
 });
 
 
@@ -1307,4 +1308,33 @@ test("continuation budget: a large member gets an even share of what the module 
   const biggest = Math.max(...(shared.continuations ?? [{ code: [] }]).map((c) => c.code.length));
   assert.ok(alone.budgetCharged > 2000);
   assert.ok(shared.budgetCharged <= 2000 + biggest, `charged ${shared.budgetCharged}`);
+});
+
+// The plan's extra entries (jump-table targets, code pointers) seed the
+// frontier: a block only an indirect branch reaches (here, after a blr) is
+// held, and a bctr into it runs in the region like the interpreter. Without
+// them it was held by nothing, even in a function far from any cap (the race
+// scene's 0x80077044).
+test("continuations: an extra entry of the plan that no direct branch reaches is held, and runs like the interpreter", { skip: contSkip }, async () => {
+  const t = assemble(LONG, [
+    "entry", asm.addi(3, 3, 1), asm.blr(),
+    "extra", asm.addi(4, 4, 2), asm.cmplwi(4, 40), (pc, l) => asm.beq(pc, l.out), asm.addi(5, 5, 3), "out", asm.blr()
+  ]);
+  const ranges = loadWords(LONG, t.words);
+  const options = { mask: PRODUCTION_DISABLE_MASK, maxBlocks: 64, names: coreAssembleOptions(core.module)?.helperNames };
+  const held = (r) => new Set([r.fragment, ...(r.continuations ?? [])].flatMap((x) => x.entries));
+  const without = await translateWithContinuations(core.module, { entry: LONG, ranges, hash: null }, options);
+  assert.ok(!held(without).has(t.labels.extra), "a direct branch never reaches it");
+  const r = await translateWithContinuations(core.module, { entry: LONG, ranges, hash: null, extraEntries: [t.labels.extra] }, options);
+  assert.ok(held(r).has(t.labels.extra), "the extra entry is held");
+  assert.ok(!r.budgetCharged, "within the old single fragment's blocks: free");
+  core.module._DolphinWeb_AotForgetRegionsForTest?.();
+  const { bytes: mod, entries } = assembleRegion(claimEntries([r.fragment, ...r.continuations]), { helpers: HELPER_SIGNATURES, pcOffset: core.pcOffset, memoryPages: core.memoryPages });
+  core.setRegionsEnabled(true);
+  core.queueRegion(mod, entries.map(([pc]) => pc), [{ ranges, hash: null }]);
+  core.serviceRegions();
+  const reference = runCall(t.labels.extra, { regions: false });
+  const got = runCall(t.labels.extra, { regions: true });
+  assert.deepEqual(got.state, reference.state);
+  assert.equal(got.interpreted, 0, "entered at the extra entry, all in the region");
 });

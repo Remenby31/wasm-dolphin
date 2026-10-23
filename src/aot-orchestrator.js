@@ -442,9 +442,15 @@ const capped = (fragment, maxBlocks, maxFragmentBytes) => fragment.entries.lengt
 export async function translateWithContinuations(m, f, { mask, maxBlocks, names, maxContinuations = REGION_MAX_CONTINUATIONS,
   maxBytes = REGION_CONTINUATION_MAX_BYTES, maxFragmentBytes = REGION_FRAGMENT_MAX_BYTES, slice = async () => {} }) {
   const first = translateOne(m, f, { mask, maxBlocks, names });
-  if (!first.fragment || maxContinuations <= 0 || !capped(first.fragment, maxBlocks, maxFragmentBytes)) return first;
-  const branches = functionBranches(m, f.ranges);
+  if (!first.fragment || maxContinuations <= 0) return first;
   const owned = new Set(first.fragment.entries.map((pc) => pc >>> 0));
+  // The plan's extra entries (jump-table targets, resolved indirect targets,
+  // code pointers) that no direct branch reaches: seeds of the frontier, so
+  // a bctr into them stays in the region rather than leaving for code with
+  // none (the race scene's 0x80077044, a jump-table target of 0x80076eb8).
+  const seeds = (f.extraEntries ?? []).map((pc) => pc >>> 0).filter((pc) => !owned.has(pc) && f.ranges.some(([s, e]) => pc >= s && pc < e));
+  if (!seeds.length && !capped(first.fragment, maxBlocks, maxFragmentBytes)) return first;
+  const branches = functionBranches(m, f.ranges);
   const tried = new Set();
   const continuations = [];
   // The budget counts only what goes past the function's old single
@@ -457,7 +463,7 @@ export async function translateWithContinuations(m, f, { mask, maxBlocks, names,
   let freeBlocks = Math.max(0, REGION_UNCUT_BLOCKS - first.fragment.entries.length);
   let fnBytes = REGION_CONTINUATION_MAX_BYTES; // the function's own cap, over every grow
   let oversize = 0;
-  const next_ = () => frontier(branches, owned).filter((x) => !tried.has(x));
+  const next_ = () => [...new Set([...frontier(branches, owned), ...seeds])].filter((x) => !tried.has(x) && !owned.has(x)).sort((a, b) => a - b);
   // Continuations from the frontier until it is empty or `limit` bytes are
   // charged; what is left waiting is refused for lack of budget.
   const grow = async (limit) => {
