@@ -118,7 +118,10 @@ inline bool Read(const std::atomic<std::uint32_t>* port, State* out, int attempt
 // poll of a later frame window has reported it. A second tap of a button
 // still held by the latch is not merged into the first: it waits, the button
 // then reads released for one window, and the tap is reported again (up to
-// MAX_PENDING_TAPS queued per button).
+// MAX_PENDING_TAPS queued per button). The release window hides the button
+// from the current state too: presses revealed together while it is held
+// (the next packet says "held, 3 more presses") are still separate edges;
+// after the last one the held state shows again.
 class TapLatch
 {
 public:
@@ -161,7 +164,7 @@ public:
         }
       }
     }
-    const std::uint32_t reported = state_mask | m_latched;
+    const std::uint32_t reported = (state_mask & ~m_gap) | m_latched;
     for (int i = 0; i < DIRECT_PAD_BUTTONS; ++i)
     {
       const std::uint32_t bit = 1u << i;

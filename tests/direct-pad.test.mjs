@@ -4,7 +4,7 @@ import { mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join, resolve } from "node:path";
 import test from "node:test";
-import { DIRECT_PAD_LAYOUT, DIRECT_PAD_PORTS, DIRECT_PAD_SLOTS, DirectPad, SLOT } from "../src/direct-pad.js";
+import { DIRECT_PAD_LAYOUT, DIRECT_PAD_MAX_TAPS, DIRECT_PAD_PORTS, DIRECT_PAD_SLOTS, DirectPad, SLOT } from "../src/direct-pad.js";
 
 const root = resolve(import.meta.dirname, "..");
 const compiler = process.env.CXX || "c++";
@@ -178,6 +178,29 @@ test("SI poll side: three presses revealed at once are three presses for the gam
   }
 });
 
+// The same burst while A is still held: the next packet says "A held, 3 more
+// presses". The release windows between them must hide the held state, or
+// the game sees one long press.
+const heldProgram = countsProgram.replace("p[MASK] = 0;", "p[MASK] = 1u;").replace(
+  'std::printf("%u %u %u %u", p[PRESSES + 0].load(), p[PRESSES + 9].load(), p[TAPS].load(), p[TAPS_HIGH].load());',
+  'std::printf("%u %u", p[PRESSES + 0].load(), reported & 1u);'
+);
+
+test("SI poll side: three presses revealed while the button is held are three presses, then held", { skip: !hasCompiler && "no C++ compiler" }, () => {
+  const dir = mkdtempSync(join(tmpdir(), "direct-pad-held-"));
+  try {
+    writeFileSync(join(dir, "main.cpp"), heldProgram);
+    const exe = join(dir, "main");
+    const built = spawnSync(compiler, ["-std=c++20", "-I", join(root, "core/upstream"), join(dir, "main.cpp"), "-o", exe], { encoding: "utf8" });
+    assert.equal(built.status, 0, built.stderr);
+    const run = spawnSync(exe, { encoding: "utf8" });
+    // 3 edges of A, and A still reported pressed after the last one.
+    assert.equal(run.stdout.trim(), "3 1");
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
 test("page side: per-button tap counts, 4 bits each, added and saturated", () => {
   const memory = new SharedArrayBuffer(4096);
   const pad = new DirectPad(memory, 512, DIRECT_PAD_LAYOUT);
@@ -187,7 +210,7 @@ test("page side: per-button tap counts, 4 bits each, added and saturated", () =>
   pad.tap(1, [2, 0, 0, 0, 0, 0, 0, 0, 0, 3, 0, 0]);  // A twice more, D_DOWN 3
   assert.equal(v[b + SLOT.TAPS] & 0xf, 3);
   assert.equal((v[b + SLOT.TAPS_HIGH] >>> 4) & 0xf, 3);
-  pad.tap(1, [20]);                                  // saturates at 15
-  assert.equal(v[b + SLOT.TAPS] & 0xf, 15);
+  pad.tap(1, [20]);                                  // capped: what one poll can use
+  assert.equal(v[b + SLOT.TAPS] & 0xf, DIRECT_PAD_MAX_TAPS);
   assert.equal((v[b + SLOT.TAPS] >>> 4) & 0xf, 0, "no carry into B");
 });
