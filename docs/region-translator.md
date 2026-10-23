@@ -295,6 +295,47 @@ counted by `DolphinWeb_AotRegionsSkippedMmu`). MMU games keep the
 CachedInterpreter with `aot=1`. Lifted once faults are delivered from our
 code (deferred delivery on the slow paths: backlog).
 
+## Memory-access counts (patch 0117, 2026-10-22)
+
+`DolphinWeb_MemAccessStats(reset)` returns a 192-byte struct, layout v1
+agreed with the harness (`race-perf --mem-stats`): guest instructions,
+memory instructions by kind (integer, FP and paired-quantized loads and
+stores), slow accesses by kind, `cyclesCovered`/`cyclesTotal`, the regions'
+estimates and `staticSaturations`. `reset >= 0` zeroes it and turns counting
+on at the next slice boundary; the CPU thread writes the struct whole at each
+boundary, so read it as a seqlock (copies until two agree). The first reset
+clears the JIT cache: race-perf resets, waits `--mem-warm` seconds, then
+resets again for its window, so recompiles stay out of it. Slow accesses are
+counted once per instruction, after it ran, and not when it faulted.
+
+- **Blocks**: every block end (`EndBlock`, a `RunWasmBlock` that ends its
+  block) carries an index into interned static counts taken where its
+  downcount is, so the counts and the cycles they cover agree. Executions
+  that leave a block early (an exception, a halted wasm block) are not
+  counted and show in `cyclesCovered`.
+- **Slow accesses**: served by Dolphin's MMU or interpreter instead of a
+  direct RAM access: the emitter's `read_*`/`write_*`, `lfs`/`lfd`/`stfs`
+  helpers, memory instructions the helpers hand to the interpreter, the
+  cached interpreter's fast instructions outside MEM1, and the memory
+  instructions a cached-interpreter block interprets (static, every
+  execution). They include those of regions.
+- **Regions**: their cycles times their code's static accesses and
+  instructions per cycle, computed while counting (at install, or for every
+  installed region when counting starts). Added with the region stats on
+  only, so region dispatch is main's otherwise; race-perf resets both.
+- **Flags** (v1's spares, offsets 160 to 184): block instructions that write
+  a CR field, read one, set XER[CA], read it (the analyzer's `crOut`, `crIn`,
+  `outputCA`, `wantsCA`), for the lazy-CR lever
+  (research/deep-cr-flags.md). Blocks only, like the accesses.
+
+Cost with stats off: none on the block path. The counts ride on a
+`CountMemBlock` callback written before each block end only while stats are
+on; the reset clears the JIT cache so every block is emitted again with it
+(a first version that tested a flag in `EndBlock` cost 2 % on the race). The
+slow-path counters sit in the MMU arms and the helpers. Tests:
+`tests/mem-access-stats.test.mjs` (the Node core has no CachedInterpreter
+instance: block counts are checked in a browser run).
+
 ## Installs in the throttle sleep (patch 0107, 2026-10-22)
 
 Installing a region is a synchronous `new WebAssembly.Module` on the CPU

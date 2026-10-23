@@ -53,11 +53,17 @@ export function decodeMemStats(bytes) {
   return out;
 }
 
+// The two copies as a seqlock: the core writes the struct whole at a slice
+// boundary, so a copy is trusted only when the next one is identical (the
+// worker copies again until two agree). Counters going backwards between them
+// are a torn read; any other difference, a write in between.
 export function consistentMemRead(a, b) {
   if (a.error) return a;
   if (b.error) return b;
   const back = MONOTONIC.filter((f) => b[f] < a[f]);
-  return back.length ? { error: `memory access stats: torn read (${back.join(", ")} went backwards)` } : a;
+  if (back.length) return { error: `memory access stats: torn read (${back.join(", ")} went backwards)` };
+  const moved = F64.filter((f) => b[f] !== a[f]);
+  return moved.length ? { error: `memory access stats: written between the two copies (${moved.join(", ")})` } : a;
 }
 
 // Several windows added up (ratios of sums, not medians of ratios).
