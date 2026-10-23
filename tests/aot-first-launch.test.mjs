@@ -613,3 +613,37 @@ test("the translator's yield is one event-loop turn, chained without the timer c
   assert.ok(ms < 200, `200 chained yields in ${ms.toFixed(1)} ms (a clamped timer chain takes ≥ 800 ms in a browser)`);
 });
 
+
+test("the profile sampler needs a shared heap and a PC address; it drains what it counted since the last drain, and blocks while paused", async () => {
+  const { startHotSampler } = await import("../src/aot-hot-sampler.js");
+  assert.equal(startHotSampler({ buffer: new ArrayBuffer(16), pcAddress: 8 }), null);
+  assert.equal(startHotSampler({ buffer: new SharedArrayBuffer(16), pcAddress: 0 }), null);
+  // A stand-in worker: what it posts is counted, drained once.
+  let worker, ctl;
+  const sampler = startHotSampler({ buffer: new SharedArrayBuffer(16), pcAddress: 8, createWorker: () => (worker = { postMessage(m) { ctl = new Int32Array(m.ctl); }, terminate() {} }) });
+  worker.onmessage({ data: [[0x80003100, 3], [0x80003104, 1]] });
+  worker.onmessage({ data: [[0x80003100, 2]] });
+  assert.deepEqual(sampler.drain(), [[0x80003100, 5], [0x80003104, 1]]);
+  assert.deepEqual(sampler.drain(), []);
+  sampler.pause();
+  assert.equal(Atomics.load(ctl, 1), 1, "paused: the worker blocks on this word");
+  sampler.resume();
+  assert.equal(Atomics.load(ctl, 1), 0);
+  sampler.stop();
+  assert.equal(Atomics.load(ctl, 0), 1);
+});
+
+// Review of #165: two records in flight (a remount during the minute's
+// record) count the session once; a failed first record does not use it up.
+test("the profile recorder counts a session once, whatever the records in flight", async () => {
+  const { createProfileRecorder } = await import("../src/aot-hot-sampler.js");
+  const { blocksFromPcSamples } = await import("../src/aot-profile.js");
+  const calls = [];
+  let fail = true;
+  const store = { record: async (key, blocks, { newSession }) => { await new Promise((r) => setTimeout(r, 5)); if (fail) { fail = false; throw new Error("quota"); } calls.push(newSession); return {}; } };
+  const record = createProfileRecorder({ store, discKey: "disc", blocksFromPcSamples });
+  assert.equal(await record([[0x80003100, 1]]), null, "the first record failed");
+  await Promise.all([record([[0x80003100, 1]]), record([[0x80003104, 1]])]);
+  assert.deepEqual(calls, [true, false], "one new session, then additions");
+  assert.equal(await record([]), null, "nothing to record");
+});
