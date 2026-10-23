@@ -17,6 +17,8 @@
 // PC extrapolation, the discovery coverage, the memory cost), or "n/a".
 
 // What a result file is, from its content (never from its directory name).
+import { gameFpsTarget } from "./matrix.mjs";
+
 export function classify(json, file = "") {
   if (!json || typeof json !== "object") return null;
   if (json.locked === false) return null; // a plumbing check (--no-lock), not a measure
@@ -190,9 +192,10 @@ export const KPI_ROWS = [
   // The product KPI (judge, 2026-10-23): with SyncOnSkipIdle off the
   // product's emulated time runs ahead of its rendering, so its speed and
   // headroom overstate it; what the player gets is the game images per host
-  // second. Target: 95 % of a 60 fps game.
-  { id: "macGameFpsProduct", group: "Leviers", label: "Images de jeu utiles par seconde, Mac M4 Pro, config produit", target: 57, unit: "i/s", better: "higher", from: "race-perf", config: "product", read: (j, s) => med(cold(j, s)?.gameFramesPerSecond), why: headroomWhy, failures: raceFailures },
-  { id: "macGameFpsProductAot", group: "Leviers", label: "Images de jeu utiles par seconde, config produit avec aot=1 (trajectoire, hors statut global)", target: 57, unit: "i/s", better: "higher", from: "race-perf", config: "productAot", counted: false, read: (j, s) => med(cold(j, s)?.gameFramesPerSecond), why: headroomWhy, failures: raceFailures },
+  // second. Target: 95 % of the scene's native rate (matrix.mjs
+  // SCENE_NATIVE_FRAMES_PER_VI, measured on a coupled reference).
+  { id: "macGameFpsProduct", group: "Leviers", label: "Images de jeu utiles par seconde, Mac M4 Pro, config produit", target: null, targetOf: (j) => gameFpsTarget(j.state), unit: "i/s", better: "higher", from: "race-perf", config: "product", read: (j, s) => med(cold(j, s)?.gameFramesPerSecond), why: headroomWhy, failures: raceFailures },
+  { id: "macGameFpsProductAot", group: "Leviers", label: "Images de jeu utiles par seconde, config produit avec aot=1 (trajectoire, hors statut global)", target: null, targetOf: (j) => gameFpsTarget(j.state), unit: "i/s", better: "higher", from: "race-perf", config: "productAot", counted: false, read: (j, s) => med(cold(j, s)?.gameFramesPerSecond), why: headroomWhy, failures: raceFailures },
   { id: "macHeadroomProduct", group: "Leviers", label: "Marge Mac M4 Pro, config produit (headroom à speed=1, découplée tant que SyncOnSkipIdle=false, hors statut global)", target: 160, unit: "%", better: "higher", from: "race-perf", config: "product", counted: false, read: headroomPct, why: headroomWhy, failures: raceFailures },
   { id: "macHeadroomProductAot", group: "Leviers", label: "Marge Mac M4 Pro, config produit avec aot=1 (trajectoire, hors statut global)", target: 160, unit: "%", better: "higher", from: "race-perf", config: "productAot", counted: false, read: headroomPct, why: headroomWhy, failures: raceFailures },
   { id: "macHeadroom", group: "Leviers", label: "Marge Mac M4 Pro, rendu matériel wgpu (KPI CPU/GPU en mode couplé)", target: 160, unit: "%", better: "higher", from: "race-perf", config: "default", read: headroomPct, why: headroomWhy, failures: raceFailures },
@@ -264,6 +267,12 @@ export function kpiTable(results, manual = {}, { trunk = new Set(), accept = { "
     const failures = row.failures?.(r.json, t.side, r.kind) ?? [];
     if (failures.length) return { ...base, value, status: "KO", nature: "measured", ...source, why: `${failures.length} run(s) en échec : ${failures.join(" ; ")}` };
     if (value == null) return { ...base, value: null, status: "n/a", nature: "n/a", ...source, why: row.why?.(r.json, t.side) ?? "valeur absente du résultat" };
+    // A target that depends on the scene (targetOf): taken from the result.
+    if (row.targetOf) {
+      const target = row.targetOf(r.json);
+      if (target == null) return { ...base, value, status: "n/a", nature: "measured", ...source, why: `scène ${r.json.state ?? "?"} sans référence d'images par VI mesurée (matrix.mjs SCENE_NATIVE_FRAMES_PER_VI)` };
+      return { ...base, target, value, status: statusOf(meets({ ...row, target }, value)), nature: "measured", ...source, detail: row.detail?.(r.json, t.side, r.kind) ?? `cible ${target} i/s = 95 % du rythme natif de la scène ${r.json.state}` };
+    }
     return { ...base, value, status: statusOf(meets(row, value)), nature: "measured", ...source, detail: row.detail?.(r.json, t.side, r.kind) ?? null };
   });
 }
@@ -296,7 +305,8 @@ export function candidateColumn(r, { label = null, note = null } = {}) {
     if (!fitsConfig(r, "candidate", row.config)) continue;
     const value = row.read(r.json, "candidate", r.kind);
     const failures = row.failures?.(r.json, "candidate", r.kind) ?? [];
-    values[row.id] = { value, status: failures.length ? "KO" : statusOf(meets(row, value)), why: failures.length ? `${failures.length} run(s) en échec` : value == null ? row.why?.(r.json, "candidate") ?? null : null };
+    const rowT = row.targetOf ? { ...row, target: row.targetOf(r.json) } : row;
+    values[row.id] = { value, status: failures.length ? "KO" : statusOf(rowT.target == null && row.targetOf ? null : meets(rowT, value)), why: failures.length ? `${failures.length} run(s) en échec` : value == null ? row.why?.(r.json, "candidate") ?? null : null };
   }
   return { ...header, values };
 }

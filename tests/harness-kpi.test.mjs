@@ -404,8 +404,29 @@ test("KPI: the headroom row reads race-perf --headroom, only where the throttle 
 test("KPI: useful game images per second, the product KPI", () => {
   const r = race("2026-10-23T05:00:00Z", { speed: 99.9, extra: { query: "video=software&presenter=webgpu&pacing=tick&speed=1&metrics=1", served: { candidate: served("T1") } } });
   r.json.candidate.cold = { ...r.json.candidate.cold, headroom: { median: 1.41 }, headroomApplies: true, gameFramesPerSecond: { median: 6.9 } };
-  const row = kpiTable([r], {}, { trunk: TRUNK }).find((x) => x.id === "macGameFpsProduct");
-  assert.deepEqual([row.value, row.status, row.counted], [6.9, "KO", true]);
+  const rowOf = (state, fps) => {
+    r.json.state = state;
+    r.json.candidate.cold.gameFramesPerSecond = { median: fps };
+    return kpiTable([r], {}, { trunk: TRUNK }).find((x) => x.id === "macGameFpsProduct");
+  };
+  // The race renders at 60 frames/s natively (1.00 per VI): target 57.
+  const race60 = rowOf("race-after.sav", 6.9);
+  assert.deepEqual([race60.value, race60.target, race60.status, race60.counted], [6.9, 57, "KO", true]);
+  assert.equal(rowOf("race-after.sav", 58).status, "OK");
+  // A scene without a measured reference: no target, no verdict.
+  const unknown = rowOf("menu.sav", 30);
+  assert.equal(unknown.status, "n/a");
+  assert.match(unknown.why, /sans référence d'images par VI mesurée/);
+});
+
+test("matrix: each KPI scene's target is 95 % of its measured native rate", async () => {
+  const { gameFpsTarget, SCENE_NATIVE_FRAMES_PER_VI } = await import("../harness/lib/matrix.mjs");
+  assert.equal(gameFpsTarget("race-after.sav"), 57);
+  assert.equal(gameFpsTarget("heavy-intro-13s.sav"), 57);
+  assert.equal(gameFpsTarget("nope.sav"), null);
+  // A 30-frame scene (0.5 per VI) would be held to 28.5, not 57.
+  assert.equal(Math.round(0.95 * 60 * 0.5 * 10) / 10, 28.5);
+  for (const ref of Object.values(SCENE_NATIVE_FRAMES_PER_VI)) assert.match(ref.measured, /^measures\/headroom\//);
 });
 
 test("KPI: a candidate column beside trunk, never in its place", (t) => {
