@@ -320,6 +320,11 @@ Patch 0122: with larger modules (continuation fragments) the estimate ran
 short, up to 2.2 ms past a deadline. The installability checks are now learned
 per byte too and added to the estimate, both rates learn from every module of
 64 KB or more (not 256 KB), and in a sleep the time left is read again before
-each install, the next module counted ×1.5 plus the 1 ms margin. If p95 > 3 ms remains, the
+each install, the next module counted ×1.5 plus the 1 ms margin.
+Patch 0125: a CPU-bound scene never sleeps (throttleSleepShare 0 in an intro
+scene), so every ready module waited the full 2 s there. When the CPU thread
+has had no throttle sleep for 500 ms, emulation is late and a ready module
+installs at the next slice boundary without waiting (counted:
+`DolphinWeb_AotRegionLateInstalls`). If p95 > 3 ms remains, the
 next lever is a size cap with split modules (coordinated with dispatch: lever
 C and #75's chaining are intra-module).

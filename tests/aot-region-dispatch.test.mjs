@@ -782,11 +782,13 @@ function withLargeModules(plan, fn) {
   // Each module estimated at 3 ms or more: too large for a slice.
   const saved = core.module._DolphinWeb_AotSetInstallCostForTest(3 / Math.min(...sizes));
   core.module._DolphinWeb_AotSetSleepWaitForTest(2000); // the production wait
+  core.module._DolphinWeb_AotSetNoSleepSpanForTest?.(1e9); // 0125: never "late" here (no throttle in Node)
   try {
     return fn(3 * Math.max(...sizes) / Math.min(...sizes) * sizes.length);
   } finally {
     core.module._DolphinWeb_AotSetInstallCostForTest(saved);
     core.module._DolphinWeb_AotSetSleepWaitForTest(2000);
+    core.module._DolphinWeb_AotSetNoSleepSpanForTest?.(500);
   }
 }
 const spin = (ms) => { const end = performance.now() + ms; while (performance.now() < end); };
@@ -818,6 +820,7 @@ test("any ready module waits for a sleep window: with #86 the boot window is pla
     const plan = setup();
     core.setRegionsEnabled(true);
     core.module._DolphinWeb_AotSetSleepWaitForTest(2000);
+    core.module._DolphinWeb_AotSetNoSleepSpanForTest?.(1e9);
     const before = core.regionCount();
     const entries = queueAll(plan);
     core.serviceRegions();
@@ -874,3 +877,29 @@ test("a large module's sleep wait counts from when it became installable; past i
     });
   });
 });
+
+// Patch 0125: emulation that has not slept for the no-sleep span runs late
+// (a CPU-bound scene never sleeps): a ready module installs at the next slice
+// instead of waiting 2 s for a sleep that will not come.
+const lateSkip = largeSkip || (typeof core?.module._DolphinWeb_AotSetNoSleepSpanForTest !== "function" && "core without 0125");
+test("with no throttle sleep lately, a ready module installs at the next slice without the sleep wait", { skip: lateSkip }, () => {
+  withOffThreadCompile((requests) => {
+    const plan = setup();
+    core.setRegionsEnabled(true);
+    core.module._DolphinWeb_AotSetSleepWaitForTest(2000);
+    core.module._DolphinWeb_AotSetNoSleepSpanForTest(0); // late at once
+    try {
+      const before = core.regionCount();
+      const late = core.module._DolphinWeb_AotRegionLateInstalls();
+      const entries = queueAll(plan);
+      core.serviceRegions();
+      for (const r of requests()) Atomics.store(core.module.HEAPU8, r.readyPtr + r.readySlot, 1);
+      for (let slice = 0; slice < 50 && core.regionCount() < before + entries; slice++) core.serviceRegions();
+      assert.equal(core.regionCount(), before + entries, "installed in slices, no 2 s wait");
+      assert.ok(core.module._DolphinWeb_AotRegionLateInstalls() > late, "counted as late installs");
+    } finally {
+      core.module._DolphinWeb_AotSetNoSleepSpanForTest(500);
+    }
+  });
+});
+

@@ -1,0 +1,75 @@
+diff --git a/Source/Core/Core/PowerPC/CachedInterpreter/CachedInterpreter.cpp b/Source/Core/Core/PowerPC/CachedInterpreter/CachedInterpreter.cpp
+--- a/Source/Core/Core/PowerPC/CachedInterpreter/CachedInterpreter.cpp
++++ b/Source/Core/Core/PowerPC/CachedInterpreter/CachedInterpreter.cpp
+@@ -9479,6 +9479,13 @@ std::chrono::milliseconds s_region_sleep_wait{2000};  // tests change it
+ // can be off by the jitter measured on the bench).
+ constexpr double REGION_SLEEP_MARGIN_MS = 1.0;
+ std::atomic<bool> s_region_core_active{false};  // a CachedInterpreter runs
++// Patch 0125: the last throttle sleep of the CPU thread. Emulation that has
++// not slept for this long runs late (a CPU-bound scene: throttleSleepShare 0
++// measured in an intro scene): no sleep window will come, and a ready module
++// installs at the next slice boundary instead of waiting the sleep wait out.
++std::optional<std::chrono::steady_clock::time_point> s_region_last_sleep;
++std::chrono::milliseconds s_region_no_sleep_span{500};  // tests change it
++u32 s_region_late_installs = 0;  // installs that did not wait (no sleep lately)
+ u32 s_region_sleep_installs = 0;     // installs done in throttle sleeps
+ double s_region_sleep_used_ms = 0;   // host time they took
+ // The worst lateness past the sleep's deadline after its installs: the frame
+@@ -9669,6 +9676,8 @@ void ForgetAllRegions()
+   s_region_sleep_used_ms = 0;
+   s_region_sleep_overshoot_max_ms = 0;
+   s_region_sleep_wait_expired = 0;
++  s_region_last_sleep.reset();
++  s_region_late_installs = 0;
+   std::lock_guard lock(s_region_queue_mutex);
+   s_region_queue.clear();
+   s_region_queue_nonempty.store(false, std::memory_order_release);
+@@ -9864,6 +9873,14 @@ void ServiceRegionInstalls(std::optional<std::chrono::steady_clock::time_point>
+   const auto may_wait_for_sleep = [&](PendingRegion& pending) {
+     if (deadline)
+       return false;
++    // Running late: no sleep for s_region_no_sleep_span (counted from the
++    // first slice when none came yet), so none to wait for.
++    if (now - std::max(s_region_last_sleep.value_or(*s_region_service_start), *s_region_service_start) >=
++        s_region_no_sleep_span)
++    {
++      s_region_late_installs += 1;
++      return false;
++    }
+     if (!pending.installable_since)
+       pending.installable_since = now;
+     if (now - *pending.installable_since < s_region_sleep_wait)
+@@ -10399,9 +10416,11 @@ void DolphinWeb_RegionInstallsWhileIdle(std::chrono::steady_clock::time_point de
+ {
+   // Any CPU core sleeps here (Interpreter, FifoPlayer): only the
+   // CachedInterpreter runs regions.
+-  if (s_regions_enabled.load(std::memory_order_relaxed) &&
+-      s_region_core_active.load(std::memory_order_relaxed))
+-    ServiceRegionInstalls(deadline);
++  if (!s_regions_enabled.load(std::memory_order_relaxed) ||
++      !s_region_core_active.load(std::memory_order_relaxed))
++    return;
++  s_region_last_sleep = std::chrono::steady_clock::now();
++  ServiceRegionInstalls(deadline);
+ }
+ 
+ // Tests: a sleep window of `ms` from now, as the throttle would give it.
+@@ -10418,6 +10437,18 @@ extern "C" EMSCRIPTEN_KEEPALIVE void DolphinWeb_AotSetSleepWaitForTest(int ms)
+   s_region_sleep_wait = std::chrono::milliseconds(ms);
+ }
+ 
++// Tests: how long without a throttle sleep makes emulation late (0125, ms).
++extern "C" EMSCRIPTEN_KEEPALIVE void DolphinWeb_AotSetNoSleepSpanForTest(int ms)
++{
++  s_region_no_sleep_span = std::chrono::milliseconds(ms);
++}
++
++// Installs that did not wait for a sleep because emulation ran late (0125).
++extern "C" EMSCRIPTEN_KEEPALIVE u32 DolphinWeb_AotRegionLateInstalls()
++{
++  return s_region_late_installs;
++}
++
+ // Tests: the estimated install cost per module byte (ms), so that a test
+ // module counts as one too large for a slice.
+ extern "C" EMSCRIPTEN_KEEPALIVE double DolphinWeb_AotSetInstallCostForTest(double ms_per_byte)
