@@ -71,7 +71,7 @@ test("ramp summary: medians over the good runs, overloaded runs apart, failures 
 });
 
 test("ramp KPI rows: one per scene, game-frame results only, max-load 6 at most, a run under 90 % fails the row", () => {
-  const summary = (scene, extra = {}) => ({ kind: "first-launch-ramp", file: scene, json: { probe: "first-launch-ramp", scene, metric: "game", at: "2026-10-23T02:00:00Z", maxLoad: 6, chrome: { path: "chrome stable", args: "" },
+  const summary = (scene, extra = {}) => ({ kind: "first-launch-ramp", file: scene, json: { probe: "first-launch-ramp", scene, metric: "game", query: "core=upstream&video=software&aot=1&metrics=1", at: "2026-10-23T02:00:00Z", maxLoad: 6, chrome: { path: "chrome stable", args: "" },
     served: { commit: "T1", dirty: false }, windowSec: 60, timeTo90Ms: { median: 12000 }, timeToFullMs: { median: 14000 }, plateauSpeed: { median: 99 }, timeToTail90Ms: { median: 12000 }, regionsAt90: { median: 40 }, regionsAtEnd: { median: 80 },
     vi: { plateauSpeed: { median: 100 } }, failed: [], ...extra } });
   const rows = (results) => Object.fromEntries(kpiTable(results, {}, { trunk: new Set(["T1"]) }).map((r) => [r.id, r]));
@@ -85,6 +85,12 @@ test("ramp KPI rows: one per scene, game-frame results only, max-load 6 at most,
   const day = rows([summary("race", { maxLoad: 12 })]);
   assert.equal(day.firstLaunchRampRace.status, "n/a");
   assert.match(day.firstLaunchRampRace.why, /hors règle/);
+  // A wgpu + aot=1 result feeds the wgpu rows only (the target product after 0116).
+  const wgpu = rows([summary("race", { query: "core=upstream&video=wgpu&aot=1&metrics=1", timeTo90Ms: { median: 3000 } })]);
+  assert.equal(wgpu.firstLaunchRampRaceWgpu.value, 3000);
+  assert.equal(wgpu.firstLaunchRampRaceWgpu.counted, false);
+  assert.equal(wgpu.firstLaunchRampRace.status, "n/a");
+  assert.equal(both.firstLaunchRampRaceWgpu.status, "n/a");
   // The first version's results (VI speed only) never feed the rows.
   const old = rows([summary("race", { metric: undefined })]);
   assert.equal(old.firstLaunchRampRace.status, "n/a");
