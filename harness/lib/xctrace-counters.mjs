@@ -142,6 +142,42 @@ function heldOpen(file) {
   try { execFileSync("lsof", ["-t", file], { stdio: ["ignore", "pipe", "ignore"] }); return true; } catch { return false; }
 }
 
+// Xcode's DTServiceHub keeps the last ktrace of a recording open, and does
+// not exit while race-perf waits (hours, for a calm machine: 3.7 GB held
+// 2026-10-23). A hub that holds only ktraces our windows created was
+// started for our recordings: it is stopped (SIGTERM; the next recording
+// starts another), so the file closes. Returns the pids stopped.
+export function releaseOurHub(files, { holders = ktraceHolders, kill = (pid) => process.kill(pid, "SIGTERM") } = {}) {
+  const ours = new Set(files);
+  const stopped = [];
+  for (const [pid, info] of holders(files)) {
+    if (!/DTServiceHub/.test(info.command)) continue;
+    if (!info.ktraces.every((f) => ours.has(f))) continue; // holds someone else's too: left alone
+    try { kill(pid); stopped.push(pid); } catch {}
+  }
+  return stopped;
+}
+
+// pid -> { command, ktraces it holds } for the holders of `files` (lsof).
+function ktraceHolders(files) {
+  const out = new Map();
+  for (const f of files) {
+    let pids = [];
+    try { pids = execFileSync("lsof", ["-t", f], { encoding: "utf8" }).split("\n").filter(Boolean).map(Number); } catch {}
+    for (const pid of pids) {
+      if (out.has(pid)) continue;
+      let command = "", ktraces = [];
+      try { command = execFileSync("ps", ["-o", "comm=", "-p", String(pid)], { encoding: "utf8" }).trim(); } catch {}
+      try {
+        ktraces = execFileSync("lsof", ["-Fn", "-p", String(pid)], { encoding: "utf8", maxBuffer: 64 << 20 })
+          .split("\n").filter((l) => /^n.*instruments.*\.ktrace$/.test(l)).map((l) => l.slice(1).replace(/^\/private/, ""));
+      } catch {}
+      out.set(pid, { command, ktraces });
+    }
+  }
+  return out;
+}
+
 // Deletes the ktraces in `after` but not in `before` that nobody holds open.
 export function removeNewKtraces(before, after, { isOpen = heldOpen, remove = (f) => rmSync(f, { force: true }), sizeOf = (f) => statSync(f).size } = {}) {
   const was = new Set(before);
@@ -266,6 +302,11 @@ export function xctraceCounters({ mode = "delivery", pidOf, readyTimeoutMs = 600
       rmSync(c.trace, { recursive: true, force: true });
       const k = removeNewKtraces(c.ktraces, listKtraces());
       janitor.add(k.keptOpen);
+      // The hub that holds them, if it holds only ours: stopped now.
+      if (k.keptOpen.length) {
+        const stopped = releaseOurHub(k.keptOpen);
+        if (stopped.length) { console.log(`[xctrace] stopped DTServiceHub ${stopped.join(" ")} (held only this window's ktrace)`); await new Promise((r) => setTimeout(r, 2000)); }
+      }
       if (k.removed.length || k.keptOpen.length) console.log(`[xctrace] ktrace: ${k.removed.length} removed (${k.removedMB} MB)${k.keptOpen.length ? `, ${k.keptOpen.length} still open, removed once closed: ${k.keptOpen.join(" ")}` : ""}`);
       sweep();
     }
