@@ -624,3 +624,11 @@ test("race-perf: pairs on the warm windows and on cycles per guest cycle", () =>
   assert.equal(pairedSpeedChange(runs, { phase: "warm" }).median, 10);
   assert.equal(pairedSpeedChange(runs).median, 0, "cold speed by default");
 });
+
+test("race-perf --pc-raw: every sampled PC of the window with its count, hottest first", async () => {
+  const { pcHistogramOf } = await import("../harness/probes/race-perf.mjs");
+  const counts = new Map([[0x800a9774, 12], [0x80001000, 40], [0x8017b940, 3]]);
+  assert.deepEqual(pcHistogramOf({ counts }), [["0x80001000", 40], ["0x800a9774", 12], ["0x8017b940", 3]]);
+  assert.deepEqual(pcHistogramOf({ counts: [[0x10, 1]] }), [["0x00000010", 1]], "pairs too, padded to 8 hex digits");
+  assert.deepEqual(pcHistogramOf({}), []);
+});
