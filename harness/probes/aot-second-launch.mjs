@@ -125,7 +125,8 @@ async function launchOnce(profileDir) {
         // (0 first attempt, 1 after the ready byte, 2 cold); a sleep install is
         // one of them too, so the worst one bounds the worst slice from above.
         const samples = Array.isArray(r?.installSamples) ? r.installSamples : [];
-        result.installSamples = { count: samples.length, worstMs: samples.length ? Math.max(...samples.map((x) => x[0])) : null, over3Ms: samples.filter((x) => x[0] > 3).length };
+        const ms = samples.map((x) => x[0]).sort((a, b) => a - b);
+        result.installSamples = { count: ms.length, p95Ms: ms.length ? ms[Math.min(ms.length - 1, Math.ceil(0.95 * ms.length) - 1)] : null, worstMs: ms.at(-1) ?? null, over3Ms: ms.filter((x) => x > 3).length };
         result.aot = aotLaunchInfo(await workerRequest(page, "validationReadAotProgress", {}, 10000).catch(() => null));
       })(),
       (async () => { while (!stop) await new Promise((res) => setTimeout(res, 500)); throw new Error(`over ${values["cap-mb"]} MB`); })(),
