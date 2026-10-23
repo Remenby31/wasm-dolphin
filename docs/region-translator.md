@@ -294,3 +294,13 @@ cache translated in a session without the MMU (`RegionInstallable`,
 counted by `DolphinWeb_AotRegionsSkippedMmu`). MMU games keep the
 CachedInterpreter with `aot=1`. Lifted once faults are delivered from our
 code (deferred delivery on the slow paths: backlog).
+
+## Fragment size cap (patch 0115, 2026-10-23)
+
+A fragment stops taking blocks once it holds 400 KB of code (the blocks'
+bodies and their tails); the blocks left out run outside the region. In a
+race on main, the three fragments of more than ~1.7 MB of Liftoff code
+(about 500 KB of body) never reached TurboFan in 157 s, while fragments of
+570 to 760 KB of Liftoff code did: V8's optimizing tier gives up on
+functions that big. Compiler version 13 (6 to 12 are taken by the region
+codegen patches 0105 to 0114).

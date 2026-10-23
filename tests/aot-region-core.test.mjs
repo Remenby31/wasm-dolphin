@@ -171,3 +171,31 @@ test("under the MMU the translator refuses every entry, and translates again onc
   }
   assert.ok(core.translate(DOUBLE), "translated with the MMU off");
 });
+
+// 0115: a fragment stops taking blocks past 400 KB of code (V8's optimizing
+// tier gives up on bigger functions). 64 blocks of 120 loads and stores
+// would make far more; the fragment keeps a prefix of them under the cap.
+const BIG_TEXT = 0x80020100;
+const compilerVersion = () => {
+  if (typeof core?.module?._DolphinWeb_AotKeyParts !== "function") return 0;
+  const p = core.module._malloc(8);
+  try { core.module._DolphinWeb_AotKeyParts(p); return new Uint32Array(core.module.HEAPU8.buffer, p, 2)[0]; } finally { core.module._free(p); }
+};
+test("a fragment stops taking blocks past 400 KB of code (0115)", { skip: skip || (compilerVersion() < 13 && "core before 0115 (compiler version < 13)") }, () => {
+  const cmpwi0 = (a) => (11 << 26) | (a << 16);
+  const items = ["big"];
+  for (let b = 0; b < 64; b++) {
+    for (let k = 0; k < 60; k++) items.push(lwz(5, 1, 8), stw(5, 1, 12));
+    items.push(cmpwi0(3), ((pc, l) => asm.beq(pc, l[`b${b + 1}`])), `b${b + 1}`);
+  }
+  items.push(asm.blr());
+  const big = assemble(BIG_TEXT, items);
+  const dol = buildDol({ textAddr: BIG_TEXT, text: big.words, entry: big.labels.big });
+  const { image } = imageFromDol(dol);
+  for (const s of image.segments) core.load(s.start, s.bytes);
+  const fragment = core.translate(big.labels.big, { ranges: [[BIG_TEXT, BIG_TEXT + 4 * big.words.length]], maxBlocks: 256 });
+  assert.ok(fragment, "translated");
+  if (fragment.code.length < 400000) return; // a translator that emits less per op stays under the cap whole
+  assert.ok(fragment.entries.length < 65, `${fragment.entries.length} blocks`);
+  assert.ok(fragment.code.length < 400000 + 80000, `${fragment.code.length} bytes`);
+});
