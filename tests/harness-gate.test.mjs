@@ -168,7 +168,8 @@ test("the committed known-failures.json parses for both gates", async () => {
   const { readFileSync } = await import("node:fs");
   const known = JSON.parse(readFileSync(new URL("../harness/known-failures.json", import.meta.url), "utf8"));
   assert.doesNotThrow(() => expectedFailures(known));
-  assert.ok(expectedFailures(known).has("efbpeek/wgpu-interp\u0000render"));
+  // The readback landed (patch 0093): efbpeek on wgpu passes, so its entry is gone.
+  assert.equal(expectedFailures(known).has("efbpeek/wgpu-interp\u0000render"), false);
 });
 
 test("fuzz and pads findings: new kinds regress, a missing result is inconclusive", () => {

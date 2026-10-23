@@ -25,7 +25,7 @@
       "commit": "01e0577914a75a2569c846778c2f93aa8e6feddd"
     }
   },
-  "patchSeriesSha256": "6e2a6cfb2a33d64c92b82b94d32cf50912520942fee393cb02dbf9c3ff6db2be",
+  "patchSeriesSha256": "54d77145bc3091eaa52384b3c6c16baabde4d3355c579b5cf89d47676b826eed",
   "patches": [
     {
       "order": 1,
@@ -687,12 +687,20 @@
       "order": 83,
       "cwd": ".",
       "hashMode": "lf-normalized",
+      "path": "patches/dolphin-wasm/snapshot/0093-webgpu-staging-readback.patch",
+      "size": 12216,
+      "sha256": "a5f1cc8654a0e7d0ea19ab1ca40b2cc046137263dd8f55799f7a197c0c4e054b"
+    },
+    {
+      "order": 84,
+      "cwd": ".",
+      "hashMode": "lf-normalized",
       "path": "patches/dolphin-wasm/snapshot/0094-present-sleep-until-on-video-thread.patch",
       "size": 2434,
       "sha256": "e0caebd7a85161d580ed4b4876335fd060a8b127953899208f6240404eaa7673"
     },
     {
-      "order": 84,
+      "order": 85,
       "cwd": ".",
       "hashMode": "lf-normalized",
       "path": "patches/dolphin-wasm/snapshot/0095-rumble-hook.patch",
@@ -700,7 +708,7 @@
       "sha256": "833790160fc3f2b929c5c914c91f257a30e52eb4f714a2f8af64d1ad4ac4273f"
     },
     {
-      "order": 85,
+      "order": 86,
       "cwd": ".",
       "hashMode": "lf-normalized",
       "path": "patches/dolphin-wasm/snapshot/0097-embed-filtered-gamesettings.patch",
@@ -708,7 +716,7 @@
       "sha256": "6726edf3d4ff8937f77085e593020d9f351444e0b02d4c75e2cdea510fefc5a0"
     },
     {
-      "order": 86,
+      "order": 87,
       "cwd": ".",
       "hashMode": "lf-normalized",
       "path": "patches/dolphin-wasm/snapshot/0098-gpu-thread-spin-budget.patch",
@@ -716,7 +724,7 @@
       "sha256": "91d1793c85456481cd34c58e28e02d379868687bead56dffb62b85c4f5118abd"
     },
     {
-      "order": 87,
+      "order": 88,
       "cwd": ".",
       "hashMode": "lf-normalized",
       "path": "patches/dolphin-wasm/snapshot/0099-ax-hle-timing.patch",
@@ -724,7 +732,7 @@
       "sha256": "fcf883f10294f89b4660891765bba842259213b7ebebbf80e6815cb0b083f6b5"
     },
     {
-      "order": 88,
+      "order": 89,
       "cwd": ".",
       "hashMode": "lf-normalized",
       "path": "patches/dolphin-wasm/snapshot/0102-region-chaining.patch",
@@ -732,7 +740,7 @@
       "sha256": "7938d117b7a9eee9df929d52ceaaebfd5f41af2e463b933b89e9ed25126adb27"
     },
     {
-      "order": 89,
+      "order": 90,
       "cwd": ".",
       "hashMode": "lf-normalized",
       "path": "patches/dolphin-wasm/snapshot/0103-fma-ctz-as-clz.patch",
@@ -740,7 +748,7 @@
       "sha256": "66260aea20f5cacb8578da119dfe5cd2606f30f6bcd5bcb040ec142a3393f55a"
     },
     {
-      "order": 90,
+      "order": 91,
       "cwd": ".",
       "hashMode": "lf-normalized",
       "path": "patches/dolphin-wasm/snapshot/0107-region-installs-in-throttle-sleep.patch",
@@ -748,7 +756,7 @@
       "sha256": "ab1cff9cf64a939235aac58fb6517a0ce8c375233edb3043dcfda018b16efaa4"
     },
     {
-      "order": 91,
+      "order": 92,
       "cwd": ".",
       "hashMode": "lf-normalized",
       "path": "patches/dolphin-wasm/snapshot/0113-headroom-counters.patch",
@@ -756,7 +764,23 @@
       "sha256": "704fdcdba2d3d8b39edc38a158acfb884fa4cdd77a52eee31658a9ed4616fcc0"
     },
     {
-      "order": 92,
+      "order": 93,
+      "cwd": ".",
+      "hashMode": "lf-normalized",
+      "path": "patches/dolphin-wasm/snapshot/0117-mem-access-stats.patch",
+      "size": 35779,
+      "sha256": "90a96cfa1c69892a076cf4c61dd86c969b26d922bc0132ad9e945d4ec125eb49"
+    },
+    {
+      "order": 94,
+      "cwd": ".",
+      "hashMode": "lf-normalized",
+      "path": "patches/dolphin-wasm/snapshot/0120-region-dcbz-direct.patch",
+      "size": 614,
+      "sha256": "20970aa1d59cb3b77e382fa46d99581adf63c421e1856d4b29033ebab97bef63"
+    },
+    {
+      "order": 95,
       "cwd": "Externals/SFML/SFML",
       "hashMode": "lf-normalized",
       "path": "patches/dolphin-wasm/submodules/0001-sfml-emscripten-config.patch",
@@ -764,7 +788,7 @@
       "sha256": "f82197a21fe982ad83f6ee7bbf5a03839b1cebd4d64da3eab11263842bf61d89"
     },
     {
-      "order": 93,
+      "order": 96,
       "cwd": "Externals/xxhash/xxHash",
       "hashMode": "lf-normalized",
       "path": "patches/dolphin-wasm/submodules/0002-xxhash-wasm-simd-scalar.patch",

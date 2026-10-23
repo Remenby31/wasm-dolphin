@@ -154,6 +154,16 @@ node harness/probes/race-perf.mjs --iso ../roms/<disc>.iso --state ../measures/h
   past 6 readbacks in flight, `errors`) and `uniqueFpsEstimate` = the speed
   window's presents/s × that share; `cold.uniqueShare` and
   `cold.uniqueFpsEstimate` per side. WebGPU presents only (`video=wgpu`).
+- **Scene protocols** (`lib/matrix.mjs` `SCENE_PROTOCOLS`, judge 2026-10-23):
+  a KPI scene can pin how it is measured, by savestate name. The heavy intro
+  (`heavy-intro-13s.sav`) is a short phase, about 9 guest seconds from that
+  state: `--emulated-warmup 1 --emulated-window 6 --hold ""`, and with
+  `--region-sample` the region stats are reset and read around that same
+  window (not in a stats window after it, which would read another phase).
+  race-perf refuses a window over 8 s on it (an ew20 read 100 % / headroom
+  1.16 where 6 s read 57-62 % / 0.56) and warns about a longer warmup, a held
+  key or a host-time window; `summary.sceneProtocol` records the protocol and
+  the warnings.
 - `--headroom [--frames-per-vi-ref R]` (patch 0113, research/deep-headroom-kpi.md):
   the program's main KPI, measured at `speed=1` where the game runs as the
   player sees it. The core counters (`DolphinWeb_HeadroomStats`: throttle
@@ -165,7 +175,10 @@ node harness/probes/race-perf.mjs --iso ../roms/<disc>.iso --state ../measures/h
   `headroom` = the smaller one; guest s from the core's own ticks, written
   at the same instant as its host window. PushBlockingEvent and SyncGPU
   waits (off by default) count as CPU busy time;
-  plus `throttleSleepShare` and `xfbCopiesPerVi` (`cold.headroom` per run,
+  plus `throttleSleepShare`, `xfbCopiesPerVi` and `gameFramesPerSecond`
+  (XFB copies per host second: the game images the player gets, the product
+  KPI while SyncOnSkipIdle is off, since the product's emulated time then
+  runs ahead of its rendering) (`cold.headroom` per run,
   medians per side). Under 2 % of sleep the game runs below 100 %
   (`headroomApplies` false): the speed is then the number.
   Validity (every run, `lib/headroom.mjs` `invalidReasons`): a ring overflow
