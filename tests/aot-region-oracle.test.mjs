@@ -11,8 +11,8 @@
 import assert from "node:assert/strict";
 import test from "node:test";
 
-import { loadAotCore, runOracleProgramsAsRegions } from "./helpers/aot-core-equivalence.mjs";
-import { PRODUCTION_DISABLE_MASK, SHORT_PREFIX_MASK } from "./helpers/jit-oracle.mjs";
+import { compareRegionProgram, loadAotCore, runOracleProgramsAsRegions } from "./helpers/aot-core-equivalence.mjs";
+import { PRODUCTION_DISABLE_MASK, SHORT_PREFIX_MASK, makeRng, randomState } from "./helpers/jit-oracle.mjs";
 
 const core = await loadAotCore();
 const skip = !core?.has("DolphinWeb_AotTestLoadState") && "core without the region test exports (patch 0075)";
@@ -29,3 +29,81 @@ for (const [name, mask] of [["production mask", PRODUCTION_DISABLE_MASK], ["shor
     assert.ok((tally.ends.stop ?? 0) >= 100, "programs ran to their blr");
   });
 }
+
+// 0105: FPU ops the direct tier does not emit run inside the region as
+// helper calls (fp or interpret). Their exceptions and GPR writes, against the
+// interpreter from the same state (full state, SRR0 and downcount included).
+const compilerVersion = () => {
+  if (typeof core?.module?._DolphinWeb_AotKeyParts !== "function") return 0;
+  const p = core.module._malloc(8);
+  try { core.module._DolphinWeb_AotKeyParts(p); return new Uint32Array(core.module.HEAPU8.buffer, p, 2)[0]; } finally { core.module._free(p); }
+};
+const fpuSkip = skip || (compilerVersion() < 6 && "core before 0105 (compiler version < 6)");
+const MSR_FP = 0x2000, MSR_FE0 = 0x800, MSR_FE1 = 0x100;
+const addi = (d, a, imm) => (14 << 26) | (d << 21) | (a << 16) | (imm & 0xffff);
+const add = (d, a, b) => (31 << 26) | (d << 21) | (a << 16) | (b << 11) | (266 << 1);
+const faddsRc = (d, a, b) => (59 << 26) | (d << 21) | (a << 16) | (b << 11) | (21 << 1) | 1;
+const psqLux = (d, a, b) => (4 << 26) | (d << 21) | (a << 16) | (b << 11) | (38 << 1); // W=0, GQR0
+const BLR = 0x4e800020;
+const f64Words = (x) => Array.from(new Uint32Array(new Float64Array([x]).buffer));
+const baseState = (seed) => {
+  const s = randomState(makeRng(seed));
+  s[37] = 0x00002032; // FP, IR, DR, RI
+  s[33] = 0; // XER clear: with SO set a fragment refuses to run (0111)
+  s[36] = 0; // FPSCR: round to nearest, no enable, no sticky bit
+  s[38] = 0; // GQR0: float loads and stores
+  return s;
+};
+const expectSame = (r, what) => {
+  assert.ok(r.translated, `${what}: translated`);
+  assert.ok(!r.trap && !r.error, `${what}: ${r.error ?? "trap"}`);
+  assert.ok(r.got.regionRuns >= 1, `${what}: the region ran`);
+  // The op stays in the region as a helper call (fp, through EmitFpCall, or
+  // interpret), not as a region exit.
+  assert.ok(r.fragment.relocs.some((x) => x.kind === "import" && (x.name === "fp" || x.name === "interpret")), `${what}: the op is a helper call inside the region`);
+  assert.equal(r.fragment.entries.length, 1, `${what}: one block, not cut before the op`);
+  assert.ok(r.equal, `${what}: ${JSON.stringify(r.difference)}`);
+};
+
+test("an FPU op kept in the region as a helper call, with MSR.FP clear, takes FP unavailable in the region, like the interpreter (0105)", { skip: fpuSkip }, () => {
+  const program = [addi(3, 3, 1), faddsRc(3, 1, 2), addi(3, 3, 1), BLR];
+  const translateState = baseState(11);
+  const state = translateState.slice();
+  state[37] &= ~MSR_FP;
+  const r = compareRegionProgram(core, program, state, { translateState });
+  expectSame(r, "FP unavailable");
+  assert.equal(r.got.end, "exception");
+});
+
+test("an enabled FP exception (FE0/FE1, VE) of an FPU op kept in the region is a program exception at its pc, partial downcount, like the interpreter (0105)", { skip: fpuSkip }, () => {
+  const program = [addi(3, 3, 1), faddsRc(3, 1, 2), addi(3, 3, 1), BLR];
+  const state = baseState(12);
+  state[37] |= MSR_FE0 | MSR_FE1;
+  state[36] = 0x00000080; // VE: invalid operation enabled
+  state.set([...f64Words(Infinity), ...f64Words(Infinity)], 48 + 1 * 4);
+  state.set([...f64Words(-Infinity), ...f64Words(-Infinity)], 48 + 2 * 4); // inf + -inf: VXISI
+  const r = compareRegionProgram(core, program, state);
+  if (core.has("DolphinWeb_RegionGuardRefusals")) {
+    // 0121: no region is entered with FE0/FE1 set (its code takes them clear):
+    // the CPU loop runs blocks there, and the exception is the interpreter's.
+    assert.ok(r.translated && !r.trap && !r.error, JSON.stringify(r.error ?? r.difference));
+    assert.equal(r.got.regionRuns, 0, "refused by the 0121 guards");
+    assert.ok(r.equal, JSON.stringify(r.difference));
+    assert.equal(r.got.end, "exception");
+    return;
+  }
+  expectSame(r, "program exception");
+  assert.equal(r.got.end, "exception");
+});
+
+test("psq_lux kept in the region updates a GPR the block had cached dirty, like the interpreter (0105)", { skip: fpuSkip }, () => {
+  // r5 written (dirty in the GPR cache) before psq_lux reads it from the
+  // state and writes it back (rA + rB); r7 reads the new r5 after it.
+  const program = [addi(5, 5, 16), psqLux(1, 5, 6), add(7, 5, 5), BLR];
+  const state = baseState(13);
+  state[5] = 0x80004000;
+  state[6] = 8;
+  const r = compareRegionProgram(core, program, state);
+  expectSame(r, "psq_lux");
+  assert.equal(r.got.end, "stop");
+});

@@ -311,10 +311,13 @@ test("committed Dolphin provenance and ABI manifests verify", () => {
   // 0099 (AX HLE timing) is the first patch to touch DSPHLE.cpp: 128.
   // 0098 (GPU thread spin budget) touches BlockingLoop.h and Fifo.h: 130.
   // 0113 (headroom counters) adds WasmHeadroom.h and the first changes to
-  // BPStructs.cpp and AsyncRequests.h: 133.
-  // 0106 (static GameCube RAM views) touches Memmap.cpp/.h and DSP.cpp: 136.
+  // BPStructs.cpp and AsyncRequests.h: 133. 0092 (bounded FIFO logs) is the
+  // first patch to touch FifoDataFile.cpp and FifoPlayer.cpp: 135. 0121 (FPRF
+  // follows the setting in every tier) is the first to touch PowerPC.h and
+  // PowerPC.cpp: 137.
+  // 0106 (static GameCube RAM views) touches Memmap.cpp/.h and DSP.cpp: 140.
   // Update deliberately when the series changes what it modifies.
-  assert.equal(result.vendorSnapshot.rootPaths, 136);
+  assert.equal(result.vendorSnapshot.rootPaths, 140);
   assert.equal(result.vendorSnapshot.submodulePaths, 2);
   assert.equal(result.core.abiVersion, 1);
   assert.equal(result.core.memoryContract.jsGlue.initialPages, 24576);

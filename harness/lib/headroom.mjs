@@ -77,6 +77,10 @@ export function headroomOf(s, { guestSeconds = null, ticksPerSecond = null, viOu
     gpuConsumerWaitShare: round(consumerS / hostS, 4),
     rushSkips: s.rushSkips,
     xfbCopiesPerVi: viOutputs > 0 ? round(s.xfbCopies / viOutputs, 4) : null,
+    // The product KPI (judge, 2026-10-23): game images the player gets per
+    // host second, XFB copies over the host window. Unlike the speed, it does
+    // not count emulated time that ran ahead of the rendering.
+    gameFramesPerSecond: round(s.xfbCopies / hostS, 2),
     guestSeconds: round(guestSeconds, 3)
   };
 }
@@ -92,7 +96,12 @@ export function invalidReasons(rec, { target = null, framesPerViRef = null } = {
   }
   if (target != null && rec.speed != null && rec.speed > target * 100 * 1.02) why.push(`speed ${rec.speed} % above the target ${target * 100} % × 1.02: the throttle did not hold`);
   if (rec.uniqueFrames && rec.uniqueFrames.uniqueShare === 0) why.push("no unique image in the unique-frames window");
+  // A frozen renderer presents nothing, so no pair is compared and
+  // uniqueShare is null, not 0; the GPU idles and the speed looks free
+  // (2026-10-23: 160 % at speed=1.6 with 0 presents).
+  if (rec.uniqueFrames?.ok !== false && rec.uniqueFrames?.windowMs > 0 && rec.uniqueFrames.presents === 0) why.push("no present in the unique-frames window (rendering frozen)");
   const fpv = rec.headroom?.xfbCopiesPerVi;
+  if (fpv === 0) why.push("no game frame (XFB copy) in the window (rendering frozen)");
   if (framesPerViRef != null && fpv != null && Math.abs(fpv / framesPerViRef - 1) > 0.1) why.push(`game frames per VI ${fpv} outside ±10 % of ${framesPerViRef} (emulated time decoupled from rendering)`);
   return why;
 }

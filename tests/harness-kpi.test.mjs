@@ -11,7 +11,7 @@ import { consistentRead, decodeRegionStats, DIAGNOSTICS, DIAGNOSTICS_BY_VERSION,
 import { p4Summary, regionRecord, summarizeP4 } from "../harness/probes/race-perf.mjs";
 import { aotLaunchInfo, launchTtff, summarizeAot, summarizeTtff } from "../harness/lib/ttff.mjs";
 import { summarizeLaunch, summarizeP7, unavailable } from "../harness/lib/aot-progress.mjs";
-import { candidateColumn, classify, KPI_ROWS, kpiMarkdown, kpiTable, servedSides, sideFlags, sideHasAot, trunkSide } from "../harness/lib/kpi.mjs";
+import { candidateColumn, classify, KPI_ROWS, kpiMarkdown, kpiTable, servedSides, setupDifferences, setupOf, sideFlags, sideHasAot, TRUNK_SETUP, trunkSide } from "../harness/lib/kpi.mjs";
 import { findResults, loadResults, readCandidate, readManual } from "../harness/kpi-report.mjs";
 
 // The struct the core writes (layout v1), as the worker returns it.
@@ -325,6 +325,7 @@ test("KPI report: files classified by content; manual.json errors become reasons
   assert.deepEqual(servedSides(results.find((r) => r.kind === "race-perf")).candidate, served("T1"));
   assert.deepEqual(servedSides(results.find((r) => r.kind === "gate")).candidate, served("T1"));
   assert.equal(classify({ probe: "first-launch" }), "first-launch");
+  assert.equal(classify({ probe: "first-launch-ramp" }), "first-launch-ramp");
   assert.equal(classify(null), null);
 
   put("m1.json", "{ broken");
@@ -334,7 +335,7 @@ test("KPI report: files classified by content; manual.json errors become reasons
   const rows = (m) => Object.fromEntries(kpiTable([], m, { trunk: TRUNK }).map((r) => [r.id, r]));
   assert.match(rows(readManual(path.join(root, "m1.json"))).pcSpeed.why, /illisible/);
   assert.match(rows(readManual(path.join(root, "m2.json"))).pcSpeed.why, /non numérique/);
-  assert.equal(KPI_ROWS.length, 27);
+  assert.equal(KPI_ROWS.length, 34);
   // Every TTFF run overloaded: n/a, and the row says so.
   const over = { kind: "ttff", file: "o", json: { probe: "ttff", at: "2026-10-19T11:00:00Z", served: served("T1"), runs: 3, overloadedRuns: [1, 2, 3], cold: null, warm: null } };
   assert.match(kpiTable([over], {}, { trunk: TRUNK }).find((r) => r.id === "ttffCold").why, /runs 1, 2, 3 lancées sur machine surchargée/);
@@ -372,8 +373,11 @@ test("KPI: the product config (video=software) counts; wgpu and aot=1 are trajec
   const rows = Object.fromEntries(table.map((r) => [r.id, r]));
   // What the player sees today: the product side without aot.
   assert.deepEqual([rows.macSpeedProduct.value, rows.macSpeedProduct.side, rows.macSpeedProduct.counted], [61, "baseline", false]);
-  // The main KPI is the headroom; without --headroom it says so.
-  assert.equal(rows.macHeadroomProduct.counted, true);
+  // The product is judged on its useful game images (its headroom is
+  // decoupled while SyncOnSkipIdle is off); without --headroom it says so.
+  assert.equal(rows.macGameFpsProduct.counted, true);
+  assert.equal(rows.macHeadroomProduct.counted, false);
+  assert.equal(rows.macHeadroom.counted, true);
   assert.equal(rows.macHeadroomProduct.status, "n/a");
   assert.equal(rows.macHeadroomProduct.why, "pas de mesure --headroom");
   assert.match(rows.macSpeedProduct.flags, /video=software&speed=unlimited/);
@@ -392,10 +396,38 @@ test("KPI: the headroom row reads race-perf --headroom, only where the throttle 
   const withHr = (applies) => { const r = run(); r.json.candidate.cold = { ...r.json.candidate.cold, headroom: { median: 1.734 }, headroomApplies: applies }; return r; };
   const rows = (r) => Object.fromEntries(kpiTable([r], {}, { trunk: TRUNK }).map((x) => [x.id, x]));
   const ok = rows(withHr(true)).macHeadroomProduct;
-  assert.deepEqual([ok.value, ok.status, ok.counted], [173.4, "OK", true]);
+  assert.deepEqual([ok.value, ok.status, ok.counted], [173.4, "OK", false]);
   const under = rows(withHr(false)).macHeadroomProduct;
   assert.equal(under.status, "n/a");
   assert.match(under.why, /sous 100 %/);
+});
+
+test("KPI: useful game images per second, the product KPI", () => {
+  const r = race("2026-10-23T05:00:00Z", { speed: 99.9, extra: { query: "video=software&presenter=webgpu&pacing=tick&speed=1&metrics=1", served: { candidate: served("T1") } } });
+  r.json.candidate.cold = { ...r.json.candidate.cold, headroom: { median: 1.41 }, headroomApplies: true, gameFramesPerSecond: { median: 6.9 } };
+  const rowOf = (state, fps) => {
+    r.json.state = state;
+    r.json.candidate.cold.gameFramesPerSecond = { median: fps };
+    return kpiTable([r], {}, { trunk: TRUNK }).find((x) => x.id === "macGameFpsProduct");
+  };
+  // The race renders at 60 frames/s natively (1.00 per VI): target 57.
+  const race60 = rowOf("race-after.sav", 6.9);
+  assert.deepEqual([race60.value, race60.target, race60.status, race60.counted], [6.9, 57, "KO", true]);
+  assert.equal(rowOf("race-after.sav", 58).status, "OK");
+  // A scene without a measured reference: no target, no verdict.
+  const unknown = rowOf("menu.sav", 30);
+  assert.equal(unknown.status, "n/a");
+  assert.match(unknown.why, /sans référence d'images par VI mesurée/);
+});
+
+test("matrix: each KPI scene's target is 95 % of its measured native rate", async () => {
+  const { gameFpsTarget, SCENE_NATIVE_FRAMES_PER_VI } = await import("../harness/lib/matrix.mjs");
+  assert.equal(gameFpsTarget("race-after.sav"), 57);
+  assert.equal(gameFpsTarget("heavy-intro-13s.sav"), 57);
+  assert.equal(gameFpsTarget("nope.sav"), null);
+  // A 30-frame scene (0.5 per VI) would be held to 28.5, not 57.
+  assert.equal(Math.round(0.95 * 60 * 0.5 * 10) / 10, 28.5);
+  for (const ref of Object.values(SCENE_NATIVE_FRAMES_PER_VI)) assert.match(ref.measured, /^measures\/headroom\//);
 });
 
 test("KPI: a candidate column beside trunk, never in its place", (t) => {
@@ -420,6 +452,13 @@ test("KPI: a candidate column beside trunk, never in its place", (t) => {
   assert.match(md, /\| Vitesse course, Mac M4 Pro, wgpu \+ aot=1 [^|]*\| n\/a [^|]*\|.*\| 95\.8 % \(KO\) \|/);
   assert.match(md, /Colonne « Candidat » : `P4 \(#43\)` \(aot=1&wasmjit=1\), max-load 6, `ab` @ B avec modifications locales/);
   assert.doesNotMatch(kpiMarkdown(rows, { at: "T" }), /Candidat/);
+  assert.deepEqual(c.setupDifferences, []);
+  assert.doesNotMatch(md, /NON comparable/);
+  // A Spark candidate, or one run with Chrome arguments, is shown and flagged.
+  const flag = "--js-flags=--wasm-partial-oob-writes-are-noops";
+  const spark = candidateColumn({ ...ab, json: { ...ab.json, host: "spark", chrome: { path: "chrome stable", args: flag } } });
+  assert.deepEqual(spark.setupDifferences, ["machine spark ≠ Mac", `arguments Chrome « ${flag} » ≠ « aucun »`]);
+  assert.match(kpiMarkdown(rows, { at: "T", candidate: spark }), /\*\*Candidat NON comparable aux lignes de trunk\*\* : machine spark ≠ Mac ; arguments Chrome/);
 
   const root = mkdtempSync(path.join(os.tmpdir(), "kpi-candidate-test-"));
   t.after(() => rmSync(root, { recursive: true, force: true }));
@@ -594,4 +633,17 @@ test("ttff: the core's own count of installed regions, not the P7 install event"
   assert.match(row.detail, /SANS cache de régions : refusées pour une autre disposition du tas \(143, 143\)/);
   // An older probe without the core's count falls back on the install event.
   assert.equal(summarizeAot([{ run: 1, warm: { aot: { state: "complete", install } } }]).warm.installedBy, "install event");
+});
+
+test("setup: two Spark summaries with and without the V8 flag differ; absent arguments count as none", () => {
+  const flag = "--js-flags=--wasm-partial-oob-writes-are-noops";
+  const before = setupOf({ host: "spark" }); // race-multi before #145: no chrome at all
+  const beforeEmpty = setupOf({ host: "spark", chrome: { path: "chrome stable", args: "" } });
+  const after = setupOf({ host: "spark", chrome: { path: "chrome stable", args: flag } });
+  assert.deepEqual(setupDifferences(before, beforeEmpty), []);
+  assert.deepEqual(setupDifferences(before, after), [`arguments Chrome « aucun » ≠ « ${flag} »`]);
+  // A side's own arguments (race-perf --chrome-args) belong to that side's setup.
+  const pair = { chrome: { path: "chrome stable", args: "", sideArgs: { candidate: "--x" } } };
+  assert.deepEqual(setupDifferences(setupOf(pair, "candidate"), setupOf(pair, "baseline")), ["arguments Chrome « --x » ≠ « aucun »"]);
+  assert.deepEqual(setupDifferences(setupOf({ chrome: { path: "chrome stable" } }), TRUNK_SETUP), []);
 });

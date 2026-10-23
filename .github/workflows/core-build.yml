@@ -22,6 +22,12 @@ name: core build (Linux, reproducible)
 #   rebuild the same bytes.
 # - prepare-core-commit (read-only) and push-core (the only writer, which runs
 #   no repository code) commit the core on main.
+# - fetch-run-core (workflow_dispatch with from_run only, set by push-core when
+#   main moved after the core commit was prepared): no build; it takes the
+#   core of that earlier green run on main, which went through both builds,
+#   and prepare-core-commit publishes it only if HEAD's sources are still the
+#   ones it was built from, ABI contract sources included (publish-plan
+#   --republish); any difference hands over to a full run.
 #
 # Third-party actions are pinned by commit SHA (the tag is in the comment):
 # re-running a commit runs the same code.
@@ -34,6 +40,14 @@ on:
     inputs:
       attempt:
         description: Publication attempt for main's HEAD (set by push-core; 3 at most)
+        type: number
+        default: 0
+      from_run:
+        description: Republish the core of this earlier green run on main instead of building (set by push-core)
+        type: string
+        default: ''
+      republish:
+        description: Republication attempt from from_run (set by push-core; 3 at most)
         type: number
         default: 0
 
@@ -129,7 +143,7 @@ jobs:
 
   build:
     needs: changes
-    if: needs.changes.outputs.core == 'true'
+    if: needs.changes.outputs.core == 'true' && !inputs.from_run
     runs-on: ubuntu-24.04
     timeout-minutes: 300
     permissions:
@@ -396,13 +410,79 @@ jobs:
           echo "archive build: $rebuilt, checkout build: $CHECKOUT_SHA256"
           test "$rebuilt" = "$CHECKOUT_SHA256"
 
+  # main, workflow_dispatch with from_run: the core of that run, which must be
+  # core-build.yml on main of this repository, completed and green, with its
+  # build and rebuild-from-source-archive jobs green. Reads only; runs no
+  # repository code. Re-uploaded here under the same name for the next job.
+  fetch-run-core:
+    if: github.ref == 'refs/heads/main' && github.event_name == 'workflow_dispatch' && inputs.from_run != ''
+    runs-on: ubuntu-24.04
+    timeout-minutes: 20
+    permissions:
+      actions: read
+    outputs:
+      wasm_sha256: ${{ steps.check.outputs.wasm_sha256 }}
+    steps:
+      - name: Check the run
+        id: check
+        shell: bash
+        env:
+          FROM_RUN: ${{ inputs.from_run }}
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          [[ "$FROM_RUN" =~ ^[0-9]+$ ]]
+          api="repos/$GITHUB_REPOSITORY/actions/runs/$FROM_RUN"
+          # push-core hands over from its own run's last job: wait for that run to end.
+          for _ in $(seq 1 40); do
+            [ "$(gh api "$api" --jq .status)" = completed ] && break
+            sleep 15
+          done
+          gh api "$api" > run.json
+          jq -e --arg repo "$GITHUB_REPOSITORY" '.status == "completed" and .conclusion == "success"
+            and .repository.full_name == $repo and .head_repository.full_name == $repo
+            and .head_branch == "main" and (.event == "push" or .event == "workflow_dispatch")
+            and .path == ".github/workflows/core-build.yml"' run.json > /dev/null
+          gh api "$api/jobs?per_page=100" > jobs.json
+          for job in build rebuild-from-source-archive; do
+            jq -e --arg job "$job" '[.jobs[] | select(.name == $job and .conclusion == "success")] | length == 1' jobs.json > /dev/null
+          done
+          names=$(gh api "$api/artifacts?per_page=100" --jq '.artifacts[] | select(.expired | not) | .name' | grep -E '^core-[0-9a-f]{64}$')
+          test "$(wc -l <<< "$names")" -eq 1
+          echo "wasm_sha256=${names#core-}" >> "$GITHUB_OUTPUT"
+
+      - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4
+        with:
+          name: core-${{ steps.check.outputs.wasm_sha256 }}
+          run-id: ${{ inputs.from_run }}
+          github-token: ${{ github.token }}
+          path: ${{ runner.temp }}/core-artifact
+
+      - name: The artifact is the core that run built
+        shell: bash
+        env:
+          SHA256: ${{ steps.check.outputs.wasm_sha256 }}
+          ARTIFACT: ${{ runner.temp }}/core-artifact
+        run: test "$(sha256sum "$ARTIFACT/dolphin-core-upstream.wasm" | cut -d' ' -f1)" = "$SHA256"
+
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        with:
+          name: core-${{ steps.check.outputs.wasm_sha256 }}
+          path: ${{ runner.temp }}/core-artifact/
+          if-no-files-found: error
+          retention-days: 7
+
   # On main: turn the core into one commit on top of main's current tip.
   # Read-only; runs the repository's code (publish-plan, update-core-abi,
   # core:status, verify:provenance). Its only output is a validated plan and,
   # for "commit", a git bundle holding exactly that commit.
   prepare-core-commit:
-    needs: [build, rebuild-from-source-archive]
-    if: github.ref == 'refs/heads/main' && github.event_name != 'pull_request'
+    needs: [build, rebuild-from-source-archive, fetch-run-core]
+    # Both builds of this run, or a core fetched from an earlier run.
+    if: >-
+      !cancelled() && github.ref == 'refs/heads/main' && github.event_name != 'pull_request' &&
+      ((needs.build.result == 'success' && needs.rebuild-from-source-archive.result == 'success') ||
+      needs.fetch-run-core.result == 'success')
     runs-on: ubuntu-24.04
     timeout-minutes: 15
     permissions:
@@ -410,11 +490,15 @@ jobs:
     outputs:
       action: ${{ steps.plan.outputs.action }}
       base: ${{ steps.plan.outputs.base }}
+    env:
+      CORE_SHA256: ${{ needs.build.outputs.wasm_sha256 || needs.fetch-run-core.outputs.wasm_sha256 }}
     steps:
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
         with:
           ref: refs/heads/main
           persist-credentials: false
+          # --republish compares HEAD with the commit the core was built at.
+          fetch-depth: ${{ inputs.from_run && '0' || '1' }}
 
       - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4
         with:
@@ -422,16 +506,17 @@ jobs:
 
       - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4
         with:
-          name: core-${{ needs.build.outputs.wasm_sha256 }}
+          name: core-${{ env.CORE_SHA256 }}
           path: ${{ runner.temp }}/core-artifact
 
       - name: Plan and commit
         id: plan
         shell: bash
         env:
-          SHA256: ${{ needs.build.outputs.wasm_sha256 }}
+          SHA256: ${{ env.CORE_SHA256 }}
           ARTIFACT: ${{ runner.temp }}/core-artifact
           OUT: ${{ runner.temp }}/publish
+          FROM_RUN: ${{ inputs.from_run }}
         run: |
           set -euo pipefail
           mkdir -p "$OUT"
@@ -439,8 +524,13 @@ jobs:
           base=$(git rev-parse HEAD)
           git config user.name "github-actions[bot]"
           git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
-          node tools/core-artifacts.mjs publish-plan --artifact "$ARTIFACT" --built-sha256 "$SHA256" --out "$OUT/plan.json" \
-            --message "Build the core for ${base:0:7} (run ${GITHUB_RUN_ID}, rebuilt identically from its GPL source archive)"
+          if [ -n "$FROM_RUN" ]; then
+            node tools/core-artifacts.mjs publish-plan --artifact "$ARTIFACT" --built-sha256 "$SHA256" --out "$OUT/plan.json" --republish \
+              --message "Build the core for ${base:0:7} (run ${FROM_RUN}, rebuilt identically from its GPL source archive; republished by run ${GITHUB_RUN_ID})"
+          else
+            node tools/core-artifacts.mjs publish-plan --artifact "$ARTIFACT" --built-sha256 "$SHA256" --out "$OUT/plan.json" \
+              --message "Build the core for ${base:0:7} (run ${GITHUB_RUN_ID}, rebuilt identically from its GPL source archive)"
+          fi
           action=$(jq -er '.action | select(. == "none" or . == "dispatch" or . == "commit")' "$OUT/plan.json")
           jq -e '.schemaVersion == 1' "$OUT/plan.json" > /dev/null
           if [ "$action" = commit ]; then
@@ -467,12 +557,20 @@ jobs:
   # - commit: the bundle must be one commit whose parent is the planned base
   #   and still main's tip, touching only the core files, with a .wasm whose
   #   hash is the one built and the one in core.lock.json. Push; if main moved
-  #   meanwhile, hand over to a new run.
+  #   meanwhile, hand over to a run that republishes this core (from_run: the
+  #   run that built it), which costs no build; after 3 republications, to a
+  #   new full run.
   # - dispatch (main's sources moved during the build): hand over to a new run.
+  # - fetch-run-core failed (API error, expired artifact, run refused): hand
+  #   over to a new full run.
   # Hand-overs carry an attempt counter; after 3, the job fails instead.
+  # !cancelled(): a run a maintainer cancelled hands nothing over.
   push-core:
-    needs: [build, prepare-core-commit]
-    if: needs.prepare-core-commit.outputs.action == 'commit' || needs.prepare-core-commit.outputs.action == 'dispatch'
+    needs: [build, fetch-run-core, prepare-core-commit]
+    if: >-
+      !cancelled() && ((needs.prepare-core-commit.result == 'success' &&
+      (needs.prepare-core-commit.outputs.action == 'commit' || needs.prepare-core-commit.outputs.action == 'dispatch')) ||
+      needs.fetch-run-core.result == 'failure')
     runs-on: ubuntu-24.04
     timeout-minutes: 10
     permissions:
@@ -483,22 +581,28 @@ jobs:
       cancel-in-progress: false
     steps:
       - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4
+        if: needs.prepare-core-commit.result == 'success'
         with:
           name: core-commit
           path: ${{ runner.temp }}/publish
 
-      - name: Push the core commit, or hand over to a new run (3 attempts at most)
+      - name: Push the core commit, or hand over to a new run (3 attempts and 3 republications at most)
         shell: bash
         env:
           ACTION: ${{ needs.prepare-core-commit.outputs.action }}
           BASE: ${{ needs.prepare-core-commit.outputs.base }}
-          SHA256: ${{ needs.build.outputs.wasm_sha256 }}
+          SHA256: ${{ needs.build.outputs.wasm_sha256 || needs.fetch-run-core.outputs.wasm_sha256 }}
           ATTEMPT: ${{ inputs.attempt || 0 }}
+          REPUBLISH: ${{ inputs.republish || 0 }}
+          SOURCE_RUN: ${{ inputs.from_run || github.run_id }}
+          FETCH: ${{ needs.fetch-run-core.result }}
           PUBLISH: ${{ runner.temp }}/publish
           REMOTE: https://github.com/${{ github.repository }}.git
           TOKEN: ${{ github.token }}
         run: |
           set -euo pipefail
+          # Counters come from workflow_dispatch inputs: non-negative integers only.
+          [[ "$ATTEMPT" =~ ^[0-9]+$ && "$REPUBLISH" =~ ^[0-9]+$ ]] || { echo "::error::invalid attempt=$ATTEMPT republish=$REPUBLISH"; exit 1; }
           handover() {
             if [ "$ATTEMPT" -ge 3 ]; then
               echo "::error::main's core is still not published after $ATTEMPT hand-overs: $1"
@@ -507,6 +611,21 @@ jobs:
             echo "$1; handing over to attempt $((ATTEMPT + 1))"
             GH_TOKEN="$TOKEN" gh workflow run core-build.yml -R "$GITHUB_REPOSITORY" --ref main -f attempt=$((ATTEMPT + 1))
           }
+          # main moved, maybe without touching the sources: the next run takes
+          # this core again (its prepare-core-commit decides on content).
+          republish() {
+            if [ "$REPUBLISH" -ge 3 ]; then
+              handover "$1 (after $REPUBLISH republications)"
+              return
+            fi
+            echo "$1; republishing run $SOURCE_RUN's core, republication $((REPUBLISH + 1))"
+            GH_TOKEN="$TOKEN" gh workflow run core-build.yml -R "$GITHUB_REPOSITORY" --ref main \
+              -f attempt="$ATTEMPT" -f from_run="$SOURCE_RUN" -f republish=$((REPUBLISH + 1))
+          }
+          if [ "$FETCH" = failure ]; then
+            handover "run $SOURCE_RUN's core could not be taken"
+            exit 0
+          fi
           jq -e --arg action "$ACTION" '.schemaVersion == 1 and .action == $action' "$PUBLISH/plan.json" > /dev/null
           if [ "$ACTION" = dispatch ]; then
             handover "main's sources changed during the build"
@@ -520,7 +639,7 @@ jobs:
             "$REMOTE" repo
           cd repo
           if [ "$(git rev-parse HEAD)" != "$BASE" ]; then
-            handover "main moved after the core commit was prepared"
+            republish "main moved after the core commit was prepared"
             exit 0
           fi
           # The bundle holds exactly one ref, HEAD (git bundle create
@@ -552,5 +671,5 @@ jobs:
           if git -c core.hooksPath=/dev/null -c "$auth" push "$REMOTE" "$commit:refs/heads/main"; then
             echo "Published sha256:$SHA256 as $commit"
           else
-            handover "main moved before the push"
+            republish "main moved before the push"
           fi
