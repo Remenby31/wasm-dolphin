@@ -129,3 +129,13 @@ test("GPRs written before read are not loaded, the slow path and the reads after
     assert.ok(r.equal, `${what}: ${JSON.stringify(r.difference)}`);
   }
 });
+
+test("a GPR written first by a load whose slow path halts keeps its value (0127, lmw)", { skip: deadSkip }, () => {
+  // lmw r29, 2(r1): unaligned, the helper takes an alignment exception before
+  // writing r29..r31; their values must stay as they were.
+  const lmw = (d, a, off) => (46 << 26) | (d << 21) | (a << 16) | (off & 0xffff);
+  const state = baseState(32);
+  const r = compareRegionProgram(core, [lmw(29, 1, 2), add(7, 29, 30), BLR], state);
+  assert.ok(r.translated && !r.trap && !r.error, `${r.error ?? "trap or untranslated"}`);
+  assert.ok(r.equal, JSON.stringify(r.difference));
+});

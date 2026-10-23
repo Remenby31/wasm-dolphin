@@ -25,7 +25,7 @@
       "commit": "01e0577914a75a2569c846778c2f93aa8e6feddd"
     }
   },
-  "patchSeriesSha256": "d24a82232e6cc9a292409f7dab6d3b66be240e2b273649c6cac14631dfdfa0a6",
+  "patchSeriesSha256": "6f46205170f7fe7db644de6799606b2ca9765952d69e169c77a6a773dfc954fe",
   "patches": [
     {
       "order": 1,
@@ -824,8 +824,8 @@
       "cwd": ".",
       "hashMode": "lf-normalized",
       "path": "patches/dolphin-wasm/snapshot/0127-dead-gpr-prologue-loads.patch",
-      "size": 1925,
-      "sha256": "6d850dd92e9d4b563050e233ea29dd117cf0b50872a2e4a21f19da8e306925a5"
+      "size": 2178,
+      "sha256": "cae19f41a80255189fd871620987baefabf7a329a0df144e1d7fc57c8b0c122d"
     },
     {
       "order": 101,

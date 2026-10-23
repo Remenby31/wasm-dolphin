@@ -440,11 +440,12 @@ in order.)
 ## Dead GPR loads in the block prologue (patch 0127, 2026-10-23)
 
 The GPR cache's prologue loaded every GPR a block reads or writes. A GPR
-the block writes before any op reads it is now left unloaded; it still
-counts as present, since its local is written before it is read. This
-covers block modules and region fragments alike. Only emitted ops count:
-a skipped op neither reads nor writes. A write on one side of a wasm `if`
-(a memory fast path) is fine, because the other side calls a helper and
-reloads the op's outputs. Before the write, a helper call stores only
-dirty GPRs, and the skipped one's state value is still current.
-Compiler version 19.
+whose first access in the block is a write by a plain integer op (type
+Integer, no memory access, no FPU) is now left unloaded; it still counts as
+present, since its local is written before it is read. This covers block
+modules and region fragments alike. Only such writes count, because dirty
+flags are set when an op is emitted: a GPR that a load or an FPU op writes
+on its fast path only would be stored unloaded by a halt on its slow path.
+A first version counted every write and lost GPRs on an unaligned lmw's
+exception (cpufuzz). Skipped ops neither read nor write. Compiler version
+19.
