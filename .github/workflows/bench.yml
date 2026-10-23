@@ -228,7 +228,8 @@ jobs:
             [ -n "$BASELINE" ] && [ -n "$CANDIDATE" ] || { echo "an A/B needs both baseline and candidate"; exit 1; }
             for ref in "$BASELINE" "$CANDIDATE"; do
               d=$(mktemp -d); git archive "$ref" | tar -x -C "$d"
-              (cd "$d" && node tools/core-artifacts.mjs status --require-current) || { echo "$ref: its committed core is not the build of its sources"; exit 1; }
+              # This checkout's tool judges the exported ref: a ref never certifies its own core.
+              node tools/core-artifacts.mjs status --checkout "$d" --require-current || { echo "$ref: its committed core is not the build of its sources"; exit 1; }
             done
             sides=(--baseline "$BASELINE" --candidate "$CANDIDATE")
           fi
