@@ -46,6 +46,10 @@ on:
         description: A/B candidate ref
         type: string
         default: ''
+      candidate_core_run:
+        description: 'A core-build.yml run id (a lever PR''s CI build): its core-<sha256> artifact is served to the candidate side (&coreid), this tree on both sides'
+        type: string
+        default: ''
       candidate_query:
         description: 'Extra URL parameters for the candidate side only (&key=value…), e.g. &aotsample=0: one build against itself with a switch'
         type: string
@@ -125,6 +129,8 @@ jobs:
     timeout-minutes: 180
     permissions:
       contents: read
+      # candidate_core_run: the artifact of another run
+      actions: read
     env:
       RUNS: ${{ inputs.runs || 12 }}
       WINDOW: ${{ inputs.window || 10 }}
@@ -132,6 +138,7 @@ jobs:
       BASELINE: ${{ inputs.baseline }}
       CANDIDATE: ${{ inputs.candidate }}
       CANDIDATE_QUERY: ${{ inputs.candidate_query }}
+      CANDIDATE_CORE_RUN: ${{ inputs.candidate_core_run }}
       # A bench/** push calibrates footprint against the game's regions: aot=1.
       # With aot=1, the region pipeline is read after each window
       # (--region-sample 0: counters only): regions installed and their
@@ -214,6 +221,32 @@ jobs:
           ' "$OUT/lscpu.txt" "$OUT/machine.json" "${{ matrix.runner }}" "${{ matrix.job }}" "$sib" "$others" "$pmu"
           cat "$OUT/machine.json"
 
+      # candidate_core_run: the core a lever's PR built, checked before use: a
+      # core-build.yml run of this repository whose build job passed, one
+      # core-<sha256> artifact, its .wasm that hash, the same binary
+      # interface as this tree's core (harness/remote/core-compat.mjs).
+      - name: The candidate core (a lever's PR build)
+        if: inputs.candidate_core_run != ''
+        shell: bash
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          [[ "$CANDIDATE_CORE_RUN" =~ ^[0-9]+$ ]] || { echo "candidate_core_run: a run id"; exit 1; }
+          [ -z "$BASELINE$CANDIDATE" ] || { echo "candidate_core_run serves this tree on both sides: no baseline/candidate refs"; exit 1; }
+          api="repos/$GITHUB_REPOSITORY/actions/runs/$CANDIDATE_CORE_RUN"
+          gh api "$api" > "$RUNNER_TEMP/core-run.json"
+          jq -e --arg repo "$GITHUB_REPOSITORY" '.repository.full_name == $repo and .path == ".github/workflows/core-build.yml"' "$RUNNER_TEMP/core-run.json" > /dev/null
+          gh api "$api/jobs?per_page=100" | jq -e '[.jobs[] | select(.name == "build" and .conclusion == "success")] | length == 1' > /dev/null
+          names=$(gh api "$api/artifacts?per_page=100" --jq '.artifacts[] | select(.expired | not) | .name' | grep -E '^core-[0-9a-f]{64}$')
+          test "$(wc -l <<< "$names")" -eq 1
+          sha=${names#core-}
+          dir="$RUNNER_TEMP/core-candidate/$sha"
+          gh run download "$CANDIDATE_CORE_RUN" -R "$GITHUB_REPOSITORY" -n "core-$sha" -D "$dir"
+          node harness/remote/core-compat.mjs "$dir" "$sha" .
+          { echo "CORE_SHA=$sha"; echo "CORE_DIR=$dir"; } >> "$GITHUB_ENV"
+          jq -r '"candidate core: run \(.id), \(.head_branch) @ \(.head_sha[0:7])"' "$RUNNER_TEMP/core-run.json" | tee -a "$GITHUB_STEP_SUMMARY"
+
       - name: A/A on the homebrew (ABBA, CPU thread pinned)
         shell: bash
         env:
@@ -245,12 +278,20 @@ jobs:
           # added (race-perf --baseline-query keeps the baseline without them).
           query="core=upstream&video=null&cpu=single&speed=unlimited&synconidle=1&wasmjit=1&jitwarmup=60$AOT"
           queries=(--query "$query")
+          extra=""
           if [ -n "$CANDIDATE_QUERY" ]; then
             [[ "$CANDIDATE_QUERY" =~ ^(\&[a-z0-9_]+=[A-Za-z0-9._-]+)+$ ]] || { echo "candidate_query: &key=value pairs only"; exit 1; }
-            queries=(--query "$query$CANDIDATE_QUERY" --baseline-query "$query")
+            extra="$CANDIDATE_QUERY"
           fi
+          # A lever's PR core on the candidate side (checked in the step above).
+          cores=()
+          if [ -n "${CORE_SHA:-}" ]; then
+            extra="$extra&coreid=sha256:$CORE_SHA"
+            cores=(--core-candidate "$CORE_DIR")
+          fi
+          [ -n "$extra" ] && queries=(--query "$query$extra" --baseline-query "$query")
           taskset -c "$OTHER_CPUS" node harness/probes/race-perf.mjs \
-            --iso "$dol" --port 8090 "${sides[@]}" "${queries[@]}" \
+            --iso "$dol" --port 8090 "${sides[@]}" "${queries[@]}" "${cores[@]}" \
             ${AOT:+--region-sample 0 --region-secs 3} \
             --hold "" --runs "$RUNS" --warmup 5 --emulated-warmup 5 --emulated-window "$WINDOW" \
             --pin-cpu-thread 0 --max-load 8 --load-wait 60 --lock-wait 60 --calm-wait 60 \

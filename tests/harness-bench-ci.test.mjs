@@ -36,7 +36,7 @@ test("CI bench: manual or bench/** pushes only, never a disc, read-only token, b
   assert.doesNotMatch(workflow, /cd "\$d" && node tools/); // never the ref's own tool
   // A switch on the candidate side only: validated &key=value pairs, the baseline without them.
   assert.match(workflow, /\[\[ "\$CANDIDATE_QUERY" =~ \^\(\\&\[a-z0-9_\]\+=\[A-Za-z0-9\._-\]\+\)\+\$ \]\]/);
-  assert.match(workflow, /queries=\(--query "\$query\$CANDIDATE_QUERY" --baseline-query "\$query"\)/);
+  assert.match(workflow, /extra="\$CANDIDATE_QUERY"/);
   assert.match(workflow, /sides=\(--baseline "\$BASELINE" --candidate "\$CANDIDATE"\)/);
   assert.doesNotMatch(workflow, /--state|\.sav\b|roms\/|\.iso\b/);
   assert.match(workflow, /--pin-cpu-thread 0/);
@@ -150,4 +150,23 @@ test("CI bench: with region stats, a pair where a side installed no region is se
   // Without region stats (no aot): no region line, nothing set aside for it.
   const plain = benchAA([run(1, 20, 20), run(2, 20, 20), run(3, 20, 20), run(4, 20, 20)].map((r) => { for (const s of ["baseline", "candidate"]) { delete r[s].cold.p4; delete r[s].cold.p4Raw; } return r; }));
   assert.equal(plain.regions, null);
+});
+
+test("CI bench: a lever's PR core is served only if it is the .wasm its name says, with this tree's binary interface", async () => {
+  const { coreCompat } = await import("../harness/remote/core-compat.mjs");
+  const { createHash } = await import("node:crypto");
+  const wasm = Buffer.from("a core"), sha = createHash("sha256").update(wasm).digest("hex");
+  const abi = { coreId: `sha256:${sha}`, moduleExports: ["_b", "_a"], runtimeMethods: ["FS"], memoryContract: { pages: 1 }, memoryContractStatus: "ok" };
+  const tree = { coreId: "sha256:other", moduleExports: ["_a", "_b"], runtimeMethods: ["FS"], memoryContract: { pages: 1 }, memoryContractStatus: "ok" };
+  assert.deepEqual(coreCompat({ wasm, name: sha, artifactAbi: abi, treeAbi: tree }), []); // export order does not matter
+  assert.match(coreCompat({ wasm, name: "0".repeat(64), artifactAbi: abi, treeAbi: tree })[0], /hashes to/);
+  assert.deepEqual(coreCompat({ wasm, name: sha, artifactAbi: { ...abi, moduleExports: ["_a"] }, treeAbi: tree }), ["moduleExports differs from the tree's core"]);
+  assert.deepEqual(coreCompat({ wasm, name: sha, artifactAbi: { ...abi, memoryContract: { pages: 2 } }, treeAbi: tree }), ["memoryContract differs from the tree's core"]);
+  // The workflow: the run checked, the artifact checked, the coreid on the candidate only.
+  assert.match(workflow, /\.path == "\.github\/workflows\/core-build\.yml"/);
+  assert.match(workflow, /select\(\.name == "build" and \.conclusion == "success"\)/);
+  assert.match(workflow, /node harness\/remote\/core-compat\.mjs "\$dir" "\$sha" \./);
+  assert.match(workflow, /extra="\$extra&coreid=sha256:\$CORE_SHA"/);
+  assert.match(workflow, /queries=\(--query "\$query\$extra" --baseline-query "\$query"\)/);
+  assert.equal(workflow.match(/actions: read/g).length, 1); // the aa job only
 });

@@ -633,9 +633,12 @@ async function main() {
     if (querySpeed(q) === "unlimited" && !unlimitedAllowed(q)) throw new Error("speed=unlimited without synconidle=1: emulated time runs ahead of the rendering (research/deep-headroom-kpi.md); measure the headroom at speed=1 with --headroom");
   }
   if (baselineQuery && !values.baseline) throw new Error("--baseline-query needs --baseline");
-  // A coreid would pin both sides to one core: trunk against head would
-  // then compare a core with itself.
-  if (values.baseline && [query, baselineQuery].some((q) => q && new URLSearchParams(q).has("coreid"))) throw new Error("--baseline compares the two sides' own cores: no coreid in --query or --baseline-query");
+  // A coreid on both sides would pin them to one core (trunk against head
+  // would compare a core with itself): with --baseline, a coreid only on
+  // the candidate side, the baseline keeping its own core (a lever's PR core
+  // against trunk's, the CI bench's candidate_core_run).
+  if (values.baseline && baselineQuery && new URLSearchParams(baselineQuery).has("coreid")) throw new Error("--baseline compares the two sides' own cores: no coreid in --baseline-query");
+  if (values.baseline && !baselineQuery && new URLSearchParams(query).has("coreid")) throw new Error("--baseline compares the two sides' own cores: a coreid in --query needs a --baseline-query without it (else both sides load it)");
   const chromeArgs = chromeArgsOf(values["chrome-args"], "chrome-args");
   const baselineChromeArgs = values["baseline-chrome-args"] == null ? chromeArgs : chromeArgsOf(values["baseline-chrome-args"], "baseline-chrome-args");
   if (values["baseline-chrome-args"] != null && !values.baseline) throw new Error("--baseline-chrome-args needs --baseline");
