@@ -321,21 +321,22 @@ as a `metadata.code.branch_hint` custom section (wasm branch hinting) before
 the code section, so V8 lays out the cold arms out of line. An engine that
 doesn't know the section ignores it. Compiler version 9.
 
-## Resident GPRs (patch 0114, 2026-10-22)
+## Resident GPRs (patch 0114, 2026-10-23)
 
 Each block of a fragment used to load the GPRs it touches into their locals
-at its start and store the written ones at its end. A fragment now keeps
-its most used GPRs in their locals across its blocks: at most 12, each used
-by more than one op, counted over the fragment's ops. The fragment loads
-them once before its loop and stores the written ones before each exit
-(downcount, an exiting block, a jump out, the dispatch tail call). Inside a
-block they are present and, if the fragment writes them, dirty. So a helper
-call or a halt stores them, and a helper that may write GPRs reloads them,
-as for any cached GPR. The blocks are emitted a second time with that set,
-and that pass is only kept if it comes out the same shape (successors,
-exits, cycles). Compiler version 12. The cap follows the microbenchmark of
-GPRs in locals (fewer spills than keeping all 32); an earlier uncapped try
-without branch hints was slower.
+at its start. A fragment now keeps its most used GPRs in their locals
+across its blocks: at most 12, each used by more than one op, counted over
+the fragment's ops. The fragment loads them once before its loop, and its
+blocks don't load them again. A block still stores the ones it writes,
+before a helper call and at its end, as it does for any cached GPR. So the
+state is current at every block boundary, and the fragment's exits need no
+extra stores. A helper that may write GPRs reloads them. The blocks are
+emitted a second time with that set, and that pass is only kept if it comes
+out the same shape (successors, exits, cycles). Compiler version 12.
+
+A first version kept the written residents dirty across blocks and stored
+them at the fragment's exits. Every flushing helper then stored up to 12
+GPRs, which was -1 % on the Mac.
 
 ## MMU mode (patch 0091, with dispatch's 0090, 2026-10-22)
 

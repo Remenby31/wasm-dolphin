@@ -25,7 +25,7 @@
       "commit": "01e0577914a75a2569c846778c2f93aa8e6feddd"
     }
   },
-  "patchSeriesSha256": "fe2e1ccdcba7bdfc9942c935a52181662ef7400ecffe23151155207024d26da0",
+  "patchSeriesSha256": "e705cf56d6bc2bfb31b5275214be79d9ea9254c4673014c5828d567ab6a3f734",
   "patches": [
     {
       "order": 1,
@@ -776,8 +776,8 @@
       "cwd": ".",
       "hashMode": "lf-normalized",
       "path": "patches/dolphin-wasm/snapshot/0114-region-resident-gprs.patch",
-      "size": 8966,
-      "sha256": "394549a9e158a3a115556c0e1a4274e1742545298235e2d233ee9424e61f0222"
+      "size": 7184,
+      "sha256": "79f47456f5b6b608bc6ffff7650c4ec2d278924d70d9e18d7a1f2f54df6272d9"
     },
     {
       "order": 95,

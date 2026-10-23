@@ -1,43 +1,41 @@
 diff --git a/Source/Core/Core/PowerPC/CachedInterpreter/CachedInterpreter.cpp b/Source/Core/Core/PowerPC/CachedInterpreter/CachedInterpreter.cpp
 --- a/Source/Core/Core/PowerPC/CachedInterpreter/CachedInterpreter.cpp
 +++ b/Source/Core/Core/PowerPC/CachedInterpreter/CachedInterpreter.cpp
-@@ -2860,6 +2860,16 @@ struct WasmFragmentRelocs
+@@ -2860,6 +2860,17 @@ struct WasmFragmentRelocs
  };
  thread_local WasmFragmentRelocs* s_wasm_fragment_relocs = nullptr;
  
-+// Patch 0114: the GPRs a fragment keeps in its locals across its blocks (the
-+// fragment loads them at its entry and stores the written ones at its exits);
-+// set while BuildRegionFragment emits its blocks again with them.
++// Patch 0114: the GPRs a fragment keeps in its locals across its blocks: the
++// fragment loads them once at its entry and its blocks do not load them
++// again. A block still stores the ones it writes, before a helper call and
++// at its end, so the state is current at every block boundary and exit. Set
++// while BuildRegionFragment emits its blocks again with them.
 +struct FragmentResidentGprs
 +{
 +  u32 gprs = 0;
-+  u32 written = 0;
 +};
 +thread_local FragmentResidentGprs t_fragment_resident;
 +
  // Records the `if` about to be emitted at body.size() (fragment mode only).
  inline void HintNextIf(const std::vector<u8>& body, bool likely)
  {
-@@ -8930,6 +8940,18 @@ std::vector<u8> BuildWasmCachedInterpreterBlock(std::span<const PPCAnalyst::Code
+@@ -8930,6 +8941,15 @@ std::vector<u8> BuildWasmCachedInterpreterBlock(std::span<const PPCAnalyst::Code
      s_gpr_rc.present[i] = false;
      s_gpr_rc.dirty[i] = false;
    }
-+  // 0114: in a fragment that keeps GPRs, they are present (in their locals)
-+  // and, when the fragment writes them, dirty from the block's start: a
-+  // helper call or a halt stores them as any other dirty GPR.
++  // 0114: in a fragment that keeps GPRs, they are present (in their locals,
++  // current: every block stores what it writes) and clean at the block's
++  // start, so only the ones this block writes are stored.
 +  const u32 resident = s_wasm_fragment_relocs ? t_fragment_resident.gprs : 0;
 +  if (s_gpr_rc.active && resident != 0)
 +  {
 +    for (u32 i = 0; i < 32; ++i)
-+    {
 +      s_gpr_rc.present[i] = ((resident >> i) & 1) != 0;
-+      s_gpr_rc.dirty[i] = ((t_fragment_resident.written >> i) & 1) != 0;
-+    }
 +  }
    if (s_gpr_rc.active)
    {
      BitSet32 used_gprs;
-@@ -8940,6 +8962,8 @@ std::vector<u8> BuildWasmCachedInterpreterBlock(std::span<const PPCAnalyst::Code
+@@ -8940,6 +8960,8 @@ std::vector<u8> BuildWasmCachedInterpreterBlock(std::span<const PPCAnalyst::Code
        if (bit < 0 || bit >= 32)
          continue;
        s_gpr_rc.present[bit] = true;
@@ -46,32 +44,18 @@ diff --git a/Source/Core/Core/PowerPC/CachedInterpreter/CachedInterpreter.cpp b/
        EmitLocalGet(body, 0);
        body.push_back(0x28);  // i32.load
        body.push_back(0x02);  // align=2
-@@ -8979,6 +9003,12 @@ std::vector<u8> BuildWasmCachedInterpreterBlock(std::span<const PPCAnalyst::Code
-   // §28cx C1: commit all dirty GPR locals to guest memory before the block's
-   // single unconditional exit. The halt early-returns inside the call emitters
-   // already flushed before their call, so every exit path is covered.
-+  // 0114: the fragment's resident GPRs stay in their locals.
-+  for (u32 i = 0; i < 32; ++i)
-+  {
-+    if (((resident >> i) & 1) != 0)
-+      s_gpr_rc.dirty[i] = false;
-+  }
-   EmitRegCacheFlushDirty(body);
- 
-   if (write_npc)
-@@ -15657,6 +15687,11 @@ struct FragmentBlock
+@@ -15657,6 +15679,10 @@ struct FragmentBlock
    // 0088: set when the block was left out because it holds an idle loop:
    // the region picks up again after the whole block (the loop's exit).
    u32 outside_until = 0;
-+  // 0114: per GPR, the ops of the block that read or write it; the GPRs it
-+  // writes; whether the GPR cache was on for it.
++  // 0114: per GPR, the ops of the block that read or write it; whether the
++  // GPR cache was on for it.
 +  std::array<u16, 32> gpr_uses{};
-+  u32 gprs_written = 0;
 +  bool gpr_cache = false;
  };
  
  // Locals of a block body without the fastmem hoist (the only layout a
-@@ -15664,6 +15699,8 @@ struct FragmentBlock
+@@ -15664,6 +15690,8 @@ struct FragmentBlock
  constexpr std::array<u8, 13> WASM_BLOCK_LOCALS = {0x06, 0x03, 0x7f, 0x02, 0x7e, 0x01, 0x7c,
                                                    0x01, 0x7f, 0x20, 0x7f, 0x10, 0x7c};
  constexpr u32 WASM_FRAGMENT_PC_LOCAL = 56;  // appended after the block locals 1..55
@@ -80,7 +64,7 @@ diff --git a/Source/Core/Core/PowerPC/CachedInterpreter/CachedInterpreter.cpp b/
  
  // The block at pc as the CPU thread would build it (same analyzer, same
  // direct-candidate prefix), emitted in fragment mode. A region holds only
-@@ -15764,6 +15801,20 @@ bool BuildFragmentBlock(Core::System& system, u32 pc, u32 limit, FragmentBlock*
+@@ -15764,6 +15792,15 @@ bool BuildFragmentBlock(Core::System& system, u32 pc, u32 limit, FragmentBlock*
    for (const auto& [at, likely] : fragment.hints)
      out->hints.emplace_back(static_cast<u32>(at - WASM_BLOCK_LOCALS.size()), likely);
    out->cycles = fragment.cycles;
@@ -92,16 +76,11 @@ diff --git a/Source/Core/Core/PowerPC/CachedInterpreter/CachedInterpreter.cpp b/
 +      if (bit >= 0 && bit < 32)
 +        out->gpr_uses[bit] += 1;
 +    }
-+    for (int bit : buffer[i].regsOut)
-+    {
-+      if (bit >= 0 && bit < 32)
-+        out->gprs_written |= 1u << bit;
-+    }
 +  }
    if (!ends_with_branch)
    {
      out->successors.push_back(resume_pc);
-@@ -15865,6 +15916,48 @@ bool BuildRegionFragment(Core::System& system, u32 entry_pc, std::span<const u32
+@@ -15865,6 +15902,46 @@ bool BuildRegionFragment(Core::System& system, u32 entry_pc, std::span<const u32
      fragment_bytes += fb.expr.size() + 64;  // body and its tail
      blocks.push_back(std::move(fb));
    }
@@ -124,8 +103,6 @@ diff --git a/Source/Core/Core/PowerPC/CachedInterpreter/CachedInterpreter.cpp b/
 +    std::stable_sort(order.begin(), order.end(), [&](u32 a, u32 b) { return uses[a] > uses[b]; });
 +    for (u32 k = 0; k < REGION_RESIDENT_GPRS && uses[order[k]] > 1; ++k)
 +      resident.gprs |= 1u << order[k];
-+    for (const auto& b : blocks)
-+      resident.written |= b.gprs_written & resident.gprs;
 +  }
 +  if (resident.gprs != 0)
 +  {
@@ -150,29 +127,15 @@ diff --git a/Source/Core/Core/PowerPC/CachedInterpreter/CachedInterpreter.cpp b/
    std::unordered_set<u32> starts;
    for (const auto& b : blocks)
      starts.insert(b.start);
-@@ -15884,7 +15977,21 @@ bool BuildRegionFragment(Core::System& system, u32 entry_pc, std::span<const u32
+@@ -15884,6 +15961,7 @@ bool BuildRegionFragment(Core::System& system, u32 entry_pc, std::span<const u32
      code.insert(code.end(), {0x36, 0x02});
      EmitU32Leb(code, offset);
    };
 +  const u32 gpr_offset = static_cast<u32>(reinterpret_cast<std::uintptr_t>(&ppc.gpr[0]) - base);
-+  // 0114: the resident GPRs the fragment writes go back to the state before
-+  // it leaves (return or tail call).
-+  const auto store_resident = [&] {
-+    for (u32 i = 0; i < 32; ++i)
-+    {
-+      if (((resident.written >> i) & 1) == 0)
-+        continue;
-+      EmitLocalGet(code, 0);
-+      EmitLocalGet(code, WASM_GPR_LOCAL_BASE + i);
-+      store(gpr_offset + 4 * i);
-+    }
-+  };
    const auto reloc_site = [&](u32 kind, u32 value) {
-+    store_resident();
      code.push_back(0x12);  // return_call
      out->relocs.push_back({static_cast<u32>(code.size()), kind, value});
-     EmitPaddedU32Leb(code, 0);
-@@ -15892,6 +15999,14 @@ bool BuildRegionFragment(Core::System& system, u32 entry_pc, std::span<const u32
+@@ -15892,6 +15970,14 @@ bool BuildRegionFragment(Core::System& system, u32 entry_pc, std::span<const u32
    code.assign(WASM_BLOCK_LOCALS.begin(), WASM_BLOCK_LOCALS.end());
    code[0] = 0x07;
    code.insert(code.end(), {0x01, 0x7f});  // the dispatch pc
@@ -187,20 +150,7 @@ diff --git a/Source/Core/Core/PowerPC/CachedInterpreter/CachedInterpreter.cpp b/
    code.insert(code.end(), {0x03, 0x40});  // loop
    EmitLocalGet(code, 0);
    load(pc_offset);
-@@ -15935,10 +16050,12 @@ bool BuildRegionFragment(Core::System& system, u32 entry_pc, std::span<const u32
-     EmitI32Const(code, 0);
-     out->relocs.push_back({static_cast<u32>(code.size()) + 1, 4, 0});  // downcount out: unlikely
-     code.insert(code.end(), {0x4c, 0x04, 0x40});  // i32.le_s; if
-+    store_resident();
-     EmitI32Const(code, 0);
-     code.insert(code.end(), {0x0f, 0x0b});  // return; end
-     if (b.exits)
-     {
-+      store_resident();
-       EmitI32Const(code, 0);
-       code.push_back(0x0f);  // return
-     }
-@@ -16014,8 +16131,8 @@ namespace
+@@ -16014,8 +16100,8 @@ namespace
  // 6 (0105): FPU ops outside the direct tier stay in the region, interpreted.
  // 7 (0108): region byte swaps as two rotates. 8 (0109): regions of up to
  // 256 blocks, under a 480 KB cap. 9 (0110): region modules carry wasm branch
