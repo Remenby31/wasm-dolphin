@@ -658,7 +658,8 @@ async function main() {
   const runsDone = records;
 
   // A run that breaks a validity rule (headroom.mjs invalidReasons: ring
-  // overflow, speed above its target, no unique image, game frames per VI
+  // overflow, speed above its target, no unique image, a frozen renderer
+  // (no present or no game frame), game frames per VI
   // off the reference) is set aside with its reasons.
   for (const r of records) for (const n of Object.keys(sides)) {
     const c = r[n]?.cold;
