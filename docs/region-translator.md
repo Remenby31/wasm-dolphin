@@ -318,3 +318,26 @@ ran out], reset with the session's regions, in the region stats reply as
 is the proof that no frame paid: 0 when every sleep kept its deadline. If p95 > 3 ms remains, the
 next lever is a size cap with split modules (coordinated with dispatch: lever
 C and #75's chaining are intra-module).
+
+## Continuation fragments (2026-10-23)
+
+A function whose first fragment is capped (64 blocks, or 96 000 bytes of
+code: the byte cap of 0115) used to leave its other blocks to the dispatcher
+and the block JIT at every pass: in a CPU-bound intro scene 77 % of the CPU
+thread's time, 2.2 M region exits per 4 s to PCs of the same function that no
+fragment held. `translateWithContinuations` (aot-orchestrator.js) now decodes
+the function's direct branches from guest memory and follows its frontier:
+the leaders (targets of b/bc without link, bc fall-throughs, inside its
+ranges) that a branch in a held block reaches and no fragment holds. Each
+starts a continuation fragment of the same module: the jump there is a
+direct return_call, `claimEntries` keeps each PC's first owner. A literal
+after a block end is in no block, so it is never followed. Each continuation
+stays under 96 000 bytes on its own (fewer blocks until it fits, a single
+block over it is refused); at most 31 continuations and 2 MB per function,
+1 MB per module (it must still fit a throttle sleep), and the translator
+yields to the worker inside a function's continuations. The formation (2) is
+hashed into the region key, so a cache formed before is translated again.
+Measured (Mac, aot=1, seeded, video=null, emulated window 6 guest s): the
+intro scene +31.3 % (regionCycleShare 0.55 → 0.90), the race at its cap with
++1.9 % CPU headroom. A block whose first op the translator refuses (dcbz)
+stays an exit.
