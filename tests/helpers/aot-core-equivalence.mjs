@@ -273,7 +273,19 @@ export function compareCall(core, regionAt, start) {
       regionRuns += 1;
       const code = core.runRegion(handle);
       regionCycles += before - core.downcount();
-      if (code === 1) throw new Error(`region refused its own entry ${pc.toString(16)}`);
+      if (code === 1) {
+        // 0111: with XER.SO set a fragment refuses to run (returns 1 before
+        // touching the state); the dispatcher then runs the block path. The
+        // program itself may set SO (mtxer runs outside regions).
+        if ((core.state()[33] >>> 31) === 1 && core.pc() === pc && core.downcount() === before) {
+          regionRuns -= 1;
+          const raised = core.interpretOne();
+          interpCycles += before - core.downcount();
+          if (raised) return done("exception");
+          continue;
+        }
+        throw new Error(`region refused its own entry ${pc.toString(16)}`);
+      }
       if (code === 3) return done("exception");
     }
   };
@@ -390,11 +402,26 @@ export function runOracleProgramsAsRegions(core, { seed, count, length, mask }) 
     const regionAt = new Map(fragment.entries.map((pc) => [pc >>> 0, handle]));
     const baseline = core.ram().slice();
     for (const budget of [400000, smallBudget]) {
-      const result = compareCall(core, regionAt, () => {
+      const call = (start) => compareCall(core, regionAt, () => {
         core.ram().set(baseline);
-        core.loadState(state, ORACLE_CODE);
+        core.loadState(start, ORACLE_CODE);
         core.setDowncount(budget);
       });
+      let result = call(state);
+      // 0111: regions do not run with XER.SO set (their compares store CR
+      // fields without it): from a state with SO set, compareCall runs the
+      // interpreter where a fragment refuses. The program is also compared
+      // from the same state with SO clear, so its regions run.
+      if ((state[33] >>> 31) === 1 && core.has?.("DolphinWeb_AotKeyParts")) {
+        const clear = state.slice();
+        clear[33] = (clear[33] & 0x7fffffff) >>> 0;
+        const again = call(clear);
+        if (!again.trap) {
+          tally.soCleared = (tally.soCleared ?? 0) + 1;
+          if (again.error) tally.mismatches.push({ n, budget, soCleared: true, error: again.error });
+          else if (!again.equal) tally.mismatches.push({ n, budget, soCleared: true, program: Array.from(words, (w) => w.toString(16)), ...again.difference });
+        }
+      }
       if (result.trap) { tally.trap += 1; continue; }
       tally.compared += 1;
       if (result.error) { tally.mismatches.push({ n, budget, error: result.error }); continue; }
