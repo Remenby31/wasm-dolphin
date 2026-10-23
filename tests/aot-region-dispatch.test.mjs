@@ -832,3 +832,44 @@ test("resident GPRs end like the interpreter, at the end and on downcount (0114)
   core.invalidate(GPR_TEXT, 4 * GPRS.words.length);
   core.module._DolphinWeb_AotForgetRegionsForTest?.();
 });
+
+// 0114: a resident GPR written by an op that may go through a helper (the
+// update forms lfsu and psq_lu write rA; psq_lu is interpreted in regions),
+// read before and after it in the same fragment, in a loop: the resident
+// must be reloaded after the helper (ReloadAll), never stale.
+const UPD_TEXT = 0x80013100;
+const lfsu = (d, a, off) => (49 << 26) | (d << 21) | (a << 16) | (off & 0xffff);
+const psqLu = (d, a, off) => (57 << 26) | (d << 21) | (a << 16) | (off & 0xfff);
+const UPD = assemble(UPD_TEXT, [
+  "main", asm.mflr(0), asm.stwu(1, 1, -16), stw(0, 1, 20), (pc, l) => asm.bl(pc, l.f),
+  lwz(0, 1, 20), asm.addi(1, 1, 16), mtlr(0), asm.blr(),
+  "f", asm.lis(5, DATA >>> 16), asm.ori(5, 5, DATA & 0xffff), asm.li(8, 0), asm.li(10, 0),
+  "loop", add(10, 10, 5), lfsu(1, 5, 4), add(10, 10, 5), psqLu(2, 5, 8), add(10, 10, 5),
+  lwz(9, 5, 0), add(10, 10, 9), asm.addi(8, 8, 1), asm.cmplwi(8, 4), (pc, l) => bltR(pc, l.loop),
+  stw(10, 5, 4), asm.blr()
+]);
+
+test("a resident GPR written through a helper (update forms) is reloaded, never stale (0114)", { skip: chainSkip || (core?.has("DolphinWeb_AotKeyParts") && keyVersion() < 12 && "core before 0114 (compiler version < 12)") }, () => {
+  const dol = buildDol({ textAddr: UPD_TEXT, text: UPD.words, entry: UPD.labels.main });
+  const { image, entryPoint } = imageFromDol(dol);
+  const plan = planDol({ image, entryPoint, gameId: "TEST01", dolBytes: dol, options: { gapFill: false } });
+  for (const seg of image.segments) core.load(seg.start, seg.bytes);
+  const data = new Uint8Array(256);
+  for (let i = 0; i < data.length; i++) data[i] = (i * 37) & 0xff;
+  const loadData = () => core.load(DATA, data);
+  loadData();
+  core.reset(seedGprs(UPD.labels.main), UPD.labels.main, STOP, 400000);
+  core.setRegionsEnabled(true);
+  core.setRegionChaining(true);
+  queueAll(plan, 1, true);
+  serviceAll();
+  loadData();
+  const reference = runCall(UPD.labels.main, { regions: false });
+  loadData();
+  const got = runCall(UPD.labels.main, { regions: true });
+  core.invalidate(UPD_TEXT, 4 * UPD.words.length);
+  core.module._DolphinWeb_AotForgetRegionsForTest?.();
+  assert.deepEqual(got.state, reference.state);
+  assert.equal(got.downcount, reference.downcount);
+  assert.equal(got.interpreted, 0, "no op left the region");
+});
