@@ -436,3 +436,47 @@ masks and ors). Blocks keep the old form,
 so their bytes and cache keys don't change. Compiler version 17. (Written
 as 0108 on the region stack; renumbered after 0111 so the series applies
 in order.)
+
+## Branch hints (patch 0131, 2026-10-23)
+
+Region code is bound by the instruction cache on the bench's arm64 host:
+with regions the front end stalls 55 % of cycles (29.5 % without), with
+1.85× the L1i refills per instruction. The core now marks the `if`s of
+region code whose outcome it knows:
+- **likely:** the RAM fast path of integer and lmw/stmw accesses and of float loads, lfd/stfd and stfiwx, a dcbz in RAM, and the exact-FP fast path (not stfs: to the gather pipe, its hottest target, it takes the inline else-if arm);
+- **unlikely:** a halt after a helper, the gather pipe filling up, XER.SO set at fragment entry, and the downcount running out.
+
+The hints travel as reloc kind 4 (offset of the `if`, 1 when likely) and
+patch nothing. The assembler counts a hint that does not land on an `if`
+(`hintsDropped`, 0 on every oracle program). The assembler writes them as a `metadata.code.branch_hint`
+custom section (wasm branch hinting, on by default in V8) before the code
+section. TurboFan then lays the cold arms out of line, away from the hot
+path. An engine that doesn't know the section ignores it.
+
+The psq paths are left unhinted: their float fast path depends on the
+game's GQR types. The bytes of the bodies are unchanged. Compiler version
+23 (rebuilt from the never-measured 0110 of 2026-10-22).
+
+## The fragment's head as a br_table (patch 0133, 2026-10-23)
+
+A fragment used to find its block by a chain at the loop head:
+`if (pc == start₀) { body₀ } if (pc == start₁) { body₁ } …`. Reaching block k
+took k failed compares, each a taken jump on its own cache line between two
+bodies: up to 64 lines of dispatch per fragment, while V8 never turns such a
+chain into a switch (research/deep-icache-layout.md §4.1).
+
+Now each body follows the end of its own `block`, the blocks nested in the
+order of emission:
+
+```
+loop $L  block $D  block $b(N-1) … block $b0
+  br_table on rotr(pc − lowest start, 2)   ; a non-start, misaligned or out-of-span pc → $D
+end body₀  end body₁ …  end body(N-1)  end($D) return_call dispatch  end($L)
+```
+
+- **Head.** One `br_table` (TurboFan emits a jump table: one indirect branch, the table on the data side).
+- **Sparse blocks.** When the blocks fill less than a quarter of their span (span > 4 × blocks), the head is a compact `br_if` chain: a sparse table would cost wasm bytes and a big jump table for few blocks.
+- **Body tail.** It keeps the new pc in the dispatch-pc local. It branches directly (`br_if $bj`) to a later body that its npc names (a static successor), and goes back to the head otherwise.
+- **Unchanged.** The per-block tail (pc, downcount, its exits) and the entries.
+
+Compiler version 25.
