@@ -184,9 +184,10 @@ const compilerVersion = () => {
   try { core.module._DolphinWeb_AotKeyParts(p); return new Uint32Array(core.module.HEAPU8.buffer, p, 2)[0]; } finally { core.module._free(p); }
 };
 const sleb = (v) => { const o = []; for (;;) { const b = v & 0x7f; v >>= 7; if ((v === 0 && !(b & 0x40)) || (v === -1 && (b & 0x40))) { o.push(b); return o; } o.push(b | 0x80); } };
-const ROTATE_SWAP = [0x20, 0, 0x41, 8, 0x77, 0x41, ...sleb(0x00ff00ff), 0x71, 0x20, 0, 0x41, 8, 0x78, 0x41, ...sleb(0xff00ff00 | 0), 0x71, 0x72];
+// EmitBswap32FromLocal(local): the memory emitters swap from local 2.
+const rotateSwap = (local) => [0x20, local, 0x41, 8, 0x77, 0x41, ...sleb(0x00ff00ff), 0x71, 0x20, local, 0x41, 8, 0x78, 0x41, ...sleb(0xff00ff00 | 0), 0x71, 0x72];
 test("the rotate byte swap of region code is a bswap32, on edge and random values (0126)", () => {
-  const body = [0, ...ROTATE_SWAP, 0x0b];
+  const body = [0, ...rotateSwap(0), 0x0b];
   const bytes = Uint8Array.from([0, 0x61, 0x73, 0x6d, 1, 0, 0, 0, 1, 6, 1, 0x60, 1, 0x7f, 1, 0x7f, 3, 2, 1, 0, 7, 5, 1, 1, 0x66, 0, 0, 10, body.length + 2, 1, body.length, ...body]);
   const swap = new WebAssembly.Instance(new WebAssembly.Module(bytes)).exports.f;
   const ref = (x) => (((x & 0xff) << 24) | ((x & 0xff00) << 8) | ((x >>> 8) & 0xff00) | (x >>> 24)) >>> 0;
@@ -203,6 +204,6 @@ test("a translated lwz carries the rotate byte swap (0126)", { skip: skip || (co
   const fragment = core.translate(at, { ranges: [[at, at + 8]] });
   assert.ok(fragment, "translated");
   const code = Array.from(fragment.code);
-  const tail = ROTATE_SWAP.slice(2); // after the local.get of the loaded value
-  assert.ok(code.some((_, i) => tail.every((b, j) => code[i + j] === b)), "the rotate sequence is in the fragment");
+  const seq = rotateSwap(2);
+  assert.ok(code.some((_, i) => seq.every((b, j) => code[i + j] === b)), "the rotate sequence is in the fragment");
 });
