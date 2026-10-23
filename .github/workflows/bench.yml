@@ -38,6 +38,18 @@ on:
         description: Emulated seconds per window
         type: number
         default: 10
+      baseline:
+        description: A/B baseline ref (empty, with candidate empty, for an A/A of this ref). Each side serves its own committed core, which must be the build of its sources
+        type: string
+        default: ''
+      candidate:
+        description: A/B candidate ref
+        type: string
+        default: ''
+      aot:
+        description: aot=1 on both sides (region levers)
+        type: boolean
+        default: false
       workload:
         description: Homebrew to measure
         type: choice
@@ -109,11 +121,16 @@ jobs:
       RUNS: ${{ inputs.runs || 12 }}
       WINDOW: ${{ inputs.window || 10 }}
       WORKLOAD: ${{ inputs.workload || 'footprint' }}
+      BASELINE: ${{ inputs.baseline }}
+      CANDIDATE: ${{ inputs.candidate }}
+      AOT: ${{ inputs.aot && '&aot=1' || '' }}
       OUT: ${{ github.workspace }}/bench-out
     steps:
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
         with:
           persist-credentials: false
+          # An A/B exports both refs (git archive): the whole history.
+          fetch-depth: 0
 
       - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4
         with:
@@ -198,9 +215,20 @@ jobs:
             cpufuzz) dol=harness/homebrew/fixtures/cpufuzz.dol ;;
             *) echo "unknown workload $WORKLOAD"; exit 1 ;;
           esac
+          # A/A: this tree on both sides; A/B: the two refs, each with its own
+          # committed core (race-perf exports them; checked current below).
+          sides=(--baseline .)
+          if [ -n "$BASELINE$CANDIDATE" ]; then
+            [ -n "$BASELINE" ] && [ -n "$CANDIDATE" ] || { echo "an A/B needs both baseline and candidate"; exit 1; }
+            for ref in "$BASELINE" "$CANDIDATE"; do
+              d=$(mktemp -d); git archive "$ref" | tar -x -C "$d"
+              (cd "$d" && node tools/core-artifacts.mjs status --require-current) || { echo "$ref: its committed core is not the build of its sources"; exit 1; }
+            done
+            sides=(--baseline "$BASELINE" --candidate "$CANDIDATE")
+          fi
           taskset -c "$OTHER_CPUS" node harness/probes/race-perf.mjs \
-            --iso "$dol" --port 8090 --baseline . \
-            --query "core=upstream&video=null&cpu=single&speed=unlimited&synconidle=1&wasmjit=1&jitwarmup=60" \
+            --iso "$dol" --port 8090 "${sides[@]}" \
+            --query "core=upstream&video=null&cpu=single&speed=unlimited&synconidle=1&wasmjit=1&jitwarmup=60$AOT" \
             --hold "" --runs "$RUNS" --warmup 5 --emulated-warmup 5 --emulated-window "$WINDOW" \
             --pin-cpu-thread 0 --max-load 8 --load-wait 60 --lock-wait 60 --calm-wait 60 \
             "${counters[@]}" --out "$OUT/aa"

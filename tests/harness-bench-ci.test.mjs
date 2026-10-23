@@ -30,6 +30,9 @@ test("CI bench: manual or bench/** pushes only, never a disc, read-only token, b
   assert.match(workflow, /cpufuzz\) dol=harness\/homebrew\/fixtures\/cpufuzz\.dol ;;/);
   assert.match(workflow, /--iso "\$dol"/);
   assert.match(workflow, /node footprint\/gen\.mjs > out\/footprint_gen\.S/);
+  // An A/B serves each ref's committed core, refused unless it is the build of that ref's sources.
+  assert.match(workflow, /node tools\/core-artifacts\.mjs status --require-current\) \|\| \{ echo "\$ref: its committed core is not the build of its sources"; exit 1; \}/);
+  assert.match(workflow, /sides=\(--baseline "\$BASELINE" --candidate "\$CANDIDATE"\)/);
   assert.doesNotMatch(workflow, /--state|\.sav\b|roms\/|\.iso\b/);
   assert.match(workflow, /--pin-cpu-thread 0/);
   assert.match(workflow, /lscpu/);
