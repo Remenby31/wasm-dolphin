@@ -14,7 +14,9 @@ import { fileURLToPath } from "node:url";
 import { imageFromDol } from "../src/aot-image.js";
 import { planDol } from "../src/aot-plan.js";
 import { coreStatus } from "../tools/core-artifacts.mjs";
-import { assembleRegion, paddedSleb, paddedUleb, patchRegionHeap, regionHeapOfBytes } from "../src/aot-region-module.js";
+import { assembleRegion, claimEntries, paddedSleb, paddedUleb, patchRegionHeap, regionHeapOfBytes } from "../src/aot-region-module.js";
+import { coreAssembleOptions, coreRegionTranslator } from "../src/aot-orchestrator.js";
+import { PRODUCTION_DISABLE_MASK } from "./helpers/jit-oracle.mjs";
 import { asm, assemble, buildDol } from "./aot-asm.mjs";
 import { HELPER_SIGNATURES, STOP, functionFragments, loadAotCore, regionGroups, seedGprs } from "./helpers/aot-core-equivalence.mjs";
 import { makeRng, randomProgram } from "./helpers/jit-oracle.mjs";
@@ -874,3 +876,49 @@ test("a large module's sleep wait counts from when it became installable; past i
     });
   });
 });
+
+// Continuation fragments (2026-10-23): a function of more blocks than one
+// fragment holds (the 64-block cap) left the rest to the dispatcher and the
+// block JIT at every pass (2.2 M exits per 4 s in a CPU-bound intro scene).
+// The production translator now forms continuation fragments from the
+// frontier, in the same module: one region call runs the whole function.
+const LONG = 0x80020000;
+const longFunction = (blocks) => assemble(LONG, [
+  ...Array.from({ length: blocks }, () => [asm.addi(3, 3, 1), asm.cmplwi(3, 0xffff), (pc, l) => asm.beq(pc, l.out)]).flat(),
+  "out", asm.blr()
+]);
+const contSkip = skip || (typeof core?.module._DolphinWeb_AotTranslate !== "function" && "core without the production translator");
+for (const maxContinuations of [0, 7]) {
+  test(`a function past the 64-block cap ${maxContinuations ? "runs in one region call with continuation fragments" : "exits to the dispatcher at the cap without them"}`, { skip: contSkip }, async () => {
+    const program = longFunction(100);
+    const bytes = new Uint8Array(4 * program.words.length);
+    new DataView(bytes.buffer).setUint32(0, 0);
+    program.words.forEach((w, i) => new DataView(bytes.buffer).setUint32(4 * i, w >>> 0));
+    core.load(LONG, bytes);
+    core.invalidate(LONG, bytes.length);
+    core.module._DolphinWeb_AotForgetRegionsForTest?.();
+    const ranges = [[LONG, LONG + bytes.length]];
+    const translator = coreRegionTranslator(core.module, { mask: PRODUCTION_DISABLE_MASK, helperNames: coreAssembleOptions(core.module)?.helperNames, maxContinuations, yieldNow: async () => {} });
+    const [r] = await translator.translate([{ entry: LONG, ranges, hash: null }]);
+    assert.ok(r.fragment, r.reason);
+    assert.equal(r.fragment.entries.length, 64, "the first fragment is capped");
+    const fragments = claimEntries([r.fragment, ...(r.continuations ?? [])]);
+    assert.equal(fragments.length, maxContinuations ? 2 : 1);
+    const owned = new Set(fragments.flatMap((f) => f.entries));
+    assert.equal(owned.size, maxContinuations ? 101 : 64, "every block start is an entry of one fragment");
+    const { bytes: mod, entries } = assembleRegion(fragments, { helpers: HELPER_SIGNATURES, pcOffset: core.pcOffset, memoryPages: core.memoryPages });
+    core.setRegionsEnabled(true);
+    core.queueRegion(mod, entries.map(([pc]) => pc), [{ ranges, hash: null }]);
+    core.serviceRegions();
+    const reference = runCall(LONG, { regions: false });
+    const got = runCall(LONG, { regions: true });
+    assert.deepEqual(got.state, reference.state);
+    if (maxContinuations) {
+      assert.equal(got.ran, 1, "one region call");
+      assert.equal(got.interpreted, 0);
+    } else {
+      assert.ok(got.interpreted > 0, "past the cap: back to the dispatcher");
+    }
+  });
+}
+

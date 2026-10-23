@@ -356,7 +356,9 @@ export function coreHeapBases(m) {
 // The translator the optimiser drives, over the core's export. Translates
 // for at most `sliceMs` per call and answers "budget" for the rest: the discio
 // worker also serves the core's disc reads, so it yields between slices.
-export function coreRegionTranslator(m, { mask, helperNames, maxBlocks = 64, sliceMs = 8, now = () => performance.now(),
+// maxContinuations: fragments translated after a function's first one, from
+// its frontier (see translateWithContinuations).
+export function coreRegionTranslator(m, { mask, helperNames, maxBlocks = 64, maxContinuations = REGION_MAX_CONTINUATIONS, sliceMs = 8, now = () => performance.now(),
   yieldNow = () => new Promise((r) => setTimeout(r, 0)) } = {}) {
   if (typeof m?._DolphinWeb_AotTranslate !== "function") return null;
   const names = helperNames ?? coreAssembleOptions(m)?.helperNames ?? [];
@@ -370,13 +372,64 @@ export function coreRegionTranslator(m, { mask, helperNames, maxBlocks = 64, sli
           out.push({ entry: f.entry, reason: "budget" });
           break;
         }
-        const r = translateOne(m, f, { mask, maxBlocks, names });
+        const r = translateWithContinuations(m, f, { mask, maxBlocks, names, maxContinuations });
         out.push(r);
         if (r.reason === "budget" || r.reason === "not-ready") break;
       }
       return out;
     }
   };
+}
+
+// A function whose blocks do not fit one fragment (the 64-block cap) left
+// the rest to the dispatcher and the block JIT at every pass: 77 % of a
+// CPU-bound intro scene's time (2026-10-23, 2.2 M region exits per 4 s to
+// PCs of the same function that no fragment held). When the first fragment
+// is capped, the function's block leaders that no fragment holds (targets
+// of its direct branches and fall-throughs of its conditional ones, inside
+// its ranges, decoded from guest memory) start continuation fragments of
+// the same function, in the same module: the region's exit there becomes a
+// direct return_call, and claimEntries (at assembly) keeps each PC's first
+// owner. At most maxContinuations more fragments; a leader that does not
+// translate (a first op the translator refuses) stays an exit, as before.
+export const REGION_MAX_CONTINUATIONS = 7;
+export function translateWithContinuations(m, f, { mask, maxBlocks, names, maxContinuations = REGION_MAX_CONTINUATIONS }) {
+  const first = translateOne(m, f, { mask, maxBlocks, names });
+  if (!first.fragment || maxContinuations <= 0 || first.fragment.entries.length < maxBlocks) return first;
+  const owned = new Set(first.fragment.entries.map((pc) => pc >>> 0));
+  const continuations = [];
+  for (const pc of blockLeaders(m, f.ranges)) {
+    if (continuations.length >= maxContinuations) break;
+    if (owned.has(pc)) continue;
+    const next = translateOne(m, { ...f, entry: pc }, { mask, maxBlocks, names });
+    if (!next.fragment) continue;
+    for (const e of next.fragment.entries) owned.add(e >>> 0);
+    continuations.push(next.fragment);
+  }
+  return continuations.length ? { ...first, continuations } : first;
+}
+
+// Block leaders of the code in `ranges` ([start, end) guest addresses), in
+// address order: targets of b and bc without link inside the ranges, and
+// the instruction after a bc. Read from the emulated RAM (big-endian).
+export function blockLeaders(m, ranges) {
+  if (typeof m._DolphinWeb_AotRegionHeapBases !== "function") return [];
+  const ram = coreHeapBases(m)[0];
+  const inside = (pc) => ranges.some(([s, e]) => pc >= s && pc < e);
+  const view = new DataView(m.HEAPU8.buffer);
+  const leaders = new Set();
+  for (const [s, e] of ranges) {
+    for (let a = s >>> 0; a < e >>> 0; a += 4) {
+      const w = view.getUint32(ram + (a & 0x01ffffff), false);
+      const op = w >>> 26;
+      if ((op !== 16 && op !== 18) || (w & 1)) continue; // b/bc without link
+      const disp = op === 18 ? ((w & 0x03fffffc) << 6) >> 6 : ((w & 0xfffc) << 16) >> 16;
+      const target = ((w & 2) ? disp : a + disp) >>> 0;
+      if (inside(target)) leaders.add(target);
+      if (op === 16 && inside(a + 4)) leaders.add((a + 4) >>> 0);
+    }
+  }
+  return [...leaders].sort((x, y) => x - y);
 }
 
 function translateOne(m, f, { mask, maxBlocks, names }) {

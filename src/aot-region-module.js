@@ -587,12 +587,17 @@ export function groupRegions(module, order, { maxFunctions = 100 } = {}) {
 // of code generation in the core is covered by compilerVersion instead.
 // "region-v2": the same with the chaining exit stub (`chain`, patch 0102),
 // which imports env.region_chain and env.table.
-export async function regionModuleKey(functions, { compilerVersion, codegenMask, chain = false }) {
+// formation: how a member's fragments are formed, hashed with the members
+// from 2 on (2: continuation fragments from a capped fragment's frontier,
+// aot-orchestrator translateWithContinuations), so that a cache built with
+// another formation is translated again rather than reused.
+export const REGION_FORMATION = 2;
+export async function regionModuleKey(functions, { compilerVersion, codegenMask, chain = false, formation = REGION_FORMATION }) {
   for (const [what, v] of [["compilerVersion", compilerVersion], ["codegenMask", codegenMask]]) {
     if (!Number.isInteger(v) || v < 0 || v > 0xffffffff) throw new Error(`region: ${what} must be a u32`);
   }
   const hex8 = (v) => (v >>> 0).toString(16).padStart(8, "0");
-  const text = functions.map((f) => {
+  const text = (formation > 1 ? `formation:${formation};` : "") + functions.map((f) => {
     if (!/^[0-9a-f]{64}$/.test(f.sha256 ?? "")) throw new Error(`region: function ${f.entry?.toString(16)} has no sha256`);
     const extra = [...(f.extraEntries ?? [])].map((pc) => (pc >>> 0)).sort((a, b) => a - b).map((pc) => pc.toString(16)).join(",");
     return `${(f.entry >>> 0).toString(16)}:${f.sha256}:${extra};`;

@@ -286,7 +286,7 @@ export class AotOptimizer extends EventTarget {
         if (r.reason === "not-ready") { wait = true; break; }
         if (n >= batch.length || (r.entry !== undefined && r.entry !== batch[n].entry)) throw new Error("translator results out of order");
         consumed++;
-        if (r.fragment) fragments.push(r.fragment);
+        if (r.fragment) fragments.push(r.fragment, ...(r.continuations ?? []));
         else refused.push({ entry: batch[n].entry, reason: r.reason ?? "untranslatable" });
       }
       i += consumed;
