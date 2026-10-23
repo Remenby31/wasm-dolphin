@@ -17,8 +17,8 @@ test("the Windows WARP workflow is manual and keeps --enable-unsafe-webgpu in it
     warp.split("--enable-unsafe-webgpu").length - 1, "the flag appears only in the warp job");
   assert.match(warp, /runs-on: windows-/);
   for (const uses of wf.match(/uses: \S+/g)) assert.match(uses, /@[0-9a-f]{40}$/, `${uses} is pinned by SHA`);
-  // Without the flag, the runner must have no adapter (WARP refused), as a GPU-less PC.
-  assert.match(warp, /webgpu-adapter\.mjs --port \d+ --expect none/);
+  // Without flags the adapter is recorded (first run: a SwiftShader fallback, not null).
+  assert.match(warp, /webgpu-adapter\.mjs --port \d+ --out webgpu-adapter-default\.json/);
 });
 
 test("the WARP matrix compares wgpu with the exact software renderer, single core", async () => {

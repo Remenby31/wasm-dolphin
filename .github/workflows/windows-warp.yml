@@ -2,10 +2,9 @@ name: windows WARP (WebGPU on D3D12, correctness, manual)
 
 # Chrome on Windows runs WebGPU on D3D12 only: Tint translates WGSL to HLSL,
 # DXC compiles it. No PC is on the bench, and a GitHub Windows runner has no
-# GPU. Without flags Chrome then gives no adapter (WARP, a CPU adapter, is
-# refused): the first check is that this is so, as on a real GPU-less PC.
-# With --enable-unsafe-webgpu, for this job only, Chrome takes WARP, so the
-# whole D3D12 path runs, slowly: harness/matrices/windows-warp.json compares
+# GPU. The job records which WebGPU adapter Chrome gives a page without
+# flags and with --enable-unsafe-webgpu (for this job only), then runs the
+# matrix on that adapter: harness/matrices/windows-warp.json compares
 # video=wgpu with the exact software renderer on our homebrews. Correctness
 # only: WARP times say nothing about a GPU.
 #
@@ -58,12 +57,20 @@ jobs:
           path: harness/homebrew/out
       - name: Playwright (driver only; the runner's Chrome stable is used)
         run: npm i -g playwright@1.56.1
-      - name: "No flag: no adapter, as on a GPU-less PC"
-        run: node harness/probes/webgpu-adapter.mjs --port 8102 --expect none --out webgpu-adapter-default.json
-      - name: "With --enable-unsafe-webgpu: WARP"
+      # First run (2026-10-23): without flags, headless Chrome 156 on this
+      # GPU-less runner gives a SwiftShader fallback adapter (Vulkan), not
+      # null. Recorded, not judged: which adapter each setting gives.
+      - name: "No flag: the adapter a GPU-less Windows Chrome gives"
+        run: node harness/probes/webgpu-adapter.mjs --port 8102 --out webgpu-adapter-default.json
+      - name: "With --enable-unsafe-webgpu"
         env:
           HARNESS_CHROME_ARGS: --enable-unsafe-webgpu
-        run: node harness/probes/webgpu-adapter.mjs --port 8102 --expect adapter --out webgpu-adapter-warp.json
+        run: node harness/probes/webgpu-adapter.mjs --port 8102 --expect adapter --out webgpu-adapter-unsafe.json
+      - name: "With --enable-unsafe-webgpu --use-webgpu-adapter=d3d12 (WARP?)"
+        continue-on-error: true
+        env:
+          HARNESS_CHROME_ARGS: --enable-unsafe-webgpu --use-webgpu-adapter=d3d12
+        run: node harness/probes/webgpu-adapter.mjs --port 8102 --expect adapter --out webgpu-adapter-d3d12.json
       - name: wgpu on WARP against the exact software renderer
         env:
           HARNESS_CHROME_ARGS: --enable-unsafe-webgpu
