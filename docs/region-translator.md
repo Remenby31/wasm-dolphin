@@ -295,6 +295,30 @@ counted by `DolphinWeb_AotRegionsSkippedMmu`). MMU games keep the
 CachedInterpreter with `aot=1`. Lifted once faults are delivered from our
 code (deferred delivery on the slow paths: backlog).
 
+## Installs in the throttle sleep (patch 0107, 2026-10-22)
+
+Installing a region is a synchronous `new WebAssembly.Module` on the CPU
+thread: a hit in V8's native module cache, but V8 reads all the wire bytes to
+find it, about 1.7 ms per MB measured on the bench (modules up to 5.8 MB:
+slices of 9-14 ms past the boot). The estimate is now 1.7 ms/MB (was 0.7).
+When the game is speed-capped, CoreTiming's throttle sleeps several ms per
+frame: `SleepUntil` first installs ready regions while the next module's
+estimate fits before the deadline (1 ms margin), then sleeps the rest. At a
+slice boundary, boot window included (with #86 the region cache loads after
+the first image, so the boot window is play), every ready module waits for
+such a window, 2 s at most from when a slice first found it installable (not
+from its post: with #86 every module is posted at once). A scene that never
+sleeps still gets it, then in slices of the slice target (not the boot's). Only
+a running CachedInterpreter installs in its sleeps. The installability checks
+(heap sites, plan hashes) count in the slice or sleep time. Counters:
+`DolphinWeb_AotRegionSleepInstalls` [installs, ms x 100, worst lateness past
+a sleep's deadline after its installs x 100, slice installs after the wait
+ran out], reset with the session's regions, in the region stats reply as
+`regionSleep`; sleep installs stay out of `installMaxSliceMs`. The lateness
+is the proof that no frame paid: 0 when every sleep kept its deadline. If p95 > 3 ms remains, the
+next lever is a size cap with split modules (coordinated with dispatch: lever
+C and #75's chaining are intra-module).
+
 ## Fragment size cap (patch 0115, 2026-10-23)
 
 A fragment stops taking blocks once it holds 400 KB of code (the blocks'
