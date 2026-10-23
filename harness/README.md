@@ -727,6 +727,15 @@ offers nor boots a `.dff` otherwise) a log boots like a disc, and
 exact software reference (`fastsw=0`): the same GPU commands, without the
 homebrew's CPU side, so wgpu is compared with the software rasterizer at
 SSIM ≥ 0.99 (the matrix's `renderMatch`; 0.9 by default).
+**Missing WebGPU features.** `?wgpumask=a,b` (harness only) creates the
+WebGPU device without those optional features, as a browser that lacks them
+would: Safari 26 has no `dual-source-blending` (Dolphin then takes its
+`no_dual_src` path) and no WGSL `clip_distances`.
+`matrices/wgpu-features.json` runs wgpu with and without them against the
+exact software reference (`fastsw=0`, `cpu=single`, SSIM ≥ 0.99), on
+`homebrew/dstalpha` (source-alpha blending while the destination alpha is a
+constant: the dual-source case), the gxscene FIFO log, efbpeek and ramcopy.
+
 Record them after `homebrew/build.sh`. Only our homebrews are recorded; no
 third-party FIFO logs (they contain game content).
 
