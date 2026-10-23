@@ -58,6 +58,10 @@ on:
         description: aot=1 on both sides (region levers)
         type: boolean
         default: false
+      warm:
+        description: 'Measure the second launch in the same profile (race-perf --warm): with aot=1 a .dol has its regions installed before boot (region codegen in steady state)'
+        type: boolean
+        default: false
       workloads:
         description: 'Homebrews to measure, a JSON list: footprint (1024 functions), footprint-64/-128/-256/-512, cpufuzz'
         type: string
@@ -139,6 +143,7 @@ jobs:
       CANDIDATE: ${{ inputs.candidate }}
       CANDIDATE_QUERY: ${{ inputs.candidate_query }}
       CANDIDATE_CORE_RUN: ${{ inputs.candidate_core_run }}
+      PHASE: ${{ inputs.warm && 'warm' || 'cold' }}
       # A bench/** push calibrates footprint against the game's regions: aot=1.
       # With aot=1, the region pipeline is read after each window
       # (--region-sample 0: counters only): regions installed and their
@@ -290,13 +295,16 @@ jobs:
             cores=(--core-candidate "$CORE_DIR")
           fi
           [ -n "$extra" ] && queries=(--query "$query$extra" --baseline-query "$query")
+          # --warm: the second launch in the same profile is the measured window.
+          warm=()
+          if [ "$PHASE" = warm ]; then warm=(--warm); fi
           taskset -c "$OTHER_CPUS" node harness/probes/race-perf.mjs \
             --iso "$dol" --port 8090 "${sides[@]}" "${queries[@]}" "${cores[@]}" \
             ${AOT:+--region-sample 0 --region-secs 3} \
             --hold "" --runs "$RUNS" --warmup 5 --emulated-warmup 5 --emulated-window "$WINDOW" \
             --pin-cpu-thread 0 --max-load 8 --load-wait 60 --lock-wait 60 --calm-wait 60 \
-            "${counters[@]}" --out "$OUT/aa"
-          node harness/remote/bench-aa.mjs "$OUT/aa" "$OUT/machine.json" | tee -a "$GITHUB_STEP_SUMMARY"
+            "${counters[@]}" "${warm[@]}" --out "$OUT/aa"
+          node harness/remote/bench-aa.mjs "$OUT/aa" "$OUT/machine.json" "$PHASE" | tee -a "$GITHUB_STEP_SUMMARY"
           # The machine at the end: a live migration would change the model.
           lscpu | grep "Model name" | tee "$OUT/model-end.txt"
 

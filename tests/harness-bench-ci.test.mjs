@@ -170,3 +170,17 @@ test("CI bench: a lever's PR core is served only if it is the .wasm its name say
   assert.match(workflow, /queries=\(--query "\$query\$extra" --baseline-query "\$query"\)/);
   assert.equal(workflow.match(/actions: read/g).length, 1); // the aa job only
 });
+
+test("CI bench: --warm runs are read on their warm windows (the second launch, regions installed before boot)", () => {
+  const pin = { thread: "DedicatedWorker", busyPct: 99, cpu: 0 };
+  const w = (speed) => ({ speed, pinned: pin });
+  const run = (n, coldA, coldB, warmA, warmB) => ({ run: n, baseline: { cold: w(coldA), warm: w(warmA) }, candidate: { cold: w(coldB), warm: w(warmB) } });
+  const runs = [1, 2, 3, 4, 5, 6].map((n) => run(n, 20, 20, 20, 22));
+  assert.equal(benchAA(runs).change.medianPct, 0);
+  const warm = benchAA(runs, {}, { phase: "warm" });
+  assert.equal(warm.phase, "warm");
+  assert.equal(warm.change.medianPct, Math.round(100 * Math.log(1.1) * 100) / 100);
+  assert.match(benchMarkdown(warm), /warm windows/);
+  assert.match(workflow, /if \[ "\$PHASE" = warm \]; then warm=\(--warm\); fi/);
+  assert.match(workflow, /bench-aa\.mjs "\$OUT\/aa" "\$OUT\/machine\.json" "\$PHASE"/);
+});
