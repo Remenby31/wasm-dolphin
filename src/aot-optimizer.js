@@ -50,7 +50,8 @@ export class AotOptimizer extends EventTarget {
   // keyParts: { compilerVersion, codegenMask } (the core's _DolphinWeb_AotKeyParts)
   constructor({ discKey, buildPlan, translator, openCache, cacheIdentity = {}, keyParts = { compilerVersion: 0, codegenMask: 0 },
     assemble = null, assembleOptions = null, compile = null, install = null, maxFunctions = 100, planStore = null, batchSize = BATCH,
-    notReadyDelayMs = 1000, maxNotReadyWaits = 300, maxAttempts = 3, sleep = (ms) => new Promise((r) => setTimeout(r, ms)), now = () => performance.now() }) {
+    notReadyDelayMs = 1000, maxNotReadyWaits = 300, maxAttempts = 3, sleep = (ms) => new Promise((r) => setTimeout(r, ms)), now = () => performance.now(),
+    heat = null }) {
     super();
     this.discKey = discKey;
     this.buildPlan = buildPlan;
@@ -66,6 +67,10 @@ export class AotOptimizer extends EventTarget {
     // core's dispatcher (_DolphinWeb_AotQueueRegion). Optional.
     this.install = install;
     this.maxFunctions = maxFunctions;
+    // heat(): the guest PCs sampled in this session so far, [pc, hits] pairs
+    // (or null): the next module is the waiting one whose code they hit most
+    // (research deep-first-minute, lever 1). Optional; never stored.
+    this.heat = heat;
     this.planStore = planStore;
     this.now = now;
     this.batchSize = batchSize;
@@ -298,6 +303,30 @@ export class AotOptimizer extends EventTarget {
     return { fragments, refused };
   }
 
+  // Index of the waiting unit (todo[from..]) whose members' code the sampled
+  // PCs hit most; `from` when nothing was sampled or nothing waiting is hot
+  // (the plan's order otherwise: ties keep it).
+  hottest(todo, from) {
+    const sampled = this.heat?.();
+    if (!sampled?.length) return from;
+    const pcs = [...sampled].sort((a, b) => a[0] - b[0]);
+    const prefix = [0];
+    for (const [, hits] of pcs) prefix.push(prefix.at(-1) + hits);
+    const lowerBound = (x) => {
+      let lo = 0, hi = pcs.length;
+      while (lo < hi) { const mid = (lo + hi) >> 1; if (pcs[mid][0] < x) lo = mid + 1; else hi = mid; }
+      return lo;
+    };
+    const hitsIn = (s, e) => prefix[lowerBound(e)] - prefix[lowerBound(s)];
+    let best = from, bestHits = 0;
+    for (let i = from; i < todo.length; i++) {
+      let hits = 0;
+      for (const f of todo[i].members) for (const [s, e] of f.ranges) hits += hitsIn(s, e);
+      if (hits > bestHits) { best = i; bestHits = hits; }
+    }
+    return best;
+  }
+
   // No verdict yet (code not in memory, out of memory, quota): retried at the
   // next launch, blacklisted after maxAttempts launches.
   async defer(session, unit, reason) {
@@ -413,6 +442,8 @@ export class AotOptimizer extends EventTarget {
           for (const u of this.regions) if (this.stale.has(u.key) && !queued.has(u.key)) { queued.add(u.key); todo.push(u); }
         }
         if (n >= todo.length || this.cancelled) break;
+        const hottest = this.hottest(todo, n);
+        if (hottest !== n) todo.splice(n, 0, todo.splice(hottest, 1)[0]); // the others keep their order
         const unit = todo[n];
         this.stale.delete(unit.key);
         const result = await this.translateUnit(unit);

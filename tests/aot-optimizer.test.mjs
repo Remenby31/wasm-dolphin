@@ -292,3 +292,24 @@ test("aot optimizer: the next module translates while the previous one compiles;
   await run;
   assert.deepEqual(installed, o.regions.map((u) => u.key), "installed in compile order");
 });
+
+// Research deep-first-minute, lever 1: the next module is the waiting one
+// whose code this session's sampled PCs hit most; the others keep the plan's
+// order, and nothing sampled keeps it all.
+test("aot optimizer: sampled heat translates the hottest waiting module first", async () => {
+  const order = [];
+  const base = fakeTranslator();
+  const translator = { translate: async (batch) => { order.push(batch[0].entry); return base.translate(batch); } };
+  const cold = optimizer({ translator });
+  await cold.o.start();
+  const planOrder = [...order];
+  order.length = 0;
+  const units = cold.o.regions;
+  const last = units.at(-1);
+  const [s] = last.members[0].ranges[0];
+  const hot = optimizer({ translator, heat: () => [[s, 50], [0x80000000, 1]] });
+  await hot.o.start();
+  assert.equal(order[0], last.members[0].entry, "the hot module first");
+  const rest = order.filter((e) => !last.members.some((f) => f.entry === e));
+  assert.deepEqual(rest, planOrder.filter((e) => !last.members.some((f) => f.entry === e)), "the others in the plan's order");
+});

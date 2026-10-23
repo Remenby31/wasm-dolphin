@@ -1,5 +1,6 @@
 import { readViRing } from "./harness-vi-ring.js";
 import { startPcSampler } from "./harness-pc-sampler.js";
+import { startHotSampler } from "./aot-hot-sampler.js";
 import {
   DEFAULT_UPSTREAM_CORE_SHA256,
   DEFAULT_UPSTREAM_CORE_URL,
@@ -3787,6 +3788,8 @@ async function mountFile(file) {
   aotDiscGeneration += 1;
   aotFirstLaunch?.dispose();
   aotFirstLaunch = null;
+  aotHotSampler?.stop();
+  aotHotSampler = null;
   aotCoreBooted = false;
   aotRegionsBeforeBoot.length = 0;
   // The previous disc's flow never sees this disc's first image (review of #86).
@@ -7353,6 +7356,8 @@ export async function prepareAotFirstLaunch(file, {
   const flow = createAotFirstLaunch({
     discKey,
     coreHash,
+    // The PCs sampled since the first image: hottest modules first.
+    heat: () => (aotFirstLaunch === flow ? aotHotSampler?.heat() ?? null : null),
     keyParts,
     translator,
     assembleOptions: core?.assemble,
@@ -7448,9 +7453,20 @@ export function startAotFirstLaunchAfterBoot(flow = aotFirstLaunch) {
     if (aotFirstLaunch !== flow) return undefined;
     return flow.loadRest();
   }).catch(() => {}).then(() => {
-    if (aotFirstLaunch === flow) return flow.start({ resume: true, ifGeneration: generation });
+    if (aotFirstLaunch !== flow) return undefined;
+    // Where the game runs while the optimisation goes (a thread of its own
+    // reading the guest PC): its modules are translated first. Stopped
+    // with the run, or by a remount.
+    aotHotSampler?.stop();
+    aotHotSampler = startHotSampler({ buffer: moduleInstance?.HEAPU8?.buffer, pcAddress: moduleInstance?._DolphinWeb_HarnessPcAddress?.() ?? 0 });
+    const sampler = aotHotSampler;
+    return flow.start({ resume: true, ifGeneration: generation }).finally(() => {
+      sampler?.stop();
+      if (aotHotSampler === sampler) aotHotSampler = null;
+    });
   });
 }
+let aotHotSampler = null;
 // The first presented image of this boot, or false after `timeoutMs`. No
 // running core (tests): at once.
 export const aotWhenFirstImageForTest = (module, options) => aotWhenFirstImage(module, options);

@@ -607,3 +607,9 @@ test("the translator's yield is one event-loop turn, chained without the timer c
   assert.ok(ms < 200, `200 chained yields in ${ms.toFixed(1)} ms (a clamped timer chain takes ≥ 800 ms in a browser)`);
 });
 
+
+test("the heat sampler needs a shared heap and a PC address; without them, no sampler (the plan's order)", async () => {
+  const { startHotSampler } = await import("../src/aot-hot-sampler.js");
+  assert.equal(startHotSampler({ buffer: new ArrayBuffer(16), pcAddress: 8 }), null);
+  assert.equal(startHotSampler({ buffer: new SharedArrayBuffer(16), pcAddress: 0 }), null);
+});
