@@ -2577,6 +2577,15 @@ async function loadCore({
     preferredPresenterBackend = "webgpu";
     await setupSoftwarePresenter(detachedWgpuCanvas, preferredPresenterBackend);
   }
+  // video=wgpu needs this worker's WebGPU device: the core asks for an adapter
+  // of its own and would take a CPU fallback the presenter refused, then run
+  // behind a black canvas (the replay has no device). Fail before the core
+  // starts, as without an adapter.
+  if (videoBackend === "WebGPU-Real" && !renderGpu && !isIntentionalBlankWgpuProbe(wgpuRendererWorkerProbe)) {
+    const message = `video=wgpu needs a usable WebGPU adapter; the presenter is ${renderBackend || "none"}`;
+    console.error(`[wgpu] ${message}`);
+    throw new Error(message);
+  }
 
   // §28cf boot-phase timing instrumentation. Attributes the ~1s page-load
   // freeze measured in §28cd. Each step's wall time is postStatus'd so the

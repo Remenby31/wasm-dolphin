@@ -18,6 +18,9 @@ test("the Windows no-GPU workflow is manual, pinned, and checks the no-flag adap
   for (const uses of wf.match(/uses: \S+/g)) assert.match(uses, /@[0-9a-f]{40}$/, `${uses} is pinned by SHA`);
   // A player's Chrome (without the harness's unsafe flag) gets no adapter.
   assert.match(job, /webgpu-adapter\.mjs --port \d+ --no-unsafe-webgpu --expect none/);
+  // The effective presenter is asserted, and forced wgpu must fail.
+  assert.match(job, /presenter-check\.mjs [^\n]*video=software&presenter=webgpu[^\n]*--expect-presenter webgl/);
+  assert.match(job, /presenter-check\.mjs [^\n]*video=wgpu[^\n]*--expect-boot-error "needs a usable WebGPU adapter"/);
   // No step adds Chrome flags of its own.
   assert.doesNotMatch(wf, /HARNESS_CHROME_ARGS/);
 });
@@ -47,4 +50,10 @@ test("a fallback WebGPU adapter counts as none unless the harness asks for it", 
   assert.match(host, /get\("wgpufallback"\) === "1"/);
   assert.match(adapter, /wgpuFallback: this\.wgpuFallback,/);
   assert.match(worker, /wgpuFallback: payload\.wgpuFallback,/);
+  // video=wgpu without this worker's device fails before the core starts (the
+  // core would otherwise take the refused fallback adapter itself).
+  const guard = worker.indexOf('if (videoBackend === "WebGPU-Real" && !renderGpu && !isIntentionalBlankWgpuProbe(wgpuRendererWorkerProbe))');
+  assert.ok(guard > 0, "video=wgpu guard present");
+  assert.ok(guard < worker.indexOf("moduleInstance = await factory("), "the guard runs before the core module is created");
+  assert.match(worker.slice(guard, guard + 600), /throw new Error\(message\)/);
 });

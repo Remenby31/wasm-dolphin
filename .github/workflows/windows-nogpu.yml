@@ -62,6 +62,10 @@ jobs:
         run: node harness/probes/webgpu-adapter.mjs --port 8102 --no-unsafe-webgpu --expect none --out webgpu-adapter-default.json
       - name: "Harness default (--enable-unsafe-webgpu): the fallback adapter"
         run: node harness/probes/webgpu-adapter.mjs --port 8102 --out webgpu-adapter-unsafe.json
+      - name: "The product's software config: the fallback adapter is refused, WebGL presents"
+        run: node harness/probes/presenter-check.mjs --iso harness/homebrew/out/gxscene.iso --port 8102 --query "core=upstream&video=software&presenter=webgpu&cpu=single&speed=1&wasmjit=0&fastsw=1" --expect-presenter webgl --out presenter-software.json
+      - name: "Forced video=wgpu without a usable adapter fails before the core starts"
+        run: node harness/probes/presenter-check.mjs --iso harness/homebrew/out/gxscene.iso --port 8102 --query "core=upstream&video=wgpu&presenter=webgpu&cpu=single&speed=1&wasmjit=0" --expect-boot-error "needs a usable WebGPU adapter" --out presenter-wgpu.json
       - name: Software renderer, WebGPU presenter refused (WebGL) and 2D
         run: node harness/cli.mjs matrix harness/matrices/windows-nogpu.json --port 8102
       - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
@@ -70,5 +74,6 @@ jobs:
           name: windows-nogpu-results
           path: |
             webgpu-adapter-*.json
+            presenter-*.json
             harness/results/
           retention-days: 14
