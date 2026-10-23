@@ -270,9 +270,9 @@ let fifoLogBoot = false;
 let wgpuMaskedFeatures = new Set();
 // ?wgpufallback=1 (harness): keep a CPU fallback adapter; refused otherwise.
 let wgpuAcceptFallbackAdapter = false;
-// A CPU adapter is no usable GPU: Chrome without a GPU (a GitHub Windows
-// runner, 2026-10-23) gives a SwiftShader fallback adapter instead of none,
-// and both the replay and the presenter would run on the CPU.
+// A CPU adapter is no usable GPU: with --enable-unsafe-webgpu (the harness
+// passes it) a GPU-less Chrome gives a SwiftShader fallback adapter, and both
+// the replay and the presenter would run on the CPU.
 export function isFallbackAdapterInfo(info) {
   return info?.isFallbackAdapter === true || info?.architecture === "swiftshader";
 }

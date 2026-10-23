@@ -17,7 +17,7 @@ test("the Windows WARP workflow is manual and keeps --enable-unsafe-webgpu in it
     warp.split("--enable-unsafe-webgpu").length - 1, "the flag appears only in the warp job");
   assert.match(warp, /runs-on: windows-/);
   for (const uses of wf.match(/uses: \S+/g)) assert.match(uses, /@[0-9a-f]{40}$/, `${uses} is pinned by SHA`);
-  // Without flags the adapter is recorded (first run: a SwiftShader fallback, not null).
+  // Without the harness's unsafe flag, the adapter a player's Chrome gets is recorded.
   assert.match(warp, /webgpu-adapter\.mjs --port \d+ --no-unsafe-webgpu --out webgpu-adapter-default\.json/);
 });
 
@@ -30,7 +30,7 @@ test("the WARP matrix compares wgpu with the exact software renderer, single cor
   assert.ok(m.games.every((g) => g.iso.startsWith("harness/homebrew/out/")), "homebrews only, no ROM");
 });
 
-// A CPU fallback adapter (what Chrome gives a GPU-less Windows runner) is no
+// A CPU fallback adapter (SwiftShader, with --enable-unsafe-webgpu) is no
 // usable GPU for the app; only the harness keeps it (?wgpufallback=1).
 test("a fallback WebGPU adapter counts as none unless the harness asks for it", async () => {
   const [host, adapter, worker] = await Promise.all(

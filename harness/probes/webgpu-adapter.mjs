@@ -4,9 +4,10 @@
 //
 // What WebGPU this Chrome gives a page: navigator.gpu, requestAdapter(),
 // the adapter's info and features, and whether a device can be created.
-// Headless, no disc. Used by the Windows WARP workflow: without flags a
-// GPU-less Windows runner has no adapter (WARP is refused), with
-// --enable-unsafe-webgpu (HARNESS_CHROME_ARGS) it should get WARP.
+// Headless, no disc. Used by the Windows workflow: with --no-unsafe-webgpu,
+// what a player's Chrome gets on a GPU-less PC; with the harness default
+// (--enable-unsafe-webgpu), the fallback adapter it allows (SwiftShader on
+// the GitHub runner, never WARP).
 //
 //   node harness/probes/webgpu-adapter.mjs --port N [--expect adapter|none] [--out file.json]
 //     [--no-unsafe-webgpu]   (the harness passes --enable-unsafe-webgpu by default:
