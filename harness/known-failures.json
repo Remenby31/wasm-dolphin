@@ -18,14 +18,5 @@
     "mode": "report-only",
     "reason": "cpu=dual race state: one commit gives several pictures across runs (wgpu: 3 distinct in 6 runs), so no baseline set holds; the exact render check of the race is on the cpu=single cells (rec-single, wgpu-single)",
     "since": "2026-10-19"
-  },
-  {
-    "cell": "efbpeek/wgpu-interp",
-    "check": "render",
-    "mode": "expected-fail",
-    "reason": "video=wgpu reads the EFB back as zeros (WebGPUStagingTexture is a stub, docs/wgpu-efb-readback-design.md): the peeked colours draw black and the depths white.",
-    "until": "wgpu EFB readback step 2 (real WebGPUStagingTexture), follow-up of PR #84",
-    "since": "2026-10-22",
-    "detail": "^missing-detail$"
   }
 ]
