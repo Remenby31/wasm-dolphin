@@ -14,6 +14,11 @@
  *     (GX_BL_DSTALPHA), so the alpha step 2 wrote shows as brightness.
  * A backend that blends step 2 with the constant instead of the TEV alpha,
  * or writes the TEV alpha instead of the constant, shows another picture.
+ *
+ * DSTALPHA_COPLANAR (dstalpha-coplanar): depth test on, and step 2 drawn
+ * coplanar (GX_SetCoPlanar, Dolphin's zfreeze), so its pixel shader writes
+ * depth. On WebGPU such a shader cannot use dual-source blending even when
+ * the device has it, and takes the same no_dual_src path on every browser.
  */
 #include <gccore.h>
 #include <malloc.h>
@@ -91,6 +96,9 @@ int main(void) {
 		GX_LoadProjectionMtx(ortho, GX_ORTHOGRAPHIC);
 		GX_LoadPosMtxImm(id, GX_PNMTX0);
 
+#ifdef DSTALPHA_COPLANAR
+		GX_SetZMode(GX_TRUE, GX_LEQUAL, GX_TRUE);
+#endif
 		/* 1. Opaque columns, destination alpha 0. */
 		GX_SetDstAlpha(GX_ENABLE, 0x00);
 		GX_SetBlendMode(GX_BM_NONE, GX_BL_ONE, GX_BL_ZERO, GX_LO_CLEAR);
@@ -100,6 +108,9 @@ int main(void) {
 		/* 2. Translucent rows: blended with the TEV alpha, destination alpha
 		 * written as a constant. */
 		GX_SetBlendMode(GX_BM_BLEND, GX_BL_SRCALPHA, GX_BL_INVSRCALPHA, GX_LO_CLEAR);
+#ifdef DSTALPHA_COPLANAR
+		GX_SetCoPlanar(GX_TRUE);
+#endif
 		for (int r = 0; r < 4; r++) {
 			GX_SetDstAlpha(GX_ENABLE, r < 2 ? 0x40 : 0xc0);
 			for (int c = 0; c < 4; c++)
@@ -107,6 +118,10 @@ int main(void) {
 				     0xf0f0f000u | quad_alpha[(r + c) & 3]);
 		}
 
+#ifdef DSTALPHA_COPLANAR
+		GX_SetCoPlanar(GX_FALSE);
+		GX_SetZMode(GX_FALSE, GX_ALWAYS, GX_FALSE);
+#endif
 		/* 3. White band blended with the destination alpha. */
 		GX_SetDstAlpha(GX_DISABLE, 0x00);
 		GX_SetBlendMode(GX_BM_BLEND, GX_BL_DSTALPHA, GX_BL_INVDSTALPHA, GX_LO_CLEAR);

@@ -1,0 +1,132 @@
+diff --git a/Source/Core/VideoCommon/VertexManagerBase.cpp b/Source/Core/VideoCommon/VertexManagerBase.cpp
+--- a/Source/Core/VideoCommon/VertexManagerBase.cpp
++++ b/Source/Core/VideoCommon/VertexManagerBase.cpp
+@@ -650,6 +650,7 @@
+       if (m_current_pipeline_object)
+       {
+         const AbstractPipeline* pipeline_object = m_current_pipeline_object;
++        const AbstractPipeline* dst_alpha_pipeline = nullptr;
+         if (!custom_pixel_shader_contents.shaders.empty())
+         {
+           if (const auto custom_pipeline =
+@@ -659,8 +660,21 @@
+             pipeline_object = custom_pipeline;
+           }
+         }
++        else if (g_ActiveConfig.iShaderCompilationMode == ShaderCompilationMode::Synchronous &&
++                 NeedsDstAlphaPass(m_current_pipeline_config))
++        {
++          const auto [color_config, alpha_config] = DstAlphaPassConfigs(m_current_pipeline_config);
++          const AbstractPipeline* color_pass = g_shader_cache->GetPipelineForUid(color_config);
++          const AbstractPipeline* alpha_pass = g_shader_cache->GetPipelineForUid(alpha_config);
++          if (color_pass && alpha_pass)
++          {
++            pipeline_object = color_pass;
++            dst_alpha_pipeline = alpha_pass;
++          }
++        }
+         RenderDrawCall(pixel_shader_manager, geometry_shader_manager, custom_pixel_shader_contents,
+-                       custom_pixel_shader_uniforms, m_current_primitive_type, pipeline_object);
++                       custom_pixel_shader_uniforms, m_current_primitive_type, pipeline_object,
++                       dst_alpha_pipeline);
+       }
+     }
+ 
+@@ -1057,11 +1071,56 @@
+   m_custom_shader_cache->Reload();
+ }
+ 
++// GX writes a constant destination alpha (GX_SetDstAlpha) while blending the
++// colour by the TEV alpha. Dolphin does both in one draw with dual-source
++// blending: ocol0.a carries the constant, ocol1.a the TEV alpha the blend
++// reads. A pipeline that cannot have dual-source blending (no such host
++// feature, as Safari's WebGPU; or, on WebGPU, a shader that writes depth,
++// see PipelineUtils.cpp) would blend with the constant instead. Old Dolphin
++// drew those in two passes, as below.
++static bool DualSourceBlendDropped(const pixel_shader_uid_data* ps)
++{
++  // Framebuffer fetch blends in the shader and needs no second pass.
++  if (g_backend_info.bSupportsFramebufferFetch)
++    return false;
++  if (!g_backend_info.bSupportsDualSourceBlend)
++    return true;
++  return g_backend_info.api_type == APIType::Vulkan && ps->per_pixel_depth;
++}
++
++bool VertexManagerBase::NeedsDstAlphaPass(const VideoCommon::GXPipelineUid& config)
++{
++  const pixel_shader_uid_data* ps = config.ps_uid.GetUidData();
++  return ps->useDstAlpha && config.blending_state.RequiresDualSrc() &&
++         DualSourceBlendDropped(ps);
++}
++
++std::pair<VideoCommon::GXPipelineUid, VideoCommon::GXPipelineUid>
++VertexManagerBase::DstAlphaPassConfigs(const VideoCommon::GXPipelineUid& config)
++{
++  // Pass 1: the game's blend on the colour, with the TEV alpha in ocol0.a
++  // (no destination-alpha constant); the alpha channel is left alone.
++  VideoCommon::GXPipelineUid color = config;
++  color.ps_uid.GetUidData()->useDstAlpha = false;
++  color.blending_state.alpha_update = false;
++
++  // Pass 2: the constant alone, unblended, where pass 1 drew. When pass 1
++  // wrote depth, an ordered test (LESS...) would now fail on the same
++  // fragments: test EQUAL instead, and write no depth.
++  VideoCommon::GXPipelineUid alpha = config;
++  alpha.blending_state.blend_enable = false;
++  alpha.blending_state.color_update = false;
++  if (alpha.depth_state.test_enable && alpha.depth_state.update_enable)
++    alpha.depth_state.func = CompareMode::Equal;
++  alpha.depth_state.update_enable = false;
++  return {color, alpha};
++}
++
+ void VertexManagerBase::RenderDrawCall(
+     PixelShaderManager& pixel_shader_manager, GeometryShaderManager& geometry_shader_manager,
+     const CustomPixelShaderContents& custom_pixel_shader_contents,
+     std::span<u8> custom_pixel_shader_uniforms, PrimitiveType primitive_type,
+-    const AbstractPipeline* current_pipeline)
++    const AbstractPipeline* current_pipeline, const AbstractPipeline* dst_alpha_pipeline)
+ {
+   // Now we can upload uniforms, as nothing else will override them.
+   geometry_shader_manager.SetConstants(primitive_type);
+@@ -1100,6 +1159,14 @@
+ 
+   if (PerfQueryBase::ShouldEmulate())
+     g_perf_query->DisableQuery(bpmem.zcontrol.early_ztest ? PQG_ZCOMP_ZCOMPLOC : PQG_ZCOMP);
++
++  // Second pass of a destination-alpha draw without dual-source blending
++  // (NeedsDstAlphaPass): the same vertices, outside the perf query.
++  if (dst_alpha_pipeline)
++  {
++    g_gfx->SetPipeline(dst_alpha_pipeline);
++    DrawCurrentBatch(base_index, m_index_generator.GetIndexLen(), base_vertex);
++  }
+ }
+ 
+ const AbstractPipeline* VertexManagerBase::GetCustomPipeline(
+diff --git a/Source/Core/VideoCommon/VertexManagerBase.h b/Source/Core/VideoCommon/VertexManagerBase.h
+--- a/Source/Core/VideoCommon/VertexManagerBase.h
++++ b/Source/Core/VideoCommon/VertexManagerBase.h
+@@ -4,6 +4,7 @@
+ #pragma once
+ 
+ #include <memory>
++#include <utility>
+ #include <vector>
+ 
+ #include "Common/BitSet.h"
+@@ -228,7 +229,12 @@
+                       GeometryShaderManager& geometry_shader_manager,
+                       const CustomPixelShaderContents& custom_pixel_shader_contents,
+                       std::span<u8> custom_pixel_shader_uniforms, PrimitiveType primitive_type,
+-                      const AbstractPipeline* current_pipeline);
++                      const AbstractPipeline* current_pipeline,
++                      const AbstractPipeline* dst_alpha_pipeline = nullptr);
++  // Destination alpha without dual-source blending: two passes (patch 0136).
++  static bool NeedsDstAlphaPass(const VideoCommon::GXPipelineUid& config);
++  static std::pair<VideoCommon::GXPipelineUid, VideoCommon::GXPipelineUid>
++  DstAlphaPassConfigs(const VideoCommon::GXPipelineUid& config);
+   void UpdatePipelineConfig();
+   void UpdatePipelineObject();
+ 
