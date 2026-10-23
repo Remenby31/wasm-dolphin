@@ -1210,7 +1210,11 @@ EMSCRIPTEN_KEEPALIVE const char* DolphinWeb_GpuSyncDiag()
     << ",\"eventsScheduled\":" << load(c.pe_events_scheduled)
     << ",\"eventsRun\":" << load(c.pe_events_run)
     << ",\"finishSignalled\":" << load(c.pe_finish_signalled)
-    << ",\"tokenSignalled\":" << load(c.pe_token_signalled) << "}}";
+    << ",\"tokenSignalled\":" << load(c.pe_token_signalled) << "}";
+  // Savestate pauses of the GPU loop (patch 0116).
+  const auto& sp = system.GetFifo().GetSavestatePauseStats();
+  o << ",\"savestatePause\":{\"count\":" << load(sp.count) << ",\"busy\":" << load(sp.busy)
+    << ",\"lastUs\":" << load(sp.last_us) << ",\"maxUs\":" << load(sp.max_us) << "}}";
   out = o.str();
   return out.c_str();
 }

@@ -35,10 +35,15 @@ diff --git a/Source/Core/Core/State.cpp b/Source/Core/Core/State.cpp
 diff --git a/Source/Core/VideoCommon/Fifo.cpp b/Source/Core/VideoCommon/Fifo.cpp
 --- a/Source/Core/VideoCommon/Fifo.cpp
 +++ b/Source/Core/VideoCommon/Fifo.cpp
-@@ -105,6 +105,41 @@
-     EmulatorState(true);
+@@ -100,7 +100,51 @@
  }
  
+ void FifoManager::RestoreState(const bool was_running)
++{
++  if (was_running)
++    EmulatorState(true);
++}
++
 +bool FifoManager::PauseForSavestate()
 +{
 +  const bool was_running = m_emu_running_state.IsSet();
@@ -55,32 +60,37 @@ diff --git a/Source/Core/VideoCommon/Fifo.cpp b/Source/Core/VideoCommon/Fifo.cpp
 +  // Wakeup has returned, so nothing decodes after the wait. No timeout: the
 +  // GPU loop waits on the render worker at most, never on the CPU thread.
 +  const bool busy = !m_gpu_mainloop.IsDone();
++  const auto start = std::chrono::steady_clock::now();
 +  m_gpu_mainloop.Wakeup();
 +  int seconds = 0;
 +  m_gpu_mainloop.WaitYield(std::chrono::seconds(1), [&seconds] {
 +    WARN_LOG_FMT(COMMANDPROCESSOR, "Savestate: the GPU loop is still running after {} s",
 +                 ++seconds);
 +  });
++  const u64 waited_us = static_cast<u64>(std::chrono::duration_cast<std::chrono::microseconds>(
++                                             std::chrono::steady_clock::now() - start)
++                                             .count());
++  auto& stats = m_savestate_pause_stats;
++  stats.count.fetch_add(1, std::memory_order_relaxed);
 +  if (busy)
-+    INFO_LOG_FMT(COMMANDPROCESSOR, "Savestate: waited for a running GPU loop");
++    stats.busy.fetch_add(1, std::memory_order_relaxed);
++  stats.last_us.store(waited_us, std::memory_order_relaxed);
++  if (waited_us > stats.max_us.load(std::memory_order_relaxed))
++    stats.max_us.store(waited_us, std::memory_order_relaxed);
 +  return was_running;
 +}
 +
 +void FifoManager::ResumeAfterSavestate(const bool was_running)
-+{
+ {
 +  if (!m_system.IsDualCoreMode() || m_use_deterministic_gpu_thread)
 +    return;
-+  if (was_running)
-+    EmulatorState(true);
-+}
-+
- void FifoManager::Init()
- {
-   if (!m_config_callback_id)
+   if (was_running)
+     EmulatorState(true);
+ }
 diff --git a/Source/Core/VideoCommon/Fifo.h b/Source/Core/VideoCommon/Fifo.h
 --- a/Source/Core/VideoCommon/Fifo.h
 +++ b/Source/Core/VideoCommon/Fifo.h
-@@ -54,6 +54,11 @@
+@@ -54,6 +54,21 @@
    void DoState(PointerWrap& f);
    void PauseAndLock();
    void RestoreState(bool was_running);
@@ -89,6 +99,24 @@ diff --git a/Source/Core/VideoCommon/Fifo.h b/Source/Core/VideoCommon/Fifo.h
 +  // the loop was running, for ResumeAfterSavestate.
 +  bool PauseForSavestate();
 +  void ResumeAfterSavestate(bool was_running);
++  // The pauses so far: how many, how many found the loop still running, and
++  // the last and longest wait in microseconds (harness, read from any thread).
++  struct SavestatePauseStats
++  {
++    std::atomic<u32> count{0};
++    std::atomic<u32> busy{0};
++    std::atomic<u64> last_us{0};
++    std::atomic<u64> max_us{0};
++  };
++  const SavestatePauseStats& GetSavestatePauseStats() const { return m_savestate_pause_stats; }
    void UpdateWantDeterminism(bool want);
    bool UseDeterministicGPUThread() const { return m_use_deterministic_gpu_thread; }
    bool UseSyncGPU() const { return m_config_sync_gpu; }
+@@ -90,6 +105,7 @@
+   static constexpr u32 FIFO_SIZE = 2 * 1024 * 1024;
+ 
+   Common::BlockingLoop m_gpu_mainloop;
++  SavestatePauseStats m_savestate_pause_stats;
+ 
+   Common::Flag m_emu_running_state;
+ 

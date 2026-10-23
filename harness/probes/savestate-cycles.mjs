@@ -77,7 +77,8 @@ async function progress(page) {
   const finish = (after?.counters?.finishSignalled ?? 0) - (before?.counters?.finishSignalled ?? 0);
   const chunks = (after?.counters?.fifoChunks ?? 0) - (before?.counters?.fifoChunks ?? 0);
   const xfbCopies = hr.error ? null : hr.xfbCopies;
-  return { ok: Boolean(xfbCopies > 0 && finish > 0), xfbCopies, finish, chunks, headroomError: hr.error ?? null, fifo: after?.fifo ?? null };
+  // pause: the GPU-loop pause of the last DoState (patch 0116; absent before).
+  return { ok: Boolean(xfbCopies > 0 && finish > 0), xfbCopies, finish, chunks, headroomError: hr.error ?? null, fifo: after?.fifo ?? null, pause: after?.savestatePause ?? null };
 }
 
 const record = { probe: "savestate-cycles", iso: path.basename(iso), state: path.basename(state), query, mode: values.mode, boots: [], at: new Date().toISOString() };
@@ -121,6 +122,22 @@ for (let b = 1; b <= Number(values.boots); b += 1) {
   }
 }
 record.failed = failed;
+// How long a load waited for the GPU loop (patch 0116), first loads apart.
+const pauses = (rows) => {
+  const us = rows.map((c) => c.pause?.lastUs).filter(Number.isFinite).sort((a, b) => a - b);
+  if (!us.length) return null;
+  const at = (q) => us[Math.min(us.length - 1, Math.ceil(us.length * q) - 1)];
+  return { n: us.length, p50Ms: at(0.5) / 1000, p95Ms: at(0.95) / 1000, maxMs: us.at(-1) / 1000 };
+};
+// count/busy are cumulative per boot: the last reading of each boot says how
+// many pauses (saves and loads) found the GPU loop still running.
+const lastPause = (b) => [b.first, ...b.cycles].filter((c) => c?.pause).at(-1)?.pause ?? null;
+record.pause = {
+  firstLoad: pauses(record.boots.map((b) => b.first).filter(Boolean)),
+  cycles: pauses(record.boots.flatMap((b) => b.cycles)),
+  busyPerBoot: record.boots.map((b) => { const p = lastPause(b); return p ? `${p.busy}/${p.count}` : null; })
+};
+if (record.pause.firstLoad || record.pause.cycles) console.log(`[savestate-cycles] GPU-loop pause: first load ${JSON.stringify(record.pause.firstLoad)}, cycles ${JSON.stringify(record.pause.cycles)}`);
 if (outDir) {
   mkdirSync(outDir, { recursive: true });
   writeFileSync(path.join(outDir, "savestate-cycles.json"), JSON.stringify(record, null, 1));
