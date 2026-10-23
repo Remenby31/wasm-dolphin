@@ -8,7 +8,7 @@ import test from "node:test";
 import { fileURLToPath } from "node:url";
 
 import {
-  ABI_PATH, CORE_BINARY_FILES, CORE_DERIVED_FILES, coreArtifactChanges, coreStatus, fetchCore, publishPlan,
+  ABI_PATH, CORE_BINARY_FILES, CORE_DERIVED_FILES, coreArtifactChanges, coreStatus, fetchCore, publishPlan, republishDifferences,
   resolvePinConflict, restoreCoreFromBase, stagedCoreArtifactChanges
 } from "../tools/core-artifacts.mjs";
 import { CORE_LOCK_PATH, formatCoreLock } from "../tools/core-lock.mjs";
@@ -327,6 +327,41 @@ test("publishing decides on content, and refuses a build of other sources before
   }
 });
 
+test("a republished core needs HEAD's ABI contract sources at its clean build commit", async () => {
+  const f = fixture();
+  try {
+    f.installCore("core", ["a"]);
+    const built = f.commit("built here");
+    const record = (extra = {}) => ({ repository: { commit: built, cleanTree: true, ...extra } });
+    f.write("harness/notes.md", "not a contract source\n");
+    f.commit("harness only");
+    assert.deepEqual(republishDifferences(record(), f.dir), []);
+    assert.deepEqual(republishDifferences(record({ cleanTree: false }), f.dir), ["the core was built from a tree with local changes"]);
+    assert.match(republishDifferences({ repository: { commit: "f".repeat(40), cleanTree: true } }, f.dir)[0], /not in this checkout/);
+    assert.deepEqual(republishDifferences({}, f.dir), ["the build record names no commit"]);
+    f.write(PROTOCOL_PATH, "export const other = 2;\n");
+    f.commit("src only");
+    assert.deepEqual(republishDifferences(record(), f.dir), [`ABI contract source ${PROTOCOL_PATH} differs`]);
+
+    // publish-plan --republish: those differences hand over to a full run, nothing installed.
+    const { dir, artifact } = publishFixture();
+    try {
+      const plan = await publishPlan({
+        artifactDir: artifact, cwd: dir, builtSha256: BUILT, republish: true,
+        status: async () => ({ current: false, reasons: ["stale"] }), identityDifferences: () => [],
+        republishCheck: () => [`ABI contract source ${PROTOCOL_PATH} differs`],
+        regenerate: () => { throw new Error("nothing is installed"); }, commit: () => { throw new Error("no commit"); }
+      });
+      assert.equal(plan.action, "dispatch");
+      assert.deepEqual(plan.reasons, [`ABI contract source ${PROTOCOL_PATH} differs`]);
+    } finally {
+      rmSync(dir, { recursive: true, force: true });
+    }
+  } finally {
+    rmSync(f.dir, { recursive: true, force: true });
+  }
+});
+
 test("none needs the committed bytes to be this run's build, whatever the build record declares", async () => {
   for (const platform of ["darwin-arm64", "linux-x64"]) {
     const { dir, artifact } = publishFixture();
@@ -484,10 +519,10 @@ function pushFixture() {
   mkdirSync(hooks);
   writeFileSync(path.join(hooks, "pre-push"), `#!/bin/sh\ntouch "${path.join(dir, "hook-ran")}"\n`, { mode: 0o755 });
   writeFileSync(path.join(dir, "gitconfig"), `[core]\n\thooksPath = ${hooks}\n`);
-  const run = ({ action = "commit", attempt = 0, sha }) => spawnSync("bash", ["-c", pushStepScript()], {
+  const run = ({ action = "commit", attempt = 0, republish = 0, sourceRun = "100", fetch = "", sha }) => spawnSync("bash", ["-c", pushStepScript()], {
     cwd: dir, encoding: "utf8",
     env: { ...process.env, PATH: `${bin}:${process.env.PATH}`, HOME: dir, GIT_CONFIG_GLOBAL: path.join(dir, "gitconfig"),
-      ACTION: action, BASE: base, SHA256: sha, ATTEMPT: String(attempt), PUBLISH: publish,
+      ACTION: action, BASE: base, SHA256: sha, ATTEMPT: String(attempt), REPUBLISH: String(republish), SOURCE_RUN: sourceRun, FETCH: fetch, PUBLISH: publish,
       REMOTE: `file://${remote}`, TOKEN: "dummy-token", GITHUB_REPOSITORY: "o/r" }
   });
   const ghCalls = () => (existsSync(path.join(dir, "gh.log")) ? readFileSync(path.join(dir, "gh.log"), "utf8") : "");
@@ -577,7 +612,7 @@ test("push-core refuses a missing bundle or one with other refs than HEAD", () =
   }
 });
 
-test("push-core hands over when main moved or sources changed, at most 3 times", () => {
+test("push-core republishes when main moved, hands over when sources changed, 3 times at most each", () => {
   const f = pushFixture();
   try {
     const hash = sha256("new core");
@@ -587,9 +622,15 @@ test("push-core hands over when main moved or sources changed, at most 3 times",
     f.sh(f.dir, "clone", "-q", `file://${f.remote}`, other);
     f.sh(other, "-c", "user.email=t@x", "-c", "user.name=t", "commit", "-q", "--allow-empty", "-m", "moved");
     f.sh(other, "push", "-q", "origin", "main");
+    // main moved: the next run republishes this run's core, no build.
     const moved = f.run({ sha: hash, attempt: 1 });
     assert.equal(moved.status, 0, moved.stderr);
-    assert.match(f.ghCalls(), /workflow run core-build\.yml .*--ref main -f attempt=2/);
+    assert.match(f.ghCalls(), /workflow run core-build\.yml .*--ref main -f attempt=1 -f from_run=100 -f republish=1\n$/);
+    // After 3 republications, a full run.
+    rmSync(path.join(f.dir, "repo"), { recursive: true, force: true });
+    const fourth = f.run({ sha: hash, attempt: 1, republish: 3 });
+    assert.equal(fourth.status, 0, fourth.stderr);
+    assert.match(f.ghCalls(), /--ref main -f attempt=2\n$/);
 
     // A plan that disagrees with the job's input is refused, not acted on.
     assert.notEqual(f.run({ sha: hash, action: "dispatch", attempt: 2 }).status, 0);
@@ -598,6 +639,20 @@ test("push-core hands over when main moved or sources changed, at most 3 times",
     const sources = f.run({ sha: hash, action: "dispatch", attempt: 2 });
     assert.equal(sources.status, 0, sources.stderr);
     assert.match(f.ghCalls(), /attempt=3/);
+
+    // The core of from_run could not be taken: a full run, whatever the plan.
+    const lost = f.run({ sha: hash, action: "", attempt: 1, republish: 2, fetch: "failure" });
+    assert.equal(lost.status, 0, lost.stderr);
+    assert.match(lost.stdout, /run 100's core could not be taken; handing over to attempt 2/);
+    assert.match(f.ghCalls(), /--ref main -f attempt=2\n$/);
+    // Counters are non-negative integers, or nothing is dispatched.
+    const calls = f.ghCalls();
+    for (const bad of [{ attempt: -50 }, { republish: -1 }, { attempt: "1; echo x" }]) {
+      const refused = f.run({ sha: hash, action: "dispatch", ...bad });
+      assert.notEqual(refused.status, 0, JSON.stringify(bad));
+      assert.match(refused.stdout, /invalid attempt/);
+    }
+    assert.equal(f.ghCalls(), calls);
 
     const exhausted = f.run({ sha: hash, action: "dispatch", attempt: 3 });
     assert.notEqual(exhausted.status, 0, "the fourth hand-over fails the job instead");
@@ -627,6 +682,29 @@ test("main's runs build main's tip, queue, and keep the token out of every job t
   }
   const prepare = jobs.find((job) => job.startsWith("prepare-core-commit:"));
   assert.match(prepare, /set -euo pipefail/);
+  // A republication (from_run) builds nothing and passes --republish.
+  assert.match(jobs.find((job) => job.startsWith("build:")), /if: needs\.changes\.outputs\.core == 'true' && !inputs\.from_run/);
+  assert.match(prepare, /if \[ -n "\$FROM_RUN" \]; then\n\s+node tools\/core-artifacts\.mjs publish-plan [^\n]*--republish/);
+  assert.match(prepare, /needs\.build\.result == 'success' && needs\.rebuild-from-source-archive\.result == 'success'\) \|\|\s+needs\.fetch-run-core\.result == 'success'/);
+  // Only a completed, green core-build run on main of this repository, whose
+  // two builds were green; the artifact's .wasm must be the hash it is named after.
+  const fetch = jobs.find((job) => job.startsWith("fetch-run-core:"));
+  assert.match(fetch, /permissions:\n\s+actions: read\n/);
+  assert.doesNotMatch(fetch, /actions\/checkout|node |npm /, "fetch-run-core runs no repository code");
+  for (const check of [/\.status == "completed" and \.conclusion == "success"/, /\.repository\.full_name == \$repo and \.head_repository\.full_name == \$repo/,
+    /\.head_branch == "main"/, /\.path == "\.github\/workflows\/core-build\.yml"/, /for job in build rebuild-from-source-archive/,
+    /grep -E '\^core-\[0-9a-f\]\{64\}\$'/, /test "\$\(sha256sum "\$ARTIFACT\/dolphin-core-upstream\.wasm"/]) {
+    assert.match(fetch, check);
+  }
+  const push = jobs.find((job) => job.startsWith("push-core:"));
+  assert.match(push, /needs\.prepare-core-commit\.result == 'success'/);
+  // A cancelled run hands nothing over (always() would override the cancel);
+  // a failed build publishes nothing; a failed fetch-run-core hands over.
+  assert.doesNotMatch(workflow, /always\(\)/);
+  assert.match(prepare, /if: >-\n\s+!cancelled\(\) && /);
+  assert.match(push, /if: >-\n\s+!cancelled\(\) && \(\(needs\.prepare-core-commit\.result == 'success' &&[\s\S]*\|\|\s+needs\.fetch-run-core\.result == 'failure'\)/);
+  assert.match(push, /download-artifact[^\n]*\n\s+if: needs\.prepare-core-commit\.result == 'success'/);
+  assert.match(push, /FETCH: \$\{\{ needs\.fetch-run-core\.result \}\}/);
   assert.match(prepare, /jq -er '\.action/);
   assert.doesNotMatch(prepare, /github\.token|secrets\./);
 });
