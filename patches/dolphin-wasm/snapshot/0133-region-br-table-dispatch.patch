@@ -1,7 +1,7 @@
 diff --git a/Source/Core/Core/PowerPC/CachedInterpreter/CachedInterpreter.cpp b/Source/Core/Core/PowerPC/CachedInterpreter/CachedInterpreter.cpp
 --- a/Source/Core/Core/PowerPC/CachedInterpreter/CachedInterpreter.cpp
 +++ b/Source/Core/Core/PowerPC/CachedInterpreter/CachedInterpreter.cpp
-@@ -16779,9 +16779,10 @@ bool BuildRegionFragment(Core::System& system, u32 entry_pc, std::span<const u32
+@@ -16815,9 +16815,10 @@ bool BuildRegionFragment(Core::System& system, u32 entry_pc, std::span<const u32
      }
      blocks.push_back(std::move(fb));
    }
@@ -15,7 +15,7 @@ diff --git a/Source/Core/Core/PowerPC/CachedInterpreter/CachedInterpreter.cpp b/
  
    auto& ppc = system.GetPPCState();
    const auto base = reinterpret_cast<std::uintptr_t>(&ppc);
-@@ -16816,16 +16817,69 @@ bool BuildRegionFragment(Core::System& system, u32 entry_pc, std::span<const u32
+@@ -16853,16 +16854,69 @@ bool BuildRegionFragment(Core::System& system, u32 entry_pc, std::span<const u32
    code.insert(code.end(), {0x71, 0x04, 0x40});  // i32.and; if
    EmitI32Const(code, 1);
    code.insert(code.end(), {0x0f, 0x0b});  // return; end
@@ -89,7 +89,7 @@ diff --git a/Source/Core/Core/PowerPC/CachedInterpreter/CachedInterpreter.cpp b/
      const u32 at = static_cast<u32>(code.size());
      code.insert(code.end(), b.expr.begin(), b.expr.end());
      for (const auto& reloc : b.relocs)
-@@ -16842,9 +16896,12 @@ bool BuildRegionFragment(Core::System& system, u32 entry_pc, std::span<const u32
+@@ -16885,9 +16939,12 @@ bool BuildRegionFragment(Core::System& system, u32 entry_pc, std::span<const u32
        out->relocs.push_back({at + static_cast<u32>(reloc.offset), 0,
                               static_cast<u32>(it - WASM_IMPORT_NAMES.begin())});
      }
@@ -102,7 +102,7 @@ diff --git a/Source/Core/Core/PowerPC/CachedInterpreter/CachedInterpreter.cpp b/
      store(pc_offset);
      EmitLocalGet(code, 0);
      EmitLocalGet(code, 0);
-@@ -16858,22 +16915,40 @@ bool BuildRegionFragment(Core::System& system, u32 entry_pc, std::span<const u32
+@@ -16902,22 +16959,40 @@ bool BuildRegionFragment(Core::System& system, u32 entry_pc, std::span<const u32
      code.insert(code.end(), {0x4c, 0x04, 0x40});  // i32.le_s; if
      EmitI32Const(code, 0);
      code.insert(code.end(), {0x0f, 0x0b});  // return; end
@@ -146,14 +146,14 @@ diff --git a/Source/Core/Core/PowerPC/CachedInterpreter/CachedInterpreter.cpp b/
    EmitLocalGet(code, 0);
    reloc_site(2, 0);
    code.insert(code.end(), {0x0b, 0x00, 0x0b});  // end loop; unreachable; end
-@@ -16937,8 +17012,9 @@ namespace
- // taken by 0108-0110). 16 (0121): region code takes MSR LE/FE0/FE1 and
+@@ -16982,8 +17057,9 @@ namespace
  // HID2.LSQE for granted (15 is 0119's). 17 (0126): region byte swaps as two
  // rotates (11-15 are taken by 0112-0119). 21 (0129): fused relaxed_madd mode
--// (18 retired, 19 and 20 are 0127's and 0128's).
--constexpr u32 AOT_COMPILER_VERSION = 21;
-+// (18 retired, 19 and 20 are 0127's and 0128's). 25 (0133): a fragment's
-+// head finds the block by br_table (22-24 are taken by 0130-0132).
+ // (18 retired, 19 and 20 are 0127's and 0128's). 23 (0131): region modules
+-// carry wasm branch hints (22 is 0130's).
+-constexpr u32 AOT_COMPILER_VERSION = 23;
++// carry wasm branch hints (22 is 0130's). 25 (0133): a fragment's head finds
++// the block by br_table (24 is 0132's).
 +constexpr u32 AOT_COMPILER_VERSION = 25;
  constexpr u32 AOT_MAX_FRAGMENT_BYTES = 1u << 20;
  thread_local std::vector<u32> t_aot_out;

@@ -229,12 +229,12 @@ export const sceneName = (file) => path.basename(String(file)).replace(/-[0-9a-f
 // cycles, and its lane-corrected change against arm 0 (armEffects; an event
 // at zero somewhere gets no change).
 export function frontEndStats(runs, events) {
-  const laneOf = runs.map((r) => r.arms.map((x) => x.lane));
+  const laneIdx = runs.map((r) => r.arms.map((x) => x.lane));
   const out = {};
   for (const ev of events) {
     const rate = runs.map((r) => r.arms.map((x) => ((x.cold.counters?.[ev] ?? NaN) / x.cold.guestTicks) * 1000));
     const perArm = rate[0].map((_, a) => round(median(rate.map((row) => row[a])), 3));
-    out[ev] = { perArm, effects: rate.every((row) => row.every((v) => v > 0)) ? armEffects(rate, laneOf) : null };
+    out[ev] = { perArm, effects: rate.every((row) => row.every((v) => v > 0)) ? armEffects(rate, laneIdx) : null };
   }
   return out;
 }
@@ -516,12 +516,13 @@ async function main() {
   const effects = full ? armEffects(good.map((r) => r.arms.map((x) => x.cold.speed)), good.map((r) => r.arms.map((x) => x.lane))) : null;
   // The same analysis on host instructions per guest cycle (lower is better).
   const ipg = good.map((r) => r.arms.map((x) => x.cold.instructionsPerGuestCycle));
-  const laneOf = good.map((r) => r.arms.map((x) => x.lane));
-  const counterEffects = full && values.counters && ipg.every((row) => row.every((v) => v > 0)) ? armEffects(ipg, laneOf) : null;
+  // Not `laneOf`: that name is the rotation function the runs call above (TDZ).
+  const laneIdx = good.map((r) => r.arms.map((x) => x.lane));
+  const counterEffects = full && values.counters && ipg.every((row) => row.every((v) => v > 0)) ? armEffects(ipg, laneIdx) : null;
   // And on host CYCLES per guest cycle: when a change moves the IPC, the
   // instructions mislead and these decide (PROGRAM.md, 2026-10-23).
   const cpg = good.map((r) => r.arms.map((x) => x.cold.cyclesPerGuestCycle));
-  const cycleEffects = full && values.counters && cpg.every((row) => row.every((v) => v > 0)) ? armEffects(cpg, laneOf) : null;
+  const cycleEffects = full && values.counters && cpg.every((row) => row.every((v) => v > 0)) ? armEffects(cpg, laneIdx) : null;
   // --counter-events: per arm, each event per 1000 guest cycles (median over
   // the runs), and its lane-corrected change against arm 0.
   const eventStats = full && extraEvents.length ? frontEndStats(good, extraEvents) : null;

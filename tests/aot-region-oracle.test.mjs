@@ -22,6 +22,7 @@ for (const [name, mask] of [["production mask", PRODUCTION_DISABLE_MASK], ["shor
     const tally = runOracleProgramsAsRegions(core, { seed: 0x4e9 ^ mask, count: 400, length: 24, mask });
     t.diagnostic(JSON.stringify({ ...tally, mismatches: tally.mismatches.slice(0, 4), mismatchCount: tally.mismatches.length }));
     assert.deepEqual(tally.mismatches.slice(0, 4), []);
+    assert.equal(tally.hintsDropped, 0, "every branch hint of the core lands on an `if` (0131)");
     // A program whose first instruction the direct tier does not take has no
     // fragment (its entry must be a block): about a quarter of them.
     assert.ok(tally.translated >= 0.7 * tally.programs, `${tally.translated} of ${tally.programs} translated`);

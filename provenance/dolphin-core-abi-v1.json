@@ -1,27 +1,27 @@
 {
   "schemaVersion": 1,
   "abiVersion": 1,
-  "coreId": "sha256:fdd3b0e8a0e347c1579696b4accedd0d0641f3ff6ba1feef41b0d4cf9c60d0c7",
+  "coreId": "sha256:88560abae5ca3575134fbcb7ff39bf59c9902827f3fbaf8f5faa44e4c7cade0a",
   "upstreamCommit": "e22551eae1c84a7e4d0b6a5c519ef4ed4ef69df1",
   "artifacts": [
     {
       "path": "cores/dolphin/dolphin-core-upstream.js",
       "hashMode": "lf-normalized",
-      "size": 282487,
-      "sha256": "4ff9ec4f1a572809a470ae7b0b496fbdcc5b232218c064fd8988f60f90429240"
+      "size": 283026,
+      "sha256": "1c9f71a200290815707ad980824ccd87662105de148187f132ce6c66064dc71f"
     },
     {
       "path": "cores/dolphin/dolphin-core-upstream.wasm",
-      "size": 13144303,
-      "sha256": "fdd3b0e8a0e347c1579696b4accedd0d0641f3ff6ba1feef41b0d4cf9c60d0c7"
+      "size": 13163064,
+      "sha256": "88560abae5ca3575134fbcb7ff39bf59c9902827f3fbaf8f5faa44e4c7cade0a"
     }
   ],
   "contractSources": [
     {
       "path": "core/upstream/dolphin_web_discio.cpp",
       "hashMode": "lf-normalized",
-      "size": 71684,
-      "sha256": "19e4dec6bc36a9bccc7dfe8b0319f4fbac9f7b33844d713b14aab1d8a9654e92"
+      "size": 72056,
+      "sha256": "cbfce8478d96f0d715c869e98562c7692018640fab16cae8db5d1827062d73de"
     },
     {
       "path": "core/upstream/dolphin_web_raster_profile.h",
@@ -140,8 +140,8 @@
     {
       "path": "src/upstream-discio-worker.js",
       "hashMode": "lf-normalized",
-      "size": 718983,
-      "sha256": "e5cb33be019291c3d5e76c052d7384bb6ddbe33fa33af63947de3cc0c2369c45"
+      "size": 722675,
+      "sha256": "eaed077e3c4ad31d3664665fc6eeb15d0902ef340d94d61552738a47c71d0ca1"
     },
     {
       "path": "src/wgpu-renderer-worker-probe.js",
@@ -408,8 +408,10 @@
     "_DolphinWeb_DirectPadLayout",
     "_DolphinWeb_EmulatedRtc",
     "_DolphinWeb_FmaIsMusl",
+    "_DolphinWeb_FusedMadd",
     "_DolphinWeb_GpuSyncDiag",
     "_DolphinWeb_GpuSyncDiagEnable",
+    "_DolphinWeb_GuestPcAddress",
     "_DolphinWeb_HarnessArmCapture",
     "_DolphinWeb_HarnessCaptureHeight",
     "_DolphinWeb_HarnessCaptureIndex",
@@ -469,6 +471,9 @@
     "_DolphinWeb_RecordModuleUs",
     "_DolphinWeb_RecordWasmCompileError",
     "_DolphinWeb_RegionChainHelper",
+    "_DolphinWeb_RegionGuardRefusals",
+    "_DolphinWeb_SetFprfForTest",
+    "_DolphinWeb_SetFusedMadd",
     "_DolphinWeb_SetGpuSpinBudget",
     "_FlushMemoryCards",
     "_FrameBuffer",
@@ -683,7 +688,8 @@
       "validationReadWgpuReplayState",
       "validationSetCorePaused",
       "validationSetWgpuPerturbation",
-      "validationUniqueFrames"
+      "validationUniqueFrames",
+      "validationWgslCorpus"
     ],
     "notificationFields": {
       "detachedOglFrame": [

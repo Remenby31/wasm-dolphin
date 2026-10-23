@@ -741,6 +741,15 @@ exact software reference (`fastsw=0`, `cpu=single`, SSIM ≥ 0.99), on
 `homebrew/dstalpha` (source-alpha blending while the destination alpha is a
 constant: the dual-source case), the gxscene FIFO log, efbpeek and ramcopy.
 
+**Chrome's Windows shader path, offline.** `probes/wgsl-corpus.mjs` boots a
+disc on `video=wgpu` (savestate and steps optional) and writes the WGSL of
+every shader module the replay created, one file per hash (harness request
+`validationWgslCorpus`). `tools/wgsl-hlsl-corpus.mjs` then runs each module
+through Tint to HLSL and DXC, with the Tint and DXC of the Dawn branch the
+installed Chrome ships (`dawn chromium/<build>`, `DAWN_USE_BUILT_DXC`),
+and reports failures and per-module times. A local disc's corpus stays
+outside the repo. FXC (`d3dcompiler_47`) is Windows-only and not covered.
+
 Record them after `homebrew/build.sh`. Only our homebrews are recorded; no
 third-party FIFO logs (they contain game content).
 
