@@ -25,7 +25,7 @@
       "commit": "01e0577914a75a2569c846778c2f93aa8e6feddd"
     }
   },
-  "patchSeriesSha256": "d2233e03b7b748b73bca8a4cfafce8e1d11028b05a4b005c89005a38e056f497",
+  "patchSeriesSha256": "c6fc1bc8085860d032899c3e21aa37b462092c581df263ece79af16ca45b04d8",
   "patches": [
     {
       "order": 1,
@@ -767,9 +767,9 @@
       "order": 93,
       "cwd": ".",
       "hashMode": "lf-normalized",
-      "path": "patches/dolphin-wasm/snapshot/0121-fprf-setting-all-tiers.patch",
-      "size": 4878,
-      "sha256": "96b8b814bff82a0a0888c590ec9843e29adf2eee964de1bd246920ede553fca4"
+      "path": "patches/dolphin-wasm/snapshot/0121-entry-guards-fprf-setting.patch",
+      "size": 12869,
+      "sha256": "02f2194788af4870e48626dac9f1e33a008b70b54775272692001017fd849bd3"
     },
     {
       "order": 94,
