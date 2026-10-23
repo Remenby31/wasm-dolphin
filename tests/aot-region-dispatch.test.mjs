@@ -1181,7 +1181,7 @@ test("a compare's field or operands rewritten in the region (fcmpu, ps_cmpu0, lm
   assert.equal(got.interpreted, 0, "no op left the region");
 });
 
-// 0128: a fragment keeps pc, npc and downcount in locals and writes them back
+// 0135 (was 0128): a fragment keeps pc, npc and downcount in locals and writes them back
 // at its exits. A loop over memory with an FPU op kept in the region (a
 // helper call: downcount flushed and reloaded around it), run to the end and
 // stopped on downcount at every budget, against the interpreter.
@@ -1197,7 +1197,7 @@ const FRAME = assemble(FRAME_TEXT, [
   stfd(3, 5, 16), asm.blr()
 ]);
 
-test("pc, npc and downcount in locals end like the interpreter, at the end and on downcount at every budget (0128)", { skip: chainSkip || (core?.has("DolphinWeb_AotKeyParts") && keyVersion() < 20 && "core before 0128 (compiler version < 20)") }, () => {
+test("pc, npc and downcount in locals end like the interpreter, at the end and on downcount at every budget (0135)", { skip: chainSkip || (core?.has("DolphinWeb_AotKeyParts") && keyVersion() < 27 && "core before 0135 (compiler version < 27)") }, () => {
   const dol = buildDol({ textAddr: FRAME_TEXT, text: FRAME.words, entry: FRAME.labels.main });
   const { image, entryPoint } = imageFromDol(dol);
   const plan = planDol({ image, entryPoint, gameId: "TEST01", dolBytes: dol, options: { gapFill: false } });

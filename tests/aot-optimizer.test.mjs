@@ -264,3 +264,68 @@ test("aot optimizer: a module marked stale during a run is done by that run", as
   assert.notEqual(cache.persisted.get(second), before, "rewritten by the same run");
   assert.equal(o.stale.size, 0);
 });
+
+// Research deep-first-minute: module n+1 is translated while module n
+// compiles and goes to the cache; modules still install in order, each
+// before its cache write.
+test("aot optimizer: the next module translates while the previous one compiles; installs stay in order", async () => {
+  const log = [];
+  const base = fakeTranslator();
+  const translator = { translate: async (batch) => { log.push(`translate ${batch[0].entry.toString(16)}`); return base.translate(batch); } };
+  const releases = [];
+  const compile = (key) => new Promise((resolve) => { log.push(`compile ${key.slice(-6)}`); releases.push(() => resolve({ module: {} })); });
+  const installed = [];
+  const { o } = optimizer({ translator, compile, install: (r) => { installed.push(r.key); log.push(`install ${r.key.slice(-6)}`); } });
+  const run = o.start();
+  // The first module waits in its compile: the second one translates meanwhile.
+  const translations = () => log.filter((l) => l.startsWith("translate")).length;
+  for (let i = 0; i < 400 && !(releases.length && translations() >= 2); i++) await new Promise((r) => setTimeout(r, 0));
+  assert.equal(installed.length, 0, "the first module has not compiled yet");
+  assert.equal(releases.length, 1, "one compile pending");
+  assert.ok(translations() >= 2, `the next module translated meanwhile (${translations()})`);
+  // Release the compiles as they come: everything ends, in order.
+  for (let i = 0; i < 2000; i++) {
+    if (releases.length) releases.shift()();
+    await new Promise((r) => setTimeout(r, 0));
+    if (o.regions && installed.length === o.regions.length) break;
+  }
+  await run;
+  assert.deepEqual(installed, o.regions.map((u) => u.key), "installed in compile order");
+});
+
+// Review of #144: a cancel during a module's compile is no verdict. The
+// module still installs (this session runs it), but it is neither stored
+// nor blacklisted, and the next launch translates it again.
+test("aot optimizer: a cancel during a compile installs the module, never blacklists it, and the next launch retries it", async () => {
+  const cache = fakeCache();
+  const installed = [];
+  let first = null;
+  let o;
+  const compile = async (key) => {
+    if (!first) { first = key; o.cancel(); }
+    return { module: {} };
+  };
+  ({ o } = optimizer({ cache, compile, install: (r) => installed.push(r.key) }));
+  await o.start();
+  assert.deepEqual(installed, [first], "installed for this session");
+  const session = await cache({});
+  assert.equal(session.isBlacklisted?.(first) ?? false, false, "not blacklisted");
+  assert.equal((await session.has([first])).has(first), false, "not stored");
+  const again = optimizer({ cache });
+  const retried = [];
+  again.o.install = (r) => retried.push(r.key);
+  await again.o.start();
+  assert.ok(retried.includes(first), "translated again at the next launch");
+});
+
+test("aot optimizer: a finishing step that fails is reported and the run still ends", async () => {
+  const base = fakeCache();
+  const cache = async (identity) => {
+    const s = await base(identity);
+    return { ...s, has: s.has.bind(s), put: s.put.bind(s), cancel: s.cancel?.bind(s), isBlacklisted: s.isBlacklisted?.bind(s), blacklist: async () => { throw new Error("disk full"); } };
+  };
+  const { o, events } = optimizer({ cache, compile: async () => ({ reason: "compile" }) }); // every module refused: blacklist throws
+  await o.start();
+  assert.ok(events.some(([t, d]) => t === "optimization-error" && /disk full/.test(d.message)), "reported");
+  assert.equal(events.at(-1)[0], "optimization-done", "the run ends");
+});

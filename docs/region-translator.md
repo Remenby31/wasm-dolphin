@@ -437,7 +437,7 @@ so their bytes and cache keys don't change. Compiler version 17. (Written
 as 0108 on the region stack; renumbered after 0111 so the series applies
 in order.)
 
-## Frame in locals (patch 0128, 2026-10-23)
+## Frame in locals (patch 0135, was 0128, 2026-10-23)
 
 A fragment block used to end with `pc ← npc` through the state, then a
 load, subtract, store and reload of downcount: 2 loads and 3 stores per
@@ -452,4 +452,4 @@ an exception takes the cycles spent and a helper may lower it. A helper
 other than the memory and FPU ones (`system`, the HLE calls) also gets pc
 and npc stored before it and npc reloaded after it. A helper that halts
 leaves its own pc, npc and downcount in the state, and the fragment
-returns 2 without writing them back. Compiler version 20.
+returns 2 without writing them back. Compiler version 27.

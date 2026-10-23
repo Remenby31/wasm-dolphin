@@ -1,14 +1,14 @@
 diff --git a/Source/Core/Core/PowerPC/CachedInterpreter/CachedInterpreter.cpp b/Source/Core/Core/PowerPC/CachedInterpreter/CachedInterpreter.cpp
 --- a/Source/Core/Core/PowerPC/CachedInterpreter/CachedInterpreter.cpp
 +++ b/Source/Core/Core/PowerPC/CachedInterpreter/CachedInterpreter.cpp
-@@ -3238,8 +3238,54 @@ void EmitPaddedU32Leb(std::vector<u8>& out, u32 value)
+@@ -3243,8 +3243,54 @@ void EmitPaddedU32Leb(std::vector<u8>& out, u32 value)
    out.push_back(static_cast<u8>(value & 0x7f));
  }
  
-+// Patch 0128: a region fragment keeps npc and downcount in locals (with the
-+// dispatch pc, 56): its blocks write npc to a local, its frame subtracts
-+// cycles from a local, and the state is written back at every exit. Set by
-+// BuildRegionFragment while it builds the fragment's blocks.
++// Patch 0135 (was 0128): a region fragment keeps npc and downcount in
++// locals (with the dispatch pc, 56): its blocks write npc to a local, its
++// frame subtracts cycles from a local, and the state is written back at every
++// exit. Set by BuildRegionFragment while it builds the fragment's blocks.
 +constexpr u32 WASM_FRAME_PC_LOCAL = 56;
 +constexpr u32 WASM_FRAME_NPC_LOCAL = 57;
 +constexpr u32 WASM_FRAME_DOWNCOUNT_LOCAL = 58;
@@ -41,7 +41,7 @@ diff --git a/Source/Core/Core/PowerPC/CachedInterpreter/CachedInterpreter.cpp b/
 +
  void EmitCallImport(std::vector<u8>& body, u32 index)
  {
-+  // 0128: every helper reads and may lower state.downcount (an exception
++  // 0135: every helper reads and may lower state.downcount (an exception
 +  // takes the cycles spent); the others than the memory and FPU helpers
 +  // (system, the HLE calls) may also read pc and write npc.
 +  const bool frame = s_wasm_fragment_relocs && t_fragment_frame.active;
@@ -56,7 +56,7 @@ diff --git a/Source/Core/Core/PowerPC/CachedInterpreter/CachedInterpreter.cpp b/
    body.push_back(0x10);  // call
    if (!s_wasm_fragment_relocs)
    {
-@@ -3255,6 +3301,10 @@ void EmitCallImport(std::vector<u8>& body, u32 index)
+@@ -3260,6 +3306,10 @@ void EmitCallImport(std::vector<u8>& body, u32 index)
      t_fused_cr.valid = false;
    s_wasm_fragment_relocs->relocs.push_back({body.size(), WASM_IMPORT_NAMES[index]});
    EmitPaddedU32Leb(body, 0);
@@ -67,13 +67,13 @@ diff --git a/Source/Core/Core/PowerPC/CachedInterpreter/CachedInterpreter.cpp b/
  }
  
  // Region fragments do not take the host addresses of the emulated RAM and L1
-@@ -3523,6 +3573,13 @@ void EmitStateStoreU32Prefix(std::vector<u8>& body)
+@@ -3528,6 +3578,13 @@ void EmitStateStoreU32Prefix(std::vector<u8>& body)
  
  void EmitStateStoreU32Suffix(std::vector<u8>& body, u32 offset)
  {
 +  if (s_wasm_fragment_relocs && t_fragment_frame.active && offset == t_fragment_frame.npc_offset)
 +  {
-+    // 0128: in a fragment, npc lives in a local (stack: [state_ptr, value]).
++    // 0135: in a fragment, npc lives in a local (stack: [state_ptr, value]).
 +    EmitLocalSet(body, WASM_FRAME_NPC_LOCAL);
 +    body.push_back(0x1a);  // drop
 +    return;
@@ -81,11 +81,11 @@ diff --git a/Source/Core/Core/PowerPC/CachedInterpreter/CachedInterpreter.cpp b/
    u32 gpr_index;
    if (RegCacheGprIndex(offset, &gpr_index) && s_gpr_rc.present[gpr_index])
    {
-@@ -16665,6 +16722,18 @@ bool BuildRegionFragment(Core::System& system, u32 entry_pc, std::span<const u32
+@@ -16743,6 +16800,18 @@ bool BuildRegionFragment(Core::System& system, u32 entry_pc, std::span<const u32
    {
      ~ResetGuards() { t_region_guards = false; }
    } reset_guards;
-+  // 0128: the blocks are built with the fragment's frame locals.
++  // 0135: the blocks are built with the fragment's frame locals.
 +  {
 +    auto& fppc = system.GetPPCState();
 +    const auto fbase = reinterpret_cast<std::uintptr_t>(&fppc);
@@ -100,7 +100,7 @@ diff --git a/Source/Core/Core/PowerPC/CachedInterpreter/CachedInterpreter.cpp b/
    // End of the range holding pc, 0 when none does.
    const auto range_end = [&](u32 pc) -> u32 {
      for (std::size_t i = 0; i + 1 < ranges.size(); i += 2)
-@@ -16712,14 +16781,6 @@ bool BuildRegionFragment(Core::System& system, u32 entry_pc, std::span<const u32
+@@ -16790,14 +16859,6 @@ bool BuildRegionFragment(Core::System& system, u32 entry_pc, std::span<const u32
    const u32 downcount_offset =
        static_cast<u32>(reinterpret_cast<std::uintptr_t>(&ppc.downcount) - base);
    std::vector<u8>& code = out->code;
@@ -115,20 +115,20 @@ diff --git a/Source/Core/Core/PowerPC/CachedInterpreter/CachedInterpreter.cpp b/
    const auto reloc_site = [&](u32 kind, u32 value) {
      code.push_back(0x12);  // return_call
      out->relocs.push_back({static_cast<u32>(code.size()), kind, value});
-@@ -16727,7 +16788,7 @@ bool BuildRegionFragment(Core::System& system, u32 entry_pc, std::span<const u32
+@@ -16805,7 +16866,7 @@ bool BuildRegionFragment(Core::System& system, u32 entry_pc, std::span<const u32
    };
    code.assign(WASM_BLOCK_LOCALS.begin(), WASM_BLOCK_LOCALS.end());
    code[0] = 0x07;
 -  code.insert(code.end(), {0x01, 0x7f});  // the dispatch pc
-+  code.insert(code.end(), {0x03, 0x7f});  // the dispatch pc, npc, downcount (0128)
++  code.insert(code.end(), {0x03, 0x7f});  // the dispatch pc, npc, downcount (0135)
    // 0111: compares store CR fields without SO (EmitLazyCrStore): with XER.SO
    // set the fragment does not run (1, as a pc that is not an entry). The
    // dispatcher and region chaining refuse first; this covers a direct call.
-@@ -16738,10 +16799,17 @@ bool BuildRegionFragment(Core::System& system, u32 entry_pc, std::span<const u32
+@@ -16816,10 +16877,17 @@ bool BuildRegionFragment(Core::System& system, u32 entry_pc, std::span<const u32
    code.insert(code.end(), {0x71, 0x04, 0x40});  // i32.and; if
    EmitI32Const(code, 1);
    code.insert(code.end(), {0x0f, 0x0b});  // return; end
-+  // 0128: pc and downcount in locals for the whole fragment, written back
++  // 0135: pc and downcount in locals for the whole fragment, written back
 +  // before every return or tail call (flush_frame).
 +  EmitLoadStateToLocal(code, pc_offset, WASM_FRAME_PC_LOCAL);
 +  EmitLoadStateToLocal(code, pc_offset, WASM_FRAME_NPC_LOCAL);
@@ -145,7 +145,7 @@ diff --git a/Source/Core/Core/PowerPC/CachedInterpreter/CachedInterpreter.cpp b/
    for (const auto& b : blocks)
    {
      out->entries.push_back(b.start);
-@@ -16764,29 +16832,28 @@ bool BuildRegionFragment(Core::System& system, u32 entry_pc, std::span<const u32
+@@ -16842,29 +16910,28 @@ bool BuildRegionFragment(Core::System& system, u32 entry_pc, std::span<const u32
        out->relocs.push_back({at + static_cast<u32>(reloc.offset), 0,
                               static_cast<u32>(it - WASM_IMPORT_NAMES.begin())});
      }
@@ -156,7 +156,7 @@ diff --git a/Source/Core/Core/PowerPC/CachedInterpreter/CachedInterpreter.cpp b/
 -    EmitLocalGet(code, 0);
 -    EmitLocalGet(code, 0);
 -    load(downcount_offset);
-+    // pc = npc; downcount -= cycles (locals, 0128)
++    // pc = npc; downcount -= cycles (locals, 0135)
 +    EmitLocalGet(code, WASM_FRAME_NPC_LOCAL);
 +    EmitLocalSet(code, WASM_FRAME_PC_LOCAL);
 +    EmitLocalGet(code, WASM_FRAME_DOWNCOUNT_LOCAL);
@@ -184,7 +184,7 @@ diff --git a/Source/Core/Core/PowerPC/CachedInterpreter/CachedInterpreter.cpp b/
        EmitLocalGet(code, 0);
        reloc_site(1, b.jump_target);
      }
-@@ -16796,6 +16863,7 @@ bool BuildRegionFragment(Core::System& system, u32 entry_pc, std::span<const u32
+@@ -16874,6 +16941,7 @@ bool BuildRegionFragment(Core::System& system, u32 entry_pc, std::span<const u32
      }
      code.push_back(0x0b);  // end if
    }
@@ -192,14 +192,16 @@ diff --git a/Source/Core/Core/PowerPC/CachedInterpreter/CachedInterpreter.cpp b/
    EmitLocalGet(code, 0);
    reloc_site(2, 0);
    code.insert(code.end(), {0x0b, 0x00, 0x0b});  // end loop; unreachable; end
-@@ -16859,7 +16927,9 @@ namespace
+@@ -16937,8 +17005,10 @@ namespace
  // taken by 0108-0110). 16 (0121): region code takes MSR LE/FE0/FE1 and
  // HID2.LSQE for granted (15 is 0119's). 17 (0126): region byte swaps as two
- // rotates (11-15 are taken by 0112-0119).
--constexpr u32 AOT_COMPILER_VERSION = 17;
-+// 20 (0128): region fragments keep pc, npc and downcount in locals (19 is
-+// 0127's).
-+constexpr u32 AOT_COMPILER_VERSION = 20;
+ // rotates (11-15 are taken by 0112-0119). 21 (0129): fused relaxed_madd mode
+-// (18 retired, 19 and 20 are 0127's and 0128's).
+-constexpr u32 AOT_COMPILER_VERSION = 21;
++// (18 retired, 19 and 20 are 0127's and 0128's). 27 (0135): region fragments
++// keep pc, npc and downcount in locals (22-26 are taken by 0130-0134; 20 is
++// retired, from 0128).
++constexpr u32 AOT_COMPILER_VERSION = 27;
  constexpr u32 AOT_MAX_FRAGMENT_BYTES = 1u << 20;
  thread_local std::vector<u32> t_aot_out;
  u8* s_aot_ram = nullptr;
