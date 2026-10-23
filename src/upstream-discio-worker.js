@@ -7394,7 +7394,7 @@ export async function prepareAotFirstLaunch(file, {
     return;
   }
   const generation = aotDiscGeneration;
-  const [{ coreAotKeyParts, coreAssembleOptions, coreRegionTranslator, createAotFirstLaunch }, { OpfsPlanStore }, { AotProfileStore, blocksFromPcSamples }, { planDiscInWorker }, { fileReader, planDisc }, { createProfileRecorder, guestPcAddress, startHotSampler }] =
+  const [{ coreAotKeyParts, coreAssembleOptions, coreRegionTranslator, createAotFirstLaunch }, { OpfsPlanStore }, { AotProfileStore, blocksFromPcSamples, profileKey }, { planDiscInWorker }, { fileReader, planDisc }, { createProfileRecorder, guestPcAddress, startHotSampler }] =
     await Promise.all([import("./aot-orchestrator.js"), import("./aot-optimizer.js"), import("./aot-profile.js"), import("./aot-plan-worker.js"), import("./aot-recomp.js"), import("./aot-hot-sampler.js")]);
   const discKey = await readDiscKey();
   if (generation !== aotDiscGeneration) return;
@@ -7416,7 +7416,7 @@ export async function prepareAotFirstLaunch(file, {
     // in a worker of its own, never on this one, which serves the core's
     // disc reads. Without workers (tests), in place.
     buildPlan: async () => {
-      const profile = opfs ? await new AotProfileStore(opfs).load(discKey).catch(() => null) : null;
+      const profile = opfs ? await new AotProfileStore(opfs).load(profileKey(discKey)).catch(() => null) : null;
       return typeof Worker === "function" ? planDiscInWorker(file, { profile }) : planDisc(fileReader(file), { profile });
     },
     compile: precompileAotRegion,
@@ -7457,7 +7457,7 @@ export async function prepareAotFirstLaunch(file, {
   // profile (OPFS, per disc, addresses and sample counts only; never sent or
   // shared): the next plan orders by it and forms hot fragments from it.
   aotProfileTarget = opfs && discKey
-    ? { flow, startHotSampler, guestPcAddress, record: createProfileRecorder({ store: new AotProfileStore(opfs), discKey, blocksFromPcSamples }) }
+    ? { flow, startHotSampler, guestPcAddress, record: createProfileRecorder({ store: new AotProfileStore(opfs), discKey: profileKey(discKey), blocksFromPcSamples }) }
     : null;
   const blockKeys = [];
   if (!flow.supported) {
