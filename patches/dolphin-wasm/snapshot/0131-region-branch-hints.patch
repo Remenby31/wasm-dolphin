@@ -118,15 +118,18 @@ diff --git a/Source/Core/Core/PowerPC/CachedInterpreter/CachedInterpreter.cpp b/
    body.push_back(0x04);
    body.push_back(0x40);
    EmitStateLoadF64(body, PsOffset(layout, inst.FB, 0));
-@@ -6396,6 +6422,7 @@ void EmitFloatLoadStore(std::vector<u8>& body, const WasmStateLayout& layout,
+@@ -6396,6 +6422,10 @@ void EmitFloatLoadStore(std::vector<u8>& body, const WasmStateLayout& layout,
    const UGeckoInstruction inst = op.inst;
  
    EmitAlignedFloatFastPathCondition(body, layout, false);
-+  HintNextIf(body, true);  // aligned, in RAM
++  // A load is likely in RAM. A store is not hinted: stfs to the gather pipe
++  // (vertex submission, the hottest stores) takes the inline else-if arm.
++  if (load)
++    HintNextIf(body, true);  // aligned, in RAM
    body.push_back(0x04);
    body.push_back(0x40);
    if (load)
-@@ -6455,6 +6482,7 @@ void EmitLfdLoad(std::vector<u8>& body, const WasmStateLayout& layout,
+@@ -6455,6 +6485,7 @@ void EmitLfdLoad(std::vector<u8>& body, const WasmStateLayout& layout,
    const UGeckoInstruction inst = op.inst;
  
    EmitHighMem1FloatCondition(body, layout, sizeof(u64));
@@ -134,7 +137,7 @@ diff --git a/Source/Core/Core/PowerPC/CachedInterpreter/CachedInterpreter.cpp b/
    body.push_back(0x04);
    body.push_back(0x40);
    EmitDirectLfdFromRam(body, layout, inst);
-@@ -6484,6 +6512,7 @@ void EmitStfdStore(std::vector<u8>& body, const WasmStateLayout& layout,
+@@ -6484,6 +6515,7 @@ void EmitStfdStore(std::vector<u8>& body, const WasmStateLayout& layout,
    const UGeckoInstruction inst = op.inst;
  
    EmitHighMem1FloatCondition(body, layout, sizeof(u64));
@@ -142,7 +145,7 @@ diff --git a/Source/Core/Core/PowerPC/CachedInterpreter/CachedInterpreter.cpp b/
    body.push_back(0x04);
    body.push_back(0x40);
    EmitDirectStfdToRam(body, layout, inst);
-@@ -6528,6 +6557,7 @@ void EmitMultipleWordMemory(std::vector<u8>& body, const WasmStateLayout& layout
+@@ -6528,6 +6560,7 @@ void EmitMultipleWordMemory(std::vector<u8>& body, const WasmStateLayout& layout
    EmitIsMem1AddressForSize(body, layout, bytes);
    body.push_back(0x71);
  
@@ -150,7 +153,7 @@ diff --git a/Source/Core/Core/PowerPC/CachedInterpreter/CachedInterpreter.cpp b/
    body.push_back(0x04);
    body.push_back(0x40);
    for (u32 reg = first_reg; reg <= 31; ++reg)
-@@ -6568,6 +6598,7 @@ void EmitStfiwx(std::vector<u8>& body, const WasmStateLayout& layout, const PPCA
+@@ -6568,6 +6601,7 @@ void EmitStfiwx(std::vector<u8>& body, const WasmStateLayout& layout, const PPCA
    const UGeckoInstruction inst = op.inst;
  
    EmitAlignedFloatFastPathCondition(body, layout, false);
@@ -158,7 +161,7 @@ diff --git a/Source/Core/Core/PowerPC/CachedInterpreter/CachedInterpreter.cpp b/
    body.push_back(0x04);
    body.push_back(0x40);
    EmitDirectStfiwx(body, layout, inst, false);
-@@ -7364,6 +7395,7 @@ void EmitDcbz(std::vector<u8>& body, const WasmStateLayout& layout, const PPCAna
+@@ -7364,6 +7398,7 @@ void EmitDcbz(std::vector<u8>& body, const WasmStateLayout& layout, const PPCAna
    body.push_back(0x71);
    EmitIsOutsideLowDcbzHackRange(body);
    body.push_back(0x71);
@@ -166,7 +169,7 @@ diff --git a/Source/Core/Core/PowerPC/CachedInterpreter/CachedInterpreter.cpp b/
    body.push_back(0x04);
    body.push_back(0x40);
  
-@@ -16715,8 +16747,9 @@ struct RegionFragment
+@@ -16715,8 +16750,9 @@ struct RegionFragment
    struct Reloc
    {
      u32 offset;
@@ -178,7 +181,7 @@ diff --git a/Source/Core/Core/PowerPC/CachedInterpreter/CachedInterpreter.cpp b/
    };
    std::vector<Reloc> relocs;
  };
-@@ -16813,6 +16846,7 @@ bool BuildRegionFragment(Core::System& system, u32 entry_pc, std::span<const u32
+@@ -16813,6 +16849,7 @@ bool BuildRegionFragment(Core::System& system, u32 entry_pc, std::span<const u32
    code.insert(code.end(), {0x2d, 0x00});  // i32.load8_u
    EmitU32Leb(code, static_cast<u32>(reinterpret_cast<std::uintptr_t>(&ppc.xer_so_ov) - base));
    EmitI32Const(code, 2);
@@ -186,7 +189,7 @@ diff --git a/Source/Core/Core/PowerPC/CachedInterpreter/CachedInterpreter.cpp b/
    code.insert(code.end(), {0x71, 0x04, 0x40});  // i32.and; if
    EmitI32Const(code, 1);
    code.insert(code.end(), {0x0f, 0x0b});  // return; end
-@@ -16830,6 +16864,12 @@ bool BuildRegionFragment(Core::System& system, u32 entry_pc, std::span<const u32
+@@ -16830,6 +16867,12 @@ bool BuildRegionFragment(Core::System& system, u32 entry_pc, std::span<const u32
      code.insert(code.end(), b.expr.begin(), b.expr.end());
      for (const auto& reloc : b.relocs)
      {
@@ -199,7 +202,7 @@ diff --git a/Source/Core/Core/PowerPC/CachedInterpreter/CachedInterpreter.cpp b/
        const auto heap = std::find(WASM_HEAP_SITE_NAMES.begin(), WASM_HEAP_SITE_NAMES.end(),
                                    reloc.name);
        if (heap != WASM_HEAP_SITE_NAMES.end())
-@@ -16855,6 +16895,7 @@ bool BuildRegionFragment(Core::System& system, u32 entry_pc, std::span<const u32
+@@ -16855,6 +16898,7 @@ bool BuildRegionFragment(Core::System& system, u32 entry_pc, std::span<const u32
      EmitLocalGet(code, 0);
      load(downcount_offset);
      EmitI32Const(code, 0);
@@ -207,7 +210,7 @@ diff --git a/Source/Core/Core/PowerPC/CachedInterpreter/CachedInterpreter.cpp b/
      code.insert(code.end(), {0x4c, 0x04, 0x40});  // i32.le_s; if
      EmitI32Const(code, 0);
      code.insert(code.end(), {0x0f, 0x0b});  // return; end
-@@ -16937,8 +16978,9 @@ namespace
+@@ -16937,8 +16981,9 @@ namespace
  // taken by 0108-0110). 16 (0121): region code takes MSR LE/FE0/FE1 and
  // HID2.LSQE for granted (15 is 0119's). 17 (0126): region byte swaps as two
  // rotates (11-15 are taken by 0112-0119). 21 (0129): fused relaxed_madd mode

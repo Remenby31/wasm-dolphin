@@ -441,9 +441,13 @@ export function assembleRegion(fragments, { helpers, pcOffset, memoryPages, memo
   // downcount running out), so V8 lays the cold arms out of line, away from
   // the hot code in the instruction cache. Offsets are from the start of the
   // function body, as the fragment's own code starts. A hint off an `if` is
-  // dropped; an engine that doesn't know the section ignores it.
+  // dropped and counted (hintsDropped: V8 drops a malformed section silently,
+  // so a drift of the core's offsets must show); an engine that doesn't know
+  // the section ignores it.
+  let hintsDropped = 0;
+  const onIf = (f, r) => Number.isInteger(r.offset) && r.offset >= 0 && r.offset < f.code.length && f.code[r.offset] === OP.if;
   const hinted = fragments.map((f, i) => [FIRST + i, (f.relocs ?? []).filter((r) => r.kind === "hint")
-    .filter((r) => Number.isInteger(r.offset) && r.offset >= 0 && r.offset < f.code.length && f.code[r.offset] === OP.if)
+    .filter((r) => onIf(f, r) || (hintsDropped++, false))
     .sort((a, b) => a.offset - b.offset)]).filter(([, hs]) => hs.length);
   if (hinted.length) {
     const hints = [];
@@ -514,7 +518,8 @@ export function assembleRegion(fragments, { helpers, pcOffset, memoryPages, memo
     bytes: Uint8Array.from(out),
     layout,
     entries: sortedEntries.map(([pc, fn]) => [pc, fn - FIRST]),
-    helpers: helperNames
+    helpers: helperNames,
+    hintsDropped
   };
 }
 

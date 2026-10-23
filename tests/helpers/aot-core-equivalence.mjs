@@ -415,7 +415,7 @@ export function compareRegionProgram(core, words, state, { translateState = stat
 
 export function runOracleProgramsAsRegions(core, { seed, count, length, mask }) {
   const r = makeRng(seed);
-  const tally = { programs: 0, translated: 0, compared: 0, equal: 0, trap: 0, ends: {}, regionRuns: 0, mismatches: [] };
+  const tally = { programs: 0, translated: 0, compared: 0, equal: 0, trap: 0, ends: {}, regionRuns: 0, hintsDropped: 0, mismatches: [] };
   for (let n = 0; n < count; n++) {
     const words = randomProgram(r, length);
     const state = randomState(r);
@@ -425,7 +425,8 @@ export function runOracleProgramsAsRegions(core, { seed, count, length, mask }) 
     const fragment = core.translate(ORACLE_CODE, { mask, ranges: [[ORACLE_CODE, ORACLE_CODE + 4 * words.length]] });
     if (!fragment) continue;
     tally.translated += 1;
-    const { bytes } = assembleRegion([fragment], { helpers: HELPER_SIGNATURES, pcOffset: core.pcOffset, memoryPages: core.memoryPages });
+    const { bytes, hintsDropped } = assembleRegion([fragment], { helpers: HELPER_SIGNATURES, pcOffset: core.pcOffset, memoryPages: core.memoryPages });
+    tally.hintsDropped += hintsDropped ?? 0; // 0131: a core hint off an `if`
     const handle = core.compile(bytes);
     if (handle <= 0) throw new Error(`core rejected a region module (${handle})`);
     const regionAt = new Map(fragment.entries.map((pc) => [pc >>> 0, handle]));

@@ -223,7 +223,8 @@ test("a translated lwz carries branch hints on its ifs, and the module a branch_
   for (const h of hints) assert.equal(fragment.code[h.offset], 0x04, `the hint at ${h.offset} is on an if`);
   assert.ok(hints.some((h) => h.likely), "the RAM fast path is likely");
   assert.ok(hints.filter((h) => !h.likely).length >= 2, "SO guard and downcount unlikely");
-  const { bytes } = assembleRegion([fragment], { helpers: HELPER_SIGNATURES, pcOffset: core.pcOffset, memoryPages: core.memoryPages });
+  const { bytes, hintsDropped } = assembleRegion([fragment], { helpers: HELPER_SIGNATURES, pcOffset: core.pcOffset, memoryPages: core.memoryPages });
+  assert.equal(hintsDropped, 0, "no hint of the core falls off an `if`");
   const [section] = WebAssembly.Module.customSections(new WebAssembly.Module(bytes), "metadata.code.branch_hint");
   assert.ok(section, "the module carries the hints");
   assert.ok(core.compile(bytes) > 0, "the core compiles and links the hinted module");

@@ -443,11 +443,12 @@ Region code is bound by the instruction cache on the bench's arm64 host:
 with regions the front end stalls 55 % of cycles (29.5 % without), with
 1.85× the L1i refills per instruction. The core now marks the `if`s of
 region code whose outcome it knows:
-- **likely:** the RAM fast path of integer, float and lmw/stmw accesses, a dcbz in RAM, and the exact-FP fast path;
+- **likely:** the RAM fast path of integer and lmw/stmw accesses and of float loads, lfd/stfd and stfiwx, a dcbz in RAM, and the exact-FP fast path (not stfs: to the gather pipe, its hottest target, it takes the inline else-if arm);
 - **unlikely:** a halt after a helper, the gather pipe filling up, XER.SO set at fragment entry, and the downcount running out.
 
 The hints travel as reloc kind 4 (offset of the `if`, 1 when likely) and
-patch nothing. The assembler writes them as a `metadata.code.branch_hint`
+patch nothing. The assembler counts a hint that does not land on an `if`
+(`hintsDropped`, 0 on every oracle program). The assembler writes them as a `metadata.code.branch_hint`
 custom section (wasm branch hinting, on by default in V8) before the code
 section. TurboFan then lays the cold arms out of line, away from the hot
 path. An engine that doesn't know the section ignores it.

@@ -232,6 +232,7 @@ test("aot region: branch hints from the core become a metadata.code.branch_hint 
   const bytes = new Uint8Array(section);
   assert.equal(bytes[0], 1, "one function hinted");
   assert.deepEqual(Array.from(bytes.slice(2)), [1, ifAt, 1, 0], "one hint: offset, size 1, unlikely");
+  assert.equal(region.hintsDropped, 1, "the hint off an `if` is counted");
   const r = await instantiate(region);
   assert.equal(r.run(0x1000), 0, "runs as before");
   assert.equal(r.word(COUNT), 111);
