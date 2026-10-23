@@ -9,6 +9,7 @@
 // dcbz_l (4/1014) stays out of the tier.
 
 import assert from "node:assert/strict";
+import { readFileSync } from "node:fs";
 import test from "node:test";
 
 import { assembleRegion } from "../src/aot-region-module.js";
@@ -39,9 +40,14 @@ function translate(words) {
   return core.translate(ORACLE_CODE, { mask: PRODUCTION_DISABLE_MASK, ranges: [[ORACLE_CODE, ORACLE_CODE + 4 * words.length]] });
 }
 
-// A core before 0120 translates no block starting with dcbz (CI builds this
-// branch's core and runs the tests on it).
-const skip = regionSkip || (!translate([dcbz(3, 4), BLR]) && "core before patch 0120 (dcbz on the direct tier)");
+// Skipped only for a core built from another patch series without 0120 (the
+// committed core of an older main). A core built from this tree's series
+// (CI builds this branch's) must translate dcbz: a regression fails.
+const lock = JSON.parse(readFileSync(new URL("../provenance/dolphin-source.lock.json", import.meta.url), "utf8"));
+const built = JSON.parse(readFileSync(new URL("../cores/dolphin/dolphin-core-upstream.build.json", import.meta.url), "utf8"));
+const coreHas0120 = built.source?.patchSeriesSha256 === lock.patchSeriesSha256 &&
+  lock.patches.some((p) => p.path.includes("/0120-"));
+const skip = regionSkip || (!coreHas0120 && !translate([dcbz(3, 4), BLR]) && "core built from a patch series without 0120");
 
 test("a block starting with dcbz is translated into a region; dcbz_l is not", { skip }, () => {
   assert.ok(translate(PROGRAM), "dcbz first: a fragment");
