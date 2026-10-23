@@ -49,6 +49,7 @@ const f64Words = (x) => Array.from(new Uint32Array(new Float64Array([x]).buffer)
 const baseState = (seed) => {
   const s = randomState(makeRng(seed));
   s[37] = 0x00002032; // FP, IR, DR, RI
+  s[33] = 0; // XER clear: with SO set a fragment refuses to run (0111)
   s[36] = 0; // FPSCR: round to nearest, no enable, no sticky bit
   s[38] = 0; // GQR0: float loads and stores
   return s;
