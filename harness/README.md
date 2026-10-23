@@ -437,6 +437,15 @@ episodes per run, each state cut at 64 KB). A served worker without that
 message gets none and the episode is recorded as `unsupported`. Evidence
 only: freezes are judged by coreFreeze as before.
 
+A third kind shows neither: the guest runs at speed, VI and presents go on,
+and the game draws nothing (no EFB-to-XFB copy). `probes/savestate-cycles.mjs`
+checks it around savestates: after the first load and after each of N loads
+or save-then-load cycles, XFB copies (headroom) and DrawDone signals
+(GPU sync) must move within `--settle` seconds; a stall fails the probe and
+prints the CP FIFO. Before patch 0116, the first load after boot on
+`video=wgpu` left the FIFO empty with commands pending (`rwDistance` 0,
+read != write).
+
 ## Renderer crashes
 
 A Chrome renderer crash ("Target crashed") in a matrix cell is run once

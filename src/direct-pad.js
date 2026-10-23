@@ -8,7 +8,10 @@
 // and the rumble state the game set. Same layout as the header; the core
 // reports its layout version and a mismatch disables the path.
 
-export const DIRECT_PAD_LAYOUT = 1;
+// Presses of one button the core takes between two polls: one reported now,
+// TapLatch::MAX_PENDING_TAPS (3) queued after it.
+export const DIRECT_PAD_MAX_TAPS = 4;
+export const DIRECT_PAD_LAYOUT = 2;
 export const DIRECT_PAD_PORTS = 4;
 export const DIRECT_PAD_SLOTS = 36;
 export const DIRECT_PAD_BUTTONS = 12;
@@ -31,6 +34,7 @@ export const SLOT = Object.freeze({
   RUMBLE_GEN: 17,
   PRESSES: 18,
   REPORTED_MASK: 30,
+  TAPS_HIGH: 31,
   EDGE_POLL_TIME: 32
 });
 
@@ -80,12 +84,29 @@ export class DirectPad {
   disable(port) {
     Atomics.store(this.i32, this.base(port) + SLOT.ENABLED, 0);
     Atomics.store(this.i32, this.base(port) + SLOT.TAPS, 0);
+    Atomics.store(this.i32, this.base(port) + SLOT.TAPS_HIGH, 0);
   }
 
-  // Buttons pressed since the last poll, held until a poll of a later frame read them.
-  tap(port, buttons) {
-    const bits = buttons & ((1 << DIRECT_PAD_BUTTONS) - 1);
-    if (bits) Atomics.or(this.i32, this.base(port) + SLOT.TAPS, bits);
+  // Presses since the last poll, maybe already released, held by the poll
+  // until a poll of a later frame read them: a button mask (one press per
+  // set bit) or an array of per-button counts (a lossy channel may reveal
+  // several presses of a button at once). Counts are 4 bits per button,
+  // added atomically and capped at DIRECT_PAD_MAX_TAPS, what one poll can
+  // use: more would be dropped by the core anyway.
+  tap(port, presses) {
+    const b = this.base(port);
+    for (let i = 0; i < DIRECT_PAD_BUTTONS; i += 1) {
+      const n = Array.isArray(presses) ? Math.max(0, Math.min(DIRECT_PAD_MAX_TAPS, Math.floor(Number(presses[i]) || 0))) : (presses >>> i) & 1;
+      if (!n) continue;
+      const slot = b + (i < 8 ? SLOT.TAPS : SLOT.TAPS_HIGH);
+      const shift = 4 * (i < 8 ? i : i - 8);
+      for (;;) {
+        const old = Atomics.load(this.i32, slot);
+        const cur = (old >>> shift) & 0xf;
+        const next = (old & ~(0xf << shift)) | (Math.min(DIRECT_PAD_MAX_TAPS, cur + n) << shift);
+        if (Atomics.compareExchange(this.i32, slot, old, next | 0) === old) break;
+      }
+    }
   }
 
   // What the core's polls of this port read last.
