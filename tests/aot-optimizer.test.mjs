@@ -264,3 +264,31 @@ test("aot optimizer: a module marked stale during a run is done by that run", as
   assert.notEqual(cache.persisted.get(second), before, "rewritten by the same run");
   assert.equal(o.stale.size, 0);
 });
+
+// Research deep-first-minute: module n+1 is translated while module n
+// compiles and goes to the cache; modules still install in order, each
+// before its cache write.
+test("aot optimizer: the next module translates while the previous one compiles; installs stay in order", async () => {
+  const log = [];
+  const base = fakeTranslator();
+  const translator = { translate: async (batch) => { log.push(`translate ${batch[0].entry.toString(16)}`); return base.translate(batch); } };
+  const releases = [];
+  const compile = (key) => new Promise((resolve) => { log.push(`compile ${key.slice(-6)}`); releases.push(() => resolve({ module: {} })); });
+  const installed = [];
+  const { o } = optimizer({ translator, compile, install: (r) => { installed.push(r.key); log.push(`install ${r.key.slice(-6)}`); } });
+  const run = o.start();
+  // The first module waits in its compile: the second one translates meanwhile.
+  const translations = () => log.filter((l) => l.startsWith("translate")).length;
+  for (let i = 0; i < 400 && !(releases.length && translations() >= 2); i++) await new Promise((r) => setTimeout(r, 0));
+  assert.equal(installed.length, 0, "the first module has not compiled yet");
+  assert.equal(releases.length, 1, "one compile pending");
+  assert.ok(translations() >= 2, `the next module translated meanwhile (${translations()})`);
+  // Release the compiles as they come: everything ends, in order.
+  for (let i = 0; i < 2000; i++) {
+    if (releases.length) releases.shift()();
+    await new Promise((r) => setTimeout(r, 0));
+    if (o.regions && installed.length === o.regions.length) break;
+  }
+  await run;
+  assert.deepEqual(installed, o.regions.map((u) => u.key), "installed in compile order");
+});

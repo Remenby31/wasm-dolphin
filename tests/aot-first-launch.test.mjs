@@ -11,6 +11,7 @@ import { imageFromDol } from "../src/aot-image.js";
 import {
   AOT_PROGRESS_SCHEMA, aotFirstLaunchRequested, coreRegionTranslator, createAotFirstLaunch, parseHelperSignature, regionCacheIdentity
 } from "../src/aot-orchestrator.js";
+import { yieldToEventLoop } from "../src/aot-orchestrator.js";
 import { planDol } from "../src/aot-plan.js";
 import { paddedUleb } from "../src/aot-region-module.js";
 import { asm, assemble, buildDol } from "./aot-asm.mjs";
@@ -596,3 +597,13 @@ test("a disposed or cancelled second launch loads nothing of its deferred cache"
   assert.equal((await rest).loaded, 0);
   assert.equal(third.retained.size, 0);
 });
+
+// Research deep-first-minute: the translator yields through a MessageChannel,
+// not a setTimeout(0) chain that the browser clamps to 4 ms after 5 levels.
+test("the translator's yield is one event-loop turn, chained without the timer clamp", async () => {
+  const t0 = performance.now();
+  for (let i = 0; i < 200; i++) await yieldToEventLoop();
+  const ms = performance.now() - t0;
+  assert.ok(ms < 200, `200 chained yields in ${ms.toFixed(1)} ms (a clamped timer chain takes ≥ 800 ms in a browser)`);
+});
+
