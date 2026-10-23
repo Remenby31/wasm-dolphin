@@ -20,8 +20,8 @@
     {
       "path": "core/upstream/dolphin_web_discio.cpp",
       "hashMode": "lf-normalized",
-      "size": 69240,
-      "sha256": "2f8215056ade5918a5ff8a85f2e508f82f64ab43ecc4108a62535ebb3bd6743b"
+      "size": 71204,
+      "sha256": "273e374722702266de9a214f174a087eefd1a3db93fbd9d615016e8e270d6f63"
     },
     {
       "path": "core/upstream/dolphin_web_raster_profile.h",
@@ -86,8 +86,8 @@
     {
       "path": "src/core-host.js",
       "hashMode": "lf-normalized",
-      "size": 74143,
-      "sha256": "4953ea7c953b3fd56cd87c5ebc2a437d55a4113f08c1b0494a5c3ad88b2f3de6"
+      "size": 74353,
+      "sha256": "c5aed83f8290b7d1fc91ad2d0bee3d38c87e296375019bb33fe0545c81cefbe5"
     },
     {
       "path": "src/diagnostic-log-filter.js",
@@ -140,8 +140,8 @@
     {
       "path": "src/upstream-discio-worker.js",
       "hashMode": "lf-normalized",
-      "size": 715545,
-      "sha256": "c341bbc928ae961943eb9cb48cc11192633798abba66e0eccac5cbe0b3ec380e"
+      "size": 717516,
+      "sha256": "9be70d83ab53272e64460bf066996619ec3633a46191ae964de6ad44a7eba338"
     },
     {
       "path": "src/wgpu-renderer-worker-probe.js",
@@ -164,8 +164,8 @@
     {
       "path": "src/upstream-worker-adapter.js",
       "hashMode": "lf-normalized",
-      "size": 52319,
-      "sha256": "224f0c41923f4346b6650bc67190acb03ed376b584702a2eff0c505b717b2b7a"
+      "size": 52406,
+      "sha256": "4b2fb1bf83e6b0eda2fc2db601e4b1172629644c5a5112260b97f9de9174581a"
     },
     {
       "path": "src/upstream-worker-protocol.js",
@@ -658,6 +658,7 @@
       "validationCaptureAtVi",
       "validationEnableGpuSyncDiag",
       "validationEnableHarness",
+      "validationFifoRecord",
       "validationFinalizeWgpuMappedDrain",
       "validationFinalizeWgpuRendererProbe",
       "validationFinalizeWgpuReplay",
