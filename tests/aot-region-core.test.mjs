@@ -229,3 +229,21 @@ test("a translated lwz carries branch hints on its ifs, and the module a branch_
   assert.ok(section, "the module carries the hints");
   assert.ok(core.compile(bytes) > 0, "the core compiles and links the hinted module");
 });
+
+// 0137: a stfs hints its locked-L1 arm unlikely and its gather-pipe arm
+// likely (its RAM test has no hint: the gather pipe is hot), so only the slow
+// call goes out of line. Before, a stfs carried no likely hint at all.
+test("a translated stfs hints its gather-pipe arm likely and its locked-L1 arm unlikely (0137)", { skip: skip || (compilerVersion() < 28 && "core before 0137 (compiler version < 28)") }, () => {
+  const stfsF1 = (52 << 26) | (1 << 21) | (3 << 16) | 0;
+  const at = 0x80021300;
+  core.load(at, Uint8Array.of(stfsF1 >>> 24, (stfsF1 >>> 16) & 0xff, (stfsF1 >>> 8) & 0xff, stfsF1 & 0xff, 0x4e, 0x80, 0x00, 0x20));
+  const fragment = core.translate(at, { ranges: [[at, at + 8]] });
+  assert.ok(fragment, "translated");
+  const hints = fragment.relocs.filter((r) => r.kind === "hint");
+  for (const h of hints) assert.ok([0x04, 0x0d].includes(fragment.code[h.offset]), `the hint at ${h.offset} is on an if or a br_if`);
+  assert.equal(hints.filter((h) => h.likely).length, 1, "the gather pipe, likely");
+  assert.ok(hints.filter((h) => !h.likely).length >= 3, "SO guard, downcount, the locked L1 unlikely");
+  const { bytes, hintsDropped } = assembleRegion([fragment], { helpers: HELPER_SIGNATURES, pcOffset: core.pcOffset, memoryPages: core.memoryPages });
+  assert.equal(hintsDropped, 0);
+  assert.ok(core.compile(bytes) > 0, "the core compiles and links the hinted module");
+});

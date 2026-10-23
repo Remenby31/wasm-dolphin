@@ -480,3 +480,16 @@ end body₀  end body₁ …  end body(N-1)  end($D) return_call dispatch  end($
 - **Unchanged.** The per-block tail (pc, downcount, its exits) and the entries.
 
 Compiler version 25.
+
+## Store hints (patch 0137, 2026-10-23)
+
+0131 left `stfs` without a hint: its RAM test is not likely, since stores
+to the gather pipe (vertex submission) are its hottest target and take
+the else arm. 0137 hints inside that arm: the locked L1 is unlikely and the
+gather pipe likely. V8 then defers only the slow call (and the L1 copy),
+keeping RAM and the gather pipe in line (`IsUnlikelySuccessor` defers
+just the arm a hint names; research/deep-wasm-code-metadata.md §4, lever
+3). A load's RAM test is already likely, so its whole else arm is out of
+line. `stfd` and `stfiwx` have their RAM test hinted since 0131. psq stores
+stay without hints (their fast path depends on the GQR types). Compiler
+version 28.
