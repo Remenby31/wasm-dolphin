@@ -11,6 +11,7 @@ import { imageFromDol } from "../src/aot-image.js";
 import {
   AOT_PROGRESS_SCHEMA, aotFirstLaunchRequested, coreRegionTranslator, createAotFirstLaunch, parseHelperSignature, regionCacheIdentity
 } from "../src/aot-orchestrator.js";
+import { yieldToEventLoop } from "../src/aot-orchestrator.js";
 import { planDol } from "../src/aot-plan.js";
 import { paddedUleb } from "../src/aot-region-module.js";
 import { asm, assemble, buildDol } from "./aot-asm.mjs";
@@ -201,7 +202,10 @@ test("interrupted in the middle of the first launch, the next launch resumes whe
   assert.equal(ofType(first.flow, "done").length, 0, "no done after a cancel");
   const stopped = ofType(first.flow, "progress").at(-1);
   assert.ok(stopped.done < total, "interrupted before the end");
-  const doneBefore = first.compiled.length;
+  // Modules handled before the cancel (stored); one that compiled during
+  // the cancel is installed but not stored (no verdict), so it is not
+  // counted (review of #144).
+  const doneBefore = stopped.done;
   assert.ok(doneBefore >= 1);
 
   const second = launch(p);
@@ -211,14 +215,17 @@ test("interrupted in the middle of the first launch, the next launch resumes whe
   // the partial cache is installed before boot
   const report = await second.flow.installBeforeBoot();
   assert.ok(report.loaded >= doneBefore);
+  const stored = new Set(second.retained.keys()); // what the first launch stored
   await second.flow.start();
   const [start] = ofType(second.flow, "start");
   assert.equal(start.resumed, true);
   assert.ok(start.done >= doneBefore, "resumes near where it stopped");
   const [done] = ofType(second.flow, "done");
   assert.equal(done.compiled + start.done, total, "the regions already stored are not compiled again");
-  // the regions stored by the first launch are not compiled again
-  for (const key of first.compiled) assert.ok(!second.compiled.includes(key));
+  // the regions stored by the first launch are not compiled again; one that
+  // compiled during the cancel was not stored, so it is retried (#144)
+  for (const key of first.compiled) if (stored.has(key)) assert.ok(!second.compiled.includes(key));
+  assert.ok(first.compiled.filter((key) => !stored.has(key)).length <= 1, "at most the module of the cancel");
   assert.equal(ofType(second.flow, "progress").at(-1).fraction, 1);
   // third launch: complete, nothing left to do
   const third = launch(p);
@@ -595,4 +602,48 @@ test("a disposed or cancelled second launch loads nothing of its deferred cache"
   third.flow.dispose();
   assert.equal((await rest).loaded, 0);
   assert.equal(third.retained.size, 0);
+});
+
+// Research deep-first-minute: the translator yields through a MessageChannel,
+// not a setTimeout(0) chain that the browser clamps to 4 ms after 5 levels.
+test("the translator's yield is one event-loop turn, chained without the timer clamp", async () => {
+  const t0 = performance.now();
+  for (let i = 0; i < 200; i++) await yieldToEventLoop();
+  const ms = performance.now() - t0;
+  assert.ok(ms < 200, `200 chained yields in ${ms.toFixed(1)} ms (a clamped timer chain takes ≥ 800 ms in a browser)`);
+});
+
+
+test("the profile sampler needs a shared heap and a PC address; it drains what it counted since the last drain, and blocks while paused", async () => {
+  const { startHotSampler } = await import("../src/aot-hot-sampler.js");
+  assert.equal(startHotSampler({ buffer: new ArrayBuffer(16), pcAddress: 8 }), null);
+  assert.equal(startHotSampler({ buffer: new SharedArrayBuffer(16), pcAddress: 0 }), null);
+  // A stand-in worker: what it posts is counted, drained once.
+  let worker, ctl;
+  const sampler = startHotSampler({ buffer: new SharedArrayBuffer(16), pcAddress: 8, createWorker: () => (worker = { postMessage(m) { ctl = new Int32Array(m.ctl); }, terminate() {} }) });
+  worker.onmessage({ data: [[0x80003100, 3], [0x80003104, 1]] });
+  worker.onmessage({ data: [[0x80003100, 2]] });
+  assert.deepEqual(sampler.drain(), [[0x80003100, 5], [0x80003104, 1]]);
+  assert.deepEqual(sampler.drain(), []);
+  sampler.pause();
+  assert.equal(Atomics.load(ctl, 1), 1, "paused: the worker blocks on this word");
+  sampler.resume();
+  assert.equal(Atomics.load(ctl, 1), 0);
+  sampler.stop();
+  assert.equal(Atomics.load(ctl, 0), 1);
+});
+
+// Review of #165: two records in flight (a remount during the minute's
+// record) count the session once; a failed first record does not use it up.
+test("the profile recorder counts a session once, whatever the records in flight", async () => {
+  const { createProfileRecorder } = await import("../src/aot-hot-sampler.js");
+  const { blocksFromPcSamples } = await import("../src/aot-profile.js");
+  const calls = [];
+  let fail = true;
+  const store = { record: async (key, blocks, { newSession }) => { await new Promise((r) => setTimeout(r, 5)); if (fail) { fail = false; throw new Error("quota"); } calls.push(newSession); return {}; } };
+  const record = createProfileRecorder({ store, discKey: "disc", blocksFromPcSamples });
+  assert.equal(await record([[0x80003100, 1]]), null, "the first record failed");
+  await Promise.all([record([[0x80003100, 1]]), record([[0x80003104, 1]])]);
+  assert.deepEqual(calls, [true, false], "one new session, then additions");
+  assert.equal(await record([]), null, "nothing to record");
 });

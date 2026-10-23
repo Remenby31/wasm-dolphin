@@ -265,6 +265,12 @@ let harnessEnabled = false;
 let harnessWgslCorpus = null;
 const HARNESS_WGSL_CORPUS_MAX = 20000;
 let fifoLogBoot = false;
+// ?wgpumask=a,b: optional WebGPU features the device is created without, as
+// on a browser that lacks them (harness only, set at loadCore).
+let wgpuMaskedFeatures = new Set();
+export function parseWgpuMask(mask) {
+  return new Set(String(mask || "").split(",").map((f) => f.trim()).filter(Boolean));
+}
 let harnessPcSamplerRun = null;
 
 // QA harness only: start / stop the guest-PC sampler (harness-pc-sampler.js).
@@ -1367,6 +1373,11 @@ async function handleMessage(type, payload) {
   // P6: blocks waiting for their pack go out when the saves do (page hidden
   // or closed) and on stop; their outcome is not the saves'.
   if (type === "flushUserData" || type === "stop") void dolphinJitBlockStore?.flush().catch(() => {});
+  // The local profile: recorded when the tab hides or closes, the sampler
+  // blocked while the emulation is paused or stopped (no frozen PC counted).
+  if (type === "flushUserData" || type === "pause" || type === "stop") flushAotProfile();
+  if (type === "pause" || type === "stop") aotHotSampler?.pause();
+  if (type === "start" || type === "resume") aotHotSampler?.resume();
   if (type === "flushUserData" || type === "stop") void pipelinePrewarm?.flush();
   if (type === "stop") pipelinePrewarm?.stop();
   switch (type) {
@@ -1496,6 +1507,7 @@ async function handleMessage(type, payload) {
         efbAccess: payload.efbAccess,
         fifoLog: payload.fifoLog,
         efbCopyRam: payload.efbCopyRam,
+        wgpuMask: payload.wgpuMask,
         efbDiag: payload.efbDiag,
         jitVerbose: payload.jitVerbose,
         frameCap: payload.frameCap,
@@ -1506,6 +1518,7 @@ async function handleMessage(type, payload) {
         aotCompiler: payload.aotCompiler,
         aotFirstLaunch: payload.aotFirstLaunch,
         regionChain: payload.regionChain,
+        fusedMadd: payload.fusedMadd,
         reportedCoreSelection: payload.coreSelection,
         wgpuReplayDiagnostics: payload.wgpuReplayDiagnostics,
         wgpuDeepReplayDiagnostics: payload.wgpuDeepReplayDiagnostics,
@@ -2165,6 +2178,7 @@ async function loadCore({
   efbAccess = false,
   fifoLog = false,
   efbCopyRam = false,
+  wgpuMask = "",
   efbDiag = false,
   jitVerbose = false,
   frameCap = 0,
@@ -2175,6 +2189,7 @@ async function loadCore({
   aotCompiler = true,
   aotFirstLaunch = false,
   regionChain = true,
+  fusedMadd = true,
   reportedCoreSelection = null,
   wgpuReplayDiagnostics = false,
   wgpuDeepReplayDiagnostics: requestedWgpuDeepReplayDiagnostics = false,
@@ -2215,6 +2230,7 @@ async function loadCore({
   oglSabEnabled = false
 } = {}) {
   fifoLogBoot = Boolean(fifoLog);
+  wgpuMaskedFeatures = parseWgpuMask(wgpuMask);
   if (moduleInstance) {
     return moduleInstance;
   }
@@ -2702,11 +2718,11 @@ async function loadCore({
   if (harnessEnabled) moduleInstance._DolphinWeb_HarnessEnable?.(1);
   if (detTraceRequested) moduleInstance._DolphinWeb_DetTraceEnable?.(1);
   if (gpuSyncDiagEnabled) moduleInstance._DolphinWeb_GpuSyncDiagEnable?.(1);
-  // patch 0129: the FMA emitter uses relaxed_madd only where it is fused,
-  // decided once here, before the first compile.
+  // Patch 0129: the FMA emitter uses relaxed_madd only where it is fused,
+  // decided once here, before the first compile (?fusedmadd=0: never).
   relaxedMadd = probeRelaxedMadd();
-  moduleInstance._DolphinWeb_SetFusedMadd?.(relaxedMadd === "fused" ? 1 : 0);
-  postStatus(`relaxed_madd: ${relaxedMadd}${moduleInstance._DolphinWeb_SetFusedMadd ? "" : " (core without patch 0129)"}`);
+  moduleInstance._DolphinWeb_SetFusedMadd?.(relaxedMadd === "fused" && fusedMadd !== false ? 1 : 0);
+  postStatus(`relaxed_madd: ${relaxedMadd}${fusedMadd === false ? ", off (?fusedmadd=0)" : ""}${moduleInstance._DolphinWeb_SetFusedMadd ? "" : " (core without patch 0129)"}`);
   const ownershipTraceSetterAvailable = Boolean(
     api.setWebGpuOwnershipTraceEnabled &&
     api.getWebGpuOwnershipTracePtr &&
@@ -3815,6 +3831,14 @@ async function mountFile(file) {
   aotDiscGeneration += 1;
   aotFirstLaunch?.dispose();
   aotFirstLaunch = null;
+  // The previous disc's last samples go to its own profile (its recorder
+  // keeps its session count); the next disc starts a new one.
+  flushAotProfile();
+  if (aotProfileTimer) clearInterval(aotProfileTimer);
+  aotProfileTimer = null;
+  aotProfileTarget = null;
+  aotHotSampler?.stop();
+  aotHotSampler = null;
   aotCoreBooted = false;
   aotRegionsBeforeBoot.length = 0;
   // The previous disc's flow never sees this disc's first image (review of #86).
@@ -5935,10 +5959,12 @@ async function createWebGpuPresenter(canvas) {
   // into clamping.
   // dual-source-blending lets GX destination alpha and source-alpha blending
   // coexist in one draw (see RENDERER_FEATURE_DUAL_SOURCE_BLEND).
-  const wantFeatures = ["clip-distances", "depth-clip-control", "dual-source-blending"];
+  const wantFeatures = ["clip-distances", "depth-clip-control", "dual-source-blending"]
+    .filter((f) => !wgpuMaskedFeatures.has(f));
   const haveFeatures = wantFeatures.filter((f) => adapter.features && adapter.features.has(f));
   console.log("[wgpu-features] got=" + (haveFeatures.join(",") || "none") +
-              " missing=" + (wantFeatures.filter((f) => !haveFeatures.includes(f)).join(",") || "none"));
+              " missing=" + (wantFeatures.filter((f) => !haveFeatures.includes(f)).join(",") || "none") +
+              " masked=" + ([...wgpuMaskedFeatures].join(",") || "none"));
   const device = await adapter.requestDevice(
     haveFeatures.length ? { requiredFeatures: haveFeatures } : undefined);
   rendererDiagnostics.device = {
@@ -7368,8 +7394,8 @@ export async function prepareAotFirstLaunch(file, {
     return;
   }
   const generation = aotDiscGeneration;
-  const [{ coreAotKeyParts, coreAssembleOptions, coreRegionTranslator, createAotFirstLaunch }, { OpfsPlanStore }, { AotProfileStore }, { planDiscInWorker }, { fileReader, planDisc }] =
-    await Promise.all([import("./aot-orchestrator.js"), import("./aot-optimizer.js"), import("./aot-profile.js"), import("./aot-plan-worker.js"), import("./aot-recomp.js")]);
+  const [{ coreAotKeyParts, coreAssembleOptions, coreRegionTranslator, createAotFirstLaunch }, { OpfsPlanStore }, { AotProfileStore, blocksFromPcSamples }, { planDiscInWorker }, { fileReader, planDisc }, { createProfileRecorder, guestPcAddress, startHotSampler }] =
+    await Promise.all([import("./aot-orchestrator.js"), import("./aot-optimizer.js"), import("./aot-profile.js"), import("./aot-plan-worker.js"), import("./aot-recomp.js"), import("./aot-hot-sampler.js")]);
   const discKey = await readDiscKey();
   if (generation !== aotDiscGeneration) return;
   const keyParts = coreAotKeyParts(module);
@@ -7427,6 +7453,12 @@ export async function prepareAotFirstLaunch(file, {
     onEvent: (event) => self.postMessage({ type: "aot-progress", event })
   });
   aotFirstLaunch = flow;
+  // Where this player's game spends its time, recorded into the local
+  // profile (OPFS, per disc, addresses and sample counts only; never sent or
+  // shared): the next plan orders by it and forms hot fragments from it.
+  aotProfileTarget = opfs && discKey
+    ? { flow, startHotSampler, guestPcAddress, record: createProfileRecorder({ store: new AotProfileStore(opfs), discKey, blocksFromPcSamples }) }
+    : null;
   const blockKeys = [];
   if (!flow.supported) {
     postStatus("aot: first-launch optimisation unavailable (no disc key, core hash or translator)");
@@ -7474,10 +7506,35 @@ export function startAotFirstLaunchAfterBoot(flow = aotFirstLaunch) {
     // A remount meanwhile woke this flow: its disc is gone (loadRest of a
     // disposed flow loads nothing either).
     if (aotFirstLaunch !== flow) return undefined;
+    // The local profile's samples, from the first image on (a thread of its
+    // own reading the guest PC, nothing on the CPU thread).
+    aotHotSampler?.stop();
+    aotHotSampler = aotProfileTarget?.flow === flow
+      ? aotProfileTarget.startHotSampler({ buffer: moduleInstance?.HEAPU8?.buffer, pcAddress: aotProfileTarget.guestPcAddress(moduleInstance), periodMs: AOT_PROFILE_SAMPLE_MS })
+      : null;
+    startAotProfileRecorder(flow, aotHotSampler);
     return flow.loadRest();
   }).catch(() => {}).then(() => {
     if (aotFirstLaunch === flow) return flow.start({ resume: true, ifGeneration: generation });
   });
+}
+let aotHotSampler = null;
+let aotProfileTarget = null;
+let aotProfileTimer = null;
+const AOT_PROFILE_SAMPLE_MS = 10; // one guest PC per 10 ms: enough for block weights
+const AOT_PROFILE_RECORD_MS = 60000;
+// Every minute, and when the tab hides or closes (flushUserData), the
+// emulation pauses or stops, or another disc is mounted, what the sampler
+// counted goes into the disc's local profile (aot-hot-sampler.js
+// createProfileRecorder: the first record of a session is a new session).
+function startAotProfileRecorder(flow, sampler) {
+  if (aotProfileTimer) clearInterval(aotProfileTimer);
+  aotProfileTimer = null;
+  if (!sampler || !aotProfileTarget || aotProfileTarget.flow !== flow) return;
+  aotProfileTimer = setInterval(flushAotProfile, AOT_PROFILE_RECORD_MS);
+}
+function flushAotProfile() {
+  if (aotHotSampler && aotProfileTarget) void aotProfileTarget.record(aotHotSampler.drain());
 }
 // The first presented image of this boot, or false after `timeoutMs`. No
 // running core (tests): at once.
