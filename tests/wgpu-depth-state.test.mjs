@@ -38,7 +38,8 @@ test("the replay builds both pipeline depth states and the clear depth through t
 });
 
 test("dual-source blending is requested from the device and advertised to the core", () => {
-  assert.match(worker, /const wantFeatures = \[[^\]]*"dual-source-blending"[^\]]*\];/);
+  // Requested unless the harness masks it (?wgpumask, tests/wgpu-feature-mask).
+  assert.match(worker, /const wantFeatures = \[[^\]]*"dual-source-blending"[^\]]*\]\s*\.filter\(\(f\) => !wgpuMaskedFeatures\.has\(f\)\);/);
   assert.match(worker, /const RENDERER_FEATURE_DUAL_SOURCE_BLEND = 1 << 1;/);
   assert.match(worker,
     /renderGpu\?\.device\?\.features\?\.has\?\.\("dual-source-blending"\)\) \{\n\s*rendererFeatureMask = \(rendererFeatureMask \| RENDERER_FEATURE_DUAL_SOURCE_BLEND\)/);
