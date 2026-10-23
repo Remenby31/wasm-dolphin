@@ -368,7 +368,8 @@ export class AotOptimizer extends EventTarget {
             } catch (error) {
               out = { reason: String(error?.message || error) };
             }
-            if (this.cancelled) return;
+            // A cancel (tab closing, another disc) stops new work only: a
+            // module that compiled still installs and goes to the cache.
             if (!out?.module) {
               const reason = out?.reason ?? "compile";
               if (reason === "compile" || reason === "link") failure = `engine-reject: ${reason}`;
@@ -384,7 +385,6 @@ export class AotOptimizer extends EventTarget {
             // session runs it even if the write then fails (quota).
             this.install?.(region);
             const stored = await session.put([{ key: unit.key, bytes, meta: { members: unit.members.length, translated: result.fragments.length, entries, ranges } }]);
-            if (this.cancelled) return;
             const reason = stored.failed?.[0]?.reason ?? null;
             if (reason === "quota") wait = "quota";
             else failure = reason;
