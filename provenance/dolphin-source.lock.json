@@ -25,7 +25,7 @@
       "commit": "01e0577914a75a2569c846778c2f93aa8e6feddd"
     }
   },
-  "patchSeriesSha256": "17847691e0bf8e159f72298dea19b4e82a95d3b9b83a909a27e1761a86fdb93d",
+  "patchSeriesSha256": "63eb1900462b9bbf3beb586590ce68d57f86fac2433563a54f115c11559c699d",
   "patches": [
     {
       "order": 1,
@@ -824,8 +824,8 @@
       "cwd": ".",
       "hashMode": "lf-normalized",
       "path": "patches/dolphin-wasm/snapshot/0129-fused-relaxed-madd.patch",
-      "size": 6773,
-      "sha256": "3b42c871bc2804369758679e9532f4f2813ca5eefc65f0422203f121cd66b4c0"
+      "size": 7132,
+      "sha256": "4d9c0b43752c0b32288e975c3980ba1c5f6a333896090268c6c9c0e3fe395b8d"
     },
     {
       "order": 101,

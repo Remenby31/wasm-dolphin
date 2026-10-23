@@ -1733,7 +1733,8 @@ async function handleMessage(type, payload) {
     case "validationPcSampler":
       return harnessPcSampler(payload);
     case "validationReadRelaxedMadd":
-      return { mode: relaxedMadd, coreFused: moduleInstance?._DolphinWeb_SetFusedMadd ? relaxedMadd === "fused" : null };
+      // coreFused: the core's own mode (null: a core without patch 0129).
+      return { mode: relaxedMadd, coreFused: moduleInstance?._DolphinWeb_FusedMadd ? moduleInstance._DolphinWeb_FusedMadd() === 1 : null };
     case "validationReadJitRegionStats":
       return harnessJitRegionStats(payload);
     case "validationReadAxHleStats":

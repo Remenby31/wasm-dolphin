@@ -40,7 +40,9 @@ const coreFromThisSeries = built?.source?.patchSeriesSha256 === lock.patchSeries
 const skip = !core ? "no core" :
   !coreFromThisSeries && !core.has("DolphinWeb_SetFusedMadd") ? "core built from a patch series without 0129" : false;
 const machine = probeRelaxedMadd();
-const MODES = [["plain f64", false], ...(machine === "fused" ? [["fused relaxed_madd", true]] : [])];
+const MODES = [["plain f64", false], ["fused relaxed_madd", true]];
+// The fused mode only where this engine fuses (the core never selects it elsewhere).
+const modeSkip = (base, fused) => base || (fused && machine !== "fused" && `this engine's relaxed_madd is ${machine}`);
 
 const A = (op, t, a, b, c, xo) => ((op << 26) | (t << 21) | (a << 16) | (b << 11) | (c << 6) | (xo << 1)) >>> 0;
 const BLR = 0x4e800020;
@@ -81,7 +83,7 @@ function edgeCases(r) {
 }
 
 for (const [label, fused] of MODES) {
-  test(`${label}: FMA edge cases (ties, double-rounding traps, underflow, denormal frC) match the interpreter`, { skip }, () => {
+  test(`${label}: FMA edge cases (ties, double-rounding traps, underflow, denormal frC) match the interpreter`, { skip: modeSkip(skip, fused) }, () => {
     const previous = core.setFusedMadd(fused);
     try {
       const r = makeRng(0xf5ed);
@@ -108,7 +110,7 @@ for (const [label, fused] of MODES) {
     }
   });
 
-  test(`${label}: random FMA blocks from random states match the interpreter`, { skip }, () => {
+  test(`${label}: random FMA blocks from random states match the interpreter`, { skip: modeSkip(skip, fused) }, () => {
     const previous = core.setFusedMadd(fused);
     try {
       const r = makeRng(fused ? 0xfa5 : 0xe1a);
@@ -128,7 +130,7 @@ const MADD = [0xfd, 0x87, 0x02];
 const hasMadd = (code) => code.some((_, i) => MADD.every((b, j) => code[i + j] === b));
 
 for (const [label, fused] of MODES) {
-  test(`${label}: FMA regions match the interpreter, relaxed_madd emitted only in its mode`, { skip: regionSkip }, () => {
+  test(`${label}: FMA regions match the interpreter, relaxed_madd emitted only in its mode`, { skip: modeSkip(regionSkip, fused) }, () => {
     const previous = aot.module._DolphinWeb_SetFusedMadd(fused ? 1 : 0);
     try {
       const keyParts = () => {
@@ -137,6 +139,7 @@ for (const [label, fused] of MODES) {
       };
       assert.equal(keyParts()[0], 21, "compiler version");
       assert.equal((keyParts()[1] >>> 30) & 1, fused ? 1 : 0, "key parts bit 30");
+      assert.equal(aot.module._DolphinWeb_FusedMadd(), fused ? 1 : 0, "the core reads its mode back");
       const r = makeRng(fused ? 0x4ead : 0x4eac);
       let ran = 0, withMadd = 0;
       for (let k = 0; k < 120; k++) {
