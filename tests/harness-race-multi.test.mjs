@@ -188,3 +188,13 @@ test("counters: cycles per guest cycle, extra PMU events per arm, and perf's mul
   assert.deepEqual(st.l1i_cache_refill.perArm, [0.1, 0.2]);
   assert.equal(Math.round(st.l1i_cache_refill.effects.arms[0].laneCorrected), 100);
 });
+
+// 2026-10-23: `const laneOf = …` in main() shadowed the exported laneOf()
+// the run loop calls earlier in the same function: every race-multi died at
+// its first run (ReferenceError, temporal dead zone), unseen by the unit tests.
+test("race-multi: no local const shadows one of the module's own exported names", () => {
+  const src = readFileSync(new URL("../harness/probes/race-multi.mjs", import.meta.url), "utf8");
+  const exported = [...src.matchAll(/^export (?:const|function|async function) (\w+)/gm)].map((m) => m[1]);
+  const shadowed = exported.filter((name) => new RegExp(`^\\s+(?:const|let) ${name}\\b`, "m").test(src));
+  assert.deepEqual(shadowed, []);
+});
