@@ -135,9 +135,11 @@ const lastPause = (b) => [b.first, ...b.cycles].filter((c) => c?.pause).at(-1)?.
 record.pause = {
   firstLoad: pauses(record.boots.map((b) => b.first).filter(Boolean)),
   cycles: pauses(record.boots.flatMap((b) => b.cycles)),
-  busyPerBoot: record.boots.map((b) => { const p = lastPause(b); return p ? `${p.busy}/${p.count}` : null; })
+  busyPerBoot: record.boots.map((b) => { const p = lastPause(b); return p ? `${p.busy}/${p.count}` : null; }),
+  // GP read disables that found a chunk decoding, and the longest wait (us).
+  readDisablePerBoot: record.boots.map((b) => { const p = lastPause(b); return p?.readDisableWaits != null ? `${p.readDisableWaits}:${p.readDisableMaxUs}` : null; })
 };
-if (record.pause.firstLoad || record.pause.cycles) console.log(`[savestate-cycles] GPU-loop pause: first load ${JSON.stringify(record.pause.firstLoad)}, cycles ${JSON.stringify(record.pause.cycles)}`);
+if (record.pause.firstLoad || record.pause.cycles) console.log(`[savestate-cycles] GPU-loop pause: first load ${JSON.stringify(record.pause.firstLoad)}, cycles ${JSON.stringify(record.pause.cycles)}, read-disable waits per boot ${JSON.stringify(record.pause.readDisablePerBoot)}`);
 if (outDir) {
   mkdirSync(outDir, { recursive: true });
   writeFileSync(path.join(outDir, "savestate-cycles.json"), JSON.stringify(record, null, 1));

@@ -28,6 +28,7 @@ test("headroom: Dolphin's Max on the CPU thread, the GPU bound, the smaller one"
   assert.equal(h.headroomApplies, true);
   assert.equal(h.throttleSleepShare, 0.4);
   assert.equal(h.xfbCopiesPerVi, 0.5);
+  assert.equal(h.gameFramesPerSecond, 30); // 300 XFB copies over 10 host s
   // The GPU as the bound.
   assert.equal(headroomOf(decodeHeadroomStats(hrBytes({ windowUs: 10e6, cpuSleepUs: 6e6, gpuWorkUs: 8e6 })), { guestSeconds: 10 }).headroom, 1.25);
   // Below 100 %: no sleep, the speed is the number.

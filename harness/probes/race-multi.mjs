@@ -82,6 +82,7 @@ import { measure, num } from "./race-perf.mjs";
 import { loadHarnessState, readCoreProgress } from "../lib/browser.mjs";
 import { workerRequest } from "../lib/browser.mjs";
 import { emulatedWindow, ticksNow } from "../lib/emulated-window.mjs";
+import { chromeInfo } from "../lib/probe-out.mjs";
 import { decodeRegionStats } from "../lib/jit-region-stats.mjs";
 import { busiestThread, checkPerfAccess, instructionsPerGuestCycle, perfCounters } from "../lib/perf-counters.mjs";
 import { execFileSync, spawn } from "node:child_process";
@@ -205,7 +206,9 @@ export function discardReason(arms, targets) {
     if (!g) return `no region gate on arm ${a}`;
     if (g.layoutRefused > 0) return `layoutRefused on arm ${a} (${g.layoutRefused})`;
     const want = targets[a];
-    if (Number.isInteger(want) && g.installed !== want) return `arm ${a} installed ${g.installed ?? "?"} of ${want} regions`;
+    // More than the seed is fine: a module the seed's first launch was still
+    // finishing when it reported "done" (regions-0118, 2026-10-23: 143 of 142).
+    if (Number.isInteger(want) && !(g.installed >= want)) return `arm ${a} installed ${g.installed ?? "?"} of ${want} regions`;
     if (!g.quiescent) return `arm ${a}: ${g.why ?? "regions not quiescent"}`;
     return null;
   }).filter(Boolean);
@@ -481,7 +484,9 @@ async function main() {
   const ipg = good.map((r) => r.arms.map((x) => x.cold.instructionsPerGuestCycle));
   const counterEffects = full && values.counters && ipg.every((row) => row.every((v) => v > 0)) ? armEffects(ipg, good.map((r) => r.arms.map((x) => x.lane))) : null;
   const summary = {
-    probe: "race-multi", at: new Date().toISOString(), query: o.query, warmupSec: o.warmup, secs: o.secs, maxLoad: o.maxLoad,
+    probe: "race-multi", at: new Date().toISOString(),
+    // Which Chromium and its extra flags (the bench's --js-flags among them).
+    chrome: chromeInfo(), query: o.query, warmupSec: o.warmup, secs: o.secs, maxLoad: o.maxLoad,
     arms, lanes, runs: records.length, validRuns: good.length,
     // A lane estimate needs every run (the Latin square incomplete otherwise).
     // --aot-seed: installed regions per run and arm, and whether every run had them equal.

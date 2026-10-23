@@ -151,6 +151,7 @@ import {
   hashWgpuVisualSample
 } from "./wgpu-visual-cadence.js";
 import { createCoreLifecycle } from "./core-lifecycle.js";
+import { WgpuReadback, unwrapSeq } from "./wgpu-readback.js";
 import { createDisplayCounter, startDisplayLoop } from "./wgpu-display-counter.js";
 import { PipelinePrewarm } from "./wgpu-pipeline-prewarm.js";
 import { BOOT_FILE_HEAD_BYTES, bootFileKind, checkExecutable, executableGameId } from "./boot-file.js";
@@ -258,6 +259,8 @@ const PRESENTATION_HISTOGRAM_BUCKETS_MS = [8, 12, 16, 20, 24, 33, 50, 100, 200];
 // clock emscripten_get_now() gives the core's VI ring.
 const harnessNow = () => performance.timeOrigin + performance.now();
 let harnessEnabled = false;
+// ?fifolog=1: a .dff may boot (FifoPlayer). Harness only, set at loadCore.
+let fifoLogBoot = false;
 let harnessPcSamplerRun = null;
 
 // QA harness only: start / stop the guest-PC sampler (harness-pc-sampler.js).
@@ -415,8 +418,15 @@ function harnessMemAccessStats({ reset } = {}) {
   if (!ptr || ptr + 8 > heap.length) return { error: `DolphinWeb_MemAccessStats returned ${ptr}` };
   const size = Math.min(new DataView(heap.buffer, ptr, 8).getUint32(4, true), 192);
   if (ptr + size > heap.length) return { error: `memory access stats of ${size} bytes past the heap` };
+  // A seqlock read: copy until two consecutive copies agree (the core writes
+  // the struct whole at a slice boundary), at most 8 times.
   const copy = () => Array.from(new Uint8Array(heap.buffer, ptr, size));
-  return { bytes: copy(), again: copy() };
+  let bytes = copy(), again = copy();
+  for (let i = 0; i < 8 && bytes.some((b, j) => b !== again[j]); i++) {
+    bytes = again;
+    again = copy();
+  }
+  return { bytes, again };
 }
 // The core's first region installs, [ms, bytes, path] each (path 0 first
 // attempt, 1 after the worker's ready byte, 2 cold); null with an older core.
@@ -499,6 +509,31 @@ let wgpuRendererWorkerProbe = "off";
 let wgpuVisualCadenceEnabled = false;
 // Mirrors the loaded core's videoBackend for code outside loadCore's scope.
 let hardwareVideoBackend = false;
+// Staging-texture readbacks of the hardware renderer, per device and per
+// core module: the heap is the one the copies were issued in.
+let wgpuReadback = null;
+function readbackFor(device) {
+  // A failed replay released its readback: none is made again.
+  if (wgpuReplayFatal) return null;
+  if (wgpuReadback?.device !== device || wgpuReadback.module !== moduleInstance) {
+    releaseWgpuReadback();
+    const module = moduleInstance;
+    wgpuReadback = new WgpuReadback({
+      device,
+      heap: () => module.HEAPU8,
+      words: () => new Int32Array(module.HEAPU8.buffer)
+    });
+    wgpuReadback.module = module;
+  }
+  return wgpuReadback;
+}
+// Every copy in flight or still in the ring is released as LOST, and what
+// lands later is dropped. Before the consumer is marked failed: the core
+// then stops waiting for copies and frees their memory (patch 0093).
+function releaseWgpuReadback() {
+  wgpuReadback?.reset();
+  wgpuReadback = null;
+}
 // video=wgpu: pipelines seen in earlier sessions, compiled at boot
 // (src/wgpu-pipeline-prewarm.js). null when off (?wgpuprewarm=0) or not wgpu.
 let wgpuPipelinePrewarmEnabled = true;
@@ -1157,6 +1192,34 @@ let harnessViRead = null;
 // from the last savestate load). Fails explicitly if that output has passed,
 // never arrives within the timeout, or the core has no capture hook.
 // `ahead` instead of `index`: that many outputs after the latest one.
+// Harness: a FIFO log (.dff) of the next `frames` frames, recorded by the
+// core's FifoRecorder, as bytes. FifoPlayer boots it like a disc.
+async function recordFifoLog({ frames = 10, timeoutMs = 60000 } = {}) {
+  const m = moduleInstance;
+  if (!m?._DolphinWeb_HarnessFifoRecord) throw new Error("core has no FIFO recorder hook (rebuild the core)");
+  if (!harnessEnabled) throw new Error("harness hooks not enabled (validationEnableHarness)");
+  const path = "/tmp/harness-fifo.dff";
+  const fs = m.FS;
+  try { fs.mkdir("/tmp"); } catch { /* exists */ }
+  if (!m.ccall("DolphinWeb_HarnessFifoRecord", "number", ["number", "string"], [frames | 0, path])) {
+    throw new Error("a FIFO recording is already running");
+  }
+  const end = performance.now() + timeoutMs;
+  for (;;) {
+    const state = m._DolphinWeb_HarnessFifoRecordState();
+    if (state === 2) break;
+    if (state === 3) throw new Error("FifoRecorder could not save the log");
+    if (performance.now() > end) {
+      m._DolphinWeb_HarnessFifoRecordCancel?.();
+      throw new Error(`no FIFO log after ${timeoutMs} ms (${frames} frames)`);
+    }
+    await new Promise((resolve) => setTimeout(resolve, 20));
+  }
+  const bytes = fs.readFile(path);
+  fs.unlink(path);
+  return { frames, size: bytes.length, bytes };
+}
+
 async function captureAtViOutput({ index, ahead, fromLoad = false, timeoutMs = 60000 }) {
   const m = moduleInstance;
   if (!m?._DolphinWeb_HarnessArmCapture) throw new Error("core has no harness capture hook (rebuild the core)");
@@ -1425,6 +1488,8 @@ async function handleMessage(type, payload) {
         coreLog: payload.coreLog,
         memcardSlotB: payload.memcardSlotB,
         efbAccess: payload.efbAccess,
+        fifoLog: payload.fifoLog,
+        efbCopyRam: payload.efbCopyRam,
         efbDiag: payload.efbDiag,
         jitVerbose: payload.jitVerbose,
         frameCap: payload.frameCap,
@@ -1674,6 +1739,8 @@ async function handleMessage(type, payload) {
       return harnessMemAccessStats(payload);
     case "validationCaptureAtVi":
       return captureAtViOutput(payload);
+    case "validationFifoRecord":
+      return recordFifoLog(payload);
     case "validationReadPipelinePrewarm":
       return pipelinePrewarm ? pipelinePrewarm.snapshot() : { enabled: false, why: !hardwareVideoBackend ? "not video=wgpu" : !wgpuPipelinePrewarmEnabled ? "wgpuprewarm=0" : "not started" };
     case "validationReadDetTrace":
@@ -2073,6 +2140,8 @@ async function loadCore({
   coreLog = false,
   memcardSlotB = false,
   efbAccess = false,
+  fifoLog = false,
+  efbCopyRam = false,
   efbDiag = false,
   jitVerbose = false,
   frameCap = 0,
@@ -2122,6 +2191,7 @@ async function loadCore({
   wgpuSemanticRuntime: requestedWgpuSemanticRuntime = false,
   oglSabEnabled = false
 } = {}) {
+  fifoLogBoot = Boolean(fifoLog);
   if (moduleInstance) {
     return moduleInstance;
   }
@@ -2528,6 +2598,7 @@ async function loadCore({
       : undefined;
 
   const _t_factory = performance.now();
+  releaseWgpuReadback();
   moduleInstance = await factory({
     noInitialRun: true,
     canvas: videoBackend === "OGL" ? moduleCanvas || undefined : undefined,
@@ -2549,6 +2620,7 @@ async function loadCore({
     dolphinCoreLog: Boolean(coreLog),
     dolphinMemcardSlotB: Boolean(memcardSlotB),
     dolphinEfbAccess: Boolean(efbAccess),
+    dolphinEfbCopyRam: Boolean(efbCopyRam),
     // Ranks the instructions that block JIT compilation (?jitverbose=1).
     dolphinWebVerbosePpcJit: Boolean(jitVerbose),
     dolphinFrameCap: (frameCapTarget = Number(frameCap) || 0),
@@ -3728,9 +3800,12 @@ async function mountFile(file) {
   aotDiscFile = file;
   console.log(`[boot-phase] fs.mount(WORKERFS) took ${(performance.now() - _t_workerfs).toFixed(1)}ms (${(file.size / 1048576).toFixed(1)}MiB image)`);
 
-  // A .dol/.elf is no disc: DiscIO cannot open it, and BootDisc's
-  // GenerateFromFile boots it directly, whatever its size.
+  // A .dol/.elf/.dff is no disc: DiscIO cannot open it, and BootDisc's
+  // GenerateFromFile boots it directly (a .dff through FifoPlayer),
+  // whatever its size.
   const bootKind = bootFileKind(safeName);
+  // FifoPlayer replays a log's memory updates as given: harness only (?fifolog=1).
+  if (bootKind === "dff" && !fifoLogBoot) throw new Error("FIFO logs (.dff) boot only with ?fifolog=1 (harness)");
   let executable = null;
   if (bootKind === "disc") {
     const _t_mount = performance.now();
@@ -3779,7 +3854,10 @@ async function mountFile(file) {
     if (executable && !coreBoot.accepted) {
       throw new Error(`Dolphin refused the ${bootKind}: ${api.getCoreStatus?.() || "no status"}`);
     }
-    bootedGame = executable
+    bootedGame = bootKind === "dff"
+      // SConfig sets NTSC-U and the log's game ID for a FIFO log.
+      ? { kind: bootKind, gameId: executable.gameId || executableGameId(path), region: "NTSC-U" }
+      : executable
       // An executable has no region: Dolphin falls back to its default one,
       // PAL in the browser (no host locale; observed as GC/EUR).
       ? { kind: bootKind, gameId: executableGameId(path), region: "PAL" }
@@ -8150,6 +8228,8 @@ const WGPU_CMD_OP_BLIT_TEXTURE = 24;
 const WGPU_CMD_OP_CLEAR_RECT = 25;
 const WGPU_CMD_OP_VI_TAG = 26;
 const WGPU_CMD_OP_PRESENT_SOURCE = 27;
+// Readback of a staging texture (EFB peeks, copies to RAM): src/wgpu-readback.js.
+const WGPU_CMD_OP_COPY_TO_STAGING = 28;
 // ClearRect uses the full attachment viewport and [0,1] depth range, so its
 // scissor alone determines coverage and its depth is independent of game state.
 // A/B switch: false restores the original game-viewport-dependent clear.
@@ -9495,6 +9575,7 @@ function markWgpuReplayFatal(scope, detail) {
   if (wgpuMappedStagingPool?.snapshot().pendingUploads > 0) {
     wgpuMappedStagingPool.invalidate(`fatal ${scope}: ${detail || "unknown"}`);
   }
+  releaseWgpuReadback();
   const errorCode = scope === "device-lost"
     ? WGPU_CONSUMER_ERROR_DEVICE_LOST
     : scope === "submit-error"
@@ -14935,6 +15016,37 @@ function drainWebGpuCmdRing(source = "presentation") {
               a4 & 0xFFFF, a4 >>> 16, a5 & 0xFFFF, a5 >>> 16,
               a6 & 0xFF, (a6 >>> 8) & 0xFF, (a6 >>> 16) & 0xFF, (a6 >>> 24) & 0xFF);
           }
+          break;
+        }
+        case WGPU_CMD_OP_COPY_TO_STAGING: {
+          const rb = readbackFor(dev);
+          if (!rb) break;
+          const source = webGpuObjects.textures.get(u32[recWord + 1]);
+          const a1 = u32[recWord + 2], a2 = u32[recWord + 3], a3 = u32[recWord + 4];
+          const wordIndex = u32[recWord + 7] >>> 2;
+          const words = new Int32Array(moduleInstance.HEAPU8.buffer);
+          const copy = {
+            slot: wordIndex, wordIndex,
+            seq: unwrapSeq(Atomics.load(words, wordIndex), a3 >>> 16),
+            texture: source?.tex, mipLevel: (a3 >>> 8) & 0xF,
+            origin: { x: a1 & 0xFFFF, y: a1 >>> 16, z: a3 & 0xFF },
+            width: a2 & 0xFFFF, height: a2 >>> 16, texelSize: (a3 >>> 12) & 0xF,
+            heapPtr: u32[recWord + 5], dstStride: u32[recWord + 6]
+          };
+          if (!source) {
+            wgpuReplayClassifier?.recordMissingResource({ kind: "readback-source", id: u32[recWord + 1] });
+            rb.lose(copy);
+            break;
+          }
+          // Everything recorded before it is submitted first; the copy then
+          // goes in its own encoder and submission (WgpuReadback.issue), so
+          // the map can start right away and a bad copy spoils no draw.
+          endPass("readback", read);
+          if (!submitEnc("readback") && lastSubmitFailureReason !== "no-command-encoder") {
+            rb.lose(copy);
+            break;
+          }
+          void rb.issue(q, copy);
           break;
         }
         case WGPU_CMD_OP_VI_TAG:

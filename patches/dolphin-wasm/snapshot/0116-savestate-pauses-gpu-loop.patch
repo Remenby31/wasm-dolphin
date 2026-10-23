@@ -32,6 +32,29 @@ diff --git a/Source/Core/Core/State.cpp b/Source/Core/Core/State.cpp
    bool is_wii = system.IsWii() || system.IsMIOS();
    const bool is_wii_currently = is_wii;
    p.Do(is_wii);
+diff --git a/Source/Core/VideoCommon/CommandProcessor.cpp b/Source/Core/VideoCommon/CommandProcessor.cpp
+--- a/Source/Core/VideoCommon/CommandProcessor.cpp
++++ b/Source/Core/VideoCommon/CommandProcessor.cpp
+@@ -607,11 +607,17 @@
+ void CommandProcessorManager::SetCpControlRegister()
+ {
+   // Just before disabling reads, give the GPU a chance to catch up.
+-  if (m_fifo.bFF_GPReadEnable.load(std::memory_order_relaxed) && !m_cp_ctrl_reg.GPReadEnable)
++  const bool disabling_reads =
++      m_fifo.bFF_GPReadEnable.load(std::memory_order_relaxed) && !m_cp_ctrl_reg.GPReadEnable;
++  if (disabling_reads)
+   {
+     m_system.GetFifo().SyncGPUForRegisterAccess();
+   }
+-  m_fifo.bFF_GPReadEnable.store(m_cp_ctrl_reg.GPReadEnable, std::memory_order_relaxed);
++  m_fifo.bFF_GPReadEnable.store(m_cp_ctrl_reg.GPReadEnable);
++  // The game rewrites the FIFO pointers next: in dual core, no chunk may still
++  // be decoding then (patch 0116).
++  if (disabling_reads)
++    m_system.GetFifo().WaitForFifoChunk();
+   m_fifo.bFF_BPInt.store(m_cp_ctrl_reg.BPInt, std::memory_order_relaxed);
+   m_fifo.bFF_BPEnable.store(m_cp_ctrl_reg.BPEnable, std::memory_order_relaxed);
+   m_fifo.bFF_HiWatermarkInt.store(m_cp_ctrl_reg.FifoOverflowIntEnable, std::memory_order_relaxed);
 diff --git a/Source/Core/VideoCommon/Fifo.cpp b/Source/Core/VideoCommon/Fifo.cpp
 --- a/Source/Core/VideoCommon/Fifo.cpp
 +++ b/Source/Core/VideoCommon/Fifo.cpp
@@ -51,12 +74,10 @@ diff --git a/Source/Core/VideoCommon/Fifo.cpp b/Source/Core/VideoCommon/Fifo.cpp
  
  #include "Core/Config/MainSettings.h"
  #include "Core/ConfigManager.h"
-@@ -103,6 +105,56 @@
- {
-   if (was_running)
+@@ -105,6 +107,85 @@
      EmulatorState(true);
-+}
-+
+ }
+ 
 +void FifoManager::PauseForSavestate()
 +{
 +  if (!m_system.IsDualCoreMode() || m_use_deterministic_gpu_thread)
@@ -99,16 +120,47 @@ diff --git a/Source/Core/VideoCommon/Fifo.cpp b/Source/Core/VideoCommon/Fifo.cpp
 +    stats.max_us.store(waited_us, std::memory_order_relaxed);
 +}
 +
++void FifoManager::WaitForFifoChunk()
++{
++  if (!m_system.IsDualCoreMode() || m_use_deterministic_gpu_thread)
++    return;
++  if (!m_chunk_active.load())
++    return;
++  // The chunk waits on the render worker at most, never on the CPU thread.
++  const auto start = std::chrono::steady_clock::now();
++  auto next_log = start + std::chrono::seconds(1);
++  while (m_chunk_active.load())
++  {
++    std::this_thread::sleep_for(std::chrono::microseconds(20));
++    const auto now = std::chrono::steady_clock::now();
++    if (now >= next_log)
++    {
++      WARN_LOG_FMT(COMMANDPROCESSOR, "GP reads off: a FIFO chunk is still decoding after {} s",
++                   std::chrono::duration_cast<std::chrono::seconds>(now - start).count());
++      next_log += std::chrono::seconds(1);
++    }
++  }
++  const u64 waited_us = static_cast<u64>(std::chrono::duration_cast<std::chrono::microseconds>(
++                                             std::chrono::steady_clock::now() - start)
++                                             .count());
++  auto& stats = m_savestate_pause_stats;
++  stats.read_disable_waits.fetch_add(1, std::memory_order_relaxed);
++  if (waited_us > stats.read_disable_max_us.load(std::memory_order_relaxed))
++    stats.read_disable_max_us.store(waited_us, std::memory_order_relaxed);
++}
++
 +void FifoManager::ResumeAfterSavestate()
 +{
 +  if (!m_system.IsDualCoreMode() || m_use_deterministic_gpu_thread)
 +    return;
 +  if (m_savestate_pauses.fetch_sub(1) == 1)
 +    m_gpu_mainloop.Wakeup();
- }
- 
++}
++
  void FifoManager::Init()
-@@ -344,6 +396,12 @@
+ {
+   if (!m_config_callback_id)
+@@ -344,6 +425,12 @@
  #endif
  
          // Do nothing while paused
@@ -121,10 +173,37 @@ diff --git a/Source/Core/VideoCommon/Fifo.cpp b/Source/Core/VideoCommon/Fifo.cpp
          if (!m_emu_running_state.IsSet())
            return;
  
+@@ -399,7 +486,17 @@
+                  !AtBreakpoint(m_system))
+           {
+             if (m_config_sync_gpu && m_sync_ticks.load() < m_config_sync_gpu_min_distance)
++              break;
++            // Patch 0116: a chunk decoding while the CPU rewrites the FIFO
++            // pointers would store its stale read pointer and distance over
++            // the new ones (on WebGPU a chunk can wait on the render worker
++            // for milliseconds). Flag the chunk, then re-check GP reads.
++            m_chunk_active.store(true);
++            if (!fifo.bFF_GPReadEnable.load())
++            {
++              m_chunk_active.store(false);
+               break;
++            }
+ #ifdef __EMSCRIPTEN__
+             hr_work = true;
+ #endif
+@@ -475,6 +572,8 @@
+               }
+             }
+ 
++            m_chunk_active.store(false);
++
+             // This call is pretty important in DualCore mode and must be called in the FIFO Loop.
+             // If we don't, s_swapRequested or s_efbAccessRequested won't be set to false
+             // leading the CPU thread to wait in Video_OutputXFB or Video_AccessEFB thus slowing
 diff --git a/Source/Core/VideoCommon/Fifo.h b/Source/Core/VideoCommon/Fifo.h
 --- a/Source/Core/VideoCommon/Fifo.h
 +++ b/Source/Core/VideoCommon/Fifo.h
-@@ -54,6 +54,22 @@
+@@ -54,6 +54,29 @@
    void DoState(PointerWrap& f);
    void PauseAndLock();
    void RestoreState(bool was_running);
@@ -132,6 +211,10 @@ diff --git a/Source/Core/VideoCommon/Fifo.h b/Source/Core/VideoCommon/Fifo.h
 +  // State::DoState reads or restores the CP FIFO (patch 0116). Calls nest.
 +  void PauseForSavestate();
 +  void ResumeAfterSavestate();
++  // GP reads just turned off by the CPU (GXSetGPFifo and the like, before it
++  // rewrites the FIFO pointers): returns once the chunk the GPU loop was
++  // decoding, if any, has stored its read pointer and distance (patch 0116).
++  void WaitForFifoChunk();
 +  // The pauses so far: how many, how many found a payload decoding, how many
 +  // of those the BlockingLoop already called done, and the last and longest
 +  // wait in microseconds (harness, read from any thread).
@@ -142,12 +225,15 @@ diff --git a/Source/Core/VideoCommon/Fifo.h b/Source/Core/VideoCommon/Fifo.h
 +    std::atomic<u32> done_while_active{0};
 +    std::atomic<u64> last_us{0};
 +    std::atomic<u64> max_us{0};
++    // GP read disables that found a chunk being decoded, and the longest wait.
++    std::atomic<u32> read_disable_waits{0};
++    std::atomic<u64> read_disable_max_us{0};
 +  };
 +  const SavestatePauseStats& GetSavestatePauseStats() const { return m_savestate_pause_stats; }
    void UpdateWantDeterminism(bool want);
    bool UseDeterministicGPUThread() const { return m_use_deterministic_gpu_thread; }
    bool UseSyncGPU() const { return m_config_sync_gpu; }
-@@ -90,6 +106,12 @@
+@@ -90,6 +113,15 @@
    static constexpr u32 FIFO_SIZE = 2 * 1024 * 1024;
  
    Common::BlockingLoop m_gpu_mainloop;
@@ -157,6 +243,9 @@ diff --git a/Source/Core/VideoCommon/Fifo.h b/Source/Core/VideoCommon/Fifo.h
 +  // pause and does not decode, or the pause sees the payload and waits.
 +  std::atomic<int> m_savestate_pauses{0};
 +  std::atomic<bool> m_payload_active{false};
++  // Set by the GPU loop around each FIFO chunk, then GP reads re-checked:
++  // either the chunk sees reads off, or WaitForFifoChunk sees the chunk.
++  std::atomic<bool> m_chunk_active{false};
  
    Common::Flag m_emu_running_state;
  

@@ -27,6 +27,8 @@
 #include "Core/HW/VideoInterface.h"
 #include "Core/PowerPC/PowerPC.h"
 #include "Core/System.h"
+#include "Core/FifoPlayer/FifoDataFile.h"
+#include "Core/FifoPlayer/FifoRecorder.h"
 #include "InputCommon/GCPadStatus.h"
 #include "VideoCommon/CommandProcessor.h"
 #include "VideoCommon/Fifo.h"
@@ -1215,6 +1217,8 @@ EMSCRIPTEN_KEEPALIVE const char* DolphinWeb_GpuSyncDiag()
   const auto& sp = system.GetFifo().GetSavestatePauseStats();
   o << ",\"savestatePause\":{\"count\":" << load(sp.count) << ",\"busy\":" << load(sp.busy)
     << ",\"doneWhileActive\":" << load(sp.done_while_active)
+    << ",\"readDisableWaits\":" << load(sp.read_disable_waits)
+    << ",\"readDisableMaxUs\":" << load(sp.read_disable_max_us)
     << ",\"lastUs\":" << load(sp.last_us) << ",\"maxUs\":" << load(sp.max_us) << "}}";
   out = o.str();
   return out.c_str();
@@ -1308,6 +1312,45 @@ EMSCRIPTEN_KEEPALIVE std::uintptr_t DolphinWeb_HarnessPcAddress()
 EMSCRIPTEN_KEEPALIVE std::uint32_t DolphinWeb_HarnessViRingCapacity() { return HARNESS_VI_RING_CAPACITY; }
 EMSCRIPTEN_KEEPALIVE std::uint32_t DolphinWeb_HarnessViRingHead() { return s_harness_vi_head.load(std::memory_order_acquire); }
 EMSCRIPTEN_KEEPALIVE std::uint32_t DolphinWeb_HarnessLoadGeneration() { return s_harness_load_generation.load(std::memory_order_acquire); }
+
+// Harness: record the next `frames` frames of the GPU FIFO into a FIFO log
+// at `path` (FifoPlayer's .dff format), so a homebrew's frames can be
+// replayed on every backend without its CPU side. State: 0 idle,
+// 1 recording, 2 saved, 3 failed.
+static std::atomic<int> s_fifo_record_state{0};
+// A cancelled recording's late callback must not report into the next one.
+static std::atomic<unsigned> s_fifo_record_generation{0};
+static std::string s_fifo_record_path;
+EMSCRIPTEN_KEEPALIVE int DolphinWeb_HarnessFifoRecord(int frames, const char* path)
+{
+  if (!s_harness_enabled.load(std::memory_order_relaxed) || frames <= 0 || !path ||
+      s_fifo_record_state.load(std::memory_order_acquire) == 1)
+  {
+    return 0;
+  }
+  s_fifo_record_path = path;
+  const unsigned generation = s_fifo_record_generation.fetch_add(1, std::memory_order_acq_rel) + 1;
+  s_fifo_record_state.store(1, std::memory_order_release);
+  auto& recorder = Core::System::GetInstance().GetFifoRecorder();
+  recorder.StartRecording(frames, [&recorder, generation] {
+    if (s_fifo_record_generation.load(std::memory_order_acquire) != generation)
+      return;
+    FifoDataFile* file = recorder.GetRecordedFile();
+    const bool saved = file && file->Save(s_fifo_record_path);
+    s_fifo_record_state.store(saved ? 2 : 3, std::memory_order_release);
+  });
+  return 1;
+}
+// After a timeout: ends the recording and frees the recorder for a new one.
+EMSCRIPTEN_KEEPALIVE void DolphinWeb_HarnessFifoRecordCancel()
+{
+  if (s_fifo_record_state.load(std::memory_order_acquire) != 1)
+    return;
+  s_fifo_record_generation.fetch_add(1, std::memory_order_acq_rel);
+  Core::System::GetInstance().GetFifoRecorder().StopRecording();
+  s_fifo_record_state.store(0, std::memory_order_release);
+}
+EMSCRIPTEN_KEEPALIVE int DolphinWeb_HarnessFifoRecordState() { return s_fifo_record_state.load(std::memory_order_acquire); }
 
 void DolphinWeb_OnXfb(const std::uint8_t* xfb, std::uint32_t width, std::uint32_t stride,
                       std::uint32_t height)
