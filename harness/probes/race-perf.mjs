@@ -13,7 +13,7 @@
 //     [--config wgpu | --query "..."] [--warmup 25] [--secs 20]
 //     [--runs 4 (even with --baseline)] [--min-pairs 4] [--hold KeyX] [--warm]
 //     [--max-load L] [--load-wait 300] [--lock-wait 1800]
-//     [--counters [--counter-events frontend|e1,e2]] [--pcsample [periodMs]] [--symbols functions.json] [--out dir]
+//     [--counters [--counter-events frontend|e1,e2 | macOS: delivery|discarded|discarded_indirect|bottlenecks]] [--pcsample [periodMs]] [--symbols functions.json] [--out dir]
 //     [--headroom [--frames-per-vi-ref R]] [--display] [--unique-frames secs] [--region-sample N [--region-secs 10]] [--mem-stats [--mem-warm 5]] [--baseline-query "..."]
 //     [--calm-wait S (default --lock-wait): wait for load ≤ --max-load before taking the lock]
 //     [--chrome-args "--flag …"] [--baseline-chrome-args "--flag …"]
@@ -47,6 +47,15 @@
 //   summary.json (chrome.sideArgs): such a result is never stock Chrome for
 //   kpi-report. Each run also records bootMs, from the Chrome launch to the
 //   session ready (boot, compilations included).
+// - --counters on macOS (no root): xctrace's CPU Counters, attached to the
+//   renderer for the window (lib/xctrace-counters.mjs; never Instruments'
+//   window). --counter-events names the guided mode: delivery (default:
+//   I-cache, iTLB, other latency and bandwidth fractions of the front end),
+//   discarded, discarded_indirect, bottlenecks. The busiest thread's EL0
+//   cycles give cyclesPerGuestCycle; each window also gets
+//   perKiloGuestCycles (host cycles, and the cycles each fraction stands
+//   for, per 1000 guest cycles), with perKiloChange in a pair. Each trace
+//   (~150 MB a second) is deleted once read.
 // - --emulated-window S: the window is S GUEST seconds instead of --secs host
 //   seconds. With a host-time window the faster side covers another stretch
 //   of the scene (another idle share), which biases the pair (PROGRAM.md,
@@ -93,6 +102,7 @@ import { consistentMemRead, decodeMemStats, memAccessShares, poolMemStats } from
 import { consistentHeadroomRead, decodeHeadroomStats, headroomOf, invalidReasons, querySpeed, unlimitedAllowed } from "../lib/headroom.mjs";
 import { summarizePcSamples } from "../../src/harness-pc-sampler.js";
 import { checkPerfAccess, counterEvents, cyclesPerGuestCycle, instructionsPerGuestCycle, perfCounters } from "../lib/perf-counters.mjs";
+import { checkXctrace, freeDiskGB, perKiloGuestCycles, XCTRACE_MIN_FREE_GB, xctraceCounters } from "../lib/xctrace-counters.mjs";
 import { emulatedStart } from "../lib/emulated-window.mjs";
 
 const HOMEBREW_OUT = path.join(REPO_ROOT, "harness", "homebrew", "out");
@@ -271,8 +281,11 @@ export async function measure(session, o) {
     // --region-sample, so that a launch running without its region cache
     // never goes unnoticed (2026-10-22: 0/143 on a loaded machine).
     const pipeline = regionEnd ? null : await workerRequest(page, "validationReadJitRegionStats", {}, 10000).catch(() => null);
+    // The FMA emitter's mode (patch 0129): relaxed_madd fused or the plain-f64 path.
+    const relaxedMadd = await workerRequest(page, "validationReadRelaxedMadd", {}, 10000).catch(() => null);
     return {
       windowMs: Math.round(t1 - t0),
+      relaxedMadd: relaxedMadd?.mode ?? null, fusedMadd: relaxedMadd?.coreFused ?? null,
       // Guest seconds this window covered (core ticks / ticks per second);
       // the reads bracket the window, so a few host ms more than windowMs.
       guestCovered: guestCovered(ticksBefore, ticksAfter, progress?.coreTicksPerSecond),
@@ -425,6 +438,16 @@ export function memSummary(runs, sides, good = (r) => r && !r.error) {
   return { memAccess: c.memAccess, memAccessWhy: c.why, baselineMemAccess: b?.memAccess ?? null, baselineMemAccessWhy: b?.why ?? null };
 }
 
+// The FMA emitter's mode per side (patch 0129), as the runs saw it: one value,
+// or "mixed" when the runs disagree.
+export function fusedMaddSummary(runs, sides, good = (r) => r && !r.error) {
+  const side = (n) => {
+    const seen = [...new Set(runs.map((r) => r[n]).filter(good).map((r) => r.cold?.fusedMadd ?? null))];
+    return seen.length === 1 ? seen[0] : seen.length ? "mixed" : null;
+  };
+  return { fusedMadd: side("candidate"), baselineFusedMadd: sides.baseline ? side("baseline") : null };
+}
+
 // p4 / baselineP4 and their reasons; the sides are compared only when both
 // have counters (one side without the export is not a comparison).
 export function p4Summary(runs, sides, good = (r) => r && !r.error) {
@@ -464,7 +487,9 @@ async function measureSide(side, o, loadGate) {
       }
       // Per guest cycle: host instructions, and host cycles (which decide
       // when a change moves the IPC), for the warm window too (--warm).
-      for (const w of [record.cold, record.warm]) if (w?.counters) Object.assign(w, { instructionsPerGuestCycle: instructionsPerGuestCycle(w), cyclesPerGuestCycle: cyclesPerGuestCycle(w) });
+      // xctrace (macOS): per 1000 guest cycles, the host cycles and the cycles
+      // each fraction stands for (I-cache, iTLB, …).
+      for (const w of [record.cold, record.warm]) if (w?.counters) Object.assign(w, { instructionsPerGuestCycle: instructionsPerGuestCycle(w), cyclesPerGuestCycle: cyclesPerGuestCycle(w), ...(w.counters.tool === "xctrace" ? { perKiloGuestCycles: perKiloGuestCycles(w) } : {}) });
     } catch (error) {
       record.error = String(error?.message || error).slice(0, 300);
       // The harness lost Chrome (CDP pipe fault, lib/browser.mjs): infra.
@@ -572,7 +597,12 @@ async function main() {
     // --counters (Linux perf): host instructions per guest cycle of the
     // emulated CPU thread, per window (lib/perf-counters.mjs).
     // --counter-events frontend|e1,e2: more PMU events in the same window.
-    ...(values.counters ? (checkPerfAccess(), { onWindow: perfCounters(undefined, { extra: counterEvents(values["counter-events"]) }) }) : {}),
+    // On macOS, xctrace's CPU Counters on the renderer instead (no root,
+    // lib/xctrace-counters.mjs): host cycles and the mode's fractions;
+    // --counter-events names the mode (delivery by default).
+    ...(values.counters && process.platform === "darwin"
+      ? (checkXctrace(), { xctrace: true, onWindow: xctraceCounters({ mode: values["counter-events"] ?? "delivery", pidOf: (session) => rendererThreads(session.profileDir)?.pid }) })
+      : values.counters ? (checkPerfAccess(), { onWindow: perfCounters(undefined, { extra: counterEvents(values["counter-events"]) }) }) : {}),
     uniqueFrames: values["unique-frames"] == null ? null : num(values, "unique-frames", { min: 2 }),
     memStats: values["mem-stats"],
     memWarm: num(values, "mem-warm", { min: 0 }),
@@ -629,6 +659,12 @@ async function main() {
     const loadRetries = new Map();
     for (let run = 1; run <= o.runs && !gaveUp; run += 1) {
       checkLock(`before run ${run}`);
+      // xctrace traces are large: the campaign stops before the disk fills.
+      if (o.xctrace && freeDiskGB() < XCTRACE_MIN_FREE_GB) {
+        gaveUp = `disk: ${round(freeDiskGB(), 1)} GB free < ${XCTRACE_MIN_FREE_GB} GB (xctrace): remaining runs given up`;
+        console.warn(`[race-perf] ${gaveUp}`);
+        break;
+      }
       const record = { run, loadRetries: loadRetries.get(run) ?? 0 };
       let replay = false;
       for (const name of sideOrder(run).filter((n) => sides[n])) {
@@ -659,6 +695,9 @@ async function main() {
     releaseLock?.();
     dropExports();
   }
+  // xctrace: its raw ktraces still open at the last window, deleted once
+  // closed (outside the lock: it may wait minutes).
+  const xctraceCleanup = o.onWindow?.finish ? await o.onWindow.finish() : null;
   const runsDone = records;
 
   // A run that breaks a validity rule (headroom.mjs invalidReasons: ring
@@ -680,6 +719,11 @@ async function main() {
       viP99Ms: describe(m.map((x) => x.viIntervalMs.p99)), presentP99Ms: describe(m.map((x) => x.presentIntervalMs.p99)),
       hitchesPerMin: describe(m.map((x) => x.hitchesPerMin)), busiestThread: describe(m.map((x) => x.rendererThreads.at(-1)?.busiest)),
       presentsPerSecond: describe(m.map((x) => x.presentsPerSecond)),
+      // --counters with xctrace: per 1000 guest cycles, and the fractions.
+      ...(m.some((x) => x.perKiloGuestCycles) ? {
+        perKiloGuestCycles: Object.fromEntries(Object.keys(m.find((x) => x.perKiloGuestCycles).perKiloGuestCycles).map((k) => [k, describe(m.map((x) => x.perKiloGuestCycles?.[k]), 3)])),
+        counterFractions: Object.fromEntries(Object.keys(m.find((x) => x.counters?.fractions)?.counters.fractions ?? {}).map((k) => [k, describe(m.map((x) => x.counters?.fractions?.[k]), 5)]))
+      } : {}),
       ...(m.some((x) => x.headroom) ? {
         headroom: describe(m.map((x) => x.headroom?.headroom), 4),
         maxSpeedCpu: describe(m.map((x) => x.headroom?.maxSpeedCpu), 4),
@@ -730,6 +774,7 @@ async function main() {
     emulatedWindow: o.emulatedWindow ? { secs: o.emulatedWindow, warmup: o.emulatedWarmup, pollMs: o.emulatedPollMs } : null, hold: o.hold, maxLoad: o.maxLoad,
     sides: Object.fromEntries(Object.entries(sides).map(([n, s]) => [n, s.label])),
     runs: runsDone.length, failed, gaveUp,
+    ...(xctraceCleanup ? { xctraceCleanup } : {}),
     // Runs played again after the lock went back for the load: { run: times }.
     loadRetries: Object.fromEntries(runsDone.filter((r) => r.loadRetries).map((r) => [r.run, r.loadRetries])),
     candidate: { cold: summarize("candidate", "cold"), warm: summarize("candidate", "warm") },
@@ -742,11 +787,21 @@ async function main() {
     // Host cycles per guest cycle: they decide when the instructions and the
     // IPC move apart (PROGRAM.md, 2026-10-23).
     ...(o.onWindow && sides.baseline ? { cycleChange: pairedSpeedChange(runsDone.filter((r) => good(r.baseline) && good(r.candidate)), { metric: "cyclesPerGuestCycle", minPairs: o.minPairs }) } : {}),
+    // --counters with xctrace: the same pairing on each per-1000-guest-cycle
+    // quantity (host cycles, I-cache / iTLB / bandwidth-bound cycles), cold
+    // and, with --warm, warm.
+    ...(sides.baseline && runsDone.some((r) => r.candidate?.cold?.perKiloGuestCycles) ? { perKiloChange: Object.fromEntries(["cold", ...(o.warm ? ["warm"] : [])].map((phase) => {
+      const pairs = runsDone.filter((r) => good(r.baseline) && good(r.candidate));
+      const keys = Object.keys(pairs.find((r) => r.candidate?.[phase]?.perKiloGuestCycles)?.candidate[phase].perKiloGuestCycles ?? {});
+      const as = (r, side, k) => ({ [phase]: { v: r[side]?.[phase]?.perKiloGuestCycles?.[k] } });
+      return [phase, Object.fromEntries(keys.map((k) => [k, pairedSpeedChange(pairs.map((r) => ({ run: r.run, baseline: as(r, "baseline", k), candidate: as(r, "candidate", k) })), { metric: "v", minPairs: o.minPairs, phase })]))];
+    })) } : {}),
     // --warm: the same pairings on the warm windows (the profile's second boot).
     ...(o.warm && sides.baseline ? { warmChange: Object.fromEntries(["speed", ...(o.onWindow ? ["instructionsPerGuestCycle", "cyclesPerGuestCycle"] : [])].map((m) => [m, pairedSpeedChange(runsDone.filter((r) => good(r.baseline) && good(r.candidate)), { metric: m, minPairs: o.minPairs, phase: "warm" })])) } : {}),
     pcsample: pcNote,
     // P4 counters (KPI: region and dispatch shares), cold stats windows of good runs.
     ...p4Summary(runsDone, sides, good),
+    ...fusedMaddSummary(runsDone, sides, good),
     // Memory accesses per instruction (0104), cold stats windows of good runs.
     ...(o.memStats ? memSummary(runsDone, sides, good) : {}),
     // What each side served (commit, dirty), for kpi-report: from its first good run.

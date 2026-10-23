@@ -12,7 +12,7 @@ MACHDEP   := -DGEKKO -mogc -mcpu=750 -meabi -mhard-float
 CFLAGS    := -O2 -Wall -Werror $(MACHDEP) -I$(LIBOGC)/include -Icommon \
              -ffile-prefix-map=$(CURDIR)=. -fno-ident
 LDFLAGS   := $(MACHDEP) -L$(LIBOGC)/lib/cube -Wl,--build-id=none
-PROGRAMS  := padtest consoletest gxscene cpufuzz cpufuzz-nomcrf tonetest smctest efbpeek ramcopy
+PROGRAMS  := padtest consoletest gxscene cpufuzz cpufuzz-nomcrf tonetest smctest efbpeek ramcopy dstalpha
 # Selftest mutants (harness/selftest): built from the same sources.
 MUTANTS   := gxscene-nocubes gxscene-color
 

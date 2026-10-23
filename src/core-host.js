@@ -115,6 +115,9 @@ export class EmulatorHost {
     this.fifoLog = new URLSearchParams(window.location.search).get("fifolog") === "1";
     // EFB copies written to guest RAM too (Dolphin's EFBToTextureEnable=False).
     this.efbCopyRam = new URLSearchParams(window.location.search).get("efbcopyram") === "1";
+    // Harness: optional WebGPU features withheld from the device, comma-separated
+    // (e.g. Safari 26 has no dual-source-blending). Empty for the app.
+    this.wgpuMask = new URLSearchParams(window.location.search).get("wgpumask") ?? "";
     this.savesMode = new URLSearchParams(window.location.search).get("saves") === "off" ? "off" : "";
     this.efbDiag = requestedEfbDiag();
     this.jitVerbose = new URLSearchParams(window.location.search).get("jitverbose") === "1";
@@ -137,6 +140,9 @@ export class EmulatorHost {
     this.aotFirstLaunch = new URLSearchParams(window.location.search).get("aot") === "1";
     // With aot=1, regions tail-call the next region (patch 0102); ?regionchain=0 turns it off.
     this.regionChain = new URLSearchParams(window.location.search).get("regionchain") !== "0";
+    // Where relaxed_madd is fused the JIT's FMA uses it (patch 0129); ?fusedmadd=0
+    // keeps the exact plain-f64 path (A/B on one core).
+    this.fusedMadd = new URLSearchParams(window.location.search).get("fusedmadd") !== "0";
     this.collectMetrics = requestedCollectMetrics();
     this.legacyOneWayAck = requestedLegacyOneWayAck(window.location.search);
     this.wgpuReplayDiagnostics = requestedWgpuReplayDiagnostics(window.location.search);
@@ -420,6 +426,7 @@ export class EmulatorHost {
             efbAccess: this.efbAccess,
             fifoLog: this.fifoLog,
             efbCopyRam: this.efbCopyRam,
+            wgpuMask: this.wgpuMask,
             savesMode: this.savesMode,
             efbDiag: this.efbDiag,
             jitVerbose: this.jitVerbose,
@@ -431,6 +438,7 @@ export class EmulatorHost {
             aotCompiler: this.aotCompiler,
             aotFirstLaunch: this.aotFirstLaunch,
             regionChain: this.regionChain,
+            fusedMadd: this.fusedMadd,
             collectMetrics: this.collectMetrics,
             legacyOneWayAck: this.legacyOneWayAck,
             wgpuReplayDiagnostics: this.wgpuReplayDiagnostics,

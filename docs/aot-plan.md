@@ -218,11 +218,23 @@ are computed from guest memory right after linking. When to poll the list
 (little-endian):
 
 ```
-"SAOTPRF2", u32 version = 2, u32 sessions, 8 bytes gameId, 8 bytes dolHash,
-u32 count, count x (u32 start, u32 end, u16 seen, u16 flags)
+"SAOTPRF2", u32 version = 3, u32 sessions, 8 bytes gameId, 8 bytes dolHash,
+u32 count, count x (u32 start, u32 end, u16 seen, u16 flags, u32 weight)
 ```
 
-`seen` counts the sessions that ran the block, `flags` bit0 = real mode. A
+`seen` counts the sessions that ran the block, `flags` bit0 = real mode,
+`weight` the guest-PC samples taken in it (version 3; halved at each new
+session, so it follows what the player runs now). Version 2 files (12-byte
+entries, no weight) still read, with weight 0. A build from before version 3 reads a v3 file as
+no profile and rewrites it as v2: the weights are lost, nothing else.
+
+**The profile stays on the player's machine.** It holds addresses and counts
+only, never guest bytes, in this origin's OPFS; nothing but the next plan of
+the same disc reads it, and it is never sent, uploaded or shared. A profile
+shared between players for a commercial disc was set aside for the same
+reason as hint sheets (below).
+
+A
 profile recorded for another DOL under the same key is ignored on load and
 replaced on record. Writes go through `navigator.locks`
 (`salon-aot-profile:<key>.bin`) so two tabs do not lose a session. Overlapping
@@ -233,7 +245,12 @@ Sources of blocks: `blocksFromCoreDump(u32 triplets)` for
 `_DolphinWeb_JitDumpBlocks(out, capacity)` (start, PPC byte length, flags:
 bit0 executed, bit1 compiled, bit2 real mode; region compiler PR), called
 periodically and at pause/exit since the block cache is cleared on some
-events; or `blocksFromPcSamples(pcs)` for a PC sampler.
+events; or `blocksFromPcSamples(pcs)` for a PC sampler (PCs, or
+`[pc, samples]` pairs that become the weight). The engine records the latter:
+`aot-hot-sampler.js` reads the guest PC from the shared heap every 10 ms from
+the first image on, and the discio
+worker merges what it counted into the profile every minute and at a
+remount; the first record of a session counts as a new session.
 
 ## Per-game hint sheets `salon-aot-hints/1`
 
