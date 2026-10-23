@@ -436,3 +436,15 @@ masks and ors). Blocks keep the old form,
 so their bytes and cache keys don't change. Compiler version 17. (Written
 as 0108 on the region stack; renumbered after 0111 so the series applies
 in order.)
+
+## Dead GPR loads in the block prologue (patch 0127, 2026-10-23)
+
+The GPR cache's prologue loaded every GPR a block reads or writes. A GPR
+the block writes before any op reads it is now left unloaded; it still
+counts as present, since its local is written before it is read. This
+covers block modules and region fragments alike. Only emitted ops count:
+a skipped op neither reads nor writes. A write on one side of a wasm `if`
+(a memory fast path) is fine, because the other side calls a helper and
+reloads the op's outputs. Before the write, a helper call stores only
+dirty GPRs, and the skipped one's state value is still current.
+Compiler version 19.

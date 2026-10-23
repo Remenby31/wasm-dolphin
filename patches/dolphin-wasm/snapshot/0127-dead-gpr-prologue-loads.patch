@@ -1,0 +1,41 @@
+diff --git a/Source/Core/Core/PowerPC/CachedInterpreter/CachedInterpreter.cpp b/Source/Core/Core/PowerPC/CachedInterpreter/CachedInterpreter.cpp
+--- a/Source/Core/Core/PowerPC/CachedInterpreter/CachedInterpreter.cpp
++++ b/Source/Core/Core/PowerPC/CachedInterpreter/CachedInterpreter.cpp
+@@ -9427,11 +9427,26 @@ std::vector<u8> BuildWasmCachedInterpreterBlock(std::span<const PPCAnalyst::Code
+     BitSet32 used_gprs;
+     for (const PPCAnalyst::CodeOp& op : ops)
+       used_gprs |= op.regsIn | op.regsOut;
++    // Patch 0127: a GPR the block writes before any op reads it is not
++    // loaded; it is present all the same (its local is written before it is
++    // read). Only emitted ops count: a skipped op neither reads nor writes.
++    // A write on one side of a wasm `if` (a memory fast path) is fine: the
++    // other side calls a helper and reloads the op's outputs.
++    BitSet32 read_first, written;
++    for (const PPCAnalyst::CodeOp& op : ops)
++    {
++      if (op.skip)
++        continue;
++      read_first |= op.regsIn & ~written;
++      written |= op.regsOut;
++    }
+     for (int bit : used_gprs)
+     {
+       if (bit < 0 || bit >= 32)
+         continue;
+       s_gpr_rc.present[bit] = true;
++      if (!read_first[bit] && written[bit])
++        continue;
+       EmitLocalGet(body, 0);
+       body.push_back(0x28);  // i32.load
+       body.push_back(0x02);  // align=2
+@@ -16859,7 +16874,9 @@ namespace
+ // taken by 0108-0110). 16 (0121): region code takes MSR LE/FE0/FE1 and
+ // HID2.LSQE for granted (15 is 0119's). 17 (0126): region byte swaps as two
+ // rotates (11-15 are taken by 0112-0119).
+-constexpr u32 AOT_COMPILER_VERSION = 17;
++// 19 (0127): GPRs written before they are read are not loaded in the block
++// prologue (18 is 0123's).
++constexpr u32 AOT_COMPILER_VERSION = 19;
+ constexpr u32 AOT_MAX_FRAGMENT_BYTES = 1u << 20;
+ thread_local std::vector<u32> t_aot_out;
+ u8* s_aot_ram = nullptr;

@@ -107,3 +107,25 @@ test("psq_lux kept in the region updates a GPR the block had cached dirty, like 
   expectSame(r, "psq_lux");
   assert.equal(r.got.end, "stop");
 });
+
+// 0127: a GPR the block writes before reading it is not loaded in the
+// prologue. Written first by a load whose fast path fails (a helper writes
+// it, the slow path reloads it), by an immediate, and read right after,
+// against the interpreter.
+const lwz = (d, a, off) => (32 << 26) | (d << 21) | (a << 16) | (off & 0xffff);
+const deadSkip = skip || (compilerVersion() < 19 && "core before 0127 (compiler version < 19)");
+test("GPRs written before read are not loaded, the slow path and the reads after agree with the interpreter (0127)", { skip: deadSkip }, () => {
+  const cases = [
+    ["slow-path load", [lwz(5, 6, 0), add(7, 5, 5), addi(5, 5, 1), BLR], (s) => { s[6] = 0x00100080; }],
+    ["fast-path load", [lwz(5, 6, 4), add(7, 5, 5), BLR], (s) => { s[6] = 0x80004000; }],
+    ["immediate", [addi(5, 0, 7), add(7, 5, 6), addi(5, 7, 0), BLR], () => {}]
+  ];
+  for (const [what, program, set] of cases) {
+    const state = baseState(31);
+    set(state);
+    const r = compareRegionProgram(core, program, state);
+    assert.ok(r.translated && !r.trap && !r.error, `${what}: ${r.error ?? "trap or untranslated"}`);
+    assert.ok(r.got.regionRuns >= 1, `${what}: the region ran`);
+    assert.ok(r.equal, `${what}: ${JSON.stringify(r.difference)}`);
+  }
+});
