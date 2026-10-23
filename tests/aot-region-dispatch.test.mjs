@@ -235,9 +235,13 @@ function withOffThreadCompile(fn) {
   const savedCache = m._dolphinJitCache;
   m._dolphinJitCache = new Map(); // the pthread's module map (pre-js), empty
   m._SetPpcWasmJitOffThread(1);
+  // 0107: a ready module waits for a throttle sleep (2 s at most); these
+  // tests install at slice boundaries, as after that wait.
+  m._DolphinWeb_AotSetSleepWaitForTest?.(0);
   try {
     return fn(posted.filter.bind(posted, (msg) => msg.type === "dolphin-jit-compile-request"));
   } finally {
+    m._DolphinWeb_AotSetSleepWaitForTest?.(2000);
     m._SetPpcWasmJitOffThread(0);
     m._dolphinJitCache = savedCache;
     globalThis._dolphinJitInflight?.clear();
@@ -780,4 +784,139 @@ test("FPU ops outside the direct tier run inside the region, interpreted, like t
   assert.equal(got.interpreted, 0, "no op left the region");
   assert.equal(got.ran, 1);
   core.invalidate(FPU_TEXT, 4 * FPU.words.length);
+
+// Patch 0107: the CPU thread's throttle sleep installs ready regions (no
+// frame pays for them), counted apart and kept out of installMaxSliceMs.
+// [installs, ms x 100, worst lateness past the deadline x 100, slice installs
+// after the sleep wait ran out] (the last two with the review's fixes).
+function sleepCounters() {
+  const p = core.module._malloc(16);
+  try {
+    new Uint32Array(core.module.HEAPU8.buffer, p, 4).fill(0);
+    core.module._DolphinWeb_AotRegionSleepInstalls(p);
+    return Array.from(new Uint32Array(core.module.HEAPU8.buffer, p, 4));
+  } finally {
+    core.module._free(p);
+  }
+}
+test("a throttle sleep window installs queued regions", { skip: skip || (typeof core?.module._DolphinWeb_AotRegionSleepWindowForTest !== "function" && "core without installs in throttle sleeps (0107)") }, () => {
+  const plan = setup();
+  core.setRegionsEnabled(true);
+  const before = core.regionCount();
+  const [installs] = sleepCounters();
+  queueAll(plan);
+  core.module._DolphinWeb_AotRegionSleepWindowForTest(50); // a 50 ms sleep, as the throttle gives it
+  assert.ok(core.regionCount() > before, "installed in the sleep window");
+  assert.ok(sleepCounters()[0] > installs, "counted as sleep installs");
+  const reference = runCall(PROGRAM.labels.main, { regions: false });
+  assert.deepEqual(runCall(PROGRAM.labels.main, { regions: true }).state, reference.state);
+  // A window with no time left installs nothing more.
+  queueAll(setup());
+  const after = core.regionCount();
+  core.module._DolphinWeb_AotRegionSleepWindowForTest(0);
+  assert.equal(core.regionCount(), after);
+});
+
+// A module too large for a slice (its estimate over the 2.5 ms target) waits
+// for a sleep window, the boot window included (setup() forgets the regions,
+// so these slices are the session's first), and at most the sleep wait from
+// when it became installable: with #86 every module is posted at once, and
+// one whose ready byte comes late must not skip the wait.
+const largeSkip = offThreadSkip || (typeof core?.module._DolphinWeb_AotSetInstallCostForTest !== "function" && "core without the 0107 review's test hooks");
+function withLargeModules(plan, fn) {
+  const sizes = regionModules(plan).map((bytes) => bytes.length);
+  // Each module estimated at 3 ms or more: too large for a slice.
+  const saved = core.module._DolphinWeb_AotSetInstallCostForTest(3 / Math.min(...sizes));
+  core.module._DolphinWeb_AotSetSleepWaitForTest(2000); // the production wait
+  try {
+    return fn(3 * Math.max(...sizes) / Math.min(...sizes) * sizes.length);
+  } finally {
+    core.module._DolphinWeb_AotSetInstallCostForTest(saved);
+    core.module._DolphinWeb_AotSetSleepWaitForTest(2000);
+  }
+}
+const spin = (ms) => { const end = performance.now() + ms; while (performance.now() < end); };
+
+test("a large ready module waits for a sleep window instead of costing a slice, boot window included", { skip: largeSkip }, () => {
+  withOffThreadCompile((requests) => {
+    const plan = setup();
+    assert.deepEqual(sleepCounters(), [0, 0, 0, 0], "reset with the session's regions");
+    core.setRegionsEnabled(true);
+    withLargeModules(plan, (windowMs) => {
+      const before = core.regionCount();
+      const entries = queueAll(plan);
+      core.serviceRegions();
+      for (const r of requests()) Atomics.store(core.module.HEAPU8, r.readyPtr + r.readySlot, 1);
+      for (let slice = 0; slice < 20; slice++) core.serviceRegions();
+      assert.equal(core.regionCount(), before, "ready, but no slice installs it");
+      core.module._DolphinWeb_AotRegionSleepWindowForTest(windowMs + 50);
+      assert.equal(core.regionCount(), before + entries, "installed in the sleep window");
+      const [installs, , lateBy, expired] = sleepCounters();
+      assert.ok(installs >= 1);
+      assert.equal(lateBy, 0, "the window's deadline was kept");
+      assert.equal(expired, 0);
+    });
+  });
+});
+
+test("any ready module waits for a sleep window: with #86 the boot window is play", { skip: largeSkip }, () => {
+  withOffThreadCompile((requests) => {
+    const plan = setup();
+    core.setRegionsEnabled(true);
+    core.module._DolphinWeb_AotSetSleepWaitForTest(2000);
+    const before = core.regionCount();
+    const entries = queueAll(plan);
+    core.serviceRegions();
+    for (const r of requests()) Atomics.store(core.module.HEAPU8, r.readyPtr + r.readySlot, 1);
+    for (let slice = 0; slice < 20; slice++) core.serviceRegions();
+    assert.equal(core.regionCount(), before, "small modules too: no slice installs them while a sleep may come");
+    core.module._DolphinWeb_AotRegionSleepWindowForTest(200);
+    assert.equal(core.regionCount(), before + entries);
+  });
+});
+
+// Review of #124: a module whose ready byte never came compiles cold,
+// synchronously, far over the cache-hit estimate a sleep window is sized
+// with: never in a sleep, at a slice boundary only.
+test("a cold install (no ready byte) never runs in a sleep window, only at a slice boundary", { skip: largeSkip }, () => {
+  withOffThreadCompile(() => {
+    const plan = setup();
+    core.setRegionsEnabled(true);
+    core.module._DolphinWeb_AotSetSleepWaitForTest(2000);
+    const before = core.regionCount();
+    const entries = queueAll(plan);
+    core.serviceRegions(); // posted; the worker never answers
+    core.module._DolphinWeb_AotSetReadyWaitForTest(0); // 5 s in production
+    try {
+      core.module._DolphinWeb_AotRegionSleepWindowForTest(1000);
+      assert.equal(core.regionCount(), before, "no cold compile in the sleep");
+      for (let slice = 0; slice < 300 && core.regionCount() < before + entries; slice++) core.serviceRegions();
+      assert.equal(core.regionCount(), before + entries, "cold, at slice boundaries");
+      assert.equal(lastInstallPath(), 2, "sampled as cold");
+    } finally {
+      core.module._DolphinWeb_AotSetReadyWaitForTest(5000);
+    }
+  });
+});
+
+test("a large module's sleep wait counts from when it became installable; past it a slice installs it", { skip: largeSkip }, () => {
+  withOffThreadCompile((requests) => {
+    const plan = setup();
+    core.setRegionsEnabled(true);
+    withLargeModules(plan, () => {
+      core.module._DolphinWeb_AotSetSleepWaitForTest(40); // 2 s in production
+      const before = core.regionCount();
+      const entries = queueAll(plan);
+      core.serviceRegions();
+      spin(60); // the worker answers after the sleep wait, counted from the post
+      for (const r of requests()) Atomics.store(core.module.HEAPU8, r.readyPtr + r.readySlot, 1);
+      core.serviceRegions();
+      assert.equal(core.regionCount(), before, "the wait starts now, not at the post");
+      spin(60); // no sleep came: the wait runs out
+      for (let slice = 0; slice < 50 && core.regionCount() < before + entries; slice++) core.serviceRegions();
+      assert.equal(core.regionCount(), before + entries, "a scene that never sleeps still gets its regions");
+      assert.ok(sleepCounters()[3] >= 1, "counted as installed after the wait ran out");
+      assert.equal(sleepCounters()[0], 0, "no sleep install");
+    });
+  });
 });

@@ -1,19 +1,19 @@
 {
   "schemaVersion": 1,
   "abiVersion": 1,
-  "coreId": "sha256:c91af5da8a1ac8e27e53901cac736388c65b2009cceb9816600d54b0325cf942",
+  "coreId": "sha256:6710d9f0cf80ecbae7da64f18a0f77a8ba2e83ede09958730f6c43767f52c806",
   "upstreamCommit": "e22551eae1c84a7e4d0b6a5c519ef4ed4ef69df1",
   "artifacts": [
     {
       "path": "cores/dolphin/dolphin-core-upstream.js",
       "hashMode": "lf-normalized",
-      "size": 281014,
-      "sha256": "2e02bf10e893509c720a329c645e67a562a4058fc05c7e181346f6b1d17177b3"
+      "size": 281673,
+      "sha256": "f829d2057bfe4f7b8a506ed3f66066c74c90dacaeab792580ae65bfe432d78ac"
     },
     {
       "path": "cores/dolphin/dolphin-core-upstream.wasm",
-      "size": 13112479,
-      "sha256": "c91af5da8a1ac8e27e53901cac736388c65b2009cceb9816600d54b0325cf942"
+      "size": 13115901,
+      "sha256": "6710d9f0cf80ecbae7da64f18a0f77a8ba2e83ede09958730f6c43767f52c806"
     }
   ],
   "contractSources": [
@@ -140,8 +140,8 @@
     {
       "path": "src/upstream-discio-worker.js",
       "hashMode": "lf-normalized",
-      "size": 708614,
-      "sha256": "91e3f08c18486f43345e0b1dd3ca931b60eef8a539724bc2fa6c52f4072603ad"
+      "size": 712496,
+      "sha256": "61e58ae5d9261bf8a3fcc6c0554fca2fe8573299940845a142d31ca43e5db7e2"
     },
     {
       "path": "src/wgpu-renderer-worker-probe.js",
@@ -384,10 +384,14 @@
     "_DolphinWeb_AotRamReady",
     "_DolphinWeb_AotRegionHeapBases",
     "_DolphinWeb_AotRegionRechecks",
+    "_DolphinWeb_AotRegionSleepInstalls",
+    "_DolphinWeb_AotRegionSleepWindowForTest",
     "_DolphinWeb_AotRegionsSkippedMmu",
     "_DolphinWeb_AotRunRegionForTest",
     "_DolphinWeb_AotServiceRegionsForTest",
+    "_DolphinWeb_AotSetInstallCostForTest",
     "_DolphinWeb_AotSetReadyWaitForTest",
+    "_DolphinWeb_AotSetSleepWaitForTest",
     "_DolphinWeb_AotTestInterpretOne",
     "_DolphinWeb_AotTestLoadState",
     "_DolphinWeb_AotTestRam",
@@ -423,6 +427,7 @@
     "_DolphinWeb_HarnessViRingHead",
     "_DolphinWeb_HarnessViSinceBoot",
     "_DolphinWeb_HarnessViSinceLoad",
+    "_DolphinWeb_HeadroomStats",
     "_DolphinWeb_JitArmedStepForTest",
     "_DolphinWeb_JitCompileBytesForTest",
     "_DolphinWeb_JitCompileBytesInPlaceForTest",
