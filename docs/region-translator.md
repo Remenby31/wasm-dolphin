@@ -426,3 +426,12 @@ Measured (Mac, aot=1, seeded, video=null, emulated window 6 guest s): the
 intro scene +31.3 % (regionCycleShare 0.55 → 0.90), the race at its cap with
 +1.9 % CPU headroom. A block whose first op the translator refuses (dcbz)
 stays an exit.
+
+## Byte swaps as rotates (patch 0126, 2026-10-23)
+
+In region code, a 32-bit byte swap (32-bit guest loads and stores) is
+`(rotl(x, 8) & 0x00ff00ff) | (rotr(x, 8) & 0xff00ff00)`, the form LLVM
+emits: 5 ops instead of 10 shifts, masks and ors. Blocks keep the old form,
+so their bytes and cache keys don't change. Compiler version 16. (Written
+as 0108 on the region stack; renumbered after 0111 so the series applies
+in order.)
