@@ -1,0 +1,150 @@
+diff --git a/Source/Core/Core/PowerPC/CachedInterpreter/CachedInterpreter.cpp b/Source/Core/Core/PowerPC/CachedInterpreter/CachedInterpreter.cpp
+--- a/Source/Core/Core/PowerPC/CachedInterpreter/CachedInterpreter.cpp
++++ b/Source/Core/Core/PowerPC/CachedInterpreter/CachedInterpreter.cpp
+@@ -334,6 +334,11 @@ namespace
+ // attempt; we don't promise instant per-block synchronization.
+ std::atomic<u32> s_dolphin_web_disable_mask{0};
+ 
++// Patch 0129: the page found f64x2.relaxed_madd fused (one rounding, as
++// std::fma) on this machine; the FMA emitter then uses it. Off by default
++// (and wherever relaxed SIMD is missing or unfused): the plain-f64 path.
++std::atomic<bool> s_fused_madd{false};
++
+ constexpr u32 DOLPHIN_WEB_DISABLE_MELEELOOP   = 1u << 0;  // MeleeIdlePollLoop + MeleeTitleLoop
+ constexpr u32 DOLPHIN_WEB_DISABLE_MELEECALL   = 1u << 1;  // 5 Melee fast call-branch helpers
+ constexpr u32 DOLPHIN_WEB_DISABLE_OSINTERRUPT = 1u << 2;  // OsInterruptFunction + call-branch
+@@ -5569,6 +5574,10 @@ enum class FpArithKind
+ // The non-exact-product path (TwoProduct + round-to-odd) and the single tie
+ // fix inline cost ~75 WASM ops per FMA lane; off, they call the import
+ // (measured the same speed on the race; kept for A/B).
++// Patch 0129: with s_fused_madd, a * c + b is f64x2.relaxed_madd (fused, so
++// it rounds once like std::fma, for every finite input) instead of the
++// transforms above, and the single tie fix's fma(a, c, a') too. a and c stay
++// zero or normal and b finite (no NaN can come out); the rest calls the import.
+ constexpr bool kInlineFmaSlowPaths = true;
+ 
+ void EmitExactMulAddSub(std::vector<u8>& body, const WasmStateLayout& layout,
+@@ -5660,6 +5669,44 @@ void EmitExactMulAddSub(std::vector<u8>& body, const WasmStateLayout& layout,
+     EmitForce25BitNonDenormal(body);
+     set(c);
+   }
++  if (s_fused_madd.load(std::memory_order_relaxed))
++  {
++    // fma(a, c, y) on lane 0 of three splats (0129).
++    const auto madd = [&](u32 y) {
++      get(a); op(0xfd); EmitU32Leb(body, 0x14);                 // f64x2.splat
++      get(c); op(0xfd); EmitU32Leb(body, 0x14);
++      get(y); op(0xfd); EmitU32Leb(body, 0x14);
++      op(0xfd); EmitU32Leb(body, 0x107);                        // f64x2.relaxed_madd
++      op(0xfd); EmitU32Leb(body, 0x21); body.push_back(0);      // f64x2.extract_lane 0
++    };
++    get(2);
++    get(b); op(ABS); f64const(std::numeric_limits<double>::infinity()); op(LT);
++    op(AND);
++    op(0x04); op(0x7c);  // if (result f64)
++    madd(b);
++    if (single)
++    {
++      // NI_madd_msub's tie fix (see below), fma(a, c, a') fused as well.
++      const u32 ap = p, bp = e, err = sx;
++      op(0x22); EmitU32Leb(body, dst);
++      op(0xbd); EmitI64Const(body, 0x1fffffff); op(0x83);
++      EmitI64Const(body, 0x10000000); op(0x51);                 // i64.eq
++      op(0x04); op(0x7c);
++      get(b); get(dst); op(SUB); set(ap);
++      get(dst); get(ap); op(ADD); set(bp);
++      madd(ap);
++      get(b); get(bp); op(SUB);
++      op(ADD); set(err);
++      nudge(dst, err, [&] { get(err); f64const(0.0); op(NE); });
++      op(0x05);
++      get(dst);
++      op(0x0b);
++    }
++    op(0x05);
++    emit_import();
++    op(0x0b);
++    return;
++  }
+   get(a); get(c); op(MUL); set(p);
+   // Exact product: a*c is a double when the significands need 53 bits or
+   // fewer together (trailing zeros of both add up to 53 or more; frC keeps
+@@ -9694,6 +9741,8 @@ namespace
+ void ForgetAllRegions();
+ // The FPRF mode (PowerPC::g_fprf_emulation) the JIT cache was emitted for.
+ bool s_emitted_fprf = false;
++// The relaxed_madd mode (s_fused_madd, patch 0129) it was emitted for.
++bool s_emitted_fused_madd = false;
+ }
+ 
+ void CachedInterpreter::Shutdown()
+@@ -11542,6 +11591,14 @@ void CachedInterpreter::Run()
+       ClearCache();
+       ForgetAllRegions();
+     }
++    // 0129: the same for the relaxed_madd mode (set once, before the boot).
++    if (const bool fused = s_fused_madd.load(std::memory_order_relaxed);
++        fused != s_emitted_fused_madd)
++    {
++      s_emitted_fused_madd = fused;
++      ClearCache();
++      ForgetAllRegions();
++    }
+ #endif
+     // Start new timing slice
+     // Metrics-off runs avoid all per-slice clocks. BeginSlice also resets
+@@ -16425,6 +16482,13 @@ u32 WasmLayoutHash(const WasmStateLayout& layout_in)
+     h ^= 0x46505246u;  // "FPRF"
+     h *= 0x01000193u;
+   }
++  // 0129: likewise for code using relaxed_madd (it would not even compile where
++  // relaxed SIMD is missing).
++  if (s_fused_madd.load(std::memory_order_relaxed))
++  {
++    h ^= 0x464d4144u;  // "FMAD"
++    h *= 0x01000193u;
++  }
+   return h != 0 ? h : 1;
+ }
+ 
+@@ -16858,8 +16922,9 @@ namespace
+ // 10 (0111): compares store their CR field as one i64, bc fused (7-9 are
+ // taken by 0108-0110). 16 (0121): region code takes MSR LE/FE0/FE1 and
+ // HID2.LSQE for granted (15 is 0119's). 17 (0126): region byte swaps as two
+-// rotates (11-15 are taken by 0112-0119).
+-constexpr u32 AOT_COMPILER_VERSION = 17;
++// rotates (11-15 are taken by 0112-0119). 21 (0129): fused relaxed_madd mode
++// (18 retired, 19 and 20 are 0127's and 0128's).
++constexpr u32 AOT_COMPILER_VERSION = 21;
+ constexpr u32 AOT_MAX_FRAGMENT_BYTES = 1u << 20;
+ thread_local std::vector<u32> t_aot_out;
+ u8* s_aot_ram = nullptr;
+@@ -17055,9 +17120,11 @@ extern "C" EMSCRIPTEN_KEEPALIVE void DolphinWeb_AotKeyParts(u32* out)
+ {
+   out[0] = AOT_COMPILER_VERSION;
+   // Bit 31 (no disable bit uses it): FPRF on (patch 0121), regions translated
+-  // with and without it never share a cache entry.
++  // with and without it never share a cache entry. Bit 30: fused relaxed_madd
++  // (patch 0129), likewise.
+   out[1] = s_dolphin_web_disable_mask.load(std::memory_order_relaxed) |
+-           (PowerPC::g_fprf_emulation.load(std::memory_order_relaxed) ? 1u << 31 : 0u);
++           (PowerPC::g_fprf_emulation.load(std::memory_order_relaxed) ? 1u << 31 : 0u) |
++           (s_fused_madd.load(std::memory_order_relaxed) ? 1u << 30 : 0u);
+ }
+ 
+ // {LE, FE0, FE1, LSQE off}: region entries the 0121 guards refused (counted
+@@ -17074,6 +17141,14 @@ extern "C" EMSCRIPTEN_KEEPALIVE void DolphinWeb_SetFprfForTest(int on)
+   PowerPC::g_fprf_emulation.store(on != 0, std::memory_order_relaxed);
+ }
+ 
++// Patch 0129: the page's probe found f64x2.relaxed_madd fused (1) or not (0);
++// set before the first compile (code of the other mode is dropped at the next
++// slice). Returns the previous mode.
++extern "C" EMSCRIPTEN_KEEPALIVE int DolphinWeb_SetFusedMadd(int on)
++{
++  return s_fused_madd.exchange(on != 0, std::memory_order_relaxed) ? 1 : 0;
++}
++
+ // Helper signatures in import order, "params>results" (BuildWasmCachedInterpreterBlock's types).
+ extern "C" EMSCRIPTEN_KEEPALIVE const char* DolphinWeb_JitHelperSignature(u32 index)
+ {

@@ -11,6 +11,7 @@ import {
   sha256Hex
 } from "./upstream-worker-protocol.js";
 import { parseDolHeader } from "./dol.js";
+import { probeRelaxedMadd } from "./relaxed-madd-probe.js";
 import { decodeWgpuSamplerState } from "./wgpu-sampler-state.js";
 import { gxClearDepthToStored, gxDepthState } from "./wgpu-depth-state.js";
 import { clampSourceRect, createWgpuExactCapture, packReadbackRows } from "./wgpu-exact-capture.js";
@@ -866,6 +867,8 @@ const wgpuDiagPerturb = { presentDelayMs: 0, drainEveryMs: 0 };
 let wgpuDiagLastDrainAt = 0;
 // The core's GPU-sync counters (patch 0080), on only for the freeze probe.
 let gpuSyncDiagEnabled = false;
+// probeRelaxedMadd()'s answer: "fused", "unfused", "unsupported" or "inconsistent".
+let relaxedMadd = null;
 
 // Milliseconds before the next drain the drainEveryMs perturbation allows (0:
 // drain now). The replay pump sleeps that long instead of polling.
@@ -1729,6 +1732,8 @@ async function handleMessage(type, payload) {
       return harnessUniqueFramesRequest(payload);
     case "validationPcSampler":
       return harnessPcSampler(payload);
+    case "validationReadRelaxedMadd":
+      return { mode: relaxedMadd, coreFused: moduleInstance?._DolphinWeb_SetFusedMadd ? relaxedMadd === "fused" : null };
     case "validationReadJitRegionStats":
       return harnessJitRegionStats(payload);
     case "validationReadAxHleStats":
@@ -2679,6 +2684,11 @@ async function loadCore({
   if (harnessEnabled) moduleInstance._DolphinWeb_HarnessEnable?.(1);
   if (detTraceRequested) moduleInstance._DolphinWeb_DetTraceEnable?.(1);
   if (gpuSyncDiagEnabled) moduleInstance._DolphinWeb_GpuSyncDiagEnable?.(1);
+  // patch 0129: the FMA emitter uses relaxed_madd only where it is fused,
+  // decided once here, before the first compile.
+  relaxedMadd = probeRelaxedMadd();
+  moduleInstance._DolphinWeb_SetFusedMadd?.(relaxedMadd === "fused" ? 1 : 0);
+  postStatus(`relaxed_madd: ${relaxedMadd}${moduleInstance._DolphinWeb_SetFusedMadd ? "" : " (core without patch 0129)"}`);
   const ownershipTraceSetterAvailable = Boolean(
     api.setWebGpuOwnershipTraceEnabled &&
     api.getWebGpuOwnershipTracePtr &&

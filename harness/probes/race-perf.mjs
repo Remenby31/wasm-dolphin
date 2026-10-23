@@ -271,8 +271,11 @@ export async function measure(session, o) {
     // --region-sample, so that a launch running without its region cache
     // never goes unnoticed (2026-10-22: 0/143 on a loaded machine).
     const pipeline = regionEnd ? null : await workerRequest(page, "validationReadJitRegionStats", {}, 10000).catch(() => null);
+    // The FMA emitter's mode (patch 0129): relaxed_madd fused or the plain-f64 path.
+    const relaxedMadd = await workerRequest(page, "validationReadRelaxedMadd", {}, 10000).catch(() => null);
     return {
       windowMs: Math.round(t1 - t0),
+      relaxedMadd: relaxedMadd?.mode ?? null, fusedMadd: relaxedMadd?.coreFused ?? null,
       // Guest seconds this window covered (core ticks / ticks per second);
       // the reads bracket the window, so a few host ms more than windowMs.
       guestCovered: guestCovered(ticksBefore, ticksAfter, progress?.coreTicksPerSecond),
@@ -423,6 +426,16 @@ export function memSummary(runs, sides, good = (r) => r && !r.error) {
   const side = (n) => summarizeMem(runs.map((r) => r[n]).filter(good).map((r) => r.cold));
   const c = side("candidate"), b = sides.baseline ? side("baseline") : null;
   return { memAccess: c.memAccess, memAccessWhy: c.why, baselineMemAccess: b?.memAccess ?? null, baselineMemAccessWhy: b?.why ?? null };
+}
+
+// The FMA emitter's mode per side (patch 0129), as the runs saw it: one value,
+// or "mixed" when the runs disagree.
+export function fusedMaddSummary(runs, sides, good = (r) => r && !r.error) {
+  const side = (n) => {
+    const seen = [...new Set(runs.map((r) => r[n]).filter(good).map((r) => r.cold?.fusedMadd ?? null))];
+    return seen.length === 1 ? seen[0] : seen.length ? "mixed" : null;
+  };
+  return { fusedMadd: side("candidate"), baselineFusedMadd: sides.baseline ? side("baseline") : null };
 }
 
 // p4 / baselineP4 and their reasons; the sides are compared only when both
@@ -738,6 +751,7 @@ async function main() {
     pcsample: pcNote,
     // P4 counters (KPI: region and dispatch shares), cold stats windows of good runs.
     ...p4Summary(runsDone, sides, good),
+    ...fusedMaddSummary(runsDone, sides, good),
     // Memory accesses per instruction (0104), cold stats windows of good runs.
     ...(o.memStats ? memSummary(runsDone, sides, good) : {}),
     // What each side served (commit, dirty), for kpi-report: from its first good run.
