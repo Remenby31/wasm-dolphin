@@ -164,6 +164,10 @@ jobs:
             (perf list 2>/dev/null | grep -iE "l1i|itlb|stall_frontend" || true) | tee "$OUT/perf-list-l1i.txt"
             for d in /sys/bus/event_source/devices/armv8_pmuv3*; do p=$(basename "$d"); break; done
             perf stat -x, -e "$p/l1i_cache_refill/u,$p/l1i_cache/u,$p/itlb_walk/u,$p/stall_frontend/u,r01:u,r14:u,r02:u,r23:u" -- node -e 'let x=0; for (let i=0;i<5e7;i++) x+=Math.sqrt(i); console.log(x)' 2>&1 | tee "$OUT/perf-l1i-probe.txt" || true
+            # The first probe read 0 for L1I_CACHE (0x14) at EL0, impossible
+            # on hardware: all exception levels, and the other names.
+            perf list 2>/dev/null > "$OUT/perf-list.txt" || true
+            sudo perf stat -x, -e "r01,r14,r02,$p/l1i_cache_lmiss/,$p/l1i_tlb/,$p/l1i_tlb_refill/,r23" -- node -e 'let x=0; for (let i=0;i<5e7;i++) x+=Math.sqrt(i); console.log(x)' 2>&1 | tee "$OUT/perf-l1i-probe-all-el.txt" || true
           fi
           # cpu 0 and its SMT sibling for the CPU thread; everything else elsewhere.
           sib=$(cat /sys/devices/system/cpu/cpu0/topology/thread_siblings_list)
