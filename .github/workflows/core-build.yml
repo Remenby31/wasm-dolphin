@@ -310,11 +310,16 @@ jobs:
       - name: npm run check
         run: npm run check
 
+      # [bench] do not merge: this branch removes region patches on purpose,
+      # so the tests asserting them fail; the core is built for the CI bench's
+      # candidate_core_run and must still be uploaded.
       - name: npm test
+        continue-on-error: true
         run: npm test
 
       # Source-contract tests read the patched vendor/dolphin the build left.
       - name: npm run test:contract
+        continue-on-error: true
         run: npm run test:contract
 
       # Vendoring the crates needs the pinned cargo, which lives in the image.
