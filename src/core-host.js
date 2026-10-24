@@ -123,6 +123,8 @@ export class EmulatorHost {
     // Harness: accept a CPU fallback WebGPU adapter (SwiftShader), refused for
     // the app as no usable GPU (the Windows CI lane has nothing else).
     this.wgpuFallback = new URLSearchParams(window.location.search).get("wgpufallback") === "1";
+    // ?dstalpha2pass=0 (patch 0149): the dst-alpha second pass (0136) off.
+    this.dstAlphaTwoPass = new URLSearchParams(window.location.search).get("dstalpha2pass") !== "0";
     // Harness: keep a software WebGL presenter (SwiftShader), which the app
     // refuses for the 2D canvas (cheaper on a CPU).
     this.webglSoftware = new URLSearchParams(window.location.search).get("webglsw") === "1";
@@ -326,6 +328,25 @@ export class EmulatorHost {
     // captureStream to the original canvas, permanently locking it from
     // transfer. Swapping in a fresh canvas element severs any such binding
     // because the new element has none of that history.
+    // A fresh canvas element in place of the current one (its attributes
+    // copied), transferred to the worker. Also used once the worker's WebGL
+    // presenter lost its context for good: a canvas that had a WebGL context
+    // can never get a 2D one.
+    const replaceCanvasForWorker = () => {
+      const replacement = document.createElement("canvas");
+      replacement.id = canvas.id;
+      replacement.width = canvas.width;
+      replacement.height = canvas.height;
+      for (const cls of canvas.classList) replacement.classList.add(cls);
+      replacement.setAttribute("aria-label", canvas.getAttribute("aria-label") || "");
+      if (canvas.parentNode) canvas.parentNode.replaceChild(replacement, canvas);
+      // Re-point the host's reference and the elements registry.
+      canvas = replacement;
+      this.canvas = replacement;
+      const off = replacement.transferControlToOffscreen();
+      off.id = "canvas";
+      return off;
+    };
     const transferCanvasToOffscreen = () => {
       if (!this.usesAdapterCanvas || typeof canvas.transferControlToOffscreen !== "function") {
         return null;
@@ -340,20 +361,8 @@ export class EmulatorHost {
         try {
           // Replace the DOM canvas with a freshly-created one. The new
           // element has no captureStream history, no extension hooks, no
-          // compositor binding. Copy across the relevant attributes.
-          const replacement = document.createElement("canvas");
-          replacement.id = canvas.id;
-          replacement.width = canvas.width;
-          replacement.height = canvas.height;
-          for (const cls of canvas.classList) replacement.classList.add(cls);
-          replacement.setAttribute("aria-label", canvas.getAttribute("aria-label") || "");
-          if (canvas.parentNode) canvas.parentNode.replaceChild(replacement, canvas);
-          // Re-point the host's reference and the elements registry.
-          canvas = replacement;
-          this.canvas = replacement;
-          const off = replacement.transferControlToOffscreen();
-          off.id = "canvas";
-          return off;
+          // compositor binding.
+          return replaceCanvasForWorker();
         } catch (err2) {
           console.warn("[host] canvas-replacement transferControlToOffscreen also failed:", err2);
           return null;
@@ -406,6 +415,13 @@ export class EmulatorHost {
                 this.oglSabEnabled || this.usesDetachedWgpu
                 ? null
                 : transferCanvasToOffscreen,
+            // After a lost WebGL context: a new element, so whoever captures
+            // the canvas (captureStream) must re-capture: "presentercanvas".
+            replacePresenterCanvas: () => {
+              const off = replaceCanvasForWorker();
+              window.dispatchEvent(new CustomEvent("presentercanvas", { detail: { canvas: this.canvas } }));
+              return off;
+            },
             visibleCanvas:
               (this.videoBackend === "OGL" && this.oglProxyMode === "worker") ||
                 this.oglSabEnabled || this.usesDetachedWgpu
@@ -445,6 +461,7 @@ export class EmulatorHost {
             efbCopyRam: this.efbCopyRam,
             wgpuMask: this.wgpuMask,
             wgpuFallback: this.wgpuFallback,
+            dstAlphaTwoPass: this.dstAlphaTwoPass,
             webglSoftware: this.webglSoftware,
             savesMode: this.savesMode,
             efbDiag: this.efbDiag,

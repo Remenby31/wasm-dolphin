@@ -25,7 +25,7 @@
       "commit": "01e0577914a75a2569c846778c2f93aa8e6feddd"
     }
   },
-  "patchSeriesSha256": "14b23452f3c51af07fe1c400d1eef64ebb4b4048248e6b4789716d4daa947025",
+  "patchSeriesSha256": "9d74869e68a66ef16de1ccd62694eb918508b1f3bc1a8f4aa0765220c84f387c",
   "patches": [
     {
       "order": 1,
@@ -933,6 +933,14 @@
     },
     {
       "order": 114,
+      "cwd": ".",
+      "hashMode": "lf-normalized",
+      "path": "patches/dolphin-wasm/snapshot/0149-dst-alpha-pass-switch.patch",
+      "size": 2531,
+      "sha256": "ca26a1b08e8b66105d08838e8897982c1dd51863fe72dcf65cbe3212d453c7dc"
+    },
+    {
+      "order": 115,
       "cwd": "Externals/SFML/SFML",
       "hashMode": "lf-normalized",
       "path": "patches/dolphin-wasm/submodules/0001-sfml-emscripten-config.patch",
@@ -940,7 +948,7 @@
       "sha256": "f82197a21fe982ad83f6ee7bbf5a03839b1cebd4d64da3eab11263842bf61d89"
     },
     {
-      "order": 115,
+      "order": 116,
       "cwd": "Externals/xxhash/xxHash",
       "hashMode": "lf-normalized",
       "path": "patches/dolphin-wasm/submodules/0002-xxhash-wasm-simd-scalar.patch",

@@ -222,6 +222,12 @@ let renderImageData = null;
 let renderGpu = null;
 let renderGl = null;
 let renderGlState = null;
+// The WebGL presenter's context was lost (GPU process crash, driver reset):
+// draws are skipped until it is restored, or until the page hands over a new
+// canvas for a 2D presenter (WEBGL_RESTORE_WAIT_MS later).
+let renderGlLost = false;
+let renderGlRestoreTimer = null;
+const WEBGL_RESTORE_WAIT_MS = 3000;
 let renderUploadBuffer = null;
 let renderRequiresUploadCopy = false;
 let preferredPresenterBackend = "webgl";
@@ -1599,6 +1605,7 @@ async function handleMessage(type, payload) {
         efbCopyRam: payload.efbCopyRam,
         wgpuMask: payload.wgpuMask,
         wgpuFallback: payload.wgpuFallback,
+        dstAlphaTwoPass: payload.dstAlphaTwoPass,
         webglSoftware: payload.webglSoftware,
         efbDiag: payload.efbDiag,
         jitVerbose: payload.jitVerbose,
@@ -1843,6 +1850,33 @@ async function handleMessage(type, payload) {
       return harnessUniqueFramesRequest(payload);
     case "validationPcSampler":
       return harnessPcSampler(payload);
+    case "replacePresenterCanvas":
+      return replacePresenterCanvas(payload);
+    case "validationLoseWebGlContext": {
+      // Harness: lose the WebGL presenter's context as a GPU crash would;
+      // restoreAfterMs >= 0 restores it that much later (WEBGL_lose_context).
+      if (!harnessEnabled) return { error: "harness hooks are off" };
+      const lose = renderGl?.getExtension("WEBGL_lose_context");
+      if (!lose) return { error: `no WebGL presenter (${renderBackend})` };
+      lose.loseContext();
+      const after = Number(payload?.restoreAfterMs);
+      if (Number.isFinite(after) && after >= 0) setTimeout(() => lose.restoreContext(), after);
+      return { lost: true };
+    }
+    case "validationReadDstAlphaPasses": {
+      // Patch 0149: the dst-alpha second pass (0136), cumulative.
+      if (!harnessEnabled) return { error: "harness hooks are off" };
+      const stats = moduleInstance?._DolphinWeb_DstAlphaPassStats;
+      if (!stats || !moduleInstance._malloc) return { error: "core without patch 0149" };
+      const ptr = moduleInstance._malloc(12);
+      try {
+        stats(ptr);
+        const v = new Uint32Array(moduleInstance.HEAPU8.buffer, ptr, 3);
+        return { flushes: v[0], extraDraws: v[1], enabled: v[2] === 1 };
+      } finally {
+        moduleInstance._free(ptr);
+      }
+    }
     case "validationReadRelaxedMadd":
       // coreFused: the core's own mode (null: a core without patch 0129).
       return { mode: relaxedMadd, coreFused: moduleInstance?._DolphinWeb_FusedMadd ? moduleInstance._DolphinWeb_FusedMadd() === 1 : null };
@@ -2281,6 +2315,7 @@ async function loadCore({
   efbCopyRam = false,
   wgpuMask = "",
   wgpuFallback = false,
+  dstAlphaTwoPass = true,
   webglSoftware = false,
   efbDiag = false,
   jitVerbose = false,
@@ -3000,6 +3035,7 @@ async function loadCore({
   api.setJitRegionChaining?.(regionChain !== false ? 1 : 0);
   api.setPpcProfileEnabled?.(ppcProfile ? 1 : 0);
   if (Number.isInteger(gpuSpinMicros) && gpuSpinMicros >= 0) api.setGpuSpinBudget?.(gpuSpinMicros);
+  api.setDstAlphaTwoPass?.(dstAlphaTwoPass !== false ? 1 : 0);
   api.setWebGpuUploadArenaMiB?.(wgpuUploadArenaMiB, collectMetrics ? 1 : 0);
   api.setWebGpuProducerProfileEnabled?.(wgpuProducerProfileRequested ? 1 : 0);
   api.setWebGpuDrawProfileEnabled?.(wgpuDrawProfileRequested ? 1 : 0);
@@ -3128,6 +3164,7 @@ function bindApi(module) {
     setJitRegionsEnabled: optionalCwrap("DolphinWeb_JitSetRegionsEnabled", null, ["number"]),
     setJitRegionChaining: optionalCwrap("DolphinWeb_JitSetRegionChaining", null, ["number"]),
     setGpuSpinBudget: optionalCwrap("DolphinWeb_SetGpuSpinBudget", null, ["number"]),
+    setDstAlphaTwoPass: optionalCwrap("DolphinWeb_SetDstAlphaTwoPass", null, ["number"]),
     getPpcWasmJitEngagedFrame: optionalCwrap("GetPpcWasmJitEngagedFrame", "number", []),
     getPpcWasmJitArmStartFrame: optionalCwrap("GetPpcWasmJitArmStartFrame", "number", []),
     setPpcWasmJitEnabled:
@@ -5991,6 +6028,50 @@ function formatProfileWindow(elapsedMs) {
   );
 }
 
+// A lost WebGL context (GPU crash mid-game) left the screen black for good.
+// preventDefault() lets the browser restore it: the blitter is then rebuilt.
+// Not restored in time: the page gives this worker a new canvas
+// ("presenter-canvas-lost" → replacePresenterCanvas), presented in 2D.
+function watchWebGlContextLoss(canvas) {
+  canvas.addEventListener("webglcontextlost", (event) => {
+    if (canvas !== renderCanvas) return;
+    event.preventDefault();
+    renderGlLost = true;
+    rendererDiagnostics.webglContextLostCount = (rendererDiagnostics.webglContextLostCount ?? 0) + 1;
+    postStatus("WebGL presenter context lost; waiting for the browser to restore it");
+    clearTimeout(renderGlRestoreTimer);
+    renderGlRestoreTimer = setTimeout(() => {
+      renderGlRestoreTimer = null;
+      if (canvas === renderCanvas && renderGlLost) self.postMessage({ type: "presenter-canvas-lost" });
+    }, WEBGL_RESTORE_WAIT_MS);
+  });
+  canvas.addEventListener("webglcontextrestored", () => {
+    if (canvas !== renderCanvas || !renderGl) return;
+    clearTimeout(renderGlRestoreTimer);
+    renderGlRestoreTimer = null;
+    // Every GL object died with the context.
+    renderGlState = createSoftwareBlitter(renderGl);
+    renderGlLost = false;
+    rendererDiagnostics.webglContextRestoredCount = (rendererDiagnostics.webglContextRestoredCount ?? 0) + 1;
+    postStatus("WebGL presenter context restored");
+  });
+}
+
+// The page's new canvas after a WebGL context that never came back: a 2D
+// presenter, showing the last frame at once.
+async function replacePresenterCanvas({ canvas } = {}) {
+  if (!canvas) return { presenter: renderBackend, replaced: false };
+  clearTimeout(renderGlRestoreTimer);
+  renderGlRestoreTimer = null;
+  await setupSoftwarePresenter(canvas, "2d");
+  rendererDiagnostics.presenterReplacedAfterContextLoss = (rendererDiagnostics.presenterReplacedAfterContextLoss ?? 0) + 1;
+  if (_lastFrameCopyValid && _lastFrameLength > 0) {
+    drawFrameBytesToCanvas(_lastFrameWidth, _lastFrameHeight, _lastFrameCopy.subarray(0, _lastFrameLength));
+  }
+  postStatus(`WebGL presenter replaced by ${renderBackend} after its context was lost`);
+  return { presenter: renderBackend, replaced: true };
+}
+
 async function setupSoftwarePresenter(canvas, presenterBackend) {
   rendererDiagnostics.requestedPresenterBackend = presenterBackend;
   renderCanvas = canvas;
@@ -5998,9 +6079,12 @@ async function setupSoftwarePresenter(canvas, presenterBackend) {
   renderGpu = null;
   renderGl = null;
   renderGlState = null;
+  renderGlLost = false;
   renderImageData = null;
   renderUploadBuffer = null;
   renderRequiresUploadCopy = false;
+  // A presenter set up again (a new canvas) says why it fell back, or nothing.
+  rendererDiagnostics.webglFallback = null;
 
   if (presenterBackend === "webgpu") {
     try {
@@ -6029,6 +6113,7 @@ async function setupSoftwarePresenter(canvas, presenterBackend) {
       renderBackend = "webgl";
       rendererDiagnostics.activePresenterBackend = renderBackend;
       renderGlState = createSoftwareBlitter(renderGl);
+      watchWebGlContextLoss(renderCanvas);
       return;
     }
     rendererDiagnostics.webglFallback = "no hardware WebGL context (software or none): 2D presenter";
@@ -6675,7 +6760,7 @@ function alignTo(value, alignment) {
 }
 
 function drawFrameToWebGl(width, height, pointer, length) {
-  if (!renderCanvas || !renderGl || !renderGlState || width <= 0 || height <= 0 || pointer <= 0 || length <= 0) {
+  if (!renderCanvas || !renderGl || !renderGlState || renderGlLost || width <= 0 || height <= 0 || pointer <= 0 || length <= 0) {
     return;
   }
 
@@ -6683,7 +6768,7 @@ function drawFrameToWebGl(width, height, pointer, length) {
 }
 
 function drawFrameBytesToWebGl(width, height, frameView) {
-  if (!renderCanvas || !renderGl || !renderGlState || width <= 0 || height <= 0 || !frameView?.byteLength) {
+  if (!renderCanvas || !renderGl || !renderGlState || renderGlLost || width <= 0 || height <= 0 || !frameView?.byteLength) {
     return;
   }
 
