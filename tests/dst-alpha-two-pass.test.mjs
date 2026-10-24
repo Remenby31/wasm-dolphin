@@ -64,8 +64,15 @@ test("0149 gates the dst-alpha second pass on a runtime switch and counts the ex
   assert.match(added, /extern "C" EMSCRIPTEN_KEEPALIVE void DolphinWeb_SetDstAlphaTwoPass\(int on\)/);
   assert.match(added, /extern "C" EMSCRIPTEN_KEEPALIVE void DolphinWeb_DstAlphaPassStats\(u32\* out\)/);
   assert.match(await read("../src/core-host.js"), /get\("dstalpha2pass"\) !== "0"/);
-  assert.match(await read("../src/upstream-worker-adapter.js"), /dstAlphaTwoPass: this\.dstAlphaTwoPass/);
+  // Every hop of ?dstalpha2pass, or the A/B compares the same thing twice.
+  const adapter = await read("../src/upstream-worker-adapter.js");
+  assert.match(adapter, /dstAlphaTwoPass = true,/);
+  assert.match(adapter, /this\.dstAlphaTwoPass = dstAlphaTwoPass !== false;/);
+  assert.match(adapter, /dstAlphaTwoPass: this\.dstAlphaTwoPass/);
   const w = await read("../src/upstream-discio-worker.js");
+  assert.match(w, /dstAlphaTwoPass: payload\.dstAlphaTwoPass,/);
+  assert.match(w, /^  dstAlphaTwoPass = true,$/m);
+  assert.match(w, /case "validationReadDstAlphaPasses": \{\n[^\n]*\n\s*if \(!harnessEnabled\) return/);
   assert.match(w, /api\.setDstAlphaTwoPass\?\.\(dstAlphaTwoPass !== false \? 1 : 0\);/);
   assert.match(w, /case "validationReadDstAlphaPasses":/);
 });

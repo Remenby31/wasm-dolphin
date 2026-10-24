@@ -1845,6 +1845,7 @@ async function handleMessage(type, payload) {
       return harnessPcSampler(payload);
     case "validationReadDstAlphaPasses": {
       // Patch 0149: the dst-alpha second pass (0136), cumulative.
+      if (!harnessEnabled) return { error: "harness hooks are off" };
       const stats = moduleInstance?._DolphinWeb_DstAlphaPassStats;
       if (!stats || !moduleInstance._malloc) return { error: "core without patch 0149" };
       const ptr = moduleInstance._malloc(12);
