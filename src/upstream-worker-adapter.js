@@ -100,6 +100,9 @@ export class UpstreamWorkerAdapter {
     softwareTevHotCaseMode = 0,
     xfbFastPaths = 0,
     correctTimeDrift = false,
+    rushPresentation = false,
+    syncOnSkipIdle = false,
+    dupXfbRearmsThrottle = false,
     coreLog = false,
     memcardSlotB = false,
     efbAccess = false,
@@ -109,6 +112,7 @@ export class UpstreamWorkerAdapter {
     wgpuFallback = false,
     dstAlphaTwoPass = true,
     discReadahead = true,
+    discPrefetch = false,
     webglSoftware = false,
     savesMode = "",
     efbDiag = false,
@@ -219,6 +223,9 @@ export class UpstreamWorkerAdapter {
     this.softwareTevHotCaseMode = (Number(softwareTevHotCaseMode) || 0) & 3;
     this.xfbFastPaths = (Number(xfbFastPaths) || 0) & 3;
     this.correctTimeDrift = Boolean(correctTimeDrift);
+    this.rushPresentation = rushPresentation === true;
+    this.syncOnSkipIdle = syncOnSkipIdle === true;
+    this.dupXfbRearmsThrottle = dupXfbRearmsThrottle === true;
     this.coreLog = Boolean(coreLog);
     this.memcardSlotB = Boolean(memcardSlotB);
     this.efbAccess = Boolean(efbAccess);
@@ -228,6 +235,7 @@ export class UpstreamWorkerAdapter {
     this.wgpuFallback = Boolean(wgpuFallback);
     this.dstAlphaTwoPass = dstAlphaTwoPass !== false;
     this.discReadahead = discReadahead !== false;
+    this.discPrefetch = discPrefetch === true;
     this.webglSoftware = Boolean(webglSoftware);
     this.savesMode = String(savesMode || "");
     this.userData = null;
@@ -456,6 +464,9 @@ export class UpstreamWorkerAdapter {
       softwareTevHotCaseMode: this.softwareTevHotCaseMode,
       xfbFastPaths: this.xfbFastPaths,
       correctTimeDrift: this.correctTimeDrift,
+      rushPresentation: this.rushPresentation,
+      syncOnSkipIdle: this.syncOnSkipIdle,
+      dupXfbRearmsThrottle: this.dupXfbRearmsThrottle,
       coreLog: this.coreLog,
       memcardSlotB: this.memcardSlotB,
       efbAccess: this.efbAccess,
@@ -465,6 +476,7 @@ export class UpstreamWorkerAdapter {
       wgpuFallback: this.wgpuFallback,
       dstAlphaTwoPass: this.dstAlphaTwoPass,
       discReadahead: this.discReadahead,
+      discPrefetch: this.discPrefetch,
       webglSoftware: this.webglSoftware,
       savesMode: this.savesMode,
       efbDiag: this.efbDiag,
@@ -626,6 +638,7 @@ export class UpstreamWorkerAdapter {
       rootEntryCount: response.rootEntryCount,
       rootEntries: response.rootEntries ?? [],
       bootProbe: response.bootProbe ?? null,
+      needs: response.needs ?? { boundingBox: false },
       fullCore: Boolean(response.fullCore),
       coreBoot: response.coreBoot ?? null,
       coreState: response.coreState,

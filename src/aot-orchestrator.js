@@ -471,8 +471,12 @@ export async function translateWithContinuations(m, f, { mask, maxBlocks, names,
   // a bctr into them stays in the region rather than leaving for code with
   // none (the race scene's 0x80077044, a jump-table target of 0x80076eb8).
   const seeds = (f.extraEntries ?? []).map((pc) => pc >>> 0).filter((pc) => !owned.has(pc) && f.ranges.some(([s, e]) => pc >= s && pc < e));
-  if (!seeds.length && !cut && !capped(first.fragment, maxBlocks, maxFragmentBytes)) return first;
+  // An uncapped first fragment can still leave code out: the core's
+  // discovery does not follow an mtmsr's fall-through (an exit: MSR may
+  // have changed), so blocks only it reaches had no entry (a homebrew's main
+  // loop: 35 % of its cycles outside regions). The frontier says so.
   const branches = functionBranches(m, f.ranges);
+  if (!seeds.length && !cut && !capped(first.fragment, maxBlocks, maxFragmentBytes) && !frontier(branches, owned).length) return first;
   const tried = new Set();
   const continuations = [];
   // The budget counts only what goes past the function's old single
