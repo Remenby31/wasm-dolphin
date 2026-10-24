@@ -1608,6 +1608,7 @@ async function handleMessage(type, payload) {
         wgpuFallback: payload.wgpuFallback,
         dstAlphaTwoPass: payload.dstAlphaTwoPass,
         discReadahead: payload.discReadahead,
+        discPrefetch: payload.discPrefetch,
         webglSoftware: payload.webglSoftware,
         efbDiag: payload.efbDiag,
         jitVerbose: payload.jitVerbose,
@@ -2321,6 +2322,7 @@ async function loadCore({
   wgpuFallback = false,
   dstAlphaTwoPass = true,
   discReadahead = true,
+  discPrefetch = true,
   webglSoftware = false,
   efbDiag = false,
   jitVerbose = false,
@@ -2379,6 +2381,7 @@ async function loadCore({
   wgpuMaskedFeatures = parseWgpuMask(wgpuMask);
   wgpuAcceptFallbackAdapter = Boolean(wgpuFallback);
   discReadaheadEnabled = discReadahead !== false;
+  discPrefetchEnabled = discPrefetch !== false;
   webglAcceptSoftware = Boolean(webglSoftware);
   if (moduleInstance) {
     return moduleInstance;
@@ -3135,12 +3138,17 @@ const discReadService = { reads: 0, bytes: 0, ms: 0, maxMs: 0 };
 // most (src/disc-readahead.js); ?discreadahead=0 reads exactly what is asked,
 // as WORKERFS does.
 let discReadaheadEnabled = true;
+let discPrefetchEnabled = true;
 let discBlockReader = null;
 function readDiscAhead(workerFs) {
   const ops = workerFs?.stream_ops;
   if (!ops?.read || discBlockReader || typeof FileReaderSync !== "function") return;
   const reader = new FileReaderSync();
-  discBlockReader = createDiscReadahead({ readBlob: (blob) => reader.readAsArrayBuffer(blob) });
+  discBlockReader = createDiscReadahead({
+    readBlob: (blob) => reader.readAsArrayBuffer(blob),
+    // Patch 0155: the next segment in the background (?discprefetch=0: none).
+    readBlobAsync: discPrefetchEnabled ? (blob) => blob.arrayBuffer() : null,
+  });
   ops.read = discBlockReader.read;
 }
 function timeDiscReads(workerFs) {

@@ -127,6 +127,8 @@ export class EmulatorHost {
     this.dstAlphaTwoPass = new URLSearchParams(window.location.search).get("dstalpha2pass") !== "0";
     // ?discreadahead=0: the disc read exactly as asked (no read-ahead).
     this.discReadahead = new URLSearchParams(window.location.search).get("discreadahead") !== "0";
+    // ?discprefetch=0: read ahead without the background prefetch (0155).
+    this.discPrefetch = new URLSearchParams(window.location.search).get("discprefetch") !== "0";
     // Harness: keep a software WebGL presenter (SwiftShader), which the app
     // refuses for the 2D canvas (cheaper on a CPU).
     this.webglSoftware = new URLSearchParams(window.location.search).get("webglsw") === "1";
@@ -465,6 +467,7 @@ export class EmulatorHost {
             wgpuFallback: this.wgpuFallback,
             dstAlphaTwoPass: this.dstAlphaTwoPass,
             discReadahead: this.discReadahead,
+            discPrefetch: this.discPrefetch,
             webglSoftware: this.webglSoftware,
             savesMode: this.savesMode,
             efbDiag: this.efbDiag,

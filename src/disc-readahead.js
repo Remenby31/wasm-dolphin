@@ -9,6 +9,12 @@
 // stream costs a few big reads and a first boot (scattered small reads) does
 // not pay for 1 MiB blocks it never uses. The last segments are kept, 8 MiB
 // at most, oldest out first.
+//
+// Prefetch (patch 0155, with `readBlobAsync`): once a stream follows on, the
+// next segment is read in the background (Blob.arrayBuffer: the worker's
+// event loop, between two WebGPU drains) so the DVD thread finds it held. A
+// read that reaches it while still in flight reads synchronously (a
+// FileReaderSync cannot wait for a promise) and the late prefetch is dropped.
 
 export const DISC_READAHEAD_MIN_BYTES = 64 << 10;
 export const DISC_READAHEAD_MAX_BYTES = 1 << 20;
@@ -20,17 +26,21 @@ export const DISC_READAHEAD_HELD_BYTES = 8 << 20;
 // held at most.
 export function createDiscReadahead({
   readBlob,
+  readBlobAsync = null,
   minBytes = DISC_READAHEAD_MIN_BYTES,
   maxBytes = DISC_READAHEAD_MAX_BYTES,
   heldBytes = DISC_READAHEAD_HELD_BYTES,
 }) {
-  const stats = { blockReads: 0, blockHits: 0, bytesRead: 0, heldBytes: 0, maxHeldBytes: 0 };
+  const stats = {
+    blockReads: 0, blockHits: 0, bytesRead: 0, heldBytes: 0, maxHeldBytes: 0,
+    prefetchIssued: 0, prefetchUsed: 0, prefetchWasted: 0, syncMissInflight: 0, prefetchBytes: 0,
+  };
   // Per file: segments held (oldest first) and the read-ahead state.
   const files = new WeakMap();
 
   function stateOf(blob) {
     let f = files.get(blob);
-    if (!f) files.set(blob, (f = { segments: [], next: minBytes, lastEnd: -1 }));
+    if (!f) files.set(blob, (f = { segments: [], next: minBytes, lastEnd: -1, pending: null }));
     return f;
   }
 
@@ -38,32 +48,79 @@ export function createDiscReadahead({
   // moment, the new segment included.
   function evict(f, incoming) {
     while (stats.heldBytes + incoming > heldBytes && f.segments.length > 0) {
-      stats.heldBytes -= f.segments.shift().bytes.length;
+      const old = f.segments.shift();
+      stats.heldBytes -= old.bytes.length;
+      if (old.prefetched && !old.used) stats.prefetchWasted += 1;
     }
+  }
+
+  function heldAt(f, at) {
+    for (let i = f.segments.length - 1; i >= 0; i -= 1) {
+      const s = f.segments[i];
+      if (at >= s.start && at < s.start + s.bytes.length) return s;
+    }
+    return null;
+  }
+
+  function hold(f, s) {
+    evict(f, s.bytes.length);
+    f.segments.push(s);
+    stats.heldBytes += s.bytes.length;
+    stats.maxHeldBytes = Math.max(stats.maxHeldBytes, stats.heldBytes);
+  }
+
+  // The next segment of a stream, in the background: twice the last one, up
+  // to maxBytes; one in flight per file.
+  function prefetchFrom(f, blob, size, at) {
+    if (!readBlobAsync || f.pending || at >= size || heldAt(f, at)) return;
+    f.next = Math.min(maxBytes, f.next * 2);
+    const end = Math.min(size, at + f.next);
+    const pending = { start: at, end };
+    f.pending = pending;
+    stats.prefetchIssued += 1;
+    Promise.resolve(readBlobAsync(blob.slice(at, end))).then((buffer) => {
+      if (f.pending === pending) f.pending = null;
+      // Read synchronously meanwhile: this one came too late.
+      if (heldAt(f, at)) {
+        stats.prefetchWasted += 1;
+        return;
+      }
+      const bytes = new Uint8Array(buffer);
+      stats.prefetchBytes += bytes.length;
+      hold(f, { start: at, bytes, prefetched: true, used: false });
+    }, () => {
+      if (f.pending === pending) f.pending = null;
+    });
   }
 
   // The segment holding `at`, or a new one read from there.
   function segmentAt(blob, size, at) {
     const f = stateOf(blob);
-    for (let i = f.segments.length - 1; i >= 0; i -= 1) {
-      const s = f.segments[i];
-      if (at >= s.start && at < s.start + s.bytes.length) {
-        stats.blockHits += 1;
-        return s;
+    const held = heldAt(f, at);
+    if (held) {
+      stats.blockHits += 1;
+      // A prefetched segment in use: the stream goes on, fetch the next one.
+      if (held.prefetched && !held.used) {
+        held.used = true;
+        stats.prefetchUsed += 1;
+        f.lastEnd = held.start + held.bytes.length;
+        prefetchFrom(f, blob, size, f.lastEnd);
       }
+      return held;
     }
+    if (f.pending && at >= f.pending.start && at < f.pending.end) stats.syncMissInflight += 1;
     // Following on from the last read: twice as far; anything else is a seek.
-    f.next = at === f.lastEnd ? Math.min(maxBytes, f.next * 2) : minBytes;
+    const follows = at === f.lastEnd;
+    f.next = follows ? Math.min(maxBytes, f.next * 2) : minBytes;
     const end = Math.min(size, at + f.next);
     evict(f, end - at);
     const bytes = new Uint8Array(readBlob(blob.slice(at, end)));
     const s = { start: at, bytes };
-    f.segments.push(s);
+    hold(f, s);
     f.lastEnd = at + bytes.length;
     stats.blockReads += 1;
     stats.bytesRead += bytes.length;
-    stats.heldBytes += bytes.length;
-    stats.maxHeldBytes = Math.max(stats.maxHeldBytes, stats.heldBytes);
+    if (follows) prefetchFrom(f, blob, size, f.lastEnd);
     return s;
   }
 
