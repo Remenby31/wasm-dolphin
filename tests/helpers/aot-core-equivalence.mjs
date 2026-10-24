@@ -415,11 +415,11 @@ export function compareRegionProgram(core, words, state, { translateState = stat
   return { translated: true, fragment, ...result };
 }
 
-export function runOracleProgramsAsRegions(core, { seed, count, length, mask }) {
+export function runOracleProgramsAsRegions(core, { seed, count, length, mask, names = null }) {
   const r = makeRng(seed);
   const tally = { programs: 0, translated: 0, compared: 0, equal: 0, trap: 0, ends: {}, regionRuns: 0, hintsDropped: 0, hintsChecked: 0, hintSectionErrors: [], mismatches: [] };
   for (let n = 0; n < count; n++) {
-    const words = randomProgram(r, length);
+    const words = randomProgram(r, length, { names });
     const state = randomState(r);
     const smallBudget = 1 + r.below(60);
     tally.programs += 1;
