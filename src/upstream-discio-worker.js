@@ -24,6 +24,7 @@ import {
   compileFailureReason,
   createAotCompilerClient
 } from "./aot-compiler-worker.js";
+import { WASM_ENGINES, wasmEngine } from "./wasm-engine.js";
 import { migrateLegacyJitIdb, openAotBlockStore, openAotCache, readDiscKeyFromFile, readDolKeyFromFile } from "./aot-cache.js";
 import {
   JIT_CACHE_ENTRY_KEY_SCHEMA,
@@ -271,6 +272,9 @@ let fifoLogBoot = false;
 let wgpuMaskedFeatures = new Set();
 // ?wgpufallback=1 (harness): keep a CPU fallback adapter; refused otherwise.
 let wgpuAcceptFallbackAdapter = false;
+// ?webglsw=1 (harness): keep a software WebGL presenter; refused otherwise
+// (setupSoftwarePresenter).
+let webglAcceptSoftware = false;
 // A CPU adapter is no usable GPU: with --enable-unsafe-webgpu (the harness
 // passes it) a GPU-less Chrome gives a SwiftShader fallback adapter, and both
 // the replay and the presenter would run on the CPU.
@@ -1594,6 +1598,7 @@ async function handleMessage(type, payload) {
         efbCopyRam: payload.efbCopyRam,
         wgpuMask: payload.wgpuMask,
         wgpuFallback: payload.wgpuFallback,
+        webglSoftware: payload.webglSoftware,
         efbDiag: payload.efbDiag,
         jitVerbose: payload.jitVerbose,
         frameCap: payload.frameCap,
@@ -1604,6 +1609,7 @@ async function handleMessage(type, payload) {
         aotCompiler: payload.aotCompiler,
         aotFirstLaunch: payload.aotFirstLaunch,
         aotSampleMs: payload.aotSampleMs,
+        wasmEngine: payload.wasmEngine,
         regionChain: payload.regionChain,
         fusedMadd: payload.fusedMadd,
         reportedCoreSelection: payload.coreSelection,
@@ -2269,6 +2275,7 @@ async function loadCore({
   efbCopyRam = false,
   wgpuMask = "",
   wgpuFallback = false,
+  webglSoftware = false,
   efbDiag = false,
   jitVerbose = false,
   frameCap = 0,
@@ -2279,6 +2286,7 @@ async function loadCore({
   aotCompiler = true,
   aotFirstLaunch = false,
   aotSampleMs = AOT_PROFILE_SAMPLE_MS,
+  wasmEngine: requestedWasmEngine = null,
   regionChain = true,
   fusedMadd = true,
   reportedCoreSelection = null,
@@ -2323,6 +2331,7 @@ async function loadCore({
   fifoLogBoot = Boolean(fifoLog);
   wgpuMaskedFeatures = parseWgpuMask(wgpuMask);
   wgpuAcceptFallbackAdapter = Boolean(wgpuFallback);
+  webglAcceptSoftware = Boolean(webglSoftware);
   if (moduleInstance) {
     return moduleInstance;
   }
@@ -2716,6 +2725,7 @@ async function loadCore({
   }
   aotFirstLaunchEnabled = aotFirstLaunch === true;
   aotProfileSampleMs = Number.isInteger(aotSampleMs) && aotSampleMs >= 0 ? aotSampleMs : AOT_PROFILE_SAMPLE_MS;
+  wasmEngineName = WASM_ENGINES.includes(requestedWasmEngine) ? requestedWasmEngine : wasmEngine({ search: "" });
   dolphinJitBootLoadComplete = false;
   dolphinJitBootLoadedEntries = 0;
   coreBuildFingerprint = String(buildFingerprint ?? "");
@@ -6000,15 +6010,20 @@ async function setupSoftwarePresenter(canvas, presenterBackend) {
   }
 
   if (presenterBackend !== "2d") {
-    renderGl =
-      renderCanvas.getContext("webgl2", softwareBlitContextAttributes()) ||
-      renderCanvas.getContext("webgl", softwareBlitContextAttributes());
+    // Without a usable GPU, WebGL rasterises on the CPU (WARP on Windows,
+    // SwiftShader): on a GPU-less Windows runner the 2D canvas showed the same
+    // picture for 13-18 % less Chrome CPU (windows-nogpu lane).
+    // failIfMajorPerformanceCaveat refuses such a context (WARP included), and
+    // a refused getContext leaves the canvas free for 2D.
+    const attributes = { ...softwareBlitContextAttributes(), failIfMajorPerformanceCaveat: !webglAcceptSoftware };
+    renderGl = renderCanvas.getContext("webgl2", attributes) || renderCanvas.getContext("webgl", attributes);
     if (renderGl) {
       renderBackend = "webgl";
       rendererDiagnostics.activePresenterBackend = renderBackend;
       renderGlState = createSoftwareBlitter(renderGl);
       return;
     }
+    rendererDiagnostics.webglFallback = "no hardware WebGL context (software or none): 2D presenter";
   }
 
   renderContext = renderCanvas.getContext("2d", { alpha: false });
@@ -7710,7 +7725,12 @@ export const recordAotProfileForTest = (samples) => aotProfileTarget?.record(sam
 export const aotPlanProfileReadForTest = () => aotPlanProfileForTest;
 let aotProfileTimer = null;
 const AOT_PROFILE_SAMPLE_MS = 10; // one guest PC per 10 ms: enough for block weights
-let aotProfileSampleMs = AOT_PROFILE_SAMPLE_MS; // ?aotsample=N (core-host), 0: no sampler
+let aotProfileSampleMs = AOT_PROFILE_SAMPLE_MS;
+// The page's wasm engine (core-host, src/wasm-engine.js); without one, this
+// worker's own detection (no ?wasmengine= here: a worker's location is its
+// script's).
+let wasmEngineName = "unknown";
+export const wasmEngineForTest = () => wasmEngineName; // ?aotsample=N (core-host), 0: no sampler
 const AOT_PROFILE_RECORD_MS = 60000;
 // Every minute, and when the tab hides or closes (flushUserData), the
 // emulation pauses or stops, or another disc is mounted, what the sampler

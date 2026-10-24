@@ -4,8 +4,9 @@
 //
 // Which presenter a boot really ends up with, or that a boot fails as it
 // must. Headless. Used by the Windows no-GPU lane:
-//   --expect-presenter webgl   the software renderer with presenter=webgpu
-//                              on a fallback adapter (refused) shows WebGL
+//   --expect-presenter 2d      the software renderer with presenter=webgpu
+//                              without a usable GPU (fallback adapter and
+//                              software WebGL refused) shows the 2D canvas
 //   --expect-boot-error RE     video=wgpu without a usable adapter fails
 //                              before the core starts, with a message
 //                              matching RE (worker console)
