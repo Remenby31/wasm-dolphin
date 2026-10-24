@@ -109,6 +109,7 @@ export class EmulatorHost {
     this.softwareTevHotCaseMode = requestedSoftwareTevHotCaseMode(window.location.search);
     this.xfbFastPaths = requestedXfbFastPaths(window.location.search);
     this.correctTimeDrift = requestedCorrectTimeDrift();
+    this.pacing = requestedPacing();
     this.coreLog = requestedCoreLog();
     this.memcardSlotB = new URLSearchParams(window.location.search).get("memcardb") === "1";
     // CPU reads of the EFB (peeks), off by default as in Dolphin (EFBAccessEnable).
@@ -438,6 +439,9 @@ export class EmulatorHost {
             softwareTevHotCaseMode: this.softwareTevHotCaseMode,
             xfbFastPaths: this.xfbFastPaths,
             correctTimeDrift: this.correctTimeDrift,
+            rushPresentation: this.pacing.rushPresentation,
+            syncOnSkipIdle: this.pacing.syncOnSkipIdle,
+            dupXfbRearmsThrottle: this.pacing.dupXfbRearmsThrottle,
             coreLog: this.coreLog,
             memcardSlotB: this.memcardSlotB,
             efbAccess: this.efbAccess,
@@ -1579,6 +1583,18 @@ function requestedEfbDiag() {
   // "1" blits the EFB to the canvas; "2" blits the XFB entry last presented.
   const raw = new URLSearchParams(window.location.search).get("efbdiag");
   return raw === "2" ? 2 : (raw === "1" ? 1 : false);
+}
+
+// Pacing switches (patch 0150), for measurement: ?rush=0 turns Rush Frame
+// Presentation off, ?synconidle=1 turns SyncOnSkipIdle on, ?dupvsync=1 makes a
+// duplicated XFB rearm the throttle. Absent: the shipped pacing.
+export function requestedPacing(search = window.location.search) {
+  const params = new URLSearchParams(search);
+  return {
+    rushPresentation: params.get("rush") !== "0",
+    syncOnSkipIdle: params.get("synconidle") === "1",
+    dupXfbRearmsThrottle: params.get("dupvsync") === "1"
+  };
 }
 
 function requestedCorrectTimeDrift() {
