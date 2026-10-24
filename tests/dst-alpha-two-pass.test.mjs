@@ -29,4 +29,11 @@ test("the features matrix covers the coplanar (per-pixel depth) case", async () 
   assert.ok(m.games.some((g) => g.id === "dstalpha-coplanar" && g.set?.cpu === "single"));
   const make = await read("../harness/homebrew/Makefile");
   assert.match(make, /-DDSTALPHA_COPLANAR/);
+  assert.match(make, /-DDSTALPHA_ZINIT/);
+  // The dual-source cases pass with 0136; only the EFB depth divergence
+  // (dstalpha-zinit, a wgpu defect of its own) stays an expected failure.
+  const known = JSON.parse(await read("../harness/known-failures.json"));
+  assert.ok(!known.some((k) => /^dstalpha\/wgpu-(nodualsrc|safari26)$/.test(k.cell)));
+  assert.deepEqual(known.filter((k) => k.cell.startsWith("dstalpha-zinit/")).map((k) => k.cell).sort(),
+    ["dstalpha-zinit/wgpu-interp", "dstalpha-zinit/wgpu-nodualsrc", "dstalpha-zinit/wgpu-safari26"]);
 });

@@ -19,6 +19,15 @@
  * coplanar (GX_SetCoPlanar, Dolphin's zfreeze), so its pixel shader writes
  * depth. On WebGPU such a shader cannot use dual-source blending even when
  * the device has it, and takes the same no_dual_src path on every browser.
+ *
+ * The EFB copy clears depth only while depth updates are on (BPStructs:
+ * zmode.update_enable): the coplanar variant turns them on for its copies.
+ *
+ * DSTALPHA_ZINIT (dstalpha-zinit): step 2 depth-tested, but the copies leave
+ * depth alone, so the test only ever sees the EFB's initial depth. Native
+ * Dolphin starts it at GX depth 0 (FramebufferManager), where LEQUAL rejects
+ * every quad: the columns show alone, as in the software renderer. wgpu
+ * drew the quads (2026-10-23): a divergence kept as its own case.
  */
 #include <gccore.h>
 #include <malloc.h>
@@ -30,7 +39,7 @@ static const u32 column_rgba[4] = {0xc03020ff, 0x20a040ff, 0x2040c0ff, 0xe0c020f
 static const u8 quad_alpha[4] = {0x30, 0x80, 0xc0, 0xff};
 
 static void vtx(f32 x, f32 y, u32 rgba) {
-	GX_Position3f32(x, y, -1.0f);
+	GX_Position3f32(x, y, -10.0f);
 	GX_Color1u32(rgba);
 }
 
@@ -108,6 +117,9 @@ int main(void) {
 		/* 2. Translucent rows: blended with the TEV alpha, destination alpha
 		 * written as a constant. */
 		GX_SetBlendMode(GX_BM_BLEND, GX_BL_SRCALPHA, GX_BL_INVSRCALPHA, GX_LO_CLEAR);
+#ifdef DSTALPHA_ZINIT
+		GX_SetZMode(GX_TRUE, GX_LEQUAL, GX_TRUE);
+#endif
 #ifdef DSTALPHA_COPLANAR
 		GX_SetCoPlanar(GX_TRUE);
 #endif
@@ -120,6 +132,8 @@ int main(void) {
 
 #ifdef DSTALPHA_COPLANAR
 		GX_SetCoPlanar(GX_FALSE);
+#endif
+#if defined(DSTALPHA_COPLANAR) || defined(DSTALPHA_ZINIT)
 		GX_SetZMode(GX_FALSE, GX_ALWAYS, GX_FALSE);
 #endif
 		/* 3. White band blended with the destination alpha. */
@@ -128,6 +142,10 @@ int main(void) {
 		rect(30, 130, 620, 340, 0xffffffffu);
 
 		GX_DrawDone();
+#ifdef DSTALPHA_COPLANAR
+		/* Depth updates on, so the copy clears depth for the next frame. */
+		GX_SetZMode(GX_FALSE, GX_ALWAYS, GX_TRUE);
+#endif
 		GX_CopyDisp(xfb[fb], GX_TRUE);
 		GX_Flush();
 		VIDEO_SetNextFramebuffer(xfb[fb]);
