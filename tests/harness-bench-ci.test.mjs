@@ -149,6 +149,8 @@ test("CI bench: with region stats, a pair where a side installed no region is se
   assert.ok(b.setAside.some((x) => x.run === 5 && /no region installed \(140 \/ 0\)/.test(x.why)));
   assert.deepEqual(b.regions, { baseline: { installed: 140, cycleShare: 0.8 }, candidate: { installed: 140, cycleShare: 0.82 } });
   assert.match(benchMarkdown(b), /Regions \(median per arm\): A 140 installed, 0\.8 of guest cycles; B 140 installed, 0\.82/);
+  // The footprint's share is a generator artifact (deep-region-coverage-gap.md): said next to it.
+  assert.match(benchMarkdown(b), /Region share: a footprint-generator artifact[^\n]*not a KPI/);
   // Without region stats (no aot): no region line, nothing set aside for it.
   const plain = benchAA([run(1, 20, 20), run(2, 20, 20), run(3, 20, 20), run(4, 20, 20)].map((r) => { for (const s of ["baseline", "candidate"]) { delete r[s].cold.p4; delete r[s].cold.p4Raw; } return r; }));
   assert.equal(plain.regions, null);
