@@ -474,9 +474,14 @@ export async function translateWithContinuations(m, f, { mask, maxBlocks, names,
   // An uncapped first fragment can still leave code out: the core's
   // discovery does not follow an mtmsr's fall-through (an exit: MSR may
   // have changed), so blocks only it reaches had no entry (a homebrew's main
-  // loop: 35 % of its cycles outside regions). The frontier says so.
+  // loop: 35 % of its cycles outside regions). The frontier says so; it is
+  // followed only when that code loops (a branch back at or past the first
+  // leader). A straight tail after an mtmsr (an OS routine's FPU save or
+  // load, the FP unavailable path) runs once per call: as a region it cost
+  // one more region entry per call and broke block chains there (race
+  // scene -1.3 %, review of #240).
   const branches = functionBranches(m, f.ranges);
-  if (!seeds.length && !cut && !capped(first.fragment, maxBlocks, maxFragmentBytes) && !frontier(branches, owned).length) return first;
+  if (!seeds.length && !cut && !capped(first.fragment, maxBlocks, maxFragmentBytes) && !loopsPast(branches, frontier(branches, owned))) return first;
   const tried = new Set();
   const continuations = [];
   // The budget counts only what goes past the function's old single
@@ -615,6 +620,14 @@ export function withoutStarts(ranges, starts) {
     if (s < e) out.push([s, e >>> 0]);
   }
   return out;
+}
+
+// Whether a direct branch at or past the first of `leaders` goes back to an
+// address at or past it: the code the frontier leads to holds a loop.
+export function loopsPast(branches, leaders) {
+  if (!leaders.size && !leaders.length) return false;
+  const lo = Math.min(...leaders);
+  return branches.some(([a, targets]) => a >= lo && targets.some((t) => t <= a && t >= lo));
 }
 
 // The direct branches of the code in `ranges` ([start, end) guest

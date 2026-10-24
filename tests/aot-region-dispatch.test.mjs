@@ -1142,7 +1142,8 @@ test("the region key changes with the formation", async () => {
   assert.notEqual(await regionModuleKey(f, { ...parts, formation: 3 }), await regionModuleKey(f, { ...parts, formation: 4 }), "4: continuations stop at held blocks");
   assert.notEqual(await regionModuleKey(f, { ...parts, formation: 4 }), await regionModuleKey(f, { ...parts, formation: 5 }), "5: extra entries seed the frontier");
   assert.notEqual(await regionModuleKey(f, { ...parts, formation: 5 }), await regionModuleKey(f, { ...parts, formation: 6 }), "6: continuations past an uncapped first fragment");
-  assert.equal(await regionModuleKey(f, parts), await regionModuleKey(f, { ...parts, formation: 6 }), "6 by default");
+  assert.notEqual(await regionModuleKey(f, { ...parts, formation: 6 }), await regionModuleKey(f, { ...parts, formation: 7 }), "7: past an uncapped first fragment only into a loop");
+  assert.equal(await regionModuleKey(f, parts), await regionModuleKey(f, { ...parts, formation: 7 }), "7 by default");
 });
 
 
@@ -1397,6 +1398,23 @@ test("continuations: code past an mtmsr is held even when the first fragment is 
   const held = new Set([r.fragment, ...(r.continuations ?? [])].flatMap((x) => x.entries));
   assert.ok(held.has(t.labels.loop), "the loop is held by a continuation");
   assert.equal(r.budgetCharged ?? 0, 0, "within the old single fragment's free blocks");
+});
+test("continuations: a straight tail past an mtmsr is left to the block path, the first fragment not full", { skip: contSkip }, async () => {
+  // An OS routine's shape: mtmsr, then a few blocks without a loop, run
+  // once per call. A continuation there was one more region entry per call
+  // and a broken block chain (race scene -1.3 %, review of #240).
+  const MTMSR_R6 = 0x7cc00124;
+  const t = assemble(LONG, [
+    asm.addi(3, 3, 1), asm.cmplwi(3, 0xffff), (pc, l) => asm.beq(pc, l.out),
+    MTMSR_R6,
+    asm.addi(4, 4, 1), asm.cmplwi(4, 40), (pc, l) => asm.beq(pc, l.tail),
+    asm.addi(5, 5, 1),
+    "tail", asm.addi(6, 6, 1),
+    "out", asm.blr()
+  ]);
+  const r = await continuationsOf(t);
+  assert.ok(r.fragment.entries.length < 64 && !r.fragment.entries.includes(t.labels.tail), "the first fragment stops at the mtmsr");
+  assert.equal(r.continuations, undefined, "no continuation: nothing past the mtmsr loops");
 });
 test("continuations: an extra entry of the plan that no direct branch reaches is held, and runs like the interpreter", { skip: contSkip }, async () => {
   const t = assemble(LONG, [
