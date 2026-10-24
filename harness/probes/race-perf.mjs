@@ -108,7 +108,7 @@ import { consistentRead, decodeRegionStats, poolStats, regionShares, topMisses }
 import { consistentMemRead, decodeMemStats, memAccessShares, poolMemStats } from "../lib/mem-access-stats.mjs";
 import { consistentHeadroomRead, decodeHeadroomStats, headroomOf, invalidReasons, querySpeed, unlimitedAllowed } from "../lib/headroom.mjs";
 import { summarizePcSamples } from "../../src/harness-pc-sampler.js";
-import { busiestThread, checkPerfAccess, counterEvents, cyclesPerGuestCycle, instructionsPerGuestCycle, perfCounters } from "../lib/perf-counters.mjs";
+import { busiestThread, checkPerfAccess, counterEvents, counterSanity, cyclesPerGuestCycle, instructionsPerGuestCycle, perfCounters } from "../lib/perf-counters.mjs";
 import { checkXctrace, freeDiskGB, perKiloGuestCycles, xctraceCounters, xctraceNeedGB } from "../lib/xctrace-counters.mjs";
 import { emulatedStart } from "../lib/emulated-window.mjs";
 
@@ -562,6 +562,11 @@ async function measureSide(side, o, loadGate) {
       // xctrace (macOS): per 1000 guest cycles, the host cycles and the cycles
       // each fraction stands for (I-cache, iTLB, …).
       for (const w of [record.cold, record.warm]) if (w?.counters) Object.assign(w, { instructionsPerGuestCycle: instructionsPerGuestCycle(w), cyclesPerGuestCycle: cyclesPerGuestCycle(w), ...(w.counters.tool === "xctrace" ? { perKiloGuestCycles: perKiloGuestCycles(w) } : {}) });
+      // Counters that cannot be the CPU thread's are kept but never paired.
+      for (const w of [record.cold, record.warm]) {
+        const why = w?.counters ? counterSanity(w) : null;
+        if (why) { Object.assign(w, { countersRejected: why, instructionsPerGuestCycle: null, cyclesPerGuestCycle: null }); console.warn(`[race-perf] ${side.name}: counters rejected, ${why}`); }
+      }
     } catch (error) {
       record.error = String(error?.message || error).slice(0, 300);
       if (error?.runTimeout) {
