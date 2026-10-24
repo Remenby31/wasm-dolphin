@@ -156,8 +156,8 @@ test("review #22: odd runs and a pinned coreid are refused with --baseline", () 
 });
 
 test("--worker-read: per request start, end and the numeric fields' end - start; an error gives no delta", () => {
-  const start = { validationReadDstAlphaPasses: { flushes: 10, extraDraws: 4, enabled: true }, validationReadMissing: { error: "unknown request" } };
-  const end = { validationReadDstAlphaPasses: { flushes: 70, extraDraws: 4, enabled: true }, validationReadMissing: { error: "unknown request" } };
+  const start = { validationReadDstAlphaPasses: { id: 361, flushes: 10, extraDraws: 4, enabled: true }, validationReadMissing: { error: "unknown request" } };
+  const end = { validationReadDstAlphaPasses: { id: 727, flushes: 70, extraDraws: 4, enabled: true }, validationReadMissing: { error: "unknown request" } };
   const r = workerReadDeltas(start, end);
   assert.deepEqual(r.validationReadDstAlphaPasses.delta, { flushes: 60, extraDraws: 0 });
   assert.deepEqual(r.validationReadDstAlphaPasses.end, end.validationReadDstAlphaPasses);

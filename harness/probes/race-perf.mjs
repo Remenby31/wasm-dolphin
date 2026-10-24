@@ -90,7 +90,7 @@
 // - --worker-read a,b: worker requests (cumulative counters, e.g. a patch's
 //   validationRead* export) called just before and just after the speed
 //   window; each window carries workerReads[name] = { start, end, delta }
-//   (delta: end - start per numeric field). A request the core lacks gives
+//   (delta: end - start per numeric field but the reply's id). A request the core lacks gives
 //   its error, never a failure.
 import { execFileSync } from "node:child_process";
 import { randomBytes } from "node:crypto";
@@ -395,7 +395,7 @@ export function workerReadDeltas(start, end) {
   return Object.fromEntries(Object.keys(start).map((name) => {
     const a = start[name], b = end[name];
     const delta = a && b && !a.error && !b.error
-      ? Object.fromEntries(Object.keys(b).filter((k) => typeof b[k] === "number" && typeof a[k] === "number").map((k) => [k, b[k] - a[k]]))
+      ? Object.fromEntries(Object.keys(b).filter((k) => k !== "id" && typeof b[k] === "number" && typeof a[k] === "number").map((k) => [k, b[k] - a[k]]))
       : null;
     return [name, { start: a, end: b, delta }];
   }));
