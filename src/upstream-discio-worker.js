@@ -1853,7 +1853,7 @@ async function handleMessage(type, payload) {
     case "validationPcSampler":
       return harnessPcSampler(payload);
     case "validationReadDiscReads":
-      return harnessDiscReads();
+      return harnessDiscReads(payload);
     case "replacePresenterCanvas":
       return replacePresenterCanvas(payload);
     case "validationLoseWebGlContext": {
@@ -3162,7 +3162,9 @@ function timeDiscReads(workerFs) {
   ops.read.timedDiscReads = true;
 }
 
-function harnessDiscReads() {
+// resetMax (patch 0154): the maxima start over after this read, both sides,
+// so the next read gives the maxima of a window.
+function harnessDiscReads({ resetMax = false } = {}) {
   if (!harnessEnabled) return { error: "harness hooks are off" };
   const stats = moduleInstance?._DolphinWeb_DiscReadStats;
   let core = null;
@@ -3177,7 +3179,12 @@ function harnessDiscReads() {
       moduleInstance._free(ptr);
     }
   }
-  return { service: { ...discReadService }, readahead: discBlockReader ? { ...discBlockReader.stats } : null, core, frame: api?.getFrame?.() ?? null };
+  const read = { service: { ...discReadService }, readahead: discBlockReader ? { ...discBlockReader.stats } : null, core, frame: api?.getFrame?.() ?? null };
+  if (resetMax) {
+    discReadService.maxMs = 0;
+    moduleInstance?._DolphinWeb_DiscReadStatsResetMax?.();
+  }
+  return read;
 }
 
 // WORKERFS lookup, with a fallback that current Emscripten requires.

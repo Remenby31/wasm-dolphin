@@ -19,8 +19,8 @@ test("the worker times its own service of those reads, harness only", async () =
   const w = await read("../src/upstream-discio-worker.js");
   assert.match(w, /if \(harnessEnabled\) \{\n\s*timeDiscReads\(resolveWorkerFs\(moduleInstance\)\);/);
   assert.match(w, /ops\.read = function timedRead\(stream, buffer, offset, length, position\) \{/);
-  assert.match(w, /case "validationReadDiscReads":\n\s*return harnessDiscReads\(\);/);
-  assert.match(w, /function harnessDiscReads\(\) \{\n\s*if \(!harnessEnabled\) return/);
+  assert.match(w, /case "validationReadDiscReads":\n\s*return harnessDiscReads\(payload\);/);
+  assert.match(w, /function harnessDiscReads\(\{ resetMax = false \} = \{\}\) \{\n\s*if \(!harnessEnabled\) return/);
 });
 
 // Off unless the harness is on: in the product neither side times anything.
@@ -36,4 +36,14 @@ test("0151's counters are off unless the harness turns them on", async () => {
   assert.match(added, /if \(time_wait\)\n\+\s*\{/);
   const w = await read("../src/upstream-discio-worker.js");
   assert.match(w, /if \(harnessEnabled\) \{\n\s*timeDiscReads\(resolveWorkerFs\(moduleInstance\)\);\n\s*moduleInstance\._DolphinWeb_SetDiscReadStatsEnabled\?\.\(1\);/);
+});
+
+// Patch 0154: a window's maxima (both sides) start over on request.
+test("0154 resets the maxima on request, both sides, and only them", async () => {
+  const patch = await read("../patches/dolphin-wasm/snapshot/0154-disc-read-max-reset.patch");
+  assert.match(patch, /\+extern "C" EMSCRIPTEN_KEEPALIVE void DolphinWeb_DiscReadStatsResetMax\(\)\n\+\{\n\+\s*s_disc_read_max_us\.store\(0, std::memory_order_relaxed\);\n\+\s*s_disc_finish_wait_max_us\.store\(0, std::memory_order_relaxed\);\n[+ ]\}/);
+  const w = await read("../src/upstream-discio-worker.js");
+  assert.match(w, /case "validationReadDiscReads":\n\s*return harnessDiscReads\(payload\);/);
+  // The read is taken before the reset: it still holds the window's maxima.
+  assert.match(w, /const read = \{ service: \{ \.\.\.discReadService \}[^\n]*\n\s*if \(resetMax\) \{\n\s*discReadService\.maxMs = 0;\n\s*moduleInstance\?\._DolphinWeb_DiscReadStatsResetMax\?\.\(\);/);
 });

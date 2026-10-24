@@ -87,6 +87,11 @@
 //   (idleTimeShare), and its diagnostics (p4.diagnostics). The speed
 //   windows are identical with or without it; p4 is compared between sides
 //   only when both have it (p4Compare).
+// - --worker-read a,b: worker requests (cumulative counters, e.g. a patch's
+//   validationRead* export) called just before and just after the speed
+//   window; each window carries workerReads[name] = { start, end, delta }
+//   (delta: end - start per numeric field but the reply's id). A request the core lacks gives
+//   its error, never a failure.
 import { execFileSync } from "node:child_process";
 import { randomBytes } from "node:crypto";
 import { existsSync, mkdirSync, readdirSync, readFileSync, rmSync, statSync, writeFileSync } from "node:fs";
@@ -256,6 +261,7 @@ export async function measure(session, o) {
     // A scene whose region stats must cover the window itself (matrix.mjs
     // regionStatsInWindow): reset now, read just after the window.
     const regionInWindow = o.regionInWindow && o.regionSample != null;
+    const readsStart = await workerReads(page, o.workerRead);
     if (regionInWindow) await workerRequest(page, "validationReadJitRegionStats", { sampleEvery: o.regionSample }, 10000);
     // The emulated time this host-time window covers (judge, 2026-10-22: a
     // faster side covers more of the scene): core ticks just before and just
@@ -278,6 +284,7 @@ export async function measure(session, o) {
       if (s === Math.floor(o.secs / 2)) threads.push(rendererThreads(session.profileDir));
     }
     const hrEnd = hrStart && !hrStart.error ? await headroomRead(page) : null;
+    const readsEnd = await workerReads(page, o.workerRead);
     const regionInWindowEnd = regionInWindow ? await workerRequest(page, "validationReadJitRegionStats", {}, 10000) : null;
     const counters = o.onWindow ? await o.onWindow("end", session) : undefined;
     const chunk = await readTimeline(page);
@@ -338,6 +345,7 @@ export async function measure(session, o) {
     return {
       windowMs: Math.round(t1 - t0),
       ...(pacingConfig ? { pacingConfig } : {}),
+      ...(o.workerRead.length ? { workerReads: workerReadDeltas(readsStart, readsEnd) } : {}),
       relaxedMadd: relaxedMadd?.mode ?? null, fusedMadd: relaxedMadd?.coreFused ?? null,
       // Guest seconds this window covered (core ticks / ticks per second);
       // the reads bracket the window, so a few host ms more than windowMs.
@@ -381,6 +389,24 @@ export async function measure(session, o) {
 
 // Headroom counters (0113) and the core ticks, read together; reset >= 0
 // zeroes and turns the counters on.
+// --worker-read: each request's reply (or its error), in order.
+async function workerReads(page, names) {
+  const out = {};
+  for (const name of names) out[name] = await workerRequest(page, name, {}, 10000).catch((e) => ({ error: String(e.message || e) }));
+  return out;
+}
+
+// Start, end and end - start of each numeric field (cumulative counters).
+export function workerReadDeltas(start, end) {
+  return Object.fromEntries(Object.keys(start).map((name) => {
+    const a = start[name], b = end[name];
+    const delta = a && b && !a.error && !b.error
+      ? Object.fromEntries(Object.keys(b).filter((k) => k !== "id" && typeof b[k] === "number" && typeof a[k] === "number").map((k) => [k, b[k] - a[k]]))
+      : null;
+    return [name, { start: a, end: b, delta }];
+  }));
+}
+
 async function headroomRead(page, reset = -1) {
   const r = await workerRequest(page, "validationReadHeadroomStats", { reset }, 10000).catch((e) => ({ error: String(e.message || e) }));
   if (r?.error) return { error: /Unknown upstream worker message/.test(r.error) ? "engine without validationReadHeadroomStats" : r.error };
@@ -629,7 +655,7 @@ async function main() {
       "emulated-window": { type: "string" }, "emulated-warmup": { type: "string" }, "emulated-poll-ms": { type: "string", default: "100" },
       hold: { type: "string", default: "KeyX" }, warm: { type: "boolean", default: false },
       "max-load": { type: "string" }, "lock-wait": { type: "string", default: "1800" },
-      pcsample: { type: "string" }, "pc-raw": { type: "boolean", default: false }, symbols: { type: "string" }, "region-sample": { type: "string" }, "region-secs": { type: "string", default: "10" }, counters: { type: "boolean", default: false }, "counter-events": { type: "string" }, "pin-cpu-thread": { type: "string" }, "run-timeout": { type: "string", default: "1800" }, "unique-frames": { type: "string" }, display: { type: "boolean", default: false }, "mem-stats": { type: "boolean", default: false }, "mem-warm": { type: "string", default: "5" }, headroom: { type: "boolean", default: false }, "frames-per-vi-ref": { type: "string" }, "baseline-query": { type: "string" }, "chrome-args": { type: "string" }, "baseline-chrome-args": { type: "string" },
+      pcsample: { type: "string" }, "pc-raw": { type: "boolean", default: false }, symbols: { type: "string" }, "region-sample": { type: "string" }, "worker-read": { type: "string" }, "region-secs": { type: "string", default: "10" }, counters: { type: "boolean", default: false }, "counter-events": { type: "string" }, "pin-cpu-thread": { type: "string" }, "run-timeout": { type: "string", default: "1800" }, "unique-frames": { type: "string" }, display: { type: "boolean", default: false }, "mem-stats": { type: "boolean", default: false }, "mem-warm": { type: "string", default: "5" }, headroom: { type: "boolean", default: false }, "frames-per-vi-ref": { type: "string" }, "baseline-query": { type: "string" }, "chrome-args": { type: "string" }, "baseline-chrome-args": { type: "string" },
       "core-candidate": { type: "string", multiple: true, default: [] },
       port: { type: "string", default: process.env.HARNESS_PORT }, out: { type: "string" }
     },
@@ -686,6 +712,10 @@ async function main() {
     pcRaw: values["pc-raw"],
     // --mem-stats needs the region counters (its region estimates ride on
     // them): on without timers (0) unless --region-sample says otherwise.
+    workerRead: (values["worker-read"] ?? "").split(",").map((x) => x.trim()).filter(Boolean).map((x) => {
+      if (!/^validationRead[A-Za-z]+$/.test(x)) throw new Error(`--worker-read ${x}: expected a validationRead* worker request`);
+      return x;
+    }),
     regionSample: values["region-sample"] == null ? (values["mem-stats"] ? 0 : null) : num(values, "region-sample", { min: 0, int: true }),
     regionSecs: num(values, "region-secs", { min: 1 }),
     // --counters (Linux perf): host instructions per guest cycle of the
