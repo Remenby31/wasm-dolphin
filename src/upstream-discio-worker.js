@@ -1645,6 +1645,7 @@ async function handleMessage(type, payload) {
         rushPresentation: payload.rushPresentation,
         syncOnSkipIdle: payload.syncOnSkipIdle,
         dupXfbRearmsThrottle: payload.dupXfbRearmsThrottle,
+        presentVsync: payload.presentVsync,
         coreLog: payload.coreLog,
         memcardSlotB: payload.memcardSlotB,
         efbAccess: payload.efbAccess,
@@ -2365,6 +2366,7 @@ async function loadCore({
   rushPresentation = false,
   syncOnSkipIdle = false,
   dupXfbRearmsThrottle = false,
+  presentVsync = false,
   coreLog = false,
   memcardSlotB = false,
   efbAccess = false,
@@ -2863,6 +2865,7 @@ async function loadCore({
       : undefined;
 
   const _t_factory = performance.now();
+  wgpuPresentVsync = presentVsync === true && typeof self.requestAnimationFrame === "function";
   releaseWgpuReadback();
   moduleInstance = await factory({
     noInitialRun: true,
@@ -4849,6 +4852,7 @@ function maybeCreateCausalTelemetry(videoStats, { force = false } = {}) {
     },
     webgpu: {
       ...webGpuCausalStats,
+      presentVsync: wgpuPresentVsync ? { ...wgpuPresentVsyncStats } : null,
       visualCadence: wgpuVisualCadenceSnapshot(),
       mappedStaging: wgpuMappedStagingPool?.snapshot() ?? null,
       mappedDrainCoalescing: wgpuMappedDrainCoalescer.snapshot(),
@@ -12271,6 +12275,7 @@ const webGpuCausalStats = {
     "time-budget": 0,
     "deferred-begin": 0,
     "load-fence": 0,
+    "display-tick": 0,
   },
   drainDurationBucketBoundsMs: [...WGPU_DRAIN_DURATION_BUCKET_BOUNDS_MS],
   drainDurationHistogram: new Array(WGPU_DRAIN_DURATION_BUCKET_BOUNDS_MS.length + 1).fill(0),
@@ -12504,6 +12509,57 @@ function recordBoundedHistogram(values, bounds, value) {
   let bucket = 0;
   while (bucket < bounds.length && value > bounds[bucket]) bucket += 1;
   values[bucket] += 1;
+}
+
+// ?presentvsync=1 (research/deep-frame-pacing.md §5 step 2, its smallest
+// form): at most one wgpu present per BeginFrame. Chrome pushes the canvas to
+// the compositor at its BeginFrame and keeps only the last picture since the
+// previous one; a second frame's getCurrentTexture() discards the first,
+// unseen. So once a present went out, the drain stops before the next
+// frame's backbuffer pass (BEGIN_PASS fb#0, where getCurrentTexture() is
+// called) and the worker's rAF, at the next BeginFrame, lets it through. The
+// first present after a BeginFrame still goes out at once: no added latency
+// unless two pictures fall in one display interval. A timer stands in when
+// no BeginFrame comes (a hidden tab), so the core never waits on a ring held
+// for a display that does not tick.
+let wgpuPresentVsync = false;
+let wgpuPresentsSinceBeginFrame = 0;
+let wgpuPresentVsyncHeld = false;
+let wgpuPresentVsyncFallback = null;
+let wgpuPresentVsyncLoop = false;
+const WGPU_PRESENT_VSYNC_FALLBACK_MS = 50;
+const wgpuPresentVsyncStats = { held: 0, releasedByBeginFrame: 0, releasedByTimer: 0 };
+
+function releaseWgpuPresentVsync(byTimer) {
+  wgpuPresentsSinceBeginFrame = 0;
+  if (wgpuPresentVsyncFallback !== null) {
+    clearTimeout(wgpuPresentVsyncFallback);
+    wgpuPresentVsyncFallback = null;
+  }
+  if (!wgpuPresentVsyncHeld) return;
+  wgpuPresentVsyncHeld = false;
+  if (byTimer) wgpuPresentVsyncStats.releasedByTimer += 1;
+  else wgpuPresentVsyncStats.releasedByBeginFrame += 1;
+  drainWebGpuCmdRing("presentation");
+}
+
+function startWgpuPresentVsyncLoop() {
+  if (wgpuPresentVsyncLoop) return;
+  wgpuPresentVsyncLoop = true;
+  const tick = () => {
+    releaseWgpuPresentVsync(false);
+    self.requestAnimationFrame(tick);
+  };
+  self.requestAnimationFrame(tick);
+}
+
+function holdWgpuPresentForBeginFrame() {
+  if (!wgpuPresentVsyncHeld) wgpuPresentVsyncStats.held += 1;
+  wgpuPresentVsyncHeld = true;
+  wgpuPresentVsyncFallback ??= setTimeout(() => {
+    wgpuPresentVsyncFallback = null;
+    releaseWgpuPresentVsync(true);
+  }, WGPU_PRESENT_VSYNC_FALLBACK_MS);
 }
 
 function drainWebGpuCmdRing(source = "presentation") {
@@ -13232,6 +13288,12 @@ function drainWebGpuCmdRing(source = "presentation") {
     }
     const recWord = (ring.slotsBase + (read % ring.capacity) * 32) >>> 2;
     const op = u32[recWord];
+    if (wgpuPresentVsync && wgpuPresentsSinceBeginFrame > 0 && protocolPassDepth === 0 &&
+        op === WGPU_CMD_OP_BEGIN_PASS && u32[recWord + 1] === 0) {
+      holdWgpuPresentForBeginFrame();
+      budgetStopReason = "display-tick";
+      break;
+    }
     if (budgetGate) {
       const beforeRecordBudget = budgetGate.check({
         processed: processedBeforeRecord,
@@ -15615,6 +15677,10 @@ function drainWebGpuCmdRing(source = "presentation") {
           // A frame carrying the diagnostic input marker is not streamed.
           if (streamCapture.active && !hardwareInputMarkerApplied) streamCapture.offerCanvas(renderCanvas, api?.getFrame?.() ?? 0);
           recordPresentedFrame(api?.getFrame?.() ?? 0, wgpuExactCapture.currentBoot());
+          if (wgpuPresentVsync) {
+            wgpuPresentsSinceBeginFrame += 1;
+            startWgpuPresentVsyncLoop();
+          }
           wgpuPresentedSource = {
             textureId: wgpuLastBackbufferSourceTextureId, rect: wgpuNextPresentSource
           };

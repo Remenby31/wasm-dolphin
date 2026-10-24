@@ -17,7 +17,7 @@ const SWITCHES = [
 test("pacing switches: URL parsing, shipped defaults, each switch only its own", async () => {
   const { requestedPacing } = await import("../src/core-host.js");
   // Rush off by default (upstream's default): ?rush=1 turns it back on.
-  assert.deepEqual(requestedPacing(""), { rushPresentation: false, syncOnSkipIdle: false, dupXfbRearmsThrottle: false });
+  assert.deepEqual(requestedPacing(""), { rushPresentation: false, syncOnSkipIdle: false, dupXfbRearmsThrottle: false, presentVsync: false });
   for (const s of SWITCHES) {
     const p = requestedPacing(`?${s.param}`);
     assert.equal(p[s.option], s.on, s.param);
@@ -73,4 +73,48 @@ test("Rush off by default: a page or core that sets nothing runs without Rush Fr
   assert.match(core, /Module\['dolphinRushPresentation'\] === true\) \? 1 : 0;/, "the core's own default is off too");
   const worker = await readFile(new URL("../src/upstream-discio-worker.js", import.meta.url), "utf8");
   assert.match(worker, /\n  rushPresentation = false,\n/);
+});
+
+// ?presentvsync=1 (research/deep-frame-pacing.md §5 step 2): at most one wgpu
+// present per BeginFrame, held in the worker (no core flag).
+test("presentvsync: URL → host → adapter → worker, off by default", async (t) => {
+  const { requestedPacing } = await import("../src/core-host.js");
+  assert.equal(requestedPacing("").presentVsync, false);
+  assert.equal(requestedPacing("?presentvsync=1").presentVsync, true);
+  assert.equal(requestedPacing("?presentvsync=1").rushPresentation, false, "only its own switch");
+  const { UpstreamWorkerAdapter } = await import("../src/upstream-worker-adapter.js");
+  assert.equal(new UpstreamWorkerAdapter({}).presentVsync, false);
+  const adapter = new UpstreamWorkerAdapter(requestedPacing("?presentvsync=1"));
+  let posted = null;
+  adapter.worker = {
+    postMessage(message) {
+      posted = message;
+      queueMicrotask(() => adapter.handleMessage({ id: message.id, ok: true }));
+    }
+  };
+  const originalWindow = globalThis.window;
+  globalThis.window = { location: { href: "http://127.0.0.1:8080/?presentvsync=1", search: "?presentvsync=1" } };
+  t.after(() => {
+    if (originalWindow === undefined) delete globalThis.window;
+    else globalThis.window = originalWindow;
+  });
+  await adapter.load();
+  assert.equal(posted.payload.presentVsync, true, "presentVsync in the init payload");
+  const host = await readFile(new URL("../src/core-host.js", import.meta.url), "utf8");
+  const worker = await readFile(new URL("../src/upstream-discio-worker.js", import.meta.url), "utf8");
+  assert.match(host, /\n {12}presentVsync: this\.pacing\.presentVsync,\n/);
+  assert.match(worker, /\n {8}presentVsync: payload\.presentVsync,\n/);
+  assert.match(worker, /wgpuPresentVsync = presentVsync === true && typeof self\.requestAnimationFrame === "function";/, "only with a worker rAF");
+});
+
+test("presentvsync: the drain stops before the next frame's backbuffer pass, never inside a pass", async () => {
+  const worker = await readFile(new URL("../src/upstream-discio-worker.js", import.meta.url), "utf8");
+  // fb#0's BEGIN_PASS is where getCurrentTexture() is called: stopping later
+  // would already have discarded the unseen picture.
+  assert.match(worker, /case WGPU_CMD_OP_BEGIN_PASS: \{[\s\S]{0,6000}?if \(fbId === 0\) \{[\s\S]{0,8000}?renderGpu\.context\.getCurrentTexture\(\)/);
+  assert.match(worker, /if \(wgpuPresentVsync && wgpuPresentsSinceBeginFrame > 0 && protocolPassDepth === 0 &&\n\s+op === WGPU_CMD_OP_BEGIN_PASS && u32\[recWord \+ 1\] === 0\) \{\n\s+holdWgpuPresentForBeginFrame\(\);\n\s+budgetStopReason = "display-tick";\n\s+break;/);
+  // released by the worker's rAF, or by a timer when no BeginFrame comes
+  assert.match(worker, /self\.requestAnimationFrame\(tick\)/);
+  assert.match(worker, /setTimeout\(\(\) => \{\n\s+wgpuPresentVsyncFallback = null;\n\s+releaseWgpuPresentVsync\(true\);/);
+  assert.match(worker, /"display-tick": 0,/, "the stop reason is counted");
 });

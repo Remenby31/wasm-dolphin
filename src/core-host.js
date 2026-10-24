@@ -466,6 +466,7 @@ export class EmulatorHost {
             rushPresentation: this.pacing.rushPresentation,
             syncOnSkipIdle: this.pacing.syncOnSkipIdle,
             dupXfbRearmsThrottle: this.pacing.dupXfbRearmsThrottle,
+            presentVsync: this.pacing.presentVsync,
             coreLog: this.coreLog,
             memcardSlotB: this.memcardSlotB,
             efbAccess: this.efbAccess,
@@ -1635,7 +1636,9 @@ export function requestedPacing(search = window.location.search) {
   return {
     rushPresentation: params.get("rush") === "1",
     syncOnSkipIdle: params.get("synconidle") === "1",
-    dupXfbRearmsThrottle: params.get("dupvsync") === "1"
+    dupXfbRearmsThrottle: params.get("dupvsync") === "1",
+    // ?presentvsync=1: at most one wgpu present per BeginFrame (the worker's rAF).
+    presentVsync: params.get("presentvsync") === "1"
   };
 }
 
