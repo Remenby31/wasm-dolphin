@@ -25,7 +25,7 @@
       "commit": "01e0577914a75a2569c846778c2f93aa8e6feddd"
     }
   },
-  "patchSeriesSha256": "dbd6479222871d82820505dd82a04cb60f4243dc76d8c942ab3d35fb4a7ac334",
+  "patchSeriesSha256": "6a61e2e1f781e1f959365ba711471efc19c5e18978685d9ac101f662ba4d3cb4",
   "patches": [
     {
       "order": 1,
@@ -903,12 +903,52 @@
       "order": 110,
       "cwd": ".",
       "hashMode": "lf-normalized",
+      "path": "patches/dolphin-wasm/snapshot/0143-paired-simd-add-mul.patch",
+      "size": 6203,
+      "sha256": "848a4196392c0fe8f37f2588701970395ddfb850b30184a984eb8e274036d55d"
+    },
+    {
+      "order": 111,
+      "cwd": ".",
+      "hashMode": "lf-normalized",
       "path": "patches/dolphin-wasm/snapshot/0145-region-unverify-on-icache-flush.patch",
       "size": 1740,
       "sha256": "a9b96399e4544b2d882f99ded0ab249c2e5254307196764da4ad35fe56524403"
     },
     {
-      "order": 111,
+      "order": 112,
+      "cwd": ".",
+      "hashMode": "lf-normalized",
+      "path": "patches/dolphin-wasm/snapshot/0146-paired-simd-compact.patch",
+      "size": 7834,
+      "sha256": "a7c038f54740c6ce3ca076dc5d64bcb603c309d8ecb7dd40c4c3795a1c8ae34e"
+    },
+    {
+      "order": 113,
+      "cwd": ".",
+      "hashMode": "lf-normalized",
+      "path": "patches/dolphin-wasm/snapshot/0147-psq-simd.patch",
+      "size": 5297,
+      "sha256": "79ca72b7fc03c1543a737737ce6abbf9edec8b43b7d683b2c3416228e2065770"
+    },
+    {
+      "order": 114,
+      "cwd": ".",
+      "hashMode": "lf-normalized",
+      "path": "patches/dolphin-wasm/snapshot/0148-wgpu-ring-wake-parked-consumer.patch",
+      "size": 3049,
+      "sha256": "c80aef7d39c6faa8975e30d5a6ed58af91b3d3bc1334491d344437fc6ca716af"
+    },
+    {
+      "order": 115,
+      "cwd": ".",
+      "hashMode": "lf-normalized",
+      "path": "patches/dolphin-wasm/snapshot/0149-dst-alpha-pass-switch.patch",
+      "size": 2531,
+      "sha256": "ca26a1b08e8b66105d08838e8897982c1dd51863fe72dcf65cbe3212d453c7dc"
+    },
+    {
+      "order": 116,
       "cwd": "Externals/SFML/SFML",
       "hashMode": "lf-normalized",
       "path": "patches/dolphin-wasm/submodules/0001-sfml-emscripten-config.patch",
@@ -916,7 +956,7 @@
       "sha256": "f82197a21fe982ad83f6ee7bbf5a03839b1cebd4d64da3eab11263842bf61d89"
     },
     {
-      "order": 112,
+      "order": 117,
       "cwd": "Externals/xxhash/xxHash",
       "hashMode": "lf-normalized",
       "path": "patches/dolphin-wasm/submodules/0002-xxhash-wasm-simd-scalar.patch",

@@ -236,6 +236,106 @@ test("a compile request is precompiled, kept alive and marked ready in the core'
   assert.deepEqual(heap, snapshot, "no byte of the heap changed");
 });
 
+test("without a native module cache (JSC), past the boot, a compile request is marked ready with nothing compiled or kept here", async (t) => {
+  const originalSelf = globalThis.self;
+  globalThis.self = { location: { href: "http://127.0.0.1:8080/" }, addEventListener() {}, postMessage() {} };
+  t.after(() => {
+    if (originalSelf === undefined) delete globalThis.self;
+    else globalThis.self = originalSelf;
+  });
+  const {
+    installDolphinPthreadChannels, precompileDolphinJitModule, setDolphinJitReadyHeapForTest, dolphinJitReadyStatsForTest,
+    setDolphinAotCompilerForTest, setWasmEngineForTest, setAotCoreBootedForTest, dolphinJitCopiesSkippedForTest
+  } = await import(`${workerUrl.href}?no-native-cache-test=${Date.now()}`);
+  const { canonicalWasmBlockKey } = await import("../src/jit-cache-identity.js");
+  const cpu = fakePthreadWorker();
+  await installDolphinPthreadChannels({ PThread: { runningWorkers: [cpu], unusedWorkers: [] } }, { jitCacheEnabled: true });
+  const request = cpu.listeners.find(({ name }) => name === "handleDolphinJitCompileRequest").listener;
+  let workersMade = 0;
+  setDolphinAotCompilerForTest({ enabled: true, createWorker: () => { workersMade += 1; throw new Error("no compile expected"); } });
+  t.after(() => setDolphinAotCompilerForTest({}));
+  const heap = new Uint8Array(new SharedArrayBuffer(0x20000));
+  const READY = 0x1000;
+  setDolphinJitReadyHeapForTest(heap, READY);
+  t.after(() => setDolphinJitReadyHeapForTest(null));
+  setWasmEngineForTest("jsc");
+  setAotCoreBootedForTest(true);
+  t.after(() => { setWasmEngineForTest("unknown"); setAotCoreBootedForTest(false); });
+  const plusOne = Uint8Array.from(Buffer.from("0061736d0100000001060160017f017f03020100070501016600000a09010700200041016a0b", "hex"));
+  const key = await canonicalWasmBlockKey(plusOne);
+  const slot = parseInt(key.slice(-64, -60), 16);
+  const skipped = dolphinJitCopiesSkippedForTest(), marks = dolphinJitReadyStatsForTest().marks;
+  await request({ currentTarget: cpu, data: { type: "dolphin-jit-compile-request", key, bytes: plusOne, kind: "block", readyPtr: READY, readySlot: slot } });
+  assert.equal(Atomics.load(heap, READY + slot), 1, "the CPU thread is not kept waiting");
+  assert.equal(dolphinJitReadyStatsForTest().marks - marks, 1);
+  assert.equal(workersMade, 0, "nothing compiled");
+  assert.equal(dolphinJitCopiesSkippedForTest() - skipped, 1);
+  assert.equal((await precompileDolphinJitModule(key, plusOne)).reason, "no-native-cache", "and no Module kept");
+  // V8 (or before the boot, whatever the engine): compiled and kept, as before
+  setWasmEngineForTest("jsc");
+  setAotCoreBootedForTest(false);
+  setDolphinAotCompilerForTest({});
+  const before = await precompileDolphinJitModule(key, plusOne);
+  assert.ok(before.module instanceof WebAssembly.Module, "before the boot the Module is kept (it reaches the pthreads)");
+});
+
+test("no native module cache: V8 past the boot unchanged, new blocks stored once and not kept, regions compiled but not kept; the engine comes from the adapter", async (t) => {
+  const originalSelf = globalThis.self;
+  globalThis.self = { location: { href: "http://127.0.0.1:8080/" }, addEventListener() {}, postMessage() {} };
+  t.after(() => {
+    if (originalSelf === undefined) delete globalThis.self;
+    else globalThis.self = originalSelf;
+  });
+  const {
+    installDolphinPthreadChannels, precompileDolphinJitModule, precompileAotRegion, setWasmEngineForTest, setAotCoreBootedForTest,
+    dolphinJitCopiesSkippedForTest, resolveWasmEngineName, setDolphinAotCompilerForTest
+  } = await import(`${workerUrl.href}?no-native-cache-paths-test=${Date.now()}`);
+  const { canonicalWasmBlockKey } = await import("../src/jit-cache-identity.js");
+  setDolphinAotCompilerForTest({});
+  t.after(() => { setWasmEngineForTest("unknown"); setAotCoreBootedForTest(false); });
+  const wasm = (n) => Uint8Array.from(Buffer.from(`0061736d0100000001060160017f017f03020100070501016600000a090107002000410${n}6a0b`, "hex"));
+  setAotCoreBootedForTest(true);
+
+  // V8 past the boot: compiled and kept, the same Module comes back
+  setWasmEngineForTest("v8");
+  const a = wasm("1"), aKey = await canonicalWasmBlockKey(a);
+  const kept = await precompileDolphinJitModule(aKey, a);
+  assert.ok(kept.module instanceof WebAssembly.Module);
+  assert.equal((await precompileDolphinJitModule(aKey, a)).module, kept.module);
+
+  // JSC past the boot: a region is compiled (its sections are read) but not kept
+  setWasmEngineForTest("jsc");
+  const r = wasm("2"), rKey = await canonicalWasmBlockKey(r);
+  const region = await precompileAotRegion(rKey, r);
+  assert.ok(region.module instanceof WebAssembly.Module, "compiled for validation and sections");
+  setWasmEngineForTest("v8");
+  assert.notEqual((await precompileDolphinJitModule(rKey, r)).module, region.module, "not kept: compiled again");
+  // control: under V8 a region is kept
+  const c = wasm("3"), cKey = await canonicalWasmBlockKey(c);
+  const control = await precompileAotRegion(cKey, c);
+  assert.equal((await precompileDolphinJitModule(cKey, c)).module, control.module);
+
+  // JSC past the boot: the CPU thread's new compile is stored once, never compiled or kept here
+  setWasmEngineForTest("jsc");
+  const cpu = fakePthreadWorker();
+  await installDolphinPthreadChannels({ PThread: { runningWorkers: [cpu], unusedWorkers: [] } }, { jitCacheEnabled: true });
+  const newCompile = cpu.listeners.find(({ name }) => name === "handleDolphinJitNewCompile").listener;
+  const n = wasm("4"), nKey = await canonicalWasmBlockKey(n);
+  const skipped = dolphinJitCopiesSkippedForTest();
+  await newCompile({ currentTarget: cpu, data: { type: "dolphin-jit-new-compile", hash: nKey, bytes: n } });
+  await newCompile({ currentTarget: cpu, data: { type: "dolphin-jit-new-compile", hash: nKey, bytes: n } });
+  assert.equal(dolphinJitCopiesSkippedForTest() - skipped, 1, "stored once, the repeat is deduplicated");
+  setWasmEngineForTest("v8");
+  const after = await precompileDolphinJitModule(nKey, n);
+  assert.ok(after.module instanceof WebAssembly.Module, "no Module was kept for it: compiled now");
+
+  // the engine as the adapter passed it (?wasmengine= on the page); anything else: the worker's own detection
+  assert.equal(resolveWasmEngineName("jsc", () => "v8"), "jsc");
+  assert.equal(resolveWasmEngineName("spidermonkey", () => "v8"), "spidermonkey");
+  assert.equal(resolveWasmEngineName("safari", () => "v8"), "v8");
+  assert.equal(resolveWasmEngineName(undefined, () => "unknown"), "unknown");
+});
+
 test("the off-thread compiler is on by default: no parameter, worker load defaults and adapter defaults", async () => {
   const { aotCompilerRequested, jitOffThreadRequested } = await import("../src/aot-compiler-worker.js");
   assert.equal(aotCompilerRequested(""), true);
@@ -270,6 +370,30 @@ test("region chaining is on by default; ?regionchain=0 reaches the core through 
   assert.match(source, /\n  regionChain = true,\n/);
   assert.match(source, /setJitRegionChaining: optionalCwrap\("DolphinWeb_JitSetRegionChaining", null, \["number"\]\)/);
   assert.match(source, /api\.setJitRegionChaining\?\.\(regionChain !== false \? 1 : 0\);/);
+});
+
+// The page's ?aotsample= (#187) and wasm engine (src/wasm-engine.js) reach
+// the disc worker only through the adapter's init message: both were
+// dropped there, the worker then sampling at 10 ms and detecting V8 by
+// itself whatever the page said.
+test("?aotsample= and the wasm engine reach the worker through the host, the adapter and the worker's init", async () => {
+  const { UpstreamWorkerAdapter } = await import("../src/upstream-worker-adapter.js");
+  const adapter = new UpstreamWorkerAdapter({ aotSampleMs: 0, wasmEngine: "jsc" });
+  assert.deepEqual([adapter.aotSampleMs, adapter.wasmEngine], [0, "jsc"]);
+  const host = await readFile(new URL("../src/core-host.js", import.meta.url), "utf8");
+  assert.match(host, /\n {12}aotSampleMs: this\.aotSampleMs,\n/);
+  assert.match(host, /\n {12}wasmEngine: this\.wasmEngine,\n/);
+  const adapterSource = await readFile(new URL("../src/upstream-worker-adapter.js", import.meta.url), "utf8");
+  assert.match(adapterSource, /\n {6}aotSampleMs: this\.aotSampleMs,\n/);
+  assert.match(adapterSource, /\n {6}wasmEngine: this\.wasmEngine,\n/);
+  const source = await readFile(workerUrl, "utf8");
+  assert.match(source, /\n {8}aotSampleMs: payload\.aotSampleMs,\n/);
+  assert.match(source, /\n {8}wasmEngine: payload\.wasmEngine,\n/);
+  // #215: ?regioncap=N|0 the same way.
+  assert.equal(new UpstreamWorkerAdapter({ regionCap: 0 }).regionCap, 0);
+  assert.match(host, /\n {12}regionCap: this\.regionCap,\n/);
+  assert.match(adapterSource, /\n {6}regionCap: this\.regionCap,\n/);
+  assert.match(source, /\n {8}regionCap: payload\.regionCap,\n/);
 });
 
 test("fused relaxed_madd is used where probed fused; ?fusedmadd=0 keeps the exact path, through the host, the adapter and the worker (0129)", async () => {

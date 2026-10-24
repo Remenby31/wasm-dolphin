@@ -1,5 +1,6 @@
 import { aotCompilerRequested, jitOffThreadRequested } from "./aot-compiler-worker.js";
 import { aotSamplePeriodRequested } from "./aot-hot-sampler.js";
+import { wasmEngine } from "./wasm-engine.js";
 import { parseCustomRtc } from "./custom-rtc.js";
 import { DolphinCoreAdapter, dolphinBundleAvailable } from "./dolphin-adapter.js";
 import { buttonMaskFromPressed, isPadPort } from "./input.js";
@@ -122,6 +123,8 @@ export class EmulatorHost {
     // Harness: accept a CPU fallback WebGPU adapter (SwiftShader), refused for
     // the app as no usable GPU (the Windows CI lane has nothing else).
     this.wgpuFallback = new URLSearchParams(window.location.search).get("wgpufallback") === "1";
+    // ?dstalpha2pass=0 (patch 0149): the dst-alpha second pass (0136) off.
+    this.dstAlphaTwoPass = new URLSearchParams(window.location.search).get("dstalpha2pass") !== "0";
     // Harness: keep a software WebGL presenter (SwiftShader), which the app
     // refuses for the 2D canvas (cheaper on a CPU).
     this.webglSoftware = new URLSearchParams(window.location.search).get("webglsw") === "1";
@@ -147,6 +150,13 @@ export class EmulatorHost {
     this.aotFirstLaunch = new URLSearchParams(window.location.search).get("aot") === "1";
     // With aot=1, the local profile's guest-PC sampler: ?aotsample=N ms, 0 off.
     this.aotSampleMs = aotSamplePeriodRequested(window.location.search);
+    // The wasm engine (src/wasm-engine.js), resolved here once: a worker's
+    // location is its own script's, so ?wasmengine= reaches it only this way.
+    this.wasmEngine = wasmEngine({ search: window.location.search });
+    // ?regioncap=N|0: the region function cap forced (tests, benches); by
+    // default the worker takes it from the engine (JSC only).
+    const regionCap = new URLSearchParams(window.location.search).get("regioncap");
+    this.regionCap = regionCap !== null && /^\d+$/.test(regionCap) ? Number(regionCap) : null;
     // With aot=1, regions tail-call the next region (patch 0102); ?regionchain=0 turns it off.
     this.regionChain = new URLSearchParams(window.location.search).get("regionchain") !== "0";
     // Where relaxed_madd is fused the JIT's FMA uses it (patch 0129); ?fusedmadd=0
@@ -318,6 +328,25 @@ export class EmulatorHost {
     // captureStream to the original canvas, permanently locking it from
     // transfer. Swapping in a fresh canvas element severs any such binding
     // because the new element has none of that history.
+    // A fresh canvas element in place of the current one (its attributes
+    // copied), transferred to the worker. Also used once the worker's WebGL
+    // presenter lost its context for good: a canvas that had a WebGL context
+    // can never get a 2D one.
+    const replaceCanvasForWorker = () => {
+      const replacement = document.createElement("canvas");
+      replacement.id = canvas.id;
+      replacement.width = canvas.width;
+      replacement.height = canvas.height;
+      for (const cls of canvas.classList) replacement.classList.add(cls);
+      replacement.setAttribute("aria-label", canvas.getAttribute("aria-label") || "");
+      if (canvas.parentNode) canvas.parentNode.replaceChild(replacement, canvas);
+      // Re-point the host's reference and the elements registry.
+      canvas = replacement;
+      this.canvas = replacement;
+      const off = replacement.transferControlToOffscreen();
+      off.id = "canvas";
+      return off;
+    };
     const transferCanvasToOffscreen = () => {
       if (!this.usesAdapterCanvas || typeof canvas.transferControlToOffscreen !== "function") {
         return null;
@@ -332,20 +361,8 @@ export class EmulatorHost {
         try {
           // Replace the DOM canvas with a freshly-created one. The new
           // element has no captureStream history, no extension hooks, no
-          // compositor binding. Copy across the relevant attributes.
-          const replacement = document.createElement("canvas");
-          replacement.id = canvas.id;
-          replacement.width = canvas.width;
-          replacement.height = canvas.height;
-          for (const cls of canvas.classList) replacement.classList.add(cls);
-          replacement.setAttribute("aria-label", canvas.getAttribute("aria-label") || "");
-          if (canvas.parentNode) canvas.parentNode.replaceChild(replacement, canvas);
-          // Re-point the host's reference and the elements registry.
-          canvas = replacement;
-          this.canvas = replacement;
-          const off = replacement.transferControlToOffscreen();
-          off.id = "canvas";
-          return off;
+          // compositor binding.
+          return replaceCanvasForWorker();
         } catch (err2) {
           console.warn("[host] canvas-replacement transferControlToOffscreen also failed:", err2);
           return null;
@@ -398,6 +415,13 @@ export class EmulatorHost {
                 this.oglSabEnabled || this.usesDetachedWgpu
                 ? null
                 : transferCanvasToOffscreen,
+            // After a lost WebGL context: a new element, so whoever captures
+            // the canvas (captureStream) must re-capture: "presentercanvas".
+            replacePresenterCanvas: () => {
+              const off = replaceCanvasForWorker();
+              window.dispatchEvent(new CustomEvent("presentercanvas", { detail: { canvas: this.canvas } }));
+              return off;
+            },
             visibleCanvas:
               (this.videoBackend === "OGL" && this.oglProxyMode === "worker") ||
                 this.oglSabEnabled || this.usesDetachedWgpu
@@ -437,6 +461,7 @@ export class EmulatorHost {
             efbCopyRam: this.efbCopyRam,
             wgpuMask: this.wgpuMask,
             wgpuFallback: this.wgpuFallback,
+            dstAlphaTwoPass: this.dstAlphaTwoPass,
             webglSoftware: this.webglSoftware,
             savesMode: this.savesMode,
             efbDiag: this.efbDiag,
@@ -449,6 +474,8 @@ export class EmulatorHost {
             aotCompiler: this.aotCompiler,
             aotFirstLaunch: this.aotFirstLaunch,
             aotSampleMs: this.aotSampleMs,
+            wasmEngine: this.wasmEngine,
+            regionCap: this.regionCap,
             regionChain: this.regionChain,
             fusedMadd: this.fusedMadd,
             collectMetrics: this.collectMetrics,

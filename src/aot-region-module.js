@@ -644,13 +644,17 @@ export function groupRegions(module, order, { maxFunctions = 100 } = {}) {
 // from 2 on (2: continuation fragments from a capped fragment's frontier,
 // aot-orchestrator translateWithContinuations), so that a cache built with
 // another formation is translated again rather than reused.
-export const REGION_FORMATION = 4; // 3: frontier by nearest held entry, module budget by water-filling; 4: a continuation stops at blocks already held
-export async function regionModuleKey(functions, { compilerVersion, codegenMask, chain = false, formation = REGION_FORMATION }) {
+export const REGION_FORMATION = 5; // 3: frontier by nearest held entry, module budget by water-filling; 4: a continuation stops at blocks already held; 5: the plan's extra entries seed the frontier
+// functionCap: the wasm function body cap the fragments were formed under
+// (JSC, REGION_JSC_FUNCTION_CAP); in the key only when there is one, so the
+// keys without it (V8, SpiderMonkey) are those of before.
+export async function regionModuleKey(functions, { compilerVersion, codegenMask, chain = false, formation = REGION_FORMATION, functionCap = 0 }) {
   for (const [what, v] of [["compilerVersion", compilerVersion], ["codegenMask", codegenMask]]) {
     if (!Number.isInteger(v) || v < 0 || v > 0xffffffff) throw new Error(`region: ${what} must be a u32`);
   }
   const hex8 = (v) => (v >>> 0).toString(16).padStart(8, "0");
-  const text = (formation > 1 ? `formation:${formation};` : "") + functions.map((f) => {
+  if (!Number.isInteger(functionCap) || functionCap < 0) throw new Error("region: functionCap must be a non-negative integer");
+  const text = (formation > 1 ? `formation:${formation};` : "") + (functionCap > 0 ? `cap:${functionCap};` : "") + functions.map((f) => {
     if (!/^[0-9a-f]{64}$/.test(f.sha256 ?? "")) throw new Error(`region: function ${f.entry?.toString(16)} has no sha256`);
     const extra = [...(f.extraEntries ?? [])].map((pc) => (pc >>> 0)).sort((a, b) => a - b).map((pc) => pc.toString(16)).join(",");
     return `${(f.entry >>> 0).toString(16)}:${f.sha256}:${extra};`;
