@@ -120,6 +120,7 @@ export class UpstreamWorkerAdapter {
     fusedMadd = true,
     aotSampleMs = undefined,
     wasmEngine = undefined,
+    regionCap = null,
     onAotProgress = () => {},
     collectMetrics = false,
     legacyOneWayAck = false,
@@ -237,6 +238,7 @@ export class UpstreamWorkerAdapter {
     // cannot read the page's URL, so they reach it only in this message.
     this.aotSampleMs = aotSampleMs;
     this.wasmEngine = wasmEngine;
+    this.regionCap = regionCap; // ?regioncap=N|0 (#215), null: by engine
     this.onAotProgress = onAotProgress;
     this.collectMetrics = Boolean(collectMetrics);
     this.legacyOneWayAck = Boolean(legacyOneWayAck);
@@ -467,6 +469,7 @@ export class UpstreamWorkerAdapter {
       fusedMadd: this.fusedMadd,
       aotSampleMs: this.aotSampleMs,
       wasmEngine: this.wasmEngine,
+      regionCap: this.regionCap,
       collectMetrics: this.collectMetrics,
       legacyOneWayAck: this.legacyOneWayAck,
       coreSelection: this.coreSelectionTelemetry(window.location.href),
