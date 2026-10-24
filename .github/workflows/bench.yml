@@ -246,6 +246,8 @@ jobs:
           # This repository's own core-build.yml, from a push or a pull request
           # whose head is this repository (a fork's PR runs its own workflow
           # file and could upload any core-<sha>).
+          # $repo is jq's variable (--arg), not the shell's.
+          # shellcheck disable=SC2016
           filter='.repository.full_name == $repo and .head_repository.full_name == $repo and .path == ".github/workflows/core-build.yml" and (.event == "push" or .event == "pull_request")'
           jq -e --arg repo "$GITHUB_REPOSITORY" "$filter" "$RUNNER_TEMP/core-run.json" > /dev/null
           gh api "$api/jobs?per_page=100" | jq -e '[.jobs[] | select(.name == "build" and .conclusion == "success")] | length == 1' > /dev/null
