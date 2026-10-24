@@ -1,5 +1,6 @@
 import { aotCompilerRequested, jitOffThreadRequested } from "./aot-compiler-worker.js";
 import { aotSamplePeriodRequested } from "./aot-hot-sampler.js";
+import { wasmEngine } from "./wasm-engine.js";
 import { parseCustomRtc } from "./custom-rtc.js";
 import { DolphinCoreAdapter, dolphinBundleAvailable } from "./dolphin-adapter.js";
 import { buttonMaskFromPressed, isPadPort } from "./input.js";
@@ -147,6 +148,9 @@ export class EmulatorHost {
     this.aotFirstLaunch = new URLSearchParams(window.location.search).get("aot") === "1";
     // With aot=1, the local profile's guest-PC sampler: ?aotsample=N ms, 0 off.
     this.aotSampleMs = aotSamplePeriodRequested(window.location.search);
+    // The wasm engine (src/wasm-engine.js), resolved here once: a worker's
+    // location is its own script's, so ?wasmengine= reaches it only this way.
+    this.wasmEngine = wasmEngine({ search: window.location.search });
     // With aot=1, regions tail-call the next region (patch 0102); ?regionchain=0 turns it off.
     this.regionChain = new URLSearchParams(window.location.search).get("regionchain") !== "0";
     // Where relaxed_madd is fused the JIT's FMA uses it (patch 0129); ?fusedmadd=0
@@ -449,6 +453,7 @@ export class EmulatorHost {
             aotCompiler: this.aotCompiler,
             aotFirstLaunch: this.aotFirstLaunch,
             aotSampleMs: this.aotSampleMs,
+            wasmEngine: this.wasmEngine,
             regionChain: this.regionChain,
             fusedMadd: this.fusedMadd,
             collectMetrics: this.collectMetrics,
