@@ -222,7 +222,7 @@ test("a translated lwz carries branch hints on its ifs, and the module a branch_
   const fragment = core.translate(at, { ranges: [[at, at + 8]] });
   assert.ok(fragment, "translated");
   const hints = fragment.relocs.filter((r) => r.kind === "hint");
-  for (const h of hints) assert.equal(fragment.code[h.offset], 0x04, `the hint at ${h.offset} is on an if`);
+  for (const h of hints) assert.ok([0x04, 0x0d].includes(fragment.code[h.offset]), `the hint at ${h.offset} is on an if or a br_if (0135: the downcount check)`);
   assert.ok(hints.some((h) => h.likely), "the RAM fast path is likely");
   assert.ok(hints.filter((h) => !h.likely).length >= 2, "SO guard and downcount unlikely");
   const { bytes, hintsDropped } = assembleRegion([fragment], { helpers: HELPER_SIGNATURES, pcOffset: core.pcOffset, memoryPages: core.memoryPages });
@@ -231,4 +231,23 @@ test("a translated lwz carries branch hints on its ifs, and the module a branch_
   const [section] = WebAssembly.Module.customSections(new WebAssembly.Module(bytes), "metadata.code.branch_hint");
   assert.ok(section, "the module carries the hints");
   assert.ok(core.compile(bytes) > 0, "the core compiles and links the hinted module");
+});
+
+// 0135: the downcount check is a br_if to the shared exit, hinted unlikely
+// (0131). The hint must reach the module's section, at that br_if, as V8
+// reads it (the assembler took only `if` before).
+test("the downcount check's br_if carries its unlikely hint into the module's section (0135)", { skip: skip || (compilerVersion() < 27 && "core before 0135 (compiler version < 27)") }, () => {
+  const lwzR3 = (32 << 26) | (3 << 21) | (4 << 16) | 8;
+  const at = 0x80021400;
+  core.load(at, Uint8Array.of(lwzR3 >>> 24, (lwzR3 >>> 16) & 0xff, (lwzR3 >>> 8) & 0xff, lwzR3 & 0xff, 0x4e, 0x80, 0x00, 0x20));
+  const fragment = core.translate(at, { ranges: [[at, at + 8]] });
+  assert.ok(fragment, "translated");
+  const onBrIf = fragment.relocs.filter((r) => r.kind === "hint" && fragment.code[r.offset] === 0x0d);
+  assert.ok(onBrIf.length >= 1, "a hint on the downcount br_if");
+  assert.ok(onBrIf.every((h) => !h.likely), "unlikely");
+  const { bytes, hintsDropped } = assembleRegion([fragment], { helpers: HELPER_SIGNATURES, pcOffset: core.pcOffset, memoryPages: core.memoryPages });
+  assert.equal(hintsDropped, 0);
+  const section = checkBranchHintSection(bytes);
+  assert.deepEqual(section.errors, []);
+  for (const h of onBrIf) assert.ok(section.entries.some((e) => e.offset === h.offset && !e.likely), `the br_if hint at ${h.offset} is in the section`);
 });

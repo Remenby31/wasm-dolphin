@@ -1,19 +1,19 @@
 {
   "schemaVersion": 1,
   "abiVersion": 1,
-  "coreId": "sha256:cfc3d5a2139ff2f48bfe2ed3cf9f5acd88cadfdada3d3b33c95e5099afcb0f1c",
+  "coreId": "sha256:f6be5539c6427495a6b2a452227d5edace5cdb6592ecf890e2cab066b89e46e6",
   "upstreamCommit": "e22551eae1c84a7e4d0b6a5c519ef4ed4ef69df1",
   "artifacts": [
     {
       "path": "cores/dolphin/dolphin-core-upstream.js",
       "hashMode": "lf-normalized",
-      "size": 283026,
-      "sha256": "1c9f71a200290815707ad980824ccd87662105de148187f132ce6c66064dc71f"
+      "size": 283271,
+      "sha256": "4c33fc68da259d55d54d8689ee5d609f60d2cc7585f504d008f8e3dc926e4c81"
     },
     {
       "path": "cores/dolphin/dolphin-core-upstream.wasm",
-      "size": 13171866,
-      "sha256": "cfc3d5a2139ff2f48bfe2ed3cf9f5acd88cadfdada3d3b33c95e5099afcb0f1c"
+      "size": 13187401,
+      "sha256": "f6be5539c6427495a6b2a452227d5edace5cdb6592ecf890e2cab066b89e46e6"
     }
   ],
   "contractSources": [
@@ -140,8 +140,8 @@
     {
       "path": "src/upstream-discio-worker.js",
       "hashMode": "lf-normalized",
-      "size": 727931,
-      "sha256": "7d820393dd4a09d4e5ad2859b1fb2c7646db1b22f4b7ac9c67695ab3a1a3cffc"
+      "size": 731406,
+      "sha256": "a6e3627c64b0e8d00ad8b8cec325b0c0117061b348e5329d1107764e76fc47c5"
     },
     {
       "path": "src/wgpu-renderer-worker-probe.js",
@@ -470,6 +470,8 @@
     "_DolphinWeb_RecordInstanceUs",
     "_DolphinWeb_RecordModuleUs",
     "_DolphinWeb_RecordWasmCompileError",
+    "_DolphinWeb_RegionCallDepthForTest",
+    "_DolphinWeb_RegionCallStats",
     "_DolphinWeb_RegionChainHelper",
     "_DolphinWeb_RegionGuardRefusals",
     "_DolphinWeb_SetFprfForTest",

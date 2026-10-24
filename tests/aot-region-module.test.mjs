@@ -236,11 +236,29 @@ test("aot region: branch hints from the core become a metadata.code.branch_hint 
   assert.deepEqual(Array.from(bytes.slice(2)), [1, ifAt, 1, 0], "one hint: offset, size 1, unlikely");
   assert.equal(region.hintsDropped, 1, "the hint off an `if` is counted");
   assert.deepEqual(checkBranchHintSection(region.bytes).errors, [], "a section V8 keeps");
-  // Two hints on the same `if`: the second is dropped (offsets must be
-  // strictly increasing, or V8 drops the whole section).
-  const twice = assembleRegion([{ ...A, relocs: [...A.relocs, { offset: ifAt, kind: "hint", likely: false }, { offset: ifAt, kind: "hint", likely: true }] }, B], opts);
+  // Two hints on the same `if` (offsets must be strictly increasing, or V8
+  // drops the whole section): that agree, one is kept; that disagree, both
+  // are dropped (no guess) and counted as conflicting.
+  const twice = assembleRegion([{ ...A, relocs: [...A.relocs, { offset: ifAt, kind: "hint", likely: false }, { offset: ifAt, kind: "hint", likely: false }] }, B], opts);
   assert.equal(twice.hintsDropped, 1, "the duplicate is counted");
-  assert.deepEqual(checkBranchHintSection(twice.bytes), { hints: 1, errors: [] });
+  assert.equal(twice.hintsConflicting, 0);
+  assert.deepEqual({ ...checkBranchHintSection(twice.bytes), entries: undefined }, { hints: 1, errors: [], entries: undefined });
+  const clash = assembleRegion([{ ...A, relocs: [...A.relocs, { offset: ifAt, kind: "hint", likely: false }, { offset: ifAt, kind: "hint", likely: true }] }, B], opts);
+  assert.equal(clash.hintsDropped, 2, "both dropped");
+  assert.equal(clash.hintsConflicting, 2, "counted as conflicting");
+  assert.equal(WebAssembly.Module.customSections(new WebAssembly.Module(clash.bytes), "metadata.code.branch_hint").length, 0, "no hint left: no section");
+  // The checker sees a duplicate offset V8 would reject: a module built by
+  // hand, one function `(if (i32.const 0) (then))` hinted twice at its `if`.
+  const leb = (n) => [n];
+  const sec = (id, body) => [id, ...leb(body.length), ...body];
+  const nameBytes = [...new TextEncoder().encode("metadata.code.branch_hint")];
+  const fnBody = [0x00, 0x41, 0x00, 0x04, 0x40, 0x0b, 0x0b]; // no locals; i32.const 0; if; end; end
+  const handMade = (hintEntries) => Uint8Array.from([0x00, 0x61, 0x73, 0x6d, 1, 0, 0, 0,
+    ...sec(1, [1, 0x60, 0, 0]), ...sec(3, [1, 0]),
+    ...sec(0, [nameBytes.length, ...nameBytes, 1, 0, hintEntries.length, ...hintEntries.flat()]),
+    ...sec(10, [1, fnBody.length, ...fnBody])]);
+  assert.deepEqual(checkBranchHintSection(handMade([[3, 1, 0]])), { hints: 1, errors: [], entries: [{ fn: 0, offset: 3, likely: false }] }, "one hint on the `if`: valid");
+  assert.ok(checkBranchHintSection(handMade([[3, 1, 0], [3, 1, 0]])).errors.some((e) => /offset 3 after 3/.test(e)), "a duplicate offset is caught");
   // The checker sees what V8 would reject: a hint off an `if`, a duplicate.
   const bad = Uint8Array.from(twice.bytes);
   const [sectionBytes] = WebAssembly.Module.customSections(new WebAssembly.Module(bad), "metadata.code.branch_hint");
