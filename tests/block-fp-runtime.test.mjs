@@ -34,7 +34,8 @@ const usesFpu = (w) => {
 
 test("a block compiled with MSR.FP set raises FP unavailable when it runs with MSR.FP clear, like the interpreter", { skip }, () => {
   const fpClasses = new Set();
-  let compared = 0, compiled = 0;
+  let compared = 0, compiled = 0, control = 0;
+  const codes = new Map(), ops = new Map();
   const set = (on) => core.compileWithFp(on);
   try {
     set(true);
@@ -51,7 +52,14 @@ test("a block compiled with MSR.FP set raises FP unavailable when it runs with M
           assert.ok(res.code === 0 || res.code === 2, `${name} ${program.map(hex).join(" ")}: ${res.code === 1 ? describeDifference(res.interp, res.jit).slice(0, 6).join("; ") : res.message}`);
           assert.equal(res.interp[47] >>> 0, 0x800, `${name}: the interpreter raised FP unavailable`);
           compared++;
+          codes.set(res.code, (codes.get(res.code) ?? 0) + 1);
+          ops.set(`${res.compiledBlocks}/${res.compiledOps}`, (ops.get(`${res.compiledBlocks}/${res.compiledOps}`) ?? 0) + 1);
           if (res.compiledOps >= 2) compiled++;
+          // Control: the same program with the FPU on compiles the FP op.
+          state[37] = 0x00002032;
+          set(false);
+          if (core.run(Uint32Array.from(program), state, PRODUCTION_DISABLE_MASK).compiledOps >= 2) control++;
+          set(true);
         }
       }
     }
@@ -59,5 +67,5 @@ test("a block compiled with MSR.FP set raises FP unavailable when it runs with M
     set(false);
   }
   assert.ok(fpClasses.size >= 40, `${fpClasses.size} FP instruction classes`);
-  assert.ok(compiled >= compared / 2, `${compiled} of ${compared} programs ran a compiled block holding the FP op`);
+  assert.ok(compiled >= compared / 2, `${compiled} of ${compared} programs ran a compiled block holding the FP op (FPU on: ${control}); codes ${JSON.stringify([...codes])} blocks/ops ${JSON.stringify([...ops].slice(0, 8))}`);
 });
