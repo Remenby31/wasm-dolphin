@@ -1349,14 +1349,82 @@ test("guest calls as wasm calls, in one module and across modules, past the dept
     assert.deepEqual(got.state, reference.state, what);
     assert.equal(got.downcount, reference.downcount, what);
     assert.equal(got.interpreted, 0, `${what}: no op left the regions`);
+    // Counters (harness): calls, a return elsewhere (jumper), the cap.
+    const stats = () => Array.from(new Uint32Array(core.module.HEAPU8.buffer, core.module._DolphinWeb_RegionCallStats(-1), 6));
+    core.module._DolphinWeb_RegionCallStats(1);
+    runCall(CALLS.labels.main, { regions: true });
+    const [calls, , elsewhere, , capped, depthMax] = stats();
+    core.module._DolphinWeb_RegionCallStats(0);
+    assert.ok(calls >= 64, `${what}: ${calls} calls made as wasm calls`);
+    assert.ok(elsewhere >= 1, `${what}: jumper's return elsewhere counted`);
+    assert.equal(depthMax, 64, `${what}: the cap is the deepest`);
+    assert.ok(capped >= 30, `${what}: ${capped} calls past the cap (recursion 100)`);
     for (const budget of [1, 7, 40, 151, 400, 777, 1501]) {
       core.reset(seedGprs(CALLS.labels.main), CALLS.labels.main, STOP, budget);
       while (core.downcount() > 0 && core.pc() !== STOP) if (!core.dispatchRegion()) assert.equal(core.interpretOne(), 0);
+      assert.equal(core.module._DolphinWeb_RegionCallDepthForTest(-1), 0, `${what}, budget ${budget}: no call left counted`);
       const stopped = { state: core.state(), downcount: core.downcount() };
       core.reset(seedGprs(CALLS.labels.main), CALLS.labels.main, STOP, budget);
       for (let n = 0; n < 1000000 && core.downcount() > stopped.downcount; n++) assert.equal(core.interpretOne(), 0);
       assert.equal(core.downcount(), stopped.downcount, `${what}, budget ${budget}`);
       assert.deepEqual(core.state(), stopped.state, `${what}, budget ${budget}`);
     }
+  }
+});
+
+// 0139: the depth starts at 0 at every region run, whatever was left (here
+// set to the cap by hand): no call of the next run is made past the cap.
+test("a region run starts at call depth 0 (0139)", { skip: callSkip }, () => {
+  installCalls(100);
+  const stats = () => Array.from(new Uint32Array(core.module.HEAPU8.buffer, core.module._DolphinWeb_RegionCallStats(-1), 6));
+  core.module._DolphinWeb_RegionCallStats(1);
+  core.reset(seedGprs(PROGRAM.labels.main), PROGRAM.labels.main, STOP, 400000);
+  installedOnePerFunction();
+  core.module._DolphinWeb_RegionCallDepthForTest(64);
+  const got = runCall(PROGRAM.labels.main, { regions: true });
+  const [calls, , , , capped] = stats();
+  core.module._DolphinWeb_RegionCallStats(0);
+  assert.equal(got.interpreted, 0);
+  assert.ok(calls >= 2, `${calls} calls`);
+  assert.equal(capped, 0, "none past the cap: the run started at 0");
+});
+
+// 0139: a callee that rewrites its caller's continuation (stw, dcbst, sync,
+// icbi, isync) then returns: its isync block leaves the region (0), every
+// call passes it up, and the caller never goes on in code that is gone. As
+// the interpreter.
+const PATCH_TEXT = 0x80017100;
+const dcbst = (a, b) => (31 << 26) | (a << 16) | (b << 11) | (54 << 1);
+const icbi = (a, b) => (31 << 26) | (a << 16) | (b << 11) | (982 << 1);
+const SYNC = 0x7c0004ac, ISYNC = 0x4c00012c;
+const LI_R9_2 = (14 << 26) | (9 << 21) | 2;
+const PATCHER = assemble(PATCH_TEXT, [
+  "main", asm.mflr(0), asm.stwu(1, 1, -16), stw(0, 1, 20), (pc, l) => asm.bl(pc, l.patcher),
+  "cont", asm.li(9, 1), lwz(0, 1, 20), asm.addi(1, 1, 16), mtlr(0), asm.blr(),
+  "patcher", asm.lis(5, LI_R9_2 >>> 16), asm.ori(5, 5, LI_R9_2 & 0xffff),
+  (pc, l) => asm.lis(6, l.cont >>> 16), (pc, l) => asm.ori(6, 6, l.cont & 0xffff),
+  stw(5, 6, 0), dcbst(0, 6), SYNC, icbi(0, 6), ISYNC, asm.blr()
+]);
+test("a callee that rewrites its caller's continuation: the caller runs the new code, like the interpreter (0139)", { skip: callSkip }, () => {
+  const load = () => {
+    const dol = buildDol({ textAddr: PATCH_TEXT, text: PATCHER.words, entry: PATCHER.labels.main });
+    const { image, entryPoint } = imageFromDol(dol);
+    for (const seg of image.segments) core.load(seg.start, seg.bytes);
+    core.invalidate(PATCH_TEXT, 4 * PATCHER.words.length);
+    return planDol({ image, entryPoint, gameId: "TEST01", dolBytes: dol, options: { gapFill: false } });
+  };
+  load();
+  const reference = runCall(PATCHER.labels.main, { regions: false });
+  assert.equal(reference.state[9], 2, "the interpreter runs the new li r9, 2");
+  for (const maxFunctions of [100, 1]) {
+    const plan = load();
+    core.module._DolphinWeb_AotForgetRegionsForTest?.();
+    core.setRegionsEnabled(true);
+    core.setRegionChaining(true);
+    queueAll(plan, maxFunctions, true);
+    serviceAll();
+    const got = runCall(PATCHER.labels.main, { regions: true });
+    assert.deepEqual(got.state, reference.state, `maxFunctions ${maxFunctions}`);
+    assert.equal(got.downcount, reference.downcount, `maxFunctions ${maxFunctions}`);
   }
 });

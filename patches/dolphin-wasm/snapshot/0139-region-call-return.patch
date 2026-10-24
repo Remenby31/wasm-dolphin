@@ -1,20 +1,42 @@
 diff --git a/Source/Core/Core/PowerPC/CachedInterpreter/CachedInterpreter.cpp b/Source/Core/Core/PowerPC/CachedInterpreter/CachedInterpreter.cpp
 --- a/Source/Core/Core/PowerPC/CachedInterpreter/CachedInterpreter.cpp
 +++ b/Source/Core/Core/PowerPC/CachedInterpreter/CachedInterpreter.cpp
-@@ -255,7 +255,11 @@ EM_JS(int, DolphinWeb_CachedInterpreterCompileWasmBlock,
-           // Region chaining (patch 0102): a region's exit stub asks the core
-           // for the next region and tail-calls it through the core's table.
-           region_chain: wasmTable.get(_DolphinWeb_RegionChainHelper()),
--          table: wasmTable
-+          table: wasmTable,
-+          // Patch 0139: the depth of guest calls made by regions as wasm
-+          // calls, one global for every region module (a recursion across
-+          // modules counts once).
-+          region_depth: (Module.regionDepth ??= new WebAssembly.Global({ value: "i32", mutable: true }, 0))
-         }
-       }).exports.f;
-   const inst_t1 = (typeof performance !== "undefined" && performance.now) ? performance.now() : 0;
-@@ -16657,6 +16661,13 @@ struct FragmentBlock
+@@ -3171,6 +3171,7 @@ struct WasmStateLayout
+   u32 ram_size_real;
+   u32 l1_base;
+   u32 l1_size;
++  u32 region_call_offset;  // 0139: PowerPCState::region_call_depth (stats after it)
+ };
+ 
+ constexpr u32 WASM_IMPORT_FASTCHECK_GPFIFO_INDEX = 14;
+@@ -10895,6 +10896,10 @@ bool TryRunRegion(PowerPC::PowerPCState& ppc_state)
+   const auto run = reinterpret_cast<RegionFunction>(
+       static_cast<std::uintptr_t>(region.handle));
+   const s32 downcount = ppc_state.downcount;
++  // 0139: no region code runs here: no wasm call made by one is pending, so
++  // the call depth starts at 0 whatever a run before left (a trap, a path
++  // that did not take it back down).
++  ppc_state.region_call_depth = 0;
+   int code;
+   if (s_region_stats_on && s_region_stats.sample_every != 0)
+   {
+@@ -16457,6 +16462,7 @@ extern "C" EMSCRIPTEN_KEEPALIVE int DolphinWeb_JitOracleRun(u32 word_count, u32
+       memory.GetRamSizeReal(),
+       static_cast<u32>(reinterpret_cast<std::uintptr_t>(memory.GetL1Cache())),
+       memory.GetL1CacheSize(),
++      offset(&ppc.region_call_depth),
+   };
+   int result = 0;
+   while (budget && ppc.pc != JIT_ORACLE_SENTINEL_VA &&
+@@ -16631,6 +16637,7 @@ WasmStateLayout CurrentWasmStateLayout(Core::System& system)
+       memory.GetRamSizeReal(),
+       static_cast<u32>(reinterpret_cast<std::uintptr_t>(memory.GetL1Cache())),
+       memory.GetL1CacheSize(),
++      offset(&ppc.region_call_depth),
+   };
+ }
+ 
+@@ -16657,6 +16664,13 @@ struct FragmentBlock
    // 0088: set when the block was left out because it holds an idle loop:
    // the region picks up again after the whole block (the loop's exit).
    u32 outside_until = 0;
@@ -28,7 +50,7 @@ diff --git a/Source/Core/Core/PowerPC/CachedInterpreter/CachedInterpreter.cpp b/
  };
  
  // Locals of a block body without the fastmem hoist (the only layout a
-@@ -16664,6 +16675,11 @@ struct FragmentBlock
+@@ -16664,6 +16678,11 @@ struct FragmentBlock
  constexpr std::array<u8, 13> WASM_BLOCK_LOCALS = {0x06, 0x03, 0x7f, 0x02, 0x7e, 0x01, 0x7c,
                                                    0x01, 0x7f, 0x20, 0x7f, 0x10, 0x7c};
  constexpr u32 WASM_FRAGMENT_PC_LOCAL = 56;  // appended after the block locals 1..55
@@ -40,7 +62,7 @@ diff --git a/Source/Core/Core/PowerPC/CachedInterpreter/CachedInterpreter.cpp b/
  
  // The block at pc as the CPU thread would build it (same analyzer, same
  // direct-candidate prefix), emitted in fragment mode. A region holds only
-@@ -16804,6 +16820,18 @@ bool BuildFragmentBlock(Core::System& system, u32 pc, u32 limit, FragmentBlock*
+@@ -16804,6 +16823,18 @@ bool BuildFragmentBlock(Core::System& system, u32 pc, u32 limit, FragmentBlock*
      out->successors.push_back(last.address + 4);
    if (inst.OPCD == 18 && last.branchTo != UINT32_MAX)
      out->jump_target = last.branchTo;
@@ -59,34 +81,52 @@ diff --git a/Source/Core/Core/PowerPC/CachedInterpreter/CachedInterpreter.cpp b/
    return true;
  }
  
-@@ -16814,7 +16842,9 @@ struct RegionFragment
+@@ -16814,7 +16845,9 @@ struct RegionFragment
    struct Reloc
    {
      u32 offset;
 -    u32 kind;   // 0 import, 1 jump, 2 dispatch, 3 heap site, 4 branch hint (0131)
 +    u32 kind;   // 0 import, 1 jump, 2 dispatch, 3 heap site, 4 branch hint (0131),
 +                // 5 call (0139: a `call` to the fragment holding value, else
-+                // the exit stub), 6 the call-depth global's index (0139)
++                // the exit stub)
      u32 value;  // helper index, target pc, 0, heap: base (bit 0) and form (bit 1),
                  // hint: 1 if the `if` at offset is likely
    };
-@@ -16949,6 +16979,15 @@ bool BuildRegionFragment(Core::System& system, u32 entry_pc, std::span<const u32
+@@ -16949,6 +16982,33 @@ bool BuildRegionFragment(Core::System& system, u32 entry_pc, std::span<const u32
      EmitStoreLocalToState(code, WASM_FRAME_PC_LOCAL, npc_offset);
      EmitStoreLocalToState(code, WASM_FRAME_DOWNCOUNT_LOCAL, downcount_offset);
    };
-+  // 0139: the call depth, one i32 global all region modules import
-+  // (env.region_depth), its index a padded LEB the assembler patches (6).
-+  const auto depth_access = [&](u8 opcode) {
-+    code.push_back(opcode);
-+    out->relocs.push_back({static_cast<u32>(code.size()), 6, 0});
-+    EmitPaddedU32Leb(code, 0);
++  // 0139: the call depth and the harness counters, in the state
++  // (PowerPCState::region_call_depth, then region_call_stats_on and
++  // region_call_stats).
++  const u32 call_depth_offset =
++      static_cast<u32>(reinterpret_cast<std::uintptr_t>(&ppc.region_call_depth) - base);
++  const u32 call_stats_on_offset =
++      static_cast<u32>(reinterpret_cast<std::uintptr_t>(&ppc.region_call_stats_on) - base);
++  const auto call_stat_offset = [&](u32 i) {
++    return static_cast<u32>(reinterpret_cast<std::uintptr_t>(&ppc.region_call_stats[i]) - base);
 +  };
-+  const auto depth_get = [&] { depth_access(0x23); };  // global.get
-+  const auto depth_set = [&] { depth_access(0x24); };  // global.set
++  const auto load_field = [&](u32 offset) {
++    EmitLocalGet(code, 0);
++    code.insert(code.end(), {0x28, 0x02});
++    EmitU32Leb(code, offset);
++  };
++  const auto add_field = [&](u32 offset, s32 delta) {
++    EmitLocalGet(code, 0);
++    load_field(offset);
++    EmitI32Const(code, delta);
++    code.push_back(0x6a);  // i32.add
++    code.insert(code.end(), {0x36, 0x02});
++    EmitU32Leb(code, offset);
++  };
++  const auto depth_get = [&] { load_field(call_depth_offset); };
++  // Counters: 0 calls, 2 returns elsewhere, 3 codes passed up, 4 past the
++  // cap, 5 depth reached.
++  const auto count = [&](u32 i) { add_field(call_stat_offset(i), 1); };
    const u32 n = static_cast<u32>(blocks.size());
    u32 lowest = UINT32_MAX, highest = 0;
    for (const auto& b : blocks)
-@@ -17045,6 +17084,71 @@ bool BuildRegionFragment(Core::System& system, u32 entry_pc, std::span<const u32
+@@ -17045,6 +17105,90 @@ bool BuildRegionFragment(Core::System& system, u32 entry_pc, std::span<const u32
        EmitI32Const(code, 0);
        code.push_back(0x0f);  // return
      }
@@ -99,33 +139,51 @@ diff --git a/Source/Core/Core/PowerPC/CachedInterpreter/CachedInterpreter.cpp b/
 +      // state.pc is this call's continuation it goes on here; any other
 +      // code, or another pc, is passed up (0 always means "continue at
 +      // state.pc": the CPU loop picks it up).
++      // Invariant (why no state generation is checked here): 3 comes only
++      // from a bclr block reached with no exit in between. Everything that
++      // invalidates code or changes the mode a fragment was built for
++      // (sc, rfi, mtmsr, isync after icbi: exiting blocks; a halting
++      // helper; events and exceptions, taken when downcount runs out)
++      // returns 0 or 2, which every call passes up: no caller goes on after
++      // its code may have changed. A new way to leave a block must keep it.
 +      flush_frame();
 +      depth_get();
 +      EmitI32Const(code, REGION_CALL_DEPTH);
 +      code.push_back(0x4f);  // i32.ge_u
 +      out->relocs.push_back({static_cast<u32>(code.size()), 4, 0});  // at the cap: unlikely
 +      code.insert(code.end(), {0x04, 0x40});  // if
++      count(4);
 +      EmitLocalGet(code, 0);
 +      reloc_site(1, b.call_target);
 +      code.push_back(0x0b);  // end
++      add_field(call_depth_offset, 1);
++      // Harness counters (region_call_stats_on): calls, depth reached.
++      load_field(call_stats_on_offset);
++      out->relocs.push_back({static_cast<u32>(code.size()), 4, 0});  // counting: unlikely
++      code.insert(code.end(), {0x04, 0x40});  // if
++      count(0);
++      EmitLocalGet(code, 0);
 +      depth_get();
-+      EmitI32Const(code, 1);
-+      code.push_back(0x6a);  // i32.add
-+      depth_set();
++      load_field(call_stat_offset(5));
++      depth_get();
++      load_field(call_stat_offset(5));
++      code.push_back(0x4b);  // i32.gt_u
++      code.push_back(0x1b);  // select: the larger
++      code.insert(code.end(), {0x36, 0x02});
++      EmitU32Leb(code, call_stat_offset(5));
++      code.push_back(0x0b);  // end
 +      EmitLocalGet(code, 0);
 +      code.push_back(0x10);  // call
 +      out->relocs.push_back({static_cast<u32>(code.size()), 5, b.call_target});
 +      EmitPaddedU32Leb(code, 0);
-+      depth_get();
-+      EmitI32Const(code, 1);
-+      code.push_back(0x6b);  // i32.sub
-+      depth_set();
++      add_field(call_depth_offset, -1);
 +      code.push_back(0x22);  // local.tee
 +      EmitU32Leb(code, 3);
 +      EmitI32Const(code, 3);
 +      code.push_back(0x47);  // i32.ne
 +      out->relocs.push_back({static_cast<u32>(code.size()), 4, 0});  // not a return: unlikely
 +      code.insert(code.end(), {0x04, 0x40});  // if
++      count(3);
 +      EmitLocalGet(code, 3);
 +      code.insert(code.end(), {0x0f, 0x0b});  // return; end
 +      EmitLocalGet(code, 0);
@@ -135,6 +193,7 @@ diff --git a/Source/Core/Core/PowerPC/CachedInterpreter/CachedInterpreter.cpp b/
 +      code.push_back(0x47);  // i32.ne
 +      out->relocs.push_back({static_cast<u32>(code.size()), 4, 0});  // elsewhere: unlikely
 +      code.insert(code.end(), {0x04, 0x40});  // if
++      count(2);
 +      EmitI32Const(code, 3);
 +      code.insert(code.end(), {0x0f, 0x0b});  // return 3; end
 +      // Back at the continuation: the frame from the state the callee left.
@@ -158,7 +217,7 @@ diff --git a/Source/Core/Core/PowerPC/CachedInterpreter/CachedInterpreter.cpp b/
      else if (b.jump_target != UINT32_MAX && !index_of.contains(b.jump_target))
      {
        flush_frame();
-@@ -17053,6 +17157,25 @@ bool BuildRegionFragment(Core::System& system, u32 entry_pc, std::span<const u32
+@@ -17053,6 +17197,25 @@ bool BuildRegionFragment(Core::System& system, u32 entry_pc, std::span<const u32
      }
      else
      {
@@ -184,7 +243,7 @@ diff --git a/Source/Core/Core/PowerPC/CachedInterpreter/CachedInterpreter.cpp b/
        std::vector<u32> later;
        for (const u32 next : b.successors)
        {
-@@ -17145,7 +17268,9 @@ namespace
+@@ -17145,7 +17308,9 @@ namespace
  // carry wasm branch hints (22 is 0130's). 25 (0133): a fragment's head finds
  // the block by br_table (24 is 0132's). 27 (0135): region fragments keep pc,
  // npc and downcount in locals, with one shared exit (26 is retired, 0134's).
@@ -195,8 +254,42 @@ diff --git a/Source/Core/Core/PowerPC/CachedInterpreter/CachedInterpreter.cpp b/
  constexpr u32 AOT_MAX_FRAGMENT_BYTES = 1u << 20;
  thread_local std::vector<u32> t_aot_out;
  u8* s_aot_ram = nullptr;
-@@ -17485,6 +17610,10 @@ extern "C" EMSCRIPTEN_KEEPALIVE int DolphinWeb_AotRunRegionForTest(int handle)
+@@ -17471,6 +17636,30 @@ extern "C" EMSCRIPTEN_KEEPALIVE void DolphinWeb_AotTestStackRestore(u32 sp)
+   _emscripten_stack_restore(sp);
+ }
+ 
++// Patch 0139: the counters of guest calls made by region code as wasm calls
++// (PowerPCState::region_call_stats, u32 each): calls, unused, returns
++// elsewhere than the continuation, codes passed up, calls past the depth
++// cap, depth reached. mode 1: zeroed and counting; 0: off; -1: read only.
++// The counters past the cap, elsewhere and passed up count with the harness
++// off too (their paths are cold); calls and the depth only when on.
++extern "C" EMSCRIPTEN_KEEPALIVE u32 DolphinWeb_RegionCallStats(int mode)
++{
++  auto& ppc = Core::System::GetInstance().GetPPCState();
++  if (mode == 1)
++    ppc.region_call_stats = {};
++  if (mode >= 0)
++    ppc.region_call_stats_on = static_cast<u32>(mode);
++  return static_cast<u32>(reinterpret_cast<std::uintptr_t>(ppc.region_call_stats.data()));
++}
++// Tests: the call depth region code left (0139), and setting it.
++extern "C" EMSCRIPTEN_KEEPALIVE u32 DolphinWeb_RegionCallDepthForTest(int set)
++{
++  auto& ppc = Core::System::GetInstance().GetPPCState();
++  if (set >= 0)
++    ppc.region_call_depth = static_cast<u32>(set);
++  return ppc.region_call_depth;
++}
++
+ // Runs a region module compiled by DolphinWeb_JitCompileBytesForTest on the
+ // test CPU: 0 continue at pc, 1 not an entry, 2 stopped, 3 stopped in an
+ // exception handler (taken by a helper, or pending and taken here as the CPU
+@@ -17483,8 +17672,13 @@ extern "C" EMSCRIPTEN_KEEPALIVE int DolphinWeb_AotRunRegionForTest(int handle)
+   // (4: refused by the mode, the CPU loop runs blocks there).
+   if (!RegionGuardsHold(ppc))
      return 4;
++  ppc.region_call_depth = 0;  // 0139: as TryRunRegion
    const int code = DolphinWeb_CachedInterpreterRunWasmBlockForTest(
        handle, static_cast<int>(reinterpret_cast<std::uintptr_t>(&ppc)));
 +  // 0139: a guest return passed up past every wasm call (3) is "continue at
@@ -206,3 +299,22 @@ diff --git a/Source/Core/Core/PowerPC/CachedInterpreter/CachedInterpreter.cpp b/
    if (code != 2)
      return code;
    // A helper that stopped the region has taken its exception (translation
+diff --git a/Source/Core/Core/PowerPC/PowerPC.h b/Source/Core/Core/PowerPC/PowerPC.h
+--- a/Source/Core/Core/PowerPC/PowerPC.h
++++ b/Source/Core/Core/PowerPC/PowerPC.h
+@@ -200,6 +200,15 @@ struct PowerPCState
+   InstructionCache iCache;
+   Cache dCache;
+ 
++  // Patch 0139 (wasm-dolphin): guest calls made by region code as wasm calls.
++  // Their depth (reset by TryRunRegion, so no unwind path can leave it high),
++  // then the harness counters, on with region_call_stats_on: calls, unused,
++  // returns elsewhere than the continuation, codes passed up, calls past the
++  // depth cap, depth reached. Region code reaches them through the state.
++  u32 region_call_depth = 0;
++  u32 region_call_stats_on = 0;
++  std::array<u32, 6> region_call_stats{};
++
+   void UpdateCR1()
+   {
+     cr.SetField(1, (fpscr.FX << 3) | (fpscr.FEX << 2) | (fpscr.VX << 1) | fpscr.OX);

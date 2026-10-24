@@ -537,12 +537,20 @@ optimization").
 - **Return.** A block ending in `bclr` (a conditional one, when taken) under
   a call made by a region writes its frame back and returns 3, after its
   downcount check.
-- **Depth.** One i32 global, `env.region_depth`, imported by every region
-  module (reloc kind 6), counts these calls. At 64 a call is a `return_call`
-  as before: a Chrome worker holds ~960 frames of a fragment's locals in
-  Liftoff.
-- **Exits.** An exiting block, a halt, running out of downcount: all return 0
-  or 2 and pass up through every call. `TryRunRegion` already takes any code
-  other than 1 as "ran"; the test export maps 3 to 0.
+- **Depth.** `PowerPCState::region_call_depth` counts these calls; at 64 a
+  call is a `return_call` as before (a Chrome worker holds ~960 frames of a
+  fragment's locals in Liftoff). `TryRunRegion` sets it to 0 before every
+  run: no unwind path can leave it high.
+- **Exits, and why no state generation is checked.** 3 comes only from a
+  `bclr` block reached with no exit in between. Everything that invalidates
+  code or changes the mode (sc, rfi, mtmsr, isync after icbi, a halting
+  helper, events and exceptions when downcount runs out) returns 0 or 2, and
+  every call passes it up: no caller goes on after its code may have changed.
+  `TryRunRegion` already takes any code but 1 as "ran"; the test export maps 3
+  to 0.
+- **Counters** (`DolphinWeb_RegionCallStats`, in race-perf's region stats as
+  `regionCalls`): calls past the cap, returns elsewhere and codes passed up
+  count always, on their cold paths; calls and the depth reached only while
+  the harness samples.
 
 Compiler version 29.

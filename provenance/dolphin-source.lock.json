@@ -25,7 +25,7 @@
       "commit": "01e0577914a75a2569c846778c2f93aa8e6feddd"
     }
   },
-  "patchSeriesSha256": "2d3a2c6b9361c18fbf0e06f3a4c64a50e6e5644fd4ee8a4d65a886f3a25bc60b",
+  "patchSeriesSha256": "553edc7b57b4ffc41e48b669d89683b80b3d375afd0027523a7f38a8275876e6",
   "patches": [
     {
       "order": 1,
@@ -872,8 +872,8 @@
       "cwd": ".",
       "hashMode": "lf-normalized",
       "path": "patches/dolphin-wasm/snapshot/0139-region-call-return.patch",
-      "size": 9738,
-      "sha256": "9bc47fa7f34431c2d58d72249305c92f23f50e3842e217bc9c730e6f7532b013"
+      "size": 14685,
+      "sha256": "8dcee49482243b4edc43bad62122806f68094b68d64bea10f0d0d45f611841bf"
     },
     {
       "order": 107,

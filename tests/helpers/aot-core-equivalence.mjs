@@ -107,7 +107,6 @@ export async function loadAotCore(coreDir = new URL("../../cores/dolphin/", impo
         if (kind === 1) return { offset, kind: "jump", targetPc: value };
         if (kind === 3) return { offset, kind: "heap", name: REGION_HEAP_NAMES[value & 1], form: value & 2 ? "offset" : "const" };
         if (kind === 5) return { offset, kind: "call", targetPc: value }; // a guest call as a wasm call (0139)
-        if (kind === 6) return { offset, kind: "depth" }; // the call-depth global (0139)
         if (kind === 4) return { offset, kind: "hint", likely: value === 1 }; // branch hint (0131)
         return { offset, kind: "dispatch" };
       });
