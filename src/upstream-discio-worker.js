@@ -4116,7 +4116,14 @@ function mountedDiscNeeds() {
   const gameId = api?.getGameId?.() || "";
   const revision = api?.getRevision?.() ?? -1;
   if (!gameId || revision < 0 || !api?.gameConfigValue) return { boundingBox: false };
-  return { boundingBox: api.gameConfigValue(gameId, revision, "BBoxEnable") === 1 };
+  const value = api.gameConfigValue(gameId, revision, "BBoxEnable");
+  if (value < 0) {
+    // -1: a game's settings layer is already loaded (a game is running), which
+    // the read must not replace; the need is unknown, not "no".
+    postStatus(`The disc's settings could not be read before the boot (GameConfigValue ${value}): its bounding-box need is unknown`);
+    return { boundingBox: false, known: false };
+  }
+  return { boundingBox: value === 1 };
 }
 
 async function mountFile(file) {
