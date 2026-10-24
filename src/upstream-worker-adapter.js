@@ -118,6 +118,9 @@ export class UpstreamWorkerAdapter {
     aotFirstLaunch = false,
     regionChain = true,
     fusedMadd = true,
+    aotSampleMs = undefined,
+    wasmEngine = undefined,
+    regionCap = null,
     onAotProgress = () => {},
     collectMetrics = false,
     legacyOneWayAck = false,
@@ -231,6 +234,11 @@ export class UpstreamWorkerAdapter {
     this.aotFirstLaunch = aotFirstLaunch === true;
     this.regionChain = regionChain !== false;
     this.fusedMadd = fusedMadd !== false;
+    // The page's ?aotsample= and wasm engine (src/wasm-engine.js): the worker
+    // cannot read the page's URL, so they reach it only in this message.
+    this.aotSampleMs = aotSampleMs;
+    this.wasmEngine = wasmEngine;
+    this.regionCap = regionCap; // ?regioncap=N|0 (#215), null: by engine
     this.onAotProgress = onAotProgress;
     this.collectMetrics = Boolean(collectMetrics);
     this.legacyOneWayAck = Boolean(legacyOneWayAck);
@@ -459,6 +467,9 @@ export class UpstreamWorkerAdapter {
       aotFirstLaunch: this.aotFirstLaunch,
       regionChain: this.regionChain,
       fusedMadd: this.fusedMadd,
+      aotSampleMs: this.aotSampleMs,
+      wasmEngine: this.wasmEngine,
+      regionCap: this.regionCap,
       collectMetrics: this.collectMetrics,
       legacyOneWayAck: this.legacyOneWayAck,
       coreSelection: this.coreSelectionTelemetry(window.location.href),
