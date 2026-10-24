@@ -273,9 +273,6 @@ let wgpuAcceptFallbackAdapter = false;
 // ?webglsw=1 (harness): keep a software WebGL presenter; refused otherwise
 // (setupSoftwarePresenter).
 let webglAcceptSoftware = false;
-// The presenter draws on the CPU: no WebGPU and no hardware WebGL. The tick
-// repaint of an unchanged frame is skipped there (startTickRepaintLoop).
-let presenterOnCpu = false;
 // A CPU adapter is no usable GPU: with --enable-unsafe-webgpu (the harness
 // passes it) a GPU-less Chrome gives a SwiftShader fallback adapter, and both
 // the replay and the presenter would run on the CPU.
@@ -4726,8 +4723,6 @@ function startTickRepaintLoop() {
     // submitted a real present, repainting the cached CPU frame here would
     // immediately cover that backbuffer with the stale checker/green frame.
     if (cmdRingOwnsCanvas) return;
-    // On the CPU the repaint is pure cost: the canvas keeps the last frame.
-    if (presenterOnCpu) return;
     if (!_lastFrameCopyValid || _lastFrameLength <= 0) return;
     const now = performance.now();
     if (lastPresentedAt > 0 && (now - lastPresentedAt) < SKIP_IF_RECENT_MS) return;
@@ -5979,7 +5974,6 @@ async function setupSoftwarePresenter(canvas, presenterBackend) {
   renderImageData = null;
   renderUploadBuffer = null;
   renderRequiresUploadCopy = false;
-  presenterOnCpu = false;
 
   if (presenterBackend === "webgpu") {
     try {
@@ -5997,10 +5991,11 @@ async function setupSoftwarePresenter(canvas, presenterBackend) {
   }
 
   if (presenterBackend !== "2d") {
-    // Without a usable GPU, WebGL is SwiftShader: on a GPU-less Windows
-    // runner it cost 12-19 % more Chrome CPU than the 2D canvas for the same
-    // picture (windows-nogpu lane). failIfMajorPerformanceCaveat refuses such
-    // a context, and a refused getContext leaves the canvas free for 2D.
+    // Without a usable GPU, WebGL rasterises on the CPU (WARP on Windows,
+    // SwiftShader): on a GPU-less Windows runner the 2D canvas showed the same
+    // picture for 13-18 % less Chrome CPU (windows-nogpu lane).
+    // failIfMajorPerformanceCaveat refuses such a context (WARP included), and
+    // a refused getContext leaves the canvas free for 2D.
     const attributes = { ...softwareBlitContextAttributes(), failIfMajorPerformanceCaveat: !webglAcceptSoftware };
     renderGl = renderCanvas.getContext("webgl2", attributes) || renderCanvas.getContext("webgl", attributes);
     if (renderGl) {
@@ -6010,7 +6005,6 @@ async function setupSoftwarePresenter(canvas, presenterBackend) {
       return;
     }
     rendererDiagnostics.webglFallback = "no hardware WebGL context (software or none): 2D presenter";
-    presenterOnCpu = true;
   }
 
   renderContext = renderCanvas.getContext("2d", { alpha: false });

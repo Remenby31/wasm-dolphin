@@ -82,14 +82,12 @@ test("the no-GPU lane measures the presenters' CPU and records the player's WebG
   assert.match(session, /process\.platform === "win32" \? await cdpCpuSampler/);
 });
 
-// Without a usable GPU the presenter is the 2D canvas, not software WebGL,
-// and the tick does not repaint an unchanged frame on the CPU.
-test("software WebGL is refused for the 2D presenter, without the tick repaint", async () => {
+// Without a usable GPU the presenter is the 2D canvas, not software WebGL.
+test("software WebGL is refused for the 2D presenter", async () => {
   const w = await read("../src/upstream-discio-worker.js");
   assert.match(w, /failIfMajorPerformanceCaveat: !webglAcceptSoftware/);
   assert.match(w, /webglAcceptSoftware = Boolean\(webglSoftware\);/);
-  assert.match(w, /rendererDiagnostics\.webglFallback = [^\n]+;\n\s*presenterOnCpu = true;/);
-  assert.match(w, /if \(cmdRingOwnsCanvas\) return;\n(?:\s*\/\/[^\n]*\n)*\s*if \(presenterOnCpu\) return;/);
+  assert.match(w, /if \(renderGl\) \{[\s\S]{0,200}return;\n\s*\}\n\s*rendererDiagnostics\.webglFallback = /);
   assert.match(await read("../src/core-host.js"), /get\("webglsw"\) === "1"/);
   assert.match(await read("../src/upstream-worker-adapter.js"), /webglSoftware: this\.webglSoftware/);
 });
