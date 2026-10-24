@@ -1,0 +1,86 @@
+diff --git a/Source/Core/Core/CoreTiming.cpp b/Source/Core/Core/CoreTiming.cpp
+index d8041e2..343e93a 100644
+--- a/Source/Core/Core/CoreTiming.cpp
++++ b/Source/Core/Core/CoreTiming.cpp
+@@ -70,13 +70,15 @@ extern "C" EMSCRIPTEN_KEEPALIVE void DolphinWeb_SetDupXfbRearmsThrottle(int on)
+ }
+ 
+ // The pacing settings the core runs with, from its effective config: bit 0
+-// SyncOnSkipIdle, bit 1 Rush Frame Presentation, bit 2 the 0150 rearm. The
+-// harness reads it (validationReadPacingConfig) to know a switch was applied.
++// SyncOnSkipIdle, bit 1 Rush Frame Presentation, bit 2 the 0150 rearm, bit 3
++// Smooth Early Presentation (0153, ?smoothearly=0). The harness reads it
++// (validationReadPacingConfig) to know a switch was applied.
+ extern "C" EMSCRIPTEN_KEEPALIVE u32 DolphinWeb_PacingConfig()
+ {
+   return (Config::Get(Config::MAIN_SYNC_ON_SKIP_IDLE) ? 1u : 0u) |
+          (Config::Get(Config::MAIN_RUSH_FRAME_PRESENTATION) ? 2u : 0u) |
+-         (DolphinWeb::g_dup_xfb_rearms_throttle.load(std::memory_order_relaxed) ? 4u : 0u);
++         (DolphinWeb::g_dup_xfb_rearms_throttle.load(std::memory_order_relaxed) ? 4u : 0u) |
++         (Config::Get(Config::MAIN_SMOOTH_EARLY_PRESENTATION) ? 8u : 0u);
+ }
+ #endif
+ 
+diff --git a/Source/Core/Core/WasmHeadroom.h b/Source/Core/Core/WasmHeadroom.h
+index 3fda7b0..9d039ca 100644
+--- a/Source/Core/Core/WasmHeadroom.h
++++ b/Source/Core/Core/WasmHeadroom.h
+@@ -46,7 +46,7 @@ struct Stats
+   double flush_gpu_waits = 0;
+   double gpu_consumer_wait_us = 0;  // inside gpu_work_us: waiting on the render worker
+   double guest_ticks = 0;        // core ticks since the reset, with window_us (CPU thread)
+-  double spare = 0;
++  double present_sleep_us = 0;   // inside gpu_work_us: SmoothEarlyPresentation sleep (0153)
+ };
+ static_assert(sizeof(Stats) == 96);
+ 
+@@ -113,6 +113,7 @@ inline void GpuSync()
+     g_stats.gpu_work_us = 0;
+     g_stats.gpu_consumer_wait_us = 0;
+     g_stats.xfb_copies = 0;
++    g_stats.present_sleep_us = 0;
+   }
+ }
+ inline void AddGpuWork(Clock::duration d)
+@@ -128,6 +129,15 @@ inline void AddGpuConsumerWait(double us)
+     g_stats.gpu_consumer_wait_us += us;
+   }
+ }
++// Patch 0153: the video thread's sleep to the present time (Present.cpp).
++inline void AddPresentSleep(Clock::duration d)
++{
++  if (g_on) [[unlikely]]
++  {
++    GpuSync();
++    g_stats.present_sleep_us += Micros(d);
++  }
++}
+ inline void CountXfbCopy()
+ {
+   if (g_on) [[unlikely]]
+diff --git a/Source/Core/VideoCommon/Present.cpp b/Source/Core/VideoCommon/Present.cpp
+index 2514854..3704d1b 100644
+--- a/Source/Core/VideoCommon/Present.cpp
++++ b/Source/Core/VideoCommon/Present.cpp
+@@ -19,6 +19,9 @@ extern std::atomic<bool> g_dup_xfb_rearms_throttle;  // CoreTiming.cpp, patch 01
+ #include "Core/Host.h"
+ #include "Core/Core.h"
+ #include "Core/System.h"
++#ifdef __EMSCRIPTEN__
++#include "Core/WasmHeadroom.h"
++#endif
+ 
+ #include "InputCommon/ControllerInterface/ControllerInterface.h"
+ 
+@@ -954,7 +957,11 @@ void Presenter::Present(PresentInfo* present_info)
+       if (!Core::IsCPUThread() && g_video_backend &&
+           g_video_backend->GetConfigName() == "WebGPU")
+       {
++        // Patch 0153: counted apart (headroom presentSleepUs), it is not
++        // the emulated GPU's work.
++        const auto sleep_start = Clock::now();
+         Core::System::GetInstance().GetCoreTiming().SleepUntil(present_time);
++        DolphinWeb::Headroom::AddPresentSleep(Clock::now() - sleep_start);
+       }
+ #else
+       Core::System::GetInstance().GetCoreTiming().SleepUntil(present_time);

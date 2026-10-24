@@ -396,7 +396,8 @@ function harnessPacingConfig() {
   const read = moduleInstance?._DolphinWeb_PacingConfig;
   if (typeof read !== "function") return { supported: false };
   const bits = read() >>> 0;
-  return { supported: true, syncOnSkipIdle: Boolean(bits & 1), rushFramePresentation: Boolean(bits & 2), dupXfbResetsThrottle: Boolean(bits & 4) };
+  // bit 3 (patch 0153): SmoothEarlyPresentation; a 0150-only core reads false.
+  return { supported: true, syncOnSkipIdle: Boolean(bits & 1), rushFramePresentation: Boolean(bits & 2), dupXfbResetsThrottle: Boolean(bits & 4), smoothEarlyPresentation: Boolean(bits & 8) };
 }
 function harnessJitRegionStats({ sampleEvery, pcs } = {}) {
   if (!harnessEnabled) return { error: "harness hooks are off" };
@@ -1603,6 +1604,7 @@ async function handleMessage(type, payload) {
         rushPresentation: payload.rushPresentation,
         syncOnSkipIdle: payload.syncOnSkipIdle,
         dupXfbRearmsThrottle: payload.dupXfbRearmsThrottle,
+        smoothEarly: payload.smoothEarly,
         coreLog: payload.coreLog,
         memcardSlotB: payload.memcardSlotB,
         efbAccess: payload.efbAccess,
@@ -2286,6 +2288,7 @@ async function loadCore({
   rushPresentation = true,
   syncOnSkipIdle = false,
   dupXfbRearmsThrottle = false,
+  smoothEarly = true,
   coreLog = false,
   memcardSlotB = false,
   efbAccess = false,
@@ -2802,6 +2805,7 @@ async function loadCore({
     dolphinRushPresentation: rushPresentation !== false,
     dolphinSyncOnSkipIdle: syncOnSkipIdle === true,
     dolphinDupXfbRearmsThrottle: dupXfbRearmsThrottle === true,
+    dolphinSmoothEarly: smoothEarly !== false,
     dolphinCoreLog: Boolean(coreLog),
     dolphinMemcardSlotB: Boolean(memcardSlotB),
     dolphinEfbAccess: Boolean(efbAccess),

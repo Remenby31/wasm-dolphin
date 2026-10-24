@@ -749,8 +749,13 @@ void EnsureRuntime()
   DolphinWeb_SetDupXfbRearmsThrottle(
       EM_ASM_INT({ return (typeof Module !== 'undefined' &&
                            Module['dolphinDupXfbRearmsThrottle'] === true) ? 1 : 0; }));
+  // ?smoothearly=0 (patch 0153, Module['dolphinSmoothEarly'] false) turns
+  // off the video thread's sleep to each present's time (Present.cpp, 0094).
+  const bool smooth_early =
+      EM_ASM_INT({ return (typeof Module !== 'undefined' &&
+                           Module['dolphinSmoothEarly'] === false) ? 0 : 1; }) != 0;
   Config::SetBase(Config::MAIN_RUSH_FRAME_PRESENTATION, rush_presentation);
-  Config::SetBase(Config::MAIN_SMOOTH_EARLY_PRESENTATION, true);
+  Config::SetBase(Config::MAIN_SMOOTH_EARLY_PRESENTATION, smooth_early);
   Config::SetBase(Config::MAIN_SYNC_ON_SKIP_IDLE, sync_on_skip_idle);
   Config::SetBase(Config::MAIN_ACCURATE_FMADDS, false);
   Config::SetBase(Config::MAIN_ENABLE_CHEATS, false);

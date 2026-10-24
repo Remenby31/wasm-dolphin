@@ -442,6 +442,7 @@ export class EmulatorHost {
             rushPresentation: this.pacing.rushPresentation,
             syncOnSkipIdle: this.pacing.syncOnSkipIdle,
             dupXfbRearmsThrottle: this.pacing.dupXfbRearmsThrottle,
+            smoothEarly: this.pacing.smoothEarly,
             coreLog: this.coreLog,
             memcardSlotB: this.memcardSlotB,
             efbAccess: this.efbAccess,
@@ -1587,13 +1588,15 @@ function requestedEfbDiag() {
 
 // Pacing switches (patch 0150), for measurement: ?rush=0 turns Rush Frame
 // Presentation off, ?synconidle=1 turns SyncOnSkipIdle on, ?dupvsync=1 makes a
-// duplicated XFB rearm the throttle. Absent: the shipped pacing.
+// duplicated XFB rearm the throttle; ?smoothearly=0 (patch 0153) turns off
+// the video thread's sleep to each present's time. Absent: the shipped pacing.
 export function requestedPacing(search = window.location.search) {
   const params = new URLSearchParams(search);
   return {
     rushPresentation: params.get("rush") !== "0",
     syncOnSkipIdle: params.get("synconidle") === "1",
-    dupXfbRearmsThrottle: params.get("dupvsync") === "1"
+    dupXfbRearmsThrottle: params.get("dupvsync") === "1",
+    smoothEarly: params.get("smoothearly") !== "0"
   };
 }
 
