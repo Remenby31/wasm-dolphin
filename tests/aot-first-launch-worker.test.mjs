@@ -59,7 +59,7 @@ test("without aot=1 the worker answers disabled and imports nothing of P7", asyn
   const { worker } = await loadWorker(t);
   worker.setAotFirstLaunchEnabledForTest(false);
   assert.deepEqual(await worker.handleAotMessage("validationReadAotProgress"), { schema: "wasm-dolphin.aot-progress.v1", state: "disabled", events: [] });
-  assert.deepEqual(await worker.handleAotMessage("aotStatus"), { state: "disabled", fraction: 0 });
+  assert.deepEqual(await worker.handleAotMessage("aotStatus"), { state: "disabled", fraction: 0, wasmFeatures: { relaxedMadd: null } });
   assert.deepEqual(await worker.handleAotMessage("aotOptimize", { resume: true }), { started: false });
   // P7's modules are loaded only under the flag (dynamic import)
   const source = await readFile(workerUrl, "utf8");
@@ -77,7 +77,7 @@ test("a core without the translator export: unsupported, and the disc key is nev
   await worker.prepareAotFirstLaunch({}, { module: {}, readDiscKey: async () => { reads++; return DISC; }, coreHash: CORE });
   assert.equal(reads, 0);
   assert.equal((await worker.handleAotMessage("validationReadAotProgress")).state, "unsupported");
-  assert.deepEqual(await worker.handleAotMessage("aotStatus"), { state: "unsupported", fraction: 0 });
+  assert.deepEqual(await worker.handleAotMessage("aotStatus"), { state: "unsupported", fraction: 0, wasmFeatures: { relaxedMadd: null } });
   await worker.startAotFirstLaunchAfterBoot();
 });
 

@@ -90,7 +90,7 @@ import { workerRequest } from "../lib/browser.mjs";
 import { emulatedWindow, ticksNow } from "../lib/emulated-window.mjs";
 import { chromeInfo } from "../lib/probe-out.mjs";
 import { decodeRegionStats } from "../lib/jit-region-stats.mjs";
-import { busiestThread, checkPerfAccess, counterEvents, cyclesPerGuestCycle, instructionsPerGuestCycle, perfCounters } from "../lib/perf-counters.mjs";
+import { busiestThread, checkPerfAccess, counterEvents, counterSanity, cyclesPerGuestCycle, instructionsPerGuestCycle, perfCounters } from "../lib/perf-counters.mjs";
 import { execFileSync, spawn } from "node:child_process";
 import { existsSync, readdirSync, statSync } from "node:fs";
 
@@ -496,6 +496,9 @@ async function main() {
         // One name for the analysis: per tick when the ticks are known, else from the speed.
         x.cold.instructionsPerGuestCycle = x.cold.instructionsPerGuestTick ?? instructionsPerGuestCycle(x.cold);
         x.cold.cyclesPerGuestCycle = cyclesPerGuestCycle(x.cold);
+        // Counters that cannot be the CPU thread's: kept, never analysed.
+        const why = x.cold.counters ? counterSanity(x.cold) : null;
+        if (why) { Object.assign(x.cold, { countersRejected: why, instructionsPerGuestCycle: null, cyclesPerGuestCycle: null }); console.warn(`[race-multi] run ${r} arm ${a}: counters rejected, ${why}`); }
       });
       record.arms.forEach((x, a) => { x.regionGate = gates.get(sessions[a]) ?? null; });
       if (values["aot-seed"]) {
