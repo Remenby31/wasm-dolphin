@@ -106,6 +106,7 @@ export async function loadAotCore(coreDir = new URL("../../cores/dolphin/", impo
         if (kind === 0) return { offset, kind: "import", name: helperNames[value] };
         if (kind === 1) return { offset, kind: "jump", targetPc: value };
         if (kind === 3) return { offset, kind: "heap", name: REGION_HEAP_NAMES[value & 1], form: value & 2 ? "offset" : "const" };
+        if (kind === 5) return { offset, kind: "call", targetPc: value }; // a guest call as a wasm call (0142)
         if (kind === 4) return { offset, kind: "hint", likely: value === 1 }; // branch hint (0131)
         return { offset, kind: "dispatch" };
       });
@@ -415,11 +416,11 @@ export function compareRegionProgram(core, words, state, { translateState = stat
   return { translated: true, fragment, ...result };
 }
 
-export function runOracleProgramsAsRegions(core, { seed, count, length, mask }) {
+export function runOracleProgramsAsRegions(core, { seed, count, length, mask, names = null }) {
   const r = makeRng(seed);
   const tally = { programs: 0, translated: 0, compared: 0, equal: 0, trap: 0, ends: {}, regionRuns: 0, hintsDropped: 0, hintsChecked: 0, hintSectionErrors: [], mismatches: [] };
   for (let n = 0; n < count; n++) {
-    const words = randomProgram(r, length);
+    const words = randomProgram(r, length, { names });
     const state = randomState(r);
     const smallBudget = 1 + r.below(60);
     tally.programs += 1;

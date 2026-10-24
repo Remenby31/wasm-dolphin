@@ -8,7 +8,8 @@
 //   node tests/jit-oracle-fuzz.mjs --programs 5000         # random blocks (cpufuzz-like)
 //
 // Options: --seed S, --core <dir>, --mask <hex> (CachedInterpreter disable
-// mask; default production), --regalloc both|on|off, --json out.json.
+// mask; default production), --regalloc both|on|off, --json out.json,
+// --only name,name, --fprf, --fused 0|1 (relaxed_madd mode, 0129/0141).
 // Exit 0 when nothing diverged and nothing was rejected by the engine.
 
 import { writeFileSync } from "node:fs";
@@ -59,6 +60,15 @@ if (args.includes("--fprf")) {
     process.exit(2);
   }
   core.setFprf(true);
+}
+
+// --fused 1|0: the FMA emitter's relaxed_madd mode; 1 only where this engine fuses.
+if (opt("fused", null) !== null) {
+  if (!core.has("DolphinWeb_SetFusedMadd")) {
+    console.error("--fused: this core predates patch 0129");
+    process.exit(2);
+  }
+  core.setFusedMadd(Number(opt("fused")) !== 0);
 }
 
 const findings = new Map(); // key -> {count, example}

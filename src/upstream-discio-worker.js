@@ -364,6 +364,9 @@ function harnessJitRegionStats({ sampleEvery, pcs } = {}) {
   const stats = moduleInstance?._DolphinWeb_JitRegionStats;
   if (!stats) return { error: "core has no DolphinWeb_JitRegionStats" };
   const ptr = stats(Number.isInteger(sampleEvery) && sampleEvery >= 0 ? sampleEvery : -1) >>> 0;
+  // 0142: the counters of guest calls made by regions as wasm calls start
+  // and stop with the region stats (on while sampling).
+  if (Number.isInteger(sampleEvery)) moduleInstance._DolphinWeb_RegionCallStats?.(sampleEvery >= 0 ? 1 : 0);
   const heap = moduleInstance.HEAPU8;
   if (!ptr || ptr + 8 > heap.length) return { error: `DolphinWeb_JitRegionStats returned ${ptr}` };
   const size = Math.min(new DataView(heap.buffer, ptr, 8).getUint32(4, true), 256);
@@ -380,7 +383,17 @@ function harnessJitRegionStats({ sampleEvery, pcs } = {}) {
   // (0084), the bytes of their unpatched compiles, and patched compiles refused.
   return { bytes: copy(), again: copy(), installSamples: harnessRegionInstallSamples(heap), layoutRefused, layoutHash, layout: harnessHeapLayout(moduleInstance),
     heapPatched: aotHeapPatched, heapPatchedBytes: aotHeapPatchedBytes, heapPatchFailed: aotHeapPatchFailed,
-    regionChain: harnessRegionChainStats(heap), regionSleep: harnessRegionSleepStats(), ledger: harnessRegionLedger(pcs) };
+    regionChain: harnessRegionChainStats(heap), regionSleep: harnessRegionSleepStats(), ledger: harnessRegionLedger(pcs),
+    regionCalls: harnessRegionCallStats() };
+}
+// Guest calls made by region code as wasm calls (patch 0142): calls, returns
+// elsewhere than the continuation, codes passed up, calls past the depth
+// cap, depth reached. Null with an older core.
+function harnessRegionCallStats() {
+  const f = moduleInstance?._DolphinWeb_RegionCallStats;
+  if (!f) return null;
+  const [calls, , elsewhere, passedUp, capped, depthMax] = new Uint32Array(moduleInstance.HEAPU8.buffer, f(-1) >>> 0, 6);
+  return { calls, elsewhere, passedUp, capped, depthMax };
 }
 // Installs in the CPU thread's throttle sleeps (patch 0107): how many, their
 // host time, the worst lateness past a sleep's deadline they caused (the
