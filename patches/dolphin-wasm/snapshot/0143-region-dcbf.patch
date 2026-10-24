@@ -1,0 +1,74 @@
+diff --git a/Source/Core/Core/PowerPC/CachedInterpreter/CachedInterpreter.cpp b/Source/Core/Core/PowerPC/CachedInterpreter/CachedInterpreter.cpp
+--- a/Source/Core/Core/PowerPC/CachedInterpreter/CachedInterpreter.cpp
++++ b/Source/Core/Core/PowerPC/CachedInterpreter/CachedInterpreter.cpp
+@@ -3037,6 +3037,9 @@ extern "C" int DolphinWeb_CachedInterpreterSystem(int state_ptr, u32 inst_hex, u
+   return DolphinWeb_CachedInterpreterCheckProgramOrDsi(ppc_state, current_pc, downcount) ? 1 : 0;
+ }
+ 
++// Patch 0143: lines of code invalidated over a region's pages (a dcbf/dcbst
++// interpreted in region code stops the region when it moved).
++u32 s_region_code_lines_invalidated = 0;
+ extern "C" int DolphinWeb_CachedInterpreterInterpret(int state_ptr, u32 current_pc, u32 inst_hex,
+                                                       int write_pc, u32 downcount)
+ {
+@@ -3079,6 +3082,7 @@ extern "C" int DolphinWeb_CachedInterpreterInterpret(int state_ptr, u32 current_
+     return 1;
+   }
+ 
++  const u32 code_lines_before = s_region_code_lines_invalidated;
+   Interpreter::GetInterpreterOp(inst)(interpreter, inst);
+   if (s_mem_stats_on) [[unlikely]]
+   {
+@@ -3093,6 +3097,16 @@ extern "C" int DolphinWeb_CachedInterpreterInterpret(int state_ptr, u32 current_
+     ++s_wasm_helper_halt_count;
+     return 1;
+   }
++  // 0143: a dcbf/dcbst that invalidated a line of region code stops the
++  // region after it (the code it would go on with may be gone).
++  if (s_region_code_lines_invalidated != code_lines_before) [[unlikely]]
++  {
++    ppc_state.pc = current_pc + 4;
++    ppc_state.npc = current_pc + 4;
++    ppc_state.downcount -= downcount;
++    ++s_wasm_helper_halt_count;
++    return 1;
++  }
+   return 0;
+ }
+ 
+@@ -11263,6 +11277,7 @@ void DolphinWeb_InvalidateRegions(u32 address, u32 size, bool forced)
+     covered = (a >> 12) < s_region_pages.size() && s_region_pages[a >> 12] != 0;
+   if (!covered)
+     return;
++  s_region_code_lines_invalidated += 1;  // 0143
+   for (u32 index = 0; index < s_regions.size(); ++index)
+   {
+     const InstalledRegion& region = s_regions[index];
+@@ -16875,9 +16890,15 @@ constexpr u32 REGION_CALL_DEPTH = 64;
+ // the region, which never checks the CPU's mode between its blocks.
+ bool RegionInterpretsInline(const PPCAnalyst::CodeOp& op)
+ {
++  const UGeckoInstruction inst = op.inst;
++  // Patch 0143: dcbf and dcbst run in region code through the interpret
++  // helper (a flush loop over data stayed outside, one exit per line). With
++  // the dcache off they invalidate the line's JIT code: when that line
++  // touches a region, the helper stops the region (0142's invariant).
++  if (inst.OPCD == 31 && (inst.SUBOP10 == 86 || inst.SUBOP10 == 54) && !op.canEndBlock)
++    return true;
+   if ((op.opinfo->flags & FL_USE_FPU) == 0 || op.canEndBlock || op.branchIsIdleLoop)
+     return false;
+-  const UGeckoInstruction inst = op.inst;
+   return !(inst.OPCD == 4 && inst.SUBOP10 == 1014);  // dcbz_l: a cache op
+ }
+ 
+@@ -17492,8 +17513,8 @@ namespace
+ // npc and downcount in locals, with one shared exit (26 is retired, 0134's).
+ // 30 (0141): paired-single FMA in f64x2 with fused relaxed_madd (28, 29 are
+ // 0137's and 0139's). 31 (0142): guest calls as wasm calls, guest returns as
+-// wasm returns (was 0139).
+-constexpr u32 AOT_COMPILER_VERSION = 31;
++// wasm returns (was 0139). 32 (0143): dcbf and dcbst in region code.
++constexpr u32 AOT_COMPILER_VERSION = 32;
+ constexpr u32 AOT_MAX_FRAGMENT_BYTES = 1u << 20;
+ thread_local std::vector<u32> t_aot_out;
+ u8* s_aot_ram = nullptr;

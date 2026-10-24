@@ -1521,3 +1521,58 @@ test("a trap in a callee two wasm calls deep: the handler sees the interpreter's
     assert.equal(core.module._DolphinWeb_RegionCallDepthForTest(-1), 0, "no call left counted");
   }
 });
+
+// 0143: dcbf and dcbst run in region code (interpret helper). A flush loop
+// over data stays in the region; a dcbf on a line of region code (with the
+// dcache off it invalidates the line) stops the region after it. Against
+// the interpreter, in one module and across modules.
+const dcbfSkip = chainSkip || (core?.has("DolphinWeb_AotKeyParts") && keyVersion() < 32 && "core before 0143 (compiler version < 32)");
+const DCBF_TEXT = 0x8001a100;
+const DCBF_DATA = 0x80c10000;
+const dcbfOp = (a, b) => (31 << 26) | (a << 16) | (b << 11) | (86 << 1);
+const dcbstOp = (a, b) => (31 << 26) | (a << 16) | (b << 11) | (54 << 1);
+const bdnz = (from, to) => asm.bc(16, 0, from, to);
+const FLUSHER = assemble(DCBF_TEXT, [
+  "main", asm.mflr(0), asm.stwu(1, 1, -16), stw(0, 1, 20),
+  asm.lis(3, DCBF_DATA >>> 16), asm.ori(3, 3, DCBF_DATA & 0xffff), asm.li(4, 16), asm.mtctr(4),
+  "flush", dcbfOp(0, 3), dcbstOp(0, 3), asm.addi(3, 3, 32), (pc, l) => bdnz(pc, l.flush),
+  (pc, l) => asm.lis(5, l.main >>> 16), (pc, l) => asm.ori(5, 5, l.main & 0xffff), dcbfOp(0, 5),
+  asm.li(9, 7), lwz(0, 1, 20), asm.addi(1, 1, 16), mtlr(0), asm.blr()
+]);
+test("dcbf and dcbst run in the region; a dcbf on region code stops it after, like the interpreter (0143)", { skip: dcbfSkip }, () => {
+  const load = () => {
+    const dol = buildDol({ textAddr: DCBF_TEXT, text: FLUSHER.words, entry: FLUSHER.labels.main });
+    const { image, entryPoint } = imageFromDol(dol);
+    for (const seg of image.segments) core.load(seg.start, seg.bytes);
+    core.invalidate(DCBF_TEXT, 4 * FLUSHER.words.length);
+    return planDol({ image, entryPoint, gameId: "TEST01", dolBytes: dol, options: { gapFill: false } });
+  };
+  load();
+  const reference = runCall(FLUSHER.labels.main, { regions: false });
+  for (const maxFunctions of [100, 1]) {
+    const plan = load();
+    core.module._DolphinWeb_AotForgetRegionsForTest?.();
+    core.setRegionsEnabled(true);
+    core.setRegionChaining(true);
+    queueAll(plan, maxFunctions, true);
+    serviceAll();
+    const got = runCall(FLUSHER.labels.main, { regions: true });
+    assert.deepEqual(got.state, reference.state, `maxFunctions ${maxFunctions}`);
+    assert.equal(got.downcount, reference.downcount, `maxFunctions ${maxFunctions}`);
+    // The 16 lines of the loop (48 ops) in the region; after the dcbf on
+    // main's own line, at most the 5 ops to the blr run outside.
+    assert.ok(got.interpreted <= 5, `maxFunctions ${maxFunctions}: ${got.interpreted} ops interpreted`);
+    for (const budget of [3, 17, 40, 77]) {
+      core.reset(seedGprs(FLUSHER.labels.main), FLUSHER.labels.main, STOP, budget);
+      while (core.downcount() > 0 && core.pc() !== STOP) if (!core.dispatchRegion()) assert.equal(core.interpretOne(), 0);
+      const stopped = { state: core.state(), downcount: core.downcount() };
+      load();
+      core.reset(seedGprs(FLUSHER.labels.main), FLUSHER.labels.main, STOP, budget);
+      for (let n = 0; n < 100000 && core.downcount() > stopped.downcount; n++) assert.equal(core.interpretOne(), 0);
+      assert.equal(core.downcount(), stopped.downcount, `maxFunctions ${maxFunctions}, budget ${budget}`);
+      assert.deepEqual(core.state(), stopped.state, `maxFunctions ${maxFunctions}, budget ${budget}`);
+      queueAll(plan, maxFunctions, true);
+      serviceAll();
+    }
+  }
+});
