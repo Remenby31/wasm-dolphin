@@ -43,7 +43,7 @@
 export const REGION_HEAP_NAMES = Object.freeze(["ram_base", "l1_base"]);
 
 const TYPE_STATE = 0; // (i32) -> i32: dispatcher, stub, fragments
-const OP = { localGet: 0x20, localSet: 0x21, localTee: 0x22, call: 0x10, i32Load: 0x28, i32Const: 0x41, i32Eq: 0x46, i32LtU: 0x49, if: 0x04, brIf: 0x0d, end: 0x0b, return: 0x0f, returnCall: 0x12, returnCallIndirect: 0x13 };
+const OP = { localGet: 0x20, localSet: 0x21, localTee: 0x22, globalGet: 0x23, globalSet: 0x24, call: 0x10, i32Load: 0x28, i32Const: 0x41, i32Eq: 0x46, i32LtU: 0x49, if: 0x04, brIf: 0x0d, end: 0x0b, return: 0x0f, returnCall: 0x12, returnCallIndirect: 0x13 };
 const VAL = { i32: 0x7f, i64: 0x7e, f32: 0x7d, f64: 0x7c };
 
 function uleb(out, v) {
@@ -324,6 +324,9 @@ export function assembleRegion(fragments, { helpers, pcOffset, memoryPages, memo
     if (all.size > 1) throw new Error("region: fragments translated for different heaps");
     heapBases = fragments.find((f) => f.heapBases)?.heapBases ?? null;
   }
+  // 0139: a fragment that reads or writes the call depth imports the one
+  // env.region_depth global every region module shares (global 0).
+  let usesDepth = false;
   const bodies = fragments.map((f, fi) => {
     const code = Uint8Array.from(f.code);
     const offsets = new Set();
@@ -349,13 +352,18 @@ export function assembleRegion(fragments, { helpers, pcOffset, memoryPages, memo
       }
       if (TEMPLATE.some((b, i) => code[r.offset + i] !== b)) throw new Error(`region: reloc at ${r.offset} is not a padded zero`);
       const opcode = code[r.offset - 1];
-      if ((r.kind === "import" && opcode !== 0x10) || ((r.kind === "jump" || r.kind === "dispatch") && opcode !== OP.returnCall)) {
+      if (((r.kind === "import" || r.kind === "call") && opcode !== OP.call) || ((r.kind === "jump" || r.kind === "dispatch") && opcode !== OP.returnCall) ||
+          (r.kind === "depth" && opcode !== OP.globalGet && opcode !== OP.globalSet)) {
         throw new Error(`region: ${r.kind} reloc at ${r.offset} after opcode 0x${opcode.toString(16)}`);
       }
       let index;
       if (r.kind === "import") index = helperIndex.get(r.name);
       else if (r.kind === "jump") index = entryOwner.get(r.targetPc >>> 0) ?? STUB;
       else if (r.kind === "dispatch") index = INNER;
+      // 0139: a guest call as a wasm call, to the fragment holding the
+      // callee here, else the exit stub (which chains on to its region).
+      else if (r.kind === "call") index = entryOwner.get(r.targetPc >>> 0) ?? STUB;
+      else if (r.kind === "depth") { index = 0; usesDepth = true; }
       else throw new Error(`region: unknown reloc kind ${r.kind}`);
       code.set(paddedUleb(index), r.offset);
     }
@@ -379,7 +387,7 @@ export function assembleRegion(fragments, { helpers, pcOffset, memoryPages, memo
   section(out, 1, types);
 
   const imports = [];
-  uleb(imports, helperNames.length + 1 + (chain ? 2 : 0));
+  uleb(imports, helperNames.length + 1 + (chain ? 2 : 0) + (usesDepth ? 1 : 0));
   name(imports, "env"); name(imports, "memory");
   imports.push(0x02, sharedMemory ? 0x03 : 0x01);
   uleb(imports, memoryMinPages); uleb(imports, memoryPages);
@@ -390,6 +398,7 @@ export function assembleRegion(fragments, { helpers, pcOffset, memoryPages, memo
     // is (any size).
     name(imports, "env"); name(imports, "table"); imports.push(0x01, 0x70, 0x00, 0x00);
   }
+  if (usesDepth) { name(imports, "env"); name(imports, "region_depth"); imports.push(0x03, VAL.i32, 0x01); } // global 0, mutable
   section(out, 2, imports);
 
   const funcs = [];

@@ -1306,3 +1306,57 @@ test("continuation budget: past a full first fragment every continuation byte is
   assert.ok(short.budgetCharged <= cap + Math.max(...capped.continuations.map((c) => c.code.length)), "stops once the budget is spent");
   assert.ok(short.budgetRefused >= 1, `refused ${short.budgetRefused}`);
 });
+
+// 0139: a guest call made by a region is a wasm `call` (to the callee's
+// fragment in the module, else the exit stub, which chains on), its return a
+// wasm return (3) that the caller takes only at its continuation. Calls
+// within one module and across modules (one region per function), a
+// recursion past the 64-call cap, a return elsewhere than the continuation
+// (LR rewritten: passed up to the dispatcher), each against the interpreter,
+// to the end and at budgets that stop it mid-call.
+const callSkip = chainSkip || (core?.has("DolphinWeb_AotKeyParts") && keyVersion() < 29 && "core before 0139 (compiler version < 29)");
+const CALL_TEXT = 0x80016100;
+const CALLS = assemble(CALL_TEXT, [
+  "main", asm.mflr(0), asm.stwu(1, 1, -16), stw(0, 1, 20), asm.li(3, 100), asm.li(4, 0), (pc, l) => asm.bl(pc, l.rec),
+  (pc, l) => asm.bl(pc, l.jumper), asm.li(6, 1),
+  "elsewhere", asm.li(7, 2), lwz(0, 1, 20), asm.addi(1, 1, 16), mtlr(0), asm.blr(),
+  // rec(r3): r4 += 1 per level after its call returns; 100 deep.
+  "rec", asm.mflr(0), asm.stwu(1, 1, -16), stw(0, 1, 20), asm.cmplwi(3, 0), (pc, l) => asm.beq(pc, l.rec_done),
+  asm.addi(3, 3, -1), (pc, l) => asm.bl(pc, l.rec), asm.addi(4, 4, 1),
+  "rec_done", lwz(0, 1, 20), asm.addi(1, 1, 16), mtlr(0), asm.blr(),
+  // jumper: returns to `elsewhere`, not to its call's continuation.
+  "jumper", (pc, l) => asm.lis(5, l.elsewhere >>> 16), (pc, l) => asm.ori(5, 5, l.elsewhere & 0xffff), mtlr(5), asm.blr()
+]);
+function installCalls(maxFunctions) {
+  const dol = buildDol({ textAddr: CALL_TEXT, text: CALLS.words, entry: CALLS.labels.main });
+  const { image, entryPoint } = imageFromDol(dol);
+  const plan = planDol({ image, entryPoint, gameId: "TEST01", dolBytes: dol, options: { gapFill: false } });
+  for (const s of image.segments) core.load(s.start, s.bytes);
+  core.invalidate(CALL_TEXT, 4 * CALLS.words.length);
+  core.module._DolphinWeb_AotForgetRegionsForTest?.();
+  core.setRegionsEnabled(true);
+  core.setRegionChaining(true);
+  queueAll(plan, maxFunctions, true);
+  serviceAll();
+  return plan;
+}
+test("guest calls as wasm calls, in one module and across modules, past the depth cap and returning elsewhere: like the interpreter (0139)", { skip: callSkip }, () => {
+  for (const maxFunctions of [100, 1]) {
+    installCalls(maxFunctions);
+    const reference = runCall(CALLS.labels.main, { regions: false });
+    const got = runCall(CALLS.labels.main, { regions: true });
+    const what = maxFunctions === 1 ? "across modules" : "in one module";
+    assert.deepEqual(got.state, reference.state, what);
+    assert.equal(got.downcount, reference.downcount, what);
+    assert.equal(got.interpreted, 0, `${what}: no op left the regions`);
+    for (const budget of [1, 7, 40, 151, 400, 777, 1501]) {
+      core.reset(seedGprs(CALLS.labels.main), CALLS.labels.main, STOP, budget);
+      while (core.downcount() > 0 && core.pc() !== STOP) if (!core.dispatchRegion()) assert.equal(core.interpretOne(), 0);
+      const stopped = { state: core.state(), downcount: core.downcount() };
+      core.reset(seedGprs(CALLS.labels.main), CALLS.labels.main, STOP, budget);
+      for (let n = 0; n < 1000000 && core.downcount() > stopped.downcount; n++) assert.equal(core.interpretOne(), 0);
+      assert.equal(core.downcount(), stopped.downcount, `${what}, budget ${budget}`);
+      assert.deepEqual(core.state(), stopped.state, `${what}, budget ${budget}`);
+    }
+  }
+});

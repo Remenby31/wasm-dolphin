@@ -513,3 +513,36 @@ in a region (no DSI without the MMU, under which no region is installed,
 0090/0091; MSR.FP is never clear in one, 0121), and the MMU mode is fixed at
 boot. The downcount check's branch hint (0131) sits on its `br_if`.
 Compiler version 27.
+
+## Guest calls as wasm calls (patch 0139, 2026-10-24)
+
+A guest return (`blr`) used to leave the fragment through the region
+dispatcher's binary search, then a `return_call` into the caller's fragment
+and its head `br_table`. When the caller sat in another module, it went
+through `region_chain` and a `call_indirect` too. None of those jumps is
+predicted by the host's return stack. On the race scene returns and computed
+branches are 19 % of block transitions and 31 % of their time
+(research/deep-return-prediction.md, option R1; the native Dolphin "BLR
+optimization").
+
+- **Call.** A block ending in `bl` to a function outside the fragment writes
+  its frame back, then makes a wasm `call` (reloc kind 5) to the callee's
+  fragment in the module, else to the exit stub, which chains on to the
+  callee's region. On return:
+  - code 3 with `state.pc` at the call's continuation: the caller goes on
+    there (a direct `br` to that block, or its head);
+  - any other code, or another pc: passed up. 0 always means "continue at
+    `state.pc`", so a return elsewhere (LR rewritten, a `longjmp`) unwinds to
+    the dispatcher, as before.
+- **Return.** A block ending in `bclr` (a conditional one, when taken) under
+  a call made by a region writes its frame back and returns 3, after its
+  downcount check.
+- **Depth.** One i32 global, `env.region_depth`, imported by every region
+  module (reloc kind 6), counts these calls. At 64 a call is a `return_call`
+  as before: a Chrome worker holds ~960 frames of a fragment's locals in
+  Liftoff.
+- **Exits.** An exiting block, a halt, running out of downcount: all return 0
+  or 2 and pass up through every call. `TryRunRegion` already takes any code
+  other than 1 as "ran"; the test export maps 3 to 0.
+
+Compiler version 29.

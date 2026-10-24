@@ -1,0 +1,208 @@
+diff --git a/Source/Core/Core/PowerPC/CachedInterpreter/CachedInterpreter.cpp b/Source/Core/Core/PowerPC/CachedInterpreter/CachedInterpreter.cpp
+--- a/Source/Core/Core/PowerPC/CachedInterpreter/CachedInterpreter.cpp
++++ b/Source/Core/Core/PowerPC/CachedInterpreter/CachedInterpreter.cpp
+@@ -255,7 +255,11 @@ EM_JS(int, DolphinWeb_CachedInterpreterCompileWasmBlock,
+           // Region chaining (patch 0102): a region's exit stub asks the core
+           // for the next region and tail-calls it through the core's table.
+           region_chain: wasmTable.get(_DolphinWeb_RegionChainHelper()),
+-          table: wasmTable
++          table: wasmTable,
++          // Patch 0139: the depth of guest calls made by regions as wasm
++          // calls, one global for every region module (a recursion across
++          // modules counts once).
++          region_depth: (Module.regionDepth ??= new WebAssembly.Global({ value: "i32", mutable: true }, 0))
+         }
+       }).exports.f;
+   const inst_t1 = (typeof performance !== "undefined" && performance.now) ? performance.now() : 0;
+@@ -16657,6 +16661,13 @@ struct FragmentBlock
+   // 0088: set when the block was left out because it holds an idle loop:
+   // the region picks up again after the whole block (the loop's exit).
+   u32 outside_until = 0;
++  // 0139: ends with a bl (a guest call): its callee and the continuation.
++  bool call = false;
++  u32 call_target = 0, call_return = 0;
++  // 0139: ends with a bclr without link (a guest return); a conditional one
++  // falls through to return_fallthrough when not taken.
++  bool returns = false;
++  u32 return_fallthrough = UINT32_MAX;
+ };
+ 
+ // Locals of a block body without the fastmem hoist (the only layout a
+@@ -16664,6 +16675,11 @@ struct FragmentBlock
+ constexpr std::array<u8, 13> WASM_BLOCK_LOCALS = {0x06, 0x03, 0x7f, 0x02, 0x7e, 0x01, 0x7c,
+                                                   0x01, 0x7f, 0x20, 0x7f, 0x10, 0x7c};
+ constexpr u32 WASM_FRAGMENT_PC_LOCAL = 56;  // appended after the block locals 1..55
++// 0139: guest calls made by regions as wasm calls, at most this deep (the
++// rest as return_calls). A Chrome worker holds ~960 frames of a fragment's
++// locals in Liftoff (research/deep-return-prediction.md §5.4): 64 keeps a
++// wide margin under the emulator's own frames.
++constexpr u32 REGION_CALL_DEPTH = 64;
+ 
+ // The block at pc as the CPU thread would build it (same analyzer, same
+ // direct-candidate prefix), emitted in fragment mode. A region holds only
+@@ -16804,6 +16820,18 @@ bool BuildFragmentBlock(Core::System& system, u32 pc, u32 limit, FragmentBlock*
+     out->successors.push_back(last.address + 4);
+   if (inst.OPCD == 18 && last.branchTo != UINT32_MAX)
+     out->jump_target = last.branchTo;
++  if (inst.OPCD == 18 && inst.LK && last.branchTo != UINT32_MAX)
++  {
++    out->call = true;
++    out->call_target = last.branchTo;
++    out->call_return = last.address + 4;
++  }
++  if (inst.OPCD == 19 && inst.SUBOP10 == 16 && !inst.LK)
++  {
++    out->returns = true;
++    if (conditional)
++      out->return_fallthrough = last.address + 4;
++  }
+   return true;
+ }
+ 
+@@ -16814,7 +16842,9 @@ struct RegionFragment
+   struct Reloc
+   {
+     u32 offset;
+-    u32 kind;   // 0 import, 1 jump, 2 dispatch, 3 heap site, 4 branch hint (0131)
++    u32 kind;   // 0 import, 1 jump, 2 dispatch, 3 heap site, 4 branch hint (0131),
++                // 5 call (0139: a `call` to the fragment holding value, else
++                // the exit stub), 6 the call-depth global's index (0139)
+     u32 value;  // helper index, target pc, 0, heap: base (bit 0) and form (bit 1),
+                 // hint: 1 if the `if` at offset is likely
+   };
+@@ -16949,6 +16979,15 @@ bool BuildRegionFragment(Core::System& system, u32 entry_pc, std::span<const u32
+     EmitStoreLocalToState(code, WASM_FRAME_PC_LOCAL, npc_offset);
+     EmitStoreLocalToState(code, WASM_FRAME_DOWNCOUNT_LOCAL, downcount_offset);
+   };
++  // 0139: the call depth, one i32 global all region modules import
++  // (env.region_depth), its index a padded LEB the assembler patches (6).
++  const auto depth_access = [&](u8 opcode) {
++    code.push_back(opcode);
++    out->relocs.push_back({static_cast<u32>(code.size()), 6, 0});
++    EmitPaddedU32Leb(code, 0);
++  };
++  const auto depth_get = [&] { depth_access(0x23); };  // global.get
++  const auto depth_set = [&] { depth_access(0x24); };  // global.set
+   const u32 n = static_cast<u32>(blocks.size());
+   u32 lowest = UINT32_MAX, highest = 0;
+   for (const auto& b : blocks)
+@@ -17045,6 +17084,71 @@ bool BuildRegionFragment(Core::System& system, u32 entry_pc, std::span<const u32
+       EmitI32Const(code, 0);
+       code.push_back(0x0f);  // return
+     }
++    else if (b.call && !index_of.contains(b.call_target))
++    {
++      // 0139: a guest call is a wasm `call` (the callee's fragment in this
++      // module, else the exit stub, which chains on), so the guest return
++      // is a wasm return the host predicts. Past REGION_CALL_DEPTH calls a
++      // return_call, as before. The callee returns 3 from its blr: when
++      // state.pc is this call's continuation it goes on here; any other
++      // code, or another pc, is passed up (0 always means "continue at
++      // state.pc": the CPU loop picks it up).
++      flush_frame();
++      depth_get();
++      EmitI32Const(code, REGION_CALL_DEPTH);
++      code.push_back(0x4f);  // i32.ge_u
++      out->relocs.push_back({static_cast<u32>(code.size()), 4, 0});  // at the cap: unlikely
++      code.insert(code.end(), {0x04, 0x40});  // if
++      EmitLocalGet(code, 0);
++      reloc_site(1, b.call_target);
++      code.push_back(0x0b);  // end
++      depth_get();
++      EmitI32Const(code, 1);
++      code.push_back(0x6a);  // i32.add
++      depth_set();
++      EmitLocalGet(code, 0);
++      code.push_back(0x10);  // call
++      out->relocs.push_back({static_cast<u32>(code.size()), 5, b.call_target});
++      EmitPaddedU32Leb(code, 0);
++      depth_get();
++      EmitI32Const(code, 1);
++      code.push_back(0x6b);  // i32.sub
++      depth_set();
++      code.push_back(0x22);  // local.tee
++      EmitU32Leb(code, 3);
++      EmitI32Const(code, 3);
++      code.push_back(0x47);  // i32.ne
++      out->relocs.push_back({static_cast<u32>(code.size()), 4, 0});  // not a return: unlikely
++      code.insert(code.end(), {0x04, 0x40});  // if
++      EmitLocalGet(code, 3);
++      code.insert(code.end(), {0x0f, 0x0b});  // return; end
++      EmitLocalGet(code, 0);
++      code.insert(code.end(), {0x28, 0x02});  // i32.load state.pc
++      EmitU32Leb(code, pc_offset);
++      EmitI32Const(code, b.call_return);
++      code.push_back(0x47);  // i32.ne
++      out->relocs.push_back({static_cast<u32>(code.size()), 4, 0});  // elsewhere: unlikely
++      code.insert(code.end(), {0x04, 0x40});  // if
++      EmitI32Const(code, 3);
++      code.insert(code.end(), {0x0f, 0x0b});  // return 3; end
++      // Back at the continuation: the frame from the state the callee left.
++      EmitI32Const(code, b.call_return);
++      EmitLocalSet(code, WASM_FRAME_PC_LOCAL);
++      EmitI32Const(code, b.call_return);
++      EmitLocalSet(code, WASM_FRAME_NPC_LOCAL);
++      EmitLoadStateToLocal(code, downcount_offset, WASM_FRAME_DOWNCOUNT_LOCAL);
++      const auto it = index_of.find(b.call_return);
++      if (it != index_of.end() && it->second > k)
++      {
++        code.push_back(0x0c);  // br $bj
++        EmitU32Leb(code, it->second - k - 1);
++      }
++      else
++      {
++        code.push_back(0x0c);  // br $L: the head
++        EmitU32Leb(code, n - k);
++      }
++    }
+     else if (b.jump_target != UINT32_MAX && !index_of.contains(b.jump_target))
+     {
+       flush_frame();
+@@ -17053,6 +17157,25 @@ bool BuildRegionFragment(Core::System& system, u32 entry_pc, std::span<const u32
+     }
+     else
+     {
++      if (b.returns)
++      {
++        // 0139: a guest return under a guest call made by a region (depth
++        // > 0) returns 3 to that call; a conditional one only when taken.
++        depth_get();
++        if (b.return_fallthrough != UINT32_MAX)
++        {
++          EmitI32Const(code, 0);
++          code.push_back(0x47);  // i32.ne: depth > 0
++          EmitLocalGet(code, WASM_FRAGMENT_PC_LOCAL);
++          EmitI32Const(code, b.return_fallthrough);
++          code.push_back(0x47);  // i32.ne: taken
++          code.push_back(0x71);  // i32.and
++        }
++        code.insert(code.end(), {0x04, 0x40});  // if
++        flush_frame();
++        EmitI32Const(code, 3);
++        code.insert(code.end(), {0x0f, 0x0b});  // return 3; end
++      }
+       std::vector<u32> later;
+       for (const u32 next : b.successors)
+       {
+@@ -17145,7 +17268,9 @@ namespace
+ // carry wasm branch hints (22 is 0130's). 25 (0133): a fragment's head finds
+ // the block by br_table (24 is 0132's). 27 (0135): region fragments keep pc,
+ // npc and downcount in locals, with one shared exit (26 is retired, 0134's).
+-constexpr u32 AOT_COMPILER_VERSION = 27;
++// 29 (0139): guest calls as wasm calls, guest returns as wasm returns (28 is
++// 0137's).
++constexpr u32 AOT_COMPILER_VERSION = 29;
+ constexpr u32 AOT_MAX_FRAGMENT_BYTES = 1u << 20;
+ thread_local std::vector<u32> t_aot_out;
+ u8* s_aot_ram = nullptr;
+@@ -17485,6 +17610,10 @@ extern "C" EMSCRIPTEN_KEEPALIVE int DolphinWeb_AotRunRegionForTest(int handle)
+     return 4;
+   const int code = DolphinWeb_CachedInterpreterRunWasmBlockForTest(
+       handle, static_cast<int>(reinterpret_cast<std::uintptr_t>(&ppc)));
++  // 0139: a guest return passed up past every wasm call (3) is "continue at
++  // state.pc", as TryRunRegion takes it.
++  if (code == 3)
++    return 0;
+   if (code != 2)
+     return code;
+   // A helper that stopped the region has taken its exception (translation
