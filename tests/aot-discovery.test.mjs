@@ -222,3 +222,37 @@ test("aot discovery: 65,536 notCode ranges are searched, not scanned", () => {
   assert.equal(r.stats.codeBytes, 20001 * 4);
   assert.ok(performance.now() - t0 < 1000);
 });
+
+// A switch with no compare: the index masked to its low bits bounds the
+// table (`rlwinm x, 2, 28, 29` = (x & 3) * 4, or andi. before the scaling).
+// Scanned instead, it ran on into the next table, here the call table right
+// after it, and absorbed the functions it calls (footprint-256: 45 of 256).
+// A scanned table stops at a known function entry. CALLS (fA, fB) follows
+// the masked tables in data, as footprint's call tables follow its switches.
+test("aot discovery: a masked switch index bounds its table; the next call table is not absorbed", () => {
+  const rlwinm = (a, s, sh, mb, me) => (21 << 26) | (s << 21) | (a << 16) | (sh << 11) | (mb << 6) | (me << 1);
+  const andi = (a, s, imm) => (28 << 26) | (s << 21) | (a << 16) | (imm & 0xffff);
+  const SW1 = DATA, SW2 = DATA + 16, CALLS = DATA + 32, SW3 = DATA + 40;
+  const text = assemble(TEXT, [
+    "entry", (pc, l) => asm.bl(pc, l.fB), (pc, l) => asm.bl(pc, l.fC), (pc, l) => asm.bl(pc, l.fA), asm.blr(),
+    // fA: rlwinm masked index, 4 cases
+    "fA", rlwinm(11, 3, 2, 28, 29), asm.lis(9, ha(SW1)), asm.addi(9, 9, lo(SW1)), asm.lwzx(10, 9, 11), asm.mtctr(10), asm.bctr(),
+    "a0", asm.li(4, 0), asm.blr(), "a1", asm.li(4, 1), asm.blr(), "a2", asm.li(4, 2), asm.blr(), "a3", asm.li(4, 3), asm.blr(),
+    // fB: andi. then slwi, 4 cases
+    "fB", andi(11, 3, 3), asm.slwi2(11, 11), asm.lis(9, ha(SW2)), asm.addi(9, 9, lo(SW2)), asm.lwzx(10, 9, 11), asm.mtctr(10), asm.bctr(),
+    "b0", asm.li(5, 0), asm.blr(), "b1", asm.li(5, 1), asm.blr(), "b2", asm.li(5, 2), asm.blr(), "b3", asm.li(5, 3), asm.blr(),
+    // fC: unbounded (plain slwi), its table followed by a word that is fB's entry
+    "fC", asm.slwi2(11, 3), asm.lis(9, ha(SW3)), asm.addi(9, 9, lo(SW3)), asm.lwzx(10, 9, 11), asm.mtctr(10), asm.bctr(),
+    "c0", asm.li(6, 0), asm.blr(), "c1", asm.li(6, 1), asm.blr()
+  ]);
+  const l = text.labels;
+  const data = [l.a0, l.a1, l.a2, l.a3, l.b0, l.b1, l.b2, l.b3, l.fA, l.fB, l.c0, l.c1, l.fB];
+  const { image } = imageFromDol(buildDol({ textAddr: TEXT, text: text.words, dataAddr: DATA, data, entry: l.entry }));
+  const r = discover(image, { entryPoints: [{ addr: l.entry, source: "t" }], gapFill: false });
+  const table = (site) => r.jumpTables.find((t) => t.targets.includes(site));
+  assert.deepEqual([table(l.a0).bound, table(l.a0).count], ["mask", 4], "rlwinm x, 2, 28, 29: 4 entries");
+  assert.deepEqual([table(l.b0).bound, table(l.b0).count], ["mask", 4], "andi. x, 3 then slwi: 4 entries");
+  const entries = new Set(r.functions.map((f) => f.entry));
+  for (const f of ["fA", "fB", "fC"]) assert.ok(entries.has(l[f]), `${f} is a function of its own, not a case`);
+  assert.ok(!table(l.c0).targets.includes(l.fB), "a scanned table stops at a known function's entry");
+});
