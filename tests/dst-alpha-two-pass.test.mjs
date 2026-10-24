@@ -37,10 +37,19 @@ test("the features matrix covers the coplanar (per-pixel depth) case", async () 
   // Strict depth (LESS) and NEVER on a redrawn mesh (review of 0136).
   assert.match(make, /-DDSTALPHA_REDRAW/);
   assert.ok(m.games.some((g) => g.id === "dstalpha-redraw"));
-  // The dual-source cases pass with 0136; only the EFB depth divergence
-  // (dstalpha-zinit, a wgpu defect of its own) stays an expected failure.
+  // No dstalpha case is an expected failure: the dual-source ones pass with
+  // 0136, and dstalpha-zinit no longer reads the EFB's undefined initial depth.
   const known = JSON.parse(await read("../harness/known-failures.json"));
-  assert.ok(!known.some((k) => /^dstalpha\/wgpu-(nodualsrc|safari26)$/.test(k.cell)));
-  assert.deepEqual(known.filter((k) => k.cell.startsWith("dstalpha-zinit/")).map((k) => k.cell).sort(),
-    ["dstalpha-zinit/wgpu-interp", "dstalpha-zinit/wgpu-nodualsrc", "dstalpha-zinit/wgpu-safari26"]);
+  assert.ok(!known.some((k) => k.cell.startsWith("dstalpha")));
+});
+
+test("dstalpha-zinit sets depth itself before its copies leave it alone", async () => {
+  const src = await read("../harness/homebrew/dstalpha/main.c");
+  // One copy with depth updates on clears depth to GX 0 before the loop ...
+  assert.match(src, /#ifdef DSTALPHA_ZINIT\n[^#]*GX_SetCopyClear\(bg, 0\);\n\tGX_SetZMode\(GX_FALSE, GX_ALWAYS, GX_TRUE\);\n\tGX_CopyDisp\(/);
+  // ... then the loop's copies clear to far with updates off: a backend that
+  // ignored z_enable would let the LEQUAL rows through.
+  assert.match(src, /GX_SetZMode\(GX_FALSE, GX_ALWAYS, GX_FALSE\);\n\tGX_SetCopyClear\(bg, 0x00ffffff\);/);
+  const copyUpdates = src.match(/#if ([^\n]*)\n\t\t\/\* Depth updates on, so the copy clears depth/);
+  assert.ok(copyUpdates && !copyUpdates[1].includes("DSTALPHA_ZINIT"));
 });

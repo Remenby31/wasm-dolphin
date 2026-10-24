@@ -1806,3 +1806,51 @@ test("seeds: frontier leaders before seeds, and a seed's fragment charged whole"
   assert.ok(seedFragment);
   assert.equal(both.budgetCharged, seedFragment.code.length, "the leader's fragment free, the seed's charged whole");
 });
+
+// 0145: HID0.ICFI flash-invalidates the instruction cache (Dolphin clears
+// its whole block cache, JitInterface::ClearSafe): every region is checked
+// against its plan before it runs again. Here a callee rewrites a function
+// main already ran (stw, no icbi or dcbf), then sets ICFI, and main calls the
+// function again: it must run the new code, like the interpreter, and not
+// main's or its own stale region. The mtspr is not a region op: the region
+// leaves before it.
+const unverifySkip = callSkip || (!core?.has("DolphinWeb_UnverifyRegions") && "core without region re-checks on an icache flush (0145)");
+const ICFI_TEXT = 0x8001c100;
+const HID0_SPR = ((1008 & 0x1f) << 5) | (1008 >>> 5);
+const mfspr = (d, spr) => (31 << 26) | (d << 21) | (spr << 11) | (339 << 1);
+const mtspr = (s, spr) => (31 << 26) | (s << 21) | (spr << 11) | (467 << 1);
+const mr = (a, s) => (31 << 26) | (s << 21) | (a << 16) | (s << 11) | (444 << 1);
+const FLASHER = assemble(ICFI_TEXT, [
+  "main", asm.mflr(0), asm.stwu(1, 1, -16), stw(0, 1, 20), (pc, l) => asm.bl(pc, l.target), mr(11, 9),
+  (pc, l) => asm.bl(pc, l.flasher), (pc, l) => asm.bl(pc, l.target),
+  lwz(0, 1, 20), asm.addi(1, 1, 16), mtlr(0), asm.blr(),
+  "target", asm.li(9, 1), asm.blr(),
+  "flasher", asm.lis(5, LI_R9_2 >>> 16), asm.ori(5, 5, LI_R9_2 & 0xffff),
+  (pc, l) => asm.lis(6, l.target >>> 16), (pc, l) => asm.ori(6, 6, l.target & 0xffff), stw(5, 6, 0),
+  mfspr(7, HID0_SPR), asm.ori(7, 7, 0x800), mtspr(7, HID0_SPR), asm.blr()
+]);
+test("a function rewritten then an icache flash invalidate (HID0.ICFI): its next call runs the new code, like the interpreter (0145)", { skip: unverifySkip }, () => {
+  const load = () => {
+    const dol = buildDol({ textAddr: ICFI_TEXT, text: FLASHER.words, entry: FLASHER.labels.main });
+    const { image, entryPoint } = imageFromDol(dol);
+    for (const seg of image.segments) core.load(seg.start, seg.bytes);
+    core.invalidate(ICFI_TEXT, 4 * FLASHER.words.length);
+    return planDol({ image, entryPoint, gameId: "TEST01", dolBytes: dol, options: { gapFill: false } });
+  };
+  load();
+  const reference = runCall(FLASHER.labels.main, { regions: false });
+  assert.equal(reference.state[11], 1, "the interpreter ran the old li r9, 1 first");
+  assert.equal(reference.state[9], 2, "then the new li r9, 2");
+  for (const maxFunctions of [100, 1]) {
+    const plan = load();
+    core.module._DolphinWeb_AotForgetRegionsForTest?.();
+    core.setRegionsEnabled(true);
+    core.setRegionChaining(true);
+    queueAll(plan, maxFunctions, true);
+    serviceAll();
+    const got = runCall(FLASHER.labels.main, { regions: true });
+    assert.ok(got.ran >= 1, `maxFunctions ${maxFunctions}: the regions ran`);
+    assert.deepEqual(got.state, reference.state, `maxFunctions ${maxFunctions}`);
+    assert.equal(got.downcount, reference.downcount, `maxFunctions ${maxFunctions}`);
+  }
+});
