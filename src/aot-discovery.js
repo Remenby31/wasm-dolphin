@@ -7,7 +7,7 @@
 import {
   FLOW_BRANCH, FLOW_INDIRECT, FLOW_RETURN, SPR_CTR, SPR_LR,
   bcCondition, cmplwi, constStep, decodeFlow, fallsThrough, isAdd, isLwzx, isMtspr,
-  isValidInstruction, mayWriteGpr, rA, rB, rD, simm, slwi2Source
+  isValidInstruction, maskedValues, mayWriteGpr, rA, rB, rD, scaledWordIndex, simm
 } from "./aot-ppc.js";
 
 // Confidence of a function entry, lower is surer.
@@ -96,6 +96,7 @@ export function discover(image, {
   const doomed = new Set(); // addresses whose straight-line walk ends on invalid code
   const tableWords = new Set(); // jump table words in data, not code pointers
   const codePointers = new Set(); // code addresses taken as values (entries from outside)
+  const callTargets = new Set(); // targets of calls seen by committed walks, before they commit
   const badStops = new Set();
   const stats = { rejectedCandidates: 0, budgetExhausted: false };
   const execWords = image.execSegments.reduce((n, s) => n + ((s.end - s.start) >>> 2), 0);
@@ -242,16 +243,34 @@ export function discover(image, {
     let count = null, bound = "scan";
     const idxDef = defOf(idxReg, load.a);
     if (idxDef) {
-      const scaledFrom = slwi2Source(idxDef.w);
-      if (scaledFrom >= 0 && rA(idxDef.w) === idxReg) {
-        count = switchBound(scaledFrom, idxDef.a);
+      const scaled = scaledWordIndex(idxDef.w);
+      if (scaled && rA(idxDef.w) === idxReg) {
+        count = switchBound(scaled.src, idxDef.a);
         if (count !== null) bound = "cmplwi";
+        else {
+          // No compare: an index masked to its low bits bounds the table as
+          // well (rlwinm x, 2, MB, 29; or andi./clrlwi before the scaling).
+          // Scanned instead, such a table ran on into the next ones, call
+          // tables included, and absorbed whole functions (footprint-256:
+          // 45 of 256, one of 46 KB with 423 extra entries).
+          const md = scaled.entries === null ? defOf(scaled.src, idxDef.a) : null;
+          const values = scaled.entries ?? (md && rA(md.w) === scaled.src ? maskedValues(md.w) : null);
+          if (values !== null && values <= maxTableEntries) {
+            count = values;
+            bound = "mask";
+          }
+        }
       }
     }
     const limit = Math.min(count ?? maxTableEntries, maxTableEntries);
     const seg = image.segmentAt(site);
     const targets = [];
+    // A scanned table stops at another resolved table's first word, and at a
+    // target that is a known function's entry (the next words are a call
+    // table, not this switch's cases).
+    const otherTables = count === null ? new Set([...jumpTables.values()].map((t) => t.table >>> 0)) : null;
     for (let i = 0; i < limit; i++) {
+      if (otherTables && i > 0 && otherTables.has((table + i * 4) >>> 0)) break;
       const word = read(table + i * 4);
       const t = word === undefined ? undefined : kind === "rel" ? (table + (word | 0)) >>> 0 : word;
       const inRange = t !== undefined && isCodeAddr(t) && seg && t >= seg.start && t < seg.end;
@@ -260,6 +279,7 @@ export function discover(image, {
         break;
       }
       if (count === null && Math.abs(t - site) > 0x10000) break;
+      if (count === null && (entries.has(t) || callTargets.has(t))) break;
       targets.push(t);
     }
     if (!targets.length) return null;
@@ -298,7 +318,10 @@ export function discover(image, {
           if (isCodeAddr(flow.target)) {
             leaders.add(flow.target);
             stack.push(flow.target);
-            if (flow.link) calls.push(flow.target);
+            if (flow.link) {
+              calls.push(flow.target);
+              if (commit) callTargets.add(flow.target >>> 0);
+            }
           } else if (!flow.link) {
             bad = !commit || bad; // branch out of the image: fine for known code, suspicious for a guess
           }

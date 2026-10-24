@@ -8,7 +8,7 @@ import { PROFILE_REAL_MODE } from "./aot-profile.js";
 import { IncrementalSha256 } from "./incremental-sha256.js";
 
 export const PLAN_SCHEMA = "salon-aot-plan/1";
-export const ANALYZER_VERSION = 2; // 2: per-region sha256, extraEntries, plan identity
+export const ANALYZER_VERSION = 3; // 2: per-region sha256, extraEntries, plan identity; 3: jump tables bounded by a masked index
 export const HASH_ALGORITHM = "fnv1a64";
 
 // FNV-1a 64 over guest bytes in memory order. Kept in two 32-bit halves:
