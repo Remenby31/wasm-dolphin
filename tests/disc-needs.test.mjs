@@ -17,7 +17,11 @@ test("the worker reads the disc's BBoxEnable after the mount and before the boot
   const worker = await read("../src/upstream-discio-worker.js");
   assert.match(worker, /getRevision: optionalCwrap\("GetRevision", "number", \[\]\)/);
   assert.match(worker, /gameConfigValue: optionalCwrap\("GameConfigValue", "number", \["string", "number", "string"\]\)/);
-  assert.match(worker, /api\.gameConfigValue\(gameId, revision, "BBoxEnable"\) === 1/);
+  assert.match(worker, /const value = api\.gameConfigValue\(gameId, revision, "BBoxEnable"\);/);
+  const unreadable = worker.slice(worker.indexOf("if (value < 0) {"), worker.indexOf("return { boundingBox: value === 1 };"));
+  assert.match(unreadable, /postStatus\(/, "an unreadable config is reported");
+  assert.match(unreadable, /return \{ boundingBox: false, known: false \};/, "and not taken for \"no\"");
+  assert.match(worker, /return \{ boundingBox: value === 1 \};/);
   const body = worker.slice(worker.indexOf("async function mountFile("));
   const mount = body.indexOf("api.mountDisc(path)");
   const needs = body.indexOf("discNeeds = mountedDiscNeeds()");

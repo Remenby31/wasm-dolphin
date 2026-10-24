@@ -704,7 +704,7 @@ export function groupRegions(module, order, { maxFunctions = 100 } = {}) {
 // 2^DISPATCH_MAX_BITS), so a module cached with another shape is assembled
 // again.
 export const REGION_DISPATCH = 3;
-export const REGION_FORMATION = 6; // 3: frontier by nearest held entry, module budget by water-filling; 4: a continuation stops at blocks already held; 5: the plan's extra entries seed the frontier; 6: continuations when the frontier is not empty, the first fragment uncapped
+export const REGION_FORMATION = 7; // 3: frontier by nearest held entry, module budget by water-filling; 4: a continuation stops at blocks already held; 5: the plan's extra entries seed the frontier; 6: continuations when the frontier is not empty, the first fragment uncapped; 7: that only when the code it leads to loops
 // functionCap: the wasm function body cap the fragments were formed under
 // (JSC, REGION_JSC_FUNCTION_CAP); in the key only when there is one, so the
 // keys without it (V8, SpiderMonkey) are those of before.
