@@ -80,6 +80,9 @@ export class AotOptimizer extends EventTarget {
     this.maxNotReadyWaits = maxNotReadyWaits;
     this.maxAttempts = maxAttempts;
     this.attempts = null;
+    // Modules the engine refused to compile or link this session (status():
+    // regionsRefused), so a silent loss of regions shows up.
+    this.engineRejects = 0;
     this.planTask = null;
     this.sleep = sleep;
     this.plan = null;
@@ -242,7 +245,7 @@ export class AotOptimizer extends EventTarget {
     const tried = this.regions.some((u) => attempts.has(u.key));
     const p = this.progress(doneSet);
     const state = p.done >= p.total ? "complete" : p.done > 0 || tried ? "partial" : "none";
-    return { state, fraction: p.fraction };
+    return { state, fraction: p.fraction, regionsRefused: this.engineRejects };
   }
 
   // Module keys to load at boot, in compile order, that the cache holds: what
@@ -430,7 +433,10 @@ export class AotOptimizer extends EventTarget {
             }
             if (!out?.module) {
               const reason = out?.reason ?? "compile";
-              if (reason === "compile" || reason === "link") failure = `engine-reject: ${reason}`;
+              if (reason === "compile" || reason === "link") {
+                failure = `engine-reject: ${reason}`;
+                this.engineRejects++;
+              }
               else wait = reason;
               bytes = null;
             }
