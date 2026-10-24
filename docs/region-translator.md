@@ -577,8 +577,10 @@ thread in the region dispatchers `r<id>_dispatch` and `r<id>_inner`. Each was
 a binary search over the module's entries, up to 4,721 of them, so about 12
 compares whose branches the host mispredicts.
 
-- **Lookup.** slot = hash(pc) into a table of the next power of two of twice
-  the entries. Then one `br_table` (a jump table) goes to that slot's
+- **Lookup.** slot = hash(pc) into a table of a slot per entry (the next
+  power of two), at most 1,024 slots (`DISPATCH_MAX_BITS`): V8 lowers
+  `br_table` to 8-byte addresses on x64, and tables of twice the entries
+  (up to 16k slots, 128 KB) cost 1.5–2.8 % on x64 runners. Then one `br_table` (a jump table) goes to that slot's
   compares, at most a few, against the full pc. A pc that is not an entry,
   whatever its slot, still returns 1 from `f` or leaves through the exit
   stub. Up to 4 entries, the dispatcher stays a row of compares.
@@ -586,8 +588,8 @@ compares whose branches the host mispredicts.
   with M from `DISPATCH_HASH_MULS`. The first one with the fewest compares in
   its fullest slot, then in all, wins. It depends on the entries alone, so a
   module's bytes depend only on its members.
-- **Key.** `dispatch:2;` in the module's cache key (`REGION_DISPATCH`), so a
-  module cached with the binary search is assembled again.
+- **Key.** `dispatch:3;` in the module's cache key (`REGION_DISPATCH`), so a
+  module cached with another dispatcher shape is assembled again.
 - **Cost.** Over the whole disc, the 143 modules grow from 140.25 to 142.13 MB
   (+1.3 %); formation is unchanged. A dispatch costs 16–17 ns instead of
   26–30 ns in V8 at 1,400–2,400 entries (JS call included). In JSC it costs

@@ -1,7 +1,7 @@
 import assert from "node:assert/strict";
 import test from "node:test";
 
-import { assembleRegion, chooseDispatchHash, dispatchSlot, groupRegions, paddedSleb, paddedUleb, patchRegionHeap, regionHeapOfBytes, regionModuleKey, regionModuleLayout } from "../src/aot-region-module.js";
+import { DISPATCH_MAX_BITS, assembleRegion, chooseDispatchHash, dispatchSlot, groupRegions, paddedSleb, paddedUleb, patchRegionHeap, regionHeapOfBytes, regionModuleKey, regionModuleLayout } from "../src/aot-region-module.js";
 import { checkBranchHintSection } from "./helpers/branch-hints.mjs";
 
 
@@ -197,7 +197,8 @@ test("aot region: the dispatch hash depends on the entries only (same members, s
   const pcs = frags.flatMap((f) => f.entries);
   assert.deepEqual(chooseDispatchHash(pcs), chooseDispatchHash([...pcs].reverse()), "order of the entries does not matter");
   const h = chooseDispatchHash(pcs);
-  assert.ok(1 << h.bits >= 2 * pcs.length && 1 << (h.bits - 1) < 2 * pcs.length, "table of the next power of two of twice the entries");
+  assert.ok(1 << h.bits >= pcs.length && 1 << (h.bits - 1) < pcs.length, "a slot per entry: the next power of two of the entries");
+  assert.equal(chooseDispatchHash(Array.from({ length: 5000 }, (_, i) => 0x80003000 + 4 * i)).bits, DISPATCH_MAX_BITS, "at most 2^DISPATCH_MAX_BITS slots (x64 jump tables)");
 });
 
 test("aot region: malformed input is refused", () => {

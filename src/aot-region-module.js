@@ -102,14 +102,19 @@ function signature(sig) {
 // Dispatcher hash (decision of 2026-10-24): a binary search over a module's
 // hundreds of entries cost 9.9 % of the CPU thread on a heavy scene, in
 // mispredicted compares. Instead, slot = hash(state.pc) in a power-of-two
-// table of at least twice the entries, then one `br_table` (one indirect
-// jump) to the compares of that slot's entries. The hash is chosen from a
+// table, then one `br_table` (one indirect jump) to the compares of that
+// slot's entries. The table has a slot per entry (the next power of two, a
+// load of 0.5 to 1) and at most DISPATCH_MAX_BITS bits: V8 lowers a br_table
+// to a jump table of 8-byte addresses on x64, so a table of twice the entries
+// (16k slots, 128 KB per dispatcher at 4,721 entries) cost 1.5-2.8 % on x64
+// (Neoverse N2, Zen 3) where arm64's 4-byte branches gained 2 %. The hash is chosen from a
 // fixed list by the entries alone (fewest compares in the fullest slot, then
 // in all), so a module's bytes depend only on its members, as the cache key.
 //   mul 0      slot = (pc >>> 2) & (size - 1)
 //   mul M      slot = Math.imul(pc >>> 2, M) >>> (32 - bits)
 export const DISPATCH_HASH_MULS = Object.freeze([0, 0x9e3779b1, 0x85ebca6b, 0xc2b2ae35, 0x27d4eb2f, 0x165667b1]);
 const DISPATCH_LINEAR_MAX = 4; // up to 4 entries: compares in a row
+export const DISPATCH_MAX_BITS = 10; // 1,024 slots: 8 KB of jump table on x64
 
 export function dispatchSlot(pc, mul, bits) {
   const w = (pc >>> 2) >>> 0;
@@ -118,7 +123,7 @@ export function dispatchSlot(pc, mul, bits) {
 
 export function chooseDispatchHash(pcs) {
   let bits = 4;
-  while ((1 << bits) < 2 * pcs.length) bits++;
+  while ((1 << bits) < pcs.length && bits < DISPATCH_MAX_BITS) bits++;
   let best = null;
   for (const mul of DISPATCH_HASH_MULS) {
     const count = new Uint32Array(1 << bits);
@@ -695,9 +700,10 @@ export function groupRegions(module, order, { maxFunctions = 100 } = {}) {
 // aot-orchestrator translateWithContinuations), so that a cache built with
 // another formation is translated again rather than reused.
 // dispatch: the dispatchers' shape, hashed with the members from 2 on (2: a
-// hashed br_table, DISPATCH_HASH_MULS), so a module cached with the binary
-// search is assembled again.
-export const REGION_DISPATCH = 2;
+// hashed br_table, DISPATCH_HASH_MULS; 3: its table a slot per entry, at most
+// 2^DISPATCH_MAX_BITS), so a module cached with another shape is assembled
+// again.
+export const REGION_DISPATCH = 3;
 export const REGION_FORMATION = 6; // 3: frontier by nearest held entry, module budget by water-filling; 4: a continuation stops at blocks already held; 5: the plan's extra entries seed the frontier; 6: continuations when the frontier is not empty, the first fragment uncapped
 // functionCap: the wasm function body cap the fragments were formed under
 // (JSC, REGION_JSC_FUNCTION_CAP); in the key only when there is one, so the
