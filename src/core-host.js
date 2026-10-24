@@ -658,6 +658,8 @@ export class EmulatorHost {
         this.game.rootEntryCount = mounted.rootEntryCount;
         this.game.rootEntries = mounted.rootEntries ?? [];
         this.game.bootProbe = mounted.bootProbe ?? null;
+        // Before the boot: what the disc's settings ask of the renderer.
+        this.game.needs = mounted.needs ?? { boundingBox: false };
         this.game.fullCore = mounted.fullCore;
         this.game.coreBoot = mounted.coreBoot;
         this.game.coreState = mounted.coreState;

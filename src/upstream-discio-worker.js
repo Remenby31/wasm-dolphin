@@ -3550,6 +3550,8 @@ function bindApi(module) {
     getPlatform: cwrap("GetPlatform", "string", []),
     getRegion: cwrap("GetRegion", "string", []),
     getDiscNumber: cwrap("GetDiscNumber", "number", []),
+    getRevision: optionalCwrap("GetRevision", "number", []),
+    gameConfigValue: optionalCwrap("GameConfigValue", "number", ["string", "number", "string"]),
     getApploaderDate: cwrap("GetApploaderDate", "string", []),
     getApploaderSize: cwrap("GetApploaderSize", "number", []),
     getBootDolOffset: cwrap("GetBootDolOffset", "number", []),
@@ -4095,6 +4097,20 @@ async function handleSavesMessage(type, payload) {
   }
 }
 
+// What the mounted disc's settings ask of the renderer, read before the boot
+// through Dolphin's own game config (the GameSettings INIs the core embeds,
+// merged as the boot will): the bounding box, which video=wgpu does not
+// compute (its box is the software rasterizer's, never updated by the GPU
+// path). A host renders such a disc in software.
+let discNeeds = { boundingBox: false };
+
+function mountedDiscNeeds() {
+  const gameId = api?.getGameId?.() || "";
+  const revision = api?.getRevision?.() ?? -1;
+  if (!gameId || revision < 0 || !api?.gameConfigValue) return { boundingBox: false };
+  return { boundingBox: api.gameConfigValue(gameId, revision, "BBoxEnable") === 1 };
+}
+
 async function mountFile(file) {
   if (!moduleInstance) {
     throw new Error("Upstream core must be loaded before mounting a disc");
@@ -4173,6 +4189,10 @@ async function mountFile(file) {
     if (!accepted) {
       throw new Error("Upstream Dolphin DiscIO rejected the selected disc");
     }
+    discNeeds = mountedDiscNeeds();
+    if (discNeeds.boundingBox && rendererDiagnostics.configuredVideoBackend === "WebGPU-Real") {
+      postStatus("This disc's settings read the bounding box (BBoxEnable), which video=wgpu does not compute: render it in software");
+    }
   } else {
     const head = new Uint8Array(await file.slice(0, BOOT_FILE_HEAD_BYTES).arrayBuffer());
     executable = checkExecutable(bootKind, head, file.size);
@@ -4241,6 +4261,7 @@ async function mountFile(file) {
       ? { title: file.name, gameId: "", platform: "GameCube", region: "", bootKind, entryPoint: executable.entryPoint }
       : { bootKind }),
     bootProbe: bootProbePayload(metadata),
+    needs: bootKind === "disc" ? { ...discNeeds } : { boundingBox: false },
     path,
     ...framePayload()
   };
