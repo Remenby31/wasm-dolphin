@@ -138,6 +138,7 @@ import {
   failWgpuRingConsumer
 } from "./wgpu-ring-backpressure.js";
 import { createWgpuReplayParker } from "./wgpu-replay-park.js";
+import { createDiscReadahead } from "./disc-readahead.js";
 import {
   WGPU_UPLOAD_PROBE_SCHEMA,
   createWgpuUploadProbeExecutor
@@ -1599,6 +1600,7 @@ async function handleMessage(type, payload) {
         efbCopyRam: payload.efbCopyRam,
         wgpuMask: payload.wgpuMask,
         wgpuFallback: payload.wgpuFallback,
+        discReadahead: payload.discReadahead,
         webglSoftware: payload.webglSoftware,
         efbDiag: payload.efbDiag,
         jitVerbose: payload.jitVerbose,
@@ -2283,6 +2285,7 @@ async function loadCore({
   efbCopyRam = false,
   wgpuMask = "",
   wgpuFallback = false,
+  discReadahead = true,
   webglSoftware = false,
   efbDiag = false,
   jitVerbose = false,
@@ -2340,6 +2343,7 @@ async function loadCore({
   fifoLogBoot = Boolean(fifoLog);
   wgpuMaskedFeatures = parseWgpuMask(wgpuMask);
   wgpuAcceptFallbackAdapter = Boolean(wgpuFallback);
+  discReadaheadEnabled = discReadahead !== false;
   webglAcceptSoftware = Boolean(webglSoftware);
   if (moduleInstance) {
     return moduleInstance;
@@ -3088,6 +3092,17 @@ async function loadCore({
 // (WORKERFS, FileReaderSync). The DVD thread's read time (core side) minus
 // this is what a read waited for the worker, busy draining the WebGPU ring.
 const discReadService = { reads: 0, bytes: 0, ms: 0, maxMs: 0 };
+// The disc's reads in 1 MiB blocks, the last 8 kept (src/disc-readahead.js);
+// ?discreadahead=0 reads exactly what is asked, as WORKERFS does.
+let discReadaheadEnabled = true;
+let discBlockReader = null;
+function readDiscAhead(workerFs) {
+  const ops = workerFs?.stream_ops;
+  if (!ops?.read || discBlockReader || typeof FileReaderSync !== "function") return;
+  const reader = new FileReaderSync();
+  discBlockReader = createDiscReadahead({ readBlob: (blob) => reader.readAsArrayBuffer(blob) });
+  ops.read = discBlockReader.read;
+}
 function timeDiscReads(workerFs) {
   const ops = workerFs?.stream_ops;
   if (!ops?.read || ops.read.timedDiscReads) return;
@@ -3122,7 +3137,7 @@ function harnessDiscReads() {
       moduleInstance._free(ptr);
     }
   }
-  return { service: { ...discReadService }, core, frame: api?.getFrame?.() ?? null };
+  return { service: { ...discReadService }, readahead: discBlockReader ? { ...discBlockReader.stats } : null, core, frame: api?.getFrame?.() ?? null };
 }
 
 // WORKERFS lookup, with a fallback that current Emscripten requires.
@@ -3996,6 +4011,7 @@ async function mountFile(file) {
   const _t_workerfs = performance.now();
   fs.mount(resolveWorkerFs(moduleInstance), { blobs: [{ name: safeName, data: file }] }, WORKERFS_MOUNT_DIR);
   mounted = true;
+  if (discReadaheadEnabled) readDiscAhead(resolveWorkerFs(moduleInstance));
   if (harnessEnabled) timeDiscReads(resolveWorkerFs(moduleInstance));
   // P6: the disc's key for the region cache is read from this File only when
   // a region cache is first opened, never during boot: this worker serves the
