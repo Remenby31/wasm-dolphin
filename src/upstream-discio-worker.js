@@ -1610,6 +1610,7 @@ async function handleMessage(type, payload) {
         aotFirstLaunch: payload.aotFirstLaunch,
         aotSampleMs: payload.aotSampleMs,
         wasmEngine: payload.wasmEngine,
+        regionCap: payload.regionCap,
         regionChain: payload.regionChain,
         fusedMadd: payload.fusedMadd,
         reportedCoreSelection: payload.coreSelection,
@@ -2287,6 +2288,7 @@ async function loadCore({
   aotFirstLaunch = false,
   aotSampleMs = AOT_PROFILE_SAMPLE_MS,
   wasmEngine: requestedWasmEngine = null,
+  regionCap = null,
   regionChain = true,
   fusedMadd = true,
   reportedCoreSelection = null,
@@ -2726,6 +2728,7 @@ async function loadCore({
   aotFirstLaunchEnabled = aotFirstLaunch === true;
   aotProfileSampleMs = Number.isInteger(aotSampleMs) && aotSampleMs >= 0 ? aotSampleMs : AOT_PROFILE_SAMPLE_MS;
   wasmEngineName = WASM_ENGINES.includes(requestedWasmEngine) ? requestedWasmEngine : wasmEngine({ search: "" });
+  aotRegionCapRequested = Number.isInteger(regionCap) && regionCap >= 0 ? regionCap : null;
   dolphinJitBootLoadComplete = false;
   dolphinJitBootLoadedEntries = 0;
   coreBuildFingerprint = String(buildFingerprint ?? "");
@@ -7562,14 +7565,20 @@ export async function prepareAotFirstLaunch(file, {
     return;
   }
   const generation = aotDiscGeneration;
-  const [{ coreAotKeyParts, coreAssembleOptions, coreRegionTranslator, createAotFirstLaunch }, { OpfsPlanStore }, { AotProfileStore, blocksFromPcSamples, profileKey }, { planDiscInWorker }, { fileReader, planDisc, planDolFile }, { createProfileRecorder, guestPcAddress, startHotSampler }] =
+  const [{ coreAotKeyParts, coreAssembleOptions, coreRegionTranslator, createAotFirstLaunch, REGION_JSC_FUNCTION_CAP }, { OpfsPlanStore }, { AotProfileStore, blocksFromPcSamples, profileKey }, { planDiscInWorker }, { fileReader, planDisc, planDolFile }, { createProfileRecorder, guestPcAddress, startHotSampler }] =
     await Promise.all([import("./aot-orchestrator.js"), import("./aot-optimizer.js"), import("./aot-profile.js"), import("./aot-plan-worker.js"), import("./aot-recomp.js"), import("./aot-hot-sampler.js")]);
   const discKey = await readDiscKey();
   if (generation !== aotDiscGeneration) return;
-  const keyParts = coreAotKeyParts(module);
+  // The wasm function body cap the fragments are formed under: JSC's OMG
+  // limit under JavaScriptCore only (src/wasm-engine.js), none elsewhere
+  // (V8 pays for the extra transitions); ?regioncap=N|0 forces it. In the
+  // region key only when there is one.
+  const functionCap = regionFunctionCap(REGION_JSC_FUNCTION_CAP);
+  const coreKeyParts = coreAotKeyParts(module);
+  const keyParts = coreKeyParts ? { ...coreKeyParts, functionCap } : null;
   const core = coreAssembleOptions(module);
   const translator = keyParts && core && discKey && coreHash
-    ? coreRegionTranslator(module, { mask: keyParts.codegenMask, helperNames: core.helperNames })
+    ? coreRegionTranslator(module, { mask: keyParts.codegenMask, helperNames: core.helperNames, functionCap })
     : null;
   const opfs = translator ? await Promise.resolve(storageRoot()).catch(() => null) : null;
   const flow = createAotFirstLaunch({
@@ -7730,7 +7739,16 @@ let aotProfileSampleMs = AOT_PROFILE_SAMPLE_MS;
 // worker's own detection (no ?wasmengine= here: a worker's location is its
 // script's).
 let wasmEngineName = "unknown";
-export const wasmEngineForTest = () => wasmEngineName; // ?aotsample=N (core-host), 0: no sampler
+export const wasmEngineForTest = () => wasmEngineName;
+// ?regioncap=N|0 (core-host): the region function cap forced, else null (by engine).
+let aotRegionCapRequested = null;
+export function regionFunctionCap(jscCap) {
+  return aotRegionCapRequested ?? (wasmEngineName === "jsc" ? jscCap : 0);
+}
+export function setRegionCapForTest({ engine = null, cap = null } = {}) {
+  if (engine) wasmEngineName = engine;
+  aotRegionCapRequested = cap;
+} // ?aotsample=N (core-host), 0: no sampler
 const AOT_PROFILE_RECORD_MS = 60000;
 // Every minute, and when the tab hides or closes (flushUserData), the
 // emulation pauses or stops, or another disc is mounted, what the sampler

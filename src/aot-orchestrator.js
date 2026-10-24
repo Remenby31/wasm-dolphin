@@ -380,7 +380,7 @@ export function yieldToEventLoop() {
 // maxContinuations: fragments translated after a function's first one, from
 // its frontier (see translateWithContinuations).
 export function coreRegionTranslator(m, { mask, helperNames, maxBlocks = 64, maxContinuations = REGION_MAX_CONTINUATIONS, sliceMs = 8, now = () => performance.now(),
-  yieldNow = yieldToEventLoop } = {}) {
+  yieldNow = yieldToEventLoop, functionCap = 0 } = {}) {
   if (typeof m?._DolphinWeb_AotTranslate !== "function") return null;
   const names = helperNames ?? coreAssembleOptions(m)?.helperNames ?? [];
   return {
@@ -407,7 +407,7 @@ export function coreRegionTranslator(m, { mask, helperNames, maxBlocks = 64, max
         // A large member's even share of what is left (the optimiser gives
         // the rest back to the refused ones at the module's end, `resume`).
         const share = f.largeLeft > 1 ? Math.floor(unitBytes / f.largeLeft) : unitBytes;
-        const r = await translateWithContinuations(m, f, { mask, maxBlocks, names, maxContinuations, maxBytes: share, slice });
+        const r = await translateWithContinuations(m, f, { mask, maxBlocks, names, maxContinuations, maxBytes: share, functionCap, slice });
         unitBytes -= r.budgetCharged ?? 0;
         out.push(r);
         if (r.reason === "budget" || r.reason === "not-ready") break;
@@ -434,26 +434,31 @@ export function coreRegionTranslator(m, { mask, helperNames, maxBlocks = 64, max
 // REGION_UNIT_CONTINUATION_MAX_BYTES per module: a module must still fit a
 // throttle sleep (0107, ~1.7 ms/MB). A leader that does not translate (a
 // first op the translator refuses) stays an exit, as before.
-// Every fragment, the first one included, stays under it as a whole wasm
-// function body (prologue and exits counted: fragment.code is the body):
-// JavaScriptCore never tiers a function past 100,000 bytes of body up to OMG
-// (maximumOMGCandidateCost), so a bigger hot fragment stays in BBQ in
-// Safari, 1.6x slower (rendu's WebKit lane). V8 has no such cap.
-export const REGION_FRAGMENT_MAX_BYTES = 95000;
+export const REGION_FRAGMENT_MAX_BYTES = 96000;
+// Under JavaScriptCore (src/wasm-engine.js) every fragment, the first one
+// included, stays under this as a whole wasm function body (prologue and
+// exits counted: fragment.code is the body): JSC never tiers a function past
+// 100,000 bytes of body up to OMG (maximumOMGCandidateCost), so a bigger hot
+// fragment stays in BBQ, 1.6x slower (rendu's WebKit lane). V8 has no such
+// limit and pays for the extra transitions (heavy scene: -3.9 % headroom),
+// SpiderMonkey decides Ion per module: neither gets it (functionCap 0).
+export const REGION_JSC_FUNCTION_CAP = 95000;
 export const REGION_CONTINUATION_MAX_BYTES = 2 << 20;
 export const REGION_UNIT_CONTINUATION_MAX_BYTES = 1 << 20;
 export const REGION_MAX_CONTINUATIONS = 31;
 export const REGION_UNCUT_BLOCKS = 64; // what one fragment held before continuations: free of budget
 const capped = (fragment, maxBlocks, maxFragmentBytes) => fragment.entries.length >= maxBlocks || fragment.code.length >= maxFragmentBytes;
 export async function translateWithContinuations(m, f, { mask, maxBlocks, names, maxContinuations = REGION_MAX_CONTINUATIONS,
-  maxBytes = REGION_CONTINUATION_MAX_BYTES, maxFragmentBytes = REGION_FRAGMENT_MAX_BYTES, slice = async () => {} }) {
-  // The first fragment, too, under the byte cap: fewer blocks until it fits
-  // (a single block over it is kept, being the function's entry); what it
-  // leaves out goes to continuations. Before, a first fragment was capped
-  // by blocks only (0x800f4e50: 612 KB in one function).
+  maxBytes = REGION_CONTINUATION_MAX_BYTES, maxFragmentBytes = REGION_FRAGMENT_MAX_BYTES, functionCap = 0, slice = async () => {} }) {
+  // functionCap (JSC, REGION_JSC_FUNCTION_CAP): the first fragment, too,
+  // under it: fewer blocks until it fits (a single block over it is kept,
+  // being the function's entry); what it leaves out goes to continuations,
+  // which stay under it as well. 0: as before (a first fragment capped by
+  // blocks only; 0x800f4e50: 612 KB in one function, fine for V8).
+  if (functionCap > 0) maxFragmentBytes = Math.min(maxFragmentBytes, functionCap);
   let first = translateOne(m, f, { mask, maxBlocks, names });
   let cut = false;
-  for (let blocks = maxBlocks; first.fragment && first.fragment.code.length > maxFragmentBytes && blocks > 1;) {
+  for (let blocks = maxBlocks; functionCap > 0 && first.fragment && first.fragment.code.length > maxFragmentBytes && blocks > 1;) {
     blocks = Math.max(1, blocks >> 1);
     await slice(); // a 612 KB function retried up to 6 times: the worker's slice in between (review of #215)
     first = translateOne(m, f, { mask, maxBlocks: blocks, names });

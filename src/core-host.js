@@ -151,6 +151,10 @@ export class EmulatorHost {
     // The wasm engine (src/wasm-engine.js), resolved here once: a worker's
     // location is its own script's, so ?wasmengine= reaches it only this way.
     this.wasmEngine = wasmEngine({ search: window.location.search });
+    // ?regioncap=N|0: the region function cap forced (tests, benches); by
+    // default the worker takes it from the engine (JSC only).
+    const regionCap = new URLSearchParams(window.location.search).get("regioncap");
+    this.regionCap = regionCap !== null && /^\d+$/.test(regionCap) ? Number(regionCap) : null;
     // With aot=1, regions tail-call the next region (patch 0102); ?regionchain=0 turns it off.
     this.regionChain = new URLSearchParams(window.location.search).get("regionchain") !== "0";
     // Where relaxed_madd is fused the JIT's FMA uses it (patch 0129); ?fusedmadd=0
@@ -454,6 +458,7 @@ export class EmulatorHost {
             aotFirstLaunch: this.aotFirstLaunch,
             aotSampleMs: this.aotSampleMs,
             wasmEngine: this.wasmEngine,
+            regionCap: this.regionCap,
             regionChain: this.regionChain,
             fusedMadd: this.fusedMadd,
             collectMetrics: this.collectMetrics,

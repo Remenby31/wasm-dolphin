@@ -1104,19 +1104,13 @@ test("continuations: each under the byte cap (halved until it fits), within the 
   const one = await continuationsOf(program, { maxFragmentBytes: Math.floor(size / 3), maxContinuations: 1 });
   assert.equal(one.continuations.length, 1, "maxContinuations");
   const bytes = await continuationsOf(program, { maxFragmentBytes: Math.floor(size / 3), maxBytes: 1 });
-  // Never past the byte budget (review of #189). Formation 5: the first
-  // fragment is cut under the cap too, so continuations within the old
-  // single fragment's 64 blocks are free and kept; the first charged one
-  // would overshoot 1 byte, so it is refused, and resumable.
-  assert.ok(bytes.fragment.code.length <= Math.floor(size / 3), "the first fragment under the cap");
-  assert.ok((bytes.budgetCharged ?? 0) <= 1, "nothing charged past the byte budget");
+  // Never past the byte budget (review of #189): the first charged fragment
+  // would overshoot 1 byte, so none is kept, and it is refused.
+  assert.equal(bytes.continuations, undefined, "nothing kept past the byte budget");
   assert.ok(bytes.budgetRefused >= 1 && bytes.resume, "refused, and resumable with more");
   const tiny = await continuationsOf(program, { maxFragmentBytes: 16 });
-  assert.equal(tiny.continuations, undefined, "a single block over the cap is refused as a continuation");
+  assert.equal(tiny.continuations, undefined, "a single block over the cap is refused");
   assert.ok(tiny.oversize >= 1);
-  // Formation 5: the first fragment cut down to one block, still over the
-  // cap: kept (the function's entry; review of #215).
-  assert.deepEqual([tiny.fragment?.entries.length, tiny.fragment?.code.length > 16], [1, true], "the entry block kept over the cap");
 });
 
 test("continuations: a leader that does not translate stays an exit; a data word that looks like a branch is not followed", { skip: contSkip }, async () => {
@@ -1146,8 +1140,7 @@ test("the region key changes with the formation", async () => {
   assert.notEqual(await regionModuleKey(f, { ...parts, formation: 1 }), await regionModuleKey(f, { ...parts, formation: 2 }));
   assert.notEqual(await regionModuleKey(f, { ...parts, formation: 2 }), await regionModuleKey(f, { ...parts, formation: 3 }), "3: frontier rule and shared budget");
   assert.notEqual(await regionModuleKey(f, { ...parts, formation: 3 }), await regionModuleKey(f, { ...parts, formation: 4 }), "4: continuations stop at held blocks");
-  assert.notEqual(await regionModuleKey(f, { ...parts, formation: 4 }), await regionModuleKey(f, { ...parts, formation: 5 }), "5: every fragment under the byte cap");
-  assert.equal(await regionModuleKey(f, parts), await regionModuleKey(f, { ...parts, formation: 5 }), "5 by default");
+  assert.equal(await regionModuleKey(f, parts), await regionModuleKey(f, { ...parts, formation: 4 }), "4 by default");
 });
 
 
@@ -1318,10 +1311,8 @@ test("continuation budget: past a full first fragment every continuation byte is
   const cap = Math.floor(full.fragment.code.length / 8);
   const capped = await run({ maxFragmentBytes: cap });
   assert.ok(capped.continuations.length > full.continuations.length, "halved under the byte cap");
-  assert.ok([capped.fragment, ...capped.continuations].every((c) => c.code.length <= cap), "the first fragment too (formation 5)");
-  // A cut first fragment leaves its other blocks of the old 64 free: only
-  // what goes past them is charged.
-  assert.ok(capped.budgetCharged > 0 && capped.budgetCharged < bytesOf(capped), `charged ${capped.budgetCharged} of ${bytesOf(capped)}`);
+  assert.ok(capped.continuations.every((c) => c.code.length <= cap));
+  assert.equal(capped.budgetCharged, bytesOf(capped));
   const short = await run({ maxFragmentBytes: cap, maxBytes: cap });
   assert.ok(short.budgetCharged <= cap + Math.max(...capped.continuations.map((c) => c.code.length)), "stops once the budget is spent");
   assert.ok(short.budgetRefused >= 1, `refused ${short.budgetRefused}`);
@@ -1771,22 +1762,38 @@ test("a function rewritten then an icache flash invalidate (HID0.ICFI): its next
   }
 });
 
-// Formation 5: the first fragment, too, stays under the byte cap (a wasm
-// function past 100,000 bytes of body never tiers up to OMG in Safari):
-// fewer blocks until it fits, the rest in continuations; the same blocks
-// held, and the module runs like the interpreter.
-test("continuations: a first fragment over the byte cap is cut to fit, the rest in continuations", { skip: contSkip }, async () => {
+// #215: the wasm function body cap, under JavaScriptCore only (it never
+// tiers a function past 100,000 bytes up to OMG). Without a cap the
+// formation is the one before (V8, SpiderMonkey); with one, every fragment,
+// the first included, stays under it, the same blocks held, and the module
+// runs like the interpreter. The cap is in the region key only when set.
+test("region key: the function cap is in it only when there is one", async () => {
+  const f = [{ entry: 0x80003100, sha256: "a".repeat(64) }];
+  const parts = { compilerVersion: 5, codegenMask: 0 };
+  assert.equal(await regionModuleKey(f, { ...parts, functionCap: 0 }), await regionModuleKey(f, parts), "no cap: the key of before");
+  assert.notEqual(await regionModuleKey(f, { ...parts, functionCap: 95000 }), await regionModuleKey(f, parts));
+  assert.notEqual(await regionModuleKey(f, { ...parts, functionCap: 95000 }), await regionModuleKey(f, { ...parts, functionCap: 50000 }));
+  await assert.rejects(regionModuleKey(f, { ...parts, functionCap: -1 }), /functionCap/);
+});
+
+test("function cap: none leaves the formation as before; one cuts every fragment, the first included, under it", { skip: contSkip }, async () => {
   const program = longFunction(100);
   const ranges = loadWords(LONG, program.words);
   const options = { mask: PRODUCTION_DISABLE_MASK, maxBlocks: 64, names: coreAssembleOptions(core.module)?.helperNames };
-  const uncapped = await translateWithContinuations(core.module, { entry: LONG, ranges, hash: null }, { ...options, maxFragmentBytes: 1 << 30 });
-  const cap = Math.floor(uncapped.fragment.code.length / 3);
-  const r = await translateWithContinuations(core.module, { entry: LONG, ranges, hash: null }, { ...options, maxFragmentBytes: cap });
+  const bytesOf = (r) => [r.fragment, ...(r.continuations ?? [])].map((x) => Array.from(x.code).join(","));
+  const plain = await translateWithContinuations(core.module, { entry: LONG, ranges, hash: null }, options);
+  const zero = await translateWithContinuations(core.module, { entry: LONG, ranges, hash: null }, { ...options, functionCap: 0 });
+  assert.deepEqual(bytesOf(zero), bytesOf(plain), "no cap: the same fragments, byte for byte");
+  assert.equal(plain.fragment.entries.length, 64, "the first fragment capped by blocks only");
+  const cap = Math.floor(plain.fragment.code.length / 3);
+  let slices = 0;
+  const r = await translateWithContinuations(core.module, { entry: LONG, ranges, hash: null }, { ...options, functionCap: cap, slice: async () => { slices++; } });
   const fragments = [r.fragment, ...(r.continuations ?? [])];
-  assert.ok(r.fragment.entries.length < uncapped.fragment.entries.length, "the first fragment holds fewer blocks");
-  assert.ok(fragments.every((x) => x.code.length <= cap), "every fragment under the cap, the first included");
+  assert.ok(r.fragment.entries.length < 64, "the first fragment cut");
+  assert.ok(fragments.every((x) => x.code.length <= cap), "every fragment under the cap");
+  assert.ok(slices >= 2, "the retries yield between them");
   const held = (fs) => new Set(fs.flatMap((x) => x.entries));
-  assert.equal(held(fragments).size, held([uncapped.fragment, ...(uncapped.continuations ?? [])]).size, "the same blocks held");
+  assert.equal(held(fragments).size, held([plain.fragment, ...(plain.continuations ?? [])]).size, "the same blocks held");
   core.module._DolphinWeb_AotForgetRegionsForTest?.();
   const { bytes: mod, entries } = assembleRegion(claimEntries(fragments), { helpers: HELPER_SIGNATURES, pcOffset: core.pcOffset, memoryPages: core.memoryPages });
   core.setRegionsEnabled(true);
@@ -1796,18 +1803,7 @@ test("continuations: a first fragment over the byte cap is cut to fit, the rest 
   const got = runCall(LONG, { regions: true });
   assert.deepEqual(got.state, reference.state);
   assert.equal(got.interpreted, 0);
+  // A single block over the cap: kept as the first fragment (the entry).
+  const tiny = await translateWithContinuations(core.module, { entry: LONG, ranges, hash: null }, { ...options, functionCap: 16 });
+  assert.deepEqual([tiny.fragment?.entries.length, tiny.fragment?.code.length > 16], [1, true]);
 });
-
-// Review of #215: the first fragment's retries under the byte cap give the
-// worker its slice between them (a 612 KB function is retried up to 6 times).
-test("continuations: the first fragment's retries under the cap yield between them", { skip: contSkip }, async () => {
-  const program = longFunction(100);
-  const ranges = loadWords(LONG, program.words);
-  const options = { mask: PRODUCTION_DISABLE_MASK, maxBlocks: 64, names: coreAssembleOptions(core.module)?.helperNames, maxContinuations: 0 };
-  const whole = await translateWithContinuations(core.module, { entry: LONG, ranges, hash: null }, { ...options, maxFragmentBytes: 1 << 30 });
-  let slices = 0;
-  const r = await translateWithContinuations(core.module, { entry: LONG, ranges, hash: null }, { ...options, maxFragmentBytes: Math.floor(whole.fragment.code.length / 5), slice: async () => { slices++; } });
-  assert.ok(r.fragment.entries.length < whole.fragment.entries.length);
-  assert.ok(slices >= 2, `${slices} slices across the retries`);
-});
-
