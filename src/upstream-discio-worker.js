@@ -1599,6 +1599,7 @@ async function handleMessage(type, payload) {
         efbCopyRam: payload.efbCopyRam,
         wgpuMask: payload.wgpuMask,
         wgpuFallback: payload.wgpuFallback,
+        dstAlphaTwoPass: payload.dstAlphaTwoPass,
         webglSoftware: payload.webglSoftware,
         efbDiag: payload.efbDiag,
         jitVerbose: payload.jitVerbose,
@@ -1843,6 +1844,20 @@ async function handleMessage(type, payload) {
       return harnessUniqueFramesRequest(payload);
     case "validationPcSampler":
       return harnessPcSampler(payload);
+    case "validationReadDstAlphaPasses": {
+      // Patch 0149: the dst-alpha second pass (0136), cumulative.
+      if (!harnessEnabled) return { error: "harness hooks are off" };
+      const stats = moduleInstance?._DolphinWeb_DstAlphaPassStats;
+      if (!stats || !moduleInstance._malloc) return { error: "core without patch 0149" };
+      const ptr = moduleInstance._malloc(12);
+      try {
+        stats(ptr);
+        const v = new Uint32Array(moduleInstance.HEAPU8.buffer, ptr, 3);
+        return { flushes: v[0], extraDraws: v[1], enabled: v[2] === 1 };
+      } finally {
+        moduleInstance._free(ptr);
+      }
+    }
     case "validationReadRelaxedMadd":
       // coreFused: the core's own mode (null: a core without patch 0129).
       return { mode: relaxedMadd, coreFused: moduleInstance?._DolphinWeb_FusedMadd ? moduleInstance._DolphinWeb_FusedMadd() === 1 : null };
@@ -2281,6 +2296,7 @@ async function loadCore({
   efbCopyRam = false,
   wgpuMask = "",
   wgpuFallback = false,
+  dstAlphaTwoPass = true,
   webglSoftware = false,
   efbDiag = false,
   jitVerbose = false,
@@ -3000,6 +3016,7 @@ async function loadCore({
   api.setJitRegionChaining?.(regionChain !== false ? 1 : 0);
   api.setPpcProfileEnabled?.(ppcProfile ? 1 : 0);
   if (Number.isInteger(gpuSpinMicros) && gpuSpinMicros >= 0) api.setGpuSpinBudget?.(gpuSpinMicros);
+  api.setDstAlphaTwoPass?.(dstAlphaTwoPass !== false ? 1 : 0);
   api.setWebGpuUploadArenaMiB?.(wgpuUploadArenaMiB, collectMetrics ? 1 : 0);
   api.setWebGpuProducerProfileEnabled?.(wgpuProducerProfileRequested ? 1 : 0);
   api.setWebGpuDrawProfileEnabled?.(wgpuDrawProfileRequested ? 1 : 0);
@@ -3128,6 +3145,7 @@ function bindApi(module) {
     setJitRegionsEnabled: optionalCwrap("DolphinWeb_JitSetRegionsEnabled", null, ["number"]),
     setJitRegionChaining: optionalCwrap("DolphinWeb_JitSetRegionChaining", null, ["number"]),
     setGpuSpinBudget: optionalCwrap("DolphinWeb_SetGpuSpinBudget", null, ["number"]),
+    setDstAlphaTwoPass: optionalCwrap("DolphinWeb_SetDstAlphaTwoPass", null, ["number"]),
     getPpcWasmJitEngagedFrame: optionalCwrap("GetPpcWasmJitEngagedFrame", "number", []),
     getPpcWasmJitArmStartFrame: optionalCwrap("GetPpcWasmJitArmStartFrame", "number", []),
     setPpcWasmJitEnabled:
