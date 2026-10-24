@@ -1,0 +1,133 @@
+diff --git a/Source/Core/Core/PowerPC/CachedInterpreter/CachedInterpreter.cpp b/Source/Core/Core/PowerPC/CachedInterpreter/CachedInterpreter.cpp
+--- a/Source/Core/Core/PowerPC/CachedInterpreter/CachedInterpreter.cpp
++++ b/Source/Core/Core/PowerPC/CachedInterpreter/CachedInterpreter.cpp
+@@ -7660,6 +7660,98 @@ void EmitStorePsqU8Scale61(std::vector<u8>& body, const WasmStateLayout& layout,
+     EmitStorePsqU8Scale61Lane(body, layout, inst.RS, 1, sizeof(u8));
+ }
+ 
++// psq SIMD: psq_l/psq_lu float, both lanes (W=0) with one v128 load: the two
++// big-endian words byteswapped by one shuffle, then f64x2.promote_low_f32x4,
++// which is EmitConvertToDouble's promote branch, exact for every single that
++// is not a NaN. A NaN in either word takes the per-lane path (ConvertToDouble
++// keeps its payload and quiet bit; promote need not).
++void EmitLoadPsqFloatPair(std::vector<u8>& body, const WasmStateLayout& layout, u32 fd)
++{
++  const u32 v = WasmV128ScratchLocal(0);
++  const auto simd = [&](u32 code) {
++    body.push_back(0xfd);
++    EmitU32Leb(body, code);
++  };
++  EmitRamAddress(body, layout);
++  simd(0x5d);  // v128.load64_zero
++  body.push_back(0x00);
++  EmitU32Leb(body, 0);
++  body.push_back(0x22);  // local.tee
++  EmitU32Leb(body, v);
++  EmitLocalGet(body, v);
++  simd(0x0d);  // i8x16.shuffle: each word's bytes reversed; lanes 2, 3 zero
++  for (const u8 b : {3, 2, 1, 0, 7, 6, 5, 4, 8, 9, 10, 11, 12, 13, 14, 15})
++    body.push_back(b);
++  body.push_back(0x22);
++  EmitU32Leb(body, v);
++  // A NaN word: (bits & 0x7fffffff) > 0x7f800000.
++  EmitI32Const(body, 0x7fffffff);
++  simd(0x11);  // i32x4.splat
++  simd(0x4e);  // v128.and
++  EmitI32Const(body, 0x7f800000);
++  simd(0x11);
++  simd(0x3b);  // i32x4.gt_s (both sides below 2^31)
++  simd(0x53);  // v128.any_true
++  body.push_back(0x04);
++  body.push_back(0x40);
++  EmitLoadPsqFloatLane(body, layout, fd, 0, 0);
++  EmitLoadPsqFloatLane(body, layout, fd, 1, sizeof(u32));
++  body.push_back(0x05);
++  EmitLocalGet(body, 0);
++  EmitLocalGet(body, v);
++  simd(0x5f);  // f64x2.promote_low_f32x4
++  simd(0x0b);  // v128.store
++  body.push_back(0x03);
++  EmitU32Leb(body, PsOffset(layout, fd, 0));
++  body.push_back(0x0b);
++}
++
++// psq SIMD: psq_st/psq_stu float, both lanes (W=0): EmitConvertToSingle(ftz)
++// on both lanes in i64x2 (an exponent above 896 keeps
++// (x >> 32) & 0xc0000000 | (x >> 29) & 0x3fffffff, anything else the sign
++// alone), packed big-endian by one shuffle, one 8-byte store. Bit operations
++// only: the same words as the per-lane path for every input, NaN included.
++void EmitStorePsqFloatPair(std::vector<u8>& body, const WasmStateLayout& layout, u32 fs)
++{
++  const u32 x = WasmV128ScratchLocal(0), r = WasmV128ScratchLocal(1);
++  const auto simd = [&](u32 code) {
++    body.push_back(0xfd);
++    EmitU32Leb(body, code);
++  };
++  constexpr u32 SHR_U = 0xcd, AND = 0x4e, OR = 0x50;
++  const auto shifted = [&](u32 by, u64 mask) {
++    EmitLocalGet(body, x);
++    EmitI32Const(body, by);
++    simd(SHR_U);  // i64x2.shr_u
++    EmitSplatConst64(body, mask);
++    simd(AND);
++  };
++  EmitLocalGet(body, 0);
++  simd(0x00);  // v128.load
++  body.push_back(0x03);
++  EmitU32Leb(body, PsOffset(layout, fs, 0));
++  EmitLocalSet(body, x);
++  shifted(32, 0xc0000000);
++  shifted(29, 0x3fffffff);
++  simd(OR);
++  shifted(32, 0x80000000);  // the sign
++  shifted(52, 0x7ff);       // the exponent
++  EmitSplatConst64(body, 896);
++  simd(0xd9);  // i64x2.gt_s
++  simd(0x52);  // v128.bitselect
++  EmitLocalSet(body, r);
++  EmitRamAddress(body, layout);
++  EmitLocalGet(body, r);
++  EmitLocalGet(body, r);
++  simd(0x0d);  // i8x16.shuffle: lane 0's low word then lane 1's, big-endian
++  for (const u8 b : {3, 2, 1, 0, 11, 10, 9, 8, 0, 1, 2, 3, 4, 5, 6, 7})
++    body.push_back(b);
++  simd(0x5b);  // v128.store64_lane
++  body.push_back(0x00);
++  EmitU32Leb(body, 0);
++  body.push_back(0x00);  // lane 0
++}
++
+ void EmitPairedQuantizedFloatMemory(std::vector<u8>& body, const WasmStateLayout& layout,
+                                     const PPCAnalyst::CodeOp& op, u32 downcount)
+ {
+@@ -7674,7 +7766,17 @@ void EmitPairedQuantizedFloatMemory(std::vector<u8>& body, const WasmStateLayout
+   body.push_back(0x04);
+   body.push_back(0x40);
+ 
+-  if (load)
++  // psq SIMD: both lanes at once (off with DISABLE_NATIVE_PS, like 0143).
++  const bool pair = !inst.W && !DolphinWebHelperDisabled(DOLPHIN_WEB_DISABLE_NATIVE_PS);
++  if (load && pair)
++  {
++    EmitLoadPsqFloatPair(body, layout, inst.RD);
++  }
++  else if (!load && pair)
++  {
++    EmitStorePsqFloatPair(body, layout, inst.RS);
++  }
++  else if (load)
+   {
+     EmitLoadPsqFloatLane(body, layout, inst.RD, 0, 0);
+     if (inst.W)
+@@ -17655,8 +17757,9 @@ namespace
+ // 0137's and 0139's). 31 (0142): guest calls as wasm calls, guest returns as
+ // wasm returns (was 0139). 32 (0143): ps_add/sub/mul/muls0/1 in f64x2.
+ // 34 (0146): the 0141/0143 paths in fewer bytes (splatted constants, one
+-// helper call per op); 33 is retired (0144, closed).
+-constexpr u32 AOT_COMPILER_VERSION = 34;
++// helper call per op); 33 is retired (0144, closed). 35 (0147): psq_l and
++// psq_st float pairs in v128.
++constexpr u32 AOT_COMPILER_VERSION = 35;
+ constexpr u32 AOT_MAX_FRAGMENT_BYTES = 1u << 20;
+ thread_local std::vector<u32> t_aot_out;
+ u8* s_aot_ram = nullptr;
