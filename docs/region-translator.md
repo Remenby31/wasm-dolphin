@@ -534,9 +534,12 @@ optimization").
   - any other code, or another pc: passed up. 0 always means "continue at
     `state.pc`", so a return elsewhere (LR rewritten, a `longjmp`) unwinds to
     the dispatcher, as before.
-- **Return.** A block ending in `bclr` (a conditional one, when taken) under
-  a call made by a region writes its frame back and returns 3, after its
-  downcount check.
+- **Return.** A block ending in a taken `bclr` marks its way to the
+  fragment's head (a local). When the head finds no block of the fragment
+  for that pc and a call made by a region is pending (depth > 0), the
+  fragment writes its frame back and returns 3. A return inside the
+  fragment (a self-recursion, whose calls are local jumps) stays there; other
+  exits (bctr) go to the dispatcher as before.
 - **Depth.** `PowerPCState::region_call_depth` counts these calls; at 64 a
   call is a `return_call` as before (a Chrome worker holds ~960 frames of a
   fragment's locals in Liftoff). `TryRunRegion` sets it to 0 before every
@@ -549,8 +552,9 @@ optimization").
   `TryRunRegion` already takes any code but 1 as "ran"; the test export maps 3
   to 0.
 - **Counters** (`DolphinWeb_RegionCallStats`, in race-perf's region stats as
-  `regionCalls`): calls past the cap, returns elsewhere and codes passed up
-  count always, on their cold paths; calls and the depth reached only while
-  the harness samples.
+  `regionCalls`): calls past the cap and returns elsewhere count always, on
+  their cold paths; calls, the depth reached and returns passed up to the
+  CPU loop (counted by `TryRunRegion`) only while the harness samples. Off, a
+  call costs one state load and a hinted branch.
 
 Compiler version 29.
