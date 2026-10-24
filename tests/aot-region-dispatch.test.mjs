@@ -1142,7 +1142,8 @@ test("the region key changes with the formation", async () => {
   assert.notEqual(await regionModuleKey(f, { ...parts, formation: 3 }), await regionModuleKey(f, { ...parts, formation: 4 }), "4: continuations stop at held blocks");
   assert.notEqual(await regionModuleKey(f, { ...parts, formation: 4 }), await regionModuleKey(f, { ...parts, formation: 5 }), "5: extra entries seed the frontier");
   assert.notEqual(await regionModuleKey(f, { ...parts, formation: 5 }), await regionModuleKey(f, { ...parts, formation: 6 }), "6: continuations past an uncapped first fragment");
-  assert.equal(await regionModuleKey(f, parts), await regionModuleKey(f, { ...parts, formation: 6 }), "6 by default");
+  assert.notEqual(await regionModuleKey(f, { ...parts, formation: 6 }), await regionModuleKey(f, { ...parts, formation: 7 }), "7: past an uncapped first fragment only into a loop");
+  assert.equal(await regionModuleKey(f, parts), await regionModuleKey(f, { ...parts, formation: 7 }), "7 by default");
 });
 
 
@@ -1398,6 +1399,23 @@ test("continuations: code past an mtmsr is held even when the first fragment is 
   assert.ok(held.has(t.labels.loop), "the loop is held by a continuation");
   assert.equal(r.budgetCharged ?? 0, 0, "within the old single fragment's free blocks");
 });
+test("continuations: a straight tail past an mtmsr is left to the block path, the first fragment not full", { skip: contSkip }, async () => {
+  // An OS routine's shape: mtmsr, then a few blocks without a loop, run
+  // once per call. A continuation there was one more region entry per call
+  // and a broken block chain (race scene -1.3 %, review of #240).
+  const MTMSR_R6 = 0x7cc00124;
+  const t = assemble(LONG, [
+    asm.addi(3, 3, 1), asm.cmplwi(3, 0xffff), (pc, l) => asm.beq(pc, l.out),
+    MTMSR_R6,
+    asm.addi(4, 4, 1), asm.cmplwi(4, 40), (pc, l) => asm.beq(pc, l.tail),
+    asm.addi(5, 5, 1),
+    "tail", asm.addi(6, 6, 1),
+    "out", asm.blr()
+  ]);
+  const r = await continuationsOf(t);
+  assert.ok(r.fragment.entries.length < 64 && !r.fragment.entries.includes(t.labels.tail), "the first fragment stops at the mtmsr");
+  assert.equal(r.continuations, undefined, "no continuation: nothing past the mtmsr loops");
+});
 test("continuations: an extra entry of the plan that no direct branch reaches is held, and runs like the interpreter", { skip: contSkip }, async () => {
   const t = assemble(LONG, [
     "entry", asm.addi(3, 3, 1), asm.blr(),
@@ -1467,6 +1485,28 @@ test("frontier: a leader a held block falls into, and the return point of a call
   assert.deepEqual(frontier(branches, new Set([0x80000000])), [0x8000000c], "the call's return point; 0x10 is past the bctrl's end");
   // Held through 0x0c: 0x10 is fallen into (no end between 0x0c and it).
   assert.deepEqual(frontier(branches, new Set([0x80000000, 0x8000000c])), [0x80000010]);
+});
+
+test("loopsPast: a loop in the code the frontier leads to; not a branch back into held code, nor a literal after a blr (review of #243)", async () => {
+  const { loopsPast } = await import("../src/aot-orchestrator.js");
+  const at = (x) => (0x80000000 + x) >>> 0;
+  // A loop: the leader 0x10, a bdnz at 0x20 back to 0x18 (reached), blr 0x24.
+  const loop = [[at(0x20), [at(0x18), at(0x24)]]];
+  loop.ends = [at(0x24)];
+  assert.equal(loopsPast(loop, [at(0x10)], new Set([at(0)])), true);
+  // A straight tail from 0x10 that branches back to 0x00, held: no loop.
+  const back = [[at(0x18), [at(0x00)]]];
+  back.ends = [at(0x18)];
+  assert.equal(loopsPast(back, [at(0x10)], new Set([at(0)])), false, "a branch back into held code");
+  // A tail ending in a blr at 0x18; at 0x1c a literal that decodes as a
+  // branch back to 0x10: no walk reaches it.
+  const literal = [[at(0x1c), [at(0x10)]]];
+  literal.ends = [at(0x18), at(0x1c)];
+  assert.equal(loopsPast(literal, [at(0x10)], new Set([at(0)])), false, "a word past the blr");
+  // The leader's walk stops at a held entry: a loop past it is held code.
+  const heldLoop = [[at(0x30), [at(0x28), at(0x34)]]];
+  heldLoop.ends = [at(0x34)];
+  assert.equal(loopsPast(heldLoop, [at(0x10)], new Set([at(0), at(0x20)])), false, "a held loop after a straight tail");
 });
 
 test("continuations: no block in two fragments, and the module runs like the interpreter", { skip: contSkip }, async () => {
