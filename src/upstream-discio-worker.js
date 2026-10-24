@@ -6019,6 +6019,8 @@ async function setupSoftwarePresenter(canvas, presenterBackend) {
   renderImageData = null;
   renderUploadBuffer = null;
   renderRequiresUploadCopy = false;
+  // A presenter set up again (a new canvas) says why it fell back, or nothing.
+  rendererDiagnostics.webglFallback = null;
 
   if (presenterBackend === "webgpu") {
     try {
