@@ -185,6 +185,32 @@ export function slwi2Source(w) {
   return sh === 2 && mb === 0 && me === 29 ? rD(w) : -1;
 }
 
+// A word index scaled to a byte offset by rlwinm rA, rS, 2, MB, 29: slwi 2
+// (MB 0), or the same with a mask (MB > 0: `x & (2^k - 1)` scaled, the
+// switch of a table with no compare). -> { src, entries } where entries is
+// the number of offsets the mask allows (2^(30 - MB)), null without a mask.
+export function scaledWordIndex(w) {
+  if ((w >>> 26) !== 21) return null;
+  const sh = (w >>> 11) & 31, mb = (w >>> 6) & 31, me = (w >>> 1) & 31;
+  if (sh !== 2 || me !== 29 || mb > me) return null; // MB > ME wraps around: not a word index
+  return { src: rD(w), entries: mb === 0 ? null : 2 ** (30 - mb) };
+}
+
+// A register masked to its low bits: andi. rA, rS, 2^k - 1, or clrlwi
+// (rlwinm rA, rS, 0, MB, 31) -> the number of values it can take, else null.
+export function maskedValues(w) {
+  const op = w >>> 26;
+  if (op === 28) {
+    const imm = w & 0xffff;
+    return imm > 0 && (imm & (imm + 1)) === 0 ? imm + 1 : null;
+  }
+  if (op === 21) {
+    const sh = (w >>> 11) & 31, mb = (w >>> 6) & 31, me = (w >>> 1) & 31;
+    return sh === 0 && me === 31 && mb > 0 ? 2 ** (32 - mb) : null;
+  }
+  return null;
+}
+
 // cmplwi crf, rA, UIMM  -> { crf, reg, imm }
 export function cmplwi(w) {
   if ((w >>> 26) !== 10) return null;

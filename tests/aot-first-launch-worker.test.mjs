@@ -209,6 +209,43 @@ test("the region function cap: JSC only, unless forced", async (t) => {
   }
 });
 
+// Patch 0156: the 64 most costly PCs outside the regions, read from the
+// core's buffer (seq around the copy), each with its cause from the ledger:
+// declared by a queued module or not; a torn copy is reported, an older core
+// gives null.
+test("the region miss top: cycles outside the regions by PC, with their cause from the ledger", async (t) => {
+  const { worker } = await loadWorker(t);
+  const heap = new Uint8Array(1 << 16);
+  let top = 1024;
+  const AT = 0x4000;
+  const core = {
+    HEAPU8: heap,
+    _malloc: (n) => { const p = top; top += (n + 7) & ~7; return p; },
+    _free: () => {},
+    _DolphinWeb_AotLayoutHash: () => 0x1234,
+    _DolphinWeb_AotQueueRegion: () => {},
+    _DolphinWeb_JitRegionMissTop: () => AT
+  };
+  const view = new DataView(heap.buffer);
+  const publish = (rows, { torn = false } = {}) => {
+    view.setUint32(AT, 7, true);
+    view.setUint32(AT + 4, rows.length, true);
+    rows.forEach(([pc, cycles], i) => { view.setFloat64(AT + 8 + 16 * i, cycles, true); view.setUint32(AT + 8 + 16 * i + 8, pc, true); });
+    view.setUint32(AT + 8 + 16 * 64, torn ? 6 : 7, true);
+  };
+  worker.setHarnessEnabledForTest(true);
+  t.after(() => worker.setHarnessEnabledForTest(false));
+  await worker.queueAotRegionForTest(core, { key: "region-v1:m", bytes: Uint8Array.of(0, 97, 115, 109), entries: [0x80003100], members: [{ ranges: [[0x80003100, 0x80003200]], hash: "0011223344556677" }], layout: 0x1234 }, { retranslate: async () => true });
+  publish([[0x80003100, 5000], [0x00000500, 1200]]);
+  assert.deepEqual(worker.regionMissTopForTest(heap, core), [
+    { pc: 0x80003100, cycles: 5000, cause: "declared" },
+    { pc: 0x500, cycles: 1200, cause: "undeclared" }
+  ]);
+  publish([[0x80003100, 5000]], { torn: true });
+  assert.deepEqual(worker.regionMissTopForTest(heap, core), { torn: true });
+  assert.equal(worker.regionMissTopForTest(heap, { HEAPU8: heap }), null, "a core before 0156");
+});
+
 // Review of #86: the region cache waits for the first presented image (or
 // the timeout), never more; with no running core, not at all.
 test("the first-image wait: woken by the first presented frame, or by its timeout", async (t) => {
