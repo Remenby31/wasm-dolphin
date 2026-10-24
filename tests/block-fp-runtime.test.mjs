@@ -45,7 +45,7 @@ test("a block compiled with MSR.FP set raises FP unavailable when it runs with M
         const w = generate(name, r);
         if (!usesFpu(w)) break;
         fpClasses.add(name);
-        for (const program of [[w, ADDI_R31, BLR], [ADDI_R31, w, BLR]]) {
+        for (const program of [[w, ADDI_R31, ADDI_R31, ADDI_R31, BLR], [ADDI_R31, ADDI_R31, w, ADDI_R31, BLR]]) { // production: 4 ops at least (no short prefix)
           const state = randomState(r);
           state[37] = 0x00000032; // MSR: IR, DR, RI; FP clear
           const res = core.run(Uint32Array.from(program), state, PRODUCTION_DISABLE_MASK);
@@ -54,11 +54,11 @@ test("a block compiled with MSR.FP set raises FP unavailable when it runs with M
           compared++;
           codes.set(res.code, (codes.get(res.code) ?? 0) + 1);
           ops.set(`${res.compiledBlocks}/${res.compiledOps}`, (ops.get(`${res.compiledBlocks}/${res.compiledOps}`) ?? 0) + 1);
-          if (res.compiledOps >= 2) compiled++;
+          if (res.compiledOps >= 4) compiled++;
           // Control: the same program with the FPU on compiles the FP op.
           state[37] = 0x00002032;
           set(false);
-          if (core.run(Uint32Array.from(program), state, PRODUCTION_DISABLE_MASK).compiledOps >= 2) control++;
+          if (core.run(Uint32Array.from(program), state, PRODUCTION_DISABLE_MASK).compiledOps >= 4) control++;
           set(true);
         }
       }
