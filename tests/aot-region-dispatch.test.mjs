@@ -1112,8 +1112,11 @@ test("continuations: each under the byte cap (halved until it fits), within the 
   assert.ok((bytes.budgetCharged ?? 0) <= 1, "nothing charged past the byte budget");
   assert.ok(bytes.budgetRefused >= 1 && bytes.resume, "refused, and resumable with more");
   const tiny = await continuationsOf(program, { maxFragmentBytes: 16 });
-  assert.equal(tiny.continuations, undefined, "a single block over the cap is refused");
+  assert.equal(tiny.continuations, undefined, "a single block over the cap is refused as a continuation");
   assert.ok(tiny.oversize >= 1);
+  // Formation 5: the first fragment cut down to one block, still over the
+  // cap: kept (the function's entry; review of #215).
+  assert.deepEqual([tiny.fragment?.entries.length, tiny.fragment?.code.length > 16], [1, true], "the entry block kept over the cap");
 });
 
 test("continuations: a leader that does not translate stays an exit; a data word that looks like a branch is not followed", { skip: contSkip }, async () => {
@@ -1794,3 +1797,17 @@ test("continuations: a first fragment over the byte cap is cut to fit, the rest 
   assert.deepEqual(got.state, reference.state);
   assert.equal(got.interpreted, 0);
 });
+
+// Review of #215: the first fragment's retries under the byte cap give the
+// worker its slice between them (a 612 KB function is retried up to 6 times).
+test("continuations: the first fragment's retries under the cap yield between them", { skip: contSkip }, async () => {
+  const program = longFunction(100);
+  const ranges = loadWords(LONG, program.words);
+  const options = { mask: PRODUCTION_DISABLE_MASK, maxBlocks: 64, names: coreAssembleOptions(core.module)?.helperNames, maxContinuations: 0 };
+  const whole = await translateWithContinuations(core.module, { entry: LONG, ranges, hash: null }, { ...options, maxFragmentBytes: 1 << 30 });
+  let slices = 0;
+  const r = await translateWithContinuations(core.module, { entry: LONG, ranges, hash: null }, { ...options, maxFragmentBytes: Math.floor(whole.fragment.code.length / 5), slice: async () => { slices++; } });
+  assert.ok(r.fragment.entries.length < whole.fragment.entries.length);
+  assert.ok(slices >= 2, `${slices} slices across the retries`);
+});
+

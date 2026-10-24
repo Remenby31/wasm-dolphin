@@ -455,6 +455,7 @@ export async function translateWithContinuations(m, f, { mask, maxBlocks, names,
   let cut = false;
   for (let blocks = maxBlocks; first.fragment && first.fragment.code.length > maxFragmentBytes && blocks > 1;) {
     blocks = Math.max(1, blocks >> 1);
+    await slice(); // a 612 KB function retried up to 6 times: the worker's slice in between (review of #215)
     first = translateOne(m, f, { mask, maxBlocks: blocks, names });
     cut = true;
   }
