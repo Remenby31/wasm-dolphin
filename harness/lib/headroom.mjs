@@ -88,7 +88,7 @@ export function headroomOf(s, { guestSeconds = null, ticksPerSecond = null, viOu
 // Why a run cannot be used (deep-headroom-kpi.md §3.4), or [].
 //   target: the query's speed (1, 1.6, …); framesPerViRef: game frames per
 //   VI of the same config at speed=1, when known.
-export function invalidReasons(rec, { target = null, framesPerViRef = null } = {}) {
+export function invalidReasons(rec, { target = null, framesPerViRef = null, pacingProof = false } = {}) {
   const why = [];
   if (!rec) return ["no record"];
   if (rec.complete === false || rec.timelineLost?.vi > 0 || rec.timelineLost?.presents > 0) {
@@ -103,13 +103,21 @@ export function invalidReasons(rec, { target = null, framesPerViRef = null } = {
   const fpv = rec.headroom?.xfbCopiesPerVi;
   if (fpv === 0) why.push("no game frame (XFB copy) in the window (rendering frozen)");
   if (framesPerViRef != null && fpv != null && Math.abs(fpv / framesPerViRef - 1) > 0.1) why.push(`game frames per VI ${fpv} outside ±10 % of ${framesPerViRef} (emulated time decoupled from rendering)`);
+  if (pacingProof && rec.pacingConfig?.syncOnSkipIdle !== true) why.push(`speed=unlimited with a renderer: SyncOnSkipIdle not applied by the core (${rec.pacingConfig?.supported === false ? "no validationReadPacingConfig" : rec.pacingConfig?.error ?? "syncOnSkipIdle " + rec.pacingConfig?.syncOnSkipIdle})`);
   return why;
 }
 
 // The speed a query asks for: a number, "unlimited", or null (default 1).
 // unlimited is a speed only with SyncOnSkipIdle on (?synconidle=1): with it
-// off (the product today), emulated time runs ahead of the rendering.
-export const unlimitedAllowed = (query) => new URLSearchParams(String(query ?? "")).get("synconidle") === "1";
+// off (the product today), emulated time runs ahead of the rendering. The
+// URL alone proves nothing (2026-10-24: the core ignored ?synconidle): with
+// a renderer, each window must also read the core's own config
+// (validationReadPacingConfig, patch 0150) saying syncOnSkipIdle, else the
+// run is invalid (pacingProofNeeded). video=null renders nothing to run
+// ahead of: unlimited is allowed there as it stands (the CI bench).
+const params = (query) => new URLSearchParams(String(query ?? ""));
+export const unlimitedAllowed = (query) => params(query).get("video") === "null" || params(query).get("synconidle") === "1";
+export const pacingProofNeeded = (query) => querySpeed(query) === "unlimited" && params(query).get("video") !== "null";
 
 export function querySpeed(query) {
   const v = new URLSearchParams(String(query ?? "")).get("speed");

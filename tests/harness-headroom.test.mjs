@@ -6,7 +6,7 @@ import { spawnSync } from "node:child_process";
 import path from "node:path";
 import test from "node:test";
 
-import { consistentHeadroomRead, decodeHeadroomStats, headroomOf, invalidReasons, querySpeed, unlimitedAllowed } from "../harness/lib/headroom.mjs";
+import { consistentHeadroomRead, decodeHeadroomStats, headroomOf, invalidReasons, pacingProofNeeded, querySpeed, unlimitedAllowed } from "../harness/lib/headroom.mjs";
 
 function hrBytes(v = {}) {
   const view = new DataView(new ArrayBuffer(96));
@@ -67,6 +67,24 @@ test("validity: ring overflow, speed above its target, no unique image, game fra
   assert.equal(querySpeed("speed=unlimited"), "unlimited");
   assert.equal(unlimitedAllowed("speed=unlimited&synconidle=1"), true);
   assert.equal(unlimitedAllowed("speed=unlimited"), false);
+  // video=null renders nothing to run ahead of (the CI bench).
+  assert.equal(unlimitedAllowed("video=null&speed=unlimited"), true);
+});
+
+test("speed=unlimited with a renderer: a run is valid only when the core reports SyncOnSkipIdle on (0150)", () => {
+  assert.equal(pacingProofNeeded("video=wgpu&speed=unlimited&synconidle=1"), true);
+  assert.equal(pacingProofNeeded("video=null&speed=unlimited&synconidle=1"), false);
+  assert.equal(pacingProofNeeded("video=wgpu&speed=1"), false);
+  const rec = (pacingConfig) => ({ complete: true, headroom: { xfbCopiesPerVi: 1 }, ...(pacingConfig === undefined ? {} : { pacingConfig }) });
+  assert.deepEqual(invalidReasons(rec({ supported: true, syncOnSkipIdle: true, rushFramePresentation: true, dupXfbResetsThrottle: false }), { pacingProof: true }), []);
+  // The URL asked for it, the core did not apply it (2026-10-24: ?synconidle was ignored).
+  assert.match(invalidReasons(rec({ supported: true, syncOnSkipIdle: false }), { pacingProof: true })[0], /SyncOnSkipIdle not applied by the core \(syncOnSkipIdle false\)/);
+  // A core without the export, a failed read or no read at all: not applied.
+  assert.match(invalidReasons(rec({ supported: false }), { pacingProof: true })[0], /no validationReadPacingConfig/);
+  assert.match(invalidReasons(rec({ error: "timeout" }), { pacingProof: true })[0], /\(timeout\)/);
+  assert.match(invalidReasons(rec(undefined), { pacingProof: true })[0], /not applied by the core/);
+  // Without the proof requirement nothing changes.
+  assert.deepEqual(invalidReasons(rec(undefined)), []);
 });
 
 test("race-perf refuses speed=unlimited while SyncOnSkipIdle is off", () => {
