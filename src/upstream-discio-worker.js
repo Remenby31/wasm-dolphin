@@ -397,6 +397,15 @@ function harnessRegionLedger(pcs) {
   return { modules: aotRegionLedger.size, outcomes, queuedEntries: entries, mappedRegions: typeof mapped === "function" ? mapped() >>> 0 : null, nowMs: Math.round(performance.now()), pcs: at };
 }
 
+// QA harness only: the pacing settings the core runs with (patch 0150),
+// from its effective config, not from the URL: proof that a switch applied.
+function harnessPacingConfig() {
+  if (!harnessEnabled) return { error: "harness hooks are off" };
+  const read = moduleInstance?._DolphinWeb_PacingConfig;
+  if (typeof read !== "function") return { supported: false };
+  const bits = read() >>> 0;
+  return { supported: true, syncOnSkipIdle: Boolean(bits & 1), rushFramePresentation: Boolean(bits & 2), dupXfbResetsThrottle: Boolean(bits & 4) };
+}
 // Patch 0156: the guest cycles ran outside the regions by the PC a chain of
 // blocks started at, the 64 most costly, while the stats are on (timing or
 // not), each with its cause as the ledger sees it: "declared" (a module
@@ -1633,6 +1642,9 @@ async function handleMessage(type, payload) {
         softwareTevHotCaseMode: payload.softwareTevHotCaseMode,
         xfbFastPaths: payload.xfbFastPaths,
         correctTimeDrift: payload.correctTimeDrift,
+        rushPresentation: payload.rushPresentation,
+        syncOnSkipIdle: payload.syncOnSkipIdle,
+        dupXfbRearmsThrottle: payload.dupXfbRearmsThrottle,
         coreLog: payload.coreLog,
         memcardSlotB: payload.memcardSlotB,
         efbAccess: payload.efbAccess,
@@ -1918,6 +1930,8 @@ async function handleMessage(type, payload) {
     case "validationReadRelaxedMadd":
       // coreFused: the core's own mode (null: a core without patch 0129).
       return { mode: relaxedMadd, coreFused: moduleInstance?._DolphinWeb_FusedMadd ? moduleInstance._DolphinWeb_FusedMadd() === 1 : null };
+    case "validationReadPacingConfig":
+      return harnessPacingConfig();
     case "validationReadJitRegionStats":
       return harnessJitRegionStats(payload);
     case "validationReadRegionLedgerStale":
@@ -2347,6 +2361,9 @@ async function loadCore({
   softwareTevHotCaseMode: requestedSoftwareTevHotCaseMode = 0,
   xfbFastPaths = 0,
   correctTimeDrift = false,
+  rushPresentation = false,
+  syncOnSkipIdle = false,
+  dupXfbRearmsThrottle = false,
   coreLog = false,
   memcardSlotB = false,
   efbAccess = false,
@@ -2862,6 +2879,10 @@ async function loadCore({
     // Read by dolphin_web_core.cpp at CoreInit. Both are opt-in and default
     // false, so the shipping page load is unchanged.
     dolphinCorrectTimeDrift: Boolean(correctTimeDrift),
+    // Patch 0150 pacing switches (dolphin_web_core.cpp reads them at setup).
+    dolphinRushPresentation: rushPresentation === true,
+    dolphinSyncOnSkipIdle: syncOnSkipIdle === true,
+    dolphinDupXfbRearmsThrottle: dupXfbRearmsThrottle === true,
     dolphinCoreLog: Boolean(coreLog),
     dolphinMemcardSlotB: Boolean(memcardSlotB),
     dolphinEfbAccess: Boolean(efbAccess),

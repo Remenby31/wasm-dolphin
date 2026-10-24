@@ -25,7 +25,7 @@
       "commit": "01e0577914a75a2569c846778c2f93aa8e6feddd"
     }
   },
-  "patchSeriesSha256": "ec0af222455f9ec2dcbeedc82131dc1958b6b19c316028ce14c6f0b04e7b4278",
+  "patchSeriesSha256": "48005315778a072b6df03a881c18b3b9630f13d9650b340c776ce7daf08041c2",
   "patches": [
     {
       "order": 1,
@@ -951,12 +951,20 @@
       "order": 116,
       "cwd": ".",
       "hashMode": "lf-normalized",
+      "path": "patches/dolphin-wasm/snapshot/0150-dup-xfb-rearms-throttle-and-pacing-readback.patch",
+      "size": 3210,
+      "sha256": "82dab1a99c71b04d10a03be837902dc33f84371a46413b76c6d4326caf87020a"
+    },
+    {
+      "order": 117,
+      "cwd": ".",
+      "hashMode": "lf-normalized",
       "path": "patches/dolphin-wasm/snapshot/0151-disc-read-counters.patch",
       "size": 4734,
       "sha256": "7f9e260ad1afcc306259ea6689a98656bc0ec86970e112d74119dc71722b9608"
     },
     {
-      "order": 117,
+      "order": 118,
       "cwd": ".",
       "hashMode": "lf-normalized",
       "path": "patches/dolphin-wasm/snapshot/0154-disc-read-max-reset.patch",
@@ -964,7 +972,7 @@
       "sha256": "d0204416d560f4d6d3123965d32a80c8a06b2697ff0c194b8ff1e6b58322f10f"
     },
     {
-      "order": 118,
+      "order": 119,
       "cwd": ".",
       "hashMode": "lf-normalized",
       "path": "patches/dolphin-wasm/snapshot/0156-region-miss-top.patch",
@@ -972,7 +980,7 @@
       "sha256": "096c4d846175540fec102d85dc6626712a0955aa3f24d0100c241d3e8057a3b4"
     },
     {
-      "order": 119,
+      "order": 120,
       "cwd": "Externals/SFML/SFML",
       "hashMode": "lf-normalized",
       "path": "patches/dolphin-wasm/submodules/0001-sfml-emscripten-config.patch",
@@ -980,7 +988,7 @@
       "sha256": "f82197a21fe982ad83f6ee7bbf5a03839b1cebd4d64da3eab11263842bf61d89"
     },
     {
-      "order": 120,
+      "order": 121,
       "cwd": "Externals/xxhash/xxHash",
       "hashMode": "lf-normalized",
       "path": "patches/dolphin-wasm/submodules/0002-xxhash-wasm-simd-scalar.patch",
