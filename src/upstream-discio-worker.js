@@ -24,7 +24,7 @@ import {
   compileFailureReason,
   createAotCompilerClient
 } from "./aot-compiler-worker.js";
-import { WASM_ENGINES, wasmEngine } from "./wasm-engine.js";
+import { nativeModuleCache, WASM_ENGINES, wasmEngine } from "./wasm-engine.js";
 import { migrateLegacyJitIdb, openAotBlockStore, openAotCache, readDiscKeyFromFile, readDolKeyFromFile } from "./aot-cache.js";
 import {
   JIT_CACHE_ENTRY_KEY_SCHEMA,
@@ -137,6 +137,7 @@ import {
   enableWgpuNonDroppingBackpressure,
   failWgpuRingConsumer
 } from "./wgpu-ring-backpressure.js";
+import { createWgpuReplayParker } from "./wgpu-replay-park.js";
 import {
   WGPU_UPLOAD_PROBE_SCHEMA,
   createWgpuUploadProbeExecutor
@@ -1604,6 +1605,7 @@ async function handleMessage(type, payload) {
         efbCopyRam: payload.efbCopyRam,
         wgpuMask: payload.wgpuMask,
         wgpuFallback: payload.wgpuFallback,
+        dstAlphaTwoPass: payload.dstAlphaTwoPass,
         webglSoftware: payload.webglSoftware,
         efbDiag: payload.efbDiag,
         jitVerbose: payload.jitVerbose,
@@ -1861,6 +1863,20 @@ async function handleMessage(type, payload) {
       if (Number.isFinite(after) && after >= 0) setTimeout(() => lose.restoreContext(), after);
       return { lost: true };
     }
+    case "validationReadDstAlphaPasses": {
+      // Patch 0149: the dst-alpha second pass (0136), cumulative.
+      if (!harnessEnabled) return { error: "harness hooks are off" };
+      const stats = moduleInstance?._DolphinWeb_DstAlphaPassStats;
+      if (!stats || !moduleInstance._malloc) return { error: "core without patch 0149" };
+      const ptr = moduleInstance._malloc(12);
+      try {
+        stats(ptr);
+        const v = new Uint32Array(moduleInstance.HEAPU8.buffer, ptr, 3);
+        return { flushes: v[0], extraDraws: v[1], enabled: v[2] === 1 };
+      } finally {
+        moduleInstance._free(ptr);
+      }
+    }
     case "validationReadRelaxedMadd":
       // coreFused: the core's own mode (null: a core without patch 0129).
       return { mode: relaxedMadd, coreFused: moduleInstance?._DolphinWeb_FusedMadd ? moduleInstance._DolphinWeb_FusedMadd() === 1 : null };
@@ -1958,6 +1974,10 @@ async function handleMessage(type, payload) {
         lazyFillTerminalReason: dolphinJitLazyFillTerminalReason,
         lazyFillFailureCount: dolphinJitLazyFillFailureCount,
         cacheSize: dolphinJitCacheMap.size,
+        // Modules not compiled or not kept here because the engine has no
+        // native module cache (wasmEngine: jsc, spidermonkey; iOS memory lever 1).
+        wasmEngine: wasmEngineName,
+        copiesSkipped: dolphinJitCopiesSkipped,
         newCompileCount: dolphinJitNewCompileCount,
         verificationPending: dolphinJitVerificationPending.size,
         compilePending: dolphinJitCompilePending,
@@ -2295,6 +2315,7 @@ async function loadCore({
   efbCopyRam = false,
   wgpuMask = "",
   wgpuFallback = false,
+  dstAlphaTwoPass = true,
   webglSoftware = false,
   efbDiag = false,
   jitVerbose = false,
@@ -2746,7 +2767,7 @@ async function loadCore({
   }
   aotFirstLaunchEnabled = aotFirstLaunch === true;
   aotProfileSampleMs = Number.isInteger(aotSampleMs) && aotSampleMs >= 0 ? aotSampleMs : AOT_PROFILE_SAMPLE_MS;
-  wasmEngineName = WASM_ENGINES.includes(requestedWasmEngine) ? requestedWasmEngine : wasmEngine({ search: "" });
+  wasmEngineName = resolveWasmEngineName(requestedWasmEngine);
   aotRegionCapRequested = Number.isInteger(regionCap) && regionCap >= 0 ? regionCap : null;
   dolphinJitBootLoadComplete = false;
   dolphinJitBootLoadedEntries = 0;
@@ -3014,6 +3035,7 @@ async function loadCore({
   api.setJitRegionChaining?.(regionChain !== false ? 1 : 0);
   api.setPpcProfileEnabled?.(ppcProfile ? 1 : 0);
   if (Number.isInteger(gpuSpinMicros) && gpuSpinMicros >= 0) api.setGpuSpinBudget?.(gpuSpinMicros);
+  api.setDstAlphaTwoPass?.(dstAlphaTwoPass !== false ? 1 : 0);
   api.setWebGpuUploadArenaMiB?.(wgpuUploadArenaMiB, collectMetrics ? 1 : 0);
   api.setWebGpuProducerProfileEnabled?.(wgpuProducerProfileRequested ? 1 : 0);
   api.setWebGpuDrawProfileEnabled?.(wgpuDrawProfileRequested ? 1 : 0);
@@ -3142,6 +3164,7 @@ function bindApi(module) {
     setJitRegionsEnabled: optionalCwrap("DolphinWeb_JitSetRegionsEnabled", null, ["number"]),
     setJitRegionChaining: optionalCwrap("DolphinWeb_JitSetRegionChaining", null, ["number"]),
     setGpuSpinBudget: optionalCwrap("DolphinWeb_SetGpuSpinBudget", null, ["number"]),
+    setDstAlphaTwoPass: optionalCwrap("DolphinWeb_SetDstAlphaTwoPass", null, ["number"]),
     getPpcWasmJitEngagedFrame: optionalCwrap("GetPpcWasmJitEngagedFrame", "number", []),
     getPpcWasmJitArmStartFrame: optionalCwrap("GetPpcWasmJitArmStartFrame", "number", []),
     setPpcWasmJitEnabled:
@@ -6060,6 +6083,8 @@ async function setupSoftwarePresenter(canvas, presenterBackend) {
   renderImageData = null;
   renderUploadBuffer = null;
   renderRequiresUploadCopy = false;
+  // A presenter set up again (a new canvas) says why it fell back, or nothing.
+  rendererDiagnostics.webglFallback = null;
 
   if (presenterBackend === "webgpu") {
     try {
@@ -7421,6 +7446,7 @@ async function reconcileJitCacheWithBuild(fingerprint) {
   if (identity.reset) {
     await clearDolphinJitModulesStore(dolphinJitIdb);
     dolphinJitCacheMap.clear();
+    dolphinJitPersistedOnly.clear();
     dolphinJitPrebuiltOverflow = null;
     postStatus(
       `jit-cache: identity reset (${identity.reason}); cleared unverified modules`
@@ -7685,6 +7711,13 @@ export async function prepareAotFirstLaunch(file, {
       }).catch(() => {});
     },
     retain: (key, mod, bytes) => {
+      // After the boot, without a native module cache: not kept (the CPU
+      // thread compiles the region's bytes itself; the module here was only
+      // needed for its sections, read by the flow before this call).
+      if (!keepModulesForNativeCache()) {
+        dolphinJitCopiesSkipped += 1;
+        return;
+      }
       // Also under the key the CPU thread's compile looks up (the SHA-256 of
       // the bytes, as for a block): its install of the region is then a hit
       // in its own module map, handed over below before the boot.
@@ -7804,7 +7837,20 @@ let aotProfileSampleMs = AOT_PROFILE_SAMPLE_MS;
 // worker's own detection (no ?wasmengine= here: a worker's location is its
 // script's).
 let wasmEngineName = "unknown";
+// The page's engine as the adapter passed it (?wasmengine= resolved there),
+// else this worker's own detection.
+export function resolveWasmEngineName(requested, detect = () => wasmEngine({ search: "" })) {
+  return WASM_ENGINES.includes(requested) ? requested : detect();
+}
 export const wasmEngineForTest = () => wasmEngineName;
+// Test seams: the engine this worker believes it runs on, and whether the
+// core has booted (the Modules kept before it reach the pthreads).
+export function setWasmEngineForTest(name) {
+  wasmEngineName = name;
+}
+export function setAotCoreBootedForTest(on) {
+  aotCoreBooted = on === true;
+}
 // ?regioncap=N|0 (core-host): the region function cap forced, else null (by engine).
 let aotRegionCapRequested = null;
 export function regionFunctionCap(jscCap) {
@@ -7813,7 +7859,7 @@ export function regionFunctionCap(jscCap) {
 export function setRegionCapForTest({ engine = null, cap = null } = {}) {
   if (engine) wasmEngineName = engine;
   aotRegionCapRequested = cap;
-} // ?aotsample=N (core-host), 0: no sampler
+}
 const AOT_PROFILE_RECORD_MS = 60000;
 // Every minute, and when the tab hides or closes (flushUserData), the
 // emulation pauses or stops, or another disc is mounted, what the sampler
@@ -7969,8 +8015,10 @@ export function setHarnessEnabledForTest(on) {
   if (!harnessEnabled) aotRegionLedger.clear();
 }
 // A region module of the first launch: compiled off the CPU thread when the
-// compiler worker is on (?aotcompiler=1), kept alive under its key.
-async function precompileAotRegion(key, bytes) {
+// compiler worker is on (?aotcompiler=1), kept alive under its key (without
+// a native module cache past the boot: compiled for its sections and
+// validation, not kept).
+export async function precompileAotRegion(key, bytes) {
   let module;
   try {
     module = dolphinAotCompilerEnabled
@@ -7979,7 +8027,8 @@ async function precompileAotRegion(key, bytes) {
   } catch (err) {
     return { reason: compileFailureReason(err) };
   }
-  if (dolphinJitCacheMap.size < DOLPHIN_JIT_CACHE_MAX) dolphinJitCacheMap.set(key, module);
+  if (!keepModulesForNativeCache()) dolphinJitCopiesSkipped += 1;
+  else if (dolphinJitCacheMap.size < DOLPHIN_JIT_CACHE_MAX) dolphinJitCacheMap.set(key, module);
   return { module };
 }
 // P5 (plan piste 3): cached and requested modules are compiled in a
@@ -8086,6 +8135,15 @@ export function precompileDolphinJitModule(key, input) {
       postStatus("jit-cache: rejected compile request with mismatched block identity");
       return { reason: "key-mismatch" };
     }
+    // No native module cache: compiling here would only make a second copy.
+    // The slot is marked ready and the CPU thread compiles its own (an engine
+    // reject is handled there, 0071). Nothing is stored from here: the bytes
+    // come back in the CPU thread's dolphin-jit-new-compile once its compile
+    // succeeded, and are stored then, once.
+    if (!keepModulesForNativeCache()) {
+      dolphinJitCopiesSkipped += 1;
+      return { reason: "no-native-cache" };
+    }
     let mod;
     try {
       mod = dolphinAotCompilerEnabled
@@ -8116,7 +8174,7 @@ async function handleDolphinJitCompileRequest(event) {
   // compiles its own bytes.
   if (key && data.kind === "region" && !data.bytes) {
     dolphinJitCompileRequestCount += 1;
-    if (!dolphinJitCacheMap.has(key)) dolphinJitCompileRequestFailures += 1;
+    if (!dolphinJitCacheMap.has(key) && keepModulesForNativeCache()) dolphinJitCompileRequestFailures += 1;
     markDolphinJitModuleReady(data.readyPtr, data.readySlot);
     return;
   }
@@ -8125,7 +8183,7 @@ async function handleDolphinJitCompileRequest(event) {
   const firstAsk = !dolphinJitCompileRequestsInFlight.has(key);
   const outcome = await precompileDolphinJitModule(key, data.bytes);
   if (!firstAsk) return; // the first request marks the slot
-  if (!outcome.module || outcome.reason) dolphinJitCompileRequestFailures += 1;
+  if ((!outcome.module || outcome.reason) && outcome.reason !== "no-native-cache") dolphinJitCompileRequestFailures += 1;
   markDolphinJitModuleReady(data.readyPtr, data.readySlot);
 }
 
@@ -8144,6 +8202,19 @@ let dolphinJitReadyMarks = 0;
 // The only byte ever written into the core's heap from here: a slot of the
 // table the core itself reports (_DolphinWeb_JitReadyBitsPtr); a request
 // naming any other address is ignored.
+// Whether a Module compiled here is kept for the CPU thread's own compile of
+// the same bytes. That only pays where the engine caches native modules by
+// their bytes (V8): elsewhere (JSC, SpiderMonkey) the CPU thread compiles its
+// own copy anyway, and the one kept here is a second copy of the code
+// (research/deep-ios-memory-fit.md, lever 1: 107 to 190 MiB of regions on an
+// iPhone). Before the boot the Modules are handed to the pthreads and used,
+// whatever the engine: kept then. ?wasmengine= forces the engine (core-host).
+function keepModulesForNativeCache() {
+  return nativeModuleCache(wasmEngineName) || !aotCoreBooted;
+}
+let dolphinJitCopiesSkipped = 0;
+export const dolphinJitCopiesSkippedForTest = () => dolphinJitCopiesSkipped;
+
 function markDolphinJitModuleReady(readyPtr, readySlot) {
   if (!Number.isInteger(readyPtr) || !Number.isInteger(readySlot)) return;
   if (readyPtr <= 0 || readySlot < 0 || readySlot >= DOLPHIN_JIT_READY_SLOTS) return;
@@ -8159,6 +8230,8 @@ function markDolphinJitModuleReady(readyPtr, readySlot) {
 }
 
 let dolphinJitNewCompileCount = 0;
+// Keys stored without a Module (no native module cache): seen, for dedupe.
+const dolphinJitPersistedOnly = new Set();
 let dolphinJitCompilePending = 0;
 const dolphinJitVerificationPending = new Set();
 async function handleDolphinJitNewCompile(event) {
@@ -8168,8 +8241,10 @@ async function handleDolphinJitNewCompile(event) {
   const key = String(data.hash);
   const bytes = data.bytes instanceof ArrayBuffer ? new Uint8Array(data.bytes) : data.bytes;
   if (!(bytes instanceof Uint8Array)) return;
-  if (dolphinJitCacheMap.has(key) || dolphinJitVerificationPending.has(key)) return;
-  if (dolphinJitCacheMap.size >= DOLPHIN_JIT_CACHE_MAX) return;
+  if (dolphinJitCacheMap.has(key) || dolphinJitVerificationPending.has(key) || dolphinJitPersistedOnly.has(key)) return;
+  // Keys stored without a Module count as Modules would: the store stays
+  // within the same bound as under V8 (49 152 entries, then nothing new).
+  if (dolphinJitCacheMap.size + dolphinJitPersistedOnly.size >= DOLPHIN_JIT_CACHE_MAX) return;
   dolphinJitVerificationPending.add(key);
   let valid = false;
   try {
@@ -8186,6 +8261,14 @@ async function handleDolphinJitNewCompile(event) {
   }
   if (dolphinJitCacheMap.has(key)) return;
   dolphinJitNewCompileCount += 1;
+  // No native module cache: the bytes are stored for the next boot (whose
+  // Modules the pthreads do use), nothing is compiled or kept here.
+  if (!keepModulesForNativeCache()) {
+    dolphinJitPersistedOnly.add(key);
+    dolphinJitCopiesSkipped += 1;
+    void writeDolphinJitEntryToIdb(key, bytes);
+    return;
+  }
   // Reserve the slot synchronously so duplicate notifications dedupe even
   // before the async compile finishes. Replace with the real Module once
   // compilation completes. Async to keep discio off-critical-path. After
@@ -9105,14 +9188,36 @@ function startWgpuReplayPump() {
     } else {
       webGpuCausalStats.replayPumpEmptyPollCount += 1;
     }
-    // A backlog the drainEveryMs perturbation holds back waits for its next
-    // drain instead of rescheduling at 0 ms.
+    // An empty ring parks until the producer publishes (4 ms at most, the
+    // old poll). A backlog the drainEveryMs perturbation holds back waits for
+    // its next drain instead of rescheduling at 0 ms.
+    if (write === read && !wgpuMappedCapacityBlocked && parkWgpuReplayPump(pump, write)) return;
     scheduleWgpuReplayPump(
       pump,
       write === read || wgpuMappedCapacityBlocked ? 4 : wgpuDiagDrainWaitMs()
     );
   };
   scheduleWgpuReplayPump(pump, 0);
+}
+
+// Waits for the producer on the write index instead of a 4 ms timer; false
+// when this engine cannot (no Atomics.waitAsync): the caller polls.
+// Waits for the producer on the write index instead of a 4 ms timer (patch
+// 0148); false when this engine cannot (no Atomics.waitAsync): the caller
+// polls. Created lazily: webGpuCausalStats is declared further down.
+let wgpuReplayParker = null;
+function parkWgpuReplayPump(pump, observedWrite) {
+  wgpuReplayParker ??= createWgpuReplayParker({
+    stats: webGpuCausalStats,
+    schedule: scheduleWgpuReplayPump,
+    isCurrentRing: (ring) => ring === webGpuCmdRing,
+  });
+  if (!wgpuReplayParker.park(webGpuCmdRing, observedWrite, pump)) return false;
+  if (wgpuReplayParker.parked) {
+    wgpuReplayPumpTimer = "parked";
+    wgpuReplayPumpDueAt = 0;
+  }
+  return true;
 }
 
 function scheduleWgpuReplayPump(callback, delayMs) {
@@ -9127,7 +9232,8 @@ function scheduleWgpuReplayPump(callback, delayMs) {
 }
 
 function cancelWgpuReplayPump() {
-  if (wgpuReplayPumpTimer !== null) clearTimeout(wgpuReplayPumpTimer);
+  if (wgpuReplayPumpTimer !== null && wgpuReplayPumpTimer !== "parked") clearTimeout(wgpuReplayPumpTimer);
+  wgpuReplayParker?.cancel(webGpuCmdRing);
   wgpuReplayPumpTimer = null;
   wgpuReplayYieldPending = false;
   wgpuReplayPumpScheduledAt = 0;
@@ -11953,6 +12059,15 @@ const webGpuCausalStats = {
   backlogHighWater: 0,
   replayPumpDrainCount: 0,
   replayPumpEmptyPollCount: 0,
+  // Patch 0148: the pump parks on an empty ring (waitAsync on the write
+  // index) and the producer wakes it. timedOutWithData counts a park that
+  // timed out although the write index had moved: with a 0148 core, a
+  // publish racing the timeout (rare); with an older core, every publish.
+  replayPumpParkCount: 0,
+  replayPumpParkNotifiedCount: 0,
+  replayPumpParkTimedOutCount: 0,
+  replayPumpParkTimedOutWithDataCount: 0,
+  replayPumpParkNotEqualCount: 0,
   replayPumpScheduleCount: 0,
   replayPumpBacklogScheduleCount: 0,
   replayPumpIdleScheduleCount: 0,

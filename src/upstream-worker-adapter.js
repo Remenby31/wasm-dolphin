@@ -106,6 +106,7 @@ export class UpstreamWorkerAdapter {
     efbCopyRam = false,
     wgpuMask = "",
     wgpuFallback = false,
+    dstAlphaTwoPass = true,
     webglSoftware = false,
     savesMode = "",
     efbDiag = false,
@@ -222,6 +223,7 @@ export class UpstreamWorkerAdapter {
     this.efbCopyRam = Boolean(efbCopyRam);
     this.wgpuMask = String(wgpuMask || "");
     this.wgpuFallback = Boolean(wgpuFallback);
+    this.dstAlphaTwoPass = dstAlphaTwoPass !== false;
     this.webglSoftware = Boolean(webglSoftware);
     this.savesMode = String(savesMode || "");
     this.userData = null;
@@ -456,6 +458,7 @@ export class UpstreamWorkerAdapter {
       efbCopyRam: this.efbCopyRam,
       wgpuMask: this.wgpuMask,
       wgpuFallback: this.wgpuFallback,
+      dstAlphaTwoPass: this.dstAlphaTwoPass,
       webglSoftware: this.webglSoftware,
       savesMode: this.savesMode,
       efbDiag: this.efbDiag,
