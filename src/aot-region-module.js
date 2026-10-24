@@ -351,7 +351,9 @@ export function assembleRegion(fragments, { helpers, pcOffset, memoryPages, memo
   // exported dispatcher, the internal one (`dispatch` relocs), the exit stub,
   // then the fragments.
   const CHAIN = helperNames.length, DISPATCHER = CHAIN + (chain ? 1 : 0), INNER = DISPATCHER + 1, STUB = INNER + 1, FIRST = STUB + 1;
-  const LOCAL_FUNCTIONS = 3 + fragments.length;
+  // Bench (layout A/A', not for merge): one more function, never called,
+  // after the fragments: the module's code differs, no guest code does.
+  const LOCAL_FUNCTIONS = 3 + fragments.length + REGION_LAYOUT_PAD;
 
   // Entries -> fragment function index.
   const entryOwner = new Map();
@@ -488,6 +490,7 @@ export function assembleRegion(fragments, { helpers, pcOffset, memoryPages, memo
   uleb(code, stub.length); append(stub);
   const bodyAt = [];
   for (const b of bodies) { uleb(code, b.length); bodyAt.push(code.length); append(b); }
+  for (let i = 0; i < REGION_LAYOUT_PAD; i++) { const pad = [0x00, OP.i32Const, 0x00, OP.end]; uleb(code, pad.length); append(pad); }
   // Custom section "metadata.code.branch_hint" (wasm branch hinting, before
   // the code section): per fragment, the `if` opcodes the core marked and
   // whether their true arm is likely (a fast path) or not (a halt, the
@@ -698,6 +701,7 @@ export function groupRegions(module, order, { maxFunctions = 100 } = {}) {
 // hashed br_table, DISPATCH_HASH_MULS), so a module cached with the binary
 // search is assembled again.
 export const REGION_DISPATCH = 2;
+export const REGION_LAYOUT_PAD = 1; // bench: a dead function per region module (layout A/A')
 export const REGION_FORMATION = 6; // 3: frontier by nearest held entry, module budget by water-filling; 4: a continuation stops at blocks already held; 5: the plan's extra entries seed the frontier; 6: continuations when the frontier is not empty, the first fragment uncapped
 // functionCap: the wasm function body cap the fragments were formed under
 // (JSC, REGION_JSC_FUNCTION_CAP); in the key only when there is one, so the
@@ -708,7 +712,7 @@ export async function regionModuleKey(functions, { compilerVersion, codegenMask,
   }
   const hex8 = (v) => (v >>> 0).toString(16).padStart(8, "0");
   if (!Number.isInteger(functionCap) || functionCap < 0) throw new Error("region: functionCap must be a non-negative integer");
-  const text = (dispatch > 1 ? `dispatch:${dispatch};` : "") + (formation > 1 ? `formation:${formation};` : "") + (functionCap > 0 ? `cap:${functionCap};` : "") + functions.map((f) => {
+  const text = (REGION_LAYOUT_PAD ? `pad:${REGION_LAYOUT_PAD};` : "") + (dispatch > 1 ? `dispatch:${dispatch};` : "") + (formation > 1 ? `formation:${formation};` : "") + (functionCap > 0 ? `cap:${functionCap};` : "") + functions.map((f) => {
     if (!/^[0-9a-f]{64}$/.test(f.sha256 ?? "")) throw new Error(`region: function ${f.entry?.toString(16)} has no sha256`);
     const extra = [...(f.extraEntries ?? [])].map((pc) => (pc >>> 0)).sort((a, b) => a - b).map((pc) => pc.toString(16)).join(",");
     return `${(f.entry >>> 0).toString(16)}:${f.sha256}:${extra};`;
