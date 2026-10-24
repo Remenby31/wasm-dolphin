@@ -88,9 +88,12 @@ test("speed=unlimited with a renderer: the core's pacing config must be what the
   assert.match(invalidReasons(rec(off), { pacing: "sync" })[0], /SyncOnSkipIdle not applied by the core \(syncOnSkipIdle false\)/);
   // Labelled decoupled, the core synchronises: not the measurement it claims.
   assert.match(invalidReasons(rec(on), { pacing: "decoupled" })[0], /--decoupled-unlimited: the core does not read SyncOnSkipIdle off/);
-  // A core without the export, a failed read or no read at all: never valid either way.
+  // A core without the readback (before 0150) ignores ?synconidle: never "sync",
+  // decoupled by construction (idle et timing, 2026-10-24).
+  assert.match(invalidReasons(rec({ supported: false }), { pacing: "sync" })[0], /no validationReadPacingConfig/);
+  assert.deepEqual(invalidReasons(rec({ supported: false }), { pacing: "decoupled" }), []);
+  // A failed read or no read at all: never valid either way.
   for (const pacing of ["sync", "decoupled"]) {
-    assert.match(invalidReasons(rec({ supported: false }), { pacing })[0], /no validationReadPacingConfig/);
     assert.match(invalidReasons(rec({ error: "timeout" }), { pacing })[0], /\(timeout\)/);
     assert.equal(invalidReasons(rec(undefined), { pacing }).length, 1);
   }

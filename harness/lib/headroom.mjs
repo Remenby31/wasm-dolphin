@@ -103,7 +103,11 @@ export function invalidReasons(rec, { target = null, framesPerViRef = null, paci
   const fpv = rec.headroom?.xfbCopiesPerVi;
   if (fpv === 0) why.push("no game frame (XFB copy) in the window (rendering frozen)");
   if (framesPerViRef != null && fpv != null && Math.abs(fpv / framesPerViRef - 1) > 0.1) why.push(`game frames per VI ${fpv} outside ±10 % of ${framesPerViRef} (emulated time decoupled from rendering)`);
-  if (pacing && rec.pacingConfig?.syncOnSkipIdle !== (pacing === "sync")) {
+  // A core without the readback (before 0150) ignores ?synconidle and keeps
+  // SyncOnSkipIdle off: decoupled by construction, so it passes "decoupled"
+  // (never "sync"). An error or no read passes neither.
+  const decoupledOld = pacing === "decoupled" && rec.pacingConfig?.supported === false;
+  if (pacing && !decoupledOld && rec.pacingConfig?.syncOnSkipIdle !== (pacing === "sync")) {
     const read = rec.pacingConfig?.supported === false ? "no validationReadPacingConfig" : rec.pacingConfig?.error ?? `syncOnSkipIdle ${rec.pacingConfig?.syncOnSkipIdle}`;
     why.push(pacing === "sync" ? `speed=unlimited with a renderer: SyncOnSkipIdle not applied by the core (${read})` : `--decoupled-unlimited: the core does not read SyncOnSkipIdle off (${read})`);
   }
