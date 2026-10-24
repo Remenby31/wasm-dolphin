@@ -1380,3 +1380,69 @@ test("continuations: no block in two fragments, and the module runs like the int
   assert.deepEqual(got.state, reference.state);
   assert.equal(got.interpreted, 0);
 });
+
+// Review of #205: carving with the plan's hash on. A first fragment capped
+// at 2 blocks holds `entry` and the loop head `L`; the continuation at `F`
+// is cut where it falls into L (a held start) and jumps there. The module
+// runs like the interpreter.
+test("continuations: a block cut where it falls into a held block, hash on, runs like the interpreter", { skip: contSkip }, async () => {
+  const { regionHash } = await import("../src/aot-plan.js");
+  const t = assemble(LONG, [
+    "entry", asm.li(3, 0), (pc, l) => asm.b(pc, l.L),
+    "F", asm.addi(4, 4, 1),
+    "L", asm.addi(3, 3, 1), asm.cmplwi(3, 10), (pc, l) => asm.bc(12, 0, pc, l.F), // blt F
+    "out", asm.blr()
+  ]);
+  const ranges = loadWords(LONG, t.words);
+  const read32 = (a) => new DataView(core.ram().buffer, core.ram().byteOffset).getUint32(a & 0x01ffffff, false);
+  const hash = regionHash(read32, ranges);
+  const r = await translateWithContinuations(core.module, { entry: LONG, ranges, hash },
+    { mask: PRODUCTION_DISABLE_MASK, maxBlocks: 2, names: coreAssembleOptions(core.module)?.helperNames });
+  assert.ok(r.fragment, r.reason);
+  assert.ok(!r.codeChanged);
+  const fragments = [r.fragment, ...(r.continuations ?? [])];
+  const listed = fragments.flatMap((x) => x.entries);
+  assert.equal(new Set(listed).size, listed.length, "no block in two fragments");
+  for (const pc of [t.labels.entry, t.labels.F, t.labels.L, t.labels.out]) assert.ok(listed.includes(pc), `${pc.toString(16)} held`);
+  const fFragment = fragments.find((x) => x.entry === t.labels.F);
+  assert.ok(fFragment && !fFragment.entries.includes(t.labels.L), "F's fragment stops at the held L");
+  core.module._DolphinWeb_AotForgetRegionsForTest?.();
+  const { bytes: mod, entries } = assembleRegion(claimEntries(fragments), { helpers: HELPER_SIGNATURES, pcOffset: core.pcOffset, memoryPages: core.memoryPages });
+  core.setRegionsEnabled(true);
+  core.queueRegion(mod, entries.map(([pc]) => pc), [{ ranges, hash: null }]);
+  core.serviceRegions();
+  const reference = runCall(LONG, { regions: false });
+  const got = runCall(LONG, { regions: true });
+  assert.deepEqual(got.state, reference.state);
+  assert.equal(got.interpreted, 0);
+});
+
+// Review of #205: code rewritten between two translations (an overlay
+// during a slice) refuses the continuation and stops the function's growth:
+// nothing translated from foreign bytes is kept.
+test("continuations: code rewritten during a slice refuses the fragment (plan hash checked after each)", { skip: contSkip }, async () => {
+  const { regionHash } = await import("../src/aot-plan.js");
+  const program = longFunction(100);
+  const ranges = loadWords(LONG, program.words);
+  const read32 = (a) => new DataView(core.ram().buffer, core.ram().byteOffset).getUint32(a & 0x01ffffff, false);
+  const hash = regionHash(read32, ranges);
+  const options = { mask: PRODUCTION_DISABLE_MASK, maxBlocks: 16, names: coreAssembleOptions(core.module)?.helperNames };
+  const clean = await translateWithContinuations(core.module, { entry: LONG, ranges, hash }, options);
+  assert.ok(clean.continuations?.length >= 2 && !clean.codeChanged, "unchanged code: continuations kept");
+  // The second slice rewrites a word of the function (an addi constant).
+  const at = LONG + 4 * 40;
+  const before = read32(at);
+  let slices = 0;
+  const slice = async () => {
+    if (++slices === 2) core.load(at, Uint8Array.of(before >>> 24, (before >>> 16) & 0xff, (before >>> 8) & 0xff, ((before & 0xff) ^ 1)));
+  };
+  try {
+    const r = await translateWithContinuations(core.module, { entry: LONG, ranges, hash }, { ...options, slice });
+    assert.equal(r.codeChanged, true);
+    assert.equal(r.continuations?.length ?? 0, 1, "only the continuation translated before the rewrite");
+    assert.ok(!r.resume, "no resume: the function grows no more");
+  } finally {
+    core.load(at, Uint8Array.of(before >>> 24, (before >>> 16) & 0xff, (before >>> 8) & 0xff, before & 0xff));
+  }
+});
+

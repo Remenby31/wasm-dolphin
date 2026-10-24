@@ -29,6 +29,7 @@
 // time since the start of this run.
 import { AotOptimizer } from "./aot-optimizer.js";
 import { createAotRegionLoader } from "./aot-region-loader.js";
+import { regionHash } from "./aot-plan.js";
 import { REGION_HEAP_NAMES, regionModuleEntries, regionModuleLayout } from "./aot-region-module.js";
 
 export const AOT_FIRST_LAUNCH_PARAM = "aot";
@@ -457,6 +458,16 @@ export async function translateWithContinuations(m, f, { mask, maxBlocks, names,
   let freeBlocks = Math.max(0, REGION_UNCUT_BLOCKS - first.fragment.entries.length);
   let fnBytes = REGION_CONTINUATION_MAX_BYTES; // the function's own cap, over every grow
   let oversize = 0;
+  // Continuations are translated over carved ranges, which the core cannot
+  // check against the plan's hash (it covers the whole ranges): the code is
+  // hashed here after each one, as the core hashed it for the first. Code
+  // rewritten meanwhile (an overlay or a REL during a slice) refuses the
+  // fragment and stops the function's growth; back by install time, it
+  // would pass the install's check and be stored under the plan's key, then
+  // run in every later session (review of #205).
+  const read32 = guestRead32(m);
+  let codeChanged = false;
+  const codeMatchesPlan = () => !f.hash || !read32 || regionHash(read32, f.ranges) === f.hash;
   // `elsewhere`: entries another member of the module already holds (a
   // continuation started there would be dropped at assembly, its bytes
   // charged for nothing).
@@ -472,7 +483,7 @@ export async function translateWithContinuations(m, f, { mask, maxBlocks, names,
     const added = [];
     for (;;) {
       const waiting = next_(elsewhere);
-      if (!waiting.length) break;
+      if (!waiting.length || codeChanged) break;
       if (continuations.length >= maxContinuations || bytes <= 0) {
         refused = waiting.length; // left as exits for lack of budget
         break;
@@ -494,6 +505,10 @@ export async function translateWithContinuations(m, f, { mask, maxBlocks, names,
         next = translateOne(m, carved, { mask, maxBlocks: blocks, names });
       }
       if (!next.fragment) continue;
+      if (!codeMatchesPlan()) {
+        codeChanged = true;
+        break;
+      }
       if (next.fragment.code.length > maxFragmentBytes) { oversize += 1; continue; } // one block alone: left an exit
       // The share of this fragment within the old single fragment's blocks is free.
       const n = next.fragment.entries.length;
@@ -512,11 +527,12 @@ export async function translateWithContinuations(m, f, { mask, maxBlocks, names,
       charged += cost;
     }
     fnBytes -= charged;
-    return { added, charged, refused, exhausted: refused > 0 && (continuations.length >= maxContinuations || fnBytes <= 0) };
+    return { added, charged, refused, exhausted: codeChanged || (refused > 0 && (continuations.length >= maxContinuations || fnBytes <= 0)) };
   };
   const { charged, refused, exhausted } = await grow(maxBytes);
   return {
     ...first, ...(continuations.length ? { continuations: [...continuations], budgetCharged: charged } : {}), ...(oversize ? { oversize } : {}),
+    ...(codeChanged ? { codeChanged } : {}),
     ...(refused ? { budgetRefused: refused } : {}),
     ...(refused && !exhausted ? {
       // The module's leftover budget, once its other functions took their
@@ -530,6 +546,14 @@ export async function translateWithContinuations(m, f, { mask, maxBlocks, names,
       }
     } : {})
   };
+}
+
+// A reader of guest words (big-endian, the RAM through its heap base), or
+// null with a core that does not say where its RAM is.
+function guestRead32(m) {
+  if (typeof m?._DolphinWeb_AotRegionHeapBases !== "function") return null;
+  const ram = coreHeapBases(m)[0];
+  return (a) => new DataView(m.HEAPU8.buffer).getUint32(ram + (a & 0x01ffffff), false);
 }
 
 // `ranges` (sorted [start, end)) without the word at each of `starts`.
@@ -605,7 +629,10 @@ export function frontier(branches, owned) {
   }
   // The return point of a call made from held code (a bctrl's next word is
   // no branch target: before continuations stopped at held blocks, one
-  // translated through the call and held it).
+  // translated through the call and held it). Discovery has no noreturn
+  // knowledge either: the word after a call is inside the plan's ranges, so
+  // under its hash; were it data, an invalid op ends or refuses the
+  // fragment, and nothing enters it unless a PC really goes there.
   for (const c of branches.calls ?? []) {
     const pc = (c + 4) >>> 0;
     if (owned.has(pc) || out.has(pc)) continue;
