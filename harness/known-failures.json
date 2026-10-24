@@ -20,21 +20,30 @@
     "since": "2026-10-19"
   },
   {
-    "cell": "dstalpha/wgpu-nodualsrc",
+    "cell": "dstalpha-zinit/wgpu-interp",
     "check": "render",
     "mode": "expected-fail",
     "detail": "^different$",
-    "reason": "No dual-source blending (Safari 26 WebGPU): Dolphin's no_dual_src path blends with the constant destination alpha instead of the TEV alpha (upstream ShaderCache: no emulation without dual source or framebuffer fetch). homebrew/dstalpha shows it; the fix is a two-pass draw in the WebGPU backend.",
-    "until": "two-pass dst-alpha draw in the WebGPU backend",
-    "since": "2026-10-23"
+    "reason": "WebGPU EFB depth never cleared: native Dolphin clears depth on an EFB copy only while depth updates are on (BPStructs.cpp:389, z_enable = bpmem.zmode.update_enable) and starts the EFB at GX depth 0 (FramebufferManager.cpp:291-294), so LEQUAL rejects the depth-tested rows (columns only, as the software renderer). wgpu's never-cleared depth behaves as far and draws them.",
+    "until": "WebGPU EFB depth clear (initial value, z_enable on copy)",
+    "since": "2026-10-24"
   },
   {
-    "cell": "dstalpha/wgpu-safari26",
+    "cell": "dstalpha-zinit/wgpu-nodualsrc",
     "check": "render",
     "mode": "expected-fail",
     "detail": "^different$",
-    "reason": "No dual-source blending (Safari 26 WebGPU): Dolphin's no_dual_src path blends with the constant destination alpha instead of the TEV alpha (upstream ShaderCache: no emulation without dual source or framebuffer fetch). homebrew/dstalpha shows it; the fix is a two-pass draw in the WebGPU backend.",
-    "until": "two-pass dst-alpha draw in the WebGPU backend",
-    "since": "2026-10-23"
+    "reason": "WebGPU EFB depth never cleared: native Dolphin clears depth on an EFB copy only while depth updates are on (BPStructs.cpp:389, z_enable = bpmem.zmode.update_enable) and starts the EFB at GX depth 0 (FramebufferManager.cpp:291-294), so LEQUAL rejects the depth-tested rows (columns only, as the software renderer). wgpu's never-cleared depth behaves as far and draws them.",
+    "until": "WebGPU EFB depth clear (initial value, z_enable on copy)",
+    "since": "2026-10-24"
+  },
+  {
+    "cell": "dstalpha-zinit/wgpu-safari26",
+    "check": "render",
+    "mode": "expected-fail",
+    "detail": "^different$",
+    "reason": "WebGPU EFB depth never cleared: native Dolphin clears depth on an EFB copy only while depth updates are on (BPStructs.cpp:389, z_enable = bpmem.zmode.update_enable) and starts the EFB at GX depth 0 (FramebufferManager.cpp:291-294), so LEQUAL rejects the depth-tested rows (columns only, as the software renderer). wgpu's never-cleared depth behaves as far and draws them.",
+    "until": "WebGPU EFB depth clear (initial value, z_enable on copy)",
+    "since": "2026-10-24"
   }
 ]

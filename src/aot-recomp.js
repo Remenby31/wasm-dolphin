@@ -47,6 +47,22 @@ export async function planDisc(read, { profile = null, hints = null, options = {
   return plan;
 }
 
+// A booted .dol (no disc: no apploader, RELs or hint sheet): the plan of
+// its own code, with the same identity fields as a disc's.
+export async function planDolFile(read, size, { profile = null, options = {} } = {}) {
+  const dol = await read(0, size);
+  const { image, entryPoint } = imageFromDol(dol);
+  const plan = planDol({ image, entryPoint, gameId: null, dolBytes: dol, profile, options });
+  plan.identity = {
+    dolHash: fnv1a64Hex(dol),
+    apploaderHash: null,
+    rels: [],
+    profileHash: profile ? fnv1a64Hex(encodeProfile(profile)) : null,
+    hintsHash: null
+  };
+  return plan;
+}
+
 // The apploader is plain code at a fixed address: a second absolute module.
 export function planApploader({ address, entry, bytes }, options = {}) {
   const image = new GuestImage([{ start: address, bytes, exec: true, name: "apploader" }]);

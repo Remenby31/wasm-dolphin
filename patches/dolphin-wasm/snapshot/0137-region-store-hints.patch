@@ -22,16 +22,3 @@ diff --git a/Source/Core/Core/PowerPC/CachedInterpreter/CachedInterpreter.cpp b/
      body.push_back(0x04);
      body.push_back(0x40);
      EmitDirectStfsToGatherPipe(body, layout, inst);
-@@ -17058,8 +17065,10 @@ namespace
- // rotates (11-15 are taken by 0112-0119). 21 (0129): fused relaxed_madd mode
- // (18 retired, 19 and 20 are 0127's and 0128's). 23 (0131): region modules
- // carry wasm branch hints (22 is 0130's). 25 (0133): a fragment's head finds
--// the block by br_table (24 is 0132's).
--constexpr u32 AOT_COMPILER_VERSION = 25;
-+// the block by br_table (24 is 0132's). 28 (0137): stfs hints its locked-L1
-+// arm unlikely and its gather-pipe arm likely (26 and 27 are 0134's, retired,
-+// and 0135's).
-+constexpr u32 AOT_COMPILER_VERSION = 28;
- constexpr u32 AOT_MAX_FRAGMENT_BYTES = 1u << 20;
- thread_local std::vector<u32> t_aot_out;
- u8* s_aot_ram = nullptr;

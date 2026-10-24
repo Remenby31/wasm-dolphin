@@ -23,7 +23,7 @@ import {
   compileFailureReason,
   createAotCompilerClient
 } from "./aot-compiler-worker.js";
-import { migrateLegacyJitIdb, openAotBlockStore, openAotCache, readDiscKeyFromFile } from "./aot-cache.js";
+import { migrateLegacyJitIdb, openAotBlockStore, openAotCache, readDiscKeyFromFile, readDolKeyFromFile } from "./aot-cache.js";
 import {
   JIT_CACHE_ENTRY_KEY_SCHEMA,
   canonicalCoreFingerprint,
@@ -331,11 +331,42 @@ function harnessHeapLayout(m) {
   return out;
 }
 
-function harnessJitRegionStats({ sampleEvery } = {}) {
+// Harness only: what this worker handed the core, per region module (key,
+// its entries, when, and whether it was queued or why not), to tell a
+// formation the translator produced from one the core runs (a scan says a
+// PC is held, the browser exits to it with no region). Kept only while the
+// harness hooks are on; reset per mount.
+const aotRegionLedger = new Map();
+function noteAotRegionLedger(key, entries, outcome) {
+  if (!harnessEnabled || !key) return;
+  aotRegionLedger.set(key, { entries: Uint32Array.from(entries ?? [], (pc) => pc >>> 0), outcome, ms: Math.round(performance.now()) });
+}
+// pcs: the modules holding each among their entries (queued or not), with
+// the outcome and when; mappedRegions: the core's own count of mapped entries.
+function harnessRegionLedger(pcs) {
+  const outcomes = {};
+  let entries = 0;
+  for (const r of aotRegionLedger.values()) {
+    outcomes[r.outcome] = (outcomes[r.outcome] ?? 0) + 1;
+    if (r.outcome === "queued") entries += r.entries.length;
+  }
+  const at = (Array.isArray(pcs) ? pcs : []).slice(0, 64).map((pc) => {
+    const holders = [];
+    for (const [key, r] of aotRegionLedger) if (r.entries.includes(pc >>> 0)) holders.push({ key, outcome: r.outcome, ms: r.ms });
+    return { pc: pc >>> 0, holders };
+  });
+  const mapped = moduleInstance?._DolphinWeb_JitRegionCount;
+  return { modules: aotRegionLedger.size, outcomes, queuedEntries: entries, mappedRegions: typeof mapped === "function" ? mapped() >>> 0 : null, nowMs: Math.round(performance.now()), pcs: at };
+}
+
+function harnessJitRegionStats({ sampleEvery, pcs } = {}) {
   if (!harnessEnabled) return { error: "harness hooks are off" };
   const stats = moduleInstance?._DolphinWeb_JitRegionStats;
   if (!stats) return { error: "core has no DolphinWeb_JitRegionStats" };
   const ptr = stats(Number.isInteger(sampleEvery) && sampleEvery >= 0 ? sampleEvery : -1) >>> 0;
+  // 0142: the counters of guest calls made by regions as wasm calls start
+  // and stop with the region stats (on while sampling).
+  if (Number.isInteger(sampleEvery)) moduleInstance._DolphinWeb_RegionCallStats?.(sampleEvery >= 0 ? 1 : 0);
   const heap = moduleInstance.HEAPU8;
   if (!ptr || ptr + 8 > heap.length) return { error: `DolphinWeb_JitRegionStats returned ${ptr}` };
   const size = Math.min(new DataView(heap.buffer, ptr, 8).getUint32(4, true), 256);
@@ -352,7 +383,17 @@ function harnessJitRegionStats({ sampleEvery } = {}) {
   // (0084), the bytes of their unpatched compiles, and patched compiles refused.
   return { bytes: copy(), again: copy(), installSamples: harnessRegionInstallSamples(heap), layoutRefused, layoutHash, layout: harnessHeapLayout(moduleInstance),
     heapPatched: aotHeapPatched, heapPatchedBytes: aotHeapPatchedBytes, heapPatchFailed: aotHeapPatchFailed,
-    regionChain: harnessRegionChainStats(heap), regionSleep: harnessRegionSleepStats() };
+    regionChain: harnessRegionChainStats(heap), regionSleep: harnessRegionSleepStats(), ledger: harnessRegionLedger(pcs),
+    regionCalls: harnessRegionCallStats() };
+}
+// Guest calls made by region code as wasm calls (patch 0142): calls, returns
+// elsewhere than the continuation, codes passed up, calls past the depth
+// cap, depth reached. Null with an older core.
+function harnessRegionCallStats() {
+  const f = moduleInstance?._DolphinWeb_RegionCallStats;
+  if (!f) return null;
+  const [calls, , elsewhere, passedUp, capped, depthMax] = new Uint32Array(moduleInstance.HEAPU8.buffer, f(-1) >>> 0, 6);
+  return { calls, elsewhere, passedUp, capped, depthMax };
 }
 // Installs in the CPU thread's throttle sleeps (patch 0107): how many, their
 // host time, the worst lateness past a sleep's deadline they caused (the
@@ -1532,6 +1573,7 @@ async function handleMessage(type, payload) {
         jitOffThread: payload.jitOffThread,
         aotCompiler: payload.aotCompiler,
         aotFirstLaunch: payload.aotFirstLaunch,
+        aotSampleMs: payload.aotSampleMs,
         regionChain: payload.regionChain,
         fusedMadd: payload.fusedMadd,
         reportedCoreSelection: payload.coreSelection,
@@ -2204,6 +2246,7 @@ async function loadCore({
   jitOffThread = true,
   aotCompiler = true,
   aotFirstLaunch = false,
+  aotSampleMs = AOT_PROFILE_SAMPLE_MS,
   regionChain = true,
   fusedMadd = true,
   reportedCoreSelection = null,
@@ -2630,6 +2673,7 @@ async function loadCore({
   dolphinJitCachePersistenceEnabled = !noJitCache;
   dolphinAotCompilerEnabled = aotCompiler !== false;
   aotFirstLaunchEnabled = aotFirstLaunch === true;
+  aotProfileSampleMs = Number.isInteger(aotSampleMs) && aotSampleMs >= 0 ? aotSampleMs : AOT_PROFILE_SAMPLE_MS;
   dolphinJitBootLoadComplete = false;
   dolphinJitBootLoadedEntries = 0;
   coreBuildFingerprint = String(buildFingerprint ?? "");
@@ -3870,12 +3914,14 @@ async function mountFile(file) {
   // The previous disc's flow never sees this disc's first image (review of #86).
   for (const resolve of aotFirstImageWaiters.splice(0)) resolve(false);
   aotLayoutSkipped = 0;
+  aotRegionLedger.clear();
   aotHeapPatched = 0;
   aotHeapPatchedBytes = 0;
   aotHeapPatchFailed = 0;
   aotDiscKey = null;
   aotDiscKeyPromise = null;
   aotDiscFile = file;
+  aotDiscKind = "disc";
   console.log(`[boot-phase] fs.mount(WORKERFS) took ${(performance.now() - _t_workerfs).toFixed(1)}ms (${(file.size / 1048576).toFixed(1)}MiB image)`);
 
   // A .dol/.elf/.dff is no disc: DiscIO cannot open it, and BootDisc's
@@ -3912,9 +3958,13 @@ async function mountFile(file) {
   presentedFrame = 0;
 
   // P7 (?aot=1): the regions cached for this disc are installed before the
-  // boot; the optimisation of the rest starts once the boot is accepted.
-  if (aotFirstLaunchEnabled && bootKind === "disc" && api.bootDisc && file.size >= MIN_FULL_BOOT_BYTES) {
-    await prepareAotFirstLaunch(file);
+  // boot; the optimisation of the rest starts once the boot is accepted. A
+  // booted .dol too (a homebrew, the CI bench's workloads): its own key
+  // namespace (dol-sha256-v1, the file's SHA-256) and plan (the .dol alone).
+  const aotKind = aotBootKind(bootKind, file.size);
+  if (aotFirstLaunchEnabled && aotKind && api.bootDisc) {
+    aotDiscKind = aotKind;
+    await prepareAotFirstLaunch(file, { kind: aotKind });
   }
   if (aotTestHeapShiftBytes && !aotTestHeapPad && moduleInstance?._malloc) {
     aotTestHeapPad = moduleInstance._malloc(aotTestHeapShiftBytes); // kept for the session
@@ -7283,10 +7333,17 @@ let aotDiscKey = null;
 let aotDiscGeneration = 0;
 let aotDiscKeyPromise = null;
 let aotDiscFile = null;
+let aotDiscKind = "disc"; // "dol": a booted .dol, keyed by readDolKeyFromFile
+// Which boots get ?aot=1: a disc as before (a full boot image), and a .dol;
+// nothing else (.elf, .dff, a disc too small to boot).
+export function aotBootKind(bootKind, size) {
+  if (bootKind === "disc") return size >= MIN_FULL_BOOT_BYTES ? "disc" : null;
+  return bootKind === "dol" ? "dol" : null;
+}
 function readMountedDiscKey() {
   if (!aotDiscKeyPromise) {
     const generation = aotDiscGeneration;
-    aotDiscKeyPromise = readDiscKeyFromFile(aotDiscFile).then(
+    aotDiscKeyPromise = (aotDiscKind === "dol" ? readDolKeyFromFile : readDiscKeyFromFile)(aotDiscFile).then(
       (key) => (generation === aotDiscGeneration ? (aotDiscKey = key) : null),
       () => null
     );
@@ -7366,6 +7423,19 @@ let aotFirstLaunchEnabled = false;
 let aotFirstLaunch = null;
 const AOT_PROGRESS_SCHEMA = "wasm-dolphin.aot-progress.v1";
 const DOLPHIN_AOT_BOOT_BYTES = 192 << 20; // region modules retained before boot, at most
+// Test seams: the mounted file's key state as a mount sets it (the key then
+// read by readMountedDiscKey, by kind), and the plan worker's factory.
+export function setAotMountedFileForTest(file, kind = "disc") {
+  aotDiscGeneration += 1;
+  aotDiscKey = null;
+  aotDiscKeyPromise = null;
+  aotDiscFile = file;
+  aotDiscKind = kind;
+}
+let aotPlannerWorkerForTest = null;
+export function setAotPlannerWorkerForTest(createWorker) {
+  aotPlannerWorkerForTest = createWorker ?? null;
+}
 export function setAotFirstLaunchEnabledForTest(enabled) {
   aotFirstLaunchEnabled = enabled === true;
   aotFirstLaunch?.dispose();
@@ -7415,6 +7485,7 @@ function unsupportedAotFlow() {
 // Test seams: `module` stands for the core, `readDiscKey` for the disc key of
 // the mounted file, `cacheStorage` for the browser's.
 export async function prepareAotFirstLaunch(file, {
+  kind = "disc", // "dol": a booted .dol (planDolFile)
   module = moduleInstance,
   readDiscKey = readMountedDiscKey,
   coreHash = aotCoreFingerprint,
@@ -7431,7 +7502,7 @@ export async function prepareAotFirstLaunch(file, {
     return;
   }
   const generation = aotDiscGeneration;
-  const [{ coreAotKeyParts, coreAssembleOptions, coreRegionTranslator, createAotFirstLaunch }, { OpfsPlanStore }, { AotProfileStore, blocksFromPcSamples, profileKey }, { planDiscInWorker }, { fileReader, planDisc }, { createProfileRecorder, guestPcAddress, startHotSampler }] =
+  const [{ coreAotKeyParts, coreAssembleOptions, coreRegionTranslator, createAotFirstLaunch }, { OpfsPlanStore }, { AotProfileStore, blocksFromPcSamples, profileKey }, { planDiscInWorker }, { fileReader, planDisc, planDolFile }, { createProfileRecorder, guestPcAddress, startHotSampler }] =
     await Promise.all([import("./aot-orchestrator.js"), import("./aot-optimizer.js"), import("./aot-profile.js"), import("./aot-plan-worker.js"), import("./aot-recomp.js"), import("./aot-hot-sampler.js")]);
   const discKey = await readDiscKey();
   if (generation !== aotDiscGeneration) return;
@@ -7455,7 +7526,9 @@ export async function prepareAotFirstLaunch(file, {
     buildPlan: async () => {
       const profile = opfs ? await new AotProfileStore(opfs).load(profileKey(discKey)).catch((error) => noteAotProfileReadFailure(error)) : null;
       aotPlanProfileForTest = profile;
-      return typeof Worker === "function" ? planDiscInWorker(file, { profile }) : planDisc(fileReader(file), { profile });
+      if (aotPlannerWorkerForTest) return planDiscInWorker(file, { profile, kind, createWorker: aotPlannerWorkerForTest });
+      if (typeof Worker === "function") return planDiscInWorker(file, { profile, kind });
+      return kind === "dol" ? planDolFile(fileReader(file), file.size, { profile }) : planDisc(fileReader(file), { profile });
     },
     compile: precompileAotRegion,
     // Queued once the module is also kept under its bytes' key: the CPU
@@ -7552,8 +7625,9 @@ export function startAotFirstLaunchAfterBoot(flow = aotFirstLaunch) {
     // own reading the guest PC, nothing on the CPU thread).
     aotHotSampler?.stop();
     aotHotSampler = aotProfileTarget?.flow === flow
-      ? aotProfileTarget.startHotSampler({ buffer: moduleInstance?.HEAPU8?.buffer, pcAddress: aotProfileTarget.guestPcAddress(moduleInstance), periodMs: AOT_PROFILE_SAMPLE_MS })
+      ? aotProfileTarget.startHotSampler({ buffer: moduleInstance?.HEAPU8?.buffer, pcAddress: aotProfileTarget.guestPcAddress(moduleInstance), periodMs: aotProfileSampleMs })
       : null;
+    if (!aotHotSampler && aotProfileSampleMs === 0) postStatus("aot: local profile sampler off (?aotsample=0)");
     startAotProfileRecorder(flow, aotHotSampler);
     return flow.loadRest();
   }).catch(() => {}).then(() => {
@@ -7591,6 +7665,7 @@ export const recordAotProfileForTest = (samples) => aotProfileTarget?.record(sam
 export const aotPlanProfileReadForTest = () => aotPlanProfileForTest;
 let aotProfileTimer = null;
 const AOT_PROFILE_SAMPLE_MS = 10; // one guest PC per 10 ms: enough for block weights
+let aotProfileSampleMs = AOT_PROFILE_SAMPLE_MS; // ?aotsample=N (core-host), 0: no sampler
 const AOT_PROFILE_RECORD_MS = 60000;
 // Every minute, and when the tab hides or closes (flushUserData), the
 // emulation pauses or stops, or another disc is mounted, what the sampler
@@ -7664,12 +7739,16 @@ async function queueAotRegion(module, region, flow = aotFirstLaunch) {
 // The part of queueAotRegion that may run alongside other modules' (heap
 // patch, compile of the patched bytes): what to queue, or null.
 async function prepareAotRegion(module, { key, bytes, entries, members, layout = 0 }, flow = aotFirstLaunch) {
-  if (typeof module?._DolphinWeb_AotQueueRegion !== "function" || !bytes?.length || !entries?.length || !members?.length) return null;
+  if (typeof module?._DolphinWeb_AotQueueRegion !== "function" || !bytes?.length || !entries?.length || !members?.length) {
+    noteAotRegionLedger(key, entries, "empty");
+    return null;
+  }
   // Translated for another heap layout: the core would refuse it; not even
   // copied into its heap (counted). Translated again from guest memory, its
   // cache entry overwritten (the new module comes back through install).
   if (typeof module._DolphinWeb_AotLayoutHash === "function" && (layout >>> 0) !== (module._DolphinWeb_AotLayoutHash() >>> 0)) {
     aotLayoutSkipped += 1;
+    noteAotRegionLedger(key, entries, "layout");
     if (key) flow?.retranslate?.(key);
     return null;
   }
@@ -7692,6 +7771,7 @@ async function prepareAotRegion(module, { key, bytes, entries, members, layout =
       heap = regionHeapOfBytes(patched);
     } catch {
       aotLayoutSkipped += 1; // a malformed section or a site that does not hold its base: never queued
+      noteAotRegionLedger(key, entries, "heap-section");
       return null;
     }
     if (patched !== bytes) {
@@ -7703,6 +7783,7 @@ async function prepareAotRegion(module, { key, bytes, entries, members, layout =
       const compiled = await precompileAotRegion(patchedKey, patched);
       if (!compiled.module) {
         aotHeapPatchFailed += 1;
+        noteAotRegionLedger(key, entries, "heap-patch-compile");
         return null;
       }
       bytes = patched;
@@ -7710,11 +7791,12 @@ async function prepareAotRegion(module, { key, bytes, entries, members, layout =
     if (generation !== aotDiscGeneration) return null; // another disc meanwhile
     if (heap) heapBases = [heap.ramBase, heap.l1Base];
   }
-  return { generation: aotDiscGeneration, bytes, entries, members, layout, heapBases };
+  return { key, generation: aotDiscGeneration, bytes, entries, members, layout, heapBases };
 }
 // Copies a prepared region into the core's heap and queues it (in order).
-function submitAotRegion(module, { generation, bytes, entries, members, layout, heapBases }) {
+function submitAotRegion(module, { key, generation, bytes, entries, members, layout, heapBases }) {
   if (generation !== aotDiscGeneration) return; // another disc since it was prepared
+  noteAotRegionLedger(key, entries, "queued");
   const ranges = members.flatMap((m) => m.ranges);
   const triples = members.flatMap((m) => [m.ranges.length, m.hash ? parseInt(m.hash.slice(8), 16) : 0, m.hash ? parseInt(m.hash.slice(0, 8), 16) : 0]);
   const words = [...entries, ...ranges.flat(), ...triples].map((v) => v >>> 0);
@@ -7732,6 +7814,11 @@ function submitAotRegion(module, { generation, bytes, entries, members, layout, 
   }
 }
 export const queueAotRegionForTest = queueAotRegion;
+export const regionLedgerForTest = (pcs) => harnessRegionLedger(pcs);
+export function setHarnessEnabledForTest(on) {
+  harnessEnabled = on === true;
+  if (!harnessEnabled) aotRegionLedger.clear();
+}
 // A region module of the first launch: compiled off the CPU thread when the
 // compiler worker is on (?aotcompiler=1), kept alive under its key.
 async function precompileAotRegion(key, bytes) {

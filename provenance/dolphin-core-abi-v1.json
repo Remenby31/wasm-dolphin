@@ -1,19 +1,19 @@
 {
   "schemaVersion": 1,
   "abiVersion": 1,
-  "coreId": "sha256:3cdf28ed55cb72d14f273fe49b075b4a56612e6cb27843dcfa4c899de190469a",
+  "coreId": "sha256:f6be5539c6427495a6b2a452227d5edace5cdb6592ecf890e2cab066b89e46e6",
   "upstreamCommit": "e22551eae1c84a7e4d0b6a5c519ef4ed4ef69df1",
   "artifacts": [
     {
       "path": "cores/dolphin/dolphin-core-upstream.js",
       "hashMode": "lf-normalized",
-      "size": 283026,
-      "sha256": "1c9f71a200290815707ad980824ccd87662105de148187f132ce6c66064dc71f"
+      "size": 283271,
+      "sha256": "4c33fc68da259d55d54d8689ee5d609f60d2cc7585f504d008f8e3dc926e4c81"
     },
     {
       "path": "cores/dolphin/dolphin-core-upstream.wasm",
-      "size": 13171275,
-      "sha256": "3cdf28ed55cb72d14f273fe49b075b4a56612e6cb27843dcfa4c899de190469a"
+      "size": 13187401,
+      "sha256": "f6be5539c6427495a6b2a452227d5edace5cdb6592ecf890e2cab066b89e46e6"
     }
   ],
   "contractSources": [
@@ -86,8 +86,8 @@
     {
       "path": "src/core-host.js",
       "hashMode": "lf-normalized",
-      "size": 75248,
-      "sha256": "da9ab46f1036ef2296a11e9b3fe7d1d2e2aa4f3f8f206656d7605893b1242ecd"
+      "size": 75510,
+      "sha256": "657ed7659bb5f3d0b9be127edd7e82e94084f301a00afd83a3df969cb7940618"
     },
     {
       "path": "src/diagnostic-log-filter.js",
@@ -140,8 +140,8 @@
     {
       "path": "src/upstream-discio-worker.js",
       "hashMode": "lf-normalized",
-      "size": 726698,
-      "sha256": "96d0c55668029f4ebc04f0fff17e9feef04c082c7e07e1ef79245028f1f17f3c"
+      "size": 731406,
+      "sha256": "a6e3627c64b0e8d00ad8b8cec325b0c0117061b348e5329d1107764e76fc47c5"
     },
     {
       "path": "src/wgpu-renderer-worker-probe.js",
@@ -296,8 +296,8 @@
     {
       "path": "src/jit-cache-identity.js",
       "hashMode": "lf-normalized",
-      "size": 6647,
-      "sha256": "33a9c3d95ea53e227b4eac141b38cd60c7720a6e3dbc98da1d1e8222d4dcce6b"
+      "size": 7018,
+      "sha256": "e5fc6426011c3b897a2c002688365df1fab19ea32080257ba7fd581905a37ec1"
     },
     {
       "path": "src/wgpu-ubo-compute-projection.js",
@@ -470,6 +470,8 @@
     "_DolphinWeb_RecordInstanceUs",
     "_DolphinWeb_RecordModuleUs",
     "_DolphinWeb_RecordWasmCompileError",
+    "_DolphinWeb_RegionCallDepthForTest",
+    "_DolphinWeb_RegionCallStats",
     "_DolphinWeb_RegionChainHelper",
     "_DolphinWeb_RegionGuardRefusals",
     "_DolphinWeb_SetFprfForTest",
