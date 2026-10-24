@@ -84,6 +84,18 @@ test("the constructed lanes tie where they should", () => {
   assert.equal(classify(NOT_TIE), "no tie");
 });
 
+test("the fp helper counter moves when a lane leaves the fast path (a NaN), so the counts below mean something", { skip }, () => {
+  const previous = core.setFusedMadd(true);
+  try {
+    const before = core.fpHelperCalls();
+    const { result } = runForm(29, null, [NaN, 1, 1], NOT_TIE);
+    assertSame(result, "NaN lane");
+    assert.ok(result.compiledOps >= 2 && core.fpHelperCalls() - before >= 1, `${core.fpHelperCalls() - before} fp helper calls`);
+  } finally {
+    core.setFusedMadd(previous);
+  }
+});
+
 test("paired FMA single ties: bit-exact with the interpreter, inline (no fp helper) except at the overflow bound", { skip }, () => {
   const previous = core.setFusedMadd(true);
   try {
@@ -105,7 +117,7 @@ test("paired FMA single ties: bit-exact with the interpreter, inline (no fp help
         const { result } = runForm(xo, cLane, over, forForm(bSign, NOT_TIE));
         assertSame(result, `${name} overflow-bound tie`);
         const calls = core.fpHelperCalls() - before;
-        if (process.env.TIE_DEBUG) assert.ok(result.compiledOps >= 2 && calls >= 1, `${name}: the overflow-bound tie goes to the interpreter (code ${result.code}, ${result.compiledOps} ops compiled, ${calls} fp helper calls)`);
+        assert.ok(result.compiledOps >= 2 && calls >= 1, `${name}: the overflow-bound tie goes to the interpreter (code ${result.code}, ${result.compiledOps} ops compiled, ${calls} fp helper calls)`);
       }
     }
   } finally {

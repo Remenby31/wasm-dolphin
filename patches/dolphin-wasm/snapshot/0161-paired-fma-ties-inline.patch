@@ -79,7 +79,22 @@ diff --git a/Source/Core/Core/PowerPC/CachedInterpreter/CachedInterpreter.cpp b/
    // ForceSingle both lanes, then nmadd/nmsub negate the rounded result.
    EmitLocalGet(body, 0);
    get(vr);
-@@ -17839,8 +17860,9 @@ namespace
+@@ -15755,6 +15776,14 @@ extern "C" const char* GetPpcProfileStats()
+   return stats.c_str();
+ }
+ 
++// Patch 0161: the fp helper's calls, live (the stats line above refreshes
++// every STATS_REFRESH_BLOCK_RUNS block runs): tests count what reaches the
++// interpreter.
++extern "C" EMSCRIPTEN_KEEPALIVE u32 DolphinWeb_FpHelperCallsForTest()
++{
++  return s_wasm_fp_call_count;
++}
++
+ extern "C" const char* GetPpcWasmHelperStats()
+ {
+ #if DOLPHIN_WEB_STATIC_EXIT_LINKS && DOLPHIN_WEB_STATIC_EXIT_LINK_STATS
+@@ -17839,8 +17868,9 @@ namespace
  // wasm returns (was 0139). 32 (0143): ps_add/sub/mul/muls0/1 in f64x2.
  // 34 (0146): the 0141/0143 paths in fewer bytes (splatted constants, one
  // helper call per op); 33 is retired (0144, closed). 35 (0147): psq_l and

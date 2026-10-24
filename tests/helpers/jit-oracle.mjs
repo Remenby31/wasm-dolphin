@@ -46,9 +46,9 @@ export async function loadOracleCore(coreDir = new URL("../../cores/dolphin/", i
     setFprf: (on) => module._DolphinWeb_SetFprfForTest(on ? 1 : 0),
     // Patch 0129: the FMA emitter's relaxed_madd mode (returns the previous one).
     setFusedMadd: (on) => module._DolphinWeb_SetFusedMadd(on ? 1 : 0),
-    // The core's helper counters (GetPpcWasmHelperStats): imports fp:N counts
-    // calls of the fp helper, the interpreter fallback of FPU ops.
-    fpHelperCalls: () => Number(/\bfp:(\d+)/.exec(module.UTF8ToString(module._GetPpcWasmHelperStats()))?.[1] ?? NaN),
+    // Patch 0161: calls of the fp helper so far, the interpreter fallback of
+    // FPU ops (DolphinWeb_FpHelperCallsForTest, live).
+    fpHelperCalls: () => module._DolphinWeb_FpHelperCallsForTest() >>> 0,
     // Region modules (P4): pc, npc and downcount offsets in PowerPCState, version.
     stateLayout() {
       const ptr = module._malloc(16);
