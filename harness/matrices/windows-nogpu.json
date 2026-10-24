@@ -10,8 +10,8 @@
     { "id": "ramcopy", "iso": "harness/homebrew/out/ramcopy.iso", "static": true, "set": { "efbcopyram": "1", "cpu": "single" } }
   ],
   "configs": [
-    { "id": "sw-product", "preset": "sw-interp" },
-    { "id": "sw-2d", "preset": "sw-interp", "set": { "presenter": "2d" } }
+    { "id": "sw-product", "preset": "rec" },
+    { "id": "sw-2d", "preset": "rec", "set": { "presenter": "2d" } }
   ],
   "reference": "sw-product"
 }

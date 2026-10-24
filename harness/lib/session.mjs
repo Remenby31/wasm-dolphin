@@ -11,7 +11,7 @@ import { encodePng } from "./png.mjs";
 import { checkCore, recordCoreFetches } from "./core-identity.mjs";
 import { withDeterministicClock } from "./matrix.mjs";
 import { OWNER_FILE, claim } from "./ownership.mjs";
-import { machineSnapshot, sampleChromeCpu } from "./system.mjs";
+import { cdpCpuSampler, machineSnapshot, sampleChromeCpu } from "./system.mjs";
 
 // Profiles of the sessions still open in this process. A process that ends
 // without closing them (a signal handler calling process.exit, Ctrl-C, an SSH
@@ -145,10 +145,13 @@ export async function sample(session, { seconds, shotEvery = 0, shotPrefix = nul
   const samples = [];
   const cpu = [];
   const shots = [];
+  // Windows has no ps: per-process CPU time through CDP instead.
+  const cdpCpu = process.platform === "win32" ? await cdpCpuSampler(session.context).catch(() => null) : null;
+  if (cdpCpu) await cdpCpu();
   for (let i = 0; i < seconds; i += 1) {
     await session.page.waitForTimeout(1000);
     samples.push(await readFrameInfo(session.page));
-    cpu.push(sampleChromeCpu(session.profileDir));
+    cpu.push(cdpCpu ? await cdpCpu() : sampleChromeCpu(session.profileDir));
     if (shotEvery && shotPrefix && (i + 1) % shotEvery === 0) {
       shots.push(savePng(await grabFrame(session.page), `${shotPrefix}-t${String(i + 1).padStart(3, "0")}.png`));
     }
