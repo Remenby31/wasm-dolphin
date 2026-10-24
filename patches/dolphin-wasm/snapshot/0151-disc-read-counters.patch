@@ -1,0 +1,101 @@
+diff --git a/Source/Core/Core/HW/DVD/DVDThread.cpp b/Source/Core/Core/HW/DVD/DVDThread.cpp
+--- a/Source/Core/Core/HW/DVD/DVDThread.cpp
++++ b/Source/Core/Core/HW/DVD/DVDThread.cpp
+@@ -20,7 +20,55 @@
+ #include "Core/Core.h"
+ #include "Core/CoreTiming.h"
+ #ifdef __EMSCRIPTEN__
++#include <algorithm>
++#include <atomic>
++#include <emscripten/emscripten.h>
+ #include "Core/WasmTimingProfile.h"
++
++// Patch 0151: the disc's reads, as the emulation sees them. The disc is a
++// WORKERFS mount on the worker that also drains the WebGPU ring: a read on
++// the DVD thread waits there between two drains. read_us is the whole read
++// on the DVD thread (that wait included; the worker's own service time is
++// counted on its side), finish_wait_us the CPU thread waiting for a result
++// (the emulation stalled). Cumulative; DolphinWeb_DiscReadStats.
++namespace
++{
++std::atomic<u32> s_disc_reads{0};
++std::atomic<u64> s_disc_read_bytes{0};
++std::atomic<u64> s_disc_read_us{0};
++std::atomic<u32> s_disc_read_max_us{0};
++std::atomic<u32> s_disc_finish_waits{0};
++std::atomic<u64> s_disc_finish_wait_us{0};
++std::atomic<u32> s_disc_finish_wait_max_us{0};
++
++void StoreMax(std::atomic<u32>& max, u64 value)
++{
++  const u32 v = static_cast<u32>(std::min<u64>(value, 0xffffffffu));
++  u32 seen = max.load(std::memory_order_relaxed);
++  while (v > seen && !max.compare_exchange_weak(seen, v, std::memory_order_relaxed))
++  {
++  }
++}
++}  // namespace
++
++// out: reads, bytes (lo, hi), read us (lo, hi), read max us, finish waits,
++// finish wait us (lo, hi), finish wait max us.
++extern "C" EMSCRIPTEN_KEEPALIVE void DolphinWeb_DiscReadStats(u32* out)
++{
++  const u64 bytes = s_disc_read_bytes.load(std::memory_order_relaxed);
++  const u64 read_us = s_disc_read_us.load(std::memory_order_relaxed);
++  const u64 wait_us = s_disc_finish_wait_us.load(std::memory_order_relaxed);
++  out[0] = s_disc_reads.load(std::memory_order_relaxed);
++  out[1] = static_cast<u32>(bytes);
++  out[2] = static_cast<u32>(bytes >> 32);
++  out[3] = static_cast<u32>(read_us);
++  out[4] = static_cast<u32>(read_us >> 32);
++  out[5] = s_disc_read_max_us.load(std::memory_order_relaxed);
++  out[6] = s_disc_finish_waits.load(std::memory_order_relaxed);
++  out[7] = static_cast<u32>(wait_us);
++  out[8] = static_cast<u32>(wait_us >> 32);
++  out[9] = s_disc_finish_wait_max_us.load(std::memory_order_relaxed);
++}
+ #endif
+ #include "Core/HW/DVD/DVDInterface.h"
+ #include "Core/HW/DVD/FileMonitor.h"
+@@ -283,9 +331,20 @@
+       const auto wait_started_at = profile_dvd ?
+                                        DolphinWeb::WasmTimingProfile::Clock::now() :
+                                        DolphinWeb::WasmTimingProfile::Clock::time_point{};
++#endif
++#ifdef __EMSCRIPTEN__
++      const u64 finish_wait_started_us = Common::Timer::NowUs();
+ #endif
+       m_result_queue.WaitForData();
+ #ifdef __EMSCRIPTEN__
++      {
++        const u64 waited = Common::Timer::NowUs() - finish_wait_started_us;
++        s_disc_finish_waits.fetch_add(1, std::memory_order_relaxed);
++        s_disc_finish_wait_us.fetch_add(waited, std::memory_order_relaxed);
++        StoreMax(s_disc_finish_wait_max_us, waited);
++      }
++#endif
++#ifdef __EMSCRIPTEN__
+       if (profile_dvd)
+       {
+         DolphinWeb::WasmTimingProfile::RecordDvdWaitUs(DolphinWeb::WasmTimingProfile::ElapsedMicros(
+@@ -384,8 +443,20 @@
+   m_file_logger.Log(*m_disc, request.partition, request.dvd_offset);
+ 
+   std::vector<u8> buffer(request.length);
++#ifdef __EMSCRIPTEN__
++  const u64 read_started_us = Common::Timer::NowUs();
++#endif
+   if (!m_disc->Read(request.dvd_offset, request.length, buffer.data(), request.partition))
+     buffer.resize(0);
++#ifdef __EMSCRIPTEN__
++  {
++    const u64 read_us = Common::Timer::NowUs() - read_started_us;
++    s_disc_reads.fetch_add(1, std::memory_order_relaxed);
++    s_disc_read_bytes.fetch_add(request.length, std::memory_order_relaxed);
++    s_disc_read_us.fetch_add(read_us, std::memory_order_relaxed);
++    StoreMax(s_disc_read_max_us, read_us);
++  }
++#endif
+ 
+   request.realtime_done_us = Common::Timer::NowUs();
+ 

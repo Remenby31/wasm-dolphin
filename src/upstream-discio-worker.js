@@ -1842,6 +1842,8 @@ async function handleMessage(type, payload) {
       return harnessUniqueFramesRequest(payload);
     case "validationPcSampler":
       return harnessPcSampler(payload);
+    case "validationReadDiscReads":
+      return harnessDiscReads();
     case "validationReadRelaxedMadd":
       // coreFused: the core's own mode (null: a core without patch 0129).
       return { mode: relaxedMadd, coreFused: moduleInstance?._DolphinWeb_FusedMadd ? moduleInstance._DolphinWeb_FusedMadd() === 1 : null };
@@ -3077,6 +3079,47 @@ async function loadCore({
   return moduleInstance;
 }
 
+// Patch 0151 (harness): this worker's own time serving the core's disc reads
+// (WORKERFS, FileReaderSync). The DVD thread's read time (core side) minus
+// this is what a read waited for the worker, busy draining the WebGPU ring.
+const discReadService = { reads: 0, bytes: 0, ms: 0, maxMs: 0 };
+function timeDiscReads(workerFs) {
+  const ops = workerFs?.stream_ops;
+  if (!ops?.read || ops.read.timedDiscReads) return;
+  const read = ops.read;
+  ops.read = function timedRead(stream, buffer, offset, length, position) {
+    const startedAt = performance.now();
+    try {
+      return read.call(this, stream, buffer, offset, length, position);
+    } finally {
+      const ms = performance.now() - startedAt;
+      discReadService.reads += 1;
+      discReadService.bytes += length;
+      discReadService.ms += ms;
+      if (ms > discReadService.maxMs) discReadService.maxMs = ms;
+    }
+  };
+  ops.read.timedDiscReads = true;
+}
+
+function harnessDiscReads() {
+  if (!harnessEnabled) return { error: "harness hooks are off" };
+  const stats = moduleInstance?._DolphinWeb_DiscReadStats;
+  let core = null;
+  if (stats && moduleInstance._malloc) {
+    const ptr = moduleInstance._malloc(40);
+    try {
+      stats(ptr);
+      const v = new Uint32Array(moduleInstance.HEAPU8.buffer, ptr, 10);
+      const u64 = (lo, hi) => v[lo] + v[hi] * 2 ** 32;
+      core = { reads: v[0], bytes: u64(1, 2), readUs: u64(3, 4), readMaxUs: v[5], finishWaits: v[6], finishWaitUs: u64(7, 8), finishWaitMaxUs: v[9] };
+    } finally {
+      moduleInstance._free(ptr);
+    }
+  }
+  return { service: { ...discReadService }, core, frame: api?.getFrame?.() ?? null };
+}
+
 // WORKERFS lookup, with a fallback that current Emscripten requires.
 //
 // Emscripten registers a filesystem into FS.filesystems only when its JS
@@ -3948,6 +3991,7 @@ async function mountFile(file) {
   const _t_workerfs = performance.now();
   fs.mount(resolveWorkerFs(moduleInstance), { blobs: [{ name: safeName, data: file }] }, WORKERFS_MOUNT_DIR);
   mounted = true;
+  if (harnessEnabled) timeDiscReads(resolveWorkerFs(moduleInstance));
   // P6: the disc's key for the region cache is read from this File only when
   // a region cache is first opened, never during boot: this worker serves the
   // core's file reads, and extra work here while the core boots shifts what
