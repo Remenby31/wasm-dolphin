@@ -137,7 +137,7 @@ import {
   enableWgpuNonDroppingBackpressure,
   failWgpuRingConsumer
 } from "./wgpu-ring-backpressure.js";
-import { parkWgpuReplay, unparkWgpuReplay } from "./wgpu-replay-park.js";
+import { createWgpuReplayParker } from "./wgpu-replay-park.js";
 import {
   WGPU_UPLOAD_PROBE_SCHEMA,
   createWgpuUploadProbeExecutor
@@ -691,8 +691,6 @@ let wgpuLoadEpochFence = false;
 let wgpuLoadFenceActive = false;
 let wgpuReplayPumpEnabled = false;
 let wgpuReplayPumpTimer = null;
-// Bumped by cancelWgpuReplayPump: a park that wakes after a cancel is stale.
-let wgpuReplayPumpGeneration = 0;
 let wgpuReplayBudgetMs = 0;
 let wgpuPowerPreference = "high-performance";
 let wgpuReplayFatal = null;
@@ -9057,32 +9055,21 @@ function startWgpuReplayPump() {
 
 // Waits for the producer on the write index instead of a 4 ms timer; false
 // when this engine cannot (no Atomics.waitAsync): the caller polls.
+// Waits for the producer on the write index instead of a 4 ms timer (patch
+// 0148); false when this engine cannot (no Atomics.waitAsync): the caller
+// polls. Created lazily: webGpuCausalStats is declared further down.
+let wgpuReplayParker = null;
 function parkWgpuReplayPump(pump, observedWrite) {
-  const ring = webGpuCmdRing;
-  const wait = ring?.headerI32 ? parkWgpuReplay(ring.headerI32, observedWrite, 4) : null;
-  if (!wait) return false;
-  webGpuCausalStats.replayPumpParkCount += 1;
-  if (!wait.async) {
-    // The producer moved between the drain and the park: drain now.
-    webGpuCausalStats.replayPumpParkNotEqualCount += 1;
-    scheduleWgpuReplayPump(pump, 0);
-    return true;
-  }
-  const generation = wgpuReplayPumpGeneration;
-  wgpuReplayPumpTimer = "parked";
-  wgpuReplayPumpDueAt = 0;
-  wait.value.then((outcome) => {
-    if (generation !== wgpuReplayPumpGeneration || ring !== webGpuCmdRing) return;
-    unparkWgpuReplay(ring.headerI32);
-    if (outcome === "ok") webGpuCausalStats.replayPumpParkNotifiedCount += 1;
-    else {
-      webGpuCausalStats.replayPumpParkTimedOutCount += 1;
-      if ((Atomics.load(ring.headerI32, 0) >>> 0) !== (observedWrite >>> 0)) {
-        webGpuCausalStats.replayPumpParkTimedOutWithDataCount += 1;
-      }
-    }
-    pump();
+  wgpuReplayParker ??= createWgpuReplayParker({
+    stats: webGpuCausalStats,
+    schedule: scheduleWgpuReplayPump,
+    isCurrentRing: (ring) => ring === webGpuCmdRing,
   });
+  if (!wgpuReplayParker.park(webGpuCmdRing, observedWrite, pump)) return false;
+  if (wgpuReplayParker.parked) {
+    wgpuReplayPumpTimer = "parked";
+    wgpuReplayPumpDueAt = 0;
+  }
   return true;
 }
 
@@ -9098,10 +9085,8 @@ function scheduleWgpuReplayPump(callback, delayMs) {
 }
 
 function cancelWgpuReplayPump() {
-  if (wgpuReplayPumpTimer === "parked") {
-    if (webGpuCmdRing?.headerI32) unparkWgpuReplay(webGpuCmdRing.headerI32);
-  } else if (wgpuReplayPumpTimer !== null) clearTimeout(wgpuReplayPumpTimer);
-  wgpuReplayPumpGeneration += 1;
+  if (wgpuReplayPumpTimer !== null && wgpuReplayPumpTimer !== "parked") clearTimeout(wgpuReplayPumpTimer);
+  wgpuReplayParker?.cancel(webGpuCmdRing);
   wgpuReplayPumpTimer = null;
   wgpuReplayYieldPending = false;
   wgpuReplayPumpScheduledAt = 0;
