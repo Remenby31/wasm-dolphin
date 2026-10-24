@@ -18,3 +18,24 @@ diff --git a/Source/Core/Core/PowerPC/CachedInterpreter/CachedInterpreter.cpp b/
  // Queues a region module for installation (any thread). bytes: the module
  // (src/aot-region-module.js); entries: its entry PCs; ranges: [start, end)
  // pairs of the guest code it was translated from, member after member;
+diff --git a/Source/Core/Core/PowerPC/JitInterface.cpp b/Source/Core/Core/PowerPC/JitInterface.cpp
+--- a/Source/Core/Core/PowerPC/JitInterface.cpp
++++ b/Source/Core/Core/PowerPC/JitInterface.cpp
+@@ -245,8 +245,17 @@ void JitInterface::ClearCache(const Core::CPUThreadGuard&)
+     m_jit->ClearCache();
+ }
+ 
++#ifdef __EMSCRIPTEN__
++// Patch 0145: CachedInterpreter.cpp. A cache clear with no range re-checks
++// every region before it runs again.
++extern "C" void DolphinWeb_UnverifyRegions();
++#endif
++
+ void JitInterface::ClearSafe()
+ {
++#ifdef __EMSCRIPTEN__
++  DolphinWeb_UnverifyRegions();
++#endif
+   if (m_jit)
+     m_jit->GetBlockCache()->Clear();
+ }
