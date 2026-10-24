@@ -24,6 +24,7 @@ import {
   compileFailureReason,
   createAotCompilerClient
 } from "./aot-compiler-worker.js";
+import { WASM_ENGINES, wasmEngine } from "./wasm-engine.js";
 import { migrateLegacyJitIdb, openAotBlockStore, openAotCache, readDiscKeyFromFile, readDolKeyFromFile } from "./aot-cache.js";
 import {
   JIT_CACHE_ENTRY_KEY_SCHEMA,
@@ -1608,6 +1609,7 @@ async function handleMessage(type, payload) {
         aotCompiler: payload.aotCompiler,
         aotFirstLaunch: payload.aotFirstLaunch,
         aotSampleMs: payload.aotSampleMs,
+        wasmEngine: payload.wasmEngine,
         regionChain: payload.regionChain,
         fusedMadd: payload.fusedMadd,
         reportedCoreSelection: payload.coreSelection,
@@ -2284,6 +2286,7 @@ async function loadCore({
   aotCompiler = true,
   aotFirstLaunch = false,
   aotSampleMs = AOT_PROFILE_SAMPLE_MS,
+  wasmEngine: requestedWasmEngine = null,
   regionChain = true,
   fusedMadd = true,
   reportedCoreSelection = null,
@@ -2722,6 +2725,7 @@ async function loadCore({
   }
   aotFirstLaunchEnabled = aotFirstLaunch === true;
   aotProfileSampleMs = Number.isInteger(aotSampleMs) && aotSampleMs >= 0 ? aotSampleMs : AOT_PROFILE_SAMPLE_MS;
+  wasmEngineName = WASM_ENGINES.includes(requestedWasmEngine) ? requestedWasmEngine : wasmEngine({ search: "" });
   dolphinJitBootLoadComplete = false;
   dolphinJitBootLoadedEntries = 0;
   coreBuildFingerprint = String(buildFingerprint ?? "");
@@ -7721,7 +7725,12 @@ export const recordAotProfileForTest = (samples) => aotProfileTarget?.record(sam
 export const aotPlanProfileReadForTest = () => aotPlanProfileForTest;
 let aotProfileTimer = null;
 const AOT_PROFILE_SAMPLE_MS = 10; // one guest PC per 10 ms: enough for block weights
-let aotProfileSampleMs = AOT_PROFILE_SAMPLE_MS; // ?aotsample=N (core-host), 0: no sampler
+let aotProfileSampleMs = AOT_PROFILE_SAMPLE_MS;
+// The page's wasm engine (core-host, src/wasm-engine.js); without one, this
+// worker's own detection (no ?wasmengine= here: a worker's location is its
+// script's).
+let wasmEngineName = "unknown";
+export const wasmEngineForTest = () => wasmEngineName; // ?aotsample=N (core-host), 0: no sampler
 const AOT_PROFILE_RECORD_MS = 60000;
 // Every minute, and when the tab hides or closes (flushUserData), the
 // emulation pauses or stops, or another disc is mounted, what the sampler
