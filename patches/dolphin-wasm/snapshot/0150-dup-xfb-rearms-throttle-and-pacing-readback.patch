@@ -1,0 +1,89 @@
+diff --git a/Source/Core/Core/CoreTiming.cpp b/Source/Core/Core/CoreTiming.cpp
+index bf950a7598..d8041e22b1 100644
+--- a/Source/Core/Core/CoreTiming.cpp
++++ b/Source/Core/Core/CoreTiming.cpp
+@@ -56,6 +56,30 @@
+ void DolphinWeb_RegionInstallsWhileIdle(std::chrono::steady_clock::time_point deadline);
+ #endif
+ 
++#ifdef __EMSCRIPTEN__
++namespace DolphinWeb
++{
++// Patch 0150 (?dupvsync=1): a duplicated XFB rearms the Rush throttle as a
++// presented one does (Presenter::ViSwap).
++std::atomic<bool> g_dup_xfb_rearms_throttle{false};
++}  // namespace DolphinWeb
++
++extern "C" EMSCRIPTEN_KEEPALIVE void DolphinWeb_SetDupXfbRearmsThrottle(int on)
++{
++  DolphinWeb::g_dup_xfb_rearms_throttle.store(on != 0, std::memory_order_relaxed);
++}
++
++// The pacing settings the core runs with, from its effective config: bit 0
++// SyncOnSkipIdle, bit 1 Rush Frame Presentation, bit 2 the 0150 rearm. The
++// harness reads it (validationReadPacingConfig) to know a switch was applied.
++extern "C" EMSCRIPTEN_KEEPALIVE u32 DolphinWeb_PacingConfig()
++{
++  return (Config::Get(Config::MAIN_SYNC_ON_SKIP_IDLE) ? 1u : 0u) |
++         (Config::Get(Config::MAIN_RUSH_FRAME_PRESENTATION) ? 2u : 0u) |
++         (DolphinWeb::g_dup_xfb_rearms_throttle.load(std::memory_order_relaxed) ? 4u : 0u);
++}
++#endif
++
+ namespace CoreTiming
+ {
+ static constexpr int MAX_SLICE_LENGTH = 20000;
+diff --git a/Source/Core/Core/CoreTiming.h b/Source/Core/Core/CoreTiming.h
+index 29d636e433..f6d77b0a65 100644
+--- a/Source/Core/Core/CoreTiming.h
++++ b/Source/Core/Core/CoreTiming.h
+@@ -171,6 +171,15 @@ public:
+   float GetOverclock() const;
+ 
+   bool UseSyncOnSkipIdle() const;
++#ifdef __EMSCRIPTEN__
++  // Patch 0150: a duplicated XFB that is not presented never fires
++  // after_present_event, so Rush keeps skipping throttles (up to
++  // AudioBufferSize/2 ahead). With ?dupvsync=1 the presenter rearms it here.
++  void RearmThrottleAfterSkippedPresent()
++  {
++    m_throttled_after_presentation.store(false, std::memory_order_relaxed);
++  }
++#endif
+ 
+ private:
+   Globals m_globals;
+diff --git a/Source/Core/VideoCommon/Present.cpp b/Source/Core/VideoCommon/Present.cpp
+index ebb8a64dc7..2514854be0 100644
+--- a/Source/Core/VideoCommon/Present.cpp
++++ b/Source/Core/VideoCommon/Present.cpp
+@@ -3,6 +3,14 @@
+ 
+ #include "VideoCommon/Present.h"
+ 
++#ifdef __EMSCRIPTEN__
++#include <atomic>
++namespace DolphinWeb
++{
++extern std::atomic<bool> g_dup_xfb_rearms_throttle;  // CoreTiming.cpp, patch 0150
++}
++#endif
++
+ #include "Common/ChunkFile.h"
+ #include "Core/Config/GraphicsSettings.h"
+ #include "Core/Config/MainSettings.h"
+@@ -224,6 +232,14 @@ void Presenter::ViSwap(u32 xfb_addr, u32 fb_width, u32 fb_stride, u32 fb_height,
+ 
+     video_events.after_present_event.Trigger(present_info);
+   }
++#ifdef __EMSCRIPTEN__
++  // Patch 0150 (?dupvsync=1): a duplicate is not presented, yet this VI's
++  // field is done: rearm the throttle Rush would otherwise keep skipping.
++  else if (DolphinWeb::g_dup_xfb_rearms_throttle.load(std::memory_order_relaxed))
++  {
++    Core::System::GetInstance().GetCoreTiming().RearmThrottleAfterSkippedPresent();
++  }
++#endif
+ }
+ 
+ void Presenter::ImmediateSwap(u32 xfb_addr, u32 fb_width, u32 fb_stride, u32 fb_height)

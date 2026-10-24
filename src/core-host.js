@@ -109,6 +109,7 @@ export class EmulatorHost {
     this.softwareTevHotCaseMode = requestedSoftwareTevHotCaseMode(window.location.search);
     this.xfbFastPaths = requestedXfbFastPaths(window.location.search);
     this.correctTimeDrift = requestedCorrectTimeDrift();
+    this.pacing = requestedPacing();
     this.coreLog = requestedCoreLog();
     this.memcardSlotB = new URLSearchParams(window.location.search).get("memcardb") === "1";
     // CPU reads of the EFB (peeks), off by default as in Dolphin (EFBAccessEnable).
@@ -127,6 +128,9 @@ export class EmulatorHost {
     this.dstAlphaTwoPass = new URLSearchParams(window.location.search).get("dstalpha2pass") !== "0";
     // ?discreadahead=0: the disc read exactly as asked (no read-ahead).
     this.discReadahead = new URLSearchParams(window.location.search).get("discreadahead") !== "0";
+    // ?discprefetch=1: the background prefetch of the next segment (0155),
+    // off by default (within noise on Chromium; to be measured on WebKit).
+    this.discPrefetch = new URLSearchParams(window.location.search).get("discprefetch") === "1";
     // Harness: keep a software WebGL presenter (SwiftShader), which the app
     // refuses for the 2D canvas (cheaper on a CPU).
     this.webglSoftware = new URLSearchParams(window.location.search).get("webglsw") === "1";
@@ -459,6 +463,9 @@ export class EmulatorHost {
             softwareTevHotCaseMode: this.softwareTevHotCaseMode,
             xfbFastPaths: this.xfbFastPaths,
             correctTimeDrift: this.correctTimeDrift,
+            rushPresentation: this.pacing.rushPresentation,
+            syncOnSkipIdle: this.pacing.syncOnSkipIdle,
+            dupXfbRearmsThrottle: this.pacing.dupXfbRearmsThrottle,
             coreLog: this.coreLog,
             memcardSlotB: this.memcardSlotB,
             efbAccess: this.efbAccess,
@@ -468,6 +475,7 @@ export class EmulatorHost {
             wgpuFallback: this.wgpuFallback,
             dstAlphaTwoPass: this.dstAlphaTwoPass,
             discReadahead: this.discReadahead,
+            discPrefetch: this.discPrefetch,
             webglSoftware: this.webglSoftware,
             savesMode: this.savesMode,
             efbDiag: this.efbDiag,
@@ -654,6 +662,8 @@ export class EmulatorHost {
         this.game.rootEntryCount = mounted.rootEntryCount;
         this.game.rootEntries = mounted.rootEntries ?? [];
         this.game.bootProbe = mounted.bootProbe ?? null;
+        // Before the boot: what the disc's settings ask of the renderer.
+        this.game.needs = mounted.needs ?? { boundingBox: false };
         this.game.fullCore = mounted.fullCore;
         this.game.coreBoot = mounted.coreBoot;
         this.game.coreState = mounted.coreState;
@@ -1614,6 +1624,19 @@ function requestedEfbDiag() {
   // "1" blits the EFB to the canvas; "2" blits the XFB entry last presented.
   const raw = new URLSearchParams(window.location.search).get("efbdiag");
   return raw === "2" ? 2 : (raw === "1" ? 1 : false);
+}
+
+// Pacing switches (patch 0150): Rush Frame Presentation is off by default
+// (upstream's default), ?rush=1 turns it on. For measurement: ?synconidle=1
+// turns SyncOnSkipIdle on, ?dupvsync=1 makes a duplicated XFB rearm the
+// throttle. Absent: the shipped pacing.
+export function requestedPacing(search = window.location.search) {
+  const params = new URLSearchParams(search);
+  return {
+    rushPresentation: params.get("rush") === "1",
+    syncOnSkipIdle: params.get("synconidle") === "1",
+    dupXfbRearmsThrottle: params.get("dupvsync") === "1"
+  };
 }
 
 function requestedCorrectTimeDrift() {

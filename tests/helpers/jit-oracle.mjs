@@ -46,6 +46,9 @@ export async function loadOracleCore(coreDir = new URL("../../cores/dolphin/", i
     setFprf: (on) => module._DolphinWeb_SetFprfForTest(on ? 1 : 0),
     // Patch 0129: the FMA emitter's relaxed_madd mode (returns the previous one).
     setFusedMadd: (on) => module._DolphinWeb_SetFusedMadd(on ? 1 : 0),
+    // Patch 0159: compile the oracle's blocks as if MSR.FP were set, run them
+    // with the input MSR.
+    compileWithFp: (on) => module._DolphinWeb_JitOracleCompileWithFpForTest(on ? 1 : 0),
     // Region modules (P4): pc, npc and downcount offsets in PowerPCState, version.
     stateLayout() {
       const ptr = module._malloc(16);

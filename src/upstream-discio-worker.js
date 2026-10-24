@@ -397,6 +397,15 @@ function harnessRegionLedger(pcs) {
   return { modules: aotRegionLedger.size, outcomes, queuedEntries: entries, mappedRegions: typeof mapped === "function" ? mapped() >>> 0 : null, nowMs: Math.round(performance.now()), pcs: at };
 }
 
+// QA harness only: the pacing settings the core runs with (patch 0150),
+// from its effective config, not from the URL: proof that a switch applied.
+function harnessPacingConfig() {
+  if (!harnessEnabled) return { error: "harness hooks are off" };
+  const read = moduleInstance?._DolphinWeb_PacingConfig;
+  if (typeof read !== "function") return { supported: false };
+  const bits = read() >>> 0;
+  return { supported: true, syncOnSkipIdle: Boolean(bits & 1), rushFramePresentation: Boolean(bits & 2), dupXfbResetsThrottle: Boolean(bits & 4) };
+}
 // Patch 0156: the guest cycles ran outside the regions by the PC a chain of
 // blocks started at, the 64 most costly, while the stats are on (timing or
 // not), each with its cause as the ledger sees it: "declared" (a module
@@ -1633,6 +1642,9 @@ async function handleMessage(type, payload) {
         softwareTevHotCaseMode: payload.softwareTevHotCaseMode,
         xfbFastPaths: payload.xfbFastPaths,
         correctTimeDrift: payload.correctTimeDrift,
+        rushPresentation: payload.rushPresentation,
+        syncOnSkipIdle: payload.syncOnSkipIdle,
+        dupXfbRearmsThrottle: payload.dupXfbRearmsThrottle,
         coreLog: payload.coreLog,
         memcardSlotB: payload.memcardSlotB,
         efbAccess: payload.efbAccess,
@@ -1642,6 +1654,7 @@ async function handleMessage(type, payload) {
         wgpuFallback: payload.wgpuFallback,
         dstAlphaTwoPass: payload.dstAlphaTwoPass,
         discReadahead: payload.discReadahead,
+        discPrefetch: payload.discPrefetch,
         webglSoftware: payload.webglSoftware,
         efbDiag: payload.efbDiag,
         jitVerbose: payload.jitVerbose,
@@ -1918,6 +1931,8 @@ async function handleMessage(type, payload) {
     case "validationReadRelaxedMadd":
       // coreFused: the core's own mode (null: a core without patch 0129).
       return { mode: relaxedMadd, coreFused: moduleInstance?._DolphinWeb_FusedMadd ? moduleInstance._DolphinWeb_FusedMadd() === 1 : null };
+    case "validationReadPacingConfig":
+      return harnessPacingConfig();
     case "validationReadJitRegionStats":
       return harnessJitRegionStats(payload);
     case "validationReadRegionLedgerStale":
@@ -2347,6 +2362,9 @@ async function loadCore({
   softwareTevHotCaseMode: requestedSoftwareTevHotCaseMode = 0,
   xfbFastPaths = 0,
   correctTimeDrift = false,
+  rushPresentation = false,
+  syncOnSkipIdle = false,
+  dupXfbRearmsThrottle = false,
   coreLog = false,
   memcardSlotB = false,
   efbAccess = false,
@@ -2356,6 +2374,7 @@ async function loadCore({
   wgpuFallback = false,
   dstAlphaTwoPass = true,
   discReadahead = true,
+  discPrefetch = false,
   webglSoftware = false,
   efbDiag = false,
   jitVerbose = false,
@@ -2414,6 +2433,7 @@ async function loadCore({
   wgpuMaskedFeatures = parseWgpuMask(wgpuMask);
   wgpuAcceptFallbackAdapter = Boolean(wgpuFallback);
   discReadaheadEnabled = discReadahead !== false;
+  discPrefetchEnabled = discPrefetch === true;
   webglAcceptSoftware = Boolean(webglSoftware);
   if (moduleInstance) {
     return moduleInstance;
@@ -2862,6 +2882,10 @@ async function loadCore({
     // Read by dolphin_web_core.cpp at CoreInit. Both are opt-in and default
     // false, so the shipping page load is unchanged.
     dolphinCorrectTimeDrift: Boolean(correctTimeDrift),
+    // Patch 0150 pacing switches (dolphin_web_core.cpp reads them at setup).
+    dolphinRushPresentation: rushPresentation === true,
+    dolphinSyncOnSkipIdle: syncOnSkipIdle === true,
+    dolphinDupXfbRearmsThrottle: dupXfbRearmsThrottle === true,
     dolphinCoreLog: Boolean(coreLog),
     dolphinMemcardSlotB: Boolean(memcardSlotB),
     dolphinEfbAccess: Boolean(efbAccess),
@@ -3171,12 +3195,17 @@ const discReadService = { reads: 0, bytes: 0, ms: 0, maxMs: 0 };
 // most (src/disc-readahead.js); ?discreadahead=0 reads exactly what is asked,
 // as WORKERFS does.
 let discReadaheadEnabled = true;
+let discPrefetchEnabled = false;
 let discBlockReader = null;
 function readDiscAhead(workerFs) {
   const ops = workerFs?.stream_ops;
   if (!ops?.read || discBlockReader || typeof FileReaderSync !== "function") return;
   const reader = new FileReaderSync();
-  discBlockReader = createDiscReadahead({ readBlob: (blob) => reader.readAsArrayBuffer(blob) });
+  discBlockReader = createDiscReadahead({
+    readBlob: (blob) => reader.readAsArrayBuffer(blob),
+    // Patch 0155: the next segment in the background, with ?discprefetch=1.
+    readBlobAsync: discPrefetchEnabled ? (blob) => blob.arrayBuffer() : null,
+  });
   ops.read = discBlockReader.read;
 }
 function timeDiscReads(workerFs) {
@@ -3529,6 +3558,8 @@ function bindApi(module) {
     getPlatform: cwrap("GetPlatform", "string", []),
     getRegion: cwrap("GetRegion", "string", []),
     getDiscNumber: cwrap("GetDiscNumber", "number", []),
+    getRevision: optionalCwrap("GetRevision", "number", []),
+    gameConfigValue: optionalCwrap("GameConfigValue", "number", ["string", "number", "string"]),
     getApploaderDate: cwrap("GetApploaderDate", "string", []),
     getApploaderSize: cwrap("GetApploaderSize", "number", []),
     getBootDolOffset: cwrap("GetBootDolOffset", "number", []),
@@ -4074,6 +4105,27 @@ async function handleSavesMessage(type, payload) {
   }
 }
 
+// What the mounted disc's settings ask of the renderer, read before the boot
+// through Dolphin's own game config (the GameSettings INIs the core embeds,
+// merged as the boot will): the bounding box, which video=wgpu does not
+// compute (its box is the software rasterizer's, never updated by the GPU
+// path). A host renders such a disc in software.
+let discNeeds = { boundingBox: false };
+
+function mountedDiscNeeds() {
+  const gameId = api?.getGameId?.() || "";
+  const revision = api?.getRevision?.() ?? -1;
+  if (!gameId || revision < 0 || !api?.gameConfigValue) return { boundingBox: false };
+  const value = api.gameConfigValue(gameId, revision, "BBoxEnable");
+  if (value < 0) {
+    // -1: a game's settings layer is already loaded (a game is running), which
+    // the read must not replace; the need is unknown, not "no".
+    postStatus(`The disc's settings could not be read before the boot (GameConfigValue ${value}): its bounding-box need is unknown`);
+    return { boundingBox: false, known: false };
+  }
+  return { boundingBox: value === 1 };
+}
+
 async function mountFile(file) {
   if (!moduleInstance) {
     throw new Error("Upstream core must be loaded before mounting a disc");
@@ -4152,6 +4204,10 @@ async function mountFile(file) {
     if (!accepted) {
       throw new Error("Upstream Dolphin DiscIO rejected the selected disc");
     }
+    discNeeds = mountedDiscNeeds();
+    if (discNeeds.boundingBox && rendererDiagnostics.configuredVideoBackend === "WebGPU-Real") {
+      postStatus("This disc's settings read the bounding box (BBoxEnable), which video=wgpu does not compute: render it in software");
+    }
   } else {
     const head = new Uint8Array(await file.slice(0, BOOT_FILE_HEAD_BYTES).arrayBuffer());
     executable = checkExecutable(bootKind, head, file.size);
@@ -4220,6 +4276,7 @@ async function mountFile(file) {
       ? { title: file.name, gameId: "", platform: "GameCube", region: "", bootKind, entryPoint: executable.entryPoint }
       : { bootKind }),
     bootProbe: bootProbePayload(metadata),
+    needs: bootKind === "disc" ? { ...discNeeds } : { boundingBox: false },
     path,
     ...framePayload()
   };
