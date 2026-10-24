@@ -1133,7 +1133,8 @@ test("the region key changes with the formation", async () => {
   const parts = { compilerVersion: 5, codegenMask: 0 };
   assert.notEqual(await regionModuleKey(f, { ...parts, formation: 1 }), await regionModuleKey(f, { ...parts, formation: 2 }));
   assert.notEqual(await regionModuleKey(f, { ...parts, formation: 2 }), await regionModuleKey(f, { ...parts, formation: 3 }), "3: frontier rule and shared budget");
-  assert.equal(await regionModuleKey(f, parts), await regionModuleKey(f, { ...parts, formation: 3 }), "3 by default");
+  assert.notEqual(await regionModuleKey(f, { ...parts, formation: 3 }), await regionModuleKey(f, { ...parts, formation: 4 }), "4: continuations stop at held blocks");
+  assert.equal(await regionModuleKey(f, parts), await regionModuleKey(f, { ...parts, formation: 4 }), "4 by default");
 });
 
 
@@ -1274,7 +1275,9 @@ test("frontier: a branch belongs to the nearest held entry unless a block end li
   // the heavy scene's first one).
   const loop = [[0x80000008, [0x80000100]], [0x80000030, [0x80000004]]];
   loop.ends = [0x80000010, 0x80000030];
-  assert.deepEqual(frontier(loop, new Set([0x80000000])), [0x80000100]);
+  // Formation 4: 0x80000004 is also seeded, a leader the held block falls
+  // into (the bdnz at 0x30 enters there once its code is held).
+  assert.deepEqual(frontier(loop, new Set([0x80000000])), [0x80000004, 0x80000100]);
 });
 
 // A function refused continuations for lack of budget resumes its frontier
@@ -1332,4 +1335,48 @@ test("continuation budget: never charged past the limit, first pass or resume", 
   // A member whose own cap is reached is not offered more (no resume).
   const capped = await translateWithContinuations(core.module, f, { ...options, maxContinuations: 1 });
   assert.ok(capped.budgetRefused >= 1 && !capped.resume, "at its own cap: no resume");
+});
+
+// Formation 4: a continuation is translated over the function's ranges
+// without the first word of each held block, so it stops there instead of
+// translating it again; the frontier then also seeds what a held block
+// falls into and the return points of calls made from held code (before,
+// a continuation translated through them).
+test("withoutStarts: the ranges without the word at each start", async () => {
+  const { withoutStarts } = await import("../src/aot-orchestrator.js");
+  assert.deepEqual(withoutStarts([[0x100, 0x140]], [0x100, 0x110, 0x13c, 0x200]), [[0x104, 0x110], [0x114, 0x13c]]);
+  assert.deepEqual(withoutStarts([[0x100, 0x110], [0x200, 0x210]], []), [[0x100, 0x110], [0x200, 0x210]]);
+});
+
+test("frontier: a leader a held block falls into, and the return point of a call from held code", async () => {
+  const { frontier } = await import("../src/aot-orchestrator.js");
+  // 0x00 held; 0x08 a bctrl from held code (0x0c its return point); 0x10
+  // a loop head only a bdnz at 0x30 targets, past a blr at 0x20 (so that
+  // bdnz is in no held block).
+  const branches = [[0x80000030, [0x80000010, 0x80000034]]];
+  branches.ends = [0x80000008, 0x80000020, 0x80000040];
+  branches.calls = [0x80000008];
+  assert.deepEqual(frontier(branches, new Set([0x80000000])), [0x8000000c], "the call's return point; 0x10 is past the bctrl's end");
+  // Held through 0x0c: 0x10 is fallen into (no end between 0x0c and it).
+  assert.deepEqual(frontier(branches, new Set([0x80000000, 0x8000000c])), [0x80000010]);
+});
+
+test("continuations: no block in two fragments, and the module runs like the interpreter", { skip: contSkip }, async () => {
+  const program = longFunction(100);
+  const ranges = loadWords(LONG, program.words);
+  const r = await translateWithContinuations(core.module, { entry: LONG, ranges, hash: null },
+    { mask: PRODUCTION_DISABLE_MASK, maxBlocks: 16, names: coreAssembleOptions(core.module)?.helperNames });
+  const fragments = [r.fragment, ...r.continuations];
+  const listed = fragments.flatMap((x) => x.entries);
+  assert.equal(new Set(listed).size, listed.length, "every block in one fragment");
+  assert.equal(listed.length, 101);
+  core.module._DolphinWeb_AotForgetRegionsForTest?.();
+  const { bytes: mod, entries } = assembleRegion(claimEntries(fragments), { helpers: HELPER_SIGNATURES, pcOffset: core.pcOffset, memoryPages: core.memoryPages });
+  core.setRegionsEnabled(true);
+  core.queueRegion(mod, entries.map(([pc]) => pc), [{ ranges, hash: null }]);
+  core.serviceRegions();
+  const reference = runCall(LONG, { regions: false });
+  const got = runCall(LONG, { regions: true });
+  assert.deepEqual(got.state, reference.state);
+  assert.equal(got.interpreted, 0);
 });

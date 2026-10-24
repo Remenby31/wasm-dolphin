@@ -480,10 +480,18 @@ export async function translateWithContinuations(m, f, { mask, maxBlocks, names,
       const pc = waiting[0];
       tried.add(pc);
       await slice();
-      let next = translateOne(m, { ...f, entry: pc }, { mask, maxBlocks, names });
+      // Over the function's ranges without the first word of each block
+      // already held: a continuation stops at a held block (its range ends
+      // there) and jumps to it, rather than translating it again (in
+      // 0x800f4e50, 39 of 142 entries were blocks of another fragment). The
+      // plan's hash covers the whole ranges, so it is not asked here: the
+      // first fragment checked it in this pass, and the install checks every
+      // member against the plan again.
+      const carved = { ...f, entry: pc, ranges: withoutStarts(f.ranges, owned), hash: null };
+      let next = translateOne(m, carved, { mask, maxBlocks, names });
       for (let blocks = maxBlocks; next.fragment && next.fragment.code.length > maxFragmentBytes && blocks > 1;) {
         blocks = Math.max(1, blocks >> 1);
-        next = translateOne(m, { ...f, entry: pc }, { mask, maxBlocks: blocks, names });
+        next = translateOne(m, carved, { mask, maxBlocks: blocks, names });
       }
       if (!next.fragment) continue;
       if (next.fragment.code.length > maxFragmentBytes) { oversize += 1; continue; } // one block alone: left an exit
@@ -524,6 +532,22 @@ export async function translateWithContinuations(m, f, { mask, maxBlocks, names,
   };
 }
 
+// `ranges` (sorted [start, end)) without the word at each of `starts`.
+export function withoutStarts(ranges, starts) {
+  const cuts = [...starts].map((pc) => pc >>> 0).sort((a, b) => a - b);
+  const out = [];
+  for (const [s0, e] of ranges) {
+    let s = s0 >>> 0;
+    for (const c of cuts) {
+      if (c < s || c >= e) continue;
+      if (c > s) out.push([s, c]);
+      s = c + 4;
+    }
+    if (s < e) out.push([s, e >>> 0]);
+  }
+  return out;
+}
+
 // The direct branches of the code in `ranges` ([start, end) guest
 // addresses), read from the emulated RAM (big-endian): [address, leaders it
 // makes] for each b and bc without link (its target inside the ranges, and
@@ -533,6 +557,7 @@ export async function translateWithContinuations(m, f, { mask, maxBlocks, names,
 export function functionBranches(m, ranges) {
   const out = [];
   out.ends = [];
+  out.calls = []; // call sites (bl, bcl, bctrl, blrl): their return point is reached once the callee returns
   if (typeof m._DolphinWeb_AotRegionHeapBases !== "function") return out;
   const ram = coreHeapBases(m)[0];
   const inside = (pc) => ranges.some(([s, e]) => pc >= s && pc < e);
@@ -543,6 +568,7 @@ export function functionBranches(m, ranges) {
       const op = w >>> 26;
       const xo = (w >>> 1) & 0x3ff;
       if ((op === 18 && !(w & 1)) || (op === 19 && (xo === 50 || ((xo === 16 || xo === 528) && ((w >>> 21) & 0x14) === 0x14)))) out.ends.push(a >>> 0);
+      if ((w & 1) && (op === 16 || op === 18 || (op === 19 && (xo === 16 || xo === 528))) && inside((a + 4) >>> 0)) out.calls.push(a >>> 0);
       if ((op !== 16 && op !== 18) || (w & 1)) continue; // b/bc without link
       const disp = op === 18 ? ((w & 0x03fffffc) << 6) >> 6 : ((w & 0xfffc) << 16) >> 16;
       const target = ((w & 2) ? disp : a + disp) >>> 0;
@@ -552,6 +578,7 @@ export function functionBranches(m, ranges) {
   }
   out.sort((x, y) => x[0] - y[0]);
   out.ends.sort((x, y) => x - y);
+  out.calls.sort((x, y) => x - y);
   return out;
 }
 
@@ -575,6 +602,26 @@ export function frontier(branches, owned) {
     const start = blockOf(a);
     if (start === null || endBetween(start, a)) continue;
     for (const pc of leaders) if (!owned.has(pc)) out.add(pc);
+  }
+  // The return point of a call made from held code (a bctrl's next word is
+  // no branch target: before continuations stopped at held blocks, one
+  // translated through the call and held it).
+  for (const c of branches.calls ?? []) {
+    const pc = (c + 4) >>> 0;
+    if (owned.has(pc) || out.has(pc)) continue;
+    const start = blockOf(c);
+    if (start !== null && !endBetween(start, c)) out.add(pc);
+  }
+  // A leader a held block falls into, with no branch to it from held code
+  // (a loop head after the mtctr that precedes it, review of dispatch): no
+  // block end between the nearest held entry and it. A continuation stops
+  // at held blocks, so nothing else reaches it.
+  for (const [, leaders] of branches) {
+    for (const pc of leaders) {
+      if (owned.has(pc) || out.has(pc)) continue;
+      const start = blockOf((pc - 4) >>> 0);
+      if (start !== null && !endBetween(start, pc)) out.add(pc);
+    }
   }
   return [...out].sort((a, b) => a - b);
 }
