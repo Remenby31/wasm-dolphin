@@ -31,16 +31,18 @@ diff --git a/Source/Core/Core/PowerPC/CachedInterpreter/CachedInterpreter.cpp b/
    int code;
    if (s_region_stats_on && s_region_stats.sample_every != 0)
    {
-@@ -11087,6 +11096,8 @@ bool TryRunRegion(PowerPC::PowerPCState& ppc_state)
-       s_mem_totals.region_instructions += cycles * s_regions[index].instructions_per_cycle;
-     }
-     s_region_stats.region_cycles += static_cast<double>(downcount - ppc_state.downcount);
-+    if (code == 3 && ppc_state.region_call_stats_on)
-+      ppc_state.region_call_stats[3] += 1;  // 0142: a return passed up to here
-     if (code == 1)
-       s_region_stats.region_not_entry += 1;
-     else if (code == 2)
-@@ -16621,6 +16632,7 @@ extern "C" EMSCRIPTEN_KEEPALIVE int DolphinWeb_JitOracleRun(u32 word_count, u32
+@@ -11075,6 +11084,10 @@ bool TryRunRegion(PowerPC::PowerPCState& ppc_state)
+   {
+     code = run(static_cast<int>(reinterpret_cast<std::uintptr_t>(&ppc_state)));
+   }
++  // 0142: a guest return passed up past every wasm call, counted with the
++  // call counters (whether or not the region stats are on).
++  if (code == 3 && ppc_state.region_call_stats_on) [[unlikely]]
++    ppc_state.region_call_stats[3] += 1;
+   if (s_region_stats_on)
+   {
+     s_region_stats.region_calls += 1;
+@@ -16621,6 +16634,7 @@ extern "C" EMSCRIPTEN_KEEPALIVE int DolphinWeb_JitOracleRun(u32 word_count, u32
        memory.GetRamSizeReal(),
        static_cast<u32>(reinterpret_cast<std::uintptr_t>(memory.GetL1Cache())),
        memory.GetL1CacheSize(),
@@ -48,7 +50,7 @@ diff --git a/Source/Core/Core/PowerPC/CachedInterpreter/CachedInterpreter.cpp b/
    };
    int result = 0;
    while (budget && ppc.pc != JIT_ORACLE_SENTINEL_VA &&
-@@ -16795,6 +16807,7 @@ WasmStateLayout CurrentWasmStateLayout(Core::System& system)
+@@ -16795,6 +16809,7 @@ WasmStateLayout CurrentWasmStateLayout(Core::System& system)
        memory.GetRamSizeReal(),
        static_cast<u32>(reinterpret_cast<std::uintptr_t>(memory.GetL1Cache())),
        memory.GetL1CacheSize(),
@@ -56,7 +58,7 @@ diff --git a/Source/Core/Core/PowerPC/CachedInterpreter/CachedInterpreter.cpp b/
    };
  }
  
-@@ -16821,6 +16834,13 @@ struct FragmentBlock
+@@ -16821,6 +16836,13 @@ struct FragmentBlock
    // 0088: set when the block was left out because it holds an idle loop:
    // the region picks up again after the whole block (the loop's exit).
    u32 outside_until = 0;
@@ -70,7 +72,7 @@ diff --git a/Source/Core/Core/PowerPC/CachedInterpreter/CachedInterpreter.cpp b/
  };
  
  // Locals of a block body without the fastmem hoist (the only layout a
-@@ -16830,6 +16850,11 @@ constexpr std::array<u8, 17> WASM_BLOCK_LOCALS = {0x08, 0x03, 0x7f, 0x02, 0x7e,
+@@ -16830,6 +16852,11 @@ constexpr std::array<u8, 17> WASM_BLOCK_LOCALS = {0x08, 0x03, 0x7f, 0x02, 0x7e,
                                                    0x01, 0x7f, 0x20, 0x7f, 0x10, 0x7c,
                                                    0x03, 0x7f, 0x04, 0x7b};
  constexpr u32 WASM_FRAGMENT_PC_LOCAL = 56;  // appended after the block locals 1..55
@@ -82,7 +84,7 @@ diff --git a/Source/Core/Core/PowerPC/CachedInterpreter/CachedInterpreter.cpp b/
  
  // The block at pc as the CPU thread would build it (same analyzer, same
  // direct-candidate prefix), emitted in fragment mode. A region holds only
-@@ -16970,6 +16995,18 @@ bool BuildFragmentBlock(Core::System& system, u32 pc, u32 limit, FragmentBlock*
+@@ -16970,6 +16997,18 @@ bool BuildFragmentBlock(Core::System& system, u32 pc, u32 limit, FragmentBlock*
      out->successors.push_back(last.address + 4);
    if (inst.OPCD == 18 && last.branchTo != UINT32_MAX)
      out->jump_target = last.branchTo;
@@ -101,7 +103,7 @@ diff --git a/Source/Core/Core/PowerPC/CachedInterpreter/CachedInterpreter.cpp b/
    return true;
  }
  
-@@ -16980,7 +17017,9 @@ struct RegionFragment
+@@ -16980,7 +17019,9 @@ struct RegionFragment
    struct Reloc
    {
      u32 offset;
@@ -112,7 +114,7 @@ diff --git a/Source/Core/Core/PowerPC/CachedInterpreter/CachedInterpreter.cpp b/
      u32 value;  // helper index, target pc, 0, heap: base (bit 0) and form (bit 1),
                  // hint: 1 if the `if` at offset is likely
    };
-@@ -17076,6 +17115,8 @@ bool BuildRegionFragment(Core::System& system, u32 entry_pc, std::span<const u32
+@@ -17076,6 +17117,8 @@ bool BuildRegionFragment(Core::System& system, u32 entry_pc, std::span<const u32
    };
    // The dispatch pc, npc, downcount (0135) are the block locals' 56..58 (0141).
    code.assign(WASM_BLOCK_LOCALS.begin(), WASM_BLOCK_LOCALS.end());
@@ -121,7 +123,7 @@ diff --git a/Source/Core/Core/PowerPC/CachedInterpreter/CachedInterpreter.cpp b/
    // 0111: compares store CR fields without SO (EmitLazyCrStore): with XER.SO
    // set the fragment does not run (1, as a pc that is not an entry). The
    // dispatcher and region chaining refuse first; this covers a direct call.
-@@ -17114,6 +17155,33 @@ bool BuildRegionFragment(Core::System& system, u32 entry_pc, std::span<const u32
+@@ -17114,6 +17157,33 @@ bool BuildRegionFragment(Core::System& system, u32 entry_pc, std::span<const u32
      EmitStoreLocalToState(code, WASM_FRAME_PC_LOCAL, npc_offset);
      EmitStoreLocalToState(code, WASM_FRAME_DOWNCOUNT_LOCAL, downcount_offset);
    };
@@ -155,7 +157,7 @@ diff --git a/Source/Core/Core/PowerPC/CachedInterpreter/CachedInterpreter.cpp b/
    const u32 n = static_cast<u32>(blocks.size());
    u32 lowest = UINT32_MAX, highest = 0;
    for (const auto& b : blocks)
-@@ -17210,6 +17278,91 @@ bool BuildRegionFragment(Core::System& system, u32 entry_pc, std::span<const u32
+@@ -17210,6 +17280,91 @@ bool BuildRegionFragment(Core::System& system, u32 entry_pc, std::span<const u32
        EmitI32Const(code, 0);
        code.push_back(0x0f);  // return
      }
@@ -247,7 +249,7 @@ diff --git a/Source/Core/Core/PowerPC/CachedInterpreter/CachedInterpreter.cpp b/
      else if (b.jump_target != UINT32_MAX && !index_of.contains(b.jump_target))
      {
        flush_frame();
-@@ -17234,12 +17387,37 @@ bool BuildRegionFragment(Core::System& system, u32 entry_pc, std::span<const u32
+@@ -17234,12 +17389,37 @@ bool BuildRegionFragment(Core::System& system, u32 entry_pc, std::span<const u32
          code.push_back(0x0d);  // br_if $bj
          EmitU32Leb(code, j - k - 1);
        }
@@ -285,7 +287,7 @@ diff --git a/Source/Core/Core/PowerPC/CachedInterpreter/CachedInterpreter.cpp b/
    EmitLocalGet(code, 0);
    reloc_site(2, 0);
    code.insert(code.end(), {0x0b, 0x0b});  // end $L; end $X: the shared exit
-@@ -17311,8 +17489,9 @@ namespace
+@@ -17311,8 +17491,9 @@ namespace
  // the block by br_table (24 is 0132's). 27 (0135): region fragments keep pc,
  // npc and downcount in locals, with one shared exit (26 is retired, 0134's).
  // 30 (0141): paired-single FMA in f64x2 with fused relaxed_madd (28, 29 are
@@ -297,7 +299,7 @@ diff --git a/Source/Core/Core/PowerPC/CachedInterpreter/CachedInterpreter.cpp b/
  constexpr u32 AOT_MAX_FRAGMENT_BYTES = 1u << 20;
  thread_local std::vector<u32> t_aot_out;
  u8* s_aot_ram = nullptr;
-@@ -17638,6 +17817,31 @@ extern "C" EMSCRIPTEN_KEEPALIVE void DolphinWeb_AotTestStackRestore(u32 sp)
+@@ -17638,6 +17819,31 @@ extern "C" EMSCRIPTEN_KEEPALIVE void DolphinWeb_AotTestStackRestore(u32 sp)
    _emscripten_stack_restore(sp);
  }
  
@@ -329,7 +331,7 @@ diff --git a/Source/Core/Core/PowerPC/CachedInterpreter/CachedInterpreter.cpp b/
  // Runs a region module compiled by DolphinWeb_JitCompileBytesForTest on the
  // test CPU: 0 continue at pc, 1 not an entry, 2 stopped, 3 stopped in an
  // exception handler (taken by a helper, or pending and taken here as the CPU
-@@ -17650,8 +17854,13 @@ extern "C" EMSCRIPTEN_KEEPALIVE int DolphinWeb_AotRunRegionForTest(int handle)
+@@ -17650,8 +17856,13 @@ extern "C" EMSCRIPTEN_KEEPALIVE int DolphinWeb_AotRunRegionForTest(int handle)
    // (4: refused by the mode, the CPU loop runs blocks there).
    if (!RegionGuardsHold(ppc))
      return 4;
