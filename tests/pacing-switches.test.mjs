@@ -107,14 +107,21 @@ test("presentvsync: URL → host → adapter → worker, off by default", async 
   assert.match(worker, /wgpuPresentVsync = presentVsync === true && typeof self\.requestAnimationFrame === "function";/, "only with a worker rAF");
 });
 
-test("presentvsync: the drain stops before the next frame's backbuffer pass, never inside a pass", async () => {
+test("presentvsync: the backbuffer pass renders into a pooled texture, shown at the worker's rAF, the drain never held", async () => {
   const worker = await readFile(new URL("../src/upstream-discio-worker.js", import.meta.url), "utf8");
-  // fb#0's BEGIN_PASS is where getCurrentTexture() is called: stopping later
-  // would already have discarded the unseen picture.
-  assert.match(worker, /case WGPU_CMD_OP_BEGIN_PASS: \{[\s\S]{0,6000}?if \(fbId === 0\) \{[\s\S]{0,8000}?renderGpu\.context\.getCurrentTexture\(\)/);
-  assert.match(worker, /if \(wgpuPresentVsync && wgpuPresentsSinceBeginFrame > 0 && protocolPassDepth === 0 &&\n\s+op === WGPU_CMD_OP_BEGIN_PASS && u32\[recWord \+ 1\] === 0\) \{\n\s+holdWgpuPresentForBeginFrame\(\);\n\s+budgetStopReason = "display-tick";\n\s+break;/);
-  // released by the worker's rAF, or by a timer when no BeginFrame comes
+  // fb#0's BEGIN_PASS: the pool's texture in place of the canvas's
+  assert.match(worker, /const cur = wgpuPresentVsync\n\s+\? acquireWgpuVsyncTexture\([^)]*\)\n\s+: renderGpu\.context\.getCurrentTexture\(\);/);
+  // the present queues the frame; streaming and the present count follow the display
+  assert.match(worker, /if \(wgpuPresentVsync && lastBackbufferTexture\) \{\n[^\n]*\n\s+queueWgpuVsyncFrame\(lastBackbufferTexture,/);
+  const present = worker.slice(worker.indexOf("function presentWgpuVsyncFrame()"), worker.indexOf("function wgpuCanvasUsage("));
+  assert.match(present, /const f = wgpuVsyncQueue\.shift\(\);/, "the oldest queued frame");
+  assert.match(present, /copyTextureToTexture\(/);
+  assert.match(present, /streamCapture\.offerCanvas\(renderCanvas, f\.coreFrame\)/);
+  assert.match(present, /recordPresentedFrame\(f\.coreFrame, f\.shownVi\)/);
+  // at the worker's rAF, a timer when no BeginFrame comes; the canvas can be copied to
   assert.match(worker, /self\.requestAnimationFrame\(tick\)/);
-  assert.match(worker, /setTimeout\(\(\) => \{\n\s+wgpuPresentVsyncFallback = null;\n\s+releaseWgpuPresentVsync\(true\);/);
-  assert.match(worker, /"display-tick": 0,/, "the stop reason is counted");
+  assert.match(worker, /setTimeout\(wgpuVsyncFallbackCheck, WGPU_VSYNC_FALLBACK_MS\)/);
+  assert.equal((worker.match(/wgpuPresentVsync \? (textureUsage|self\.GPUTextureUsage)\.COPY_DST : 0/g) ?? []).length, 3, "every configure keeps COPY_DST");
+  // v1 held the drain and the core skipped frames: never again
+  assert.doesNotMatch(worker, /"display-tick"/);
 });
