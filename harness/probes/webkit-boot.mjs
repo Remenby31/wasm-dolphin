@@ -21,8 +21,9 @@
 //                           (WebKit: unsupported) and the core is fused only
 //                           when MODE is "fused"
 //     [--module-sizes]      record each compiled module's function sizes in
-//                           the workers Playwright reports (Chromium sees the
-//                           CPU thread's region compiles; WebKit does not).
+//                           the workers Playwright reports, as console lines
+//                           (Chromium sees the CPU thread's region compiles;
+//                           WebKit does not).
 //                           It wraps WebAssembly and disturbs the timing:
 //                           a separate run, never with a speed reading.
 import { mkdtempSync, writeFileSync } from "node:fs";
@@ -59,15 +60,20 @@ export function functionBodySizes(bytes) {
   return null;
 }
 
-// Installed in every worker: records the function body sizes of each module
-// it compiles (not the bytes), read back by the probe. Pure source.
-export const RECORD_MODULE_SIZES = `(${(sizesOf) => {
-  if (self.__wasmSizes) return;
-  self.__wasmSizes = [];
+// Installed in every worker: logs the function body sizes of each module it
+// compiles (not the bytes) as a "[wasm-sizes]" console line. A console line
+// reaches the probe even from a worker that never returns to its event loop
+// (the CPU thread of a program that never waits for a VI), where an evaluate
+// would hang. Pure source.
+export const WASM_SIZES_TAG = "[wasm-sizes] ";
+export const RECORD_MODULE_SIZES = `(${(sizesOf, tag) => {
+  if (self.__wasmSizesOn) return;
+  self.__wasmSizesOn = true;
+  let n = 0;
   const note = (src) => {
     try {
       const u = src instanceof Uint8Array ? src : ArrayBuffer.isView(src) ? new Uint8Array(src.buffer, src.byteOffset, src.byteLength) : src instanceof ArrayBuffer ? new Uint8Array(src) : null;
-      if (u && self.__wasmSizes.length < 5000) self.__wasmSizes.push({ bytes: u.length, functions: sizesOf(u) });
+      if (u && n++ < 5000) console.log(tag + JSON.stringify({ bytes: u.length, functions: sizesOf(u) }));
     } catch {}
   };
   const W = WebAssembly, M = W.Module, compile = W.compile, inst = W.instantiate;
@@ -76,7 +82,12 @@ export const RECORD_MODULE_SIZES = `(${(sizesOf) => {
   Object.setPrototypeOf(W.Module, M);
   W.compile = (b, ...rest) => { note(b); return compile.call(W, b, ...rest); };
   W.instantiate = (b, ...rest) => { if (!(b instanceof M)) note(b); return inst.call(W, b, ...rest); };
-}})(${functionBodySizes.toString()})`;
+}})(${functionBodySizes.toString()}, ${JSON.stringify(WASM_SIZES_TAG)})`;
+
+// The records of the "[wasm-sizes]" console lines; pure.
+export function sizeRecords(lines) {
+  return lines.filter((t) => t.startsWith(WASM_SIZES_TAG)).map((t) => { try { return JSON.parse(t.slice(WASM_SIZES_TAG.length)); } catch { return null; } }).filter(Boolean);
+}
 
 // Region-sized modules (not the core) and their largest functions; pure.
 export function moduleSizeSummary(records, coreMinBytes = 4 << 20) {
@@ -138,10 +149,8 @@ async function main() {
     const page = await context.newPage();
     const keep = (m) => lines.push(m.text());
     page.on("console", keep);
-    const workers = [];
     page.on("worker", (w) => {
       w.on("console", keep);
-      workers.push(w);
       if (values["module-sizes"]) w.evaluate(RECORD_MODULE_SIZES).catch(() => {});
     });
     page.on("pageerror", (e) => lines.push(`pageerror: ${e.message}`));
@@ -164,10 +173,7 @@ async function main() {
       r.aotStatus = await ask("aotStatus");
       r.aotProgress = await ask("validationReadAotProgress");
       r.frame = await readFrameInfo(page).catch(() => null);
-      if (values["module-sizes"]) {
-        const records = (await Promise.all(workers.map((w) => w.evaluate(() => self.__wasmSizes ?? []).catch(() => [])))).flat();
-        r.moduleSizes = moduleSizeSummary(records);
-      }
+      if (values["module-sizes"]) r.moduleSizes = moduleSizeSummary(sizeRecords(lines));
       Object.assign(r, regionCounts(r.aotProgress, r.aotStatus));
     }
   } finally {
@@ -175,7 +181,7 @@ async function main() {
   }
   r.compileErrors = lines.filter((t) => COMPILE_ERROR.test(t)).slice(0, 20);
   r.fatal = lines.filter((t) => FATAL_PATTERN.test(t)).slice(0, 20);
-  r.statusLines = lines.filter((t) => /relaxed_madd|aot[: ]|regions? |wasm feature|tail call/i.test(t)).slice(0, 40);
+  r.statusLines = lines.filter((t) => !t.startsWith(WASM_SIZES_TAG) && /relaxed_madd|aot[: ]|regions? |wasm feature|tail call/i.test(t)).slice(0, 40);
   r.verdict = webkitBootVerdict(r);
   console.log(`[webkit-boot] ${JSON.stringify({ browser: r.browser, booted: r.booted, bootError: r.bootError, relaxedMadd: r.relaxedMadd, state: r.state, installs: r.installs, compiled: r.compiled, refused: r.refused, compileErrors: r.compileErrors.length, regionStats: r.regionStats, moduleSizes: r.moduleSizes, speed: r.frame?.speed ?? null })}`);
   if (values.out) writeFileSync(values.out, JSON.stringify(r, null, 1));

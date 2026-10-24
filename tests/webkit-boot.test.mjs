@@ -1,7 +1,7 @@
 import assert from "node:assert/strict";
 import test from "node:test";
 
-import { functionBodySizes, JSC_OMG_MAX_FUNCTION_BYTES, moduleSizeSummary, regionCounts, webkitBootVerdict } from "../harness/probes/webkit-boot.mjs";
+import { functionBodySizes, JSC_OMG_MAX_FUNCTION_BYTES, moduleSizeSummary, regionCounts, sizeRecords, WASM_SIZES_TAG, webkitBootVerdict } from "../harness/probes/webkit-boot.mjs";
 
 // A module of one type, n functions whose bodies are `sizes` bytes (locals
 // count 0, then nops, then end), to check the code section walk.
@@ -46,4 +46,9 @@ test("regionCounts takes the installs from the progress events and the refusals 
   const progress = { state: "complete", events: [{ type: "install", loaded: 0 }, { type: "done", compiled: 4, refused: 0 }, { type: "install", loaded: 4, after: "first-image" }] };
   assert.deepEqual(regionCounts(progress, { regionsRefused: 0 }), { installs: 4, compiled: 4, refused: 0, state: "complete" });
   assert.deepEqual(regionCounts({ state: "complete", events: [{ type: "done", compiled: 3 }] }, {}), { installs: 3, compiled: 3, refused: null, state: "complete" });
+});
+
+test("module sizes come back as console lines, so a worker that never yields cannot hang the read", () => {
+  const lines = ["relaxed_madd: unsupported", `${WASM_SIZES_TAG}{"bytes":120000,"functions":[99000]}`, `${WASM_SIZES_TAG}not json`];
+  assert.deepEqual(sizeRecords(lines), [{ bytes: 120000, functions: [99000] }]);
 });
