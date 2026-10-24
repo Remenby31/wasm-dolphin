@@ -1487,6 +1487,28 @@ test("frontier: a leader a held block falls into, and the return point of a call
   assert.deepEqual(frontier(branches, new Set([0x80000000, 0x8000000c])), [0x80000010]);
 });
 
+test("loopsPast: a loop in the code the frontier leads to; not a branch back into held code, nor a literal after a blr (review of #243)", async () => {
+  const { loopsPast } = await import("../src/aot-orchestrator.js");
+  const at = (x) => (0x80000000 + x) >>> 0;
+  // A loop: the leader 0x10, a bdnz at 0x20 back to 0x18 (reached), blr 0x24.
+  const loop = [[at(0x20), [at(0x18), at(0x24)]]];
+  loop.ends = [at(0x24)];
+  assert.equal(loopsPast(loop, [at(0x10)], new Set([at(0)])), true);
+  // A straight tail from 0x10 that branches back to 0x00, held: no loop.
+  const back = [[at(0x18), [at(0x00)]]];
+  back.ends = [at(0x18)];
+  assert.equal(loopsPast(back, [at(0x10)], new Set([at(0)])), false, "a branch back into held code");
+  // A tail ending in a blr at 0x18; at 0x1c a literal that decodes as a
+  // branch back to 0x10: no walk reaches it.
+  const literal = [[at(0x1c), [at(0x10)]]];
+  literal.ends = [at(0x18), at(0x1c)];
+  assert.equal(loopsPast(literal, [at(0x10)], new Set([at(0)])), false, "a word past the blr");
+  // The leader's walk stops at a held entry: a loop past it is held code.
+  const heldLoop = [[at(0x30), [at(0x28), at(0x34)]]];
+  heldLoop.ends = [at(0x34)];
+  assert.equal(loopsPast(heldLoop, [at(0x10)], new Set([at(0), at(0x20)])), false, "a held loop after a straight tail");
+});
+
 test("continuations: no block in two fragments, and the module runs like the interpreter", { skip: contSkip }, async () => {
   const program = longFunction(100);
   const ranges = loadWords(LONG, program.words);
