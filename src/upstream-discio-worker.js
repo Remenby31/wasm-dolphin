@@ -3095,8 +3095,9 @@ async function loadCore({
 // boot's HLE apploader and FST reads): over a window that holds any, the
 // difference is a lower bound; equal read counts on both sides mean none.
 const discReadService = { reads: 0, bytes: 0, ms: 0, maxMs: 0 };
-// The disc's reads in 1 MiB blocks, the last 8 kept (src/disc-readahead.js);
-// ?discreadahead=0 reads exactly what is asked, as WORKERFS does.
+// The disc read ahead, 64 KiB to 1 MiB as a stream goes on, 8 MiB held at
+// most (src/disc-readahead.js); ?discreadahead=0 reads exactly what is asked,
+// as WORKERFS does.
 let discReadaheadEnabled = true;
 let discBlockReader = null;
 function readDiscAhead(workerFs) {

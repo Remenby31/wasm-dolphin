@@ -1,51 +1,67 @@
 // Copyright 2026 wasm-dolphin contributors
 // SPDX-License-Identifier: GPL-2.0-or-later
 
-// The disc's reads through WORKERFS, in blocks (task 4, patch 0151's
-// counters). WORKERFS reads exactly what the DVD thread asks, ~15 KB a call,
-// each one a FileReaderSync round trip: 12-46 ms per emulated second on a
-// race and an intro, most of the emulation's disc stall. This reads aligned
-// blocks (1 MiB) instead and keeps the last few (8: 8 MiB at most), so the
-// next reads of the same region are a copy.
+// The disc's reads through WORKERFS, ahead of the DVD thread (task 4, patch
+// 0151's counters). WORKERFS reads exactly what is asked, ~15 KB a call, each
+// one a FileReaderSync round trip: 12-46 ms per emulated second on a race and
+// an intro, most of the emulation's disc stall. This reads ahead instead:
+// 64 KiB after a seek, doubling while the reads follow on (up to 1 MiB), so a
+// stream costs a few big reads and a first boot (scattered small reads) does
+// not pay for 1 MiB blocks it never uses. The last segments are kept, 8 MiB
+// at most, oldest out first.
 
-export const DISC_READAHEAD_BLOCK_BYTES = 1 << 20;
-export const DISC_READAHEAD_BLOCKS = 8;
+export const DISC_READAHEAD_MIN_BYTES = 64 << 10;
+export const DISC_READAHEAD_MAX_BYTES = 1 << 20;
+export const DISC_READAHEAD_HELD_BYTES = 8 << 20;
 
-// A WORKERFS stream_ops.read in blocks. `readBlob(blob)` returns the bytes of
-// a Blob slice (FileReaderSync in the worker). Stats: block reads (misses),
-// copies served from the cache (hits), bytes held at most.
-export function createDiscReadahead({ readBlob, blockBytes = DISC_READAHEAD_BLOCK_BYTES, maxBlocks = DISC_READAHEAD_BLOCKS }) {
-  // Per file: blockIndex -> Uint8Array, in least-recently-used order.
-  const files = new WeakMap();
+// A WORKERFS stream_ops.read reading ahead. `readBlob(blob)` returns the
+// bytes of a Blob slice (FileReaderSync in the worker). Stats: segment reads
+// (misses) and their bytes, copies served from what is held (hits), bytes
+// held at most.
+export function createDiscReadahead({
+  readBlob,
+  minBytes = DISC_READAHEAD_MIN_BYTES,
+  maxBytes = DISC_READAHEAD_MAX_BYTES,
+  heldBytes = DISC_READAHEAD_HELD_BYTES,
+}) {
   const stats = { blockReads: 0, blockHits: 0, bytesRead: 0, heldBytes: 0, maxHeldBytes: 0 };
-  let held = [];
+  // Per file: segments held (oldest first) and the read-ahead state.
+  const files = new WeakMap();
 
-  function block(blob, size, index) {
-    let blocks = files.get(blob);
-    if (!blocks) files.set(blob, (blocks = new Map()));
-    const cached = blocks.get(index);
-    if (cached) {
-      blocks.delete(index);
-      blocks.set(index, cached);
-      held = held.filter((h) => h.bytes !== cached);
-      held.push({ blocks, index, bytes: cached });
-      stats.blockHits += 1;
-      return cached;
+  function stateOf(blob) {
+    let f = files.get(blob);
+    if (!f) files.set(blob, (f = { segments: [], next: minBytes, lastEnd: -1 }));
+    return f;
+  }
+
+  function evict(f) {
+    while (stats.heldBytes > heldBytes && f.segments.length > 1) {
+      stats.heldBytes -= f.segments.shift().bytes.length;
     }
-    const start = index * blockBytes;
-    const bytes = new Uint8Array(readBlob(blob.slice(start, Math.min(size, start + blockBytes))));
+  }
+
+  // The segment holding `at`, or a new one read from there.
+  function segmentAt(blob, size, at) {
+    const f = stateOf(blob);
+    for (let i = f.segments.length - 1; i >= 0; i -= 1) {
+      const s = f.segments[i];
+      if (at >= s.start && at < s.start + s.bytes.length) {
+        stats.blockHits += 1;
+        return s;
+      }
+    }
+    // Following on from the last read: twice as far; anything else is a seek.
+    f.next = at === f.lastEnd ? Math.min(maxBytes, f.next * 2) : minBytes;
+    const bytes = new Uint8Array(readBlob(blob.slice(at, Math.min(size, at + f.next))));
+    const s = { start: at, bytes };
+    f.segments.push(s);
+    f.lastEnd = at + bytes.length;
     stats.blockReads += 1;
     stats.bytesRead += bytes.length;
-    blocks.set(index, bytes);
-    held.push({ blocks, index, bytes });
     stats.heldBytes += bytes.length;
-    while (held.length > maxBlocks) {
-      const old = held.shift();
-      old.blocks.delete(old.index);
-      stats.heldBytes -= old.bytes.length;
-    }
     stats.maxHeldBytes = Math.max(stats.maxHeldBytes, stats.heldBytes);
-    return bytes;
+    evict(f);
+    return s;
   }
 
   function read(stream, buffer, offset, length, position) {
@@ -56,11 +72,10 @@ export function createDiscReadahead({ readBlob, blockBytes = DISC_READAHEAD_BLOC
     let at = position;
     let out = offset;
     while (at < end) {
-      const index = Math.floor(at / blockBytes);
-      const bytes = block(blob, size, index);
-      const from = at - index * blockBytes;
-      const count = Math.min(bytes.length - from, end - at);
-      buffer.set(bytes.subarray(from, from + count), out);
+      const s = segmentAt(blob, size, at);
+      const from = at - s.start;
+      const count = Math.min(s.bytes.length - from, end - at);
+      buffer.set(s.bytes.subarray(from, from + count), out);
       at += count;
       out += count;
     }

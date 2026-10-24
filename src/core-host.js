@@ -123,7 +123,7 @@ export class EmulatorHost {
     // Harness: accept a CPU fallback WebGPU adapter (SwiftShader), refused for
     // the app as no usable GPU (the Windows CI lane has nothing else).
     this.wgpuFallback = new URLSearchParams(window.location.search).get("wgpufallback") === "1";
-    // ?discreadahead=0: the disc read exactly as asked (no 1 MiB blocks).
+    // ?discreadahead=0: the disc read exactly as asked (no read-ahead).
     this.discReadahead = new URLSearchParams(window.location.search).get("discreadahead") !== "0";
     // Harness: keep a software WebGL presenter (SwiftShader), which the app
     // refuses for the 2D canvas (cheaper on a CPU).

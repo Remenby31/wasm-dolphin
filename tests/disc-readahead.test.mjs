@@ -14,10 +14,10 @@ function disc(size) {
   return { bytes, stream: { node: { contents: blob, size } }, readBlob, calls };
 }
 
-test("reads in blocks return exactly the bytes asked, across block boundaries and at the end", () => {
+test("reads ahead return exactly the bytes asked, across segment boundaries and at the end", () => {
   const d = disc(10_000);
-  const ra = createDiscReadahead({ readBlob: d.readBlob, blockBytes: 1024, maxBlocks: 4 });
-  for (const [position, length] of [[0, 100], [1000, 100], [3000, 2500], [9990, 100], [10_000, 10]]) {
+  const ra = createDiscReadahead({ readBlob: d.readBlob, minBytes: 512, maxBytes: 2048, heldBytes: 4096 });
+  for (const [position, length] of [[0, 100], [1000, 100], [3000, 2500], [9990, 100], [10_000, 10], [5, 9000]]) {
     const out = new Uint8Array(length + 8).fill(0xee);
     const n = ra.read(d.stream, out, 4, length, position);
     const expected = Math.max(0, Math.min(10_000, position + length) - position);
@@ -27,24 +27,34 @@ test("reads in blocks return exactly the bytes asked, across block boundaries an
   }
 });
 
-test("a block is read once, then copies; at most maxBlocks are held (least recently used out)", () => {
-  const d = disc(64 * 1024);
-  const ra = createDiscReadahead({ readBlob: d.readBlob, blockBytes: 4096, maxBlocks: 2 });
-  const out = new Uint8Array(64);
-  for (let p = 0; p < 4096; p += 64) ra.read(d.stream, out, 0, 64, p);
-  assert.deepEqual(d.calls, [[0, 4096]], "64 small reads of one block: one block read");
-  assert.equal(ra.stats.blockHits, 63);
-  ra.read(d.stream, out, 0, 64, 4096); // block 1
-  ra.read(d.stream, out, 0, 64, 0); // block 0 again: a hit, now most recent
-  ra.read(d.stream, out, 0, 64, 8192); // block 2: evicts block 1
-  ra.read(d.stream, out, 0, 64, 0); // still held
-  ra.read(d.stream, out, 0, 64, 4096); // read again
-  assert.deepEqual(d.calls.map(([a]) => a / 4096), [0, 1, 2, 1]);
-  assert.equal(ra.stats.maxHeldBytes, 2 * 4096);
-  assert.equal(ra.stats.heldBytes, 2 * 4096);
+test("a stream reads 64 KiB first, then twice as much each time it follows on, up to 1 MiB; a seek starts over", () => {
+  const d = disc(8 << 20);
+  const ra = createDiscReadahead({ readBlob: d.readBlob });
+  const out = new Uint8Array(16 << 10);
+  for (let p = 0; p < (3 << 20); p += out.length) ra.read(d.stream, out, 0, out.length, p);
+  const sizes = d.calls.map(([a, b]) => (b - a) >> 10);
+  assert.deepEqual(sizes.slice(0, 6), [64, 128, 256, 512, 1024, 1024]);
+  const before = d.calls.length;
+  ra.read(d.stream, out, 0, 100, 6 << 20); // a seek
+  assert.equal((d.calls[before][1] - d.calls[before][0]) >> 10, 64);
+  // 3 MiB of 16 KiB reads: a handful of segment reads, the rest copies.
+  assert.ok(ra.stats.blockHits > 180 && before <= 7, `${before} reads, ${ra.stats.blockHits} hits`);
 });
 
-test("the worker reads the disc in blocks by default, ?discreadahead=0 turns it off, and counts it", async () => {
+test("what is held stays under the cap, oldest segments out first", () => {
+  const d = disc(8 << 20);
+  const ra = createDiscReadahead({ readBlob: d.readBlob, heldBytes: 2 << 20 });
+  const out = new Uint8Array(16 << 10);
+  for (let p = 0; p < (6 << 20); p += out.length) ra.read(d.stream, out, 0, out.length, p);
+  assert.ok(ra.stats.heldBytes <= 2 << 20, `${ra.stats.heldBytes} held`);
+  assert.ok(ra.stats.maxHeldBytes <= (2 << 20) + (1 << 20), "at most one segment over the cap, before eviction");
+  // The oldest region was let go: reading it again is a new (small) read.
+  const before = d.calls.length;
+  ra.read(d.stream, out, 0, 100, 0);
+  assert.equal(d.calls.length, before + 1);
+});
+
+test("the worker reads the disc ahead by default, ?discreadahead=0 turns it off, and counts it", async () => {
   const read = (p) => readFile(new URL(p, import.meta.url), "utf8");
   const w = await read("../src/upstream-discio-worker.js");
   // Before the harness's timing wrapper, so (a) times the reads in blocks.
