@@ -74,6 +74,7 @@ export class UpstreamWorkerAdapter {
     onStatus = () => {},
     canvas = null,
     transferCanvas = null,
+    replacePresenterCanvas = null,
     visibleCanvas = null,
     videoBackend = "Software Renderer",
     cpuThread = false,
@@ -105,6 +106,7 @@ export class UpstreamWorkerAdapter {
     efbCopyRam = false,
     wgpuMask = "",
     wgpuFallback = false,
+    dstAlphaTwoPass = true,
     discReadahead = true,
     webglSoftware = false,
     savesMode = "",
@@ -183,6 +185,7 @@ export class UpstreamWorkerAdapter {
     this.onStatus = onStatus;
     this.canvas = canvas;
     this.transferCanvasFn = typeof transferCanvas === "function" ? transferCanvas : null;
+    this.replacePresenterCanvasFn = typeof replacePresenterCanvas === "function" ? replacePresenterCanvas : null;
     this.workerCanvas = Boolean(canvas) || Boolean(this.transferCanvasFn);
     this.visibleCanvas = visibleCanvas;
     this.detachedOglContext = null;
@@ -221,6 +224,7 @@ export class UpstreamWorkerAdapter {
     this.efbCopyRam = Boolean(efbCopyRam);
     this.wgpuMask = String(wgpuMask || "");
     this.wgpuFallback = Boolean(wgpuFallback);
+    this.dstAlphaTwoPass = dstAlphaTwoPass !== false;
     this.discReadahead = discReadahead !== false;
     this.webglSoftware = Boolean(webglSoftware);
     this.savesMode = String(savesMode || "");
@@ -456,6 +460,7 @@ export class UpstreamWorkerAdapter {
       efbCopyRam: this.efbCopyRam,
       wgpuMask: this.wgpuMask,
       wgpuFallback: this.wgpuFallback,
+      dstAlphaTwoPass: this.dstAlphaTwoPass,
       discReadahead: this.discReadahead,
       webglSoftware: this.webglSoftware,
       savesMode: this.savesMode,
@@ -1038,6 +1043,24 @@ export class UpstreamWorkerAdapter {
       .catch((e) => ({ loaded: false, error: e.message }));
   }
 
+  // The worker's WebGL presenter lost its context and the browser did not
+  // restore it: a new canvas for a 2D presenter (the old one keeps its dead
+  // WebGL context forever).
+  async replaceLostPresenterCanvas() {
+    if (!this.replacePresenterCanvasFn || !this.worker) return;
+    let canvas = null;
+    try {
+      canvas = this.replacePresenterCanvasFn();
+    } catch (error) {
+      this.onStatus(`Presenter canvas could not be replaced: ${error instanceof Error ? error.message : error}`);
+      return;
+    }
+    if (!canvas) return;
+    await this.request("replacePresenterCanvas", { canvas }, [canvas]).catch((error) => {
+      this.onStatus(`Presenter canvas replacement failed: ${error instanceof Error ? error.message : error}`);
+    });
+  }
+
   request(type, payload = {}, transfer = []) {
     if (!this.worker) {
       throw new Error("Upstream worker has not been created");
@@ -1176,6 +1199,13 @@ export class UpstreamWorkerAdapter {
     }
     if (message?.type === "status") {
       this.onStatus(message.message);
+      return;
+    }
+    if (message?.type === "presenter-canvas-lost") {
+      // The worker may be gone by then (request throws): never unhandled.
+      this.replaceLostPresenterCanvas().catch((error) => {
+        this.onStatus(`Presenter canvas replacement failed: ${error instanceof Error ? error.message : error}`);
+      });
       return;
     }
     if (message?.type === "direct-pad") {

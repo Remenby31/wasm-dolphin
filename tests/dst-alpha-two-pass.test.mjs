@@ -53,3 +53,26 @@ test("dstalpha-zinit sets depth itself before its copies leave it alone", async 
   const copyUpdates = src.match(/#if ([^\n]*)\n\t\t\/\* Depth updates on, so the copy clears depth/);
   assert.ok(copyUpdates && !copyUpdates[1].includes("DSTALPHA_ZINIT"));
 });
+
+// Patch 0149: the second pass as a runtime switch (?dstalpha2pass=0, a kill
+// switch and an A/B within one core) and its counters for the harness.
+test("0149 gates the dst-alpha second pass on a runtime switch and counts the extra draws", async () => {
+  const patch = await read("../patches/dolphin-wasm/snapshot/0149-dst-alpha-pass-switch.patch");
+  const added = patch.split("\n").filter((l) => l.startsWith("+")).join("\n");
+  assert.match(added, /s_dst_alpha_two_pass\.load\(std::memory_order_relaxed\) &&\n\+\s*g_ActiveConfig\.iShaderCompilationMode == ShaderCompilationMode::Synchronous &&/);
+  assert.match(added, /if \(alpha_pass\)\n\+\s*s_dst_alpha_extra_draws\.fetch_add\(1/);
+  assert.match(added, /extern "C" EMSCRIPTEN_KEEPALIVE void DolphinWeb_SetDstAlphaTwoPass\(int on\)/);
+  assert.match(added, /extern "C" EMSCRIPTEN_KEEPALIVE void DolphinWeb_DstAlphaPassStats\(u32\* out\)/);
+  assert.match(await read("../src/core-host.js"), /get\("dstalpha2pass"\) !== "0"/);
+  // Every hop of ?dstalpha2pass, or the A/B compares the same thing twice.
+  const adapter = await read("../src/upstream-worker-adapter.js");
+  assert.match(adapter, /dstAlphaTwoPass = true,/);
+  assert.match(adapter, /this\.dstAlphaTwoPass = dstAlphaTwoPass !== false;/);
+  assert.match(adapter, /dstAlphaTwoPass: this\.dstAlphaTwoPass/);
+  const w = await read("../src/upstream-discio-worker.js");
+  assert.match(w, /dstAlphaTwoPass: payload\.dstAlphaTwoPass,/);
+  assert.match(w, /^  dstAlphaTwoPass = true,$/m);
+  assert.match(w, /case "validationReadDstAlphaPasses": \{\n[^\n]*\n\s*if \(!harnessEnabled\) return/);
+  assert.match(w, /api\.setDstAlphaTwoPass\?\.\(dstAlphaTwoPass !== false \? 1 : 0\);/);
+  assert.match(w, /case "validationReadDstAlphaPasses":/);
+});
