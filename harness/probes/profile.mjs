@@ -18,7 +18,15 @@
 //   On the Spark bench: harness/remote/spark-profile.sh (FIFO queue, lane a).
 //
 //   [--state scene.sav] [--tree <checkout> (default: this one)] [--serve <dir> (default: --tree)] [--warmup 40] [--secs 20] [--port 8791]
-//   [--chrome <path>] [--js-flags "..."]
+//   [--chrome <path>] [--js-flags "..."] [--event cycles:u]
+//   [--emulated-window S [--emulated-warmup W] [--hold KeyX]]
+//
+// --emulated-window: the window of race-perf --emulated-window (the pinned
+// scene protocol): from the savestate, W guest seconds of warmup, then S
+// guest seconds, however slow the profiled run is (--warmup, --secs: host
+// seconds, ignored). perf stops at the window's last tick read. --hold: the
+// key race-perf holds from the savestate on (its default KeyX; none for the
+// pinned heavy protocol, --hold "").
 //
 // The jitdump weighs ~417 MB for 75 s: --out must be outside the repository
 // (research/deep-region-profiling.md). The run is heavily perturbed (jitdump,
@@ -40,7 +48,8 @@ const { values: o } = parseArgs({
     tree: { type: "string" }, iso: { type: "string" }, out: { type: "string" }, state: { type: "string" }, serve: { type: "string" },
     query: { type: "string", default: "core=upstream&video=wgpu&presenter=webgpu&cpu=dual&speed=1&wasmjit=1&jitwarmup=60&oc=1&aot=1" },
     warmup: { type: "string", default: "40" }, secs: { type: "string", default: "20" }, port: { type: "string", default: "8791" },
-    chrome: { type: "string" }, "js-flags": { type: "string", default: "" }, perf: { type: "string" }, freq: { type: "string", default: "4999" }
+    chrome: { type: "string" }, "js-flags": { type: "string", default: "" }, perf: { type: "string" }, freq: { type: "string", default: "4999" }, event: { type: "string" },
+    "emulated-window": { type: "string" }, "emulated-warmup": { type: "string", default: "1" }, hold: { type: "string", default: "" }
   }
 });
 const HERE_TREE = path.resolve(import.meta.dirname, "..", "..");
@@ -54,6 +63,9 @@ const lib = (f) => import(pathToFileURL(path.join(tree, "harness", "lib", f)).hr
 const { ensureServer, loadHarnessState, readCoreProgress, workerRequest } = await lib("browser.mjs");
 const { openSession } = await lib("session.mjs");
 const { acquirePerfLock } = await lib("perf-lock.mjs");
+const { emulatedStart } = await lib("emulated-window.mjs");
+const emulated = o["emulated-window"] ? { secs: Number(o["emulated-window"]), warmup: Number(o["emulated-warmup"]) } : null;
+if (emulated && !(emulated.secs > 0 && emulated.warmup >= 0)) { console.error("--emulated-window S (> 0) [--emulated-warmup W (>= 0)]"); process.exit(2); }
 
 // --perf-prof: jitdump with code bytes (perf-jit.cc). It implies --log
 // (flag-definitions.h:4479): the v8.log goes next to the dump, one file.
@@ -81,8 +93,9 @@ try {
     if (!loaded?.loaded) throw new Error(`savestate load failed: ${JSON.stringify(loaded)}`);
     log(`savestate ${path.basename(o.state)} loaded`);
   }
-  log(`booted; warm-up ${o.warmup} s`);
-  await sleep(Number(o.warmup) * 1000);
+  log(emulated ? `booted; emulated warm-up ${emulated.warmup} guest s` : `booted; warm-up ${o.warmup} s`);
+  const emu = emulated ? await emulatedStart(page, { warmup: emulated.warmup, press: o.hold ? () => page.keyboard.down(o.hold) : undefined }) : null;
+  if (!emu) await sleep(Number(o.warmup) * 1000);
   const aot = await workerRequest(page, "validationReadAotProgress", {}, 10000).catch((e) => ({ error: String(e) }));
   const installs = (aot?.events ?? []).filter((e) => e.type === "install" || e.type === "done");
   log(`aot state ${aot?.state ?? aot?.error}; last events ${JSON.stringify(installs.slice(-2))}`);
@@ -96,16 +109,24 @@ try {
   const win = { start: Date.now(), monoStartNs: String(process.hrtime.bigint()), rendererPid, query: o.query, iso: path.basename(o.iso) };
   if (o.perf && rendererPid) {
     const [cmd, ...pre] = o.perf.split(/\s+/);
-    const args = [...pre, "record", "-k", "mono", "-F", o.freq, "-g", "-p", String(rendererPid), "-o", path.join(out, "perf.data"), "--", "sleep", o.secs];
+    // An emulated window has no known length: perf runs until SIGINT.
+    const args = [...pre, "record", "-k", "mono", "-F", o.freq, ...(o.event ? ["-e", o.event] : []), "-g", "-p", String(rendererPid), "-o", path.join(out, "perf.data"), ...(emu ? [] : ["--", "sleep", o.secs])];
     log(`${cmd} ${args.join(" ")}`);
     perf = spawn(cmd, args, { stdio: "inherit" });
   }
-  log(`window ${o.secs} s`);
-  await sleep(Number(o.secs) * 1000);
+  const perfExit = perf && new Promise((r) => perf.on("exit", r));
+  if (emu) {
+    log(`window ${emulated.secs} guest s`);
+    win.emulated = await emu.window(emulated.secs);
+    perf?.kill("SIGINT");
+  } else {
+    log(`window ${o.secs} s`);
+    await sleep(Number(o.secs) * 1000);
+  }
   win.end = Date.now(); win.monoEndNs = String(process.hrtime.bigint());
   const after = await readCoreProgress(page).catch(() => null);
   win.progress = { before, after };
-  if (perf) await new Promise((r) => perf.on("exit", r));
+  if (perf) await perfExit;
   writeFileSync(path.join(out, "window.json"), JSON.stringify(win, null, 2));
   log(`frames ${before?.frame} -> ${after?.frame}; window.json written`);
 } finally {

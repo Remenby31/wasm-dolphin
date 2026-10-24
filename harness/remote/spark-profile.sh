@@ -11,7 +11,10 @@
 #   ssh spark salon-bench/bin/spark-queue list --eta        (its place)
 # A bench build (spark-run --build <ref>: build/wt/<commit>) holds only the
 # served files: run from a harness snapshot (~/salon-bench/harness/<key>)
-# with SERVE=~/salon-bench/build/wt/<commit>; STATE=<.sav> profiles a scene.
+# with SERVE=~/salon-bench/build/wt/<commit>; STATE=<.sav> profiles a scene;
+# EMU="S W" profiles race-perf's emulated window (S guest seconds after W of
+# warmup; HOLD=<key> held from the savestate on, none by default);
+# EVENT=cycles:u samples that event (perf's default otherwise).
 #
 # Needs perf usable by the bench user for its own processes:
 #   kernel.perf_event_paranoid <= 2 (Ubuntu ships 4: no perf at all for
@@ -33,10 +36,13 @@ mkdir -p "$out"
   export HARNESS_CHROME_PATH="$PWD/harness/remote/chrome-pinned.sh"
   export SPARK_CHROMIUM="$(ls -d "$B"/ms-playwright/chromium-*/chrome-linux*/chrome | sort -V | tail -1)"
   export SPARK_CHROME_CPUS=15-19
+  # The pairs' codegen (spark-race.sh): no explicit bounds check on wasm stores.
+  export HARNESS_CHROME_ARGS="${HARNESS_CHROME_ARGS:+$HARNESS_CHROME_ARGS }--js-flags=--wasm-partial-oob-writes-are-noops"
   echo "[spark-profile] $(date -Is) $("$SPARK_CHROMIUM" --version) perf=$PERF paranoid=$(cat /proc/sys/kernel/perf_event_paranoid)"
   taskset -c 10-14 node harness/probes/profile.mjs --tree "$PWD" --iso "$iso" --out "$out" --port 8090 ${SERVE:+--serve "$SERVE"} ${STATE:+--state "$STATE"} \
     --query "${QUERY:-core=upstream&video=null&presenter=2d&cpu=dual&speed=1&wasmjit=1&jitwarmup=60&oc=1&aot=1}" \
-    --perf "$PERF" --freq 4999 --warmup "${WARMUP:-45}" --secs "${SECS:-20}"
+    --perf "$PERF" --freq 4999 --warmup "${WARMUP:-45}" --secs "${SECS:-20}" ${EVENT:+--event "$EVENT"} \
+    ${EMU:+--emulated-window "${EMU% *}" --emulated-warmup "${EMU#* }"} ${HOLD:+--hold "$HOLD"}
   echo "[spark-profile] run exit $?"
   [ -s "$out/perf.data" ] || { echo "[spark-profile] no perf.data"; exit 3; }
   # Our own mapping (no inject needed): pid/tid/time/ip of every sample.

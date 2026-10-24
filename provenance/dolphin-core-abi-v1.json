@@ -1,19 +1,19 @@
 {
   "schemaVersion": 1,
   "abiVersion": 1,
-  "coreId": "sha256:951d5c41b41002fc90f26191a86b24febab4843be048f4e28dceb9a821140541",
+  "coreId": "sha256:789c90151723d8f4bf6be9a88b3d264bf855356a764743455de5cd304390d944",
   "upstreamCommit": "e22551eae1c84a7e4d0b6a5c519ef4ed4ef69df1",
   "artifacts": [
     {
       "path": "cores/dolphin/dolphin-core-upstream.js",
       "hashMode": "lf-normalized",
-      "size": 283383,
-      "sha256": "c0f45e57552fcff5a440008c2110096da30ef57bbb3e9a09d8a71ea6aa6a5c86"
+      "size": 284221,
+      "sha256": "cd8c4b17d55d92d9198334b7daafcafde6ae7934e5339e9e320292486d0f755d"
     },
     {
       "path": "cores/dolphin/dolphin-core-upstream.wasm",
-      "size": 13193903,
-      "sha256": "951d5c41b41002fc90f26191a86b24febab4843be048f4e28dceb9a821140541"
+      "size": 13201885,
+      "sha256": "789c90151723d8f4bf6be9a88b3d264bf855356a764743455de5cd304390d944"
     }
   ],
   "contractSources": [
@@ -86,8 +86,8 @@
     {
       "path": "src/core-host.js",
       "hashMode": "lf-normalized",
-      "size": 77229,
-      "sha256": "aaadbf6136a0aaf461ea063a24e2b215b8baf52ef6631ddb1cccdd178ff69905"
+      "size": 79285,
+      "sha256": "b29fd9593b70acc143e5fdf7e15923b8647c2c07151bb72b119521608e965f74"
     },
     {
       "path": "src/diagnostic-log-filter.js",
@@ -140,8 +140,8 @@
     {
       "path": "src/upstream-discio-worker.js",
       "hashMode": "lf-normalized",
-      "size": 737568,
-      "sha256": "be99e8a689f3824f7640e113e02753fbcf5d9bac98a2bd8186cf315c8610fa2f"
+      "size": 752687,
+      "sha256": "914fd7369dcd6d3024d726d770817365329b56ddea772d16873b560ee05b4af8"
     },
     {
       "path": "src/wgpu-renderer-worker-probe.js",
@@ -164,8 +164,8 @@
     {
       "path": "src/upstream-worker-adapter.js",
       "hashMode": "lf-normalized",
-      "size": 53873,
-      "sha256": "6a9cbf66b05346dd42527ecf78a613ad95c93ee092bb0662b1f5dd8da4536a1f"
+      "size": 55498,
+      "sha256": "f4e73f2ac49b1871c2a2d55f7eba1072032d2322f888b3d1766e92dd47b62a00"
     },
     {
       "path": "src/upstream-worker-protocol.js",
@@ -406,6 +406,9 @@
     "_DolphinWeb_AxHleStats",
     "_DolphinWeb_DirectPadBlock",
     "_DolphinWeb_DirectPadLayout",
+    "_DolphinWeb_DiscReadStats",
+    "_DolphinWeb_DiscReadStatsResetMax",
+    "_DolphinWeb_DstAlphaPassStats",
     "_DolphinWeb_EmulatedRtc",
     "_DolphinWeb_FmaIsMusl",
     "_DolphinWeb_FusedMadd",
@@ -455,6 +458,7 @@
     "_DolphinWeb_JitRegionChainStats",
     "_DolphinWeb_JitRegionCount",
     "_DolphinWeb_JitRegionInstallSamples",
+    "_DolphinWeb_JitRegionMissTop",
     "_DolphinWeb_JitRegionStats",
     "_DolphinWeb_JitRegionTransitionTop",
     "_DolphinWeb_JitSetRegionChaining",
@@ -474,6 +478,9 @@
     "_DolphinWeb_RegionCallStats",
     "_DolphinWeb_RegionChainHelper",
     "_DolphinWeb_RegionGuardRefusals",
+    "_DolphinWeb_SetCodeSpaceMiB",
+    "_DolphinWeb_SetDiscReadStatsEnabled",
+    "_DolphinWeb_SetDstAlphaTwoPass",
     "_DolphinWeb_SetFprfForTest",
     "_DolphinWeb_SetFusedMadd",
     "_DolphinWeb_SetGpuSpinBudget",
@@ -654,6 +661,7 @@
       "mountFile",
       "pause",
       "rendererDiagnostics",
+      "replacePresenterCanvas",
       "reset",
       "resume",
       "runFrame",
@@ -676,11 +684,14 @@
       "validationFinalizeWgpuMappedDrain",
       "validationFinalizeWgpuRendererProbe",
       "validationFinalizeWgpuReplay",
+      "validationLoseWebGlContext",
       "validationPcSampler",
       "validationReadAotProgress",
       "validationReadAxHleStats",
       "validationReadCoreProgress",
       "validationReadDetTrace",
+      "validationReadDiscReads",
+      "validationReadDstAlphaPasses",
       "validationReadHeadroomStats",
       "validationReadJitCacheReadiness",
       "validationReadJitRegionStats",

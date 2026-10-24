@@ -124,6 +124,10 @@ export class EmulatorHost {
     // Harness: accept a CPU fallback WebGPU adapter (SwiftShader), refused for
     // the app as no usable GPU (the Windows CI lane has nothing else).
     this.wgpuFallback = new URLSearchParams(window.location.search).get("wgpufallback") === "1";
+    // ?dstalpha2pass=0 (patch 0149): the dst-alpha second pass (0136) off.
+    this.dstAlphaTwoPass = new URLSearchParams(window.location.search).get("dstalpha2pass") !== "0";
+    // ?discreadahead=0: the disc read exactly as asked (no read-ahead).
+    this.discReadahead = new URLSearchParams(window.location.search).get("discreadahead") !== "0";
     // Harness: keep a software WebGL presenter (SwiftShader), which the app
     // refuses for the 2D canvas (cheaper on a CPU).
     this.webglSoftware = new URLSearchParams(window.location.search).get("webglsw") === "1";
@@ -152,6 +156,7 @@ export class EmulatorHost {
     // The wasm engine (src/wasm-engine.js), resolved here once: a worker's
     // location is its own script's, so ?wasmengine= reaches it only this way.
     this.wasmEngine = wasmEngine({ search: window.location.search });
+    this.codeSpaceMiB = requestedCodeSpaceMiB(window.location.search, this.wasmEngine);
     // ?regioncap=N|0: the region function cap forced (tests, benches); by
     // default the worker takes it from the engine (JSC only).
     const regionCap = new URLSearchParams(window.location.search).get("regioncap");
@@ -327,6 +332,25 @@ export class EmulatorHost {
     // captureStream to the original canvas, permanently locking it from
     // transfer. Swapping in a fresh canvas element severs any such binding
     // because the new element has none of that history.
+    // A fresh canvas element in place of the current one (its attributes
+    // copied), transferred to the worker. Also used once the worker's WebGL
+    // presenter lost its context for good: a canvas that had a WebGL context
+    // can never get a 2D one.
+    const replaceCanvasForWorker = () => {
+      const replacement = document.createElement("canvas");
+      replacement.id = canvas.id;
+      replacement.width = canvas.width;
+      replacement.height = canvas.height;
+      for (const cls of canvas.classList) replacement.classList.add(cls);
+      replacement.setAttribute("aria-label", canvas.getAttribute("aria-label") || "");
+      if (canvas.parentNode) canvas.parentNode.replaceChild(replacement, canvas);
+      // Re-point the host's reference and the elements registry.
+      canvas = replacement;
+      this.canvas = replacement;
+      const off = replacement.transferControlToOffscreen();
+      off.id = "canvas";
+      return off;
+    };
     const transferCanvasToOffscreen = () => {
       if (!this.usesAdapterCanvas || typeof canvas.transferControlToOffscreen !== "function") {
         return null;
@@ -341,20 +365,8 @@ export class EmulatorHost {
         try {
           // Replace the DOM canvas with a freshly-created one. The new
           // element has no captureStream history, no extension hooks, no
-          // compositor binding. Copy across the relevant attributes.
-          const replacement = document.createElement("canvas");
-          replacement.id = canvas.id;
-          replacement.width = canvas.width;
-          replacement.height = canvas.height;
-          for (const cls of canvas.classList) replacement.classList.add(cls);
-          replacement.setAttribute("aria-label", canvas.getAttribute("aria-label") || "");
-          if (canvas.parentNode) canvas.parentNode.replaceChild(replacement, canvas);
-          // Re-point the host's reference and the elements registry.
-          canvas = replacement;
-          this.canvas = replacement;
-          const off = replacement.transferControlToOffscreen();
-          off.id = "canvas";
-          return off;
+          // compositor binding.
+          return replaceCanvasForWorker();
         } catch (err2) {
           console.warn("[host] canvas-replacement transferControlToOffscreen also failed:", err2);
           return null;
@@ -378,6 +390,7 @@ export class EmulatorHost {
             ppcWasmJitWarmupFrames: this.ppcWasmJitWarmupFrames,
             ppcProfile: this.ppcProfile,
             gpuSpinMicros: this.gpuSpinMicros,
+            codeSpaceMiB: this.codeSpaceMiB,
             cpuOverclock: this.cpuOverclock,
             emulationSpeed: this.emulationSpeed,
             presentationScale: this.presentationScale,
@@ -407,6 +420,13 @@ export class EmulatorHost {
                 this.oglSabEnabled || this.usesDetachedWgpu
                 ? null
                 : transferCanvasToOffscreen,
+            // After a lost WebGL context: a new element, so whoever captures
+            // the canvas (captureStream) must re-capture: "presentercanvas".
+            replacePresenterCanvas: () => {
+              const off = replaceCanvasForWorker();
+              window.dispatchEvent(new CustomEvent("presentercanvas", { detail: { canvas: this.canvas } }));
+              return off;
+            },
             visibleCanvas:
               (this.videoBackend === "OGL" && this.oglProxyMode === "worker") ||
                 this.oglSabEnabled || this.usesDetachedWgpu
@@ -426,6 +446,7 @@ export class EmulatorHost {
             ppcWasmJitWarmupFrames: this.ppcWasmJitWarmupFrames,
             ppcProfile: this.ppcProfile,
             gpuSpinMicros: this.gpuSpinMicros,
+            codeSpaceMiB: this.codeSpaceMiB,
             cpuOverclock: this.cpuOverclock,
             emulationSpeed: this.emulationSpeed,
             presentationScale: this.presentationScale,
@@ -449,6 +470,8 @@ export class EmulatorHost {
             efbCopyRam: this.efbCopyRam,
             wgpuMask: this.wgpuMask,
             wgpuFallback: this.wgpuFallback,
+            dstAlphaTwoPass: this.dstAlphaTwoPass,
+            discReadahead: this.discReadahead,
             webglSoftware: this.webglSoftware,
             savesMode: this.savesMode,
             efbDiag: this.efbDiag,
@@ -1440,6 +1463,18 @@ export function parseGpuSpinMicros(raw) {
   if (/^\d{1,7}$/.test(raw) && Number(raw) <= MAX_GPU_SPIN_MICROS) return Number(raw);
   console.warn(`?gpuspin=${JSON.stringify(raw)} ignored: expected -1 or an integer from 0 to ${MAX_GPU_SPIN_MICROS} (microseconds); using ${DEFAULT_GPU_SPIN_MICROS}`);
   return DEFAULT_GPU_SPIN_MICROS;
+}
+// The CachedInterpreter code space (patch 0138), in MiB. Its whole size is
+// dirtied at boot (Emscripten's mmap zeroes it). Under JSC (iOS) that memory
+// counts for jetsam and 32 MiB hold the working set (peak 4 to 9 MiB measured):
+// 32. Elsewhere (V8) a smaller space moved the later heap allocations and
+// cost up to 1 % (measured): 128, as before. ?codespace=<4..128> overrides.
+export const CODE_SPACE_MIB_JSC = 32;
+export const CODE_SPACE_MIB_DEFAULT = 128;
+export function requestedCodeSpaceMiB(search, engine) {
+  const raw = new URLSearchParams(search).get("codespace");
+  if (raw != null && /^\d{1,3}$/.test(raw) && Number(raw) >= 4 && Number(raw) <= 128) return Number(raw);
+  return engine === "jsc" ? CODE_SPACE_MIB_JSC : CODE_SPACE_MIB_DEFAULT;
 }
 function requestedGpuSpinMicros() {
   return parseGpuSpinMicros(new URLSearchParams(window.location.search).get("gpuspin"));
