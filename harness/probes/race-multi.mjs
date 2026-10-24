@@ -303,6 +303,8 @@ async function main() {
   const runs = num(values, "runs", { min: 1, int: true });
   if (runs % arms.length) throw new Error(`--runs ${runs}: a multiple of the ${arms.length} arms, so each arm visits each lane equally`);
   const o = {
+    // measure() loads the savestate only when told (a homebrew has none, #178).
+    state: path.resolve(values.state),
     query: `${values.query ?? PRESETS[values.config] ?? values.config}&metrics=1`,
     warmup: num(values, "warmup", { min: 0 }), secs: num(values, "secs", { min: 2, int: true }), hold: values.hold || null,
     maxLoad: values["max-load"] ? num(values, "max-load", { min: 0.1 }) : arms.length * Math.max(2, os.cpus().length / 4)

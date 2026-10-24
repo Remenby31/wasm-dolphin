@@ -37,6 +37,8 @@ test("CI bench: manual or bench/** pushes only, never a disc, read-only token, b
   // A switch on the candidate side only: validated &key=value pairs, the baseline without them.
   assert.match(workflow, /\[\[ "\$CANDIDATE_QUERY" =~ \^\(\\&\[a-z0-9_\]\+=\[A-Za-z0-9\._-\]\+\)\+\$ \]\]/);
   assert.match(workflow, /extra="\$CANDIDATE_QUERY"/);
+  // The GPU-less runner's presenter (#175) is out of the measure: both sides fall back.
+  assert.match(workflow, /query="core=upstream&video=null&cpu=single&speed=unlimited&synconidle=1&wasmjit=1&jitwarmup=60&wgpufallback=1\$AOT"/);
   assert.match(workflow, /sides=\(--baseline "\$BASELINE" --candidate "\$CANDIDATE"\)/);
   assert.doesNotMatch(workflow, /--state|\.sav\b|roms\/|\.iso\b/);
   assert.match(workflow, /--pin-cpu-thread 0/);

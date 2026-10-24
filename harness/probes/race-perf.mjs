@@ -420,7 +420,8 @@ export function regionRecord(reply) {
     // the host work per guest cycle with it, bench 2026-10-22), and the 0084
     // heap patches
     ...regionPipeline(reply),
-    ...(reply.regionChain ? { regionChain: reply.regionChain } : {})
+    ...(reply.regionChain ? { regionChain: reply.regionChain } : {}),
+    ...(reply.regionCalls ? { regionCalls: reply.regionCalls } : {}) // 0142
   };
   return p4.error ? { p4: null, p4Why: p4.error, ...samples } : { p4, p4Raw: stats, ...samples };
 }

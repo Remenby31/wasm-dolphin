@@ -383,6 +383,7 @@ export function coreRegionTranslator(m, { mask, helperNames, maxBlocks = 64, max
   if (typeof m?._DolphinWeb_AotTranslate !== "function") return null;
   const names = helperNames ?? coreAssembleOptions(m)?.helperNames ?? [];
   return {
+    unitContinuationBytes: REGION_UNIT_CONTINUATION_MAX_BYTES,
     async translate(batch) {
       await yieldNow();
       let t0 = now();
@@ -402,7 +403,10 @@ export function coreRegionTranslator(m, { mask, helperNames, maxBlocks = 64, max
           out.push({ entry: f.entry, reason: "budget" });
           break;
         }
-        const r = await translateWithContinuations(m, f, { mask, maxBlocks, names, maxContinuations, maxBytes: unitBytes, slice });
+        // A large member's even share of what is left (the optimiser gives
+        // the rest back to the refused ones at the module's end, `resume`).
+        const share = f.largeLeft > 1 ? Math.floor(unitBytes / f.largeLeft) : unitBytes;
+        const r = await translateWithContinuations(m, f, { mask, maxBlocks, names, maxContinuations, maxBytes: share, slice });
         unitBytes -= r.budgetCharged ?? 0;
         out.push(r);
         if (r.reason === "budget" || r.reason === "not-ready") break;
@@ -451,39 +455,73 @@ export async function translateWithContinuations(m, f, { mask, maxBlocks, names,
   // function's budget and the module's (review of 0130: −39 % when the
   // moved code ran out of budget and fell back to the dispatcher).
   let freeBlocks = Math.max(0, REGION_UNCUT_BLOCKS - first.fragment.entries.length);
-  let bytes = Math.min(maxBytes, REGION_CONTINUATION_MAX_BYTES);
-  let charged = 0;
+  let fnBytes = REGION_CONTINUATION_MAX_BYTES; // the function's own cap, over every grow
   let oversize = 0;
-  let budgetRefused = 0;
-  const next_ = () => frontier(branches, owned).filter((x) => !tried.has(x));
-  for (;;) {
-    const waiting = next_();
-    if (!waiting.length) break;
-    if (continuations.length >= maxContinuations || bytes <= 0) {
-      budgetRefused = waiting.length; // left as exits for lack of budget
-      break;
+  // `elsewhere`: entries another member of the module already holds (a
+  // continuation started there would be dropped at assembly, its bytes
+  // charged for nothing).
+  const next_ = (elsewhere) => frontier(branches, owned).filter((x) => !tried.has(x) && !elsewhere?.has(x));
+  // Continuations from the frontier until it is empty or the next one would
+  // cost more than `limit` (never past it: that one goes back to the
+  // frontier, for a later share); what is left waiting is refused for lack
+  // of budget. `exhausted`: the function's own cap is reached (no share can
+  // help it any more).
+  const grow = async (limit, elsewhere = null) => {
+    let bytes = Math.min(limit, fnBytes);
+    let charged = 0, refused = 0;
+    const added = [];
+    for (;;) {
+      const waiting = next_(elsewhere);
+      if (!waiting.length) break;
+      if (continuations.length >= maxContinuations || bytes <= 0) {
+        refused = waiting.length; // left as exits for lack of budget
+        break;
+      }
+      const pc = waiting[0];
+      tried.add(pc);
+      await slice();
+      let next = translateOne(m, { ...f, entry: pc }, { mask, maxBlocks, names });
+      for (let blocks = maxBlocks; next.fragment && next.fragment.code.length > maxFragmentBytes && blocks > 1;) {
+        blocks = Math.max(1, blocks >> 1);
+        next = translateOne(m, { ...f, entry: pc }, { mask, maxBlocks: blocks, names });
+      }
+      if (!next.fragment) continue;
+      if (next.fragment.code.length > maxFragmentBytes) { oversize += 1; continue; } // one block alone: left an exit
+      // The share of this fragment within the old single fragment's blocks is free.
+      const n = next.fragment.entries.length;
+      const free = Math.min(freeBlocks, n);
+      const cost = Math.round(next.fragment.code.length * (n - free) / Math.max(1, n));
+      if (cost > bytes) {
+        tried.delete(pc); // past the budget: back to the frontier
+        refused = next_(elsewhere).length;
+        break;
+      }
+      freeBlocks -= free;
+      for (const e of next.fragment.entries) owned.add(e >>> 0);
+      continuations.push(next.fragment);
+      added.push(next.fragment);
+      bytes -= cost;
+      charged += cost;
     }
-    const pc = waiting[0];
-    tried.add(pc);
-    await slice();
-    let next = translateOne(m, { ...f, entry: pc }, { mask, maxBlocks, names });
-    for (let blocks = maxBlocks; next.fragment && next.fragment.code.length > maxFragmentBytes && blocks > 1;) {
-      blocks = Math.max(1, blocks >> 1);
-      next = translateOne(m, { ...f, entry: pc }, { mask, maxBlocks: blocks, names });
-    }
-    if (!next.fragment) continue;
-    if (next.fragment.code.length > maxFragmentBytes) { oversize += 1; continue; } // one block alone: left an exit
-    for (const e of next.fragment.entries) owned.add(e >>> 0);
-    continuations.push(next.fragment);
-    // The share of this fragment within the old single fragment's blocks is free.
-    const n = next.fragment.entries.length;
-    const free = Math.min(freeBlocks, n);
-    freeBlocks -= free;
-    const cost = Math.round(next.fragment.code.length * (n - free) / Math.max(1, n));
-    bytes -= cost;
-    charged += cost;
-  }
-  return { ...first, ...(continuations.length ? { continuations, budgetCharged: charged } : {}), ...(oversize ? { oversize } : {}), ...(budgetRefused ? { budgetRefused } : {}) };
+    fnBytes -= charged;
+    return { added, charged, refused, exhausted: refused > 0 && (continuations.length >= maxContinuations || fnBytes <= 0) };
+  };
+  const { charged, refused, exhausted } = await grow(maxBytes);
+  return {
+    ...first, ...(continuations.length ? { continuations: [...continuations], budgetCharged: charged } : {}), ...(oversize ? { oversize } : {}),
+    ...(refused ? { budgetRefused: refused } : {}),
+    ...(refused && !exhausted ? {
+      // The module's leftover budget, once its other functions took their
+      // share: this function's frontier goes on where it stopped (nothing
+      // translated again), never past `limit`, and not from an entry another
+      // member holds (`elsewhere`). The new continuations, what they cost,
+      // what is still refused, and whether the function's own cap is reached.
+      resume: async (limit, elsewhere = null) => {
+        const more = await grow(limit, elsewhere);
+        return { continuations: more.added, budgetCharged: more.charged, budgetRefused: more.refused, exhausted: more.exhausted };
+      }
+    } : {})
+  };
 }
 
 // The direct branches of the code in `ranges` ([start, end) guest
@@ -518,12 +556,13 @@ export function functionBranches(m, ranges) {
 }
 
 // The leaders that the blocks held already reach and that none holds, in
-// address order. A branch belongs to the block of the nearest block start
-// at or before it (held entries and all leaders), unless a block end lies
-// between them: the leaders a held block reaches are the frontier; a word
-// that only looks like a branch (a literal after a blr) is in no block.
+// address order. A branch is in held code when the nearest held entry at or
+// before it reaches it with no block end between them (the core's block can
+// run through a leader it did not split at, e.g. a loop head right after the
+// entry); a word that only looks like a branch (a literal after a blr) is in
+// no block.
 export function frontier(branches, owned) {
-  const starts = [...new Set([...owned, ...branches.flatMap(([, l]) => l)])].sort((a, b) => a - b);
+  const starts = [...owned].sort((a, b) => a - b);
   const blockOf = (a) => {
     let lo = 0, hi = starts.length - 1, at = null;
     while (lo <= hi) { const mid = (lo + hi) >> 1; if (starts[mid] <= a) { at = starts[mid]; lo = mid + 1; } else hi = mid - 1; }
@@ -534,7 +573,7 @@ export function frontier(branches, owned) {
   const out = new Set();
   for (const [a, leaders] of branches) {
     const start = blockOf(a);
-    if (!owned.has(start) || endBetween(start, a)) continue;
+    if (start === null || endBetween(start, a)) continue;
     for (const pc of leaders) if (!owned.has(pc)) out.add(pc);
   }
   return [...out].sort((a, b) => a - b);
@@ -562,6 +601,7 @@ function translateOne(m, f, { mask, maxBlocks, names }) {
     if (kind === 0) return { offset, kind: "import", name: names[value] };
     if (kind === 1) return { offset, kind: "jump", targetPc: value };
     if (kind === 3) return { offset, kind: "heap", name: REGION_HEAP_NAMES[value & 1], form: value & 2 ? "offset" : "const" };
+    if (kind === 5) return { offset, kind: "call", targetPc: value }; // a guest call as a wasm call (0142)
     if (kind === 4) return { offset, kind: "hint", likely: value === 1 }; // an `if` and whether its true arm is likely (0131)
     return { offset, kind: "dispatch" };
   });

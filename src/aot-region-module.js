@@ -349,13 +349,16 @@ export function assembleRegion(fragments, { helpers, pcOffset, memoryPages, memo
       }
       if (TEMPLATE.some((b, i) => code[r.offset + i] !== b)) throw new Error(`region: reloc at ${r.offset} is not a padded zero`);
       const opcode = code[r.offset - 1];
-      if ((r.kind === "import" && opcode !== 0x10) || ((r.kind === "jump" || r.kind === "dispatch") && opcode !== OP.returnCall)) {
+      if (((r.kind === "import" || r.kind === "call") && opcode !== OP.call) || ((r.kind === "jump" || r.kind === "dispatch") && opcode !== OP.returnCall)) {
         throw new Error(`region: ${r.kind} reloc at ${r.offset} after opcode 0x${opcode.toString(16)}`);
       }
       let index;
       if (r.kind === "import") index = helperIndex.get(r.name);
       else if (r.kind === "jump") index = entryOwner.get(r.targetPc >>> 0) ?? STUB;
       else if (r.kind === "dispatch") index = INNER;
+      // 0142: a guest call as a wasm call, to the fragment holding the
+      // callee here, else the exit stub (which chains on to its region).
+      else if (r.kind === "call") index = entryOwner.get(r.targetPc >>> 0) ?? STUB;
       else throw new Error(`region: unknown reloc kind ${r.kind}`);
       code.set(paddedUleb(index), r.offset);
     }
@@ -641,7 +644,7 @@ export function groupRegions(module, order, { maxFunctions = 100 } = {}) {
 // from 2 on (2: continuation fragments from a capped fragment's frontier,
 // aot-orchestrator translateWithContinuations), so that a cache built with
 // another formation is translated again rather than reused.
-export const REGION_FORMATION = 2;
+export const REGION_FORMATION = 3; // 3: the frontier attributes a branch to the nearest held entry; continuations allocated by priority
 export async function regionModuleKey(functions, { compilerVersion, codegenMask, chain = false, formation = REGION_FORMATION }) {
   for (const [what, v] of [["compilerVersion", compilerVersion], ["codegenMask", codegenMask]]) {
     if (!Number.isInteger(v) || v < 0 || v > 0xffffffff) throw new Error(`region: ${what} must be a u32`);
