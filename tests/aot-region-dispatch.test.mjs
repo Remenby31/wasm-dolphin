@@ -1141,7 +1141,8 @@ test("the region key changes with the formation", async () => {
   assert.notEqual(await regionModuleKey(f, { ...parts, formation: 2 }), await regionModuleKey(f, { ...parts, formation: 3 }), "3: frontier rule and shared budget");
   assert.notEqual(await regionModuleKey(f, { ...parts, formation: 3 }), await regionModuleKey(f, { ...parts, formation: 4 }), "4: continuations stop at held blocks");
   assert.notEqual(await regionModuleKey(f, { ...parts, formation: 4 }), await regionModuleKey(f, { ...parts, formation: 5 }), "5: extra entries seed the frontier");
-  assert.equal(await regionModuleKey(f, parts), await regionModuleKey(f, { ...parts, formation: 5 }), "5 by default");
+  assert.notEqual(await regionModuleKey(f, { ...parts, formation: 5 }), await regionModuleKey(f, { ...parts, formation: 6 }), "6: continuations past an uncapped first fragment");
+  assert.equal(await regionModuleKey(f, parts), await regionModuleKey(f, { ...parts, formation: 6 }), "6 by default");
 });
 
 
@@ -1380,6 +1381,23 @@ test("continuation budget: a large member gets an even share of what the module 
 // held, and a bctr into it runs in the region like the interpreter. Without
 // them it was held by nothing, even in a function far from any cap (the race
 // scene's 0x80077044).
+test("continuations: code past an mtmsr is held even when the first fragment is not full", { skip: contSkip }, async () => {
+  // A small function whose loop follows an mtmsr: the core's discovery
+  // stops at it, so the first fragment holds a few blocks, far from the cap,
+  // and the loop ran outside regions (a scene's main loop, 35 % of cycles).
+  const MTMSR_R6 = 0x7cc00124;
+  const t = assemble(LONG, [
+    asm.addi(3, 3, 1), asm.cmplwi(3, 0xffff), (pc, l) => asm.beq(pc, l.out),
+    MTMSR_R6,
+    "loop", asm.addi(4, 4, 1), asm.cmplwi(4, 40), (pc, l) => asm.bc(4, 2, pc, l.loop),
+    "out", asm.blr()
+  ]);
+  const r = await continuationsOf(t);
+  assert.ok(r.fragment.entries.length < 64 && !r.fragment.entries.includes(t.labels.loop), "the first fragment stops short of the loop");
+  const held = new Set([r.fragment, ...(r.continuations ?? [])].flatMap((x) => x.entries));
+  assert.ok(held.has(t.labels.loop), "the loop is held by a continuation");
+  assert.equal(r.budgetCharged ?? 0, 0, "within the old single fragment's free blocks");
+});
 test("continuations: an extra entry of the plan that no direct branch reaches is held, and runs like the interpreter", { skip: contSkip }, async () => {
   const t = assemble(LONG, [
     "entry", asm.addi(3, 3, 1), asm.blr(),

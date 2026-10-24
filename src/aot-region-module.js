@@ -644,7 +644,7 @@ export function groupRegions(module, order, { maxFunctions = 100 } = {}) {
 // from 2 on (2: continuation fragments from a capped fragment's frontier,
 // aot-orchestrator translateWithContinuations), so that a cache built with
 // another formation is translated again rather than reused.
-export const REGION_FORMATION = 5; // 3: frontier by nearest held entry, module budget by water-filling; 4: a continuation stops at blocks already held; 5: the plan's extra entries seed the frontier
+export const REGION_FORMATION = 6; // 3: frontier by nearest held entry, module budget by water-filling; 4: a continuation stops at blocks already held; 5: the plan's extra entries seed the frontier; 6: continuations when the frontier is not empty, the first fragment uncapped
 // functionCap: the wasm function body cap the fragments were formed under
 // (JSC, REGION_JSC_FUNCTION_CAP); in the key only when there is one, so the
 // keys without it (V8, SpiderMonkey) are those of before.
