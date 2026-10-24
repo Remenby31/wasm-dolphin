@@ -3180,9 +3180,15 @@ function harnessDiscReads({ resetMax = false } = {}) {
     }
   }
   const read = { service: { ...discReadService }, readahead: discBlockReader ? { ...discBlockReader.stats } : null, core, frame: api?.getFrame?.() ?? null };
+  // A read that finishes between this read and the reset is in neither
+  // window's maxima (accepted: a few microseconds). coreMaxReset says whether
+  // the core's maxima really started over (false with a core before 0154,
+  // where only the worker's did).
   if (resetMax) {
     discReadService.maxMs = 0;
-    moduleInstance?._DolphinWeb_DiscReadStatsResetMax?.();
+    const reset = moduleInstance?._DolphinWeb_DiscReadStatsResetMax;
+    reset?.();
+    read.coreMaxReset = typeof reset === "function";
   }
   return read;
 }
