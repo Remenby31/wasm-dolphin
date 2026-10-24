@@ -1,0 +1,24 @@
+diff --git a/Source/Core/Core/PowerPC/CachedInterpreter/CachedInterpreter.cpp b/Source/Core/Core/PowerPC/CachedInterpreter/CachedInterpreter.cpp
+--- a/Source/Core/Core/PowerPC/CachedInterpreter/CachedInterpreter.cpp
++++ b/Source/Core/Core/PowerPC/CachedInterpreter/CachedInterpreter.cpp
+@@ -6435,6 +6435,12 @@ void EmitFloatLoadStore(std::vector<u8>& body, const WasmStateLayout& layout,
+ 
+   body.push_back(0x05);
+   EmitAlignedFloatFastPathCondition(body, layout, true);
++  // 0137: for a store, whose RAM test is not hinted (the gather pipe is
++  // hot), the locked L1 is the unlikely arm and the gather pipe the likely
++  // one, so only the slow call goes out of line. A load's RAM test is
++  // likely: this whole arm is already out of line.
++  if (!load)
++    HintNextIf(body, false);  // the locked L1: rare
+   body.push_back(0x04);
+   body.push_back(0x40);
+   if (load)
+@@ -6446,6 +6452,7 @@ void EmitFloatLoadStore(std::vector<u8>& body, const WasmStateLayout& layout,
+   if (!load)
+   {
+     EmitGatherPipeFloatStoreCondition(body, layout);
++    HintNextIf(body, true);  // the gather pipe: vertex submission
+     body.push_back(0x04);
+     body.push_back(0x40);
+     EmitDirectStfsToGatherPipe(body, layout, inst);
