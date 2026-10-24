@@ -86,8 +86,8 @@
     {
       "path": "src/core-host.js",
       "hashMode": "lf-normalized",
-      "size": 76773,
-      "sha256": "bc4c9ab893b8b09fd6c55624c168f37dc7b8ea7ab709c657b0458e8218d7e670"
+      "size": 77115,
+      "sha256": "f13592da1ed6fcadf1c590d401f365879ca880657291cc90a6554cce66d8d9c2"
     },
     {
       "path": "src/diagnostic-log-filter.js",
@@ -164,8 +164,8 @@
     {
       "path": "src/upstream-worker-adapter.js",
       "hashMode": "lf-normalized",
-      "size": 54474,
-      "sha256": "72524960006e0d74896fffb6e53b952c70cd278a91db0f56fd4f8effe4764139"
+      "size": 54706,
+      "sha256": "1d155e4251eeb9f3538ea1b7deba9f8833f9105ddf0e01177463a081f1ab2487"
     },
     {
       "path": "src/upstream-worker-protocol.js",

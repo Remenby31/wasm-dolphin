@@ -22,10 +22,11 @@ test("the worker keeps the WebGL presenter restorable and asks for a new canvas 
 
 test("the adapter relays the lost presenter to the page, which hands over a fresh canvas", async () => {
   const a = await read("../src/upstream-worker-adapter.js");
-  assert.match(a, /if \(message\?\.type === "presenter-canvas-lost"\) \{\n\s*this\.replaceLostPresenterCanvas\(\);/);
+  assert.match(a, /if \(message\?\.type === "presenter-canvas-lost"\) \{\n[^\n]*\n\s*this\.replaceLostPresenterCanvas\(\)\.catch\(/);
   assert.match(a, /this\.request\("replacePresenterCanvas", \{ canvas \}, \[canvas\]\)/);
   const h = await read("../src/core-host.js");
-  assert.match(h, /replacePresenterCanvas: replaceCanvasForWorker,/);
+  // An embedder capturing the canvas (captureStream) learns of the new element.
+  assert.match(h, /replacePresenterCanvas: \(\) => \{\n\s*const off = replaceCanvasForWorker\(\);\n\s*window\.dispatchEvent\(new CustomEvent\("presentercanvas", \{ detail: \{ canvas: this\.canvas \} \}\)\);/);
 });
 
 test("litFraction counts the pixels that are not near-black", () => {

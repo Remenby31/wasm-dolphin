@@ -413,7 +413,13 @@ export class EmulatorHost {
                 this.oglSabEnabled || this.usesDetachedWgpu
                 ? null
                 : transferCanvasToOffscreen,
-            replacePresenterCanvas: replaceCanvasForWorker,
+            // After a lost WebGL context: a new element, so whoever captures
+            // the canvas (captureStream) must re-capture: "presentercanvas".
+            replacePresenterCanvas: () => {
+              const off = replaceCanvasForWorker();
+              window.dispatchEvent(new CustomEvent("presentercanvas", { detail: { canvas: this.canvas } }));
+              return off;
+            },
             visibleCanvas:
               (this.videoBackend === "OGL" && this.oglProxyMode === "worker") ||
                 this.oglSabEnabled || this.usesDetachedWgpu

@@ -1041,7 +1041,7 @@ export class UpstreamWorkerAdapter {
   // restore it: a new canvas for a 2D presenter (the old one keeps its dead
   // WebGL context forever).
   async replaceLostPresenterCanvas() {
-    if (!this.replacePresenterCanvasFn) return;
+    if (!this.replacePresenterCanvasFn || !this.worker) return;
     let canvas = null;
     try {
       canvas = this.replacePresenterCanvasFn();
@@ -1196,7 +1196,10 @@ export class UpstreamWorkerAdapter {
       return;
     }
     if (message?.type === "presenter-canvas-lost") {
-      this.replaceLostPresenterCanvas();
+      // The worker may be gone by then (request throws): never unhandled.
+      this.replaceLostPresenterCanvas().catch((error) => {
+        this.onStatus(`Presenter canvas replacement failed: ${error instanceof Error ? error.message : error}`);
+      });
       return;
     }
     if (message?.type === "direct-pad") {
