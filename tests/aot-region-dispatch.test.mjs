@@ -1522,11 +1522,11 @@ test("a trap in a callee two wasm calls deep: the handler sees the interpreter's
   }
 });
 
-// 0143: dcbf and dcbst run in region code (interpret helper). A flush loop
+// 0144: dcbf and dcbst run in region code (interpret helper). A flush loop
 // over data stays in the region; a dcbf on a line of region code (with the
 // dcache off it invalidates the line) stops the region after it. Against
 // the interpreter, in one module and across modules.
-const dcbfSkip = chainSkip || (core?.has("DolphinWeb_AotKeyParts") && keyVersion() < 32 && "core before 0143 (compiler version < 32)");
+const dcbfSkip = chainSkip || (core?.has("DolphinWeb_AotKeyParts") && keyVersion() < 33 && "core before 0144 (compiler version < 33)");
 const DCBF_TEXT = 0x8001a100;
 const DCBF_DATA = 0x80c10000;
 const dcbfOp = (a, b) => (31 << 26) | (a << 16) | (b << 11) | (86 << 1);
@@ -1539,7 +1539,7 @@ const FLUSHER = assemble(DCBF_TEXT, [
   (pc, l) => asm.lis(5, l.main >>> 16), (pc, l) => asm.ori(5, 5, l.main & 0xffff), dcbfOp(0, 5),
   asm.li(9, 7), lwz(0, 1, 20), asm.addi(1, 1, 16), mtlr(0), asm.blr()
 ]);
-test("dcbf and dcbst run in the region; a dcbf on region code stops it after, like the interpreter (0143)", { skip: dcbfSkip }, () => {
+test("dcbf and dcbst run in the region; a dcbf on region code stops it after, like the interpreter (0144)", { skip: dcbfSkip }, () => {
   const load = () => {
     const dol = buildDol({ textAddr: DCBF_TEXT, text: FLUSHER.words, entry: FLUSHER.labels.main });
     const { image, entryPoint } = imageFromDol(dol);

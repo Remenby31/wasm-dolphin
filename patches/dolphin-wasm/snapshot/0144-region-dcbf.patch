@@ -5,7 +5,7 @@ diff --git a/Source/Core/Core/PowerPC/CachedInterpreter/CachedInterpreter.cpp b/
    return DolphinWeb_CachedInterpreterCheckProgramOrDsi(ppc_state, current_pc, downcount) ? 1 : 0;
  }
  
-+// Patch 0143: lines of code invalidated over a region's pages (a dcbf/dcbst
++// Patch 0144: lines of code invalidated over a region's pages (a dcbf/dcbst
 +// interpreted in region code stops the region when it moved).
 +u32 s_region_code_lines_invalidated = 0;
  extern "C" int DolphinWeb_CachedInterpreterInterpret(int state_ptr, u32 current_pc, u32 inst_hex,
@@ -23,7 +23,7 @@ diff --git a/Source/Core/Core/PowerPC/CachedInterpreter/CachedInterpreter.cpp b/
      ++s_wasm_helper_halt_count;
      return 1;
    }
-+  // 0143: a dcbf/dcbst that invalidated a line of region code stops the
++  // 0144: a dcbf/dcbst that invalidated a line of region code stops the
 +  // region after it (the code it would go on with may be gone).
 +  if (s_region_code_lines_invalidated != code_lines_before) [[unlikely]]
 +  {
@@ -40,7 +40,7 @@ diff --git a/Source/Core/Core/PowerPC/CachedInterpreter/CachedInterpreter.cpp b/
      covered = (a >> 12) < s_region_pages.size() && s_region_pages[a >> 12] != 0;
    if (!covered)
      return;
-+  s_region_code_lines_invalidated += 1;  // 0143
++  s_region_code_lines_invalidated += 1;  // 0144
    for (u32 index = 0; index < s_regions.size(); ++index)
    {
      const InstalledRegion& region = s_regions[index];
@@ -49,7 +49,7 @@ diff --git a/Source/Core/Core/PowerPC/CachedInterpreter/CachedInterpreter.cpp b/
  bool RegionInterpretsInline(const PPCAnalyst::CodeOp& op)
  {
 +  const UGeckoInstruction inst = op.inst;
-+  // Patch 0143: dcbf and dcbst run in region code through the interpret
++  // Patch 0144: dcbf and dcbst run in region code through the interpret
 +  // helper (a flush loop over data stayed outside, one exit per line). With
 +  // the dcache off they invalidate the line's JIT code: when that line
 +  // touches a region, the helper stops the region (0142's invariant).
@@ -61,14 +61,15 @@ diff --git a/Source/Core/Core/PowerPC/CachedInterpreter/CachedInterpreter.cpp b/
    return !(inst.OPCD == 4 && inst.SUBOP10 == 1014);  // dcbz_l: a cache op
  }
  
-@@ -17492,8 +17513,8 @@ namespace
+@@ -17492,8 +17513,9 @@ namespace
  // npc and downcount in locals, with one shared exit (26 is retired, 0134's).
  // 30 (0141): paired-single FMA in f64x2 with fused relaxed_madd (28, 29 are
  // 0137's and 0139's). 31 (0142): guest calls as wasm calls, guest returns as
 -// wasm returns (was 0139).
 -constexpr u32 AOT_COMPILER_VERSION = 31;
-+// wasm returns (was 0139). 32 (0143): dcbf and dcbst in region code.
-+constexpr u32 AOT_COMPILER_VERSION = 32;
++// wasm returns (was 0139). 33 (0144): dcbf and dcbst in region code (32 is
++// 0143's).
++constexpr u32 AOT_COMPILER_VERSION = 33;
  constexpr u32 AOT_MAX_FRAGMENT_BYTES = 1u << 20;
  thread_local std::vector<u32> t_aot_out;
  u8* s_aot_ram = nullptr;
