@@ -831,6 +831,7 @@ async function main() {
         maxSpeedCpu: describe(m.map((x) => x.headroom?.maxSpeedCpu), 4),
         maxSpeedGpu: describe(m.map((x) => x.headroom?.maxSpeedGpu), 4),
         throttleSleepShare: describe(m.map((x) => x.headroom?.throttleSleepShare), 4),
+        presentSleepShare: describe(m.map((x) => x.headroom?.presentSleepShare), 4),
         xfbCopiesPerVi: describe(m.map((x) => x.headroom?.xfbCopiesPerVi), 4),
         gameFramesPerSecond: describe(m.map((x) => x.headroom?.gameFramesPerSecond), 2),
         headroomApplies: m.every((x) => x.headroom?.headroomApplies),
