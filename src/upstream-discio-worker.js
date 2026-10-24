@@ -408,9 +408,17 @@ function harnessRegionMissTop(heap, m = moduleInstance) {
   const at = typeof m?._DolphinWeb_JitRegionMissTop === "function" ? m._DolphinWeb_JitRegionMissTop() >>> 0 : 0;
   const size = 8 + 16 * REGION_MISS_TOP + 8;
   if (!at || at + size > heap.length) return null;
+  // A seqlock: the CPU thread stores seq, the entries, then seq_end; read
+  // seq_end first, copy, then seq: equal, no write overlapped the copy (read
+  // in the writer's order, a write begun after seq and still running when
+  // seq_end is read would match on a torn copy; review of #237).
+  const words = new Int32Array(heap.buffer);
+  const seqAt = at >>> 2, seqEndAt = (at + 8 + 16 * REGION_MISS_TOP) >>> 2;
+  const load = (i) => (typeof SharedArrayBuffer !== "undefined" && heap.buffer instanceof SharedArrayBuffer ? Atomics.load(words, i) : words[i]) >>> 0;
   for (let tries = 0; tries < 3; tries += 1) {
+    const ended = load(seqEndAt);
     const view = new DataView(heap.slice(at, at + size).buffer);
-    if (view.getUint32(0, true) !== view.getUint32(8 + 16 * REGION_MISS_TOP, true)) continue;
+    if (load(seqAt) !== ended) continue;
     const count = Math.min(view.getUint32(4, true), REGION_MISS_TOP);
     const declared = (pc) => [...aotRegionLedger.values()].some((r) => r.outcome === "queued" && r.entries.includes(pc));
     return Array.from({ length: count }, (_, i) => {
