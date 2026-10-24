@@ -25,7 +25,7 @@
       "commit": "01e0577914a75a2569c846778c2f93aa8e6feddd"
     }
   },
-  "patchSeriesSha256": "a96b5b67a82377d1cb419fdbee7d1a774fb03201d21e40058c76933bd8b3fee5",
+  "patchSeriesSha256": "84e8f8862696557c9ff1cc9c7ed3d55b3ec373b097dad80163b1c22a166699cb",
   "patches": [
     {
       "order": 1,
@@ -911,12 +911,36 @@
       "order": 111,
       "cwd": ".",
       "hashMode": "lf-normalized",
+      "path": "patches/dolphin-wasm/snapshot/0146-paired-simd-compact.patch",
+      "size": 7834,
+      "sha256": "a7c038f54740c6ce3ca076dc5d64bcb603c309d8ecb7dd40c4c3795a1c8ae34e"
+    },
+    {
+      "order": 112,
+      "cwd": ".",
+      "hashMode": "lf-normalized",
+      "path": "patches/dolphin-wasm/snapshot/0147-psq-simd.patch",
+      "size": 5297,
+      "sha256": "79ca72b7fc03c1543a737737ce6abbf9edec8b43b7d683b2c3416228e2065770"
+    },
+    {
+      "order": 113,
+      "cwd": ".",
+      "hashMode": "lf-normalized",
+      "path": "patches/dolphin-wasm/snapshot/0148-wgpu-ring-wake-parked-consumer.patch",
+      "size": 3049,
+      "sha256": "c80aef7d39c6faa8975e30d5a6ed58af91b3d3bc1334491d344437fc6ca716af"
+    },
+    {
+      "order": 114,
+      "cwd": ".",
+      "hashMode": "lf-normalized",
       "path": "patches/dolphin-wasm/snapshot/0151-disc-read-counters.patch",
       "size": 4078,
       "sha256": "ae9a8d06f788e658b2fef165f11b953246fb338d0d2175de4ab3b7c8403b3aa9"
     },
     {
-      "order": 112,
+      "order": 115,
       "cwd": "Externals/SFML/SFML",
       "hashMode": "lf-normalized",
       "path": "patches/dolphin-wasm/submodules/0001-sfml-emscripten-config.patch",
@@ -924,7 +948,7 @@
       "sha256": "f82197a21fe982ad83f6ee7bbf5a03839b1cebd4d64da3eab11263842bf61d89"
     },
     {
-      "order": 113,
+      "order": 116,
       "cwd": "Externals/xxhash/xxHash",
       "hashMode": "lf-normalized",
       "path": "patches/dolphin-wasm/submodules/0002-xxhash-wasm-simd-scalar.patch",
