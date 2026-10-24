@@ -127,8 +127,9 @@ export class EmulatorHost {
     this.dstAlphaTwoPass = new URLSearchParams(window.location.search).get("dstalpha2pass") !== "0";
     // ?discreadahead=0: the disc read exactly as asked (no read-ahead).
     this.discReadahead = new URLSearchParams(window.location.search).get("discreadahead") !== "0";
-    // ?discprefetch=0: read ahead without the background prefetch (0155).
-    this.discPrefetch = new URLSearchParams(window.location.search).get("discprefetch") !== "0";
+    // ?discprefetch=1: the background prefetch of the next segment (0155),
+    // off by default (within noise on Chromium; to be measured on WebKit).
+    this.discPrefetch = new URLSearchParams(window.location.search).get("discprefetch") === "1";
     // Harness: keep a software WebGL presenter (SwiftShader), which the app
     // refuses for the 2D canvas (cheaper on a CPU).
     this.webglSoftware = new URLSearchParams(window.location.search).get("webglsw") === "1";

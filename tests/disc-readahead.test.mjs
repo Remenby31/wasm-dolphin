@@ -149,14 +149,15 @@ test("the worker reads the disc ahead by default, ?discreadahead=0 turns it off,
   assert.match(a, /discReadahead: this\.discReadahead,/);
 });
 
-test("the worker prefetches with Blob.arrayBuffer by default, ?discprefetch=0 turns it off", async () => {
+test("the worker prefetches with Blob.arrayBuffer only with ?discprefetch=1 (off by default)", async () => {
   const read = (p) => readFile(new URL(p, import.meta.url), "utf8");
   const w = await read("../src/upstream-discio-worker.js");
   assert.match(w, /readBlobAsync: discPrefetchEnabled \? \(blob\) => blob\.arrayBuffer\(\) : null,/);
-  assert.match(w, /discPrefetchEnabled = discPrefetch !== false;/);
+  assert.match(w, /discPrefetchEnabled = discPrefetch === true;/);
+  assert.match(w, /^let discPrefetchEnabled = false;$/m);
   assert.match(w, /discPrefetch: payload\.discPrefetch,/);
-  assert.match(await read("../src/core-host.js"), /get\("discprefetch"\) !== "0"/);
+  assert.match(await read("../src/core-host.js"), /get\("discprefetch"\) === "1"/);
   const a = await read("../src/upstream-worker-adapter.js");
-  assert.match(a, /this\.discPrefetch = discPrefetch !== false;/);
+  assert.match(a, /this\.discPrefetch = discPrefetch === true;/);
   assert.match(a, /discPrefetch: this\.discPrefetch,/);
 });
