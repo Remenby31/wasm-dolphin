@@ -483,3 +483,78 @@ end body₀  end body₁ …  end body(N-1)  end($D) return_call dispatch  end($
 - **Unchanged.** The per-block tail (pc, downcount, its exits) and the entries.
 
 Compiler version 25.
+
+## Frame in locals (patch 0135, was 0128, 2026-10-23)
+
+A fragment block used to end with `pc ← npc` through the state, then a
+load, subtract, store and reload of downcount: 2 loads and 3 stores per
+block. A fragment now keeps pc (56), npc (57) and downcount (58) in locals:
+- Its blocks write npc to the local.
+- The block tail is `pc = npc ; downcount -= cycles ; br_if (downcount <= 0) $X`.
+- pc, npc and downcount are written back before every return and every
+  tail call. Running out of downcount branches to one shared exit `$X`
+  around the loop, which writes them back once: the first version wrote them
+  back in every block's tail and lost 0.9 % of cycles on the race (front
+  end). `$X` is only reached by those `br_if`, all hinted unlikely (0131), so
+  V8 lays it out of line: it defers a block only when all its predecessors
+  are unlikely edges. An exiting block (sc, rfi…), a jump out and the
+  dispatch write them back themselves.
+
+Every helper call that takes the state stores downcount before it and
+reloads it after: an exception takes the cycles spent, and a memory helper
+reaching MMIO reads the time (`CoreTiming::GetTicks` reads downcount) or
+schedules an event, which may lower it. `fma` takes no state: nothing
+around it. A helper
+other than the memory and FPU ones (`system`, the HLE calls) also gets pc
+and npc stored before it and npc reloaded after it. A helper that halts
+leaves its own pc, npc and downcount in the state, and the fragment
+returns 2 without writing them back: memory and FPU helpers never halt
+in a region (no DSI without the MMU, under which no region is installed,
+0090/0091; MSR.FP is never clear in one, 0121), and the MMU mode is fixed at
+boot. The downcount check's branch hint (0131) sits on its `br_if`.
+Compiler version 27.
+
+## Guest calls as wasm calls (patch 0142, 2026-10-24)
+
+A guest return (`blr`) used to leave the fragment through the region
+dispatcher's binary search, then a `return_call` into the caller's fragment
+and its head `br_table`. When the caller sat in another module, it went
+through `region_chain` and a `call_indirect` too. None of those jumps is
+predicted by the host's return stack. On the race scene returns and computed
+branches are 19 % of block transitions and 31 % of their time
+(research/deep-return-prediction.md, option R1; the native Dolphin "BLR
+optimization").
+
+- **Call.** A block ending in `bl` to a function outside the fragment writes
+  its frame back, then makes a wasm `call` (reloc kind 5) to the callee's
+  fragment in the module, else to the exit stub, which chains on to the
+  callee's region. On return:
+  - code 3 with `state.pc` at the call's continuation: the caller goes on
+    there (a direct `br` to that block, or its head);
+  - any other code, or another pc: passed up. 0 always means "continue at
+    `state.pc`", so a return elsewhere (LR rewritten, a `longjmp`) unwinds to
+    the dispatcher, as before.
+- **Return.** A block ending in a taken `bclr` marks its way to the
+  fragment's head (a local). When the head finds no block of the fragment
+  for that pc and a call made by a region is pending (depth > 0), the
+  fragment writes its frame back and returns 3. A return inside the
+  fragment (a self-recursion, whose calls are local jumps) stays there; other
+  exits (bctr) go to the dispatcher as before.
+- **Depth.** `PowerPCState::region_call_depth` counts these calls; at 64 a
+  call is a `return_call` as before (a Chrome worker holds ~960 frames of a
+  fragment's locals in Liftoff). `TryRunRegion` sets it to 0 before every
+  run: no unwind path can leave it high.
+- **Exits, and why no state generation is checked.** 3 comes only from a
+  `bclr` block reached with no exit in between. Everything that invalidates
+  code or changes the mode (sc, rfi, mtmsr, isync after icbi, a halting
+  helper, events and exceptions when downcount runs out) returns 0 or 2, and
+  every call passes it up: no caller goes on after its code may have changed.
+  `TryRunRegion` already takes any code but 1 as "ran"; the test export maps 3
+  to 0.
+- **Counters** (`DolphinWeb_RegionCallStats`, in race-perf's region stats as
+  `regionCalls`): calls past the cap and returns elsewhere count always, on
+  their cold paths; calls, the depth reached and returns passed up to the
+  CPU loop (counted by `TryRunRegion`) only while the harness samples. Off, a
+  call costs one state load and a hinted branch.
+
+Compiler version 31 (first numbered 0139, compiler version 29).

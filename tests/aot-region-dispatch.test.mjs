@@ -606,7 +606,13 @@ test("chained regions run a whole call in one dispatch, like the interpreter", {
     assert.equal(chained.ran, 1, "main, double, main, count, main: one dispatch");
     assert.ok(unchained.ran >= 4, `unchained dispatches (${unchained.ran})`);
     const chain = core.regionChainStats();
-    assert.equal(chain.chained, unchained.ran - 1, "one chain per dispatcher round trip saved");
+    if (keyVersion() >= 31) {
+      // 0142: calls go through the stub (chained), returns come back as wasm
+      // returns: fewer chains than dispatcher round trips saved.
+      assert.ok(chain.chained >= 1 && chain.chained <= unchained.ran - 1, `${chain.chained} chains for ${unchained.ran - 1} round trips saved`);
+    } else {
+      assert.equal(chain.chained, unchained.ran - 1, "one chain per dispatcher round trip saved");
+    }
     assert.equal(core.regionStats().regionCalls, 1);
   } finally {
     core.setRegionChaining(true);
@@ -1186,6 +1192,59 @@ test("a compare's field or operands rewritten in the region (fcmpu, ps_cmpu0, lm
   assert.equal(got.interpreted, 0, "no op left the region");
 });
 
+// 0135 (was 0128): a fragment keeps pc, npc and downcount in locals and writes them back
+// at its exits. A loop over memory with an FPU op kept in the region (a
+// helper call: downcount flushed and reloaded around it), run to the end and
+// stopped on downcount at every budget, against the interpreter.
+const FRAME_TEXT = 0x80015100;
+const bltFrame = (from, to) => asm.bc(12, 0, from, to);
+const FRAME = assemble(FRAME_TEXT, [
+  "main", asm.mflr(0), asm.stwu(1, 1, -16), stw(0, 1, 20), (pc, l) => asm.bl(pc, l.loop),
+  lwz(0, 1, 20), asm.addi(1, 1, 16), mtlr(0), asm.blr(),
+  "loop", asm.lis(5, DATA >>> 16), asm.ori(5, 5, DATA & 0xffff), asm.li(8, 0), asm.li(10, 0),
+  lfs(1, 5, 0), lfs(2, 5, 4),
+  "body", lwz(9, 5, 8), add(10, 10, 9), stw(10, 5, 12), faddsRc(3, 1, 2), asm.addi(8, 8, 1),
+  asm.addi(9, 9, 3), stw(9, 5, 8), asm.cmplwi(8, 5), (pc, l) => bltFrame(pc, l.body),
+  stfd(3, 5, 16), asm.blr()
+]);
+
+test("pc, npc and downcount in locals end like the interpreter, at the end and on downcount at every budget (0135)", { skip: chainSkip || (core?.has("DolphinWeb_AotKeyParts") && keyVersion() < 27 && "core before 0135 (compiler version < 27)") }, () => {
+  const dol = buildDol({ textAddr: FRAME_TEXT, text: FRAME.words, entry: FRAME.labels.main });
+  const { image, entryPoint } = imageFromDol(dol);
+  const plan = planDol({ image, entryPoint, gameId: "TEST01", dolBytes: dol, options: { gapFill: false } });
+  for (const seg of image.segments) core.load(seg.start, seg.bytes);
+  const data = new DataView(new ArrayBuffer(24));
+  data.setFloat32(0, 1.5); data.setFloat32(4, -3.25); data.setUint32(8, 7);
+  const loadData = () => core.load(DATA, new Uint8Array(data.buffer));
+  loadData();
+  core.reset(seedGprs(FRAME.labels.main), FRAME.labels.main, STOP, 400000);
+  core.setRegionsEnabled(true);
+  core.setRegionChaining(true);
+  queueAll(plan, 1, true);
+  serviceAll();
+  loadData();
+  const reference = runCall(FRAME.labels.main, { regions: false });
+  loadData();
+  const got = runCall(FRAME.labels.main, { regions: true });
+  assert.deepEqual(got.state, reference.state);
+  assert.equal(got.downcount, reference.downcount);
+  assert.equal(got.interpreted, 0, "no op left the region");
+  for (const budget of [1, 2, 4, 9, 17, 30, 47, 64]) {
+    loadData();
+    core.reset(seedGprs(FRAME.labels.main), FRAME.labels.main, STOP, budget);
+    core.dispatchRegion();
+    const stopped = { state: core.state(), downcount: core.downcount(), pc: core.pc() };
+    loadData();
+    core.reset(seedGprs(FRAME.labels.main), FRAME.labels.main, STOP, budget);
+    for (let n = 0; n < 100000 && core.downcount() > stopped.downcount; n++) assert.equal(core.interpretOne(), 0);
+    assert.equal(core.downcount(), stopped.downcount, `budget ${budget}`);
+    assert.equal(core.pc(), stopped.pc, `budget ${budget}: pc`);
+    assert.deepEqual(core.state(), stopped.state, `budget ${budget}`);
+  }
+  core.invalidate(FRAME_TEXT, 4 * FRAME.words.length);
+  core.module._DolphinWeb_AotForgetRegionsForTest?.();
+});
+
 // The local profile in a product build (harness hooks off): the sampler gets
 // the guest PC's address and a record writes the profile file. A product
 // build of #165 got 0 from the harness-only export and recorded nothing.
@@ -1446,3 +1505,211 @@ test("continuations: code rewritten during a slice refuses the fragment (plan ha
   }
 });
 
+// 0142: a guest call made by a region is a wasm `call` (to the callee's
+// fragment in the module, else the exit stub, which chains on), its return a
+// wasm return (3) that the caller takes only at its continuation. Calls
+// within one module and across modules (one region per function), a
+// recursion past the 64-call cap, a return elsewhere than the continuation
+// (LR rewritten: passed up to the dispatcher), each against the interpreter,
+// to the end and at budgets that stop it mid-call.
+const callSkip = chainSkip || (core?.has("DolphinWeb_AotKeyParts") && keyVersion() < 31 && "core before 0142 (compiler version < 31)");
+const CALL_TEXT = 0x80016100;
+const BEQLR = 0x4d820020; // beqlr cr0
+const CALLS = assemble(CALL_TEXT, [
+  "main", asm.mflr(0), asm.stwu(1, 1, -16), stw(0, 1, 20), asm.li(3, 100), asm.li(4, 0), (pc, l) => asm.bl(pc, l.recA),
+  asm.li(3, 10), (pc, l) => asm.bl(pc, l.self),
+  asm.li(3, 0), (pc, l) => asm.bl(pc, l.cond), asm.li(3, 1), (pc, l) => asm.bl(pc, l.cond),
+  (pc, l) => asm.bl(pc, l.jumper), asm.li(6, 1),
+  "elsewhere", asm.li(7, 2), lwz(0, 1, 20), asm.addi(1, 1, 16), mtlr(0), asm.blr(),
+  // recA / recB (r3): a mutual recursion 100 deep, every call to the other
+  // function's fragment (past the 64 cap); r4 += 1 per level on the way back.
+  "recA", asm.mflr(0), asm.stwu(1, 1, -16), stw(0, 1, 20), asm.cmplwi(3, 0), (pc, l) => asm.beq(pc, l.recA_done),
+  asm.addi(3, 3, -1), (pc, l) => asm.bl(pc, l.recB), asm.addi(4, 4, 1),
+  "recA_done", lwz(0, 1, 20), asm.addi(1, 1, 16), mtlr(0), asm.blr(),
+  "recB", asm.mflr(0), asm.stwu(1, 1, -16), stw(0, 1, 20), asm.cmplwi(3, 0), (pc, l) => asm.beq(pc, l.recB_done),
+  asm.addi(3, 3, -1), (pc, l) => asm.bl(pc, l.recA), asm.addi(4, 4, 1),
+  "recB_done", lwz(0, 1, 20), asm.addi(1, 1, 16), mtlr(0), asm.blr(),
+  // self (r3): a self-recursion, its calls local jumps in its fragment: its
+  // inner returns stay in the fragment (the head), only the last one is 3.
+  "self", asm.mflr(0), asm.stwu(1, 1, -16), stw(0, 1, 20), asm.cmplwi(3, 0), (pc, l) => asm.beq(pc, l.self_done),
+  asm.addi(3, 3, -1), (pc, l) => asm.bl(pc, l.self), asm.addi(4, 4, 2),
+  "self_done", lwz(0, 1, 20), asm.addi(1, 1, 16), mtlr(0), asm.blr(),
+  // cond (r3): beqlr taken with r3 == 0, not taken (r5 += 1, then blr) else.
+  "cond", asm.cmplwi(3, 0), BEQLR, asm.addi(5, 5, 1), asm.blr(),
+  // jumper: returns to `elsewhere`, not to its call's continuation.
+  "jumper", (pc, l) => asm.lis(5, l.elsewhere >>> 16), (pc, l) => asm.ori(5, 5, l.elsewhere & 0xffff), mtlr(5), asm.blr()
+]);
+// The same without the deep recursion (no call past the cap), its own
+// program so its entry is a function of the plan.
+const SMALL_TEXT = 0x80019100;
+const SMALL = assemble(SMALL_TEXT, [
+  "main", asm.mflr(0), asm.stwu(1, 1, -16), stw(0, 1, 20), asm.li(3, 10), (pc, l) => asm.bl(pc, l.self),
+  asm.li(3, 0), (pc, l) => asm.bl(pc, l.cond), asm.li(3, 1), (pc, l) => asm.bl(pc, l.cond),
+  (pc, l) => asm.bl(pc, l.jumper), asm.li(6, 1),
+  "elsewhere", asm.li(7, 2), lwz(0, 1, 20), asm.addi(1, 1, 16), mtlr(0), asm.blr(),
+  "self", asm.mflr(0), asm.stwu(1, 1, -16), stw(0, 1, 20), asm.cmplwi(3, 0), (pc, l) => asm.beq(pc, l.self_done),
+  asm.addi(3, 3, -1), (pc, l) => asm.bl(pc, l.self), asm.addi(4, 4, 2),
+  "self_done", lwz(0, 1, 20), asm.addi(1, 1, 16), mtlr(0), asm.blr(),
+  "cond", asm.cmplwi(3, 0), BEQLR, asm.addi(5, 5, 1), asm.blr(),
+  "jumper", (pc, l) => asm.lis(5, l.elsewhere >>> 16), (pc, l) => asm.ori(5, 5, l.elsewhere & 0xffff), mtlr(5), asm.blr()
+]);
+function installCalls(maxFunctions, program = CALLS, text = CALL_TEXT) {
+  const dol = buildDol({ textAddr: text, text: program.words, entry: program.labels.main });
+  const { image, entryPoint } = imageFromDol(dol);
+  const plan = planDol({ image, entryPoint, gameId: "TEST01", dolBytes: dol, options: { gapFill: false } });
+  for (const s of image.segments) core.load(s.start, s.bytes);
+  core.invalidate(text, 4 * program.words.length);
+  core.module._DolphinWeb_AotForgetRegionsForTest?.();
+  core.setRegionsEnabled(true);
+  core.setRegionChaining(true);
+  queueAll(plan, maxFunctions, true);
+  serviceAll();
+  return plan;
+}
+test("guest calls as wasm calls, in one module and across modules, past the depth cap and returning elsewhere: like the interpreter (0142)", { skip: callSkip }, () => {
+  for (const maxFunctions of [100, 1]) {
+    installCalls(maxFunctions);
+    const reference = runCall(CALLS.labels.main, { regions: false });
+    const got = runCall(CALLS.labels.main, { regions: true });
+    const what = maxFunctions === 1 ? "across modules" : "in one module";
+    assert.deepEqual(got.state, reference.state, what);
+    assert.equal(got.downcount, reference.downcount, what);
+    // jumper's return to `elsewhere` (not an entry) unwinds to the CPU loop,
+    // which interprets up to the next entry: some ops, never the calls.
+    assert.ok(got.ran >= 1, `${what}: the regions ran`);
+    // Counters (harness): the cap (the recursion 100 deep: past it, calls
+    // are return_calls and the returns below unwind as "elsewhere")...
+    const stats = () => Array.from(new Uint32Array(core.module.HEAPU8.buffer, core.module._DolphinWeb_RegionCallStats(-1), 6));
+    core.module._DolphinWeb_RegionCallStats(1);
+    runCall(CALLS.labels.main, { regions: true });
+    const [calls, , , , capped, depthMax] = stats();
+    assert.ok(calls >= 64, `${what}: ${calls} calls made as wasm calls`);
+    assert.equal(depthMax, 64, `${what}: the cap is the deepest`);
+    assert.ok(capped >= 30, `${what}: ${capped} calls past the cap (recursion 100)`);
+    // ...and without it: self's inner returns stay in its fragment, cond's
+    // beqlr returns taken and not, only jumper's return is elsewhere.
+    installCalls(maxFunctions, SMALL, SMALL_TEXT);
+    core.module._DolphinWeb_RegionCallStats(1);
+    const small = runCall(SMALL.labels.main, { regions: true });
+    const smallReference = runCall(SMALL.labels.main, { regions: false });
+    const [smallCalls, , elsewhere, , smallCapped] = stats();
+    core.module._DolphinWeb_RegionCallStats(0);
+    assert.deepEqual(small.state, smallReference.state, `${what}: main_small`);
+    assert.equal(smallCapped, 0);
+    assert.ok(smallCalls >= 4, `${what}: ${smallCalls} calls`);
+    assert.equal(elsewhere, 1, `${what}: only jumper's return is elsewhere`);
+    installCalls(maxFunctions); // back to CALLS for the budgets
+    for (const budget of [1, 7, 40, 151, 400, 777, 1501]) {
+      core.reset(seedGprs(CALLS.labels.main), CALLS.labels.main, STOP, budget);
+      while (core.downcount() > 0 && core.pc() !== STOP) if (!core.dispatchRegion()) assert.equal(core.interpretOne(), 0);
+      assert.equal(core.module._DolphinWeb_RegionCallDepthForTest(-1), 0, `${what}, budget ${budget}: no call left counted`);
+      const stopped = { state: core.state(), downcount: core.downcount() };
+      core.reset(seedGprs(CALLS.labels.main), CALLS.labels.main, STOP, budget);
+      for (let n = 0; n < 1000000 && core.downcount() > stopped.downcount; n++) assert.equal(core.interpretOne(), 0);
+      assert.equal(core.downcount(), stopped.downcount, `${what}, budget ${budget}`);
+      assert.deepEqual(core.state(), stopped.state, `${what}, budget ${budget}`);
+    }
+  }
+});
+
+// 0142: the depth starts at 0 at every region run, whatever was left (here
+// set to the cap by hand): no call of the next run is made past the cap.
+test("a region run starts at call depth 0 (0142)", { skip: callSkip }, () => {
+  installCalls(100);
+  const stats = () => Array.from(new Uint32Array(core.module.HEAPU8.buffer, core.module._DolphinWeb_RegionCallStats(-1), 6));
+  core.module._DolphinWeb_RegionCallStats(1);
+  core.reset(seedGprs(PROGRAM.labels.main), PROGRAM.labels.main, STOP, 400000);
+  installedOnePerFunction();
+  core.module._DolphinWeb_RegionCallDepthForTest(64);
+  const got = runCall(PROGRAM.labels.main, { regions: true });
+  const [calls, , , , capped] = stats();
+  core.module._DolphinWeb_RegionCallStats(0);
+  assert.equal(got.interpreted, 0);
+  assert.ok(calls >= 2, `${calls} calls`);
+  assert.equal(capped, 0, "none past the cap: the run started at 0");
+});
+
+// 0142: a callee that rewrites its caller's continuation (stw, icbi,
+// isync) then returns. The translator does not take icbi: the callee's
+// region leaves before it (0), every call passes that up, and the caller
+// never goes on in code that is gone. As the interpreter.
+const PATCH_TEXT = 0x80017100;
+const icbi = (a, b) => (31 << 26) | (a << 16) | (b << 11) | (982 << 1);
+const ISYNC = 0x4c00012c;
+const LI_R9_2 = (14 << 26) | (9 << 21) | 2;
+const PATCHER = assemble(PATCH_TEXT, [
+  "main", asm.mflr(0), asm.stwu(1, 1, -16), stw(0, 1, 20), (pc, l) => asm.bl(pc, l.patcher),
+  "cont", asm.li(9, 1), lwz(0, 1, 20), asm.addi(1, 1, 16), mtlr(0), asm.blr(),
+  "patcher", asm.lis(5, LI_R9_2 >>> 16), asm.ori(5, 5, LI_R9_2 & 0xffff),
+  (pc, l) => asm.lis(6, l.cont >>> 16), (pc, l) => asm.ori(6, 6, l.cont & 0xffff),
+  stw(5, 6, 0), icbi(0, 6), ISYNC, asm.blr()
+]);
+test("a callee that rewrites its caller's continuation: the caller runs the new code, like the interpreter (0142)", { skip: callSkip }, () => {
+  const load = () => {
+    const dol = buildDol({ textAddr: PATCH_TEXT, text: PATCHER.words, entry: PATCHER.labels.main });
+    const { image, entryPoint } = imageFromDol(dol);
+    for (const seg of image.segments) core.load(seg.start, seg.bytes);
+    core.invalidate(PATCH_TEXT, 4 * PATCHER.words.length);
+    return planDol({ image, entryPoint, gameId: "TEST01", dolBytes: dol, options: { gapFill: false } });
+  };
+  load();
+  const reference = runCall(PATCHER.labels.main, { regions: false });
+  assert.equal(reference.state[9], 2, "the interpreter runs the new li r9, 2");
+  for (const maxFunctions of [100, 1]) {
+    const plan = load();
+    core.module._DolphinWeb_AotForgetRegionsForTest?.();
+    core.setRegionsEnabled(true);
+    core.setRegionChaining(true);
+    queueAll(plan, maxFunctions, true);
+    serviceAll();
+    const got = runCall(PATCHER.labels.main, { regions: true });
+    // The translator does not take icbi: the region leaves before it (its
+    // prefix ends, 0), every call passes that up, and the icbi, isync, blr
+    // and the rewritten continuation run outside: 8 ops at most, the stw
+    // and the calls in the region.
+    assert.ok(got.interpreted <= 8, `maxFunctions ${maxFunctions}: ${got.interpreted} ops interpreted`);
+    assert.deepEqual(got.state, reference.state, `maxFunctions ${maxFunctions}`);
+    assert.equal(got.downcount, reference.downcount, `maxFunctions ${maxFunctions}`);
+  }
+});
+
+// 0142: a callee that traps (tw: a program exception taken by its helper,
+// the fragment halts with 2) under two levels of wasm calls: 2 is passed up
+// through every call, and the state at the handler is the interpreter's.
+const TRAP_TEXT = 0x80018100;
+const TW = 0x7fe00008; // tw 31, r0, r0: always traps
+const TRAPPER = assemble(TRAP_TEXT, [
+  "main", asm.mflr(0), asm.stwu(1, 1, -16), stw(0, 1, 20), (pc, l) => asm.bl(pc, l.middle), lwz(0, 1, 20), asm.addi(1, 1, 16), mtlr(0), asm.blr(),
+  "middle", asm.mflr(0), asm.stwu(1, 1, -16), stw(0, 1, 20), (pc, l) => asm.bl(pc, l.trap), lwz(0, 1, 20), asm.addi(1, 1, 16), mtlr(0), asm.blr(),
+  "trap", asm.li(3, 5), TW, asm.blr()
+]);
+test("a trap in a callee two wasm calls deep: the handler sees the interpreter's state (0142)", { skip: callSkip }, () => {
+  const VECTOR = 0x700;
+  const load = () => {
+    const dol = buildDol({ textAddr: TRAP_TEXT, text: TRAPPER.words, entry: TRAPPER.labels.main });
+    const { image, entryPoint } = imageFromDol(dol);
+    for (const seg of image.segments) core.load(seg.start, seg.bytes);
+    core.invalidate(TRAP_TEXT, 4 * TRAPPER.words.length);
+    return planDol({ image, entryPoint, gameId: "TEST01", dolBytes: dol, options: { gapFill: false } });
+  };
+  const toVector = (regions) => {
+    core.reset(seedGprs(TRAPPER.labels.main), TRAPPER.labels.main, STOP, 400000);
+    for (let n = 0; n < 100000 && (core.pc() >>> 0) !== VECTOR; n++) if (!(regions && core.dispatchRegion())) core.interpretOne();
+    assert.equal(core.pc() >>> 0, VECTOR, "the program exception was taken");
+    return { state: core.state(), downcount: core.downcount() };
+  };
+  load();
+  core.setRegionsEnabled(false);
+  const reference = toVector(false);
+  for (const maxFunctions of [100, 1]) {
+    const plan = load();
+    core.module._DolphinWeb_AotForgetRegionsForTest?.();
+    core.setRegionsEnabled(true);
+    core.setRegionChaining(true);
+    queueAll(plan, maxFunctions, true);
+    serviceAll();
+    const got = toVector(true);
+    assert.deepEqual(got.state, reference.state, `maxFunctions ${maxFunctions}`);
+    assert.equal(core.module._DolphinWeb_RegionCallDepthForTest(-1), 0, "no call left counted");
+  }
+});
