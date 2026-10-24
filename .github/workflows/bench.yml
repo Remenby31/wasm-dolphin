@@ -289,7 +289,12 @@ jobs:
           fi
           # candidate_query: the candidate side boots with these parameters
           # added (race-perf --baseline-query keeps the baseline without them).
-          query="core=upstream&video=null&cpu=single&speed=unlimited&synconidle=1&wasmjit=1&jitwarmup=60$AOT"
+          # wgpufallback=1 on both sides: a GPU-less runner otherwise presents
+          # through WebGL at 60 Hz, which on x64's 2 SMT threads took 14-20 %
+          # of the emulated CPU (#175, run 40036481382; nothing on N2's 4
+          # cores). The bench measures the emulation, not that presenter.
+          query="core=upstream&video=null&cpu=single&speed=unlimited&synconidle=1&wasmjit=1&jitwarmup=60&wgpufallback=1$AOT"
+          echo "Query (both sides; the candidate adds: ${CANDIDATE_QUERY:-nothing}${CORE_SHA:+, &coreid=sha256:$CORE_SHA}): \`$query\`" >> "$GITHUB_STEP_SUMMARY"
           queries=(--query "$query")
           extra=""
           if [ -n "$CANDIDATE_QUERY" ]; then
