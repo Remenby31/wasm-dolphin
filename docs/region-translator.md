@@ -569,3 +569,25 @@ stale regions. `ClearSafe` now calls `DolphinWeb_UnverifyRegions`
 plan at its next entry and dropped if its code changed. The `mtspr` is not a
 region op, so the region leaves before it and its callers pass that up
 (0142). No compiler version: the generated code is the same.
+
+## Hashed region dispatch (2026-10-24)
+
+A host profile of the heavy scene (product path, wgpu) put 10 % of the CPU
+thread in the region dispatchers `r<id>_dispatch` and `r<id>_inner`. Each was
+a binary search over the module's entries, up to 4,721 of them, so about 12
+compares whose branches the host mispredicts.
+
+- **Lookup.** slot = hash(pc) into a table of the next power of two of twice
+  the entries. Then one `br_table` (a jump table) goes to that slot's
+  compares, at most a few, against the full pc. A pc that is not an entry,
+  whatever its slot, still returns 1 from `f` or leaves through the exit
+  stub. Up to 4 entries, the dispatcher stays a row of compares.
+- **Hash.** It is `(pc >>> 2) & mask`, or `imul(pc >>> 2, M) >>> (32 - bits)`
+  with M from `DISPATCH_HASH_MULS`. The first one with the fewest compares in
+  its fullest slot, then in all, wins. It depends on the entries alone, so a
+  module's bytes depend only on its members.
+- **Key.** `dispatch:2;` in the module's cache key (`REGION_DISPATCH`), so a
+  module cached with the binary search is assembled again.
+- **Cost.** Over the whole disc, the 143 modules grow from 140.25 to 142.13 MB
+  (+1.3 %); formation is unchanged. A dispatch costs 16–17 ns instead of
+  26–30 ns in V8 at 1,400–2,400 entries (JS call included).
