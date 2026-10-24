@@ -271,6 +271,9 @@ let fifoLogBoot = false;
 let wgpuMaskedFeatures = new Set();
 // ?wgpufallback=1 (harness): keep a CPU fallback adapter; refused otherwise.
 let wgpuAcceptFallbackAdapter = false;
+// ?webglsw=1 (harness): keep a software WebGL presenter; refused otherwise
+// (setupSoftwarePresenter).
+let webglAcceptSoftware = false;
 // A CPU adapter is no usable GPU: with --enable-unsafe-webgpu (the harness
 // passes it) a GPU-less Chrome gives a SwiftShader fallback adapter, and both
 // the replay and the presenter would run on the CPU.
@@ -1594,6 +1597,7 @@ async function handleMessage(type, payload) {
         efbCopyRam: payload.efbCopyRam,
         wgpuMask: payload.wgpuMask,
         wgpuFallback: payload.wgpuFallback,
+        webglSoftware: payload.webglSoftware,
         efbDiag: payload.efbDiag,
         jitVerbose: payload.jitVerbose,
         frameCap: payload.frameCap,
@@ -2269,6 +2273,7 @@ async function loadCore({
   efbCopyRam = false,
   wgpuMask = "",
   wgpuFallback = false,
+  webglSoftware = false,
   efbDiag = false,
   jitVerbose = false,
   frameCap = 0,
@@ -2323,6 +2328,7 @@ async function loadCore({
   fifoLogBoot = Boolean(fifoLog);
   wgpuMaskedFeatures = parseWgpuMask(wgpuMask);
   wgpuAcceptFallbackAdapter = Boolean(wgpuFallback);
+  webglAcceptSoftware = Boolean(webglSoftware);
   if (moduleInstance) {
     return moduleInstance;
   }
@@ -6000,15 +6006,20 @@ async function setupSoftwarePresenter(canvas, presenterBackend) {
   }
 
   if (presenterBackend !== "2d") {
-    renderGl =
-      renderCanvas.getContext("webgl2", softwareBlitContextAttributes()) ||
-      renderCanvas.getContext("webgl", softwareBlitContextAttributes());
+    // Without a usable GPU, WebGL rasterises on the CPU (WARP on Windows,
+    // SwiftShader): on a GPU-less Windows runner the 2D canvas showed the same
+    // picture for 13-18 % less Chrome CPU (windows-nogpu lane).
+    // failIfMajorPerformanceCaveat refuses such a context (WARP included), and
+    // a refused getContext leaves the canvas free for 2D.
+    const attributes = { ...softwareBlitContextAttributes(), failIfMajorPerformanceCaveat: !webglAcceptSoftware };
+    renderGl = renderCanvas.getContext("webgl2", attributes) || renderCanvas.getContext("webgl", attributes);
     if (renderGl) {
       renderBackend = "webgl";
       rendererDiagnostics.activePresenterBackend = renderBackend;
       renderGlState = createSoftwareBlitter(renderGl);
       return;
     }
+    rendererDiagnostics.webglFallback = "no hardware WebGL context (software or none): 2D presenter";
   }
 
   renderContext = renderCanvas.getContext("2d", { alpha: false });
