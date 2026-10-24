@@ -1,0 +1,176 @@
+diff --git a/Source/Core/Core/PowerPC/CachedInterpreter/CachedInterpreter.cpp b/Source/Core/Core/PowerPC/CachedInterpreter/CachedInterpreter.cpp
+--- a/Source/Core/Core/PowerPC/CachedInterpreter/CachedInterpreter.cpp
++++ b/Source/Core/Core/PowerPC/CachedInterpreter/CachedInterpreter.cpp
+@@ -3512,6 +3512,7 @@ void EmitF64ConstBits(std::vector<u8>& body, u64 bits)
+     body.push_back(static_cast<u8>(bits >> (i * 8)));
+ }
+ 
++
+ u32 GprOffset(const WasmStateLayout& layout, u32 index)
+ {
+   return layout.gpr_offset + index * sizeof(u32);
+@@ -3788,6 +3789,28 @@ void EmitLazyCrStore(std::vector<u8>& body, const WasmStateLayout& layout, const
+   EmitLazyCrFieldTail(body, layout, c.field);
+ }
+ 
++// Patch 0146: a v128 with `bits` in both 64-bit lanes, in its shortest form:
++// i64.const + i64x2.splat (4 to 11 bytes) or f64.const + f64x2.splat (11),
++// instead of an 18-byte v128.const. The same value either way.
++void EmitSplatConst64(std::vector<u8>& body, u64 bits)
++{
++  u32 leb = 1;
++  for (s64 v = static_cast<s64>(bits); !(v >= -64 && v < 64); v >>= 7)
++    ++leb;
++  if (1 + leb <= 9)
++  {
++    EmitI64Const(body, bits);
++    body.push_back(0xfd);
++    EmitU32Leb(body, 0x12);  // i64x2.splat
++  }
++  else
++  {
++    EmitF64ConstBits(body, bits);
++    body.push_back(0xfd);
++    EmitU32Leb(body, 0x14);  // f64x2.splat
++  }
++}
++
+ // The CR bit `bit` (LT, GT or EQ of the recorded field) from the operands.
+ void EmitFusedCrBit(std::vector<u8>& body, const WasmStateLayout& layout, const FusedCr& c,
+                     u32 bit)
+@@ -6029,7 +6052,7 @@ void EmitPairedFusedMulAddSub(std::vector<u8>& body, const WasmStateLayout& layo
+     body.push_back(0xfd);
+     EmitU32Leb(body, code);
+   };
+-  constexpr u32 LOAD = 0x00, STORE = 0x0b, CONST = 0x0c, SHUFFLE = 0x0d, EXTRACT = 0x21,
++  constexpr u32 LOAD = 0x00, STORE = 0x0b, SHUFFLE = 0x0d, EXTRACT = 0x21,
+                 EQ = 0x47, LT = 0x49, LE = 0x4b, GE = 0x4c, AND = 0x4e, ANDNOT = 0x4f, OR = 0x50,
+                 DEMOTE = 0x5e, PROMOTE = 0x5f, ALL_TRUE = 0xc3, ADD_I64 = 0xce, EQ_I64 = 0xd6,
+                 ABS = 0xec, NEG = 0xed, MUL = 0xf2, MADD = 0x107;
+@@ -6039,12 +6062,7 @@ void EmitPairedFusedMulAddSub(std::vector<u8>& body, const WasmStateLayout& layo
+     body.push_back(0x03);  // align 8 (state lanes are 8-aligned)
+     EmitU32Leb(body, offset);
+   };
+-  const auto i64x2 = [&](u64 v) {
+-    simd(CONST);
+-    for (int k = 0; k < 2; ++k)
+-      for (int i = 0; i < 8; ++i)
+-        body.push_back(static_cast<u8>(v >> (8 * i)));
+-  };
++  const auto i64x2 = [&](u64 v) { EmitSplatConst64(body, v); };  // 0146
+   const auto f64x2 = [&](double v) { i64x2(std::bit_cast<u64>(v)); };
+   const auto get = [&](u32 l) { EmitLocalGet(body, l); };
+   const auto abs_of = [&](u32 l) {
+@@ -6142,8 +6160,10 @@ void EmitPairedFusedMulAddSub(std::vector<u8>& body, const WasmStateLayout& layo
+   body.push_back(0x00);
+   EmitLocalSet(body, r0);
+   EmitSetFprfZeroOrNormal(body, layout, r0, 0, op.wantsFPRF);
+-  body.push_back(0x05);
+-  EmitFpCall(body, op, downcount);
++  // 0146: out of the op's block; the one helper call after the MSR if serves
++  // both a failed lane and a failed MSR test.
++  body.push_back(0x0c);  // br
++  EmitU32Leb(body, 2);
+   body.push_back(0x0b);
+ }
+ 
+@@ -6166,7 +6186,7 @@ void EmitPairedSimdArith(std::vector<u8>& body, const WasmStateLayout& layout,
+     body.push_back(0xfd);
+     EmitU32Leb(body, code);
+   };
+-  constexpr u32 LOAD = 0x00, STORE = 0x0b, CONST = 0x0c, SHUFFLE = 0x0d, EXTRACT = 0x21,
++  constexpr u32 LOAD = 0x00, STORE = 0x0b, SHUFFLE = 0x0d, EXTRACT = 0x21,
+                 EQ = 0x47, NE = 0x48, LT = 0x49, GE = 0x4c, AND = 0x4e, OR = 0x50, DEMOTE = 0x5e,
+                 PROMOTE = 0x5f, ALL_TRUE = 0xc3, ADD_I64 = 0xce, ABS = 0xec, ADD = 0xf0,
+                 SUB = 0xf1, MUL = 0xf2;
+@@ -6176,12 +6196,7 @@ void EmitPairedSimdArith(std::vector<u8>& body, const WasmStateLayout& layout,
+     body.push_back(0x03);  // align 8 (state lanes are 8-aligned)
+     EmitU32Leb(body, offset);
+   };
+-  const auto i64x2 = [&](u64 v) {
+-    simd(CONST);
+-    for (int k = 0; k < 2; ++k)
+-      for (int i = 0; i < 8; ++i)
+-        body.push_back(static_cast<u8>(v >> (8 * i)));
+-  };
++  const auto i64x2 = [&](u64 v) { EmitSplatConst64(body, v); };  // 0146
+   const auto f64x2 = [&](double v) { i64x2(std::bit_cast<u64>(v)); };
+   const auto get = [&](u32 l) { EmitLocalGet(body, l); };
+   const auto abs_of = [&](u32 l) {
+@@ -6255,8 +6270,10 @@ void EmitPairedSimdArith(std::vector<u8>& body, const WasmStateLayout& layout,
+   body.push_back(0x00);
+   EmitLocalSet(body, r0);
+   EmitSetFprfZeroOrNormal(body, layout, r0, 0, op.wantsFPRF);
+-  body.push_back(0x05);
+-  EmitFpCall(body, op, downcount);
++  // 0146: out of the op's block; the one helper call after the MSR if serves
++  // both a failed lane and a failed MSR test.
++  body.push_back(0x0c);  // br
++  EmitU32Leb(body, 2);
+   body.push_back(0x0b);
+ }
+ 
+@@ -6319,32 +6336,42 @@ void EmitExactFpArithmetic(std::vector<u8>& body, const WasmStateLayout& layout,
+     return;
+   }
+ 
++  // 0141/0143 paths: one block per op (0146), so a failed lane and a failed
++  // MSR test share one helper call after the MSR if.
++  const bool vector_fma = paired && (kind == FpArithKind::MulAdd || kind == FpArithKind::MulSub) &&
++                          s_fused_madd.load(std::memory_order_relaxed) &&
++                          (DolphinWebDisableMask() & DOLPHIN_WEB_DISABLE_INLINE_FMA) == 0;
++  const bool vector_arith =
++      !vector_fma && paired &&
++      (kind == FpArithKind::Add || kind == FpArithKind::Sub || kind == FpArithKind::Mul) &&
++      !DolphinWebHelperDisabled(DOLPHIN_WEB_DISABLE_NATIVE_PS);
++  if (vector_fma || vector_arith)
++  {
++    body.push_back(0x02);  // block $done
++    body.push_back(0x40);
++  }
+   EmitFpFastPathMsrCondition(body, layout);
+   HintNextIf(body, true);  // FP exceptions off
+   body.push_back(0x04);
+   body.push_back(0x40);
+   EmitI32Const(body, 1);
+   EmitLocalSet(body, 3);
+-  if (paired && (kind == FpArithKind::MulAdd || kind == FpArithKind::MulSub) &&
+-      s_fused_madd.load(std::memory_order_relaxed) &&
+-      (DolphinWebDisableMask() & DOLPHIN_WEB_DISABLE_INLINE_FMA) == 0)
++  if (vector_fma)
+   {
+     EmitPairedFusedMulAddSub(body, layout, op, kind == FpArithKind::MulSub, negate, c_lane0,
+                              c_lane0 == c_lane1, downcount);
+-    body.push_back(0x05);
++    body.push_back(0x0b);  // end MSR if
+     EmitFpCall(body, op, downcount);
+-    body.push_back(0x0b);
++    body.push_back(0x0b);  // end block $done
+     return;
+   }
+   // 0143: ps_add/sub/mul/muls0/1 in f64x2 (off with DISABLE_NATIVE_PS).
+-  if (paired &&
+-      (kind == FpArithKind::Add || kind == FpArithKind::Sub || kind == FpArithKind::Mul) &&
+-      !DolphinWebHelperDisabled(DOLPHIN_WEB_DISABLE_NATIVE_PS))
++  if (vector_arith)
+   {
+     EmitPairedSimdArith(body, layout, op, kind, c_lane0, c_lane0 == c_lane1, downcount);
+-    body.push_back(0x05);
++    body.push_back(0x0b);  // end MSR if
+     EmitFpCall(body, op, downcount);
+-    body.push_back(0x0b);
++    body.push_back(0x0b);  // end block $done
+     return;
+   }
+   const u32 r0 = WasmFpScratchLocal(0), r1 = WasmFpScratchLocal(1), raw = WasmFpScratchLocal(2);
+@@ -17627,7 +17654,9 @@ namespace
+ // 30 (0141): paired-single FMA in f64x2 with fused relaxed_madd (28, 29 are
+ // 0137's and 0139's). 31 (0142): guest calls as wasm calls, guest returns as
+ // wasm returns (was 0139). 32 (0143): ps_add/sub/mul/muls0/1 in f64x2.
+-constexpr u32 AOT_COMPILER_VERSION = 32;
++// 34 (0146): the 0141/0143 paths in fewer bytes (splatted constants, one
++// helper call per op); 33 is retired (0144, closed).
++constexpr u32 AOT_COMPILER_VERSION = 34;
+ constexpr u32 AOT_MAX_FRAGMENT_BYTES = 1u << 20;
+ thread_local std::vector<u32> t_aot_out;
+ u8* s_aot_ram = nullptr;
