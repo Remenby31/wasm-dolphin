@@ -1,0 +1,20 @@
+diff --git a/Source/Core/Core/PowerPC/CachedInterpreter/CachedInterpreter.cpp b/Source/Core/Core/PowerPC/CachedInterpreter/CachedInterpreter.cpp
+--- a/Source/Core/Core/PowerPC/CachedInterpreter/CachedInterpreter.cpp
++++ b/Source/Core/Core/PowerPC/CachedInterpreter/CachedInterpreter.cpp
+@@ -11296,6 +11296,16 @@ void DolphinWeb_InvalidateRegions(u32 address, u32 size, bool forced)
+   }
+ }
+ 
++// Patch 0145: the block cache was cleared without a range
++// (JitInterface::ClearSafe: HID0.ICFI flash-invalidates the instruction
++// cache; a BAT update). Any code may have changed: every region is checked
++// against its plan before it next runs, and dropped then if its code moved.
++// Region code never runs the mtspr that sets ICFI (it is not a region op).
++extern "C" EMSCRIPTEN_KEEPALIVE void DolphinWeb_UnverifyRegions()
++{
++  UnverifyAllRegions();
++}
++
+ // Queues a region module for installation (any thread). bytes: the module
+ // (src/aot-region-module.js); entries: its entry PCs; ranges: [start, end)
+ // pairs of the guest code it was translated from, member after member;

@@ -25,7 +25,7 @@
       "commit": "01e0577914a75a2569c846778c2f93aa8e6feddd"
     }
   },
-  "patchSeriesSha256": "e72260796d7ca07472234316b6e7512c15058a5b4b702330b17cded1cdfa4671",
+  "patchSeriesSha256": "1b43f38a881a73f816d7ab093d3f4486ea6bb1549cc1a3c5725cd71437e2553d",
   "patches": [
     {
       "order": 1,
@@ -893,6 +893,14 @@
     },
     {
       "order": 109,
+      "cwd": ".",
+      "hashMode": "lf-normalized",
+      "path": "patches/dolphin-wasm/snapshot/0145-region-unverify-on-icache-flush.patch",
+      "size": 1084,
+      "sha256": "3631c3123b6f31b9fa0fa5e215bce9ef8b7e1afc75afdd8611c8b59d2efe890d"
+    },
+    {
+      "order": 110,
       "cwd": "Externals/SFML/SFML",
       "hashMode": "lf-normalized",
       "path": "patches/dolphin-wasm/submodules/0001-sfml-emscripten-config.patch",
@@ -900,7 +908,7 @@
       "sha256": "f82197a21fe982ad83f6ee7bbf5a03839b1cebd4d64da3eab11263842bf61d89"
     },
     {
-      "order": 110,
+      "order": 111,
       "cwd": "Externals/xxhash/xxHash",
       "hashMode": "lf-normalized",
       "path": "patches/dolphin-wasm/submodules/0002-xxhash-wasm-simd-scalar.patch",
