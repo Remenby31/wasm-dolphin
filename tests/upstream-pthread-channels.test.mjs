@@ -272,6 +272,30 @@ test("region chaining is on by default; ?regionchain=0 reaches the core through 
   assert.match(source, /api\.setJitRegionChaining\?\.\(regionChain !== false \? 1 : 0\);/);
 });
 
+// The page's ?aotsample= (#187) and wasm engine (src/wasm-engine.js) reach
+// the disc worker only through the adapter's init message: both were
+// dropped there, the worker then sampling at 10 ms and detecting V8 by
+// itself whatever the page said.
+test("?aotsample= and the wasm engine reach the worker through the host, the adapter and the worker's init", async () => {
+  const { UpstreamWorkerAdapter } = await import("../src/upstream-worker-adapter.js");
+  const adapter = new UpstreamWorkerAdapter({ aotSampleMs: 0, wasmEngine: "jsc" });
+  assert.deepEqual([adapter.aotSampleMs, adapter.wasmEngine], [0, "jsc"]);
+  const host = await readFile(new URL("../src/core-host.js", import.meta.url), "utf8");
+  assert.match(host, /\n {12}aotSampleMs: this\.aotSampleMs,\n/);
+  assert.match(host, /\n {12}wasmEngine: this\.wasmEngine,\n/);
+  const adapterSource = await readFile(new URL("../src/upstream-worker-adapter.js", import.meta.url), "utf8");
+  assert.match(adapterSource, /\n {6}aotSampleMs: this\.aotSampleMs,\n/);
+  assert.match(adapterSource, /\n {6}wasmEngine: this\.wasmEngine,\n/);
+  const source = await readFile(workerUrl, "utf8");
+  assert.match(source, /\n {8}aotSampleMs: payload\.aotSampleMs,\n/);
+  assert.match(source, /\n {8}wasmEngine: payload\.wasmEngine,\n/);
+  // #215: ?regioncap=N|0 the same way.
+  assert.equal(new UpstreamWorkerAdapter({ regionCap: 0 }).regionCap, 0);
+  assert.match(host, /\n {12}regionCap: this\.regionCap,\n/);
+  assert.match(adapterSource, /\n {6}regionCap: this\.regionCap,\n/);
+  assert.match(source, /\n {8}regionCap: payload\.regionCap,\n/);
+});
+
 test("fused relaxed_madd is used where probed fused; ?fusedmadd=0 keeps the exact path, through the host, the adapter and the worker (0129)", async () => {
   const { UpstreamWorkerAdapter } = await import("../src/upstream-worker-adapter.js");
   assert.equal(new UpstreamWorkerAdapter().fusedMadd, true);

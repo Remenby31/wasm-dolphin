@@ -197,6 +197,18 @@ test("the region ledger: members whose code no longer matches the plan are liste
   assert.deepEqual(r.stale.map((x) => [x.key, x.member, x.start, x.translated]), [["region-v1:m", 1, 0x80003120, false]]);
 });
 
+// #215: the region function cap by engine: JSC's OMG limit under
+// JavaScriptCore only, none under V8 (or unknown); ?regioncap= forces it.
+test("the region function cap: JSC only, unless forced", async (t) => {
+  const { worker } = await loadWorker(t);
+  t.after(() => worker.setRegionCapForTest({ engine: "unknown", cap: null }));
+  const cases = [["v8", null, 0], ["jsc", null, 95000], ["unknown", null, 0], ["spidermonkey", null, 0], ["jsc", 0, 0], ["v8", 50000, 50000]];
+  for (const [engine, cap, expected] of cases) {
+    worker.setRegionCapForTest({ engine, cap });
+    assert.equal(worker.regionFunctionCap(95000), expected, `${engine}, forced ${cap}`);
+  }
+});
+
 // Review of #86: the region cache waits for the first presented image (or
 // the timeout), never more; with no running core, not at all.
 test("the first-image wait: woken by the first presented frame, or by its timeout", async (t) => {
