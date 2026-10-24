@@ -130,8 +130,8 @@ test("Dolphin's own folder passes the filter and gives only allowlisted keys", (
 
 const core = await loadAotCore();
 // A core that does not know the newest allowlisted setting answers -2 for it.
-const knowsXfb = () => core.module.ccall("GameConfigValueForTest", "number", ["string", "number", "string"], ["XYZE01", 0, "FPRF"]) !== -2;
-const coreSkip = core && typeof core.module._GameConfigValueForTest === "function" && knowsXfb() ? false : "the core predates FPRF in the allowlist (patch 0121; CI builds this branch's core)";
+const knowsBbox = () => core.module.ccall("GameConfigValueForTest", "number", ["string", "number", "string"], ["XYZE01", 0, "BBoxEnable"]) !== -2;
+const coreSkip = core && typeof core.module._GameConfigValueForTest === "function" && knowsBbox() ? false : "the core predates BBoxEnable in the allowlist (CI builds this branch's core)";
 
 test("the core embeds the filtered INIs, and its game config applies them in Dolphin's order", { skip: coreSkip }, () => {
   const m = core.module;
@@ -141,11 +141,11 @@ test("the core embeds the filtered INIs, and its game config applies them in Dol
   for (const name of embedded) {
     const text = m.FS.readFile(`${dir}/${name}`, { encoding: "utf8" });
     assert.ok(text.length > 0, name);
-    assert.match(text, /^(\[Core\]\n(MMU = (True|False)\n)?(FPRF = (True|False)\n)?)?(\[Video_Settings\]\nSafeTextureCacheColorSamples = \d*\n)?(\[Video_Hacks\]\nXFBToTextureEnable = (True|False)\n)?$/, name);
+    assert.match(text, /^(\[Core\]\n(MMU = (True|False)\n)?(FPRF = (True|False)\n)?)?(\[Video_Settings\]\nSafeTextureCacheColorSamples = \d*\n)?(\[Video_Hacks\]\n(XFBToTextureEnable = (True|False)\n)?(EFBAccessEnable = (True|False)\n)?(EFBToTextureEnable = (True|False)\n)?(BBoxEnable = (True|False)\n)?)?$/, name);
   }
   // Synthetic discs: ID3, then ID6, then ID6rN, the later file winning.
   const fixtures = {
-    "TST.ini": "[Core]\nMMU = True\nFPRF = True\n[Video_Settings]\nSafeTextureCacheColorSamples = 512\n[Video_Hacks]\nXFBToTextureEnable = False\n",
+    "TST.ini": "[Core]\nMMU = True\nFPRF = True\n[Video_Settings]\nSafeTextureCacheColorSamples = 512\n[Video_Hacks]\nXFBToTextureEnable = False\nEFBAccessEnable = True\nEFBToTextureEnable = False\nBBoxEnable = True\n",
     "TSTE01r1.ini": "[Core]\nMMU = False\n[Video_Settings]\nSafeTextureCacheColorSamples = 0\n"
   };
   for (const [name, text] of Object.entries(fixtures)) m.FS.writeFile(`${dir}/${name}`, text);
@@ -161,6 +161,12 @@ test("the core embeds the filtered INIs, and its game config applies them in Dol
     assert.equal(value("TSTE01", 0, "FPRF"), 1, "the ID3 file turns FPRF on");
     assert.equal(value("XYZE01", 0, "FPRF"), 0, "Dolphin's default: FPRF off");
     assert.equal(value("XYZE01", 0, "XFBToTextureEnable"), 1, "Dolphin's default skips it");
+    assert.equal(value("TSTE01", 0, "EFBAccessEnable"), 1, "the ID3 file turns EFB access on");
+    assert.equal(value("XYZE01", 0, "EFBAccessEnable"), 0, "Dolphin's default: off");
+    assert.equal(value("TSTE01", 0, "EFBToTextureEnable"), 0, "the ID3 file copies the EFB to RAM");
+    assert.equal(value("XYZE01", 0, "EFBToTextureEnable"), 1, "Dolphin's default skips it");
+    assert.equal(value("TSTE01", 0, "BBoxEnable"), 1, "the ID3 file turns the bounding box on");
+    assert.equal(value("XYZE01", 0, "BBoxEnable"), 0, "Dolphin's default: off");
     assert.equal(value("TSTE01", 0, "CPUThread"), -2, "only allowlisted settings");
   } finally {
     for (const name of Object.keys(fixtures)) m.FS.unlink(`${dir}/${name}`);

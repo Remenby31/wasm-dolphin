@@ -1060,8 +1060,9 @@ int SetCpuThread(int enabled)
 // Tests (patch 0097): the value Dolphin's game config gives an allowlisted
 // setting (tools/gamesettings-allowlist.json) for a disc ID and revision from
 // the INIs under /dolphin-sys/GameSettings, as the game's boot reads it: MMU
-// (System::Initialize, IsMMUMode), FPRF (patch 0121), SafeTextureCacheColorSamples and
-// XFBToTextureEnable (GFX_HACK_SKIP_XFB_COPY_TO_RAM); booleans
+// (System::Initialize, IsMMUMode), FPRF (patch 0121), SafeTextureCacheColorSamples,
+// XFBToTextureEnable (GFX_HACK_SKIP_XFB_COPY_TO_RAM), EFBAccessEnable,
+// EFBToTextureEnable (GFX_HACK_SKIP_EFB_COPY_TO_RAM) and BBoxEnable; booleans
 // as 0/1. The global game layer is added for the read and removed after; -1
 // when a game's layer is already there (a game is running), which this must
 // not replace, -2 for a setting it does not know.
@@ -1072,7 +1073,8 @@ int GameConfigValueForTest(const char* game_id, int revision, const char* settin
 {
   const std::string_view name = setting;
   if (name != "MMU" && name != "FPRF" && name != "SafeTextureCacheColorSamples" &&
-      name != "XFBToTextureEnable")
+      name != "XFBToTextureEnable" && name != "EFBAccessEnable" &&
+      name != "EFBToTextureEnable" && name != "BBoxEnable")
     return -2;
   if (Config::GetLayer(Config::LayerType::GlobalGame))
     return -1;
@@ -1081,6 +1083,9 @@ int GameConfigValueForTest(const char* game_id, int revision, const char* settin
       name == "MMU"                  ? (Config::Get(Config::MAIN_MMU) ? 1 : 0) :
       name == "FPRF"                 ? (Config::Get(Config::MAIN_FPRF) ? 1 : 0) :
       name == "XFBToTextureEnable"   ? (Config::Get(Config::GFX_HACK_SKIP_XFB_COPY_TO_RAM) ? 1 : 0) :
+      name == "EFBAccessEnable"      ? (Config::Get(Config::GFX_HACK_EFB_ACCESS_ENABLE) ? 1 : 0) :
+      name == "EFBToTextureEnable"   ? (Config::Get(Config::GFX_HACK_SKIP_EFB_COPY_TO_RAM) ? 1 : 0) :
+      name == "BBoxEnable"           ? (Config::Get(Config::GFX_HACK_BBOX_ENABLE) ? 1 : 0) :
                                        Config::Get(Config::GFX_SAFE_TEXTURE_CACHE_COLOR_SAMPLES);
   Config::RemoveLayer(Config::LayerType::GlobalGame);
   return value;
