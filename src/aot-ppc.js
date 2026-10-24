@@ -192,7 +192,7 @@ export function slwi2Source(w) {
 export function scaledWordIndex(w) {
   if ((w >>> 26) !== 21) return null;
   const sh = (w >>> 11) & 31, mb = (w >>> 6) & 31, me = (w >>> 1) & 31;
-  if (sh !== 2 || me !== 29) return null;
+  if (sh !== 2 || me !== 29 || mb > me) return null; // MB > ME wraps around: not a word index
   return { src: rD(w), entries: mb === 0 ? null : 2 ** (30 - mb) };
 }
 

@@ -247,18 +247,17 @@ export function discover(image, {
       if (scaled && rA(idxDef.w) === idxReg) {
         count = switchBound(scaled.src, idxDef.a);
         if (count !== null) bound = "cmplwi";
-        else {
-          // No compare: an index masked to its low bits bounds the table as
-          // well (rlwinm x, 2, MB, 29; or andi./clrlwi before the scaling).
-          // Scanned instead, such a table ran on into the next ones, call
-          // tables included, and absorbed whole functions (footprint-256:
-          // 45 of 256, one of 46 KB with 423 extra entries).
-          const md = scaled.entries === null ? defOf(scaled.src, idxDef.a) : null;
-          const values = scaled.entries ?? (md && rA(md.w) === scaled.src ? maskedValues(md.w) : null);
-          if (values !== null && values <= maxTableEntries) {
-            count = values;
-            bound = "mask";
-          }
+        // An index masked to its low bits bounds the table as well (rlwinm x,
+        // 2, MB, 29; or andi./clrlwi before the scaling), with or without a
+        // compare (the smaller bound wins). Scanned instead, a table with no
+        // compare ran on into the next ones, call tables included, and
+        // absorbed whole functions (footprint-256: 45 of 256, one of 46 KB
+        // with 423 extra entries).
+        const md = scaled.entries === null ? defOf(scaled.src, idxDef.a) : null;
+        const values = scaled.entries ?? (md && rA(md.w) === scaled.src ? maskedValues(md.w) : null);
+        if (values !== null && values <= maxTableEntries && (count === null || values < count)) {
+          count = values;
+          bound = "mask";
         }
       }
     }
@@ -267,19 +266,25 @@ export function discover(image, {
     const targets = [];
     // A scanned table stops at another resolved table's first word, and at a
     // target that is a known function's entry (the next words are a call
-    // table, not this switch's cases).
+    // table, not this switch's cases), past its first entry; an entry known
+    // only from a code pointer in data (or a gap) does not stop it: the
+    // table's own cases look like that before the table is resolved.
     const otherTables = count === null ? new Set([...jumpTables.values()].map((t) => t.table >>> 0)) : null;
+    const knownFunction = (t) => callTargets.has(t) || [...(entries.get(t)?.sources ?? [])].some((s) => s !== "data" && s !== "const" && s !== "gap");
     for (let i = 0; i < limit; i++) {
       if (otherTables && i > 0 && otherTables.has((table + i * 4) >>> 0)) break;
       const word = read(table + i * 4);
       const t = word === undefined ? undefined : kind === "rel" ? (table + (word | 0)) >>> 0 : word;
       const inRange = t !== undefined && isCodeAddr(t) && seg && t >= seg.start && t < seg.end;
       if (!inRange || !isValidInstruction(read(t))) {
-        if (count !== null) return null; // a bounded table must be all code
+        // A cmplwi-bounded table must be all code; a masked one keeps the
+        // entries before the first word that is not (the mask may allow more
+        // values than the switch uses).
+        if (bound === "cmplwi") return null;
         break;
       }
       if (count === null && Math.abs(t - site) > 0x10000) break;
-      if (count === null && (entries.has(t) || callTargets.has(t))) break;
+      if (count === null && i > 0 && knownFunction(t)) break;
       targets.push(t);
     }
     if (!targets.length) return null;

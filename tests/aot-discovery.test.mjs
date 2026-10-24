@@ -256,3 +256,30 @@ test("aot discovery: a masked switch index bounds its table; the next call table
   for (const f of ["fA", "fB", "fC"]) assert.ok(entries.has(l[f]), `${f} is a function of its own, not a case`);
   assert.ok(!table(l.c0).targets.includes(l.fB), "a scanned table stops at a known function's entry");
 });
+
+// Review of #235: (1) a function known only through a data pointer, whose
+// unbounded table's cases the data scan already registered: the table still
+// resolves (an entry known only from data does not stop a scan, nor does
+// anything at the first entry). (2) A masked table with an invalid word
+// keeps the entries before it, as before the mask bound.
+test("aot discovery: data-only entries do not stop a scanned table; a masked table keeps its valid entries", () => {
+  const rlwinm = (a, s, sh, mb, me) => (21 << 26) | (s << 21) | (a << 16) | (sh << 11) | (mb << 6) | (me << 1);
+  const T1 = DATA, T2 = DATA + 12; // the cases' words come before fD's pointer: the data scan meets them first
+  const text = assemble(TEXT, [
+    "entry", (pc, l) => asm.bl(pc, l.fM), asm.blr(),
+    // fD: reached only through a code pointer in data; plain slwi, 3 cases
+    "fD", asm.slwi2(11, 3), asm.lis(9, ha(T1)), asm.addi(9, 9, lo(T1)), asm.lwzx(10, 9, 11), asm.mtctr(10), asm.bctr(),
+    "d0", asm.li(4, 0), asm.blr(), "d1", asm.li(4, 1), asm.blr(), "d2", asm.li(4, 2), asm.blr(),
+    // fM: mask of 4 values, the table's 4th word is 0
+    "fM", rlwinm(11, 3, 2, 28, 29), asm.lis(9, ha(T2)), asm.addi(9, 9, lo(T2)), asm.lwzx(10, 9, 11), asm.mtctr(10), asm.bctr(),
+    "m0", asm.li(5, 0), asm.blr(), "m1", asm.li(5, 1), asm.blr(), "m2", asm.li(5, 2), asm.blr()
+  ]);
+  const l = text.labels;
+  const data = [l.d0, l.d1, l.d2, l.m0, l.m1, l.m2, 0, l.fD];
+  const { image } = imageFromDol(buildDol({ textAddr: TEXT, text: text.words, dataAddr: DATA, data, entry: l.entry }));
+  const r = discover(image, { entryPoints: [{ addr: l.entry, source: "t" }], gapFill: false });
+  const table = (target) => r.jumpTables.find((t) => t.targets.includes(target));
+  assert.ok(table(l.d0), "fD's table resolved");
+  assert.deepEqual(table(l.d0).targets, [l.d0, l.d1, l.d2], "its 3 cases, though the data scan knew them first");
+  assert.deepEqual([table(l.m0)?.bound, table(l.m0)?.targets], ["mask", [l.m0, l.m1, l.m2]], "the masked table keeps its 3 valid entries");
+});
