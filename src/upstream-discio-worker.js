@@ -1585,6 +1585,7 @@ async function handleMessage(type, payload) {
         ppcWasmJitWarmupFrames: payload.ppcWasmJitWarmupFrames,
         ppcProfile: payload.ppcProfile,
         gpuSpinMicros: payload.gpuSpinMicros,
+        codeSpaceMiB: payload.codeSpaceMiB,
         cpuOverclock: payload.cpuOverclock,
         emulationSpeed: payload.emulationSpeed,
         presentationScale: payload.presentationScale,
@@ -2297,6 +2298,7 @@ async function loadCore({
   ppcWasmJitWarmupFrames: requestedPpcWasmJitWarmupFrames = DEFAULT_WASM_JIT_WARMUP_XFB_FRAMES,
   ppcProfile = false,
   gpuSpinMicros = -1,
+  codeSpaceMiB = null,
   cpuOverclock = 1,
   emulationSpeed = 1,
   presentationScale = 1,
@@ -3037,6 +3039,7 @@ async function loadCore({
   api.setJitRegionChaining?.(regionChain !== false ? 1 : 0);
   api.setPpcProfileEnabled?.(ppcProfile ? 1 : 0);
   if (Number.isInteger(gpuSpinMicros) && gpuSpinMicros >= 0) api.setGpuSpinBudget?.(gpuSpinMicros);
+  if (Number.isInteger(codeSpaceMiB)) api.setCodeSpaceMiB?.(codeSpaceMiB);
   api.setDstAlphaTwoPass?.(dstAlphaTwoPass !== false ? 1 : 0);
   api.setWebGpuUploadArenaMiB?.(wgpuUploadArenaMiB, collectMetrics ? 1 : 0);
   api.setWebGpuProducerProfileEnabled?.(wgpuProducerProfileRequested ? 1 : 0);
@@ -3210,6 +3213,7 @@ function bindApi(module) {
     setJitRegionsEnabled: optionalCwrap("DolphinWeb_JitSetRegionsEnabled", null, ["number"]),
     setJitRegionChaining: optionalCwrap("DolphinWeb_JitSetRegionChaining", null, ["number"]),
     setGpuSpinBudget: optionalCwrap("DolphinWeb_SetGpuSpinBudget", null, ["number"]),
+    setCodeSpaceMiB: optionalCwrap("DolphinWeb_SetCodeSpaceMiB", null, ["number"]),
     setDstAlphaTwoPass: optionalCwrap("DolphinWeb_SetDstAlphaTwoPass", null, ["number"]),
     getPpcWasmJitEngagedFrame: optionalCwrap("GetPpcWasmJitEngagedFrame", "number", []),
     getPpcWasmJitArmStartFrame: optionalCwrap("GetPpcWasmJitArmStartFrame", "number", []),
