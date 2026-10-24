@@ -2731,7 +2731,7 @@ async function loadCore({
   }
   aotFirstLaunchEnabled = aotFirstLaunch === true;
   aotProfileSampleMs = Number.isInteger(aotSampleMs) && aotSampleMs >= 0 ? aotSampleMs : AOT_PROFILE_SAMPLE_MS;
-  wasmEngineName = WASM_ENGINES.includes(requestedWasmEngine) ? requestedWasmEngine : wasmEngine({ search: "" });
+  wasmEngineName = resolveWasmEngineName(requestedWasmEngine);
   aotRegionCapRequested = Number.isInteger(regionCap) && regionCap >= 0 ? regionCap : null;
   dolphinJitBootLoadComplete = false;
   dolphinJitBootLoadedEntries = 0;
@@ -7360,6 +7360,7 @@ async function reconcileJitCacheWithBuild(fingerprint) {
   if (identity.reset) {
     await clearDolphinJitModulesStore(dolphinJitIdb);
     dolphinJitCacheMap.clear();
+    dolphinJitPersistedOnly.clear();
     dolphinJitPrebuiltOverflow = null;
     postStatus(
       `jit-cache: identity reset (${identity.reason}); cleared unverified modules`
@@ -7750,6 +7751,11 @@ let aotProfileSampleMs = AOT_PROFILE_SAMPLE_MS;
 // worker's own detection (no ?wasmengine= here: a worker's location is its
 // script's).
 let wasmEngineName = "unknown";
+// The page's engine as the adapter passed it (?wasmengine= resolved there),
+// else this worker's own detection.
+export function resolveWasmEngineName(requested, detect = () => wasmEngine({ search: "" })) {
+  return WASM_ENGINES.includes(requested) ? requested : detect();
+}
 export const wasmEngineForTest = () => wasmEngineName;
 // Test seams: the engine this worker believes it runs on, and whether the
 // core has booted (the Modules kept before it reach the pthreads).
@@ -7923,8 +7929,10 @@ export function setHarnessEnabledForTest(on) {
   if (!harnessEnabled) aotRegionLedger.clear();
 }
 // A region module of the first launch: compiled off the CPU thread when the
-// compiler worker is on (?aotcompiler=1), kept alive under its key.
-async function precompileAotRegion(key, bytes) {
+// compiler worker is on (?aotcompiler=1), kept alive under its key (without
+// a native module cache past the boot: compiled for its sections and
+// validation, not kept).
+export async function precompileAotRegion(key, bytes) {
   let module;
   try {
     module = dolphinAotCompilerEnabled
@@ -8041,12 +8049,13 @@ export function precompileDolphinJitModule(key, input) {
       postStatus("jit-cache: rejected compile request with mismatched block identity");
       return { reason: "key-mismatch" };
     }
-    // No native module cache: compiling here would only make a second copy;
-    // the bytes are stored and the slot marked ready, the CPU thread compiles
-    // its own (an engine reject is handled there, 0071).
+    // No native module cache: compiling here would only make a second copy.
+    // The slot is marked ready and the CPU thread compiles its own (an engine
+    // reject is handled there, 0071). Nothing is stored from here: the bytes
+    // come back in the CPU thread's dolphin-jit-new-compile once its compile
+    // succeeded, and are stored then, once.
     if (!keepModulesForNativeCache()) {
       dolphinJitCopiesSkipped += 1;
-      if (dolphinJitCachePersistenceEnabled) void writeDolphinJitEntryToIdb(key, bytes);
       return { reason: "no-native-cache" };
     }
     let mod;
@@ -8147,7 +8156,9 @@ async function handleDolphinJitNewCompile(event) {
   const bytes = data.bytes instanceof ArrayBuffer ? new Uint8Array(data.bytes) : data.bytes;
   if (!(bytes instanceof Uint8Array)) return;
   if (dolphinJitCacheMap.has(key) || dolphinJitVerificationPending.has(key) || dolphinJitPersistedOnly.has(key)) return;
-  if (dolphinJitCacheMap.size >= DOLPHIN_JIT_CACHE_MAX) return;
+  // Keys stored without a Module count as Modules would: the store stays
+  // within the same bound as under V8 (49 152 entries, then nothing new).
+  if (dolphinJitCacheMap.size + dolphinJitPersistedOnly.size >= DOLPHIN_JIT_CACHE_MAX) return;
   dolphinJitVerificationPending.add(key);
   let valid = false;
   try {
@@ -8479,13 +8490,6 @@ async function startLazyJitCacheFill() {
   const HARD_CAP = DOLPHIN_JIT_CACHE_MAX;
   let added = 0;
   for (let i = 0; i < remaining.length; i += LAZY_BATCH) {
-    // Past the boot, without a native module cache, a Module compiled here
-    // reaches no pthread (they no longer read messages) and is a second copy
-    // of what the CPU thread compiles itself: the fill stops.
-    if (!keepModulesForNativeCache()) {
-      dolphinJitLazyFillTerminalReason = "no-native-cache";
-      break;
-    }
     if (dolphinJitCacheMap.size >= HARD_CAP) break;
     if (performance.now() - startedAt > DOLPHIN_JIT_BOOT_COMPILE_BUDGET_MS) break;
     const slice = remaining.slice(i, i + LAZY_BATCH);
@@ -8555,9 +8559,7 @@ async function startLazyJitCacheFill() {
     dolphinJitLazyFillFailureCount === 0;
   dolphinJitLazyFillTerminalReason = dolphinJitLazyFillCompleted
     ? "complete"
-    : !keepModulesForNativeCache()
-      ? "no-native-cache"
-      : dolphinJitCacheMap.size >= HARD_CAP
+    : dolphinJitCacheMap.size >= HARD_CAP
       ? "capacity"
       : "incomplete";
 }

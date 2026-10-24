@@ -279,6 +279,63 @@ test("without a native module cache (JSC), past the boot, a compile request is m
   assert.ok(before.module instanceof WebAssembly.Module, "before the boot the Module is kept (it reaches the pthreads)");
 });
 
+test("no native module cache: V8 past the boot unchanged, new blocks stored once and not kept, regions compiled but not kept; the engine comes from the adapter", async (t) => {
+  const originalSelf = globalThis.self;
+  globalThis.self = { location: { href: "http://127.0.0.1:8080/" }, addEventListener() {}, postMessage() {} };
+  t.after(() => {
+    if (originalSelf === undefined) delete globalThis.self;
+    else globalThis.self = originalSelf;
+  });
+  const {
+    installDolphinPthreadChannels, precompileDolphinJitModule, precompileAotRegion, setWasmEngineForTest, setAotCoreBootedForTest,
+    dolphinJitCopiesSkippedForTest, resolveWasmEngineName, setDolphinAotCompilerForTest
+  } = await import(`${workerUrl.href}?no-native-cache-paths-test=${Date.now()}`);
+  const { canonicalWasmBlockKey } = await import("../src/jit-cache-identity.js");
+  setDolphinAotCompilerForTest({});
+  t.after(() => { setWasmEngineForTest("unknown"); setAotCoreBootedForTest(false); });
+  const wasm = (n) => Uint8Array.from(Buffer.from(`0061736d0100000001060160017f017f03020100070501016600000a090107002000410${n}6a0b`, "hex"));
+  setAotCoreBootedForTest(true);
+
+  // V8 past the boot: compiled and kept, the same Module comes back
+  setWasmEngineForTest("v8");
+  const a = wasm("1"), aKey = await canonicalWasmBlockKey(a);
+  const kept = await precompileDolphinJitModule(aKey, a);
+  assert.ok(kept.module instanceof WebAssembly.Module);
+  assert.equal((await precompileDolphinJitModule(aKey, a)).module, kept.module);
+
+  // JSC past the boot: a region is compiled (its sections are read) but not kept
+  setWasmEngineForTest("jsc");
+  const r = wasm("2"), rKey = await canonicalWasmBlockKey(r);
+  const region = await precompileAotRegion(rKey, r);
+  assert.ok(region.module instanceof WebAssembly.Module, "compiled for validation and sections");
+  setWasmEngineForTest("v8");
+  assert.notEqual((await precompileDolphinJitModule(rKey, r)).module, region.module, "not kept: compiled again");
+  // control: under V8 a region is kept
+  const c = wasm("3"), cKey = await canonicalWasmBlockKey(c);
+  const control = await precompileAotRegion(cKey, c);
+  assert.equal((await precompileDolphinJitModule(cKey, c)).module, control.module);
+
+  // JSC past the boot: the CPU thread's new compile is stored once, never compiled or kept here
+  setWasmEngineForTest("jsc");
+  const cpu = fakePthreadWorker();
+  await installDolphinPthreadChannels({ PThread: { runningWorkers: [cpu], unusedWorkers: [] } }, { jitCacheEnabled: true });
+  const newCompile = cpu.listeners.find(({ name }) => name === "handleDolphinJitNewCompile").listener;
+  const n = wasm("4"), nKey = await canonicalWasmBlockKey(n);
+  const skipped = dolphinJitCopiesSkippedForTest();
+  await newCompile({ currentTarget: cpu, data: { type: "dolphin-jit-new-compile", hash: nKey, bytes: n } });
+  await newCompile({ currentTarget: cpu, data: { type: "dolphin-jit-new-compile", hash: nKey, bytes: n } });
+  assert.equal(dolphinJitCopiesSkippedForTest() - skipped, 1, "stored once, the repeat is deduplicated");
+  setWasmEngineForTest("v8");
+  const after = await precompileDolphinJitModule(nKey, n);
+  assert.ok(after.module instanceof WebAssembly.Module, "no Module was kept for it: compiled now");
+
+  // the engine as the adapter passed it (?wasmengine= on the page); anything else: the worker's own detection
+  assert.equal(resolveWasmEngineName("jsc", () => "v8"), "jsc");
+  assert.equal(resolveWasmEngineName("spidermonkey", () => "v8"), "spidermonkey");
+  assert.equal(resolveWasmEngineName("safari", () => "v8"), "v8");
+  assert.equal(resolveWasmEngineName(undefined, () => "unknown"), "unknown");
+});
+
 test("the off-thread compiler is on by default: no parameter, worker load defaults and adapter defaults", async () => {
   const { aotCompilerRequested, jitOffThreadRequested } = await import("../src/aot-compiler-worker.js");
   assert.equal(aotCompilerRequested(""), true);
