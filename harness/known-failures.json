@@ -18,32 +18,5 @@
     "mode": "report-only",
     "reason": "cpu=dual race state: one commit gives several pictures across runs (wgpu: 3 distinct in 6 runs), so no baseline set holds; the exact render check of the race is on the cpu=single cells (rec-single, wgpu-single)",
     "since": "2026-10-19"
-  },
-  {
-    "cell": "dstalpha-zinit/wgpu-interp",
-    "check": "render",
-    "mode": "expected-fail",
-    "detail": "^different$",
-    "reason": "WebGPU EFB depth never cleared: native Dolphin clears depth on an EFB copy only while depth updates are on (BPStructs.cpp:389, z_enable = bpmem.zmode.update_enable) and starts the EFB at GX depth 0 (FramebufferManager.cpp:291-294), so LEQUAL rejects the depth-tested rows (columns only, as the software renderer). wgpu's never-cleared depth behaves as far and draws them.",
-    "until": "WebGPU EFB depth clear (initial value, z_enable on copy)",
-    "since": "2026-10-24"
-  },
-  {
-    "cell": "dstalpha-zinit/wgpu-nodualsrc",
-    "check": "render",
-    "mode": "expected-fail",
-    "detail": "^different$",
-    "reason": "WebGPU EFB depth never cleared: native Dolphin clears depth on an EFB copy only while depth updates are on (BPStructs.cpp:389, z_enable = bpmem.zmode.update_enable) and starts the EFB at GX depth 0 (FramebufferManager.cpp:291-294), so LEQUAL rejects the depth-tested rows (columns only, as the software renderer). wgpu's never-cleared depth behaves as far and draws them.",
-    "until": "WebGPU EFB depth clear (initial value, z_enable on copy)",
-    "since": "2026-10-24"
-  },
-  {
-    "cell": "dstalpha-zinit/wgpu-safari26",
-    "check": "render",
-    "mode": "expected-fail",
-    "detail": "^different$",
-    "reason": "WebGPU EFB depth never cleared: native Dolphin clears depth on an EFB copy only while depth updates are on (BPStructs.cpp:389, z_enable = bpmem.zmode.update_enable) and starts the EFB at GX depth 0 (FramebufferManager.cpp:291-294), so LEQUAL rejects the depth-tested rows (columns only, as the software renderer). wgpu's never-cleared depth behaves as far and draws them.",
-    "until": "WebGPU EFB depth clear (initial value, z_enable on copy)",
-    "since": "2026-10-24"
   }
 ]
