@@ -125,6 +125,8 @@ export class EmulatorHost {
     this.wgpuFallback = new URLSearchParams(window.location.search).get("wgpufallback") === "1";
     // ?dstalpha2pass=0 (patch 0149): the dst-alpha second pass (0136) off.
     this.dstAlphaTwoPass = new URLSearchParams(window.location.search).get("dstalpha2pass") !== "0";
+    // ?discreadahead=0: the disc read exactly as asked (no read-ahead).
+    this.discReadahead = new URLSearchParams(window.location.search).get("discreadahead") !== "0";
     // Harness: keep a software WebGL presenter (SwiftShader), which the app
     // refuses for the 2D canvas (cheaper on a CPU).
     this.webglSoftware = new URLSearchParams(window.location.search).get("webglsw") === "1";
@@ -465,6 +467,7 @@ export class EmulatorHost {
             wgpuMask: this.wgpuMask,
             wgpuFallback: this.wgpuFallback,
             dstAlphaTwoPass: this.dstAlphaTwoPass,
+            discReadahead: this.discReadahead,
             webglSoftware: this.webglSoftware,
             savesMode: this.savesMode,
             efbDiag: this.efbDiag,

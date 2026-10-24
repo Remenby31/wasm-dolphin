@@ -138,6 +138,7 @@ import {
   failWgpuRingConsumer
 } from "./wgpu-ring-backpressure.js";
 import { createWgpuReplayParker } from "./wgpu-replay-park.js";
+import { createDiscReadahead } from "./disc-readahead.js";
 import {
   WGPU_UPLOAD_PROBE_SCHEMA,
   createWgpuUploadProbeExecutor
@@ -1640,6 +1641,7 @@ async function handleMessage(type, payload) {
         wgpuMask: payload.wgpuMask,
         wgpuFallback: payload.wgpuFallback,
         dstAlphaTwoPass: payload.dstAlphaTwoPass,
+        discReadahead: payload.discReadahead,
         webglSoftware: payload.webglSoftware,
         efbDiag: payload.efbDiag,
         jitVerbose: payload.jitVerbose,
@@ -2353,6 +2355,7 @@ async function loadCore({
   wgpuMask = "",
   wgpuFallback = false,
   dstAlphaTwoPass = true,
+  discReadahead = true,
   webglSoftware = false,
   efbDiag = false,
   jitVerbose = false,
@@ -2410,6 +2413,7 @@ async function loadCore({
   fifoLogBoot = Boolean(fifoLog);
   wgpuMaskedFeatures = parseWgpuMask(wgpuMask);
   wgpuAcceptFallbackAdapter = Boolean(wgpuFallback);
+  discReadaheadEnabled = discReadahead !== false;
   webglAcceptSoftware = Boolean(webglSoftware);
   if (moduleInstance) {
     return moduleInstance;
@@ -3163,6 +3167,18 @@ async function loadCore({
 // boot's HLE apploader and FST reads): over a window that holds any, the
 // difference is a lower bound; equal read counts on both sides mean none.
 const discReadService = { reads: 0, bytes: 0, ms: 0, maxMs: 0 };
+// The disc read ahead, 64 KiB to 1 MiB as a stream goes on, 8 MiB held at
+// most (src/disc-readahead.js); ?discreadahead=0 reads exactly what is asked,
+// as WORKERFS does.
+let discReadaheadEnabled = true;
+let discBlockReader = null;
+function readDiscAhead(workerFs) {
+  const ops = workerFs?.stream_ops;
+  if (!ops?.read || discBlockReader || typeof FileReaderSync !== "function") return;
+  const reader = new FileReaderSync();
+  discBlockReader = createDiscReadahead({ readBlob: (blob) => reader.readAsArrayBuffer(blob) });
+  ops.read = discBlockReader.read;
+}
 function timeDiscReads(workerFs) {
   const ops = workerFs?.stream_ops;
   if (!ops?.read || ops.read.timedDiscReads) return;
@@ -3199,10 +3215,16 @@ function harnessDiscReads({ resetMax = false } = {}) {
       moduleInstance._free(ptr);
     }
   }
-  const read = { service: { ...discReadService }, core, frame: api?.getFrame?.() ?? null };
+  const read = { service: { ...discReadService }, readahead: discBlockReader ? { ...discBlockReader.stats } : null, core, frame: api?.getFrame?.() ?? null };
+  // A read that finishes between this read and the reset is in neither
+  // window's maxima (accepted: a few microseconds). coreMaxReset says whether
+  // the core's maxima really started over (false with a core before 0154,
+  // where only the worker's did).
   if (resetMax) {
     discReadService.maxMs = 0;
-    moduleInstance?._DolphinWeb_DiscReadStatsResetMax?.();
+    const reset = moduleInstance?._DolphinWeb_DiscReadStatsResetMax;
+    reset?.();
+    read.coreMaxReset = typeof reset === "function";
   }
   return read;
 }
@@ -4080,6 +4102,7 @@ async function mountFile(file) {
   const _t_workerfs = performance.now();
   fs.mount(resolveWorkerFs(moduleInstance), { blobs: [{ name: safeName, data: file }] }, WORKERFS_MOUNT_DIR);
   mounted = true;
+  if (discReadaheadEnabled) readDiscAhead(resolveWorkerFs(moduleInstance));
   if (harnessEnabled) {
     timeDiscReads(resolveWorkerFs(moduleInstance));
     moduleInstance._DolphinWeb_SetDiscReadStatsEnabled?.(1);

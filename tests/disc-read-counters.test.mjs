@@ -45,5 +45,5 @@ test("0154 resets the maxima on request, both sides, and only them", async () =>
   const w = await read("../src/upstream-discio-worker.js");
   assert.match(w, /case "validationReadDiscReads":\n\s*return harnessDiscReads\(payload\);/);
   // The read is taken before the reset: it still holds the window's maxima.
-  assert.match(w, /const read = \{ service: \{ \.\.\.discReadService \}[^\n]*\n\s*if \(resetMax\) \{\n\s*discReadService\.maxMs = 0;\n\s*moduleInstance\?\._DolphinWeb_DiscReadStatsResetMax\?\.\(\);/);
+  assert.match(w, /if \(resetMax\) \{\n\s*discReadService\.maxMs = 0;\n\s*const reset = moduleInstance\?\._DolphinWeb_DiscReadStatsResetMax;\n\s*reset\?\.\(\);\n\s*read\.coreMaxReset = typeof reset === "function";/);
 });
