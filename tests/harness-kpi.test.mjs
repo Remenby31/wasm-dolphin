@@ -679,3 +679,10 @@ test("KPI: a video=null run fills neither the product rows nor the hardware (wgp
   assert.equal(fitsConfig(r("speed=1&aot=1"), "candidate", "aot"), true);
   assert.equal(fitsConfig(r("video=software&speed=1"), "candidate", "product"), true);
 });
+
+test("KPI: the race rows read the race scene only, never a heavy-scene run", () => {
+  const r = (state) => ({ kind: "race-perf", json: { probe: "race-perf", query: "video=wgpu&speed=1&aot=1", state } });
+  assert.equal(fitsConfig(r("/m/harness/race-after.sav"), "candidate", "aot"), true);
+  assert.equal(fitsConfig(r("/m/harness/heavy-intro-13s.sav"), "candidate", "aot"), false);
+  assert.equal(fitsConfig(r(undefined), "candidate", "aot"), true); // no state recorded: as before
+});

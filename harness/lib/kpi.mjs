@@ -78,8 +78,13 @@ const queryOf = (j, side, kind) => new URLSearchParams(String((kind === "ttff" |
 // the wgpu rows).
 const sideVideo = (j, side, kind) => queryOf(j, side, kind).get("video");
 export const sideIsProduct = (j, side, kind = "race-perf") => sideVideo(j, side, kind) === "software";
+// The race rows read the race scene only: a race-perf run on another
+// savestate (the heavy scene, heavy-*.sav) is not the race (2026-10-25: the
+// night campaign's heavy runs, newer, filled the race speed and headroom rows).
+export const raceScene = (j) => !/heavy/i.test(String(j?.state ?? "").split("/").pop());
 export function fitsConfig(r, side, config) {
   if (!config || !["race-perf", "ttff", "first-launch-ramp"].includes(r.kind)) return true;
+  if (r.kind === "race-perf" && !raceScene(r.json)) return false;
   const want = CONFIGS[config];
   const aot = r.kind === "ttff" ? ttffHasAot(r.json)
     : r.kind === "first-launch-ramp" ? queryOf(r.json, side, r.kind).get("aot") === "1"
