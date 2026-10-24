@@ -397,6 +397,39 @@ function harnessRegionLedger(pcs) {
   return { modules: aotRegionLedger.size, outcomes, queuedEntries: entries, mappedRegions: typeof mapped === "function" ? mapped() >>> 0 : null, nowMs: Math.round(performance.now()), pcs: at };
 }
 
+// Patch 0156: the guest cycles ran outside the regions by the PC a chain of
+// blocks started at, the 64 most costly, while the stats are on (timing or
+// not), each with its cause as the ledger sees it: "declared" (a module
+// handed to the core declares that PC: refused by the mode, not verified,
+// or its region left early) or "undeclared" (no module has it: outside the
+// plan, or not held by any fragment). Null with a core before 0156; torn
+// copies (the CPU thread publishing meanwhile) are read again.
+const REGION_MISS_TOP = 64;
+function harnessRegionMissTop(heap, m = moduleInstance) {
+  const at = typeof m?._DolphinWeb_JitRegionMissTop === "function" ? m._DolphinWeb_JitRegionMissTop() >>> 0 : 0;
+  const size = 8 + 16 * REGION_MISS_TOP + 8;
+  if (!at || at + size > heap.length) return null;
+  // A seqlock: the CPU thread stores seq, the entries, then seq_end; read
+  // seq_end first, copy, then seq: equal, no write overlapped the copy (read
+  // in the writer's order, a write begun after seq and still running when
+  // seq_end is read would match on a torn copy; review of #237).
+  const words = new Int32Array(heap.buffer);
+  const seqAt = at >>> 2, seqEndAt = (at + 8 + 16 * REGION_MISS_TOP) >>> 2;
+  const load = (i) => (typeof SharedArrayBuffer !== "undefined" && heap.buffer instanceof SharedArrayBuffer ? Atomics.load(words, i) : words[i]) >>> 0;
+  for (let tries = 0; tries < 3; tries += 1) {
+    const ended = load(seqEndAt);
+    const view = new DataView(heap.slice(at, at + size).buffer);
+    if (load(seqAt) !== ended) continue;
+    const count = Math.min(view.getUint32(4, true), REGION_MISS_TOP);
+    const declared = (pc) => [...aotRegionLedger.values()].some((r) => r.outcome === "queued" && r.entries.includes(pc));
+    return Array.from({ length: count }, (_, i) => {
+      const pc = view.getUint32(8 + 16 * i + 8, true) >>> 0;
+      return { pc, cycles: view.getFloat64(8 + 16 * i, true), cause: declared(pc) ? "declared" : "undeclared" };
+    });
+  }
+  return { torn: true };
+}
+
 function harnessJitRegionStats({ sampleEvery, pcs } = {}) {
   if (!harnessEnabled) return { error: "harness hooks are off" };
   const stats = moduleInstance?._DolphinWeb_JitRegionStats;
@@ -422,7 +455,7 @@ function harnessJitRegionStats({ sampleEvery, pcs } = {}) {
   return { bytes: copy(), again: copy(), installSamples: harnessRegionInstallSamples(heap), layoutRefused, layoutHash, layout: harnessHeapLayout(moduleInstance),
     heapPatched: aotHeapPatched, heapPatchedBytes: aotHeapPatchedBytes, heapPatchFailed: aotHeapPatchFailed,
     regionChain: harnessRegionChainStats(heap), regionSleep: harnessRegionSleepStats(), ledger: harnessRegionLedger(pcs),
-    regionCalls: harnessRegionCallStats() };
+    regionCalls: harnessRegionCallStats(), missTop: harnessRegionMissTop(heap) };
 }
 // Guest calls made by region code as wasm calls (patch 0142): calls, returns
 // elsewhere than the continuation, codes passed up, calls past the depth
@@ -1586,6 +1619,7 @@ async function handleMessage(type, payload) {
         ppcWasmJitWarmupFrames: payload.ppcWasmJitWarmupFrames,
         ppcProfile: payload.ppcProfile,
         gpuSpinMicros: payload.gpuSpinMicros,
+        codeSpaceMiB: payload.codeSpaceMiB,
         cpuOverclock: payload.cpuOverclock,
         emulationSpeed: payload.emulationSpeed,
         presentationScale: payload.presentationScale,
@@ -2299,6 +2333,7 @@ async function loadCore({
   ppcWasmJitWarmupFrames: requestedPpcWasmJitWarmupFrames = DEFAULT_WASM_JIT_WARMUP_XFB_FRAMES,
   ppcProfile = false,
   gpuSpinMicros = -1,
+  codeSpaceMiB = null,
   cpuOverclock = 1,
   emulationSpeed = 1,
   presentationScale = 1,
@@ -3041,6 +3076,7 @@ async function loadCore({
   api.setJitRegionChaining?.(regionChain !== false ? 1 : 0);
   api.setPpcProfileEnabled?.(ppcProfile ? 1 : 0);
   if (Number.isInteger(gpuSpinMicros) && gpuSpinMicros >= 0) api.setGpuSpinBudget?.(gpuSpinMicros);
+  if (Number.isInteger(codeSpaceMiB)) api.setCodeSpaceMiB?.(codeSpaceMiB);
   api.setDstAlphaTwoPass?.(dstAlphaTwoPass !== false ? 1 : 0);
   api.setWebGpuUploadArenaMiB?.(wgpuUploadArenaMiB, collectMetrics ? 1 : 0);
   api.setWebGpuProducerProfileEnabled?.(wgpuProducerProfileRequested ? 1 : 0);
@@ -3239,6 +3275,7 @@ function bindApi(module) {
     setJitRegionsEnabled: optionalCwrap("DolphinWeb_JitSetRegionsEnabled", null, ["number"]),
     setJitRegionChaining: optionalCwrap("DolphinWeb_JitSetRegionChaining", null, ["number"]),
     setGpuSpinBudget: optionalCwrap("DolphinWeb_SetGpuSpinBudget", null, ["number"]),
+    setCodeSpaceMiB: optionalCwrap("DolphinWeb_SetCodeSpaceMiB", null, ["number"]),
     setDstAlphaTwoPass: optionalCwrap("DolphinWeb_SetDstAlphaTwoPass", null, ["number"]),
     getPpcWasmJitEngagedFrame: optionalCwrap("GetPpcWasmJitEngagedFrame", "number", []),
     getPpcWasmJitArmStartFrame: optionalCwrap("GetPpcWasmJitArmStartFrame", "number", []),
@@ -8089,6 +8126,7 @@ function submitAotRegion(module, { key, generation, bytes, entries, members, lay
 }
 export const queueAotRegionForTest = queueAotRegion;
 export const regionLedgerForTest = (pcs) => harnessRegionLedger(pcs);
+export const regionMissTopForTest = (heap, m) => harnessRegionMissTop(heap, m);
 export const regionLedgerStaleForTest = (m) => harnessRegionLedgerStale(m);
 export function setHarnessEnabledForTest(on) {
   harnessEnabled = on === true;

@@ -155,6 +155,7 @@ export class EmulatorHost {
     // The wasm engine (src/wasm-engine.js), resolved here once: a worker's
     // location is its own script's, so ?wasmengine= reaches it only this way.
     this.wasmEngine = wasmEngine({ search: window.location.search });
+    this.codeSpaceMiB = requestedCodeSpaceMiB(window.location.search, this.wasmEngine);
     // ?regioncap=N|0: the region function cap forced (tests, benches); by
     // default the worker takes it from the engine (JSC only).
     const regionCap = new URLSearchParams(window.location.search).get("regioncap");
@@ -388,6 +389,7 @@ export class EmulatorHost {
             ppcWasmJitWarmupFrames: this.ppcWasmJitWarmupFrames,
             ppcProfile: this.ppcProfile,
             gpuSpinMicros: this.gpuSpinMicros,
+            codeSpaceMiB: this.codeSpaceMiB,
             cpuOverclock: this.cpuOverclock,
             emulationSpeed: this.emulationSpeed,
             presentationScale: this.presentationScale,
@@ -443,6 +445,7 @@ export class EmulatorHost {
             ppcWasmJitWarmupFrames: this.ppcWasmJitWarmupFrames,
             ppcProfile: this.ppcProfile,
             gpuSpinMicros: this.gpuSpinMicros,
+            codeSpaceMiB: this.codeSpaceMiB,
             cpuOverclock: this.cpuOverclock,
             emulationSpeed: this.emulationSpeed,
             presentationScale: this.presentationScale,
@@ -1456,6 +1459,18 @@ export function parseGpuSpinMicros(raw) {
   if (/^\d{1,7}$/.test(raw) && Number(raw) <= MAX_GPU_SPIN_MICROS) return Number(raw);
   console.warn(`?gpuspin=${JSON.stringify(raw)} ignored: expected -1 or an integer from 0 to ${MAX_GPU_SPIN_MICROS} (microseconds); using ${DEFAULT_GPU_SPIN_MICROS}`);
   return DEFAULT_GPU_SPIN_MICROS;
+}
+// The CachedInterpreter code space (patch 0138), in MiB. Its whole size is
+// dirtied at boot (Emscripten's mmap zeroes it). Under JSC (iOS) that memory
+// counts for jetsam and 32 MiB hold the working set (peak 4 to 9 MiB measured):
+// 32. Elsewhere (V8) a smaller space moved the later heap allocations and
+// cost up to 1 % (measured): 128, as before. ?codespace=<4..128> overrides.
+export const CODE_SPACE_MIB_JSC = 32;
+export const CODE_SPACE_MIB_DEFAULT = 128;
+export function requestedCodeSpaceMiB(search, engine) {
+  const raw = new URLSearchParams(search).get("codespace");
+  if (raw != null && /^\d{1,3}$/.test(raw) && Number(raw) >= 4 && Number(raw) <= 128) return Number(raw);
+  return engine === "jsc" ? CODE_SPACE_MIB_JSC : CODE_SPACE_MIB_DEFAULT;
 }
 function requestedGpuSpinMicros() {
   return parseGpuSpinMicros(new URLSearchParams(window.location.search).get("gpuspin"));

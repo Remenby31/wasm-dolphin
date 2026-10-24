@@ -16,9 +16,14 @@
 // thread waiting for the GPU in FlushGpu, with SyncOnSkipIdle on),
 // gpuConsumerWaitUs (inside those passes, the GPU thread waiting for ring or
 // upload space from the render worker), guestTicks (core ticks since the
-// reset, written at the same instant as windowUs), one spare.
-// maxSpeedGpu = guest s / (GPU work - consumer wait): waiting on the render
-// worker is not the emulated GPU's work. With the deterministic GPU thread
+// reset, written at the same instant as windowUs), presentSleepUs (inside
+// those passes, the video thread sleeping until the VI's host time,
+// SmoothEarlyPresentation, Present.cpp; patch 0153; 0 on a core that does
+// not measure it: the layout and version are unchanged).
+// maxSpeedGpu = guest s / (GPU work - consumer wait - present sleep):
+// waiting on the render worker or on the VI's host time is not the emulated
+// GPU's work (research/deep-gpu-cost-amplifier.md: the present sleep alone
+// took maxSpeedGpu from ~18 to 5.9 on heavy with Rush). With the deterministic GPU thread
 // the GPU loop does not run: maxSpeedGpu is null. PushBlockingEvent and
 // SyncGPU waits count as CPU busy time (they are off by default).
 // maxSpeedCpu leaves the CPU's waits out (sleep and FlushGpu): what limits it
@@ -27,7 +32,7 @@ import { round } from "./stats.mjs";
 
 export const HEADROOM_VERSION = 1;
 export const HEADROOM_BYTES = 96;
-const F64 = ["windowUs", "cpuSleepUs", "gpuWorkUs", "xfbCopies", "rushSkips", "flushGpuWaitUs", "flushGpuWaits", "gpuConsumerWaitUs", "guestTicks"];
+const F64 = ["windowUs", "cpuSleepUs", "gpuWorkUs", "xfbCopies", "rushSkips", "flushGpuWaitUs", "flushGpuWaits", "gpuConsumerWaitUs", "guestTicks", "presentSleepUs"];
 
 export function decodeHeadroomStats(bytes) {
   if (!bytes || bytes.length < 16) return { error: `headroom stats: ${bytes?.length ?? 0} bytes, no header` };
@@ -39,6 +44,7 @@ export function decodeHeadroomStats(bytes) {
   F64.forEach((name, i) => { out[name] = view.getFloat64(16 + i * 8, true); });
   for (const name of F64) if (!Number.isFinite(out[name]) || out[name] < 0) return { error: `headroom stats: ${name} = ${out[name]}` };
   if (out.cpuSleepUs + out.flushGpuWaitUs > out.windowUs * 1.001) return { error: `headroom stats: CPU waits ${out.cpuSleepUs + out.flushGpuWaitUs} µs > windowUs ${out.windowUs}` };
+  if (out.gpuConsumerWaitUs + out.presentSleepUs > out.gpuWorkUs * 1.001 + 1) return { error: `headroom stats: GPU waits ${out.gpuConsumerWaitUs + out.presentSleepUs} µs > gpuWorkUs ${out.gpuWorkUs}` };
   return out;
 }
 
@@ -58,7 +64,8 @@ export function headroomOf(s, { guestSeconds = null, ticksPerSecond = null, viOu
   if (!s.on) return { error: "headroom stats: counters not on" };
   if (!(guestSeconds > 0) || !(s.windowUs > 0)) return { error: `headroom stats: ${guestSeconds} guest s over ${s.windowUs} µs` };
   const hostS = s.windowUs / 1e6, sleepS = s.cpuSleepUs / 1e6, flushS = s.flushGpuWaitUs / 1e6;
-  const consumerS = s.gpuConsumerWaitUs / 1e6, gpuS = Math.max(0, s.gpuWorkUs / 1e6 - consumerS);
+  const consumerS = s.gpuConsumerWaitUs / 1e6, presentSleepS = (s.presentSleepUs ?? 0) / 1e6;
+  const gpuS = Math.max(0, s.gpuWorkUs / 1e6 - consumerS - presentSleepS);
   const sleepShare = sleepS / hostS;
   const busyS = hostS - sleepS - flushS;
   const maxSpeedCpu = busyS > 0 ? guestSeconds / busyS : null;
@@ -75,6 +82,7 @@ export function headroomOf(s, { guestSeconds = null, ticksPerSecond = null, viOu
     gpuBusyShare: round(gpuS / hostS, 4),
     flushGpuWaitShare: round(flushS / hostS, 4),
     gpuConsumerWaitShare: round(consumerS / hostS, 4),
+    presentSleepShare: round(presentSleepS / hostS, 4),
     rushSkips: s.rushSkips,
     xfbCopiesPerVi: viOutputs > 0 ? round(s.xfbCopies / viOutputs, 4) : null,
     // The product KPI (judge, 2026-10-23): game images the player gets per
