@@ -788,13 +788,13 @@ void EnsureRuntime()
     Config::SetBase(Config::GFX_HACK_SKIP_DUPLICATE_XFBS, false);
   Config::SetBase(Config::GFX_HACK_COPY_EFB_SCALED, false);
   // ?efbaccess=1 (Module['dolphinEfbAccess']): CPU reads and writes of the
-  // EFB, off by default as in Dolphin; upstream turns them on per game
-  // (GameINI), which this build does not ship yet.
+  // EFB, off by default as in Dolphin. A base-layer value: the disc's
+  // GameINI (tools/gamesettings-allowlist.json) turns it on above it.
   const bool efb_access = EM_ASM_INT({ return (typeof Module !== 'undefined' &&
                                                Module['dolphinEfbAccess']) ? 1 : 0; }) != 0;
   Config::SetBase(Config::GFX_HACK_EFB_ACCESS_ENABLE, efb_access);
   // ?efbcopyram=1 (Module['dolphinEfbCopyRam']): EFB copies also land in
-  // guest RAM, as upstream's GameINIs ask with EFBToTextureEnable=False.
+  // guest RAM. Base layer too: a GameINI's EFBToTextureEnable wins.
   const bool efb_copy_ram = EM_ASM_INT({ return (typeof Module !== 'undefined' &&
                                                  Module['dolphinEfbCopyRam']) ? 1 : 0; }) != 0;
   Config::SetBase(Config::GFX_HACK_SKIP_EFB_COPY_TO_RAM, !efb_copy_ram);

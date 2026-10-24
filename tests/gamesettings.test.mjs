@@ -57,6 +57,13 @@ test("[Dolphin.Core] and [Graphics.Settings] are the other spellings Dolphin map
   assert.equal(filterIni("[Graphics.Hacks]\nXFBToTextureEnable = False\n", allowlist), "[Video_Hacks]\nXFBToTextureEnable = False\n");
 });
 
+test("the EFB and bounding-box keys pass under [Video_Hacks], in allowlist order", () => {
+  const ini = "[Video_Hacks]\nBBoxEnable = True\nEFBToTextureEnable = False\nEFBAccessEnable = True\nEFBScaledCopy = False\n";
+  assert.equal(filterIni(ini, allowlist), "[Video_Hacks]\nEFBAccessEnable = True\nEFBToTextureEnable = False\nBBoxEnable = True\n");
+  assert.equal(filterIni("[Graphics.Hacks]\nBBoxEnable = True\n", allowlist), "[Video_Hacks]\nBBoxEnable = True\n");
+  assert.throws(() => filterIni("[Video_Settings]\nEFBAccessEnable = True\n", allowlist, "TST98.ini"), /TST98\.ini/);
+});
+
 test("an empty value is kept: Dolphin reads it as no value, the default", () => {
   assert.equal(filterIni("[Video_Settings]\nSafeTextureCacheColorSamples = \n", allowlist), "[Video_Settings]\nSafeTextureCacheColorSamples = \n");
 });
