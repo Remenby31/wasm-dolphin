@@ -270,6 +270,12 @@ let fifoLogBoot = false;
 let wgpuMaskedFeatures = new Set();
 // ?wgpufallback=1 (harness): keep a CPU fallback adapter; refused otherwise.
 let wgpuAcceptFallbackAdapter = false;
+// ?webglsw=1 (harness): keep a software WebGL presenter; refused otherwise
+// (setupSoftwarePresenter).
+let webglAcceptSoftware = false;
+// The presenter draws on the CPU: no WebGPU and no hardware WebGL. The tick
+// repaint of an unchanged frame is skipped there (startTickRepaintLoop).
+let presenterOnCpu = false;
 // A CPU adapter is no usable GPU: with --enable-unsafe-webgpu (the harness
 // passes it) a GPU-less Chrome gives a SwiftShader fallback adapter, and both
 // the replay and the presenter would run on the CPU.
@@ -1589,6 +1595,7 @@ async function handleMessage(type, payload) {
         efbCopyRam: payload.efbCopyRam,
         wgpuMask: payload.wgpuMask,
         wgpuFallback: payload.wgpuFallback,
+        webglSoftware: payload.webglSoftware,
         efbDiag: payload.efbDiag,
         jitVerbose: payload.jitVerbose,
         frameCap: payload.frameCap,
@@ -2264,6 +2271,7 @@ async function loadCore({
   efbCopyRam = false,
   wgpuMask = "",
   wgpuFallback = false,
+  webglSoftware = false,
   efbDiag = false,
   jitVerbose = false,
   frameCap = 0,
@@ -2318,6 +2326,7 @@ async function loadCore({
   fifoLogBoot = Boolean(fifoLog);
   wgpuMaskedFeatures = parseWgpuMask(wgpuMask);
   wgpuAcceptFallbackAdapter = Boolean(wgpuFallback);
+  webglAcceptSoftware = Boolean(webglSoftware);
   if (moduleInstance) {
     return moduleInstance;
   }
@@ -4717,6 +4726,8 @@ function startTickRepaintLoop() {
     // submitted a real present, repainting the cached CPU frame here would
     // immediately cover that backbuffer with the stale checker/green frame.
     if (cmdRingOwnsCanvas) return;
+    // On the CPU the repaint is pure cost: the canvas keeps the last frame.
+    if (presenterOnCpu) return;
     if (!_lastFrameCopyValid || _lastFrameLength <= 0) return;
     const now = performance.now();
     if (lastPresentedAt > 0 && (now - lastPresentedAt) < SKIP_IF_RECENT_MS) return;
@@ -5968,6 +5979,7 @@ async function setupSoftwarePresenter(canvas, presenterBackend) {
   renderImageData = null;
   renderUploadBuffer = null;
   renderRequiresUploadCopy = false;
+  presenterOnCpu = false;
 
   if (presenterBackend === "webgpu") {
     try {
@@ -5985,15 +5997,20 @@ async function setupSoftwarePresenter(canvas, presenterBackend) {
   }
 
   if (presenterBackend !== "2d") {
-    renderGl =
-      renderCanvas.getContext("webgl2", softwareBlitContextAttributes()) ||
-      renderCanvas.getContext("webgl", softwareBlitContextAttributes());
+    // Without a usable GPU, WebGL is SwiftShader: on a GPU-less Windows
+    // runner it cost 12-19 % more Chrome CPU than the 2D canvas for the same
+    // picture (windows-nogpu lane). failIfMajorPerformanceCaveat refuses such
+    // a context, and a refused getContext leaves the canvas free for 2D.
+    const attributes = { ...softwareBlitContextAttributes(), failIfMajorPerformanceCaveat: !webglAcceptSoftware };
+    renderGl = renderCanvas.getContext("webgl2", attributes) || renderCanvas.getContext("webgl", attributes);
     if (renderGl) {
       renderBackend = "webgl";
       rendererDiagnostics.activePresenterBackend = renderBackend;
       renderGlState = createSoftwareBlitter(renderGl);
       return;
     }
+    rendererDiagnostics.webglFallback = "no hardware WebGL context (software or none): 2D presenter";
+    presenterOnCpu = true;
   }
 
   renderContext = renderCanvas.getContext("2d", { alpha: false });

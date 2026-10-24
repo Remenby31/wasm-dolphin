@@ -122,6 +122,9 @@ export class EmulatorHost {
     // Harness: accept a CPU fallback WebGPU adapter (SwiftShader), refused for
     // the app as no usable GPU (the Windows CI lane has nothing else).
     this.wgpuFallback = new URLSearchParams(window.location.search).get("wgpufallback") === "1";
+    // Harness: keep a software WebGL presenter (SwiftShader), which the app
+    // refuses for the 2D canvas (cheaper on a CPU).
+    this.webglSoftware = new URLSearchParams(window.location.search).get("webglsw") === "1";
     this.savesMode = new URLSearchParams(window.location.search).get("saves") === "off" ? "off" : "";
     this.efbDiag = requestedEfbDiag();
     this.jitVerbose = new URLSearchParams(window.location.search).get("jitverbose") === "1";
@@ -434,6 +437,7 @@ export class EmulatorHost {
             efbCopyRam: this.efbCopyRam,
             wgpuMask: this.wgpuMask,
             wgpuFallback: this.wgpuFallback,
+            webglSoftware: this.webglSoftware,
             savesMode: this.savesMode,
             efbDiag: this.efbDiag,
             jitVerbose: this.jitVerbose,
