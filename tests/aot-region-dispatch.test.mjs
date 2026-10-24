@@ -1392,7 +1392,8 @@ test("continuations: an extra entry of the plan that no direct branch reaches is
   assert.ok(!held(without).has(t.labels.extra), "a direct branch never reaches it");
   const r = await translateWithContinuations(core.module, { entry: LONG, ranges, hash: null, extraEntries: [t.labels.extra] }, options);
   assert.ok(held(r).has(t.labels.extra), "the extra entry is held");
-  assert.ok(!r.budgetCharged, "within the old single fragment's blocks: free");
+  const seedFragment = r.continuations.find((x) => x.entries.includes(t.labels.extra));
+  assert.equal(r.budgetCharged, seedFragment.code.length, "a seed's fragment is charged whole (review of #191)");
   core.module._DolphinWeb_AotForgetRegionsForTest?.();
   const { bytes: mod, entries } = assembleRegion(claimEntries([r.fragment, ...r.continuations]), { helpers: HELPER_SIGNATURES, pcOffset: core.pcOffset, memoryPages: core.memoryPages });
   core.setRegionsEnabled(true);
@@ -1742,4 +1743,66 @@ test("a trap in a callee two wasm calls deep: the handler sees the interpreter's
     assert.deepEqual(got.state, reference.state, `maxFunctions ${maxFunctions}`);
     assert.equal(core.module._DolphinWeb_RegionCallDepthForTest(-1), 0, "no call left counted");
   }
+});
+
+// Review of #191: a real jump table. The plan finds its cases (extra
+// entries, reached only through the bctr); the region holds them and the
+// function, entered at its start, runs its table dispatch in the region
+// like the interpreter.
+test("seeds: the cases of a bctr jump table are held and reached through the table, like the interpreter", { skip: contSkip }, async () => {
+  const TABLE_TEXT = 0x8001c100, TABLE_DATA = 0x8001d100;
+  const ha = (x) => ((x + 0x8000) >>> 16) & 0xffff;
+  const t = assemble(TABLE_TEXT, [
+    "entry", asm.li(5, 2), asm.cmplwi(5, 4), (pc, l) => asm.bge(pc, l.dflt),
+    asm.lis(6, ha(TABLE_DATA)), asm.addi(6, 6, TABLE_DATA & 0xffff), asm.slwi2(5, 5), asm.lwzx(7, 6, 5), asm.mtctr(7), asm.bctr(),
+    "c0", asm.addi(4, 4, 1), asm.blr(),
+    "c1", asm.addi(4, 4, 2), asm.blr(),
+    "c2", asm.addi(4, 4, 3), asm.addi(3, 3, 7), asm.blr(),
+    "c3", asm.addi(4, 4, 4), asm.blr(),
+    "dflt", asm.blr()
+  ]);
+  const l = t.labels;
+  const dol = buildDol({ textAddr: TABLE_TEXT, text: t.words, dataAddr: TABLE_DATA, data: [l.c0, l.c1, l.c2, l.c3], entry: l.entry });
+  const { image, entryPoint } = imageFromDol(dol);
+  const plan = planDol({ image, entryPoint, gameId: "TEST01", dolBytes: dol, options: { gapFill: false } });
+  const f = plan.modules[0].functions.find((x) => x.entry === l.entry);
+  for (const c of [l.c0, l.c1, l.c2, l.c3]) assert.ok(f.extraEntries.includes(c), `${c.toString(16)} is an extra entry of the plan`);
+  for (const s of image.segments) core.load(s.start, s.bytes);
+  core.invalidate(TABLE_TEXT, 4 * t.words.length);
+  core.module._DolphinWeb_AotForgetRegionsForTest?.();
+  const r = await translateWithContinuations(core.module, { entry: f.entry, ranges: f.ranges, hash: f.hash, extraEntries: f.extraEntries },
+    { mask: PRODUCTION_DISABLE_MASK, maxBlocks: 64, names: coreAssembleOptions(core.module)?.helperNames });
+  assert.ok(r.fragment, r.reason);
+  const fragments = [r.fragment, ...(r.continuations ?? [])];
+  const held = new Set(fragments.flatMap((x) => x.entries));
+  for (const c of [l.c0, l.c1, l.c2, l.c3]) assert.ok(held.has(c), `${c.toString(16)} held`);
+  const { bytes: mod, entries } = assembleRegion(claimEntries(fragments), { helpers: HELPER_SIGNATURES, pcOffset: core.pcOffset, memoryPages: core.memoryPages });
+  core.setRegionsEnabled(true);
+  core.queueRegion(mod, entries.map(([pc]) => pc), [{ ranges: f.ranges, hash: null }]);
+  core.serviceRegions();
+  const reference = runCall(l.entry, { regions: false });
+  const got = runCall(l.entry, { regions: true });
+  assert.deepEqual(got.state, reference.state);
+  assert.equal(got.interpreted, 0, "the bctr into c2 stays in the region");
+});
+
+// Review of #191: what held code reaches goes before the seeds, whatever
+// their addresses; a seed's fragment is charged whole (the old single
+// fragment's free blocks are for the function's own flow).
+test("seeds: frontier leaders before seeds, and a seed's fragment charged whole", { skip: contSkip }, async () => {
+  const t = assemble(LONG, [
+    "entry", asm.li(3, 0), (pc, l) => asm.b(pc, l.hi),
+    "lo", asm.addi(4, 4, 1), asm.blr(), // a seed, below the leader
+    "hi", asm.addi(3, 3, 1), asm.blr()
+  ]);
+  const ranges = loadWords(LONG, t.words);
+  const options = { mask: PRODUCTION_DISABLE_MASK, maxBlocks: 1, names: coreAssembleOptions(core.module)?.helperNames };
+  const f = { entry: LONG, ranges, hash: null, extraEntries: [t.labels.lo] };
+  const one = await translateWithContinuations(core.module, f, { ...options, maxContinuations: 1 });
+  assert.deepEqual(one.continuations.map((x) => x.entry), [t.labels.hi], "the leader first, though the seed is lower");
+  assert.ok(one.budgetRefused >= 1, "the seed waits");
+  const both = await translateWithContinuations(core.module, f, { ...options, maxContinuations: 2 });
+  const seedFragment = both.continuations.find((x) => x.entry === t.labels.lo);
+  assert.ok(seedFragment);
+  assert.equal(both.budgetCharged, seedFragment.code.length, "the leader's fragment free, the seed's charged whole");
 });
