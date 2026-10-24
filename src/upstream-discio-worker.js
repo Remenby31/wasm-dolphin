@@ -12,6 +12,7 @@ import {
 } from "./upstream-worker-protocol.js";
 import { parseDolHeader } from "./dol.js";
 import { probeRelaxedMadd } from "./relaxed-madd-probe.js";
+import { probeWasmFeatures } from "./wasm-feature-probe.js";
 import { decodeWgpuSamplerState } from "./wgpu-sampler-state.js";
 import { gxClearDepthToStored, gxDepthState } from "./wgpu-depth-state.js";
 import { clampSourceRect, createWgpuExactCapture, packReadbackRows } from "./wgpu-exact-capture.js";
@@ -270,6 +271,9 @@ let fifoLogBoot = false;
 let wgpuMaskedFeatures = new Set();
 // ?wgpufallback=1 (harness): keep a CPU fallback adapter; refused otherwise.
 let wgpuAcceptFallbackAdapter = false;
+// ?webglsw=1 (harness): keep a software WebGL presenter; refused otherwise
+// (setupSoftwarePresenter).
+let webglAcceptSoftware = false;
 // A CPU adapter is no usable GPU: with --enable-unsafe-webgpu (the harness
 // passes it) a GPU-less Chrome gives a SwiftShader fallback adapter, and both
 // the replay and the presenter would run on the CPU.
@@ -337,9 +341,34 @@ function harnessHeapLayout(m) {
 // PC is held, the browser exits to it with no region). Kept only while the
 // harness hooks are on; reset per mount.
 const aotRegionLedger = new Map();
-function noteAotRegionLedger(key, entries, outcome) {
+function noteAotRegionLedger(key, entries, outcome, members = null) {
   if (!harnessEnabled || !key) return;
-  aotRegionLedger.set(key, { entries: Uint32Array.from(entries ?? [], (pc) => pc >>> 0), outcome, ms: Math.round(performance.now()) });
+  aotRegionLedger.set(key, { entries: Uint32Array.from(entries ?? [], (pc) => pc >>> 0), outcome, ms: Math.round(performance.now()), members });
+}
+// The members of each queued module whose code no longer matches the plan's
+// hash (what the core's re-verification compares: one such member drops the
+// whole module), and whether the module holds code of theirs (`translated`:
+// one of its entries is in their ranges) or only lists them (refused at
+// translation, still verified).
+async function harnessRegionLedgerStale(m = moduleInstance) {
+  if (!harnessEnabled) return { error: "harness hooks are off" };
+  if (typeof m?._DolphinWeb_AotRegionHeapBases !== "function") return { error: "core has no DolphinWeb_AotRegionHeapBases" };
+  const [{ coreHeapBases }, { regionHash }] = await Promise.all([import("./aot-orchestrator.js"), import("./aot-plan.js")]);
+  const ram = coreHeapBases(m)[0];
+  const read32 = (a) => new DataView(m.HEAPU8.buffer).getUint32(ram + (a & 0x01ffffff), false);
+  const stale = [];
+  let checked = 0;
+  for (const [key, r] of aotRegionLedger) {
+    if (r.outcome !== "queued" || !r.members) continue;
+    for (const [i, member] of r.members.entries()) {
+      if (!member.hash) continue;
+      checked += 1;
+      if (regionHash(read32, member.ranges) === member.hash) continue;
+      const translated = r.entries.some((pc) => member.ranges.some(([a, b]) => pc >= a && pc < b));
+      stale.push({ key, member: i, start: member.ranges[0]?.[0] ?? null, ranges: member.ranges.length, translated });
+    }
+  }
+  return { checked, stale: stale.slice(0, 64), staleModules: new Set(stale.map((x) => x.key)).size, staleCount: stale.length };
 }
 // pcs: the modules holding each among their entries (queued or not), with
 // the outcome and when; mappedRegions: the core's own count of mapped entries.
@@ -927,6 +956,10 @@ let wgpuDiagLastDrainAt = 0;
 let gpuSyncDiagEnabled = false;
 // probeRelaxedMadd()'s answer: "fused", "unfused", "unsupported" or "inconsistent".
 let relaxedMadd = null;
+// probeWasmFeatures()'s answer ({ simd, tailCall }), and why ?aot=1 was turned
+// off by it (null when it was not).
+let wasmFeatures = null;
+let aotRegionsOffReason = null;
 
 // Milliseconds before the next drain the drainEveryMs perturbation allows (0:
 // drain now). The replay pump sleeps that long instead of polling.
@@ -1564,6 +1597,7 @@ async function handleMessage(type, payload) {
         efbCopyRam: payload.efbCopyRam,
         wgpuMask: payload.wgpuMask,
         wgpuFallback: payload.wgpuFallback,
+        webglSoftware: payload.webglSoftware,
         efbDiag: payload.efbDiag,
         jitVerbose: payload.jitVerbose,
         frameCap: payload.frameCap,
@@ -1810,6 +1844,8 @@ async function handleMessage(type, payload) {
       return { mode: relaxedMadd, coreFused: moduleInstance?._DolphinWeb_FusedMadd ? moduleInstance._DolphinWeb_FusedMadd() === 1 : null };
     case "validationReadJitRegionStats":
       return harnessJitRegionStats(payload);
+    case "validationReadRegionLedgerStale":
+      return harnessRegionLedgerStale();
     case "validationReadAxHleStats":
       return harnessAxHleStats(payload);
     case "validationReadHeadroomStats":
@@ -2237,6 +2273,7 @@ async function loadCore({
   efbCopyRam = false,
   wgpuMask = "",
   wgpuFallback = false,
+  webglSoftware = false,
   efbDiag = false,
   jitVerbose = false,
   frameCap = 0,
@@ -2291,6 +2328,7 @@ async function loadCore({
   fifoLogBoot = Boolean(fifoLog);
   wgpuMaskedFeatures = parseWgpuMask(wgpuMask);
   wgpuAcceptFallbackAdapter = Boolean(wgpuFallback);
+  webglAcceptSoftware = Boolean(webglSoftware);
   if (moduleInstance) {
     return moduleInstance;
   }
@@ -2672,6 +2710,16 @@ async function loadCore({
   const _t_idb = performance.now();
   dolphinJitCachePersistenceEnabled = !noJitCache;
   dolphinAotCompilerEnabled = aotCompiler !== false;
+  // Regions are return_call chains: without wasm tail calls every region
+  // module would fail to compile. They stay off and the CPU runs on blocks,
+  // with a status line and aotStatus saying why (never a silent loss).
+  wasmFeatures = probeWasmFeatures();
+  aotRegionsOffReason = null;
+  if (aotFirstLaunch === true && !wasmFeatures.tailCall) {
+    aotFirstLaunch = false;
+    aotRegionsOffReason = "no wasm tail calls (return_call) in this engine";
+    postStatus(`aot: regions off: ${aotRegionsOffReason}`);
+  }
   aotFirstLaunchEnabled = aotFirstLaunch === true;
   aotProfileSampleMs = Number.isInteger(aotSampleMs) && aotSampleMs >= 0 ? aotSampleMs : AOT_PROFILE_SAMPLE_MS;
   dolphinJitBootLoadComplete = false;
@@ -5958,15 +6006,20 @@ async function setupSoftwarePresenter(canvas, presenterBackend) {
   }
 
   if (presenterBackend !== "2d") {
-    renderGl =
-      renderCanvas.getContext("webgl2", softwareBlitContextAttributes()) ||
-      renderCanvas.getContext("webgl", softwareBlitContextAttributes());
+    // Without a usable GPU, WebGL rasterises on the CPU (WARP on Windows,
+    // SwiftShader): on a GPU-less Windows runner the 2D canvas showed the same
+    // picture for 13-18 % less Chrome CPU (windows-nogpu lane).
+    // failIfMajorPerformanceCaveat refuses such a context (WARP included), and
+    // a refused getContext leaves the canvas free for 2D.
+    const attributes = { ...softwareBlitContextAttributes(), failIfMajorPerformanceCaveat: !webglAcceptSoftware };
+    renderGl = renderCanvas.getContext("webgl2", attributes) || renderCanvas.getContext("webgl", attributes);
     if (renderGl) {
       renderBackend = "webgl";
       rendererDiagnostics.activePresenterBackend = renderBackend;
       renderGlState = createSoftwareBlitter(renderGl);
       return;
     }
+    rendererDiagnostics.webglFallback = "no hardware WebGL context (software or none): 2D presenter";
   }
 
   renderContext = renderCanvas.getContext("2d", { alpha: false });
@@ -7446,7 +7499,10 @@ export async function handleAotMessage(type, payload = {}) {
   const idle = aotFirstLaunchEnabled ? "none" : "disabled";
   switch (type) {
     case "aotStatus": {
-      const status = aotFirstLaunch ? await aotFirstLaunch.status() : { state: idle, fraction: 0 };
+      const base = aotFirstLaunch ? await aotFirstLaunch.status() : { state: idle, fraction: 0 };
+      // The engine's features, and why regions are off when a missing one
+      // turned them off.
+      const status = { ...base, wasmFeatures: { ...wasmFeatures, relaxedMadd }, ...(aotRegionsOffReason ? { regionsOff: aotRegionsOffReason } : {}) };
       const profile = aotProfileReport();
       return profile ? { ...status, profile } : status;
     }
@@ -7796,7 +7852,7 @@ async function prepareAotRegion(module, { key, bytes, entries, members, layout =
 // Copies a prepared region into the core's heap and queues it (in order).
 function submitAotRegion(module, { key, generation, bytes, entries, members, layout, heapBases }) {
   if (generation !== aotDiscGeneration) return; // another disc since it was prepared
-  noteAotRegionLedger(key, entries, "queued");
+  noteAotRegionLedger(key, entries, "queued", members.map((x) => ({ ranges: x.ranges, hash: x.hash })));
   const ranges = members.flatMap((m) => m.ranges);
   const triples = members.flatMap((m) => [m.ranges.length, m.hash ? parseInt(m.hash.slice(8), 16) : 0, m.hash ? parseInt(m.hash.slice(0, 8), 16) : 0]);
   const words = [...entries, ...ranges.flat(), ...triples].map((v) => v >>> 0);
@@ -7815,6 +7871,7 @@ function submitAotRegion(module, { key, generation, bytes, entries, members, lay
 }
 export const queueAotRegionForTest = queueAotRegion;
 export const regionLedgerForTest = (pcs) => harnessRegionLedger(pcs);
+export const regionLedgerStaleForTest = (m) => harnessRegionLedgerStale(m);
 export function setHarnessEnabledForTest(on) {
   harnessEnabled = on === true;
   if (!harnessEnabled) aotRegionLedger.clear();

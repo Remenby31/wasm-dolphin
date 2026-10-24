@@ -1,19 +1,19 @@
 {
   "schemaVersion": 1,
   "abiVersion": 1,
-  "coreId": "sha256:4660d457d49c372f9fc2fb4e479a2dd7975b7b36125cdce2e9383cc4316cf9d6",
+  "coreId": "sha256:d18cd57ea175f5dcd6eb7034529ddf509cde3b2cfff0aa8b964895b4b730f5b9",
   "upstreamCommit": "e22551eae1c84a7e4d0b6a5c519ef4ed4ef69df1",
   "artifacts": [
     {
       "path": "cores/dolphin/dolphin-core-upstream.js",
       "hashMode": "lf-normalized",
-      "size": 283026,
-      "sha256": "1c9f71a200290815707ad980824ccd87662105de148187f132ce6c66064dc71f"
+      "size": 283271,
+      "sha256": "4c33fc68da259d55d54d8689ee5d609f60d2cc7585f504d008f8e3dc926e4c81"
     },
     {
       "path": "cores/dolphin/dolphin-core-upstream.wasm",
-      "size": 13173455,
-      "sha256": "4660d457d49c372f9fc2fb4e479a2dd7975b7b36125cdce2e9383cc4316cf9d6"
+      "size": 13188143,
+      "sha256": "d18cd57ea175f5dcd6eb7034529ddf509cde3b2cfff0aa8b964895b4b730f5b9"
     }
   ],
   "contractSources": [
@@ -86,8 +86,8 @@
     {
       "path": "src/core-host.js",
       "hashMode": "lf-normalized",
-      "size": 75510,
-      "sha256": "657ed7659bb5f3d0b9be127edd7e82e94084f301a00afd83a3df969cb7940618"
+      "size": 75780,
+      "sha256": "690494b3ceffc529b3acf1a4e7929fa5bfd0f5bd241c3f1a0642f21c9495bd7c"
     },
     {
       "path": "src/diagnostic-log-filter.js",
@@ -140,8 +140,8 @@
     {
       "path": "src/upstream-discio-worker.js",
       "hashMode": "lf-normalized",
-      "size": 731406,
-      "sha256": "a6e3627c64b0e8d00ad8b8cec325b0c0117061b348e5329d1107764e76fc47c5"
+      "size": 734955,
+      "sha256": "1b0ef80d397b9809c27a0ce40d4ea84ec427a2d9f9e09295dad6d65e92ed9b04"
     },
     {
       "path": "src/wgpu-renderer-worker-probe.js",
@@ -164,8 +164,8 @@
     {
       "path": "src/upstream-worker-adapter.js",
       "hashMode": "lf-normalized",
-      "size": 52869,
-      "sha256": "f4065d28f7464e7336964653cc417adcc82acf96e11192d134f51f61ce1fa8cd"
+      "size": 52986,
+      "sha256": "8fb622d633c8be96396a9a49db6a457575417c74909081503a380f1cc26bf3ef"
     },
     {
       "path": "src/upstream-worker-protocol.js",
@@ -470,6 +470,8 @@
     "_DolphinWeb_RecordInstanceUs",
     "_DolphinWeb_RecordModuleUs",
     "_DolphinWeb_RecordWasmCompileError",
+    "_DolphinWeb_RegionCallDepthForTest",
+    "_DolphinWeb_RegionCallStats",
     "_DolphinWeb_RegionChainHelper",
     "_DolphinWeb_RegionGuardRefusals",
     "_DolphinWeb_SetFprfForTest",
@@ -683,6 +685,7 @@
       "validationReadJitRegionStats",
       "validationReadMemAccessStats",
       "validationReadPipelinePrewarm",
+      "validationReadRegionLedgerStale",
       "validationReadRelaxedMadd",
       "validationReadTimeline",
       "validationReadWgpuReplayState",

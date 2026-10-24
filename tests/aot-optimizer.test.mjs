@@ -39,14 +39,14 @@ function optimizer({ cache = fakeCache(), translator = fakeTranslator(), ...extr
 test("aot optimizer: first launch compiles every region, second launch is complete", async () => {
   const cache = fakeCache();
   const { o, events } = optimizer({ cache });
-  assert.deepEqual(await o.status(), { state: "none", fraction: 0 });
+  assert.deepEqual(await o.status(), { state: "none", fraction: 0, regionsRefused: 0 });
   await o.start();
   const fractions = events.filter(([t]) => t === "optimization-progress").map(([, d]) => d.fraction);
   assert.ok(fractions.every((f, i) => !i || f >= fractions[i - 1]), "progress is monotonic");
   assert.equal(fractions.at(-1), 1);
   assert.equal(events.at(-1)[0], "optimization-done");
   const again = optimizer({ cache });
-  assert.deepEqual(await again.o.status(), { state: "complete", fraction: 1 });
+  assert.deepEqual(await again.o.status(), { state: "complete", fraction: 1, regionsRefused: 0 });
 });
 
 test("aot optimizer: cancel keeps what was compiled and a restart resumes", async () => {
@@ -61,7 +61,7 @@ test("aot optimizer: cancel keeps what was compiled and a restart resumes", asyn
   const before = cache.persisted.size;
   const second = optimizer({ cache, translator });
   await second.o.start({ resume: true });
-  assert.deepEqual(await second.o.status(), { state: "complete", fraction: 1 });
+  assert.deepEqual(await second.o.status(), { state: "complete", fraction: 1, regionsRefused: 0 });
   const submitted = second.events.filter(([t]) => t === "optimization-progress")[0][1].done;
   assert.ok(submitted >= before - 1, "the restart starts from the persisted regions");
 });
@@ -125,7 +125,7 @@ test("aot optimizer: core slices (budget), waits before boot (not-ready), skips 
   assert.ok(sleeps >= 2, "not-ready waits before retrying");
   assert.ok([...cache.persisted.keys()].every((k) => /^region-v1:00000000:00000000:[0-9a-f]{64}$/.test(k)), "module keys");
   assert.equal(cache.persisted.size, o.regions.length - 1);
-  assert.deepEqual(await o.status(), { state: "complete", fraction: 1 });
+  assert.deepEqual(await o.status(), { state: "complete", fraction: 1, regionsRefused: 0 });
 });
 
 // A core with region chaining (patch 0102) gets chained modules under their
@@ -340,4 +340,40 @@ test("aot optimizer: budgetRefused in optimization-done counts this run's refusa
   assert.ok(first > 0);
   await o.start({ resume: false });
   assert.equal(events.findLast(([t]) => t === "optimization-done")[1].budgetRefused, first, "a second run does not add the first's");
+});
+
+test("aot optimizer: the module's leftover continuation budget goes back to the members refused for lack of it, never past it", async () => {
+  // Three refused members per module, each charged 100 by its first pass:
+  // the first two want 300 more each, the third is at its own cap
+  // (exhausted: it leaves the rounds). A member's share is what is left at
+  // its turn over the members still to come; the translator never goes past
+  // its limit.
+  const UNIT = 1000;
+  const calls = [];
+  const base = fakeTranslator();
+  const fragment = (pc) => ({ entry: pc, entries: [pc], code: Uint8Array.from([0x00, 0x41, 0x00, 0x0b]), relocs: [] });
+  const wants = [300, 300, 0];
+  let k = 0;
+  const translator = {
+    unitContinuationBytes: UNIT,
+    translate: async (batch) => (await base.translate(batch)).map((r, n) => {
+      if (!r.fragment || k >= wants.length) return r;
+      const want = wants[k++], entry = batch[n].entry;
+      if (!want) return { ...r, budgetCharged: 100, budgetRefused: 2 }; // capped: no resume
+      let got = 0;
+      return { ...r, budgetCharged: 100, budgetRefused: 3, resume: async (limit, elsewhere) => {
+        calls.push([entry, limit, elsewhere]);
+        const take = Math.min(limit, want - got);
+        got += take;
+        return { continuations: [fragment(entry + 0x10000)], budgetCharged: take, budgetRefused: got >= want ? 0 : 1 };
+      } };
+    })
+  };
+  const { o, events } = optimizer({ translator, maxFunctions: 100 });
+  await o.start({ resume: false });
+  const left = UNIT - 300;
+  assert.deepEqual(calls.slice(0, 2).map((c) => c[1]), [Math.floor(left / 2), left - 300], "the first an even share, the next what is left at its turn");
+  assert.equal(calls.length, 2, "the capped member never resumes; both others are done after one round");
+  assert.ok(calls[0][2] instanceof Set && calls[0][2].size > 0, "the entries the module holds are passed (no continuation starts there)");
+  assert.equal(events.findLast(([t]) => t === "optimization-done")[1].budgetRefused, 2, "only the capped member's refusals are left");
 });

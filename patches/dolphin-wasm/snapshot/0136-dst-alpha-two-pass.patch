@@ -1,0 +1,184 @@
+diff --git a/Source/Core/VideoCommon/VertexManagerBase.cpp b/Source/Core/VideoCommon/VertexManagerBase.cpp
+--- a/Source/Core/VideoCommon/VertexManagerBase.cpp
++++ b/Source/Core/VideoCommon/VertexManagerBase.cpp
+@@ -650,6 +650,8 @@
+       if (m_current_pipeline_object)
+       {
+         const AbstractPipeline* pipeline_object = m_current_pipeline_object;
++        const AbstractPipeline* dst_alpha_pipeline = nullptr;
++        bool dst_alpha_first = false;
+         if (!custom_pixel_shader_contents.shaders.empty())
+         {
+           if (const auto custom_pipeline =
+@@ -657,10 +659,25 @@
+                                     m_current_uber_pipeline_config, m_current_pipeline_object))
+           {
+             pipeline_object = custom_pipeline;
++          }
++        }
++        else if (g_ActiveConfig.iShaderCompilationMode == ShaderCompilationMode::Synchronous &&
++                 NeedsDstAlphaPass(m_current_pipeline_config))
++        {
++          const DstAlphaPasses passes = DstAlphaPassConfigs(m_current_pipeline_config);
++          const AbstractPipeline* color_pass = g_shader_cache->GetPipelineForUid(passes.color);
++          const AbstractPipeline* alpha_pass =
++              passes.alpha_drawn ? g_shader_cache->GetPipelineForUid(passes.alpha) : nullptr;
++          if (color_pass && (alpha_pass || !passes.alpha_drawn))
++          {
++            pipeline_object = color_pass;
++            dst_alpha_pipeline = alpha_pass;
++            dst_alpha_first = passes.alpha_first;
+           }
+         }
+         RenderDrawCall(pixel_shader_manager, geometry_shader_manager, custom_pixel_shader_contents,
+-                       custom_pixel_shader_uniforms, m_current_primitive_type, pipeline_object);
++                       custom_pixel_shader_uniforms, m_current_primitive_type, pipeline_object,
++                       dst_alpha_pipeline, dst_alpha_first);
+       }
+     }
+ 
+@@ -1057,11 +1074,78 @@
+   m_custom_shader_cache->Reload();
+ }
+ 
++// GX writes a constant destination alpha (GX_SetDstAlpha) while blending the
++// colour by the TEV alpha. Dolphin does both in one draw with dual-source
++// blending: ocol0.a carries the constant, ocol1.a the TEV alpha the blend
++// reads. A pipeline that cannot have dual-source blending (no such host
++// feature, as Safari's WebGPU; or, on WebGPU, a shader that writes depth,
++// see PipelineUtils.cpp) would blend with the constant instead. Old Dolphin
++// drew those in two passes, as below.
++static bool DualSourceBlendDropped(const pixel_shader_uid_data* ps)
++{
++  // Framebuffer fetch blends in the shader and needs no second pass.
++  if (g_backend_info.bSupportsFramebufferFetch)
++    return false;
++  if (!g_backend_info.bSupportsDualSourceBlend)
++    return true;
++  return g_backend_info.api_type == APIType::Vulkan && ps->per_pixel_depth;
++}
++
++bool VertexManagerBase::NeedsDstAlphaPass(const VideoCommon::GXPipelineUid& config)
++{
++  const pixel_shader_uid_data* ps = config.ps_uid.GetUidData();
++  return ps->useDstAlpha && config.blending_state.RequiresDualSrc() &&
++         DualSourceBlendDropped(ps);
++}
++
++static bool ReadsDstAlpha(const BlendingState& b)
++{
++  return b.src_factor == SrcBlendFactor::DstAlpha || b.src_factor == SrcBlendFactor::InvDstAlpha ||
++         b.dst_factor == DstBlendFactor::DstAlpha || b.dst_factor == DstBlendFactor::InvDstAlpha;
++}
++
++VertexManagerBase::DstAlphaPasses
++VertexManagerBase::DstAlphaPassConfigs(const VideoCommon::GXPipelineUid& config)
++{
++  DstAlphaPasses p;
++  // The colour: the game's blend and depth state, with the TEV alpha in
++  // ocol0.a (no destination-alpha constant); the alpha channel left alone.
++  p.color = config;
++  p.color.ps_uid.GetUidData()->useDstAlpha = false;
++  p.color.blending_state.alpha_update = false;
++
++  // The constant alone, unblended, colour writes off, never writing depth.
++  p.alpha = config;
++  p.alpha.blending_state.blend_enable = false;
++  p.alpha.blending_state.color_update = false;
++  p.alpha.depth_state.update_enable = false;
++
++  // Drawn first, it sees the depth buffer the colour pass will see, so it
++  // writes the constant exactly where the colour pass draws, whatever the
++  // game's depth function (strict tests, NEVER) and without a depth write of
++  // its own. Same vertex shader in both pipelines (only the pixel shader uid
++  // differs), so the same depth. Unless the colour blend reads the
++  // destination alpha: it must read the old one, so the colour goes first
++  // and the constant follows on the fragments it left (depth EQUAL when the
++  // colour wrote depth: a fragment it rejected at the same depth gets the
++  // constant too, a known limit of that rare case).
++  p.alpha_first = !ReadsDstAlpha(config.blending_state);
++  if (!p.alpha_first && p.alpha.depth_state.test_enable)
++  {
++    if (p.alpha.depth_state.func == CompareMode::Never)
++      p.alpha_drawn = false;
++    else if (config.depth_state.update_enable)
++      p.alpha.depth_state.func = CompareMode::Equal;
++  }
++  return p;
++}
++
+ void VertexManagerBase::RenderDrawCall(
+     PixelShaderManager& pixel_shader_manager, GeometryShaderManager& geometry_shader_manager,
+     const CustomPixelShaderContents& custom_pixel_shader_contents,
+     std::span<u8> custom_pixel_shader_uniforms, PrimitiveType primitive_type,
+-    const AbstractPipeline* current_pipeline)
++    const AbstractPipeline* current_pipeline, const AbstractPipeline* dst_alpha_pipeline,
++    bool dst_alpha_first)
+ {
+   // Now we can upload uniforms, as nothing else will override them.
+   geometry_shader_manager.SetConstants(primitive_type);
+@@ -1090,6 +1174,16 @@
+     base_vertex <<= 2;
+   }
+ 
++  // The destination-alpha constant before the colour (DstAlphaPassConfigs),
++  // on the same vertices, outside the perf query.
++  if (dst_alpha_pipeline && dst_alpha_first)
++  {
++    g_gfx->SetPipeline(dst_alpha_pipeline);
++    DrawCurrentBatch(base_index, m_index_generator.GetIndexLen(), base_vertex);
++    INCSTAT(g_stats.this_frame.num_draw_calls);
++    g_gfx->SetPipeline(current_pipeline);
++  }
++
+   if (PerfQueryBase::ShouldEmulate())
+     g_perf_query->EnableQuery(bpmem.zcontrol.early_ztest ? PQG_ZCOMP_ZCOMPLOC : PQG_ZCOMP);
+ 
+@@ -1100,6 +1194,15 @@
+ 
+   if (PerfQueryBase::ShouldEmulate())
+     g_perf_query->DisableQuery(bpmem.zcontrol.early_ztest ? PQG_ZCOMP_ZCOMPLOC : PQG_ZCOMP);
++
++  // The constant after the colour, when the colour blend reads the
++  // destination alpha (DstAlphaPassConfigs): same vertices, outside the query.
++  if (dst_alpha_pipeline && !dst_alpha_first)
++  {
++    g_gfx->SetPipeline(dst_alpha_pipeline);
++    DrawCurrentBatch(base_index, m_index_generator.GetIndexLen(), base_vertex);
++    INCSTAT(g_stats.this_frame.num_draw_calls);
++  }
+ }
+ 
+ const AbstractPipeline* VertexManagerBase::GetCustomPipeline(
+diff --git a/Source/Core/VideoCommon/VertexManagerBase.h b/Source/Core/VideoCommon/VertexManagerBase.h
+--- a/Source/Core/VideoCommon/VertexManagerBase.h
++++ b/Source/Core/VideoCommon/VertexManagerBase.h
+@@ -4,6 +4,7 @@
+ #pragma once
+ 
+ #include <memory>
++#include <utility>
+ #include <vector>
+ 
+ #include "Common/BitSet.h"
+@@ -228,7 +229,19 @@
+                       GeometryShaderManager& geometry_shader_manager,
+                       const CustomPixelShaderContents& custom_pixel_shader_contents,
+                       std::span<u8> custom_pixel_shader_uniforms, PrimitiveType primitive_type,
+-                      const AbstractPipeline* current_pipeline);
++                      const AbstractPipeline* current_pipeline,
++                      const AbstractPipeline* dst_alpha_pipeline = nullptr,
++                      bool dst_alpha_first = false);
++  // Destination alpha without dual-source blending: two passes (patch 0136).
++  struct DstAlphaPasses
++  {
++    VideoCommon::GXPipelineUid color;
++    VideoCommon::GXPipelineUid alpha;
++    bool alpha_first = true;
++    bool alpha_drawn = true;
++  };
++  static bool NeedsDstAlphaPass(const VideoCommon::GXPipelineUid& config);
++  static DstAlphaPasses DstAlphaPassConfigs(const VideoCommon::GXPipelineUid& config);
+   void UpdatePipelineConfig();
+   void UpdatePipelineObject();
+ 

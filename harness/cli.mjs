@@ -575,8 +575,10 @@ const EXPECTED_BITS = (s) => {
   return out.sort();
 };
 
-// padtest crashes the WASM JIT today (see `fuzz`), so pads run interpreted.
-const PADS_QUERY = "core=upstream&video=software&cpu=dual&speed=1&wasmjit=0&metrics=1";
+// Pads run on the JIT (the shipped engine): padtest, consoletest and cpufuzz
+// match the interpreter over 10000 frames with the JIT and with aot=1
+// regions (`fuzz`, 2026-10-24), and pads pass on both.
+const PADS_QUERY = "core=upstream&video=software&cpu=dual&speed=1&wasmjit=1&jitwarmup=120&forcejit=1&metrics=1";
 
 async function runPads(server, values, { iso, query, dir }) {
   const session = await openSession({ base: server.base, server, query, iso, display: displayOf(values), gamepads: { count: 4 }, keepProfile: values["keep-profiles"] });
