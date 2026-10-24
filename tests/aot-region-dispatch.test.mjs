@@ -800,38 +800,72 @@ test("FPU ops outside the direct tier run inside the region, interpreted, like t
 
 // 0157: with MSR.FP clear (a thread that does not own the FPU, until its
 // first FPU op traps) regions run, but never a block holding an FPU op: the
-// fragment leaves at its start, through a direct branch (main) or a call's
-// continuation (caller), and the block path raises FP unavailable there.
+// fragment leaves at its start (returns 1, the frame written back) and the
+// block path raises FP unavailable there. One program per way in, each the
+// entry of its own DOL (so every function is in the plan); `fpu` names the
+// block the region must leave at.
 const FP_OFF_TEXT = 0x8001a100;
 const fadd = (d, a, b) => (63 << 26) | (d << 21) | (a << 16) | (b << 11) | (21 << 1);
-const FP_OFF = assemble(FP_OFF_TEXT, [
-  "main", asm.addi(3, 3, 1), asm.cmplwi(3, 0xffff), (pc, l) => asm.beq(pc, l.out),
-  "fp", fadd(1, 1, 2), asm.addi(4, 4, 1),
-  "out", asm.blr(),
-  "caller", asm.mflr(0), asm.stwu(1, 1, -16), stw(0, 1, 20), (pc, l) => asm.bl(pc, l.leaf),
-  "back", fadd(3, 3, 4), lwz(0, 1, 20), asm.addi(1, 1, 16), mtlr(0), asm.blr(),
-  "leaf", asm.addi(5, 5, 2), asm.blr()
-]);
+const SPARSE_GAP = 64;
+const FP_OFF_CASES = {
+  // A direct branch from a block without FPU ops (a later body).
+  branch: assemble(FP_OFF_TEXT, [
+    "main", asm.addi(3, 3, 1), asm.cmplwi(3, 0xffff), (pc, l) => asm.beq(pc, l.out),
+    "fpu", fadd(1, 1, 2), asm.addi(4, 4, 1),
+    "out", asm.blr()
+  ]),
+  // A call's continuation, the callee a wasm call in the same module.
+  continuation: assemble(FP_OFF_TEXT, [
+    "main", asm.mflr(0), asm.stwu(1, 1, -16), stw(0, 1, 20), (pc, l) => asm.bl(pc, l.leaf),
+    "fpu", fadd(3, 3, 4), lwz(0, 1, 20), asm.addi(1, 1, 16), mtlr(0), asm.blr(),
+    "leaf", asm.addi(5, 5, 2), asm.blr()
+  ]),
+  // The callee leaves (1) under the caller's wasm call, which passes it up.
+  callee: assemble(FP_OFF_TEXT, [
+    "main", asm.mflr(0), asm.stwu(1, 1, -16), stw(0, 1, 20), (pc, l) => asm.bl(pc, l.leaf),
+    lwz(0, 1, 20), asm.addi(1, 1, 16), mtlr(0), asm.blr(),
+    "leaf", asm.addi(5, 5, 2), asm.cmplwi(5, 0xffff), (pc, l) => asm.beq(pc, l.skip),
+    "fpu", fadd(1, 1, 2),
+    "skip", asm.blr()
+  ]),
+  // A back edge (to a body emitted earlier: through the head) into the FPU
+  // block: beq's target is discovered before its fall-through.
+  back: assemble(FP_OFF_TEXT, [
+    "main", asm.li(3, 5), asm.cmplwi(3, 0), (pc, l) => asm.beq(pc, l.fpu),
+    "fall", asm.addi(4, 4, 1), (pc, l) => asm.b(pc, l.fpu),
+    "fpu", fadd(1, 1, 2), asm.blr()
+  ]),
+  // Blocks spread over more than 4 words each: the head's compact br_if
+  // chain instead of its br_table (0133). A bc, not a b: never a tail call.
+  sparse: assemble(FP_OFF_TEXT, [
+    "main", asm.li(3, 5), asm.cmplwi(3, 0), (pc, l) => asm.bc(4, 2, pc, l.fpu), asm.blr(), // bne: taken
+    ...Array.from({ length: SPARSE_GAP }, () => asm.nop()),
+    "fpu", fadd(1, 1, 2), asm.blr()
+  ])
+};
 const fpOffSkip = chainSkip || (!fpOffRuns() && "core before 0157 (compiler version < 36)");
-function installFpOff() {
-  const dol = buildDol({ textAddr: FP_OFF_TEXT, text: FP_OFF.words, entry: FP_OFF.labels.main });
+function installFpOff(program) {
+  const dol = buildDol({ textAddr: FP_OFF_TEXT, text: program.words, entry: program.labels.main });
   const { image, entryPoint } = imageFromDol(dol);
   const plan = planDol({ image, entryPoint, gameId: "TEST01", dolBytes: dol, options: { gapFill: false } });
   for (const seg of image.segments) core.load(seg.start, seg.bytes);
-  core.invalidate(FP_OFF_TEXT, 4 * FP_OFF.words.length);
+  core.invalidate(FP_OFF_TEXT, 4 * program.words.length);
   core.module._DolphinWeb_AotForgetRegionsForTest?.();
-  core.reset(seedGprs(FP_OFF.labels.main), FP_OFF.labels.main, STOP, 400000); // MSR.FP on while translating
+  core.reset(seedGprs(program.labels.main), program.labels.main, STOP, 400000); // MSR.FP on while translating
   core.setRegionsEnabled(true);
   core.setRegionChaining(true);
-  queueAll(plan, 100, true); // caller and leaf in one module: the call is a wasm call
+  queueAll(plan, 100, true); // caller and callee in one module: the call is a wasm call
   serviceAll();
 }
+const withFp = (on) => {
+  const st = core.state();
+  core.loadState(Uint32Array.from(st, (v, i) => (i === 37 ? (on ? v | 0x2000 : v & ~0x2000) : v)), core.pc());
+};
 // From entry with MSR.FP off, until the FP unavailable exception is taken
 // (interpretOne returns 1 once MSR.IR is off) or STOP.
 function runFpOff(entry, { regions }) {
   core.reset(seedGprs(entry), entry, STOP, 400000);
-  const msr = core.state()[37];
-  core.loadState(Uint32Array.from(core.state(), (v, i) => (i === 37 ? msr & ~0x2000 : v)), entry);
+  withFp(false);
   const pcs = [];
   for (let n = 0; n < 1000 && core.pc() !== STOP; n++) {
     if (regions) {
@@ -845,34 +879,36 @@ function runFpOff(entry, { regions }) {
   return { state: core.state(), downcount: core.downcount(), pcs };
 }
 
-test("with MSR.FP off a region runs up to a block with FPU ops and leaves at its start: the exception as the interpreter's (0157)", { skip: fpOffSkip }, () => {
-  installFpOff();
-  for (const entry of [FP_OFF.labels.main, FP_OFF.labels.caller]) {
-    const reference = runFpOff(entry, { regions: false });
-    const got = runFpOff(entry, { regions: true });
+for (const [name, program] of Object.entries(FP_OFF_CASES)) {
+  test(`with MSR.FP off a region runs up to a block with FPU ops and leaves at its start (${name}): the exception as the interpreter's (0157)`, { skip: fpOffSkip }, () => {
+    if (name === "sparse") assert.ok((program.labels.fpu - program.labels.main) / 4 + 1 > 4 * 3, "a compact head (3 blocks)");
+    installFpOff(program);
+    const reference = runFpOff(program.labels.main, { regions: false });
+    const got = runFpOff(program.labels.main, { regions: true });
     assert.equal(reference.state[37] & 0x30, 0, "the exception was taken (IR, DR off)");
     assert.deepEqual(got.state, reference.state);
     assert.equal(got.downcount, reference.downcount);
-    const fpuBlock = entry === FP_OFF.labels.main ? FP_OFF.labels.fp : FP_OFF.labels.back;
-    assert.deepEqual(got.pcs, [fpuBlock], "the region left at the FPU block, nothing of it ran");
-  }
-  core.invalidate(FP_OFF_TEXT, 4 * FP_OFF.words.length);
-});
+    assert.deepEqual(got.pcs, [program.labels.fpu], "the region left at the FPU block, nothing of it ran");
+    core.invalidate(FP_OFF_TEXT, 4 * program.words.length);
+  });
+}
 
-test("with MSR.FP off a region entered at a block with FPU ops does nothing; with FP on it runs it (0157)", { skip: fpOffSkip }, () => {
-  installFpOff();
-  core.reset(seedGprs(FP_OFF.labels.fp), FP_OFF.labels.fp, STOP, 400000);
-  const msr = core.state()[37];
-  core.loadState(Uint32Array.from(core.state(), (v, i) => (i === 37 ? msr & ~0x2000 : v)), FP_OFF.labels.fp);
-  const before = core.state(), downcount = core.downcount();
-  assert.equal(core.dispatchRegion(), 0, "not run: the block path");
-  assert.deepEqual(core.state(), before);
-  assert.equal(core.downcount(), downcount);
-  core.loadState(Uint32Array.from(core.state(), (v, i) => (i === 37 ? msr | 0x2000 : v)), FP_OFF.labels.fp);
-  assert.equal(core.dispatchRegion(), 1, "FP on: the region");
-  assert.equal(core.pc(), STOP);
-  core.invalidate(FP_OFF_TEXT, 4 * FP_OFF.words.length);
-});
+for (const name of ["branch", "sparse"]) {
+  test(`with MSR.FP off a region entered at a block with FPU ops does nothing; with FP on it runs it (${name} head, 0157)`, { skip: fpOffSkip }, () => {
+    const program = FP_OFF_CASES[name];
+    installFpOff(program);
+    core.reset(seedGprs(program.labels.fpu), program.labels.fpu, STOP, 400000);
+    withFp(false);
+    const before = core.state(), downcount = core.downcount();
+    assert.equal(core.dispatchRegion(), 0, "not run: the block path");
+    assert.deepEqual(core.state(), before);
+    assert.equal(core.downcount(), downcount);
+    withFp(true);
+    assert.equal(core.dispatchRegion(), 1, "FP on: the region");
+    assert.equal(core.pc(), STOP);
+    core.invalidate(FP_OFF_TEXT, 4 * program.words.length);
+  });
+}
 
 // 0111: region compares store their CR field as one i64 (SO clear) and a bc
 // on it decides on the compare's operands while they are intact. Unsigned
