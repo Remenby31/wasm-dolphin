@@ -28,7 +28,8 @@ test("the Windows no-GPU workflow is manual, pinned, and checks the no-flag adap
 test("the no-GPU matrix runs the product's software path with both presenter fallbacks", async () => {
   const m = JSON.parse(await read("../harness/matrices/windows-nogpu.json"));
   assert.equal(m.reference, "sw-product");
-  assert.deepEqual(m.configs.map((c) => c.preset), ["sw-interp", "sw-interp"]);
+  // The product preset (rec: JIT, pacing=tick), not the interpreter.
+  assert.deepEqual(m.configs.map((c) => c.preset), ["rec", "rec"]);
   assert.equal(m.configs.find((c) => c.id === "sw-2d").set.presenter, "2d");
   assert.ok(m.games.every((g) => g.set?.cpu === "single"));
   assert.ok(m.games.every((g) => g.iso.startsWith("harness/homebrew/out/")), "homebrews only, no ROM");
@@ -56,4 +57,23 @@ test("a fallback WebGPU adapter counts as none unless the harness asks for it", 
   assert.ok(guard > 0, "video=wgpu guard present");
   assert.ok(guard < worker.indexOf("moduleInstance = await factory("), "the guard runs before the core module is created");
   assert.match(worker.slice(guard, guard + 600), /throw new Error\(message\)/);
+});
+
+// The presenter cost on a GPU-less PC: WebGL vs 2D, the tick repaint of
+// duplicate frames (speed 0.5) vs direct, half-size output; Chrome CPU is
+// read through CDP on Windows (no ps), and the no-flag probe records WebGL.
+test("the no-GPU lane measures the presenters' CPU and records the player's WebGL", async () => {
+  const wf = await read("../.github/workflows/windows-nogpu.yml");
+  assert.match(wf, /harness\/cli\.mjs matrix harness\/matrices\/windows-nogpu-presenter\.json/);
+  const m = JSON.parse(await read("../harness/matrices/windows-nogpu-presenter.json"));
+  assert.ok(m.configs.every((c) => c.preset === "rec"));
+  const set = (id) => m.configs.find((c) => c.id === id)?.set ?? {};
+  assert.equal(set("2d-tick").presenter, "2d");
+  assert.deepEqual(set("webgl-direct-s50"), { speed: "0.5", pacing: "direct" });
+  assert.equal(set("webgl-half").present, "half");
+  const probe = await read("../harness/probes/webgpu-adapter.mjs");
+  assert.match(probe, /UNMASKED_RENDERER_WEBGL/);
+  assert.match(probe, /new OffscreenCanvas/);
+  const session = await read("../harness/lib/session.mjs");
+  assert.match(session, /process\.platform === "win32" \? await cdpCpuSampler/);
 });

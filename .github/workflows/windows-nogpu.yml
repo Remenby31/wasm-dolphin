@@ -58,7 +58,7 @@ jobs:
           path: harness/homebrew/out
       - name: Playwright (driver only; the runner's Chrome stable is used)
         run: npm i -g playwright@1.56.1
-      - name: "No flag: no adapter, as a player's Chrome on a GPU-less PC"
+      - name: "No flag (a player's Chrome on a GPU-less PC): no WebGPU adapter; its WebGL recorded"
         run: node harness/probes/webgpu-adapter.mjs --port 8102 --no-unsafe-webgpu --expect none --out webgpu-adapter-default.json
       - name: "Harness default (--enable-unsafe-webgpu): the fallback adapter"
         run: node harness/probes/webgpu-adapter.mjs --port 8102 --out webgpu-adapter-unsafe.json
@@ -68,8 +68,7 @@ jobs:
         run: node harness/probes/presenter-check.mjs --iso harness/homebrew/out/gxscene.iso --port 8102 --query "core=upstream&video=wgpu&presenter=webgpu&cpu=single&speed=1&wasmjit=0" --expect-boot-error "needs a usable WebGPU adapter" --out presenter-wgpu.json
       - name: Software renderer, WebGPU presenter refused (WebGL) and 2D
         run: node harness/cli.mjs matrix harness/matrices/windows-nogpu.json --port 8102
-      - name: "Experiment: presenter CPU cost (WebGL vs 2D, tick vs direct, half size)"
-        continue-on-error: true
+      - name: "Presenter CPU cost: WebGL vs 2D, tick repaint vs direct, half size, at full and half speed"
         run: node harness/cli.mjs matrix harness/matrices/windows-nogpu-presenter.json --port 8102
       - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
         if: always()
