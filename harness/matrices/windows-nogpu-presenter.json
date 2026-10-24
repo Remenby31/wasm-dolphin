@@ -1,0 +1,19 @@
+{
+  "name": "windows-nogpu-presenter",
+  "runs": 3,
+  "warmupSec": 10,
+  "sampleSec": 15,
+  "games": [
+    { "id": "gxscene", "iso": "harness/homebrew/out/gxscene.iso", "static": true },
+    { "id": "dstalpha", "iso": "harness/homebrew/out/dstalpha.iso", "static": true }
+  ],
+  "configs": [
+    { "id": "webgl-tick", "preset": "rec" },
+    { "id": "2d-tick", "preset": "rec", "set": { "presenter": "2d" } },
+    { "id": "webgl-half", "preset": "rec", "set": { "present": "half" } },
+    { "id": "webgl-tick-s50", "preset": "rec", "set": { "speed": "0.5" } },
+    { "id": "webgl-direct-s50", "preset": "rec", "set": { "speed": "0.5", "pacing": "direct" } },
+    { "id": "2d-tick-s50", "preset": "rec", "set": { "presenter": "2d", "speed": "0.5" } }
+  ],
+  "reference": "webgl-tick"
+}
