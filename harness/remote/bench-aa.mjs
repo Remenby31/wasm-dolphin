@@ -34,6 +34,13 @@ import { pathToFileURL } from "node:url";
 
 import { mean, median, round, stdev } from "../lib/stats.mjs";
 
+// The region share on the footprint homebrew is not the game's (0.96-0.97
+// outside idle): its jump tables are indexed by an rlwinm mask with no
+// cmplwi bound, discovery scans into the neighbouring tables and the largest
+// functions overflow the continuation budget (research/deep-region-coverage-
+// gap.md). A check that regions ran and moved, not a KPI.
+export const REGION_SHARE_NOTE = "Region share: a footprint-generator artifact (research/deep-region-coverage-gap.md), not a KPI; it shows regions ran and moved, the game's share is 0.96-0.97.";
+
 const goodPin = (p) => !p || (p.thread === "DedicatedWorker" && !(p.busyPct < 80));
 const order = (run) => (run % 2 === 1 ? "AB" : "BA"); // race-perf's sideOrder: odd runs baseline first
 
@@ -58,7 +65,9 @@ export function logRatioChange(lrs, { resamples = 2000, seed = 0x9e3779b9 } = {}
 export function benchAA(runs, machine = {}, { phase = "cold" } = {}) {
   const all = runs
     .map((r) => ({ run: r.run, a: r.baseline?.[phase]?.speed, b: r.candidate?.[phase]?.speed, pins: [r.baseline?.[phase]?.pinned, r.candidate?.[phase]?.pinned], models: [r.baseline?.[phase]?.cpuModel, r.candidate?.[phase]?.cpuModel],
-      // Regions installed and their share of guest cycles (outside idle), when read.
+      // Region modules installed (diagnostics.regionsInstalled counts modules
+      // of ~100 functions, not regions) and the region share of guest cycles
+      // (outside idle), when read.
       regions: [r.baseline?.[phase], r.candidate?.[phase]].map((c) => (c?.p4Raw ? { installed: c.p4Raw.diagnostics?.regionsInstalled ?? null, cycleShare: c.p4?.regionCycleShare ?? null } : null)) }))
     .filter((p) => Number.isFinite(p.a) && Number.isFinite(p.b) && p.a > 0 && p.b > 0);
   const first = Math.min(...all.map((p) => p.run));
@@ -66,7 +75,7 @@ export function benchAA(runs, machine = {}, { phase = "cold" } = {}) {
   const why = (p) => p.run <= first + 1 ? "warm-up block (runs 1-2)"
     : !sameModel(p) ? `CPU model changed: ${p.models.join(" / ")}`
     : !p.pins.every(goodPin) ? `pinned ${p.pins.map((x) => `${x?.thread ?? "?"} ${x?.busyPct ?? "?"} %`).join(" / ")}`
-    : p.regions.some((x) => x && x.installed === 0) ? `no region installed (${p.regions.map((x) => x?.installed ?? "?").join(" / ")})`
+    : p.regions.some((x) => x && x.installed === 0) ? `no region module installed (${p.regions.map((x) => x?.installed ?? "?").join(" / ")})`
     : null;
   const setAside = all.filter((p) => why(p)).map((p) => ({ run: p.run, why: why(p) }));
   let pairs = all.filter((p) => !why(p));
@@ -116,7 +125,7 @@ export function benchMarkdown(b) {
     "|---|---|---|---|---|---|---|---|---|",
     `| ${b.pairs} | ${b.meanSpeed.baseline} / ${b.meanSpeed.candidate} % | ${b.armSigmaPct.baseline} / ${b.armSigmaPct.candidate} % | ${c.medianPct} % [${c.ci95Pct?.join(", ") ?? "?"}] | ${c.verdict} | ${b.lrSigmaPct} % | ${b.pairsFor2Pct ?? "?"} | ${b.drift.firstThird} → ${b.drift.lastThird} % | ${b.pmu ?? "?"} |`,
     "",
-    ...(b.regions ? [`Regions (median per arm): A ${b.regions.baseline.installed} installed, ${b.regions.baseline.cycleShare} of guest cycles; B ${b.regions.candidate.installed} installed, ${b.regions.candidate.cycleShare}`] : []),
+    ...(b.regions ? [`Regions (median per arm): A ${b.regions.baseline.installed} modules installed, ${b.regions.baseline.cycleShare} of guest cycles; B ${b.regions.candidate.installed} modules installed, ${b.regions.candidate.cycleShare}`, REGION_SHARE_NOTE] : []),
     `Per kept pair (100·ln(B/A)): ${b.perPair.map((p) => `${p.lrPct} (${p.order})`).join(", ")}`,
     `Set aside: ${b.setAside.map((x) => `run ${x.run} (${x.why})`).join(", ") || "none"}`,
     ""

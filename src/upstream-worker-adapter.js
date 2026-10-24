@@ -86,6 +86,7 @@ export class UpstreamWorkerAdapter {
     ppcWasmJitWarmupFrames = 60,
     ppcProfile = false,
     gpuSpinMicros = -1,
+    codeSpaceMiB = null,
     cpuOverclock = 1,
     emulationSpeed = 1,
     presentationScale = 1,
@@ -99,6 +100,9 @@ export class UpstreamWorkerAdapter {
     softwareTevHotCaseMode = 0,
     xfbFastPaths = 0,
     correctTimeDrift = false,
+    rushPresentation = false,
+    syncOnSkipIdle = false,
+    dupXfbRearmsThrottle = false,
     coreLog = false,
     memcardSlotB = false,
     efbAccess = false,
@@ -205,6 +209,7 @@ export class UpstreamWorkerAdapter {
     this.ppcWasmJitWarmupFrames = ppcWasmJitWarmupFrames;
     this.ppcProfile = Boolean(ppcProfile);
     this.gpuSpinMicros = Number.isInteger(gpuSpinMicros) ? gpuSpinMicros : -1;
+    this.codeSpaceMiB = Number.isInteger(codeSpaceMiB) ? codeSpaceMiB : null;
     this.cpuOverclock = cpuOverclock;
     this.emulationSpeed = emulationSpeed;
     this.presentationScale = presentationScale;
@@ -218,6 +223,9 @@ export class UpstreamWorkerAdapter {
     this.softwareTevHotCaseMode = (Number(softwareTevHotCaseMode) || 0) & 3;
     this.xfbFastPaths = (Number(xfbFastPaths) || 0) & 3;
     this.correctTimeDrift = Boolean(correctTimeDrift);
+    this.rushPresentation = rushPresentation === true;
+    this.syncOnSkipIdle = syncOnSkipIdle === true;
+    this.dupXfbRearmsThrottle = dupXfbRearmsThrottle === true;
     this.coreLog = Boolean(coreLog);
     this.memcardSlotB = Boolean(memcardSlotB);
     this.efbAccess = Boolean(efbAccess);
@@ -442,6 +450,7 @@ export class UpstreamWorkerAdapter {
       ppcWasmJitWarmupFrames: this.ppcWasmJitWarmupFrames,
       ppcProfile: this.ppcProfile,
       gpuSpinMicros: this.gpuSpinMicros,
+      codeSpaceMiB: this.codeSpaceMiB,
       cpuOverclock: this.cpuOverclock,
       emulationSpeed: this.emulationSpeed,
       presentationScale: this.presentationScale,
@@ -455,6 +464,9 @@ export class UpstreamWorkerAdapter {
       softwareTevHotCaseMode: this.softwareTevHotCaseMode,
       xfbFastPaths: this.xfbFastPaths,
       correctTimeDrift: this.correctTimeDrift,
+      rushPresentation: this.rushPresentation,
+      syncOnSkipIdle: this.syncOnSkipIdle,
+      dupXfbRearmsThrottle: this.dupXfbRearmsThrottle,
       coreLog: this.coreLog,
       memcardSlotB: this.memcardSlotB,
       efbAccess: this.efbAccess,

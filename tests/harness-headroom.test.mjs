@@ -13,7 +13,7 @@ function hrBytes(v = {}) {
   view.setUint32(0, v.version ?? 1, true);
   view.setUint32(4, v.size ?? 96, true);
   view.setUint32(8, v.on ?? 1, true);
-  [v.windowUs ?? 0, v.cpuSleepUs ?? 0, v.gpuWorkUs ?? 0, v.xfbCopies ?? 0, v.rushSkips ?? 0, v.flushGpuWaitUs ?? 0, v.flushGpuWaits ?? 0, v.gpuConsumerWaitUs ?? 0, v.guestTicks ?? 0].forEach((x, i) => view.setFloat64(16 + 8 * i, x, true));
+  [v.windowUs ?? 0, v.cpuSleepUs ?? 0, v.gpuWorkUs ?? 0, v.xfbCopies ?? 0, v.rushSkips ?? 0, v.flushGpuWaitUs ?? 0, v.flushGpuWaits ?? 0, v.gpuConsumerWaitUs ?? 0, v.guestTicks ?? 0, v.presentSleepUs ?? 0].forEach((x, i) => view.setFloat64(16 + 8 * i, x, true));
   return Array.from(new Uint8Array(view.buffer));
 }
 
@@ -48,6 +48,24 @@ test("headroom: waiting on the render worker is not GPU work; guest time from th
   assert.equal(h.gpuConsumerWaitShare, 0.2);
   // An older v1 struct without guestTicks: the harness's guest seconds.
   assert.equal(headroomOf(decodeHeadroomStats(hrBytes({ windowUs: 10e6, cpuSleepUs: 4e6, gpuWorkUs: 3e6 })), { guestSeconds: 9, ticksPerSecond: 486e6 }).guestSeconds, 9);
+});
+
+test("headroom: the video thread sleeping until the VI's host time is not GPU work (0153)", () => {
+  // Heavy with Rush (deep-gpu-cost-amplifier.md): GPU passes 1.7 s per 10 s, 1.15 s of which asleep in
+  // SmoothEarlyPresentation, 0.05 s waiting for ring space: 0.5 s of work.
+  const s = decodeHeadroomStats(hrBytes({ windowUs: 10e6, cpuSleepUs: 2.5e6, gpuWorkUs: 1.7e6, gpuConsumerWaitUs: 0.05e6, presentSleepUs: 1.15e6 }));
+  const h = headroomOf(s, { guestSeconds: 10 });
+  assert.equal(h.maxSpeedGpu, 20); // 10 / (1.7 - 0.05 - 1.15); without the field it read 10 / 1.65 = 6.06
+  assert.equal(h.presentSleepShare, 0.115);
+  assert.equal(h.gpuBusyShare, 0.05);
+  // 0 on a core that does not measure it (before 0153): the old bound, unchanged.
+  const old = headroomOf(decodeHeadroomStats(hrBytes({ windowUs: 10e6, cpuSleepUs: 2.5e6, gpuWorkUs: 1.7e6, gpuConsumerWaitUs: 0.05e6 })), { guestSeconds: 10 });
+  assert.equal(old.maxSpeedGpu, 6.0606);
+  assert.equal(old.presentSleepShare, 0);
+  // GPU waits beyond the GPU passes: a broken struct.
+  assert.match(decodeHeadroomStats(hrBytes({ windowUs: 10e6, gpuWorkUs: 1e6, presentSleepUs: 2e6 })).error, /GPU waits/);
+  // A torn read on the new field too.
+  assert.match(consistentHeadroomRead(s, decodeHeadroomStats(hrBytes({ windowUs: 11e6, cpuSleepUs: 2.5e6, gpuWorkUs: 1.8e6, gpuConsumerWaitUs: 0.05e6, presentSleepUs: 1e6 }))).error, /presentSleepUs went backwards/);
 });
 
 test("validity: ring overflow, speed above its target, no unique image, game frames per VI off the reference", () => {
