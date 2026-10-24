@@ -732,6 +732,11 @@ offers nor boots a `.dff` otherwise) a log boots like a disc, and
 exact software reference (`fastsw=0`): the same GPU commands, without the
 homebrew's CPU side, so wgpu is compared with the software rasterizer at
 SSIM ≥ 0.99 (the matrix's `renderMatch`; 0.9 by default).
+Seven logs: gxscene and gxscene-nocubes, dstalpha, dstalpha-coplanar,
+dstalpha-redraw, efbpeek and ramcopy. Not dstalpha-zinit: its one depth
+clear to 0 happens before the recorded frames, so a replay starts from the
+EFB's undefined initial depth (0 in software, far on GPU backends) and the
+two references legitimately differ.
 **Missing WebGPU features.** `?wgpumask=a,b` (harness only) creates the
 WebGPU device without those optional features, as a browser that lacks them
 would: Safari 26 has no `dual-source-blending` (Dolphin then takes its

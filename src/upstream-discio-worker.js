@@ -1654,6 +1654,7 @@ async function handleMessage(type, payload) {
         wgpuFallback: payload.wgpuFallback,
         dstAlphaTwoPass: payload.dstAlphaTwoPass,
         discReadahead: payload.discReadahead,
+        discPrefetch: payload.discPrefetch,
         webglSoftware: payload.webglSoftware,
         efbDiag: payload.efbDiag,
         jitVerbose: payload.jitVerbose,
@@ -2373,6 +2374,7 @@ async function loadCore({
   wgpuFallback = false,
   dstAlphaTwoPass = true,
   discReadahead = true,
+  discPrefetch = false,
   webglSoftware = false,
   efbDiag = false,
   jitVerbose = false,
@@ -2431,6 +2433,7 @@ async function loadCore({
   wgpuMaskedFeatures = parseWgpuMask(wgpuMask);
   wgpuAcceptFallbackAdapter = Boolean(wgpuFallback);
   discReadaheadEnabled = discReadahead !== false;
+  discPrefetchEnabled = discPrefetch === true;
   webglAcceptSoftware = Boolean(webglSoftware);
   if (moduleInstance) {
     return moduleInstance;
@@ -3192,12 +3195,17 @@ const discReadService = { reads: 0, bytes: 0, ms: 0, maxMs: 0 };
 // most (src/disc-readahead.js); ?discreadahead=0 reads exactly what is asked,
 // as WORKERFS does.
 let discReadaheadEnabled = true;
+let discPrefetchEnabled = false;
 let discBlockReader = null;
 function readDiscAhead(workerFs) {
   const ops = workerFs?.stream_ops;
   if (!ops?.read || discBlockReader || typeof FileReaderSync !== "function") return;
   const reader = new FileReaderSync();
-  discBlockReader = createDiscReadahead({ readBlob: (blob) => reader.readAsArrayBuffer(blob) });
+  discBlockReader = createDiscReadahead({
+    readBlob: (blob) => reader.readAsArrayBuffer(blob),
+    // Patch 0155: the next segment in the background, with ?discprefetch=1.
+    readBlobAsync: discPrefetchEnabled ? (blob) => blob.arrayBuffer() : null,
+  });
   ops.read = discBlockReader.read;
 }
 function timeDiscReads(workerFs) {
@@ -3550,6 +3558,8 @@ function bindApi(module) {
     getPlatform: cwrap("GetPlatform", "string", []),
     getRegion: cwrap("GetRegion", "string", []),
     getDiscNumber: cwrap("GetDiscNumber", "number", []),
+    getRevision: optionalCwrap("GetRevision", "number", []),
+    gameConfigValue: optionalCwrap("GameConfigValue", "number", ["string", "number", "string"]),
     getApploaderDate: cwrap("GetApploaderDate", "string", []),
     getApploaderSize: cwrap("GetApploaderSize", "number", []),
     getBootDolOffset: cwrap("GetBootDolOffset", "number", []),
@@ -4095,6 +4105,27 @@ async function handleSavesMessage(type, payload) {
   }
 }
 
+// What the mounted disc's settings ask of the renderer, read before the boot
+// through Dolphin's own game config (the GameSettings INIs the core embeds,
+// merged as the boot will): the bounding box, which video=wgpu does not
+// compute (its box is the software rasterizer's, never updated by the GPU
+// path). A host renders such a disc in software.
+let discNeeds = { boundingBox: false };
+
+function mountedDiscNeeds() {
+  const gameId = api?.getGameId?.() || "";
+  const revision = api?.getRevision?.() ?? -1;
+  if (!gameId || revision < 0 || !api?.gameConfigValue) return { boundingBox: false };
+  const value = api.gameConfigValue(gameId, revision, "BBoxEnable");
+  if (value < 0) {
+    // -1: a game's settings layer is already loaded (a game is running), which
+    // the read must not replace; the need is unknown, not "no".
+    postStatus(`The disc's settings could not be read before the boot (GameConfigValue ${value}): its bounding-box need is unknown`);
+    return { boundingBox: false, known: false };
+  }
+  return { boundingBox: value === 1 };
+}
+
 async function mountFile(file) {
   if (!moduleInstance) {
     throw new Error("Upstream core must be loaded before mounting a disc");
@@ -4173,6 +4204,10 @@ async function mountFile(file) {
     if (!accepted) {
       throw new Error("Upstream Dolphin DiscIO rejected the selected disc");
     }
+    discNeeds = mountedDiscNeeds();
+    if (discNeeds.boundingBox && rendererDiagnostics.configuredVideoBackend === "WebGPU-Real") {
+      postStatus("This disc's settings read the bounding box (BBoxEnable), which video=wgpu does not compute: render it in software");
+    }
   } else {
     const head = new Uint8Array(await file.slice(0, BOOT_FILE_HEAD_BYTES).arrayBuffer());
     executable = checkExecutable(bootKind, head, file.size);
@@ -4241,6 +4276,7 @@ async function mountFile(file) {
       ? { title: file.name, gameId: "", platform: "GameCube", region: "", bootKind, entryPoint: executable.entryPoint }
       : { bootKind }),
     bootProbe: bootProbePayload(metadata),
+    needs: bootKind === "disc" ? { ...discNeeds } : { boundingBox: false },
     path,
     ...framePayload()
   };

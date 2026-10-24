@@ -49,6 +49,9 @@ export async function loadOracleCore(coreDir = new URL("../../cores/dolphin/", i
     // Patch 0161: calls of the fp helper so far, the interpreter fallback of
     // FPU ops (DolphinWeb_FpHelperCallsForTest, live).
     fpHelperCalls: () => module._DolphinWeb_FpHelperCallsForTest() >>> 0,
+    // Patch 0159: compile the oracle's blocks as if MSR.FP were set, run them
+    // with the input MSR.
+    compileWithFp: (on) => module._DolphinWeb_JitOracleCompileWithFpForTest(on ? 1 : 0),
     // Region modules (P4): pc, npc and downcount offsets in PowerPCState, version.
     stateLayout() {
       const ptr = module._malloc(16);
