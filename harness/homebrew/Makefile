@@ -21,8 +21,8 @@ all: $(PROGRAMS:%=$(OUT)/%.dol) $(MUTANTS:%=$(OUT)/%.dol) $(OUT)/apploader.bin
 $(OUT)/%.elf: %/main.c common/marker.h | $(OUT)
 	$(CC) $(CFLAGS) $< -o $@ $(LDFLAGS) -logc -lm
 
-# Same fuzzer without mcrf, which currently crashes the WASM JIT; lets the
-# fuzz keep going past that known crash.
+# Same fuzzer without mcrf, which once crashed the WASM JIT (cpufuzz with it
+# now matches the interpreter, `harness fuzz` 2026-10-24).
 $(OUT)/cpufuzz-nomcrf.elf: cpufuzz/main.c common/marker.h | $(OUT)
 	$(CC) $(CFLAGS) -DCPUFUZZ_NO_MCRF $< -o $@ $(LDFLAGS) -logc -lm
 

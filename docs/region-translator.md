@@ -559,6 +559,17 @@ optimization").
 
 Compiler version 31 (first numbered 0139, compiler version 29).
 
+## Icache flash invalidate re-checks every region (patch 0145, 2026-10-24)
+
+`mtspr HID0` with ICFI flash-invalidates the instruction cache: Dolphin
+clears its whole block cache (`JitInterface::ClearSafe`). Regions were left
+verified, so a game that rewrote code and only flash-invalidated kept running
+stale regions. `ClearSafe` now calls `DolphinWeb_UnverifyRegions`
+(`UnverifyAllRegions`, as a state load): each region is hashed against its
+plan at its next entry and dropped if its code changed. The `mtspr` is not a
+region op, so the region leaves before it and its callers pass that up
+(0142). No compiler version: the generated code is the same.
+
 ## dcbf and dcbst in region code (patch 0144, 2026-10-24)
 
 A data-cache flush loop (`dcbf; addi; bdnz` over a buffer) used to leave

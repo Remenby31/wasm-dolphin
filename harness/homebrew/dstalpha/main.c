@@ -29,11 +29,12 @@
  * The EFB copy clears depth only while depth updates are on (BPStructs:
  * zmode.update_enable): the coplanar variant turns them on for its copies.
  *
- * DSTALPHA_ZINIT (dstalpha-zinit): step 2 depth-tested, but the copies leave
- * depth alone, so the test only ever sees the EFB's initial depth. Native
- * Dolphin starts it at GX depth 0 (FramebufferManager), where LEQUAL rejects
- * every quad: the columns show alone, as in the software renderer. wgpu
- * drew the quads (2026-10-23): a divergence kept as its own case.
+ * DSTALPHA_ZINIT (dstalpha-zinit): step 2 depth-tested (LEQUAL). One copy
+ * before the loop clears depth to GX 0 with updates on; the loop's copies
+ * clear to far with updates off, so they must leave depth at 0 and every
+ * quad is rejected: the columns show alone. A backend clearing depth on
+ * those copies draws the rows. The EFB's initial depth is not used: it is
+ * undefined (the software renderer starts at 0, GPU backends at far).
  */
 #include <gccore.h>
 #include <malloc.h>
@@ -105,6 +106,17 @@ int main(void) {
 	guOrtho(ortho, 0, rmode->efbHeight - 1, 0, rmode->fbWidth - 1, 0, 300);
 	Mtx id;
 	guMtxIdentity(id);
+
+#ifdef DSTALPHA_ZINIT
+	/* Depth to GX 0 once (updates on), then the loop's copies clear to far
+	 * with updates off. */
+	GX_SetCopyClear(bg, 0);
+	GX_SetZMode(GX_FALSE, GX_ALWAYS, GX_TRUE);
+	GX_CopyDisp(xfb[1], GX_TRUE);
+	GX_SetZMode(GX_FALSE, GX_ALWAYS, GX_FALSE);
+	GX_SetCopyClear(bg, 0x00ffffff);
+	GX_DrawDone();
+#endif
 
 	int fb = 0;
 	while (1) {

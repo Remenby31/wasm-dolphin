@@ -40,6 +40,10 @@ import { orderedRegions, validatePlan, ANALYZER_VERSION } from "./aot-plan.js";
 import { assembleRegion, claimEntries, groupRegions, regionModuleKey } from "./aot-region-module.js";
 
 export const PLAN_CACHE_DIR = "aot-plan";
+// Guest code past which a function may need continuation fragments (256
+// instructions): the large functions of a module share its continuation
+// budget (largeLeft, the translator).
+export const REGION_LARGE_FUNCTION_BYTES = 1024;
 const BATCH = 64;
 
 const functionWeight = (f) => f.ranges.reduce((n, [s, e]) => n + e - s, 0);
@@ -276,11 +280,22 @@ export class AotOptimizer extends EventTarget {
     const refused = [];
     let i = 0, waits = 0;
     let continuationBytesUsed = 0; // continuation fragments of this module so far (the translator caps them)
+    // The module's continuation budget is shared out by water-filling: each
+    // large member gets at most an even share of what is left (largeLeft:
+    // the large members from it to the end), so the first ones no longer
+    // take it all (members are smallest first on a first launch, the
+    // biggest last); then what is left goes back, evenly again, to the
+    // ones refused for lack of budget (their `resume`).
+    const large = unit.members.map((f) => (f.ranges ?? []).reduce((n, [s, e]) => n + e - s, 0) > REGION_LARGE_FUNCTION_BYTES);
+    const largeLeft = large.map((_, k) => large.slice(k).filter(Boolean).length);
+    const starved = [];
+    let unitRefused = 0;
     while (i < unit.members.length) {
       if (this.cancelled) return null;
       const slice = unit.members.slice(i, i + this.batchSize);
-      const batch = slice.map((f) => ({
-        module: unit.module, entry: f.entry, flags: f.flags ?? 0, hash: f.hash, ranges: f.ranges, extraEntries: f.extraEntries ?? [], continuationBytesUsed
+      const batch = slice.map((f, k) => ({
+        module: unit.module, entry: f.entry, flags: f.flags ?? 0, hash: f.hash, ranges: f.ranges, extraEntries: f.extraEntries ?? [], continuationBytesUsed,
+        largeLeft: largeLeft[i + k]
       }));
       const translated = await this.translator.translate(batch);
       if (this.cancelled) return null;
@@ -291,7 +306,8 @@ export class AotOptimizer extends EventTarget {
         if (n >= batch.length || (r.entry !== undefined && r.entry !== batch[n].entry)) throw new Error("translator results out of order");
         consumed++;
         continuationBytesUsed += r.budgetCharged ?? 0;
-        this.budgetRefused += r.budgetRefused ?? 0;
+        unitRefused += r.budgetRefused ?? 0;
+        if (r.resume) starved.push(r);
         if (r.fragment) fragments.push(r.fragment, ...(r.continuations ?? []));
         else refused.push({ entry: batch[n].entry, reason: r.reason ?? "untranslatable" });
       }
@@ -299,6 +315,36 @@ export class AotOptimizer extends EventTarget {
       if (wait && ++waits > this.maxNotReadyWaits) return { notReady: true };
       if (wait || !consumed) await this.sleep(wait ? this.notReadyDelayMs : 0);
     }
+    // Rounds: each member still refused gets an even share of what is left
+    // at its turn (never past it: the translator keeps no continuation past
+    // its limit), until none is refused or a round charges nothing; then one
+    // last pass offers each the whole of what is left (a next continuation
+    // bigger than every even share). A member at its own cap leaves the
+    // rounds; a continuation never starts at an entry the module holds.
+    const unitBytes = this.translator.unitContinuationBytes;
+    const claimed = new Set(fragments.flatMap((x) => x.entries.map((pc) => pc >>> 0)));
+    let waiting = starved.map((r) => ({ resume: r.resume, refused: r.budgetRefused ?? 0, exhausted: false }));
+    let whole = false;
+    while (waiting.length) {
+      let spent = 0;
+      for (const [k, w] of waiting.entries()) {
+        const left = unitBytes - continuationBytesUsed;
+        if (!(left > 0)) break;
+        if (this.cancelled) return null;
+        const more = await w.resume(whole ? left : Math.floor(left / (waiting.length - k)), claimed);
+        continuationBytesUsed += more.budgetCharged ?? 0;
+        spent += more.budgetCharged ?? 0;
+        unitRefused += (more.budgetRefused ?? 0) - w.refused;
+        w.refused = more.budgetRefused ?? 0;
+        w.exhausted = Boolean(more.exhausted);
+        for (const x of more.continuations ?? []) for (const pc of x.entries) claimed.add(pc >>> 0);
+        fragments.push(...(more.continuations ?? []));
+      }
+      waiting = waiting.filter((w) => w.refused > 0 && !w.exhausted);
+      if (!(unitBytes - continuationBytesUsed > 0) || whole) break;
+      if (!spent) whole = true;
+    }
+    this.budgetRefused += unitRefused;
     return { fragments, refused };
   }
 
