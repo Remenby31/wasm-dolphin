@@ -1,7 +1,7 @@
 diff --git a/Source/Core/Core/HW/DVD/DVDThread.cpp b/Source/Core/Core/HW/DVD/DVDThread.cpp
 --- a/Source/Core/Core/HW/DVD/DVDThread.cpp
 +++ b/Source/Core/Core/HW/DVD/DVDThread.cpp
-@@ -20,7 +20,55 @@
+@@ -20,7 +20,62 @@
  #include "Core/Core.h"
  #include "Core/CoreTiming.h"
  #ifdef __EMSCRIPTEN__
@@ -15,9 +15,11 @@ diff --git a/Source/Core/Core/HW/DVD/DVDThread.cpp b/Source/Core/Core/HW/DVD/DVD
 +// the DVD thread waits there between two drains. read_us is the whole read
 +// on the DVD thread (that wait included; the worker's own service time is
 +// counted on its side), finish_wait_us the CPU thread waiting for a result
-+// (the emulation stalled). Cumulative; DolphinWeb_DiscReadStats.
++// (the emulation stalled). Cumulative; DolphinWeb_DiscReadStats. Off unless
++// the harness turns them on (DolphinWeb_SetDiscReadStatsEnabled).
 +namespace
 +{
++std::atomic<bool> s_disc_read_stats{false};
 +std::atomic<u32> s_disc_reads{0};
 +std::atomic<u64> s_disc_read_bytes{0};
 +std::atomic<u64> s_disc_read_us{0};
@@ -35,6 +37,11 @@ diff --git a/Source/Core/Core/HW/DVD/DVDThread.cpp b/Source/Core/Core/HW/DVD/DVD
 +  }
 +}
 +}  // namespace
++
++extern "C" EMSCRIPTEN_KEEPALIVE void DolphinWeb_SetDiscReadStatsEnabled(int on)
++{
++  s_disc_read_stats.store(on != 0, std::memory_order_relaxed);
++}
 +
 +// out: reads, bytes (lo, hi), read us (lo, hi), read max us, finish waits,
 +// finish wait us (lo, hi), finish wait max us.
@@ -57,16 +64,19 @@ diff --git a/Source/Core/Core/HW/DVD/DVDThread.cpp b/Source/Core/Core/HW/DVD/DVD
  #endif
  #include "Core/HW/DVD/DVDInterface.h"
  #include "Core/HW/DVD/FileMonitor.h"
-@@ -283,9 +331,20 @@
-       const auto wait_started_at = profile_dvd ?
+@@ -284,8 +339,23 @@
                                         DolphinWeb::WasmTimingProfile::Clock::now() :
                                         DolphinWeb::WasmTimingProfile::Clock::time_point{};
-+#endif
-+#ifdef __EMSCRIPTEN__
-+      const u64 finish_wait_started_us = Common::Timer::NowUs();
  #endif
++#ifdef __EMSCRIPTEN__
++      // Only a wait that blocks is a stall (the result may already be queued).
++      const bool time_wait =
++          s_disc_read_stats.load(std::memory_order_relaxed) && m_result_queue.Empty();
++      const u64 finish_wait_started_us = time_wait ? Common::Timer::NowUs() : 0;
++#endif
        m_result_queue.WaitForData();
  #ifdef __EMSCRIPTEN__
++      if (time_wait)
 +      {
 +        const u64 waited = Common::Timer::NowUs() - finish_wait_started_us;
 +        s_disc_finish_waits.fetch_add(1, std::memory_order_relaxed);
@@ -78,18 +88,22 @@ diff --git a/Source/Core/Core/HW/DVD/DVDThread.cpp b/Source/Core/Core/HW/DVD/DVD
        if (profile_dvd)
        {
          DolphinWeb::WasmTimingProfile::RecordDvdWaitUs(DolphinWeb::WasmTimingProfile::ElapsedMicros(
-@@ -384,8 +443,20 @@
+@@ -384,10 +454,24 @@
    m_file_logger.Log(*m_disc, request.partition, request.dvd_offset);
  
    std::vector<u8> buffer(request.length);
 +#ifdef __EMSCRIPTEN__
-+  const u64 read_started_us = Common::Timer::NowUs();
++  const bool time_read = s_disc_read_stats.load(std::memory_order_relaxed);
++  const u64 read_started_us = time_read ? Common::Timer::NowUs() : 0;
 +#endif
    if (!m_disc->Read(request.dvd_offset, request.length, buffer.data(), request.partition))
      buffer.resize(0);
+ 
+   request.realtime_done_us = Common::Timer::NowUs();
 +#ifdef __EMSCRIPTEN__
++  if (time_read)
 +  {
-+    const u64 read_us = Common::Timer::NowUs() - read_started_us;
++    const u64 read_us = request.realtime_done_us - read_started_us;
 +    s_disc_reads.fetch_add(1, std::memory_order_relaxed);
 +    s_disc_read_bytes.fetch_add(request.length, std::memory_order_relaxed);
 +    s_disc_read_us.fetch_add(read_us, std::memory_order_relaxed);
@@ -97,5 +111,5 @@ diff --git a/Source/Core/Core/HW/DVD/DVDThread.cpp b/Source/Core/Core/HW/DVD/DVD
 +  }
 +#endif
  
-   request.realtime_done_us = Common::Timer::NowUs();
- 
+   m_result_queue.Push(ReadResult(std::move(request), std::move(buffer)));
+ }

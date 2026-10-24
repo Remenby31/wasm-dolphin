@@ -47,7 +47,8 @@ test("a block is read once, then copies; at most maxBlocks are held (least recen
 test("the worker reads the disc in blocks by default, ?discreadahead=0 turns it off, and counts it", async () => {
   const read = (p) => readFile(new URL(p, import.meta.url), "utf8");
   const w = await read("../src/upstream-discio-worker.js");
-  assert.match(w, /if \(discReadaheadEnabled\) readDiscAhead\(resolveWorkerFs\(moduleInstance\)\);\n\s*if \(harnessEnabled\) timeDiscReads/);
+  // Before the harness's timing wrapper, so (a) times the reads in blocks.
+  assert.match(w, /if \(discReadaheadEnabled\) readDiscAhead\(resolveWorkerFs\(moduleInstance\)\);\n\s*if \(harnessEnabled\) \{\n\s*timeDiscReads/);
   assert.match(w, /discReadaheadEnabled = discReadahead !== false;/);
   assert.match(w, /discReadahead: payload\.discReadahead,/);
   assert.match(w, /readahead: discBlockReader \? \{ \.\.\.discBlockReader\.stats \} : null/);

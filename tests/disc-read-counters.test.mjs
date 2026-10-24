@@ -10,15 +10,30 @@ test("0151 times the DVD thread's reads and the CPU thread's waits for them", as
   const patch = await read("../patches/dolphin-wasm/snapshot/0151-disc-read-counters.patch");
   const added = patch.split("\n").filter((l) => l.startsWith("+")).join("\n");
   // The timers wrap the read and the wait themselves (context lines).
-  assert.match(patch, /const u64 read_started_us = Common::Timer::NowUs\(\);\n[+ ]#endif\n\s+if \(!m_disc->Read\(/);
-  assert.match(patch, /const u64 finish_wait_started_us = Common::Timer::NowUs\(\);\n[+ ]#endif\n\s+m_result_queue\.WaitForData\(\);/);
+  assert.match(patch, /const u64 read_started_us = time_read \? Common::Timer::NowUs\(\) : 0;\n[+ ]#endif\n\s+if \(!m_disc->Read\(/);
+  assert.match(patch, /const u64 finish_wait_started_us = time_wait \? Common::Timer::NowUs\(\) : 0;\n[+ ]#endif\n\s+m_result_queue\.WaitForData\(\);/);
   assert.match(added, /extern "C" EMSCRIPTEN_KEEPALIVE void DolphinWeb_DiscReadStats\(u32\* out\)/);
 });
 
 test("the worker times its own service of those reads, harness only", async () => {
   const w = await read("../src/upstream-discio-worker.js");
-  assert.match(w, /if \(harnessEnabled\) timeDiscReads\(resolveWorkerFs\(moduleInstance\)\);/);
+  assert.match(w, /if \(harnessEnabled\) \{\n\s*timeDiscReads\(resolveWorkerFs\(moduleInstance\)\);/);
   assert.match(w, /ops\.read = function timedRead\(stream, buffer, offset, length, position\) \{/);
   assert.match(w, /case "validationReadDiscReads":\n\s*return harnessDiscReads\(\);/);
   assert.match(w, /function harnessDiscReads\(\) \{\n\s*if \(!harnessEnabled\) return/);
+});
+
+// Off unless the harness is on: in the product neither side times anything.
+test("0151's counters are off unless the harness turns them on", async () => {
+  const patch = await read("../patches/dolphin-wasm/snapshot/0151-disc-read-counters.patch");
+  const added = patch.split("\n").filter((l) => l.startsWith("+")).join("\n");
+  assert.match(added, /std::atomic<bool> s_disc_read_stats\{false\};/);
+  // Every counter update sits behind the flag: the read, and a wait only when it blocks.
+  assert.match(added, /const bool time_read = s_disc_read_stats\.load\(std::memory_order_relaxed\);/);
+  assert.match(added, /s_disc_read_stats\.load\(std::memory_order_relaxed\) && m_result_queue\.Empty\(\);/);
+  assert.equal((added.match(/fetch_add\(1, std::memory_order_relaxed\)/g) ?? []).length, 2);
+  assert.match(added, /if \(time_read\)\n\+\s*\{\n\+\s*const u64 read_us = request\.realtime_done_us - read_started_us;/);
+  assert.match(added, /if \(time_wait\)\n\+\s*\{/);
+  const w = await read("../src/upstream-discio-worker.js");
+  assert.match(w, /if \(harnessEnabled\) \{\n\s*timeDiscReads\(resolveWorkerFs\(moduleInstance\)\);\n\s*moduleInstance\._DolphinWeb_SetDiscReadStatsEnabled\?\.\(1\);/);
 });

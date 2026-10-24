@@ -25,7 +25,7 @@
       "commit": "01e0577914a75a2569c846778c2f93aa8e6feddd"
     }
   },
-  "patchSeriesSha256": "84e8f8862696557c9ff1cc9c7ed3d55b3ec373b097dad80163b1c22a166699cb",
+  "patchSeriesSha256": "dfd3353020cb10dbae70790eb85df86545e3df92a4f177b0a5b1038d942a9297",
   "patches": [
     {
       "order": 1,
@@ -936,8 +936,8 @@
       "cwd": ".",
       "hashMode": "lf-normalized",
       "path": "patches/dolphin-wasm/snapshot/0151-disc-read-counters.patch",
-      "size": 4078,
-      "sha256": "ae9a8d06f788e658b2fef165f11b953246fb338d0d2175de4ab3b7c8403b3aa9"
+      "size": 4734,
+      "sha256": "7f9e260ad1afcc306259ea6689a98656bc0ec86970e112d74119dc71722b9608"
     },
     {
       "order": 115,

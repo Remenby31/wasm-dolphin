@@ -3091,6 +3091,9 @@ async function loadCore({
 // Patch 0151 (harness): this worker's own time serving the core's disc reads
 // (WORKERFS, FileReaderSync). The DVD thread's read time (core side) minus
 // this is what a read waited for the worker, busy draining the WebGPU ring.
+// It counts every WORKERFS read, also those made outside the DVD thread (the
+// boot's HLE apploader and FST reads): over a window that holds any, the
+// difference is a lower bound; equal read counts on both sides mean none.
 const discReadService = { reads: 0, bytes: 0, ms: 0, maxMs: 0 };
 // The disc's reads in 1 MiB blocks, the last 8 kept (src/disc-readahead.js);
 // ?discreadahead=0 reads exactly what is asked, as WORKERFS does.
@@ -4012,7 +4015,10 @@ async function mountFile(file) {
   fs.mount(resolveWorkerFs(moduleInstance), { blobs: [{ name: safeName, data: file }] }, WORKERFS_MOUNT_DIR);
   mounted = true;
   if (discReadaheadEnabled) readDiscAhead(resolveWorkerFs(moduleInstance));
-  if (harnessEnabled) timeDiscReads(resolveWorkerFs(moduleInstance));
+  if (harnessEnabled) {
+    timeDiscReads(resolveWorkerFs(moduleInstance));
+    moduleInstance._DolphinWeb_SetDiscReadStatsEnabled?.(1);
+  }
   // P6: the disc's key for the region cache is read from this File only when
   // a region cache is first opened, never during boot: this worker serves the
   // core's file reads, and extra work here while the core boots shifts what
