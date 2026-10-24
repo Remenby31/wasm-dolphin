@@ -13,7 +13,7 @@ diff --git a/Source/Core/Core/PowerPC/CachedInterpreter/CachedInterpreter.cpp b/
    EmitLazyCrFieldTail(body, layout, c.field);
  }
  
-+// Patch 0147: a v128 with `bits` in both 64-bit lanes, in its shortest form:
++// Patch 0146: a v128 with `bits` in both 64-bit lanes, in its shortest form:
 +// i64.const + i64x2.splat (4 to 11 bytes) or f64.const + f64x2.splat (11),
 +// instead of an 18-byte v128.const. The same value either way.
 +void EmitSplatConst64(std::vector<u8>& body, u64 bits)
@@ -57,7 +57,7 @@ diff --git a/Source/Core/Core/PowerPC/CachedInterpreter/CachedInterpreter.cpp b/
 -      for (int i = 0; i < 8; ++i)
 -        body.push_back(static_cast<u8>(v >> (8 * i)));
 -  };
-+  const auto i64x2 = [&](u64 v) { EmitSplatConst64(body, v); };  // 0147
++  const auto i64x2 = [&](u64 v) { EmitSplatConst64(body, v); };  // 0146
    const auto f64x2 = [&](double v) { i64x2(std::bit_cast<u64>(v)); };
    const auto get = [&](u32 l) { EmitLocalGet(body, l); };
    const auto abs_of = [&](u32 l) {
@@ -67,7 +67,7 @@ diff --git a/Source/Core/Core/PowerPC/CachedInterpreter/CachedInterpreter.cpp b/
    EmitSetFprfZeroOrNormal(body, layout, r0, 0, op.wantsFPRF);
 -  body.push_back(0x05);
 -  EmitFpCall(body, op, downcount);
-+  // 0147: out of the op's block; the one helper call after the MSR if serves
++  // 0146: out of the op's block; the one helper call after the MSR if serves
 +  // both a failed lane and a failed MSR test.
 +  body.push_back(0x0c);  // br
 +  EmitU32Leb(body, 2);
@@ -93,7 +93,7 @@ diff --git a/Source/Core/Core/PowerPC/CachedInterpreter/CachedInterpreter.cpp b/
 -      for (int i = 0; i < 8; ++i)
 -        body.push_back(static_cast<u8>(v >> (8 * i)));
 -  };
-+  const auto i64x2 = [&](u64 v) { EmitSplatConst64(body, v); };  // 0147
++  const auto i64x2 = [&](u64 v) { EmitSplatConst64(body, v); };  // 0146
    const auto f64x2 = [&](double v) { i64x2(std::bit_cast<u64>(v)); };
    const auto get = [&](u32 l) { EmitLocalGet(body, l); };
    const auto abs_of = [&](u32 l) {
@@ -103,7 +103,7 @@ diff --git a/Source/Core/Core/PowerPC/CachedInterpreter/CachedInterpreter.cpp b/
    EmitSetFprfZeroOrNormal(body, layout, r0, 0, op.wantsFPRF);
 -  body.push_back(0x05);
 -  EmitFpCall(body, op, downcount);
-+  // 0147: out of the op's block; the one helper call after the MSR if serves
++  // 0146: out of the op's block; the one helper call after the MSR if serves
 +  // both a failed lane and a failed MSR test.
 +  body.push_back(0x0c);  // br
 +  EmitU32Leb(body, 2);
@@ -114,7 +114,7 @@ diff --git a/Source/Core/Core/PowerPC/CachedInterpreter/CachedInterpreter.cpp b/
      return;
    }
  
-+  // 0141/0143 paths: one block per op (0147), so a failed lane and a failed
++  // 0141/0143 paths: one block per op (0146), so a failed lane and a failed
 +  // MSR test share one helper call after the MSR if.
 +  const bool vector_fma = paired && (kind == FpArithKind::MulAdd || kind == FpArithKind::MulSub) &&
 +                          s_fused_madd.load(std::memory_order_relaxed) &&
@@ -168,9 +168,9 @@ diff --git a/Source/Core/Core/PowerPC/CachedInterpreter/CachedInterpreter.cpp b/
  // 0137's and 0139's). 31 (0142): guest calls as wasm calls, guest returns as
  // wasm returns (was 0139). 32 (0143): ps_add/sub/mul/muls0/1 in f64x2.
 -constexpr u32 AOT_COMPILER_VERSION = 32;
-+// 35 (0147): the 0141/0143 paths in fewer bytes (splatted constants, one
-+// helper call per op); 33 is retired (0144, closed), 34 is 0146's.
-+constexpr u32 AOT_COMPILER_VERSION = 35;
++// 34 (0146): the 0141/0143 paths in fewer bytes (splatted constants, one
++// helper call per op); 33 is retired (0144, closed).
++constexpr u32 AOT_COMPILER_VERSION = 34;
  constexpr u32 AOT_MAX_FRAGMENT_BYTES = 1u << 20;
  thread_local std::vector<u32> t_aot_out;
  u8* s_aot_ram = nullptr;

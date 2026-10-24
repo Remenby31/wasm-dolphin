@@ -25,7 +25,7 @@
       "commit": "01e0577914a75a2569c846778c2f93aa8e6feddd"
     }
   },
-  "patchSeriesSha256": "b3ea94eb4d3b6a34db2fd62a1da572087ebbf79e7c4e736d0cd3e2436dcdc634",
+  "patchSeriesSha256": "e319c6bbc3602ffaf930940d165ada11ea0558bf1d597cdff0cc07d67b9a6a65",
   "patches": [
     {
       "order": 1,
@@ -911,9 +911,9 @@
       "order": 111,
       "cwd": ".",
       "hashMode": "lf-normalized",
-      "path": "patches/dolphin-wasm/snapshot/0147-paired-simd-compact.patch",
-      "size": 7848,
-      "sha256": "8a3700d1dbb7856f078450cb3dd42ef986567b21b8fd3fd801b7750c27546980"
+      "path": "patches/dolphin-wasm/snapshot/0146-paired-simd-compact.patch",
+      "size": 7834,
+      "sha256": "a7c038f54740c6ce3ca076dc5d64bcb603c309d8ecb7dd40c4c3795a1c8ae34e"
     },
     {
       "order": 112,
