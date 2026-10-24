@@ -9,7 +9,7 @@ import path from "node:path";
 import test from "node:test";
 
 import { acquirePerfLock, lockIntegrity, queueDir, readLockOwner, ticketsAhead } from "../harness/lib/perf-lock.mjs";
-import { chromeArgsOf, guestCovered, lockOverlapAt, num, pairedSpeedChange, regionPipeline, sideOrder, withheldOnOverlap } from "../harness/probes/race-perf.mjs";
+import { chromeArgsOf, guestCovered, lockOverlapAt, num, pairedSpeedChange, regionPipeline, sideOrder, withheldOnOverlap, workerReadDeltas } from "../harness/probes/race-perf.mjs";
 import { stockChrome } from "../harness/lib/kpi.mjs";
 import { calmThenLock, loadGaveUp } from "../harness/lib/env.mjs";
 import { summarizePcSamples } from "../src/harness-pc-sampler.js";
@@ -150,6 +150,28 @@ test("review #22: odd runs and a pinned coreid are refused with --baseline", () 
     const ok = run(["--runs", "2", "--query", "core=upstream&coreid=sha256:" + "a".repeat(64), "--baseline-query", "core=upstream", "--max-load", "abc"]);
     assert.match(ok, /--max-load abc/);
     assert.doesNotMatch(ok, /coreid/);
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test("--worker-read: per request start, end and the numeric fields' end - start; an error gives no delta", () => {
+  const start = { validationReadDstAlphaPasses: { flushes: 10, extraDraws: 4, enabled: true }, validationReadMissing: { error: "unknown request" } };
+  const end = { validationReadDstAlphaPasses: { flushes: 70, extraDraws: 4, enabled: true }, validationReadMissing: { error: "unknown request" } };
+  const r = workerReadDeltas(start, end);
+  assert.deepEqual(r.validationReadDstAlphaPasses.delta, { flushes: 60, extraDraws: 0 });
+  assert.deepEqual(r.validationReadDstAlphaPasses.end, end.validationReadDstAlphaPasses);
+  assert.equal(r.validationReadMissing.delta, null);
+  assert.deepEqual(workerReadDeltas({}, {}), {});
+});
+
+test("--worker-read: only validationRead* worker requests", () => {
+  const probe = path.resolve(import.meta.dirname, "../harness/probes/race-perf.mjs");
+  const dir = mkdtempSync(path.join(os.tmpdir(), "harness-test-probe-"));
+  try {
+    for (const f of ["d.iso", "s.sav"]) writeFileSync(path.join(dir, f), "");
+    const err = spawnSync(process.execPath, [probe, "--iso", path.join(dir, "d.iso"), "--state", path.join(dir, "s.sav"), "--port", "1", "--worker-read", "validationReadHeadroomStats,validationUniqueFrames"], { encoding: "utf8", env: { ...process.env, CI: "" } }).stderr;
+    assert.match(err, /--worker-read validationUniqueFrames: expected a validationRead\* worker request/);
   } finally {
     rmSync(dir, { recursive: true, force: true });
   }
