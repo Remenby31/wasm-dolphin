@@ -14,7 +14,7 @@ CFLAGS    := -O2 -Wall -Werror $(MACHDEP) -I$(LIBOGC)/include -Icommon \
 LDFLAGS   := $(MACHDEP) -L$(LIBOGC)/lib/cube -Wl,--build-id=none
 PROGRAMS  := padtest consoletest gxscene cpufuzz cpufuzz-nomcrf tonetest smctest efbpeek ramcopy dstalpha footprint
 # Selftest mutants (harness/selftest): built from the same sources.
-MUTANTS   := gxscene-nocubes gxscene-color dstalpha-coplanar dstalpha-zinit
+MUTANTS   := gxscene-nocubes gxscene-color dstalpha-coplanar dstalpha-zinit dstalpha-redraw
 
 all: $(PROGRAMS:%=$(OUT)/%.dol) $(MUTANTS:%=$(OUT)/%.dol) $(OUT)/apploader.bin
 
@@ -48,6 +48,9 @@ $(OUT)/dstalpha-coplanar.elf: dstalpha/main.c | $(OUT)
 
 $(OUT)/dstalpha-zinit.elf: dstalpha/main.c | $(OUT)
 	$(CC) $(CFLAGS) -DDSTALPHA_ZINIT $< -o $@ $(LDFLAGS) -logc -lm
+
+$(OUT)/dstalpha-redraw.elf: dstalpha/main.c | $(OUT)
+	$(CC) $(CFLAGS) -DDSTALPHA_REDRAW $< -o $@ $(LDFLAGS) -logc -lm
 
 $(OUT)/%.dol: $(OUT)/%.elf
 	$(ELF2DOL) $< $@

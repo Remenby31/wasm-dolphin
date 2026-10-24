@@ -6,6 +6,7 @@
   "games": [
     { "id": "dstalpha", "iso": "harness/homebrew/out/dstalpha.iso", "static": true, "set": { "cpu": "single" } },
     { "id": "dstalpha-coplanar", "iso": "harness/homebrew/out/dstalpha-coplanar.iso", "static": true, "set": { "cpu": "single" } },
+    { "id": "dstalpha-redraw", "iso": "harness/homebrew/out/dstalpha-redraw.iso", "static": true, "set": { "cpu": "single" } },
     { "id": "dstalpha-zinit", "iso": "harness/homebrew/out/dstalpha-zinit.iso", "static": true, "set": { "cpu": "single" } },
     { "id": "gxscene-fifo", "iso": "harness/homebrew/out/gxscene.dff", "static": true, "set": { "cpu": "single", "fifolog": "1" } },
     { "id": "efbpeek", "iso": "harness/homebrew/out/efbpeek.iso", "static": true, "set": { "efbaccess": "1", "cpu": "single" } },

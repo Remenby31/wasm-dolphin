@@ -20,6 +20,12 @@
  * depth. On WebGPU such a shader cannot use dual-source blending even when
  * the device has it, and takes the same no_dual_src path on every browser.
  *
+ * DSTALPHA_REDRAW (dstalpha-redraw): depth test on (LEQUAL, writes); the
+ * rows are drawn again at the same depth with LESS (constant 0xff) and with
+ * NEVER (constant 0x00): every fragment must fail, so neither constant may
+ * reach the EFB. A second pass that tested EQUAL after the colour wrote
+ * depth would write them (review of patch 0136).
+ *
  * The EFB copy clears depth only while depth updates are on (BPStructs:
  * zmode.update_enable): the coplanar variant turns them on for its copies.
  *
@@ -105,7 +111,7 @@ int main(void) {
 		GX_LoadProjectionMtx(ortho, GX_ORTHOGRAPHIC);
 		GX_LoadPosMtxImm(id, GX_PNMTX0);
 
-#ifdef DSTALPHA_COPLANAR
+#if defined(DSTALPHA_COPLANAR) || defined(DSTALPHA_REDRAW)
 		GX_SetZMode(GX_TRUE, GX_LEQUAL, GX_TRUE);
 #endif
 		/* 1. Opaque columns, destination alpha 0. */
@@ -130,10 +136,25 @@ int main(void) {
 				     0xf0f0f000u | quad_alpha[(r + c) & 3]);
 		}
 
+#ifdef DSTALPHA_REDRAW
+		/* The same rows at the same depth: LESS and NEVER reject them all. */
+		GX_SetZMode(GX_TRUE, GX_LESS, GX_TRUE);
+		GX_SetDstAlpha(GX_ENABLE, 0xff);
+		for (int r = 0; r < 4; r++)
+			for (int c = 0; c < 4; c++)
+				rect(50 + c * 150, 50 + r * 100, 160 + c * 150, 120 + r * 100,
+				     0x10101000u | quad_alpha[(r + c) & 3]);
+		GX_SetZMode(GX_TRUE, GX_NEVER, GX_TRUE);
+		GX_SetDstAlpha(GX_ENABLE, 0x00);
+		for (int r = 0; r < 4; r++)
+			for (int c = 0; c < 4; c++)
+				rect(50 + c * 150, 50 + r * 100, 160 + c * 150, 120 + r * 100,
+				     0x10101000u | quad_alpha[(r + c) & 3]);
+#endif
 #ifdef DSTALPHA_COPLANAR
 		GX_SetCoPlanar(GX_FALSE);
 #endif
-#if defined(DSTALPHA_COPLANAR) || defined(DSTALPHA_ZINIT)
+#if defined(DSTALPHA_COPLANAR) || defined(DSTALPHA_ZINIT) || defined(DSTALPHA_REDRAW)
 		GX_SetZMode(GX_FALSE, GX_ALWAYS, GX_FALSE);
 #endif
 		/* 3. White band blended with the destination alpha. */
@@ -142,7 +163,7 @@ int main(void) {
 		rect(30, 130, 620, 340, 0xffffffffu);
 
 		GX_DrawDone();
-#ifdef DSTALPHA_COPLANAR
+#if defined(DSTALPHA_COPLANAR) || defined(DSTALPHA_REDRAW)
 		/* Depth updates on, so the copy clears depth for the next frame. */
 		GX_SetZMode(GX_FALSE, GX_ALWAYS, GX_TRUE);
 #endif

@@ -15,13 +15,17 @@ test("patch 0136 draws destination alpha in two passes when dual-source blending
   assert.match(added, /ps->useDstAlpha && config\.blending_state\.RequiresDualSrc\(\) &&\n\+\s*DualSourceBlendDropped\(ps\)/);
   assert.match(added, /if \(!g_backend_info\.bSupportsDualSourceBlend\)\n\+\s*return true;/);
   assert.match(added, /g_backend_info\.api_type == APIType::Vulkan && ps->per_pixel_depth/);
-  // Pass 1: TEV alpha in ocol0.a, colour only. Pass 2: the constant, alpha only, no blend.
-  assert.match(added, /color\.ps_uid\.GetUidData\(\)->useDstAlpha = false;\n\+\s*color\.blending_state\.alpha_update = false;/);
-  assert.match(added, /alpha\.blending_state\.blend_enable = false;\n\+\s*alpha\.blending_state\.color_update = false;/);
-  assert.match(added, /alpha\.depth_state\.func = CompareMode::Equal;/);
-  assert.match(added, /alpha\.depth_state\.update_enable = false;/);
-  // The second draw reuses the committed vertices, outside the perf query.
-  assert.match(added, /g_gfx->SetPipeline\(dst_alpha_pipeline\);\n\+\s*DrawCurrentBatch\(base_index, m_index_generator\.GetIndexLen\(\), base_vertex\);/);
+  // Colour: TEV alpha in ocol0.a, alpha writes off, the game's depth state.
+  assert.match(added, /p\.color\.ps_uid\.GetUidData\(\)->useDstAlpha = false;\n\+\s*p\.color\.blending_state\.alpha_update = false;/);
+  // The constant: unblended, colour writes off, never writing depth.
+  assert.match(added, /p\.alpha\.blending_state\.blend_enable = false;\n\+\s*p\.alpha\.blending_state\.color_update = false;\n\+\s*p\.alpha\.depth_state\.update_enable = false;/);
+  // The constant goes first (the game's depth func, so strict tests and NEVER
+  // hold), unless the colour blend reads the destination alpha.
+  assert.match(added, /p\.alpha_first = !ReadsDstAlpha\(config\.blending_state\);/);
+  assert.match(added, /if \(p\.alpha\.depth_state\.func == CompareMode::Never\)\n\+\s*p\.alpha_drawn = false;/);
+  // Both extra draws reuse the committed vertices, outside the perf query, and count as draws.
+  assert.match(added, /if \(dst_alpha_pipeline && dst_alpha_first\)\n\+\s*\{\n\+\s*g_gfx->SetPipeline\(dst_alpha_pipeline\);\n\+\s*DrawCurrentBatch\(base_index, m_index_generator\.GetIndexLen\(\), base_vertex\);\n\+\s*INCSTAT\(g_stats\.this_frame\.num_draw_calls\);/);
+  assert.match(added, /if \(dst_alpha_pipeline && !dst_alpha_first\)/);
 });
 
 test("the features matrix covers the coplanar (per-pixel depth) case", async () => {
@@ -30,6 +34,9 @@ test("the features matrix covers the coplanar (per-pixel depth) case", async () 
   const make = await read("../harness/homebrew/Makefile");
   assert.match(make, /-DDSTALPHA_COPLANAR/);
   assert.match(make, /-DDSTALPHA_ZINIT/);
+  // Strict depth (LESS) and NEVER on a redrawn mesh (review of 0136).
+  assert.match(make, /-DDSTALPHA_REDRAW/);
+  assert.ok(m.games.some((g) => g.id === "dstalpha-redraw"));
   // The dual-source cases pass with 0136; only the EFB depth divergence
   // (dstalpha-zinit, a wgpu defect of its own) stays an expected failure.
   const known = JSON.parse(await read("../harness/known-failures.json"));
