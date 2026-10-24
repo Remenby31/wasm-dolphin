@@ -286,7 +286,10 @@ export async function measure(session, o) {
     const xfbDt = /xfb_dt:([\d.]+) avg:([\d.]+) max:([\d.]+)/.exec(String(info?.ppcWasmHelperStats ?? ""));
     // CachedInterpreter code space (patch 0138): cache clears (all, and
     // because the space was full) and the highest offset written, since boot.
-    const code = /codeclears:(\d+) codefull:(\d+) codehighkib:(\d+) codesizemib:(\d+)/.exec(String(info?.ppcWasmHelperStats ?? ""));
+    // readFrameInfo keeps FRAME_FIELDS only: the helper stats string is read
+    // from the page's last frame info directly.
+    const helperStats = info?.ppcWasmHelperStats ?? await page.evaluate(() => window.__lastFrameInfo?.ppcWasmHelperStats ?? null).catch(() => null);
+    const code = /codeclears:(\d+) codefull:(\d+) codehighkib:(\d+) codesizemib:(\d+)/.exec(String(helperStats ?? ""));
     const medianLoad = median(loads);
     // Unique images (--unique-frames): a window of its own after the speed
     // window (its GPU readbacks never weigh on the speed), before the stats.
