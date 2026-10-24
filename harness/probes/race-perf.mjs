@@ -106,7 +106,7 @@ import { describe, median, percentile, round } from "../lib/stats.mjs";
 import { coreStats, displayStats, hitchList, mergeTimeline, presentationStats } from "../lib/timeline.mjs";
 import { consistentRead, decodeRegionStats, poolStats, regionShares, topMisses } from "../lib/jit-region-stats.mjs";
 import { consistentMemRead, decodeMemStats, memAccessShares, poolMemStats } from "../lib/mem-access-stats.mjs";
-import { consistentHeadroomRead, decodeHeadroomStats, headroomOf, invalidReasons, querySpeed, unlimitedAllowed } from "../lib/headroom.mjs";
+import { consistentHeadroomRead, decodeHeadroomStats, headroomOf, invalidReasons, pacingExpectation, querySpeed, unlimitedAllowed } from "../lib/headroom.mjs";
 import { summarizePcSamples } from "../../src/harness-pc-sampler.js";
 import { busiestThread, checkPerfAccess, counterEvents, counterSanity, cyclesPerGuestCycle, instructionsPerGuestCycle, perfCounters } from "../lib/perf-counters.mjs";
 import { checkXctrace, freeDiskGB, perKiloGuestCycles, xctraceCounters, xctraceNeedGB } from "../lib/xctrace-counters.mjs";
@@ -248,6 +248,11 @@ export async function measure(session, o) {
     // --headroom (0113): the counters reset and the core ticks read just
     // before the window, both read again just after it.
     const hrStart = o.headroom ? await headroomRead(page, 0) : null;
+    // speed=unlimited with a renderer: the core's own pacing config (0150),
+    // the proof that SyncOnSkipIdle is what the side claims (pacingExpectation).
+    const pacingConfig = pacingExpectation(new URL(session.url).search, { decoupledUnlimited: o.decoupledUnlimited })
+      ? await workerRequest(page, "validationReadPacingConfig", {}, 10000).catch((e) => ({ error: String(e.message || e) }))
+      : undefined;
     // A scene whose region stats must cover the window itself (matrix.mjs
     // regionStatsInWindow): reset now, read just after the window.
     const regionInWindow = o.regionInWindow && o.regionSample != null;
@@ -332,6 +337,7 @@ export async function measure(session, o) {
     const relaxedMadd = await workerRequest(page, "validationReadRelaxedMadd", {}, 10000).catch(() => null);
     return {
       windowMs: Math.round(t1 - t0),
+      ...(pacingConfig ? { pacingConfig } : {}),
       relaxedMadd: relaxedMadd?.mode ?? null, fusedMadd: relaxedMadd?.coreFused ?? null,
       // Guest seconds this window covered (core ticks / ticks per second);
       // the reads bracket the window, so a few host ms more than windowMs.
@@ -643,9 +649,11 @@ async function main() {
   const baselineQuery = values["baseline-query"] ? `${values["baseline-query"]}&metrics=1` : null;
   // speed=unlimited decouples emulated time from the rendering while the
   // core leaves SyncOnSkipIdle off (research/deep-headroom-kpi.md §1): refused
-  // unless the query turns it on (synconidle=1).
+  // unless the query turns it on (synconidle=1) or renders nothing
+  // (video=null); with a renderer, each run is then invalid unless the core
+  // itself reports it on (pacingExpectation, validationReadPacingConfig).
   for (const q of [query, baselineQuery].filter(Boolean)) {
-    if (querySpeed(q) === "unlimited" && !unlimitedAllowed(q)) throw new Error("speed=unlimited without synconidle=1: emulated time runs ahead of the rendering (research/deep-headroom-kpi.md); measure the headroom at speed=1 with --headroom");
+    if (querySpeed(q) === "unlimited" && !unlimitedAllowed(q, { decoupledUnlimited: values["decoupled-unlimited"] === true })) throw new Error("speed=unlimited without synconidle=1 (or video=null): emulated time runs ahead of the rendering (research/deep-headroom-kpi.md); measure the headroom at speed=1 with --headroom");
   }
   if (baselineQuery && !values.baseline) throw new Error("--baseline-query needs --baseline");
   // A coreid on both sides would pin them to one core (trunk against head
@@ -801,7 +809,7 @@ async function main() {
   for (const r of records) for (const n of Object.keys(sides)) {
     const c = r[n]?.cold;
     if (!c) continue;
-    const why = invalidReasons(c, { target: querySpeed(sides[n].query ?? o.query) === "unlimited" ? null : querySpeed(sides[n].query ?? o.query), framesPerViRef: o.framesPerViRef });
+    const why = invalidReasons(c, { target: querySpeed(sides[n].query ?? o.query) === "unlimited" ? null : querySpeed(sides[n].query ?? o.query), framesPerViRef: o.framesPerViRef, pacing: pacingExpectation(sides[n].query ?? o.query, { decoupledUnlimited: o.decoupledUnlimited }) });
     if (why.length) c.invalid = why;
   }
   const good = (r) => r && !r.error && !r.fatal?.length && !r.cold?.overloaded && !r.warm?.overloaded && !r.cold?.invalid?.length;
