@@ -159,14 +159,43 @@ export function sideOrder(run) {
 // pair counts only when both sides measured; the conclusion needs at least
 // `minPairs` pairs, as many with trunk first as with head first (drift over
 // a campaign then hits both sides alike), otherwise it is withheld.
+// A pair whose ln(candidate / baseline) lies more than OUTLIER_MADS robust
+// standard deviations (1.4826 x the median absolute deviation) AND more than
+// OUTLIER_MIN (5 %) from the pairs' median is set aside, named in `excluded`
+// (layout A/A' 2026-10-24: one window at -25 % among pairs within 1 %); the
+// floor keeps ordinary noise in when a few pairs agree so closely that the
+// MAD is a fraction of a percent. The latest extra pairs of the larger order
+// then go too, so both orders stay equal.
+export const OUTLIER_MADS = 3;
+export const OUTLIER_MIN = 0.05;
+export function outlierPairs(pairs) {
+  if (pairs.length < 4) return [];
+  const lr = pairs.map((p) => Math.log1p(p.ratio));
+  const m = median(lr), mad = median(lr.map((x) => Math.abs(x - m)));
+  if (!(mad > 0)) return [];
+  return pairs.filter((p, i) => Math.abs(lr[i] - m) > Math.max(OUTLIER_MADS * 1.4826 * mad, OUTLIER_MIN));
+}
+
 export function pairedSpeedChange(runs, { metric = "speed", minPairs = 4, phase = "cold" } = {}) {
-  const pairs = [];
+  let pairs = [];
   for (const r of runs) {
     const b = r.baseline?.[phase]?.[metric], c = r.candidate?.[phase]?.[metric];
     if (Number.isFinite(b) && Number.isFinite(c) && b > 0) pairs.push({ run: r.run, first: sideOrder(r.run)[0], ratio: c / b - 1 });
   }
+  const perRun = pairs.map((p) => round(p.ratio * 100, 1));
+  const excluded = outlierPairs(pairs).map((p) => ({ run: p.run, pct: round(p.ratio * 100, 1), why: `outlier: more than ${OUTLIER_MADS} MAD and ${OUTLIER_MIN * 100} % from the pairs' median` }));
+  pairs = pairs.filter((p) => !excluded.some((x) => x.run === p.run));
+  if (excluded.length) {
+    for (;;) {
+      const ab = pairs.filter((p) => p.first === "baseline"), ba = pairs.filter((p) => p.first !== "baseline");
+      if (ab.length === ba.length) break;
+      const extra = (ab.length > ba.length ? ab : ba).at(-1);
+      excluded.push({ run: extra.run, pct: round(extra.ratio * 100, 1), why: "order balance after an outlier" });
+      pairs = pairs.filter((p) => p !== extra);
+    }
+  }
   const baseFirst = pairs.filter((p) => p.first === "baseline").length;
-  const out = { pairs: pairs.length, baselineFirst: baseFirst, candidateFirst: pairs.length - baseFirst, perRun: pairs.map((p) => round(p.ratio * 100, 1)), median: null, withheld: null };
+  const out = { pairs: pairs.length, baselineFirst: baseFirst, candidateFirst: pairs.length - baseFirst, perRun, ...(excluded.length ? { excluded } : {}), median: null, withheld: null };
   if (pairs.length < minPairs) out.withheld = `${pairs.length} valid pair(s), at least ${minPairs} needed`;
   else if (baseFirst !== pairs.length - baseFirst) out.withheld = `order unbalanced: trunk first in ${baseFirst} pair(s), head first in ${pairs.length - baseFirst}`;
   else out.median = round(median(pairs.map((p) => p.ratio)) * 100, 1);
@@ -929,6 +958,13 @@ async function main() {
     change: sides.baseline ? withheldOnOverlap(pairedSpeedChange(runsDone.filter((r) => good(r.baseline) && good(r.candidate)), { minPairs: o.minPairs }), lockOverlap) : null,
     // Checks of the perf lock that found another holder (empty: none).
     lockOverlap,
+    // --headroom: the same pairing on maxSpeedCpu, the number a speed=1 A/B
+    // decides on (the speed itself sits at 100 %), cold and, with --warm, warm.
+    ...(o.headroom && sides.baseline ? { headroomChange: Object.fromEntries(["cold", ...(o.warm ? ["warm"] : [])].map((phase) => {
+      const as = (r, side) => ({ [phase]: { v: r[side]?.[phase]?.headroom?.maxSpeedCpu } });
+      const pairs = runsDone.filter((r) => good(r.baseline) && good(r.candidate));
+      return [phase, pairedSpeedChange(pairs.map((r) => ({ run: r.run, baseline: as(r, "baseline"), candidate: as(r, "candidate") })), { metric: "v", minPairs: o.minPairs, phase })];
+    })) } : {}),
     // --counters: the same pairing on host instructions per guest cycle (lower is better).
     ...(o.onWindow && sides.baseline ? { counterChange: pairedSpeedChange(runsDone.filter((r) => good(r.baseline) && good(r.candidate)), { metric: "instructionsPerGuestCycle", minPairs: o.minPairs }) } : {}),
     // Host cycles per guest cycle: they decide when the instructions and the

@@ -9,7 +9,7 @@ import path from "node:path";
 import test from "node:test";
 
 import { acquirePerfLock, lockIntegrity, queueDir, readLockOwner, ticketsAhead } from "../harness/lib/perf-lock.mjs";
-import { chromeArgsOf, guestCovered, lockOverlapAt, num, pairedSpeedChange, regionPipeline, sideOrder, withheldOnOverlap, workerReadDeltas } from "../harness/probes/race-perf.mjs";
+import { chromeArgsOf, guestCovered, lockOverlapAt, num, outlierPairs, pairedSpeedChange, regionPipeline, sideOrder, withheldOnOverlap, workerReadDeltas } from "../harness/probes/race-perf.mjs";
 import { stockChrome } from "../harness/lib/kpi.mjs";
 import { calmThenLock, loadGaveUp } from "../harness/lib/env.mjs";
 import { summarizePcSamples } from "../src/harness-pc-sampler.js";
@@ -122,6 +122,25 @@ test("review #22: the change is withheld when pairs are too few or unbalanced in
   assert.match(pairedSpeedChange([run(1, 80, 88), run(2, 70, 77)]).withheld, /2 valid pair\(s\), at least 4/);
   const lost = pairedSpeedChange([run(1, 80, 88), run(2, 70, 77), run(3, 90, 99), { run: 4, baseline: { cold: { speed: 100 } }, candidate: { error: "core-mismatch" } }], { minPairs: 2 });
   assert.match(lost.withheld, /unbalanced/);
+});
+
+test("paired change: a pair more than 3 MAD from the median is set aside and named, the orders kept equal", () => {
+  const run = (n, b, c) => ({ run: n, baseline: { cold: { speed: b } }, candidate: { cold: { speed: c } } });
+  // The layout A/A' of 2026-10-24: one window at -25 % among pairs within about 1 %.
+  const ch = pairedSpeedChange([run(1, 1.743, 1.356), run(2, 1.743, 1.673), run(3, 1.75, 1.733), run(4, 1.769, 1.776), run(5, 1.76, 1.75), run(6, 1.75, 1.76)]);
+  assert.deepEqual(ch.excluded.map((x) => [x.run, x.why.split(":")[0]]), [[1, "outlier"], [6, "order balance after an outlier"]]);
+  assert.equal(ch.pairs, 4);
+  assert.equal(ch.baselineFirst, ch.candidateFirst);
+  assert.equal(ch.withheld, null);
+  assert.ok(Math.abs(ch.median) < 2);
+  assert.equal(ch.perRun.length, 6); // every pair stays listed
+  // Pairs that agree: nothing set aside, no excluded field.
+  const calm = pairedSpeedChange([run(1, 80, 88), run(2, 70, 77), run(3, 90, 99), run(4, 100, 110)]);
+  assert.equal(calm.excluded, undefined);
+  // Close pairs make a tiny MAD: a -2 % pair among -0.1..-0.5 % is noise, not an outlier (the 5 % floor).
+  assert.equal(pairedSpeedChange([run(1, 1.782, 1.744), run(2, 1.767, 1.763), run(3, 1.823, 1.814), run(4, 1.802, 1.801)]).excluded, undefined);
+  // Fewer than 4 pairs: no outlier test (the median of 3 is its own guard).
+  assert.deepEqual(outlierPairs([{ ratio: 0 }, { ratio: 0.01 }, { ratio: -0.5 }]), []);
 });
 
 test("review #22: numeric options reject NaN and out-of-range values", () => {
