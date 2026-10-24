@@ -1854,3 +1854,49 @@ test("a function rewritten then an icache flash invalidate (HID0.ICFI): its next
     assert.equal(got.downcount, reference.downcount, `maxFunctions ${maxFunctions}`);
   }
 });
+
+// #215: the wasm function body cap, under JavaScriptCore only (it never
+// tiers a function past 100,000 bytes up to OMG). Without a cap the
+// formation is the one before (V8, SpiderMonkey); with one, every fragment,
+// the first included, stays under it, the same blocks held, and the module
+// runs like the interpreter. The cap is in the region key only when set.
+test("region key: the function cap is in it only when there is one", async () => {
+  const f = [{ entry: 0x80003100, sha256: "a".repeat(64) }];
+  const parts = { compilerVersion: 5, codegenMask: 0 };
+  assert.equal(await regionModuleKey(f, { ...parts, functionCap: 0 }), await regionModuleKey(f, parts), "no cap: the key of before");
+  assert.notEqual(await regionModuleKey(f, { ...parts, functionCap: 95000 }), await regionModuleKey(f, parts));
+  assert.notEqual(await regionModuleKey(f, { ...parts, functionCap: 95000 }), await regionModuleKey(f, { ...parts, functionCap: 50000 }));
+  await assert.rejects(regionModuleKey(f, { ...parts, functionCap: -1 }), /functionCap/);
+});
+
+test("function cap: none leaves the formation as before; one cuts every fragment, the first included, under it", { skip: contSkip }, async () => {
+  const program = longFunction(100);
+  const ranges = loadWords(LONG, program.words);
+  const options = { mask: PRODUCTION_DISABLE_MASK, maxBlocks: 64, names: coreAssembleOptions(core.module)?.helperNames };
+  const bytesOf = (r) => [r.fragment, ...(r.continuations ?? [])].map((x) => Array.from(x.code).join(","));
+  const plain = await translateWithContinuations(core.module, { entry: LONG, ranges, hash: null }, options);
+  const zero = await translateWithContinuations(core.module, { entry: LONG, ranges, hash: null }, { ...options, functionCap: 0 });
+  assert.deepEqual(bytesOf(zero), bytesOf(plain), "no cap: the same fragments, byte for byte");
+  assert.equal(plain.fragment.entries.length, 64, "the first fragment capped by blocks only");
+  const cap = Math.floor(plain.fragment.code.length / 3);
+  let slices = 0;
+  const r = await translateWithContinuations(core.module, { entry: LONG, ranges, hash: null }, { ...options, functionCap: cap, slice: async () => { slices++; } });
+  const fragments = [r.fragment, ...(r.continuations ?? [])];
+  assert.ok(r.fragment.entries.length < 64, "the first fragment cut");
+  assert.ok(fragments.every((x) => x.code.length <= cap), "every fragment under the cap");
+  assert.ok(slices >= 2, "the retries yield between them");
+  const held = (fs) => new Set(fs.flatMap((x) => x.entries));
+  assert.equal(held(fragments).size, held([plain.fragment, ...(plain.continuations ?? [])]).size, "the same blocks held");
+  core.module._DolphinWeb_AotForgetRegionsForTest?.();
+  const { bytes: mod, entries } = assembleRegion(claimEntries(fragments), { helpers: HELPER_SIGNATURES, pcOffset: core.pcOffset, memoryPages: core.memoryPages });
+  core.setRegionsEnabled(true);
+  core.queueRegion(mod, entries.map(([pc]) => pc), [{ ranges, hash: null }]);
+  core.serviceRegions();
+  const reference = runCall(LONG, { regions: false });
+  const got = runCall(LONG, { regions: true });
+  assert.deepEqual(got.state, reference.state);
+  assert.equal(got.interpreted, 0);
+  // A single block over the cap: kept as the first fragment (the entry).
+  const tiny = await translateWithContinuations(core.module, { entry: LONG, ranges, hash: null }, { ...options, functionCap: 16 });
+  assert.deepEqual([tiny.fragment?.entries.length, tiny.fragment?.code.length > 16], [1, true]);
+});

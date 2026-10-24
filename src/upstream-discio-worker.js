@@ -12,6 +12,7 @@ import {
 } from "./upstream-worker-protocol.js";
 import { parseDolHeader } from "./dol.js";
 import { probeRelaxedMadd } from "./relaxed-madd-probe.js";
+import { probeWasmFeatures } from "./wasm-feature-probe.js";
 import { decodeWgpuSamplerState } from "./wgpu-sampler-state.js";
 import { gxClearDepthToStored, gxDepthState } from "./wgpu-depth-state.js";
 import { clampSourceRect, createWgpuExactCapture, packReadbackRows } from "./wgpu-exact-capture.js";
@@ -23,6 +24,7 @@ import {
   compileFailureReason,
   createAotCompilerClient
 } from "./aot-compiler-worker.js";
+import { WASM_ENGINES, wasmEngine } from "./wasm-engine.js";
 import { migrateLegacyJitIdb, openAotBlockStore, openAotCache, readDiscKeyFromFile, readDolKeyFromFile } from "./aot-cache.js";
 import {
   JIT_CACHE_ENTRY_KEY_SCHEMA,
@@ -270,6 +272,9 @@ let fifoLogBoot = false;
 let wgpuMaskedFeatures = new Set();
 // ?wgpufallback=1 (harness): keep a CPU fallback adapter; refused otherwise.
 let wgpuAcceptFallbackAdapter = false;
+// ?webglsw=1 (harness): keep a software WebGL presenter; refused otherwise
+// (setupSoftwarePresenter).
+let webglAcceptSoftware = false;
 // A CPU adapter is no usable GPU: with --enable-unsafe-webgpu (the harness
 // passes it) a GPU-less Chrome gives a SwiftShader fallback adapter, and both
 // the replay and the presenter would run on the CPU.
@@ -952,6 +957,10 @@ let wgpuDiagLastDrainAt = 0;
 let gpuSyncDiagEnabled = false;
 // probeRelaxedMadd()'s answer: "fused", "unfused", "unsupported" or "inconsistent".
 let relaxedMadd = null;
+// probeWasmFeatures()'s answer ({ simd, tailCall }), and why ?aot=1 was turned
+// off by it (null when it was not).
+let wasmFeatures = null;
+let aotRegionsOffReason = null;
 
 // Milliseconds before the next drain the drainEveryMs perturbation allows (0:
 // drain now). The replay pump sleeps that long instead of polling.
@@ -1589,6 +1598,7 @@ async function handleMessage(type, payload) {
         efbCopyRam: payload.efbCopyRam,
         wgpuMask: payload.wgpuMask,
         wgpuFallback: payload.wgpuFallback,
+        webglSoftware: payload.webglSoftware,
         efbDiag: payload.efbDiag,
         jitVerbose: payload.jitVerbose,
         frameCap: payload.frameCap,
@@ -1599,6 +1609,8 @@ async function handleMessage(type, payload) {
         aotCompiler: payload.aotCompiler,
         aotFirstLaunch: payload.aotFirstLaunch,
         aotSampleMs: payload.aotSampleMs,
+        wasmEngine: payload.wasmEngine,
+        regionCap: payload.regionCap,
         regionChain: payload.regionChain,
         fusedMadd: payload.fusedMadd,
         reportedCoreSelection: payload.coreSelection,
@@ -2264,6 +2276,7 @@ async function loadCore({
   efbCopyRam = false,
   wgpuMask = "",
   wgpuFallback = false,
+  webglSoftware = false,
   efbDiag = false,
   jitVerbose = false,
   frameCap = 0,
@@ -2274,6 +2287,8 @@ async function loadCore({
   aotCompiler = true,
   aotFirstLaunch = false,
   aotSampleMs = AOT_PROFILE_SAMPLE_MS,
+  wasmEngine: requestedWasmEngine = null,
+  regionCap = null,
   regionChain = true,
   fusedMadd = true,
   reportedCoreSelection = null,
@@ -2318,6 +2333,7 @@ async function loadCore({
   fifoLogBoot = Boolean(fifoLog);
   wgpuMaskedFeatures = parseWgpuMask(wgpuMask);
   wgpuAcceptFallbackAdapter = Boolean(wgpuFallback);
+  webglAcceptSoftware = Boolean(webglSoftware);
   if (moduleInstance) {
     return moduleInstance;
   }
@@ -2699,8 +2715,20 @@ async function loadCore({
   const _t_idb = performance.now();
   dolphinJitCachePersistenceEnabled = !noJitCache;
   dolphinAotCompilerEnabled = aotCompiler !== false;
+  // Regions are return_call chains: without wasm tail calls every region
+  // module would fail to compile. They stay off and the CPU runs on blocks,
+  // with a status line and aotStatus saying why (never a silent loss).
+  wasmFeatures = probeWasmFeatures();
+  aotRegionsOffReason = null;
+  if (aotFirstLaunch === true && !wasmFeatures.tailCall) {
+    aotFirstLaunch = false;
+    aotRegionsOffReason = "no wasm tail calls (return_call) in this engine";
+    postStatus(`aot: regions off: ${aotRegionsOffReason}`);
+  }
   aotFirstLaunchEnabled = aotFirstLaunch === true;
   aotProfileSampleMs = Number.isInteger(aotSampleMs) && aotSampleMs >= 0 ? aotSampleMs : AOT_PROFILE_SAMPLE_MS;
+  wasmEngineName = WASM_ENGINES.includes(requestedWasmEngine) ? requestedWasmEngine : wasmEngine({ search: "" });
+  aotRegionCapRequested = Number.isInteger(regionCap) && regionCap >= 0 ? regionCap : null;
   dolphinJitBootLoadComplete = false;
   dolphinJitBootLoadedEntries = 0;
   coreBuildFingerprint = String(buildFingerprint ?? "");
@@ -5985,15 +6013,20 @@ async function setupSoftwarePresenter(canvas, presenterBackend) {
   }
 
   if (presenterBackend !== "2d") {
-    renderGl =
-      renderCanvas.getContext("webgl2", softwareBlitContextAttributes()) ||
-      renderCanvas.getContext("webgl", softwareBlitContextAttributes());
+    // Without a usable GPU, WebGL rasterises on the CPU (WARP on Windows,
+    // SwiftShader): on a GPU-less Windows runner the 2D canvas showed the same
+    // picture for 13-18 % less Chrome CPU (windows-nogpu lane).
+    // failIfMajorPerformanceCaveat refuses such a context (WARP included), and
+    // a refused getContext leaves the canvas free for 2D.
+    const attributes = { ...softwareBlitContextAttributes(), failIfMajorPerformanceCaveat: !webglAcceptSoftware };
+    renderGl = renderCanvas.getContext("webgl2", attributes) || renderCanvas.getContext("webgl", attributes);
     if (renderGl) {
       renderBackend = "webgl";
       rendererDiagnostics.activePresenterBackend = renderBackend;
       renderGlState = createSoftwareBlitter(renderGl);
       return;
     }
+    rendererDiagnostics.webglFallback = "no hardware WebGL context (software or none): 2D presenter";
   }
 
   renderContext = renderCanvas.getContext("2d", { alpha: false });
@@ -7473,7 +7506,10 @@ export async function handleAotMessage(type, payload = {}) {
   const idle = aotFirstLaunchEnabled ? "none" : "disabled";
   switch (type) {
     case "aotStatus": {
-      const status = aotFirstLaunch ? await aotFirstLaunch.status() : { state: idle, fraction: 0 };
+      const base = aotFirstLaunch ? await aotFirstLaunch.status() : { state: idle, fraction: 0 };
+      // The engine's features, and why regions are off when a missing one
+      // turned them off.
+      const status = { ...base, wasmFeatures: { ...wasmFeatures, relaxedMadd }, ...(aotRegionsOffReason ? { regionsOff: aotRegionsOffReason } : {}) };
       const profile = aotProfileReport();
       return profile ? { ...status, profile } : status;
     }
@@ -7529,14 +7565,20 @@ export async function prepareAotFirstLaunch(file, {
     return;
   }
   const generation = aotDiscGeneration;
-  const [{ coreAotKeyParts, coreAssembleOptions, coreRegionTranslator, createAotFirstLaunch }, { OpfsPlanStore }, { AotProfileStore, blocksFromPcSamples, profileKey }, { planDiscInWorker }, { fileReader, planDisc, planDolFile }, { createProfileRecorder, guestPcAddress, startHotSampler }] =
+  const [{ coreAotKeyParts, coreAssembleOptions, coreRegionTranslator, createAotFirstLaunch, REGION_JSC_FUNCTION_CAP }, { OpfsPlanStore }, { AotProfileStore, blocksFromPcSamples, profileKey }, { planDiscInWorker }, { fileReader, planDisc, planDolFile }, { createProfileRecorder, guestPcAddress, startHotSampler }] =
     await Promise.all([import("./aot-orchestrator.js"), import("./aot-optimizer.js"), import("./aot-profile.js"), import("./aot-plan-worker.js"), import("./aot-recomp.js"), import("./aot-hot-sampler.js")]);
   const discKey = await readDiscKey();
   if (generation !== aotDiscGeneration) return;
-  const keyParts = coreAotKeyParts(module);
+  // The wasm function body cap the fragments are formed under: JSC's OMG
+  // limit under JavaScriptCore only (src/wasm-engine.js), none elsewhere
+  // (V8 pays for the extra transitions); ?regioncap=N|0 forces it. In the
+  // region key only when there is one.
+  const functionCap = regionFunctionCap(REGION_JSC_FUNCTION_CAP);
+  const coreKeyParts = coreAotKeyParts(module);
+  const keyParts = coreKeyParts ? { ...coreKeyParts, functionCap } : null;
   const core = coreAssembleOptions(module);
   const translator = keyParts && core && discKey && coreHash
-    ? coreRegionTranslator(module, { mask: keyParts.codegenMask, helperNames: core.helperNames })
+    ? coreRegionTranslator(module, { mask: keyParts.codegenMask, helperNames: core.helperNames, functionCap })
     : null;
   const opfs = translator ? await Promise.resolve(storageRoot()).catch(() => null) : null;
   const flow = createAotFirstLaunch({
@@ -7692,7 +7734,21 @@ export const recordAotProfileForTest = (samples) => aotProfileTarget?.record(sam
 export const aotPlanProfileReadForTest = () => aotPlanProfileForTest;
 let aotProfileTimer = null;
 const AOT_PROFILE_SAMPLE_MS = 10; // one guest PC per 10 ms: enough for block weights
-let aotProfileSampleMs = AOT_PROFILE_SAMPLE_MS; // ?aotsample=N (core-host), 0: no sampler
+let aotProfileSampleMs = AOT_PROFILE_SAMPLE_MS;
+// The page's wasm engine (core-host, src/wasm-engine.js); without one, this
+// worker's own detection (no ?wasmengine= here: a worker's location is its
+// script's).
+let wasmEngineName = "unknown";
+export const wasmEngineForTest = () => wasmEngineName;
+// ?regioncap=N|0 (core-host): the region function cap forced, else null (by engine).
+let aotRegionCapRequested = null;
+export function regionFunctionCap(jscCap) {
+  return aotRegionCapRequested ?? (wasmEngineName === "jsc" ? jscCap : 0);
+}
+export function setRegionCapForTest({ engine = null, cap = null } = {}) {
+  if (engine) wasmEngineName = engine;
+  aotRegionCapRequested = cap;
+} // ?aotsample=N (core-host), 0: no sampler
 const AOT_PROFILE_RECORD_MS = 60000;
 // Every minute, and when the tab hides or closes (flushUserData), the
 // emulation pauses or stops, or another disc is mounted, what the sampler

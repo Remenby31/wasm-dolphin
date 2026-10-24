@@ -1,19 +1,19 @@
 {
   "schemaVersion": 1,
   "abiVersion": 1,
-  "coreId": "sha256:d18cd57ea175f5dcd6eb7034529ddf509cde3b2cfff0aa8b964895b4b730f5b9",
+  "coreId": "sha256:bb7216a1ec522fc8f726aefdbf143431a20de18724dd44016a886db3bfab12d0",
   "upstreamCommit": "e22551eae1c84a7e4d0b6a5c519ef4ed4ef69df1",
   "artifacts": [
     {
       "path": "cores/dolphin/dolphin-core-upstream.js",
       "hashMode": "lf-normalized",
-      "size": 283271,
-      "sha256": "4c33fc68da259d55d54d8689ee5d609f60d2cc7585f504d008f8e3dc926e4c81"
+      "size": 283383,
+      "sha256": "c0f45e57552fcff5a440008c2110096da30ef57bbb3e9a09d8a71ea6aa6a5c86"
     },
     {
       "path": "cores/dolphin/dolphin-core-upstream.wasm",
-      "size": 13188143,
-      "sha256": "d18cd57ea175f5dcd6eb7034529ddf509cde3b2cfff0aa8b964895b4b730f5b9"
+      "size": 13188431,
+      "sha256": "bb7216a1ec522fc8f726aefdbf143431a20de18724dd44016a886db3bfab12d0"
     }
   ],
   "contractSources": [
@@ -86,8 +86,8 @@
     {
       "path": "src/core-host.js",
       "hashMode": "lf-normalized",
-      "size": 75510,
-      "sha256": "657ed7659bb5f3d0b9be127edd7e82e94084f301a00afd83a3df969cb7940618"
+      "size": 76449,
+      "sha256": "6b776d4fc8466cf1232c0afe8b844908299e2d7d7c82e6a7a9a4564707a79577"
     },
     {
       "path": "src/diagnostic-log-filter.js",
@@ -140,8 +140,8 @@
     {
       "path": "src/upstream-discio-worker.js",
       "hashMode": "lf-normalized",
-      "size": 733172,
-      "sha256": "ace9748cf912d32d7cd241d6e09de640d945298b0ad4515f74fbf7003baee1cc"
+      "size": 736449,
+      "sha256": "8bde1219ba637d275f5e9fbd1b179cc72ced5e3fa9be8ed8c9b4db631c897637"
     },
     {
       "path": "src/wgpu-renderer-worker-probe.js",
@@ -164,8 +164,8 @@
     {
       "path": "src/upstream-worker-adapter.js",
       "hashMode": "lf-normalized",
-      "size": 52869,
-      "sha256": "f4065d28f7464e7336964653cc417adcc82acf96e11192d134f51f61ce1fa8cd"
+      "size": 53467,
+      "sha256": "983c252ef608ceaa248c0054cd83bfb7b0962ce60f09ee2681ddca90c1672323"
     },
     {
       "path": "src/upstream-worker-protocol.js",
@@ -477,6 +477,7 @@
     "_DolphinWeb_SetFprfForTest",
     "_DolphinWeb_SetFusedMadd",
     "_DolphinWeb_SetGpuSpinBudget",
+    "_DolphinWeb_UnverifyRegions",
     "_FlushMemoryCards",
     "_FrameBuffer",
     "_FrameHeight",

@@ -59,7 +59,7 @@ test("without aot=1 the worker answers disabled and imports nothing of P7", asyn
   const { worker } = await loadWorker(t);
   worker.setAotFirstLaunchEnabledForTest(false);
   assert.deepEqual(await worker.handleAotMessage("validationReadAotProgress"), { schema: "wasm-dolphin.aot-progress.v1", state: "disabled", events: [] });
-  assert.deepEqual(await worker.handleAotMessage("aotStatus"), { state: "disabled", fraction: 0 });
+  assert.deepEqual(await worker.handleAotMessage("aotStatus"), { state: "disabled", fraction: 0, wasmFeatures: { relaxedMadd: null } });
   assert.deepEqual(await worker.handleAotMessage("aotOptimize", { resume: true }), { started: false });
   // P7's modules are loaded only under the flag (dynamic import)
   const source = await readFile(workerUrl, "utf8");
@@ -77,7 +77,7 @@ test("a core without the translator export: unsupported, and the disc key is nev
   await worker.prepareAotFirstLaunch({}, { module: {}, readDiscKey: async () => { reads++; return DISC; }, coreHash: CORE });
   assert.equal(reads, 0);
   assert.equal((await worker.handleAotMessage("validationReadAotProgress")).state, "unsupported");
-  assert.deepEqual(await worker.handleAotMessage("aotStatus"), { state: "unsupported", fraction: 0 });
+  assert.deepEqual(await worker.handleAotMessage("aotStatus"), { state: "unsupported", fraction: 0, wasmFeatures: { relaxedMadd: null } });
   await worker.startAotFirstLaunchAfterBoot();
 });
 
@@ -195,6 +195,18 @@ test("the region ledger: members whose code no longer matches the plan are liste
   const r = await worker.regionLedgerStaleForTest(core);
   assert.deepEqual([r.checked, r.staleModules], [2, 1]);
   assert.deepEqual(r.stale.map((x) => [x.key, x.member, x.start, x.translated]), [["region-v1:m", 1, 0x80003120, false]]);
+});
+
+// #215: the region function cap by engine: JSC's OMG limit under
+// JavaScriptCore only, none under V8 (or unknown); ?regioncap= forces it.
+test("the region function cap: JSC only, unless forced", async (t) => {
+  const { worker } = await loadWorker(t);
+  t.after(() => worker.setRegionCapForTest({ engine: "unknown", cap: null }));
+  const cases = [["v8", null, 0], ["jsc", null, 95000], ["unknown", null, 0], ["spidermonkey", null, 0], ["jsc", 0, 0], ["v8", 50000, 50000]];
+  for (const [engine, cap, expected] of cases) {
+    worker.setRegionCapForTest({ engine, cap });
+    assert.equal(worker.regionFunctionCap(95000), expected, `${engine}, forced ${cap}`);
+  }
 });
 
 // Review of #86: the region cache waits for the first presented image (or
