@@ -175,6 +175,10 @@ async function main() {
       r.frame = await readFrameInfo(page).catch(() => null);
       if (values["module-sizes"]) r.moduleSizes = moduleSizeSummary(sizeRecords(lines));
       Object.assign(r, regionCounts(r.aotProgress, r.aotStatus));
+      // The engine's wasm feature probes (simd, tail calls, relaxed madd), and
+      // why regions were turned off if they were.
+      r.wasmFeatures = r.aotStatus?.wasmFeatures ?? null;
+      r.regionsOff = r.aotStatus?.regionsOff ?? null;
     }
   } finally {
     await close(context);
@@ -183,7 +187,7 @@ async function main() {
   r.fatal = lines.filter((t) => FATAL_PATTERN.test(t)).slice(0, 20);
   r.statusLines = lines.filter((t) => !t.startsWith(WASM_SIZES_TAG) && /relaxed_madd|aot[: ]|regions? |wasm feature|tail call/i.test(t)).slice(0, 40);
   r.verdict = webkitBootVerdict(r);
-  console.log(`[webkit-boot] ${JSON.stringify({ browser: r.browser, booted: r.booted, bootError: r.bootError, relaxedMadd: r.relaxedMadd, state: r.state, installs: r.installs, compiled: r.compiled, refused: r.refused, compileErrors: r.compileErrors.length, regionStats: r.regionStats, moduleSizes: r.moduleSizes, speed: r.frame?.speed ?? null })}`);
+  console.log(`[webkit-boot] ${JSON.stringify({ browser: r.browser, booted: r.booted, bootError: r.bootError, relaxedMadd: r.relaxedMadd, wasmFeatures: r.wasmFeatures, regionsOff: r.regionsOff, state: r.state, installs: r.installs, compiled: r.compiled, refused: r.refused, compileErrors: r.compileErrors.length, regionStats: r.regionStats, moduleSizes: r.moduleSizes, speed: r.frame?.speed ?? null })}`);
   if (values.out) writeFileSync(values.out, JSON.stringify(r, null, 1));
   const relaxed = values["expect-relaxed"];
   if (relaxed && !(r.relaxedMadd?.mode === relaxed && r.relaxedMadd?.coreFused === (relaxed === "fused"))) {
