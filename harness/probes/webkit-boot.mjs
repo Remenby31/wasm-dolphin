@@ -20,6 +20,8 @@
 //     [--expect-relaxed MODE]  fail unless the relaxed SIMD probe answered MODE
 //                           (WebKit: unsupported) and the core is fused only
 //                           when MODE is "fused"
+//     [--expect-wasm-notify]  fail unless memory.atomic.notify from wasm wakes
+//                           Atomics.waitAsync in this engine (patch 0148)
 //     [--module-sizes]      record each compiled module's function sizes in
 //                           the workers Playwright reports, as console lines
 //                           (Chromium sees the CPU thread's region compiles;
@@ -100,6 +102,35 @@ export function moduleSizeSummary(records, coreMinBytes = 4 << 20) {
   };
 }
 
+// Patch 0148's replay pump sleeps in Atomics.waitAsync and the core wakes it
+// with memory.atomic.notify from wasm. A module that stores 1 at address 0 of
+// a shared memory, then notifies it:
+//   (import "e" "m" (memory 1 1 shared))
+//   (func (export "n") (i32.atomic.store (i32.const 0) (i32.const 1))
+//     (drop (memory.atomic.notify (i32.const 0) (i32.const 1))))
+export const WASM_NOTIFY_MODULE = [0, 0x61, 0x73, 0x6d, 1, 0, 0, 0, 1, 4, 1, 0x60, 0, 0, 2, 9, 1, 1, 0x65, 1, 0x6d, 2, 3, 1, 1,
+  3, 2, 1, 0, 7, 5, 1, 1, 0x6e, 0, 0, 10, 0x15, 1, 0x13, 0, 0x41, 0, 0x41, 1, 0xfe, 0x17, 2, 0, 0x41, 0, 0x41, 1, 0xfe, 0, 2, 0, 0x1a, 0x0b];
+
+// In the page (cross-origin isolated): a worker runs that module 30 ms
+// later; the page waits with Atomics.waitAsync (2 s timeout). "ok" means a
+// notify from wasm wakes it in this engine; otherwise the pump would fall
+// back to its 4 ms poll in silence.
+export async function wasmNotifyWakesWaitAsync(page) {
+  return page.evaluate(async (bytes) => {
+    if (typeof Atomics.waitAsync !== "function") return { waitAsync: false, outcome: null };
+    const memory = new WebAssembly.Memory({ initial: 1, maximum: 1, shared: true });
+    const mod = await WebAssembly.compile(new Uint8Array(bytes));
+    const src = "onmessage = async (e) => { const i = await WebAssembly.instantiate(e.data.mod, { e: { m: e.data.memory } }); setTimeout(() => i.exports.n(), 30); };";
+    const worker = new Worker(URL.createObjectURL(new Blob([src], { type: "text/javascript" })));
+    const t0 = performance.now();
+    const wait = Atomics.waitAsync(new Int32Array(memory.buffer), 0, 0, 2000);
+    worker.postMessage({ mod, memory });
+    const outcome = wait.async ? await wait.value : wait.value;
+    worker.terminate();
+    return { waitAsync: true, outcome, ms: Math.round(performance.now() - t0) };
+  }, WASM_NOTIFY_MODULE).catch((e) => ({ error: String(e?.message || e) }));
+}
+
 // The verdict from what was read; pure.
 export function webkitBootVerdict(r) {
   const installs = r.installs ?? 0;
@@ -137,7 +168,7 @@ async function main() {
       dol: { type: "string" }, port: { type: "string", default: process.env.HARNESS_PORT }, browser: { type: "string", default: "webkit" },
       secs: { type: "string", default: "40" }, query: { type: "string", default: DEFAULT_QUERY }, out: { type: "string" },
       "expect-installs": { type: "boolean", default: false }, "module-sizes": { type: "boolean", default: false },
-      "expect-relaxed": { type: "string" },
+      "expect-relaxed": { type: "string" }, "expect-wasm-notify": { type: "boolean", default: false },
     },
   });
   if (!values.dol || !values.port) throw new Error("usage: webkit-boot.mjs --dol x.dol --port N [--browser webkit|chromium]");
@@ -173,6 +204,7 @@ async function main() {
       r.aotStatus = await ask("aotStatus");
       r.aotProgress = await ask("validationReadAotProgress");
       r.frame = await readFrameInfo(page).catch(() => null);
+      r.wasmNotify = await wasmNotifyWakesWaitAsync(page);
       if (values["module-sizes"]) r.moduleSizes = moduleSizeSummary(sizeRecords(lines));
       Object.assign(r, regionCounts(r.aotProgress, r.aotStatus));
       // The engine's wasm feature probes (simd, tail calls, relaxed madd), and
@@ -187,11 +219,15 @@ async function main() {
   r.fatal = lines.filter((t) => FATAL_PATTERN.test(t)).slice(0, 20);
   r.statusLines = lines.filter((t) => !t.startsWith(WASM_SIZES_TAG) && /relaxed_madd|aot[: ]|regions? |wasm feature|tail call/i.test(t)).slice(0, 40);
   r.verdict = webkitBootVerdict(r);
-  console.log(`[webkit-boot] ${JSON.stringify({ browser: r.browser, booted: r.booted, bootError: r.bootError, relaxedMadd: r.relaxedMadd, wasmFeatures: r.wasmFeatures, regionsOff: r.regionsOff, state: r.state, installs: r.installs, compiled: r.compiled, refused: r.refused, compileErrors: r.compileErrors.length, regionStats: r.regionStats, moduleSizes: r.moduleSizes, speed: r.frame?.speed ?? null })}`);
+  console.log(`[webkit-boot] ${JSON.stringify({ browser: r.browser, booted: r.booted, bootError: r.bootError, relaxedMadd: r.relaxedMadd, wasmFeatures: r.wasmFeatures, regionsOff: r.regionsOff, state: r.state, installs: r.installs, compiled: r.compiled, refused: r.refused, compileErrors: r.compileErrors.length, regionStats: r.regionStats, moduleSizes: r.moduleSizes, wasmNotify: r.wasmNotify, speed: r.frame?.speed ?? null })}`);
   if (values.out) writeFileSync(values.out, JSON.stringify(r, null, 1));
   const relaxed = values["expect-relaxed"];
   if (relaxed && !(r.relaxedMadd?.mode === relaxed && r.relaxedMadd?.coreFused === (relaxed === "fused"))) {
     console.error(`[webkit-boot] expected relaxed SIMD ${relaxed} (core fused ${relaxed === "fused"}): ${JSON.stringify(r.relaxedMadd)}`);
+    process.exit(1);
+  }
+  if (values["expect-wasm-notify"] && r.wasmNotify?.outcome !== "ok") {
+    console.error(`[webkit-boot] expected a wasm notify to wake Atomics.waitAsync: ${JSON.stringify(r.wasmNotify)}`);
     process.exit(1);
   }
   if (values["expect-installs"] && !r.verdict.ok) {

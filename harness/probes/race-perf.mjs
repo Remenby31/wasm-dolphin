@@ -87,6 +87,11 @@
 //   (idleTimeShare), and its diagnostics (p4.diagnostics). The speed
 //   windows are identical with or without it; p4 is compared between sides
 //   only when both have it (p4Compare).
+// - --worker-read a,b: worker requests (cumulative counters, e.g. a patch's
+//   validationRead* export) called just before and just after the speed
+//   window; each window carries workerReads[name] = { start, end, delta }
+//   (delta: end - start per numeric field but the reply's id). A request the core lacks gives
+//   its error, never a failure.
 import { execFileSync } from "node:child_process";
 import { randomBytes } from "node:crypto";
 import { existsSync, mkdirSync, readdirSync, readFileSync, rmSync, statSync, writeFileSync } from "node:fs";
@@ -106,7 +111,7 @@ import { describe, median, percentile, round } from "../lib/stats.mjs";
 import { coreStats, displayStats, hitchList, mergeTimeline, presentationStats } from "../lib/timeline.mjs";
 import { consistentRead, decodeRegionStats, poolStats, regionShares, topMisses } from "../lib/jit-region-stats.mjs";
 import { consistentMemRead, decodeMemStats, memAccessShares, poolMemStats } from "../lib/mem-access-stats.mjs";
-import { consistentHeadroomRead, decodeHeadroomStats, headroomOf, invalidReasons, querySpeed, unlimitedAllowed } from "../lib/headroom.mjs";
+import { consistentHeadroomRead, decodeHeadroomStats, headroomOf, invalidReasons, pacingExpectation, querySpeed, unlimitedAllowed } from "../lib/headroom.mjs";
 import { runSteps, validateSteps } from "../lib/steps.mjs";
 import { summarizePcSamples } from "../../src/harness-pc-sampler.js";
 import { busiestThread, checkPerfAccess, counterEvents, counterSanity, cyclesPerGuestCycle, instructionsPerGuestCycle, perfCounters } from "../lib/perf-counters.mjs";
@@ -252,9 +257,15 @@ export async function measure(session, o) {
     // --headroom (0113): the counters reset and the core ticks read just
     // before the window, both read again just after it.
     const hrStart = o.headroom ? await headroomRead(page, 0) : null;
+    // speed=unlimited with a renderer: the core's own pacing config (0150),
+    // the proof that SyncOnSkipIdle is what the side claims (pacingExpectation).
+    const pacingConfig = pacingExpectation(new URL(session.url).search, { decoupledUnlimited: o.decoupledUnlimited })
+      ? await workerRequest(page, "validationReadPacingConfig", {}, 10000).catch((e) => ({ error: String(e.message || e) }))
+      : undefined;
     // A scene whose region stats must cover the window itself (matrix.mjs
     // regionStatsInWindow): reset now, read just after the window.
     const regionInWindow = o.regionInWindow && o.regionSample != null;
+    const readsStart = await workerReads(page, o.workerRead);
     if (regionInWindow) await workerRequest(page, "validationReadJitRegionStats", { sampleEvery: o.regionSample }, 10000);
     // The emulated time this host-time window covers (judge, 2026-10-22: a
     // faster side covers more of the scene): core ticks just before and just
@@ -277,6 +288,7 @@ export async function measure(session, o) {
       if (s === Math.floor(o.secs / 2)) threads.push(rendererThreads(session.profileDir));
     }
     const hrEnd = hrStart && !hrStart.error ? await headroomRead(page) : null;
+    const readsEnd = await workerReads(page, o.workerRead);
     const regionInWindowEnd = regionInWindow ? await workerRequest(page, "validationReadJitRegionStats", {}, 10000) : null;
     const counters = o.onWindow ? await o.onWindow("end", session) : undefined;
     const chunk = await readTimeline(page);
@@ -342,6 +354,8 @@ export async function measure(session, o) {
     const relaxedMadd = await workerRequest(page, "validationReadRelaxedMadd", {}, 10000).catch(() => null);
     return {
       windowMs: Math.round(t1 - t0),
+      ...(pacingConfig ? { pacingConfig } : {}),
+      ...(o.workerRead.length ? { workerReads: workerReadDeltas(readsStart, readsEnd) } : {}),
       relaxedMadd: relaxedMadd?.mode ?? null, fusedMadd: relaxedMadd?.coreFused ?? null,
       // Guest seconds this window covered (core ticks / ticks per second);
       // the reads bracket the window, so a few host ms more than windowMs.
@@ -386,6 +400,24 @@ export async function measure(session, o) {
 
 // Headroom counters (0113) and the core ticks, read together; reset >= 0
 // zeroes and turns the counters on.
+// --worker-read: each request's reply (or its error), in order.
+async function workerReads(page, names) {
+  const out = {};
+  for (const name of names) out[name] = await workerRequest(page, name, {}, 10000).catch((e) => ({ error: String(e.message || e) }));
+  return out;
+}
+
+// Start, end and end - start of each numeric field (cumulative counters).
+export function workerReadDeltas(start, end) {
+  return Object.fromEntries(Object.keys(start).map((name) => {
+    const a = start[name], b = end[name];
+    const delta = a && b && !a.error && !b.error
+      ? Object.fromEntries(Object.keys(b).filter((k) => k !== "id" && typeof b[k] === "number" && typeof a[k] === "number").map((k) => [k, b[k] - a[k]]))
+      : null;
+    return [name, { start: a, end: b, delta }];
+  }));
+}
+
 async function headroomRead(page, reset = -1) {
   const r = await workerRequest(page, "validationReadHeadroomStats", { reset }, 10000).catch((e) => ({ error: String(e.message || e) }));
   if (r?.error) return { error: /Unknown upstream worker message/.test(r.error) ? "engine without validationReadHeadroomStats" : r.error };
@@ -634,7 +666,7 @@ async function main() {
       "emulated-window": { type: "string" }, "emulated-warmup": { type: "string" }, "emulated-poll-ms": { type: "string", default: "100" },
       hold: { type: "string", default: "KeyX" }, warm: { type: "boolean", default: false },
       "max-load": { type: "string" }, "lock-wait": { type: "string", default: "1800" },
-      pcsample: { type: "string" }, "pc-raw": { type: "boolean", default: false }, symbols: { type: "string" }, "region-sample": { type: "string" }, "region-secs": { type: "string", default: "10" }, counters: { type: "boolean", default: false }, steps: { type: "string" }, "counter-events": { type: "string" }, "pin-cpu-thread": { type: "string" }, "run-timeout": { type: "string", default: "1800" }, "unique-frames": { type: "string" }, display: { type: "boolean", default: false }, "mem-stats": { type: "boolean", default: false }, "mem-warm": { type: "string", default: "5" }, headroom: { type: "boolean", default: false }, "frames-per-vi-ref": { type: "string" }, "baseline-query": { type: "string" }, "chrome-args": { type: "string" }, "baseline-chrome-args": { type: "string" },
+      pcsample: { type: "string" }, "pc-raw": { type: "boolean", default: false }, symbols: { type: "string" }, "region-sample": { type: "string" }, "worker-read": { type: "string" }, "region-secs": { type: "string", default: "10" }, counters: { type: "boolean", default: false }, steps: { type: "string" }, "counter-events": { type: "string" }, "pin-cpu-thread": { type: "string" }, "run-timeout": { type: "string", default: "1800" }, "unique-frames": { type: "string" }, display: { type: "boolean", default: false }, "mem-stats": { type: "boolean", default: false }, "mem-warm": { type: "string", default: "5" }, headroom: { type: "boolean", default: false }, "frames-per-vi-ref": { type: "string" }, "baseline-query": { type: "string" }, "chrome-args": { type: "string" }, "baseline-chrome-args": { type: "string" },
       "core-candidate": { type: "string", multiple: true, default: [] },
       port: { type: "string", default: process.env.HARNESS_PORT }, out: { type: "string" }
     },
@@ -657,9 +689,11 @@ async function main() {
   const baselineQuery = values["baseline-query"] ? `${values["baseline-query"]}&metrics=1` : null;
   // speed=unlimited decouples emulated time from the rendering while the
   // core leaves SyncOnSkipIdle off (research/deep-headroom-kpi.md §1): refused
-  // unless the query turns it on (synconidle=1).
+  // unless the query turns it on (synconidle=1) or renders nothing
+  // (video=null); with a renderer, each run is then invalid unless the core
+  // itself reports it on (pacingExpectation, validationReadPacingConfig).
   for (const q of [query, baselineQuery].filter(Boolean)) {
-    if (querySpeed(q) === "unlimited" && !unlimitedAllowed(q)) throw new Error("speed=unlimited without synconidle=1: emulated time runs ahead of the rendering (research/deep-headroom-kpi.md); measure the headroom at speed=1 with --headroom");
+    if (querySpeed(q) === "unlimited" && !unlimitedAllowed(q, { decoupledUnlimited: values["decoupled-unlimited"] === true })) throw new Error("speed=unlimited without synconidle=1 (or video=null): emulated time runs ahead of the rendering (research/deep-headroom-kpi.md); measure the headroom at speed=1 with --headroom");
   }
   if (baselineQuery && !values.baseline) throw new Error("--baseline-query needs --baseline");
   // A coreid on both sides would pin them to one core (trunk against head
@@ -692,6 +726,10 @@ async function main() {
     pcRaw: values["pc-raw"],
     // --mem-stats needs the region counters (its region estimates ride on
     // them): on without timers (0) unless --region-sample says otherwise.
+    workerRead: (values["worker-read"] ?? "").split(",").map((x) => x.trim()).filter(Boolean).map((x) => {
+      if (!/^validationRead[A-Za-z]+$/.test(x)) throw new Error(`--worker-read ${x}: expected a validationRead* worker request`);
+      return x;
+    }),
     regionSample: values["region-sample"] == null ? (values["mem-stats"] ? 0 : null) : num(values, "region-sample", { min: 0, int: true }),
     regionSecs: num(values, "region-secs", { min: 1 }),
     // --counters (Linux perf): host instructions per guest cycle of the
@@ -815,7 +853,7 @@ async function main() {
   for (const r of records) for (const n of Object.keys(sides)) {
     const c = r[n]?.cold;
     if (!c) continue;
-    const why = invalidReasons(c, { target: querySpeed(sides[n].query ?? o.query) === "unlimited" ? null : querySpeed(sides[n].query ?? o.query), framesPerViRef: o.framesPerViRef });
+    const why = invalidReasons(c, { target: querySpeed(sides[n].query ?? o.query) === "unlimited" ? null : querySpeed(sides[n].query ?? o.query), framesPerViRef: o.framesPerViRef, pacing: pacingExpectation(sides[n].query ?? o.query, { decoupledUnlimited: o.decoupledUnlimited }) });
     if (why.length) c.invalid = why;
   }
   const good = (r) => r && !r.error && !r.fatal?.length && !r.cold?.overloaded && !r.warm?.overloaded && !r.cold?.invalid?.length;
