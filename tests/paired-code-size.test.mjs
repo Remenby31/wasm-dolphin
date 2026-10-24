@@ -1,9 +1,9 @@
 // Copyright 2026 wasm-dolphin contributors
 // SPDX-License-Identifier: GPL-2.0-or-later
 
-// Patch 0147: the paired-single SIMD paths (0141, 0143) in fewer bytes, region
+// Patch 0146: the paired-single SIMD paths (0141, 0143) in fewer bytes, region
 // code being what keeps a hot loop inside its module's budget. Bytes per op in
-// a fragment: (8 x op + blr) - (blr), / 8. Measured on 0147's core: fused
+// a fragment: (8 x op + blr) - (blr), / 8. Measured on 0146's core: fused
 // ps_madd 459 (690 before), ps_add 166 (237), ps_mul 235 (348), ps_muls0 257
 // (370). The bounds leave a little room; a change that grows these paths past
 // them is a size regression to look at.
@@ -18,10 +18,10 @@ import { makeRng, randomState } from "./helpers/jit-oracle.mjs";
 const lock = JSON.parse(readFileSync(new URL("../provenance/dolphin-source.lock.json", import.meta.url), "utf8"));
 const builtUrl = new URL("../cores/dolphin/dolphin-core-upstream.build.json", import.meta.url);
 const built = existsSync(builtUrl) ? JSON.parse(readFileSync(builtUrl, "utf8")) : null;
-const coreHas0147 = built?.source?.patchSeriesSha256 === lock.patchSeriesSha256 &&
-  lock.patches.some((p) => p.path.includes("/0147-"));
-const core = coreHas0147 ? await loadAotCore() : null;
-const skip = !coreHas0147 ? "core built from a patch series without 0147 (CI builds this branch's core)" :
+const coreHas0146 = built?.source?.patchSeriesSha256 === lock.patchSeriesSha256 &&
+  lock.patches.some((p) => p.path.includes("/0146-"));
+const core = coreHas0146 ? await loadAotCore() : null;
+const skip = !coreHas0146 ? "core built from a patch series without 0146 (CI builds this branch's core)" :
   !core?.has("DolphinWeb_AotTestLoadState") ? "core without the region test exports" : false;
 
 const A = (op, t, a, b, c, xo) => ((op << 26) | (t << 21) | (a << 16) | (b << 11) | (c << 6) | (xo << 1)) >>> 0;

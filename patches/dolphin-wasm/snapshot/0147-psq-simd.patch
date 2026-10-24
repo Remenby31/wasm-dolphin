@@ -119,13 +119,15 @@ diff --git a/Source/Core/Core/PowerPC/CachedInterpreter/CachedInterpreter.cpp b/
    {
      EmitLoadPsqFloatLane(body, layout, inst.RD, 0, 0);
      if (inst.W)
-@@ -17656,7 +17758,8 @@ namespace
+@@ -17655,8 +17757,9 @@ namespace
+ // 0137's and 0139's). 31 (0142): guest calls as wasm calls, guest returns as
  // wasm returns (was 0139). 32 (0143): ps_add/sub/mul/muls0/1 in f64x2.
- // 35 (0147): the 0141/0143 paths in fewer bytes (splatted constants, one
- // helper call per op); 33 is retired (0144, closed), 34 is 0146's.
--constexpr u32 AOT_COMPILER_VERSION = 35;
-+// 36 (0148, provisional): psq_l/psq_st float pairs in v128.
-+constexpr u32 AOT_COMPILER_VERSION = 36;
+ // 34 (0146): the 0141/0143 paths in fewer bytes (splatted constants, one
+-// helper call per op); 33 is retired (0144, closed).
+-constexpr u32 AOT_COMPILER_VERSION = 34;
++// helper call per op); 33 is retired (0144, closed). 35 (0147): psq_l and
++// psq_st float pairs in v128.
++constexpr u32 AOT_COMPILER_VERSION = 35;
  constexpr u32 AOT_MAX_FRAGMENT_BYTES = 1u << 20;
  thread_local std::vector<u32> t_aot_out;
  u8* s_aot_ram = nullptr;
