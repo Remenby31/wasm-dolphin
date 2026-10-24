@@ -564,9 +564,13 @@ Compiler version 31 (first numbered 0139, compiler version 29).
 A data-cache flush loop (`dcbf; addi; bdnz` over a buffer) used to leave
 region code at every line: neither op was taken. On the race scene one such
 loop was the top exit to a pc no region holds (70 k per stats window). Now
-both run in the region through the interpret helper (Dolphin's own op).
-With the dcache off they invalidate the line's JIT code
-(`DolphinWeb_InvalidateRegions`). When the line touches a region page, the
-helper stops the region right after the op (code 2, pc on the next
-instruction). That keeps 0142's invariant: no caller goes on after its code
-may have changed. Compiler version 33.
+both run in the region through the system helper, which the emitter
+already called for them. With the dcache off they invalidate the line's JIT
+code (`DolphinWeb_InvalidateRegions`, which counts the lines that touch a
+region page). When that count moved, the system helper stops the region
+right after the op (code 2, pc on the next instruction). That keeps 0142's
+invariant: no caller goes on after its code may have changed, and a callee
+called next is not run from its dropped fragment. The tests rewrite a
+caller's continuation and a function called next, then flush them with dcbf;
+without the stop the caller resumes in its stale translation. Compiler
+version 33.

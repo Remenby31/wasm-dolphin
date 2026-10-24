@@ -1,40 +1,40 @@
 diff --git a/Source/Core/Core/PowerPC/CachedInterpreter/CachedInterpreter.cpp b/Source/Core/Core/PowerPC/CachedInterpreter/CachedInterpreter.cpp
 --- a/Source/Core/Core/PowerPC/CachedInterpreter/CachedInterpreter.cpp
 +++ b/Source/Core/Core/PowerPC/CachedInterpreter/CachedInterpreter.cpp
-@@ -3037,6 +3037,9 @@ extern "C" int DolphinWeb_CachedInterpreterSystem(int state_ptr, u32 inst_hex, u
-   return DolphinWeb_CachedInterpreterCheckProgramOrDsi(ppc_state, current_pc, downcount) ? 1 : 0;
+@@ -2811,6 +2811,9 @@ extern "C" double DolphinWeb_CachedInterpreterFma(double a, double c, double b,
+   }
  }
  
-+// Patch 0144: lines of code invalidated over a region's pages (a dcbf/dcbst
-+// interpreted in region code stops the region when it moved).
++// Patch 0144: lines of code invalidated over a region's pages. A dcbf/dcbst
++// (system helper) that moved it stops the code it runs in, region or block.
 +u32 s_region_code_lines_invalidated = 0;
- extern "C" int DolphinWeb_CachedInterpreterInterpret(int state_ptr, u32 current_pc, u32 inst_hex,
-                                                       int write_pc, u32 downcount)
+ extern "C" int DolphinWeb_CachedInterpreterSystem(int state_ptr, u32 inst_hex, u32 current_pc,
+                                                    u32 downcount, u32 unused)
  {
-@@ -3079,6 +3082,7 @@ extern "C" int DolphinWeb_CachedInterpreterInterpret(int state_ptr, u32 current_
-     return 1;
-   }
- 
-+  const u32 code_lines_before = s_region_code_lines_invalidated;
-   Interpreter::GetInterpreterOp(inst)(interpreter, inst);
-   if (s_mem_stats_on) [[unlikely]]
+@@ -2946,6 +2949,7 @@ extern "C" int DolphinWeb_CachedInterpreterSystem(int state_ptr, u32 inst_hex, u
+   case 86:   // dcbf
+   case 470:  // dcbi
    {
-@@ -3093,6 +3097,16 @@ extern "C" int DolphinWeb_CachedInterpreterInterpret(int state_ptr, u32 current_
-     ++s_wasm_helper_halt_count;
-     return 1;
-   }
-+  // 0144: a dcbf/dcbst that invalidated a line of region code stops the
-+  // region after it (the code it would go on with may be gone).
-+  if (s_region_code_lines_invalidated != code_lines_before) [[unlikely]]
-+  {
-+    ppc_state.pc = current_pc + 4;
-+    ppc_state.npc = current_pc + 4;
-+    ppc_state.downcount -= downcount;
-+    ++s_wasm_helper_halt_count;
-+    return 1;
-+  }
-   return 0;
- }
++    const u32 code_lines_before = s_region_code_lines_invalidated;
+     const u32 address = (inst.RA ? ppc_state.gpr[inst.RA] : 0) + ppc_state.gpr[inst.RB];
+     if (inst.SUBOP10 == 470 && ppc_state.msr.PR)
+     {
+@@ -2956,6 +2960,16 @@ extern "C" int DolphinWeb_CachedInterpreterSystem(int state_ptr, u32 inst_hex, u
+     if (!ppc_state.m_enable_dcache)
+     {
+       system.GetJitInterface().InvalidateICacheLine(address);
++      // 0144: the line held region code: stop after this op, the code that
++      // would go on (a caller's continuation too, 0142) may be stale.
++      if (s_region_code_lines_invalidated != code_lines_before) [[unlikely]]
++      {
++        ppc_state.pc = current_pc + 4;
++        ppc_state.npc = current_pc + 4;
++        ppc_state.downcount -= downcount;
++        ++s_wasm_helper_halt_count;
++        return 1;
++      }
+       break;
+     }
  
 @@ -11263,6 +11277,7 @@ void DolphinWeb_InvalidateRegions(u32 address, u32 size, bool forced)
      covered = (a >> 12) < s_region_pages.size() && s_region_pages[a >> 12] != 0;
@@ -49,7 +49,7 @@ diff --git a/Source/Core/Core/PowerPC/CachedInterpreter/CachedInterpreter.cpp b/
  bool RegionInterpretsInline(const PPCAnalyst::CodeOp& op)
  {
 +  const UGeckoInstruction inst = op.inst;
-+  // Patch 0144: dcbf and dcbst run in region code through the interpret
++  // Patch 0144: dcbf and dcbst run in region code through the system
 +  // helper (a flush loop over data stayed outside, one exit per line). With
 +  // the dcache off they invalidate the line's JIT code: when that line
 +  // touches a region, the helper stops the region (0142's invariant).
