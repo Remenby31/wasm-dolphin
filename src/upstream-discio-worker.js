@@ -136,6 +136,7 @@ import {
   enableWgpuNonDroppingBackpressure,
   failWgpuRingConsumer
 } from "./wgpu-ring-backpressure.js";
+import { parkWgpuReplay, unparkWgpuReplay } from "./wgpu-replay-park.js";
 import {
   WGPU_UPLOAD_PROBE_SCHEMA,
   createWgpuUploadProbeExecutor
@@ -689,6 +690,8 @@ let wgpuLoadEpochFence = false;
 let wgpuLoadFenceActive = false;
 let wgpuReplayPumpEnabled = false;
 let wgpuReplayPumpTimer = null;
+// Bumped by cancelWgpuReplayPump: a park that wakes after a cancel is stale.
+let wgpuReplayPumpGeneration = 0;
 let wgpuReplayBudgetMs = 0;
 let wgpuPowerPreference = "high-performance";
 let wgpuReplayFatal = null;
@@ -9013,14 +9016,47 @@ function startWgpuReplayPump() {
     } else {
       webGpuCausalStats.replayPumpEmptyPollCount += 1;
     }
-    // A backlog the drainEveryMs perturbation holds back waits for its next
-    // drain instead of rescheduling at 0 ms.
+    // An empty ring parks until the producer publishes (4 ms at most, the
+    // old poll). A backlog the drainEveryMs perturbation holds back waits for
+    // its next drain instead of rescheduling at 0 ms.
+    if (write === read && !wgpuMappedCapacityBlocked && parkWgpuReplayPump(pump, write)) return;
     scheduleWgpuReplayPump(
       pump,
       write === read || wgpuMappedCapacityBlocked ? 4 : wgpuDiagDrainWaitMs()
     );
   };
   scheduleWgpuReplayPump(pump, 0);
+}
+
+// Waits for the producer on the write index instead of a 4 ms timer; false
+// when this engine cannot (no Atomics.waitAsync): the caller polls.
+function parkWgpuReplayPump(pump, observedWrite) {
+  const ring = webGpuCmdRing;
+  const wait = ring?.headerI32 ? parkWgpuReplay(ring.headerI32, observedWrite, 4) : null;
+  if (!wait) return false;
+  webGpuCausalStats.replayPumpParkCount += 1;
+  if (!wait.async) {
+    // The producer moved between the drain and the park: drain now.
+    webGpuCausalStats.replayPumpParkNotEqualCount += 1;
+    scheduleWgpuReplayPump(pump, 0);
+    return true;
+  }
+  const generation = wgpuReplayPumpGeneration;
+  wgpuReplayPumpTimer = "parked";
+  wgpuReplayPumpDueAt = 0;
+  wait.value.then((outcome) => {
+    if (generation !== wgpuReplayPumpGeneration || ring !== webGpuCmdRing) return;
+    unparkWgpuReplay(ring.headerI32);
+    if (outcome === "ok") webGpuCausalStats.replayPumpParkNotifiedCount += 1;
+    else {
+      webGpuCausalStats.replayPumpParkTimedOutCount += 1;
+      if ((Atomics.load(ring.headerI32, 0) >>> 0) !== (observedWrite >>> 0)) {
+        webGpuCausalStats.replayPumpParkTimedOutWithDataCount += 1;
+      }
+    }
+    pump();
+  });
+  return true;
 }
 
 function scheduleWgpuReplayPump(callback, delayMs) {
@@ -9035,7 +9071,10 @@ function scheduleWgpuReplayPump(callback, delayMs) {
 }
 
 function cancelWgpuReplayPump() {
-  if (wgpuReplayPumpTimer !== null) clearTimeout(wgpuReplayPumpTimer);
+  if (wgpuReplayPumpTimer === "parked") {
+    if (webGpuCmdRing?.headerI32) unparkWgpuReplay(webGpuCmdRing.headerI32);
+  } else if (wgpuReplayPumpTimer !== null) clearTimeout(wgpuReplayPumpTimer);
+  wgpuReplayPumpGeneration += 1;
   wgpuReplayPumpTimer = null;
   wgpuReplayYieldPending = false;
   wgpuReplayPumpScheduledAt = 0;
@@ -11861,6 +11900,15 @@ const webGpuCausalStats = {
   backlogHighWater: 0,
   replayPumpDrainCount: 0,
   replayPumpEmptyPollCount: 0,
+  // Patch 0148: the pump parks on an empty ring (waitAsync on the write
+  // index) and the producer wakes it. timedOutWithData counts a park that
+  // timed out although the write index had moved: with a 0148 core, a
+  // publish racing the timeout (rare); with an older core, every publish.
+  replayPumpParkCount: 0,
+  replayPumpParkNotifiedCount: 0,
+  replayPumpParkTimedOutCount: 0,
+  replayPumpParkTimedOutWithDataCount: 0,
+  replayPumpParkNotEqualCount: 0,
   replayPumpScheduleCount: 0,
   replayPumpBacklogScheduleCount: 0,
   replayPumpIdleScheduleCount: 0,
