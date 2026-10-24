@@ -236,6 +236,49 @@ test("a compile request is precompiled, kept alive and marked ready in the core'
   assert.deepEqual(heap, snapshot, "no byte of the heap changed");
 });
 
+test("without a native module cache (JSC), past the boot, a compile request is marked ready with nothing compiled or kept here", async (t) => {
+  const originalSelf = globalThis.self;
+  globalThis.self = { location: { href: "http://127.0.0.1:8080/" }, addEventListener() {}, postMessage() {} };
+  t.after(() => {
+    if (originalSelf === undefined) delete globalThis.self;
+    else globalThis.self = originalSelf;
+  });
+  const {
+    installDolphinPthreadChannels, precompileDolphinJitModule, setDolphinJitReadyHeapForTest, dolphinJitReadyStatsForTest,
+    setDolphinAotCompilerForTest, setWasmEngineForTest, setAotCoreBootedForTest, dolphinJitCopiesSkippedForTest
+  } = await import(`${workerUrl.href}?no-native-cache-test=${Date.now()}`);
+  const { canonicalWasmBlockKey } = await import("../src/jit-cache-identity.js");
+  const cpu = fakePthreadWorker();
+  await installDolphinPthreadChannels({ PThread: { runningWorkers: [cpu], unusedWorkers: [] } }, { jitCacheEnabled: true });
+  const request = cpu.listeners.find(({ name }) => name === "handleDolphinJitCompileRequest").listener;
+  let workersMade = 0;
+  setDolphinAotCompilerForTest({ enabled: true, createWorker: () => { workersMade += 1; throw new Error("no compile expected"); } });
+  t.after(() => setDolphinAotCompilerForTest({}));
+  const heap = new Uint8Array(new SharedArrayBuffer(0x20000));
+  const READY = 0x1000;
+  setDolphinJitReadyHeapForTest(heap, READY);
+  t.after(() => setDolphinJitReadyHeapForTest(null));
+  setWasmEngineForTest("jsc");
+  setAotCoreBootedForTest(true);
+  t.after(() => { setWasmEngineForTest("unknown"); setAotCoreBootedForTest(false); });
+  const plusOne = Uint8Array.from(Buffer.from("0061736d0100000001060160017f017f03020100070501016600000a09010700200041016a0b", "hex"));
+  const key = await canonicalWasmBlockKey(plusOne);
+  const slot = parseInt(key.slice(-64, -60), 16);
+  const skipped = dolphinJitCopiesSkippedForTest(), marks = dolphinJitReadyStatsForTest().marks;
+  await request({ currentTarget: cpu, data: { type: "dolphin-jit-compile-request", key, bytes: plusOne, kind: "block", readyPtr: READY, readySlot: slot } });
+  assert.equal(Atomics.load(heap, READY + slot), 1, "the CPU thread is not kept waiting");
+  assert.equal(dolphinJitReadyStatsForTest().marks - marks, 1);
+  assert.equal(workersMade, 0, "nothing compiled");
+  assert.equal(dolphinJitCopiesSkippedForTest() - skipped, 1);
+  assert.equal((await precompileDolphinJitModule(key, plusOne)).reason, "no-native-cache", "and no Module kept");
+  // V8 (or before the boot, whatever the engine): compiled and kept, as before
+  setWasmEngineForTest("jsc");
+  setAotCoreBootedForTest(false);
+  setDolphinAotCompilerForTest({});
+  const before = await precompileDolphinJitModule(key, plusOne);
+  assert.ok(before.module instanceof WebAssembly.Module, "before the boot the Module is kept (it reaches the pthreads)");
+});
+
 test("the off-thread compiler is on by default: no parameter, worker load defaults and adapter defaults", async () => {
   const { aotCompilerRequested, jitOffThreadRequested } = await import("../src/aot-compiler-worker.js");
   assert.equal(aotCompilerRequested(""), true);
