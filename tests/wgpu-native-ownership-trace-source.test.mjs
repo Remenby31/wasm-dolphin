@@ -86,7 +86,9 @@ sourceContractTest("native ownership trace records transaction outcomes without 
     "BeginPass must correlate its framebuffer id with the legacy semantic decoder"
   );
   assert.match(source, /publication << 8/);
-  assert.match(source, /m_header->write\.store\(w \+ count, std::memory_order_release\)/);
+  // At least release (patch 0148 makes it seq_cst, for the parked-consumer
+  // wake: publish, then read the parked flag).
+  assert.match(source, /m_header->write\.store\(w \+ count, std::memory_order_(release|seq_cst)\)/);
 });
 
 sourceContractTest("the applied save callback publishes the ownership epoch before GPU wake", async () => {
