@@ -158,7 +158,7 @@ test("first launch: plan -> optimiser -> off-thread compile -> cache, with progr
 
   // second launch (reload): the loader brings every region back before boot
   const second = launch(p);
-  assert.deepEqual(await second.flow.status(), { state: "complete", fraction: 1 });
+  assert.deepEqual(await second.flow.status(), { state: "complete", fraction: 1, regionsRefused: 0 });
   const report = await second.flow.installBeforeBoot();
   assert.equal(report.loaded, total);
   assert.deepEqual(report.failed, []);
@@ -229,7 +229,7 @@ test("interrupted in the middle of the first launch, the next launch resumes whe
   assert.equal(ofType(second.flow, "progress").at(-1).fraction, 1);
   // third launch: complete, nothing left to do
   const third = launch(p);
-  assert.deepEqual(await third.flow.status(), { state: "complete", fraction: 1 });
+  assert.deepEqual(await third.flow.status(), { state: "complete", fraction: 1, regionsRefused: 0 });
   assert.equal((await third.flow.installBeforeBoot()).loaded, total);
 });
 
@@ -256,7 +256,7 @@ test("a region that fails goes to the blacklist and the optimisation goes on", a
   const report = await second.flow.installBeforeBoot();
   assert.equal(report.loaded, done.total - 1);
   assert.ok(!second.retained.has(rejectKey));
-  assert.deepEqual(await second.flow.status(), { state: "complete", fraction: 1 });
+  assert.deepEqual(await second.flow.status(), { state: "complete", fraction: 1, regionsRefused: 0 });
   await second.flow.start();
   assert.equal(second.translator.translated.length, 0);
 });
@@ -613,6 +613,22 @@ test("the translator's yield is one event-loop turn, chained without the timer c
   assert.ok(ms < 200, `200 chained yields in ${ms.toFixed(1)} ms (a clamped timer chain takes ≥ 800 ms in a browser)`);
 });
 
+
+test("?aotsample: the sampler's period in ms, 0 turns it off and no worker is created", async () => {
+  const { aotSamplePeriodRequested, startHotSampler, AOT_SAMPLE_DEFAULT_MS } = await import("../src/aot-hot-sampler.js");
+  assert.equal(aotSamplePeriodRequested(""), AOT_SAMPLE_DEFAULT_MS);
+  assert.equal(aotSamplePeriodRequested("?aot=1&aotsample=0"), 0);
+  assert.equal(aotSamplePeriodRequested("?aotsample=25"), 25);
+  assert.equal(aotSamplePeriodRequested("?aotsample=99999"), 1000, "capped");
+  for (const bad of ["?aotsample=", "?aotsample=-1", "?aotsample=off", "?aotsample=2.5"]) assert.equal(aotSamplePeriodRequested(bad), AOT_SAMPLE_DEFAULT_MS, bad);
+  let created = 0;
+  const createWorker = () => { created++; return { postMessage() {}, terminate() {} }; };
+  assert.equal(startHotSampler({ buffer: new SharedArrayBuffer(16), pcAddress: 8, periodMs: 0, createWorker }), null);
+  assert.equal(created, 0, "?aotsample=0: no worker");
+  const on = startHotSampler({ buffer: new SharedArrayBuffer(16), pcAddress: 8, periodMs: 25, createWorker });
+  assert.equal(created, 1);
+  on.stop();
+});
 
 test("the profile sampler needs a shared heap and a PC address; it drains what it counted since the last drain, and blocks while paused", async () => {
   const { startHotSampler } = await import("../src/aot-hot-sampler.js");

@@ -83,19 +83,56 @@ export async function busiestThread(profileDir, ms = 500, { withShare = false } 
   return withShare ? (best ? { tid: best.tid, busyPct: Math.round((best.delta * 1000) / ms) } : null) : best?.tid ?? null;
 }
 
-// o.onWindow for race-perf's measure(): perf stat on the busiest thread for
-// the window of each session.
+// Every thread of the renderer(s) of `profileDir`.
+export function rendererThreads(profileDir) {
+  const ps = execFileSync("ps", ["-A", "-o", "pid=,args="], { encoding: "utf8", maxBuffer: 32 << 20 });
+  const pids = ps.split("\n").filter((l) => l.includes(profileDir) && l.includes("--type=renderer")).map((l) => l.trim().split(/\s+/)[0]);
+  const tids = [];
+  for (const pid of pids) { try { tids.push(...readdirSync(`/proc/${pid}/task`)); } catch {} }
+  return tids;
+}
+
+// perf stat -x, --per-thread output: the counts of each thread ("comm-tid").
+export function parsePerfCsvPerThread(text) {
+  const byThread = new Map();
+  for (const line of text.split("\n")) {
+    const m = /^(.+)-(\d+),/.exec(line);
+    if (!m) continue;
+    const key = m[2];
+    if (!byThread.has(key)) byThread.set(key, { tid: Number(m[2]), comm: m[1], lines: [] });
+    byThread.get(key).lines.push(line.slice(m[1].length + m[2].length + 2));
+  }
+  return [...byThread.values()].map((t) => ({ tid: t.tid, comm: t.comm, ...parsePerfCsv(t.lines.join("\n")) }));
+}
+
+// The thread that ran most over the window (most cycles): the emulated CPU
+// thread. Chosen after the window, from every renderer thread's counts, not
+// from 500 ms before it: on a scene at the speed cap the CPU thread naps, and
+// a compiler worker could look busier at the start (p0143 heavy, 2026-10-24).
+export function busiestOf(threads) {
+  return threads.reduce((best, t) => (!best || (t.cycles ?? 0) > (best.cycles ?? 0) ? t : best), null);
+}
+
+// Why a window's counters cannot be the emulated CPU thread's, or null: no
+// guest cycle costs under one host cycle.
+export function counterSanity(w) {
+  const cpg = cyclesPerGuestCycle(w);
+  return cpg != null && cpg < 1 ? `cycles per guest cycle ${round(cpg, 3)} < 1: not the emulated CPU thread` : null;
+}
+
+// o.onWindow for race-perf's measure(): perf stat on every renderer thread
+// over the window of each session, the busiest kept afterwards.
 // `extra`: more PMU events (counterEvents), counted on the same thread and window.
 export function perfCounters(outDir = mkdtempSync(path.join(os.tmpdir(), "perf-counters-")), { extra = [] } = {}) {
   const live = new Map();
-  return async (phase, session) => {
+  const onWindow = async (phase, session) => {
     if (phase === "start") {
-      const tid = await busiestThread(session.profileDir);
-      if (!tid) return live.set(session, { error: "no renderer thread" });
-      const file = path.join(outDir, `perf-${tid}-${randomBytes(3).toString("hex")}.csv`);
+      const tids = rendererThreads(session.profileDir);
+      if (!tids.length) return live.set(session, { error: "no renderer thread" });
+      const file = path.join(outDir, `perf-${tids[0]}-${randomBytes(3).toString("hex")}.csv`);
       const events = armPmus().flatMap((p) => ["instructions", "cycles", ...extra].map((e) => `${p}/${e}/u`)).join(",");
-      const proc = spawn("perf", ["stat", "-x,", "-e", events, "-t", tid, "-o", file], { stdio: "ignore" });
-      live.set(session, { proc, file, tid, comm: (() => { try { return readFileSync(`/proc/${tid}/comm`, "utf8").trim(); } catch { return null; } })() });
+      const proc = spawn("perf", ["stat", "-x,", "--per-thread", "-e", events, "-t", tids.join(","), "-o", file], { stdio: "ignore" });
+      live.set(session, { proc, file, threads: tids.length });
       return;
     }
     const c = live.get(session);
@@ -104,11 +141,22 @@ export function perfCounters(outDir = mkdtempSync(path.join(os.tmpdir(), "perf-c
     const exited = new Promise((r) => c.proc.once("exit", r));
     c.proc.kill("SIGINT");
     await exited;
-    let counts;
-    try { counts = parsePerfCsv(readFileSync(c.file, "utf8")); } catch (e) { return { tid: c.tid, error: String(e.message) }; }
+    let best;
+    try { best = busiestOf(parsePerfCsvPerThread(readFileSync(c.file, "utf8"))); } catch (e) { return { error: String(e.message) }; }
     rmSync(c.file, { force: true });
-    return { tid: Number(c.tid), thread: c.comm, ...counts, ipc: counts.cycles ? round(counts.instructions / counts.cycles, 3) : null };
+    if (!best) return { error: "no thread counted" };
+    const { tid, comm, ...counts } = best;
+    return { tid, thread: comm, threadsCounted: c.threads, ...counts, ipc: counts.cycles ? round(counts.instructions / counts.cycles, 3) : null };
   };
+  // A window that will never end (race-perf --run-timeout): perf stops.
+  onWindow.abort = async (session) => {
+    const c = live.get(session);
+    live.delete(session);
+    if (!c || c.error) return;
+    c.proc.kill("SIGINT");
+    rmSync(c.file, { force: true });
+  };
+  return onWindow;
 }
 
 // Host instructions per guest cycle of one window (race-perf's record): over

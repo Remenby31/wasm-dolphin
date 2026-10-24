@@ -1,4 +1,6 @@
 import { aotCompilerRequested, jitOffThreadRequested } from "./aot-compiler-worker.js";
+import { aotSamplePeriodRequested } from "./aot-hot-sampler.js";
+import { wasmEngine } from "./wasm-engine.js";
 import { parseCustomRtc } from "./custom-rtc.js";
 import { DolphinCoreAdapter, dolphinBundleAvailable } from "./dolphin-adapter.js";
 import { buttonMaskFromPressed, isPadPort } from "./input.js";
@@ -94,7 +96,6 @@ export class EmulatorHost {
     this.ppcWasmJitWarmupFrames = requestedPpcWasmJitWarmupFrames(this.videoBackend);
     this.ppcProfile = requestedPpcProfile();
     this.gpuSpinMicros = requestedGpuSpinMicros();
-    this.codeSpaceMiB = requestedCodeSpaceMiB();
     this.cpuOverclock = requestedCpuOverclock();
     this.emulationSpeed = requestedEmulationSpeed();
     this.presentationScale = requestedPresentationScale();
@@ -122,6 +123,9 @@ export class EmulatorHost {
     // Harness: accept a CPU fallback WebGPU adapter (SwiftShader), refused for
     // the app as no usable GPU (the Windows CI lane has nothing else).
     this.wgpuFallback = new URLSearchParams(window.location.search).get("wgpufallback") === "1";
+    // Harness: keep a software WebGL presenter (SwiftShader), which the app
+    // refuses for the 2D canvas (cheaper on a CPU).
+    this.webglSoftware = new URLSearchParams(window.location.search).get("webglsw") === "1";
     this.savesMode = new URLSearchParams(window.location.search).get("saves") === "off" ? "off" : "";
     this.efbDiag = requestedEfbDiag();
     this.jitVerbose = new URLSearchParams(window.location.search).get("jitverbose") === "1";
@@ -142,6 +146,16 @@ export class EmulatorHost {
     this.aotCompiler = aotCompilerRequested(window.location.search);
     // ?aot=1: first-launch optimisation of the disc (P7), off by default.
     this.aotFirstLaunch = new URLSearchParams(window.location.search).get("aot") === "1";
+    // With aot=1, the local profile's guest-PC sampler: ?aotsample=N ms, 0 off.
+    this.aotSampleMs = aotSamplePeriodRequested(window.location.search);
+    // The wasm engine (src/wasm-engine.js), resolved here once: a worker's
+    // location is its own script's, so ?wasmengine= reaches it only this way.
+    this.wasmEngine = wasmEngine({ search: window.location.search });
+    this.codeSpaceMiB = requestedCodeSpaceMiB(window.location.search, this.wasmEngine);
+    // ?regioncap=N|0: the region function cap forced (tests, benches); by
+    // default the worker takes it from the engine (JSC only).
+    const regionCap = new URLSearchParams(window.location.search).get("regioncap");
+    this.regionCap = regionCap !== null && /^\d+$/.test(regionCap) ? Number(regionCap) : null;
     // With aot=1, regions tail-call the next region (patch 0102); ?regionchain=0 turns it off.
     this.regionChain = new URLSearchParams(window.location.search).get("regionchain") !== "0";
     // Where relaxed_madd is fused the JIT's FMA uses it (patch 0129); ?fusedmadd=0
@@ -434,6 +448,7 @@ export class EmulatorHost {
             efbCopyRam: this.efbCopyRam,
             wgpuMask: this.wgpuMask,
             wgpuFallback: this.wgpuFallback,
+            webglSoftware: this.webglSoftware,
             savesMode: this.savesMode,
             efbDiag: this.efbDiag,
             jitVerbose: this.jitVerbose,
@@ -444,6 +459,9 @@ export class EmulatorHost {
             jitOffThread: this.jitOffThread,
             aotCompiler: this.aotCompiler,
             aotFirstLaunch: this.aotFirstLaunch,
+            aotSampleMs: this.aotSampleMs,
+            wasmEngine: this.wasmEngine,
+            regionCap: this.regionCap,
             regionChain: this.regionChain,
             fusedMadd: this.fusedMadd,
             collectMetrics: this.collectMetrics,
@@ -1422,11 +1440,17 @@ export function parseGpuSpinMicros(raw) {
   console.warn(`?gpuspin=${JSON.stringify(raw)} ignored: expected -1 or an integer from 0 to ${MAX_GPU_SPIN_MICROS} (microseconds); using ${DEFAULT_GPU_SPIN_MICROS}`);
   return DEFAULT_GPU_SPIN_MICROS;
 }
-// ?codespace=<MiB> (patch 0138): the CachedInterpreter code space, 4 to 128
-// MiB; absent or invalid, the core's default (32). For measurements.
-function requestedCodeSpaceMiB() {
-  const raw = new URLSearchParams(window.location.search).get("codespace");
-  return raw != null && /^\d{1,3}$/.test(raw) && Number(raw) >= 4 && Number(raw) <= 128 ? Number(raw) : null;
+// The CachedInterpreter code space (patch 0138), in MiB. Its whole size is
+// dirtied at boot (Emscripten's mmap zeroes it). Under JSC (iOS) that memory
+// counts for jetsam and 32 MiB hold the working set (peak 4 to 9 MiB measured):
+// 32. Elsewhere (V8) a smaller space moved the later heap allocations and
+// cost up to 1 % (measured): 128, as before. ?codespace=<4..128> overrides.
+export const CODE_SPACE_MIB_JSC = 32;
+export const CODE_SPACE_MIB_DEFAULT = 128;
+export function requestedCodeSpaceMiB(search, engine) {
+  const raw = new URLSearchParams(search).get("codespace");
+  if (raw != null && /^\d{1,3}$/.test(raw) && Number(raw) >= 4 && Number(raw) <= 128) return Number(raw);
+  return engine === "jsc" ? CODE_SPACE_MIB_JSC : CODE_SPACE_MIB_DEFAULT;
 }
 function requestedGpuSpinMicros() {
   return parseGpuSpinMicros(new URLSearchParams(window.location.search).get("gpuspin"));

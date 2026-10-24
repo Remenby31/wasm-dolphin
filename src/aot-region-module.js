@@ -43,7 +43,7 @@
 export const REGION_HEAP_NAMES = Object.freeze(["ram_base", "l1_base"]);
 
 const TYPE_STATE = 0; // (i32) -> i32: dispatcher, stub, fragments
-const OP = { localGet: 0x20, localSet: 0x21, localTee: 0x22, call: 0x10, i32Load: 0x28, i32Const: 0x41, i32Eq: 0x46, i32LtU: 0x49, if: 0x04, end: 0x0b, return: 0x0f, returnCall: 0x12, returnCallIndirect: 0x13 };
+const OP = { localGet: 0x20, localSet: 0x21, localTee: 0x22, call: 0x10, i32Load: 0x28, i32Const: 0x41, i32Eq: 0x46, i32LtU: 0x49, if: 0x04, brIf: 0x0d, end: 0x0b, return: 0x0f, returnCall: 0x12, returnCallIndirect: 0x13 };
 const VAL = { i32: 0x7f, i64: 0x7e, f32: 0x7d, f64: 0x7c };
 
 function uleb(out, v) {
@@ -349,13 +349,16 @@ export function assembleRegion(fragments, { helpers, pcOffset, memoryPages, memo
       }
       if (TEMPLATE.some((b, i) => code[r.offset + i] !== b)) throw new Error(`region: reloc at ${r.offset} is not a padded zero`);
       const opcode = code[r.offset - 1];
-      if ((r.kind === "import" && opcode !== 0x10) || ((r.kind === "jump" || r.kind === "dispatch") && opcode !== OP.returnCall)) {
+      if (((r.kind === "import" || r.kind === "call") && opcode !== OP.call) || ((r.kind === "jump" || r.kind === "dispatch") && opcode !== OP.returnCall)) {
         throw new Error(`region: ${r.kind} reloc at ${r.offset} after opcode 0x${opcode.toString(16)}`);
       }
       let index;
       if (r.kind === "import") index = helperIndex.get(r.name);
       else if (r.kind === "jump") index = entryOwner.get(r.targetPc >>> 0) ?? STUB;
       else if (r.kind === "dispatch") index = INNER;
+      // 0142: a guest call as a wasm call, to the fragment holding the
+      // callee here, else the exit stub (which chains on to its region).
+      else if (r.kind === "call") index = entryOwner.get(r.targetPc >>> 0) ?? STUB;
       else throw new Error(`region: unknown reloc kind ${r.kind}`);
       code.set(paddedUleb(index), r.offset);
     }
@@ -445,14 +448,32 @@ export function assembleRegion(fragments, { helpers, pcOffset, memoryPages, memo
   // so a drift of the core's offsets must show); an engine that doesn't know
   // the section ignores it.
   let hintsDropped = 0;
-  const onIf = (f, r) => Number.isInteger(r.offset) && r.offset >= 0 && r.offset < f.code.length && f.code[r.offset] === OP.if;
+  // An `if` or a `br_if` (0135: the downcount check branches to the shared exit).
+  const onIf = (f, r) => Number.isInteger(r.offset) && r.offset >= 0 && r.offset < f.code.length && (f.code[r.offset] === OP.if || f.code[r.offset] === OP.brIf);
   // Offsets must be strictly increasing within a function (V8 drops the
-  // whole section otherwise, silently): a second hint on the same `if` is
-  // dropped too (the first one kept) and counted.
+  // whole section otherwise, silently). Hints on the same offset that agree
+  // are kept once; hints that disagree are all dropped (no guess), counted
+  // in hintsDropped and hintsConflicting.
+  let hintsConflicting = 0;
+  const once = (hs) => {
+    const out = [];
+    for (let j = 0; j < hs.length;) {
+      let k = j;
+      while (k < hs.length && hs[k].offset === hs[j].offset) k++;
+      if (hs.slice(j, k).every((h) => h.likely === hs[j].likely)) {
+        out.push(hs[j]);
+        hintsDropped += k - j - 1;
+      } else {
+        hintsConflicting += k - j;
+        hintsDropped += k - j;
+      }
+      j = k;
+    }
+    return out;
+  };
   const hinted = fragments.map((f, i) => [FIRST + i, (f.relocs ?? []).filter((r) => r.kind === "hint")
     .filter((r) => onIf(f, r) || (hintsDropped++, false))
-    .sort((a, b) => a.offset - b.offset)
-    .filter((r, j, hs) => j === 0 || r.offset !== hs[j - 1].offset || (hintsDropped++, false))]).filter(([, hs]) => hs.length);
+    .sort((a, b) => a.offset - b.offset)]).map(([fn, hs]) => [fn, once(hs)]).filter(([, hs]) => hs.length);
   if (hinted.length) {
     const hints = [];
     name(hints, "metadata.code.branch_hint");
@@ -523,7 +544,8 @@ export function assembleRegion(fragments, { helpers, pcOffset, memoryPages, memo
     layout,
     entries: sortedEntries.map(([pc, fn]) => [pc, fn - FIRST]),
     helpers: helperNames,
-    hintsDropped
+    hintsDropped,
+    hintsConflicting
   };
 }
 
@@ -622,13 +644,17 @@ export function groupRegions(module, order, { maxFunctions = 100 } = {}) {
 // from 2 on (2: continuation fragments from a capped fragment's frontier,
 // aot-orchestrator translateWithContinuations), so that a cache built with
 // another formation is translated again rather than reused.
-export const REGION_FORMATION = 2;
-export async function regionModuleKey(functions, { compilerVersion, codegenMask, chain = false, formation = REGION_FORMATION }) {
+export const REGION_FORMATION = 4; // 3: frontier by nearest held entry, module budget by water-filling; 4: a continuation stops at blocks already held
+// functionCap: the wasm function body cap the fragments were formed under
+// (JSC, REGION_JSC_FUNCTION_CAP); in the key only when there is one, so the
+// keys without it (V8, SpiderMonkey) are those of before.
+export async function regionModuleKey(functions, { compilerVersion, codegenMask, chain = false, formation = REGION_FORMATION, functionCap = 0 }) {
   for (const [what, v] of [["compilerVersion", compilerVersion], ["codegenMask", codegenMask]]) {
     if (!Number.isInteger(v) || v < 0 || v > 0xffffffff) throw new Error(`region: ${what} must be a u32`);
   }
   const hex8 = (v) => (v >>> 0).toString(16).padStart(8, "0");
-  const text = (formation > 1 ? `formation:${formation};` : "") + functions.map((f) => {
+  if (!Number.isInteger(functionCap) || functionCap < 0) throw new Error("region: functionCap must be a non-negative integer");
+  const text = (formation > 1 ? `formation:${formation};` : "") + (functionCap > 0 ? `cap:${functionCap};` : "") + functions.map((f) => {
     if (!/^[0-9a-f]{64}$/.test(f.sha256 ?? "")) throw new Error(`region: function ${f.entry?.toString(16)} has no sha256`);
     const extra = [...(f.extraEntries ?? [])].map((pc) => (pc >>> 0)).sort((a, b) => a - b).map((pc) => pc.toString(16)).join(",");
     return `${(f.entry >>> 0).toString(16)}:${f.sha256}:${extra};`;

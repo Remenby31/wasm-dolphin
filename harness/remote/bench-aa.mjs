@@ -4,7 +4,7 @@
 //
 // The CI bench's reading of one job (.github/workflows/bench.yml), A/A or A/B:
 //
-//   node harness/remote/bench-aa.mjs <race-perf out dir> <machine.json> > bench.md
+//   node harness/remote/bench-aa.mjs <race-perf out dir> <machine.json> [cold|warm] > bench.md
 //
 // race-perf alternates which side goes first (odd runs baseline first: AB,
 // even runs BA). Kept pairs:
@@ -13,6 +13,8 @@
 //     keeps both orders equal;
 //   - both sides on the same CPU model, and the pinned thread of each a
 //     DedicatedWorker at least 80 % busy (else another thread was pinned);
+//   - with aot=1 (region stats read: race-perf --region-sample), both sides
+//     with regions installed (a side without any does not measure regions);
 //   - then as many AB as BA pairs (the latest extra ones of the larger
 //     order are set aside), so a drift does not favour one side.
 // Per kept pair: lr = 100·ln(candidate / baseline) (symmetric; ≈ % for small
@@ -50,15 +52,21 @@ export function logRatioChange(lrs, { resamples = 2000, seed = 0x9e3779b9 } = {}
   return { pairs: n, medianPct: round(median(lrs), 2), ci95Pct: [round(lo, 2), round(hi, 2)], verdict };
 }
 
-export function benchAA(runs, machine = {}) {
+// phase: "cold" (the launch's first window) or "warm" (race-perf --warm: the
+// second launch in the same profile, where aot=1 has its regions installed
+// before boot: region codegen in steady state).
+export function benchAA(runs, machine = {}, { phase = "cold" } = {}) {
   const all = runs
-    .map((r) => ({ run: r.run, a: r.baseline?.cold?.speed, b: r.candidate?.cold?.speed, pins: [r.baseline?.cold?.pinned, r.candidate?.cold?.pinned], models: [r.baseline?.cold?.cpuModel, r.candidate?.cold?.cpuModel] }))
+    .map((r) => ({ run: r.run, a: r.baseline?.[phase]?.speed, b: r.candidate?.[phase]?.speed, pins: [r.baseline?.[phase]?.pinned, r.candidate?.[phase]?.pinned], models: [r.baseline?.[phase]?.cpuModel, r.candidate?.[phase]?.cpuModel],
+      // Regions installed and their share of guest cycles (outside idle), when read.
+      regions: [r.baseline?.[phase], r.candidate?.[phase]].map((c) => (c?.p4Raw ? { installed: c.p4Raw.diagnostics?.regionsInstalled ?? null, cycleShare: c.p4?.regionCycleShare ?? null } : null)) }))
     .filter((p) => Number.isFinite(p.a) && Number.isFinite(p.b) && p.a > 0 && p.b > 0);
   const first = Math.min(...all.map((p) => p.run));
   const sameModel = (p) => !p.models[0] || !p.models[1] || p.models[0] === p.models[1];
   const why = (p) => p.run <= first + 1 ? "warm-up block (runs 1-2)"
     : !sameModel(p) ? `CPU model changed: ${p.models.join(" / ")}`
     : !p.pins.every(goodPin) ? `pinned ${p.pins.map((x) => `${x?.thread ?? "?"} ${x?.busyPct ?? "?"} %`).join(" / ")}`
+    : p.regions.some((x) => x && x.installed === 0) ? `no region installed (${p.regions.map((x) => x?.installed ?? "?").join(" / ")})`
     : null;
   const setAside = all.filter((p) => why(p)).map((p) => ({ run: p.run, why: why(p) }));
   let pairs = all.filter((p) => !why(p));
@@ -78,11 +86,17 @@ export function benchAA(runs, machine = {}) {
   const third = Math.max(1, Math.floor(pairs.length / 3));
   return {
     cpuModel: machine.cpuModel ?? null, runner: machine.runner ?? null, arch: machine.arch ?? null, pmu: machine.pmu ?? null,
+    phase,
     pairs: pairs.length,
     meanSpeed: { baseline: round(mean(pairs.map((p) => p.a)), 2), candidate: round(mean(pairs.map((p) => p.b)), 2) },
     armSigmaPct,
     runSigmaPct: finite.length ? Math.max(...finite) : null,
     change: logRatioChange(lrs),
+    // With region stats: per arm, the median regions installed and region cycle share.
+    regions: pairs.some((p) => p.regions.some(Boolean)) ? Object.fromEntries(["baseline", "candidate"].map((arm, i) => [arm, {
+      installed: median(pairs.map((p) => p.regions[i]?.installed).filter(Number.isFinite)),
+      cycleShare: round(median(pairs.map((p) => p.regions[i]?.cycleShare).filter(Number.isFinite)), 4)
+    }])) : null,
     lrSigmaPct: round(lrSigma, 2),
     pairsFor2Pct: lrSigma == null ? null : Math.max(1, Math.ceil((4 * lrSigma * lrSigma) / 4)),
     drift: { firstThird: round(mean(pairs.slice(0, third).flatMap((p) => [p.a, p.b])), 2), lastThird: round(mean(pairs.slice(-third).flatMap((p) => [p.a, p.b])), 2) },
@@ -96,12 +110,13 @@ export function benchAA(runs, machine = {}) {
 export function benchMarkdown(b) {
   const c = b.change;
   return [
-    `### ${b.runner ?? "?"} (${b.arch ?? "?"}): ${b.cpuModel ?? "unknown CPU"}`,
+    `### ${b.runner ?? "?"} (${b.arch ?? "?"}): ${b.cpuModel ?? "unknown CPU"}, ${b.phase} windows`,
     "",
     "| pairs | mean speed A / B | σ per run A / B | change: median ln(B/A), 95 % CI | verdict | σ of ln(B/A) | pairs for a 2 % change | drift | PMU |",
     "|---|---|---|---|---|---|---|---|---|",
     `| ${b.pairs} | ${b.meanSpeed.baseline} / ${b.meanSpeed.candidate} % | ${b.armSigmaPct.baseline} / ${b.armSigmaPct.candidate} % | ${c.medianPct} % [${c.ci95Pct?.join(", ") ?? "?"}] | ${c.verdict} | ${b.lrSigmaPct} % | ${b.pairsFor2Pct ?? "?"} | ${b.drift.firstThird} → ${b.drift.lastThird} % | ${b.pmu ?? "?"} |`,
     "",
+    ...(b.regions ? [`Regions (median per arm): A ${b.regions.baseline.installed} installed, ${b.regions.baseline.cycleShare} of guest cycles; B ${b.regions.candidate.installed} installed, ${b.regions.candidate.cycleShare}`] : []),
     `Per kept pair (100·ln(B/A)): ${b.perPair.map((p) => `${p.lrPct} (${p.order})`).join(", ")}`,
     `Set aside: ${b.setAside.map((x) => `run ${x.run} (${x.why})`).join(", ") || "none"}`,
     ""
@@ -109,11 +124,11 @@ export function benchMarkdown(b) {
 }
 
 if (import.meta.url === pathToFileURL(process.argv[1] ?? "").href) {
-  const [dir, machineFile] = process.argv.slice(2);
-  if (!dir) throw new Error("usage: bench-aa.mjs <race-perf out dir> [machine.json]");
+  const [dir, machineFile, phase = "cold"] = process.argv.slice(2);
+  if (!dir || !["cold", "warm"].includes(phase)) throw new Error("usage: bench-aa.mjs <race-perf out dir> [machine.json] [cold|warm]");
   const runs = readdirSync(dir).filter((f) => /^run\d+\.json$/.test(f)).map((f) => JSON.parse(readFileSync(path.join(dir, f), "utf8"))).sort((x, y) => x.run - y.run);
   const machine = machineFile ? JSON.parse(readFileSync(machineFile, "utf8")) : {};
-  const b = benchAA(runs, machine);
+  const b = benchAA(runs, machine, { phase });
   writeFileSync(path.join(dir, "bench.json"), JSON.stringify({ ...b, machine }, null, 1) + "\n");
   process.stdout.write(benchMarkdown(b));
 }

@@ -1,8 +1,8 @@
 diff --git a/Source/Core/Core/PowerPC/CachedInterpreter/CachedInterpreter.cpp b/Source/Core/Core/PowerPC/CachedInterpreter/CachedInterpreter.cpp
-index 5a686ff863..7a37c13769 100644
+index 84cb55db09..a3cf453f78 100644
 --- a/Source/Core/Core/PowerPC/CachedInterpreter/CachedInterpreter.cpp
 +++ b/Source/Core/Core/PowerPC/CachedInterpreter/CachedInterpreter.cpp
-@@ -9762,6 +9762,28 @@ extern std::atomic<bool> s_region_core_active;
+@@ -10119,6 +10119,29 @@ extern std::atomic<bool> s_region_core_active;
  }  // namespace
  #endif
  
@@ -10,12 +10,13 @@ index 5a686ff863..7a37c13769 100644
 +namespace
 +{
 +// Patch 0138: the code space (callbacks and operands only, the WASM bodies
-+// live in their own modules) is 32 MiB instead of Jit64's 128 MiB. Under
-+// Emscripten the allocation is a memalign + memset that dirties all of it at
-+// boot. ?codespace=<MiB> (DolphinWeb_SetCodeSpaceMiB, before the boot) sets
-+// it for a measurement. Counters in GetPpcWasmHelperStats: cache clears in
-+// all, those because the space was full, and the highest offset written.
-+std::atomic<u32> s_code_space_mib{32};
++// live in their own modules) is set by the page before the boot
++// (DolphinWeb_SetCodeSpaceMiB): 32 MiB under JSC, where its memory, all
++// dirtied at boot by Emscripten's mmap, counts on iOS; 128 MiB (Jit64's)
++// otherwise, the default here. Counters in GetPpcWasmHelperStats: cache
++// clears in all, those because the space was full, and the highest offset
++// written.
++std::atomic<u32> s_code_space_mib{128};
 +std::atomic<u32> s_code_clears{0};
 +std::atomic<u32> s_code_full_clears{0};
 +std::atomic<u32> s_code_high_kib{0};
@@ -31,7 +32,7 @@ index 5a686ff863..7a37c13769 100644
  void CachedInterpreter::Init()
  {
  #if DOLPHIN_WEB_STATIC_EXIT_LINKS && DOLPHIN_WEB_STATIC_EXIT_LINK_STATS
-@@ -9773,7 +9795,11 @@ void CachedInterpreter::Init()
+@@ -10130,7 +10153,11 @@ void CachedInterpreter::Init()
    s_region_core_active.store(true, std::memory_order_relaxed);
  #endif
  
@@ -43,7 +44,7 @@ index 5a686ff863..7a37c13769 100644
    ResetFreeMemoryRanges();
  
    jo.enableBlocklink = false;
-@@ -15274,6 +15300,10 @@ extern "C" const char* GetPpcWasmHelperStats()
+@@ -15649,6 +15676,10 @@ extern "C" const char* GetPpcWasmHelperStats()
        << " transientreject:" << s_wasm_transient_reject_count.load(std::memory_order_relaxed)
        << " offthreaddefer:" << s_wasm_off_thread_defer_count
        << " tablefull:" << (s_wasm_table_full.load(std::memory_order_relaxed) ? 1 : 0)
@@ -54,7 +55,7 @@ index 5a686ff863..7a37c13769 100644
        << " fmad:" << s_wasm_fma_import_counts[0].load(std::memory_order_relaxed) +
                           s_wasm_fma_import_counts[1].load(std::memory_order_relaxed)
        << " fmas:" << s_wasm_fma_import_counts[2].load(std::memory_order_relaxed) +
-@@ -17586,6 +17616,10 @@ void CachedInterpreter::Jit(u32 em_address, bool clear_cache_and_retry_on_failur
+@@ -18184,6 +18215,10 @@ void CachedInterpreter::Jit(u32 em_address, bool clear_cache_and_retry_on_failur
  #endif
    if (IsAlmostFull() || SConfig::GetInstance().bJITNoBlockCache)
    {
@@ -65,7 +66,7 @@ index 5a686ff863..7a37c13769 100644
      ClearCache();
    }
    FreeRanges();
-@@ -17616,6 +17650,13 @@ void CachedInterpreter::Jit(u32 em_address, bool clear_cache_and_retry_on_failur
+@@ -18214,6 +18249,13 @@ void CachedInterpreter::Jit(u32 em_address, bool clear_cache_and_retry_on_failur
        // Mark the memory region that this code block uses in the RangeSizeSet.
        if (b->near_begin != b->near_end)
          m_free_ranges.erase(b->near_begin, b->near_end);
@@ -79,7 +80,7 @@ index 5a686ff863..7a37c13769 100644
  
  #if DOLPHIN_WEB_STATIC_EXIT_LINKS
        m_block_cache.FinalizeBlock(*b, jo.enableBlocklink || StaticExitLinksEnabled(),
-@@ -17641,6 +17682,9 @@ void CachedInterpreter::Jit(u32 em_address, bool clear_cache_and_retry_on_failur
+@@ -18239,6 +18281,9 @@ void CachedInterpreter::Jit(u32 em_address, bool clear_cache_and_retry_on_failur
    if (clear_cache_and_retry_on_failure)
    {
      WARN_LOG_FMT(DYNA_REC, "flushing code caches, please report if this happens a lot");
@@ -89,7 +90,7 @@ index 5a686ff863..7a37c13769 100644
      ClearCache();
      Jit(em_address, false);
      return;
-@@ -17812,6 +17856,7 @@ void CachedInterpreter::ClearCache()
+@@ -18410,6 +18455,7 @@ void CachedInterpreter::ClearCache()
  #endif
  #line 12477
  #ifdef __EMSCRIPTEN__

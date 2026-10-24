@@ -14,15 +14,15 @@ CFLAGS    := -O2 -Wall -Werror $(MACHDEP) -I$(LIBOGC)/include -Icommon \
 LDFLAGS   := $(MACHDEP) -L$(LIBOGC)/lib/cube -Wl,--build-id=none
 PROGRAMS  := padtest consoletest gxscene cpufuzz cpufuzz-nomcrf tonetest smctest efbpeek ramcopy dstalpha footprint
 # Selftest mutants (harness/selftest): built from the same sources.
-MUTANTS   := gxscene-nocubes gxscene-color
+MUTANTS   := gxscene-nocubes gxscene-color dstalpha-coplanar dstalpha-zinit dstalpha-redraw
 
 all: $(PROGRAMS:%=$(OUT)/%.dol) $(MUTANTS:%=$(OUT)/%.dol) $(OUT)/apploader.bin
 
 $(OUT)/%.elf: %/main.c common/marker.h | $(OUT)
 	$(CC) $(CFLAGS) $< -o $@ $(LDFLAGS) -logc -lm
 
-# Same fuzzer without mcrf, which currently crashes the WASM JIT; lets the
-# fuzz keep going past that known crash.
+# Same fuzzer without mcrf, which once crashed the WASM JIT (cpufuzz with it
+# now matches the interpreter, `harness fuzz` 2026-10-24).
 $(OUT)/cpufuzz-nomcrf.elf: cpufuzz/main.c common/marker.h | $(OUT)
 	$(CC) $(CFLAGS) -DCPUFUZZ_NO_MCRF $< -o $@ $(LDFLAGS) -logc -lm
 
@@ -42,6 +42,15 @@ $(OUT)/gxscene-nocubes.elf: gxscene/main.c | $(OUT)
 
 $(OUT)/gxscene-color.elf: gxscene/main.c | $(OUT)
 	$(CC) $(CFLAGS) -DMUTATE_COLOR $< -o $@ $(LDFLAGS) -logc -lm
+
+$(OUT)/dstalpha-coplanar.elf: dstalpha/main.c | $(OUT)
+	$(CC) $(CFLAGS) -DDSTALPHA_COPLANAR $< -o $@ $(LDFLAGS) -logc -lm
+
+$(OUT)/dstalpha-zinit.elf: dstalpha/main.c | $(OUT)
+	$(CC) $(CFLAGS) -DDSTALPHA_ZINIT $< -o $@ $(LDFLAGS) -logc -lm
+
+$(OUT)/dstalpha-redraw.elf: dstalpha/main.c | $(OUT)
+	$(CC) $(CFLAGS) -DDSTALPHA_REDRAW $< -o $@ $(LDFLAGS) -logc -lm
 
 $(OUT)/%.dol: $(OUT)/%.elf
 	$(ELF2DOL) $< $@

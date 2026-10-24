@@ -46,8 +46,20 @@ on:
         description: A/B candidate ref
         type: string
         default: ''
+      candidate_core_run:
+        description: 'A core-build.yml run id (a lever PR''s CI build): its core-<sha256> artifact is served to the candidate side (&coreid), this tree on both sides'
+        type: string
+        default: ''
+      candidate_query:
+        description: 'Extra URL parameters for the candidate side only (&key=value…), e.g. &aotsample=0: one build against itself with a switch'
+        type: string
+        default: ''
       aot:
         description: aot=1 on both sides (region levers)
+        type: boolean
+        default: false
+      warm:
+        description: 'Measure the second launch in the same profile (race-perf --warm): with aot=1 a .dol has its regions installed before boot (region codegen in steady state)'
         type: boolean
         default: false
       workloads:
@@ -121,13 +133,21 @@ jobs:
     timeout-minutes: 180
     permissions:
       contents: read
+      # candidate_core_run: the artifact of another run
+      actions: read
     env:
       RUNS: ${{ inputs.runs || 12 }}
       WINDOW: ${{ inputs.window || 10 }}
       WORKLOAD: ${{ matrix.workload }}
       BASELINE: ${{ inputs.baseline }}
       CANDIDATE: ${{ inputs.candidate }}
+      CANDIDATE_QUERY: ${{ inputs.candidate_query }}
+      CANDIDATE_CORE_RUN: ${{ inputs.candidate_core_run }}
+      PHASE: ${{ inputs.warm && 'warm' || 'cold' }}
       # A bench/** push calibrates footprint against the game's regions: aot=1.
+      # With aot=1, the region pipeline is read after each window
+      # (--region-sample 0: counters only): regions installed and their
+      # share of guest cycles per side, so a pair without regions shows.
       AOT: ${{ (github.event_name == 'push' || inputs.aot) && '&aot=1' || '' }}
       OUT: ${{ github.workspace }}/bench-out
     steps:
@@ -206,6 +226,40 @@ jobs:
           ' "$OUT/lscpu.txt" "$OUT/machine.json" "${{ matrix.runner }}" "${{ matrix.job }}" "$sib" "$others" "$pmu"
           cat "$OUT/machine.json"
 
+      # candidate_core_run: the core a lever's PR built, checked before use: a
+      # core-build.yml run of this repository whose build job passed, one
+      # core-<sha256> artifact, its .wasm that hash, the same binary
+      # interface as this tree's core (harness/remote/core-compat.mjs).
+      - name: The candidate core (a lever's PR build)
+        if: inputs.candidate_core_run != ''
+        shell: bash
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          [[ "$CANDIDATE_CORE_RUN" =~ ^[0-9]+$ ]] || { echo "candidate_core_run: a run id"; exit 1; }
+          [ -z "$BASELINE$CANDIDATE" ] || { echo "candidate_core_run serves this tree on both sides: no baseline/candidate refs"; exit 1; }
+          # The baseline is the dispatched tree: main only.
+          [ "$GITHUB_REF" = refs/heads/main ] || { echo "candidate_core_run: dispatch from main (the baseline is the dispatched tree)"; exit 1; }
+          api="repos/$GITHUB_REPOSITORY/actions/runs/$CANDIDATE_CORE_RUN"
+          gh api "$api" > "$RUNNER_TEMP/core-run.json"
+          # This repository's own core-build.yml, from a push or a pull request
+          # whose head is this repository (a fork's PR runs its own workflow
+          # file and could upload any core-<sha>).
+          # $repo is jq's variable (--arg), not the shell's.
+          # shellcheck disable=SC2016
+          filter='.repository.full_name == $repo and .head_repository.full_name == $repo and .path == ".github/workflows/core-build.yml" and (.event == "push" or .event == "pull_request")'
+          jq -e --arg repo "$GITHUB_REPOSITORY" "$filter" "$RUNNER_TEMP/core-run.json" > /dev/null
+          gh api "$api/jobs?per_page=100" | jq -e '[.jobs[] | select(.name == "build" and .conclusion == "success")] | length == 1' > /dev/null
+          names=$(gh api "$api/artifacts?per_page=100" --jq '.artifacts[] | select(.expired | not) | .name' | grep -E '^core-[0-9a-f]{64}$')
+          test "$(wc -l <<< "$names")" -eq 1
+          sha=${names#core-}
+          dir="$RUNNER_TEMP/core-candidate/$sha"
+          gh run download "$CANDIDATE_CORE_RUN" -R "$GITHUB_REPOSITORY" -n "core-$sha" -D "$dir"
+          node harness/remote/core-compat.mjs "$dir" "$sha" .
+          { echo "CORE_SHA=$sha"; echo "CORE_DIR=$dir"; } >> "$GITHUB_ENV"
+          jq -r '"candidate core: run \(.id), \(.head_branch) @ \(.head_sha[0:7])"' "$RUNNER_TEMP/core-run.json" | tee -a "$GITHUB_STEP_SUMMARY"
+
       - name: A/A on the homebrew (ABBA, CPU thread pinned)
         shell: bash
         env:
@@ -233,13 +287,37 @@ jobs:
             done
             sides=(--baseline "$BASELINE" --candidate "$CANDIDATE")
           fi
+          # candidate_query: the candidate side boots with these parameters
+          # added (race-perf --baseline-query keeps the baseline without them).
+          # wgpufallback=1 on both sides: a GPU-less runner otherwise presents
+          # through WebGL at 60 Hz, which on x64's 2 SMT threads took 14-20 %
+          # of the emulated CPU (#175, run 40036481382; nothing on N2's 4
+          # cores). The bench measures the emulation, not that presenter.
+          query="core=upstream&video=null&cpu=single&speed=unlimited&synconidle=1&wasmjit=1&jitwarmup=60&wgpufallback=1$AOT"
+          echo "Query (both sides; the candidate adds: ${CANDIDATE_QUERY:-nothing}${CORE_SHA:+, &coreid=sha256:$CORE_SHA}): \`$query\`" >> "$GITHUB_STEP_SUMMARY"
+          queries=(--query "$query")
+          extra=""
+          if [ -n "$CANDIDATE_QUERY" ]; then
+            [[ "$CANDIDATE_QUERY" =~ ^(\&[a-z0-9_]+=[A-Za-z0-9._-]+)+$ ]] || { echo "candidate_query: &key=value pairs only"; exit 1; }
+            extra="$CANDIDATE_QUERY"
+          fi
+          # A lever's PR core on the candidate side (checked in the step above).
+          cores=()
+          if [ -n "${CORE_SHA:-}" ]; then
+            extra="$extra&coreid=sha256:$CORE_SHA"
+            cores=(--core-candidate "$CORE_DIR")
+          fi
+          [ -n "$extra" ] && queries=(--query "$query$extra" --baseline-query "$query")
+          # --warm: the second launch in the same profile is the measured window.
+          warm=()
+          if [ "$PHASE" = warm ]; then warm=(--warm); fi
           taskset -c "$OTHER_CPUS" node harness/probes/race-perf.mjs \
-            --iso "$dol" --port 8090 "${sides[@]}" \
-            --query "core=upstream&video=null&cpu=single&speed=unlimited&synconidle=1&wasmjit=1&jitwarmup=60$AOT" \
+            --iso "$dol" --port 8090 "${sides[@]}" "${queries[@]}" "${cores[@]}" \
+            ${AOT:+--region-sample 0 --region-secs 3} \
             --hold "" --runs "$RUNS" --warmup 5 --emulated-warmup 5 --emulated-window "$WINDOW" \
             --pin-cpu-thread 0 --max-load 8 --load-wait 60 --lock-wait 60 --calm-wait 60 \
-            "${counters[@]}" --out "$OUT/aa"
-          node harness/remote/bench-aa.mjs "$OUT/aa" "$OUT/machine.json" | tee -a "$GITHUB_STEP_SUMMARY"
+            "${counters[@]}" "${warm[@]}" --out "$OUT/aa"
+          node harness/remote/bench-aa.mjs "$OUT/aa" "$OUT/machine.json" "$PHASE" | tee -a "$GITHUB_STEP_SUMMARY"
           # The machine at the end: a live migration would change the model.
           lscpu | grep "Model name" | tee "$OUT/model-end.txt"
 

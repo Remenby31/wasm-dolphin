@@ -59,7 +59,7 @@ test("without aot=1 the worker answers disabled and imports nothing of P7", asyn
   const { worker } = await loadWorker(t);
   worker.setAotFirstLaunchEnabledForTest(false);
   assert.deepEqual(await worker.handleAotMessage("validationReadAotProgress"), { schema: "wasm-dolphin.aot-progress.v1", state: "disabled", events: [] });
-  assert.deepEqual(await worker.handleAotMessage("aotStatus"), { state: "disabled", fraction: 0 });
+  assert.deepEqual(await worker.handleAotMessage("aotStatus"), { state: "disabled", fraction: 0, wasmFeatures: { relaxedMadd: null } });
   assert.deepEqual(await worker.handleAotMessage("aotOptimize", { resume: true }), { started: false });
   // P7's modules are loaded only under the flag (dynamic import)
   const source = await readFile(workerUrl, "utf8");
@@ -77,7 +77,7 @@ test("a core without the translator export: unsupported, and the disc key is nev
   await worker.prepareAotFirstLaunch({}, { module: {}, readDiscKey: async () => { reads++; return DISC; }, coreHash: CORE });
   assert.equal(reads, 0);
   assert.equal((await worker.handleAotMessage("validationReadAotProgress")).state, "unsupported");
-  assert.deepEqual(await worker.handleAotMessage("aotStatus"), { state: "unsupported", fraction: 0 });
+  assert.deepEqual(await worker.handleAotMessage("aotStatus"), { state: "unsupported", fraction: 0, wasmFeatures: { relaxedMadd: null } });
   await worker.startAotFirstLaunchAfterBoot();
 });
 
@@ -132,6 +132,81 @@ test("a cached region under another layout goes to retranslation, never into the
   assert.equal(queued.length, 1);
   assert.equal(queued[0][8], 0x1234, "queued with its layout");
   assert.deepEqual(asked, ["region-v1:k"], "no retranslation under the core's layout");
+});
+
+// Harness only: the ledger of what the worker handed the core, per module
+// (its entries, the outcome, when), queried by PC; nothing is kept while
+// the harness hooks are off.
+test("the region ledger: per module what was queued or why not, queried by PC, only with the harness on", async (t) => {
+  const { worker } = await loadWorker(t);
+  const heap = new Uint8Array(1 << 16);
+  let top = 1024;
+  const core = {
+    HEAPU8: heap,
+    _malloc: (n) => { const p = top; top += (n + 7) & ~7; return p; },
+    _free: () => {},
+    _DolphinWeb_AotLayoutHash: () => 0x1234,
+    _DolphinWeb_AotQueueRegion: () => {}
+  };
+  const flow = { retranslate: async () => true };
+  const region = (key, entries, layout) => ({ key, bytes: Uint8Array.of(0, 97, 115, 109), entries, layout, members: [{ ranges: [[0x80003100, 0x80003200]], hash: "0011223344556677" }] });
+  await worker.queueAotRegionForTest(core, region("region-v1:off", [0x80003100], 0x1234), flow);
+  assert.equal(worker.regionLedgerForTest([0x80003100]).modules, 0, "harness off: nothing kept");
+  worker.setHarnessEnabledForTest(true);
+  t.after(() => worker.setHarnessEnabledForTest(false));
+  await worker.queueAotRegionForTest(core, region("region-v1:a", [0x80003100, 0x80003140], 0x1234), flow);
+  await worker.queueAotRegionForTest(core, region("region-v1:b", [0x80003180], 0x9999), flow); // another layout
+  const ledger = worker.regionLedgerForTest([0x80003140, 0x80003180, 0x80003300]);
+  assert.deepEqual([ledger.modules, ledger.outcomes, ledger.queuedEntries], [2, { queued: 1, layout: 1 }, 2]);
+  assert.deepEqual(ledger.pcs.map((p) => p.holders.map((h) => [h.key, h.outcome])), [[["region-v1:a", "queued"]], [["region-v1:b", "layout"]], []]);
+  assert.ok(ledger.pcs[0].holders[0].ms <= ledger.nowMs, "when it was handed over");
+  assert.equal(ledger.mappedRegions, null, "the core's own count: null without the export");
+});
+
+// The ledger's members re-hashed against the plan: one whose code changed
+// (what drops a whole module at the core's re-verification) is listed, with
+// whether the module holds code of it or only lists it.
+test("the region ledger: members whose code no longer matches the plan are listed (translated or only listed)", async (t) => {
+  const { worker } = await loadWorker(t);
+  const { regionHash } = await import("../src/aot-plan.js");
+  const heap = new Uint8Array(1 << 16);
+  const RAM = 0x8000;
+  let top = 1024;
+  const core = {
+    HEAPU8: heap,
+    _malloc: (n) => { const p = top; top += (n + 7) & ~7; return p; },
+    _free: () => {},
+    _DolphinWeb_AotLayoutHash: () => 0x1234,
+    _DolphinWeb_AotQueueRegion: () => {},
+    _DolphinWeb_AotRegionHeapBases: (p) => new Uint32Array(heap.buffer, p, 2).set([RAM, 0])
+  };
+  const view = new DataView(heap.buffer);
+  const word = (pc, w) => view.setUint32(RAM + (pc & 0x01ffffff), w, false);
+  const read32 = (pc) => view.getUint32(RAM + (pc & 0x01ffffff), false);
+  for (let pc = 0x80003100; pc < 0x80003140; pc += 4) word(pc, 0x38600000 + (pc & 0xff));
+  const a = [[0x80003100, 0x80003120]], b = [[0x80003120, 0x80003140]];
+  const members = [{ ranges: a, hash: regionHash(read32, a) }, { ranges: b, hash: regionHash(read32, b) }];
+  worker.setHarnessEnabledForTest(true);
+  t.after(() => worker.setHarnessEnabledForTest(false));
+  // Its entries are in the first member only: the second was refused at translation.
+  await worker.queueAotRegionForTest(core, { key: "region-v1:m", bytes: Uint8Array.of(0, 97, 115, 109), entries: [0x80003100], members, layout: 0x1234 }, { retranslate: async () => true });
+  assert.deepEqual((await worker.regionLedgerStaleForTest(core)).staleCount, 0, "code as the plan saw it");
+  word(0x80003124, 0x60000000); // the listed-only member's code changes
+  const r = await worker.regionLedgerStaleForTest(core);
+  assert.deepEqual([r.checked, r.staleModules], [2, 1]);
+  assert.deepEqual(r.stale.map((x) => [x.key, x.member, x.start, x.translated]), [["region-v1:m", 1, 0x80003120, false]]);
+});
+
+// #215: the region function cap by engine: JSC's OMG limit under
+// JavaScriptCore only, none under V8 (or unknown); ?regioncap= forces it.
+test("the region function cap: JSC only, unless forced", async (t) => {
+  const { worker } = await loadWorker(t);
+  t.after(() => worker.setRegionCapForTest({ engine: "unknown", cap: null }));
+  const cases = [["v8", null, 0], ["jsc", null, 95000], ["unknown", null, 0], ["spidermonkey", null, 0], ["jsc", 0, 0], ["v8", 50000, 50000]];
+  for (const [engine, cap, expected] of cases) {
+    worker.setRegionCapForTest({ engine, cap });
+    assert.equal(worker.regionFunctionCap(95000), expected, `${engine}, forced ${cap}`);
+  }
 });
 
 // Review of #86: the region cache waits for the first presented image (or

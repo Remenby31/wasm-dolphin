@@ -4,6 +4,9 @@
 //
 // What WebGPU this Chrome gives a page: navigator.gpu, requestAdapter(),
 // the adapter's info and features, and whether a device can be created.
+// Also its WebGL, in the page and in a worker's OffscreenCanvas (where the
+// software presenter runs): context or none, and the unmasked renderer
+// (SwiftShader, WARP through ANGLE, a real GPU).
 // Headless, no disc. Used by the Windows workflow: with --no-unsafe-webgpu,
 // what a player's Chrome gets on a GPU-less PC; with the harness default
 // (--enable-unsafe-webgpu), the fallback adapter it allows (SwiftShader on
@@ -36,7 +39,20 @@ try {
   const page = await context.newPage();
   await page.goto(`${server.base}/index.html`);
   r = await page.evaluate(async () => {
+    // WebGL context and renderer string, or null without a context.
+    const readGl = String.raw`(canvas) => {
+      const gl = canvas.getContext("webgl");
+      if (!gl) return null;
+      const ext = gl.getExtension("WEBGL_debug_renderer_info");
+      return { vendor: ext ? gl.getParameter(ext.UNMASKED_VENDOR_WEBGL) : null, renderer: ext ? gl.getParameter(ext.UNMASKED_RENDERER_WEBGL) : gl.getParameter(gl.RENDERER) };
+    }`;
     const out = { ua: navigator.userAgent, gpu: Boolean(navigator.gpu), adapter: null };
+    try { out.webgl = new Function(`return (${readGl})`)()(document.createElement("canvas")); } catch (e) { out.webgl = { error: String(e?.message || e) }; }
+    out.webglWorker = await new Promise((resolve) => {
+      const w = new Worker(URL.createObjectURL(new Blob([`postMessage((${readGl})(new OffscreenCanvas(4, 4)))`], { type: "text/javascript" })));
+      w.onmessage = (e) => { resolve(e.data); w.terminate(); };
+      w.onerror = (e) => { resolve({ error: String(e.message || e) }); w.terminate(); };
+    });
     if (!navigator.gpu) return out;
     try {
       const a = await navigator.gpu.requestAdapter();

@@ -198,3 +198,43 @@ test("race-multi: no local const shadows one of the module's own exported names"
   const shadowed = exported.filter((name) => new RegExp(`^\\s+(?:const|let) ${name}\\b`, "m").test(src));
   assert.deepEqual(shadowed, []);
 });
+
+test("race-multi: a boot that fails sets the run aside and plays it again, at most --max-boot-replays times in a row", async () => {
+  const { bootFailureStep } = await import("../harness/probes/race-multi.mjs");
+  assert.equal(bootFailureStep(1, 2), "replay");
+  assert.equal(bootFailureStep(2, 2), "replay");
+  assert.equal(bootFailureStep(3, 2), "fail", "a third failure in a row: the machine, not a hiccup");
+  assert.equal(bootFailureStep(1, 0), "fail", "--max-boot-replays 0: fail at once");
+  // The loop: the boot sits in its own try, a failure skips the windows, is
+  // recorded as a boot discard (outside the region discards' cap) and resets
+  // only after a run that booted.
+  const src = readFileSync(new URL("../harness/probes/race-multi.mjs", import.meta.url), "utf8");
+  assert.match(src, /record\.bootFailed = \{ arm: booting/);
+  assert.match(src, /const results = record\.bootFailed \? \[\] :/);
+  assert.match(src, /discarded\.push\(\{ run: r, attempt: record\.attempt, why, boot: true \}\)/);
+  assert.match(src, /const regionDiscards = discarded\.filter\(\(d\) => !d\.boot\)\.length;/);
+  assert.match(src, /bootFailures = 0;\n\s+record\.arms\.forEach/);
+});
+
+test("counters: every renderer thread counted, the busiest kept after the window; an impossible window rejected", async () => {
+  const { busiestOf, counterSanity, parsePerfCsvPerThread } = await import("../harness/lib/perf-counters.mjs");
+  const csv = [
+    "# started on Sat Oct 24 07:38:35 2026", "",
+    "DedicatedWorker-101,9000000,,armv8_pmuv3_1/instructions/u,1,100.00,,",
+    "DedicatedWorker-101,4000000,,armv8_pmuv3_1/cycles/u,1,100.00,,",
+    "DedicatedWorker-102,250000000,,armv8_pmuv3_1/instructions/u,1,100.00,,",
+    "DedicatedWorker-102,60000000,,armv8_pmuv3_1/cycles/u,1,100.00,,",
+    "DedicatedWorker-102,<not counted>,,armv8_pmuv3_0/cycles/u,0,100.00,,",
+    "Compositor-7-103,100,,armv8_pmuv3_1/cycles/u,1,100.00,,"
+  ].join("\n");
+  const threads = parsePerfCsvPerThread(csv);
+  assert.equal(threads.length, 3);
+  assert.deepEqual(threads.find((t) => t.tid === 103), { tid: 103, comm: "Compositor-7", instructions: 0, cycles: 100 }, "a dash in the thread name");
+  const best = busiestOf(threads);
+  assert.equal(best.tid, 102, "the CPU thread: most cycles over the window, whatever it did in its first 500 ms");
+  assert.equal(best.cycles, 60000000);
+  // 10 M guest ticks: 6 cycles per guest cycle is the CPU thread; 0.4 is not.
+  assert.equal(counterSanity({ counters: { cycles: 60e6 }, guestTicks: 10e6 }), null);
+  assert.match(counterSanity({ counters: { cycles: 4e6 }, guestTicks: 10e6 }), /0\.4 < 1: not the emulated CPU thread/);
+  assert.equal(counterSanity({ counters: { error: "x" }, guestTicks: 10e6 }), null, "no counts: nothing to judge");
+});
