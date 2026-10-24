@@ -1,0 +1,152 @@
+diff --git a/Source/Core/Core/PowerPC/CachedInterpreter/CachedInterpreter.cpp b/Source/Core/Core/PowerPC/CachedInterpreter/CachedInterpreter.cpp
+--- a/Source/Core/Core/PowerPC/CachedInterpreter/CachedInterpreter.cpp
++++ b/Source/Core/Core/PowerPC/CachedInterpreter/CachedInterpreter.cpp
+@@ -6147,6 +6147,119 @@ void EmitPairedFusedMulAddSub(std::vector<u8>& body, const WasmStateLayout& layo
+   body.push_back(0x0b);
+ }
+ 
++// Patch 0143: ps_add, ps_sub, ps_mul, ps_muls0, ps_muls1 with both lanes in
++// f64x2 (no relaxed op: any mode). Inside the MSR fast-path if: emits
++// `if (every lane passes) { store both lanes, FPRF } else helper end`. A lane
++// passes exactly where EmitFpArithLane computes it inline: for the muls, a
++// frC that is not a (nonzero) denormal, rounded to 25 bits (Force25Bit); then
++// a result that is zero or rounds to a normal single (no NaN, no overflow, no
++// NI flush below 2^-126). Any lane failing sends the whole op to the
++// interpreter, as the scalar path does.
++void EmitPairedSimdArith(std::vector<u8>& body, const WasmStateLayout& layout,
++                         const PPCAnalyst::CodeOp& op, FpArithKind kind, u32 c_lane, bool splat_c,
++                         u32 downcount)
++{
++  const UGeckoInstruction inst = op.inst;
++  const u32 va = WasmV128ScratchLocal(0), vx = WasmV128ScratchLocal(1),
++            vr = WasmV128ScratchLocal(2);
++  const auto simd = [&](u32 code) {
++    body.push_back(0xfd);
++    EmitU32Leb(body, code);
++  };
++  constexpr u32 LOAD = 0x00, STORE = 0x0b, CONST = 0x0c, SHUFFLE = 0x0d, EXTRACT = 0x21,
++                EQ = 0x47, NE = 0x48, LT = 0x49, GE = 0x4c, AND = 0x4e, OR = 0x50, DEMOTE = 0x5e,
++                PROMOTE = 0x5f, ALL_TRUE = 0xc3, ADD_I64 = 0xce, ABS = 0xec, ADD = 0xf0,
++                SUB = 0xf1, MUL = 0xf2;
++  const auto load = [&](u32 offset) {
++    EmitLocalGet(body, 0);
++    simd(LOAD);
++    body.push_back(0x03);  // align 8 (state lanes are 8-aligned)
++    EmitU32Leb(body, offset);
++  };
++  const auto i64x2 = [&](u64 v) {
++    simd(CONST);
++    for (int k = 0; k < 2; ++k)
++      for (int i = 0; i < 8; ++i)
++        body.push_back(static_cast<u8>(v >> (8 * i)));
++  };
++  const auto f64x2 = [&](double v) { i64x2(std::bit_cast<u64>(v)); };
++  const auto get = [&](u32 l) { EmitLocalGet(body, l); };
++  const auto abs_of = [&](u32 l) {
++    get(l);
++    simd(ABS);
++  };
++
++  load(PsOffset(layout, inst.FA, 0));
++  EmitLocalSet(body, va);
++  const bool mul = kind == FpArithKind::Mul;
++  if (mul)
++  {
++    load(PsOffset(layout, inst.FC, 0));
++    if (splat_c)
++    {
++      // ps_muls0/1: frC's lane c_lane in both lanes.
++      body.push_back(0x22);  // local.tee
++      EmitU32Leb(body, vx);
++      get(vx);
++      simd(SHUFFLE);
++      for (int k = 0; k < 2; ++k)
++        for (u32 i = 0; i < 8; ++i)
++          body.push_back(static_cast<u8>(c_lane * 8 + i));
++    }
++    EmitLocalSet(body, vx);
++    // frC not a nonzero denormal (EmitIsNotDenormalDouble: zero, normal,
++    // infinite or NaN; an infinite or NaN product fails the result test).
++    abs_of(vx); f64x2(0.0); simd(EQ);
++    abs_of(vx); f64x2(0x1p-1022); simd(GE);
++    simd(OR);
++    get(vx); get(vx); simd(NE);
++    simd(OR);
++    // Force25Bit(c) = (c & ~0x7ffffff) + (c & 0x8000000), on the bits.
++    get(vx); i64x2(0xfffffffff8000000ull); simd(AND);
++    get(vx); i64x2(0x8000000ull); simd(AND);
++    simd(ADD_I64);
++    EmitLocalSet(body, vx);
++    get(va); get(vx); simd(MUL);
++  }
++  else
++  {
++    load(PsOffset(layout, inst.FB, 0));
++    EmitLocalSet(body, vx);
++    get(va); get(vx); simd(kind == FpArithKind::Add ? ADD : SUB);
++  }
++  EmitLocalSet(body, vr);
++  // r is zero or rounds to a normal single (EmitIsZeroOrNormalSingleResult).
++  abs_of(vr); f64x2(0.0); simd(EQ);
++  abs_of(vr); f64x2(0x1p-126); simd(GE);
++  abs_of(vr); i64x2(0x47effffff0000000ull); simd(LT);
++  simd(AND);
++  simd(OR);
++  if (mul)
++    simd(AND);
++  simd(ALL_TRUE);
++  HintNextIf(body, true);  // a lane leaves the fast path rarely
++  body.push_back(0x04);
++  body.push_back(0x40);
++  EmitLocalGet(body, 0);
++  get(vr);
++  simd(DEMOTE);
++  simd(PROMOTE);
++  body.push_back(0x22);  // local.tee
++  EmitU32Leb(body, vr);
++  simd(STORE);
++  body.push_back(0x03);
++  EmitU32Leb(body, PsOffset(layout, inst.FD, 0));
++  const u32 r0 = WasmFpScratchLocal(0);
++  get(vr);
++  simd(EXTRACT);
++  body.push_back(0x00);
++  EmitLocalSet(body, r0);
++  EmitSetFprfZeroOrNormal(body, layout, r0, 0, op.wantsFPRF);
++  body.push_back(0x05);
++  EmitFpCall(body, op, downcount);
++  body.push_back(0x0b);
++}
++
+ // fadd/fsub/fmul/fdiv (63), their single forms (59), ps_add/ps_sub/ps_mul/
+ // ps_muls0/ps_muls1 (4). FMA-family subops go to the interpreter helper.
+ void EmitExactFpArithmetic(std::vector<u8>& body, const WasmStateLayout& layout,
+@@ -6223,6 +6336,17 @@ void EmitExactFpArithmetic(std::vector<u8>& body, const WasmStateLayout& layout,
+     body.push_back(0x0b);
+     return;
+   }
++  // 0143: ps_add/sub/mul/muls0/1 in f64x2 (off with DISABLE_NATIVE_PS).
++  if (paired &&
++      (kind == FpArithKind::Add || kind == FpArithKind::Sub || kind == FpArithKind::Mul) &&
++      !DolphinWebHelperDisabled(DOLPHIN_WEB_DISABLE_NATIVE_PS))
++  {
++    EmitPairedSimdArith(body, layout, op, kind, c_lane0, c_lane0 == c_lane1, downcount);
++    body.push_back(0x05);
++    EmitFpCall(body, op, downcount);
++    body.push_back(0x0b);
++    return;
++  }
+   const u32 r0 = WasmFpScratchLocal(0), r1 = WasmFpScratchLocal(1), raw = WasmFpScratchLocal(2);
+   // fmadds alone sets FI from the rounding (FI = unrounded != result).
+   const bool fmadds_fi = inst.OPCD == 59 && inst.SUBOP5 == 29;
+@@ -17492,8 +17616,8 @@ namespace
+ // npc and downcount in locals, with one shared exit (26 is retired, 0134's).
+ // 30 (0141): paired-single FMA in f64x2 with fused relaxed_madd (28, 29 are
+ // 0137's and 0139's). 31 (0142): guest calls as wasm calls, guest returns as
+-// wasm returns (was 0139).
+-constexpr u32 AOT_COMPILER_VERSION = 31;
++// wasm returns (was 0139). 32 (0143): ps_add/sub/mul/muls0/1 in f64x2.
++constexpr u32 AOT_COMPILER_VERSION = 32;
+ constexpr u32 AOT_MAX_FRAGMENT_BYTES = 1u << 20;
+ thread_local std::vector<u32> t_aot_out;
+ u8* s_aot_ram = nullptr;
