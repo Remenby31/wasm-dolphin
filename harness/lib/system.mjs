@@ -48,6 +48,41 @@ export function sampleChromeCpu(profileDir) {
   }
 }
 
+// Windows has no `ps`: the same figures from two CDP SystemInfo.getProcessInfo
+// snapshots (cumulative CPU seconds per Chrome process, browser target only),
+// over the wall time between them. 100 = one core, as on macOS. Pure.
+export function cpuFromProcessInfo(before, after, wallMs) {
+  if (!before || !after || !(wallMs > 0)) return null;
+  const prev = new Map(before.map((p) => [p.id, p.cpuTime]));
+  let total = 0, rendererMax = 0, gpu = 0;
+  for (const p of after) {
+    const cpu = (Math.max(0, p.cpuTime - (prev.get(p.id) ?? 0)) * 1000 * 100) / wallMs;
+    total += cpu;
+    if (p.type === "renderer" && cpu > rendererMax) rendererMax = cpu;
+    if (p.type === "GPU") gpu += cpu;
+  }
+  return { total: Math.round(total), rendererMax: Math.round(rendererMax), gpu: Math.round(gpu), processes: after.length };
+}
+
+// A sampler over cpuFromProcessInfo for one Playwright context; each call
+// returns the CPU since the previous one (the first only sets the origin).
+export async function cdpCpuSampler(context) {
+  const cdp = await context.browser()?.newBrowserCDPSession();
+  if (!cdp) return null;
+  let last = null;
+  return async () => {
+    const t = Date.now();
+    try {
+      const { processInfo } = await cdp.send("SystemInfo.getProcessInfo");
+      const r = last ? cpuFromProcessInfo(last.info, processInfo, t - last.t) : null;
+      last = { t, info: processInfo };
+      return { t, load1: null, ...(r ?? { origin: true }) };
+    } catch (error) {
+      return { t, error: String(error.message || error) };
+    }
+  };
+}
+
 // Resident memory of one profile's Chrome processes, per process type
 // (browser, renderer, gpu-process, utility:<service>), from
 // `ps -A -o pid=,rss=,command=` (RSS in KB). Pure.
