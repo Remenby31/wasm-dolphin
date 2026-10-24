@@ -6,7 +6,7 @@ import { spawnSync } from "node:child_process";
 import path from "node:path";
 import test from "node:test";
 
-import { consistentHeadroomRead, decodeHeadroomStats, headroomOf, invalidReasons, pacingProofNeeded, querySpeed, unlimitedAllowed } from "../harness/lib/headroom.mjs";
+import { consistentHeadroomRead, decodeHeadroomStats, headroomOf, invalidReasons, pacingExpectation, querySpeed, unlimitedAllowed } from "../harness/lib/headroom.mjs";
 
 function hrBytes(v = {}) {
   const view = new DataView(new ArrayBuffer(96));
@@ -71,19 +71,30 @@ test("validity: ring overflow, speed above its target, no unique image, game fra
   assert.equal(unlimitedAllowed("video=null&speed=unlimited"), true);
 });
 
-test("speed=unlimited with a renderer: a run is valid only when the core reports SyncOnSkipIdle on (0150)", () => {
-  assert.equal(pacingProofNeeded("video=wgpu&speed=unlimited&synconidle=1"), true);
-  assert.equal(pacingProofNeeded("video=null&speed=unlimited&synconidle=1"), false);
-  assert.equal(pacingProofNeeded("video=wgpu&speed=1"), false);
+test("speed=unlimited with a renderer: the core's pacing config must be what the side claims (0150)", () => {
+  assert.equal(pacingExpectation("video=wgpu&speed=unlimited&synconidle=1"), "sync");
+  assert.equal(pacingExpectation("video=null&speed=unlimited&synconidle=1"), null);
+  assert.equal(pacingExpectation("video=wgpu&speed=1"), null);
+  assert.equal(pacingExpectation("video=wgpu&speed=unlimited", { decoupledUnlimited: true }), "decoupled");
+  assert.equal(pacingExpectation("video=wgpu&speed=unlimited&synconidle=1", { decoupledUnlimited: true }), "sync");
+  assert.equal(unlimitedAllowed("video=wgpu&speed=unlimited"), false);
+  assert.equal(unlimitedAllowed("video=wgpu&speed=unlimited", { decoupledUnlimited: true }), true);
   const rec = (pacingConfig) => ({ complete: true, headroom: { xfbCopiesPerVi: 1 }, ...(pacingConfig === undefined ? {} : { pacingConfig }) });
-  assert.deepEqual(invalidReasons(rec({ supported: true, syncOnSkipIdle: true, rushFramePresentation: true, dupXfbResetsThrottle: false }), { pacingProof: true }), []);
+  const on = { supported: true, syncOnSkipIdle: true, rushFramePresentation: true, dupXfbResetsThrottle: false };
+  const off = { ...on, syncOnSkipIdle: false };
+  assert.deepEqual(invalidReasons(rec(on), { pacing: "sync" }), []);
+  assert.deepEqual(invalidReasons(rec(off), { pacing: "decoupled" }), []);
   // The URL asked for it, the core did not apply it (2026-10-24: ?synconidle was ignored).
-  assert.match(invalidReasons(rec({ supported: true, syncOnSkipIdle: false }), { pacingProof: true })[0], /SyncOnSkipIdle not applied by the core \(syncOnSkipIdle false\)/);
-  // A core without the export, a failed read or no read at all: not applied.
-  assert.match(invalidReasons(rec({ supported: false }), { pacingProof: true })[0], /no validationReadPacingConfig/);
-  assert.match(invalidReasons(rec({ error: "timeout" }), { pacingProof: true })[0], /\(timeout\)/);
-  assert.match(invalidReasons(rec(undefined), { pacingProof: true })[0], /not applied by the core/);
-  // Without the proof requirement nothing changes.
+  assert.match(invalidReasons(rec(off), { pacing: "sync" })[0], /SyncOnSkipIdle not applied by the core \(syncOnSkipIdle false\)/);
+  // Labelled decoupled, the core synchronises: not the measurement it claims.
+  assert.match(invalidReasons(rec(on), { pacing: "decoupled" })[0], /--decoupled-unlimited: the core does not read SyncOnSkipIdle off/);
+  // A core without the export, a failed read or no read at all: never valid either way.
+  for (const pacing of ["sync", "decoupled"]) {
+    assert.match(invalidReasons(rec({ supported: false }), { pacing })[0], /no validationReadPacingConfig/);
+    assert.match(invalidReasons(rec({ error: "timeout" }), { pacing })[0], /\(timeout\)/);
+    assert.equal(invalidReasons(rec(undefined), { pacing }).length, 1);
+  }
+  // Nothing asked: nothing changes.
   assert.deepEqual(invalidReasons(rec(undefined)), []);
 });
 
