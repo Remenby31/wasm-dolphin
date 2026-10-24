@@ -112,6 +112,7 @@ export class UpstreamWorkerAdapter {
     wgpuFallback = false,
     dstAlphaTwoPass = true,
     discReadahead = true,
+    discPrefetch = false,
     webglSoftware = false,
     savesMode = "",
     efbDiag = false,
@@ -234,6 +235,7 @@ export class UpstreamWorkerAdapter {
     this.wgpuFallback = Boolean(wgpuFallback);
     this.dstAlphaTwoPass = dstAlphaTwoPass !== false;
     this.discReadahead = discReadahead !== false;
+    this.discPrefetch = discPrefetch === true;
     this.webglSoftware = Boolean(webglSoftware);
     this.savesMode = String(savesMode || "");
     this.userData = null;
@@ -474,6 +476,7 @@ export class UpstreamWorkerAdapter {
       wgpuFallback: this.wgpuFallback,
       dstAlphaTwoPass: this.dstAlphaTwoPass,
       discReadahead: this.discReadahead,
+      discPrefetch: this.discPrefetch,
       webglSoftware: this.webglSoftware,
       savesMode: this.savesMode,
       efbDiag: this.efbDiag,
