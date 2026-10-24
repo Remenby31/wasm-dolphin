@@ -590,4 +590,7 @@ compares whose branches the host mispredicts.
   module cached with the binary search is assembled again.
 - **Cost.** Over the whole disc, the 143 modules grow from 140.25 to 142.13 MB
   (+1.3 %); formation is unchanged. A dispatch costs 16–17 ns instead of
-  26–30 ns in V8 at 1,400–2,400 entries (JS call included).
+  26–30 ns in V8 at 1,400–2,400 entries (JS call included). In JSC it costs
+  13 / 20 / 22 ns instead of 24 / 32 / 50 ns at 1,400 / 2,400 / 4,800 entries,
+  from the 5th pass on, so the large `br_table` does not hold back tier-up.
+  Only the first pass, before V8 tiers up (Liftoff), is 1.2–1.4× slower.
