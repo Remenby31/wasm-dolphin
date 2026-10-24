@@ -104,7 +104,8 @@ test("paired FMA single ties: bit-exact with the interpreter, inline (no fp help
         const before = core.fpHelperCalls();
         const { result } = runForm(xo, cLane, over, forForm(bSign, NOT_TIE));
         assertSame(result, `${name} overflow-bound tie`);
-        assert.ok(core.fpHelperCalls() - before >= 1, `${name}: the overflow-bound tie goes to the interpreter`);
+        const calls = core.fpHelperCalls() - before;
+        assert.ok(result.compiledOps >= 2 && calls >= 1, `${name}: the overflow-bound tie goes to the interpreter (code ${result.code}, ${result.compiledOps} ops compiled, ${calls} fp helper calls)`);
       }
     }
   } finally {
@@ -116,21 +117,31 @@ test("a sweep of random paired FMA ties matches the interpreter bit for bit", { 
   const previous = core.setFusedMadd(true);
   try {
     const r = makeRng(0x7161);
-    const f32 = () => single(((r.below(2) << 31) | ((120 + r.below(16)) << 23) | (r.next() & 0x7fffff)) >>> 0);
-    // b near a * c, a few exponents apart, so the sum has 25-28 significant
-    // bits: ties come often; some products are inexact (err != 0).
+    const sgn = () => (r.below(2) ? 1 : -1);
+    const f24 = (e) => sgn() * (1 + (r.next() & 0x7fffff) / 2 ** 23) * 2 ** e; // a single with 24 bits
+    // As the scene's vertex math: an integer-like product (a, c with few bits)
+    // plus a b whose exponent is 1-4 below it, so b's low bits fall under the
+    // sum's single ulp: a true tie (error 0) once in 2-16 lanes.
+    const trueTie = () => {
+      const a = sgn() * (1 + r.below(255)), c = sgn() * (1 + r.below(255)) * 2 ** (r.below(4) - 2);
+      const e = Math.floor(Math.log2(Math.abs(a * c))) - 1 - r.below(4);
+      return [a, c, Math.fround(f24(e))];
+    };
+    // As BELOW / ABOVE: (1 + 2^-23)(1 - 2^-23) = 1 - 2^-46 scaled, plus b on a
+    // grid of 2: the double rounding lands on a tie with a nonzero error,
+    // above or below, for random scales, signs and grid points.
+    const errTie = () => {
+      const s = r.below(20) - 10, sa = sgn();
+      const m = 2 ** 24 + 2 * r.below(2 ** 22);
+      return [sa * ONE_UP * 2 ** s, single(0x3f7ffffe), -sa * sgn() === 1 ? m * 2 ** s : -m * 2 ** s];
+    };
     let ties = 0, runs = 0;
     for (let k = 0; k < 3000; k++) {
-      const make = () => {
-        const a = f32(), c = f32();
-        const p = a * force25Bit(c);
-        const b = Math.fround(p * (r.below(2) ? 2 ** (1 + r.below(4)) : -(2 ** (1 + r.below(4)))) + (r.below(3) ? 0 : f32()));
-        return [a, c, b];
-      };
+      const make = () => (r.below(3) ? trueTie() : errTie());
       const l0 = make(), l1 = make();
       ties += (classify(l0) === "tie") + (classify(l1) === "tie");
-      const [xo, name, , cLane] = FORMS[r.below(FORMS.length)];
-      const { result, program } = runForm(xo, cLane, l0, l1);
+      const [xo, name, bSign, cLane] = FORMS[r.below(FORMS.length)];
+      const { result, program } = runForm(xo, cLane, forForm(bSign, l0), forForm(bSign, l1));
       assertSame(result, `${name} sweep ${k} lanes ${l0} / ${l1} ${Array.from(program, hex).join(" ")}`);
       runs++;
     }
