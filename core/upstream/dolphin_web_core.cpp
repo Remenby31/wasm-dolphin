@@ -1057,7 +1057,7 @@ int SetCpuThread(int enabled)
   return 1;
 }
 
-// Tests (patch 0097): the value Dolphin's game config gives an allowlisted
+// The value Dolphin's game config gives an allowlisted
 // setting (tools/gamesettings-allowlist.json) for a disc ID and revision from
 // the INIs under /dolphin-sys/GameSettings, as the game's boot reads it: MMU
 // (System::Initialize, IsMMUMode), FPRF (patch 0121), SafeTextureCacheColorSamples,
@@ -1065,11 +1065,13 @@ int SetCpuThread(int enabled)
 // EFBToTextureEnable (GFX_HACK_SKIP_EFB_COPY_TO_RAM) and BBoxEnable; booleans
 // as 0/1. The global game layer is added for the read and removed after; -1
 // when a game's layer is already there (a game is running), which this must
-// not replace, -2 for a setting it does not know.
+// not replace, -2 for a setting it does not know. Read before the boot by
+// the worker (a disc that needs the bounding box, which video=wgpu does not
+// compute) and by the tests (patch 0097).
 #ifdef __EMSCRIPTEN__
 EMSCRIPTEN_KEEPALIVE
 #endif
-int GameConfigValueForTest(const char* game_id, int revision, const char* setting)
+int GameConfigValue(const char* game_id, int revision, const char* setting)
 {
   const std::string_view name = setting;
   if (name != "MMU" && name != "FPRF" && name != "SafeTextureCacheColorSamples" &&
@@ -1089,6 +1091,15 @@ int GameConfigValueForTest(const char* game_id, int revision, const char* settin
                                        Config::Get(Config::GFX_SAFE_TEXTURE_CACHE_COLOR_SAMPLES);
   Config::RemoveLayer(Config::LayerType::GlobalGame);
   return value;
+}
+
+// The first name of GameConfigValue (the ABI manifest lists it).
+#ifdef __EMSCRIPTEN__
+EMSCRIPTEN_KEEPALIVE
+#endif
+int GameConfigValueForTest(const char* game_id, int revision, const char* setting)
+{
+  return GameConfigValue(game_id, revision, setting);
 }
 
 // The MMU only (the first 0097 test; kept: the ABI manifest lists it).

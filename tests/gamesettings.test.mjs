@@ -166,6 +166,7 @@ test("the core embeds the filtered INIs, and its game config applies them in Dol
     assert.equal(value("TSTE01", 0, "EFBToTextureEnable"), 0, "the ID3 file copies the EFB to RAM");
     assert.equal(value("XYZE01", 0, "EFBToTextureEnable"), 1, "Dolphin's default skips it");
     assert.equal(value("TSTE01", 0, "BBoxEnable"), 1, "the ID3 file turns the bounding box on");
+    assert.equal(m.ccall("GameConfigValue", "number", ["string", "number", "string"], ["TSTE01", 0, "BBoxEnable"]), 1, "the worker's export, the same reader");
     assert.equal(value("XYZE01", 0, "BBoxEnable"), 0, "Dolphin's default: off");
     assert.equal(value("TSTE01", 0, "CPUThread"), -2, "only allowlisted settings");
   } finally {

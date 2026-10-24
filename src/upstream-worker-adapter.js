@@ -638,6 +638,7 @@ export class UpstreamWorkerAdapter {
       rootEntryCount: response.rootEntryCount,
       rootEntries: response.rootEntries ?? [],
       bootProbe: response.bootProbe ?? null,
+      needs: response.needs ?? { boundingBox: false },
       fullCore: Boolean(response.fullCore),
       coreBoot: response.coreBoot ?? null,
       coreState: response.coreState,
