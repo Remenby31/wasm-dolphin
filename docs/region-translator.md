@@ -514,7 +514,7 @@ in a region (no DSI without the MMU, under which no region is installed,
 boot. The downcount check's branch hint (0131) sits on its `br_if`.
 Compiler version 27.
 
-## Guest calls as wasm calls (patch 0139, 2026-10-24)
+## Guest calls as wasm calls (patch 0142, 2026-10-24)
 
 A guest return (`blr`) used to leave the fragment through the region
 dispatcher's binary search, then a `return_call` into the caller's fragment
@@ -557,4 +557,4 @@ optimization").
   CPU loop (counted by `TryRunRegion`) only while the harness samples. Off, a
   call costs one state load and a hinted branch.
 
-Compiler version 29.
+Compiler version 31 (first numbered 0139, compiler version 29).

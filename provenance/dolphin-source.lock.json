@@ -25,7 +25,7 @@
       "commit": "01e0577914a75a2569c846778c2f93aa8e6feddd"
     }
   },
-  "patchSeriesSha256": "943e589f28a83e883a2734db7cfbbf23c84019dfcab8a3a785bbe3517d65d6e7",
+  "patchSeriesSha256": "c694458470777f2310317afb576ceedf17c922d1ad316003df8da6073c490051",
   "patches": [
     {
       "order": 1,
@@ -871,12 +871,20 @@
       "order": 106,
       "cwd": ".",
       "hashMode": "lf-normalized",
-      "path": "patches/dolphin-wasm/snapshot/0139-region-call-return.patch",
-      "size": 17162,
-      "sha256": "45089956724578de5f3e27d09ea4bed1eb0128419d1e34ccbbe872e87fa1dd70"
+      "path": "patches/dolphin-wasm/snapshot/0141-paired-fused-madd-simd.patch",
+      "size": 11072,
+      "sha256": "b2f9328325b951d01ef61ddd8b046dbf2d0811f58bedc3c1677096cf8a693419"
     },
     {
       "order": 107,
+      "cwd": ".",
+      "hashMode": "lf-normalized",
+      "path": "patches/dolphin-wasm/snapshot/0142-region-call-return.patch",
+      "size": 17267,
+      "sha256": "394b7826f1948dc53e6f8120967fbb263a413e6771880306ff7ba99cd90f487b"
+    },
+    {
+      "order": 108,
       "cwd": "Externals/SFML/SFML",
       "hashMode": "lf-normalized",
       "path": "patches/dolphin-wasm/submodules/0001-sfml-emscripten-config.patch",
@@ -884,7 +892,7 @@
       "sha256": "f82197a21fe982ad83f6ee7bbf5a03839b1cebd4d64da3eab11263842bf61d89"
     },
     {
-      "order": 108,
+      "order": 109,
       "cwd": "Externals/xxhash/xxHash",
       "hashMode": "lf-normalized",
       "path": "patches/dolphin-wasm/submodules/0002-xxhash-wasm-simd-scalar.patch",

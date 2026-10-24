@@ -356,7 +356,7 @@ export function assembleRegion(fragments, { helpers, pcOffset, memoryPages, memo
       if (r.kind === "import") index = helperIndex.get(r.name);
       else if (r.kind === "jump") index = entryOwner.get(r.targetPc >>> 0) ?? STUB;
       else if (r.kind === "dispatch") index = INNER;
-      // 0139: a guest call as a wasm call, to the fragment holding the
+      // 0142: a guest call as a wasm call, to the fragment holding the
       // callee here, else the exit stub (which chains on to its region).
       else if (r.kind === "call") index = entryOwner.get(r.targetPc >>> 0) ?? STUB;
       else throw new Error(`region: unknown reloc kind ${r.kind}`);

@@ -421,7 +421,7 @@ export function regionRecord(reply) {
     // heap patches
     ...regionPipeline(reply),
     ...(reply.regionChain ? { regionChain: reply.regionChain } : {}),
-    ...(reply.regionCalls ? { regionCalls: reply.regionCalls } : {}) // 0139
+    ...(reply.regionCalls ? { regionCalls: reply.regionCalls } : {}) // 0142
   };
   return p4.error ? { p4: null, p4Why: p4.error, ...samples } : { p4, p4Raw: stats, ...samples };
 }

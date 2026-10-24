@@ -606,8 +606,8 @@ test("chained regions run a whole call in one dispatch, like the interpreter", {
     assert.equal(chained.ran, 1, "main, double, main, count, main: one dispatch");
     assert.ok(unchained.ran >= 4, `unchained dispatches (${unchained.ran})`);
     const chain = core.regionChainStats();
-    if (keyVersion() >= 29) {
-      // 0139: calls go through the stub (chained), returns come back as wasm
+    if (keyVersion() >= 31) {
+      // 0142: calls go through the stub (chained), returns come back as wasm
       // returns: fewer chains than dispatcher round trips saved.
       assert.ok(chain.chained >= 1 && chain.chained <= unchained.ran - 1, `${chain.chained} chains for ${unchained.ran - 1} round trips saved`);
     } else {
@@ -1313,14 +1313,14 @@ test("continuation budget: past a full first fragment every continuation byte is
   assert.ok(short.budgetRefused >= 1, `refused ${short.budgetRefused}`);
 });
 
-// 0139: a guest call made by a region is a wasm `call` (to the callee's
+// 0142: a guest call made by a region is a wasm `call` (to the callee's
 // fragment in the module, else the exit stub, which chains on), its return a
 // wasm return (3) that the caller takes only at its continuation. Calls
 // within one module and across modules (one region per function), a
 // recursion past the 64-call cap, a return elsewhere than the continuation
 // (LR rewritten: passed up to the dispatcher), each against the interpreter,
 // to the end and at budgets that stop it mid-call.
-const callSkip = chainSkip || (core?.has("DolphinWeb_AotKeyParts") && keyVersion() < 29 && "core before 0139 (compiler version < 29)");
+const callSkip = chainSkip || (core?.has("DolphinWeb_AotKeyParts") && keyVersion() < 31 && "core before 0142 (compiler version < 31)");
 const CALL_TEXT = 0x80016100;
 const BEQLR = 0x4d820020; // beqlr cr0
 const CALLS = assemble(CALL_TEXT, [
@@ -1329,10 +1329,6 @@ const CALLS = assemble(CALL_TEXT, [
   asm.li(3, 0), (pc, l) => asm.bl(pc, l.cond), asm.li(3, 1), (pc, l) => asm.bl(pc, l.cond),
   (pc, l) => asm.bl(pc, l.jumper), asm.li(6, 1),
   "elsewhere", asm.li(7, 2), lwz(0, 1, 20), asm.addi(1, 1, 16), mtlr(0), asm.blr(),
-  // main_small: the same without the deep recursion (no call past the cap).
-  "main_small", asm.mflr(0), asm.stwu(1, 1, -16), stw(0, 1, 20), asm.li(3, 10), (pc, l) => asm.bl(pc, l.self),
-  asm.li(3, 0), (pc, l) => asm.bl(pc, l.cond), asm.li(3, 1), (pc, l) => asm.bl(pc, l.cond),
-  (pc, l) => asm.bl(pc, l.jumper), asm.li(6, 1), (pc, l) => asm.b(pc, l.elsewhere),
   // recA / recB (r3): a mutual recursion 100 deep, every call to the other
   // function's fragment (past the 64 cap); r4 += 1 per level on the way back.
   "recA", asm.mflr(0), asm.stwu(1, 1, -16), stw(0, 1, 20), asm.cmplwi(3, 0), (pc, l) => asm.beq(pc, l.recA_done),
@@ -1351,12 +1347,26 @@ const CALLS = assemble(CALL_TEXT, [
   // jumper: returns to `elsewhere`, not to its call's continuation.
   "jumper", (pc, l) => asm.lis(5, l.elsewhere >>> 16), (pc, l) => asm.ori(5, 5, l.elsewhere & 0xffff), mtlr(5), asm.blr()
 ]);
-function installCalls(maxFunctions) {
-  const dol = buildDol({ textAddr: CALL_TEXT, text: CALLS.words, entry: CALLS.labels.main });
+// The same without the deep recursion (no call past the cap), its own
+// program so its entry is a function of the plan.
+const SMALL_TEXT = 0x80019100;
+const SMALL = assemble(SMALL_TEXT, [
+  "main", asm.mflr(0), asm.stwu(1, 1, -16), stw(0, 1, 20), asm.li(3, 10), (pc, l) => asm.bl(pc, l.self),
+  asm.li(3, 0), (pc, l) => asm.bl(pc, l.cond), asm.li(3, 1), (pc, l) => asm.bl(pc, l.cond),
+  (pc, l) => asm.bl(pc, l.jumper), asm.li(6, 1),
+  "elsewhere", asm.li(7, 2), lwz(0, 1, 20), asm.addi(1, 1, 16), mtlr(0), asm.blr(),
+  "self", asm.mflr(0), asm.stwu(1, 1, -16), stw(0, 1, 20), asm.cmplwi(3, 0), (pc, l) => asm.beq(pc, l.self_done),
+  asm.addi(3, 3, -1), (pc, l) => asm.bl(pc, l.self), asm.addi(4, 4, 2),
+  "self_done", lwz(0, 1, 20), asm.addi(1, 1, 16), mtlr(0), asm.blr(),
+  "cond", asm.cmplwi(3, 0), BEQLR, asm.addi(5, 5, 1), asm.blr(),
+  "jumper", (pc, l) => asm.lis(5, l.elsewhere >>> 16), (pc, l) => asm.ori(5, 5, l.elsewhere & 0xffff), mtlr(5), asm.blr()
+]);
+function installCalls(maxFunctions, program = CALLS, text = CALL_TEXT) {
+  const dol = buildDol({ textAddr: text, text: program.words, entry: program.labels.main });
   const { image, entryPoint } = imageFromDol(dol);
   const plan = planDol({ image, entryPoint, gameId: "TEST01", dolBytes: dol, options: { gapFill: false } });
   for (const s of image.segments) core.load(s.start, s.bytes);
-  core.invalidate(CALL_TEXT, 4 * CALLS.words.length);
+  core.invalidate(text, 4 * program.words.length);
   core.module._DolphinWeb_AotForgetRegionsForTest?.();
   core.setRegionsEnabled(true);
   core.setRegionChaining(true);
@@ -1364,7 +1374,7 @@ function installCalls(maxFunctions) {
   serviceAll();
   return plan;
 }
-test("guest calls as wasm calls, in one module and across modules, past the depth cap and returning elsewhere: like the interpreter (0139)", { skip: callSkip }, () => {
+test("guest calls as wasm calls, in one module and across modules, past the depth cap and returning elsewhere: like the interpreter (0142)", { skip: callSkip }, () => {
   for (const maxFunctions of [100, 1]) {
     installCalls(maxFunctions);
     const reference = runCall(CALLS.labels.main, { regions: false });
@@ -1386,15 +1396,17 @@ test("guest calls as wasm calls, in one module and across modules, past the dept
     assert.ok(capped >= 30, `${what}: ${capped} calls past the cap (recursion 100)`);
     // ...and without it: self's inner returns stay in its fragment, cond's
     // beqlr returns taken and not, only jumper's return is elsewhere.
+    installCalls(maxFunctions, SMALL, SMALL_TEXT);
     core.module._DolphinWeb_RegionCallStats(1);
-    const small = runCall(CALLS.labels.main_small, { regions: true });
-    const smallReference = (() => { const r = runCall(CALLS.labels.main_small, { regions: false }); return r; })();
+    const small = runCall(SMALL.labels.main, { regions: true });
+    const smallReference = runCall(SMALL.labels.main, { regions: false });
     const [smallCalls, , elsewhere, , smallCapped] = stats();
     core.module._DolphinWeb_RegionCallStats(0);
     assert.deepEqual(small.state, smallReference.state, `${what}: main_small`);
     assert.equal(smallCapped, 0);
     assert.ok(smallCalls >= 4, `${what}: ${smallCalls} calls`);
     assert.equal(elsewhere, 1, `${what}: only jumper's return is elsewhere`);
+    installCalls(maxFunctions); // back to CALLS for the budgets
     for (const budget of [1, 7, 40, 151, 400, 777, 1501]) {
       core.reset(seedGprs(CALLS.labels.main), CALLS.labels.main, STOP, budget);
       while (core.downcount() > 0 && core.pc() !== STOP) if (!core.dispatchRegion()) assert.equal(core.interpretOne(), 0);
@@ -1408,9 +1420,9 @@ test("guest calls as wasm calls, in one module and across modules, past the dept
   }
 });
 
-// 0139: the depth starts at 0 at every region run, whatever was left (here
+// 0142: the depth starts at 0 at every region run, whatever was left (here
 // set to the cap by hand): no call of the next run is made past the cap.
-test("a region run starts at call depth 0 (0139)", { skip: callSkip }, () => {
+test("a region run starts at call depth 0 (0142)", { skip: callSkip }, () => {
   installCalls(100);
   const stats = () => Array.from(new Uint32Array(core.module.HEAPU8.buffer, core.module._DolphinWeb_RegionCallStats(-1), 6));
   core.module._DolphinWeb_RegionCallStats(1);
@@ -1425,11 +1437,10 @@ test("a region run starts at call depth 0 (0139)", { skip: callSkip }, () => {
   assert.equal(capped, 0, "none past the cap: the run started at 0");
 });
 
-// 0139: a callee that rewrites its caller's continuation (stw, icbi, isync;
-// no dcbst, so the region reaches the isync) then returns: its
-// isync block leaves the region (0), every
-// call passes it up, and the caller never goes on in code that is gone. As
-// the interpreter.
+// 0142: a callee that rewrites its caller's continuation (stw, icbi,
+// isync) then returns. The translator does not take icbi: the callee's
+// region leaves before it (0), every call passes that up, and the caller
+// never goes on in code that is gone. As the interpreter.
 const PATCH_TEXT = 0x80017100;
 const icbi = (a, b) => (31 << 26) | (a << 16) | (b << 11) | (982 << 1);
 const ISYNC = 0x4c00012c;
@@ -1441,7 +1452,7 @@ const PATCHER = assemble(PATCH_TEXT, [
   (pc, l) => asm.lis(6, l.cont >>> 16), (pc, l) => asm.ori(6, 6, l.cont & 0xffff),
   stw(5, 6, 0), icbi(0, 6), ISYNC, asm.blr()
 ]);
-test("a callee that rewrites its caller's continuation: the caller runs the new code, like the interpreter (0139)", { skip: callSkip }, () => {
+test("a callee that rewrites its caller's continuation: the caller runs the new code, like the interpreter (0142)", { skip: callSkip }, () => {
   const load = () => {
     const dol = buildDol({ textAddr: PATCH_TEXT, text: PATCHER.words, entry: PATCHER.labels.main });
     const { image, entryPoint } = imageFromDol(dol);
@@ -1460,17 +1471,17 @@ test("a callee that rewrites its caller's continuation: the caller runs the new 
     queueAll(plan, maxFunctions, true);
     serviceAll();
     const got = runCall(PATCHER.labels.main, { regions: true });
-    // After the isync block leaves the region, its blr and the rewritten
-    // continuation (its region dropped by the icbi) run outside: at most the
-    // 6 ops from the blr on. Leaving earlier (at the icbi) would add the icbi
-    // and the isync.
-    assert.ok(got.interpreted <= 6, `maxFunctions ${maxFunctions}: ${got.interpreted} ops interpreted: stw, icbi and isync ran in the region`);
+    // The translator does not take icbi: the region leaves before it (its
+    // prefix ends, 0), every call passes that up, and the icbi, isync, blr
+    // and the rewritten continuation run outside: 8 ops at most, the stw
+    // and the calls in the region.
+    assert.ok(got.interpreted <= 8, `maxFunctions ${maxFunctions}: ${got.interpreted} ops interpreted`);
     assert.deepEqual(got.state, reference.state, `maxFunctions ${maxFunctions}`);
     assert.equal(got.downcount, reference.downcount, `maxFunctions ${maxFunctions}`);
   }
 });
 
-// 0139: a callee that traps (tw: a program exception taken by its helper,
+// 0142: a callee that traps (tw: a program exception taken by its helper,
 // the fragment halts with 2) under two levels of wasm calls: 2 is passed up
 // through every call, and the state at the handler is the interpreter's.
 const TRAP_TEXT = 0x80018100;
@@ -1480,7 +1491,7 @@ const TRAPPER = assemble(TRAP_TEXT, [
   "middle", asm.mflr(0), asm.stwu(1, 1, -16), stw(0, 1, 20), (pc, l) => asm.bl(pc, l.trap), lwz(0, 1, 20), asm.addi(1, 1, 16), mtlr(0), asm.blr(),
   "trap", asm.li(3, 5), TW, asm.blr()
 ]);
-test("a trap in a callee two wasm calls deep: the handler sees the interpreter's state (0139)", { skip: callSkip }, () => {
+test("a trap in a callee two wasm calls deep: the handler sees the interpreter's state (0142)", { skip: callSkip }, () => {
   const VECTOR = 0x700;
   const load = () => {
     const dol = buildDol({ textAddr: TRAP_TEXT, text: TRAPPER.words, entry: TRAPPER.labels.main });

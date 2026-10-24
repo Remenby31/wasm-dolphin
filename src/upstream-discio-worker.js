@@ -364,7 +364,7 @@ function harnessJitRegionStats({ sampleEvery, pcs } = {}) {
   const stats = moduleInstance?._DolphinWeb_JitRegionStats;
   if (!stats) return { error: "core has no DolphinWeb_JitRegionStats" };
   const ptr = stats(Number.isInteger(sampleEvery) && sampleEvery >= 0 ? sampleEvery : -1) >>> 0;
-  // 0139: the counters of guest calls made by regions as wasm calls start
+  // 0142: the counters of guest calls made by regions as wasm calls start
   // and stop with the region stats (on while sampling).
   if (Number.isInteger(sampleEvery)) moduleInstance._DolphinWeb_RegionCallStats?.(sampleEvery >= 0 ? 1 : 0);
   const heap = moduleInstance.HEAPU8;
@@ -386,7 +386,7 @@ function harnessJitRegionStats({ sampleEvery, pcs } = {}) {
     regionChain: harnessRegionChainStats(heap), regionSleep: harnessRegionSleepStats(), ledger: harnessRegionLedger(pcs),
     regionCalls: harnessRegionCallStats() };
 }
-// Guest calls made by region code as wasm calls (patch 0139): calls, returns
+// Guest calls made by region code as wasm calls (patch 0142): calls, returns
 // elsewhere than the continuation, codes passed up, calls past the depth
 // cap, depth reached. Null with an older core.
 function harnessRegionCallStats() {
