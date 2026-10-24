@@ -1,7 +1,7 @@
 diff --git a/Source/Core/Core/PowerPC/CachedInterpreter/CachedInterpreter.cpp b/Source/Core/Core/PowerPC/CachedInterpreter/CachedInterpreter.cpp
 --- a/Source/Core/Core/PowerPC/CachedInterpreter/CachedInterpreter.cpp
 +++ b/Source/Core/Core/PowerPC/CachedInterpreter/CachedInterpreter.cpp
-@@ -6142,6 +6142,119 @@ void EmitPairedFusedMulAddSub(std::vector<u8>& body, const WasmStateLayout& layo
+@@ -6147,6 +6147,119 @@ void EmitPairedFusedMulAddSub(std::vector<u8>& body, const WasmStateLayout& layo
    body.push_back(0x0b);
  }
  
@@ -121,7 +121,7 @@ diff --git a/Source/Core/Core/PowerPC/CachedInterpreter/CachedInterpreter.cpp b/
  // fadd/fsub/fmul/fdiv (63), their single forms (59), ps_add/ps_sub/ps_mul/
  // ps_muls0/ps_muls1 (4). FMA-family subops go to the interpreter helper.
  void EmitExactFpArithmetic(std::vector<u8>& body, const WasmStateLayout& layout,
-@@ -6218,6 +6331,17 @@ void EmitExactFpArithmetic(std::vector<u8>& body, const WasmStateLayout& layout,
+@@ -6223,6 +6336,17 @@ void EmitExactFpArithmetic(std::vector<u8>& body, const WasmStateLayout& layout,
      body.push_back(0x0b);
      return;
    }
@@ -139,14 +139,13 @@ diff --git a/Source/Core/Core/PowerPC/CachedInterpreter/CachedInterpreter.cpp b/
    const u32 r0 = WasmFpScratchLocal(0), r1 = WasmFpScratchLocal(1), raw = WasmFpScratchLocal(2);
    // fmadds alone sets FI from the rounding (FI = unrounded != result).
    const bool fmadds_fi = inst.OPCD == 59 && inst.SUBOP5 == 29;
-@@ -17311,8 +17435,9 @@ namespace
- // the block by br_table (24 is 0132's). 27 (0135): region fragments keep pc,
+@@ -17492,8 +17616,8 @@ namespace
  // npc and downcount in locals, with one shared exit (26 is retired, 0134's).
  // 30 (0141): paired-single FMA in f64x2 with fused relaxed_madd (28, 29 are
--// 0137's and 0139's).
--constexpr u32 AOT_COMPILER_VERSION = 30;
-+// 0137's and 0139's). 32 (0143): ps_add/sub/mul/muls0/1 in f64x2 (31 is
-+// 0142's).
+ // 0137's and 0139's). 31 (0142): guest calls as wasm calls, guest returns as
+-// wasm returns (was 0139).
+-constexpr u32 AOT_COMPILER_VERSION = 31;
++// wasm returns (was 0139). 32 (0143): ps_add/sub/mul/muls0/1 in f64x2.
 +constexpr u32 AOT_COMPILER_VERSION = 32;
  constexpr u32 AOT_MAX_FRAGMENT_BYTES = 1u << 20;
  thread_local std::vector<u32> t_aot_out;

@@ -5,11 +5,12 @@
 // in f64x2, with the scalar path's guards as lane masks; any lane outside them
 // sends the op to the interpreter. DISABLE_NATIVE_PS (1 << 29) keeps the
 // scalar lanes: both forms must give the interpreter's registers and FPSCR,
-// FPRF on and off, blocks and regions alike. Each guard has lanes that only
-// it sends to the interpreter: a result below 2^-126 (the NI flush and
-// underflow), one past the FLT_MAX midpoint (overflow), a denormal frC (the
-// interpreter's Force25Bit normalizes it), and an frC with bits below the 25
-// kept (Force25Bit itself).
+// FPRF on and off, blocks and regions alike. Each guard has a lane that only
+// it handles, checked by removing it (one CI mutation each, review of #204):
+// a result below 2^-126 (the NI flush and underflow), one past the FLT_MAX
+// midpoint (overflow), a denormal frC with a normal product (the
+// interpreter's Force25Bit normalizes it), and an frC whose bits below the
+// 25 kept change the single result (Force25Bit itself).
 
 import assert from "node:assert/strict";
 import { existsSync, readFileSync } from "node:fs";
@@ -50,8 +51,14 @@ const FAST = [[1.5, 2.25], [-3, 0.125], [0, -0], [1e30, 1e-20], [Math.fround(0.1
 const SLOW = [
   [1e-20, 1e-20], [2 ** -130, 2 ** -131], // results below 2^-126: mul, and add/sub
   [3e38, 3e38], [2 ** 127, 4], // past the FLT_MAX midpoint: add, mul
-  [1.5, f(0x00080000)], [1.5, f(0x00000000, 0x12345)], // denormal frC (mul) or tiny b (add)
-  [3, 1 + 2 ** -30], [7, f(0x3ff00000, 0x0c000000)], // frC bits below the 25 kept: Force25Bit
+  // A denormal frC whose product is a normal single: only the denormal-frC
+  // guard sends it to the interpreter, whose Force25Bit normalizes first and
+  // keeps 25 significant bits (on the raw bits it keeps fewer: 0.14222222 vs
+  // 0.14222217 here).
+  [2 ** 1023, f(0x00012345, 0x67ffffff)],
+  // Force25Bit itself: 1 * (1 + 2^-24 + 2^-26) is 1 with frC rounded to 25
+  // bits (a single tie, to even) and 1 + 2^-23 without.
+  [1, 1 + 2 ** -24 + 2 ** -26],
   [NaN, 1], [1, Infinity], [Infinity, -Infinity]
 ];
 
