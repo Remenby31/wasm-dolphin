@@ -1,0 +1,93 @@
+diff --git a/Source/Core/Core/PowerPC/CachedInterpreter/CachedInterpreter.cpp b/Source/Core/Core/PowerPC/CachedInterpreter/CachedInterpreter.cpp
+--- a/Source/Core/Core/PowerPC/CachedInterpreter/CachedInterpreter.cpp
++++ b/Source/Core/Core/PowerPC/CachedInterpreter/CachedInterpreter.cpp
+@@ -6034,13 +6034,14 @@ void EmitStoreFprLaneFromLocal(std::vector<u8>& body, const WasmStateLayout& lay
+ // (0129's mode), both lanes in f64x2 at once. Inside the MSR fast-path if:
+ // emits `if (every lane passes) { store both lanes, FPRF } else helper end`.
+ // A lane passes exactly where the scalar path (EmitFpArithLane with
+-// EmitExactMulAddSub's fused branch) computes it inline without its tie fix:
+-// a and frC zero or normal, then frC rounded to 25 bits (Force25Bit), then a
+-// zero operand with b finite or the 2^995 / 2^-900 range, no single tie in
+-// a * c + b (the scalar fix stays, inline, for the helper here: rare), and a
+-// result that is zero or a normal single (no NaN, overflow or NI flush). The
+-// rest, and any lane failing, calls the interpreter for the whole op, as the
+-// scalar path does when one of its lanes fails.
++// EmitExactMulAddSub's fused branch) computes it inline: a and frC zero or
++// normal, then frC rounded to 25 bits (Force25Bit), then a zero operand with b
++// finite or the 2^995 / 2^-900 range, and a result that is zero or a normal
++// single (no NaN, overflow or NI flush). The rest, and any lane failing, calls
++// the interpreter for the whole op, as the scalar path does when one of its
++// lanes fails. A single tie in a * c + b gets NI_madd_msub's fix inline, on
++// both lanes at once (0161): quantized vertex math ties on most lanes, and
++// 0141 sent each of those to the helper (135k calls a second on a heavy scene).
+ void EmitPairedFusedMulAddSub(std::vector<u8>& body, const WasmStateLayout& layout,
+                               const PPCAnalyst::CodeOp& op, bool sub, bool negate, u32 c_lane,
+                               bool splat_c, u32 downcount)
+@@ -6053,9 +6054,10 @@ void EmitPairedFusedMulAddSub(std::vector<u8>& body, const WasmStateLayout& layo
+     EmitU32Leb(body, code);
+   };
+   constexpr u32 LOAD = 0x00, STORE = 0x0b, SHUFFLE = 0x0d, EXTRACT = 0x21,
+-                EQ = 0x47, LT = 0x49, LE = 0x4b, GE = 0x4c, AND = 0x4e, ANDNOT = 0x4f, OR = 0x50,
++                EQ = 0x47, LT = 0x49, LE = 0x4b, GE = 0x4c, AND = 0x4e, OR = 0x50,
+                 DEMOTE = 0x5e, PROMOTE = 0x5f, ALL_TRUE = 0xc3, ADD_I64 = 0xce, EQ_I64 = 0xd6,
+-                ABS = 0xec, NEG = 0xed, MUL = 0xf2, MADD = 0x107;
++                ABS = 0xec, NEG = 0xed, MUL = 0xf2, MADD = 0x107, XOR = 0x51, NE = 0x48,
++                SHR_S_I64 = 0xcc, ADD = 0xf0, SUB = 0xf1;
+   const auto load = [&](u32 offset) {
+     EmitLocalGet(body, 0);
+     simd(LOAD);
+@@ -6126,11 +6128,7 @@ void EmitPairedFusedMulAddSub(std::vector<u8>& body, const WasmStateLayout& layo
+   simd(AND);
+   // r = fma(a, c, b), rounded once.
+   get(va); get(vc); get(vb); simd(MADD);
+-  body.push_back(0x22);  // local.tee
+-  EmitU32Leb(body, vr);
+-  // No single tie: the 29 bits below single precision are not exactly half.
+-  i64x2(0x1fffffffull); simd(AND); i64x2(0x10000000ull); simd(EQ_I64);
+-  simd(ANDNOT);
++  EmitLocalSet(body, vr);
+   // r is zero or rounds to a normal single (EmitIsZeroOrNormalSingleResult).
+   abs_of(vr); f64x2(0.0); simd(EQ);
+   abs_of(vr); f64x2(0x1p-126); simd(GE);
+@@ -6142,6 +6140,29 @@ void EmitPairedFusedMulAddSub(std::vector<u8>& body, const WasmStateLayout& layo
+   HintNextIf(body, true);  // a lane leaves the fast path rarely
+   body.push_back(0x04);
+   body.push_back(0x40);
++  // 0161: NI_madd_msub's single tie fix, both lanes. Where the 29 bits below
++  // single precision are exactly half, the error of the fma (2Sum, with
++  // fma(a, c, b - r) for the product's part) says which way the exact result
++  // lies: r moves one double ulp toward it (+1 on the bits when the error has
++  // r's sign, -1 otherwise), so the demotion rounds that way. A zero error is
++  // a true tie: the demotion's ties-to-even is right. Lanes without a tie
++  // keep r. The checks above ran on r before the nudge: one ulp at the 29th
++  // bit never crosses a single's exponent, and a tie at the overflow bound
++  // (bits 0x47effffff0000000) failed them and calls the helper. va is free
++  // past the fma: it holds the error.
++  get(va); get(vc); get(vb); get(vr); simd(SUB); simd(MADD);  // fma(a, c, b - r)
++  get(vb); get(vr); get(vb); get(vr); simd(SUB); simd(ADD);
++  simd(SUB);                                                   // b - (r + (b - r))
++  simd(ADD);
++  EmitLocalSet(body, va);
++  get(vr); get(va); simd(XOR); EmitI32Const(body, 63); simd(SHR_S_I64);
++  i64x2(1); simd(OR);                                          // -1 or 1 per lane
++  get(vr); i64x2(0x1fffffffull); simd(AND); i64x2(0x10000000ull); simd(EQ_I64);
++  get(va); f64x2(0.0); simd(NE);
++  simd(AND);
++  simd(AND);
++  get(vr); simd(ADD_I64);
++  EmitLocalSet(body, vr);
+   // ForceSingle both lanes, then nmadd/nmsub negate the rounded result.
+   EmitLocalGet(body, 0);
+   get(vr);
+@@ -17839,8 +17860,9 @@ namespace
+ // wasm returns (was 0139). 32 (0143): ps_add/sub/mul/muls0/1 in f64x2.
+ // 34 (0146): the 0141/0143 paths in fewer bytes (splatted constants, one
+ // helper call per op); 33 is retired (0144, closed). 35 (0147): psq_l and
+-// psq_st float pairs in v128.
+-constexpr u32 AOT_COMPILER_VERSION = 35;
++// psq_st float pairs in v128. 37 (0161): paired FMA single ties fixed inline
++// (36 is 0157's).
++constexpr u32 AOT_COMPILER_VERSION = 37;
+ constexpr u32 AOT_MAX_FRAGMENT_BYTES = 1u << 20;
+ thread_local std::vector<u32> t_aot_out;
+ u8* s_aot_ram = nullptr;

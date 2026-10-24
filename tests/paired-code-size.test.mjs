@@ -51,7 +51,7 @@ test("paired add/sub/mul stay compact (bytes per op in a region)", { skip }, () 
 test("fused paired FMA stays compact (bytes per op in a region)", { skip: skip || (probeRelaxedMadd() !== "fused" && "this engine does not fuse relaxed_madd") }, () => {
   const previous = core.module._DolphinWeb_SetFusedMadd(1);
   try {
-    for (const [name, xo, max] of [["ps_madd", 29, 490], ["ps_nmsub", 30, 495], ["ps_madds0", 14, 510]]) {
+    for (const [name, xo, max] of [["ps_madd", 29, 640], ["ps_nmsub", 30, 645], ["ps_madds0", 14, 660]]) {
       const n = bytesPerOp(4, xo);
       assert.ok(n <= max, `${name}: ${n} bytes per op, more than ${max}`);
     }
