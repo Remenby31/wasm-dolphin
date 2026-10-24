@@ -434,7 +434,12 @@ export function coreRegionTranslator(m, { mask, helperNames, maxBlocks = 64, max
 // REGION_UNIT_CONTINUATION_MAX_BYTES per module: a module must still fit a
 // throttle sleep (0107, ~1.7 ms/MB). A leader that does not translate (a
 // first op the translator refuses) stays an exit, as before.
-export const REGION_FRAGMENT_MAX_BYTES = 96000;
+// Every fragment, the first one included, stays under it as a whole wasm
+// function body (prologue and exits counted: fragment.code is the body):
+// JavaScriptCore never tiers a function past 100,000 bytes of body up to OMG
+// (maximumOMGCandidateCost), so a bigger hot fragment stays in BBQ in
+// Safari, 1.6x slower (rendu's WebKit lane). V8 has no such cap.
+export const REGION_FRAGMENT_MAX_BYTES = 95000;
 export const REGION_CONTINUATION_MAX_BYTES = 2 << 20;
 export const REGION_UNIT_CONTINUATION_MAX_BYTES = 1 << 20;
 export const REGION_MAX_CONTINUATIONS = 31;
@@ -442,8 +447,18 @@ export const REGION_UNCUT_BLOCKS = 64; // what one fragment held before continua
 const capped = (fragment, maxBlocks, maxFragmentBytes) => fragment.entries.length >= maxBlocks || fragment.code.length >= maxFragmentBytes;
 export async function translateWithContinuations(m, f, { mask, maxBlocks, names, maxContinuations = REGION_MAX_CONTINUATIONS,
   maxBytes = REGION_CONTINUATION_MAX_BYTES, maxFragmentBytes = REGION_FRAGMENT_MAX_BYTES, slice = async () => {} }) {
-  const first = translateOne(m, f, { mask, maxBlocks, names });
-  if (!first.fragment || maxContinuations <= 0 || !capped(first.fragment, maxBlocks, maxFragmentBytes)) return first;
+  // The first fragment, too, under the byte cap: fewer blocks until it fits
+  // (a single block over it is kept, being the function's entry); what it
+  // leaves out goes to continuations. Before, a first fragment was capped
+  // by blocks only (0x800f4e50: 612 KB in one function).
+  let first = translateOne(m, f, { mask, maxBlocks, names });
+  let cut = false;
+  for (let blocks = maxBlocks; first.fragment && first.fragment.code.length > maxFragmentBytes && blocks > 1;) {
+    blocks = Math.max(1, blocks >> 1);
+    first = translateOne(m, f, { mask, maxBlocks: blocks, names });
+    cut = true;
+  }
+  if (!first.fragment || maxContinuations <= 0 || (!cut && !capped(first.fragment, maxBlocks, maxFragmentBytes))) return first;
   const branches = functionBranches(m, f.ranges);
   const owned = new Set(first.fragment.entries.map((pc) => pc >>> 0));
   const tried = new Set();
