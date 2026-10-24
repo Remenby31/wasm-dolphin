@@ -474,9 +474,14 @@ export async function translateWithContinuations(m, f, { mask, maxBlocks, names,
   // An uncapped first fragment can still leave code out: the core's
   // discovery does not follow an mtmsr's fall-through (an exit: MSR may
   // have changed), so blocks only it reaches had no entry (a homebrew's main
-  // loop: 35 % of its cycles outside regions). The frontier says so.
+  // loop: 35 % of its cycles outside regions). The frontier says so; it is
+  // followed only when that code loops (a branch back at or past the first
+  // leader). A straight tail after an mtmsr (an OS routine's FPU save or
+  // load, the FP unavailable path) runs once per call: as a region it cost
+  // one more region entry per call and broke block chains there (race
+  // scene -1.3 %, review of #240).
   const branches = functionBranches(m, f.ranges);
-  if (!seeds.length && !cut && !capped(first.fragment, maxBlocks, maxFragmentBytes) && !frontier(branches, owned).length) return first;
+  if (!seeds.length && !cut && !capped(first.fragment, maxBlocks, maxFragmentBytes) && !loopsPast(branches, frontier(branches, owned), owned)) return first;
   const tried = new Set();
   const continuations = [];
   // The budget counts only what goes past the function's old single
@@ -615,6 +620,33 @@ export function withoutStarts(ranges, starts) {
     if (s < e) out.push([s, e >>> 0]);
   }
   return out;
+}
+
+// Whether the code the frontier's `leaders` lead to holds a loop: walked
+// from each leader to the next block end or held entry, following the
+// branches met there (targets not held), a branch goes back into code the
+// walk reached. Held code is never walked (a straight tail before a held
+// loop does not count), nor a word no walk reaches (a literal after a blr
+// that decodes as a branch back; review of #243).
+export function loopsPast(branches, leaders, owned) {
+  const ends = branches.ends ?? [];
+  const starts = [...owned].sort((x, y) => x - y);
+  const after = (list, pc) => { let lo = 0, hi = list.length; while (lo < hi) { const mid = (lo + hi) >> 1; if (list[mid] < pc) lo = mid + 1; else hi = mid; } return list[lo]; };
+  const walked = [], met = [];
+  const queue = [...leaders], seen = new Set(queue);
+  while (queue.length) {
+    const s = queue.pop();
+    const end = after(ends, s), held = after(starts, s + 1);
+    const stop = Math.min(end === undefined ? Infinity : end + 4, held === undefined ? Infinity : held);
+    walked.push([s, stop]);
+    for (const [a, targets] of branches) {
+      if (a < s || a >= stop) continue;
+      met.push([a, targets]);
+      for (const t of targets) if (!owned.has(t) && !seen.has(t)) { seen.add(t); queue.push(t); }
+    }
+  }
+  const reached = (pc) => walked.some(([s, e]) => pc >= s && pc < e);
+  return met.some(([a, targets]) => targets.some((t) => t <= a && reached(t)));
 }
 
 // The direct branches of the code in `ranges` ([start, end) guest
