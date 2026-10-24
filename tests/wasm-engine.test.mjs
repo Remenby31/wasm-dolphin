@@ -38,7 +38,7 @@ test("wasm engine: this Node is V8 by its Error shape", () => {
   assert.deepEqual(errorShape(), { line: false, lineNumber: false });
 });
 
-test("wasm engine: a native module cache to feed is V8's only", async () => {
+test("wasm engine: only an engine known to have no native module cache says so (unknown keeps it)", async () => {
   const { nativeModuleCache } = await import("../src/wasm-engine.js");
-  assert.deepEqual(["v8", "jsc", "spidermonkey", "unknown"].map(nativeModuleCache), [true, false, false, false]);
+  assert.deepEqual(["v8", "jsc", "spidermonkey", "unknown"].map(nativeModuleCache), [true, false, false, true]);
 });

@@ -48,6 +48,8 @@ export function wasmEngine({
 // Whether the engine keeps a native cache of compiled modules that a module
 // compiled ahead (and kept alive) feeds: V8's. JavaScriptCore and
 // SpiderMonkey have none, so a copy kept for it only costs memory there.
+// "unknown" answers true: a Chromium with an unusual user agent keeps its
+// cache; only an engine known to have none drops the copies.
 export function nativeModuleCache(engine) {
-  return engine === "v8";
+  return engine !== "jsc" && engine !== "spidermonkey";
 }
