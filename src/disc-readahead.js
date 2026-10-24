@@ -25,40 +25,51 @@ export function createDiscReadahead({
   heldBytes = DISC_READAHEAD_HELD_BYTES,
 }) {
   const stats = { blockReads: 0, blockHits: 0, bytesRead: 0, heldBytes: 0, maxHeldBytes: 0 };
-  // Per file: segments held (oldest first) and the read-ahead state.
+  // Segments held, every file's together (oldest first): one cap for all,
+  // so a disc change lets the previous disc's segments go first.
+  const segments = [];
+  // Per file: the read-ahead state.
   const files = new WeakMap();
 
   function stateOf(blob) {
     let f = files.get(blob);
-    if (!f) files.set(blob, (f = { segments: [], next: minBytes, lastEnd: -1 }));
+    if (!f) files.set(blob, (f = { next: minBytes, lastEnd: -1 }));
     return f;
   }
 
   // Room for `incoming` bytes before they are read: the cap holds at every
   // moment, the new segment included.
-  function evict(f, incoming) {
-    while (stats.heldBytes + incoming > heldBytes && f.segments.length > 0) {
-      stats.heldBytes -= f.segments.shift().bytes.length;
+  function evict(incoming) {
+    while (stats.heldBytes + incoming > heldBytes && segments.length > 0) {
+      stats.heldBytes -= segments.shift().bytes.length;
     }
   }
 
-  // The segment holding `at`, or a new one read from there.
+  function heldAt(blob, at) {
+    for (let i = segments.length - 1; i >= 0; i -= 1) {
+      const s = segments[i];
+      if (s.blob === blob && at >= s.start && at < s.start + s.bytes.length) return s;
+    }
+    return null;
+  }
+
+  // The segment holding `at`, or a new one read from there; null when the
+  // file gives nothing there (shorter than its node says).
   function segmentAt(blob, size, at) {
     const f = stateOf(blob);
-    for (let i = f.segments.length - 1; i >= 0; i -= 1) {
-      const s = f.segments[i];
-      if (at >= s.start && at < s.start + s.bytes.length) {
-        stats.blockHits += 1;
-        return s;
-      }
+    const held = heldAt(blob, at);
+    if (held) {
+      stats.blockHits += 1;
+      return held;
     }
     // Following on from the last read: twice as far; anything else is a seek.
     f.next = at === f.lastEnd ? Math.min(maxBytes, f.next * 2) : minBytes;
     const end = Math.min(size, at + f.next);
-    evict(f, end - at);
+    evict(end - at);
     const bytes = new Uint8Array(readBlob(blob.slice(at, end)));
-    const s = { start: at, bytes };
-    f.segments.push(s);
+    if (bytes.length === 0) return null;
+    const s = { blob, start: at, bytes };
+    segments.push(s);
     f.lastEnd = at + bytes.length;
     stats.blockReads += 1;
     stats.bytesRead += bytes.length;
@@ -76,13 +87,15 @@ export function createDiscReadahead({
     let out = offset;
     while (at < end) {
       const s = segmentAt(blob, size, at);
+      // A short file: what was read, as WORKERFS's own read would return.
+      if (!s) break;
       const from = at - s.start;
       const count = Math.min(s.bytes.length - from, end - at);
       buffer.set(s.bytes.subarray(from, from + count), out);
       at += count;
       out += count;
     }
-    return end - position;
+    return at - position;
   }
 
   return { read, stats };

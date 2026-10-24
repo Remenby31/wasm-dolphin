@@ -54,6 +54,37 @@ test("what is held stays under the cap, oldest segments out first", () => {
   assert.equal(d.calls.length, before + 1);
 });
 
+test("two discs share one cap: after a disc change the old disc's segments go first", () => {
+  const one = disc(4 << 20), two = disc(4 << 20);
+  const readBlob = (slice) => (slice.file === 1 ? one : two).readBlob(slice);
+  for (const [n, d] of [[1, one], [2, two]]) d.stream.node.contents = { slice: (a, b) => ({ file: n, a, b }) };
+  const ra = createDiscReadahead({ readBlob, heldBytes: 2 << 20 });
+  const out = new Uint8Array(16 << 10);
+  for (let p = 0; p < (2 << 20); p += out.length) ra.read(one.stream, out, 0, out.length, p);
+  const readsOnOne = one.calls.length;
+  // The second disc: a stream that settles at 1 MiB segments, then a pass
+  // over what is held must be copies, with the cap holding.
+  for (let p = 0; p < (2 << 20); p += out.length) ra.read(two.stream, out, 0, out.length, p);
+  const readsOnTwo = two.calls.length;
+  for (let p = (1 << 20); p < (2 << 20); p += out.length) {
+    ra.read(two.stream, out, 0, out.length, p);
+    assert.deepEqual(out, two.bytes.subarray(p, p + out.length));
+  }
+  assert.equal(two.calls.length, readsOnTwo, "what is held of the second disc is not read again");
+  assert.equal(one.calls.length, readsOnOne);
+  assert.ok(ra.stats.maxHeldBytes <= 2 << 20, `${ra.stats.maxHeldBytes} held at most`);
+});
+
+test("a file shorter than its node says: the read returns what there is, never loops", () => {
+  const d = disc(1000);
+  d.stream.node.size = 5000; // the node says more than the Blob holds
+  const ra = createDiscReadahead({ readBlob: d.readBlob, minBytes: 512 });
+  const out = new Uint8Array(4000);
+  assert.equal(ra.read(d.stream, out, 0, 4000, 500), 500);
+  assert.deepEqual(out.subarray(0, 500), d.bytes.subarray(500, 1000));
+  assert.equal(ra.read(d.stream, out, 0, 100, 2000), 0);
+});
+
 test("the worker reads the disc ahead by default, ?discreadahead=0 turns it off, and counts it", async () => {
   const read = (p) => readFile(new URL(p, import.meta.url), "utf8");
   const w = await read("../src/upstream-discio-worker.js");
