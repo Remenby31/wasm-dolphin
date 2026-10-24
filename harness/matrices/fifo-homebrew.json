@@ -12,6 +12,60 @@
         "cpu": "single",
         "fifolog": "1"
       }
+    },
+    {
+      "id": "dstalpha-fifo",
+      "iso": "harness/homebrew/out/dstalpha.dff",
+      "static": true,
+      "set": {
+        "cpu": "single",
+        "fifolog": "1"
+      }
+    },
+    {
+      "id": "dstalpha-coplanar-fifo",
+      "iso": "harness/homebrew/out/dstalpha-coplanar.dff",
+      "static": true,
+      "set": {
+        "cpu": "single",
+        "fifolog": "1"
+      }
+    },
+    {
+      "id": "dstalpha-redraw-fifo",
+      "iso": "harness/homebrew/out/dstalpha-redraw.dff",
+      "static": true,
+      "set": {
+        "cpu": "single",
+        "fifolog": "1"
+      }
+    },
+    {
+      "id": "efbpeek-fifo",
+      "iso": "harness/homebrew/out/efbpeek.dff",
+      "static": true,
+      "set": {
+        "cpu": "single",
+        "fifolog": "1"
+      }
+    },
+    {
+      "id": "ramcopy-fifo",
+      "iso": "harness/homebrew/out/ramcopy.dff",
+      "static": true,
+      "set": {
+        "cpu": "single",
+        "fifolog": "1"
+      }
+    },
+    {
+      "id": "gxscene-nocubes-fifo",
+      "iso": "harness/homebrew/out/gxscene-nocubes.dff",
+      "static": true,
+      "set": {
+        "cpu": "single",
+        "fifolog": "1"
+      }
     }
   ],
   "configs": [
