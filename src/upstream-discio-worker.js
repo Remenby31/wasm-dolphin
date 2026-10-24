@@ -137,6 +137,7 @@ import {
   enableWgpuNonDroppingBackpressure,
   failWgpuRingConsumer
 } from "./wgpu-ring-backpressure.js";
+import { createWgpuReplayParker } from "./wgpu-replay-park.js";
 import {
   WGPU_UPLOAD_PROBE_SCHEMA,
   createWgpuUploadProbeExecutor
@@ -1598,6 +1599,7 @@ async function handleMessage(type, payload) {
         efbCopyRam: payload.efbCopyRam,
         wgpuMask: payload.wgpuMask,
         wgpuFallback: payload.wgpuFallback,
+        dstAlphaTwoPass: payload.dstAlphaTwoPass,
         webglSoftware: payload.webglSoftware,
         efbDiag: payload.efbDiag,
         jitVerbose: payload.jitVerbose,
@@ -1842,6 +1844,20 @@ async function handleMessage(type, payload) {
       return harnessUniqueFramesRequest(payload);
     case "validationPcSampler":
       return harnessPcSampler(payload);
+    case "validationReadDstAlphaPasses": {
+      // Patch 0149: the dst-alpha second pass (0136), cumulative.
+      if (!harnessEnabled) return { error: "harness hooks are off" };
+      const stats = moduleInstance?._DolphinWeb_DstAlphaPassStats;
+      if (!stats || !moduleInstance._malloc) return { error: "core without patch 0149" };
+      const ptr = moduleInstance._malloc(12);
+      try {
+        stats(ptr);
+        const v = new Uint32Array(moduleInstance.HEAPU8.buffer, ptr, 3);
+        return { flushes: v[0], extraDraws: v[1], enabled: v[2] === 1 };
+      } finally {
+        moduleInstance._free(ptr);
+      }
+    }
     case "validationReadRelaxedMadd":
       // coreFused: the core's own mode (null: a core without patch 0129).
       return { mode: relaxedMadd, coreFused: moduleInstance?._DolphinWeb_FusedMadd ? moduleInstance._DolphinWeb_FusedMadd() === 1 : null };
@@ -2280,6 +2296,7 @@ async function loadCore({
   efbCopyRam = false,
   wgpuMask = "",
   wgpuFallback = false,
+  dstAlphaTwoPass = true,
   webglSoftware = false,
   efbDiag = false,
   jitVerbose = false,
@@ -2999,6 +3016,7 @@ async function loadCore({
   api.setJitRegionChaining?.(regionChain !== false ? 1 : 0);
   api.setPpcProfileEnabled?.(ppcProfile ? 1 : 0);
   if (Number.isInteger(gpuSpinMicros) && gpuSpinMicros >= 0) api.setGpuSpinBudget?.(gpuSpinMicros);
+  api.setDstAlphaTwoPass?.(dstAlphaTwoPass !== false ? 1 : 0);
   api.setWebGpuUploadArenaMiB?.(wgpuUploadArenaMiB, collectMetrics ? 1 : 0);
   api.setWebGpuProducerProfileEnabled?.(wgpuProducerProfileRequested ? 1 : 0);
   api.setWebGpuDrawProfileEnabled?.(wgpuDrawProfileRequested ? 1 : 0);
@@ -3127,6 +3145,7 @@ function bindApi(module) {
     setJitRegionsEnabled: optionalCwrap("DolphinWeb_JitSetRegionsEnabled", null, ["number"]),
     setJitRegionChaining: optionalCwrap("DolphinWeb_JitSetRegionChaining", null, ["number"]),
     setGpuSpinBudget: optionalCwrap("DolphinWeb_SetGpuSpinBudget", null, ["number"]),
+    setDstAlphaTwoPass: optionalCwrap("DolphinWeb_SetDstAlphaTwoPass", null, ["number"]),
     getPpcWasmJitEngagedFrame: optionalCwrap("GetPpcWasmJitEngagedFrame", "number", []),
     getPpcWasmJitArmStartFrame: optionalCwrap("GetPpcWasmJitArmStartFrame", "number", []),
     setPpcWasmJitEnabled:
@@ -9104,14 +9123,36 @@ function startWgpuReplayPump() {
     } else {
       webGpuCausalStats.replayPumpEmptyPollCount += 1;
     }
-    // A backlog the drainEveryMs perturbation holds back waits for its next
-    // drain instead of rescheduling at 0 ms.
+    // An empty ring parks until the producer publishes (4 ms at most, the
+    // old poll). A backlog the drainEveryMs perturbation holds back waits for
+    // its next drain instead of rescheduling at 0 ms.
+    if (write === read && !wgpuMappedCapacityBlocked && parkWgpuReplayPump(pump, write)) return;
     scheduleWgpuReplayPump(
       pump,
       write === read || wgpuMappedCapacityBlocked ? 4 : wgpuDiagDrainWaitMs()
     );
   };
   scheduleWgpuReplayPump(pump, 0);
+}
+
+// Waits for the producer on the write index instead of a 4 ms timer; false
+// when this engine cannot (no Atomics.waitAsync): the caller polls.
+// Waits for the producer on the write index instead of a 4 ms timer (patch
+// 0148); false when this engine cannot (no Atomics.waitAsync): the caller
+// polls. Created lazily: webGpuCausalStats is declared further down.
+let wgpuReplayParker = null;
+function parkWgpuReplayPump(pump, observedWrite) {
+  wgpuReplayParker ??= createWgpuReplayParker({
+    stats: webGpuCausalStats,
+    schedule: scheduleWgpuReplayPump,
+    isCurrentRing: (ring) => ring === webGpuCmdRing,
+  });
+  if (!wgpuReplayParker.park(webGpuCmdRing, observedWrite, pump)) return false;
+  if (wgpuReplayParker.parked) {
+    wgpuReplayPumpTimer = "parked";
+    wgpuReplayPumpDueAt = 0;
+  }
+  return true;
 }
 
 function scheduleWgpuReplayPump(callback, delayMs) {
@@ -9126,7 +9167,8 @@ function scheduleWgpuReplayPump(callback, delayMs) {
 }
 
 function cancelWgpuReplayPump() {
-  if (wgpuReplayPumpTimer !== null) clearTimeout(wgpuReplayPumpTimer);
+  if (wgpuReplayPumpTimer !== null && wgpuReplayPumpTimer !== "parked") clearTimeout(wgpuReplayPumpTimer);
+  wgpuReplayParker?.cancel(webGpuCmdRing);
   wgpuReplayPumpTimer = null;
   wgpuReplayYieldPending = false;
   wgpuReplayPumpScheduledAt = 0;
@@ -11952,6 +11994,15 @@ const webGpuCausalStats = {
   backlogHighWater: 0,
   replayPumpDrainCount: 0,
   replayPumpEmptyPollCount: 0,
+  // Patch 0148: the pump parks on an empty ring (waitAsync on the write
+  // index) and the producer wakes it. timedOutWithData counts a park that
+  // timed out although the write index had moved: with a 0148 core, a
+  // publish racing the timeout (rare); with an older core, every publish.
+  replayPumpParkCount: 0,
+  replayPumpParkNotifiedCount: 0,
+  replayPumpParkTimedOutCount: 0,
+  replayPumpParkTimedOutWithDataCount: 0,
+  replayPumpParkNotEqualCount: 0,
   replayPumpScheduleCount: 0,
   replayPumpBacklogScheduleCount: 0,
   replayPumpIdleScheduleCount: 0,

@@ -63,11 +63,11 @@ jobs:
           for p in dstalpha footprint cpufuzz; do
             node harness/probes/webkit-boot.mjs --browser chromium --dol harness/homebrew/out/$p.dol --port 8102 --secs 40 --expect-installs --expect-relaxed fused --out webkit-boot-chromium-$p.json
           done
-      - name: "WebKit: relaxed SIMD unsupported, regions install, compile and run in JSC"
+      - name: "WebKit: relaxed SIMD unsupported, regions install, compile and run in JSC; a wasm notify wakes waitAsync"
         timeout-minutes: 15
         run: |
           for p in dstalpha footprint cpufuzz; do
-            node harness/probes/webkit-boot.mjs --browser webkit --dol harness/homebrew/out/$p.dol --port 8102 --secs 40 --expect-installs --expect-relaxed unsupported --out webkit-boot-webkit-$p.json
+            node harness/probes/webkit-boot.mjs --browser webkit --dol harness/homebrew/out/$p.dol --port 8102 --secs 40 --expect-installs --expect-relaxed unsupported --expect-wasm-notify --out webkit-boot-webkit-$p.json
           done
       - name: "Region function sizes on the exact path (Safari's code) against JSC's OMG cap"
         timeout-minutes: 15
