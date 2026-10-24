@@ -26,6 +26,24 @@
       "key": "XFBToTextureEnable",
       "why": "Correctness: False keeps the XFB copy to RAM for the games that read it back. Under video=wgpu the copy is skipped unless the game's settings ask for it (#93), so without this key those games lose their frames.",
       "measured": "No effect on the measurement disc (its INI sets no [Video_Hacks] key). The RAM copy costs what it costs on Dolphin desktop, in the two GameCube games that ask for it."
+    },
+    {
+      "section": "Video_Hacks",
+      "key": "EFBAccessEnable",
+      "why": "Correctness: True lets the CPU read the EFB (peeks: colour and depth under the cursor, lens flares, picking). Off, every peek is skipped and reads 0 on any backend. Under video=wgpu peeks read back through the staging texture (0093); software reads its own EFB.",
+      "measured": "No effect on the measurement disc (none of its INIs is kept). Peeks cost a staging readback per 64-pixel tile touched (cached until the next draw), only in the 14 GameCube discs that set it."
+    },
+    {
+      "section": "Video_Hacks",
+      "key": "EFBToTextureEnable",
+      "why": "Correctness: False writes EFB copies to guest RAM too, for the games that read them back (CPU-side effects, screenshots, recursive textures). Without it those games sample stale RAM. Software and wgpu both honour it (ramcopy homebrew).",
+      "measured": "No effect on the measurement disc (none of its INIs is kept). Its cost, forced on the race scene under wgpu + aot=1 (race-perf, 3 valid pairs, 2026-10-24): useful frames 59.1 -> 47.3/s (XFB copies per VI 0.98 -> 0.79), VI p99 22 -> 61 ms, while CPU and GPU both keep headroom (max speed 2.0 and 3.5): the readback's latency, not its throughput. Paid only by the 36 GameCube discs that set it; software always copies to RAM."
+    },
+    {
+      "section": "Video_Hacks",
+      "key": "BBoxEnable",
+      "why": "Correctness: the games that read the bounding box (pixel engine registers) get the real box only with it on: off, BoundingBox::Get returns the value the game wrote. The software renderer computes the box as it rasterises; video=wgpu has no GPU box yet (SWBoundingBox, never updated by the GPU path), so a disc that sets it is a software-only case for the renderer choice.",
+      "measured": "No effect on the measurement disc (none of its INIs is kept). Software computes the box as it rasterises either way; the key only makes Dolphin return it (6 GameCube discs)."
     }
   ]
 }

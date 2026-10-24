@@ -1788,6 +1788,18 @@ int GetDiscNumber()
   return disc_number ? static_cast<int>(*disc_number) : -1;
 }
 
+// The mounted disc's revision (0 when it has none), -1 without a disc: with
+// GetGameId, what selects the disc's GameSettings INIs (GetGameIniFilenames).
+#ifdef __EMSCRIPTEN__
+EMSCRIPTEN_KEEPALIVE
+#endif
+int GetRevision()
+{
+  if (!s_disc)
+    return -1;
+  return static_cast<int>(s_disc->GetRevision().value_or(0));
+}
+
 const char* GetApploaderDate()
 {
   return s_apploader_date.c_str();

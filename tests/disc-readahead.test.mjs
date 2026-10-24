@@ -85,6 +85,56 @@ test("a file shorter than its node says: the read returns what there is, never l
   assert.equal(ra.read(d.stream, out, 0, 100, 2000), 0);
 });
 
+// Patch 0155: the next segment in the background, with an async reader the
+// test settles by hand.
+function asyncReader(d) {
+  const pending = [];
+  const readBlobAsync = (slice) => new Promise((resolve) => pending.push(() => resolve(d.readBlob(slice))));
+  const settle = async () => { while (pending.length) pending.shift()(); await new Promise((r) => setImmediate(r)); };
+  return { readBlobAsync, pending, settle };
+}
+
+test("prefetch: a stream reads ahead in the background and the DVD thread finds it held", async () => {
+  const d = disc(8 << 20);
+  const a = asyncReader(d);
+  const ra = createDiscReadahead({ readBlob: d.readBlob, readBlobAsync: a.readBlobAsync });
+  const out = new Uint8Array(16 << 10);
+  let p = 0;
+  const readNext = () => { ra.read(d.stream, out, 0, out.length, p); assert.deepEqual(out, d.bytes.subarray(p, p + out.length)); p += out.length; };
+  // 64 KiB, then following on: a 128 KiB sync read and a prefetch issued.
+  for (let i = 0; i < 5; i += 1) readNext();
+  assert.equal(ra.stats.prefetchIssued, 1);
+  await a.settle();
+  const syncBefore = ra.stats.blockReads;
+  // The stream then lives on prefetched segments: no more sync reads.
+  for (let i = 0; i < 100; i += 1) { readNext(); await a.settle(); }
+  assert.equal(ra.stats.blockReads, syncBefore, "no sync read once the prefetch leads");
+  assert.ok(ra.stats.prefetchUsed >= 3 && ra.stats.syncMissInflight === 0, JSON.stringify(ra.stats));
+  assert.ok(ra.stats.heldBytes <= 8 << 20);
+});
+
+test("prefetch: a read that reaches a segment still in flight reads it synchronously, the late one is dropped", async () => {
+  const d = disc(8 << 20);
+  const a = asyncReader(d);
+  const ra = createDiscReadahead({ readBlob: d.readBlob, readBlobAsync: a.readBlobAsync });
+  const out = new Uint8Array(64 << 10);
+  ra.read(d.stream, out, 0, out.length, 0);
+  ra.read(d.stream, out, 0, out.length, 64 << 10); // follows on: sync 128 KiB, prefetch from 192 KiB
+  ra.read(d.stream, out, 0, out.length, 192 << 10); // reaches the prefetch before it lands
+  assert.equal(ra.stats.syncMissInflight, 1);
+  assert.deepEqual(out, d.bytes.subarray(192 << 10, 256 << 10));
+  await a.settle();
+  assert.equal(ra.stats.prefetchWasted, 1, "the late prefetch overlaps what was read: dropped");
+});
+
+test("prefetch: without an async reader, nothing is prefetched", () => {
+  const d = disc(1 << 20);
+  const ra = createDiscReadahead({ readBlob: d.readBlob });
+  const out = new Uint8Array(16 << 10);
+  for (let p = 0; p < (512 << 10); p += out.length) ra.read(d.stream, out, 0, out.length, p);
+  assert.equal(ra.stats.prefetchIssued, 0);
+});
+
 test("the worker reads the disc ahead by default, ?discreadahead=0 turns it off, and counts it", async () => {
   const read = (p) => readFile(new URL(p, import.meta.url), "utf8");
   const w = await read("../src/upstream-discio-worker.js");
@@ -97,4 +147,17 @@ test("the worker reads the disc ahead by default, ?discreadahead=0 turns it off,
   const a = await read("../src/upstream-worker-adapter.js");
   assert.match(a, /this\.discReadahead = discReadahead !== false;/);
   assert.match(a, /discReadahead: this\.discReadahead,/);
+});
+
+test("the worker prefetches with Blob.arrayBuffer only with ?discprefetch=1 (off by default)", async () => {
+  const read = (p) => readFile(new URL(p, import.meta.url), "utf8");
+  const w = await read("../src/upstream-discio-worker.js");
+  assert.match(w, /readBlobAsync: discPrefetchEnabled \? \(blob\) => blob\.arrayBuffer\(\) : null,/);
+  assert.match(w, /discPrefetchEnabled = discPrefetch === true;/);
+  assert.match(w, /^let discPrefetchEnabled = false;$/m);
+  assert.match(w, /discPrefetch: payload\.discPrefetch,/);
+  assert.match(await read("../src/core-host.js"), /get\("discprefetch"\) === "1"/);
+  const a = await read("../src/upstream-worker-adapter.js");
+  assert.match(a, /this\.discPrefetch = discPrefetch === true;/);
+  assert.match(a, /discPrefetch: this\.discPrefetch,/);
 });
