@@ -1522,7 +1522,7 @@ test("a trap in a callee two wasm calls deep: the handler sees the interpreter's
   }
 });
 
-// 0144: dcbf and dcbst run in region code (interpret helper). A flush loop
+// 0144: dcbf and dcbst run in region code (system helper). A flush loop
 // over data stays in the region; a dcbf on a line of region code (with the
 // dcache off it invalidates the line) stops the region after it. Against
 // the interpreter, in one module and across modules.
@@ -1559,9 +1559,9 @@ test("dcbf and dcbst run in the region; a dcbf on region code stops it after, li
     const got = runCall(FLUSHER.labels.main, { regions: true });
     assert.deepEqual(got.state, reference.state, `maxFunctions ${maxFunctions}`);
     assert.equal(got.downcount, reference.downcount, `maxFunctions ${maxFunctions}`);
-    // The 16 lines of the loop (48 ops) in the region; after the dcbf on
-    // main's own line, at most the 5 ops to the blr run outside.
-    assert.ok(got.interpreted <= 5, `maxFunctions ${maxFunctions}: ${got.interpreted} ops interpreted`);
+    // The 16 lines of the loop (48 ops) in the region; the dcbf on main's
+    // own line stops it: the ops to the blr (5 at most) run outside.
+    assert.ok(got.interpreted >= 1 && got.interpreted <= 5, `maxFunctions ${maxFunctions}: ${got.interpreted} ops interpreted`);
     for (const budget of [3, 17, 40, 77]) {
       core.reset(seedGprs(FLUSHER.labels.main), FLUSHER.labels.main, STOP, budget);
       while (core.downcount() > 0 && core.pc() !== STOP) if (!core.dispatchRegion()) assert.equal(core.interpretOne(), 0);
@@ -1574,5 +1574,50 @@ test("dcbf and dcbst run in the region; a dcbf on region code stops it after, li
       queueAll(plan, maxFunctions, true);
       serviceAll();
     }
+  }
+});
+
+// 0144: a callee that REWRITES code then flushes it with dcbf (no icbi):
+// first its caller's continuation, then a function the caller calls next.
+// Each dcbf drops the region code of its line, and the region stops right
+// after it (system helper): without that stop the callee would go on, return
+// 3 to its caller, which would resume in its stale translation of `cont`,
+// then call `other`'s stale fragment. In one module and across modules.
+const REWRITE_TEXT = 0x8001b100;
+const LI_R10_3 = (14 << 26) | (10 << 21) | 3;
+const REWRITER = assemble(REWRITE_TEXT, [
+  "main", asm.mflr(0), asm.stwu(1, 1, -16), stw(0, 1, 20), (pc, l) => asm.bl(pc, l.rewriter),
+  "cont", asm.li(9, 1), (pc, l) => asm.bl(pc, l.other),
+  lwz(0, 1, 20), asm.addi(1, 1, 16), mtlr(0), asm.blr(),
+  "other", asm.li(10, 1), asm.blr(),
+  "rewriter", asm.lis(5, LI_R9_2 >>> 16), asm.ori(5, 5, LI_R9_2 & 0xffff),
+  (pc, l) => asm.lis(6, l.cont >>> 16), (pc, l) => asm.ori(6, 6, l.cont & 0xffff), stw(5, 6, 0), dcbfOp(0, 6),
+  asm.lis(5, LI_R10_3 >>> 16), asm.ori(5, 5, LI_R10_3 & 0xffff),
+  (pc, l) => asm.lis(6, l.other >>> 16), (pc, l) => asm.ori(6, 6, l.other & 0xffff), stw(5, 6, 0), dcbfOp(0, 6),
+  asm.blr()
+]);
+test("a callee that rewrites code and flushes it with dcbf: the caller and the next callee run the new code, like the interpreter (0144)", { skip: dcbfSkip }, () => {
+  const load = () => {
+    const dol = buildDol({ textAddr: REWRITE_TEXT, text: REWRITER.words, entry: REWRITER.labels.main });
+    const { image, entryPoint } = imageFromDol(dol);
+    for (const seg of image.segments) core.load(seg.start, seg.bytes);
+    core.invalidate(REWRITE_TEXT, 4 * REWRITER.words.length);
+    return planDol({ image, entryPoint, gameId: "TEST01", dolBytes: dol, options: { gapFill: false } });
+  };
+  load();
+  const reference = runCall(REWRITER.labels.main, { regions: false });
+  assert.equal(reference.state[9], 2, "the interpreter runs the new li r9, 2");
+  assert.equal(reference.state[10], 3, "the interpreter runs the new li r10, 3");
+  for (const maxFunctions of [100, 1]) {
+    const plan = load();
+    core.module._DolphinWeb_AotForgetRegionsForTest?.();
+    core.setRegionsEnabled(true);
+    core.setRegionChaining(true);
+    queueAll(plan, maxFunctions, true);
+    serviceAll();
+    const got = runCall(REWRITER.labels.main, { regions: true });
+    assert.ok(got.ran >= 1, `maxFunctions ${maxFunctions}: the regions ran`);
+    assert.deepEqual(got.state, reference.state, `maxFunctions ${maxFunctions}`);
+    assert.equal(got.downcount, reference.downcount, `maxFunctions ${maxFunctions}`);
   }
 });
