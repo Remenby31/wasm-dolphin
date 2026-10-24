@@ -91,3 +91,12 @@ test("software WebGL is refused for the 2D presenter", async () => {
   assert.match(await read("../src/core-host.js"), /get\("webglsw"\) === "1"/);
   assert.match(await read("../src/upstream-worker-adapter.js"), /webglSoftware: this\.webglSoftware/);
 });
+
+// #214 review: the comparison rows must really be WebGL, and a presenter set
+// up again must not keep an old fallback reason.
+test("the lane checks its WebGL rows present in WebGL; a new presenter clears the fallback reason", async () => {
+  const wf = await read("../.github/workflows/windows-nogpu.yml");
+  assert.match(wf, /presenter-check\.mjs [^\n]*&webglsw=1[^\n]*--expect-presenter webgl/);
+  const w = await read("../src/upstream-discio-worker.js");
+  assert.match(w, /async function setupSoftwarePresenter\([^)]*\) \{[\s\S]{0,600}rendererDiagnostics\.webglFallback = null;/);
+});
