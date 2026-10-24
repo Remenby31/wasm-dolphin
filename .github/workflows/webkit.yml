@@ -17,8 +17,6 @@ name: WebKit (JavaScriptCore, Safari's engine) homebrew boot with aot=1, manual
 
 on:
   workflow_dispatch:
-  push: # TEMPORARY, removed before the PR
-    branches: [harness/webkit-lane]
 
 permissions:
   contents: read
