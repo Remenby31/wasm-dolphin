@@ -72,15 +72,20 @@ export const CONFIGS = {
   aot: { aot: true, product: false, label: "rendu matériel (video=wgpu), aot=1" }
 };
 const queryOf = (j, side, kind) => new URLSearchParams(String((kind === "ttff" || side !== "baseline" ? j.query : j.baselineQuery ?? j.query) ?? ""));
-// The product config renders in software; any other video backend is not it.
-export const sideIsProduct = (j, side, kind = "race-perf") => queryOf(j, side, kind).get("video") === "software";
+// The product config renders in software; the hardware rows take the
+// renderer (video=wgpu, or no video= for the harness default), never
+// video=null, which renders nothing (2026-10-24: a video=null run filled
+// the wgpu rows).
+const sideVideo = (j, side, kind) => queryOf(j, side, kind).get("video");
+export const sideIsProduct = (j, side, kind = "race-perf") => sideVideo(j, side, kind) === "software";
 export function fitsConfig(r, side, config) {
   if (!config || !["race-perf", "ttff", "first-launch-ramp"].includes(r.kind)) return true;
   const want = CONFIGS[config];
   const aot = r.kind === "ttff" ? ttffHasAot(r.json)
     : r.kind === "first-launch-ramp" ? queryOf(r.json, side, r.kind).get("aot") === "1"
     : sideHasAot(r.json, side);
-  return aot === want.aot && sideIsProduct(r.json, side, r.kind) === want.product;
+  const video = sideVideo(r.json, side, r.kind);
+  return aot === want.aot && (want.product ? video === "software" : video !== "software" && video !== "null");
 }
 
 // The side of `r` that measured trunk (candidate first) in `config`, or null.
