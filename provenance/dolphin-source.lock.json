@@ -25,7 +25,7 @@
       "commit": "01e0577914a75a2569c846778c2f93aa8e6feddd"
     }
   },
-  "patchSeriesSha256": "ec0af222455f9ec2dcbeedc82131dc1958b6b19c316028ce14c6f0b04e7b4278",
+  "patchSeriesSha256": "081309b023b44c6befb7ccfba72c68159199d5bacbfb3a8aa56d101a0e6e661d",
   "patches": [
     {
       "order": 1,
@@ -973,6 +973,14 @@
     },
     {
       "order": 119,
+      "cwd": ".",
+      "hashMode": "lf-normalized",
+      "path": "patches/dolphin-wasm/snapshot/0999-diag-pfma-why.patch",
+      "size": 5431,
+      "sha256": "1195044d43599f700352bca71ac0f885ebe5409a4c1fe094cca6a75514c32381"
+    },
+    {
+      "order": 120,
       "cwd": "Externals/SFML/SFML",
       "hashMode": "lf-normalized",
       "path": "patches/dolphin-wasm/submodules/0001-sfml-emscripten-config.patch",
@@ -980,7 +988,7 @@
       "sha256": "f82197a21fe982ad83f6ee7bbf5a03839b1cebd4d64da3eab11263842bf61d89"
     },
     {
-      "order": 120,
+      "order": 121,
       "cwd": "Externals/xxhash/xxHash",
       "hashMode": "lf-normalized",
       "path": "patches/dolphin-wasm/submodules/0002-xxhash-wasm-simd-scalar.patch",

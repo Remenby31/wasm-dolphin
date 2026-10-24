@@ -1,0 +1,108 @@
+diff --git a/Source/Core/Core/PowerPC/CachedInterpreter/CachedInterpreter.cpp b/Source/Core/Core/PowerPC/CachedInterpreter/CachedInterpreter.cpp
+--- a/Source/Core/Core/PowerPC/CachedInterpreter/CachedInterpreter.cpp
++++ b/Source/Core/Core/PowerPC/CachedInterpreter/CachedInterpreter.cpp
+@@ -338,6 +338,10 @@ std::atomic<u32> s_dolphin_web_disable_mask{0};
+ // std::fma) on this machine; the FMA emitter then uses it. Off by default
+ // (and wherever relaxed SIMD is missing or unfused): the plain-f64 path.
+ std::atomic<bool> s_fused_madd{false};
++// DIAG (not for merge): why paired FMAs reach the fp helper.
++std::array<std::array<u32, 12>, 2> s_diag_pfma_why{};
++std::array<std::array<u64, 3>, 12> s_diag_pfma_sample{};
++std::array<u32, 4> s_diag_pfma_emit{};
+ 
+ constexpr u32 DOLPHIN_WEB_DISABLE_MELEELOOP   = 1u << 0;  // MeleeIdlePollLoop + MeleeTitleLoop
+ constexpr u32 DOLPHIN_WEB_DISABLE_MELEECALL   = 1u << 1;  // 5 Melee fast call-branch helpers
+@@ -2745,6 +2749,66 @@ extern "C" int DolphinWeb_CachedInterpreterFpOp(int state_ptr, u32 inst_hex, u32
+ 
+   const UGeckoInstruction inst{inst_hex};
+   ++s_wasm_fp_key_counts[(inst.OPCD << 10) | inst.SUBOP10];
++  if (inst.OPCD == 4 && (inst.SUBOP5 == 28 || inst.SUBOP5 == 29 || inst.SUBOP5 == 30 ||
++                         inst.SUBOP5 == 31 || inst.SUBOP5 == 14 || inst.SUBOP5 == 15))
++  {
++    const bool sub = inst.SUBOP5 == 28 || inst.SUBOP5 == 30;
++    const auto lane = [&](u32 r, u32 l) {
++      return l ? ppc_state.ps[r].PS1AsDouble() : ppc_state.ps[r].PS0AsDouble();
++    };
++    const auto zn = [](double x) {
++      const double m = std::fabs(x);
++      return m == 0.0 || (m >= 0x1p-1022 && m < std::numeric_limits<double>::infinity());
++    };
++    for (u32 l = 0; l < 2; ++l)
++    {
++      const double a = lane(inst.FA, l);
++      const u32 cl = inst.SUBOP5 == 14 ? 0 : inst.SUBOP5 == 15 ? 1 : l;
++      double c = lane(inst.FC, cl);
++      double b = lane(inst.FB, l);
++      u32 why = 0;
++      if (!zn(a))
++        why = 1;
++      else if (!zn(c))
++        why = 2;
++      else
++      {
++        const u64 cb = std::bit_cast<u64>(c);
++        c = std::bit_cast<double>((cb & 0xfffffffff8000000ull) + (cb & 0x8000000ull));
++        if (sub)
++          b = -b;
++        const bool zero_ok = (a == 0.0 || c == 0.0) && std::fabs(b) < std::numeric_limits<double>::infinity();
++        const bool range_ok = std::fabs(a) <= 0x1p995 && std::fabs(c) <= 0x1p995 &&
++                              std::fabs(b) <= 0x1p995 && std::fabs(a * c) >= 0x1p-900;
++        if (!zero_ok && !range_ok)
++        {
++          if (std::isnan(b) || std::isinf(b))
++            why = 3;
++          else if (std::fabs(a) > 0x1p995 || std::fabs(c) > 0x1p995 || std::fabs(b) > 0x1p995)
++            why = 4;
++          else
++            why = 5;  // tiny product
++        }
++        else
++        {
++          const double r = std::fma(a, c, b);
++          const u64 rb = std::bit_cast<u64>(r);
++          const double m = std::fabs(r);
++          if ((rb & 0x1fffffffull) == 0x10000000ull)
++            why = 6;
++          else if (!(m == 0.0 || (m >= 0x1p-126 && (rb & 0x7fffffffffffffffull) < 0x47effffff0000000ull)))
++            why = std::isnan(r) || m >= 0x1p127 ? 7 : 8;  // 8: below the normal singles
++        }
++      }
++      if (!s_fused_madd.load(std::memory_order_relaxed))
++        why += 0;  // fused flag counted separately
++      ++s_diag_pfma_why[l][why];
++      if (s_diag_pfma_sample[why][0] == 0 && s_diag_pfma_sample[why][1] == 0)
++        s_diag_pfma_sample[why] = {std::bit_cast<u64>(lane(inst.FA, l)), std::bit_cast<u64>(lane(inst.FC, cl)),
++                                   std::bit_cast<u64>(lane(inst.FB, l))};
++    }
++    ++s_diag_pfma_emit[s_fused_madd.load(std::memory_order_relaxed) ? 3 : 2];
++  }
+   if (inst.OPCD == 56 || inst.OPCD == 57 || inst.OPCD == 60 || inst.OPCD == 61)
+   {
+     auto reason = PsqFallbackReason::ShouldHaveInlined;
+@@ -6345,6 +6409,8 @@ void EmitExactFpArithmetic(std::vector<u8>& body, const WasmStateLayout& layout,
+       !vector_fma && paired &&
+       (kind == FpArithKind::Add || kind == FpArithKind::Sub || kind == FpArithKind::Mul) &&
+       !DolphinWebHelperDisabled(DOLPHIN_WEB_DISABLE_NATIVE_PS);
++  if (paired && (kind == FpArithKind::MulAdd || kind == FpArithKind::MulSub))
++    ++s_diag_pfma_emit[vector_fma ? 1 : 0];
+   if (vector_fma || vector_arith)
+   {
+     body.push_back(0x02);  // block $done
+@@ -16221,6 +16287,17 @@ extern "C" const char* GetPpcWasmHelperStats()
+     out << " | fp" << (key >> 10) << "/" << (key & 0x3ff) << ":" << count;
+   }
+ 
++  out << " | pfma-emit vec:" << s_diag_pfma_emit[1] << " novec:" << s_diag_pfma_emit[0]
++      << " helper-fused:" << s_diag_pfma_emit[3] << " helper-unfused:" << s_diag_pfma_emit[2];
++  for (u32 l = 0; l < 2; ++l)
++  {
++    out << " | pfma-why-l" << l;
++    for (u32 w = 0; w < 9; ++w)
++      out << " " << w << ":" << s_diag_pfma_why[l][w];
++  }
++  for (u32 w = 1; w < 9; ++w)
++    if (s_diag_pfma_sample[w][0] | s_diag_pfma_sample[w][1])
++      out << " | pfma-sample" << w << " " << std::hex << s_diag_pfma_sample[w][0] << "," << s_diag_pfma_sample[w][1] << "," << s_diag_pfma_sample[w][2] << std::dec;
+   static constexpr std::array<std::string_view, static_cast<u32>(PsqFallbackReason::Count)>
+       psq_fallback_labels = {"nofp", "le", "lsqe", "nonfloat", "mem", "ra0", "miss"};
+   for (std::size_t i = 0; i < psq_fallback_labels.size(); ++i)
