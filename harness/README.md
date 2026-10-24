@@ -712,7 +712,7 @@ is identical across rebuilds.
 | `consoletest` | deterministic `printf` workload, hash of the formatted text |
 | `gxscene` | static depth-tested 3D scene (floor + 2 cubes) under a 2D overlay, for backend diffs |
 | `cpufuzz` | 384 random PowerPC programs (integer, rotates, XER/CR, branches, CTR loops, loads/stores, FP) run every frame, self-checked against frame 0 |
-| `cpufuzz-nomcrf` | the same without `mcrf`, which currently crashes the JIT, so the fuzz can go further |
+| `cpufuzz-nomcrf` | the same without `mcrf`, which once crashed the JIT (cpufuzz with it now matches the interpreter: `fuzz`, 2026-10-24) |
 | `tonetest` | a continuous 440 Hz tone through the audio DMA, for the audio check |
 | `gxscene-nocubes`, `gxscene-color` | selftest mutants of `gxscene` (`-DMUTATE_NO_CUBES`, `-DMUTATE_COLOR`) |
 
