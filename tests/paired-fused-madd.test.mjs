@@ -14,7 +14,7 @@ import { existsSync, readFileSync } from "node:fs";
 import test from "node:test";
 import { probeRelaxedMadd } from "../src/relaxed-madd-probe.js";
 import { compareRegionProgram, loadAotCore } from "./helpers/aot-core-equivalence.mjs";
-import { SHORT_PREFIX_MASK, describeDifference, hex, loadOracleCore, makeRng, randomProgram, randomState } from "./helpers/jit-oracle.mjs";
+import { SHORT_PREFIX_MASK, describeDifference, exactFmaDouble, force25Bit, hex, loadOracleCore, makeRng, randomProgram, randomState } from "./helpers/jit-oracle.mjs";
 
 const coreWasm = new URL("../cores/dolphin/dolphin-core-upstream.wasm", import.meta.url);
 const core = existsSync(coreWasm) ? await loadOracleCore() : null;
@@ -44,6 +44,10 @@ function assertSame(result, label) {
     : result.message || `oracle code ${result.code}`}`);
 }
 
+// The Strikers inputs of Interpreter_FPUtils.h (frA, frC, frB): a * c + b is
+// exactly a single midpoint, 0xbfeab7e2f0000000 (29 low bits 0x10000000).
+const TIE = [single(0x42480000), single(0xbc88cc38), single(0x1b1c72a0)];
+
 // Per-lane (a, c, b): fast-path values and every reason the scalar path
 // leaves for the interpreter.
 const FAST = [[1.5, 2.25, -0.75], [single(0x3f8ccccd), single(0x40490fdb), single(0xbf000001)], [0, 3, -0], [-2, -0, 5], [1e30, 1e-20, 7]];
@@ -51,9 +55,14 @@ const SLOW = [
   [NaN, 1, 1], [1, NaN, 1], [1, 1, NaN], [Infinity, 1, 1], [1, 1, -Infinity],
   [f(0x00000000, 1), 1, 1], [1, f(0x00080000), 1], // denormal a, denormal frC
   [f(0x9a700000), f(0x1a700000), 0], // underflowed product (0129's CI case)
-  [single(0x42480000), single(0x1b1c72a0), single(0xbc88cc38)], // a single tie
+  TIE, // a single tie
   [2 ** 100, 2 ** 100, 1], [2 ** 1000, 2 ** 20, -(2 ** 1020)], [2 ** -100, 2 ** -100, 0] // overflow, huge, NI flush
 ];
+
+test("the tie case is a single tie: fma(a, Force25(c), b) has 0x10000000 in its 29 low bits", () => {
+  const [lo, hi] = exactFmaDouble(TIE[0], force25Bit(TIE[1]), TIE[2]);
+  assert.equal((lo & 0x1fffffff) >>> 0, 0x10000000, `0x${hi.toString(16)}${lo.toString(16).padStart(8, "0")}`);
+});
 
 for (const [label, fused] of MODES) {
   test(`${label}: paired FMA with each lane fast or not matches the interpreter (madds0/1 included)`, { skip: modeSkip(skip, fused) }, () => {
