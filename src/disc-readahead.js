@@ -34,8 +34,10 @@ export function createDiscReadahead({
     return f;
   }
 
-  function evict(f) {
-    while (stats.heldBytes > heldBytes && f.segments.length > 1) {
+  // Room for `incoming` bytes before they are read: the cap holds at every
+  // moment, the new segment included.
+  function evict(f, incoming) {
+    while (stats.heldBytes + incoming > heldBytes && f.segments.length > 0) {
       stats.heldBytes -= f.segments.shift().bytes.length;
     }
   }
@@ -52,7 +54,9 @@ export function createDiscReadahead({
     }
     // Following on from the last read: twice as far; anything else is a seek.
     f.next = at === f.lastEnd ? Math.min(maxBytes, f.next * 2) : minBytes;
-    const bytes = new Uint8Array(readBlob(blob.slice(at, Math.min(size, at + f.next))));
+    const end = Math.min(size, at + f.next);
+    evict(f, end - at);
+    const bytes = new Uint8Array(readBlob(blob.slice(at, end)));
     const s = { start: at, bytes };
     f.segments.push(s);
     f.lastEnd = at + bytes.length;
@@ -60,7 +64,6 @@ export function createDiscReadahead({
     stats.bytesRead += bytes.length;
     stats.heldBytes += bytes.length;
     stats.maxHeldBytes = Math.max(stats.maxHeldBytes, stats.heldBytes);
-    evict(f);
     return s;
   }
 

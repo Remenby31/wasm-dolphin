@@ -47,7 +47,7 @@ test("what is held stays under the cap, oldest segments out first", () => {
   const out = new Uint8Array(16 << 10);
   for (let p = 0; p < (6 << 20); p += out.length) ra.read(d.stream, out, 0, out.length, p);
   assert.ok(ra.stats.heldBytes <= 2 << 20, `${ra.stats.heldBytes} held`);
-  assert.ok(ra.stats.maxHeldBytes <= (2 << 20) + (1 << 20), "at most one segment over the cap, before eviction");
+  assert.ok(ra.stats.maxHeldBytes <= 2 << 20, `the cap holds at every moment (${ra.stats.maxHeldBytes})`);
   // The oldest region was let go: reading it again is a new (small) read.
   const before = d.calls.length;
   ra.read(d.stream, out, 0, 100, 0);
