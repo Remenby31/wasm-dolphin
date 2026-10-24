@@ -134,6 +134,35 @@ test("a cached region under another layout goes to retranslation, never into the
   assert.deepEqual(asked, ["region-v1:k"], "no retranslation under the core's layout");
 });
 
+// Harness only: the ledger of what the worker handed the core, per module
+// (its entries, the outcome, when), queried by PC; nothing is kept while
+// the harness hooks are off.
+test("the region ledger: per module what was queued or why not, queried by PC, only with the harness on", async (t) => {
+  const { worker } = await loadWorker(t);
+  const heap = new Uint8Array(1 << 16);
+  let top = 1024;
+  const core = {
+    HEAPU8: heap,
+    _malloc: (n) => { const p = top; top += (n + 7) & ~7; return p; },
+    _free: () => {},
+    _DolphinWeb_AotLayoutHash: () => 0x1234,
+    _DolphinWeb_AotQueueRegion: () => {}
+  };
+  const flow = { retranslate: async () => true };
+  const region = (key, entries, layout) => ({ key, bytes: Uint8Array.of(0, 97, 115, 109), entries, layout, members: [{ ranges: [[0x80003100, 0x80003200]], hash: "0011223344556677" }] });
+  await worker.queueAotRegionForTest(core, region("region-v1:off", [0x80003100], 0x1234), flow);
+  assert.equal(worker.regionLedgerForTest([0x80003100]).modules, 0, "harness off: nothing kept");
+  worker.setHarnessEnabledForTest(true);
+  t.after(() => worker.setHarnessEnabledForTest(false));
+  await worker.queueAotRegionForTest(core, region("region-v1:a", [0x80003100, 0x80003140], 0x1234), flow);
+  await worker.queueAotRegionForTest(core, region("region-v1:b", [0x80003180], 0x9999), flow); // another layout
+  const ledger = worker.regionLedgerForTest([0x80003140, 0x80003180, 0x80003300]);
+  assert.deepEqual([ledger.modules, ledger.outcomes, ledger.queuedEntries], [2, { queued: 1, layout: 1 }, 2]);
+  assert.deepEqual(ledger.pcs.map((p) => p.holders.map((h) => [h.key, h.outcome])), [[["region-v1:a", "queued"]], [["region-v1:b", "layout"]], []]);
+  assert.ok(ledger.pcs[0].holders[0].ms <= ledger.nowMs, "when it was handed over");
+  assert.equal(ledger.mappedRegions, null, "the core's own count: null without the export");
+});
+
 // Review of #86: the region cache waits for the first presented image (or
 // the timeout), never more; with no running core, not at all.
 test("the first-image wait: woken by the first presented frame, or by its timeout", async (t) => {
@@ -147,4 +176,52 @@ test("the first-image wait: woken by the first presented frame, or by its timeou
   await waiting;
   assert.equal(woken, true, "the first presented frame wakes it");
   assert.equal(await worker.aotWhenFirstImageForTest({}, { timeoutMs: 30 }), false, "no frame: the timeout");
+});
+
+// Review of #173: the worker's profile wiring with an engine disc key (a
+// ':' in it). The recorder writes the profile, the probes see it, and the
+// next plan build receives it. Reverting profileKey in the worker fails this.
+function fakeOpfs() {
+  const notFound = () => Object.assign(new Error("missing"), { name: "NotFoundError" });
+  const dir = () => {
+    const files = new Map(), dirs = new Map();
+    return {
+      async getDirectoryHandle(name, { create } = {}) {
+        if (!dirs.has(name)) { if (!create) throw notFound(); dirs.set(name, dir()); }
+        return dirs.get(name);
+      },
+      async getFileHandle(name, { create } = {}) {
+        if (!files.has(name) && !create) throw notFound();
+        if (!files.has(name)) files.set(name, new Uint8Array());
+        return {
+          getFile: async () => ({ size: files.get(name).length, arrayBuffer: async () => files.get(name).slice().buffer, text: async () => new TextDecoder().decode(files.get(name)) }),
+          createWritable: async () => {
+            let pending = new Uint8Array();
+            return { write: async (b) => { pending = typeof b === "string" ? new TextEncoder().encode(b) : new Uint8Array(b.buffer ?? b); }, close: async () => { files.set(name, pending); }, abort: async () => {} };
+          }
+        };
+      },
+      async removeEntry(name) { if (!files.delete(name)) throw notFound(); },
+      async *entries() { for (const [n] of files) yield [n, null]; }
+    };
+  };
+  return dir();
+}
+
+test("the local profile: an engine disc key records, the probes see it, the next plan build receives it", async (t) => {
+  const { worker } = await loadWorker(t);
+  worker.setAotFirstLaunchEnabledForTest(true);
+  const opfs = fakeOpfs();
+  const options = { module: fakeCore(), readDiscKey: async () => DISC, coreHash: CORE, cacheStorage: fakeCacheStorage(), storageRoot: () => opfs };
+  await worker.prepareAotFirstLaunch({}, options);
+  assert.ok(DISC.includes(":"), "an engine disc key");
+  const saved = await worker.recordAotProfileForTest([[0x80003100, 5], [0x80003104, 2]]);
+  assert.ok(saved, "recorded");
+  const { profile } = await worker.handleAotMessage("validationReadAotProgress");
+  assert.deepEqual([profile.opfs, profile.records, profile.writeFailures, profile.readFailures], [true, 1, 0, 0]);
+  // The next plan build (the flow's start) loads it.
+  await worker.startAotFirstLaunchAfterBoot();
+  const planned = worker.aotPlanProfileReadForTest();
+  assert.deepEqual(planned?.blocks.map((b) => [b[0], b[4]]), [[0x80003100, 5], [0x80003104, 2]], "the plan build got the weights");
+  worker.setAotFirstLaunchEnabledForTest(false);
 });

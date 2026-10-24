@@ -37,6 +37,16 @@ const SOURCE = `onmessage = (e) => {
   close();
 };`;
 
+// ?aotsample=N: the sampling period in ms (default 10); ?aotsample=0 turns
+// the sampler off (no worker; the local profile records nothing), e.g. to
+// measure what it costs. Anything else is the default.
+export const AOT_SAMPLE_DEFAULT_MS = 10;
+export function aotSamplePeriodRequested(search = "") {
+  const raw = new URLSearchParams(search).get("aotsample");
+  if (raw === null || !/^\d+$/.test(raw)) return AOT_SAMPLE_DEFAULT_MS;
+  return Math.min(Number(raw), 1000);
+}
+
 // The guest PC's address in the core's heap: the ungated export (the harness
 // one returns 0 unless the harness hooks are on, which the product never
 // does: a product build recorded no profile), the harness one on an older
@@ -45,9 +55,11 @@ export function guestPcAddress(m) {
   return m?._DolphinWeb_GuestPcAddress?.() || m?._DolphinWeb_HarnessPcAddress?.() || 0;
 }
 
-// Starts sampling; null without a shared heap or a PC address.
-export function startHotSampler({ buffer, pcAddress, periodMs = 10, postMs = 500, frozenMs = 1000,
+// Starts sampling; null without a shared heap or a PC address, or with a
+// period of 0 (?aotsample=0: no worker at all).
+export function startHotSampler({ buffer, pcAddress, periodMs = AOT_SAMPLE_DEFAULT_MS, postMs = 500, frozenMs = 1000,
   createWorker = (url) => new Worker(url, { name: "aot-hot-sampler" }) }) {
+  if (!(periodMs > 0)) return null;
   if (typeof SharedArrayBuffer === "undefined" || !(buffer instanceof SharedArrayBuffer) || !pcAddress || pcAddress % 4) return null;
   const ctl = new SharedArrayBuffer(8);
   const flag = new Int32Array(ctl);
@@ -87,17 +99,29 @@ export function startHotSampler({ buffer, pcAddress, periodMs = 10, postMs = 500
 // a new session (older weights halve), the next ones add to it; which one a
 // record is gets decided before it awaits anything, so two records in flight
 // (a remount during the minute's record) never count the session twice.
-export function createProfileRecorder({ store, discKey, blocksFromPcSamples }) {
+// A failure only costs the profile, but it is never silent (#165 recorded
+// nothing for two bugs in a row and nothing showed): record.stats() counts
+// records and failures with the last error (in validationReadAotProgress),
+// and the first failure is a console warning.
+export function createProfileRecorder({ store, discKey, blocksFromPcSamples, warn = (m) => console.warn(m) }) {
   let recorded = false;
-  return async function record(samples) {
+  const stats = { records: 0, failures: 0, lastError: null };
+  async function record(samples) {
     if (!samples?.length) return null;
     const newSession = !recorded;
     recorded = true;
     try {
-      return await store.record(discKey, blocksFromPcSamples(samples), { newSession });
-    } catch {
-      if (newSession) recorded = false; // a full or unavailable OPFS only costs the profile
+      const out = await store.record(discKey, blocksFromPcSamples(samples), { newSession });
+      stats.records += 1;
+      return out;
+    } catch (error) {
+      if (newSession) recorded = false;
+      stats.failures += 1;
+      stats.lastError = `${error?.name ?? "Error"}: ${error?.message ?? error}`;
+      if (stats.failures === 1) warn(`aot: the local region profile could not be recorded (${stats.lastError})`);
       return null;
     }
-  };
+  }
+  record.stats = () => ({ ...stats });
+  return record;
 }

@@ -21,6 +21,8 @@ import { readFileSync } from "node:fs";
 import { orderedRegions } from "../../src/aot-plan.js";
 import { REGION_HEAP_NAMES, assembleRegion, groupRegions } from "../../src/aot-region-module.js";
 import { PRODUCTION_DISABLE_MASK, makeRng, randomProgram, randomState } from "./jit-oracle.mjs";
+import { checkBranchHintSection } from "./branch-hints.mjs";
+
 
 // Signatures of the block module's import types (BuildWasmCachedInterpreterBlock).
 const T1 = { params: ["i32", "i32"], results: ["i32"] };
@@ -104,6 +106,7 @@ export async function loadAotCore(coreDir = new URL("../../cores/dolphin/", impo
         if (kind === 0) return { offset, kind: "import", name: helperNames[value] };
         if (kind === 1) return { offset, kind: "jump", targetPc: value };
         if (kind === 3) return { offset, kind: "heap", name: REGION_HEAP_NAMES[value & 1], form: value & 2 ? "offset" : "const" };
+        if (kind === 4) return { offset, kind: "hint", likely: value === 1 }; // branch hint (0131)
         return { offset, kind: "dispatch" };
       });
       const at = p + 16 + 4 * (entryCount + 3 * relocCount);
@@ -394,10 +397,10 @@ export function bigEndian(words) {
 // One program at ORACLE_CODE, translated as a region while `translateState`
 // is loaded (its MSR decides which FPU ops the translator takes), then run
 // from `state` by the interpreter alone and by the region (compareCall).
-export function compareRegionProgram(core, words, state, { translateState = state, mask = PRODUCTION_DISABLE_MASK, budget = 400000 } = {}) {
+export function compareRegionProgram(core, words, state, { translateState = state, mask = PRODUCTION_DISABLE_MASK, budget = 400000, ranges = [[ORACLE_CODE, ORACLE_CODE + 4 * words.length]] } = {}) {
   core.load(ORACLE_CODE, bigEndian(words));
   core.loadState(translateState, ORACLE_CODE);
-  const fragment = core.translate(ORACLE_CODE, { mask, ranges: [[ORACLE_CODE, ORACLE_CODE + 4 * words.length]] });
+  const fragment = core.translate(ORACLE_CODE, { mask, ranges });
   if (!fragment) return { translated: false };
   const { bytes } = assembleRegion([fragment], { helpers: HELPER_SIGNATURES, pcOffset: core.pcOffset, memoryPages: core.memoryPages });
   const handle = core.compile(bytes);
@@ -414,7 +417,7 @@ export function compareRegionProgram(core, words, state, { translateState = stat
 
 export function runOracleProgramsAsRegions(core, { seed, count, length, mask }) {
   const r = makeRng(seed);
-  const tally = { programs: 0, translated: 0, compared: 0, equal: 0, trap: 0, ends: {}, regionRuns: 0, mismatches: [] };
+  const tally = { programs: 0, translated: 0, compared: 0, equal: 0, trap: 0, ends: {}, regionRuns: 0, hintsDropped: 0, hintsChecked: 0, hintSectionErrors: [], mismatches: [] };
   for (let n = 0; n < count; n++) {
     const words = randomProgram(r, length);
     const state = randomState(r);
@@ -424,7 +427,12 @@ export function runOracleProgramsAsRegions(core, { seed, count, length, mask }) 
     const fragment = core.translate(ORACLE_CODE, { mask, ranges: [[ORACLE_CODE, ORACLE_CODE + 4 * words.length]] });
     if (!fragment) continue;
     tally.translated += 1;
-    const { bytes } = assembleRegion([fragment], { helpers: HELPER_SIGNATURES, pcOffset: core.pcOffset, memoryPages: core.memoryPages });
+    const { bytes, hintsDropped } = assembleRegion([fragment], { helpers: HELPER_SIGNATURES, pcOffset: core.pcOffset, memoryPages: core.memoryPages });
+    tally.hintsDropped += hintsDropped ?? 0; // 0131: a core hint off an `if`
+    // The branch_hint section as V8 reads it: any broken rule drops it all.
+    const hintCheck = checkBranchHintSection(bytes);
+    tally.hintSectionErrors.push(...hintCheck.errors.slice(0, 2));
+    tally.hintsChecked += hintCheck.hints;
     const handle = core.compile(bytes);
     if (handle <= 0) throw new Error(`core rejected a region module (${handle})`);
     const regionAt = new Map(fragment.entries.map((pc) => [pc >>> 0, handle]));

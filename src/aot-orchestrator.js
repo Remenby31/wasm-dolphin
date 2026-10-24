@@ -403,7 +403,7 @@ export function coreRegionTranslator(m, { mask, helperNames, maxBlocks = 64, max
           break;
         }
         const r = await translateWithContinuations(m, f, { mask, maxBlocks, names, maxContinuations, maxBytes: unitBytes, slice });
-        for (const c of r.continuations ?? []) unitBytes -= c.code.length;
+        unitBytes -= r.budgetCharged ?? 0;
         out.push(r);
         if (r.reason === "budget" || r.reason === "not-ready") break;
       }
@@ -433,6 +433,7 @@ export const REGION_FRAGMENT_MAX_BYTES = 96000;
 export const REGION_CONTINUATION_MAX_BYTES = 2 << 20;
 export const REGION_UNIT_CONTINUATION_MAX_BYTES = 1 << 20;
 export const REGION_MAX_CONTINUATIONS = 31;
+export const REGION_UNCUT_BLOCKS = 64; // what one fragment held before continuations: free of budget
 const capped = (fragment, maxBlocks, maxFragmentBytes) => fragment.entries.length >= maxBlocks || fragment.code.length >= maxFragmentBytes;
 export async function translateWithContinuations(m, f, { mask, maxBlocks, names, maxContinuations = REGION_MAX_CONTINUATIONS,
   maxBytes = REGION_CONTINUATION_MAX_BYTES, maxFragmentBytes = REGION_FRAGMENT_MAX_BYTES, slice = async () => {} }) {
@@ -442,12 +443,27 @@ export async function translateWithContinuations(m, f, { mask, maxBlocks, names,
   const owned = new Set(first.fragment.entries.map((pc) => pc >>> 0));
   const tried = new Set();
   const continuations = [];
+  // The budget counts only what goes past the function's old single
+  // fragment: the first fragment and its continuations together, up to
+  // maxBlocks blocks, are the code one uncut fragment held before
+  // continuations (and before a byte cap moved it into them), so they are
+  // free; only the blocks after those spend the
+  // function's budget and the module's (review of 0130: −39 % when the
+  // moved code ran out of budget and fell back to the dispatcher).
+  let freeBlocks = Math.max(0, REGION_UNCUT_BLOCKS - first.fragment.entries.length);
   let bytes = Math.min(maxBytes, REGION_CONTINUATION_MAX_BYTES);
+  let charged = 0;
   let oversize = 0;
+  let budgetRefused = 0;
+  const next_ = () => frontier(branches, owned).filter((x) => !tried.has(x));
   for (;;) {
-    if (continuations.length >= maxContinuations || bytes <= 0) break;
-    const pc = frontier(branches, owned).find((x) => !tried.has(x));
-    if (pc === undefined) break;
+    const waiting = next_();
+    if (!waiting.length) break;
+    if (continuations.length >= maxContinuations || bytes <= 0) {
+      budgetRefused = waiting.length; // left as exits for lack of budget
+      break;
+    }
+    const pc = waiting[0];
     tried.add(pc);
     await slice();
     let next = translateOne(m, { ...f, entry: pc }, { mask, maxBlocks, names });
@@ -459,9 +475,15 @@ export async function translateWithContinuations(m, f, { mask, maxBlocks, names,
     if (next.fragment.code.length > maxFragmentBytes) { oversize += 1; continue; } // one block alone: left an exit
     for (const e of next.fragment.entries) owned.add(e >>> 0);
     continuations.push(next.fragment);
-    bytes -= next.fragment.code.length;
+    // The share of this fragment within the old single fragment's blocks is free.
+    const n = next.fragment.entries.length;
+    const free = Math.min(freeBlocks, n);
+    freeBlocks -= free;
+    const cost = Math.round(next.fragment.code.length * (n - free) / Math.max(1, n));
+    bytes -= cost;
+    charged += cost;
   }
-  return { ...first, ...(continuations.length ? { continuations } : {}), ...(oversize ? { oversize } : {}) };
+  return { ...first, ...(continuations.length ? { continuations, budgetCharged: charged } : {}), ...(oversize ? { oversize } : {}), ...(budgetRefused ? { budgetRefused } : {}) };
 }
 
 // The direct branches of the code in `ranges` ([start, end) guest
@@ -540,6 +562,7 @@ function translateOne(m, f, { mask, maxBlocks, names }) {
     if (kind === 0) return { offset, kind: "import", name: names[value] };
     if (kind === 1) return { offset, kind: "jump", targetPc: value };
     if (kind === 3) return { offset, kind: "heap", name: REGION_HEAP_NAMES[value & 1], form: value & 2 ? "offset" : "const" };
+    if (kind === 4) return { offset, kind: "hint", likely: value === 1 }; // an `if` and whether its true arm is likely (0131)
     return { offset, kind: "dispatch" };
   });
   const at = p + 24 + 4 * (entryCount + 3 * relocCount);

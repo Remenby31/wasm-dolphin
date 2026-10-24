@@ -436,3 +436,80 @@ masks and ors). Blocks keep the old form,
 so their bytes and cache keys don't change. Compiler version 17. (Written
 as 0108 on the region stack; renumbered after 0111 so the series applies
 in order.)
+
+## Branch hints (patch 0131, 2026-10-23)
+
+Region code is bound by the instruction cache on the bench's arm64 host:
+with regions the front end stalls 55 % of cycles (29.5 % without), with
+1.85× the L1i refills per instruction. The core now marks the `if`s of
+region code whose outcome it knows:
+- **likely:** the RAM fast path of integer and lmw/stmw accesses and of float loads, lfd/stfd and stfiwx, a dcbz in RAM, and the exact-FP fast path (not stfs: to the gather pipe, its hottest target, it takes the inline else-if arm);
+- **unlikely:** a halt after a helper, the gather pipe filling up, XER.SO set at fragment entry, and the downcount running out.
+
+The hints travel as reloc kind 4 (offset of the `if`, 1 when likely) and
+patch nothing. The assembler counts a hint that does not land on an `if`
+(`hintsDropped`, 0 on every oracle program), and a second hint on the same
+`if`. V8 drops the whole section, silently, on any broken rule (offsets
+strictly increasing, size 1, nothing left over): the tests read every
+oracle module's section with those rules (`tests/helpers/branch-hints.mjs`). The assembler writes them as a `metadata.code.branch_hint`
+custom section (wasm branch hinting, on by default in V8) before the code
+section. TurboFan then lays the cold arms out of line, away from the hot
+path. An engine that doesn't know the section ignores it.
+
+The psq paths are left unhinted: their float fast path depends on the
+game's GQR types. The bytes of the bodies are unchanged. Compiler version
+23 (rebuilt from the never-measured 0110 of 2026-10-22).
+
+## The fragment's head as a br_table (patch 0133, 2026-10-23)
+
+A fragment used to find its block by a chain at the loop head:
+`if (pc == start₀) { body₀ } if (pc == start₁) { body₁ } …`. Reaching block k
+took k failed compares, each a taken jump on its own cache line between two
+bodies: up to 64 lines of dispatch per fragment, while V8 never turns such a
+chain into a switch (research/deep-icache-layout.md §4.1).
+
+Now each body follows the end of its own `block`, the blocks nested in the
+order of emission:
+
+```
+loop $L  block $D  block $b(N-1) … block $b0
+  br_table on rotr(pc − lowest start, 2)   ; a non-start, misaligned or out-of-span pc → $D
+end body₀  end body₁ …  end body(N-1)  end($D) return_call dispatch  end($L)
+```
+
+- **Head.** One `br_table` (TurboFan emits a jump table: one indirect branch, the table on the data side).
+- **Sparse blocks.** When the blocks fill less than a quarter of their span (span > 4 × blocks), the head is a compact `br_if` chain: a sparse table would cost wasm bytes and a big jump table for few blocks.
+- **Body tail.** It keeps the new pc in the dispatch-pc local. It branches directly (`br_if $bj`) to a later body that its npc names (a static successor), and goes back to the head otherwise.
+- **Unchanged.** The per-block tail (pc, downcount, its exits) and the entries.
+
+Compiler version 25.
+
+## Frame in locals (patch 0135, was 0128, 2026-10-23)
+
+A fragment block used to end with `pc ← npc` through the state, then a
+load, subtract, store and reload of downcount: 2 loads and 3 stores per
+block. A fragment now keeps pc (56), npc (57) and downcount (58) in locals:
+- Its blocks write npc to the local.
+- The block tail is `pc = npc ; downcount -= cycles ; br_if (downcount <= 0) $X`.
+- pc, npc and downcount are written back before every return and every
+  tail call. Running out of downcount branches to one shared exit `$X`
+  around the loop, which writes them back once: the first version wrote them
+  back in every block's tail and lost 0.9 % of cycles on the race (front
+  end). `$X` is only reached by those `br_if`, all hinted unlikely (0131), so
+  V8 lays it out of line: it defers a block only when all its predecessors
+  are unlikely edges. An exiting block (sc, rfi…), a jump out and the
+  dispatch write them back themselves.
+
+Every helper call that takes the state stores downcount before it and
+reloads it after: an exception takes the cycles spent, and a memory helper
+reaching MMIO reads the time (`CoreTiming::GetTicks` reads downcount) or
+schedules an event, which may lower it. `fma` takes no state: nothing
+around it. A helper
+other than the memory and FPU ones (`system`, the HLE calls) also gets pc
+and npc stored before it and npc reloaded after it. A helper that halts
+leaves its own pc, npc and downcount in the state, and the fragment
+returns 2 without writing them back: memory and FPU helpers never halt
+in a region (no DSI without the MMU, under which no region is installed,
+0090/0091; MSR.FP is never clear in one, 0121), and the MMU mode is fixed at
+boot. The downcount check's branch hint (0131) sits on its `br_if`.
+Compiler version 27.

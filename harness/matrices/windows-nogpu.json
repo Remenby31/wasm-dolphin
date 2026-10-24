@@ -1,0 +1,17 @@
+{
+  "name": "windows-nogpu",
+  "runs": 1,
+  "warmupSec": 10,
+  "sampleSec": 10,
+  "games": [
+    { "id": "gxscene", "iso": "harness/homebrew/out/gxscene.iso", "static": true, "set": { "cpu": "single" } },
+    { "id": "dstalpha", "iso": "harness/homebrew/out/dstalpha.iso", "static": true, "set": { "cpu": "single" } },
+    { "id": "efbpeek", "iso": "harness/homebrew/out/efbpeek.iso", "static": true, "set": { "efbaccess": "1", "cpu": "single" } },
+    { "id": "ramcopy", "iso": "harness/homebrew/out/ramcopy.iso", "static": true, "set": { "efbcopyram": "1", "cpu": "single" } }
+  ],
+  "configs": [
+    { "id": "sw-product", "preset": "sw-interp" },
+    { "id": "sw-2d", "preset": "sw-interp", "set": { "presenter": "2d" } }
+  ],
+  "reference": "sw-product"
+}

@@ -1,4 +1,5 @@
 import { aotCompilerRequested, jitOffThreadRequested } from "./aot-compiler-worker.js";
+import { aotSamplePeriodRequested } from "./aot-hot-sampler.js";
 import { parseCustomRtc } from "./custom-rtc.js";
 import { DolphinCoreAdapter, dolphinBundleAvailable } from "./dolphin-adapter.js";
 import { buttonMaskFromPressed, isPadPort } from "./input.js";
@@ -118,6 +119,9 @@ export class EmulatorHost {
     // Harness: optional WebGPU features withheld from the device, comma-separated
     // (e.g. Safari 26 has no dual-source-blending). Empty for the app.
     this.wgpuMask = new URLSearchParams(window.location.search).get("wgpumask") ?? "";
+    // Harness: accept a CPU fallback WebGPU adapter (SwiftShader), refused for
+    // the app as no usable GPU (the Windows CI lane has nothing else).
+    this.wgpuFallback = new URLSearchParams(window.location.search).get("wgpufallback") === "1";
     this.savesMode = new URLSearchParams(window.location.search).get("saves") === "off" ? "off" : "";
     this.efbDiag = requestedEfbDiag();
     this.jitVerbose = new URLSearchParams(window.location.search).get("jitverbose") === "1";
@@ -138,6 +142,8 @@ export class EmulatorHost {
     this.aotCompiler = aotCompilerRequested(window.location.search);
     // ?aot=1: first-launch optimisation of the disc (P7), off by default.
     this.aotFirstLaunch = new URLSearchParams(window.location.search).get("aot") === "1";
+    // With aot=1, the local profile's guest-PC sampler: ?aotsample=N ms, 0 off.
+    this.aotSampleMs = aotSamplePeriodRequested(window.location.search);
     // With aot=1, regions tail-call the next region (patch 0102); ?regionchain=0 turns it off.
     this.regionChain = new URLSearchParams(window.location.search).get("regionchain") !== "0";
     // Where relaxed_madd is fused the JIT's FMA uses it (patch 0129); ?fusedmadd=0
@@ -427,6 +433,7 @@ export class EmulatorHost {
             fifoLog: this.fifoLog,
             efbCopyRam: this.efbCopyRam,
             wgpuMask: this.wgpuMask,
+            wgpuFallback: this.wgpuFallback,
             savesMode: this.savesMode,
             efbDiag: this.efbDiag,
             jitVerbose: this.jitVerbose,
@@ -437,6 +444,7 @@ export class EmulatorHost {
             jitOffThread: this.jitOffThread,
             aotCompiler: this.aotCompiler,
             aotFirstLaunch: this.aotFirstLaunch,
+            aotSampleMs: this.aotSampleMs,
             regionChain: this.regionChain,
             fusedMadd: this.fusedMadd,
             collectMetrics: this.collectMetrics,

@@ -188,3 +188,30 @@ test("counters: cycles per guest cycle, extra PMU events per arm, and perf's mul
   assert.deepEqual(st.l1i_cache_refill.perArm, [0.1, 0.2]);
   assert.equal(Math.round(st.l1i_cache_refill.effects.arms[0].laneCorrected), 100);
 });
+
+// 2026-10-23: `const laneOf = …` in main() shadowed the exported laneOf()
+// the run loop calls earlier in the same function: every race-multi died at
+// its first run (ReferenceError, temporal dead zone), unseen by the unit tests.
+test("race-multi: no local const shadows one of the module's own exported names", () => {
+  const src = readFileSync(new URL("../harness/probes/race-multi.mjs", import.meta.url), "utf8");
+  const exported = [...src.matchAll(/^export (?:const|function|async function) (\w+)/gm)].map((m) => m[1]);
+  const shadowed = exported.filter((name) => new RegExp(`^\\s+(?:const|let) ${name}\\b`, "m").test(src));
+  assert.deepEqual(shadowed, []);
+});
+
+test("race-multi: a boot that fails sets the run aside and plays it again, at most --max-boot-replays times in a row", async () => {
+  const { bootFailureStep } = await import("../harness/probes/race-multi.mjs");
+  assert.equal(bootFailureStep(1, 2), "replay");
+  assert.equal(bootFailureStep(2, 2), "replay");
+  assert.equal(bootFailureStep(3, 2), "fail", "a third failure in a row: the machine, not a hiccup");
+  assert.equal(bootFailureStep(1, 0), "fail", "--max-boot-replays 0: fail at once");
+  // The loop: the boot sits in its own try, a failure skips the windows, is
+  // recorded as a boot discard (outside the region discards' cap) and resets
+  // only after a run that booted.
+  const src = readFileSync(new URL("../harness/probes/race-multi.mjs", import.meta.url), "utf8");
+  assert.match(src, /record\.bootFailed = \{ arm: booting/);
+  assert.match(src, /const results = record\.bootFailed \? \[\] :/);
+  assert.match(src, /discarded\.push\(\{ run: r, attempt: record\.attempt, why, boot: true \}\)/);
+  assert.match(src, /const regionDiscards = discarded\.filter\(\(d\) => !d\.boot\)\.length;/);
+  assert.match(src, /bootFailures = 0;\n\s+record\.arms\.forEach/);
+});
