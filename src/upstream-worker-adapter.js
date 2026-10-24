@@ -98,7 +98,7 @@ export class UpstreamWorkerAdapter {
     softwareTevHotCaseMode = 0,
     xfbFastPaths = 0,
     correctTimeDrift = false,
-    rushPresentation = true,
+    rushPresentation = false,
     syncOnSkipIdle = false,
     dupXfbRearmsThrottle = false,
     coreLog = false,
@@ -216,7 +216,7 @@ export class UpstreamWorkerAdapter {
     this.softwareTevHotCaseMode = (Number(softwareTevHotCaseMode) || 0) & 3;
     this.xfbFastPaths = (Number(xfbFastPaths) || 0) & 3;
     this.correctTimeDrift = Boolean(correctTimeDrift);
-    this.rushPresentation = rushPresentation !== false;
+    this.rushPresentation = rushPresentation === true;
     this.syncOnSkipIdle = syncOnSkipIdle === true;
     this.dupXfbRearmsThrottle = dupXfbRearmsThrottle === true;
     this.coreLog = Boolean(coreLog);

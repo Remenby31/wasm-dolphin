@@ -5,31 +5,32 @@ import { readFile } from "node:fs/promises";
 import test from "node:test";
 
 // Patch 0150's pacing switches, each from the page's URL to the core's config:
-// ?rush=0, ?synconidle=1, ?dupvsync=1. An option the adapter forgot to carry
+// ?rush=1 (Rush is off by default), ?synconidle=1, ?dupvsync=1. An option the adapter forgot to carry
 // was silently dropped twice (?aotsample, ?wasmengine; and ?synconidle, which
 // the harness trusted while the core ignored it): every hop is checked.
 const SWITCHES = [
-  { param: "rush=0", option: "rushPresentation", on: false, flag: "dolphinRushPresentation" },
+  { param: "rush=1", option: "rushPresentation", on: true, flag: "dolphinRushPresentation" },
   { param: "synconidle=1", option: "syncOnSkipIdle", on: true, flag: "dolphinSyncOnSkipIdle" },
   { param: "dupvsync=1", option: "dupXfbRearmsThrottle", on: true, flag: "dolphinDupXfbRearmsThrottle" }
 ];
 
 test("pacing switches: URL parsing, shipped defaults, each switch only its own", async () => {
   const { requestedPacing } = await import("../src/core-host.js");
-  assert.deepEqual(requestedPacing(""), { rushPresentation: true, syncOnSkipIdle: false, dupXfbRearmsThrottle: false });
+  // Rush off by default (upstream's default): ?rush=1 turns it back on.
+  assert.deepEqual(requestedPacing(""), { rushPresentation: false, syncOnSkipIdle: false, dupXfbRearmsThrottle: false });
   for (const s of SWITCHES) {
     const p = requestedPacing(`?${s.param}`);
     assert.equal(p[s.option], s.on, s.param);
     for (const other of SWITCHES.filter((o) => o !== s)) assert.equal(p[other.option], !other.on, `${s.param} leaves ${other.option}`);
   }
-  assert.equal(requestedPacing("?rush=1").rushPresentation, true);
+  assert.equal(requestedPacing("?rush=0").rushPresentation, false);
   assert.equal(requestedPacing("?synconidle=0").syncOnSkipIdle, false);
 });
 
 test("pacing switches reach the worker's init message through the adapter", async (t) => {
   const { requestedPacing } = await import("../src/core-host.js");
   const { UpstreamWorkerAdapter } = await import("../src/upstream-worker-adapter.js");
-  const adapter = new UpstreamWorkerAdapter(requestedPacing("?rush=0&synconidle=1&dupvsync=1"));
+  const adapter = new UpstreamWorkerAdapter(requestedPacing("?rush=1&synconidle=1&dupvsync=1"));
   let posted = null;
   adapter.worker = {
     postMessage(message) {
@@ -38,7 +39,7 @@ test("pacing switches reach the worker's init message through the adapter", asyn
     }
   };
   const originalWindow = globalThis.window;
-  globalThis.window = { location: { href: "http://127.0.0.1:8080/?rush=0&synconidle=1&dupvsync=1", search: "?rush=0&synconidle=1&dupvsync=1" } };
+  globalThis.window = { location: { href: "http://127.0.0.1:8080/?rush=1&synconidle=1&dupvsync=1", search: "?rush=1&synconidle=1&dupvsync=1" } };
   t.after(() => {
     if (originalWindow === undefined) delete globalThis.window;
     else globalThis.window = originalWindow;
@@ -63,4 +64,13 @@ test("pacing switches: host passes them, the worker sets the Module flags, the c
   // the harness reads back what the core applied, from its effective config
   assert.match(worker, /case "validationReadPacingConfig":/);
   assert.match(worker, /syncOnSkipIdle: Boolean\(bits & 1\), rushFramePresentation: Boolean\(bits & 2\), dupXfbResetsThrottle: Boolean\(bits & 4\)/);
+});
+
+test("Rush off by default: a page or core that sets nothing runs without Rush Frame Presentation", async () => {
+  const { UpstreamWorkerAdapter } = await import("../src/upstream-worker-adapter.js");
+  assert.equal(new UpstreamWorkerAdapter({}).rushPresentation, false);
+  const core = await readFile(new URL("../core/upstream/dolphin_web_core.cpp", import.meta.url), "utf8");
+  assert.match(core, /Module\['dolphinRushPresentation'\] === true\) \? 1 : 0;/, "the core's own default is off too");
+  const worker = await readFile(new URL("../src/upstream-discio-worker.js", import.meta.url), "utf8");
+  assert.match(worker, /\n  rushPresentation = false,\n/);
 });

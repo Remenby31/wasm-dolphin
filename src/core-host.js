@@ -1585,13 +1585,14 @@ function requestedEfbDiag() {
   return raw === "2" ? 2 : (raw === "1" ? 1 : false);
 }
 
-// Pacing switches (patch 0150), for measurement: ?rush=0 turns Rush Frame
-// Presentation off, ?synconidle=1 turns SyncOnSkipIdle on, ?dupvsync=1 makes a
-// duplicated XFB rearm the throttle. Absent: the shipped pacing.
+// Pacing switches (patch 0150): Rush Frame Presentation is off by default
+// (upstream's default), ?rush=1 turns it on. For measurement: ?synconidle=1
+// turns SyncOnSkipIdle on, ?dupvsync=1 makes a duplicated XFB rearm the
+// throttle. Absent: the shipped pacing.
 export function requestedPacing(search = window.location.search) {
   const params = new URLSearchParams(search);
   return {
-    rushPresentation: params.get("rush") !== "0",
+    rushPresentation: params.get("rush") === "1",
     syncOnSkipIdle: params.get("synconidle") === "1",
     dupXfbRearmsThrottle: params.get("dupvsync") === "1"
   };

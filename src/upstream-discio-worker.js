@@ -2283,7 +2283,7 @@ async function loadCore({
   softwareTevHotCaseMode: requestedSoftwareTevHotCaseMode = 0,
   xfbFastPaths = 0,
   correctTimeDrift = false,
-  rushPresentation = true,
+  rushPresentation = false,
   syncOnSkipIdle = false,
   dupXfbRearmsThrottle = false,
   coreLog = false,
@@ -2799,7 +2799,7 @@ async function loadCore({
     // false, so the shipping page load is unchanged.
     dolphinCorrectTimeDrift: Boolean(correctTimeDrift),
     // Patch 0150 pacing switches (dolphin_web_core.cpp reads them at setup).
-    dolphinRushPresentation: rushPresentation !== false,
+    dolphinRushPresentation: rushPresentation === true,
     dolphinSyncOnSkipIdle: syncOnSkipIdle === true,
     dolphinDupXfbRearmsThrottle: dupXfbRearmsThrottle === true,
     dolphinCoreLog: Boolean(coreLog),
