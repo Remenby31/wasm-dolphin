@@ -6,7 +6,9 @@
 // a fragment: (8 x op + blr) - (blr), / 8. Measured on 0146's core: fused
 // ps_madd 459 (690 before), ps_add 166 (237), ps_mul 235 (348), ps_muls0 257
 // (370). The bounds leave a little room; a change that grows these paths past
-// them is a size regression to look at.
+// them is a size regression to look at. 0161 adds the single tie fix to the
+// paired FMAs: ps_madd 531 (459 before), ps_nmsub 537, ps_madds0 553,
+// all inline where ties went to the helper.
 
 import assert from "node:assert/strict";
 import { existsSync, readFileSync } from "node:fs";
@@ -51,7 +53,7 @@ test("paired add/sub/mul stay compact (bytes per op in a region)", { skip }, () 
 test("fused paired FMA stays compact (bytes per op in a region)", { skip: skip || (probeRelaxedMadd() !== "fused" && "this engine does not fuse relaxed_madd") }, () => {
   const previous = core.module._DolphinWeb_SetFusedMadd(1);
   try {
-    for (const [name, xo, max] of [["ps_madd", 29, 640], ["ps_nmsub", 30, 645], ["ps_madds0", 14, 660]]) {
+    for (const [name, xo, max] of [["ps_madd", 29, 560], ["ps_nmsub", 30, 565], ["ps_madds0", 14, 580]]) {
       const n = bytesPerOp(4, xo);
       assert.ok(n <= max, `${name}: ${n} bytes per op, more than ${max}`);
     }
