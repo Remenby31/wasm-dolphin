@@ -158,7 +158,7 @@ test("first launch: plan -> optimiser -> off-thread compile -> cache, with progr
 
   // second launch (reload): the loader brings every region back before boot
   const second = launch(p);
-  assert.deepEqual(await second.flow.status(), { state: "complete", fraction: 1 });
+  assert.deepEqual(await second.flow.status(), { state: "complete", fraction: 1, regionsRefused: 0 });
   const report = await second.flow.installBeforeBoot();
   assert.equal(report.loaded, total);
   assert.deepEqual(report.failed, []);
@@ -229,7 +229,7 @@ test("interrupted in the middle of the first launch, the next launch resumes whe
   assert.equal(ofType(second.flow, "progress").at(-1).fraction, 1);
   // third launch: complete, nothing left to do
   const third = launch(p);
-  assert.deepEqual(await third.flow.status(), { state: "complete", fraction: 1 });
+  assert.deepEqual(await third.flow.status(), { state: "complete", fraction: 1, regionsRefused: 0 });
   assert.equal((await third.flow.installBeforeBoot()).loaded, total);
 });
 
@@ -256,7 +256,7 @@ test("a region that fails goes to the blacklist and the optimisation goes on", a
   const report = await second.flow.installBeforeBoot();
   assert.equal(report.loaded, done.total - 1);
   assert.ok(!second.retained.has(rejectKey));
-  assert.deepEqual(await second.flow.status(), { state: "complete", fraction: 1 });
+  assert.deepEqual(await second.flow.status(), { state: "complete", fraction: 1, regionsRefused: 0 });
   await second.flow.start();
   assert.equal(second.translator.translated.length, 0);
 });

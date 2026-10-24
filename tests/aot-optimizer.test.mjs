@@ -39,14 +39,14 @@ function optimizer({ cache = fakeCache(), translator = fakeTranslator(), ...extr
 test("aot optimizer: first launch compiles every region, second launch is complete", async () => {
   const cache = fakeCache();
   const { o, events } = optimizer({ cache });
-  assert.deepEqual(await o.status(), { state: "none", fraction: 0 });
+  assert.deepEqual(await o.status(), { state: "none", fraction: 0, regionsRefused: 0 });
   await o.start();
   const fractions = events.filter(([t]) => t === "optimization-progress").map(([, d]) => d.fraction);
   assert.ok(fractions.every((f, i) => !i || f >= fractions[i - 1]), "progress is monotonic");
   assert.equal(fractions.at(-1), 1);
   assert.equal(events.at(-1)[0], "optimization-done");
   const again = optimizer({ cache });
-  assert.deepEqual(await again.o.status(), { state: "complete", fraction: 1 });
+  assert.deepEqual(await again.o.status(), { state: "complete", fraction: 1, regionsRefused: 0 });
 });
 
 test("aot optimizer: cancel keeps what was compiled and a restart resumes", async () => {
@@ -61,7 +61,7 @@ test("aot optimizer: cancel keeps what was compiled and a restart resumes", asyn
   const before = cache.persisted.size;
   const second = optimizer({ cache, translator });
   await second.o.start({ resume: true });
-  assert.deepEqual(await second.o.status(), { state: "complete", fraction: 1 });
+  assert.deepEqual(await second.o.status(), { state: "complete", fraction: 1, regionsRefused: 0 });
   const submitted = second.events.filter(([t]) => t === "optimization-progress")[0][1].done;
   assert.ok(submitted >= before - 1, "the restart starts from the persisted regions");
 });
@@ -125,7 +125,7 @@ test("aot optimizer: core slices (budget), waits before boot (not-ready), skips 
   assert.ok(sleeps >= 2, "not-ready waits before retrying");
   assert.ok([...cache.persisted.keys()].every((k) => /^region-v1:00000000:00000000:[0-9a-f]{64}$/.test(k)), "module keys");
   assert.equal(cache.persisted.size, o.regions.length - 1);
-  assert.deepEqual(await o.status(), { state: "complete", fraction: 1 });
+  assert.deepEqual(await o.status(), { state: "complete", fraction: 1, regionsRefused: 0 });
 });
 
 // A core with region chaining (patch 0102) gets chained modules under their

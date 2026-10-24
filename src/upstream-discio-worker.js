@@ -12,6 +12,7 @@ import {
 } from "./upstream-worker-protocol.js";
 import { parseDolHeader } from "./dol.js";
 import { probeRelaxedMadd } from "./relaxed-madd-probe.js";
+import { probeWasmFeatures } from "./wasm-feature-probe.js";
 import { decodeWgpuSamplerState } from "./wgpu-sampler-state.js";
 import { gxClearDepthToStored, gxDepthState } from "./wgpu-depth-state.js";
 import { clampSourceRect, createWgpuExactCapture, packReadbackRows } from "./wgpu-exact-capture.js";
@@ -952,6 +953,10 @@ let wgpuDiagLastDrainAt = 0;
 let gpuSyncDiagEnabled = false;
 // probeRelaxedMadd()'s answer: "fused", "unfused", "unsupported" or "inconsistent".
 let relaxedMadd = null;
+// probeWasmFeatures()'s answer ({ simd, tailCall }), and why ?aot=1 was turned
+// off by it (null when it was not).
+let wasmFeatures = null;
+let aotRegionsOffReason = null;
 
 // Milliseconds before the next drain the drainEveryMs perturbation allows (0:
 // drain now). The replay pump sleeps that long instead of polling.
@@ -2699,6 +2704,16 @@ async function loadCore({
   const _t_idb = performance.now();
   dolphinJitCachePersistenceEnabled = !noJitCache;
   dolphinAotCompilerEnabled = aotCompiler !== false;
+  // Regions are return_call chains: without wasm tail calls every region
+  // module would fail to compile. They stay off and the CPU runs on blocks,
+  // with a status line and aotStatus saying why (never a silent loss).
+  wasmFeatures = probeWasmFeatures();
+  aotRegionsOffReason = null;
+  if (aotFirstLaunch === true && !wasmFeatures.tailCall) {
+    aotFirstLaunch = false;
+    aotRegionsOffReason = "no wasm tail calls (return_call) in this engine";
+    postStatus(`aot: regions off: ${aotRegionsOffReason}`);
+  }
   aotFirstLaunchEnabled = aotFirstLaunch === true;
   aotProfileSampleMs = Number.isInteger(aotSampleMs) && aotSampleMs >= 0 ? aotSampleMs : AOT_PROFILE_SAMPLE_MS;
   dolphinJitBootLoadComplete = false;
@@ -7473,7 +7488,10 @@ export async function handleAotMessage(type, payload = {}) {
   const idle = aotFirstLaunchEnabled ? "none" : "disabled";
   switch (type) {
     case "aotStatus": {
-      const status = aotFirstLaunch ? await aotFirstLaunch.status() : { state: idle, fraction: 0 };
+      const base = aotFirstLaunch ? await aotFirstLaunch.status() : { state: idle, fraction: 0 };
+      // The engine's features, and why regions are off when a missing one
+      // turned them off.
+      const status = { ...base, wasmFeatures: { ...wasmFeatures, relaxedMadd }, ...(aotRegionsOffReason ? { regionsOff: aotRegionsOffReason } : {}) };
       const profile = aotProfileReport();
       return profile ? { ...status, profile } : status;
     }
