@@ -64,6 +64,7 @@ extern "C" std::uint32_t DolphinWeb_SetCachedInterpreterDisableMask(std::uint32_
 extern "C" std::uint32_t DolphinWeb_GetCachedInterpreterDisableMask();
 extern "C" unsigned int DolphinWeb_SetRendererFeatureMask(unsigned int mask);
 extern "C" unsigned int DolphinWeb_GetRendererFeatureMask();
+extern "C" void DolphinWeb_SetDupXfbRearmsThrottle(int on);  // patch 0150
 extern "C" void NotifyWebGpuOwnershipTraceLoadRequested();
 
 #ifdef __EMSCRIPTEN__
@@ -735,9 +736,23 @@ void EnsureRuntime()
   Config::SetBase(Config::MAIN_OVERCLOCK_ENABLE, true);
   Config::SetBase(Config::MAIN_OVERCLOCK, s_cpu_overclock);
   Config::SetBase(Config::MAIN_PRECISION_FRAME_TIMING, false);
-  Config::SetBase(Config::MAIN_RUSH_FRAME_PRESENTATION, true);
+  // Pacing switches (patch 0150): Rush Frame Presentation is off, as
+  // upstream's default (with it, heavy scenes ran up to 40 ms ahead of the
+  // presents: VI p99 ~60 ms); ?rush=1 (Module['dolphinRushPresentation'] true)
+  // turns it back on. For measurement: ?synconidle=1 turns Dolphin's
+  // SyncOnSkipIdle on, ?dupvsync=1 makes a duplicated XFB rearm the throttle.
+  const bool rush_presentation =
+      EM_ASM_INT({ return (typeof Module !== 'undefined' &&
+                           Module['dolphinRushPresentation'] === true) ? 1 : 0; }) != 0;
+  const bool sync_on_skip_idle =
+      EM_ASM_INT({ return (typeof Module !== 'undefined' &&
+                           Module['dolphinSyncOnSkipIdle'] === true) ? 1 : 0; }) != 0;
+  DolphinWeb_SetDupXfbRearmsThrottle(
+      EM_ASM_INT({ return (typeof Module !== 'undefined' &&
+                           Module['dolphinDupXfbRearmsThrottle'] === true) ? 1 : 0; }));
+  Config::SetBase(Config::MAIN_RUSH_FRAME_PRESENTATION, rush_presentation);
   Config::SetBase(Config::MAIN_SMOOTH_EARLY_PRESENTATION, true);
-  Config::SetBase(Config::MAIN_SYNC_ON_SKIP_IDLE, false);
+  Config::SetBase(Config::MAIN_SYNC_ON_SKIP_IDLE, sync_on_skip_idle);
   Config::SetBase(Config::MAIN_ACCURATE_FMADDS, false);
   Config::SetBase(Config::MAIN_ENABLE_CHEATS, false);
   Config::SetBase(Config::MAIN_OSD_MESSAGES, false);

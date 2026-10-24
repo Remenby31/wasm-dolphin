@@ -100,6 +100,9 @@ export class UpstreamWorkerAdapter {
     softwareTevHotCaseMode = 0,
     xfbFastPaths = 0,
     correctTimeDrift = false,
+    rushPresentation = false,
+    syncOnSkipIdle = false,
+    dupXfbRearmsThrottle = false,
     coreLog = false,
     memcardSlotB = false,
     efbAccess = false,
@@ -219,6 +222,9 @@ export class UpstreamWorkerAdapter {
     this.softwareTevHotCaseMode = (Number(softwareTevHotCaseMode) || 0) & 3;
     this.xfbFastPaths = (Number(xfbFastPaths) || 0) & 3;
     this.correctTimeDrift = Boolean(correctTimeDrift);
+    this.rushPresentation = rushPresentation === true;
+    this.syncOnSkipIdle = syncOnSkipIdle === true;
+    this.dupXfbRearmsThrottle = dupXfbRearmsThrottle === true;
     this.coreLog = Boolean(coreLog);
     this.memcardSlotB = Boolean(memcardSlotB);
     this.efbAccess = Boolean(efbAccess);
@@ -456,6 +462,9 @@ export class UpstreamWorkerAdapter {
       softwareTevHotCaseMode: this.softwareTevHotCaseMode,
       xfbFastPaths: this.xfbFastPaths,
       correctTimeDrift: this.correctTimeDrift,
+      rushPresentation: this.rushPresentation,
+      syncOnSkipIdle: this.syncOnSkipIdle,
+      dupXfbRearmsThrottle: this.dupXfbRearmsThrottle,
       coreLog: this.coreLog,
       memcardSlotB: this.memcardSlotB,
       efbAccess: this.efbAccess,
