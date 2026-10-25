@@ -1315,6 +1315,28 @@ self.addEventListener("message", async (event) => {
   }
 });
 
+// Patch 0164: the video thread's blocking EFB copies to RAM (harness hooks
+// on): per kind, how long it waited and whether FIFO work was waiting behind.
+const EFB_SYNC_BOUNDS_MS = [0.5, 1, 2, 4, 8, 16, 33, null];
+function readEfbSyncStats(payload = {}) {
+  const m = moduleInstance;
+  if (!m?._DolphinWeb_HarnessEfbSyncWord) return { available: false, why: "core has no EFB sync counters (patch 0164)" };
+  const n = m._DolphinWeb_HarnessEfbSyncWords() >>> 0;
+  const w = Array.from({ length: n }, (_, i) => m._DolphinWeb_HarnessEfbSyncWord(i) >>> 0);
+  const kind = (k) => {
+    const b = 1 + 16 * k;
+    return {
+      flushes: w[b], copies: w[b + 1], fifoBehindStart: w[b + 2], fifoBehindEnd: w[b + 3],
+      waitUs: w[b + 4], waitUsFifoBehind: w[b + 5], maxWaitUs: w[b + 6],
+      waitHistogram: w.slice(b + 7, b + 15)
+    };
+  };
+  const out = { available: true, harness: Boolean(m._DolphinWeb_HarnessEnabled?.()), version: w[0],
+    boundsMs: EFB_SYNC_BOUNDS_MS, syncPoint: kind(0), immediate: kind(1) };
+  if (payload?.reset) m._DolphinWeb_HarnessEfbSyncReset();
+  return out;
+}
+
 // Drain both harness rings since the previous read: presentations (worker)
 // and VI outputs (core). Every entry is returned; `lost` counts entries
 // overwritten before they could be read.
@@ -2000,6 +2022,8 @@ async function handleMessage(type, payload) {
       return readDetTrace(payload);
     case "validationReadWgpuReplayState":
       return readWgpuReplayState();
+    case "validationReadEfbSyncStats":
+      return readEfbSyncStats(payload);
     case "validationReadWgpuReadback":
       // EFB/staging readbacks (copies to RAM, peeks): counters and per-copy
       // latency since the last read with { reset: true }.
