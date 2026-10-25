@@ -58,8 +58,8 @@ test("[Dolphin.Core] and [Graphics.Settings] are the other spellings Dolphin map
 });
 
 test("the EFB and bounding-box keys pass under [Video_Hacks], in allowlist order", () => {
-  const ini = "[Video_Hacks]\nBBoxEnable = True\nEFBToTextureEnable = False\nEFBAccessEnable = True\nEFBScaledCopy = False\n";
-  assert.equal(filterIni(ini, allowlist), "[Video_Hacks]\nEFBAccessEnable = True\nEFBToTextureEnable = False\nBBoxEnable = True\n");
+  const ini = "[Video_Hacks]\nDeferEFBCopies = False\nBBoxEnable = True\nEFBToTextureEnable = False\nEFBAccessEnable = True\nEFBScaledCopy = False\n";
+  assert.equal(filterIni(ini, allowlist), "[Video_Hacks]\nEFBAccessEnable = True\nEFBToTextureEnable = False\nBBoxEnable = True\nDeferEFBCopies = False\n");
   assert.equal(filterIni("[Graphics.Hacks]\nBBoxEnable = True\n", allowlist), "[Video_Hacks]\nBBoxEnable = True\n");
   assert.throws(() => filterIni("[Video_Settings]\nEFBAccessEnable = True\n", allowlist, "TST98.ini"), /TST98\.ini/);
 });
@@ -130,8 +130,8 @@ test("Dolphin's own folder passes the filter and gives only allowlisted keys", (
 
 const core = await loadAotCore();
 // A core that does not know the newest allowlisted setting answers -2 for it.
-const knowsBbox = () => core.module.ccall("GameConfigValueForTest", "number", ["string", "number", "string"], ["XYZE01", 0, "BBoxEnable"]) !== -2;
-const coreSkip = core && typeof core.module._GameConfigValueForTest === "function" && knowsBbox() ? false : "the core predates BBoxEnable in the allowlist (CI builds this branch's core)";
+const knowsBbox = () => core.module.ccall("GameConfigValueForTest", "number", ["string", "number", "string"], ["XYZE01", 0, "DeferEFBCopies"]) !== -2;
+const coreSkip = core && typeof core.module._GameConfigValueForTest === "function" && knowsBbox() ? false : "the core predates DeferEFBCopies in the allowlist (CI builds this branch's core)";
 
 test("the core embeds the filtered INIs, and its game config applies them in Dolphin's order", { skip: coreSkip }, () => {
   const m = core.module;
@@ -141,11 +141,11 @@ test("the core embeds the filtered INIs, and its game config applies them in Dol
   for (const name of embedded) {
     const text = m.FS.readFile(`${dir}/${name}`, { encoding: "utf8" });
     assert.ok(text.length > 0, name);
-    assert.match(text, /^(\[Core\]\n(MMU = (True|False)\n)?(FPRF = (True|False)\n)?)?(\[Video_Settings\]\nSafeTextureCacheColorSamples = \d*\n)?(\[Video_Hacks\]\n(XFBToTextureEnable = (True|False)\n)?(EFBAccessEnable = (True|False)\n)?(EFBToTextureEnable = (True|False)\n)?(BBoxEnable = (True|False)\n)?)?$/, name);
+    assert.match(text, /^(\[Core\]\n(MMU = (True|False)\n)?(FPRF = (True|False)\n)?)?(\[Video_Settings\]\nSafeTextureCacheColorSamples = \d*\n)?(\[Video_Hacks\]\n(XFBToTextureEnable = (True|False)\n)?(EFBAccessEnable = (True|False)\n)?(EFBToTextureEnable = (True|False)\n)?(BBoxEnable = (True|False)\n)?(DeferEFBCopies = (True|False)\n)?)?$/, name);
   }
   // Synthetic discs: ID3, then ID6, then ID6rN, the later file winning.
   const fixtures = {
-    "TST.ini": "[Core]\nMMU = True\nFPRF = True\n[Video_Settings]\nSafeTextureCacheColorSamples = 512\n[Video_Hacks]\nXFBToTextureEnable = False\nEFBAccessEnable = True\nEFBToTextureEnable = False\nBBoxEnable = True\n",
+    "TST.ini": "[Core]\nMMU = True\nFPRF = True\n[Video_Settings]\nSafeTextureCacheColorSamples = 512\n[Video_Hacks]\nXFBToTextureEnable = False\nEFBAccessEnable = True\nEFBToTextureEnable = False\nBBoxEnable = True\nDeferEFBCopies = False\n",
     "TSTE01r1.ini": "[Core]\nMMU = False\n[Video_Settings]\nSafeTextureCacheColorSamples = 0\n"
   };
   for (const [name, text] of Object.entries(fixtures)) m.FS.writeFile(`${dir}/${name}`, text);
@@ -168,6 +168,8 @@ test("the core embeds the filtered INIs, and its game config applies them in Dol
     assert.equal(value("TSTE01", 0, "BBoxEnable"), 1, "the ID3 file turns the bounding box on");
     assert.equal(m.ccall("GameConfigValue", "number", ["string", "number", "string"], ["TSTE01", 0, "BBoxEnable"]), 1, "the worker's export, the same reader");
     assert.equal(value("XYZE01", 0, "BBoxEnable"), 0, "Dolphin's default: off");
+    assert.equal(value("TSTE01", 0, "DeferEFBCopies"), 0, "the ID3 file waits for each EFB copy");
+    assert.equal(value("XYZE01", 0, "DeferEFBCopies"), 1, "Dolphin's default defers them");
     assert.equal(value("TSTE01", 0, "CPUThread"), -2, "only allowlisted settings");
   } finally {
     for (const name of Object.keys(fixtures)) m.FS.unlink(`${dir}/${name}`);
