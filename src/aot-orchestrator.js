@@ -359,6 +359,22 @@ export function coreHeapBases(m) {
 // translation slices a third of the time idle (research deep-first-minute
 // §2.1); a message has no clamp and still lets the worker's other messages
 // (the core's disc reads, compile requests) run between slices.
+// A yield that also gives way to the core's disc reads: while the worker
+// served one less than quietMs ago (lastReadAt), the next translation slice
+// waits, in steps, up to maxWaitMs, so a burst of sequential reads (a boot,
+// a load) is not served one per slice. The core's DVD thread issues its
+// next read as soon as one completes: a slice in between delays each by up
+// to a slice, and the emulated CPU waits on it (drop meter: cold boot,
+// 0.55-1.7 s at ~17 % speed, reads at ~10-50 ms each while translating).
+export function discAwareYield({ lastReadAt, quietMs = 15, maxWaitMs = 1000, now = () => performance.now(),
+  yieldNow = yieldToEventLoop, sleep = (ms) => new Promise((r) => setTimeout(r, ms)) }) {
+  return async () => {
+    await yieldNow();
+    const until = now() + maxWaitMs;
+    while (now() - lastReadAt() < quietMs && now() < until) await sleep(quietMs);
+  };
+}
+
 export function yieldToEventLoop() {
   if (typeof MessageChannel !== "function") return new Promise((r) => setTimeout(r, 0));
   // A channel per turn, closed once it delivered: a port left open would

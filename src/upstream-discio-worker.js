@@ -3293,6 +3293,22 @@ function readDiscAhead(workerFs) {
   });
   ops.read = discBlockReader.read;
 }
+// When this worker last served a disc read (performance.now()): the region
+// translator gives way to read bursts (discAwareYield, aot-orchestrator.js).
+let lastDiscReadAt = -Infinity;
+function noteDiscReads(workerFs) {
+  const ops = workerFs?.stream_ops;
+  if (!ops?.read || ops.read.notedDiscReads) return;
+  const read = ops.read;
+  ops.read = function notedRead(stream, buffer, offset, length, position) {
+    try {
+      return read.call(this, stream, buffer, offset, length, position);
+    } finally {
+      lastDiscReadAt = performance.now();
+    }
+  };
+  ops.read.notedDiscReads = true;
+}
 function timeDiscReads(workerFs) {
   const ops = workerFs?.stream_ops;
   if (!ops?.read || ops.read.timedDiscReads) return;
@@ -4241,6 +4257,7 @@ async function mountFile(file) {
   fs.mount(resolveWorkerFs(moduleInstance), { blobs: [{ name: safeName, data: file }] }, WORKERFS_MOUNT_DIR);
   mounted = true;
   if (discReadaheadEnabled) readDiscAhead(resolveWorkerFs(moduleInstance));
+  noteDiscReads(resolveWorkerFs(moduleInstance));
   if (harnessEnabled) {
     timeDiscReads(resolveWorkerFs(moduleInstance));
     moduleInstance._DolphinWeb_SetDiscReadStatsEnabled?.(1);
@@ -7916,7 +7933,7 @@ export async function prepareAotFirstLaunch(file, {
     return;
   }
   const generation = aotDiscGeneration;
-  const [{ coreAotKeyParts, coreAssembleOptions, coreRegionTranslator, createAotFirstLaunch, REGION_JSC_FUNCTION_CAP }, { OpfsPlanStore }, { AotProfileStore, blocksFromPcSamples, profileKey }, { planDiscInWorker }, { fileReader, planDisc, planDolFile }, { createProfileRecorder, guestPcAddress, startHotSampler }] =
+  const [{ coreAotKeyParts, coreAssembleOptions, coreRegionTranslator, createAotFirstLaunch, discAwareYield, REGION_JSC_FUNCTION_CAP }, { OpfsPlanStore }, { AotProfileStore, blocksFromPcSamples, profileKey }, { planDiscInWorker }, { fileReader, planDisc, planDolFile }, { createProfileRecorder, guestPcAddress, startHotSampler }] =
     await Promise.all([import("./aot-orchestrator.js"), import("./aot-optimizer.js"), import("./aot-profile.js"), import("./aot-plan-worker.js"), import("./aot-recomp.js"), import("./aot-hot-sampler.js")]);
   const discKey = await readDiscKey();
   if (generation !== aotDiscGeneration) return;
@@ -7929,7 +7946,8 @@ export async function prepareAotFirstLaunch(file, {
   const keyParts = coreKeyParts ? { ...coreKeyParts, functionCap } : null;
   const core = coreAssembleOptions(module);
   const translator = keyParts && core && discKey && coreHash
-    ? coreRegionTranslator(module, { mask: keyParts.codegenMask, helperNames: core.helperNames, functionCap })
+    ? coreRegionTranslator(module, { mask: keyParts.codegenMask, helperNames: core.helperNames, functionCap,
+      yieldNow: discAwareYield({ lastReadAt: () => lastDiscReadAt }) })
     : null;
   const opfs = translator ? await Promise.resolve(storageRoot()).catch(() => null) : null;
   const flow = createAotFirstLaunch({
