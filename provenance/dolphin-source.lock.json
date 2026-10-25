@@ -25,7 +25,7 @@
       "commit": "01e0577914a75a2569c846778c2f93aa8e6feddd"
     }
   },
-  "patchSeriesSha256": "72e9cc3b74772724fdd10aa1a5ca21e820128a6332719185d0602725021c7bf5",
+  "patchSeriesSha256": "d673c4c5cf730a71f21a123f1d1613ac08ecd8447e1fef597f3e95403a816d9f",
   "patches": [
     {
       "order": 1,
@@ -968,8 +968,8 @@
       "cwd": ".",
       "hashMode": "lf-normalized",
       "path": "patches/dolphin-wasm/snapshot/0153-smooth-early-switch-and-present-sleep.patch",
-      "size": 3539,
-      "sha256": "921cbdaed8c1355de014e3c48823518d5cab61cc6517543713fd1d1130fcb9c4"
+      "size": 5201,
+      "sha256": "c298c525589229f48f773645a71a23508f62ee0c8b34a2724fabbdd005e272d0"
     },
     {
       "order": 119,

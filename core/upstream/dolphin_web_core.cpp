@@ -65,6 +65,7 @@ extern "C" std::uint32_t DolphinWeb_GetCachedInterpreterDisableMask();
 extern "C" unsigned int DolphinWeb_SetRendererFeatureMask(unsigned int mask);
 extern "C" unsigned int DolphinWeb_GetRendererFeatureMask();
 extern "C" void DolphinWeb_SetDupXfbRearmsThrottle(int on);  // patch 0150
+extern "C" void DolphinWeb_SetPresentOnArrival(int on);       // patch 0153
 extern "C" void NotifyWebGpuOwnershipTraceLoadRequested();
 
 #ifdef __EMSCRIPTEN__
@@ -750,11 +751,14 @@ void EnsureRuntime()
   DolphinWeb_SetDupXfbRearmsThrottle(
       EM_ASM_INT({ return (typeof Module !== 'undefined' &&
                            Module['dolphinDupXfbRearmsThrottle'] === true) ? 1 : 0; }));
-  // ?smoothearly=0 (patch 0153, Module['dolphinSmoothEarly'] false) turns
-  // off the video thread's sleep to each present's time (Present.cpp, 0094).
+  // ?smoothearly=0 (patch 0153, Module['dolphinSmoothEarly'] false): the
+  // video thread presents on arrival, with no sleep to the present's time
+  // (Present.cpp, 0094). SmoothEarlyPresentation off alone would not remove
+  // it: with Rush off, GetUpdatedPresentationTime returns the intended time.
   const bool smooth_early =
       EM_ASM_INT({ return (typeof Module !== 'undefined' &&
                            Module['dolphinSmoothEarly'] === false) ? 0 : 1; }) != 0;
+  DolphinWeb_SetPresentOnArrival(smooth_early ? 0 : 1);
   Config::SetBase(Config::MAIN_RUSH_FRAME_PRESENTATION, rush_presentation);
   Config::SetBase(Config::MAIN_SMOOTH_EARLY_PRESENTATION, smooth_early);
   Config::SetBase(Config::MAIN_SYNC_ON_SKIP_IDLE, sync_on_skip_idle);

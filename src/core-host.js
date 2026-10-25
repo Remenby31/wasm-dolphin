@@ -1630,8 +1630,10 @@ function requestedEfbDiag() {
 // Pacing switches (patch 0150): Rush Frame Presentation is off by default
 // (upstream's default), ?rush=1 turns it on. For measurement: ?synconidle=1
 // turns SyncOnSkipIdle on, ?dupvsync=1 makes a duplicated XFB rearm the
-// throttle; ?smoothearly=0 (patch 0153) turns off the video thread's sleep to
-// each present's time. Absent: the shipped pacing.
+// throttle; ?smoothearly=0 (patch 0153) makes the video thread present on
+// arrival: SmoothEarlyPresentation off and no sleep to the present's time
+// (off alone, with Rush off, it would still sleep to the intended time).
+// Absent: the shipped pacing.
 export function requestedPacing(search = window.location.search) {
   const params = new URLSearchParams(search);
   return {

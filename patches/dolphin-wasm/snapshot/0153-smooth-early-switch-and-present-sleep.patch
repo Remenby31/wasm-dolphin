@@ -1,15 +1,34 @@
 diff --git a/Source/Core/Core/CoreTiming.cpp b/Source/Core/Core/CoreTiming.cpp
-index d8041e2..343e93a 100644
+index d8041e2..c2ab050 100644
 --- a/Source/Core/Core/CoreTiming.cpp
 +++ b/Source/Core/Core/CoreTiming.cpp
-@@ -70,13 +70,15 @@ extern "C" EMSCRIPTEN_KEEPALIVE void DolphinWeb_SetDupXfbRearmsThrottle(int on)
+@@ -62,21 +62,37 @@ namespace DolphinWeb
+ // Patch 0150 (?dupvsync=1): a duplicated XFB rearms the Rush throttle as a
+ // presented one does (Presenter::ViSwap).
+ std::atomic<bool> g_dup_xfb_rearms_throttle{false};
++// Patch 0153 (?smoothearly=0): the video thread presents on arrival, without
++// the sleep to the present's time (Present.cpp). SmoothEarlyPresentation off
++// alone does not do it: with Rush off, upstream's GetUpdatedPresentationTime
++// still returns the intended time, and the thread sleeps until it.
++std::atomic<bool> g_present_on_arrival{false};
+ }  // namespace DolphinWeb
+ 
++extern "C" EMSCRIPTEN_KEEPALIVE void DolphinWeb_SetPresentOnArrival(int on)
++{
++  DolphinWeb::g_present_on_arrival.store(on != 0, std::memory_order_relaxed);
++}
++
+ extern "C" EMSCRIPTEN_KEEPALIVE void DolphinWeb_SetDupXfbRearmsThrottle(int on)
+ {
+   DolphinWeb::g_dup_xfb_rearms_throttle.store(on != 0, std::memory_order_relaxed);
  }
  
  // The pacing settings the core runs with, from its effective config: bit 0
 -// SyncOnSkipIdle, bit 1 Rush Frame Presentation, bit 2 the 0150 rearm. The
 -// harness reads it (validationReadPacingConfig) to know a switch was applied.
 +// SyncOnSkipIdle, bit 1 Rush Frame Presentation, bit 2 the 0150 rearm, bit 3
-+// Smooth Early Presentation (0153, ?smoothearly=0). The harness reads it
++// the video thread's present sleep (0153: SmoothEarlyPresentation on and not
++// presenting on arrival; ?smoothearly=0 clears it). The harness reads it
 +// (validationReadPacingConfig) to know a switch was applied.
  extern "C" EMSCRIPTEN_KEEPALIVE u32 DolphinWeb_PacingConfig()
  {
@@ -17,7 +36,10 @@ index d8041e2..343e93a 100644
           (Config::Get(Config::MAIN_RUSH_FRAME_PRESENTATION) ? 2u : 0u) |
 -         (DolphinWeb::g_dup_xfb_rearms_throttle.load(std::memory_order_relaxed) ? 4u : 0u);
 +         (DolphinWeb::g_dup_xfb_rearms_throttle.load(std::memory_order_relaxed) ? 4u : 0u) |
-+         (Config::Get(Config::MAIN_SMOOTH_EARLY_PRESENTATION) ? 8u : 0u);
++         (Config::Get(Config::MAIN_SMOOTH_EARLY_PRESENTATION) &&
++                  !DolphinWeb::g_present_on_arrival.load(std::memory_order_relaxed) ?
++              8u :
++              0u);
  }
  #endif
  
@@ -59,10 +81,18 @@ index 3fda7b0..9d039ca 100644
  {
    if (g_on) [[unlikely]]
 diff --git a/Source/Core/VideoCommon/Present.cpp b/Source/Core/VideoCommon/Present.cpp
-index 2514854..3704d1b 100644
+index 2514854..d83f280 100644
 --- a/Source/Core/VideoCommon/Present.cpp
 +++ b/Source/Core/VideoCommon/Present.cpp
-@@ -19,6 +19,9 @@ extern std::atomic<bool> g_dup_xfb_rearms_throttle;  // CoreTiming.cpp, patch 01
+@@ -8,6 +8,7 @@
+ namespace DolphinWeb
+ {
+ extern std::atomic<bool> g_dup_xfb_rearms_throttle;  // CoreTiming.cpp, patch 0150
++extern std::atomic<bool> g_present_on_arrival;       // CoreTiming.cpp, patch 0153
+ }
+ #endif
+ 
+@@ -19,6 +20,9 @@ extern std::atomic<bool> g_dup_xfb_rearms_throttle;  // CoreTiming.cpp, patch 01
  #include "Core/Host.h"
  #include "Core/Core.h"
  #include "Core/System.h"
@@ -72,15 +102,22 @@ index 2514854..3704d1b 100644
  
  #include "InputCommon/ControllerInterface/ControllerInterface.h"
  
-@@ -954,7 +957,11 @@ void Presenter::Present(PresentInfo* present_info)
+@@ -954,7 +958,17 @@ void Presenter::Present(PresentInfo* present_info)
        if (!Core::IsCPUThread() && g_video_backend &&
            g_video_backend->GetConfigName() == "WebGPU")
        {
-+        // Patch 0153: counted apart (headroom presentSleepUs), it is not
-+        // the emulated GPU's work.
-+        const auto sleep_start = Clock::now();
-         Core::System::GetInstance().GetCoreTiming().SleepUntil(present_time);
-+        DolphinWeb::Headroom::AddPresentSleep(Clock::now() - sleep_start);
+-        Core::System::GetInstance().GetCoreTiming().SleepUntil(present_time);
++        // Patch 0153: ?smoothearly=0 presents on arrival (no sleep at all);
++        // the sleep is counted apart (headroom presentSleepUs), it is not the
++        // emulated GPU's work, and only timed while the counters are on.
++        if (!DolphinWeb::g_present_on_arrival.load(std::memory_order_relaxed))
++        {
++          const bool timed = DolphinWeb::Headroom::g_on;
++          const auto sleep_start = timed ? Clock::now() : TimePoint{};
++          Core::System::GetInstance().GetCoreTiming().SleepUntil(present_time);
++          if (timed)
++            DolphinWeb::Headroom::AddPresentSleep(Clock::now() - sleep_start);
++        }
        }
  #else
        Core::System::GetInstance().GetCoreTiming().SleepUntil(present_time);
