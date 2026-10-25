@@ -25,7 +25,7 @@
       "commit": "01e0577914a75a2569c846778c2f93aa8e6feddd"
     }
   },
-  "patchSeriesSha256": "5bfb40c3b247aaa2a1a3ed654454b7ec886a0fea2d14fa568009cb8c9e8efc7c",
+  "patchSeriesSha256": "73faaf3120e5abe2cb8b3f31023d844d8fab1c61a1120ed969452decfa6787c9",
   "patches": [
     {
       "order": 1,
@@ -925,6 +925,14 @@
     },
     {
       "order": 113,
+      "cwd": ".",
+      "hashMode": "lf-normalized",
+      "path": "patches/dolphin-wasm/snapshot/0162-present-cadence-counters.patch",
+      "size": 10167,
+      "sha256": "ff69c72b42427a1b41a2eb94f12d07108496e28bc237b312d1cb724dfef489e6"
+    },
+    {
+      "order": 114,
       "cwd": "Externals/SFML/SFML",
       "hashMode": "lf-normalized",
       "path": "patches/dolphin-wasm/submodules/0001-sfml-emscripten-config.patch",
@@ -932,7 +940,7 @@
       "sha256": "f82197a21fe982ad83f6ee7bbf5a03839b1cebd4d64da3eab11263842bf61d89"
     },
     {
-      "order": 114,
+      "order": 115,
       "cwd": "Externals/xxhash/xxHash",
       "hashMode": "lf-normalized",
       "path": "patches/dolphin-wasm/submodules/0002-xxhash-wasm-simd-scalar.patch",

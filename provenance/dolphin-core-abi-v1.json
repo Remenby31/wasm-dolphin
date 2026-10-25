@@ -140,8 +140,8 @@
     {
       "path": "src/upstream-discio-worker.js",
       "hashMode": "lf-normalized",
-      "size": 737803,
-      "sha256": "ae31e4a2d828f3efbea0225ffc97042f1cb8b028c6c3cc070603e1599fe6b9a6"
+      "size": 739117,
+      "sha256": "8d6efd4eaee08253d739da7ee36d55b3f41d7812eb6c34c0e257b4b2b11e79c8"
     },
     {
       "path": "src/wgpu-renderer-worker-probe.js",
@@ -687,6 +687,7 @@
       "validationReadMemAccessStats",
       "validationReadPacingConfig",
       "validationReadPipelinePrewarm",
+      "validationReadPresentCadence",
       "validationReadRegionLedgerStale",
       "validationReadRelaxedMadd",
       "validationReadTimeline",

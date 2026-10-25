@@ -1,0 +1,251 @@
+diff --git a/Source/Core/Core/CoreTiming.cpp b/Source/Core/Core/CoreTiming.cpp
+index 343e93a..f3d3f7a 100644
+--- a/Source/Core/Core/CoreTiming.cpp
++++ b/Source/Core/Core/CoreTiming.cpp
+@@ -24,6 +24,7 @@
+ #include "Core/Core.h"
+ #ifdef __EMSCRIPTEN__
+ #include "Core/WasmHeadroom.h"
++#include "Core/WasmPresentCadence.h"
+ #endif
+ #include "Core/HW/Memmap.h"
+ #include "Core/HW/ProcessorInterface.h"
+@@ -628,6 +629,7 @@ void CoreTimingManager::Throttle(const s64 target_cycle)
+   const TimePoint time = Clock::now();
+ #ifdef __EMSCRIPTEN__
+   DolphinWeb::Headroom::OnThrottle(GetTicks());
++  DolphinWeb::PresentCadence::OnThrottle();
+ #endif
+ 
+   const bool already_throttled =
+@@ -690,6 +692,10 @@ void CoreTimingManager::Throttle(const s64 target_cycle)
+   UpdateVISkip(time, target_time);
+ 
+   SleepUntil(target_time);
++#ifdef __EMSCRIPTEN__
++  // Patch 0162: this paced Throttle's wake-up against its target.
++  DolphinWeb::PresentCadence::OnThrottleSleep(time, target_time, Clock::now());
++#endif
+ }
+ 
+ void CoreTimingManager::UpdateSpeedLimit(s64 cycle, double new_speed)
+@@ -861,4 +867,14 @@ extern "C" EMSCRIPTEN_KEEPALIVE u32 DolphinWeb_HeadroomStats(int reset)
+     DolphinWeb::Headroom::g_request.store(reset, std::memory_order_release);
+   return static_cast<u32>(reinterpret_cast<std::uintptr_t>(&DolphinWeb::Headroom::g_stats));
+ }
++
++// Present cadence counters (patch 0162, WasmPresentCadence.h): n >= 0 zeroes
++// and turns them on at the CPU thread's next Throttle; n < 0 only reads.
++// Returns the struct's address (8-aligned).
++extern "C" EMSCRIPTEN_KEEPALIVE u32 DolphinWeb_PresentCadenceStats(int reset)
++{
++  if (reset >= 0)
++    DolphinWeb::PresentCadence::g_request.store(reset, std::memory_order_release);
++  return static_cast<u32>(reinterpret_cast<std::uintptr_t>(&DolphinWeb::PresentCadence::g_stats));
++}
+ #endif
+diff --git a/Source/Core/Core/HW/VideoInterface.cpp b/Source/Core/Core/HW/VideoInterface.cpp
+index 2fa6703..b5df669 100644
+--- a/Source/Core/Core/HW/VideoInterface.cpp
++++ b/Source/Core/Core/HW/VideoInterface.cpp
+@@ -28,6 +28,7 @@
+ #include "Core/Core.h"
+ #include "Core/CoreTiming.h"
+ #ifdef __EMSCRIPTEN__
++#include "Core/WasmPresentCadence.h"
+ #include "Core/WasmTimingProfile.h"
+ #endif
+ #include "Core/FifoPlayer/FifoPlayer.h"
+@@ -873,7 +874,13 @@ void VideoInterfaceManager::OutputField(FieldType field, u64 ticks)
+   // can change the register values during scanout. To correctly emulate the scanout process, we
+   // would need to collate all changes to the VI registers during scanout.
+   if (xfbAddr)
++  {
++#ifdef __EMSCRIPTEN__
++    // Patch 0162: the CPU burst from the last paced Throttle to this output.
++    DolphinWeb::PresentCadence::OnOutputXfb();
++#endif
+     g_video_backend->Video_OutputXFB(xfbAddr, fbWidth, fbStride, fbHeight, ticks);
++  }
+ }
+ 
+ void VideoInterfaceManager::BeginField(FieldType field, u64 ticks)
+diff --git a/Source/Core/Core/WasmPresentCadence.h b/Source/Core/Core/WasmPresentCadence.h
+new file mode 100644
+index 0000000..6855b95
+--- /dev/null
++++ b/Source/Core/Core/WasmPresentCadence.h
+@@ -0,0 +1,151 @@
++// Copyright 2026 wasm-dolphin contributors
++// SPDX-License-Identifier: GPL-2.0-or-later
++//
++// Present cadence counters (patch 0162, read by the harness through
++// validationReadPresentCadence): where a VI output comes late. Per field,
++// histograms of
++//   (1) the throttle's wake-up lateness: CoreTiming::Throttle's SleepUntil,
++//       actual wake-up minus target (CPU thread), and, when the target had
++//       already passed (no sleep), how far behind it was;
++//   (2) the CPU burst: last paced Throttle return to the next
++//       Video_OutputXFB (CPU thread);
++//   (3) on the video thread (WebGPU, dual core), a present's arrival minus
++//       its intended_present_time (signed: early arrivals are what
++//       SmoothEarlyPresentation sleeps away).
++// Each section is written by one thread only, as plain u32s; the harness
++// copies the struct as whole u32s, twice, and refuses a torn read.
++// Off until DolphinWeb_PresentCadenceStats(n >= 0): the CPU thread applies
++// the request at its next Throttle and bumps the generation; the video thread
++// zeroes its own section when it sees a new generation (as WasmHeadroom.h).
++#pragma once
++
++#ifdef __EMSCRIPTEN__
++#include <algorithm>
++#include <atomic>
++#include <chrono>
++
++#include "Common/CommonTypes.h"
++
++namespace DolphinWeb::PresentCadence
++{
++// Layout v1 (1344 bytes, little-endian u32s), agreed with the harness.
++constexpr u32 SLEEP_BIN_US = 250;   // (1) wake-up lateness, 64 bins, last = overflow
++constexpr u32 BEHIND_BIN_US = 500;  // (1) target already passed, 64 bins
++constexpr u32 BURST_BIN_US = 500;   // (2) Throttle return -> OutputXFB, 64 bins
++constexpr u32 ARRIVAL_BIN_US = 500; // (3) signed, 128 bins, bin 64 = [0, 500 us)
++struct Stats
++{
++  u32 version = 1;
++  u32 size_bytes = 1344;
++  u32 on = 0;
++  u32 generation = 0;
++  // CPU thread
++  u32 throttles = 0;  // paced throttles (not skipped by Rush, speed limited)
++  u32 sleeps = 0;     // of them, the ones whose target was still ahead
++  u32 sleep_late_max_us = 0;
++  u32 behind_max_us = 0;
++  u32 burst_max_us = 0;
++  u32 outputs = 0;  // OutputXFB calls with a paced Throttle before them
++  // video thread
++  u32 presents = 0;
++  u32 arrival_late_max_us = 0;
++  u32 reserved[4] = {};
++  u32 sleep_late_hist[64] = {};
++  u32 behind_hist[64] = {};
++  u32 burst_hist[64] = {};
++  u32 arrival_hist[128] = {};
++};
++static_assert(sizeof(Stats) == 1344);
++
++using Clock = std::chrono::steady_clock;
++alignas(8) inline Stats g_stats;
++inline bool g_on = false;  // read plainly by both threads
++inline std::atomic<int> g_request{-1};
++inline u32 g_video_generation = 0;
++inline Clock::time_point g_last_throttle_return;
++inline bool g_have_return = false;
++
++inline u32 Micros(Clock::duration d)
++{
++  const auto us = std::chrono::duration_cast<std::chrono::microseconds>(d).count();
++  return us <= 0 ? 0u : static_cast<u32>(std::min<long long>(us, 0x7fffffff));
++}
++inline void Bin(u32* hist, u32 bins, u32 bin_us, u32 us)
++{
++  hist[std::min(us / bin_us, bins - 1)] += 1;
++}
++
++// CPU thread, at each Throttle: applies a reset request.
++inline void OnThrottle()
++{
++  if (g_request.load(std::memory_order_relaxed) >= 0) [[unlikely]]
++  {
++    g_request.exchange(-1, std::memory_order_acquire);
++    const u32 generation = g_stats.generation + 1;
++    // The CPU section only: the video thread zeroes its own.
++    g_stats.throttles = g_stats.sleeps = g_stats.outputs = 0;
++    g_stats.sleep_late_max_us = g_stats.behind_max_us = g_stats.burst_max_us = 0;
++    std::fill(std::begin(g_stats.sleep_late_hist), std::end(g_stats.sleep_late_hist), 0u);
++    std::fill(std::begin(g_stats.behind_hist), std::end(g_stats.behind_hist), 0u);
++    std::fill(std::begin(g_stats.burst_hist), std::end(g_stats.burst_hist), 0u);
++    g_have_return = false;
++    g_stats.generation = generation;
++    g_stats.on = 1;
++    g_on = true;
++  }
++}
++// CPU thread, a paced Throttle's sleep: target and the instants around it.
++inline void OnThrottleSleep(Clock::time_point entry, Clock::time_point target,
++                            Clock::time_point woke)
++{
++  if (!g_on) [[likely]]
++    return;
++  g_stats.throttles += 1;
++  if (target > entry)
++  {
++    g_stats.sleeps += 1;
++    const u32 late = Micros(woke - target);
++    g_stats.sleep_late_max_us = std::max(g_stats.sleep_late_max_us, late);
++    Bin(g_stats.sleep_late_hist, 64, SLEEP_BIN_US, late);
++  }
++  else
++  {
++    const u32 behind = Micros(entry - target);
++    g_stats.behind_max_us = std::max(g_stats.behind_max_us, behind);
++    Bin(g_stats.behind_hist, 64, BEHIND_BIN_US, behind);
++  }
++  g_last_throttle_return = woke;
++  g_have_return = true;
++}
++// CPU thread, at Video_OutputXFB.
++inline void OnOutputXfb()
++{
++  if (!g_on || !g_have_return) [[likely]]
++    return;
++  const u32 burst = Micros(Clock::now() - g_last_throttle_return);
++  g_stats.outputs += 1;
++  g_stats.burst_max_us = std::max(g_stats.burst_max_us, burst);
++  Bin(g_stats.burst_hist, 64, BURST_BIN_US, burst);
++  g_have_return = false;
++}
++// Video thread, a present's arrival against its intended time.
++inline void OnPresentArrival(Clock::time_point arrival, Clock::time_point intended)
++{
++  if (!g_on) [[likely]]
++    return;
++  if (g_video_generation != g_stats.generation) [[unlikely]]
++  {
++    g_video_generation = g_stats.generation;
++    g_stats.presents = 0;
++    g_stats.arrival_late_max_us = 0;
++    std::fill(std::begin(g_stats.arrival_hist), std::end(g_stats.arrival_hist), 0u);
++  }
++  g_stats.presents += 1;
++  const auto d = std::chrono::duration_cast<std::chrono::microseconds>(arrival - intended).count();
++  const long long bin = 64 + (d >= 0 ? d / ARRIVAL_BIN_US : -((-d + ARRIVAL_BIN_US - 1) / ARRIVAL_BIN_US));
++  g_stats.arrival_hist[std::clamp<long long>(bin, 0, 127)] += 1;
++  if (d > 0)
++    g_stats.arrival_late_max_us = std::max(g_stats.arrival_late_max_us, Micros(arrival - intended));
++}
++}  // namespace DolphinWeb::PresentCadence
++#endif
+diff --git a/Source/Core/VideoCommon/Present.cpp b/Source/Core/VideoCommon/Present.cpp
+index 3704d1b..b789fa0 100644
+--- a/Source/Core/VideoCommon/Present.cpp
++++ b/Source/Core/VideoCommon/Present.cpp
+@@ -21,6 +21,7 @@ extern std::atomic<bool> g_dup_xfb_rearms_throttle;  // CoreTiming.cpp, patch 01
+ #include "Core/System.h"
+ #ifdef __EMSCRIPTEN__
+ #include "Core/WasmHeadroom.h"
++#include "Core/WasmPresentCadence.h"
+ #endif
+ 
+ #include "InputCommon/ControllerInterface/ControllerInterface.h"
+@@ -960,6 +961,9 @@ void Presenter::Present(PresentInfo* present_info)
+         // Patch 0153: counted apart (headroom presentSleepUs), it is not
+         // the emulated GPU's work.
+         const auto sleep_start = Clock::now();
++        // Patch 0162: this present's arrival against its intended time.
++        DolphinWeb::PresentCadence::OnPresentArrival(sleep_start,
++                                                     present_info->intended_present_time);
+         Core::System::GetInstance().GetCoreTiming().SleepUntil(present_time);
+         DolphinWeb::Headroom::AddPresentSleep(Clock::now() - sleep_start);
+       }

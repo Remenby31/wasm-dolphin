@@ -3,8 +3,8 @@
   "normalization": "git-blob-lf",
   "root": {
     "baseCommit": "e22551eae1c84a7e4d0b6a5c519ef4ed4ef69df1",
-    "resultTree": "4566af9164f3449c77ab1399289bf91e0f7819e4",
-    "changedPathCount": 141,
+    "resultTree": "3cb6419952a78facfb2df385af9df61bfdb04328",
+    "changedPathCount": 142,
     "records": [
       {
         "path": "CMakeLists.txt",
@@ -191,9 +191,9 @@
         "status": "M",
         "mode": "100644",
         "baseBlob": "1fa39d74486b5c652078c7fba67891c1e13c194f",
-        "resultBlob": "343e93a0cd5dac117bd9b04ea5112b51825c8cef",
-        "size": 29869,
-        "sha256": "753ad5f73932a93662c368b9b11b062cd0ff08a0e6284ba3a51bf82b18a53fed"
+        "resultBlob": "f3d3f7a9f0530b1bd6c21e7f5e475c5b0fb5dce7",
+        "size": 30606,
+        "sha256": "00604c8c61213fee88198b0bba009704b65dd3d7a398630e94866cee554af959"
       },
       {
         "path": "Source/Core/Core/CoreTiming.h",
@@ -389,9 +389,9 @@
         "status": "M",
         "mode": "100644",
         "baseBlob": "42e0f350ba133ed466cefa0fd102f71bd0f7c880",
-        "resultBlob": "2fa67037f14895d8976ee454e0d19deed4baea29",
-        "size": 43120,
-        "sha256": "9827badf3f1a2aea477b747d0ea70c19e0756822a40f8333143dad9794b8f061"
+        "resultBlob": "b5df66952a8b4de9eac5ec7a591cd636b3f00a67",
+        "size": 43319,
+        "sha256": "4478fafdaa12f4b2d17865db1096d2171c4552f08d47eea59c09911684dd4ca5"
       },
       {
         "path": "Source/Core/Core/IOS/Network/Socket.h",
@@ -590,6 +590,15 @@
         "resultBlob": "9d039cabd69f4848bd4e34aa1f4f7305b34d7da1",
         "size": 4996,
         "sha256": "28b66221d42d3010f9cb73028863a58851c67b6f6c28529b19f324c1506e2e26"
+      },
+      {
+        "path": "Source/Core/Core/WasmPresentCadence.h",
+        "status": "A",
+        "mode": "100644",
+        "baseBlob": null,
+        "resultBlob": "6855b95e147cda8935e773f603086436c51ae536",
+        "size": 5804,
+        "sha256": "be20f9d45e26d8d34c72445efcc43609123536368e4b0c913ee07b1b58398b1e"
       },
       {
         "path": "Source/Core/Core/WasmTimingProfile.h",
@@ -1109,9 +1118,9 @@
         "status": "M",
         "mode": "100644",
         "baseBlob": "0691323c545c12839b77b5c243b11c5e4373e347",
-        "resultBlob": "3704d1b46ecb6acf66c7c74051cb1fc50e5979f5",
-        "size": 37427,
-        "sha256": "382ec51bcd3fac75e554a535de45c88aa4d909fe7ee8dd14a22fe56600664119"
+        "resultBlob": "b789fa0d94a3849332a6f2f5b5f423d1e22e9053",
+        "size": 37694,
+        "sha256": "2dd68315698ac3a2d98dc99b09fbc315fc14872b26361923e12207bf494786bb"
       },
       {
         "path": "Source/Core/VideoCommon/ShaderCache.cpp",
@@ -1311,5 +1320,5 @@
       ]
     }
   ],
-  "contentSha256": "3875ece23f0c51e3e15f322117910f9653524f69607bdbd7a202fd142a7697db"
+  "contentSha256": "813e4ecbdd3a525b4f02bfa525aff4f5d95821718787d7865b375a12367235f3"
 }
