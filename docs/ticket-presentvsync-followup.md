@@ -15,6 +15,18 @@ time (v3). Left for later:
    (it runs every BeginFrame once started, even paused).
 4. **Rename `wgpuVsyncInBeginFrame` to `wgpuVsyncFrameTime`**: it now holds
    the rAF frame time, not a flag.
-5. **Default switch criterion** (judge, 2026-10-26): p99 between presents and
+5. **Drain-local texture in vsync mode** (re-review, 2026-10-26): the input
+   marker, the visual cadence sample and the backbuffer readbacks still read
+   `lastBackbufferTexture`, local to one drain (worker ~15559/15577/15724);
+   in vsync mode they should read the frame's texture, `wgpuVsync.current`.
+6. **A present without a backbuffer pass** (scenario C) queues nothing and is
+   not counted by `recordPresentedFrame`: the presentation FPS reads lower
+   with presentvsync on than off for the same pictures. Compare p99 between
+   presents and BeginFrames with 2+, never the presentation FPS.
+7. **`wgpuVsyncStreamCanvas` and `wgpuVsyncCanvasCopyDst` are not keyed by
+   device**: after a device loss the stream canvas stays configured on the
+   old device and the display canvas keeps its old usage flag. Key them like
+   the pool (device number).
+8. **Default switch criterion** (judge, 2026-10-26): p99 between presents and
    BeginFrames with 2+ pictures over ≥ 6 runs, with the fixed display counter;
    check beginFb0 == presents in the measurement.
