@@ -12578,6 +12578,10 @@ function recordBoundedHistogram(values, bounds, value) {
 // More than WGPU_VSYNC_QUEUE waiting: the oldest is dropped, counted. With no
 // BeginFrame for WGPU_VSYNC_FALLBACK_MS (hidden tab, a host streaming in the
 // background), a timer presents instead.
+// v3: the stream captures each frame when it is queued, from its pooled
+// texture copied to a canvas of its own (wgpuVsyncStreamCanvas), not from the
+// display canvas at the rAF: the stream keeps every frame at its own time,
+// free of the local display's BeginFrames, catch-up drops and timer fallback.
 let wgpuPresentVsync = false;
 const WGPU_VSYNC_QUEUE = 2;
 const WGPU_VSYNC_POOL = WGPU_VSYNC_QUEUE + 1;
@@ -12595,7 +12599,29 @@ let wgpuVsyncTick = 0;
 let wgpuVsyncInBeginFrame = false;
 let wgpuVsyncFallback = null;
 let wgpuVsyncCanvasCopyDst = false;
-const wgpuPresentVsyncStats = { queued: 0, shown: 0, dropped: 0, caughtUp: 0, byTimer: 0 };
+const wgpuPresentVsyncStats = { queued: 0, shown: 0, dropped: 0, caughtUp: 0, byTimer: 0, streamed: 0 };
+// v3: the stream's own canvas, sized like the frames (made on first use).
+let wgpuVsyncStreamCanvas = null;
+let wgpuVsyncStreamContext = null;
+
+// v3: one queued frame to the stream, at queue time: its texture copied to
+// the stream canvas, then a VideoFrame of that canvas (submitted first, on
+// the same queue, before any later pass reuses the texture).
+function streamWgpuVsyncFrame(tex, coreFrame) {
+  if (!streamCapture.ready()) return;
+  const dev = renderGpu.device;
+  if (!wgpuVsyncStreamCanvas || wgpuVsyncStreamCanvas.width !== tex.width || wgpuVsyncStreamCanvas.height !== tex.height) {
+    wgpuVsyncStreamCanvas = new OffscreenCanvas(tex.width, tex.height);
+    wgpuVsyncStreamContext = wgpuVsyncStreamCanvas.getContext("webgpu");
+    const u = self.GPUTextureUsage;
+    wgpuVsyncStreamContext.configure({ device: dev, format: renderGpu.format, alphaMode: "opaque", usage: u.RENDER_ATTACHMENT | u.COPY_DST });
+  }
+  const enc = dev.createCommandEncoder({ label: "wgpu-vsync-stream" });
+  enc.copyTextureToTexture({ texture: tex }, { texture: wgpuVsyncStreamContext.getCurrentTexture() }, [tex.width, tex.height, 1]);
+  dev.queue.submit([enc.finish()]);
+  streamCapture.offerCanvas(wgpuVsyncStreamCanvas, coreFrame);
+  wgpuPresentVsyncStats.streamed += 1;
+}
 
 // The texture the backbuffer pass renders into, in place of the canvas's.
 function acquireWgpuVsyncTexture(width, height) {
@@ -12635,6 +12661,7 @@ function queueWgpuVsyncFrame(tex, coreFrame, shownVi, stream) {
     presentationLifetimeDropCount += 1;
   }
   wgpuVsyncQueue.push({ tex, coreFrame, shownVi, stream, tick: wgpuVsyncTick });
+  if (stream && streamCapture.active) streamWgpuVsyncFrame(tex, coreFrame);
   if (!wgpuVsyncLoop) {
     wgpuVsyncLoop = true;
     const tick = () => {
@@ -12697,7 +12724,7 @@ function presentWgpuVsyncFrame() {
   // Same queue: the copy runs before any later pass renders into f.tex.
   wgpuVsyncFree.push(f.tex);
   wgpuPresentVsyncStats.shown += 1;
-  if (streamCapture.active && f.stream) streamCapture.offerCanvas(renderCanvas, f.coreFrame);
+  // v3: streamed at queue time (streamWgpuVsyncFrame), not here.
   recordPresentedFrame(f.coreFrame, f.shownVi);
 }
 
@@ -15820,7 +15847,7 @@ function drainWebGpuCmdRing(source = "presentation") {
           cmdRingOwnsCanvas = true;
           // A frame carrying the diagnostic input marker is not streamed.
           if (wgpuPresentVsync && lastBackbufferTexture) {
-            // Shown (and streamed, and counted) at the next rAF.
+            // Streamed now, from its texture (v3); shown and counted at the next rAF.
             queueWgpuVsyncFrame(lastBackbufferTexture, api?.getFrame?.() ?? 0,
                                 wgpuExactCapture.currentBoot(), !hardwareInputMarkerApplied);
           } else {

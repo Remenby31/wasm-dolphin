@@ -136,12 +136,13 @@ test("presentvsync: the backbuffer pass renders into a pooled texture, shown at 
   const worker = await readFile(new URL("../src/upstream-discio-worker.js", import.meta.url), "utf8");
   // fb#0's BEGIN_PASS: the pool's texture in place of the canvas's
   assert.match(worker, /const cur = wgpuPresentVsync\n\s+\? acquireWgpuVsyncTexture\([^)]*\)\n\s+: renderGpu\.context\.getCurrentTexture\(\);/);
-  // the present queues the frame; streaming and the present count follow the display
+  // the present queues the frame; the present count follows the display
   assert.match(worker, /if \(wgpuPresentVsync && lastBackbufferTexture\) \{\n[^\n]*\n\s+queueWgpuVsyncFrame\(lastBackbufferTexture,/);
   const present = worker.slice(worker.indexOf("function presentWgpuVsyncFrame()"), worker.indexOf("function wgpuCanvasUsage("));
   assert.match(present, /const f = wgpuVsyncQueue\.shift\(\);/, "the oldest queued frame");
   assert.match(present, /copyTextureToTexture\(/);
-  assert.match(present, /streamCapture\.offerCanvas\(renderCanvas, f\.coreFrame\)/);
+  // v3: the stream no longer follows the display: nothing captured at the rAF
+  assert.doesNotMatch(present, /streamCapture\.offerCanvas\(/);
   assert.match(present, /recordPresentedFrame\(f\.coreFrame, f\.shownVi\)/);
   // at the worker's rAF, a timer when no BeginFrame comes; the canvas can be copied to
   assert.match(worker, /self\.requestAnimationFrame\(tick\)/);
@@ -174,4 +175,18 @@ test("display counter: a submit made inside the current BeginFrame is counted in
   const { displayed } = c.drain();
   assert.deepEqual(displayed.submits, [1, 0, 1]);
   assert.deepEqual(displayed.vi, [7, -1, 8]);
+});
+
+// presentvsync v3: the stream captures every frame when it is queued, from
+// its pooled texture copied to a canvas of its own, so it is free of the local
+// display's BeginFrames, catch-up drops and timer fallback.
+test("presentvsync v3: the stream captures at queue time, from the frame's texture", async () => {
+  const worker = await readFile(new URL("../src/upstream-discio-worker.js", import.meta.url), "utf8");
+  const queue = worker.slice(worker.indexOf("function queueWgpuVsyncFrame("), worker.indexOf("function wgpuVsyncFallbackCheck("));
+  assert.match(queue, /wgpuVsyncQueue\.push\([^\n]*\);\n {2}if \(stream && streamCapture\.active\) streamWgpuVsyncFrame\(tex, coreFrame\);/);
+  const stream = worker.slice(worker.indexOf("function streamWgpuVsyncFrame("), worker.indexOf("// The texture the backbuffer pass renders into"));
+  assert.match(stream, /if \(!streamCapture\.ready\(\)\) return;/, "nobody reading: no copy");
+  assert.match(stream, /copyTextureToTexture\(\{ texture: tex \}, \{ texture: wgpuVsyncStreamContext\.getCurrentTexture\(\) \}/);
+  assert.match(stream, /dev\.queue\.submit\(\[enc\.finish\(\)\]\);\n {2}streamCapture\.offerCanvas\(wgpuVsyncStreamCanvas, coreFrame\);/, "copy submitted before the snapshot");
+  assert.match(worker, /streamed: 0 \};/);
 });
