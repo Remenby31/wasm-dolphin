@@ -3,7 +3,7 @@
   "normalization": "git-blob-lf",
   "root": {
     "baseCommit": "e22551eae1c84a7e4d0b6a5c519ef4ed4ef69df1",
-    "resultTree": "632e19e2c6ebf06e429bb6539cd11d9fc973cf7a",
+    "resultTree": "533e1c0cde68922ea39615cf3cfdd11a3d902cec",
     "changedPathCount": 142,
     "records": [
       {
@@ -191,9 +191,9 @@
         "status": "M",
         "mode": "100644",
         "baseBlob": "1fa39d74486b5c652078c7fba67891c1e13c194f",
-        "resultBlob": "d8041e22b18242580e0a8df9590c163260b49dd9",
-        "size": 29735,
-        "sha256": "e6b4e5f8176978f1f3ce00beee93dba9eb46f18caa55f8ca4417e539fb99698a"
+        "resultBlob": "cc778423fa46af7d1191fc14d471a1ee9afec244",
+        "size": 31349,
+        "sha256": "1bea8a43b9ddb77fe92f9222d664d424fc70f2d6ecfe85987e3b9313adc77040"
       },
       {
         "path": "Source/Core/Core/CoreTiming.h",
@@ -389,9 +389,9 @@
         "status": "M",
         "mode": "100644",
         "baseBlob": "42e0f350ba133ed466cefa0fd102f71bd0f7c880",
-        "resultBlob": "2fa67037f14895d8976ee454e0d19deed4baea29",
-        "size": 43120,
-        "sha256": "9827badf3f1a2aea477b747d0ea70c19e0756822a40f8333143dad9794b8f061"
+        "resultBlob": "b5df66952a8b4de9eac5ec7a591cd636b3f00a67",
+        "size": 43319,
+        "sha256": "4478fafdaa12f4b2d17865db1096d2171c4552f08d47eea59c09911684dd4ca5"
       },
       {
         "path": "Source/Core/Core/IOS/Network/Socket.h",
@@ -587,9 +587,18 @@
         "status": "A",
         "mode": "100644",
         "baseBlob": null,
-        "resultBlob": "3fda7b0bb9917dc8636cce8d325bea176779edbe",
-        "size": 4672,
-        "sha256": "2b19aa99f8e45da997b4d67c2a121cd76415e0f34cc3428ed080369ad62aa803"
+        "resultBlob": "9d039cabd69f4848bd4e34aa1f4f7305b34d7da1",
+        "size": 4996,
+        "sha256": "28b66221d42d3010f9cb73028863a58851c67b6f6c28529b19f324c1506e2e26"
+      },
+      {
+        "path": "Source/Core/Core/WasmPresentCadence.h",
+        "status": "A",
+        "mode": "100644",
+        "baseBlob": null,
+        "resultBlob": "cdcbf1ef98f035d49fdafd55a381f62932603a1a",
+        "size": 6187,
+        "sha256": "ee2f6c5faacc9a728d8dd5adbb7f06f7054e684d10158e6323d9ef9928d4317f"
       },
       {
         "path": "Source/Core/Core/WasmTimingProfile.h",
@@ -1109,9 +1118,9 @@
         "status": "M",
         "mode": "100644",
         "baseBlob": "0691323c545c12839b77b5c243b11c5e4373e347",
-        "resultBlob": "2514854be0964a56b87ebef97e75e53aff7f3a46",
-        "size": 37135,
-        "sha256": "23bdbbb37023b5523178e8a663164381c59b947a9c8a8cc4504baab67775823c"
+        "resultBlob": "0c58fadb1eaef809e6ab110c3f92a9f359e46b47",
+        "size": 38175,
+        "sha256": "65fd9d2ec076ae93a9a6308bbd4618911fd6ee8fd700f56d7b4ee0744520ac08"
       },
       {
         "path": "Source/Core/VideoCommon/ShaderCache.cpp",
@@ -1130,15 +1139,6 @@
         "resultBlob": "cf9793efccf7cdaf57486d655b31b10c92d6e9af",
         "size": 15161,
         "sha256": "5d2514d167829d85a17ca49b02c20f1ecbbaf958cba92283862558a5bb6fb468"
-      },
-      {
-        "path": "Source/Core/VideoCommon/TextureCacheBase.cpp",
-        "status": "M",
-        "mode": "100644",
-        "baseBlob": "bbcd1140b4ed2151a3e2e217f384046eadeb5f6e",
-        "resultBlob": "1eb243b06596c8073c40f3ae923cb4deabc56c1a",
-        "size": 128809,
-        "sha256": "5d3d8d994b4cd21899d1cbb8bac5b511b0fc85bc708f3c4908fe34447118ab4c"
       },
       {
         "path": "Source/Core/VideoCommon/TextureConversionShader.cpp",
@@ -1320,5 +1320,5 @@
       ]
     }
   ],
-  "contentSha256": "21d7e55f8cf3ec722bceb3cb824534332bb726b97c11eb55087a920ba95c2d8b"
+  "contentSha256": "083325591eafc77b83e057f20d72a3585051ae2da88c31e531ea72b11c6711fa"
 }

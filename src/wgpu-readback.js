@@ -188,9 +188,7 @@ export class WgpuReadback {
     // worker task less before the texels land. A copy the scope reports bad
     // throws the map's result away: its buffer is destroyed, which rejects a
     // map still pending.
-    const mapped = thrown || !buffer
-      ? null
-      : buffer.mapAsync(MAP_MODE_READ).then(() => true, () => false);
+    const mapped = thrown || !buffer ? null : this.mapInOwnScope(buffer);
     const rejected = thrown || Boolean(await scope.catch(() => true));
     recordLatency(this.latency.scope, now() - c.at);
     if (generation !== this.generation) {
@@ -219,6 +217,17 @@ export class WgpuReadback {
     this.stats.maxLatencyMs = Math.max(this.stats.maxLatencyMs, now() - c.at);
     recordLatency(this.latency.mapped, now() - c.at);
     this.finish(entry, "ok", buffer);
+  }
+
+  // The map of a buffer the device may have refused (createBuffer out of
+  // memory, reported by the copy's scope only later): inside a scope of its
+  // own, so its validation error is caught here, not counted as uncaptured.
+  // The copy's own scope decides whether it is LOST.
+  mapInOwnScope(buffer) {
+    this.device.pushErrorScope("validation");
+    const mapped = buffer.mapAsync(MAP_MODE_READ).then(() => true, () => false);
+    this.device.popErrorScope().catch(() => null);
+    return mapped;
   }
 
   finish(entry, state, buffer = null, stat = null) {
