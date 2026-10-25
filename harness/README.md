@@ -372,6 +372,13 @@ node harness/kpi-report.mjs [--print]
 - They all record the served tree (commit, dirty) and the Chrome that ran, and
   leave out runs started on an overloaded machine (listed). `--no-lock`
   checks the plumbing in a CORRECTION slot; such results are not measures.
+- `stream-track.mjs`: what a streaming host would encode, with the local
+  display at the same time. It attaches the worker's stream track
+  (`window.__host.captureVideoTrack()`), reads it in the page through a
+  `MediaStreamTrackProcessor`, and records over `--secs` the stream's rate,
+  capture and arrival intervals and gaps over 25 ms (`lib/stream-track.mjs`),
+  next to the core's VI intervals, the presents, the `--display` counter and
+  the presentvsync counters. Takes the perf lock unless `--no-lock`.
 - `kpi-report.mjs`: reads only. It classifies by content every `summary.json`,
   `gate.json` and `fuzz.json` under `../measures` and the worktrees'
   `harness/results`, and keeps only results measured on a clean commit of
