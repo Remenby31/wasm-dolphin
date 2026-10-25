@@ -14,6 +14,7 @@ import { parseDolHeader } from "./dol.js";
 import { probeRelaxedMadd } from "./relaxed-madd-probe.js";
 import { probeWasmFeatures } from "./wasm-feature-probe.js";
 import { decodeWgpuSamplerState } from "./wgpu-sampler-state.js";
+import { bootBackbufferResize, enhancementCoreArgs, normalizeInternalResolution, resizeCanvasBackbuffer } from "./wgpu-enhancements.js";
 import { gxClearDepthToStored, gxDepthState } from "./wgpu-depth-state.js";
 import { clampSourceRect, createWgpuExactCapture, packReadbackRows } from "./wgpu-exact-capture.js";
 import { createUniqueFrameCounter, hashRows, sampleRowOffsets } from "./harness-unique-frames.js";
@@ -1315,6 +1316,28 @@ self.addEventListener("message", async (event) => {
   }
 });
 
+// Patch 0164: the video thread's blocking EFB copies to RAM (harness hooks
+// on): per kind, how long it waited and whether FIFO work was waiting behind.
+const EFB_SYNC_BOUNDS_MS = [0.5, 1, 2, 4, 8, 16, 33, null];
+function readEfbSyncStats(payload = {}) {
+  const m = moduleInstance;
+  if (!m?._DolphinWeb_HarnessEfbSyncWord) return { available: false, why: "core has no EFB sync counters (patch 0164)" };
+  const n = m._DolphinWeb_HarnessEfbSyncWords() >>> 0;
+  const w = Array.from({ length: n }, (_, i) => m._DolphinWeb_HarnessEfbSyncWord(i) >>> 0);
+  const kind = (k) => {
+    const b = 1 + 16 * k;
+    return {
+      flushes: w[b], copies: w[b + 1], fifoBehindStart: w[b + 2], fifoBehindEnd: w[b + 3],
+      waitUs: w[b + 4], waitUsFifoBehind: w[b + 5], maxWaitUs: w[b + 6],
+      waitHistogram: w.slice(b + 7, b + 15)
+    };
+  };
+  const out = { available: true, harness: Boolean(m._DolphinWeb_HarnessEnabled?.()), version: w[0],
+    boundsMs: EFB_SYNC_BOUNDS_MS, syncPoint: kind(0), immediate: kind(1) };
+  if (payload?.reset) m._DolphinWeb_HarnessEfbSyncReset();
+  return out;
+}
+
 // Drain both harness rings since the previous read: presentations (worker)
 // and VI outputs (core). Every entry is returned; `lost` counts entries
 // overwritten before they could be read.
@@ -1678,6 +1701,8 @@ async function handleMessage(type, payload) {
         presentVsync: payload.presentVsync,
         coreLog: payload.coreLog,
         memcardSlotB: payload.memcardSlotB,
+        internalResolution: payload.internalResolution,
+        maxAnisotropy: payload.maxAnisotropy,
         efbAccess: payload.efbAccess,
         fifoLog: payload.fifoLog,
         efbCopyRam: payload.efbCopyRam,
@@ -2008,10 +2033,13 @@ async function handleMessage(type, payload) {
       return {
         enabled: wgpuPresentVsync,
         ...wgpuPresentVsyncStats,
-        queued: wgpuVsyncQueue.length,
+        // frames waiting now (the `queued` counter is the total queued)
+        waiting: wgpuVsyncQueue.length,
         ticks: wgpuVsyncTick,
         visualCadence: wgpuVisualCadenceSnapshot()
       };
+    case "validationReadEfbSyncStats":
+      return readEfbSyncStats(payload);
     case "validationReadWgpuReadback":
       // EFB/staging readbacks (copies to RAM, peeks): counters and per-copy
       // latency since the last read with { reset: true }.
@@ -2363,6 +2391,17 @@ async function handleMessage(type, payload) {
         stats: api.getAudioStats?.() || ""
       };
     }
+    case "setEnhancements": {
+      // Patch 0168: applied by the video thread at its next frame; the
+      // canvas follows the backbuffer size the core then announces.
+      const set = moduleInstance?._DolphinWeb_SetEnhancements;
+      if (typeof set !== "function") return { applied: false, reason: "core-without-0168" };
+      // 0: the core's runtime is not up yet (the boot reads the init values).
+      const internalResolution = set(...enhancementCoreArgs(payload));
+      return internalResolution > 0
+        ? { applied: true, internalResolution }
+        : { applied: false, reason: "core-not-running" };
+    }
     case "setAudioMuted":
       api?.setAudioMuted?.(payload.muted ? 1 : 0);
       workletAudioProducer.setMuted(Boolean(payload.muted));
@@ -2418,6 +2457,8 @@ async function loadCore({
   presentVsync = false,
   coreLog = false,
   memcardSlotB = false,
+  internalResolution = 1,
+  maxAnisotropy = -1,
   efbAccess = false,
   fifoLog = false,
   efbCopyRam = false,
@@ -2942,6 +2983,10 @@ async function loadCore({
     dolphinSmoothEarly: smoothEarly !== false,
     dolphinCoreLog: Boolean(coreLog),
     dolphinMemcardSlotB: Boolean(memcardSlotB),
+    // Patch 0168: internal resolution (1-4) and anisotropy (log2, -1 = the
+    // game's). The core keeps 1 off the WebGPU path.
+    dolphinEfbScale: normalizeInternalResolution(internalResolution),
+    dolphinMaxAnisotropy: Number.isInteger(maxAnisotropy) ? maxAnisotropy : -1,
     dolphinEfbAccess: Boolean(efbAccess),
     dolphinEfbCopyRam: Boolean(efbCopyRam),
     dolphinEfbNoDefer: Boolean(efbNoDefer),
@@ -4189,6 +4234,7 @@ async function mountFile(file) {
   if (!file) {
     throw new Error("No disc file was provided to the upstream worker");
   }
+  resetWgpuBackbufferForBoot();
   await ensureUserDataReady();
 
   const fs = moduleInstance.FS;
@@ -8936,6 +8982,7 @@ const WGPU_CMD_OP_VI_TAG = 26;
 const WGPU_CMD_OP_PRESENT_SOURCE = 27;
 // Readback of a staging texture (EFB peeks, copies to RAM): src/wgpu-readback.js.
 const WGPU_CMD_OP_COPY_TO_STAGING = 28;
+const WGPU_CMD_OP_BACKBUFFER_SIZE = 29;
 // ClearRect uses the full attachment viewport and [0,1] depth range, so its
 // scissor alone determines coverage and its depth is independent of game state.
 // A/B switch: false restores the original game-viewport-dependent clear.
@@ -12736,6 +12783,37 @@ function wgpuCanvasUsage(u) {
     (wgpuPresentVsync ? u.COPY_DST : 0);
 }
 
+// Size the canvas (Dolphin's backbuffer) and reconfigure its context. Once
+// for a core that never announces its size (640x480), then on every
+// BackbufferSize command (patch 0168: 640N x 480N at internal resolution N,
+// which can change while a game runs). Repeated resizes from per-frame
+// viewport extents blanked the output once (0.0 visual fps); only a size the
+// core lays the presenter out on reaches here.
+function resizeWgpuBackbuffer(width, height) {
+  wgpuBackbufferSized = true;
+  try {
+    const usage = self.GPUTextureUsage.RENDER_ATTACHMENT |
+      ((wgpuReplayClassifier || inputReadbackDiagnostics) ? self.GPUTextureUsage.COPY_SRC : 0) |
+      (wgpuVisualCadenceEnabled ? self.GPUTextureUsage.TEXTURE_BINDING : 0) |
+      (wgpuPresentVsync ? self.GPUTextureUsage.COPY_DST : 0);
+    if (!resizeCanvasBackbuffer(renderCanvas, renderGpu, width, height, usage)) return;
+    console.log(`[bbresize] backbuffer ${width}x${height}`);
+    postStatus(`wgpu backbuffer resized to ${width}x${height}`);
+  } catch (e) {
+    recordRendererError("validation", `backbuffer resize: ${e?.message || e}`);
+  }
+}
+
+// Before a disc boots in a worker that already ran one: the new core starts
+// from a 640x480 backbuffer and announces only other sizes (patch 0168), so
+// a canvas left at the previous session's scale would get the 640x480 frame
+// in its top-left corner. Bring it back, and re-arm the one-shot growth.
+function resetWgpuBackbufferForBoot() {
+  const size = renderGpu ? bootBackbufferResize(renderCanvas) : null;
+  if (size) resizeWgpuBackbuffer(...size);
+  wgpuBackbufferSized = false;
+}
+
 function drainWebGpuCmdRing(source = "presentation") {
   if (wgpuReplayFatal) return;
   if (wgpuDiagPerturb.drainEveryMs > 0) {
@@ -14285,29 +14363,7 @@ function drainWebGpuCmdRing(source = "presentation") {
             if (!wgpuBackbufferSized && renderCanvas &&
                 (renderCanvas.width < WGPU_BACKBUFFER_W ||
                  renderCanvas.height < WGPU_BACKBUFFER_H)) {
-              wgpuBackbufferSized = true;
-              const newW = WGPU_BACKBUFFER_W;
-              const newH = WGPU_BACKBUFFER_H;
-              try {
-                renderCanvas.width = newW;
-                renderCanvas.height = newH;
-                renderGpu.context.configure({
-                  device: renderGpu.device,
-                  format: renderGpu.format,
-                  alphaMode: "opaque",
-                  usage: self.GPUTextureUsage.RENDER_ATTACHMENT |
-                    ((wgpuReplayClassifier || inputReadbackDiagnostics) ?
-                      self.GPUTextureUsage.COPY_SRC : 0) |
-                    (wgpuVisualCadenceEnabled ? self.GPUTextureUsage.TEXTURE_BINDING : 0) |
-                    (wgpuPresentVsync ? self.GPUTextureUsage.COPY_DST : 0)
-                });
-                renderGpu.canvasWidth = newW;
-                renderGpu.canvasHeight = newH;
-                console.log(`[bbresize] backbuffer ${newW}x${newH} (game viewport extent)`);
-                postStatus(`wgpu backbuffer resized to ${newW}x${newH}`);
-              } catch (e) {
-                recordRendererError("validation", `backbuffer resize: ${e?.message || e}`);
-              }
+              resizeWgpuBackbuffer(WGPU_BACKBUFFER_W, WGPU_BACKBUFFER_H);
             }
             // Content check on the texture actually about to be presented,
             // read adjacent to the EFB in the command stream. Triple buffering
@@ -15975,6 +16031,11 @@ function drainWebGpuCmdRing(source = "presentation") {
             ticks: u32[recWord + 3] + u32[recWord + 4] * 4294967296,
             generation: u32[recWord + 5]
           }, readbackWgpuPresentSource);
+          break;
+        case WGPU_CMD_OP_BACKBUFFER_SIZE:
+          // Patch 0168: the backbuffer the coming passes draw into (640N x
+          // 480N at internal resolution N), outside any pass.
+          resizeWgpuBackbuffer(u32[recWord + 1], u32[recWord + 2]);
           break;
         case WGPU_CMD_OP_PRESENT_SOURCE:
           // Harness only: the XFB rectangle the coming backbuffer blit samples.

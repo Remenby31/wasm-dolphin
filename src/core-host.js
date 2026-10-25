@@ -1,6 +1,7 @@
 import { aotCompilerRequested, jitOffThreadRequested } from "./aot-compiler-worker.js";
 import { aotSamplePeriodRequested } from "./aot-hot-sampler.js";
 import { wasmEngine } from "./wasm-engine.js";
+import { anisotropyToCore, normalizeInternalResolution, requestedEnhancements } from "./wgpu-enhancements.js";
 import { parseCustomRtc } from "./custom-rtc.js";
 import { DolphinCoreAdapter, dolphinBundleAvailable } from "./dolphin-adapter.js";
 import { buttonMaskFromPressed, isPadPort } from "./input.js";
@@ -112,6 +113,9 @@ export class EmulatorHost {
     this.pacing = requestedPacing();
     this.coreLog = requestedCoreLog();
     this.memcardSlotB = new URLSearchParams(window.location.search).get("memcardb") === "1";
+    // ?ir=1-4 and ?aniso=1|2|4|8|16 (patch 0168, WebGPU path); setEnhancements
+    // changes them while a game runs.
+    this.enhancements = requestedEnhancements(window.location.search);
     // CPU reads of the EFB (peeks), off by default as in Dolphin (EFBAccessEnable).
     this.efbAccess = new URLSearchParams(window.location.search).get("efbaccess") === "1";
     // Harness: FIFO logs (.dff) may boot. Off for the app (FifoPlayer trusts the log).
@@ -472,6 +476,8 @@ export class EmulatorHost {
             presentVsync: this.pacing.presentVsync,
             coreLog: this.coreLog,
             memcardSlotB: this.memcardSlotB,
+            internalResolution: this.enhancements.internalResolution,
+            maxAnisotropy: this.enhancements.maxAnisotropy,
             efbAccess: this.efbAccess,
             fifoLog: this.fifoLog,
             efbCopyRam: this.efbCopyRam,
@@ -915,6 +921,22 @@ export class EmulatorHost {
       samples: null,
       stats: "audio:unavailable"
     });
+  }
+
+  // Internal resolution (1-4) and maximum anisotropy (1, 2, 4, 8, 16; 0 =
+  // the game's), the units of ?ir= and ?aniso=, applied at the core's next
+  // frame. Resolves { applied, internalResolution } (applied false before the
+  // core runs, or with a core without patch 0168); the values are kept for
+  // the next boot.
+  async setEnhancements({ internalResolution, anisotropy } = {}) {
+    if (internalResolution !== undefined) {
+      this.enhancements.internalResolution = normalizeInternalResolution(internalResolution);
+    }
+    if (anisotropy !== undefined) this.enhancements.maxAnisotropy = anisotropyToCore(anisotropy);
+    if (this.mode !== "dolphin" || typeof this.adapter?.setEnhancements !== "function") {
+      return { applied: false, reason: "core-not-loaded" };
+    }
+    return this.adapter.setEnhancements(this.enhancements);
   }
 
   setAudioMuted(muted) {

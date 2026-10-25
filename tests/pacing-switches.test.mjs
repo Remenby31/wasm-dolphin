@@ -189,4 +189,8 @@ test("presentvsync v3: the stream captures at queue time, from the frame's textu
   assert.match(stream, /copyTextureToTexture\(\{ texture: tex \}, \{ texture: wgpuVsyncStreamContext\.getCurrentTexture\(\) \}/);
   assert.match(stream, /dev\.queue\.submit\(\[enc\.finish\(\)\]\);\n {2}streamCapture\.offerCanvas\(wgpuVsyncStreamCanvas, coreFrame\);/, "copy submitted before the snapshot");
   assert.match(worker, /streamed: 0 \};/);
+  // the readback keeps the `queued` counter: the queue's length is `waiting`
+  const read = worker.slice(worker.indexOf('case "validationReadPresentVsync":'), worker.indexOf('case "validationReadEfbSyncStats":'));
+  assert.match(read, /\.\.\.wgpuPresentVsyncStats,\n[^\n]*\n {8}waiting: wgpuVsyncQueue\.length,/);
+  assert.doesNotMatch(read, /queued: wgpuVsyncQueue\.length/);
 });

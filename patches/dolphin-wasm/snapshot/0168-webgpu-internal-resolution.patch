@@ -1,0 +1,124 @@
+diff --git a/Source/Core/VideoBackends/WebGPU/WebGPUCommandStream.cpp b/Source/Core/VideoBackends/WebGPU/WebGPUCommandStream.cpp
+--- a/Source/Core/VideoBackends/WebGPU/WebGPUCommandStream.cpp
++++ b/Source/Core/VideoBackends/WebGPU/WebGPUCommandStream.cpp
+@@ -1474,6 +1474,17 @@
+   return Push(rec);
+ }
+ 
++bool WebGPUCommandStream::PushBackbufferSize(u32 w, u32 h)
++{
++  if (!m_header || w == 0 || h == 0)
++    return false;
++  CmdRecord rec{};
++  rec.op = static_cast<u32>(CmdOp::BackbufferSize);
++  rec.arg.u[0] = w;
++  rec.arg.u[1] = h;
++  return Push(rec);
++}
++
+ static u32 Pack16(u32 lo, u32 hi);
+ 
+ bool WebGPUCommandStream::PushCopyToStaging(u32 src_id, u32 x, u32 y, u32 w, u32 h, u32 layer,
+diff --git a/Source/Core/VideoBackends/WebGPU/WebGPUCommandStream.h b/Source/Core/VideoBackends/WebGPU/WebGPUCommandStream.h
+--- a/Source/Core/VideoBackends/WebGPU/WebGPUCommandStream.h
++++ b/Source/Core/VideoBackends/WebGPU/WebGPUCommandStream.h
+@@ -161,6 +161,13 @@
+   //   u3=(layer | level<<8 | texelSize<<12 | seq16<<16)
+   //   u4=dstPtr u5=dstStride u6=wordsPtr
+   CopyToStaging = 28,
++  // Size of the backbuffer (the canvas) the next backbuffer pass draws into.
++  // Emitted outside any pass, before a backbuffer pass whose size differs
++  // from the last one the consumer was told, which starts at 640x480 (patch
++  // 0168: 640N x 480N at scale N; never sent at 1x). The consumer resizes
++  // and reconfigures the canvas before that pass.
++  //   u0=width u1=height
++  BackbufferSize = 29,
+ };
+ 
+ // Stable producer attribution for UploadBuffer records. The value is carried
+@@ -415,6 +422,7 @@
+   bool PushSubmitPresent();
+   bool PushViTag(u32 vi_since_boot, u32 vi_since_load, u64 ticks, u32 load_generation);
+   bool PushPresentSource(u32 x, u32 y, u32 w, u32 h);
++  bool PushBackbufferSize(u32 w, u32 h);
+   bool PushDestroy(u32 class_tag, u32 id);
+   // Readback of a staging texture (CmdOp::CopyToStaging); outside any pass.
+   bool PushCopyToStaging(u32 src_id, u32 x, u32 y, u32 w, u32 h, u32 layer, u32 level,
+diff --git a/Source/Core/VideoBackends/WebGPU/WebGPUGfx.cpp b/Source/Core/VideoBackends/WebGPU/WebGPUGfx.cpp
+--- a/Source/Core/VideoBackends/WebGPU/WebGPUGfx.cpp
++++ b/Source/Core/VideoBackends/WebGPU/WebGPUGfx.cpp
+@@ -21,6 +21,7 @@
+ #include "VideoCommon/ConstantManager.h"
+ #include "VideoCommon/GeometryShaderManager.h"
+ #include "VideoCommon/PixelShaderManager.h"
++#include "VideoCommon/Present.h"
+ #include "VideoCommon/VertexManagerBase.h"
+ #include "VideoCommon/VertexShaderManager.h"
+ #include "VideoCommon/VideoBackendBase.h"
+@@ -1166,6 +1167,15 @@
+   // ends + submits.
+   m_cmd_stream.EnsureRing();
+   EndPassIfOpen();
++  // Patch 0168: the consumer sizes the canvas from the backbuffer the
++  // presenter laid out, before the first pass at a new size.
++  const SurfaceInfo surface = GetSurfaceInfo();
++  if ((surface.width != m_announced_backbuffer_w || surface.height != m_announced_backbuffer_h) &&
++      m_cmd_stream.ready() && m_cmd_stream.PushBackbufferSize(surface.width, surface.height))
++  {
++    m_announced_backbuffer_w = surface.width;
++    m_announced_backbuffer_h = surface.height;
++  }
+   m_fb_color_id = 0;
+   m_fb_depth_id = 0;
+   m_clear_col[0] = clear_color[0];
+@@ -2684,9 +2694,25 @@
+   // incompatible with the bgra8unorm canvas pass ("Attachment state
+   // ... not compatible"), so the blit silently failed and nothing
+   // presented. Must match the consumer's context format.
+-  return {640, 480, 1.0f, AbstractTextureFormat::BGRA8};
++  //
++  // Internal resolution (patch 0168): the EFB and the XFB copies are N times
++  // native, so the backbuffer the XFB is blitted into is too; at 640x480 the
++  // presenter would average the extra pixels away. BindBackbuffer tells the
++  // consumer, which sizes the canvas to match. The core allows 1 to 4.
++  const u32 scale = static_cast<u32>(std::clamp(g_ActiveConfig.iEFBScale, 1, 4));
++  return {640 * scale, 480 * scale, 1.0f, AbstractTextureFormat::BGRA8};
+ }
+ 
++void WebGPUGfx::OnConfigChanged(u32 changed_bits)
++{
++  AbstractGfx::OnConfigChanged(changed_bits);
++  // A new internal resolution: lay the presenter out on the new backbuffer
++  // now, as other backends do when their surface resizes. The next
++  // BindBackbuffer announces the size before drawing into it.
++  if ((changed_bits & CONFIG_CHANGE_BIT_TARGET_SIZE) && g_presenter)
++    g_presenter->SetBackbuffer(GetSurfaceInfo());
++}
++
+ void WebGPUEFBInterface::ReinterpretPixelData(EFBReinterpretType /* convtype */)
+ {
+ }
+diff --git a/Source/Core/VideoBackends/WebGPU/WebGPUGfx.h b/Source/Core/VideoBackends/WebGPU/WebGPUGfx.h
+--- a/Source/Core/VideoBackends/WebGPU/WebGPUGfx.h
++++ b/Source/Core/VideoBackends/WebGPU/WebGPUGfx.h
+@@ -76,6 +76,8 @@
+                                                    const void* cache_data = nullptr,
+                                                    size_t cache_data_length = 0) override;
+   SurfaceInfo GetSurfaceInfo() const override;
++  // Internal resolution (patch 0168): a new EFB scale resizes the backbuffer.
++  void OnConfigChanged(u32 changed_bits) override;
+ 
+   bool BindBackbuffer(const ClearColor& clear_color = {}) override;
+   void PresentBackbuffer() override;
+@@ -209,6 +211,11 @@
+ 
+   bool m_pass_open = false;
+   u32 m_fb_color_id = 0;  // 0 = backbuffer
++  // Backbuffer size the consumer's canvas has: 640x480 until a
++  // BackbufferSize says otherwise. At 1x nothing is ever sent, so a stream
++  // without internal resolution keeps the opcodes older consumers know.
++  u32 m_announced_backbuffer_w = 640;
++  u32 m_announced_backbuffer_h = 480;
+   u32 m_fb_depth_id = 0;
+   bool m_pending_clear = false;
+   bool m_pending_clear_color = false;
