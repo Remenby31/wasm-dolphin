@@ -654,6 +654,15 @@ void CreateDirectoryIfNeeded(const std::string& path)
     File::CreateFullPath(path);
 }
 
+// ?efbeager=1 (Module['dolphinEfbEager'], patch 0166): EFB copies to RAM
+// that would block the video thread (DeferEFBCopies=False) are written as
+// soon as their texels land instead; read by TextureCacheBase, dual core only.
+static std::atomic<int> s_efb_eager{0};
+extern "C" int DolphinWeb_EfbEager()
+{
+  return s_efb_eager.load(std::memory_order_relaxed);
+}
+
 void EnsureRuntime()
 {
   if (s_runtime_initialized)
@@ -813,6 +822,9 @@ void EnsureRuntime()
   const bool efb_no_defer = EM_ASM_INT({ return (typeof Module !== 'undefined' &&
                                                  Module['dolphinEfbNoDefer']) ? 1 : 0; }) != 0;
   Config::SetBase(Config::GFX_HACK_DEFER_EFB_COPIES, !efb_no_defer);
+  s_efb_eager.store(EM_ASM_INT({ return (typeof Module !== 'undefined' &&
+                                         Module['dolphinEfbEager']) ? 1 : 0; }),
+                    std::memory_order_relaxed);
   // Fill the canvas with the XFB, as the software presenter does. Dolphin's
   // default analog aspect pillarboxes a 640-wide XFB to ~583 pixels, so the
   // hardware path showed every game narrower than the software one.

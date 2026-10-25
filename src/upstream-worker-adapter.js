@@ -110,6 +110,7 @@ export class UpstreamWorkerAdapter {
     fifoLog = false,
     efbCopyRam = false,
     efbNoDefer = false,
+    efbEager = false,
     wgpuMask = "",
     wgpuFallback = false,
     dstAlphaTwoPass = true,
@@ -235,6 +236,7 @@ export class UpstreamWorkerAdapter {
     this.fifoLog = Boolean(fifoLog);
     this.efbCopyRam = Boolean(efbCopyRam);
     this.efbNoDefer = Boolean(efbNoDefer);
+    this.efbEager = Boolean(efbEager);
     this.wgpuMask = String(wgpuMask || "");
     this.wgpuFallback = Boolean(wgpuFallback);
     this.dstAlphaTwoPass = dstAlphaTwoPass !== false;
@@ -478,6 +480,7 @@ export class UpstreamWorkerAdapter {
       fifoLog: this.fifoLog,
       efbCopyRam: this.efbCopyRam,
       efbNoDefer: this.efbNoDefer,
+      efbEager: this.efbEager,
       wgpuMask: this.wgpuMask,
       wgpuFallback: this.wgpuFallback,
       dstAlphaTwoPass: this.dstAlphaTwoPass,
