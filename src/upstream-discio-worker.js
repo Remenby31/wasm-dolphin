@@ -14,7 +14,7 @@ import { parseDolHeader } from "./dol.js";
 import { probeRelaxedMadd } from "./relaxed-madd-probe.js";
 import { probeWasmFeatures } from "./wasm-feature-probe.js";
 import { decodeWgpuSamplerState } from "./wgpu-sampler-state.js";
-import { enhancementCoreArgs, normalizeInternalResolution, resizeCanvasBackbuffer } from "./wgpu-enhancements.js";
+import { bootBackbufferResize, enhancementCoreArgs, normalizeInternalResolution, resizeCanvasBackbuffer } from "./wgpu-enhancements.js";
 import { gxClearDepthToStored, gxDepthState } from "./wgpu-depth-state.js";
 import { clampSourceRect, createWgpuExactCapture, packReadbackRows } from "./wgpu-exact-capture.js";
 import { createUniqueFrameCounter, hashRows, sampleRowOffsets } from "./harness-unique-frames.js";
@@ -4219,6 +4219,7 @@ async function mountFile(file) {
   if (!file) {
     throw new Error("No disc file was provided to the upstream worker");
   }
+  resetWgpuBackbufferForBoot();
   await ensureUserDataReady();
 
   const fs = moduleInstance.FS;
@@ -12610,6 +12611,16 @@ function resizeWgpuBackbuffer(width, height) {
   } catch (e) {
     recordRendererError("validation", `backbuffer resize: ${e?.message || e}`);
   }
+}
+
+// Before a disc boots in a worker that already ran one: the new core starts
+// from a 640x480 backbuffer and announces only other sizes (patch 0168), so
+// a canvas left at the previous session's scale would get the 640x480 frame
+// in its top-left corner. Bring it back, and re-arm the one-shot growth.
+function resetWgpuBackbufferForBoot() {
+  const size = renderGpu ? bootBackbufferResize(renderCanvas) : null;
+  if (size) resizeWgpuBackbuffer(...size);
+  wgpuBackbufferSized = false;
 }
 
 function drainWebGpuCmdRing(source = "presentation") {

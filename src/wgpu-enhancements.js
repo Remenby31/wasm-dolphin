@@ -65,3 +65,16 @@ export function resizeCanvasBackbuffer(canvas, gpu, width, height, usage) {
   gpu.canvasHeight = height;
   return true;
 }
+
+// The backbuffer a new boot's core starts from (WebGPUGfx announces only the
+// sizes that differ from it, patch 0168).
+export const BOOT_BACKBUFFER = Object.freeze([640, 480]);
+
+// A worker reused for another disc keeps the canvas of the previous session,
+// which may be at another scale: the size to bring it back to before the
+// boot, or null when it already is the boot size.
+export function bootBackbufferResize(canvas) {
+  if (!canvas) return null;
+  const [w, h] = BOOT_BACKBUFFER;
+  return canvas.width === w && canvas.height === h ? null : [w, h];
+}

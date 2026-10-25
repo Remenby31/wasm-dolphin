@@ -64,7 +64,6 @@ test("the worker resizes the canvas on the core's BackbufferSize command (0168)"
   assert.match(worker, /const WGPU_CMD_OP_BACKBUFFER_SIZE = 29;/);
   assert.match(worker, /case WGPU_CMD_OP_BACKBUFFER_SIZE:\n[^]*?resizeWgpuBackbuffer\(u32\[recWord \+ 1\], u32\[recWord \+ 2\]\);/);
   assert.match(worker, /if \(!resizeCanvasBackbuffer\(renderCanvas, renderGpu, width, height, usage\)\) return;/);
-  assert.match(worker, /if \(!resizeCanvasBackbuffer\(renderCanvas, renderGpu, width, height, usage\)\) return;/);
   assert.match(worker, /case "setEnhancements": \{[^]*?_DolphinWeb_SetEnhancements/);
   const patch = await read("../patches/dolphin-wasm/snapshot/0168-webgpu-internal-resolution.patch");
   assert.match(patch, /\+  BackbufferSize = 29,/);
@@ -108,4 +107,25 @@ test("core-host's setEnhancements takes the anisotropy as a multiplier, like ?an
   assert.match(host, /this\.enhancements\.maxAnisotropy = anisotropyToCore\(anisotropy\);/);
   const worker = await read("../src/upstream-discio-worker.js");
   assert.match(worker, /const internalResolution = set\(\.\.\.enhancementCoreArgs\(payload\)\);/);
+});
+
+// A worker reused for another disc (mountGame reloads into the same worker):
+// played at 2x (canvas 1280x960), then a disc booted at 1x. The new core
+// announces nothing at 640x480, so the worker brings its canvas back before
+// the boot, or the frame lands in the top-left quarter.
+test("a reused worker brings the canvas back to 640x480 before the next disc boots", async () => {
+  const { BOOT_BACKBUFFER, bootBackbufferResize, resizeCanvasBackbuffer } = await import("../src/wgpu-enhancements.js");
+  const canvas = { width: 1280, height: 960 };
+  const gpu = { context: { configure() {} }, device: "dev", format: "bgra8unorm", canvasWidth: 1280, canvasHeight: 960 };
+  const size = bootBackbufferResize(canvas);
+  assert.deepEqual(size, [640, 480]);
+  assert.equal(resizeCanvasBackbuffer(canvas, gpu, ...size, 16), true);
+  assert.deepEqual([canvas.width, canvas.height], [...BOOT_BACKBUFFER]);
+  assert.equal(bootBackbufferResize(canvas), null);
+  assert.equal(bootBackbufferResize(null), null);
+  const worker = await read("../src/upstream-discio-worker.js");
+  assert.match(worker, /async function mountFile\(file\) \{[^]*?resetWgpuBackbufferForBoot\(\);\n  await ensureUserDataReady\(\);/);
+  assert.match(worker, /function resetWgpuBackbufferForBoot\(\) \{[^]*?wgpuBackbufferSized = false;\n\}/);
+  const patch = await read("../patches/dolphin-wasm/snapshot/0168-webgpu-internal-resolution.patch");
+  assert.match(patch, new RegExp(`m_announced_backbuffer_w = ${BOOT_BACKBUFFER[0]};[^]*m_announced_backbuffer_h = ${BOOT_BACKBUFFER[1]};`));
 });
