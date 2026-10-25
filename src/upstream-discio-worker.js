@@ -534,6 +534,31 @@ function harnessHeadroomStats({ reset } = {}) {
   return { bytes: copy(), again: copy() };
 }
 
+// Present cadence (patch 0162, WasmPresentCadence.h): per-field histograms of
+// the throttle's wake-up lateness, the CPU burst from Throttle to OutputXFB and
+// a present's arrival against its intended time. reset >= 0 zeroes and turns
+// them on at the next Throttle. Copied as whole u32s until two copies agree
+// (else { torn: true }); the caller still checks on === 1 (2: a reset half
+// done) and video_generation === generation (word 12 against word 3) before
+// trusting the video section.
+function harnessPresentCadence({ reset } = {}) {
+  if (!harnessEnabled) return { error: "harness hooks are off" };
+  const stats = moduleInstance?._DolphinWeb_PresentCadenceStats;
+  if (!stats) return { supported: false };
+  const ptr = stats(Number.isInteger(reset) && reset >= 0 ? reset : -1) >>> 0;
+  const heap = moduleInstance.HEAPU8;
+  if (!ptr || ptr + 8 > heap.length) return { error: `DolphinWeb_PresentCadenceStats returned ${ptr}` };
+  const size = Math.min(new DataView(heap.buffer, ptr, 8).getUint32(4, true), 1344);
+  if (ptr + size > heap.length) return { error: `present cadence of ${size} bytes past the heap` };
+  if (ptr % 4 !== 0 || size % 4 !== 0) return { error: `present cadence at ${ptr} (${size} bytes): not 4-aligned` };
+  const copy = () => Array.from(new Uint32Array(heap.buffer, ptr, size / 4));
+  for (let tries = 0; tries < 4; tries += 1) {
+    const words = copy(), again = copy();
+    if (words.every((w, i) => w === again[i])) return { supported: true, words };
+  }
+  return { supported: true, torn: true };
+}
+
 // AX HLE timing (patch 0099, harness/lib/ax-hle-stats.mjs): reset >= 0
 // zeroes and turns the counters on from the next mail; copied twice so the
 // harness can refuse a torn read.
@@ -1947,6 +1972,8 @@ async function handleMessage(type, payload) {
       return harnessAxHleStats(payload);
     case "validationReadHeadroomStats":
       return harnessHeadroomStats(payload);
+    case "validationReadPresentCadence":
+      return harnessPresentCadence(payload);
     case "validationReadMemAccessStats":
       return harnessMemAccessStats(payload);
     case "validationCaptureAtVi":
