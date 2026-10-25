@@ -1,5 +1,5 @@
 diff --git a/Source/Core/Core/CoreTiming.cpp b/Source/Core/Core/CoreTiming.cpp
-index 343e93a..f3d3f7a 100644
+index c2ab050..cc77842 100644
 --- a/Source/Core/Core/CoreTiming.cpp
 +++ b/Source/Core/Core/CoreTiming.cpp
 @@ -24,6 +24,7 @@
@@ -10,7 +10,7 @@ index 343e93a..f3d3f7a 100644
  #endif
  #include "Core/HW/Memmap.h"
  #include "Core/HW/ProcessorInterface.h"
-@@ -628,6 +629,7 @@ void CoreTimingManager::Throttle(const s64 target_cycle)
+@@ -642,6 +643,7 @@ void CoreTimingManager::Throttle(const s64 target_cycle)
    const TimePoint time = Clock::now();
  #ifdef __EMSCRIPTEN__
    DolphinWeb::Headroom::OnThrottle(GetTicks());
@@ -18,18 +18,19 @@ index 343e93a..f3d3f7a 100644
  #endif
  
    const bool already_throttled =
-@@ -690,6 +692,10 @@ void CoreTimingManager::Throttle(const s64 target_cycle)
+@@ -704,6 +706,11 @@ void CoreTimingManager::Throttle(const s64 target_cycle)
    UpdateVISkip(time, target_time);
  
    SleepUntil(target_time);
 +#ifdef __EMSCRIPTEN__
 +  // Patch 0162: this paced Throttle's wake-up against its target.
-+  DolphinWeb::PresentCadence::OnThrottleSleep(time, target_time, Clock::now());
++  if (DolphinWeb::PresentCadence::g_on)
++    DolphinWeb::PresentCadence::OnThrottleSleep(time, target_time, Clock::now());
 +#endif
  }
  
  void CoreTimingManager::UpdateSpeedLimit(s64 cycle, double new_speed)
-@@ -861,4 +867,14 @@ extern "C" EMSCRIPTEN_KEEPALIVE u32 DolphinWeb_HeadroomStats(int reset)
+@@ -875,4 +882,14 @@ extern "C" EMSCRIPTEN_KEEPALIVE u32 DolphinWeb_HeadroomStats(int reset)
      DolphinWeb::Headroom::g_request.store(reset, std::memory_order_release);
    return static_cast<u32>(reinterpret_cast<std::uintptr_t>(&DolphinWeb::Headroom::g_stats));
  }
@@ -72,10 +73,10 @@ index 2fa6703..b5df669 100644
  void VideoInterfaceManager::BeginField(FieldType field, u64 ticks)
 diff --git a/Source/Core/Core/WasmPresentCadence.h b/Source/Core/Core/WasmPresentCadence.h
 new file mode 100644
-index 0000000..6855b95
+index 0000000..cdcbf1e
 --- /dev/null
 +++ b/Source/Core/Core/WasmPresentCadence.h
-@@ -0,0 +1,151 @@
+@@ -0,0 +1,156 @@
 +// Copyright 2026 wasm-dolphin contributors
 +// SPDX-License-Identifier: GPL-2.0-or-later
 +//
@@ -90,11 +91,14 @@ index 0000000..6855b95
 +//   (3) on the video thread (WebGPU, dual core), a present's arrival minus
 +//       its intended_present_time (signed: early arrivals are what
 +//       SmoothEarlyPresentation sleeps away).
-+// Each section is written by one thread only, as plain u32s; the harness
-+// copies the struct as whole u32s, twice, and refuses a torn read.
++// Each section is written by one thread only, as plain u32s; the worker
++// copies the struct as whole u32s until two copies agree, and the harness
++// keeps a copy only with on == 1 (2 while the CPU thread resets its section).
 +// Off until DolphinWeb_PresentCadenceStats(n >= 0): the CPU thread applies
 +// the request at its next Throttle and bumps the generation; the video thread
-+// zeroes its own section when it sees a new generation (as WasmHeadroom.h).
++// zeroes its own section when it sees a new generation (as WasmHeadroom.h)
++// and stores that generation in video_generation: the video section is the
++// current window's only when video_generation == generation.
 +#pragma once
 +
 +#ifdef __EMSCRIPTEN__
@@ -115,7 +119,7 @@ index 0000000..6855b95
 +{
 +  u32 version = 1;
 +  u32 size_bytes = 1344;
-+  u32 on = 0;
++  u32 on = 0;  // 0 off, 1 on, 2 resetting (CPU section half zeroed)
 +  u32 generation = 0;
 +  // CPU thread
 +  u32 throttles = 0;  // paced throttles (not skipped by Rush, speed limited)
@@ -127,7 +131,8 @@ index 0000000..6855b95
 +  // video thread
 +  u32 presents = 0;
 +  u32 arrival_late_max_us = 0;
-+  u32 reserved[4] = {};
++  u32 video_generation = 0;  // the generation the video section was zeroed for
++  u32 reserved[3] = {};
 +  u32 sleep_late_hist[64] = {};
 +  u32 behind_hist[64] = {};
 +  u32 burst_hist[64] = {};
@@ -139,7 +144,6 @@ index 0000000..6855b95
 +alignas(8) inline Stats g_stats;
 +inline bool g_on = false;  // read plainly by both threads
 +inline std::atomic<int> g_request{-1};
-+inline u32 g_video_generation = 0;
 +inline Clock::time_point g_last_throttle_return;
 +inline bool g_have_return = false;
 +
@@ -159,6 +163,7 @@ index 0000000..6855b95
 +  if (g_request.load(std::memory_order_relaxed) >= 0) [[unlikely]]
 +  {
 +    g_request.exchange(-1, std::memory_order_acquire);
++    g_stats.on = 2;
 +    const u32 generation = g_stats.generation + 1;
 +    // The CPU section only: the video thread zeroes its own.
 +    g_stats.throttles = g_stats.sleeps = g_stats.outputs = 0;
@@ -211,12 +216,13 @@ index 0000000..6855b95
 +{
 +  if (!g_on) [[likely]]
 +    return;
-+  if (g_video_generation != g_stats.generation) [[unlikely]]
++  const u32 generation = g_stats.generation;
++  if (g_stats.video_generation != generation) [[unlikely]]
 +  {
-+    g_video_generation = g_stats.generation;
 +    g_stats.presents = 0;
 +    g_stats.arrival_late_max_us = 0;
 +    std::fill(std::begin(g_stats.arrival_hist), std::end(g_stats.arrival_hist), 0u);
++    g_stats.video_generation = generation;
 +  }
 +  g_stats.presents += 1;
 +  const auto d = std::chrono::duration_cast<std::chrono::microseconds>(arrival - intended).count();
@@ -228,10 +234,10 @@ index 0000000..6855b95
 +}  // namespace DolphinWeb::PresentCadence
 +#endif
 diff --git a/Source/Core/VideoCommon/Present.cpp b/Source/Core/VideoCommon/Present.cpp
-index 3704d1b..b789fa0 100644
+index d83f280..0c58fad 100644
 --- a/Source/Core/VideoCommon/Present.cpp
 +++ b/Source/Core/VideoCommon/Present.cpp
-@@ -21,6 +21,7 @@ extern std::atomic<bool> g_dup_xfb_rearms_throttle;  // CoreTiming.cpp, patch 01
+@@ -22,6 +22,7 @@ extern std::atomic<bool> g_present_on_arrival;       // CoreTiming.cpp, patch 01
  #include "Core/System.h"
  #ifdef __EMSCRIPTEN__
  #include "Core/WasmHeadroom.h"
@@ -239,13 +245,16 @@ index 3704d1b..b789fa0 100644
  #endif
  
  #include "InputCommon/ControllerInterface/ControllerInterface.h"
-@@ -960,6 +961,9 @@ void Presenter::Present(PresentInfo* present_info)
-         // Patch 0153: counted apart (headroom presentSleepUs), it is not
-         // the emulated GPU's work.
-         const auto sleep_start = Clock::now();
+@@ -958,6 +959,12 @@ void Presenter::Present(PresentInfo* present_info)
+       if (!Core::IsCPUThread() && g_video_backend &&
+           g_video_backend->GetConfigName() == "WebGPU")
+       {
 +        // Patch 0162: this present's arrival against its intended time.
-+        DolphinWeb::PresentCadence::OnPresentArrival(sleep_start,
-+                                                     present_info->intended_present_time);
-         Core::System::GetInstance().GetCoreTiming().SleepUntil(present_time);
-         DolphinWeb::Headroom::AddPresentSleep(Clock::now() - sleep_start);
-       }
++        if (DolphinWeb::PresentCadence::g_on)
++        {
++          DolphinWeb::PresentCadence::OnPresentArrival(Clock::now(),
++                                                       present_info->intended_present_time);
++        }
+         // Patch 0153: ?smoothearly=0 presents on arrival (no sleep at all);
+         // the sleep is counted apart (headroom presentSleepUs), it is not the
+         // emulated GPU's work, and only timed while the counters are on.

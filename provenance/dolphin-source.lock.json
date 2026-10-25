@@ -25,7 +25,7 @@
       "commit": "01e0577914a75a2569c846778c2f93aa8e6feddd"
     }
   },
-  "patchSeriesSha256": "06c794e9a4311d5d3ff04e378167430ae5b2b83de3ffb352a2560fbb70830b01",
+  "patchSeriesSha256": "451b63bc5d3ad52f00b99193ab6fc82f31faae432dfb9e6c2ee540c07603a15d",
   "patches": [
     {
       "order": 1,
@@ -968,8 +968,8 @@
       "cwd": ".",
       "hashMode": "lf-normalized",
       "path": "patches/dolphin-wasm/snapshot/0153-smooth-early-switch-and-present-sleep.patch",
-      "size": 3539,
-      "sha256": "921cbdaed8c1355de014e3c48823518d5cab61cc6517543713fd1d1130fcb9c4"
+      "size": 5201,
+      "sha256": "c298c525589229f48f773645a71a23508f62ee0c8b34a2724fabbdd005e272d0"
     },
     {
       "order": 119,
@@ -1008,8 +1008,8 @@
       "cwd": ".",
       "hashMode": "lf-normalized",
       "path": "patches/dolphin-wasm/snapshot/0162-present-cadence-counters.patch",
-      "size": 10167,
-      "sha256": "ff69c72b42427a1b41a2eb94f12d07108496e28bc237b312d1cb724dfef489e6"
+      "size": 10702,
+      "sha256": "d244dcd85e4f17332abc863d1ff6775e929869c44e9230d3e079faa4cec6b718"
     },
     {
       "order": 124,

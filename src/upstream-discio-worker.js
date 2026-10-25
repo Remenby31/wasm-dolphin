@@ -404,8 +404,11 @@ function harnessPacingConfig() {
   const read = moduleInstance?._DolphinWeb_PacingConfig;
   if (typeof read !== "function") return { supported: false };
   const bits = read() >>> 0;
-  // bit 3 (patch 0153): SmoothEarlyPresentation; a 0150-only core reads false.
-  return { supported: true, syncOnSkipIdle: Boolean(bits & 1), rushFramePresentation: Boolean(bits & 2), dupXfbResetsThrottle: Boolean(bits & 4), smoothEarlyPresentation: Boolean(bits & 8) };
+  // bit 3 (patch 0153): the video thread's present sleep (SmoothEarly on and
+  // not presenting on arrival); null on a core before 0153, which sleeps but
+  // has no bit for it.
+  const presentSleep = typeof moduleInstance?._DolphinWeb_SetPresentOnArrival === "function" ? Boolean(bits & 8) : null;
+  return { supported: true, syncOnSkipIdle: Boolean(bits & 1), rushFramePresentation: Boolean(bits & 2), dupXfbResetsThrottle: Boolean(bits & 4), presentSleep };
 }
 // Patch 0156: the guest cycles ran outside the regions by the PC a chain of
 // blocks started at, the 64 most costly, while the stats are on (timing or
@@ -534,8 +537,10 @@ function harnessHeadroomStats({ reset } = {}) {
 // Present cadence (patch 0162, WasmPresentCadence.h): per-field histograms of
 // the throttle's wake-up lateness, the CPU burst from Throttle to OutputXFB and
 // a present's arrival against its intended time. reset >= 0 zeroes and turns
-// them on at the next Throttle; copied twice as whole u32s so the harness can
-// refuse a torn read.
+// them on at the next Throttle. Copied as whole u32s until two copies agree
+// (else { torn: true }); the caller still checks on === 1 (2: a reset half
+// done) and video_generation === generation (word 12 against word 3) before
+// trusting the video section.
 function harnessPresentCadence({ reset } = {}) {
   if (!harnessEnabled) return { error: "harness hooks are off" };
   const stats = moduleInstance?._DolphinWeb_PresentCadenceStats;
@@ -547,7 +552,11 @@ function harnessPresentCadence({ reset } = {}) {
   if (ptr + size > heap.length) return { error: `present cadence of ${size} bytes past the heap` };
   if (ptr % 4 !== 0 || size % 4 !== 0) return { error: `present cadence at ${ptr} (${size} bytes): not 4-aligned` };
   const copy = () => Array.from(new Uint32Array(heap.buffer, ptr, size / 4));
-  return { supported: true, words: copy(), again: copy() };
+  for (let tries = 0; tries < 4; tries += 1) {
+    const words = copy(), again = copy();
+    if (words.every((w, i) => w === again[i])) return { supported: true, words };
+  }
+  return { supported: true, torn: true };
 }
 
 // AX HLE timing (patch 0099, harness/lib/ax-hle-stats.mjs): reset >= 0

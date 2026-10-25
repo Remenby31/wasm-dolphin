@@ -44,8 +44,8 @@
     {
       "path": "core/upstream/dolphin_web_core.cpp",
       "hashMode": "lf-normalized",
-      "size": 58609,
-      "sha256": "a1b25275978347a41094a1d54ea4fa5670fb0979e76b5e2125ff8a0464170a75"
+      "size": 58892,
+      "sha256": "cd3a2cfe5bf3e51b0d86827ec1f7ace0a8d0a41687b0ae1bef476f18a92e28f3"
     },
     {
       "path": "src/app.js",
@@ -86,8 +86,8 @@
     {
       "path": "src/core-host.js",
       "hashMode": "lf-normalized",
-      "size": 79912,
-      "sha256": "be86f002e59d2f7dafe7ed355848c7d2e99fdc5fa9b76a46cd0ba5d7a3c459b7"
+      "size": 80036,
+      "sha256": "9aa45863ab0a5b2d058718ff1ee56c9b5fe888512ae7a92f9c166a79c6fc1deb"
     },
     {
       "path": "src/diagnostic-log-filter.js",
@@ -140,8 +140,8 @@
     {
       "path": "src/upstream-discio-worker.js",
       "hashMode": "lf-normalized",
-      "size": 756117,
-      "sha256": "259019300b110cbd71ac17e733cbb268f3095d7cec2340bb56ffba87a3dfa54c"
+      "size": 756624,
+      "sha256": "bbe02d8a62ad9e063f1189fbf197c168a002b59724500b5aec21f96e98ffe04a"
     },
     {
       "path": "src/wgpu-renderer-worker-probe.js",
