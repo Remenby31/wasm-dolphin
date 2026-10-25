@@ -1967,6 +1967,10 @@ async function handleMessage(type, payload) {
       return readDetTrace(payload);
     case "validationReadWgpuReplayState":
       return readWgpuReplayState();
+    case "validationReadWgpuReadback":
+      // EFB/staging readbacks (copies to RAM, peeks): counters and per-copy
+      // latency since the last read with { reset: true }.
+      return wgpuReadback ? wgpuReadback.snapshot({ reset: payload?.reset === true }) : { active: false };
     case "validationEnableGpuSyncDiag":
       // Applied now if the core is loaded, and again when it loads.
       gpuSyncDiagEnabled = payload.enabled !== false;
