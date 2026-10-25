@@ -3,6 +3,7 @@
 
 import assert from "node:assert/strict";
 import { spawnSync } from "node:child_process";
+import { readFile } from "node:fs/promises";
 import path from "node:path";
 import test from "node:test";
 
@@ -129,4 +130,12 @@ test("race-perf refuses speed=unlimited while SyncOnSkipIdle is off", () => {
   });
   assert.notEqual(r.status, 0);
   assert.match(r.stderr, /speed=unlimited without synconidle=1/);
+});
+
+test("race-perf --decoupled-unlimited: the flag, its option, the summary's label", async () => {
+  // No spawn past the guard: the next step would queue for the perf lock.
+  const source = await readFile(path.resolve(import.meta.dirname, "../harness/probes/race-perf.mjs"), "utf8");
+  assert.match(source, /"decoupled-unlimited": \{ type: "boolean", default: false \}/);
+  assert.match(source, /decoupledUnlimited: values\["decoupled-unlimited"\] === true,/);
+  assert.match(source, /\.\.\.\(o\.decoupledUnlimited \? \{ decoupledUnlimited: Object\.keys\(sides\)\.filter\(\(n\) => pacingExpectation\(/);
 });
