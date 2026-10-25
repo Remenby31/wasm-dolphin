@@ -464,9 +464,24 @@ export async function translateWithContinuations(m, f, { mask, maxBlocks, names,
     first = translateOne(m, f, { mask, maxBlocks: blocks, names });
     cut = true;
   }
-  if (!first.fragment || maxContinuations <= 0 || (!cut && !capped(first.fragment, maxBlocks, maxFragmentBytes))) return first;
-  const branches = functionBranches(m, f.ranges);
+  if (!first.fragment || maxContinuations <= 0) return first;
   const owned = new Set(first.fragment.entries.map((pc) => pc >>> 0));
+  // The plan's extra entries (jump-table targets, resolved indirect targets,
+  // code pointers) that no direct branch reaches: seeds of the frontier, so
+  // a bctr into them stays in the region rather than leaving for code with
+  // none (the race scene's 0x80077044, a jump-table target of 0x80076eb8).
+  const seeds = (f.extraEntries ?? []).map((pc) => pc >>> 0).filter((pc) => !owned.has(pc) && f.ranges.some(([s, e]) => pc >= s && pc < e));
+  // An uncapped first fragment can still leave code out: the core's
+  // discovery does not follow an mtmsr's fall-through (an exit: MSR may
+  // have changed), so blocks only it reaches had no entry (a homebrew's main
+  // loop: 35 % of its cycles outside regions). The frontier says so; it is
+  // followed only when that code loops (a branch back at or past the first
+  // leader). A straight tail after an mtmsr (an OS routine's FPU save or
+  // load, the FP unavailable path) runs once per call: as a region it cost
+  // one more region entry per call and broke block chains there (race
+  // scene -1.3 %, review of #240).
+  const branches = functionBranches(m, f.ranges);
+  if (!seeds.length && !cut && !capped(first.fragment, maxBlocks, maxFragmentBytes) && !loopsPast(branches, frontier(branches, owned), owned)) return first;
   const tried = new Set();
   const continuations = [];
   // The budget counts only what goes past the function's old single
@@ -492,7 +507,17 @@ export async function translateWithContinuations(m, f, { mask, maxBlocks, names,
   // `elsewhere`: entries another member of the module already holds (a
   // continuation started there would be dropped at assembly, its bytes
   // charged for nothing).
-  const next_ = (elsewhere) => frontier(branches, owned).filter((x) => !tried.has(x) && !elsewhere?.has(x));
+  // The frontier's leaders first (what held code reaches), then the seeds
+  // nothing held reaches yet, each in address order: a big table of seeds
+  // at low addresses no longer takes the continuations and the budget from
+  // the leaders above it (review of #191). `fromSeed`: started from a seed.
+  const next_ = (elsewhere) => {
+    const keep = (x) => !tried.has(x) && !owned.has(x) && !elsewhere?.has(x);
+    const leaders = frontier(branches, owned).filter(keep);
+    const reached = new Set(leaders);
+    return [...leaders, ...seeds.filter((x) => keep(x) && !reached.has(x)).sort((a, b) => a - b)];
+  };
+  const fromSeed = (pc) => seeds.includes(pc) && !frontier(branches, owned).includes(pc);
   // Continuations from the frontier until it is empty or the next one would
   // cost more than `limit` (never past it: that one goes back to the
   // frontier, for a later share); what is left waiting is refused for lack
@@ -510,6 +535,7 @@ export async function translateWithContinuations(m, f, { mask, maxBlocks, names,
         break;
       }
       const pc = waiting[0];
+      const seeded = fromSeed(pc);
       tried.add(pc);
       await slice();
       // Over the function's ranges without the first word of each block
@@ -531,9 +557,12 @@ export async function translateWithContinuations(m, f, { mask, maxBlocks, names,
         break;
       }
       if (next.fragment.code.length > maxFragmentBytes) { oversize += 1; continue; } // one block alone: left an exit
-      // The share of this fragment within the old single fragment's blocks is free.
+      // The share of this fragment within the old single fragment's blocks
+      // is free; not for one started from a seed, which held code does not
+      // reach: it is charged whole, so the seeds' code is bounded by the
+      // budget (review of #191).
       const n = next.fragment.entries.length;
-      const free = Math.min(freeBlocks, n);
+      const free = seeded ? 0 : Math.min(freeBlocks, n);
       const cost = Math.round(next.fragment.code.length * (n - free) / Math.max(1, n));
       if (cost > bytes) {
         tried.delete(pc); // past the budget: back to the frontier
@@ -591,6 +620,33 @@ export function withoutStarts(ranges, starts) {
     if (s < e) out.push([s, e >>> 0]);
   }
   return out;
+}
+
+// Whether the code the frontier's `leaders` lead to holds a loop: walked
+// from each leader to the next block end or held entry, following the
+// branches met there (targets not held), a branch goes back into code the
+// walk reached. Held code is never walked (a straight tail before a held
+// loop does not count), nor a word no walk reaches (a literal after a blr
+// that decodes as a branch back; review of #243).
+export function loopsPast(branches, leaders, owned) {
+  const ends = branches.ends ?? [];
+  const starts = [...owned].sort((x, y) => x - y);
+  const after = (list, pc) => { let lo = 0, hi = list.length; while (lo < hi) { const mid = (lo + hi) >> 1; if (list[mid] < pc) lo = mid + 1; else hi = mid; } return list[lo]; };
+  const walked = [], met = [];
+  const queue = [...leaders], seen = new Set(queue);
+  while (queue.length) {
+    const s = queue.pop();
+    const end = after(ends, s), held = after(starts, s + 1);
+    const stop = Math.min(end === undefined ? Infinity : end + 4, held === undefined ? Infinity : held);
+    walked.push([s, stop]);
+    for (const [a, targets] of branches) {
+      if (a < s || a >= stop) continue;
+      met.push([a, targets]);
+      for (const t of targets) if (!owned.has(t) && !seen.has(t)) { seen.add(t); queue.push(t); }
+    }
+  }
+  const reached = (pc) => walked.some(([s, e]) => pc >= s && pc < e);
+  return met.some(([a, targets]) => targets.some((t) => t <= a && reached(t)));
 }
 
 // The direct branches of the code in `ranges` ([start, end) guest

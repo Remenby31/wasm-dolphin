@@ -9,7 +9,7 @@ import path from "node:path";
 import test from "node:test";
 
 import { acquirePerfLock, lockIntegrity, queueDir, readLockOwner, ticketsAhead } from "../harness/lib/perf-lock.mjs";
-import { chromeArgsOf, guestCovered, lockOverlapAt, num, pairedSpeedChange, regionPipeline, sideOrder, withheldOnOverlap } from "../harness/probes/race-perf.mjs";
+import { chromeArgsOf, guestCovered, lockOverlapAt, num, outlierPairs, pairedSpeedChange, regionPipeline, sideOrder, withheldOnOverlap, workerReadDeltas } from "../harness/probes/race-perf.mjs";
 import { stockChrome } from "../harness/lib/kpi.mjs";
 import { calmThenLock, loadGaveUp } from "../harness/lib/env.mjs";
 import { summarizePcSamples } from "../src/harness-pc-sampler.js";
@@ -124,6 +124,25 @@ test("review #22: the change is withheld when pairs are too few or unbalanced in
   assert.match(lost.withheld, /unbalanced/);
 });
 
+test("paired change: a pair more than 3 MAD from the median is set aside and named, the orders kept equal", () => {
+  const run = (n, b, c) => ({ run: n, baseline: { cold: { speed: b } }, candidate: { cold: { speed: c } } });
+  // The layout A/A' of 2026-10-24: one window at -25 % among pairs within about 1 %.
+  const ch = pairedSpeedChange([run(1, 1.743, 1.356), run(2, 1.743, 1.673), run(3, 1.75, 1.733), run(4, 1.769, 1.776), run(5, 1.76, 1.75), run(6, 1.75, 1.76)]);
+  assert.deepEqual(ch.excluded.map((x) => [x.run, x.why.split(":")[0]]), [[1, "outlier"], [6, "order balance after an outlier"]]);
+  assert.equal(ch.pairs, 4);
+  assert.equal(ch.baselineFirst, ch.candidateFirst);
+  assert.equal(ch.withheld, null);
+  assert.ok(Math.abs(ch.median) < 2);
+  assert.equal(ch.perRun.length, 6); // every pair stays listed
+  // Pairs that agree: nothing set aside, no excluded field.
+  const calm = pairedSpeedChange([run(1, 80, 88), run(2, 70, 77), run(3, 90, 99), run(4, 100, 110)]);
+  assert.equal(calm.excluded, undefined);
+  // Close pairs make a tiny MAD: a -2 % pair among -0.1..-0.5 % is noise, not an outlier (the 5 % floor).
+  assert.equal(pairedSpeedChange([run(1, 1.782, 1.744), run(2, 1.767, 1.763), run(3, 1.823, 1.814), run(4, 1.802, 1.801)]).excluded, undefined);
+  // Fewer than 4 pairs: no outlier test (the median of 3 is its own guard).
+  assert.deepEqual(outlierPairs([{ ratio: 0 }, { ratio: 0.01 }, { ratio: -0.5 }]), []);
+});
+
 test("review #22: numeric options reject NaN and out-of-range values", () => {
   assert.equal(num({ "max-load": "3.5" }, "max-load", { min: 0.1 }), 3.5);
   assert.throws(() => num({ "max-load": "abc" }, "max-load", { min: 0.1 }), /--max-load abc: expected a number/);
@@ -150,6 +169,28 @@ test("review #22: odd runs and a pinned coreid are refused with --baseline", () 
     const ok = run(["--runs", "2", "--query", "core=upstream&coreid=sha256:" + "a".repeat(64), "--baseline-query", "core=upstream", "--max-load", "abc"]);
     assert.match(ok, /--max-load abc/);
     assert.doesNotMatch(ok, /coreid/);
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test("--worker-read: per request start, end and the numeric fields' end - start; an error gives no delta", () => {
+  const start = { validationReadDstAlphaPasses: { id: 361, flushes: 10, extraDraws: 4, enabled: true }, validationReadMissing: { error: "unknown request" } };
+  const end = { validationReadDstAlphaPasses: { id: 727, flushes: 70, extraDraws: 4, enabled: true }, validationReadMissing: { error: "unknown request" } };
+  const r = workerReadDeltas(start, end);
+  assert.deepEqual(r.validationReadDstAlphaPasses.delta, { flushes: 60, extraDraws: 0 });
+  assert.deepEqual(r.validationReadDstAlphaPasses.end, end.validationReadDstAlphaPasses);
+  assert.equal(r.validationReadMissing.delta, null);
+  assert.deepEqual(workerReadDeltas({}, {}), {});
+});
+
+test("--worker-read: only validationRead* worker requests", () => {
+  const probe = path.resolve(import.meta.dirname, "../harness/probes/race-perf.mjs");
+  const dir = mkdtempSync(path.join(os.tmpdir(), "harness-test-probe-"));
+  try {
+    for (const f of ["d.iso", "s.sav"]) writeFileSync(path.join(dir, f), "");
+    const err = spawnSync(process.execPath, [probe, "--iso", path.join(dir, "d.iso"), "--state", path.join(dir, "s.sav"), "--port", "1", "--worker-read", "validationReadHeadroomStats,validationUniqueFrames"], { encoding: "utf8", env: { ...process.env, CI: "" } }).stderr;
+    assert.match(err, /--worker-read validationUniqueFrames: expected a validationRead\* worker request/);
   } finally {
     rmSync(dir, { recursive: true, force: true });
   }

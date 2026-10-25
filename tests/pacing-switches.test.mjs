@@ -5,11 +5,11 @@ import { readFile } from "node:fs/promises";
 import test from "node:test";
 
 // Patch 0150's pacing switches, each from the page's URL to the core's config:
-// ?rush=0, ?synconidle=1, ?dupvsync=1. An option the adapter forgot to carry
+// ?rush=1 (Rush is off by default), ?synconidle=1, ?dupvsync=1. An option the adapter forgot to carry
 // was silently dropped twice (?aotsample, ?wasmengine; and ?synconidle, which
 // the harness trusted while the core ignored it): every hop is checked.
 const SWITCHES = [
-  { param: "rush=0", option: "rushPresentation", on: false, flag: "dolphinRushPresentation" },
+  { param: "rush=1", option: "rushPresentation", on: true, flag: "dolphinRushPresentation" },
   { param: "synconidle=1", option: "syncOnSkipIdle", on: true, flag: "dolphinSyncOnSkipIdle" },
   { param: "dupvsync=1", option: "dupXfbRearmsThrottle", on: true, flag: "dolphinDupXfbRearmsThrottle" },
   { param: "smoothearly=0", option: "smoothEarly", on: false, flag: "dolphinSmoothEarly" }
@@ -17,13 +17,14 @@ const SWITCHES = [
 
 test("pacing switches: URL parsing, shipped defaults, each switch only its own", async () => {
   const { requestedPacing } = await import("../src/core-host.js");
-  assert.deepEqual(requestedPacing(""), { rushPresentation: true, syncOnSkipIdle: false, dupXfbRearmsThrottle: false, smoothEarly: true });
+  // Rush off by default (upstream's default): ?rush=1 turns it back on.
+  assert.deepEqual(requestedPacing(""), { rushPresentation: false, syncOnSkipIdle: false, dupXfbRearmsThrottle: false, smoothEarly: true });
   for (const s of SWITCHES) {
     const p = requestedPacing(`?${s.param}`);
     assert.equal(p[s.option], s.on, s.param);
     for (const other of SWITCHES.filter((o) => o !== s)) assert.equal(p[other.option], !other.on, `${s.param} leaves ${other.option}`);
   }
-  assert.equal(requestedPacing("?rush=1").rushPresentation, true);
+  assert.equal(requestedPacing("?rush=0").rushPresentation, false);
   assert.equal(requestedPacing("?synconidle=0").syncOnSkipIdle, false);
   assert.equal(requestedPacing("?smoothearly=1").smoothEarly, true);
 });
@@ -31,7 +32,7 @@ test("pacing switches: URL parsing, shipped defaults, each switch only its own",
 test("pacing switches reach the worker's init message through the adapter", async (t) => {
   const { requestedPacing } = await import("../src/core-host.js");
   const { UpstreamWorkerAdapter } = await import("../src/upstream-worker-adapter.js");
-  const adapter = new UpstreamWorkerAdapter(requestedPacing("?rush=0&synconidle=1&dupvsync=1&smoothearly=0"));
+  const adapter = new UpstreamWorkerAdapter(requestedPacing("?rush=1&synconidle=1&dupvsync=1&smoothearly=0"));
   let posted = null;
   adapter.worker = {
     postMessage(message) {
@@ -40,7 +41,7 @@ test("pacing switches reach the worker's init message through the adapter", asyn
     }
   };
   const originalWindow = globalThis.window;
-  globalThis.window = { location: { href: "http://127.0.0.1:8080/?rush=0&synconidle=1&dupvsync=1", search: "?rush=0&synconidle=1&dupvsync=1" } };
+  globalThis.window = { location: { href: "http://127.0.0.1:8080/?rush=1&synconidle=1&dupvsync=1", search: "?rush=1&synconidle=1&dupvsync=1" } };
   t.after(() => {
     if (originalWindow === undefined) delete globalThis.window;
     else globalThis.window = originalWindow;
@@ -83,4 +84,13 @@ test("0153: smoothearly readback bit and the present sleep in the headroom struc
   const fields = header.slice(header.indexOf("+struct Stats"), header.indexOf("+static_assert(sizeof(Stats) == 96);")).match(/\+  double \w+/g);
   assert.equal(fields.length, 10);
   assert.equal(fields[9], "+  double spare");
+});
+
+test("Rush off by default: a page or core that sets nothing runs without Rush Frame Presentation", async () => {
+  const { UpstreamWorkerAdapter } = await import("../src/upstream-worker-adapter.js");
+  assert.equal(new UpstreamWorkerAdapter({}).rushPresentation, false);
+  const core = await readFile(new URL("../core/upstream/dolphin_web_core.cpp", import.meta.url), "utf8");
+  assert.match(core, /Module\['dolphinRushPresentation'\] === true\) \? 1 : 0;/, "the core's own default is off too");
+  const worker = await readFile(new URL("../src/upstream-discio-worker.js", import.meta.url), "utf8");
+  assert.match(worker, /\n  rushPresentation = false,\n/);
 });

@@ -16,9 +16,14 @@
 // thread waiting for the GPU in FlushGpu, with SyncOnSkipIdle on),
 // gpuConsumerWaitUs (inside those passes, the GPU thread waiting for ring or
 // upload space from the render worker), guestTicks (core ticks since the
-// reset, written at the same instant as windowUs), one spare.
-// maxSpeedGpu = guest s / (GPU work - consumer wait): waiting on the render
-// worker is not the emulated GPU's work. With the deterministic GPU thread
+// reset, written at the same instant as windowUs), presentSleepUs (inside
+// those passes, the video thread sleeping until the VI's host time,
+// SmoothEarlyPresentation, Present.cpp; patch 0153; 0 on a core that does
+// not measure it: the layout and version are unchanged).
+// maxSpeedGpu = guest s / (GPU work - consumer wait - present sleep):
+// waiting on the render worker or on the VI's host time is not the emulated
+// GPU's work (research/deep-gpu-cost-amplifier.md: the present sleep alone
+// took maxSpeedGpu from ~18 to 5.9 on heavy with Rush). With the deterministic GPU thread
 // the GPU loop does not run: maxSpeedGpu is null. PushBlockingEvent and
 // SyncGPU waits count as CPU busy time (they are off by default).
 // maxSpeedCpu leaves the CPU's waits out (sleep and FlushGpu): what limits it
@@ -27,7 +32,7 @@ import { round } from "./stats.mjs";
 
 export const HEADROOM_VERSION = 1;
 export const HEADROOM_BYTES = 96;
-const F64 = ["windowUs", "cpuSleepUs", "gpuWorkUs", "xfbCopies", "rushSkips", "flushGpuWaitUs", "flushGpuWaits", "gpuConsumerWaitUs", "guestTicks"];
+const F64 = ["windowUs", "cpuSleepUs", "gpuWorkUs", "xfbCopies", "rushSkips", "flushGpuWaitUs", "flushGpuWaits", "gpuConsumerWaitUs", "guestTicks", "presentSleepUs"];
 
 export function decodeHeadroomStats(bytes) {
   if (!bytes || bytes.length < 16) return { error: `headroom stats: ${bytes?.length ?? 0} bytes, no header` };
@@ -39,6 +44,7 @@ export function decodeHeadroomStats(bytes) {
   F64.forEach((name, i) => { out[name] = view.getFloat64(16 + i * 8, true); });
   for (const name of F64) if (!Number.isFinite(out[name]) || out[name] < 0) return { error: `headroom stats: ${name} = ${out[name]}` };
   if (out.cpuSleepUs + out.flushGpuWaitUs > out.windowUs * 1.001) return { error: `headroom stats: CPU waits ${out.cpuSleepUs + out.flushGpuWaitUs} µs > windowUs ${out.windowUs}` };
+  if (out.gpuConsumerWaitUs + out.presentSleepUs > out.gpuWorkUs * 1.001 + 1) return { error: `headroom stats: GPU waits ${out.gpuConsumerWaitUs + out.presentSleepUs} µs > gpuWorkUs ${out.gpuWorkUs}` };
   return out;
 }
 
@@ -58,7 +64,8 @@ export function headroomOf(s, { guestSeconds = null, ticksPerSecond = null, viOu
   if (!s.on) return { error: "headroom stats: counters not on" };
   if (!(guestSeconds > 0) || !(s.windowUs > 0)) return { error: `headroom stats: ${guestSeconds} guest s over ${s.windowUs} µs` };
   const hostS = s.windowUs / 1e6, sleepS = s.cpuSleepUs / 1e6, flushS = s.flushGpuWaitUs / 1e6;
-  const consumerS = s.gpuConsumerWaitUs / 1e6, gpuS = Math.max(0, s.gpuWorkUs / 1e6 - consumerS);
+  const consumerS = s.gpuConsumerWaitUs / 1e6, presentSleepS = (s.presentSleepUs ?? 0) / 1e6;
+  const gpuS = Math.max(0, s.gpuWorkUs / 1e6 - consumerS - presentSleepS);
   const sleepShare = sleepS / hostS;
   const busyS = hostS - sleepS - flushS;
   const maxSpeedCpu = busyS > 0 ? guestSeconds / busyS : null;
@@ -75,6 +82,7 @@ export function headroomOf(s, { guestSeconds = null, ticksPerSecond = null, viOu
     gpuBusyShare: round(gpuS / hostS, 4),
     flushGpuWaitShare: round(flushS / hostS, 4),
     gpuConsumerWaitShare: round(consumerS / hostS, 4),
+    presentSleepShare: round(presentSleepS / hostS, 4),
     rushSkips: s.rushSkips,
     xfbCopiesPerVi: viOutputs > 0 ? round(s.xfbCopies / viOutputs, 4) : null,
     // The product KPI (judge, 2026-10-23): game images the player gets per
@@ -88,7 +96,7 @@ export function headroomOf(s, { guestSeconds = null, ticksPerSecond = null, viOu
 // Why a run cannot be used (deep-headroom-kpi.md §3.4), or [].
 //   target: the query's speed (1, 1.6, …); framesPerViRef: game frames per
 //   VI of the same config at speed=1, when known.
-export function invalidReasons(rec, { target = null, framesPerViRef = null } = {}) {
+export function invalidReasons(rec, { target = null, framesPerViRef = null, pacing = null } = {}) {
   const why = [];
   if (!rec) return ["no record"];
   if (rec.complete === false || rec.timelineLost?.vi > 0 || rec.timelineLost?.presents > 0) {
@@ -103,13 +111,37 @@ export function invalidReasons(rec, { target = null, framesPerViRef = null } = {
   const fpv = rec.headroom?.xfbCopiesPerVi;
   if (fpv === 0) why.push("no game frame (XFB copy) in the window (rendering frozen)");
   if (framesPerViRef != null && fpv != null && Math.abs(fpv / framesPerViRef - 1) > 0.1) why.push(`game frames per VI ${fpv} outside ±10 % of ${framesPerViRef} (emulated time decoupled from rendering)`);
+  // A core without the readback (before 0150) ignores ?synconidle and keeps
+  // SyncOnSkipIdle off: decoupled by construction, so it passes "decoupled"
+  // (never "sync"). An error or no read passes neither.
+  const decoupledOld = pacing === "decoupled" && rec.pacingConfig?.supported === false;
+  if (pacing && !decoupledOld && rec.pacingConfig?.syncOnSkipIdle !== (pacing === "sync")) {
+    const read = rec.pacingConfig?.supported === false ? "no validationReadPacingConfig" : rec.pacingConfig?.error ?? `syncOnSkipIdle ${rec.pacingConfig?.syncOnSkipIdle}`;
+    why.push(pacing === "sync" ? `speed=unlimited with a renderer: SyncOnSkipIdle not applied by the core (${read})` : `--decoupled-unlimited: the core does not read SyncOnSkipIdle off (${read})`);
+  }
   return why;
 }
 
 // The speed a query asks for: a number, "unlimited", or null (default 1).
 // unlimited is a speed only with SyncOnSkipIdle on (?synconidle=1): with it
-// off (the product today), emulated time runs ahead of the rendering.
-export const unlimitedAllowed = (query) => new URLSearchParams(String(query ?? "")).get("synconidle") === "1";
+// off (the product today), emulated time runs ahead of the rendering. The
+// URL alone proves nothing (2026-10-24: the core ignored ?synconidle): with
+// a renderer, each window must also read the core's own config
+// (validationReadPacingConfig, patch 0150) and find what the side claims
+// (pacingExpectation), else the run is invalid. video=null renders nothing
+// to run ahead of: unlimited is allowed there as it stands (the CI bench).
+// decoupledUnlimited (race-perf --decoupled-unlimited, judge 2026-10-24):
+// unlimited without synconidle=1 on purpose, to measure the cost of the
+// CPU/GPU coupling; the core must then read SyncOnSkipIdle off.
+const params = (query) => new URLSearchParams(String(query ?? ""));
+export const unlimitedAllowed = (query, { decoupledUnlimited = false } = {}) =>
+  params(query).get("video") === "null" || params(query).get("synconidle") === "1" || decoupledUnlimited;
+// "sync": the core must read syncOnSkipIdle true; "decoupled": false; null: nothing asked.
+export function pacingExpectation(query, { decoupledUnlimited = false } = {}) {
+  if (querySpeed(query) !== "unlimited" || params(query).get("video") === "null") return null;
+  if (params(query).get("synconidle") === "1") return "sync";
+  return decoupledUnlimited ? "decoupled" : null;
+}
 
 export function querySpeed(query) {
   const v = new URLSearchParams(String(query ?? "")).get("speed");

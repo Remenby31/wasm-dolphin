@@ -736,13 +736,14 @@ void EnsureRuntime()
   Config::SetBase(Config::MAIN_OVERCLOCK_ENABLE, true);
   Config::SetBase(Config::MAIN_OVERCLOCK, s_cpu_overclock);
   Config::SetBase(Config::MAIN_PRECISION_FRAME_TIMING, false);
-  // Pacing switches (patch 0150, for measurement; all off by default):
-  // ?rush=0 (Module['dolphinRushPresentation'] false) turns Rush Frame
-  // Presentation off, ?synconidle=1 turns Dolphin's SyncOnSkipIdle on,
-  // ?dupvsync=1 makes a duplicated XFB rearm the Rush throttle.
+  // Pacing switches (patch 0150): Rush Frame Presentation is off, as
+  // upstream's default (with it, heavy scenes ran up to 40 ms ahead of the
+  // presents: VI p99 ~60 ms); ?rush=1 (Module['dolphinRushPresentation'] true)
+  // turns it back on. For measurement: ?synconidle=1 turns Dolphin's
+  // SyncOnSkipIdle on, ?dupvsync=1 makes a duplicated XFB rearm the throttle.
   const bool rush_presentation =
       EM_ASM_INT({ return (typeof Module !== 'undefined' &&
-                           Module['dolphinRushPresentation'] === false) ? 0 : 1; }) != 0;
+                           Module['dolphinRushPresentation'] === true) ? 1 : 0; }) != 0;
   const bool sync_on_skip_idle =
       EM_ASM_INT({ return (typeof Module !== 'undefined' &&
                            Module['dolphinSyncOnSkipIdle'] === true) ? 1 : 0; }) != 0;
@@ -792,13 +793,13 @@ void EnsureRuntime()
     Config::SetBase(Config::GFX_HACK_SKIP_DUPLICATE_XFBS, false);
   Config::SetBase(Config::GFX_HACK_COPY_EFB_SCALED, false);
   // ?efbaccess=1 (Module['dolphinEfbAccess']): CPU reads and writes of the
-  // EFB, off by default as in Dolphin; upstream turns them on per game
-  // (GameINI), which this build does not ship yet.
+  // EFB, off by default as in Dolphin. A base-layer value: the disc's
+  // GameINI (tools/gamesettings-allowlist.json) turns it on above it.
   const bool efb_access = EM_ASM_INT({ return (typeof Module !== 'undefined' &&
                                                Module['dolphinEfbAccess']) ? 1 : 0; }) != 0;
   Config::SetBase(Config::GFX_HACK_EFB_ACCESS_ENABLE, efb_access);
   // ?efbcopyram=1 (Module['dolphinEfbCopyRam']): EFB copies also land in
-  // guest RAM, as upstream's GameINIs ask with EFBToTextureEnable=False.
+  // guest RAM. Base layer too: a GameINI's EFBToTextureEnable wins.
   const bool efb_copy_ram = EM_ASM_INT({ return (typeof Module !== 'undefined' &&
                                                  Module['dolphinEfbCopyRam']) ? 1 : 0; }) != 0;
   Config::SetBase(Config::GFX_HACK_SKIP_EFB_COPY_TO_RAM, !efb_copy_ram);
@@ -1061,22 +1062,26 @@ int SetCpuThread(int enabled)
   return 1;
 }
 
-// Tests (patch 0097): the value Dolphin's game config gives an allowlisted
+// The value Dolphin's game config gives an allowlisted
 // setting (tools/gamesettings-allowlist.json) for a disc ID and revision from
 // the INIs under /dolphin-sys/GameSettings, as the game's boot reads it: MMU
-// (System::Initialize, IsMMUMode), FPRF (patch 0121), SafeTextureCacheColorSamples and
-// XFBToTextureEnable (GFX_HACK_SKIP_XFB_COPY_TO_RAM); booleans
+// (System::Initialize, IsMMUMode), FPRF (patch 0121), SafeTextureCacheColorSamples,
+// XFBToTextureEnable (GFX_HACK_SKIP_XFB_COPY_TO_RAM), EFBAccessEnable,
+// EFBToTextureEnable (GFX_HACK_SKIP_EFB_COPY_TO_RAM) and BBoxEnable; booleans
 // as 0/1. The global game layer is added for the read and removed after; -1
 // when a game's layer is already there (a game is running), which this must
-// not replace, -2 for a setting it does not know.
+// not replace, -2 for a setting it does not know. Read before the boot by
+// the worker (a disc that needs the bounding box, which video=wgpu does not
+// compute) and by the tests (patch 0097).
 #ifdef __EMSCRIPTEN__
 EMSCRIPTEN_KEEPALIVE
 #endif
-int GameConfigValueForTest(const char* game_id, int revision, const char* setting)
+int GameConfigValue(const char* game_id, int revision, const char* setting)
 {
   const std::string_view name = setting;
   if (name != "MMU" && name != "FPRF" && name != "SafeTextureCacheColorSamples" &&
-      name != "XFBToTextureEnable")
+      name != "XFBToTextureEnable" && name != "EFBAccessEnable" &&
+      name != "EFBToTextureEnable" && name != "BBoxEnable")
     return -2;
   if (Config::GetLayer(Config::LayerType::GlobalGame))
     return -1;
@@ -1085,9 +1090,21 @@ int GameConfigValueForTest(const char* game_id, int revision, const char* settin
       name == "MMU"                  ? (Config::Get(Config::MAIN_MMU) ? 1 : 0) :
       name == "FPRF"                 ? (Config::Get(Config::MAIN_FPRF) ? 1 : 0) :
       name == "XFBToTextureEnable"   ? (Config::Get(Config::GFX_HACK_SKIP_XFB_COPY_TO_RAM) ? 1 : 0) :
+      name == "EFBAccessEnable"      ? (Config::Get(Config::GFX_HACK_EFB_ACCESS_ENABLE) ? 1 : 0) :
+      name == "EFBToTextureEnable"   ? (Config::Get(Config::GFX_HACK_SKIP_EFB_COPY_TO_RAM) ? 1 : 0) :
+      name == "BBoxEnable"           ? (Config::Get(Config::GFX_HACK_BBOX_ENABLE) ? 1 : 0) :
                                        Config::Get(Config::GFX_SAFE_TEXTURE_CACHE_COLOR_SAMPLES);
   Config::RemoveLayer(Config::LayerType::GlobalGame);
   return value;
+}
+
+// The first name of GameConfigValue (the ABI manifest lists it).
+#ifdef __EMSCRIPTEN__
+EMSCRIPTEN_KEEPALIVE
+#endif
+int GameConfigValueForTest(const char* game_id, int revision, const char* setting)
+{
+  return GameConfigValue(game_id, revision, setting);
 }
 
 // The MMU only (the first 0097 test; kept: the ABI manifest lists it).
