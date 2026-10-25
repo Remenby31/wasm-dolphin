@@ -408,7 +408,10 @@ function harnessPacingConfig() {
   // not presenting on arrival); null on a core before 0153, which sleeps but
   // has no bit for it.
   const presentSleep = typeof moduleInstance?._DolphinWeb_SetPresentOnArrival === "function" ? Boolean(bits & 8) : null;
-  return { supported: true, syncOnSkipIdle: Boolean(bits & 1), rushFramePresentation: Boolean(bits & 2), dupXfbResetsThrottle: Boolean(bits & 4), presentSleep };
+  // bits 16-28 (patch 0165): the throttle sleep margin in us; null before.
+  const sleepMarginUs = typeof moduleInstance?._DolphinWeb_SetThrottleSleepMarginUs === "function" ? (bits >>> 16) & 0x1fff : null;
+  const sleepStepUs = typeof moduleInstance?._DolphinWeb_ThrottleSleepStepUs === "function" ? moduleInstance._DolphinWeb_ThrottleSleepStepUs() >>> 0 : null;
+  return { supported: true, syncOnSkipIdle: Boolean(bits & 1), rushFramePresentation: Boolean(bits & 2), dupXfbResetsThrottle: Boolean(bits & 4), presentSleep, sleepMarginUs, sleepStepUs };
 }
 // Patch 0156: the guest cycles ran outside the regions by the PC a chain of
 // blocks started at, the 64 most costly, while the stats are on (timing or
@@ -1675,6 +1678,8 @@ async function handleMessage(type, payload) {
         syncOnSkipIdle: payload.syncOnSkipIdle,
         dupXfbRearmsThrottle: payload.dupXfbRearmsThrottle,
         smoothEarly: payload.smoothEarly,
+        sleepMarginUs: payload.sleepMarginUs,
+        sleepStepUs: payload.sleepStepUs,
         coreLog: payload.coreLog,
         memcardSlotB: payload.memcardSlotB,
         efbAccess: payload.efbAccess,
@@ -2402,6 +2407,8 @@ async function loadCore({
   syncOnSkipIdle = false,
   dupXfbRearmsThrottle = false,
   smoothEarly = true,
+  sleepMarginUs = 0,
+  sleepStepUs = 0,
   coreLog = false,
   memcardSlotB = false,
   efbAccess = false,
@@ -2924,6 +2931,8 @@ async function loadCore({
     dolphinSyncOnSkipIdle: syncOnSkipIdle === true,
     dolphinDupXfbRearmsThrottle: dupXfbRearmsThrottle === true,
     dolphinSmoothEarly: smoothEarly !== false,
+    dolphinSleepMarginUs: Number.isInteger(sleepMarginUs) ? sleepMarginUs : 0,
+    dolphinSleepStepUs: Number.isInteger(sleepStepUs) ? sleepStepUs : 0,
     dolphinCoreLog: Boolean(coreLog),
     dolphinMemcardSlotB: Boolean(memcardSlotB),
     dolphinEfbAccess: Boolean(efbAccess),

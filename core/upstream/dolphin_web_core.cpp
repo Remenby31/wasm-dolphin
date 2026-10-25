@@ -66,6 +66,8 @@ extern "C" unsigned int DolphinWeb_SetRendererFeatureMask(unsigned int mask);
 extern "C" unsigned int DolphinWeb_GetRendererFeatureMask();
 extern "C" void DolphinWeb_SetDupXfbRearmsThrottle(int on);  // patch 0150
 extern "C" void DolphinWeb_SetPresentOnArrival(int on);       // patch 0153
+extern "C" void DolphinWeb_SetThrottleSleepMarginUs(int us);  // patch 0165
+extern "C" void DolphinWeb_SetThrottleSleepStepUs(int us);    // patch 0165
 extern "C" void NotifyWebGpuOwnershipTraceLoadRequested();
 
 #ifdef __EMSCRIPTEN__
@@ -759,6 +761,17 @@ void EnsureRuntime()
       EM_ASM_INT({ return (typeof Module !== 'undefined' &&
                            Module['dolphinSmoothEarly'] === false) ? 0 : 1; }) != 0;
   DolphinWeb_SetPresentOnArrival(smooth_early ? 0 : 1);
+  // ?sleepmargin=<us> (patch 0165, Module['dolphinSleepMarginUs']): the
+  // throttle sleeps to its target minus the margin, then spins (0: off).
+  DolphinWeb_SetThrottleSleepMarginUs(
+      EM_ASM_INT({ return (typeof Module !== 'undefined' &&
+                           Number.isInteger(Module['dolphinSleepMarginUs'])) ?
+                              Module['dolphinSleepMarginUs'] : 0; }));
+  // ?sleepstep=<us>: short sleeps inside the margin before the final spin.
+  DolphinWeb_SetThrottleSleepStepUs(
+      EM_ASM_INT({ return (typeof Module !== 'undefined' &&
+                           Number.isInteger(Module['dolphinSleepStepUs'])) ?
+                              Module['dolphinSleepStepUs'] : 0; }));
   Config::SetBase(Config::MAIN_RUSH_FRAME_PRESENTATION, rush_presentation);
   Config::SetBase(Config::MAIN_SMOOTH_EARLY_PRESENTATION, smooth_early);
   Config::SetBase(Config::MAIN_SYNC_ON_SKIP_IDLE, sync_on_skip_idle);

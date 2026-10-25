@@ -467,6 +467,8 @@ export class EmulatorHost {
             syncOnSkipIdle: this.pacing.syncOnSkipIdle,
             dupXfbRearmsThrottle: this.pacing.dupXfbRearmsThrottle,
             smoothEarly: this.pacing.smoothEarly,
+            sleepMarginUs: this.pacing.sleepMarginUs,
+            sleepStepUs: this.pacing.sleepStepUs,
             coreLog: this.coreLog,
             memcardSlotB: this.memcardSlotB,
             efbAccess: this.efbAccess,
@@ -1632,15 +1634,19 @@ function requestedEfbDiag() {
 // turns SyncOnSkipIdle on, ?dupvsync=1 makes a duplicated XFB rearm the
 // throttle; ?smoothearly=0 (patch 0153) makes the video thread present on
 // arrival: SmoothEarlyPresentation off and no sleep to the present's time
-// (off alone, with Rush off, it would still sleep to the intended time).
-// Absent: the shipped pacing.
+// (off alone, with Rush off, it would still sleep to the intended time);
+// ?sleepmargin=<us> (patch 0165, 0..8000) sleeps the throttle to its target
+// minus the margin, then spins to it; ?sleepstep=<us> (0..4000) sleeps in
+// short steps inside the margin before the spin. Absent: the shipped pacing.
 export function requestedPacing(search = window.location.search) {
   const params = new URLSearchParams(search);
   return {
     rushPresentation: params.get("rush") === "1",
     syncOnSkipIdle: params.get("synconidle") === "1",
     dupXfbRearmsThrottle: params.get("dupvsync") === "1",
-    smoothEarly: params.get("smoothearly") !== "0"
+    smoothEarly: params.get("smoothearly") !== "0",
+    sleepMarginUs: /^\d{1,4}$/.test(params.get("sleepmargin") ?? "") && Number(params.get("sleepmargin")) <= 8000 ? Number(params.get("sleepmargin")) : 0,
+    sleepStepUs: /^\d{1,4}$/.test(params.get("sleepstep") ?? "") && Number(params.get("sleepstep")) <= 4000 ? Number(params.get("sleepstep")) : 0
   };
 }
 
