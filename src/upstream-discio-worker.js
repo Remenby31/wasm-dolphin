@@ -14,6 +14,7 @@ import { parseDolHeader } from "./dol.js";
 import { probeRelaxedMadd } from "./relaxed-madd-probe.js";
 import { probeWasmFeatures } from "./wasm-feature-probe.js";
 import { decodeWgpuSamplerState } from "./wgpu-sampler-state.js";
+import { normalizeInternalResolution } from "./wgpu-enhancements.js";
 import { gxClearDepthToStored, gxDepthState } from "./wgpu-depth-state.js";
 import { clampSourceRect, createWgpuExactCapture, packReadbackRows } from "./wgpu-exact-capture.js";
 import { createUniqueFrameCounter, hashRows, sampleRowOffsets } from "./harness-unique-frames.js";
@@ -1699,6 +1700,8 @@ async function handleMessage(type, payload) {
         smoothEarly: payload.smoothEarly,
         coreLog: payload.coreLog,
         memcardSlotB: payload.memcardSlotB,
+        internalResolution: payload.internalResolution,
+        maxAnisotropy: payload.maxAnisotropy,
         efbAccess: payload.efbAccess,
         fifoLog: payload.fifoLog,
         efbCopyRam: payload.efbCopyRam,
@@ -2375,6 +2378,15 @@ async function handleMessage(type, payload) {
         stats: api.getAudioStats?.() || ""
       };
     }
+    case "setEnhancements": {
+      // Patch 0168: applied by the video thread at its next frame; the
+      // canvas follows the backbuffer size the core then announces.
+      const set = moduleInstance?._DolphinWeb_SetEnhancements;
+      if (typeof set !== "function") return { applied: false, reason: "core-without-0168" };
+      const internalResolution = set(normalizeInternalResolution(payload.internalResolution),
+        Number.isInteger(payload.maxAnisotropy) ? payload.maxAnisotropy : -1);
+      return { applied: true, internalResolution };
+    }
     case "setAudioMuted":
       api?.setAudioMuted?.(payload.muted ? 1 : 0);
       workletAudioProducer.setMuted(Boolean(payload.muted));
@@ -2429,6 +2441,8 @@ async function loadCore({
   smoothEarly = true,
   coreLog = false,
   memcardSlotB = false,
+  internalResolution = 1,
+  maxAnisotropy = -1,
   efbAccess = false,
   fifoLog = false,
   efbCopyRam = false,
@@ -2952,6 +2966,10 @@ async function loadCore({
     dolphinSmoothEarly: smoothEarly !== false,
     dolphinCoreLog: Boolean(coreLog),
     dolphinMemcardSlotB: Boolean(memcardSlotB),
+    // Patch 0168: internal resolution (1-4) and anisotropy (log2, -1 = the
+    // game's). The core keeps 1 off the WebGPU path.
+    dolphinEfbScale: normalizeInternalResolution(internalResolution),
+    dolphinMaxAnisotropy: Number.isInteger(maxAnisotropy) ? maxAnisotropy : -1,
     dolphinEfbAccess: Boolean(efbAccess),
     dolphinEfbCopyRam: Boolean(efbCopyRam),
     dolphinEfbNoDefer: Boolean(efbNoDefer),
@@ -8943,6 +8961,7 @@ const WGPU_CMD_OP_VI_TAG = 26;
 const WGPU_CMD_OP_PRESENT_SOURCE = 27;
 // Readback of a staging texture (EFB peeks, copies to RAM): src/wgpu-readback.js.
 const WGPU_CMD_OP_COPY_TO_STAGING = 28;
+const WGPU_CMD_OP_BACKBUFFER_SIZE = 29;
 // ClearRect uses the full attachment viewport and [0,1] depth range, so its
 // scissor alone determines coverage and its depth is independent of game state.
 // A/B switch: false restores the original game-viewport-dependent clear.
@@ -12571,6 +12590,38 @@ function recordBoundedHistogram(values, bounds, value) {
   values[bucket] += 1;
 }
 
+// Size the canvas (Dolphin's backbuffer) and reconfigure its context. Once
+// for a core that never announces its size (640x480), then on every
+// BackbufferSize command (patch 0168: 640N x 480N at internal resolution N,
+// which can change while a game runs). Repeated resizes from per-frame
+// viewport extents blanked the output once (0.0 visual fps); only a size the
+// core lays the presenter out on reaches here.
+function resizeWgpuBackbuffer(width, height) {
+  wgpuBackbufferSized = true;
+  if (!renderCanvas || !renderGpu || !(width > 0) || !(height > 0)) return;
+  if (renderCanvas.width === width && renderCanvas.height === height &&
+      renderGpu.canvasWidth === width && renderGpu.canvasHeight === height) return;
+  try {
+    renderCanvas.width = width;
+    renderCanvas.height = height;
+    renderGpu.context.configure({
+      device: renderGpu.device,
+      format: renderGpu.format,
+      alphaMode: "opaque",
+      usage: self.GPUTextureUsage.RENDER_ATTACHMENT |
+        ((wgpuReplayClassifier || inputReadbackDiagnostics) ?
+          self.GPUTextureUsage.COPY_SRC : 0) |
+        (wgpuVisualCadenceEnabled ? self.GPUTextureUsage.TEXTURE_BINDING : 0)
+    });
+    renderGpu.canvasWidth = width;
+    renderGpu.canvasHeight = height;
+    console.log(`[bbresize] backbuffer ${width}x${height}`);
+    postStatus(`wgpu backbuffer resized to ${width}x${height}`);
+  } catch (e) {
+    recordRendererError("validation", `backbuffer resize: ${e?.message || e}`);
+  }
+}
+
 function drainWebGpuCmdRing(source = "presentation") {
   if (wgpuReplayFatal) return;
   if (wgpuDiagPerturb.drainEveryMs > 0) {
@@ -14120,28 +14171,7 @@ function drainWebGpuCmdRing(source = "presentation") {
             if (!wgpuBackbufferSized && renderCanvas &&
                 (renderCanvas.width < WGPU_BACKBUFFER_W ||
                  renderCanvas.height < WGPU_BACKBUFFER_H)) {
-              wgpuBackbufferSized = true;
-              const newW = WGPU_BACKBUFFER_W;
-              const newH = WGPU_BACKBUFFER_H;
-              try {
-                renderCanvas.width = newW;
-                renderCanvas.height = newH;
-                renderGpu.context.configure({
-                  device: renderGpu.device,
-                  format: renderGpu.format,
-                  alphaMode: "opaque",
-                  usage: self.GPUTextureUsage.RENDER_ATTACHMENT |
-                    ((wgpuReplayClassifier || inputReadbackDiagnostics) ?
-                      self.GPUTextureUsage.COPY_SRC : 0) |
-                    (wgpuVisualCadenceEnabled ? self.GPUTextureUsage.TEXTURE_BINDING : 0)
-                });
-                renderGpu.canvasWidth = newW;
-                renderGpu.canvasHeight = newH;
-                console.log(`[bbresize] backbuffer ${newW}x${newH} (game viewport extent)`);
-                postStatus(`wgpu backbuffer resized to ${newW}x${newH}`);
-              } catch (e) {
-                recordRendererError("validation", `backbuffer resize: ${e?.message || e}`);
-              }
+              resizeWgpuBackbuffer(WGPU_BACKBUFFER_W, WGPU_BACKBUFFER_H);
             }
             // Content check on the texture actually about to be presented,
             // read adjacent to the EFB in the command stream. Triple buffering
@@ -15801,6 +15831,11 @@ function drainWebGpuCmdRing(source = "presentation") {
             ticks: u32[recWord + 3] + u32[recWord + 4] * 4294967296,
             generation: u32[recWord + 5]
           }, readbackWgpuPresentSource);
+          break;
+        case WGPU_CMD_OP_BACKBUFFER_SIZE:
+          // Patch 0168: the backbuffer the coming passes draw into (640N x
+          // 480N at internal resolution N), outside any pass.
+          resizeWgpuBackbuffer(u32[recWord + 1], u32[recWord + 2]);
           break;
         case WGPU_CMD_OP_PRESENT_SOURCE:
           // Harness only: the XFB rectangle the coming backbuffer blit samples.

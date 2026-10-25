@@ -654,6 +654,22 @@ void CreateDirectoryIfNeeded(const std::string& path)
     File::CreateFullPath(path);
 }
 
+// Patch 0168. Internal resolution: 1 to 4 times native (the EFB, the EFB and
+// XFB copies, the backbuffer), clamped; the software renderer has a single
+// resolution, so other backends stay at 1. Anisotropic filtering: log2 of
+// the maximum (0 = 1x .. 4 = 16x), -1 = what the game asks for. Base layer
+// only: the video thread applies a change at its next frame
+// (VideoConfig::CheckForConfigChanges recreates the EFB, WebGPUGfx resizes the
+// backbuffer and tells the page). Returns the scale in effect.
+static int ApplyEnhancements(int efb_scale, int anisotropy)
+{
+  const int scale = s_video_backend == "WebGPU" ? std::clamp(efb_scale, 1, 4) : 1;
+  Config::SetBase(Config::GFX_EFB_SCALE, scale);
+  Config::SetBase(Config::GFX_ENHANCE_MAX_ANISOTROPY,
+                  static_cast<AnisotropicFilteringMode>(std::clamp(anisotropy, -1, 4)));
+  return scale;
+}
+
 void EnsureRuntime()
 {
   if (s_runtime_initialized)
@@ -795,7 +811,19 @@ void EnsureRuntime()
   // texture). Keep one present per VI field, as before and as OGL does.
   if (s_video_backend == "WebGPU")
     Config::SetBase(Config::GFX_HACK_SKIP_DUPLICATE_XFBS, false);
-  Config::SetBase(Config::GFX_HACK_COPY_EFB_SCALED, false);
+  // Internal resolution and anisotropic filtering (patch 0168), from the page
+  // (?ir= sets Module['dolphinEfbScale'], ?aniso= Module['dolphinMaxAnisotropy'])
+  // and later from DolphinWeb_SetEnhancements. EFB copies to textures follow
+  // the internal resolution, Dolphin's default: render-to-texture effects
+  // (shadows, reflections, split screens, blur) would otherwise stay native
+  // and look blurrier than the frame. At 1x a scaled copy is the native one.
+  Config::SetBase(Config::GFX_HACK_COPY_EFB_SCALED, true);
+  ApplyEnhancements(
+      EM_ASM_INT({ return (typeof Module !== 'undefined') ? (Module['dolphinEfbScale'] | 0) : 1; }),
+      EM_ASM_INT({
+        const n = (typeof Module !== 'undefined') ? Module['dolphinMaxAnisotropy'] : undefined;
+        return typeof n === 'number' ? (n | 0) : -1;
+      }));
   // ?efbaccess=1 (Module['dolphinEfbAccess']): CPU reads and writes of the
   // EFB, off by default as in Dolphin. A base-layer value: the disc's
   // GameINI (tools/gamesettings-allowlist.json) turns it on above it.
@@ -1320,6 +1348,16 @@ int SetCorePaused(int paused)
   Core::HostDispatchJobs(Core::System::GetInstance());
   SetCoreStatus(paused ? "Paused" : "Running");
   return 1;
+}
+
+// Internal resolution (1 to 4) and anisotropic filtering (log2, -1 = game),
+// at boot or while a game runs (patch 0168). Returns the scale in effect.
+#ifdef __EMSCRIPTEN__
+EMSCRIPTEN_KEEPALIVE
+#endif
+int DolphinWeb_SetEnhancements(int efb_scale, int anisotropy)
+{
+  return ApplyEnhancements(efb_scale, anisotropy);
 }
 
 // Writes every inserted memory card's pending saves to /dolphin-user now,

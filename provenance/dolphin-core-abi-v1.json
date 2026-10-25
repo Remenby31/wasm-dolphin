@@ -44,8 +44,8 @@
     {
       "path": "core/upstream/dolphin_web_core.cpp",
       "hashMode": "lf-normalized",
-      "size": 59508,
-      "sha256": "103b903cfcd1561a963c2073a5741d7a05c251b9ecfc986a50c05fa23c400a27"
+      "size": 61464,
+      "sha256": "f56a5637b42413d0f8b8f1d8b942b38fa3b7594f8b96b1b297fe3fa1fe0401db"
     },
     {
       "path": "src/app.js",
@@ -86,8 +86,8 @@
     {
       "path": "src/core-host.js",
       "hashMode": "lf-normalized",
-      "size": 80240,
-      "sha256": "ae64fb9c53313b4430661e07b21ffff866edf4d344a692368cf54c77b15a6141"
+      "size": 81413,
+      "sha256": "31472b05326d71188a32f8b357d2de6dcf1b349ff61c563450a74d5bc0fcec12"
     },
     {
       "path": "src/diagnostic-log-filter.js",
@@ -140,8 +140,8 @@
     {
       "path": "src/upstream-discio-worker.js",
       "hashMode": "lf-normalized",
-      "size": 758180,
-      "sha256": "1f3cf67b59c5c755370d8d0417731106022d289276aa477dbc3781ae030d1f2d"
+      "size": 759977,
+      "sha256": "e7ddb6215c65700b5056aabadda048f29b31a1682ba555083768df8b7fee4a9b"
     },
     {
       "path": "src/wgpu-renderer-worker-probe.js",
@@ -164,8 +164,8 @@
     {
       "path": "src/upstream-worker-adapter.js",
       "hashMode": "lf-normalized",
-      "size": 55874,
-      "sha256": "b7d643bf30a950cbfa35bcba623ca00fbe8e43c99753215d8c3e61840bc30280"
+      "size": 56677,
+      "sha256": "b48f6db34815f021b63e695884b674f3c2ebcd03e53b8694f4559a504a0ba3af"
     },
     {
       "path": "src/upstream-worker-protocol.js",
@@ -678,6 +678,7 @@
       "saveState",
       "saveStateFile",
       "setAudioMuted",
+      "setEnhancements",
       "setInputMask",
       "setInputState",
       "start",
