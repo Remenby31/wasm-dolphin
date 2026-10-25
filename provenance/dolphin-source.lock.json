@@ -25,7 +25,7 @@
       "commit": "01e0577914a75a2569c846778c2f93aa8e6feddd"
     }
   },
-  "patchSeriesSha256": "454a8d6757a4fde0d206c0f21fa0bb650e3ad6db6925c289f7f317bb7f65c435",
+  "patchSeriesSha256": "ac079705dd9d1e7cff09537405569ab24e595b12263eda90c7096dbfc78e829b",
   "patches": [
     {
       "order": 1,
@@ -967,12 +967,20 @@
       "order": 118,
       "cwd": ".",
       "hashMode": "lf-normalized",
+      "path": "patches/dolphin-wasm/snapshot/0153-smooth-early-switch-and-present-sleep.patch",
+      "size": 5201,
+      "sha256": "c298c525589229f48f773645a71a23508f62ee0c8b34a2724fabbdd005e272d0"
+    },
+    {
+      "order": 119,
+      "cwd": ".",
+      "hashMode": "lf-normalized",
       "path": "patches/dolphin-wasm/snapshot/0154-disc-read-max-reset.patch",
       "size": 753,
       "sha256": "d0204416d560f4d6d3123965d32a80c8a06b2697ff0c194b8ff1e6b58322f10f"
     },
     {
-      "order": 119,
+      "order": 120,
       "cwd": ".",
       "hashMode": "lf-normalized",
       "path": "patches/dolphin-wasm/snapshot/0156-region-miss-top.patch",
@@ -980,7 +988,7 @@
       "sha256": "096c4d846175540fec102d85dc6626712a0955aa3f24d0100c241d3e8057a3b4"
     },
     {
-      "order": 120,
+      "order": 121,
       "cwd": ".",
       "hashMode": "lf-normalized",
       "path": "patches/dolphin-wasm/snapshot/0157-region-fp-off.patch",
@@ -988,7 +996,7 @@
       "sha256": "a8a04b6166a9deb3c40b240bfd848431ef19a6062040404e3cf226695571a075"
     },
     {
-      "order": 121,
+      "order": 122,
       "cwd": ".",
       "hashMode": "lf-normalized",
       "path": "patches/dolphin-wasm/snapshot/0159-block-fp-runtime-check.patch",
@@ -996,7 +1004,15 @@
       "sha256": "50457453ab6b1831f744741dbbcb10272d18f1148bc3d060c81db2b3175dc3b3"
     },
     {
-      "order": 122,
+      "order": 123,
+      "cwd": ".",
+      "hashMode": "lf-normalized",
+      "path": "patches/dolphin-wasm/snapshot/0162-present-cadence-counters.patch",
+      "size": 10702,
+      "sha256": "d244dcd85e4f17332abc863d1ff6775e929869c44e9230d3e079faa4cec6b718"
+    },
+    {
+      "order": 124,
       "cwd": ".",
       "hashMode": "lf-normalized",
       "path": "patches/dolphin-wasm/snapshot/0163-fp-update-keeps-ra-unaligned.patch",
@@ -1004,7 +1020,7 @@
       "sha256": "8e64294cd194adc74901334e41b9072f03f3d77bb3ee4c57fa877b9ff110d3b8"
     },
     {
-      "order": 123,
+      "order": 125,
       "cwd": "Externals/SFML/SFML",
       "hashMode": "lf-normalized",
       "path": "patches/dolphin-wasm/submodules/0001-sfml-emscripten-config.patch",
@@ -1012,7 +1028,7 @@
       "sha256": "f82197a21fe982ad83f6ee7bbf5a03839b1cebd4d64da3eab11263842bf61d89"
     },
     {
-      "order": 124,
+      "order": 126,
       "cwd": "Externals/xxhash/xxHash",
       "hashMode": "lf-normalized",
       "path": "patches/dolphin-wasm/submodules/0002-xxhash-wasm-simd-scalar.patch",

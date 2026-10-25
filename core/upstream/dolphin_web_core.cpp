@@ -65,6 +65,7 @@ extern "C" std::uint32_t DolphinWeb_GetCachedInterpreterDisableMask();
 extern "C" unsigned int DolphinWeb_SetRendererFeatureMask(unsigned int mask);
 extern "C" unsigned int DolphinWeb_GetRendererFeatureMask();
 extern "C" void DolphinWeb_SetDupXfbRearmsThrottle(int on);  // patch 0150
+extern "C" void DolphinWeb_SetPresentOnArrival(int on);       // patch 0153
 extern "C" void NotifyWebGpuOwnershipTraceLoadRequested();
 
 #ifdef __EMSCRIPTEN__
@@ -750,8 +751,16 @@ void EnsureRuntime()
   DolphinWeb_SetDupXfbRearmsThrottle(
       EM_ASM_INT({ return (typeof Module !== 'undefined' &&
                            Module['dolphinDupXfbRearmsThrottle'] === true) ? 1 : 0; }));
+  // ?smoothearly=0 (patch 0153, Module['dolphinSmoothEarly'] false): the
+  // video thread presents on arrival, with no sleep to the present's time
+  // (Present.cpp, 0094). SmoothEarlyPresentation off alone would not remove
+  // it: with Rush off, GetUpdatedPresentationTime returns the intended time.
+  const bool smooth_early =
+      EM_ASM_INT({ return (typeof Module !== 'undefined' &&
+                           Module['dolphinSmoothEarly'] === false) ? 0 : 1; }) != 0;
+  DolphinWeb_SetPresentOnArrival(smooth_early ? 0 : 1);
   Config::SetBase(Config::MAIN_RUSH_FRAME_PRESENTATION, rush_presentation);
-  Config::SetBase(Config::MAIN_SMOOTH_EARLY_PRESENTATION, true);
+  Config::SetBase(Config::MAIN_SMOOTH_EARLY_PRESENTATION, smooth_early);
   Config::SetBase(Config::MAIN_SYNC_ON_SKIP_IDLE, sync_on_skip_idle);
   Config::SetBase(Config::MAIN_ACCURATE_FMADDS, false);
   Config::SetBase(Config::MAIN_ENABLE_CHEATS, false);
@@ -798,6 +807,12 @@ void EnsureRuntime()
   const bool efb_copy_ram = EM_ASM_INT({ return (typeof Module !== 'undefined' &&
                                                  Module['dolphinEfbCopyRam']) ? 1 : 0; }) != 0;
   Config::SetBase(Config::GFX_HACK_SKIP_EFB_COPY_TO_RAM, !efb_copy_ram);
+  // ?efbdefer=0 (Module['dolphinEfbNoDefer']): EFB copies to RAM wait for
+  // the GPU one by one instead of at the next sync point, as a GameINI asks
+  // with DeferEFBCopies=False. Base layer too: a GameINI's value wins.
+  const bool efb_no_defer = EM_ASM_INT({ return (typeof Module !== 'undefined' &&
+                                                 Module['dolphinEfbNoDefer']) ? 1 : 0; }) != 0;
+  Config::SetBase(Config::GFX_HACK_DEFER_EFB_COPIES, !efb_no_defer);
   // Fill the canvas with the XFB, as the software presenter does. Dolphin's
   // default analog aspect pillarboxes a 640-wide XFB to ~583 pixels, so the
   // hardware path showed every game narrower than the software one.
@@ -1062,7 +1077,8 @@ int SetCpuThread(int enabled)
 // the INIs under /dolphin-sys/GameSettings, as the game's boot reads it: MMU
 // (System::Initialize, IsMMUMode), FPRF (patch 0121), SafeTextureCacheColorSamples,
 // XFBToTextureEnable (GFX_HACK_SKIP_XFB_COPY_TO_RAM), EFBAccessEnable,
-// EFBToTextureEnable (GFX_HACK_SKIP_EFB_COPY_TO_RAM) and BBoxEnable; booleans
+// EFBToTextureEnable (GFX_HACK_SKIP_EFB_COPY_TO_RAM), BBoxEnable and
+// DeferEFBCopies; booleans
 // as 0/1. The global game layer is added for the read and removed after; -1
 // when a game's layer is already there (a game is running), which this must
 // not replace, -2 for a setting it does not know. Read before the boot by
@@ -1076,7 +1092,7 @@ int GameConfigValue(const char* game_id, int revision, const char* setting)
   const std::string_view name = setting;
   if (name != "MMU" && name != "FPRF" && name != "SafeTextureCacheColorSamples" &&
       name != "XFBToTextureEnable" && name != "EFBAccessEnable" &&
-      name != "EFBToTextureEnable" && name != "BBoxEnable")
+      name != "EFBToTextureEnable" && name != "BBoxEnable" && name != "DeferEFBCopies")
     return -2;
   if (Config::GetLayer(Config::LayerType::GlobalGame))
     return -1;
@@ -1088,6 +1104,7 @@ int GameConfigValue(const char* game_id, int revision, const char* setting)
       name == "EFBAccessEnable"      ? (Config::Get(Config::GFX_HACK_EFB_ACCESS_ENABLE) ? 1 : 0) :
       name == "EFBToTextureEnable"   ? (Config::Get(Config::GFX_HACK_SKIP_EFB_COPY_TO_RAM) ? 1 : 0) :
       name == "BBoxEnable"           ? (Config::Get(Config::GFX_HACK_BBOX_ENABLE) ? 1 : 0) :
+      name == "DeferEFBCopies"       ? (Config::Get(Config::GFX_HACK_DEFER_EFB_COPIES) ? 1 : 0) :
                                        Config::Get(Config::GFX_SAFE_TEXTURE_CACHE_COLOR_SAMPLES);
   Config::RemoveLayer(Config::LayerType::GlobalGame);
   return value;
