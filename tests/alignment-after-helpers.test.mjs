@@ -60,6 +60,27 @@ test("blocks: an alignment exception stays pending and the block runs on, like t
   }
 });
 
+// The boundary: a double update form at an address that is a multiple of 4
+// but not of 8 raises nothing (the interpreter tests EA & 3 only) and must
+// write rA. r6 = 4 for the indexed forms.
+const WORD_ALIGNED = [
+  ["lfdu", D(51, 1, 1, 4)], ["stfdu", D(55, 2, 1, 4)], ["lfdux", X(1, 1, 6, 631)], ["stfdux", X(2, 1, 6, 759)],
+  ["lfsu", D(49, 1, 1, 4)], ["stfsu", D(53, 2, 1, 4)]
+];
+const wordState = (k) => { const s = stateFor(0x40 + k); s[6] = 4; return s; };
+
+test("blocks: a double update form at 4 mod 8 updates rA, like the interpreter", { skip }, () => {
+  for (const [k, [name, w]] of WORD_ALIGNED.entries()) {
+    const words = Uint32Array.from(program(w));
+    const state = wordState(k);
+    const r = core.run(words, state, PRODUCTION_DISABLE_MASK);
+    assert.equal(r.interp[46] & 0x20, 0, `${name}: no alignment exception at 4 mod 8`);
+    assert.equal(r.interp[1] >>> 0, (state[1] + 4) >>> 0, `${name}: the interpreter updates rA`);
+    assert.ok(r.code === 0, `${name} ${Array.from(words, hex).join(" ")}: ${r.code === 1 ? describeDifference(r.interp, r.jit).slice(0, 6).join("; ") : r.message || r.code}`);
+    assert.ok(r.compiledOps >= 4, `${name}: compiled (${r.compiledOps} ops)`);
+  }
+});
+
 const aot = skip ? null : await loadAotCore();
 const regionSkip = skip || (!aot?.has("DolphinWeb_AotTestLoadState") && "core without the region test exports");
 test("regions: an alignment exception stays pending and the region runs on, like the interpreter", { skip: regionSkip }, () => {
@@ -72,4 +93,12 @@ test("regions: an alignment exception stays pending and the region runs on, like
     ran++;
   }
   assert.ok(ran >= 15, `${ran} region programs ran`);
+  let word = 0;
+  for (const [k, [name, w]] of WORD_ALIGNED.entries()) {
+    const res = compareRegionProgram(aot, program(w), wordState(k), { mask: PRODUCTION_DISABLE_MASK });
+    if (!res.translated) continue;
+    assert.ok(!res.trap && !res.error && res.equal, `${name} at 4 mod 8: ${res.error ?? JSON.stringify(res.difference)}`);
+    word++;
+  }
+  assert.ok(word >= 4, `${word} region programs at 4 mod 8 ran`);
 });
