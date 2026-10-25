@@ -5878,7 +5878,7 @@ function recordPresentedFrame(coreFrame, shownVi = null) {
     harnessPresentRing[slot + 1] = coreFrame;
     harnessPresentRing[slot + 2] = shownVi ?? moduleInstance?._DolphinWeb_HarnessViSinceBoot?.() ?? -1;
     harnessPresentHead += 1;
-    if (harnessDisplayStop) harnessDisplay.submit(harnessPresentRing[slot + 2]);
+    if (harnessDisplayStop) harnessDisplay.submit(harnessPresentRing[slot + 2], wgpuVsyncInBeginFrame);
   }
   presentedFrame += 1;
   framesSincePresentationFps += 1;
@@ -12590,6 +12590,9 @@ let wgpuVsyncLoop = false;
 let wgpuVsyncLastTickAt = 0;
 // BeginFrames seen (the worker's rAF ticks).
 let wgpuVsyncTick = 0;
+// Inside the presenter's rAF callback: what it submits goes out with this
+// BeginFrame (the harness display counter attributes it there).
+let wgpuVsyncInBeginFrame = false;
 let wgpuVsyncFallback = null;
 let wgpuVsyncCanvasCopyDst = false;
 const wgpuPresentVsyncStats = { queued: 0, shown: 0, dropped: 0, caughtUp: 0, byTimer: 0 };
@@ -12637,7 +12640,12 @@ function queueWgpuVsyncFrame(tex, coreFrame, shownVi, stream) {
     const tick = () => {
       wgpuVsyncLastTickAt = performance.now();
       wgpuVsyncTick += 1;
-      presentWgpuVsyncFrame();
+      wgpuVsyncInBeginFrame = true;
+      try {
+        presentWgpuVsyncFrame();
+      } finally {
+        wgpuVsyncInBeginFrame = false;
+      }
       self.requestAnimationFrame(tick);
     };
     self.requestAnimationFrame(tick);

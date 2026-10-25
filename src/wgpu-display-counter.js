@@ -17,7 +17,18 @@ export function createDisplayCounter({ capacity = 16384 } = {}) {
   let head = 0, read = 0, pending = 0, lastVi = -1, dropped = 0;
   return {
     // One presentation submitted to the canvas, showing VI output `viIndex`.
-    submit(viIndex = -1) { pending += 1; lastVi = viIndex; },
+    // inBeginFrame: submitted from a rAF callback of this very BeginFrame
+    // (?presentvsync=1), pushed with it: counted there, not at the next one.
+    submit(viIndex = -1, inBeginFrame = false) {
+      if (inBeginFrame && head > 0) {
+        const slot = (head - 1) % capacity;
+        submits[slot] = Math.min(submits[slot] + 1, 0xFFFF);
+        vi[slot] = viIndex;
+        if (submits[slot] > 1) dropped += 1;
+        return;
+      }
+      pending += 1; lastVi = viIndex;
+    },
     // A BeginFrame (the worker's rAF callback), at `now` on the harness
     // clock. One entry each: submits 0 = nothing new on screen, 1 = one
     // picture shown, n > 1 = shown one, dropped n - 1.

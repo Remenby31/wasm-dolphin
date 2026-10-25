@@ -159,3 +159,19 @@ test("presentvsync catch-up: a frame that already waited a BeginFrame gives way 
   assert.match(worker, /wgpuVsyncQueue\.push\(\{ tex, coreFrame, shownVi, stream, tick: wgpuVsyncTick \}\);/);
   assert.match(worker, /case "validationReadPresentVsync":/);
 });
+
+// A present submitted from the presenter's own rAF callback goes out with
+// that BeginFrame: the harness display counter counts it there, not at the
+// next one (else ?presentvsync=1 measured a vsync later than it shows).
+test("display counter: a submit made inside the current BeginFrame is counted in it", async () => {
+  const { createDisplayCounter } = await import("../src/wgpu-display-counter.js");
+  const c = createDisplayCounter({ capacity: 8 });
+  c.beginFrame(100);
+  c.submit(7, true);
+  c.beginFrame(116);
+  c.submit(8);
+  c.beginFrame(133);
+  const { displayed } = c.drain();
+  assert.deepEqual(displayed.submits, [1, 0, 1]);
+  assert.deepEqual(displayed.vi, [7, -1, 8]);
+});
