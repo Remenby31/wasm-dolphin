@@ -124,3 +124,28 @@ test("a rejected write closes the frame and stops the capture", async () => {
   capture.offerBytes(new Uint8Array(64), 4, 4, 2);
   assert.equal(capture.stats.frames, 1);
 });
+
+// Internal resolution N (patch 0168) makes the canvas 640N x 480N: the stream
+// keeps 640x480, scaled in the capture before the VideoFrame exists, and
+// follows a switch to another scale.
+test("a canvas wider than the stream is scaled down to 640 wide before the frame; a native one goes as is", () => {
+  const written = [];
+  const writer = { desiredSize: 1, write: async (f) => written.push(f), close: async () => {}, closed: new Promise(() => {}) };
+  const draws = [];
+  const created = [];
+  const createCanvas = (width, height) => {
+    const c = { width, height, getContext: () => ({ drawImage: (src, x, y, w, h) => draws.push([src.width, src.height, w, h]) }) };
+    created.push(c);
+    return c;
+  };
+  const capture = new StreamCapture({ now: () => 10, VideoFrameImpl: FakeFrame, createCanvas });
+  capture.attach({ getWriter: () => writer });
+  const native = { width: 640, height: 480 };
+  capture.offerCanvas(native, 1);
+  assert.equal(written[0].source, native);
+  for (const n of [4, 2, 2]) capture.offerCanvas({ width: 640 * n, height: 480 * n }, 2);
+  assert.deepEqual(written.slice(1).map((f) => [f.source.width, f.source.height]), [[640, 480], [640, 480], [640, 480]]);
+  assert.deepEqual(draws, [[2560, 1920, 640, 480], [1280, 960, 640, 480], [1280, 960, 640, 480]]);
+  assert.equal(created.length, 1, "one scaler canvas, reused across scales");
+  assert.deepEqual([capture.stats.width, capture.stats.height], [640, 480]);
+});

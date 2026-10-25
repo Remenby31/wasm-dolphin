@@ -141,7 +141,7 @@ test("the core embeds the filtered INIs, and its game config applies them in Dol
   for (const name of embedded) {
     const text = m.FS.readFile(`${dir}/${name}`, { encoding: "utf8" });
     assert.ok(text.length > 0, name);
-    assert.match(text, /^(\[Core\]\n(MMU = (True|False)\n)?(FPRF = (True|False)\n)?)?(\[Video_Settings\]\nSafeTextureCacheColorSamples = \d*\n)?(\[Video_Hacks\]\n(XFBToTextureEnable = (True|False)\n)?(EFBAccessEnable = (True|False)\n)?(EFBToTextureEnable = (True|False)\n)?(BBoxEnable = (True|False)\n)?(DeferEFBCopies = (True|False)\n)?)?$/, name);
+    assert.match(text, /^(\[Core\]\n(MMU = (True|False)\n)?(FPRF = (True|False)\n)?)?(\[Video_Settings\]\nSafeTextureCacheColorSamples = \d*\n)?(\[Video_Hacks\]\n(XFBToTextureEnable = (True|False)\n)?(EFBAccessEnable = (True|False)\n)?(EFBToTextureEnable = (True|False)\n)?(BBoxEnable = (True|False)\n)?(DeferEFBCopies = (True|False)\n)?(VertexRounding = (True|False)\n)?)?$/, name);
   }
   // Synthetic discs: ID3, then ID6, then ID6rN, the later file winning.
   const fixtures = {

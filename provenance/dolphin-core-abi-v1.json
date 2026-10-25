@@ -1,27 +1,27 @@
 {
   "schemaVersion": 1,
   "abiVersion": 1,
-  "coreId": "sha256:9a46db5a28997d2fb7e239a51f9693b2bec5956fd858711c780ba7e2cda25ae4",
+  "coreId": "sha256:10d0a043cf809380a20f25d2a24af433f0945ca492ee247abd8184c047488420",
   "upstreamCommit": "e22551eae1c84a7e4d0b6a5c519ef4ed4ef69df1",
   "artifacts": [
     {
       "path": "cores/dolphin/dolphin-core-upstream.js",
       "hashMode": "lf-normalized",
-      "size": 285020,
-      "sha256": "ae11fc71489fb38c52f342827e703e4d517d71a05c1cd751060f52decfbf7ad2"
+      "size": 286099,
+      "sha256": "fcd9e958d03038f201885f549881515b02ae7047b61fa59e2fec5bc32fdd6b19"
     },
     {
       "path": "cores/dolphin/dolphin-core-upstream.wasm",
-      "size": 13209801,
-      "sha256": "9a46db5a28997d2fb7e239a51f9693b2bec5956fd858711c780ba7e2cda25ae4"
+      "size": 13214825,
+      "sha256": "10d0a043cf809380a20f25d2a24af433f0945ca492ee247abd8184c047488420"
     }
   ],
   "contractSources": [
     {
       "path": "core/upstream/dolphin_web_discio.cpp",
       "hashMode": "lf-normalized",
-      "size": 72377,
-      "sha256": "f6e719fc0e2d60cb0900d0f398e4e011fcb93943433149f58318d1c14fcef559"
+      "size": 74753,
+      "sha256": "430d887542e86273b670e6c1b1ea9a7d1930797ca694f0e992b27c788a4ee9a8"
     },
     {
       "path": "core/upstream/dolphin_web_raster_profile.h",
@@ -44,8 +44,8 @@
     {
       "path": "core/upstream/dolphin_web_core.cpp",
       "hashMode": "lf-normalized",
-      "size": 60984,
-      "sha256": "3eaa0acefc6e66a2cc6ece833dbe9367d45bba54ba66b368721a62f26ca938af"
+      "size": 63298,
+      "sha256": "6b63cd84d960b21b3ac9dc1ed1ea9f7db20c35df67e4ae464d6796f260d5405d"
     },
     {
       "path": "src/app.js",
@@ -86,8 +86,8 @@
     {
       "path": "src/core-host.js",
       "hashMode": "lf-normalized",
-      "size": 81437,
-      "sha256": "ce0dc8894aca7043350c7bb4f6e922a619467c0d9b3eedd7004aaa4fad4ac4f2"
+      "size": 82914,
+      "sha256": "2ddbb1c0cd04b8e5d70607818ffed919b27a5e7fd52a48f01f7bc8699b1ec03c"
     },
     {
       "path": "src/diagnostic-log-filter.js",
@@ -140,8 +140,8 @@
     {
       "path": "src/upstream-discio-worker.js",
       "hashMode": "lf-normalized",
-      "size": 758233,
-      "sha256": "ec21a097ba5bce20404a165d383b2a020a576fb1b311dacf844d32401cbd5070"
+      "size": 770846,
+      "sha256": "b84e484fc2913a0b517efafb0843bb62f519f9dd4a565a66b69a996db7783d60"
     },
     {
       "path": "src/wgpu-renderer-worker-probe.js",
@@ -164,8 +164,8 @@
     {
       "path": "src/upstream-worker-adapter.js",
       "hashMode": "lf-normalized",
-      "size": 56546,
-      "sha256": "e340229dd002e11203c092832e6ee82e31aaa6968ccdc77f0be18766767111b0"
+      "size": 57461,
+      "sha256": "c6b17169afda03bfb50dfbe412b7a110b31db9203b7bc906718f2121981b6401"
     },
     {
       "path": "src/upstream-worker-protocol.js",
@@ -423,6 +423,9 @@
     "_DolphinWeb_HarnessCaptureTicks",
     "_DolphinWeb_HarnessCaptureWidth",
     "_DolphinWeb_HarnessDisarmCapture",
+    "_DolphinWeb_HarnessEfbSyncReset",
+    "_DolphinWeb_HarnessEfbSyncWord",
+    "_DolphinWeb_HarnessEfbSyncWords",
     "_DolphinWeb_HarnessEnable",
     "_DolphinWeb_HarnessEnabled",
     "_DolphinWeb_HarnessFifoRecord",
@@ -471,6 +474,7 @@
     "_DolphinWeb_MemAccessStaticAt",
     "_DolphinWeb_MemAccessStats",
     "_DolphinWeb_PacingConfig",
+    "_DolphinWeb_PresentCadenceStats",
     "_DolphinWeb_RecordCacheHit",
     "_DolphinWeb_RecordCacheMiss",
     "_DolphinWeb_RecordInstanceUs",
@@ -484,9 +488,11 @@
     "_DolphinWeb_SetDiscReadStatsEnabled",
     "_DolphinWeb_SetDstAlphaTwoPass",
     "_DolphinWeb_SetDupXfbRearmsThrottle",
+    "_DolphinWeb_SetEnhancements",
     "_DolphinWeb_SetFprfForTest",
     "_DolphinWeb_SetFusedMadd",
     "_DolphinWeb_SetGpuSpinBudget",
+    "_DolphinWeb_SetPresentOnArrival",
     "_DolphinWeb_UnverifyRegions",
     "_FlushMemoryCards",
     "_FrameBuffer",
@@ -673,6 +679,7 @@
       "saveState",
       "saveStateFile",
       "setAudioMuted",
+      "setEnhancements",
       "setInputMask",
       "setInputState",
       "start",
@@ -697,6 +704,7 @@
       "validationReadDetTrace",
       "validationReadDiscReads",
       "validationReadDstAlphaPasses",
+      "validationReadEfbSyncStats",
       "validationReadHeadroomStats",
       "validationReadJitCacheReadiness",
       "validationReadJitRegionStats",
@@ -704,6 +712,7 @@
       "validationReadPacingConfig",
       "validationReadPipelinePrewarm",
       "validationReadPresentCadence",
+      "validationReadPresentVsync",
       "validationReadRegionLedgerStale",
       "validationReadRelaxedMadd",
       "validationReadTimeline",

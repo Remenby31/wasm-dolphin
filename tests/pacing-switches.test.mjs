@@ -18,7 +18,7 @@ const SWITCHES = [
 test("pacing switches: URL parsing, shipped defaults, each switch only its own", async () => {
   const { requestedPacing } = await import("../src/core-host.js");
   // Rush off by default (upstream's default): ?rush=1 turns it back on.
-  assert.deepEqual(requestedPacing(""), { rushPresentation: false, syncOnSkipIdle: false, dupXfbRearmsThrottle: false, smoothEarly: true, sleepMarginUs: 0, sleepStepUs: 0, sleepK: 0, sleepSpinUs: 300 });
+  assert.deepEqual(requestedPacing(""), { rushPresentation: false, syncOnSkipIdle: false, dupXfbRearmsThrottle: false, smoothEarly: true, sleepMarginUs: 0, sleepStepUs: 0, sleepK: 0, sleepSpinUs: 300, presentVsync: false });
   for (const s of SWITCHES) {
     const p = requestedPacing(`?${s.param}`);
     assert.equal(p[s.option], s.on, s.param);
@@ -98,4 +98,123 @@ test("Rush off by default: a page or core that sets nothing runs without Rush Fr
   assert.match(core, /Module\['dolphinRushPresentation'\] === true\) \? 1 : 0;/, "the core's own default is off too");
   const worker = await readFile(new URL("../src/upstream-discio-worker.js", import.meta.url), "utf8");
   assert.match(worker, /\n  rushPresentation = false,\n/);
+});
+
+// ?presentvsync=1 (research/deep-frame-pacing.md §5 step 2): at most one wgpu
+// present per BeginFrame, held in the worker (no core flag).
+test("presentvsync: URL → host → adapter → worker, off by default", async (t) => {
+  const { requestedPacing } = await import("../src/core-host.js");
+  assert.equal(requestedPacing("").presentVsync, false);
+  assert.equal(requestedPacing("?presentvsync=1").presentVsync, true);
+  assert.equal(requestedPacing("?presentvsync=1").rushPresentation, false, "only its own switch");
+  const { UpstreamWorkerAdapter } = await import("../src/upstream-worker-adapter.js");
+  assert.equal(new UpstreamWorkerAdapter({}).presentVsync, false);
+  const adapter = new UpstreamWorkerAdapter(requestedPacing("?presentvsync=1"));
+  let posted = null;
+  adapter.worker = {
+    postMessage(message) {
+      posted = message;
+      queueMicrotask(() => adapter.handleMessage({ id: message.id, ok: true }));
+    }
+  };
+  const originalWindow = globalThis.window;
+  globalThis.window = { location: { href: "http://127.0.0.1:8080/?presentvsync=1", search: "?presentvsync=1" } };
+  t.after(() => {
+    if (originalWindow === undefined) delete globalThis.window;
+    else globalThis.window = originalWindow;
+  });
+  await adapter.load();
+  assert.equal(posted.payload.presentVsync, true, "presentVsync in the init payload");
+  const host = await readFile(new URL("../src/core-host.js", import.meta.url), "utf8");
+  const worker = await readFile(new URL("../src/upstream-discio-worker.js", import.meta.url), "utf8");
+  assert.match(host, /\n {12}presentVsync: this\.pacing\.presentVsync,\n/);
+  assert.match(worker, /\n {8}presentVsync: payload\.presentVsync,\n/);
+  assert.match(worker, /wgpuPresentVsync = presentVsync === true && typeof self\.requestAnimationFrame === "function" && !wgpuDetachedPresenter;/, "only with a worker rAF, never with the detached presenter (stale bitmap)");
+});
+
+test("presentvsync: the backbuffer pass renders into a pooled texture, shown at the worker's rAF, the drain never held", async () => {
+  const worker = await readFile(new URL("../src/upstream-discio-worker.js", import.meta.url), "utf8");
+  // fb#0's BEGIN_PASS: the pool's texture in place of the canvas's
+  assert.match(worker, /const cur = wgpuPresentVsync\n\s+\? acquireWgpuVsyncTexture\([^)]*\)\n\s+: renderGpu\.context\.getCurrentTexture\(\);/);
+  // the present queues the frame; the present count follows the display
+  // the frame's texture is kept across drains (wgpu-vsync-queue.js): the present
+  // queues it whatever this drain saw, never a drain-local texture
+  assert.match(worker, /if \(wgpuPresentVsync\) \{\n(?:\s+\/\/[^\n]*\n)+\s+queueWgpuVsyncFrame\(api\?\.getFrame/);
+  assert.doesNotMatch(worker, /queueWgpuVsyncFrame\(lastBackbufferTexture/);
+  const present = worker.slice(worker.indexOf("function presentWgpuVsyncFrame()"), worker.indexOf("function wgpuCanvasUsage("));
+  assert.match(present, /const f = wgpuVsync\.takeForDisplay\(wgpuVsyncTick\);/, "the oldest queued frame, after the catch-up");
+  assert.match(present, /copyTextureToTexture\(/);
+  // v3: the stream no longer follows the display: nothing captured at the rAF
+  assert.doesNotMatch(present, /streamCapture\.offerCanvas\(/);
+  assert.match(present, /recordPresentedFrame\(f\.coreFrame, f\.shownVi\)/);
+  // at the worker's rAF, a timer when no BeginFrame comes; the canvas can be copied to
+  assert.match(worker, /self\.requestAnimationFrame\(tick\)/);
+  assert.match(worker, /setTimeout\(wgpuVsyncFallbackCheck, WGPU_VSYNC_FALLBACK_MS\)/);
+  assert.equal((worker.match(/wgpuPresentVsync \? (textureUsage|self\.GPUTextureUsage)\.COPY_DST : 0/g) ?? []).length, 3, "every configure keeps COPY_DST");
+  // v1 held the drain and the core skipped frames: never again
+  assert.doesNotMatch(worker, /"display-tick"/);
+});
+
+test("presentvsync catch-up: a frame that already waited a BeginFrame gives way to a newer one, counted", async () => {
+  const worker = await readFile(new URL("../src/upstream-discio-worker.js", import.meta.url), "utf8");
+  const present = worker.slice(worker.indexOf("function presentWgpuVsyncFrame()"), worker.indexOf("function wgpuCanvasUsage("));
+  // the behaviour is tested on the module (tests/wgpu-vsync-queue.test.mjs)
+  assert.match(present, /wgpuVsync\.takeForDisplay\(wgpuVsyncTick\)/);
+  assert.match(worker, /wgpuVsync\.queueFrame\(\{ coreFrame, shownVi, stream, tick: wgpuVsyncTick \}\)/);
+  assert.match(worker, /case "validationReadPresentVsync":/);
+});
+
+// A present submitted from the presenter's own rAF callback goes out with
+// that BeginFrame: the harness display counter counts it there, not at the
+// next one (else ?presentvsync=1 measured a vsync later than it shows).
+test("display counter: a submit made inside the current BeginFrame is counted in it", async () => {
+  const { createDisplayCounter } = await import("../src/wgpu-display-counter.js");
+  const c = createDisplayCounter({ capacity: 8 });
+  c.beginFrame(100);
+  c.submit(7, 100);
+  c.beginFrame(116);
+  c.submit(8);
+  c.beginFrame(133);
+  const { displayed } = c.drain();
+  assert.deepEqual(displayed.submits, [1, 0, 1]);
+  assert.deepEqual(displayed.vi, [7, -1, 8]);
+});
+
+// The presenter's rAF and the counter's run in a fixed but arbitrary order
+// in each frame: either order counts one picture per BeginFrame, no drop.
+// (The presenter first used to land on the previous frame's entry: a false
+// drop every frame, in the runs where its loop had started first.)
+test("display counter: one present per BeginFrame is one picture, whichever rAF runs first", async () => {
+  const { createDisplayCounter } = await import("../src/wgpu-display-counter.js");
+  for (const presenterFirst of [false, true]) {
+    const c = createDisplayCounter({ capacity: 16 });
+    for (const [i, ft] of [100, 116.7, 133.3, 150].entries()) {
+      if (presenterFirst) { c.submit(i, ft); c.beginFrame(ft); }
+      else { c.beginFrame(ft); c.submit(i, ft); }
+    }
+    const { displayed, dropped } = c.drain();
+    assert.deepEqual(displayed.submits, [1, 1, 1, 1], `presenter first: ${presenterFirst}`);
+    assert.deepEqual(displayed.vi, [0, 1, 2, 3]);
+    assert.equal(dropped, 0);
+  }
+  const worker = await readFile(new URL("../src/upstream-discio-worker.js", import.meta.url), "utf8");
+  assert.match(worker, /wgpuVsyncInBeginFrame = performance\.timeOrigin \+ frameTime;/, "the same clock as the counter's beginFrame");
+});
+
+// presentvsync v3: the stream captures every frame when it is queued, from
+// its pooled texture copied to a canvas of its own, so it is free of the local
+// display's BeginFrames, catch-up drops and timer fallback.
+test("presentvsync v3: the stream captures at queue time, from the frame's texture", async () => {
+  const worker = await readFile(new URL("../src/upstream-discio-worker.js", import.meta.url), "utf8");
+  const queue = worker.slice(worker.indexOf("function queueWgpuVsyncFrame("), worker.indexOf("function wgpuVsyncFallbackCheck("));
+  assert.match(queue, /if \(!frame\) return false;\n {2}if \(stream && streamCapture\.active\) streamWgpuVsyncFrame\(frame\.tex, coreFrame\);/, "a present without a pass streams nothing");
+  const stream = worker.slice(worker.indexOf("function streamWgpuVsyncFrame("), worker.indexOf("// The texture the backbuffer pass renders into"));
+  assert.match(stream, /if \(!streamCapture\.ready\(\)\) return;/, "nobody reading: no copy");
+  assert.match(stream, /copyTextureToTexture\(\{ texture: tex \}, \{ texture: wgpuVsyncStreamContext\.getCurrentTexture\(\) \}/);
+  assert.match(stream, /dev\.queue\.submit\(\[enc\.finish\(\)\]\);\n {2}streamCapture\.offerCanvas\(wgpuVsyncStreamCanvas, coreFrame\);/, "copy submitted before the snapshot");
+  assert.match(worker, /const wgpuPresentVsyncStats = \{ byTimer: 0, streamed: 0 \};/);
+  // the readback keeps the `queued` counter: the queue's length is `waiting`
+  const read = worker.slice(worker.indexOf('case "validationReadPresentVsync":'), worker.indexOf('case "validationReadEfbSyncStats":'));
+  assert.match(read, /\.\.\.wgpuVsync\.stats,\n[^\n]*\n {8}waiting: wgpuVsync\.waiting,/);
+  assert.doesNotMatch(read, /queued: /);
 });
