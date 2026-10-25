@@ -159,14 +159,43 @@ export function sideOrder(run) {
 // pair counts only when both sides measured; the conclusion needs at least
 // `minPairs` pairs, as many with trunk first as with head first (drift over
 // a campaign then hits both sides alike), otherwise it is withheld.
+// A pair whose ln(candidate / baseline) lies more than OUTLIER_MADS robust
+// standard deviations (1.4826 x the median absolute deviation) AND more than
+// OUTLIER_MIN (5 %) from the pairs' median is set aside, named in `excluded`
+// (layout A/A' 2026-10-24: one window at -25 % among pairs within 1 %); the
+// floor keeps ordinary noise in when a few pairs agree so closely that the
+// MAD is a fraction of a percent. The latest extra pairs of the larger order
+// then go too, so both orders stay equal.
+export const OUTLIER_MADS = 3;
+export const OUTLIER_MIN = 0.05;
+export function outlierPairs(pairs) {
+  if (pairs.length < 4) return [];
+  const lr = pairs.map((p) => Math.log1p(p.ratio));
+  const m = median(lr), mad = median(lr.map((x) => Math.abs(x - m)));
+  if (!(mad > 0)) return [];
+  return pairs.filter((p, i) => Math.abs(lr[i] - m) > Math.max(OUTLIER_MADS * 1.4826 * mad, OUTLIER_MIN));
+}
+
 export function pairedSpeedChange(runs, { metric = "speed", minPairs = 4, phase = "cold" } = {}) {
-  const pairs = [];
+  let pairs = [];
   for (const r of runs) {
     const b = r.baseline?.[phase]?.[metric], c = r.candidate?.[phase]?.[metric];
     if (Number.isFinite(b) && Number.isFinite(c) && b > 0) pairs.push({ run: r.run, first: sideOrder(r.run)[0], ratio: c / b - 1 });
   }
+  const perRun = pairs.map((p) => round(p.ratio * 100, 1));
+  const excluded = outlierPairs(pairs).map((p) => ({ run: p.run, pct: round(p.ratio * 100, 1), why: `outlier: more than ${OUTLIER_MADS} MAD and ${OUTLIER_MIN * 100} % from the pairs' median` }));
+  pairs = pairs.filter((p) => !excluded.some((x) => x.run === p.run));
+  if (excluded.length) {
+    for (;;) {
+      const ab = pairs.filter((p) => p.first === "baseline"), ba = pairs.filter((p) => p.first !== "baseline");
+      if (ab.length === ba.length) break;
+      const extra = (ab.length > ba.length ? ab : ba).at(-1);
+      excluded.push({ run: extra.run, pct: round(extra.ratio * 100, 1), why: "order balance after an outlier" });
+      pairs = pairs.filter((p) => p !== extra);
+    }
+  }
   const baseFirst = pairs.filter((p) => p.first === "baseline").length;
-  const out = { pairs: pairs.length, baselineFirst: baseFirst, candidateFirst: pairs.length - baseFirst, perRun: pairs.map((p) => round(p.ratio * 100, 1)), median: null, withheld: null };
+  const out = { pairs: pairs.length, baselineFirst: baseFirst, candidateFirst: pairs.length - baseFirst, perRun, ...(excluded.length ? { excluded } : {}), median: null, withheld: null };
   if (pairs.length < minPairs) out.withheld = `${pairs.length} valid pair(s), at least ${minPairs} needed`;
   else if (baseFirst !== pairs.length - baseFirst) out.withheld = `order unbalanced: trunk first in ${baseFirst} pair(s), head first in ${pairs.length - baseFirst}`;
   else out.median = round(median(pairs.map((p) => p.ratio)) * 100, 1);
@@ -666,7 +695,7 @@ async function main() {
       "emulated-window": { type: "string" }, "emulated-warmup": { type: "string" }, "emulated-poll-ms": { type: "string", default: "100" },
       hold: { type: "string", default: "KeyX" }, warm: { type: "boolean", default: false },
       "max-load": { type: "string" }, "lock-wait": { type: "string", default: "1800" },
-      pcsample: { type: "string" }, "pc-raw": { type: "boolean", default: false }, symbols: { type: "string" }, "region-sample": { type: "string" }, "worker-read": { type: "string" }, "region-secs": { type: "string", default: "10" }, counters: { type: "boolean", default: false }, steps: { type: "string" }, "counter-events": { type: "string" }, "pin-cpu-thread": { type: "string" }, "run-timeout": { type: "string", default: "1800" }, "unique-frames": { type: "string" }, display: { type: "boolean", default: false }, "mem-stats": { type: "boolean", default: false }, "mem-warm": { type: "string", default: "5" }, headroom: { type: "boolean", default: false }, "frames-per-vi-ref": { type: "string" }, "baseline-query": { type: "string" }, "chrome-args": { type: "string" }, "baseline-chrome-args": { type: "string" },
+      pcsample: { type: "string" }, "pc-raw": { type: "boolean", default: false }, symbols: { type: "string" }, "region-sample": { type: "string" }, "worker-read": { type: "string" }, "region-secs": { type: "string", default: "10" }, counters: { type: "boolean", default: false }, steps: { type: "string" }, "counter-events": { type: "string" }, "pin-cpu-thread": { type: "string" }, "run-timeout": { type: "string", default: "1800" }, "unique-frames": { type: "string" }, display: { type: "boolean", default: false }, "mem-stats": { type: "boolean", default: false }, "mem-warm": { type: "string", default: "5" }, headroom: { type: "boolean", default: false }, "frames-per-vi-ref": { type: "string" }, "baseline-query": { type: "string" }, "decoupled-unlimited": { type: "boolean", default: false }, "chrome-args": { type: "string" }, "baseline-chrome-args": { type: "string" },
       "core-candidate": { type: "string", multiple: true, default: [] },
       port: { type: "string", default: process.env.HARNESS_PORT }, out: { type: "string" }
     },
@@ -710,6 +739,9 @@ async function main() {
   if (values.baseline && runs % 2) throw new Error(`--runs ${runs}: with --baseline the runs must be even, so trunk goes first as often as head`);
   const o = {
     iso, state, steps, port: num(values, "port", { min: 1, int: true }), query, runs,
+    // --decoupled-unlimited: speed=unlimited without synconidle=1 on purpose
+    // (the cost of the CPU<->GPU coupling); an upper bound, never a KPI.
+    decoupledUnlimited: values["decoupled-unlimited"] === true,
     minPairs: values["min-pairs"] ? num(values, "min-pairs", { min: 2, int: true }) : Math.min(runs, 4),
     warmup: num(values, "warmup", { min: 0 }), secs: num(values, "secs", { min: 2, int: true }),
     // --emulated-window S: S guest seconds after --emulated-warmup W guest
@@ -915,6 +947,9 @@ async function main() {
   const summary = {
     sceneProtocol: sceneCheck.protocol ? { state: state && path.basename(state), ...sceneCheck.protocol, warnings: sceneCheck.warnings } : null,
     probe: "race-perf", at: new Date().toISOString(),
+    // --decoupled-unlimited: the sides it decoupled (harness/lib/kpi.mjs
+    // refuses such a result: an upper bound, not a KPI).
+    ...(o.decoupledUnlimited ? { decoupledUnlimited: Object.keys(sides).filter((n) => pacingExpectation(sides[n].query ?? o.query, { decoupledUnlimited: true }) === "decoupled") } : {}),
     chrome,
     iso: path.basename(iso), state: steps ? null : state && path.basename(state), steps: steps ? path.basename(values.steps) : null, query: o.query, baselineQuery: sides.baseline?.query ?? null, warmupSec: o.warmup, secs: o.secs,
     // Window in guest seconds (null: host seconds, --secs).
@@ -929,6 +964,13 @@ async function main() {
     change: sides.baseline ? withheldOnOverlap(pairedSpeedChange(runsDone.filter((r) => good(r.baseline) && good(r.candidate)), { minPairs: o.minPairs }), lockOverlap) : null,
     // Checks of the perf lock that found another holder (empty: none).
     lockOverlap,
+    // --headroom: the same pairing on maxSpeedCpu, the number a speed=1 A/B
+    // decides on (the speed itself sits at 100 %), cold and, with --warm, warm.
+    ...(o.headroom && sides.baseline ? { headroomChange: Object.fromEntries(["cold", ...(o.warm ? ["warm"] : [])].map((phase) => {
+      const as = (r, side) => ({ [phase]: { v: r[side]?.[phase]?.headroom?.maxSpeedCpu } });
+      const pairs = runsDone.filter((r) => good(r.baseline) && good(r.candidate));
+      return [phase, pairedSpeedChange(pairs.map((r) => ({ run: r.run, baseline: as(r, "baseline"), candidate: as(r, "candidate") })), { metric: "v", minPairs: o.minPairs, phase })];
+    })) } : {}),
     // --counters: the same pairing on host instructions per guest cycle (lower is better).
     ...(o.onWindow && sides.baseline ? { counterChange: pairedSpeedChange(runsDone.filter((r) => good(r.baseline) && good(r.candidate)), { metric: "instructionsPerGuestCycle", minPairs: o.minPairs }) } : {}),
     // Host cycles per guest cycle: they decide when the instructions and the

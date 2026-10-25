@@ -41,6 +41,21 @@ export function copyRows(src, dst, dstOffset, { rowBytes, srcStride, dstStride, 
   }
 }
 
+// Latency buckets (ms) of a copy's steps, for the harness
+// (research/deep-efb-ram-copy-latency.md step 0): counts per upper bound.
+export const READBACK_LATENCY_BOUNDS_MS = Object.freeze([1, 2, 4, 8, 16, 33, 66, Infinity]);
+
+function latencyHistogram() {
+  return { count: 0, sumMs: 0, maxMs: 0, buckets: READBACK_LATENCY_BOUNDS_MS.map(() => 0) };
+}
+
+function recordLatency(h, ms) {
+  h.count += 1;
+  h.sumMs += ms;
+  h.maxMs = Math.max(h.maxMs, ms);
+  h.buckets[READBACK_LATENCY_BOUNDS_MS.findIndex((b) => ms <= b)] += 1;
+}
+
 export class WgpuReadback {
   // heap(): the wasm heap's current Uint8Array (it can grow); words(): the
   // shared Int32Array the slots' words live in. poolBytes caps the MAP_READ
@@ -58,6 +73,21 @@ export class WgpuReadback {
     this.pooledBytes = 0;
     this.slots = new Map(); // wordIndex -> { published, recorded, entries: Map(seq -> entry) }
     this.stats = { copies: 0, completed: 0, stale: 0, lost: 0, failed: 0, rejected: 0, bytes: 0, maxLatencyMs: 0 };
+    // Per copy, from its submission: the validation scope resolved, the
+    // buffer mapped.
+    this.latency = { scope: latencyHistogram(), mapped: latencyHistogram() };
+  }
+
+  // Counters and latency histograms; reset: start a new window.
+  snapshot({ reset = false } = {}) {
+    const out = {
+      stats: { ...this.stats },
+      latency: JSON.parse(JSON.stringify(this.latency)),
+      boundsMs: READBACK_LATENCY_BOUNDS_MS.map((b) => (b === Infinity ? null : b)),
+      inFlight: [...this.slots.values()].reduce((n, s) => n + s.entries.size, 0)
+    };
+    if (reset) this.latency = { scope: latencyHistogram(), mapped: latencyHistogram() };
+    return out;
   }
 
   takeBuffer(size) {
@@ -153,7 +183,14 @@ export class WgpuReadback {
       thrown = true;
     }
     const scope = this.device.popErrorScope();
+    // The map goes out with the scope, not once it resolves
+    // (research/deep-efb-ram-copy-latency.md §3): one IPC round trip and one
+    // worker task less before the texels land. A copy the scope reports bad
+    // throws the map's result away: its buffer is destroyed, which rejects a
+    // map still pending.
+    const mapped = thrown || !buffer ? null : this.mapInOwnScope(buffer);
     const rejected = thrown || Boolean(await scope.catch(() => true));
+    recordLatency(this.latency.scope, now() - c.at);
     if (generation !== this.generation) {
       buffer?.destroy();
       return;
@@ -165,9 +202,7 @@ export class WgpuReadback {
       this.finish(entry, "lost", null, "failed");
       return;
     }
-    try {
-      await buffer.mapAsync(MAP_MODE_READ);
-    } catch {
+    if (!(await mapped)) {
       buffer.destroy();
       if (generation === this.generation) this.finish(entry, "lost", null, "failed");
       return;
@@ -180,7 +215,19 @@ export class WgpuReadback {
       return;
     }
     this.stats.maxLatencyMs = Math.max(this.stats.maxLatencyMs, now() - c.at);
+    recordLatency(this.latency.mapped, now() - c.at);
     this.finish(entry, "ok", buffer);
+  }
+
+  // The map of a buffer the device may have refused (createBuffer out of
+  // memory, reported by the copy's scope only later): inside a scope of its
+  // own, so its validation error is caught here, not counted as uncaptured.
+  // The copy's own scope decides whether it is LOST.
+  mapInOwnScope(buffer) {
+    this.device.pushErrorScope("validation");
+    const mapped = buffer.mapAsync(MAP_MODE_READ).then(() => true, () => false);
+    this.device.popErrorScope().catch(() => null);
+    return mapped;
   }
 
   finish(entry, state, buffer = null, stat = null) {

@@ -103,12 +103,14 @@ export class UpstreamWorkerAdapter {
     rushPresentation = false,
     syncOnSkipIdle = false,
     dupXfbRearmsThrottle = false,
+    smoothEarly = true,
     presentVsync = false,
     coreLog = false,
     memcardSlotB = false,
     efbAccess = false,
     fifoLog = false,
     efbCopyRam = false,
+    efbNoDefer = false,
     wgpuMask = "",
     wgpuFallback = false,
     dstAlphaTwoPass = true,
@@ -227,12 +229,14 @@ export class UpstreamWorkerAdapter {
     this.rushPresentation = rushPresentation === true;
     this.syncOnSkipIdle = syncOnSkipIdle === true;
     this.dupXfbRearmsThrottle = dupXfbRearmsThrottle === true;
+    this.smoothEarly = smoothEarly !== false;
     this.presentVsync = presentVsync === true;
     this.coreLog = Boolean(coreLog);
     this.memcardSlotB = Boolean(memcardSlotB);
     this.efbAccess = Boolean(efbAccess);
     this.fifoLog = Boolean(fifoLog);
     this.efbCopyRam = Boolean(efbCopyRam);
+    this.efbNoDefer = Boolean(efbNoDefer);
     this.wgpuMask = String(wgpuMask || "");
     this.wgpuFallback = Boolean(wgpuFallback);
     this.dstAlphaTwoPass = dstAlphaTwoPass !== false;
@@ -469,12 +473,14 @@ export class UpstreamWorkerAdapter {
       rushPresentation: this.rushPresentation,
       syncOnSkipIdle: this.syncOnSkipIdle,
       dupXfbRearmsThrottle: this.dupXfbRearmsThrottle,
+      smoothEarly: this.smoothEarly,
       presentVsync: this.presentVsync,
       coreLog: this.coreLog,
       memcardSlotB: this.memcardSlotB,
       efbAccess: this.efbAccess,
       fifoLog: this.fifoLog,
       efbCopyRam: this.efbCopyRam,
+      efbNoDefer: this.efbNoDefer,
       wgpuMask: this.wgpuMask,
       wgpuFallback: this.wgpuFallback,
       dstAlphaTwoPass: this.dstAlphaTwoPass,

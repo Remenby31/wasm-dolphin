@@ -118,6 +118,8 @@ export class EmulatorHost {
     this.fifoLog = new URLSearchParams(window.location.search).get("fifolog") === "1";
     // EFB copies written to guest RAM too (Dolphin's EFBToTextureEnable=False).
     this.efbCopyRam = new URLSearchParams(window.location.search).get("efbcopyram") === "1";
+    // EFB copies to RAM not deferred (Dolphin's DeferEFBCopies=False).
+    this.efbNoDefer = new URLSearchParams(window.location.search).get("efbdefer") === "0";
     // Harness: optional WebGPU features withheld from the device, comma-separated
     // (e.g. Safari 26 has no dual-source-blending). Empty for the app.
     this.wgpuMask = new URLSearchParams(window.location.search).get("wgpumask") ?? "";
@@ -466,12 +468,14 @@ export class EmulatorHost {
             rushPresentation: this.pacing.rushPresentation,
             syncOnSkipIdle: this.pacing.syncOnSkipIdle,
             dupXfbRearmsThrottle: this.pacing.dupXfbRearmsThrottle,
+            smoothEarly: this.pacing.smoothEarly,
             presentVsync: this.pacing.presentVsync,
             coreLog: this.coreLog,
             memcardSlotB: this.memcardSlotB,
             efbAccess: this.efbAccess,
             fifoLog: this.fifoLog,
             efbCopyRam: this.efbCopyRam,
+            efbNoDefer: this.efbNoDefer,
             wgpuMask: this.wgpuMask,
             wgpuFallback: this.wgpuFallback,
             dstAlphaTwoPass: this.dstAlphaTwoPass,
@@ -1630,13 +1634,17 @@ function requestedEfbDiag() {
 // Pacing switches (patch 0150): Rush Frame Presentation is off by default
 // (upstream's default), ?rush=1 turns it on. For measurement: ?synconidle=1
 // turns SyncOnSkipIdle on, ?dupvsync=1 makes a duplicated XFB rearm the
-// throttle. Absent: the shipped pacing.
+// throttle; ?smoothearly=0 (patch 0153) makes the video thread present on
+// arrival: SmoothEarlyPresentation off and no sleep to the present's time
+// (off alone, with Rush off, it would still sleep to the intended time).
+// Absent: the shipped pacing.
 export function requestedPacing(search = window.location.search) {
   const params = new URLSearchParams(search);
   return {
     rushPresentation: params.get("rush") === "1",
     syncOnSkipIdle: params.get("synconidle") === "1",
     dupXfbRearmsThrottle: params.get("dupvsync") === "1",
+    smoothEarly: params.get("smoothearly") !== "0",
     // ?presentvsync=1: at most one wgpu present per BeginFrame (the worker's rAF).
     presentVsync: params.get("presentvsync") === "1"
   };
