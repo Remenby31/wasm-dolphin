@@ -60,7 +60,7 @@ import { acquirePerfLock } from "../lib/perf-lock.mjs";
 import { chromeInfo, isLocalOnly, probeOutDir } from "../lib/probe-out.mjs";
 import { savePng } from "../lib/session.mjs";
 import { median, round } from "../lib/stats.mjs";
-import { machineSnapshot } from "../lib/system.mjs";
+import { machineSnapshot, sampleChromeRss } from "../lib/system.mjs";
 import { mergeTimeline } from "../lib/timeline.mjs";
 import { num, sideOrder } from "./race-perf.mjs";
 
@@ -110,13 +110,14 @@ const guestSec = async (page) => {
 export const stepsFor = (scenario, visit) => scenario.steps.filter((x) => x.only == null || x.only === (visit === 1 ? "cold" : "warm"));
 
 async function playVisit(o, server, profileDir, shotDir, visit) {
-  const raw = { markers: [], chunks: [], rows: [], page: [], loads: [] };
+  const raw = { markers: [], chunks: [], rows: [], page: [], loads: [], rss: [] };
   const context = await launchChrome({ profileDir });
   try {
     await context.assertInvisible("after launch");
     await context.addInitScript(installPageSampler, o.sampleMs);
     const page = context.pages()[0] ?? (await context.newPage());
     const t0 = Date.now();
+    raw.launchT = t0;
     await bootIso(page, { url: `${server.base}?${o.query}`, iso: o.iso, timeoutMs: 120000 });
     raw.bootMs = Date.now() - t0;
     await context.assertInvisible("after boot");
@@ -140,6 +141,10 @@ async function playVisit(o, server, profileDir, shotDir, visit) {
       const p = await page.evaluate(() => window.__dropPage?.drain() ?? []).catch(() => []);
       raw.page.push(...p);
       raw.loads.push([Date.now(), os.loadavg()[0]]);
+      // Resident memory of this profile's Chrome processes (MB): the peak of
+      // a launch (e.g. regions kept as bytes and as modules).
+      const m = sampleChromeRss(profileDir);
+      if (!m.error) raw.rss.push([Date.now(), m.totalMB, m.byType.renderer ?? null]);
     };
     const drain = (async () => { while (draining) { await drainOnce(); await page.waitForTimeout(1000); } })();
     try {
@@ -163,7 +168,10 @@ async function playVisit(o, server, profileDir, shotDir, visit) {
         } else if ("down" in step) await page.keyboard.down(step.down);
         else if ("up" in step) await page.keyboard.up(step.up);
         else if ("click" in step) await page.mouse.click(step.click[0], step.click[1]);
-        else if (step.pc === "start") raw.pc = { start: await workerRequest(page, "validationPcSampler", { action: "start", periodMs: 0.25 }, 5000) };
+        else if (step.pc === "start") {
+          raw.pc = { start: await workerRequest(page, "validationPcSampler", { action: "start", periodMs: 0.25 }, 5000) };
+          raw.jitCacheAtWindow = await workerRequest(page, "validationReadJitCacheReadiness", {}, 5000);
+        }
         else if (step.pc === "stop") {
           const r = await workerRequest(page, "validationPcSampler", { action: "stop" }, 10000);
           raw.pc.window = o.pcWindow;
@@ -180,6 +188,8 @@ async function playVisit(o, server, profileDir, shotDir, visit) {
     }
     await drainOnce();
     raw.tps = (await guestSec(page))?.tps ?? null;
+    // The JIT cache and the off-thread compiler at the end (cheap, read only).
+    raw.jitCache = await workerRequest(page, "validationReadJitCacheReadiness", {}, 5000);
     if (sampling) {
       const r = await workerRequest(page, "validationDropSampler", { action: "stop" }, 5000);
       if (r?.rows) raw.rows.push(r);
@@ -212,10 +222,18 @@ export function analyzeVisit(raw, { native = null } = {}) {
     p.nativeFps = ws.length ? nativeFps(native, ws[0].guestStart, ws.at(-1).guestStart + 0.1) : null;
   }
   const loadAvg = raw.loads.map((x) => x[1]);
+  // When the region count reached its final value: host ms from the launch
+  // and guest seconds (a warm boot that delays its regions shows here).
+  const withRegions = rows.filter((r) => r.regionsInstalled != null);
+  const finalRegions = withRegions.at(-1)?.regionsInstalled ?? null;
+  const allAt = finalRegions == null ? null : withRegions.find((r) => r.regionsInstalled === finalRegions);
+  const regionsDone = allAt ? { regions: finalRegions, hostMsFromLaunch: raw.launchT ? Math.round(allAt.t - raw.launchT) : null, guestSec: allAt.ticks != null && raw.tps ? round(allAt.ticks / raw.tps, 2) : null } : null;
+  const rss = (raw.rss ?? []).map((x) => x[1]);
   return {
     timelineComplete: timeline.complete, bootMs: raw.bootMs, pc: raw.pc ?? null,
     load1: { median: round(median(loadAvg), 2), max: round(Math.max(...loadAvg), 2) },
-    summary: { ...dropSummary({ windows, presents, vi }), loads: loads.length, loadExcessMs: loads.reduce((a, l) => a + l.excessMs, 0) },
+    regionsDone, rssPeakMB: rss.length ? Math.max(...rss) : null,
+    summary: { ...dropSummary({ windows, presents, vi }), loads: loads.length, loadExcessMs: loads.reduce((a, l) => a + l.excessMs, 0), rssPeakMB: rss.length ? Math.max(...rss) : null, regionsDoneMs: regionsDone?.hostMsFromLaunch ?? null },
     phases, loads, worst: worstDrops(events), drops: events.length,
     // the 100 ms timeline, compact: [ms from start, speed %, VI/s, presents, max present gap, lost ms, top cause]
     timeline: windows.map((w) => {
