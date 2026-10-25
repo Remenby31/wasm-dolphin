@@ -327,6 +327,9 @@ test("KPI report: files classified by content; manual.json errors become reasons
   assert.equal(classify({ probe: "first-launch" }), "first-launch");
   assert.equal(classify({ probe: "first-launch-ramp" }), "first-launch-ramp");
   assert.equal(classify(null), null);
+  // race-perf --decoupled-unlimited: an upper bound, never a KPI result
+  assert.equal(classify({ probe: "race-perf", decoupledUnlimited: ["baseline"] }), null);
+  assert.equal(classify({ probe: "race-perf", decoupledUnlimited: [] }), "race-perf");
 
   put("m1.json", "{ broken");
   put("m2.json", { pcSpeed: { value: "33-49" } });

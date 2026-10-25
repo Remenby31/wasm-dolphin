@@ -695,7 +695,7 @@ async function main() {
       "emulated-window": { type: "string" }, "emulated-warmup": { type: "string" }, "emulated-poll-ms": { type: "string", default: "100" },
       hold: { type: "string", default: "KeyX" }, warm: { type: "boolean", default: false },
       "max-load": { type: "string" }, "lock-wait": { type: "string", default: "1800" },
-      pcsample: { type: "string" }, "pc-raw": { type: "boolean", default: false }, symbols: { type: "string" }, "region-sample": { type: "string" }, "worker-read": { type: "string" }, "region-secs": { type: "string", default: "10" }, counters: { type: "boolean", default: false }, steps: { type: "string" }, "counter-events": { type: "string" }, "pin-cpu-thread": { type: "string" }, "run-timeout": { type: "string", default: "1800" }, "unique-frames": { type: "string" }, display: { type: "boolean", default: false }, "mem-stats": { type: "boolean", default: false }, "mem-warm": { type: "string", default: "5" }, headroom: { type: "boolean", default: false }, "frames-per-vi-ref": { type: "string" }, "baseline-query": { type: "string" }, "chrome-args": { type: "string" }, "baseline-chrome-args": { type: "string" },
+      pcsample: { type: "string" }, "pc-raw": { type: "boolean", default: false }, symbols: { type: "string" }, "region-sample": { type: "string" }, "worker-read": { type: "string" }, "region-secs": { type: "string", default: "10" }, counters: { type: "boolean", default: false }, steps: { type: "string" }, "counter-events": { type: "string" }, "pin-cpu-thread": { type: "string" }, "run-timeout": { type: "string", default: "1800" }, "unique-frames": { type: "string" }, display: { type: "boolean", default: false }, "mem-stats": { type: "boolean", default: false }, "mem-warm": { type: "string", default: "5" }, headroom: { type: "boolean", default: false }, "frames-per-vi-ref": { type: "string" }, "baseline-query": { type: "string" }, "decoupled-unlimited": { type: "boolean", default: false }, "chrome-args": { type: "string" }, "baseline-chrome-args": { type: "string" },
       "core-candidate": { type: "string", multiple: true, default: [] },
       port: { type: "string", default: process.env.HARNESS_PORT }, out: { type: "string" }
     },
@@ -739,6 +739,9 @@ async function main() {
   if (values.baseline && runs % 2) throw new Error(`--runs ${runs}: with --baseline the runs must be even, so trunk goes first as often as head`);
   const o = {
     iso, state, steps, port: num(values, "port", { min: 1, int: true }), query, runs,
+    // --decoupled-unlimited: speed=unlimited without synconidle=1 on purpose
+    // (the cost of the CPU<->GPU coupling); an upper bound, never a KPI.
+    decoupledUnlimited: values["decoupled-unlimited"] === true,
     minPairs: values["min-pairs"] ? num(values, "min-pairs", { min: 2, int: true }) : Math.min(runs, 4),
     warmup: num(values, "warmup", { min: 0 }), secs: num(values, "secs", { min: 2, int: true }),
     // --emulated-window S: S guest seconds after --emulated-warmup W guest
@@ -944,6 +947,9 @@ async function main() {
   const summary = {
     sceneProtocol: sceneCheck.protocol ? { state: state && path.basename(state), ...sceneCheck.protocol, warnings: sceneCheck.warnings } : null,
     probe: "race-perf", at: new Date().toISOString(),
+    // --decoupled-unlimited: the sides it decoupled (harness/lib/kpi.mjs
+    // refuses such a result: an upper bound, not a KPI).
+    ...(o.decoupledUnlimited ? { decoupledUnlimited: Object.keys(sides).filter((n) => pacingExpectation(sides[n].query ?? o.query, { decoupledUnlimited: true }) === "decoupled") } : {}),
     chrome,
     iso: path.basename(iso), state: steps ? null : state && path.basename(state), steps: steps ? path.basename(values.steps) : null, query: o.query, baselineQuery: sides.baseline?.query ?? null, warmupSec: o.warmup, secs: o.secs,
     // Window in guest seconds (null: host seconds, --secs).

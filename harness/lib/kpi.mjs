@@ -22,6 +22,7 @@ import { gameFpsTarget } from "./matrix.mjs";
 export function classify(json, file = "") {
   if (!json || typeof json !== "object") return null;
   if (json.locked === false) return null; // a plumbing check (--no-lock), not a measure
+  if (json.decoupledUnlimited?.length) return null; // race-perf --decoupled-unlimited: an upper bound, not a KPI
   if (json.probe === "race-perf" || (json.state && json.candidate && "change" in json && json.query)) return "race-perf";
   if (json.probe === "ttff") return "ttff";
   if (json.probe === "first-launch") return "first-launch";
