@@ -44,7 +44,7 @@
 // frames of the same scenario) to compare game frames per guest second.
 // A timing measure: calm machine first, then the shared perf lock.
 import { execFileSync } from "node:child_process";
-import { appendFileSync, existsSync, mkdtempSync, readdirSync, readFileSync, rmSync, statSync, writeFileSync } from "node:fs";
+import { appendFileSync, existsSync, mkdirSync, mkdtempSync, readdirSync, readFileSync, rmSync, statSync, writeFileSync } from "node:fs";
 import os from "node:os";
 import path from "node:path";
 import { pathToFileURL } from "node:url";
@@ -245,7 +245,7 @@ export function humanSummary(summary) {
     lines.push(`${v.visit === 1 ? "cold" : "warm"} (${v.candidate.runs} runs): lost ${n.lostMs?.median ?? "–"} ms, <95 % ${n.pctBelow95?.median ?? "–"} % of the time, worst 1 s ${n.worstSecond?.median ?? "–"} %, hitches >100 ms ${n.hitches100?.median ?? "–"}, load excess ${n.loadExcessMs?.median ?? "–"} ms; worst drop ${top ? `${top.label} ${Math.round(top.lostMs)} ms (${top.cause})` : "none"}`);
     if (v.verdict) {
       const bad = v.verdict.rows.filter((r) => r.regression).map((r) => `${r.metric} ${r.baseline} → ${r.candidate} (> ${r.threshold})`);
-      lines.push(`   verdict: ${v.verdict.regression ? `REGRESSION ${bad.join(", ")}` : "no regression beyond the noise"}${v.verdict.improvement ? " (some improvement)" : ""}`);
+      lines.push(`   verdict: ${v.verdict.inconclusive ? `INCONCLUSIVE (fewer than 3 runs a side and no --noise)` : v.verdict.regression ? `REGRESSION ${bad.join(", ")}` : "no regression beyond the noise"}${v.verdict.improvement ? " (some improvement)" : ""}`);
     }
   }
   return lines;
@@ -378,6 +378,7 @@ async function main() {
   if (values.trend) {
     const commit = meta.served?.candidate?.commit ?? execFileSync("git", ["-C", REPO_ROOT, "rev-parse", "HEAD"], { encoding: "utf8" }).trim();
     const file = path.resolve(values.trend);
+    mkdirSync(path.dirname(file), { recursive: true });
     appendFileSync(file, JSON.stringify({ ...trendLine({ at: meta.at, commit, visitSummary: summary.visitSummary.map((v) => ({ visit: v.visit, ...v.candidate })) }), out: outDir }) + "\n");
     const lines = readFileSync(file, "utf8").split("\n").filter(Boolean).map((l) => JSON.parse(l));
     writeFileSync(file.replace(/\.jsonl$/, "") + ".md", `# Drop meter, nightly on main\n\n${trendTable(lines)}`);

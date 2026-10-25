@@ -329,6 +329,7 @@ export const GUARDED = {
 // minDiff from an A/A of this probe when given (noise[k].minDiff, for its
 // own n; scaled to this n), else 2 standard errors of a difference from the
 // two sides' own spread. Small absolute moves never count (floor).
+export const VERDICT_MIN_RUNS = 3;
 export const VERDICT_FLOOR = { lostMs: 50, pctBelow95: 0.5, pctBelow90: 0.5, worstSecond: 5, hitches50: 2, hitches100: 1, presentP99: 2, loadExcessMs: 50 };
 export function verdictOf(baseline, candidate, { noise = null } = {}) {
   const rows = [];
@@ -338,7 +339,14 @@ export function verdictOf(baseline, candidate, { noise = null } = {}) {
     const delta = median(c) - median(b);
     const n = Math.min(b.length, c.length);
     let threshold;
-    if (noise?.[k]?.minDiff != null && noise[k].n > 1) threshold = noise[k].minDiff * Math.sqrt(noise[k].n / Math.max(n, 1));
+    const fromAa = noise?.[k]?.minDiff != null && noise[k].n > 1;
+    // Without an A/A, two sides' spread of fewer than VERDICT_MIN_RUNS runs
+    // says nothing about the noise: no verdict on that metric.
+    if (!fromAa && n < VERDICT_MIN_RUNS) {
+      rows.push({ metric: k, baseline: round(median(b), 2), candidate: round(median(c), 2), delta: round(delta, 2), threshold: null, regression: false, improvement: false, inconclusive: true });
+      continue;
+    }
+    if (fromAa) threshold = noise[k].minDiff * Math.sqrt(noise[k].n / Math.max(n, 1));
     else {
       const sd = Math.sqrt(((stdev(b) ?? 0) ** 2 + (stdev(c) ?? 0) ** 2) / 2);
       threshold = 2 * sd * Math.sqrt(2 / Math.max(n, 1));
@@ -347,7 +355,7 @@ export function verdictOf(baseline, candidate, { noise = null } = {}) {
     const worseBy = worse === "up" ? delta : -delta;
     rows.push({ metric: k, baseline: round(median(b), 2), candidate: round(median(c), 2), delta: round(delta, 2), threshold: round(threshold, 2), regression: worseBy > threshold, improvement: -worseBy > threshold });
   }
-  return { regression: rows.some((r) => r.regression), improvement: rows.some((r) => r.improvement), rows };
+  return { regression: rows.some((r) => r.regression), improvement: rows.some((r) => r.improvement), inconclusive: rows.length > 0 && rows.every((r) => r.inconclusive), rows };
 }
 
 // One line of the nightly trend (measures/drops/trend.jsonl) and the table

@@ -133,7 +133,12 @@ test("verdict: a move beyond the noise is a regression, inside it is not", () =>
   // An A/A that says lostMs moves by 400 ms between series: not a regression.
   assert.equal(verdictOf(base, [{ lostMs: 600 }, { lostMs: 620 }, { lostMs: 610 }], { noise: { lostMs: { n: 3, minDiff: 400 } } }).regression, false);
   // worstSecond: lower is worse.
-  assert.equal(verdictOf([{ worstSecond: 90 }, { worstSecond: 91 }], [{ worstSecond: 40 }, { worstSecond: 41 }]).regression, true);
+  assert.equal(verdictOf([{ worstSecond: 90 }, { worstSecond: 91 }, { worstSecond: 89 }], [{ worstSecond: 40 }, { worstSecond: 41 }, { worstSecond: 42 }]).regression, true);
+  // One run a side and no A/A: no verdict (an A/A gave "regression" that way).
+  const one = verdictOf([{ lostMs: 854 }], [{ lostMs: 957 }]);
+  assert.equal(one.regression, false);
+  assert.equal(one.inconclusive, true);
+  assert.equal(verdictOf([{ lostMs: 854 }], [{ lostMs: 957 }], { noise: { lostMs: { n: 6, minDiff: 300 } } }).inconclusive, false);
 });
 
 test("A/A noise, trend line and table", () => {
