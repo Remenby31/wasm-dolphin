@@ -1,7 +1,7 @@
 diff --git a/Source/Core/VideoCommon/TextureCacheBase.cpp b/Source/Core/VideoCommon/TextureCacheBase.cpp
 --- a/Source/Core/VideoCommon/TextureCacheBase.cpp
 +++ b/Source/Core/VideoCommon/TextureCacheBase.cpp
-@@ -58,6 +58,32 @@
+@@ -58,6 +58,35 @@
  #include "VideoCommon/VideoCommon.h"
  #include "VideoCommon/VideoConfig.h"
  
@@ -23,10 +23,13 @@ diff --git a/Source/Core/VideoCommon/TextureCacheBase.cpp b/Source/Core/VideoCom
 +{
 +bool EfbSyncFifoBehind()
 +{
++  // The GPU loop takes a chunk off the distance only once it is decoded:
++  // during a flush the chunk being decoded is still counted. More than
++  // one chunk left means the CPU wrote work behind it.
 +  return Core::System::GetInstance()
 +             .GetCommandProcessor()
 +             .GetFifo()
-+             .CPReadWriteDistance.load(std::memory_order_relaxed) != 0;
++             .CPReadWriteDistance.load(std::memory_order_relaxed) > 32;
 +}
 +}  // namespace
 +#endif
@@ -34,7 +37,7 @@ diff --git a/Source/Core/VideoCommon/TextureCacheBase.cpp b/Source/Core/VideoCom
  static const u64 TEXHASH_INVALID = 0;
  // Sonic the Fighters (inside Sonic Gems Collection) loops a 64 frames animation
  static const int TEXTURE_KILL_THRESHOLD = 64;
-@@ -2403,8 +2429,20 @@ void TextureCacheBase::CopyRenderTargetToTexture(
+@@ -2403,8 +2432,20 @@ void TextureCacheBase::CopyRenderTargetToTexture(
        if (!copy_to_vram || !g_ActiveConfig.bDeferEFBCopies)
        {
          // Immediately flush it.
@@ -55,7 +58,7 @@ diff --git a/Source/Core/VideoCommon/TextureCacheBase.cpp b/Source/Core/VideoCom
        }
        else
        {
-@@ -2518,9 +2556,22 @@ void TextureCacheBase::FlushEFBCopies()
+@@ -2518,9 +2559,22 @@ void TextureCacheBase::FlushEFBCopies()
    if (m_pending_efb_copies.empty())
      return;
  
