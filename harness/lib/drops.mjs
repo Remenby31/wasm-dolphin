@@ -347,8 +347,9 @@ export const GUARDED = {
 export const VERDICT_MIN_RUNS = 3;
 export const VERDICT_FLOOR = { lostMs: 50, pctBelow95: 0.5, pctBelow90: 0.5, worstSecond: 5, hitches50: 2, hitches100: 1, presentP99: 2, loadExcessMs: 50 };
 // Per phase of the scenario (each with its own A/A noise): a stable load
-// moves far less than the whole run, whose noise would hide it.
-export const PHASE_FLOOR = { lostMs: 20, worstSecond: 5, hitches50: 2, hitches100: 1, presentP99: 2 };
+// moves far less than the whole run, whose noise would hide it. A short
+// phase's p99 is its two worst frames: floor 5 ms (A/A title: 26-33 ms).
+export const PHASE_FLOOR = { lostMs: 20, worstSecond: 5, hitches50: 2, hitches100: 1, presentP99: 5 };
 export function verdictOf(baseline, candidate, { noise = null, floor = VERDICT_FLOOR } = {}) {
   const rows = [];
   for (const [k, worse] of Object.entries(GUARDED)) {
