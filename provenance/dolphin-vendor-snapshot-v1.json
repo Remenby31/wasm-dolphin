@@ -3,8 +3,8 @@
   "normalization": "git-blob-lf",
   "root": {
     "baseCommit": "e22551eae1c84a7e4d0b6a5c519ef4ed4ef69df1",
-    "resultTree": "357d388f87c52310e9699b7462467afd9d268040",
-    "changedPathCount": 141,
+    "resultTree": "9bb71c771e746222dc96c2bd76da36f5583bd559",
+    "changedPathCount": 142,
     "records": [
       {
         "path": "CMakeLists.txt",
@@ -1132,6 +1132,15 @@
         "sha256": "5d2514d167829d85a17ca49b02c20f1ecbbaf958cba92283862558a5bb6fb468"
       },
       {
+        "path": "Source/Core/VideoCommon/TextureCacheBase.cpp",
+        "status": "M",
+        "mode": "100644",
+        "baseBlob": "bbcd1140b4ed2151a3e2e217f384046eadeb5f6e",
+        "resultBlob": "9eb521e1ff96f5434fed7f648757ed5b9ce35dfe",
+        "size": 128607,
+        "sha256": "34d60c8840661c489340fa740a8e888f50182ca28f7db322fd2dc3d74c1e4021"
+      },
+      {
         "path": "Source/Core/VideoCommon/TextureConversionShader.cpp",
         "status": "M",
         "mode": "100644",
@@ -1311,5 +1320,5 @@
       ]
     }
   ],
-  "contentSha256": "488a4374f3d18a8ab154bfb5db08f80df9fa9ad5dd396f28705d8dc65b5bcaa3"
+  "contentSha256": "249fde38431d00ddf219434d6597c7a7aabd8213cf46074d59d91ca51ac9c22f"
 }
