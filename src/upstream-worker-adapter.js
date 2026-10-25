@@ -104,6 +104,7 @@ export class UpstreamWorkerAdapter {
     syncOnSkipIdle = false,
     dupXfbRearmsThrottle = false,
     smoothEarly = true,
+    presentVsync = false,
     coreLog = false,
     memcardSlotB = false,
     internalResolution = 1,
@@ -231,6 +232,7 @@ export class UpstreamWorkerAdapter {
     this.syncOnSkipIdle = syncOnSkipIdle === true;
     this.dupXfbRearmsThrottle = dupXfbRearmsThrottle === true;
     this.smoothEarly = smoothEarly !== false;
+    this.presentVsync = presentVsync === true;
     this.coreLog = Boolean(coreLog);
     this.memcardSlotB = Boolean(memcardSlotB);
     this.internalResolution = Number(internalResolution) || 1;
@@ -476,6 +478,7 @@ export class UpstreamWorkerAdapter {
       syncOnSkipIdle: this.syncOnSkipIdle,
       dupXfbRearmsThrottle: this.dupXfbRearmsThrottle,
       smoothEarly: this.smoothEarly,
+      presentVsync: this.presentVsync,
       coreLog: this.coreLog,
       memcardSlotB: this.memcardSlotB,
       internalResolution: this.internalResolution,

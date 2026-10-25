@@ -86,8 +86,8 @@
     {
       "path": "src/core-host.js",
       "hashMode": "lf-normalized",
-      "size": 81527,
-      "sha256": "7621b29481b0709ade417bf296aa4527dba2d2710e85c8df099e6903ae5619bf"
+      "size": 81717,
+      "sha256": "39da505c1f63dd57310169d6ebe83b2bb8cf58c5ad0b82cf6618d0ab518aabdc"
     },
     {
       "path": "src/diagnostic-log-filter.js",
@@ -140,8 +140,8 @@
     {
       "path": "src/upstream-discio-worker.js",
       "hashMode": "lf-normalized",
-      "size": 760212,
-      "sha256": "7416b55eaf89d73bdcd3a0237f22e86d60d4ad5849959160767f658360065fbb"
+      "size": 769625,
+      "sha256": "ecea6504103f81cdc739e487469109ff5166d24ae4452a12bdafbd8baacc755b"
     },
     {
       "path": "src/wgpu-renderer-worker-probe.js",
@@ -164,8 +164,8 @@
     {
       "path": "src/upstream-worker-adapter.js",
       "hashMode": "lf-normalized",
-      "size": 56677,
-      "sha256": "b48f6db34815f021b63e695884b674f3c2ebcd03e53b8694f4559a504a0ba3af"
+      "size": 56789,
+      "sha256": "7eee8f61e625141eea76f28940f4053f7734b8f39036f82f91747a1335ca48c4"
     },
     {
       "path": "src/upstream-worker-protocol.js",
@@ -712,6 +712,7 @@
       "validationReadPacingConfig",
       "validationReadPipelinePrewarm",
       "validationReadPresentCadence",
+      "validationReadPresentVsync",
       "validationReadRegionLedgerStale",
       "validationReadRelaxedMadd",
       "validationReadTimeline",
