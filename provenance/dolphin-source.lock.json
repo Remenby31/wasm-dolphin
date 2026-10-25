@@ -25,7 +25,7 @@
       "commit": "01e0577914a75a2569c846778c2f93aa8e6feddd"
     }
   },
-  "patchSeriesSha256": "c58c2d9c46c4f4688a700bf255a3adc8cd2211b5805e07358eabcea095ce2a87",
+  "patchSeriesSha256": "9e87efc651d240fafb1d5e1dff3f495bef155e4febd4e93e82262364b1cd0443",
   "patches": [
     {
       "order": 1,
@@ -1016,8 +1016,8 @@
       "cwd": ".",
       "hashMode": "lf-normalized",
       "path": "patches/dolphin-wasm/snapshot/0164-efb-sync-counters.patch",
-      "size": 3439,
-      "sha256": "a839d9321a095dd523a930b8cc67af70bcdc2f9e83b78e4ed321418218718261"
+      "size": 4029,
+      "sha256": "801ef269ee70c3e7476d10ae292a6de6b4159be62c8ff9aa7a1dd0f9763b9fd6"
     },
     {
       "order": 125,
