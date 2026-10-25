@@ -318,8 +318,10 @@ test("committed Dolphin provenance and ABI manifests verify", () => {
   // 0106 (static GameCube RAM views) touches Memmap.cpp/.h and DSP.cpp: 140.
   // 0150 (pacing switches) is the first patch to touch Present.cpp: 141.
   // 0162 (present cadence counters) adds WasmPresentCadence.h: 142.
+  // 0166 (eager EFB copies) is the first to touch TextureCacheBase.cpp/.h
+  // and AbstractStagingTexture.h: 145.
   // Update deliberately when the series changes what it modifies.
-  assert.equal(result.vendorSnapshot.rootPaths, 142);
+  assert.equal(result.vendorSnapshot.rootPaths, 145);
   assert.equal(result.vendorSnapshot.submodulePaths, 2);
   assert.equal(result.core.abiVersion, 1);
   assert.equal(result.core.memoryContract.jsGlue.initialPages, 24576);
