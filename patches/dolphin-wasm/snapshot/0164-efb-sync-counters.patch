@@ -1,41 +1,14 @@
 diff --git a/Source/Core/VideoCommon/TextureCacheBase.cpp b/Source/Core/VideoCommon/TextureCacheBase.cpp
 --- a/Source/Core/VideoCommon/TextureCacheBase.cpp
 +++ b/Source/Core/VideoCommon/TextureCacheBase.cpp
-@@ -33,6 +33,9 @@
- #include "Core/FifoPlayer/FifoRecorder.h"
- #include "Core/HW/Memmap.h"
- #include "Core/System.h"
+@@ -58,6 +58,32 @@
+ #include "VideoCommon/VideoCommon.h"
+ #include "VideoCommon/VideoConfig.h"
+ 
 +#ifdef __EMSCRIPTEN__
 +#include "VideoCommon/CommandProcessor.h"
 +#endif
- 
- #include "VideoCommon/AbstractFramebuffer.h"
- #include "VideoCommon/AbstractGfx.h"
-@@ -2403,8 +2406,20 @@ void TextureCacheBase::CopyRenderTargetToTexture(
-       if (!copy_to_vram || !g_ActiveConfig.bDeferEFBCopies)
-       {
-         // Immediately flush it.
-+#ifdef __EMSCRIPTEN__
-+        const auto efb_copy_start = std::chrono::steady_clock::now();
-+        const bool efb_copy_behind_start = EfbSyncFifoBehind();
-+#endif
-         WriteEFBCopyToRAM(dst, bytes_per_row / sizeof(u32), num_blocks_y, dstStride,
-                           std::move(staging_texture));
-+#ifdef __EMSCRIPTEN__
-+        DolphinWeb_RecordEfbSync(
-+            1,
-+            static_cast<unsigned>(std::chrono::duration_cast<std::chrono::microseconds>(
-+                                      std::chrono::steady_clock::now() - efb_copy_start)
-+                                      .count()),
-+            efb_copy_behind_start ? 1 : 0, EfbSyncFifoBehind() ? 1 : 0, 1);
-+#endif
-       }
-       else
-       {
-@@ -2513,14 +2528,49 @@ void TextureCacheBase::CopyRenderTargetToTexture(
-   }
- }
- 
++
 +#ifdef __EMSCRIPTEN__
 +// Patch 0164 (harness only, research/deep-efb-ram-copy-latency.md §3.3): how
 +// long the video thread blocks on EFB copies to RAM, and whether FIFO work
@@ -58,8 +31,31 @@ diff --git a/Source/Core/VideoCommon/TextureCacheBase.cpp b/Source/Core/VideoCom
 +}  // namespace
 +#endif
 +
- void TextureCacheBase::FlushEFBCopies()
- {
+ static const u64 TEXHASH_INVALID = 0;
+ // Sonic the Fighters (inside Sonic Gems Collection) loops a 64 frames animation
+ static const int TEXTURE_KILL_THRESHOLD = 64;
+@@ -2403,8 +2429,20 @@ void TextureCacheBase::CopyRenderTargetToTexture(
+       if (!copy_to_vram || !g_ActiveConfig.bDeferEFBCopies)
+       {
+         // Immediately flush it.
++#ifdef __EMSCRIPTEN__
++        const auto efb_copy_start = std::chrono::steady_clock::now();
++        const bool efb_copy_behind_start = EfbSyncFifoBehind();
++#endif
+         WriteEFBCopyToRAM(dst, bytes_per_row / sizeof(u32), num_blocks_y, dstStride,
+                           std::move(staging_texture));
++#ifdef __EMSCRIPTEN__
++        DolphinWeb_RecordEfbSync(
++            1,
++            static_cast<unsigned>(std::chrono::duration_cast<std::chrono::microseconds>(
++                                      std::chrono::steady_clock::now() - efb_copy_start)
++                                      .count()),
++            efb_copy_behind_start ? 1 : 0, EfbSyncFifoBehind() ? 1 : 0, 1);
++#endif
+       }
+       else
+       {
+@@ -2518,9 +2556,22 @@ void TextureCacheBase::FlushEFBCopies()
    if (m_pending_efb_copies.empty())
      return;
  
