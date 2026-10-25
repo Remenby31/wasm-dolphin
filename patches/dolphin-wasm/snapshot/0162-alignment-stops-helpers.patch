@@ -1,0 +1,38 @@
+diff --git a/Source/Core/Core/PowerPC/CachedInterpreter/CachedInterpreter.cpp b/Source/Core/Core/PowerPC/CachedInterpreter/CachedInterpreter.cpp
+--- a/Source/Core/Core/PowerPC/CachedInterpreter/CachedInterpreter.cpp
++++ b/Source/Core/Core/PowerPC/CachedInterpreter/CachedInterpreter.cpp
+@@ -2355,10 +2355,15 @@ bool DolphinWeb_CachedInterpreterCheckFpu(PowerPC::PowerPCState& ppc_state, u32
+   return true;
+ }
+ 
++// Patch 0162: an alignment exception (lmw/stmw, FP loads and stores at an
++// unaligned address) stops the instruction as a DSI does: the interpreter
++// takes it before the next instruction, so the tiers must not run on.
++constexpr u32 WASM_HELPER_HALT_EXCEPTIONS = EXCEPTION_DSI | EXCEPTION_PROGRAM | EXCEPTION_ALIGNMENT;
++
+ bool DolphinWeb_CachedInterpreterCheckProgramOrDsi(PowerPC::PowerPCState& ppc_state,
+                                                    u32 current_pc, u32 downcount)
+ {
+-  if ((ppc_state.Exceptions & (EXCEPTION_DSI | EXCEPTION_PROGRAM)) == 0)
++  if ((ppc_state.Exceptions & WASM_HELPER_HALT_EXCEPTIONS) == 0)
+     return false;
+ 
+   ppc_state.pc = current_pc;
+@@ -3085,7 +3090,7 @@ extern "C" int DolphinWeb_CachedInterpreterInterpret(int state_ptr, u32 current_
+     if (const int kind = MemAccessKind(opinfo, inst); kind >= 0)
+       CountSlowMemAccess(static_cast<u32>(kind));
+   }
+-  if ((ppc_state.Exceptions & (EXCEPTION_DSI | EXCEPTION_PROGRAM)) != 0)
++  if ((ppc_state.Exceptions & WASM_HELPER_HALT_EXCEPTIONS) != 0)
+   {
+     ppc_state.pc = current_pc;
+     ppc_state.downcount -= downcount;
+@@ -12432,7 +12437,7 @@ s32 CachedInterpreter::InterpretAndCheckExceptions(
+   }
+   operands.func(operands.interpreter, operands.inst);
+ 
+-  if ((ppc_state.Exceptions & (EXCEPTION_DSI | EXCEPTION_PROGRAM)) != 0)
++  if ((ppc_state.Exceptions & WASM_HELPER_HALT_EXCEPTIONS) != 0)
+   {
+     ppc_state.pc = operands.current_pc;
+     ppc_state.downcount -= operands.downcount;
