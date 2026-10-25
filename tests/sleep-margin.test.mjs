@@ -15,10 +15,12 @@ test("sleepmargin: parsed in range, off by default", async () => {
   assert.equal(requestedPacing("?sleepstep=500").sleepStepUs, 500);
   assert.equal(requestedPacing("?sleepstep=4001").sleepStepUs, 0);
   assert.equal(requestedPacing("?sleepk=750").sleepK, 750);
-  assert.equal(requestedPacing("?sleepk=951").sleepK, 0);
-  assert.equal(requestedPacing("").sleepSpinUs, 300);
+  assert.equal(requestedPacing("?sleepk=951").sleepK, 750);
+  assert.equal(requestedPacing("").sleepK, 750, "the cascade by default");
+  assert.equal(requestedPacing("?sleepk=0").sleepK, 0, "?sleepk=0: the plain sleep");
+  assert.equal(requestedPacing("").sleepSpinUs, 150);
   assert.equal(requestedPacing("?sleepspin=200").sleepSpinUs, 200);
-  assert.equal(requestedPacing("?sleepspin=20").sleepSpinUs, 300);
+  assert.equal(requestedPacing("?sleepspin=20").sleepSpinUs, 150);
   for (const bad of ["?sleepmargin=8001", "?sleepmargin=-1", "?sleepmargin=1e3", "?sleepmargin=abc", "?sleepmargin=12345"]) {
     assert.equal(requestedPacing(bad).sleepMarginUs, 0, bad);
   }
@@ -61,7 +63,7 @@ test("sleepmargin: host, worker, core and patch", async () => {
   assert.match(core, /DolphinWeb_SetThrottleSleepCascade\(/);
   assert.match(host, /\n {12}sleepK: this\.pacing\.sleepK,\n {12}sleepSpinUs: this\.pacing\.sleepSpinUs,\n/);
   assert.match(worker, /\n {8}sleepK: payload\.sleepK,\n {8}sleepSpinUs: payload\.sleepSpinUs,\n/);
-  assert.match(worker, /\n {4}dolphinSleepK: Number\.isInteger\(sleepK\) \? sleepK : 0,\n/);
+  assert.match(worker, /\n {4}dolphinSleepK: Number\.isInteger\(sleepK\) \? sleepK : 750,\n/);
   assert.match(worker, /getUint32\(4, true\), 1872\);/, "the v2 struct is read whole");
   assert.match(worker, /\n {4}dolphinSleepMarginUs: Number\.isInteger\(sleepMarginUs\) \? sleepMarginUs : 0,\n/);
   assert.match(worker, /const sleepMarginUs = typeof moduleInstance\?\._DolphinWeb_SetThrottleSleepMarginUs === "function" \? \(bits >>> 16\) & 0x1fff : null;/);
@@ -77,7 +79,7 @@ test("sleepmargin: host, worker, core and patch", async () => {
   assert.match(patch, /\+          while \(time_point - Clock::now\(\) > step\)\n\+            DolphinWeb::ThrottleWaitUntil\(Clock::now\(\) \+ step\);/);
   assert.match(patch, /\+std::atomic<u32> g_sleep_step_us\{0\};/);
   // the cascade: k x the time left per wait, at most 8 waits, then the spin
-  assert.match(patch, /\+std::atomic<u32> g_sleep_k_permille\{0\};/, "off unless the page sets it");
+  assert.match(patch, /\+std::atomic<u32> g_sleep_k_permille\{750\};\n\+std::atomic<u32> g_sleep_spin_us\{150\};/, "the cascade by default, in the core too");
   assert.match(patch, /\+        for \(int waits = 0; waits < 8; \+\+waits\)/);
   assert.match(patch, /\+          DolphinWeb::ThrottleWaitUntil\(now \+ left \* k_permille \/ 1000\);/);
   // v2 layout: v1 untouched, the waits appended

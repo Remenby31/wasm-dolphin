@@ -797,10 +797,10 @@ void EnsureRuntime()
   DolphinWeb_SetThrottleSleepCascade(
       EM_ASM_INT({ return (typeof Module !== 'undefined' &&
                            Number.isInteger(Module['dolphinSleepK'])) ?
-                              Module['dolphinSleepK'] : 0; }),
+                              Module['dolphinSleepK'] : 750; }),
       EM_ASM_INT({ return (typeof Module !== 'undefined' &&
                            Number.isInteger(Module['dolphinSleepSpinUs'])) ?
-                              Module['dolphinSleepSpinUs'] : 300; }));
+                              Module['dolphinSleepSpinUs'] : 150; }));
   Config::SetBase(Config::MAIN_RUSH_FRAME_PRESENTATION, rush_presentation);
   Config::SetBase(Config::MAIN_SMOOTH_EARLY_PRESENTATION, smooth_early);
   Config::SetBase(Config::MAIN_SYNC_ON_SKIP_IDLE, sync_on_skip_idle);

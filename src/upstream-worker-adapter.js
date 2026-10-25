@@ -106,8 +106,8 @@ export class UpstreamWorkerAdapter {
     smoothEarly = true,
     sleepMarginUs = 0,
     sleepStepUs = 0,
-    sleepK = 0,
-    sleepSpinUs = 300,
+    sleepK = 750,
+    sleepSpinUs = 150,
     presentVsync = false,
     coreLog = false,
     memcardSlotB = false,
@@ -238,8 +238,8 @@ export class UpstreamWorkerAdapter {
     this.smoothEarly = smoothEarly !== false;
     this.sleepMarginUs = Number.isInteger(sleepMarginUs) && sleepMarginUs >= 0 && sleepMarginUs <= 8000 ? sleepMarginUs : 0;
     this.sleepStepUs = Number.isInteger(sleepStepUs) && sleepStepUs >= 0 && sleepStepUs <= 4000 ? sleepStepUs : 0;
-    this.sleepK = Number.isInteger(sleepK) && sleepK >= 0 && sleepK <= 950 ? sleepK : 0;
-    this.sleepSpinUs = Number.isInteger(sleepSpinUs) && sleepSpinUs >= 50 && sleepSpinUs <= 2000 ? sleepSpinUs : 300;
+    this.sleepK = Number.isInteger(sleepK) && sleepK >= 0 && sleepK <= 950 ? sleepK : 750;
+    this.sleepSpinUs = Number.isInteger(sleepSpinUs) && sleepSpinUs >= 50 && sleepSpinUs <= 2000 ? sleepSpinUs : 150;
     this.presentVsync = presentVsync === true;
     this.coreLog = Boolean(coreLog);
     this.memcardSlotB = Boolean(memcardSlotB);

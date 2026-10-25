@@ -22,8 +22,8 @@ index cc77842..a1ac7d7 100644
 +// left, then a spin. macOS wakes a wait of d at most ~d/4 late (timer
 +// coalescing), so with k = 0.75 each wake lands before the target and the
 +// time left shrinks by >= 4x per wait. 0: off (takes precedence over the margin).
-+std::atomic<u32> g_sleep_k_permille{0};
-+std::atomic<u32> g_sleep_spin_us{300};
++std::atomic<u32> g_sleep_k_permille{750};
++std::atomic<u32> g_sleep_spin_us{150};
 +
 +// One timed wait of the CPU thread's throttle, with its requested length and
 +// lateness counted (0162/0165 histograms) while the counters are on.

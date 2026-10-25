@@ -25,7 +25,7 @@
       "commit": "01e0577914a75a2569c846778c2f93aa8e6feddd"
     }
   },
-  "patchSeriesSha256": "3d3d5ed964a4ae98ee0b289c291873402b2f88480dcfdf5e6038df408fb19868",
+  "patchSeriesSha256": "63f56149976d1cddc64df898e602d3b22006a7a19f1165728729a7cfa077d8c7",
   "patches": [
     {
       "order": 1,
@@ -1024,8 +1024,8 @@
       "cwd": ".",
       "hashMode": "lf-normalized",
       "path": "patches/dolphin-wasm/snapshot/0165-throttle-sleep-margin.patch",
-      "size": 10982,
-      "sha256": "1a01797bb58bfb87c67c95ce68f9023476b0871b1e8d4f4cc12b562f5c21fd3a"
+      "size": 10984,
+      "sha256": "daf11c513451e6dfe3bf8820e87168f586b3fe7597171584dee10d857b83bbc2"
     },
     {
       "order": 126,

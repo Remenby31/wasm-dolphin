@@ -18,7 +18,7 @@ const SWITCHES = [
 test("pacing switches: URL parsing, shipped defaults, each switch only its own", async () => {
   const { requestedPacing } = await import("../src/core-host.js");
   // Rush off by default (upstream's default): ?rush=1 turns it back on.
-  assert.deepEqual(requestedPacing(""), { rushPresentation: false, syncOnSkipIdle: false, dupXfbRearmsThrottle: false, smoothEarly: true, sleepMarginUs: 0, sleepStepUs: 0, sleepK: 0, sleepSpinUs: 300, presentVsync: false });
+  assert.deepEqual(requestedPacing(""), { rushPresentation: false, syncOnSkipIdle: false, dupXfbRearmsThrottle: false, smoothEarly: true, sleepMarginUs: 0, sleepStepUs: 0, sleepK: 750, sleepSpinUs: 150, presentVsync: false });
   for (const s of SWITCHES) {
     const p = requestedPacing(`?${s.param}`);
     assert.equal(p[s.option], s.on, s.param);

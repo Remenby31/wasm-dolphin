@@ -1665,9 +1665,11 @@ function requestedEfbDiag() {
 // (off alone, with Rush off, it would still sleep to the intended time);
 // ?sleepmargin=<us> (patch 0165, 0..8000) sleeps the throttle to its target
 // minus the margin, then spins to it; ?sleepstep=<us> (0..4000) sleeps in
-// short steps inside the margin before the spin; ?sleepk=<permille> (0..950)
-// waits k x the time left in a cascade until ?sleepspin=<us> (50..2000,
-// default 300) is left, then spins (research/deep-precise-sleep.md §6 D).
+// short steps inside the margin before the spin. The throttle's sleep is the
+// cascade by default (research/deep-precise-sleep.md §6 D, measured
+// 2026-10-25/26): each wait k x the time left, ?sleepk=<permille> (0..950,
+// default 750, 0: the plain sleep), until ?sleepspin=<us> (50..2000, default
+// 150) is left, then a spin.
 // Absent: the shipped pacing.
 export function requestedPacing(search = window.location.search) {
   const params = new URLSearchParams(search);
@@ -1678,8 +1680,8 @@ export function requestedPacing(search = window.location.search) {
     smoothEarly: params.get("smoothearly") !== "0",
     sleepMarginUs: /^\d{1,4}$/.test(params.get("sleepmargin") ?? "") && Number(params.get("sleepmargin")) <= 8000 ? Number(params.get("sleepmargin")) : 0,
     sleepStepUs: /^\d{1,4}$/.test(params.get("sleepstep") ?? "") && Number(params.get("sleepstep")) <= 4000 ? Number(params.get("sleepstep")) : 0,
-    sleepK: /^\d{1,3}$/.test(params.get("sleepk") ?? "") && Number(params.get("sleepk")) <= 950 ? Number(params.get("sleepk")) : 0,
-    sleepSpinUs: /^\d{2,4}$/.test(params.get("sleepspin") ?? "") && Number(params.get("sleepspin")) >= 50 && Number(params.get("sleepspin")) <= 2000 ? Number(params.get("sleepspin")) : 300,
+    sleepK: /^\d{1,3}$/.test(params.get("sleepk") ?? "") && Number(params.get("sleepk")) <= 950 ? Number(params.get("sleepk")) : 750,
+    sleepSpinUs: /^\d{2,4}$/.test(params.get("sleepspin") ?? "") && Number(params.get("sleepspin")) >= 50 && Number(params.get("sleepspin")) <= 2000 ? Number(params.get("sleepspin")) : 150,
     // ?presentvsync=1: at most one wgpu present per BeginFrame (the worker's rAF).
     presentVsync: params.get("presentvsync") === "1"
   };
