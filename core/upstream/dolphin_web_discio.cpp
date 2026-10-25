@@ -1320,6 +1320,61 @@ EMSCRIPTEN_KEEPALIVE std::uint32_t DolphinWeb_HarnessViRingCapacity() { return H
 EMSCRIPTEN_KEEPALIVE std::uint32_t DolphinWeb_HarnessViRingHead() { return s_harness_vi_head.load(std::memory_order_acquire); }
 EMSCRIPTEN_KEEPALIVE std::uint32_t DolphinWeb_HarnessLoadGeneration() { return s_harness_load_generation.load(std::memory_order_acquire); }
 
+// Patch 0164 (harness only): the video thread's blocking EFB copies to RAM.
+// Per kind (0: a sync point flushing deferred copies, 1: an immediate copy,
+// DeferEFBCopies=False), at word 1 + 16 * kind: flushes, copies, FIFO work
+// waiting at the start, FIFO work waiting at the end, total wait (us), wait
+// with FIFO work at the end (us), longest wait (us), then a histogram of
+// waits (<= 0.5, 1, 2, 4, 8, 16, 33 ms, more). Word 0: the layout version.
+static constexpr std::uint32_t EFB_SYNC_WORDS = 33;
+static std::array<std::atomic<std::uint32_t>, EFB_SYNC_WORDS> s_efb_sync{};
+
+void DolphinWeb_RecordEfbSync(int kind, unsigned wait_us, int fifo_behind_start,
+                              int fifo_behind_end, unsigned copies)
+{
+  if (!s_harness_enabled.load(std::memory_order_relaxed) || kind < 0 || kind > 1)
+    return;
+  static constexpr unsigned BOUNDS_US[7] = {500, 1000, 2000, 4000, 8000, 16000, 33000};
+  const std::size_t base = 1 + 16 * static_cast<std::size_t>(kind);
+  s_efb_sync[0].store(1, std::memory_order_relaxed);
+  s_efb_sync[base + 0].fetch_add(1, std::memory_order_relaxed);
+  s_efb_sync[base + 1].fetch_add(copies, std::memory_order_relaxed);
+  if (fifo_behind_start)
+    s_efb_sync[base + 2].fetch_add(1, std::memory_order_relaxed);
+  if (fifo_behind_end)
+  {
+    s_efb_sync[base + 3].fetch_add(1, std::memory_order_relaxed);
+    s_efb_sync[base + 5].fetch_add(wait_us, std::memory_order_relaxed);
+  }
+  s_efb_sync[base + 4].fetch_add(wait_us, std::memory_order_relaxed);
+  std::uint32_t max = s_efb_sync[base + 6].load(std::memory_order_relaxed);
+  while (wait_us > max &&
+         !s_efb_sync[base + 6].compare_exchange_weak(max, wait_us, std::memory_order_relaxed))
+  {
+  }
+  std::size_t bucket = 7;
+  for (std::size_t i = 0; i < 7; ++i)
+  {
+    if (wait_us <= BOUNDS_US[i])
+    {
+      bucket = i;
+      break;
+    }
+  }
+  s_efb_sync[base + 7 + bucket].fetch_add(1, std::memory_order_relaxed);
+}
+
+EMSCRIPTEN_KEEPALIVE std::uint32_t DolphinWeb_HarnessEfbSyncWords() { return EFB_SYNC_WORDS; }
+EMSCRIPTEN_KEEPALIVE std::uint32_t DolphinWeb_HarnessEfbSyncWord(std::uint32_t index)
+{
+  return index < EFB_SYNC_WORDS ? s_efb_sync[index].load(std::memory_order_relaxed) : 0;
+}
+EMSCRIPTEN_KEEPALIVE void DolphinWeb_HarnessEfbSyncReset()
+{
+  for (std::size_t i = 1; i < EFB_SYNC_WORDS; ++i)
+    s_efb_sync[i].store(0, std::memory_order_relaxed);
+}
+
 // Harness: record the next `frames` frames of the GPU FIFO into a FIFO log
 // at `path` (FifoPlayer's .dff format), so a homebrew's frames can be
 // replayed on every backend without its CPU side. State: 0 idle,

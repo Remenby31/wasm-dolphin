@@ -1,0 +1,84 @@
+diff --git a/Source/Core/VideoCommon/TextureCacheBase.cpp b/Source/Core/VideoCommon/TextureCacheBase.cpp
+--- a/Source/Core/VideoCommon/TextureCacheBase.cpp
++++ b/Source/Core/VideoCommon/TextureCacheBase.cpp
+@@ -33,6 +33,9 @@
+ #include "Core/FifoPlayer/FifoRecorder.h"
+ #include "Core/HW/Memmap.h"
+ #include "Core/System.h"
++#ifdef __EMSCRIPTEN__
++#include "VideoCommon/CommandProcessor.h"
++#endif
+ 
+ #include "VideoCommon/AbstractFramebuffer.h"
+ #include "VideoCommon/AbstractGfx.h"
+@@ -2403,8 +2406,20 @@ void TextureCacheBase::CopyRenderTargetToTexture(
+       if (!copy_to_vram || !g_ActiveConfig.bDeferEFBCopies)
+       {
+         // Immediately flush it.
++#ifdef __EMSCRIPTEN__
++        const auto efb_copy_start = std::chrono::steady_clock::now();
++        const bool efb_copy_behind_start = EfbSyncFifoBehind();
++#endif
+         WriteEFBCopyToRAM(dst, bytes_per_row / sizeof(u32), num_blocks_y, dstStride,
+                           std::move(staging_texture));
++#ifdef __EMSCRIPTEN__
++        DolphinWeb_RecordEfbSync(
++            1,
++            static_cast<unsigned>(std::chrono::duration_cast<std::chrono::microseconds>(
++                                      std::chrono::steady_clock::now() - efb_copy_start)
++                                      .count()),
++            efb_copy_behind_start ? 1 : 0, EfbSyncFifoBehind() ? 1 : 0, 1);
++#endif
+       }
+       else
+       {
+@@ -2513,14 +2528,49 @@ void TextureCacheBase::CopyRenderTargetToTexture(
+   }
+ }
+ 
++#ifdef __EMSCRIPTEN__
++// Patch 0164 (harness only, research/deep-efb-ram-copy-latency.md §3.3): how
++// long the video thread blocks on EFB copies to RAM, and whether FIFO work
++// was waiting behind it (the CPU had written more): a non-blocking sync
++// point can only gain when it was. kind 0: a flush of deferred copies (a
++// sync point), 1: an immediate copy (DeferEFBCopies=False). Counted in
++// dolphin_web_discio.cpp, a no-op unless the harness turned its hooks on.
++extern "C" void DolphinWeb_RecordEfbSync(int kind, unsigned wait_us, int fifo_behind_start,
++                                         int fifo_behind_end, unsigned copies);
++
++namespace
++{
++bool EfbSyncFifoBehind()
++{
++  return Core::System::GetInstance()
++             .GetCommandProcessor()
++             .GetFifo()
++             .CPReadWriteDistance.load(std::memory_order_relaxed) != 0;
++}
++}  // namespace
++#endif
++
+ void TextureCacheBase::FlushEFBCopies()
+ {
+   if (m_pending_efb_copies.empty())
+     return;
+ 
++#ifdef __EMSCRIPTEN__
++  const auto efb_sync_start = std::chrono::steady_clock::now();
++  const bool efb_sync_behind_start = EfbSyncFifoBehind();
++  const unsigned efb_sync_copies = static_cast<unsigned>(m_pending_efb_copies.size());
++#endif
+   for (auto& entry : m_pending_efb_copies)
+     FlushEFBCopy(entry.get());
+   m_pending_efb_copies.clear();
++#ifdef __EMSCRIPTEN__
++  DolphinWeb_RecordEfbSync(
++      0,
++      static_cast<unsigned>(std::chrono::duration_cast<std::chrono::microseconds>(
++                                std::chrono::steady_clock::now() - efb_sync_start)
++                                .count()),
++      efb_sync_behind_start ? 1 : 0, EfbSyncFifoBehind() ? 1 : 0, efb_sync_copies);
++#endif
+ }
+ 
+ void TextureCacheBase::FlushStaleBinds()
