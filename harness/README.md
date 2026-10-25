@@ -299,6 +299,33 @@ node harness/remote/spark-run.mjs --build <ref>           # its core built on th
   worktree. A core built there differs in bytes from CI's and from a Mac
   build: compare it only with another core built on the bench.
 
+## Drop meter (merge guard and nightly)
+
+`harness/probes/drop-meter.mjs` measures speed drops over a whole
+play-through, not a race in steady state: boot, menus, the race's load, a
+race (`harness/probes/drop-scenario.json`, inputs at guest seconds so every
+run presses the same buttons at the same place). Each run is a new profile,
+played cold then warm (`--visits 2`). It keeps every VI output and present,
+and every 50 ms the worker's counters (`validationDropSampler`) and the
+page's stalls, then cuts them into 100 ms windows: drops with their cause
+(JIT compiles, patch 0167; region installs; disc waits; GPU and EFB waits;
+wgpu pipelines; late throttle wake-ups; worker and main-thread stalls;
+`emulation` when the CPU thread never slept), loads (host against guest
+time), and per run, visit and phase: time lost, time under 95/90 %, worst
+second, hitches over 50/100 ms, present p99, load excess, audio underruns.
+A timing measure: it takes the perf lock.
+
+```sh
+# A/A (noise of every metric) and the baseline report
+node harness/probes/drop-meter.mjs --iso ../roms/<disc>.iso --port 8113 --runs 6
+# merge guard: this tree against main, verdict per visit (exit 2 on a regression)
+node harness/probes/drop-meter.mjs --iso ../roms/<disc>.iso --port 8113 --runs 3 --baseline origin/main --noise <A/A dir>/summary.json
+# nightly on main, with its history (JSONL + table)
+node harness/probes/drop-meter.mjs --iso ../roms/<disc>.iso --port 8113 --runs 3 --trend ../measures/drops/trend.jsonl
+# again from the raw data, e.g. against a native reference (game frames per guest second)
+node harness/probes/drop-meter.mjs --analyze <dir> --native <native-ref.json>
+```
+
 ## KPI probes and report
 
 The program's KPIs (PROGRAM.md, « KPI du programme ») that race-perf does not
