@@ -18,7 +18,7 @@ const SWITCHES = [
 test("pacing switches: URL parsing, shipped defaults, each switch only its own", async () => {
   const { requestedPacing } = await import("../src/core-host.js");
   // Rush off by default (upstream's default): ?rush=1 turns it back on.
-  assert.deepEqual(requestedPacing(""), { rushPresentation: false, syncOnSkipIdle: false, dupXfbRearmsThrottle: false, smoothEarly: true, sleepMarginUs: 0, sleepStepUs: 0 });
+  assert.deepEqual(requestedPacing(""), { rushPresentation: false, syncOnSkipIdle: false, dupXfbRearmsThrottle: false, smoothEarly: true, sleepMarginUs: 0, sleepStepUs: 0, sleepK: 0, sleepSpinUs: 300 });
   for (const s of SWITCHES) {
     const p = requestedPacing(`?${s.param}`);
     assert.equal(p[s.option], s.on, s.param);
@@ -66,7 +66,7 @@ test("pacing switches: host passes them, the worker sets the Module flags, the c
   assert.match(core, /Config::SetBase\(Config::MAIN_SMOOTH_EARLY_PRESENTATION, smooth_early\);/);
   // the harness reads back what the core applied, from its effective config
   assert.match(worker, /case "validationReadPacingConfig":/);
-  assert.match(worker, /syncOnSkipIdle: Boolean\(bits & 1\), rushFramePresentation: Boolean\(bits & 2\), dupXfbResetsThrottle: Boolean\(bits & 4\), presentSleep, sleepMarginUs, sleepStepUs \};/);
+  assert.match(worker, /syncOnSkipIdle: Boolean\(bits & 1\), rushFramePresentation: Boolean\(bits & 2\), dupXfbResetsThrottle: Boolean\(bits & 4\), presentSleep, sleepMarginUs, sleepStepUs, sleepK, sleepSpinUs \};/);
   assert.match(worker, /const presentSleep = typeof moduleInstance\?\._DolphinWeb_SetPresentOnArrival === "function" \? Boolean\(bits & 8\) : null;/);
   assert.match(core, /DolphinWeb_SetPresentOnArrival\(smooth_early \? 0 : 1\);/);
 });

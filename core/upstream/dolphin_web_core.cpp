@@ -68,6 +68,7 @@ extern "C" void DolphinWeb_SetDupXfbRearmsThrottle(int on);  // patch 0150
 extern "C" void DolphinWeb_SetPresentOnArrival(int on);       // patch 0153
 extern "C" void DolphinWeb_SetThrottleSleepMarginUs(int us);  // patch 0165
 extern "C" void DolphinWeb_SetThrottleSleepStepUs(int us);    // patch 0165
+extern "C" void DolphinWeb_SetThrottleSleepCascade(int k_permille, int spin_us);  // patch 0165
 extern "C" void NotifyWebGpuOwnershipTraceLoadRequested();
 
 #ifdef __EMSCRIPTEN__
@@ -772,6 +773,14 @@ void EnsureRuntime()
       EM_ASM_INT({ return (typeof Module !== 'undefined' &&
                            Number.isInteger(Module['dolphinSleepStepUs'])) ?
                               Module['dolphinSleepStepUs'] : 0; }));
+  // ?sleepk=<permille>&sleepspin=<us>: the geometric cascade (0: off).
+  DolphinWeb_SetThrottleSleepCascade(
+      EM_ASM_INT({ return (typeof Module !== 'undefined' &&
+                           Number.isInteger(Module['dolphinSleepK'])) ?
+                              Module['dolphinSleepK'] : 0; }),
+      EM_ASM_INT({ return (typeof Module !== 'undefined' &&
+                           Number.isInteger(Module['dolphinSleepSpinUs'])) ?
+                              Module['dolphinSleepSpinUs'] : 300; }));
   Config::SetBase(Config::MAIN_RUSH_FRAME_PRESENTATION, rush_presentation);
   Config::SetBase(Config::MAIN_SMOOTH_EARLY_PRESENTATION, smooth_early);
   Config::SetBase(Config::MAIN_SYNC_ON_SKIP_IDLE, sync_on_skip_idle);
