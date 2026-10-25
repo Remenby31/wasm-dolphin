@@ -1,15 +1,17 @@
 // Copyright 2026 wasm-dolphin contributors
 // SPDX-License-Identifier: GPL-2.0-or-later
 
-// An instruction that raises the alignment exception (lmw/stmw and the FP
-// loads and stores at an address that is not a multiple of 4) leaves it
-// pending, and the next instructions run: Dolphin's interpreter takes an
+// Patch 0163: an instruction that raises the alignment exception (lmw/stmw and
+// the FP loads and stores at an address that is not a multiple of 4) leaves
+// it pending, and the next instructions run: Dolphin's interpreter takes an
 // exception right after an instruction only for DSI (Interpreter.cpp,
 // SingleStepInner), the alignment one at its next CheckExceptions, as Jit64
-// does. The tiers must do the same, the pending bit included (oracle word 46):
-// their helpers' checks (CheckProgramOrDsi, InterpretAndCheckExceptions) stop
-// on DSI and PROGRAM only. Each case: an integer op before (a dirty register),
-// the faulting op, integer ops after, in a block and in a region.
+// does. The tiers do the same (their helpers' checks stop on DSI and PROGRAM
+// only), the pending bit included (oracle word 46). But the FP update forms
+// wrote rA anyway, where the interpreter returns before the update: 0163
+// writes it only at an aligned address. Each case: an integer op before (a
+// dirty register), the faulting op, integer ops after, in a block and in a
+// region; every FP load/store form, update and indexed ones included.
 
 import assert from "node:assert/strict";
 import { existsSync, readFileSync } from "node:fs";
@@ -20,9 +22,10 @@ import { PRODUCTION_DISABLE_MASK, describeDifference, hex, loadOracleCore, makeR
 const lock = JSON.parse(readFileSync(new URL("../provenance/dolphin-source.lock.json", import.meta.url), "utf8"));
 const builtUrl = new URL("../cores/dolphin/dolphin-core-upstream.build.json", import.meta.url);
 const built = existsSync(builtUrl) ? JSON.parse(readFileSync(builtUrl, "utf8")) : null;
-const coreCurrent = built?.source?.patchSeriesSha256 === lock.patchSeriesSha256;
-const core = coreCurrent ? await loadOracleCore() : null;
-const skip = !coreCurrent ? "core built from another patch series (CI builds this branch's core)" : !core ? "no core" : false;
+const coreHas0163 = built?.source?.patchSeriesSha256 === lock.patchSeriesSha256 &&
+  lock.patches.some((p) => p.path.includes("/0163-"));
+const core = coreHas0163 ? await loadOracleCore() : null;
+const skip = !coreHas0163 ? "core built from a patch series without 0163 (CI builds this branch's core)" : !core ? "no core" : false;
 
 const u = (v) => v >>> 0;
 const D = (op, rt, ra, d) => u((op << 26) | (rt << 21) | (ra << 16) | (d & 0xffff));
@@ -31,9 +34,11 @@ const ADDI = (rt, ra, v) => D(14, rt, ra, v);
 const BLR = 0x4e800020;
 // r1: the 8-aligned scratch base; r6 = 2 for the indexed forms.
 const FAULTING = [
-  ["lfs", D(48, 1, 1, 2)], ["lfd", D(50, 1, 1, 6)], ["stfs", D(52, 2, 1, 2)], ["stfd", D(54, 2, 1, 6)],
-  ["lfsu", D(49, 1, 1, 2)], ["stfdu", D(55, 2, 1, 2)], ["lfsx", X(1, 1, 6, 535)], ["stfdx", X(2, 1, 6, 727)],
-  ["lmw", D(46, 28, 1, 2)], ["stmw", D(47, 28, 1, 2)]
+  ["lfs", D(48, 1, 1, 2)], ["lfsu", D(49, 1, 1, 2)], ["lfd", D(50, 1, 1, 6)], ["lfdu", D(51, 1, 1, 2)],
+  ["stfs", D(52, 2, 1, 2)], ["stfsu", D(53, 2, 1, 2)], ["stfd", D(54, 2, 1, 6)], ["stfdu", D(55, 2, 1, 2)],
+  ["lfsx", X(1, 1, 6, 535)], ["lfsux", X(1, 1, 6, 567)], ["lfdx", X(1, 1, 6, 599)], ["lfdux", X(1, 1, 6, 631)],
+  ["stfsx", X(2, 1, 6, 663)], ["stfsux", X(2, 1, 6, 695)], ["stfdx", X(2, 1, 6, 727)], ["stfdux", X(2, 1, 6, 759)],
+  ["stfiwx", X(2, 1, 6, 983)], ["lmw", D(46, 28, 1, 2)], ["stmw", D(47, 28, 1, 2)]
 ];
 const program = (w) => [ADDI(5, 5, 1), w, ADDI(31, 31, 1), ADDI(31, 31, 1), ADDI(30, 30, 1), BLR];
 const stateFor = (k) => {
@@ -66,5 +71,5 @@ test("regions: an alignment exception stays pending and the region runs on, like
     assert.ok(res.equal, `${name}: ${JSON.stringify(res.difference)}`);
     ran++;
   }
-  assert.ok(ran >= 8, `${ran} region programs ran`);
+  assert.ok(ran >= 15, `${ran} region programs ran`);
 });

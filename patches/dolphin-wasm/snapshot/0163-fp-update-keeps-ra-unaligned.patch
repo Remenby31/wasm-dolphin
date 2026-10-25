@@ -1,0 +1,82 @@
+diff --git a/Source/Core/Core/PowerPC/CachedInterpreter/CachedInterpreter.cpp b/Source/Core/Core/PowerPC/CachedInterpreter/CachedInterpreter.cpp
+--- a/Source/Core/Core/PowerPC/CachedInterpreter/CachedInterpreter.cpp
++++ b/Source/Core/Core/PowerPC/CachedInterpreter/CachedInterpreter.cpp
+@@ -6799,6 +6799,27 @@ void EmitDirectStfdToL1(std::vector<u8>& body, const WasmStateLayout& layout,
+   EmitStoreU32BigEndianToL1AddressOffset(body, layout, sizeof(u32));
+ }
+ 
++// Patch 0163: the update forms of the FP loads and stores (lfsu, lfdu,
++// stfsu, stfdu and their x forms) write rA only when the access ran. At an
++// address that is not a multiple of 4 the interpreter raises the alignment
++// exception and returns before the update; the exception stays pending (it
++// does not stop the instruction, Interpreter.cpp), so the code goes on and
++// rA must keep its old value. A DSI halts before this point.
++void EmitFloatUpdateRa(std::vector<u8>& body, const WasmStateLayout& layout, UGeckoInstruction inst)
++{
++  EmitLocalGet(body, 1);
++  EmitI32Const(body, 3);
++  body.push_back(0x71);  // i32.and
++  body.push_back(0x45);  // i32.eqz
++  HintNextIf(body, true);  // aligned
++  body.push_back(0x04);
++  body.push_back(0x40);
++  EmitStateStoreU32Prefix(body);
++  EmitLocalGet(body, 1);
++  EmitStateStoreU32Suffix(body, GprOffset(layout, inst.RA));
++  body.push_back(0x0b);
++}
++
+ void EmitFloatLoadStore(std::vector<u8>& body, const WasmStateLayout& layout,
+                         const PPCAnalyst::CodeOp& op, u32 downcount, bool load, bool update)
+ {
+@@ -6844,11 +6865,7 @@ void EmitFloatLoadStore(std::vector<u8>& body, const WasmStateLayout& layout,
+   body.push_back(0x0b);
+ 
+   if (update)
+-  {
+-    EmitStateStoreU32Prefix(body);
+-    EmitLocalGet(body, 1);
+-    EmitStateStoreU32Suffix(body, GprOffset(layout, inst.RA));
+-  }
++    EmitFloatUpdateRa(body, layout, inst);
+ }
+ 
+ void EmitHighMem1FloatCondition(std::vector<u8>& body, const WasmStateLayout& layout, u32 bytes)
+@@ -6885,11 +6902,7 @@ void EmitLfdLoad(std::vector<u8>& body, const WasmStateLayout& layout,
+   body.push_back(0x0b);
+ 
+   if (update)
+-  {
+-    EmitStateStoreU32Prefix(body);
+-    EmitLocalGet(body, 1);
+-    EmitStateStoreU32Suffix(body, GprOffset(layout, inst.RA));
+-  }
++    EmitFloatUpdateRa(body, layout, inst);
+ }
+ 
+ void EmitStfdStore(std::vector<u8>& body, const WasmStateLayout& layout,
+@@ -6915,11 +6928,7 @@ void EmitStfdStore(std::vector<u8>& body, const WasmStateLayout& layout,
+   body.push_back(0x0b);
+ 
+   if (update)
+-  {
+-    EmitStateStoreU32Prefix(body);
+-    EmitLocalGet(body, 1);
+-    EmitStateStoreU32Suffix(body, GprOffset(layout, inst.RA));
+-  }
++    EmitFloatUpdateRa(body, layout, inst);
+ }
+ 
+ void EmitMultipleWordMemory(std::vector<u8>& body, const WasmStateLayout& layout,
+@@ -17943,8 +17952,9 @@ namespace
+ // 34 (0146): the 0141/0143 paths in fewer bytes (splatted constants, one
+ // helper call per op); 33 is retired (0144, closed). 35 (0147): psq_l and
+ // psq_st float pairs in v128. 36 (0157): regions run with MSR.FP clear,
+-// blocks with FPU ops checked at the head.
+-constexpr u32 AOT_COMPILER_VERSION = 36;
++// blocks with FPU ops checked at the head. 37 (0163): FP update forms keep rA
++// at an unaligned address.
++constexpr u32 AOT_COMPILER_VERSION = 37;
+ constexpr u32 AOT_MAX_FRAGMENT_BYTES = 1u << 20;
+ thread_local std::vector<u32> t_aot_out;
+ u8* s_aot_ram = nullptr;

@@ -25,7 +25,7 @@
       "commit": "01e0577914a75a2569c846778c2f93aa8e6feddd"
     }
   },
-  "patchSeriesSha256": "4f33f2e6ea34a11274bff0ebf5ae569c6b78f08802747b46a06c213ae7169a91",
+  "patchSeriesSha256": "454a8d6757a4fde0d206c0f21fa0bb650e3ad6db6925c289f7f317bb7f65c435",
   "patches": [
     {
       "order": 1,
@@ -997,6 +997,14 @@
     },
     {
       "order": 122,
+      "cwd": ".",
+      "hashMode": "lf-normalized",
+      "path": "patches/dolphin-wasm/snapshot/0163-fp-update-keeps-ra-unaligned.patch",
+      "size": 3403,
+      "sha256": "8e64294cd194adc74901334e41b9072f03f3d77bb3ee4c57fa877b9ff110d3b8"
+    },
+    {
+      "order": 123,
       "cwd": "Externals/SFML/SFML",
       "hashMode": "lf-normalized",
       "path": "patches/dolphin-wasm/submodules/0001-sfml-emscripten-config.patch",
@@ -1004,7 +1012,7 @@
       "sha256": "f82197a21fe982ad83f6ee7bbf5a03839b1cebd4d64da3eab11263842bf61d89"
     },
     {
-      "order": 123,
+      "order": 124,
       "cwd": "Externals/xxhash/xxHash",
       "hashMode": "lf-normalized",
       "path": "patches/dolphin-wasm/submodules/0002-xxhash-wasm-simd-scalar.patch",
