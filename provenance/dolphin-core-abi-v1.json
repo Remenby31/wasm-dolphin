@@ -1,19 +1,19 @@
 {
   "schemaVersion": 1,
   "abiVersion": 1,
-  "coreId": "sha256:9a46db5a28997d2fb7e239a51f9693b2bec5956fd858711c780ba7e2cda25ae4",
+  "coreId": "sha256:329699859ada4c5f7dc7bd68d8ef41c2d1792c119d1ac468264903d7d5eb17b9",
   "upstreamCommit": "e22551eae1c84a7e4d0b6a5c519ef4ed4ef69df1",
   "artifacts": [
     {
       "path": "cores/dolphin/dolphin-core-upstream.js",
       "hashMode": "lf-normalized",
-      "size": 285020,
-      "sha256": "ae11fc71489fb38c52f342827e703e4d517d71a05c1cd751060f52decfbf7ad2"
+      "size": 285792,
+      "sha256": "0ea65c9c3c3c2c661dc511a1adce337fb96a157c0d70b561343eba2c466cc5f0"
     },
     {
       "path": "cores/dolphin/dolphin-core-upstream.wasm",
-      "size": 13209801,
-      "sha256": "9a46db5a28997d2fb7e239a51f9693b2bec5956fd858711c780ba7e2cda25ae4"
+      "size": 13212689,
+      "sha256": "329699859ada4c5f7dc7bd68d8ef41c2d1792c119d1ac468264903d7d5eb17b9"
     }
   ],
   "contractSources": [
@@ -423,6 +423,9 @@
     "_DolphinWeb_HarnessCaptureTicks",
     "_DolphinWeb_HarnessCaptureWidth",
     "_DolphinWeb_HarnessDisarmCapture",
+    "_DolphinWeb_HarnessEfbSyncReset",
+    "_DolphinWeb_HarnessEfbSyncWord",
+    "_DolphinWeb_HarnessEfbSyncWords",
     "_DolphinWeb_HarnessEnable",
     "_DolphinWeb_HarnessEnabled",
     "_DolphinWeb_HarnessFifoRecord",
@@ -471,6 +474,7 @@
     "_DolphinWeb_MemAccessStaticAt",
     "_DolphinWeb_MemAccessStats",
     "_DolphinWeb_PacingConfig",
+    "_DolphinWeb_PresentCadenceStats",
     "_DolphinWeb_RecordCacheHit",
     "_DolphinWeb_RecordCacheMiss",
     "_DolphinWeb_RecordInstanceUs",
@@ -487,6 +491,7 @@
     "_DolphinWeb_SetFprfForTest",
     "_DolphinWeb_SetFusedMadd",
     "_DolphinWeb_SetGpuSpinBudget",
+    "_DolphinWeb_SetPresentOnArrival",
     "_DolphinWeb_UnverifyRegions",
     "_FlushMemoryCards",
     "_FrameBuffer",
