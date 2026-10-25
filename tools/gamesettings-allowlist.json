@@ -49,7 +49,7 @@
       "section": "Video_Hacks",
       "key": "DeferEFBCopies",
       "why": "Correctness: False makes each EFB copy to RAM wait for the GPU before the CPU goes on, for the games that read a copy back at once; deferred (Dolphin's default), they may read RAM before the copy lands. Only matters with EFBToTextureEnable=False; software copies synchronously either way.",
-      "measured": "MEASURED"
+      "measured": "No effect on the measurement disc (none of its INIs is kept). Its cost, forced on the race scene under wgpu + aot=1 with EFB copies to RAM (~780 a second; race-perf, 3 valid pairs, 2026-10-25): useful frames 50-55 -> 21/s (XFB copies per VI 0.84-0.92 -> 0.35), the GPU side becoming the limit (max speed 5.4-6.0 -> 1.35): each copy waits for its own readback (~2.5 ms). Paid by the 12 GameCube discs that set it with EFBToTextureEnable=False, as correctness asks; software copies synchronously either way."
     }
   ]
 }
