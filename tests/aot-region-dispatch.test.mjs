@@ -116,14 +116,17 @@ test("queued regions install at the slice boundary and the dispatcher runs them 
   assert.ok(stats.regionCycles > 0);
 });
 
-test("regions run only with translation and FP on", { skip }, () => {
+// Before 0157 (compiler version 36) regions ran with MSR.FP on only; since,
+// a region without FPU ops runs with it off too (see FP_OFF_TEXT).
+const fpOffRuns = () => core?.has("DolphinWeb_AotKeyParts") && keyVersion() >= 36;
+test("regions run only with translation on; with FP off only before 0157", { skip }, () => {
   installed();
   core.reset(seedGprs(1), PROGRAM.labels.double, STOP, 400000);
   assert.equal(core.dispatchRegion(), 1);
   core.reset(seedGprs(1), PROGRAM.labels.double, STOP, 400000);
   const msr = core.state()[37];
   core.loadState(Uint32Array.from(core.state(), (v, i) => (i === 37 ? msr & ~0x2000 : v)), PROGRAM.labels.double);
-  assert.equal(core.dispatchRegion(), 0, "FP off: the block path");
+  assert.equal(core.dispatchRegion(), fpOffRuns() ? 1 : 0, fpOffRuns() ? "FP off, no FPU op: the region" : "FP off: the block path");
 });
 
 // Patch 0085: an invalidation over a region's code checks it again against
@@ -765,10 +768,10 @@ const FPU = assemble(FPU_TEXT, [
   faddsRc(3, 1, 2), psMerge00(4, 1, 2), mffs(6),
   stfd(3, 5, 8), stfd(4, 5, 16), stfd(6, 5, 24), asm.addi(6, 6, 1), asm.blr()
 ]);
-const keyVersion = () => {
+function keyVersion() { // hoisted: an earlier test reads it (0157)
   const p = core.module._malloc(8);
   try { core.module._DolphinWeb_AotKeyParts(p); return new Uint32Array(core.module.HEAPU8.buffer, p, 2)[0]; } finally { core.module._free(p); }
-};
+}
 
 test("FPU ops outside the direct tier run inside the region, interpreted, like the interpreter (0105)", { skip: chainSkip || (core?.has("DolphinWeb_AotKeyParts") && keyVersion() < 6 && "core before 0105 (compiler version < 6)") }, () => {
   const dol = buildDol({ textAddr: FPU_TEXT, text: FPU.words, entry: FPU.labels.main });
@@ -794,6 +797,118 @@ test("FPU ops outside the direct tier run inside the region, interpreted, like t
   assert.equal(got.ran, 1);
   core.invalidate(FPU_TEXT, 4 * FPU.words.length);
 });
+
+// 0157: with MSR.FP clear (a thread that does not own the FPU, until its
+// first FPU op traps) regions run, but never a block holding an FPU op: the
+// fragment leaves at its start (returns 1, the frame written back) and the
+// block path raises FP unavailable there. One program per way in, each the
+// entry of its own DOL (so every function is in the plan); `fpu` names the
+// block the region must leave at.
+const FP_OFF_TEXT = 0x8001a100;
+const fadd = (d, a, b) => (63 << 26) | (d << 21) | (a << 16) | (b << 11) | (21 << 1);
+const SPARSE_GAP = 64;
+const FP_OFF_CASES = {
+  // A direct branch from a block without FPU ops (a later body).
+  branch: assemble(FP_OFF_TEXT, [
+    "main", asm.addi(3, 3, 1), asm.cmplwi(3, 0xffff), (pc, l) => asm.beq(pc, l.out),
+    "fpu", fadd(1, 1, 2), asm.addi(4, 4, 1),
+    "out", asm.blr()
+  ]),
+  // A call's continuation, the callee a wasm call in the same module.
+  continuation: assemble(FP_OFF_TEXT, [
+    "main", asm.mflr(0), asm.stwu(1, 1, -16), stw(0, 1, 20), (pc, l) => asm.bl(pc, l.leaf),
+    "fpu", fadd(3, 3, 4), lwz(0, 1, 20), asm.addi(1, 1, 16), mtlr(0), asm.blr(),
+    "leaf", asm.addi(5, 5, 2), asm.blr()
+  ]),
+  // The callee leaves (1) under the caller's wasm call, which passes it up.
+  callee: assemble(FP_OFF_TEXT, [
+    "main", asm.mflr(0), asm.stwu(1, 1, -16), stw(0, 1, 20), (pc, l) => asm.bl(pc, l.leaf),
+    lwz(0, 1, 20), asm.addi(1, 1, 16), mtlr(0), asm.blr(),
+    "leaf", asm.addi(5, 5, 2), asm.cmplwi(5, 0xffff), (pc, l) => asm.beq(pc, l.skip),
+    "fpu", fadd(1, 1, 2),
+    "skip", asm.blr()
+  ]),
+  // A back edge (to a body emitted earlier: through the head) into the FPU
+  // block: beq's target is discovered before its fall-through.
+  back: assemble(FP_OFF_TEXT, [
+    "main", asm.li(3, 5), asm.cmplwi(3, 0), (pc, l) => asm.beq(pc, l.fpu),
+    "fall", asm.addi(4, 4, 1), (pc, l) => asm.b(pc, l.fpu),
+    "fpu", fadd(1, 1, 2), asm.blr()
+  ]),
+  // Blocks spread over more than 4 words each: the head's compact br_if
+  // chain instead of its br_table (0133). A bc, not a b: never a tail call.
+  sparse: assemble(FP_OFF_TEXT, [
+    "main", asm.li(3, 5), asm.cmplwi(3, 0), (pc, l) => asm.bc(4, 2, pc, l.fpu), asm.blr(), // bne: taken
+    ...Array.from({ length: SPARSE_GAP }, () => asm.nop()),
+    "fpu", fadd(1, 1, 2), asm.blr()
+  ])
+};
+const fpOffSkip = chainSkip || (!fpOffRuns() && "core before 0157 (compiler version < 36)");
+function installFpOff(program) {
+  const dol = buildDol({ textAddr: FP_OFF_TEXT, text: program.words, entry: program.labels.main });
+  const { image, entryPoint } = imageFromDol(dol);
+  const plan = planDol({ image, entryPoint, gameId: "TEST01", dolBytes: dol, options: { gapFill: false } });
+  for (const seg of image.segments) core.load(seg.start, seg.bytes);
+  core.invalidate(FP_OFF_TEXT, 4 * program.words.length);
+  core.module._DolphinWeb_AotForgetRegionsForTest?.();
+  core.reset(seedGprs(program.labels.main), program.labels.main, STOP, 400000); // MSR.FP on while translating
+  core.setRegionsEnabled(true);
+  core.setRegionChaining(true);
+  queueAll(plan, 100, true); // caller and callee in one module: the call is a wasm call
+  serviceAll();
+}
+const withFp = (on) => {
+  const st = core.state();
+  core.loadState(Uint32Array.from(st, (v, i) => (i === 37 ? (on ? v | 0x2000 : v & ~0x2000) : v)), core.pc());
+};
+// From entry with MSR.FP off, until the FP unavailable exception is taken
+// (interpretOne returns 1 once MSR.IR is off) or STOP.
+function runFpOff(entry, { regions }) {
+  core.reset(seedGprs(entry), entry, STOP, 400000);
+  withFp(false);
+  const pcs = [];
+  for (let n = 0; n < 1000 && core.pc() !== STOP; n++) {
+    if (regions) {
+      const pc = core.pc();
+      const ran = core.dispatchRegion();
+      if (core.pc() !== pc) pcs.push(core.pc() >>> 0); // the region ran (1, or 0 having left at an FPU block)
+      if (ran) continue;
+    }
+    if (core.interpretOne()) break;
+  }
+  return { state: core.state(), downcount: core.downcount(), pcs };
+}
+
+for (const [name, program] of Object.entries(FP_OFF_CASES)) {
+  test(`with MSR.FP off a region runs up to a block with FPU ops and leaves at its start (${name}): the exception as the interpreter's (0157)`, { skip: fpOffSkip }, () => {
+    if (name === "sparse") assert.ok((program.labels.fpu - program.labels.main) / 4 + 1 > 4 * 3, "a compact head (3 blocks)");
+    installFpOff(program);
+    const reference = runFpOff(program.labels.main, { regions: false });
+    const got = runFpOff(program.labels.main, { regions: true });
+    assert.equal(reference.state[37] & 0x30, 0, "the exception was taken (IR, DR off)");
+    assert.deepEqual(got.state, reference.state);
+    assert.equal(got.downcount, reference.downcount);
+    assert.deepEqual(got.pcs, [program.labels.fpu], "the region left at the FPU block, nothing of it ran");
+    core.invalidate(FP_OFF_TEXT, 4 * program.words.length);
+  });
+}
+
+for (const name of ["branch", "sparse"]) {
+  test(`with MSR.FP off a region entered at a block with FPU ops does nothing; with FP on it runs it (${name} head, 0157)`, { skip: fpOffSkip }, () => {
+    const program = FP_OFF_CASES[name];
+    installFpOff(program);
+    core.reset(seedGprs(program.labels.fpu), program.labels.fpu, STOP, 400000);
+    withFp(false);
+    const before = core.state(), downcount = core.downcount();
+    assert.equal(core.dispatchRegion(), 0, "not run: the block path");
+    assert.deepEqual(core.state(), before);
+    assert.equal(core.downcount(), downcount);
+    withFp(true);
+    assert.equal(core.dispatchRegion(), 1, "FP on: the region");
+    assert.equal(core.pc(), STOP);
+    core.invalidate(FP_OFF_TEXT, 4 * program.words.length);
+  });
+}
 
 // 0111: region compares store their CR field as one i64 (SO clear) and a bc
 // on it decides on the compare's operands while they are intact. Unsigned

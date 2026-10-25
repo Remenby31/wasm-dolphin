@@ -68,12 +68,21 @@ const expectSame = (r, what) => {
   assert.ok(r.equal, `${what}: ${JSON.stringify(r.difference)}`);
 };
 
-test("an FPU op kept in the region as a helper call, with MSR.FP clear, takes FP unavailable in the region, like the interpreter (0105)", { skip: fpuSkip }, () => {
+test("an FPU op kept in the region as a helper call, with MSR.FP clear, takes FP unavailable like the interpreter (0105; in the region before 0157)", { skip: fpuSkip }, () => {
   const program = [addi(3, 3, 1), faddsRc(3, 1, 2), addi(3, 3, 1), BLR];
   const translateState = baseState(11);
   const state = translateState.slice();
   state[37] &= ~MSR_FP;
   const r = compareRegionProgram(core, program, state, { translateState });
+  if (compilerVersion() >= 36) {
+    // 0157: regions run with MSR.FP clear but leave at a block holding an
+    // FPU op, before running it: the block path takes FP unavailable.
+    assert.ok(r.translated && !r.trap && !r.error, JSON.stringify(r.error ?? r.difference));
+    assert.equal(r.got.regionRuns, 0, "the region left at its FPU block's start");
+    assert.ok(r.equal, JSON.stringify(r.difference));
+    assert.equal(r.got.end, "exception");
+    return;
+  }
   expectSame(r, "FP unavailable");
   assert.equal(r.got.end, "exception");
 });
