@@ -5,7 +5,7 @@ diff --git a/Source/Core/Core/PowerPC/CachedInterpreter/CachedInterpreter.cpp b/
    return true;
  }
  
-+// Patch 0162: an alignment exception (lmw/stmw, FP loads and stores at an
++// Patch 0163: an alignment exception (lmw/stmw, FP loads and stores at an
 +// unaligned address) stops the instruction as a DSI does: the interpreter
 +// takes it before the next instruction, so the tiers must not run on.
 +constexpr u32 WASM_HELPER_HALT_EXCEPTIONS = EXCEPTION_DSI | EXCEPTION_PROGRAM | EXCEPTION_ALIGNMENT;

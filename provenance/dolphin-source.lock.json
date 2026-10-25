@@ -25,7 +25,7 @@
       "commit": "01e0577914a75a2569c846778c2f93aa8e6feddd"
     }
   },
-  "patchSeriesSha256": "9226d1aad553ba1707cc8378c60d5595809628ed17353b526284c318607cf823",
+  "patchSeriesSha256": "db79dbc7f442b4c2ea611cfd5acc835660c778562d8c45c8669b701cdf111cdd",
   "patches": [
     {
       "order": 1,
@@ -999,9 +999,9 @@
       "order": 122,
       "cwd": ".",
       "hashMode": "lf-normalized",
-      "path": "patches/dolphin-wasm/snapshot/0162-alignment-stops-helpers.patch",
+      "path": "patches/dolphin-wasm/snapshot/0163-alignment-stops-helpers.patch",
       "size": 1916,
-      "sha256": "6312d2add7674ef2189f6f0c6946ecec9a21505dfacbe59ec38512aab2fc45c2"
+      "sha256": "10232ee0fdc4be3119fa900c3804f2dda44dc7007c63187ac39cebb7bdd2ac3d"
     },
     {
       "order": 123,

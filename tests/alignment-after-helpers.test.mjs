@@ -1,7 +1,7 @@
 // Copyright 2026 wasm-dolphin contributors
 // SPDX-License-Identifier: GPL-2.0-or-later
 
-// Patch 0162: an instruction that raises the alignment exception (lmw/stmw
+// Patch 0163: an instruction that raises the alignment exception (lmw/stmw
 // and the FP loads and stores at an address that is not a multiple of 4)
 // stops there, as in the interpreter: it vectors to 0x600 before the next
 // instruction. The helpers' exception checks (CheckProgramOrDsi, the
@@ -19,10 +19,10 @@ import { PRODUCTION_DISABLE_MASK, describeDifference, hex, loadOracleCore, makeR
 const lock = JSON.parse(readFileSync(new URL("../provenance/dolphin-source.lock.json", import.meta.url), "utf8"));
 const builtUrl = new URL("../cores/dolphin/dolphin-core-upstream.build.json", import.meta.url);
 const built = existsSync(builtUrl) ? JSON.parse(readFileSync(builtUrl, "utf8")) : null;
-const coreHas0162 = built?.source?.patchSeriesSha256 === lock.patchSeriesSha256 &&
-  lock.patches.some((p) => p.path.includes("/0162-"));
-const core = coreHas0162 ? await loadOracleCore() : null;
-const skip = !coreHas0162 ? "core built from a patch series without 0162 (CI builds this branch's core)" : !core ? "no core" : false;
+const coreHas0163 = built?.source?.patchSeriesSha256 === lock.patchSeriesSha256 &&
+  lock.patches.some((p) => p.path.includes("/0163-"));
+const core = coreHas0163 ? await loadOracleCore() : null;
+const skip = !coreHas0163 ? "core built from a patch series without 0163 (CI builds this branch's core)" : !core ? "no core" : false;
 
 const u = (v) => v >>> 0;
 const D = (op, rt, ra, d) => u((op << 26) | (rt << 21) | (ra << 16) | (d & 0xffff));
