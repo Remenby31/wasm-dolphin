@@ -324,7 +324,8 @@ test("the map is requested before the validation scope resolves; a scope error s
   for (const scopeError of [null, { message: "invalid copy" }]) {
     const { device, heap, words, rb } = setup();
     let resolveScope;
-    device.popErrorScope = () => new Promise((r) => { resolveScope = r; });
+    // The copy's scope stays pending; the map's own scope resolves at once.
+    device.popErrorScope = () => (resolveScope ? Promise.resolve(null) : new Promise((r) => { resolveScope = r; }));
     const done = rb.issue(device.queue, copyOf(1));
     await flush();
     assert.equal(device.created[0].mapRequested, true, "map requested while the scope is pending");
@@ -340,4 +341,20 @@ test("the map is requested before the validation scope resolves; a scope error s
       assert.equal(Atomics.load(words, 1), READBACK_OK);
     }
   }
+});
+
+// #254 review: an invalid buffer (createBuffer out of memory) mapped in
+// parallel raised an uncaptured validation error.
+test("the parallel map runs inside a scope of its own, popped at once", async () => {
+  const { device, rb } = setup();
+  const events = [];
+  const push = device.pushErrorScope.bind(device), pop = device.popErrorScope.bind(device);
+  device.pushErrorScope = (f) => { events.push("push"); push(f); };
+  device.popErrorScope = () => { events.push("pop"); return pop(); };
+  const done = rb.issue(device.queue, copyOf(1));
+  await flush();
+  device.created[0].land();
+  await done;
+  // the copy's scope, then the map's own, each popped at once
+  assert.deepEqual(events, ["push", "pop", "push", "pop"]);
 });
