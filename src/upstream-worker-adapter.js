@@ -104,8 +104,11 @@ export class UpstreamWorkerAdapter {
     syncOnSkipIdle = false,
     dupXfbRearmsThrottle = false,
     smoothEarly = true,
+    presentVsync = false,
     coreLog = false,
     memcardSlotB = false,
+    internalResolution = 1,
+    maxAnisotropy = -1,
     efbAccess = false,
     fifoLog = false,
     efbCopyRam = false,
@@ -229,8 +232,11 @@ export class UpstreamWorkerAdapter {
     this.syncOnSkipIdle = syncOnSkipIdle === true;
     this.dupXfbRearmsThrottle = dupXfbRearmsThrottle === true;
     this.smoothEarly = smoothEarly !== false;
+    this.presentVsync = presentVsync === true;
     this.coreLog = Boolean(coreLog);
     this.memcardSlotB = Boolean(memcardSlotB);
+    this.internalResolution = Number(internalResolution) || 1;
+    this.maxAnisotropy = Number.isInteger(maxAnisotropy) ? maxAnisotropy : -1;
     this.efbAccess = Boolean(efbAccess);
     this.fifoLog = Boolean(fifoLog);
     this.efbCopyRam = Boolean(efbCopyRam);
@@ -472,8 +478,11 @@ export class UpstreamWorkerAdapter {
       syncOnSkipIdle: this.syncOnSkipIdle,
       dupXfbRearmsThrottle: this.dupXfbRearmsThrottle,
       smoothEarly: this.smoothEarly,
+      presentVsync: this.presentVsync,
       coreLog: this.coreLog,
       memcardSlotB: this.memcardSlotB,
+      internalResolution: this.internalResolution,
+      maxAnisotropy: this.maxAnisotropy,
       efbAccess: this.efbAccess,
       fifoLog: this.fifoLog,
       efbCopyRam: this.efbCopyRam,
@@ -868,6 +877,17 @@ export class UpstreamWorkerAdapter {
     }
 
     return this.request("mixAudio", { frames });
+  }
+
+  // Patch 0168: internal resolution and anisotropy while a game runs.
+  async setEnhancements({ internalResolution = 1, maxAnisotropy = -1 } = {}) {
+    this.internalResolution = Number(internalResolution) || 1;
+    this.maxAnisotropy = Number.isInteger(maxAnisotropy) ? maxAnisotropy : -1;
+    if (!this.loaded) return { applied: false, reason: "core-not-loaded" };
+    return this.request("setEnhancements", {
+      internalResolution: this.internalResolution,
+      maxAnisotropy: this.maxAnisotropy
+    });
   }
 
   setAudioMuted(muted) {

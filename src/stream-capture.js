@@ -14,12 +14,27 @@
 //   (option B), which waits for the submitted GPU work.
 // The writer never queues: when the track's consumer has not taken the last
 // frame, the new one is dropped (the next one is fresher anyway).
+//
+// The stream keeps its own size: at internal resolution N (patch 0168) the
+// canvas is 640N x 480N and changes size with every switch. A wider canvas is
+// first drawn into a STREAM_WIDTH-wide canvas (a GPU blit with filtering),
+// so the encoder always gets 640x480, whatever the scale.
+
+export const STREAM_WIDTH = 640;
 
 export class StreamCapture {
   // VideoFrameImpl: injectable for tests (node has no VideoFrame).
-  constructor({ now = () => performance.now(), VideoFrameImpl = globalThis.VideoFrame } = {}) {
+  constructor({
+    now = () => performance.now(),
+    VideoFrameImpl = globalThis.VideoFrame,
+    createCanvas = (w, h) => new OffscreenCanvas(w, h),
+    streamWidth = STREAM_WIDTH
+  } = {}) {
     this.now = now;
     this.VideoFrameImpl = VideoFrameImpl;
+    this.createCanvas = createCanvas;
+    this.streamWidth = streamWidth;
+    this.scaler = null;
     this.writer = null;
     this.stats = StreamCapture.emptyStats();
   }
@@ -91,18 +106,34 @@ export class StreamCapture {
     this.push(frame, "bytes", width, height, coreFrame, startedAt);
   }
 
-  // A canvas just presented (WebGPU or WebGL backbuffer).
+  // A canvas just presented (WebGPU or WebGL backbuffer), brought down to
+  // the stream's width first when it is wider.
   offerCanvas(canvas, coreFrame) {
     if (!canvas || !this.ready()) return;
     const startedAt = this.now();
-    let frame;
+    let frame, source;
     try {
-      frame = new this.VideoFrameImpl(canvas, { timestamp: Math.round(startedAt * 1000), alpha: "discard" });
+      source = this.streamSource(canvas);
+      frame = new this.VideoFrameImpl(source, { timestamp: Math.round(startedAt * 1000), alpha: "discard" });
     } catch {
       this.stats.errors += 1;
       return;
     }
-    this.push(frame, "canvas", canvas.width, canvas.height, coreFrame, startedAt);
+    this.push(frame, "canvas", source.width, source.height, coreFrame, startedAt);
+  }
+
+  streamSource(canvas) {
+    if (!(canvas.width > this.streamWidth)) return canvas;
+    const width = this.streamWidth;
+    const height = Math.round(canvas.height * width / canvas.width);
+    if (!this.scaler || this.scaler.canvas.width !== width || this.scaler.canvas.height !== height) {
+      const scaled = this.createCanvas(width, height);
+      const ctx = scaled.getContext("2d", { alpha: false });
+      ctx.imageSmoothingQuality = "high";
+      this.scaler = { canvas: scaled, ctx };
+    }
+    this.scaler.ctx.drawImage(canvas, 0, 0, width, height);
+    return this.scaler.canvas;
   }
 
   push(frame, source, width, height, coreFrame, startedAt) {
