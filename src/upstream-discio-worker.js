@@ -7917,7 +7917,17 @@ export async function prepareAotFirstLaunch(file, {
     keyParts,
     translator,
     assembleOptions: core?.assemble,
-    openCache: (identity) => openAotCache({ ...identity, baseUrl: AOT_BASE_URL, cacheStorage }),
+    // Regions loaded back from the cache go through the compiler worker as
+    // those of a first launch do (precompileAotRegion): handed over at once,
+    // then every function called once in the background, so V8's lazy
+    // Liftoff code exists in the shared NativeModule before the CPU thread
+    // first runs it. Compiled here, by compileStreaming, they were never
+    // warmed: the CPU thread compiled each function on its first call (a
+    // warm launch lost ~0.3 s at the race's load, harness drop-meter).
+    openCache: (identity) => openAotCache({
+      ...identity, baseUrl: AOT_BASE_URL, cacheStorage,
+      ...(dolphinAotCompilerEnabled ? { compile: (bytes) => compileDolphinJitModuleOffThread(bytes, DELIVER_BEFORE_WARM, true), compileStreaming: null } : {})
+    }),
     planStore: opfs ? new OpfsPlanStore(opfs) : null,
     // Planning reads the DOL and RELs and runs discovery (about a second):
     // in a worker of its own, never on this one, which serves the core's

@@ -380,7 +380,9 @@ export async function openAotCache({
       // compiled from an untouched response, the one V8 attaches code to.
       let module;
       let streamed = false;
-      if (await viaServiceWorker()) {
+      // compileStreaming null: the caller compiles from the bytes (its
+      // compiler worker warms what it compiles).
+      if (compileStreaming && await viaServiceWorker()) {
         const response = await fetchImpl(urlOf(key));
         if (response.ok && response.headers.get(AOT_HASH_HEADER) === claimed) {
           module = await compileStreaming(response);

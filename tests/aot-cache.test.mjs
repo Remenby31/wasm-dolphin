@@ -232,6 +232,35 @@ test("with the Service Worker, modules come from compileStreaming(fetch) of an u
   }
 });
 
+// A warm launch's regions must reach the compiler worker, which warms what
+// it compiles: with compileStreaming null the cache compiles every module
+// from its bytes through the caller's compile, Service Worker or not.
+test("compileStreaming null: modules come from the caller's compile, even with the Service Worker", async () => {
+  const storage = fakeCacheStorage();
+  let cacheName = null;
+  const fetchImpl = async (url) => {
+    if (url.endsWith("/ping")) return new Response(null, { status: 204, headers: { "x-salon-aot-sw": "1" } });
+    const hit = await (await storage.open(cacheName)).match(url);
+    return hit ?? new Response(null, { status: 404 });
+  };
+  const compiled = [];
+  const cache = await openAotCache({ ...ident(), baseUrl: BASE, cacheStorage: storage, fetchImpl, compileStreaming: null,
+    compile: async (bytes) => { compiled.push(bytes.byteLength); return WebAssembly.compile(bytes); } });
+  cacheName = cache.cacheName;
+  await cache.put([{ key: k(1), bytes: MOD_A }]);
+  const got = (await cache.load([k(1)])).get(k(1));
+  assert.ok(got.module instanceof WebAssembly.Module);
+  assert.equal(got.streamed, false);
+  assert.deepEqual(compiled, [MOD_A.byteLength]);
+});
+
+// The worker opens the first launch's cache with the compiler worker's
+// compile (deliver before warm-up), as precompileAotRegion compiles.
+test("the worker loads cached regions through the compiler worker when it is on", async () => {
+  const w = await (await import("node:fs/promises")).readFile(new URL("../src/upstream-discio-worker.js", import.meta.url), "utf8");
+  assert.match(w, /openCache: \(identity\) => openAotCache\(\{\n\s*\.\.\.identity, baseUrl: AOT_BASE_URL, cacheStorage,\n\s*\.\.\.\(dolphinAotCompilerEnabled \? \{ compile: \(bytes\) => compileDolphinJitModuleOffThread\(bytes, DELIVER_BEFORE_WARM, true\), compileStreaming: null \} : \{\}\)/);
+});
+
 test("pruneAotCaches leaves other discs, foreign caches and caches being created alone", async () => {
   const storage = fakeCacheStorage();
   const a = await open(storage, {}, { clock });
