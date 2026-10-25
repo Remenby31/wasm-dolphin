@@ -262,7 +262,7 @@ if (process.env.DOLPHIN_WASM_CCACHE) {
 // PROFILING_FUNCS=1 adds a wasm name section to the core so CPU profiles show
 // real symbols instead of wasm-function[N]. Name section only — no codegen or
 // optimisation change, so timings stay representative. Off by default.
-if (process.env.PROFILING_FUNCS === "1") {
+if (true || process.env.PROFILING_FUNCS === "1") { // DIAG (not for merge): name section for a host profile
   // The -D was on its own for a while, and nothing in the vendored CMake ever
   // read it: the configure step logged that it was building with symbols, the
   // link never got the flag, and the profile still read wasm-function[N].
