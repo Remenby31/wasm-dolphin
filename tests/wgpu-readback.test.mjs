@@ -300,3 +300,21 @@ test("a readback released by a fatal submit stores nothing afterwards", async ()
   assert.match(worker, /function readbackFor\(device\) \{\n(?:.*\n)?  if \(wgpuReplayFatal\) return null;/, "no new readback once the replay is fatal");
   assert.match(worker, /const rb = readbackFor\(dev\);\n\s+if \(!rb\) break;/);
 });
+
+test("the snapshot carries per-copy latency from the submission: scope resolved, buffer mapped", async () => {
+  let t = 0;
+  const { device, rb } = setup();
+  const done = rb.issue(device.queue, copyOf(1), () => t);
+  t = 3;
+  await flush();
+  t = 12;
+  device.created[0].land();
+  await done;
+  const s = rb.snapshot({ reset: true });
+  assert.equal(s.latency.scope.count, 1);
+  assert.equal(s.latency.mapped.count, 1);
+  assert.equal(s.latency.mapped.maxMs, 12);
+  assert.equal(s.latency.mapped.buckets[s.boundsMs.indexOf(16)], 1, "12 ms lands in the ≤16 ms bucket");
+  assert.equal(s.stats.completed, 1);
+  assert.equal(rb.snapshot().latency.mapped.count, 0, "reset starts a new window");
+});
