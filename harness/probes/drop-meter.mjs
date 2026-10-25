@@ -12,6 +12,7 @@
 //     [--shots] [--region-counters] [--pc-window FROM-TO] [--max-load L] [--load-wait 300] [--lock-wait 14400 | --no-lock]
 //     [--out dir]
 //   node harness/probes/drop-meter.mjs --analyze <out dir> [--native ref.json]
+//   node harness/probes/drop-meter.mjs --trace drop-trace-….json   (salon's dev HUD)
 //
 // Merge guard: --baseline origin/main (the candidate defaults to this tree)
 // alternates the sides run by run and gives a verdict per visit: a metric
@@ -336,7 +337,7 @@ async function main() {
       runs: { type: "string", default: "6" }, visits: { type: "string", default: "2" },
       candidate: { type: "string" }, baseline: { type: "string" }, noise: { type: "string" }, trend: { type: "string" },
       config: { type: "string", default: "product" }, query: { type: "string" }, "sample-ms": { type: "string", default: "50" },
-      native: { type: "string" }, analyze: { type: "string" }, shots: { type: "boolean", default: false },
+      native: { type: "string" }, analyze: { type: "string" }, trace: { type: "string" }, shots: { type: "boolean", default: false },
       "region-counters": { type: "boolean", default: false }, "pc-window": { type: "string" },
       "max-load": { type: "string" }, "load-wait": { type: "string", default: "300" }, "lock-wait": { type: "string", default: "14400" }, "calm-wait": { type: "string" }, "no-lock": { type: "boolean", default: false },
       port: { type: "string", default: process.env.HARNESS_PORT }, out: { type: "string" }
@@ -345,6 +346,18 @@ async function main() {
   const log = (m) => console.log(`[drops] ${m}`);
   const native = values.native ? JSON.parse(readFileSync(values.native, "utf8")) : null;
   if (values.analyze) return analyzeDir(path.resolve(values.analyze), native, log);
+  // A trace the site's drop HUD recorded (salon, ?engine.drophud=1): a
+  // player's real session through the same analysis.
+  if (values.trace) {
+    const raw = JSON.parse(readFileSync(path.resolve(values.trace), "utf8"));
+    if (raw.format !== "salon-drop-trace-v1") throw new Error(`${values.trace}: not a salon drop trace (format ${raw.format})`);
+    const analysis = analyzeVisit(raw, { native });
+    const out = path.resolve(values.trace).replace(/\.json$/, "") + ".analysis.json";
+    writeFileSync(out, JSON.stringify(analysis) + "\n");
+    logRun(log, path.basename(values.trace), analysis);
+    log(`-> ${out}`);
+    return;
+  }
   if (!values.iso) throw new Error("usage: drop-meter.mjs --iso disc.iso --port N [--runs 6] [--visits 2] [--candidate ref|dir] [--baseline ref|dir] [--noise aa/summary.json] [--trend file.jsonl] | --analyze dir");
   const iso = path.resolve(values.iso);
   if (isLocalOnly(iso) && process.env.CI) throw new Error("this disc is local-only and must never run in CI");
