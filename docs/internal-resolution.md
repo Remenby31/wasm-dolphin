@@ -64,6 +64,7 @@ Results (2026-10-25, M4 Pro, Chrome headless, local darwin core):
 | ramcopy (`efbcopyram=1`, RAM readback) | 0.44 | 0.36 | 0, 0 |
 | efbpeek (`efbaccess=1`) | 0.71 | 0.58 | 0, 0 |
 | local commercial disc, race | 1.87 | 2.07 | 0, 0 |
+| local commercial disc, 2-player split screen | 2.63 | 2.79 | 0, 0 |
 
 The residue is edge antialiasing from the box filter. Switching 1 → 2 → 4
 → 1 while running: canvas and frame at the expected size each time. At 1x
