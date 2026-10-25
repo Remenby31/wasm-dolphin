@@ -677,7 +677,10 @@ test("KPI: a video=null run fills neither the product rows nor the hardware (wgp
   assert.equal(fitsConfig(r("video=wgpu&speed=1&aot=1"), "candidate", "aot"), true);
   // No video= is the harness default: a hardware row, as before.
   assert.equal(fitsConfig(r("speed=1&aot=1"), "candidate", "aot"), true);
-  assert.equal(fitsConfig(r("video=software&speed=1"), "candidate", "product"), true);
+  assert.equal(fitsConfig(r("video=software&pacing=tick&speed=1"), "candidate", "product"), true);
+  // The site since salon 9a3dfbf: wgpu + aot=1 with its own parameters is the product row, not the harness's wgpu row.
+  assert.equal(fitsConfig(r("video=wgpu&presenter=webgpu&pacing=tick&fastsw=1&speed=1&aot=1"), "candidate", "productAot"), true);
+  assert.equal(fitsConfig(r("video=wgpu&presenter=webgpu&pacing=tick&fastsw=1&speed=1&aot=1"), "candidate", "aot"), false);
 });
 
 test("KPI: the race rows read the race scene only, never a heavy-scene run", () => {

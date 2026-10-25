@@ -61,23 +61,26 @@ export function servedSides(r) {
 }
 
 // Configurations of the race-perf and TTFF rows (judge, 2026-10-22): the
-// product is what the Salon site ships (video=software, no aot: salon
-// packages/core/src/emulator.ts BASE_PARAMS) and is what the global status
-// counts; the hardware renderer (video=wgpu, "default"/"aot") and aot=1 are
-// trajectory rows.
+// product is what the Salon site ships and is what the global status counts;
+// the harness's own renderer queries ("default"/"aot") are trajectory rows.
+// The site is told by its engine parameters, salon packages/core/src/
+// emulator.ts BASE_PARAMS (pacing=tick, absent from the harness's renderer
+// queries; the software renderer counts as the site too, as before), not by
+// its renderer alone: it shipped video=software until 2026-10-24 and ships
+// video=wgpu (renderer.ts WGPU_DEFAULT) with aot=1 (fast profile) since
+// salon 9a3dfbf.
 export const CONFIGS = {
-  product: { aot: false, product: true, label: "config produit (video=software, sans aot)" },
-  productAot: { aot: true, product: true, label: "config produit avec aot=1" },
+  product: { aot: false, product: true, label: "site tel que livré (paramètres Salon), sans aot" },
+  productAot: { aot: true, product: true, label: "site tel que livré (paramètres Salon), aot=1 (profil rapide depuis salon 9a3dfbf)" },
   default: { aot: false, product: false, label: "rendu matériel (video=wgpu), sans aot=1" },
   aot: { aot: true, product: false, label: "rendu matériel (video=wgpu), aot=1" }
 };
 const queryOf = (j, side, kind) => new URLSearchParams(String((kind === "ttff" || side !== "baseline" ? j.query : j.baselineQuery ?? j.query) ?? ""));
-// The product config renders in software; the hardware rows take the
-// renderer (video=wgpu, or no video= for the harness default), never
-// video=null, which renders nothing (2026-10-24: a video=null run filled
-// the wgpu rows).
+// The hardware rows take the harness's renderer queries (video=wgpu, or no
+// video= for the harness default), never video=null, which renders nothing
+// (2026-10-24: a video=null run filled the wgpu rows).
 const sideVideo = (j, side, kind) => queryOf(j, side, kind).get("video");
-export const sideIsProduct = (j, side, kind = "race-perf") => sideVideo(j, side, kind) === "software";
+export const sideIsProduct = (j, side, kind = "race-perf") => queryOf(j, side, kind).get("pacing") === "tick" || sideVideo(j, side, kind) === "software";
 // The race rows read the race scene only: a race-perf run on another
 // savestate (the heavy scene, heavy-*.sav) is not the race (2026-10-25: the
 // night campaign's heavy runs, newer, filled the race speed and headroom rows).
@@ -90,7 +93,7 @@ export function fitsConfig(r, side, config) {
     : r.kind === "first-launch-ramp" ? queryOf(r.json, side, r.kind).get("aot") === "1"
     : sideHasAot(r.json, side);
   const video = sideVideo(r.json, side, r.kind);
-  return aot === want.aot && (want.product ? video === "software" : video !== "software" && video !== "null");
+  return aot === want.aot && video !== "null" && sideIsProduct(r.json, side, r.kind) === want.product;
 }
 
 // The side of `r` that measured trunk (candidate first) in `config`, or null.
