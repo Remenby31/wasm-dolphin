@@ -15,7 +15,8 @@
 //   node harness/probes/drop-meter.mjs --trace drop-trace-….json   (salon's dev HUD)
 //
 // Merge guard: --baseline origin/main (the candidate defaults to this tree)
-// alternates the sides run by run and gives a verdict per visit: a metric
+// alternates the sides run by run and gives a verdict per visit and per
+// phase of the scenario (each against its own A/A noise): a metric
 // regresses when its median moved the worse way by more than its noise (the
 // A/A of --noise, else the two sides' spread). Exit code 2 on a regression.
 // Nightly: --trend appends the run's medians to a JSONL file and rewrites
@@ -53,7 +54,7 @@ import { parseArgs } from "node:util";
 import { gunzipSync, gzipSync } from "node:zlib";
 
 import { bootIso, ensureServer, grabFrame, launchChrome, loadHarnessState, readTimeline, REPO_ROOT, workerRequest } from "../lib/browser.mjs";
-import { dropEvents, dropSummary, loadSegments, nativeFps, noiseOf, phaseSummaries, rowsOf, trendLine, trendTable, verdictOf, windowsOf, worstDrops } from "../lib/drops.mjs";
+import { dropEvents, dropSummary, loadSegments, nativeFps, noiseOf, PHASE_FLOOR, phaseSummaries, rowsOf, trendLine, trendTable, verdictOf, windowsOf, worstDrops } from "../lib/drops.mjs";
 import { exportRef } from "../cli.mjs";
 import { calmLock, loadGaveUp } from "../lib/env.mjs";
 import { claim } from "../lib/ownership.mjs";
@@ -288,6 +289,8 @@ export function humanSummary(summary) {
     lines.push(`${v.visit === 1 ? "cold" : "warm"} (${v.candidate.runs} runs): lost ${n.lostMs?.median ?? "–"} ms, <95 % ${n.pctBelow95?.median ?? "–"} % of the time, worst 1 s ${n.worstSecond?.median ?? "–"} %, hitches >100 ms ${n.hitches100?.median ?? "–"}, load excess ${n.loadExcessMs?.median ?? "–"} ms; worst drop ${top ? `${top.label} ${Math.round(top.lostMs)} ms (${top.cause})` : "none"}`);
     if (v.verdict) {
       const bad = v.verdict.rows.filter((r) => r.regression).map((r) => `${r.metric} ${r.baseline} → ${r.candidate} (> ${r.threshold})`);
+      const phaseBad = Object.entries(v.phaseVerdicts ?? {}).flatMap(([label, pv]) => pv.rows.filter((r) => r.regression).map((r) => `${label} ${r.metric} ${r.baseline} → ${r.candidate} (> ${r.threshold})`));
+      if (phaseBad.length) lines.push(`   phases: REGRESSION ${phaseBad.join(", ")}`);
       lines.push(`   verdict: ${v.verdict.inconclusive ? `INCONCLUSIVE (fewer than 3 runs a side and no --noise)` : v.verdict.regression ? `REGRESSION ${bad.join(", ")}` : "no regression beyond the noise"}${v.verdict.improvement ? " (some improvement)" : ""}`);
     }
   }
@@ -303,7 +306,11 @@ function writeSummary(outDir, meta, analyses, visits, { noise = null } = {}) {
     if (analyses.some((a) => a.side === "baseline")) {
       entry.baseline = summarizeVisits(of("baseline"));
       const ok = (xs) => xs.filter((a) => !a.error && !a.overloaded).map((a) => a.summary);
-      entry.verdict = verdictOf(ok(of("baseline")), ok(of("candidate")), { noise: noise?.[v] ?? null });
+      entry.verdict = verdictOf(ok(of("baseline")), ok(of("candidate")), { noise: noise?.[v]?.run ?? null });
+      const phasesOf = (side, label) => of(side).filter((a) => !a.error && !a.overloaded).map((a) => a.phases.find((p) => p.label === label)).filter(Boolean);
+      const labels = [...new Set(of("candidate").filter((a) => !a.error).flatMap((a) => a.phases.map((p) => p.label)))];
+      entry.phaseVerdicts = Object.fromEntries(labels.map((label) => [label,
+        verdictOf(phasesOf("baseline", label), phasesOf("candidate", label), { noise: noise?.[v]?.phases?.[label] ?? null, floor: PHASE_FLOOR })]));
     }
     summary.visitSummary.push(entry);
   }
@@ -315,7 +322,7 @@ function writeSummary(outDir, meta, analyses, visits, { noise = null } = {}) {
 // The A/A noise of a previous summary.json, per visit number.
 function readNoise(file) {
   const s = JSON.parse(readFileSync(file, "utf8"));
-  return Object.fromEntries(s.visitSummary.map((v) => [v.visit, (v.candidate ?? v).noise]));
+  return Object.fromEntries(s.visitSummary.map((v) => [v.visit, { run: (v.candidate ?? v).noise, phases: (v.candidate ?? v).phases ?? {} }]));
 }
 
 function logRun(log, tag, a) {
@@ -325,7 +332,7 @@ function logRun(log, tag, a) {
   for (const d of a.worst.slice(0, 3)) log(`   drop ${d.label} @${round(d.guestStart, 1)} gs: ${d.durationMs} ms, lost ${d.lostMs} ms, min ${d.minSpeed} %, cause ${d.cause}, ${d.jitBlocks} new blocks (${d.defers} deferred), causes ${JSON.stringify(d.causesMs)}`);
 }
 
-async function analyzeDir(dir, native, log) {
+async function analyzeDir(dir, native, log, noise = null) {
   const meta = JSON.parse(readFileSync(path.join(dir, "summary.json"), "utf8"));
   const analyses = [];
   for (const f of readdirSync(dir).filter((x) => /^raw-(candidate|baseline)-\d+-v\d+\.json\.gz$/.test(x)).sort()) {
@@ -336,7 +343,7 @@ async function analyzeDir(dir, native, log) {
     writeFileSync(path.join(dir, f.replace(/^raw-/, "").replace(/\.json\.gz$/, ".json")), JSON.stringify(analysis) + "\n");
     logRun(log, f, analysis);
   }
-  const summary = writeSummary(dir, { ...meta, reanalyzedAt: new Date().toISOString(), native: Boolean(native) }, analyses, meta.visits ?? 1);
+  const summary = writeSummary(dir, { ...meta, reanalyzedAt: new Date().toISOString(), native: Boolean(native) }, analyses, meta.visits ?? 1, { noise });
   for (const l of summary.human) log(l);
 }
 
@@ -355,7 +362,7 @@ async function main() {
   });
   const log = (m) => console.log(`[drops] ${m}`);
   const native = values.native ? JSON.parse(readFileSync(values.native, "utf8")) : null;
-  if (values.analyze) return analyzeDir(path.resolve(values.analyze), native, log);
+  if (values.analyze) return analyzeDir(path.resolve(values.analyze), native, log, values.noise ? readNoise(values.noise) : null);
   // A trace the site's drop HUD recorded (salon, ?engine.drophud=1): a
   // player's real session through the same analysis.
   if (values.trace) {
@@ -444,7 +451,8 @@ async function main() {
   for (const l of summary.human) log(l);
   log(`-> ${outDir}`);
   const failed = analyses.some((a) => a.analysis.error);
-  process.exitCode = failed ? 1 : summary.visitSummary.some((v) => v.verdict?.regression) ? 2 : 0;
+  const regressed = summary.visitSummary.some((v) => v.verdict?.regression || Object.values(v.phaseVerdicts ?? {}).some((p) => p.regression));
+  process.exitCode = failed ? 1 : regressed ? 2 : 0;
 }
 
 if (import.meta.url === pathToFileURL(process.argv[1] ?? "").href) await main();

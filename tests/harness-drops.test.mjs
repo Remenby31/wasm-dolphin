@@ -5,7 +5,7 @@ import assert from "node:assert/strict";
 import { readFile } from "node:fs/promises";
 import test from "node:test";
 
-import { causeOf, dropEvents, dropSummary, interpolate, loadSegments, noiseOf, rowsOf, stallOverlap, trendLine, trendTable, verdictOf, windowsOf } from "../harness/lib/drops.mjs";
+import { causeOf, PHASE_FLOOR, dropEvents, dropSummary, interpolate, loadSegments, noiseOf, rowsOf, stallOverlap, trendLine, trendTable, verdictOf, windowsOf } from "../harness/lib/drops.mjs";
 import { stepsFor, validateScenario } from "../harness/probes/drop-meter.mjs";
 import { createDropSampler, histogramSum } from "../src/harness-drop-sampler.js";
 
@@ -139,6 +139,13 @@ test("verdict: a move beyond the noise is a regression, inside it is not", () =>
   assert.equal(one.regression, false);
   assert.equal(one.inconclusive, true);
   assert.equal(verdictOf([{ lostMs: 854 }], [{ lostMs: 957 }], { noise: { lostMs: { n: 6, minDiff: 300 } } }).inconclusive, false);
+});
+
+test("per phase: a 50 ms loss on a stable load is a regression the whole run's noise would hide", () => {
+  const base = [{ lostMs: 175 }, { lostMs: 168 }, { lostMs: 182 }];
+  const cand = [{ lostMs: 228 }, { lostMs: 221 }, { lostMs: 232 }];
+  assert.equal(verdictOf(base, cand, { noise: { lostMs: { n: 6, minDiff: 211 } } }).regression, false); // the run's noise
+  assert.equal(verdictOf(base, cand, { noise: { lostMs: { n: 6, minDiff: 9 } }, floor: PHASE_FLOOR }).regression, true); // the phase's
 });
 
 test("A/A noise, trend line and table", () => {

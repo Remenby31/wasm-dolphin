@@ -346,7 +346,10 @@ export const GUARDED = {
 // two sides' own spread. Small absolute moves never count (floor).
 export const VERDICT_MIN_RUNS = 3;
 export const VERDICT_FLOOR = { lostMs: 50, pctBelow95: 0.5, pctBelow90: 0.5, worstSecond: 5, hitches50: 2, hitches100: 1, presentP99: 2, loadExcessMs: 50 };
-export function verdictOf(baseline, candidate, { noise = null } = {}) {
+// Per phase of the scenario (each with its own A/A noise): a stable load
+// moves far less than the whole run, whose noise would hide it.
+export const PHASE_FLOOR = { lostMs: 20, worstSecond: 5, hitches50: 2, hitches100: 1, presentP99: 2 };
+export function verdictOf(baseline, candidate, { noise = null, floor = VERDICT_FLOOR } = {}) {
   const rows = [];
   for (const [k, worse] of Object.entries(GUARDED)) {
     const b = baseline.map((s) => s[k]).filter(Number.isFinite), c = candidate.map((s) => s[k]).filter(Number.isFinite);
@@ -366,7 +369,7 @@ export function verdictOf(baseline, candidate, { noise = null } = {}) {
       const sd = Math.sqrt(((stdev(b) ?? 0) ** 2 + (stdev(c) ?? 0) ** 2) / 2);
       threshold = 2 * sd * Math.sqrt(2 / Math.max(n, 1));
     }
-    threshold = Math.max(threshold, VERDICT_FLOOR[k] ?? 0);
+    threshold = Math.max(threshold, floor[k] ?? 0);
     const worseBy = worse === "up" ? delta : -delta;
     rows.push({ metric: k, baseline: round(median(b), 2), candidate: round(median(c), 2), delta: round(delta, 2), threshold: round(threshold, 2), regression: worseBy > threshold, improvement: -worseBy > threshold });
   }
