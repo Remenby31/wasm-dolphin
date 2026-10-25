@@ -183,6 +183,14 @@ export class WgpuReadback {
       thrown = true;
     }
     const scope = this.device.popErrorScope();
+    // The map goes out with the scope, not once it resolves
+    // (research/deep-efb-ram-copy-latency.md §3): one IPC round trip and one
+    // worker task less before the texels land. A copy the scope reports bad
+    // throws the map's result away: its buffer is destroyed, which rejects a
+    // map still pending.
+    const mapped = thrown || !buffer
+      ? null
+      : buffer.mapAsync(MAP_MODE_READ).then(() => true, () => false);
     const rejected = thrown || Boolean(await scope.catch(() => true));
     recordLatency(this.latency.scope, now() - c.at);
     if (generation !== this.generation) {
@@ -196,9 +204,7 @@ export class WgpuReadback {
       this.finish(entry, "lost", null, "failed");
       return;
     }
-    try {
-      await buffer.mapAsync(MAP_MODE_READ);
-    } catch {
+    if (!(await mapped)) {
       buffer.destroy();
       if (generation === this.generation) this.finish(entry, "lost", null, "failed");
       return;
