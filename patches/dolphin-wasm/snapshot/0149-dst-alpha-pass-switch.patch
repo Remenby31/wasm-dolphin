@@ -1,0 +1,64 @@
+diff --git a/Source/Core/VideoCommon/VertexManagerBase.cpp b/Source/Core/VideoCommon/VertexManagerBase.cpp
+--- a/Source/Core/VideoCommon/VertexManagerBase.cpp
++++ b/Source/Core/VideoCommon/VertexManagerBase.cpp
+@@ -45,6 +45,19 @@
+ #include "VideoCommon/XFMemory.h"
+ #include "VideoCommon/XFStateManager.h"
+ 
++#include <atomic>
++
++#ifdef __EMSCRIPTEN__
++#include <emscripten/emscripten.h>
++#endif
++
++// Patch 0149: the dst-alpha second pass (0136) as a runtime switch, and the
++// draws it adds. Set by the worker (?dstalpha2pass=0 turns it off), read by
++// the harness: a kill switch and an A/B within one core.
++static std::atomic<bool> s_dst_alpha_two_pass{true};
++static std::atomic<u32> s_dst_alpha_extra_draws{0};
++static std::atomic<u32> s_dst_alpha_flushes{0};
++
+ std::unique_ptr<VertexManagerBase> g_vertex_manager;
+ 
+ using OpcodeDecoder::Primitive;
+@@ -661,7 +674,8 @@
+             pipeline_object = custom_pipeline;
+           }
+         }
+-        else if (g_ActiveConfig.iShaderCompilationMode == ShaderCompilationMode::Synchronous &&
++        else if (s_dst_alpha_two_pass.load(std::memory_order_relaxed) &&
++                 g_ActiveConfig.iShaderCompilationMode == ShaderCompilationMode::Synchronous &&
+                  NeedsDstAlphaPass(m_current_pipeline_config))
+         {
+           const DstAlphaPasses passes = DstAlphaPassConfigs(m_current_pipeline_config);
+@@ -673,6 +687,9 @@
+             pipeline_object = color_pass;
+             dst_alpha_pipeline = alpha_pass;
+             dst_alpha_first = passes.alpha_first;
++            s_dst_alpha_flushes.fetch_add(1, std::memory_order_relaxed);
++            if (alpha_pass)
++              s_dst_alpha_extra_draws.fetch_add(1, std::memory_order_relaxed);
+           }
+         }
+         RenderDrawCall(pixel_shader_manager, geometry_shader_manager, custom_pixel_shader_contents,
+@@ -1270,4 +1287,20 @@
+   }
+ 
+   return nullptr;
++}
++
++#ifdef __EMSCRIPTEN__
++extern "C" EMSCRIPTEN_KEEPALIVE void DolphinWeb_SetDstAlphaTwoPass(int on)
++{
++  s_dst_alpha_two_pass.store(on != 0, std::memory_order_relaxed);
+ }
++
++// Cumulative: [0] flushes drawn through the two passes, [1] extra draws (the
++// destination-alpha pass; 0 for a NEVER-rejected one), [2] the switch.
++extern "C" EMSCRIPTEN_KEEPALIVE void DolphinWeb_DstAlphaPassStats(u32* out)
++{
++  out[0] = s_dst_alpha_flushes.load(std::memory_order_relaxed);
++  out[1] = s_dst_alpha_extra_draws.load(std::memory_order_relaxed);
++  out[2] = s_dst_alpha_two_pass.load(std::memory_order_relaxed) ? 1 : 0;
++}
++#endif

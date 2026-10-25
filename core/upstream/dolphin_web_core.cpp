@@ -736,13 +736,14 @@ void EnsureRuntime()
   Config::SetBase(Config::MAIN_OVERCLOCK_ENABLE, true);
   Config::SetBase(Config::MAIN_OVERCLOCK, s_cpu_overclock);
   Config::SetBase(Config::MAIN_PRECISION_FRAME_TIMING, false);
-  // Pacing switches (patch 0150, for measurement; all off by default):
-  // ?rush=0 (Module['dolphinRushPresentation'] false) turns Rush Frame
-  // Presentation off, ?synconidle=1 turns Dolphin's SyncOnSkipIdle on,
-  // ?dupvsync=1 makes a duplicated XFB rearm the Rush throttle.
+  // Pacing switches (patch 0150): Rush Frame Presentation is off, as
+  // upstream's default (with it, heavy scenes ran up to 40 ms ahead of the
+  // presents: VI p99 ~60 ms); ?rush=1 (Module['dolphinRushPresentation'] true)
+  // turns it back on. For measurement: ?synconidle=1 turns Dolphin's
+  // SyncOnSkipIdle on, ?dupvsync=1 makes a duplicated XFB rearm the throttle.
   const bool rush_presentation =
       EM_ASM_INT({ return (typeof Module !== 'undefined' &&
-                           Module['dolphinRushPresentation'] === false) ? 0 : 1; }) != 0;
+                           Module['dolphinRushPresentation'] === true) ? 1 : 0; }) != 0;
   const bool sync_on_skip_idle =
       EM_ASM_INT({ return (typeof Module !== 'undefined' &&
                            Module['dolphinSyncOnSkipIdle'] === true) ? 1 : 0; }) != 0;

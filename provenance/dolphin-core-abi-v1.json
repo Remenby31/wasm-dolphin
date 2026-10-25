@@ -1,19 +1,19 @@
 {
   "schemaVersion": 1,
   "abiVersion": 1,
-  "coreId": "sha256:951d5c41b41002fc90f26191a86b24febab4843be048f4e28dceb9a821140541",
+  "coreId": "sha256:789c90151723d8f4bf6be9a88b3d264bf855356a764743455de5cd304390d944",
   "upstreamCommit": "e22551eae1c84a7e4d0b6a5c519ef4ed4ef69df1",
   "artifacts": [
     {
       "path": "cores/dolphin/dolphin-core-upstream.js",
       "hashMode": "lf-normalized",
-      "size": 283383,
-      "sha256": "c0f45e57552fcff5a440008c2110096da30ef57bbb3e9a09d8a71ea6aa6a5c86"
+      "size": 284221,
+      "sha256": "cd8c4b17d55d92d9198334b7daafcafde6ae7934e5339e9e320292486d0f755d"
     },
     {
       "path": "cores/dolphin/dolphin-core-upstream.wasm",
-      "size": 13193903,
-      "sha256": "951d5c41b41002fc90f26191a86b24febab4843be048f4e28dceb9a821140541"
+      "size": 13201885,
+      "sha256": "789c90151723d8f4bf6be9a88b3d264bf855356a764743455de5cd304390d944"
     }
   ],
   "contractSources": [
@@ -44,8 +44,8 @@
     {
       "path": "core/upstream/dolphin_web_core.cpp",
       "hashMode": "lf-normalized",
-      "size": 57659,
-      "sha256": "f715ba6789669fd9c0e7f732f02d81b7b1bee8f8cb959e53466b39dbcc4fb8bd"
+      "size": 57752,
+      "sha256": "e65e1b4c46a1567201c76c7bc64c43fd0e93eae24c27d1fc0a986d854d43500d"
     },
     {
       "path": "src/app.js",
@@ -86,8 +86,8 @@
     {
       "path": "src/core-host.js",
       "hashMode": "lf-normalized",
-      "size": 77376,
-      "sha256": "0ee9432ca1bdf56e80c61670027d17871b889edacd8ebb7968f8ef69851d5187"
+      "size": 79477,
+      "sha256": "ed1d75f50bf7a90534499e3ea02d3809d7b81c7c18c3e4da5423c9d0b1bff605"
     },
     {
       "path": "src/diagnostic-log-filter.js",
@@ -140,8 +140,8 @@
     {
       "path": "src/upstream-discio-worker.js",
       "hashMode": "lf-normalized",
-      "size": 737803,
-      "sha256": "ae31e4a2d828f3efbea0225ffc97042f1cb8b028c6c3cc070603e1599fe6b9a6"
+      "size": 752922,
+      "sha256": "6b774d6e4d4e909a5abd223ff42331562f3b3c24004d33b0d9516f238535ff9c"
     },
     {
       "path": "src/wgpu-renderer-worker-probe.js",
@@ -164,8 +164,8 @@
     {
       "path": "src/upstream-worker-adapter.js",
       "hashMode": "lf-normalized",
-      "size": 53980,
-      "sha256": "285998cdf0e760f11176fbdf2d3e0923523d02f2ac351a1b22e7d1d28ac55002"
+      "size": 55605,
+      "sha256": "da7588f831bc41a22d8ed4637db856f97b0db4402e70944153e0adb5ceb6b6cb"
     },
     {
       "path": "src/upstream-worker-protocol.js",
@@ -406,6 +406,9 @@
     "_DolphinWeb_AxHleStats",
     "_DolphinWeb_DirectPadBlock",
     "_DolphinWeb_DirectPadLayout",
+    "_DolphinWeb_DiscReadStats",
+    "_DolphinWeb_DiscReadStatsResetMax",
+    "_DolphinWeb_DstAlphaPassStats",
     "_DolphinWeb_EmulatedRtc",
     "_DolphinWeb_FmaIsMusl",
     "_DolphinWeb_FusedMadd",
@@ -455,6 +458,7 @@
     "_DolphinWeb_JitRegionChainStats",
     "_DolphinWeb_JitRegionCount",
     "_DolphinWeb_JitRegionInstallSamples",
+    "_DolphinWeb_JitRegionMissTop",
     "_DolphinWeb_JitRegionStats",
     "_DolphinWeb_JitRegionTransitionTop",
     "_DolphinWeb_JitSetRegionChaining",
@@ -474,6 +478,9 @@
     "_DolphinWeb_RegionCallStats",
     "_DolphinWeb_RegionChainHelper",
     "_DolphinWeb_RegionGuardRefusals",
+    "_DolphinWeb_SetCodeSpaceMiB",
+    "_DolphinWeb_SetDiscReadStatsEnabled",
+    "_DolphinWeb_SetDstAlphaTwoPass",
     "_DolphinWeb_SetFprfForTest",
     "_DolphinWeb_SetFusedMadd",
     "_DolphinWeb_SetGpuSpinBudget",
@@ -654,6 +661,7 @@
       "mountFile",
       "pause",
       "rendererDiagnostics",
+      "replacePresenterCanvas",
       "reset",
       "resume",
       "runFrame",
@@ -676,11 +684,14 @@
       "validationFinalizeWgpuMappedDrain",
       "validationFinalizeWgpuRendererProbe",
       "validationFinalizeWgpuReplay",
+      "validationLoseWebGlContext",
       "validationPcSampler",
       "validationReadAotProgress",
       "validationReadAxHleStats",
       "validationReadCoreProgress",
       "validationReadDetTrace",
+      "validationReadDiscReads",
+      "validationReadDstAlphaPasses",
       "validationReadHeadroomStats",
       "validationReadJitCacheReadiness",
       "validationReadJitRegionStats",

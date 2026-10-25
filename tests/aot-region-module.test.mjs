@@ -1,7 +1,7 @@
 import assert from "node:assert/strict";
 import test from "node:test";
 
-import { assembleRegion, groupRegions, paddedSleb, paddedUleb, patchRegionHeap, regionHeapOfBytes, regionModuleKey, regionModuleLayout } from "../src/aot-region-module.js";
+import { assembleRegion, chooseDispatchHash, dispatchSlot, groupRegions, paddedSleb, paddedUleb, patchRegionHeap, regionHeapOfBytes, regionModuleKey, regionModuleLayout } from "../src/aot-region-module.js";
 import { checkBranchHintSection } from "./helpers/branch-hints.mjs";
 
 
@@ -99,7 +99,7 @@ test("aot region: unknown PC returns 1 without running anything, a stop returns 
   assert.equal(r.run(0x1008), 2);
 });
 
-test("aot region: the dispatcher finds every entry among hundreds (binary search)", async () => {
+test("aot region: the dispatcher finds every entry among hundreds (hashed br_table)", async () => {
   // 300 fragments with two entries each; every entry adds index+1 and exits.
   const frags = Array.from({ length: 300 }, (_, i) => {
     const pc = 0x80003000 + i * 0x40;
@@ -119,6 +119,85 @@ test("aot region: the dispatcher finds every entry among hundreds (binary search
     r.reset();
     assert.equal(r.run(0x80003004 + i * 0x40), 1);
   }
+});
+
+// Entries spread like a plan's (seeded): a module of many fragments, with
+// slots holding several entries, so the compares after the br_table matter.
+function spreadFragments(n, seed, entriesPer = 2) {
+  let x = (seed * 0x9e3779b9) >>> 0 || 1;
+  const next = () => { x ^= x << 13; x ^= x >>> 17; x ^= x << 5; return (x >>>= 0); }; // xorshift32 (an LCG's low bits are periodic)
+  const pcs = new Set();
+  while (pcs.size < n * entriesPer) pcs.add((0x80003000 + (next() % 0x3a0000) * 4) >>> 0);
+  const sorted = [...pcs];
+  return Array.from({ length: n }, (_, i) => {
+    const entries = sorted.slice(i * entriesPer, (i + 1) * entriesPer);
+    return fragment(entries[0], entries, [
+      add(COUNT, i + 1), store(PC, konst(0x81700000)), ...tail({ kind: "jump", targetPc: 0x81700000 })
+    ]);
+  });
+}
+
+test("aot region: hashed dispatch reaches every entry, and a pc sharing an entry's slot is not run (collisions)", async () => {
+  for (const [n, seed] of [[3, 1], [40, 2], [700, 3], [1100, 4]]) {
+    const frags = spreadFragments(n, seed);
+    const region = assembleRegion(frags, { helpers: HELPERS, pcOffset: PC, memoryPages: 1 });
+    const r = await instantiate(region);
+    const owner = new Map(frags.flatMap((f, i) => f.entries.map((pc) => [pc, i + 1])));
+    for (const [pc, want] of owner) {
+      r.reset();
+      assert.equal(r.run(pc), 0, `${n}: ${pc.toString(16)}`);
+      assert.equal(r.word(COUNT), want, `${n}: ${pc.toString(16)} ran its own fragment`);
+    }
+    if (n * 2 <= 4) continue; // compares in a row, no table
+    const { mul, bits, max } = chooseDispatchHash([...owner.keys()]);
+    if (n >= 700) assert.ok(max >= 2, `${n}: slots with several entries (max ${max})`);
+    // Non-entries in occupied slots: neighbours, misaligned pcs, other aligned
+    // pcs of the same slot, 0 and the top of memory.
+    const occupied = new Set([...owner.keys()].map((pc) => dispatchSlot(pc, mul, bits)));
+    const probes = [0, 0xfffffffc, 0x80003001];
+    for (const pc of owner.keys()) probes.push(pc + 4, pc - 4, pc + 2, (pc + (4 << bits)) >>> 0);
+    for (let pc = 0x80003000, k = 0; k < n; pc += 4) if (!owner.has(pc) && occupied.has(dispatchSlot(pc, mul, bits))) { probes.push(pc); k++; } // same slot, any hash
+    let shared = 0;
+    for (const pc of probes) {
+      if (owner.has(pc >>> 0)) continue;
+      if (occupied.has(dispatchSlot(pc >>> 0, mul, bits))) shared++;
+      r.reset();
+      assert.equal(r.run(pc >>> 0), 1, `${n}: ${(pc >>> 0).toString(16)} is not an entry`);
+      assert.equal(r.word(COUNT), 0);
+    }
+    assert.ok(shared >= n, `${n}: ${shared} probes landed in an occupied slot`);
+  }
+});
+
+test("aot region: a dispatch from code to a non-entry of an occupied slot leaves through the exit (0, state.pc kept)", async () => {
+  const frags = spreadFragments(300, 7);
+  const pcs = frags.flatMap((f) => f.entries);
+  const { mul, bits } = chooseDispatchHash(pcs);
+  const entries = new Set(pcs);
+  const occupied = new Set(pcs.map((pc) => dispatchSlot(pc, mul, bits)));
+  let target = 0x80003000;
+  while (entries.has(target) || !occupied.has(dispatchSlot(target, mul, bits))) target += 4;
+  // An extra fragment writes that pc and dispatches (a blr to it).
+  const jumper = fragment(0x81000000, [0x81000000], [add(COUNT, 1000), store(PC, konst(target | 0)), ...tail({ kind: "dispatch" })]);
+  for (const chain of [false, true]) {
+    const region = assembleRegion([...frags, jumper], { helpers: HELPERS, pcOffset: PC, memoryPages: 1, chain });
+    const r = await instantiate(region);
+    r.reset();
+    assert.equal(r.run(0x81000000), 0, `chain ${chain}: code ran, continue at state.pc`);
+    assert.equal(r.word(COUNT), 1000, `chain ${chain}: only the jumper ran`);
+    assert.equal(r.word(PC), target);
+  }
+});
+
+test("aot region: the dispatch hash depends on the entries only (same members, same bytes)", () => {
+  const frags = spreadFragments(500, 11);
+  const opts = { helpers: HELPERS, pcOffset: PC, memoryPages: 1 };
+  const a = assembleRegion(frags, opts).bytes, b = assembleRegion(frags.map((f) => ({ ...f, code: Uint8Array.from(f.code) })), opts).bytes;
+  assert.deepEqual(Buffer.from(a), Buffer.from(b));
+  const pcs = frags.flatMap((f) => f.entries);
+  assert.deepEqual(chooseDispatchHash(pcs), chooseDispatchHash([...pcs].reverse()), "order of the entries does not matter");
+  const h = chooseDispatchHash(pcs);
+  assert.ok(1 << h.bits >= 2 * pcs.length && 1 << (h.bits - 1) < 2 * pcs.length, "table of the next power of two of twice the entries");
 });
 
 test("aot region: malformed input is refused", () => {

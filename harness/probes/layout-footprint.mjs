@@ -13,6 +13,8 @@
 //
 //   node harness/probes/layout-footprint.mjs --iso disc.iso --state scene.sav --port N
 //     --baseline <dir> --candidate <dir> [--runs 4] [--warmup 25] [--query "..."]
+//     [--baseline-query "..."]   (the baseline boots with its own query: one
+//                                 tree with and without a switch, e.g. codespace)
 //     [--lock-wait 14400] [--out dir]
 import { execFileSync } from "node:child_process";
 import { mkdirSync, writeFileSync } from "node:fs";
@@ -49,14 +51,17 @@ export function footprintOf(profileDir) {
 async function launch(side, o) {
   const server = await ensureServer({ port: o.port, root: side.root });
   try {
-    const session = await openSession({ base: server.base, server, query: o.query, iso: o.iso, routes: { [STATE_ROUTE]: o.state } });
+    const session = await openSession({ base: server.base, server, query: side.query ?? o.query, iso: o.iso, routes: { [STATE_ROUTE]: o.state } });
     try {
       const loaded = await loadHarnessState(session.page, session.url);
       if (!loaded?.loaded) throw new Error(`savestate load failed: ${JSON.stringify(loaded)}`);
       await session.page.waitForTimeout(o.warmup * 1000);
       const stats = await workerRequest(session.page, "validationReadJitRegionStats", {}, 10000);
       const layout = stats?.layout ?? null;
-      return { core: session.core?.sha256 ?? session.core ?? null, layout, footprint: footprintOf(session.profileDir) };
+      const info = await session.page.evaluate(() => window.__lastFrameInfo?.ppcWasmHelperStats ?? null).catch(() => null);
+      const code = /codeclears:(\d+) codefull:(\d+) codehighkib:(\d+) codesizemib:(\d+)/.exec(String(info ?? ""));
+      const codeSpace = code ? { clears: Number(code[1]), fullClears: Number(code[2]), highKiB: Number(code[3]), sizeMiB: Number(code[4]) } : null;
+      return { core: session.core?.sha256 ?? session.core ?? null, layout, codeSpace, footprint: footprintOf(session.profileDir) };
     } finally {
       await session.close();
     }
@@ -70,7 +75,7 @@ async function main() {
     options: {
       iso: { type: "string" }, state: { type: "string" }, port: { type: "string", default: process.env.HARNESS_PORT },
       baseline: { type: "string" }, candidate: { type: "string" }, runs: { type: "string", default: "4" },
-      warmup: { type: "string", default: "25" }, query: { type: "string" }, "lock-wait": { type: "string", default: "14400" }, out: { type: "string" }
+      warmup: { type: "string", default: "25" }, query: { type: "string" }, "lock-wait": { type: "string", default: "14400" }, out: { type: "string" }, "baseline-query": { type: "string" }
     }
   });
   if (!values.iso || !values.state || !values.port || !values.baseline || !values.candidate) {
@@ -80,7 +85,10 @@ async function main() {
     iso: path.resolve(values.iso), state: path.resolve(values.state), port: Number(values.port), runs: Number(values.runs),
     warmup: Number(values.warmup), query: `${values.query ?? PRESETS.wgpu}&metrics=1`
   };
-  const sides = { baseline: { root: path.resolve(values.baseline) }, candidate: { root: path.resolve(values.candidate) } };
+  const sides = {
+    baseline: { root: path.resolve(values.baseline), query: values["baseline-query"] ? `${values["baseline-query"]}&metrics=1` : null },
+    candidate: { root: path.resolve(values.candidate) }
+  };
   const release = await acquirePerfLock({ name: `harness layout-footprint (${REPO_ROOT})`, waitSec: Number(values["lock-wait"]), log: (m) => console.log(`[layout-footprint] ${m}`) });
   const runs = [];
   try {
@@ -88,7 +96,7 @@ async function main() {
       for (const name of run % 2 ? ["baseline", "candidate"] : ["candidate", "baseline"]) {
         const r = await launch(sides[name], o).catch((e) => ({ error: String(e?.message || e).slice(0, 300) }));
         runs.push({ run, side: name, ...r });
-        console.log(`[layout-footprint] run ${run} ${name}: ${r.error ?? `ram 0x${(r.layout?.ramBase ?? 0).toString(16)} l1 0x${(r.layout?.l1Base ?? 0).toString(16)} footprint ${r.footprint?.totalMB} MB (renderer ${r.footprint?.rendererMB} MB)`}`);
+        console.log(`[layout-footprint] run ${run} ${name}: ${r.error ?? `ram 0x${(r.layout?.ramBase ?? 0).toString(16)} l1 0x${(r.layout?.l1Base ?? 0).toString(16)} footprint ${r.footprint?.totalMB} MB (renderer ${r.footprint?.rendererMB} MB)${r.codeSpace ? ` code ${r.codeSpace.sizeMiB} MiB, high ${r.codeSpace.highKiB} KiB, clears ${r.codeSpace.clears} (full ${r.codeSpace.fullClears})` : ""}`}`);
       }
     }
   } finally {
@@ -101,7 +109,7 @@ async function main() {
       footprintMB: median(ok.map((r) => r.footprint?.totalMB).filter(Number.isFinite)), rendererMB: median(ok.map((r) => r.footprint?.rendererMB).filter(Number.isFinite))
     };
   };
-  const summary = { probe: "layout-footprint", at: new Date().toISOString(), query: o.query, warmupSec: o.warmup, sides: { baseline: sides.baseline.root, candidate: sides.candidate.root }, baseline: side("baseline"), candidate: side("candidate"), runs };
+  const summary = { probe: "layout-footprint", at: new Date().toISOString(), query: o.query, baselineQuery: sides.baseline.query, warmupSec: o.warmup, sides: { baseline: sides.baseline.root, candidate: sides.candidate.root }, baseline: side("baseline"), candidate: side("candidate"), runs };
   if (values.out) { mkdirSync(values.out, { recursive: true }); writeFileSync(path.join(values.out, "summary.json"), JSON.stringify(summary, null, 1) + "\n"); }
   console.log(`[layout-footprint] baseline: ${JSON.stringify(summary.baseline)}\n[layout-footprint] candidate: ${JSON.stringify(summary.candidate)}`);
 }
