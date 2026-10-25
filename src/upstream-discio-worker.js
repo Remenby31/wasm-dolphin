@@ -3307,8 +3307,10 @@ const DROP_COLUMNS = [
   // time (patch 0003's own counters, u32 µs that wrap), and its whole time
   // compiling blocks (patch 0167: analysis, emission, compile or post)
   "jitBlocks", "jitModuleUs", "jitInstanceUs", "jitCompiles", "jitUs",
-  // regions (0075): pipeline counts, the CPU thread's install time
-  "regionsQueued", "regionsInstalled", "regionsDropped", "regionInstallMs",
+  // regions (0075): pipeline counts, the CPU thread's install time; with
+  // the region counters on (the harness asks, counters only, no timing),
+  // guest cycles run in regions, in all, and skipped as idle
+  "regionsQueued", "regionsInstalled", "regionsDropped", "regionInstallMs", "regionCycles", "totalCycles", "idleCycles",
   // blocks posted to the off-thread compiler, interpreted meanwhile (0074)
   "offThreadDefers",
   // disc (0151): the DVD thread's reads, the CPU thread's waits for them;
@@ -3350,6 +3352,8 @@ function readDropCounters() {
   if (region && region % 8 === 0 && region + 256 <= heap.length && new DataView(heap.buffer, region, 8).getUint32(4, true) >= 256) {
     const f = new Float64Array(heap.buffer, region + 88, 21);
     out.regionsQueued = f[0]; out.regionsInstalled = f[1]; out.regionsDropped = f[3]; out.regionInstallMs = f[20];
+    const c = new Float64Array(heap.buffer, region + 16, 2);
+    out.regionCycles = c[0]; out.totalCycles = c[1]; out.idleCycles = f[10];
   }
   dropScratch ||= m._malloc?.(40) ?? 0;
   if (m._DolphinWeb_JitTimeStats && dropScratch) {

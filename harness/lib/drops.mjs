@@ -146,6 +146,8 @@ export function windowsOf({ vi, presents = [], rows = [], page = [], markers = [
       presents: nPresents, maxPresentGap: maxGap,
       xfb: d.xfbCopies ?? null, discBytes: d.discBytes ?? null, sleptMs: d.cpuSleepUs == null ? null : d.cpuSleepUs / 1000,
       behindMs: d.behindUs == null ? null : d.behindUs / 1000,
+      // guest cycles (region counters on, else 0): in regions, in all, idle-skipped
+      cycles: { region: d.regionCycles ?? null, total: d.totalCycles ?? null, idle: d.idleCycles ?? null },
       jitBlocks: d.jitBlocks ?? null, defers: d.offThreadDefers ?? null, regions: d.regionsInstalled ?? null, regionsDropped: d.regionsDropped ?? null,
       underruns: interpolateDelta(page, "underruns", t0, t1),
       causes
@@ -193,8 +195,21 @@ export function causeOf(windows) {
     cause, lostMs: round(lost, 1), causesMs: Object.fromEntries(Object.entries(causes).map(([k, v]) => [k, round(v, 1)])), sleptMs: round(slept, 1), sleptShare: round(sleptShare, 3),
     // what ran meanwhile: new JIT blocks, of them posted off thread
     // (interpreted until compiled), regions dropped, disc bytes read
-    jitBlocks: total("jitBlocks"), defers: total("defers"), regionsDropped: total("regionsDropped"), discBytes: total("discBytes")
+    jitBlocks: total("jitBlocks"), defers: total("defers"), regionsDropped: total("regionsDropped"), discBytes: total("discBytes"),
+    ...cycleShares(windows)
   };
+}
+
+// With the region counters on: the share of guest cycles run in regions,
+// outside idle skip (the KPI's definition), and the idle-skipped share.
+export function cycleShares(windows) {
+  let region = 0, total = 0, idle = 0;
+  for (const w of windows) {
+    if (w.cycles?.total == null) return {};
+    region += w.cycles.region ?? 0; total += w.cycles.total; idle += w.cycles.idle ?? 0;
+  }
+  if (!(total > 0)) return {};
+  return { regionShare: round(region / Math.max(1, total - idle), 3), idleShare: round(idle / total, 3) };
 }
 
 // Runs of slow windows (speed under `speed`, or a present gap over the

@@ -9,7 +9,7 @@
 //     [--noise <A/A>/summary.json] [--trend measures/drops/trend.jsonl]
 //     [--scenario harness/probes/drop-scenario.json]
 //     [--config product | --query "..."] [--sample-ms 50] [--native ref.json]
-//     [--shots] [--max-load L] [--load-wait 300] [--lock-wait 14400 | --no-lock]
+//     [--shots] [--region-counters] [--pc-window FROM-TO] [--max-load L] [--load-wait 300] [--lock-wait 14400 | --no-lock]
 //     [--out dir]
 //   node harness/probes/drop-meter.mjs --analyze <out dir> [--native ref.json]
 //
@@ -123,6 +123,9 @@ async function playVisit(o, server, profileDir, shotDir, visit) {
     // Counters that need turning on (0113 headroom, 0162 cadence), then the sampler.
     raw.headroom = (await workerRequest(page, "validationReadHeadroomStats", { reset: 0 }, 5000))?.error ?? "on";
     raw.cadence = await workerRequest(page, "validationReadPresentCadence", { reset: 0 }, 5000).then((r) => r?.error ?? (r?.supported === false ? "unsupported" : "on"));
+    // --region-counters: the region stats counting guest cycles (no timing):
+    // cheap, but not nothing; compare such runs only with each other.
+    if (o.regionCounters) raw.regionCounters = (await workerRequest(page, "validationReadJitRegionStats", { sampleEvery: 0 }, 10000))?.error ?? "on";
     raw.sampler = await workerRequest(page, "validationDropSampler", { action: "start", everyMs: o.sampleMs }, 5000);
     // An older tree (a baseline before the sampler) still gives the
     // timeline: speeds, presents, drops, without their causes.
@@ -140,7 +143,10 @@ async function playVisit(o, server, profileDir, shotDir, visit) {
     };
     const drain = (async () => { while (draining) { await drainOnce(); await page.waitForTimeout(1000); } })();
     try {
-      for (const step of [...stepsFor(o.scenario, visit), { at: o.scenario.end, mark: "end" }]) {
+      // --pc-window FROM-TO: the guest-PC sampler over those guest seconds.
+      const pcSteps = o.pcWindow ? [{ at: o.pcWindow[0], pc: "start" }, { at: o.pcWindow[1], pc: "stop" }] : [];
+      const steps = [...stepsFor(o.scenario, visit), ...pcSteps].sort((a, b) => a.at - b.at);
+      for (const step of [...steps, { at: o.scenario.end, mark: "end" }]) {
         const deadline = Date.now() + Math.max(60000, step.at * 1000 * 20);
         for (;;) {
           const g = await guestSec(page);
@@ -157,6 +163,14 @@ async function playVisit(o, server, profileDir, shotDir, visit) {
         } else if ("down" in step) await page.keyboard.down(step.down);
         else if ("up" in step) await page.keyboard.up(step.up);
         else if ("click" in step) await page.mouse.click(step.click[0], step.click[1]);
+        else if (step.pc === "start") raw.pc = { start: await workerRequest(page, "validationPcSampler", { action: "start", periodMs: 0.25 }, 5000) };
+        else if (step.pc === "stop") {
+          const r = await workerRequest(page, "validationPcSampler", { action: "stop" }, 10000);
+          raw.pc.window = o.pcWindow;
+          raw.pc.samples = r?.n ?? null;
+          raw.pc.error = r?.error ?? null;
+          raw.pc.top = (r?.counts ?? []).sort((a, b) => b[1] - a[1]).slice(0, 40).map(([pc, n]) => [`0x${(pc >>> 0).toString(16)}`, n]);
+        }
         if (shotDir && step.label) savePng(await grabFrame(page), path.join(shotDir, `${String(raw.markers.length).padStart(2, "0")}-${step.label}.png`));
       }
       raw.endT = performance.timeOrigin + performance.now();
@@ -199,7 +213,7 @@ export function analyzeVisit(raw, { native = null } = {}) {
   }
   const loadAvg = raw.loads.map((x) => x[1]);
   return {
-    timelineComplete: timeline.complete, bootMs: raw.bootMs,
+    timelineComplete: timeline.complete, bootMs: raw.bootMs, pc: raw.pc ?? null,
     load1: { median: round(median(loadAvg), 2), max: round(Math.max(...loadAvg), 2) },
     summary: { ...dropSummary({ windows, presents, vi }), loads: loads.length, loadExcessMs: loads.reduce((a, l) => a + l.excessMs, 0) },
     phases, loads, worst: worstDrops(events), drops: events.length,
@@ -305,6 +319,7 @@ async function main() {
       candidate: { type: "string" }, baseline: { type: "string" }, noise: { type: "string" }, trend: { type: "string" },
       config: { type: "string", default: "product" }, query: { type: "string" }, "sample-ms": { type: "string", default: "50" },
       native: { type: "string" }, analyze: { type: "string" }, shots: { type: "boolean", default: false },
+      "region-counters": { type: "boolean", default: false }, "pc-window": { type: "string" },
       "max-load": { type: "string" }, "load-wait": { type: "string", default: "300" }, "lock-wait": { type: "string", default: "14400" }, "calm-wait": { type: "string" }, "no-lock": { type: "boolean", default: false },
       port: { type: "string", default: process.env.HARNESS_PORT }, out: { type: "string" }
     }
@@ -321,6 +336,7 @@ async function main() {
   const o = {
     iso, scenario, query: query.toString(), runs: num(values, "runs", { min: 1, int: true }), visits: num(values, "visits", { min: 1, int: true }),
     sampleMs: num(values, "sample-ms", { min: 10 }), port: num(values, "port", { min: 1, int: true }),
+    regionCounters: values["region-counters"], pcWindow: values["pc-window"] ? values["pc-window"].split("-").map(Number) : null,
     maxLoad: values["max-load"] ? num(values, "max-load", { min: 0.1 }) : Math.max(2, os.cpus().length / 4), loadWait: num(values, "load-wait", { min: 0 })
   };
   const noise = values.noise ? readNoise(values.noise) : null;
