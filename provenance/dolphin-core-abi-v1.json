@@ -20,8 +20,8 @@
     {
       "path": "core/upstream/dolphin_web_discio.cpp",
       "hashMode": "lf-normalized",
-      "size": 72377,
-      "sha256": "f6e719fc0e2d60cb0900d0f398e4e011fcb93943433149f58318d1c14fcef559"
+      "size": 74753,
+      "sha256": "430d887542e86273b670e6c1b1ea9a7d1930797ca694f0e992b27c788a4ee9a8"
     },
     {
       "path": "core/upstream/dolphin_web_raster_profile.h",
@@ -140,8 +140,8 @@
     {
       "path": "src/upstream-discio-worker.js",
       "hashMode": "lf-normalized",
-      "size": 757012,
-      "sha256": "150e50a98a2e2ad039c73b19f2f97cda1bec9d85c05a90bd1ca46799dc1e0786"
+      "size": 758180,
+      "sha256": "1f3cf67b59c5c755370d8d0417731106022d289276aa477dbc3781ae030d1f2d"
     },
     {
       "path": "src/wgpu-renderer-worker-probe.js",
@@ -697,6 +697,7 @@
       "validationReadDetTrace",
       "validationReadDiscReads",
       "validationReadDstAlphaPasses",
+      "validationReadEfbSyncStats",
       "validationReadHeadroomStats",
       "validationReadJitCacheReadiness",
       "validationReadJitRegionStats",
