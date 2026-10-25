@@ -20,8 +20,8 @@
 // A drop is a run of windows under DROP_SPEED (or with a long gap between
 // presentations); its cause is the largest of its causes when that one
 // covers at least CAUSE_MIN_SHARE of the time it lost, "emulation" when the
-// CPU thread never slept (busy all along: the guest code itself is heavier
-// than the host keeps up with), else "unexplained".
+// CPU thread hardly slept where the time was lost (busy all along running
+// guest code, none of the counted waits), else "unexplained".
 import { describe, median, percentile, round, stdev } from "./stats.mjs";
 
 export const STEP_MS = 100;
@@ -29,6 +29,7 @@ export const DROP_SPEED = 90;
 export const HITCH_MS = [50, 100];
 export const CAUSE_MIN_SHARE = 0.25;
 export const STALL_MIN_MS = 20;
+export const EMULATION_SLEEP_SHARE = 0.1;
 // Columns that are u32 in the core and wrap (µs totals of patch 0003, the
 // EFB words of 0164): unwrapped before any difference.
 export const WRAPPING = new Set(["jitModuleUs", "jitInstanceUs", "jitCompiles", "efbSyncs", "efbWaitUs", "discWaits", "discReads"]);
@@ -176,18 +177,20 @@ export function causeOf(windows) {
   const causes = {};
   for (const w of windows) for (const [k, v] of Object.entries(w.causes)) causes[k] = (causes[k] ?? 0) + (v ?? 0);
   const [top, ms] = Object.entries(causes).sort((a, b) => b[1] - a[1])[0] ?? [null, 0];
-  // Did the CPU thread sleep in the slow windows themselves (not the
-  // normal ones a drop bridges)?
-  const slow = windows.filter((w) => w.speed != null && w.speed < DROP_SPEED);
-  const core = slow.length ? slow : windows;
-  const slept = core.reduce((a, w) => a + (w.sleptMs ?? 0), 0);
+  // Did the CPU thread sleep where the time was lost? Each window's share
+  // of throttle sleep, weighted by the time it lost (the edges of a drop,
+  // which lose little, weigh little).
+  const weights = windows.map((w) => Math.max(0, w.lostMs ?? 0));
+  const wsum = weights.reduce((a, x) => a + x, 0);
+  const slept = windows.reduce((a, w) => a + (w.sleptMs ?? 0), 0);
+  const sleptShare = wsum > 0 ? windows.reduce((a, w, i) => a + ((w.sleptMs ?? 0) / STEP_MS) * weights[i], 0) / wsum : null;
   let cause;
   if (top && ms >= CAUSE_MIN_SHARE * Math.max(lost, 1)) cause = top;
-  else if (core.every((w) => w.sleptMs != null) && slept < 0.02 * core.length * STEP_MS) cause = "emulation";
+  else if (windows.every((w) => w.sleptMs != null) && sleptShare != null && sleptShare < EMULATION_SLEEP_SHARE) cause = "emulation";
   else cause = "unexplained";
   const total = (k) => round(windows.reduce((a, w) => a + (w[k] ?? 0), 0), 1);
   return {
-    cause, lostMs: round(lost, 1), causesMs: Object.fromEntries(Object.entries(causes).map(([k, v]) => [k, round(v, 1)])), sleptMs: round(slept, 1),
+    cause, lostMs: round(lost, 1), causesMs: Object.fromEntries(Object.entries(causes).map(([k, v]) => [k, round(v, 1)])), sleptMs: round(slept, 1), sleptShare: round(sleptShare, 3),
     // what ran meanwhile: new JIT blocks, of them posted off thread
     // (interpreted until compiled), regions dropped, disc bytes read
     jitBlocks: total("jitBlocks"), defers: total("defers"), regionsDropped: total("regionsDropped"), discBytes: total("discBytes")
