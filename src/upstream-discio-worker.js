@@ -404,7 +404,11 @@ function harnessPacingConfig() {
   const read = moduleInstance?._DolphinWeb_PacingConfig;
   if (typeof read !== "function") return { supported: false };
   const bits = read() >>> 0;
-  return { supported: true, syncOnSkipIdle: Boolean(bits & 1), rushFramePresentation: Boolean(bits & 2), dupXfbResetsThrottle: Boolean(bits & 4) };
+  // bit 3 (patch 0153): the video thread's present sleep (SmoothEarly on and
+  // not presenting on arrival); null on a core before 0153, which sleeps but
+  // has no bit for it.
+  const presentSleep = typeof moduleInstance?._DolphinWeb_SetPresentOnArrival === "function" ? Boolean(bits & 8) : null;
+  return { supported: true, syncOnSkipIdle: Boolean(bits & 1), rushFramePresentation: Boolean(bits & 2), dupXfbResetsThrottle: Boolean(bits & 4), presentSleep };
 }
 // Patch 0156: the guest cycles ran outside the regions by the PC a chain of
 // blocks started at, the 64 most costly, while the stats are on (timing or
@@ -1645,6 +1649,7 @@ async function handleMessage(type, payload) {
         rushPresentation: payload.rushPresentation,
         syncOnSkipIdle: payload.syncOnSkipIdle,
         dupXfbRearmsThrottle: payload.dupXfbRearmsThrottle,
+        smoothEarly: payload.smoothEarly,
         coreLog: payload.coreLog,
         memcardSlotB: payload.memcardSlotB,
         efbAccess: payload.efbAccess,
@@ -2370,6 +2375,7 @@ async function loadCore({
   rushPresentation = false,
   syncOnSkipIdle = false,
   dupXfbRearmsThrottle = false,
+  smoothEarly = true,
   coreLog = false,
   memcardSlotB = false,
   efbAccess = false,
@@ -2892,6 +2898,7 @@ async function loadCore({
     dolphinRushPresentation: rushPresentation === true,
     dolphinSyncOnSkipIdle: syncOnSkipIdle === true,
     dolphinDupXfbRearmsThrottle: dupXfbRearmsThrottle === true,
+    dolphinSmoothEarly: smoothEarly !== false,
     dolphinCoreLog: Boolean(coreLog),
     dolphinMemcardSlotB: Boolean(memcardSlotB),
     dolphinEfbAccess: Boolean(efbAccess),

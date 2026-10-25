@@ -103,6 +103,7 @@ export class UpstreamWorkerAdapter {
     rushPresentation = false,
     syncOnSkipIdle = false,
     dupXfbRearmsThrottle = false,
+    smoothEarly = true,
     coreLog = false,
     memcardSlotB = false,
     efbAccess = false,
@@ -227,6 +228,7 @@ export class UpstreamWorkerAdapter {
     this.rushPresentation = rushPresentation === true;
     this.syncOnSkipIdle = syncOnSkipIdle === true;
     this.dupXfbRearmsThrottle = dupXfbRearmsThrottle === true;
+    this.smoothEarly = smoothEarly !== false;
     this.coreLog = Boolean(coreLog);
     this.memcardSlotB = Boolean(memcardSlotB);
     this.efbAccess = Boolean(efbAccess);
@@ -469,6 +471,7 @@ export class UpstreamWorkerAdapter {
       rushPresentation: this.rushPresentation,
       syncOnSkipIdle: this.syncOnSkipIdle,
       dupXfbRearmsThrottle: this.dupXfbRearmsThrottle,
+      smoothEarly: this.smoothEarly,
       coreLog: this.coreLog,
       memcardSlotB: this.memcardSlotB,
       efbAccess: this.efbAccess,
