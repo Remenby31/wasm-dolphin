@@ -1681,6 +1681,7 @@ async function handleMessage(type, payload) {
         fifoLog: payload.fifoLog,
         efbCopyRam: payload.efbCopyRam,
         efbNoDefer: payload.efbNoDefer,
+        efbEager: payload.efbEager,
         wgpuMask: payload.wgpuMask,
         wgpuFallback: payload.wgpuFallback,
         dstAlphaTwoPass: payload.dstAlphaTwoPass,
@@ -2409,6 +2410,7 @@ async function loadCore({
   fifoLog = false,
   efbCopyRam = false,
   efbNoDefer = false,
+  efbEager = false,
   wgpuMask = "",
   wgpuFallback = false,
   dstAlphaTwoPass = true,
@@ -2931,6 +2933,7 @@ async function loadCore({
     dolphinEfbAccess: Boolean(efbAccess),
     dolphinEfbCopyRam: Boolean(efbCopyRam),
     dolphinEfbNoDefer: Boolean(efbNoDefer),
+    dolphinEfbEager: Boolean(efbEager),
     // Ranks the instructions that block JIT compilation (?jitverbose=1).
     dolphinWebVerbosePpcJit: Boolean(jitVerbose),
     dolphinFrameCap: (frameCapTarget = Number(frameCap) || 0),

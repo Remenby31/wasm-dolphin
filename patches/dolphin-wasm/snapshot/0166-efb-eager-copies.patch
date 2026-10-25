@@ -1,0 +1,211 @@
+diff --git a/Source/Core/VideoBackends/WebGPU/WebGPUTexture.cpp b/Source/Core/VideoBackends/WebGPU/WebGPUTexture.cpp
+--- a/Source/Core/VideoBackends/WebGPU/WebGPUTexture.cpp
++++ b/Source/Core/VideoBackends/WebGPU/WebGPUTexture.cpp
+@@ -291,6 +291,12 @@ void WebGPUStagingTexture::CopyFromTexture(const AbstractTexture* src,
+   m_needs_flush = true;
+ }
+ 
++bool WebGPUStagingTexture::IsCopyComplete() const
++{
++  return !m_needs_flush || !m_block ||
++         static_cast<u32>(m_block->words[0].load(std::memory_order_acquire)) >= m_issued;
++}
++
+ bool WebGPUStagingTexture::WaitForCopies(u32 timeout_ms)
+ {
+   if (static_cast<u32>(m_block->words[0].load(std::memory_order_acquire)) >= m_issued)
+diff --git a/Source/Core/VideoBackends/WebGPU/WebGPUTexture.h b/Source/Core/VideoBackends/WebGPU/WebGPUTexture.h
+--- a/Source/Core/VideoBackends/WebGPU/WebGPUTexture.h
++++ b/Source/Core/VideoBackends/WebGPU/WebGPUTexture.h
+@@ -82,6 +82,7 @@ public:
+   bool Map() override;
+   void Unmap() override;
+   void Flush() override;
++  bool IsCopyComplete() const override;
+ 
+ private:
+   // Readback (docs/wgpu-efb-readback-design.md): copies issued to the
+diff --git a/Source/Core/VideoCommon/AbstractStagingTexture.h b/Source/Core/VideoCommon/AbstractStagingTexture.h
+--- a/Source/Core/VideoCommon/AbstractStagingTexture.h
++++ b/Source/Core/VideoCommon/AbstractStagingTexture.h
+@@ -67,6 +67,10 @@ public:
+   // call to CopyFromTexture()/CopyToTexture() and the Flush() call.
+   virtual void Flush() = 0;
+ 
++  // Patch 0166: whether every copy issued so far has landed, without waiting
++  // (Flush() would not block). A backend that cannot tell says no.
++  virtual bool IsCopyComplete() const { return !m_needs_flush; }
++
+   // Reads the specified rectangle from the staging texture to out_ptr, with the specified stride
+   // (length in bytes of each row). CopyFromTexture must be called first. The contents of any
+   // texels outside of the rectangle used for CopyFromTexture is undefined.
+diff --git a/Source/Core/VideoCommon/BPStructs.cpp b/Source/Core/VideoCommon/BPStructs.cpp
+--- a/Source/Core/VideoCommon/BPStructs.cpp
++++ b/Source/Core/VideoCommon/BPStructs.cpp
+@@ -423,6 +423,8 @@ static void BPWritten(PixelShaderManager& pixel_shader_manager, XFStateManager&
+     static_assert(MAX_LOADABLE_TMEM_ADDR + MAX_TMEM_LINE_COUNT < TMEM_SIZE);
+ 
+     auto& memory = system.GetMemory();
++    if (TextureCacheBase::EfbEagerActive())
++      g_texture_cache->FlushEFBCopiesOverlapping(addr, tmem_transfer_count);  // patch 0166
+     memory.CopyFromEmu(s_tex_mem.data() + tmem_addr, addr, tmem_transfer_count);
+ 
+     if (OpcodeDecoder::g_record_fifo_data)
+@@ -621,6 +623,8 @@ static void BPWritten(PixelShaderManager& pixel_shader_manager, XFStateManager&
+ 
+           auto& system = Core::System::GetInstance();
+           auto& memory = system.GetMemory();
++          if (TextureCacheBase::EfbEagerActive())
++            g_texture_cache->FlushEFBCopiesOverlapping(src_addr, bytes_read);  // patch 0166
+           memory.CopyFromEmu(s_tex_mem.data() + tmem_addr_even, src_addr, bytes_read);
+         }
+       }
+@@ -632,6 +636,11 @@ static void BPWritten(PixelShaderManager& pixel_shader_manager, XFStateManager&
+         // AR and GB tiles are stored in separate TMEM banks => can't use a single memcpy for
+         // everything
+         u32 tmem_addr_odd = tmem_cfg.preload_tmem_odd * TMEM_LINE_SIZE;
++        if (TextureCacheBase::EfbEagerActive())  // patch 0166: the whole span read below
++        {
++          g_texture_cache->FlushEFBCopiesOverlapping(
++              src_addr, tmem_cfg.preload_tile_info.count * TMEM_LINE_SIZE * 2);
++        }
+ 
+         for (u32 i = 0; i < tmem_cfg.preload_tile_info.count; ++i)
+         {
+diff --git a/Source/Core/VideoCommon/Fifo.cpp b/Source/Core/VideoCommon/Fifo.cpp
+--- a/Source/Core/VideoCommon/Fifo.cpp
++++ b/Source/Core/VideoCommon/Fifo.cpp
+@@ -32,6 +32,7 @@
+ #include "VideoCommon/FramebufferManager.h"
+ #include "VideoCommon/OpcodeDecoding.h"
+ #include "VideoCommon/VertexLoaderManager.h"
++#include "VideoCommon/TextureCacheBase.h"
+ #include "VideoCommon/VertexManagerBase.h"
+ #include "VideoCommon/VideoBackendBase.h"
+ #include "VideoCommon/WasmWebGpuProducerProfile.h"
+@@ -577,6 +578,10 @@ void FifoManager::RunGpuLoop()
+ 
+             m_chunk_active.store(false);
+ 
++            // Patch 0166: eager EFB copies whose texels landed go to RAM now.
++            if (TextureCacheBase::EfbEagerActive())
++              g_texture_cache->FlushLandedEFBCopies();
++
+             // This call is pretty important in DualCore mode and must be called in the FIFO Loop.
+             // If we don't, s_swapRequested or s_efbAccessRequested won't be set to false
+             // leading the CPU thread to wait in Video_OutputXFB or Video_AccessEFB thus slowing
+@@ -592,6 +597,12 @@ void FifoManager::RunGpuLoop()
+               m_sync_wakeup_event.Set();
+           }
+ 
++          // Patch 0166: nothing left to decode, so waiting costs nothing: the
++          // eager EFB copies still in flight go to RAM before the GPU thread
++          // sleeps (a game polling RAM without a sync point still sees them).
++          if (TextureCacheBase::EfbEagerActive())
++            g_texture_cache->FlushEFBCopies();
++
+           // The fifo is empty and it's unlikely we will get any more work in the near future.
+           // Make sure VertexManager finishes drawing any primitives it has stored in it's buffer.
+           if (!DolphinWeb::WgpuIdleFifoTailGate::IsEnabled())
+diff --git a/Source/Core/VideoCommon/TextureCacheBase.cpp b/Source/Core/VideoCommon/TextureCacheBase.cpp
+--- a/Source/Core/VideoCommon/TextureCacheBase.cpp
++++ b/Source/Core/VideoCommon/TextureCacheBase.cpp
+@@ -1276,6 +1276,10 @@ TCacheEntry* TextureCacheBase::LoadImpl(u32 stage, bool force_reload)
+   }
+ 
+   const TextureInfo texture_info = TextureInfo::FromStage(stage);
++  // Patch 0166: the texels of a pending eager copy are in RAM before the
++  // texture reads them (the span above is the live RAM).
++  if (!m_pending_efb_copies.empty() && EfbEagerActive())
++    FlushEFBCopiesOverlapping(texture_info.GetRawAddress(), texture_info.GetTextureSize());
+   auto entry = GetTexture(g_ActiveConfig.iSafeTextureCache_ColorSamples, texture_info);
+ 
+   if (!entry)
+@@ -1824,6 +1828,8 @@ RcTcacheEntry TextureCacheBase::GetXFBTexture(u32 address, u32 width, u32 height
+ 
+   auto& system = Core::System::GetInstance();
+   auto& memory = system.GetMemory();
++  if (!m_pending_efb_copies.empty() && EfbEagerActive())
++    FlushEFBCopiesOverlapping(address, total_size);  // patch 0166
+   const u8* src_data = memory.GetPointerForRange(address, total_size);
+   if (!src_data)
+   {
+@@ -2400,7 +2406,9 @@ void TextureCacheBase::CopyRenderTargetToTexture(
+               scaleByHalf, linear_filter, y_scale, gamma, clamp_top, clamp_bottom, coefficients);
+ 
+       // We can't defer if there is no VRAM copy (since we need to update the hash).
+-      if (!copy_to_vram || !g_ActiveConfig.bDeferEFBCopies)
++      // Patch 0166: with ?efbeager=1 an immediate copy goes the deferred way,
++      // written to RAM as soon as it lands (FlushLandedEFBCopies).
++      if (!copy_to_vram || (!g_ActiveConfig.bDeferEFBCopies && !EfbEagerActive()))
+       {
+         // Immediately flush it.
+         WriteEFBCopyToRAM(dst, bytes_per_row / sizeof(u32), num_blocks_y, dstStride,
+@@ -2513,6 +2521,47 @@ void TextureCacheBase::CopyRenderTargetToTexture(
+   }
+ }
+ 
++#ifdef __EMSCRIPTEN__
++extern "C" int DolphinWeb_EfbEager();
++#endif
++
++bool TextureCacheBase::EfbEagerActive()
++{
++#ifdef __EMSCRIPTEN__
++  // Single core: the CPU thread decodes the FIFO itself and could read the
++  // RAM right after the copy, before its texels land; dual core only.
++  return DolphinWeb_EfbEager() != 0 && Core::System::GetInstance().IsDualCoreMode();
++#else
++  return false;
++#endif
++}
++
++void TextureCacheBase::FlushLandedEFBCopies()
++{
++  // In order: a copy is written only once every copy before it is.
++  auto landed = m_pending_efb_copies.begin();
++  for (; landed != m_pending_efb_copies.end(); ++landed)
++  {
++    const auto& staging = (*landed)->pending_efb_copy;
++    if (staging && !staging->IsCopyComplete())
++      break;
++    FlushEFBCopy(landed->get());
++  }
++  m_pending_efb_copies.erase(m_pending_efb_copies.begin(), landed);
++}
++
++void TextureCacheBase::FlushEFBCopiesOverlapping(u32 address, u32 size)
++{
++  for (const auto& entry : m_pending_efb_copies)
++  {
++    if (entry->OverlapsMemoryRange(address, size))
++    {
++      FlushEFBCopies();
++      return;
++    }
++  }
++}
++
+ void TextureCacheBase::FlushEFBCopies()
+ {
+   if (m_pending_efb_copies.empty())
+diff --git a/Source/Core/VideoCommon/TextureCacheBase.h b/Source/Core/VideoCommon/TextureCacheBase.h
+--- a/Source/Core/VideoCommon/TextureCacheBase.h
++++ b/Source/Core/VideoCommon/TextureCacheBase.h
+@@ -297,6 +297,16 @@ public:
+   // Flushes all pending EFB copies to emulated RAM.
+   void FlushEFBCopies();
+ 
++  // Patch 0166 (?efbeager=1, dual core only): an EFB copy to RAM that would
++  // block the video thread at once (DeferEFBCopies=False) waits in the
++  // deferred list instead, and is written to RAM as soon as its texels land
++  // (FlushLandedEFBCopies, after each FIFO chunk; everything when the FIFO
++  // is idle). Any RAM the GPU thread reads afterwards (texture, TLUT, TMEM
++  // preload, XFB) flushes the pending copies first if it overlaps them.
++  static bool EfbEagerActive();
++  void FlushLandedEFBCopies();
++  void FlushEFBCopiesOverlapping(u32 address, u32 size);
++
+   // Flush any Bound textures that can't be reused
+   void FlushStaleBinds();
+ 

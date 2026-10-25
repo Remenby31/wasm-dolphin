@@ -3,8 +3,8 @@
   "normalization": "git-blob-lf",
   "root": {
     "baseCommit": "e22551eae1c84a7e4d0b6a5c519ef4ed4ef69df1",
-    "resultTree": "533e1c0cde68922ea39615cf3cfdd11a3d902cec",
-    "changedPathCount": 142,
+    "resultTree": "d27cf8fe385c757c2278f68961a2a646e877cca9",
+    "changedPathCount": 145,
     "records": [
       {
         "path": "CMakeLists.txt",
@@ -920,18 +920,18 @@
         "status": "A",
         "mode": "100644",
         "baseBlob": null,
-        "resultBlob": "e5e311c145db9112952c9fc3cbf2382e826a8dd9",
-        "size": 16486,
-        "sha256": "c2536883bd7713a98cccb90e2671366fc2c23fa5e9bd2d3f4f526269f9b31ba2"
+        "resultBlob": "b72f72f462e39599ae6dfc8ab82b2807eb2ba9db",
+        "size": 16670,
+        "sha256": "cfdc6417b23a93c269af304a68e0f8b3b18789bc145c99a3503581c96e7795c2"
       },
       {
         "path": "Source/Core/VideoBackends/WebGPU/WebGPUTexture.h",
         "status": "A",
         "mode": "100644",
         "baseBlob": null,
-        "resultBlob": "83f9629f04a534d85dcd15476c8fedb2d56a7e53",
-        "size": 4430,
-        "sha256": "1d750fca981e30d7a5b974b3d9e69dd37bb4122a63431e6248c59082ef9489e3"
+        "resultBlob": "4f4203bc6003266ff7114f69c90a55245cd67c47",
+        "size": 4470,
+        "sha256": "ba6ae060d4ce4a348ba2a4b598f07dc222544a78d819dfe29427d582f4b8c87a"
       },
       {
         "path": "Source/Core/VideoBackends/WebGPU/WebGPUUboPacket.h",
@@ -961,6 +961,15 @@
         "sha256": "593a7b8b04fc0ed4a2288be194f14e92b4eb092788c27839d73dc5da98d6f8c4"
       },
       {
+        "path": "Source/Core/VideoCommon/AbstractStagingTexture.h",
+        "status": "M",
+        "mode": "100644",
+        "baseBlob": "0baf65c670bedc93019bc67daabfc671623bbe1b",
+        "resultBlob": "6a7a5bb0093badabf50c63fa7153a9808f202f54",
+        "size": 4528,
+        "sha256": "2e85ef072416f65a4bf6ddac5dfaf633d6cae58908ffbeb909d866bb33ff79bb"
+      },
+      {
         "path": "Source/Core/VideoCommon/AsyncRequests.h",
         "status": "M",
         "mode": "100644",
@@ -983,9 +992,9 @@
         "status": "M",
         "mode": "100644",
         "baseBlob": "180bc86151c717ce19da6c7ffc24bbbafb664d53",
-        "resultBlob": "854361bc8d68c8b7c2b3d486055482e6a4a9cef1",
-        "size": 53843,
-        "sha256": "3f66e1307ce53a4674844597a0b11f9a751582eea699616e7f25789024844c91"
+        "resultBlob": "d59323dc377a40a2d5aa9145fca57d86635bea18",
+        "size": 54366,
+        "sha256": "daa6f1c2a5836950c9a0454076e999ed914f6911863930b2966977b768413805"
       },
       {
         "path": "Source/Core/VideoCommon/CMakeLists.txt",
@@ -1028,9 +1037,9 @@
         "status": "M",
         "mode": "100644",
         "baseBlob": "f183c9365514cc908bbc3641d55ff8db8c3acfe9",
-        "resultBlob": "54189177c40a3b5484ba8fdbd687a0c3b384bc23",
-        "size": 32218,
-        "sha256": "1f644f00a683a961fd5059cc404857ebed834a38a0ca8d9398e1777d94c618e4"
+        "resultBlob": "4eed3fc5090a885c3ae828b1c0521d1a1964c018",
+        "size": 32781,
+        "sha256": "93f8fb8e268229dd4c8b2defe4966871b708a6dcd4e9c444cb346b5d856c8853"
       },
       {
         "path": "Source/Core/VideoCommon/Fifo.h",
@@ -1139,6 +1148,24 @@
         "resultBlob": "cf9793efccf7cdaf57486d655b31b10c92d6e9af",
         "size": 15161,
         "sha256": "5d2514d167829d85a17ca49b02c20f1ecbbaf958cba92283862558a5bb6fb468"
+      },
+      {
+        "path": "Source/Core/VideoCommon/TextureCacheBase.cpp",
+        "status": "M",
+        "mode": "100644",
+        "baseBlob": "bbcd1140b4ed2151a3e2e217f384046eadeb5f6e",
+        "resultBlob": "0f678d8dd398525f6cb6f88c0b289a321607ebd9",
+        "size": 128168,
+        "sha256": "800af1399adea120fd216255fb013c05ab023b50b90cda3e79e564f8ac81ba8b"
+      },
+      {
+        "path": "Source/Core/VideoCommon/TextureCacheBase.h",
+        "status": "M",
+        "mode": "100644",
+        "baseBlob": "d596f84e5ed57556c74c353d63ed23c1094890c8",
+        "resultBlob": "162245c1b2bd1e182ce3972f9fad0c13021a208e",
+        "size": 18299,
+        "sha256": "d842710b6cd57383a34ad68aca06653eccadd24b8f4061c9bb8491e24fa90d9e"
       },
       {
         "path": "Source/Core/VideoCommon/TextureConversionShader.cpp",
@@ -1320,5 +1347,5 @@
       ]
     }
   ],
-  "contentSha256": "083325591eafc77b83e057f20d72a3585051ae2da88c31e531ea72b11c6711fa"
+  "contentSha256": "a0f0587c8ba98f5ac714dec6c57cd8320d7e2433320ec8b159f99a4d47bd4f28"
 }
