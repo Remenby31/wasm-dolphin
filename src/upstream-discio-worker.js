@@ -2038,6 +2038,10 @@ async function handleMessage(type, payload) {
         // frames waiting now (the `queued` counter is the total queued)
         waiting: wgpuVsync.waiting,
         ticks: wgpuVsyncTick,
+        // backbuffer passes and presents since boot: with one pass a frame
+        // they match; more passes than presents is a frame's pass reopened
+        beginFb0: webGpuExecStats.beginFb0,
+        presents: webGpuExecStats.present,
         visualCadence: wgpuVisualCadenceSnapshot()
       };
     case "validationReadEfbSyncStats":
