@@ -36,8 +36,11 @@ const runs = Number(values.runs), warmupMs = Number(values.warmup) * 1000, secs 
 // A run that never ends would hold the lock: each run has a watchdog.
 const runTimeoutMs = warmupMs + secs * 1000 + 180_000;
 
-async function measure(server) {
+// `held.session`: the run's session, closed by the watchdog on a timeout so
+// a hung run never overlaps the next one under the lock.
+async function measure(server, held) {
   const s = await openSession({ base: server.base, server, query: `${values.query}&metrics=1`, iso: values.iso, routes: { "**/__harness_state.sav": values.state }, harness: { displayed: true } });
+  held.session = s;
   try {
     const loaded = await loadHarnessState(s.page, s.url);
     if (!loaded?.loaded) return { error: "state load failed" };
@@ -76,6 +79,7 @@ async function measure(server) {
       presentVsync
     };
   } finally {
+    held.session = null;
     await s.close();
   }
 }
@@ -85,11 +89,13 @@ const server = await ensureServer({ port: Number(values.port), root: REPO_ROOT }
 const records = [];
 for (let run = 1; run <= runs; run += 1) {
   let timer;
+  const held = { session: null };
   const record = await Promise.race([
-    measure(server),
+    measure(server, held),
     new Promise((resolve) => { timer = setTimeout(() => resolve({ error: `run timed out (${runTimeoutMs / 1000} s)` }), runTimeoutMs); })
   ]).catch((e) => ({ error: String(e.message || e) }));
   clearTimeout(timer);
+  if (held.session) await held.session.close().catch(() => {});
   records.push({ run, ...record });
   console.log(`[stream-track] run ${run}: ${record.error ?? `stream ${record.stream.fps} fps, capture p99 ${record.stream.captureInterval.p99} ms, gaps ${record.stream.gaps}; display 2+ ${record.display.with2plus}/${record.display.beginFrames}`}`);
 }

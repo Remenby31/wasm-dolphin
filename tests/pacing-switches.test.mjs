@@ -129,7 +129,7 @@ test("presentvsync: URL → host → adapter → worker, off by default", async 
   const worker = await readFile(new URL("../src/upstream-discio-worker.js", import.meta.url), "utf8");
   assert.match(host, /\n {12}presentVsync: this\.pacing\.presentVsync,\n/);
   assert.match(worker, /\n {8}presentVsync: payload\.presentVsync,\n/);
-  assert.match(worker, /wgpuPresentVsync = presentVsync === true && typeof self\.requestAnimationFrame === "function";/, "only with a worker rAF");
+  assert.match(worker, /wgpuPresentVsync = presentVsync === true && typeof self\.requestAnimationFrame === "function" && !wgpuDetachedPresenter;/, "only with a worker rAF, never with the detached presenter (stale bitmap)");
 });
 
 test("presentvsync: the backbuffer pass renders into a pooled texture, shown at the worker's rAF, the drain never held", async () => {
@@ -137,9 +137,12 @@ test("presentvsync: the backbuffer pass renders into a pooled texture, shown at 
   // fb#0's BEGIN_PASS: the pool's texture in place of the canvas's
   assert.match(worker, /const cur = wgpuPresentVsync\n\s+\? acquireWgpuVsyncTexture\([^)]*\)\n\s+: renderGpu\.context\.getCurrentTexture\(\);/);
   // the present queues the frame; the present count follows the display
-  assert.match(worker, /if \(wgpuPresentVsync && lastBackbufferTexture\) \{\n[^\n]*\n\s+queueWgpuVsyncFrame\(lastBackbufferTexture,/);
+  // the frame's texture is kept across drains (wgpu-vsync-queue.js): the present
+  // queues it whatever this drain saw, never a drain-local texture
+  assert.match(worker, /if \(wgpuPresentVsync\) \{\n(?:\s+\/\/[^\n]*\n)+\s+queueWgpuVsyncFrame\(api\?\.getFrame/);
+  assert.doesNotMatch(worker, /queueWgpuVsyncFrame\(lastBackbufferTexture/);
   const present = worker.slice(worker.indexOf("function presentWgpuVsyncFrame()"), worker.indexOf("function wgpuCanvasUsage("));
-  assert.match(present, /const f = wgpuVsyncQueue\.shift\(\);/, "the oldest queued frame");
+  assert.match(present, /const f = wgpuVsync\.takeForDisplay\(wgpuVsyncTick\);/, "the oldest queued frame, after the catch-up");
   assert.match(present, /copyTextureToTexture\(/);
   // v3: the stream no longer follows the display: nothing captured at the rAF
   assert.doesNotMatch(present, /streamCapture\.offerCanvas\(/);
@@ -155,9 +158,9 @@ test("presentvsync: the backbuffer pass renders into a pooled texture, shown at 
 test("presentvsync catch-up: a frame that already waited a BeginFrame gives way to a newer one, counted", async () => {
   const worker = await readFile(new URL("../src/upstream-discio-worker.js", import.meta.url), "utf8");
   const present = worker.slice(worker.indexOf("function presentWgpuVsyncFrame()"), worker.indexOf("function wgpuCanvasUsage("));
-  assert.match(present, /while \(wgpuVsyncQueue\.length > 1 && wgpuVsyncQueue\[0\]\.tick < wgpuVsyncTick - 1\) \{/);
-  assert.match(present, /wgpuPresentVsyncStats\.caughtUp \+= 1;/);
-  assert.match(worker, /wgpuVsyncQueue\.push\(\{ tex, coreFrame, shownVi, stream, tick: wgpuVsyncTick \}\);/);
+  // the behaviour is tested on the module (tests/wgpu-vsync-queue.test.mjs)
+  assert.match(present, /wgpuVsync\.takeForDisplay\(wgpuVsyncTick\)/);
+  assert.match(worker, /wgpuVsync\.queueFrame\(\{ coreFrame, shownVi, stream, tick: wgpuVsyncTick \}\)/);
   assert.match(worker, /case "validationReadPresentVsync":/);
 });
 
@@ -204,14 +207,14 @@ test("display counter: one present per BeginFrame is one picture, whichever rAF 
 test("presentvsync v3: the stream captures at queue time, from the frame's texture", async () => {
   const worker = await readFile(new URL("../src/upstream-discio-worker.js", import.meta.url), "utf8");
   const queue = worker.slice(worker.indexOf("function queueWgpuVsyncFrame("), worker.indexOf("function wgpuVsyncFallbackCheck("));
-  assert.match(queue, /wgpuVsyncQueue\.push\([^\n]*\);\n {2}if \(stream && streamCapture\.active\) streamWgpuVsyncFrame\(tex, coreFrame\);/);
+  assert.match(queue, /if \(!frame\) return false;\n {2}if \(stream && streamCapture\.active\) streamWgpuVsyncFrame\(frame\.tex, coreFrame\);/, "a present without a pass streams nothing");
   const stream = worker.slice(worker.indexOf("function streamWgpuVsyncFrame("), worker.indexOf("// The texture the backbuffer pass renders into"));
   assert.match(stream, /if \(!streamCapture\.ready\(\)\) return;/, "nobody reading: no copy");
   assert.match(stream, /copyTextureToTexture\(\{ texture: tex \}, \{ texture: wgpuVsyncStreamContext\.getCurrentTexture\(\) \}/);
   assert.match(stream, /dev\.queue\.submit\(\[enc\.finish\(\)\]\);\n {2}streamCapture\.offerCanvas\(wgpuVsyncStreamCanvas, coreFrame\);/, "copy submitted before the snapshot");
-  assert.match(worker, /streamed: 0 \};/);
+  assert.match(worker, /const wgpuPresentVsyncStats = \{ byTimer: 0, streamed: 0 \};/);
   // the readback keeps the `queued` counter: the queue's length is `waiting`
   const read = worker.slice(worker.indexOf('case "validationReadPresentVsync":'), worker.indexOf('case "validationReadEfbSyncStats":'));
-  assert.match(read, /\.\.\.wgpuPresentVsyncStats,\n[^\n]*\n {8}waiting: wgpuVsyncQueue\.length,/);
-  assert.doesNotMatch(read, /queued: wgpuVsyncQueue\.length/);
+  assert.match(read, /\.\.\.wgpuVsync\.stats,\n[^\n]*\n {8}waiting: wgpuVsync\.waiting,/);
+  assert.doesNotMatch(read, /queued: /);
 });

@@ -23,6 +23,7 @@ test("stream-track probe: takes the perf lock unless --no-lock, a watchdog per r
   const src = await readFile(new URL("../harness/probes/stream-track.mjs", import.meta.url), "utf8");
   assert.match(src, /values\["no-lock"\] \? null : await acquirePerfLock\(/);
   assert.match(src, /const runTimeoutMs = /);
+  assert.match(src, /if \(held\.session\) await held\.session\.close\(\)/, "a timed-out run's session is closed before the next");
   assert.match(src, /process\.exit\(/, "ensureServer keeps node alive: the probe must exit");
   assert.match(src, /window\.__host\?\.captureVideoTrack\?\.\(\)/);
 });
