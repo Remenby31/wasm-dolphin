@@ -25,7 +25,7 @@
       "commit": "01e0577914a75a2569c846778c2f93aa8e6feddd"
     }
   },
-  "patchSeriesSha256": "db79dbc7f442b4c2ea611cfd5acc835660c778562d8c45c8669b701cdf111cdd",
+  "patchSeriesSha256": "4f33f2e6ea34a11274bff0ebf5ae569c6b78f08802747b46a06c213ae7169a91",
   "patches": [
     {
       "order": 1,
@@ -997,14 +997,6 @@
     },
     {
       "order": 122,
-      "cwd": ".",
-      "hashMode": "lf-normalized",
-      "path": "patches/dolphin-wasm/snapshot/0163-alignment-stops-helpers.patch",
-      "size": 1916,
-      "sha256": "10232ee0fdc4be3119fa900c3804f2dda44dc7007c63187ac39cebb7bdd2ac3d"
-    },
-    {
-      "order": 123,
       "cwd": "Externals/SFML/SFML",
       "hashMode": "lf-normalized",
       "path": "patches/dolphin-wasm/submodules/0001-sfml-emscripten-config.patch",
@@ -1012,7 +1004,7 @@
       "sha256": "f82197a21fe982ad83f6ee7bbf5a03839b1cebd4d64da3eab11263842bf61d89"
     },
     {
-      "order": 124,
+      "order": 123,
       "cwd": "Externals/xxhash/xxHash",
       "hashMode": "lf-normalized",
       "path": "patches/dolphin-wasm/submodules/0002-xxhash-wasm-simd-scalar.patch",

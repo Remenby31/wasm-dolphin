@@ -1,14 +1,15 @@
 // Copyright 2026 wasm-dolphin contributors
 // SPDX-License-Identifier: GPL-2.0-or-later
 
-// Patch 0163: an instruction that raises the alignment exception (lmw/stmw
-// and the FP loads and stores at an address that is not a multiple of 4)
-// stops there, as in the interpreter: it vectors to 0x600 before the next
-// instruction. The helpers' exception checks (CheckProgramOrDsi, the
-// interpreter fallback, InterpretAndCheckExceptions) took only DSI and
-// PROGRAM, so the tiers ran on past the faulting instruction with the
-// exception pending. Each case: an integer op before (a dirty register), the
-// faulting op, integer ops after, in a block and in a region.
+// An instruction that raises the alignment exception (lmw/stmw and the FP
+// loads and stores at an address that is not a multiple of 4) leaves it
+// pending, and the next instructions run: Dolphin's interpreter takes an
+// exception right after an instruction only for DSI (Interpreter.cpp,
+// SingleStepInner), the alignment one at its next CheckExceptions, as Jit64
+// does. The tiers must do the same, the pending bit included (oracle word 46):
+// their helpers' checks (CheckProgramOrDsi, InterpretAndCheckExceptions) stop
+// on DSI and PROGRAM only. Each case: an integer op before (a dirty register),
+// the faulting op, integer ops after, in a block and in a region.
 
 import assert from "node:assert/strict";
 import { existsSync, readFileSync } from "node:fs";
@@ -19,10 +20,9 @@ import { PRODUCTION_DISABLE_MASK, describeDifference, hex, loadOracleCore, makeR
 const lock = JSON.parse(readFileSync(new URL("../provenance/dolphin-source.lock.json", import.meta.url), "utf8"));
 const builtUrl = new URL("../cores/dolphin/dolphin-core-upstream.build.json", import.meta.url);
 const built = existsSync(builtUrl) ? JSON.parse(readFileSync(builtUrl, "utf8")) : null;
-const coreHas0163 = built?.source?.patchSeriesSha256 === lock.patchSeriesSha256 &&
-  lock.patches.some((p) => p.path.includes("/0163-"));
-const core = coreHas0163 ? await loadOracleCore() : null;
-const skip = !coreHas0163 ? "core built from a patch series without 0163 (CI builds this branch's core)" : !core ? "no core" : false;
+const coreCurrent = built?.source?.patchSeriesSha256 === lock.patchSeriesSha256;
+const core = coreCurrent ? await loadOracleCore() : null;
+const skip = !coreCurrent ? "core built from another patch series (CI builds this branch's core)" : !core ? "no core" : false;
 
 const u = (v) => v >>> 0;
 const D = (op, rt, ra, d) => u((op << 26) | (rt << 21) | (ra << 16) | (d & 0xffff));
@@ -45,11 +45,11 @@ const stateFor = (k) => {
   return s;
 };
 
-test("blocks: an alignment exception stops at the faulting instruction, like the interpreter", { skip }, () => {
+test("blocks: an alignment exception stays pending and the block runs on, like the interpreter", { skip }, () => {
   for (const [k, [name, w]] of FAULTING.entries()) {
     const words = Uint32Array.from(program(w));
     const r = core.run(words, stateFor(k), PRODUCTION_DISABLE_MASK);
-    assert.equal(r.interp[47] >>> 0, 0x600, `${name}: the interpreter vectors to 0x600`);
+    assert.ok((r.interp[46] & 0x20) !== 0 && r.interp[47] >>> 0 !== 0x600, `${name}: the interpreter leaves the alignment exception pending`);
     assert.ok(r.code === 0, `${name} ${Array.from(words, hex).join(" ")}: ${r.code === 1 ? describeDifference(r.interp, r.jit).slice(0, 6).join("; ") : r.message || r.code}`);
     assert.ok(r.compiledOps >= 4, `${name}: compiled (${r.compiledOps} ops)`);
   }
@@ -57,7 +57,7 @@ test("blocks: an alignment exception stops at the faulting instruction, like the
 
 const aot = skip ? null : await loadAotCore();
 const regionSkip = skip || (!aot?.has("DolphinWeb_AotTestLoadState") && "core without the region test exports");
-test("regions: an alignment exception stops at the faulting instruction, like the interpreter", { skip: regionSkip }, () => {
+test("regions: an alignment exception stays pending and the region runs on, like the interpreter", { skip: regionSkip }, () => {
   let ran = 0;
   for (const [k, [name, w]] of FAULTING.entries()) {
     const res = compareRegionProgram(aot, program(w), stateFor(k), { mask: PRODUCTION_DISABLE_MASK });
