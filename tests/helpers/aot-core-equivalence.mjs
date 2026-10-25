@@ -295,6 +295,18 @@ export function compareCall(core, regionAt, start) {
           if (raised) return done("exception");
           continue;
         }
+        // 0157: with MSR.FP clear a fragment leaves (1) at the start of a
+        // block holding an FPU op, the frame written back: the block path
+        // raises FP unavailable there. At its entry it ran nothing.
+        if ((core.state()[37] & 0x2000) === 0) {
+          if (core.pc() === pc && core.downcount() === before) {
+            regionRuns -= 1;
+            const raised = core.interpretOne();
+            interpCycles += before - core.downcount();
+            if (raised) return done("exception");
+          }
+          continue;
+        }
         throw new Error(`region refused its own entry ${pc.toString(16)}`);
       }
       if (code === 3) return done("exception");
