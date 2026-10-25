@@ -7,7 +7,7 @@
 //   node harness/probes/drop-meter.mjs --iso disc.iso --port N [--runs 6]
 //     [--visits 2] [--candidate ref|dir] [--baseline ref|dir]
 //     [--noise <A/A>/summary.json] [--trend measures/drops/trend.jsonl]
-//     [--scenario harness/probes/drop-scenario.json]
+//     [--scenario harness/probes/drop-scenario.json] [--state scene.sav]
 //     [--config product | --query "..."] [--sample-ms 50] [--native ref.json]
 //     [--shots] [--region-counters] [--pc-window FROM-TO] [--max-load L] [--load-wait 300] [--lock-wait 14400 | --no-lock]
 //     [--out dir]
@@ -52,7 +52,7 @@ import { pathToFileURL } from "node:url";
 import { parseArgs } from "node:util";
 import { gunzipSync, gzipSync } from "node:zlib";
 
-import { bootIso, ensureServer, grabFrame, launchChrome, readTimeline, REPO_ROOT, workerRequest } from "../lib/browser.mjs";
+import { bootIso, ensureServer, grabFrame, launchChrome, loadHarnessState, readTimeline, REPO_ROOT, workerRequest } from "../lib/browser.mjs";
 import { dropEvents, dropSummary, loadSegments, nativeFps, noiseOf, phaseSummaries, rowsOf, trendLine, trendTable, verdictOf, windowsOf, worstDrops } from "../lib/drops.mjs";
 import { exportRef } from "../cli.mjs";
 import { calmLock, loadGaveUp } from "../lib/env.mjs";
@@ -63,7 +63,7 @@ import { savePng } from "../lib/session.mjs";
 import { median, round } from "../lib/stats.mjs";
 import { machineSnapshot, sampleChromeRss } from "../lib/system.mjs";
 import { mergeTimeline } from "../lib/timeline.mjs";
-import { num, sideOrder } from "./race-perf.mjs";
+import { num, sideOrder, STATE_ROUTE } from "./race-perf.mjs";
 
 // What the site runs (salon packages/core engineParams, profile "fast", with
 // a WebGPU adapter).
@@ -122,6 +122,16 @@ async function playVisit(o, server, profileDir, shotDir, visit) {
     await bootIso(page, { url: `${server.base}?${o.query}`, iso: o.iso, timeoutMs: 120000 });
     raw.bootMs = Date.now() - t0;
     await context.assertInvisible("after boot");
+    // --state: the scene starts at a savestate (e.g. a 2-player race); the
+    // scenario's guest seconds then count from the load.
+    let base = 0;
+    if (o.state) {
+      await page.route(STATE_ROUTE, (route) => route.fulfill({ path: o.state, contentType: "application/octet-stream" }));
+      raw.stateLoad = await loadHarnessState(page, `${server.base}/`);
+      if (!raw.stateLoad?.loaded) throw new Error(`savestate not loaded: ${JSON.stringify(raw.stateLoad).slice(0, 200)}`);
+      base = (await guestSec(page))?.sec ?? 0;
+      raw.stateBaseSec = base;
+    }
     // Counters that need turning on (0113 headroom, 0162 cadence), then the sampler.
     raw.headroom = (await workerRequest(page, "validationReadHeadroomStats", { reset: 0 }, 5000))?.error ?? "on";
     raw.cadence = await workerRequest(page, "validationReadPresentCadence", { reset: 0 }, 5000).then((r) => r?.error ?? (r?.supported === false ? "unsupported" : "on"));
@@ -156,9 +166,9 @@ async function playVisit(o, server, profileDir, shotDir, visit) {
         const deadline = Date.now() + Math.max(60000, step.at * 1000 * 20);
         for (;;) {
           const g = await guestSec(page);
-          if (g && g.sec >= step.at) break;
-          if (Date.now() > deadline) throw new Error(`guest second ${step.at} not reached (${g?.sec?.toFixed(1) ?? "?"})`);
-          await page.waitForTimeout(g && step.at - g.sec > 1 ? 200 : 15);
+          if (g && g.sec - base >= step.at) break;
+          if (Date.now() > deadline) throw new Error(`guest second ${step.at} not reached (${g ? (g.sec - base).toFixed(1) : "?"})`);
+          await page.waitForTimeout(g && step.at - (g.sec - base) > 1 ? 200 : 15);
         }
         const t = performance.timeOrigin + performance.now();
         if (step.label) raw.markers.push({ t, label: step.label });
@@ -337,7 +347,7 @@ async function main() {
       runs: { type: "string", default: "6" }, visits: { type: "string", default: "2" },
       candidate: { type: "string" }, baseline: { type: "string" }, noise: { type: "string" }, trend: { type: "string" },
       config: { type: "string", default: "product" }, query: { type: "string" }, "sample-ms": { type: "string", default: "50" },
-      native: { type: "string" }, analyze: { type: "string" }, trace: { type: "string" }, shots: { type: "boolean", default: false },
+      native: { type: "string" }, analyze: { type: "string" }, trace: { type: "string" }, state: { type: "string" }, shots: { type: "boolean", default: false },
       "region-counters": { type: "boolean", default: false }, "pc-window": { type: "string" },
       "max-load": { type: "string" }, "load-wait": { type: "string", default: "300" }, "lock-wait": { type: "string", default: "14400" }, "calm-wait": { type: "string" }, "no-lock": { type: "boolean", default: false },
       port: { type: "string", default: process.env.HARNESS_PORT }, out: { type: "string" }
@@ -367,6 +377,7 @@ async function main() {
   const o = {
     iso, scenario, query: query.toString(), runs: num(values, "runs", { min: 1, int: true }), visits: num(values, "visits", { min: 1, int: true }),
     sampleMs: num(values, "sample-ms", { min: 10 }), port: num(values, "port", { min: 1, int: true }),
+    state: values.state ? path.resolve(values.state) : null,
     regionCounters: values["region-counters"], pcWindow: values["pc-window"] ? values["pc-window"].split("-").map(Number) : null,
     maxLoad: values["max-load"] ? num(values, "max-load", { min: 0.1 }) : Math.max(2, os.cpus().length / 4), loadWait: num(values, "load-wait", { min: 0 })
   };
@@ -381,7 +392,7 @@ async function main() {
   const outDir = probeOutDir("drop-meter", iso, values.out);
   const meta = {
     probe: "drop-meter", at: new Date().toISOString(), locked: !values["no-lock"], machine: machineSnapshot(), chrome: chromeInfo(), iso: path.basename(iso),
-    scenario: path.basename(values.scenario), query: o.query, sampleMs: o.sampleMs, runs: o.runs, visits: o.visits, maxLoad: o.maxLoad,
+    scenario: path.basename(values.scenario), state: o.state ? path.basename(o.state) : null, query: o.query, sampleMs: o.sampleMs, runs: o.runs, visits: o.visits, maxLoad: o.maxLoad,
     sides: Object.fromEntries(Object.entries(sides).map(([k, s]) => [k, s.label])), noise: values.noise ?? null,
     definition: "windows of 100 ms from the scenario's first step; speed = guest/host time (VI ticks); drops: windows < 90 % or a present gap > 50 ms, merged; loads: disc reads ≥ 2.5 MiB/s (0.5 s average), merged within 1 s, excess = host − guest ms; time under 95/90 %: 1 s sliding windows; verdict: median moved the worse way beyond the A/A noise"
   };
