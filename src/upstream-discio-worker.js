@@ -14,7 +14,7 @@ import { parseDolHeader } from "./dol.js";
 import { probeRelaxedMadd } from "./relaxed-madd-probe.js";
 import { probeWasmFeatures } from "./wasm-feature-probe.js";
 import { decodeWgpuSamplerState } from "./wgpu-sampler-state.js";
-import { normalizeInternalResolution } from "./wgpu-enhancements.js";
+import { enhancementCoreArgs, normalizeInternalResolution, resizeCanvasBackbuffer } from "./wgpu-enhancements.js";
 import { gxClearDepthToStored, gxDepthState } from "./wgpu-depth-state.js";
 import { clampSourceRect, createWgpuExactCapture, packReadbackRows } from "./wgpu-exact-capture.js";
 import { createUniqueFrameCounter, hashRows, sampleRowOffsets } from "./harness-unique-frames.js";
@@ -2383,9 +2383,11 @@ async function handleMessage(type, payload) {
       // canvas follows the backbuffer size the core then announces.
       const set = moduleInstance?._DolphinWeb_SetEnhancements;
       if (typeof set !== "function") return { applied: false, reason: "core-without-0168" };
-      const internalResolution = set(normalizeInternalResolution(payload.internalResolution),
-        Number.isInteger(payload.maxAnisotropy) ? payload.maxAnisotropy : -1);
-      return { applied: true, internalResolution };
+      // 0: the core's runtime is not up yet (the boot reads the init values).
+      const internalResolution = set(...enhancementCoreArgs(payload));
+      return internalResolution > 0
+        ? { applied: true, internalResolution }
+        : { applied: false, reason: "core-not-running" };
     }
     case "setAudioMuted":
       api?.setAudioMuted?.(payload.muted ? 1 : 0);
@@ -12598,23 +12600,11 @@ function recordBoundedHistogram(values, bounds, value) {
 // core lays the presenter out on reaches here.
 function resizeWgpuBackbuffer(width, height) {
   wgpuBackbufferSized = true;
-  if (!renderCanvas || !renderGpu || !(width > 0) || !(height > 0)) return;
-  if (renderCanvas.width === width && renderCanvas.height === height &&
-      renderGpu.canvasWidth === width && renderGpu.canvasHeight === height) return;
   try {
-    renderCanvas.width = width;
-    renderCanvas.height = height;
-    renderGpu.context.configure({
-      device: renderGpu.device,
-      format: renderGpu.format,
-      alphaMode: "opaque",
-      usage: self.GPUTextureUsage.RENDER_ATTACHMENT |
-        ((wgpuReplayClassifier || inputReadbackDiagnostics) ?
-          self.GPUTextureUsage.COPY_SRC : 0) |
-        (wgpuVisualCadenceEnabled ? self.GPUTextureUsage.TEXTURE_BINDING : 0)
-    });
-    renderGpu.canvasWidth = width;
-    renderGpu.canvasHeight = height;
+    const usage = self.GPUTextureUsage.RENDER_ATTACHMENT |
+      ((wgpuReplayClassifier || inputReadbackDiagnostics) ? self.GPUTextureUsage.COPY_SRC : 0) |
+      (wgpuVisualCadenceEnabled ? self.GPUTextureUsage.TEXTURE_BINDING : 0);
+    if (!resizeCanvasBackbuffer(renderCanvas, renderGpu, width, height, usage)) return;
     console.log(`[bbresize] backbuffer ${width}x${height}`);
     postStatus(`wgpu backbuffer resized to ${width}x${height}`);
   } catch (e) {

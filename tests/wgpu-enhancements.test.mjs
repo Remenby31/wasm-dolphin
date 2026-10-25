@@ -63,10 +63,49 @@ test("the worker resizes the canvas on the core's BackbufferSize command (0168)"
   const worker = await read("../src/upstream-discio-worker.js");
   assert.match(worker, /const WGPU_CMD_OP_BACKBUFFER_SIZE = 29;/);
   assert.match(worker, /case WGPU_CMD_OP_BACKBUFFER_SIZE:\n[^]*?resizeWgpuBackbuffer\(u32\[recWord \+ 1\], u32\[recWord \+ 2\]\);/);
+  assert.match(worker, /if \(!resizeCanvasBackbuffer\(renderCanvas, renderGpu, width, height, usage\)\) return;/);
+  assert.match(worker, /if \(!resizeCanvasBackbuffer\(renderCanvas, renderGpu, width, height, usage\)\) return;/);
   assert.match(worker, /case "setEnhancements": \{[^]*?_DolphinWeb_SetEnhancements/);
   const patch = await read("../patches/dolphin-wasm/snapshot/0168-webgpu-internal-resolution.patch");
   assert.match(patch, /\+  BackbufferSize = 29,/);
   assert.match(patch, /\+  return \{640 \* scale, 480 \* scale, 1\.0f, AbstractTextureFormat::BGRA8\};/);
   assert.match(patch, /PushBackbufferSize\(surface\.width, surface\.height\)/);
+  // Never at 1x: the canvas starts at 640x480, and the semantic capture
+  // (?wgpusemanticruntime) refuses opcodes it does not know.
+  assert.match(patch, /\+  u32 m_announced_backbuffer_w = 640;\n\+  u32 m_announced_backbuffer_h = 480;/);
   assert.match(patch, /g_presenter->SetBackbuffer\(GetSurfaceInfo\(\)\)/);
+});
+
+test("resizeCanvasBackbuffer: the same size is a no-op, another size resizes and reconfigures once", async () => {
+  const { resizeCanvasBackbuffer } = await import("../src/wgpu-enhancements.js");
+  const configured = [];
+  const canvas = { width: 640, height: 480 };
+  const gpu = { context: { configure: (c) => configured.push(c) }, device: "dev", format: "bgra8unorm", canvasWidth: 640, canvasHeight: 480 };
+  assert.equal(resizeCanvasBackbuffer(canvas, gpu, 640, 480, 16), false);
+  assert.equal(configured.length, 0);
+  assert.equal(resizeCanvasBackbuffer(canvas, gpu, 1280, 960, 16), true);
+  assert.deepEqual([canvas.width, canvas.height, gpu.canvasWidth, gpu.canvasHeight], [1280, 960, 1280, 960]);
+  assert.deepEqual(configured, [{ device: "dev", format: "bgra8unorm", alphaMode: "opaque", usage: 16 }]);
+  assert.equal(resizeCanvasBackbuffer(canvas, gpu, 1280, 960, 16), false);
+  for (const bad of [[0, 480], [640, NaN]]) assert.equal(resizeCanvasBackbuffer(canvas, gpu, ...bad, 16), false);
+  assert.equal(resizeCanvasBackbuffer(null, gpu, 640, 480, 16), false);
+  assert.equal(configured.length, 1);
+});
+
+test("the worker hands the core a normalized scale and log2 anisotropy, whatever the message carries", async () => {
+  const { enhancementCoreArgs } = await import("../src/wgpu-enhancements.js");
+  assert.deepEqual(enhancementCoreArgs({ internalResolution: 3, maxAnisotropy: 4 }), [3, 4]);
+  for (const p of [{}, { internalResolution: 5, maxAnisotropy: 5 }, { internalResolution: "x", maxAnisotropy: 2.5 }, null]) {
+    assert.deepEqual(enhancementCoreArgs(p), [1, -1], JSON.stringify(p));
+  }
+});
+
+// The page speaks multipliers (?aniso=16, setEnhancements({ anisotropy: 16 })),
+// the core log2: one conversion, in core-host.
+test("core-host's setEnhancements takes the anisotropy as a multiplier, like ?aniso=", async () => {
+  const host = await read("../src/core-host.js");
+  assert.match(host, /async setEnhancements\(\{ internalResolution, anisotropy \} = \{\}\)/);
+  assert.match(host, /this\.enhancements\.maxAnisotropy = anisotropyToCore\(anisotropy\);/);
+  const worker = await read("../src/upstream-discio-worker.js");
+  assert.match(worker, /const internalResolution = set\(\.\.\.enhancementCoreArgs\(payload\)\);/);
 });

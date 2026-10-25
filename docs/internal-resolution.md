@@ -9,8 +9,11 @@ software renderer has a single resolution: both settings are ignored there.
 | Where | Internal resolution | Anisotropy |
 | --- | --- | --- |
 | URL, at boot | `?ir=1` to `?ir=4` (default 1) | `?aniso=1\|2\|4\|8\|16` (default: what the game asks for) |
-| Page, while a game runs | `host.setEnhancements({ internalResolution, maxAnisotropy })` | `maxAnisotropy`: log2 (0 = 1x … 4 = 16x), -1 = the game's |
-| Core | `DolphinWeb_SetEnhancements(scale, log2)`, returns the scale in effect | same call |
+| Page, while a game runs | `host.setEnhancements({ internalResolution, anisotropy })` | `anisotropy`: 1, 2, 4, 8 or 16, as `?aniso=`; anything else = the game's |
+| Core | `DolphinWeb_SetEnhancements(scale, log2)`, returns the scale in effect (0 before the runtime is up) | log2: 0 = 1x … 4 = 16x, -1 = the game's |
+
+Out-of-range values mean the default on both sides: a scale other than 1-4
+is 1, an anisotropy other than the five levels is the game's.
 
 `src/wgpu-enhancements.js` converts between the page's values and the
 core's. A change while a game runs is applied by the video thread at its
@@ -30,7 +33,8 @@ texture sampling depends on scaled EFB copies), a short stutter.
 - The backbuffer is 640N × 480N (`WebGPUGfx::GetSurfaceInfo`). On a new
   scale, `WebGPUGfx::OnConfigChanged` lays the presenter out again, and
   `BindBackbuffer` sends `BackbufferSize` (opcode 29) before the next
-  backbuffer pass; the worker resizes and reconfigures the canvas there
+  backbuffer pass whose size differs from the last one sent (the canvas
+  starts at 640x480, so nothing is sent at 1x); the worker resizes and reconfigures the canvas there
   (`resizeWgpuBackbuffer`). The canvas follows the core in order, never a
   frame early or late.
 - Anisotropy: `GFX_ENHANCE_MAX_ANISOTROPY`. The sampler word already
@@ -39,8 +43,25 @@ texture sampling depends on scaled EFB copies), a short stutter.
   (`tools/gamesettings-allowlist.json`): Dolphin's fix for seams at scales
   above 1; it does nothing at 1x.
 
-Streaming keeps its own encoding size: the site sets
-`scaleResolutionDownBy` on the video sender (the canvas is N times larger).
+Streaming keeps its own encoding size: the worker capture
+(`src/stream-capture.js`) draws a canvas wider than 640 into a 640-wide one
+before it makes the VideoFrame, so the encoder gets 640x480 at every scale
+and across switches. The page's own `canvas.captureStream()` fallback
+(`?capture=canvas`) still gets the full canvas; the site divides it back
+with `scaleResolutionDownBy` there.
+
+## Costs and limits
+
+- GPU memory grows with N²: EFB colour and depth, every XFB copy and every
+  scaled EFB copy. At 4x the EFB alone is 2560x2112 (about 43 MB for colour
+  and depth), and a game with many render-to-texture copies holds several
+  hundred MB more than at 1x. Savestates hold the EFB too, so they grow
+  with N² inside the 1.5 GiB heap. To do: a ceiling per adapter class and
+  a fallback to 1x on device loss. Until then, Auto on the site goes no
+  higher than 2x.
+- The semantic capture (`?wgpusemanticruntime`, diagnostics) does not know
+  opcode 29: a scale change invalidates that capture, as any opcode above
+  24 does. At 1x nothing changes for it.
 
 ## Checking it
 

@@ -655,18 +655,22 @@ void CreateDirectoryIfNeeded(const std::string& path)
 }
 
 // Patch 0168. Internal resolution: 1 to 4 times native (the EFB, the EFB and
-// XFB copies, the backbuffer), clamped; the software renderer has a single
-// resolution, so other backends stay at 1. Anisotropic filtering: log2 of
-// the maximum (0 = 1x .. 4 = 16x), -1 = what the game asks for. Base layer
-// only: the video thread applies a change at its next frame
-// (VideoConfig::CheckForConfigChanges recreates the EFB, WebGPUGfx resizes the
-// backbuffer and tells the page). Returns the scale in effect.
+// XFB copies, the backbuffer); any other value is native, as the page's
+// normalizeInternalResolution says. The software renderer has a single
+// resolution, so other backends stay at 1. Anisotropic filtering: log2 of the
+// maximum (0 = 1x .. 4 = 16x); any other value is -1, what the game asks for
+// (src/wgpu-enhancements.js anisotropyToCore). Base layer only: the video
+// thread applies a change at its next frame (VideoConfig::CheckForConfigChanges
+// recreates the EFB, WebGPUGfx resizes the backbuffer and tells the page).
+// Returns the scale in effect.
 static int ApplyEnhancements(int efb_scale, int anisotropy)
 {
-  const int scale = s_video_backend == "WebGPU" ? std::clamp(efb_scale, 1, 4) : 1;
+  const int scale =
+      s_video_backend == "WebGPU" && efb_scale >= 1 && efb_scale <= 4 ? efb_scale : 1;
   Config::SetBase(Config::GFX_EFB_SCALE, scale);
   Config::SetBase(Config::GFX_ENHANCE_MAX_ANISOTROPY,
-                  static_cast<AnisotropicFilteringMode>(std::clamp(anisotropy, -1, 4)));
+                  static_cast<AnisotropicFilteringMode>(anisotropy >= 0 && anisotropy <= 4 ?
+                                                            anisotropy : -1));
   return scale;
 }
 
@@ -1350,13 +1354,16 @@ int SetCorePaused(int paused)
   return 1;
 }
 
-// Internal resolution (1 to 4) and anisotropic filtering (log2, -1 = game),
-// at boot or while a game runs (patch 0168). Returns the scale in effect.
+// Internal resolution (1 to 4) and anisotropic filtering (log2, -1 = game)
+// while a game runs (patch 0168). Returns the scale in effect, or 0 before
+// the runtime exists (nothing applied: the boot reads Module's fields).
 #ifdef __EMSCRIPTEN__
 EMSCRIPTEN_KEEPALIVE
 #endif
 int DolphinWeb_SetEnhancements(int efb_scale, int anisotropy)
 {
+  if (!s_runtime_initialized)
+    return 0;
   return ApplyEnhancements(efb_scale, anisotropy);
 }
 

@@ -37,3 +37,31 @@ export function requestedEnhancements(search) {
     maxAnisotropy: anisotropyToCore(params.get("aniso")),
   };
 }
+
+// The worker's setEnhancements message, as the core takes it: [scale 1-4,
+// log2 anisotropy or -1]. The page sends the scale and the log2 already
+// normalized (core-host); anything else falls back to the defaults.
+export function enhancementCoreArgs(payload = {}) {
+  const log2 = payload?.maxAnisotropy;
+  return [
+    normalizeInternalResolution(payload?.internalResolution),
+    Number.isInteger(log2) && log2 >= 0 && log2 <= 4 ? log2 : -1
+  ];
+}
+
+// Size the presented canvas (Dolphin's backbuffer) and reconfigure its WebGPU
+// context. `gpu` is the worker's renderGpu ({ context, device, format,
+// canvasWidth, canvasHeight }), `usage` the canvas texture usage. Same size:
+// nothing, since reconfiguring drops the current texture. Returns whether it
+// resized.
+export function resizeCanvasBackbuffer(canvas, gpu, width, height, usage) {
+  if (!canvas || !gpu || !(width > 0) || !(height > 0)) return false;
+  if (canvas.width === width && canvas.height === height &&
+      gpu.canvasWidth === width && gpu.canvasHeight === height) return false;
+  canvas.width = width;
+  canvas.height = height;
+  gpu.context.configure({ device: gpu.device, format: gpu.format, alphaMode: "opaque", usage });
+  gpu.canvasWidth = width;
+  gpu.canvasHeight = height;
+  return true;
+}

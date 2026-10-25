@@ -1,7 +1,7 @@
 import { aotCompilerRequested, jitOffThreadRequested } from "./aot-compiler-worker.js";
 import { aotSamplePeriodRequested } from "./aot-hot-sampler.js";
 import { wasmEngine } from "./wasm-engine.js";
-import { requestedEnhancements } from "./wgpu-enhancements.js";
+import { anisotropyToCore, normalizeInternalResolution, requestedEnhancements } from "./wgpu-enhancements.js";
 import { parseCustomRtc } from "./custom-rtc.js";
 import { DolphinCoreAdapter, dolphinBundleAvailable } from "./dolphin-adapter.js";
 import { buttonMaskFromPressed, isPadPort } from "./input.js";
@@ -922,13 +922,16 @@ export class EmulatorHost {
     });
   }
 
-  // Internal resolution (1-4) and maximum anisotropy (log2, -1 = the game's;
-  // see src/wgpu-enhancements.js), applied at the core's next frame. Resolves
-  // { applied, internalResolution } (applied false before the core runs, or
-  // with a core without patch 0168); the values are kept for the next boot.
-  async setEnhancements({ internalResolution, maxAnisotropy } = {}) {
-    if (internalResolution !== undefined) this.enhancements.internalResolution = internalResolution;
-    if (maxAnisotropy !== undefined) this.enhancements.maxAnisotropy = maxAnisotropy;
+  // Internal resolution (1-4) and maximum anisotropy (1, 2, 4, 8, 16; 0 =
+  // the game's), the units of ?ir= and ?aniso=, applied at the core's next
+  // frame. Resolves { applied, internalResolution } (applied false before the
+  // core runs, or with a core without patch 0168); the values are kept for
+  // the next boot.
+  async setEnhancements({ internalResolution, anisotropy } = {}) {
+    if (internalResolution !== undefined) {
+      this.enhancements.internalResolution = normalizeInternalResolution(internalResolution);
+    }
+    if (anisotropy !== undefined) this.enhancements.maxAnisotropy = anisotropyToCore(anisotropy);
     if (this.mode !== "dolphin" || typeof this.adapter?.setEnhancements !== "function") {
       return { applied: false, reason: "core-not-loaded" };
     }
