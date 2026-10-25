@@ -168,13 +168,34 @@ test("display counter: a submit made inside the current BeginFrame is counted in
   const { createDisplayCounter } = await import("../src/wgpu-display-counter.js");
   const c = createDisplayCounter({ capacity: 8 });
   c.beginFrame(100);
-  c.submit(7, true);
+  c.submit(7, 100);
   c.beginFrame(116);
   c.submit(8);
   c.beginFrame(133);
   const { displayed } = c.drain();
   assert.deepEqual(displayed.submits, [1, 0, 1]);
   assert.deepEqual(displayed.vi, [7, -1, 8]);
+});
+
+// The presenter's rAF and the counter's run in a fixed but arbitrary order
+// in each frame: either order counts one picture per BeginFrame, no drop.
+// (The presenter first used to land on the previous frame's entry: a false
+// drop every frame, in the runs where its loop had started first.)
+test("display counter: one present per BeginFrame is one picture, whichever rAF runs first", async () => {
+  const { createDisplayCounter } = await import("../src/wgpu-display-counter.js");
+  for (const presenterFirst of [false, true]) {
+    const c = createDisplayCounter({ capacity: 16 });
+    for (const [i, ft] of [100, 116.7, 133.3, 150].entries()) {
+      if (presenterFirst) { c.submit(i, ft); c.beginFrame(ft); }
+      else { c.beginFrame(ft); c.submit(i, ft); }
+    }
+    const { displayed, dropped } = c.drain();
+    assert.deepEqual(displayed.submits, [1, 1, 1, 1], `presenter first: ${presenterFirst}`);
+    assert.deepEqual(displayed.vi, [0, 1, 2, 3]);
+    assert.equal(dropped, 0);
+  }
+  const worker = await readFile(new URL("../src/upstream-discio-worker.js", import.meta.url), "utf8");
+  assert.match(worker, /wgpuVsyncInBeginFrame = performance\.timeOrigin \+ frameTime;/, "the same clock as the counter's beginFrame");
 });
 
 // presentvsync v3: the stream captures every frame when it is queued, from

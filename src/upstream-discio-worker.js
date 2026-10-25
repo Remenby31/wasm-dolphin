@@ -12641,9 +12641,10 @@ let wgpuVsyncLoop = false;
 let wgpuVsyncLastTickAt = 0;
 // BeginFrames seen (the worker's rAF ticks).
 let wgpuVsyncTick = 0;
-// Inside the presenter's rAF callback: what it submits goes out with this
-// BeginFrame (the harness display counter attributes it there).
-let wgpuVsyncInBeginFrame = false;
+// The rAF frame time of the presenter's callback running now (null outside
+// it): the harness display counter matches it to that BeginFrame's entry,
+// whichever of the two worker rAF loops runs first in the frame.
+let wgpuVsyncInBeginFrame = null;
 let wgpuVsyncFallback = null;
 let wgpuVsyncCanvasCopyDst = false;
 const wgpuPresentVsyncStats = { queued: 0, shown: 0, dropped: 0, caughtUp: 0, byTimer: 0, streamed: 0 };
@@ -12711,14 +12712,14 @@ function queueWgpuVsyncFrame(tex, coreFrame, shownVi, stream) {
   if (stream && streamCapture.active) streamWgpuVsyncFrame(tex, coreFrame);
   if (!wgpuVsyncLoop) {
     wgpuVsyncLoop = true;
-    const tick = () => {
+    const tick = (frameTime) => {
       wgpuVsyncLastTickAt = performance.now();
       wgpuVsyncTick += 1;
-      wgpuVsyncInBeginFrame = true;
+      wgpuVsyncInBeginFrame = performance.timeOrigin + frameTime;
       try {
         presentWgpuVsyncFrame();
       } finally {
-        wgpuVsyncInBeginFrame = false;
+        wgpuVsyncInBeginFrame = null;
       }
       self.requestAnimationFrame(tick);
     };
