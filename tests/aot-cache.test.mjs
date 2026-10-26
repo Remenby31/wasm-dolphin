@@ -264,6 +264,19 @@ test("compileStreaming null: modules come from the caller's compile, even with t
   assert.ok(most > 1, `compiled one at a time (${most})`);
 });
 
+// The worker's loader gives way to the core's disc reads before each region.
+test("beforeLoad is awaited before each key's load", async () => {
+  const storage = fakeCacheStorage();
+  const order = [];
+  const cache = await openAotCache({ ...ident(), baseUrl: BASE, cacheStorage: storage, compileStreaming: null,
+    beforeLoad: async () => { order.push("wait"); await new Promise((r) => setTimeout(r, 1)); },
+    compile: async (bytes) => { order.push("compile"); return WebAssembly.compile(bytes); } });
+  await cache.put([{ key: k(1), bytes: MOD_A }, { key: k(2), bytes: MOD_B }]);
+  await cache.load([k(1), k(2)]);
+  assert.equal(order.filter((x) => x === "wait").length, 2);
+  assert.equal(order[0], "wait");
+});
+
 test("pruneAotCaches leaves other discs, foreign caches and caches being created alone", async () => {
   const storage = fakeCacheStorage();
   const a = await open(storage, {}, { clock });
