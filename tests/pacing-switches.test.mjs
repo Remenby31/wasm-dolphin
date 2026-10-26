@@ -18,7 +18,7 @@ const SWITCHES = [
 test("pacing switches: URL parsing, shipped defaults, each switch only its own", async () => {
   const { requestedPacing } = await import("../src/core-host.js");
   // Rush off by default (upstream's default): ?rush=1 turns it back on.
-  assert.deepEqual(requestedPacing(""), { rushPresentation: false, syncOnSkipIdle: false, dupXfbRearmsThrottle: false, smoothEarly: true, presentVsync: false });
+  assert.deepEqual(requestedPacing(""), { rushPresentation: false, syncOnSkipIdle: false, dupXfbRearmsThrottle: false, smoothEarly: true, presentVsync: true });
   for (const s of SWITCHES) {
     const p = requestedPacing(`?${s.param}`);
     assert.equal(p[s.option], s.on, s.param);
@@ -102,13 +102,14 @@ test("Rush off by default: a page or core that sets nothing runs without Rush Fr
 
 // ?presentvsync=1 (research/deep-frame-pacing.md §5 step 2): at most one wgpu
 // present per BeginFrame, held in the worker (no core flag).
-test("presentvsync: URL → host → adapter → worker, off by default", async (t) => {
+test("presentvsync: URL → host → adapter → worker, on by default, ?presentvsync=0 off", async (t) => {
   const { requestedPacing } = await import("../src/core-host.js");
-  assert.equal(requestedPacing("").presentVsync, false);
+  assert.equal(requestedPacing("").presentVsync, true, "on by default (2026-10-26)");
+  assert.equal(requestedPacing("?presentvsync=0").presentVsync, false);
   assert.equal(requestedPacing("?presentvsync=1").presentVsync, true);
   assert.equal(requestedPacing("?presentvsync=1").rushPresentation, false, "only its own switch");
   const { UpstreamWorkerAdapter } = await import("../src/upstream-worker-adapter.js");
-  assert.equal(new UpstreamWorkerAdapter({}).presentVsync, false);
+  assert.equal(new UpstreamWorkerAdapter({}).presentVsync, true);
   const adapter = new UpstreamWorkerAdapter(requestedPacing("?presentvsync=1"));
   let posted = null;
   adapter.worker = {
@@ -129,7 +130,7 @@ test("presentvsync: URL → host → adapter → worker, off by default", async 
   const worker = await readFile(new URL("../src/upstream-discio-worker.js", import.meta.url), "utf8");
   assert.match(host, /\n {12}presentVsync: this\.pacing\.presentVsync,\n/);
   assert.match(worker, /\n {8}presentVsync: payload\.presentVsync,\n/);
-  assert.match(worker, /wgpuPresentVsync = presentVsync === true && typeof self\.requestAnimationFrame === "function" && !wgpuDetachedPresenter;/, "only with a worker rAF, never with the detached presenter (stale bitmap)");
+  assert.match(worker, /wgpuPresentVsync = presentVsync !== false && typeof self\.requestAnimationFrame === "function" && !wgpuDetachedPresenter;/, "only with a worker rAF, never with the detached presenter (stale bitmap)");
 });
 
 test("presentvsync: the backbuffer pass renders into a pooled texture, shown at the worker's rAF, the drain never held", async () => {

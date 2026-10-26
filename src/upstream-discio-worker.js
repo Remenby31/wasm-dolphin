@@ -2460,7 +2460,7 @@ async function loadCore({
   syncOnSkipIdle = false,
   dupXfbRearmsThrottle = false,
   smoothEarly = true,
-  presentVsync = false,
+  presentVsync = true,
   coreLog = false,
   memcardSlotB = false,
   internalResolution = 1,
@@ -2964,7 +2964,7 @@ async function loadCore({
   const _t_factory = performance.now();
   // Not with the detached presenter: it shows a bitmap of the canvas, which
   // the vsync presenter fills only at its rAF (a stale picture).
-  wgpuPresentVsync = presentVsync === true && typeof self.requestAnimationFrame === "function" && !wgpuDetachedPresenter;
+  wgpuPresentVsync = presentVsync !== false && typeof self.requestAnimationFrame === "function" && !wgpuDetachedPresenter;
   releaseWgpuReadback();
   moduleInstance = await factory({
     noInitialRun: true,
