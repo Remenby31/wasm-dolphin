@@ -1197,6 +1197,7 @@ function withModuleCost(plan, ms, fn, { atMost = false, loaded = true } = {}) {
     core.module._DolphinWeb_AotSetInstallCostForTest(saved);
     core.module._DolphinWeb_AotSetLargeOverrunForTest(overrun);
     core.module._DolphinWeb_AotSetInstallDelayForTest(0);
+    core.module._DolphinWeb_AotSetForcedPeriodForTest(1000 / 60);
     core.module._DolphinWeb_AotSetBehindWindowForTest(150);
     core.module._DolphinWeb_AotSetLargeBehindWaitForTest(500);
     core.module._DolphinWeb_AotSetLoadWindowForTest(0);
@@ -1344,21 +1345,23 @@ test("after a state load: the overrun is measured on installs that happened, up 
   });
 });
 
-test("after a state load: forced installs stay within 4 ms of install per frame", { skip: behindSkip }, () => {
+test("after a state load: forced installs spend at most 4 ms per period, sliding, failed attempts included", { skip: behindSkip }, () => {
   withOffThreadCompile((requests) => {
     const plan = setup();
     core.setRegionsEnabled(true);
     withModuleCost(plan, 0.4, (modules) => {
       const before = core.regionCount();
       readyAll(requests, plan);
+      core.module._DolphinWeb_AotSetForcedPeriodForTest(60000); // nothing drains meanwhile
       core.module._DolphinWeb_AotSetInstallDelayForTest(2.5); // each install takes 2.5 ms
-      for (let slice = 0; slice < 5; slice++) core.serviceRegions(); // well within one frame
+      for (let slice = 0; slice < 5; slice++) core.serviceRegions();
       const first = forcedCounters()[0];
-      assert.ok(first >= 1 && first <= 2, `two installs at most use the frame's 4 ms (${first})`);
+      assert.ok(first >= 1 && first <= 2, `2.5 + 2.5 ms leave no room for another under 4 ms (${first})`);
       if (modules > first) {
-        spin(20); // the next frame
+        core.module._DolphinWeb_AotSetForcedPeriodForTest(10); // 4 ms drain per 10 ms
+        spin(20);
         for (let slice = 0; slice < 5; slice++) core.serviceRegions();
-        assert.ok(forcedCounters()[0] > first, "the next frame has its own budget");
+        assert.ok(forcedCounters()[0] > first, "the debt drained: more go");
       }
       assert.ok(core.regionCount() > before);
     }, { atMost: true });
@@ -1391,7 +1394,8 @@ test("0171 source: the window opens at a state load for 3 s, normal regime uncha
   const patch = await readFile(new URL("../patches/dolphin-wasm/snapshot/0171-region-installs-after-state-load.patch", import.meta.url), "utf8");
   assert.match(patch, /\+std::chrono::milliseconds s_region_load_window\{3000\};/);
   assert.match(patch, /\+ {2}OpenRegionLoadWindow\(\);  \/\/ patch 0171\n {3}if \(s_wasm_armed_policy/, "opened by the state-load hook, armed JIT or not");
-  assert.match(patch, /\+constexpr double REGION_FORCED_FRAME_BUDGET_MS = 4\.0;/);
+  assert.match(patch, /\+constexpr double REGION_FORCED_RATE_MS = 4\.0;\n\+double s_region_forced_period_ms = 1000\.0 \/ 60;/);
+  assert.match(patch, /\+ {4}if \(forced_one\)\n\+ {6}s_region_forced_debt_ms \+= took;\n\+ {4}if \(s_region_stats\.regions_installed > installed_now\)/, "failed forced attempts count in the debt");
   assert.match(patch, /\+constexpr double REGION_LARGE_OVERRUN_START = 3\.0;\n\+constexpr double REGION_LARGE_OVERRUN_MAX = 4\.0;/);
   assert.match(patch, /\+ {4}if \(s_region_stats\.regions_installed > installed_now\)/, "measured and counted on installs that happened");
   assert.match(patch, /\+ {6}if \(!in_load_window\)\n\+ {8}return true;/, "outside the window: the sleep wait as before");

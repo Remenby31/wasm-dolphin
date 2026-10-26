@@ -1,5 +1,5 @@
 diff --git a/Source/Core/Core/PowerPC/CachedInterpreter/CachedInterpreter.cpp b/Source/Core/Core/PowerPC/CachedInterpreter/CachedInterpreter.cpp
-index 655482f..ca73714 100644
+index 655482f..0c5e1d4 100644
 --- a/Source/Core/Core/PowerPC/CachedInterpreter/CachedInterpreter.cpp
 +++ b/Source/Core/Core/PowerPC/CachedInterpreter/CachedInterpreter.cpp
 @@ -10586,6 +10586,9 @@ struct PendingRegion
@@ -12,7 +12,7 @@ index 655482f..ca73714 100644
  };
  std::mutex s_region_queue_mutex;
  std::vector<PendingRegion> s_region_queue;
-@@ -10642,11 +10645,80 @@ double s_region_sleep_overshoot_max_ms = 0;
+@@ -10642,11 +10645,86 @@ double s_region_sleep_overshoot_max_ms = 0;
  // Installs a slice boundary did for a large module after its sleep wait ran
  // out (the path that may cost a frame).
  u32 s_region_sleep_wait_expired = 0;
@@ -49,23 +49,29 @@ index 655482f..ca73714 100644
 +  std::chrono::steady_clock::time_point at;
 +  double ms = -1;
 +};
-+constexpr std::size_t REGION_SLEEPS_KEPT = 32;
++constexpr std::size_t REGION_SLEEPS_KEPT = 64;
 +std::array<SleepSeen, REGION_SLEEPS_KEPT> s_region_sleeps{};
 +std::size_t s_region_sleeps_next = 0;
 +std::chrono::milliseconds s_region_large_behind_wait{500};
 +constexpr double REGION_FORCED_MAX_SLICE_MS = 6.0;
-+// Forced installs take at most this much host time per frame (review of
-+// #284: small modules forced slice after slice would leave the throttle no
-+// sleep, and the thread would look behind for the whole window). A large
-+// one only as the first of its frame.
-+constexpr double REGION_FORCED_FRAME_MS = 1000.0 / 60;
-+constexpr double REGION_FORCED_FRAME_BUDGET_MS = 4.0;
-+std::optional<std::chrono::steady_clock::time_point> s_region_forced_frame_start;
-+double s_region_forced_frame_used_ms = 0;
++// Forced installs spend at most REGION_FORCED_RATE_MS of host time per
++// s_region_forced_period_ms, sliding (reviews of #284: small modules forced
++// slice after slice would leave the throttle no sleep, and the thread would
++// look behind for the whole window). The time they took, failed attempts
++// included, is a debt that drains at that rate; a small module goes when
++// its estimate fits under the rate, a large one when its estimate times the
++// overrun fits under REGION_FORCED_MAX_SLICE_MS.
++constexpr double REGION_FORCED_RATE_MS = 4.0;
++double s_region_forced_period_ms = 1000.0 / 60;  // tests change it
++double s_region_forced_debt_ms = 0;
++std::optional<std::chrono::steady_clock::time_point> s_region_forced_debt_at;
 +// Measured install time over the estimate of large modules, from installs
 +// that happened only, within [1, 4]: up at once to a larger one, down
-+// slowly. It starts high: no large module is forced before one was measured
-+// (v3 of #277: a forced slice of 7.2 ms; review of #284).
++// slowly. It starts at 3: a large module (estimate over 2.5 ms) is forced
++// only once installs measured bring estimate x overrun under 6 ms, a few
++// installs in; until then large ones wait for a sleep or the sleep wait as
++// before, and the window's gains come from the small ones (forcedLarge
++// counts them; v3 of #277: a forced slice of 7.2 ms; review of #284).
 +constexpr double REGION_LARGE_OVERRUN_START = 3.0;
 +constexpr double REGION_LARGE_OVERRUN_MAX = 4.0;
 +double s_region_large_overrun = REGION_LARGE_OVERRUN_START;
@@ -93,7 +99,7 @@ index 655482f..ca73714 100644
  void UnverifyAllRegions();
  void ResetRegionChainStats();  // patch 0102
  
-@@ -10846,6 +10918,19 @@ void ForgetAllRegions()
+@@ -10846,6 +10924,19 @@ void ForgetAllRegions()
    s_region_sleep_used_ms = 0;
    s_region_sleep_overshoot_max_ms = 0;
    s_region_sleep_wait_expired = 0;
@@ -103,8 +109,8 @@ index 655482f..ca73714 100644
 +  s_region_load_window_end = 0;
 +  s_region_sleeps = {};
 +  s_region_sleeps_next = 0;
-+  s_region_forced_frame_start.reset();
-+  s_region_forced_frame_used_ms = 0;
++  s_region_forced_debt_at.reset();
++  s_region_forced_debt_ms = 0;
 +  s_region_forced_installs = 0;
 +  s_region_forced_large_installs = 0;
 +  s_region_forced_max_slice_ms = 0;
@@ -113,7 +119,7 @@ index 655482f..ca73714 100644
    std::lock_guard lock(s_region_queue_mutex);
    s_region_queue.clear();
    s_region_queue_nonempty.store(false, std::memory_order_release);
-@@ -11073,6 +11158,23 @@ void ServiceRegionInstalls(std::optional<std::chrono::steady_clock::time_point>
+@@ -11073,6 +11164,23 @@ void ServiceRegionInstalls(std::optional<std::chrono::steady_clock::time_point>
    // in play, where the boot's budget would cost frames (review of #86).
    if (!s_region_service_start && !deadline)
      s_region_service_start = std::chrono::steady_clock::now();
@@ -137,7 +143,7 @@ index 655482f..ca73714 100644
    if (s_region_waiting.empty() && !s_region_queue_nonempty.load(std::memory_order_acquire))
      return;
    const auto now = std::chrono::steady_clock::now();
-@@ -11080,25 +11182,81 @@ void ServiceRegionInstalls(std::optional<std::chrono::steady_clock::time_point>
+@@ -11080,25 +11188,87 @@ void ServiceRegionInstalls(std::optional<std::chrono::steady_clock::time_point>
      s_region_service_start = now;
    const bool boot = now - *s_region_service_start < REGION_BOOT_WINDOW;
    const u32 installed_before = s_region_stats.regions_installed;
@@ -168,13 +174,17 @@ index 655482f..ca73714 100644
 +  };
 +  const bool in_load_window =
 +      s_region_load_window_end != 0 && now.time_since_epoch().count() < s_region_load_window_end;
-+  if (in_load_window &&
-+      (!s_region_forced_frame_start ||
-+       std::chrono::duration<double, std::milli>(now - *s_region_forced_frame_start).count() >=
-+           REGION_FORCED_FRAME_MS))
++  if (in_load_window)
 +  {
-+    s_region_forced_frame_start = now;
-+    s_region_forced_frame_used_ms = 0;
++    // the forced debt drains at REGION_FORCED_RATE_MS per period
++    if (s_region_forced_debt_at)
++    {
++      const double elapsed =
++          std::chrono::duration<double, std::milli>(now - *s_region_forced_debt_at).count();
++      s_region_forced_debt_ms = std::max(
++          0.0, s_region_forced_debt_ms - elapsed * REGION_FORCED_RATE_MS / s_region_forced_period_ms);
++    }
++    s_region_forced_debt_at = now;
 +  }
    const auto may_wait_for_sleep = [&](PendingRegion& pending) {
      if (deadline)
@@ -191,13 +201,15 @@ index 655482f..ca73714 100644
 +      // this module came, none is coming. Within the slice target, room()
 +      // bounds the slice as usual; a larger module only when the throttle
 +      // did not sleep at all, alone, one per behind window. Either within
-+      // the frame's forced budget.
++      // what the forced debt leaves.
 +      const double cost = install_cost(pending.bytes.size());
 +      const bool large = cost > REGION_SLICE_TARGET_MS;
 +      const bool long_enough_seen =
 +          sleep_seen(cost * REGION_SLEEP_ESTIMATE_FACTOR + REGION_SLEEP_MARGIN_MS);
-+      const double used = s_region_forced_frame_used_ms;
-+      if (long_enough_seen || (large ? used > 0 : used + cost > REGION_FORCED_FRAME_BUDGET_MS) ||
++      const double debt = s_region_forced_debt_ms;
++      if (long_enough_seen ||
++          (large ? debt + cost * s_region_large_overrun > REGION_FORCED_MAX_SLICE_MS :
++                   debt + cost > REGION_FORCED_RATE_MS) ||
 +          (large &&
 +           (n != 0 || now - *pending.installable_since < s_region_behind_window ||
 +            (s_region_last_forced && now - *s_region_last_forced < s_region_behind_window) ||
@@ -229,7 +241,7 @@ index 655482f..ca73714 100644
    // Room in this slice for a module of `bytes`: always for the first one at
    // a slice boundary; in a sleep window, while it fits before the deadline.
    // `boot_budget`: the boot window's larger slices (a module handed over
-@@ -11179,12 +11337,55 @@ void ServiceRegionInstalls(std::optional<std::chrono::steady_clock::time_point>
+@@ -11179,12 +11349,57 @@ void ServiceRegionInstalls(std::optional<std::chrono::steady_clock::time_point>
      ++n;
      if (!answered)
        s_region_install_fallbacks += 1;
@@ -260,10 +272,13 @@ index 655482f..ca73714 100644
 +                         answered ? InstallPath::Ready : InstallPath::Cold);
 +    // Patch 0171: what an install that happened took (a refused check or a
 +    // failed compile says nothing of the cost): a large module's over its
-+    // estimate, and a forced one's against the frame's budget.
++    // estimate. A forced attempt's time is a debt whether it installed or
++    // not.
++    const double took = spent_ms - spent_before;
++    if (forced_one)
++      s_region_forced_debt_ms += took;
 +    if (s_region_stats.regions_installed > installed_now)
 +    {
-+      const double took = spent_ms - spent_before;
 +      if (answered && cost_before > REGION_SLICE_TARGET_MS)
 +      {
 +        const double ratio = std::min(took / cost_before, REGION_LARGE_OVERRUN_MAX);
@@ -275,7 +290,6 @@ index 655482f..ca73714 100644
 +      {
 +        forced = true;
 +        s_region_forced_installs += 1;
-+        s_region_forced_frame_used_ms += took;
 +        if (cost_before > REGION_SLICE_TARGET_MS)
 +        {
 +          s_region_last_forced = now;
@@ -287,7 +301,7 @@ index 655482f..ca73714 100644
      {
        s_region_waiting[i] = std::move(s_region_waiting.back());
        s_region_waiting.pop_back();
-@@ -11233,6 +11434,8 @@ void ServiceRegionInstalls(std::optional<std::chrono::steady_clock::time_point>
+@@ -11233,6 +11448,8 @@ void ServiceRegionInstalls(std::optional<std::chrono::steady_clock::time_point>
      }
      return;
    }
@@ -296,7 +310,7 @@ index 655482f..ca73714 100644
    if (!boot)
      s_region_stats.install_max_slice_ms = std::max(s_region_stats.install_max_slice_ms, spent_ms);
    else
-@@ -11710,6 +11913,58 @@ extern "C" EMSCRIPTEN_KEEPALIVE void DolphinWeb_AotSetSleepWaitForTest(int ms)
+@@ -11710,6 +11927,65 @@ extern "C" EMSCRIPTEN_KEEPALIVE void DolphinWeb_AotSetSleepWaitForTest(int ms)
    s_region_sleep_wait = std::chrono::milliseconds(ms);
  }
  
@@ -305,6 +319,13 @@ index 655482f..ca73714 100644
 +extern "C" EMSCRIPTEN_KEEPALIVE void DolphinWeb_AotSetBehindWindowForTest(int ms)
 +{
 +  s_region_behind_window = std::chrono::milliseconds(ms);
++}
++
++// Tests (patch 0171): the period over which forced installs spend at most
++// REGION_FORCED_RATE_MS (ms; 1000 / 60 in production).
++extern "C" EMSCRIPTEN_KEEPALIVE void DolphinWeb_AotSetForcedPeriodForTest(double ms)
++{
++  s_region_forced_period_ms = ms;
 +}
 +
 +// Tests (patch 0171): sets the measured overrun of large installs; returns
@@ -355,7 +376,7 @@ index 655482f..ca73714 100644
  // Tests: the estimated install cost per module byte (ms), so that a test
  // module counts as one too large for a slice.
  extern "C" EMSCRIPTEN_KEEPALIVE double DolphinWeb_AotSetInstallCostForTest(double ms_per_byte)
-@@ -15690,6 +15945,7 @@ extern "C" EMSCRIPTEN_KEEPALIVE double GetPpcWasmJitEngagedFrame()
+@@ -15690,6 +15966,7 @@ extern "C" EMSCRIPTEN_KEEPALIVE double GetPpcWasmJitEngagedFrame()
  
  extern "C" EMSCRIPTEN_KEEPALIVE void DolphinWeb_JitOnStateLoaded()
  {
