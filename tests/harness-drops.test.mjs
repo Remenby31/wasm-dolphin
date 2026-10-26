@@ -144,11 +144,11 @@ test("too few runs, or none, is inconclusive even with an A/A", () => {
   assert.equal(verdictOf([{ lostMs: 854 }], [{ lostMs: 957 }], { ...L, noise }).inconclusive, true);
   assert.equal(verdictOf([], [], { ...L, noise }).inconclusive, true);
   assert.equal(verdictOf([], [], { ...L, noise }).regression, false);
-  const ok = Array.from({ length: 3 }, () => ({ summary: { hitches100: 1, worstSecond: 80 }, phases: [{ label: "race", stallMs: 0, presentExcessMs: 0, hitches50: 0 }] }));
+  const ok = Array.from({ length: 3 }, () => ({ summary: { hitches100: 1, worstSecond: 80 }, phases: [{ label: "race", stallMs: 0, presentExcessMs: 0, hitches50: 0, presentsPerGuestSec: 60 }] }));
   assert.equal(visitVerdict(ok, ok).inconclusive, false);
   assert.equal(visitVerdict(ok.slice(0, 2), ok).inconclusive, true);
   // a phase a side never reached has no verdict
-  assert.equal(visitVerdict(ok, ok.map((a) => ({ ...a, phases: [...a.phases, { label: "extra", stallMs: 0, presentExcessMs: 0, hitches50: 0 }] }))).inconclusive, true);
+  assert.equal(visitVerdict(ok, ok.map((a) => ({ ...a, phases: [...a.phases, { label: "extra", stallMs: 0, presentExcessMs: 0, hitches50: 0, presentsPerGuestSec: 60 }] }))).inconclusive, true);
 });
 
 test("exit codes: 3 without a verdict, 2 only on a reproduced regression when confirming", () => {
@@ -302,7 +302,7 @@ test("screen side: distinct images, intervals of 3 vsyncs or more, gaps over 100
 });
 
 test("with --display the gating reads the screen, the presentation metrics stay reported", () => {
-  const run = (x) => ({ summary: { displayGaps100: 0, worstSecond: 99, hitches100: 0, presentExcessMs: 0 }, phases: [{ label: "race", stallMs: 0, displayExcessMs: 0, displayRepeats3: 0, presentExcessMs: 0, hitches50: 0, ...x }] });
+  const run = (x) => ({ summary: { displayGaps100: 0, worstSecond: 99, hitches100: 0, presentExcessMs: 0 }, phases: [{ label: "race", stallMs: 0, displayExcessMs: 0, displayRepeats3: 0, presentExcessMs: 0, hitches50: 0, presentsPerGuestSec: 60, displayedPerGuestSec: 60, ...x }] });
   const base = [run({}), run({}), run({})];
   // presents worse (present-vsync: a late image is a 3-vsync interval), screen unchanged
   const cand = [run({ presentExcessMs: 60, hitches50: 7 }), run({ presentExcessMs: 62, hitches50: 7 }), run({ presentExcessMs: 61, hitches50: 7 })];
@@ -310,6 +310,40 @@ test("with --display the gating reads the screen, the presentation metrics stay 
   assert.equal(visitVerdict(base, cand, null, { display: true }).regression, false, "not on the screen");
   const worse = [run({ displayExcessMs: 90, displayRepeats3: 6 }), run({ displayExcessMs: 95, displayRepeats3: 6 }), run({ displayExcessMs: 92, displayRepeats3: 7 })];
   assert.deepEqual(visitVerdict(base, worse, null, { display: true }).regressions.map((r) => r.metric).sort(), ["displayExcessMs", "displayRepeats3"]);
+});
+
+// Review of #269: a straddled 50 ms stall the core then makes up at x2
+// was caught 46 % of the time against a fixed 0.6; against the local speed
+// it is caught whole, wherever it falls.
+test("a straddled 50 ms stall followed by a x2 catch-up is caught at any offset", () => {
+  for (const at of [400, 410, 425, 440, 449]) {
+    const rows = [];
+    let g = 0;
+    for (let t = 0; t <= 1500; t += 50) {
+      rows.push({ t, lagMs: 0, ticks: g });
+      const lost = Math.max(0, Math.min(t + 50, at + 50) - Math.max(t, at));
+      const back = Math.max(0, Math.min(t + 50, at + 100) - Math.max(t, at + 50)); // 50 ms at x2 right after
+      g += TPS * (50 - lost + back) / 1000;
+    }
+    // The part of the stall sharing a 50 ms row with the catch-up nets out
+    // inside that row (no reading at 50 ms can see it): at least half of the
+    // 50 ms, over the 20 ms floor wherever the stall falls. stallMs takes the
+    // VI reading too, which sees it whole when the VI outputs go on.
+    const ms = stallMsOfRows(rows, TPS);
+    assert.ok(ms >= 25 && ms <= 55, `stall at ${at}: ${ms}`);
+  }
+});
+
+test("a cadence halved with the core at 100 %: images per guest second regress", () => {
+  const vi = viOf(5000);
+  const p60 = presentsOf(vi), p30 = p60.filter((_, i) => i % 2 === 0);
+  const s60 = dropSummary({ windows: windowsOf({ vi, presents: p60, tps: TPS }), presents: p60, vi, tps: TPS });
+  const s30 = dropSummary({ windows: windowsOf({ vi, presents: p30, tps: TPS }), presents: p30, vi, tps: TPS });
+  assert.ok(Math.abs(s60.presentsPerGuestSec - 60) < 1 && Math.abs(s30.presentsPerGuestSec - 30) < 1);
+  assert.equal(s30.presentExcessMs, 0, "no gap past the median: the old gating saw nothing");
+  const phase = (x) => ({ summary: { hitches100: 0, worstSecond: 99 }, phases: [{ label: "race", stallMs: 0, presentExcessMs: 0, hitches50: 0, ...x }] });
+  const v = visitVerdict([60, 60, 60].map((n) => phase({ presentsPerGuestSec: n })), [30, 30, 30].map((n) => phase({ presentsPerGuestSec: n })));
+  assert.deepEqual(v.regressions.map((r) => r.metric), ["presentsPerGuestSec"]);
 });
 
 test("hitch counts never get an sd under Poisson's: an A/A that always saw 3 is not certainty", () => {

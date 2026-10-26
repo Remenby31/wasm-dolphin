@@ -340,16 +340,18 @@ node harness/probes/drop-meter.mjs --iso ../roms/<disc>.iso --port 8113 --runs 3
 # on a COLD visit reads 34-50 ms against a 45 ms threshold there (noisier
 # phase); repeated stalls under 25 ms each stay under the per-phase floors
 # (the reported pctBelow95 per phase shows them, not gating). stallMs is
-# the larger of the VI reading and the sampler's (pairs of 50 ms rows that
-# lost 40 % of their time), so a stall inside a long VI gap counts too; a
-# sustained slowness of 80 % is no stall (slowRowsMs reports it).
+# the larger of the VI reading and the sampler's (50 ms rows under 0.6 of
+# the local speed, the median within +-1 s), so a stall inside a long VI gap
+# counts too (at least half of it when the core makes it up right after);
+# a sustained slowness is no stall (slowRowsMs reports it). Images per
+# guest second per phase (presents, or distinct images shown with --display)
+# catch a cadence halved with the core at 100 %.
 # presentExcessMs (gaps beyond max(two fields, 1.5 x the phase's median),
 # summed) catches the presenter stalling while the core runs on, at 60 or
 # 30 images/s. A --noise with no core recorded, or another core, stops the
 # comparison before its first run (exit 3). Hitch counts never get an sd under Poisson's (sqrt(mean + 0.5)),
 # judged at the normal 99.5 % quantile then. Measured on 12 runs of one tree
-# (independent A/A noise): 0.8 % of batches flag a regression, 0.0 % once a
-# second batch must confirm it.
+# (independent A/A noise): 0.0 % of batches flag a regression (3000 draws).
 # the guard's false-positive rate from runs of one tree (A against A draws)
 node harness/probes/drop-meter.mjs --false-positives <A/A dir>:candidate --noise <A/A dir>/summary.json
 # again from the raw data, e.g. against a native reference (game frames per guest second)
