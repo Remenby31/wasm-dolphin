@@ -25,7 +25,7 @@
       "commit": "01e0577914a75a2569c846778c2f93aa8e6feddd"
     }
   },
-  "patchSeriesSha256": "394ebe3c7b859a77629a14691a95a8509fe0764829dd8aa0d1e51c903553a561",
+  "patchSeriesSha256": "90148a940e319e1f7e79c50fa3adbaf3b971b8481620d859f4902230b7b6a0bf",
   "patches": [
     {
       "order": 1,
@@ -1040,8 +1040,8 @@
       "cwd": ".",
       "hashMode": "lf-normalized",
       "path": "patches/dolphin-wasm/snapshot/0169-region-boot-window-switch.patch",
-      "size": 7479,
-      "sha256": "8de75f10af52ddf47b4fadafde49622005db346959d6c5793b2bd982287300ee"
+      "size": 7961,
+      "sha256": "b12c6fea9594fa0e7adfc91cb8e5bec7ec6f16be2f1c8f1a8e6502cb233f175b"
     },
     {
       "order": 128,
