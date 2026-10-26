@@ -299,6 +299,56 @@ node harness/remote/spark-run.mjs --build <ref>           # its core built on th
   worktree. A core built there differs in bytes from CI's and from a Mac
   build: compare it only with another core built on the bench.
 
+## Drop meter (merge guard and nightly)
+
+`harness/probes/drop-meter.mjs` measures speed drops over a whole
+play-through, not a race in steady state: boot, menus, the race's load, a
+race (`harness/probes/drop-scenario.json`, inputs at guest seconds so every
+run presses the same buttons at the same place). Each run is a new profile,
+played cold then warm (`--visits 2`). It keeps every VI output and present,
+and every 50 ms the worker's counters (`validationDropSampler`) and the
+page's stalls, then cuts them into 100 ms windows: drops with their cause
+(JIT compiles, patch 0167; region installs; disc waits; GPU and EFB waits;
+wgpu pipelines; late throttle wake-ups; worker and main-thread stalls;
+`uncounted-busy` when the CPU thread hardly slept), loads (host against guest
+time), and per run, visit and phase: time lost, time under 95/90 %, worst
+second, hitches over 50/100 ms, present p99, load excess, audio underruns.
+A timing measure: it takes the perf lock.
+
+```sh
+# A/A (noise of every metric) and the baseline report
+node harness/probes/drop-meter.mjs --iso ../roms/<disc>.iso --port 8113 --runs 6
+# merge guard: this tree against main. Gating metrics only: per phase the
+# time the core stood still (stallMs, from the VI intervals) and the gaps
+# over 50 ms, per visit the hitches over 100 ms and the worst second; each
+# against its A/A noise (medians of n: t(n_AA - 1, 99.5 %) x 1.25 x sd x
+# sqrt(2/n)). A failed run is played once more. A regression must reproduce on a second batch
+# (--no-confirm skips it). Exit 0 none, 2 regression, 3 no verdict (too few
+# usable runs, gave up, a phase without a verdict, sides sampled differently)
+node harness/probes/drop-meter.mjs --iso ../roms/<disc>.iso --port 8113 --runs 3 --baseline origin/main --noise <A/A dir>/summary.json
+# nightly on main, with its history (JSONL + table)
+node harness/probes/drop-meter.mjs --iso ../roms/<disc>.iso --port 8113 --runs 3 --trend ../measures/drops/trend.jsonl
+# The --noise A/A must have run on the core of the base measured (the
+# summary records each side's core): another core gives no verdict (exit 3),
+# --noise-stale-ok for a study. Redo the A/A when main publishes a core.
+# Known blind spots (review of #261): a single 50 ms stall at the race load
+# on a COLD visit reads 34-50 ms against a 45 ms threshold there (noisier
+# phase); repeated stalls under 25 ms each stay under the per-phase floors
+# (the reported pctBelow95 per phase shows them, not gating). stallMs is
+# the larger of the VI reading and the sampler's (pairs of 50 ms rows under
+# 0.75 of real time), so a stall inside a long VI gap counts too, mostly
+# whole (a stall on a pair's edge may be read in part). presentExcessMs (gaps
+# beyond two fields, summed) catches the presenter stalling while the core
+# runs on. Hitch counts never get an sd under Poisson's (sqrt(mean + 0.5)),
+# judged at the normal 99.5 % quantile then. Measured on 12 runs of one tree
+# (independent A/A noise): 6.2 % of batches flag a regression, 0.3 % once a
+# second batch must confirm it.
+# the guard's false-positive rate from runs of one tree (A against A draws)
+node harness/probes/drop-meter.mjs --false-positives <A/A dir>:candidate --noise <A/A dir>/summary.json
+# again from the raw data, e.g. against a native reference (game frames per guest second)
+node harness/probes/drop-meter.mjs --analyze <dir> --native <native-ref.json>
+```
+
 ## KPI probes and report
 
 The program's KPIs (PROGRAM.md, « KPI du programme ») that race-perf does not
