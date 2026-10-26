@@ -144,7 +144,7 @@ test("presentvsync: the backbuffer pass renders into a pooled texture, shown at 
   assert.match(worker, /if \(wgpuPresentVsync\) \{\n(?:\s+\/\/[^\n]*\n)+\s+queueWgpuVsyncFrame\(api\?\.getFrame/);
   assert.doesNotMatch(worker, /queueWgpuVsyncFrame\(lastBackbufferTexture/);
   const present = worker.slice(worker.indexOf("function presentWgpuVsyncFrame("), worker.indexOf("function wgpuCanvasUsage("));
-  assert.match(present, /const f = newest \? wgpuVsync\.takeNewest\(\) : wgpuVsync\.takeForDisplay\(wgpuVsyncTick\);/, "the oldest queued frame, after the catch-up");
+  assert.match(present, /const f = newest \? wgpuVsync\.takeNewest\(\{ hidden \}\) : wgpuVsync\.takeForDisplay\(wgpuVsyncTick\);/, "the oldest queued frame, after the catch-up");
   assert.match(present, /copyTextureToTexture\(/);
   // v3: the stream no longer follows the display: nothing captured at the rAF
   assert.doesNotMatch(present, /streamCapture\.offerCanvas\(/);
@@ -252,12 +252,17 @@ test("presentvsync: the input marker, cadence sample and readbacks read the fram
 // is late (a busy worker cannot run it) is shown at once, counted byLate.
 test("presentvsync: a frame queued while the rAF is late is shown at once", async () => {
   const worker = await readFile(new URL("../src/upstream-discio-worker.js", import.meta.url), "utf8");
-  // late: 1.5 x the median tick interval (any refresh rate), floor 12 ms
-  assert.match(worker, /return Math\.max\(WGPU_VSYNC_LATE_FLOOR_MS, 1\.5 \* sorted\[n >> 1\]\);/);
+  // late: 1.5 x the frame period, the 25th percentile of rAF frame-time
+  // deltas (a busy stretch does not push it up), floor 12 ms
+  assert.match(worker, /return Math\.max\(WGPU_VSYNC_LATE_FLOOR_MS, 1\.5 \* sorted\[n >> 2\]\);/);
+  assert.match(worker, /wgpuVsyncFrameGaps\[wgpuVsyncFrameGapCount\+\+ % wgpuVsyncFrameGaps\.length\] = frameTime - wgpuVsyncLastFrameTime;/);
+  // back after a gap of 50 ms or more: the newest frame first
+  assert.match(worker, /const afterGap = now - wgpuVsyncLastTickAt >= WGPU_VSYNC_FALLBACK_MS;/);
+  assert.match(worker, /shown = presentWgpuVsyncFrame\(\{ newest: afterGap \}\);/);
   assert.match(worker, /\} else if \(sinceTick > wgpuVsyncLateMs\(\)\) \{\n(?: {6}\/\/[^\n]*\n)+ {6}wgpuPresentVsyncStats\.byLate \+= 1;\n {6}presentWgpuVsyncFrame\(\{ newest: true \}\);/);
   // no BeginFrame for 50 ms (hidden tab): no local copy, the timer shows the newest
   assert.match(worker, /if \(sinceTick >= WGPU_VSYNC_FALLBACK_MS\) \{\n(?: {6}\/\/[^\n]*\n)+ {6}wgpuPresentVsyncStats\.byLateHidden \+= 1;\n {4}\}/);
-  assert.match(worker, /wgpuPresentVsyncStats\.byTimer \+= 1;\n {4}presentWgpuVsyncFrame\(\{ newest: true \}\);/);
+  assert.match(worker, /wgpuPresentVsyncStats\.byTimer \+= 1;\n {4}\/\/[^\n]*\n {4}presentWgpuVsyncFrame\(\{ newest: true, hidden: true \}\);/, "the timer's catch-up is not a drop");
   assert.match(worker, /const wgpuPresentVsyncStats = \{ byTimer: 0, byLate: 0, byLateHidden: 0, streamed: 0 \};/);
 });
 

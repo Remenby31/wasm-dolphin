@@ -116,11 +116,17 @@ export function createVsyncQueue({ queueSize = 2, poolSize = queueSize + 1, crea
     // silent): the newest frame, the older ones dropped as caught up, so a
     // silent rAF never leaves the display a frame behind and leaves nothing
     // to show in a burst when it comes back.
-    takeNewest() {
+    // `hidden`: no BeginFrame comes (a hidden tab): the older frames could
+    // not have been shown, counted as droppedHidden, not as drops.
+    takeNewest({ hidden = false } = {}) {
       while (queue.length > 1) {
         giveBack(queue.shift().tex);
-        stats.dropped += 1;
-        stats.caughtUp += 1;
+        if (hidden) {
+          stats.droppedHidden += 1;
+        } else {
+          stats.dropped += 1;
+          stats.caughtUp += 1;
+        }
       }
       return queue.shift() ?? null;
     },
