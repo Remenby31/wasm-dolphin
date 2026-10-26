@@ -1164,13 +1164,15 @@ test("a large module's sleep wait counts from when it became installable; past i
 // window (150 ms), a slice boundary installs them: the small ones up to the
 // slice target, a large one alone, one per behind window.
 const behindSkip = largeSkip || (typeof core?.module._DolphinWeb_AotRegionForcedInstalls !== "function" && "core without installs when the thread is behind (0170)");
-// [forced installs, worst slice that did one x 100, those over the target]
+// [forced installs, worst slice that did one x 100, those over the target,
+// measured overrun of large installs x 100, large modules the 6 ms bound kept
+// waiting, the largest estimate x overrun it refused x 100]
 function forcedCounters() {
-  const p = core.module._malloc(12);
+  const p = core.module._malloc(24);
   try {
-    new Uint32Array(core.module.HEAPU8.buffer, p, 3).fill(0);
+    new Uint32Array(core.module.HEAPU8.buffer, p, 6).fill(0);
     core.module._DolphinWeb_AotRegionForcedInstalls(p);
-    return Array.from(new Uint32Array(core.module.HEAPU8.buffer, p, 3));
+    return Array.from(new Uint32Array(core.module.HEAPU8.buffer, p, 6));
   } finally {
     core.module._free(p);
   }
@@ -1182,11 +1184,13 @@ function withModuleCost(plan, ms, fn, { atMost = false } = {}) {
   const saved = core.module._DolphinWeb_AotSetInstallCostForTest(ms / (atMost ? Math.max(...sizes) : Math.min(...sizes)));
   core.module._DolphinWeb_AotSetSleepWaitForTest(2000); // the production wait
   core.module._DolphinWeb_AotSetBehindWindowForTest(40); // 150 ms in production
+  core.module._DolphinWeb_AotSetLargeBehindWaitForTest(100); // 500 ms in production
   try {
     return fn(sizes.length);
   } finally {
     core.module._DolphinWeb_AotSetInstallCostForTest(saved);
     core.module._DolphinWeb_AotSetBehindWindowForTest(60000);
+    core.module._DolphinWeb_AotSetLargeBehindWaitForTest(500);
   }
 }
 function readyAll(requests, plan) {
@@ -1197,17 +1201,19 @@ function readyAll(requests, plan) {
   return entries;
 }
 
-test("behind: with no sleep window long enough, a slice installs a large ready module, one per behind window", { skip: behindSkip }, () => {
+test("behind: a large ready module installs at a slice only when the throttle stops sleeping or after the large wait, one per behind window", { skip: behindSkip }, () => {
   withOffThreadCompile((requests) => {
     const plan = setup();
     core.setRegionsEnabled(true);
     withModuleCost(plan, 3, (modules) => {
       const before = core.regionCount();
       const entries = readyAll(requests, plan);
-      core.module._DolphinWeb_AotRegionSleepWindowForTest(2); // a short sleep: too short for any
-      for (let slice = 0; slice < 20; slice++) core.serviceRegions();
-      assert.equal(core.regionCount(), before, "it waits a behind window first");
       spin(50);
+      core.module._DolphinWeb_AotRegionSleepWindowForTest(2); // too short for it, but a sleep
+      for (let slice = 0; slice < 20; slice++) core.serviceRegions();
+      assert.equal(core.regionCount(), before, "the throttle still sleeps: a large one waits on");
+      spin(60); // past the large wait (100 ms here), still sleeping short
+      core.module._DolphinWeb_AotRegionSleepWindowForTest(2);
       for (let slice = 0; slice < 20; slice++) core.serviceRegions();
       const [forced, maxSlice, large] = forcedCounters();
       assert.equal(forced, 1, "one module, not every ready one");
@@ -1216,13 +1222,32 @@ test("behind: with no sleep window long enough, a slice installs a large ready m
       assert.ok(core.regionCount() > before);
       if (modules > 1) assert.ok(core.regionCount() < before + entries, "the others wait another window");
       for (let k = 0; k < modules && core.regionCount() < before + entries; k++) {
-        spin(50);
+        spin(50); // no sleep at all: behind
         for (let slice = 0; slice < 20; slice++) core.serviceRegions();
       }
       assert.equal(core.regionCount(), before + entries, "all in well under the 2 s wait");
       assert.equal(sleepCounters()[3], 0, "none waited the sleep wait out");
+      assert.ok(forcedCounters()[3] > 0, "the overrun of large installs is measured");
       const reference = runCall(PROGRAM.labels.main, { regions: false });
       assert.deepEqual(runCall(PROGRAM.labels.main, { regions: true }).state, reference.state);
+    });
+  });
+});
+
+test("behind: a large module whose estimate times the overrun passes 6 ms is never forced", { skip: behindSkip }, () => {
+  withOffThreadCompile((requests) => {
+    const plan = setup();
+    core.setRegionsEnabled(true);
+    withModuleCost(plan, 5, () => { // 5 ms x 1.5 > 6 ms
+      const before = core.regionCount();
+      readyAll(requests, plan);
+      spin(150); // behind, and past the large wait
+      for (let slice = 0; slice < 20; slice++) core.serviceRegions();
+      assert.equal(core.regionCount(), before, "it waits for a sleep or the sleep wait");
+      const [forced, , , , refused, refusedMax] = forcedCounters();
+      assert.equal(forced, 0);
+      assert.ok(refused >= 1, "counted once per module the bound kept waiting");
+      assert.ok(refusedMax > 600, "the refused estimate x overrun, over 6 ms");
     });
   });
 });
@@ -1273,10 +1298,13 @@ test("0170 source: the behind window is 150 ms, the bucket matches room()'s slee
   const patch = await readFile(new URL("../patches/dolphin-wasm/snapshot/0170-region-install-when-behind.patch", import.meta.url), "utf8");
   assert.match(patch, /\+std::chrono::milliseconds s_region_behind_window\{150\};/);
   assert.match(patch, /\+ {4}return bytes \* \(s_install_ms_per_byte \+ s_check_ms_per_byte\);/, "room()'s estimate");
-  assert.match(patch, /\+ {4}const double need = cost \* REGION_SLEEP_ESTIMATE_FACTOR \+ REGION_SLEEP_MARGIN_MS;/);
+  assert.match(patch, /\+ {10}sleep_seen\(cost \* REGION_SLEEP_ESTIMATE_FACTOR \+ REGION_SLEEP_MARGIN_MS\);/, "the need room() asks in a sleep");
   assert.match(patch, /\+ {6}const bool large = cost > REGION_SLICE_TARGET_MS;/, "the slice target splits small and large");
   assert.match(patch, /\+\/\/ \(REGION_SLICE_TARGET_MS\), accepted by the judge \(2026-10-26\)/);
-  assert.match(patch, /\(large && \(n != 0 \|\| \(s_region_last_forced &&/, "a large one alone, one per behind window");
+  assert.match(patch, /\+ {6}if \(large && cost \* s_region_large_overrun > REGION_FORCED_MAX_SLICE_MS\)/, "a large one within 6 ms with the measured overrun");
+  assert.match(patch, /\+constexpr double REGION_FORCED_MAX_SLICE_MS = 6\.0;/);
+  assert.match(patch, /\+std::chrono::milliseconds s_region_large_behind_wait\{500\};/);
+  assert.match(patch, /\(sleep_seen\(1\.0\) &&\n\+ {13}now - \*pending\.installable_since < s_region_large_behind_wait\)/, "a sleep of 1 ms or more keeps it waiting, up to the large wait");
 });
 
 // Continuation fragments (2026-10-23): a function of more blocks than one
