@@ -66,6 +66,7 @@ extern "C" unsigned int DolphinWeb_SetRendererFeatureMask(unsigned int mask);
 extern "C" unsigned int DolphinWeb_GetRendererFeatureMask();
 extern "C" void DolphinWeb_SetDupXfbRearmsThrottle(int on);  // patch 0150
 extern "C" void DolphinWeb_SetPresentOnArrival(int on);       // patch 0153
+extern "C" void DolphinWeb_SetRegionBootMode(int mode);       // patch 0169 (test switch)
 extern "C" void NotifyWebGpuOwnershipTraceLoadRequested();
 
 #ifdef __EMSCRIPTEN__
@@ -779,6 +780,12 @@ void EnsureRuntime()
       EM_ASM_INT({ return (typeof Module !== 'undefined' &&
                            Module['dolphinSmoothEarly'] === false) ? 0 : 1; }) != 0;
   DolphinWeb_SetPresentOnArrival(smooth_early ? 0 : 1);
+  // ?regionboot=0|1|2 (patch 0169, a test switch): the region boot window
+  // as shipped, none, or 30 s (Module['dolphinRegionBootMode']).
+  DolphinWeb_SetRegionBootMode(
+      EM_ASM_INT({ return (typeof Module !== 'undefined' &&
+                           Number.isInteger(Module['dolphinRegionBootMode'])) ?
+                              Module['dolphinRegionBootMode'] : 0; }));
   Config::SetBase(Config::MAIN_RUSH_FRAME_PRESENTATION, rush_presentation);
   Config::SetBase(Config::MAIN_SMOOTH_EARLY_PRESENTATION, smooth_early);
   Config::SetBase(Config::MAIN_SYNC_ON_SKIP_IDLE, sync_on_skip_idle);

@@ -394,7 +394,11 @@ function harnessRegionLedger(pcs) {
   const at = (Array.isArray(pcs) ? pcs : []).slice(0, 64).map((pc) => {
     const holders = [];
     for (const [key, r] of aotRegionLedger) if (r.entries.includes(pc >>> 0)) holders.push({ key, outcome: r.outcome, ms: r.ms });
-    return { pc: pc >>> 0, holders };
+    // patch 0169 (diagnosis): where the core's region lookup at this PC stops
+    const probe = moduleInstance?._DolphinWeb_RegionProbePc;
+    const b = typeof probe === "function" ? probe(pc >>> 0) >>> 0 : null;
+    const core = b === null ? null : { filter: Boolean(b & 1), owner: Boolean(b & 2), live: Boolean(b & 4), verified: Boolean(b & 8), entryListed: Boolean(b & 16), found: Boolean(b & 32), ownerIndex: ((b >>> 8) & 0xffff) - 1 };
+    return { pc: pc >>> 0, holders, core };
   });
   const mapped = moduleInstance?._DolphinWeb_JitRegionCount;
   return { modules: aotRegionLedger.size, outcomes, queuedEntries: entries, mappedRegions: typeof mapped === "function" ? mapped() >>> 0 : null, nowMs: Math.round(performance.now()), pcs: at };
@@ -411,7 +415,9 @@ function harnessPacingConfig() {
   // not presenting on arrival); null on a core before 0153, which sleeps but
   // has no bit for it.
   const presentSleep = typeof moduleInstance?._DolphinWeb_SetPresentOnArrival === "function" ? Boolean(bits & 8) : null;
-  return { supported: true, syncOnSkipIdle: Boolean(bits & 1), rushFramePresentation: Boolean(bits & 2), dupXfbResetsThrottle: Boolean(bits & 4), presentSleep };
+  // patch 0169 (test switch): the region boot window mode; null before.
+  const regionBootMode = typeof moduleInstance?._DolphinWeb_RegionBootMode === "function" ? moduleInstance._DolphinWeb_RegionBootMode() : null;
+  return { supported: true, syncOnSkipIdle: Boolean(bits & 1), rushFramePresentation: Boolean(bits & 2), dupXfbResetsThrottle: Boolean(bits & 4), presentSleep, regionBootMode };
 }
 // Patch 0156: the guest cycles ran outside the regions by the PC a chain of
 // blocks started at, the 64 most costly, while the stats are on (timing or
@@ -1701,6 +1707,7 @@ async function handleMessage(type, payload) {
         dupXfbRearmsThrottle: payload.dupXfbRearmsThrottle,
         smoothEarly: payload.smoothEarly,
         presentVsync: payload.presentVsync,
+        regionBootMode: payload.regionBootMode,
         coreLog: payload.coreLog,
         memcardSlotB: payload.memcardSlotB,
         internalResolution: payload.internalResolution,
@@ -1992,6 +1999,33 @@ async function handleMessage(type, payload) {
     case "validationReadRelaxedMadd":
       // coreFused: the core's own mode (null: a core without patch 0129).
       return { mode: relaxedMadd, coreFused: moduleInstance?._DolphinWeb_FusedMadd ? moduleInstance._DolphinWeb_FusedMadd() === 1 : null };
+    case "validationRegionWatch": {
+      // patch 0169 (diagnosis): `pcs` (<= 8) sets the watched PCs and zeroes
+      // their counters; without, reads them: per PC, region attempts and the
+      // codes its region returned (0 normal, 1 not an entry, 2 stop, 3 return).
+      if (!harnessEnabled) return { error: "harness hooks are off" };
+      const watch = moduleInstance?._DolphinWeb_RegionWatch;
+      if (typeof watch !== "function") return { supported: false };
+      const heap = moduleInstance.HEAPU8;
+      let ptr;
+      if (Array.isArray(payload?.pcs)) {
+        const pcs = payload.pcs.slice(0, 8).map((pc) => pc >>> 0);
+        const buf = moduleInstance._malloc(4 * Math.max(1, pcs.length));
+        new Uint32Array(heap.buffer, buf, pcs.length).set(pcs);
+        ptr = watch(buf, pcs.length) >>> 0;
+        moduleInstance._free(buf);
+      } else {
+        ptr = watch(0, -1) >>> 0;
+      }
+      const W = 14;  // words a slot (REGION_WATCH_WORDS)
+      const w = Array.from(new Uint32Array(moduleInstance.HEAPU8.buffer, ptr, 8 * W));
+      const slots = [];
+      for (let i = 0; i < 8; i += 1) {
+        const [pc, tries, normal, notEntry, stop, guestReturn, filterMiss, irDrOff, guards, perfmon, xerSo, lookupMiss, verifications, firstRunMs] = w.slice(i * W, i * W + W);
+        if (pc) slots.push({ pc, tries, ran: normal + notEntry + stop + guestReturn, normal, notEntry, stop, guestReturn, refused: { filterMiss, irDrOff, guards, perfmon, xerSo, lookupMiss }, verifications, firstRunMs: firstRunMs || null });
+      }
+      return { supported: true, slots };
+    }
     case "validationReadPacingConfig":
       return harnessPacingConfig();
     case "validationReadJitRegionStats":
@@ -2464,6 +2498,7 @@ async function loadCore({
   dupXfbRearmsThrottle = false,
   smoothEarly = true,
   presentVsync = true,
+  regionBootMode = 0,
   coreLog = false,
   memcardSlotB = false,
   internalResolution = 1,
@@ -2992,6 +3027,7 @@ async function loadCore({
     dolphinSyncOnSkipIdle: syncOnSkipIdle === true,
     dolphinDupXfbRearmsThrottle: dupXfbRearmsThrottle === true,
     dolphinSmoothEarly: smoothEarly !== false,
+    dolphinRegionBootMode: [1, 2].includes(regionBootMode) ? regionBootMode : 0,
     dolphinCoreLog: Boolean(coreLog),
     dolphinMemcardSlotB: Boolean(memcardSlotB),
     // Patch 0168: internal resolution (1-4) and anisotropy (log2, -1 = the

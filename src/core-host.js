@@ -474,6 +474,7 @@ export class EmulatorHost {
             dupXfbRearmsThrottle: this.pacing.dupXfbRearmsThrottle,
             smoothEarly: this.pacing.smoothEarly,
             presentVsync: this.pacing.presentVsync,
+            regionBootMode: this.pacing.regionBootMode,
             coreLog: this.coreLog,
             memcardSlotB: this.memcardSlotB,
             internalResolution: this.enhancements.internalResolution,
@@ -1671,7 +1672,10 @@ export function requestedPacing(search = window.location.search) {
     // default since 2026-10-26: ~58 distinct pictures shown a second instead
     // of ~56 and half the on-screen repeats on the race (12 pairs, --display).
     // ?presentvsync=0 (or false, off, no) presents as the ring drains.
-    presentVsync: !["0", "false", "off", "no"].includes((params.get("presentvsync") ?? "").toLowerCase())
+    presentVsync: !["0", "false", "off", "no"].includes((params.get("presentvsync") ?? "").toLowerCase()),
+    // ?regionboot=0|1|2 (patch 0169, a test switch, not a setting): the
+    // region boot window as shipped, none, or 30 s.
+    regionBootMode: ["1", "2"].includes(params.get("regionboot")) ? Number(params.get("regionboot")) : 0
   };
 }
 

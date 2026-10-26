@@ -18,7 +18,7 @@ const SWITCHES = [
 test("pacing switches: URL parsing, shipped defaults, each switch only its own", async () => {
   const { requestedPacing } = await import("../src/core-host.js");
   // Rush off by default (upstream's default): ?rush=1 turns it back on.
-  assert.deepEqual(requestedPacing(""), { rushPresentation: false, syncOnSkipIdle: false, dupXfbRearmsThrottle: false, smoothEarly: true, presentVsync: true });
+  assert.deepEqual(requestedPacing(""), { rushPresentation: false, syncOnSkipIdle: false, dupXfbRearmsThrottle: false, smoothEarly: true, presentVsync: true, regionBootMode: 0 });
   for (const s of SWITCHES) {
     const p = requestedPacing(`?${s.param}`);
     assert.equal(p[s.option], s.on, s.param);
@@ -66,7 +66,7 @@ test("pacing switches: host passes them, the worker sets the Module flags, the c
   assert.match(core, /Config::SetBase\(Config::MAIN_SMOOTH_EARLY_PRESENTATION, smooth_early\);/);
   // the harness reads back what the core applied, from its effective config
   assert.match(worker, /case "validationReadPacingConfig":/);
-  assert.match(worker, /syncOnSkipIdle: Boolean\(bits & 1\), rushFramePresentation: Boolean\(bits & 2\), dupXfbResetsThrottle: Boolean\(bits & 4\), presentSleep \};/);
+  assert.match(worker, /syncOnSkipIdle: Boolean\(bits & 1\), rushFramePresentation: Boolean\(bits & 2\), dupXfbResetsThrottle: Boolean\(bits & 4\), presentSleep, regionBootMode \};/);
   assert.match(worker, /const presentSleep = typeof moduleInstance\?\._DolphinWeb_SetPresentOnArrival === "function" \? Boolean\(bits & 8\) : null;/);
   assert.match(core, /DolphinWeb_SetPresentOnArrival\(smooth_early \? 0 : 1\);/);
 });
@@ -264,4 +264,42 @@ test("presentvsync: a frame queued while the rAF is late is shown at once", asyn
   assert.match(worker, /if \(sinceTick >= WGPU_VSYNC_FALLBACK_MS\) \{\n(?: {6}\/\/[^\n]*\n)+ {6}wgpuPresentVsyncStats\.byLateHidden \+= 1;\n {4}\}/);
   assert.match(worker, /wgpuPresentVsyncStats\.byTimer \+= 1;\n {4}\/\/[^\n]*\n {4}presentWgpuVsyncFrame\(\{ newest: true, hidden: true \}\);/, "the timer's catch-up is not a drop");
   assert.match(worker, /const wgpuPresentVsyncStats = \{ byTimer: 0, byLate: 0, byLateHidden: 0, streamed: 0 \};/);
+});
+
+// Patch 0169, a test switch: ?regionboot=0|1|2, the region boot window as
+// shipped, none, or 30 s (the heavy scene's slow mode, 2026-10-26).
+test("regionboot: URL → host → adapter → worker → core, 0 unless 1 or 2", async (t) => {
+  const { requestedPacing } = await import("../src/core-host.js");
+  assert.equal(requestedPacing("").regionBootMode, 0);
+  assert.equal(requestedPacing("?regionboot=1").regionBootMode, 1);
+  assert.equal(requestedPacing("?regionboot=2").regionBootMode, 2);
+  assert.equal(requestedPacing("?regionboot=3").regionBootMode, 0);
+  const { UpstreamWorkerAdapter } = await import("../src/upstream-worker-adapter.js");
+  const adapter = new UpstreamWorkerAdapter(requestedPacing("?regionboot=2"));
+  let posted = null;
+  adapter.worker = { postMessage(message) { posted = message; queueMicrotask(() => adapter.handleMessage({ id: message.id, ok: true })); } };
+  const originalWindow = globalThis.window;
+  globalThis.window = { location: { href: "http://127.0.0.1:8080/?regionboot=2", search: "?regionboot=2" } };
+  t.after(() => { if (originalWindow === undefined) delete globalThis.window; else globalThis.window = originalWindow; });
+  await adapter.load();
+  assert.equal(posted.payload.regionBootMode, 2);
+  const worker = await readFile(new URL("../src/upstream-discio-worker.js", import.meta.url), "utf8");
+  const core = await readFile(new URL("../core/upstream/dolphin_web_core.cpp", import.meta.url), "utf8");
+  const patch = await readFile(new URL("../patches/dolphin-wasm/snapshot/0169-region-boot-window-switch.patch", import.meta.url), "utf8");
+  assert.match(worker, /\n {8}regionBootMode: payload\.regionBootMode,\n/);
+  assert.match(worker, /dolphinRegionBootMode: \[1, 2\]\.includes\(regionBootMode\) \? regionBootMode : 0,/);
+  assert.match(core, /DolphinWeb_SetRegionBootMode\(/);
+  assert.match(patch, /\+std::atomic<int> s_region_boot_mode\{0\};/, "shipped behaviour unless the page sets it");
+  assert.match(patch, /\+  const bool boot = boot_mode != 1 && now - \*s_region_service_start </);
+  // the lookup probe (diagnosis), read with the ledger's PCs
+  assert.match(patch, /\+extern "C" EMSCRIPTEN_KEEPALIVE u32 DolphinWeb_RegionProbePc\(u32 pc\)/);
+  assert.match(worker, /const probe = moduleInstance\?\._DolphinWeb_RegionProbePc;/);
+  // per-PC watch (diagnosis): attempts and region codes, read without a reset
+  assert.match(patch, /\+  if \(count < 0\)\n\+    return static_cast<u32>/);
+  assert.match(patch, /\+  if \(watch && code >= 0 && code <= 3\)\n\+  \{\n\+    watch\[2 \+ code\] \+= 1;/);
+  assert.match(worker, /case "validationRegionWatch": \{/);
+  // refusals split by cause (filter, IR/DR, guards, perfmon, XER.SO, lookup)
+  assert.match(patch, /\+constexpr u32 REGION_WATCH_WORDS = 14;/);
+  assert.match(patch, /\+        watch\[10\] \+= 1;/);
+  assert.match(worker, /const W = 14;/);
 });
