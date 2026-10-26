@@ -474,6 +474,7 @@ export class EmulatorHost {
             dupXfbRearmsThrottle: this.pacing.dupXfbRearmsThrottle,
             smoothEarly: this.pacing.smoothEarly,
             presentVsync: this.pacing.presentVsync,
+            regionBootMode: this.pacing.regionBootMode,
             coreLog: this.coreLog,
             memcardSlotB: this.memcardSlotB,
             internalResolution: this.enhancements.internalResolution,
@@ -1668,7 +1669,10 @@ export function requestedPacing(search = window.location.search) {
     dupXfbRearmsThrottle: params.get("dupvsync") === "1",
     smoothEarly: params.get("smoothearly") !== "0",
     // ?presentvsync=1: at most one wgpu present per BeginFrame (the worker's rAF).
-    presentVsync: params.get("presentvsync") === "1"
+    presentVsync: params.get("presentvsync") === "1",
+    // ?regionboot=0|1|2 (patch 0169, a test switch, not a setting): the
+    // region boot window as shipped, none, or 30 s.
+    regionBootMode: ["1", "2"].includes(params.get("regionboot")) ? Number(params.get("regionboot")) : 0
   };
 }
 

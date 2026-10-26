@@ -1,0 +1,46 @@
+diff --git a/Source/Core/Core/PowerPC/CachedInterpreter/CachedInterpreter.cpp b/Source/Core/Core/PowerPC/CachedInterpreter/CachedInterpreter.cpp
+index 7b59188..18f5bcc 100644
+--- a/Source/Core/Core/PowerPC/CachedInterpreter/CachedInterpreter.cpp
++++ b/Source/Core/Core/PowerPC/CachedInterpreter/CachedInterpreter.cpp
+@@ -10606,6 +10606,13 @@ std::chrono::milliseconds s_region_ready_wait{5000};  // tests shorten it
+ // of them is reported apart from installMaxSliceMs.
+ constexpr std::chrono::milliseconds REGION_BOOT_WINDOW{3000};
+ constexpr double REGION_BOOT_SLICE_MS = 8.0;
++// Patch 0169, a test switch (?regionboot=, not a product setting): 0 the
++// boot window as above; 1 none (nothing installs in boot slices); 2 a boot
++// window of REGION_BOOT_WINDOW_LONG. For the heavy scene's slow mode: a
++// module installed in a boot slice (queued early) left its entries outside
++// regions for the whole run (2026-10-26).
++std::atomic<int> s_region_boot_mode{0};
++constexpr std::chrono::milliseconds REGION_BOOT_WINDOW_LONG{30000};
+ std::optional<std::chrono::steady_clock::time_point> s_region_service_start;
+ // Past the boot a slice stops installing when the next module's estimated
+ // cost would take it over this; estimate = size x the measured cost per byte
+@@ -11078,7 +11085,9 @@ void ServiceRegionInstalls(std::optional<std::chrono::steady_clock::time_point>
+   const auto now = std::chrono::steady_clock::now();
+   if (!s_region_service_start)
+     s_region_service_start = now;
+-  const bool boot = now - *s_region_service_start < REGION_BOOT_WINDOW;
++  const int boot_mode = s_region_boot_mode.load(std::memory_order_relaxed);
++  const bool boot = boot_mode != 1 && now - *s_region_service_start <
++                                          (boot_mode == 2 ? REGION_BOOT_WINDOW_LONG : REGION_BOOT_WINDOW);
+   const u32 installed_before = s_region_stats.regions_installed;
+   // A ready module waits for a sleep window, the sleep wait at most from when
+   // a slice first found it installable (not from its post: with #86 every
+@@ -11622,6 +11631,16 @@ void DolphinWeb_InvalidateRegions(u32 address, u32 size, bool forced)
+ // cache; a BAT update). Any code may have changed: every region is checked
+ // against its plan before it next runs, and dropped then if its code moved.
+ // Region code never runs the mtspr that sets ICFI (it is not a region op).
++// Patch 0169: the boot window test switch (0 normal, 1 none, 2 long).
++extern "C" EMSCRIPTEN_KEEPALIVE void DolphinWeb_SetRegionBootMode(int mode)
++{
++  s_region_boot_mode.store(std::clamp(mode, 0, 2), std::memory_order_relaxed);
++}
++extern "C" EMSCRIPTEN_KEEPALIVE int DolphinWeb_RegionBootMode()
++{
++  return s_region_boot_mode.load(std::memory_order_relaxed);
++}
++
+ extern "C" EMSCRIPTEN_KEEPALIVE void DolphinWeb_UnverifyRegions()
+ {
+   UnverifyAllRegions();

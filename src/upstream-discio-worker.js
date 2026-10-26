@@ -410,7 +410,9 @@ function harnessPacingConfig() {
   // not presenting on arrival); null on a core before 0153, which sleeps but
   // has no bit for it.
   const presentSleep = typeof moduleInstance?._DolphinWeb_SetPresentOnArrival === "function" ? Boolean(bits & 8) : null;
-  return { supported: true, syncOnSkipIdle: Boolean(bits & 1), rushFramePresentation: Boolean(bits & 2), dupXfbResetsThrottle: Boolean(bits & 4), presentSleep };
+  // patch 0169 (test switch): the region boot window mode; null before.
+  const regionBootMode = typeof moduleInstance?._DolphinWeb_RegionBootMode === "function" ? moduleInstance._DolphinWeb_RegionBootMode() : null;
+  return { supported: true, syncOnSkipIdle: Boolean(bits & 1), rushFramePresentation: Boolean(bits & 2), dupXfbResetsThrottle: Boolean(bits & 4), presentSleep, regionBootMode };
 }
 // Patch 0156: the guest cycles ran outside the regions by the PC a chain of
 // blocks started at, the 64 most costly, while the stats are on (timing or
@@ -1700,6 +1702,7 @@ async function handleMessage(type, payload) {
         dupXfbRearmsThrottle: payload.dupXfbRearmsThrottle,
         smoothEarly: payload.smoothEarly,
         presentVsync: payload.presentVsync,
+        regionBootMode: payload.regionBootMode,
         coreLog: payload.coreLog,
         memcardSlotB: payload.memcardSlotB,
         internalResolution: payload.internalResolution,
@@ -2461,6 +2464,7 @@ async function loadCore({
   dupXfbRearmsThrottle = false,
   smoothEarly = true,
   presentVsync = false,
+  regionBootMode = 0,
   coreLog = false,
   memcardSlotB = false,
   internalResolution = 1,
@@ -2989,6 +2993,7 @@ async function loadCore({
     dolphinSyncOnSkipIdle: syncOnSkipIdle === true,
     dolphinDupXfbRearmsThrottle: dupXfbRearmsThrottle === true,
     dolphinSmoothEarly: smoothEarly !== false,
+    dolphinRegionBootMode: [1, 2].includes(regionBootMode) ? regionBootMode : 0,
     dolphinCoreLog: Boolean(coreLog),
     dolphinMemcardSlotB: Boolean(memcardSlotB),
     // Patch 0168: internal resolution (1-4) and anisotropy (log2, -1 = the

@@ -18,7 +18,7 @@ const SWITCHES = [
 test("pacing switches: URL parsing, shipped defaults, each switch only its own", async () => {
   const { requestedPacing } = await import("../src/core-host.js");
   // Rush off by default (upstream's default): ?rush=1 turns it back on.
-  assert.deepEqual(requestedPacing(""), { rushPresentation: false, syncOnSkipIdle: false, dupXfbRearmsThrottle: false, smoothEarly: true, presentVsync: false });
+  assert.deepEqual(requestedPacing(""), { rushPresentation: false, syncOnSkipIdle: false, dupXfbRearmsThrottle: false, smoothEarly: true, presentVsync: false, regionBootMode: 0 });
   for (const s of SWITCHES) {
     const p = requestedPacing(`?${s.param}`);
     assert.equal(p[s.option], s.on, s.param);
@@ -66,7 +66,7 @@ test("pacing switches: host passes them, the worker sets the Module flags, the c
   assert.match(core, /Config::SetBase\(Config::MAIN_SMOOTH_EARLY_PRESENTATION, smooth_early\);/);
   // the harness reads back what the core applied, from its effective config
   assert.match(worker, /case "validationReadPacingConfig":/);
-  assert.match(worker, /syncOnSkipIdle: Boolean\(bits & 1\), rushFramePresentation: Boolean\(bits & 2\), dupXfbResetsThrottle: Boolean\(bits & 4\), presentSleep \};/);
+  assert.match(worker, /syncOnSkipIdle: Boolean\(bits & 1\), rushFramePresentation: Boolean\(bits & 2\), dupXfbResetsThrottle: Boolean\(bits & 4\), presentSleep, regionBootMode \};/);
   assert.match(worker, /const presentSleep = typeof moduleInstance\?\._DolphinWeb_SetPresentOnArrival === "function" \? Boolean\(bits & 8\) : null;/);
   assert.match(core, /DolphinWeb_SetPresentOnArrival\(smooth_early \? 0 : 1\);/);
 });
@@ -217,4 +217,31 @@ test("presentvsync v3: the stream captures at queue time, from the frame's textu
   const read = worker.slice(worker.indexOf('case "validationReadPresentVsync":'), worker.indexOf('case "validationReadEfbSyncStats":'));
   assert.match(read, /\.\.\.wgpuVsync\.stats,\n[^\n]*\n {8}waiting: wgpuVsync\.waiting,/);
   assert.doesNotMatch(read, /queued: /);
+});
+
+// Patch 0169, a test switch: ?regionboot=0|1|2, the region boot window as
+// shipped, none, or 30 s (the heavy scene's slow mode, 2026-10-26).
+test("regionboot: URL → host → adapter → worker → core, 0 unless 1 or 2", async (t) => {
+  const { requestedPacing } = await import("../src/core-host.js");
+  assert.equal(requestedPacing("").regionBootMode, 0);
+  assert.equal(requestedPacing("?regionboot=1").regionBootMode, 1);
+  assert.equal(requestedPacing("?regionboot=2").regionBootMode, 2);
+  assert.equal(requestedPacing("?regionboot=3").regionBootMode, 0);
+  const { UpstreamWorkerAdapter } = await import("../src/upstream-worker-adapter.js");
+  const adapter = new UpstreamWorkerAdapter(requestedPacing("?regionboot=2"));
+  let posted = null;
+  adapter.worker = { postMessage(message) { posted = message; queueMicrotask(() => adapter.handleMessage({ id: message.id, ok: true })); } };
+  const originalWindow = globalThis.window;
+  globalThis.window = { location: { href: "http://127.0.0.1:8080/?regionboot=2", search: "?regionboot=2" } };
+  t.after(() => { if (originalWindow === undefined) delete globalThis.window; else globalThis.window = originalWindow; });
+  await adapter.load();
+  assert.equal(posted.payload.regionBootMode, 2);
+  const worker = await readFile(new URL("../src/upstream-discio-worker.js", import.meta.url), "utf8");
+  const core = await readFile(new URL("../core/upstream/dolphin_web_core.cpp", import.meta.url), "utf8");
+  const patch = await readFile(new URL("../patches/dolphin-wasm/snapshot/0169-region-boot-window-switch.patch", import.meta.url), "utf8");
+  assert.match(worker, /\n {8}regionBootMode: payload\.regionBootMode,\n/);
+  assert.match(worker, /dolphinRegionBootMode: \[1, 2\]\.includes\(regionBootMode\) \? regionBootMode : 0,/);
+  assert.match(core, /DolphinWeb_SetRegionBootMode\(/);
+  assert.match(patch, /\+std::atomic<int> s_region_boot_mode\{0\};/, "shipped behaviour unless the page sets it");
+  assert.match(patch, /\+  const bool boot = boot_mode != 1 && now - \*s_region_service_start </);
 });
