@@ -90,13 +90,20 @@ export function validateScenario(s) {
 
 // In the page, before the app: main-thread stalls (a 50 ms timer that ran
 // late) and the audio output's underruns, same clock as the worker's rows.
+// The page's own BeginFrames too (requestAnimationFrame on the main thread,
+// counted): when the worker's rAF stops (no BeginFrame for seconds while
+// presents go on), they tell whether the whole compositor paused or only the
+// worker's rAF did.
 function installPageSampler(everyMs) {
   const rows = [];
   let due = performance.now();
+  let rafs = 0;
+  const frame = () => { rafs += 1; requestAnimationFrame(frame); };
+  requestAnimationFrame(frame);
   const tick = () => {
     const now = performance.now();
     const a = window.__audio?.causalTelemetry?.();
-    rows.push([performance.timeOrigin + now, Math.max(0, now - due), a ? Number(a.underrunCount ?? 0) : null]);
+    rows.push([performance.timeOrigin + now, Math.max(0, now - due), a ? Number(a.underrunCount ?? 0) : null, rafs]);
     due = Math.max(due + everyMs, now);
     setTimeout(tick, Math.max(0, due - performance.now()));
   };
@@ -245,7 +252,7 @@ export function analyzeVisit(raw, { native = null } = {}) {
   if (!timeline.complete) return { error: `timeline incomplete (lost presents ${timeline.lost.presents}, VI ${timeline.lost.vi}, failed reads ${timeline.failedReads})` };
   const rows = rowsOf(raw.rows);
   raw = { ...raw, ...markersOnVi(raw, timeline.vi) };
-  const page = raw.page.map(([t, lagMs, underruns]) => ({ t, lagMs, underruns }));
+  const page = raw.page.map(([t, lagMs, underruns, rafs]) => ({ t, lagMs, underruns, rafs: rafs ?? null }));
   const from = raw.markers[0]?.t ?? null;
   const windows = windowsOf({ vi: timeline.vi, presents: timeline.presents, rows, page, markers: raw.markers, tps: raw.tps, from, to: raw.endT });
   const span = (e) => e.t >= (from ?? -Infinity) && e.t <= (raw.endT ?? Infinity);
@@ -253,7 +260,7 @@ export function analyzeVisit(raw, { native = null } = {}) {
   const events = dropEvents(windows);
   const loads = loadSegments(windows).map((l) => (native && l.guestStart != null ? { ...l, nativeFps: nativeFps(native, l.guestStart, l.guestStart + l.guestMs / 1000) } : l));
   const displayed = timeline.displayed?.length ? timeline.displayed.filter(span) : null;
-  const phases = phaseSummaries({ windows, presents, vi, tps: raw.tps, rows, displayed });
+  const phases = phaseSummaries({ windows, presents, vi, tps: raw.tps, rows, displayed, page });
   if (native) for (const p of phases) {
     const ws = windows.filter((w) => w.label === p.label && w.guestStart != null);
     p.nativeFps = ws.length ? nativeFps(native, ws[0].guestStart, ws.at(-1).guestStart + 0.1) : null;
@@ -270,7 +277,7 @@ export function analyzeVisit(raw, { native = null } = {}) {
     timelineComplete: timeline.complete, sampled: rows.length > 0, browser: raw.browser ?? null, bootMs: raw.bootMs, pc: raw.pc ?? null,
     load1: { median: round(median(loadAvg), 2), max: round(Math.max(...loadAvg), 2) },
     regionsDone, rssPeakMB: rss.length ? Math.max(...rss) : null,
-    summary: { ...dropSummary({ windows, presents, vi, tps: raw.tps, rows: rows.filter(span), displayed }), loads: loads.length, loadExcessMs: loads.reduce((a, l) => a + l.excessMs, 0), rssPeakMB: rss.length ? Math.max(...rss) : null, regionsDoneMs: regionsDone?.hostMsFromLaunch ?? null },
+    summary: { ...dropSummary({ windows, presents, vi, tps: raw.tps, rows: rows.filter(span), displayed, page: page.filter(span) }), loads: loads.length, loadExcessMs: loads.reduce((a, l) => a + l.excessMs, 0), rssPeakMB: rss.length ? Math.max(...rss) : null, regionsDoneMs: regionsDone?.hostMsFromLaunch ?? null },
     phases, loads, worst: worstDrops(events), drops: events.length,
     // the 100 ms timeline, compact: [ms from start, speed %, VI/s, presents, max present gap, lost ms, top cause]
     timeline: windows.map((w) => {

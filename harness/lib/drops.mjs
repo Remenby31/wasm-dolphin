@@ -381,7 +381,26 @@ export function displaySummaryOf(displayed) {
   };
 }
 
-export function dropSummary({ windows, presents = [], vi = [], tps = null, rows = [], displayed = null }) {
+// Seconds without a BeginFrame: the worker's rAF (the --display counter)
+// and the page's (its rAF count per sampler tick), the longest gap of each.
+// Reported, never gating: a pause of the worker's rAF alone (seen headless,
+// 1-4 s, 2 visits in 12) says nothing yet about a real screen.
+export function beginFrameGaps(displayed, page) {
+  const worker = displayed?.length > 1 ? Math.max(...displayed.slice(1).map((f, i) => f.t - displayed[i].t)) : null;
+  let pageGap = null;
+  const withRafs = (page ?? []).filter((r) => r.rafs != null);
+  if (withRafs.length > 1) {
+    pageGap = 0;
+    let since = withRafs[0].t;
+    for (let i = 1; i < withRafs.length; i += 1) {
+      if (withRafs[i].rafs > withRafs[i - 1].rafs) since = withRafs[i].t;
+      else pageGap = Math.max(pageGap, withRafs[i].t - since);
+    }
+  }
+  return { workerBeginFrameGapMs: worker == null ? null : round(worker, 0), pageBeginFrameGapMs: pageGap == null ? null : round(pageGap, 0) };
+}
+
+export function dropSummary({ windows, presents = [], vi = [], tps = null, rows = [], displayed = null, page = null }) {
   const guestSec = tps > 0 && vi.length > 1 ? (vi.at(-1).ticks - vi[0].ticks) / tps : null;
   const display = displaySummaryOf(displayed);
   const sl = slidingSpeed(windows);
@@ -408,6 +427,7 @@ export function dropSummary({ windows, presents = [], vi = [], tps = null, rows 
     presentsPerGuestSec: guestSec > 0 ? round(presents.length / guestSec, 2) : null,
     ...(display ?? {}),
     displayedPerGuestSec: display && guestSec > 0 && display.distinct != null ? round(display.distinct / guestSec, 2) : null,
+    ...(displayed || page ? beginFrameGaps(displayed, page) : {}),
     pctBelow95: below(95), pctBelow90: below(90),
     worstSecond: sl.length ? round(Math.min(...sl.map((s) => s.speed)), 1) : null,
     hitches50: pg.filter((g) => g > HITCH_MS[0]).length, hitches100: pg.filter((g) => g > HITCH_MS[1]).length,
@@ -419,7 +439,7 @@ export function dropSummary({ windows, presents = [], vi = [], tps = null, rows 
 }
 
 // Per labelled phase of the scenario: the same summary over its windows.
-export function phaseSummaries({ windows, presents = [], vi = [], tps = null, rows = [], displayed = null }) {
+export function phaseSummaries({ windows, presents = [], vi = [], tps = null, rows = [], displayed = null, page = null }) {
   const labels = [...new Set(windows.map((w) => w.label))];
   return labels.map((label) => {
     const ws = windows.filter((w) => w.label === label);
@@ -430,7 +450,7 @@ export function phaseSummaries({ windows, presents = [], vi = [], tps = null, ro
     const phaseVi = first > 0 ? vi.slice(first - 1).filter((e, i) => i === 0 || inside(e)) : vi.filter(inside);
     const r0 = rows.findIndex(inside);
     const phaseRows = r0 > 0 ? rows.slice(r0 - 1).filter((e, i) => i === 0 || inside(e)) : rows.filter(inside);
-    return { label, ...dropSummary({ windows: ws, presents: presents.filter(inside), vi: phaseVi, tps, rows: phaseRows, displayed: displayed ? displayed.filter(inside) : null }) };
+    return { label, ...dropSummary({ windows: ws, presents: presents.filter(inside), vi: phaseVi, tps, rows: phaseRows, displayed: displayed ? displayed.filter(inside) : null, page: page ? page.filter(inside) : null }) };
   });
 }
 
@@ -447,7 +467,20 @@ export function noiseOf(summaries) {
   return Object.fromEntries(keys.map((k) => {
     const xs = summaries.map((s) => s[k]).filter(Number.isFinite);
     const sd = stdev(xs);
-    return [k, { ...describe(xs, 2), minDiff: sd == null || xs.length < 2 ? null : round(2 * sd * Math.sqrt(2 / xs.length), 2) }];
+    // Robust spread (1.4826 x the median absolute deviation): one run far off
+    // (a multi-second BeginFrame gap) no longer widens the threshold of a
+    // phase for every later comparison; such runs are counted, not dropped.
+    const med = median(xs);
+    const mad = xs.length ? median(xs.map((x) => Math.abs(x - med))) : null;
+    const robustSd = mad == null ? null : 1.4826 * mad;
+    // Outliers only where the MAD is not 0 (a phase mostly at 0 with a few
+    // 20 ms readings has MAD 0: those are its spread, not outliers); the
+    // threshold's sd is then the plain sd of the others.
+    const far = (x) => robustSd > 0 && Math.abs(x - med) > 5 * robustSd;
+    const kept = xs.filter((x) => !far(x));
+    const outliers = xs.length - kept.length;
+    const trimmedSd = outliers ? stdev(kept) : sd;
+    return [k, { ...describe(xs, 2), robustSd: round(robustSd, 2), trimmedSd: round(trimmedSd, 2), outliers, minDiff: sd == null || xs.length < 2 ? null : round(2 * sd * Math.sqrt(2 / xs.length), 2) }];
   }));
 }
 
@@ -509,7 +542,9 @@ export function verdictOf(baseline, candidate, { noise = null, floor = VERDICT_F
     }
     const delta = median(c) - median(b);
     const fromAa = noise?.[k]?.stdev != null && noise[k].n > 1;
-    let sd = fromAa ? noise[k].stdev : Math.sqrt(((stdev(b) ?? 0) ** 2 + (stdev(c) ?? 0) ** 2) / 2);
+    // The A/A's sd without its outlier runs when it had some (one run far off
+    // does not widen the threshold); its plain sd otherwise.
+    let sd = fromAa ? (noise[k].trimmedSd ?? noise[k].stdev) : Math.sqrt(((stdev(b) ?? 0) ** 2 + (stdev(c) ?? 0) ** 2) / 2);
     // A count (hitches) varies at least as a Poisson count: an A/A that saw
     // the same count six times says sd 0, not that a gap cannot come and go.
     let poisson = false;
