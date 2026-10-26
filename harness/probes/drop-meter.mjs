@@ -9,7 +9,7 @@
 //     [--noise <A/A>/summary.json] [--trend measures/drops/trend.jsonl]
 //     [--scenario harness/probes/drop-scenario.json] [--state scene.sav]
 //     [--config product | --query "..."] [--sample-ms 50] [--native ref.json]
-//     [--shots] [--region-counters] [--pc-window FROM-TO] [--max-load L] [--load-wait 300] [--lock-wait 14400 | --no-lock]
+//     [--shots] [--display] [--region-counters] [--pc-window FROM-TO] [--max-load L] [--load-wait 300] [--lock-wait 14400 | --no-lock]
 //     [--out dir]
 //   node harness/probes/drop-meter.mjs --analyze <out dir> [--native ref.json]
 //   node harness/probes/drop-meter.mjs --trace drop-trace-….json   (salon's dev HUD)
@@ -66,6 +66,11 @@ import { machineSnapshot, sampleChromeRss } from "../lib/system.mjs";
 import { mergeTimeline } from "../lib/timeline.mjs";
 import { num, sideOrder, STATE_ROUTE } from "./race-perf.mjs";
 
+// What this probe runs in the page and the worker (samplers, counters): an
+// A/A's noise holds only for the same version (review of #271: the page's
+// rAF counter changes the environment). Raised with each such change.
+export const PROBE_VERSION = 2;
+
 // What the site runs (salon packages/core engineParams, profile "fast", with
 // a WebGPU adapter).
 export const PRODUCT_QUERY = "core=upstream&video=wgpu&presenter=webgpu&cpu=dual&speed=1&oc=1&pacing=tick&fastsw=1&wasmjit=1&jitwarmup=700&aot=1&aotcompiler=1&jitoffthread=1";
@@ -90,13 +95,20 @@ export function validateScenario(s) {
 
 // In the page, before the app: main-thread stalls (a 50 ms timer that ran
 // late) and the audio output's underruns, same clock as the worker's rows.
+// The page's own BeginFrames too (requestAnimationFrame on the main thread,
+// counted): when the worker's rAF stops (no BeginFrame for seconds while
+// presents go on), they tell whether the whole compositor paused or only the
+// worker's rAF did.
 function installPageSampler(everyMs) {
   const rows = [];
   let due = performance.now();
+  let rafs = 0;
+  const frame = () => { rafs += 1; requestAnimationFrame(frame); };
+  requestAnimationFrame(frame);
   const tick = () => {
     const now = performance.now();
     const a = window.__audio?.causalTelemetry?.();
-    rows.push([performance.timeOrigin + now, Math.max(0, now - due), a ? Number(a.underrunCount ?? 0) : null]);
+    rows.push([performance.timeOrigin + now, Math.max(0, now - due), a ? Number(a.underrunCount ?? 0) : null, rafs]);
     due = Math.max(due + everyMs, now);
     setTimeout(tick, Math.max(0, due - performance.now()));
   };
@@ -120,7 +132,8 @@ async function playVisit(o, server, profileDir, shotDir, visit) {
     const page = context.pages()[0] ?? (await context.newPage());
     const t0 = Date.now();
     raw.launchT = t0;
-    await bootIso(page, { url: `${server.base}?${o.query}`, iso: o.iso, timeoutMs: 120000 });
+    // --display: the worker's rAF records what each BeginFrame put on screen.
+    await bootIso(page, { url: `${server.base}?${o.query}`, iso: o.iso, timeoutMs: 120000, harness: o.display ? { displayed: true } : {} });
     raw.bootMs = Date.now() - t0;
     raw.browser = await page.evaluate(() => navigator.userAgent.match(/(?:Headless)?Chrome\/[\d.]+/)?.[0] ?? navigator.userAgent).catch(() => null);
     await context.assertInvisible("after boot");
@@ -244,14 +257,15 @@ export function analyzeVisit(raw, { native = null } = {}) {
   if (!timeline.complete) return { error: `timeline incomplete (lost presents ${timeline.lost.presents}, VI ${timeline.lost.vi}, failed reads ${timeline.failedReads})` };
   const rows = rowsOf(raw.rows);
   raw = { ...raw, ...markersOnVi(raw, timeline.vi) };
-  const page = raw.page.map(([t, lagMs, underruns]) => ({ t, lagMs, underruns }));
+  const page = raw.page.map(([t, lagMs, underruns, rafs]) => ({ t, lagMs, underruns, rafs: rafs ?? null }));
   const from = raw.markers[0]?.t ?? null;
   const windows = windowsOf({ vi: timeline.vi, presents: timeline.presents, rows, page, markers: raw.markers, tps: raw.tps, from, to: raw.endT });
   const span = (e) => e.t >= (from ?? -Infinity) && e.t <= (raw.endT ?? Infinity);
   const presents = timeline.presents.filter(span), vi = timeline.vi.filter(span);
   const events = dropEvents(windows);
   const loads = loadSegments(windows).map((l) => (native && l.guestStart != null ? { ...l, nativeFps: nativeFps(native, l.guestStart, l.guestStart + l.guestMs / 1000) } : l));
-  const phases = phaseSummaries({ windows, presents, vi, tps: raw.tps, rows });
+  const displayed = timeline.displayed?.length ? timeline.displayed.filter(span) : null;
+  const phases = phaseSummaries({ windows, presents, vi, tps: raw.tps, rows, displayed, page });
   if (native) for (const p of phases) {
     const ws = windows.filter((w) => w.label === p.label && w.guestStart != null);
     p.nativeFps = ws.length ? nativeFps(native, ws[0].guestStart, ws.at(-1).guestStart + 0.1) : null;
@@ -268,7 +282,7 @@ export function analyzeVisit(raw, { native = null } = {}) {
     timelineComplete: timeline.complete, sampled: rows.length > 0, browser: raw.browser ?? null, bootMs: raw.bootMs, pc: raw.pc ?? null,
     load1: { median: round(median(loadAvg), 2), max: round(Math.max(...loadAvg), 2) },
     regionsDone, rssPeakMB: rss.length ? Math.max(...rss) : null,
-    summary: { ...dropSummary({ windows, presents, vi, tps: raw.tps, rows: rows.filter(span) }), loads: loads.length, loadExcessMs: loads.reduce((a, l) => a + l.excessMs, 0), rssPeakMB: rss.length ? Math.max(...rss) : null, regionsDoneMs: regionsDone?.hostMsFromLaunch ?? null },
+    summary: { ...dropSummary({ windows, presents, vi, tps: raw.tps, rows: rows.filter(span), displayed, page: page.filter(span) }), loads: loads.length, loadExcessMs: loads.reduce((a, l) => a + l.excessMs, 0), rssPeakMB: rss.length ? Math.max(...rss) : null, regionsDoneMs: regionsDone?.hostMsFromLaunch ?? null },
     phases, loads, worst: worstDrops(events), drops: events.length,
     // the 100 ms timeline, compact: [ms from start, speed %, VI/s, presents, max present gap, lost ms, top cause]
     timeline: windows.map((w) => {
@@ -351,7 +365,7 @@ function writeSummary(outDir, meta, analyses, visits, { noise = null, confirm = 
     if (analyses.some((a) => a.side === "baseline")) {
       entry.baseline = summarizeVisits(of("baseline"));
       const ok = (xs) => xs.filter((a) => !a.error && !a.overloaded);
-      entry.verdict = verdicts[v] = visitVerdict(ok(of("baseline")), ok(of("candidate")), noise?.[v] ?? null);
+      entry.verdict = verdicts[v] = visitVerdict(ok(of("baseline")), ok(of("candidate")), noise?.[v] ?? null, { display: Boolean(meta.display) });
     }
     summary.visitSummary.push(entry);
   }
@@ -411,7 +425,7 @@ export function readNoise(file, expect = null) {
   const s = JSON.parse(readFileSync(file, "utf8"));
   if (s.probe !== "drop-meter") throw new Error(`--noise ${file}: not a drop-meter summary`);
   if (expect) {
-    const differ = ["scenario", "state", "query", "sampleMs"].filter((k) => (s[k] ?? null) !== (expect[k] ?? null));
+    const differ = ["probeVersion", "scenario", "state", "query", "sampleMs", "display"].filter((k) => (s[k] ?? (k === "display" ? false : null)) !== (expect[k] ?? (k === "display" ? false : null)));
     const named = { cpuModel: [s.machine?.cpuModel, expect.cpuModel], browser: [s.browser, expect.browser] };
     // the same machine, and the same browser when both runs say which
     if (expect.cpuModel && s.machine?.cpuModel && s.machine.cpuModel !== expect.cpuModel) differ.push("cpuModel");
@@ -509,7 +523,7 @@ async function main() {
     options: {
       iso: { type: "string" }, scenario: { type: "string", default: path.join(REPO_ROOT, "harness", "probes", "drop-scenario.json") },
       runs: { type: "string", default: "6" }, visits: { type: "string", default: "2" },
-      candidate: { type: "string" }, baseline: { type: "string" }, noise: { type: "string" }, trend: { type: "string" }, "no-confirm": { type: "boolean", default: false }, "noise-stale-ok": { type: "boolean", default: false },
+      candidate: { type: "string" }, baseline: { type: "string" }, noise: { type: "string" }, trend: { type: "string" }, "no-confirm": { type: "boolean", default: false }, display: { type: "boolean", default: false }, "noise-stale-ok": { type: "boolean", default: false },
       "false-positives": { type: "string", multiple: true }, draws: { type: "string", default: "2000" },
       config: { type: "string", default: "product" }, query: { type: "string" }, "sample-ms": { type: "string", default: "50" },
       native: { type: "string" }, analyze: { type: "string" }, trace: { type: "string" }, state: { type: "string" }, shots: { type: "boolean", default: false },
@@ -544,10 +558,10 @@ async function main() {
     iso, scenario, query: query.toString(), runs: num(values, "runs", { min: 1, int: true }), visits: num(values, "visits", { min: 1, int: true }),
     sampleMs: num(values, "sample-ms", { min: 10 }), port: num(values, "port", { min: 1, int: true }),
     state: values.state ? path.resolve(values.state) : null,
-    regionCounters: values["region-counters"], pcWindow: values["pc-window"] ? values["pc-window"].split("-").map(Number) : null,
+    regionCounters: values["region-counters"], display: values.display, pcWindow: values["pc-window"] ? values["pc-window"].split("-").map(Number) : null,
     maxLoad: values["max-load"] ? num(values, "max-load", { min: 0.1 }) : Math.max(2, os.cpus().length / 4), loadWait: num(values, "load-wait", { min: 0 })
   };
-  const noise = values.noise ? readNoise(values.noise, { scenario: path.basename(values.scenario), state: o.state ? path.basename(o.state) : null, query: o.query, sampleMs: o.sampleMs, cpuModel: machineSnapshot().cpuModel }) : null;
+  const noise = values.noise ? readNoise(values.noise, { probeVersion: PROBE_VERSION, scenario: path.basename(values.scenario), state: o.state ? path.basename(o.state) : null, display: o.display, query: o.query, sampleMs: o.sampleMs, cpuModel: machineSnapshot().cpuModel }) : null;
   const noiseCore = values.noise ? noiseCoreOf(values.noise) : null;
   const sides = { candidate: resolveSide("candidate", values.candidate) };
   if (values.baseline) sides.baseline = resolveSide("baseline", values.baseline);
@@ -555,9 +569,16 @@ async function main() {
   const cores = Object.fromEntries(Object.entries(sides).map(([k, side]) => [k, coreOf(side.root)]));
   const measuredBase = cores.baseline ?? cores.candidate;
   let staleNoise = null;
-  if (noise && noiseCore !== measuredBase) {
+  // Unknown on either side is stale too (null === null proves nothing).
+  if (noise && (!noiseCore || !measuredBase || noiseCore !== measuredBase)) {
     staleNoise = `--noise ${values.noise}: its A/A ran on core ${noiseCore ? noiseCore.slice(0, 12) : "unknown (an A/A before the core was recorded)"}, the base measured here is ${measuredBase ? measuredBase.slice(0, 12) : "unknown"}`;
-    if (!values["noise-stale-ok"]) log(`${staleNoise}: no verdict (exit 3); --noise-stale-ok for a study`);
+    // Before any run: a comparison that cannot give a verdict is not played.
+    if (!values["noise-stale-ok"] && sides.baseline) {
+      log(`${staleNoise}: no verdict possible, nothing measured (exit 3); --noise-stale-ok for a study`);
+      for (const side of Object.values(sides)) if (side.temp) rmSync(side.root, { recursive: true, force: true });
+      process.exitCode = 3;
+      return;
+    }
   }
   const lockWait = num(values, "lock-wait", { min: 0 });
   const lock = await calmLock({
@@ -567,7 +588,7 @@ async function main() {
   const outDir = probeOutDir("drop-meter", iso, values.out);
   const meta = {
     probe: "drop-meter", at: new Date().toISOString(), locked: !values["no-lock"], machine: machineSnapshot(), chrome: chromeInfo(), iso: path.basename(iso),
-    scenario: path.basename(values.scenario), state: o.state ? path.basename(o.state) : null, query: o.query, sampleMs: o.sampleMs, runs: o.runs, visits: o.visits, maxLoad: o.maxLoad,
+    probeVersion: PROBE_VERSION, scenario: path.basename(values.scenario), state: o.state ? path.basename(o.state) : null, display: o.display, query: o.query, sampleMs: o.sampleMs, runs: o.runs, visits: o.visits, maxLoad: o.maxLoad,
     sides: Object.fromEntries(Object.entries(sides).map(([k, s]) => [k, s.label])), cores, noise: values.noise ?? null, noiseCore,
     definition: "windows of 100 ms from the scenario's first step; speed = guest/host time (VI ticks); drops: windows < 90 % or a present gap > 50 ms, merged; loads: disc reads ≥ 2.5 MiB/s (0.5 s average), merged within 1 s, excess = host − guest ms; time under 95/90 %: 1 s sliding windows; verdict: median moved the worse way beyond the A/A noise"
   };

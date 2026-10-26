@@ -294,41 +294,164 @@ export function stallMsOf(vi, tps) {
 // The same quantity from the drop sampler's ticks (every 50 ms on the
 // worker, independent of the VI outputs): a stall inside a long VI gap (the
 // game blanking the VI, or a change that emits fewer VI entries) still
-// shows. Read over pairs of rows (100 ms): where a pair's guest time is
-// under 0.75 of its host time, each of its two intervals adds its own host
-// minus guest time, once. A stall straddling two rows is then caught whole;
-// in normal play a pair is under 0.75 about once in 650 (A/A, race; a single
-// row is under 0.8 one time in twenty, the throttle's bursts).
-export const STALL_PAIR_RATIO = 0.75;
-export function stallMsOfRows(rows, tps) {
-  if (!(tps > 0)) return null;
-  const ok = (i) => rows[i].ticks != null && rows[i - 1].ticks != null;
-  const host = (i) => rows[i].t - rows[i - 1].t, guest = (i) => ((rows[i].ticks - rows[i - 1].ticks) / tps) * 1000;
-  let ms = 0, seen = false;
-  const credited = new Set();
-  for (let i = 2; i < rows.length; i += 1) {
-    if (!ok(i) || !ok(i - 1)) continue;
-    seen = true;
-    if (guest(i) + guest(i - 1) >= STALL_PAIR_RATIO * (host(i) + host(i - 1))) continue;
-    for (const j of [i - 1, i]) {
-      if (credited.has(j)) continue;
-      credited.add(j);
-      ms += Math.max(0, host(j) - guest(j));
-    }
-  }
-  return seen ? ms : null;
+// shows. Each 50 ms interval is judged against the LOCAL speed, the median
+// of the intervals within +-1 s (review of #269): under STALL_LOCAL_RATIO of
+// it, its host minus guest time counts. A stall straddling two rows leaves
+// each at ~0.5 (caught, even when the core catches up right after: at least
+// half of it, the part sharing a row with the catch-up nets out there); a
+// sustained slowness moves the local median with it (80 % for 4 s: 0); the
+// throttle's bursts (rows 0.8/1.2) stay above. `ratio` 0.75 against real
+// time instead reads the slowness itself (slowRowsMs, reported only).
+export const STALL_LOCAL_RATIO = 0.6;
+export const SLOW_PAIR_RATIO = 0.75;
+const LOCAL_HALF_ROWS = 20;
+const STEP_ROWS_SHARE = 0.2;
+// Whether row i is in a run of 3 rows or more under 0.2 of real time.
+function nearlyStoppedRun(iv, i) {
+  if (!(iv[i].r < 0.2)) return false;
+  let from = i, to = i;
+  while (from > 0 && iv[from - 1].r < 0.2) from -= 1;
+  while (to < iv.length - 1 && iv[to + 1].r < 0.2) to += 1;
+  return to - from + 1 >= 3;
 }
-
-// Gaps between presents beyond two fields, summed (ms): what the presenter
-// stalled, whatever the core did meanwhile (a pipeline compile blocking the
-// presenter while the core runs on: stallMs and worstSecond read 0).
-export function presentExcessOf(presents) {
+export function stallMsOfRows(rows, tps, ratio = null) {
+  if (!(tps > 0)) return null;
+  const iv = [];
+  for (let i = 1; i < rows.length; i += 1) {
+    if (rows[i].ticks == null || rows[i - 1].ticks == null) continue;
+    const host = rows[i].t - rows[i - 1].t, guest = ((rows[i].ticks - rows[i - 1].ticks) / tps) * 1000;
+    if (host > 0) iv.push({ host, guest, r: guest / host });
+  }
+  if (!iv.length) return null;
   let ms = 0;
-  for (let i = 1; i < presents.length; i += 1) ms += Math.max(0, presents[i].t - presents[i - 1].t - STALL_GAP_MS);
+  for (let i = 0; i < iv.length; i += 1) {
+    let bar;
+    if (ratio != null) bar = ratio;
+    else {
+      const local = iv.slice(Math.max(0, i - LOCAL_HALF_ROWS), i + LOCAL_HALF_ROWS + 1).map((x) => x.r).sort((x, y) => x - y);
+      const med = local[local.length >> 1];
+      bar = STALL_LOCAL_RATIO * med;
+      // Guest time in quanta as long as a row (66 ms steps) leaves a row
+      // with no progress every few rows, SCATTERED (alternating with fast
+      // rows, at most 2 in a row with the steps' rounding): skipped when over
+      // 20 % of the window's rows are low and no run of them is longer. A
+      // stall's low rows are contiguous: a 500 ms stall in a long VI gap
+      // still counts, and a 50 ms one in a phase at 70 % (few low rows) too
+      // (review of #271); a 50 ms stall inside such quantized steps does not.
+      // A sustained slowness moves the median with it.
+      const win = iv.slice(Math.max(0, i - LOCAL_HALF_ROWS), i + LOCAL_HALF_ROWS + 1).map((x) => x.r < bar);
+      const lows = win.filter(Boolean).length;
+      let run = 0, longest = 0;
+      for (const low of win) { run = low ? run + 1 : 0; longest = Math.max(longest, run); }
+      if (lows > STEP_ROWS_SHARE * win.length && longest <= 2) continue;
+      // Where the core runs slow locally (median under 0.75), steps with a
+      // 20 ms jitter or a slow phase made false stalls (review of #271: up to
+      // 500 ms in 5 s): there, only a run of 3 rows or more nearly stopped
+      // (under 0.2 of real time) is one.
+      if (med < SLOW_PAIR_RATIO && !nearlyStoppedRun(iv, i)) continue;
+    }
+    if (iv[i].r < bar) ms += Math.max(0, iv[i].host - iv[i].guest);
+  }
   return ms;
 }
 
-export function dropSummary({ windows, presents = [], vi = [], tps = null, rows = [] }) {
+// Gaps between presents beyond their usual size, summed (ms): what the presenter
+// stalled, whatever the core did meanwhile (a pipeline compile blocking the
+// presenter while the core runs on: stallMs and worstSecond read 0).
+// Beyond max(two fields, 1.5 x the phase's median gap): at 30 images/s two
+// fields is the nominal gap and its jitter added up (A/A ~1000 ms, review
+// of #267); relative to the median, only the stalls count.
+export function presentExcessOf(presents) {
+  const gaps = presents.slice(1).map((p, i) => p.t - presents[i].t);
+  if (!gaps.length) return 0;
+  const sorted = [...gaps].sort((a, b) => a - b);
+  const bar = Math.max(STALL_GAP_MS, 1.5 * sorted[sorted.length >> 1]);
+  return gaps.reduce((ms, g) => ms + Math.max(0, g - bar), 0);
+}
+
+// What the screen showed (--display: the worker's rAF records what each
+// BeginFrame put on screen, timeline.mjs displayStats), for a change to the
+// presentation itself (present-vsync: a late image is a 3-vsync interval
+// on one side, a compositor drop with no trace on the other). Distinct
+// images: a shown frame whose VI differs from the previous shown one.
+// displayExcessMs: intervals between distinct images beyond max(2 vsyncs,
+// 1.5 x the median), summed; displayRepeats3: intervals of 3 vsyncs or
+// more; displayGaps100: intervals over 100 ms. Null without the counter.
+// page: the page's sampler rows ({ t, rafs } cumulative). An interval of the
+// worker's BeginFrames longer than MUTE_RAF_MS while the page's rAF went on
+// is the worker's rAF alone being mute (headless, 1-4 s): no screen
+// measurement there, not a loss (review of #265). Distinct-image intervals
+// spanning one are left out of the excess, repeats and gaps, and their time
+// is reported (screenUnmeasuredMs).
+export const MUTE_RAF_MS = 100;
+function pageRafsBetween(page, t0, t1) {
+  const at = (t) => { let v = null; for (const r of page) { if (r.t > t) break; if (r.rafs != null) v = r.rafs; } return v; };
+  const a = at(t0), b = at(t1);
+  return a == null || b == null ? null : b - a;
+}
+// alive(t0, t1): whether the worker itself was running then (its sampler on
+// time, presents still reaching the canvas). The worker's rAF, its sampler,
+// the wgpu replay and the presenter share one thread (review of #272): a
+// worker blocked (a pipeline compiled on it) silences its rAF because the
+// screen IS frozen; only a live worker's silent rAF is "not measured".
+export function displaySummaryOf(displayed, page = null, alive = null) {
+  if (!displayed || displayed.length < 3) return null;
+  const mute = [];
+  if (page?.some((r) => r.rafs != null)) {
+    for (let i = 1; i < displayed.length; i += 1) {
+      const t0 = displayed[i - 1].t, t1 = displayed[i].t;
+      if (t1 - t0 > MUTE_RAF_MS && (pageRafsBetween(page, t0, t1) ?? 0) >= 3 && (alive ? alive(t0, t1) : false)) mute.push([t0, t1]);
+    }
+  }
+  const begin = displayed.slice(1).map((f, i) => f.t - displayed[i].t).sort((a, b) => a - b);
+  const vsync = begin[begin.length >> 1];
+  const distinct = [];
+  for (const f of displayed) if (f.submits > 0 && (distinct.length === 0 || f.vi !== distinct.at(-1).vi)) distinct.push(f);
+  if (distinct.length < 2) return { distinct: distinct.length, displayedPerSecond: 0, displayExcessMs: null, displayRepeats3: null, displayGaps100: null };
+  const spans = mute.length;
+  const all = distinct.slice(1).map((f, i) => ({ from: distinct[i].t, to: f.t, ms: f.t - distinct[i].t }));
+  const unmeasured = all.filter((g) => mute.some(([a, b]) => a >= g.from && b <= g.to));
+  const gaps = all.filter((g) => !unmeasured.includes(g)).map((g) => g.ms);
+  const sorted = gaps.length ? [...gaps].sort((a, b) => a - b) : [0];
+  const bar = Math.max(2 * vsync, 1.5 * sorted[sorted.length >> 1]);
+  const span = (displayed.at(-1).t - displayed[0].t) / 1000;
+  return {
+    distinct: distinct.length, muteRafSpans: spans, screenUnmeasuredMs: round(unmeasured.reduce((a, g) => a + g.ms, 0), 0),
+    displayedPerSecond: span > 0 ? round(distinct.length / span, 1) : null,
+    displayExcessMs: round(gaps.reduce((a, g) => a + Math.max(0, g - bar), 0), 0),
+    // relative to the phase's own cadence too (review of #270): at 30
+    // images/s every interval is 2 vsyncs; a repeat is 1.5 x that or more
+    displayRepeats3: gaps.filter((g) => g >= Math.max(2.5 * vsync, 1.5 * sorted[sorted.length >> 1])).length,
+    displayGaps100: gaps.filter((g) => g > 100).length
+  };
+}
+
+// Seconds without a BeginFrame: the worker's rAF (the --display counter)
+// and the page's (its rAF count per sampler tick), the longest gap of each.
+// Reported, never gating: a pause of the worker's rAF alone (seen headless,
+// 1-4 s, 2 visits in 12) says nothing yet about a real screen.
+export function beginFrameGaps(displayed, page) {
+  const worker = displayed?.length > 1 ? Math.max(...displayed.slice(1).map((f, i) => f.t - displayed[i].t)) : null;
+  let pageGap = null;
+  const withRafs = (page ?? []).filter((r) => r.rafs != null);
+  if (withRafs.length > 1) {
+    pageGap = 0;
+    let since = withRafs[0].t;
+    for (let i = 1; i < withRafs.length; i += 1) {
+      if (withRafs[i].rafs > withRafs[i - 1].rafs) since = withRafs[i].t;
+      else pageGap = Math.max(pageGap, withRafs[i].t - since);
+    }
+  }
+  return { workerBeginFrameGapMs: worker == null ? null : round(worker, 0), pageBeginFrameGapMs: pageGap == null ? null : round(pageGap, 0) };
+}
+
+export function dropSummary({ windows, presents = [], vi = [], tps = null, rows = [], displayed = null, page = null }) {
+  const guestSec = tps > 0 && vi.length > 1 ? (vi.at(-1).ticks - vi[0].ticks) / tps : null;
+  // The worker alive over [t0, t1]: no sampler tick late by STALL_MIN_MS or
+  // more, and presents at least every 50 ms on average.
+  const alive = (t0, t1) => rows.every((r) => r.t < t0 || r.t - r.lagMs > t1 || r.lagMs < STALL_MIN_MS) &&
+    presents.filter((p) => p.t >= t0 && p.t <= t1).length >= Math.floor((t1 - t0) / 50);
+  const display = displaySummaryOf(displayed, page, rows.length ? alive : null);
   const sl = slidingSpeed(windows);
   const below = (x) => (sl.length ? round((100 * sl.filter((s) => s.speed < x).length) / sl.length, 2) : null);
   const pg = gapsOf(presents), vg = gapsOf(vi);
@@ -345,7 +468,15 @@ export function dropSummary({ windows, presents = [], vi = [], tps = null, rows 
     // the larger of the two readings: VI intervals, sampler rows
     stallMs: round(Math.max(stallMsOf(vi, tps) ?? 0, stallMsOfRows(rows, tps) ?? 0), 0),
     stallViMs: round(stallMsOf(vi, tps), 0), stallRowsMs: round(stallMsOfRows(rows, tps), 0),
+    slowRowsMs: round(stallMsOfRows(rows, tps, SLOW_PAIR_RATIO), 0),
     presentExcessMs: round(presentExcessOf(presents), 0),
+    // images per GUEST second (review of #269: a cadence halved, 60 -> 30
+    // with the core at 100 %, moves no gap past the median): presents, and
+    // with --display the distinct images shown
+    presentsPerGuestSec: guestSec > 0 ? round(presents.length / guestSec, 2) : null,
+    ...(display ?? {}),
+    displayedPerGuestSec: display && guestSec > 0 && display.distinct != null ? round(display.distinct / guestSec, 2) : null,
+    ...(displayed || page ? beginFrameGaps(displayed, page) : {}),
     pctBelow95: below(95), pctBelow90: below(90),
     worstSecond: sl.length ? round(Math.min(...sl.map((s) => s.speed)), 1) : null,
     hitches50: pg.filter((g) => g > HITCH_MS[0]).length, hitches100: pg.filter((g) => g > HITCH_MS[1]).length,
@@ -357,7 +488,7 @@ export function dropSummary({ windows, presents = [], vi = [], tps = null, rows 
 }
 
 // Per labelled phase of the scenario: the same summary over its windows.
-export function phaseSummaries({ windows, presents = [], vi = [], tps = null, rows = [] }) {
+export function phaseSummaries({ windows, presents = [], vi = [], tps = null, rows = [], displayed = null, page = null }) {
   const labels = [...new Set(windows.map((w) => w.label))];
   return labels.map((label) => {
     const ws = windows.filter((w) => w.label === label);
@@ -368,7 +499,7 @@ export function phaseSummaries({ windows, presents = [], vi = [], tps = null, ro
     const phaseVi = first > 0 ? vi.slice(first - 1).filter((e, i) => i === 0 || inside(e)) : vi.filter(inside);
     const r0 = rows.findIndex(inside);
     const phaseRows = r0 > 0 ? rows.slice(r0 - 1).filter((e, i) => i === 0 || inside(e)) : rows.filter(inside);
-    return { label, ...dropSummary({ windows: ws, presents: presents.filter(inside), vi: phaseVi, tps, rows: phaseRows }) };
+    return { label, ...dropSummary({ windows: ws, presents: presents.filter(inside), vi: phaseVi, tps, rows: phaseRows, displayed: displayed ? displayed.filter(inside) : null, page: page ? page.filter(inside) : null }) };
   });
 }
 
@@ -380,12 +511,33 @@ export function worstDrops(events, n = 5) {
 // A/A: each metric's spread over repeated runs of the same build. minDiff:
 // the smallest difference between the medians of two series of n runs that
 // is unlikely to be noise (about 2 standard errors of a difference).
+export const TRIM_MIN_RUNS = 10;
 export function noiseOf(summaries) {
   const keys = [...new Set(summaries.flatMap((s) => Object.keys(s)))].filter((k) => summaries.some((s) => typeof s[k] === "number"));
   return Object.fromEntries(keys.map((k) => {
     const xs = summaries.map((s) => s[k]).filter(Number.isFinite);
     const sd = stdev(xs);
-    return [k, { ...describe(xs, 2), minDiff: sd == null || xs.length < 2 ? null : round(2 * sd * Math.sqrt(2 / xs.length), 2) }];
+    // Robust spread (1.4826 x the median absolute deviation): one run far off
+    // (a multi-second BeginFrame gap) no longer widens the threshold of a
+    // phase for every later comparison; such runs are counted, not dropped.
+    const med = median(xs);
+    const mad = xs.length ? median(xs.map((x) => Math.abs(x - med))) : null;
+    const robustSd = mad == null ? null : 1.4826 * mad;
+    // Outliers (beyond 5 robust sds, where the MAD is not 0) are always
+    // counted. They are left out of the threshold's sd only with an A/A of
+    // TRIM_MIN_RUNS or more (review of #271: from 6 runs the MAD itself is
+    // noisy, a normal run went out 6.6 % of the time and the confirmed false
+    // positives rose from 0.45 to 5 %), with the degrees of freedom of the
+    // runs kept.
+    const far = (x) => robustSd > 0 && Math.abs(x - med) > 5 * robustSd;
+    const kept = xs.filter((x) => !far(x));
+    const outliers = xs.length - kept.length;
+    // ...and only when it is rare, a single run (review of #271: recurring
+    // outliers, 10 % of runs, are part of the noise: trimmed, 3 % confirmed).
+    const trim = outliers === 1 && xs.length >= TRIM_MIN_RUNS;
+    return [k, { ...describe(xs, 2), robustSd: round(robustSd, 2), outliers,
+      ...(trim ? { trimmedSd: round(stdev(kept), 2), keptN: kept.length } : {}),
+      minDiff: sd == null || xs.length < 2 ? null : round(2 * sd * Math.sqrt(2 / xs.length), 2) }];
   }));
 }
 
@@ -406,11 +558,16 @@ export { median };
 // still (stallMs) and the gaps over 50 ms between presents; per visit, the
 // hitches over 100 ms and the worst second. Others are reported, never gating.
 export const VISIT_PRIMARY = { hitches100: "up", worstSecond: "down" };
-export const PHASE_PRIMARY = { stallMs: "up", presentExcessMs: "up", hitches50: "up" };
-export const REPORTED = { lostMs: "up", dropLostMs: "up", pctBelow95: "up", pctBelow90: "up", hitches50: "up", presentP99: "up", loadExcessMs: "up" };
+export const PHASE_PRIMARY = { stallMs: "up", presentExcessMs: "up", hitches50: "up", presentsPerGuestSec: "down" };
+// With --display, what the screen showed replaces the presentation timeline
+// in the gating (review of #265: present-vsync changes the presentations
+// themselves); the presentation metrics stay reported.
+export const VISIT_PRIMARY_DISPLAY = { displayGaps100: "up", worstSecond: "down" };
+export const PHASE_PRIMARY_DISPLAY = { stallMs: "up", displayExcessMs: "up", displayRepeats3: "up", displayedPerGuestSec: "down", screenUnmeasuredMs: "up" };
+export const REPORTED = { lostMs: "up", dropLostMs: "up", slowRowsMs: "up", pctBelow95: "up", pctBelow90: "up", hitches50: "up", presentP99: "up", loadExcessMs: "up" };
 export const GUARDED = { ...VISIT_PRIMARY, ...REPORTED };
 export const VERDICT_MIN_RUNS = 3;
-export const COUNTS = new Set(["hitches50", "hitches100"]);
+export const COUNTS = new Set(["hitches50", "hitches100", "displayRepeats3", "displayGaps100"]);
 export const Z_COUNTS = 2.576;
 // A median of n runs varies ~1.25x more than a mean.
 export const MEDIAN_SE = 1.25;
@@ -419,10 +576,10 @@ export const MEDIAN_SE = 1.25;
 // runs, ~40 % of identical batches showed a "regression").
 const T995 = [63.657, 9.925, 5.841, 4.604, 4.032, 3.707, 3.499, 3.355, 3.25, 3.169, 3.106, 3.055, 3.012, 2.977, 2.947, 2.921, 2.898, 2.878, 2.861, 2.845, 2.831, 2.819, 2.807, 2.797, 2.787, 2.779, 2.771, 2.763, 2.756, 2.75];
 export const tQuantile = (df) => (df < 1 ? Infinity : df <= T995.length ? T995[df - 1] : 2.576);
-export const VERDICT_FLOOR = { lostMs: 50, dropLostMs: 20, pctBelow95: 0.5, pctBelow90: 0.5, worstSecond: 5, hitches50: 2, hitches100: 1, presentP99: 2, loadExcessMs: 50 };
+export const VERDICT_FLOOR = { displayGaps100: 1, lostMs: 50, dropLostMs: 20, pctBelow95: 0.5, pctBelow90: 0.5, worstSecond: 5, hitches50: 2, hitches100: 1, presentP99: 2, loadExcessMs: 50 };
 // Per phase: a 50 ms stall on a stable load must show (floor 20 ms), and
 // one new gap over 50 ms (floor 0.5: a whole one beyond the noise).
-export const PHASE_FLOOR = { stallMs: 20, presentExcessMs: 20, hitches50: 0.5, dropLostMs: 20, lostMs: 20, pctBelow95: 0.5, pctBelow90: 0.5, worstSecond: 5, hitches100: 1, presentP99: 5 };
+export const PHASE_FLOOR = { screenUnmeasuredMs: 100, presentsPerGuestSec: 3, displayedPerGuestSec: 3, stallMs: 20, presentExcessMs: 20, displayExcessMs: 20, displayRepeats3: 0.5, displayGaps100: 0.5, hitches50: 0.5, dropLostMs: 20, lostMs: 20, pctBelow95: 0.5, pctBelow90: 0.5, worstSecond: 5, hitches100: 1, presentP99: 5 };
 
 // Candidate against baseline over runs of one visit (or one phase). A metric
 // regresses when its median moved the worse way by more than
@@ -442,7 +599,10 @@ export function verdictOf(baseline, candidate, { noise = null, floor = VERDICT_F
     }
     const delta = median(c) - median(b);
     const fromAa = noise?.[k]?.stdev != null && noise[k].n > 1;
-    let sd = fromAa ? noise[k].stdev : Math.sqrt(((stdev(b) ?? 0) ** 2 + (stdev(c) ?? 0) ** 2) / 2);
+    // The A/A's sd without its outlier runs when it had some (one run far off
+    // does not widen the threshold); its plain sd otherwise.
+    let sd = fromAa ? (noise[k].trimmedSd ?? noise[k].stdev) : Math.sqrt(((stdev(b) ?? 0) ** 2 + (stdev(c) ?? 0) ** 2) / 2);
+    const aaDf = fromAa ? (noise[k].trimmedSd != null ? noise[k].keptN : noise[k].n) - 1 : null;
     // A count (hitches) varies at least as a Poisson count: an A/A that saw
     // the same count six times says sd 0, not that a gap cannot come and go.
     let poisson = false;
@@ -453,7 +613,7 @@ export function verdictOf(baseline, candidate, { noise = null, floor = VERDICT_F
     // Where the Poisson floor sets the sd, it is a model, not an estimate:
     // the normal quantile, not Student's (review of #267: t x a floor made
     // hitches nearly blind, +5 hitches needed at a mean of 1).
-    const t = poisson ? Z_COUNTS : tQuantile(fromAa ? noise[k].n - 1 : b.length + c.length - 2);
+    const t = poisson ? Z_COUNTS : tQuantile(fromAa ? aaDf : b.length + c.length - 2);
     const threshold = Math.max(t * MEDIAN_SE * sd * Math.sqrt(2 / n), floor[k] ?? 0);
     const worseBy = worse === "up" ? delta : -delta;
     rows.push({ ...base, delta: round(delta, 2), threshold: round(threshold, 2), regression: worseBy > threshold, improvement: -worseBy > threshold });
@@ -464,13 +624,15 @@ export function verdictOf(baseline, candidate, { noise = null, floor = VERDICT_F
 // One visit's gating verdict: the visit's primaries and every phase's.
 // sides: { baseline: [analysis], candidate: [analysis] } (usable runs only);
 // noise: { run, phases } from an A/A summary, or null.
-export function visitVerdict(baseline, candidate, noise = null) {
-  const visit = verdictOf(baseline.map((a) => a.summary), candidate.map((a) => a.summary), { noise: noise?.run ?? null });
-  const reported = verdictOf(baseline.map((a) => a.summary), candidate.map((a) => a.summary), { noise: noise?.run ?? null, metrics: REPORTED });
+export function visitVerdict(baseline, candidate, noise = null, { display = false } = {}) {
+  const visitMetrics = display ? VISIT_PRIMARY_DISPLAY : VISIT_PRIMARY, phaseMetrics = display ? PHASE_PRIMARY_DISPLAY : PHASE_PRIMARY;
+  const visit = verdictOf(baseline.map((a) => a.summary), candidate.map((a) => a.summary), { noise: noise?.run ?? null, metrics: visitMetrics });
+  const reported = verdictOf(baseline.map((a) => a.summary), candidate.map((a) => a.summary), { noise: noise?.run ?? null,
+    metrics: display ? { ...REPORTED, hitches100: "up", presentExcessMs: "up" } : REPORTED });
   const labels = [...new Set([...baseline, ...candidate].flatMap((a) => a.phases.map((p) => p.label)))];
   const phaseOf = (list, label) => list.map((a) => a.phases.find((p) => p.label === label)).filter(Boolean);
   const phases = Object.fromEntries(labels.map((label) => [label,
-    verdictOf(phaseOf(baseline, label), phaseOf(candidate, label), { noise: noise?.phases?.[label] ?? null, floor: PHASE_FLOOR, metrics: PHASE_PRIMARY })]));
+    verdictOf(phaseOf(baseline, label), phaseOf(candidate, label), { noise: noise?.phases?.[label] ?? null, floor: PHASE_FLOOR, metrics: phaseMetrics })]));
   const all = [visit, ...Object.values(phases)];
   const regressions = [
     ...visit.rows.filter((r) => r.regression).map((r) => ({ where: "visit", ...r })),

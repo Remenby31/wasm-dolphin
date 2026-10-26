@@ -359,6 +359,87 @@ export function coreHeapBases(m) {
 // translation slices a third of the time idle (research deep-first-minute
 // §2.1); a message has no clamp and still lets the worker's other messages
 // (the core's disc reads, compile requests) run between slices.
+// A yield that also gives way to the core's disc reads: while the worker
+// served one less than quietMs ago (lastReadAt), the next translation slice
+// waits, in steps, so a burst of sequential reads (a boot, a load) is not
+// served one per slice. The core's DVD thread issues its next read as soon
+// as one completes: a slice in between delays each by up to a slice, and
+// the emulated CPU waits on it (drop meter: cold boot, 0.55-1.7 s at ~17 %
+// speed, reads at ~10-50 ms each while translating).
+// The waiting has a budget kept across calls (review of #268: a bound per
+// call let endless reads, a movie or streamed audio, starve the translation):
+// it starts at maxWaitMs, each slice of translation earns as much again (up
+// to maxWaitMs), each wait spends it. Under reads that never stop, the
+// translation still gets about half the time after the first maxWaitMs.
+export function discAwareYield({ lastReadAt, quietMs = 15, maxWaitMs = 1000, now = () => performance.now(),
+  yieldNow = yieldToEventLoop, sleep = (ms) => new Promise((r) => setTimeout(r, ms)) }) {
+  let budget = maxWaitMs;
+  let sliceStart = null;
+  const out = async () => {
+    if (sliceStart != null) budget = Math.min(maxWaitMs, budget + (now() - sliceStart));
+    await yieldNow();
+    while (budget > 0 && now() - lastReadAt() < quietMs) {
+      const t0 = now();
+      await sleep(quietMs);
+      budget -= now() - t0;
+      out.waitedMs += now() - t0;
+    }
+    sliceStart = now();
+  };
+  out.waitedMs = 0;
+  return out;
+}
+
+// A queue of tasks run one at a time, in order, each after a return to the
+// event loop: a burst of synchronous work per item (a warm launch's ~140
+// cached regions: heap patch, copy into the core's heap, queueing) no longer
+// makes one long task on the worker that serves the core's disc reads. A
+// task that throws does not stop the ones after it.
+export function serialQueue({ yieldNow = yieldToEventLoop } = {}) {
+  let tail = Promise.resolve();
+  return {
+    push(task) {
+      tail = tail.then(() => yieldNow()).then(task).catch(() => {});
+      return tail;
+    },
+    get idle() { return tail; }
+  };
+}
+
+// The cached regions' installation (review of #273): each region's
+// synchronous part (heap patch) runs in a task of its own, in order
+// (serialQueue); a compile it may need (bytes patched for this session's
+// heap) starts without being awaited, and the submits follow in the same
+// order on a second chain once their compile is done, so the queue never
+// waits a round trip to the compiler worker per region (~140 when the heap
+// moved). prepare(region) -> null | { prepared, pending?: Promise<bool> };
+// submit(prepared); current(): the disc generation now (a region of another
+// disc is neither prepared nor submitted).
+export function createRegionInstaller({ queue = serialQueue(), prepare, submit, current }) {
+  let submitTail = Promise.resolve();
+  return {
+    push(region, generation = current()) {
+      return queue.push(async () => {
+        if (generation !== current()) return;
+        const p = await prepare(region);
+        if (!p) return;
+        submitTail = submitTail.then(async () => {
+          if (p.pending && !(await p.pending.catch(() => false))) return;
+          if (generation === current()) submit(p.prepared);
+        }).catch(() => {});
+      });
+    },
+    get idle() { return queue.idle.then(() => submitTail); }
+  };
+}
+
+// Several callers of one yield (the cache loader's 8 lanes) share each wait:
+// the budget of a discAwareYield is spent once per round, not 8 times.
+export function sharedYield(yieldFn) {
+  let inflight = null;
+  return () => (inflight ??= yieldFn().finally(() => { inflight = null; }));
+}
+
 export function yieldToEventLoop() {
   if (typeof MessageChannel !== "function") return new Promise((r) => setTimeout(r, 0));
   // A channel per turn, closed once it delivered: a port left open would
