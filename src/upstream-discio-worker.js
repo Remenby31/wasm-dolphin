@@ -8282,8 +8282,8 @@ export async function prioritizeAotAfterStateLoad({ flow = aotFirstLaunch, insta
     if (!flow?.supported || flow.hasWork?.() === false) return 0;
     let read;
     if (sampler?.watch) {
-      // the sampler's first post may hold samples from before the load
-      watch = sampler.watch({ skipFirst: true });
+      // counts from the load on: the sampler flushes what it had before
+      watch = sampler.watch();
       read = async (until) => { await wait(Math.max(0, until - now())); return watch.read(); };
     } else {
       const pcAddress = aotProfileTarget?.guestPcAddress?.(instance) || instance?._DolphinWeb_GuestPcAddress?.() || 0;
@@ -8306,7 +8306,7 @@ export async function prioritizeAotAfterStateLoad({ flow = aotFirstLaunch, insta
       if (flow.hasWork?.() === false) break;
       const hits = await read(t0 + at);
       if (!current()) return moved; // another load or another disc meanwhile
-      if (hits.length) moved = flow.prioritize(hits);
+      if (hits.length && flow.hasWork?.() !== false) moved = flow.prioritize(hits);
     }
     return moved;
   } catch {
