@@ -140,8 +140,8 @@
     {
       "path": "src/upstream-discio-worker.js",
       "hashMode": "lf-normalized",
-      "size": 784804,
-      "sha256": "eb24da75eb3f69b901f67ded0d457fcfe6000f970ad71a087a05e711ba5f1dab"
+      "size": 787452,
+      "sha256": "5ea48d64b73087491cb51bfe002fabc29d5c2b56728e74579c81e5a0e0d972c6"
     },
     {
       "path": "src/wgpu-renderer-worker-probe.js",

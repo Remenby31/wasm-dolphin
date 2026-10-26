@@ -6,7 +6,7 @@ import { readFile } from "node:fs/promises";
 import test from "node:test";
 
 import { beginFrameGaps, causeOf, displaySummaryOf, PHASE_FLOOR, PHASE_PRIMARY, stallMsOfRows, tQuantile, dropEvents, dropSummary, interpolate, loadSegments, noiseOf, rowsOf, stallOverlap, trendLine, trendTable, verdictOf, visitVerdict, windowsOf } from "../harness/lib/drops.mjs";
-import { coreOf, exitCodeOf, falsePositiveRate, noiseCoreOf, markersOnVi, noVerdictReasons, regressionKeys, runFiles, stepsFor, validateScenario } from "../harness/probes/drop-meter.mjs";
+import { coreOf, exitCodeOf, falsePositiveRate, noiseCoreOf, markersOnVi, noVerdictReasons, readNoise, regressionKeys, runFiles, stepsFor, validateScenario } from "../harness/probes/drop-meter.mjs";
 import { createDropSampler, histogramSum } from "../src/harness-drop-sampler.js";
 
 const TPS = 486e6;
@@ -551,4 +551,24 @@ test("0167 times the CPU thread's block compiles behind a flag the sampler sets"
   assert.match(w, /if \(payload\.action === "start"\) \{\n\s*moduleInstance\?\._DolphinWeb_SetJitTimeStatsEnabled\?\.\(1\);/);
   // The wgpu timers cost nothing unless the sampler runs.
   assert.match(w, /const createdAt = dropSampler\?\.running && !prewarmed \? performance\.now\(\) : 0;/);
+});
+
+// --state-delay-ms: when the savestate loads after launch is part of the
+// measure (a load ~2 s into a first launch loses 1.4-2.3 s, ~4.5 s almost
+// nothing): an A/A taken at another delay is another measure. A summary from
+// before the option loaded at once (0).
+test("--noise must have loaded the savestate at the same delay; an older summary counts as 0", async (t) => {
+  const { mkdtempSync, writeFileSync, rmSync } = await import("node:fs");
+  const os = await import("node:os");
+  const path = await import("node:path");
+  const root = mkdtempSync(path.join(os.tmpdir(), "drops-delay-"));
+  t.after(() => rmSync(root, { recursive: true, force: true }));
+  const base = { probe: "drop-meter", probeVersion: 2, scenario: "drop-scenario-state.json", state: "scene.sav", query: "q", sampleMs: 50, display: true, visitSummary: [{ visit: 1, noise: {}, phases: {} }] };
+  const expect = { probeVersion: 2, scenario: "drop-scenario-state.json", state: "scene.sav", query: "q", sampleMs: 50, display: true };
+  writeFileSync(path.join(root, "old.json"), JSON.stringify(base));
+  writeFileSync(path.join(root, "late.json"), JSON.stringify({ ...base, stateDelayMs: 3300 }));
+  assert.ok(readNoise(path.join(root, "old.json"), { ...expect, stateDelayMs: 0 })[1]);
+  assert.throws(() => readNoise(path.join(root, "old.json"), { ...expect, stateDelayMs: 3300 }), /stateDelayMs 0 vs 3300/);
+  assert.ok(readNoise(path.join(root, "late.json"), { ...expect, stateDelayMs: 3300 })[1]);
+  assert.throws(() => readNoise(path.join(root, "late.json"), { ...expect, stateDelayMs: 0 }), /stateDelayMs 3300 vs 0/);
 });

@@ -7,7 +7,7 @@
 //   node harness/probes/drop-meter.mjs --iso disc.iso --port N [--runs 6]
 //     [--visits 2] [--candidate ref|dir] [--baseline ref|dir]
 //     [--noise <A/A>/summary.json] [--trend measures/drops/trend.jsonl]
-//     [--scenario harness/probes/drop-scenario.json] [--state scene.sav]
+//     [--scenario harness/probes/drop-scenario.json] [--state scene.sav [--state-delay-ms N]]
 //     [--config product | --query "..."] [--sample-ms 50] [--native ref.json]
 //     [--shots] [--display] [--region-counters] [--pc-window FROM-TO] [--max-load L] [--load-wait 300] [--lock-wait 14400 | --no-lock]
 //     [--out dir]
@@ -141,6 +141,11 @@ async function playVisit(o, server, profileDir, shotDir, visit) {
     // scenario's guest seconds then count from the load.
     let base = 0;
     if (o.state) {
+      // --state-delay-ms: the load no earlier than N ms after the browser's
+      // launch (a quick-load ~2 s into a first launch vs ~4.5 s: the region
+      // translation is at a different point); 0 loads as soon as it can.
+      const wait = t0 + o.stateDelayMs - Date.now();
+      if (wait > 0) await page.waitForTimeout(wait);
       await page.route(STATE_ROUTE, (route) => route.fulfill({ path: o.state, contentType: "application/octet-stream" }));
       raw.stateLoad = await loadHarnessState(page, `${server.base}/`);
       if (!raw.stateLoad?.loaded) throw new Error(`savestate not loaded: ${JSON.stringify(raw.stateLoad).slice(0, 200)}`);
@@ -425,12 +430,14 @@ export function readNoise(file, expect = null) {
   const s = JSON.parse(readFileSync(file, "utf8"));
   if (s.probe !== "drop-meter") throw new Error(`--noise ${file}: not a drop-meter summary`);
   if (expect) {
-    const differ = ["probeVersion", "scenario", "state", "query", "sampleMs", "display"].filter((k) => (s[k] ?? (k === "display" ? false : null)) !== (expect[k] ?? (k === "display" ? false : null)));
+    // unset in a summary from before the option: the default (false, 0)
+    const unset = { display: false, stateDelayMs: 0 };
+    const differ = ["probeVersion", "scenario", "state", "stateDelayMs", "query", "sampleMs", "display"].filter((k) => (s[k] ?? unset[k] ?? null) !== (expect[k] ?? unset[k] ?? null));
     const named = { cpuModel: [s.machine?.cpuModel, expect.cpuModel], browser: [s.browser, expect.browser] };
     // the same machine, and the same browser when both runs say which
     if (expect.cpuModel && s.machine?.cpuModel && s.machine.cpuModel !== expect.cpuModel) differ.push("cpuModel");
     if (expect.browser && s.browser && s.browser !== expect.browser) differ.push("browser");
-    if (differ.length) throw new Error(`--noise ${file}: another measure (${differ.map((k) => `${k} ${named[k]?.[0] ?? s[k]} vs ${named[k]?.[1] ?? expect[k]}`).join("; ")})`);
+    if (differ.length) throw new Error(`--noise ${file}: another measure (${differ.map((k) => `${k} ${named[k]?.[0] ?? s[k] ?? unset[k]} vs ${named[k]?.[1] ?? expect[k] ?? unset[k]}`).join("; ")})`);
   }
   return Object.fromEntries(s.visitSummary.map((v) => [v.visit, { run: (v.candidate ?? v).noise, phases: (v.candidate ?? v).phases ?? {} }]));
 }
@@ -526,7 +533,7 @@ async function main() {
       candidate: { type: "string" }, baseline: { type: "string" }, noise: { type: "string" }, trend: { type: "string" }, "no-confirm": { type: "boolean", default: false }, display: { type: "boolean", default: false }, "noise-stale-ok": { type: "boolean", default: false },
       "false-positives": { type: "string", multiple: true }, draws: { type: "string", default: "2000" },
       config: { type: "string", default: "product" }, query: { type: "string" }, "sample-ms": { type: "string", default: "50" },
-      native: { type: "string" }, analyze: { type: "string" }, trace: { type: "string" }, state: { type: "string" }, shots: { type: "boolean", default: false },
+      native: { type: "string" }, analyze: { type: "string" }, trace: { type: "string" }, state: { type: "string" }, "state-delay-ms": { type: "string", default: "0" }, shots: { type: "boolean", default: false },
       "region-counters": { type: "boolean", default: false }, "pc-window": { type: "string" },
       "max-load": { type: "string" }, "load-wait": { type: "string", default: "300" }, "lock-wait": { type: "string", default: "14400" }, "calm-wait": { type: "string" }, "no-lock": { type: "boolean", default: false },
       port: { type: "string", default: process.env.HARNESS_PORT }, out: { type: "string" }
@@ -557,11 +564,11 @@ async function main() {
   const o = {
     iso, scenario, query: query.toString(), runs: num(values, "runs", { min: 1, int: true }), visits: num(values, "visits", { min: 1, int: true }),
     sampleMs: num(values, "sample-ms", { min: 10 }), port: num(values, "port", { min: 1, int: true }),
-    state: values.state ? path.resolve(values.state) : null,
+    state: values.state ? path.resolve(values.state) : null, stateDelayMs: num(values, "state-delay-ms", { min: 0, int: true }),
     regionCounters: values["region-counters"], display: values.display, pcWindow: values["pc-window"] ? values["pc-window"].split("-").map(Number) : null,
     maxLoad: values["max-load"] ? num(values, "max-load", { min: 0.1 }) : Math.max(2, os.cpus().length / 4), loadWait: num(values, "load-wait", { min: 0 })
   };
-  const noise = values.noise ? readNoise(values.noise, { probeVersion: PROBE_VERSION, scenario: path.basename(values.scenario), state: o.state ? path.basename(o.state) : null, display: o.display, query: o.query, sampleMs: o.sampleMs, cpuModel: machineSnapshot().cpuModel }) : null;
+  const noise = values.noise ? readNoise(values.noise, { probeVersion: PROBE_VERSION, scenario: path.basename(values.scenario), state: o.state ? path.basename(o.state) : null, stateDelayMs: o.state ? o.stateDelayMs : 0, display: o.display, query: o.query, sampleMs: o.sampleMs, cpuModel: machineSnapshot().cpuModel }) : null;
   const noiseCore = values.noise ? noiseCoreOf(values.noise) : null;
   const sides = { candidate: resolveSide("candidate", values.candidate) };
   if (values.baseline) sides.baseline = resolveSide("baseline", values.baseline);
@@ -588,7 +595,7 @@ async function main() {
   const outDir = probeOutDir("drop-meter", iso, values.out);
   const meta = {
     probe: "drop-meter", at: new Date().toISOString(), locked: !values["no-lock"], machine: machineSnapshot(), chrome: chromeInfo(), iso: path.basename(iso),
-    probeVersion: PROBE_VERSION, scenario: path.basename(values.scenario), state: o.state ? path.basename(o.state) : null, display: o.display, query: o.query, sampleMs: o.sampleMs, runs: o.runs, visits: o.visits, maxLoad: o.maxLoad,
+    probeVersion: PROBE_VERSION, scenario: path.basename(values.scenario), state: o.state ? path.basename(o.state) : null, stateDelayMs: o.state ? o.stateDelayMs : 0, display: o.display, query: o.query, sampleMs: o.sampleMs, runs: o.runs, visits: o.visits, maxLoad: o.maxLoad,
     sides: Object.fromEntries(Object.entries(sides).map(([k, s]) => [k, s.label])), cores, noise: values.noise ?? null, noiseCore,
     definition: "windows of 100 ms from the scenario's first step; speed = guest/host time (VI ticks); drops: windows < 90 % or a present gap > 50 ms, merged; loads: disc reads ≥ 2.5 MiB/s (0.5 s average), merged within 1 s, excess = host − guest ms; time under 95/90 %: 1 s sliding windows; verdict: median moved the worse way beyond the A/A noise"
   };
