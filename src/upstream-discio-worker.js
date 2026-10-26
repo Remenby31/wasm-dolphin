@@ -3364,6 +3364,9 @@ const DROP_COLUMNS = [
   // present cadence (0162): paced throttles, those that slept, and the
   // approximate total wake-up lateness and lateness behind target (µs)
   "throttles", "throttleSleeps", "sleepLateUs", "behindUs",
+  // wake-ups later than the histogram's last bin (15.75 ms): sleepLateUs
+  // counts them at that edge, a lower bound
+  "sleepLateOverflow",
   // EFB copies to RAM waiting for the GPU (0164), both kinds
   "efbSyncs", "efbWaitUs",
   // wgpu replay on this thread: pipelines and shaders created, and the
@@ -3375,6 +3378,7 @@ const DROP_COLUMNS = [
 const dropWgpu = { pipelines: 0, pipelineMs: 0, shaders: 0, shaderMs: 0 };
 let dropSampler = null;
 let dropScratch = 0;
+let dropScratchModule = null; // the core dropScratch was allocated in
 function readDropCounters() {
   const m = moduleInstance;
   const heap = m?.HEAPU8;
@@ -3398,7 +3402,10 @@ function readDropCounters() {
     const c = new Float64Array(heap.buffer, region + 16, 2);
     out.regionCycles = c[0]; out.totalCycles = c[1]; out.idleCycles = f[10];
   }
-  dropScratch ||= m._malloc?.(40) ?? 0;
+  if (dropScratchModule !== m) {
+    dropScratch = m._malloc?.(40) ?? 0;
+    dropScratchModule = m;
+  }
   if (m._DolphinWeb_JitTimeStats && dropScratch) {
     m._DolphinWeb_JitTimeStats(dropScratch);
     const v = new Uint32Array(heap.buffer, dropScratch, 3);
@@ -3423,6 +3430,7 @@ function readDropCounters() {
     if (w[2] === 1) {
       out.throttles = w[4]; out.throttleSleeps = w[5];
       out.sleepLateUs = histogramSum(w, 16, 64, 250).sum;
+      out.sleepLateOverflow = w[16 + 63];
       out.behindUs = histogramSum(w, 80, 64, 500).sum;
     }
   }

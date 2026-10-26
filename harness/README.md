@@ -310,7 +310,7 @@ and every 50 ms the worker's counters (`validationDropSampler`) and the
 page's stalls, then cuts them into 100 ms windows: drops with their cause
 (JIT compiles, patch 0167; region installs; disc waits; GPU and EFB waits;
 wgpu pipelines; late throttle wake-ups; worker and main-thread stalls;
-`emulation` when the CPU thread never slept), loads (host against guest
+`uncounted-busy` when the CPU thread hardly slept), loads (host against guest
 time), and per run, visit and phase: time lost, time under 95/90 %, worst
 second, hitches over 50/100 ms, present p99, load excess, audio underruns.
 A timing measure: it takes the perf lock.
@@ -318,10 +318,17 @@ A timing measure: it takes the perf lock.
 ```sh
 # A/A (noise of every metric) and the baseline report
 node harness/probes/drop-meter.mjs --iso ../roms/<disc>.iso --port 8113 --runs 6
-# merge guard: this tree against main, verdict per visit (exit 2 on a regression)
+# merge guard: this tree against main. Gating metrics only: per phase the
+# time lost inside drops and the longest present gap, per visit the hitches
+# over 100 ms and the worst second; each against its A/A noise (medians:
+# 2.5 x 1.25 standard errors). A regression must reproduce on a second batch
+# (--no-confirm skips it). Exit 0 none, 2 regression, 3 no verdict (too few
+# usable runs, gave up, a phase without a verdict, sides sampled differently)
 node harness/probes/drop-meter.mjs --iso ../roms/<disc>.iso --port 8113 --runs 3 --baseline origin/main --noise <A/A dir>/summary.json
 # nightly on main, with its history (JSONL + table)
 node harness/probes/drop-meter.mjs --iso ../roms/<disc>.iso --port 8113 --runs 3 --trend ../measures/drops/trend.jsonl
+# the guard's false-positive rate from runs of one tree (A against A draws)
+node harness/probes/drop-meter.mjs --false-positives <A/A dir>:candidate --noise <A/A dir>/summary.json
 # again from the raw data, e.g. against a native reference (game frames per guest second)
 node harness/probes/drop-meter.mjs --analyze <dir> --native <native-ref.json>
 ```

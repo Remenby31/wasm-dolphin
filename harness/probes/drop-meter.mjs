@@ -54,7 +54,7 @@ import { parseArgs } from "node:util";
 import { gunzipSync, gzipSync } from "node:zlib";
 
 import { bootIso, ensureServer, grabFrame, launchChrome, loadHarnessState, readTimeline, REPO_ROOT, workerRequest } from "../lib/browser.mjs";
-import { dropEvents, dropSummary, loadSegments, nativeFps, noiseOf, PHASE_FLOOR, phaseSummaries, rowsOf, trendLine, trendTable, verdictOf, windowsOf, worstDrops } from "../lib/drops.mjs";
+import { dropEvents, dropSummary, loadSegments, nativeFps, noiseOf, phaseSummaries, rowsOf, trendLine, trendTable, VERDICT_MIN_RUNS, visitVerdict, windowsOf, worstDrops } from "../lib/drops.mjs";
 import { exportRef } from "../cli.mjs";
 import { calmLock, loadGaveUp } from "../lib/env.mjs";
 import { claim } from "../lib/ownership.mjs";
@@ -172,7 +172,9 @@ async function playVisit(o, server, profileDir, shotDir, visit) {
           await page.waitForTimeout(g && step.at - (g.sec - base) > 1 ? 200 : 15);
         }
         const t = performance.timeOrigin + performance.now();
-        if (step.label) raw.markers.push({ t, label: step.label });
+        // The phase starts at its guest second: the analysis places it on the
+        // VI ring (this host time is the poll's, up to ~20 ms late).
+        if (step.label) raw.markers.push({ t, label: step.label, guest: step.at + base });
         if ("tap" in step) {
           await page.keyboard.down(step.tap);
           await page.waitForTimeout(step.hold ?? 120);
@@ -194,6 +196,7 @@ async function playVisit(o, server, profileDir, shotDir, visit) {
         if (shotDir && step.label) savePng(await grabFrame(page), path.join(shotDir, `${String(raw.markers.length).padStart(2, "0")}-${step.label}.png`));
       }
       raw.endT = performance.timeOrigin + performance.now();
+      raw.endGuest = o.scenario.end + base;
     } finally {
       draining = false;
       await drain;
@@ -216,11 +219,30 @@ async function playVisit(o, server, profileDir, shotDir, visit) {
   }
 }
 
+// The phase bounds at the host time the VI ring reached their guest second
+// (markers with `guest`; a site trace or an older record keeps its own).
+export function markersOnVi(raw, vi) {
+  if (!(raw.tps > 0) || !vi.length) return {};
+  const at = (g) => {
+    const target = g * raw.tps;
+    const v = vi.find((x) => x.ticks >= target);
+    return v ? v.t : null;
+  };
+  const markers = raw.markers.map((m) => (m.guest != null && at(m.guest) != null ? { ...m, t: at(m.guest) } : m));
+  const endT = raw.endGuest != null && at(raw.endGuest) != null ? at(raw.endGuest) : raw.endT;
+  return { markers, endT };
+}
+
 // One visit's analysis from its raw record (pure but for the reference).
 export function analyzeVisit(raw, { native = null } = {}) {
+  // (raw is reassigned below with the markers placed on the VI ring)
   if (raw.error) return { error: raw.error };
   const timeline = mergeTimeline(raw.chunks);
+  // A ring that overflowed or a read that failed leaves holes a drop could
+  // hide in: the run is not used.
+  if (!timeline.complete) return { error: `timeline incomplete (lost presents ${timeline.lost.presents}, VI ${timeline.lost.vi}, failed reads ${timeline.failedReads})` };
   const rows = rowsOf(raw.rows);
+  raw = { ...raw, ...markersOnVi(raw, timeline.vi) };
   const page = raw.page.map(([t, lagMs, underruns]) => ({ t, lagMs, underruns }));
   const from = raw.markers[0]?.t ?? null;
   const windows = windowsOf({ vi: timeline.vi, presents: timeline.presents, rows, page, markers: raw.markers, tps: raw.tps, from, to: raw.endT });
@@ -242,7 +264,7 @@ export function analyzeVisit(raw, { native = null } = {}) {
   const regionsDone = allAt ? { regions: finalRegions, hostMsFromLaunch: raw.launchT ? Math.round(allAt.t - raw.launchT) : null, guestSec: allAt.ticks != null && raw.tps ? round(allAt.ticks / raw.tps, 2) : null } : null;
   const rss = (raw.rss ?? []).map((x) => x[1]);
   return {
-    timelineComplete: timeline.complete, bootMs: raw.bootMs, pc: raw.pc ?? null,
+    timelineComplete: timeline.complete, sampled: rows.length > 0, bootMs: raw.bootMs, pc: raw.pc ?? null,
     load1: { median: round(median(loadAvg), 2), max: round(Math.max(...loadAvg), 2) },
     regionsDone, rssPeakMB: rss.length ? Math.max(...rss) : null,
     summary: { ...dropSummary({ windows, presents, vi }), loads: loads.length, loadExcessMs: loads.reduce((a, l) => a + l.excessMs, 0), rssPeakMB: rss.length ? Math.max(...rss) : null, regionsDoneMs: regionsDone?.hostMsFromLaunch ?? null },
@@ -288,40 +310,81 @@ export function humanSummary(summary) {
     const n = v.candidate.noise, top = v.candidate.worst[0];
     lines.push(`${v.visit === 1 ? "cold" : "warm"} (${v.candidate.runs} runs): lost ${n.lostMs?.median ?? "–"} ms, <95 % ${n.pctBelow95?.median ?? "–"} % of the time, worst 1 s ${n.worstSecond?.median ?? "–"} %, hitches >100 ms ${n.hitches100?.median ?? "–"}, load excess ${n.loadExcessMs?.median ?? "–"} ms; worst drop ${top ? `${top.label} ${Math.round(top.lostMs)} ms (${top.cause})` : "none"}`);
     if (v.verdict) {
-      const bad = v.verdict.rows.filter((r) => r.regression).map((r) => `${r.metric} ${r.baseline} → ${r.candidate} (> ${r.threshold})`);
-      const phaseBad = Object.entries(v.phaseVerdicts ?? {}).flatMap(([label, pv]) => pv.rows.filter((r) => r.regression).map((r) => `${label} ${r.metric} ${r.baseline} → ${r.candidate} (> ${r.threshold})`));
-      if (phaseBad.length) lines.push(`   phases: REGRESSION ${phaseBad.join(", ")}`);
-      lines.push(`   verdict: ${v.verdict.inconclusive ? `INCONCLUSIVE (fewer than 3 runs a side and no --noise)` : v.verdict.regression ? `REGRESSION ${bad.join(", ")}` : "no regression beyond the noise"}${v.verdict.improvement ? " (some improvement)" : ""}`);
+      const bad = v.verdict.regressions.map((r) => `${r.where} ${r.metric} ${r.baseline} → ${r.candidate} (> ${r.threshold})`);
+      lines.push(`   verdict: ${v.verdict.inconclusive ? "NO VERDICT (see noVerdict)" : v.verdict.regression ? `REGRESSION ${bad.join(", ")}` : "no regression beyond the noise"}${v.verdict.improvement ? " (some improvement)" : ""}`);
     }
   }
+  if (summary.noVerdict) lines.push(`NO VERDICT: ${summary.noVerdict.join("; ")}`);
+  if (summary.confirmation) lines.push(`confirmation batch: ${summary.confirmation.confirmed ? `REGRESSION REPRODUCED (${summary.confirmation.metrics.join(", ")})` : `not reproduced (${summary.confirmation.metrics.join(", ") || "none"} on the 2nd batch)`}`);
   return lines;
 }
 
-function writeSummary(outDir, meta, analyses, visits, { noise = null } = {}) {
+// Why a comparison gives no verdict (exit code 3), or null (pure).
+export function noVerdictReasons({ analyses, visits, gaveUp = null, verdicts }) {
+  const reasons = [];
+  if (gaveUp) reasons.push(gaveUp);
+  const sampled = new Set(analyses.filter((a) => !a.analysis.error).map((a) => `${a.side}:${a.analysis.sampled}`));
+  const bySide = (side) => [...sampled].filter((x) => x.startsWith(`${side}:`)).map((x) => x.split(":")[1]);
+  if (bySide("baseline").length && (bySide("baseline").join() !== bySide("candidate").join() || bySide("candidate").length > 1)) {
+    reasons.push("the sides were not sampled alike (one without the drop sampler): their costs differ");
+  }
+  for (let v = 1; v <= visits; v += 1) {
+    const vv = verdicts[v];
+    if (!vv) continue;
+    for (const side of ["baseline", "candidate"]) {
+      const usable = analyses.filter((a) => a.visit === v && a.side === side && !a.analysis.error && !a.analysis.overloaded).length;
+      if (usable < VERDICT_MIN_RUNS) reasons.push(`visit ${v}: ${usable} usable ${side} run(s) (errors and overloaded runs left out), ${VERDICT_MIN_RUNS} needed`);
+    }
+    if (vv.inconclusive) reasons.push(`visit ${v}: a metric or a phase has no verdict`);
+  }
+  return reasons.length ? [...new Set(reasons)] : null;
+}
+
+function writeSummary(outDir, meta, analyses, visits, { noise = null, confirm = null } = {}) {
   const summary = { ...meta, visitSummary: [] };
+  const verdicts = {};
   for (let v = 1; v <= visits; v += 1) {
     const of = (side) => analyses.filter((a) => a.visit === v && a.side === side).map((a) => a.analysis);
     const candidate = summarizeVisits(of("candidate"));
     const entry = { visit: v, candidate };
     if (analyses.some((a) => a.side === "baseline")) {
       entry.baseline = summarizeVisits(of("baseline"));
-      const ok = (xs) => xs.filter((a) => !a.error && !a.overloaded).map((a) => a.summary);
-      entry.verdict = verdictOf(ok(of("baseline")), ok(of("candidate")), { noise: noise?.[v]?.run ?? null });
-      const phasesOf = (side, label) => of(side).filter((a) => !a.error && !a.overloaded).map((a) => a.phases.find((p) => p.label === label)).filter(Boolean);
-      const labels = [...new Set(of("candidate").filter((a) => !a.error).flatMap((a) => a.phases.map((p) => p.label)))];
-      entry.phaseVerdicts = Object.fromEntries(labels.map((label) => [label,
-        verdictOf(phasesOf("baseline", label), phasesOf("candidate", label), { noise: noise?.[v]?.phases?.[label] ?? null, floor: PHASE_FLOOR })]));
+      const ok = (xs) => xs.filter((a) => !a.error && !a.overloaded);
+      entry.verdict = verdicts[v] = visitVerdict(ok(of("baseline")), ok(of("candidate")), noise?.[v] ?? null);
     }
     summary.visitSummary.push(entry);
+  }
+  if (analyses.some((a) => a.side === "baseline")) {
+    summary.noVerdict = noVerdictReasons({ analyses, visits, gaveUp: meta.gaveUp, verdicts });
+    if (confirm) summary.confirmation = confirm;
   }
   summary.human = humanSummary(summary);
   writeFileSync(path.join(outDir, "summary.json"), JSON.stringify(summary, null, 1) + "\n");
   return summary;
 }
 
+// "visit|phase:metric" of every gating regression of a summary (pure).
+export function regressionKeys(summary) {
+  return summary.visitSummary.flatMap((v) => (v.verdict?.regressions ?? []).map((r) => `${v.visit}|${r.where}:${r.metric}`));
+}
+
+export function exitCodeOf(summary, { compared, failed }) {
+  if (!compared) return failed ? 1 : 0;
+  if (summary.noVerdict || summary.confirmation?.noVerdict) return 3;
+  if (summary.confirmation) return summary.confirmation.confirmed ? 2 : 0;
+  if (regressionKeys(summary).length) return 2;
+  return failed ? 1 : 0;
+}
+
 // The A/A noise of a previous summary.json, per visit number.
-function readNoise(file) {
+// It must come from the same measure: scenario, savestate, query, sampling.
+export function readNoise(file, expect = null) {
   const s = JSON.parse(readFileSync(file, "utf8"));
+  if (s.probe !== "drop-meter") throw new Error(`--noise ${file}: not a drop-meter summary`);
+  if (expect) {
+    const differ = ["scenario", "state", "query", "sampleMs"].filter((k) => (s[k] ?? null) !== (expect[k] ?? null));
+    if (differ.length) throw new Error(`--noise ${file}: another measure (${differ.map((k) => `${k} ${s[k]} vs ${expect[k]}`).join("; ")})`);
+  }
   return Object.fromEntries(s.visitSummary.map((v) => [v.visit, { run: (v.candidate ?? v).noise, phases: (v.candidate ?? v).phases ?? {} }]));
 }
 
@@ -332,8 +395,9 @@ function logRun(log, tag, a) {
   for (const d of a.worst.slice(0, 3)) log(`   drop ${d.label} @${round(d.guestStart, 1)} gs: ${d.durationMs} ms, lost ${d.lostMs} ms, min ${d.minSpeed} %, cause ${d.cause}, ${d.jitBlocks} new blocks (${d.defers} deferred), causes ${JSON.stringify(d.causesMs)}`);
 }
 
-async function analyzeDir(dir, native, log, noise = null) {
+async function analyzeDir(dir, native, log, noiseFile = null) {
   const meta = JSON.parse(readFileSync(path.join(dir, "summary.json"), "utf8"));
+  const noise = noiseFile ? readNoise(noiseFile, meta) : null;
   const analyses = [];
   for (const f of readdirSync(dir).filter((x) => /^raw-(candidate|baseline)-\d+-v\d+\.json\.gz$/.test(x)).sort()) {
     const [, side, run, visit] = f.match(/raw-(\w+)-(\d+)-v(\d+)/);
@@ -347,12 +411,69 @@ async function analyzeDir(dir, native, log, noise = null) {
   for (const l of summary.human) log(l);
 }
 
+// The guard's false-positive rate, from real runs of ONE tree: random
+// disjoint draws of VERDICT_MIN_RUNS runs as "baseline" and as "candidate"
+// (the same run id for both visits), judged by the guard's own verdict.
+// Sources: "dir" (every side) or "dir:side". Confirmed: a second,
+// independent draw must regress on the same metric (--confirm).
+export function falsePositiveRate(pool, { visits, noise = null, draws = 2000, n = VERDICT_MIN_RUNS, random = Math.random }) {
+  const ids = [...new Set(pool.map((a) => a.id))];
+  if (ids.length < 2 * n) throw new Error(`${ids.length} runs: ${2 * n} needed for a ${n} against ${n} draw`);
+  const pick = () => {
+    const order = ids.map((id) => [random(), id]).sort((a, b) => a[0] - b[0]).map((x) => x[1]);
+    return [order.slice(0, n), order.slice(n, 2 * n)];
+  };
+  const keysOf = ([b, c]) => {
+    const out = [];
+    for (let v = 1; v <= visits; v += 1) {
+      const of = (set) => pool.filter((a) => a.visit === v && set.includes(a.id)).map((a) => a.analysis);
+      const vv = visitVerdict(of(b), of(c), noise?.[v] ?? null);
+      out.push(...vv.regressions.map((r) => `${v}|${r.where}:${r.metric}`));
+    }
+    return out;
+  };
+  let single = 0, confirmed = 0;
+  const byKey = {};
+  for (let d = 0; d < draws; d += 1) {
+    const k1 = keysOf(pick());
+    if (!k1.length) continue;
+    single += 1;
+    for (const k of k1) byKey[k] = (byKey[k] ?? 0) + 1;
+    const k2 = keysOf(pick());
+    if (k1.some((k) => k2.includes(k))) confirmed += 1;
+  }
+  return { draws, runs: ids.length, singleBatch: round(single / draws, 4), confirmed: round(confirmed / draws, 4),
+    byMetric: Object.entries(byKey).sort((a, b) => b[1] - a[1]).slice(0, 12).map(([k, c]) => [k, round(c / draws, 4)]) };
+}
+
+async function falsePositives(sources, { noiseFile, draws, log }) {
+  const pool = [];
+  let meta = null;
+  for (const src of sources) {
+    const [dir, side] = src.split(":");
+    meta ??= JSON.parse(readFileSync(path.join(dir, "summary.json"), "utf8"));
+    for (const f of readdirSync(dir).filter((x) => /^(candidate|baseline)-\d+-v\d+\.json$/.test(x))) {
+      const [, s, run, visit] = f.match(/^(\w+)-(\d+)-v(\d+)/);
+      if (side && s !== side) continue;
+      const analysis = JSON.parse(readFileSync(path.join(dir, f), "utf8"));
+      if (analysis.error || analysis.overloaded || !analysis.phases?.[0] || analysis.summary?.dropLostMs === undefined) continue;
+      pool.push({ id: `${dir}:${s}:${run}`, visit: Number(visit), analysis });
+    }
+  }
+  const noise = noiseFile ? readNoise(noiseFile, meta) : null;
+  const r = falsePositiveRate(pool, { visits: meta.visits ?? 2, noise, draws });
+  log(`false positives over ${r.draws} A-against-A draws of ${VERDICT_MIN_RUNS} runs (${r.runs} runs of one tree): one batch ${(100 * r.singleBatch).toFixed(1)} %, confirmed by a second batch ${(100 * r.confirmed).toFixed(1)} %`);
+  for (const [k, f] of r.byMetric) log(`   ${k}: ${(100 * f).toFixed(1)} %`);
+  return r;
+}
+
 async function main() {
   const { values } = parseArgs({
     options: {
       iso: { type: "string" }, scenario: { type: "string", default: path.join(REPO_ROOT, "harness", "probes", "drop-scenario.json") },
       runs: { type: "string", default: "6" }, visits: { type: "string", default: "2" },
-      candidate: { type: "string" }, baseline: { type: "string" }, noise: { type: "string" }, trend: { type: "string" },
+      candidate: { type: "string" }, baseline: { type: "string" }, noise: { type: "string" }, trend: { type: "string" }, "no-confirm": { type: "boolean", default: false },
+      "false-positives": { type: "string", multiple: true }, draws: { type: "string", default: "2000" },
       config: { type: "string", default: "product" }, query: { type: "string" }, "sample-ms": { type: "string", default: "50" },
       native: { type: "string" }, analyze: { type: "string" }, trace: { type: "string" }, state: { type: "string" }, shots: { type: "boolean", default: false },
       "region-counters": { type: "boolean", default: false }, "pc-window": { type: "string" },
@@ -362,7 +483,8 @@ async function main() {
   });
   const log = (m) => console.log(`[drops] ${m}`);
   const native = values.native ? JSON.parse(readFileSync(values.native, "utf8")) : null;
-  if (values.analyze) return analyzeDir(path.resolve(values.analyze), native, log, values.noise ? readNoise(values.noise) : null);
+  if (values.analyze) return analyzeDir(path.resolve(values.analyze), native, log, values.noise ?? null);
+  if (values["false-positives"]) return falsePositives(values["false-positives"], { noiseFile: values.noise ?? null, draws: num(values, "draws", { min: 10, int: true }), log });
   // A trace the site's drop HUD recorded (salon, ?engine.drophud=1): a
   // player's real session through the same analysis.
   if (values.trace) {
@@ -388,7 +510,7 @@ async function main() {
     regionCounters: values["region-counters"], pcWindow: values["pc-window"] ? values["pc-window"].split("-").map(Number) : null,
     maxLoad: values["max-load"] ? num(values, "max-load", { min: 0.1 }) : Math.max(2, os.cpus().length / 4), loadWait: num(values, "load-wait", { min: 0 })
   };
-  const noise = values.noise ? readNoise(values.noise) : null;
+  const noise = values.noise ? readNoise(values.noise, { scenario: path.basename(values.scenario), state: o.state ? path.basename(o.state) : null, query: o.query, sampleMs: o.sampleMs }) : null;
   const sides = { candidate: resolveSide("candidate", values.candidate) };
   if (values.baseline) sides.baseline = resolveSide("baseline", values.baseline);
   const lockWait = num(values, "lock-wait", { min: 0 });
@@ -405,8 +527,10 @@ async function main() {
   };
   const analyses = [];
   let gaveUp = null;
-  try {
-    for (let run = 1; run <= o.runs && !gaveUp; run += 1) {
+  // One batch: o.runs runs, the sides alternating; run numbers go on.
+  const runBatch = async (batch) => {
+    const first = analyses.length ? Math.max(...analyses.map((a) => a.run)) + 1 : 1;
+    for (let run = first; run < first + o.runs && !gaveUp; run += 1) {
       for (const name of sideOrder(run).filter((n) => sides[n])) {
         const gate = await lock.waitCalmUnlocked({ waitSec: o.loadWait, log });
         gaveUp = loadGaveUp(gate);
@@ -420,10 +544,12 @@ async function main() {
           for (let visit = 1; visit <= o.visits; visit += 1) {
             const raw = await playVisit(o, server, profileDir, values.shots ? path.join(outDir, `shots-${name}-${run}-v${visit}`) : null, visit);
             raw.gate = gate;
+            raw.batch = batch;
             writeFileSync(path.join(outDir, `raw-${name}-${run}-v${visit}.json.gz`), gzipSync(JSON.stringify(raw)));
             const analysis = analyzeVisit(raw, { native });
             analysis.overloaded = analysis.load1?.median > o.maxLoad;
-            analyses.push({ side: name, run, visit, analysis });
+            analysis.batch = batch;
+            analyses.push({ side: name, run, visit, batch, analysis });
             writeFileSync(path.join(outDir, `${name}-${run}-v${visit}.json`), JSON.stringify(analysis) + "\n");
             logRun(log, `${name} run ${run} visit ${visit}`, analysis);
             if (analysis.error) break;
@@ -435,11 +561,28 @@ async function main() {
         }
       }
     }
+  };
+  let confirm = null;
+  try {
+    await runBatch(1);
+    // A regression fails the guard only if a second batch, judged on its
+    // own, regresses on the same metric (review of #261: ~24 tests a run).
+    if (sides.baseline && !gaveUp && !values["no-confirm"]) {
+      const first = writeSummary(outDir, { ...meta, gaveUp }, analyses, o.visits, { noise });
+      const found = regressionKeys(first);
+      if (found.length && !first.noVerdict) {
+        log(`regression on the first batch (${found.join(", ")}): a second batch to confirm`);
+        await runBatch(2);
+        const second = writeSummary(outDir, { ...meta, gaveUp }, analyses.filter((a) => a.batch === 2), o.visits, { noise });
+        const again = regressionKeys(second);
+        confirm = { first: found, second: again, metrics: found.filter((k) => again.includes(k)), confirmed: found.some((k) => again.includes(k)), noVerdict: second.noVerdict };
+      }
+    }
   } finally {
     lock.release();
     for (const s of Object.values(sides)) if (s.temp) rmSync(s.root, { recursive: true, force: true });
   }
-  const summary = writeSummary(outDir, { ...meta, gaveUp }, analyses, o.visits, { noise });
+  const summary = writeSummary(outDir, { ...meta, gaveUp }, confirm ? analyses.filter((a) => a.batch === 1) : analyses, o.visits, { noise, confirm });
   if (values.trend) {
     const commit = meta.served?.candidate?.commit ?? execFileSync("git", ["-C", REPO_ROOT, "rev-parse", "HEAD"], { encoding: "utf8" }).trim();
     const file = path.resolve(values.trend);
@@ -450,9 +593,11 @@ async function main() {
   }
   for (const l of summary.human) log(l);
   log(`-> ${outDir}`);
-  const failed = analyses.some((a) => a.analysis.error);
-  const regressed = summary.visitSummary.some((v) => v.verdict?.regression || Object.values(v.phaseVerdicts ?? {}).some((p) => p.regression));
-  process.exitCode = failed ? 1 : regressed ? 2 : 0;
+  // 0 no regression, 2 regression (reproduced when --confirm), 3 no verdict
+  // (gave up, too few usable runs, a metric or phase without one, sides
+  // sampled differently, a confirmation without one), 1 a run failed and
+  // nothing else could be said.
+  process.exitCode = exitCodeOf(summary, { compared: Boolean(sides.baseline), failed: analyses.some((a) => a.analysis.error) });
 }
 
 if (import.meta.url === pathToFileURL(process.argv[1] ?? "").href) await main();

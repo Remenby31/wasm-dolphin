@@ -19,9 +19,10 @@
 //            (counter differences, the sampler stalls overlapping it)
 // A drop is a run of windows under DROP_SPEED (or with a long gap between
 // presentations); its cause is the largest of its causes when that one
-// covers at least CAUSE_MIN_SHARE of the time it lost, "emulation" when the
-// CPU thread hardly slept where the time was lost (busy all along running
-// guest code, none of the counted waits), else "unexplained".
+// covers at least CAUSE_MIN_SHARE of the time it lost, "uncounted-busy"
+// when the CPU thread hardly slept where the time was lost (busy, in none
+// of the counted waits: guest code, or a host cost nothing counts yet, as V8
+// compiling region functions lazily was), else "unexplained".
 import { describe, median, percentile, round, stdev } from "./stats.mjs";
 
 export const STEP_MS = 100;
@@ -32,7 +33,7 @@ export const STALL_MIN_MS = 20;
 export const EMULATION_SLEEP_SHARE = 0.1;
 // Columns that are u32 in the core and wrap (µs totals of patch 0003, the
 // EFB words of 0164): unwrapped before any difference.
-export const WRAPPING = new Set(["jitModuleUs", "jitInstanceUs", "jitCompiles", "efbSyncs", "efbWaitUs", "discWaits", "discReads"]);
+export const WRAPPING = new Set(["sleepLateOverflow", "jitModuleUs", "jitInstanceUs", "jitCompiles", "efbSyncs", "efbWaitUs", "discWaits", "discReads"]);
 // Cause → how many host ms a window spent in it (counter differences).
 export const CAUSES = {
   // the whole block compile (0167) when the core has it, else its
@@ -148,6 +149,7 @@ export function windowsOf({ vi, presents = [], rows = [], page = [], markers = [
       behindMs: d.behindUs == null ? null : d.behindUs / 1000,
       // guest cycles (region counters on, else 0): in regions, in all, idle-skipped
       cycles: { region: d.regionCycles ?? null, total: d.totalCycles ?? null, idle: d.idleCycles ?? null },
+      lateWakeOverflow: d.sleepLateOverflow ?? null,
       jitBlocks: d.jitBlocks ?? null, defers: d.offThreadDefers ?? null, regions: d.regionsInstalled ?? null, regionsDropped: d.regionsDropped ?? null,
       underruns: interpolateDelta(page, "underruns", t0, t1),
       causes
@@ -188,13 +190,15 @@ export function causeOf(windows) {
   const sleptShare = wsum > 0 ? windows.reduce((a, w, i) => a + ((w.sleptMs ?? 0) / STEP_MS) * weights[i], 0) / wsum : null;
   let cause;
   if (top && ms >= CAUSE_MIN_SHARE * Math.max(lost, 1)) cause = top;
-  else if (windows.every((w) => w.sleptMs != null) && sleptShare != null && sleptShare < EMULATION_SLEEP_SHARE) cause = "emulation";
+  else if (windows.every((w) => w.sleptMs != null) && sleptShare != null && sleptShare < EMULATION_SLEEP_SHARE) cause = "uncounted-busy";
   else cause = "unexplained";
   const total = (k) => round(windows.reduce((a, w) => a + (w[k] ?? 0), 0), 1);
   return {
     cause, lostMs: round(lost, 1), causesMs: Object.fromEntries(Object.entries(causes).map(([k, v]) => [k, round(v, 1)])), sleptMs: round(slept, 1), sleptShare: round(sleptShare, 3),
     // what ran meanwhile: new JIT blocks, of them posted off thread
     // (interpreted until compiled), regions dropped, disc bytes read
+    // wake-ups past 15.75 ms: causesMs.lateWake is then a lower bound
+    lateWakeOverflow: total("lateWakeOverflow"),
     jitBlocks: total("jitBlocks"), defers: total("defers"), regionsDropped: total("regionsDropped"), discBytes: total("discBytes"),
     ...cycleShares(windows)
   };
@@ -277,12 +281,15 @@ export function dropSummary({ windows, presents = [], vi = [] }) {
   const below = (x) => (sl.length ? round((100 * sl.filter((s) => s.speed < x).length) / sl.length, 2) : null);
   const pg = gapsOf(presents), vg = gapsOf(vi);
   const lost = windows.reduce((a, w) => a + (w.lostMs ?? 0), 0);
+  // Time lost inside drops only (never offset by the throttle catching up
+  // afterwards, unlike lostMs): what a 50 ms stall on a load shows as.
+  const dropLost = windows.reduce((a, w) => a + ((w.speed != null && w.speed < DROP_SPEED) || w.maxPresentGap > HITCH_MS[0] ? Math.max(0, w.lostMs ?? 0) : 0), 0);
   const host = windows.length * STEP_MS;
   const xfb = windows.reduce((a, w) => a + (w.xfb ?? 0), 0);
   return {
     hostSec: round(host / 1000, 1),
     // net host ms not matched by guest time (catch-up counted)
-    lostMs: round(lost, 0),
+    lostMs: round(lost, 0), dropLostMs: round(dropLost, 0),
     pctBelow95: below(95), pctBelow90: below(90),
     worstSecond: sl.length ? round(Math.min(...sl.map((s) => s.speed)), 1) : null,
     hitches50: pg.filter((g) => g > HITCH_MS[0]).length, hitches100: pg.filter((g) => g > HITCH_MS[1]).length,
@@ -333,48 +340,65 @@ export function nativeFps(reference, g0, g1) {
 
 export { median };
 
-// The metrics a merge guard judges, and which way is worse.
-export const GUARDED = {
-  lostMs: "up", pctBelow95: "up", pctBelow90: "up", worstSecond: "down",
-  hitches50: "up", hitches100: "up", presentP99: "up", loadExcessMs: "up"
-};
-
-// Candidate against baseline over runs of one visit number. A metric
-// regresses when its median moved the worse way by more than its noise:
-// minDiff from an A/A of this probe when given (noise[k].minDiff, for its
-// own n; scaled to this n), else 2 standard errors of a difference from the
-// two sides' own spread. Small absolute moves never count (floor).
+// The metrics a merge guard judges, and which way is worse. Few on purpose
+// (each one is a test; review of #261): per phase, the time lost inside
+// drops and the longest gap between two presents; per visit, the hitches
+// over 100 ms and the worst second. Others are reported, never gating.
+export const VISIT_PRIMARY = { hitches100: "up", worstSecond: "down" };
+export const PHASE_PRIMARY = { dropLostMs: "up", presentMax: "up" };
+export const REPORTED = { lostMs: "up", pctBelow95: "up", pctBelow90: "up", hitches50: "up", presentP99: "up", loadExcessMs: "up" };
+export const GUARDED = { ...VISIT_PRIMARY, ...REPORTED };
 export const VERDICT_MIN_RUNS = 3;
+// A median of n runs varies ~1.25x more than a mean; 2.5 standard errors of
+// a difference (several metrics are tested at once; a regression must also
+// reproduce on a second batch before the guard fails, drop-meter.mjs).
+export const VERDICT_Z = 2.5;
+export const MEDIAN_SE = 1.25;
 export const VERDICT_FLOOR = { lostMs: 50, pctBelow95: 0.5, pctBelow90: 0.5, worstSecond: 5, hitches50: 2, hitches100: 1, presentP99: 2, loadExcessMs: 50 };
-// Per phase of the scenario (each with its own A/A noise): a stable load
-// moves far less than the whole run, whose noise would hide it. A short
-// phase's p99 is its two worst frames: floor 5 ms (A/A title: 26-33 ms).
-export const PHASE_FLOOR = { lostMs: 20, worstSecond: 5, hitches50: 2, hitches100: 1, presentP99: 5 };
-export function verdictOf(baseline, candidate, { noise = null, floor = VERDICT_FLOOR } = {}) {
+// Per phase: a 50 ms drop on a stable load must show (floor 20 ms lost in
+// drops, 20 ms of extra gap).
+export const PHASE_FLOOR = { dropLostMs: 20, presentMax: 20, lostMs: 20, pctBelow95: 0.5, pctBelow90: 0.5, worstSecond: 5, hitches50: 2, hitches100: 1, presentP99: 5 };
+
+// Candidate against baseline over runs of one visit (or one phase). A metric
+// regresses when its median moved the worse way by more than
+// max(floor, Z x 1.25 x sd x sqrt(2/n)), sd from an A/A of this probe
+// (noise[k].stdev) else from the two sides. Fewer than VERDICT_MIN_RUNS
+// usable runs on a side, or none: inconclusive, never "no regression".
+export function verdictOf(baseline, candidate, { noise = null, floor = VERDICT_FLOOR, metrics = { ...VISIT_PRIMARY } } = {}) {
   const rows = [];
-  for (const [k, worse] of Object.entries(GUARDED)) {
+  for (const [k, worse] of Object.entries(metrics)) {
     const b = baseline.map((s) => s[k]).filter(Number.isFinite), c = candidate.map((s) => s[k]).filter(Number.isFinite);
-    if (!b.length || !c.length) continue;
-    const delta = median(c) - median(b);
     const n = Math.min(b.length, c.length);
-    let threshold;
-    const fromAa = noise?.[k]?.minDiff != null && noise[k].n > 1;
-    // Without an A/A, two sides' spread of fewer than VERDICT_MIN_RUNS runs
-    // says nothing about the noise: no verdict on that metric.
-    if (!fromAa && n < VERDICT_MIN_RUNS) {
-      rows.push({ metric: k, baseline: round(median(b), 2), candidate: round(median(c), 2), delta: round(delta, 2), threshold: null, regression: false, improvement: false, inconclusive: true });
+    const base = { metric: k, baseline: b.length ? round(median(b), 2) : null, candidate: c.length ? round(median(c), 2) : null };
+    if (n < VERDICT_MIN_RUNS) {
+      rows.push({ ...base, delta: null, threshold: null, regression: false, improvement: false, inconclusive: true });
       continue;
     }
-    if (fromAa) threshold = noise[k].minDiff * Math.sqrt(noise[k].n / Math.max(n, 1));
-    else {
-      const sd = Math.sqrt(((stdev(b) ?? 0) ** 2 + (stdev(c) ?? 0) ** 2) / 2);
-      threshold = 2 * sd * Math.sqrt(2 / Math.max(n, 1));
-    }
-    threshold = Math.max(threshold, floor[k] ?? 0);
+    const delta = median(c) - median(b);
+    const sd = noise?.[k]?.stdev != null && noise[k].n > 1 ? noise[k].stdev : Math.sqrt(((stdev(b) ?? 0) ** 2 + (stdev(c) ?? 0) ** 2) / 2);
+    const threshold = Math.max(VERDICT_Z * MEDIAN_SE * sd * Math.sqrt(2 / n), floor[k] ?? 0);
     const worseBy = worse === "up" ? delta : -delta;
-    rows.push({ metric: k, baseline: round(median(b), 2), candidate: round(median(c), 2), delta: round(delta, 2), threshold: round(threshold, 2), regression: worseBy > threshold, improvement: -worseBy > threshold });
+    rows.push({ ...base, delta: round(delta, 2), threshold: round(threshold, 2), regression: worseBy > threshold, improvement: -worseBy > threshold });
   }
-  return { regression: rows.some((r) => r.regression), improvement: rows.some((r) => r.improvement), inconclusive: rows.length > 0 && rows.every((r) => r.inconclusive), rows };
+  return { regression: rows.some((r) => r.regression), improvement: rows.some((r) => r.improvement), inconclusive: rows.length === 0 || rows.some((r) => r.inconclusive), rows };
+}
+
+// One visit's gating verdict: the visit's primaries and every phase's.
+// sides: { baseline: [analysis], candidate: [analysis] } (usable runs only);
+// noise: { run, phases } from an A/A summary, or null.
+export function visitVerdict(baseline, candidate, noise = null) {
+  const visit = verdictOf(baseline.map((a) => a.summary), candidate.map((a) => a.summary), { noise: noise?.run ?? null });
+  const reported = verdictOf(baseline.map((a) => a.summary), candidate.map((a) => a.summary), { noise: noise?.run ?? null, metrics: REPORTED });
+  const labels = [...new Set([...baseline, ...candidate].flatMap((a) => a.phases.map((p) => p.label)))];
+  const phaseOf = (list, label) => list.map((a) => a.phases.find((p) => p.label === label)).filter(Boolean);
+  const phases = Object.fromEntries(labels.map((label) => [label,
+    verdictOf(phaseOf(baseline, label), phaseOf(candidate, label), { noise: noise?.phases?.[label] ?? null, floor: PHASE_FLOOR, metrics: PHASE_PRIMARY })]));
+  const all = [visit, ...Object.values(phases)];
+  const regressions = [
+    ...visit.rows.filter((r) => r.regression).map((r) => ({ where: "visit", ...r })),
+    ...Object.entries(phases).flatMap(([label, v]) => v.rows.filter((r) => r.regression).map((r) => ({ where: label, ...r })))
+  ];
+  return { regression: regressions.length > 0, inconclusive: all.some((v) => v.inconclusive), improvement: all.some((v) => v.improvement), regressions, visit, phases, reported };
 }
 
 // One line of the nightly trend (measures/drops/trend.jsonl) and the table
