@@ -437,7 +437,8 @@ test("a mute worker rAF while the page's goes on is no screen loss", () => {
   for (let t = 6000; t < 8000; t += 1000 / 60) displayed.push({ t, submits: 1, vi: (vi += 1) }); // 4 s without a BeginFrame
   const page = [];
   for (let t = 0, r = 0; t <= 8000; t += 50) page.push({ t, lagMs: 0, rafs: (r += 3) });
-  const d = displaySummaryOf(displayed, page);
+  const alive = () => true;
+  const d = displaySummaryOf(displayed, page, alive);
   assert.equal(d.muteRafSpans, 1);
   assert.ok(d.screenUnmeasuredMs > 3900);
   assert.equal(d.displayGaps100, 0);
@@ -445,9 +446,32 @@ test("a mute worker rAF while the page's goes on is no screen loss", () => {
   // the page's rAF stopped too: the whole compositor paused, a real gap
   const frozenAt = page.find((r) => r.t === 1950).rafs;
   const still = page.map((r) => (r.t > 1950 && r.t <= 6100 ? { ...r, rafs: frozenAt } : r.t > 6100 ? { ...r, rafs: r.rafs - 250 } : r));
-  const d2 = displaySummaryOf(displayed, still);
+  const d2 = displaySummaryOf(displayed, still, alive);
   assert.equal(d2.muteRafSpans, 0);
   assert.equal(d2.displayGaps100, 1);
+  // review of #272: the worker blocked (a pipeline compiled on it), the page
+  // fine: the screen IS frozen, a loss, not "not measured"
+  const blocked = displaySummaryOf(displayed, page, () => false);
+  assert.equal(blocked.muteRafSpans, 0);
+  assert.equal(blocked.displayGaps100, 1);
+});
+
+test("two 300 ms worker stalls in a 7 s phase are losses, not unmeasured screen", () => {
+  const vi = viOf(7000);
+  const stalls = [[2000, 2300], [5000, 5300]];
+  const inStall = (t) => stalls.some(([a, b]) => t > a && t < b);
+  const presents = presentsOf(vi).filter((p) => !inStall(p.t));
+  const displayed = [];
+  let n = 0;
+  for (let t = 0; t <= 7000; t += 1000 / 60) if (!inStall(t)) displayed.push({ t, submits: 1, vi: ++n });
+  const rows = [];
+  for (let t = 0; t <= 7000; t += 50) rows.push({ t, lagMs: stalls.some(([a, b]) => t >= b && t < b + 50) ? 300 : 0, ticks: (t * TPS) / 1000 });
+  const page = [];
+  for (let t = 0, r = 0; t <= 7000; t += 50) page.push({ t, lagMs: 0, rafs: (r += 3) });
+  const s = dropSummary({ windows: windowsOf({ vi, presents, tps: TPS }), presents, vi, tps: TPS, rows, displayed, page });
+  assert.equal(s.muteRafSpans, 0);
+  assert.equal(s.displayGaps100, 2);
+  assert.ok(s.displayExcessMs > 500, `excess ${s.displayExcessMs}`);
 });
 
 test("hitch counts never get an sd under Poisson's: an A/A that always saw 3 is not certainty", () => {
