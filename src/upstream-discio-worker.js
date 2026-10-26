@@ -128,7 +128,7 @@ import {
   createWgpuMappedStagingPool
 } from "./wgpu-mapped-staging-pool.js";
 import { createWgpuSparseUboCopyForward } from "./wgpu-sparse-ubo-copy-forward.js";
-import { createVsyncQueue } from "./wgpu-vsync-queue.js";
+import { createVsyncQueue, vsyncLateMs } from "./wgpu-vsync-queue.js";
 import {
   WGPU_MAPPED_DRAIN_FORCE_REASONS,
   createWgpuMappedDrainCoalescer
@@ -12852,19 +12852,17 @@ const WGPU_VSYNC_FALLBACK_MS = 50;
 // BeginFrame the busy worker cannot run: held there it stayed 3 vsyncs or
 // more (drop-meter, review of #265). Late: 1.5 x the display's frame
 // period, at least WGPU_VSYNC_LATE_FLOOR_MS; 25 ms (1.5 vsync at 60 Hz)
-// before there are ticks to measure. The period is the 25th percentile of
-// the last rAF frame-time deltas (vsync timestamps, not callback times): a
-// busy stretch (ticks 2 vsyncs apart) does not push it up and turn byLate off
-// where it is needed (follow-up review of #265).
+// before there are ticks to measure. The period is the smallest of the last
+// 16 rAF frame-time deltas (vsyncLateMs, src/wgpu-vsync-queue.js): frame
+// times fall on vsyncs, so a busy stretch cannot push it up and turn byLate
+// off where it is needed (reviews of #265 and #274).
 const WGPU_VSYNC_LATE_FLOOR_MS = 12;
 const wgpuVsyncFrameGaps = new Float64Array(16);
 let wgpuVsyncFrameGapCount = 0;
 let wgpuVsyncLastFrameTime = null;
 function wgpuVsyncLateMs() {
   const n = Math.min(wgpuVsyncFrameGapCount, wgpuVsyncFrameGaps.length);
-  if (n < 4) return 25;
-  const sorted = Array.from(wgpuVsyncFrameGaps.subarray(0, n)).sort((a, b) => a - b);
-  return Math.max(WGPU_VSYNC_LATE_FLOOR_MS, 1.5 * sorted[n >> 2]);
+  return vsyncLateMs(Array.from(wgpuVsyncFrameGaps.subarray(0, n)), { floor: WGPU_VSYNC_LATE_FLOOR_MS });
 }
 // Pool and queue, one texture per frame (src/wgpu-vsync-queue.js).
 const wgpuVsync = createVsyncQueue({

@@ -15,15 +15,28 @@
 // The device is a parameter (`createTexture`, `destroyTexture`): no WebGPU in
 // the tests.
 
+// The delay after which the presenter's rAF counts as late: 1.5 x the
+// display's frame period, at least `floor`; `fallback` before there are 4
+// deltas. The period is the SMALLEST rAF frame-time delta of the window:
+// frame times fall on vsyncs, so a delta is a whole number of periods and
+// the smallest one is the period, which a busy stretch (ticks 2 or 3 vsyncs
+// apart) cannot push up (review of #274).
+export function vsyncLateMs(deltas, { floor = 12, fallback = 25 } = {}) {
+  const valid = deltas.filter((d) => d > 0);
+  if (valid.length < 4) return fallback;
+  return Math.max(floor, 1.5 * Math.min(...valid));
+}
+
 export function createVsyncQueue({ queueSize = 2, poolSize = queueSize + 1, createTexture, destroyTexture = () => {} } = {}) {
   let key = "";
   let free = [];
   let made = 0;
   let current = null;
   const queue = [];
-  // droppedHidden: queue overflows with no BeginFrame coming (hidden tab):
-  // nothing could have been shown, so not counted as drops.
-  const stats = { queued: 0, shown: 0, dropped: 0, droppedHidden: 0, caughtUp: 0, presentNoPass: 0, overflow: 0 };
+  // droppedNoBeginFrame: frames dropped while no BeginFrame came for 50 ms
+  // (a hidden tab, or a visible stall: the drop-meter counts what the screen
+  // missed then), kept apart from drops at a BeginFrame.
+  const stats = { queued: 0, shown: 0, dropped: 0, droppedNoBeginFrame: 0, caughtUp: 0, presentNoPass: 0, overflow: 0 };
 
   const giveBack = (tex) => { if (tex) free.push(tex); };
 
@@ -70,7 +83,7 @@ export function createVsyncQueue({ queueSize = 2, poolSize = queueSize + 1, crea
     },
 
     // The frame's present: its texture joins the queue (the oldest frames
-    // beyond `queueSize` are dropped, counted, as droppedHidden when
+    // beyond `queueSize` are dropped, counted, as droppedNoBeginFrame when
     // `hidden`: no BeginFrame comes). Null when the frame had no backbuffer
     // pass (nothing new to show).
     queueFrame(meta, { hidden = false } = {}) {
@@ -83,7 +96,7 @@ export function createVsyncQueue({ queueSize = 2, poolSize = queueSize + 1, crea
       stats.queued += 1;
       while (queue.length >= queueSize) {
         giveBack(queue.shift().tex);
-        if (hidden) stats.droppedHidden += 1;
+        if (hidden) stats.droppedNoBeginFrame += 1;
         else stats.dropped += 1;
       }
       queue.push(frame);
@@ -117,12 +130,12 @@ export function createVsyncQueue({ queueSize = 2, poolSize = queueSize + 1, crea
     // silent rAF never leaves the display a frame behind and leaves nothing
     // to show in a burst when it comes back.
     // `hidden`: no BeginFrame comes (a hidden tab): the older frames could
-    // not have been shown, counted as droppedHidden, not as drops.
+    // not have been shown, counted as droppedNoBeginFrame, not as drops.
     takeNewest({ hidden = false } = {}) {
       while (queue.length > 1) {
         giveBack(queue.shift().tex);
         if (hidden) {
-          stats.droppedHidden += 1;
+          stats.droppedNoBeginFrame += 1;
         } else {
           stats.dropped += 1;
           stats.caughtUp += 1;

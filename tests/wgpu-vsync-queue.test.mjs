@@ -122,7 +122,7 @@ test("an overflow with no BeginFrame coming is counted apart, not as a drop", ()
   frame(); q.queueFrame({ tick: 0 });
   frame(); q.queueFrame({ tick: 0 }, { hidden: true });
   assert.equal(q.stats.dropped, 0);
-  assert.equal(q.stats.droppedHidden, 1);
+  assert.equal(q.stats.droppedNoBeginFrame, 1);
   frame(); q.queueFrame({ tick: 0 });
   assert.equal(q.stats.dropped, 1);
 });
@@ -147,12 +147,23 @@ test("takeNewest: with no BeginFrame to wait for, the newest frame, older ones c
   assert.equal(q.stats.caughtUp, 1);
 });
 
-test("takeNewest({ hidden }): with no BeginFrame coming, the older frames are droppedHidden, not drops", () => {
+test("takeNewest({ hidden }): with no BeginFrame coming, the older frames are droppedNoBeginFrame, not drops", () => {
   const { q, frame } = harness({ queueSize: 2 });
   frame(); q.queueFrame({ tick: 1, i: 0 });
   frame(); q.queueFrame({ tick: 1, i: 1 });
   assert.equal(q.takeNewest({ hidden: true }).i, 1);
   assert.equal(q.stats.dropped, 0);
   assert.equal(q.stats.caughtUp, 0);
-  assert.equal(q.stats.droppedHidden, 1);
+  assert.equal(q.stats.droppedNoBeginFrame, 1);
+});
+
+test("vsyncLateMs: the smallest frame-time delta is the period, a busy stretch cannot push it up", async () => {
+  const { vsyncLateMs } = await import("../src/wgpu-vsync-queue.js");
+  // 12 ticks 2 vsyncs apart (busy) and 4 at the vsync: the period is 16.7
+  const busy = [...Array(12).fill(33.3), ...Array(4).fill(16.7)];
+  assert.equal(vsyncLateMs(busy), 1.5 * 16.7);
+  assert.equal(vsyncLateMs(Array(16).fill(6.94)), 12, "144 Hz: the 12 ms floor");
+  assert.equal(vsyncLateMs(Array(16).fill(33.3)), 1.5 * 33.3, "30 Hz");
+  assert.equal(vsyncLateMs([16.7, 16.7, 16.7]), 25, "fewer than 4 deltas: 25 ms");
+  assert.equal(vsyncLateMs([0, -1, 16.7, 16.7, 16.7, 16.7]), 1.5 * 16.7, "non-positive deltas are left out");
 });

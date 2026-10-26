@@ -252,9 +252,9 @@ test("presentvsync: the input marker, cadence sample and readbacks read the fram
 // is late (a busy worker cannot run it) is shown at once, counted byLate.
 test("presentvsync: a frame queued while the rAF is late is shown at once", async () => {
   const worker = await readFile(new URL("../src/upstream-discio-worker.js", import.meta.url), "utf8");
-  // late: 1.5 x the frame period, the 25th percentile of rAF frame-time
-  // deltas (a busy stretch does not push it up), floor 12 ms
-  assert.match(worker, /return Math\.max\(WGPU_VSYNC_LATE_FLOOR_MS, 1\.5 \* sorted\[n >> 2\]\);/);
+  // late: 1.5 x the frame period, the smallest rAF frame-time delta
+  // (vsyncLateMs, tested in wgpu-vsync-queue.test.mjs), floor 12 ms
+  assert.match(worker, /return vsyncLateMs\(Array\.from\(wgpuVsyncFrameGaps\.subarray\(0, n\)\), \{ floor: WGPU_VSYNC_LATE_FLOOR_MS \}\);/);
   assert.match(worker, /wgpuVsyncFrameGaps\[wgpuVsyncFrameGapCount\+\+ % wgpuVsyncFrameGaps\.length\] = frameTime - wgpuVsyncLastFrameTime;/);
   // back after a gap of 50 ms or more: the newest frame first
   assert.match(worker, /const afterGap = now - wgpuVsyncLastTickAt >= WGPU_VSYNC_FALLBACK_MS;/);
