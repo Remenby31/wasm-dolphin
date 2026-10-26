@@ -3319,6 +3319,23 @@ function readDiscAhead(workerFs) {
   });
   ops.read = discBlockReader.read;
 }
+// When this worker last served a disc read (performance.now()): the region
+// translator gives way to read bursts (discAwareYield, aot-orchestrator.js).
+let lastDiscReadAt = -Infinity;
+export const lastDiscReadAtForTest = () => lastDiscReadAt;
+export function noteDiscReads(workerFs) {
+  const ops = workerFs?.stream_ops;
+  if (!ops?.read || ops.read.notedDiscReads) return;
+  const read = ops.read;
+  ops.read = function notedRead(stream, buffer, offset, length, position) {
+    try {
+      return read.call(this, stream, buffer, offset, length, position);
+    } finally {
+      lastDiscReadAt = performance.now();
+    }
+  };
+  ops.read.notedDiscReads = true;
+}
 function timeDiscReads(workerFs) {
   const ops = workerFs?.stream_ops;
   if (!ops?.read || ops.read.timedDiscReads) return;
@@ -4393,6 +4410,7 @@ async function mountFile(file) {
     timeDiscReads(resolveWorkerFs(moduleInstance));
     moduleInstance._DolphinWeb_SetDiscReadStatsEnabled?.(1);
   }
+  noteDiscReads(resolveWorkerFs(moduleInstance));
   // P6: the disc's key for the region cache is read from this File only when
   // a region cache is first opened, never during boot: this worker serves the
   // core's file reads, and extra work here while the core boots shifts what
@@ -8067,7 +8085,7 @@ export async function prepareAotFirstLaunch(file, {
     return;
   }
   const generation = aotDiscGeneration;
-  const [{ coreAotKeyParts, coreAssembleOptions, coreRegionTranslator, createAotFirstLaunch, REGION_JSC_FUNCTION_CAP }, { OpfsPlanStore }, { AotProfileStore, blocksFromPcSamples, profileKey }, { planDiscInWorker }, { fileReader, planDisc, planDolFile }, { createProfileRecorder, guestPcAddress, startHotSampler }] =
+  const [{ coreAotKeyParts, coreAssembleOptions, coreRegionTranslator, createAotFirstLaunch, discAwareYield, REGION_JSC_FUNCTION_CAP }, { OpfsPlanStore }, { AotProfileStore, blocksFromPcSamples, profileKey }, { planDiscInWorker }, { fileReader, planDisc, planDolFile }, { createProfileRecorder, guestPcAddress, startHotSampler }] =
     await Promise.all([import("./aot-orchestrator.js"), import("./aot-optimizer.js"), import("./aot-profile.js"), import("./aot-plan-worker.js"), import("./aot-recomp.js"), import("./aot-hot-sampler.js")]);
   const discKey = await readDiscKey();
   if (generation !== aotDiscGeneration) return;
@@ -8080,7 +8098,8 @@ export async function prepareAotFirstLaunch(file, {
   const keyParts = coreKeyParts ? { ...coreKeyParts, functionCap } : null;
   const core = coreAssembleOptions(module);
   const translator = keyParts && core && discKey && coreHash
-    ? coreRegionTranslator(module, { mask: keyParts.codegenMask, helperNames: core.helperNames, functionCap })
+    ? coreRegionTranslator(module, { mask: keyParts.codegenMask, helperNames: core.helperNames, functionCap,
+      yieldNow: discAwareYield({ lastReadAt: () => lastDiscReadAt }) })
     : null;
   const opfs = translator ? await Promise.resolve(storageRoot()).catch(() => null) : null;
   const flow = createAotFirstLaunch({
@@ -8089,7 +8108,17 @@ export async function prepareAotFirstLaunch(file, {
     keyParts,
     translator,
     assembleOptions: core?.assemble,
-    openCache: (identity) => openAotCache({ ...identity, baseUrl: AOT_BASE_URL, cacheStorage }),
+    // Regions loaded back from the cache go through the compiler worker as
+    // those of a first launch do (precompileAotRegion): handed over at once,
+    // then every function called once in the background, so V8's lazy
+    // Liftoff code exists in the shared NativeModule before the CPU thread
+    // first runs it. Compiled here, by compileStreaming, they were never
+    // warmed: the CPU thread compiled each function on its first call (a
+    // warm launch lost ~0.3 s at the race's load, harness drop-meter).
+    openCache: (identity) => openAotCache({
+      ...identity, baseUrl: AOT_BASE_URL, cacheStorage,
+      ...aotCacheCompileOptions()
+    }),
     planStore: opfs ? new OpfsPlanStore(opfs) : null,
     // Planning reads the DOL and RELs and runs discovery (about a second):
     // in a worker of its own, never on this one, which serves the core's
@@ -8442,6 +8471,16 @@ export async function precompileAotRegion(key, bytes) {
   if (!keepModulesForNativeCache()) dolphinJitCopiesSkipped += 1;
   else if (dolphinJitCacheMap.size < DOLPHIN_JIT_CACHE_MAX) dolphinJitCacheMap.set(key, module);
   return { module };
+}
+// How the region cache compiles what it loads back (openAotCache options).
+// With the compiler worker, and only where V8 keeps a native module cache:
+// through that worker, handed over at once and every function then called
+// once in the background, as the first launch's regions are; elsewhere
+// (JSC, SpiderMonkey) the module would be dropped and the CPU thread compile
+// the bytes itself, the warm-up lost (an iPhone under its memory cap).
+export function aotCacheCompileOptions() {
+  if (!dolphinAotCompilerEnabled || !nativeModuleCache(wasmEngineName)) return {};
+  return { compile: (bytes) => compileDolphinJitModuleOffThread(bytes, DELIVER_BEFORE_WARM, true), compileStreaming: null };
 }
 // P5 (plan piste 3): cached and requested modules are compiled in a
 // dedicated worker that also runs every entry point once on scratch memory, so
