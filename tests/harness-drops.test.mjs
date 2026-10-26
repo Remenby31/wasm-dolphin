@@ -5,7 +5,7 @@ import assert from "node:assert/strict";
 import { readFile } from "node:fs/promises";
 import test from "node:test";
 
-import { causeOf, PHASE_FLOOR, PHASE_PRIMARY, stallMsOfRows, tQuantile, dropEvents, dropSummary, interpolate, loadSegments, noiseOf, rowsOf, stallOverlap, trendLine, trendTable, verdictOf, visitVerdict, windowsOf } from "../harness/lib/drops.mjs";
+import { causeOf, displaySummaryOf, PHASE_FLOOR, PHASE_PRIMARY, stallMsOfRows, tQuantile, dropEvents, dropSummary, interpolate, loadSegments, noiseOf, rowsOf, stallOverlap, trendLine, trendTable, verdictOf, visitVerdict, windowsOf } from "../harness/lib/drops.mjs";
 import { coreOf, exitCodeOf, falsePositiveRate, noiseCoreOf, markersOnVi, noVerdictReasons, regressionKeys, runFiles, stepsFor, validateScenario } from "../harness/probes/drop-meter.mjs";
 import { createDropSampler, histogramSum } from "../src/harness-drop-sampler.js";
 
@@ -279,6 +279,37 @@ test("80 % speed for 4 s: no stall from the ticks (slowRowsMs reports it); 30 im
   const stalled = p30.filter((p) => p.t < 5000 || p.t > 5150);
   const s2 = dropSummary({ windows: windowsOf({ vi, presents: stalled, tps: TPS }), presents: stalled, vi, tps: TPS });
   assert.ok(s2.presentExcessMs > 80, `a 180 ms gap at 30 i/s: ${s2.presentExcessMs}`);
+});
+
+// --display (review of #265): what the screen showed. 60 BeginFrames a
+// second; a new image on every frame, but for a 3-vsync hole and a 120 ms one.
+test("screen side: distinct images, intervals of 3 vsyncs or more, gaps over 100 ms, excess", () => {
+  const displayed = [];
+  let vi = 0;
+  for (let i = 0, t = 0; i < 600; i += 1, t += 1000 / 60) {
+    const hole = (i >= 100 && i < 102) || (i >= 300 && i < 307); // 2 frames then 7 frames with nothing new
+    displayed.push({ t, submits: hole ? 0 : 1, vi: hole ? vi : ++vi });
+  }
+  const d = displaySummaryOf(displayed);
+  assert.ok(d.displayedPerSecond > 58 && d.displayedPerSecond < 60);
+  assert.equal(d.displayRepeats3, 2);
+  assert.equal(d.displayGaps100, 1);
+  assert.ok(d.displayExcessMs > 90 && d.displayExcessMs < 120, `excess ${d.displayExcessMs}`);
+  // the same image shown again (submits, same VI) is no new image
+  const same = displayed.map((f, i) => (i >= 200 && i < 205 ? { ...f, vi: displayed[199].vi } : f));
+  assert.equal(displaySummaryOf(same).displayRepeats3, 3);
+  assert.equal(displaySummaryOf([]), null);
+});
+
+test("with --display the gating reads the screen, the presentation metrics stay reported", () => {
+  const run = (x) => ({ summary: { displayGaps100: 0, worstSecond: 99, hitches100: 0, presentExcessMs: 0 }, phases: [{ label: "race", stallMs: 0, displayExcessMs: 0, displayRepeats3: 0, presentExcessMs: 0, hitches50: 0, ...x }] });
+  const base = [run({}), run({}), run({})];
+  // presents worse (present-vsync: a late image is a 3-vsync interval), screen unchanged
+  const cand = [run({ presentExcessMs: 60, hitches50: 7 }), run({ presentExcessMs: 62, hitches50: 7 }), run({ presentExcessMs: 61, hitches50: 7 })];
+  assert.equal(visitVerdict(base, cand).regression, true, "on the presentations");
+  assert.equal(visitVerdict(base, cand, null, { display: true }).regression, false, "not on the screen");
+  const worse = [run({ displayExcessMs: 90, displayRepeats3: 6 }), run({ displayExcessMs: 95, displayRepeats3: 6 }), run({ displayExcessMs: 92, displayRepeats3: 7 })];
+  assert.deepEqual(visitVerdict(base, worse, null, { display: true }).regressions.map((r) => r.metric).sort(), ["displayExcessMs", "displayRepeats3"]);
 });
 
 test("hitch counts never get an sd under Poisson's: an A/A that always saw 3 is not certainty", () => {

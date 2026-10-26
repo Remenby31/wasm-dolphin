@@ -328,6 +328,11 @@ node harness/probes/drop-meter.mjs --iso ../roms/<disc>.iso --port 8113 --runs 6
 node harness/probes/drop-meter.mjs --iso ../roms/<disc>.iso --port 8113 --runs 3 --baseline origin/main --noise <A/A dir>/summary.json
 # nightly on main, with its history (JSONL + table)
 node harness/probes/drop-meter.mjs --iso ../roms/<disc>.iso --port 8113 --runs 3 --trend ../measures/drops/trend.jsonl
+# --display: the worker's rAF records what each BeginFrame put on screen;
+# the gating then reads the screen (per phase: distinct images' interval
+# excess and intervals of 3 vsyncs or more; per visit: gaps over 100 ms and
+# the worst second) instead of the presentation timeline, which a change to
+# the presentation itself biases (present-vsync). Its A/A must be --display.
 # The --noise A/A must have run on the core of the base measured (the
 # summary records each side's core): another core gives no verdict (exit 3),
 # --noise-stale-ok for a study. Redo the A/A when main publishes a core.
