@@ -390,6 +390,22 @@ export function discAwareYield({ lastReadAt, quietMs = 15, maxWaitMs = 1000, now
   return out;
 }
 
+// A queue of tasks run one at a time, in order, each after a return to the
+// event loop: a burst of synchronous work per item (a warm launch's ~140
+// cached regions: heap patch, copy into the core's heap, queueing) no longer
+// makes one long task on the worker that serves the core's disc reads. A
+// task that throws does not stop the ones after it.
+export function serialQueue({ yieldNow = yieldToEventLoop } = {}) {
+  let tail = Promise.resolve();
+  return {
+    push(task) {
+      tail = tail.then(() => yieldNow()).then(task).catch(() => {});
+      return tail;
+    },
+    get idle() { return tail; }
+  };
+}
+
 export function yieldToEventLoop() {
   if (typeof MessageChannel !== "function") return new Promise((r) => setTimeout(r, 0));
   // A channel per turn, closed once it delivered: a port left open would

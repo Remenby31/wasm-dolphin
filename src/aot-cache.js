@@ -249,6 +249,8 @@ export async function openAotCache({
   fetchImpl = globalThis.fetch,
   compile = (bytes) => WebAssembly.compile(bytes),
   compileStreaming = (response) => WebAssembly.compileStreaming(response),
+  // awaited before each key's load (the worker: give way to the core's disc reads)
+  beforeLoad = null,
   serviceWorker = null,
   onProgress = null,
   keepPerDisc = 2,
@@ -475,6 +477,7 @@ export async function openAotCache({
         const worker = async () => {
           while (next < list.length) {
             const i = next++;
+            if (beforeLoad && !cancelled) await beforeLoad();
             results[i] = cancelled ? { reason: "cancelled" } : await loadOne(list[i]);
           }
         };

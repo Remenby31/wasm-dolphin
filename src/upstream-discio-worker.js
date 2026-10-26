@@ -8085,7 +8085,7 @@ export async function prepareAotFirstLaunch(file, {
     return;
   }
   const generation = aotDiscGeneration;
-  const [{ coreAotKeyParts, coreAssembleOptions, coreRegionTranslator, createAotFirstLaunch, discAwareYield, REGION_JSC_FUNCTION_CAP }, { OpfsPlanStore }, { AotProfileStore, blocksFromPcSamples, profileKey }, { planDiscInWorker }, { fileReader, planDisc, planDolFile }, { createProfileRecorder, guestPcAddress, startHotSampler }] =
+  const [{ coreAotKeyParts, coreAssembleOptions, coreRegionTranslator, createAotFirstLaunch, serialQueue, discAwareYield, REGION_JSC_FUNCTION_CAP }, { OpfsPlanStore }, { AotProfileStore, blocksFromPcSamples, profileKey }, { planDiscInWorker }, { fileReader, planDisc, planDolFile }, { createProfileRecorder, guestPcAddress, startHotSampler }] =
     await Promise.all([import("./aot-orchestrator.js"), import("./aot-optimizer.js"), import("./aot-profile.js"), import("./aot-plan-worker.js"), import("./aot-recomp.js"), import("./aot-hot-sampler.js")]);
   const discKey = await readDiscKey();
   if (generation !== aotDiscGeneration) return;
@@ -8115,8 +8115,14 @@ export async function prepareAotFirstLaunch(file, {
     // first runs it. Compiled here, by compileStreaming, they were never
     // warmed: the CPU thread compiled each function on its first call (a
     // warm launch lost ~0.3 s at the race's load, harness drop-meter).
+    // Each region read back from the cache waits for the core's disc reads
+    // to be quiet first (with the same budget as the translator, its own):
+    // a warm boot's ~20 small reads per 50 ms each waited ~2 ms behind the
+    // cache's reads, digests and compile messages (drop meter, warm boot:
+    // ~180 ms lost with the worker never stalled).
     openCache: (identity) => openAotCache({
       ...identity, baseUrl: AOT_BASE_URL, cacheStorage,
+      beforeLoad: discAwareYield({ lastReadAt: () => lastDiscReadAt }),
       ...aotCacheCompileOptions()
     }),
     planStore: opfs ? new OpfsPlanStore(opfs) : null,
@@ -8144,11 +8150,20 @@ export async function prepareAotFirstLaunch(file, {
       // parallel with the others; only the queueing waits its turn. Nothing
       // of a disc unmounted since (aotDiscGeneration) is queued.
       if (generation !== aotDiscGeneration) return;
-      const prepared = aotCoreBooted ? prepareAotRegion(module, region).catch(() => null) : null;
-      aotQueueChain = aotQueueChain.then(() => keyed.catch(() => {})).then(() => {
+      // One region at a time, back to the event loop between two (this
+      // worker serves the core's disc reads): prepared all at once, a warm
+      // launch's ~140 cached regions made a single ~210 ms task 0.3-0.5 s
+      // into the boot, the CPU thread waiting on the disc meanwhile (drop
+      // meter, warm boot).
+      aotRegionQueue ??= serialQueue();
+      aotQueueChain = aotRegionQueue.push(async () => {
+        await keyed.catch(() => {});
         if (generation !== aotDiscGeneration) return undefined;
-        return prepared ? prepared.then((p) => p && submitAotRegion(module, p)) : queueAotRegionAfterBoot(module, region);
-      }).catch(() => {});
+        if (!aotCoreBooted) return queueAotRegionAfterBoot(module, region);
+        const p = await prepareAotRegion(module, region).catch(() => null);
+        if (p && generation === aotDiscGeneration) submitAotRegion(module, p);
+        return undefined;
+      });
     },
     retain: (key, mod, bytes) => {
       // After the boot, without a native module cache: not kept (the CPU
@@ -8217,7 +8232,11 @@ export function startAotFirstLaunchAfterBoot(flow = aotFirstLaunch) {
     aotCoreBooted = true;
     const waiting = aotRegionsBeforeBoot.splice(0);
     aotQueueChain = aotQueueChain.then(async () => {
-      for (const [module, region] of waiting) await queueAotRegion(module, region).catch(() => {});
+      const { yieldToEventLoop } = await import("./aot-orchestrator.js");
+      for (const [module, region] of waiting) {
+        await yieldToEventLoop(); // one region a task, as aotRegionQueue does
+        await queueAotRegion(module, region).catch(() => {});
+      }
     });
   });
   if (!flow?.supported) return Promise.resolve();
@@ -8350,6 +8369,8 @@ async function whenCoreRamReady(module, { timeoutMs = 60000, everyMs = 50 } = {}
 }
 const aotRegionsBeforeBoot = [];
 let aotQueueChain = Promise.resolve();
+// The cached regions' queueing, one at a time (serialQueue, aot-orchestrator.js).
+let aotRegionQueue = null;
 function queueAotRegionAfterBoot(module, region) {
   if (aotCoreBooted) return queueAotRegion(module, region).catch(() => {});
   aotRegionsBeforeBoot.push([module, region]);
