@@ -1,5 +1,6 @@
 import { readViRing } from "./harness-vi-ring.js";
 import { startPcSampler } from "./harness-pc-sampler.js";
+import { createDropSampler, histogramSum } from "./harness-drop-sampler.js";
 import {
   DEFAULT_UPSTREAM_CORE_SHA256,
   DEFAULT_UPSTREAM_CORE_URL,
@@ -1959,6 +1960,8 @@ async function handleMessage(type, payload) {
       return harnessPcSampler(payload);
     case "validationReadDiscReads":
       return harnessDiscReads(payload);
+    case "validationDropSampler":
+      return harnessDropSampler(payload);
     case "replacePresenterCanvas":
       return replacePresenterCanvas(payload);
     case "validationLoseWebGlContext": {
@@ -3333,6 +3336,128 @@ function timeDiscReads(workerFs) {
     }
   };
   ops.read.timedDiscReads = true;
+}
+
+// Drop sampler (harness/probes/drop-meter.mjs): every few tens of ms, the
+// cumulative counters that can explain a slow window, read without
+// resetting anything. A column is null when the core does not have it.
+// The headroom (0113) and present cadence (0162) counters must be turned on
+// by the harness first (their own reset messages); the others always count
+// while the harness is on. Off unless the harness starts it.
+const DROP_COLUMNS = [
+  "frame", "ticks",
+  // JIT blocks: compiled, the CPU thread's synchronous Module and Instance
+  // time (patch 0003's own counters, u32 µs that wrap), and its whole time
+  // compiling blocks (patch 0167: analysis, emission, compile or post)
+  "jitBlocks", "jitModuleUs", "jitInstanceUs", "jitCompiles", "jitUs",
+  // regions (0075): pipeline counts, the CPU thread's install time; with
+  // the region counters on (the harness asks, counters only, no timing),
+  // guest cycles run in regions, in all, and skipped as idle
+  "regionsQueued", "regionsInstalled", "regionsDropped", "regionInstallMs", "regionCycles", "totalCycles", "idleCycles",
+  // blocks posted to the off-thread compiler, interpreted meanwhile (0074)
+  "offThreadDefers",
+  // disc (0151): the DVD thread's reads, the CPU thread's waits for them;
+  // the worker's service of WORKERFS reads
+  "discReads", "discBytes", "discReadUs", "discWaits", "discWaitUs", "discServiceMs",
+  // headroom (0113)
+  "cpuSleepUs", "gpuWorkUs", "xfbCopies", "rushSkips", "flushGpuWaitUs", "gpuConsumerWaitUs", "presentSleepUs",
+  // present cadence (0162): paced throttles, those that slept, and the
+  // approximate total wake-up lateness and lateness behind target (µs)
+  "throttles", "throttleSleeps", "sleepLateUs", "behindUs",
+  // wake-ups later than the histogram's last bin (15.75 ms): sleepLateUs
+  // counts them at that edge, a lower bound
+  "sleepLateOverflow",
+  // EFB copies to RAM waiting for the GPU (0164), both kinds
+  "efbSyncs", "efbWaitUs",
+  // wgpu replay on this thread: pipelines and shaders created, and the
+  // synchronous time of those calls; prewarm misses (created at draw time)
+  "pipelines", "pipelineMs", "shaders", "shaderMs", "prewarmMisses",
+  // block bytes the CPU threads sent to this worker (new compiles)
+  "jitNewCompiles"
+];
+const dropWgpu = { pipelines: 0, pipelineMs: 0, shaders: 0, shaderMs: 0 };
+let dropSampler = null;
+let dropScratch = 0;
+let dropScratchModule = null; // the core dropScratch was allocated in
+function readDropCounters() {
+  const m = moduleInstance;
+  const heap = m?.HEAPU8;
+  const out = Object.fromEntries(DROP_COLUMNS.map((c) => [c, null]));
+  if (!m || !heap) return DROP_COLUMNS.map((c) => out[c]);
+  out.frame = api?.getFrame?.() ?? null;
+  out.ticks = readCoreTicks();
+  out.jitBlocks = api?.getPpcWasmBlockCompileCount?.() ?? null;
+  const helper = api?.getPpcWasmHelperStats?.();
+  if (typeof helper === "string") {
+    const mod = /modcompile:(\d+)us/.exec(helper), inst = /modinst:(\d+)us/.exec(helper);
+    const defer = /offthreaddefer:(\d+)/.exec(helper);
+    if (mod) out.jitModuleUs = Number(mod[1]);
+    if (inst) out.jitInstanceUs = Number(inst[1]);
+    if (defer) out.offThreadDefers = Number(defer[1]);
+  }
+  const region = m._DolphinWeb_JitRegionStats?.(-1) >>> 0;
+  if (region && region % 8 === 0 && region + 256 <= heap.length && new DataView(heap.buffer, region, 8).getUint32(4, true) >= 256) {
+    const f = new Float64Array(heap.buffer, region + 88, 21);
+    out.regionsQueued = f[0]; out.regionsInstalled = f[1]; out.regionsDropped = f[3]; out.regionInstallMs = f[20];
+    const c = new Float64Array(heap.buffer, region + 16, 2);
+    out.regionCycles = c[0]; out.totalCycles = c[1]; out.idleCycles = f[10];
+  }
+  if (dropScratchModule !== m) {
+    dropScratch = m._malloc?.(40) ?? 0;
+    dropScratchModule = m;
+  }
+  if (m._DolphinWeb_JitTimeStats && dropScratch) {
+    m._DolphinWeb_JitTimeStats(dropScratch);
+    const v = new Uint32Array(heap.buffer, dropScratch, 3);
+    out.jitCompiles = v[0]; out.jitUs = v[1] + v[2] * 2 ** 32;
+  }
+  if (m._DolphinWeb_DiscReadStats && dropScratch) {
+    m._DolphinWeb_DiscReadStats(dropScratch);
+    const v = new Uint32Array(heap.buffer, dropScratch, 10);
+    out.discReads = v[0]; out.discBytes = v[1] + v[2] * 2 ** 32; out.discReadUs = v[3] + v[4] * 2 ** 32;
+    out.discWaits = v[6]; out.discWaitUs = v[7] + v[8] * 2 ** 32;
+  }
+  out.discServiceMs = discReadService.ms;
+  const head = m._DolphinWeb_HeadroomStats?.(-1) >>> 0;
+  if (head && head % 8 === 0 && head + 96 <= heap.length && new Uint32Array(heap.buffer, head, 3)[2] === 1) {
+    const f = new Float64Array(heap.buffer, head + 16, 10);
+    out.cpuSleepUs = f[1]; out.gpuWorkUs = f[2]; out.xfbCopies = f[3]; out.rushSkips = f[4];
+    out.flushGpuWaitUs = f[5]; out.gpuConsumerWaitUs = f[7]; out.presentSleepUs = f[9];
+  }
+  const cad = m._DolphinWeb_PresentCadenceStats?.(-1) >>> 0;
+  if (cad && cad % 4 === 0 && cad + 1344 <= heap.length) {
+    const w = new Uint32Array(heap.buffer, cad, 336);
+    if (w[2] === 1) {
+      out.throttles = w[4]; out.throttleSleeps = w[5];
+      out.sleepLateUs = histogramSum(w, 16, 64, 250).sum;
+      out.sleepLateOverflow = w[16 + 63];
+      out.behindUs = histogramSum(w, 80, 64, 500).sum;
+    }
+  }
+  if (m._DolphinWeb_HarnessEfbSyncWord) {
+    const word = (i) => m._DolphinWeb_HarnessEfbSyncWord(i) >>> 0;
+    out.efbSyncs = word(1) + word(17);
+    out.efbWaitUs = word(5) + word(21);
+  }
+  Object.assign(out, dropWgpu);
+  out.prewarmMisses = pipelinePrewarm?.stats?.misses ?? null;
+  out.jitNewCompiles = dolphinJitNewCompileCount;
+  return DROP_COLUMNS.map((c) => out[c]);
+}
+// payload.action: "start" (everyMs), "drain", "stop".
+function harnessDropSampler(payload = {}) {
+  if (!harnessEnabled) return { error: "harness hooks are off" };
+  dropSampler ??= createDropSampler({ columns: DROP_COLUMNS, read: readDropCounters });
+  // Patch 0167's timer runs only while the sampler does.
+  if (payload.action === "start") {
+    moduleInstance?._DolphinWeb_SetJitTimeStatsEnabled?.(1);
+    return { ...dropSampler.start(payload.everyMs), jitTime: typeof moduleInstance?._DolphinWeb_JitTimeStats === "function" };
+  }
+  if (payload.action === "stop") {
+    moduleInstance?._DolphinWeb_SetJitTimeStatsEnabled?.(0);
+    return dropSampler.stop();
+  }
+  return dropSampler.drain();
 }
 
 // resetMax (patch 0154): the maxima start over after this read, both sides,
@@ -16687,7 +16812,9 @@ function resolvePipeline(pipelineId, colorFmt, depthFmt, dbg, revZ, samplingKey 
   const prewarmed = prewarmEntry ? pipelinePrewarm.take(prewarmEntry.key) : null;
   try {
     renderGpu.device.pushErrorScope("validation");
+    const createdAt = dropSampler?.running && !prewarmed ? performance.now() : 0;
     pipe = prewarmed ?? renderGpu.device.createRenderPipeline(d);
+    if (createdAt) { dropWgpu.pipelines += 1; dropWgpu.pipelineMs += performance.now() - createdAt; }
     if (pipe && d.depthStencil) {
       vpDiagPipeFinalDs.set(pipe, { cmp: d.depthStencil.depthCompare,
                                     write: !!d.depthStencil.depthWriteEnabled });
@@ -16975,11 +17102,13 @@ function replayCreateShader(id, blobPtr, blobLen, stage) {
     }
   }
   let module;
+  const createdAt = dropSampler?.running ? performance.now() : 0;
   try {
     module = renderGpu.device.createShaderModule({
       label: `dolphin-shader-${id}-s${stage}`,
       code: wgsl
     });
+    if (createdAt) { dropWgpu.shaders += 1; dropWgpu.shaderMs += performance.now() - createdAt; }
   } catch (e) {
     webGpuObjects.shaderFail += 1;
     if (!self._webGpuShaderFirstErr) {
