@@ -75,3 +75,34 @@ test("with the profile sampler: one prioritize per round over the samples since 
   assert.deepEqual(calls, [[[0x80100000, 5]], [[0x80100000, 5]], [[0x80100000, 5], [0x80200000, 9]]]);
   assert.ok(stopped, "the watch ends with the rounds");
 });
+
+// Review of #278 (P2): a second load ends the first one's rounds; nothing
+// left to translate, no round at all (the fallback polled discio 3 s).
+test("a later load ends the earlier load's rounds; no rounds once the flow has no work", async (t) => {
+  const originalSelf = globalThis.self;
+  globalThis.self = { location: { href: "http://127.0.0.1:8080/" }, addEventListener() {}, postMessage() {} };
+  t.after(() => {
+    if (originalSelf === undefined) delete globalThis.self;
+    else globalThis.self = originalSelf;
+  });
+  const workerUrl = new URL("../src/upstream-discio-worker.js", import.meta.url);
+  const { prioritizeAotAfterStateLoad } = await import(`${workerUrl.href}?state-priority-test-p2=${Date.now()}`);
+  const seen = new Map([[0x80100000, 3]]);
+  const sampler = { watch: () => ({ read: () => [...seen.entries()], stop() {} }) };
+  const calls = [];
+  const flow = { supported: true, hasWork: () => true, prioritize: (hits) => { calls.push(hits.length); return 1; } };
+  // the first load's rounds wait on this gate; the second load runs meanwhile
+  let open;
+  const gate = new Promise((r) => { open = r; });
+  const first = prioritizeAotAfterStateLoad({ flow, sampler, rounds: [600, 1500], wait: () => gate, now: () => 0 });
+  const second = prioritizeAotAfterStateLoad({ flow, sampler, rounds: [10], wait: async () => {}, now: () => 0 });
+  assert.equal(await second, 1);
+  open();
+  assert.equal(await first, 0, "the first load's rounds stopped: a later load took over");
+  assert.deepEqual(calls, [1], "only the second load prioritized");
+  // nothing left to translate: no sampling, no round
+  let watched = 0;
+  const idle = { supported: true, hasWork: () => false, prioritize: () => { throw new Error("not called"); } };
+  assert.equal(await prioritizeAotAfterStateLoad({ flow: idle, sampler: { watch: () => { watched++; return { read: () => [], stop() {} }; } }, rounds: [600] }), 0);
+  assert.equal(watched, 0);
+});

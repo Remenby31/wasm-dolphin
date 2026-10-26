@@ -8,17 +8,26 @@
 // Paused (the emulation paused or stopped), the worker blocks without waking;
 // a PC that does not move for `frozenMs` (a stall the pause did not report)
 // is not counted, and the worker then looks less often, until it moves.
-const SOURCE = `onmessage = (e) => {
+// A flush request (ctl[2], a counter) makes it post what it has at once, with
+// the request's number: watch() starts its counts on that boundary.
+export const HOT_SAMPLER_SOURCE = `onmessage = (e) => {
   const { buffer, ctl, pcAddress, periodMs, postMs, frozenMs } = e.data;
-  const u32 = new Uint32Array(buffer), flag = new Int32Array(ctl), sleeper = new Int32Array(new SharedArrayBuffer(4));
+  const u32 = new Uint32Array(buffer), flag = new Int32Array(ctl);
   const frozenAfter = Math.max(1, Math.round(frozenMs / periodMs));
-  let counts = new Map(), lastPost = performance.now(), lastPc = -1, same = 0;
+  let counts = new Map(), lastPost = performance.now(), lastPc = -1, same = 0, flushed = 0;
   const post = () => {
     if (counts.size) postMessage([...counts.entries()]);
     counts = new Map();
     lastPost = performance.now();
   };
   while (Atomics.load(flag, 0) === 0) {
+    const asked = Atomics.load(flag, 2);
+    if (asked !== flushed) {
+      flushed = asked;
+      postMessage({ flushed, counts: [...counts.entries()] });
+      counts = new Map();
+      lastPost = performance.now();
+    }
     if (Atomics.load(flag, 1) === 1) {
       post();
       Atomics.wait(flag, 1, 1);
@@ -26,7 +35,8 @@ const SOURCE = `onmessage = (e) => {
       same = 0;
       continue;
     }
-    Atomics.wait(sleeper, 0, 0, same >= frozenAfter ? Math.max(periodMs * 20, 200) : periodMs);
+    // on the flush word: a request wakes it at once
+    Atomics.wait(flag, 2, flushed, same >= frozenAfter ? Math.max(periodMs * 20, 200) : periodMs);
     const pc = u32[pcAddress >>> 2];
     if (pc === lastPc) same++;
     else { lastPc = pc; same = 0; }
@@ -61,16 +71,25 @@ export function startHotSampler({ buffer, pcAddress, periodMs = AOT_SAMPLE_DEFAU
   createWorker = (url) => new Worker(url, { name: "aot-hot-sampler" }) }) {
   if (!(periodMs > 0)) return null;
   if (typeof SharedArrayBuffer === "undefined" || !(buffer instanceof SharedArrayBuffer) || !pcAddress || pcAddress % 4) return null;
-  const ctl = new SharedArrayBuffer(8);
+  const ctl = new SharedArrayBuffer(12); // [stop, pause, flush request]
   const flag = new Int32Array(ctl);
-  const url = URL.createObjectURL(new Blob([SOURCE], { type: "text/javascript" }));
+  const url = URL.createObjectURL(new Blob([HOT_SAMPLER_SOURCE], { type: "text/javascript" }));
   const worker = createWorker(url);
   URL.revokeObjectURL(url);
   let pending = new Map(); // since the last drain (the local profile's record)
   const watchers = new Set(); // watch(): counts since a moment (a save state load)
   worker.onmessage = (e) => {
-    for (const [pc, n] of e.data) pending.set(pc, (pending.get(pc) ?? 0) + n);
-    for (const w of watchers) for (const [pc, n] of e.data) w.set(pc, (w.get(pc) ?? 0) + n);
+    const flush = Array.isArray(e.data) ? null : e.data;
+    const entries = flush ? flush.counts : e.data;
+    for (const [pc, n] of entries) pending.set(pc, (pending.get(pc) ?? 0) + n);
+    for (const w of watchers) {
+      // until its flush comes back, what arrives was sampled before watch()
+      if (w.until) {
+        if (flush && flush.flushed >= w.until) w.until = 0;
+        continue;
+      }
+      for (const [pc, n] of entries) w.counts.set(pc, (w.counts.get(pc) ?? 0) + n);
+    }
   };
   worker.onerror = () => worker.terminate();
   worker.postMessage({ buffer, ctl, pcAddress, periodMs, postMs, frozenMs });
@@ -81,11 +100,16 @@ export function startHotSampler({ buffer, pcAddress, periodMs = AOT_SAMPLE_DEFAU
       pending = new Map();
       return out;
     },
-    // [[pc, hits]] from now on, without taking them from the profile's drain.
+    // [[pc, hits]] sampled from now on, without taking them from the
+    // profile's drain: the worker is asked to post what it has at once, and
+    // that post and any before it (samples from before now, e.g. the code
+    // that ran before a save state load) are left out; nothing after is.
     watch() {
-      const counts = new Map();
-      watchers.add(counts);
-      return { read: () => [...counts.entries()], stop: () => watchers.delete(counts) };
+      const until = Atomics.add(flag, 2, 1) + 1;
+      Atomics.notify(flag, 2);
+      const w = { counts: new Map(), until };
+      watchers.add(w);
+      return { read: () => [...w.counts.entries()], stop: () => watchers.delete(w) };
     },
     // The emulation paused or stopped: the worker blocks, without waking.
     pause() {

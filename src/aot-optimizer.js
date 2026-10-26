@@ -102,6 +102,7 @@ export class AotOptimizer extends EventTarget {
     this.todo = null;
     this.cursor = 0;
     this.priority = null; // { score: Map<unit, hits> } a run not yet started applies
+    this.finished = false; // the last run went through its work (hasWork)
   }
 
   // A save state just loaded: the guest now runs code the plan's order may
@@ -122,17 +123,23 @@ export class AotOptimizer extends EventTarget {
     const p = this.priority;
     if (!p || !this.regions?.length) return null;
     if (p.score) return p.score;
-    const starts = [];
-    for (const u of this.regions) for (const f of u.members) for (const [s, e] of f.ranges) starts.push([s >>> 0, e >>> 0, u]);
-    starts.sort((x, y) => x[0] - y[0]);
+    // The members' ranges by start, once per plan (a load's rounds score again).
+    if (this.rangeIndex?.regions !== this.regions) {
+      const all = [];
+      for (const u of this.regions) for (const f of u.members) for (const [s, e] of f.ranges) all.push([s >>> 0, e >>> 0, u]);
+      all.sort((x, y) => x[0] - y[0]);
+      // Ranges may overlap (a block shared by two functions): any range that
+      // starts less than the longest one's length before pc may hold it.
+      this.rangeIndex = { regions: this.regions, starts: all, longest: all.reduce((m, [s, e]) => Math.max(m, e - s), 0) };
+    }
+    const { starts, longest } = this.rangeIndex;
     const unitAt = (pc) => {
       let lo = 0, hi = starts.length - 1, found = -1;
       while (lo <= hi) {
         const mid = (lo + hi) >> 1;
         if (starts[mid][0] <= pc) { found = mid; lo = mid + 1; } else hi = mid - 1;
       }
-      // Ranges may overlap (a block shared by two functions): look back a little.
-      for (let i = found; i >= 0 && i > found - 8; i--) if (pc < starts[i][1]) return starts[i][2];
+      for (let i = found; i >= 0 && pc - starts[i][0] < longest; i--) if (pc < starts[i][1]) return starts[i][2];
       return null;
     };
     const score = new Map();
@@ -142,6 +149,11 @@ export class AotOptimizer extends EventTarget {
     }
     p.score = score;
     return score;
+  }
+
+  // Modules left to translate: before a run, during it, or marked stale.
+  hasWork() {
+    return !this.finished || this.stale.size > 0;
   }
 
   applyPriority() {
@@ -430,6 +442,7 @@ export class AotOptimizer extends EventTarget {
     const ms = () => Math.round(this.now() - t0);
     let compiled = 0, deferred = 0;
     this.budgetRefused = 0; // per run: the done event reports this run's
+    this.finished = false;
     try {
       await this.getPlan();
       const session = await this.openSession();
@@ -560,6 +573,10 @@ export class AotOptimizer extends EventTarget {
       } finally {
         await finishing;
         this.todo = null;
+      }
+      if (!this.cancelled) {
+        this.finished = true;
+        this.priority = null; // its hits were for this run's work
       }
       if (!this.cancelled) this.emit("optimization-done", { total: this.regions.length, refused: refused.size, compiled, deferred, budgetRefused: this.budgetRefused, ms: ms() });
     } catch (error) {

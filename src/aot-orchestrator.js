@@ -260,6 +260,11 @@ export function createAotFirstLaunch({
       return moved;
     },
 
+    // Modules still to translate (a load's rounds stop when there are none).
+    hasWork() {
+      return supported && !disposed && optimizer.hasWork();
+    },
+
     get generation() {
       return generation;
     },

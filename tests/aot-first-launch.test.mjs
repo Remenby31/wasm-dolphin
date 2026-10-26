@@ -659,6 +659,7 @@ test("the profile sampler's watch() counts from now on and leaves the drain whol
   const sampler = startHotSampler({ buffer: new SharedArrayBuffer(16), pcAddress: 8, createWorker: () => (worker = { postMessage() {}, terminate() {} }) });
   worker.onmessage({ data: [[0x80003100, 3]] });
   const w = sampler.watch();
+  worker.onmessage({ data: { flushed: 1, counts: [] } }); // its flush: nothing sampled since the last post
   worker.onmessage({ data: [[0x80003100, 2], [0x80004000, 1]] });
   assert.deepEqual(w.read(), [[0x80003100, 2], [0x80004000, 1]]);
   w.stop();
@@ -666,6 +667,79 @@ test("the profile sampler's watch() counts from now on and leaves the drain whol
   assert.deepEqual(w.read(), [[0x80003100, 2], [0x80004000, 1]], "stopped: no more counts");
   assert.deepEqual(sampler.drain(), [[0x80003100, 5], [0x80004000, 5]]);
   sampler.stop();
+});
+
+// Review of #279: watch() asks the sampler to post what it has at once;
+// that post (sampled before the watch) and any before it are left out, and
+// nothing after it is. The profile's drain keeps everything.
+test("the profile sampler's watch() starts on a flush: earlier posts left out, later ones kept", async () => {
+  const { startHotSampler } = await import("../src/aot-hot-sampler.js");
+  let worker, ctl;
+  const sampler = startHotSampler({ buffer: new SharedArrayBuffer(16), pcAddress: 8, createWorker: () => (worker = { postMessage(m) { ctl = new Int32Array(m.ctl); }, terminate() {} }) });
+  const w = sampler.watch();
+  assert.equal(Atomics.load(ctl, 2), 1, "a flush was requested");
+  worker.onmessage({ data: [[0x80001000, 7]] }); // a regular post, sent before the request was seen
+  worker.onmessage({ data: { flushed: 1, counts: [[0x80001000, 2]] } }); // the flush: still before the watch
+  worker.onmessage({ data: [[0x80002000, 3]] });
+  assert.deepEqual(w.read(), [[0x80002000, 3]]);
+  // a second watch's flush carries samples taken after the first watch: kept for it
+  const w2 = sampler.watch();
+  worker.onmessage({ data: { flushed: 2, counts: [[0x80003000, 1]] } });
+  worker.onmessage({ data: [[0x80004000, 1]] });
+  assert.deepEqual(w.read(), [[0x80002000, 3], [0x80003000, 1], [0x80004000, 1]]);
+  assert.deepEqual(w2.read(), [[0x80004000, 1]]);
+  assert.deepEqual(sampler.drain(), [[0x80001000, 9], [0x80002000, 3], [0x80003000, 1], [0x80004000, 1]], "the profile keeps all");
+  w.stop(); w2.stop();
+  sampler.stop();
+});
+
+// The sampler's own worker code, in a thread: a flush request is answered at
+// once with what was sampled before it, numbered; what follows is the next post.
+test("the sampler worker answers a flush request at once, numbered, and samples on after it", async () => {
+  const { HOT_SAMPLER_SOURCE } = await import("../src/aot-hot-sampler.js");
+  const { Worker } = await import("node:worker_threads");
+  const shim = `const { parentPort } = require("node:worker_threads");
+globalThis.postMessage = (m) => parentPort.postMessage(m);
+globalThis.close = () => parentPort.close();
+${HOT_SAMPLER_SOURCE}
+parentPort.on("message", (data) => onmessage({ data }));`;
+  const buffer = new SharedArrayBuffer(16), u32 = new Uint32Array(buffer);
+  const ctl = new SharedArrayBuffer(12), flag = new Int32Array(ctl);
+  const got = [];
+  const worker = new Worker(shim, { eval: true });
+  worker.on("message", (m) => got.push(m));
+  const until = async (ok, ms = 20000) => { const end = Date.now() + ms; while (!ok() && Date.now() < end) await new Promise((r) => setTimeout(r, 2)); assert.ok(ok(), "timed out"); };
+  // Each flush request is answered by a post with its number; it holds what
+  // was sampled since the last post. No assumption on how fast the thread
+  // samples (a slow CI runner had sampled nothing yet): flush until a post
+  // holds the PC, with a generous deadline only against a hang.
+  let asked = 0;
+  const flushUntil = async (pc) => {
+    for (const end = Date.now() + 20000; Date.now() < end;) {
+      asked = Atomics.add(flag, 2, 1) + 1;
+      Atomics.notify(flag, 2);
+      await until(() => got.some((m) => m.flushed === asked), 20000);
+      const m = got.find((x) => x.flushed === asked);
+      if (m.counts.some(([p]) => p === pc)) return m;
+      await new Promise((r) => setTimeout(r, 5));
+    }
+    assert.fail(`no flush ever held ${pc.toString(16)}`);
+  };
+  try {
+    u32[2] = 0x80001000;
+    worker.postMessage({ buffer, ctl, pcAddress: 8, periodMs: 1, postMs: 100000, frozenMs: 100000 });
+    await flushUntil(0x80001000);
+    u32[2] = 0x80002000;
+    const later = await flushUntil(0x80002000);
+    assert.ok(later.flushed > 1);
+    // every request answered once, in order, with its own number
+    const numbers = got.filter((m) => !Array.isArray(m)).map((m) => m.flushed);
+    assert.deepEqual(numbers, Array.from({ length: asked }, (_, i) => i + 1));
+    Atomics.store(flag, 0, 1); // stop: the last post, if anything was left
+    Atomics.notify(flag, 2);
+  } finally {
+    await worker.terminate();
+  }
 });
 
 // Review of #165: two records in flight (a remount during the minute's
