@@ -40,7 +40,7 @@ function harness({ scopeError = null } = {}) {
     GPUShaderStage: { VERTEX: 1, FRAGMENT: 2 }, GPUTextureUsage: { TEXTURE_BINDING: 4, COPY_DST: 2 }, GPUBufferUsage: { UNIFORM: 64, STORAGE: 128, COPY_DST: 8 },
     self: {}, console: { log() {} }, REVZ_COMPARE_FLIP: false, REVZ_COMPARE_FLIP_ALL: false, DIAG_DEPTH_ALWAYS: false,
     DIAG_DUMMY_TINT: false, DIAG_DEPTH_TRACE: false, vpDiagDone: true,
-    vpDiagFinalCmp: new Map(), vpDiagPipeFinalDs: new Map(), webGpuPcfg: { ok: 0, fail: 0 },
+    vpDiagFinalCmp: new Map(), vpDiagPipeFinalDs: new Map(), webGpuPcfg: { ok: 0, fail: 0 }, dropSampler: null,
     recordRendererError: () => {}
   });
   vm.runInContext(`${layoutsFunction}\n${pipelineFunction}`, context);
