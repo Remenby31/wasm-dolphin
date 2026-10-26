@@ -143,6 +143,22 @@ test("late wake-ups: without ticks in the rows, all of the lateness counts (olde
   assert.equal(w[2].causes.uncountedBusy, null);
 });
 
+test("late wake-ups (review of #281): rows with a counter missing are not judged; one cause per row", () => {
+  const { vi, rows } = bootRun({ speed: 70, sleptMs: 45, lateMs: 20 });
+  // two rows of the slow stretch read nothing (a read that threw)
+  const holed = rows.map((r) => (r.t === 1050 || r.t === 1100 ? { ...r, ticks: null, cpuSleepUs: null, sleepLateUs: null } : r));
+  const w = windowsOf({ vi, presents: presentsOf(vi), rows: holed, tps: TPS });
+  const busy = w.reduce((a, x) => a + (x.causes.uncountedBusy ?? 0), 0);
+  assert.ok(busy < 1, `no busy time made up from missing counters (${busy})`);
+  // rows that lost 5 ms, worked 4 ms past their pace and woke 5 ms late:
+  // lateWake 5 each, uncountedBusy 0 (not 5 + 4)
+  const one = bootRun({ speed: 90, sleptMs: 41.5, lateMs: 5 });
+  const lw = one.w.reduce((a, x) => a + (x.causes.lateWake ?? 0), 0);
+  const ub = one.w.reduce((a, x) => a + (x.causes.uncountedBusy ?? 0), 0);
+  assert.ok(ub < 0.5, `the lateness took the row (${ub})`);
+  assert.ok(lw > 9, `both slow rows to lateWake (${lw})`);
+});
+
 test("a drop with no cause counted: uncounted-busy when the CPU never slept, else unexplained", () => {
   const w = (sleptMs) => ({ t0: 0, speed: 50, lostMs: 50, sleptMs, causes: { jit: 0, disc: 1 } });
   assert.equal(causeOf([w(0), w(0)]).cause, "uncounted-busy");

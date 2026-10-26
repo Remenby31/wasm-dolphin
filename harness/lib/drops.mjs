@@ -55,8 +55,9 @@ export const CAUSES = {
   // counted causes, where it lost time (lateWakeLoss)
   uncountedBusy: (d) => d.uncountedBusyMs
 };
-// Counted causes a CPU thread's busy time can go to (lateWake is sleep).
-const BUSY_CAUSES = ["jit", "regions", "disc", "gpuWait", "efb", "pipelines"];
+// Counted causes the CPU thread's busy time can go to (lateWake is sleep;
+// pipelines are the replay worker's).
+const BUSY_CAUSES = ["jit", "regions", "disc", "gpuWait", "efb"];
 // A row is calm when its guest time is within this share of its host time;
 // a row's pace is that of the calm rows of the PACE_SPAN_MS before it (a
 // boot screen and a race work at very different paces), else the run's.
@@ -75,10 +76,14 @@ export function lateWakeLoss(rows, tps) {
   for (let i = 1; i < rows.length; i += 1) {
     const a = rows[i - 1], b = rows[i];
     const dd = (k) => (b[k] == null || a[k] == null ? null : b[k] - a[k]);
-    const host = b.t - a.t, guest = (dd("ticks") / tps) * 1000, slept = dd("cpuSleepUs") / 1000, late = dd("sleepLateUs") / 1000;
+    const raw = [dd("ticks"), dd("cpuSleepUs"), dd("sleepLateUs")];
+    // a counter missing at either edge: the row is not judged (null / 1000
+    // would read as 0)
+    const known = raw.every((v) => v != null && Number.isFinite(v));
+    const host = b.t - a.t, guest = (raw[0] / tps) * 1000, slept = raw[1] / 1000, late = raw[2] / 1000;
     const counted = BUSY_CAUSES.reduce((sum, k) => { const v = CAUSES[k](Object.fromEntries(Object.keys(b).map((c) => [c, dd(c)]))); return sum + (Number.isFinite(v) ? Math.max(0, v) : 0); }, 0);
-    const calm = host > 0 && guest > 0 && slept > 0 && Math.abs(guest - host) <= CALM_SHARE * host;
-    steps.push({ t: b.t, host, guest, slept, late, counted, pace: calm ? Math.max(0, host - slept) / guest : null });
+    const calm = known && host > 0 && guest > 0 && slept > 0 && Math.abs(guest - host) <= CALM_SHARE * host;
+    steps.push({ t: b.t, known, host, guest, slept, late, counted, pace: calm ? Math.max(0, host - slept) / guest : null });
   }
   const medianOf = (xs) => { const v = xs.filter((p) => p != null).sort((p, q) => p - q); return v.length ? v[Math.floor(v.length / 2)] : null; };
   const runPace = medianOf(steps.map((x) => x.pace));
@@ -89,12 +94,12 @@ export function lateWakeLoss(rows, tps) {
   steps.forEach((x, i) => {
     while (steps[lo].t < x.t - x.host - PACE_SPAN_MS) lo += 1;
     const pace = medianOf(steps.slice(lo, i).map((y) => y.pace)) ?? runPace;
-    const valid = [x.host, x.guest, x.slept, x.late].every(Number.isFinite);
-    const lost = valid ? Math.max(0, x.host - x.guest) : 0;
-    const excess = valid ? Math.max(0, x.host - x.slept - pace * x.guest - x.counted) : 0;
-    // worked past its pace more than it woke late: the work lost the time
-    lateSum += excess > x.late ? 0 : Math.min(x.late, lost);
-    busySum += Math.min(excess, lost);
+    const lost = x.known ? Math.max(0, x.host - x.guest) : 0;
+    const excess = x.known ? Math.max(0, x.host - x.slept - pace * x.guest - x.counted) : 0;
+    // one cause per row: worked past its pace more than it woke late, the
+    // work lost the time; else the lateness did
+    if (excess > x.late) busySum += Math.min(excess, lost);
+    else lateSum += Math.min(x.late, lost);
     out.push({ ...rows[i + 1], lateWakeLossMs: lateSum, uncountedBusyMs: busySum });
   });
   return out;
