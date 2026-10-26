@@ -295,12 +295,16 @@ export function stallMsOf(vi, tps) {
 // worker, independent of the VI outputs): a stall inside a long VI gap (the
 // game blanking the VI, or a change that emits fewer VI entries) still
 // shows. Read over pairs of rows (100 ms): where a pair's guest time is
-// under 0.75 of its host time, each of its two intervals adds its own host
-// minus guest time, once. A stall straddling two rows is then caught whole;
-// in normal play a pair is under 0.75 about once in 650 (A/A, race; a single
-// row is under 0.8 one time in twenty, the throttle's bursts).
-export const STALL_PAIR_RATIO = 0.75;
-export function stallMsOfRows(rows, tps) {
+// under `ratio` of its host time, each of its two intervals adds its own
+// host minus guest time, once (a stall straddling two rows is caught
+// whole). For stalls, ratio 0.6: a pair that lost 40 of its 100 ms (a 50 ms
+// stall straddling two rows leaves 0.5; ratio 0.25 would miss it); a
+// sustained slowness of 80 % is not a stall (review of #267) and is read
+// apart with ratio 0.75 (slowRowsMs, reported, not gating; in normal play a
+// pair is under 0.75 about once in 650).
+export const STALL_PAIR_RATIO = 0.6;
+export const SLOW_PAIR_RATIO = 0.75;
+export function stallMsOfRows(rows, tps, ratio = STALL_PAIR_RATIO) {
   if (!(tps > 0)) return null;
   const ok = (i) => rows[i].ticks != null && rows[i - 1].ticks != null;
   const host = (i) => rows[i].t - rows[i - 1].t, guest = (i) => ((rows[i].ticks - rows[i - 1].ticks) / tps) * 1000;
@@ -309,7 +313,7 @@ export function stallMsOfRows(rows, tps) {
   for (let i = 2; i < rows.length; i += 1) {
     if (!ok(i) || !ok(i - 1)) continue;
     seen = true;
-    if (guest(i) + guest(i - 1) >= STALL_PAIR_RATIO * (host(i) + host(i - 1))) continue;
+    if (guest(i) + guest(i - 1) >= ratio * (host(i) + host(i - 1))) continue;
     for (const j of [i - 1, i]) {
       if (credited.has(j)) continue;
       credited.add(j);
@@ -319,13 +323,18 @@ export function stallMsOfRows(rows, tps) {
   return seen ? ms : null;
 }
 
-// Gaps between presents beyond two fields, summed (ms): what the presenter
+// Gaps between presents beyond their usual size, summed (ms): what the presenter
 // stalled, whatever the core did meanwhile (a pipeline compile blocking the
 // presenter while the core runs on: stallMs and worstSecond read 0).
+// Beyond max(two fields, 1.5 x the phase's median gap): at 30 images/s two
+// fields is the nominal gap and its jitter added up (A/A ~1000 ms, review
+// of #267); relative to the median, only the stalls count.
 export function presentExcessOf(presents) {
-  let ms = 0;
-  for (let i = 1; i < presents.length; i += 1) ms += Math.max(0, presents[i].t - presents[i - 1].t - STALL_GAP_MS);
-  return ms;
+  const gaps = presents.slice(1).map((p, i) => p.t - presents[i].t);
+  if (!gaps.length) return 0;
+  const sorted = [...gaps].sort((a, b) => a - b);
+  const bar = Math.max(STALL_GAP_MS, 1.5 * sorted[sorted.length >> 1]);
+  return gaps.reduce((ms, g) => ms + Math.max(0, g - bar), 0);
 }
 
 export function dropSummary({ windows, presents = [], vi = [], tps = null, rows = [] }) {
@@ -345,6 +354,7 @@ export function dropSummary({ windows, presents = [], vi = [], tps = null, rows 
     // the larger of the two readings: VI intervals, sampler rows
     stallMs: round(Math.max(stallMsOf(vi, tps) ?? 0, stallMsOfRows(rows, tps) ?? 0), 0),
     stallViMs: round(stallMsOf(vi, tps), 0), stallRowsMs: round(stallMsOfRows(rows, tps), 0),
+    slowRowsMs: round(stallMsOfRows(rows, tps, SLOW_PAIR_RATIO), 0),
     presentExcessMs: round(presentExcessOf(presents), 0),
     pctBelow95: below(95), pctBelow90: below(90),
     worstSecond: sl.length ? round(Math.min(...sl.map((s) => s.speed)), 1) : null,
@@ -407,7 +417,7 @@ export { median };
 // hitches over 100 ms and the worst second. Others are reported, never gating.
 export const VISIT_PRIMARY = { hitches100: "up", worstSecond: "down" };
 export const PHASE_PRIMARY = { stallMs: "up", presentExcessMs: "up", hitches50: "up" };
-export const REPORTED = { lostMs: "up", dropLostMs: "up", pctBelow95: "up", pctBelow90: "up", hitches50: "up", presentP99: "up", loadExcessMs: "up" };
+export const REPORTED = { lostMs: "up", dropLostMs: "up", slowRowsMs: "up", pctBelow95: "up", pctBelow90: "up", hitches50: "up", presentP99: "up", loadExcessMs: "up" };
 export const GUARDED = { ...VISIT_PRIMARY, ...REPORTED };
 export const VERDICT_MIN_RUNS = 3;
 export const COUNTS = new Set(["hitches50", "hitches100"]);

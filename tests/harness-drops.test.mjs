@@ -263,6 +263,24 @@ test("presenter stalls with a regular core: presentExcessMs catches 2-3 new 100 
   assert.ok(v.regressions.some((r) => r.metric === "hitches50"), "3 new gaps over 50 ms where none were: a count regression too");
 });
 
+// Review of #267 follow-ups: a sustained slowness is no stall; at 30
+// images/s the nominal gap and its jitter are no presenter stall.
+test("80 % speed for 4 s: no stall from the ticks (slowRowsMs reports it); 30 images/s: no present excess", () => {
+  const rows = [];
+  let g = 0;
+  for (let t = 0; t <= 4000; t += 50) { rows.push({ t, lagMs: 0, ticks: g }); g += TPS * 0.04; } // 80 %
+  assert.equal(stallMsOfRows(rows, TPS), 0);
+  assert.ok(stallMsOfRows(rows, TPS, 0.85) > 500, "the slowness, read apart");
+  const p30 = [];
+  for (let t = 0, i = 0; t < 10000; t += 1000 / 30 + (i++ % 2 ? 4 : -4)) p30.push({ t }); // 30 i/s with jitter
+  const vi = viOf(10000);
+  const s = dropSummary({ windows: windowsOf({ vi, presents: p30, tps: TPS }), presents: p30, vi, tps: TPS });
+  assert.equal(s.presentExcessMs, 0);
+  const stalled = p30.filter((p) => p.t < 5000 || p.t > 5150);
+  const s2 = dropSummary({ windows: windowsOf({ vi, presents: stalled, tps: TPS }), presents: stalled, vi, tps: TPS });
+  assert.ok(s2.presentExcessMs > 80, `a 180 ms gap at 30 i/s: ${s2.presentExcessMs}`);
+});
+
 test("hitch counts never get an sd under Poisson's: an A/A that always saw 3 is not certainty", () => {
   const b = [{ hitches50: 3 }, { hitches50: 3 }, { hitches50: 3 }], c = [{ hitches50: 5 }, { hitches50: 5 }, { hitches50: 5 }];
   const v = verdictOf(b, c, { metrics: { hitches50: "up" }, noise: { hitches50: { n: 6, stdev: 0, mean: 3, median: 3 } }, floor: PHASE_FLOOR });
