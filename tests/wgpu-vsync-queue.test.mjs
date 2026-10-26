@@ -146,3 +146,13 @@ test("takeNewest: with no BeginFrame to wait for, the newest frame, older ones c
   assert.equal(q.waiting, 0, "nothing left for a burst when the rAF comes back");
   assert.equal(q.stats.caughtUp, 1);
 });
+
+test("takeNewest({ hidden }): with no BeginFrame coming, the older frames are droppedHidden, not drops", () => {
+  const { q, frame } = harness({ queueSize: 2 });
+  frame(); q.queueFrame({ tick: 1, i: 0 });
+  frame(); q.queueFrame({ tick: 1, i: 1 });
+  assert.equal(q.takeNewest({ hidden: true }).i, 1);
+  assert.equal(q.stats.dropped, 0);
+  assert.equal(q.stats.caughtUp, 0);
+  assert.equal(q.stats.droppedHidden, 1);
+});
