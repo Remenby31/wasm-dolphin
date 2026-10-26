@@ -2496,7 +2496,7 @@ async function loadCore({
   syncOnSkipIdle = false,
   dupXfbRearmsThrottle = false,
   smoothEarly = true,
-  presentVsync = false,
+  presentVsync = true,
   regionBootMode = 0,
   coreLog = false,
   memcardSlotB = false,
@@ -3001,7 +3001,7 @@ async function loadCore({
   const _t_factory = performance.now();
   // Not with the detached presenter: it shows a bitmap of the canvas, which
   // the vsync presenter fills only at its rAF (a stale picture).
-  wgpuPresentVsync = presentVsync === true && typeof self.requestAnimationFrame === "function" && !wgpuDetachedPresenter;
+  wgpuPresentVsync = presentVsync !== false && typeof self.requestAnimationFrame === "function" && !wgpuDetachedPresenter;
   releaseWgpuReadback();
   moduleInstance = await factory({
     noInitialRun: true,
@@ -3353,6 +3353,23 @@ function readDiscAhead(workerFs) {
     readBlobAsync: discPrefetchEnabled ? (blob) => blob.arrayBuffer() : null,
   });
   ops.read = discBlockReader.read;
+}
+// When this worker last served a disc read (performance.now()): the region
+// translator gives way to read bursts (discAwareYield, aot-orchestrator.js).
+let lastDiscReadAt = -Infinity;
+export const lastDiscReadAtForTest = () => lastDiscReadAt;
+export function noteDiscReads(workerFs) {
+  const ops = workerFs?.stream_ops;
+  if (!ops?.read || ops.read.notedDiscReads) return;
+  const read = ops.read;
+  ops.read = function notedRead(stream, buffer, offset, length, position) {
+    try {
+      return read.call(this, stream, buffer, offset, length, position);
+    } finally {
+      lastDiscReadAt = performance.now();
+    }
+  };
+  ops.read.notedDiscReads = true;
 }
 function timeDiscReads(workerFs) {
   const ops = workerFs?.stream_ops;
@@ -4428,6 +4445,7 @@ async function mountFile(file) {
     timeDiscReads(resolveWorkerFs(moduleInstance));
     moduleInstance._DolphinWeb_SetDiscReadStatsEnabled?.(1);
   }
+  noteDiscReads(resolveWorkerFs(moduleInstance));
   // P6: the disc's key for the region cache is read from this File only when
   // a region cache is first opened, never during boot: this worker serves the
   // core's file reads, and extra work here while the core boots shifts what
@@ -4446,6 +4464,7 @@ async function mountFile(file) {
   aotHotSampler = null;
   aotCoreBooted = false;
   aotRegionsBeforeBoot.length = 0;
+  aotRegionInstaller = null;
   // The previous disc's flow never sees this disc's first image (review of #86).
   for (const resolve of aotFirstImageWaiters.splice(0)) resolve(false);
   aotLayoutSkipped = 0;
@@ -6092,7 +6111,7 @@ function recordPresentedFrame(coreFrame, shownVi = null) {
     harnessPresentRing[slot + 1] = coreFrame;
     harnessPresentRing[slot + 2] = shownVi ?? moduleInstance?._DolphinWeb_HarnessViSinceBoot?.() ?? -1;
     harnessPresentHead += 1;
-    if (harnessDisplayStop) harnessDisplay.submit(harnessPresentRing[slot + 2], wgpuVsyncInBeginFrame);
+    if (harnessDisplayStop) harnessDisplay.submit(harnessPresentRing[slot + 2], wgpuVsyncFrameTime);
   }
   presentedFrame += 1;
   framesSincePresentationFps += 1;
@@ -8102,7 +8121,7 @@ export async function prepareAotFirstLaunch(file, {
     return;
   }
   const generation = aotDiscGeneration;
-  const [{ coreAotKeyParts, coreAssembleOptions, coreRegionTranslator, createAotFirstLaunch, REGION_JSC_FUNCTION_CAP }, { OpfsPlanStore }, { AotProfileStore, blocksFromPcSamples, profileKey }, { planDiscInWorker }, { fileReader, planDisc, planDolFile }, { createProfileRecorder, guestPcAddress, startHotSampler }] =
+  const [{ coreAotKeyParts, coreAssembleOptions, coreRegionTranslator, createAotFirstLaunch, createRegionInstaller, discAwareYield, sharedYield, REGION_JSC_FUNCTION_CAP }, { OpfsPlanStore }, { AotProfileStore, blocksFromPcSamples, profileKey }, { planDiscInWorker }, { fileReader, planDisc, planDolFile }, { createProfileRecorder, guestPcAddress, startHotSampler }] =
     await Promise.all([import("./aot-orchestrator.js"), import("./aot-optimizer.js"), import("./aot-profile.js"), import("./aot-plan-worker.js"), import("./aot-recomp.js"), import("./aot-hot-sampler.js")]);
   const discKey = await readDiscKey();
   if (generation !== aotDiscGeneration) return;
@@ -8115,7 +8134,8 @@ export async function prepareAotFirstLaunch(file, {
   const keyParts = coreKeyParts ? { ...coreKeyParts, functionCap } : null;
   const core = coreAssembleOptions(module);
   const translator = keyParts && core && discKey && coreHash
-    ? coreRegionTranslator(module, { mask: keyParts.codegenMask, helperNames: core.helperNames, functionCap })
+    ? coreRegionTranslator(module, { mask: keyParts.codegenMask, helperNames: core.helperNames, functionCap,
+      yieldNow: discAwareYield({ lastReadAt: () => lastDiscReadAt }) })
     : null;
   const opfs = translator ? await Promise.resolve(storageRoot()).catch(() => null) : null;
   const flow = createAotFirstLaunch({
@@ -8124,7 +8144,24 @@ export async function prepareAotFirstLaunch(file, {
     keyParts,
     translator,
     assembleOptions: core?.assemble,
-    openCache: (identity) => openAotCache({ ...identity, baseUrl: AOT_BASE_URL, cacheStorage }),
+    // Regions loaded back from the cache go through the compiler worker as
+    // those of a first launch do (precompileAotRegion): handed over at once,
+    // then every function called once in the background, so V8's lazy
+    // Liftoff code exists in the shared NativeModule before the CPU thread
+    // first runs it. Compiled here, by compileStreaming, they were never
+    // warmed: the CPU thread compiled each function on its first call (a
+    // warm launch lost ~0.3 s at the race's load, harness drop-meter).
+    // Each region read back from the cache waits for the core's disc reads
+    // to be quiet first (with the same budget as the translator, its own):
+    // a warm boot's ~20 small reads per 50 ms each waited ~2 ms behind the
+    // cache's reads, digests and compile messages (drop meter, warm boot:
+    // ~180 ms lost with the worker never stalled).
+    openCache: (identity) => openAotCache({
+      ...identity, baseUrl: AOT_BASE_URL, cacheStorage,
+      // one wait per round of the loader's 8 lanes (sharedYield), not 8
+      beforeLoad: sharedYield(discAwareYield({ lastReadAt: () => lastDiscReadAt })),
+      ...aotCacheCompileOptions()
+    }),
     planStore: opfs ? new OpfsPlanStore(opfs) : null,
     // Planning reads the DOL and RELs and runs discovery (about a second):
     // in a worker of its own, never on this one, which serves the core's
@@ -8150,11 +8187,13 @@ export async function prepareAotFirstLaunch(file, {
       // parallel with the others; only the queueing waits its turn. Nothing
       // of a disc unmounted since (aotDiscGeneration) is queued.
       if (generation !== aotDiscGeneration) return;
-      const prepared = aotCoreBooted ? prepareAotRegion(module, region).catch(() => null) : null;
-      aotQueueChain = aotQueueChain.then(() => keyed.catch(() => {})).then(() => {
-        if (generation !== aotDiscGeneration) return undefined;
-        return prepared ? prepared.then((p) => p && submitAotRegion(module, p)) : queueAotRegionAfterBoot(module, region);
-      }).catch(() => {});
+      // One region at a time, back to the event loop between two (this
+      // worker serves the core's disc reads): prepared all at once, a warm
+      // launch's ~140 cached regions made a single ~210 ms task 0.3-0.5 s
+      // into the boot, the CPU thread waiting on the disc meanwhile (drop
+      // meter, warm boot).
+      aotRegionInstaller ??= newAotRegionInstaller(createRegionInstaller);
+      aotQueueChain = aotRegionInstaller.push({ module, region, keyed }, generation);
     },
     retain: (key, mod, bytes) => {
       // After the boot, without a native module cache: not kept (the CPU
@@ -8222,9 +8261,18 @@ export function startAotFirstLaunchAfterBoot(flow = aotFirstLaunch) {
     if (!ready || disc !== aotDiscGeneration) return;
     aotCoreBooted = true;
     const waiting = aotRegionsBeforeBoot.splice(0);
-    aotQueueChain = aotQueueChain.then(async () => {
-      for (const [module, region] of waiting) await queueAotRegion(module, region).catch(() => {});
-    });
+    // Through the same installer as the cache's (one order, hottest first;
+    // a remount meanwhile drops the rest), else as before.
+    if (aotRegionInstaller) {
+      for (const [module, region] of waiting) aotQueueChain = aotRegionInstaller.push({ module, region }, disc);
+    } else {
+      aotQueueChain = aotQueueChain.then(async () => {
+        for (const [module, region] of waiting) {
+          if (disc !== aotDiscGeneration) return;
+          await queueAotRegion(module, region).catch(() => {});
+        }
+      });
+    }
   });
   if (!flow?.supported) return Promise.resolve();
   const generation = flow.generation;
@@ -8356,6 +8404,24 @@ async function whenCoreRamReady(module, { timeoutMs = 60000, everyMs = 50 } = {}
 }
 const aotRegionsBeforeBoot = [];
 let aotQueueChain = Promise.resolve();
+// The cached regions' installation, one at a time, submits in order
+// (createRegionInstaller, aot-orchestrator.js).
+let aotRegionInstaller = null;
+function newAotRegionInstaller(createRegionInstaller) {
+  return createRegionInstaller({
+    current: () => aotDiscGeneration,
+    prepare: async ({ module, region, keyed }) => {
+      await keyed?.catch(() => {});
+      if (!aotCoreBooted) {
+        queueAotRegionAfterBoot(module, region);
+        return null;
+      }
+      const r = await prepareAotRegion(module, region, aotFirstLaunch, { deferCompile: true }).catch(() => null);
+      return r && { prepared: { module, p: r.prepared }, pending: r.pending };
+    },
+    submit: ({ module, p }) => submitAotRegion(module, p)
+  });
+}
 function queueAotRegionAfterBoot(module, region) {
   if (aotCoreBooted) return queueAotRegion(module, region).catch(() => {});
   aotRegionsBeforeBoot.push([module, region]);
@@ -8378,7 +8444,10 @@ async function queueAotRegion(module, region, flow = aotFirstLaunch) {
 }
 // The part of queueAotRegion that may run alongside other modules' (heap
 // patch, compile of the patched bytes): what to queue, or null.
-async function prepareAotRegion(module, { key, bytes, entries, members, layout = 0 }, flow = aotFirstLaunch) {
+// deferCompile: a compile of the patched bytes is started, not awaited; the
+// result then carries it as `pending` (resolves true once compiled and kept,
+// false if it failed), and the caller submits only after it.
+async function prepareAotRegion(module, { key, bytes, entries, members, layout = 0 }, flow = aotFirstLaunch, { deferCompile = false } = {}) {
   if (typeof module?._DolphinWeb_AotQueueRegion !== "function" || !bytes?.length || !entries?.length || !members?.length) {
     noteAotRegionLedger(key, entries, "empty");
     return null;
@@ -8400,6 +8469,7 @@ async function prepareAotRegion(module, { key, bytes, entries, members, layout =
   // section, or whose section does not parse, goes with none (0, 0), which
   // the core refuses; the core also checks every site itself.
   let heapBases = [0, 0];
+  let pending = null;
   if (typeof module._DolphinWeb_AotRegionHeapBases === "function") {
     const generation = aotDiscGeneration;
     const { coreHeapBases } = await import("./aot-orchestrator.js");
@@ -8419,19 +8489,22 @@ async function prepareAotRegion(module, { key, bytes, entries, members, layout =
       // thrown away (counted; up to the whole cache when the heap moved).
       aotHeapPatched += 1;
       aotHeapPatchedBytes += bytes.length;
-      const patchedKey = await regionBlockCacheKey(patched);
-      const compiled = await precompileAotRegion(patchedKey, patched);
-      if (!compiled.module) {
+      const compiling = (async () => {
+        const compiled = await precompileAotRegion(await regionBlockCacheKey(patched), patched);
+        if (compiled.module) return true;
         aotHeapPatchFailed += 1;
         noteAotRegionLedger(key, entries, "heap-patch-compile");
-        return null;
-      }
+        return false;
+      })();
       bytes = patched;
+      if (deferCompile) pending = compiling;
+      else if (!(await compiling)) return null;
     }
     if (generation !== aotDiscGeneration) return null; // another disc meanwhile
     if (heap) heapBases = [heap.ramBase, heap.l1Base];
   }
-  return { key, generation: aotDiscGeneration, bytes, entries, members, layout, heapBases };
+  const prepared = { key, generation: aotDiscGeneration, bytes, entries, members, layout, heapBases };
+  return deferCompile ? { prepared, pending } : prepared;
 }
 // Copies a prepared region into the core's heap and queues it (in order).
 function submitAotRegion(module, { key, generation, bytes, entries, members, layout, heapBases }) {
@@ -8477,6 +8550,16 @@ export async function precompileAotRegion(key, bytes) {
   if (!keepModulesForNativeCache()) dolphinJitCopiesSkipped += 1;
   else if (dolphinJitCacheMap.size < DOLPHIN_JIT_CACHE_MAX) dolphinJitCacheMap.set(key, module);
   return { module };
+}
+// How the region cache compiles what it loads back (openAotCache options).
+// With the compiler worker, and only where V8 keeps a native module cache:
+// through that worker, handed over at once and every function then called
+// once in the background, as the first launch's regions are; elsewhere
+// (JSC, SpiderMonkey) the module would be dropped and the CPU thread compile
+// the bytes itself, the warm-up lost (an iPhone under its memory cap).
+export function aotCacheCompileOptions() {
+  if (!dolphinAotCompilerEnabled || !nativeModuleCache(wasmEngineName)) return {};
+  return { compile: (bytes) => compileDolphinJitModuleOffThread(bytes, DELIVER_BEFORE_WARM, true), compileStreaming: null };
 }
 // P5 (plan piste 3): cached and requested modules are compiled in a
 // dedicated worker that also runs every entry point once on scratch memory, so
@@ -12799,6 +12882,21 @@ function recordBoundedHistogram(values, bounds, value) {
 // free of the local display's BeginFrames, catch-up drops and timer fallback.
 let wgpuPresentVsync = false;
 const WGPU_VSYNC_FALLBACK_MS = 50;
+// A frame queued while the presenter's rAF is late (the worker busy in a
+// long task, as compiles at boot) is shown at once instead of waiting for a
+// BeginFrame the busy worker cannot run: held there it stayed 3 vsyncs or
+// more (drop-meter, review of #265). Late: 1.5 x the median interval of the
+// last ticks (any refresh rate), at least WGPU_VSYNC_LATE_FLOOR_MS; 25 ms
+// (1.5 vsync at 60 Hz) before there are ticks to measure.
+const WGPU_VSYNC_LATE_FLOOR_MS = 12;
+const wgpuVsyncTickGaps = new Float64Array(16);
+let wgpuVsyncTickGapCount = 0;
+function wgpuVsyncLateMs() {
+  const n = Math.min(wgpuVsyncTickGapCount, wgpuVsyncTickGaps.length);
+  if (n < 4) return 25;
+  const sorted = Array.from(wgpuVsyncTickGaps.subarray(0, n)).sort((a, b) => a - b);
+  return Math.max(WGPU_VSYNC_LATE_FLOOR_MS, 1.5 * sorted[n >> 1]);
+}
 // Pool and queue, one texture per frame (src/wgpu-vsync-queue.js).
 const wgpuVsync = createVsyncQueue({
   queueSize: 2,
@@ -12810,8 +12908,14 @@ const wgpuVsync = createVsyncQueue({
       format: renderGpu.format,
       usage: u.RENDER_ATTACHMENT | u.COPY_SRC | u.TEXTURE_BINDING
     });
-  }
+  },
+  destroyTexture: (tex) => tex.destroy()
 });
+// The presenter's rAF loop stops after this many BeginFrames with nothing to
+// show (2 s at 60 Hz: a paused game, a menu that does not render) and starts
+// again with the next queued frame (battery, 120/144 Hz screens).
+const WGPU_VSYNC_IDLE_TICKS = 120;
+let wgpuVsyncIdleTicks = 0;
 // A device's number in the pool key: a new device (lost and recreated)
 // drops the pool, whose textures belong to the old one.
 const wgpuVsyncDeviceIds = new WeakMap();
@@ -12823,13 +12927,16 @@ let wgpuVsyncTick = 0;
 // The rAF frame time of the presenter's callback running now (null outside
 // it): the harness display counter matches it to that BeginFrame's entry,
 // whichever of the two worker rAF loops runs first in the frame.
-let wgpuVsyncInBeginFrame = null;
+let wgpuVsyncFrameTime = null;
 let wgpuVsyncFallback = null;
-let wgpuVsyncCanvasCopyDst = false;
-const wgpuPresentVsyncStats = { byTimer: 0, streamed: 0 };
-// v3: the stream's own canvas, sized like the frames (made on first use).
+// The device the display canvas was configured on with COPY_DST (null: not yet).
+let wgpuVsyncCanvasDevice = null;
+const wgpuPresentVsyncStats = { byTimer: 0, byLate: 0, byLateHidden: 0, streamed: 0 };
+// v3: the stream's own canvas, sized like the frames and configured on the
+// current device (made again when either changes).
 let wgpuVsyncStreamCanvas = null;
 let wgpuVsyncStreamContext = null;
+let wgpuVsyncStreamDevice = null;
 
 // The pool's drops count in the presentation's lifetime drops.
 function wgpuVsyncCountDrops(before) {
@@ -12842,7 +12949,9 @@ function wgpuVsyncCountDrops(before) {
 function streamWgpuVsyncFrame(tex, coreFrame) {
   if (!streamCapture.ready()) return;
   const dev = renderGpu.device;
-  if (!wgpuVsyncStreamCanvas || wgpuVsyncStreamCanvas.width !== tex.width || wgpuVsyncStreamCanvas.height !== tex.height) {
+  if (!wgpuVsyncStreamCanvas || wgpuVsyncStreamDevice !== dev ||
+      wgpuVsyncStreamCanvas.width !== tex.width || wgpuVsyncStreamCanvas.height !== tex.height) {
+    wgpuVsyncStreamDevice = dev;
     wgpuVsyncStreamCanvas = new OffscreenCanvas(tex.width, tex.height);
     wgpuVsyncStreamContext = wgpuVsyncStreamCanvas.getContext("webgpu");
     const u = self.GPUTextureUsage;
@@ -12871,24 +12980,49 @@ function acquireWgpuVsyncTexture(width, height) {
 // nothing queued, streamed or counted as presented.
 function queueWgpuVsyncFrame(coreFrame, shownVi, stream) {
   const before = wgpuVsync.stats.dropped;
-  const frame = wgpuVsync.queueFrame({ coreFrame, shownVi, stream, tick: wgpuVsyncTick });
+  // No BeginFrame lately (hidden tab): an overflow is not a drop.
+  const hidden = wgpuVsyncLoop && performance.now() - wgpuVsyncLastTickAt >= WGPU_VSYNC_FALLBACK_MS;
+  const frame = wgpuVsync.queueFrame({ coreFrame, shownVi, stream, tick: wgpuVsyncTick }, { hidden });
   wgpuVsyncCountDrops(before);
   if (!frame) return false;
   if (stream && streamCapture.active) streamWgpuVsyncFrame(frame.tex, coreFrame);
+  wgpuVsyncIdleTicks = 0;
   if (!wgpuVsyncLoop) {
     wgpuVsyncLoop = true;
+    wgpuVsyncLastTickAt = performance.now();
     const tick = (frameTime) => {
-      wgpuVsyncLastTickAt = performance.now();
+      const now = performance.now();
+      wgpuVsyncTickGaps[wgpuVsyncTickGapCount++ % wgpuVsyncTickGaps.length] = now - wgpuVsyncLastTickAt;
+      wgpuVsyncLastTickAt = now;
       wgpuVsyncTick += 1;
-      wgpuVsyncInBeginFrame = performance.timeOrigin + frameTime;
+      wgpuVsyncFrameTime = performance.timeOrigin + frameTime;
+      let shown = false;
       try {
-        presentWgpuVsyncFrame();
+        shown = presentWgpuVsyncFrame();
       } finally {
-        wgpuVsyncInBeginFrame = null;
+        wgpuVsyncFrameTime = null;
+      }
+      wgpuVsyncIdleTicks = shown ? 0 : wgpuVsyncIdleTicks + 1;
+      if (wgpuVsyncIdleTicks >= WGPU_VSYNC_IDLE_TICKS && !wgpuVsync.waiting) {
+        wgpuVsyncLoop = false;  // the next queued frame starts it again
+        return;
       }
       self.requestAnimationFrame(tick);
     };
     self.requestAnimationFrame(tick);
+  } else {
+    const sinceTick = performance.now() - wgpuVsyncLastTickAt;
+    if (sinceTick >= WGPU_VSYNC_FALLBACK_MS) {
+      // No BeginFrame for 50 ms or more (a hidden tab, a rAF silent for
+      // seconds): no local copy per frame, the stream has it already (v3);
+      // the fallback timer shows the newest one every 50 ms.
+      wgpuPresentVsyncStats.byLateHidden += 1;
+    } else if (sinceTick > wgpuVsyncLateMs()) {
+      // The rAF is late (busy worker): no BeginFrame to wait for, the
+      // newest frame now.
+      wgpuPresentVsyncStats.byLate += 1;
+      presentWgpuVsyncFrame({ newest: true });
+    }
   }
   wgpuVsyncFallback ??= setTimeout(wgpuVsyncFallbackCheck, WGPU_VSYNC_FALLBACK_MS);
   return true;
@@ -12896,25 +13030,34 @@ function queueWgpuVsyncFrame(coreFrame, shownVi, stream) {
 
 function wgpuVsyncFallbackCheck() {
   wgpuVsyncFallback = null;
+  // The device is gone: nothing can be shown, the queue goes (else this timer
+  // would run every 50 ms for ever).
+  if (!renderGpu) {
+    wgpuVsync.clear();
+    return;
+  }
   if (!wgpuVsync.waiting) return;
   if (performance.now() - wgpuVsyncLastTickAt >= WGPU_VSYNC_FALLBACK_MS) {
     wgpuPresentVsyncStats.byTimer += 1;
-    presentWgpuVsyncFrame();
+    presentWgpuVsyncFrame({ newest: true });
   }
   if (wgpuVsync.waiting) wgpuVsyncFallback = setTimeout(wgpuVsyncFallbackCheck, WGPU_VSYNC_FALLBACK_MS);
 }
 
 // One queued frame to the canvas: the oldest, so a burst is shown in order
-// (after the catch-up, in takeForDisplay).
-function presentWgpuVsyncFrame() {
-  if (!renderGpu) return;
+// (after the catch-up, in takeForDisplay). True when a frame was shown.
+function presentWgpuVsyncFrame({ newest = false } = {}) {
+  if (!renderGpu) {
+    wgpuVsync.clear();
+    return false;
+  }
   const before = wgpuVsync.stats.dropped;
-  const f = wgpuVsync.takeForDisplay(wgpuVsyncTick);
+  const f = newest ? wgpuVsync.takeNewest() : wgpuVsync.takeForDisplay(wgpuVsyncTick);
   wgpuVsyncCountDrops(before);
-  if (!f) return;
+  if (!f) return false;
   const dev = renderGpu.device;
-  if (!wgpuVsyncCanvasCopyDst) {
-    wgpuVsyncCanvasCopyDst = true;
+  if (wgpuVsyncCanvasDevice !== dev) {
+    wgpuVsyncCanvasDevice = dev;
     const u = self.GPUTextureUsage;
     renderGpu.context.configure({
       device: dev,
@@ -12935,6 +13078,7 @@ function presentWgpuVsyncFrame() {
   wgpuVsync.shown(f);
   // v3: streamed at queue time (streamWgpuVsyncFrame), not here.
   recordPresentedFrame(f.coreFrame, f.shownVi);
+  return true;
 }
 
 // The canvas's usage; COPY_DST when frames are copied to it at the rAF.
@@ -15714,17 +15858,22 @@ function drainWebGpuCmdRing(source = "presentation") {
             }
           }
           let presentAlreadySubmitted = false;
+          // The texture this present shows: in vsync mode the frame's pooled
+          // texture (kept across drains, queued below), else the canvas
+          // texture this drain's backbuffer pass rendered into. The input
+          // marker, the cadence sample and the readbacks read it.
+          const presentTexture = wgpuPresentVsync ? wgpuVsync.current : lastBackbufferTexture;
           const hardwareInputMarkerCoreFrame = api?.getFrame?.() ?? 0;
           const hardwareInputMarker = prepareInputVisualMarker(hardwareInputMarkerCoreFrame);
           let hardwareInputMarkerApplied = false;
           const applyHardwareInputMarker = () => {
-            if (hardwareInputMarkerApplied || !hardwareInputMarker || !lastBackbufferTexture) {
+            if (hardwareInputMarkerApplied || !hardwareInputMarker || !presentTexture) {
               return hardwareInputMarkerApplied;
             }
             try {
               hardwareInputMarkerApplied = encodeHardwareInputMarker(
                 ensureEnc(),
-                lastBackbufferTexture,
+                presentTexture,
                 renderGpu.format,
                 hardwareInputMarker
               );
@@ -15736,8 +15885,8 @@ function drainWebGpuCmdRing(source = "presentation") {
           // Keep the sample on the same command encoder and before the
           // optional input marker so it represents the unmodified game
           // output submitted by this hardware present.
-          const visualCadenceSlot = wgpuVisualCadenceEnabled && lastBackbufferTexture
-            ? encodeWgpuVisualCadence(ensureEnc(), lastBackbufferTexture)
+          const visualCadenceSlot = wgpuVisualCadenceEnabled && presentTexture
+            ? encodeWgpuVisualCadence(ensureEnc(), presentTexture)
             : null;
           // ?efbdiag=1 blits the EFB; ?efbdiag=2 blits the XFB entry the game
           // last presented. The second answers whether that entry holds the
@@ -15826,7 +15975,7 @@ function drainWebGpuCmdRing(source = "presentation") {
             // input generation is pending.  This is opt-in because a mapped
             // GPU readback is intentionally too expensive for normal play.
             const _inputBackbufferOk = inputReadbackDiagnostics &&
-              lastBackbufferTexture && !wgpuInputBackbufferReadbackPending &&
+              presentTexture && !wgpuInputBackbufferReadbackPending &&
               (!wgpuInputVisualBaselineReady || inputVisibleLatencyTracker.hasPending());
             const _sourceOk = lastBackbufferSourceTextureId > 0 && Boolean(
               wgpuReplayClassifier?.needsPresentationReadback("xfb", P)
@@ -15883,16 +16032,16 @@ function drainWebGpuCmdRing(source = "presentation") {
                   `${e?.message || e}`);
               }
             }
-            if ((_backbufferOk || _inputBackbufferOk) && lastBackbufferTexture) {
+            if ((_backbufferOk || _inputBackbufferOk) && presentTexture) {
               try {
                 ensureEnc();
-                const w = lastBackbufferTexture.width;
-                const h = lastBackbufferTexture.height;
+                const w = presentTexture.width;
+                const h = presentTexture.height;
                 const bpr = Math.ceil(w * 4 / 256) * 256;
                 const rb = dev.createBuffer({ size: bpr * h,
                   usage: 0x1 | 0x8 });
                 enc.copyTextureToBuffer(
-                  { texture: lastBackbufferTexture },
+                  { texture: presentTexture },
                   { buffer: rb, bytesPerRow: bpr, rowsPerImage: h },
                   { width: w, height: h, depthOrArrayLayers: 1 });
                 pending.push({

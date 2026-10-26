@@ -104,7 +104,7 @@ export class UpstreamWorkerAdapter {
     syncOnSkipIdle = false,
     dupXfbRearmsThrottle = false,
     smoothEarly = true,
-    presentVsync = false,
+    presentVsync = true,
     regionBootMode = 0,
     coreLog = false,
     memcardSlotB = false,
@@ -233,7 +233,7 @@ export class UpstreamWorkerAdapter {
     this.syncOnSkipIdle = syncOnSkipIdle === true;
     this.dupXfbRearmsThrottle = dupXfbRearmsThrottle === true;
     this.smoothEarly = smoothEarly !== false;
-    this.presentVsync = presentVsync === true;
+    this.presentVsync = presentVsync !== false;
     this.regionBootMode = [1, 2].includes(regionBootMode) ? regionBootMode : 0;
     this.coreLog = Boolean(coreLog);
     this.memcardSlotB = Boolean(memcardSlotB);

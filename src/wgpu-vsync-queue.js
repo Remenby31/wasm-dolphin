@@ -12,15 +12,18 @@
 // no backbuffer pass since the previous one queues nothing (the picture has
 // not changed), so a texture is never queued twice.
 //
-// The device is a parameter (`createTexture`): no WebGPU in the tests.
+// The device is a parameter (`createTexture`, `destroyTexture`): no WebGPU in
+// the tests.
 
-export function createVsyncQueue({ queueSize = 2, poolSize = queueSize + 1, createTexture } = {}) {
+export function createVsyncQueue({ queueSize = 2, poolSize = queueSize + 1, createTexture, destroyTexture = () => {} } = {}) {
   let key = "";
   let free = [];
   let made = 0;
   let current = null;
   const queue = [];
-  const stats = { queued: 0, shown: 0, dropped: 0, caughtUp: 0, presentNoPass: 0, overflow: 0 };
+  // droppedHidden: queue overflows with no BeginFrame coming (hidden tab):
+  // nothing could have been shown, so not counted as drops.
+  const stats = { queued: 0, shown: 0, dropped: 0, droppedHidden: 0, caughtUp: 0, presentNoPass: 0, overflow: 0 };
 
   const giveBack = (tex) => { if (tex) free.push(tex); };
 
@@ -36,6 +39,10 @@ export function createVsyncQueue({ queueSize = 2, poolSize = queueSize + 1, crea
     textureForPass(poolKey, width, height) {
       if (poolKey !== key) {
         key = poolKey;
+        // The free textures go now; the queued ones and the frame's current
+        // one may still be referenced by commands not yet submitted: left
+        // to the GC.
+        for (const tex of free) destroyTexture(tex);
         free = [];
         made = 0;
         current = null;
@@ -63,9 +70,10 @@ export function createVsyncQueue({ queueSize = 2, poolSize = queueSize + 1, crea
     },
 
     // The frame's present: its texture joins the queue (the oldest frames
-    // beyond `queueSize` are dropped, counted). Null when the frame had no
-    // backbuffer pass (nothing new to show).
-    queueFrame(meta) {
+    // beyond `queueSize` are dropped, counted, as droppedHidden when
+    // `hidden`: no BeginFrame comes). Null when the frame had no backbuffer
+    // pass (nothing new to show).
+    queueFrame(meta, { hidden = false } = {}) {
       if (!current) {
         stats.presentNoPass += 1;
         return null;
@@ -75,7 +83,8 @@ export function createVsyncQueue({ queueSize = 2, poolSize = queueSize + 1, crea
       stats.queued += 1;
       while (queue.length >= queueSize) {
         giveBack(queue.shift().tex);
-        stats.dropped += 1;
+        if (hidden) stats.droppedHidden += 1;
+        else stats.dropped += 1;
       }
       queue.push(frame);
       return frame;
@@ -86,6 +95,29 @@ export function createVsyncQueue({ queueSize = 2, poolSize = queueSize + 1, crea
     // newer one). The caller copies it, then calls shown(frame).
     takeForDisplay(tick) {
       while (queue.length > 1 && queue[0].tick < tick - 1) {
+        giveBack(queue.shift().tex);
+        stats.dropped += 1;
+        stats.caughtUp += 1;
+      }
+      return queue.shift() ?? null;
+    },
+
+    // The device is gone: forget the queue and the frame in progress (their
+    // textures die with the device).
+    clear() {
+      queue.length = 0;
+      current = null;
+      free = [];
+      made = 0;
+      key = "";
+    },
+
+    // With no BeginFrame to wait for (the presenter's rAF is late or
+    // silent): the newest frame, the older ones dropped as caught up, so a
+    // silent rAF never leaves the display a frame behind and leaves nothing
+    // to show in a burst when it comes back.
+    takeNewest() {
+      while (queue.length > 1) {
         giveBack(queue.shift().tex);
         stats.dropped += 1;
         stats.caughtUp += 1;

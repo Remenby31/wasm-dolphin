@@ -1,19 +1,19 @@
 {
   "schemaVersion": 1,
   "abiVersion": 1,
-  "coreId": "sha256:10d0a043cf809380a20f25d2a24af433f0945ca492ee247abd8184c047488420",
+  "coreId": "sha256:d9d326cf988685632691e2407dd7c2ded35eaca08894e267c4ddc7b5f9794346",
   "upstreamCommit": "e22551eae1c84a7e4d0b6a5c519ef4ed4ef69df1",
   "artifacts": [
     {
       "path": "cores/dolphin/dolphin-core-upstream.js",
       "hashMode": "lf-normalized",
-      "size": 286099,
-      "sha256": "fcd9e958d03038f201885f549881515b02ae7047b61fa59e2fec5bc32fdd6b19"
+      "size": 286335,
+      "sha256": "46a0138190a8f7d987190a12f90704467350fc83d18daab05634831de0add048"
     },
     {
       "path": "cores/dolphin/dolphin-core-upstream.wasm",
-      "size": 13214825,
-      "sha256": "10d0a043cf809380a20f25d2a24af433f0945ca492ee247abd8184c047488420"
+      "size": 13215145,
+      "sha256": "d9d326cf988685632691e2407dd7c2ded35eaca08894e267c4ddc7b5f9794346"
     }
   ],
   "contractSources": [
@@ -86,8 +86,8 @@
     {
       "path": "src/core-host.js",
       "hashMode": "lf-normalized",
-      "size": 82005,
-      "sha256": "1aeb7af09a95a8c771fa2d59321d3789012f64380202183b9ff487baff9fc107"
+      "size": 82277,
+      "sha256": "b7fcaf25b840865f29ab73949194c717be23052e8e96b892cf55dcb77ef2c6e4"
     },
     {
       "path": "src/diagnostic-log-filter.js",
@@ -140,8 +140,8 @@
     {
       "path": "src/upstream-discio-worker.js",
       "hashMode": "lf-normalized",
-      "size": 778616,
-      "sha256": "83b35c35519eb4add56e8cb9197157485d4d7758814fc190112660e3fe3573cf"
+      "size": 786270,
+      "sha256": "fd99398ebae98b8c862da9212f2f219a88d20f79416b9d94b098c7ef0d4b5396"
     },
     {
       "path": "src/wgpu-renderer-worker-probe.js",
@@ -165,7 +165,7 @@
       "path": "src/upstream-worker-adapter.js",
       "hashMode": "lf-normalized",
       "size": 56936,
-      "sha256": "b931740206b2dc0ecbb41ad0d48f15aa2b4e4933fb310da6d1cbbcc9bfacf4ee"
+      "sha256": "643e5b31ab85ad18abd170d78630679796de09f8d2fce84cb2287fa27cb4d455"
     },
     {
       "path": "src/upstream-worker-protocol.js",
@@ -469,6 +469,7 @@
     "_DolphinWeb_JitSetRegionsEnabled",
     "_DolphinWeb_JitStateLayout",
     "_DolphinWeb_JitTableFull",
+    "_DolphinWeb_JitTimeStats",
     "_DolphinWeb_JitTransientRejectCount",
     "_DolphinWeb_MemAccessKindForTest",
     "_DolphinWeb_MemAccessStaticAt",
@@ -492,6 +493,7 @@
     "_DolphinWeb_SetFprfForTest",
     "_DolphinWeb_SetFusedMadd",
     "_DolphinWeb_SetGpuSpinBudget",
+    "_DolphinWeb_SetJitTimeStatsEnabled",
     "_DolphinWeb_SetPresentOnArrival",
     "_DolphinWeb_UnverifyRegions",
     "_FlushMemoryCards",

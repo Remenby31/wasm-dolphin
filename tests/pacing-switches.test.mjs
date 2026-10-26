@@ -18,7 +18,7 @@ const SWITCHES = [
 test("pacing switches: URL parsing, shipped defaults, each switch only its own", async () => {
   const { requestedPacing } = await import("../src/core-host.js");
   // Rush off by default (upstream's default): ?rush=1 turns it back on.
-  assert.deepEqual(requestedPacing(""), { rushPresentation: false, syncOnSkipIdle: false, dupXfbRearmsThrottle: false, smoothEarly: true, presentVsync: false, regionBootMode: 0 });
+  assert.deepEqual(requestedPacing(""), { rushPresentation: false, syncOnSkipIdle: false, dupXfbRearmsThrottle: false, smoothEarly: true, presentVsync: true, regionBootMode: 0 });
   for (const s of SWITCHES) {
     const p = requestedPacing(`?${s.param}`);
     assert.equal(p[s.option], s.on, s.param);
@@ -102,13 +102,15 @@ test("Rush off by default: a page or core that sets nothing runs without Rush Fr
 
 // ?presentvsync=1 (research/deep-frame-pacing.md §5 step 2): at most one wgpu
 // present per BeginFrame, held in the worker (no core flag).
-test("presentvsync: URL → host → adapter → worker, off by default", async (t) => {
+test("presentvsync: URL → host → adapter → worker, on by default, ?presentvsync=0 off", async (t) => {
   const { requestedPacing } = await import("../src/core-host.js");
-  assert.equal(requestedPacing("").presentVsync, false);
+  assert.equal(requestedPacing("").presentVsync, true, "on by default (2026-10-26)");
+  assert.equal(requestedPacing("?presentvsync=0").presentVsync, false);
+  for (const off of ["false", "off", "no", "OFF"]) assert.equal(requestedPacing(`?presentvsync=${off}`).presentVsync, false, off);
   assert.equal(requestedPacing("?presentvsync=1").presentVsync, true);
   assert.equal(requestedPacing("?presentvsync=1").rushPresentation, false, "only its own switch");
   const { UpstreamWorkerAdapter } = await import("../src/upstream-worker-adapter.js");
-  assert.equal(new UpstreamWorkerAdapter({}).presentVsync, false);
+  assert.equal(new UpstreamWorkerAdapter({}).presentVsync, true);
   const adapter = new UpstreamWorkerAdapter(requestedPacing("?presentvsync=1"));
   let posted = null;
   adapter.worker = {
@@ -129,7 +131,7 @@ test("presentvsync: URL → host → adapter → worker, off by default", async 
   const worker = await readFile(new URL("../src/upstream-discio-worker.js", import.meta.url), "utf8");
   assert.match(host, /\n {12}presentVsync: this\.pacing\.presentVsync,\n/);
   assert.match(worker, /\n {8}presentVsync: payload\.presentVsync,\n/);
-  assert.match(worker, /wgpuPresentVsync = presentVsync === true && typeof self\.requestAnimationFrame === "function" && !wgpuDetachedPresenter;/, "only with a worker rAF, never with the detached presenter (stale bitmap)");
+  assert.match(worker, /wgpuPresentVsync = presentVsync !== false && typeof self\.requestAnimationFrame === "function" && !wgpuDetachedPresenter;/, "only with a worker rAF, never with the detached presenter (stale bitmap)");
 });
 
 test("presentvsync: the backbuffer pass renders into a pooled texture, shown at the worker's rAF, the drain never held", async () => {
@@ -141,8 +143,8 @@ test("presentvsync: the backbuffer pass renders into a pooled texture, shown at 
   // queues it whatever this drain saw, never a drain-local texture
   assert.match(worker, /if \(wgpuPresentVsync\) \{\n(?:\s+\/\/[^\n]*\n)+\s+queueWgpuVsyncFrame\(api\?\.getFrame/);
   assert.doesNotMatch(worker, /queueWgpuVsyncFrame\(lastBackbufferTexture/);
-  const present = worker.slice(worker.indexOf("function presentWgpuVsyncFrame()"), worker.indexOf("function wgpuCanvasUsage("));
-  assert.match(present, /const f = wgpuVsync\.takeForDisplay\(wgpuVsyncTick\);/, "the oldest queued frame, after the catch-up");
+  const present = worker.slice(worker.indexOf("function presentWgpuVsyncFrame("), worker.indexOf("function wgpuCanvasUsage("));
+  assert.match(present, /const f = newest \? wgpuVsync\.takeNewest\(\) : wgpuVsync\.takeForDisplay\(wgpuVsyncTick\);/, "the oldest queued frame, after the catch-up");
   assert.match(present, /copyTextureToTexture\(/);
   // v3: the stream no longer follows the display: nothing captured at the rAF
   assert.doesNotMatch(present, /streamCapture\.offerCanvas\(/);
@@ -157,10 +159,10 @@ test("presentvsync: the backbuffer pass renders into a pooled texture, shown at 
 
 test("presentvsync catch-up: a frame that already waited a BeginFrame gives way to a newer one, counted", async () => {
   const worker = await readFile(new URL("../src/upstream-discio-worker.js", import.meta.url), "utf8");
-  const present = worker.slice(worker.indexOf("function presentWgpuVsyncFrame()"), worker.indexOf("function wgpuCanvasUsage("));
+  const present = worker.slice(worker.indexOf("function presentWgpuVsyncFrame("), worker.indexOf("function wgpuCanvasUsage("));
   // the behaviour is tested on the module (tests/wgpu-vsync-queue.test.mjs)
   assert.match(present, /wgpuVsync\.takeForDisplay\(wgpuVsyncTick\)/);
-  assert.match(worker, /wgpuVsync\.queueFrame\(\{ coreFrame, shownVi, stream, tick: wgpuVsyncTick \}\)/);
+  assert.match(worker, /wgpuVsync\.queueFrame\(\{ coreFrame, shownVi, stream, tick: wgpuVsyncTick \}, \{ hidden \}\)/);
   assert.match(worker, /case "validationReadPresentVsync":/);
 });
 
@@ -198,7 +200,7 @@ test("display counter: one present per BeginFrame is one picture, whichever rAF 
     assert.equal(dropped, 0);
   }
   const worker = await readFile(new URL("../src/upstream-discio-worker.js", import.meta.url), "utf8");
-  assert.match(worker, /wgpuVsyncInBeginFrame = performance\.timeOrigin \+ frameTime;/, "the same clock as the counter's beginFrame");
+  assert.match(worker, /wgpuVsyncFrameTime = performance\.timeOrigin \+ frameTime;/, "the same clock as the counter's beginFrame");
 });
 
 // presentvsync v3: the stream captures every frame when it is queued, from
@@ -212,11 +214,51 @@ test("presentvsync v3: the stream captures at queue time, from the frame's textu
   assert.match(stream, /if \(!streamCapture\.ready\(\)\) return;/, "nobody reading: no copy");
   assert.match(stream, /copyTextureToTexture\(\{ texture: tex \}, \{ texture: wgpuVsyncStreamContext\.getCurrentTexture\(\) \}/);
   assert.match(stream, /dev\.queue\.submit\(\[enc\.finish\(\)\]\);\n {2}streamCapture\.offerCanvas\(wgpuVsyncStreamCanvas, coreFrame\);/, "copy submitted before the snapshot");
-  assert.match(worker, /const wgpuPresentVsyncStats = \{ byTimer: 0, streamed: 0 \};/);
+  assert.match(worker, /const wgpuPresentVsyncStats = \{ byTimer: 0, byLate: 0, byLateHidden: 0, streamed: 0 \};/);
   // the readback keeps the `queued` counter: the queue's length is `waiting`
   const read = worker.slice(worker.indexOf('case "validationReadPresentVsync":'), worker.indexOf('case "validationReadEfbSyncStats":'));
   assert.match(read, /\.\.\.wgpuVsync\.stats,\n[^\n]*\n {8}waiting: wgpuVsync\.waiting,/);
   assert.doesNotMatch(read, /queued: /);
+});
+
+// Review of #265: the presenter's rAF loop stops after WGPU_VSYNC_IDLE_TICKS
+// empty BeginFrames and the next queued frame starts it again; a lost device
+// empties the queue (no 50 ms timer for ever); the canvases follow the device.
+test("presentvsync: idle loop stops, device loss empties the queue, canvases keyed by device", async () => {
+  const worker = await readFile(new URL("../src/upstream-discio-worker.js", import.meta.url), "utf8");
+  assert.match(worker, /if \(wgpuVsyncIdleTicks >= WGPU_VSYNC_IDLE_TICKS && !wgpuVsync\.waiting\) \{\n\s+wgpuVsyncLoop = false;/);
+  assert.match(worker, /wgpuVsyncIdleTicks = 0;\n {2}if \(!wgpuVsyncLoop\) \{/, "a queued frame restarts it");
+  assert.match(worker, /if \(!renderGpu\) \{\n {4}wgpuVsync\.clear\(\);\n {4}return;\n {2}\}/);
+  assert.match(worker, /if \(wgpuVsyncCanvasDevice !== dev\) \{/);
+  assert.match(worker, /wgpuVsyncStreamDevice !== dev \|\|/);
+  assert.match(worker, /destroyTexture: \(tex\) => tex\.destroy\(\)/);
+});
+
+// Review of #263 (item 5): in vsync mode the frame's texture is kept across
+// drains, so the input marker, the cadence sample and the backbuffer
+// readbacks read the frame's texture, never the drain-local one (null when
+// the frame's pass ran in an earlier drain).
+test("presentvsync: the input marker, cadence sample and readbacks read the frame's texture", async () => {
+  const worker = await readFile(new URL("../src/upstream-discio-worker.js", import.meta.url), "utf8");
+  assert.match(worker, /const presentTexture = wgpuPresentVsync \? wgpuVsync\.current : lastBackbufferTexture;/);
+  const at = worker.indexOf("const presentTexture = ");
+  const present = worker.slice(at, worker.indexOf("          if (wgpuPresentVsync) {", at));
+  assert.doesNotMatch(present.slice(80), /lastBackbufferTexture/, "no drain-local texture between the frame's present and its queue");
+  assert.match(present, /encodeHardwareInputMarker\(\n\s+ensureEnc\(\),\n\s+presentTexture,/);
+  assert.match(present, /encodeWgpuVisualCadence\(ensureEnc\(\), presentTexture\)/);
+});
+
+// Review of #265 (drop-meter, boot): a frame queued while the presenter's rAF
+// is late (a busy worker cannot run it) is shown at once, counted byLate.
+test("presentvsync: a frame queued while the rAF is late is shown at once", async () => {
+  const worker = await readFile(new URL("../src/upstream-discio-worker.js", import.meta.url), "utf8");
+  // late: 1.5 x the median tick interval (any refresh rate), floor 12 ms
+  assert.match(worker, /return Math\.max\(WGPU_VSYNC_LATE_FLOOR_MS, 1\.5 \* sorted\[n >> 1\]\);/);
+  assert.match(worker, /\} else if \(sinceTick > wgpuVsyncLateMs\(\)\) \{\n(?: {6}\/\/[^\n]*\n)+ {6}wgpuPresentVsyncStats\.byLate \+= 1;\n {6}presentWgpuVsyncFrame\(\{ newest: true \}\);/);
+  // no BeginFrame for 50 ms (hidden tab): no local copy, the timer shows the newest
+  assert.match(worker, /if \(sinceTick >= WGPU_VSYNC_FALLBACK_MS\) \{\n(?: {6}\/\/[^\n]*\n)+ {6}wgpuPresentVsyncStats\.byLateHidden \+= 1;\n {4}\}/);
+  assert.match(worker, /wgpuPresentVsyncStats\.byTimer \+= 1;\n {4}presentWgpuVsyncFrame\(\{ newest: true \}\);/);
+  assert.match(worker, /const wgpuPresentVsyncStats = \{ byTimer: 0, byLate: 0, byLateHidden: 0, streamed: 0 \};/);
 });
 
 // Patch 0169, a test switch: ?regionboot=0|1|2, the region boot window as
