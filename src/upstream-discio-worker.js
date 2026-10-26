@@ -489,12 +489,29 @@ function harnessRegionCallStats() {
 function harnessRegionSleepStats() {
   const m = moduleInstance;
   if (!m?._DolphinWeb_AotRegionSleepInstalls || !m._malloc) return null;
-  const p = m._malloc(16);
+  const p = m._malloc(24);
   try {
-    new Uint32Array(m.HEAPU8.buffer, p, 4).fill(0);
+    new Uint32Array(m.HEAPU8.buffer, p, 6).fill(0);
     m._DolphinWeb_AotRegionSleepInstalls(p);
     const w = new Uint32Array(m.HEAPU8.buffer, p, 4);
-    return { installs: w[0], ms: w[1] / 100, overshootMaxMs: w[2] / 100, waitExpired: w[3] };
+    const stats = { installs: w[0], ms: w[1] / 100, overshootMaxMs: w[2] / 100, waitExpired: w[3] };
+    // Patch 0171: installs done at a slice boundary in the window after a
+    // state load while the thread was behind (no sleep window long enough),
+    // the worst slice that did one, those over the slice target (one per
+    // slice and per behind window), the measured install time over the
+    // estimate of large modules, the large modules the 6 ms bound kept
+    // waiting and the largest estimate x overrun it refused.
+    if (m._DolphinWeb_AotRegionForcedInstalls) {
+      const f = new Uint32Array(m.HEAPU8.buffer, p, 6).fill(0);
+      m._DolphinWeb_AotRegionForcedInstalls(p);
+      stats.forcedInstalls = f[0];
+      stats.forcedMaxSliceMs = f[1] / 100;
+      stats.forcedLargeInstalls = f[2];
+      stats.largeOverrun = f[3] / 100;
+      stats.boundRefused = f[4];
+      stats.boundRefusedMaxMs = f[5] / 100;
+    }
+    return stats;
   } finally {
     m._free?.(p);
   }
