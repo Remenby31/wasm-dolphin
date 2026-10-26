@@ -328,6 +328,11 @@ node harness/probes/drop-meter.mjs --iso ../roms/<disc>.iso --port 8113 --runs 6
 node harness/probes/drop-meter.mjs --iso ../roms/<disc>.iso --port 8113 --runs 3 --baseline origin/main --noise <A/A dir>/summary.json
 # nightly on main, with its history (JSONL + table)
 node harness/probes/drop-meter.mjs --iso ../roms/<disc>.iso --port 8113 --runs 3 --trend ../measures/drops/trend.jsonl
+# --display: the worker's rAF records what each BeginFrame put on screen;
+# the gating then reads the screen (per phase: distinct images' interval
+# excess and intervals of 3 vsyncs or more; per visit: gaps over 100 ms and
+# the worst second) instead of the presentation timeline, which a change to
+# the presentation itself biases (present-vsync). Its A/A must be --display.
 # The --noise A/A must have run on the core of the base measured (the
 # summary records each side's core): another core gives no verdict (exit 3),
 # --noise-stale-ok for a study. Redo the A/A when main publishes a core.
@@ -335,14 +340,32 @@ node harness/probes/drop-meter.mjs --iso ../roms/<disc>.iso --port 8113 --runs 3
 # on a COLD visit reads 34-50 ms against a 45 ms threshold there (noisier
 # phase); repeated stalls under 25 ms each stay under the per-phase floors
 # (the reported pctBelow95 per phase shows them, not gating). stallMs is
-# the larger of the VI reading and the sampler's (pairs of 50 ms rows under
-# 0.75 of real time), so a stall inside a long VI gap counts too, mostly
-# whole (a stall on a pair's edge may be read in part). presentExcessMs (gaps
-# beyond two fields, summed) catches the presenter stalling while the core
-# runs on. Hitch counts never get an sd under Poisson's (sqrt(mean + 0.5)),
+# the larger of the VI reading and the sampler's (50 ms rows under 0.6 of
+# the local speed, the median within +-1 s), so a stall inside a long VI gap
+# counts too (at least half of it when the core makes it up right after);
+# a sustained slowness is no stall (slowRowsMs reports it). Images per
+# guest second per phase (presents, or distinct images shown with --display)
+# catch a cadence halved with the core at 100 %.
+# presentExcessMs (gaps beyond max(two fields, 1.5 x the phase's median),
+# summed) catches the presenter stalling while the core runs on, at 60 or
+# 30 images/s. A --noise with no core recorded, or another core, stops the
+# comparison before its first run (exit 3). Hitch counts never get an sd under Poisson's (sqrt(mean + 0.5)),
 # judged at the normal 99.5 % quantile then. Measured on 12 runs of one tree
-# (independent A/A noise): 6.2 % of batches flag a regression, 0.3 % once a
-# second batch must confirm it.
+# (independent A/A noise): 0.0 % of batches flag a regression (3000 draws).
+# Outlier runs of the A/A (beyond 5 robust sds, MAD not 0) are counted in
+# the summary (outliers); they are left out of the threshold's sd only with
+# an A/A of 10 runs or more and when a single run is off (degrees of
+# freedom of the runs kept): from 6 runs the MAD is too noisy, and outliers
+# that recur are part of the noise. The summary records the probe's version
+# (PROBE_VERSION, what it runs in the page and worker); --noise must match.
+# The ticks reading misses stalls of 1.5 s or more (the +-1 s median falls
+# with them) and, where the core runs slow, any stall shorter than 3 rows
+# nearly stopped: the VI reading covers both, outside VI gaps. With
+# --display, a gap of the worker's rAF while the page's rAF goes on is no
+# screen measurement (screenUnmeasuredMs, muteRafSpans), not a loss.
+# beginFrameGaps: the longest gap without a BeginFrame, the worker's rAF
+# (--display) and the page's (always), reported: headless, the worker's rAF
+# sometimes stops 1-4 s while presents go on.
 # the guard's false-positive rate from runs of one tree (A against A draws)
 node harness/probes/drop-meter.mjs --false-positives <A/A dir>:candidate --noise <A/A dir>/summary.json
 # again from the raw data, e.g. against a native reference (game frames per guest second)
