@@ -100,3 +100,49 @@ test("a new pool key (resize, format, device) drops the pool, the queue and the 
   assert.equal(t.id, 3);
   assert.equal(frame("1280x960:bgra8unorm:2").id, 4, "another device: its own textures");
 });
+
+test("a new pool key destroys the free textures, never the queued ones or the current one", () => {
+  const destroyed = [];
+  let n = 0;
+  const q = createVsyncQueue({ queueSize: 2, createTexture: () => ({ id: ++n }), destroyTexture: (t) => destroyed.push(t.id) });
+  q.textureForPass("a", 1, 1); q.queueFrame({ tick: 0 });          // 1 queued
+  q.shown(q.takeForDisplay(0));                                       // 1 free
+  q.textureForPass("a", 1, 1); q.queueFrame({ tick: 0 });          // 1 queued again (reused)
+  q.textureForPass("a", 1, 1);                                        // 2 current
+  q.textureForPass("b", 1, 1);
+  assert.deepEqual(destroyed, [], "nothing free: the queued (1) and current (2) are left to the GC");
+  q.queueFrame({ tick: 0 });
+  q.shown(q.takeForDisplay(0));                                       // 3 free under key b
+  q.textureForPass("c", 1, 1);
+  assert.deepEqual(destroyed, [3]);
+});
+
+test("an overflow with no BeginFrame coming is counted apart, not as a drop", () => {
+  const { q, frame } = harness({ queueSize: 1 });
+  frame(); q.queueFrame({ tick: 0 });
+  frame(); q.queueFrame({ tick: 0 }, { hidden: true });
+  assert.equal(q.stats.dropped, 0);
+  assert.equal(q.stats.droppedHidden, 1);
+  frame(); q.queueFrame({ tick: 0 });
+  assert.equal(q.stats.dropped, 1);
+});
+
+test("clear(): the device is gone, the queue and the frame in progress go", () => {
+  const { q, frame } = harness();
+  frame(); q.queueFrame({ tick: 0 });
+  frame();
+  q.clear();
+  assert.equal(q.waiting, 0);
+  assert.equal(q.current, null);
+  assert.equal(q.takeForDisplay(5), null);
+});
+
+test("takeNewest: with no BeginFrame to wait for, the newest frame, older ones caught up", () => {
+  const { q, frame } = harness({ queueSize: 2 });
+  frame(); q.queueFrame({ tick: 7, i: 0 });
+  frame(); q.queueFrame({ tick: 7, i: 1 });
+  const f = q.takeNewest();
+  assert.equal(f.i, 1);
+  assert.equal(q.waiting, 0, "nothing left for a burst when the rAF comes back");
+  assert.equal(q.stats.caughtUp, 1);
+});

@@ -2463,7 +2463,7 @@ async function loadCore({
   syncOnSkipIdle = false,
   dupXfbRearmsThrottle = false,
   smoothEarly = true,
-  presentVsync = false,
+  presentVsync = true,
   coreLog = false,
   memcardSlotB = false,
   internalResolution = 1,
@@ -2967,7 +2967,7 @@ async function loadCore({
   const _t_factory = performance.now();
   // Not with the detached presenter: it shows a bitmap of the canvas, which
   // the vsync presenter fills only at its rAF (a stale picture).
-  wgpuPresentVsync = presentVsync === true && typeof self.requestAnimationFrame === "function" && !wgpuDetachedPresenter;
+  wgpuPresentVsync = presentVsync !== false && typeof self.requestAnimationFrame === "function" && !wgpuDetachedPresenter;
   releaseWgpuReadback();
   moduleInstance = await factory({
     noInitialRun: true,
@@ -6076,7 +6076,7 @@ function recordPresentedFrame(coreFrame, shownVi = null) {
     harnessPresentRing[slot + 1] = coreFrame;
     harnessPresentRing[slot + 2] = shownVi ?? moduleInstance?._DolphinWeb_HarnessViSinceBoot?.() ?? -1;
     harnessPresentHead += 1;
-    if (harnessDisplayStop) harnessDisplay.submit(harnessPresentRing[slot + 2], wgpuVsyncInBeginFrame);
+    if (harnessDisplayStop) harnessDisplay.submit(harnessPresentRing[slot + 2], wgpuVsyncFrameTime);
   }
   presentedFrame += 1;
   framesSincePresentationFps += 1;
@@ -12847,6 +12847,21 @@ function recordBoundedHistogram(values, bounds, value) {
 // free of the local display's BeginFrames, catch-up drops and timer fallback.
 let wgpuPresentVsync = false;
 const WGPU_VSYNC_FALLBACK_MS = 50;
+// A frame queued while the presenter's rAF is late (the worker busy in a
+// long task, as compiles at boot) is shown at once instead of waiting for a
+// BeginFrame the busy worker cannot run: held there it stayed 3 vsyncs or
+// more (drop-meter, review of #265). Late: 1.5 x the median interval of the
+// last ticks (any refresh rate), at least WGPU_VSYNC_LATE_FLOOR_MS; 25 ms
+// (1.5 vsync at 60 Hz) before there are ticks to measure.
+const WGPU_VSYNC_LATE_FLOOR_MS = 12;
+const wgpuVsyncTickGaps = new Float64Array(16);
+let wgpuVsyncTickGapCount = 0;
+function wgpuVsyncLateMs() {
+  const n = Math.min(wgpuVsyncTickGapCount, wgpuVsyncTickGaps.length);
+  if (n < 4) return 25;
+  const sorted = Array.from(wgpuVsyncTickGaps.subarray(0, n)).sort((a, b) => a - b);
+  return Math.max(WGPU_VSYNC_LATE_FLOOR_MS, 1.5 * sorted[n >> 1]);
+}
 // Pool and queue, one texture per frame (src/wgpu-vsync-queue.js).
 const wgpuVsync = createVsyncQueue({
   queueSize: 2,
@@ -12858,8 +12873,14 @@ const wgpuVsync = createVsyncQueue({
       format: renderGpu.format,
       usage: u.RENDER_ATTACHMENT | u.COPY_SRC | u.TEXTURE_BINDING
     });
-  }
+  },
+  destroyTexture: (tex) => tex.destroy()
 });
+// The presenter's rAF loop stops after this many BeginFrames with nothing to
+// show (2 s at 60 Hz: a paused game, a menu that does not render) and starts
+// again with the next queued frame (battery, 120/144 Hz screens).
+const WGPU_VSYNC_IDLE_TICKS = 120;
+let wgpuVsyncIdleTicks = 0;
 // A device's number in the pool key: a new device (lost and recreated)
 // drops the pool, whose textures belong to the old one.
 const wgpuVsyncDeviceIds = new WeakMap();
@@ -12871,13 +12892,16 @@ let wgpuVsyncTick = 0;
 // The rAF frame time of the presenter's callback running now (null outside
 // it): the harness display counter matches it to that BeginFrame's entry,
 // whichever of the two worker rAF loops runs first in the frame.
-let wgpuVsyncInBeginFrame = null;
+let wgpuVsyncFrameTime = null;
 let wgpuVsyncFallback = null;
-let wgpuVsyncCanvasCopyDst = false;
-const wgpuPresentVsyncStats = { byTimer: 0, streamed: 0 };
-// v3: the stream's own canvas, sized like the frames (made on first use).
+// The device the display canvas was configured on with COPY_DST (null: not yet).
+let wgpuVsyncCanvasDevice = null;
+const wgpuPresentVsyncStats = { byTimer: 0, byLate: 0, byLateHidden: 0, streamed: 0 };
+// v3: the stream's own canvas, sized like the frames and configured on the
+// current device (made again when either changes).
 let wgpuVsyncStreamCanvas = null;
 let wgpuVsyncStreamContext = null;
+let wgpuVsyncStreamDevice = null;
 
 // The pool's drops count in the presentation's lifetime drops.
 function wgpuVsyncCountDrops(before) {
@@ -12890,7 +12914,9 @@ function wgpuVsyncCountDrops(before) {
 function streamWgpuVsyncFrame(tex, coreFrame) {
   if (!streamCapture.ready()) return;
   const dev = renderGpu.device;
-  if (!wgpuVsyncStreamCanvas || wgpuVsyncStreamCanvas.width !== tex.width || wgpuVsyncStreamCanvas.height !== tex.height) {
+  if (!wgpuVsyncStreamCanvas || wgpuVsyncStreamDevice !== dev ||
+      wgpuVsyncStreamCanvas.width !== tex.width || wgpuVsyncStreamCanvas.height !== tex.height) {
+    wgpuVsyncStreamDevice = dev;
     wgpuVsyncStreamCanvas = new OffscreenCanvas(tex.width, tex.height);
     wgpuVsyncStreamContext = wgpuVsyncStreamCanvas.getContext("webgpu");
     const u = self.GPUTextureUsage;
@@ -12919,24 +12945,49 @@ function acquireWgpuVsyncTexture(width, height) {
 // nothing queued, streamed or counted as presented.
 function queueWgpuVsyncFrame(coreFrame, shownVi, stream) {
   const before = wgpuVsync.stats.dropped;
-  const frame = wgpuVsync.queueFrame({ coreFrame, shownVi, stream, tick: wgpuVsyncTick });
+  // No BeginFrame lately (hidden tab): an overflow is not a drop.
+  const hidden = wgpuVsyncLoop && performance.now() - wgpuVsyncLastTickAt >= WGPU_VSYNC_FALLBACK_MS;
+  const frame = wgpuVsync.queueFrame({ coreFrame, shownVi, stream, tick: wgpuVsyncTick }, { hidden });
   wgpuVsyncCountDrops(before);
   if (!frame) return false;
   if (stream && streamCapture.active) streamWgpuVsyncFrame(frame.tex, coreFrame);
+  wgpuVsyncIdleTicks = 0;
   if (!wgpuVsyncLoop) {
     wgpuVsyncLoop = true;
+    wgpuVsyncLastTickAt = performance.now();
     const tick = (frameTime) => {
-      wgpuVsyncLastTickAt = performance.now();
+      const now = performance.now();
+      wgpuVsyncTickGaps[wgpuVsyncTickGapCount++ % wgpuVsyncTickGaps.length] = now - wgpuVsyncLastTickAt;
+      wgpuVsyncLastTickAt = now;
       wgpuVsyncTick += 1;
-      wgpuVsyncInBeginFrame = performance.timeOrigin + frameTime;
+      wgpuVsyncFrameTime = performance.timeOrigin + frameTime;
+      let shown = false;
       try {
-        presentWgpuVsyncFrame();
+        shown = presentWgpuVsyncFrame();
       } finally {
-        wgpuVsyncInBeginFrame = null;
+        wgpuVsyncFrameTime = null;
+      }
+      wgpuVsyncIdleTicks = shown ? 0 : wgpuVsyncIdleTicks + 1;
+      if (wgpuVsyncIdleTicks >= WGPU_VSYNC_IDLE_TICKS && !wgpuVsync.waiting) {
+        wgpuVsyncLoop = false;  // the next queued frame starts it again
+        return;
       }
       self.requestAnimationFrame(tick);
     };
     self.requestAnimationFrame(tick);
+  } else {
+    const sinceTick = performance.now() - wgpuVsyncLastTickAt;
+    if (sinceTick >= WGPU_VSYNC_FALLBACK_MS) {
+      // No BeginFrame for 50 ms or more (a hidden tab, a rAF silent for
+      // seconds): no local copy per frame, the stream has it already (v3);
+      // the fallback timer shows the newest one every 50 ms.
+      wgpuPresentVsyncStats.byLateHidden += 1;
+    } else if (sinceTick > wgpuVsyncLateMs()) {
+      // The rAF is late (busy worker): no BeginFrame to wait for, the
+      // newest frame now.
+      wgpuPresentVsyncStats.byLate += 1;
+      presentWgpuVsyncFrame({ newest: true });
+    }
   }
   wgpuVsyncFallback ??= setTimeout(wgpuVsyncFallbackCheck, WGPU_VSYNC_FALLBACK_MS);
   return true;
@@ -12944,25 +12995,34 @@ function queueWgpuVsyncFrame(coreFrame, shownVi, stream) {
 
 function wgpuVsyncFallbackCheck() {
   wgpuVsyncFallback = null;
+  // The device is gone: nothing can be shown, the queue goes (else this timer
+  // would run every 50 ms for ever).
+  if (!renderGpu) {
+    wgpuVsync.clear();
+    return;
+  }
   if (!wgpuVsync.waiting) return;
   if (performance.now() - wgpuVsyncLastTickAt >= WGPU_VSYNC_FALLBACK_MS) {
     wgpuPresentVsyncStats.byTimer += 1;
-    presentWgpuVsyncFrame();
+    presentWgpuVsyncFrame({ newest: true });
   }
   if (wgpuVsync.waiting) wgpuVsyncFallback = setTimeout(wgpuVsyncFallbackCheck, WGPU_VSYNC_FALLBACK_MS);
 }
 
 // One queued frame to the canvas: the oldest, so a burst is shown in order
-// (after the catch-up, in takeForDisplay).
-function presentWgpuVsyncFrame() {
-  if (!renderGpu) return;
+// (after the catch-up, in takeForDisplay). True when a frame was shown.
+function presentWgpuVsyncFrame({ newest = false } = {}) {
+  if (!renderGpu) {
+    wgpuVsync.clear();
+    return false;
+  }
   const before = wgpuVsync.stats.dropped;
-  const f = wgpuVsync.takeForDisplay(wgpuVsyncTick);
+  const f = newest ? wgpuVsync.takeNewest() : wgpuVsync.takeForDisplay(wgpuVsyncTick);
   wgpuVsyncCountDrops(before);
-  if (!f) return;
+  if (!f) return false;
   const dev = renderGpu.device;
-  if (!wgpuVsyncCanvasCopyDst) {
-    wgpuVsyncCanvasCopyDst = true;
+  if (wgpuVsyncCanvasDevice !== dev) {
+    wgpuVsyncCanvasDevice = dev;
     const u = self.GPUTextureUsage;
     renderGpu.context.configure({
       device: dev,
@@ -12983,6 +13043,7 @@ function presentWgpuVsyncFrame() {
   wgpuVsync.shown(f);
   // v3: streamed at queue time (streamWgpuVsyncFrame), not here.
   recordPresentedFrame(f.coreFrame, f.shownVi);
+  return true;
 }
 
 // The canvas's usage; COPY_DST when frames are copied to it at the rAF.
@@ -15762,17 +15823,22 @@ function drainWebGpuCmdRing(source = "presentation") {
             }
           }
           let presentAlreadySubmitted = false;
+          // The texture this present shows: in vsync mode the frame's pooled
+          // texture (kept across drains, queued below), else the canvas
+          // texture this drain's backbuffer pass rendered into. The input
+          // marker, the cadence sample and the readbacks read it.
+          const presentTexture = wgpuPresentVsync ? wgpuVsync.current : lastBackbufferTexture;
           const hardwareInputMarkerCoreFrame = api?.getFrame?.() ?? 0;
           const hardwareInputMarker = prepareInputVisualMarker(hardwareInputMarkerCoreFrame);
           let hardwareInputMarkerApplied = false;
           const applyHardwareInputMarker = () => {
-            if (hardwareInputMarkerApplied || !hardwareInputMarker || !lastBackbufferTexture) {
+            if (hardwareInputMarkerApplied || !hardwareInputMarker || !presentTexture) {
               return hardwareInputMarkerApplied;
             }
             try {
               hardwareInputMarkerApplied = encodeHardwareInputMarker(
                 ensureEnc(),
-                lastBackbufferTexture,
+                presentTexture,
                 renderGpu.format,
                 hardwareInputMarker
               );
@@ -15784,8 +15850,8 @@ function drainWebGpuCmdRing(source = "presentation") {
           // Keep the sample on the same command encoder and before the
           // optional input marker so it represents the unmodified game
           // output submitted by this hardware present.
-          const visualCadenceSlot = wgpuVisualCadenceEnabled && lastBackbufferTexture
-            ? encodeWgpuVisualCadence(ensureEnc(), lastBackbufferTexture)
+          const visualCadenceSlot = wgpuVisualCadenceEnabled && presentTexture
+            ? encodeWgpuVisualCadence(ensureEnc(), presentTexture)
             : null;
           // ?efbdiag=1 blits the EFB; ?efbdiag=2 blits the XFB entry the game
           // last presented. The second answers whether that entry holds the
@@ -15874,7 +15940,7 @@ function drainWebGpuCmdRing(source = "presentation") {
             // input generation is pending.  This is opt-in because a mapped
             // GPU readback is intentionally too expensive for normal play.
             const _inputBackbufferOk = inputReadbackDiagnostics &&
-              lastBackbufferTexture && !wgpuInputBackbufferReadbackPending &&
+              presentTexture && !wgpuInputBackbufferReadbackPending &&
               (!wgpuInputVisualBaselineReady || inputVisibleLatencyTracker.hasPending());
             const _sourceOk = lastBackbufferSourceTextureId > 0 && Boolean(
               wgpuReplayClassifier?.needsPresentationReadback("xfb", P)
@@ -15931,16 +15997,16 @@ function drainWebGpuCmdRing(source = "presentation") {
                   `${e?.message || e}`);
               }
             }
-            if ((_backbufferOk || _inputBackbufferOk) && lastBackbufferTexture) {
+            if ((_backbufferOk || _inputBackbufferOk) && presentTexture) {
               try {
                 ensureEnc();
-                const w = lastBackbufferTexture.width;
-                const h = lastBackbufferTexture.height;
+                const w = presentTexture.width;
+                const h = presentTexture.height;
                 const bpr = Math.ceil(w * 4 / 256) * 256;
                 const rb = dev.createBuffer({ size: bpr * h,
                   usage: 0x1 | 0x8 });
                 enc.copyTextureToBuffer(
-                  { texture: lastBackbufferTexture },
+                  { texture: presentTexture },
                   { buffer: rb, bytesPerRow: bpr, rowsPerImage: h },
                   { width: w, height: h, depthOrArrayLayers: 1 });
                 pending.push({
