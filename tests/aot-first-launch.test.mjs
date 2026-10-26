@@ -331,7 +331,9 @@ test("coreRegionTranslator reads the agreed layout of _DolphinWeb_AotTranslate",
   const { m, calls } = fakeCore((pc) => (pc === 0x80003000
     ? { entries: [0x80003000, 0x80003010], relocs: [[5, 0, 1], [11, 1, 0x80004000], [17, 2, 0]], code: [1, 2, 3, 4], layout: 0x5eed1234 }
     : pc === 0x80003100 ? 1 : pc === 0x80003200 ? 4 : null));
-  const t = coreRegionTranslator(m, { mask: 0x40, helperNames: ["read_u32", "write_u32"], yieldNow: async () => {} });
+  // A frozen clock: on a loaded machine the real one passed the 8 ms slice
+  // and the rest of the batch came back "budget" (a flaky CI failure).
+  const t = coreRegionTranslator(m, { mask: 0x40, helperNames: ["read_u32", "write_u32"], now: () => 0, yieldNow: async () => {} });
   const batch = [
     { entry: 0x80003000, hash: "0123456789abcdef", ranges: [[0x80003000, 0x80003020]] },
     { entry: 0x80003100, hash: "0000000100000002", ranges: [[0x80003100, 0x80003104]] },
