@@ -96,6 +96,69 @@ test("windows: speed and lost time from the VI ticks, causes from the counters",
   assert.ok(s.worstSecond < 80);
 });
 
+// A boot screen at 100 %: per 50 ms row the CPU thread sleeps 45 ms (5 ms of
+// work for 50 guest ms) and wakes 5 ms late in all (macOS coalescing, which
+// the throttle's absolute targets absorb). Between 1000 and 1100 ms the guest
+// runs at `speed` %, the thread sleeping `sleptMs` and waking `lateMs` late
+// per row. Ticks in the rows, as the sampler has them.
+function bootRun({ speed, sleptMs, lateMs }) {
+  const slow = (t) => (t >= 1000 && t < 1100 ? speed : 100);
+  const vi = viOf(2000, slow);
+  const inSlow = (t) => Math.max(0, Math.min(t, 1100) - 1000);
+  const guestMs = (t) => t - (inSlow(t) * (100 - speed)) / 100;
+  const rows = rowsAt(2000, (t) => ({
+    ticks: (guestMs(t) / 1000) * TPS,
+    cpuSleepUs: ((t - inSlow(t)) * 0.9 + (inSlow(t) * sleptMs) / 50) * 1000,
+    sleepLateUs: ((t - inSlow(t)) / 50 * 5 + (inSlow(t) / 50) * lateMs) * 1000
+  }));
+  return { vi, rows, w: windowsOf({ vi, presents: presentsOf(vi), rows, tps: TPS }) };
+}
+
+test("late wake-ups: a stall that works past the calm pace is uncounted-busy, not lateWake", () => {
+  // At 30 % the thread sleeps 10 ms per row: 40 ms of work for 15 guest ms.
+  const { w } = bootRun({ speed: 30, sleptMs: 10, lateMs: 5 });
+  const events = dropEvents(w);
+  assert.equal(events.length, 1);
+  assert.equal(events[0].cause, "uncounted-busy");
+  assert.ok(events[0].causesMs.lateWake < 1, "its coalescing lateness cost nothing");
+  assert.ok(events[0].causesMs.uncountedBusy > 50);
+  // calm windows: lateness there never counts as lost
+  assert.ok(w[2].causes.lateWake < 0.5);
+});
+
+test("late wake-ups: a row that sleeps as usual but wakes too late to keep up is lateWake", () => {
+  // At 70 % the thread still sleeps 45 ms per row (no extra work) but its
+  // wake-ups come 20 ms late in all: the lateness is the loss.
+  const { w } = bootRun({ speed: 70, sleptMs: 45, lateMs: 20 });
+  const events = dropEvents(w);
+  assert.equal(events.length, 1);
+  assert.equal(events[0].cause, "lateWake");
+  assert.ok(Math.abs(events[0].causesMs.lateWake - 30) < 3, "the lost time, at most the lateness");
+});
+
+test("late wake-ups: without ticks in the rows, all of the lateness counts (older samplers)", () => {
+  const { vi, rows } = bootRun({ speed: 30, sleptMs: 10, lateMs: 5 });
+  const w = windowsOf({ vi, presents: presentsOf(vi), rows: rows.map(({ ticks, ...r }) => r), tps: TPS });
+  assert.ok(Math.abs(w[2].causes.lateWake - 10) < 0.5, "5 ms per 50 ms row");
+  assert.equal(w[2].causes.uncountedBusy, null);
+});
+
+test("late wake-ups (review of #281): rows with a counter missing are not judged; one cause per row", () => {
+  const { vi, rows } = bootRun({ speed: 70, sleptMs: 45, lateMs: 20 });
+  // two rows of the slow stretch read nothing (a read that threw)
+  const holed = rows.map((r) => (r.t === 1050 || r.t === 1100 ? { ...r, ticks: null, cpuSleepUs: null, sleepLateUs: null } : r));
+  const w = windowsOf({ vi, presents: presentsOf(vi), rows: holed, tps: TPS });
+  const busy = w.reduce((a, x) => a + (x.causes.uncountedBusy ?? 0), 0);
+  assert.ok(busy < 1, `no busy time made up from missing counters (${busy})`);
+  // rows that lost 5 ms, worked 4 ms past their pace and woke 5 ms late:
+  // lateWake 5 each, uncountedBusy 0 (not 5 + 4)
+  const one = bootRun({ speed: 90, sleptMs: 41.5, lateMs: 5 });
+  const lw = one.w.reduce((a, x) => a + (x.causes.lateWake ?? 0), 0);
+  const ub = one.w.reduce((a, x) => a + (x.causes.uncountedBusy ?? 0), 0);
+  assert.ok(ub < 0.5, `the lateness took the row (${ub})`);
+  assert.ok(lw > 9, `both slow rows to lateWake (${lw})`);
+});
+
 test("a drop with no cause counted: uncounted-busy when the CPU never slept, else unexplained", () => {
   const w = (sleptMs) => ({ t0: 0, speed: 50, lostMs: 50, sleptMs, causes: { jit: 0, disc: 1 } });
   assert.equal(causeOf([w(0), w(0)]).cause, "uncounted-busy");
