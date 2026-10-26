@@ -52,9 +52,10 @@ if (power === "battery" && !o["allow-battery"]) {
   console.error("on battery: decisions are measured on mains power (--allow-battery to override)");
   process.exit(3);
 }
-// Never hold the lock for ever (a hung browser).
-const watchdog = setTimeout(() => { console.error("watchdog: 20 min"); process.exit(2); }, 20 * 60 * 1000);
 const release = await acquirePerfLock({ name: "Salon · rendu: stream-capture-cost", waitSec: 1800, log: (m) => console.log(`[capture-cost] ${m}`) });
+// Never hold the lock for ever (a hung browser): counted from the lock, not
+// from the wait for it.
+const watchdog = setTimeout(() => { console.error("watchdog: 20 min under the lock"); release(); process.exit(2); }, 20 * 60 * 1000);
 const server = await ensureServer({ port: o.port });
 const query = (ir) => `${PRESETS.wgpu}&ir=${ir}${o.query ? `&${o.query}` : ""}`;
 const results = { power, load: os.loadavg(), started: new Date().toISOString(), query: query("N"), state: o.state ? path.basename(o.state) : null, runs: [] };
