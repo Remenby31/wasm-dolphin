@@ -12850,17 +12850,21 @@ const WGPU_VSYNC_FALLBACK_MS = 50;
 // A frame queued while the presenter's rAF is late (the worker busy in a
 // long task, as compiles at boot) is shown at once instead of waiting for a
 // BeginFrame the busy worker cannot run: held there it stayed 3 vsyncs or
-// more (drop-meter, review of #265). Late: 1.5 x the median interval of the
-// last ticks (any refresh rate), at least WGPU_VSYNC_LATE_FLOOR_MS; 25 ms
-// (1.5 vsync at 60 Hz) before there are ticks to measure.
+// more (drop-meter, review of #265). Late: 1.5 x the display's frame
+// period, at least WGPU_VSYNC_LATE_FLOOR_MS; 25 ms (1.5 vsync at 60 Hz)
+// before there are ticks to measure. The period is the 25th percentile of
+// the last rAF frame-time deltas (vsync timestamps, not callback times): a
+// busy stretch (ticks 2 vsyncs apart) does not push it up and turn byLate off
+// where it is needed (follow-up review of #265).
 const WGPU_VSYNC_LATE_FLOOR_MS = 12;
-const wgpuVsyncTickGaps = new Float64Array(16);
-let wgpuVsyncTickGapCount = 0;
+const wgpuVsyncFrameGaps = new Float64Array(16);
+let wgpuVsyncFrameGapCount = 0;
+let wgpuVsyncLastFrameTime = null;
 function wgpuVsyncLateMs() {
-  const n = Math.min(wgpuVsyncTickGapCount, wgpuVsyncTickGaps.length);
+  const n = Math.min(wgpuVsyncFrameGapCount, wgpuVsyncFrameGaps.length);
   if (n < 4) return 25;
-  const sorted = Array.from(wgpuVsyncTickGaps.subarray(0, n)).sort((a, b) => a - b);
-  return Math.max(WGPU_VSYNC_LATE_FLOOR_MS, 1.5 * sorted[n >> 1]);
+  const sorted = Array.from(wgpuVsyncFrameGaps.subarray(0, n)).sort((a, b) => a - b);
+  return Math.max(WGPU_VSYNC_LATE_FLOOR_MS, 1.5 * sorted[n >> 2]);
 }
 // Pool and queue, one texture per frame (src/wgpu-vsync-queue.js).
 const wgpuVsync = createVsyncQueue({
@@ -12957,13 +12961,19 @@ function queueWgpuVsyncFrame(coreFrame, shownVi, stream) {
     wgpuVsyncLastTickAt = performance.now();
     const tick = (frameTime) => {
       const now = performance.now();
-      wgpuVsyncTickGaps[wgpuVsyncTickGapCount++ % wgpuVsyncTickGaps.length] = now - wgpuVsyncLastTickAt;
+      if (wgpuVsyncLastFrameTime !== null && frameTime > wgpuVsyncLastFrameTime) {
+        wgpuVsyncFrameGaps[wgpuVsyncFrameGapCount++ % wgpuVsyncFrameGaps.length] = frameTime - wgpuVsyncLastFrameTime;
+      }
+      wgpuVsyncLastFrameTime = frameTime;
+      // Back after a gap of 50 ms or more (a block, a silent rAF): the newest
+      // frame first, not the oldest one queued before the gap.
+      const afterGap = now - wgpuVsyncLastTickAt >= WGPU_VSYNC_FALLBACK_MS;
       wgpuVsyncLastTickAt = now;
       wgpuVsyncTick += 1;
       wgpuVsyncFrameTime = performance.timeOrigin + frameTime;
       let shown = false;
       try {
-        shown = presentWgpuVsyncFrame();
+        shown = presentWgpuVsyncFrame({ newest: afterGap });
       } finally {
         wgpuVsyncFrameTime = null;
       }
@@ -13004,20 +13014,21 @@ function wgpuVsyncFallbackCheck() {
   if (!wgpuVsync.waiting) return;
   if (performance.now() - wgpuVsyncLastTickAt >= WGPU_VSYNC_FALLBACK_MS) {
     wgpuPresentVsyncStats.byTimer += 1;
-    presentWgpuVsyncFrame({ newest: true });
+    // No BeginFrame for 50 ms: the older frames were never to be shown.
+    presentWgpuVsyncFrame({ newest: true, hidden: true });
   }
   if (wgpuVsync.waiting) wgpuVsyncFallback = setTimeout(wgpuVsyncFallbackCheck, WGPU_VSYNC_FALLBACK_MS);
 }
 
 // One queued frame to the canvas: the oldest, so a burst is shown in order
 // (after the catch-up, in takeForDisplay). True when a frame was shown.
-function presentWgpuVsyncFrame({ newest = false } = {}) {
+function presentWgpuVsyncFrame({ newest = false, hidden = false } = {}) {
   if (!renderGpu) {
     wgpuVsync.clear();
     return false;
   }
   const before = wgpuVsync.stats.dropped;
-  const f = newest ? wgpuVsync.takeNewest() : wgpuVsync.takeForDisplay(wgpuVsyncTick);
+  const f = newest ? wgpuVsync.takeNewest({ hidden }) : wgpuVsync.takeForDisplay(wgpuVsyncTick);
   wgpuVsyncCountDrops(before);
   if (!f) return false;
   const dev = renderGpu.device;
