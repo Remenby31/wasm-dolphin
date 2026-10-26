@@ -214,7 +214,7 @@ test("presentvsync v3: the stream captures at queue time, from the frame's textu
   assert.match(stream, /if \(!streamCapture\.ready\(\)\) return;/, "nobody reading: no copy");
   assert.match(stream, /copyTextureToTexture\(\{ texture: tex \}, \{ texture: wgpuVsyncStreamContext\.getCurrentTexture\(\) \}/);
   assert.match(stream, /dev\.queue\.submit\(\[enc\.finish\(\)\]\);\n {2}streamCapture\.offerCanvas\(wgpuVsyncStreamCanvas, coreFrame\);/, "copy submitted before the snapshot");
-  assert.match(worker, /const wgpuPresentVsyncStats = \{ byTimer: 0, byLate: 0, byLateHidden: 0, streamed: 0 \};/);
+  assert.match(worker, /const wgpuPresentVsyncStats = \{ byTimer: 0, byLate: 0, byNoBeginFrame: 0, streamed: 0 \};/);
   // the readback keeps the `queued` counter: the queue's length is `waiting`
   const read = worker.slice(worker.indexOf('case "validationReadPresentVsync":'), worker.indexOf('case "validationReadEfbSyncStats":'));
   assert.match(read, /\.\.\.wgpuVsync\.stats,\n[^\n]*\n {8}waiting: wgpuVsync\.waiting,/);
@@ -261,7 +261,7 @@ test("presentvsync: a frame queued while the rAF is late is shown at once", asyn
   assert.match(worker, /shown = presentWgpuVsyncFrame\(\{ newest: afterGap \}\);/);
   assert.match(worker, /\} else if \(sinceTick > wgpuVsyncLateMs\(\)\) \{\n(?: {6}\/\/[^\n]*\n)+ {6}wgpuPresentVsyncStats\.byLate \+= 1;\n {6}presentWgpuVsyncFrame\(\{ newest: true \}\);/);
   // no BeginFrame for 50 ms (hidden tab): no local copy, the timer shows the newest
-  assert.match(worker, /if \(sinceTick >= WGPU_VSYNC_FALLBACK_MS\) \{\n(?: {6}\/\/[^\n]*\n)+ {6}wgpuPresentVsyncStats\.byLateHidden \+= 1;\n {4}\}/);
+  assert.match(worker, /if \(sinceTick >= WGPU_VSYNC_FALLBACK_MS\) \{\n(?: {6}\/\/[^\n]*\n)+ {6}wgpuPresentVsyncStats\.byNoBeginFrame \+= 1;\n {4}\}/);
   assert.match(worker, /wgpuPresentVsyncStats\.byTimer \+= 1;\n {4}\/\/[^\n]*\n {4}presentWgpuVsyncFrame\(\{ newest: true, hidden: true \}\);/, "the timer's catch-up is not a drop");
-  assert.match(worker, /const wgpuPresentVsyncStats = \{ byTimer: 0, byLate: 0, byLateHidden: 0, streamed: 0 \};/);
+  assert.match(worker, /const wgpuPresentVsyncStats = \{ byTimer: 0, byLate: 0, byNoBeginFrame: 0, streamed: 0 \};/);
 });
