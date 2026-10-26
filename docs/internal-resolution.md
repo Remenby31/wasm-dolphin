@@ -56,9 +56,31 @@ with `scaleResolutionDownBy` there.
   scaled EFB copy. At 4x the EFB alone is 2560x2112 (about 43 MB for colour
   and depth), and a game with many render-to-texture copies holds several
   hundred MB more than at 1x. Savestates hold the EFB too, so they grow
-  with N² inside the 1.5 GiB heap. To do: a ceiling per adapter class and
-  a fallback to 1x on device loss. Until then, Auto on the site goes no
-  higher than 2x.
+  with N² inside the 1.5 GiB heap.
+- **Ceiling per adapter.** `internalResolutionCeiling(adapter, { deviceMemory })`
+  (`src/wgpu-enhancements.js`) gives the highest scale a machine is trusted
+  with, by adapter class since WebGPU says nothing about GPU memory: 1 for
+  no adapter or a CPU one; 2 for `navigator.deviceMemory` ≤ 4 GB (1 at
+  ≤ 2), an adapter offering buffers under 1 GiB, a mobile GPU vendor
+  (Chrome's names: qualcomm, arm, img-tec, huawei, verisilicon…), an
+  integrated Intel GPU (Dawn's `gen-*` but `gen-12hp`, or any `lp`:
+  `gen-12lp`, `xe-lpg`, `xe-2lpg`, `xe-3lpg`…; Arc `gen-12hp`/`xe-2hpg` or
+  unnamed keeps 4) or an Apple GPU without `deviceMemory` (Safari and
+  Firefox, a Mac included: an iPhone or iPad cannot be told from it there);
+  the texture limit / 640; else 4
+  (M4 Pro in Chrome: 4). The worker holds the boot scale and every
+  `setEnhancements` to its adapter's ceiling, answers the scale in effect
+  and posts its ceiling (`wgpu-scale-ceiling`);
+  `host.internalResolutionCeiling()` gives `{ ceiling, reason }`: the
+  worker's once known, before that the same rule on an adapter the page
+  asks with the worker's power preference. `host.setEnhancements` clamps to
+  it too.
+- **Device loss.** A lost `GPUDevice` stops the game (no rendering without
+  it). Lost above 1x, the worker posts `wgpu-device-lost` with the scale;
+  the host's ceiling drops to 1 for the rest of the page (next boot and
+  every `setEnhancements` at 1x) and `onGpuDeviceLost({ internalResolution,
+  fallback: 1, reason, detail })` tells the page, which restarts the game at
+  1x instead of at the same scale. Lost at 1x: `fallback` is null.
 - The semantic capture (`?wgpusemanticruntime`, diagnostics) does not know
   opcode 29: a scale change invalidates that capture, as any opcode above
   24 does. At 1x nothing changes for it.
