@@ -25,7 +25,7 @@
       "commit": "01e0577914a75a2569c846778c2f93aa8e6feddd"
     }
   },
-  "patchSeriesSha256": "e0d04948d4cd80b8eb11192c0727a6cf1ff35d6883ef69a70de9d004796bfc0e",
+  "patchSeriesSha256": "ee10e953be1c8cc4ecb35060a7fadabeeaa1ec5082bb577c30ec0e5d2e0d4541",
   "patches": [
     {
       "order": 1,
@@ -1040,8 +1040,8 @@
       "cwd": ".",
       "hashMode": "lf-normalized",
       "path": "patches/dolphin-wasm/snapshot/0171-region-installs-after-state-load.patch",
-      "size": 14495,
-      "sha256": "f141d00b2ce7cbd78e680ced963fe06f01b19a7244a875b3201598da6d9124d1"
+      "size": 17854,
+      "sha256": "7160f2426b72670ddd116c63cd3ced3a0f0901ac0186ec4683350071249988d1"
     },
     {
       "order": 128,

@@ -1185,18 +1185,23 @@ function withModuleCost(plan, ms, fn, { atMost = false, loaded = true } = {}) {
   core.module._DolphinWeb_AotSetSleepWaitForTest(2000); // the production wait
   core.module._DolphinWeb_AotSetBehindWindowForTest(40); // 150 ms in production
   core.module._DolphinWeb_AotSetLargeBehindWaitForTest(100); // 500 ms in production
+  // measured: large installs cost what they are estimated at
+  const overrun = core.module._DolphinWeb_AotSetLargeOverrunForTest(1);
   if (loaded) {
     core.module._DolphinWeb_AotSetLoadWindowForTest(60000); // 3 s in production
-    core.module._DolphinWeb_JitOnStateLoaded();
+    core.module._DolphinWeb_JitOnStateLoaded(); // pending: the next slice opens it
   }
   try {
     return fn(sizes.length);
   } finally {
     core.module._DolphinWeb_AotSetInstallCostForTest(saved);
+    core.module._DolphinWeb_AotSetLargeOverrunForTest(overrun);
+    core.module._DolphinWeb_AotSetInstallDelayForTest(0);
     core.module._DolphinWeb_AotSetBehindWindowForTest(150);
     core.module._DolphinWeb_AotSetLargeBehindWaitForTest(500);
     core.module._DolphinWeb_AotSetLoadWindowForTest(0);
-    core.module._DolphinWeb_JitOnStateLoaded(); // closes it (a window of 0)
+    core.module._DolphinWeb_JitOnStateLoaded();
+    core.serviceRegions(); // a window of 0 from here: closed
     core.module._DolphinWeb_AotSetLoadWindowForTest(3000);
   }
 }
@@ -1234,7 +1239,6 @@ test("after a state load, behind: a large ready module installs at a slice only 
       }
       assert.equal(core.regionCount(), before + entries, "all in well under the 2 s wait");
       assert.equal(sleepCounters()[3], 0, "none waited the sleep wait out");
-      assert.ok(forcedCounters()[3] > 0, "the overrun of large installs is measured");
       const reference = runCall(PROGRAM.labels.main, { regions: false });
       assert.deepEqual(runCall(PROGRAM.labels.main, { regions: true }).state, reference.state);
     });
@@ -1246,6 +1250,7 @@ test("after a state load, behind: a large module whose estimate times the overru
     const plan = setup();
     core.setRegionsEnabled(true);
     withModuleCost(plan, 5, () => { // 5 ms x 1.5 > 6 ms
+      core.module._DolphinWeb_AotSetLargeOverrunForTest(1.5);
       const before = core.regionCount();
       readyAll(requests, plan);
       spin(150); // behind, and past the large wait
@@ -1319,10 +1324,76 @@ test("after a state load, not behind: a sleep window long enough seen within the
   });
 });
 
+test("after a state load: the overrun is measured on installs that happened, up at once, at most 4", { skip: behindSkip }, () => {
+  withOffThreadCompile((requests) => {
+    const plan = setup();
+    core.setRegionsEnabled(true);
+    withModuleCost(plan, 3, () => {
+      readyAll(requests, plan);
+      // each install takes 9 ms more than its 3 ms estimate: x 3 at least
+      core.module._DolphinWeb_AotSetInstallDelayForTest(9);
+      core.module._DolphinWeb_AotRegionSleepWindowForTest(60);
+      const ratio = forcedCounters()[3] / 100;
+      assert.ok(ratio >= 3 && ratio <= 4, `measured on the installs that happened (${ratio})`);
+      queueAll(setup());
+      core.module._DolphinWeb_AotSetInstallDelayForTest(60);
+      for (const r of requests()) Atomics.store(core.module.HEAPU8, r.readyPtr + r.readySlot, 1);
+      core.module._DolphinWeb_AotRegionSleepWindowForTest(500);
+      assert.equal(forcedCounters()[3], 400, "bounded at 4");
+    });
+  });
+});
+
+test("after a state load: forced installs stay within 4 ms of install per frame", { skip: behindSkip }, () => {
+  withOffThreadCompile((requests) => {
+    const plan = setup();
+    core.setRegionsEnabled(true);
+    withModuleCost(plan, 0.4, (modules) => {
+      const before = core.regionCount();
+      readyAll(requests, plan);
+      core.module._DolphinWeb_AotSetInstallDelayForTest(2.5); // each install takes 2.5 ms
+      for (let slice = 0; slice < 5; slice++) core.serviceRegions(); // well within one frame
+      const first = forcedCounters()[0];
+      assert.ok(first >= 1 && first <= 2, `two installs at most use the frame's 4 ms (${first})`);
+      if (modules > first) {
+        spin(20); // the next frame
+        for (let slice = 0; slice < 5; slice++) core.serviceRegions();
+        assert.ok(forcedCounters()[0] > first, "the next frame has its own budget");
+      }
+      assert.ok(core.regionCount() > before);
+    }, { atMost: true });
+  });
+});
+
+test("after a state load: the window closes", { skip: behindSkip }, () => {
+  withOffThreadCompile((requests) => {
+    const plan = setup();
+    core.setRegionsEnabled(true);
+    withModuleCost(plan, 0.4, () => {
+      core.module._DolphinWeb_AotSetLoadWindowForTest(30);
+      core.module._DolphinWeb_JitOnStateLoaded();
+      const before = core.regionCount();
+      readyAll(requests, plan); // its first slice opens the 30 ms window
+      spin(60);
+      for (let slice = 0; slice < 20; slice++) core.serviceRegions();
+      assert.equal(core.regionCount(), before, "closed: the sleep wait again");
+      assert.equal(forcedCounters()[0], 0);
+    }, { atMost: true });
+  });
+});
+
+test("0171: only a state load opens the window (JitInterface::DoState in read mode, not a save)", async () => {
+  const patch = await readFile(new URL("../patches/dolphin-wasm/snapshot/0072-jit-deterministic-engage-exception-oracle-inline-fma.patch", import.meta.url), "utf8");
+  assert.match(patch, / {3}if \(m_jit && p\.IsReadMode\(\)\)\n\+ {2}\{\n {5}m_jit->ClearCache\(\);\n\+#ifdef __EMSCRIPTEN__\n\+[^\n]*\n\+ {4}DolphinWeb_JitOnStateLoaded\(\);/);
+});
+
 test("0171 source: the window opens at a state load for 3 s, normal regime unchanged outside it", async () => {
   const patch = await readFile(new URL("../patches/dolphin-wasm/snapshot/0171-region-installs-after-state-load.patch", import.meta.url), "utf8");
   assert.match(patch, /\+std::chrono::milliseconds s_region_load_window\{3000\};/);
   assert.match(patch, /\+ {2}OpenRegionLoadWindow\(\);  \/\/ patch 0171\n {3}if \(s_wasm_armed_policy/, "opened by the state-load hook, armed JIT or not");
+  assert.match(patch, /\+constexpr double REGION_FORCED_FRAME_BUDGET_MS = 4\.0;/);
+  assert.match(patch, /\+constexpr double REGION_LARGE_OVERRUN_START = 3\.0;\n\+constexpr double REGION_LARGE_OVERRUN_MAX = 4\.0;/);
+  assert.match(patch, /\+ {4}if \(s_region_stats\.regions_installed > installed_now\)/, "measured and counted on installs that happened");
   assert.match(patch, /\+ {6}if \(!in_load_window\)\n\+ {8}return true;/, "outside the window: the sleep wait as before");
   assert.match(patch, /\+std::chrono::milliseconds s_region_behind_window\{150\};/);
   assert.match(patch, /\+ {6}const bool large = cost > REGION_SLICE_TARGET_MS;/);
