@@ -21,14 +21,16 @@ import { parseArgs } from "node:util";
 import { ensureServer, loadHarnessState, readTimeline, REPO_ROOT, workerRequest } from "../lib/browser.mjs";
 import { acquirePerfLock } from "../lib/perf-lock.mjs";
 import { openSession } from "../lib/session.mjs";
-import { distribution, streamTrackStats } from "../lib/stream-track.mjs";
+import { distribution, streamTrackStats, viToScreen } from "../lib/stream-track.mjs";
 
 const { values } = parseArgs({
   options: {
     iso: { type: "string" }, state: { type: "string" }, query: { type: "string" },
     port: { type: "string", default: process.env.HARNESS_PORT ?? "8100" }, runs: { type: "string", default: "1" },
     warmup: { type: "string", default: "15" }, secs: { type: "string", default: "20" }, hold: { type: "string", default: "KeyX" },
-    "lock-wait": { type: "string", default: "1800" }, "no-lock": { type: "boolean", default: false }, out: { type: "string" }
+    "lock-wait": { type: "string", default: "1800" }, "no-lock": { type: "boolean", default: false }, out: { type: "string" },
+    // the local display alone (no stream attached): its latency past the core
+    "no-stream": { type: "boolean", default: false }
   }
 });
 if (!values.iso || !values.state || !values.query) throw new Error("--iso, --state and --query are required");
@@ -45,7 +47,7 @@ async function measure(server, held) {
     const loaded = await loadHarnessState(s.page, s.url);
     if (!loaded?.loaded) return { error: "state load failed" };
     if (values.hold) await s.page.keyboard.down(values.hold);
-    const attached = await s.page.evaluate(() => {
+    const attached = values["no-stream"] ? null : await s.page.evaluate(() => {
       const track = window.__host?.captureVideoTrack?.();
       if (!track) return false;
       const reader = new MediaStreamTrackProcessor({ track }).readable.getReader();
@@ -61,18 +63,19 @@ async function measure(server, held) {
       })();
       return true;
     });
-    if (!attached) return { error: "no stream track (captureVideoTrack returned null)" };
+    if (attached === false) return { error: "no stream track (captureVideoTrack returned null)" };
     await s.page.waitForTimeout(warmupMs);
     await readTimeline(s.page);
-    await s.page.evaluate(() => { window.__streamFrames = []; window.__streamRecording = true; });
+    if (attached) await s.page.evaluate(() => { window.__streamFrames = []; window.__streamRecording = true; });
     await s.page.waitForTimeout(secs * 1000);
     const tl = await readTimeline(s.page);
-    const frames = await s.page.evaluate(() => { window.__streamRecording = false; return window.__streamFrames; });
+    const frames = attached ? await s.page.evaluate(() => { window.__streamRecording = false; return window.__streamFrames; }) : null;
     const presentVsync = await workerRequest(s.page, "validationReadPresentVsync", {}).catch((e) => ({ error: String(e.message || e) }));
     const intervals = (t) => t.slice(1).map((x, i) => x - t[i]);
     const d = tl.displayed;
     return {
-      stream: streamTrackStats(frames, secs),
+      stream: frames ? streamTrackStats(frames, secs) : null,
+      viToScreen: tl.displayed && tl.vi?.supported ? viToScreen(tl.vi, tl.displayed) : null,
       viInterval: distribution(intervals(tl.vi.t)),
       presentInterval: distribution(intervals(tl.presents.t)),
       display: { beginFrames: d.t.length, shown: d.submits.filter((n) => n > 0).length, with2plus: d.submits.filter((n) => n > 1).length },
@@ -97,7 +100,7 @@ for (let run = 1; run <= runs; run += 1) {
   clearTimeout(timer);
   if (held.session) await held.session.close().catch(() => {});
   records.push({ run, ...record });
-  console.log(`[stream-track] run ${run}: ${record.error ?? `stream ${record.stream.fps} fps, capture p99 ${record.stream.captureInterval.p99} ms, gaps ${record.stream.gaps}; display 2+ ${record.display.with2plus}/${record.display.beginFrames}`}`);
+  console.log(`[stream-track] run ${run}: ${record.error ?? `${record.stream ? `stream ${record.stream.fps} fps, capture p99 ${record.stream.captureInterval.p99} ms, gaps ${record.stream.gaps}; ` : ""}VI→screen p50 ${record.viToScreen?.p50} ms; display 2+ ${record.display.with2plus}/${record.display.beginFrames}`}`);
 }
 const result = { probe: "stream-track", at: new Date().toISOString(), query: values.query, state: path.basename(values.state), secs, locked: !values["no-lock"], runs: records };
 if (values.out) {

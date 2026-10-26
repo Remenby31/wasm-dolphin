@@ -34,3 +34,20 @@ export function streamTrackStats(frames, secs, { gapMs = 25 } = {}) {
     repeats: capture.filter((ms) => ms === 0).length
   };
 }
+
+// Local display latency past the core: for each BeginFrame that showed a
+// new picture, its time minus the time of the VI output that picture is
+// (the display counter's VI index, the core's VI timeline). Press → VI output
+// is the core's and the same whatever the presenter: this is the part a
+// presenter adds (?presentvsync's queue) before the screen. Both times are
+// on the harness clock (performance.timeOrigin + now).
+// vi: { t, sinceBoot } (validationReadTimeline), displayed: { t, submits, vi }.
+export function viToScreen(vi, displayed) {
+  const at = new Map();
+  vi.sinceBoot.forEach((n, i) => at.set(n, vi.t[i]));
+  const ms = [];
+  displayed.t.forEach((t, i) => {
+    if (displayed.submits[i] > 0 && at.has(displayed.vi[i])) ms.push(t - at.get(displayed.vi[i]));
+  });
+  return distribution(ms);
+}

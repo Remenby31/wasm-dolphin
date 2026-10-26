@@ -3,7 +3,7 @@
 import assert from "node:assert/strict";
 import { readFile } from "node:fs/promises";
 import test from "node:test";
-import { streamTrackStats } from "../harness/lib/stream-track.mjs";
+import { streamTrackStats, viToScreen } from "../harness/lib/stream-track.mjs";
 
 test("stream-track stats: rate, intervals, gaps over 25 ms and repeated captures", () => {
   // 60 Hz captures with one missed frame (33.4 ms) and one repeat (0 ms)
@@ -26,4 +26,13 @@ test("stream-track probe: takes the perf lock unless --no-lock, a watchdog per r
   assert.match(src, /if \(held\.session\) await held\.session\.close\(\)/, "a timed-out run's session is closed before the next");
   assert.match(src, /process\.exit\(/, "ensureServer keeps node alive: the probe must exit");
   assert.match(src, /window\.__host\?\.captureVideoTrack\?\.\(\)/);
+});
+
+test("VI → screen: each BeginFrame that showed a new picture against its VI output's time", () => {
+  const vi = { t: [1000, 1017, 1033], sinceBoot: [40, 41, 42] };
+  const displayed = { t: [1010, 1027, 1044, 1060], submits: [1, 0, 1, 1], vi: [40, -1, 41, 99] };
+  const d = viToScreen(vi, displayed);
+  assert.equal(d.n, 2, "nothing new on screen and a VI outside the timeline are left out");
+  assert.equal(d.p50, 27);
+  assert.equal(d.max, 27);
 });
