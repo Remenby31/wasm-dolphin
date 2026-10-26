@@ -841,6 +841,9 @@ let ppcWasmJitCorePaused = false;
 let ppcWasmJitTimingSuspensions = 0;
 let ppcWasmJitTier = "guarded";
 let ppcWasmJitWarmupFrames = 0; // set by every load (normalizePpcWasmJitWarmupFrames)
+// After a state load the warmup restarts from the loaded field, or counts
+// from boot ("boot", patch 0172); set by every load.
+let ppcWasmJitWarmupOnLoadMode = "restart";
 let pacedPresentationActive = false;
 let nextPacedPresentationTime = 0;
 let pacedPresentationTimer = 0;
@@ -2080,7 +2083,10 @@ async function handleMessage(type, payload) {
         loadedCheckpointPpcPc: loadedCheckpoint.ppcPc,
         // Emulated field at which the core engaged the JIT (-1: not yet).
         jitEngagedField: api?.getPpcWasmJitEngagedFrame?.() ?? null,
+        // 0 after a load with jitWarmupOnLoad "boot" (patch 0172): the
+        // warmup counts from boot, not from the loaded field.
         jitArmStartField: api?.getPpcWasmJitArmStartFrame?.() ?? null,
+        jitWarmupOnLoad: ppcWasmJitWarmupOnLoadMode,
         observedAtMs: performance.now(),
       };
     }
@@ -3205,7 +3211,8 @@ async function loadCore({
     api.setPpcWasmJitWarmup(ppcWasmJitTier === "mixed" ? 2 : 1, ppcWasmJitWarmupFrames);
     // Patch 0172: after a state load, the warmup counts from boot
     // (?jitwarmupload=boot) or restarts from the loaded field.
-    api.setJitWarmupOnLoad?.(ppcWasmJitWarmupOnLoad === "boot" ? 1 : 0);
+    ppcWasmJitWarmupOnLoadMode = ppcWasmJitWarmupOnLoad === "boot" ? "boot" : "restart";
+    api.setJitWarmupOnLoad?.(ppcWasmJitWarmupOnLoadMode === "boot" ? 1 : 0);
     ppcWasmJitArmed = true;
   } else {
     api.setPpcWasmJitEnabled?.(0);

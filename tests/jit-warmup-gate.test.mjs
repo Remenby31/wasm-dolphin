@@ -120,7 +120,8 @@ test("?jitwarmupload=boot reaches the core: host, adapter, worker message and lo
   assert.match(adapter, /ppcWasmJitWarmupOnLoad: this\.ppcWasmJitWarmupOnLoad,/, "rebuilt field by field: carried");
   assert.match(worker, /ppcWasmJitWarmupOnLoad: payload\.ppcWasmJitWarmupOnLoad,/);
   assert.match(worker, /setJitWarmupOnLoad: optionalCwrap\("DolphinWeb_SetJitWarmupOnLoad", null, \["number"\]\)/);
-  const set = worker.indexOf("api.setJitWarmupOnLoad?.(ppcWasmJitWarmupOnLoad");
+  const set = worker.indexOf("api.setJitWarmupOnLoad?.(ppcWasmJitWarmupOnLoadMode");
+  assert.match(worker, /jitArmStartField: [^\n]*\n {8}jitWarmupOnLoad: ppcWasmJitWarmupOnLoadMode,/, "reported next to the arm's start field");
   assert.ok(set > 0 && set < worker.indexOf("api.bootDisc(path)"), "set before the disc boots");
   const patch = await readFile(new URL("../patches/dolphin-wasm/snapshot/0172-jit-warmup-from-boot-on-load.patch", import.meta.url), "utf8");
   assert.match(patch, /\+std::atomic<bool> s_wasm_warmup_from_boot_on_load\{false\};/, "off by default");
