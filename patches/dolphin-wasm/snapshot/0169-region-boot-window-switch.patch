@@ -1,5 +1,5 @@
 diff --git a/Source/Core/Core/PowerPC/CachedInterpreter/CachedInterpreter.cpp b/Source/Core/Core/PowerPC/CachedInterpreter/CachedInterpreter.cpp
-index 7b59188..18f5bcc 100644
+index 7b59188..7a765db 100644
 --- a/Source/Core/Core/PowerPC/CachedInterpreter/CachedInterpreter.cpp
 +++ b/Source/Core/Core/PowerPC/CachedInterpreter/CachedInterpreter.cpp
 @@ -10606,6 +10606,13 @@ std::chrono::milliseconds s_region_ready_wait{5000};  // tests shorten it
@@ -27,7 +27,7 @@ index 7b59188..18f5bcc 100644
    const u32 installed_before = s_region_stats.regions_installed;
    // A ready module waits for a sleep window, the sleep wait at most from when
    // a slice first found it installable (not from its post: with #86 every
-@@ -11622,6 +11631,16 @@ void DolphinWeb_InvalidateRegions(u32 address, u32 size, bool forced)
+@@ -11622,6 +11631,48 @@ void DolphinWeb_InvalidateRegions(u32 address, u32 size, bool forced)
  // cache; a BAT update). Any code may have changed: every region is checked
  // against its plan before it next runs, and dropped then if its code moved.
  // Region code never runs the mtspr that sets ICFI (it is not a region op).
@@ -39,6 +39,38 @@ index 7b59188..18f5bcc 100644
 +extern "C" EMSCRIPTEN_KEEPALIVE int DolphinWeb_RegionBootMode()
 +{
 +  return s_region_boot_mode.load(std::memory_order_relaxed);
++}
++
++// Patch 0169 (diagnosis): where a region lookup at `pc` stops. Bits: 1 in
++// the filter, 2 an owner in s_region_at, 4 that region live, 8 verified,
++// 16 its entries list `pc`, 32 FindRegionIndex finds it (lookup slot
++// included); bits 8-23: the owner's index + 1 (0: none, capped).
++extern "C" EMSCRIPTEN_KEEPALIVE u32 DolphinWeb_RegionProbePc(u32 pc)
++{
++  u32 bits = RegionFilterHas(pc) ? 1u : 0u;
++  const auto it = s_region_at.find(pc);
++  if (it != s_region_at.end())
++  {
++    bits |= 2u;
++    const u32 index = it->second;
++    bits |= std::min<u32>(index + 1, 0xffff) << 8;
++    if (index < s_regions.size())
++    {
++      const InstalledRegion& region = s_regions[index];
++      if (region.live)
++        bits |= 4u;
++      if (region.verified)
++        bits |= 8u;
++      if (std::find(region.entries.begin(), region.entries.end(), pc) != region.entries.end())
++        bits |= 16u;
++    }
++  }
++  if (bits & 1u)
++  {
++    if (FindRegionIndex(pc) != NO_REGION)
++      bits |= 32u;
++  }
++  return bits;
 +}
 +
  extern "C" EMSCRIPTEN_KEEPALIVE void DolphinWeb_UnverifyRegions()

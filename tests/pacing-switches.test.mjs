@@ -244,4 +244,7 @@ test("regionboot: URL → host → adapter → worker → core, 0 unless 1 or 2"
   assert.match(core, /DolphinWeb_SetRegionBootMode\(/);
   assert.match(patch, /\+std::atomic<int> s_region_boot_mode\{0\};/, "shipped behaviour unless the page sets it");
   assert.match(patch, /\+  const bool boot = boot_mode != 1 && now - \*s_region_service_start </);
+  // the lookup probe (diagnosis), read with the ledger's PCs
+  assert.match(patch, /\+extern "C" EMSCRIPTEN_KEEPALIVE u32 DolphinWeb_RegionProbePc\(u32 pc\)/);
+  assert.match(worker, /const probe = moduleInstance\?\._DolphinWeb_RegionProbePc;/);
 });

@@ -393,7 +393,11 @@ function harnessRegionLedger(pcs) {
   const at = (Array.isArray(pcs) ? pcs : []).slice(0, 64).map((pc) => {
     const holders = [];
     for (const [key, r] of aotRegionLedger) if (r.entries.includes(pc >>> 0)) holders.push({ key, outcome: r.outcome, ms: r.ms });
-    return { pc: pc >>> 0, holders };
+    // patch 0169 (diagnosis): where the core's region lookup at this PC stops
+    const probe = moduleInstance?._DolphinWeb_RegionProbePc;
+    const b = typeof probe === "function" ? probe(pc >>> 0) >>> 0 : null;
+    const core = b === null ? null : { filter: Boolean(b & 1), owner: Boolean(b & 2), live: Boolean(b & 4), verified: Boolean(b & 8), entryListed: Boolean(b & 16), found: Boolean(b & 32), ownerIndex: ((b >>> 8) & 0xffff) - 1 };
+    return { pc: pc >>> 0, holders, core };
   });
   const mapped = moduleInstance?._DolphinWeb_JitRegionCount;
   return { modules: aotRegionLedger.size, outcomes, queuedEntries: entries, mappedRegions: typeof mapped === "function" ? mapped() >>> 0 : null, nowMs: Math.round(performance.now()), pcs: at };
