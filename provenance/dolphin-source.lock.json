@@ -25,7 +25,7 @@
       "commit": "01e0577914a75a2569c846778c2f93aa8e6feddd"
     }
   },
-  "patchSeriesSha256": "85b2bac30040bf96b88f6d95837f55ffc082dbe32e7d27195c40d0e4da0c7479",
+  "patchSeriesSha256": "396063926e5a7a2ef08e1bfdd3e9985c807b96ff4cc22bed6a3614a0842b7c3d",
   "patches": [
     {
       "order": 1,
@@ -1040,8 +1040,8 @@
       "cwd": ".",
       "hashMode": "lf-normalized",
       "path": "patches/dolphin-wasm/snapshot/0170-region-install-when-behind.patch",
-      "size": 7637,
-      "sha256": "bba611306c34a96fcdb05371b20584030e7f3a17ecdc4069900edcf781536790"
+      "size": 8377,
+      "sha256": "638fb11f1bfd37903c9f1daa1bbfd7b54e488aa6358862bd197e9c6d4130e661"
     },
     {
       "order": 128,
