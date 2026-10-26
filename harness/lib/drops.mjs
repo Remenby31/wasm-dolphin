@@ -508,15 +508,26 @@ export function beginFrameGaps(displayed, page) {
 
 // Distinct images per guest second, the screen-unmeasured intervals left out
 // of both the count (the image that closes one) and the guest time (theirs).
+// Null when what is left measured is too short to be a rate (review of #286:
+// 0.1 s and 2 images missing read 40 instead of 60): under MIN_MEASURED_SEC
+// of guest time, or under half the phase.
+export const MIN_MEASURED_SEC = 1;
 export function displayedPerGuestSecOf(display, guestSec, vi, tps) {
-  if (!display || !(guestSec > 0) || display.distinct == null) return null;
-  const spans = display.unmeasuredSpans ?? [];
-  const guestIn = (a, b) => {
-    const g0 = interpolate(vi, "ticks", a), g1 = interpolate(vi, "ticks", b);
-    return g0 == null || g1 == null || !(tps > 0) ? 0 : Math.max(0, (g1 - g0) / tps);
-  };
-  const sec = guestSec - spans.reduce((s, [a, b]) => s + guestIn(a, b), 0);
-  return sec > 0 ? round(Math.max(0, display.distinct - spans.length) / sec, 2) : null;
+  if (!display || !(guestSec > 0) || display.distinct == null || !(tps > 0) || vi.length < 2) return null;
+  // Each span bounded to the VI timeline (review of #286: a span ending past
+  // the last VI output interpolated to nothing, its time not taken out while
+  // its image was); a span wholly outside takes nothing out.
+  const lo = vi[0].t, hi = vi.at(-1).t;
+  let out = 0, images = 0;
+  for (const [a, b] of display.unmeasuredSpans ?? []) {
+    const from = Math.max(a, lo), to = Math.min(b, hi);
+    if (to <= from) continue;
+    out += Math.max(0, (interpolate(vi, "ticks", to) - interpolate(vi, "ticks", from)) / tps);
+    images += 1;
+  }
+  const sec = guestSec - out;
+  if (!(sec >= MIN_MEASURED_SEC) || sec < guestSec / 2) return null;
+  return round(Math.max(0, display.distinct - images) / sec, 2);
 }
 
 export function dropSummary({ windows, presents = [], vi = [], tps = null, rows = [], displayed = null, page = null }) {

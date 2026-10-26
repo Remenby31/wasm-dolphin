@@ -69,7 +69,7 @@ import { num, sideOrder, STATE_ROUTE } from "./race-perf.mjs";
 // What this probe runs in the page and the worker (samplers, counters): an
 // A/A's noise holds only for the same version (review of #271: the page's
 // rAF counter changes the environment). Raised with each such change.
-export const PROBE_VERSION = 2;
+export const PROBE_VERSION = 3; // 3: the power source per run and per summary (an older A/A has none)
 
 // What the site runs (salon packages/core engineParams, profile "fast", with
 // a WebGPU adapter).
@@ -216,6 +216,7 @@ async function playVisit(o, server, profileDir, shotDir, visit) {
         if (shotDir && step.label) savePng(await grabFrame(page), path.join(shotDir, `${String(raw.markers.length).padStart(2, "0")}-${step.label}.png`));
       }
       raw.endT = performance.timeOrigin + performance.now();
+      raw.powerEnd = powerSnapshot(); // unplugged (or plugged in) during the visit: "mixed"
       raw.endGuest = o.scenario.end + base;
     } finally {
       draining = false;
@@ -285,7 +286,7 @@ export function analyzeVisit(raw, { native = null } = {}) {
   const regionsDone = allAt ? { regions: finalRegions, hostMsFromLaunch: raw.launchT ? Math.round(allAt.t - raw.launchT) : null, guestSec: allAt.ticks != null && raw.tps ? round(allAt.ticks / raw.tps, 2) : null } : null;
   const rss = (raw.rss ?? []).map((x) => x[1]);
   return {
-    timelineComplete: timeline.complete, sampled: rows.length > 0, power: raw.power?.source ?? null, browser: raw.browser ?? null, bootMs: raw.bootMs, pc: raw.pc ?? null,
+    timelineComplete: timeline.complete, sampled: rows.length > 0, power: powerOfVisit(raw), browser: raw.browser ?? null, bootMs: raw.bootMs, pc: raw.pc ?? null,
     load1: { median: round(median(loadAvg), 2), max: round(Math.max(...loadAvg), 2) },
     regionsDone, rssPeakMB: rss.length ? Math.max(...rss) : null,
     summary: { ...dropSummary({ windows, presents, vi, tps: raw.tps, rows: rows.filter(span), displayed, page: page.filter(span) }), loads: loads.length, loadExcessMs: loads.reduce((a, l) => a + l.excessMs, 0), rssPeakMB: rss.length ? Math.max(...rss) : null, regionsDoneMs: regionsDone?.hostMsFromLaunch ?? null },
@@ -341,6 +342,17 @@ export function humanSummary(summary) {
 }
 
 // Why a comparison gives no verdict (exit code 3), or null (pure).
+// A visit's power source: the same at its start and end, else "mixed"; null
+// when unknown (another OS, a desktop).
+export function powerOfVisit(raw) {
+  const a = raw.power?.source ?? null, b = raw.powerEnd?.source ?? a;
+  return a === b ? a : "mixed";
+}
+// The sources of a batch's runs (known ones), sorted.
+export function powerSourcesOf(analyses) {
+  return [...new Set(analyses.filter((a) => !a.analysis?.error && a.analysis?.power).map((a) => a.analysis.power))].sort();
+}
+
 export function noVerdictReasons({ analyses, visits, gaveUp = null, verdicts }) {
   const reasons = [];
   if (gaveUp) reasons.push(gaveUp);
@@ -349,10 +361,10 @@ export function noVerdictReasons({ analyses, visits, gaveUp = null, verdicts }) 
   if (bySide("baseline").length && (bySide("baseline").join() !== bySide("candidate").join() || bySide("candidate").length > 1)) {
     reasons.push("the sides were not sampled alike (one without the drop sampler): their costs differ");
   }
-  // On mains for some runs and on battery for others (unplugged mid-batch):
-  // the runs are from two machines, as far as speed goes.
-  const powers = new Set(analyses.filter((a) => !a.analysis.error && a.analysis.power).map((a) => a.analysis.power));
-  if (powers.size > 1) reasons.push(`runs on ${[...powers].join(" and ")}: the power source changed during the batch`);
+  // On mains for some runs and on battery for others (unplugged mid-batch),
+  // or within a run: the runs are from two machines, as far as speed goes.
+  const powers = powerSourcesOf(analyses);
+  if (powers.length > 1 || powers.includes("mixed")) reasons.push(`runs on ${powers.join(" and ")}: the power source changed during the batch`);
   for (let v = 1; v <= visits; v += 1) {
     const vv = verdicts[v];
     if (!vv) continue;
@@ -379,6 +391,8 @@ function writeSummary(outDir, meta, analyses, visits, { noise = null, confirm = 
     }
     summary.visitSummary.push(entry);
   }
+  // every batch, an A/A included: what --noise checks
+  summary.powerSources = powerSourcesOf(analyses);
   if (analyses.some((a) => a.side === "baseline")) {
     summary.noVerdict = noVerdictReasons({ analyses, visits, gaveUp: meta.gaveUp, verdicts });
     if (meta.staleNoise) summary.noVerdict = [meta.staleNoise, ...(summary.noVerdict ?? [])];
@@ -442,9 +456,12 @@ export function readNoise(file, expect = null) {
     // the same machine, and the same browser when both runs say which
     if (expect.cpuModel && s.machine?.cpuModel && s.machine.cpuModel !== expect.cpuModel) differ.push("cpuModel");
     if (expect.browser && s.browser && s.browser !== expect.browser) differ.push("browser");
-    // on mains vs on battery (when both runs say): another machine, as far as noise goes
-    const power = s.machine?.power?.source;
-    if (expect.powerSource && power && power !== expect.powerSource) differ.push("power");
+    // on mains vs on battery: another machine, as far as noise goes; an A/A
+    // whose runs mixed both (or a run that did) is no noise for either
+    const sources = s.powerSources ?? [];
+    const power = sources.length === 1 ? sources[0] : sources.length ? sources.join("+") : s.machine?.power?.source ?? null;
+    if (sources.length > 1 || sources.includes("mixed")) differ.push("power");
+    else if (expect.powerSource && power && power !== expect.powerSource) differ.push("power");
     named.power = [power, expect.powerSource];
     if (differ.length) throw new Error(`--noise ${file}: another measure (${differ.map((k) => `${k} ${named[k]?.[0] ?? s[k] ?? unset[k]} vs ${named[k]?.[1] ?? expect[k] ?? unset[k]}`).join("; ")})`);
   }

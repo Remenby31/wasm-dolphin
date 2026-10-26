@@ -268,6 +268,41 @@ test("displayedPerGuestSec leaves the screen-unmeasured intervals out", async ()
   assert.equal(displayedPerGuestSecOf(display, 10, vi, TPS), 90);
   assert.equal(displayedPerGuestSecOf({ distinct: 600 }, 10, vi, TPS), 60, "none unmeasured: as before");
   assert.equal(displayedPerGuestSecOf(null, 10, vi, TPS), null);
+  // review of #286: a span running past the last VI output is bounded to it
+  // (its time taken out with its image), one wholly outside takes nothing
+  assert.equal(displayedPerGuestSecOf({ distinct: 541, unmeasuredSpans: [[6000, 14000]] }, 10, vi, TPS), 90);
+  assert.equal(displayedPerGuestSecOf({ distinct: 600, unmeasuredSpans: [[11000, 12000]] }, 10, vi, TPS), 60);
+  // too little left measured (0.1 s, or under half the phase): no rate, not a fall
+  assert.equal(displayedPerGuestSecOf({ distinct: 10, unmeasuredSpans: [[0, 9900]] }, 10, vi, TPS), null);
+  assert.equal(displayedPerGuestSecOf({ distinct: 300, unmeasuredSpans: [[0, 6000]] }, 10, vi, TPS), null);
+});
+
+// review of #286: the power source at the end of a visit too ("mixed" when it
+// changed), the batch's sources in every summary, refused by --noise when mixed.
+test("power: a visit unplugged midway is mixed; an A/A with mixed sources is no noise", async (t) => {
+  const { powerOfVisit, powerSourcesOf } = await import("../harness/probes/drop-meter.mjs");
+  assert.equal(powerOfVisit({ power: { source: "ac" }, powerEnd: { source: "ac" } }), "ac");
+  assert.equal(powerOfVisit({ power: { source: "ac" }, powerEnd: { source: "battery" } }), "mixed");
+  assert.equal(powerOfVisit({ power: { source: "battery" } }), "battery");
+  assert.equal(powerOfVisit({}), null);
+  const r = (power, error) => ({ analysis: { power, ...(error ? { error } : {}) } });
+  assert.deepEqual(powerSourcesOf([r("ac"), r("ac"), r(null), r("battery", "x")]), ["ac"]);
+  assert.deepEqual(powerSourcesOf([r("ac"), r("mixed")]), ["ac", "mixed"]);
+  const p = (side, power) => ({ side, visit: 1, analysis: { overloaded: false, sampled: true, power } });
+  const verdicts = { 1: { inconclusive: false } };
+  assert.match(noVerdictReasons({ analyses: [p("baseline", "ac"), p("candidate", "ac"), p("baseline", "ac"), p("candidate", "mixed"), p("baseline", "ac"), p("candidate", "ac")], visits: 1, verdicts }).join(), /power source changed/);
+  const { mkdtempSync, writeFileSync, rmSync } = await import("node:fs");
+  const os = await import("node:os");
+  const path = await import("node:path");
+  const root = mkdtempSync(path.join(os.tmpdir(), "drops-power-mixed-"));
+  t.after(() => rmSync(root, { recursive: true, force: true }));
+  const base = { probe: "drop-meter", probeVersion: 3, scenario: "s.json", state: null, query: "q", sampleMs: 50, display: true, visitSummary: [{ visit: 1, noise: {}, phases: {} }] };
+  const expect = { probeVersion: 3, scenario: "s.json", state: null, query: "q", sampleMs: 50, display: true };
+  writeFileSync(path.join(root, "mixed.json"), JSON.stringify({ ...base, powerSources: ["ac", "battery"] }));
+  writeFileSync(path.join(root, "ac.json"), JSON.stringify({ ...base, powerSources: ["ac"] }));
+  assert.throws(() => readNoise(path.join(root, "mixed.json"), { ...expect, powerSource: "ac" }), /power ac\+battery/);
+  assert.ok(readNoise(path.join(root, "ac.json"), { ...expect, powerSource: "ac" })[1]);
+  assert.throws(() => readNoise(path.join(root, "ac.json"), { ...expect, powerSource: "battery" }), /power ac vs battery/);
 });
 
 // Review of #261 (P1-4, then P1-b): a 50 ms stall the throttle then makes
