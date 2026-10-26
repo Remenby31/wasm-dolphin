@@ -143,8 +143,8 @@ test("presentvsync: the backbuffer pass renders into a pooled texture, shown at 
   // queues it whatever this drain saw, never a drain-local texture
   assert.match(worker, /if \(wgpuPresentVsync\) \{\n(?:\s+\/\/[^\n]*\n)+\s+queueWgpuVsyncFrame\(api\?\.getFrame/);
   assert.doesNotMatch(worker, /queueWgpuVsyncFrame\(lastBackbufferTexture/);
-  const present = worker.slice(worker.indexOf("function presentWgpuVsyncFrame()"), worker.indexOf("function wgpuCanvasUsage("));
-  assert.match(present, /const f = wgpuVsync\.takeForDisplay\(wgpuVsyncTick\);/, "the oldest queued frame, after the catch-up");
+  const present = worker.slice(worker.indexOf("function presentWgpuVsyncFrame("), worker.indexOf("function wgpuCanvasUsage("));
+  assert.match(present, /const f = newest \? wgpuVsync\.takeNewest\(\) : wgpuVsync\.takeForDisplay\(wgpuVsyncTick\);/, "the oldest queued frame, after the catch-up");
   assert.match(present, /copyTextureToTexture\(/);
   // v3: the stream no longer follows the display: nothing captured at the rAF
   assert.doesNotMatch(present, /streamCapture\.offerCanvas\(/);
@@ -159,7 +159,7 @@ test("presentvsync: the backbuffer pass renders into a pooled texture, shown at 
 
 test("presentvsync catch-up: a frame that already waited a BeginFrame gives way to a newer one, counted", async () => {
   const worker = await readFile(new URL("../src/upstream-discio-worker.js", import.meta.url), "utf8");
-  const present = worker.slice(worker.indexOf("function presentWgpuVsyncFrame()"), worker.indexOf("function wgpuCanvasUsage("));
+  const present = worker.slice(worker.indexOf("function presentWgpuVsyncFrame("), worker.indexOf("function wgpuCanvasUsage("));
   // the behaviour is tested on the module (tests/wgpu-vsync-queue.test.mjs)
   assert.match(present, /wgpuVsync\.takeForDisplay\(wgpuVsyncTick\)/);
   assert.match(worker, /wgpuVsync\.queueFrame\(\{ coreFrame, shownVi, stream, tick: wgpuVsyncTick \}, \{ hidden \}\)/);
@@ -253,6 +253,6 @@ test("presentvsync: the input marker, cadence sample and readbacks read the fram
 test("presentvsync: a frame queued while the rAF is late is shown at once", async () => {
   const worker = await readFile(new URL("../src/upstream-discio-worker.js", import.meta.url), "utf8");
   assert.match(worker, /const WGPU_VSYNC_LATE_MS = 25;/);
-  assert.match(worker, /\} else if \(performance\.now\(\) - wgpuVsyncLastTickAt > WGPU_VSYNC_LATE_MS\) \{\n[^\n]*\n {4}wgpuPresentVsyncStats\.byLate \+= 1;\n {4}presentWgpuVsyncFrame\(\);/);
+  assert.match(worker, /\} else if \(performance\.now\(\) - wgpuVsyncLastTickAt > WGPU_VSYNC_LATE_MS\) \{\n(?: {4}\/\/[^\n]*\n)+ {4}wgpuPresentVsyncStats\.byLate \+= 1;\n {4}presentWgpuVsyncFrame\(\{ newest: true \}\);/);
   assert.match(worker, /const wgpuPresentVsyncStats = \{ byTimer: 0, byLate: 0, streamed: 0 \};/);
 });

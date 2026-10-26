@@ -136,3 +136,13 @@ test("clear(): the device is gone, the queue and the frame in progress go", () =
   assert.equal(q.current, null);
   assert.equal(q.takeForDisplay(5), null);
 });
+
+test("takeNewest: with no BeginFrame to wait for, the newest frame, older ones caught up", () => {
+  const { q, frame } = harness({ queueSize: 2 });
+  frame(); q.queueFrame({ tick: 7, i: 0 });
+  frame(); q.queueFrame({ tick: 7, i: 1 });
+  const f = q.takeNewest();
+  assert.equal(f.i, 1);
+  assert.equal(q.waiting, 0, "nothing left for a burst when the rAF comes back");
+  assert.equal(q.stats.caughtUp, 1);
+});

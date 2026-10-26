@@ -112,6 +112,19 @@ export function createVsyncQueue({ queueSize = 2, poolSize = queueSize + 1, crea
       key = "";
     },
 
+    // With no BeginFrame to wait for (the presenter's rAF is late or
+    // silent): the newest frame, the older ones dropped as caught up, so a
+    // silent rAF never leaves the display a frame behind and leaves nothing
+    // to show in a burst when it comes back.
+    takeNewest() {
+      while (queue.length > 1) {
+        giveBack(queue.shift().tex);
+        stats.dropped += 1;
+        stats.caughtUp += 1;
+      }
+      return queue.shift() ?? null;
+    },
+
     // After its copy is submitted (same GPU queue: it runs before any later
     // pass renders into the texture).
     shown(frame) {

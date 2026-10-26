@@ -12901,9 +12901,10 @@ function queueWgpuVsyncFrame(coreFrame, shownVi, stream) {
     };
     self.requestAnimationFrame(tick);
   } else if (performance.now() - wgpuVsyncLastTickAt > WGPU_VSYNC_LATE_MS) {
-    // The rAF is late (busy worker): no BeginFrame to wait for, show it now.
+    // The rAF is late or silent (busy worker, a headless rAF that stops for
+    // seconds): no BeginFrame to wait for, the newest frame now.
     wgpuPresentVsyncStats.byLate += 1;
-    presentWgpuVsyncFrame();
+    presentWgpuVsyncFrame({ newest: true });
   }
   wgpuVsyncFallback ??= setTimeout(wgpuVsyncFallbackCheck, WGPU_VSYNC_FALLBACK_MS);
   return true;
@@ -12927,13 +12928,13 @@ function wgpuVsyncFallbackCheck() {
 
 // One queued frame to the canvas: the oldest, so a burst is shown in order
 // (after the catch-up, in takeForDisplay). True when a frame was shown.
-function presentWgpuVsyncFrame() {
+function presentWgpuVsyncFrame({ newest = false } = {}) {
   if (!renderGpu) {
     wgpuVsync.clear();
     return false;
   }
   const before = wgpuVsync.stats.dropped;
-  const f = wgpuVsync.takeForDisplay(wgpuVsyncTick);
+  const f = newest ? wgpuVsync.takeNewest() : wgpuVsync.takeForDisplay(wgpuVsyncTick);
   wgpuVsyncCountDrops(before);
   if (!f) return false;
   const dev = renderGpu.device;
