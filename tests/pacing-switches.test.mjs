@@ -247,4 +247,8 @@ test("regionboot: URL → host → adapter → worker → core, 0 unless 1 or 2"
   // the lookup probe (diagnosis), read with the ledger's PCs
   assert.match(patch, /\+extern "C" EMSCRIPTEN_KEEPALIVE u32 DolphinWeb_RegionProbePc\(u32 pc\)/);
   assert.match(worker, /const probe = moduleInstance\?\._DolphinWeb_RegionProbePc;/);
+  // per-PC watch (diagnosis): attempts and region codes, read without a reset
+  assert.match(patch, /\+  if \(count < 0\)\n\+    return static_cast<u32>/);
+  assert.match(patch, /\+  if \(watch && code >= 0 && code <= 3\)\n\+    watch\[2 \+ code\] \+= 1;/);
+  assert.match(worker, /case "validationRegionWatch": \{/);
 });

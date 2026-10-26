@@ -1999,6 +1999,32 @@ async function handleMessage(type, payload) {
     case "validationReadRelaxedMadd":
       // coreFused: the core's own mode (null: a core without patch 0129).
       return { mode: relaxedMadd, coreFused: moduleInstance?._DolphinWeb_FusedMadd ? moduleInstance._DolphinWeb_FusedMadd() === 1 : null };
+    case "validationRegionWatch": {
+      // patch 0169 (diagnosis): `pcs` (<= 8) sets the watched PCs and zeroes
+      // their counters; without, reads them: per PC, region attempts and the
+      // codes its region returned (0 normal, 1 not an entry, 2 stop, 3 return).
+      if (!harnessEnabled) return { error: "harness hooks are off" };
+      const watch = moduleInstance?._DolphinWeb_RegionWatch;
+      if (typeof watch !== "function") return { supported: false };
+      const heap = moduleInstance.HEAPU8;
+      let ptr;
+      if (Array.isArray(payload?.pcs)) {
+        const pcs = payload.pcs.slice(0, 8).map((pc) => pc >>> 0);
+        const buf = moduleInstance._malloc(4 * Math.max(1, pcs.length));
+        new Uint32Array(heap.buffer, buf, pcs.length).set(pcs);
+        ptr = watch(buf, pcs.length) >>> 0;
+        moduleInstance._free(buf);
+      } else {
+        ptr = watch(0, -1) >>> 0;
+      }
+      const w = Array.from(new Uint32Array(moduleInstance.HEAPU8.buffer, ptr, 48));
+      const slots = [];
+      for (let i = 0; i < 8; i += 1) {
+        const [pc, tries, normal, notEntry, stop, guestReturn] = w.slice(i * 6, i * 6 + 6);
+        if (pc) slots.push({ pc, tries, ran: normal + notEntry + stop + guestReturn, normal, notEntry, stop, guestReturn });
+      }
+      return { supported: true, slots };
+    }
     case "validationReadPacingConfig":
       return harnessPacingConfig();
     case "validationReadJitRegionStats":

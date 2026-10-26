@@ -1,5 +1,5 @@
 diff --git a/Source/Core/Core/PowerPC/CachedInterpreter/CachedInterpreter.cpp b/Source/Core/Core/PowerPC/CachedInterpreter/CachedInterpreter.cpp
-index 7b59188..7a765db 100644
+index 7b59188..fefe3f4 100644
 --- a/Source/Core/Core/PowerPC/CachedInterpreter/CachedInterpreter.cpp
 +++ b/Source/Core/Core/PowerPC/CachedInterpreter/CachedInterpreter.cpp
 @@ -10606,6 +10606,13 @@ std::chrono::milliseconds s_region_ready_wait{5000};  // tests shorten it
@@ -27,7 +27,45 @@ index 7b59188..7a765db 100644
    const u32 installed_before = s_region_stats.regions_installed;
    // A ready module waits for a sleep window, the sleep wait at most from when
    // a slice first found it installable (not from its post: with #86 every
-@@ -11622,6 +11631,48 @@ void DolphinWeb_InvalidateRegions(u32 address, u32 size, bool forced)
+@@ -11326,8 +11335,28 @@ bool RegionGuardsHold(const PowerPC::PowerPCState& ppc_state)
+   return !ppc_state.msr.LE && !ppc_state.msr.FE0 && !ppc_state.msr.FE1 && HID2(ppc_state).LSQE;
+ }
+ 
++// Patch 0169 (diagnosis): up to 8 watched PCs; for each, the region
++// attempts at it (TryRunRegion reached) and the codes its region returned
++// (0 left normally, 1 not an entry, 2 stop, 3 guest return). Attempts minus
++// runs: refused (mode, guard, lookup, verification). Words per slot: pc,
++// tries, code 0, code 1, code 2, code 3.
++std::array<u32, 8 * 6> s_region_watch{};
++u32 s_region_watch_count = 0;
++inline u32* RegionWatchSlot(u32 pc)
++{
++  for (u32 i = 0; i < s_region_watch_count; ++i)
++  {
++    if (s_region_watch[i * 6] == pc)
++      return &s_region_watch[i * 6];
++  }
++  return nullptr;
++}
++
+ bool TryRunRegion(PowerPC::PowerPCState& ppc_state)
+ {
++  u32* const watch = s_region_watch_count != 0 ? RegionWatchSlot(ppc_state.pc) : nullptr;
++  if (watch)
++    watch[1] += 1;
+   if (!RegionFilterHas(ppc_state.pc))
+     return false;
+   // Regions keep no performance monitor counts (the block path does), and
+@@ -11418,6 +11447,8 @@ bool TryRunRegion(PowerPC::PowerPCState& ppc_state)
+     else if (code == 2)
+       s_region_stats.region_stops += 1;
+   }
++  if (watch && code >= 0 && code <= 3)
++    watch[2 + code] += 1;
+   return code != 1;
+ }
+ // Block chaining stops where a region would run: at a mapped entry, in the
+@@ -11622,6 +11653,62 @@ void DolphinWeb_InvalidateRegions(u32 address, u32 size, bool forced)
  // cache; a BAT update). Any code may have changed: every region is checked
  // against its plan before it next runs, and dropped then if its code moved.
  // Region code never runs the mtspr that sets ICFI (it is not a region op).
@@ -39,6 +77,20 @@ index 7b59188..7a765db 100644
 +extern "C" EMSCRIPTEN_KEEPALIVE int DolphinWeb_RegionBootMode()
 +{
 +  return s_region_boot_mode.load(std::memory_order_relaxed);
++}
++
++// Patch 0169 (diagnosis): watch these PCs (count <= 8; 0 stops watching) and
++// zero their counters; count < 0 only reads. Returns the counters' address
++// (8 x 6 u32).
++extern "C" EMSCRIPTEN_KEEPALIVE u32 DolphinWeb_RegionWatch(const u32* pcs, int count)
++{
++  if (count < 0)
++    return static_cast<u32>(reinterpret_cast<std::uintptr_t>(s_region_watch.data()));
++  s_region_watch.fill(0);
++  s_region_watch_count = static_cast<u32>(std::clamp(count, 0, 8));
++  for (u32 i = 0; i < s_region_watch_count; ++i)
++    s_region_watch[i * 6] = pcs[i];
++  return static_cast<u32>(reinterpret_cast<std::uintptr_t>(s_region_watch.data()));
 +}
 +
 +// Patch 0169 (diagnosis): where a region lookup at `pc` stops. Bits: 1 in
