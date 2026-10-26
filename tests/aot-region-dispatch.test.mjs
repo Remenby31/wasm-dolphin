@@ -8,6 +8,7 @@
 
 import assert from "node:assert/strict";
 import { createHash } from "node:crypto";
+import { readFile } from "node:fs/promises";
 import test from "node:test";
 import { fileURLToPath } from "node:url";
 
@@ -1149,6 +1150,47 @@ test("a large module's sleep wait counts from when it became installable; past i
       assert.equal(sleepCounters()[0], 0, "no sleep install");
     });
   });
+});
+
+// Patch 0170: a module asked again after a state load (RepostWaitingRegions)
+// waited up to the full 2 s sleep wait again, its entries refused all along
+// (heavy savestate: ~20 % of tries refused in ~1 run of 3). Asked again, it
+// waits for a sleep window at most the repost wait (150 ms), then a slice
+// installs it, within the slice budget as before.
+const repostSkip = clearCacheSkip || (typeof core?.module._DolphinWeb_AotSetRepostSleepWaitForTest !== "function" && "core without the repost sleep wait (0170)");
+test("a module asked again after a cache clear waits the repost wait, not the full sleep wait", { skip: repostSkip }, () => {
+  withOffThreadCompile((requests) => {
+    const plan = setup();
+    core.setRegionsEnabled(true);
+    core.module._DolphinWeb_AotSetSleepWaitForTest(2000); // the production wait
+    core.module._DolphinWeb_AotSetRepostSleepWaitForTest(40); // 150 ms in production
+    try {
+      const before = core.regionCount();
+      const entries = queueAll(plan);
+      core.serviceRegions();
+      const first = requests().length;
+      clearCache(); // the state load before the worker answered
+      core.serviceRegions();
+      for (const r of requests().slice(first)) Atomics.store(core.module.HEAPU8, r.readyPtr + r.readySlot, 1);
+      for (let slice = 0; slice < 20; slice++) core.serviceRegions();
+      assert.equal(core.regionCount(), before, "ready: it still waits for a sleep window, for a while");
+      spin(60); // no sleep came within the repost wait
+      for (let slice = 0; slice < 50 && core.regionCount() < before + entries; slice++) core.serviceRegions();
+      assert.equal(core.regionCount(), before + entries, "installed at slice boundaries well before 2 s");
+      assert.ok(sleepCounters()[3] >= 1, "counted as installed after the wait ran out");
+    } finally {
+      core.module._DolphinWeb_AotSetRepostSleepWaitForTest(150);
+      core.module._DolphinWeb_AotSetSleepWaitForTest(2000);
+    }
+  });
+});
+
+test("0170 source: the repost wait is 150 ms and only modules asked again use it", async () => {
+  const patch = await readFile(new URL("../patches/dolphin-wasm/snapshot/0170-region-repost-sleep-wait.patch", import.meta.url), "utf8");
+  assert.match(patch, /\+std::chrono::milliseconds s_region_repost_sleep_wait\{150\};/);
+  assert.match(patch, /\+ {4}waiting\.reposted = true;/);
+  assert.match(patch, /\+ {4}waiting\.installable_since\.reset\(\);/, "the wait counts from the new ready mark");
+  assert.match(patch, /\(pending\.reposted \? s_region_repost_sleep_wait : s_region_sleep_wait\)/);
 });
 
 // Continuation fragments (2026-10-23): a function of more blocks than one

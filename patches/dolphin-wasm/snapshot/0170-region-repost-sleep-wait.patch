@@ -1,0 +1,63 @@
+diff --git a/Source/Core/Core/PowerPC/CachedInterpreter/CachedInterpreter.cpp b/Source/Core/Core/PowerPC/CachedInterpreter/CachedInterpreter.cpp
+index 655482f..53ba826 100644
+--- a/Source/Core/Core/PowerPC/CachedInterpreter/CachedInterpreter.cpp
++++ b/Source/Core/Core/PowerPC/CachedInterpreter/CachedInterpreter.cpp
+@@ -10575,6 +10575,12 @@ struct PendingRegion
+   // A cache clear (a state load) zeroed every ready byte and forgot the
+   // requests in flight: a mark that landed before it is lost. Asked again.
+   bool repost = false;
++  // Patch 0170: asked again after a state load. It waits for a sleep window
++  // at most s_region_repost_sleep_wait, not s_region_sleep_wait: the scene
++  // the load brings (a heavy one rarely sleeps) ran its code in blocks for
++  // up to 2 s while its compiled module waited (the heavy scene's slow mode,
++  // 2026-10-26: 15 to 20 % of a 6 s window).
++  bool reposted = false;
+   // WasmLayoutHash of the layout its code was translated for: the code embeds
+   // absolute addresses of this session's heap (RAM, L1), so a module built in
+   // another session runs only where they are the same.
+@@ -10630,6 +10636,8 @@ constexpr double REGION_SLEEP_ESTIMATE_FACTOR = 1.5;
+ // the first image, so the boot window is play. A scene that never sleeps
+ // still gets its regions, in slices of the slice target.
+ std::chrono::milliseconds s_region_sleep_wait{2000};  // tests change it
++// Patch 0170: the sleep wait of a module asked again after a state load.
++std::chrono::milliseconds s_region_repost_sleep_wait{150};
+ // What an install in a sleep window leaves before the deadline (its estimate
+ // can be off by the jitter measured on the bench).
+ constexpr double REGION_SLEEP_MARGIN_MS = 1.0;
+@@ -10665,8 +10673,12 @@ void RepostWaitingRegions()
+   for (auto& waiting : s_region_waiting)
+   {
+     waiting.repost = true;
++    waiting.reposted = true;
+     waiting.signalled = false;
+     waiting.posted = now;
++    // Its wait for a sleep window starts again (from when a slice finds it
++    // installable once more), shortened (s_region_repost_sleep_wait).
++    waiting.installable_since.reset();
+   }
+ }
+ 
+@@ -11089,7 +11101,8 @@ void ServiceRegionInstalls(std::optional<std::chrono::steady_clock::time_point>
+       return false;
+     if (!pending.installable_since)
+       pending.installable_since = now;
+-    if (now - *pending.installable_since < s_region_sleep_wait)
++    if (now - *pending.installable_since <
++        (pending.reposted ? s_region_repost_sleep_wait : s_region_sleep_wait))
+       return true;
+     s_region_sleep_wait_expired += 1;
+     return false;
+@@ -11710,6 +11723,13 @@ extern "C" EMSCRIPTEN_KEEPALIVE void DolphinWeb_AotSetSleepWaitForTest(int ms)
+   s_region_sleep_wait = std::chrono::milliseconds(ms);
+ }
+ 
++// Tests (patch 0170): how long a module asked again after a state load waits
++// for a sleep window (ms).
++extern "C" EMSCRIPTEN_KEEPALIVE void DolphinWeb_AotSetRepostSleepWaitForTest(int ms)
++{
++  s_region_repost_sleep_wait = std::chrono::milliseconds(ms);
++}
++
+ // Tests: the estimated install cost per module byte (ms), so that a test
+ // module counts as one too large for a slice.
+ extern "C" EMSCRIPTEN_KEEPALIVE double DolphinWeb_AotSetInstallCostForTest(double ms_per_byte)

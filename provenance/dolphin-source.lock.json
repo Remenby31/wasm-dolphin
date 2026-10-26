@@ -25,7 +25,7 @@
       "commit": "01e0577914a75a2569c846778c2f93aa8e6feddd"
     }
   },
-  "patchSeriesSha256": "15f4816b56ec1f48115bd54bbbaf9050c05488d1a16e6965262e87ad521ad534",
+  "patchSeriesSha256": "6f332ef5c936a6c14bb400ebf30cf9d789c1f1643fa60ed956e572d988a9d2e3",
   "patches": [
     {
       "order": 1,
@@ -1037,6 +1037,14 @@
     },
     {
       "order": 127,
+      "cwd": ".",
+      "hashMode": "lf-normalized",
+      "path": "patches/dolphin-wasm/snapshot/0170-region-repost-sleep-wait.patch",
+      "size": 3273,
+      "sha256": "e8f83261ea588e9512c610805419b8df5e3d06b79ccf465c179781bf4a20b6f8"
+    },
+    {
+      "order": 128,
       "cwd": "Externals/SFML/SFML",
       "hashMode": "lf-normalized",
       "path": "patches/dolphin-wasm/submodules/0001-sfml-emscripten-config.patch",
@@ -1044,7 +1052,7 @@
       "sha256": "f82197a21fe982ad83f6ee7bbf5a03839b1cebd4d64da3eab11263842bf61d89"
     },
     {
-      "order": 128,
+      "order": 129,
       "cwd": "Externals/xxhash/xxHash",
       "hashMode": "lf-normalized",
       "path": "patches/dolphin-wasm/submodules/0002-xxhash-wasm-simd-scalar.patch",
