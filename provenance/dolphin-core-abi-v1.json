@@ -44,8 +44,8 @@
     {
       "path": "core/upstream/dolphin_web_core.cpp",
       "hashMode": "lf-normalized",
-      "size": 61822,
-      "sha256": "f31fc2ca2c083556ca2328a35aeb191f78ecc999a45aeee114bf95795ba24033"
+      "size": 62702,
+      "sha256": "bed21de6ceb90e2574f54b23534373d63abad3dd6b6ec55f49fd61fe63316b6f"
     },
     {
       "path": "src/app.js",
@@ -140,8 +140,8 @@
     {
       "path": "src/upstream-discio-worker.js",
       "hashMode": "lf-normalized",
-      "size": 790361,
-      "sha256": "1b49930e489a80ae677689c05beb3b912fe4706f583e61342a64649760d4ab6c"
+      "size": 791253,
+      "sha256": "dd7eaa03dc11031bb3c4e0bf0096ea24435ff80d0fee439faf09208c1ccf435b"
     },
     {
       "path": "src/wgpu-renderer-worker-probe.js",
@@ -699,6 +699,7 @@
       "validationFinalizeWgpuMappedDrain",
       "validationFinalizeWgpuRendererProbe",
       "validationFinalizeWgpuReplay",
+      "validationHeapStats",
       "validationLoseWebGlContext",
       "validationLoseWebGpuDevice",
       "validationPcSampler",

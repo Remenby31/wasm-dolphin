@@ -6,7 +6,10 @@
 // hold the EFB, which grows with N², inside a 1.5 GiB wasm heap. For each
 // scale and run: boot (savestate), wait --warmup s, save (size, time until
 // the file stopped growing, heap after), load the bytes back (round-trip
-// time, heap after), then check the game still runs (frames advance).
+// time, heap after), then check the game still runs (frames advance). With a
+// core that has DolphinWeb_HeapStats, malloc's use of the heap and the
+// headroom left (heap above the arena + free bytes in it) before the save,
+// after it and after the load.
 //
 //   node harness/probes/savestate-scale.mjs --iso disc.iso --state s.sav --port N
 //     [--scales 1,2,4] [--runs 3] [--warmup 15] [--hold KeyX] [--out dir]
@@ -65,12 +68,23 @@ try {
         // The bytes stay in the page: only sizes and times come back.
         const r = await session.page.evaluate(async () => {
           const req = (type, payload) => window.__host.adapter.request(type, payload);
+          // malloc's use of the heap (core with DolphinWeb_HeapStats), MB.
+          const heap = async () => {
+            const h = await req("validationHeapStats", {}).catch(() => null);
+            if (!h?.supported) return null;
+            const mb = (b) => Math.round(b / 1048576);
+            return { inUseMB: mb(h.inUse), freeMB: mb(h.free), topMB: mb(h.top), headroomMB: mb(h.headroom) };
+          };
+          const heapBefore = await heap();
           const save = await req("saveStateFile", {});
+          const heapAfterSave = await heap();
           if (!save?.saved) return { save: { saved: false, error: save?.error ?? null } };
           const t0 = performance.now();
           const load = await req("loadStateFile", { bytes: save.bytes });
           const loadMs = performance.now() - t0;
+          const heapAfterLoad = await heap();
           return {
+            heap: { before: heapBefore, afterSave: heapAfterSave, afterLoad: heapAfterLoad },
             save: { saved: true, size: save.size, elapsedMs: save.elapsedMs, heapBytes: save.heapBytes },
             load: { loaded: Boolean(load?.loaded), ms: Math.round(loadMs) },
           };
