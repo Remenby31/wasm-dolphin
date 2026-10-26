@@ -106,6 +106,7 @@ test("presentvsync: URL → host → adapter → worker, on by default, ?present
   const { requestedPacing } = await import("../src/core-host.js");
   assert.equal(requestedPacing("").presentVsync, true, "on by default (2026-10-26)");
   assert.equal(requestedPacing("?presentvsync=0").presentVsync, false);
+  for (const off of ["false", "off", "no", "OFF"]) assert.equal(requestedPacing(`?presentvsync=${off}`).presentVsync, false, off);
   assert.equal(requestedPacing("?presentvsync=1").presentVsync, true);
   assert.equal(requestedPacing("?presentvsync=1").rushPresentation, false, "only its own switch");
   const { UpstreamWorkerAdapter } = await import("../src/upstream-worker-adapter.js");
@@ -161,7 +162,7 @@ test("presentvsync catch-up: a frame that already waited a BeginFrame gives way 
   const present = worker.slice(worker.indexOf("function presentWgpuVsyncFrame()"), worker.indexOf("function wgpuCanvasUsage("));
   // the behaviour is tested on the module (tests/wgpu-vsync-queue.test.mjs)
   assert.match(present, /wgpuVsync\.takeForDisplay\(wgpuVsyncTick\)/);
-  assert.match(worker, /wgpuVsync\.queueFrame\(\{ coreFrame, shownVi, stream, tick: wgpuVsyncTick \}\)/);
+  assert.match(worker, /wgpuVsync\.queueFrame\(\{ coreFrame, shownVi, stream, tick: wgpuVsyncTick \}, \{ hidden \}\)/);
   assert.match(worker, /case "validationReadPresentVsync":/);
 });
 
@@ -199,7 +200,7 @@ test("display counter: one present per BeginFrame is one picture, whichever rAF 
     assert.equal(dropped, 0);
   }
   const worker = await readFile(new URL("../src/upstream-discio-worker.js", import.meta.url), "utf8");
-  assert.match(worker, /wgpuVsyncInBeginFrame = performance\.timeOrigin \+ frameTime;/, "the same clock as the counter's beginFrame");
+  assert.match(worker, /wgpuVsyncFrameTime = performance\.timeOrigin \+ frameTime;/, "the same clock as the counter's beginFrame");
 });
 
 // presentvsync v3: the stream captures every frame when it is queued, from
@@ -218,4 +219,17 @@ test("presentvsync v3: the stream captures at queue time, from the frame's textu
   const read = worker.slice(worker.indexOf('case "validationReadPresentVsync":'), worker.indexOf('case "validationReadEfbSyncStats":'));
   assert.match(read, /\.\.\.wgpuVsync\.stats,\n[^\n]*\n {8}waiting: wgpuVsync\.waiting,/);
   assert.doesNotMatch(read, /queued: /);
+});
+
+// Review of #265: the presenter's rAF loop stops after WGPU_VSYNC_IDLE_TICKS
+// empty BeginFrames and the next queued frame starts it again; a lost device
+// empties the queue (no 50 ms timer for ever); the canvases follow the device.
+test("presentvsync: idle loop stops, device loss empties the queue, canvases keyed by device", async () => {
+  const worker = await readFile(new URL("../src/upstream-discio-worker.js", import.meta.url), "utf8");
+  assert.match(worker, /if \(wgpuVsyncIdleTicks >= WGPU_VSYNC_IDLE_TICKS && !wgpuVsync\.waiting\) \{\n\s+wgpuVsyncLoop = false;/);
+  assert.match(worker, /wgpuVsyncIdleTicks = 0;\n {2}if \(!wgpuVsyncLoop\) \{/, "a queued frame restarts it");
+  assert.match(worker, /if \(!renderGpu\) \{\n {4}wgpuVsync\.clear\(\);\n {4}return;\n {2}\}/);
+  assert.match(worker, /if \(wgpuVsyncCanvasDevice !== dev\) \{/);
+  assert.match(worker, /wgpuVsyncStreamDevice !== dev \|\|/);
+  assert.match(worker, /destroyTexture: \(tex\) => tex\.destroy\(\)/);
 });

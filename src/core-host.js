@@ -1670,8 +1670,8 @@ export function requestedPacing(search = window.location.search) {
     // At most one wgpu present per BeginFrame (the worker's rAF), on by
     // default since 2026-10-26: ~58 distinct pictures shown a second instead
     // of ~56 and half the on-screen repeats on the race (12 pairs, --display).
-    // ?presentvsync=0 presents as the ring drains.
-    presentVsync: params.get("presentvsync") !== "0"
+    // ?presentvsync=0 (or false, off, no) presents as the ring drains.
+    presentVsync: !["0", "false", "off", "no"].includes((params.get("presentvsync") ?? "").toLowerCase())
   };
 }
 

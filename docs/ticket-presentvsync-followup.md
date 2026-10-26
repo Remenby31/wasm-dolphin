@@ -9,11 +9,11 @@ time (v3). Left for later:
 1. **Stream copy at full size.** At internal resolution 4× (patch 0168) the
    stream copies a 2560×1920 texture per frame. Render it to 640×480 (a blit
    pass from the pool texture) when the encoder does not need more.
-2. **destroy() the pool's textures** when the pool is dropped (resize, new
+2. ~~**destroy() the pool's textures**~~ done in #265 for the free ones at a key change (the queued and the current one may still be referenced by unsubmitted commands); when the pool is dropped (resize, new
    device) and when the presenter detaches; today they wait for the GC.
-3. **Stop the presenter's rAF loop** when nothing has been queued for a while
+3. ~~**Stop the presenter's rAF loop**~~ done in #265 (after 120 empty BeginFrames, restarted by the next queued frame); when nothing has been queued for a while
    (it runs every BeginFrame once started, even paused).
-4. **Rename `wgpuVsyncInBeginFrame` to `wgpuVsyncFrameTime`**: it now holds
+4. ~~**Rename `wgpuVsyncInBeginFrame` to `wgpuVsyncFrameTime`**~~ done in #265;: it now holds
    the rAF frame time, not a flag.
 5. **Drain-local texture in vsync mode** (re-review, 2026-10-26): the input
    marker, the visual cadence sample and the backbuffer readbacks still read
@@ -23,8 +23,8 @@ time (v3). Left for later:
    not counted by `recordPresentedFrame`: the presentation FPS reads lower
    with presentvsync on than off for the same pictures. Compare p99 between
    presents and BeginFrames with 2+, never the presentation FPS.
-7. **`wgpuVsyncStreamCanvas` and `wgpuVsyncCanvasCopyDst` are not keyed by
-   device**: after a device loss the stream canvas stays configured on the
+7. ~~**`wgpuVsyncStreamCanvas` and `wgpuVsyncCanvasCopyDst` are not keyed by
+   device**~~ done in #265 (both follow the device; a lost device empties the queue): after a device loss the stream canvas stays configured on the
    old device and the display canvas keeps its old usage flag. Key them like
    the pool (device number).
 8. **Default switch criterion** (judge, 2026-10-26): p99 between presents and

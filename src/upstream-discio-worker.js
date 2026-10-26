@@ -5932,7 +5932,7 @@ function recordPresentedFrame(coreFrame, shownVi = null) {
     harnessPresentRing[slot + 1] = coreFrame;
     harnessPresentRing[slot + 2] = shownVi ?? moduleInstance?._DolphinWeb_HarnessViSinceBoot?.() ?? -1;
     harnessPresentHead += 1;
-    if (harnessDisplayStop) harnessDisplay.submit(harnessPresentRing[slot + 2], wgpuVsyncInBeginFrame);
+    if (harnessDisplayStop) harnessDisplay.submit(harnessPresentRing[slot + 2], wgpuVsyncFrameTime);
   }
   presentedFrame += 1;
   framesSincePresentationFps += 1;
@@ -12650,8 +12650,14 @@ const wgpuVsync = createVsyncQueue({
       format: renderGpu.format,
       usage: u.RENDER_ATTACHMENT | u.COPY_SRC | u.TEXTURE_BINDING
     });
-  }
+  },
+  destroyTexture: (tex) => tex.destroy()
 });
+// The presenter's rAF loop stops after this many BeginFrames with nothing to
+// show (2 s at 60 Hz: a paused game, a menu that does not render) and starts
+// again with the next queued frame (battery, 120/144 Hz screens).
+const WGPU_VSYNC_IDLE_TICKS = 120;
+let wgpuVsyncIdleTicks = 0;
 // A device's number in the pool key: a new device (lost and recreated)
 // drops the pool, whose textures belong to the old one.
 const wgpuVsyncDeviceIds = new WeakMap();
@@ -12663,13 +12669,16 @@ let wgpuVsyncTick = 0;
 // The rAF frame time of the presenter's callback running now (null outside
 // it): the harness display counter matches it to that BeginFrame's entry,
 // whichever of the two worker rAF loops runs first in the frame.
-let wgpuVsyncInBeginFrame = null;
+let wgpuVsyncFrameTime = null;
 let wgpuVsyncFallback = null;
-let wgpuVsyncCanvasCopyDst = false;
+// The device the display canvas was configured on with COPY_DST (null: not yet).
+let wgpuVsyncCanvasDevice = null;
 const wgpuPresentVsyncStats = { byTimer: 0, streamed: 0 };
-// v3: the stream's own canvas, sized like the frames (made on first use).
+// v3: the stream's own canvas, sized like the frames and configured on the
+// current device (made again when either changes).
 let wgpuVsyncStreamCanvas = null;
 let wgpuVsyncStreamContext = null;
+let wgpuVsyncStreamDevice = null;
 
 // The pool's drops count in the presentation's lifetime drops.
 function wgpuVsyncCountDrops(before) {
@@ -12682,7 +12691,9 @@ function wgpuVsyncCountDrops(before) {
 function streamWgpuVsyncFrame(tex, coreFrame) {
   if (!streamCapture.ready()) return;
   const dev = renderGpu.device;
-  if (!wgpuVsyncStreamCanvas || wgpuVsyncStreamCanvas.width !== tex.width || wgpuVsyncStreamCanvas.height !== tex.height) {
+  if (!wgpuVsyncStreamCanvas || wgpuVsyncStreamDevice !== dev ||
+      wgpuVsyncStreamCanvas.width !== tex.width || wgpuVsyncStreamCanvas.height !== tex.height) {
+    wgpuVsyncStreamDevice = dev;
     wgpuVsyncStreamCanvas = new OffscreenCanvas(tex.width, tex.height);
     wgpuVsyncStreamContext = wgpuVsyncStreamCanvas.getContext("webgpu");
     const u = self.GPUTextureUsage;
@@ -12711,20 +12722,30 @@ function acquireWgpuVsyncTexture(width, height) {
 // nothing queued, streamed or counted as presented.
 function queueWgpuVsyncFrame(coreFrame, shownVi, stream) {
   const before = wgpuVsync.stats.dropped;
-  const frame = wgpuVsync.queueFrame({ coreFrame, shownVi, stream, tick: wgpuVsyncTick });
+  // No BeginFrame lately (hidden tab): an overflow is not a drop.
+  const hidden = wgpuVsyncLoop && performance.now() - wgpuVsyncLastTickAt >= WGPU_VSYNC_FALLBACK_MS;
+  const frame = wgpuVsync.queueFrame({ coreFrame, shownVi, stream, tick: wgpuVsyncTick }, { hidden });
   wgpuVsyncCountDrops(before);
   if (!frame) return false;
   if (stream && streamCapture.active) streamWgpuVsyncFrame(frame.tex, coreFrame);
+  wgpuVsyncIdleTicks = 0;
   if (!wgpuVsyncLoop) {
     wgpuVsyncLoop = true;
+    wgpuVsyncLastTickAt = performance.now();
     const tick = (frameTime) => {
       wgpuVsyncLastTickAt = performance.now();
       wgpuVsyncTick += 1;
-      wgpuVsyncInBeginFrame = performance.timeOrigin + frameTime;
+      wgpuVsyncFrameTime = performance.timeOrigin + frameTime;
+      let shown = false;
       try {
-        presentWgpuVsyncFrame();
+        shown = presentWgpuVsyncFrame();
       } finally {
-        wgpuVsyncInBeginFrame = null;
+        wgpuVsyncFrameTime = null;
+      }
+      wgpuVsyncIdleTicks = shown ? 0 : wgpuVsyncIdleTicks + 1;
+      if (wgpuVsyncIdleTicks >= WGPU_VSYNC_IDLE_TICKS && !wgpuVsync.waiting) {
+        wgpuVsyncLoop = false;  // the next queued frame starts it again
+        return;
       }
       self.requestAnimationFrame(tick);
     };
@@ -12736,6 +12757,12 @@ function queueWgpuVsyncFrame(coreFrame, shownVi, stream) {
 
 function wgpuVsyncFallbackCheck() {
   wgpuVsyncFallback = null;
+  // The device is gone: nothing can be shown, the queue goes (else this timer
+  // would run every 50 ms for ever).
+  if (!renderGpu) {
+    wgpuVsync.clear();
+    return;
+  }
   if (!wgpuVsync.waiting) return;
   if (performance.now() - wgpuVsyncLastTickAt >= WGPU_VSYNC_FALLBACK_MS) {
     wgpuPresentVsyncStats.byTimer += 1;
@@ -12745,16 +12772,19 @@ function wgpuVsyncFallbackCheck() {
 }
 
 // One queued frame to the canvas: the oldest, so a burst is shown in order
-// (after the catch-up, in takeForDisplay).
+// (after the catch-up, in takeForDisplay). True when a frame was shown.
 function presentWgpuVsyncFrame() {
-  if (!renderGpu) return;
+  if (!renderGpu) {
+    wgpuVsync.clear();
+    return false;
+  }
   const before = wgpuVsync.stats.dropped;
   const f = wgpuVsync.takeForDisplay(wgpuVsyncTick);
   wgpuVsyncCountDrops(before);
-  if (!f) return;
+  if (!f) return false;
   const dev = renderGpu.device;
-  if (!wgpuVsyncCanvasCopyDst) {
-    wgpuVsyncCanvasCopyDst = true;
+  if (wgpuVsyncCanvasDevice !== dev) {
+    wgpuVsyncCanvasDevice = dev;
     const u = self.GPUTextureUsage;
     renderGpu.context.configure({
       device: dev,
@@ -12775,6 +12805,7 @@ function presentWgpuVsyncFrame() {
   wgpuVsync.shown(f);
   // v3: streamed at queue time (streamWgpuVsyncFrame), not here.
   recordPresentedFrame(f.coreFrame, f.shownVi);
+  return true;
 }
 
 // The canvas's usage; COPY_DST when frames are copied to it at the rAF.
