@@ -8268,17 +8268,22 @@ export function startAotFirstLaunchAfterBoot(flow = aotFirstLaunch) {
 // sampler (a thread of its own, 10 ms), put the modules that cover them first,
 // in rounds as the state's hot code shows up. Without that sampler, this
 // worker reads the PC itself (its event loop is busy: ~50 samples/s). Never
-// throws, never awaited by the load.
+// throws, never awaited by the load. A later load ends these rounds (its own
+// take over), and no round runs once the optimisation has nothing left.
 const AOT_STATE_ROUNDS_MS = [600, 1500, 3000];
+let aotStateLoads = 0;
 export async function prioritizeAotAfterStateLoad({ flow = aotFirstLaunch, instance = moduleInstance, sampler = aotHotSampler, rounds = AOT_STATE_ROUNDS_MS,
   everyMs = 2, wait = (t) => new Promise((r) => setTimeout(r, t)), now = () => performance.now() } = {}) {
   let watch = null;
+  const load = ++aotStateLoads;
+  const current = () => load === aotStateLoads && disc === aotDiscGeneration;
+  const disc = aotDiscGeneration;
   try {
-    if (!flow?.supported) return 0;
-    const disc = aotDiscGeneration;
+    if (!flow?.supported || flow.hasWork?.() === false) return 0;
     let read;
     if (sampler?.watch) {
-      watch = sampler.watch();
+      // the sampler's first post may hold samples from before the load
+      watch = sampler.watch({ skipFirst: true });
       read = async (until) => { await wait(Math.max(0, until - now())); return watch.read(); };
     } else {
       const pcAddress = aotProfileTarget?.guestPcAddress?.(instance) || instance?._DolphinWeb_GuestPcAddress?.() || 0;
@@ -8287,7 +8292,7 @@ export async function prioritizeAotAfterStateLoad({ flow = aotFirstLaunch, insta
       if (!pcAddress || pcAddress % 4 || !heap) return 0;
       const counts = new Map();
       read = async (until) => {
-        while (now() < until) {
+        while (now() < until && current()) {
           const pc = heap[pcAddress >>> 2] >>> 0;
           if (pc >= 0x80000000 && pc < 0x81800000) counts.set(pc, (counts.get(pc) ?? 0) + 1);
           await wait(everyMs);
@@ -8298,8 +8303,9 @@ export async function prioritizeAotAfterStateLoad({ flow = aotFirstLaunch, insta
     const t0 = now();
     let moved = 0;
     for (const at of rounds) {
+      if (flow.hasWork?.() === false) break;
       const hits = await read(t0 + at);
-      if (disc !== aotDiscGeneration) return moved; // another disc meanwhile
+      if (!current()) return moved; // another load or another disc meanwhile
       if (hits.length) moved = flow.prioritize(hits);
     }
     return moved;

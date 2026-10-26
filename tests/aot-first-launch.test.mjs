@@ -666,6 +666,21 @@ test("the profile sampler's watch() counts from now on and leaves the drain whol
   sampler.stop();
 });
 
+// Review of #278: the sampler's next post after a load holds up to 500 ms
+// of samples from before it; watch({ skipFirst }) leaves that post out.
+test("the profile sampler's watch({ skipFirst }) leaves the next post out", async () => {
+  const { startHotSampler } = await import("../src/aot-hot-sampler.js");
+  let worker;
+  const sampler = startHotSampler({ buffer: new SharedArrayBuffer(16), pcAddress: 8, createWorker: () => (worker = { postMessage() {}, terminate() {} }) });
+  const w = sampler.watch({ skipFirst: true });
+  worker.onmessage({ data: [[0x80001000, 7]] }); // before the load, mostly
+  worker.onmessage({ data: [[0x80002000, 2]] });
+  assert.deepEqual(w.read(), [[0x80002000, 2]]);
+  assert.deepEqual(sampler.drain(), [[0x80001000, 7], [0x80002000, 2]], "the profile keeps both");
+  w.stop();
+  sampler.stop();
+});
+
 // Review of #165: two records in flight (a remount during the minute's
 // record) count the session once; a failed first record does not use it up.
 test("the profile recorder counts a session once, whatever the records in flight", async () => {

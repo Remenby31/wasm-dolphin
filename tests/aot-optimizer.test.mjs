@@ -437,3 +437,24 @@ test("aot optimizer: prioritize() before the plan is built applies once the run 
   await o.start();
   assert.equal(translated[0], target.key);
 });
+
+// Review of #278 (P2): a range found however far its start is behind the
+// PC (8 starts before, a long function was missed), and the priority ends
+// with the run it was for.
+test("aot optimizer: prioritize() finds a PC in a long range many starts back; hasWork and the priority end with the run", async () => {
+  const { o } = optimizer();
+  await o.status();
+  const units = o.regions;
+  // a long range in the first unit, with 20 short ones of other units starting inside it
+  const long = { ranges: [[0x80100000, 0x80110000]] };
+  units[0].members = [long, ...units[0].members];
+  for (let i = 0; i < 20; i += 1) units[1 + (i % (units.length - 1))].members.push({ ranges: [[0x80100100 + i * 0x100, 0x80100140 + i * 0x100]] });
+  o.prioritize([[0x80101f80, 4]]); // past all 20 short ranges' starts, inside the long one only
+  assert.deepEqual([...o.priorityScore().entries()].map(([u, n]) => [units.indexOf(u), n]), [[0, 4]]);
+  assert.equal(o.hasWork(), true, "before the run");
+  await o.start();
+  assert.equal(o.hasWork(), false, "the run went through its work");
+  assert.equal(o.priority, null);
+  o.markStale(units[2].key);
+  assert.equal(o.hasWork(), true, "a stale module is work again");
+});

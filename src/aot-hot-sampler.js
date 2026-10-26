@@ -70,7 +70,10 @@ export function startHotSampler({ buffer, pcAddress, periodMs = AOT_SAMPLE_DEFAU
   const watchers = new Set(); // watch(): counts since a moment (a save state load)
   worker.onmessage = (e) => {
     for (const [pc, n] of e.data) pending.set(pc, (pending.get(pc) ?? 0) + n);
-    for (const w of watchers) for (const [pc, n] of e.data) w.set(pc, (w.get(pc) ?? 0) + n);
+    for (const w of watchers) {
+      if (w.skip) { w.skip = false; continue; }
+      for (const [pc, n] of e.data) w.counts.set(pc, (w.counts.get(pc) ?? 0) + n);
+    }
   };
   worker.onerror = () => worker.terminate();
   worker.postMessage({ buffer, ctl, pcAddress, periodMs, postMs, frozenMs });
@@ -82,10 +85,12 @@ export function startHotSampler({ buffer, pcAddress, periodMs = AOT_SAMPLE_DEFAU
       return out;
     },
     // [[pc, hits]] from now on, without taking them from the profile's drain.
-    watch() {
-      const counts = new Map();
-      watchers.add(counts);
-      return { read: () => [...counts.entries()], stop: () => watchers.delete(counts) };
+    // skipFirst: the next post is left out (it holds up to postMs of samples
+    // from before now, e.g. the code that ran before a save state load).
+    watch({ skipFirst = false } = {}) {
+      const w = { counts: new Map(), skip: skipFirst };
+      watchers.add(w);
+      return { read: () => [...w.counts.entries()], stop: () => watchers.delete(w) };
     },
     // The emulation paused or stopped: the worker blocks, without waking.
     pause() {
