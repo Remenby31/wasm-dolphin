@@ -165,9 +165,16 @@ export class StreamCapture {
     s.maxWidth = Math.max(s.maxWidth, width);
     s.minHeight = s.minHeight ? Math.min(s.minHeight, height) : height;
     s.maxHeight = Math.max(s.maxHeight, height);
-    let key = `${source}:${width}x${height}`;
-    if (!(key in s.sizes) && Object.keys(s.sizes).length >= MAX_SIZES) key = "other";
-    const size = (s.sizes[key] ??= { frames: 0, lastCoreFrame: 0, lastAt: 0 });
+    // The size's entry, looked up again only when the size or source
+    // changes (no string per frame).
+    const last = this.lastSize;
+    let size = last && last.sizes === s.sizes && last.source === source && last.width === width && last.height === height ? last.entry : null;
+    if (!size) {
+      let key = `${source}:${width}x${height}`;
+      if (!(key in s.sizes) && Object.keys(s.sizes).length >= MAX_SIZES) key = "other";
+      size = (s.sizes[key] ??= { frames: 0, lastCoreFrame: 0, lastAt: 0 });
+      this.lastSize = { sizes: s.sizes, source, width, height, entry: size };
+    }
     size.frames += 1;
     size.lastCoreFrame = coreFrame;
     size.lastAt = startedAt;

@@ -220,3 +220,14 @@ test("a device lost above 1x brings the host back to 1x for its next boot and ev
   assert.equal(lost.at(-1).fallback, null);
   assert.equal(host1.scaleLostCeiling, 4);
 });
+
+// Follow-up of 0168, point 3: the heap headroom at 4x needs malloc's own
+// figures; a diagnostics request only (harness hooks), never per frame.
+test("the core reports malloc's use of the heap, read by a harness-only request", async () => {
+  const core = await read("../core/upstream/dolphin_web_core.cpp");
+  assert.match(core, /int DolphinWeb_HeapStats\(uint32_t\* out, int words\)/);
+  assert.match(core, /const struct mallinfo info = mallinfo\(\);/);
+  const worker = await read("../src/upstream-discio-worker.js");
+  assert.match(worker, /case "validationHeapStats": \{\n(?: {6}\/\/[^\n]*\n)+ {6}if \(!harnessEnabled\) return \{ error: "harness hooks are off" \};/);
+  assert.match(worker, /headroom: heapBytes - top \+ free/);
+});

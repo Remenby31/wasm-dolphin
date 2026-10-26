@@ -1969,6 +1969,25 @@ async function handleMessage(type, payload) {
       return harnessUniqueFramesRequest(payload);
     case "validationPcSampler":
       return harnessPcSampler(payload);
+    case "validationHeapStats": {
+      // Diagnostics (harness hooks on): malloc's use of the wasm heap
+      // (DolphinWeb_HeapStats). headroom: what is left above the arena
+      // plus the free bytes inside it. Never called by the product.
+      if (!harnessEnabled) return { error: "harness hooks are off" };
+      const m = moduleInstance;
+      if (typeof m?._DolphinWeb_HeapStats !== "function" || typeof m._malloc !== "function") {
+        return { supported: false };
+      }
+      const p = m._malloc(4 * 4);
+      try {
+        if (m._DolphinWeb_HeapStats(p, 4) !== 3) return { supported: false };
+        const [inUse, free, top] = new Uint32Array(m.HEAPU8.buffer, p, 3);
+        const heapBytes = m.HEAPU8.buffer.byteLength;
+        return { supported: true, inUse, free, top, heapBytes, headroom: heapBytes - top + free };
+      } finally {
+        m._free(p);
+      }
+    }
     case "validationReadDiscReads":
       return harnessDiscReads(payload);
     case "validationDropSampler":
