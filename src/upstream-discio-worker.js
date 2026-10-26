@@ -15,7 +15,7 @@ import { parseDolHeader } from "./dol.js";
 import { probeRelaxedMadd } from "./relaxed-madd-probe.js";
 import { probeWasmFeatures } from "./wasm-feature-probe.js";
 import { decodeWgpuSamplerState } from "./wgpu-sampler-state.js";
-import { bootBackbufferResize, enhancementCoreArgs, normalizeInternalResolution, resizeCanvasBackbuffer } from "./wgpu-enhancements.js";
+import { bootBackbufferResize, clampInternalResolution, enhancementCoreArgs, internalResolutionCeiling, resizeCanvasBackbuffer } from "./wgpu-enhancements.js";
 import { gxClearDepthToStored, gxDepthState } from "./wgpu-depth-state.js";
 import { clampSourceRect, createWgpuExactCapture, packReadbackRows } from "./wgpu-exact-capture.js";
 import { createUniqueFrameCounter, hashRows, sampleRowOffsets } from "./harness-unique-frames.js";
@@ -775,6 +775,16 @@ let wgpuReplayPumpTimer = null;
 let wgpuReplayBudgetMs = 0;
 let wgpuPowerPreference = "high-performance";
 let wgpuReplayFatal = null;
+// Patch 0168 follow-ups: the highest internal resolution the adapter is
+// trusted with (internalResolutionCeiling, set when the presenter takes its
+// adapter), 1 for the rest of this worker once a device was lost above 1x,
+// and the scale in effect (boot value, then each setEnhancements).
+let wgpuScaleAdapterCeiling = 4;
+let wgpuScaleLostCeiling = 4;
+let wgpuInternalResolution = 1;
+function wgpuScaleCeiling() {
+  return Math.min(wgpuScaleAdapterCeiling, wgpuScaleLostCeiling);
+}
 let wgpuReplayYieldPending = false;
 let wgpuReplayPumpScheduledAt = 0;
 let wgpuReplayPumpDueAt = 0;
@@ -1976,6 +1986,15 @@ async function handleMessage(type, payload) {
       if (Number.isFinite(after) && after >= 0) setTimeout(() => lose.restoreContext(), after);
       return { lost: true };
     }
+    case "validationLoseWebGpuDevice": {
+      // Harness: lose the WebGPU device as an out-of-memory or a GPU process
+      // reset would (destroy() resolves device.lost; patch 0168 follow-up).
+      if (!harnessEnabled) return { error: "harness hooks are off" };
+      if (!renderGpu?.device) return { error: `no WebGPU device (${renderBackend})` };
+      const internalResolution = wgpuInternalResolution;
+      renderGpu.device.destroy();
+      return { lost: true, internalResolution };
+    }
     case "validationReadDstAlphaPasses": {
       // Patch 0149: the dst-alpha second pass (0136), cumulative.
       if (!harnessEnabled) return { error: "harness hooks are off" };
@@ -2408,9 +2427,11 @@ async function handleMessage(type, payload) {
       const set = moduleInstance?._DolphinWeb_SetEnhancements;
       if (typeof set !== "function") return { applied: false, reason: "core-without-0168" };
       // 0: the core's runtime is not up yet (the boot reads the init values).
-      const internalResolution = set(...enhancementCoreArgs(payload));
+      // Held to the adapter's ceiling: the answer says the scale in effect.
+      const internalResolution = set(...enhancementCoreArgs(payload, wgpuScaleCeiling()));
+      if (internalResolution > 0) wgpuInternalResolution = internalResolution;
       return internalResolution > 0
-        ? { applied: true, internalResolution }
+        ? { applied: true, internalResolution, ceiling: wgpuScaleCeiling() }
         : { applied: false, reason: "core-not-running" };
     }
     case "setAudioMuted":
@@ -2996,9 +3017,10 @@ async function loadCore({
     dolphinSmoothEarly: smoothEarly !== false,
     dolphinCoreLog: Boolean(coreLog),
     dolphinMemcardSlotB: Boolean(memcardSlotB),
-    // Patch 0168: internal resolution (1-4) and anisotropy (log2, -1 = the
-    // game's). The core keeps 1 off the WebGPU path.
-    dolphinEfbScale: normalizeInternalResolution(internalResolution),
+    // Patch 0168: internal resolution (1-4, held to the adapter's ceiling)
+    // and anisotropy (log2, -1 = the game's). The core keeps 1 off the
+    // WebGPU path.
+    dolphinEfbScale: (wgpuInternalResolution = clampInternalResolution(internalResolution, wgpuScaleCeiling())),
     dolphinMaxAnisotropy: Number.isInteger(maxAnisotropy) ? maxAnisotropy : -1,
     dolphinEfbAccess: Boolean(efbAccess),
     dolphinEfbCopyRam: Boolean(efbCopyRam),
@@ -6597,6 +6619,11 @@ async function createWebGpuPresenter(canvas) {
   if (!adapterInfo && typeof adapter.requestAdapterInfo === "function") {
     try { adapterInfo = await adapter.requestAdapterInfo(); } catch {}
   }
+  const scaleCeiling = internalResolutionCeiling(
+    { info: adapterInfo, limits: adapter.limits, isFallbackAdapter: adapter.isFallbackAdapter },
+    { deviceMemory: self.navigator?.deviceMemory });
+  wgpuScaleAdapterCeiling = scaleCeiling.ceiling;
+  rendererDiagnostics.internalResolutionCeiling = { ...scaleCeiling, lost: wgpuScaleLostCeiling < 4 };
   rendererDiagnostics.adapter = {
     selected: true,
     vendor: adapterInfo?.vendor || null,
@@ -6769,7 +6796,7 @@ fn fs(input: VertexOutput) -> @location(0) vec4f {
   wgpuReplayFatal = null;
 
   device.lost.then((info) => {
-    handleWgpuDeviceLoss({
+    const loss = handleWgpuDeviceLoss({
       activeDevice: renderGpu?.device,
       lostDevice: device,
       info,
@@ -6785,6 +6812,15 @@ fn fs(input: VertexOutput) -> @location(0) vec4f {
       setBackend: (backend) => { renderBackend = backend; },
       postStatus,
     });
+    if (!loss.handled) return;
+    // Lost above 1x (out of memory, GPU process reset): never again at that
+    // scale in this worker, and the page restarts at 1x (core-host).
+    const internalResolution = wgpuInternalResolution;
+    if (internalResolution > 1) wgpuScaleLostCeiling = 1;
+    rendererDiagnostics.internalResolutionCeiling = {
+      ...rendererDiagnostics.internalResolutionCeiling, lost: wgpuScaleLostCeiling < 4
+    };
+    self.postMessage({ type: "wgpu-device-lost", internalResolution, reason: String(info?.reason ?? "unknown"), detail: loss.detail });
   });
 
   return state;

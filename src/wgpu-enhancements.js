@@ -15,6 +15,52 @@ export function normalizeInternalResolution(value) {
   return Number.isInteger(n) && n >= 1 && n <= 4 ? n : 1;
 }
 
+// The highest internal resolution an adapter is trusted with. GPU memory
+// grows with N² (EFB colour and depth, XFB copies, scaled EFB copies: several
+// hundred MB more at 4x than at 1x in a render-to-texture game) and WebGPU
+// tells nothing about it, so the ceiling goes by adapter class:
+// - no adapter, or a CPU one (fallback, SwiftShader): 1;
+// - a texture limit below 640N (the EFB and backbuffer width): the limit;
+// - a small machine (navigator.deviceMemory, GB, rounded: ≤ 2 → 1, ≤ 4 → 2);
+// - an adapter that offers buffers under 1 GiB (Chrome's lower limit tiers),
+//   a mobile GPU vendor, or an integrated Intel GPU (not Arc, "xe-hp*"): 2;
+// - anything else: 4.
+// `adapter` is a GPUAdapter or { info, limits, isFallbackAdapter }.
+// Returns { ceiling, reason }; the core-host and the worker clamp every
+// scale to it (docs/internal-resolution.md).
+const MOBILE_GPU_VENDORS = new Set(["qualcomm", "arm", "imagination", "samsung", "broadcom", "mediatek"]);
+
+export function internalResolutionCeiling(adapter, { deviceMemory } = {}) {
+  const max = INTERNAL_RESOLUTIONS.at(-1);
+  if (!adapter) return { ceiling: 1, reason: "no-adapter" };
+  const info = adapter.info ?? {};
+  const vendor = String(info.vendor ?? "").toLowerCase();
+  const architecture = String(info.architecture ?? "").toLowerCase();
+  if (adapter.isFallbackAdapter || info.isFallbackAdapter || architecture === "swiftshader") {
+    return { ceiling: 1, reason: "cpu-adapter" };
+  }
+  let ceiling = max;
+  let reason = "adapter";
+  const lower = (n, why) => {
+    if (n < ceiling) { ceiling = Math.max(1, n); reason = why; }
+  };
+  const textureMax = Number(adapter.limits?.maxTextureDimension2D);
+  if (textureMax > 0) lower(Math.floor(textureMax / 640), "texture-limit");
+  const memory = Number(deviceMemory);
+  if (memory > 0) lower(memory <= 2 ? 1 : memory <= 4 ? 2 : max, "device-memory");
+  const bufferMax = Number(adapter.limits?.maxBufferSize);
+  if (bufferMax > 0 && bufferMax < 2 ** 30) lower(2, "small-adapter");
+  if (MOBILE_GPU_VENDORS.has(vendor)) lower(2, "mobile-gpu");
+  if (vendor === "intel" && !architecture.startsWith("xe-hp")) lower(2, "integrated-gpu");
+  return { ceiling, reason };
+}
+
+// A scale normalized and held to a ceiling (1 when the ceiling is unknown or
+// invalid: never above what was checked).
+export function clampInternalResolution(value, ceiling = INTERNAL_RESOLUTIONS.at(-1)) {
+  return Math.min(normalizeInternalResolution(value), normalizeInternalResolution(ceiling));
+}
+
 // The core takes log2 of the maximum anisotropy (Dolphin's
 // AnisotropicFilteringMode: 0 = 1x .. 4 = 16x), or -1 to leave what the game
 // asks for. 1x forces anisotropy off, as in Dolphin.
@@ -40,11 +86,12 @@ export function requestedEnhancements(search) {
 
 // The worker's setEnhancements message, as the core takes it: [scale 1-4,
 // log2 anisotropy or -1]. The page sends the scale and the log2 already
-// normalized (core-host); anything else falls back to the defaults.
-export function enhancementCoreArgs(payload = {}) {
+// normalized (core-host); anything else falls back to the defaults. The
+// worker holds the scale to its adapter's ceiling.
+export function enhancementCoreArgs(payload = {}, ceiling = INTERNAL_RESOLUTIONS.at(-1)) {
   const log2 = payload?.maxAnisotropy;
   return [
-    normalizeInternalResolution(payload?.internalResolution),
+    clampInternalResolution(payload?.internalResolution, ceiling),
     Number.isInteger(log2) && log2 >= 0 && log2 <= 4 ? log2 : -1
   ];
 }
