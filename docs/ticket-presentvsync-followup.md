@@ -15,7 +15,7 @@ time (v3). Left for later:
    (it runs every BeginFrame once started, even paused).
 4. ~~**Rename `wgpuVsyncInBeginFrame` to `wgpuVsyncFrameTime`**~~ done in #265;: it now holds
    the rAF frame time, not a flag.
-5. **Drain-local texture in vsync mode** (re-review, 2026-10-26): the input
+5. ~~**Drain-local texture in vsync mode**~~ done in #265 (`presentTexture`): (re-review, 2026-10-26): the input
    marker, the visual cadence sample and the backbuffer readbacks still read
    `lastBackbufferTexture`, local to one drain (worker ~15559/15577/15724);
    in vsync mode they should read the frame's texture, `wgpuVsync.current`.

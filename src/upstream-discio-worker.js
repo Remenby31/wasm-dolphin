@@ -15730,17 +15730,22 @@ function drainWebGpuCmdRing(source = "presentation") {
             }
           }
           let presentAlreadySubmitted = false;
+          // The texture this present shows: in vsync mode the frame's pooled
+          // texture (kept across drains, queued below), else the canvas
+          // texture this drain's backbuffer pass rendered into. The input
+          // marker, the cadence sample and the readbacks read it.
+          const presentTexture = wgpuPresentVsync ? wgpuVsync.current : lastBackbufferTexture;
           const hardwareInputMarkerCoreFrame = api?.getFrame?.() ?? 0;
           const hardwareInputMarker = prepareInputVisualMarker(hardwareInputMarkerCoreFrame);
           let hardwareInputMarkerApplied = false;
           const applyHardwareInputMarker = () => {
-            if (hardwareInputMarkerApplied || !hardwareInputMarker || !lastBackbufferTexture) {
+            if (hardwareInputMarkerApplied || !hardwareInputMarker || !presentTexture) {
               return hardwareInputMarkerApplied;
             }
             try {
               hardwareInputMarkerApplied = encodeHardwareInputMarker(
                 ensureEnc(),
-                lastBackbufferTexture,
+                presentTexture,
                 renderGpu.format,
                 hardwareInputMarker
               );
@@ -15752,8 +15757,8 @@ function drainWebGpuCmdRing(source = "presentation") {
           // Keep the sample on the same command encoder and before the
           // optional input marker so it represents the unmodified game
           // output submitted by this hardware present.
-          const visualCadenceSlot = wgpuVisualCadenceEnabled && lastBackbufferTexture
-            ? encodeWgpuVisualCadence(ensureEnc(), lastBackbufferTexture)
+          const visualCadenceSlot = wgpuVisualCadenceEnabled && presentTexture
+            ? encodeWgpuVisualCadence(ensureEnc(), presentTexture)
             : null;
           // ?efbdiag=1 blits the EFB; ?efbdiag=2 blits the XFB entry the game
           // last presented. The second answers whether that entry holds the
@@ -15842,7 +15847,7 @@ function drainWebGpuCmdRing(source = "presentation") {
             // input generation is pending.  This is opt-in because a mapped
             // GPU readback is intentionally too expensive for normal play.
             const _inputBackbufferOk = inputReadbackDiagnostics &&
-              lastBackbufferTexture && !wgpuInputBackbufferReadbackPending &&
+              presentTexture && !wgpuInputBackbufferReadbackPending &&
               (!wgpuInputVisualBaselineReady || inputVisibleLatencyTracker.hasPending());
             const _sourceOk = lastBackbufferSourceTextureId > 0 && Boolean(
               wgpuReplayClassifier?.needsPresentationReadback("xfb", P)
@@ -15899,16 +15904,16 @@ function drainWebGpuCmdRing(source = "presentation") {
                   `${e?.message || e}`);
               }
             }
-            if ((_backbufferOk || _inputBackbufferOk) && lastBackbufferTexture) {
+            if ((_backbufferOk || _inputBackbufferOk) && presentTexture) {
               try {
                 ensureEnc();
-                const w = lastBackbufferTexture.width;
-                const h = lastBackbufferTexture.height;
+                const w = presentTexture.width;
+                const h = presentTexture.height;
                 const bpr = Math.ceil(w * 4 / 256) * 256;
                 const rb = dev.createBuffer({ size: bpr * h,
                   usage: 0x1 | 0x8 });
                 enc.copyTextureToBuffer(
-                  { texture: lastBackbufferTexture },
+                  { texture: presentTexture },
                   { buffer: rb, bytesPerRow: bpr, rowsPerImage: h },
                   { width: w, height: h, depthOrArrayLayers: 1 });
                 pending.push({

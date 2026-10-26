@@ -233,3 +233,17 @@ test("presentvsync: idle loop stops, device loss empties the queue, canvases key
   assert.match(worker, /wgpuVsyncStreamDevice !== dev \|\|/);
   assert.match(worker, /destroyTexture: \(tex\) => tex\.destroy\(\)/);
 });
+
+// Review of #263 (item 5): in vsync mode the frame's texture is kept across
+// drains, so the input marker, the cadence sample and the backbuffer
+// readbacks read the frame's texture, never the drain-local one (null when
+// the frame's pass ran in an earlier drain).
+test("presentvsync: the input marker, cadence sample and readbacks read the frame's texture", async () => {
+  const worker = await readFile(new URL("../src/upstream-discio-worker.js", import.meta.url), "utf8");
+  assert.match(worker, /const presentTexture = wgpuPresentVsync \? wgpuVsync\.current : lastBackbufferTexture;/);
+  const at = worker.indexOf("const presentTexture = ");
+  const present = worker.slice(at, worker.indexOf("          if (wgpuPresentVsync) {", at));
+  assert.doesNotMatch(present.slice(80), /lastBackbufferTexture/, "no drain-local texture between the frame's present and its queue");
+  assert.match(present, /encodeHardwareInputMarker\(\n\s+ensureEnc\(\),\n\s+presentTexture,/);
+  assert.match(present, /encodeWgpuVisualCadence\(ensureEnc\(\), presentTexture\)/);
+});
