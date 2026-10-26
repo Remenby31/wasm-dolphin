@@ -94,7 +94,19 @@ with `scaleResolutionDownBy` there.
   times have the 200 ms granularity of `saveStateFile`'s polls. The capture
   costs nothing that matters at 4x; a savestate at 4x is about twice the 1x
   one. The heap is reserved at 1.5 GiB from the start, so its size says
-  nothing about the headroom: that needs a malloc counter in the core.
+  nothing about the headroom; malloc's own figures do (`DolphinWeb_HeapStats`,
+  harness request `validationHeapStats`, #290). 2-player split screen,
+  2 runs, CI core 4e2d8198:
+
+  | Scale | malloc in use | Headroom before a save | Lowest headroom seen |
+  | --- | --- | --- | --- |
+  | 1x | ~446 MB | ~995 MB | 992 MB |
+  | 2x | ~483 MB | ~958 MB | 952 MB |
+  | 4x | ~649 MB | ~791 MB | 604 MB (after a load) |
+
+  A save grows malloc's arena by about 100 MB at 1x and 245 MB at 4x
+  (freed after it). 4x keeps more than 600 MB of the heap free: no ceiling
+  by heap memory (judge's bar: 200 MB).
 - `streamCaptureStats` counts every size it sent over the capture
   (`minWidth`/`maxWidth`, `sizes`: frames per `source:WxH` with the last
   core frame, `inputMaxWidth`): a stray size, as the 320x240 seen once at
