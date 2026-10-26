@@ -322,15 +322,20 @@ export function stallMsOfRows(rows, tps, ratio = null) {
     else {
       const local = iv.slice(Math.max(0, i - LOCAL_HALF_ROWS), i + LOCAL_HALF_ROWS + 1).map((x) => x.r).sort((x, y) => x - y);
       const med = local[local.length >> 1];
-      // A core running slow there (local median under 0.75: guest time in
-      // coarse steps, or a sustained slowness) is no stall: read apart by
-      // slowRowsMs (review of #270: 33 ms steps read up to 411 ms in 4 s).
-      if (med < SLOW_PAIR_RATIO) continue;
       bar = STALL_LOCAL_RATIO * med;
       // Guest time in quanta as long as a row (66 ms steps) leaves a row
-      // with no progress every few rows: a stall leaves 1-2 in the window,
-      // quantization 20 % of them or more.
-      if (local.filter((r) => r < bar).length > STEP_ROWS_SHARE * local.length) continue;
+      // with no progress every few rows, SCATTERED (alternating with fast
+      // rows, at most 2 in a row with the steps' rounding): skipped when over
+      // 20 % of the window's rows are low and no run of them is longer. A
+      // stall's low rows are contiguous: a 500 ms stall in a long VI gap
+      // still counts, and a 50 ms one in a phase at 70 % (few low rows) too
+      // (review of #271); a 50 ms stall inside such quantized steps does not.
+      // A sustained slowness moves the median with it.
+      const win = iv.slice(Math.max(0, i - LOCAL_HALF_ROWS), i + LOCAL_HALF_ROWS + 1).map((x) => x.r < bar);
+      const lows = win.filter(Boolean).length;
+      let run = 0, longest = 0;
+      for (const low of win) { run = low ? run + 1 : 0; longest = Math.max(longest, run); }
+      if (lows > STEP_ROWS_SHARE * win.length && longest <= 2) continue;
     }
     if (iv[i].r < bar) ms += Math.max(0, iv[i].host - iv[i].guest);
   }
@@ -462,6 +467,7 @@ export function worstDrops(events, n = 5) {
 // A/A: each metric's spread over repeated runs of the same build. minDiff:
 // the smallest difference between the medians of two series of n runs that
 // is unlikely to be noise (about 2 standard errors of a difference).
+export const TRIM_MIN_RUNS = 10;
 export function noiseOf(summaries) {
   const keys = [...new Set(summaries.flatMap((s) => Object.keys(s)))].filter((k) => summaries.some((s) => typeof s[k] === "number"));
   return Object.fromEntries(keys.map((k) => {
@@ -473,14 +479,19 @@ export function noiseOf(summaries) {
     const med = median(xs);
     const mad = xs.length ? median(xs.map((x) => Math.abs(x - med))) : null;
     const robustSd = mad == null ? null : 1.4826 * mad;
-    // Outliers only where the MAD is not 0 (a phase mostly at 0 with a few
-    // 20 ms readings has MAD 0: those are its spread, not outliers); the
-    // threshold's sd is then the plain sd of the others.
+    // Outliers (beyond 5 robust sds, where the MAD is not 0) are always
+    // counted. They are left out of the threshold's sd only with an A/A of
+    // TRIM_MIN_RUNS or more (review of #271: from 6 runs the MAD itself is
+    // noisy, a normal run went out 6.6 % of the time and the confirmed false
+    // positives rose from 0.45 to 5 %), with the degrees of freedom of the
+    // runs kept.
     const far = (x) => robustSd > 0 && Math.abs(x - med) > 5 * robustSd;
     const kept = xs.filter((x) => !far(x));
     const outliers = xs.length - kept.length;
-    const trimmedSd = outliers ? stdev(kept) : sd;
-    return [k, { ...describe(xs, 2), robustSd: round(robustSd, 2), trimmedSd: round(trimmedSd, 2), outliers, minDiff: sd == null || xs.length < 2 ? null : round(2 * sd * Math.sqrt(2 / xs.length), 2) }];
+    const trim = outliers > 0 && xs.length >= TRIM_MIN_RUNS;
+    return [k, { ...describe(xs, 2), robustSd: round(robustSd, 2), outliers,
+      ...(trim ? { trimmedSd: round(stdev(kept), 2), keptN: kept.length } : {}),
+      minDiff: sd == null || xs.length < 2 ? null : round(2 * sd * Math.sqrt(2 / xs.length), 2) }];
   }));
 }
 
@@ -545,6 +556,7 @@ export function verdictOf(baseline, candidate, { noise = null, floor = VERDICT_F
     // The A/A's sd without its outlier runs when it had some (one run far off
     // does not widen the threshold); its plain sd otherwise.
     let sd = fromAa ? (noise[k].trimmedSd ?? noise[k].stdev) : Math.sqrt(((stdev(b) ?? 0) ** 2 + (stdev(c) ?? 0) ** 2) / 2);
+    const aaDf = fromAa ? (noise[k].trimmedSd != null ? noise[k].keptN : noise[k].n) - 1 : null;
     // A count (hitches) varies at least as a Poisson count: an A/A that saw
     // the same count six times says sd 0, not that a gap cannot come and go.
     let poisson = false;
@@ -555,7 +567,7 @@ export function verdictOf(baseline, candidate, { noise = null, floor = VERDICT_F
     // Where the Poisson floor sets the sd, it is a model, not an estimate:
     // the normal quantile, not Student's (review of #267: t x a floor made
     // hitches nearly blind, +5 hitches needed at a mean of 1).
-    const t = poisson ? Z_COUNTS : tQuantile(fromAa ? noise[k].n - 1 : b.length + c.length - 2);
+    const t = poisson ? Z_COUNTS : tQuantile(fromAa ? aaDf : b.length + c.length - 2);
     const threshold = Math.max(t * MEDIAN_SE * sd * Math.sqrt(2 / n), floor[k] ?? 0);
     const worseBy = worse === "up" ? delta : -delta;
     rows.push({ ...base, delta: round(delta, 2), threshold: round(threshold, 2), regression: worseBy > threshold, improvement: -worseBy > threshold });

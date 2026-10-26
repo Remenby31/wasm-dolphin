@@ -351,10 +351,12 @@ node harness/probes/drop-meter.mjs --iso ../roms/<disc>.iso --port 8113 --runs 3
 # 30 images/s. A --noise with no core recorded, or another core, stops the
 # comparison before its first run (exit 3). Hitch counts never get an sd under Poisson's (sqrt(mean + 0.5)),
 # judged at the normal 99.5 % quantile then. Measured on 12 runs of one tree
-# (independent A/A noise): 7.0 % of batches flag a regression, 0.5 % once
-# a second batch must confirm it (3000 draws). The A/A's sd leaves out its
-# outlier runs (beyond 5 robust sds, MAD not 0), which are counted in the
-# summary (outliers); one far-off run no longer widens a phase's threshold.
+# (independent A/A noise): 0.0 % of batches flag a regression (3000 draws).
+# Outlier runs of the A/A (beyond 5 robust sds, MAD not 0) are counted in
+# the summary (outliers); they are left out of the threshold's sd only with
+# an A/A of 10 runs or more (degrees of freedom of the runs kept): from 6
+# runs the MAD is too noisy. The summary records the probe's version
+# (PROBE_VERSION, what it runs in the page and worker); --noise must match.
 # beginFrameGaps: the longest gap without a BeginFrame, the worker's rAF
 # (--display) and the page's (always), reported: headless, the worker's rAF
 # sometimes stops 1-4 s while presents go on.

@@ -362,19 +362,42 @@ test("coarse guest steps and sustained slowness read no stall; repeats are relat
   assert.equal(displaySummaryOf(displayed).displayRepeats3, 0);
 });
 
+// Review of #271: low rows that are contiguous are a stall, whatever the
+// share: a 500 ms stall in a long VI gap, a 50 ms one in a phase at 70 %.
+test("contiguous low rows are a stall: 500 ms at 100 %, 50 ms at 70 %", () => {
+  for (const [name, speed, from, to, expect] of [["500 ms at 100 %", 1, 1000, 1500, 500], ["50 ms at 70 %", 0.7, 1000, 1050, 35]]) {
+    const rows = [];
+    let g = 0;
+    for (let t = 0; t <= 3000; t += 50) {
+      rows.push({ t, lagMs: 0, ticks: g });
+      const lost = Math.max(0, Math.min(t + 50, to) - Math.max(t, from));
+      g += TPS * speed * (50 - lost) / 1000;
+    }
+    const ms = stallMsOfRows(rows, TPS);
+    assert.ok(ms >= 0.9 * expect && ms <= 1.1 * (to - from), `${name}: ${ms}`);
+  }
+});
+
 // The A/A --display of main had one run with a 4.4 s BeginFrame gap: the
 // phase's sd went from ~10 to 1773 ms. Robust noise: that run is counted as
 // an outlier, the threshold stays that of the others.
 test("robust A/A noise: one far-off run is reported, it does not widen the threshold", () => {
-  const n = noiseOf([0, 17, 0, 17, 4350, 0].map((v) => ({ displayExcessMs: v })));
+  // 6 runs: the outlier is counted, not left out (a 6-run MAD is noisy)
+  const six = noiseOf([0, 17, 0, 17, 4350, 0].map((v) => ({ displayExcessMs: v })));
+  assert.equal(six.displayExcessMs.outliers, 1);
+  assert.equal(six.displayExcessMs.trimmedSd, undefined);
+  // 10 runs: left out of the threshold's sd, df = runs kept - 1
+  const n = noiseOf([0, 17, 0, 17, 4350, 0, 9, 3, 12, 5].map((v) => ({ displayExcessMs: v })));
   assert.equal(n.displayExcessMs.outliers, 1);
+  assert.equal(n.displayExcessMs.keptN, 9);
   assert.ok(n.displayExcessMs.trimmedSd < 30 && n.displayExcessMs.stdev > 1000);
   // mostly 0 with a few 20 ms readings: that is the spread, no outlier
-  const z = noiseOf([0, 22, 0, 18, 0, 27].map((v) => ({ stallMs: v })));
+  const z = noiseOf([0, 22, 0, 18, 0, 27, 0, 0, 21, 0].map((v) => ({ stallMs: v })));
   assert.equal(z.stallMs.outliers, 0);
-  assert.equal(z.stallMs.trimmedSd, z.stallMs.stdev);
+  assert.equal(z.stallMs.trimmedSd, undefined);
   const b = [{ displayExcessMs: 0 }, { displayExcessMs: 10 }, { displayExcessMs: 5 }], c = [{ displayExcessMs: 300 }, { displayExcessMs: 320 }, { displayExcessMs: 310 }];
   assert.equal(verdictOf(b, c, { metrics: { displayExcessMs: "up" }, noise: n, floor: PHASE_FLOOR }).regression, true);
+  assert.equal(verdictOf(b, c, { metrics: { displayExcessMs: "up" }, noise: six, floor: PHASE_FLOOR }).regression, false, "with 6 runs the outlier's sd stays: no verdict through it");
 });
 
 test("BeginFrame gaps: the worker's rAF and the page's, apart", () => {

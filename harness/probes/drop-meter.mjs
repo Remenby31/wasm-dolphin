@@ -66,6 +66,11 @@ import { machineSnapshot, sampleChromeRss } from "../lib/system.mjs";
 import { mergeTimeline } from "../lib/timeline.mjs";
 import { num, sideOrder, STATE_ROUTE } from "./race-perf.mjs";
 
+// What this probe runs in the page and the worker (samplers, counters): an
+// A/A's noise holds only for the same version (review of #271: the page's
+// rAF counter changes the environment). Raised with each such change.
+export const PROBE_VERSION = 2;
+
 // What the site runs (salon packages/core engineParams, profile "fast", with
 // a WebGPU adapter).
 export const PRODUCT_QUERY = "core=upstream&video=wgpu&presenter=webgpu&cpu=dual&speed=1&oc=1&pacing=tick&fastsw=1&wasmjit=1&jitwarmup=700&aot=1&aotcompiler=1&jitoffthread=1";
@@ -420,7 +425,7 @@ export function readNoise(file, expect = null) {
   const s = JSON.parse(readFileSync(file, "utf8"));
   if (s.probe !== "drop-meter") throw new Error(`--noise ${file}: not a drop-meter summary`);
   if (expect) {
-    const differ = ["scenario", "state", "query", "sampleMs", "display"].filter((k) => (s[k] ?? (k === "display" ? false : null)) !== (expect[k] ?? (k === "display" ? false : null)));
+    const differ = ["probeVersion", "scenario", "state", "query", "sampleMs", "display"].filter((k) => (s[k] ?? (k === "display" ? false : null)) !== (expect[k] ?? (k === "display" ? false : null)));
     const named = { cpuModel: [s.machine?.cpuModel, expect.cpuModel], browser: [s.browser, expect.browser] };
     // the same machine, and the same browser when both runs say which
     if (expect.cpuModel && s.machine?.cpuModel && s.machine.cpuModel !== expect.cpuModel) differ.push("cpuModel");
@@ -556,7 +561,7 @@ async function main() {
     regionCounters: values["region-counters"], display: values.display, pcWindow: values["pc-window"] ? values["pc-window"].split("-").map(Number) : null,
     maxLoad: values["max-load"] ? num(values, "max-load", { min: 0.1 }) : Math.max(2, os.cpus().length / 4), loadWait: num(values, "load-wait", { min: 0 })
   };
-  const noise = values.noise ? readNoise(values.noise, { scenario: path.basename(values.scenario), state: o.state ? path.basename(o.state) : null, display: o.display, query: o.query, sampleMs: o.sampleMs, cpuModel: machineSnapshot().cpuModel }) : null;
+  const noise = values.noise ? readNoise(values.noise, { probeVersion: PROBE_VERSION, scenario: path.basename(values.scenario), state: o.state ? path.basename(o.state) : null, display: o.display, query: o.query, sampleMs: o.sampleMs, cpuModel: machineSnapshot().cpuModel }) : null;
   const noiseCore = values.noise ? noiseCoreOf(values.noise) : null;
   const sides = { candidate: resolveSide("candidate", values.candidate) };
   if (values.baseline) sides.baseline = resolveSide("baseline", values.baseline);
@@ -583,7 +588,7 @@ async function main() {
   const outDir = probeOutDir("drop-meter", iso, values.out);
   const meta = {
     probe: "drop-meter", at: new Date().toISOString(), locked: !values["no-lock"], machine: machineSnapshot(), chrome: chromeInfo(), iso: path.basename(iso),
-    scenario: path.basename(values.scenario), state: o.state ? path.basename(o.state) : null, display: o.display, query: o.query, sampleMs: o.sampleMs, runs: o.runs, visits: o.visits, maxLoad: o.maxLoad,
+    probeVersion: PROBE_VERSION, scenario: path.basename(values.scenario), state: o.state ? path.basename(o.state) : null, display: o.display, query: o.query, sampleMs: o.sampleMs, runs: o.runs, visits: o.visits, maxLoad: o.maxLoad,
     sides: Object.fromEntries(Object.entries(sides).map(([k, s]) => [k, s.label])), cores, noise: values.noise ?? null, noiseCore,
     definition: "windows of 100 ms from the scenario's first step; speed = guest/host time (VI ticks); drops: windows < 90 % or a present gap > 50 ms, merged; loads: disc reads ≥ 2.5 MiB/s (0.5 s average), merged within 1 s, excess = host − guest ms; time under 95/90 %: 1 s sliding windows; verdict: median moved the worse way beyond the A/A noise"
   };
