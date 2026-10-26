@@ -145,12 +145,17 @@ test("the internal resolution ceiling goes by adapter class and limits", async (
     [gpu("apple", "metal-3", {}, { isFallbackAdapter: true }), {}, 1, "cpu-adapter"],
     [{ info: { vendor: "x", isFallbackAdapter: true } }, {}, 1, "cpu-adapter"],
     [gpu("apple", "metal-3"), { deviceMemory: 32 }, 4, "adapter"],
+    // Safari has no deviceMemory: an iPhone or an iPad reads as a Mac.
+    [gpu("apple", "metal-3"), {}, 2, "apple-without-memory"],
     [gpu("nvidia", "ampere"), {}, 4, "adapter"],
-    [gpu("intel", "xe-hpg"), {}, 4, "adapter"],
-    [gpu("intel", "gen-12lp"), {}, 2, "integrated-gpu"],
-    [gpu("qualcomm", "adreno-7xx"), {}, 2, "mobile-gpu"],
-    [gpu("apple", "metal-3", { maxBufferSize: 268435456 }), {}, 2, "small-adapter"],
-    [gpu("apple", "metal-3", { maxTextureDimension2D: 2048 }), {}, 3, "texture-limit"],
+    // Chrome's Intel names: Arc Battlemage "xe-2-hpg", Alchemist none;
+    // integrated "gen-9", "gen-12lp", "xe-lpg", "xe-2-lpg".
+    [gpu("intel", "xe-2-hpg"), { deviceMemory: 16 }, 4, "adapter"],
+    [gpu("intel", ""), { deviceMemory: 16 }, 4, "adapter"],
+    ...["gen-9", "gen-12lp", "xe-lpg", "xe-2-lpg"].map((a) => [gpu("intel", a), { deviceMemory: 16 }, 2, "integrated-gpu"]),
+    ...["qualcomm", "arm", "img-tec", "huawei", "verisilicon"].map((v) => [gpu(v, ""), { deviceMemory: 8 }, 2, "mobile-gpu"]),
+    [gpu("apple", "metal-3", { maxBufferSize: 268435456 }), { deviceMemory: 16 }, 2, "small-adapter"],
+    [gpu("apple", "metal-3", { maxTextureDimension2D: 2048 }), { deviceMemory: 16 }, 3, "texture-limit"],
     [gpu("apple", "metal-3"), { deviceMemory: 4 }, 2, "device-memory"],
     [gpu("apple", "metal-3"), { deviceMemory: 2 }, 1, "device-memory"],
     [gpu("intel", "gen-12lp"), { deviceMemory: 2 }, 1, "device-memory"],
@@ -197,6 +202,13 @@ test("a device lost above 1x brings the host back to 1x for its next boot and ev
   };
   const call = (name, ...args) => EmulatorHost.prototype[name].apply(host, args);
   assert.deepEqual(await call("internalResolutionCeiling"), { ceiling: 4, reason: "adapter" });
+  // The worker's adapter, once known, wins over the page's guess.
+  host.workerScaleCeiling = { ceiling: 2, reason: "integrated-gpu" };
+  assert.deepEqual(await call("internalResolutionCeiling"), { ceiling: 2, reason: "integrated-gpu" });
+  const seenCeiling = [];
+  new UpstreamWorkerAdapter({ onScaleCeiling: (c) => seenCeiling.push(c) }).handleMessage({ type: "wgpu-scale-ceiling", ceiling: 2, reason: "integrated-gpu" });
+  assert.deepEqual(seenCeiling, [{ ceiling: 2, reason: "integrated-gpu" }]);
+  host.workerScaleCeiling = null;
   call("handleGpuDeviceLost", { internalResolution: 4, reason: "unknown", detail: "oom" });
   assert.deepEqual(lost, [{ internalResolution: 4, fallback: 1, reason: "unknown", detail: "oom" }]);
   assert.equal(host.enhancements.internalResolution, 1);

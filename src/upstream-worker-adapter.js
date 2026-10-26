@@ -136,6 +136,7 @@ export class UpstreamWorkerAdapter {
     regionCap = null,
     onAotProgress = () => {},
     onGpuDeviceLost = () => {},
+    onScaleCeiling = () => {},
     collectMetrics = false,
     legacyOneWayAck = false,
     wgpuReplayDiagnostics = false,
@@ -270,6 +271,8 @@ export class UpstreamWorkerAdapter {
     // { internalResolution, reason, detail }: the worker's WebGPU device was
     // lost at that scale (patch 0168 follow-up, core-host falls back to 1x).
     this.onGpuDeviceLost = onGpuDeviceLost;
+    // { ceiling, reason }: the worker's adapter's internal resolution ceiling.
+    this.onScaleCeiling = onScaleCeiling;
     this.collectMetrics = Boolean(collectMetrics);
     this.legacyOneWayAck = Boolean(legacyOneWayAck);
     this.wgpuReplayDiagnostics = Boolean(wgpuReplayDiagnostics);
@@ -1252,6 +1255,10 @@ export class UpstreamWorkerAdapter {
       this.replaceLostPresenterCanvas().catch((error) => {
         this.onStatus(`Presenter canvas replacement failed: ${error instanceof Error ? error.message : error}`);
       });
+      return;
+    }
+    if (message?.type === "wgpu-scale-ceiling") {
+      this.onScaleCeiling({ ceiling: Number(message.ceiling) || 1, reason: String(message.reason ?? "") });
       return;
     }
     if (message?.type === "wgpu-device-lost") {

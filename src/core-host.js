@@ -123,6 +123,8 @@ export class EmulatorHost {
     // 1 once a device was lost above 1x (internalResolutionCeiling()).
     this.scaleLostCeiling = 4;
     this.scaleCeilingPromise = null;
+    // The worker's own adapter's ceiling, once its presenter took it.
+    this.workerScaleCeiling = null;
     // CPU reads of the EFB (peeks), off by default as in Dolphin (EFBAccessEnable).
     this.efbAccess = new URLSearchParams(window.location.search).get("efbaccess") === "1";
     // Harness: FIFO logs (.dff) may boot. Off for the app (FifoPlayer trusts the log).
@@ -554,7 +556,8 @@ export class EmulatorHost {
             inputReadbackDiagnostics: this.inputReadbackDiagnostics,
             inputPhotonDiagnostics: this.inputPhotonMarker.enabled,
             inputPhotonMarker: this.inputPhotonMarker,
-            onGpuDeviceLost: (event) => this.handleGpuDeviceLost(event)
+            onGpuDeviceLost: (event) => this.handleGpuDeviceLost(event),
+            onScaleCeiling: (ceiling) => { this.workerScaleCeiling = ceiling; }
           })
         : new DolphinCoreAdapter({ canvas, onStatus });
     this.mode = "demo";
@@ -949,17 +952,23 @@ export class EmulatorHost {
   }
 
   // The highest internal resolution this machine is trusted with:
-  // { ceiling, reason } (src/wgpu-enhancements.js), from the page's
-  // high-performance adapter, the one the worker takes; 1 after a device
-  // loss above 1x. setEnhancements holds every scale to it, the worker too
-  // (its own adapter). Ask it before offering a scale.
+  // { ceiling, reason } (src/wgpu-enhancements.js): the worker's adapter's
+  // once its presenter took it (wgpu-scale-ceiling), before that the same
+  // rule on an adapter the page asks with the worker's power preference;
+  // 1 after a device loss above 1x. setEnhancements holds every scale to
+  // it, the worker too. Ask it before offering a scale, again after the boot.
   async internalResolutionCeiling() {
     this.scaleCeilingPromise ??= (async () => {
       const gpu = globalThis.navigator?.gpu;
-      const adapter = await gpu?.requestAdapter?.({ powerPreference: "high-performance" }).catch(() => null);
-      return internalResolutionCeiling(adapter ?? null, { deviceMemory: globalThis.navigator?.deviceMemory });
+      const adapter = await gpu?.requestAdapter?.({ powerPreference: this.wgpuPowerPreference ?? "high-performance" }).catch(() => null);
+      let info = adapter?.info ?? null;
+      if (adapter && !info && typeof adapter.requestAdapterInfo === "function") {
+        info = await adapter.requestAdapterInfo().catch(() => null);
+      }
+      return internalResolutionCeiling(adapter ? { info, limits: adapter.limits, isFallbackAdapter: adapter.isFallbackAdapter } : null,
+        { deviceMemory: globalThis.navigator?.deviceMemory });
     })();
-    const adapter = await this.scaleCeilingPromise;
+    const adapter = this.workerScaleCeiling ?? await this.scaleCeilingPromise;
     return this.scaleLostCeiling < adapter.ceiling
       ? { ceiling: this.scaleLostCeiling, reason: "device-lost" }
       : adapter;

@@ -23,12 +23,23 @@ export function normalizeInternalResolution(value) {
 // - a texture limit below 640N (the EFB and backbuffer width): the limit;
 // - a small machine (navigator.deviceMemory, GB, rounded: ≤ 2 → 1, ≤ 4 → 2);
 // - an adapter that offers buffers under 1 GiB (Chrome's lower limit tiers),
-//   a mobile GPU vendor, or an integrated Intel GPU (not Arc, "xe-hp*"): 2;
+//   a mobile GPU vendor (Chrome's names), an integrated Intel GPU, or an
+//   Apple GPU without navigator.deviceMemory (Safari: an iPhone or iPad
+//   cannot be told from a Mac there): 2;
 // - anything else: 4.
+// Intel: Chrome names the integrated generations ("gen-9", "gen-12lp",
+// "xe-lpg", "xe-2-lpg": "gen-*" or an "lp" architecture); Arc is "xe-2-hpg"
+// (Battlemage) or no architecture at all (Alchemist, not in Dawn's list), so
+// an unknown Intel architecture is not taken for an integrated one.
 // `adapter` is a GPUAdapter or { info, limits, isFallbackAdapter }.
 // Returns { ceiling, reason }; the core-host and the worker clamp every
 // scale to it (docs/internal-resolution.md).
-const MOBILE_GPU_VENDORS = new Set(["qualcomm", "arm", "imagination", "samsung", "broadcom", "mediatek"]);
+const MOBILE_GPU_VENDORS = new Set(["qualcomm", "arm", "img-tec", "imagination", "samsung", "broadcom", "mediatek", "huawei", "verisilicon"]);
+
+export function integratedIntelArchitecture(architecture) {
+  const a = String(architecture ?? "").toLowerCase();
+  return a.startsWith("gen-") || /(^|-)lpg?$|lp$/.test(a);
+}
 
 export function internalResolutionCeiling(adapter, { deviceMemory } = {}) {
   const max = INTERNAL_RESOLUTIONS.at(-1);
@@ -51,7 +62,8 @@ export function internalResolutionCeiling(adapter, { deviceMemory } = {}) {
   const bufferMax = Number(adapter.limits?.maxBufferSize);
   if (bufferMax > 0 && bufferMax < 2 ** 30) lower(2, "small-adapter");
   if (MOBILE_GPU_VENDORS.has(vendor)) lower(2, "mobile-gpu");
-  if (vendor === "intel" && !architecture.startsWith("xe-hp")) lower(2, "integrated-gpu");
+  if (vendor === "intel" && integratedIntelArchitecture(architecture)) lower(2, "integrated-gpu");
+  if (vendor === "apple" && !(memory > 0)) lower(2, "apple-without-memory");
   return { ceiling, reason };
 }
 

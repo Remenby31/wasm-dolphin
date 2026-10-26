@@ -61,12 +61,18 @@ with `scaleResolutionDownBy` there.
   (`src/wgpu-enhancements.js`) gives the highest scale a machine is trusted
   with, by adapter class since WebGPU says nothing about GPU memory: 1 for
   no adapter or a CPU one; 2 for `navigator.deviceMemory` ≤ 4 GB (1 at
-  ≤ 2), an adapter offering buffers under 1 GiB, a mobile GPU vendor or an
-  integrated Intel GPU; the texture limit / 640; else 4 (M4 Pro: 4). The
-  worker holds the boot scale and every `setEnhancements` to its adapter's
-  ceiling and answers the scale in effect;
-  `host.internalResolutionCeiling()` gives `{ ceiling, reason }` to the page
-  before it offers a scale, and `host.setEnhancements` clamps to it too.
+  ≤ 2), an adapter offering buffers under 1 GiB, a mobile GPU vendor
+  (Chrome's names: qualcomm, arm, img-tec, huawei, verisilicon…), an
+  integrated Intel GPU (`gen-*` or an `lp` architecture; Arc is `xe-2-hpg`
+  or unnamed and keeps 4) or an Apple GPU without `deviceMemory` (Safari,
+  where an iPhone or iPad reads as a Mac); the texture limit / 640; else 4
+  (M4 Pro in Chrome: 4). The worker holds the boot scale and every
+  `setEnhancements` to its adapter's ceiling, answers the scale in effect
+  and posts its ceiling (`wgpu-scale-ceiling`);
+  `host.internalResolutionCeiling()` gives `{ ceiling, reason }`: the
+  worker's once known, before that the same rule on an adapter the page
+  asks with the worker's power preference. `host.setEnhancements` clamps to
+  it too.
 - **Device loss.** A lost `GPUDevice` stops the game (no rendering without
   it). Lost above 1x, the worker posts `wgpu-device-lost` with the scale;
   the host's ceiling drops to 1 for the rest of the page (next boot and

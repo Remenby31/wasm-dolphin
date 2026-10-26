@@ -6624,6 +6624,9 @@ async function createWebGpuPresenter(canvas) {
     { deviceMemory: self.navigator?.deviceMemory });
   wgpuScaleAdapterCeiling = scaleCeiling.ceiling;
   rendererDiagnostics.internalResolutionCeiling = { ...scaleCeiling, lost: wgpuScaleLostCeiling < 4 };
+  // The page holds its scales to this adapter's ceiling (core-host), not to
+  // its own guess from another adapter.
+  self.postMessage({ type: "wgpu-scale-ceiling", ceiling: scaleCeiling.ceiling, reason: scaleCeiling.reason });
   rendererDiagnostics.adapter = {
     selected: true,
     vendor: adapterInfo?.vendor || null,
