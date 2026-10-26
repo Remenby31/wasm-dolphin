@@ -1,0 +1,62 @@
+diff --git a/Source/Core/Core/PowerPC/CachedInterpreter/CachedInterpreter.cpp b/Source/Core/Core/PowerPC/CachedInterpreter/CachedInterpreter.cpp
+--- a/Source/Core/Core/PowerPC/CachedInterpreter/CachedInterpreter.cpp
++++ b/Source/Core/Core/PowerPC/CachedInterpreter/CachedInterpreter.cpp
+@@ -18487,8 +18487,58 @@ void CachedInterpreter::ResetFreeMemoryRanges()
+   m_free_ranges.insert(region, region + region_size);
+ }
+ 
++#ifdef __EMSCRIPTEN__
++// Patch 0167: the CPU thread's time compiling blocks, for the harness's drop
++// meter. Everything a block cache miss costs before the block runs: the
++// analysis, the cached interpreter's code, the WASM block's emission and its
++// compile, instantiation or post to the off-thread compiler, a cache clear.
++// Cumulative; DolphinWeb_JitTimeStats. Off unless the harness turns it on
++// (DolphinWeb_SetJitTimeStatsEnabled): one relaxed load per block compile.
++namespace
++{
++std::atomic<bool> s_jit_time_stats{false};
++std::atomic<u32> s_jit_time_calls{0};
++std::atomic<u64> s_jit_time_us{0};
++std::atomic<u32> s_jit_time_max_us{0};
++}  // namespace
++
++extern "C" EMSCRIPTEN_KEEPALIVE void DolphinWeb_SetJitTimeStatsEnabled(int on)
++{
++  s_jit_time_stats.store(on != 0, std::memory_order_relaxed);
++}
++
++// out: compiles, us (lo, hi), max us of one compile.
++extern "C" EMSCRIPTEN_KEEPALIVE void DolphinWeb_JitTimeStats(u32* out)
++{
++  const u64 us = s_jit_time_us.load(std::memory_order_relaxed);
++  out[0] = s_jit_time_calls.load(std::memory_order_relaxed);
++  out[1] = static_cast<u32>(us);
++  out[2] = static_cast<u32>(us >> 32);
++  out[3] = s_jit_time_max_us.load(std::memory_order_relaxed);
++}
++#endif
++
+ void CachedInterpreter::Jit(u32 em_address)
+ {
++#ifdef __EMSCRIPTEN__
++  if (s_jit_time_stats.load(std::memory_order_relaxed))
++  {
++    const auto start = std::chrono::steady_clock::now();
++    Jit(em_address, true);
++    const u64 us = static_cast<u64>(std::max<s64>(
++        std::chrono::duration_cast<std::chrono::microseconds>(std::chrono::steady_clock::now() - start)
++            .count(),
++        0));
++    s_jit_time_calls.fetch_add(1, std::memory_order_relaxed);
++    s_jit_time_us.fetch_add(us, std::memory_order_relaxed);
++    const u32 v = static_cast<u32>(std::min<u64>(us, 0xffffffffu));
++    u32 seen = s_jit_time_max_us.load(std::memory_order_relaxed);
++    while (v > seen && !s_jit_time_max_us.compare_exchange_weak(seen, v, std::memory_order_relaxed))
++    {
++    }
++    return;
++  }
++#endif
+   Jit(em_address, true);
+ }
+ 

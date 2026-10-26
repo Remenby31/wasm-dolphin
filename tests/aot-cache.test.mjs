@@ -232,6 +232,38 @@ test("with the Service Worker, modules come from compileStreaming(fetch) of an u
   }
 });
 
+// A warm launch's regions must reach the compiler worker, which warms what
+// it compiles: with compileStreaming null the cache compiles every module
+// from its bytes through the caller's compile, Service Worker or not; the
+// keys of one load are compiled several at once, results in key order.
+test("compileStreaming null: modules come from the caller's compile, even with the Service Worker", async () => {
+  const storage = fakeCacheStorage();
+  let cacheName = null;
+  const fetchImpl = async (url) => {
+    if (url.endsWith("/ping")) return new Response(null, { status: 204, headers: { "x-salon-aot-sw": "1" } });
+    const hit = await (await storage.open(cacheName)).match(url);
+    return hit ?? new Response(null, { status: 404 });
+  };
+  const compiled = [];
+  const cache = await openAotCache({ ...ident(), baseUrl: BASE, cacheStorage: storage, fetchImpl, compileStreaming: null,
+    compile: async (bytes) => { compiled.push(bytes.byteLength); return WebAssembly.compile(bytes); } });
+  cacheName = cache.cacheName;
+  await cache.put([{ key: k(1), bytes: MOD_A }]);
+  const got = (await cache.load([k(1)])).get(k(1));
+  assert.ok(got.module instanceof WebAssembly.Module);
+  assert.equal(got.streamed, false);
+  assert.deepEqual(compiled, [MOD_A.byteLength]);
+  // several at once (a compile is a round trip to the compiler worker)
+  let inFlight = 0, most = 0;
+  const slow = await openAotCache({ ...ident(), baseUrl: BASE, cacheStorage: storage, fetchImpl, compileStreaming: null,
+    compile: async (bytes) => { inFlight += 1; most = Math.max(most, inFlight); await new Promise((r) => setTimeout(r, 5)); inFlight -= 1; return WebAssembly.compile(bytes); } });
+  await slow.put([{ key: k(2), bytes: MOD_B }, { key: k(3), bytes: MOD_A }]);
+  const many = await slow.load([k(3), k(1), k(2)]);
+  assert.deepEqual([...many.keys()], [k(3), k(1), k(2)]);
+  assert.ok([...many.values()].every((x) => x.module instanceof WebAssembly.Module));
+  assert.ok(most > 1, `compiled one at a time (${most})`);
+});
+
 test("pruneAotCaches leaves other discs, foreign caches and caches being created alone", async () => {
   const storage = fakeCacheStorage();
   const a = await open(storage, {}, { clock });

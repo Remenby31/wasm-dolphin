@@ -466,3 +466,49 @@ test("loadCore awaits pthread cache installation before returning", async () => 
     /if\s*\(!noJitCache\)\s*installDolphinPthreadChannels/
   );
 });
+
+// A warm launch: the region cache compiles through the compiler worker,
+// delivered before its warm-up (as a first launch's regions), but only under
+// an engine that keeps native modules; under JSC/SpiderMonkey not at all.
+test("cached regions go to the compiler worker as before-warm jobs, only where modules are kept", async (t) => {
+  const originalSelf = globalThis.self;
+  globalThis.self = { location: { href: "http://127.0.0.1:8080/" }, addEventListener() {}, postMessage() {} };
+  t.after(() => {
+    if (originalSelf === undefined) delete globalThis.self;
+    else globalThis.self = originalSelf;
+  });
+  const { aotCacheCompileOptions, setDolphinAotCompilerForTest, setWasmEngineForTest } = await import(`${workerUrl.href}?cache-compile-test=${Date.now()}`);
+  const { Worker } = await import("node:worker_threads");
+  const jobs = [];
+  setDolphinAotCompilerForTest({
+    enabled: true,
+    createWorker: () => {
+      const w = new Worker(new URL("./helpers/aot-compiler-node-worker.mjs", import.meta.url));
+      return {
+        addEventListener(type, listener) {
+          if (type === "message") w.on("message", (data) => listener({ data }));
+          if (type === "error") w.on("error", listener);
+        },
+        postMessage: (m) => { if (m?.type === "aot-compile") jobs.push(...m.jobs); w.postMessage(m); },
+        terminate: () => w.terminate()
+      };
+    }
+  });
+  t.after(() => { setDolphinAotCompilerForTest({}); setWasmEngineForTest("unknown"); });
+  const plusOne = Uint8Array.from(Buffer.from("0061736d0100000001060160017f017f03020100070501016600000a09010700200041016a0b", "hex"));
+  setWasmEngineForTest("v8");
+  const options = aotCacheCompileOptions();
+  assert.equal(options.compileStreaming, null);
+  const mod = await options.compile(plusOne);
+  assert.equal(new WebAssembly.Instance(mod).exports.f(1), 2);
+  assert.equal(jobs.length, 1);
+  assert.equal(jobs[0].deliver, "before-warm");
+  assert.equal(jobs[0].warm, true);
+  for (const engine of ["jsc", "spidermonkey"]) {
+    setWasmEngineForTest(engine);
+    assert.deepEqual(aotCacheCompileOptions(), {}, `${engine}: the cache compiles in place`);
+  }
+  setWasmEngineForTest("v8");
+  setDolphinAotCompilerForTest({});
+  assert.deepEqual(aotCacheCompileOptions(), {}, "no compiler worker: in place");
+});
