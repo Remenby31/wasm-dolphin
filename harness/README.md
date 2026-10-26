@@ -328,13 +328,21 @@ node harness/probes/drop-meter.mjs --iso ../roms/<disc>.iso --port 8113 --runs 6
 node harness/probes/drop-meter.mjs --iso ../roms/<disc>.iso --port 8113 --runs 3 --baseline origin/main --noise <A/A dir>/summary.json
 # nightly on main, with its history (JSONL + table)
 node harness/probes/drop-meter.mjs --iso ../roms/<disc>.iso --port 8113 --runs 3 --trend ../measures/drops/trend.jsonl
+# The --noise A/A must have run on the core of the base measured (the
+# summary records each side's core): another core gives no verdict (exit 3),
+# --noise-stale-ok for a study. Redo the A/A when main publishes a core.
 # Known blind spots (review of #261): a single 50 ms stall at the race load
 # on a COLD visit reads 34-50 ms against a 45 ms threshold there (noisier
 # phase); repeated stalls under 25 ms each stay under the per-phase floors
 # (the reported pctBelow95 per phase shows them, not gating). stallMs is
-# the larger of the VI reading and the sampler's (50 ms rows), so a stall
-# inside a long VI gap still counts; hitch counts never get an sd under
-# Poisson's (sqrt(mean + 0.5)).
+# the larger of the VI reading and the sampler's (pairs of 50 ms rows under
+# 0.75 of real time), so a stall inside a long VI gap counts too, mostly
+# whole (a stall on a pair's edge may be read in part). presentExcessMs (gaps
+# beyond two fields, summed) catches the presenter stalling while the core
+# runs on. Hitch counts never get an sd under Poisson's (sqrt(mean + 0.5)),
+# judged at the normal 99.5 % quantile then. Measured on 12 runs of one tree
+# (independent A/A noise): 6.2 % of batches flag a regression, 0.3 % once a
+# second batch must confirm it.
 # the guard's false-positive rate from runs of one tree (A against A draws)
 node harness/probes/drop-meter.mjs --false-positives <A/A dir>:candidate --noise <A/A dir>/summary.json
 # again from the raw data, e.g. against a native reference (game frames per guest second)

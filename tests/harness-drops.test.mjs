@@ -5,8 +5,8 @@ import assert from "node:assert/strict";
 import { readFile } from "node:fs/promises";
 import test from "node:test";
 
-import { causeOf, PHASE_FLOOR, PHASE_PRIMARY, tQuantile, dropEvents, dropSummary, interpolate, loadSegments, noiseOf, rowsOf, stallOverlap, trendLine, trendTable, verdictOf, visitVerdict, windowsOf } from "../harness/lib/drops.mjs";
-import { exitCodeOf, falsePositiveRate, markersOnVi, noVerdictReasons, regressionKeys, runFiles, stepsFor, validateScenario } from "../harness/probes/drop-meter.mjs";
+import { causeOf, PHASE_FLOOR, PHASE_PRIMARY, stallMsOfRows, tQuantile, dropEvents, dropSummary, interpolate, loadSegments, noiseOf, rowsOf, stallOverlap, trendLine, trendTable, verdictOf, visitVerdict, windowsOf } from "../harness/lib/drops.mjs";
+import { coreOf, exitCodeOf, falsePositiveRate, noiseCoreOf, markersOnVi, noVerdictReasons, regressionKeys, runFiles, stepsFor, validateScenario } from "../harness/probes/drop-meter.mjs";
 import { createDropSampler, histogramSum } from "../src/harness-drop-sampler.js";
 
 const TPS = 486e6;
@@ -144,11 +144,11 @@ test("too few runs, or none, is inconclusive even with an A/A", () => {
   assert.equal(verdictOf([{ lostMs: 854 }], [{ lostMs: 957 }], { ...L, noise }).inconclusive, true);
   assert.equal(verdictOf([], [], { ...L, noise }).inconclusive, true);
   assert.equal(verdictOf([], [], { ...L, noise }).regression, false);
-  const ok = Array.from({ length: 3 }, () => ({ summary: { hitches100: 1, worstSecond: 80 }, phases: [{ label: "race", stallMs: 0, hitches50: 0 }] }));
+  const ok = Array.from({ length: 3 }, () => ({ summary: { hitches100: 1, worstSecond: 80 }, phases: [{ label: "race", stallMs: 0, presentExcessMs: 0, hitches50: 0 }] }));
   assert.equal(visitVerdict(ok, ok).inconclusive, false);
   assert.equal(visitVerdict(ok.slice(0, 2), ok).inconclusive, true);
   // a phase a side never reached has no verdict
-  assert.equal(visitVerdict(ok, ok.map((a) => ({ ...a, phases: [...a.phases, { label: "extra", stallMs: 0, hitches50: 0 }] }))).inconclusive, true);
+  assert.equal(visitVerdict(ok, ok.map((a) => ({ ...a, phases: [...a.phases, { label: "extra", stallMs: 0, presentExcessMs: 0, hitches50: 0 }] }))).inconclusive, true);
 });
 
 test("exit codes: 3 without a verdict, 2 only on a reproduced regression when confirming", () => {
@@ -226,12 +226,66 @@ test("stallMs reads the sampler's ticks too: a stall in a VI gap is not missed",
   assert.ok(s.stallMs >= s.stallRowsMs);
 });
 
+test("the sampler reading catches a 50 ms stall straddling two rows, and stays ~0 on the throttle's bursts", () => {
+  const rows = [];
+  let g = 0;
+  for (let t = 0; t <= 1000; t += 50) {
+    rows.push({ t, lagMs: 0, ticks: g });
+    // the next 50 ms: guest time, minus the part of [425, 475) inside it
+    const lost = Math.max(0, Math.min(t + 50, 475) - Math.max(t, 425));
+    g += TPS * (50 - lost) / 1000;
+  }
+  const ms = stallMsOfRows(rows, TPS);
+  assert.ok(ms >= 45 && ms <= 55, `straddled: ${ms}`);
+  // bursts: rows alternating 0.8 and 1.2 of real time never add up
+  const bursty = [];
+  g = 0;
+  for (let i = 0, t = 0; i <= 40; i += 1, t += 50) { bursty.push({ t, lagMs: 0, ticks: g }); g += TPS * (i % 2 ? 0.06 : 0.04); }
+  assert.equal(stallMsOfRows(bursty, TPS), 0);
+});
+
+// Review of #267 (P1): the presenter can stall while the core runs on (a
+// wgpu pipeline compiled at draw time): stallMs and worstSecond read 0; the
+// gap excess per phase must catch 2-3 new 100 ms gaps.
+test("presenter stalls with a regular core: presentExcessMs catches 2-3 new 100 ms gaps", () => {
+  const vi = viOf(10000);
+  const presents = presentsOf(vi);
+  const gapped = presents.filter((p) => !((p.t > 2000 && p.t < 2100) || (p.t > 5000 && p.t < 5100) || (p.t > 8000 && p.t < 8100)));
+  const w = windowsOf({ vi, presents: gapped, tps: TPS });
+  const s = dropSummary({ windows: w, presents: gapped, vi, tps: TPS });
+  assert.equal(s.stallMs, 0);
+  assert.ok(s.presentExcessMs >= 180, `excess ${s.presentExcessMs}`);
+  const phase = (x) => ({ summary: { hitches100: 0, worstSecond: 99 }, phases: [{ label: "race", stallMs: 0, hitches50: 0, ...x }] });
+  const noise = { run: { hitches100: { n: 6, stdev: 0, mean: 0, median: 0 }, worstSecond: { n: 6, stdev: 1 } },
+    phases: { race: { stallMs: { n: 6, stdev: 3 }, presentExcessMs: { n: 6, stdev: 5, mean: 3 }, hitches50: { n: 6, stdev: 0, mean: 0, median: 0 } } } };
+  const v = visitVerdict([2, 4, 3].map((e) => phase({ presentExcessMs: e })), [190, 200, 210].map((e) => phase({ presentExcessMs: e, hitches50: 3 })), noise);
+  assert.ok(v.regressions.some((r) => r.metric === "presentExcessMs"));
+  assert.ok(v.regressions.some((r) => r.metric === "hitches50"), "3 new gaps over 50 ms where none were: a count regression too");
+});
+
 test("hitch counts never get an sd under Poisson's: an A/A that always saw 3 is not certainty", () => {
   const b = [{ hitches50: 3 }, { hitches50: 3 }, { hitches50: 3 }], c = [{ hitches50: 5 }, { hitches50: 5 }, { hitches50: 5 }];
   const v = verdictOf(b, c, { metrics: { hitches50: "up" }, noise: { hitches50: { n: 6, stdev: 0, mean: 3, median: 3 } }, floor: PHASE_FLOOR });
   assert.equal(v.regression, false, "two more gaps where 3 come and go");
   const big = verdictOf(b, [{ hitches50: 14 }, { hitches50: 15 }, { hitches50: 14 }], { metrics: { hitches50: "up" }, noise: { hitches50: { n: 6, stdev: 0, mean: 3, median: 3 } }, floor: PHASE_FLOOR });
   assert.equal(big.regression, true);
+});
+
+// Review rule: an A/A's noise holds for its core only; the summary records
+// each side's core, and an A/A without one counts as stale.
+test("the core of a served tree and of an A/A summary", async () => {
+  const { mkdtempSync, mkdirSync, writeFileSync } = await import("node:fs");
+  const os = await import("node:os");
+  const path = await import("node:path");
+  const root = mkdtempSync(path.join(os.tmpdir(), "drops-core-"));
+  assert.equal(coreOf(root), null);
+  mkdirSync(path.join(root, "cores", "dolphin"), { recursive: true });
+  writeFileSync(path.join(root, "cores", "dolphin", "core.lock.json"), JSON.stringify({ schemaVersion: 1, sha256: "ab".repeat(32) }));
+  assert.equal(coreOf(root), "ab".repeat(32));
+  writeFileSync(path.join(root, "aa.json"), JSON.stringify({ probe: "drop-meter", cores: { candidate: "cd".repeat(32) } }));
+  writeFileSync(path.join(root, "old.json"), JSON.stringify({ probe: "drop-meter" }));
+  assert.equal(noiseCoreOf(path.join(root, "aa.json")), "cd".repeat(32));
+  assert.equal(noiseCoreOf(path.join(root, "old.json")), null);
 });
 
 test("t quantiles: a small A/A widens the threshold", () => {

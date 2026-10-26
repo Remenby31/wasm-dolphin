@@ -357,6 +357,7 @@ function writeSummary(outDir, meta, analyses, visits, { noise = null, confirm = 
   }
   if (analyses.some((a) => a.side === "baseline")) {
     summary.noVerdict = noVerdictReasons({ analyses, visits, gaveUp: meta.gaveUp, verdicts });
+    if (meta.staleNoise) summary.noVerdict = [meta.staleNoise, ...(summary.noVerdict ?? [])];
     if (confirm) summary.confirmation = confirm;
   }
   summary.human = humanSummary(summary);
@@ -375,6 +376,20 @@ export function runFiles(names, re) {
     if (!best.has(key) || m[4]) best.set(key, f);
   }
   return [...best.values()].sort();
+}
+
+// The sha256 a tree's core lock names, or null.
+export function coreOf(root) {
+  try {
+    return JSON.parse(readFileSync(path.join(root, "cores", "dolphin", "core.lock.json"), "utf8")).sha256 ?? null;
+  } catch {
+    return null;
+  }
+}
+// The core an A/A summary measured (its candidate side), or null.
+export function noiseCoreOf(file) {
+  const s = JSON.parse(readFileSync(file, "utf8"));
+  return s.cores?.candidate ?? null;
 }
 
 // "visit|phase:metric" of every gating regression of a summary (pure).
@@ -494,7 +509,7 @@ async function main() {
     options: {
       iso: { type: "string" }, scenario: { type: "string", default: path.join(REPO_ROOT, "harness", "probes", "drop-scenario.json") },
       runs: { type: "string", default: "6" }, visits: { type: "string", default: "2" },
-      candidate: { type: "string" }, baseline: { type: "string" }, noise: { type: "string" }, trend: { type: "string" }, "no-confirm": { type: "boolean", default: false },
+      candidate: { type: "string" }, baseline: { type: "string" }, noise: { type: "string" }, trend: { type: "string" }, "no-confirm": { type: "boolean", default: false }, "noise-stale-ok": { type: "boolean", default: false },
       "false-positives": { type: "string", multiple: true }, draws: { type: "string", default: "2000" },
       config: { type: "string", default: "product" }, query: { type: "string" }, "sample-ms": { type: "string", default: "50" },
       native: { type: "string" }, analyze: { type: "string" }, trace: { type: "string" }, state: { type: "string" }, shots: { type: "boolean", default: false },
@@ -533,8 +548,17 @@ async function main() {
     maxLoad: values["max-load"] ? num(values, "max-load", { min: 0.1 }) : Math.max(2, os.cpus().length / 4), loadWait: num(values, "load-wait", { min: 0 })
   };
   const noise = values.noise ? readNoise(values.noise, { scenario: path.basename(values.scenario), state: o.state ? path.basename(o.state) : null, query: o.query, sampleMs: o.sampleMs, cpuModel: machineSnapshot().cpuModel }) : null;
+  const noiseCore = values.noise ? noiseCoreOf(values.noise) : null;
   const sides = { candidate: resolveSide("candidate", values.candidate) };
   if (values.baseline) sides.baseline = resolveSide("baseline", values.baseline);
+  // The core each side serves (its lock): an A/A's noise holds for that core only.
+  const cores = Object.fromEntries(Object.entries(sides).map(([k, side]) => [k, coreOf(side.root)]));
+  const measuredBase = cores.baseline ?? cores.candidate;
+  let staleNoise = null;
+  if (noise && noiseCore !== measuredBase) {
+    staleNoise = `--noise ${values.noise}: its A/A ran on core ${noiseCore ? noiseCore.slice(0, 12) : "unknown (an A/A before the core was recorded)"}, the base measured here is ${measuredBase ? measuredBase.slice(0, 12) : "unknown"}`;
+    if (!values["noise-stale-ok"]) log(`${staleNoise}: no verdict (exit 3); --noise-stale-ok for a study`);
+  }
   const lockWait = num(values, "lock-wait", { min: 0 });
   const lock = await calmLock({
     maxLoad: o.maxLoad, calmWait: values["calm-wait"] == null ? lockWait : num(values, "calm-wait", { min: 0 }), log: (m) => log(`before the lock: ${m}`),
@@ -544,7 +568,7 @@ async function main() {
   const meta = {
     probe: "drop-meter", at: new Date().toISOString(), locked: !values["no-lock"], machine: machineSnapshot(), chrome: chromeInfo(), iso: path.basename(iso),
     scenario: path.basename(values.scenario), state: o.state ? path.basename(o.state) : null, query: o.query, sampleMs: o.sampleMs, runs: o.runs, visits: o.visits, maxLoad: o.maxLoad,
-    sides: Object.fromEntries(Object.entries(sides).map(([k, s]) => [k, s.label])), noise: values.noise ?? null,
+    sides: Object.fromEntries(Object.entries(sides).map(([k, s]) => [k, s.label])), cores, noise: values.noise ?? null, noiseCore,
     definition: "windows of 100 ms from the scenario's first step; speed = guest/host time (VI ticks); drops: windows < 90 % or a present gap > 50 ms, merged; loads: disc reads ≥ 2.5 MiB/s (0.5 s average), merged within 1 s, excess = host − guest ms; time under 95/90 %: 1 s sliding windows; verdict: median moved the worse way beyond the A/A noise"
   };
   const analyses = [];
@@ -617,7 +641,7 @@ async function main() {
     lock.release();
     for (const s of Object.values(sides)) if (s.temp) rmSync(s.root, { recursive: true, force: true });
   }
-  const summary = writeSummary(outDir, { ...meta, gaveUp }, confirm ? analyses.filter((a) => a.batch === 1) : analyses, o.visits, { noise, confirm });
+  const summary = writeSummary(outDir, { ...meta, gaveUp, staleNoise: values["noise-stale-ok"] ? null : staleNoise, staleNoiseAccepted: values["noise-stale-ok"] ? staleNoise : undefined }, confirm ? analyses.filter((a) => a.batch === 1) : analyses, o.visits, { noise, confirm });
   if (values.trend) {
     const commit = meta.served?.candidate?.commit ?? execFileSync("git", ["-C", REPO_ROOT, "rev-parse", "HEAD"], { encoding: "utf8" }).trim();
     const file = path.resolve(values.trend);

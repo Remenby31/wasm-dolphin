@@ -294,19 +294,38 @@ export function stallMsOf(vi, tps) {
 // The same quantity from the drop sampler's ticks (every 50 ms on the
 // worker, independent of the VI outputs): a stall inside a long VI gap (the
 // game blanking the VI, or a change that emits fewer VI entries) still
-// shows. Over each row interval where the guest advanced less than half the
-// host time: host minus guest.
+// shows. Read over pairs of rows (100 ms): where a pair's guest time is
+// under 0.75 of its host time, each of its two intervals adds its own host
+// minus guest time, once. A stall straddling two rows is then caught whole;
+// in normal play a pair is under 0.75 about once in 650 (A/A, race; a single
+// row is under 0.8 one time in twenty, the throttle's bursts).
+export const STALL_PAIR_RATIO = 0.75;
 export function stallMsOfRows(rows, tps) {
   if (!(tps > 0)) return null;
+  const ok = (i) => rows[i].ticks != null && rows[i - 1].ticks != null;
+  const host = (i) => rows[i].t - rows[i - 1].t, guest = (i) => ((rows[i].ticks - rows[i - 1].ticks) / tps) * 1000;
   let ms = 0, seen = false;
-  for (let i = 1; i < rows.length; i += 1) {
-    const a = rows[i - 1], b = rows[i];
-    if (a.ticks == null || b.ticks == null) continue;
+  const credited = new Set();
+  for (let i = 2; i < rows.length; i += 1) {
+    if (!ok(i) || !ok(i - 1)) continue;
     seen = true;
-    const host = b.t - a.t, guest = ((b.ticks - a.ticks) / tps) * 1000;
-    if (guest < host / 2) ms += host - guest;
+    if (guest(i) + guest(i - 1) >= STALL_PAIR_RATIO * (host(i) + host(i - 1))) continue;
+    for (const j of [i - 1, i]) {
+      if (credited.has(j)) continue;
+      credited.add(j);
+      ms += Math.max(0, host(j) - guest(j));
+    }
   }
   return seen ? ms : null;
+}
+
+// Gaps between presents beyond two fields, summed (ms): what the presenter
+// stalled, whatever the core did meanwhile (a pipeline compile blocking the
+// presenter while the core runs on: stallMs and worstSecond read 0).
+export function presentExcessOf(presents) {
+  let ms = 0;
+  for (let i = 1; i < presents.length; i += 1) ms += Math.max(0, presents[i].t - presents[i - 1].t - STALL_GAP_MS);
+  return ms;
 }
 
 export function dropSummary({ windows, presents = [], vi = [], tps = null, rows = [] }) {
@@ -326,6 +345,7 @@ export function dropSummary({ windows, presents = [], vi = [], tps = null, rows 
     // the larger of the two readings: VI intervals, sampler rows
     stallMs: round(Math.max(stallMsOf(vi, tps) ?? 0, stallMsOfRows(rows, tps) ?? 0), 0),
     stallViMs: round(stallMsOf(vi, tps), 0), stallRowsMs: round(stallMsOfRows(rows, tps), 0),
+    presentExcessMs: round(presentExcessOf(presents), 0),
     pctBelow95: below(95), pctBelow90: below(90),
     worstSecond: sl.length ? round(Math.min(...sl.map((s) => s.speed)), 1) : null,
     hitches50: pg.filter((g) => g > HITCH_MS[0]).length, hitches100: pg.filter((g) => g > HITCH_MS[1]).length,
@@ -386,11 +406,12 @@ export { median };
 // still (stallMs) and the gaps over 50 ms between presents; per visit, the
 // hitches over 100 ms and the worst second. Others are reported, never gating.
 export const VISIT_PRIMARY = { hitches100: "up", worstSecond: "down" };
-export const PHASE_PRIMARY = { stallMs: "up", hitches50: "up" };
+export const PHASE_PRIMARY = { stallMs: "up", presentExcessMs: "up", hitches50: "up" };
 export const REPORTED = { lostMs: "up", dropLostMs: "up", pctBelow95: "up", pctBelow90: "up", hitches50: "up", presentP99: "up", loadExcessMs: "up" };
 export const GUARDED = { ...VISIT_PRIMARY, ...REPORTED };
 export const VERDICT_MIN_RUNS = 3;
 export const COUNTS = new Set(["hitches50", "hitches100"]);
+export const Z_COUNTS = 2.576;
 // A median of n runs varies ~1.25x more than a mean.
 export const MEDIAN_SE = 1.25;
 // Student's t, two-sided 1 % (0.995), by degrees of freedom: the A/A's sd is
@@ -401,7 +422,7 @@ export const tQuantile = (df) => (df < 1 ? Infinity : df <= T995.length ? T995[d
 export const VERDICT_FLOOR = { lostMs: 50, dropLostMs: 20, pctBelow95: 0.5, pctBelow90: 0.5, worstSecond: 5, hitches50: 2, hitches100: 1, presentP99: 2, loadExcessMs: 50 };
 // Per phase: a 50 ms stall on a stable load must show (floor 20 ms), and
 // one new gap over 50 ms (floor 0.5: a whole one beyond the noise).
-export const PHASE_FLOOR = { stallMs: 20, hitches50: 0.5, dropLostMs: 20, lostMs: 20, pctBelow95: 0.5, pctBelow90: 0.5, worstSecond: 5, hitches100: 1, presentP99: 5 };
+export const PHASE_FLOOR = { stallMs: 20, presentExcessMs: 20, hitches50: 0.5, dropLostMs: 20, lostMs: 20, pctBelow95: 0.5, pctBelow90: 0.5, worstSecond: 5, hitches100: 1, presentP99: 5 };
 
 // Candidate against baseline over runs of one visit (or one phase). A metric
 // regresses when its median moved the worse way by more than
@@ -424,8 +445,15 @@ export function verdictOf(baseline, candidate, { noise = null, floor = VERDICT_F
     let sd = fromAa ? noise[k].stdev : Math.sqrt(((stdev(b) ?? 0) ** 2 + (stdev(c) ?? 0) ** 2) / 2);
     // A count (hitches) varies at least as a Poisson count: an A/A that saw
     // the same count six times says sd 0, not that a gap cannot come and go.
-    if (COUNTS.has(k)) sd = Math.max(sd, Math.sqrt((fromAa ? noise[k].mean ?? noise[k].median ?? 0 : median(b)) + 0.5));
-    const t = tQuantile(fromAa ? noise[k].n - 1 : b.length + c.length - 2);
+    let poisson = false;
+    if (COUNTS.has(k)) {
+      const floorSd = Math.sqrt((fromAa ? noise[k].mean ?? noise[k].median ?? 0 : median(b)) + 0.5);
+      if (floorSd >= sd) { sd = floorSd; poisson = true; }
+    }
+    // Where the Poisson floor sets the sd, it is a model, not an estimate:
+    // the normal quantile, not Student's (review of #267: t x a floor made
+    // hitches nearly blind, +5 hitches needed at a mean of 1).
+    const t = poisson ? Z_COUNTS : tQuantile(fromAa ? noise[k].n - 1 : b.length + c.length - 2);
     const threshold = Math.max(t * MEDIAN_SE * sd * Math.sqrt(2 / n), floor[k] ?? 0);
     const worseBy = worse === "up" ? delta : -delta;
     rows.push({ ...base, delta: round(delta, 2), threshold: round(threshold, 2), regression: worseBy > threshold, improvement: -worseBy > threshold });
