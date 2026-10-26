@@ -5,8 +5,8 @@ import assert from "node:assert/strict";
 import { readFile } from "node:fs/promises";
 import test from "node:test";
 
-import { causeOf, PHASE_FLOOR, PHASE_PRIMARY, dropEvents, dropSummary, interpolate, loadSegments, noiseOf, rowsOf, stallOverlap, trendLine, trendTable, verdictOf, visitVerdict, windowsOf } from "../harness/lib/drops.mjs";
-import { exitCodeOf, falsePositiveRate, markersOnVi, noVerdictReasons, regressionKeys, stepsFor, validateScenario } from "../harness/probes/drop-meter.mjs";
+import { causeOf, PHASE_FLOOR, PHASE_PRIMARY, tQuantile, dropEvents, dropSummary, interpolate, loadSegments, noiseOf, rowsOf, stallOverlap, trendLine, trendTable, verdictOf, visitVerdict, windowsOf } from "../harness/lib/drops.mjs";
+import { exitCodeOf, falsePositiveRate, markersOnVi, noVerdictReasons, regressionKeys, runFiles, stepsFor, validateScenario } from "../harness/probes/drop-meter.mjs";
 import { createDropSampler, histogramSum } from "../src/harness-drop-sampler.js";
 
 const TPS = 486e6;
@@ -144,11 +144,11 @@ test("too few runs, or none, is inconclusive even with an A/A", () => {
   assert.equal(verdictOf([{ lostMs: 854 }], [{ lostMs: 957 }], { ...L, noise }).inconclusive, true);
   assert.equal(verdictOf([], [], { ...L, noise }).inconclusive, true);
   assert.equal(verdictOf([], [], { ...L, noise }).regression, false);
-  const ok = Array.from({ length: 3 }, () => ({ summary: { hitches100: 1, worstSecond: 80 }, phases: [{ label: "race", dropLostMs: 0, presentMax: 30 }] }));
+  const ok = Array.from({ length: 3 }, () => ({ summary: { hitches100: 1, worstSecond: 80 }, phases: [{ label: "race", stallMs: 0, hitches50: 0 }] }));
   assert.equal(visitVerdict(ok, ok).inconclusive, false);
   assert.equal(visitVerdict(ok.slice(0, 2), ok).inconclusive, true);
   // a phase a side never reached has no verdict
-  assert.equal(visitVerdict(ok, ok.map((a) => ({ ...a, phases: [...a.phases, { label: "extra", dropLostMs: 0, presentMax: 30 }] }))).inconclusive, true);
+  assert.equal(visitVerdict(ok, ok.map((a) => ({ ...a, phases: [...a.phases, { label: "extra", stallMs: 0, hitches50: 0 }] }))).inconclusive, true);
 });
 
 test("exit codes: 3 without a verdict, 2 only on a reproduced regression when confirming", () => {
@@ -171,37 +171,58 @@ test("no verdict when a side has too few usable runs or the sides were sampled d
   assert.match(noVerdictReasons({ analyses: [a("baseline", false, false), a("baseline", false, false), a("baseline", false, false), a("candidate"), a("candidate"), a("candidate")], visits: 1, verdicts }).join(), /sampled alike/);
 });
 
-// Review of #261 (P1-4): a 50 ms stall on a load the throttle then makes up
-// shows in the drop-only loss and the phase's longest gap, not in lostMs.
-test("a 50 ms stall made up afterwards: lostMs nets to ~0, dropLostMs and presentMax show it", () => {
-  const vi = viOf(3000, (t) => (t >= 1000 && t < 1100 ? 50 : t >= 1100 && t < 1200 ? 150 : 100));
-  const presents = presentsOf(vi).filter((p) => p.t < 1000 || p.t > 1060);
-  const w = windowsOf({ vi, presents, tps: TPS });
-  const s = dropSummary({ windows: w, presents, vi });
-  assert.ok(Math.abs(s.lostMs) < 10, `lostMs ${s.lostMs}`);
-  assert.ok(s.dropLostMs >= 40, `dropLostMs ${s.dropLostMs}`); // VI interpolation smears the edges
-  assert.ok(s.presentMax > 55);
+// Review of #261 (P1-4, then P1-b): a 50 ms stall the throttle then makes
+// up nets ~0 in lostMs and depends on the 100 ms grid in dropLostMs; the
+// stall metric reads it from the VI intervals, wherever it falls.
+test("a 50 ms stall made up afterwards: stallMs shows it at any offset of the grid", () => {
+  for (const at of [1000, 1030, 1070]) {
+    const vi = [];
+    let ticks = 0;
+    for (let t = 0; t <= 3000; t += 1000 / 60) {
+      if (t >= at && t < at + 50) continue; // the core stood still 50 ms
+      vi.push({ t, ticks });
+      ticks += TPS / 60;
+    }
+    // made up: three fields come fast after it
+    const presents = presentsOf(vi);
+    const w = windowsOf({ vi, presents, tps: TPS });
+    const s = dropSummary({ windows: w, presents, vi, tps: TPS });
+    assert.ok(s.stallMs >= 45 && s.stallMs <= 70, `at ${at}: stallMs ${s.stallMs}`);
+  }
   const phase = (x) => ({ summary: { hitches100: 0, worstSecond: 99 }, phases: [{ label: "race-load", ...x }] });
-  const base = [0, 2, 1].map((d) => phase({ dropLostMs: d, presentMax: 20 }));
-  const cand = [50, 52, 49].map((d) => phase({ dropLostMs: d, presentMax: 70 }));
-  const v = visitVerdict(base, cand, { run: null, phases: { "race-load": { dropLostMs: { n: 6, stdev: 2 }, presentMax: { n: 6, stdev: 2 } } } });
+  const base = [0, 2, 1].map((d) => phase({ stallMs: d, hitches50: 3 }));
+  const cand = [50, 52, 49].map((d) => phase({ stallMs: d, hitches50: 4 }));
+  const v = visitVerdict(base, cand, { run: null, phases: { "race-load": { stallMs: { n: 6, stdev: 2 }, hitches50: { n: 6, stdev: 0 } } } });
   assert.equal(v.regression, true);
-  assert.deepEqual(v.regressions.map((r) => r.metric).sort(), ["dropLostMs", "presentMax"]);
+  assert.deepEqual(v.regressions.map((r) => r.metric).sort(), ["hitches50", "stallMs"]);
 });
 
 test("phase floors: a second under 95 % alone is never a regression (pctBelow95 is reported only)", () => {
-  assert.ok(PHASE_FLOOR.pctBelow95 >= 0.5 && PHASE_FLOOR.dropLostMs === 20 && PHASE_FLOOR.presentMax === 20);
+  assert.ok(PHASE_FLOOR.pctBelow95 >= 0.5 && PHASE_FLOOR.stallMs === 20 && PHASE_FLOOR.hitches50 === 0.5);
   assert.ok(!("pctBelow95" in PHASE_PRIMARY));
 });
 
 test("the false-positive rate on identical runs stays low; a real shift is found", () => {
   let seed = 7;
   const random = () => ((seed = (seed * 1103515245 + 12345) % 2 ** 31) / 2 ** 31);
-  const run = (id, d) => [1].map((visit) => ({ id, visit, analysis: { summary: { hitches100: 1, worstSecond: 80 + (random() - 0.5) * 4 }, phases: [{ label: "race-load", dropLostMs: d + random() * 4, presentMax: 25 + random() * 3 }] } }))[0];
+  const run = (id, d) => [1].map((visit) => ({ id, visit, analysis: { summary: { hitches100: 1, worstSecond: 80 + (random() - 0.5) * 4 }, phases: [{ label: "race-load", stallMs: d + random() * 4, hitches50: Math.round(random()) }] } }))[0];
   const same = Array.from({ length: 9 }, (_, i) => run(`a${i}`, 0));
   const fp = falsePositiveRate(same, { visits: 1, draws: 300, random });
   assert.ok(fp.singleBatch < 0.1, `single ${fp.singleBatch}`);
   assert.ok(fp.confirmed <= fp.singleBatch);
+});
+
+test("t quantiles: a small A/A widens the threshold", () => {
+  assert.ok(tQuantile(5) > 4 && tQuantile(5) < 4.1);
+  assert.equal(tQuantile(100), 2.576);
+  const base = [{ hitches100: 1 }, { hitches100: 1 }, { hitches100: 1 }];
+  const t5 = verdictOf(base, base, { noise: { hitches100: { n: 6, stdev: 1 } } }).rows.find((r) => r.metric === "hitches100").threshold;
+  const t30 = verdictOf(base, base, { noise: { hitches100: { n: 31, stdev: 1 } } }).rows.find((r) => r.metric === "hitches100").threshold;
+  assert.ok(t5 > 1.4 * t30); // 4.03 against 2.75
+});
+
+test("a retried run replaces its failed attempt", () => {
+  assert.deepEqual(runFiles(["candidate-1-v1.json", "candidate-1-v1-retry.json", "candidate-2-v1.json", "x.json"], /^(candidate|baseline)-(\d+)-v(\d+)(-retry)?\.json$/), ["candidate-1-v1-retry.json", "candidate-2-v1.json"]);
 });
 
 test("phase bounds come from the VI ring at their guest second, not from the poll's host time", () => {

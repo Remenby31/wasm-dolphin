@@ -319,9 +319,10 @@ A timing measure: it takes the perf lock.
 # A/A (noise of every metric) and the baseline report
 node harness/probes/drop-meter.mjs --iso ../roms/<disc>.iso --port 8113 --runs 6
 # merge guard: this tree against main. Gating metrics only: per phase the
-# time lost inside drops and the longest present gap, per visit the hitches
-# over 100 ms and the worst second; each against its A/A noise (medians:
-# 2.5 x 1.25 standard errors). A regression must reproduce on a second batch
+# time the core stood still (stallMs, from the VI intervals) and the gaps
+# over 50 ms, per visit the hitches over 100 ms and the worst second; each
+# against its A/A noise (medians of n: t(n_AA - 1, 99.5 %) x 1.25 x sd x
+# sqrt(2/n)). A failed run is played once more. A regression must reproduce on a second batch
 # (--no-confirm skips it). Exit 0 none, 2 regression, 3 no verdict (too few
 # usable runs, gave up, a phase without a verdict, sides sampled differently)
 node harness/probes/drop-meter.mjs --iso ../roms/<disc>.iso --port 8113 --runs 3 --baseline origin/main --noise <A/A dir>/summary.json

@@ -122,6 +122,7 @@ async function playVisit(o, server, profileDir, shotDir, visit) {
     raw.launchT = t0;
     await bootIso(page, { url: `${server.base}?${o.query}`, iso: o.iso, timeoutMs: 120000 });
     raw.bootMs = Date.now() - t0;
+    raw.browser = await page.evaluate(() => navigator.userAgent.match(/(?:Headless)?Chrome\/[\d.]+/)?.[0] ?? navigator.userAgent).catch(() => null);
     await context.assertInvisible("after boot");
     // --state: the scene starts at a savestate (e.g. a 2-player race); the
     // scenario's guest seconds then count from the load.
@@ -250,7 +251,7 @@ export function analyzeVisit(raw, { native = null } = {}) {
   const presents = timeline.presents.filter(span), vi = timeline.vi.filter(span);
   const events = dropEvents(windows);
   const loads = loadSegments(windows).map((l) => (native && l.guestStart != null ? { ...l, nativeFps: nativeFps(native, l.guestStart, l.guestStart + l.guestMs / 1000) } : l));
-  const phases = phaseSummaries({ windows, presents, vi });
+  const phases = phaseSummaries({ windows, presents, vi, tps: raw.tps });
   if (native) for (const p of phases) {
     const ws = windows.filter((w) => w.label === p.label && w.guestStart != null);
     p.nativeFps = ws.length ? nativeFps(native, ws[0].guestStart, ws.at(-1).guestStart + 0.1) : null;
@@ -264,10 +265,10 @@ export function analyzeVisit(raw, { native = null } = {}) {
   const regionsDone = allAt ? { regions: finalRegions, hostMsFromLaunch: raw.launchT ? Math.round(allAt.t - raw.launchT) : null, guestSec: allAt.ticks != null && raw.tps ? round(allAt.ticks / raw.tps, 2) : null } : null;
   const rss = (raw.rss ?? []).map((x) => x[1]);
   return {
-    timelineComplete: timeline.complete, sampled: rows.length > 0, bootMs: raw.bootMs, pc: raw.pc ?? null,
+    timelineComplete: timeline.complete, sampled: rows.length > 0, browser: raw.browser ?? null, bootMs: raw.bootMs, pc: raw.pc ?? null,
     load1: { median: round(median(loadAvg), 2), max: round(Math.max(...loadAvg), 2) },
     regionsDone, rssPeakMB: rss.length ? Math.max(...rss) : null,
-    summary: { ...dropSummary({ windows, presents, vi }), loads: loads.length, loadExcessMs: loads.reduce((a, l) => a + l.excessMs, 0), rssPeakMB: rss.length ? Math.max(...rss) : null, regionsDoneMs: regionsDone?.hostMsFromLaunch ?? null },
+    summary: { ...dropSummary({ windows, presents, vi, tps: raw.tps }), loads: loads.length, loadExcessMs: loads.reduce((a, l) => a + l.excessMs, 0), rssPeakMB: rss.length ? Math.max(...rss) : null, regionsDoneMs: regionsDone?.hostMsFromLaunch ?? null },
     phases, loads, worst: worstDrops(events), drops: events.length,
     // the 100 ms timeline, compact: [ms from start, speed %, VI/s, presents, max present gap, lost ms, top cause]
     timeline: windows.map((w) => {
@@ -363,6 +364,19 @@ function writeSummary(outDir, meta, analyses, visits, { noise = null, confirm = 
   return summary;
 }
 
+// One file per side, run and visit: a run played again (-retry) replaces
+// its failed first attempt (pure).
+export function runFiles(names, re) {
+  const best = new Map();
+  for (const f of names) {
+    const m = f.match(re);
+    if (!m) continue;
+    const key = `${m[1]}-${m[2]}-${m[3]}`;
+    if (!best.has(key) || m[4]) best.set(key, f);
+  }
+  return [...best.values()].sort();
+}
+
 // "visit|phase:metric" of every gating regression of a summary (pure).
 export function regressionKeys(summary) {
   return summary.visitSummary.flatMap((v) => (v.verdict?.regressions ?? []).map((r) => `${v.visit}|${r.where}:${r.metric}`));
@@ -383,7 +397,11 @@ export function readNoise(file, expect = null) {
   if (s.probe !== "drop-meter") throw new Error(`--noise ${file}: not a drop-meter summary`);
   if (expect) {
     const differ = ["scenario", "state", "query", "sampleMs"].filter((k) => (s[k] ?? null) !== (expect[k] ?? null));
-    if (differ.length) throw new Error(`--noise ${file}: another measure (${differ.map((k) => `${k} ${s[k]} vs ${expect[k]}`).join("; ")})`);
+    const named = { cpuModel: [s.machine?.cpuModel, expect.cpuModel], browser: [s.browser, expect.browser] };
+    // the same machine, and the same browser when both runs say which
+    if (expect.cpuModel && s.machine?.cpuModel && s.machine.cpuModel !== expect.cpuModel) differ.push("cpuModel");
+    if (expect.browser && s.browser && s.browser !== expect.browser) differ.push("browser");
+    if (differ.length) throw new Error(`--noise ${file}: another measure (${differ.map((k) => `${k} ${named[k]?.[0] ?? s[k]} vs ${named[k]?.[1] ?? expect[k]}`).join("; ")})`);
   }
   return Object.fromEntries(s.visitSummary.map((v) => [v.visit, { run: (v.candidate ?? v).noise, phases: (v.candidate ?? v).phases ?? {} }]));
 }
@@ -397,9 +415,9 @@ function logRun(log, tag, a) {
 
 async function analyzeDir(dir, native, log, noiseFile = null) {
   const meta = JSON.parse(readFileSync(path.join(dir, "summary.json"), "utf8"));
-  const noise = noiseFile ? readNoise(noiseFile, meta) : null;
+  const noise = noiseFile ? readNoise(noiseFile, { ...meta, cpuModel: meta.machine?.cpuModel }) : null;
   const analyses = [];
-  for (const f of readdirSync(dir).filter((x) => /^raw-(candidate|baseline)-\d+-v\d+\.json\.gz$/.test(x)).sort()) {
+  for (const f of runFiles(readdirSync(dir), /^raw-(candidate|baseline)-(\d+)-v(\d+)(-retry)?\.json\.gz$/)) {
     const [, side, run, visit] = f.match(/raw-(\w+)-(\d+)-v(\d+)/);
     const analysis = analyzeVisit(JSON.parse(gunzipSync(readFileSync(path.join(dir, f)))), { native });
     analysis.overloaded = analysis.load1?.median > meta.maxLoad;
@@ -452,7 +470,7 @@ async function falsePositives(sources, { noiseFile, draws, log }) {
   for (const src of sources) {
     const [dir, side] = src.split(":");
     meta ??= JSON.parse(readFileSync(path.join(dir, "summary.json"), "utf8"));
-    for (const f of readdirSync(dir).filter((x) => /^(candidate|baseline)-\d+-v\d+\.json$/.test(x))) {
+    for (const f of runFiles(readdirSync(dir), /^(candidate|baseline)-(\d+)-v(\d+)(-retry)?\.json$/)) {
       const [, s, run, visit] = f.match(/^(\w+)-(\d+)-v(\d+)/);
       if (side && s !== side) continue;
       const analysis = JSON.parse(readFileSync(path.join(dir, f), "utf8"));
@@ -460,7 +478,11 @@ async function falsePositives(sources, { noiseFile, draws, log }) {
       pool.push({ id: `${dir}:${s}:${run}`, visit: Number(visit), analysis });
     }
   }
-  const noise = noiseFile ? readNoise(noiseFile, meta) : null;
+  // The noise must come from other runs than the ones drawn: an sd taken
+  // from the pool itself makes the rate look lower than it is.
+  const noiseDir = noiseFile ? path.resolve(path.dirname(noiseFile)) : null;
+  if (noiseDir && sources.some((src) => path.resolve(src.split(":")[0]) === noiseDir)) throw new Error(`--noise ${noiseFile}: from a directory of the pool; take it from another A/A`);
+  const noise = noiseFile ? readNoise(noiseFile, { ...meta, cpuModel: meta.machine?.cpuModel }) : null;
   const r = falsePositiveRate(pool, { visits: meta.visits ?? 2, noise, draws });
   log(`false positives over ${r.draws} A-against-A draws of ${VERDICT_MIN_RUNS} runs (${r.runs} runs of one tree): one batch ${(100 * r.singleBatch).toFixed(1)} %, confirmed by a second batch ${(100 * r.confirmed).toFixed(1)} %`);
   for (const [k, f] of r.byMetric) log(`   ${k}: ${(100 * f).toFixed(1)} %`);
@@ -510,7 +532,7 @@ async function main() {
     regionCounters: values["region-counters"], pcWindow: values["pc-window"] ? values["pc-window"].split("-").map(Number) : null,
     maxLoad: values["max-load"] ? num(values, "max-load", { min: 0.1 }) : Math.max(2, os.cpus().length / 4), loadWait: num(values, "load-wait", { min: 0 })
   };
-  const noise = values.noise ? readNoise(values.noise, { scenario: path.basename(values.scenario), state: o.state ? path.basename(o.state) : null, query: o.query, sampleMs: o.sampleMs }) : null;
+  const noise = values.noise ? readNoise(values.noise, { scenario: path.basename(values.scenario), state: o.state ? path.basename(o.state) : null, query: o.query, sampleMs: o.sampleMs, cpuModel: machineSnapshot().cpuModel }) : null;
   const sides = { candidate: resolveSide("candidate", values.candidate) };
   if (values.baseline) sides.baseline = resolveSide("baseline", values.baseline);
   const lockWait = num(values, "lock-wait", { min: 0 });
@@ -538,25 +560,37 @@ async function main() {
         const server = await ensureServer({ port: o.port, root: sides[name].root });
         meta.served ??= {};
         meta.served[name] ??= server.identity;
-        const profileDir = mkdtempSync(path.join(os.tmpdir(), "gc-harness-drops-"));
-        const releaseProfile = claim(profileDir, REPO_ROOT, "chrome-profile");
         try {
-          for (let visit = 1; visit <= o.visits; visit += 1) {
-            const raw = await playVisit(o, server, profileDir, values.shots ? path.join(outDir, `shots-${name}-${run}-v${visit}`) : null, visit);
-            raw.gate = gate;
-            raw.batch = batch;
-            writeFileSync(path.join(outDir, `raw-${name}-${run}-v${visit}.json.gz`), gzipSync(JSON.stringify(raw)));
-            const analysis = analyzeVisit(raw, { native });
-            analysis.overloaded = analysis.load1?.median > o.maxLoad;
-            analysis.batch = batch;
-            analyses.push({ side: name, run, visit, batch, analysis });
-            writeFileSync(path.join(outDir, `${name}-${run}-v${visit}.json`), JSON.stringify(analysis) + "\n");
-            logRun(log, `${name} run ${run} visit ${visit}`, analysis);
-            if (analysis.error) break;
+          // A run with an invalid visit (a crash, a timeline with holes) is
+          // played once more on a new profile, so one bad run does not cost
+          // the comparison its verdict; the failed one is kept as evidence.
+          for (let attempt = 1; attempt <= 2; attempt += 1) {
+            const profileDir = mkdtempSync(path.join(os.tmpdir(), "gc-harness-drops-"));
+            const releaseProfile = claim(profileDir, REPO_ROOT, "chrome-profile");
+            const tries = [];
+            try {
+              for (let visit = 1; visit <= o.visits; visit += 1) {
+                const tag = attempt === 1 ? `${name}-${run}-v${visit}` : `${name}-${run}-v${visit}-retry`;
+                const raw = await playVisit(o, server, profileDir, values.shots ? path.join(outDir, `shots-${tag}`) : null, visit);
+                raw.gate = gate;
+                raw.batch = batch;
+                writeFileSync(path.join(outDir, `raw-${tag}.json.gz`), gzipSync(JSON.stringify(raw)));
+                const analysis = analyzeVisit(raw, { native });
+                analysis.overloaded = analysis.load1?.median > o.maxLoad;
+                analysis.batch = batch;
+                tries.push({ side: name, run, visit, batch, analysis });
+                writeFileSync(path.join(outDir, `${tag}.json`), JSON.stringify(analysis) + "\n");
+                logRun(log, `${name} run ${run} visit ${visit}${attempt > 1 ? " (retry)" : ""}`, analysis);
+                if (analysis.error) break;
+              }
+            } finally {
+              releaseProfile();
+              rmSync(profileDir, { recursive: true, force: true });
+            }
+            if (tries.every((x) => !x.analysis.error) || attempt === 2) { analyses.push(...tries); break; }
+            log(`${name} run ${run}: ${tries.find((x) => x.analysis.error).analysis.error}; played again`);
           }
         } finally {
-          releaseProfile();
-          rmSync(profileDir, { recursive: true, force: true });
           await server.stop();
         }
       }
@@ -565,6 +599,7 @@ async function main() {
   let confirm = null;
   try {
     await runBatch(1);
+    meta.browser = analyses.find((a) => a.analysis.browser)?.analysis.browser ?? null;
     // A regression fails the guard only if a second batch, judged on its
     // own, regresses on the same metric (review of #261: ~24 tests a run).
     if (sides.baseline && !gaveUp && !values["no-confirm"]) {

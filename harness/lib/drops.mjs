@@ -276,7 +276,22 @@ const gapsOf = (events) => events.slice(1).map((e, i) => e.t - events[i].t);
 
 // The headline numbers of one run (or one phase of it: pass its windows and
 // the presents/vi of the same span).
-export function dropSummary({ windows, presents = [], vi = [] }) {
+// Host time the core stood still: over every VI interval longer than two
+// fields, host minus guest time. Independent of the 100 ms grid, and never
+// offset by the throttle catching up later (review of #261: a 50 ms stall
+// made up afterwards could net 0 in a window).
+export const STALL_GAP_MS = 2 * 1000 / 59.94;
+export function stallMsOf(vi, tps) {
+  if (!(tps > 0)) return null;
+  let ms = 0;
+  for (let i = 1; i < vi.length; i += 1) {
+    const host = vi[i].t - vi[i - 1].t;
+    if (host > STALL_GAP_MS) ms += Math.max(0, host - ((vi[i].ticks - vi[i - 1].ticks) / tps) * 1000);
+  }
+  return ms;
+}
+
+export function dropSummary({ windows, presents = [], vi = [], tps = null }) {
   const sl = slidingSpeed(windows);
   const below = (x) => (sl.length ? round((100 * sl.filter((s) => s.speed < x).length) / sl.length, 2) : null);
   const pg = gapsOf(presents), vg = gapsOf(vi);
@@ -289,7 +304,7 @@ export function dropSummary({ windows, presents = [], vi = [] }) {
   return {
     hostSec: round(host / 1000, 1),
     // net host ms not matched by guest time (catch-up counted)
-    lostMs: round(lost, 0), dropLostMs: round(dropLost, 0),
+    lostMs: round(lost, 0), dropLostMs: round(dropLost, 0), stallMs: round(stallMsOf(vi, tps), 0),
     pctBelow95: below(95), pctBelow90: below(90),
     worstSecond: sl.length ? round(Math.min(...sl.map((s) => s.speed)), 1) : null,
     hitches50: pg.filter((g) => g > HITCH_MS[0]).length, hitches100: pg.filter((g) => g > HITCH_MS[1]).length,
@@ -301,13 +316,16 @@ export function dropSummary({ windows, presents = [], vi = [] }) {
 }
 
 // Per labelled phase of the scenario: the same summary over its windows.
-export function phaseSummaries({ windows, presents = [], vi = [] }) {
+export function phaseSummaries({ windows, presents = [], vi = [], tps = null }) {
   const labels = [...new Set(windows.map((w) => w.label))];
   return labels.map((label) => {
     const ws = windows.filter((w) => w.label === label);
     const t0 = ws[0].t0, t1 = ws.at(-1).t0 + STEP_MS;
     const inside = (e) => e.t >= t0 && e.t < t1;
-    return { label, ...dropSummary({ windows: ws, presents: presents.filter(inside), vi: vi.filter(inside) }) };
+    // the VI entry just before the phase too: its first interval counts
+    const first = vi.findIndex(inside);
+    const phaseVi = first > 0 ? vi.slice(first - 1).filter((e, i) => i === 0 || inside(e)) : vi.filter(inside);
+    return { label, ...dropSummary({ windows: ws, presents: presents.filter(inside), vi: phaseVi, tps }) };
   });
 }
 
@@ -341,28 +359,31 @@ export function nativeFps(reference, g0, g1) {
 export { median };
 
 // The metrics a merge guard judges, and which way is worse. Few on purpose
-// (each one is a test; review of #261): per phase, the time lost inside
-// drops and the longest gap between two presents; per visit, the hitches
-// over 100 ms and the worst second. Others are reported, never gating.
+// (each one is a test; review of #261): per phase, the time the core stood
+// still (stallMs) and the gaps over 50 ms between presents; per visit, the
+// hitches over 100 ms and the worst second. Others are reported, never gating.
 export const VISIT_PRIMARY = { hitches100: "up", worstSecond: "down" };
-export const PHASE_PRIMARY = { dropLostMs: "up", presentMax: "up" };
-export const REPORTED = { lostMs: "up", pctBelow95: "up", pctBelow90: "up", hitches50: "up", presentP99: "up", loadExcessMs: "up" };
+export const PHASE_PRIMARY = { stallMs: "up", hitches50: "up" };
+export const REPORTED = { lostMs: "up", dropLostMs: "up", pctBelow95: "up", pctBelow90: "up", hitches50: "up", presentP99: "up", loadExcessMs: "up" };
 export const GUARDED = { ...VISIT_PRIMARY, ...REPORTED };
 export const VERDICT_MIN_RUNS = 3;
-// A median of n runs varies ~1.25x more than a mean; 2.5 standard errors of
-// a difference (several metrics are tested at once; a regression must also
-// reproduce on a second batch before the guard fails, drop-meter.mjs).
-export const VERDICT_Z = 2.5;
+// A median of n runs varies ~1.25x more than a mean.
 export const MEDIAN_SE = 1.25;
-export const VERDICT_FLOOR = { lostMs: 50, pctBelow95: 0.5, pctBelow90: 0.5, worstSecond: 5, hitches50: 2, hitches100: 1, presentP99: 2, loadExcessMs: 50 };
-// Per phase: a 50 ms drop on a stable load must show (floor 20 ms lost in
-// drops, 20 ms of extra gap).
-export const PHASE_FLOOR = { dropLostMs: 20, presentMax: 20, lostMs: 20, pctBelow95: 0.5, pctBelow90: 0.5, worstSecond: 5, hitches50: 2, hitches100: 1, presentP99: 5 };
+// Student's t, two-sided 1 % (0.995), by degrees of freedom: the A/A's sd is
+// itself estimated from few runs (review of #261: with 2.5 and an sd from 6
+// runs, ~40 % of identical batches showed a "regression").
+const T995 = [63.657, 9.925, 5.841, 4.604, 4.032, 3.707, 3.499, 3.355, 3.25, 3.169, 3.106, 3.055, 3.012, 2.977, 2.947, 2.921, 2.898, 2.878, 2.861, 2.845, 2.831, 2.819, 2.807, 2.797, 2.787, 2.779, 2.771, 2.763, 2.756, 2.75];
+export const tQuantile = (df) => (df < 1 ? Infinity : df <= T995.length ? T995[df - 1] : 2.576);
+export const VERDICT_FLOOR = { lostMs: 50, dropLostMs: 20, pctBelow95: 0.5, pctBelow90: 0.5, worstSecond: 5, hitches50: 2, hitches100: 1, presentP99: 2, loadExcessMs: 50 };
+// Per phase: a 50 ms stall on a stable load must show (floor 20 ms), and
+// one new gap over 50 ms (floor 0.5: a whole one beyond the noise).
+export const PHASE_FLOOR = { stallMs: 20, hitches50: 0.5, dropLostMs: 20, lostMs: 20, pctBelow95: 0.5, pctBelow90: 0.5, worstSecond: 5, hitches100: 1, presentP99: 5 };
 
 // Candidate against baseline over runs of one visit (or one phase). A metric
 // regresses when its median moved the worse way by more than
-// max(floor, Z x 1.25 x sd x sqrt(2/n)), sd from an A/A of this probe
-// (noise[k].stdev) else from the two sides. Fewer than VERDICT_MIN_RUNS
+// max(floor, t x 1.25 x sd x sqrt(2/n)): t of Student at the sd's degrees
+// of freedom, sd from an A/A of this probe (noise[k].stdev) else from the
+// two sides. Fewer than VERDICT_MIN_RUNS
 // usable runs on a side, or none: inconclusive, never "no regression".
 export function verdictOf(baseline, candidate, { noise = null, floor = VERDICT_FLOOR, metrics = { ...VISIT_PRIMARY } } = {}) {
   const rows = [];
@@ -375,8 +396,10 @@ export function verdictOf(baseline, candidate, { noise = null, floor = VERDICT_F
       continue;
     }
     const delta = median(c) - median(b);
-    const sd = noise?.[k]?.stdev != null && noise[k].n > 1 ? noise[k].stdev : Math.sqrt(((stdev(b) ?? 0) ** 2 + (stdev(c) ?? 0) ** 2) / 2);
-    const threshold = Math.max(VERDICT_Z * MEDIAN_SE * sd * Math.sqrt(2 / n), floor[k] ?? 0);
+    const fromAa = noise?.[k]?.stdev != null && noise[k].n > 1;
+    const sd = fromAa ? noise[k].stdev : Math.sqrt(((stdev(b) ?? 0) ** 2 + (stdev(c) ?? 0) ** 2) / 2);
+    const t = tQuantile(fromAa ? noise[k].n - 1 : b.length + c.length - 2);
+    const threshold = Math.max(t * MEDIAN_SE * sd * Math.sqrt(2 / n), floor[k] ?? 0);
     const worseBy = worse === "up" ? delta : -delta;
     rows.push({ ...base, delta: round(delta, 2), threshold: round(threshold, 2), regression: worseBy > threshold, improvement: -worseBy > threshold });
   }
