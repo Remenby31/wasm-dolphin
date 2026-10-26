@@ -346,6 +346,22 @@ test("a cadence halved with the core at 100 %: images per guest second regress",
   assert.deepEqual(v.regressions.map((r) => r.metric), ["presentsPerGuestSec"]);
 });
 
+// Review of #270: guest time advancing in coarse steps (33 ms jumps), or a
+// sustained 50 % speed, is no stall; at 30 images/s a 2-vsync interval is
+// the cadence, not a repeat.
+test("coarse guest steps and sustained slowness read no stall; repeats are relative to the cadence", () => {
+  // guest time in quanta of q ms of host time (VI-paced steps), at 100 %; and 50 % sustained
+  const quanta = (q) => (t) => Math.floor(t / q) * q;
+  for (const [name, guestAt] of [["33 ms steps", quanta(1000 / 30)], ["66 ms steps", quanta(2000 / 30)], ["50 % for 4 s", (t) => t / 2]]) {
+    const rows = [];
+    for (let t = 0; t <= 4000; t += 50) rows.push({ t, lagMs: 0, ticks: (guestAt(t) * TPS) / 1000 });
+    assert.ok(stallMsOfRows(rows, TPS) < 30, `${name}: ${stallMsOfRows(rows, TPS)}`);
+  }
+  const displayed = [];
+  for (let i = 0, t = 0, vi = 0; i < 600; i += 1, t += 1000 / 60) displayed.push({ t, submits: i % 2 ? 0 : 1, vi: i % 2 ? vi : ++vi }); // 30 images/s
+  assert.equal(displaySummaryOf(displayed).displayRepeats3, 0);
+});
+
 test("hitch counts never get an sd under Poisson's: an A/A that always saw 3 is not certainty", () => {
   const b = [{ hitches50: 3 }, { hitches50: 3 }, { hitches50: 3 }], c = [{ hitches50: 5 }, { hitches50: 5 }, { hitches50: 5 }];
   const v = verdictOf(b, c, { metrics: { hitches50: "up" }, noise: { hitches50: { n: 6, stdev: 0, mean: 3, median: 3 } }, floor: PHASE_FLOOR });

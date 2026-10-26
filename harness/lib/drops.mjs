@@ -305,6 +305,7 @@ export function stallMsOf(vi, tps) {
 export const STALL_LOCAL_RATIO = 0.6;
 export const SLOW_PAIR_RATIO = 0.75;
 const LOCAL_HALF_ROWS = 20;
+const STEP_ROWS_SHARE = 0.2;
 export function stallMsOfRows(rows, tps, ratio = null) {
   if (!(tps > 0)) return null;
   const iv = [];
@@ -320,7 +321,16 @@ export function stallMsOfRows(rows, tps, ratio = null) {
     if (ratio != null) bar = ratio;
     else {
       const local = iv.slice(Math.max(0, i - LOCAL_HALF_ROWS), i + LOCAL_HALF_ROWS + 1).map((x) => x.r).sort((x, y) => x - y);
-      bar = STALL_LOCAL_RATIO * local[local.length >> 1];
+      const med = local[local.length >> 1];
+      // A core running slow there (local median under 0.75: guest time in
+      // coarse steps, or a sustained slowness) is no stall: read apart by
+      // slowRowsMs (review of #270: 33 ms steps read up to 411 ms in 4 s).
+      if (med < SLOW_PAIR_RATIO) continue;
+      bar = STALL_LOCAL_RATIO * med;
+      // Guest time in quanta as long as a row (66 ms steps) leaves a row
+      // with no progress every few rows: a stall leaves 1-2 in the window,
+      // quantization 20 % of them or more.
+      if (local.filter((r) => r < bar).length > STEP_ROWS_SHARE * local.length) continue;
     }
     if (iv[i].r < bar) ms += Math.max(0, iv[i].host - iv[i].guest);
   }
@@ -364,7 +374,9 @@ export function displaySummaryOf(displayed) {
     distinct: distinct.length,
     displayedPerSecond: span > 0 ? round(distinct.length / span, 1) : null,
     displayExcessMs: round(gaps.reduce((a, g) => a + Math.max(0, g - bar), 0), 0),
-    displayRepeats3: gaps.filter((g) => g >= 2.5 * vsync).length,
+    // relative to the phase's own cadence too (review of #270): at 30
+    // images/s every interval is 2 vsyncs; a repeat is 1.5 x that or more
+    displayRepeats3: gaps.filter((g) => g >= Math.max(2.5 * vsync, 1.5 * sorted[sorted.length >> 1])).length,
     displayGaps100: gaps.filter((g) => g > 100).length
   };
 }
