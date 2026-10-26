@@ -293,4 +293,8 @@ test("regionboot: URL → host → adapter → worker → core, 0 unless 1 or 2"
   assert.match(patch, /\+  if \(count < 0\)\n\+    return static_cast<u32>/);
   assert.match(patch, /\+  if \(watch && code >= 0 && code <= 3\)\n\+    watch\[2 \+ code\] \+= 1;/);
   assert.match(worker, /case "validationRegionWatch": \{/);
+  // refusals split by cause (filter, IR/DR, guards, perfmon, XER.SO, lookup)
+  assert.match(patch, /\+constexpr u32 REGION_WATCH_WORDS = 13;/);
+  assert.match(patch, /\+        watch\[10\] \+= 1;/);
+  assert.match(worker, /const W = 13;/);
 });

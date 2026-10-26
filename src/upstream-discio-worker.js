@@ -2017,11 +2017,12 @@ async function handleMessage(type, payload) {
       } else {
         ptr = watch(0, -1) >>> 0;
       }
-      const w = Array.from(new Uint32Array(moduleInstance.HEAPU8.buffer, ptr, 48));
+      const W = 13;  // words a slot (REGION_WATCH_WORDS)
+      const w = Array.from(new Uint32Array(moduleInstance.HEAPU8.buffer, ptr, 8 * W));
       const slots = [];
       for (let i = 0; i < 8; i += 1) {
-        const [pc, tries, normal, notEntry, stop, guestReturn] = w.slice(i * 6, i * 6 + 6);
-        if (pc) slots.push({ pc, tries, ran: normal + notEntry + stop + guestReturn, normal, notEntry, stop, guestReturn });
+        const [pc, tries, normal, notEntry, stop, guestReturn, filterMiss, irDrOff, guards, perfmon, xerSo, lookupMiss, verifications] = w.slice(i * W, i * W + W);
+        if (pc) slots.push({ pc, tries, ran: normal + notEntry + stop + guestReturn, normal, notEntry, stop, guestReturn, refused: { filterMiss, irDrOff, guards, perfmon, xerSo, lookupMiss }, verifications });
       }
       return { supported: true, slots };
     }
