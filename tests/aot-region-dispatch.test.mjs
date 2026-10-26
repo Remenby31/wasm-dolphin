@@ -1336,7 +1336,8 @@ test("after a state load: the overrun is measured on installs that happened, up 
       core.module._DolphinWeb_AotRegionSleepWindowForTest(60);
       const ratio = forcedCounters()[3] / 100;
       assert.ok(ratio >= 3 && ratio <= 4, `measured on the installs that happened (${ratio})`);
-      queueAll(setup());
+      queueAll(setup()); // forgets the regions: the overrun starts again at 3
+      core.serviceRegions(); // posted
       core.module._DolphinWeb_AotSetInstallDelayForTest(60);
       for (const r of requests()) Atomics.store(core.module.HEAPU8, r.readyPtr + r.readySlot, 1);
       core.module._DolphinWeb_AotRegionSleepWindowForTest(500);
@@ -1351,9 +1352,9 @@ test("after a state load: forced installs spend at most 4 ms per period, sliding
     core.setRegionsEnabled(true);
     withModuleCost(plan, 0.4, (modules) => {
       const before = core.regionCount();
-      readyAll(requests, plan);
       core.module._DolphinWeb_AotSetForcedPeriodForTest(60000); // nothing drains meanwhile
       core.module._DolphinWeb_AotSetInstallDelayForTest(2.5); // each install takes 2.5 ms
+      readyAll(requests, plan); // its second slice may force already
       for (let slice = 0; slice < 5; slice++) core.serviceRegions();
       const first = forcedCounters()[0];
       assert.ok(first >= 1 && first <= 2, `2.5 + 2.5 ms leave no room for another under 4 ms (${first})`);
@@ -1375,9 +1376,10 @@ test("after a state load: the window closes", { skip: behindSkip }, () => {
     withModuleCost(plan, 0.4, () => {
       core.module._DolphinWeb_AotSetLoadWindowForTest(30);
       core.module._DolphinWeb_JitOnStateLoaded();
-      const before = core.regionCount();
-      readyAll(requests, plan); // its first slice opens the 30 ms window
+      core.serviceRegions(); // this slice opens the 30 ms window
       spin(60);
+      const before = core.regionCount();
+      readyAll(requests, plan);
       for (let slice = 0; slice < 20; slice++) core.serviceRegions();
       assert.equal(core.regionCount(), before, "closed: the sleep wait again");
       assert.equal(forcedCounters()[0], 0);

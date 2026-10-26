@@ -1,5 +1,5 @@
 diff --git a/Source/Core/Core/PowerPC/CachedInterpreter/CachedInterpreter.cpp b/Source/Core/Core/PowerPC/CachedInterpreter/CachedInterpreter.cpp
-index 655482f..0c5e1d4 100644
+index 655482f..1cbc6a5 100644
 --- a/Source/Core/Core/PowerPC/CachedInterpreter/CachedInterpreter.cpp
 +++ b/Source/Core/Core/PowerPC/CachedInterpreter/CachedInterpreter.cpp
 @@ -10586,6 +10586,9 @@ struct PendingRegion
@@ -143,7 +143,7 @@ index 655482f..0c5e1d4 100644
    if (s_region_waiting.empty() && !s_region_queue_nonempty.load(std::memory_order_acquire))
      return;
    const auto now = std::chrono::steady_clock::now();
-@@ -11080,25 +11188,87 @@ void ServiceRegionInstalls(std::optional<std::chrono::steady_clock::time_point>
+@@ -11080,25 +11188,90 @@ void ServiceRegionInstalls(std::optional<std::chrono::steady_clock::time_point>
      s_region_service_start = now;
    const bool boot = now - *s_region_service_start < REGION_BOOT_WINDOW;
    const u32 installed_before = s_region_stats.regions_installed;
@@ -206,16 +206,15 @@ index 655482f..0c5e1d4 100644
 +      const bool large = cost > REGION_SLICE_TARGET_MS;
 +      const bool long_enough_seen =
 +          sleep_seen(cost * REGION_SLEEP_ESTIMATE_FACTOR + REGION_SLEEP_MARGIN_MS);
-+      const double debt = s_region_forced_debt_ms;
 +      if (long_enough_seen ||
-+          (large ? debt + cost * s_region_large_overrun > REGION_FORCED_MAX_SLICE_MS :
-+                   debt + cost > REGION_FORCED_RATE_MS) ||
 +          (large &&
 +           (n != 0 || now - *pending.installable_since < s_region_behind_window ||
 +            (s_region_last_forced && now - *s_region_last_forced < s_region_behind_window) ||
 +            (sleep_seen(1.0) &&
 +             now - *pending.installable_since < s_region_large_behind_wait))))
 +        return true;
++      // behind: a large module the 6 ms bound keeps waiting is counted,
++      // then either waits for what the forced debt leaves
 +      if (large && cost * s_region_large_overrun > REGION_FORCED_MAX_SLICE_MS)
 +      {
 +        if (!pending.bound_refused)
@@ -227,6 +226,10 @@ index 655482f..0c5e1d4 100644
 +            std::max(s_region_forced_bound_max_ms, cost * s_region_large_overrun);
 +        return true;
 +      }
++      const double debt = s_region_forced_debt_ms;
++      if (large ? debt + cost * s_region_large_overrun > REGION_FORCED_MAX_SLICE_MS :
++                  debt + cost > REGION_FORCED_RATE_MS)
++        return true;
 +      forcing = true;  // counted once installed
 +      return false;
 +    }
@@ -241,7 +244,7 @@ index 655482f..0c5e1d4 100644
    // Room in this slice for a module of `bytes`: always for the first one at
    // a slice boundary; in a sleep window, while it fits before the deadline.
    // `boot_budget`: the boot window's larger slices (a module handed over
-@@ -11179,12 +11349,57 @@ void ServiceRegionInstalls(std::optional<std::chrono::steady_clock::time_point>
+@@ -11179,12 +11352,57 @@ void ServiceRegionInstalls(std::optional<std::chrono::steady_clock::time_point>
      ++n;
      if (!answered)
        s_region_install_fallbacks += 1;
@@ -301,7 +304,7 @@ index 655482f..0c5e1d4 100644
      {
        s_region_waiting[i] = std::move(s_region_waiting.back());
        s_region_waiting.pop_back();
-@@ -11233,6 +11448,8 @@ void ServiceRegionInstalls(std::optional<std::chrono::steady_clock::time_point>
+@@ -11233,6 +11451,8 @@ void ServiceRegionInstalls(std::optional<std::chrono::steady_clock::time_point>
      }
      return;
    }
@@ -310,7 +313,7 @@ index 655482f..0c5e1d4 100644
    if (!boot)
      s_region_stats.install_max_slice_ms = std::max(s_region_stats.install_max_slice_ms, spent_ms);
    else
-@@ -11710,6 +11927,65 @@ extern "C" EMSCRIPTEN_KEEPALIVE void DolphinWeb_AotSetSleepWaitForTest(int ms)
+@@ -11710,6 +11930,65 @@ extern "C" EMSCRIPTEN_KEEPALIVE void DolphinWeb_AotSetSleepWaitForTest(int ms)
    s_region_sleep_wait = std::chrono::milliseconds(ms);
  }
  
@@ -376,7 +379,7 @@ index 655482f..0c5e1d4 100644
  // Tests: the estimated install cost per module byte (ms), so that a test
  // module counts as one too large for a slice.
  extern "C" EMSCRIPTEN_KEEPALIVE double DolphinWeb_AotSetInstallCostForTest(double ms_per_byte)
-@@ -15690,6 +15966,7 @@ extern "C" EMSCRIPTEN_KEEPALIVE double GetPpcWasmJitEngagedFrame()
+@@ -15690,6 +15969,7 @@ extern "C" EMSCRIPTEN_KEEPALIVE double GetPpcWasmJitEngagedFrame()
  
  extern "C" EMSCRIPTEN_KEEPALIVE void DolphinWeb_JitOnStateLoaded()
  {
