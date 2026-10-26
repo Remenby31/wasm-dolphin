@@ -354,9 +354,15 @@ node harness/probes/drop-meter.mjs --iso ../roms/<disc>.iso --port 8113 --runs 3
 # (independent A/A noise): 0.0 % of batches flag a regression (3000 draws).
 # Outlier runs of the A/A (beyond 5 robust sds, MAD not 0) are counted in
 # the summary (outliers); they are left out of the threshold's sd only with
-# an A/A of 10 runs or more (degrees of freedom of the runs kept): from 6
-# runs the MAD is too noisy. The summary records the probe's version
+# an A/A of 10 runs or more and when a single run is off (degrees of
+# freedom of the runs kept): from 6 runs the MAD is too noisy, and outliers
+# that recur are part of the noise. The summary records the probe's version
 # (PROBE_VERSION, what it runs in the page and worker); --noise must match.
+# The ticks reading misses stalls of 1.5 s or more (the +-1 s median falls
+# with them) and, where the core runs slow, any stall shorter than 3 rows
+# nearly stopped: the VI reading covers both, outside VI gaps. With
+# --display, a gap of the worker's rAF while the page's rAF goes on is no
+# screen measurement (screenUnmeasuredMs, muteRafSpans), not a loss.
 # beginFrameGaps: the longest gap without a BeginFrame, the worker's rAF
 # (--display) and the page's (always), reported: headless, the worker's rAF
 # sometimes stops 1-4 s while presents go on.

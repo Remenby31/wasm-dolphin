@@ -363,9 +363,11 @@ test("coarse guest steps and sustained slowness read no stall; repeats are relat
 });
 
 // Review of #271: low rows that are contiguous are a stall, whatever the
-// share: a 500 ms stall in a long VI gap, a 50 ms one in a phase at 70 %.
-test("contiguous low rows are a stall: 500 ms at 100 %, 50 ms at 70 %", () => {
-  for (const [name, speed, from, to, expect] of [["500 ms at 100 %", 1, 1000, 1500, 500], ["50 ms at 70 %", 0.7, 1000, 1050, 35]]) {
+// share: a 500 ms stall in a long VI gap. In a slow phase (70 %) only a run
+// of 3 rows nearly stopped counts (steps with jitter made false stalls
+// there): 200 ms yes; 50 ms is left to the VI reading.
+test("contiguous low rows are a stall: 500 ms at 100 %, 200 ms at 70 % (50 ms at 70 %: VI reading only)", () => {
+  for (const [name, speed, from, to, expect] of [["500 ms at 100 %", 1, 1000, 1500, 500], ["200 ms at 70 %", 0.7, 1000, 1200, 140], ["50 ms at 70 %", 0.7, 1000, 1050, 0]]) {
     const rows = [];
     let g = 0;
     for (let t = 0; t <= 3000; t += 50) {
@@ -374,7 +376,8 @@ test("contiguous low rows are a stall: 500 ms at 100 %, 50 ms at 70 %", () => {
       g += TPS * speed * (50 - lost) / 1000;
     }
     const ms = stallMsOfRows(rows, TPS);
-    assert.ok(ms >= 0.9 * expect && ms <= 1.1 * (to - from), `${name}: ${ms}`);
+    if (expect === 0) assert.equal(ms, 0, name);
+    else assert.ok(ms >= 0.9 * expect && ms <= 1.1 * (to - from), `${name}: ${ms}`);
   }
 });
 
@@ -391,6 +394,10 @@ test("robust A/A noise: one far-off run is reported, it does not widen the thres
   assert.equal(n.displayExcessMs.outliers, 1);
   assert.equal(n.displayExcessMs.keptN, 9);
   assert.ok(n.displayExcessMs.trimmedSd < 30 && n.displayExcessMs.stdev > 1000);
+  // two outliers in 10: recurring, part of the noise, not trimmed
+  const two = noiseOf([0, 17, 0, 17, 4350, 0, 9, 3, 3900, 5].map((v) => ({ displayExcessMs: v })));
+  assert.equal(two.displayExcessMs.outliers, 2);
+  assert.equal(two.displayExcessMs.trimmedSd, undefined);
   // mostly 0 with a few 20 ms readings: that is the spread, no outlier
   const z = noiseOf([0, 22, 0, 18, 0, 27, 0, 0, 21, 0].map((v) => ({ stallMs: v })));
   assert.equal(z.stallMs.outliers, 0);
@@ -407,6 +414,40 @@ test("BeginFrame gaps: the worker's rAF and the page's, apart", () => {
   assert.deepEqual(beginFrameGaps(displayed, page), { workerBeginFrameGapMs: 4384, pageBeginFrameGapMs: 0 });
   const stopped = page.map((r) => (r.t > 1000 && r.t < 3000 ? { ...r, rafs: 60 } : r)).map((r, i, a) => ({ ...r, rafs: r.t >= 3000 ? 60 + i : r.rafs }));
   assert.ok(beginFrameGaps(displayed, stopped).pageBeginFrameGapMs >= 1900);
+});
+
+test("quantized steps with jitter in a slow phase: no false stall", () => {
+  // 33 ms steps at 100 % with up to 20 ms of jitter; 16.7 ms steps at 30 %
+  let seed = 3;
+  const rnd = () => ((seed = (seed * 1103515245 + 12345) % 2 ** 31) / 2 ** 31);
+  for (const [name, q, speed, jitter] of [["33 ms, 20 ms jitter", 1000 / 30, 1, 20], ["16.7 ms at 30 %", 1000 / 60, 0.3, 5]]) {
+    const rows = [];
+    for (let t = 0; t <= 5000; t += 50) {
+      const h = Math.max(0, t * speed + (rnd() - 0.5) * jitter);
+      rows.push({ t, lagMs: 0, ticks: (Math.floor(h / q) * q * TPS) / 1000 });
+    }
+    assert.ok(stallMsOfRows(rows, TPS) < 60, `${name}: ${stallMsOfRows(rows, TPS)}`);
+  }
+});
+
+test("a mute worker rAF while the page's goes on is no screen loss", () => {
+  const displayed = [];
+  let vi = 0;
+  for (let t = 0; t < 2000; t += 1000 / 60) displayed.push({ t, submits: 1, vi: ++vi });
+  for (let t = 6000; t < 8000; t += 1000 / 60) displayed.push({ t, submits: 1, vi: (vi += 1) }); // 4 s without a BeginFrame
+  const page = [];
+  for (let t = 0, r = 0; t <= 8000; t += 50) page.push({ t, lagMs: 0, rafs: (r += 3) });
+  const d = displaySummaryOf(displayed, page);
+  assert.equal(d.muteRafSpans, 1);
+  assert.ok(d.screenUnmeasuredMs > 3900);
+  assert.equal(d.displayGaps100, 0);
+  assert.ok(d.displayExcessMs < 20);
+  // the page's rAF stopped too: the whole compositor paused, a real gap
+  const frozenAt = page.find((r) => r.t === 1950).rafs;
+  const still = page.map((r) => (r.t > 1950 && r.t <= 6100 ? { ...r, rafs: frozenAt } : r.t > 6100 ? { ...r, rafs: r.rafs - 250 } : r));
+  const d2 = displaySummaryOf(displayed, still);
+  assert.equal(d2.muteRafSpans, 0);
+  assert.equal(d2.displayGaps100, 1);
 });
 
 test("hitch counts never get an sd under Poisson's: an A/A that always saw 3 is not certainty", () => {
