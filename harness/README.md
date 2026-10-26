@@ -338,6 +338,10 @@ node harness/probes/drop-meter.mjs --iso ../roms/<disc>.iso --port 8113 --runs 3
 # ~2 s; a first launch's region translation is then barely started, while
 # at ~4.5 s about 50 regions are in). Recorded in the summary; the --noise
 # A/A must have the same delay (an older summary counts as 0).
+# The power source (macOS pmset: mains or battery) is recorded per run and
+# in the summary's machine; --noise refuses an A/A taken on the other source
+# (an A/A from before the field is not refused on it), and a batch whose
+# runs mix both gives no verdict (exit 3). Decision measures: on mains.
 # The --noise A/A must have run on the core of the base measured (the
 # summary records each side's core): another core gives no verdict (exit 3),
 # --noise-stale-ok for a study. Redo the A/A when main publishes a core.
