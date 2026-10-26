@@ -81,6 +81,24 @@ with `scaleResolutionDownBy` there.
   every `setEnhancements` at 1x) and `onGpuDeviceLost({ internalResolution,
   fallback: 1, reason, detail })` tells the page, which restarts the game at
   1x instead of at the same scale. Lost at 1x: `fallback` is null.
+- **Measured costs** (2026-10-26/27, M4 Pro, Chrome headless, mains power,
+  local commercial disc, race, 3 runs per scale, perf lock):
+
+  | Scale | Stream capture ms/frame, mean (max) | Sizes sent | Savestate | Save | Load |
+  | --- | --- | --- | --- | --- | --- |
+  | 1x | 0.027 (0.23) | 640x480 only | 28 MB | 0.8-1.0 s | 1.21 s |
+  | 2x | 0.053 (0.46) | 640x480 only | 35 MB | 0.8-1.0 s | 1.22 s |
+  | 4x | 0.054 (0.39) | 640x480 only | 56-61 MB | 0.8-1.0 s | 1.22 s |
+
+  `harness/probes/stream-capture-cost.mjs` and `savestate-scale.mjs`; save
+  times have the 200 ms granularity of `saveStateFile`'s polls. The capture
+  costs nothing that matters at 4x; a savestate at 4x is about twice the 1x
+  one. The heap is reserved at 1.5 GiB from the start, so its size says
+  nothing about the headroom: that needs a malloc counter in the core.
+- `streamCaptureStats` counts every size it sent over the capture
+  (`minWidth`/`maxWidth`, `sizes`: frames per `source:WxH` with the last
+  core frame, `inputMaxWidth`): a stray size, as the 320x240 seen once at
+  4x (2026-10-26, not reproduced in 9 runs since), shows with its count.
 - The semantic capture (`?wgpusemanticruntime`, diagnostics) does not know
   opcode 29: a scale change invalidates that capture, as any opcode above
   24 does. At 1x nothing changes for it.

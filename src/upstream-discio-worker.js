@@ -2359,6 +2359,7 @@ async function handleMessage(type, payload) {
       }
       const path = "/savestate_out.sav";
       try { moduleInstance.FS.unlink(path); } catch (e) {}
+      const saveStartedAt = performance.now();
       const rc = api.saveStateFile(path) | 0;
       let prev = -1, stable = 0, size = 0;
       // up to ~8 s real time (40 × 200 ms); a Melee state is ~tens of
@@ -2384,9 +2385,14 @@ async function handleMessage(type, payload) {
       const ab = bytes ? bytes.buffer.slice(bytes.byteOffset,
                                             bytes.byteOffset + bytes.byteLength)
                        : null;
+      // Until the file stopped growing (200 ms polls: a coarse time), and
+      // the wasm heap after it (states grow with the internal resolution,
+      // patch 0168; the heap tops out at 1.5 GiB).
+      const elapsedMs = Math.round(performance.now() - saveStartedAt);
+      const heapBytes = moduleInstance.HEAPU8?.buffer?.byteLength ?? null;
       return ab
-        ? { saved: true, rc, size, bytes: ab, transfer: [ab] }
-        : { saved: false, rc, size, error: "empty/no state file" };
+        ? { saved: true, rc, size, elapsedMs, heapBytes, bytes: ab, transfer: [ab] }
+        : { saved: false, rc, size, elapsedMs, heapBytes, error: "empty/no state file" };
     }
     case "mixAudio": {
       const mixStartedAt = causalMetricsEnabled ? performance.now() : 0;
@@ -12992,7 +12998,7 @@ let wgpuVsyncFrameTime = null;
 let wgpuVsyncFallback = null;
 // The device the display canvas was configured on with COPY_DST (null: not yet).
 let wgpuVsyncCanvasDevice = null;
-const wgpuPresentVsyncStats = { byTimer: 0, byLate: 0, byLateHidden: 0, streamed: 0 };
+const wgpuPresentVsyncStats = { byTimer: 0, byLate: 0, byNoBeginFrame: 0, streamed: 0 };
 // v3: the stream's own canvas, sized like the frames and configured on the
 // current device (made again when either changes).
 let wgpuVsyncStreamCanvas = null;
@@ -13083,7 +13089,7 @@ function queueWgpuVsyncFrame(coreFrame, shownVi, stream) {
       // No BeginFrame for 50 ms or more (a hidden tab, a rAF silent for
       // seconds): no local copy per frame, the stream has it already (v3);
       // the fallback timer shows the newest one every 50 ms.
-      wgpuPresentVsyncStats.byLateHidden += 1;
+      wgpuPresentVsyncStats.byNoBeginFrame += 1;
     } else if (sinceTick > wgpuVsyncLateMs()) {
       // The rAF is late (busy worker): no BeginFrame to wait for, the
       // newest frame now.
