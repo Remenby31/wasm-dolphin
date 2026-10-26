@@ -35,7 +35,7 @@ test("internal resolution and anisotropy reach the core through the host, the ad
   assert.match(adapterSource, /\n {6}internalResolution: this\.internalResolution,\n {6}maxAnisotropy: this\.maxAnisotropy,\n/);
   const worker = await read("../src/upstream-discio-worker.js");
   assert.match(worker, /\n {8}internalResolution: payload\.internalResolution,\n {8}maxAnisotropy: payload\.maxAnisotropy,\n/);
-  assert.match(worker, /dolphinEfbScale: normalizeInternalResolution\(internalResolution\),/);
+  assert.match(worker, /dolphinEfbScale: \(wgpuInternalResolution = clampInternalResolution\(internalResolution, wgpuScaleCeiling\(\)\)\),/);
   assert.match(worker, /dolphinMaxAnisotropy: Number\.isInteger\(maxAnisotropy\) \? maxAnisotropy : -1,/);
   const core = await read("../core/upstream/dolphin_web_core.cpp");
   assert.match(core, /Module\['dolphinEfbScale'\]/);
@@ -106,7 +106,7 @@ test("core-host's setEnhancements takes the anisotropy as a multiplier, like ?an
   assert.match(host, /async setEnhancements\(\{ internalResolution, anisotropy \} = \{\}\)/);
   assert.match(host, /this\.enhancements\.maxAnisotropy = anisotropyToCore\(anisotropy\);/);
   const worker = await read("../src/upstream-discio-worker.js");
-  assert.match(worker, /const internalResolution = set\(\.\.\.enhancementCoreArgs\(payload\)\);/);
+  assert.match(worker, /const internalResolution = set\(\.\.\.enhancementCoreArgs\(payload, wgpuScaleCeiling\(\)\)\);/);
 });
 
 // A worker reused for another disc (mountGame reloads into the same worker):
@@ -128,4 +128,95 @@ test("a reused worker brings the canvas back to 640x480 before the next disc boo
   assert.match(worker, /function resetWgpuBackbufferForBoot\(\) \{[^]*?wgpuBackbufferSized = false;\n\}/);
   const patch = await read("../patches/dolphin-wasm/snapshot/0168-webgpu-internal-resolution.patch");
   assert.match(patch, new RegExp(`m_announced_backbuffer_w = ${BOOT_BACKBUFFER[0]};[^]*m_announced_backbuffer_h = ${BOOT_BACKBUFFER[1]};`));
+});
+
+// Follow-up of 0168, point 1: a ceiling per adapter class, the same rule for
+// the page (core-host, the site) and the worker.
+test("the internal resolution ceiling goes by adapter class and limits", async () => {
+  const { internalResolutionCeiling, clampInternalResolution } = await import("../src/wgpu-enhancements.js");
+  const gpu = (vendor, architecture, limits = {}, extra = {}) => ({
+    info: { vendor, architecture },
+    limits: { maxTextureDimension2D: 16384, maxBufferSize: 4294967292, ...limits },
+    ...extra
+  });
+  const cases = [
+    [null, {}, 1, "no-adapter"],
+    [gpu("google", "swiftshader"), {}, 1, "cpu-adapter"],
+    [gpu("apple", "metal-3", {}, { isFallbackAdapter: true }), {}, 1, "cpu-adapter"],
+    [{ info: { vendor: "x", isFallbackAdapter: true } }, {}, 1, "cpu-adapter"],
+    [gpu("apple", "metal-3"), { deviceMemory: 32 }, 4, "adapter"],
+    // Safari has no deviceMemory: an iPhone or an iPad reads as a Mac.
+    [gpu("apple", "metal-3"), {}, 2, "apple-without-memory"],
+    [gpu("nvidia", "ampere"), {}, 4, "adapter"],
+    // Dawn's exact Intel names (gpu_info.json): Arc Alchemist "gen-12hp",
+    // Battlemage "xe-2hpg"; integrated gen-*, *lp*.
+    ...["gen-12hp", "xe-2hpg", ""].map((a) => [gpu("intel", a), { deviceMemory: 16 }, 4, "adapter"]),
+    ...["gen-7", "gen-8", "gen-9", "gen-11", "gen-12lp", "xe-lpg", "xe-2lpg", "xe-3lpg", "xe-3lpg-xs"]
+      .map((a) => [gpu("intel", a), { deviceMemory: 16 }, 2, "integrated-gpu"]),
+    ...["qualcomm", "arm", "img-tec", "huawei", "verisilicon"].map((v) => [gpu(v, ""), { deviceMemory: 8 }, 2, "mobile-gpu"]),
+    [gpu("apple", "metal-3", { maxBufferSize: 268435456 }), { deviceMemory: 16 }, 2, "small-adapter"],
+    [gpu("apple", "metal-3", { maxTextureDimension2D: 2048 }), { deviceMemory: 16 }, 3, "texture-limit"],
+    [gpu("apple", "metal-3"), { deviceMemory: 4 }, 2, "device-memory"],
+    [gpu("apple", "metal-3"), { deviceMemory: 2 }, 1, "device-memory"],
+    [gpu("intel", "gen-12lp"), { deviceMemory: 2 }, 1, "device-memory"],
+    [{ info: {} }, {}, 4, "adapter"]
+  ];
+  for (const [adapter, options, ceiling, reason] of cases) {
+    assert.deepEqual(internalResolutionCeiling(adapter, options), { ceiling, reason }, JSON.stringify([adapter, options]));
+  }
+  assert.deepEqual([[4, 2], [2, 4], [3, 1], [9, 4], [4, "x"], [4, undefined]].map(([v, c]) => clampInternalResolution(v, c)),
+    [2, 2, 1, 1, 1, 4]);
+});
+
+test("the worker holds the scale to its adapter's ceiling, at boot and in game", async () => {
+  const { enhancementCoreArgs } = await import("../src/wgpu-enhancements.js");
+  assert.deepEqual(enhancementCoreArgs({ internalResolution: 4, maxAnisotropy: 4 }, 2), [2, 4]);
+  assert.deepEqual(enhancementCoreArgs({ internalResolution: 3 }, 1), [1, -1]);
+  const worker = await read("../src/upstream-discio-worker.js");
+  assert.match(worker, /set\(\.\.\.enhancementCoreArgs\(payload, wgpuScaleCeiling\(\)\)\)/);
+  assert.match(worker, /wgpuScaleAdapterCeiling = scaleCeiling\.ceiling;/);
+  // A device lost above 1x: 1x for the rest of the worker, and the page told.
+  assert.match(worker, /if \(internalResolution > 1\) wgpuScaleLostCeiling = 1;/);
+  assert.match(worker, /self\.postMessage\(\{ type: "wgpu-device-lost", internalResolution,/);
+});
+
+// Point 2: a device lost at N > 1 comes back at 1x, not at N again.
+test("a device lost above 1x brings the host back to 1x for its next boot and every change", async () => {
+  const { UpstreamWorkerAdapter } = await import("../src/upstream-worker-adapter.js");
+  const seen = [];
+  const adapter = new UpstreamWorkerAdapter({ onGpuDeviceLost: (e) => seen.push(e) });
+  adapter.handleMessage({ type: "wgpu-device-lost", internalResolution: 4, reason: "unknown", detail: "oom" });
+  assert.deepEqual(seen, [{ internalResolution: 4, reason: "unknown", detail: "oom" }]);
+
+  const { EmulatorHost } = await import("../src/core-host.js");
+  const lost = [];
+  const host = {
+    internalResolutionCeiling: EmulatorHost.prototype.internalResolutionCeiling,
+    enhancements: { internalResolution: 4, maxAnisotropy: -1 },
+    scaleLostCeiling: 4,
+    scaleCeilingPromise: Promise.resolve({ ceiling: 4, reason: "adapter" }),
+    mode: "dolphin",
+    onStatus: () => {},
+    onGpuDeviceLost: (e) => lost.push(e),
+    adapter: { setEnhancements: async (e) => ({ applied: true, internalResolution: e.internalResolution }) }
+  };
+  const call = (name, ...args) => EmulatorHost.prototype[name].apply(host, args);
+  assert.deepEqual(await call("internalResolutionCeiling"), { ceiling: 4, reason: "adapter" });
+  // The worker's adapter, once known, wins over the page's guess.
+  host.workerScaleCeiling = { ceiling: 2, reason: "integrated-gpu" };
+  assert.deepEqual(await call("internalResolutionCeiling"), { ceiling: 2, reason: "integrated-gpu" });
+  const seenCeiling = [];
+  new UpstreamWorkerAdapter({ onScaleCeiling: (c) => seenCeiling.push(c) }).handleMessage({ type: "wgpu-scale-ceiling", ceiling: 2, reason: "integrated-gpu" });
+  assert.deepEqual(seenCeiling, [{ ceiling: 2, reason: "integrated-gpu" }]);
+  host.workerScaleCeiling = null;
+  call("handleGpuDeviceLost", { internalResolution: 4, reason: "unknown", detail: "oom" });
+  assert.deepEqual(lost, [{ internalResolution: 4, fallback: 1, reason: "unknown", detail: "oom" }]);
+  assert.equal(host.enhancements.internalResolution, 1);
+  assert.deepEqual(await call("internalResolutionCeiling"), { ceiling: 1, reason: "device-lost" });
+  assert.deepEqual(await call("setEnhancements", { internalResolution: 3 }), { applied: true, internalResolution: 1 });
+  // Lost at 1x: no fallback to offer, the ceiling stays.
+  const host1 = { ...host, enhancements: { internalResolution: 1 }, scaleLostCeiling: 4, onGpuDeviceLost: (e) => lost.push(e) };
+  EmulatorHost.prototype.handleGpuDeviceLost.call(host1, { internalResolution: 1 });
+  assert.equal(lost.at(-1).fallback, null);
+  assert.equal(host1.scaleLostCeiling, 4);
 });

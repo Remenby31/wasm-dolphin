@@ -62,14 +62,14 @@ import { acquirePerfLock } from "../lib/perf-lock.mjs";
 import { chromeInfo, isLocalOnly, probeOutDir } from "../lib/probe-out.mjs";
 import { savePng } from "../lib/session.mjs";
 import { median, round } from "../lib/stats.mjs";
-import { machineSnapshot, sampleChromeRss } from "../lib/system.mjs";
+import { machineSnapshot, powerSnapshot, sampleChromeRss } from "../lib/system.mjs";
 import { mergeTimeline } from "../lib/timeline.mjs";
 import { num, sideOrder, STATE_ROUTE } from "./race-perf.mjs";
 
 // What this probe runs in the page and the worker (samplers, counters): an
 // A/A's noise holds only for the same version (review of #271: the page's
 // rAF counter changes the environment). Raised with each such change.
-export const PROBE_VERSION = 2;
+export const PROBE_VERSION = 3; // 3: the power source per run and per summary (an older A/A has none)
 
 // What the site runs (salon packages/core engineParams, profile "fast", with
 // a WebGPU adapter).
@@ -132,6 +132,7 @@ async function playVisit(o, server, profileDir, shotDir, visit) {
     const page = context.pages()[0] ?? (await context.newPage());
     const t0 = Date.now();
     raw.launchT = t0;
+    raw.power = powerSnapshot(); // mains or battery, this visit
     // --display: the worker's rAF records what each BeginFrame put on screen.
     await bootIso(page, { url: `${server.base}?${o.query}`, iso: o.iso, timeoutMs: 120000, harness: o.display ? { displayed: true } : {} });
     raw.bootMs = Date.now() - t0;
@@ -215,6 +216,7 @@ async function playVisit(o, server, profileDir, shotDir, visit) {
         if (shotDir && step.label) savePng(await grabFrame(page), path.join(shotDir, `${String(raw.markers.length).padStart(2, "0")}-${step.label}.png`));
       }
       raw.endT = performance.timeOrigin + performance.now();
+      raw.powerEnd = powerSnapshot(); // unplugged (or plugged in) during the visit: "mixed"
       raw.endGuest = o.scenario.end + base;
     } finally {
       draining = false;
@@ -284,7 +286,7 @@ export function analyzeVisit(raw, { native = null } = {}) {
   const regionsDone = allAt ? { regions: finalRegions, hostMsFromLaunch: raw.launchT ? Math.round(allAt.t - raw.launchT) : null, guestSec: allAt.ticks != null && raw.tps ? round(allAt.ticks / raw.tps, 2) : null } : null;
   const rss = (raw.rss ?? []).map((x) => x[1]);
   return {
-    timelineComplete: timeline.complete, sampled: rows.length > 0, browser: raw.browser ?? null, bootMs: raw.bootMs, pc: raw.pc ?? null,
+    timelineComplete: timeline.complete, sampled: rows.length > 0, power: powerOfVisit(raw), browser: raw.browser ?? null, bootMs: raw.bootMs, pc: raw.pc ?? null,
     load1: { median: round(median(loadAvg), 2), max: round(Math.max(...loadAvg), 2) },
     regionsDone, rssPeakMB: rss.length ? Math.max(...rss) : null,
     summary: { ...dropSummary({ windows, presents, vi, tps: raw.tps, rows: rows.filter(span), displayed, page: page.filter(span) }), loads: loads.length, loadExcessMs: loads.reduce((a, l) => a + l.excessMs, 0), rssPeakMB: rss.length ? Math.max(...rss) : null, regionsDoneMs: regionsDone?.hostMsFromLaunch ?? null },
@@ -340,6 +342,17 @@ export function humanSummary(summary) {
 }
 
 // Why a comparison gives no verdict (exit code 3), or null (pure).
+// A visit's power source: the same at its start and end, else "mixed"; null
+// when unknown (another OS, a desktop).
+export function powerOfVisit(raw) {
+  const a = raw.power?.source ?? null, b = raw.powerEnd?.source ?? a;
+  return a === b ? a : "mixed";
+}
+// The sources of a batch's runs (known ones), sorted.
+export function powerSourcesOf(analyses) {
+  return [...new Set(analyses.filter((a) => !a.analysis?.error && a.analysis?.power).map((a) => a.analysis.power))].sort();
+}
+
 export function noVerdictReasons({ analyses, visits, gaveUp = null, verdicts }) {
   const reasons = [];
   if (gaveUp) reasons.push(gaveUp);
@@ -348,6 +361,10 @@ export function noVerdictReasons({ analyses, visits, gaveUp = null, verdicts }) 
   if (bySide("baseline").length && (bySide("baseline").join() !== bySide("candidate").join() || bySide("candidate").length > 1)) {
     reasons.push("the sides were not sampled alike (one without the drop sampler): their costs differ");
   }
+  // On mains for some runs and on battery for others (unplugged mid-batch),
+  // or within a run: the runs are from two machines, as far as speed goes.
+  const powers = powerSourcesOf(analyses);
+  if (powers.length > 1 || powers.includes("mixed")) reasons.push(`runs on ${powers.join(" and ")}: the power source changed during the batch`);
   for (let v = 1; v <= visits; v += 1) {
     const vv = verdicts[v];
     if (!vv) continue;
@@ -374,6 +391,8 @@ function writeSummary(outDir, meta, analyses, visits, { noise = null, confirm = 
     }
     summary.visitSummary.push(entry);
   }
+  // every batch, an A/A included: what --noise checks
+  summary.powerSources = powerSourcesOf(analyses);
   if (analyses.some((a) => a.side === "baseline")) {
     summary.noVerdict = noVerdictReasons({ analyses, visits, gaveUp: meta.gaveUp, verdicts });
     if (meta.staleNoise) summary.noVerdict = [meta.staleNoise, ...(summary.noVerdict ?? [])];
@@ -437,6 +456,13 @@ export function readNoise(file, expect = null) {
     // the same machine, and the same browser when both runs say which
     if (expect.cpuModel && s.machine?.cpuModel && s.machine.cpuModel !== expect.cpuModel) differ.push("cpuModel");
     if (expect.browser && s.browser && s.browser !== expect.browser) differ.push("browser");
+    // on mains vs on battery: another machine, as far as noise goes; an A/A
+    // whose runs mixed both (or a run that did) is no noise for either
+    const sources = s.powerSources ?? [];
+    const power = sources.length === 1 ? sources[0] : sources.length ? sources.join("+") : s.machine?.power?.source ?? null;
+    if (sources.length > 1 || sources.includes("mixed")) differ.push("power");
+    else if (expect.powerSource && power && power !== expect.powerSource) differ.push("power");
+    named.power = [power, expect.powerSource];
     if (differ.length) throw new Error(`--noise ${file}: another measure (${differ.map((k) => `${k} ${named[k]?.[0] ?? s[k] ?? unset[k]} vs ${named[k]?.[1] ?? expect[k] ?? unset[k]}`).join("; ")})`);
   }
   return Object.fromEntries(s.visitSummary.map((v) => [v.visit, { run: (v.candidate ?? v).noise, phases: (v.candidate ?? v).phases ?? {} }]));
@@ -451,7 +477,7 @@ function logRun(log, tag, a) {
 
 async function analyzeDir(dir, native, log, noiseFile = null) {
   const meta = JSON.parse(readFileSync(path.join(dir, "summary.json"), "utf8"));
-  const noise = noiseFile ? readNoise(noiseFile, { ...meta, cpuModel: meta.machine?.cpuModel }) : null;
+  const noise = noiseFile ? readNoise(noiseFile, { ...meta, cpuModel: meta.machine?.cpuModel, powerSource: meta.machine?.power?.source }) : null;
   const analyses = [];
   for (const f of runFiles(readdirSync(dir), /^raw-(candidate|baseline)-(\d+)-v(\d+)(-retry)?\.json\.gz$/)) {
     const [, side, run, visit] = f.match(/raw-(\w+)-(\d+)-v(\d+)/);
@@ -518,7 +544,7 @@ async function falsePositives(sources, { noiseFile, draws, log }) {
   // from the pool itself makes the rate look lower than it is.
   const noiseDir = noiseFile ? path.resolve(path.dirname(noiseFile)) : null;
   if (noiseDir && sources.some((src) => path.resolve(src.split(":")[0]) === noiseDir)) throw new Error(`--noise ${noiseFile}: from a directory of the pool; take it from another A/A`);
-  const noise = noiseFile ? readNoise(noiseFile, { ...meta, cpuModel: meta.machine?.cpuModel }) : null;
+  const noise = noiseFile ? readNoise(noiseFile, { ...meta, cpuModel: meta.machine?.cpuModel, powerSource: meta.machine?.power?.source }) : null;
   const r = falsePositiveRate(pool, { visits: meta.visits ?? 2, noise, draws });
   log(`false positives over ${r.draws} A-against-A draws of ${VERDICT_MIN_RUNS} runs (${r.runs} runs of one tree): one batch ${(100 * r.singleBatch).toFixed(1)} %, confirmed by a second batch ${(100 * r.confirmed).toFixed(1)} %`);
   for (const [k, f] of r.byMetric) log(`   ${k}: ${(100 * f).toFixed(1)} %`);
@@ -574,7 +600,10 @@ async function main() {
     regionCounters: values["region-counters"], display: values.display, pcWindow: values["pc-window"] ? values["pc-window"].split("-").map(Number) : null,
     maxLoad: values["max-load"] ? num(values, "max-load", { min: 0.1 }) : Math.max(2, os.cpus().length / 4), loadWait: num(values, "load-wait", { min: 0 })
   };
-  const noise = values.noise ? readNoise(values.noise, { probeVersion: PROBE_VERSION, scenario: path.basename(values.scenario), state: o.state ? path.basename(o.state) : null, stateDelayMs: o.state ? o.stateDelayMs : 0, display: o.display, query: o.baselineQuery ?? o.query, sampleMs: o.sampleMs, cpuModel: machineSnapshot().cpuModel }) : null;
+  // for the noise check (the meta takes its own once the lock is held)
+  const machine = machineSnapshot();
+  if (machine.power?.source === "battery") log(`on battery (${machine.power.percent} %): compare only with runs and noise on battery too`);
+  const noise = values.noise ? readNoise(values.noise, { probeVersion: PROBE_VERSION, scenario: path.basename(values.scenario), state: o.state ? path.basename(o.state) : null, stateDelayMs: o.state ? o.stateDelayMs : 0, display: o.display, query: o.baselineQuery ?? o.query, sampleMs: o.sampleMs, cpuModel: machine.cpuModel, powerSource: machine.power?.source }) : null;
   const noiseCore = values.noise ? noiseCoreOf(values.noise) : null;
   const sides = { candidate: resolveSide("candidate", values.candidate) };
   if (values.baseline) sides.baseline = resolveSide("baseline", values.baseline);

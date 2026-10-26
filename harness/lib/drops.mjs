@@ -476,6 +476,8 @@ export function displaySummaryOf(displayed, page = null, alive = null) {
   const span = (displayed.at(-1).t - displayed[0].t) / 1000;
   return {
     distinct: distinct.length, muteRafSpans: spans, screenUnmeasuredMs: round(unmeasured.reduce((a, g) => a + g.ms, 0), 0),
+    // the unmeasured intervals themselves (host ms), for the per-guest-second rate
+    unmeasuredSpans: unmeasured.map((g) => [g.from, g.to]),
     displayedPerSecond: span > 0 ? round(distinct.length / span, 1) : null,
     displayExcessMs: round(gaps.reduce((a, g) => a + Math.max(0, g - bar), 0), 0),
     // relative to the phase's own cadence too (review of #270): at 30
@@ -502,6 +504,30 @@ export function beginFrameGaps(displayed, page) {
     }
   }
   return { workerBeginFrameGapMs: worker == null ? null : round(worker, 0), pageBeginFrameGapMs: pageGap == null ? null : round(pageGap, 0) };
+}
+
+// Distinct images per guest second, the screen-unmeasured intervals left out
+// of both the count (the image that closes one) and the guest time (theirs).
+// Null when what is left measured is too short to be a rate (review of #286:
+// 0.1 s and 2 images missing read 40 instead of 60): under MIN_MEASURED_SEC
+// of guest time, or under half the phase.
+export const MIN_MEASURED_SEC = 1;
+export function displayedPerGuestSecOf(display, guestSec, vi, tps) {
+  if (!display || !(guestSec > 0) || display.distinct == null || !(tps > 0) || vi.length < 2) return null;
+  // Each span bounded to the VI timeline (review of #286: a span ending past
+  // the last VI output interpolated to nothing, its time not taken out while
+  // its image was); a span wholly outside takes nothing out.
+  const lo = vi[0].t, hi = vi.at(-1).t;
+  let out = 0, images = 0;
+  for (const [a, b] of display.unmeasuredSpans ?? []) {
+    const from = Math.max(a, lo), to = Math.min(b, hi);
+    if (to <= from) continue;
+    out += Math.max(0, (interpolate(vi, "ticks", to) - interpolate(vi, "ticks", from)) / tps);
+    images += 1;
+  }
+  const sec = guestSec - out;
+  if (!(sec >= MIN_MEASURED_SEC) || sec < guestSec / 2) return null;
+  return round(Math.max(0, display.distinct - images) / sec, 2);
 }
 
 export function dropSummary({ windows, presents = [], vi = [], tps = null, rows = [], displayed = null, page = null }) {
@@ -534,7 +560,9 @@ export function dropSummary({ windows, presents = [], vi = [], tps = null, rows 
     // with --display the distinct images shown
     presentsPerGuestSec: guestSec > 0 ? round(presents.length / guestSec, 2) : null,
     ...(display ?? {}),
-    displayedPerGuestSec: display && guestSec > 0 && display.distinct != null ? round(display.distinct / guestSec, 2) : null,
+    // without the unmeasured intervals, at either end (review of #272): the
+    // image closing each one and the guest time it spans
+    displayedPerGuestSec: displayedPerGuestSecOf(display, guestSec, vi, tps),
     ...(displayed || page ? beginFrameGaps(displayed, page) : {}),
     pctBelow95: below(95), pctBelow90: below(90),
     worstSecond: sl.length ? round(Math.min(...sl.map((s) => s.speed)), 1) : null,
