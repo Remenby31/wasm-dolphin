@@ -251,6 +251,15 @@ export function createAotFirstLaunch({
       return true;
     },
 
+    // A save state loaded: the modules covering `hits` ([[pc, samples]], the
+    // guest PCs sampled since the load) go first in what this run has left.
+    prioritize(hits) {
+      if (!supported || disposed) return 0;
+      const moved = optimizer.prioritize(hits);
+      record("priority", { moved, pcs: hits?.length ?? 0 });
+      return moved;
+    },
+
     get generation() {
       return generation;
     },

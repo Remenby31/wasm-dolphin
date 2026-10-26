@@ -377,3 +377,63 @@ test("aot optimizer: the module's leftover continuation budget goes back to the 
   assert.ok(calls[0][2] instanceof Set && calls[0][2].size > 0, "the entries the module holds are passed (no continuation starts there)");
   assert.equal(events.findLast(([t]) => t === "optimization-done")[1].budgetRefused, 2, "only the capped member's refusals are left");
 });
+
+// A save state loaded early in a first launch: the modules covering the
+// guest PCs sampled after the load go first in what the run has left.
+test("aot optimizer: prioritize() moves the modules covering sampled PCs ahead, most hits first", async () => {
+  const translated = [];
+  const { o } = optimizer();
+  await o.status(); // the plan, and its modules
+  const units = o.regions;
+  assert.ok(units.length >= 5);
+  const pcIn = (u) => u.members[0].ranges[0][0];
+  const [last, beforeLast] = [units.at(-1), units.at(-2)];
+  // Before the run: nothing to move yet, kept and applied when it builds its work.
+  assert.equal(o.prioritize([[pcIn(beforeLast), 1], [pcIn(last), 5], [pcIn(last) + 4, 1], [0x81700000, 9]]), 0);
+  const realTranslate = o.translateUnit.bind(o);
+  o.translateUnit = async (unit) => { translated.push(unit); return realTranslate(unit); };
+  await o.start();
+  assert.deepEqual(translated.slice(0, 2), [last, beforeLast], "most hits first");
+  assert.deepEqual(translated.slice(2), units.slice(0, -2), "the others keep their order");
+});
+
+test("aot optimizer: prioritize() during a run reorders only what is left", async () => {
+  const translated = [];
+  const { o } = optimizer();
+  await o.status();
+  const units = o.regions;
+  const realTranslate = o.translateUnit.bind(o);
+  o.translateUnit = async (unit) => {
+    translated.push(unit);
+    // after the 2nd module: a load whose code is in the 1st (done) and the last
+    if (translated.length === 2) assert.equal(o.prioritize([[units[0].members[0].ranges[0][0], 3], [units.at(-1).members[0].ranges[0][0], 1]]), 1);
+    return realTranslate(unit);
+  };
+  await o.start();
+  assert.equal(translated.length, units.length, "every module once");
+  assert.deepEqual(translated.slice(0, 3), [units[0], units[1], units.at(-1)]);
+  assert.equal(o.prioritize([[units[0].members[0].ranges[0][0], 1]]), 0, "after the run: nothing to reorder");
+});
+
+test("aot optimizer: prioritize() with PCs outside every module changes nothing", async () => {
+  const { o } = optimizer();
+  await o.status();
+  assert.equal(o.prioritize([[0x81700000, 4], [0x80000000, 1]]), 0);
+  assert.equal(o.prioritize([]), 0);
+});
+
+// A load ~2 s into a first launch comes before the plan exists: the hits wait for it.
+test("aot optimizer: prioritize() before the plan is built applies once the run has it", async () => {
+  const probe = optimizer();
+  await probe.o.status();
+  const target = probe.o.regions.at(-1);
+  const pc = target.members[0].ranges[0][0];
+  const { o } = optimizer(); // no plan yet
+  assert.equal(o.regions, undefined);
+  assert.equal(o.prioritize([[pc, 3]]), 0);
+  const translated = [];
+  const realTranslate = o.translateUnit.bind(o);
+  o.translateUnit = async (unit) => { translated.push(unit.key); return realTranslate(unit); };
+  await o.start();
+  assert.equal(translated[0], target.key);
+});

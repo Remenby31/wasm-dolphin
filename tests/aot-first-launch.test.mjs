@@ -649,6 +649,23 @@ test("the profile sampler needs a shared heap and a PC address; it drains what i
   assert.equal(Atomics.load(ctl, 0), 1);
 });
 
+// A save state load watches the samples from then on, without taking them
+// from the profile's drain.
+test("the profile sampler's watch() counts from now on and leaves the drain whole", async () => {
+  const { startHotSampler } = await import("../src/aot-hot-sampler.js");
+  let worker;
+  const sampler = startHotSampler({ buffer: new SharedArrayBuffer(16), pcAddress: 8, createWorker: () => (worker = { postMessage() {}, terminate() {} }) });
+  worker.onmessage({ data: [[0x80003100, 3]] });
+  const w = sampler.watch();
+  worker.onmessage({ data: [[0x80003100, 2], [0x80004000, 1]] });
+  assert.deepEqual(w.read(), [[0x80003100, 2], [0x80004000, 1]]);
+  w.stop();
+  worker.onmessage({ data: [[0x80004000, 4]] });
+  assert.deepEqual(w.read(), [[0x80003100, 2], [0x80004000, 1]], "stopped: no more counts");
+  assert.deepEqual(sampler.drain(), [[0x80003100, 5], [0x80004000, 5]]);
+  sampler.stop();
+});
+
 // Review of #165: two records in flight (a remount during the minute's
 // record) count the session once; a failed first record does not use it up.
 test("the profile recorder counts a session once, whatever the records in flight", async () => {
