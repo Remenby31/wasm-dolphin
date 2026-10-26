@@ -148,11 +148,11 @@ test("the internal resolution ceiling goes by adapter class and limits", async (
     // Safari has no deviceMemory: an iPhone or an iPad reads as a Mac.
     [gpu("apple", "metal-3"), {}, 2, "apple-without-memory"],
     [gpu("nvidia", "ampere"), {}, 4, "adapter"],
-    // Chrome's Intel names: Arc Battlemage "xe-2-hpg", Alchemist none;
-    // integrated "gen-9", "gen-12lp", "xe-lpg", "xe-2-lpg".
-    [gpu("intel", "xe-2-hpg"), { deviceMemory: 16 }, 4, "adapter"],
-    [gpu("intel", ""), { deviceMemory: 16 }, 4, "adapter"],
-    ...["gen-9", "gen-12lp", "xe-lpg", "xe-2-lpg"].map((a) => [gpu("intel", a), { deviceMemory: 16 }, 2, "integrated-gpu"]),
+    // Dawn's exact Intel names (gpu_info.json): Arc Alchemist "gen-12hp",
+    // Battlemage "xe-2hpg"; integrated gen-*, *lp*.
+    ...["gen-12hp", "xe-2hpg", ""].map((a) => [gpu("intel", a), { deviceMemory: 16 }, 4, "adapter"]),
+    ...["gen-7", "gen-8", "gen-9", "gen-11", "gen-12lp", "xe-lpg", "xe-2lpg", "xe-3lpg", "xe-3lpg-xs"]
+      .map((a) => [gpu("intel", a), { deviceMemory: 16 }, 2, "integrated-gpu"]),
     ...["qualcomm", "arm", "img-tec", "huawei", "verisilicon"].map((v) => [gpu(v, ""), { deviceMemory: 8 }, 2, "mobile-gpu"]),
     [gpu("apple", "metal-3", { maxBufferSize: 268435456 }), { deviceMemory: 16 }, 2, "small-adapter"],
     [gpu("apple", "metal-3", { maxTextureDimension2D: 2048 }), { deviceMemory: 16 }, 3, "texture-limit"],

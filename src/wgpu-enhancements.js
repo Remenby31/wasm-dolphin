@@ -27,10 +27,13 @@ export function normalizeInternalResolution(value) {
 //   Apple GPU without navigator.deviceMemory (Safari: an iPhone or iPad
 //   cannot be told from a Mac there): 2;
 // - anything else: 4.
-// Intel: Chrome names the integrated generations ("gen-9", "gen-12lp",
-// "xe-lpg", "xe-2-lpg": "gen-*" or an "lp" architecture); Arc is "xe-2-hpg"
-// (Battlemage) or no architecture at all (Alchemist, not in Dawn's list), so
-// an unknown Intel architecture is not taken for an integrated one.
+// Intel: Dawn's names (gpu_info.json, a hyphen only after a word that does
+// not end in a digit): integrated "gen-9", "gen-11", "gen-12lp", "xe-lpg",
+// "xe-2lpg", "xe-3lpg", "xe-3lpg-xs" (an "lp", or "gen-*"); discrete Arc
+// "gen-12hp" (Alchemist), "xe-2hpg" (Battlemage). Unknown or no architecture
+// is not taken for an integrated GPU.
+// Safari and Firefox expose no navigator.deviceMemory: an Apple GPU there
+// (a Mac included) stays at 2.
 // `adapter` is a GPUAdapter or { info, limits, isFallbackAdapter }.
 // Returns { ceiling, reason }; the core-host and the worker clamp every
 // scale to it (docs/internal-resolution.md).
@@ -38,7 +41,7 @@ const MOBILE_GPU_VENDORS = new Set(["qualcomm", "arm", "img-tec", "imagination",
 
 export function integratedIntelArchitecture(architecture) {
   const a = String(architecture ?? "").toLowerCase();
-  return a.startsWith("gen-") || /(^|-)lpg?$|lp$/.test(a);
+  return /lp/.test(a) || (a.startsWith("gen-") && !a.endsWith("hp"));
 }
 
 export function internalResolutionCeiling(adapter, { deviceMemory } = {}) {
