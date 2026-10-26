@@ -214,7 +214,7 @@ test("presentvsync v3: the stream captures at queue time, from the frame's textu
   assert.match(stream, /if \(!streamCapture\.ready\(\)\) return;/, "nobody reading: no copy");
   assert.match(stream, /copyTextureToTexture\(\{ texture: tex \}, \{ texture: wgpuVsyncStreamContext\.getCurrentTexture\(\) \}/);
   assert.match(stream, /dev\.queue\.submit\(\[enc\.finish\(\)\]\);\n {2}streamCapture\.offerCanvas\(wgpuVsyncStreamCanvas, coreFrame\);/, "copy submitted before the snapshot");
-  assert.match(worker, /const wgpuPresentVsyncStats = \{ byTimer: 0, streamed: 0 \};/);
+  assert.match(worker, /const wgpuPresentVsyncStats = \{ byTimer: 0, byLate: 0, streamed: 0 \};/);
   // the readback keeps the `queued` counter: the queue's length is `waiting`
   const read = worker.slice(worker.indexOf('case "validationReadPresentVsync":'), worker.indexOf('case "validationReadEfbSyncStats":'));
   assert.match(read, /\.\.\.wgpuVsync\.stats,\n[^\n]*\n {8}waiting: wgpuVsync\.waiting,/);
@@ -246,4 +246,13 @@ test("presentvsync: the input marker, cadence sample and readbacks read the fram
   assert.doesNotMatch(present.slice(80), /lastBackbufferTexture/, "no drain-local texture between the frame's present and its queue");
   assert.match(present, /encodeHardwareInputMarker\(\n\s+ensureEnc\(\),\n\s+presentTexture,/);
   assert.match(present, /encodeWgpuVisualCadence\(ensureEnc\(\), presentTexture\)/);
+});
+
+// Review of #265 (drop-meter, boot): a frame queued while the presenter's rAF
+// is late (a busy worker cannot run it) is shown at once, counted byLate.
+test("presentvsync: a frame queued while the rAF is late is shown at once", async () => {
+  const worker = await readFile(new URL("../src/upstream-discio-worker.js", import.meta.url), "utf8");
+  assert.match(worker, /const WGPU_VSYNC_LATE_MS = 25;/);
+  assert.match(worker, /\} else if \(performance\.now\(\) - wgpuVsyncLastTickAt > WGPU_VSYNC_LATE_MS\) \{\n[^\n]*\n {4}wgpuPresentVsyncStats\.byLate \+= 1;\n {4}presentWgpuVsyncFrame\(\);/);
+  assert.match(worker, /const wgpuPresentVsyncStats = \{ byTimer: 0, byLate: 0, streamed: 0 \};/);
 });
