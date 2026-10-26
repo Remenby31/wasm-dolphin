@@ -1325,26 +1325,28 @@ test("after a state load, not behind: a sleep window long enough seen within the
   });
 });
 
-test("after a state load: the overrun is measured on installs that happened, up at once, at most 4", { skip: behindSkip }, () => {
-  withOffThreadCompile((requests) => {
-    const plan = setup();
-    core.setRegionsEnabled(true);
-    withModuleCost(plan, 3, () => {
-      readyAll(requests, plan);
-      // each install takes 9 ms more than its 3 ms estimate: x 3 at least
-      core.module._DolphinWeb_AotSetInstallDelayForTest(9);
-      core.module._DolphinWeb_AotRegionSleepWindowForTest(60);
-      const ratio = forcedCounters()[3] / 100;
-      assert.ok(ratio >= 3 && ratio <= 4, `measured on the installs that happened (${ratio})`);
-      queueAll(setup()); // forgets the regions: the overrun starts again at 3
-      core.serviceRegions(); // posted
-      core.module._DolphinWeb_AotSetInstallDelayForTest(60);
-      for (const r of requests()) Atomics.store(core.module.HEAPU8, r.readyPtr + r.readySlot, 1);
-      core.module._DolphinWeb_AotRegionSleepWindowForTest(500);
-      assert.equal(forcedCounters()[3], 400, "bounded at 4");
+// A large install 9 ms slower than its 3 ms estimate: x 3 at least, at once.
+// Each test sets the cost after its own setup(): installs teach the core a
+// cost per byte (my delay is not in it), so a second batch would no longer
+// count as large.
+for (const [delay, check, what] of [
+  [9, (ratio) => ratio >= 3 && ratio <= 4, "up at once to the measured ratio"],
+  [60, (ratio) => ratio === 4, "bounded at 4"]
+]) {
+  test(`after a state load: the overrun is measured on installs that happened: ${what}`, { skip: behindSkip }, () => {
+    withOffThreadCompile((requests) => {
+      const plan = setup();
+      core.setRegionsEnabled(true);
+      withModuleCost(plan, 3, () => {
+        readyAll(requests, plan);
+        core.module._DolphinWeb_AotSetInstallDelayForTest(delay);
+        core.module._DolphinWeb_AotRegionSleepWindowForTest(500);
+        const ratio = forcedCounters()[3] / 100;
+        assert.ok(check(ratio), `${what} (${ratio})`);
+      });
     });
   });
-});
+}
 
 test("after a state load: forced installs spend at most 4 ms per period, sliding, failed attempts included", { skip: behindSkip }, () => {
   withOffThreadCompile((requests) => {
