@@ -242,12 +242,15 @@ function withOffThreadCompile(fn) {
   m._dolphinJitCache = new Map(); // the pthread's module map (pre-js), empty
   m._SetPpcWasmJitOffThread(1);
   // 0107: a ready module waits for a throttle sleep (2 s at most); these
-  // tests install at slice boundaries, as after that wait.
+  // tests install at slice boundaries, as after that wait (0170: also for a
+  // module asked again after a cache clear).
   m._DolphinWeb_AotSetSleepWaitForTest?.(0);
+  m._DolphinWeb_AotSetRepostSleepWaitForTest?.(0);
   try {
     return fn(posted.filter.bind(posted, (msg) => msg.type === "dolphin-jit-compile-request"));
   } finally {
     m._DolphinWeb_AotSetSleepWaitForTest?.(2000);
+    m._DolphinWeb_AotSetRepostSleepWaitForTest?.(150);
     m._SetPpcWasmJitOffThread(0);
     m._dolphinJitCache = savedCache;
     globalThis._dolphinJitInflight?.clear();
