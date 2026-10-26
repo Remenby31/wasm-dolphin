@@ -1680,6 +1680,7 @@ async function handleMessage(type, payload) {
         ppcWasmJitForce: payload.ppcWasmJitForce,
         ppcWasmJitTier: payload.ppcWasmJitTier,
         ppcWasmJitWarmupFrames: payload.ppcWasmJitWarmupFrames,
+        ppcWasmJitWarmupOnLoad: payload.ppcWasmJitWarmupOnLoad,
         ppcProfile: payload.ppcProfile,
         gpuSpinMicros: payload.gpuSpinMicros,
         codeSpaceMiB: payload.codeSpaceMiB,
@@ -2445,6 +2446,7 @@ async function loadCore({
   ppcWasmJitForce: requestedPpcWasmJitForce = false,
   ppcWasmJitTier: requestedPpcWasmJitTier = "guarded",
   ppcWasmJitWarmupFrames: requestedPpcWasmJitWarmupFrames = DEFAULT_WASM_JIT_WARMUP_XFB_FRAMES,
+  ppcWasmJitWarmupOnLoad = "restart",
   ppcProfile = false,
   gpuSpinMicros = -1,
   codeSpaceMiB = null,
@@ -3201,6 +3203,9 @@ async function loadCore({
     // boot whatever the worker's timing (a late first poll, a state loaded
     // before the first frame).
     api.setPpcWasmJitWarmup(ppcWasmJitTier === "mixed" ? 2 : 1, ppcWasmJitWarmupFrames);
+    // Patch 0172: after a state load, the warmup counts from boot
+    // (?jitwarmupload=boot) or restarts from the loaded field.
+    api.setJitWarmupOnLoad?.(ppcWasmJitWarmupOnLoad === "boot" ? 1 : 0);
     ppcWasmJitArmed = true;
   } else {
     api.setPpcWasmJitEnabled?.(0);
@@ -3552,6 +3557,7 @@ function bindApi(module) {
         ? (core) => ccall("SetCpuCore", "number", ["string"], [core])
         : null,
     setPpcWasmJitWarmup: optionalCwrap("SetPpcWasmJitWarmup", null, ["number", "number"]),
+    setJitWarmupOnLoad: optionalCwrap("DolphinWeb_SetJitWarmupOnLoad", null, ["number"]),
     setPpcWasmJitOffThread: optionalCwrap("SetPpcWasmJitOffThread", null, ["number"]),
     setJitRegionsEnabled: optionalCwrap("DolphinWeb_JitSetRegionsEnabled", null, ["number"]),
     setJitRegionChaining: optionalCwrap("DolphinWeb_JitSetRegionChaining", null, ["number"]),

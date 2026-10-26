@@ -1,0 +1,46 @@
+diff --git a/Source/Core/Core/PowerPC/CachedInterpreter/CachedInterpreter.cpp b/Source/Core/Core/PowerPC/CachedInterpreter/CachedInterpreter.cpp
+index 655482f..13a09d2 100644
+--- a/Source/Core/Core/PowerPC/CachedInterpreter/CachedInterpreter.cpp
++++ b/Source/Core/Core/PowerPC/CachedInterpreter/CachedInterpreter.cpp
+@@ -15590,6 +15590,13 @@ std::atomic<bool> s_wasm_arm_from_boot{false};
+ u64 s_wasm_arm_start_frame = 0;
+ bool s_wasm_arm_started = false;
+ std::atomic<u64> s_wasm_engaged_frame{UINT64_MAX};
++// Patch 0172: after a state load the warmup counts from field 0 (boot)
++// instead of from the loaded field: the JIT engages at max(fields, loaded
++// field), at once for a state saved past the warmup. Still a function of
++// emulated state only (the loaded field), so as deterministic as the
++// restart; the product's 700 fields left no block JIT for ~11.7 s after
++// every load (map v3). Off by default (?jitwarmupload=boot).
++std::atomic<bool> s_wasm_warmup_from_boot_on_load{false};
+ }  // namespace
+ 
+ // Runs on the CPU thread before ApplyRequestedWasmPolicy: turns an armed
+@@ -15655,6 +15662,14 @@ extern "C" EMSCRIPTEN_KEEPALIVE double DolphinWeb_JitArmedStepForTest(double fra
+   return engaged == UINT64_MAX ? -1.0 : static_cast<double>(engaged);
+ }
+ 
++// Patch 0172: 1 counts the armed warmup from field 0 after a state load (the
++// JIT engages at max(fields, loaded field)), 0 restarts it from the loaded
++// field (the default).
++extern "C" EMSCRIPTEN_KEEPALIVE void DolphinWeb_SetJitWarmupOnLoad(int from_boot)
++{
++  s_wasm_warmup_from_boot_on_load.store(from_boot == 1, std::memory_order_relaxed);
++}
++
+ // Arms the JIT to engage `fields` emulated fields from now (or from the next
+ // state load), decided on the CPU thread. policy: 1 guarded, 2 mixed; 0
+ // disarms and turns the JIT off.
+@@ -15692,8 +15707,10 @@ extern "C" EMSCRIPTEN_KEEPALIVE void DolphinWeb_JitOnStateLoaded()
+ {
+   if (s_wasm_armed_policy.load(std::memory_order_acquire) < 0)
+     return;
+-  // A state loaded before the first slice still counts from the loaded field.
+-  s_wasm_arm_from_boot.store(false, std::memory_order_relaxed);
++  // A state loaded before the first slice still counts from the loaded field
++  // (patch 0172: from field 0 when asked).
++  s_wasm_arm_from_boot.store(s_wasm_warmup_from_boot_on_load.load(std::memory_order_relaxed),
++                             std::memory_order_relaxed);
+   s_wasm_arm_restart.store(true, std::memory_order_release);
+ }
+ 
