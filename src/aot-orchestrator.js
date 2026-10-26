@@ -361,18 +361,33 @@ export function coreHeapBases(m) {
 // (the core's disc reads, compile requests) run between slices.
 // A yield that also gives way to the core's disc reads: while the worker
 // served one less than quietMs ago (lastReadAt), the next translation slice
-// waits, in steps, up to maxWaitMs, so a burst of sequential reads (a boot,
-// a load) is not served one per slice. The core's DVD thread issues its
-// next read as soon as one completes: a slice in between delays each by up
-// to a slice, and the emulated CPU waits on it (drop meter: cold boot,
-// 0.55-1.7 s at ~17 % speed, reads at ~10-50 ms each while translating).
+// waits, in steps, so a burst of sequential reads (a boot, a load) is not
+// served one per slice. The core's DVD thread issues its next read as soon
+// as one completes: a slice in between delays each by up to a slice, and
+// the emulated CPU waits on it (drop meter: cold boot, 0.55-1.7 s at ~17 %
+// speed, reads at ~10-50 ms each while translating).
+// The waiting has a budget kept across calls (review of #268: a bound per
+// call let endless reads, a movie or streamed audio, starve the translation):
+// it starts at maxWaitMs, each slice of translation earns as much again (up
+// to maxWaitMs), each wait spends it. Under reads that never stop, the
+// translation still gets about half the time after the first maxWaitMs.
 export function discAwareYield({ lastReadAt, quietMs = 15, maxWaitMs = 1000, now = () => performance.now(),
   yieldNow = yieldToEventLoop, sleep = (ms) => new Promise((r) => setTimeout(r, ms)) }) {
-  return async () => {
+  let budget = maxWaitMs;
+  let sliceStart = null;
+  const out = async () => {
+    if (sliceStart != null) budget = Math.min(maxWaitMs, budget + (now() - sliceStart));
     await yieldNow();
-    const until = now() + maxWaitMs;
-    while (now() - lastReadAt() < quietMs && now() < until) await sleep(quietMs);
+    while (budget > 0 && now() - lastReadAt() < quietMs) {
+      const t0 = now();
+      await sleep(quietMs);
+      budget -= now() - t0;
+      out.waitedMs += now() - t0;
+    }
+    sliceStart = now();
   };
+  out.waitedMs = 0;
+  return out;
 }
 
 export function yieldToEventLoop() {

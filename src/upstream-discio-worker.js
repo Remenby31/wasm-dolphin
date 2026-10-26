@@ -3322,7 +3322,8 @@ function readDiscAhead(workerFs) {
 // When this worker last served a disc read (performance.now()): the region
 // translator gives way to read bursts (discAwareYield, aot-orchestrator.js).
 let lastDiscReadAt = -Infinity;
-function noteDiscReads(workerFs) {
+export const lastDiscReadAtForTest = () => lastDiscReadAt;
+export function noteDiscReads(workerFs) {
   const ops = workerFs?.stream_ops;
   if (!ops?.read || ops.read.notedDiscReads) return;
   const read = ops.read;
@@ -4405,11 +4406,11 @@ async function mountFile(file) {
   fs.mount(resolveWorkerFs(moduleInstance), { blobs: [{ name: safeName, data: file }] }, WORKERFS_MOUNT_DIR);
   mounted = true;
   if (discReadaheadEnabled) readDiscAhead(resolveWorkerFs(moduleInstance));
-  noteDiscReads(resolveWorkerFs(moduleInstance));
   if (harnessEnabled) {
     timeDiscReads(resolveWorkerFs(moduleInstance));
     moduleInstance._DolphinWeb_SetDiscReadStatsEnabled?.(1);
   }
+  noteDiscReads(resolveWorkerFs(moduleInstance));
   // P6: the disc's key for the region cache is read from this File only when
   // a region cache is first opened, never during boot: this worker serves the
   // core's file reads, and extra work here while the core boots shifts what
