@@ -9,6 +9,13 @@
 // page load, or no SW support) the bytes are compiled directly: slower, never
 // broken.
 //
+// The engine's worker passes compileStreaming: null with V8 and its compiler
+// worker on (the product): the bytes then go through that worker, which
+// calls every function once, so the CPU thread never compiles a region
+// function lazily during play (a warm launch's race load stalled ~0.3 s).
+// The streaming path, and the TurboFan code V8 kept on it, is then unused;
+// what that costs in the first seconds of a race is to be measured.
+//
 // Trust: an entry carries the SHA-256 of its bytes and is used only if the
 // bytes it holds hash to it. A missing hash, a wrong hash, bytes the engine
 // rejects: the entry is deleted and reported, the region stays with the JIT.
@@ -229,6 +236,8 @@ export async function probeAotServiceWorker(baseUrl, fetchImpl = globalThis.fetc
     return false;
   }
 }
+
+export const LOAD_CONCURRENCY = 8;
 
 export async function openAotCache({
   discKey,
@@ -455,13 +464,22 @@ export async function openAotCache({
     // Map of key -> {module, streamed} or {reason}. Reasons: missing,
     // corrupt and engine-reject (both deleted), bad-key, compile-error,
     // cancelled.
+    // Up to LOAD_CONCURRENCY keys at once (a compile through the compiler
+    // worker is a round trip each: one after the other, a warm launch's 143
+    // regions took 3.8 s to install instead of 2.0), results in key order.
     load(keys) {
       return track((async () => {
-        const out = new Map();
-        for (const key of keys) {
-          out.set(key, cancelled ? { reason: "cancelled" } : await loadOne(key));
-        }
-        return out;
+        const list = [...keys];
+        const results = new Array(list.length);
+        let next = 0;
+        const worker = async () => {
+          while (next < list.length) {
+            const i = next++;
+            results[i] = cancelled ? { reason: "cancelled" } : await loadOne(list[i]);
+          }
+        };
+        await Promise.all(Array.from({ length: Math.min(LOAD_CONCURRENCY, list.length) }, worker));
+        return new Map(list.map((key, i) => [key, results[i]]));
       })());
     },
 

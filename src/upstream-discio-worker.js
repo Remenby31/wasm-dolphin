@@ -7973,7 +7973,7 @@ export async function prepareAotFirstLaunch(file, {
     // warm launch lost ~0.3 s at the race's load, harness drop-meter).
     openCache: (identity) => openAotCache({
       ...identity, baseUrl: AOT_BASE_URL, cacheStorage,
-      ...(dolphinAotCompilerEnabled ? { compile: (bytes) => compileDolphinJitModuleOffThread(bytes, DELIVER_BEFORE_WARM, true), compileStreaming: null } : {})
+      ...aotCacheCompileOptions()
     }),
     planStore: opfs ? new OpfsPlanStore(opfs) : null,
     // Planning reads the DOL and RELs and runs discovery (about a second):
@@ -8327,6 +8327,16 @@ export async function precompileAotRegion(key, bytes) {
   if (!keepModulesForNativeCache()) dolphinJitCopiesSkipped += 1;
   else if (dolphinJitCacheMap.size < DOLPHIN_JIT_CACHE_MAX) dolphinJitCacheMap.set(key, module);
   return { module };
+}
+// How the region cache compiles what it loads back (openAotCache options).
+// With the compiler worker, and only where V8 keeps a native module cache:
+// through that worker, handed over at once and every function then called
+// once in the background, as the first launch's regions are; elsewhere
+// (JSC, SpiderMonkey) the module would be dropped and the CPU thread compile
+// the bytes itself, the warm-up lost (an iPhone under its memory cap).
+export function aotCacheCompileOptions() {
+  if (!dolphinAotCompilerEnabled || !nativeModuleCache(wasmEngineName)) return {};
+  return { compile: (bytes) => compileDolphinJitModuleOffThread(bytes, DELIVER_BEFORE_WARM, true), compileStreaming: null };
 }
 // P5 (plan piste 3): cached and requested modules are compiled in a
 // dedicated worker that also runs every entry point once on scratch memory, so

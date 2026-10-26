@@ -234,7 +234,8 @@ test("with the Service Worker, modules come from compileStreaming(fetch) of an u
 
 // A warm launch's regions must reach the compiler worker, which warms what
 // it compiles: with compileStreaming null the cache compiles every module
-// from its bytes through the caller's compile, Service Worker or not.
+// from its bytes through the caller's compile, Service Worker or not; the
+// keys of one load are compiled several at once, results in key order.
 test("compileStreaming null: modules come from the caller's compile, even with the Service Worker", async () => {
   const storage = fakeCacheStorage();
   let cacheName = null;
@@ -252,13 +253,15 @@ test("compileStreaming null: modules come from the caller's compile, even with t
   assert.ok(got.module instanceof WebAssembly.Module);
   assert.equal(got.streamed, false);
   assert.deepEqual(compiled, [MOD_A.byteLength]);
-});
-
-// The worker opens the first launch's cache with the compiler worker's
-// compile (deliver before warm-up), as precompileAotRegion compiles.
-test("the worker loads cached regions through the compiler worker when it is on", async () => {
-  const w = await (await import("node:fs/promises")).readFile(new URL("../src/upstream-discio-worker.js", import.meta.url), "utf8");
-  assert.match(w, /openCache: \(identity\) => openAotCache\(\{\n\s*\.\.\.identity, baseUrl: AOT_BASE_URL, cacheStorage,\n\s*\.\.\.\(dolphinAotCompilerEnabled \? \{ compile: \(bytes\) => compileDolphinJitModuleOffThread\(bytes, DELIVER_BEFORE_WARM, true\), compileStreaming: null \} : \{\}\)/);
+  // several at once (a compile is a round trip to the compiler worker)
+  let inFlight = 0, most = 0;
+  const slow = await openAotCache({ ...ident(), baseUrl: BASE, cacheStorage: storage, fetchImpl, compileStreaming: null,
+    compile: async (bytes) => { inFlight += 1; most = Math.max(most, inFlight); await new Promise((r) => setTimeout(r, 5)); inFlight -= 1; return WebAssembly.compile(bytes); } });
+  await slow.put([{ key: k(2), bytes: MOD_B }, { key: k(3), bytes: MOD_A }]);
+  const many = await slow.load([k(3), k(1), k(2)]);
+  assert.deepEqual([...many.keys()], [k(3), k(1), k(2)]);
+  assert.ok([...many.values()].every((x) => x.module instanceof WebAssembly.Module));
+  assert.ok(most > 1, `compiled one at a time (${most})`);
 });
 
 test("pruneAotCaches leaves other discs, foreign caches and caches being created alone", async () => {
