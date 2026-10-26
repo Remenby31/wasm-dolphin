@@ -555,9 +555,16 @@ async function main() {
   const cores = Object.fromEntries(Object.entries(sides).map(([k, side]) => [k, coreOf(side.root)]));
   const measuredBase = cores.baseline ?? cores.candidate;
   let staleNoise = null;
-  if (noise && noiseCore !== measuredBase) {
+  // Unknown on either side is stale too (null === null proves nothing).
+  if (noise && (!noiseCore || !measuredBase || noiseCore !== measuredBase)) {
     staleNoise = `--noise ${values.noise}: its A/A ran on core ${noiseCore ? noiseCore.slice(0, 12) : "unknown (an A/A before the core was recorded)"}, the base measured here is ${measuredBase ? measuredBase.slice(0, 12) : "unknown"}`;
-    if (!values["noise-stale-ok"]) log(`${staleNoise}: no verdict (exit 3); --noise-stale-ok for a study`);
+    // Before any run: a comparison that cannot give a verdict is not played.
+    if (!values["noise-stale-ok"] && sides.baseline) {
+      log(`${staleNoise}: no verdict possible, nothing measured (exit 3); --noise-stale-ok for a study`);
+      for (const side of Object.values(sides)) if (side.temp) rmSync(side.root, { recursive: true, force: true });
+      process.exitCode = 3;
+      return;
+    }
   }
   const lockWait = num(values, "lock-wait", { min: 0 });
   const lock = await calmLock({
