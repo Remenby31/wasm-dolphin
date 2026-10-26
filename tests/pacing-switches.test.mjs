@@ -214,7 +214,7 @@ test("presentvsync v3: the stream captures at queue time, from the frame's textu
   assert.match(stream, /if \(!streamCapture\.ready\(\)\) return;/, "nobody reading: no copy");
   assert.match(stream, /copyTextureToTexture\(\{ texture: tex \}, \{ texture: wgpuVsyncStreamContext\.getCurrentTexture\(\) \}/);
   assert.match(stream, /dev\.queue\.submit\(\[enc\.finish\(\)\]\);\n {2}streamCapture\.offerCanvas\(wgpuVsyncStreamCanvas, coreFrame\);/, "copy submitted before the snapshot");
-  assert.match(worker, /const wgpuPresentVsyncStats = \{ byTimer: 0, byLate: 0, streamed: 0 \};/);
+  assert.match(worker, /const wgpuPresentVsyncStats = \{ byTimer: 0, byLate: 0, byLateHidden: 0, streamed: 0 \};/);
   // the readback keeps the `queued` counter: the queue's length is `waiting`
   const read = worker.slice(worker.indexOf('case "validationReadPresentVsync":'), worker.indexOf('case "validationReadEfbSyncStats":'));
   assert.match(read, /\.\.\.wgpuVsync\.stats,\n[^\n]*\n {8}waiting: wgpuVsync\.waiting,/);
@@ -252,7 +252,11 @@ test("presentvsync: the input marker, cadence sample and readbacks read the fram
 // is late (a busy worker cannot run it) is shown at once, counted byLate.
 test("presentvsync: a frame queued while the rAF is late is shown at once", async () => {
   const worker = await readFile(new URL("../src/upstream-discio-worker.js", import.meta.url), "utf8");
-  assert.match(worker, /const WGPU_VSYNC_LATE_MS = 25;/);
-  assert.match(worker, /\} else if \(performance\.now\(\) - wgpuVsyncLastTickAt > WGPU_VSYNC_LATE_MS\) \{\n(?: {4}\/\/[^\n]*\n)+ {4}wgpuPresentVsyncStats\.byLate \+= 1;\n {4}presentWgpuVsyncFrame\(\{ newest: true \}\);/);
-  assert.match(worker, /const wgpuPresentVsyncStats = \{ byTimer: 0, byLate: 0, streamed: 0 \};/);
+  // late: 1.5 x the median tick interval (any refresh rate), floor 12 ms
+  assert.match(worker, /return Math\.max\(WGPU_VSYNC_LATE_FLOOR_MS, 1\.5 \* sorted\[n >> 1\]\);/);
+  assert.match(worker, /\} else if \(sinceTick > wgpuVsyncLateMs\(\)\) \{\n(?: {6}\/\/[^\n]*\n)+ {6}wgpuPresentVsyncStats\.byLate \+= 1;\n {6}presentWgpuVsyncFrame\(\{ newest: true \}\);/);
+  // no BeginFrame for 50 ms (hidden tab): no local copy, the timer shows the newest
+  assert.match(worker, /if \(sinceTick >= WGPU_VSYNC_FALLBACK_MS\) \{\n(?: {6}\/\/[^\n]*\n)+ {6}wgpuPresentVsyncStats\.byLateHidden \+= 1;\n {4}\}/);
+  assert.match(worker, /wgpuPresentVsyncStats\.byTimer \+= 1;\n {4}presentWgpuVsyncFrame\(\{ newest: true \}\);/);
+  assert.match(worker, /const wgpuPresentVsyncStats = \{ byTimer: 0, byLate: 0, byLateHidden: 0, streamed: 0 \};/);
 });

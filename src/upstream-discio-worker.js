@@ -12784,11 +12784,21 @@ function recordBoundedHistogram(values, bounds, value) {
 // free of the local display's BeginFrames, catch-up drops and timer fallback.
 let wgpuPresentVsync = false;
 const WGPU_VSYNC_FALLBACK_MS = 50;
-// A frame queued while the presenter's rAF is late by more than this (the
-// worker busy in a long task, as compiles at boot) is shown at once instead
-// of waiting for a BeginFrame the busy worker cannot run: held there it
-// stayed 3 vsyncs or more (drop-meter, review of #265). 1.5 vsync at 60 Hz.
-const WGPU_VSYNC_LATE_MS = 25;
+// A frame queued while the presenter's rAF is late (the worker busy in a
+// long task, as compiles at boot) is shown at once instead of waiting for a
+// BeginFrame the busy worker cannot run: held there it stayed 3 vsyncs or
+// more (drop-meter, review of #265). Late: 1.5 x the median interval of the
+// last ticks (any refresh rate), at least WGPU_VSYNC_LATE_FLOOR_MS; 25 ms
+// (1.5 vsync at 60 Hz) before there are ticks to measure.
+const WGPU_VSYNC_LATE_FLOOR_MS = 12;
+const wgpuVsyncTickGaps = new Float64Array(16);
+let wgpuVsyncTickGapCount = 0;
+function wgpuVsyncLateMs() {
+  const n = Math.min(wgpuVsyncTickGapCount, wgpuVsyncTickGaps.length);
+  if (n < 4) return 25;
+  const sorted = Array.from(wgpuVsyncTickGaps.subarray(0, n)).sort((a, b) => a - b);
+  return Math.max(WGPU_VSYNC_LATE_FLOOR_MS, 1.5 * sorted[n >> 1]);
+}
 // Pool and queue, one texture per frame (src/wgpu-vsync-queue.js).
 const wgpuVsync = createVsyncQueue({
   queueSize: 2,
@@ -12823,7 +12833,7 @@ let wgpuVsyncFrameTime = null;
 let wgpuVsyncFallback = null;
 // The device the display canvas was configured on with COPY_DST (null: not yet).
 let wgpuVsyncCanvasDevice = null;
-const wgpuPresentVsyncStats = { byTimer: 0, byLate: 0, streamed: 0 };
+const wgpuPresentVsyncStats = { byTimer: 0, byLate: 0, byLateHidden: 0, streamed: 0 };
 // v3: the stream's own canvas, sized like the frames and configured on the
 // current device (made again when either changes).
 let wgpuVsyncStreamCanvas = null;
@@ -12883,7 +12893,9 @@ function queueWgpuVsyncFrame(coreFrame, shownVi, stream) {
     wgpuVsyncLoop = true;
     wgpuVsyncLastTickAt = performance.now();
     const tick = (frameTime) => {
-      wgpuVsyncLastTickAt = performance.now();
+      const now = performance.now();
+      wgpuVsyncTickGaps[wgpuVsyncTickGapCount++ % wgpuVsyncTickGaps.length] = now - wgpuVsyncLastTickAt;
+      wgpuVsyncLastTickAt = now;
       wgpuVsyncTick += 1;
       wgpuVsyncFrameTime = performance.timeOrigin + frameTime;
       let shown = false;
@@ -12900,11 +12912,19 @@ function queueWgpuVsyncFrame(coreFrame, shownVi, stream) {
       self.requestAnimationFrame(tick);
     };
     self.requestAnimationFrame(tick);
-  } else if (performance.now() - wgpuVsyncLastTickAt > WGPU_VSYNC_LATE_MS) {
-    // The rAF is late or silent (busy worker, a headless rAF that stops for
-    // seconds): no BeginFrame to wait for, the newest frame now.
-    wgpuPresentVsyncStats.byLate += 1;
-    presentWgpuVsyncFrame({ newest: true });
+  } else {
+    const sinceTick = performance.now() - wgpuVsyncLastTickAt;
+    if (sinceTick >= WGPU_VSYNC_FALLBACK_MS) {
+      // No BeginFrame for 50 ms or more (a hidden tab, a rAF silent for
+      // seconds): no local copy per frame, the stream has it already (v3);
+      // the fallback timer shows the newest one every 50 ms.
+      wgpuPresentVsyncStats.byLateHidden += 1;
+    } else if (sinceTick > wgpuVsyncLateMs()) {
+      // The rAF is late (busy worker): no BeginFrame to wait for, the
+      // newest frame now.
+      wgpuPresentVsyncStats.byLate += 1;
+      presentWgpuVsyncFrame({ newest: true });
+    }
   }
   wgpuVsyncFallback ??= setTimeout(wgpuVsyncFallbackCheck, WGPU_VSYNC_FALLBACK_MS);
   return true;
@@ -12921,7 +12941,7 @@ function wgpuVsyncFallbackCheck() {
   if (!wgpuVsync.waiting) return;
   if (performance.now() - wgpuVsyncLastTickAt >= WGPU_VSYNC_FALLBACK_MS) {
     wgpuPresentVsyncStats.byTimer += 1;
-    presentWgpuVsyncFrame();
+    presentWgpuVsyncFrame({ newest: true });
   }
   if (wgpuVsync.waiting) wgpuVsyncFallback = setTimeout(wgpuVsyncFallbackCheck, WGPU_VSYNC_FALLBACK_MS);
 }
