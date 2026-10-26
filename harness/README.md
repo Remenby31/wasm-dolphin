@@ -328,6 +328,13 @@ node harness/probes/drop-meter.mjs --iso ../roms/<disc>.iso --port 8113 --runs 6
 node harness/probes/drop-meter.mjs --iso ../roms/<disc>.iso --port 8113 --runs 3 --baseline origin/main --noise <A/A dir>/summary.json
 # nightly on main, with its history (JSONL + table)
 node harness/probes/drop-meter.mjs --iso ../roms/<disc>.iso --port 8113 --runs 3 --trend ../measures/drops/trend.jsonl
+# Known blind spots (review of #261): a single 50 ms stall at the race load
+# on a COLD visit reads 34-50 ms against a 45 ms threshold there (noisier
+# phase); repeated stalls under 25 ms each stay under the per-phase floors
+# (the reported pctBelow95 per phase shows them, not gating). stallMs is
+# the larger of the VI reading and the sampler's (50 ms rows), so a stall
+# inside a long VI gap still counts; hitch counts never get an sd under
+# Poisson's (sqrt(mean + 0.5)).
 # the guard's false-positive rate from runs of one tree (A against A draws)
 node harness/probes/drop-meter.mjs --false-positives <A/A dir>:candidate --noise <A/A dir>/summary.json
 # again from the raw data, e.g. against a native reference (game frames per guest second)

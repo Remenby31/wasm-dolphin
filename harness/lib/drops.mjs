@@ -291,7 +291,25 @@ export function stallMsOf(vi, tps) {
   return ms;
 }
 
-export function dropSummary({ windows, presents = [], vi = [], tps = null }) {
+// The same quantity from the drop sampler's ticks (every 50 ms on the
+// worker, independent of the VI outputs): a stall inside a long VI gap (the
+// game blanking the VI, or a change that emits fewer VI entries) still
+// shows. Over each row interval where the guest advanced less than half the
+// host time: host minus guest.
+export function stallMsOfRows(rows, tps) {
+  if (!(tps > 0)) return null;
+  let ms = 0, seen = false;
+  for (let i = 1; i < rows.length; i += 1) {
+    const a = rows[i - 1], b = rows[i];
+    if (a.ticks == null || b.ticks == null) continue;
+    seen = true;
+    const host = b.t - a.t, guest = ((b.ticks - a.ticks) / tps) * 1000;
+    if (guest < host / 2) ms += host - guest;
+  }
+  return seen ? ms : null;
+}
+
+export function dropSummary({ windows, presents = [], vi = [], tps = null, rows = [] }) {
   const sl = slidingSpeed(windows);
   const below = (x) => (sl.length ? round((100 * sl.filter((s) => s.speed < x).length) / sl.length, 2) : null);
   const pg = gapsOf(presents), vg = gapsOf(vi);
@@ -304,7 +322,10 @@ export function dropSummary({ windows, presents = [], vi = [], tps = null }) {
   return {
     hostSec: round(host / 1000, 1),
     // net host ms not matched by guest time (catch-up counted)
-    lostMs: round(lost, 0), dropLostMs: round(dropLost, 0), stallMs: round(stallMsOf(vi, tps), 0),
+    lostMs: round(lost, 0), dropLostMs: round(dropLost, 0),
+    // the larger of the two readings: VI intervals, sampler rows
+    stallMs: round(Math.max(stallMsOf(vi, tps) ?? 0, stallMsOfRows(rows, tps) ?? 0), 0),
+    stallViMs: round(stallMsOf(vi, tps), 0), stallRowsMs: round(stallMsOfRows(rows, tps), 0),
     pctBelow95: below(95), pctBelow90: below(90),
     worstSecond: sl.length ? round(Math.min(...sl.map((s) => s.speed)), 1) : null,
     hitches50: pg.filter((g) => g > HITCH_MS[0]).length, hitches100: pg.filter((g) => g > HITCH_MS[1]).length,
@@ -316,7 +337,7 @@ export function dropSummary({ windows, presents = [], vi = [], tps = null }) {
 }
 
 // Per labelled phase of the scenario: the same summary over its windows.
-export function phaseSummaries({ windows, presents = [], vi = [], tps = null }) {
+export function phaseSummaries({ windows, presents = [], vi = [], tps = null, rows = [] }) {
   const labels = [...new Set(windows.map((w) => w.label))];
   return labels.map((label) => {
     const ws = windows.filter((w) => w.label === label);
@@ -325,7 +346,9 @@ export function phaseSummaries({ windows, presents = [], vi = [], tps = null }) 
     // the VI entry just before the phase too: its first interval counts
     const first = vi.findIndex(inside);
     const phaseVi = first > 0 ? vi.slice(first - 1).filter((e, i) => i === 0 || inside(e)) : vi.filter(inside);
-    return { label, ...dropSummary({ windows: ws, presents: presents.filter(inside), vi: phaseVi, tps }) };
+    const r0 = rows.findIndex(inside);
+    const phaseRows = r0 > 0 ? rows.slice(r0 - 1).filter((e, i) => i === 0 || inside(e)) : rows.filter(inside);
+    return { label, ...dropSummary({ windows: ws, presents: presents.filter(inside), vi: phaseVi, tps, rows: phaseRows }) };
   });
 }
 
@@ -367,6 +390,7 @@ export const PHASE_PRIMARY = { stallMs: "up", hitches50: "up" };
 export const REPORTED = { lostMs: "up", dropLostMs: "up", pctBelow95: "up", pctBelow90: "up", hitches50: "up", presentP99: "up", loadExcessMs: "up" };
 export const GUARDED = { ...VISIT_PRIMARY, ...REPORTED };
 export const VERDICT_MIN_RUNS = 3;
+export const COUNTS = new Set(["hitches50", "hitches100"]);
 // A median of n runs varies ~1.25x more than a mean.
 export const MEDIAN_SE = 1.25;
 // Student's t, two-sided 1 % (0.995), by degrees of freedom: the A/A's sd is
@@ -397,7 +421,10 @@ export function verdictOf(baseline, candidate, { noise = null, floor = VERDICT_F
     }
     const delta = median(c) - median(b);
     const fromAa = noise?.[k]?.stdev != null && noise[k].n > 1;
-    const sd = fromAa ? noise[k].stdev : Math.sqrt(((stdev(b) ?? 0) ** 2 + (stdev(c) ?? 0) ** 2) / 2);
+    let sd = fromAa ? noise[k].stdev : Math.sqrt(((stdev(b) ?? 0) ** 2 + (stdev(c) ?? 0) ** 2) / 2);
+    // A count (hitches) varies at least as a Poisson count: an A/A that saw
+    // the same count six times says sd 0, not that a gap cannot come and go.
+    if (COUNTS.has(k)) sd = Math.max(sd, Math.sqrt((fromAa ? noise[k].mean ?? noise[k].median ?? 0 : median(b)) + 0.5));
     const t = tQuantile(fromAa ? noise[k].n - 1 : b.length + c.length - 2);
     const threshold = Math.max(t * MEDIAN_SE * sd * Math.sqrt(2 / n), floor[k] ?? 0);
     const worseBy = worse === "up" ? delta : -delta;

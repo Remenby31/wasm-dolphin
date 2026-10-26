@@ -190,8 +190,8 @@ test("a 50 ms stall made up afterwards: stallMs shows it at any offset of the gr
     assert.ok(s.stallMs >= 45 && s.stallMs <= 70, `at ${at}: stallMs ${s.stallMs}`);
   }
   const phase = (x) => ({ summary: { hitches100: 0, worstSecond: 99 }, phases: [{ label: "race-load", ...x }] });
-  const base = [0, 2, 1].map((d) => phase({ stallMs: d, hitches50: 3 }));
-  const cand = [50, 52, 49].map((d) => phase({ stallMs: d, hitches50: 4 }));
+  const base = [0, 2, 1].map((d) => phase({ stallMs: d, hitches50: 0 }));
+  const cand = [50, 52, 49].map((d) => phase({ stallMs: d, hitches50: 6 }));
   const v = visitVerdict(base, cand, { run: null, phases: { "race-load": { stallMs: { n: 6, stdev: 2 }, hitches50: { n: 6, stdev: 0 } } } });
   assert.equal(v.regression, true);
   assert.deepEqual(v.regressions.map((r) => r.metric).sort(), ["hitches50", "stallMs"]);
@@ -210,6 +210,28 @@ test("the false-positive rate on identical runs stays low; a real shift is found
   const fp = falsePositiveRate(same, { visits: 1, draws: 300, random });
   assert.ok(fp.singleBatch < 0.1, `single ${fp.singleBatch}`);
   assert.ok(fp.confirmed <= fp.singleBatch);
+});
+
+// Follow-up of #261's review: a stall inside a long VI gap (no VI entry to
+// measure it) still shows through the sampler's ticks.
+test("stallMs reads the sampler's ticks too: a stall in a VI gap is not missed", () => {
+  const vi = [{ t: 0, ticks: 0 }, { t: 1000, ticks: TPS * 0.95 }]; // one long VI gap, 50 ms lost inside
+  const rows = [];
+  for (let t = 0, g = 0; t <= 1000; t += 50) {
+    rows.push({ t, lagMs: 0, ticks: g });
+    g += t >= 400 && t < 450 ? 0 : TPS * 0.05; // 50 ms of guest time per row, none in the stall
+  }
+  const s = dropSummary({ windows: [], vi, tps: TPS, rows });
+  assert.ok(s.stallRowsMs >= 45 && s.stallRowsMs <= 55, `rows ${s.stallRowsMs}`);
+  assert.ok(s.stallMs >= s.stallRowsMs);
+});
+
+test("hitch counts never get an sd under Poisson's: an A/A that always saw 3 is not certainty", () => {
+  const b = [{ hitches50: 3 }, { hitches50: 3 }, { hitches50: 3 }], c = [{ hitches50: 5 }, { hitches50: 5 }, { hitches50: 5 }];
+  const v = verdictOf(b, c, { metrics: { hitches50: "up" }, noise: { hitches50: { n: 6, stdev: 0, mean: 3, median: 3 } }, floor: PHASE_FLOOR });
+  assert.equal(v.regression, false, "two more gaps where 3 come and go");
+  const big = verdictOf(b, [{ hitches50: 14 }, { hitches50: 15 }, { hitches50: 14 }], { metrics: { hitches50: "up" }, noise: { hitches50: { n: 6, stdev: 0, mean: 3, median: 3 } }, floor: PHASE_FLOOR });
+  assert.equal(big.regression, true);
 });
 
 test("t quantiles: a small A/A widens the threshold", () => {

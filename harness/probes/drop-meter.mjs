@@ -251,7 +251,7 @@ export function analyzeVisit(raw, { native = null } = {}) {
   const presents = timeline.presents.filter(span), vi = timeline.vi.filter(span);
   const events = dropEvents(windows);
   const loads = loadSegments(windows).map((l) => (native && l.guestStart != null ? { ...l, nativeFps: nativeFps(native, l.guestStart, l.guestStart + l.guestMs / 1000) } : l));
-  const phases = phaseSummaries({ windows, presents, vi, tps: raw.tps });
+  const phases = phaseSummaries({ windows, presents, vi, tps: raw.tps, rows });
   if (native) for (const p of phases) {
     const ws = windows.filter((w) => w.label === p.label && w.guestStart != null);
     p.nativeFps = ws.length ? nativeFps(native, ws[0].guestStart, ws.at(-1).guestStart + 0.1) : null;
@@ -268,7 +268,7 @@ export function analyzeVisit(raw, { native = null } = {}) {
     timelineComplete: timeline.complete, sampled: rows.length > 0, browser: raw.browser ?? null, bootMs: raw.bootMs, pc: raw.pc ?? null,
     load1: { median: round(median(loadAvg), 2), max: round(Math.max(...loadAvg), 2) },
     regionsDone, rssPeakMB: rss.length ? Math.max(...rss) : null,
-    summary: { ...dropSummary({ windows, presents, vi, tps: raw.tps }), loads: loads.length, loadExcessMs: loads.reduce((a, l) => a + l.excessMs, 0), rssPeakMB: rss.length ? Math.max(...rss) : null, regionsDoneMs: regionsDone?.hostMsFromLaunch ?? null },
+    summary: { ...dropSummary({ windows, presents, vi, tps: raw.tps, rows: rows.filter(span) }), loads: loads.length, loadExcessMs: loads.reduce((a, l) => a + l.excessMs, 0), rssPeakMB: rss.length ? Math.max(...rss) : null, regionsDoneMs: regionsDone?.hostMsFromLaunch ?? null },
     phases, loads, worst: worstDrops(events), drops: events.length,
     // the 100 ms timeline, compact: [ms from start, speed %, VI/s, presents, max present gap, lost ms, top cause]
     timeline: windows.map((w) => {
