@@ -333,6 +333,11 @@ node harness/probes/drop-meter.mjs --iso ../roms/<disc>.iso --port 8113 --runs 3
 # excess and intervals of 3 vsyncs or more; per visit: gaps over 100 ms and
 # the worst second) instead of the presentation timeline, which a change to
 # the presentation itself biases (present-vsync). Its A/A must be --display.
+# --state scene.sav --state-delay-ms N: the savestate loads no earlier than
+# N ms after the browser's launch (0, the default: as soon as the core runs,
+# ~2 s; a first launch's region translation is then barely started, while
+# at ~4.5 s about 50 regions are in). Recorded in the summary; the --noise
+# A/A must have the same delay (an older summary counts as 0).
 # The --noise A/A must have run on the core of the base measured (the
 # summary records each side's core): another core gives no verdict (exit 3),
 # --noise-stale-ok for a study. Redo the A/A when main publishes a core.
