@@ -5,7 +5,7 @@ import assert from "node:assert/strict";
 import { readFile } from "node:fs/promises";
 import test from "node:test";
 
-import { causeOf, displaySummaryOf, PHASE_FLOOR, PHASE_PRIMARY, stallMsOfRows, tQuantile, dropEvents, dropSummary, interpolate, loadSegments, noiseOf, rowsOf, stallOverlap, trendLine, trendTable, verdictOf, visitVerdict, windowsOf } from "../harness/lib/drops.mjs";
+import { beginFrameGaps, causeOf, displaySummaryOf, PHASE_FLOOR, PHASE_PRIMARY, stallMsOfRows, tQuantile, dropEvents, dropSummary, interpolate, loadSegments, noiseOf, rowsOf, stallOverlap, trendLine, trendTable, verdictOf, visitVerdict, windowsOf } from "../harness/lib/drops.mjs";
 import { coreOf, exitCodeOf, falsePositiveRate, noiseCoreOf, markersOnVi, noVerdictReasons, regressionKeys, runFiles, stepsFor, validateScenario } from "../harness/probes/drop-meter.mjs";
 import { createDropSampler, histogramSum } from "../src/harness-drop-sampler.js";
 
@@ -344,6 +344,69 @@ test("a cadence halved with the core at 100 %: images per guest second regress",
   const phase = (x) => ({ summary: { hitches100: 0, worstSecond: 99 }, phases: [{ label: "race", stallMs: 0, presentExcessMs: 0, hitches50: 0, ...x }] });
   const v = visitVerdict([60, 60, 60].map((n) => phase({ presentsPerGuestSec: n })), [30, 30, 30].map((n) => phase({ presentsPerGuestSec: n })));
   assert.deepEqual(v.regressions.map((r) => r.metric), ["presentsPerGuestSec"]);
+});
+
+// Review of #270: guest time advancing in coarse steps (33 ms jumps), or a
+// sustained 50 % speed, is no stall; at 30 images/s a 2-vsync interval is
+// the cadence, not a repeat.
+test("coarse guest steps and sustained slowness read no stall; repeats are relative to the cadence", () => {
+  // guest time in quanta of q ms of host time (VI-paced steps), at 100 %; and 50 % sustained
+  const quanta = (q) => (t) => Math.floor(t / q) * q;
+  for (const [name, guestAt] of [["33 ms steps", quanta(1000 / 30)], ["66 ms steps", quanta(2000 / 30)], ["50 % for 4 s", (t) => t / 2]]) {
+    const rows = [];
+    for (let t = 0; t <= 4000; t += 50) rows.push({ t, lagMs: 0, ticks: (guestAt(t) * TPS) / 1000 });
+    assert.ok(stallMsOfRows(rows, TPS) < 30, `${name}: ${stallMsOfRows(rows, TPS)}`);
+  }
+  const displayed = [];
+  for (let i = 0, t = 0, vi = 0; i < 600; i += 1, t += 1000 / 60) displayed.push({ t, submits: i % 2 ? 0 : 1, vi: i % 2 ? vi : ++vi }); // 30 images/s
+  assert.equal(displaySummaryOf(displayed).displayRepeats3, 0);
+});
+
+// Review of #271: low rows that are contiguous are a stall, whatever the
+// share: a 500 ms stall in a long VI gap, a 50 ms one in a phase at 70 %.
+test("contiguous low rows are a stall: 500 ms at 100 %, 50 ms at 70 %", () => {
+  for (const [name, speed, from, to, expect] of [["500 ms at 100 %", 1, 1000, 1500, 500], ["50 ms at 70 %", 0.7, 1000, 1050, 35]]) {
+    const rows = [];
+    let g = 0;
+    for (let t = 0; t <= 3000; t += 50) {
+      rows.push({ t, lagMs: 0, ticks: g });
+      const lost = Math.max(0, Math.min(t + 50, to) - Math.max(t, from));
+      g += TPS * speed * (50 - lost) / 1000;
+    }
+    const ms = stallMsOfRows(rows, TPS);
+    assert.ok(ms >= 0.9 * expect && ms <= 1.1 * (to - from), `${name}: ${ms}`);
+  }
+});
+
+// The A/A --display of main had one run with a 4.4 s BeginFrame gap: the
+// phase's sd went from ~10 to 1773 ms. Robust noise: that run is counted as
+// an outlier, the threshold stays that of the others.
+test("robust A/A noise: one far-off run is reported, it does not widen the threshold", () => {
+  // 6 runs: the outlier is counted, not left out (a 6-run MAD is noisy)
+  const six = noiseOf([0, 17, 0, 17, 4350, 0].map((v) => ({ displayExcessMs: v })));
+  assert.equal(six.displayExcessMs.outliers, 1);
+  assert.equal(six.displayExcessMs.trimmedSd, undefined);
+  // 10 runs: left out of the threshold's sd, df = runs kept - 1
+  const n = noiseOf([0, 17, 0, 17, 4350, 0, 9, 3, 12, 5].map((v) => ({ displayExcessMs: v })));
+  assert.equal(n.displayExcessMs.outliers, 1);
+  assert.equal(n.displayExcessMs.keptN, 9);
+  assert.ok(n.displayExcessMs.trimmedSd < 30 && n.displayExcessMs.stdev > 1000);
+  // mostly 0 with a few 20 ms readings: that is the spread, no outlier
+  const z = noiseOf([0, 22, 0, 18, 0, 27, 0, 0, 21, 0].map((v) => ({ stallMs: v })));
+  assert.equal(z.stallMs.outliers, 0);
+  assert.equal(z.stallMs.trimmedSd, undefined);
+  const b = [{ displayExcessMs: 0 }, { displayExcessMs: 10 }, { displayExcessMs: 5 }], c = [{ displayExcessMs: 300 }, { displayExcessMs: 320 }, { displayExcessMs: 310 }];
+  assert.equal(verdictOf(b, c, { metrics: { displayExcessMs: "up" }, noise: n, floor: PHASE_FLOOR }).regression, true);
+  assert.equal(verdictOf(b, c, { metrics: { displayExcessMs: "up" }, noise: six, floor: PHASE_FLOOR }).regression, false, "with 6 runs the outlier's sd stays: no verdict through it");
+});
+
+test("BeginFrame gaps: the worker's rAF and the page's, apart", () => {
+  const displayed = [{ t: 0, submits: 1, vi: 1 }, { t: 16, submits: 1, vi: 2 }, { t: 4400, submits: 263, vi: 265 }];
+  const page = [];
+  for (let t = 0, r = 0; t <= 4400; t += 50) page.push({ t, lagMs: 0, rafs: (r += 3) }); // the page's rAF kept going
+  assert.deepEqual(beginFrameGaps(displayed, page), { workerBeginFrameGapMs: 4384, pageBeginFrameGapMs: 0 });
+  const stopped = page.map((r) => (r.t > 1000 && r.t < 3000 ? { ...r, rafs: 60 } : r)).map((r, i, a) => ({ ...r, rafs: r.t >= 3000 ? 60 + i : r.rafs }));
+  assert.ok(beginFrameGaps(displayed, stopped).pageBeginFrameGapMs >= 1900);
 });
 
 test("hitch counts never get an sd under Poisson's: an A/A that always saw 3 is not certainty", () => {

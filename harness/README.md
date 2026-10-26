@@ -352,6 +352,14 @@ node harness/probes/drop-meter.mjs --iso ../roms/<disc>.iso --port 8113 --runs 3
 # comparison before its first run (exit 3). Hitch counts never get an sd under Poisson's (sqrt(mean + 0.5)),
 # judged at the normal 99.5 % quantile then. Measured on 12 runs of one tree
 # (independent A/A noise): 0.0 % of batches flag a regression (3000 draws).
+# Outlier runs of the A/A (beyond 5 robust sds, MAD not 0) are counted in
+# the summary (outliers); they are left out of the threshold's sd only with
+# an A/A of 10 runs or more (degrees of freedom of the runs kept): from 6
+# runs the MAD is too noisy. The summary records the probe's version
+# (PROBE_VERSION, what it runs in the page and worker); --noise must match.
+# beginFrameGaps: the longest gap without a BeginFrame, the worker's rAF
+# (--display) and the page's (always), reported: headless, the worker's rAF
+# sometimes stops 1-4 s while presents go on.
 # the guard's false-positive rate from runs of one tree (A against A draws)
 node harness/probes/drop-meter.mjs --false-positives <A/A dir>:candidate --noise <A/A dir>/summary.json
 # again from the raw data, e.g. against a native reference (game frames per guest second)
