@@ -494,7 +494,16 @@ function harnessRegionSleepStats() {
     new Uint32Array(m.HEAPU8.buffer, p, 4).fill(0);
     m._DolphinWeb_AotRegionSleepInstalls(p);
     const w = new Uint32Array(m.HEAPU8.buffer, p, 4);
-    return { installs: w[0], ms: w[1] / 100, overshootMaxMs: w[2] / 100, waitExpired: w[3] };
+    const stats = { installs: w[0], ms: w[1] / 100, overshootMaxMs: w[2] / 100, waitExpired: w[3] };
+    // Patch 0170: installs forced at a slice boundary while the thread was
+    // behind (no sleep window long enough), and the worst slice that did one.
+    if (m._DolphinWeb_AotRegionForcedInstalls) {
+      w.fill(0);
+      m._DolphinWeb_AotRegionForcedInstalls(p);
+      stats.forcedInstalls = w[0];
+      stats.forcedMaxSliceMs = w[1] / 100;
+    }
+    return stats;
   } finally {
     m._free?.(p);
   }

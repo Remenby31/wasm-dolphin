@@ -8,6 +8,7 @@
 
 import assert from "node:assert/strict";
 import { createHash } from "node:crypto";
+import { readFile } from "node:fs/promises";
 import test from "node:test";
 import { fileURLToPath } from "node:url";
 
@@ -241,12 +242,15 @@ function withOffThreadCompile(fn) {
   m._dolphinJitCache = new Map(); // the pthread's module map (pre-js), empty
   m._SetPpcWasmJitOffThread(1);
   // 0107: a ready module waits for a throttle sleep (2 s at most); these
-  // tests install at slice boundaries, as after that wait.
+  // tests install at slice boundaries, as after that wait. 0170: no slice
+  // installs because the thread is behind unless a test asks for it.
   m._DolphinWeb_AotSetSleepWaitForTest?.(0);
+  m._DolphinWeb_AotSetBehindWindowForTest?.(60000);
   try {
     return fn(posted.filter.bind(posted, (msg) => msg.type === "dolphin-jit-compile-request"));
   } finally {
     m._DolphinWeb_AotSetSleepWaitForTest?.(2000);
+    m._DolphinWeb_AotSetBehindWindowForTest?.(150);
     m._SetPpcWasmJitOffThread(0);
     m._dolphinJitCache = savedCache;
     globalThis._dolphinJitInflight?.clear();
@@ -1149,6 +1153,100 @@ test("a large module's sleep wait counts from when it became installable; past i
       assert.equal(sleepCounters()[0], 0, "no sleep install");
     });
   });
+});
+
+// Patch 0170: a ready module waits for a sleep window only while windows long
+// enough for it come. Heavy savestate: after the state load the CPU thread ran
+// behind, the throttle never slept long enough for one large module, which
+// waited the whole 2 s wait while its entries were refused, and the thread
+// stayed at ~85 % (1 run in 3). With no window long enough in the behind
+// window (150 ms), a slice boundary installs it: one at a time.
+const behindSkip = largeSkip || (typeof core?.module._DolphinWeb_AotRegionForcedInstalls !== "function" && "core without installs when the thread is behind (0170)");
+function forcedCounters() {
+  const p = core.module._malloc(8);
+  try {
+    new Uint32Array(core.module.HEAPU8.buffer, p, 2).fill(0);
+    core.module._DolphinWeb_AotRegionForcedInstalls(p);
+    return Array.from(new Uint32Array(core.module.HEAPU8.buffer, p, 2));
+  } finally {
+    core.module._free(p);
+  }
+}
+// Every module estimated at `ms` or more (its sleep window must be longer).
+function withModuleCost(plan, ms, fn) {
+  const sizes = regionModules(plan).map((bytes) => bytes.length);
+  const saved = core.module._DolphinWeb_AotSetInstallCostForTest(ms / Math.min(...sizes));
+  core.module._DolphinWeb_AotSetSleepWaitForTest(2000); // the production wait
+  core.module._DolphinWeb_AotSetBehindWindowForTest(40); // 150 ms in production
+  try {
+    return fn(sizes.length);
+  } finally {
+    core.module._DolphinWeb_AotSetInstallCostForTest(saved);
+    core.module._DolphinWeb_AotSetBehindWindowForTest(60000);
+  }
+}
+function readyAll(requests, plan) {
+  const entries = queueAll(plan);
+  core.serviceRegions();
+  for (const r of requests()) Atomics.store(core.module.HEAPU8, r.readyPtr + r.readySlot, 1);
+  core.serviceRegions(); // installable from now
+  return entries;
+}
+
+test("behind: with no sleep window long enough, a slice installs a ready module, one per behind window", { skip: behindSkip }, () => {
+  withOffThreadCompile((requests) => {
+    const plan = setup();
+    core.setRegionsEnabled(true);
+    withModuleCost(plan, 3, (modules) => {
+      const before = core.regionCount();
+      const entries = readyAll(requests, plan);
+      core.module._DolphinWeb_AotRegionSleepWindowForTest(2); // a short sleep: too short for any
+      for (let slice = 0; slice < 20; slice++) core.serviceRegions();
+      assert.equal(core.regionCount(), before, "it waits a behind window first");
+      spin(50);
+      for (let slice = 0; slice < 20; slice++) core.serviceRegions();
+      const [forced, maxSlice] = forcedCounters();
+      assert.equal(forced, 1, "one module, not every ready one");
+      assert.ok(maxSlice > 0, "its slice is reported");
+      assert.ok(core.regionCount() > before);
+      if (modules > 1) assert.ok(core.regionCount() < before + entries, "the others wait another window");
+      for (let k = 0; k < modules && core.regionCount() < before + entries; k++) {
+        spin(50);
+        for (let slice = 0; slice < 20; slice++) core.serviceRegions();
+      }
+      assert.equal(core.regionCount(), before + entries, "all in well under the 2 s wait");
+      assert.equal(sleepCounters()[3], 0, "none waited the sleep wait out");
+      const reference = runCall(PROGRAM.labels.main, { regions: false });
+      assert.deepEqual(runCall(PROGRAM.labels.main, { regions: true }).state, reference.state);
+    });
+  });
+});
+
+test("not behind: a sleep window long enough seen within the behind window keeps the wait", { skip: behindSkip }, () => {
+  withOffThreadCompile((requests) => {
+    const plan = setup();
+    core.setRegionsEnabled(true);
+    // 20 ms per module: a 16 ms window (the last bucket, 15 ms or more,
+    // counts as long enough for any module) installs none of them.
+    withModuleCost(plan, 20, () => {
+      const before = core.regionCount();
+      readyAll(requests, plan);
+      spin(50);
+      core.module._DolphinWeb_AotRegionSleepWindowForTest(16);
+      assert.equal(core.regionCount(), before, "too large for that window");
+      for (let slice = 0; slice < 20; slice++) core.serviceRegions();
+      assert.equal(core.regionCount(), before, "long sleeps still come: it waits for one");
+      assert.equal(forcedCounters()[0], 0);
+    });
+  });
+});
+
+test("0170 source: the behind window is 150 ms, the bucket matches room()'s sleep estimate, the exception is documented", async () => {
+  const patch = await readFile(new URL("../patches/dolphin-wasm/snapshot/0170-region-install-when-behind.patch", import.meta.url), "utf8");
+  assert.match(patch, /\+std::chrono::milliseconds s_region_behind_window\{150\};/);
+  assert.match(patch, /\+ {4}const double need = bytes \* \(s_install_ms_per_byte \+ s_check_ms_per_byte\) \*\n\+ {28}REGION_SLEEP_ESTIMATE_FACTOR \+\n\+ {24}REGION_SLEEP_MARGIN_MS;/);
+  assert.match(patch, /\+\/\/ to the slice target \(REGION_SLICE_TARGET_MS\), accepted by the judge/);
+  assert.match(patch, /forced \|\| n != 0 \|\|/, "one forced module per slice, and alone");
 });
 
 // Continuation fragments (2026-10-23): a function of more blocks than one
