@@ -687,6 +687,17 @@ test("0167 times the CPU thread's block compiles behind a flag the sampler sets"
   assert.match(w, /const createdAt = dropSampler\?\.running && !prewarmed \? performance\.now\(\) : 0;/);
 });
 
+// --baseline-query: one tree, a switch on the candidate side only (as
+// race-perf's); the noise is the A/A of the baseline's query.
+test("--baseline-query: the baseline side boots with it, the noise is checked against it, a baseline is needed", async () => {
+  const src = await readFile(new URL("../harness/probes/drop-meter.mjs", import.meta.url), "utf8");
+  assert.match(src, /"baseline-query": \{ type: "string" \}/);
+  assert.match(src, /playVisit\(name === "baseline" && o\.baselineQuery \? \{ \.\.\.o, query: o\.baselineQuery \} : o,/);
+  assert.match(src, /readNoise\(values\.noise, \{[^}]*query: o\.baselineQuery \?\? o\.query,/);
+  assert.match(src, /if \(baselineQuery && !values\.baseline\) throw new Error\("--baseline-query needs --baseline"\);/);
+  assert.match(src, /baselineQuery\?\.set\("metrics", "1"\);/, "metrics on both sides");
+});
+
 // --state-delay-ms: when the savestate loads after launch is part of the
 // measure (a load ~2 s into a first launch loses 1.4-2.3 s, ~4.5 s almost
 // nothing): an A/A taken at another delay is another measure. A summary from
