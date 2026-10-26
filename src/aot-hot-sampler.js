@@ -67,8 +67,10 @@ export function startHotSampler({ buffer, pcAddress, periodMs = AOT_SAMPLE_DEFAU
   const worker = createWorker(url);
   URL.revokeObjectURL(url);
   let pending = new Map(); // since the last drain (the local profile's record)
+  const watchers = new Set(); // watch(): counts since a moment (a save state load)
   worker.onmessage = (e) => {
     for (const [pc, n] of e.data) pending.set(pc, (pending.get(pc) ?? 0) + n);
+    for (const w of watchers) for (const [pc, n] of e.data) w.set(pc, (w.get(pc) ?? 0) + n);
   };
   worker.onerror = () => worker.terminate();
   worker.postMessage({ buffer, ctl, pcAddress, periodMs, postMs, frozenMs });
@@ -78,6 +80,12 @@ export function startHotSampler({ buffer, pcAddress, periodMs = AOT_SAMPLE_DEFAU
       const out = [...pending.entries()];
       pending = new Map();
       return out;
+    },
+    // [[pc, hits]] from now on, without taking them from the profile's drain.
+    watch() {
+      const counts = new Map();
+      watchers.add(counts);
+      return { read: () => [...counts.entries()], stop: () => watchers.delete(counts) };
     },
     // The emulation paused or stopped: the worker blocks, without waking.
     pause() {
