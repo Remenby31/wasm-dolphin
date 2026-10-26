@@ -4429,6 +4429,7 @@ async function mountFile(file) {
   aotHotSampler = null;
   aotCoreBooted = false;
   aotRegionsBeforeBoot.length = 0;
+  aotRegionInstaller = null;
   // The previous disc's flow never sees this disc's first image (review of #86).
   for (const resolve of aotFirstImageWaiters.splice(0)) resolve(false);
   aotLayoutSkipped = 0;
@@ -8085,7 +8086,7 @@ export async function prepareAotFirstLaunch(file, {
     return;
   }
   const generation = aotDiscGeneration;
-  const [{ coreAotKeyParts, coreAssembleOptions, coreRegionTranslator, createAotFirstLaunch, serialQueue, discAwareYield, REGION_JSC_FUNCTION_CAP }, { OpfsPlanStore }, { AotProfileStore, blocksFromPcSamples, profileKey }, { planDiscInWorker }, { fileReader, planDisc, planDolFile }, { createProfileRecorder, guestPcAddress, startHotSampler }] =
+  const [{ coreAotKeyParts, coreAssembleOptions, coreRegionTranslator, createAotFirstLaunch, createRegionInstaller, discAwareYield, sharedYield, REGION_JSC_FUNCTION_CAP }, { OpfsPlanStore }, { AotProfileStore, blocksFromPcSamples, profileKey }, { planDiscInWorker }, { fileReader, planDisc, planDolFile }, { createProfileRecorder, guestPcAddress, startHotSampler }] =
     await Promise.all([import("./aot-orchestrator.js"), import("./aot-optimizer.js"), import("./aot-profile.js"), import("./aot-plan-worker.js"), import("./aot-recomp.js"), import("./aot-hot-sampler.js")]);
   const discKey = await readDiscKey();
   if (generation !== aotDiscGeneration) return;
@@ -8122,7 +8123,8 @@ export async function prepareAotFirstLaunch(file, {
     // ~180 ms lost with the worker never stalled).
     openCache: (identity) => openAotCache({
       ...identity, baseUrl: AOT_BASE_URL, cacheStorage,
-      beforeLoad: discAwareYield({ lastReadAt: () => lastDiscReadAt }),
+      // one wait per round of the loader's 8 lanes (sharedYield), not 8
+      beforeLoad: sharedYield(discAwareYield({ lastReadAt: () => lastDiscReadAt })),
       ...aotCacheCompileOptions()
     }),
     planStore: opfs ? new OpfsPlanStore(opfs) : null,
@@ -8155,15 +8157,8 @@ export async function prepareAotFirstLaunch(file, {
       // launch's ~140 cached regions made a single ~210 ms task 0.3-0.5 s
       // into the boot, the CPU thread waiting on the disc meanwhile (drop
       // meter, warm boot).
-      aotRegionQueue ??= serialQueue();
-      aotQueueChain = aotRegionQueue.push(async () => {
-        await keyed.catch(() => {});
-        if (generation !== aotDiscGeneration) return undefined;
-        if (!aotCoreBooted) return queueAotRegionAfterBoot(module, region);
-        const p = await prepareAotRegion(module, region).catch(() => null);
-        if (p && generation === aotDiscGeneration) submitAotRegion(module, p);
-        return undefined;
-      });
+      aotRegionInstaller ??= newAotRegionInstaller(createRegionInstaller);
+      aotQueueChain = aotRegionInstaller.push({ module, region, keyed }, generation);
     },
     retain: (key, mod, bytes) => {
       // After the boot, without a native module cache: not kept (the CPU
@@ -8231,13 +8226,18 @@ export function startAotFirstLaunchAfterBoot(flow = aotFirstLaunch) {
     if (!ready || disc !== aotDiscGeneration) return;
     aotCoreBooted = true;
     const waiting = aotRegionsBeforeBoot.splice(0);
-    aotQueueChain = aotQueueChain.then(async () => {
-      const { yieldToEventLoop } = await import("./aot-orchestrator.js");
-      for (const [module, region] of waiting) {
-        await yieldToEventLoop(); // one region a task, as aotRegionQueue does
-        await queueAotRegion(module, region).catch(() => {});
-      }
-    });
+    // Through the same installer as the cache's (one order, hottest first;
+    // a remount meanwhile drops the rest), else as before.
+    if (aotRegionInstaller) {
+      for (const [module, region] of waiting) aotQueueChain = aotRegionInstaller.push({ module, region }, disc);
+    } else {
+      aotQueueChain = aotQueueChain.then(async () => {
+        for (const [module, region] of waiting) {
+          if (disc !== aotDiscGeneration) return;
+          await queueAotRegion(module, region).catch(() => {});
+        }
+      });
+    }
   });
   if (!flow?.supported) return Promise.resolve();
   const generation = flow.generation;
@@ -8369,8 +8369,24 @@ async function whenCoreRamReady(module, { timeoutMs = 60000, everyMs = 50 } = {}
 }
 const aotRegionsBeforeBoot = [];
 let aotQueueChain = Promise.resolve();
-// The cached regions' queueing, one at a time (serialQueue, aot-orchestrator.js).
-let aotRegionQueue = null;
+// The cached regions' installation, one at a time, submits in order
+// (createRegionInstaller, aot-orchestrator.js).
+let aotRegionInstaller = null;
+function newAotRegionInstaller(createRegionInstaller) {
+  return createRegionInstaller({
+    current: () => aotDiscGeneration,
+    prepare: async ({ module, region, keyed }) => {
+      await keyed?.catch(() => {});
+      if (!aotCoreBooted) {
+        queueAotRegionAfterBoot(module, region);
+        return null;
+      }
+      const r = await prepareAotRegion(module, region, aotFirstLaunch, { deferCompile: true }).catch(() => null);
+      return r && { prepared: { module, p: r.prepared }, pending: r.pending };
+    },
+    submit: ({ module, p }) => submitAotRegion(module, p)
+  });
+}
 function queueAotRegionAfterBoot(module, region) {
   if (aotCoreBooted) return queueAotRegion(module, region).catch(() => {});
   aotRegionsBeforeBoot.push([module, region]);
@@ -8393,7 +8409,10 @@ async function queueAotRegion(module, region, flow = aotFirstLaunch) {
 }
 // The part of queueAotRegion that may run alongside other modules' (heap
 // patch, compile of the patched bytes): what to queue, or null.
-async function prepareAotRegion(module, { key, bytes, entries, members, layout = 0 }, flow = aotFirstLaunch) {
+// deferCompile: a compile of the patched bytes is started, not awaited; the
+// result then carries it as `pending` (resolves true once compiled and kept,
+// false if it failed), and the caller submits only after it.
+async function prepareAotRegion(module, { key, bytes, entries, members, layout = 0 }, flow = aotFirstLaunch, { deferCompile = false } = {}) {
   if (typeof module?._DolphinWeb_AotQueueRegion !== "function" || !bytes?.length || !entries?.length || !members?.length) {
     noteAotRegionLedger(key, entries, "empty");
     return null;
@@ -8415,6 +8434,7 @@ async function prepareAotRegion(module, { key, bytes, entries, members, layout =
   // section, or whose section does not parse, goes with none (0, 0), which
   // the core refuses; the core also checks every site itself.
   let heapBases = [0, 0];
+  let pending = null;
   if (typeof module._DolphinWeb_AotRegionHeapBases === "function") {
     const generation = aotDiscGeneration;
     const { coreHeapBases } = await import("./aot-orchestrator.js");
@@ -8434,19 +8454,22 @@ async function prepareAotRegion(module, { key, bytes, entries, members, layout =
       // thrown away (counted; up to the whole cache when the heap moved).
       aotHeapPatched += 1;
       aotHeapPatchedBytes += bytes.length;
-      const patchedKey = await regionBlockCacheKey(patched);
-      const compiled = await precompileAotRegion(patchedKey, patched);
-      if (!compiled.module) {
+      const compiling = (async () => {
+        const compiled = await precompileAotRegion(await regionBlockCacheKey(patched), patched);
+        if (compiled.module) return true;
         aotHeapPatchFailed += 1;
         noteAotRegionLedger(key, entries, "heap-patch-compile");
-        return null;
-      }
+        return false;
+      })();
       bytes = patched;
+      if (deferCompile) pending = compiling;
+      else if (!(await compiling)) return null;
     }
     if (generation !== aotDiscGeneration) return null; // another disc meanwhile
     if (heap) heapBases = [heap.ramBase, heap.l1Base];
   }
-  return { key, generation: aotDiscGeneration, bytes, entries, members, layout, heapBases };
+  const prepared = { key, generation: aotDiscGeneration, bytes, entries, members, layout, heapBases };
+  return deferCompile ? { prepared, pending } : prepared;
 }
 // Copies a prepared region into the core's heap and queues it (in order).
 function submitAotRegion(module, { key, generation, bytes, entries, members, layout, heapBases }) {

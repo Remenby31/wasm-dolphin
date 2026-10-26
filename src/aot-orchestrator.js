@@ -406,6 +406,40 @@ export function serialQueue({ yieldNow = yieldToEventLoop } = {}) {
   };
 }
 
+// The cached regions' installation (review of #273): each region's
+// synchronous part (heap patch) runs in a task of its own, in order
+// (serialQueue); a compile it may need (bytes patched for this session's
+// heap) starts without being awaited, and the submits follow in the same
+// order on a second chain once their compile is done, so the queue never
+// waits a round trip to the compiler worker per region (~140 when the heap
+// moved). prepare(region) -> null | { prepared, pending?: Promise<bool> };
+// submit(prepared); current(): the disc generation now (a region of another
+// disc is neither prepared nor submitted).
+export function createRegionInstaller({ queue = serialQueue(), prepare, submit, current }) {
+  let submitTail = Promise.resolve();
+  return {
+    push(region, generation = current()) {
+      return queue.push(async () => {
+        if (generation !== current()) return;
+        const p = await prepare(region);
+        if (!p) return;
+        submitTail = submitTail.then(async () => {
+          if (p.pending && !(await p.pending.catch(() => false))) return;
+          if (generation === current()) submit(p.prepared);
+        }).catch(() => {});
+      });
+    },
+    get idle() { return queue.idle.then(() => submitTail); }
+  };
+}
+
+// Several callers of one yield (the cache loader's 8 lanes) share each wait:
+// the budget of a discAwareYield is spent once per round, not 8 times.
+export function sharedYield(yieldFn) {
+  let inflight = null;
+  return () => (inflight ??= yieldFn().finally(() => { inflight = null; }));
+}
+
 export function yieldToEventLoop() {
   if (typeof MessageChannel !== "function") return new Promise((r) => setTimeout(r, 0));
   // A channel per turn, closed once it delivered: a port left open would
