@@ -78,6 +78,7 @@ function createHarness() {
     softwareTevHotCaseMode: 0,
     applyWgpuTailGate: noop,
     wgpuExactCapture: { onLoad: noop },
+    prioritizeAotAfterStateLoad: noop,
     webGpuUboCacheMode: () => 0,
     webGpuUboPackMode: () => 0,
   });

@@ -1900,6 +1900,7 @@ async function handleMessage(type, payload) {
       ppcWasmJitTimingSuspensions += 1;
       try {
         loaded = Boolean(api?.loadState(payload.slot | 0));
+        if (loaded) void prioritizeAotAfterStateLoad();
       } finally {
         resetPpcWasmJitTiming(loaded);
         ppcWasmJitTimingSuspensions -= 1;
@@ -2278,6 +2279,7 @@ async function handleMessage(type, payload) {
       ppcWasmJitTimingSuspensions += 1;
       try {
         rc = api.loadStateFile(path) | 0;
+        if (rc === 1) void prioritizeAotAfterStateLoad();
         // LoadAs runs on the autonomous CPU pthread (RunFrame doesn't
         // step the core) — wait real wall-clock time so the restore
         // actually takes effect before we sample/screenshot.
@@ -8276,6 +8278,59 @@ export function startAotFirstLaunchAfterBoot(flow = aotFirstLaunch) {
   }).catch(() => {}).then(() => {
     if (aotFirstLaunch === flow) return flow.start({ resume: true, ifGeneration: generation });
   });
+}
+// A save state loaded early in a first launch runs code the translation
+// reaches late (static order, ~25 modules/s): 1.4-2.3 s at 43-55 % after a
+// quick-load ~2 s in. The guest PCs since the load, from the local profile's
+// sampler (a thread of its own, 10 ms), put the modules that cover them first,
+// in rounds as the state's hot code shows up. Without that sampler, this
+// worker reads the PC itself (its event loop is busy: ~50 samples/s). Never
+// throws, never awaited by the load. A later load ends these rounds (its own
+// take over), and no round runs once the optimisation has nothing left.
+const AOT_STATE_ROUNDS_MS = [600, 1500, 3000];
+let aotStateLoads = 0;
+export async function prioritizeAotAfterStateLoad({ flow = aotFirstLaunch, instance = moduleInstance, sampler = aotHotSampler, rounds = AOT_STATE_ROUNDS_MS,
+  everyMs = 2, wait = (t) => new Promise((r) => setTimeout(r, t)), now = () => performance.now() } = {}) {
+  let watch = null;
+  const load = ++aotStateLoads;
+  const current = () => load === aotStateLoads && disc === aotDiscGeneration;
+  const disc = aotDiscGeneration;
+  try {
+    if (!flow?.supported || flow.hasWork?.() === false) return 0;
+    let read;
+    if (sampler?.watch) {
+      // counts from the load on: the sampler flushes what it had before
+      watch = sampler.watch();
+      read = async (until) => { await wait(Math.max(0, until - now())); return watch.read(); };
+    } else {
+      const pcAddress = aotProfileTarget?.guestPcAddress?.(instance) || instance?._DolphinWeb_GuestPcAddress?.() || 0;
+      // The real core exports HEAPU8 only (as the hot sampler reads it).
+      const heap = instance?.HEAPU8?.buffer ? new Uint32Array(instance.HEAPU8.buffer) : null;
+      if (!pcAddress || pcAddress % 4 || !heap) return 0;
+      const counts = new Map();
+      read = async (until) => {
+        while (now() < until && current()) {
+          const pc = heap[pcAddress >>> 2] >>> 0;
+          if (pc >= 0x80000000 && pc < 0x81800000) counts.set(pc, (counts.get(pc) ?? 0) + 1);
+          await wait(everyMs);
+        }
+        return [...counts.entries()];
+      };
+    }
+    const t0 = now();
+    let moved = 0;
+    for (const at of rounds) {
+      if (flow.hasWork?.() === false) break;
+      const hits = await read(t0 + at);
+      if (!current()) return moved; // another load or another disc meanwhile
+      if (hits.length && flow.hasWork?.() !== false) moved = flow.prioritize(hits);
+    }
+    return moved;
+  } catch {
+    return 0;
+  } finally {
+    watch?.stop();
+  }
 }
 let aotHotSampler = null;
 let aotProfileTarget = null;

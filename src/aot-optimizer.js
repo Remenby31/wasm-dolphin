@@ -98,7 +98,75 @@ export class AotOptimizer extends EventTarget {
     this.stale = new Set();
     this.restaled = new Set();
     this.uncounted = new Set(); // marked before the attempts were read
+    // The run's work, and how far it got: prioritize() reorders what is left.
+    this.todo = null;
+    this.cursor = 0;
+    this.priority = null; // { score: Map<unit, hits> } a run not yet started applies
+    this.finished = false; // the last run went through its work (hasWork)
   }
+
+  // A save state just loaded: the guest now runs code the plan's order may
+  // reach late (a first launch translates in static order, ~25 modules/s).
+  // `hits` ([[pc, samples]], guest PCs sampled since the load) move the
+  // modules whose members cover them ahead of the rest of this run's work,
+  // most hits first; the others keep their order. Kept until the plan exists
+  // (a load ~2 s into a first launch comes before it) and the run applies it.
+  // Returns how many modules moved now.
+  prioritize(hits) {
+    if (!hits?.length) return 0;
+    this.priority = { hits, score: null };
+    return this.applyPriority();
+  }
+
+  // The modules covering the hits, by hits: computed once the plan exists.
+  priorityScore() {
+    const p = this.priority;
+    if (!p || !this.regions?.length) return null;
+    if (p.score) return p.score;
+    // The members' ranges by start, once per plan (a load's rounds score again).
+    if (this.rangeIndex?.regions !== this.regions) {
+      const all = [];
+      for (const u of this.regions) for (const f of u.members) for (const [s, e] of f.ranges) all.push([s >>> 0, e >>> 0, u]);
+      all.sort((x, y) => x[0] - y[0]);
+      // Ranges may overlap (a block shared by two functions): any range that
+      // starts less than the longest one's length before pc may hold it.
+      this.rangeIndex = { regions: this.regions, starts: all, longest: all.reduce((m, [s, e]) => Math.max(m, e - s), 0) };
+    }
+    const { starts, longest } = this.rangeIndex;
+    const unitAt = (pc) => {
+      let lo = 0, hi = starts.length - 1, found = -1;
+      while (lo <= hi) {
+        const mid = (lo + hi) >> 1;
+        if (starts[mid][0] <= pc) { found = mid; lo = mid + 1; } else hi = mid - 1;
+      }
+      for (let i = found; i >= 0 && pc - starts[i][0] < longest; i--) if (pc < starts[i][1]) return starts[i][2];
+      return null;
+    };
+    const score = new Map();
+    for (const [pc, n] of p.hits) {
+      const u = unitAt(pc >>> 0);
+      if (u) score.set(u, (score.get(u) ?? 0) + (n || 1));
+    }
+    p.score = score;
+    return score;
+  }
+
+  // Modules left to translate: before a run, during it, or marked stale.
+  hasWork() {
+    return !this.finished || this.stale.size > 0;
+  }
+
+  applyPriority() {
+    const score = this.priorityScore();
+    if (!score?.size || !this.todo) return 0;
+    const rest = this.todo.slice(this.cursor);
+    const hot = rest.filter((u) => score.has(u)).sort((x, y) => score.get(y) - score.get(x));
+    if (!hot.length) return 0;
+    const cold = rest.filter((u) => !score.has(u));
+    this.todo.splice(this.cursor, rest.length, ...hot, ...cold);
+    return hot.length;
+  }
+
 
   // A stored module the core refused: translated again, live, by the current
   // run or the next one. False when the key was already retranslated this
@@ -201,6 +269,7 @@ export class AotOptimizer extends EventTarget {
     await this.planStore?.saveGroups?.(this.discKey, savedGroups)?.catch?.(() => {});
     this.plan = plan;
     this.regions = units;
+    if (this.priority) this.priority.score = null; // new modules: scored again
     this.totalWeight = units.reduce((n, u) => n + u.weight, 0);
     return plan;
   }
@@ -373,6 +442,7 @@ export class AotOptimizer extends EventTarget {
     const ms = () => Math.round(this.now() - t0);
     let compiled = 0, deferred = 0;
     this.budgetRefused = 0; // per run: the done event reports this run's
+    this.finished = false;
     try {
       await this.getPlan();
       const session = await this.openSession();
@@ -387,6 +457,9 @@ export class AotOptimizer extends EventTarget {
       const refused = new Set();
       for (const u of this.regions) if (session.isBlacklisted?.(u.key)) { refused.add(u.key); doneSet.add(u.key); }
       const todo = this.regions.filter((u) => !doneSet.has(u.key));
+      this.todo = todo;
+      this.cursor = 0;
+      this.applyPriority();
       this.emit("optimization-start", { ...this.progress(doneSet), ms: 0, resumed: doneSet.size > 0 });
       this.emit("optimization-progress", { ...this.progress(doneSet), ms: ms() });
       // Modules marked stale while this run goes are appended to its work.
@@ -486,6 +559,7 @@ export class AotOptimizer extends EventTarget {
           }
           if (n >= todo.length || this.cancelled) break;
           const unit = todo[n];
+          this.cursor = n + 1;
           this.stale.delete(unit.key);
           const result = await this.translateUnit(unit);
           await finishing;
@@ -498,6 +572,11 @@ export class AotOptimizer extends EventTarget {
         }
       } finally {
         await finishing;
+        this.todo = null;
+      }
+      if (!this.cancelled) {
+        this.finished = true;
+        this.priority = null; // its hits were for this run's work
       }
       if (!this.cancelled) this.emit("optimization-done", { total: this.regions.length, refused: refused.size, compiled, deferred, budgetRefused: this.budgetRefused, ms: ms() });
     } catch (error) {

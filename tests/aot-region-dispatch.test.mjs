@@ -1328,7 +1328,7 @@ for (const maxContinuations of [0, 7]) {
     core.invalidate(LONG, bytes.length);
     core.module._DolphinWeb_AotForgetRegionsForTest?.();
     const ranges = [[LONG, LONG + bytes.length]];
-    const translator = coreRegionTranslator(core.module, { mask: PRODUCTION_DISABLE_MASK, helperNames: coreAssembleOptions(core.module)?.helperNames, maxContinuations, yieldNow: async () => {} });
+    const translator = coreRegionTranslator(core.module, { mask: PRODUCTION_DISABLE_MASK, helperNames: coreAssembleOptions(core.module)?.helperNames, maxContinuations, now: () => 0, yieldNow: async () => {} });
     const [r] = await translator.translate([{ entry: LONG, ranges, hash: null }]);
     assert.ok(r.fragment, r.reason);
     assert.equal(r.fragment.entries.length, 64, "the first fragment is capped");
@@ -1637,7 +1637,8 @@ test("continuation budget: resume goes on from where the budget stopped", { skip
 // large members left (largeLeft), so the first ones no longer take it all.
 test("continuation budget: a large member gets an even share of what the module has left", { skip: contSkip }, async () => {
   const program = longFunction(100);
-  const t = coreRegionTranslator(core.module, { maxBlocks: 16, yieldNow: async () => {} });
+  // a frozen clock: no 8 ms slice runs out under load (budget, not the case tested)
+  const t = coreRegionTranslator(core.module, { maxBlocks: 16, now: () => 0, yieldNow: async () => {} });
   const f = { entry: LONG, ranges: loadWords(LONG, program.words), hash: null, flags: 0, extraEntries: [] };
   const [alone] = await t.translate([{ ...f, continuationBytesUsed: 0, largeLeft: 1 }]);
   const [shared] = await t.translate([{ ...f, continuationBytesUsed: t.unitContinuationBytes - 8000, largeLeft: 4 }]);
