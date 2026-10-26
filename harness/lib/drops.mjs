@@ -23,6 +23,11 @@
 // when the CPU thread hardly slept where the time was lost (busy, in none
 // of the counted waits: guest code, or a host cost nothing counts yet, as V8
 // compiling region functions lazily was), else "unexplained".
+// Late wake-ups (lateWake) and uncounted busy time (uncountedBusy) are
+// judged per sampler row against the run's calm pace (lateWakeLoss): the
+// throttle sleeps to absolute targets, so a wake-up's coalescing lateness is
+// absorbed by the next sleep and costs nothing unless the row lost time
+// without working more than usual.
 import { describe, median, percentile, round, stdev } from "./stats.mjs";
 
 export const STEP_MS = 100;
@@ -44,8 +49,56 @@ export const CAUSES = {
   gpuWait: (d) => d.flushGpuWaitUs / 1000,
   efb: (d) => d.efbWaitUs / 1000,
   pipelines: (d) => sum(d.pipelineMs, d.shaderMs),
-  lateWake: (d) => d.sleepLateUs / 1000
+  // the lateness that cost guest time (lateWakeLoss), else all of it
+  lateWake: (d) => (d.lateWakeLossMs != null ? d.lateWakeLossMs : d.sleepLateUs / 1000),
+  // host time the CPU thread worked past its calm pace in none of the
+  // counted causes, where it lost time (lateWakeLoss)
+  uncountedBusy: (d) => d.uncountedBusyMs
 };
+// Counted causes a CPU thread's busy time can go to (lateWake is sleep).
+const BUSY_CAUSES = ["jit", "regions", "disc", "gpuWait", "efb", "pipelines"];
+// A row is calm when its guest time is within this share of its host time;
+// a row's pace is that of the calm rows of the PACE_SPAN_MS before it (a
+// boot screen and a race work at very different paces), else the run's.
+const CALM_SHARE = 0.02;
+const PACE_SPAN_MS = 1000;
+
+// Rows with two cumulative columns added (ms): lateWakeLossMs, the wake-up
+// lateness of rows that lost guest time without working past their calm
+// pace (busy host ms per guest ms, the median of the calm rows that slept
+// in the PACE_SPAN_MS before, else in the run), and uncountedBusyMs, the busy time past that pace in none of the
+// counted causes, up to the time the row lost. Rows unchanged when the
+// sampler has no ticks, sleep or lateness columns, or no calm row slept.
+export function lateWakeLoss(rows, tps) {
+  if (!(tps > 0) || rows.length < 2 || !["ticks", "cpuSleepUs", "sleepLateUs"].every((c) => rows[0][c] !== undefined)) return rows;
+  const steps = [];
+  for (let i = 1; i < rows.length; i += 1) {
+    const a = rows[i - 1], b = rows[i];
+    const dd = (k) => (b[k] == null || a[k] == null ? null : b[k] - a[k]);
+    const host = b.t - a.t, guest = (dd("ticks") / tps) * 1000, slept = dd("cpuSleepUs") / 1000, late = dd("sleepLateUs") / 1000;
+    const counted = BUSY_CAUSES.reduce((sum, k) => { const v = CAUSES[k](Object.fromEntries(Object.keys(b).map((c) => [c, dd(c)]))); return sum + (Number.isFinite(v) ? Math.max(0, v) : 0); }, 0);
+    const calm = host > 0 && guest > 0 && slept > 0 && Math.abs(guest - host) <= CALM_SHARE * host;
+    steps.push({ t: b.t, host, guest, slept, late, counted, pace: calm ? Math.max(0, host - slept) / guest : null });
+  }
+  const medianOf = (xs) => { const v = xs.filter((p) => p != null).sort((p, q) => p - q); return v.length ? v[Math.floor(v.length / 2)] : null; };
+  const runPace = medianOf(steps.map((x) => x.pace));
+  if (runPace == null) return rows;
+  const out = [{ ...rows[0], lateWakeLossMs: 0, uncountedBusyMs: 0 }];
+  let lateSum = 0, busySum = 0;
+  let lo = 0;
+  steps.forEach((x, i) => {
+    while (steps[lo].t < x.t - x.host - PACE_SPAN_MS) lo += 1;
+    const pace = medianOf(steps.slice(lo, i).map((y) => y.pace)) ?? runPace;
+    const valid = [x.host, x.guest, x.slept, x.late].every(Number.isFinite);
+    const lost = valid ? Math.max(0, x.host - x.guest) : 0;
+    const excess = valid ? Math.max(0, x.host - x.slept - pace * x.guest - x.counted) : 0;
+    // worked past its pace more than it woke late: the work lost the time
+    lateSum += excess > x.late ? 0 : Math.min(x.late, lost);
+    busySum += Math.min(excess, lost);
+    out.push({ ...rows[i + 1], lateWakeLossMs: lateSum, uncountedBusyMs: busySum });
+  });
+  return out;
+}
 const sum = (...xs) => xs.reduce((a, x) => a + (Number.isFinite(x) ? x : 0), 0);
 
 // Rows as objects, wrapping columns unwrapped, sorted by time.
@@ -105,6 +158,7 @@ const labelAt = (markers, t) => {
 
 export function windowsOf({ vi, presents = [], rows = [], page = [], markers = [], tps, from = null, to = null, stepMs = STEP_MS }) {
   if (!(tps > 0) || vi.length < 2) return [];
+  rows = lateWakeLoss(rows, tps);
   const start = Math.max(from ?? vi[0].t, vi[0].t), end = Math.min(to ?? vi.at(-1).t, vi.at(-1).t);
   const columns = rows.length ? Object.keys(rows[0]).filter((c) => c !== "t" && c !== "lagMs") : [];
   const sortedMarkers = [...markers].sort((a, b) => a.t - b.t);
@@ -189,7 +243,7 @@ export function causeOf(windows) {
   const slept = windows.reduce((a, w) => a + (w.sleptMs ?? 0), 0);
   const sleptShare = wsum > 0 ? windows.reduce((a, w, i) => a + ((w.sleptMs ?? 0) / STEP_MS) * weights[i], 0) / wsum : null;
   let cause;
-  if (top && ms >= CAUSE_MIN_SHARE * Math.max(lost, 1)) cause = top;
+  if (top && ms >= CAUSE_MIN_SHARE * Math.max(lost, 1)) cause = top === "uncountedBusy" ? "uncounted-busy" : top;
   else if (windows.every((w) => w.sleptMs != null) && sleptShare != null && sleptShare < EMULATION_SLEEP_SHARE) cause = "uncounted-busy";
   else cause = "unexplained";
   const total = (k) => round(windows.reduce((a, w) => a + (w[k] ?? 0), 0), 1);
