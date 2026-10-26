@@ -706,21 +706,35 @@ parentPort.on("message", (data) => onmessage({ data }));`;
   const got = [];
   const worker = new Worker(shim, { eval: true });
   worker.on("message", (m) => got.push(m));
-  const until = async (ok, ms = 2000) => { const end = Date.now() + ms; while (!ok() && Date.now() < end) await new Promise((r) => setTimeout(r, 2)); assert.ok(ok(), "timed out"); };
+  const until = async (ok, ms = 20000) => { const end = Date.now() + ms; while (!ok() && Date.now() < end) await new Promise((r) => setTimeout(r, 2)); assert.ok(ok(), "timed out"); };
+  // Each flush request is answered by a post with its number; it holds what
+  // was sampled since the last post. No assumption on how fast the thread
+  // samples (a slow CI runner had sampled nothing yet): flush until a post
+  // holds the PC, with a generous deadline only against a hang.
+  let asked = 0;
+  const flushUntil = async (pc) => {
+    for (const end = Date.now() + 20000; Date.now() < end;) {
+      asked = Atomics.add(flag, 2, 1) + 1;
+      Atomics.notify(flag, 2);
+      await until(() => got.some((m) => m.flushed === asked), 20000);
+      const m = got.find((x) => x.flushed === asked);
+      if (m.counts.some(([p]) => p === pc)) return m;
+      await new Promise((r) => setTimeout(r, 5));
+    }
+    assert.fail(`no flush ever held ${pc.toString(16)}`);
+  };
   try {
     u32[2] = 0x80001000;
     worker.postMessage({ buffer, ctl, pcAddress: 8, periodMs: 1, postMs: 100000, frozenMs: 100000 });
-    await new Promise((r) => setTimeout(r, 30));
-    Atomics.add(flag, 2, 1);
-    Atomics.notify(flag, 2);
-    await until(() => got.length >= 1);
-    assert.equal(got[0].flushed, 1);
-    assert.ok(got[0].counts.some(([pc]) => pc === 0x80001000), JSON.stringify(got[0]));
+    await flushUntil(0x80001000);
     u32[2] = 0x80002000;
-    await new Promise((r) => setTimeout(r, 30));
-    Atomics.store(flag, 0, 1); // stop: the last post
-    await until(() => got.length >= 2);
-    assert.ok(Array.isArray(got[1]) && got[1].some(([pc]) => pc === 0x80002000), JSON.stringify(got[1]));
+    const later = await flushUntil(0x80002000);
+    assert.ok(later.flushed > 1);
+    // every request answered once, in order, with its own number
+    const numbers = got.filter((m) => !Array.isArray(m)).map((m) => m.flushed);
+    assert.deepEqual(numbers, Array.from({ length: asked }, (_, i) => i + 1));
+    Atomics.store(flag, 0, 1); // stop: the last post, if anything was left
+    Atomics.notify(flag, 2);
   } finally {
     await worker.terminate();
   }
