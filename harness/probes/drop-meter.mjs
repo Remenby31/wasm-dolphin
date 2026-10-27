@@ -109,7 +109,8 @@ function installPageSampler(everyMs) {
   const tick = () => {
     const now = performance.now();
     const a = window.__audio?.causalTelemetry?.();
-    rows.push([performance.timeOrigin + now, Math.max(0, now - due), a ? Number(a.underrunCount ?? 0) : null, rafs]);
+    // the audio queued between the mixer and the speaker (ring or schedule, plus the output), ms
+    rows.push([performance.timeOrigin + now, Math.max(0, now - due), a ? Number(a.underrunCount ?? 0) : null, rafs, Number.isFinite(a?.latencyMs) ? a.latencyMs : null]);
     due = Math.max(due + everyMs, now);
     setTimeout(tick, Math.max(0, due - performance.now()));
   };
@@ -265,7 +266,7 @@ export function analyzeVisit(raw, { native = null } = {}) {
   if (!timeline.complete) return { error: `timeline incomplete (lost presents ${timeline.lost.presents}, VI ${timeline.lost.vi}, failed reads ${timeline.failedReads})` };
   const rows = rowsOf(raw.rows);
   raw = { ...raw, ...markersOnVi(raw, timeline.vi) };
-  const page = raw.page.map(([t, lagMs, underruns, rafs]) => ({ t, lagMs, underruns, rafs: rafs ?? null }));
+  const page = raw.page.map(([t, lagMs, underruns, rafs, audioMs]) => ({ t, lagMs, underruns, rafs: rafs ?? null, audioMs: audioMs ?? null }));
   const from = raw.markers[0]?.t ?? null;
   const windows = windowsOf({ vi: timeline.vi, presents: timeline.presents, rows, page, markers: raw.markers, tps: raw.tps, from, to: raw.endT });
   const span = (e) => e.t >= (from ?? -Infinity) && e.t <= (raw.endT ?? Infinity);
@@ -496,7 +497,7 @@ export function readNoise(file, expect = null) {
 function logRun(log, tag, a) {
   if (a.error) return log(`${tag}: ${a.error}`);
   const s = a.summary;
-  log(`${tag}: lost ${s.lostMs} ms, <95 % ${s.pctBelow95} %, <90 % ${s.pctBelow90} %, worst 1 s ${s.worstSecond} %, hitches >50 ${s.hitches50} >100 ${s.hitches100}, p99 ${s.presentP99} ms, ${s.loads} loads +${s.loadExcessMs} ms, underruns ${s.underruns}, load1 ${a.load1.median}${a.overloaded ? " OVERLOADED" : ""}`);
+  log(`${tag}: lost ${s.lostMs} ms, <95 % ${s.pctBelow95} %, <90 % ${s.pctBelow90} %, worst 1 s ${s.worstSecond} %, hitches >50 ${s.hitches50} >100 ${s.hitches100}, p99 ${s.presentP99} ms, ${s.loads} loads +${s.loadExcessMs} ms, underruns ${s.underruns}, audio ${s.audioLatencyMs ?? "–"} ms, load1 ${a.load1.median}${a.overloaded ? " OVERLOADED" : ""}`);
   for (const d of a.worst.slice(0, 3)) log(`   drop ${d.label} @${round(d.guestStart, 1)} gs: ${d.durationMs} ms, lost ${d.lostMs} ms, min ${d.minSpeed} %, cause ${d.cause}, ${d.jitBlocks} new blocks (${d.defers} deferred), causes ${JSON.stringify(d.causesMs)}`);
 }
 

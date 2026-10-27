@@ -44,20 +44,20 @@
     {
       "path": "core/upstream/dolphin_web_core.cpp",
       "hashMode": "lf-normalized",
-      "size": 64704,
-      "sha256": "1a7fceb40859323eb5029fba2bab9eabb1c302f1493d59ab5c0fbe2aba8630bc"
+      "size": 65323,
+      "sha256": "31bccd965ad6b1f5c66b4133d3dd63df45c4bb9721f4c0639a2d594996c3c355"
     },
     {
       "path": "src/app.js",
       "hashMode": "lf-normalized",
-      "size": 50858,
-      "sha256": "b76fb20652b9801dabe407e701781cbd8e3612def7d1ae5a0e7c8974310b4ca9"
+      "size": 50973,
+      "sha256": "c66b7a3e5da52c234396200460b2fc1d935f00d41b426ffc026e18d3d1f4da0e"
     },
     {
       "path": "src/audio.js",
       "hashMode": "lf-normalized",
-      "size": 13055,
-      "sha256": "66a0273c05c49987cb20bf9801e0605a6b56b708aae8e27331049145eac7a943"
+      "size": 19355,
+      "sha256": "b94bfbe836722ee1562fad07172ec2c4c2e635448a457eb8de269f18db41db3e"
     },
     {
       "path": "src/audio-pcm-ring.js",
@@ -68,8 +68,8 @@
     {
       "path": "src/audio-pcm-producer.js",
       "hashMode": "lf-normalized",
-      "size": 5434,
-      "sha256": "6b5f8dc493d25212d7dc5f1753ee69e6006b66603312d1a4730cd48e3eb37225"
+      "size": 8211,
+      "sha256": "83f8dbbf5cc8184a17493b7dfea1c408b1effe8708db250fee9613d5825ede2e"
     },
     {
       "path": "src/audio-worklet-processor.js",
@@ -86,8 +86,8 @@
     {
       "path": "src/core-host.js",
       "hashMode": "lf-normalized",
-      "size": 88089,
-      "sha256": "515d39daad4ef7e68e3374bb77fe8ea85198bd6358a9332d2e3984d1e903e629"
+      "size": 88595,
+      "sha256": "669c9b1dbd85ac2bbfc092b59f608cc59c7a7f7ad75b7563ff1e3c1cfad6a886"
     },
     {
       "path": "src/diagnostic-log-filter.js",
@@ -140,8 +140,8 @@
     {
       "path": "src/upstream-discio-worker.js",
       "hashMode": "lf-normalized",
-      "size": 797086,
-      "sha256": "e69594b660195264529bdd39a789eafcf24186f7622c236f8c220d0852e07687"
+      "size": 797587,
+      "sha256": "5aa4a2648ef0025f8ba643e469e5124309e49317665349842afad3f83947fcd8"
     },
     {
       "path": "src/wgpu-renderer-worker-probe.js",
@@ -164,8 +164,8 @@
     {
       "path": "src/upstream-worker-adapter.js",
       "hashMode": "lf-normalized",
-      "size": 58896,
-      "sha256": "d86b4fcdb27c4684ee178df3bd5b69a8912f1d08c601b390965e84b1b31fe772"
+      "size": 59099,
+      "sha256": "894c66cd7cc6f7c198dc37889181f761474fa8235b79622cfe7dd1cce3ca54e2"
     },
     {
       "path": "src/upstream-worker-protocol.js",

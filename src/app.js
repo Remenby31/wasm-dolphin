@@ -890,6 +890,8 @@ async function mountFile(file) {
   try {
     await applyGameProfile(file);
     const game = await host.mountFile(file);
+    // sound turned on before this disc fell back to legacy (no core yet)
+    await audio.retryWorkletTransport();
     // Auto-unmute on disc boot. AudioController defaults to muted because
     // the AudioContext can only be created after a user gesture; the disc
     // mount click is the user gesture, so unmute here so audio actually

@@ -89,6 +89,7 @@ export class UpstreamWorkerAdapter {
     codeSpaceMiB = null,
     cpuOverclock = 1,
     emulationSpeed = 1,
+    audioBufferMs = 0,
     presentationScale = 1,
     presentationQueueSize = 2,
     presenterBackend = "webgl",
@@ -226,6 +227,7 @@ export class UpstreamWorkerAdapter {
     this.codeSpaceMiB = Number.isInteger(codeSpaceMiB) ? codeSpaceMiB : null;
     this.cpuOverclock = cpuOverclock;
     this.emulationSpeed = emulationSpeed;
+    this.audioBufferMs = Number.isInteger(audioBufferMs) ? audioBufferMs : 0;
     this.presentationScale = presentationScale;
     this.presentationQueueSize = presentationQueueSize;
     this.presenterBackend = presenterBackend;
@@ -484,6 +486,7 @@ export class UpstreamWorkerAdapter {
       codeSpaceMiB: this.codeSpaceMiB,
       cpuOverclock: this.cpuOverclock,
       emulationSpeed: this.emulationSpeed,
+      audioBufferMs: this.audioBufferMs,
       presentationScale: this.presentationScale,
       presentationQueueSize: this.presentationQueueSize,
       presenterBackend: this.presenterBackend,
@@ -926,12 +929,13 @@ export class UpstreamWorkerAdapter {
     this.post("setAudioMuted", { muted: Boolean(muted) });
   }
 
-  async configureAudioWorklet({ enabled, muted, sab }) {
+  async configureAudioWorklet({ enabled, muted, sab, targetFrames }) {
     if (!this.loaded) return { active: false, reason: "core-not-loaded" };
     const response = await this.request("configureAudioWorklet", {
       enabled: Boolean(enabled),
       muted: Boolean(muted),
       sab: sab ?? null,
+      targetFrames: Number(targetFrames) || 0,
     });
     if (enabled && !response.active) {
       this.onStatus(`AudioWorklet producer unavailable; using legacy audio: ${response.reason || "unknown"}`);
