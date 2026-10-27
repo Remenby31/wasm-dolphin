@@ -293,11 +293,11 @@ export async function acquirePerfLock({
       dequeue(dir, ticket);
     }
     if (held === ON_BATTERY) continue;
-    const source = requireMains ? power()?.source ?? null : null;
     held.requireMains = requireMains;
-    held.powerSource = source;
-    // On mains when taken: whether it is no longer (battery, or unknown now).
-    held.powerChanged = () => requireMains && (power()?.source ?? null) !== source;
+    held.powerSource = requireMains ? power()?.source ?? null : null;
+    // Taken off battery: whether it is on battery now. A reading that fails
+    // (null, pmset busy) or AC <-> UPS is no change.
+    held.powerChanged = () => requireMains && power()?.source === "battery";
     return held;
   }
 }

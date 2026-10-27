@@ -75,3 +75,55 @@ test("calmUnderLock: unplugged under the lock, the lock goes back and is taken a
   const calm = await calmUnderLock({ lock: again, maxLoad: 4, waitSec: 300, acquire, wait: async () => ({ ok: true }), load: () => 1 });
   assert.equal(calm.relocked, false);
 });
+
+// Review of #305.
+test("powerChanged: only a switch to battery; a failed reading (null) or AC <-> UPS is no change", async (t) => {
+  const dir = lockDir(t);
+  let source = "ac";
+  const release = await acquirePerfLock({ dir, name: "measure", requireMains: true, power: () => (source === null ? null : { source }) });
+  for (const [now, changed] of [["ac", false], [null, false], ["UPS Power", false], ["battery", true]]) {
+    source = now;
+    assert.equal(release.powerChanged(), changed, String(now));
+  }
+  release();
+});
+
+test("calmUnderLock: back on mains after a power relock, the load gate still applies", async () => {
+  const lock = () => {};
+  lock.powerChanged = () => true;
+  const again = () => {};
+  again.powerChanged = () => false;
+  let waited = 0;
+  const g = await calmUnderLock({ lock, maxLoad: 4, waitSec: 300, acquire: async () => again, load: () => 9, wait: async () => { waited += 1; return { ok: true, load: 3, limit: 4 }; }, log: () => {} });
+  assert.equal(waited, 1, "loaded once back on mains: waited for calm too");
+  assert.equal(g.relocked, true);
+});
+
+test("drop meter: a visit played again goes through the gate (power, load) first", async () => {
+  const { gateBeforeReplay } = await import("../harness/probes/drop-meter.mjs");
+  const { calmLock } = await import("../harness/lib/env.mjs");
+  const events = [];
+  let onBattery = false;
+  const mk = (tag) => { const r = () => events.push(`release ${tag}`); r.powerChanged = () => onBattery; return r; };
+  let n = 0;
+  const lock = await calmLock({ maxLoad: 100, calmWait: 0, acquire: async () => { n += 1; events.push(`acquire ${n}`); return mk(n); }, wait: async () => ({ ok: true }) });
+  onBattery = true; // unplugged during the visit
+  const acquireNow = lock;
+  // the next acquire happens once on mains (acquirePerfLock waits for it): modelled as plugged back
+  const realAcquire = events.length;
+  onBattery = true;
+  const replay = gateBeforeReplay(acquireNow, { waitSec: 300 });
+  onBattery = false;
+  const r = await replay;
+  assert.equal(r.gaveUp, null);
+  assert.deepEqual(events.slice(realAcquire), ["release 1", "acquire 2"], "the lock went back and was taken again before the replay");
+});
+
+test("--allow-battery still works: the rendering probes gate on mains only without it", async () => {
+  const { readFile } = await import("node:fs/promises");
+  for (const f of ["savestate-scale", "stream-capture-cost"]) {
+    const src = await readFile(new URL(`../harness/probes/${f}.mjs`, import.meta.url), "utf8");
+    assert.match(src, /acquirePerfLock\(\{ requireMains: !o\["allow-battery"\], /, f);
+    assert.doesNotMatch(src, /process\.exit\(3\);\n\}\nconst release = await acquirePerfLock/, `${f}: no early exit on battery, the lock waits`);
+  }
+});

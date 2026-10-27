@@ -62,9 +62,11 @@ export async function calmUnderLock({ lock, maxLoad, waitSec, acquire, log = () 
   // again in turn once on mains (acquire waits for it); the run is played
   // again (relocked), never measured on battery.
   if (lock?.powerChanged?.()) {
-    log("power source changed (mains → battery): perf lock released until mains power");
+    log("on battery: perf lock released until mains power");
     lock();
-    return { lock: await acquire(), gate: { load: Math.round(load() * 100) / 100, limit: loadLimit(maxLoad), ok: true, power: "waited" }, relocked: true };
+    // taken again on mains (acquire waits for it), then the load gate as usual
+    const again = await calmUnderLock({ lock: await acquire(), maxLoad, waitSec, acquire, log, load, wait });
+    return { ...again, relocked: true };
   }
   const limit = loadLimit(maxLoad);
   const now = load();

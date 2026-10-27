@@ -41,11 +41,9 @@ if (!o.iso || !o.port) throw new Error("usage: savestate-scale.mjs --iso disc.is
 const ac = (() => {
   try { return /AC Power/.test(execFileSync("pmset", ["-g", "batt"], { encoding: "utf8" })); } catch { return false; }
 })();
-if (!ac && !o["allow-battery"]) {
-  console.error("not on mains power: decisions are measured on mains power (--allow-battery to override)");
-  process.exit(3);
-}
-const release = await acquirePerfLock({ requireMains: true, name: "Salon · rendu: savestate-scale", waitSec: 1800, log: (m) => console.log(`[savestate-scale] ${m}`) });
+// Not on mains: the lock waits for it (requireMains), unless --allow-battery.
+if (!ac && o["allow-battery"]) console.warn("on battery (--allow-battery): not a decision measure");
+const release = await acquirePerfLock({ requireMains: !o["allow-battery"], name: "Salon · rendu: savestate-scale", waitSec: 1800, log: (m) => console.log(`[savestate-scale] ${m}`) });
 // Never hold the lock for ever (a hung browser): counted from the lock, not
 // from the wait for it.
 const watchdog = setTimeout(() => { console.error("watchdog: 20 min under the lock"); release(); process.exit(2); }, 20 * 60 * 1000);

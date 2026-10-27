@@ -283,6 +283,9 @@ test("power: a visit unplugged midway is mixed; an A/A with mixed sources is no 
   const { powerOfVisit, powerSourcesOf } = await import("../harness/probes/drop-meter.mjs");
   assert.equal(powerOfVisit({ power: { source: "ac" }, powerEnd: { source: "ac" } }), "ac");
   assert.equal(powerOfVisit({ power: { source: "ac" }, powerEnd: { source: "battery" } }), "mixed");
+  // review of #305: a failed reading (null) or AC <-> UPS is no change
+  assert.equal(powerOfVisit({ power: { source: "ac" }, powerEnd: { source: "UPS Power" } }), "ac");
+  assert.equal(powerOfVisit({ power: { source: "ac" }, powerEnd: null }), "ac");
   assert.equal(powerOfVisit({ power: { source: "battery" } }), "battery");
   assert.equal(powerOfVisit({}), null);
   const r = (power, error) => ({ analysis: { power, ...(error ? { error } : {}) } });
@@ -693,7 +696,8 @@ test("--baseline-query: the baseline side boots with it, the noise is checked ag
   const src = await readFile(new URL("../harness/probes/drop-meter.mjs", import.meta.url), "utf8");
   assert.match(src, /"baseline-query": \{ type: "string" \}/);
   assert.match(src, /playVisit\(name === "baseline" && o\.baselineQuery \? \{ \.\.\.o, query: o\.baselineQuery \} : o,/);
-  assert.match(src, /readNoise\(values\.noise, \{[^}]*query: o\.baselineQuery \?\? o\.query,/);
+  assert.match(src, /const noiseExpect = \{[^}]*query: o\.baselineQuery \?\? o\.query,/);
+  assert.match(src, /readNoise\(values\.noise, noiseExpect\)/);
   assert.match(src, /if \(baselineQuery && !values\.baseline\) throw new Error\("--baseline-query needs --baseline"\);/);
   assert.match(src, /baselineQuery\?\.set\("metrics", "1"\);/, "metrics on both sides");
 });

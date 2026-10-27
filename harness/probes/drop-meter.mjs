@@ -347,11 +347,20 @@ export function humanSummary(summary) {
 // when unknown (another OS, a desktop).
 export function powerOfVisit(raw) {
   const a = raw.power?.source ?? null, b = raw.powerEnd?.source ?? a;
-  return a === b ? a : "mixed";
+  // on battery at one end only; a failed reading (null) or AC <-> UPS is none
+  return (a === "battery") !== (b === "battery") && a != null && b != null ? "mixed" : a ?? b;
 }
 // The sources of a batch's runs (known ones), sorted.
 export function powerSourcesOf(analyses) {
   return [...new Set(analyses.filter((a) => !a.analysis?.error && a.analysis?.power).map((a) => a.analysis.power))].sort();
+}
+
+// Before a run is played again (a visit that failed, one unplugged midway):
+// the same gate as before any run, so it is never replayed on battery or on
+// a loaded machine. { gaveUp } when the gate gave up.
+export async function gateBeforeReplay(lock, { waitSec, log = () => {} }) {
+  const gate = await lock.waitCalmUnlocked({ waitSec, log });
+  return { gate, gaveUp: loadGaveUp(gate) };
 }
 
 export function noVerdictReasons({ analyses, visits, gaveUp = null, verdicts }) {
@@ -604,10 +613,11 @@ async function main() {
     regionCounters: values["region-counters"], display: values.display, pcWindow: values["pc-window"] ? values["pc-window"].split("-").map(Number) : null,
     maxLoad: values["max-load"] ? num(values, "max-load", { min: 0.1 }) : Math.max(2, os.cpus().length / 4), loadWait: num(values, "load-wait", { min: 0 })
   };
-  // for the noise check (the meta takes its own once the lock is held)
+  // The noise's measure checked before the lock; its power source once the
+  // lock is held (the lock waits for mains: on battery now is no mismatch).
   const machine = machineSnapshot();
-  if (machine.power?.source === "battery") log(`on battery (${machine.power.percent} %): compare only with runs and noise on battery too`);
-  const noise = values.noise ? readNoise(values.noise, { probeVersion: PROBE_VERSION, scenario: path.basename(values.scenario), state: o.state ? path.basename(o.state) : null, stateDelayMs: o.state ? o.stateDelayMs : 0, display: o.display, query: o.baselineQuery ?? o.query, sampleMs: o.sampleMs, cpuModel: machine.cpuModel, powerSource: machine.power?.source }) : null;
+  const noiseExpect = { probeVersion: PROBE_VERSION, scenario: path.basename(values.scenario), state: o.state ? path.basename(o.state) : null, stateDelayMs: o.state ? o.stateDelayMs : 0, display: o.display, query: o.baselineQuery ?? o.query, sampleMs: o.sampleMs, cpuModel: machine.cpuModel };
+  const noise = values.noise ? readNoise(values.noise, noiseExpect) : null;
   const noiseCore = values.noise ? noiseCoreOf(values.noise) : null;
   const sides = { candidate: resolveSide("candidate", values.candidate) };
   if (values.baseline) sides.baseline = resolveSide("baseline", values.baseline);
@@ -631,6 +641,7 @@ async function main() {
     maxLoad: o.maxLoad, calmWait: values["calm-wait"] == null ? lockWait : num(values, "calm-wait", { min: 0 }), log: (m) => log(`before the lock: ${m}`),
     acquire: values["no-lock"] ? null : () => acquirePerfLock({ requireMains: true, name: `harness drop-meter (${REPO_ROOT})`, waitSec: lockWait, log })
   });
+  if (values.noise) readNoise(values.noise, { ...noiseExpect, powerSource: machineSnapshot().power?.source });
   const outDir = probeOutDir("drop-meter", iso, values.out);
   const meta = {
     probe: "drop-meter", at: new Date().toISOString(), locked: !values["no-lock"], machine: machineSnapshot(), chrome: chromeInfo(), iso: path.basename(iso),
@@ -682,6 +693,9 @@ async function main() {
             }
             if (tries.every((x) => !x.analysis.error) || attempt === 2) { analyses.push(...tries); break; }
             log(`${name} run ${run}: ${tries.find((x) => x.analysis.error).analysis.error}; played again`);
+            // through the gate first: unplugged, the lock waits for mains (and the load)
+            const again = await gateBeforeReplay(lock, { waitSec: o.loadWait, log });
+            if (again.gaveUp) { gaveUp = again.gaveUp; log(gaveUp); analyses.push(...tries); break; }
           }
         } finally {
           await server.stop();

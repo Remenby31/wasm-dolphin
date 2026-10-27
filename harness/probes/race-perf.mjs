@@ -881,10 +881,13 @@ async function main() {
         const powerAtStart = powerSnapshot()?.source ?? null;
         record[name] = await measureSide(sides[name], o, g.gate);
         const r = record[name];
-        // Unplugged (or plugged in) during the side: played again, both sides,
-        // once on mains (the next gate gives the lock back while on battery).
-        if ((powerSnapshot()?.source ?? null) !== powerAtStart) {
+        // Unplugged during the side: played again, both sides, once on mains
+        // (the next gate gives the lock back while on battery). A failed
+        // reading (null) or AC <-> UPS is no change.
+        if (powerSnapshot()?.source === "battery" && powerAtStart !== "battery") {
           console.log(`[race-perf] run ${run} ${name}: the power source changed during the side (${powerAtStart} → ${powerSnapshot()?.source ?? null})`);
+          relocks += 1;
+          if (relocks > MAX_RELOCKS) { gaveUp = `the lock was let go (load or power) ${relocks} times: remaining runs given up`; console.warn(`[race-perf] ${gaveUp}`); break; }
           replay = true;
           break;
         }
