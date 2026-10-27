@@ -490,7 +490,6 @@ export class EmulatorHost {
             sleepK: this.pacing.sleepK,
             sleepSpinUs: this.pacing.sleepSpinUs,
             presentVsync: this.pacing.presentVsync,
-            presentRecommit: this.pacing.presentRecommit,
             coreLog: this.coreLog,
             memcardSlotB: this.memcardSlotB,
             internalResolution: this.enhancements.internalResolution,
@@ -1738,10 +1737,7 @@ export function requestedPacing(search = window.location.search) {
     // default since 2026-10-26: ~58 distinct pictures shown a second instead
     // of ~56 and half the on-screen repeats on the race (12 pairs, --display).
     // ?presentvsync=0 (or false, off, no) presents as the ring drains.
-    presentVsync: !["0", "false", "off", "no"].includes((params.get("presentvsync") ?? "").toLowerCase()),
-    // ?presentrecommit=1 (diagnosis): the vsync presenter commits the canvas
-    // at every BeginFrame, the last picture again when nothing is new.
-    presentRecommit: params.get("presentrecommit") === "1"
+    presentVsync: !["0", "false", "off", "no"].includes((params.get("presentvsync") ?? "").toLowerCase())
   };
 }
 
