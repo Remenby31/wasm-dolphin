@@ -15,6 +15,7 @@ import {
 
 export const AUDIO_PCM_TARGET_FRAMES = 5760;
 export const AUDIO_PCM_START_FRAMES = 2400;
+export const ADAPT_CALM_MS = 5000;
 
 function atomicMax(header, index, value) {
   let before = Atomics.load(header, index);
@@ -58,8 +59,14 @@ export class AudioPcmProducer {
       if ((core.audioChannels?.() || 0) !== 2) throw new Error("core-channel-count");
       this.stop();
       this.ring = ring;
-      this.targetFrames = Math.max(480, Math.min(AUDIO_PCM_TARGET_FRAMES, targetFrames | 0 || AUDIO_PCM_TARGET_FRAMES));
-      this.startFrames = Math.min(AUDIO_PCM_START_FRAMES, this.targetFrames >> 1);
+      // The page's target is a floor: the ring starts at 120 ms and comes
+      // down to it once the producer keeps time (a cold boot keeps this
+      // worker busy: a 40 ms ring underran ~100 times in its first 6 s).
+      this.floorFrames = Math.max(480, Math.min(AUDIO_PCM_TARGET_FRAMES, targetFrames | 0 || AUDIO_PCM_TARGET_FRAMES));
+      this.targetFrames = AUDIO_PCM_TARGET_FRAMES;
+      this.startFrames = Math.min(AUDIO_PCM_START_FRAMES, this.floorFrames >> 1);
+      this.calmSince = 0;
+      this.underrunsSeen = 0;
       this.activeTransport = "worklet";
       this.fallbackReason = "";
       this.muted = Boolean(muted);
@@ -103,6 +110,7 @@ export class AudioPcmProducer {
 
   timerTick() {
     const now = performance.now();
+    const gapMs = this.lastTimerAt ? now - this.lastTimerAt : 0;
     if (this.lastTimerAt) {
       const gapUs = Math.max(0, Math.round((now - this.lastTimerAt) * 1000));
       if (this.ring) {
@@ -110,7 +118,29 @@ export class AudioPcmProducer {
       }
     }
     this.lastTimerAt = now;
+    this.adapt(now, gapMs);
     this.refill(2);
+  }
+
+  // The ring's target between the page's floor and 120 ms: +20 ms at each
+  // underrun (or a timer gap over half the target), -10 ms a second once
+  // none for ADAPT_CALM_MS.
+  adapt(now, gapMs = 0) {
+    const ring = this.ring;
+    if (!ring || this.floorFrames == null || this.floorFrames >= AUDIO_PCM_TARGET_FRAMES) return;
+    const underruns = Atomics.load(ring.header, AUDIO_PCM_HEADER.UNDERRUN_EVENTS) >>> 0;
+    const late = gapMs > (this.targetFrames / 48) / 2;
+    if (underruns !== this.underrunsSeen || late) {
+      if (underruns !== this.underrunsSeen) this.targetFrames = Math.min(AUDIO_PCM_TARGET_FRAMES, this.targetFrames + 960);
+      this.underrunsSeen = underruns;
+      this.calmSince = now;
+      return;
+    }
+    if (!this.calmSince) this.calmSince = now;
+    if (now - this.calmSince >= ADAPT_CALM_MS && this.targetFrames > this.floorFrames) {
+      this.targetFrames = Math.max(this.floorFrames, this.targetFrames - 480);
+      this.calmSince = now - ADAPT_CALM_MS + 1000; // the next step a second later
+    }
   }
 
   refill(maxMixes = 2) {
@@ -157,6 +187,7 @@ export class AudioPcmProducer {
       activeTransport: this.activeTransport,
       transportFallbackReason: this.fallbackReason,
       targetFrames: this.targetFrames ?? AUDIO_PCM_TARGET_FRAMES,
+      floorFrames: this.floorFrames ?? null,
       workletRing: this.ring ? snapshotAudioPcmRing(this.ring) : null,
     };
   }
