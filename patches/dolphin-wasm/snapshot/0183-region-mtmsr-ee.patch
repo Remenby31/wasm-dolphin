@@ -1,0 +1,110 @@
+diff --git a/Source/Core/Core/PowerPC/CachedInterpreter/CachedInterpreter.cpp b/Source/Core/Core/PowerPC/CachedInterpreter/CachedInterpreter.cpp
+--- a/Source/Core/Core/PowerPC/CachedInterpreter/CachedInterpreter.cpp
++++ b/Source/Core/Core/PowerPC/CachedInterpreter/CachedInterpreter.cpp
+@@ -370,6 +370,11 @@
+ // 0087: ps_sum0/1, ps_neg/mr/nabs/abs, fres and ps_res emitted in the block
+ // (on by default; the bit sends them back to the interpreter).
+ constexpr u32 DOLPHIN_WEB_DISABLE_NATIVE_PS = 1u << 29;
++// 0183: ENABLE polarity (default-off; ?regionmtmsr=1). A region goes on past
++// a mtmsr that changes no MSR bit but EE (interrupts off and back on): the
++// block guards the other bits at run time and leaves as before when one
++// changed. Off: regions are emitted byte for byte as before.
++constexpr u32 DOLPHIN_WEB_ENABLE_REGION_MTMSR_EE = 1u << 27;
+ // §28ce burst smearing: when ENABLED (gate bit CLEARED), TryWriteWasmBlock
+ // returns false (falls to interpret) once this many compiles OR this much
+ // compile wall time have happened in the current CoreTiming slice. Smears
+@@ -3272,6 +3277,9 @@
+ // 0157: MSR.FP clear, read once when the fragment starts (nothing a region
+ // runs changes MSR: mtmsr, rfi and sc end their blocks with an exit).
+ constexpr u32 WASM_FRAME_FP_OFF_LOCAL = 64;
++// 0183: the MSR before a guarded mtmsr block (DOLPHIN_WEB_ENABLE_REGION_MTMSR_EE),
++// declared only by a fragment that holds one.
++constexpr u32 WASM_FRAME_MSR_LOCAL = 65;
+ struct FragmentFrame
+ {
+   bool active = false;
+@@ -17488,6 +17496,9 @@
+   // 0157: holds an FPU op (FL_USE_FPU): with MSR.FP clear the block JIT
+   // raises the FP unavailable exception there, so the region never runs it.
+   bool fpu = false;
++  // 0183: ends with a mtmsr the region goes on past (the next block is its
++  // successor) as long as only MSR.EE changed; else it exits as `exits`.
++  bool msr_guard = false;
+ };
+ 
+ // Locals of a block body without the fastmem hoist (the only layout a
+@@ -17634,6 +17645,19 @@
+                       (inst.OPCD == 19 && (inst.SUBOP10 == 16 || inst.SUBOP10 == 528));
+   if (!branch)
+   {
++    // 0183: a mtmsr goes on to the next instruction in the region; its block
++    // checks after it that MSR changed in EE alone (the mode the region was
++    // built for, and 0157's FP off read once, still hold). A pending
++    // exception it lets in is taken by EmitMtmsr's system call, as by the
++    // interpreter's mtmsr (CheckExceptions, Dolphin's order), and changes
++    // the mode bits (IR/DR cleared): the guard exits then.
++    if (inst.OPCD == 31 && inst.SUBOP10 == 146 &&
++        (DolphinWebDisableMask() & DOLPHIN_WEB_ENABLE_REGION_MTMSR_EE) != 0)
++    {
++      out->msr_guard = true;
++      out->successors.push_back(last.address + 4);
++      return true;
++    }
+     out->exits = true;  // sc, rfi, isync, ...: back to the dispatcher
+     return true;
+   }
+@@ -17765,8 +17789,12 @@
+   // The dispatch pc, npc, downcount (0135) are the block locals' 56..58 (0141).
+   code.assign(WASM_BLOCK_LOCALS.begin(), WASM_BLOCK_LOCALS.end());
+   code[0] = 0x09;
+-  // 0142: returning (63), after the block locals; 0157: FP off (64).
+-  code.insert(code.end(), {0x02, 0x7f});
++  // 0142: returning (63), after the block locals; 0157: FP off (64); 0183:
++  // the MSR before a guarded mtmsr (65), only in a fragment that has one.
++  bool has_msr_guard = false;
++  for (const auto& b : blocks)
++    has_msr_guard = has_msr_guard || b.msr_guard;
++  code.insert(code.end(), {static_cast<u8>(has_msr_guard ? 0x03 : 0x02), 0x7f});
+   // 0111: compares store CR fields without SO (EmitLazyCrStore): with XER.SO
+   // set the fragment does not run (1, as a pc that is not an entry). The
+   // dispatcher and region chaining refuse first; this covers a direct call.
+@@ -17943,6 +17971,16 @@
+     const auto& b = blocks[k];
+     code.push_back(0x0b);  // end $bk: body k
+     out->entries.push_back(b.start);
++    const auto load_msr = [&] {
++      EmitLocalGet(code, 0);
++      code.insert(code.end(), {0x28, 0x02});  // i32.load msr
++      EmitU32Leb(code, static_cast<u32>(reinterpret_cast<std::uintptr_t>(&ppc.msr) - base));
++    };
++    if (b.msr_guard)
++    {
++      load_msr();
++      EmitLocalSet(code, WASM_FRAME_MSR_LOCAL);
++    }
+     const u32 at = static_cast<u32>(code.size());
+     code.insert(code.end(), b.expr.begin(), b.expr.end());
+     for (const auto& reloc : b.relocs)
+@@ -17982,6 +18020,22 @@
+     out->relocs.push_back({static_cast<u32>(code.size()), 4, 0});  // downcount out: unlikely
+     code.push_back(0x0d);  // br_if $X
+     EmitU32Leb(code, exit_depth);
++    if (b.msr_guard)
++    {
++      // 0183: a MSR bit other than EE changed (or an exception was taken):
++      // leave as an exiting block does.
++      load_msr();
++      EmitLocalGet(code, WASM_FRAME_MSR_LOCAL);
++      code.push_back(0x73);  // i32.xor
++      EmitI32Const(code, static_cast<s32>(~0x8000u));
++      code.push_back(0x71);  // i32.and
++      out->relocs.push_back({static_cast<u32>(code.size()), 4, 0});  // mode changed: unlikely
++      code.insert(code.end(), {0x04, 0x40});  // if
++      flush_frame();
++      EmitI32Const(code, 0);
++      code.push_back(0x0f);  // return
++      code.push_back(0x0b);  // end
++    }
+     if (b.exits)
+     {
+       // Not through $X: V8 lays a block out of line only when all its
