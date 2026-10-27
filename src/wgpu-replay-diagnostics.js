@@ -402,12 +402,24 @@ export function requestedWgpuUboPack(
   return Boolean(enabledByDefault);
 }
 
+// The engine's own default: mapped staging under JavaScriptCore. Safari's
+// GPUQueue.writeBuffer copies every write into the page's process and gives
+// it back only at a garbage collection: the command ring's 50-75 k writes a
+// second (130-170 MiB/s) grew Safari's WebContent by ~140 MiB/s, to 7-8 GiB
+// within a minute (an iPhone kills the tab at 1.5-2 GiB). Mapped staging
+// reuses a few mapped buffers and copies on the GPU (research/deep-ios-host.md).
+export function defaultWgpuUploadTransport(engine) {
+  return engine === "jsc" ? "mapped" : "queue";
+}
+
+// ?wgpuuploadtransport=mapped|queue forces it, else the engine's default.
 export function requestedWgpuUploadTransport(
-  search = globalThis.location?.search ?? ""
+  search = globalThis.location?.search ?? "",
+  fallback = "queue"
 ) {
-  return new URLSearchParams(search).get("wgpuuploadtransport") === "mapped"
-    ? "mapped"
-    : "queue";
+  const value = new URLSearchParams(search).get("wgpuuploadtransport");
+  if (value === "mapped" || value === "queue") return value;
+  return fallback === "mapped" ? "mapped" : "queue";
 }
 
 export function requestedWgpuMappedStageFast(

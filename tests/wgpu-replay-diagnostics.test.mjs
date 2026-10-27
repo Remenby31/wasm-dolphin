@@ -25,6 +25,7 @@ import {
   requestedWgpuGeometryRange,
   requestedWgpuMappedStagingSlotCount,
   requestedWgpuUploadArenaMiB,
+  defaultWgpuUploadTransport,
   requestedWgpuUploadTransport,
   requestedWgpuMappedStageFast,
   requestedWgpuMappedStageTimingStride,
@@ -749,7 +750,13 @@ test("WGPU upload arena accepts only the independent 64 MiB screening arm", () =
   assert.equal(requestedWgpuUploadArenaMiB("?wgpuuploadmb=128"), 32);
 });
 
-test("mapped upload transport is opt-in and queue remains the reference", () => {
+test("upload transport: mapped by default under JSC only, ?wgpuuploadtransport forces either", () => {
+  assert.equal(defaultWgpuUploadTransport("jsc"), "mapped");
+  for (const engine of ["v8", "spidermonkey", "unknown", undefined]) assert.equal(defaultWgpuUploadTransport(engine), "queue", String(engine));
+  assert.equal(requestedWgpuUploadTransport("", "mapped"), "mapped");
+  assert.equal(requestedWgpuUploadTransport("?wgpuuploadtransport=queue", "mapped"), "queue");
+  assert.equal(requestedWgpuUploadTransport("?wgpuuploadtransport=bogus", "mapped"), "mapped");
+  assert.equal(requestedWgpuUploadTransport("?wgpuuploadtransport=mapped", "queue"), "mapped");
   assert.equal(requestedWgpuUploadTransport(""), "queue");
   assert.equal(requestedWgpuUploadTransport("?wgpuuploadtransport=queue"), "queue");
   assert.equal(requestedWgpuUploadTransport("?wgpuuploadtransport=mapped"), "mapped");

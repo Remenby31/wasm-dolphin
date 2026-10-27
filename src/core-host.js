@@ -36,6 +36,7 @@ import {
   requestedWgpuMappedStageTimingStride,
   requestedWgpuMappedStagingSlotCount,
   requestedWgpuUploadArenaMiB,
+  defaultWgpuUploadTransport,
   requestedWgpuUploadTransport,
   requestedWgpuMappedStageFast,
   requestedWgpuMappedDrainCoalescing,
@@ -241,7 +242,10 @@ export class EmulatorHost {
     this.wgpuGeometryRange =
       this.wgpuGeometryPack && requestedWgpuGeometryRange(window.location.search);
     this.wgpuUploadArenaMiB = requestedWgpuUploadArenaMiB(window.location.search);
-    this.wgpuUploadTransport = requestedWgpuUploadTransport(window.location.search);
+    this.wgpuUploadTransport = requestedWgpuUploadTransport(
+      window.location.search,
+      defaultWgpuUploadTransport(this.wasmEngine)
+    );
     this.wgpuMappedStagingSlotCount = requestedWgpuMappedStagingSlotCount(
       window.location.search
     );
