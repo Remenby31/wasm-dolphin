@@ -8,6 +8,7 @@
 
 import assert from "node:assert/strict";
 import { createHash } from "node:crypto";
+import { readFileSync } from "node:fs";
 import { readFile } from "node:fs/promises";
 import test from "node:test";
 import { fileURLToPath } from "node:url";
@@ -49,10 +50,10 @@ function setup() {
 }
 
 // Every region of the plan, queued as P7 would (members with the plan's hashes).
-function queueAll(plan, maxFunctions = 100, chain = false) {
+function queueAll(plan, maxFunctions = 100, chain = false, mask = undefined) {
   let entries = 0;
   for (const group of regionGroups(plan, maxFunctions)) {
-    const fragments = group.flatMap(functionFragments(core));
+    const fragments = group.flatMap(functionFragments(core, mask === undefined ? {} : { mask }));
     const { bytes, entries: mapped } = assembleRegion(fragments, { helpers: HELPER_SIGNATURES, pcOffset: core.pcOffset, memoryPages: core.memoryPages, chain });
     core.queueRegion(bytes, mapped.map(([pc]) => pc), group.map((f) => ({ ranges: f.ranges, hash: f.hash })));
     entries += mapped.length;
@@ -2031,7 +2032,7 @@ const SMALL = assemble(SMALL_TEXT, [
   "cond", asm.cmplwi(3, 0), BEQLR, asm.addi(5, 5, 1), asm.blr(),
   "jumper", (pc, l) => asm.lis(5, l.elsewhere >>> 16), (pc, l) => asm.ori(5, 5, l.elsewhere & 0xffff), mtlr(5), asm.blr()
 ]);
-function installCalls(maxFunctions, program = CALLS, text = CALL_TEXT) {
+function installCalls(maxFunctions, program = CALLS, text = CALL_TEXT, mask = undefined) {
   const dol = buildDol({ textAddr: text, text: program.words, entry: program.labels.main });
   const { image, entryPoint } = imageFromDol(dol);
   const plan = planDol({ image, entryPoint, gameId: "TEST01", dolBytes: dol, options: { gapFill: false } });
@@ -2040,7 +2041,7 @@ function installCalls(maxFunctions, program = CALLS, text = CALL_TEXT) {
   core.module._DolphinWeb_AotForgetRegionsForTest?.();
   core.setRegionsEnabled(true);
   core.setRegionChaining(true);
-  queueAll(plan, maxFunctions, true);
+  queueAll(plan, maxFunctions, true, mask);
   serviceAll();
   return plan;
 }
@@ -2346,4 +2347,104 @@ test("function cap: none leaves the formation as before; one cuts every fragment
   // A single block over the cap: kept as the first fragment (the entry).
   const tiny = await translateWithContinuations(core.module, { entry: LONG, ranges, hash: null }, { ...options, functionCap: 16 });
   assert.deepEqual([tiny.fragment?.entries.length, tiny.fragment?.code.length > 16], [1, true]);
+});
+
+// 0185 (?regionelsewhere=1, enable bit 16): a return a region's wasm call did
+// not expect (an indirect call, bctrl, inside a callee: the callee's return
+// lands in the caller of the bctrl, not at the wasm call's continuation)
+// chains to the region at state.pc instead of passing 3 up to the dispatcher.
+// main calls G n times (bl, a wasm call); G calls H through bctrl (its frame
+// is lost to the exit stub's tail call); H's blr returns into G: "elsewhere"
+// at main's call site. Against the interpreter, mode on and off, in one module
+// and one region per function, at budgets that stop it anywhere; and 10 000
+// such returns in one region run (the wasm stack does not grow).
+const ELSEWHERE_CHAIN = 1 << 16;
+const elsewhereSkip = callSkip || (() => {
+  const lock = JSON.parse(readFileSync(new URL("../provenance/dolphin-source.lock.json", import.meta.url), "utf8"));
+  const built = JSON.parse(readFileSync(new URL("../cores/dolphin/dolphin-core-upstream.build.json", import.meta.url), "utf8"));
+  return built.source?.patchSeriesSha256 === lock.patchSeriesSha256 && lock.patches.some((p) => p.path.includes("/0185-"))
+    ? false : "core built from a patch series without 0185";
+})();
+const BNE = (from, to) => asm.bc(4, 2, from, to); // bne cr0
+const ELSE_TEXT = 0x8001a100;
+const elseProgram = (n) => assemble(ELSE_TEXT, [
+  "main", asm.mflr(0), asm.stwu(1, 1, -16), stw(0, 1, 20), asm.lis(30, n >>> 16), asm.ori(30, 30, n & 0xffff),
+  "loop", (pc, l) => asm.bl(pc, l.G), asm.addi(30, 30, -1), asm.cmplwi(30, 0), (pc, l) => BNE(pc, l.loop),
+  lwz(0, 1, 20), asm.addi(1, 1, 16), mtlr(0), asm.blr(),
+  "G", asm.mflr(0), asm.stwu(1, 1, -16), stw(0, 1, 20), (pc, l) => asm.lis(5, l.H >>> 16), (pc, l) => asm.ori(5, 5, l.H & 0xffff),
+  asm.mtctr(5), asm.bctrl(),
+  "X", asm.addi(4, 4, 1), lwz(0, 1, 20), asm.addi(1, 1, 16), mtlr(0), asm.blr(),
+  "H", asm.addi(6, 6, 1), asm.blr()
+]);
+const callStats = () => Array.from(new Uint32Array(core.module.HEAPU8.buffer, core.module._DolphinWeb_RegionCallStats(-1), 6));
+
+test("0185: returns elsewhere chain to the region at pc, like the interpreter, and leave the dispatcher out", { skip: elsewhereSkip }, () => {
+  const program = elseProgram(50);
+  for (const maxFunctions of [100, 1]) {
+    const runs = {};
+    for (const [name, mask] of [["off", PRODUCTION_DISABLE_MASK], ["on", PRODUCTION_DISABLE_MASK | ELSEWHERE_CHAIN]]) {
+      installCalls(maxFunctions, program, ELSE_TEXT, mask);
+      const reference = runCall(program.labels.main, { regions: false });
+      core.module._DolphinWeb_RegionCallStats(1);
+      const got = runCall(program.labels.main, { regions: true });
+      const [calls, , elsewhere] = callStats();
+      core.module._DolphinWeb_RegionCallStats(0);
+      const what = `${name}, ${maxFunctions === 1 ? "across modules" : "in one module"}`;
+      assert.deepEqual(got.state, reference.state, what);
+      assert.equal(got.downcount, reference.downcount, what);
+      assert.ok(calls >= 50 && elsewhere >= 50, `${what}: ${calls} calls, ${elsewhere} returns elsewhere`);
+      runs[name] = got.ran + got.interpreted;
+      for (const budget of [1, 9, 33, 120, 401, 999]) {
+        core.reset(seedGprs(program.labels.main), program.labels.main, STOP, budget);
+        while (core.downcount() > 0 && core.pc() !== STOP) if (!core.dispatchRegion()) assert.equal(core.interpretOne(), 0);
+        assert.equal(core.module._DolphinWeb_RegionCallDepthForTest(-1), 0, `${what}, budget ${budget}: no call left counted`);
+        const stopped = { state: core.state(), downcount: core.downcount() };
+        core.reset(seedGprs(program.labels.main), program.labels.main, STOP, budget);
+        for (let n = 0; n < 1000000 && core.downcount() > stopped.downcount; n++) assert.equal(core.interpretOne(), 0);
+        assert.equal(core.downcount(), stopped.downcount, `${what}, budget ${budget}`);
+        assert.deepEqual(core.state(), stopped.state, `${what}, budget ${budget}`);
+      }
+    }
+    // Off: every return elsewhere goes back to the dispatcher (50 of them at
+    // least); on: they chain on inside the region run.
+    assert.ok(runs.on * 5 < runs.off, `dispatcher steps on ${runs.on}, off ${runs.off}`);
+  }
+});
+
+test("0185: 10 000 returns elsewhere in one region run, the wasm stack bounded", { skip: elsewhereSkip }, () => {
+  const program = elseProgram(10000);
+  installCalls(1, program, ELSE_TEXT, PRODUCTION_DISABLE_MASK | ELSEWHERE_CHAIN);
+  const reference = runCall(program.labels.main, { regions: false });
+  const got = runCall(program.labels.main, { regions: true }); // a frame left per return would trap (stack overflow)
+  assert.deepEqual(got.state, reference.state);
+  assert.equal(got.downcount, reference.downcount);
+  assert.ok(got.ran + got.interpreted < 100, `${got.ran} region runs, ${got.interpreted} interpreted: not one per return`);
+});
+
+// 0185, mode off: the call programs' fragments (every function, one fragment
+// each) hash as on the core before 0185; bit 16 changes the fragments that
+// make a guest call (their call sites). A bit not wired leaves this red.
+export function elsewhereDigest(extraMask = 0) {
+  const h = createHash("sha256");
+  let fragments = 0;
+  for (const [program, text] of [[elseProgram(50), ELSE_TEXT], [CALLS, CALL_TEXT], [SMALL, SMALL_TEXT]]) {
+    const dol = buildDol({ textAddr: text, text: program.words, entry: program.labels.main });
+    const { image, entryPoint } = imageFromDol(dol);
+    const plan = planDol({ image, entryPoint, gameId: "TEST01", dolBytes: dol, options: { gapFill: false } });
+    for (const s of image.segments) core.load(s.start, s.bytes);
+    core.invalidate(text, 4 * program.words.length);
+    for (const group of regionGroups(plan, 1)) {
+      for (const f of group.flatMap(functionFragments(core, { mask: PRODUCTION_DISABLE_MASK | extraMask }))) {
+        fragments += 1;
+        h.update(JSON.stringify(f.entries)); h.update(f.code); h.update(JSON.stringify(f.relocs));
+      }
+    }
+  }
+  return `${fragments}:${h.digest("hex")}`;
+}
+// Measured on the core before 0185 (patch series 3d01b01, 2026-10-27).
+const ELSEWHERE_MODE_OFF_DIGEST = "13:b7bbc400fe12f57e8f5df27d9dfdbe225402a4bc8e9bf38275ec3ff2348612f0";
+test("0185: mode off emits the call programs as before 0185; bit 16 changes their call sites", { skip: elsewhereSkip }, () => {
+  assert.equal(elsewhereDigest(0), ELSEWHERE_MODE_OFF_DIGEST);
+  assert.notEqual(elsewhereDigest(ELSEWHERE_CHAIN), ELSEWHERE_MODE_OFF_DIGEST);
 });

@@ -1,0 +1,66 @@
+diff --git a/Source/Core/Core/PowerPC/CachedInterpreter/CachedInterpreter.cpp b/Source/Core/Core/PowerPC/CachedInterpreter/CachedInterpreter.cpp
+--- a/Source/Core/Core/PowerPC/CachedInterpreter/CachedInterpreter.cpp
++++ b/Source/Core/Core/PowerPC/CachedInterpreter/CachedInterpreter.cpp
+@@ -382,6 +382,13 @@
+ // eager prologue of every used GPR spilled them (research/deep-x64-region-shape).
+ // Off: blocks and regions are emitted byte for byte as before.
+ constexpr u32 DOLPHIN_WEB_ENABLE_REGSHAPE_X64 = 1u << 28;
++// 0185: ENABLE polarity (default-off; ?regionelsewhere=1). A guest return a
++// region's wasm call did not expect (the callee returned 3 with state.pc
++// another continuation than this call's: an indirect call, bctrl, inside a
++// callee lost the frames between) chains to the region at state.pc instead of
++// passing 3 up to the dispatcher. Off: regions are emitted byte for byte as
++// before.
++constexpr u32 DOLPHIN_WEB_ENABLE_REGION_ELSEWHERE_CHAIN = 1u << 16;
+ constexpr u32 REGSHAPE_X64_GPR_CAP = 4;
+ // §28ce burst smearing: when ENABLED (gate bit CLEARED), TryWriteWasmBlock
+ // returns false (falls to interpret) once this many compiles OR this much
+@@ -18147,8 +18154,46 @@
+       out->relocs.push_back({static_cast<u32>(code.size()), 4, 0});  // elsewhere: unlikely
+       code.insert(code.end(), {0x04, 0x40});  // if
+       count(2);
+-      EmitI32Const(code, 3);
+-      code.insert(code.end(), {0x0f, 0x0b});  // return 3; end
++      if ((DolphinWebDisableMask() & DOLPHIN_WEB_ENABLE_REGION_ELSEWHERE_CHAIN) != 0)
++      {
++        // 0185: chain to the region at state.pc (the stub, region_chain:
++        // RegionChainNext), as the dispatcher would after passing 3 up, and
++        // without that round trip. Nothing of this frame is left to write
++        // back: the call above was made after flush_frame() and the block's
++        // GPR flush, and the callee wrote the whole state (pc, npc,
++        // downcount, GPRs) before returning 3. What the dispatcher path
++        // between two blocks does, against what the stub does
++        // (CachedInterpreter::Run's slice loop -> ExecuteOneBlock ->
++        // TryRunRegion, and RegionChainNext):
++        //   - downcount spent: the loop leaves for CoreTiming::Advance (events,
++        //     the decrementer, external exceptions taken there); the stub
++        //     returns 0 when downcount <= 0, so this region returns 0 and the
++        //     loop does just that.
++        //   - pending exceptions between two blocks: the loop does not check
++        //     them inside a slice (only Advance and the ops that take them,
++        //     already run by the callee); neither does the stub.
++        //   - CPU state (pause, stepping): checked by the loop at slice
++        //     boundaries only, as for every chained region.
++        //   - the mode (MSR IR/DR, 0121's guards, XER.SO, perfmon), a region
++        //     not verified since an invalidation or a cache clear, regions off:
++        //     the stub refuses exactly where TryRunRegion would, returning 0
++        //     to the loop, which then runs the block path at state.pc.
++        //   - no region at state.pc: 0 as well, the block path there.
++        //   - the infinite-loop guard is downcount itself: every block and
++        //     every chained region spends it; the stub never runs code
++        //     without the region it enters spending it.
++        // The tail call replaces this frame: the wasm stack never grows, and
++        // a return 3 further up (depth still above 0) meets the next call
++        // site, which does the same.
++        EmitLocalGet(code, 0);
++        reloc_site(2, 0);
++        code.push_back(0x0b);  // end
++      }
++      else
++      {
++        EmitI32Const(code, 3);
++        code.insert(code.end(), {0x0f, 0x0b});  // return 3; end
++      }
+       // Back at the continuation: the frame from the state the callee left.
+       EmitI32Const(code, b.call_return);
+       EmitLocalSet(code, WASM_FRAME_PC_LOCAL);

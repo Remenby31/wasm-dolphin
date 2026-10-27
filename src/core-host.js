@@ -1783,6 +1783,7 @@ const CACHED_INTERPRETER_DISABLE_BITS = {
   fastmemhoist:    1 << 23, // §28cz per-block fastmem bounds-check hoist (ENABLE polarity; default-off; ?fastmemhoist=1)
   inlinefma:       1 << 26, // inline exact FMA; set: the FMA family calls the interpreter's NI_madd_msub
   regionmtmsr:     1 << 27, // 0183 regions go on past a mtmsr that changes only EE (ENABLE polarity; default-off; ?regionmtmsr=1)
+  regionelsewhere: 1 << 16, // 0185 a return a region's call did not expect chains to the region at pc (ENABLE polarity; default-off; ?regionelsewhere=1)
   regshape:        1 << 28, // 0184 x64 register shape: at most 4 GPRs per block in locals (ENABLE polarity; default-off; ?regshape=x64)
   // Aliases the plan / TL;DR uses interchangeably:
   fastinputpoll: 1 << 1, // legacy synonym for meleecall (input-poll lives there)
@@ -1832,7 +1833,8 @@ function requestedCachedInterpreterDisableMask() {
     // 0183's and 0184's bits are ENABLE bits: a raw ?disable= mask (or the
     // name) must not turn them on by accident; only ?regionmtmsr=1 and
     // ?regshape=x64 do.
-    mask &= ~(CACHED_INTERPRETER_DISABLE_BITS.regionmtmsr | CACHED_INTERPRETER_DISABLE_BITS.regshape);
+    mask &= ~(CACHED_INTERPRETER_DISABLE_BITS.regionmtmsr | CACHED_INTERPRETER_DISABLE_BITS.regshape |
+      CACHED_INTERPRETER_DISABLE_BITS.regionelsewhere);
   }
   // §28bt block re-dispatch: DEFAULT-ON. Rigorously verified +11% warm
   // (4-run non-overlapping same-binary A/B, correctness-clean on battle);
@@ -1893,6 +1895,10 @@ function requestedCachedInterpreterDisableMask() {
   }
   // 0184: the x64 register shape, default-off until the CI bench and a real
   // PC decide (?regshape=x64; automatic detection comes after).
+  // 0185: default-off while it is measured.
+  if (params.get("regionelsewhere") === "1") {
+    mask |= CACHED_INTERPRETER_DISABLE_BITS.regionelsewhere;
+  }
   if (params.get("regshape") === "x64") {
     mask |= CACHED_INTERPRETER_DISABLE_BITS.regshape;
   }
