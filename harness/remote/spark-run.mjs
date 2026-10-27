@@ -9,7 +9,7 @@
 //
 //   node harness/remote/spark-run.mjs --candidate <ref|dir> [--baseline <ref|dir>]
 //     --state <local .sav> [--name n] [--runs 6] [--lane auto|a|b] [--host spark] [--detach]
-//     [--keep-video] [--headed :2 [--xauth /run/salon-xorg/xauth]]
+//     [--keep-video] [--headed :2 [--xauth /run/salon-xorg/xauth] | --headless]
 //     [-- <race-perf options: --query, --warmup, --secs, --max-load, …>]
 //   node harness/remote/spark-run.mjs --multi --baseline <ref|dir> --candidate <ref|dir> [--candidate <ref|dir>]
 //     --state <local .sav> [--name n] [--runs 6] [--detach] [-- <race-multi options>]
@@ -212,17 +212,20 @@ export function stampSummary(summary, bench) {
 // display probes, where headless gives a synthetic 60 Hz. The variables go
 // with the launch; spark-race.sh, spark-queue.mjs and chrome-pinned.sh pass
 // them on as they are (exported, exec). WebGPU runs there on the GPU
-// (Vulkan), so the query keeps video=wgpu.
+// (Vulkan), so the query keeps video=wgpu. --headless: headless whatever
+// HARNESS_DISPLAY the bench's environment holds.
 export const BENCH_XAUTHORITY = "/run/salon-xorg/xauth";
-export function headedEnv(display, xauth = BENCH_XAUTHORITY) {
-  if (!display) return [];
+export function headedEnv(display, xauth = BENCH_XAUTHORITY, { headless = false } = {}) {
+  if (headless && display != null) throw new Error("--headed and --headless: one or the other");
+  if (headless) return ["HARNESS_DISPLAY=headless"];
+  if (display == null) return [];
   if (!/^:\d+$/.test(display)) throw new Error(`--headed ${display}: an X display as :N (the bench's bare Xorg is :2)`);
   return ["HARNESS_DISPLAY=x11", `DISPLAY=${sh(display)}`, `XAUTHORITY=${sh(xauth)}`];
 }
 
 // The Spark command that starts the pair detached and returns at once.
-export function launchCommand({ harnessDir, outDir, lane = "auto", raceArgs, chromeCpus, nodeCpus, headed = null, xauth = BENCH_XAUTHORITY }) {
-  const env = [chromeCpus && `SPARK_CHROME_CPUS=${sh(chromeCpus)}`, nodeCpus && `SPARK_NODE_CPUS=${sh(nodeCpus)}`, ...headedEnv(headed, xauth)].filter(Boolean).join(" ");
+export function launchCommand({ harnessDir, outDir, lane = "auto", raceArgs, chromeCpus, nodeCpus, headed = null, headless = false, xauth = BENCH_XAUTHORITY }) {
+  const env = [chromeCpus && `SPARK_CHROME_CPUS=${sh(chromeCpus)}`, nodeCpus && `SPARK_NODE_CPUS=${sh(nodeCpus)}`, ...headedEnv(headed, xauth, { headless })].filter(Boolean).join(" ");
   return [
     `mkdir -p ${sh(path.posix.dirname(outDir))}`,
     // Two pairs never share a name (race-perf refuses an existing --out, the log would mix).
@@ -439,7 +442,7 @@ async function main() {
       name: { type: "string" }, runs: { type: "string", default: "6" }, lane: { type: "string", default: "auto" },
       host: { type: "string", default: process.env.SPARK_HOST || "spark" },
       "chrome-cpus": { type: "string" }, "node-cpus": { type: "string" }, "keep-video": { type: "boolean", default: false },
-      headed: { type: "string" }, xauth: { type: "string", default: BENCH_XAUTHORITY },
+      headed: { type: "string" }, headless: { type: "boolean", default: false }, xauth: { type: "string", default: BENCH_XAUTHORITY },
       detach: { type: "boolean", default: false }, fetch: { type: "string" }, build: { type: "string" }
     },
     allowPositionals: true
@@ -477,7 +480,7 @@ async function main() {
   const iso = benchDisc(host, values.iso);
   const home = ssh(host, "printf %s \"$HOME\"").out;
   const abs = (p) => `${home}/${p}`;
-  headedEnv(values.headed, values.xauth); // refuses a bad display before anything is pushed
+  headedEnv(values.headed, values.xauth, { headless: values.headless }); // refuses a bad display before anything is pushed
   const bench = benchRaceArgs(positionals, { keepVideo: values["keep-video"] || Boolean(values.headed) });
   for (const s of bench.swaps) console.log(`[spark-run] ${s.option} on the bench: ${s.to} (was ${s.from})`);
   requireXfbSwitch(host, bench.args, [candidate, ...(baseline ? [baseline] : [])]);
@@ -494,10 +497,10 @@ async function main() {
     harness: { from: REPO_ROOT, key: path.basename(harness.dest) },
     sides: { candidate, ...(baseline ? { baseline } : {}) },
     querySwaps: bench.swaps,
-    headed: values.headed ?? null,
+    headed: values.headed ?? null, headless: values.headless,
     raceArgs
   };
-  ssh(host, launchCommand({ harnessDir: abs(harness.dest), outDir, lane: values.lane, raceArgs, chromeCpus: values["chrome-cpus"], nodeCpus: values["node-cpus"], headed: values.headed, xauth: values.xauth }));
+  ssh(host, launchCommand({ harnessDir: abs(harness.dest), outDir, lane: values.lane, raceArgs, chromeCpus: values["chrome-cpus"], nodeCpus: values["node-cpus"], headed: values.headed, headless: values.headless, xauth: values.xauth }));
   mkdirSync(path.join(MEASURES, date, name), { recursive: true });
   writeFileSync(path.join(MEASURES, date, name, "spark.json"), JSON.stringify(meta, null, 1) + "\n");
   console.log(`[spark-run] started on ${host}: ${date}/${name}, lane ${values.lane} (race-perf waits for its lane's perf lock)`);

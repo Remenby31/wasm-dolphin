@@ -40,7 +40,11 @@ test("spark-run --headed: the pair runs in the x11 display mode on the bench's b
   assert.deepEqual(headedEnv(null), [], "headless unless asked");
   assert.deepEqual(headedEnv(":2"), ["HARNESS_DISPLAY=x11", "DISPLAY=':2'", `XAUTHORITY='${BENCH_XAUTHORITY}'`]);
   assert.equal(BENCH_XAUTHORITY, "/run/salon-xorg/xauth");
-  for (const bad of ["2", ":2; rm", "localhost:2", ""]) if (bad) assert.throws(() => headedEnv(bad), /an X display as :N/);
+  for (const bad of ["2", ":2; rm", "localhost:2", ""]) assert.throws(() => headedEnv(bad), /an X display as :N/);
+  // --headless: headless whatever HARNESS_DISPLAY the bench holds; not with --headed.
+  assert.deepEqual(headedEnv(null, BENCH_XAUTHORITY, { headless: true }), ["HARNESS_DISPLAY=headless"]);
+  assert.throws(() => headedEnv(":2", BENCH_XAUTHORITY, { headless: true }), /one or the other/);
+  assert.match(launchCommand({ harnessDir: "/h/k", outDir: "/h/r/d/n", raceArgs: [], headless: true }), /\{ HARNESS_DISPLAY=headless setsid nohup sh /);
   const cmd = launchCommand({ harnessDir: "/h/k", outDir: "/h/r/d/n", lane: "a", raceArgs: ["--display"], headed: ":2" });
   assert.match(cmd, /\{ HARNESS_DISPLAY=x11 DISPLAY=':2' XAUTHORITY='\/run\/salon-xorg\/xauth' setsid nohup sh harness\/remote\/spark-race\.sh /);
   execFileSync("bash", ["-n", "-c", cmd]);

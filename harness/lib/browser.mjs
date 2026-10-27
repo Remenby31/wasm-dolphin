@@ -4,7 +4,7 @@
 import { execFileSync } from "node:child_process";
 import { createHash } from "node:crypto";
 import os from "node:os";
-import { existsSync, readdirSync, readFileSync } from "node:fs";
+import { existsSync, mkdtempSync, readdirSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import path from "node:path";
 import { fileURLToPath, pathToFileURL } from "node:url";
 import { clockCheck, FRAME_FIELDS, withDeterministicClock } from "./matrix.mjs";
@@ -80,7 +80,7 @@ export async function ensureServer({ port, root = REPO_ROOT, patches = [], coreC
 // Refused on macOS whatever the environment: headless stays the only mode
 // on the user's Mac. Chosen by HARNESS_DISPLAY=x11 (spark-run --headed).
 export const DISPLAYS = Object.freeze(["headless", "x11"]);
-const X11_ARGS = ["--enable-features=Vulkan", "--use-angle=vulkan", "--disable-features=ThrottleRepeatedNoDamageFrames", "--window-position=0,0", "--window-size=1920,1080"];
+export const X11_ARGS = Object.freeze(["--enable-features=Vulkan", "--use-angle=vulkan", "--disable-features=ThrottleRepeatedNoDamageFrames", "--window-position=0,0", "--window-size=1920,1080"]);
 
 // Chrome keeps only the last --enable-features and the last
 // --disable-features: every one of each becomes a single flag carrying all
@@ -101,6 +101,43 @@ export function mergeFeatureFlags(args) {
     for (const v of m[2].split(",").filter(Boolean)) if (!lists.get(m[1]).includes(v)) lists.get(m[1]).push(v);
   }
   return out.map((a) => (lists.has(a) ? `${a}=${lists.get(a).join(",")}` : a));
+}
+
+const FEATURE_FLAG = /^--(?:enable|disable)-features=/;
+
+// Playwright passes its own --disable-features (PaintHolding,
+// ThirdPartyStoragePartitioning…, a list that changes with its version) and
+// --enable-features before ours: Chrome keeping only the last of each, a
+// feature flag of ours dropped Playwright's. So when we pass one, Playwright's
+// are taken out (ignoreDefaultArgs) and merged back into ours.
+export function withPlaywrightFeatures(args, defaults) {
+  if (!args.some((a) => FEATURE_FLAG.test(a)) || !defaults?.length) return { args: mergeFeatureFlags(args), ignoreDefaultArgs: undefined };
+  return { args: mergeFeatureFlags([...defaults, ...args]), ignoreDefaultArgs: defaults };
+}
+
+// Playwright's feature flags for a launch, as it passes them: read from a
+// stand-in executable that writes its arguments down and exits (~0.2 s, once
+// per process and mode; no Chrome starts). null where a shell script cannot
+// stand in (Windows).
+const playwrightFeatures = new Map();
+export function playwrightFeatureArgs(chromium, { headless, platform = process.platform } = {}) {
+  if (platform === "win32") return Promise.resolve(null);
+  if (!playwrightFeatures.has(headless)) {
+    playwrightFeatures.set(headless, (async () => {
+      const dir = mkdtempSync(path.join(os.tmpdir(), "gc-harness-argv-"));
+      const stub = path.join(dir, "chrome");
+      try {
+        writeFileSync(stub, `#!/bin/sh\nprintf '%s\\n' "$@" > "$0.args"\nexit 1\n`, { mode: 0o755 });
+        await chromium.launch({ executablePath: stub, headless, timeout: 15000 }).then((b) => b.close(), () => {});
+        return readFileSync(`${stub}.args`, "utf8").split("\n").filter((a) => FEATURE_FLAG.test(a));
+      } catch {
+        return null;
+      } finally {
+        rmSync(dir, { recursive: true, force: true });
+      }
+    })());
+  }
+  return playwrightFeatures.get(headless);
 }
 
 // The display mode when the caller names none: HARNESS_DISPLAY, else headless.
@@ -144,6 +181,12 @@ export async function launchChrome({ profileDir, display = defaultDisplay(), arg
   // HARNESS_CHROME_PATH: run this executable instead of Chrome stable, e.g. a
   // wrapper that confines Chrome to the efficiency cores (docs/consumer-perf-extrapolation.md).
   const executablePath = process.env.HARNESS_CHROME_PATH || undefined;
+  // HARNESS_CHROME_ARGS: extra flags for one machine (e.g. Linux WebGPU:
+  // "--enable-features=Vulkan --use-angle=vulkan"), space-separated.
+  const own = [...opts.args, ...(process.env.HARNESS_CHROME_ARGS ?? "").split(/\s+/).filter(Boolean), "--enable-logging", "--v=0", `--log-file=${path.join(profileDir, "chrome.log")}`, `--crash-dumps-dir=${path.join(profileDir, "crash-dumps")}`, ...args];
+  const defaults = own.some((a) => FEATURE_FLAG.test(a)) ? await playwrightFeatureArgs(chromium, { headless: opts.headless }) : null;
+  if (own.some((a) => FEATURE_FLAG.test(a)) && !defaults) console.warn("[harness] Playwright's own feature flags could not be read: ours replace them");
+  const flags = withPlaywrightFeatures(own, defaults);
   const context = await chromium.launchPersistentContext(profileDir, {
     ...(executablePath ? { executablePath } : { channel: "chrome" }),
     headless: opts.headless,
@@ -151,9 +194,8 @@ export async function launchChrome({ profileDir, display = defaultDisplay(), arg
     viewport: opts.viewport,
     // Chrome's log and crash dumps stay in the profile; a session whose
     // renderer crashed copies them out as evidence (session.mjs).
-    // HARNESS_CHROME_ARGS: extra flags for one machine (e.g. Linux WebGPU:
-    // "--enable-features=Vulkan --use-angle=vulkan"), space-separated.
-    args: mergeFeatureFlags([...opts.args, ...(process.env.HARNESS_CHROME_ARGS ?? "").split(/\s+/).filter(Boolean), "--enable-logging", "--v=0", `--log-file=${path.join(profileDir, "chrome.log")}`, `--crash-dumps-dir=${path.join(profileDir, "crash-dumps")}`, ...args])
+    args: flags.args,
+    ...(flags.ignoreDefaultArgs ? { ignoreDefaultArgs: flags.ignoreDefaultArgs } : {})
   });
   context.assertInvisible = (when) => assertNoWindow(profileDir, when, () => context.close());
   context.pipeFault = null;

@@ -7,14 +7,18 @@
 // their processes are not pinned: on 2026-10-27 two of them sat at 100 % on
 // cpus 15 and 16, two of lane a's five Chromium cores, and the worker's rAF
 // got two BeginFrames in three. Before a pair, spark-race.sh asks here and
-// waits while any process outside the pair's own tree uses more than
-// --threshold % of a core it last ran on among the lane's.
+// waits while any thread of a process outside the pair's own tree uses more
+// than --threshold % of a core it last ran on among the lane's.
 //
 //   node spark-cores.mjs check --cpus 15-19,10-14 --exclude-tree <pid> [--threshold 50] [--ms 1000]
 //
-// Prints one JSON line ({ ok, cpus, busy: [{ pid, user, comm, cpu, pct }] })
-// and exits 0 when free, 3 when busy. CPU shares come from two reads of
-// /proc/<pid>/stat --ms apart (utime + stime), not from ps's lifetime average.
+// Prints one JSON line ({ ok, cpus, busy: [{ pid, tid, user, comm, cpu, pct }] })
+// and exits 0 when free, 3 when busy, 2 on an error. CPU shares come from two
+// reads of /proc/<pid>/task/<tid>/stat --ms apart (utime + stime), thread by
+// thread, not from ps's lifetime average. /proc/<pid>/stat will not do: its
+// utime and stime sum every thread while its cpu is the main thread's, so an
+// eval at 400 % on cpus 0-9 whose main thread slept on 12 made lane a busy,
+// and a busy thread on the lane under a main thread elsewhere went unseen.
 import { readdirSync, readFileSync, statSync } from "node:fs";
 import { execFileSync } from "node:child_process";
 import { pathToFileURL } from "node:url";
@@ -32,7 +36,8 @@ export function parseCpuList(list) {
   return out;
 }
 
-// One line of /proc/<pid>/stat: comm, ppid, ticks (utime + stime), last cpu.
+// One line of /proc/<pid>/[task/<tid>/]stat: comm, ppid, ticks (utime +
+// stime), last cpu.
 export function parseStat(line) {
   const close = line.lastIndexOf(")");
   const comm = line.slice(line.indexOf("(") + 1, close);
@@ -50,29 +55,52 @@ export function treeOf(root, parents) {
   return tree;
 }
 
-// Two snapshots (pid -> { comm, ppid, ticks, cpu, user }) `ms` apart: the
-// processes outside `exclude` above `threshold` % of a core, on one of `cpus`.
+// Two snapshots (tid -> { pid, comm, ticks, cpu, user }) `ms` apart: the
+// threads of processes outside `exclude` (pids) above `threshold` % of a
+// core, on one of `cpus`.
 export function busyOn({ before, after, ms, ticksPerSecond, cpus, exclude = new Set(), threshold = 50 }) {
   const busy = [];
-  for (const [pid, b] of after) {
-    const a = before.get(pid);
-    if (!a || exclude.has(pid) || !cpus.includes(b.cpu)) continue;
+  for (const [tid, b] of after) {
+    const a = before.get(tid);
+    if (!a || exclude.has(b.pid) || !cpus.includes(b.cpu)) continue;
     const pct = ((b.ticks - a.ticks) / ticksPerSecond / (ms / 1000)) * 100;
-    if (pct > threshold) busy.push({ pid, user: b.user, comm: b.comm, cpu: b.cpu, pct: Math.round(pct) });
+    if (pct > threshold) busy.push({ pid: b.pid, tid, user: b.user, comm: b.comm, cpu: b.cpu, pct: Math.round(pct) });
   }
   return busy.sort((x, y) => y.pct - x.pct);
 }
 
+// Every thread: tid -> { pid, comm, ticks, cpu, user }, and pid -> ppid.
 function snapshot() {
-  const out = new Map();
+  const threads = new Map(), parents = new Map();
   for (const name of readdirSync("/proc")) {
     if (!/^\d+$/.test(name)) continue;
+    const pid = Number(name);
     try {
-      const s = parseStat(readFileSync(`/proc/${name}/stat`, "utf8"));
-      out.set(Number(name), { ...s, user: statSync(`/proc/${name}`).uid });
+      const user = statSync(`/proc/${name}`).uid;
+      parents.set(pid, parseStat(readFileSync(`/proc/${name}/stat`, "utf8")).ppid);
+      for (const tid of readdirSync(`/proc/${name}/task`)) {
+        try {
+          const { comm, ticks, cpu } = parseStat(readFileSync(`/proc/${name}/task/${tid}/stat`, "utf8"));
+          threads.set(Number(tid), { pid, comm, ticks, cpu, user });
+        } catch {} // the thread ended meanwhile
+      }
     } catch {} // the process ended meanwhile
   }
-  return out;
+  return { threads, parents };
+}
+
+// The lane's cores, `cpus` ("15-19,10-14"), checked once: { ok, busy }.
+// `exclude` is a pid whose tree is ours (the pair's shell).
+export async function checkCores({ cpus, exclude = null, threshold = 50, ms = 1000 }) {
+  const list = parseCpuList(cpus);
+  const ticksPerSecond = Number(execFileSync("getconf", ["CLK_TCK"], { encoding: "utf8" }).trim()) || 100;
+  const before = snapshot().threads;
+  await new Promise((r) => setTimeout(r, ms));
+  const { threads: after, parents } = snapshot();
+  const excluded = exclude ? treeOf(Number(exclude), parents) : new Set();
+  excluded.add(process.pid);
+  const busy = busyOn({ before, after, ms, ticksPerSecond, cpus: list, exclude: excluded, threshold });
+  return { ok: busy.length === 0, at: new Date().toISOString(), cpus, threshold, busy };
 }
 
 async function main() {
@@ -81,17 +109,9 @@ async function main() {
     allowPositionals: true
   });
   if (positionals[0] !== "check" || !values.cpus) throw new Error("usage: spark-cores.mjs check --cpus 15-19,10-14 --exclude-tree <pid> [--threshold 50] [--ms 1000]");
-  const cpus = parseCpuList(values.cpus);
-  const ms = Number(values.ms);
-  const ticksPerSecond = Number(execFileSync("getconf", ["CLK_TCK"], { encoding: "utf8" }).trim()) || 100;
-  const before = snapshot();
-  await new Promise((r) => setTimeout(r, ms));
-  const after = snapshot();
-  const exclude = values["exclude-tree"] ? treeOf(Number(values["exclude-tree"]), new Map([...after].map(([pid, s]) => [pid, s.ppid]))) : new Set();
-  exclude.add(process.pid);
-  const busy = busyOn({ before, after, ms, ticksPerSecond, cpus, exclude, threshold: Number(values.threshold) });
-  console.log(JSON.stringify({ ok: busy.length === 0, at: new Date().toISOString(), cpus: values.cpus, threshold: Number(values.threshold), busy }));
-  process.exitCode = busy.length ? 3 : 0;
+  const result = await checkCores({ cpus: values.cpus, exclude: values["exclude-tree"], threshold: Number(values.threshold), ms: Number(values.ms) });
+  console.log(JSON.stringify(result));
+  process.exitCode = result.ok ? 0 : 3;
 }
 
 if (import.meta.url === pathToFileURL(process.argv[1]).href) main().catch((e) => { console.error(e.message); process.exitCode = 2; });
