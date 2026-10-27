@@ -2394,7 +2394,10 @@ test("0185: returns elsewhere chain to the region at pc, like the interpreter, a
       assert.equal(got.downcount, reference.downcount, what);
       assert.ok(calls >= 50 && elsewhere >= 50, `${what}: ${calls} calls, ${elsewhere} returns elsewhere`);
       runs[name] = got.ran + got.interpreted;
-      for (const budget of [1, 9, 33, 120, 401, 999]) {
+      // Every budget over the first iterations: one of them runs out exactly
+      // on the return elsewhere, where the stub must give the CPU loop back
+      // (Advance, exceptions), as the dispatcher would; then two far ones.
+      for (const budget of [...Array.from({ length: 120 }, (_, i) => i + 1), 401, 999]) {
         core.reset(seedGprs(program.labels.main), program.labels.main, STOP, budget);
         while (core.downcount() > 0 && core.pc() !== STOP) if (!core.dispatchRegion()) assert.equal(core.interpretOne(), 0);
         assert.equal(core.module._DolphinWeb_RegionCallDepthForTest(-1), 0, `${what}, budget ${budget}: no call left counted`);
