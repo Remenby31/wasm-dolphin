@@ -260,10 +260,22 @@ function threadCpus(pid) {
 
 // The renderer of this profile and the CPU of its busiest threads.
 export function rendererThreads(profileDir) {
+  return processThreads(profileDir, "renderer");
+}
+
+// The same for Chrome's GPU process (Dawn's command execution and the
+// compositor that hands out BeginFrames): on the Spark the emulator's
+// presents finished ~11 ms late with the GPU itself at 17 %, whatever the
+// resolution or the GPU clock, where a blank WebGPU page had no lag.
+export function gpuProcessThreads(profileDir) {
+  return processThreads(profileDir, "gpu-process");
+}
+
+function processThreads(profileDir, type) {
   if (!["darwin", "linux"].includes(process.platform)) return { error: `no per-thread CPU on ${process.platform}` };
   try {
     const ps = execFileSync("ps", ["-A", "-o", "pid=,command="], { encoding: "utf8", maxBuffer: 32 << 20 });
-    const pids = ps.split("\n").filter((l) => l.includes(profileDir) && l.includes("--type=renderer")).map((l) => l.trim().split(/\s+/)[0]);
+    const pids = ps.split("\n").filter((l) => l.includes(profileDir) && l.includes(`--type=${type}`)).map((l) => l.trim().split(/\s+/)[0]);
     let best = null;
     for (const pid of pids) {
       const threads = threadCpus(pid).sort((a, b) => b - a);
@@ -327,18 +339,24 @@ export async function measure(session, o) {
     const t0 = await page.evaluate(() => performance.timeOrigin + performance.now());
     // The window: node timers only. The rings (VI 8192, presents 16384)
     // hold far more than a window, so nothing is read until it ends.
-    const loads = [], threads = [];
+    const loads = [], threads = [], gpuThreads = [];
     // Emulated: node polls the guest ticks (one worker call per poll).
     const emulated = emu && await emu.window(o.emulatedWindow, {
       poll: (t, fraction) => {
         loads.push(os.loadavg()[0]);
-        if (fraction >= 0.5 && threads.length === 0) threads.push(rendererThreads(session.profileDir));
+        if (fraction >= 0.5 && threads.length === 0) {
+          threads.push(rendererThreads(session.profileDir));
+          gpuThreads.push(gpuProcessThreads(session.profileDir));
+        }
       }
     });
     for (let s = 0; !emu && s < o.secs; s += 1) {
       await new Promise((r) => setTimeout(r, 1000));
       loads.push(os.loadavg()[0]);
-      if (s === Math.floor(o.secs / 2)) threads.push(rendererThreads(session.profileDir));
+      if (s === Math.floor(o.secs / 2)) {
+        threads.push(rendererThreads(session.profileDir));
+        gpuThreads.push(gpuProcessThreads(session.profileDir));
+      }
     }
     const hrEnd = hrStart && !hrStart.error ? await headroomRead(page) : null;
     const readsEnd = await workerReads(page, o.workerRead);
@@ -348,6 +366,7 @@ export async function measure(session, o) {
     const t1 = await page.evaluate(() => performance.timeOrigin + performance.now());
     const pc = sampling ? await workerRequest(page, "validationPcSampler", { action: "stop" }, 20000) : pcStart && { error: pcStart.error ?? "not started" };
     threads.push(rendererThreads(session.profileDir));
+    gpuThreads.push(gpuProcessThreads(session.profileDir));
     const info = await readFrameInfo(page);
     const progress = await readCoreProgress(page);
     const ticksAfter = progress?.coreTicks ?? null;
@@ -436,6 +455,7 @@ export async function measure(session, o) {
       coreprofXfbDtMaxMs: xfbDt ? Number(xfbDt[3]) : null,
       codeSpace: code ? { clears: Number(code[1]), fullClears: Number(code[2]), highKiB: Number(code[3]), sizeMiB: Number(code[4]) } : null,
       rendererThreads: threads,
+      gpuProcessThreads: gpuThreads,
       freezes: { core: core.freezes?.length ?? 0, present: pres.freezes.length },
       pc: pc && !pc.error ? summarizePcSamples(pc, { functions: o.functions }) : pc,
       // --pc-raw: the whole window's histogram, not only its top 40.

@@ -20,3 +20,14 @@ test("race-perf --worker-set: validationSet* requests with JSON payloads, one si
   const side = src.slice(src.indexOf("async function measureSide("));
   assert.ok(side.indexOf("side.workerSets") < side.indexOf("record.cold = await timed(measure(session, o)"));
 });
+
+test("race-perf: the GPU process's busiest threads, sampled with the renderer's, kept in each window", async () => {
+  const src = await readFile(new URL("../harness/probes/race-perf.mjs", import.meta.url), "utf8");
+  assert.match(src, /export function gpuProcessThreads\(profileDir\) \{\n\s+return processThreads\(profileDir, "gpu-process"\);/);
+  assert.match(src, /l\.includes\(`--type=\$\{type\}`\)/);
+  assert.equal((src.match(/gpuThreads\.push\(gpuProcessThreads\(session\.profileDir\)\);/g) ?? []).length, 3, "mid-window (both window kinds) and end");
+  assert.match(src, /gpuProcessThreads: gpuThreads,/);
+  const { gpuProcessThreads } = await import("../harness/probes/race-perf.mjs");
+  // no Chrome of this profile: no process, null (never a throw)
+  assert.equal(gpuProcessThreads("/nonexistent-profile-xyz"), null);
+});
