@@ -86,8 +86,8 @@
     {
       "path": "src/core-host.js",
       "hashMode": "lf-normalized",
-      "size": 88135,
-      "sha256": "7cd5942377b7d07137e42678167a6d783241d0695eb155ba4e54e13381a1c97d"
+      "size": 88595,
+      "sha256": "669c9b1dbd85ac2bbfc092b59f608cc59c7a7f7ad75b7563ff1e3c1cfad6a886"
     },
     {
       "path": "src/diagnostic-log-filter.js",
