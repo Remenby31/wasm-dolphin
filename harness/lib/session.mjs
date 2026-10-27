@@ -4,7 +4,7 @@
 import { cpSync, existsSync, mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import os from "node:os";
 import path from "node:path";
-import { bootIso, captureAtVi, grabFrame, launchChrome, readCoreProgress, readFrameInfo, readTimeline, REPO_ROOT, watchPage } from "./browser.mjs";
+import { bootIso, captureAtVi, defaultDisplay, grabFrame, launchChrome, readCoreProgress, readFrameInfo, readTimeline, REPO_ROOT, watchPage } from "./browser.mjs";
 import { addGamepadMock } from "./gamepad-mock.mjs";
 import { installMonitor } from "./monitor.mjs";
 import { encodePng } from "./png.mjs";
@@ -31,7 +31,7 @@ export function copySeedProfile(seed, dest) {
   for (const f of ["SingletonLock", "SingletonSocket", "SingletonCookie", OWNER_FILE]) rmSync(path.join(dest, f), { force: true });
 }
 
-export async function openSession({ base, server = null, query, iso, display = "headless", gamepads = null, keepProfile = false, routes = {}, launch = launchChrome, harness = {}, chromeArgs = [], seedProfile = null }) {
+export async function openSession({ base, server = null, query, iso, display = defaultDisplay(), gamepads = null, keepProfile = false, routes = {}, launch = launchChrome, harness = {}, chromeArgs = [], seedProfile = null }) {
   // Fail before Chrome exists: a missing disc must not cost a browser.
   if (!iso || !existsSync(iso)) throw new Error(`disc image not found: ${iso}`);
   const profileDir = mkdtempSync(path.join(os.tmpdir(), "gc-harness-profile-"));

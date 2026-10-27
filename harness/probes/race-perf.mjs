@@ -92,6 +92,11 @@
 //   window; each window carries workerReads[name] = { start, end, delta }
 //   (delta: end - start per numeric field but the reply's id). A request the core lacks gives
 //   its error, never a failure.
+// - --worker-set 'name={json}' (candidate) / --baseline-worker-set (baseline,
+//   default none): validationSet* worker requests sent once the side's page
+//   is open, before its windows, e.g. a diagnosis perturbation on one side
+//   only ('validationSetWgpuPerturbation={"readbackNoMap":true}'); several
+//   separated by ';'. Each reply is kept in the run (workerSets).
 import { execFileSync } from "node:child_process";
 import { randomBytes } from "node:crypto";
 import { existsSync, mkdirSync, readdirSync, readFileSync, rmSync, statSync, writeFileSync } from "node:fs";
@@ -255,10 +260,22 @@ function threadCpus(pid) {
 
 // The renderer of this profile and the CPU of its busiest threads.
 export function rendererThreads(profileDir) {
+  return processThreads(profileDir, "renderer");
+}
+
+// The same for Chrome's GPU process (Dawn's command execution and the
+// compositor that hands out BeginFrames): on the Spark the emulator's
+// presents finished ~11 ms late with the GPU itself at 17 %, whatever the
+// resolution or the GPU clock, where a blank WebGPU page had no lag.
+export function gpuProcessThreads(profileDir) {
+  return processThreads(profileDir, "gpu-process");
+}
+
+function processThreads(profileDir, type) {
   if (!["darwin", "linux"].includes(process.platform)) return { error: `no per-thread CPU on ${process.platform}` };
   try {
     const ps = execFileSync("ps", ["-A", "-o", "pid=,command="], { encoding: "utf8", maxBuffer: 32 << 20 });
-    const pids = ps.split("\n").filter((l) => l.includes(profileDir) && l.includes("--type=renderer")).map((l) => l.trim().split(/\s+/)[0]);
+    const pids = ps.split("\n").filter((l) => l.includes(profileDir) && l.includes(`--type=${type}`)).map((l) => l.trim().split(/\s+/)[0]);
     let best = null;
     for (const pid of pids) {
       const threads = threadCpus(pid).sort((a, b) => b - a);
@@ -322,18 +339,24 @@ export async function measure(session, o) {
     const t0 = await page.evaluate(() => performance.timeOrigin + performance.now());
     // The window: node timers only. The rings (VI 8192, presents 16384)
     // hold far more than a window, so nothing is read until it ends.
-    const loads = [], threads = [];
+    const loads = [], threads = [], gpuThreads = [];
     // Emulated: node polls the guest ticks (one worker call per poll).
     const emulated = emu && await emu.window(o.emulatedWindow, {
       poll: (t, fraction) => {
         loads.push(os.loadavg()[0]);
-        if (fraction >= 0.5 && threads.length === 0) threads.push(rendererThreads(session.profileDir));
+        if (fraction >= 0.5 && threads.length === 0) {
+          threads.push(rendererThreads(session.profileDir));
+          gpuThreads.push(gpuProcessThreads(session.profileDir));
+        }
       }
     });
     for (let s = 0; !emu && s < o.secs; s += 1) {
       await new Promise((r) => setTimeout(r, 1000));
       loads.push(os.loadavg()[0]);
-      if (s === Math.floor(o.secs / 2)) threads.push(rendererThreads(session.profileDir));
+      if (s === Math.floor(o.secs / 2)) {
+        threads.push(rendererThreads(session.profileDir));
+        gpuThreads.push(gpuProcessThreads(session.profileDir));
+      }
     }
     const hrEnd = hrStart && !hrStart.error ? await headroomRead(page) : null;
     const readsEnd = await workerReads(page, o.workerRead);
@@ -343,6 +366,7 @@ export async function measure(session, o) {
     const t1 = await page.evaluate(() => performance.timeOrigin + performance.now());
     const pc = sampling ? await workerRequest(page, "validationPcSampler", { action: "stop" }, 20000) : pcStart && { error: pcStart.error ?? "not started" };
     threads.push(rendererThreads(session.profileDir));
+    gpuThreads.push(gpuProcessThreads(session.profileDir));
     const info = await readFrameInfo(page);
     const progress = await readCoreProgress(page);
     const ticksAfter = progress?.coreTicks ?? null;
@@ -431,6 +455,7 @@ export async function measure(session, o) {
       coreprofXfbDtMaxMs: xfbDt ? Number(xfbDt[3]) : null,
       codeSpace: code ? { clears: Number(code[1]), fullClears: Number(code[2]), highKiB: Number(code[3]), sizeMiB: Number(code[4]) } : null,
       rendererThreads: threads,
+      gpuProcessThreads: gpuThreads,
       freezes: { core: core.freezes?.length ?? 0, present: pres.freezes.length },
       pc: pc && !pc.error ? summarizePcSamples(pc, { functions: o.functions }) : pc,
       // --pc-raw: the whole window's histogram, not only its top 40.
@@ -448,6 +473,21 @@ export async function measure(session, o) {
 
 // Headroom counters (0113) and the core ticks, read together; reset >= 0
 // zeroes and turns the counters on.
+// --worker-set / --baseline-worker-set: 'validationSetX={json};validationSetY={json}'.
+export function workerSetsOf(spec, flag) {
+  if (spec == null || spec === "") return [];
+  return String(spec).split(";").map((x) => x.trim()).filter(Boolean).map((item) => {
+    const eq = item.indexOf("=");
+    const name = eq < 0 ? item : item.slice(0, eq);
+    if (!/^validationSet[A-Za-z]+$/.test(name)) throw new Error(`--${flag} ${name}: expected a validationSet* worker request`);
+    let payload = {};
+    if (eq >= 0) {
+      try { payload = JSON.parse(item.slice(eq + 1)); } catch { throw new Error(`--${flag} ${name}: the payload is not JSON`); }
+    }
+    return { name, payload };
+  });
+}
+
 // --worker-read: each request's reply (or its error), in order.
 async function workerReads(page, names) {
   const out = {};
@@ -641,6 +681,12 @@ async function measureSide(side, o, loadGate) {
     const bootStart = performance.now();
     const session = await openSession({ base: server.base, server, query: side.query ?? o.query, iso: o.iso, routes: o.state ? { [STATE_ROUTE]: o.state } : {}, chromeArgs: side.chromeArgs ?? [], harness: o.display ? { displayed: true } : {} });
     const record = { url: session.url, served: server.identity, core: session.core, loadGate, bootMs: round(performance.now() - bootStart, 0) };
+    if (side.workerSets?.length) {
+      record.workerSets = [];
+      for (const { name, payload } of side.workerSets) {
+        record.workerSets.push({ name, payload, reply: await workerRequest(session.page, name, payload, 10000).catch((e) => ({ error: String(e.message || e) })) });
+      }
+    }
     // --run-timeout: a measure that never ends (a hung page or a frozen
     // core: 64 min under the lock, 2026-10-23) fails the run; the session
     // closes and the window's counters (o.onWindow.abort) stop.
@@ -717,7 +763,7 @@ async function main() {
       "emulated-window": { type: "string" }, "emulated-warmup": { type: "string" }, "emulated-poll-ms": { type: "string", default: "100" },
       hold: { type: "string", default: "KeyX" }, warm: { type: "boolean", default: false },
       "max-load": { type: "string" }, "lock-wait": { type: "string", default: "1800" },
-      pcsample: { type: "string" }, "pc-raw": { type: "boolean", default: false }, symbols: { type: "string" }, "region-sample": { type: "string" }, "worker-read": { type: "string" }, "region-secs": { type: "string", default: "10" }, counters: { type: "boolean", default: false }, steps: { type: "string" }, "counter-events": { type: "string" }, "pin-cpu-thread": { type: "string" }, "run-timeout": { type: "string", default: "1800" }, "unique-frames": { type: "string" }, display: { type: "boolean", default: false }, "mem-stats": { type: "boolean", default: false }, "mem-warm": { type: "string", default: "5" }, headroom: { type: "boolean", default: false }, "frames-per-vi-ref": { type: "string" }, "baseline-query": { type: "string" }, "decoupled-unlimited": { type: "boolean", default: false }, "chrome-args": { type: "string" }, "baseline-chrome-args": { type: "string" },
+      pcsample: { type: "string" }, "pc-raw": { type: "boolean", default: false }, symbols: { type: "string" }, "region-sample": { type: "string" }, "worker-read": { type: "string" }, "region-secs": { type: "string", default: "10" }, counters: { type: "boolean", default: false }, steps: { type: "string" }, "counter-events": { type: "string" }, "pin-cpu-thread": { type: "string" }, "run-timeout": { type: "string", default: "1800" }, "unique-frames": { type: "string" }, display: { type: "boolean", default: false }, "mem-stats": { type: "boolean", default: false }, "mem-warm": { type: "string", default: "5" }, headroom: { type: "boolean", default: false }, "frames-per-vi-ref": { type: "string" }, "baseline-query": { type: "string" }, "decoupled-unlimited": { type: "boolean", default: false }, "chrome-args": { type: "string" }, "baseline-chrome-args": { type: "string" }, "worker-set": { type: "string" }, "baseline-worker-set": { type: "string" },
       "core-candidate": { type: "string", multiple: true, default: [] },
       port: { type: "string", default: process.env.HARNESS_PORT }, out: { type: "string" }
     },
@@ -755,6 +801,8 @@ async function main() {
   if (values.baseline && !baselineQuery && new URLSearchParams(query).has("coreid")) throw new Error("--baseline compares the two sides' own cores: a coreid in --query needs a --baseline-query without it (else both sides load it)");
   const chromeArgs = chromeArgsOf(values["chrome-args"], "chrome-args");
   const baselineChromeArgs = values["baseline-chrome-args"] == null ? chromeArgs : chromeArgsOf(values["baseline-chrome-args"], "baseline-chrome-args");
+  const workerSets = workerSetsOf(values["worker-set"], "worker-set");
+  const baselineWorkerSets = workerSetsOf(values["baseline-worker-set"], "baseline-worker-set");
   if (values["baseline-chrome-args"] != null && !values.baseline) throw new Error("--baseline-chrome-args needs --baseline");
   const runs = num(values, "runs", { min: 1, int: true });
   if (values["counter-events"] && !values.counters) throw new Error("--counter-events needs --counters");
@@ -825,8 +873,8 @@ async function main() {
   // lock's signal handler exits the process, which runs this).
   const dropExports = () => { for (const s of Object.values(sides)) if (s.temp && existsSync(s.root)) { release(s.root); rmSync(s.root, { recursive: true, force: true }); } };
   process.once("exit", dropExports);
-  sides.candidate = { ...resolveSide("candidate", values.candidate), chromeArgs };
-  if (values.baseline) sides.baseline = { ...resolveSide("baseline", values.baseline), query: baselineQuery, chromeArgs: baselineChromeArgs };
+  sides.candidate = { ...resolveSide("candidate", values.candidate), chromeArgs, workerSets };
+  if (values.baseline) sides.baseline = { ...resolveSide("baseline", values.baseline), query: baselineQuery, chromeArgs: baselineChromeArgs, workerSets: baselineWorkerSets };
   // A calm machine first (--calm-wait, default --lock-wait), then the lock.
   const calmWait = values["calm-wait"] == null ? lockWait : num(values, "calm-wait", { min: 0 });
   const acquire = () => acquirePerfLock({ requireMains: true, name: `harness race-perf (${REPO_ROOT})`, waitSec: lockWait, log: (m) => console.log(`[race-perf] ${m}`) });
