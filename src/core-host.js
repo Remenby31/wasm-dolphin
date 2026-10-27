@@ -498,6 +498,7 @@ export class EmulatorHost {
             memcardSlotB: this.memcardSlotB,
             internalResolution: this.enhancements.internalResolution,
             maxAnisotropy: this.enhancements.maxAnisotropy,
+            widescreen: this.enhancements.widescreen,
             displayFilter: this.displayFilter,
             efbAccess: this.efbAccess,
             fifoLog: this.fifoLog,
@@ -951,12 +952,16 @@ export class EmulatorHost {
   // frame. Resolves { applied, internalResolution } (applied false before the
   // core runs, or with a core without patch 0168); the values are kept for
   // the next boot.
-  async setEnhancements({ internalResolution, anisotropy } = {}) {
+  // widescreen: true for 16:9 (patch 0178, Dolphin's generic widescreen
+  // hack: the 3D view widened; 2D elements stretched, some objects cut at the
+  // edges), false for 4:3. The canvas follows the core's backbuffer.
+  async setEnhancements({ internalResolution, anisotropy, widescreen } = {}) {
     if (internalResolution !== undefined) {
       const { ceiling } = await this.internalResolutionCeiling();
       this.enhancements.internalResolution = clampInternalResolution(internalResolution, ceiling);
     }
     if (anisotropy !== undefined) this.enhancements.maxAnisotropy = anisotropyToCore(anisotropy);
+    if (widescreen !== undefined) this.enhancements.widescreen = widescreen === true;
     if (this.mode !== "dolphin" || typeof this.adapter?.setEnhancements !== "function") {
       return { applied: false, reason: "core-not-loaded" };
     }

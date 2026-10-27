@@ -113,6 +113,7 @@ export class UpstreamWorkerAdapter {
     memcardSlotB = false,
     internalResolution = 1,
     maxAnisotropy = -1,
+    widescreen = false,
     displayFilter = null,
     efbAccess = false,
     fifoLog = false,
@@ -248,6 +249,7 @@ export class UpstreamWorkerAdapter {
     this.memcardSlotB = Boolean(memcardSlotB);
     this.internalResolution = Number(internalResolution) || 1;
     this.maxAnisotropy = Number.isInteger(maxAnisotropy) ? maxAnisotropy : -1;
+    this.widescreen = widescreen === true;
     this.displayFilter = displayFilter && typeof displayFilter === "object" ? { ...displayFilter } : null;
     this.efbAccess = Boolean(efbAccess);
     this.fifoLog = Boolean(fifoLog);
@@ -504,6 +506,7 @@ export class UpstreamWorkerAdapter {
       memcardSlotB: this.memcardSlotB,
       internalResolution: this.internalResolution,
       maxAnisotropy: this.maxAnisotropy,
+      widescreen: this.widescreen,
       displayFilter: this.displayFilter,
       efbAccess: this.efbAccess,
       fifoLog: this.fifoLog,
@@ -904,13 +907,16 @@ export class UpstreamWorkerAdapter {
   }
 
   // Patch 0168: internal resolution and anisotropy while a game runs.
-  async setEnhancements({ internalResolution = 1, maxAnisotropy = -1 } = {}) {
+  // Patch 0178: widescreen too.
+  async setEnhancements({ internalResolution = 1, maxAnisotropy = -1, widescreen = this.widescreen } = {}) {
     this.internalResolution = Number(internalResolution) || 1;
     this.maxAnisotropy = Number.isInteger(maxAnisotropy) ? maxAnisotropy : -1;
+    this.widescreen = widescreen === true;
     if (!this.loaded) return { applied: false, reason: "core-not-loaded" };
     return this.request("setEnhancements", {
       internalResolution: this.internalResolution,
-      maxAnisotropy: this.maxAnisotropy
+      maxAnisotropy: this.maxAnisotropy,
+      widescreen: this.widescreen
     });
   }
 

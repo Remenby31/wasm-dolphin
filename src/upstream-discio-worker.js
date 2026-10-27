@@ -1751,6 +1751,7 @@ async function handleMessage(type, payload) {
         memcardSlotB: payload.memcardSlotB,
         internalResolution: payload.internalResolution,
         maxAnisotropy: payload.maxAnisotropy,
+        widescreen: payload.widescreen,
         displayFilter: payload.displayFilter,
         efbAccess: payload.efbAccess,
         fifoLog: payload.fifoLog,
@@ -2495,8 +2496,12 @@ async function handleMessage(type, payload) {
       // Held to the adapter's ceiling: the answer says the scale in effect.
       const internalResolution = set(...enhancementCoreArgs(payload, wgpuScaleCeiling()));
       if (internalResolution > 0) wgpuInternalResolution = internalResolution;
+      // Patch 0178: 16:9 (absent from an older core: widescreen null).
+      const setWide = moduleInstance?._DolphinWeb_SetWidescreen;
+      const widescreen = typeof setWide === "function" && typeof payload.widescreen === "boolean"
+        ? setWide(payload.widescreen ? 1 : 0) === 1 : null;
       return internalResolution > 0
-        ? { applied: true, internalResolution, ceiling: wgpuScaleCeiling() }
+        ? { applied: true, internalResolution, widescreen, ceiling: wgpuScaleCeiling() }
         : { applied: false, reason: "core-not-running" };
     }
     case "setDisplayFilter":
@@ -2565,6 +2570,7 @@ async function loadCore({
   memcardSlotB = false,
   internalResolution = 1,
   maxAnisotropy = -1,
+  widescreen = false,
   displayFilter = null,
   efbAccess = false,
   fifoLog = false,
@@ -3102,6 +3108,8 @@ async function loadCore({
     // WebGPU path.
     dolphinEfbScale: (wgpuInternalResolution = clampInternalResolution(internalResolution, wgpuScaleCeiling())),
     dolphinMaxAnisotropy: Number.isInteger(maxAnisotropy) ? maxAnisotropy : -1,
+    // Patch 0178: Dolphin's generic widescreen hack, 16:9 backbuffer.
+    dolphinWidescreen: widescreen === true,
     dolphinEfbAccess: Boolean(efbAccess),
     dolphinEfbCopyRam: Boolean(efbCopyRam),
     dolphinEfbNoDefer: Boolean(efbNoDefer),

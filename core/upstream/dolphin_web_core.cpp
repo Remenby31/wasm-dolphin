@@ -682,6 +682,20 @@ static int ApplyEnhancements(int efb_scale, int anisotropy)
   return scale;
 }
 
+// Patch 0178. Widescreen: Dolphin's generic widescreen hack (the 3D
+// projection widened to 16:9, no per-game code) with the presenter drawing
+// at 16:9 (ForceWide); WebGPUGfx then makes the backbuffer 16:9 and tells
+// the page. Off: the picture fills a 4:3 backbuffer (Stretch, as before).
+// WebGPU only (the software renderer ignores the hack's projection). Base
+// layer, applied by the video thread at its next frame. Returns 1 when on.
+static int ApplyWidescreen(int on)
+{
+  const bool wide = s_video_backend == "WebGPU" && on == 1;
+  Config::SetBase(Config::GFX_WIDESCREEN_HACK, wide);
+  Config::SetBase(Config::GFX_ASPECT_RATIO, wide ? AspectMode::ForceWide : AspectMode::Stretch);
+  return wide ? 1 : 0;
+}
+
 void EnsureRuntime()
 {
   if (s_runtime_initialized)
@@ -876,6 +890,9 @@ void EnsureRuntime()
   // default analog aspect pillarboxes a 640-wide XFB to ~583 pixels, so the
   // hardware path showed every game narrower than the software one.
   Config::SetBase(Config::GFX_ASPECT_RATIO, AspectMode::Stretch);
+  // ?widescreen=1 (Module['dolphinWidescreen'], patch 0178): 16:9 instead.
+  ApplyWidescreen(EM_ASM_INT({ return (typeof Module !== 'undefined' &&
+                                       Module['dolphinWidescreen']) ? 1 : 0; }));
   // §28cx: ubershaders DISCRIMINATOR (May-30). The UBO const-index fix made the
   // uber pixel shaders translate (fail 27->0) and 7195 draws execute, but the EFB
   // is still all-zero (nz=0/max=0) => draws write nothing. Flip WebGPU back to
@@ -1392,6 +1409,19 @@ int DolphinWeb_SetEnhancements(int efb_scale, int anisotropy)
   if (!s_runtime_initialized)
     return 0;
   return ApplyEnhancements(efb_scale, anisotropy);
+}
+
+// Widescreen on (1) or off (0) while a game runs (patch 0178). Returns 1
+// when on, 0 when off, -1 before the runtime exists (nothing applied: the
+// boot reads Module's field).
+#ifdef __EMSCRIPTEN__
+EMSCRIPTEN_KEEPALIVE
+#endif
+int DolphinWeb_SetWidescreen(int on)
+{
+  if (!s_runtime_initialized)
+    return -1;
+  return ApplyWidescreen(on);
 }
 
 // Heap use, for diagnostics only (the headroom at 4x, follow-up of 0168):
