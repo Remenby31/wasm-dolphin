@@ -27,8 +27,10 @@ export function vsyncLateMs(deltas, { floor = 12, fallback = 25 } = {}) {
   return Math.max(floor, 1.5 * Math.min(...valid));
 }
 
-export function createVsyncQueue({ queueSize = 2, poolSize = queueSize + 1, createTexture, destroyTexture = () => {} } = {}) {
+export function createVsyncQueue({ queueSize = 2, poolSize = queueSize + 1, softCatchUp = false, createTexture, destroyTexture = () => {} } = {}) {
   let key = "";
+  // ?presentcatchup=soft: the frame takeForDisplay showed last was late.
+  let shownLate = false;
   let free = [];
   let made = 0;
   let current = null;
@@ -36,7 +38,7 @@ export function createVsyncQueue({ queueSize = 2, poolSize = queueSize + 1, crea
   // droppedNoBeginFrame: frames dropped while no BeginFrame came for 50 ms
   // (a hidden tab, or a visible stall: the drop-meter counts what the screen
   // missed then), kept apart from drops at a BeginFrame.
-  const stats = { queued: 0, shown: 0, dropped: 0, droppedNoBeginFrame: 0, caughtUp: 0, presentNoPass: 0, overflow: 0 };
+  const stats = { queued: 0, shown: 0, dropped: 0, droppedNoBeginFrame: 0, caughtUp: 0, presentNoPass: 0, overflow: 0, shownLate: 0 };
 
   const giveBack = (tex) => { if (tex) free.push(tex); };
 
@@ -44,6 +46,8 @@ export function createVsyncQueue({ queueSize = 2, poolSize = queueSize + 1, crea
     stats,
     get waiting() { return queue.length; },
     get current() { return current; },
+    get softCatchUp() { return softCatchUp; },
+    set softCatchUp(on) { softCatchUp = Boolean(on); },
 
     // The frame's texture for a backbuffer pass: the one this frame already
     // has, else a free one, else a new one while the pool allows, else the
@@ -106,13 +110,22 @@ export function createVsyncQueue({ queueSize = 2, poolSize = queueSize + 1, crea
     // At a BeginFrame `tick`: the frame to show, the oldest, after the
     // catch-up (a frame queued before the previous BeginFrame gives way to a
     // newer one). The caller copies it, then calls shown(frame).
+    // softCatchUp (?presentcatchup=soft): a frame late by one BeginFrame
+    // only (queued between the two previous ones) is shown, not dropped,
+    // unless the previous BeginFrame showed a late frame too: dropping it
+    // left the next BeginFrame with nothing new, a repeat on screen. A
+    // backlog that lasts is still caught up, one vsync later at most.
     takeForDisplay(tick) {
-      while (queue.length > 1 && queue[0].tick < tick - 1) {
+      const keep = softCatchUp && !shownLate ? tick - 2 : tick - 1;
+      while (queue.length > 1 && queue[0].tick < keep) {
         giveBack(queue.shift().tex);
         stats.dropped += 1;
         stats.caughtUp += 1;
       }
-      return queue.shift() ?? null;
+      const f = queue.shift() ?? null;
+      shownLate = Boolean(f && queue.length && f.tick < tick - 1);
+      if (shownLate) stats.shownLate += 1;
+      return f;
     },
 
     // The device is gone: forget the queue and the frame in progress (their
@@ -120,6 +133,7 @@ export function createVsyncQueue({ queueSize = 2, poolSize = queueSize + 1, crea
     clear() {
       queue.length = 0;
       current = null;
+      shownLate = false;
       free = [];
       made = 0;
       key = "";
@@ -132,6 +146,7 @@ export function createVsyncQueue({ queueSize = 2, poolSize = queueSize + 1, crea
     // `hidden`: no BeginFrame comes (a hidden tab): the older frames could
     // not have been shown, counted as droppedNoBeginFrame, not as drops.
     takeNewest({ hidden = false } = {}) {
+      shownLate = false;
       while (queue.length > 1) {
         giveBack(queue.shift().tex);
         if (hidden) {

@@ -1737,6 +1737,7 @@ async function handleMessage(type, payload) {
         sleepK: payload.sleepK,
         sleepSpinUs: payload.sleepSpinUs,
         presentVsync: payload.presentVsync,
+        presentSoftCatchUp: payload.presentSoftCatchUp,
         coreLog: payload.coreLog,
         memcardSlotB: payload.memcardSlotB,
         internalResolution: payload.internalResolution,
@@ -2542,6 +2543,7 @@ async function loadCore({
   sleepK = 750,
   sleepSpinUs = 150,
   presentVsync = true,
+  presentSoftCatchUp = false,
   coreLog = false,
   memcardSlotB = false,
   internalResolution = 1,
@@ -3046,6 +3048,7 @@ async function loadCore({
   // Not with the detached presenter: it shows a bitmap of the canvas, which
   // the vsync presenter fills only at its rAF (a stale picture).
   wgpuPresentVsync = presentVsync !== false && typeof self.requestAnimationFrame === "function" && !wgpuDetachedPresenter;
+  wgpuVsync.softCatchUp = presentSoftCatchUp === true;
   releaseWgpuReadback();
   moduleInstance = await factory({
     noInitialRun: true,

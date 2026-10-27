@@ -90,6 +90,68 @@ test("catch-up: a frame queued before the previous BeginFrame gives way to a new
   assert.equal(q.takeForDisplay(5).i, 2);
 });
 
+// ?presentcatchup=soft: one vsync producer (a frame every BeginFrame) after a
+// two-frame burst. The default catch-up drops the burst's second frame and the
+// next BeginFrame has nothing new (a repeat); the soft one shows it.
+function burstThenGap(softCatchUp) {
+  const { q, frame } = harness({ queueSize: 2 });
+  q.softCatchUp = softCatchUp;
+  const shown = [];
+  const show = (tick) => { const f = q.takeForDisplay(tick); if (f) q.shown(f); shown.push(f?.i ?? null); };
+  frame(); q.queueFrame({ tick: 0, i: 0 });
+  frame(); q.queueFrame({ tick: 0, i: 1 }); // the burst
+  show(1);                                   // 0
+  frame(); q.queueFrame({ tick: 1, i: 2 });
+  show(2);                                   // 1 is late by one BeginFrame
+  show(3);                                   // the gap after the burst
+  return { q, shown };
+}
+
+test("soft catch-up: a frame late by one BeginFrame is shown, so the gap after a burst repeats nothing", () => {
+  const hard = burstThenGap(false);
+  assert.deepEqual(hard.shown, [0, 2, null], "default: 1 dropped, nothing new at tick 3");
+  assert.equal(hard.q.stats.caughtUp, 1);
+  const soft = burstThenGap(true);
+  assert.deepEqual(soft.shown, [0, 1, 2], "soft: every frame shown, one vsync late for one frame");
+  assert.equal(soft.q.stats.caughtUp, 0);
+  assert.equal(soft.q.stats.shownLate, 1);
+});
+
+test("soft catch-up: a backlog that lasts is caught up at the next BeginFrame, never twice late in a row", () => {
+  const { q, frame } = harness({ queueSize: 2 });
+  q.softCatchUp = true;
+  frame(); q.queueFrame({ tick: 0, i: 0 });
+  frame(); q.queueFrame({ tick: 0, i: 1 });
+  q.shown(q.takeForDisplay(1));                        // 0
+  frame(); q.queueFrame({ tick: 1, i: 2 });
+  assert.equal(q.takeForDisplay(2).i, 1, "late by one: shown");
+  frame(); q.queueFrame({ tick: 2, i: 3 });
+  // 2 is late by one again: the previous BeginFrame showed a late frame, so it goes
+  assert.equal(q.takeForDisplay(3).i, 3);
+  assert.equal(q.stats.caughtUp, 1);
+  assert.equal(q.stats.shownLate, 1);
+});
+
+test("soft catch-up: a frame late by two BeginFrames still gives way, and takeNewest resets the streak", () => {
+  const { q, frame } = harness({ queueSize: 2 });
+  q.softCatchUp = true;
+  frame(); q.queueFrame({ tick: 0, i: 0 });
+  frame(); q.queueFrame({ tick: 3, i: 1 });
+  const a = q.takeForDisplay(3);
+  assert.equal(a.i, 1, "0 waited two BeginFrames");
+  q.shown(a);
+  assert.equal(q.stats.caughtUp, 1);
+  frame(); q.queueFrame({ tick: 3, i: 2 });
+  frame(); q.queueFrame({ tick: 4, i: 3 });
+  const b = q.takeForDisplay(5);
+  assert.equal(b.i, 2, "late by one, shown");
+  q.shown(b);
+  q.shown(q.takeNewest());
+  frame(); q.queueFrame({ tick: 5, i: 4 });
+  frame(); q.queueFrame({ tick: 6, i: 5 });
+  assert.equal(q.takeForDisplay(7).i, 4, "after takeNewest a late frame may be shown again");
+});
+
 test("a new pool key (resize, format, device) drops the pool, the queue and the current frame", () => {
   const { q, frame, made } = harness();
   frame(); q.queueFrame({ tick: 0 });

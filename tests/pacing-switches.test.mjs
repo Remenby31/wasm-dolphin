@@ -18,7 +18,7 @@ const SWITCHES = [
 test("pacing switches: URL parsing, shipped defaults, each switch only its own", async () => {
   const { requestedPacing } = await import("../src/core-host.js");
   // Rush off by default (upstream's default): ?rush=1 turns it back on.
-  assert.deepEqual(requestedPacing(""), { rushPresentation: false, syncOnSkipIdle: false, dupXfbRearmsThrottle: false, smoothEarly: true, sleepMarginUs: 0, sleepStepUs: 0, sleepK: 750, sleepSpinUs: 150, presentVsync: true });
+  assert.deepEqual(requestedPacing(""), { rushPresentation: false, syncOnSkipIdle: false, dupXfbRearmsThrottle: false, smoothEarly: true, sleepMarginUs: 0, sleepStepUs: 0, sleepK: 750, sleepSpinUs: 150, presentVsync: true, presentSoftCatchUp: false });
   for (const s of SWITCHES) {
     const p = requestedPacing(`?${s.param}`);
     assert.equal(p[s.option], s.on, s.param);
@@ -132,6 +132,41 @@ test("presentvsync: URL → host → adapter → worker, on by default, ?present
   assert.match(host, /\n {12}presentVsync: this\.pacing\.presentVsync,\n/);
   assert.match(worker, /\n {8}presentVsync: payload\.presentVsync,\n/);
   assert.match(worker, /wgpuPresentVsync = presentVsync !== false && typeof self\.requestAnimationFrame === "function" && !wgpuDetachedPresenter;/, "only with a worker rAF, never with the detached presenter (stale bitmap)");
+});
+
+// ?presentcatchup=soft (src/wgpu-vsync-queue.js): the vsync presenter shows a
+// frame late by one BeginFrame instead of dropping it. Off by default.
+test("presentcatchup=soft: URL → host → adapter → worker → the vsync queue, off by default", async (t) => {
+  const { requestedPacing } = await import("../src/core-host.js");
+  assert.equal(requestedPacing("").presentSoftCatchUp, false);
+  assert.equal(requestedPacing("?presentcatchup=soft").presentSoftCatchUp, true);
+  assert.equal(requestedPacing("?presentcatchup=SOFT").presentSoftCatchUp, true);
+  assert.equal(requestedPacing("?presentcatchup=1").presentSoftCatchUp, false, "only the word soft");
+  assert.equal(requestedPacing("?presentcatchup=soft").presentVsync, true, "only its own switch");
+  const { UpstreamWorkerAdapter } = await import("../src/upstream-worker-adapter.js");
+  assert.equal(new UpstreamWorkerAdapter({}).presentSoftCatchUp, false);
+  const adapter = new UpstreamWorkerAdapter(requestedPacing("?presentcatchup=soft"));
+  let posted = null;
+  adapter.worker = {
+    postMessage(message) {
+      posted = message;
+      queueMicrotask(() => adapter.handleMessage({ id: message.id, ok: true }));
+    }
+  };
+  const originalWindow = globalThis.window;
+  globalThis.window = { location: { href: "http://127.0.0.1:8080/?presentcatchup=soft", search: "?presentcatchup=soft" } };
+  t.after(() => {
+    if (originalWindow === undefined) delete globalThis.window;
+    else globalThis.window = originalWindow;
+  });
+  await adapter.load();
+  assert.equal(posted.payload.presentSoftCatchUp, true, "presentSoftCatchUp in the init payload");
+  const host = await readFile(new URL("../src/core-host.js", import.meta.url), "utf8");
+  const worker = await readFile(new URL("../src/upstream-discio-worker.js", import.meta.url), "utf8");
+  assert.match(host, /\n {12}presentSoftCatchUp: this\.pacing\.presentSoftCatchUp,\n/);
+  assert.match(worker, /\n {8}presentSoftCatchUp: payload\.presentSoftCatchUp,\n/);
+  assert.match(worker, /\n  presentSoftCatchUp = false,\n/);
+  assert.match(worker, /\n  wgpuVsync\.softCatchUp = presentSoftCatchUp === true;\n/);
 });
 
 test("presentvsync: the backbuffer pass renders into a pooled texture, shown at the worker's rAF, the drain never held", async () => {
