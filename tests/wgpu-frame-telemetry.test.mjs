@@ -37,5 +37,5 @@ test("frame telemetry: harness only, no timing at all in normal use", async () =
   const calls = worker.match(/wgpuFrameTelemetry\.(tick|drain)\(/g) ?? [];
   assert.equal(calls.length, 3, "one tick, two drain ends");
   assert.equal((worker.match(/if \(telemetryStartedAt\) wgpuFrameTelemetry\.drain\(/g) ?? []).length, 2, "every drain end gated");
-  assert.match(worker, /case "validationReadWorkerFrames":\n(?:\s+\/\/[^\n]*\n)+\s+return \{ enabled: harnessEnabled, \.\.\.wgpuFrameTelemetry\.snapshot\(\) \};/);
+  assert.match(worker, /case "validationReadWorkerFrames":\n(?:\s+\/\/[^\n]*\n)+\s+return \{ enabled: harnessEnabled, \.\.\.wgpuFrameTelemetry\.snapshot\(\), recommits: wgpuVsyncRecommits \};/);
 });

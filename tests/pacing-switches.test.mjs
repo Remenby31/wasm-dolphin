@@ -18,7 +18,7 @@ const SWITCHES = [
 test("pacing switches: URL parsing, shipped defaults, each switch only its own", async () => {
   const { requestedPacing } = await import("../src/core-host.js");
   // Rush off by default (upstream's default): ?rush=1 turns it back on.
-  assert.deepEqual(requestedPacing(""), { rushPresentation: false, syncOnSkipIdle: false, dupXfbRearmsThrottle: false, smoothEarly: true, sleepMarginUs: 0, sleepStepUs: 0, sleepK: 750, sleepSpinUs: 150, presentVsync: true });
+  assert.deepEqual(requestedPacing(""), { rushPresentation: false, syncOnSkipIdle: false, dupXfbRearmsThrottle: false, smoothEarly: true, sleepMarginUs: 0, sleepStepUs: 0, sleepK: 750, sleepSpinUs: 150, presentVsync: true, presentRecommit: false });
   for (const s of SWITCHES) {
     const p = requestedPacing(`?${s.param}`);
     assert.equal(p[s.option], s.on, s.param);
@@ -132,6 +132,40 @@ test("presentvsync: URL → host → adapter → worker, on by default, ?present
   assert.match(host, /\n {12}presentVsync: this\.pacing\.presentVsync,\n/);
   assert.match(worker, /\n {8}presentVsync: payload\.presentVsync,\n/);
   assert.match(worker, /wgpuPresentVsync = presentVsync !== false && typeof self\.requestAnimationFrame === "function" && !wgpuDetachedPresenter;/, "only with a worker rAF, never with the detached presenter (stale bitmap)");
+});
+
+// ?presentrecommit=1 (diagnosis): the vsync presenter commits at every
+// BeginFrame, the last picture again when nothing is new. Off by default.
+test("presentrecommit=1: URL → host → adapter → worker, off by default; a held copy, re-copied only at a BeginFrame with nothing new", async (t) => {
+  const { requestedPacing } = await import("../src/core-host.js");
+  assert.equal(requestedPacing("").presentRecommit, false);
+  assert.equal(requestedPacing("?presentrecommit=1").presentRecommit, true);
+  assert.equal(requestedPacing("?presentrecommit=yes").presentRecommit, false);
+  const { UpstreamWorkerAdapter } = await import("../src/upstream-worker-adapter.js");
+  assert.equal(new UpstreamWorkerAdapter({}).presentRecommit, false);
+  const adapter = new UpstreamWorkerAdapter(requestedPacing("?presentrecommit=1"));
+  let posted = null;
+  adapter.worker = {
+    postMessage(message) {
+      posted = message;
+      queueMicrotask(() => adapter.handleMessage({ id: message.id, ok: true }));
+    }
+  };
+  const originalWindow = globalThis.window;
+  globalThis.window = { location: { href: "http://127.0.0.1:8080/?presentrecommit=1", search: "?presentrecommit=1" } };
+  t.after(() => {
+    if (originalWindow === undefined) delete globalThis.window;
+    else globalThis.window = originalWindow;
+  });
+  await adapter.load();
+  assert.equal(posted.payload.presentRecommit, true);
+  const host = await readFile(new URL("../src/core-host.js", import.meta.url), "utf8");
+  const worker = await readFile(new URL("../src/upstream-discio-worker.js", import.meta.url), "utf8");
+  assert.match(host, /\n {12}presentRecommit: this\.pacing\.presentRecommit,\n/);
+  assert.match(worker, /\n {8}presentRecommit: payload\.presentRecommit,\n/);
+  assert.match(worker, /\n  wgpuVsyncRecommit = presentRecommit === true;\n/);
+  assert.match(worker, /if \(!shown && wgpuVsyncRecommit\) recommitWgpuVsyncFrame\(\);/);
+  assert.match(worker, /if \(wgpuVsyncRecommit\) enc\.copyTextureToTexture\(\{ texture: f\.tex \}, \{ texture: heldTextureFor\(dev, f\.tex\) \}/);
 });
 
 test("presentvsync: the backbuffer pass renders into a pooled texture, shown at the worker's rAF, the drain never held", async () => {

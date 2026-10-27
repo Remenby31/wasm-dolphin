@@ -1737,6 +1737,7 @@ async function handleMessage(type, payload) {
         sleepK: payload.sleepK,
         sleepSpinUs: payload.sleepSpinUs,
         presentVsync: payload.presentVsync,
+        presentRecommit: payload.presentRecommit,
         coreLog: payload.coreLog,
         memcardSlotB: payload.memcardSlotB,
         internalResolution: payload.internalResolution,
@@ -2099,7 +2100,7 @@ async function handleMessage(type, payload) {
     case "validationReadWorkerFrames":
       // Harness only (src/wgpu-frame-telemetry.js): the presenter rAF's
       // lateness and skipped BeginFrames, the ring drains' time and submit part.
-      return { enabled: harnessEnabled, ...wgpuFrameTelemetry.snapshot() };
+      return { enabled: harnessEnabled, ...wgpuFrameTelemetry.snapshot(), recommits: wgpuVsyncRecommits };
     case "validationReadPresentVsync":
       // ?presentvsync=1: the rAF presenter's counters (shown, dropped, caught
       // up, presented by the timer for want of a BeginFrame) and the visual
@@ -2548,6 +2549,7 @@ async function loadCore({
   sleepK = 750,
   sleepSpinUs = 150,
   presentVsync = true,
+  presentRecommit = false,
   coreLog = false,
   memcardSlotB = false,
   internalResolution = 1,
@@ -3053,6 +3055,7 @@ async function loadCore({
   // Not with the detached presenter: it shows a bitmap of the canvas, which
   // the vsync presenter fills only at its rAF (a stale picture).
   wgpuPresentVsync = presentVsync !== false && typeof self.requestAnimationFrame === "function" && !wgpuDetachedPresenter;
+  wgpuVsyncRecommit = presentRecommit === true;
   releaseWgpuReadback();
   moduleInstance = await factory({
     noInitialRun: true,
@@ -13011,6 +13014,31 @@ const WGPU_VSYNC_FALLBACK_MS = 50;
 // Harness only (validationReadWorkerFrames): the presenter rAF and the ring
 // drains, timed only while harnessEnabled (no cost in normal use).
 const wgpuFrameTelemetry = createFrameTelemetry();
+// ?presentrecommit=1 (diagnosis of the Spark's 175 ms BeginFrame holes): a
+// blank WebGPU page commits at every BeginFrame and gets them all, this
+// presenter commits only when a frame is new. With the switch, a BeginFrame
+// with nothing new copies the last picture again (kept in wgpuVsyncHeld),
+// so the canvas is committed every time; the screen shows the same picture.
+let wgpuVsyncRecommit = false;
+let wgpuVsyncHeld = null;
+let wgpuVsyncRecommits = 0;
+function heldTextureFor(dev, src) {
+  if (!wgpuVsyncHeld || wgpuVsyncHeld.device !== dev || wgpuVsyncHeld.tex.width !== src.width || wgpuVsyncHeld.tex.height !== src.height) {
+    const u = self.GPUTextureUsage;
+    wgpuVsyncHeld = { device: dev, tex: dev.createTexture({ label: "wgpu-vsync-held", size: [src.width, src.height], format: renderGpu.format, usage: u.COPY_SRC | u.COPY_DST }) };
+  }
+  return wgpuVsyncHeld.tex;
+}
+function recommitWgpuVsyncFrame() {
+  if (!renderGpu || !wgpuVsyncHeld || wgpuVsyncHeld.device !== renderGpu.device || wgpuVsyncCanvasDevice !== renderGpu.device) return;
+  const dev = renderGpu.device;
+  const dst = renderGpu.context.getCurrentTexture();
+  const src = wgpuVsyncHeld.tex;
+  const enc = dev.createCommandEncoder({ label: "wgpu-vsync-recommit" });
+  enc.copyTextureToTexture({ texture: src }, { texture: dst }, [Math.min(src.width, dst.width), Math.min(src.height, dst.height), 1]);
+  dev.queue.submit([enc.finish()]);
+  wgpuVsyncRecommits += 1;
+}
 // A frame queued while the presenter's rAF is late (the worker busy in a
 // long task, as compiles at boot) is shown at once instead of waiting for a
 // BeginFrame the busy worker cannot run: held there it stayed 3 vsyncs or
@@ -13140,6 +13168,7 @@ function queueWgpuVsyncFrame(coreFrame, shownVi, stream) {
       } finally {
         wgpuVsyncFrameTime = null;
       }
+      if (!shown && wgpuVsyncRecommit) recommitWgpuVsyncFrame();
       wgpuVsyncIdleTicks = shown ? 0 : wgpuVsyncIdleTicks + 1;
       if (wgpuVsyncIdleTicks >= WGPU_VSYNC_IDLE_TICKS && !wgpuVsync.waiting) {
         wgpuVsyncLoop = false;  // the next queued frame starts it again
@@ -13212,6 +13241,7 @@ function presentWgpuVsyncFrame({ newest = false, hidden = false } = {}) {
     { texture: dst },
     [Math.min(f.tex.width, dst.width), Math.min(f.tex.height, dst.height), 1]
   );
+  if (wgpuVsyncRecommit) enc.copyTextureToTexture({ texture: f.tex }, { texture: heldTextureFor(dev, f.tex) }, [f.tex.width, f.tex.height, 1]);
   dev.queue.submit([enc.finish()]);
   // Same queue: the copy runs before any later pass renders into f.tex.
   wgpuVsync.shown(f);
