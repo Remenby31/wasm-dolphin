@@ -1,5 +1,4 @@
 import {
-  AUDIO_PCM_DRAIN_RATIO,
   AUDIO_PCM_HEADER,
   AUDIO_PCM_SAMPLE_RATE,
   AUDIO_PCM_STATE_MUTED,
@@ -17,6 +16,8 @@ import {
 export const AUDIO_PCM_TARGET_FRAMES = 5760;
 export const AUDIO_PCM_START_FRAMES = 2400;
 export const ADAPT_CALM_MS = 5000;
+// The target's descent once calm: 0.5 % of the time, 5 ms of ring a second.
+export const ADAPT_DESCENT = 0.005;
 
 function atomicMax(header, index, value) {
   let before = Atomics.load(header, index);
@@ -125,9 +126,11 @@ export class AudioPcmProducer {
 
   // The ring's target between the page's floor and 120 ms: +20 ms at each
   // underrun (a timer gap over half the target restarts the calm); once
-  // calm for ADAPT_CALM_MS it comes down 0.5 % of the time (5 ms a second),
-  // the rate the worklet plays faster at while over it (DRAIN_RATIO): the
-  // producer keeps pulling the nominal rate and no sample is skipped.
+  // calm for ADAPT_CALM_MS it comes down ADAPT_DESCENT of the time (5 ms a
+  // second). The producer then pulls that much less from the mixer, whose
+  // granule queue grows past AudioBufferSize; the mixer jumps its playhead
+  // back to half the queue (Mixer::MixerFifo::Dequeue): granules are skipped,
+  // the jump smoothed by their overlapping windows.
   adapt(now, gapMs = 0) {
     const ring = this.ring;
     if (!ring || this.floorFrames == null || this.floorFrames >= AUDIO_PCM_TARGET_FRAMES) return;
@@ -138,7 +141,6 @@ export class AudioPcmProducer {
       this.underrunsSeen = underruns;
       this.calmSince = now;
       this.lastAdaptAt = now;
-      Atomics.store(ring.header, AUDIO_PCM_HEADER.TARGET_FRAMES, Math.round(this.targetFrames));
       return;
     }
     if (!this.calmSince) this.calmSince = now;
@@ -147,9 +149,8 @@ export class AudioPcmProducer {
     const dt = Math.max(0, now - from);
     this.lastAdaptAt = now;
     if (now - this.calmSince >= ADAPT_CALM_MS && this.targetFrames > this.floorFrames) {
-      this.targetFrames = Math.max(this.floorFrames, this.targetFrames - (AUDIO_PCM_DRAIN_RATIO - 1) * dt * 48);
+      this.targetFrames = Math.max(this.floorFrames, this.targetFrames - ADAPT_DESCENT * dt * 48);
     }
-    Atomics.store(ring.header, AUDIO_PCM_HEADER.TARGET_FRAMES, Math.round(this.targetFrames));
   }
 
   refill(maxMixes = 2) {

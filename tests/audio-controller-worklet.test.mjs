@@ -4,9 +4,13 @@ import assert from "node:assert/strict";
 function installBrowser({ search = "?audiotransport=worklet", isolated = true, sampleRate = 48000 } = {}) {
   const modules = [];
   const contextOptions = [];
+  const listeners = {};
+  const nodes = [];
+  let resumes = 0;
   class Context {
     constructor(options) {
       contextOptions.push(options);
+      this.resume = async () => { resumes += 1; };
       this.sampleRate = sampleRate;
       this.currentTime = 0;
       this.state = "running";
@@ -19,17 +23,19 @@ function installBrowser({ search = "?audiotransport=worklet", isolated = true, s
     createBuffer() { throw new Error("legacy scheduler should not run"); }
   }
   class Node {
-    constructor(_context, _name, options) { this.options = options; }
+    constructor(_context, _name, options) { this.options = options; nodes.push(this); }
     connect() {}
     disconnect() {}
   }
   globalThis.window = {
     location: { search }, AudioContext: Context,
-    setInterval, clearInterval,
+    // unref'd: a worklet watchdog left running never holds the test process
+    setInterval: (fn, ms) => { const t = setInterval(fn, ms); t.unref?.(); return t; }, clearInterval,
+    addEventListener: (type, fn) => (listeners[type] ??= []).push(fn),
   };
   globalThis.crossOriginIsolated = isolated;
   globalThis.AudioWorkletNode = Node;
-  return { modules, contextOptions };
+  return { modules, contextOptions, listeners, nodes, resumes: () => resumes };
 }
 
 test("worklet transport activates only after feature, module, rate, and producer gates", async () => {
@@ -112,4 +118,111 @@ test("worklet ring target from ?audiolead, and the latency it reports", async ()
   d.muted = false;
   await d.ensureContext();
   assert.equal(seen[0].targetFrames, 1920);
+});
+
+// Review of #301: the worklet path has no pump tick to resume a context the
+// system suspended (iOS: a call, another app).
+test("a suspended context is resumed on its state change, and on the next gesture", async () => {
+  const b = installBrowser();
+  const { AudioController } = await import(`../src/audio.js?resume=${Date.now()}`);
+  const audio = new AudioController();
+  audio.setTransportBridge(async () => true);
+  await audio.setMuted(false);
+  assert.equal(audio.activeTransport, "worklet");
+  const before = b.resumes();
+  audio.context.state = "suspended";
+  audio.context.onstatechange();
+  assert.equal(b.resumes(), before + 1, "resumed on the state change");
+  audio.context.state = "interrupted";
+  for (const fn of b.listeners.pointerdown) fn();
+  for (const fn of b.listeners.keydown) fn();
+  assert.equal(b.resumes(), before + 3, "and on a pointerdown or keydown");
+  audio.context.state = "running";
+  for (const fn of b.listeners.pointerdown) fn();
+  audio.muted = true;
+  audio.context.state = "suspended";
+  audio.context.onstatechange();
+  assert.equal(b.resumes(), before + 3, "never while running, nor muted");
+});
+
+// Review of #301: sound on before a disc -> the worker has no core yet; the
+// worklet is tried again once the disc is mounted.
+test("a worklet refused for core-not-loaded is tried again after the mount; other reasons stay legacy", async () => {
+  const b = installBrowser();
+  const { AudioController } = await import(`../src/audio.js?retry=${Date.now()}`);
+  const audio = new AudioController();
+  let core = false;
+  const calls = [];
+  audio.setTransportBridge(async (config) => { calls.push(config); return core ? true : { active: false, reason: "core-not-loaded" }; });
+  audio.setSource(async () => ({ available: false }));
+  await audio.setMuted(false);
+  assert.equal(audio.activeTransport, "legacy");
+  assert.equal(audio.transportFallbackReason, "worklet-init:producer-rejected:core-not-loaded");
+  assert.ok(audio.pumpTimer, "legacy pumps meanwhile");
+  core = true;
+  assert.equal(await audio.retryWorkletTransport(), true);
+  assert.equal(audio.activeTransport, "worklet");
+  assert.equal(audio.pumpTimer, 0, "the legacy pump stopped");
+  assert.equal(b.modules.length, 1, "the module is added once");
+  assert.equal(calls.at(-1).enabled, true);
+  assert.equal(await audio.retryWorkletTransport(), false, "already on the worklet");
+  audio.stopWorkletWatchdog();
+  // any other reason: no second try
+  installBrowser();
+  const { AudioController: Other } = await import(`../src/audio.js?retry-other=${Date.now()}`);
+  const o = new Other();
+  o.setTransportBridge(async () => ({ active: false, reason: "core-channel-count" }));
+  await o.ensureContext();
+  assert.equal(await o.retryWorkletTransport(), false);
+  assert.equal(o.activeTransport, "legacy");
+});
+
+// Review of #301: a processor that throws while being built reports it
+// before the producer has answered; the handler must already be there.
+test("a processor error during the producer's answer: legacy, the producer stopped", async () => {
+  const b = installBrowser();
+  const { AudioController } = await import(`../src/audio.js?procerr=${Date.now()}`);
+  const audio = new AudioController();
+  const calls = [];
+  audio.setTransportBridge(async (config) => {
+    calls.push(config);
+    if (config.enabled) b.nodes.at(-1).onprocessorerror?.();
+    return true;
+  });
+  audio.muted = false;
+  await audio.ensureContext();
+  assert.equal(audio.activeTransport, "legacy");
+  assert.equal(audio.transportFallbackReason, "worklet-init:processor-error");
+  assert.equal(calls.at(-1).enabled, false, "the producer told to stop");
+  assert.equal(audio.workletNode, null);
+});
+
+// Review of #301: a worklet that stops reading without an error.
+test("the ring RUNNING but not read for the stall time -> legacy; read, muted or suspended -> kept", async () => {
+  installBrowser();
+  const { AudioController } = await import(`../src/audio.js?stall=${Date.now()}`);
+  const { AUDIO_PCM_HEADER, AUDIO_PCM_STATE_RUNNING } = await import("../src/audio-pcm-ring.js");
+  const wait = (ms) => new Promise((r) => setTimeout(r, ms));
+  const audio = new AudioController();
+  const calls = [];
+  audio.setTransportBridge(async (config) => { calls.push(config); return true; });
+  audio.muted = false;
+  await audio.ensureContext();
+  const header = audio.workletRing.header;
+  Atomics.store(header, AUDIO_PCM_HEADER.STATE, AUDIO_PCM_STATE_RUNNING);
+  audio.startWorkletWatchdog(200);
+  // read: kept
+  for (let i = 0; i < 8; i++) { Atomics.add(header, AUDIO_PCM_HEADER.CONSUMED_FRAMES, 128); await wait(50); }
+  assert.equal(audio.activeTransport, "worklet");
+  // suspended (no render thread to blame): kept
+  audio.context.state = "suspended";
+  await wait(400);
+  assert.equal(audio.activeTransport, "worklet");
+  // running and not read: back to legacy
+  audio.context.state = "running";
+  await wait(500);
+  assert.equal(audio.activeTransport, "legacy");
+  assert.equal(audio.transportFallbackReason, "worklet-stalled");
+  assert.equal(calls.at(-1).enabled, false);
+  assert.equal(audio.workletWatchdog, 0);
 });

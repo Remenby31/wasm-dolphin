@@ -94,7 +94,6 @@ test("adaptive ring: starts at 120 ms, comes down to the page's floor when calm,
   t += 1000;
   f.producer.adapt(t);
   assert.equal(f.producer.telemetry().targetFrames, AUDIO_PCM_TARGET_FRAMES - 240);
-  assert.equal(Atomics.load(ring.header, AUDIO_PCM_HEADER.TARGET_FRAMES), AUDIO_PCM_TARGET_FRAMES - 240, "published for the worklet");
   for (let i = 0; i < 30; i++) { t += 1000; f.producer.adapt(t); }
   assert.equal(f.producer.telemetry().targetFrames, 1920, "never under the floor");
   // an underrun: +20 ms, and the calm starts over
@@ -115,37 +114,4 @@ test("adaptive ring: starts at 120 ms, comes down to the page's floor when calm,
   const f3 = fixture(), r3 = createAudioPcmRing();
   f3.producer.install(r3.sab, { muted: false, targetFrames: 10 });
   assert.equal(f3.producer.telemetry().floorFrames, 480);
-});
-
-// Review of #301: coming down from 120 to 40 ms must not be heard: the
-// worklet plays 0.5 % faster while over the target, interpolated, never a
-// skipped sample (a ramp read back moves at most 1.005 a frame, never back).
-test("draining over the target: no skipped sample, the fill comes down", async () => {
-  const { AUDIO_PCM_DRAIN_RATIO } = await import("../src/audio-pcm-ring.js");
-  const ring = createAudioPcmRing();
-  const frames = 6000;
-  const ramp = new Int16Array(frames * 2);
-  for (let i = 0; i < frames; i++) { ramp[2 * i] = i; ramp[2 * i + 1] = i; }
-  writeAudioPcm(ring, ramp, frames, 2);
-  Atomics.store(ring.header, AUDIO_PCM_HEADER.STATE, AUDIO_PCM_STATE_RUNNING);
-  Atomics.store(ring.header, AUDIO_PCM_HEADER.TARGET_FRAMES, 1920);
-  const out = [];
-  const result = {};
-  for (let q = 0; q < 30; q++) {
-    const l = new Float32Array(128), r = new Float32Array(128);
-    consumeAudioPcm(ring, l, r, 128, result);
-    for (const v of l) out.push(Math.round(v * 32768 * 1000) / 1000);
-  }
-  for (let i = 1; i < out.length; i++) {
-    const step = out[i] - out[i - 1];
-    assert.ok(step > 0 && step <= AUDIO_PCM_DRAIN_RATIO + 1e-6, `frame ${i}: step ${step} (a skip or a repeat)`);
-  }
-  const consumed = Atomics.load(ring.header, AUDIO_PCM_HEADER.CONSUMED_FRAMES);
-  assert.ok(consumed > 30 * 128, `drained: ${consumed} frames for ${30 * 128} played`);
-  // at the target: back to plain copy (exactly one frame per frame)
-  const l = new Float32Array(128), r = new Float32Array(128);
-  Atomics.store(ring.header, AUDIO_PCM_HEADER.TARGET_FRAMES, 99999);
-  const before = Atomics.load(ring.header, AUDIO_PCM_HEADER.CONSUMED_FRAMES);
-  consumeAudioPcm(ring, l, r, 128, result);
-  assert.equal(Atomics.load(ring.header, AUDIO_PCM_HEADER.CONSUMED_FRAMES) - before, 128);
 });

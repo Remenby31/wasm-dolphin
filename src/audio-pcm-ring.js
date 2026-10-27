@@ -25,12 +25,7 @@ export const AUDIO_PCM_HEADER = Object.freeze({
   PRODUCER_EMPTY_MIXES: 13,
   PRODUCER_TIMER_GAP_MAX_US: 14,
   PRODUCER_FILL_HIGH_WATER: 15,
-  // The producer's current target fill (0: none). Above it the worklet plays
-  // DRAIN_RATIO faster until the fill comes down: never a skipped sample.
-  TARGET_FRAMES: 16,
 });
-// 0.5 %: 8.6 cents, 5 ms of ring a second.
-export const AUDIO_PCM_DRAIN_RATIO = 1.005;
 
 const HEADER_WORDS = AUDIO_PCM_HEADER_BYTES / Int32Array.BYTES_PER_ELEMENT;
 
@@ -150,29 +145,6 @@ export function consumeAudioPcm(
   const capacity = Atomics.load(header, AUDIO_PCM_HEADER.CAPACITY_FRAMES) >>> 0;
   const read = Atomics.load(header, AUDIO_PCM_HEADER.READ_INDEX) >>> 0;
   const available = Math.min(capacity, audioPcmAvailableFrames(header));
-  // Over the producer's target (it lowered it): played DRAIN_RATIO faster,
-  // linearly interpolated, so the fill comes down without a skipped sample.
-  const target = Atomics.load(header, AUDIO_PCM_HEADER.TARGET_FRAMES) >>> 0;
-  const phase = result.phase ?? 0;
-  const span = Math.floor(phase + count * AUDIO_PCM_DRAIN_RATIO);
-  if (target > 0 && available > target + count && available > span + 1) {
-    for (let frame = 0; frame < count; frame += 1) {
-      const pos = phase + frame * AUDIO_PCM_DRAIN_RATIO;
-      const i = Math.floor(pos), f = pos - i;
-      const a = ((read + i) % capacity) * AUDIO_PCM_CHANNELS, b = ((read + i + 1) % capacity) * AUDIO_PCM_CHANNELS;
-      outputLeft[frame] = (samples[a] + (samples[b] - samples[a]) * f) / 32768;
-      outputRight[frame] = (samples[a + 1] + (samples[b + 1] - samples[a + 1]) * f) / 32768;
-    }
-    Atomics.add(header, AUDIO_PCM_HEADER.CONSUMED_FRAMES, span);
-    Atomics.store(header, AUDIO_PCM_HEADER.READ_INDEX, (read + span) | 0);
-    result.phase = phase + count * AUDIO_PCM_DRAIN_RATIO - span;
-    result.consumedFrames = span;
-    result.underrunFrames = 0;
-    result.flushed = false;
-    result.epoch = epoch;
-    return result;
-  }
-  if (result.phase) result.phase = 0; // back to plain copy (a sub-sample shift at most)
   const consumed = Math.min(count, available);
   for (let frame = 0; frame < consumed; frame += 1) {
     const src = ((read + frame) % capacity) * AUDIO_PCM_CHANNELS;
