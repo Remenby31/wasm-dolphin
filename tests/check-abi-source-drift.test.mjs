@@ -42,3 +42,14 @@ test("the core build runs the check in pull requests, after the install", () => 
   assert.ok(yml.indexOf("- name: npm test", at) > at, "before the tests of the same job");
   assert.match(yml.slice(yml.lastIndexOf("- name:", at), at), /if: env\.PR == 'true'/);
 });
+
+test("a src/-only PR (no core build) runs fast-tests, whose npm test checks the committed manifest as is", async () => {
+  const { needsCoreBuild } = await import("../tools/ci-changes.mjs");
+  assert.equal(needsCoreBuild(["src/core-host.js"]).core, false, "no core build: the fast-tests job runs");
+  const yml = readFileSync(new URL("../.github/workflows/core-build.yml", import.meta.url), "utf8");
+  const fast = yml.slice(yml.indexOf("\n  fast-tests:"), yml.indexOf("\n  build:"));
+  assert.match(fast, /run: npm test/);
+  // Nothing in it regenerates the manifest: tests/dolphin-provenance sees the
+  // committed one (it is what failed on main after #304).
+  assert.doesNotMatch(fast, /update-core-abi|build-core-repro|--install/);
+});
