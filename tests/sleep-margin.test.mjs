@@ -18,6 +18,7 @@ test("sleepmargin: parsed in range, off by default", async () => {
   assert.equal(requestedPacing("?sleepk=951").sleepK, 750);
   assert.equal(requestedPacing("").sleepK, 750, "the cascade by default");
   assert.equal(requestedPacing("?sleepk=0").sleepK, 0, "?sleepk=0: the plain sleep");
+  assert.equal(requestedPacing("?sleepk=10").sleepK, 500, "a low k is raised to 500");
   assert.equal(requestedPacing("").sleepSpinUs, 150);
   assert.equal(requestedPacing("?sleepspin=200").sleepSpinUs, 200);
   assert.equal(requestedPacing("?sleepspin=20").sleepSpinUs, 150);
@@ -72,7 +73,13 @@ test("sleepmargin: host, worker, core and patch", async () => {
   assert.match(patch, /\+std::atomic<u32> g_sleep_margin_us\{0\};/, "off unless the page sets it");
   // sleep to target - margin, spin to target, count the spin
   assert.match(patch, /\+        const TimePoint coarse = time_point - std::chrono::microseconds\{margin_us\};\n\+        if \(coarse > time\)\n\+          DolphinWeb::ThrottleWaitUntil\(coarse\);/);
-  assert.match(patch, /\+      while \(now < time_point\)\n\+        now = Clock::now\(\);\n\+      DolphinWeb::PresentCadence::AddSpin\(now - spin_start\);/);
+  assert.match(patch, /\+ {8}while \(now < time_point\)\n\+ {10}now = Clock::now\(\);\n\+ {8}DolphinWeb::PresentCadence::AddSpin\(now - spin_start\);/);
+  // review of #292: the spin bounded by ?sleepspin (time left, clock tick),
+  // the rest a plain sleep; an explicit margin wins over the default cascade;
+  // k at least 500 (0: off)
+  assert.match(patch, /\+ {8}if \(time_point - Clock::now\(\) > spin_limit \|\| DolphinWeb::ClockTick\(\) > spin_limit\)\n\+ {8}\{\n\+ {10}DolphinWeb::ThrottleWaitUntil\(time_point\);\n\+ {10}spin = false;/);
+  assert.match(patch, /\+ {6}if \(margin_us == 0\)\n/, "?sleepmargin turns the cascade off");
+  assert.match(patch, /\+ {6}static_cast<u32>\(k_permille <= 0 \? 0 : std::clamp\(k_permille, 500, 950\)\),/);
   assert.match(patch, /-  u32 reserved\[3\] = \{\};\n\+  u32 spin_us = 0;[^\n]*\n\+  u32 reserved\[2\] = \{\};/, "word 13, layout v1 unchanged");
   assert.match(patch, /\(DolphinWeb::g_sleep_margin_us\.load\(std::memory_order_relaxed\) << 16\)/);
   // ?sleepstep: short sleeps while more than one step is left, then the spin

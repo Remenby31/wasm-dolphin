@@ -240,7 +240,7 @@ export class UpstreamWorkerAdapter {
     this.smoothEarly = smoothEarly !== false;
     this.sleepMarginUs = Number.isInteger(sleepMarginUs) && sleepMarginUs >= 0 && sleepMarginUs <= 8000 ? sleepMarginUs : 0;
     this.sleepStepUs = Number.isInteger(sleepStepUs) && sleepStepUs >= 0 && sleepStepUs <= 4000 ? sleepStepUs : 0;
-    this.sleepK = Number.isInteger(sleepK) && sleepK >= 0 && sleepK <= 950 ? sleepK : 750;
+    this.sleepK = Number.isInteger(sleepK) && sleepK >= 0 && sleepK <= 950 ? (sleepK === 0 ? 0 : Math.max(500, sleepK)) : 750;
     this.sleepSpinUs = Number.isInteger(sleepSpinUs) && sleepSpinUs >= 50 && sleepSpinUs <= 2000 ? sleepSpinUs : 150;
     this.presentVsync = presentVsync !== false;
     this.coreLog = Boolean(coreLog);

@@ -1725,7 +1725,9 @@ export function requestedPacing(search = window.location.search) {
     smoothEarly: params.get("smoothearly") !== "0",
     sleepMarginUs: /^\d{1,4}$/.test(params.get("sleepmargin") ?? "") && Number(params.get("sleepmargin")) <= 8000 ? Number(params.get("sleepmargin")) : 0,
     sleepStepUs: /^\d{1,4}$/.test(params.get("sleepstep") ?? "") && Number(params.get("sleepstep")) <= 4000 ? Number(params.get("sleepstep")) : 0,
-    sleepK: /^\d{1,3}$/.test(params.get("sleepk") ?? "") && Number(params.get("sleepk")) <= 950 ? Number(params.get("sleepk")) : 750,
+    // 0 turns the cascade off; otherwise 500-950 (a lower k leaves most of
+    // each wait to the spin, review of #292)
+    sleepK: /^\d{1,3}$/.test(params.get("sleepk") ?? "") && Number(params.get("sleepk")) <= 950 ? (Number(params.get("sleepk")) === 0 ? 0 : Math.max(500, Number(params.get("sleepk")))) : 750,
     sleepSpinUs: /^\d{2,4}$/.test(params.get("sleepspin") ?? "") && Number(params.get("sleepspin")) >= 50 && Number(params.get("sleepspin")) <= 2000 ? Number(params.get("sleepspin")) : 150,
     // At most one wgpu present per BeginFrame (the worker's rAF), on by
     // default since 2026-10-26: ~58 distinct pictures shown a second instead
