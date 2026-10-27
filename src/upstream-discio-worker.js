@@ -1716,6 +1716,7 @@ async function handleMessage(type, payload) {
         ppcWasmJitTier: payload.ppcWasmJitTier,
         ppcWasmJitWarmupFrames: payload.ppcWasmJitWarmupFrames,
         ppcWasmJitWarmupOnLoad: payload.ppcWasmJitWarmupOnLoad,
+        ppcWasmJitLoadRate: payload.ppcWasmJitLoadRate,
         ppcProfile: payload.ppcProfile,
         gpuSpinMicros: payload.gpuSpinMicros,
         codeSpaceMiB: payload.codeSpaceMiB,
@@ -2525,6 +2526,7 @@ async function loadCore({
   ppcWasmJitTier: requestedPpcWasmJitTier = "guarded",
   ppcWasmJitWarmupFrames: requestedPpcWasmJitWarmupFrames = DEFAULT_WASM_JIT_WARMUP_XFB_FRAMES,
   ppcWasmJitWarmupOnLoad = "restart",
+  ppcWasmJitLoadRate = 0,
   ppcProfile = false,
   gpuSpinMicros = -1,
   codeSpaceMiB = null,
@@ -3294,6 +3296,8 @@ async function loadCore({
     // (?jitwarmupload=boot) or restarts from the loaded field.
     ppcWasmJitWarmupOnLoadMode = ppcWasmJitWarmupOnLoad === "boot" ? "boot" : "restart";
     api.setJitWarmupOnLoad?.(ppcWasmJitWarmupOnLoadMode === "boot" ? 1 : 0);
+    // Patch 0177: the compile rate after a state load (0: off).
+    api.setJitLoadCompileRate?.(Number.isInteger(ppcWasmJitLoadRate) ? ppcWasmJitLoadRate : 0);
     ppcWasmJitArmed = true;
   } else {
     api.setPpcWasmJitEnabled?.(0);
@@ -3646,6 +3650,7 @@ function bindApi(module) {
         : null,
     setPpcWasmJitWarmup: optionalCwrap("SetPpcWasmJitWarmup", null, ["number", "number"]),
     setJitWarmupOnLoad: optionalCwrap("DolphinWeb_SetJitWarmupOnLoad", null, ["number"]),
+    setJitLoadCompileRate: optionalCwrap("DolphinWeb_SetJitLoadCompileRate", "number", ["number"]),
     setPpcWasmJitOffThread: optionalCwrap("SetPpcWasmJitOffThread", null, ["number"]),
     setJitRegionsEnabled: optionalCwrap("DolphinWeb_JitSetRegionsEnabled", null, ["number"]),
     setJitRegionChaining: optionalCwrap("DolphinWeb_JitSetRegionChaining", null, ["number"]),

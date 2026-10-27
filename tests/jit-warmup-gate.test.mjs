@@ -128,3 +128,19 @@ test("?jitwarmupload=boot reaches the core: host, adapter, worker message and lo
   assert.match(patch, /\+ {2}s_wasm_arm_from_boot\.store\(s_wasm_warmup_from_boot_on_load\.load\(std::memory_order_relaxed\),/);
   assert.match(patch, /\+extern "C" EMSCRIPTEN_KEEPALIVE void DolphinWeb_SetJitWarmupOnLoad\(int from_boot\)/);
 });
+
+test("?jitloadrate=N reaches the core (patch 0177): host, adapter, worker, the bucket after a load", async () => {
+  assert.match(host, /get\("jitloadrate"\)\);\n {2}return Number\.isInteger\(n\) && n > 0 && n <= 10000 \? n : 0;/, "off unless a positive integer");
+  assert.equal(host.match(/ppcWasmJitLoadRate: this\.ppcWasmJitLoadRate,/g)?.length, 2, "both init messages");
+  assert.match(adapter, /ppcWasmJitLoadRate = 0,/);
+  assert.match(adapter, /ppcWasmJitLoadRate: this\.ppcWasmJitLoadRate,/, "rebuilt field by field: carried");
+  assert.match(worker, /ppcWasmJitLoadRate: payload\.ppcWasmJitLoadRate,/);
+  assert.match(worker, /setJitLoadCompileRate: optionalCwrap\("DolphinWeb_SetJitLoadCompileRate", "number", \["number"\]\)/);
+  const set = worker.indexOf("api.setJitLoadCompileRate?.(");
+  assert.ok(set > 0 && set < worker.indexOf("api.bootDisc(path)"), "set before the disc boots");
+  const patch = await readFile(new URL("../patches/dolphin-wasm/snapshot/0177-jit-load-compile-rate.patch", import.meta.url), "utf8");
+  assert.match(patch, /\+std::atomic<u32> s_wasm_load_rate\{0\};\n\+std::chrono::milliseconds s_wasm_load_rate_window\{3000\};/, "off by default, 3 s");
+  assert.match(patch, /\+ {6}s_wasm_load_tokens = std::min\(rate, s_wasm_load_tokens \+ frames \* rate\);/, "refilled per 16.7 ms, at most one frame's worth");
+  assert.match(patch, /\+ {6}if \(s_wasm_load_tokens < 1\)\n\+ {6}\{\n\+ {8}s_wasm_load_rate_rejects \+= 1;\n\+ {8}s_deferred_wasm_queues\[this\]\.Defer\(/, "deferred like the per-slice throttle");
+  assert.match(patch, /\+ {4}s_wasm_load_tokens -= 1;  \/\/ patch 0177/, "a compile that happened takes a token");
+});

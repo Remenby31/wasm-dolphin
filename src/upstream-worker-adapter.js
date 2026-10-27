@@ -85,6 +85,7 @@ export class UpstreamWorkerAdapter {
     ppcWasmJitForce = false,
     ppcWasmJitWarmupFrames = 60,
     ppcWasmJitWarmupOnLoad = "restart",
+    ppcWasmJitLoadRate = 0,
     ppcProfile = false,
     gpuSpinMicros = -1,
     codeSpaceMiB = null,
@@ -220,6 +221,7 @@ export class UpstreamWorkerAdapter {
     this.ppcWasmJitForce = Boolean(ppcWasmJitForce);
     this.ppcWasmJitWarmupFrames = ppcWasmJitWarmupFrames;
     this.ppcWasmJitWarmupOnLoad = ppcWasmJitWarmupOnLoad === "boot" ? "boot" : "restart";
+    this.ppcWasmJitLoadRate = Number.isInteger(ppcWasmJitLoadRate) && ppcWasmJitLoadRate > 0 && ppcWasmJitLoadRate <= 10000 ? ppcWasmJitLoadRate : 0;
     this.ppcProfile = Boolean(ppcProfile);
     this.gpuSpinMicros = Number.isInteger(gpuSpinMicros) ? gpuSpinMicros : -1;
     this.codeSpaceMiB = Number.isInteger(codeSpaceMiB) ? codeSpaceMiB : null;
@@ -476,6 +478,7 @@ export class UpstreamWorkerAdapter {
       ppcWasmJitForce: this.ppcWasmJitForce,
       ppcWasmJitWarmupFrames: this.ppcWasmJitWarmupFrames,
       ppcWasmJitWarmupOnLoad: this.ppcWasmJitWarmupOnLoad,
+      ppcWasmJitLoadRate: this.ppcWasmJitLoadRate,
       ppcProfile: this.ppcProfile,
       gpuSpinMicros: this.gpuSpinMicros,
       codeSpaceMiB: this.codeSpaceMiB,

@@ -1,0 +1,92 @@
+diff --git a/Source/Core/Core/PowerPC/CachedInterpreter/CachedInterpreter.cpp b/Source/Core/Core/PowerPC/CachedInterpreter/CachedInterpreter.cpp
+index def1420..05a3495 100644
+--- a/Source/Core/Core/PowerPC/CachedInterpreter/CachedInterpreter.cpp
++++ b/Source/Core/Core/PowerPC/CachedInterpreter/CachedInterpreter.cpp
+@@ -377,6 +377,17 @@ constexpr u32 DOLPHIN_WEB_DISABLE_NATIVE_PS = 1u << 29;
+ // one freeze. Per-slice counter reset in CachedInterpreter::Run().
+ constexpr u32 COMPILE_THROTTLE_MAX_PER_SLICE = 8;
+ constexpr u32 COMPILE_THROTTLE_MAX_US_PER_SLICE = 5000;
++// Patch 0177: for s_wasm_load_rate_window after a state load, block compiles
++// take tokens from a bucket refilled at s_wasm_load_rate per 16.7 ms (at
++// most that many saved): the JIT engaged at the load (0172, ?jitwarmupload=
++// boot) compiled 12-14k blocks in 3 s and lost what it gained against the
++// region installs (2 players cold, #287). 0: off (?jitloadrate).
++std::atomic<u32> s_wasm_load_rate{0};
++std::chrono::milliseconds s_wasm_load_rate_window{3000};
++std::optional<std::chrono::steady_clock::time_point> s_wasm_load_rate_start;
++std::optional<std::chrono::steady_clock::time_point> s_wasm_load_rate_refilled;
++double s_wasm_load_tokens = 0;
++u32 s_wasm_load_rate_rejects = 0;
+ 
+ // The region translator off the CPU thread (DolphinWeb_AotTranslate) emits
+ // with its own mask, never the CPU thread's.
+@@ -845,6 +856,8 @@ extern "C" void DolphinWeb_RecordModuleUs(int dt_us)
+   // regardless of throttle enablement — only the reject path is gated.
+   s_wasm_compiles_this_slice++;
+   s_wasm_compile_us_this_slice += dt;
++  if (s_wasm_load_rate_start)
++    s_wasm_load_tokens -= 1;  // patch 0177
+ }
+ extern "C" void DolphinWeb_RecordInstanceUs(int dt_us)
+ {
+@@ -15162,6 +15175,31 @@ bool CachedInterpreter::TryWriteWasmBlock(u32 nextPC)
+   // we've already burned this slice's compile budget. Falls to Interpret;
+   // next slice will re-attempt this block (one extra Interpret cost per
+   // deferred compile is far cheaper than a multi-hundred-ms freeze).
++  // Patch 0177: the load's compile rate, while its window lasts.
++  if (s_wasm_load_rate_start)
++  {
++    const auto now = std::chrono::steady_clock::now();
++    if (now - *s_wasm_load_rate_start >= s_wasm_load_rate_window)
++    {
++      s_wasm_load_rate_start.reset();
++    }
++    else
++    {
++      const double rate = s_wasm_load_rate.load(std::memory_order_relaxed);
++      const double frames =
++          std::chrono::duration<double, std::milli>(now - *s_wasm_load_rate_refilled).count() /
++          (1000.0 / 60);
++      s_wasm_load_tokens = std::min(rate, s_wasm_load_tokens + frames * rate);
++      s_wasm_load_rate_refilled = now;
++      if (s_wasm_load_tokens < 1)
++      {
++        s_wasm_load_rate_rejects += 1;
++        s_deferred_wasm_queues[this].Defer(js.blockStart,
++            static_cast<u32>(m_ppc_state.feature_flags), js.curBlock->normalEntry);
++        return false;
++      }
++    }
++  }
+   if (!DolphinWebHelperDisabled(DOLPHIN_WEB_DISABLE_COMPILE_THROTTLE))
+   {
+     if (s_wasm_compiles_this_slice >= COMPILE_THROTTLE_MAX_PER_SLICE ||
+@@ -15941,6 +15979,15 @@ extern "C" EMSCRIPTEN_KEEPALIVE double DolphinWeb_JitArmedStepForTest(double fra
+   return engaged == UINT64_MAX ? -1.0 : static_cast<double>(engaged);
+ }
+ 
++// Patch 0177: block compiles per 16.7 ms for the 3 s after a state load (0:
++// off, the default); returns the compiles the rate deferred so far.
++extern "C" EMSCRIPTEN_KEEPALIVE u32 DolphinWeb_SetJitLoadCompileRate(int per_frame)
++{
++  if (per_frame >= 0)
++    s_wasm_load_rate.store(static_cast<u32>(std::min(per_frame, 10000)), std::memory_order_relaxed);
++  return s_wasm_load_rate_rejects;
++}
++
+ // Patch 0172: 1 counts the armed warmup from field 0 after a state load (the
+ // JIT engages at max(fields, loaded field)), 0 restarts it from the loaded
+ // field (the default).
+@@ -15985,6 +16032,12 @@ extern "C" EMSCRIPTEN_KEEPALIVE double GetPpcWasmJitEngagedFrame()
+ extern "C" EMSCRIPTEN_KEEPALIVE void DolphinWeb_JitOnStateLoaded()
+ {
+   OpenRegionLoadWindow();  // patch 0171
++  if (s_wasm_load_rate.load(std::memory_order_relaxed) != 0)
++  {
++    // patch 0177: the load's compile rate starts now, with one frame's worth
++    s_wasm_load_rate_start = s_wasm_load_rate_refilled = std::chrono::steady_clock::now();
++    s_wasm_load_tokens = s_wasm_load_rate.load(std::memory_order_relaxed);
++  }
+   if (s_wasm_armed_policy.load(std::memory_order_acquire) < 0)
+     return;
+   // A state loaded before the first slice still counts from the loaded field

@@ -100,6 +100,7 @@ export class EmulatorHost {
     this.ppcWasmJitForce = requestedPpcWasmJitForce();
     this.ppcWasmJitWarmupFrames = requestedPpcWasmJitWarmupFrames(this.videoBackend);
     this.ppcWasmJitWarmupOnLoad = requestedPpcWasmJitWarmupOnLoad();
+    this.ppcWasmJitLoadRate = requestedPpcWasmJitLoadRate();
     this.ppcProfile = requestedPpcProfile();
     this.gpuSpinMicros = requestedGpuSpinMicros();
     this.cpuOverclock = requestedCpuOverclock();
@@ -408,6 +409,7 @@ export class EmulatorHost {
             ppcWasmJitForce: this.ppcWasmJitForce,
             ppcWasmJitWarmupFrames: this.ppcWasmJitWarmupFrames,
             ppcWasmJitWarmupOnLoad: this.ppcWasmJitWarmupOnLoad,
+            ppcWasmJitLoadRate: this.ppcWasmJitLoadRate,
             ppcProfile: this.ppcProfile,
             gpuSpinMicros: this.gpuSpinMicros,
             codeSpaceMiB: this.codeSpaceMiB,
@@ -465,6 +467,7 @@ export class EmulatorHost {
             ppcWasmJitForce: this.ppcWasmJitForce,
             ppcWasmJitWarmupFrames: this.ppcWasmJitWarmupFrames,
             ppcWasmJitWarmupOnLoad: this.ppcWasmJitWarmupOnLoad,
+            ppcWasmJitLoadRate: this.ppcWasmJitLoadRate,
             ppcProfile: this.ppcProfile,
             gpuSpinMicros: this.gpuSpinMicros,
             codeSpaceMiB: this.codeSpaceMiB,
@@ -1532,6 +1535,13 @@ function requestedPpcWasmJitWarmupFrames(videoBackend) {
 // default restarts it from the loaded field.
 function requestedPpcWasmJitWarmupOnLoad() {
   return new URLSearchParams(window.location.search).get("jitwarmupload") === "boot" ? "boot" : "restart";
+}
+
+// ?jitloadrate=N (patch 0177): for 3 s after a state load, at most N block
+// compiles per 16.7 ms (0, the default: no such limit).
+function requestedPpcWasmJitLoadRate() {
+  const n = Number(new URLSearchParams(window.location.search).get("jitloadrate"));
+  return Number.isInteger(n) && n > 0 && n <= 10000 ? n : 0;
 }
 
 function requestedPpcProfile() {
