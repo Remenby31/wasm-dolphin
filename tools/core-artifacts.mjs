@@ -159,7 +159,7 @@ const OLD_PIN = /^export const DEFAULT_UPSTREAM_CORE_SHA256 = "[0-9a-f]{64}";\n$
 
 export function resolvePinConflict(text) {
   return text.replace(/^<<<<<<< [^\n]*\n([\s\S]*?)^=======\n([\s\S]*?)^>>>>>>> [^\n]*\n/gm, (hunk, ours, theirs) =>
-    OLD_PIN.test(ours) && theirs.includes('from "../cores/dolphin/core.lock.json" with { type: "json" }')
+    OLD_PIN.test(ours) && theirs.includes('"../cores/dolphin/core.lock.json"')
       ? theirs
       : hunk);
 }

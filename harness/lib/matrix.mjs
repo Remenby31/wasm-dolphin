@@ -48,6 +48,19 @@ export const SCENE_NATIVE_FRAMES_PER_VI = Object.freeze({
 });
 export const VI_PER_SECOND = 60;
 
+// ?xfbdecode=0 under video=null (#299): the core no longer decodes the XFB,
+// so nothing visual exists to read (game fps 0, no input-to-image latency,
+// no unique frames, no displayed frames). A visual probe refuses it.
+export function xfbDecodeOff(query) {
+  const q = new URLSearchParams(PRESETS[query] ?? query ?? "");
+  return q.get("video") === "null" && q.get("xfbdecode") === "0";
+}
+export function visualProbeCheck(queries, uses) {
+  const off = queries.filter(Boolean).filter(xfbDecodeOff);
+  const used = Object.entries(uses).filter(([, on]) => on).map(([name]) => name);
+  return off.length && used.length ? `${used.join(", ")} read the decoded XFB, which video=null&xfbdecode=0 turns off (${off[0]})` : null;
+}
+
 // Measurement protocol pinned per KPI scene (judge, 2026-10-23). The heavy
 // intro is a short phase: from this state, ~9 guest seconds of the heavy
 // part, then the scene moves on. A 20 s window dilutes it (an ew20 read

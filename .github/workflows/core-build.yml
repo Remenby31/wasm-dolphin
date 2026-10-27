@@ -307,6 +307,13 @@ jobs:
           echo "wasm_sha256=$(node -p "require('./$REPRO/parity.json').rebuilt.wasmSha256")" >> "$GITHUB_OUTPUT"
           git status --short
 
+      # The core install regenerated the ABI manifest: in a pull request its
+      # SOURCE entries must match the committed ones (a src/ change needs
+      # npm run update:core-abi, else main goes red after the merge, #304).
+      - name: The committed ABI manifest is current for its sources
+        if: env.PR == 'true'
+        run: node tools/check-abi-source-drift.mjs --ref HEAD
+
       - name: npm run check
         run: npm run check
 

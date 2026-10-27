@@ -1,19 +1,19 @@
 {
   "schemaVersion": 1,
   "abiVersion": 1,
-  "coreId": "sha256:ac8bd5f8e64a9a83d2f1e0ec001136d0de434704d190fe8c0d98821e0bd37c23",
+  "coreId": "sha256:6ee9954e7e019cd632b762cc65bf860fab4ba3eb94ce89820696f84fef6883c1",
   "upstreamCommit": "e22551eae1c84a7e4d0b6a5c519ef4ed4ef69df1",
   "artifacts": [
     {
       "path": "cores/dolphin/dolphin-core-upstream.js",
       "hashMode": "lf-normalized",
-      "size": 288553,
-      "sha256": "069440ad8daafe4b98043cb73fc1e121fad1ed72365564a9d2572758e44a9316"
+      "size": 288627,
+      "sha256": "b10d9feacd4ebc282704e90f0497651d7e1232f8d9230768ca7246d4ed89180e"
     },
     {
       "path": "cores/dolphin/dolphin-core-upstream.wasm",
-      "size": 13222150,
-      "sha256": "ac8bd5f8e64a9a83d2f1e0ec001136d0de434704d190fe8c0d98821e0bd37c23"
+      "size": 13227582,
+      "sha256": "6ee9954e7e019cd632b762cc65bf860fab4ba3eb94ce89820696f84fef6883c1"
     }
   ],
   "contractSources": [
@@ -44,20 +44,20 @@
     {
       "path": "core/upstream/dolphin_web_core.cpp",
       "hashMode": "lf-normalized",
-      "size": 65993,
-      "sha256": "feed6a5fae6e14e1b2d1fc8dbcd00ae28d33495a39723b53bad85eb3ee21399f"
+      "size": 66612,
+      "sha256": "b861fda06783b5aa0fd15341f908baab701c5708693f316576e55b1c87e62910"
     },
     {
       "path": "src/app.js",
       "hashMode": "lf-normalized",
-      "size": 50761,
-      "sha256": "ebc44b9d45847a90d67a4072f196aea7ed402c9c7990c368ecf07eb1b88b1b74"
+      "size": 51313,
+      "sha256": "3fb89354ebfeb8af402d76f4f48fc721824d9cd3142eb9ee04735e25627b4563"
     },
     {
       "path": "src/audio.js",
       "hashMode": "lf-normalized",
-      "size": 13055,
-      "sha256": "66a0273c05c49987cb20bf9801e0605a6b56b708aae8e27331049145eac7a943"
+      "size": 19355,
+      "sha256": "b94bfbe836722ee1562fad07172ec2c4c2e635448a457eb8de269f18db41db3e"
     },
     {
       "path": "src/audio-pcm-ring.js",
@@ -68,8 +68,8 @@
     {
       "path": "src/audio-pcm-producer.js",
       "hashMode": "lf-normalized",
-      "size": 5434,
-      "sha256": "6b5f8dc493d25212d7dc5f1753ee69e6006b66603312d1a4730cd48e3eb37225"
+      "size": 8211,
+      "sha256": "83f8dbbf5cc8184a17493b7dfea1c408b1effe8708db250fee9613d5825ede2e"
     },
     {
       "path": "src/audio-worklet-processor.js",
@@ -86,8 +86,8 @@
     {
       "path": "src/core-host.js",
       "hashMode": "lf-normalized",
-      "size": 90413,
-      "sha256": "1b20193661a781cc134e0aa7ff08e79f022071ac711de79e4e71d9dfc5950c06"
+      "size": 92649,
+      "sha256": "540a8dffa08a05cbde3bd7d1f673a03ced83399a42d04d58a8f83b5e17667873"
     },
     {
       "path": "src/diagnostic-log-filter.js",
@@ -140,8 +140,8 @@
     {
       "path": "src/upstream-discio-worker.js",
       "hashMode": "lf-normalized",
-      "size": 798367,
-      "sha256": "24c47022a849042d4086ac6db844454efcf5396473524e115ec1a05291bee32e"
+      "size": 802507,
+      "sha256": "4c8ce48f86cbb54ebf9b75f6467e62048f64e6f5dd45a976afc67dba84272e7d"
     },
     {
       "path": "src/wgpu-renderer-worker-probe.js",
@@ -158,20 +158,20 @@
     {
       "path": "src/upstream-main-thread-adapter.js",
       "hashMode": "lf-normalized",
-      "size": 22584,
-      "sha256": "a5c3586d826400c06ef200002fe810997ae1f886003982c17e20b667d1de7dff"
+      "size": 22618,
+      "sha256": "d5caddff2ab25a450f0c4a08b9adeb4c89cb63b110017539a088d300a24b0ccc"
     },
     {
       "path": "src/upstream-worker-adapter.js",
       "hashMode": "lf-normalized",
-      "size": 59604,
-      "sha256": "bd5c3d2a70ab900cfff6ea4b143d86cf3ce083137799f6b3d0dcb48a2984ba59"
+      "size": 60100,
+      "sha256": "70bdf83cfb49dda81f8da4d27d2cd90eb3539daeae2c70c75d1d8f08fc3af99b"
     },
     {
       "path": "src/upstream-worker-protocol.js",
       "hashMode": "lf-normalized",
-      "size": 5226,
-      "sha256": "78bd3c731113df4da93fcb066d2283358a7f8112236e2bc3e330e049135662bf"
+      "size": 4372,
+      "sha256": "be7658e2128513d0cbb9f8e67f285b21d076c1144af3d6b3d018490952293b8f"
     },
     {
       "path": "src/wgpu-pass-state-cache.js",

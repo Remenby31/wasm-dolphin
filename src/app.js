@@ -3,6 +3,7 @@ import { AudioController } from "./audio.js";
 import { EmulatorHost } from "./core-host.js";
 import { startMainThreadProfiler } from "./main-profiler.js";
 import { createCausalTelemetry, deepMerge } from "./causal-telemetry.js";
+import { formatRefreshHistogram } from "./wgpu-game-pacer.js";
 import {
   CONTROL_LABELS,
   CORE_DEFAULT_PLUGGED,
@@ -88,6 +89,7 @@ const elements = {
   hudUnderDrop: document.querySelector("#hudUnderDrop"),
   hudQueue: document.querySelector("#hudQueue"),
   hudJitCache: document.querySelector("#hudJitCache"),
+  hudRefresh: document.querySelector("#hudRefresh"),
   hudRunloop: document.querySelector("#hudRunloop"),
   hudWgx: document.querySelector("#hudWgx"),
   hudStatus: document.querySelector("#hudStatus"),
@@ -827,6 +829,11 @@ function updateScreenHud(info) {
   const jitc = /\bjitc:(\d+)\/(\d+)/.exec(helper);
   elements.hudJitCache.textContent = jitc ? `${jitc[1]}/${jitc[2]}` : "0/0";
 
+  // ?presentvsync: refreshes each game frame stayed on screen, as shares of
+  // the frames (1/2/3/4+ refreshes), the refreshes beyond each frame's share
+  // (a repeat), the screen's rate and whether ?presentpace=game is on.
+  if (elements.hudRefresh) elements.hudRefresh.textContent = formatRefreshHistogram(helper);
+
   // §28cn per-slice CPU pthread profiler: avg/max/runOnlyMax wall time per
   // CoreTiming slice. max > 16000us = blew one 60Hz frame; runOnlyMax
   // separated from max so we can see whether the spike was compile-burst
@@ -890,6 +897,8 @@ async function mountFile(file) {
   try {
     await applyGameProfile(file);
     const game = await host.mountFile(file);
+    // sound turned on before this disc fell back to legacy (no core yet)
+    await audio.retryWorkletTransport();
     // Auto-unmute on disc boot. AudioController defaults to muted because
     // the AudioContext can only be created after a user gesture; the disc
     // mount click is the user gesture, so unmute here so audio actually

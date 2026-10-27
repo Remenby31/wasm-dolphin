@@ -254,7 +254,7 @@ test("power source: parsed from pmset, recorded, and checked by --noise", async 
   writeFileSync(path.join(root, "ac.json"), JSON.stringify({ ...base, machine: { power: { source: "ac", percent: 100 } } }));
   writeFileSync(path.join(root, "old.json"), JSON.stringify(base));
   assert.ok(readNoise(path.join(root, "ac.json"), { ...expect, powerSource: "ac" })[1]);
-  assert.throws(() => readNoise(path.join(root, "ac.json"), { ...expect, powerSource: "battery" }), /power ac vs battery/);
+  assert.throws(() => readNoise(path.join(root, "ac.json"), { ...expect, powerSource: "battery" }), /power mains vs battery/);
   assert.ok(readNoise(path.join(root, "old.json"), { ...expect, powerSource: "battery" })[1], "an A/A from before the field: not refused on it");
 });
 
@@ -283,6 +283,9 @@ test("power: a visit unplugged midway is mixed; an A/A with mixed sources is no 
   const { powerOfVisit, powerSourcesOf } = await import("../harness/probes/drop-meter.mjs");
   assert.equal(powerOfVisit({ power: { source: "ac" }, powerEnd: { source: "ac" } }), "ac");
   assert.equal(powerOfVisit({ power: { source: "ac" }, powerEnd: { source: "battery" } }), "mixed");
+  // review of #305: a failed reading (null) or AC <-> UPS is no change
+  assert.equal(powerOfVisit({ power: { source: "ac" }, powerEnd: { source: "UPS Power" } }), "ac");
+  assert.equal(powerOfVisit({ power: { source: "ac" }, powerEnd: null }), "ac");
   assert.equal(powerOfVisit({ power: { source: "battery" } }), "battery");
   assert.equal(powerOfVisit({}), null);
   const r = (power, error) => ({ analysis: { power, ...(error ? { error } : {}) } });
@@ -300,9 +303,12 @@ test("power: a visit unplugged midway is mixed; an A/A with mixed sources is no 
   const expect = { probeVersion: 3, scenario: "s.json", state: null, query: "q", sampleMs: 50, display: true };
   writeFileSync(path.join(root, "mixed.json"), JSON.stringify({ ...base, powerSources: ["ac", "battery"] }));
   writeFileSync(path.join(root, "ac.json"), JSON.stringify({ ...base, powerSources: ["ac"] }));
-  assert.throws(() => readNoise(path.join(root, "mixed.json"), { ...expect, powerSource: "ac" }), /power ac\+battery/);
+  assert.throws(() => readNoise(path.join(root, "mixed.json"), { ...expect, powerSource: "ac" }), /power mains\+battery/);
   assert.ok(readNoise(path.join(root, "ac.json"), { ...expect, powerSource: "ac" })[1]);
-  assert.throws(() => readNoise(path.join(root, "ac.json"), { ...expect, powerSource: "battery" }), /power ac vs battery/);
+  assert.throws(() => readNoise(path.join(root, "ac.json"), { ...expect, powerSource: "battery" }), /power mains vs battery/);
+  // review of #305: AC and UPS are both mains
+  writeFileSync(path.join(root, "ups.json"), JSON.stringify({ ...base, powerSources: ["UPS Power"] }));
+  assert.ok(readNoise(path.join(root, "ups.json"), { ...expect, powerSource: "ac" })[1]);
 });
 
 // Review of #261 (P1-4, then P1-b): a 50 ms stall the throttle then makes
@@ -693,7 +699,8 @@ test("--baseline-query: the baseline side boots with it, the noise is checked ag
   const src = await readFile(new URL("../harness/probes/drop-meter.mjs", import.meta.url), "utf8");
   assert.match(src, /"baseline-query": \{ type: "string" \}/);
   assert.match(src, /playVisit\(name === "baseline" && o\.baselineQuery \? \{ \.\.\.o, query: o\.baselineQuery \} : o,/);
-  assert.match(src, /readNoise\(values\.noise, \{[^}]*query: o\.baselineQuery \?\? o\.query,/);
+  assert.match(src, /const noiseExpect = \{[^}]*query: o\.baselineQuery \?\? o\.query,/);
+  assert.match(src, /readNoise\(values\.noise, noiseExpect\)/);
   assert.match(src, /if \(baselineQuery && !values\.baseline\) throw new Error\("--baseline-query needs --baseline"\);/);
   assert.match(src, /baselineQuery\?\.set\("metrics", "1"\);/, "metrics on both sides");
 });
@@ -728,4 +735,14 @@ test("drop-meter: the display filter's GPU cost per visit and per side (off: non
   const s = displayFilterCostSummary([a("candidate", 1, 0.5, 0.9), a("candidate", 1, 0.7, 1.2), a("candidate", 1, 0.6, 1), { side: "baseline", visit: 1, analysis: { displayFilter: null } }], 2);
   assert.deepEqual(s, { "candidate-v1": { runs: 3, gpuMsMedian: 0.6, gpuMsMax: 1.2, canvas: [1100, 824], backbuffer: [640, 480] } });
   assert.equal(displayFilterCostSummary([{ side: "candidate", visit: 1, analysis: {} }], 1), null);
+});
+
+// The audio latency the page reported: median and p95 over the windows' span.
+test("audioLatencyOf: median and p95 of the page's samples in the span", async () => {
+  const { audioLatencyOf } = await import("../harness/lib/drops.mjs");
+  const page = [0, 50, 100, 150, 200, 250, 300, 350, 400, 450].map((t, i) => ({ t, audioMs: 50 + i }));
+  page.push({ t: 2000, audioMs: 999 }); // after the span
+  const windows = [{ t0: 0 }, { t0: 100 }, { t0: 200 }, { t0: 300 }, { t0: 400 }];
+  assert.deepEqual(audioLatencyOf(page, windows), { audioLatencyMs: 55, audioLatencyP95Ms: 59 });
+  assert.deepEqual(audioLatencyOf([{ t: 0, audioMs: null }], windows), { audioLatencyMs: null, audioLatencyP95Ms: null });
 });
