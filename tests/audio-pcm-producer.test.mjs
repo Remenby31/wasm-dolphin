@@ -6,6 +6,7 @@ import {
   AUDIO_PCM_STATE_RUNNING,
   createAudioPcmRing,
   consumeAudioPcm,
+  mixerQueueMicroseconds,
   snapshotAudioPcmRing,
   writeAudioPcm,
 } from "../src/audio-pcm-ring.js";
@@ -134,4 +135,44 @@ test("the mixer's queue reaches the ring header; unknown is -1 (null in the snap
   f.core.audioQueuedMs = () => -1; // before the boot
   f.producer.refill();
   assert.equal(snapshotAudioPcmRing(ring).mixerQueueMs, null);
+});
+
+// Review of #316: muted, or a transition not yet acknowledged, the producer
+// does not pull: the mixer's queue is unknown, not the last value read.
+test("refill's early exits mark the mixer's queue unknown", () => {
+  const ring = createAudioPcmRing();
+  const f = fixture();
+  f.core.audioQueuedMs = () => 80;
+  f.producer.install(ring.sab, { muted: false });
+  consumeAudioPcm(ring, new Float32Array(128), new Float32Array(128));
+  f.producer.refill();
+  assert.equal(snapshotAudioPcmRing(ring).mixerQueueMs, 80);
+  f.producer.setMuted(true);
+  f.producer.refill();
+  assert.equal(snapshotAudioPcmRing(ring).mixerQueueMs, null, "muted");
+  f.producer.setMuted(false);
+  consumeAudioPcm(ring, new Float32Array(128), new Float32Array(128));
+  f.producer.refill();
+  assert.equal(snapshotAudioPcmRing(ring).mixerQueueMs, 80);
+  f.producer.transition(); // a state load: epoch not acknowledged yet
+  f.producer.refill();
+  assert.equal(snapshotAudioPcmRing(ring).mixerQueueMs, null, "epoch not acknowledged");
+});
+
+// Review of #316: 0186's arithmetic, the same expression as the patch.
+test("0186's queue time: 4,000 µs a granule for the 32 kHz DMA FIFO, 2,666 at 48 kHz", async () => {
+  const dividend = 108000000; // Mixer::FIXED_SAMPLE_RATE_DIVIDEND
+  assert.equal(mixerQueueMicroseconds(1, dividend / 32000, dividend), 4000);
+  assert.equal(mixerQueueMicroseconds(20, dividend / 32000, dividend), 80000, "AudioBufferSize 80 ms: 20 granules");
+  assert.equal(mixerQueueMicroseconds(1, dividend / 48000, dividend), 2666);
+  assert.equal(mixerQueueMicroseconds(255, dividend / 32000, dividend), 1020000, "the queue's mask, no overflow");
+  assert.equal(mixerQueueMicroseconds(5, 3375, 0), 0, "no dividend: 0");
+  const { readFile } = await import("node:fs/promises");
+  const patch = await readFile(new URL("../patches/dolphin-wasm/snapshot/0186-mixer-queue-depth.patch", import.meta.url), "utf8");
+  assert.match(patch, /granules \* \(GRANULE_SIZE \/ 2\) \* divisor \* 1000000 \/ m_input_sample_rate_dividend/);
+  assert.match(patch, /\(head - tail\) & GRANULE_QUEUE_MASK/);
+  // without a mixer (or before the boot) the export says -1
+  const core = await readFile(new URL("../core/upstream/dolphin_web_core.cpp", import.meta.url), "utf8");
+  const fn = core.slice(core.indexOf("double DolphinWeb_AudioQueuedMs()"));
+  assert.match(fn.slice(0, fn.indexOf("\n}\n")), /if \(!s_runtime_initialized\)\n\s*return -1;[\s\S]*: -1;/);
 });

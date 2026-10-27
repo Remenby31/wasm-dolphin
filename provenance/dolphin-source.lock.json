@@ -25,7 +25,7 @@
       "commit": "01e0577914a75a2569c846778c2f93aa8e6feddd"
     }
   },
-  "patchSeriesSha256": "07269dd605ced09db414a1b07a2b0f9f110fca57461ce6c491d22560bcfaac67",
+  "patchSeriesSha256": "0da5c18a31b97d4e454b358c92a1c394e9cfd3d2ee730ae38c26d40f29934f21",
   "patches": [
     {
       "order": 1,
@@ -1072,8 +1072,8 @@
       "cwd": ".",
       "hashMode": "lf-normalized",
       "path": "patches/dolphin-wasm/snapshot/0186-mixer-queue-depth.patch",
-      "size": 1734,
-      "sha256": "d8f1e60087f3c97da84aafbadea179042e63c54e5913555ca5ddddbe4958a62e"
+      "size": 1936,
+      "sha256": "d939f383ed563a14a2214cb26f1fdf920ca3b043c20650931e9a6064883469a7"
     },
     {
       "order": 132,

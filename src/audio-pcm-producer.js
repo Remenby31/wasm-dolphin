@@ -155,11 +155,15 @@ export class AudioPcmProducer {
 
   refill(maxMixes = 2) {
     const ring = this.ring;
-    if (!ring || this.muted) return 0;
+    if (!ring) return 0;
+    // not pulled now (muted, a transition, no core): the mixer's queue is
+    // unknown, never the last value read
+    const unknown = () => { Atomics.store(ring.header, AUDIO_PCM_HEADER.MIXER_QUEUE_US, -1); return 0; };
+    if (this.muted) return unknown();
     const epoch = Atomics.load(ring.header, AUDIO_PCM_HEADER.EPOCH) >>> 0;
-    if ((Atomics.load(ring.header, AUDIO_PCM_HEADER.EPOCH_ACK) >>> 0) !== epoch) return 0;
+    if ((Atomics.load(ring.header, AUDIO_PCM_HEADER.EPOCH_ACK) >>> 0) !== epoch) return unknown();
     const core = this.api();
-    if (!core?.mixAudio || !core?.audioBuffer || !core?.heapU8) return 0;
+    if (!core?.mixAudio || !core?.audioBuffer || !core?.heapU8) return unknown();
     let wrote = 0;
     for (let attempt = 0; attempt < maxMixes; attempt += 1) {
       const fill = audioPcmAvailableFrames(ring.header);

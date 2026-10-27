@@ -173,6 +173,14 @@ export function consumeAudioPcm(
   return result;
 }
 
+// 0186's arithmetic (Mixer::MixerFifo::QueuedMicroseconds), for its tests:
+// each queued granule is GRANULE_SIZE / 2 = 128 input samples (granules
+// overlap by half), at the input rate dividend / divisor; integer µs.
+export function mixerQueueMicroseconds(granules, divisor, dividend) {
+  if (!dividend) return 0;
+  return Number((BigInt(granules) * 128n * BigInt(divisor) * 1000000n) / BigInt(dividend));
+}
+
 function mixerQueueMsOf(header) {
   const us = Atomics.load(header, AUDIO_PCM_HEADER.MIXER_QUEUE_US) | 0;
   return us >= 0 ? us / 1000 : null;

@@ -1,13 +1,16 @@
 diff --git a/Source/Core/AudioCommon/Mixer.h b/Source/Core/AudioCommon/Mixer.h
 --- a/Source/Core/AudioCommon/Mixer.h
 +++ b/Source/Core/AudioCommon/Mixer.h
-@@ -41,6 +41,16 @@
+@@ -41,6 +41,19 @@
    // Note: NullSoundStream sets the sample rate to 0.
    bool IsOutputSampleRateValid() const { return m_output_sample_rate != 0; }
  
 +  // 0186 (read-only, no effect on emulation): the input queued ahead of the
 +  // output, in microseconds, the longer of the DMA and streaming FIFOs (the
-+  // granule queue AudioBufferSize sizes). Read from the queue's atomics.
++  // granule queue AudioBufferSize sizes). Head and tail are atomics; the
++  // input rate is a plain u32, read as Mix reads it. The time is at the
++  // input rate: at an emulation speed other than 1 (preserve_pitch off) the
++  // mixer drains it that much faster or slower.
 +  u64 GetQueuedMicroseconds() const
 +  {
 +    const u64 dma = m_dma_mixer.QueuedMicroseconds();
@@ -18,7 +21,7 @@ diff --git a/Source/Core/AudioCommon/Mixer.h b/Source/Core/AudioCommon/Mixer.h
    void SetDMAInputSampleRateDivisor(u32 rate_divisor);
    void SetStreamInputSampleRateDivisor(u32 rate_divisor);
    void SetGBAInputSampleRate(std::size_t device_number, u32 sample_rate);
-@@ -131,6 +141,19 @@
+@@ -131,6 +144,19 @@
      void SetVolume(u32 lvolume, u32 rvolume);
      std::pair<s32, s32> GetVolume() const;
  

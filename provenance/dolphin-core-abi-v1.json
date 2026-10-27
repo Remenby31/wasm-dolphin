@@ -62,14 +62,14 @@
     {
       "path": "src/audio-pcm-ring.js",
       "hashMode": "lf-normalized",
-      "size": 8314,
-      "sha256": "89de74c8dd47624dfee9bab6e4850017ce294a63e7bd24ba9c367997f39f4de2"
+      "size": 8727,
+      "sha256": "d3e6115b0eb8693265b92e6b965e2af1ee1f07c0caa88d7bc9a7bdf886bcfd6f"
     },
     {
       "path": "src/audio-pcm-producer.js",
       "hashMode": "lf-normalized",
-      "size": 8472,
-      "sha256": "e59d4345379e8db4fd3efbe7e3c7ef996214e896b6d7b105cf4152368534312c"
+      "size": 8735,
+      "sha256": "327b19af563461353d5ed7a0e871c3f09af3ba497d1f247416348de5f72e2cf5"
     },
     {
       "path": "src/audio-worklet-processor.js",
