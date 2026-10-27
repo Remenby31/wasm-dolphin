@@ -1444,13 +1444,37 @@ test("0174: the overrun of large modules starts from the measured small installs
   });
 });
 
+// Review of #294: the first large install measured replaces the start with
+// its ratio and the 1.25 margin, never under the small installs' estimate;
+// from then on the small installs no longer move it.
+const recordSkip = startSkip || (typeof core?.module._DolphinWeb_AotRecordInstallForTest !== "function" && "core without the install-record hook (0174)");
+test("0174: the first large install replaces the start (margin, not under the small ones'); small installs no longer count", { skip: recordSkip }, () => {
+  const record = (cost, took) => core.module._DolphinWeb_AotRecordInstallForTest(cost, took);
+  setup(); // forgets the regions: nothing measured
+  core.module._DolphinWeb_AotSetSmallCostMinForTest(5);
+  try {
+    assert.equal(record(2, 4), 3, "under 5 ms of small estimates: the start");
+    record(2, 4);
+    assert.equal(record(2, 4), 2.5, "6 ms of small estimates at x 2: x 2.5 with the margin");
+    assert.equal(record(4, 4), 2.5, "a fast first large one (x 1, x 1.25 with the margin) stays at the small ones'");
+    assert.equal(record(2, 40), 2.5, "small installs no longer move it");
+    assert.equal(record(4, 40), 4, "a slow large one raises it at once, bounded at 4");
+    setup();
+    assert.equal(record(4, 4), 1.25, "no small installs yet: the first large one with its margin");
+  } finally {
+    core.module._DolphinWeb_AotSetSmallCostMinForTest(5);
+    setup();
+  }
+});
+
 test("0174 source: the start from small installs, used at every bound; the margin spin bounded", async () => {
   const patch = await readFile(new URL("../patches/dolphin-wasm/snapshot/0174-region-overrun-start-sleepmargin-spin.patch", import.meta.url), "utf8");
   assert.match(patch, /\+constexpr double REGION_SMALL_OVERRUN_MARGIN = 1\.25;\n\+double s_region_small_cost_min_ms = 5\.0;/);
   assert.match(patch, /\+ {4}return std::clamp\(s_region_small_took_ms \/ s_region_small_cost_ms \* REGION_SMALL_OVERRUN_MARGIN,/);
   assert.match(patch, /\+ {6}const double overrun = LargeOverrun\(\);\n\+ {6}if \(large && cost \* overrun > REGION_FORCED_MAX_SLICE_MS\)/);
   assert.match(patch, /\+ {6}if \(large \? debt \+ cost \* overrun > REGION_FORCED_MAX_SLICE_MS :/);
-  assert.match(patch, /\+ {8}s_region_large_measured = true;/, "the first large measured replaces the start");
+  assert.match(patch, /\+ {4}s_region_large_measured = true;/, "the first large measured replaces the start");
+  assert.match(patch, /\+ {6}s_region_large_overrun = std::clamp\(std::max\(ratio \* REGION_SMALL_OVERRUN_MARGIN, small\),/, "with its margin, never under the small ones'");
   assert.match(patch, /\+ {8}\/\/ Patch 0174: the margin's spin is bounded the same way/);
 });
 

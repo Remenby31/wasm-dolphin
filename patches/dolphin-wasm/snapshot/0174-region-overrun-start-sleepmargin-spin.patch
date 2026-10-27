@@ -30,10 +30,10 @@ index 9be7f5a..f8ba860 100644
        if (spin)
        {
 diff --git a/Source/Core/Core/PowerPC/CachedInterpreter/CachedInterpreter.cpp b/Source/Core/Core/PowerPC/CachedInterpreter/CachedInterpreter.cpp
-index 1cbc6a5..ab05a7f 100644
+index 1cbc6a5..6a2e767 100644
 --- a/Source/Core/Core/PowerPC/CachedInterpreter/CachedInterpreter.cpp
 +++ b/Source/Core/Core/PowerPC/CachedInterpreter/CachedInterpreter.cpp
-@@ -10704,6 +10704,25 @@ std::optional<std::chrono::steady_clock::time_point> s_region_forced_debt_at;
+@@ -10704,6 +10704,59 @@ std::optional<std::chrono::steady_clock::time_point> s_region_forced_debt_at;
  constexpr double REGION_LARGE_OVERRUN_START = 3.0;
  constexpr double REGION_LARGE_OVERRUN_MAX = 4.0;
  double s_region_large_overrun = REGION_LARGE_OVERRUN_START;
@@ -56,10 +56,44 @@ index 1cbc6a5..ab05a7f 100644
 +                      1.0, REGION_LARGE_OVERRUN_MAX);
 +  return REGION_LARGE_OVERRUN_START;
 +}
++// An install that happened (answered: a cache hit, not a cold compile):
++// its estimate and the time it took, for the overrun above.
++void RecordInstallCost(double cost, double took)
++{
++  if (cost > REGION_SLICE_TARGET_MS)
++  {
++    const double ratio = std::clamp(took / cost, 1.0, REGION_LARGE_OVERRUN_MAX);
++    if (!s_region_large_measured)
++    {
++      // Patch 0174: the first one measured (one sample: a fast install in a
++      // sleep says little) replaces the start with its ratio and the margin,
++      // never under the small installs' (review of #294); from then on only
++      // large installs move it.
++      const double small = s_region_small_cost_ms >= s_region_small_cost_min_ms ?
++                               s_region_small_took_ms / s_region_small_cost_ms *
++                                   REGION_SMALL_OVERRUN_MARGIN :
++                               1.0;
++      s_region_large_overrun = std::clamp(std::max(ratio * REGION_SMALL_OVERRUN_MARGIN, small),
++                                          1.0, REGION_LARGE_OVERRUN_MAX);
++    }
++    else
++    {
++      s_region_large_overrun = ratio > s_region_large_overrun ?
++                                   ratio :
++                                   std::max(1.0, 0.9 * s_region_large_overrun + 0.1 * ratio);
++    }
++    s_region_large_measured = true;
++  }
++  else if (cost > 0)
++  {
++    s_region_small_took_ms += took;
++    s_region_small_cost_ms += cost;
++  }
++}
  std::optional<std::chrono::steady_clock::time_point> s_region_last_forced;
  // Tests: host time added to each install of a waiting module (ms), to make
  // one slower than its estimate.
-@@ -10926,6 +10945,9 @@ void ForgetAllRegions()
+@@ -10926,6 +10979,9 @@ void ForgetAllRegions()
    s_region_sleep_wait_expired = 0;
    s_region_last_forced.reset();
    s_region_large_overrun = REGION_LARGE_OVERRUN_START;
@@ -69,7 +103,7 @@ index 1cbc6a5..ab05a7f 100644
    s_region_load_window_pending.store(false, std::memory_order_relaxed);
    s_region_load_window_end = 0;
    s_region_sleeps = {};
-@@ -11251,7 +11273,8 @@ void ServiceRegionInstalls(std::optional<std::chrono::steady_clock::time_point>
+@@ -11251,7 +11307,8 @@ void ServiceRegionInstalls(std::optional<std::chrono::steady_clock::time_point>
          return true;
        // behind: a large module the 6 ms bound keeps waiting is counted,
        // then either waits for what the forced debt leaves
@@ -79,7 +113,7 @@ index 1cbc6a5..ab05a7f 100644
        {
          if (!pending.bound_refused)
          {
-@@ -11259,11 +11282,11 @@ void ServiceRegionInstalls(std::optional<std::chrono::steady_clock::time_point>
+@@ -11259,11 +11316,11 @@ void ServiceRegionInstalls(std::optional<std::chrono::steady_clock::time_point>
            s_region_forced_bound_refused += 1;
          }
          s_region_forced_bound_max_ms =
@@ -93,31 +127,34 @@ index 1cbc6a5..ab05a7f 100644
                    debt + cost > REGION_FORCED_RATE_MS)
          return true;
        forcing = true;  // counted once installed
-@@ -11386,10 +11409,18 @@ void ServiceRegionInstalls(std::optional<std::chrono::steady_clock::time_point>
+@@ -11384,13 +11441,8 @@ void ServiceRegionInstalls(std::optional<std::chrono::steady_clock::time_point>
+       s_region_forced_debt_ms += took;
+     if (s_region_stats.regions_installed > installed_now)
      {
-       if (answered && cost_before > REGION_SLICE_TARGET_MS)
-       {
+-      if (answered && cost_before > REGION_SLICE_TARGET_MS)
+-      {
 -        const double ratio = std::min(took / cost_before, REGION_LARGE_OVERRUN_MAX);
 -        s_region_large_overrun = ratio > s_region_large_overrun ?
-+        const double ratio =
-+            std::clamp(took / cost_before, 1.0, REGION_LARGE_OVERRUN_MAX);
-+        // the first one measured replaces the start (patch 0174)
-+        s_region_large_overrun = !s_region_large_measured || ratio > s_region_large_overrun ?
-                                      ratio :
-                                      std::max(1.0, 0.9 * s_region_large_overrun + 0.1 * ratio);
-+        s_region_large_measured = true;
-+      }
-+      else if (answered && cost_before > 0)
-+      {
-+        s_region_small_took_ms += took;
-+        s_region_small_cost_ms += cost_before;
-       }
+-                                     ratio :
+-                                     std::max(1.0, 0.9 * s_region_large_overrun + 0.1 * ratio);
+-      }
++      if (answered)
++        RecordInstallCost(cost_before, took);
        if (forced_one)
        {
-@@ -11944,12 +11975,20 @@ extern "C" EMSCRIPTEN_KEEPALIVE void DolphinWeb_AotSetForcedPeriodForTest(double
+         forced = true;
+@@ -11944,12 +11996,28 @@ extern "C" EMSCRIPTEN_KEEPALIVE void DolphinWeb_AotSetForcedPeriodForTest(double
    s_region_forced_period_ms = ms;
  }
  
++// Tests (patch 0174): an install of estimate `cost` that took `took` (ms),
++// as the install loop records it; returns the overrun in use after it.
++extern "C" EMSCRIPTEN_KEEPALIVE double DolphinWeb_AotRecordInstallForTest(double cost, double took)
++{
++  RecordInstallCost(cost, took);
++  return LargeOverrun();
++}
++
 +// Tests (patch 0174): how many ms of small installs (estimated) the start of
 +// the large modules' overrun waits for.
 +extern "C" EMSCRIPTEN_KEEPALIVE void DolphinWeb_AotSetSmallCostMinForTest(double ms)
@@ -135,7 +172,7 @@ index 1cbc6a5..ab05a7f 100644
    return before;
  }
  
-@@ -11984,7 +12023,7 @@ extern "C" EMSCRIPTEN_KEEPALIVE void DolphinWeb_AotRegionForcedInstalls(u32* out
+@@ -11984,7 +12052,7 @@ extern "C" EMSCRIPTEN_KEEPALIVE void DolphinWeb_AotRegionForcedInstalls(u32* out
    out[0] = s_region_forced_installs;
    out[1] = static_cast<u32>(std::min(s_region_forced_max_slice_ms * 100.0, 4e9));
    out[2] = s_region_forced_large_installs;

@@ -1723,6 +1723,10 @@ export function requestedPacing(search = window.location.search) {
     syncOnSkipIdle: params.get("synconidle") === "1",
     dupXfbRearmsThrottle: params.get("dupvsync") === "1",
     smoothEarly: params.get("smoothearly") !== "0",
+    // ?sleepmargin=<us> (opt-in, review of #292/#294): sleeps to the target
+    // minus the margin (?sleepstep: in steps inside it) INSTEAD of the default
+    // cascade; the last ?sleepspin us at most are spun, with a clock fine
+    // enough to time them, the rest is a plain sleep.
     sleepMarginUs: /^\d{1,4}$/.test(params.get("sleepmargin") ?? "") && Number(params.get("sleepmargin")) <= 8000 ? Number(params.get("sleepmargin")) : 0,
     sleepStepUs: /^\d{1,4}$/.test(params.get("sleepstep") ?? "") && Number(params.get("sleepstep")) <= 4000 ? Number(params.get("sleepstep")) : 0,
     // 0 turns the cascade off; otherwise 500-950 (a lower k leaves most of

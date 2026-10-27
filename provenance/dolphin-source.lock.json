@@ -25,7 +25,7 @@
       "commit": "01e0577914a75a2569c846778c2f93aa8e6feddd"
     }
   },
-  "patchSeriesSha256": "230dc84ec2f704712165c392ef3f24d53c62f9850fe03e62d114aee85b353eaa",
+  "patchSeriesSha256": "565dadcfb803d9e921f21e21cc5969cadec929ff1610b3c520883f4a5ab28169",
   "patches": [
     {
       "order": 1,
@@ -1056,8 +1056,8 @@
       "cwd": ".",
       "hashMode": "lf-normalized",
       "path": "patches/dolphin-wasm/snapshot/0174-region-overrun-start-sleepmargin-spin.patch",
-      "size": 7115,
-      "sha256": "2ad6a36f5df932ff1df421f8a0dfe8809a53e6f941d5728926066e69eec98b11"
+      "size": 8614,
+      "sha256": "5afb0ce921f15765b7a5f8544733bc0ba9d0f01fb870d4a553c68b403862de83"
     },
     {
       "order": 130,
