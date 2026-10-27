@@ -69,3 +69,26 @@ test("producer rejects malformed header metadata and non-48k core", () => {
   f.core.audioSampleRate = () => 44100;
   assert.equal(f.producer.install(valid.sab).reason, "core-sample-rate");
 });
+
+// A lower ring target (?audiolead on the AudioWorklet path): the producer
+// keeps that fill, starts playback at half of it, and stays within bounds.
+test("producer keeps the page's target fill and starts at half of it", () => {
+  const ring = createAudioPcmRing();
+  const f = fixture();
+  assert.equal(f.producer.install(ring.sab, { muted: false, targetFrames: 1920 }).active, true);
+  consumeAudioPcm(ring, new Float32Array(1), new Float32Array(1));
+  assert.equal(f.producer.refill(), 1920, "40 ms at 48 kHz");
+  assert.equal(f.producer.telemetry().targetFrames, 1920);
+  assert.equal(Atomics.load(ring.header, AUDIO_PCM_HEADER.STATE), AUDIO_PCM_STATE_RUNNING);
+  // 20 ms consumed: refilled to the target again, not to the default
+  const out = new Float32Array(960);
+  consumeAudioPcm(ring, out, new Float32Array(960));
+  assert.equal(f.producer.refill(), 960);
+  // bounds: never above the ring's default target, never under 10 ms
+  const f2 = fixture(), r2 = createAudioPcmRing();
+  f2.producer.install(r2.sab, { muted: false, targetFrames: 99999 });
+  assert.equal(f2.producer.telemetry().targetFrames, AUDIO_PCM_TARGET_FRAMES);
+  const f3 = fixture(), r3 = createAudioPcmRing();
+  f3.producer.install(r3.sab, { muted: false, targetFrames: 10 });
+  assert.equal(f3.producer.telemetry().targetFrames, 480);
+});

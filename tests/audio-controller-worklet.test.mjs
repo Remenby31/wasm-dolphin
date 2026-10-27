@@ -79,3 +79,30 @@ test("legacy remains the default and never loads a worklet module", async () => 
   assert.equal(modules.length, 0);
   assert.deepEqual(contextOptions, [undefined]);
 });
+
+// ?audiolead on the worklet path: the producer is told the ring fill to keep,
+// and the latency read back is that fill plus the output's own latency.
+test("worklet ring target from ?audiolead, and the latency it reports", async () => {
+  installBrowser({ search: "?audiotransport=worklet&audiolead=0.04" });
+  const { AudioController } = await import(`../src/audio.js?lead=${Date.now()}`);
+  const { writeAudioPcm } = await import("../src/audio-pcm-ring.js");
+  const audio = new AudioController();
+  const calls = [];
+  audio.setTransportBridge(async (config) => { calls.push(config); return true; });
+  audio.muted = false;
+  await audio.ensureContext();
+  assert.equal(calls[0].targetFrames, 1920, "40 ms at 48 kHz");
+  audio.context.outputLatency = 0.010;
+  audio.context.baseLatency = 0.003;
+  writeAudioPcm(audio.workletRing, new Int16Array(1920 * 2), 1920, 2);
+  assert.equal(audio.causalTelemetry().latencyMs, 53, "40 ms ring + 13 ms output");
+  // no ?audiolead: the worklet keeps 120 ms
+  installBrowser();
+  const { AudioController: Default } = await import(`../src/audio.js?lead-default=${Date.now()}`);
+  const d = new Default();
+  const seen = [];
+  d.setTransportBridge(async (config) => { seen.push(config); return true; });
+  d.muted = false;
+  await d.ensureContext();
+  assert.equal(seen[0].targetFrames, 5760);
+});

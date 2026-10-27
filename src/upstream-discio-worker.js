@@ -1717,6 +1717,7 @@ async function handleMessage(type, payload) {
         codeSpaceMiB: payload.codeSpaceMiB,
         cpuOverclock: payload.cpuOverclock,
         emulationSpeed: payload.emulationSpeed,
+        audioBufferMs: payload.audioBufferMs,
         presentationScale: payload.presentationScale,
         presentationQueueSize: payload.presentationQueueSize,
         presentationPacing: payload.presentationPacing,
@@ -2496,6 +2497,7 @@ async function handleMessage(type, payload) {
       }
       const result = workletAudioProducer.install(payload.sab, {
         muted: Boolean(payload.muted),
+        targetFrames: Number(payload.targetFrames) || undefined,
       });
       if (result.active) api?.setAudioMuted?.(payload.muted ? 1 : 0);
       return result;
@@ -2522,6 +2524,7 @@ async function loadCore({
   codeSpaceMiB = null,
   cpuOverclock = 1,
   emulationSpeed = 1,
+  audioBufferMs = 0,
   presentationScale = 1,
   presentationQueueSize = DEFAULT_PRESENTATION_QUEUE,
   presentationPacing = "smooth",
@@ -3307,6 +3310,9 @@ async function loadCore({
   api.setWebGpuGeometryRangeEnabled?.(wgpuGeometryRangeEnabled ? 1 : 0);
   api.setCpuOverclock?.(Number(cpuOverclock));
   api.setEmulationSpeed?.(Number(emulationSpeed));
+  // ?audiobuffer: the mixer's queue (0: Dolphin's default, 80 ms); a core
+  // without the setter keeps its default
+  if (Number(audioBufferMs) > 0) api.setAudioBufferMs?.(Number(audioBufferMs));
   api.setPresentationScale?.(Number(presentationScale));
   api.setFastSoftwareRaster?.(Math.min(3, Math.max(0, Number(fastSoftwareRaster) || 0)));
   api.setSoftwareTevHotCaseMode?.(softwareTevHotCaseMode);
@@ -3739,6 +3745,10 @@ function bindApi(module) {
     setEmulationSpeed:
       typeof module._SetEmulationSpeed === "function"
         ? (factor) => ccall("SetEmulationSpeed", "number", ["number"], [Number(factor)])
+        : null,
+    setAudioBufferMs:
+      typeof module._DolphinWeb_SetAudioBufferMs === "function"
+        ? (ms) => module._DolphinWeb_SetAudioBufferMs(Number(ms) | 0)
         : null,
     setPresentationScale:
       typeof module._SetPresentationScale === "function"

@@ -103,6 +103,7 @@ export class EmulatorHost {
     this.gpuSpinMicros = requestedGpuSpinMicros();
     this.cpuOverclock = requestedCpuOverclock();
     this.emulationSpeed = requestedEmulationSpeed();
+    this.audioBufferMs = requestedAudioBufferMs();
     this.presentationScale = requestedPresentationScale();
     this.presentationQueueSize = requestedPresentationQueueSize();
     this.presenterBackend = requestedPresenterBackend();
@@ -411,6 +412,7 @@ export class EmulatorHost {
             codeSpaceMiB: this.codeSpaceMiB,
             cpuOverclock: this.cpuOverclock,
             emulationSpeed: this.emulationSpeed,
+            audioBufferMs: this.audioBufferMs,
             presentationScale: this.presentationScale,
             oglTestClear: this.oglTestClear,
             fastSoftwareRaster: this.fastSoftwareRaster,
@@ -467,6 +469,7 @@ export class EmulatorHost {
             codeSpaceMiB: this.codeSpaceMiB,
             cpuOverclock: this.cpuOverclock,
             emulationSpeed: this.emulationSpeed,
+            audioBufferMs: this.audioBufferMs,
             presentationScale: this.presentationScale,
             presentationQueueSize: this.presentationQueueSize,
             presenterBackend: this.presenterBackend,
@@ -1568,6 +1571,13 @@ function requestedCpuOverclock() {
     return requested;
   }
   return 1;
+}
+
+// ?audiobuffer=N (ms, 16-200): the core mixer's queue (Dolphin's
+// AudioBufferSize, 80 ms when not given), part of the audio latency.
+export function requestedAudioBufferMs(search = window.location.search) {
+  const n = Number.parseInt(new URLSearchParams(search).get("audiobuffer") || "", 10);
+  return Number.isInteger(n) && n >= 16 && n <= 200 ? n : 0;
 }
 
 function requestedEmulationSpeed() {

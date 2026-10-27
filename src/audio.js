@@ -34,6 +34,12 @@ export class AudioController {
       Number.isFinite(leadParam) && leadParam >= 0.05 && leadParam <= 1
         ? leadParam
         : 0.12;
+    // The AudioWorklet path: the ring's fill the worker keeps. Its producer
+    // pulls exactly what the ring lacks from the mixer, which stretches its
+    // own queue (no clock drift to correct), so the fill IS the latency
+    // before the mixer's queue. ?audiolead (0.02-1 s) for this path too.
+    this.workletLeadSeconds =
+      Number.isFinite(leadParam) && leadParam >= 0.02 && leadParam <= 1 ? leadParam : 0.12;
     this.startLeadSeconds = 0.05;
     this.chunkFrames = 1024;
     const pumpParam = Number.parseInt(params.get("audiopump") || "", 10);
@@ -69,6 +75,21 @@ export class AudioController {
     };
   }
 
+  workletTargetFrames() {
+    return Math.round(this.workletLeadSeconds * 48000);
+  }
+
+  // What is queued between the mixer and the speaker, in ms: the worklet
+  // ring's fill (or the legacy schedule's lead) plus the output's own
+  // latency. The mixer's granule queue (AudioBufferSize) comes on top.
+  latencyMs(workletRing) {
+    const out = ((this.context?.outputLatency || 0) + (this.context?.baseLatency || 0)) * 1000;
+    if (this.activeTransport === "worklet" && workletRing) {
+      return Math.round(workletRing.fillFrames / 48 + out);
+    }
+    return this.context ? Math.round(this.profile.scheduleLeadSeconds * 1000 + out) : null;
+  }
+
   setTransportBridge(bridge) {
     this.transportBridge = typeof bridge === "function" ? bridge : null;
   }
@@ -88,7 +109,7 @@ export class AudioController {
     if (!muted) {
       await this.ensureContext();
       if (this.activeTransport === "worklet") {
-        await this.transportBridge?.({ enabled: true, muted: false, sab: this.workletRing.sab });
+        await this.transportBridge?.({ enabled: true, muted: false, sab: this.workletRing.sab, targetFrames: this.workletTargetFrames() });
       } else {
         this.startPump();
         await this.pump();
@@ -96,7 +117,7 @@ export class AudioController {
     } else {
       this.stopPump();
       if (this.activeTransport === "worklet") {
-        await this.transportBridge?.({ enabled: true, muted: true, sab: this.workletRing.sab });
+        await this.transportBridge?.({ enabled: true, muted: true, sab: this.workletRing.sab, targetFrames: this.workletTargetFrames() });
       }
     }
     this.update();
@@ -165,6 +186,7 @@ export class AudioController {
         enabled: true,
         muted: this.muted,
         sab: this.workletRing.sab,
+        targetFrames: this.workletTargetFrames(),
       });
       const activated = typeof activation === "object" ? activation?.active : activation;
       if (!activated) {
@@ -368,7 +390,9 @@ export class AudioController {
         : p.underrunCount,
       overrunCount: p.overrunCount,
       scheduleLeadSeconds: p.scheduleLeadSeconds,
-      scheduleDriftSeconds: p.scheduleDriftSeconds
+      scheduleDriftSeconds: p.scheduleDriftSeconds,
+      latencyMs: this.latencyMs(workletRing),
+      outputLatencyMs: this.context ? Math.round(((this.context.outputLatency || 0) + (this.context.baseLatency || 0)) * 1000) : null
     };
   }
 }

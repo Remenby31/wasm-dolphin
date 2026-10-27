@@ -506,6 +506,9 @@ std::uint32_t s_custom_rtc_value = 0;
 bool s_cpu_thread = false;
 float s_cpu_overclock = 1.0f;
 float s_emulation_speed = 1.0f;
+// The mixer's granule queue (Dolphin's AudioBufferSize, ms): 0 keeps its
+// default (80). Part of the audio latency, with the page's AudioWorklet ring.
+int s_audio_buffer_ms = 0;
 constexpr int AUDIO_PULL_MAX_FRAMES = 4096;
 std::array<s16, AUDIO_PULL_MAX_FRAMES * 2> s_audio_pull_buffer{};
 std::string s_audio_stats = "audio:unavailable";
@@ -751,6 +754,8 @@ void EnsureRuntime()
   Config::SetBase(Config::MAIN_DSP_THREAD, false);
   Config::SetBase(Config::MAIN_FAST_DISC_SPEED, true);
   Config::SetBase(Config::MAIN_EMULATION_SPEED, s_emulation_speed);
+  if (s_audio_buffer_ms > 0)
+    Config::SetBase(Config::MAIN_AUDIO_BUFFER_SIZE, s_audio_buffer_ms);
   // §28cz play-speed sync. When the browser CPU falls more than MaxFallback
   // (100ms) behind in a heavy scene, Dolphin's throttle normally CONCEDES that
   // time (slides the reference clock forward) and never catches up, so the
@@ -1271,6 +1276,20 @@ int SetEmulationSpeed(float factor)
     return 0;
 
   s_emulation_speed = factor;
+  return 1;
+}
+
+// ?audiobuffer=N: the mixer's queue, before the boot (16-200 ms; the mixer
+// itself keeps 4 to 64 granules). 1 when taken, 0 otherwise.
+#ifdef __EMSCRIPTEN__
+EMSCRIPTEN_KEEPALIVE
+#endif
+int DolphinWeb_SetAudioBufferMs(int ms)
+{
+  if (s_runtime_initialized || ms < 16 || ms > 200)
+    return 0;
+
+  s_audio_buffer_ms = ms;
   return 1;
 }
 

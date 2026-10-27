@@ -45,7 +45,10 @@ export class AudioPcmProducer {
     this.fallbackReason = "";
   }
 
-  install(sab, { muted = true } = {}) {
+  // targetFrames: the ring's fill the producer keeps (the AudioWorklet
+  // path's latency, before the mixer's own queue); 120 ms by default, the
+  // page passes ?audiolead. Playback starts at half of it (at most 50 ms).
+  install(sab, { muted = true, targetFrames = AUDIO_PCM_TARGET_FRAMES } = {}) {
     this.requestedTransport = "worklet";
     try {
       const ring = validateAudioPcmRing(openAudioPcmRing(sab));
@@ -55,6 +58,8 @@ export class AudioPcmProducer {
       if ((core.audioChannels?.() || 0) !== 2) throw new Error("core-channel-count");
       this.stop();
       this.ring = ring;
+      this.targetFrames = Math.max(480, Math.min(AUDIO_PCM_TARGET_FRAMES, targetFrames | 0 || AUDIO_PCM_TARGET_FRAMES));
+      this.startFrames = Math.min(AUDIO_PCM_START_FRAMES, this.targetFrames >> 1);
       this.activeTransport = "worklet";
       this.fallbackReason = "";
       this.muted = Boolean(muted);
@@ -119,9 +124,10 @@ export class AudioPcmProducer {
     for (let attempt = 0; attempt < maxMixes; attempt += 1) {
       const fill = audioPcmAvailableFrames(ring.header);
       const free = audioPcmFreeFrames(ring.header);
-      if (fill >= AUDIO_PCM_TARGET_FRAMES || free <= 0) break;
+      const target = this.targetFrames ?? AUDIO_PCM_TARGET_FRAMES;
+      if (fill >= target || free <= 0) break;
       const maxFrames = Math.max(1, core.audioBufferFrames?.() || 4096);
-      const requested = Math.min(maxFrames, AUDIO_PCM_TARGET_FRAMES - fill, free);
+      const requested = Math.min(maxFrames, target - fill, free);
       const started = performance.now();
       const mixed = Math.max(0, Math.min(requested, core.mixAudio(requested) | 0));
       this.recordMix(requested, mixed, performance.now() - started);
@@ -139,7 +145,7 @@ export class AudioPcmProducer {
       atomicMax(ring.header, AUDIO_PCM_HEADER.PRODUCER_FILL_HIGH_WATER, afterFill);
       if (published !== mixed) break;
     }
-    if (audioPcmAvailableFrames(ring.header) >= AUDIO_PCM_START_FRAMES) {
+    if (audioPcmAvailableFrames(ring.header) >= (this.startFrames ?? AUDIO_PCM_START_FRAMES)) {
       Atomics.store(ring.header, AUDIO_PCM_HEADER.STATE, AUDIO_PCM_STATE_RUNNING);
     }
     return wrote;
@@ -150,6 +156,7 @@ export class AudioPcmProducer {
       requestedTransport: this.requestedTransport,
       activeTransport: this.activeTransport,
       transportFallbackReason: this.fallbackReason,
+      targetFrames: this.targetFrames ?? AUDIO_PCM_TARGET_FRAMES,
       workletRing: this.ring ? snapshotAudioPcmRing(this.ring) : null,
     };
   }

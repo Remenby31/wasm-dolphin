@@ -44,8 +44,8 @@
     {
       "path": "core/upstream/dolphin_web_core.cpp",
       "hashMode": "lf-normalized",
-      "size": 64180,
-      "sha256": "247d81b2a92f52acf67facf9a06c4aa9db1e3d37e6093e159fede84aa9ffcd4b"
+      "size": 64799,
+      "sha256": "db2d8793a88832f0f199a0c1823c47cd14c92cde27336ec4934188663e0e09d2"
     },
     {
       "path": "src/app.js",
@@ -56,8 +56,8 @@
     {
       "path": "src/audio.js",
       "hashMode": "lf-normalized",
-      "size": 13055,
-      "sha256": "66a0273c05c49987cb20bf9801e0605a6b56b708aae8e27331049145eac7a943"
+      "size": 14444,
+      "sha256": "0ce2af4517137bc89a09d7a1672d0d5eea8e8d62b548b51be44fa5d0731ce7f1"
     },
     {
       "path": "src/audio-pcm-ring.js",
@@ -68,8 +68,8 @@
     {
       "path": "src/audio-pcm-producer.js",
       "hashMode": "lf-normalized",
-      "size": 5434,
-      "sha256": "6b5f8dc493d25212d7dc5f1753ee69e6006b66603312d1a4730cd48e3eb37225"
+      "size": 6022,
+      "sha256": "a2516199ba77626e3255928d1d696350a7423d7ced7c499cf7f0d08d8c693838"
     },
     {
       "path": "src/audio-worklet-processor.js",
@@ -86,8 +86,8 @@
     {
       "path": "src/core-host.js",
       "hashMode": "lf-normalized",
-      "size": 86070,
-      "sha256": "67987b59918347ddd718799f0b538422ecb6af7c31ff02dca663b2125d87e68e"
+      "size": 86576,
+      "sha256": "d7fe6aec4b51c3f033acec676073149ded6536e3c28764f8392edcadbfb59627"
     },
     {
       "path": "src/diagnostic-log-filter.js",
@@ -140,8 +140,8 @@
     {
       "path": "src/upstream-discio-worker.js",
       "hashMode": "lf-normalized",
-      "size": 793336,
-      "sha256": "c050d224a79bb42bfe59fee0d972b6508c8d5dbdaebe22a6e5db673218f84832"
+      "size": 793837,
+      "sha256": "ecaa8e8b3a3870bbfa7a49a02248ee9373b06d5e0bae1f12ae1ad2fa5757a72d"
     },
     {
       "path": "src/wgpu-renderer-worker-probe.js",
@@ -164,8 +164,8 @@
     {
       "path": "src/upstream-worker-adapter.js",
       "hashMode": "lf-normalized",
-      "size": 58496,
-      "sha256": "e50aceae91e7c7e2e36d0e54c761d4c294b6a0f5b6fa7a32b218137973051454"
+      "size": 58699,
+      "sha256": "eb337b2270967f7e4ff373e6aa38997a4ecce6459c1677f7d8dcd46d5681c55b"
     },
     {
       "path": "src/upstream-worker-protocol.js",
