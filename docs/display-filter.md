@@ -16,14 +16,24 @@ With presentvsync (the default) every frame is a pooled texture at the
 core's backbuffer size (640N x 480N), copied to the canvas at the worker's
 rAF. With the filter on, the canvas is sized to the page's display pixels
 (the canvas element's `devicePixelContentBoxSize`, observed by the host
-and sent to the worker), and the copy becomes:
+and sent to the worker, a replaced element observed again): the exact box,
+as the browser would stretch the canvas (the engine page's box follows its
+aspect selector), or, when the element has `object-fit: contain` (the
+site's engine frame), the backbuffer's aspect inside the box. The copy
+becomes:
 
 1. a scale to the display: FSR1 **EASU** (edge-adaptive upscale, 12 taps)
    when the display is larger than the backbuffer, an **area** filter
    (n x n bilinear samples per display pixel, an exact box at integer ratios)
    when it is smaller, nothing when equal;
 2. FSR1 **RCAS** (contrast-adaptive sharpening): light = 1.0 stop,
-   strong = 0.2 stop (AMD's default).
+   strong = 0.2 stop (AMD's default); as `ffx_fsr1.h` 1.0.2 (the centre in
+   the min/max), denominators held off zero.
+
+Turned off, its textures and buffers are destroyed. With metrics on
+(drop-meter), the device asks for `timestamp-query` and the filter times
+each frame on the GPU (`validationReadPresentVsync.displayFilter.gpuMs*`;
+drop-meter prints it per visit and side).
 
 EASU and RCAS are a WGSL port of AMD's `ffx_fsr1.h` (MIT, notice in the
 file). Without the filter the canvas is the backbuffer and the browser
@@ -47,17 +57,23 @@ filtered, hot switches).
 ## Widescreen 16:9 (patch 0178)
 
 Dolphin's generic widescreen hack (`GFX_WIDESCREEN_HACK`): the 3D
-projection is widened to 16:9 (Hor+), and the presenter draws at 16:9
-(`AspectMode::ForceWide`). `WebGPUGfx::GetSurfaceInfo` makes the
+projection is widened to the backbuffer's 16:9 (Hor+)
+(the aspect stays Stretch: ForceWide would draw the analog width, ~38 px
+of black on each side). `WebGPUGfx::GetSurfaceInfo` makes the
 backbuffer 16:9 (480N lines, 854 / 1706 / 2560 / 3414 wide) and announces
 it like any internal resolution (`BackbufferSize`); the canvas follows. A
 game that already renders 16:9 (anamorphic) is detected by Dolphin and not
 widened twice. Off is the stretch to a 4:3 backbuffer the path always had.
 
-Known artefacts (generic hack): 2D elements drawn with the 3D projection
-(HUD, menus, split-screen borders) are stretched; objects can pop in or be
-cut at the left and right edges, where the game culls what a 4:3 screen
-does not show. The stream follows the aspect (640x360 at 16:9).
+The engine page's screen follows (16:9 at boot with `?widescreen=1`, and
+on each switch through the `wgpuaspect` event).
+
+Known artefacts (generic hack), seen on a race and a 2-player split screen
+of a local commercial disc: the 2D HUD (position, lap, timer, map) is
+stretched by 4/3 horizontally; each half of a split screen is widened
+alike; objects can pop in or be cut at the left and right edges, where the
+game culls what a 4:3 screen does not show. The stream follows the aspect
+(640x360 at 16:9).
 
 ## Anti-aliasing
 
