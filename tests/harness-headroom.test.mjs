@@ -139,3 +139,20 @@ test("race-perf --decoupled-unlimited: the flag, its option, the summary's label
   assert.match(source, /decoupledUnlimited: values\["decoupled-unlimited"\] === true,/);
   assert.match(source, /\.\.\.\(o\.decoupledUnlimited \? \{ decoupledUnlimited: Object\.keys\(sides\)\.filter\(\(n\) => pacingExpectation\(/);
 });
+
+// Review of #292: on macOS ps -M's %cpu column is a decaying average that
+// still carries the boot (a thread at ~10 % read 60 %); race-perf reads each
+// thread's system + user time instead, the main thread included (ps -M's
+// first row is a thread, not the process total).
+test("race-perf: per-thread CPU seconds from ps -M rows, the main thread included", async () => {
+  const { darwinThreadSeconds } = await import("../harness/probes/race-perf.mjs");
+  const ps = [
+    "USER        PID   TT   %CPU STAT PRI     STIME     UTIME COMMAND",
+    "baptistec  4031   ??    0.0 S    31T   0:00.01   0:00.04 node -e x",
+    "           4031        99.4 R    31T   0:00.00   0:01.77 ",
+    "           4031         0.0 S    31T   1:00.50   2:00.25 "
+  ].join("\n");
+  assert.deepEqual(darwinThreadSeconds(4031, ps).map((x) => Math.round(x * 100) / 100), [0.05, 1.77, 180.75]);
+  const src = await readFile(new URL("../harness/probes/race-perf.mjs", import.meta.url), "utf8");
+  assert.doesNotMatch(src, /"-o", "%cpu="/, "no decaying %cpu");
+});
