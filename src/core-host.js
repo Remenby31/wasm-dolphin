@@ -62,6 +62,7 @@ import { requestedInputPhotonMarkerConfig } from "./input-visual-marker.js";
 import { requestedWgpuVisualCadence } from "./wgpu-visual-cadence.js";
 import { requestedWgpuPipelinePrewarm } from "./wgpu-pipeline-prewarm.js";
 import { requestedWgpuSparseUbo } from "./wgpu-sparse-ubo-copy-forward.js";
+import { captureSessionAfterDeviceLoss, requestedWgpuSessionRecover } from "./wgpu-session-recovery.js";
 
 const DEMO_WIDTH = 320;
 const DEMO_HEIGHT = 240;
@@ -80,8 +81,11 @@ export class EmulatorHost {
     this.onMode = onMode;
     // { internalResolution, fallback, reason, detail }: the WebGPU device was
     // lost (the game stops). fallback 1: it was above 1x, the next boot of
-    // this host and every setEnhancements stay at 1x.
+    // this host and every setEnhancements stay at 1x. With ?wgpurecover=1
+    // it comes once the core is paused and saved, with { paused, state,
+    // stateGameId, stateError } (docs/wgpu-session-fallback.md).
     this.onGpuDeviceLost = onGpuDeviceLost;
+    this.wgpuSessionRecover = requestedWgpuSessionRecover(window.location.search);
 
     this.demo = null;
     this.coreKind = requestedCoreKind();
@@ -994,7 +998,21 @@ export class EmulatorHost {
       this.enhancements.internalResolution = fallback;
     }
     this.onStatus(`WebGPU device lost at ${internalResolution}x (${reason})${fallback ? "; internal resolution back to 1x" : ""}`);
-    this.onGpuDeviceLost({ internalResolution, fallback, reason, detail });
+    const event = { internalResolution, fallback, reason, detail };
+    if (!this.wgpuSessionRecover || this.mode !== "dolphin") {
+      this.onGpuDeviceLost(event);
+      return null;
+    }
+    return captureSessionAfterDeviceLoss(this.adapter).then((session) => {
+      this.onStatus(session.state
+        ? `Session kept after the device loss (${session.state.byteLength} bytes)`
+        : `Session not kept after the device loss: ${session.stateError}`);
+      this.onGpuDeviceLost({ ...event, ...session });
+      return session;
+    }).catch((error) => {
+      this.onStatus(`Device loss handler failed: ${error instanceof Error ? error.message : error}`);
+      return null;
+    });
   }
 
   setAudioMuted(muted) {

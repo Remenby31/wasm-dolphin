@@ -81,6 +81,8 @@ with `scaleResolutionDownBy` there.
   every `setEnhancements` at 1x) and `onGpuDeviceLost({ internalResolution,
   fallback: 1, reason, detail })` tells the page, which restarts the game at
   1x instead of at the same scale. Lost at 1x: `fallback` is null.
+  `?wgpurecover=1` pauses the core and hands the page a save state with
+  the event, to resume after the restart (docs/wgpu-session-fallback.md).
 - **Measured costs** (2026-10-26/27, M4 Pro, Chrome headless, mains power,
   local commercial disc, race, 3 runs per scale, perf lock):
 
