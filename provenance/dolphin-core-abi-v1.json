@@ -1,19 +1,19 @@
 {
   "schemaVersion": 1,
   "abiVersion": 1,
-  "coreId": "sha256:d9d326cf988685632691e2407dd7c2ded35eaca08894e267c4ddc7b5f9794346",
+  "coreId": "sha256:4e2d81981a2e646b30f68942c5c69214e00f5e655ec6e10a783c06d1296bd35f",
   "upstreamCommit": "e22551eae1c84a7e4d0b6a5c519ef4ed4ef69df1",
   "artifacts": [
     {
       "path": "cores/dolphin/dolphin-core-upstream.js",
       "hashMode": "lf-normalized",
-      "size": 286335,
-      "sha256": "46a0138190a8f7d987190a12f90704467350fc83d18daab05634831de0add048"
+      "size": 286429,
+      "sha256": "9ef8888c187aa9d0aab9fe50ec0ffcdc4dd17877c9a92706a1006e912f1dcd91"
     },
     {
       "path": "cores/dolphin/dolphin-core-upstream.wasm",
-      "size": 13215145,
-      "sha256": "d9d326cf988685632691e2407dd7c2ded35eaca08894e267c4ddc7b5f9794346"
+      "size": 13215571,
+      "sha256": "4e2d81981a2e646b30f68942c5c69214e00f5e655ec6e10a783c06d1296bd35f"
     }
   ],
   "contractSources": [
@@ -356,9 +356,7 @@
     }
   },
   "memoryContractStatus": "consistent",
-  "sourceOnlyExportsPendingRebuild": [
-    "_DolphinWeb_HeapStats"
-  ],
+  "sourceOnlyExportsPendingRebuild": [],
   "moduleExports": [
     "_AcknowledgeWebGpuOwnershipTraceCapture",
     "_AlertRelayForTest",
@@ -441,6 +439,7 @@
     "_DolphinWeb_HarnessViSinceBoot",
     "_DolphinWeb_HarnessViSinceLoad",
     "_DolphinWeb_HeadroomStats",
+    "_DolphinWeb_HeapStats",
     "_DolphinWeb_JitArmedStepForTest",
     "_DolphinWeb_JitCompileBytesForTest",
     "_DolphinWeb_JitCompileBytesInPlaceForTest",
