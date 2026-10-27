@@ -714,7 +714,8 @@ function readbackFor(device) {
     wgpuReadback = new WgpuReadback({
       device,
       heap: () => module.HEAPU8,
-      words: () => new Int32Array(module.HEAPU8.buffer)
+      words: () => new Int32Array(module.HEAPU8.buffer),
+      skipMap: () => wgpuDiagPerturb.readbackNoMap
     });
     wgpuReadback.module = module;
   }
@@ -1065,7 +1066,7 @@ function webGpuUboPackMode() {
 // Harness-only timing perturbations, to reproduce in headless Chrome the
 // backpressure a visible canvas puts on the replay (validationSetWgpuPerturbation).
 // Both zero by default: nothing changes unless the harness asks.
-const wgpuDiagPerturb = { presentDelayMs: 0, drainEveryMs: 0 };
+const wgpuDiagPerturb = { presentDelayMs: 0, drainEveryMs: 0, readbackNoMap: false };
 let wgpuDiagLastDrainAt = 0;
 // The core's GPU-sync counters (patch 0080), on only for the freeze probe.
 let gpuSyncDiagEnabled = false;
@@ -2131,6 +2132,8 @@ async function handleMessage(type, payload) {
     case "validationSetWgpuPerturbation":
       wgpuDiagPerturb.presentDelayMs = Math.max(0, Math.min(100, Number(payload.presentDelayMs) || 0));
       wgpuDiagPerturb.drainEveryMs = Math.max(0, Math.min(200, Number(payload.drainEveryMs) || 0));
+      // diagnosis: readbacks copied but never mapped (wrong texels, see wgpu-readback.js)
+      wgpuDiagPerturb.readbackNoMap = payload.readbackNoMap === true;
       return { ...wgpuDiagPerturb };
     case "validationReadCoreProgress": {
       const loadedCheckpoint = readLastLoadedCheckpoint();

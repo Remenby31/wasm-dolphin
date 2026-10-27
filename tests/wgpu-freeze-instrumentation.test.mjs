@@ -27,7 +27,7 @@ test("the worker reports the replay state and the core's GPU-sync snapshot", () 
 });
 
 test("replay perturbations are harness-only and off by default", () => {
-  assert.match(worker, /const wgpuDiagPerturb = \{ presentDelayMs: 0, drainEveryMs: 0 \};/);
+  assert.match(worker, /const wgpuDiagPerturb = \{ presentDelayMs: 0, drainEveryMs: 0, readbackNoMap: false \};/);
   assert.match(worker, /case "validationSetWgpuPerturbation":/);
   assert.match(worker, /if \(wgpuDiagPerturb\.drainEveryMs > 0\) \{/);
   assert.match(worker, /if \(wgpuDiagPerturb\.presentDelayMs > 0\) \{/);

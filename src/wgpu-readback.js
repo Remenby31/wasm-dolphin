@@ -60,7 +60,12 @@ export class WgpuReadback {
   // heap(): the wasm heap's current Uint8Array (it can grow); words(): the
   // shared Int32Array the slots' words live in. poolBytes caps the MAP_READ
   // buffers kept for reuse.
-  constructor({ device, heap, words, poolBytes = 8 << 20 }) {
+  // skipMap (diagnosis only, validationSetWgpuPerturbation readbackNoMap):
+  // a function; while it returns true a copy is made but never mapped, and
+  // its waiter is released LOST (the game keeps its previous texels): what the
+  // readbacks' maps cost the GPU queue, at the price of wrong texels.
+  constructor({ device, heap, words, poolBytes = 8 << 20, skipMap = () => false }) {
+    this.skipMap = skipMap;
     this.device = device;
     this.heap = heap;
     this.words = words;
@@ -72,7 +77,7 @@ export class WgpuReadback {
     this.pool = new Map(); // size -> [GPUBuffer]
     this.pooledBytes = 0;
     this.slots = new Map(); // wordIndex -> { published, recorded, entries: Map(seq -> entry) }
-    this.stats = { copies: 0, completed: 0, stale: 0, lost: 0, failed: 0, rejected: 0, bytes: 0, maxLatencyMs: 0 };
+    this.stats = { copies: 0, completed: 0, stale: 0, lost: 0, failed: 0, rejected: 0, skippedMap: 0, bytes: 0, maxLatencyMs: 0 };
     // Per copy, from its submission: the validation scope resolved, the
     // buffer mapped.
     this.latency = { scope: latencyHistogram(), mapped: latencyHistogram() };
@@ -188,7 +193,8 @@ export class WgpuReadback {
     // worker task less before the texels land. A copy the scope reports bad
     // throws the map's result away: its buffer is destroyed, which rejects a
     // map still pending.
-    const mapped = thrown || !buffer ? null : this.mapInOwnScope(buffer);
+    const skip = !thrown && buffer && this.skipMap();
+    const mapped = thrown || !buffer || skip ? null : this.mapInOwnScope(buffer);
     const rejected = thrown || Boolean(await scope.catch(() => true));
     recordLatency(this.latency.scope, now() - c.at);
     if (generation !== this.generation) {
@@ -200,6 +206,11 @@ export class WgpuReadback {
       // never pooled again.
       buffer?.destroy();
       this.finish(entry, "lost", null, "failed");
+      return;
+    }
+    if (skip) {
+      buffer.destroy();
+      this.finish(entry, "lost", null, "skippedMap");
       return;
     }
     if (!(await mapped)) {

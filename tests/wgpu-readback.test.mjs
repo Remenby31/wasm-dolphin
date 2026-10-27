@@ -358,3 +358,13 @@ test("the parallel map runs inside a scope of its own, popped at once", async ()
   // the copy's scope, then the map's own, each popped at once
   assert.deepEqual(events, ["push", "pop", "push", "pop"]);
 });
+
+test("readback skipMap (diagnosis): the copy is made, the buffer never mapped, the waiter released LOST", async () => {
+  const src = await (await import("node:fs/promises")).readFile(new URL("../src/wgpu-readback.js", import.meta.url), "utf8");
+  assert.match(src, /constructor\(\{ device, heap, words, poolBytes = 8 << 20, skipMap = \(\) => false \}\)/);
+  assert.match(src, /const mapped = thrown \|\| !buffer \|\| skip \? null : this\.mapInOwnScope\(buffer\);/);
+  assert.match(src, /if \(skip\) \{\n\s+buffer\.destroy\(\);\n\s+this\.finish\(entry, "lost", null, "skippedMap"\);/);
+  const worker = await (await import("node:fs/promises")).readFile(new URL("../src/upstream-discio-worker.js", import.meta.url), "utf8");
+  assert.match(worker, /skipMap: \(\) => wgpuDiagPerturb\.readbackNoMap/);
+  assert.match(worker, /wgpuDiagPerturb\.readbackNoMap = payload\.readbackNoMap === true;/);
+});
