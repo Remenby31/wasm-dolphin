@@ -295,7 +295,13 @@ fn tap(p: vec2i, size: vec2i) -> vec3f {
 
 // The GPU side, made once per device and canvas format. encode() records
 // the frame's passes from a pooled texture to the canvas texture.
-export function createDisplayFilter(device, format) {
+// timing (metrics on, the device has timestamp-query): the GPU time of each
+// filtered frame, from the first pass's start to the last one's end, read
+// back without waiting (at most TIMING_SLOTS frames in flight, others not
+// timed): stats.gpuMs* (drop-meter).
+const TIMING_SLOTS = 4;
+
+export function createDisplayFilter(device, format, { timing = false } = {}) {
   const u = globalThis.GPUTextureUsage;
   const linear = device.createSampler({ label: "display-filter-linear", magFilter: "linear", minFilter: "linear" });
   const modules = new Map();
@@ -326,14 +332,30 @@ export function createDisplayFilter(device, format) {
     rcas: device.createBuffer({ label: "display-filter-rcas", size: 16, usage: globalThis.GPUBufferUsage.UNIFORM | globalThis.GPUBufferUsage.COPY_DST })
   };
   let scratch = null;
-  const stats = { frames: 0, easu: 0, area: 0, rcas: 0, copies: 0, encodeMsTotal: 0, encodeMsMax: 0 };
+  const stats = {
+    frames: 0, easu: 0, area: 0, rcas: 0, copies: 0, encodeMsTotal: 0, encodeMsMax: 0,
+    gpuTimed: 0, gpuMsTotal: 0, gpuMsMax: 0
+  };
+  const timed = timing && Boolean(device.features?.has?.("timestamp-query"));
+  const querySet = timed ? device.createQuerySet({ label: "display-filter-time", type: "timestamp", count: 2 }) : null;
+  const resolve = timed ? device.createBuffer({ label: "display-filter-time-resolve", size: 16, usage: GPUBufferUsage.QUERY_RESOLVE | GPUBufferUsage.COPY_SRC }) : null;
+  const freeSlots = timed ? Array.from({ length: TIMING_SLOTS }, () =>
+    device.createBuffer({ label: "display-filter-time-read", size: 16, usage: GPUBufferUsage.COPY_DST | GPUBufferUsage.MAP_READ })) : [];
+  // This frame's timestamp writes: [first pass, last pass] (null: not timed).
+  let frameTimes = null;
 
-  const pass = (encoder, name, code, view, entries) => {
+  const pass = (encoder, name, code, view, entries, last) => {
     const p = pipeline(name, code);
     const bindGroup = device.createBindGroup({ layout: p.getBindGroupLayout(0), entries });
+    const first = frameTimes && !frameTimes.started;
+    if (first) frameTimes.started = true;
+    const timestampWrites = frameTimes && (first || last)
+      ? { querySet, ...(first ? { beginningOfPassWriteIndex: 0 } : {}), ...(last ? { endOfPassWriteIndex: 1 } : {}) }
+      : undefined;
     const rp = encoder.beginRenderPass({
       label: `display-filter-${name}`,
-      colorAttachments: [{ view, loadOp: "clear", storeOp: "store", clearValue: { r: 0, g: 0, b: 0, a: 1 } }]
+      colorAttachments: [{ view, loadOp: "clear", storeOp: "store", clearValue: { r: 0, g: 0, b: 0, a: 1 } }],
+      ...(timestampWrites ? { timestampWrites } : {})
     });
     rp.setPipeline(p);
     rp.setBindGroup(0, bindGroup);
@@ -368,13 +390,14 @@ export function createDisplayFilter(device, format) {
         stats.copies += 1;
       } else {
         let rcasSource = srcView;
+        frameTimes = freeSlots.length ? { started: false } : null;
         if (plan.scale) {
           const target = plan.rcas === null ? dstView : scratchView(dst.width, dst.height);
           if (plan.scale === "easu") {
             device.queue.writeBuffer(uniforms.easu, 0, easuConstants(src.width, src.height, dst.width, dst.height));
             pass(encoder, "easu", EASU_WGSL, target, [
               { binding: 0, resource: srcView }, { binding: 1, resource: linear }, { binding: 2, resource: { buffer: uniforms.easu } }
-            ]);
+            ], plan.rcas === null);
             stats.easu += 1;
           } else {
             const rx = src.width / dst.width, ry = src.height / dst.height;
@@ -384,7 +407,7 @@ export function createDisplayFilter(device, format) {
             ]));
             pass(encoder, "area", AREA_WGSL, target, [
               { binding: 0, resource: srcView }, { binding: 1, resource: linear }, { binding: 2, resource: { buffer: uniforms.area } }
-            ]);
+            ], plan.rcas === null);
             stats.area += 1;
           }
           rcasSource = target;
@@ -393,8 +416,27 @@ export function createDisplayFilter(device, format) {
           device.queue.writeBuffer(uniforms.rcas, 0, new Float32Array([2 ** -plan.rcas, 0, 0, 0]));
           pass(encoder, "rcas", RCAS_WGSL, dstView, [
             { binding: 0, resource: rcasSource }, { binding: 2, resource: { buffer: uniforms.rcas } }
-          ]);
+          ], true);
           stats.rcas += 1;
+        }
+        if (frameTimes) {
+          const slot = freeSlots.pop();
+          encoder.resolveQuerySet(querySet, 0, 2, resolve, 0);
+          encoder.copyBufferToBuffer(resolve, 0, slot, 0, 16);
+          frameTimes = null;
+          // Mapped once the frame's submit ran (the caller submits this
+          // encoder now): never waited on.
+          queueMicrotask(() => slot.mapAsync(GPUMapMode.READ).then(() => {
+            const t = new BigUint64Array(slot.getMappedRange());
+            const ms = t[1] > t[0] ? Number(t[1] - t[0]) / 1e6 : 0;
+            slot.unmap();
+            if (ms > 0 && ms < 1000) {
+              stats.gpuTimed += 1;
+              stats.gpuMsTotal += ms;
+              if (ms > stats.gpuMsMax) stats.gpuMsMax = ms;
+            }
+            freeSlots.push(slot);
+          }, () => {}));
         }
       }
       stats.frames += 1;
@@ -407,6 +449,9 @@ export function createDisplayFilter(device, format) {
       scratch?.destroy();
       scratch = null;
       for (const b of Object.values(uniforms)) b.destroy();
+      querySet?.destroy();
+      resolve?.destroy();
+      for (const b of freeSlots) b.destroy();
     }
   };
 }

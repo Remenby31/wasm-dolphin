@@ -6743,6 +6743,9 @@ async function createWebGpuPresenter(canvas) {
   console.log("[wgpu-features] got=" + (haveFeatures.join(",") || "none") +
               " missing=" + (wantFeatures.filter((f) => !haveFeatures.includes(f)).join(",") || "none") +
               " masked=" + ([...wgpuMaskedFeatures].join(",") || "none"));
+  // timestamp-query: only read by the display filter's GPU timing, with
+  // metrics on (drop-meter); asking for it costs nothing otherwise.
+  if (adapter.features?.has("timestamp-query") && !wgpuMaskedFeatures.has("timestamp-query")) haveFeatures.push("timestamp-query");
   const device = await adapter.requestDevice(
     haveFeatures.length ? { requiredFeatures: haveFeatures } : undefined);
   rendererDiagnostics.device = {
@@ -13228,7 +13231,7 @@ function presentWgpuVsyncFrame({ newest = false, hidden = false } = {}) {
     // Scale to the display (EASU up, area down) and sharpen (RCAS).
     if (wgpuDisplayFilterDevice !== dev) {
       wgpuDisplayFilterGpu?.destroy();
-      wgpuDisplayFilterGpu = createDisplayFilter(dev, renderGpu.format);
+      wgpuDisplayFilterGpu = createDisplayFilter(dev, renderGpu.format, { timing: collectMetrics });
       wgpuDisplayFilterDevice = dev;
     }
     wgpuDisplayFilterGpu.encode(enc, f.tex, dst, wgpuDisplayFilter.sharpness);
