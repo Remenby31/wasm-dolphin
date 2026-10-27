@@ -59,3 +59,50 @@ test("runLocked: a detached grandchild left by the command is gone before the lo
   assert.ok(grandchild, "the grandchild was seen and had to be killed");
   assert.equal(aliveAtRelease, false, "gone when the lock went back");
 });
+
+// Re-review of #307.
+test("descendantsOf: from several roots (the command and its processes still alive)", () => {
+  // 30 was the command's child, its parent died: launchd (1) adopted it; 31 is its child
+  const rows = [[10, 1], [11, 10], [30, 1], [31, 30], [40, 1]];
+  assert.deepEqual(descendantsOf(rows, [10, 30]).sort(), [11, 31]);
+});
+
+test("reap: ps unavailable is never 'all gone': nothing signalled, everything reported left", async () => {
+  const sent = [];
+  const left = await reap(new Map([[5, "t5"], [6, "t6"]]), { graceMs: 0, killWaitMs: 0, stepMs: 0, sleep: async () => {}, started: () => null, kill: (p, s) => sent.push(`${s} ${p}`) });
+  assert.deepEqual(sent, []);
+  assert.deepEqual(left.sort(), [5, 6]);
+});
+
+test("runLocked: a command not found exits 127; one killed by a signal exits 128 + n", async () => {
+  const acquire = async () => () => {};
+  assert.equal(await runLocked({ name: "t", cmd: "/no/such/command-xyz", acquire, graceMs: 0 }), 127);
+  assert.equal(await runLocked({ name: "t", cmd: process.execPath, args: ["-e", "process.kill(process.pid, 'SIGKILL')"], acquire, graceMs: 0 }), 137);
+});
+
+// SIGTERM on the wrapper: the command's processes reaped, then the lock
+// released, exit 143 (before, the lock went back and sh/sleep survived).
+test("lock-run CLI: SIGTERM reaps the command's processes, then releases the lock, exit 143", async (t) => {
+  const { spawn } = await import("node:child_process");
+  const { mkdtempSync, existsSync, rmSync } = await import("node:fs");
+  const os = await import("node:os");
+  const path = await import("node:path");
+  const root = mkdtempSync(path.join(os.tmpdir(), "lockrun-sig-"));
+  t.after(() => rmSync(root, { recursive: true, force: true }));
+  const lockDir = path.join(root, ".perf-lock");
+  const cli = new URL("../harness/lib/lock-run.mjs", import.meta.url).pathname;
+  const w = spawn(process.execPath, [cli, "--name", "sig-test", "--", "sh", "-c", "sleep 40 & sleep 40"], { env: { ...process.env, HARNESS_PERF_LOCK: lockDir }, stdio: "ignore" });
+  const until = async (ok, ms) => { const end = Date.now() + ms; while (!ok() && Date.now() < end) await new Promise((r) => setTimeout(r, 50)); return ok(); };
+  assert.ok(await until(() => existsSync(lockDir), 10000), "the lock is held");
+  // its sh and the two sleeps, seen by the wrapper's watcher
+  const { psRows, descendantsOf } = await import("../harness/lib/lock-run.mjs");
+  let kids = [];
+  assert.ok(await until(() => (kids = descendantsOf(psRows() ?? [], w.pid)).length >= 3, 10000), `processes: ${kids}`);
+  await new Promise((r) => setTimeout(r, 1200)); // one watcher tick
+  w.kill("SIGTERM");
+  const code = await new Promise((r) => w.on("exit", (c) => r(c)));
+  assert.equal(code, 143);
+  assert.equal(existsSync(lockDir), false, "the lock went back");
+  const alive = (pid) => { try { process.kill(pid, 0); return true; } catch { return false; } };
+  assert.deepEqual(kids.filter(alive), [], "sh and the sleeps were reaped before");
+});
