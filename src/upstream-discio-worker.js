@@ -430,18 +430,19 @@ const REGION_MISS_TOP = 64;
 // regions, host time, its exception part, cycles and calls (64 longest).
 function harnessDiagMissTime(heap, m = moduleInstance) {
   const at = typeof m?._DolphinWeb_DiagMissTime === "function" ? m._DolphinWeb_DiagMissTime() >>> 0 : 0;
-  const size = 8 + 40 * 64 + 8;
+  const size = 8 + 64 * 64 + 8;
   if (!at || at + size > heap.length) return null;
   const words = new Int32Array(heap.buffer);
   const load = (i) => (typeof SharedArrayBuffer !== "undefined" && heap.buffer instanceof SharedArrayBuffer ? Atomics.load(words, i) : words[i]) >>> 0;
   for (let tries = 0; tries < 3; tries += 1) {
-    const ended = load((at + 8 + 40 * 64) >>> 2);
+    const ended = load((at + 8 + 64 * 64) >>> 2);
     const view = new DataView(heap.slice(at, at + size).buffer);
     if (load(at >>> 2) !== ended) continue;
     const count = Math.min(view.getUint32(4, true), 64);
     return Array.from({ length: count }, (_, i) => {
-      const o = 8 + 40 * i;
-      return { pc: view.getUint32(o + 24, true), timeMs: view.getFloat64(o, true), excMs: view.getFloat64(o + 8, true), cycles: view.getFloat64(o + 16, true), calls: view.getUint32(o + 28, true), sliceFirst: view.getUint32(o + 32, true), pred: view.getUint32(o + 36, true) };
+      const o = 8 + 64 * i;
+      return { pc: view.getUint32(o + 24, true), timeMs: view.getFloat64(o, true), excMs: view.getFloat64(o + 8, true), cycles: view.getFloat64(o + 16, true), calls: view.getUint32(o + 28, true), sliceFirst: view.getUint32(o + 32, true), pred: view.getUint32(o + 36, true),
+        codes: [0, 1, 2, 3].map((k) => view.getUint32(o + 40 + 4 * k, true)), samePc: view.getUint32(o + 56, true) };
     });
   }
   return null;
