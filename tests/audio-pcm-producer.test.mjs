@@ -6,6 +6,7 @@ import {
   AUDIO_PCM_STATE_RUNNING,
   createAudioPcmRing,
   consumeAudioPcm,
+  snapshotAudioPcmRing,
   writeAudioPcm,
 } from "../src/audio-pcm-ring.js";
 import {
@@ -114,4 +115,23 @@ test("adaptive ring: starts at 120 ms, comes down to the page's floor when calm,
   const f3 = fixture(), r3 = createAudioPcmRing();
   f3.producer.install(r3.sab, { muted: false, targetFrames: 10 });
   assert.equal(f3.producer.telemetry().floorFrames, 480);
+});
+
+// 0186: the producer publishes the core mixer's queue in the ring's header,
+// in µs; -1 while unknown (a core without the export, or before the boot).
+test("the mixer's queue reaches the ring header; unknown is -1 (null in the snapshot)", () => {
+  const ring = createAudioPcmRing();
+  assert.equal(snapshotAudioPcmRing(ring).mixerQueueMs, null, "unknown before any refill");
+  const f = fixture();
+  f.producer.install(ring.sab, { muted: false });
+  consumeAudioPcm(ring, new Float32Array(128), new Float32Array(128));
+  f.producer.refill();
+  assert.equal(snapshotAudioPcmRing(ring).mixerQueueMs, null, "a core without audioQueuedMs");
+  f.core.audioQueuedMs = () => 42.667;
+  f.producer.refill();
+  assert.equal(Atomics.load(ring.header, AUDIO_PCM_HEADER.MIXER_QUEUE_US), 42667);
+  assert.equal(snapshotAudioPcmRing(ring).mixerQueueMs, 42.667);
+  f.core.audioQueuedMs = () => -1; // before the boot
+  f.producer.refill();
+  assert.equal(snapshotAudioPcmRing(ring).mixerQueueMs, null);
 });

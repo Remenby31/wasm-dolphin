@@ -3,8 +3,8 @@
   "normalization": "git-blob-lf",
   "root": {
     "baseCommit": "e22551eae1c84a7e4d0b6a5c519ef4ed4ef69df1",
-    "resultTree": "78293867f48568b2f783f5416aeb3ba60b893222",
-    "changedPathCount": 143,
+    "resultTree": "e67f542ebe3bb68920d4e28cdb266c7ef3d734c6",
+    "changedPathCount": 144,
     "records": [
       {
         "path": "CMakeLists.txt",
@@ -41,6 +41,15 @@
         "resultBlob": "b7f924866052f428252136b22f52e6f8b50a5bd3",
         "size": 2624,
         "sha256": "24711d65660d56f0f6281084fb8564ce51728478b3b777d62795bd49f82b0dfc"
+      },
+      {
+        "path": "Source/Core/AudioCommon/Mixer.h",
+        "status": "M",
+        "mode": "100644",
+        "baseBlob": "6e5a52eecd1fd404df2a949ecce923dbd6018201",
+        "resultBlob": "aa193693b9593b6ca488e2a028ffff6ef2e89975",
+        "size": 7819,
+        "sha256": "2b799edafae5f6db36a7c31992c6ed93c11a25f1e7d9b567e42a40054d579d45"
       },
       {
         "path": "Source/Core/AudioCommon/WebAudioStream.cpp",
@@ -1329,5 +1338,5 @@
       ]
     }
   ],
-  "contentSha256": "44b2a5b4bd68f5e198e81e86a3d24f58f3d4f7540d59f1acda452d6c3acead42"
+  "contentSha256": "d69ea0538953786c6ce417fb29260146ec204dfc454b5a6bdc1440f479689c53"
 }

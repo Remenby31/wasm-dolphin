@@ -44,8 +44,8 @@
     {
       "path": "core/upstream/dolphin_web_core.cpp",
       "hashMode": "lf-normalized",
-      "size": 65323,
-      "sha256": "31bccd965ad6b1f5c66b4133d3dd63df45c4bb9721f4c0639a2d594996c3c355"
+      "size": 65912,
+      "sha256": "954f0a84b1dadec378216d671e29b4d0251d1f73780b6d03fa94e5d4bf2b8c8d"
     },
     {
       "path": "src/app.js",
@@ -56,20 +56,20 @@
     {
       "path": "src/audio.js",
       "hashMode": "lf-normalized",
-      "size": 19355,
-      "sha256": "b94bfbe836722ee1562fad07172ec2c4c2e635448a457eb8de269f18db41db3e"
+      "size": 19607,
+      "sha256": "bee128b8aacb3feaf952433297a2baac4e678e307e87eb7739b3208696d6f75b"
     },
     {
       "path": "src/audio-pcm-ring.js",
       "hashMode": "lf-normalized",
-      "size": 7901,
-      "sha256": "470a22753ad5b0563ab68f18c72a044aa700d6e51b780a1861c2a9faf4710dbc"
+      "size": 8314,
+      "sha256": "89de74c8dd47624dfee9bab6e4850017ce294a63e7bd24ba9c367997f39f4de2"
     },
     {
       "path": "src/audio-pcm-producer.js",
       "hashMode": "lf-normalized",
-      "size": 8211,
-      "sha256": "83f8dbbf5cc8184a17493b7dfea1c408b1effe8708db250fee9613d5825ede2e"
+      "size": 8472,
+      "sha256": "e59d4345379e8db4fd3efbe7e3c7ef996214e896b6d7b105cf4152368534312c"
     },
     {
       "path": "src/audio-worklet-processor.js",
@@ -140,8 +140,8 @@
     {
       "path": "src/upstream-discio-worker.js",
       "hashMode": "lf-normalized",
-      "size": 797587,
-      "sha256": "5aa4a2648ef0025f8ba643e469e5124309e49317665349842afad3f83947fcd8"
+      "size": 797848,
+      "sha256": "a1a37b2bf855f10ce2b8fb52983f04dd8cf2217e5190795de863ef11eae80bb3"
     },
     {
       "path": "src/wgpu-renderer-worker-probe.js",

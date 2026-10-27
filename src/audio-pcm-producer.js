@@ -185,6 +185,9 @@ export class AudioPcmProducer {
       atomicMax(ring.header, AUDIO_PCM_HEADER.PRODUCER_FILL_HIGH_WATER, afterFill);
       if (published !== mixed) break;
     }
+    // the mixer's own queue, for the page's latency (0186; -1 unknown)
+    const queuedMs = core.audioQueuedMs?.();
+    Atomics.store(ring.header, AUDIO_PCM_HEADER.MIXER_QUEUE_US, Number.isFinite(queuedMs) && queuedMs >= 0 ? Math.round(queuedMs * 1000) : -1);
     if (audioPcmAvailableFrames(ring.header) >= (this.startFrames ?? AUDIO_PCM_START_FRAMES)) {
       Atomics.store(ring.header, AUDIO_PCM_HEADER.STATE, AUDIO_PCM_STATE_RUNNING);
     }
