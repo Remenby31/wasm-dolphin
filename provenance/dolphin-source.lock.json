@@ -25,7 +25,7 @@
       "commit": "01e0577914a75a2569c846778c2f93aa8e6feddd"
     }
   },
-  "patchSeriesSha256": "ba0baca14e38466d9f317cb30567c1e2e43a9900e00ec094a07078804c837541",
+  "patchSeriesSha256": "1b21a91b2d465cd2484ea0cedfdd15d9dd96565246003a965f66a09d095bfffb",
   "patches": [
     {
       "order": 1,
@@ -1064,8 +1064,8 @@
       "cwd": ".",
       "hashMode": "lf-normalized",
       "path": "patches/dolphin-wasm/snapshot/0177-jit-load-compile-rate.patch",
-      "size": 4565,
-      "sha256": "517587a01c5197b75cdb12ad3d069d022f2a5b6ba6aa0c02c8c6bdffd8676b0e"
+      "size": 5832,
+      "sha256": "e31f49768bc0a08af32808e19d6659a32566e52ca24d9cd6c20c97bae8bc36ea"
     },
     {
       "order": 131,

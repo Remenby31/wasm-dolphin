@@ -1,8 +1,8 @@
 diff --git a/Source/Core/Core/PowerPC/CachedInterpreter/CachedInterpreter.cpp b/Source/Core/Core/PowerPC/CachedInterpreter/CachedInterpreter.cpp
-index def1420..05a3495 100644
+index def1420..0783535 100644
 --- a/Source/Core/Core/PowerPC/CachedInterpreter/CachedInterpreter.cpp
 +++ b/Source/Core/Core/PowerPC/CachedInterpreter/CachedInterpreter.cpp
-@@ -377,6 +377,17 @@ constexpr u32 DOLPHIN_WEB_DISABLE_NATIVE_PS = 1u << 29;
+@@ -377,6 +377,27 @@ constexpr u32 DOLPHIN_WEB_DISABLE_NATIVE_PS = 1u << 29;
  // one freeze. Per-slice counter reset in CachedInterpreter::Run().
  constexpr u32 COMPILE_THROTTLE_MAX_PER_SLICE = 8;
  constexpr u32 COMPILE_THROTTLE_MAX_US_PER_SLICE = 5000;
@@ -17,10 +17,20 @@ index def1420..05a3495 100644
 +std::optional<std::chrono::steady_clock::time_point> s_wasm_load_rate_refilled;
 +double s_wasm_load_tokens = 0;
 +u32 s_wasm_load_rate_rejects = 0;
++// The blocks the bucket refused: they stay interpreted (no erase, which made
++// the deferred queue recompile them at once, the bucket refuse them again:
++// 126-137k compiles in 3 s, first try of #298) and are handed to the
++// deferred queue when the window ends.
++struct LoadHeldBlock
++{
++  u32 address, features;
++  const void* normal_entry;
++};
++std::vector<LoadHeldBlock> s_wasm_load_held;
  
  // The region translator off the CPU thread (DolphinWeb_AotTranslate) emits
  // with its own mask, never the CPU thread's.
-@@ -845,6 +856,8 @@ extern "C" void DolphinWeb_RecordModuleUs(int dt_us)
+@@ -845,6 +866,8 @@ extern "C" void DolphinWeb_RecordModuleUs(int dt_us)
    // regardless of throttle enablement — only the reject path is gated.
    s_wasm_compiles_this_slice++;
    s_wasm_compile_us_this_slice += dt;
@@ -29,7 +39,28 @@ index def1420..05a3495 100644
  }
  extern "C" void DolphinWeb_RecordInstanceUs(int dt_us)
  {
-@@ -15162,6 +15175,31 @@ bool CachedInterpreter::TryWriteWasmBlock(u32 nextPC)
+@@ -1054,6 +1077,20 @@ void RetryDeferredWasmBlocks(CachedInterpreter& cpu)
+ {
+   if (s_wasm_off_thread_compile.load(std::memory_order_relaxed))
+     RetryOffThreadWasmBlocks(cpu);
++  // Patch 0177: the load's window is over: its held blocks join the deferred
++  // queue, drained at the usual per-slice rate.
++  if (s_wasm_load_rate_start &&
++      std::chrono::steady_clock::now() - *s_wasm_load_rate_start >= s_wasm_load_rate_window)
++  {
++    s_wasm_load_rate_start.reset();
++    if (s_wasm_jit_enabled)
++    {
++      auto& queue = s_deferred_wasm_queues[&cpu];
++      for (const LoadHeldBlock& held : s_wasm_load_held)
++        queue.Defer(held.address, held.features, held.normal_entry);
++    }
++    s_wasm_load_held.clear();
++  }
+   if (!s_wasm_jit_enabled)
+   {
+     s_deferred_wasm_queues.erase(&cpu);
+@@ -15162,6 +15199,31 @@ bool CachedInterpreter::TryWriteWasmBlock(u32 nextPC)
    // we've already burned this slice's compile budget. Falls to Interpret;
    // next slice will re-attempt this block (one extra Interpret cost per
    // deferred compile is far cheaper than a multi-hundred-ms freeze).
@@ -39,7 +70,7 @@ index def1420..05a3495 100644
 +    const auto now = std::chrono::steady_clock::now();
 +    if (now - *s_wasm_load_rate_start >= s_wasm_load_rate_window)
 +    {
-+      s_wasm_load_rate_start.reset();
++      // the window is over: RetryDeferredWasmBlocks hands the held blocks on
 +    }
 +    else
 +    {
@@ -52,8 +83,8 @@ index def1420..05a3495 100644
 +      if (s_wasm_load_tokens < 1)
 +      {
 +        s_wasm_load_rate_rejects += 1;
-+        s_deferred_wasm_queues[this].Defer(js.blockStart,
-+            static_cast<u32>(m_ppc_state.feature_flags), js.curBlock->normalEntry);
++        s_wasm_load_held.push_back({js.blockStart, static_cast<u32>(m_ppc_state.feature_flags),
++                                    js.curBlock->normalEntry});
 +        return false;
 +      }
 +    }
@@ -61,7 +92,7 @@ index def1420..05a3495 100644
    if (!DolphinWebHelperDisabled(DOLPHIN_WEB_DISABLE_COMPILE_THROTTLE))
    {
      if (s_wasm_compiles_this_slice >= COMPILE_THROTTLE_MAX_PER_SLICE ||
-@@ -15941,6 +15979,15 @@ extern "C" EMSCRIPTEN_KEEPALIVE double DolphinWeb_JitArmedStepForTest(double fra
+@@ -15941,6 +16003,15 @@ extern "C" EMSCRIPTEN_KEEPALIVE double DolphinWeb_JitArmedStepForTest(double fra
    return engaged == UINT64_MAX ? -1.0 : static_cast<double>(engaged);
  }
  
@@ -77,7 +108,7 @@ index def1420..05a3495 100644
  // Patch 0172: 1 counts the armed warmup from field 0 after a state load (the
  // JIT engages at max(fields, loaded field)), 0 restarts it from the loaded
  // field (the default).
-@@ -15985,6 +16032,12 @@ extern "C" EMSCRIPTEN_KEEPALIVE double GetPpcWasmJitEngagedFrame()
+@@ -15985,6 +16056,12 @@ extern "C" EMSCRIPTEN_KEEPALIVE double GetPpcWasmJitEngagedFrame()
  extern "C" EMSCRIPTEN_KEEPALIVE void DolphinWeb_JitOnStateLoaded()
  {
    OpenRegionLoadWindow();  // patch 0171
