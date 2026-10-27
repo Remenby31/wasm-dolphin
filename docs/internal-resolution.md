@@ -86,8 +86,10 @@ with `scaleResolutionDownBy` there.
   not attached…: the ring stops for good, the picture would freeze) comes
   the same way, once per device, with `cause: "renderer-error"` and its own
   `reason` (`submit-error`, `staging-capacity`, `ring-attach`…): the scale is
-  not why, so `fallback` is null and the page restarts at the same scale,
-  with its own guard against a loop.
+  not why, so `fallback` is null and the host keeps the scale. A page should
+  restart at the same scale with its own guard against a loop (the site
+  does it from its `fix/renderer-error-restart` change; until then it reads
+  a null `fallback` above 1x as the error screen).
 - **Measured costs** (2026-10-26/27, M4 Pro, Chrome headless, mains power,
   local commercial disc, race, 3 runs per scale, perf lock):
 

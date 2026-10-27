@@ -35,7 +35,8 @@ export function handleWgpuDeviceLoss({
 // Every scope the worker's markWgpuReplayFatal is called with, but the
 // device loss (posted by its own handler), and the reason the page gets.
 // Each one leaves the command ring FAILED for good: the game would go on
-// blind with a frozen picture. The page hears of it as of a lost device.
+// blind with a frozen picture. The page hears of it on the device-loss path
+// (`wgpu-device-lost`), with cause "renderer-error": the same scale again.
 export const WGPU_FATAL_PAGE_REASONS = Object.freeze({
   "submit-error": "submit-error",
   "staging-seal": "staging-seal",

@@ -129,8 +129,22 @@ async function pageSees(message) {
 
 // One test over every cause (the list must match the worker's, test above):
 // the page hears a renderer error at the same scale, a lost device lower.
+// The reasons the page gets, written out (not read back from the module).
+const EXPECTED_PAGE_REASONS = {
+  "submit-error": "submit-error",
+  "staging-seal": "staging-seal",
+  "staging-capacity": "staging-capacity",
+  "staging-copy": "staging-copy",
+  "staging-remap": "staging-remap",
+  "destroy-order": "destroy-order",
+  "semantic-capture-ack": "semantic-capture-ack",
+  "webgpu-command-ring-ownership": "ring-ownership",
+  "webgpu-command-ring-attach": "ring-attach",
+};
+
 test("every fatal replay error reaches the page as a renderer error, at the same scale; a lost device steps down", async () => {
-  for (const [scope, reason] of Object.entries(WGPU_FATAL_PAGE_REASONS)) {
+  assert.deepEqual({ ...WGPU_FATAL_PAGE_REASONS }, EXPECTED_PAGE_REASONS);
+  for (const [scope, reason] of Object.entries(EXPECTED_PAGE_REASONS)) {
     assert.equal(wgpuFatalPageReason(scope), reason);
     const posted = [];
     createWgpuFatalReporter((m) => posted.push(m)).report({ internalResolution: 2, reason, detail: `${scope} detail`, cause: "renderer-error" });
@@ -139,7 +153,6 @@ test("every fatal replay error reaches the page as a renderer error, at the same
     assert.deepEqual(lost, [{ internalResolution: 2, fallback: null, reason, detail: `${scope} detail`, cause: "renderer-error" }], scope);
     assert.equal(host.scaleLostCeiling, 4, scope);
   }
-  assert.deepEqual(Object.values(WGPU_FATAL_PAGE_REASONS).filter((r) => r.startsWith("ring-")), ["ring-ownership", "ring-attach"]);
   // A lost device (cause absent from an older worker too): 1x above 1x, null at 1x.
   const posted = [];
   createWgpuFatalReporter((m) => posted.push(m)).report({ internalResolution: 2, reason: "unknown", detail: "gone" });
@@ -164,4 +177,20 @@ test("one message per renderer session: the first cause wins, a new device start
   assert.equal(posted.length, 2);
   assert.equal(wgpuFatalPageReason("something-new"), "something-new");
   assert.equal(wgpuFatalPageReason(""), "unknown");
+});
+
+// core-host: only "renderer-error" keeps the scale; a cause absent (an older
+// worker) or unknown is a lost device.
+test("core-host lowers the scale unless the cause is exactly renderer-error", async () => {
+  const { EmulatorHost } = await import("../src/core-host.js");
+  for (const cause of [undefined, "device-lost", "something-else", "", null]) {
+    const lost = [];
+    const host = { enhancements: { internalResolution: 3 }, scaleLostCeiling: 4, onStatus: () => {}, onGpuDeviceLost: (e) => lost.push(e) };
+    EmulatorHost.prototype.handleGpuDeviceLost.call(host, { internalResolution: 3, reason: "r", detail: "", ...(cause === undefined ? {} : { cause }) });
+    assert.deepEqual([lost[0].fallback, lost[0].cause, host.scaleLostCeiling], [1, "device-lost", 1], String(cause));
+  }
+  const lost = [];
+  const host = { enhancements: { internalResolution: 3 }, scaleLostCeiling: 4, onStatus: () => {}, onGpuDeviceLost: (e) => lost.push(e) };
+  EmulatorHost.prototype.handleGpuDeviceLost.call(host, { internalResolution: 3, reason: "submit-error", detail: "", cause: "renderer-error" });
+  assert.deepEqual([lost[0].fallback, lost[0].cause, host.scaleLostCeiling], [null, "renderer-error", 4]);
 });
