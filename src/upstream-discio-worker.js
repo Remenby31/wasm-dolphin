@@ -121,7 +121,7 @@ import {
   captureInitialWgpuConsumerResetAttestation,
 } from "./wgpu-consumer-reset-attestation.js";
 import { createWgpuSemanticRuntime } from "./wgpu-semantic-runtime.js";
-import { handleWgpuDeviceLoss } from "./wgpu-device-lifecycle.js";
+import { createWgpuFatalReporter, handleWgpuDeviceLoss, wgpuFatalPageReason } from "./wgpu-device-lifecycle.js";
 import {
   attemptRetainedWgpuUpload,
   createWgpuMappedStagingPool
@@ -803,6 +803,9 @@ let wgpuReplayFatal = null;
 // and the scale in effect (boot value, then each setEnhancements).
 let wgpuScaleAdapterCeiling = 4;
 let wgpuScaleLostCeiling = 4;
+// The page hears once per device that the renderer failed (lost device or a
+// fatal replay error): `wgpu-device-lost`, core-host handleGpuDeviceLost.
+const wgpuFatalReporter = createWgpuFatalReporter((message) => self.postMessage(message));
 let wgpuInternalResolution = 1;
 function wgpuScaleCeiling() {
   return Math.min(wgpuScaleAdapterCeiling, wgpuScaleLostCeiling);
@@ -6886,6 +6889,7 @@ fn fs(input: VertexOutput) -> @location(0) vec4f {
   }
 
   wgpuReplayFatal = null;
+  wgpuFatalReporter.reset();
 
   device.lost.then((info) => {
     const loss = handleWgpuDeviceLoss({
@@ -6912,7 +6916,7 @@ fn fs(input: VertexOutput) -> @location(0) vec4f {
     rendererDiagnostics.internalResolutionCeiling = {
       ...rendererDiagnostics.internalResolutionCeiling, lost: wgpuScaleLostCeiling < 4
     };
-    self.postMessage({ type: "wgpu-device-lost", internalResolution, reason: String(info?.reason ?? "unknown"), detail: loss.detail });
+    wgpuFatalReporter.report({ internalResolution, reason: String(info?.reason ?? "unknown"), detail: loss.detail });
   });
 
   return state;
@@ -10757,6 +10761,16 @@ function markWgpuReplayFatal(scope, detail) {
       ? WGPU_CONSUMER_ERROR_SUBMIT
       : WGPU_CONSUMER_ERROR_UNKNOWN;
   wgpuRendererRuntime.emergencyFail(errorCode);
+  // The ring stays FAILED: tell the page as for a lost device (which posts
+  // from its own handler, with the browser's reason), so it restarts
+  // instead of showing a frozen picture.
+  if (scope !== "device-lost") {
+    wgpuFatalReporter.report({
+      internalResolution: wgpuInternalResolution,
+      reason: wgpuFatalPageReason(scope),
+      detail: wgpuReplayFatal.detail,
+    });
+  }
   return true;
 }
 
