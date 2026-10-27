@@ -2,8 +2,8 @@ import assert from "node:assert/strict";
 import { readFileSync } from "node:fs";
 import test from "node:test";
 
+import { DEFAULT_UPSTREAM_CORE_SHA256, requestedUpstreamCoreBuild } from "../src/default-core.js";
 import {
-  DEFAULT_UPSTREAM_CORE_SHA256,
   DEFAULT_UPSTREAM_CORE_URL,
   buildWorkerErrorReply,
   isStrictOneWayWorkerRequest,
@@ -11,7 +11,6 @@ import {
   requestedLegacyOneWayAck,
   requestedSoftwareTevHotCaseMode,
   requestedXfbFastPaths,
-  requestedUpstreamCoreBuild,
   sanitizeDiscFileName,
   sha256Hex,
   workerFsDiscPath

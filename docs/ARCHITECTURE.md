@@ -122,8 +122,8 @@ Traps worth knowing before losing an hour to them:
   treats those as extras and fails. Delete them before re-running.
 - `git clean -fd` inside `vendor/dolphin` deletes the untracked glslang
   externals. `npm run fetch:dolphin` puts them back.
-- `update:core-abi` also rewrites `DEFAULT_UPSTREAM_CORE_SHA256` in
-  `src/upstream-worker-protocol.js`. Rebuild without it and the worker rejects
+- `update:core-abi` also rewrites the default core's hash,
+  `cores/dolphin/core.lock.json` (read by `src/default-core.js`). Rebuild without it and the worker rejects
   the core at `loadCore-entry`, which looks like a hang but is a fingerprint
   mismatch.
 

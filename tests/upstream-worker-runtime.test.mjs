@@ -1,10 +1,8 @@
 import assert from "node:assert/strict";
 import test from "node:test";
 
-import {
-  DEFAULT_UPSTREAM_CORE_SHA256,
-  DEFAULT_UPSTREAM_CORE_URL
-} from "../src/upstream-worker-protocol.js";
+import { DEFAULT_UPSTREAM_CORE_SHA256 } from "../src/default-core.js";
+import { DEFAULT_UPSTREAM_CORE_URL } from "../src/upstream-worker-protocol.js";
 
 test("worker suppresses only one-way successes and legacy mode restores acknowledgements", async (t) => {
   const originalFetch = globalThis.fetch;

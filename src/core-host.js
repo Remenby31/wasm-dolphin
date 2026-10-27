@@ -11,9 +11,9 @@ import {
   DEFAULT_UPSTREAM_CORE_URL,
   requestedLegacyOneWayAck,
   requestedSoftwareTevHotCaseMode,
-  requestedXfbFastPaths,
-  requestedUpstreamCoreBuild
+  requestedXfbFastPaths
 } from "./upstream-worker-protocol.js";
+import { requestedUpstreamCoreBuild } from "./default-core.js";
 import {
   requestedWgpuAtomicPassReplay,
   requestedWgpuDeepReplayDiagnostics,
