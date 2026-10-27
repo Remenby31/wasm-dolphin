@@ -109,6 +109,8 @@ export class UpstreamWorkerAdapter {
     sleepK = 750,
     sleepSpinUs = 150,
     presentVsync = true,
+    presentGamePace = false,
+    presentPaceStats = false,
     coreLog = false,
     memcardSlotB = false,
     internalResolution = 1,
@@ -244,6 +246,8 @@ export class UpstreamWorkerAdapter {
     this.sleepK = Number.isInteger(sleepK) && sleepK >= 0 && sleepK <= 950 ? (sleepK === 0 ? 0 : Math.max(500, sleepK)) : 750;
     this.sleepSpinUs = Number.isInteger(sleepSpinUs) && sleepSpinUs >= 50 && sleepSpinUs <= 2000 ? sleepSpinUs : 150;
     this.presentVsync = presentVsync !== false;
+    this.presentGamePace = presentGamePace === true;
+    this.presentPaceStats = presentPaceStats === true;
     this.coreLog = Boolean(coreLog);
     this.memcardSlotB = Boolean(memcardSlotB);
     this.internalResolution = Number(internalResolution) || 1;
@@ -500,6 +504,8 @@ export class UpstreamWorkerAdapter {
       sleepK: this.sleepK,
       sleepSpinUs: this.sleepSpinUs,
       presentVsync: this.presentVsync,
+      presentGamePace: this.presentGamePace,
+      presentPaceStats: this.presentPaceStats,
       coreLog: this.coreLog,
       memcardSlotB: this.memcardSlotB,
       internalResolution: this.internalResolution,

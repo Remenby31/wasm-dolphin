@@ -490,6 +490,8 @@ export class EmulatorHost {
             sleepK: this.pacing.sleepK,
             sleepSpinUs: this.pacing.sleepSpinUs,
             presentVsync: this.pacing.presentVsync,
+            presentGamePace: this.pacing.presentGamePace,
+            presentPaceStats: this.pacing.presentPaceStats,
             coreLog: this.coreLog,
             memcardSlotB: this.memcardSlotB,
             internalResolution: this.enhancements.internalResolution,
@@ -1737,7 +1739,14 @@ export function requestedPacing(search = window.location.search) {
     // default since 2026-10-26: ~58 distinct pictures shown a second instead
     // of ~56 and half the on-screen repeats on the race (12 pairs, --display).
     // ?presentvsync=0 (or false, off, no) presents as the ring drains.
-    presentVsync: !["0", "false", "off", "no"].includes((params.get("presentvsync") ?? "").toLowerCase())
+    presentVsync: !["0", "false", "off", "no"].includes((params.get("presentvsync") ?? "").toLowerCase()),
+    // ?presentpace=game: the vsync presenter shows frames at the game's own
+    // pace on a screen faster than the game (src/wgpu-game-pacer.js). Off by default.
+    presentGamePace: (params.get("presentpace") ?? "").toLowerCase() === "game",
+    // ?presentpace=game or =observe: the refresh histogram (HUD) and the
+    // game's period are kept; observe keeps them without pacing. Off: none
+    // of it runs, the presenter does no extra work.
+    presentPaceStats: ["game", "observe"].includes((params.get("presentpace") ?? "").toLowerCase())
   };
 }
 
