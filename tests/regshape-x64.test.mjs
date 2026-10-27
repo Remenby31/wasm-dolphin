@@ -8,10 +8,11 @@
 // without the mode, on the oracle's random programs.
 
 import assert from "node:assert/strict";
+import { createHash } from "node:crypto";
 import { readFileSync } from "node:fs";
 import test from "node:test";
 
-import { loadAotCore, runOracleProgramsAsRegions } from "./helpers/aot-core-equivalence.mjs";
+import { ORACLE_CODE, bigEndian, loadAotCore, runOracleProgramsAsRegions } from "./helpers/aot-core-equivalence.mjs";
 import { PRODUCTION_DISABLE_MASK, SHORT_PREFIX_MASK, describeDifference, hex, loadOracleCore, makeRng, randomProgram, randomState } from "./helpers/jit-oracle.mjs";
 
 const REGSHAPE_X64 = 1 << 28;
@@ -44,6 +45,35 @@ test("regions, oracle programs with the x64 shape: interpreter and regions agree
   assert.deepEqual(tally.mismatches.slice(0, 4), []);
   assert.ok(tally.translated >= 0.7 * tally.programs, `${tally.translated} of ${tally.programs} translated`);
   assert.ok((tally.ends.budget ?? 0) >= 30 && (tally.ends.exception ?? 0) >= 10, JSON.stringify(tally.ends));
+});
+
+// A fixed sample: 300 oracle programs (seed 0x1840ff) translated as regions,
+// hashed (entries, code bytes, relocs). Measured on the core before 0184
+// (spark:015bf17) and on 0184's (spark:564fed6), mode off: the same 282
+// fragments, this digest. With bit 28 every one of them changes on 0184's
+// core (none on the core before it): a bit that does not reach the
+// prologue would leave this test red.
+const MODE_OFF_DIGEST = "c005124cb13006a19f1368be55d65c801157e247d7906ed25f6fa3f92e6e4f46";
+test("mode off translates byte for byte as before 0184; bit 28 changes the code", { skip }, () => {
+  const r = makeRng(0x1840ff);
+  const h = createHash("sha256");
+  let translated = 0, differ = 0;
+  for (let i = 0; i < 300; i += 1) {
+    const program = randomProgram(r, 24);
+    const state = randomState(r);
+    aot.loadState(state, ORACLE_CODE);
+    aot.load(ORACLE_CODE, bigEndian(program));
+    const ranges = [[ORACLE_CODE, ORACLE_CODE + 4 * program.length]];
+    const off = aot.translate(ORACLE_CODE, { mask: PRODUCTION_DISABLE_MASK, ranges });
+    if (!off) continue;
+    translated += 1;
+    h.update(JSON.stringify(off.entries)); h.update(off.code); h.update(JSON.stringify(off.relocs));
+    const on = aot.translate(ORACLE_CODE, { mask: PRODUCTION_DISABLE_MASK | REGSHAPE_X64, ranges });
+    if (on && Buffer.compare(Buffer.from(off.code), Buffer.from(on.code)) !== 0) differ += 1;
+  }
+  assert.equal(translated, 282);
+  assert.equal(h.digest("hex"), MODE_OFF_DIGEST, "mode off: the code before 0184");
+  assert.ok(differ >= 250, `bit 28 changed ${differ} of ${translated} fragments`);
 });
 
 test("?regshape=x64 sets the enable bit 28; a raw ?disable= never does", () => {
