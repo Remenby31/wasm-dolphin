@@ -216,13 +216,31 @@ function linuxThreadTicks(pid) {
 }
 let clockTicks = null;
 
-// %CPU of each thread of `pid` now: ps -M on macOS (the first row is the
-// process total); on Linux, /proc over 500 ms (ps -L reports a lifetime
-// average); null where there is no per-thread view (Windows).
+// System + user CPU seconds of each thread of `pid` (macOS ps -M: a header,
+// then one row per thread, the first being the main thread, not a total;
+// both times as [m]m:ss.ss).
+export function darwinThreadSeconds(pid, text = null) {
+  const sec = (t) => { const [m, r] = t.split(":"); return Number(m) * 60 + Number(r); };
+  const out = text ?? execFileSync("ps", ["-M", "-p", String(pid)], { encoding: "utf8" });
+  return out.split("\n").slice(1).filter(Boolean).map((l) => {
+    const t = l.match(/\d+:\d+\.\d+/g) ?? [];
+    return t.length >= 2 ? sec(t[0]) + sec(t[1]) : null;
+  }).filter((x) => x != null);
+}
+
+// %CPU of each thread of `pid` now, over 500 ms: on macOS from each thread's
+// system + user time (ps -M, in the kernel's order; its %cpu column is a
+// decaying average that still carries the boot: a thread at 18 % read 60 %,
+// review of #292); on Linux from /proc (ps -L reports a lifetime average);
+// null where there is no per-thread view (Windows).
 function threadCpus(pid) {
   if (process.platform === "darwin") {
-    return execFileSync("ps", ["-M", "-o", "%cpu=", "-p", pid], { encoding: "utf8" })
-      .split("\n").map((l) => Number(l.trim().split(/\s+/).at(-1))).filter(Number.isFinite).slice(1);
+    const a = darwinThreadSeconds(pid);
+    Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, 500);
+    const b = darwinThreadSeconds(pid);
+    // threads matched by row; a thread started or ended in between shifts the rows
+    if (a.length !== b.length) return null;
+    return b.map((t, i) => Math.round((1000 * (t - a[i])) / 0.5) / 10);
   }
   if (process.platform === "linux") {
     clockTicks ??= Number(execFileSync("getconf", ["CLK_TCK"], { encoding: "utf8" }).trim()) || 100;
