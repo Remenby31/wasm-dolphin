@@ -146,7 +146,12 @@ export function benchQuery(query) {
 // of the other side. Every query that asks for it needs every side to know it
 // (the core's glue carries the Module key in its EM_ASM).
 export const XFB_SWITCH_KEY = "dolphinXfbNoDecode";
-export function asksNoXfbDecode(args) {
+// --opt=value as --opt value (node's parseArgs takes both forms).
+export function splitEquals(args) {
+  return args.flatMap((a) => /^--[a-z-]+=/.test(a) ? [a.slice(0, a.indexOf("=")), a.slice(a.indexOf("=") + 1)] : [a]);
+}
+export function asksNoXfbDecode(rawArgs) {
+  const args = splitEquals(rawArgs);
   return args.some((a, i) => i > 0 && ["--query", "--baseline-query"].includes(args[i - 1]) && new URLSearchParams(a).get("xfbdecode") === "0");
 }
 export const xfbSwitchTest = (dest) => `grep -q ${XFB_SWITCH_KEY} ${dest}/cores/dolphin/dolphin-core-upstream.js && grep -q ${XFB_SWITCH_KEY} ${dest}/src/upstream-discio-worker.js`;
@@ -159,7 +164,8 @@ function requireXfbSwitch(host, args, sides) {
 
 // race-perf's options after --, with every query made fit for the bench
 // (--config becomes a --query).
-export function benchRaceArgs(args, { keepVideo = false } = {}) {
+export function benchRaceArgs(rawArgs, { keepVideo = false } = {}) {
+  const args = splitEquals(rawArgs);
   const out = [], swaps = [];
   let hasQuery = false;
   for (let i = 0; i < args.length; i += 1) {

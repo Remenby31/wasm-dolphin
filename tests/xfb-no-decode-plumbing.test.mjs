@@ -44,3 +44,32 @@ test("spark-run sees the switch in a query and checks both the core's glue and t
   assert.match(t, /dolphinXfbNoDecode trees\/x\/cores\/dolphin\/dolphin-core-upstream\.js/);
   assert.match(t, /dolphinXfbNoDecode trees\/x\/src\/upstream-discio-worker\.js/);
 });
+
+test("spark-run takes --query=... like --query ...: the bench swap and the switch check both see it", async () => {
+  const { benchRaceArgs } = await import("../harness/remote/spark-run.mjs");
+  assert.equal(asksNoXfbDecode(["--query=video=null&xfbdecode=0"]), true);
+  const { args } = benchRaceArgs(["--query=core=upstream&video=wgpu&presenter=webgpu", "--hold="]);
+  assert.equal(new URLSearchParams(args[args.indexOf("--query") + 1]).get("video"), "null", "the wgpu query is made fit for the bench");
+  assert.deepEqual(args.slice(args.indexOf("--hold"), args.indexOf("--hold") + 2), ["--hold", ""]);
+});
+
+test("visual probes refuse video=null&xfbdecode=0, other queries pass", async () => {
+  const { visualProbeCheck, xfbDecodeOff } = await import("../harness/lib/matrix.mjs");
+  assert.equal(xfbDecodeOff("video=null&xfbdecode=0"), true);
+  assert.equal(xfbDecodeOff("video=wgpu&xfbdecode=0"), false, "WebGPU never decodes; the switch means nothing there");
+  assert.equal(xfbDecodeOff("video=null"), false);
+  assert.match(visualProbeCheck(["video=wgpu", "video=null&xfbdecode=0"], { "--display": true }), /--display/);
+  assert.equal(visualProbeCheck(["video=null&xfbdecode=0"], { "--display": false, "--unique-frames": false }), null);
+  assert.equal(visualProbeCheck(["video=null"], { "drop-meter": true }), null);
+  const race = await read("../harness/probes/race-perf.mjs");
+  assert.match(race, /visualProbeCheck\(\[query, baselineQuery\], \{ "--display": o\.display, "--unique-frames": o\.uniqueFrames != null \}\)/);
+  const drops = await read("../harness/probes/drop-meter.mjs");
+  assert.match(drops, /visualProbeCheck\(\[query\.toString\(\), baselineQuery\?\.toString\(\)\], \{ "drop-meter": true \}\)/);
+});
+
+test("race-perf keeps 0156's top 64 of a stats window", async () => {
+  const { regionRecord } = await import("../harness/probes/race-perf.mjs");
+  const race = await read("../harness/probes/race-perf.mjs");
+  assert.match(race, /Array\.isArray\(reply\.missTop\) && reply\.missTop\.length \? \{ missTop: reply\.missTop \}/);
+  assert.equal(regionRecord({ error: "x" }).missTop, undefined);
+});

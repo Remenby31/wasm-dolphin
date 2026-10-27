@@ -102,7 +102,7 @@ import { parseArgs } from "node:util";
 
 import { exportRef } from "../cli.mjs";
 import { ensureServer, loadHarnessState, readCoreProgress, readFrameInfo, readTimeline, REPO_ROOT, workerRequest } from "../lib/browser.mjs";
-import { PRESETS, SCENE_PROTOCOLS, sceneProtocolCheck } from "../lib/matrix.mjs";
+import { PRESETS, SCENE_PROTOCOLS, sceneProtocolCheck, visualProbeCheck, xfbDecodeOff } from "../lib/matrix.mjs";
 import { claim, release } from "../lib/ownership.mjs";
 import { acquirePerfLock } from "../lib/perf-lock.mjs";
 import { openSession, rebootSession } from "../lib/session.mjs";
@@ -511,7 +511,10 @@ export function regionRecord(reply) {
     // heap patches
     ...regionPipeline(reply),
     ...(reply.regionChain ? { regionChain: reply.regionChain } : {}),
-    ...(reply.regionCalls ? { regionCalls: reply.regionCalls } : {}) // 0142
+    ...(reply.regionCalls ? { regionCalls: reply.regionCalls } : {}), // 0142
+    // 0156: the 64 block-start PCs with the most guest cycles outside the
+    // regions in this window (pc, cycles, why)
+    ...(Array.isArray(reply.missTop) && reply.missTop.length ? { missTop: reply.missTop } : {})
   };
   return p4.error ? { p4: null, p4Why: p4.error, ...samples } : { p4, p4Raw: stats, ...samples };
 }
@@ -811,6 +814,9 @@ async function main() {
   });
   if (sceneCheck.errors.length) throw new Error(`scene protocol: ${sceneCheck.errors.join("; ")}`);
   for (const w of sceneCheck.warnings) console.warn(`[race-perf] scene protocol: ${w}`);
+  const visual = visualProbeCheck([query, baselineQuery], { "--display": o.display, "--unique-frames": o.uniqueFrames != null });
+  if (visual) throw new Error(visual);
+  if (xfbDecodeOff(query) || xfbDecodeOff(baselineQuery)) console.warn("[race-perf] xfbdecode=0: game fps reads 0 (no decoded XFB), speed and headroom are unaffected");
   const lockWait = num(values, "lock-wait", { min: 0 });
 
   const sides = {};
