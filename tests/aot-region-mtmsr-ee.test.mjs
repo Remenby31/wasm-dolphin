@@ -53,7 +53,11 @@ const lwz = (d, a, off) => ((32 << 26) | (d << 21) | (a << 16) | (off & 0xffff))
 const NOT_EE_ALONE = [
   ["FP off", [mfmsr(5), rlwinm(6, 5, 0, 19, 17), mtmsr(6), add(7, 3, 4), BLR], { runs: 2 }],
   // Entered again at the fadd with FP off: the fragment refuses it (0157)
-  // and the block path raises FP unavailable.
+  // and the block path raises FP unavailable. This case alone would not catch
+  // a missing guard: run on past the mtmsr, the region still raises FP
+  // unavailable at the fadd itself, as every FPU op in a region tests MSR.FP
+  // at run time (0159; checked on a core with the guard neutralized, branch
+  // tmp/0183-noguard: code 3, pc 0x800). FP off, DR off and SE on catch it.
   ["FP off, then fadd", [mfmsr(5), rlwinm(6, 5, 0, 19, 17), mtmsr(6), fadd(1, 2, 3), add(7, 3, 4), BLR], { runs: 1, end: "exception" }],
   // No region in real mode (TryRunRegion): the rest runs on the block path.
   ["DR off", [mfmsr(5), rlwinm(6, 5, 0, 28, 26), mtmsr(6), add(7, 3, 4), BLR], { runs: 1, interp: true }],
