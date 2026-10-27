@@ -139,6 +139,24 @@ export function benchQuery(query) {
   return q.toString();
 }
 
+// ?xfbdecode=0 (2026-10-27): under video=null the core skips the XFB's
+// YUV->RGBA decode, 6.9 % of the CPU thread on the heavy scene that WebGPU
+// never pays. Opt-in, never added by the bench: a side whose core predates
+// the switch ignores it and keeps decoding, which would read as a ~7 % gain
+// of the other side. Every query that asks for it needs every side to know it
+// (the core's glue carries the Module key in its EM_ASM).
+export const XFB_SWITCH_KEY = "dolphinXfbNoDecode";
+export function asksNoXfbDecode(args) {
+  return args.some((a, i) => i > 0 && ["--query", "--baseline-query"].includes(args[i - 1]) && new URLSearchParams(a).get("xfbdecode") === "0");
+}
+export const xfbSwitchTest = (dest) => `grep -q ${XFB_SWITCH_KEY} ${dest}/cores/dolphin/dolphin-core-upstream.js && grep -q ${XFB_SWITCH_KEY} ${dest}/src/upstream-discio-worker.js`;
+function requireXfbSwitch(host, args, sides) {
+  if (!asksNoXfbDecode(args)) return;
+  for (const side of sides) {
+    if (ssh(host, xfbSwitchTest(side.dest), { quiet: true }).status !== 0) throw new Error(`${side.spec}: xfbdecode=0 asked but this side's core or worker predates the switch (it would keep decoding): merge main into it, or drop xfbdecode=0`);
+  }
+}
+
 // race-perf's options after --, with every query made fit for the bench
 // (--config becomes a --query).
 export function benchRaceArgs(args, { keepVideo = false } = {}) {
@@ -429,6 +447,7 @@ async function main() {
   const abs = (p) => `${home}/${p}`;
   const bench = benchRaceArgs(positionals, { keepVideo: values["keep-video"] });
   for (const s of bench.swaps) console.log(`[spark-run] ${s.option} on the bench: ${s.to} (was ${s.from})`);
+  requireXfbSwitch(host, bench.args, [candidate, ...(baseline ? [baseline] : [])]);
   const raceArgs = [
     "--iso", abs(iso), "--state", abs(state), "--runs", values.runs,
     "--candidate", abs(candidate.dest), ...(baseline ? ["--baseline", abs(baseline.dest)] : []),
@@ -478,6 +497,7 @@ async function multi(host, values, positionals) {
   const abs = (p) => `${home}/${p}`;
   const scene = path.basename(values.state);
   const raceArgs = multiRaceArgs({ iso: abs(iso), state: abs(state), runs: values.runs, armDirs: specs.map((s) => abs(pushed.get(s).dest)), extra: [...sceneMultiArgs(scene), ...positionals] });
+  requireXfbSwitch(host, raceArgs, [...pushed.values()]);
   const sceneCheck = multiSceneCheck(scene, raceArgs);
   if (sceneCheck.errors.length) throw new Error(`scene protocol: ${sceneCheck.errors.join("; ")}`);
   for (const w of sceneCheck.warnings) console.warn(`[spark-run] scene protocol: ${w}`);

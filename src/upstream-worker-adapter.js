@@ -116,6 +116,7 @@ export class UpstreamWorkerAdapter {
     widescreen = false,
     displayFilter = null,
     efbAccess = false,
+    xfbNoDecode = false,
     fifoLog = false,
     efbCopyRam = false,
     efbNoDefer = false,
@@ -252,6 +253,7 @@ export class UpstreamWorkerAdapter {
     this.widescreen = widescreen === true;
     this.displayFilter = displayFilter && typeof displayFilter === "object" ? { ...displayFilter } : null;
     this.efbAccess = Boolean(efbAccess);
+    this.xfbNoDecode = Boolean(xfbNoDecode);
     this.fifoLog = Boolean(fifoLog);
     this.efbCopyRam = Boolean(efbCopyRam);
     this.efbNoDefer = Boolean(efbNoDefer);
@@ -509,6 +511,7 @@ export class UpstreamWorkerAdapter {
       widescreen: this.widescreen,
       displayFilter: this.displayFilter,
       efbAccess: this.efbAccess,
+      xfbNoDecode: this.xfbNoDecode,
       fifoLog: this.fifoLog,
       efbCopyRam: this.efbCopyRam,
       efbNoDefer: this.efbNoDefer,

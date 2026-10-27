@@ -1754,6 +1754,7 @@ async function handleMessage(type, payload) {
         widescreen: payload.widescreen,
         displayFilter: payload.displayFilter,
         efbAccess: payload.efbAccess,
+        xfbNoDecode: payload.xfbNoDecode,
         fifoLog: payload.fifoLog,
         efbCopyRam: payload.efbCopyRam,
         efbNoDefer: payload.efbNoDefer,
@@ -2573,6 +2574,7 @@ async function loadCore({
   widescreen = false,
   displayFilter = null,
   efbAccess = false,
+  xfbNoDecode = false,
   fifoLog = false,
   efbCopyRam = false,
   efbNoDefer = false,
@@ -3111,6 +3113,7 @@ async function loadCore({
     // Patch 0178: Dolphin's generic widescreen hack, 16:9 backbuffer.
     dolphinWidescreen: widescreen === true,
     dolphinEfbAccess: Boolean(efbAccess),
+    dolphinXfbNoDecode: Boolean(xfbNoDecode),
     dolphinEfbCopyRam: Boolean(efbCopyRam),
     dolphinEfbNoDefer: Boolean(efbNoDefer),
     // Ranks the instructions that block JIT compilation (?jitverbose=1).
