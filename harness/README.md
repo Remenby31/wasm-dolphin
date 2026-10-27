@@ -348,6 +348,12 @@ node harness/probes/drop-meter.mjs --iso ../roms/<disc>.iso --port 8113 --runs 3
 # given back if unplugged meanwhile); unplugged under the lock, the next
 # gate gives the lock back and the run is played again (race-perf a run,
 # drop-meter a visit marked mixed). e2e and builds are not gated.
+# A command under the lock (an e2e, a build, a custom probe):
+#   node harness/lib/lock-run.mjs --name "<who>" [--measure] -- npx playwright test …
+# follows the command's process tree while it runs and, once it exits,
+# waits for every process it saw (10 s), then SIGTERM, then SIGKILL, before
+# giving the lock back: a run's Chromes and dev servers never outlive it
+# (2026-10-27, an e2e's Chromes at load 25 under the next measure).
 # The --noise A/A must have run on the core of the base measured (the
 # summary records each side's core): another core gives no verdict (exit 3),
 # --noise-stale-ok for a study. Redo the A/A when main publishes a core.
