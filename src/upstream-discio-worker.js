@@ -128,6 +128,7 @@ import {
 } from "./wgpu-mapped-staging-pool.js";
 import { createWgpuSparseUboCopyForward } from "./wgpu-sparse-ubo-copy-forward.js";
 import { createVsyncQueue, vsyncLateMs } from "./wgpu-vsync-queue.js";
+import { createFrameTelemetry } from "./wgpu-frame-telemetry.js";
 import {
   WGPU_MAPPED_DRAIN_FORCE_REASONS,
   createWgpuMappedDrainCoalescer
@@ -2095,6 +2096,10 @@ async function handleMessage(type, payload) {
       return readDetTrace(payload);
     case "validationReadWgpuReplayState":
       return readWgpuReplayState();
+    case "validationReadWorkerFrames":
+      // Harness only (src/wgpu-frame-telemetry.js): the presenter rAF's
+      // lateness and skipped BeginFrames, the ring drains' time and submit part.
+      return { enabled: harnessEnabled, ...wgpuFrameTelemetry.snapshot() };
     case "validationReadPresentVsync":
       // ?presentvsync=1: the rAF presenter's counters (shown, dropped, caught
       // up, presented by the timer for want of a BeginFrame) and the visual
@@ -13003,6 +13008,9 @@ function recordBoundedHistogram(values, bounds, value) {
 // free of the local display's BeginFrames, catch-up drops and timer fallback.
 let wgpuPresentVsync = false;
 const WGPU_VSYNC_FALLBACK_MS = 50;
+// Harness only (validationReadWorkerFrames): the presenter rAF and the ring
+// drains, timed only while harnessEnabled (no cost in normal use).
+const wgpuFrameTelemetry = createFrameTelemetry();
 // A frame queued while the presenter's rAF is late (the worker busy in a
 // long task, as compiles at boot) is shown at once instead of waiting for a
 // BeginFrame the busy worker cannot run: held there it stayed 3 vsyncs or
@@ -13114,6 +13122,7 @@ function queueWgpuVsyncFrame(coreFrame, shownVi, stream) {
     wgpuVsyncLoop = true;
     wgpuVsyncLastTickAt = performance.now();
     const tick = (frameTime) => {
+      if (harnessEnabled) wgpuFrameTelemetry.tick(frameTime, performance.now());
       const now = performance.now();
       if (wgpuVsyncLastFrameTime !== null && frameTime > wgpuVsyncLastFrameTime) {
         wgpuVsyncFrameGaps[wgpuVsyncFrameGapCount++ % wgpuVsyncFrameGaps.length] = frameTime - wgpuVsyncLastFrameTime;
@@ -13277,6 +13286,9 @@ function drainWebGpuCmdRing(source = "presentation") {
     : null;
   const budgetStartedAt = budgetGate?.beginDrain() ?? 0;
   const drainStartedAt = budgetStartedAt || (causalMetricsEnabled ? performance.now() : 0);
+  // harness only: this drain's time and its finish() + submit() part
+  const telemetryStartedAt = harnessEnabled ? performance.now() : 0;
+  let telemetrySubmitMs = 0;
   const budgetDeadlineMs = wgpuReplayBudgetMs > 0
     ? budgetStartedAt + wgpuReplayBudgetMs
     : Number.POSITIVE_INFINITY;
@@ -13395,6 +13407,7 @@ function drainWebGpuCmdRing(source = "presentation") {
     });
     if (collectReplayMetrics) updateWgpuBacklogState(0, performance.now());
     finishWebGpuDrain(drainStartedAt, processed);
+    if (telemetryStartedAt) wgpuFrameTelemetry.drain(performance.now() - telemetryStartedAt, telemetrySubmitMs);
     return;
   }
 
@@ -13703,12 +13716,14 @@ function drainWebGpuCmdRing(source = "presentation") {
     }
     let submitted = false;
     try {
+      const submitStartedAt = telemetryStartedAt ? performance.now() : 0;
       const renderCommandBuffer = enc.finish();
       q.submit([
         ...(mappedBatch?.ordinary ? [mappedBatch.ordinary.commandBuffer] : []),
         ...(mappedBatch?.compute ? [mappedBatch.compute.commandBuffer] : []),
         renderCommandBuffer,
       ]);
+      if (submitStartedAt) telemetrySubmitMs += performance.now() - submitStartedAt;
       gpuCompletionTracker.recordSubmittedWork(q, "hardware-replay");
       acceptMappedBatch(mappedBatch);
       submitted = true;
@@ -16681,6 +16696,7 @@ function drainWebGpuCmdRing(source = "presentation") {
     wgpuReplayYieldPending = true;
   }
   finishWebGpuDrain(drainStartedAt, processed);
+  if (telemetryStartedAt) wgpuFrameTelemetry.drain(performance.now() - telemetryStartedAt, telemetrySubmitMs);
   // Once the cmd-ring executor has presented a real frame, IT owns the
   // canvas (renderGpu.context). The legacy runPresentationLoop blit of
   // the CPU framebuffer (presentFrame → drawFrameBytesToWebGpu) must
