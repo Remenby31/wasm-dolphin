@@ -271,6 +271,9 @@ export const ON_BATTERY = Symbol("on battery");
 export async function acquirePerfLock({
   dir = process.env.HARNESS_PERF_LOCK || DEFAULT_PERF_LOCK, name, waitSec = 1800, pollSec = 60, orphanSec = ORPHAN_SEC,
   requireMains = false, power = powerSnapshot,
+  // false: the caller handles SIGINT/SIGTERM/SIGHUP itself (lock-run.mjs
+  // reaps its command's processes first); the lock still goes on exit
+  handleSignals = true,
   log = () => {}, sleep = (ms) => new Promise((r) => setTimeout(r, ms))
 } = {}) {
   if (path.basename(dir) !== ".perf-lock") throw new Error(`perf lock must be a directory named .perf-lock, not ${dir}`);
@@ -288,7 +291,7 @@ export async function acquirePerfLock({
     const ticket = enqueue(dir, name);
     let held;
     try {
-      held = await contend({ dir, name, waitSec, pollSec, orphanSec, log, sleep, end, ticket, onBattery });
+      held = await contend({ dir, name, waitSec, pollSec, orphanSec, log, sleep, end, ticket, onBattery, handleSignals });
     } finally {
       dequeue(dir, ticket);
     }
@@ -302,7 +305,7 @@ export async function acquirePerfLock({
   }
 }
 
-async function contend({ dir, name, waitSec, pollSec, orphanSec, log, sleep, end, ticket, onBattery = () => false }) {
+async function contend({ dir, name, waitSec, pollSec, orphanSec, log, sleep, end, ticket, onBattery = () => false, handleSignals = true }) {
   const ours = new Map(); // nonce → owner, of every attempt
   for (;;) {
     const ahead = ticketsAhead(dir, ticket);
@@ -320,12 +323,12 @@ async function contend({ dir, name, waitSec, pollSec, orphanSec, log, sleep, end
     const owner = newOwner(name);
     ours.set(owner.nonce, owner);
     const got = claim(dir, owner);
-    if (got === "held") return release(dir, owner);
+    if (got === "held") return release(dir, owner, { handleSignals });
     if (got === "lost") continue; // our directory was moved away before it was ours: try again
     const holder = readLockOwner(dir);
     // An earlier attempt of ours that an older harness put back after we
     // gave it up: it is ours, never wait on ourselves.
-    if (holder && ours.has(holder.nonce)) return release(dir, ours.get(holder.nonce));
+    if (holder && ours.has(holder.nonce)) return release(dir, ours.get(holder.nonce), { handleSignals });
     const stale = staleReason(dir, holder, orphanSec);
     if (stale) {
       log(`perf lock is stale (${stale}): taking it over`);
@@ -361,7 +364,7 @@ export function lockIntegrity(dir, owner) {
   return { ok: true };
 }
 
-function release(dir, owner) {
+function release(dir, owner, { handleSignals = true } = {}) {
   let done = false;
   const free = () => {
     if (done) return;
@@ -376,9 +379,11 @@ function release(dir, owner) {
   // SIGHUP: the SSH session that started the run closed.
   const onSignal = (sig) => { free(); process.exit({ SIGINT: 130, SIGTERM: 143, SIGHUP: 129 }[sig] ?? 1); };
   process.once("exit", free);
-  process.once("SIGINT", onSignal);
-  process.once("SIGTERM", onSignal);
-  process.once("SIGHUP", onSignal);
+  if (handleSignals) {
+    process.once("SIGINT", onSignal);
+    process.once("SIGTERM", onSignal);
+    process.once("SIGHUP", onSignal);
+  }
   const releaseFn = () => {
     free();
     process.off("exit", free);
