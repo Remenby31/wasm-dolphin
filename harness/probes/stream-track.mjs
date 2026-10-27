@@ -22,6 +22,7 @@ import { ensureServer, loadHarnessState, readTimeline, REPO_ROOT, workerRequest 
 import { acquirePerfLock } from "../lib/perf-lock.mjs";
 import { openSession } from "../lib/session.mjs";
 import { distribution, streamTrackStats } from "../lib/stream-track.mjs";
+import { visualProbeCheck } from "../lib/matrix.mjs";
 
 const { values } = parseArgs({
   options: {
@@ -38,6 +39,12 @@ const runTimeoutMs = warmupMs + secs * 1000 + 180_000;
 
 // `held.session`: the run's session, closed by the watchdog on a timeout so
 // a hung run never overlaps the next one under the lock.
+// Every number this probe reports is a frame it saw: no decoded XFB, no track.
+{
+  const visual = visualProbeCheck([values.query], { "stream-track": true });
+  if (visual) throw new Error(visual);
+}
+
 async function measure(server, held) {
   const s = await openSession({ base: server.base, server, query: `${values.query}&metrics=1`, iso: values.iso, routes: { "**/__harness_state.sav": values.state }, harness: { displayed: true } });
   held.session = s;

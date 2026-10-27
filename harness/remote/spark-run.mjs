@@ -146,9 +146,17 @@ export function benchQuery(query) {
 // of the other side. Every query that asks for it needs every side to know it
 // (the core's glue carries the Module key in its EM_ASM).
 export const XFB_SWITCH_KEY = "dolphinXfbNoDecode";
-// --opt=value as --opt value (node's parseArgs takes both forms).
+// --opt=value as --opt value (node's parseArgs takes both forms), for the
+// options spark-run itself reads or refuses only: an option whose value
+// starts with "-" (--chrome-args=--flag) must keep its = form, which strict
+// parseArgs reads as one value and the split form as an ambiguous option.
+export const SPLIT_OPTIONS = new Set(["--query", "--config", "--baseline-query", "--emulated-window", "--emulated-warmup", "--hold",
+  "--iso", "--state", "--out", "--port", "--runs", "--arm", "--lanes", "--lock"]);
 export function splitEquals(args) {
-  return args.flatMap((a) => /^--[a-z-]+=/.test(a) ? [a.slice(0, a.indexOf("=")), a.slice(a.indexOf("=") + 1)] : [a]);
+  return args.flatMap((a) => {
+    const at = a.indexOf("=");
+    return at > 2 && a.startsWith("--") && SPLIT_OPTIONS.has(a.slice(0, at)) ? [a.slice(0, at), a.slice(at + 1)] : [a];
+  });
 }
 export function asksNoXfbDecode(rawArgs) {
   const args = splitEquals(rawArgs);
@@ -172,6 +180,8 @@ export function benchRaceArgs(rawArgs, { keepVideo = false } = {}) {
     const a = args[i];
     if (["--query", "--config", "--baseline-query"].includes(a) && i + 1 < args.length) {
       const from = args[(i += 1)];
+      // An empty query would boot on the app's defaults, not the bench's.
+      if (!from.trim()) throw new Error(`${a} is empty`);
       const to = keepVideo ? (PRESETS[from] ?? from) : benchQuery(from);
       if (a !== "--baseline-query") hasQuery = true;
       out.push(a === "--config" ? "--query" : a, to);
@@ -481,8 +491,14 @@ async function main() {
 }
 
 // --multi: race-multi on the whole bench, base and candidates at once.
-async function multi(host, values, positionals) {
+async function multi(host, values, rawPositionals) {
   if (!values.state) throw new Error("--multi needs --state <local .sav>");
+  // The = form normalized first: the refused options, the scene protocol's
+  // checks (lastOpt) and the queries all read the split form.
+  const positionals = splitEquals(rawPositionals);
+  for (let i = 0; i < positionals.length; i += 1) {
+    if (["--query", "--config", "--baseline-query"].includes(positionals[i]) && !String(positionals[i + 1] ?? "").trim()) throw new Error(`${positionals[i]} is empty`);
+  }
   for (const f of ["--iso", "--state", "--out", "--port", "--runs", "--arm", "--lanes", "--lock"]) {
     if (positionals.includes(f)) throw new Error(`${f} is set by spark-run --multi, not after --`);
   }
