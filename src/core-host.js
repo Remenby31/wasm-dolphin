@@ -1792,7 +1792,7 @@ const CACHED_INTERPRETER_DISABLE_BITS = {
   smearcompile:    1 << 22, // §28ce cap JIT compiles/slice (default-off; ?smearcompile=1 to enable)
   fastmemhoist:    1 << 23, // §28cz per-block fastmem bounds-check hoist (ENABLE polarity; default-off; ?fastmemhoist=1)
   inlinefma:       1 << 26, // inline exact FMA; set: the FMA family calls the interpreter's NI_madd_msub
-  regionmtmsr:     1 << 27, // 0183 regions go on past a mtmsr that changes only EE (ENABLE polarity; default-off; ?regionmtmsr=1)
+  regionmtmsr:     1 << 27, // 0183 regions go on past a mtmsr that changes only EE (ENABLE polarity; default-on; ?regionmtmsr=0 turns it off)
   regshape:        1 << 28, // 0184 x64 register shape: at most 4 GPRs per block in locals (ENABLE polarity; default-off; ?regshape=x64)
   // Aliases the plan / TL;DR uses interchangeably:
   fastinputpoll: 1 << 1, // legacy synonym for meleecall (input-poll lives there)
@@ -1896,9 +1896,11 @@ function requestedCachedInterpreterDisableMask() {
   // with ?fastmemhoist=1; any other state leaves the bit clear so codegen is
   // byte-identical to today. Correctness-critical (a wrong hoisted check = an
   // unchecked OOB WASM load) — kept off until A/B + correctness verified.
-  // 0183: ENABLE polarity too, default-off while it is measured: a region
-  // goes on past a mtmsr that only turns interrupts off or on.
-  if (params.get("regionmtmsr") === "1") {
+  // 0183: ENABLE polarity too, default-on since its measures (Mac race
+  // +1.55 % warm / +1.85 % cold over 8 pairs; drop-meter guard clean): a
+  // region goes on past a mtmsr that only turns interrupts off or on.
+  // ?regionmtmsr=0 turns it off (its regions have their own cache keys).
+  if (params.get("regionmtmsr") !== "0") {
     mask |= CACHED_INTERPRETER_DISABLE_BITS.regionmtmsr;
   }
   // 0184: the x64 register shape, default-off until the CI bench and a real
