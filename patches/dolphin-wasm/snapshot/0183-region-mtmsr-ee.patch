@@ -13,9 +13,13 @@ diff --git a/Source/Core/Core/PowerPC/CachedInterpreter/CachedInterpreter.cpp b/
  // §28ce burst smearing: when ENABLED (gate bit CLEARED), TryWriteWasmBlock
  // returns false (falls to interpret) once this many compiles OR this much
  // compile wall time have happened in the current CoreTiming slice. Smears
-@@ -3272,6 +3277,9 @@
+@@ -3270,8 +3275,12 @@
+ // fragment returns 3 (a guest return) to a pending wasm call.
+ constexpr u32 WASM_FRAME_RETURNING_LOCAL = 63;  // after the block locals' v128 (0141)
  // 0157: MSR.FP clear, read once when the fragment starts (nothing a region
- // runs changes MSR: mtmsr, rfi and sc end their blocks with an exit).
+-// runs changes MSR: mtmsr, rfi and sc end their blocks with an exit).
++// runs changes MSR.FP: rfi and sc end their blocks with an exit, and so does a
++// mtmsr, except one 0183 lets through when it changed MSR.EE alone).
  constexpr u32 WASM_FRAME_FP_OFF_LOCAL = 64;
 +// 0183: the MSR before a guarded mtmsr block (DOLPHIN_WEB_ENABLE_REGION_MTMSR_EE),
 +// declared only by a fragment that holds one.
@@ -23,7 +27,18 @@ diff --git a/Source/Core/Core/PowerPC/CachedInterpreter/CachedInterpreter.cpp b/
  struct FragmentFrame
  {
    bool active = false;
-@@ -17488,6 +17496,9 @@
+@@ -5317,7 +5326,9 @@
+ // Patch 0121: set while a region fragment is emitted. A region is entered
+ // only with MSR.FP on, LE, FE0 and FE1 off and HID2.LSQE on (TryRunRegion,
+ // RegionWouldRun, RegionChainNext: RegionGuardsHold), and nothing inside a
+-// fragment can change them: mtmsr, rfi and sc end it, mtspr HID2 is not on the
++// fragment can change them: rfi and sc end it, and so does a mtmsr unless it
++// changed MSR.EE alone (0183: its block checks every other bit after it and
++// leaves when one changed), mtspr HID2 is not on the
+ // direct tier (it runs outside, the region is entered again after it). So
+ // its ops take them for granted instead of testing them one by one. GQRs
+ // (mtspr GQR is direct) are still tested per op.
+@@ -17488,6 +17499,9 @@
    // 0157: holds an FPU op (FL_USE_FPU): with MSR.FP clear the block JIT
    // raises the FP unavailable exception there, so the region never runs it.
    bool fpu = false;
@@ -33,7 +48,7 @@ diff --git a/Source/Core/Core/PowerPC/CachedInterpreter/CachedInterpreter.cpp b/
  };
  
  // Locals of a block body without the fastmem hoist (the only layout a
-@@ -17634,6 +17645,19 @@
+@@ -17634,6 +17648,19 @@
                        (inst.OPCD == 19 && (inst.SUBOP10 == 16 || inst.SUBOP10 == 528));
    if (!branch)
    {
@@ -53,7 +68,7 @@ diff --git a/Source/Core/Core/PowerPC/CachedInterpreter/CachedInterpreter.cpp b/
      out->exits = true;  // sc, rfi, isync, ...: back to the dispatcher
      return true;
    }
-@@ -17765,8 +17789,12 @@
+@@ -17765,8 +17792,12 @@
    // The dispatch pc, npc, downcount (0135) are the block locals' 56..58 (0141).
    code.assign(WASM_BLOCK_LOCALS.begin(), WASM_BLOCK_LOCALS.end());
    code[0] = 0x09;
@@ -68,7 +83,7 @@ diff --git a/Source/Core/Core/PowerPC/CachedInterpreter/CachedInterpreter.cpp b/
    // 0111: compares store CR fields without SO (EmitLazyCrStore): with XER.SO
    // set the fragment does not run (1, as a pc that is not an entry). The
    // dispatcher and region chaining refuse first; this covers a direct call.
-@@ -17943,6 +17971,16 @@
+@@ -17943,6 +17974,16 @@
      const auto& b = blocks[k];
      code.push_back(0x0b);  // end $bk: body k
      out->entries.push_back(b.start);
@@ -85,7 +100,7 @@ diff --git a/Source/Core/Core/PowerPC/CachedInterpreter/CachedInterpreter.cpp b/
      const u32 at = static_cast<u32>(code.size());
      code.insert(code.end(), b.expr.begin(), b.expr.end());
      for (const auto& reloc : b.relocs)
-@@ -17982,6 +18020,22 @@
+@@ -17982,6 +18023,22 @@
      out->relocs.push_back({static_cast<u32>(code.size()), 4, 0});  // downcount out: unlikely
      code.push_back(0x0d);  // br_if $X
      EmitU32Leb(code, exit_depth);
@@ -108,3 +123,16 @@ diff --git a/Source/Core/Core/PowerPC/CachedInterpreter/CachedInterpreter.cpp b/
      if (b.exits)
      {
        // Not through $X: V8 lays a block out of line only when all its
+@@ -18002,8 +18059,10 @@
+       // Invariant (why no state generation is checked here): 3 comes only
+       // from a bclr block reached with no exit in between. Everything that
+       // invalidates code or changes the mode a fragment was built for
+-      // (sc, rfi, mtmsr, isync after icbi: exiting blocks; a halting
+-      // helper; events and exceptions, taken when downcount runs out)
++      // (sc, rfi, mtmsr, isync after icbi: exiting blocks; a mtmsr 0183
++      // lets through leaves likewise once any MSR bit but EE changed, an
++      // exception it took included; a halting helper; events and
++      // exceptions, taken when downcount runs out)
+       // returns 0 or 2, which every call passes up: no caller goes on after
+       // its code may have changed. A new way to leave a block must keep it.
+       flush_frame();

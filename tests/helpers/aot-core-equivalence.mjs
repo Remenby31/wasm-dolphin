@@ -257,7 +257,9 @@ const diffState = (a, b) => {
 // Returns { trap } when the interpreter cannot run it on the test CPU,
 // { error } when a region refused its own entry, else { equal, got,
 // reference, difference }.
-export function compareCall(core, regionAt, start) {
+// strictCycles: compare downcount also when the run ended in an exception
+// (0183: the exception a mtmsr lets in is taken inside the region).
+export function compareCall(core, regionAt, start, { strictCycles = false } = {}) {
   const run = (useRegions, stopAt) => {
     let regionRuns = 0, regionCycles = 0, interpCycles = 0;
     const done = (end) => ({ end, regionRuns, regionCycles, interpCycles });
@@ -266,7 +268,9 @@ export function compareCall(core, regionAt, start) {
       if (pc === STOP) return done("stop");
       const before = core.downcount();
       if (before <= stopAt) return done("budget");
-      const handle = useRegions ? regionAt.get(pc) : undefined;
+      // TryRunRegion enters no region in real mode (MSR.IR or DR clear): the
+      // block path runs there (0075), so a mtmsr that clears them is left to it.
+      const handle = useRegions && (core.state()[37] & 0x30) === 0x30 ? regionAt.get(pc) : undefined;
       if (handle === undefined) {
         const raised = core.interpretOne();
         interpCycles += before - core.downcount();
@@ -347,7 +351,7 @@ export function compareCall(core, regionAt, start) {
   if (Buffer.compare(ram, expectedRam) !== 0) ramAt = ram.findIndex((b, i) => b !== expectedRam[i]);
   const stateDiff = diffState(core.state(), state);
   // Exits through an exception leave downcount to the CPU loop.
-  const cyclesDiffer = got.end !== "exception" && core.downcount() !== downcount;
+  const cyclesDiffer = (strictCycles || got.end !== "exception") && core.downcount() !== downcount;
   const equal = got.end === reference.end && !stateDiff && ramAt < 0 && !cyclesDiffer;
   return { equal, got, reference, difference: equal ? null : { end: got.end, reference: reference.end, state: stateDiff,
     ram: ramAt < 0 ? null : (0x80000000 + ramAt) >>> 0, downcount: cyclesDiffer ? { interp: core.downcount(), region: downcount } : null } };

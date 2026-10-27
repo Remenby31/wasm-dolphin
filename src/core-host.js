@@ -1819,6 +1819,9 @@ function requestedCachedInterpreterDisableMask() {
         }
       }
     }
+    // 0183's bit is an ENABLE bit: a raw ?disable= mask (or the name) must not
+    // turn it on by accident; only ?regionmtmsr=1 does.
+    mask &= ~CACHED_INTERPRETER_DISABLE_BITS.regionmtmsr;
   }
   // §28bt block re-dispatch: DEFAULT-ON. Rigorously verified +11% warm
   // (4-run non-overlapping same-binary A/B, correctness-clean on battle);

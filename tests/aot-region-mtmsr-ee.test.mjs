@@ -40,8 +40,26 @@ const BLR = 0x4e800020;
 // after: EE cleared by rlwinm (bits 17..15 kept), restored from the saved MSR.
 const EE_OFF_ON = [mfmsr(5), rlwinm(6, 5, 0, 17, 15), mtmsr(6), add(7, 3, 4), addi(8, 7, 12), mtmsr(5), add(9, 8, 3), addi(10, 9, -4), BLR];
 const MTMSR_AT = [2, 5].map((i) => (ORACLE_CODE + 4 * i) >>> 0);
-// The FP bit cleared instead: not EE alone, the region must leave.
-const FP_OFF = [mfmsr(5), rlwinm(6, 5, 0, 19, 17), mtmsr(6), add(7, 3, 4), BLR];
+// OSEnableInterrupts' shape: EE set by ori, from a state where it is off.
+const EE_ON = [mfmsr(5), ori(6, 5, 0x8000), add(7, 3, 4), mtmsr(6), add(9, 7, 3), addi(10, 9, -4), BLR];
+// Not EE alone: the region must leave after the mtmsr (and enter again at the
+// next instruction, an entry of the same fragment). Each with work after it
+// that the changed bit would make run differently (FP unavailable, a load
+// without data translation) and one that changes SE.
+const fadd = (d, a, b) => A(63, d, a, b, 0, 21);
+const lwz = (d, a, off) => ((32 << 26) | (d << 21) | (a << 16) | (off & 0xffff)) >>> 0;
+// What shows the guard left: runs = region runs (left, then entered again at
+// the next instruction); else the rest ran on the block path (interpCycles).
+const NOT_EE_ALONE = [
+  ["FP off", [mfmsr(5), rlwinm(6, 5, 0, 19, 17), mtmsr(6), add(7, 3, 4), BLR], { runs: 2 }],
+  // Entered again at the fadd with FP off: the fragment refuses it (0157)
+  // and the block path raises FP unavailable.
+  ["FP off, then fadd", [mfmsr(5), rlwinm(6, 5, 0, 19, 17), mtmsr(6), fadd(1, 2, 3), add(7, 3, 4), BLR], { runs: 1, end: "exception" }],
+  // No region in real mode (TryRunRegion): the rest runs on the block path.
+  ["DR off", [mfmsr(5), rlwinm(6, 5, 0, 28, 26), mtmsr(6), add(7, 3, 4), BLR], { runs: 1, interp: true }],
+  ["DR off, then lwz", [mfmsr(5), rlwinm(6, 5, 0, 28, 26), mtmsr(6), lwz(7, 1, 0), add(8, 7, 4), BLR], { runs: 1, interp: true }],
+  ["SE on", [mfmsr(5), ori(6, 5, 0x400), mtmsr(6), add(7, 3, 4), BLR], { runs: 2 }]
+];
 
 const stateWith = (seed, { msr = 0x0000a032, exceptions = 0 } = {}) => {
   const s = randomState(makeRng(seed));
@@ -52,7 +70,7 @@ const stateWith = (seed, { msr = 0x0000a032, exceptions = 0 } = {}) => {
   return s;
 };
 
-function runBoth(words, state, mask) {
+function runBoth(words, state, mask, { downcount = 400000 } = {}) {
   core.loadState(state, ORACLE_CODE);
   core.load(ORACLE_CODE, bigEndian(words));
   const fragment = core.translate(ORACLE_CODE, { mask, ranges: [[ORACLE_CODE, ORACLE_CODE + 4 * words.length]] });
@@ -64,11 +82,12 @@ function runBoth(words, state, mask) {
   const result = compareCall(core, regionAt, () => {
     core.ram().set(baseline);
     core.loadState(state, ORACLE_CODE);
-    core.setDowncount(400000);
-  });
+    core.setDowncount(downcount);
+  }, { strictCycles: true });
   assert.ok(!result.error && !result.trap, JSON.stringify(result));
   return { fragment, result };
 }
+const ON = PRODUCTION_DISABLE_MASK | REGION_MTMSR_EE;
 
 test("mode off: the fragment still stops at the mtmsr (the code is as before)", { skip }, () => {
   const { fragment, result } = runBoth(EE_OFF_ON, stateWith(0x183), PRODUCTION_DISABLE_MASK);
@@ -77,50 +96,65 @@ test("mode off: the fragment still stops at the mtmsr (the code is as before)", 
 });
 
 test("EE off then on, nothing pending: one region run through both mtmsr, the interpreter's state and cycles", { skip }, () => {
-  const { fragment, result } = runBoth(EE_OFF_ON, stateWith(0x184), PRODUCTION_DISABLE_MASK | REGION_MTMSR_EE);
+  const { fragment, result } = runBoth(EE_OFF_ON, stateWith(0x184), ON);
   for (const at of MTMSR_AT) assert.ok(fragment.entries.includes(at + 4), `a block past the mtmsr at ${at.toString(16)}`);
   assert.equal(result.got.regionRuns, 1, "never back to the dispatcher");
   assert.equal(result.got.end, "stop");
   assert.ok(result.equal, JSON.stringify(result.difference));
 });
 
-for (const [name, exceptions] of [["an external interrupt", EXCEPTION_EXTERNAL_INT], ["the decrementer", EXCEPTION_DECREMENTER]]) {
-  test(`${name} pending while EE is off: taken at the mtmsr that turns EE back on, as the interpreter takes it`, { skip }, () => {
-    // Pending from the start: masked by the first mtmsr (EE off), let in by
-    // the second. The interpreter's order (CheckExceptions) decides which.
-    const { result } = runBoth(EE_OFF_ON, stateWith(0x185 + exceptions, { exceptions }), PRODUCTION_DISABLE_MASK | REGION_MTMSR_EE);
+for (const [name, words, expect] of NOT_EE_ALONE) {
+  test(`${name}: the guard leaves after the mtmsr, the interpreter's state and cycles`, { skip }, () => {
+    const { fragment, result } = runBoth(words, stateWith(0x186), ON);
+    assert.ok(fragment.entries.includes(ORACLE_CODE + 12), "the block past the mtmsr is in the fragment (an entry)");
+    // Without the guard the region runs on to the blr: one run, nothing on
+    // the block path, and the fadd or lwz run as region code built for the
+    // old mode.
+    assert.equal(result.got.regionRuns, expect.runs, "left at the mtmsr");
+    if (expect.interp) assert.ok(result.got.interpCycles > 0, "the rest ran on the block path");
+    if (expect.end) assert.equal(result.got.end, expect.end);
     assert.ok(result.equal, JSON.stringify(result.difference));
-    assert.notEqual(result.got.end, "stop", "the exception was taken, not run past");
   });
 }
 
-test("a mtmsr that changes FP (not EE alone): the region leaves after it, the interpreter's state", { skip }, () => {
-  const { result } = runBoth(FP_OFF, stateWith(0x186), PRODUCTION_DISABLE_MASK | REGION_MTMSR_EE);
-  assert.ok(result.equal, JSON.stringify(result.difference));
-  assert.ok(result.got.regionRuns >= 1);
+for (const [name, exceptions] of [["an external interrupt", EXCEPTION_EXTERNAL_INT], ["the decrementer", EXCEPTION_DECREMENTER],
+  ["both", EXCEPTION_EXTERNAL_INT | EXCEPTION_DECREMENTER]]) {
+  test(`${name} pending with EE off: taken at the mtmsr that turns EE on, state and downcount as the interpreter's`, { skip }, () => {
+    const { result } = runBoth(EE_ON, stateWith(0x185 + exceptions, { msr: 0x00002032, exceptions }), ON);
+    assert.equal(result.got.end, "exception", "taken, not run past");
+    assert.equal(result.reference.end, "exception");
+    assert.ok(result.equal, JSON.stringify(result.difference));
+  });
+}
+
+test("downcount running out on each instruction, the mtmsr blocks included: same exit point and state", { skip }, () => {
+  for (const [words, msr, exceptions] of [[EE_OFF_ON, 0x0000a032, 0], [EE_ON, 0x00002032, 0], [EE_ON, 0x00002032, EXCEPTION_EXTERNAL_INT]]) {
+    for (let downcount = 1; downcount <= 2 * words.length + 2; downcount += 1) {
+      for (const mask of [PRODUCTION_DISABLE_MASK, ON]) {
+        const { result } = runBoth(words, stateWith(0x188, { msr, exceptions }), mask, { downcount });
+        assert.ok(result.equal, `downcount ${downcount} mask ${mask.toString(16)}: ${JSON.stringify(result.difference)}`);
+      }
+    }
+  }
 });
 
-test("EE on from the start with an interrupt pending and the mode bit: the first mtmsr (EE off) keeps it pending", { skip }, () => {
-  // EE is on at entry with an external interrupt pending: the region runs
-  // (the dispatcher takes exceptions between slices, as without regions), the
-  // first mtmsr turns EE off without taking it, the second takes it.
-  const { result } = runBoth(EE_OFF_ON, stateWith(0x187, { exceptions: EXCEPTION_EXTERNAL_INT }), PRODUCTION_DISABLE_MASK | REGION_MTMSR_EE);
-  assert.ok(result.equal, JSON.stringify(result.difference));
-});
-
-test("random states, EE program with and without the mode: same state, RAM and cycles as the interpreter", { skip }, () => {
+test("random MSR, downcount and pending exceptions, with and without the mode: the interpreter's state, RAM and cycles", { skip }, () => {
   const rng = makeRng(0x183183);
+  const programs = [EE_OFF_ON, EE_ON, ...NOT_EE_ALONE.map(([, words]) => words)];
   let ran = 0;
-  for (let i = 0; i < 64; i += 1) {
-    const exceptions = rng.below(4) === 0 ? rng.pick([EXCEPTION_DECREMENTER, EXCEPTION_EXTERNAL_INT, EXCEPTION_DECREMENTER | EXCEPTION_EXTERNAL_INT]) : 0;
-    const msr = rng.chance(0.5) ? 0x0000a032 : 0x00002032;
-    for (const mask of [PRODUCTION_DISABLE_MASK, PRODUCTION_DISABLE_MASK | REGION_MTMSR_EE]) {
-      const { result } = runBoth(EE_OFF_ON, stateWith(0x1830000 + i, { msr, exceptions }), mask);
-      assert.ok(result.equal, `${i} mask ${mask.toString(16)} ${JSON.stringify(result.difference)}`);
+  for (let i = 0; i < 96; i += 1) {
+    const exceptions = rng.pick([0, 0, EXCEPTION_DECREMENTER, EXCEPTION_EXTERNAL_INT, EXCEPTION_DECREMENTER | EXCEPTION_EXTERNAL_INT]);
+    // EE on or off, SE, FE0/FE1, around FP, IR, DR, RI.
+    const msr = (0x00002032 | (rng.chance(0.5) ? 0x8000 : 0) | (rng.chance(0.1) ? 0x400 : 0) | (rng.chance(0.1) ? 0x900 : 0)) >>> 0;
+    const downcount = rng.chance(0.5) ? 1 + rng.below(24) : 400000;
+    const words = rng.pick(programs);
+    for (const mask of [PRODUCTION_DISABLE_MASK, ON]) {
+      const { result } = runBoth(words, stateWith(0x1830000 + i, { msr, exceptions }), mask, { downcount });
+      assert.ok(result.equal, `${i} msr ${msr.toString(16)} dc ${downcount} exc ${exceptions} mask ${mask.toString(16)} ${JSON.stringify(result.difference)}`);
       ran += 1;
     }
   }
-  assert.equal(ran, 128);
+  assert.equal(ran, 192);
 });
 
 test("?regionmtmsr=1 sets the enable bit 27 of the codegen mask; off by default", async () => {
@@ -129,4 +163,6 @@ test("?regionmtmsr=1 sets the enable bit 27 of the codegen mask; off by default"
   assert.match(host, /if \(params\.get\("regionmtmsr"\) === "1"\) \{\n\s*mask \|= CACHED_INTERPRETER_DISABLE_BITS\.regionmtmsr;/);
   const patch = readFileSync(new URL("../patches/dolphin-wasm/snapshot/0183-region-mtmsr-ee.patch", import.meta.url), "utf8");
   assert.match(patch, /\+constexpr u32 DOLPHIN_WEB_ENABLE_REGION_MTMSR_EE = 1u << 27;/);
+  // A raw ?disable= mask never turns the enable bit on.
+  assert.match(host, /mask &= ~CACHED_INTERPRETER_DISABLE_BITS\.regionmtmsr;/);
 });
