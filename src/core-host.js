@@ -1893,12 +1893,12 @@ function requestedCachedInterpreterDisableMask() {
   if (params.get("regionmtmsr") === "1") {
     mask |= CACHED_INTERPRETER_DISABLE_BITS.regionmtmsr;
   }
-  // 0184: the x64 register shape, default-off until the CI bench and a real
-  // PC decide (?regshape=x64; automatic detection comes after).
   // 0185: default-off while it is measured.
   if (params.get("regionelsewhere") === "1") {
     mask |= CACHED_INTERPRETER_DISABLE_BITS.regionelsewhere;
   }
+  // 0184: the x64 register shape, default-off until the CI bench and a real
+  // PC decide (?regshape=x64; automatic detection comes after).
   if (params.get("regshape") === "x64") {
     mask |= CACHED_INTERPRETER_DISABLE_BITS.regshape;
   }

@@ -2394,9 +2394,10 @@ test("0185: returns elsewhere chain to the region at pc, like the interpreter, a
       assert.equal(got.downcount, reference.downcount, what);
       assert.ok(calls >= 50 && elsewhere >= 50, `${what}: ${calls} calls, ${elsewhere} returns elsewhere`);
       runs[name] = got.ran + got.interpreted;
-      // Every budget over the first iterations: one of them runs out exactly
-      // on the return elsewhere, where the stub must give the CPU loop back
-      // (Advance, exceptions), as the dispatcher would; then two far ones.
+      // Every budget over the first iterations, then two far ones: the run
+      // stops before, inside and after each call and return. (A 3 is never
+      // returned with downcount spent, the shared exit returns 0 then, so
+      // the stub's own downcount test is a guard, not a path taken here.)
       for (const budget of [...Array.from({ length: 120 }, (_, i) => i + 1), 401, 999]) {
         core.reset(seedGprs(program.labels.main), program.labels.main, STOP, budget);
         while (core.downcount() > 0 && core.pc() !== STOP) if (!core.dispatchRegion()) assert.equal(core.interpretOne(), 0);
@@ -2463,4 +2464,37 @@ const ELSEWHERE_MODE_OFF_DIGEST = "13:b7bbc400fe12f57e8f5df27d9dfdbe225402a4bc8e
 test("0185: mode off emits the call programs as before 0185; bit 16 changes their call sites", { skip: elsewhereSkip }, () => {
   assert.equal(elsewhereDigest(0), ELSEWHERE_MODE_OFF_DIGEST);
   assert.notEqual(elsewhereDigest(ELSEWHERE_CHAIN), ELSEWHERE_MODE_OFF_DIGEST);
+});
+
+// 0185: the chain goes through the module's exit stub, RegionChainNext, never
+// the module's own dispatcher (which enters an entry of the module asking the
+// core nothing): only so does the region at the return point pass the core's
+// guards, verified since an invalidation, regions and chaining on, downcount
+// left. A callee cannot invalidate that code without leaving the regions
+// today (dcbf, icbi end them), so the guard is exercised by the switch it
+// shares: with chaining off (?regionchain=0) every return elsewhere goes back
+// to the dispatcher, in one module and across modules, as with the mode off.
+// Assembled to the module's own dispatcher, the returns in one module would
+// chain on regardless, and this test fails.
+test("0185: returns elsewhere chain only where RegionChainNext lets them (chaining off: back to the dispatcher)", { skip: elsewhereSkip }, () => {
+  const program = elseProgram(50);
+  for (const maxFunctions of [100, 1]) {
+    const what = maxFunctions === 1 ? "across modules" : "in one module";
+    const steps = {};
+    for (const [name, mask] of [["off", PRODUCTION_DISABLE_MASK], ["on", PRODUCTION_DISABLE_MASK | ELSEWHERE_CHAIN]]) {
+      installCalls(maxFunctions, program, ELSE_TEXT, mask);
+      core.setRegionChaining(false);
+      try {
+        const reference = runCall(program.labels.main, { regions: false });
+        const got = runCall(program.labels.main, { regions: true });
+        assert.deepEqual(got.state, reference.state, `${what}, ${name}`);
+        assert.equal(got.downcount, reference.downcount, `${what}, ${name}`);
+        steps[name] = got.ran + got.interpreted;
+      } finally {
+        core.setRegionChaining(true);
+      }
+    }
+    assert.ok(steps.on >= 50, `${what}: ${steps.on} dispatcher steps with chaining off (50 returns elsewhere at least)`);
+    assert.ok(steps.on * 2 > steps.off, `${what}: on ${steps.on}, off ${steps.off}: no chaining past the switch`);
+  }
 });

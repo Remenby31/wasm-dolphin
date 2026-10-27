@@ -15,7 +15,7 @@ diff --git a/Source/Core/Core/PowerPC/CachedInterpreter/CachedInterpreter.cpp b/
  constexpr u32 REGSHAPE_X64_GPR_CAP = 4;
  // §28ce burst smearing: when ENABLED (gate bit CLEARED), TryWriteWasmBlock
  // returns false (falls to interpret) once this many compiles OR this much
-@@ -18147,8 +18154,46 @@
+@@ -18147,8 +18154,54 @@
        out->relocs.push_back({static_cast<u32>(code.size()), 4, 0});  // elsewhere: unlikely
        code.insert(code.end(), {0x04, 0x40});  // if
        count(2);
@@ -23,9 +23,16 @@ diff --git a/Source/Core/Core/PowerPC/CachedInterpreter/CachedInterpreter.cpp b/
 -      code.insert(code.end(), {0x0f, 0x0b});  // return 3; end
 +      if ((DolphinWebDisableMask() & DOLPHIN_WEB_ENABLE_REGION_ELSEWHERE_CHAIN) != 0)
 +      {
-+        // 0185: chain to the region at state.pc (the stub, region_chain:
-+        // RegionChainNext), as the dispatcher would after passing 3 up, and
-+        // without that round trip. Nothing of this frame is left to write
++        // 0185: chain to the region at state.pc through the module's exit
++        // stub (region_chain: RegionChainNext), as the dispatcher would after
++        // passing 3 up, and without that round trip. Always the stub, never
++        // the module's own dispatcher (the "dispatch" reloc, which jumps to an
++        // entry of this module without asking the core): a jump to pc 0, an
++        // entry of no region, is assembled as a jump to the stub. So the
++        // region at state.pc, in this module or another, is entered only if
++        // RegionChainNext would enter it: verified since an invalidation (a
++        // callee may have written and flushed this module's code), regions
++        // and chaining on, downcount left. Nothing of this frame is left to write
 +        // back: the call above was made after flush_frame() and the block's
 +        // GPR flush, and the callee wrote the whole state (pc, npc,
 +        // downcount, GPRs) before returning 3. What the dispatcher path
@@ -39,8 +46,9 @@ diff --git a/Source/Core/Core/PowerPC/CachedInterpreter/CachedInterpreter.cpp b/
 +        //   - pending exceptions between two blocks: the loop does not check
 +        //     them inside a slice (only Advance and the ops that take them,
 +        //     already run by the callee); neither does the stub.
-+        //   - CPU state (pause, stepping): checked by the loop at slice
-+        //     boundaries only, as for every chained region.
++        //   - CPU state (pause, stepping): the loop tests it after every
++        //     ExecuteOneBlock; a chained region (this one as every other)
++        //     runs on until it returns, so a pause waits for that return.
 +        //   - the mode (MSR IR/DR, 0121's guards, XER.SO, perfmon), a region
 +        //     not verified since an invalidation or a cache clear, regions off:
 +        //     the stub refuses exactly where TryRunRegion would, returning 0
@@ -53,7 +61,7 @@ diff --git a/Source/Core/Core/PowerPC/CachedInterpreter/CachedInterpreter.cpp b/
 +        // a return 3 further up (depth still above 0) meets the next call
 +        // site, which does the same.
 +        EmitLocalGet(code, 0);
-+        reloc_site(2, 0);
++        reloc_site(1, 0);  // a jump to pc 0: the exit stub (RegionChainNext)
 +        code.push_back(0x0b);  // end
 +      }
 +      else
