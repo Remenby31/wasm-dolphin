@@ -30,27 +30,37 @@ export function descendantsOf(rows, root) {
   return out;
 }
 
+// [pid, ppid, started] rows: `started` (ps lstart, to the second) tells a
+// process from a later one that got its pid back (one reused within the same
+// second as the first started would pass: not seen in practice).
 export function psRows() {
   try {
-    return execFileSync("ps", ["-A", "-o", "pid=,ppid="], { encoding: "utf8" })
-      .split("\n").map((l) => l.trim().split(/\s+/).map(Number)).filter((r) => r.length === 2 && r.every(Number.isInteger));
+    return execFileSync("ps", ["-A", "-o", "pid=,ppid=,lstart="], { encoding: "utf8" }).split("\n").map((l) => {
+      const m = /^\s*(\d+)\s+(\d+)\s+(.+?)\s*$/.exec(l);
+      return m ? [Number(m[1]), Number(m[2]), m[3]] : null;
+    }).filter(Boolean);
   } catch {
     return [];
   }
 }
+const startedOf = () => new Map(psRows().map(([pid, , started]) => [pid, started]));
 
-const alive = (pid) => { try { process.kill(pid, 0); return true; } catch (e) { return e.code === "EPERM"; } };
 
-// Waits for `pids` to be gone, up to graceMs; then SIGTERM, then SIGKILL
-// (killWaitMs after each). Returns the pids still alive at the end.
-export async function reap(pids, { graceMs = 10000, killWaitMs = 5000, log = () => {}, isAlive = alive, kill = (pid, sig) => process.kill(pid, sig), sleep = (ms) => new Promise((r) => setTimeout(r, ms)), stepMs = 200 } = {}) {
-  const left = () => pids.filter(isAlive);
+// Waits for `seen` (pid -> start time when seen) to be gone, up to graceMs;
+// then SIGTERM, then SIGKILL (killWaitMs after each). A pid is ours only
+// while it has the start time it had when seen: a pid given back to another
+// process meanwhile is never signalled (nor waited for). Returns the pids
+// still alive at the end.
+export async function reap(seen, { graceMs = 10000, killWaitMs = 5000, log = () => {}, started = startedOf, kill = (pid, sig) => process.kill(pid, sig), sleep = (ms) => new Promise((r) => setTimeout(r, ms)), stepMs = 200 } = {}) {
+  const left = () => { const now = started(); return [...seen].filter(([pid, at]) => now.get(pid) === at).map(([pid]) => pid); };
   const waitGone = async (ms) => { for (const end = Date.now() + ms; left().length && Date.now() < end;) await sleep(stepMs); return left(); };
   let rest = await waitGone(graceMs);
   for (const sig of ["SIGTERM", "SIGKILL"]) {
     if (!rest.length) return [];
     log(`${rest.length} process(es) of the run still alive (${rest.slice(0, 8).join(", ")}): ${sig}`);
-    for (const pid of rest) { try { kill(pid, sig); } catch {} }
+    // checked again right before the signal: still the same process
+    const now = started();
+    for (const pid of rest) { if (now.get(pid) !== seen.get(pid)) continue; try { kill(pid, sig); } catch {} }
     rest = await waitGone(killWaitMs);
   }
   return rest;
@@ -62,8 +72,12 @@ export async function runLocked({ name, cmd, args = [], cwd, env = process.env, 
   const release = await acquire({ name, log, ...lock });
   log("perf lock held");
   const child = spawn(cmd, args, { cwd, env, stdio: "inherit" });
-  const seen = new Set();
-  const look = () => { for (const pid of descendantsOf(psRows(), child.pid)) seen.add(pid); };
+  const seen = new Map(); // pid -> its start time when first seen
+  const look = () => {
+    const rows = psRows();
+    const at = new Map(rows.map(([pid, , started]) => [pid, started]));
+    for (const pid of descendantsOf(rows, child.pid)) if (!seen.has(pid) && at.has(pid)) seen.set(pid, at.get(pid));
+  };
   look();
   const watcher = setInterval(look, watchMs);
   let code;
@@ -72,7 +86,7 @@ export async function runLocked({ name, cmd, args = [], cwd, env = process.env, 
   } finally {
     clearInterval(watcher);
     look(); // what the command left behind just before it went (already reparented ones were seen earlier)
-    const rest = await reap([...seen], { graceMs, killWaitMs, log });
+    const rest = await reap(seen, { graceMs, killWaitMs, log });
     if (rest.length) log(`still alive after SIGKILL: ${rest.join(", ")} (the lock goes back anyway)`);
     release();
     log(`perf lock released (exit ${code})`);

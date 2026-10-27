@@ -12,15 +12,30 @@ test("descendantsOf: the whole tree under a pid, not the pid itself nor its sibl
 });
 
 test("reap: waits, then SIGTERM, then SIGKILL, and says what is left", async () => {
-  const live = new Set([1, 2, 3]);
+  const live = new Map([[1, "t1"], [2, "t2"], [3, "t3"]]);
   const sent = [];
-  const left = await reap([1, 2, 3], {
+  const left = await reap(new Map(live), {
     graceMs: 0, killWaitMs: 0, stepMs: 0, sleep: async () => {},
-    isAlive: (p) => live.has(p),
+    started: () => new Map(live),
     kill: (p, sig) => { sent.push(`${sig} ${p}`); if (sig === "SIGTERM" && p !== 3) live.delete(p); if (sig === "SIGKILL") live.delete(p); }
   });
   assert.deepEqual(left, []);
   assert.deepEqual(sent, ["SIGTERM 1", "SIGTERM 2", "SIGTERM 3", "SIGKILL 3"]);
+});
+
+// Review of #307: a pid seen during the run, gone, then given to another
+// process (another start time) is never signalled nor waited for.
+test("reap: a pid reused by another process is left alone", async () => {
+  const now = new Map([[1, "later"], [2, "t2"]]); // pid 1 now belongs to someone else
+  const sent = [];
+  let waits = 0;
+  const left = await reap(new Map([[1, "t1"], [2, "t2"]]), {
+    graceMs: 0, killWaitMs: 0, stepMs: 0, sleep: async () => { waits += 1; },
+    started: () => new Map(now),
+    kill: (p, sig) => { sent.push(`${sig} ${p}`); now.delete(p); }
+  });
+  assert.deepEqual(sent, ["SIGTERM 2"], "only the run's own process");
+  assert.deepEqual(left, []);
 });
 
 // 2026-10-27 16:11: a locked e2e gave the lock back while its Chromes still
