@@ -105,6 +105,7 @@ import { ensureServer, loadHarnessState, readCoreProgress, readFrameInfo, readTi
 import { PRESETS, SCENE_PROTOCOLS, sceneProtocolCheck, visualProbeCheck, xfbDecodeOff } from "../lib/matrix.mjs";
 import { claim, release } from "../lib/ownership.mjs";
 import { acquirePerfLock } from "../lib/perf-lock.mjs";
+import { powerSnapshot } from "../lib/system.mjs";
 import { openSession, rebootSession } from "../lib/session.mjs";
 import { calmThenLock, calmUnderLock, loadGaveUp } from "../lib/env.mjs";
 import { describe, median, percentile, round } from "../lib/stats.mjs";
@@ -828,7 +829,7 @@ async function main() {
   if (values.baseline) sides.baseline = { ...resolveSide("baseline", values.baseline), query: baselineQuery, chromeArgs: baselineChromeArgs };
   // A calm machine first (--calm-wait, default --lock-wait), then the lock.
   const calmWait = values["calm-wait"] == null ? lockWait : num(values, "calm-wait", { min: 0 });
-  const acquire = () => acquirePerfLock({ name: `harness race-perf (${REPO_ROOT})`, waitSec: lockWait, log: (m) => console.log(`[race-perf] ${m}`) });
+  const acquire = () => acquirePerfLock({ requireMains: true, name: `harness race-perf (${REPO_ROOT})`, waitSec: lockWait, log: (m) => console.log(`[race-perf] ${m}`) });
   let releaseLock = await calmThenLock({ maxLoad: o.maxLoad, calmWait, log: (m) => console.log(`[race-perf] before the lock: ${m}`), acquire });
   // A local-only disc never writes into the repo.
   const stamp = `${new Date().toISOString().replace(/[:.]/g, "-").slice(0, 19)}-${process.pid}-${randomBytes(3).toString("hex")}`;
@@ -877,8 +878,16 @@ async function main() {
           replay = true;
           break;
         }
+        const powerAtStart = powerSnapshot()?.source ?? null;
         record[name] = await measureSide(sides[name], o, g.gate);
         const r = record[name];
+        // Unplugged (or plugged in) during the side: played again, both sides,
+        // once on mains (the next gate gives the lock back while on battery).
+        if ((powerSnapshot()?.source ?? null) !== powerAtStart) {
+          console.log(`[race-perf] run ${run} ${name}: the power source changed during the side (${powerAtStart} → ${powerSnapshot()?.source ?? null})`);
+          replay = true;
+          break;
+        }
         console.log(`[race-perf] run ${run} ${name}: ${r.error ?? brief(r.cold)}${r.warm ? ` | warm: ${brief(r.warm)}` : ""}`);
         // Two runs in a row that timed out: the campaign stops (the lock goes).
         timeouts = r.timedOut ? timeouts + 1 : 0;

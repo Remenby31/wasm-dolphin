@@ -343,7 +343,11 @@ node harness/probes/drop-meter.mjs --iso ../roms/<disc>.iso --port 8113 --runs 3
 # summary (powerSources); --noise refuses an A/A on the other source or with
 # mixed sources, and a batch mixing them gives no verdict (exit 3). Since
 # PROBE_VERSION 3 an A/A from before the field is refused too (redo it).
-# Decision measures: on mains.
+# Decision measures: on mains. Every measuring probe's perf lock waits for
+# it (acquirePerfLock requireMains: no ticket while on battery, the turn
+# given back if unplugged meanwhile); unplugged under the lock, the next
+# gate gives the lock back and the run is played again (race-perf a run,
+# drop-meter a visit marked mixed). e2e and builds are not gated.
 # The --noise A/A must have run on the core of the base measured (the
 # summary records each side's core): another core gives no verdict (exit 3),
 # --noise-stale-ok for a study. Redo the A/A when main publishes a core.

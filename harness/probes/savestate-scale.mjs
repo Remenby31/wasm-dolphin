@@ -45,7 +45,7 @@ if (!ac && !o["allow-battery"]) {
   console.error("not on mains power: decisions are measured on mains power (--allow-battery to override)");
   process.exit(3);
 }
-const release = await acquirePerfLock({ name: "Salon · rendu: savestate-scale", waitSec: 1800, log: (m) => console.log(`[savestate-scale] ${m}`) });
+const release = await acquirePerfLock({ requireMains: true, name: "Salon · rendu: savestate-scale", waitSec: 1800, log: (m) => console.log(`[savestate-scale] ${m}`) });
 // Never hold the lock for ever (a hung browser): counted from the lock, not
 // from the wait for it.
 const watchdog = setTimeout(() => { console.error("watchdog: 20 min under the lock"); release(); process.exit(2); }, 20 * 60 * 1000);

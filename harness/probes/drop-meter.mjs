@@ -629,7 +629,7 @@ async function main() {
   const lockWait = num(values, "lock-wait", { min: 0 });
   const lock = await calmLock({
     maxLoad: o.maxLoad, calmWait: values["calm-wait"] == null ? lockWait : num(values, "calm-wait", { min: 0 }), log: (m) => log(`before the lock: ${m}`),
-    acquire: values["no-lock"] ? null : () => acquirePerfLock({ name: `harness drop-meter (${REPO_ROOT})`, waitSec: lockWait, log })
+    acquire: values["no-lock"] ? null : () => acquirePerfLock({ requireMains: true, name: `harness drop-meter (${REPO_ROOT})`, waitSec: lockWait, log })
   });
   const outDir = probeOutDir("drop-meter", iso, values.out);
   const meta = {
@@ -669,6 +669,8 @@ async function main() {
                 const analysis = analyzeVisit(raw, { native });
                 analysis.overloaded = analysis.load1?.median > o.maxLoad;
                 analysis.batch = batch;
+                // unplugged (or plugged in) during the visit: not a measure, the run is played again
+                if (analysis.power === "mixed" && !analysis.error) analysis.error = "the power source changed during the visit (mains/battery)";
                 tries.push({ side: name, run, visit, batch, analysis });
                 writeFileSync(path.join(outDir, `${tag}.json`), JSON.stringify(analysis) + "\n");
                 logRun(log, `${name} run ${run} visit ${visit}${attempt > 1 ? " (retry)" : ""}`, analysis);

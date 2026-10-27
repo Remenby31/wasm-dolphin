@@ -89,7 +89,7 @@ async function main() {
     baseline: { root: path.resolve(values.baseline), query: values["baseline-query"] ? `${values["baseline-query"]}&metrics=1` : null },
     candidate: { root: path.resolve(values.candidate) }
   };
-  const release = await acquirePerfLock({ name: `harness layout-footprint (${REPO_ROOT})`, waitSec: Number(values["lock-wait"]), log: (m) => console.log(`[layout-footprint] ${m}`) });
+  const release = await acquirePerfLock({ requireMains: true, name: `harness layout-footprint (${REPO_ROOT})`, waitSec: Number(values["lock-wait"]), log: (m) => console.log(`[layout-footprint] ${m}`) });
   const runs = [];
   try {
     for (let run = 1; run <= o.runs; run += 1) {

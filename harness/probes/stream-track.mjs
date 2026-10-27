@@ -91,7 +91,7 @@ async function measure(server, held) {
   }
 }
 
-const release = values["no-lock"] ? null : await acquirePerfLock({ name: `harness stream-track (${REPO_ROOT})`, waitSec: Number(values["lock-wait"]), log: (m) => console.log(`[stream-track] ${m}`) });
+const release = values["no-lock"] ? null : await acquirePerfLock({ requireMains: true, name: `harness stream-track (${REPO_ROOT})`, waitSec: Number(values["lock-wait"]), log: (m) => console.log(`[stream-track] ${m}`) });
 const server = await ensureServer({ port: Number(values.port), root: REPO_ROOT });
 const records = [];
 for (let run = 1; run <= runs; run += 1) {
