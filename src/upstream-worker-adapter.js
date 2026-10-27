@@ -105,6 +105,10 @@ export class UpstreamWorkerAdapter {
     syncOnSkipIdle = false,
     dupXfbRearmsThrottle = false,
     smoothEarly = true,
+    sleepMarginUs = 0,
+    sleepStepUs = 0,
+    sleepK = 750,
+    sleepSpinUs = 150,
     presentVsync = true,
     coreLog = false,
     memcardSlotB = false,
@@ -236,6 +240,10 @@ export class UpstreamWorkerAdapter {
     this.syncOnSkipIdle = syncOnSkipIdle === true;
     this.dupXfbRearmsThrottle = dupXfbRearmsThrottle === true;
     this.smoothEarly = smoothEarly !== false;
+    this.sleepMarginUs = Number.isInteger(sleepMarginUs) && sleepMarginUs >= 0 && sleepMarginUs <= 8000 ? sleepMarginUs : 0;
+    this.sleepStepUs = Number.isInteger(sleepStepUs) && sleepStepUs >= 0 && sleepStepUs <= 4000 ? sleepStepUs : 0;
+    this.sleepK = Number.isInteger(sleepK) && sleepK >= 0 && sleepK <= 950 ? (sleepK === 0 ? 0 : Math.max(500, sleepK)) : 750;
+    this.sleepSpinUs = Number.isInteger(sleepSpinUs) && sleepSpinUs >= 50 && sleepSpinUs <= 2000 ? sleepSpinUs : 150;
     this.presentVsync = presentVsync !== false;
     this.coreLog = Boolean(coreLog);
     this.memcardSlotB = Boolean(memcardSlotB);
@@ -488,6 +496,10 @@ export class UpstreamWorkerAdapter {
       syncOnSkipIdle: this.syncOnSkipIdle,
       dupXfbRearmsThrottle: this.dupXfbRearmsThrottle,
       smoothEarly: this.smoothEarly,
+      sleepMarginUs: this.sleepMarginUs,
+      sleepStepUs: this.sleepStepUs,
+      sleepK: this.sleepK,
+      sleepSpinUs: this.sleepSpinUs,
       presentVsync: this.presentVsync,
       coreLog: this.coreLog,
       memcardSlotB: this.memcardSlotB,
