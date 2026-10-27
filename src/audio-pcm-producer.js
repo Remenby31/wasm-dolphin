@@ -1,4 +1,5 @@
 import {
+  AUDIO_PCM_DRAIN_RATIO,
   AUDIO_PCM_HEADER,
   AUDIO_PCM_SAMPLE_RATE,
   AUDIO_PCM_STATE_MUTED,
@@ -123,8 +124,10 @@ export class AudioPcmProducer {
   }
 
   // The ring's target between the page's floor and 120 ms: +20 ms at each
-  // underrun (or a timer gap over half the target), -10 ms a second once
-  // none for ADAPT_CALM_MS.
+  // underrun (a timer gap over half the target restarts the calm); once
+  // calm for ADAPT_CALM_MS it comes down 0.5 % of the time (5 ms a second),
+  // the rate the worklet plays faster at while over it (DRAIN_RATIO): the
+  // producer keeps pulling the nominal rate and no sample is skipped.
   adapt(now, gapMs = 0) {
     const ring = this.ring;
     if (!ring || this.floorFrames == null || this.floorFrames >= AUDIO_PCM_TARGET_FRAMES) return;
@@ -134,13 +137,19 @@ export class AudioPcmProducer {
       if (underruns !== this.underrunsSeen) this.targetFrames = Math.min(AUDIO_PCM_TARGET_FRAMES, this.targetFrames + 960);
       this.underrunsSeen = underruns;
       this.calmSince = now;
+      this.lastAdaptAt = now;
+      Atomics.store(ring.header, AUDIO_PCM_HEADER.TARGET_FRAMES, Math.round(this.targetFrames));
       return;
     }
     if (!this.calmSince) this.calmSince = now;
+    // only the time since the calm was long enough counts
+    const from = Math.max(this.lastAdaptAt ?? now, this.calmSince + ADAPT_CALM_MS);
+    const dt = Math.max(0, now - from);
+    this.lastAdaptAt = now;
     if (now - this.calmSince >= ADAPT_CALM_MS && this.targetFrames > this.floorFrames) {
-      this.targetFrames = Math.max(this.floorFrames, this.targetFrames - 480);
-      this.calmSince = now - ADAPT_CALM_MS + 1000; // the next step a second later
+      this.targetFrames = Math.max(this.floorFrames, this.targetFrames - (AUDIO_PCM_DRAIN_RATIO - 1) * dt * 48);
     }
+    Atomics.store(ring.header, AUDIO_PCM_HEADER.TARGET_FRAMES, Math.round(this.targetFrames));
   }
 
   refill(maxMixes = 2) {
@@ -154,7 +163,7 @@ export class AudioPcmProducer {
     for (let attempt = 0; attempt < maxMixes; attempt += 1) {
       const fill = audioPcmAvailableFrames(ring.header);
       const free = audioPcmFreeFrames(ring.header);
-      const target = this.targetFrames ?? AUDIO_PCM_TARGET_FRAMES;
+      const target = Math.round(this.targetFrames ?? AUDIO_PCM_TARGET_FRAMES);
       if (fill >= target || free <= 0) break;
       const maxFrames = Math.max(1, core.audioBufferFrames?.() || 4096);
       const requested = Math.min(maxFrames, target - fill, free);
@@ -186,7 +195,7 @@ export class AudioPcmProducer {
       requestedTransport: this.requestedTransport,
       activeTransport: this.activeTransport,
       transportFallbackReason: this.fallbackReason,
-      targetFrames: this.targetFrames ?? AUDIO_PCM_TARGET_FRAMES,
+      targetFrames: Math.round(this.targetFrames ?? AUDIO_PCM_TARGET_FRAMES),
       floorFrames: this.floorFrames ?? null,
       workletRing: this.ring ? snapshotAudioPcmRing(this.ring) : null,
     };
