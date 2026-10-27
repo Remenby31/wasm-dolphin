@@ -154,7 +154,7 @@ async function main() {
   // Never waited for the load under the lock (calmLock).
   const lock = await calmLock({
     maxLoad, calmWait, log: (m) => log(`before the lock: ${m}`),
-    acquire: values["no-lock"] ? null : () => acquirePerfLock({ name: `harness ttff (${REPO_ROOT})`, waitSec: lockWait, log })
+    acquire: values["no-lock"] ? null : () => acquirePerfLock({ requireMains: true, name: `harness ttff (${REPO_ROOT})`, waitSec: lockWait, log })
   });
   const outDir = probeOutDir("ttff", iso, values.out);
   const server = await ensureServer({ port, root: REPO_ROOT });

@@ -105,6 +105,7 @@ import { ensureServer, loadHarnessState, readCoreProgress, readFrameInfo, readTi
 import { PRESETS, SCENE_PROTOCOLS, sceneProtocolCheck, visualProbeCheck, xfbDecodeOff } from "../lib/matrix.mjs";
 import { claim, release } from "../lib/ownership.mjs";
 import { acquirePerfLock } from "../lib/perf-lock.mjs";
+import { powerSnapshot } from "../lib/system.mjs";
 import { openSession, rebootSession } from "../lib/session.mjs";
 import { calmThenLock, calmUnderLock, loadGaveUp } from "../lib/env.mjs";
 import { describe, median, percentile, round } from "../lib/stats.mjs";
@@ -828,7 +829,7 @@ async function main() {
   if (values.baseline) sides.baseline = { ...resolveSide("baseline", values.baseline), query: baselineQuery, chromeArgs: baselineChromeArgs };
   // A calm machine first (--calm-wait, default --lock-wait), then the lock.
   const calmWait = values["calm-wait"] == null ? lockWait : num(values, "calm-wait", { min: 0 });
-  const acquire = () => acquirePerfLock({ name: `harness race-perf (${REPO_ROOT})`, waitSec: lockWait, log: (m) => console.log(`[race-perf] ${m}`) });
+  const acquire = () => acquirePerfLock({ requireMains: true, name: `harness race-perf (${REPO_ROOT})`, waitSec: lockWait, log: (m) => console.log(`[race-perf] ${m}`) });
   let releaseLock = await calmThenLock({ maxLoad: o.maxLoad, calmWait, log: (m) => console.log(`[race-perf] before the lock: ${m}`), acquire });
   // A local-only disc never writes into the repo.
   const stamp = `${new Date().toISOString().replace(/[:.]/g, "-").slice(0, 19)}-${process.pid}-${randomBytes(3).toString("hex")}`;
@@ -851,7 +852,7 @@ async function main() {
   checkLock("taken");
   try {
     // Times each run was played again after the lock went back for the load.
-    let relocks = 0, timeouts = 0;
+    let relocks = 0, timeouts = 0, powerCounted = false;
     const loadRetries = new Map();
     for (let run = 1; run <= o.runs && !gaveUp; run += 1) {
       checkLock(`before run ${run}`);
@@ -871,14 +872,31 @@ async function main() {
         gaveUp = loadGaveUp(g.gate);
         if (gaveUp) { console.warn(`[race-perf] run ${run} ${name}: ${gaveUp}`); break; }
         if (g.relocked) {
-          relocks += 1;
+          // an unplug already counted when it was seen (below): once, not twice
+          if (powerCounted) powerCounted = false;
+          else relocks += 1;
           checkLock(`taken again in run ${run}`);
-          if (relocks > MAX_RELOCKS) { gaveUp = `the lock was let go for the load ${relocks} times: remaining runs given up`; console.warn(`[race-perf] ${gaveUp}`); break; }
+          if (relocks > MAX_RELOCKS) { gaveUp = `unplugged or loaded ${relocks} times (the lock let go for power or load): remaining runs given up`; console.warn(`[race-perf] ${gaveUp}`); break; }
           replay = true;
           break;
         }
+        powerCounted = false; // back on mains without a relock: nothing left to discount
+        const powerAtStart = powerSnapshot()?.source ?? null;
         record[name] = await measureSide(sides[name], o, g.gate);
         const r = record[name];
+        // Unplugged during the side: played again, both sides, once on mains
+        // (the next gate gives the lock back while on battery). A failed
+        // reading (null) or AC <-> UPS is no change.
+        if (powerSnapshot()?.source === "battery" && powerAtStart !== "battery") {
+          console.log(`[race-perf] run ${run} ${name}: on battery during the side (${powerAtStart} → battery): not a measure`);
+          // measured partly on battery: never kept, whatever comes next
+          delete record[name];
+          relocks += 1;
+          powerCounted = true;
+          if (relocks > MAX_RELOCKS) { gaveUp = `unplugged or loaded ${relocks} times (the lock let go for power or load): remaining runs given up`; console.warn(`[race-perf] ${gaveUp}`); break; }
+          replay = true;
+          break;
+        }
         console.log(`[race-perf] run ${run} ${name}: ${r.error ?? brief(r.cold)}${r.warm ? ` | warm: ${brief(r.warm)}` : ""}`);
         // Two runs in a row that timed out: the campaign stops (the lock goes).
         timeouts = r.timedOut ? timeouts + 1 : 0;

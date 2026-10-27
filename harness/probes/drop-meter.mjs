@@ -347,11 +347,33 @@ export function humanSummary(summary) {
 // when unknown (another OS, a desktop).
 export function powerOfVisit(raw) {
   const a = raw.power?.source ?? null, b = raw.powerEnd?.source ?? a;
-  return a === b ? a : "mixed";
+  // on battery at one end only; a failed reading (null) or AC <-> UPS is none
+  return (a === "battery") !== (b === "battery") && a != null && b != null ? "mixed" : a ?? b;
 }
 // The sources of a batch's runs (known ones), sorted.
 export function powerSourcesOf(analyses) {
   return [...new Set(analyses.filter((a) => !a.analysis?.error && a.analysis?.power).map((a) => a.analysis.power))].sort();
+}
+
+// One run's sides in turn, each behind its gate: the first gate or replay
+// that gives up ends the run (and the batch: the caller stops on it); a
+// later side's calm gate never clears it (review of #305).
+export async function runSides(names, { gate, play }) {
+  for (const name of names) {
+    const g = await gate(name);
+    if (g.gaveUp) return g.gaveUp;
+    const r = await play(name, g.gate);
+    if (r?.gaveUp) return r.gaveUp;
+  }
+  return null;
+}
+
+// Before a run is played again (a visit that failed, one unplugged midway):
+// the same gate as before any run, so it is never replayed on battery or on
+// a loaded machine. { gaveUp } when the gate gave up.
+export async function gateBeforeReplay(lock, { waitSec, log = () => {} }) {
+  const gate = await lock.waitCalmUnlocked({ waitSec, log });
+  return { gate, gaveUp: loadGaveUp(gate) };
 }
 
 export function noVerdictReasons({ analyses, visits, gaveUp = null, verdicts }) {
@@ -458,12 +480,14 @@ export function readNoise(file, expect = null) {
     if (expect.cpuModel && s.machine?.cpuModel && s.machine.cpuModel !== expect.cpuModel) differ.push("cpuModel");
     if (expect.browser && s.browser && s.browser !== expect.browser) differ.push("browser");
     // on mains vs on battery: another machine, as far as noise goes; an A/A
-    // whose runs mixed both (or a run that did) is no noise for either
-    const sources = s.powerSources ?? [];
-    const power = sources.length === 1 ? sources[0] : sources.length ? sources.join("+") : s.machine?.power?.source ?? null;
-    if (sources.length > 1 || sources.includes("mixed")) differ.push("power");
-    else if (expect.powerSource && power && power !== expect.powerSource) differ.push("power");
-    named.power = [power, expect.powerSource];
+    // whose runs mixed both (or a run that did) is no noise for either.
+    // AC and UPS are both mains.
+    const kind = (x) => (x == null ? null : x === "battery" || x === "mixed" ? x : "mains");
+    const kinds = [...new Set((s.powerSources ?? []).map(kind))];
+    const power = kinds.length === 1 ? kinds[0] : kinds.length ? kinds.join("+") : kind(s.machine?.power?.source ?? null);
+    if (kinds.length > 1 || kinds.includes("mixed")) differ.push("power");
+    else if (expect.powerSource && power && power !== kind(expect.powerSource)) differ.push("power");
+    named.power = [power, kind(expect.powerSource ?? null)];
     if (differ.length) throw new Error(`--noise ${file}: another measure (${differ.map((k) => `${k} ${named[k]?.[0] ?? s[k] ?? unset[k]} vs ${named[k]?.[1] ?? expect[k] ?? unset[k]}`).join("; ")})`);
   }
   return Object.fromEntries(s.visitSummary.map((v) => [v.visit, { run: (v.candidate ?? v).noise, phases: (v.candidate ?? v).phases ?? {} }]));
@@ -604,10 +628,11 @@ async function main() {
     regionCounters: values["region-counters"], display: values.display, pcWindow: values["pc-window"] ? values["pc-window"].split("-").map(Number) : null,
     maxLoad: values["max-load"] ? num(values, "max-load", { min: 0.1 }) : Math.max(2, os.cpus().length / 4), loadWait: num(values, "load-wait", { min: 0 })
   };
-  // for the noise check (the meta takes its own once the lock is held)
+  // The noise's measure checked before the lock; its power source once the
+  // lock is held (the lock waits for mains: on battery now is no mismatch).
   const machine = machineSnapshot();
-  if (machine.power?.source === "battery") log(`on battery (${machine.power.percent} %): compare only with runs and noise on battery too`);
-  const noise = values.noise ? readNoise(values.noise, { probeVersion: PROBE_VERSION, scenario: path.basename(values.scenario), state: o.state ? path.basename(o.state) : null, stateDelayMs: o.state ? o.stateDelayMs : 0, display: o.display, query: o.baselineQuery ?? o.query, sampleMs: o.sampleMs, cpuModel: machine.cpuModel, powerSource: machine.power?.source }) : null;
+  const noiseExpect = { probeVersion: PROBE_VERSION, scenario: path.basename(values.scenario), state: o.state ? path.basename(o.state) : null, stateDelayMs: o.state ? o.stateDelayMs : 0, display: o.display, query: o.baselineQuery ?? o.query, sampleMs: o.sampleMs, cpuModel: machine.cpuModel };
+  const noise = values.noise ? readNoise(values.noise, noiseExpect) : null;
   const noiseCore = values.noise ? noiseCoreOf(values.noise) : null;
   const sides = { candidate: resolveSide("candidate", values.candidate) };
   if (values.baseline) sides.baseline = resolveSide("baseline", values.baseline);
@@ -629,7 +654,7 @@ async function main() {
   const lockWait = num(values, "lock-wait", { min: 0 });
   const lock = await calmLock({
     maxLoad: o.maxLoad, calmWait: values["calm-wait"] == null ? lockWait : num(values, "calm-wait", { min: 0 }), log: (m) => log(`before the lock: ${m}`),
-    acquire: values["no-lock"] ? null : () => acquirePerfLock({ name: `harness drop-meter (${REPO_ROOT})`, waitSec: lockWait, log })
+    acquire: values["no-lock"] ? null : () => acquirePerfLock({ requireMains: true, name: `harness drop-meter (${REPO_ROOT})`, waitSec: lockWait, log })
   });
   const outDir = probeOutDir("drop-meter", iso, values.out);
   const meta = {
@@ -644,10 +669,13 @@ async function main() {
   const runBatch = async (batch) => {
     const first = analyses.length ? Math.max(...analyses.map((a) => a.run)) + 1 : 1;
     for (let run = first; run < first + o.runs && !gaveUp; run += 1) {
-      for (const name of sideOrder(run).filter((n) => sides[n])) {
-        const gate = await lock.waitCalmUnlocked({ waitSec: o.loadWait, log });
-        gaveUp = loadGaveUp(gate);
-        if (gaveUp) { log(gaveUp); break; }
+      gaveUp = await runSides(sideOrder(run).filter((n) => sides[n]), {
+        gate: async () => {
+          const gate = await lock.waitCalmUnlocked({ waitSec: o.loadWait, log });
+          return { gate, gaveUp: loadGaveUp(gate) };
+        },
+        play: async (name, gate) => {
+        let sideGaveUp = null;
         const server = await ensureServer({ port: o.port, root: sides[name].root });
         meta.served ??= {};
         meta.served[name] ??= server.identity;
@@ -669,6 +697,8 @@ async function main() {
                 const analysis = analyzeVisit(raw, { native });
                 analysis.overloaded = analysis.load1?.median > o.maxLoad;
                 analysis.batch = batch;
+                // unplugged (or plugged in) during the visit: not a measure, the run is played again
+                if (analysis.power === "mixed" && !analysis.error) analysis.error = "the power source changed during the visit (mains/battery)";
                 tries.push({ side: name, run, visit, batch, analysis });
                 writeFileSync(path.join(outDir, `${tag}.json`), JSON.stringify(analysis) + "\n");
                 logRun(log, `${name} run ${run} visit ${visit}${attempt > 1 ? " (retry)" : ""}`, analysis);
@@ -680,15 +710,23 @@ async function main() {
             }
             if (tries.every((x) => !x.analysis.error) || attempt === 2) { analyses.push(...tries); break; }
             log(`${name} run ${run}: ${tries.find((x) => x.analysis.error).analysis.error}; played again`);
+            // through the gate first: unplugged, the lock waits for mains (and the load)
+            const again = await gateBeforeReplay(lock, { waitSec: o.loadWait, log });
+            if (again.gaveUp) { sideGaveUp = again.gaveUp; analyses.push(...tries); break; }
           }
         } finally {
           await server.stop();
         }
-      }
+        return { gaveUp: sideGaveUp };
+        }
+      });
+      if (gaveUp) log(gaveUp);
     }
   };
   let confirm = null;
   try {
+    // the noise's power source, now that the lock (on mains) is held
+    if (values.noise) readNoise(values.noise, { ...noiseExpect, powerSource: machineSnapshot().power?.source });
     await runBatch(1);
     meta.browser = analyses.find((a) => a.analysis.browser)?.analysis.browser ?? null;
     // A regression fails the guard only if a second batch, judged on its
