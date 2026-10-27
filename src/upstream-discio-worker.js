@@ -1738,6 +1738,7 @@ async function handleMessage(type, payload) {
         sleepSpinUs: payload.sleepSpinUs,
         presentVsync: payload.presentVsync,
         presentGamePace: payload.presentGamePace,
+        presentPaceStats: payload.presentPaceStats,
         coreLog: payload.coreLog,
         memcardSlotB: payload.memcardSlotB,
         internalResolution: payload.internalResolution,
@@ -2546,6 +2547,7 @@ async function loadCore({
   sleepSpinUs = 150,
   presentVsync = true,
   presentGamePace = false,
+  presentPaceStats = false,
   coreLog = false,
   memcardSlotB = false,
   internalResolution = 1,
@@ -3052,6 +3054,7 @@ async function loadCore({
   // the vsync presenter fills only at its rAF (a stale picture).
   wgpuPresentVsync = presentVsync !== false && typeof self.requestAnimationFrame === "function" && !wgpuDetachedPresenter;
   wgpuPresentGamePace = presentGamePace === true;
+  wgpuPresentPaceStats = presentPaceStats === true || wgpuPresentGamePace;
   wgpuGamePacer.reset({ arrival: true });
   wgpuRefreshHistogram.reset();
   releaseWgpuReadback();
@@ -5092,7 +5095,7 @@ function framePayload({ forceCausalTelemetry = false } = {}) {
       ` jitc:${dolphinJitCacheMap.size}/${dolphinJitNewCompileCount}` +
       // refreshes each game frame stayed on screen (1/2/3/4+), refreshes
       // beyond its share, the screen's Hz and the game pace (on/off)
-      (wgpuPresentVsync ? ` refresh:${wgpuRefreshHistogram.counts.join("/")}/rep${wgpuRefreshHistogram.repeats}/hz${Math.round(1000 / (wgpuVsyncRefreshMs() || 1000 / 60))}/${wgpuPresentGamePace ? "pace" : "nopace"}` : "") +
+      (wgpuPresentVsync && wgpuVsyncTracking() ? refreshHelperField() : "") +
       ` wgx:d${webGpuExecStats.drawIdx}/mp${webGpuExecStats.missPipe}` +
       `/mb${webGpuExecStats.missBg}/sk${webGpuExecStats.skipDraw}`
     ),
@@ -5199,8 +5202,8 @@ function maybeCreateCausalTelemetry(videoStats, { force = false } = {}) {
       ...webGpuCausalStats,
       presentVsync: wgpuPresentVsync ? {
         ...wgpuPresentVsyncStats, ...wgpuVsync.stats,
-        refreshMs: wgpuVsyncRefreshMs(),
-        refreshes: { counts: [...wgpuRefreshHistogram.counts], repeats: wgpuRefreshHistogram.repeats, short: wgpuRefreshHistogram.short },
+        refreshMs: wgpuVsyncTracking() ? wgpuVsyncRefreshMs() : null,
+        refreshes: wgpuVsyncTracking() ? wgpuRefreshHistogram.snapshot(performance.now()) : null,
         gamePace: wgpuPresentGamePace ? { ...wgpuGamePacer.stats, periodMs: wgpuGamePacer.period } : null
       } : null,
       visualCadence: wgpuVisualCadenceSnapshot(),
@@ -13047,8 +13050,18 @@ function wgpuVsyncRefreshMs() {
 // the refresh histogram (frames on screen for 1, 2, 3, 4+ refreshes, shown in
 // the HUD) reads the same with the switch on or off.
 let wgpuPresentGamePace = false;
+// The frames' arrival period, the screen's refresh and the refresh histogram
+// are kept only with ?presentpace=game|observe or the harness: by default the
+// presenter does none of this work.
+let wgpuPresentPaceStats = false;
+const wgpuVsyncTracking = () => wgpuPresentPaceStats || harnessEnabled;
 const wgpuGamePacer = createGamePacer();
 const wgpuRefreshHistogram = createRefreshHistogram();
+// The HUD's refresh field: the last 10 s of the histogram.
+function refreshHelperField() {
+  const h = wgpuRefreshHistogram.snapshot(performance.now());
+  return ` refresh:${h.counts.join("/")}/rep${h.repeats}/hz${Math.round(1000 / (wgpuVsyncRefreshMs() || 1000 / 60))}/${wgpuPresentGamePace ? "pace" : "nopace"}`;
+}
 // A frame went up since the presenter's last BeginFrame (shown at a
 // BeginFrame, by the late path or the fallback timer).
 let wgpuVsyncShownSinceTick = false;
@@ -13142,7 +13155,7 @@ function queueWgpuVsyncFrame(coreFrame, shownVi, stream) {
   wgpuVsyncCountDrops(before);
   if (!frame) return false;
   if (stream && streamCapture.active) streamWgpuVsyncFrame(frame.tex, coreFrame);
-  wgpuGamePacer.stamp(at);
+  if (wgpuVsyncTracking()) wgpuGamePacer.stamp(at);
   wgpuVsyncIdleTicks = 0;
   if (!wgpuVsyncLoop) {
     wgpuVsyncLoop = true;
@@ -13160,15 +13173,18 @@ function queueWgpuVsyncFrame(coreFrame, shownVi, stream) {
       wgpuVsyncTick += 1;
       wgpuVsyncFrameTime = performance.timeOrigin + frameTime;
       let shown = false;
-      const refreshMs = wgpuVsyncRefreshMs();
+      const tracking = wgpuVsyncTracking();
+      const refreshMs = tracking ? wgpuVsyncRefreshMs() : null;
       try {
         shown = presentWgpuVsyncFrame({ newest: afterGap, t: frameTime, refreshMs });
       } finally {
         wgpuVsyncFrameTime = null;
       }
       // The game frame now on screen and how many refreshes it covers.
-      const gameMs = wgpuGamePacer.period;
-      wgpuRefreshHistogram.tick(wgpuVsyncShownSinceTick ? (refreshMs && gameMs ? gameMs / refreshMs : 1) : null);
+      if (tracking) {
+        const gameMs = wgpuGamePacer.period;
+        wgpuRefreshHistogram.tick(wgpuVsyncShownSinceTick ? (refreshMs && gameMs ? gameMs / refreshMs : 1) : null, now);
+      }
       wgpuVsyncShownSinceTick = false;
       wgpuVsyncIdleTicks = shown ? 0 : wgpuVsyncIdleTicks + 1;
       if (wgpuVsyncIdleTicks >= WGPU_VSYNC_IDLE_TICKS && !wgpuVsync.waiting) {

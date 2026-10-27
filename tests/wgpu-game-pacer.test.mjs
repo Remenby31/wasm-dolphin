@@ -119,17 +119,53 @@ test("reset(): the display clock alone after a frame shown out of order; with ar
   assert.equal(p.period, null);
 });
 
-test("refresh histogram: refreshes per game frame, repeats beyond its share, short stays; the HUD cell", () => {
+test("refresh histogram: refreshes per game frame over the last 10 s, repeats beyond its share, short stays; the HUD cell", () => {
   const h = createRefreshHistogram();
+  const R = 1000 / 120;
+  let t = 0;
   // 120 Hz, 60 fps: stays 2, 2, 3, 1, 2 then the next frame closes the last
   for (const stay of [2, 2, 3, 1, 2]) {
-    h.tick(2);
-    for (let i = 1; i < stay; i++) h.tick(null);
+    h.tick(2, (t += R));
+    for (let i = 1; i < stay; i++) h.tick(null, (t += R));
   }
-  h.tick(2);
-  assert.deepEqual(h.counts, [1, 3, 1, 0]);
-  assert.equal(h.repeats, 1);
-  assert.equal(h.short, 1);
-  assert.equal(formatRefreshHistogram(`a refresh:${h.counts.join("/")}/rep${h.repeats}/hz120/pace b`), "20/60/20/0% rep1 120Hz pace");
+  h.tick(2, (t += R));
+  const s = h.snapshot(t);
+  assert.deepEqual(s.counts, [1, 3, 1, 0]);
+  assert.equal(s.repeats, 1);
+  assert.equal(s.short, 1);
+  assert.equal(formatRefreshHistogram(`a refresh:${s.counts.join("/")}/rep${s.repeats}/hz120/pace b`), "20/60/20/0% rep1 120Hz pace");
   assert.equal(formatRefreshHistogram("presentvsync off"), "-");
+  // 10 s later the window holds none of them: not a count since boot
+  assert.deepEqual(h.snapshot(t + 10001).counts, [0, 0, 0, 0]);
+});
+
+// The refreshes each frame is given by shown(), read back through due():
+// period P (stamped), screen period R, frames shown as soon as due.
+function stays({ P, R, frames = 6, waited = () => 0 }) {
+  const p = createGamePacer();
+  for (let n = 0; n <= 20; n++) p.stamp(n * P);
+  const out = [];
+  let t = 1000;
+  p.shown({ at: t - waited(0) }, t, R);
+  for (let i = 1; i < frames; i++) {
+    let k = 1;
+    while (p.due({}, t + k * R, R) !== "due") k += 1;
+    out.push(k);
+    t += k * R;
+    p.shown({ at: t - waited(i) }, t, R);
+  }
+  return out;
+}
+
+test("pacer stays: rounded with the fraction carried (2.4 refreshes a frame: 2, 3, 2, 3, 2), not truncated, not dropped", () => {
+  // PAL 50 fps on 120 Hz. Truncating (Math.floor) gives 2, 2, 3, 2, 3; no
+  // carry gives 2, 2, 2, 2, 2 (the display falls behind the game).
+  assert.deepEqual(stays({ P: 20, R: 1000 / 120 }), [2, 3, 2, 3, 2]);
+});
+
+test("pacer stays: a frame that waited over a period and half a refresh in the queue stays one refresh less", () => {
+  const P = 1000 / 59.94, R = 1000 / 120;
+  assert.deepEqual(stays({ P, R, frames: 4 }), [2, 2, 2], "on time: 2 refreshes each");
+  // the second frame shown had waited P + R: its stay is shortened to 1
+  assert.deepEqual(stays({ P, R, frames: 4, waited: (i) => (i === 1 ? P + R : 0) }), [2, 1, 2]);
 });

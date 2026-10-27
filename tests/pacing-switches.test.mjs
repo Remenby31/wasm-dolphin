@@ -18,7 +18,7 @@ const SWITCHES = [
 test("pacing switches: URL parsing, shipped defaults, each switch only its own", async () => {
   const { requestedPacing } = await import("../src/core-host.js");
   // Rush off by default (upstream's default): ?rush=1 turns it back on.
-  assert.deepEqual(requestedPacing(""), { rushPresentation: false, syncOnSkipIdle: false, dupXfbRearmsThrottle: false, smoothEarly: true, sleepMarginUs: 0, sleepStepUs: 0, sleepK: 750, sleepSpinUs: 150, presentVsync: true, presentGamePace: false });
+  assert.deepEqual(requestedPacing(""), { rushPresentation: false, syncOnSkipIdle: false, dupXfbRearmsThrottle: false, smoothEarly: true, sleepMarginUs: 0, sleepStepUs: 0, sleepK: 750, sleepSpinUs: 150, presentVsync: true, presentGamePace: false, presentPaceStats: false });
   for (const s of SWITCHES) {
     const p = requestedPacing(`?${s.param}`);
     assert.equal(p[s.option], s.on, s.param);
@@ -142,6 +142,10 @@ test("presentpace=game: URL → host → adapter → worker → the presenter, o
   assert.equal(requestedPacing("?presentpace=game").presentGamePace, true);
   assert.equal(requestedPacing("?presentpace=GAME").presentGamePace, true);
   assert.equal(requestedPacing("?presentpace=1").presentGamePace, false, "only the word game");
+  // observe: the histogram and the period kept, no pacing; game: both
+  assert.deepEqual([requestedPacing("?presentpace=observe").presentGamePace, requestedPacing("?presentpace=observe").presentPaceStats], [false, true]);
+  assert.equal(requestedPacing("?presentpace=game").presentPaceStats, true);
+  assert.equal(requestedPacing("").presentPaceStats, false);
   assert.equal(requestedPacing("?presentpace=game").presentVsync, true, "only its own switch");
   const { UpstreamWorkerAdapter } = await import("../src/upstream-worker-adapter.js");
   assert.equal(new UpstreamWorkerAdapter({}).presentGamePace, false);
@@ -166,14 +170,23 @@ test("presentpace=game: URL → host → adapter → worker → the presenter, o
   assert.match(host, /\n {12}presentGamePace: this\.pacing\.presentGamePace,\n/);
   assert.match(worker, /\n {8}presentGamePace: payload\.presentGamePace,\n/);
   assert.match(worker, /\n  presentGamePace = false,\n/);
-  assert.match(worker, /\n  wgpuPresentGamePace = presentGamePace === true;\n/);
+  assert.match(worker, /\n  wgpuPresentGamePace = presentGamePace === true;\n  wgpuPresentPaceStats = presentPaceStats === true \|\| wgpuPresentGamePace;\n/);
+  assert.match(worker, /\n {8}presentPaceStats: payload\.presentPaceStats,\n/);
+  assert.match(host, /\n {12}presentPaceStats: this\.pacing\.presentPaceStats,\n/);
   // every queued frame stamped (the HUD reads the same with the switch off);
   // the pace only at a BeginFrame, with the switch on
-  assert.match(worker, /\n  wgpuGamePacer\.stamp\(at\);\n/);
+  // by default no extra work: stamping, the refresh period and the histogram
+  // only with ?presentpace=game|observe or the harness
+  assert.match(worker, /const wgpuVsyncTracking = \(\) => wgpuPresentPaceStats \|\| harnessEnabled;/);
+  assert.match(worker, /\n  if \(wgpuVsyncTracking\(\)\) wgpuGamePacer\.stamp\(at\);\n/);
+  assert.match(worker, /const refreshMs = tracking \? wgpuVsyncRefreshMs\(\) : null;/);
+  assert.match(worker, /if \(tracking\) \{\n\s+const gameMs = wgpuGamePacer\.period;\n\s+wgpuRefreshHistogram\.tick\(/);
+  assert.match(worker, /\(wgpuPresentVsync && wgpuVsyncTracking\(\) \? refreshHelperField\(\) : ""\)/);
+  assert.equal((worker.match(/wgpuGamePacer\.stamp\(|wgpuRefreshHistogram\.tick\(/g) ?? []).length, 2, "one stamp, one histogram tick, both gated");
   assert.match(worker, /const pace = wgpuPresentGamePace && t !== null && !newest \? \(frame\) => wgpuGamePacer\.due\(frame, t, refreshMs\) : null;/);
   assert.match(worker, /wgpuVsync\.takeForDisplay\(wgpuVsyncTick, pace\)/);
   assert.match(worker, /if \(pace\) wgpuGamePacer\.shown\(f, t, refreshMs\);/);
-  assert.match(worker, / refresh:\$\{wgpuRefreshHistogram\.counts\.join\("\/"\)\}/, "the HUD's refresh field");
+  assert.match(worker, / refresh:\$\{h\.counts\.join\("\/"\)\}/, "the HUD's refresh field (the last 10 s)");
 });
 
 test("presentvsync: the backbuffer pass renders into a pooled texture, shown at the worker's rAF, the drain never held", async () => {

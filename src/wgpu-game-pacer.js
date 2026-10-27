@@ -137,40 +137,46 @@ export function createGamePacer() {
   };
 }
 
-// Refreshes each game frame stayed on screen, for the HUD: at every
-// BeginFrame tick(expected) when a new frame went up (`expected`: the
-// refreshes its period covers, 1 at 60 fps on 60 Hz, 2 at 60 fps on 120 Hz),
-// tick(null) when the picture stayed. Buckets 1, 2, 3 and 4+; a frame's
-// count closes when the next one goes up. `repeats`: refreshes a frame stayed
-// beyond its expected count; `short`: frames that stayed less.
-export function createRefreshHistogram() {
-  const counts = [0, 0, 0, 0];
+// Refreshes each game frame stayed on screen, for the HUD, over the last
+// `windowMs` (10 s): at every BeginFrame tick(expected, now) when a new frame
+// went up (`expected`: the refreshes its period covers, 1 at 60 fps on 60 Hz,
+// 2 at 60 fps on 120 Hz), tick(null, now) when the picture stayed. A frame's
+// count closes when the next one goes up. snapshot(now): buckets 1, 2, 3 and
+// 4+, `repeats` (refreshes a frame stayed beyond its expected count) and
+// `short` (frames that stayed less), over the window.
+export function createRefreshHistogram({ windowMs = 10000 } = {}) {
+  // closed frames: [time, refreshes, expected], oldest first
+  const closed = [];
   let current = 0;
   let currentExpected = 1;
-  let repeats = 0;
-  let short = 0;
+  const prune = (now) => {
+    while (closed.length && closed[0][0] < now - windowMs) closed.shift();
+  };
   return {
-    counts,
-    get repeats() { return repeats; },
-    get short() { return short; },
-    tick(expected = null) {
+    tick(expected = null, now = 0) {
       if (expected !== null) {
-        if (current > 0) {
-          counts[Math.min(current, 4) - 1] += 1;
-          if (current > currentExpected) repeats += current - currentExpected;
-          else if (current < currentExpected) short += 1;
-        }
+        if (current > 0) closed.push([now, current, currentExpected]);
+        prune(now);
         current = 1;
         currentExpected = Math.max(1, Math.round(expected));
       } else if (current > 0) {
         current += 1;
       }
     },
+    snapshot(now = 0) {
+      prune(now);
+      const counts = [0, 0, 0, 0];
+      let repeats = 0, short = 0;
+      for (const [, n, e] of closed) {
+        counts[Math.min(n, 4) - 1] += 1;
+        if (n > e) repeats += n - e;
+        else if (n < e) short += 1;
+      }
+      return { counts, repeats, short };
+    },
     reset() {
-      counts.fill(0);
+      closed.length = 0;
       current = 0;
-      repeats = 0;
-      short = 0;
     }
   };
 }
