@@ -8,6 +8,7 @@
 
 import assert from "node:assert/strict";
 import { createHash } from "node:crypto";
+import { readFile } from "node:fs/promises";
 import test from "node:test";
 import { fileURLToPath } from "node:url";
 
@@ -1151,6 +1152,264 @@ test("a large module's sleep wait counts from when it became installable; past i
   });
 });
 
+// Patch 0171: for 3 s after a state load, a ready module waits for a sleep
+// window only while windows long enough for it come. After a load the thread
+// runs behind (regions only until the block JIT's warmup is over again), the
+// throttle never sleeps long enough, and each module waited the whole 2 s
+// sleep wait (map v3: 0.7-1.8 s lost after an early load, warm and cold).
+// In the window a slice boundary installs them when no window long enough
+// came in the behind window (150 ms): the small ones up to the slice target,
+// a large one alone, one per behind window, within 6 ms. Outside the window
+// nothing changes (#277 forced at any time: a slow mode on the heavy scene).
+const behindSkip = largeSkip || (typeof core?.module._DolphinWeb_AotSetLoadWindowForTest !== "function" && "core without installs after a state load (0171)");
+// [forced installs, worst slice that did one x 100, those over the target,
+// measured overrun of large installs x 100, large modules the 6 ms bound kept
+// waiting, the largest estimate x overrun it refused x 100]
+function forcedCounters() {
+  const p = core.module._malloc(24);
+  try {
+    new Uint32Array(core.module.HEAPU8.buffer, p, 6).fill(0);
+    core.module._DolphinWeb_AotRegionForcedInstalls(p);
+    return Array.from(new Uint32Array(core.module.HEAPU8.buffer, p, 6));
+  } finally {
+    core.module._free(p);
+  }
+}
+// Every module estimated at `ms` or more (its sleep window must be longer);
+// `atMost`: every module at `ms` or less instead. `loaded`: a state load
+// opened the window (DolphinWeb_JitOnStateLoaded, as JitInterface::DoState
+// calls it), else none is open.
+function withModuleCost(plan, ms, fn, { atMost = false, loaded = true } = {}) {
+  const sizes = regionModules(plan).map((bytes) => bytes.length);
+  const saved = core.module._DolphinWeb_AotSetInstallCostForTest(ms / (atMost ? Math.max(...sizes) : Math.min(...sizes)));
+  core.module._DolphinWeb_AotSetSleepWaitForTest(2000); // the production wait
+  core.module._DolphinWeb_AotSetBehindWindowForTest(40); // 150 ms in production
+  core.module._DolphinWeb_AotSetLargeBehindWaitForTest(100); // 500 ms in production
+  // measured: large installs cost what they are estimated at
+  const overrun = core.module._DolphinWeb_AotSetLargeOverrunForTest(1);
+  if (loaded) {
+    core.module._DolphinWeb_AotSetLoadWindowForTest(60000); // 3 s in production
+    core.module._DolphinWeb_JitOnStateLoaded(); // pending: the next slice opens it
+  }
+  try {
+    return fn(sizes.length);
+  } finally {
+    core.module._DolphinWeb_AotSetInstallCostForTest(saved);
+    core.module._DolphinWeb_AotSetLargeOverrunForTest(overrun);
+    core.module._DolphinWeb_AotSetInstallDelayForTest(0);
+    core.module._DolphinWeb_AotSetForcedPeriodForTest(1000 / 60);
+    core.module._DolphinWeb_AotSetBehindWindowForTest(150);
+    core.module._DolphinWeb_AotSetLargeBehindWaitForTest(500);
+    core.module._DolphinWeb_AotSetLoadWindowForTest(0);
+    core.module._DolphinWeb_JitOnStateLoaded();
+    core.serviceRegions(); // a window of 0 from here: closed
+    core.module._DolphinWeb_AotSetLoadWindowForTest(3000);
+  }
+}
+function readyAll(requests, plan) {
+  const entries = queueAll(plan);
+  core.serviceRegions();
+  for (const r of requests()) Atomics.store(core.module.HEAPU8, r.readyPtr + r.readySlot, 1);
+  core.serviceRegions(); // installable from now
+  return entries;
+}
+
+test("after a state load, behind: a large ready module installs at a slice only when the throttle stops sleeping or after the large wait, one per behind window", { skip: behindSkip }, () => {
+  withOffThreadCompile((requests) => {
+    const plan = setup();
+    core.setRegionsEnabled(true);
+    withModuleCost(plan, 3, (modules) => {
+      const before = core.regionCount();
+      const entries = readyAll(requests, plan);
+      spin(50);
+      core.module._DolphinWeb_AotRegionSleepWindowForTest(2); // too short for it, but a sleep
+      for (let slice = 0; slice < 20; slice++) core.serviceRegions();
+      assert.equal(core.regionCount(), before, "the throttle still sleeps: a large one waits on");
+      spin(60); // past the large wait (100 ms here), still sleeping short
+      core.module._DolphinWeb_AotRegionSleepWindowForTest(2);
+      for (let slice = 0; slice < 20; slice++) core.serviceRegions();
+      const [forced, maxSlice, large] = forcedCounters();
+      assert.equal(forced, 1, "one module, not every ready one");
+      assert.equal(large, 1);
+      assert.ok(maxSlice > 0, "its slice is reported");
+      assert.ok(core.regionCount() > before);
+      if (modules > 1) assert.ok(core.regionCount() < before + entries, "the others wait another window");
+      for (let k = 0; k < modules && core.regionCount() < before + entries; k++) {
+        spin(50); // no sleep at all: behind
+        for (let slice = 0; slice < 20; slice++) core.serviceRegions();
+      }
+      assert.equal(core.regionCount(), before + entries, "all in well under the 2 s wait");
+      assert.equal(sleepCounters()[3], 0, "none waited the sleep wait out");
+      const reference = runCall(PROGRAM.labels.main, { regions: false });
+      assert.deepEqual(runCall(PROGRAM.labels.main, { regions: true }).state, reference.state);
+    });
+  });
+});
+
+test("after a state load, behind: a large module whose estimate times the overrun passes 6 ms is never forced", { skip: behindSkip }, () => {
+  withOffThreadCompile((requests) => {
+    const plan = setup();
+    core.setRegionsEnabled(true);
+    withModuleCost(plan, 5, () => { // 5 ms x 1.5 > 6 ms
+      core.module._DolphinWeb_AotSetLargeOverrunForTest(1.5);
+      const before = core.regionCount();
+      readyAll(requests, plan);
+      spin(150); // behind, and past the large wait
+      for (let slice = 0; slice < 20; slice++) core.serviceRegions();
+      assert.equal(core.regionCount(), before, "it waits for a sleep or the sleep wait");
+      const [forced, , , , refused, refusedMax] = forcedCounters();
+      assert.equal(forced, 0);
+      assert.ok(refused >= 1, "counted once per module the bound kept waiting");
+      assert.ok(refusedMax > 600, "the refused estimate x overrun, over 6 ms");
+    });
+  });
+});
+
+test("after a state load: small ready modules wait while long sleeps come, then install at the next slices up to the target", { skip: behindSkip }, () => {
+  withOffThreadCompile((requests) => {
+    const plan = setup();
+    core.setRegionsEnabled(true);
+    withModuleCost(plan, 0.4, (modules) => {
+      const before = core.regionCount();
+      // a long sleep just before they are ready: one is coming
+      core.module._DolphinWeb_AotRegionSleepWindowForTest(16);
+      const entries = readyAll(requests, plan);
+      for (let slice = 0; slice < 5; slice++) core.serviceRegions();
+      assert.equal(core.regionCount(), before, "long sleeps come: they wait for one");
+      spin(50); // none for a behind window: the thread is behind
+      core.serviceRegions();
+      assert.ok(core.regionCount() > before);
+      for (let slice = 0; slice < 20 && core.regionCount() < before + entries; slice++) core.serviceRegions();
+      assert.equal(core.regionCount(), before + entries, "all of them, without a cooldown");
+      const [forced, , large] = forcedCounters();
+      assert.equal(forced, modules);
+      assert.equal(large, 0);
+    }, { atMost: true });
+  });
+});
+
+test("no state load (a plain cache clear included): nothing changes, ready modules wait for a sleep window", { skip: behindSkip }, () => {
+  withOffThreadCompile((requests) => {
+    const plan = setup();
+    core.setRegionsEnabled(true);
+    withModuleCost(plan, 0.4, () => {
+      const before = core.regionCount();
+      clearCache(); // ClearOffThreadAndRegionState without a state load
+      readyAll(requests, plan);
+      spin(150); // no sleep at all, past every behind and large wait
+      for (let slice = 0; slice < 20; slice++) core.serviceRegions();
+      assert.equal(core.regionCount(), before, "as on main: the 2 s sleep wait");
+      assert.equal(forcedCounters()[0], 0);
+      core.module._DolphinWeb_AotRegionSleepWindowForTest(50);
+      assert.ok(core.regionCount() > before, "a sleep window installs them");
+    }, { atMost: true, loaded: false });
+  });
+});
+
+test("after a state load, not behind: a sleep window long enough seen within the behind window keeps the wait", { skip: behindSkip }, () => {
+  withOffThreadCompile((requests) => {
+    const plan = setup();
+    core.setRegionsEnabled(true);
+    // 20 ms per module: a 16 ms window (the last bucket, 15 ms or more,
+    // counts as long enough for any module) installs none of them.
+    withModuleCost(plan, 20, () => {
+      const before = core.regionCount();
+      readyAll(requests, plan);
+      spin(50);
+      core.module._DolphinWeb_AotRegionSleepWindowForTest(16);
+      assert.equal(core.regionCount(), before, "too large for that window");
+      for (let slice = 0; slice < 20; slice++) core.serviceRegions();
+      assert.equal(core.regionCount(), before, "long sleeps still come: it waits for one");
+      assert.equal(forcedCounters()[0], 0);
+    });
+  });
+});
+
+// A large install 9 ms slower than its 3 ms estimate: x 3 at least, at once.
+// Each test sets the cost after its own setup(): installs teach the core a
+// cost per byte (my delay is not in it), so a second batch would no longer
+// count as large.
+for (const [delay, check, what] of [
+  [9, (ratio) => ratio >= 3 && ratio <= 4, "up at once to the measured ratio"],
+  [60, (ratio) => ratio === 4, "bounded at 4"]
+]) {
+  test(`after a state load: the overrun is measured on installs that happened: ${what}`, { skip: behindSkip }, () => {
+    withOffThreadCompile((requests) => {
+      const plan = setup();
+      core.setRegionsEnabled(true);
+      withModuleCost(plan, 3, () => {
+        readyAll(requests, plan);
+        core.module._DolphinWeb_AotSetInstallDelayForTest(delay);
+        core.module._DolphinWeb_AotRegionSleepWindowForTest(500);
+        const ratio = forcedCounters()[3] / 100;
+        assert.ok(check(ratio), `${what} (${ratio})`);
+      });
+    });
+  });
+}
+
+test("after a state load: forced installs spend at most 4 ms per period, sliding, failed attempts included", { skip: behindSkip }, () => {
+  withOffThreadCompile((requests) => {
+    const plan = setup();
+    core.setRegionsEnabled(true);
+    withModuleCost(plan, 0.4, (modules) => {
+      const before = core.regionCount();
+      core.module._DolphinWeb_AotSetForcedPeriodForTest(60000); // nothing drains meanwhile
+      core.module._DolphinWeb_AotSetInstallDelayForTest(2.5); // each install takes 2.5 ms
+      readyAll(requests, plan); // its second slice may force already
+      for (let slice = 0; slice < 5; slice++) core.serviceRegions();
+      const first = forcedCounters()[0];
+      assert.ok(first >= 1 && first <= 2, `2.5 + 2.5 ms leave no room for another under 4 ms (${first})`);
+      if (modules > first) {
+        core.module._DolphinWeb_AotSetForcedPeriodForTest(10); // 4 ms drain per 10 ms
+        spin(20);
+        for (let slice = 0; slice < 5; slice++) core.serviceRegions();
+        assert.ok(forcedCounters()[0] > first, "the debt drained: more go");
+      }
+      assert.ok(core.regionCount() > before);
+    }, { atMost: true });
+  });
+});
+
+test("after a state load: the window closes", { skip: behindSkip }, () => {
+  withOffThreadCompile((requests) => {
+    const plan = setup();
+    core.setRegionsEnabled(true);
+    withModuleCost(plan, 0.4, () => {
+      core.module._DolphinWeb_AotSetLoadWindowForTest(30);
+      core.module._DolphinWeb_JitOnStateLoaded();
+      core.serviceRegions(); // this slice opens the 30 ms window
+      spin(60);
+      const before = core.regionCount();
+      readyAll(requests, plan);
+      for (let slice = 0; slice < 20; slice++) core.serviceRegions();
+      assert.equal(core.regionCount(), before, "closed: the sleep wait again");
+      assert.equal(forcedCounters()[0], 0);
+    }, { atMost: true });
+  });
+});
+
+test("0171: only a state load opens the window (JitInterface::DoState in read mode, not a save)", async () => {
+  const patch = await readFile(new URL("../patches/dolphin-wasm/snapshot/0072-jit-deterministic-engage-exception-oracle-inline-fma.patch", import.meta.url), "utf8");
+  assert.match(patch, / {3}if \(m_jit && p\.IsReadMode\(\)\)\n\+ {2}\{\n {5}m_jit->ClearCache\(\);\n\+#ifdef __EMSCRIPTEN__\n\+[^\n]*\n\+ {4}DolphinWeb_JitOnStateLoaded\(\);/);
+});
+
+test("0171 source: the window opens at a state load for 3 s, normal regime unchanged outside it", async () => {
+  const patch = await readFile(new URL("../patches/dolphin-wasm/snapshot/0171-region-installs-after-state-load.patch", import.meta.url), "utf8");
+  assert.match(patch, /\+std::chrono::milliseconds s_region_load_window\{3000\};/);
+  assert.match(patch, /\+ {2}OpenRegionLoadWindow\(\);  \/\/ patch 0171\n {3}if \(s_wasm_armed_policy/, "opened by the state-load hook, armed JIT or not");
+  assert.match(patch, /\+constexpr double REGION_FORCED_RATE_MS = 4\.0;\n\+double s_region_forced_period_ms = 1000\.0 \/ 60;/);
+  assert.match(patch, /\+ {4}if \(forced_one\)\n\+ {6}s_region_forced_debt_ms \+= took;\n\+ {4}if \(s_region_stats\.regions_installed > installed_now\)/, "failed forced attempts count in the debt");
+  assert.match(patch, /\+constexpr double REGION_LARGE_OVERRUN_START = 3\.0;\n\+constexpr double REGION_LARGE_OVERRUN_MAX = 4\.0;/);
+  assert.match(patch, /\+ {4}if \(s_region_stats\.regions_installed > installed_now\)/, "measured and counted on installs that happened");
+  assert.match(patch, /\+ {6}if \(!in_load_window\)\n\+ {8}return true;/, "outside the window: the sleep wait as before");
+  assert.match(patch, /\+std::chrono::milliseconds s_region_behind_window\{150\};/);
+  assert.match(patch, /\+ {6}const bool large = cost > REGION_SLICE_TARGET_MS;/);
+  assert.match(patch, /\+constexpr double REGION_FORCED_MAX_SLICE_MS = 6\.0;/);
+  assert.match(patch, /\+ {6}if \(large && cost \* s_region_large_overrun > REGION_FORCED_MAX_SLICE_MS\)/);
+  assert.match(patch, /\+\/\/ the judge \(2026-10-26\)/);
+});
+
 // Continuation fragments (2026-10-23): a function of more blocks than one
 // fragment holds (the 64-block cap) left the rest to the dispatcher and the
 // block JIT at every pass (2.2 M exits per 4 s in a CPU-bound intro scene).
@@ -1172,7 +1431,7 @@ for (const maxContinuations of [0, 7]) {
     core.invalidate(LONG, bytes.length);
     core.module._DolphinWeb_AotForgetRegionsForTest?.();
     const ranges = [[LONG, LONG + bytes.length]];
-    const translator = coreRegionTranslator(core.module, { mask: PRODUCTION_DISABLE_MASK, helperNames: coreAssembleOptions(core.module)?.helperNames, maxContinuations, yieldNow: async () => {} });
+    const translator = coreRegionTranslator(core.module, { mask: PRODUCTION_DISABLE_MASK, helperNames: coreAssembleOptions(core.module)?.helperNames, maxContinuations, now: () => 0, yieldNow: async () => {} });
     const [r] = await translator.translate([{ entry: LONG, ranges, hash: null }]);
     assert.ok(r.fragment, r.reason);
     assert.equal(r.fragment.entries.length, 64, "the first fragment is capped");
@@ -1481,7 +1740,8 @@ test("continuation budget: resume goes on from where the budget stopped", { skip
 // large members left (largeLeft), so the first ones no longer take it all.
 test("continuation budget: a large member gets an even share of what the module has left", { skip: contSkip }, async () => {
   const program = longFunction(100);
-  const t = coreRegionTranslator(core.module, { maxBlocks: 16, yieldNow: async () => {} });
+  // a frozen clock: no 8 ms slice runs out under load (budget, not the case tested)
+  const t = coreRegionTranslator(core.module, { maxBlocks: 16, now: () => 0, yieldNow: async () => {} });
   const f = { entry: LONG, ranges: loadWords(LONG, program.words), hash: null, flags: 0, extraEntries: [] };
   const [alone] = await t.translate([{ ...f, continuationBytesUsed: 0, largeLeft: 1 }]);
   const [shared] = await t.translate([{ ...f, continuationBytesUsed: t.unitContinuationBytes - 8000, largeLeft: 4 }]);

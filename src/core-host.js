@@ -1,7 +1,7 @@
 import { aotCompilerRequested, jitOffThreadRequested } from "./aot-compiler-worker.js";
 import { aotSamplePeriodRequested } from "./aot-hot-sampler.js";
 import { wasmEngine } from "./wasm-engine.js";
-import { anisotropyToCore, normalizeInternalResolution, requestedEnhancements } from "./wgpu-enhancements.js";
+import { anisotropyToCore, clampInternalResolution, internalResolutionCeiling, requestedEnhancements } from "./wgpu-enhancements.js";
 import { parseCustomRtc } from "./custom-rtc.js";
 import { DolphinCoreAdapter, dolphinBundleAvailable } from "./dolphin-adapter.js";
 import { buttonMaskFromPressed, isPadPort } from "./input.js";
@@ -73,11 +73,15 @@ const SAFE_JIT_WARMUP_FRAMES = 5000;
 const DEFAULT_JIT_WARMUP_FRAMES = 60;
 
 export class EmulatorHost {
-  constructor({ canvas, onFrame = () => {}, onStatus = () => {}, onMode = () => {} }) {
+  constructor({ canvas, onFrame = () => {}, onStatus = () => {}, onMode = () => {}, onGpuDeviceLost = () => {} }) {
     this.canvas = canvas;
     this.onFrame = onFrame;
     this.onStatus = onStatus;
     this.onMode = onMode;
+    // { internalResolution, fallback, reason, detail }: the WebGPU device was
+    // lost (the game stops). fallback 1: it was above 1x, the next boot of
+    // this host and every setEnhancements stay at 1x.
+    this.onGpuDeviceLost = onGpuDeviceLost;
 
     this.demo = null;
     this.coreKind = requestedCoreKind();
@@ -116,6 +120,11 @@ export class EmulatorHost {
     // ?ir=1-4 and ?aniso=1|2|4|8|16 (patch 0168, WebGPU path); setEnhancements
     // changes them while a game runs.
     this.enhancements = requestedEnhancements(window.location.search);
+    // 1 once a device was lost above 1x (internalResolutionCeiling()).
+    this.scaleLostCeiling = 4;
+    this.scaleCeilingPromise = null;
+    // The worker's own adapter's ceiling, once its presenter took it.
+    this.workerScaleCeiling = null;
     // CPU reads of the EFB (peeks), off by default as in Dolphin (EFBAccessEnable).
     this.efbAccess = new URLSearchParams(window.location.search).get("efbaccess") === "1";
     // Harness: FIFO logs (.dff) may boot. Off for the app (FifoPlayer trusts the log).
@@ -550,7 +559,9 @@ export class EmulatorHost {
             inputLatencyDiagnostics: this.inputLatencyDiagnostics,
             inputReadbackDiagnostics: this.inputReadbackDiagnostics,
             inputPhotonDiagnostics: this.inputPhotonMarker.enabled,
-            inputPhotonMarker: this.inputPhotonMarker
+            inputPhotonMarker: this.inputPhotonMarker,
+            onGpuDeviceLost: (event) => this.handleGpuDeviceLost(event),
+            onScaleCeiling: (ceiling) => { this.workerScaleCeiling = ceiling; }
           })
         : new DolphinCoreAdapter({ canvas, onStatus });
     this.mode = "demo";
@@ -934,13 +945,47 @@ export class EmulatorHost {
   // the next boot.
   async setEnhancements({ internalResolution, anisotropy } = {}) {
     if (internalResolution !== undefined) {
-      this.enhancements.internalResolution = normalizeInternalResolution(internalResolution);
+      const { ceiling } = await this.internalResolutionCeiling();
+      this.enhancements.internalResolution = clampInternalResolution(internalResolution, ceiling);
     }
     if (anisotropy !== undefined) this.enhancements.maxAnisotropy = anisotropyToCore(anisotropy);
     if (this.mode !== "dolphin" || typeof this.adapter?.setEnhancements !== "function") {
       return { applied: false, reason: "core-not-loaded" };
     }
     return this.adapter.setEnhancements(this.enhancements);
+  }
+
+  // The highest internal resolution this machine is trusted with:
+  // { ceiling, reason } (src/wgpu-enhancements.js): the worker's adapter's
+  // once its presenter took it (wgpu-scale-ceiling), before that the same
+  // rule on an adapter the page asks with the worker's power preference;
+  // 1 after a device loss above 1x. setEnhancements holds every scale to
+  // it, the worker too. Ask it before offering a scale, again after the boot.
+  async internalResolutionCeiling() {
+    this.scaleCeilingPromise ??= (async () => {
+      const gpu = globalThis.navigator?.gpu;
+      const adapter = await gpu?.requestAdapter?.({ powerPreference: this.wgpuPowerPreference ?? "high-performance" }).catch(() => null);
+      let info = adapter?.info ?? null;
+      if (adapter && !info && typeof adapter.requestAdapterInfo === "function") {
+        info = await adapter.requestAdapterInfo().catch(() => null);
+      }
+      return internalResolutionCeiling(adapter ? { info, limits: adapter.limits, isFallbackAdapter: adapter.isFallbackAdapter } : null,
+        { deviceMemory: globalThis.navigator?.deviceMemory });
+    })();
+    const adapter = this.workerScaleCeiling ?? await this.scaleCeilingPromise;
+    return this.scaleLostCeiling < adapter.ceiling
+      ? { ceiling: this.scaleLostCeiling, reason: "device-lost" }
+      : adapter;
+  }
+
+  handleGpuDeviceLost({ internalResolution = 1, reason = "unknown", detail = "" } = {}) {
+    const fallback = internalResolution > 1 ? 1 : null;
+    if (fallback) {
+      this.scaleLostCeiling = fallback;
+      this.enhancements.internalResolution = fallback;
+    }
+    this.onStatus(`WebGPU device lost at ${internalResolution}x (${reason})${fallback ? "; internal resolution back to 1x" : ""}`);
+    this.onGpuDeviceLost({ internalResolution, fallback, reason, detail });
   }
 
   setAudioMuted(muted) {
@@ -1682,8 +1727,11 @@ export function requestedPacing(search = window.location.search) {
     sleepStepUs: /^\d{1,4}$/.test(params.get("sleepstep") ?? "") && Number(params.get("sleepstep")) <= 4000 ? Number(params.get("sleepstep")) : 0,
     sleepK: /^\d{1,3}$/.test(params.get("sleepk") ?? "") && Number(params.get("sleepk")) <= 950 ? Number(params.get("sleepk")) : 750,
     sleepSpinUs: /^\d{2,4}$/.test(params.get("sleepspin") ?? "") && Number(params.get("sleepspin")) >= 50 && Number(params.get("sleepspin")) <= 2000 ? Number(params.get("sleepspin")) : 150,
-    // ?presentvsync=1: at most one wgpu present per BeginFrame (the worker's rAF).
-    presentVsync: params.get("presentvsync") === "1"
+    // At most one wgpu present per BeginFrame (the worker's rAF), on by
+    // default since 2026-10-26: ~58 distinct pictures shown a second instead
+    // of ~56 and half the on-screen repeats on the race (12 pairs, --display).
+    // ?presentvsync=0 (or false, off, no) presents as the ring drains.
+    presentVsync: !["0", "false", "off", "no"].includes((params.get("presentvsync") ?? "").toLowerCase())
   };
 }
 

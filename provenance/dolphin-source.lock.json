@@ -25,7 +25,7 @@
       "commit": "01e0577914a75a2569c846778c2f93aa8e6feddd"
     }
   },
-  "patchSeriesSha256": "63f56149976d1cddc64df898e602d3b22006a7a19f1165728729a7cfa077d8c7",
+  "patchSeriesSha256": "59c0df4e68ca2443e49fa0a8e524f4db7651dac69a9063efce0b422423cea38e",
   "patches": [
     {
       "order": 1,
@@ -1031,12 +1031,28 @@
       "order": 126,
       "cwd": ".",
       "hashMode": "lf-normalized",
+      "path": "patches/dolphin-wasm/snapshot/0167-jit-compile-time-counter.patch",
+      "size": 2502,
+      "sha256": "c5912cd85b95b574208083e3a926982dffd6dd438e8ffea1f8f635b04460364b"
+    },
+    {
+      "order": 127,
+      "cwd": ".",
+      "hashMode": "lf-normalized",
       "path": "patches/dolphin-wasm/snapshot/0168-webgpu-internal-resolution.patch",
       "size": 5688,
       "sha256": "7f204ab180038457c0577d3b880b0a8b9e54aebd1c33eb93be2bdf0cd178f3f1"
     },
     {
-      "order": 127,
+      "order": 128,
+      "cwd": ".",
+      "hashMode": "lf-normalized",
+      "path": "patches/dolphin-wasm/snapshot/0171-region-installs-after-state-load.patch",
+      "size": 19006,
+      "sha256": "8e02e8f75385d44b75f423962a3105dfc4235ec9fae4de82971ec0c689a3559c"
+    },
+    {
+      "order": 129,
       "cwd": "Externals/SFML/SFML",
       "hashMode": "lf-normalized",
       "path": "patches/dolphin-wasm/submodules/0001-sfml-emscripten-config.patch",
@@ -1044,7 +1060,7 @@
       "sha256": "f82197a21fe982ad83f6ee7bbf5a03839b1cebd4d64da3eab11263842bf61d89"
     },
     {
-      "order": 128,
+      "order": 130,
       "cwd": "Externals/xxhash/xxHash",
       "hashMode": "lf-normalized",
       "path": "patches/dolphin-wasm/submodules/0002-xxhash-wasm-simd-scalar.patch",

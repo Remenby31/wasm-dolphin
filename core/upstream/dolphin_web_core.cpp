@@ -19,6 +19,11 @@
 #include <string_view>
 #include <vector>
 
+#ifdef __EMSCRIPTEN__
+#include <malloc.h>
+#include <unistd.h>
+#endif
+
 #include "AudioCommon/AudioCommon.h"
 #include "AudioCommon/SoundStream.h"
 #include "Common/CommonPaths.h"
@@ -1388,6 +1393,26 @@ int DolphinWeb_SetEnhancements(int efb_scale, int anisotropy)
     return 0;
   return ApplyEnhancements(efb_scale, anisotropy);
 }
+
+// Heap use, for diagnostics only (the headroom at 4x, follow-up of 0168):
+// out[0] bytes malloc has handed out, out[1] free bytes inside its arena,
+// out[2] the sbrk top (the arena's end). The heap above the top plus the
+// free bytes is what a savestate or a texture can still take. mallinfo()
+// walks the arena under malloc's lock: call it on demand, never per frame.
+// Returns the words written (3), or 0 when `words` is too small.
+#ifdef __EMSCRIPTEN__
+EMSCRIPTEN_KEEPALIVE
+int DolphinWeb_HeapStats(uint32_t* out, int words)
+{
+  if (!out || words < 3)
+    return 0;
+  const struct mallinfo info = mallinfo();
+  out[0] = static_cast<uint32_t>(info.uordblks);
+  out[1] = static_cast<uint32_t>(info.fordblks);
+  out[2] = static_cast<uint32_t>(reinterpret_cast<uintptr_t>(sbrk(0)));
+  return 3;
+}
+#endif
 
 // Writes every inserted memory card's pending saves to /dolphin-user now,
 // so the page copies what the game has written instead of what Dolphin's

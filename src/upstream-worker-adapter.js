@@ -108,7 +108,7 @@ export class UpstreamWorkerAdapter {
     sleepStepUs = 0,
     sleepK = 750,
     sleepSpinUs = 150,
-    presentVsync = false,
+    presentVsync = true,
     coreLog = false,
     memcardSlotB = false,
     internalResolution = 1,
@@ -139,6 +139,8 @@ export class UpstreamWorkerAdapter {
     wasmEngine = undefined,
     regionCap = null,
     onAotProgress = () => {},
+    onGpuDeviceLost = () => {},
+    onScaleCeiling = () => {},
     collectMetrics = false,
     legacyOneWayAck = false,
     wgpuReplayDiagnostics = false,
@@ -240,7 +242,7 @@ export class UpstreamWorkerAdapter {
     this.sleepStepUs = Number.isInteger(sleepStepUs) && sleepStepUs >= 0 && sleepStepUs <= 4000 ? sleepStepUs : 0;
     this.sleepK = Number.isInteger(sleepK) && sleepK >= 0 && sleepK <= 950 ? sleepK : 750;
     this.sleepSpinUs = Number.isInteger(sleepSpinUs) && sleepSpinUs >= 50 && sleepSpinUs <= 2000 ? sleepSpinUs : 150;
-    this.presentVsync = presentVsync === true;
+    this.presentVsync = presentVsync !== false;
     this.coreLog = Boolean(coreLog);
     this.memcardSlotB = Boolean(memcardSlotB);
     this.internalResolution = Number(internalResolution) || 1;
@@ -274,6 +276,11 @@ export class UpstreamWorkerAdapter {
     this.wasmEngine = wasmEngine;
     this.regionCap = regionCap; // ?regioncap=N|0 (#215), null: by engine
     this.onAotProgress = onAotProgress;
+    // { internalResolution, reason, detail }: the worker's WebGPU device was
+    // lost at that scale (patch 0168 follow-up, core-host falls back to 1x).
+    this.onGpuDeviceLost = onGpuDeviceLost;
+    // { ceiling, reason }: the worker's adapter's internal resolution ceiling.
+    this.onScaleCeiling = onScaleCeiling;
     this.collectMetrics = Boolean(collectMetrics);
     this.legacyOneWayAck = Boolean(legacyOneWayAck);
     this.wgpuReplayDiagnostics = Boolean(wgpuReplayDiagnostics);
@@ -1260,6 +1267,22 @@ export class UpstreamWorkerAdapter {
       this.replaceLostPresenterCanvas().catch((error) => {
         this.onStatus(`Presenter canvas replacement failed: ${error instanceof Error ? error.message : error}`);
       });
+      return;
+    }
+    if (message?.type === "wgpu-scale-ceiling") {
+      this.onScaleCeiling({ ceiling: Number(message.ceiling) || 1, reason: String(message.reason ?? "") });
+      return;
+    }
+    if (message?.type === "wgpu-device-lost") {
+      try {
+        this.onGpuDeviceLost({
+          internalResolution: Number(message.internalResolution) || 1,
+          reason: String(message.reason ?? "unknown"),
+          detail: String(message.detail ?? "")
+        });
+      } catch (error) {
+        this.onStatus(`Device loss handler failed: ${error instanceof Error ? error.message : error}`);
+      }
       return;
     }
     if (message?.type === "direct-pad") {

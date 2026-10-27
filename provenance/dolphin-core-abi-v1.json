@@ -1,19 +1,19 @@
 {
   "schemaVersion": 1,
   "abiVersion": 1,
-  "coreId": "sha256:10d0a043cf809380a20f25d2a24af433f0945ca492ee247abd8184c047488420",
+  "coreId": "sha256:eb6b7b7ef6219941325dc410d6b988c0599275fd44976cb73a78c0ad5d45e7bf",
   "upstreamCommit": "e22551eae1c84a7e4d0b6a5c519ef4ed4ef69df1",
   "artifacts": [
     {
       "path": "cores/dolphin/dolphin-core-upstream.js",
       "hashMode": "lf-normalized",
-      "size": 286099,
-      "sha256": "fcd9e958d03038f201885f549881515b02ae7047b61fa59e2fec5bc32fdd6b19"
+      "size": 287420,
+      "sha256": "9e8b1da6d69c29bc4c1d4f434d53fe5ac8c7b7a98dfbf93d503517fc2413e8fc"
     },
     {
       "path": "cores/dolphin/dolphin-core-upstream.wasm",
-      "size": 13214825,
-      "sha256": "10d0a043cf809380a20f25d2a24af433f0945ca492ee247abd8184c047488420"
+      "size": 13220373,
+      "sha256": "eb6b7b7ef6219941325dc410d6b988c0599275fd44976cb73a78c0ad5d45e7bf"
     }
   ],
   "contractSources": [
@@ -44,8 +44,8 @@
     {
       "path": "core/upstream/dolphin_web_core.cpp",
       "hashMode": "lf-normalized",
-      "size": 63300,
-      "sha256": "34870e7aa3d36da090dc20b3de1796b677af0cab92cab54a3f0d4c783643d075"
+      "size": 64180,
+      "sha256": "247d81b2a92f52acf67facf9a06c4aa9db1e3d37e6093e159fede84aa9ffcd4b"
     },
     {
       "path": "src/app.js",
@@ -86,8 +86,8 @@
     {
       "path": "src/core-host.js",
       "hashMode": "lf-normalized",
-      "size": 83021,
-      "sha256": "c05d67a0f0623709d9e97f6375714f0dfeb5ddf85811a023d83aa960941543d0"
+      "size": 85890,
+      "sha256": "4806004c9d3da4b32cf6379727547f371ae1252fa5757eeda1f9a3783a84c98b"
     },
     {
       "path": "src/diagnostic-log-filter.js",
@@ -140,8 +140,8 @@
     {
       "path": "src/upstream-discio-worker.js",
       "hashMode": "lf-normalized",
-      "size": 770850,
-      "sha256": "dd8df033ba5f71f32a55a1169f4a389ca68a79e026569a0886e0664e56d8f816"
+      "size": 793336,
+      "sha256": "c050d224a79bb42bfe59fee0d972b6508c8d5dbdaebe22a6e5db673218f84832"
     },
     {
       "path": "src/wgpu-renderer-worker-probe.js",
@@ -164,8 +164,8 @@
     {
       "path": "src/upstream-worker-adapter.js",
       "hashMode": "lf-normalized",
-      "size": 57465,
-      "sha256": "76cfeccdbdc9676b242cb3ec14d9a7ea15592519a59f487b295592bb23f707a6"
+      "size": 58460,
+      "sha256": "83dbae68155b445332229104bf1d1e130e148e1ee4a86480ddaab06be5105b5f"
     },
     {
       "path": "src/upstream-worker-protocol.js",
@@ -382,6 +382,7 @@
     "_DolphinWeb_AotPublishStatsForTest",
     "_DolphinWeb_AotQueueRegion",
     "_DolphinWeb_AotRamReady",
+    "_DolphinWeb_AotRegionForcedInstalls",
     "_DolphinWeb_AotRegionHeapBases",
     "_DolphinWeb_AotRegionRechecks",
     "_DolphinWeb_AotRegionSleepInstalls",
@@ -389,7 +390,13 @@
     "_DolphinWeb_AotRegionsSkippedMmu",
     "_DolphinWeb_AotRunRegionForTest",
     "_DolphinWeb_AotServiceRegionsForTest",
+    "_DolphinWeb_AotSetBehindWindowForTest",
+    "_DolphinWeb_AotSetForcedPeriodForTest",
     "_DolphinWeb_AotSetInstallCostForTest",
+    "_DolphinWeb_AotSetInstallDelayForTest",
+    "_DolphinWeb_AotSetLargeBehindWaitForTest",
+    "_DolphinWeb_AotSetLargeOverrunForTest",
+    "_DolphinWeb_AotSetLoadWindowForTest",
     "_DolphinWeb_AotSetReadyWaitForTest",
     "_DolphinWeb_AotSetSleepWaitForTest",
     "_DolphinWeb_AotTestInterpretOne",
@@ -439,6 +446,7 @@
     "_DolphinWeb_HarnessViSinceBoot",
     "_DolphinWeb_HarnessViSinceLoad",
     "_DolphinWeb_HeadroomStats",
+    "_DolphinWeb_HeapStats",
     "_DolphinWeb_JitArmedStepForTest",
     "_DolphinWeb_JitCompileBytesForTest",
     "_DolphinWeb_JitCompileBytesInPlaceForTest",
@@ -469,6 +477,7 @@
     "_DolphinWeb_JitSetRegionsEnabled",
     "_DolphinWeb_JitStateLayout",
     "_DolphinWeb_JitTableFull",
+    "_DolphinWeb_JitTimeStats",
     "_DolphinWeb_JitTransientRejectCount",
     "_DolphinWeb_MemAccessKindForTest",
     "_DolphinWeb_MemAccessStaticAt",
@@ -492,6 +501,7 @@
     "_DolphinWeb_SetFprfForTest",
     "_DolphinWeb_SetFusedMadd",
     "_DolphinWeb_SetGpuSpinBudget",
+    "_DolphinWeb_SetJitTimeStatsEnabled",
     "_DolphinWeb_SetPresentOnArrival",
     "_DolphinWeb_UnverifyRegions",
     "_FlushMemoryCards",
@@ -690,13 +700,16 @@
       "validationAotCacheProbe",
       "validationBeginWgpuRendererProbeMeasurement",
       "validationCaptureAtVi",
+      "validationDropSampler",
       "validationEnableGpuSyncDiag",
       "validationEnableHarness",
       "validationFifoRecord",
       "validationFinalizeWgpuMappedDrain",
       "validationFinalizeWgpuRendererProbe",
       "validationFinalizeWgpuReplay",
+      "validationHeapStats",
       "validationLoseWebGlContext",
+      "validationLoseWebGpuDevice",
       "validationPcSampler",
       "validationReadAotProgress",
       "validationReadAxHleStats",
