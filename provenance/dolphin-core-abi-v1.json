@@ -1,19 +1,19 @@
 {
   "schemaVersion": 1,
   "abiVersion": 1,
-  "coreId": "sha256:eb6b7b7ef6219941325dc410d6b988c0599275fd44976cb73a78c0ad5d45e7bf",
+  "coreId": "sha256:ac8bd5f8e64a9a83d2f1e0ec001136d0de434704d190fe8c0d98821e0bd37c23",
   "upstreamCommit": "e22551eae1c84a7e4d0b6a5c519ef4ed4ef69df1",
   "artifacts": [
     {
       "path": "cores/dolphin/dolphin-core-upstream.js",
       "hashMode": "lf-normalized",
-      "size": 287420,
-      "sha256": "9e8b1da6d69c29bc4c1d4f434d53fe5ac8c7b7a98dfbf93d503517fc2413e8fc"
+      "size": 288553,
+      "sha256": "069440ad8daafe4b98043cb73fc1e121fad1ed72365564a9d2572758e44a9316"
     },
     {
       "path": "cores/dolphin/dolphin-core-upstream.wasm",
-      "size": 13220373,
-      "sha256": "eb6b7b7ef6219941325dc410d6b988c0599275fd44976cb73a78c0ad5d45e7bf"
+      "size": 13222150,
+      "sha256": "ac8bd5f8e64a9a83d2f1e0ec001136d0de434704d190fe8c0d98821e0bd37c23"
     }
   ],
   "contractSources": [
@@ -503,6 +503,11 @@
     "_DolphinWeb_SetGpuSpinBudget",
     "_DolphinWeb_SetJitTimeStatsEnabled",
     "_DolphinWeb_SetPresentOnArrival",
+    "_DolphinWeb_SetThrottleSleepCascade",
+    "_DolphinWeb_SetThrottleSleepMarginUs",
+    "_DolphinWeb_SetThrottleSleepStepUs",
+    "_DolphinWeb_ThrottleSleepCascade",
+    "_DolphinWeb_ThrottleSleepStepUs",
     "_DolphinWeb_UnverifyRegions",
     "_FlushMemoryCards",
     "_FrameBuffer",
