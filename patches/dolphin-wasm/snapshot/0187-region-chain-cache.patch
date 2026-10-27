@@ -39,18 +39,11 @@ diff --git a/Source/Core/Core/PowerPC/CachedInterpreter/CachedInterpreter.cpp b/
    s_region_lookup.fill({});
  }
  constexpr u32 NO_REGION = 0xffffffffu;
-@@ -10995,6 +11017,7 @@
- {
-   for (InstalledRegion& region : s_regions)
-     region.verified = false;
-+  ++s_chain_cache_epoch;  // 0187
- }
- 
- // On the CPU thread at a slice boundary: compile and map queued regions. A
-@@ -11753,6 +11776,26 @@
+@@ -11752,6 +11774,26 @@
+   {
      stats.out_of_time += 1;
      return 0;
-   }
++  }
 +  // 0187: one cache line for the next region. The mode is the CPU's, tested
 +  // on every chain as below; the region's own state (live, verified, mapped
 +  // at pc) is the slot's, valid while the epoch holds.
@@ -70,11 +63,10 @@ diff --git a/Source/Core/Core/PowerPC/CachedInterpreter/CachedInterpreter.cpp b/
 +    }
 +    stats.chained += 1;
 +    return cached->handle;
-+  }
+   }
    const u32 index = RegionFilterHas(ppc_state.pc) ? FindRegionIndex(ppc_state.pc) : NO_REGION;
    if (index == NO_REGION)
-   {
-@@ -11770,6 +11813,8 @@
+@@ -11770,6 +11812,8 @@
      stats.refused += 1;
      return 0;
    }
@@ -83,11 +75,12 @@ diff --git a/Source/Core/Core/PowerPC/CachedInterpreter/CachedInterpreter.cpp b/
    stats.chained += 1;
    return region.handle;
  }
-@@ -11876,6 +11921,7 @@
+@@ -11876,7 +11920,7 @@
        else
        {
          s_regions[index].verified = false;
-+        ++s_chain_cache_epoch;  // 0187
-         s_region_invalidated_kept += 1;
+-        s_region_invalidated_kept += 1;
++              s_region_invalidated_kept += 1;
        }
        break;
+     }
