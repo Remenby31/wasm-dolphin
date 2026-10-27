@@ -46,6 +46,22 @@ mkdir -p "$B/lanes/b"
   # the busiest processes and the CPU each last ran on, before and after,
   # to tell a pair's load from someone else's on its cores (read only).
   echo "[spark-race] busiest before:"; ps -eo pid,psr,pcpu,user,comm --sort=-pcpu | head -8
+  # The lane's cores free of other people's processes (spark-cores.mjs, read
+  # only): over 50 % of a core there, the pair waits and asks again, every
+  # 60 s for 30 min at most, then gives up (exit 4) rather than measure on
+  # shared cores or hold the lane. The last check is kept as <out>.cores.
+  waited=0
+  until node harness/remote/spark-cores.mjs check --cpus "$SPARK_CHROME_CPUS,${SPARK_NODE_CPUS:-$ncpus}" --exclude-tree $$ > "$out.cores"; do
+    echo "[spark-race] the lane's cores are busy: $(cat "$out.cores")"
+    if [ "$waited" -ge 1800 ]; then
+      echo "[spark-race] still busy after 30 min: no pair"
+      echo 4 > "$out.exit"
+      exit 4
+    fi
+    sleep 60
+    waited=$((waited + 60))
+  done
+  echo "[spark-race] the lane's cores are free: $(cat "$out.cores") (waited ${waited} s)"
   taskset -c "${SPARK_NODE_CPUS:-$ncpus}" node harness/probes/race-perf.mjs "$@" --port "$port" --out "$out"
   code=$?
   echo "[spark-race] busiest after:"; ps -eo pid,psr,pcpu,user,comm --sort=-pcpu | head -8

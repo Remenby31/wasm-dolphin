@@ -401,10 +401,10 @@ async function build(host, ref) {
 function fetchResult(host, { date, name, meta, exit }) {
   const local = path.join(MEASURES, date, name);
   mkdirSync(local, { recursive: true });
-  const tar = ssh(host, `tar -c -C ${BENCH}/results/${date} ${name} ${name}.log ${name}.exit ${name}.lane 2>/dev/null; true`).bytes;
+  const tar = ssh(host, `tar -c -C ${BENCH}/results/${date} ${name} ${name}.log ${name}.exit ${name}.lane ${name}.cores 2>/dev/null; true`).bytes;
   execFileSync("tar", ["-x", "-C", path.dirname(local)], { input: tar });
-  // name.log / .exit / .lane land next to the directory: keep them inside.
-  for (const ext of ["log", "exit", "lane"]) {
+  // name.log / .exit / .lane / .cores land next to the directory: keep them inside.
+  for (const ext of ["log", "exit", "lane", "cores"]) {
     const f = path.join(path.dirname(local), `${name}.${ext}`);
     if (existsSync(f)) { writeFileSync(path.join(local, `spark-run.${ext}`), readFileSync(f)); rmSync(f); }
   }
