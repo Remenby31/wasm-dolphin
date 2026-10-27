@@ -1,11 +1,13 @@
 import {
   AUDIO_PCM_HEADER,
   AUDIO_PCM_STATE_RUNNING,
+  audioPcmAvailableFrames,
   createAudioPcmRing,
   snapshotAudioPcmRing,
 } from "./audio-pcm-ring.js";
 
-// The worklet's ring RUNNING but not read this long: a dead render thread.
+// The worklet's ring RUNNING, holding frames, and not read while the
+// context's clock advanced this long: a processor gone.
 export const WORKLET_STALL_MS = 1000;
 
 export class AudioController {
@@ -39,6 +41,7 @@ export class AudioController {
     this.workletNode = null;
     this.workletModuleLoaded = false;
     this.workletWatchdog = 0;
+    this.workletWatch = null;
     this.transportBridge = null;
     const leadParam = Number.parseFloat(params.get("audiolead") || "");
     this.targetLeadSeconds =
@@ -124,12 +127,14 @@ export class AudioController {
       await this.ensureContext();
       if (this.activeTransport === "worklet") {
         await this.transportBridge?.({ enabled: true, muted: false, sab: this.workletRing.sab, targetFrames: this.workletTargetFrames() });
+        if (!this.workletWatchdog) this.startWorkletWatchdog();
       } else {
         this.startPump();
         await this.pump();
       }
     } else {
       this.stopPump();
+      this.stopWorkletWatchdog();
       if (this.activeTransport === "worklet") {
         await this.transportBridge?.({ enabled: true, muted: true, sab: this.workletRing.sab, targetFrames: this.workletTargetFrames() });
       }
@@ -176,6 +181,7 @@ export class AudioController {
   keepContextRunning() {
     const context = this.context;
     const resume = () => {
+      this.workletWatch = null;
       if (this.muted || context.state === "running" || context.state === "closed") return;
       context.resume?.()?.catch?.(() => {});
     };
@@ -183,6 +189,7 @@ export class AudioController {
     for (const type of ["pointerdown", "keydown"]) {
       window.addEventListener?.(type, resume, { capture: true, passive: true });
     }
+    globalThis.document?.addEventListener?.("visibilitychange", () => { this.workletWatch = null; });
   }
 
   // Sound turned on before a disc: the worker had no core and the worklet
@@ -257,7 +264,7 @@ export class AudioController {
       this.transportFallbackReason = "";
       this.stats = "audio:worklet-ready";
       this.stopPump();
-      this.startWorkletWatchdog();
+      if (!this.muted) this.startWorkletWatchdog();
       return true;
     } catch (error) {
       this.workletNode?.disconnect?.();
@@ -267,22 +274,30 @@ export class AudioController {
     }
   }
 
-  // A worklet that stops pulling without an error (a dead render thread):
-  // the ring RUNNING, the context running and sound on, but CONSUMED_FRAMES
-  // still for WORKLET_STALL_MS -> back to legacy.
+  // A worklet that stops reading without an error (a processor gone while
+  // its render thread runs): stalled only when, since the last reset, the
+  // context's own clock advanced WORKLET_STALL_MS with frames in the ring and
+  // CONSUMED_FRAMES never moved. Never on wall time: a Mac waking from sleep
+  // or a Bluetooth profile switch freezes the render thread (and with it
+  // currentTime) while the state stays "running"; an empty ring is a starved
+  // producer, not the worklet. A frozen render thread would silence legacy
+  // on the same context too. Reset on statechange and visibilitychange;
+  // stopped while muted.
   startWorkletWatchdog(stallMs = WORKLET_STALL_MS) {
     this.stopWorkletWatchdog();
-    let consumed = -1, since = performance.now();
+    this.workletWatch = null;
     this.workletWatchdog = window.setInterval(() => {
       const ring = this.workletRing;
-      if (this.activeTransport !== "worklet" || !ring) return this.stopWorkletWatchdog();
-      const now = performance.now();
-      const at = Atomics.load(ring.header, AUDIO_PCM_HEADER.CONSUMED_FRAMES);
-      const running = Atomics.load(ring.header, AUDIO_PCM_HEADER.STATE) === AUDIO_PCM_STATE_RUNNING;
-      if (at !== consumed || !running || this.muted || this.context?.state !== "running") {
-        consumed = at;
-        since = now;
-      } else if (now - since >= stallMs) {
+      if (this.activeTransport !== "worklet" || !ring || this.muted) return this.stopWorkletWatchdog();
+      const { header } = ring;
+      const consumed = Atomics.load(header, AUDIO_PCM_HEADER.CONSUMED_FRAMES);
+      const at = this.context?.currentTime ?? 0;
+      const queued = audioPcmAvailableFrames(header) > 0;
+      const running = Atomics.load(header, AUDIO_PCM_HEADER.STATE) === AUDIO_PCM_STATE_RUNNING;
+      const watch = this.workletWatch;
+      if (!watch || watch.consumed !== consumed || !queued || !running || this.context?.state !== "running") {
+        this.workletWatch = { consumed, at };
+      } else if (at - watch.at >= stallMs / 1000) {
         void this.fallbackFromWorklet("worklet-stalled");
       }
     }, Math.max(50, stallMs / 4));
@@ -291,6 +306,7 @@ export class AudioController {
   stopWorkletWatchdog() {
     if (this.workletWatchdog) window.clearInterval(this.workletWatchdog);
     this.workletWatchdog = 0;
+    this.workletWatch = null;
   }
 
   async fallbackFromWorklet(reason) {
@@ -379,7 +395,8 @@ export class AudioController {
 
       let scheduled = 0;
       const horizon = now + this.targetLeadSeconds;
-      while (!this.muted && this.nextPlayTime < horizon && scheduled < 6) {
+      // the worklet took over meanwhile (a retry after the mount)
+      while (!this.muted && this.activeTransport !== "worklet" && this.nextPlayTime < horizon && scheduled < 6) {
         // mixAudio is a postMessage round-trip to the worker; time it so the
         // profiler can attribute slow chunks to a busy worker vs. main-thread
         // starvation (which shows up as pump-gap, recorded above).

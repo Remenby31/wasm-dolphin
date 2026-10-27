@@ -56,8 +56,8 @@
     {
       "path": "src/audio.js",
       "hashMode": "lf-normalized",
-      "size": 18272,
-      "sha256": "c346404261befbfcef65b219a2c0beb1bd947b4b508bf711c051c1e02e7b254b"
+      "size": 19355,
+      "sha256": "b94bfbe836722ee1562fad07172ec2c4c2e635448a457eb8de269f18db41db3e"
     },
     {
       "path": "src/audio-pcm-ring.js",

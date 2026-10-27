@@ -197,32 +197,97 @@ test("a processor error during the producer's answer: legacy, the producer stopp
   assert.equal(audio.workletNode, null);
 });
 
-// Review of #301: a worklet that stops reading without an error.
-test("the ring RUNNING but not read for the stall time -> legacy; read, muted or suspended -> kept", async () => {
+// Review of #301: a worklet that stops reading without an error. Stalled
+// only on the context's own clock, with frames waiting: a frozen render
+// thread (sleep, a Bluetooth switch), a starved producer, a suspended or
+// muted context never count.
+test("the worklet watchdog: stalled on the context clock with frames queued; frozen clock, empty ring, wake, mute -> kept", async () => {
   installBrowser();
   const { AudioController } = await import(`../src/audio.js?stall=${Date.now()}`);
-  const { AUDIO_PCM_HEADER, AUDIO_PCM_STATE_RUNNING } = await import("../src/audio-pcm-ring.js");
+  const { AUDIO_PCM_HEADER, AUDIO_PCM_STATE_RUNNING, writeAudioPcm } = await import("../src/audio-pcm-ring.js");
   const wait = (ms) => new Promise((r) => setTimeout(r, ms));
   const audio = new AudioController();
   const calls = [];
   audio.setTransportBridge(async (config) => { calls.push(config); return true; });
-  audio.muted = false;
-  await audio.ensureContext();
-  const header = audio.workletRing.header;
-  Atomics.store(header, AUDIO_PCM_HEADER.STATE, AUDIO_PCM_STATE_RUNNING);
+  await audio.setMuted(false);
+  assert.ok(audio.workletWatchdog, "running while sound is on");
   audio.startWorkletWatchdog(200);
-  // read: kept
-  for (let i = 0; i < 8; i++) { Atomics.add(header, AUDIO_PCM_HEADER.CONSUMED_FRAMES, 128); await wait(50); }
-  assert.equal(audio.activeTransport, "worklet");
-  // suspended (no render thread to blame): kept
-  audio.context.state = "suspended";
+  const { header } = audio.workletRing;
+  const ctx = audio.context;
+  Atomics.store(header, AUDIO_PCM_HEADER.STATE, AUDIO_PCM_STATE_RUNNING);
+  // an empty ring (a starved producer), the clock running: kept
+  for (let i = 0; i < 6; i++) { ctx.currentTime += 0.1; await wait(60); }
+  assert.equal(audio.activeTransport, "worklet", "empty ring");
+  writeAudioPcm(audio.workletRing, new Int16Array(960 * 2), 960, 2);
+  // frames queued, the clock frozen (render thread stopped: sleep, A2DP<->HFP) while wall time passes: kept
   await wait(400);
-  assert.equal(audio.activeTransport, "worklet");
-  // running and not read: back to legacy
-  audio.context.state = "running";
-  await wait(500);
+  assert.equal(audio.activeTransport, "worklet", "frozen context clock");
+  // a wake: the clock jumps, but the statechange resets the watch first
+  ctx.currentTime += 30;
+  ctx.onstatechange();
+  await wait(60);
+  assert.equal(audio.activeTransport, "worklet", "wake");
+  // read while the clock runs: kept
+  for (let i = 0; i < 6; i++) { ctx.currentTime += 0.1; Atomics.add(header, AUDIO_PCM_HEADER.CONSUMED_FRAMES, 128); await wait(60); }
+  assert.equal(audio.activeTransport, "worklet", "read");
+  // suspended: kept
+  ctx.state = "suspended";
+  for (let i = 0; i < 6; i++) { ctx.currentTime += 0.1; await wait(60); }
+  assert.equal(audio.activeTransport, "worklet", "suspended");
+  ctx.state = "running";
+  ctx.onstatechange();
+  // muted: the watchdog stops; unmuted: it is back
+  await audio.setMuted(true);
+  assert.equal(audio.workletWatchdog, 0, "stopped while muted");
+  await audio.setMuted(false);
+  assert.ok(audio.workletWatchdog, "back with the sound");
+  audio.startWorkletWatchdog(200);
+  // the clock runs, frames queued, nothing read: legacy
+  for (let i = 0; i < 8 && audio.activeTransport === "worklet"; i++) { ctx.currentTime += 0.1; await wait(60); }
   assert.equal(audio.activeTransport, "legacy");
   assert.equal(audio.transportFallbackReason, "worklet-stalled");
   assert.equal(calls.at(-1).enabled, false);
   assert.equal(audio.workletWatchdog, 0);
+  audio.stopPump();
+});
+
+// The retry after the mount: a second refusal restarts the legacy pump
+// (sound on), never while muted; and app.js calls it once the disc is in.
+test("retry after the mount: refused again -> the legacy pump back when sound is on, none when muted; wired in mountFile", async () => {
+  installBrowser();
+  const { AudioController } = await import(`../src/audio.js?retry-fail=${Date.now()}`);
+  const audio = new AudioController();
+  audio.setTransportBridge(async () => ({ active: false, reason: "core-not-loaded" }));
+  audio.setSource(async () => ({ available: false }));
+  await audio.setMuted(false);
+  assert.equal(await audio.retryWorkletTransport(), false);
+  assert.equal(audio.activeTransport, "legacy");
+  assert.ok(audio.pumpTimer, "the legacy pump restarted");
+  await audio.setMuted(true);
+  assert.equal(await audio.retryWorkletTransport(), false);
+  assert.equal(audio.pumpTimer, 0, "no pump while muted");
+  const { readFile } = await import("node:fs/promises");
+  const app = await readFile(new URL("../src/app.js", import.meta.url), "utf8");
+  const mount = app.slice(app.indexOf("async function mountFile("));
+  const mounted = mount.indexOf("await host.mountFile(file)");
+  const retry = mount.indexOf("await audio.retryWorkletTransport()");
+  assert.ok(mounted > 0 && retry > mounted, "mountFile retries the worklet after the disc is mounted");
+  assert.ok(retry < mount.indexOf("host.start()"), "before the emulation starts");
+});
+
+// pump() in flight when the worklet takes over: it schedules nothing more.
+test("a legacy pump in flight stops scheduling once the worklet is active", async () => {
+  installBrowser();
+  const { AudioController } = await import(`../src/audio.js?pump-switch=${Date.now()}`);
+  const audio = new AudioController();
+  audio.setTransportBridge(async () => true);
+  audio.muted = false;
+  await audio.ensureContext();
+  audio.stopWorkletWatchdog();
+  audio.activeTransport = "worklet";
+  let pulled = 0;
+  audio.setSource(async () => { pulled += 1; return { available: true, frames: 1024, samples: new Int16Array(2048) }; });
+  audio.stopPump();
+  await audio.pump();
+  assert.equal(pulled, 0, "createBuffer would throw: nothing scheduled");
 });
