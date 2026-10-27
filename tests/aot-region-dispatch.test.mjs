@@ -1410,6 +1410,50 @@ test("0171 source: the window opens at a state load for 3 s, normal regime uncha
   assert.match(patch, /\+\/\/ the judge \(2026-10-26\)/);
 });
 
+// Patch 0174: until a large install is measured, the large modules' overrun
+// starts from the small installs (their time over their estimate,
+// cost-weighted, x 1.25, within [1, 4]) once 5 ms of them were measured;
+// 3 before. The constant 3 kept ~half the heavy runs with every large
+// module refused by the 6 ms bound (review of #292).
+const startSkip = behindSkip || (typeof core?.module._DolphinWeb_AotSetSmallCostMinForTest !== "function" && "core without the measured start (0174)");
+test("0174: the overrun of large modules starts from the measured small installs", { skip: startSkip }, () => {
+  withOffThreadCompile((requests) => {
+    const plan = setup(); // forgets the regions: nothing measured
+    core.setRegionsEnabled(true);
+    const sizes = regionModules(plan).map((bytes) => bytes.length);
+    // every module small (2 ms for the largest); the start waits for the
+    // estimates of the first install only here (5 ms in production)
+    const perByte = 2 / Math.max(...sizes);
+    core.module._DolphinWeb_AotSetSmallCostMinForTest(2 * Math.min(...sizes) / Math.max(...sizes));
+    const saved = core.module._DolphinWeb_AotSetInstallCostForTest(perByte);
+    core.module._DolphinWeb_AotSetSleepWaitForTest(2000);
+    try {
+      assert.equal(forcedCounters()[3], 300, "3 before anything is measured");
+      readyAll(requests, plan);
+      core.module._DolphinWeb_AotSetInstallDelayForTest(4); // each install 4 ms over
+      core.module._DolphinWeb_AotRegionSleepWindowForTest(500);
+      // each install 4 ms over an estimate of 2 ms at most: x 2 at least,
+      // x 1.25 margin, within [1, 4]
+      const ratio = forcedCounters()[3] / 100;
+      assert.ok(ratio >= 2.5 && ratio <= 4, `from the small installs (${ratio})`);
+    } finally {
+      core.module._DolphinWeb_AotSetSmallCostMinForTest(5);
+      core.module._DolphinWeb_AotSetInstallDelayForTest(0);
+      core.module._DolphinWeb_AotSetInstallCostForTest(saved);
+    }
+  });
+});
+
+test("0174 source: the start from small installs, used at every bound; the margin spin bounded", async () => {
+  const patch = await readFile(new URL("../patches/dolphin-wasm/snapshot/0174-region-overrun-start-sleepmargin-spin.patch", import.meta.url), "utf8");
+  assert.match(patch, /\+constexpr double REGION_SMALL_OVERRUN_MARGIN = 1\.25;\n\+double s_region_small_cost_min_ms = 5\.0;/);
+  assert.match(patch, /\+ {4}return std::clamp\(s_region_small_took_ms \/ s_region_small_cost_ms \* REGION_SMALL_OVERRUN_MARGIN,/);
+  assert.match(patch, /\+ {6}const double overrun = LargeOverrun\(\);\n\+ {6}if \(large && cost \* overrun > REGION_FORCED_MAX_SLICE_MS\)/);
+  assert.match(patch, /\+ {6}if \(large \? debt \+ cost \* overrun > REGION_FORCED_MAX_SLICE_MS :/);
+  assert.match(patch, /\+ {8}s_region_large_measured = true;/, "the first large measured replaces the start");
+  assert.match(patch, /\+ {8}\/\/ Patch 0174: the margin's spin is bounded the same way/);
+});
+
 // Continuation fragments (2026-10-23): a function of more blocks than one
 // fragment holds (the 64-block cap) left the rest to the dispatcher and the
 // block JIT at every pass (2.2 M exits per 4 s in a CPU-bound intro scene).

@@ -93,3 +93,8 @@ test("sleepmargin: host, worker, core and patch", async () => {
   assert.match(patch, /\+static_assert\(sizeof\(Stats\) == 1872\);/);
   assert.match(patch, /-  u32 version = 1;\n-  u32 size_bytes = 1344;\n\+  u32 version = 2;\n\+  u32 size_bytes = 1872;/);
 });
+
+test("0174: the opt-in margin's spin is bounded like the cascade's (sleepspin, clock tick)", async () => {
+  const patch = await readFile(new URL("../patches/dolphin-wasm/snapshot/0174-region-overrun-start-sleepmargin-spin.patch", import.meta.url), "utf8");
+  assert.match(patch, /\+ {8}\/\/ Patch 0174: the margin's spin is bounded the same way \(review of\n\+ {8}\/\/ #292\): at most \?sleepspin, with a clock fine enough to time it\.\n\+ {8}if \(time_point - Clock::now\(\) > spin_limit \|\| DolphinWeb::ClockTick\(\) > spin_limit\)/);
+});
