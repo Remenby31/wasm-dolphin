@@ -89,6 +89,13 @@ export function chromeLaunchOptions(display = "headless", { unsafeWebgpu = true 
   return { headless: true, args: unsafeWebgpu ? ARGS : ARGS.filter((a) => a !== "--enable-unsafe-webgpu") };
 }
 
+// "WxH" (both 320-7680) or the default 1280x800.
+export function harnessViewport(spec) {
+  const m = /^(\d+)x(\d+)$/.exec(String(spec ?? ""));
+  const [w, h] = m ? [Number(m[1]), Number(m[2])] : [0, 0];
+  return w >= 320 && w <= 7680 && h >= 240 && h <= 4320 ? { width: w, height: h } : { width: 1280, height: 800 };
+}
+
 export async function launchChrome({ profileDir, display = "headless", args = [], unsafeWebgpu = true }) {
   const opts = chromeLaunchOptions(display, { unsafeWebgpu });
   const { chromium } = await importPlaywright();
@@ -98,7 +105,9 @@ export async function launchChrome({ profileDir, display = "headless", args = []
   const context = await chromium.launchPersistentContext(profileDir, {
     ...(executablePath ? { executablePath } : { channel: "chrome" }),
     headless: opts.headless,
-    viewport: { width: 1280, height: 800 },
+    // HARNESS_VIEWPORT=WxH: a larger page, e.g. a display box above the
+    // 640x480 backbuffer for the display filter's upscale (EASU).
+    viewport: harnessViewport(process.env.HARNESS_VIEWPORT),
     // Chrome's log and crash dumps stay in the profile; a session whose
     // renderer crashed copies them out as evidence (session.mjs).
     // HARNESS_CHROME_ARGS: extra flags for one machine (e.g. Linux WebGPU:
