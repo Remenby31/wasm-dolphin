@@ -1,3 +1,4 @@
+import { asDiscBlob } from "./remote-disc.js";
 import { readViRing } from "./harness-vi-ring.js";
 import { startPcSampler } from "./harness-pc-sampler.js";
 import { createDropSampler, histogramSum } from "./harness-drop-sampler.js";
@@ -4525,7 +4526,10 @@ function mountedDiscNeeds() {
   return { boundingBox: value === 1 };
 }
 
-async function mountFile(file) {
+async function mountFile(mounted_) {
+  // A disc served over HTTP ranges (measurements, src/remote-disc.js) reads
+  // through a Blob-like; the descriptor itself goes on to the plan worker.
+  const file = asDiscBlob(mounted_);
   if (!moduleInstance) {
     throw new Error("Upstream core must be loaded before mounting a disc");
   }
@@ -4588,7 +4592,7 @@ async function mountFile(file) {
   aotHeapPatchFailed = 0;
   aotDiscKey = null;
   aotDiscKeyPromise = null;
-  aotDiscFile = file;
+  aotDiscFile = mounted_;
   aotDiscKind = "disc";
   console.log(`[boot-phase] fs.mount(WORKERFS) took ${(performance.now() - _t_workerfs).toFixed(1)}ms (${(file.size / 1048576).toFixed(1)}MiB image)`);
 
@@ -8116,7 +8120,7 @@ export function aotBootKind(bootKind, size) {
 function readMountedDiscKey() {
   if (!aotDiscKeyPromise) {
     const generation = aotDiscGeneration;
-    aotDiscKeyPromise = (aotDiscKind === "dol" ? readDolKeyFromFile : readDiscKeyFromFile)(aotDiscFile).then(
+    aotDiscKeyPromise = (aotDiscKind === "dol" ? readDolKeyFromFile : readDiscKeyFromFile)(asDiscBlob(aotDiscFile)).then(
       (key) => (generation === aotDiscGeneration ? (aotDiscKey = key) : null),
       () => null
     );
