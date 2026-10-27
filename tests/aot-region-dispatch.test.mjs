@@ -2417,8 +2417,21 @@ test("0185: returns elsewhere chain to the region at pc, like the interpreter, a
 test("0185: 10 000 returns elsewhere in one region run, the wasm stack bounded", { skip: elsewhereSkip }, () => {
   const program = elseProgram(10000);
   installCalls(1, program, ELSE_TEXT, PRODUCTION_DISABLE_MASK | ELSEWHERE_CHAIN);
-  const reference = runCall(program.labels.main, { regions: false });
-  const got = runCall(program.labels.main, { regions: true }); // a frame left per return would trap (stack overflow)
+  // runCall's bounds (400 000 cycles, 100 000 steps) are below 10 000 calls:
+  // the same loop with room for them.
+  const runLong = (regions) => {
+    core.reset(seedGprs(program.labels.main), program.labels.main, STOP, 50000000);
+    let ran = 0, interpreted = 0;
+    for (let n = 0; n < 2000000 && core.pc() !== STOP; n++) {
+      if (regions && core.dispatchRegion()) { ran += 1; continue; }
+      assert.equal(core.interpretOne(), 0, "no exception");
+      interpreted += 1;
+    }
+    assert.equal(core.pc(), STOP);
+    return { state: core.state(), downcount: core.downcount(), ran, interpreted };
+  };
+  const reference = runLong(false);
+  const got = runLong(true); // a frame left per return would trap (stack overflow)
   assert.deepEqual(got.state, reference.state);
   assert.equal(got.downcount, reference.downcount);
   assert.ok(got.ran + got.interpreted < 100, `${got.ran} region runs, ${got.interpreted} interpreted: not one per return`);
