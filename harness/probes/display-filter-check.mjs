@@ -32,12 +32,12 @@ const { values: o } = parseArgs({
   }
 });
 if (!o.port) throw new Error("usage: display-filter-check.mjs --port N [--bench N] [--out dir]");
-const watchdog = setTimeout(() => { console.error("watchdog: 10 min"); process.exit(3); }, 10 * 60_000);
-watchdog.unref();
-
 const server = await ensureServer({ port: o.port });
 const bench = Number(o.bench) || 0;
-const lock = bench > 0 ? await acquirePerfLock({ owner: "display-filter-check" }) : null;
+const lock = bench > 0 ? await acquirePerfLock({ name: "Salon · image display-filter-check", waitSec: 1500 }) : null;
+// After the lock: a run queued behind another campaign is not killed.
+const watchdog = setTimeout(() => { console.error("watchdog: 10 min"); process.exit(3); }, 10 * 60_000);
+watchdog.unref();
 const profileDir = path.join(os.tmpdir(), `display-filter-${process.pid}`);
 const context = await launchChrome({ profileDir });
 let failed = false;
@@ -222,7 +222,7 @@ try {
   console.log(JSON.stringify({ ok: !failed, load: os.loadavg()[0].toFixed(1), ...report }, null, 2));
 } finally {
   await context.close().catch(() => {});
-  await lock?.release?.();
+  await lock?.();
   server.close?.();
 }
 process.exit(failed ? 1 : 0);
