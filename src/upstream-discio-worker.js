@@ -411,7 +411,12 @@ function harnessPacingConfig() {
   // not presenting on arrival); null on a core before 0153, which sleeps but
   // has no bit for it.
   const presentSleep = typeof moduleInstance?._DolphinWeb_SetPresentOnArrival === "function" ? Boolean(bits & 8) : null;
-  return { supported: true, syncOnSkipIdle: Boolean(bits & 1), rushFramePresentation: Boolean(bits & 2), dupXfbResetsThrottle: Boolean(bits & 4), presentSleep };
+  // bits 16-28 (patch 0165): the throttle sleep margin in us; null before.
+  const sleepMarginUs = typeof moduleInstance?._DolphinWeb_SetThrottleSleepMarginUs === "function" ? (bits >>> 16) & 0x1fff : null;
+  const sleepStepUs = typeof moduleInstance?._DolphinWeb_ThrottleSleepStepUs === "function" ? moduleInstance._DolphinWeb_ThrottleSleepStepUs() >>> 0 : null;
+  const cascade = typeof moduleInstance?._DolphinWeb_ThrottleSleepCascade === "function" ? moduleInstance._DolphinWeb_ThrottleSleepCascade() >>> 0 : null;
+  const sleepK = cascade === null ? null : cascade & 0xffff, sleepSpinUs = cascade === null ? null : cascade >>> 16;
+  return { supported: true, syncOnSkipIdle: Boolean(bits & 1), rushFramePresentation: Boolean(bits & 2), dupXfbResetsThrottle: Boolean(bits & 4), presentSleep, sleepMarginUs, sleepStepUs, sleepK, sleepSpinUs };
 }
 // Patch 0156: the guest cycles ran outside the regions by the PC a chain of
 // blocks started at, the 64 most costly, while the stats are on (timing or
@@ -568,7 +573,7 @@ function harnessPresentCadence({ reset } = {}) {
   const ptr = stats(Number.isInteger(reset) && reset >= 0 ? reset : -1) >>> 0;
   const heap = moduleInstance.HEAPU8;
   if (!ptr || ptr + 8 > heap.length) return { error: `DolphinWeb_PresentCadenceStats returned ${ptr}` };
-  const size = Math.min(new DataView(heap.buffer, ptr, 8).getUint32(4, true), 1344);
+  const size = Math.min(new DataView(heap.buffer, ptr, 8).getUint32(4, true), 1872); // v2 (0165)
   if (ptr + size > heap.length) return { error: `present cadence of ${size} bytes past the heap` };
   if (ptr % 4 !== 0 || size % 4 !== 0) return { error: `present cadence at ${ptr} (${size} bytes): not 4-aligned` };
   const copy = () => Array.from(new Uint32Array(heap.buffer, ptr, size / 4));
@@ -1727,6 +1732,10 @@ async function handleMessage(type, payload) {
         syncOnSkipIdle: payload.syncOnSkipIdle,
         dupXfbRearmsThrottle: payload.dupXfbRearmsThrottle,
         smoothEarly: payload.smoothEarly,
+        sleepMarginUs: payload.sleepMarginUs,
+        sleepStepUs: payload.sleepStepUs,
+        sleepK: payload.sleepK,
+        sleepSpinUs: payload.sleepSpinUs,
         presentVsync: payload.presentVsync,
         coreLog: payload.coreLog,
         memcardSlotB: payload.memcardSlotB,
@@ -2528,6 +2537,10 @@ async function loadCore({
   syncOnSkipIdle = false,
   dupXfbRearmsThrottle = false,
   smoothEarly = true,
+  sleepMarginUs = 0,
+  sleepStepUs = 0,
+  sleepK = 750,
+  sleepSpinUs = 150,
   presentVsync = true,
   coreLog = false,
   memcardSlotB = false,
@@ -3057,6 +3070,10 @@ async function loadCore({
     dolphinSyncOnSkipIdle: syncOnSkipIdle === true,
     dolphinDupXfbRearmsThrottle: dupXfbRearmsThrottle === true,
     dolphinSmoothEarly: smoothEarly !== false,
+    dolphinSleepMarginUs: Number.isInteger(sleepMarginUs) ? sleepMarginUs : 0,
+    dolphinSleepStepUs: Number.isInteger(sleepStepUs) ? sleepStepUs : 0,
+    dolphinSleepK: Number.isInteger(sleepK) ? sleepK : 750,
+    dolphinSleepSpinUs: Number.isInteger(sleepSpinUs) ? sleepSpinUs : 150,
     dolphinCoreLog: Boolean(coreLog),
     dolphinMemcardSlotB: Boolean(memcardSlotB),
     // Patch 0168: internal resolution (1-4, held to the adapter's ceiling)
