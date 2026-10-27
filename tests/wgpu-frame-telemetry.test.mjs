@@ -30,7 +30,7 @@ test("frame telemetry: callback lateness in buckets, BeginFrames gone by unseen,
   t.drain(30, 1);
   t.tick((ft += 5 * R), ft);
   const h = t.snapshot();
-  assert.deepEqual([h.holes, h.holeDrains, h.holeDrainMs, h.holeLongestDrainMs, h.holesWithoutDrain], [1, 4, 44, 30, 0], "the two drains before count too");
+  assert.deepEqual([h.holes, h.holeDrains, h.holeDrainMs, h.holeDrainOver16, h.holeDrainOver50, h.holesWithoutDrain], [1, 4, 44, 1, 0, 0], "the two drains before count too");
   t.tick((ft += 6 * R), ft);
   assert.equal(t.snapshot().holesWithoutDrain, 1, "a hole the worker drained nothing in");
   t.present(5);
@@ -40,7 +40,8 @@ test("frame telemetry: callback lateness in buckets, BeginFrames gone by unseen,
   t.gpuDone(25);
   t.tick((ft += 5 * R), ft);
   const k = t.snapshot();
-  assert.deepEqual([k.pipelines, k.pipelineLongestMs, k.holePipelines, k.holePipelineMs, k.gpuDoneOver16, k.holeGpuDoneLongestMs], [1, 40, 1, 40, 1, 25]);
+  assert.deepEqual([k.pipelines, k.pipelineOver4, k.holePipelines, k.holePipelineMs, k.gpuDoneOver8, k.gpuDoneOver16, k.gpuDoneOver33, k.holesGpuDoneOver16], [1, 1, 1, 40, 1, 1, 0, 1]);
+  assert.equal(Object.keys(k).some((key) => /Longest|Max/.test(key)), false, "no maxima: race-perf takes deltas");
   t.reset();
   assert.equal(t.snapshot().ticks, 0);
 });

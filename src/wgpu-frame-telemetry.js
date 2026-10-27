@@ -10,7 +10,8 @@
 // went by unseen since the previous one. Per ring drain: its time, and the
 // part in enc.finish() + queue.submit() (the rest decodes and records the
 // commands). Flat numbers only: race-perf --worker-read takes deltas of
-// top-level numeric fields.
+// top-level numeric fields, so no maxima (a delta of a running maximum is 0
+// once it was reached before the window): counts over thresholds instead.
 // A hole (3 BeginFrames or more gone by unseen between two callbacks) also
 // records what the worker did in it: drains, their time and the longest; a
 // hole with drains going on had a free worker (the BeginFrames were held
@@ -29,13 +30,13 @@ export function createFrameTelemetry() {
     ticks: 0, lateTotalMs: 0, late1: 0, late2: 0, late4: 0, late8: 0, late16: 0, lateOver16: 0,
     skipped: 0, skip0: 0, skip1: 0, skip2: 0, skip3plus: 0,
     drains: 0, drainMs: 0, submitMs: 0, drainOver4: 0, drainOver8: 0,
-    holes: 0, holeMs: 0, holeDrains: 0, holeDrainMs: 0, holeLongestDrainMs: 0, holesWithoutDrain: 0,
+    holes: 0, holeMs: 0, holeDrains: 0, holeDrainMs: 0, holeDrainOver16: 0, holeDrainOver50: 0, holesWithoutDrain: 0,
     presents: 0, presentMs: 0, presentOver4: 0,
-    pipelines: 0, pipelineMs: 0, pipelineLongestMs: 0, holePipelines: 0, holePipelineMs: 0,
-    gpuDone: 0, gpuDoneMs: 0, gpuDoneLongestMs: 0, gpuDoneOver16: 0, holeGpuDoneLongestMs: 0
+    pipelines: 0, pipelineMs: 0, pipelineOver4: 0, holePipelines: 0, holePipelineMs: 0,
+    gpuDone: 0, gpuDoneMs: 0, gpuDoneOver8: 0, gpuDoneOver16: 0, gpuDoneOver33: 0, holesGpuDoneOver16: 0
   });
   // since the previous presenter callback: drains, pipelines, GPU lag
-  const fresh = () => ({ drains: 0, ms: 0, longest: 0, pipelines: 0, pipelineMs: 0, gpuDoneLongest: 0 });
+  const fresh = () => ({ drains: 0, ms: 0, over16: 0, over50: 0, pipelines: 0, pipelineMs: 0, gpuDoneOver16: 0 });
   let since = fresh();
   let s = zero();
   let lastFrameTime = null;
@@ -63,11 +64,12 @@ export function createFrameTelemetry() {
             s.holeMs += gap;
             s.holeDrains += since.drains;
             s.holeDrainMs += since.ms;
-            s.holeLongestDrainMs = Math.max(s.holeLongestDrainMs, since.longest);
+            s.holeDrainOver16 += since.over16;
+            s.holeDrainOver50 += since.over50;
             if (since.drains === 0) s.holesWithoutDrain += 1;
             s.holePipelines += since.pipelines;
             s.holePipelineMs += since.pipelineMs;
-            s.holeGpuDoneLongestMs = Math.max(s.holeGpuDoneLongestMs, since.gpuDoneLongest);
+            if (since.gpuDoneOver16 > 0) s.holesGpuDoneOver16 += 1;
           }
         }
       }
@@ -78,7 +80,7 @@ export function createFrameTelemetry() {
     pipeline(ms) {
       s.pipelines += 1;
       s.pipelineMs += ms;
-      s.pipelineLongestMs = Math.max(s.pipelineLongestMs, ms);
+      if (ms > 4) s.pipelineOver4 += 1;
       since.pipelines += 1;
       since.pipelineMs += ms;
     },
@@ -86,9 +88,10 @@ export function createFrameTelemetry() {
     gpuDone(ms) {
       s.gpuDone += 1;
       s.gpuDoneMs += ms;
-      s.gpuDoneLongestMs = Math.max(s.gpuDoneLongestMs, ms);
+      if (ms > 8) s.gpuDoneOver8 += 1;
       if (ms > 16) s.gpuDoneOver16 += 1;
-      since.gpuDoneLongest = Math.max(since.gpuDoneLongest, ms);
+      if (ms > 33) s.gpuDoneOver33 += 1;
+      if (ms > 16) since.gpuDoneOver16 += 1;
     },
     // The presenter's work at one BeginFrame (ms).
     present(ms) {
@@ -105,7 +108,8 @@ export function createFrameTelemetry() {
       if (totalMs > 8) s.drainOver8 += 1;
       since.drains += 1;
       since.ms += totalMs;
-      since.longest = Math.max(since.longest, totalMs);
+      if (totalMs > 16) since.over16 += 1;
+      if (totalMs > 50) since.over50 += 1;
     },
     snapshot() {
       return { ...s, periodMs: gaps.length >= 4 ? Math.min(...gaps) : null };
