@@ -177,7 +177,7 @@ test("the worker holds the scale to its adapter's ceiling, at boot and in game",
   assert.match(worker, /wgpuScaleAdapterCeiling = scaleCeiling\.ceiling;/);
   // A device lost above 1x: 1x for the rest of the worker, and the page told.
   assert.match(worker, /if \(internalResolution > 1\) wgpuScaleLostCeiling = 1;/);
-  assert.match(worker, /self\.postMessage\(\{ type: "wgpu-device-lost", internalResolution,/);
+  assert.match(worker, /wgpuFatalReporter\.report\(\{ internalResolution, reason: String\(info\?\.reason \?\? "unknown"\)/);
 });
 
 // Point 2: a device lost at N > 1 comes back at 1x, not at N again.

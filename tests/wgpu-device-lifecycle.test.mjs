@@ -2,7 +2,12 @@ import assert from "node:assert/strict";
 import { readFile } from "node:fs/promises";
 import test from "node:test";
 
-import { handleWgpuDeviceLoss } from "../src/wgpu-device-lifecycle.js";
+import {
+  WGPU_FATAL_PAGE_REASONS,
+  createWgpuFatalReporter,
+  handleWgpuDeviceLoss,
+  wgpuFatalPageReason,
+} from "../src/wgpu-device-lifecycle.js";
 
 test("active WebGPU device loss fails closed and invalidates producer geometry", () => {
   const device = {};
@@ -84,4 +89,82 @@ test("worker loss integration stops replay and reapplies the geometry epoch", as
     worker,
     /wgpuReplayOpMetrics\.finishReplay\([\s\S]*?if \(wgpuReplayFatal\) break;[\s\S]*?read = \(read \+ 1\)/
   );
+});
+
+// Every fatal replay error leaves the ring FAILED: the page hears of it by
+// the device-loss path, once, with a precise reason.
+const workerSource = () => readFile(new URL("../src/upstream-discio-worker.js", import.meta.url), "utf8");
+
+test("every scope the worker fails the ring with has a page reason", async () => {
+  const worker = await workerSource();
+  const scopes = new Set([...worker.matchAll(/markWgpuReplayFatal\(\s*"([^"]+)"/g)].map((m) => m[1]));
+  scopes.delete("device-lost");
+  assert.deepEqual([...scopes].sort(), Object.keys(WGPU_FATAL_PAGE_REASONS).sort());
+  // A scope passed as a variable would escape the list above.
+  assert.doesNotMatch(worker.replace(/function markWgpuReplayFatal\(scope, detail\)/, ""), /markWgpuReplayFatal\(\s*[^"\s]/);
+});
+
+test("the worker tells the page from markWgpuReplayFatal, the device loss from its handler", async () => {
+  const worker = await workerSource();
+  assert.match(worker, /function markWgpuReplayFatal\(scope, detail\) \{[\s\S]*?wgpuRendererRuntime\.emergencyFail\(errorCode\);[\s\S]*?if \(scope !== "device-lost"\) \{\s*wgpuFatalReporter\.report\(\{\s*internalResolution: wgpuInternalResolution,\s*reason: wgpuFatalPageReason\(scope\),\s*detail: wgpuReplayFatal\.detail,/);
+  assert.doesNotMatch(worker, /self\.postMessage\(\{ type: "wgpu-device-lost"/);
+  // A new device is a new renderer session.
+  assert.match(worker, /wgpuReplayFatal = null;\n  wgpuFatalReporter\.reset\(\);/);
+});
+
+async function pageSees(message) {
+  const { UpstreamWorkerAdapter } = await import("../src/upstream-worker-adapter.js");
+  const { EmulatorHost } = await import("../src/core-host.js");
+  const lost = [];
+  const host = {
+    enhancements: { internalResolution: message.internalResolution },
+    scaleLostCeiling: 4,
+    onStatus: () => {},
+    onGpuDeviceLost: (e) => lost.push(e),
+  };
+  const adapter = new UpstreamWorkerAdapter({ onGpuDeviceLost: (e) => EmulatorHost.prototype.handleGpuDeviceLost.call(host, e) });
+  adapter.handleMessage(message);
+  return { lost, host };
+}
+
+const PAGE_REASONS = {
+  "submit-error": "submit-error",
+  "staging-seal": "staging-seal",
+  "staging-capacity": "staging-capacity",
+  "staging-copy": "staging-copy",
+  "staging-remap": "staging-remap",
+  "destroy-order": "destroy-order",
+  "semantic-capture-ack": "semantic-capture-ack",
+  "webgpu-command-ring-ownership": "ring-ownership",
+  "webgpu-command-ring-attach": "ring-attach",
+};
+for (const [scope, reason] of Object.entries(PAGE_REASONS)) {
+  test(`fatal ${scope}: the page gets wgpu-device-lost, reason ${reason}, and steps down like a lost device`, async () => {
+    assert.equal(wgpuFatalPageReason(scope), reason);
+    const posted = [];
+    const reporter = createWgpuFatalReporter((m) => posted.push(m));
+    assert.equal(reporter.report({ internalResolution: 2, reason: wgpuFatalPageReason(scope), detail: `${scope} detail` }), true);
+    assert.deepEqual(posted, [{ type: "wgpu-device-lost", internalResolution: 2, reason, detail: `${scope} detail` }]);
+    const { lost, host } = await pageSees(posted[0]);
+    assert.deepEqual(lost, [{ internalResolution: 2, fallback: 1, reason, detail: `${scope} detail` }]);
+    assert.equal(host.scaleLostCeiling, 1);
+    // At 1x, as a lost device: no lower scale to offer.
+    const at1 = await pageSees({ type: "wgpu-device-lost", internalResolution: 1, reason, detail: "" });
+    assert.equal(at1.lost[0].fallback, null);
+  });
+}
+
+test("one message per renderer session: the first cause wins, a new device starts again", () => {
+  const posted = [];
+  const reporter = createWgpuFatalReporter((m) => posted.push(m));
+  assert.equal(reporter.report({ internalResolution: 3, reason: "staging-capacity", detail: "full" }), true);
+  assert.equal(reporter.report({ internalResolution: 3, reason: "destroyed", detail: "lost after" }), false);
+  assert.equal(reporter.report({ internalResolution: 3, reason: "submit-error", detail: "again" }), false);
+  assert.deepEqual(posted.map((m) => m.reason), ["staging-capacity"]);
+  assert.deepEqual(reporter.reported, { internalResolution: 3, reason: "staging-capacity", detail: "full" });
+  reporter.reset();
+  assert.equal(reporter.report({ internalResolution: 1, reason: "destroyed", detail: "" }), true);
+  assert.equal(posted.length, 2);
+  assert.equal(wgpuFatalPageReason("something-new"), "something-new");
+  assert.equal(wgpuFatalPageReason(""), "unknown");
 });
