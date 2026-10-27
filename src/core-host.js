@@ -1773,6 +1773,7 @@ const CACHED_INTERPRETER_DISABLE_BITS = {
   smearcompile:    1 << 22, // §28ce cap JIT compiles/slice (default-off; ?smearcompile=1 to enable)
   fastmemhoist:    1 << 23, // §28cz per-block fastmem bounds-check hoist (ENABLE polarity; default-off; ?fastmemhoist=1)
   inlinefma:       1 << 26, // inline exact FMA; set: the FMA family calls the interpreter's NI_madd_msub
+  regionmtmsr:     1 << 27, // 0183 regions go on past a mtmsr that changes only EE (ENABLE polarity; default-off; ?regionmtmsr=1)
   // Aliases the plan / TL;DR uses interchangeably:
   fastinputpoll: 1 << 1, // legacy synonym for meleecall (input-poll lives there)
   fastmem:       1 << 7, // legacy synonym for fastsystem (load/store-ish helpers)
@@ -1818,6 +1819,9 @@ function requestedCachedInterpreterDisableMask() {
         }
       }
     }
+    // 0183's bit is an ENABLE bit: a raw ?disable= mask (or the name) must not
+    // turn it on by accident; only ?regionmtmsr=1 does.
+    mask &= ~CACHED_INTERPRETER_DISABLE_BITS.regionmtmsr;
   }
   // §28bt block re-dispatch: DEFAULT-ON. Rigorously verified +11% warm
   // (4-run non-overlapping same-binary A/B, correctness-clean on battle);
@@ -1871,6 +1875,11 @@ function requestedCachedInterpreterDisableMask() {
   // with ?fastmemhoist=1; any other state leaves the bit clear so codegen is
   // byte-identical to today. Correctness-critical (a wrong hoisted check = an
   // unchecked OOB WASM load) — kept off until A/B + correctness verified.
+  // 0183: ENABLE polarity too, default-off while it is measured: a region
+  // goes on past a mtmsr that only turns interrupts off or on.
+  if (params.get("regionmtmsr") === "1") {
+    mask |= CACHED_INTERPRETER_DISABLE_BITS.regionmtmsr;
+  }
   if (params.get("fastmemhoist") === "1") {
     mask |= CACHED_INTERPRETER_DISABLE_BITS.fastmemhoist;
   }
