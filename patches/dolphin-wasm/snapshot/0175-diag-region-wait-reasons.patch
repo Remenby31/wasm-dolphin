@@ -1,0 +1,166 @@
+diff --git a/Source/Core/Core/PowerPC/CachedInterpreter/CachedInterpreter.cpp b/Source/Core/Core/PowerPC/CachedInterpreter/CachedInterpreter.cpp
+index 6a2e767..983f04b 100644
+--- a/Source/Core/Core/PowerPC/CachedInterpreter/CachedInterpreter.cpp
++++ b/Source/Core/Core/PowerPC/CachedInterpreter/CachedInterpreter.cpp
+@@ -10768,6 +10768,23 @@ double s_region_forced_max_slice_ms = 0;  // the slices that did one
+ // largest estimate times overrun it refused (ms).
+ u32 s_region_forced_bound_refused = 0;
+ double s_region_forced_bound_max_ms = 0;
++// Patch 0175 (diagnosis, not for merge): why a ready module waited at a
++// slice boundary (one count per decision), and a log of the installs.
++enum DiagReason
++{
++  DIAG_OUTSIDE_WINDOW, DIAG_LONG_SLEEP_SEEN, DIAG_LARGE_NOT_FIRST, DIAG_LARGE_YOUNG,
++  DIAG_LARGE_COOLDOWN, DIAG_LARGE_STILL_SLEEPING, DIAG_BOUND, DIAG_DEBT, DIAG_FORCED,
++  DIAG_EXPIRED, DIAG_ROOM, DIAG_NOT_READY, DIAG_COUNT
++};
++std::array<u32, DIAG_COUNT> s_diag_reasons{};
++struct DiagInstall
++{
++  float t_ms, path, cost_ms, took_ms, ready_ms, waited_ms, in_window, large;
++};
++constexpr std::size_t DIAG_LOG = 256;
++std::array<DiagInstall, DIAG_LOG> s_diag_log{};
++u32 s_diag_logged = 0;
++float s_diag_window_start_ms = -1;
+ double s_region_boot_max_slice_ms = 0;  // published in the header's spare u32
+ u32 s_region_install_fallbacks = 0;     // likewise
+ 
+@@ -10984,6 +11001,9 @@ void ForgetAllRegions()
+   s_region_small_cost_ms = 0;
+   s_region_load_window_pending.store(false, std::memory_order_relaxed);
+   s_region_load_window_end = 0;
++  s_diag_reasons = {};
++  s_diag_logged = 0;
++  s_diag_window_start_ms = -1;
+   s_region_sleeps = {};
+   s_region_sleeps_next = 0;
+   s_region_forced_debt_at.reset();
+@@ -11231,6 +11251,11 @@ void ServiceRegionInstalls(std::optional<std::chrono::steady_clock::time_point>
+   else if (s_region_load_window_pending.exchange(false, std::memory_order_acq_rel))
+   {
+     // Patch 0171: the window after a state load starts at this slice.
++    if (s_region_service_start)
++      s_diag_window_start_ms = static_cast<float>(std::chrono::duration<double, std::milli>(
++                                                      std::chrono::steady_clock::now() -
++                                                      *s_region_service_start)
++                                                      .count());
+     s_region_load_window_end =
+         (std::chrono::steady_clock::now() +
+          std::chrono::duration_cast<std::chrono::steady_clock::duration>(s_region_load_window))
+@@ -11288,7 +11313,10 @@ void ServiceRegionInstalls(std::optional<std::chrono::steady_clock::time_point>
+     if (now - *pending.installable_since < s_region_sleep_wait)
+     {
+       if (!in_load_window)
++      {
++        s_diag_reasons[DIAG_OUTSIDE_WINDOW] += 1;
+         return true;
++      }
+       // After a state load, the thread is behind: no window long enough for
+       // this module came, none is coming. Within the slice target, room()
+       // bounds the slice as usual; a larger module only when the throttle
+@@ -11298,13 +11326,20 @@ void ServiceRegionInstalls(std::optional<std::chrono::steady_clock::time_point>
+       const bool large = cost > REGION_SLICE_TARGET_MS;
+       const bool long_enough_seen =
+           sleep_seen(cost * REGION_SLEEP_ESTIMATE_FACTOR + REGION_SLEEP_MARGIN_MS);
+-      if (long_enough_seen ||
+-          (large &&
+-           (n != 0 || now - *pending.installable_since < s_region_behind_window ||
+-            (s_region_last_forced && now - *s_region_last_forced < s_region_behind_window) ||
+-            (sleep_seen(1.0) &&
+-             now - *pending.installable_since < s_region_large_behind_wait))))
++      const auto diag_wait = [&](DiagReason r) {
++        s_diag_reasons[r] += 1;
+         return true;
++      };
++      if (long_enough_seen)
++        return diag_wait(DIAG_LONG_SLEEP_SEEN);
++      if (large && n != 0)
++        return diag_wait(DIAG_LARGE_NOT_FIRST);
++      if (large && now - *pending.installable_since < s_region_behind_window)
++        return diag_wait(DIAG_LARGE_YOUNG);
++      if (large && s_region_last_forced && now - *s_region_last_forced < s_region_behind_window)
++        return diag_wait(DIAG_LARGE_COOLDOWN);
++      if (large && sleep_seen(1.0) && now - *pending.installable_since < s_region_large_behind_wait)
++        return diag_wait(DIAG_LARGE_STILL_SLEEPING);
+       // behind: a large module the 6 ms bound keeps waiting is counted,
+       // then either waits for what the forced debt leaves
+       const double overrun = LargeOverrun();
+@@ -11317,16 +11352,18 @@ void ServiceRegionInstalls(std::optional<std::chrono::steady_clock::time_point>
+         }
+         s_region_forced_bound_max_ms =
+             std::max(s_region_forced_bound_max_ms, cost * overrun);
+-        return true;
++        return diag_wait(DIAG_BOUND);
+       }
+       const double debt = s_region_forced_debt_ms;
+       if (large ? debt + cost * overrun > REGION_FORCED_MAX_SLICE_MS :
+                   debt + cost > REGION_FORCED_RATE_MS)
+-        return true;
++        return diag_wait(DIAG_DEBT);
+       forcing = true;  // counted once installed
++      s_diag_reasons[DIAG_FORCED] += 1;
+       return false;
+     }
+     s_region_sleep_wait_expired += 1;
++    s_diag_reasons[DIAG_EXPIRED] += 1;
+     return false;
+   };
+   // Room in this slice for a module of `bytes`: always for the first one at
+@@ -11400,6 +11437,10 @@ void ServiceRegionInstalls(std::optional<std::chrono::steady_clock::time_point>
+     // cold, synchronously: far more than the cache-hit estimate a sleep
+     // window is sized with, so it stays at slice boundaries (review of #124).
+     const bool answered = ready || pending.signalled;
++    if (!deadline && !answered && !expired)
++      s_diag_reasons[DIAG_NOT_READY] += 1;
++    else if (!deadline && answered && !room(pending.bytes.size(), false))
++      s_diag_reasons[DIAG_ROOM] += 1;
+     if ((!answered && !expired) || !room(pending.bytes.size(), false) ||
+         (answered ? may_wait_for_sleep(pending) : deadline.has_value()))
+     {
+@@ -11439,6 +11480,19 @@ void ServiceRegionInstalls(std::optional<std::chrono::steady_clock::time_point>
+     const double took = spent_ms - spent_before;
+     if (forced_one)
+       s_region_forced_debt_ms += took;
++    if (s_region_stats.regions_installed > installed_now && s_region_service_start)
++    {
++      const auto ms = [](auto d) { return static_cast<float>(std::chrono::duration<double, std::milli>(d).count()); };
++      const auto at = std::chrono::steady_clock::now();
++      s_diag_log[s_diag_logged % DIAG_LOG] = {
++          ms(at - *s_region_service_start),
++          deadline ? 0.f : forced_one ? 1.f : (pending.installable_since && now - *pending.installable_since >= s_region_sleep_wait) ? 2.f : 3.f,
++          static_cast<float>(cost_before), static_cast<float>(spent_ms - spent_before),
++          pending.installable_since ? ms(*pending.installable_since - pending.posted) : -1.f,
++          pending.installable_since ? ms(at - *pending.installable_since) : -1.f,
++          in_load_window ? 1.f : 0.f, cost_before > REGION_SLICE_TARGET_MS ? 1.f : 0.f};
++      s_diag_logged += 1;
++    }
+     if (s_region_stats.regions_installed > installed_now)
+     {
+       if (answered)
+@@ -12011,6 +12065,25 @@ extern "C" EMSCRIPTEN_KEEPALIVE void DolphinWeb_AotSetSmallCostMinForTest(double
+   s_region_small_cost_min_ms = ms;
+ }
+ 
++// Patch 0175 (diagnosis): [DIAG_COUNT reason counts, logged installs, window
++// start ms x 100]; then the log copied to `log` (8 floats per install, at
++// most `cap` installs, the last ones). Returns the installs copied.
++extern "C" EMSCRIPTEN_KEEPALIVE u32 DolphinWeb_RegionDiag(u32* counts, float* log, u32 cap)
++{
++  for (u32 i = 0; i < DIAG_COUNT; ++i)
++    counts[i] = s_diag_reasons[i];
++  counts[DIAG_COUNT] = s_diag_logged;
++  counts[DIAG_COUNT + 1] = static_cast<u32>(std::max(s_diag_window_start_ms, 0.f) * 100);
++  const u32 kept = std::min<u32>(s_diag_logged, DIAG_LOG);
++  const u32 n = std::min(kept, cap);
++  for (u32 k = 0; k < n; ++k)
++  {
++    const DiagInstall& e = s_diag_log[(s_diag_logged - n + k) % DIAG_LOG];
++    std::memcpy(log + 8 * k, &e, sizeof(DiagInstall));
++  }
++  return n;
++}
++
+ // Tests (patch 0171): sets the measured overrun of large installs; returns
+ // the one it replaces.
+ extern "C" EMSCRIPTEN_KEEPALIVE double DolphinWeb_AotSetLargeOverrunForTest(double ratio)
