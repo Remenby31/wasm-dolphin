@@ -6,10 +6,10 @@ diff --git a/Source/Core/VideoBackends/WebGPU/WebGPUGfx.cpp b/Source/Core/VideoB
    // consumer, which sizes the canvas to match. The core allows 1 to 4.
    const u32 scale = static_cast<u32>(std::clamp(g_ActiveConfig.iEFBScale, 1, 4));
 -  return {640 * scale, 480 * scale, 1.0f, AbstractTextureFormat::BGRA8};
-+  // Widescreen (patch 0178): with Dolphin's widescreen hack the presenter
-+  // draws at 16:9 (aspect ForceWide, set with the hack by the C-ABI shim), so
-+  // the backbuffer is 16:9 too, 480N lines and 4/3 as wide, rounded to even:
-+  // 854, 1706, 2560, 3414. A 4:3 backbuffer would letterbox the 16:9 picture.
++  // Widescreen (patch 0178): with Dolphin's widescreen hack the backbuffer
++  // is 16:9, 480N lines and 4/3 as wide, rounded to even: 854, 1706, 2560,
++  // 3414. The picture is stretched to it (Stretch) and the hack widens the
++  // 3D view to the backbuffer's aspect.
 +  const u32 width = g_ActiveConfig.bWidescreenHack ? ((2560 * scale + 2) / 3) & ~1u : 640 * scale;
 +  return {width, 480 * scale, 1.0f, AbstractTextureFormat::BGRA8};
  }

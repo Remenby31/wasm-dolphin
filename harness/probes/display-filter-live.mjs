@@ -84,7 +84,11 @@ for (const c of o.cases.split(",")) {
     rec.grabbed = shown.error ?? [shown.width, shown.height];
     if (o.out && !shown.error) savePng(shown, path.join(o.out, `${slug(c)}.png`));
     const wantsFilter = /fsr=(light|strong|1|2)|displayfit=1/.test(c);
-    rec.ok = rec.sizeOk && Boolean(rec.filter) && rec.filter.active === wantsFilter &&
+    // ?widescreen=1 (patch 0178): a 16:9 backbuffer, 480N lines.
+    const ir = Number(/(?:^|&)ir=(\d)/.exec(c)?.[1] ?? 1);
+    const [bw, bh] = rec.filter?.backbuffer ?? [0, 0];
+    rec.backbufferOk = /widescreen=1/.test(c) ? bh === 480 * ir && bw === (Math.floor((2560 * ir + 2) / 3) & ~1) : bh === 480 * ir && bw === 640 * ir;
+    rec.ok = rec.sizeOk && rec.backbufferOk && Boolean(rec.filter) && rec.filter.active === wantsFilter &&
       (!wantsFilter || rec.filterFramesPerSec > 0) && !(Array.isArray(rec.errors) && rec.errors.length);
     if (!rec.ok) failed = true;
     results.cases.push(rec);

@@ -46,13 +46,14 @@ export function normalizeDisplaySharpness(value) {
 // size the canvas to the display box even without sharpening (an internal
 // resolution above the display is then area-filtered down: supersampling);
 // any sharpness implies it (displayFilterFits). box: the canvas element's
-// size in device pixels, or null before the page measured it.
+// size in device pixels and whether it is laid out with object-fit: contain,
+// or null before the page measured it.
 export function normalizeDisplayFilter({ sharpness, fit, box } = {}) {
   const w = Math.round(Number(box?.width)), h = Math.round(Number(box?.height));
   return {
     sharpness: normalizeDisplaySharpness(sharpness),
     fit: fit === true,
-    box: w > 0 && h > 0 ? { width: w, height: h } : null
+    box: w > 0 && h > 0 ? { width: w, height: h, contain: box.contain === true } : null
   };
 }
 
@@ -75,14 +76,21 @@ export function rcasSharpnessStops(sharpness) {
 }
 
 // The canvas size for a backbuffer `src` shown in a display box of `box`
-// device pixels: the backbuffer's aspect fitted inside the box (the page
-// lays the canvas out at the backbuffer's aspect, so this is the box), at
-// most maxSide per side. No box (not measured, hidden): the backbuffer.
+// device pixels: the box itself, the picture stretched to it as the browser
+// would stretch the canvas (the engine page: the box follows its aspect
+// selector, which may differ from the backbuffer's); with box.contain (the
+// canvas is laid out with object-fit: contain, the site's engine frame) the
+// backbuffer's aspect fitted inside it. At most maxSide per side. No box
+// (not measured, hidden): the backbuffer.
 export function displayFilterOutputSize(src, box, { maxSide = DISPLAY_FILTER_MAX_SIDE } = {}) {
   const sw = Math.round(Number(src?.width)), sh = Math.round(Number(src?.height));
   if (!(sw > 0) || !(sh > 0)) return null;
   const bw = Math.round(Number(box?.width)), bh = Math.round(Number(box?.height));
   if (!(bw > 0) || !(bh > 0)) return { width: sw, height: sh };
+  if (!box.contain) {
+    const fit = Math.min(1, maxSide / bw, maxSide / bh);
+    return { width: Math.max(1, Math.round(bw * fit)), height: Math.max(1, Math.round(bh * fit)) };
+  }
   let scale = Math.min(bw / sw, bh / sh, maxSide / sw, maxSide / sh);
   let width = Math.max(1, Math.round(sw * scale));
   let height = Math.max(1, Math.round(sh * scale));
@@ -284,8 +292,10 @@ fn tap(p: vec2i, size: vec2i) -> vec3f {
   let h = tap(ip + vec2i(0, 1), size);
   let mn4 = min(min(b, d), min(f, h));
   let mx4 = max(max(b, d), max(f, h));
-  let hitMin = mn4 / (4.0 * mx4);
-  let hitMax = (1.0 - mx4) / (4.0 * mn4 - 4.0);
+  // As ffx_fsr1 1.0.2: the centre in the min/max; denominators held off 0
+  // (a black or a white cross would divide by zero: NaN on some drivers).
+  let hitMin = min(mn4, e) / max(4.0 * mx4, vec3f(1.0 / 32768.0));
+  let hitMax = (1.0 - max(mx4, e)) / min(4.0 * mn4 - 4.0, vec3f(-1.0 / 32768.0));
   let lobeC = max(-hitMin, hitMax);
   let limit = 0.25 - (1.0 / 16.0);
   let lobe = max(-limit, min(max(lobeC.r, max(lobeC.g, lobeC.b)), 0.0)) * P.sharp.x;
@@ -339,8 +349,10 @@ export function createDisplayFilter(device, format, { timing = false } = {}) {
   const timed = timing && Boolean(device.features?.has?.("timestamp-query"));
   const querySet = timed ? device.createQuerySet({ label: "display-filter-time", type: "timestamp", count: 2 }) : null;
   const resolve = timed ? device.createBuffer({ label: "display-filter-time-resolve", size: 16, usage: GPUBufferUsage.QUERY_RESOLVE | GPUBufferUsage.COPY_SRC }) : null;
-  const freeSlots = timed ? Array.from({ length: TIMING_SLOTS }, () =>
+  const allSlots = timed ? Array.from({ length: TIMING_SLOTS }, () =>
     device.createBuffer({ label: "display-filter-time-read", size: 16, usage: GPUBufferUsage.COPY_DST | GPUBufferUsage.MAP_READ })) : [];
+  const freeSlots = [...allSlots];
+  let destroyed = false;
   // This frame's timestamp writes: [first pass, last pass] (null: not timed).
   let frameTimes = null;
 
@@ -426,7 +438,7 @@ export function createDisplayFilter(device, format, { timing = false } = {}) {
           frameTimes = null;
           // Mapped once the frame's submit ran (the caller submits this
           // encoder now): never waited on.
-          queueMicrotask(() => slot.mapAsync(GPUMapMode.READ).then(() => {
+          queueMicrotask(() => !destroyed && slot.mapAsync(GPUMapMode.READ).then(() => {
             const t = new BigUint64Array(slot.getMappedRange());
             const ms = t[1] > t[0] ? Number(t[1] - t[0]) / 1e6 : 0;
             slot.unmap();
@@ -451,7 +463,9 @@ export function createDisplayFilter(device, format, { timing = false } = {}) {
       for (const b of Object.values(uniforms)) b.destroy();
       querySet?.destroy();
       resolve?.destroy();
-      for (const b of freeSlots) b.destroy();
+      // Slots still mapping too: their mapAsync rejects, ignored.
+      destroyed = true;
+      for (const b of allSlots) b.destroy();
     }
   };
 }

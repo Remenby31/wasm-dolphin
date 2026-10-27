@@ -6743,9 +6743,9 @@ async function createWebGpuPresenter(canvas) {
   console.log("[wgpu-features] got=" + (haveFeatures.join(",") || "none") +
               " missing=" + (wantFeatures.filter((f) => !haveFeatures.includes(f)).join(",") || "none") +
               " masked=" + ([...wgpuMaskedFeatures].join(",") || "none"));
-  // timestamp-query: only read by the display filter's GPU timing, with
-  // metrics on (drop-meter); asking for it costs nothing otherwise.
-  if (adapter.features?.has("timestamp-query") && !wgpuMaskedFeatures.has("timestamp-query")) haveFeatures.push("timestamp-query");
+  // timestamp-query: the display filter's GPU timing, metrics on only
+  // (drop-meter); the player's device is created as before.
+  if (collectMetrics && adapter.features?.has("timestamp-query") && !wgpuMaskedFeatures.has("timestamp-query")) haveFeatures.push("timestamp-query");
   const device = await adapter.requestDevice(
     haveFeatures.length ? { requiredFeatures: haveFeatures } : undefined);
   rendererDiagnostics.device = {
@@ -13294,6 +13294,12 @@ function setWgpuDisplayFilter(payload = {}) {
     [wgpuBackbufferW, wgpuBackbufferH] = wgpuBackbufferSize();
   }
   if (renderGpu && renderCanvas && (wasActive || wgpuDisplayFilterActive())) applyWgpuCanvasSize();
+  // Off: its textures, buffers and timing reads go (made again when on).
+  if (wasActive && !wgpuDisplayFilterActive()) {
+    wgpuDisplayFilterGpu?.destroy();
+    wgpuDisplayFilterGpu = null;
+    wgpuDisplayFilterDevice = null;
+  }
 }
 
 // Size the canvas: the backbuffer, or with the display filter the display

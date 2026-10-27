@@ -253,7 +253,13 @@ test("widescreen reaches the core at boot and while a game runs; the backbuffer 
   const core = await read("../core/upstream/dolphin_web_core.cpp");
   assert.match(core, /Module\['dolphinWidescreen'\]/);
   assert.match(core, /int DolphinWeb_SetWidescreen\(int on\)/);
-  assert.match(core, /Config::SetBase\(Config::GFX_WIDESCREEN_HACK, wide\);\n {2}Config::SetBase\(Config::GFX_ASPECT_RATIO, wide \? AspectMode::ForceWide : AspectMode::Stretch\);/);
+  // Stretch stays: ForceWide pillarboxed the 16:9 picture (review of #300).
+  assert.match(core, /Config::SetBase\(Config::GFX_WIDESCREEN_HACK, wide\);\n {2}return wide \? 1 : 0;/);
+  assert.doesNotMatch(core, /AspectMode::ForceWide/);
+  // The engine page's screen follows the picture's aspect.
+  const app = await read("../src/app.js");
+  assert.match(app, /if \(host\.enhancements\?\.widescreen\) select\.value = "16:9";/);
+  assert.match(app, /window\.addEventListener\("wgpuaspect"/);
   const patch = await read("../patches/dolphin-wasm/snapshot/0178-webgpu-widescreen-backbuffer.patch");
   assert.match(patch, /\+  const u32 width = g_ActiveConfig\.bWidescreenHack \? \(\(2560 \* scale \+ 2\) \/ 3\) & ~1u : 640 \* scale;/);
   assert.match(patch, /CONFIG_CHANGE_BIT_TARGET_SIZE \| CONFIG_CHANGE_BIT_ASPECT_RATIO/);

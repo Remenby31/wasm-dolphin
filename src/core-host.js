@@ -126,6 +126,7 @@ export class EmulatorHost {
     // present; setDisplayFilter changes it while a game runs.
     this.displayFilter = requestedDisplayFilter(window.location.search);
     this.displayBoxObserver = null;
+    this.displayBoxObserved = null;
     if (displayFilterFits(this.displayFilter)) this.watchDisplayBox();
     // 1 once a device was lost above 1x (internalResolutionCeiling()).
     this.scaleLostCeiling = 4;
@@ -372,6 +373,8 @@ export class EmulatorHost {
       // Re-point the host's reference and the elements registry.
       canvas = replacement;
       this.canvas = replacement;
+      // The display filter's box is the new element's.
+      this.observeDisplayCanvas();
       const off = replacement.transferControlToOffscreen();
       off.id = "canvas";
       return off;
@@ -961,11 +964,21 @@ export class EmulatorHost {
       this.enhancements.internalResolution = clampInternalResolution(internalResolution, ceiling);
     }
     if (anisotropy !== undefined) this.enhancements.maxAnisotropy = anisotropyToCore(anisotropy);
-    if (widescreen !== undefined) this.enhancements.widescreen = widescreen === true;
+    if (widescreen !== undefined) {
+      this.enhancements.widescreen = widescreen === true;
+      this.announceAspect();
+    }
     if (this.mode !== "dolphin" || typeof this.adapter?.setEnhancements !== "function") {
       return { applied: false, reason: "core-not-loaded" };
     }
     return this.adapter.setEnhancements(this.enhancements);
+  }
+
+  // The picture's aspect, for the page's layout (app.js follows it): 16:9
+  // with widescreen (patch 0178), else 4:3. A "wgpuaspect" event on window.
+  announceAspect() {
+    const [w, h] = this.enhancements.widescreen ? [16, 9] : [4, 3];
+    globalThis.dispatchEvent?.(new CustomEvent("wgpuaspect", { detail: { w, h } }));
   }
 
   // Display filter: sharpness "off" | "light" | "strong" (FSR1 RCAS after an
@@ -987,22 +1000,35 @@ export class EmulatorHost {
   // The canvas element's size in device pixels, for the display filter's
   // canvas (devicePixelContentBoxSize: exact, follows zoom and moves between
   // screens).
+  // contain: the element is laid out with object-fit: contain (the picture
+  // keeps its aspect inside the box), else the canvas is stretched to it.
   watchDisplayBox() {
     if (this.displayBoxObserver || typeof ResizeObserver !== "function" || !this.canvas) return;
     this.displayBoxObserver = new ResizeObserver((entries) => {
       const entry = entries.at(-1);
       const device = entry?.devicePixelContentBoxSize?.[0];
       const ratio = globalThis.devicePixelRatio || 1;
+      const contain = globalThis.getComputedStyle?.(entry.target)?.objectFit === "contain";
       const box = device
-        ? { width: device.inlineSize, height: device.blockSize }
-        : { width: Math.round(entry.contentRect.width * ratio), height: Math.round(entry.contentRect.height * ratio) };
+        ? { width: device.inlineSize, height: device.blockSize, contain }
+        : { width: Math.round(entry.contentRect.width * ratio), height: Math.round(entry.contentRect.height * ratio), contain };
       this.displayFilter = normalizeDisplayFilter({ ...this.displayFilter, box });
       if (displayFilterFits(this.displayFilter)) this.adapter?.setDisplayFilter?.({ box: this.displayFilter.box })?.catch?.(() => {});
     });
+    this.observeDisplayCanvas();
+  }
+
+  // (Re)observe this.canvas: after replaceCanvasForWorker the old element is
+  // gone from the page.
+  observeDisplayCanvas() {
+    const observer = this.displayBoxObserver;
+    if (!observer || !this.canvas || this.displayBoxObserved === this.canvas) return;
+    if (this.displayBoxObserved) observer.unobserve(this.displayBoxObserved);
+    this.displayBoxObserved = this.canvas;
     try {
-      this.displayBoxObserver.observe(this.canvas, { box: "device-pixel-content-box" });
+      observer.observe(this.canvas, { box: "device-pixel-content-box" });
     } catch {
-      this.displayBoxObserver.observe(this.canvas);
+      observer.observe(this.canvas);
     }
   }
 

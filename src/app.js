@@ -690,7 +690,14 @@ function wireAspectSelect() {
   let saved = null;
   try { saved = localStorage.getItem("wasmDolphinAspect"); } catch {}
   if (saved && [...select.options].some((o) => o.value === saved)) select.value = saved;
+  // Widescreen (patch 0178) draws 16:9: the screen follows the picture,
+  // at boot and when it is switched (core-host's "wgpuaspect").
+  if (host.enhancements?.widescreen) select.value = "16:9";
   apply(select.value);
+  window.addEventListener("wgpuaspect", (event) => {
+    select.value = `${event.detail.w}:${event.detail.h}`;
+    apply(select.value);
+  });
   select.addEventListener("change", () => {
     apply(select.value);
     try { localStorage.setItem("wasmDolphinAspect", select.value); } catch {}

@@ -24,22 +24,33 @@ test("?fsr= and ?displayfit= parse to the filter's state; any sharpness fits the
   assert.deepEqual(requestedDisplayFilter("?displayfit=1"), { sharpness: "off", fit: true, box: null });
   assert.deepEqual(requestedDisplayFilter("?fsr=max&displayfit=yes"), { sharpness: "off", fit: false, box: null });
   assert.deepEqual(normalizeDisplayFilter({ sharpness: "off", fit: true, box: { width: 1600.4, height: 1200 } }),
-    { sharpness: "off", fit: true, box: { width: 1600, height: 1200 } });
+    { sharpness: "off", fit: true, box: { width: 1600, height: 1200, contain: false } });
   assert.equal(normalizeDisplayFilter({ box: { width: 0, height: 10 } }).box, null);
   assert.deepEqual(["off", "light", "strong"].map(rcasSharpnessStops), [null, 1, 0.2]);
 });
 
-test("the canvas is the display box at the backbuffer's aspect, capped; no box keeps the backbuffer", () => {
+test("the canvas is the display box (stretched like the browser would), or the backbuffer's aspect inside it with object-fit: contain", () => {
   const bb = { width: 640, height: 480 };
   assert.deepEqual(displayFilterOutputSize(bb, null), { width: 640, height: 480 });
   assert.deepEqual(displayFilterOutputSize(bb, { width: 2560, height: 1920 }), { width: 2560, height: 1920 });
-  // A box a pixel off the aspect (device-pixel rounding): the box itself.
-  assert.deepEqual(displayFilterOutputSize(bb, { width: 1601, height: 1200 }), { width: 1601, height: 1200 });
-  // A wider box (the page stretches or letterboxes): fitted inside it.
-  assert.deepEqual(displayFilterOutputSize(bb, { width: 3000, height: 1200 }), { width: 1600, height: 1200 });
+  // The engine page: the box follows its aspect selector, not the
+  // backbuffer: a 16:9 backbuffer in a 4:3 box is drawn 4:3 (review of #300:
+  // fitting it made the browser stretch the filtered picture again).
+  assert.deepEqual(displayFilterOutputSize({ width: 854, height: 480 }, { width: 1600, height: 1200 }), { width: 1600, height: 1200 });
+  assert.deepEqual(displayFilterOutputSize(bb, { width: 3000, height: 1200 }), { width: 3000, height: 1200 });
+  // The site's frame (object-fit: contain): the backbuffer's aspect inside.
+  assert.deepEqual(displayFilterOutputSize(bb, { width: 3000, height: 1200, contain: true }), { width: 1600, height: 1200 });
+  assert.deepEqual(displayFilterOutputSize(bb, { width: 1601, height: 1200, contain: true }), { width: 1601, height: 1200 });
+  assert.deepEqual(displayFilterOutputSize({ width: 854, height: 480 }, { width: 1920, height: 1080, contain: true }), { width: 1920, height: 1080 });
+  assert.deepEqual(displayFilterOutputSize(bb, { width: 8000, height: 6000, contain: true }, { maxSide: 5120 }), { width: 5120, height: 3840 });
   assert.deepEqual(displayFilterOutputSize(bb, { width: 8000, height: 6000 }, { maxSide: 5120 }), { width: 5120, height: 3840 });
-  assert.deepEqual(displayFilterOutputSize({ width: 854, height: 480 }, { width: 1920, height: 1080 }), { width: 1920, height: 1080 });
   assert.equal(displayFilterOutputSize({ width: 0, height: 480 }, null), null);
+});
+
+test("RCAS: ffx_fsr1's min/max with the centre, denominators held off zero", async () => {
+  const { RCAS_WGSL } = await import("../src/wgpu-display-filter.js");
+  assert.match(RCAS_WGSL, /let hitMin = min\(mn4, e\) \/ max\(4\.0 \* mx4, vec3f\(1\.0 \/ 32768\.0\)\);/);
+  assert.match(RCAS_WGSL, /let hitMax = \(1\.0 - max\(mx4, e\)\) \/ min\(4\.0 \* mn4 - 4\.0, vec3f\(-1\.0 \/ 32768\.0\)\);/);
 });
 
 test("plans: EASU up, area down, RCAS by sharpness, a copy when nothing is to be done", () => {
@@ -72,6 +83,10 @@ test("the display filter reaches the worker through the host, the adapter and th
   adapter.request = async (type, payload) => { sent.push([type, payload]); return { applied: true }; };
   await adapter.setDisplayFilter({ sharpness: "strong" });
   assert.deepEqual(sent, [["setDisplayFilter", { sharpness: "strong", fit: false, box: { width: 10, height: 10 } }]]);
+  // A replaced canvas element is observed instead of the old one.
+  const hostSource = await read("../src/core-host.js");
+  assert.match(hostSource, /this\.canvas = replacement;\n\s+\/\/[^\n]*\n\s+this\.observeDisplayCanvas\(\);/);
+  assert.match(hostSource, /if \(this\.displayBoxObserved\) observer\.unobserve\(this\.displayBoxObserved\);/);
   const host = await read("../src/core-host.js");
   assert.match(host, /\n {12}displayFilter: this\.displayFilter,\n/);
   const adapterSource = await read("../src/upstream-worker-adapter.js");

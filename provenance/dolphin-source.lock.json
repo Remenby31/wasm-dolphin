@@ -25,7 +25,7 @@
       "commit": "01e0577914a75a2569c846778c2f93aa8e6feddd"
     }
   },
-  "patchSeriesSha256": "f02cf5e0d6b9fb28e962796dbf5fa217ca9e7704aff0f2abb51c0eba22ba3188",
+  "patchSeriesSha256": "b54ed1faf27456d8fd2ef7077ab546c7f195e82112ced6e9fbb9129820fdd85e",
   "patches": [
     {
       "order": 1,
@@ -1056,8 +1056,8 @@
       "cwd": ".",
       "hashMode": "lf-normalized",
       "path": "patches/dolphin-wasm/snapshot/0178-webgpu-widescreen-backbuffer.patch",
-      "size": 1737,
-      "sha256": "072766e6d9d7010cb74c08ffa717ba887d3f147bc0b289d582ced6ac07570cb4"
+      "size": 1695,
+      "sha256": "9fedd039af13d2cce21522f060a514ecea2d5c777713c8498a4da67e156b3177"
     },
     {
       "order": 130,

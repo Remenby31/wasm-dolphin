@@ -683,16 +683,17 @@ static int ApplyEnhancements(int efb_scale, int anisotropy)
 }
 
 // Patch 0178. Widescreen: Dolphin's generic widescreen hack (the 3D
-// projection widened to 16:9, no per-game code) with the presenter drawing
-// at 16:9 (ForceWide); WebGPUGfx then makes the backbuffer 16:9 and tells
-// the page. Off: the picture fills a 4:3 backbuffer (Stretch, as before).
-// WebGPU only (the software renderer ignores the hack's projection). Base
-// layer, applied by the video thread at its next frame. Returns 1 when on.
+// projection widened to the backbuffer's aspect, no per-game code);
+// WebGPUGfx makes the backbuffer 16:9 and tells the page. The aspect stays
+// Stretch: the picture fills the backbuffer, and the hack widens the view to
+// it. ForceWide would draw the analog 16:9 width (~38 px of black on each
+// side of 854). WebGPU only (the software renderer ignores the hack's
+// projection). Base layer, applied by the video thread at its next frame.
+// Returns 1 when on.
 static int ApplyWidescreen(int on)
 {
   const bool wide = s_video_backend == "WebGPU" && on == 1;
   Config::SetBase(Config::GFX_WIDESCREEN_HACK, wide);
-  Config::SetBase(Config::GFX_ASPECT_RATIO, wide ? AspectMode::ForceWide : AspectMode::Stretch);
   return wide ? 1 : 0;
 }
 
