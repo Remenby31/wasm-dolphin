@@ -511,7 +511,9 @@ export function regionRecord(reply) {
     // heap patches
     ...regionPipeline(reply),
     ...(reply.regionChain ? { regionChain: reply.regionChain } : {}),
-    ...(reply.regionCalls ? { regionCalls: reply.regionCalls } : {}) // 0142
+    ...(reply.regionCalls ? { regionCalls: reply.regionCalls } : {}), // 0142
+    ...(Array.isArray(reply.missTop) && reply.missTop.length ? { missTop: reply.missTop } : {}), // 0156
+    ...(Array.isArray(reply.diagMissTime) ? { diagMissTime: reply.diagMissTime } : {}) // 0182 (diagnostic)
   };
   return p4.error ? { p4: null, p4Why: p4.error, ...samples } : { p4, p4Raw: stats, ...samples };
 }

@@ -1,0 +1,186 @@
+diff --git a/Source/Core/Core/PowerPC/PowerPC.cpp b/Source/Core/Core/PowerPC/PowerPC.cpp
+--- a/Source/Core/Core/PowerPC/PowerPC.cpp
++++ b/Source/Core/Core/PowerPC/PowerPC.cpp
+@@ -1,6 +1,7 @@
+ // Copyright 2008 Dolphin Emulator Project
+ // SPDX-License-Identifier: GPL-2.0-or-later
+ 
++#include <chrono>
+ #include "Core/PowerPC/PowerPC.h"
+ 
+ #include <algorithm>
+@@ -472,9 +473,35 @@
+     ppc_state.Exceptions |= EXCEPTION_PERFORMANCE_MONITOR;
+   }
+ }
++
++#ifdef __EMSCRIPTEN__
++// Patch 0182 (diagnostic, never merged): host time in exception checks and
++// delivery while the region stats time blocks (CachedInterpreter.cpp).
++extern bool g_dolphinweb_diag_exc_on;
++extern double g_dolphinweb_diag_exc_ms;
++namespace
++{
++struct DiagExcTimer
++{
++  bool on = g_dolphinweb_diag_exc_on;
++  std::chrono::steady_clock::time_point start =
++      on ? std::chrono::steady_clock::now() : std::chrono::steady_clock::time_point{};
++  ~DiagExcTimer()
++  {
++    if (on)
++      g_dolphinweb_diag_exc_ms +=
++          std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now() - start)
++              .count();
++  }
++};
++}  // namespace
++#endif
+ 
+ void PowerPCManager::CheckExceptions()
+ {
++#ifdef __EMSCRIPTEN__
++  const DiagExcTimer diag_exc_timer;
++#endif
+   u32 exceptions = m_ppc_state.Exceptions;
+ 
+   // Example procedure:
+@@ -586,6 +613,9 @@
+ 
+ void PowerPCManager::CheckExternalExceptions()
+ {
++#ifdef __EMSCRIPTEN__
++  const DiagExcTimer diag_exc_timer;
++#endif
+   const u32 exceptions = m_ppc_state.Exceptions;
+ 
+   // EXTERNAL INTERRUPT
+diff --git a/Source/Core/Core/PowerPC/CachedInterpreter/CachedInterpreter.cpp b/Source/Core/Core/PowerPC/CachedInterpreter/CachedInterpreter.cpp
+--- a/Source/Core/Core/PowerPC/CachedInterpreter/CachedInterpreter.cpp
++++ b/Source/Core/Core/PowerPC/CachedInterpreter/CachedInterpreter.cpp
+@@ -94,6 +94,11 @@
+ #include <emscripten/stack.h>
+ #include <mbedtls/sha256.h>
+ 
++// Patch 0182 (diagnostic, never merged): exception time while a block call is
++// timed (PowerPC.cpp DiagExcTimer).
++bool g_dolphinweb_diag_exc_on = false;
++double g_dolphinweb_diag_exc_ms = 0;
++
+ #ifndef DOLPHIN_WEB_HOT_COUNTERS
+ #define DOLPHIN_WEB_HOT_COUNTERS 1
+ #endif
+@@ -10805,6 +10810,34 @@
+ // Patch 0156: while stats are on (timing or not), the guest cycles each
+ // chain of blocks ran outside the regions, by the PC it started at.
+ std::unordered_map<u32, double> s_miss_cycles;
++// Patch 0182 (diagnostic, never merged): per block-start PC outside the
++// regions, with timing on: host time of its ExecuteOneBlock calls (as block
++// time counts it), the part of it spent in exception checks and delivery,
++// and the calls; the 64 longest published by DolphinWeb_DiagMissTime.
++struct DiagMiss
++{
++  double time_ms = 0;
++  double exc_ms = 0;
++  u32 calls = 0;
++};
++std::unordered_map<u32, DiagMiss> s_diag_miss;
++struct DiagMissTop
++{
++  u32 seq = 0;
++  u32 count = 0;
++  struct Entry
++  {
++    double time_ms;
++    double exc_ms;
++    double cycles;
++    u32 pc;
++    u32 calls;
++  } entries[64] = {};
++  u32 seq_end = 0;
++  u32 pad = 0;
++};
++static_assert(sizeof(DiagMissTop) == 8 + 32 * 64 + 8);
++alignas(8) DiagMissTop s_diag_miss_top;
+ // Patch 0156: the MISS_TOP most costly of them, published by the CPU thread
+ // with the stats: {u32 seq, u32 count, then count x {f64 cycles, u32 pc,
+ // u32 0}, u32 seq again}; a reader that sees the two seq differ read a torn
+@@ -11492,6 +11525,33 @@
+     s_region_miss_top.entries[i] = i < n ? RegionMissTop::Entry{top[i].first, top[i].second, 0} :
+                                            RegionMissTop::Entry{0, 0, 0};
+   __atomic_store_n(&s_region_miss_top.seq_end, seq, __ATOMIC_RELEASE);
++  {
++    std::vector<std::pair<double, u32>> by_time;
++    by_time.reserve(s_diag_miss.size());
++    for (const auto& [pc, m] : s_diag_miss)
++      by_time.emplace_back(m.time_ms, pc);
++    const std::size_t k = std::min<std::size_t>(64, by_time.size());
++    std::partial_sort(by_time.begin(), by_time.begin() + k, by_time.end(), std::greater<>());
++    const u32 dseq = s_diag_miss_top.seq + 1;
++    __atomic_store_n(&s_diag_miss_top.seq, dseq, __ATOMIC_RELEASE);
++    s_diag_miss_top.count = static_cast<u32>(k);
++    for (std::size_t i = 0; i < 64; ++i)
++    {
++      if (i < k)
++      {
++        const u32 pc = by_time[i].second;
++        const DiagMiss& m = s_diag_miss[pc];
++        const auto c = s_miss_cycles.find(pc);
++        s_diag_miss_top.entries[i] = {m.time_ms, m.exc_ms, c == s_miss_cycles.end() ? 0 : c->second,
++                                      pc, m.calls};
++      }
++      else
++      {
++        s_diag_miss_top.entries[i] = {};
++      }
++    }
++    __atomic_store_n(&s_diag_miss_top.seq_end, dseq, __ATOMIC_RELEASE);
++  }
+   PublishTransitionTop();
+ }
+ 
+@@ -11511,6 +11571,7 @@
+     s_region_stats.installs_fast = kept.installs_fast;
+     s_region_stats.install_fallbacks = kept.install_fallbacks;
+     s_miss_cycles.clear();
++    s_diag_miss.clear();
+     ResetRegionChainStats();
+     s_region_stats.sample_every = static_cast<u32>(request);
+     s_last_timed_ms = 0;
+@@ -11755,6 +11816,13 @@
+ // Patch 0156: the guest cycles ran outside the regions by the PC a chain of
+ // blocks started at, the 64 most costly (RegionMissTop); while stats are on,
+ // timing or not, published by the CPU thread with the stats.
++// Patch 0182 (diagnostic): DiagMissTop, the 64 block-start PCs outside the
++// regions with the most host time, published with the stats.
++extern "C" EMSCRIPTEN_KEEPALIVE u32 DolphinWeb_DiagMissTime()
++{
++  return static_cast<u32>(reinterpret_cast<std::uintptr_t>(&s_diag_miss_top));
++}
++
+ extern "C" EMSCRIPTEN_KEEPALIVE u32 DolphinWeb_JitRegionMissTop()
+ {
+   return static_cast<u32>(reinterpret_cast<std::uintptr_t>(&s_region_miss_top));
+@@ -12539,8 +12607,11 @@
+         const u32 call_pc = m_ppc_state.pc;
+         const s32 call_downcount = m_ppc_state.downcount;
+         const double region_cycles_before = s_region_stats.region_cycles;
++        const double exc_before = g_dolphinweb_diag_exc_ms;
++        g_dolphinweb_diag_exc_on = true;
+         const auto start = std::chrono::steady_clock::now();
+         ExecuteOneBlock();
++        g_dolphinweb_diag_exc_on = false;
+         s_miss_cycles[call_pc] += static_cast<double>(call_downcount - m_ppc_state.downcount) -
+                                   (s_region_stats.region_cycles - region_cycles_before);
+         const double ms =
+@@ -12549,6 +12620,10 @@
+             s_clock_pair_ms - (s_region_stats.region_time_ms - region_before) -
+             (s_sampled_lookup_ms - lookups_before) - (s_region_stats.idle_time_ms - idle_before);
+         s_region_stats.block_time_ms += std::max(ms, 0.0);
++        DiagMiss& diag = s_diag_miss[call_pc];
++        diag.time_ms += std::max(ms, 0.0);
++        diag.exc_ms += g_dolphinweb_diag_exc_ms - exc_before;
++        ++diag.calls;
+         continue;
+       }
+       if (region_stats)
