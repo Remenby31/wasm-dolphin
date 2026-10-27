@@ -71,7 +71,7 @@ test("worker loss integration stops replay and reapplies the geometry epoch", as
     new URL("../src/upstream-discio-worker.js", import.meta.url),
     "utf8"
   );
-  assert.match(worker, /device\.lost\.then\(\(info\) => \{[\s\S]*?handleWgpuDeviceLoss\(\{/);
+  assert.match(worker, /device\.lost\.then\(async \(info\) => \{[\s\S]*?handleWgpuDeviceLoss\(\{/);
   assert.match(worker, /cancelReplay: cancelWgpuReplayPump/);
   assert.match(worker, /clearReplayState: clearWgpuReplayStateAfterDeviceLoss/);
   assert.match(

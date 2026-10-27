@@ -102,6 +102,7 @@ try {
   await session.page.waitForTimeout(Number(o.settle) * 1000);
   results.before = await shot(session.page, `before-ir${o.ir}`);
   await session.page.evaluate(() => {
+    window.__host.onGpuRecovering = (event) => { window.__wgpuRecovering = { ...event, at: performance.now() }; };
     window.__host.onGpuDeviceLost = (event) => {
       const { state, ...rest } = event;
       let b64 = "";
@@ -115,11 +116,19 @@ try {
     };
   });
   const lostAt = await session.page.evaluate(() => performance.now());
+  const frameAtLoss = (await readCoreProgress(session.page))?.frame ?? 0;
   const lose = await workerRequest(session.page, "validationLoseWebGpuDevice", {}, 10000);
   await session.page.waitForFunction(() => window.__wgpuLost, null, { timeout: 60000 });
   const event = await session.page.evaluate(() => window.__wgpuLost);
+  const recovering = await session.page.evaluate(() => window.__wgpuRecovering ?? null);
+  const framesLossToEvent = ((await readCoreProgress(session.page))?.frame ?? 0) - frameAtLoss;
   const { b64, at, ...rest } = event;
-  results.lost = { lose, event: rest, eventAfterMs: Math.round(at - lostAt), afterEvent: await progressOver(session.page, 2000) };
+  results.lost = {
+    lose, event: rest, eventAfterMs: Math.round(at - lostAt),
+    recoveringAfterMs: recovering ? Math.round(recovering.at - lostAt) : null,
+    framesLossToEvent, afterEvent: await progressOver(session.page, 2000)
+  };
+  if (!recovering) failed = true;
   if (!rest.paused || !rest.stateBytes) failed = true;
   if (results.lost.afterEvent.frames !== 0) failed = true;
   if (b64) {

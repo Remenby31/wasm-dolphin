@@ -176,6 +176,7 @@ export class UpstreamWorkerAdapter {
     wgpuMappedDrainCoalescing = false,
     wgpuRendererWorkerProbe = "off",
     wgpuVisualCadence = false,
+    wgpuSessionRecover = false,
     wgpuPipelinePrewarm = true,
     gpuCompletionDiagnostics = false,
     wgpuDirtyRangeProjection = false,
@@ -326,6 +327,8 @@ export class UpstreamWorkerAdapter {
       "canary", "inline-upload", "worker-upload", "null-drain"
     ]).has(wgpuRendererWorkerProbe) ? wgpuRendererWorkerProbe : "off";
     this.wgpuVisualCadence = Boolean(wgpuVisualCadence);
+    // ?wgpurecover=1: the worker pauses the core as soon as the device is lost.
+    this.wgpuSessionRecover = Boolean(wgpuSessionRecover);
     this.wgpuPipelinePrewarm = wgpuPipelinePrewarm !== false;
     this.gpuCompletionDiagnostics = Boolean(gpuCompletionDiagnostics);
     this.wgpuDirtyRangeProjection = Boolean(wgpuDirtyRangeProjection);
@@ -571,6 +574,7 @@ export class UpstreamWorkerAdapter {
       wgpuMappedDrainCoalescing: this.wgpuMappedDrainCoalescing,
       wgpuRendererWorkerProbe: this.wgpuRendererWorkerProbe,
       wgpuVisualCadence: this.wgpuVisualCadence,
+      wgpuSessionRecover: this.wgpuSessionRecover,
       wgpuPipelinePrewarm: this.wgpuPipelinePrewarm,
       gpuCompletionDiagnostics: this.gpuCompletionDiagnostics,
       wgpuDirtyRangeProjection: this.wgpuDirtyRangeProjection,
@@ -1291,7 +1295,9 @@ export class UpstreamWorkerAdapter {
         this.onGpuDeviceLost({
           internalResolution: Number(message.internalResolution) || 1,
           reason: String(message.reason ?? "unknown"),
-          detail: String(message.detail ?? "")
+          detail: String(message.detail ?? ""),
+          // ?wgpurecover=1: the worker's pause at the loss.
+          ...(message.pause ? { pause: message.pause } : {})
         });
       } catch (error) {
         this.onStatus(`Device loss handler failed: ${error instanceof Error ? error.message : error}`);

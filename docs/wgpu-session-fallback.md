@@ -132,9 +132,10 @@ the worker's device swap. Its only gain over (b) is the time of a new boot.
 
 ## Path (b): save state, new boot, load
 
-1. On the loss, pause the core at once (the game must not run blind) and
-   take a save state in memory (`exportSaveState({ slot: 0 })`, which the
-   worker already offers).
+1. On the loss, pause the core in the worker's `device.lost` handler,
+   before the page hears of it (the game must not run blind), then take a
+   save state in memory (`exportSaveState({ slot: 0 })`, which the worker
+   already offers).
 2. Restart the engine as today, one scale lower; lost at 1x, on a new
    WebGPU device at 1x or on the software renderer.
 3. Load the state (`importSaveState` / the site's `loadState(bytes)`).
@@ -145,26 +146,44 @@ Everything it uses exists and works in JavaScript, without a core change.
 | --- | --- |
 | Cost | a pause, a save (0.8 to 1.0 s, 28 to 35 MB at 1x-2x, docs/internal-resolution.md), a new boot, a load (about 1.2 s). The page holds the state in memory across the restart. |
 | Kept | the game where it was, to the frame of the pause; memory cards (flushed by the pause). |
-| Lost | the frame or two between the loss and the pause; EFB and EFB copies are stale for the first frame(s) after the load (see above). |
+| Lost | the frames between the loss and the worker's `device.lost` handler; EFB and EFB copies are stale for the first frame(s) after the load (see above). |
 | Risks | a state belongs to one core build: the restart must boot the same engine (the site restarts from the same URL, so it does). A state taken on the WebGPU renderer loads on the software one (checked below), its speed on heavy 3D scenes was not checked here: a fallback to keep the session, not a promise of full speed. |
 
-What the page sees, with `?wgpurecover=1`: `onGpuDeviceLost` comes once
-the core is paused and saved (not at once), with four more fields:
+What the page sees, with `?wgpurecover=1`:
+
+1. The worker pauses the core in its `device.lost` handler (Dolphin's
+   pause, waited for 3 s at most), then posts `wgpu-device-lost` with
+   `pause: { state, changed }` or `pause: { error }`.
+2. At once, `onStatus("WebGPU device lost: keeping the session ...")` and
+   **`onGpuRecovering({ internalResolution, fallback, reason })`**, a new
+   host callback: the page can show "the graphics card stopped, resuming"
+   while the state is taken. The page should not restart before step 3.
+3. `onGpuDeviceLost` once the state is taken (without the switch it comes
+   as soon as the worker's message arrives), with five more fields:
 
 | Field | |
 | --- | --- |
-| `paused` | the core was paused where the device went |
+| `paused` | the core is paused where the device went |
+| `pauseChanged` | the recovery paused it; `false`: the player had already paused the game, keep it paused after the restart |
 | `state` | `ArrayBuffer` of the save state, or `null` |
 | `stateGameId` | the disc ID in the state's header |
 | `stateError` | why the pause or the save failed ("" when both worked) |
 
-A worker that never answers cannot hold the restart: each step gives up
-after 20 s, and the event comes with `state: null` and the reason. Without
-the switch nothing changes: the event comes at once, as before.
+`onGpuDeviceLost` always comes, whatever fails on the way (it is called
+from a `finally`). A worker that never answers cannot hold the restart: the
+host's pause (only for a worker that did not pause itself) gives up after
+5 s and then skips the save, since the worker is not answering; a pause
+the core refused still saves. The save gives up after 20 s. At most 25 s
+pass between `onGpuRecovering` and `onGpuDeviceLost`, with
+`state: null` and the reason when they time out. Without the switch nothing
+changes: `onGpuDeviceLost` comes as soon as the worker's message arrives,
+as before, and `onGpuRecovering` is never called.
 
 The site's part (Salon, not in this repository): in the `gpulost` handler,
-keep `state` (the engine host must pass it through its `emit`), restart as
-today, then `loadState(bytes)` once the disc is mounted and the core runs.
+keep `state` (the engine host must pass it through its `emit`, and pass
+`onGpuRecovering` on as an event to show), restart as today, then
+`loadState(bytes)` once the disc is mounted and the core runs; pause again
+when `pauseChanged` is false.
 Lost at 1x: restart once on WebGPU at 1x (a GPU process reset is usually
 transient), then on the software renderer (`setRenderer({ video:
 "software" })`, which the site already does for discs that need the
@@ -200,7 +219,8 @@ Follow-ups:
 | --- | --- |
 | Without the switch, after the loss | the core ran 99 frames in 3 s: the game goes on, blind |
 | Save state after the loss, without a pause | 25.6 MB in 0.4 s |
-| With `?wgpurecover=1` | `onGpuDeviceLost` 0.45 s after the loss, `paused: true`, 25.5 MB state, no error; 0 frames in the next 2 s |
+| With `?wgpurecover=1`, the host pausing (first version) | `onGpuDeviceLost` 0.45 s after the loss, `paused: true`, 25.5 MB state, no error; 0 frames in the next 2 s. The game ran blind until the host's pause |
+| With `?wgpurecover=1`, the worker pausing (00:39, load about 8) | `onGpuRecovering` 2 ms after the loss, `onGpuDeviceLost` 0.46 s after, `paused: true`, `pauseChanged: true`, 25.5 MB state; 0 frames from the loss to the event and in the next 2 s; resumed on WebGPU at 1x (97 frames in 3 s, no renderer error) |
 | That state, new boot on WebGPU at 1x | loaded, 91 frames in 3 s, no renderer error, the race goes on from the state (picture checked by eye) |
 | That state, new boot on the software renderer | loaded, 180 frames in 3 s, no renderer error, the race goes on (checked by eye) |
 

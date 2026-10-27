@@ -74,7 +74,7 @@ const SAFE_JIT_WARMUP_FRAMES = 5000;
 const DEFAULT_JIT_WARMUP_FRAMES = 60;
 
 export class EmulatorHost {
-  constructor({ canvas, onFrame = () => {}, onStatus = () => {}, onMode = () => {}, onGpuDeviceLost = () => {} }) {
+  constructor({ canvas, onFrame = () => {}, onStatus = () => {}, onMode = () => {}, onGpuDeviceLost = () => {}, onGpuRecovering = () => {} }) {
     this.canvas = canvas;
     this.onFrame = onFrame;
     this.onStatus = onStatus;
@@ -82,9 +82,12 @@ export class EmulatorHost {
     // { internalResolution, fallback, reason, detail }: the WebGPU device was
     // lost (the game stops). fallback 1: it was above 1x, the next boot of
     // this host and every setEnhancements stay at 1x. With ?wgpurecover=1
-    // it comes once the core is paused and saved, with { paused, state,
-    // stateGameId, stateError } (docs/wgpu-session-fallback.md).
+    // it comes once the core is paused and saved, with { paused,
+    // pauseChanged, state, stateGameId, stateError }, after
+    // onGpuRecovering({ internalResolution, fallback, reason }) at the start
+    // of the save (docs/wgpu-session-fallback.md).
     this.onGpuDeviceLost = onGpuDeviceLost;
+    this.onGpuRecovering = onGpuRecovering;
     this.wgpuSessionRecover = requestedWgpuSessionRecover(window.location.search);
 
     this.demo = null;
@@ -560,6 +563,7 @@ export class EmulatorHost {
             wgpuMappedDrainCoalescing: this.wgpuMappedDrainCoalescing,
             wgpuRendererWorkerProbe: this.wgpuRendererWorkerProbe,
             wgpuVisualCadence: this.wgpuVisualCadence,
+            wgpuSessionRecover: this.wgpuSessionRecover,
             wgpuPipelinePrewarm: this.wgpuPipelinePrewarm,
             gpuCompletionDiagnostics: this.gpuCompletionDiagnostics,
             wgpuDirtyRangeProjection: this.wgpuDirtyRangeProjection,
@@ -991,7 +995,7 @@ export class EmulatorHost {
       : adapter;
   }
 
-  handleGpuDeviceLost({ internalResolution = 1, reason = "unknown", detail = "" } = {}) {
+  handleGpuDeviceLost({ internalResolution = 1, reason = "unknown", detail = "", pause = null } = {}) {
     const fallback = internalResolution > 1 ? 1 : null;
     if (fallback) {
       this.scaleLostCeiling = fallback;
@@ -1003,16 +1007,36 @@ export class EmulatorHost {
       this.onGpuDeviceLost(event);
       return null;
     }
-    return captureSessionAfterDeviceLoss(this.adapter).then((session) => {
+    return this.recoverSessionAfterDeviceLoss(event, pause);
+  }
+
+  // ?wgpurecover=1: tell the page a recovery runs, keep the paused session,
+  // then always hand the loss to the page, whatever failed on the way.
+  async recoverSessionAfterDeviceLoss(event, workerPause) {
+    const describe = (error) => (error instanceof Error ? error.message : String(error));
+    this.onStatus("WebGPU device lost: keeping the session (pause, save state)");
+    try {
+      this.onGpuRecovering({ internalResolution: event.internalResolution, fallback: event.fallback, reason: event.reason });
+    } catch (error) {
+      this.onStatus(`Device loss recovery handler failed: ${describe(error)}`);
+    }
+    let session = { paused: false, pauseChanged: false, state: null, stateGameId: "", stateError: "" };
+    try {
+      session = await captureSessionAfterDeviceLoss(this.adapter, { workerPause });
       this.onStatus(session.state
         ? `Session kept after the device loss (${session.state.byteLength} bytes)`
         : `Session not kept after the device loss: ${session.stateError}`);
-      this.onGpuDeviceLost({ ...event, ...session });
-      return session;
-    }).catch((error) => {
-      this.onStatus(`Device loss handler failed: ${error instanceof Error ? error.message : error}`);
-      return null;
-    });
+    } catch (error) {
+      session = { ...session, stateError: describe(error) };
+      this.onStatus(`Session not kept after the device loss: ${session.stateError}`);
+    } finally {
+      try {
+        this.onGpuDeviceLost({ ...event, ...session });
+      } catch (error) {
+        this.onStatus(`Device loss handler failed: ${describe(error)}`);
+      }
+    }
+    return session;
   }
 
   setAudioMuted(muted) {
