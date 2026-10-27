@@ -129,6 +129,7 @@ import {
 } from "./wgpu-mapped-staging-pool.js";
 import { createWgpuSparseUboCopyForward } from "./wgpu-sparse-ubo-copy-forward.js";
 import { createVsyncQueue, vsyncLateMs } from "./wgpu-vsync-queue.js";
+import { createGamePacer, createRefreshHistogram } from "./wgpu-game-pacer.js";
 import {
   WGPU_MAPPED_DRAIN_FORCE_REASONS,
   createWgpuMappedDrainCoalescer
@@ -1737,6 +1738,7 @@ async function handleMessage(type, payload) {
         sleepK: payload.sleepK,
         sleepSpinUs: payload.sleepSpinUs,
         presentVsync: payload.presentVsync,
+        presentGamePace: payload.presentGamePace,
         coreLog: payload.coreLog,
         memcardSlotB: payload.memcardSlotB,
         internalResolution: payload.internalResolution,
@@ -2542,6 +2544,7 @@ async function loadCore({
   sleepK = 750,
   sleepSpinUs = 150,
   presentVsync = true,
+  presentGamePace = false,
   coreLog = false,
   memcardSlotB = false,
   internalResolution = 1,
@@ -3046,6 +3049,9 @@ async function loadCore({
   // Not with the detached presenter: it shows a bitmap of the canvas, which
   // the vsync presenter fills only at its rAF (a stale picture).
   wgpuPresentVsync = presentVsync !== false && typeof self.requestAnimationFrame === "function" && !wgpuDetachedPresenter;
+  wgpuPresentGamePace = presentGamePace === true;
+  wgpuGamePacer.reset({ arrival: true });
+  wgpuRefreshHistogram.reset();
   releaseWgpuReadback();
   moduleInstance = await factory({
     noInitialRun: true,
@@ -5081,6 +5087,9 @@ function framePayload({ forceCausalTelemetry = false } = {}) {
       // geometry flowing into the EFB, are pipes/bind-groups missing,
       // are draws being poison-guard-skipped).
       ` jitc:${dolphinJitCacheMap.size}/${dolphinJitNewCompileCount}` +
+      // refreshes each game frame stayed on screen (1/2/3/4+), refreshes
+      // beyond its share, the screen's Hz and the game pace (on/off)
+      (wgpuPresentVsync ? ` refresh:${wgpuRefreshHistogram.counts.join("/")}/rep${wgpuRefreshHistogram.repeats}/hz${Math.round(1000 / (wgpuVsyncRefreshMs() || 1000 / 60))}/${wgpuPresentGamePace ? "pace" : "nopace"}` : "") +
       ` wgx:d${webGpuExecStats.drawIdx}/mp${webGpuExecStats.missPipe}` +
       `/mb${webGpuExecStats.missBg}/sk${webGpuExecStats.skipDraw}`
     ),
@@ -5185,7 +5194,12 @@ function maybeCreateCausalTelemetry(videoStats, { force = false } = {}) {
     },
     webgpu: {
       ...webGpuCausalStats,
-      presentVsync: wgpuPresentVsync ? { ...wgpuPresentVsyncStats, ...wgpuVsync.stats } : null,
+      presentVsync: wgpuPresentVsync ? {
+        ...wgpuPresentVsyncStats, ...wgpuVsync.stats,
+        refreshMs: wgpuVsyncRefreshMs(),
+        refreshes: { counts: [...wgpuRefreshHistogram.counts], repeats: wgpuRefreshHistogram.repeats, short: wgpuRefreshHistogram.short },
+        gamePace: wgpuPresentGamePace ? { ...wgpuGamePacer.stats, periodMs: wgpuGamePacer.period } : null
+      } : null,
       visualCadence: wgpuVisualCadenceSnapshot(),
       mappedStaging: wgpuMappedStagingPool?.snapshot() ?? null,
       mappedDrainCoalescing: wgpuMappedDrainCoalescer.snapshot(),
@@ -13017,6 +13031,24 @@ function wgpuVsyncLateMs() {
   const n = Math.min(wgpuVsyncFrameGapCount, wgpuVsyncFrameGaps.length);
   return vsyncLateMs(Array.from(wgpuVsyncFrameGaps.subarray(0, n)), { floor: WGPU_VSYNC_LATE_FLOOR_MS });
 }
+// The screen's refresh period: the smallest of the last 16 rAF frame-time
+// deltas (see above); null before there are 4.
+function wgpuVsyncRefreshMs() {
+  const n = Math.min(wgpuVsyncFrameGapCount, wgpuVsyncFrameGaps.length);
+  const valid = Array.from(wgpuVsyncFrameGaps.subarray(0, n)).filter((d) => d > 0);
+  return valid.length < 4 ? null : Math.min(...valid);
+}
+// ?presentpace=game (src/wgpu-game-pacer.js): frames shown at the game's own
+// pace on a screen faster than the game (60 fps on 120 Hz, 30 fps on 60 Hz).
+// Every queued frame is stamped on the pacer's arrival clock either way, so
+// the refresh histogram (frames on screen for 1, 2, 3, 4+ refreshes, shown in
+// the HUD) reads the same with the switch on or off.
+let wgpuPresentGamePace = false;
+const wgpuGamePacer = createGamePacer();
+const wgpuRefreshHistogram = createRefreshHistogram();
+// A frame went up since the presenter's last BeginFrame (shown at a
+// BeginFrame, by the late path or the fallback timer).
+let wgpuVsyncShownSinceTick = false;
 // Pool and queue, one texture per frame (src/wgpu-vsync-queue.js).
 const wgpuVsync = createVsyncQueue({
   queueSize: 2,
@@ -13102,10 +13134,12 @@ function queueWgpuVsyncFrame(coreFrame, shownVi, stream) {
   const before = wgpuVsync.stats.dropped;
   // No BeginFrame lately (hidden tab): an overflow is not a drop.
   const hidden = wgpuVsyncLoop && performance.now() - wgpuVsyncLastTickAt >= WGPU_VSYNC_FALLBACK_MS;
-  const frame = wgpuVsync.queueFrame({ coreFrame, shownVi, stream, tick: wgpuVsyncTick }, { hidden });
+  const at = performance.now();
+  const frame = wgpuVsync.queueFrame({ coreFrame, shownVi, stream, tick: wgpuVsyncTick, at }, { hidden });
   wgpuVsyncCountDrops(before);
   if (!frame) return false;
   if (stream && streamCapture.active) streamWgpuVsyncFrame(frame.tex, coreFrame);
+  wgpuGamePacer.stamp(at);
   wgpuVsyncIdleTicks = 0;
   if (!wgpuVsyncLoop) {
     wgpuVsyncLoop = true;
@@ -13123,11 +13157,16 @@ function queueWgpuVsyncFrame(coreFrame, shownVi, stream) {
       wgpuVsyncTick += 1;
       wgpuVsyncFrameTime = performance.timeOrigin + frameTime;
       let shown = false;
+      const refreshMs = wgpuVsyncRefreshMs();
       try {
-        shown = presentWgpuVsyncFrame({ newest: afterGap });
+        shown = presentWgpuVsyncFrame({ newest: afterGap, t: frameTime, refreshMs });
       } finally {
         wgpuVsyncFrameTime = null;
       }
+      // The game frame now on screen and how many refreshes it covers.
+      const gameMs = wgpuGamePacer.period;
+      wgpuRefreshHistogram.tick(wgpuVsyncShownSinceTick ? (refreshMs && gameMs ? gameMs / refreshMs : 1) : null);
+      wgpuVsyncShownSinceTick = false;
       wgpuVsyncIdleTicks = shown ? 0 : wgpuVsyncIdleTicks + 1;
       if (wgpuVsyncIdleTicks >= WGPU_VSYNC_IDLE_TICKS && !wgpuVsync.waiting) {
         wgpuVsyncLoop = false;  // the next queued frame starts it again
@@ -13173,15 +13212,25 @@ function wgpuVsyncFallbackCheck() {
 
 // One queued frame to the canvas: the oldest, so a burst is shown in order
 // (after the catch-up, in takeForDisplay). True when a frame was shown.
-function presentWgpuVsyncFrame({ newest = false, hidden = false } = {}) {
+// `t`, `refreshMs`: the BeginFrame's time and the screen's period, for the
+// game pace (none outside a BeginFrame: the newest frame, the pace restarts).
+function presentWgpuVsyncFrame({ newest = false, hidden = false, t = null, refreshMs = null } = {}) {
   if (!renderGpu) {
     wgpuVsync.clear();
+    wgpuGamePacer.reset({ arrival: true });
     return false;
   }
   const before = wgpuVsync.stats.dropped;
-  const f = newest ? wgpuVsync.takeNewest({ hidden }) : wgpuVsync.takeForDisplay(wgpuVsyncTick);
+  const pace = wgpuPresentGamePace && t !== null && !newest ? (frame) => wgpuGamePacer.due(frame, t, refreshMs) : null;
+  if (newest) wgpuGamePacer.reset();
+  const f = newest ? wgpuVsync.takeNewest({ hidden }) : wgpuVsync.takeForDisplay(wgpuVsyncTick, pace);
   wgpuVsyncCountDrops(before);
-  if (!f) return false;
+  if (!f) {
+    if (pace && wgpuVsync.waiting) wgpuGamePacer.held();
+    return false;
+  }
+  if (pace) wgpuGamePacer.shown(f, t, refreshMs);
+  wgpuVsyncShownSinceTick = true;
   const dev = renderGpu.device;
   if (wgpuVsyncCanvasDevice !== dev) {
     wgpuVsyncCanvasDevice = dev;
