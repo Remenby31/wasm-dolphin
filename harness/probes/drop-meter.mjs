@@ -65,6 +65,7 @@ import { median, round } from "../lib/stats.mjs";
 import { machineSnapshot, powerSnapshot, sampleChromeRss } from "../lib/system.mjs";
 import { mergeTimeline } from "../lib/timeline.mjs";
 import { num, sideOrder, STATE_ROUTE } from "./race-perf.mjs";
+import { visualProbeCheck } from "../lib/matrix.mjs";
 
 // What this probe runs in the page and the worker (samplers, counters): an
 // A/A's noise holds only for the same version (review of #271: the page's
@@ -593,6 +594,9 @@ async function main() {
   const baselineQuery = values["baseline-query"] ? new URLSearchParams(values["baseline-query"]) : null;
   baselineQuery?.set("metrics", "1");
   if (baselineQuery && !values.baseline) throw new Error("--baseline-query needs --baseline");
+  // Every drop the meter counts is a frame it saw: no decoded XFB, no meter.
+  const visual = visualProbeCheck([query.toString(), baselineQuery?.toString()], { "drop-meter": true });
+  if (visual) throw new Error(visual);
   const o = {
     iso, scenario, query: query.toString(), baselineQuery: baselineQuery?.toString() ?? null, runs: num(values, "runs", { min: 1, int: true }), visits: num(values, "visits", { min: 1, int: true }),
     sampleMs: num(values, "sample-ms", { min: 10 }), port: num(values, "port", { min: 1, int: true }),

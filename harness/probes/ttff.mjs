@@ -32,7 +32,7 @@ import { parseArgs } from "node:util";
 
 import { ensureServer, launchChrome, readTimeline, REPO_ROOT, workerRequest } from "../lib/browser.mjs";
 import { calmLock, loadGaveUp } from "../lib/env.mjs";
-import { PRESETS, withDeterministicClock } from "../lib/matrix.mjs";
+import { PRESETS, visualProbeCheck, withDeterministicClock } from "../lib/matrix.mjs";
 import { claim } from "../lib/ownership.mjs";
 import { acquirePerfLock } from "../lib/perf-lock.mjs";
 import { chromeInfo, isLocalOnly, probeOutDir } from "../lib/probe-out.mjs";
@@ -134,6 +134,9 @@ async function main() {
   const iso = path.resolve(values.iso);
   if (isLocalOnly(iso) && process.env.CI) throw new Error("this disc is local-only and must never run in CI");
   const query = `${values.query ?? PRESETS[values.config] ?? values.config}&metrics=1`;
+  // The first frame is a frame seen: no decoded XFB, no TTFF.
+  const visual = visualProbeCheck([query], { ttff: true });
+  if (visual) throw new Error(visual);
   const runs = num(values, "runs", { min: 1, int: true });
   const timeoutSec = num(values, "timeout", { min: 5 });
   const settleSec = num(values, "settle", { min: 0 });
