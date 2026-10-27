@@ -69,8 +69,15 @@ test("worklet fallback preserves the disc-worker producer rejection reason", asy
   );
 });
 
-test("legacy remains the default and never loads a worklet module", async () => {
-  const { modules, contextOptions } = installBrowser({ search: "" });
+// The AudioWorklet is the default since the 2026-10-27 pairs (latency 165 ->
+// 64 ms, 0 underruns); ?audiotransport=legacy keeps the scheduled buffers
+// and never loads a worklet module.
+test("the AudioWorklet by default; ?audiotransport=legacy never loads a worklet module", async () => {
+  installBrowser({ search: "" });
+  const { AudioController: Default } = await import(`../src/audio.js?default=${Date.now()}`);
+  const d = new Default();
+  assert.equal(d.requestedTransport, "worklet");
+  const { modules, contextOptions } = installBrowser({ search: "?audiotransport=legacy" });
   const { AudioController } = await import(`../src/audio.js?legacy=${Date.now()}`);
   const audio = new AudioController();
   await audio.ensureContext();
@@ -96,7 +103,7 @@ test("worklet ring target from ?audiolead, and the latency it reports", async ()
   audio.context.baseLatency = 0.003;
   writeAudioPcm(audio.workletRing, new Int16Array(1920 * 2), 1920, 2);
   assert.equal(audio.causalTelemetry().latencyMs, 53, "40 ms ring + 13 ms output");
-  // no ?audiolead: the worklet keeps 120 ms
+  // no ?audiolead: a 40 ms floor (the producer starts at 120 and comes down)
   installBrowser();
   const { AudioController: Default } = await import(`../src/audio.js?lead-default=${Date.now()}`);
   const d = new Default();
@@ -104,5 +111,5 @@ test("worklet ring target from ?audiolead, and the latency it reports", async ()
   d.setTransportBridge(async (config) => { seen.push(config); return true; });
   d.muted = false;
   await d.ensureContext();
-  assert.equal(seen[0].targetFrames, 5760);
+  assert.equal(seen[0].targetFrames, 1920);
 });

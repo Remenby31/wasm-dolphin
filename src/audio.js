@@ -23,7 +23,11 @@ export class AudioController {
     // latency vs robustness. URL param ?audiolead=N (seconds, 0.05-1.0)
     // overrides. ?audiopump=N (ms, 5-100) tunes pump interval.
     const params = new URLSearchParams(window.location.search);
-    this.requestedTransport = params.get("audiotransport") === "worklet" ? "worklet" : "legacy";
+    // The AudioWorklet by default (2026-10-27 pairs: latency 165 -> 64 ms
+    // from the title on, 0 underruns, no drop regression); ?audiotransport=
+    // legacy keeps the scheduled buffers. Without isolation or AudioWorklet
+    // it falls back to them anyway.
+    this.requestedTransport = params.get("audiotransport") === "legacy" ? "legacy" : "worklet";
     this.activeTransport = "legacy";
     this.transportFallbackReason = this.requestedTransport === "worklet" ? "not-initialized" : "";
     this.workletRing = null;
@@ -38,8 +42,10 @@ export class AudioController {
     // pulls exactly what the ring lacks from the mixer, which stretches its
     // own queue (no clock drift to correct), so the fill IS the latency
     // before the mixer's queue. ?audiolead (0.02-1 s) for this path too.
+    // The ring's floor: it starts at 120 ms and comes down to this once the
+    // producer keeps time (audio-pcm-producer.js); 40 ms by default.
     this.workletLeadSeconds =
-      Number.isFinite(leadParam) && leadParam >= 0.02 && leadParam <= 1 ? leadParam : 0.12;
+      Number.isFinite(leadParam) && leadParam >= 0.02 && leadParam <= 1 ? leadParam : 0.04;
     this.startLeadSeconds = 0.05;
     this.chunkFrames = 1024;
     const pumpParam = Number.parseInt(params.get("audiopump") || "", 10);
