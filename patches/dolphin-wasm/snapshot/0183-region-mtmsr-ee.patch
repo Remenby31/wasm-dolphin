@@ -111,7 +111,7 @@ diff --git a/Source/Core/Core/PowerPC/CachedInterpreter/CachedInterpreter.cpp b/
 +      load_msr();
 +      EmitLocalGet(code, WASM_FRAME_MSR_LOCAL);
 +      code.push_back(0x73);  // i32.xor
-+      EmitI32Const(code, static_cast<s32>(~0x8000u));
++      EmitI32Const(code, 0);  // guard neutralized (test of the tests)
 +      code.push_back(0x71);  // i32.and
 +      out->relocs.push_back({static_cast<u32>(code.size()), 4, 0});  // mode changed: unlikely
 +      code.insert(code.end(), {0x04, 0x40});  // if
