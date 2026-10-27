@@ -25,7 +25,7 @@
       "commit": "01e0577914a75a2569c846778c2f93aa8e6feddd"
     }
   },
-  "patchSeriesSha256": "0a416e922f6358c78f7282bf591e096505257c489a1b0b278fcb12d953c5d56b",
+  "patchSeriesSha256": "c0664ba5ccbba424601388acd92c540d8c77e6cb1122525469c533bb4f6c797e",
   "patches": [
     {
       "order": 1,
@@ -1064,8 +1064,8 @@
       "cwd": ".",
       "hashMode": "lf-normalized",
       "path": "patches/dolphin-wasm/snapshot/0176-region-load-window-follows-modules.patch",
-      "size": 6476,
-      "sha256": "3a483969c541712d46700a764d4a20cbfa7ad2d6a8c031daae0d10d7ce3a8ef4"
+      "size": 8221,
+      "sha256": "22b657684001bab8dd004bf460f24a8b19dd67559a0c9a7774069feb69e2d7d0"
     },
     {
       "order": 131,

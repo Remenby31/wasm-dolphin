@@ -1,5 +1,5 @@
 diff --git a/Source/Core/Core/PowerPC/CachedInterpreter/CachedInterpreter.cpp b/Source/Core/Core/PowerPC/CachedInterpreter/CachedInterpreter.cpp
-index 6a2e767..58cb5c7 100644
+index 6a2e767..1ff90a3 100644
 --- a/Source/Core/Core/PowerPC/CachedInterpreter/CachedInterpreter.cpp
 +++ b/Source/Core/Core/PowerPC/CachedInterpreter/CachedInterpreter.cpp
 @@ -10589,6 +10589,8 @@ struct PendingRegion
@@ -11,7 +11,7 @@ index 6a2e767..58cb5c7 100644
  };
  std::mutex s_region_queue_mutex;
  std::vector<PendingRegion> s_region_queue;
-@@ -10665,11 +10667,22 @@ u32 s_region_sleep_wait_expired = 0;
+@@ -10665,11 +10667,28 @@ u32 s_region_sleep_wait_expired = 0;
  // already behind. Outside the window nothing changes (#277 forced installs
  // at any time and brought a slow mode back on the heavy scene).
  std::chrono::milliseconds s_region_load_window{3000};  // tests change it
@@ -29,26 +29,34 @@ index 6a2e767..58cb5c7 100644
 +// and it closed before most were installed: their large ones then waited
 +// for sleeps a thread behind does not get (heavy, 1 run in 8, diagnosis
 +// 0175). Past s_region_load_window it stays open while a module that was
-+// waiting or queued when it opened is not installed, and for
-+// s_region_load_linger after the last of them became ready; never past
-+// s_region_load_window_cap.
++// waiting or queued when it opened, or queued during its first
++// s_region_load_window (the load's priority rounds, #278/#279), is not
++// installed, and for s_region_load_linger after the last of them became
++// ready; never past s_region_load_window_cap. During that extension only
++// those modules are forced (review of #297).
 +std::chrono::milliseconds s_region_load_window_cap{6000};  // tests change it
 +std::chrono::milliseconds s_region_load_linger{1000};      // tests change it
 +std::optional<std::chrono::steady_clock::time_point> s_region_load_last_ready;
++// The extension's scan for modules of the load, at most every 50 ms (it
++// takes the queue's mutex).
++std::optional<std::chrono::steady_clock::time_point> s_region_load_scanned_at;
++bool s_region_load_pending = false;
  std::chrono::milliseconds s_region_behind_window{150};  // tests change it
  // The last sleep windows (when, how long), whether or not they installed:
  // ~4 per 50 ms at 60 fields, so these cover the behind window.
-@@ -10983,7 +10996,8 @@ void ForgetAllRegions()
+@@ -10983,7 +11002,10 @@ void ForgetAllRegions()
    s_region_small_took_ms = 0;
    s_region_small_cost_ms = 0;
    s_region_load_window_pending.store(false, std::memory_order_relaxed);
 -  s_region_load_window_end = 0;
 +  s_region_load_window_start.reset();
 +  s_region_load_last_ready.reset();
++  s_region_load_scanned_at.reset();
++  s_region_load_pending = false;
    s_region_sleeps = {};
    s_region_sleeps_next = 0;
    s_region_forced_debt_at.reset();
-@@ -11230,12 +11244,15 @@ void ServiceRegionInstalls(std::optional<std::chrono::steady_clock::time_point>
+@@ -11230,12 +11252,16 @@ void ServiceRegionInstalls(std::optional<std::chrono::steady_clock::time_point>
    }
    else if (s_region_load_window_pending.exchange(false, std::memory_order_acq_rel))
    {
@@ -62,6 +70,7 @@ index 6a2e767..58cb5c7 100644
 +    // modules of the load are marked (0176).
 +    s_region_load_window_start = std::chrono::steady_clock::now();
 +    s_region_load_last_ready.reset();
++    s_region_load_scanned_at.reset();
 +    for (auto& waiting : s_region_waiting)
 +      waiting.from_load = true;
 +    std::lock_guard lock(s_region_queue_mutex);
@@ -70,38 +79,46 @@ index 6a2e767..58cb5c7 100644
    }
    if (s_region_waiting.empty() && !s_region_queue_nonempty.load(std::memory_order_acquire))
      return;
-@@ -11265,8 +11282,28 @@ void ServiceRegionInstalls(std::optional<std::chrono::steady_clock::time_point>
+@@ -11265,8 +11291,36 @@ void ServiceRegionInstalls(std::optional<std::chrono::steady_clock::time_point>
      }
      return false;
    };
 -  const bool in_load_window =
 -      s_region_load_window_end != 0 && now.time_since_epoch().count() < s_region_load_window_end;
 +  bool in_load_window = false;
++  bool in_load_base = false;  // the first s_region_load_window: every module
 +  if (s_region_load_window_start)
 +  {
 +    const auto age = now - *s_region_load_window_start;
 +    if (age < s_region_load_window)
 +    {
-+      in_load_window = true;
++      in_load_window = in_load_base = true;
 +    }
 +    else if (age < s_region_load_window_cap)
 +    {
-+      bool load_pending = std::any_of(s_region_waiting.begin(), s_region_waiting.end(),
-+                                      [](const PendingRegion& p) { return p.from_load; });
-+      if (!load_pending && s_region_queue_nonempty.load(std::memory_order_acquire))
++      if (!s_region_load_scanned_at ||
++          now - *s_region_load_scanned_at >= std::chrono::milliseconds(50))
 +      {
-+        std::lock_guard lock(s_region_queue_mutex);
-+        load_pending = std::any_of(s_region_queue.begin(), s_region_queue.end(),
-+                                   [](const PendingRegion& p) { return p.from_load; });
++        s_region_load_scanned_at = now;
++        s_region_load_pending =
++            std::any_of(s_region_waiting.begin(), s_region_waiting.end(),
++                        [](const PendingRegion& p) { return p.from_load; });
++        if (!s_region_load_pending && s_region_queue_nonempty.load(std::memory_order_acquire))
++        {
++          std::lock_guard lock(s_region_queue_mutex);
++          s_region_load_pending = std::any_of(s_region_queue.begin(), s_region_queue.end(),
++                                              [](const PendingRegion& p) { return p.from_load; });
++        }
 +      }
-+      in_load_window = load_pending || (s_region_load_last_ready &&
-+                                        now - *s_region_load_last_ready < s_region_load_linger);
++      in_load_window = s_region_load_pending ||
++                       (s_region_load_last_ready &&
++                        now - *s_region_load_last_ready < s_region_load_linger);
 +    }
 +  }
    if (in_load_window)
    {
      // the forced debt drains at REGION_FORCED_RATE_MS per period
-@@ -11283,7 +11320,11 @@ void ServiceRegionInstalls(std::optional<std::chrono::steady_clock::time_point>
+@@ -11283,11 +11337,16 @@ void ServiceRegionInstalls(std::optional<std::chrono::steady_clock::time_point>
      if (deadline)
        return false;
      if (!pending.installable_since)
@@ -113,7 +130,24 @@ index 6a2e767..58cb5c7 100644
      forcing = false;
      if (now - *pending.installable_since < s_region_sleep_wait)
      {
-@@ -11996,6 +12037,14 @@ extern "C" EMSCRIPTEN_KEEPALIVE void DolphinWeb_AotSetForcedPeriodForTest(double
+-      if (!in_load_window)
++      // in the extension (0176), only the modules of the load
++      if (!in_load_window || (!in_load_base && !pending.from_load))
+         return true;
+       // After a state load, the thread is behind: no window long enough for
+       // this module came, none is coming. Within the slice target, room()
+@@ -11478,6 +11537,10 @@ void ServiceRegionInstalls(std::optional<std::chrono::steady_clock::time_point>
+       s_region_queue.erase(s_region_queue.begin());
+       s_region_queue_nonempty.store(!s_region_queue.empty(), std::memory_order_release);
+     }
++    // Patch 0176: queued during the window's first s_region_load_window (the
++    // load's priority rounds): a module of the load too.
++    if (in_load_base)
++      pending.from_load = true;
+     if (!installable(pending))
+       continue;
+     // A module handed to this pthread before the boot is installed at once;
+@@ -11996,6 +12059,14 @@ extern "C" EMSCRIPTEN_KEEPALIVE void DolphinWeb_AotSetForcedPeriodForTest(double
    s_region_forced_period_ms = ms;
  }
  
