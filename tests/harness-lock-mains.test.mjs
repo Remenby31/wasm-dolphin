@@ -127,3 +127,36 @@ test("--allow-battery still works: the rendering probes gate on mains only witho
     assert.doesNotMatch(src, /process\.exit\(3\);\n\}\nconst release = await acquirePerfLock/, `${f}: no early exit on battery, the lock waits`);
   }
 });
+
+// Re-review of #305.
+test("drop meter: a side whose gate or replay gives up ends the run and the batch; a later calm side never clears it", async () => {
+  const { runSides } = await import("../harness/probes/drop-meter.mjs");
+  const played = [];
+  // the candidate's replay gives up (unplugged, never back), the baseline's gate would be calm
+  const gaveUp = await runSides(["candidate", "baseline"], {
+    gate: async () => ({ gate: { ok: true }, gaveUp: null }),
+    play: async (name) => { played.push(name); return { gaveUp: name === "candidate" ? "on battery: given up" : null }; }
+  });
+  assert.equal(gaveUp, "on battery: given up");
+  assert.deepEqual(played, ["candidate"], "the baseline is not played after a give-up");
+  // a gate that gives up: nothing played on that side or after
+  const played2 = [];
+  const g2 = await runSides(["baseline", "candidate"], {
+    gate: async (name) => ({ gate: {}, gaveUp: name === "baseline" ? "load given up" : null }),
+    play: async (name) => { played2.push(name); return {}; }
+  });
+  assert.equal(g2, "load given up");
+  assert.deepEqual(played2, []);
+  // and the give-up reaches the summary: no verdict
+  const { noVerdictReasons } = await import("../harness/probes/drop-meter.mjs");
+  assert.match(noVerdictReasons({ analyses: [], visits: 1, gaveUp, verdicts: {} }).join(), /on battery: given up/);
+});
+
+test("race-perf: a side measured partly on battery is dropped; an unplug counts once; the give-up names power", async () => {
+  const { readFile } = await import("node:fs/promises");
+  const src = await readFile(new URL("../harness/probes/race-perf.mjs", import.meta.url), "utf8");
+  const branch = src.slice(src.indexOf('if (powerSnapshot()?.source === "battery" && powerAtStart !== "battery")'));
+  assert.ok(branch.indexOf("delete record[name];") > 0 && branch.indexOf("delete record[name];") < branch.indexOf("replay = true;"), "dropped before any give-up or replay");
+  assert.match(src, /if \(powerCounted\) powerCounted = false;\n\s+else relocks \+= 1;/);
+  assert.match(src, /unplugged or loaded \$\{relocks\} times \(the lock let go for power or load\)/);
+});

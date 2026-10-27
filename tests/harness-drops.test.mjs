@@ -254,7 +254,7 @@ test("power source: parsed from pmset, recorded, and checked by --noise", async 
   writeFileSync(path.join(root, "ac.json"), JSON.stringify({ ...base, machine: { power: { source: "ac", percent: 100 } } }));
   writeFileSync(path.join(root, "old.json"), JSON.stringify(base));
   assert.ok(readNoise(path.join(root, "ac.json"), { ...expect, powerSource: "ac" })[1]);
-  assert.throws(() => readNoise(path.join(root, "ac.json"), { ...expect, powerSource: "battery" }), /power ac vs battery/);
+  assert.throws(() => readNoise(path.join(root, "ac.json"), { ...expect, powerSource: "battery" }), /power mains vs battery/);
   assert.ok(readNoise(path.join(root, "old.json"), { ...expect, powerSource: "battery" })[1], "an A/A from before the field: not refused on it");
 });
 
@@ -303,9 +303,12 @@ test("power: a visit unplugged midway is mixed; an A/A with mixed sources is no 
   const expect = { probeVersion: 3, scenario: "s.json", state: null, query: "q", sampleMs: 50, display: true };
   writeFileSync(path.join(root, "mixed.json"), JSON.stringify({ ...base, powerSources: ["ac", "battery"] }));
   writeFileSync(path.join(root, "ac.json"), JSON.stringify({ ...base, powerSources: ["ac"] }));
-  assert.throws(() => readNoise(path.join(root, "mixed.json"), { ...expect, powerSource: "ac" }), /power ac\+battery/);
+  assert.throws(() => readNoise(path.join(root, "mixed.json"), { ...expect, powerSource: "ac" }), /power mains\+battery/);
   assert.ok(readNoise(path.join(root, "ac.json"), { ...expect, powerSource: "ac" })[1]);
-  assert.throws(() => readNoise(path.join(root, "ac.json"), { ...expect, powerSource: "battery" }), /power ac vs battery/);
+  assert.throws(() => readNoise(path.join(root, "ac.json"), { ...expect, powerSource: "battery" }), /power mains vs battery/);
+  // review of #305: AC and UPS are both mains
+  writeFileSync(path.join(root, "ups.json"), JSON.stringify({ ...base, powerSources: ["UPS Power"] }));
+  assert.ok(readNoise(path.join(root, "ups.json"), { ...expect, powerSource: "ac" })[1]);
 });
 
 // Review of #261 (P1-4, then P1-b): a 50 ms stall the throttle then makes

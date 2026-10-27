@@ -852,7 +852,7 @@ async function main() {
   checkLock("taken");
   try {
     // Times each run was played again after the lock went back for the load.
-    let relocks = 0, timeouts = 0;
+    let relocks = 0, timeouts = 0, powerCounted = false;
     const loadRetries = new Map();
     for (let run = 1; run <= o.runs && !gaveUp; run += 1) {
       checkLock(`before run ${run}`);
@@ -872,12 +872,15 @@ async function main() {
         gaveUp = loadGaveUp(g.gate);
         if (gaveUp) { console.warn(`[race-perf] run ${run} ${name}: ${gaveUp}`); break; }
         if (g.relocked) {
-          relocks += 1;
+          // an unplug already counted when it was seen (below): once, not twice
+          if (powerCounted) powerCounted = false;
+          else relocks += 1;
           checkLock(`taken again in run ${run}`);
-          if (relocks > MAX_RELOCKS) { gaveUp = `the lock was let go for the load ${relocks} times: remaining runs given up`; console.warn(`[race-perf] ${gaveUp}`); break; }
+          if (relocks > MAX_RELOCKS) { gaveUp = `unplugged or loaded ${relocks} times (the lock let go for power or load): remaining runs given up`; console.warn(`[race-perf] ${gaveUp}`); break; }
           replay = true;
           break;
         }
+        powerCounted = false; // back on mains without a relock: nothing left to discount
         const powerAtStart = powerSnapshot()?.source ?? null;
         record[name] = await measureSide(sides[name], o, g.gate);
         const r = record[name];
@@ -885,9 +888,12 @@ async function main() {
         // (the next gate gives the lock back while on battery). A failed
         // reading (null) or AC <-> UPS is no change.
         if (powerSnapshot()?.source === "battery" && powerAtStart !== "battery") {
-          console.log(`[race-perf] run ${run} ${name}: the power source changed during the side (${powerAtStart} → ${powerSnapshot()?.source ?? null})`);
+          console.log(`[race-perf] run ${run} ${name}: on battery during the side (${powerAtStart} → battery): not a measure`);
+          // measured partly on battery: never kept, whatever comes next
+          delete record[name];
           relocks += 1;
-          if (relocks > MAX_RELOCKS) { gaveUp = `the lock was let go (load or power) ${relocks} times: remaining runs given up`; console.warn(`[race-perf] ${gaveUp}`); break; }
+          powerCounted = true;
+          if (relocks > MAX_RELOCKS) { gaveUp = `unplugged or loaded ${relocks} times (the lock let go for power or load): remaining runs given up`; console.warn(`[race-perf] ${gaveUp}`); break; }
           replay = true;
           break;
         }

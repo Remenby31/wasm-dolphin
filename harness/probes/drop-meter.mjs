@@ -355,6 +355,19 @@ export function powerSourcesOf(analyses) {
   return [...new Set(analyses.filter((a) => !a.analysis?.error && a.analysis?.power).map((a) => a.analysis.power))].sort();
 }
 
+// One run's sides in turn, each behind its gate: the first gate or replay
+// that gives up ends the run (and the batch: the caller stops on it); a
+// later side's calm gate never clears it (review of #305).
+export async function runSides(names, { gate, play }) {
+  for (const name of names) {
+    const g = await gate(name);
+    if (g.gaveUp) return g.gaveUp;
+    const r = await play(name, g.gate);
+    if (r?.gaveUp) return r.gaveUp;
+  }
+  return null;
+}
+
 // Before a run is played again (a visit that failed, one unplugged midway):
 // the same gate as before any run, so it is never replayed on battery or on
 // a loaded machine. { gaveUp } when the gate gave up.
@@ -467,12 +480,14 @@ export function readNoise(file, expect = null) {
     if (expect.cpuModel && s.machine?.cpuModel && s.machine.cpuModel !== expect.cpuModel) differ.push("cpuModel");
     if (expect.browser && s.browser && s.browser !== expect.browser) differ.push("browser");
     // on mains vs on battery: another machine, as far as noise goes; an A/A
-    // whose runs mixed both (or a run that did) is no noise for either
-    const sources = s.powerSources ?? [];
-    const power = sources.length === 1 ? sources[0] : sources.length ? sources.join("+") : s.machine?.power?.source ?? null;
-    if (sources.length > 1 || sources.includes("mixed")) differ.push("power");
-    else if (expect.powerSource && power && power !== expect.powerSource) differ.push("power");
-    named.power = [power, expect.powerSource];
+    // whose runs mixed both (or a run that did) is no noise for either.
+    // AC and UPS are both mains.
+    const kind = (x) => (x == null ? null : x === "battery" || x === "mixed" ? x : "mains");
+    const kinds = [...new Set((s.powerSources ?? []).map(kind))];
+    const power = kinds.length === 1 ? kinds[0] : kinds.length ? kinds.join("+") : kind(s.machine?.power?.source ?? null);
+    if (kinds.length > 1 || kinds.includes("mixed")) differ.push("power");
+    else if (expect.powerSource && power && power !== kind(expect.powerSource)) differ.push("power");
+    named.power = [power, kind(expect.powerSource ?? null)];
     if (differ.length) throw new Error(`--noise ${file}: another measure (${differ.map((k) => `${k} ${named[k]?.[0] ?? s[k] ?? unset[k]} vs ${named[k]?.[1] ?? expect[k] ?? unset[k]}`).join("; ")})`);
   }
   return Object.fromEntries(s.visitSummary.map((v) => [v.visit, { run: (v.candidate ?? v).noise, phases: (v.candidate ?? v).phases ?? {} }]));
@@ -641,7 +656,6 @@ async function main() {
     maxLoad: o.maxLoad, calmWait: values["calm-wait"] == null ? lockWait : num(values, "calm-wait", { min: 0 }), log: (m) => log(`before the lock: ${m}`),
     acquire: values["no-lock"] ? null : () => acquirePerfLock({ requireMains: true, name: `harness drop-meter (${REPO_ROOT})`, waitSec: lockWait, log })
   });
-  if (values.noise) readNoise(values.noise, { ...noiseExpect, powerSource: machineSnapshot().power?.source });
   const outDir = probeOutDir("drop-meter", iso, values.out);
   const meta = {
     probe: "drop-meter", at: new Date().toISOString(), locked: !values["no-lock"], machine: machineSnapshot(), chrome: chromeInfo(), iso: path.basename(iso),
@@ -655,10 +669,13 @@ async function main() {
   const runBatch = async (batch) => {
     const first = analyses.length ? Math.max(...analyses.map((a) => a.run)) + 1 : 1;
     for (let run = first; run < first + o.runs && !gaveUp; run += 1) {
-      for (const name of sideOrder(run).filter((n) => sides[n])) {
-        const gate = await lock.waitCalmUnlocked({ waitSec: o.loadWait, log });
-        gaveUp = loadGaveUp(gate);
-        if (gaveUp) { log(gaveUp); break; }
+      gaveUp = await runSides(sideOrder(run).filter((n) => sides[n]), {
+        gate: async () => {
+          const gate = await lock.waitCalmUnlocked({ waitSec: o.loadWait, log });
+          return { gate, gaveUp: loadGaveUp(gate) };
+        },
+        play: async (name, gate) => {
+        let sideGaveUp = null;
         const server = await ensureServer({ port: o.port, root: sides[name].root });
         meta.served ??= {};
         meta.served[name] ??= server.identity;
@@ -695,16 +712,21 @@ async function main() {
             log(`${name} run ${run}: ${tries.find((x) => x.analysis.error).analysis.error}; played again`);
             // through the gate first: unplugged, the lock waits for mains (and the load)
             const again = await gateBeforeReplay(lock, { waitSec: o.loadWait, log });
-            if (again.gaveUp) { gaveUp = again.gaveUp; log(gaveUp); analyses.push(...tries); break; }
+            if (again.gaveUp) { sideGaveUp = again.gaveUp; analyses.push(...tries); break; }
           }
         } finally {
           await server.stop();
         }
-      }
+        return { gaveUp: sideGaveUp };
+        }
+      });
+      if (gaveUp) log(gaveUp);
     }
   };
   let confirm = null;
   try {
+    // the noise's power source, now that the lock (on mains) is held
+    if (values.noise) readNoise(values.noise, { ...noiseExpect, powerSource: machineSnapshot().power?.source });
     await runBatch(1);
     meta.browser = analyses.find((a) => a.analysis.browser)?.analysis.browser ?? null;
     // A regression fails the guard only if a second batch, judged on its
