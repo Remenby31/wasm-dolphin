@@ -33,7 +33,10 @@ export function createFrameTelemetry() {
     holes: 0, holeMs: 0, holeDrains: 0, holeDrainMs: 0, holeDrainOver16: 0, holeDrainOver50: 0, holesWithoutDrain: 0,
     presents: 0, presentMs: 0, presentOver4: 0,
     pipelines: 0, pipelineMs: 0, pipelineOver4: 0, holePipelines: 0, holePipelineMs: 0,
-    gpuDone: 0, gpuDoneMs: 0, gpuDoneOver8: 0, gpuDoneOver16: 0, gpuDoneOver33: 0, holesGpuDoneOver16: 0
+    gpuDone: 0, gpuDoneMs: 0, gpuDoneOver8: 0, gpuDoneOver16: 0, gpuDoneOver33: 0, holesGpuDoneOver16: 0,
+    // the queue's traffic (instrumentQueue): calls, command buffers, bytes
+    submits: 0, submitBuffers: 0, writeBuffers: 0, writeBufferBytes: 0, writeBufferOver64k: 0,
+    writeTextures: 0, writeTextureBytes: 0, writeTextureOver256k: 0, mapAsyncs: 0
   });
   // since the previous presenter callback: drains, pipelines, GPU lag
   const fresh = () => ({ drains: 0, ms: 0, over16: 0, over50: 0, pipelines: 0, pipelineMs: 0, gpuDoneOver16: 0 });
@@ -111,6 +114,11 @@ export function createFrameTelemetry() {
       if (totalMs > 16) since.over16 += 1;
       if (totalMs > 50) since.over50 += 1;
     },
+    // GPUQueue traffic, counted by the harness's queue wrapper.
+    submit(buffers) { s.submits += 1; s.submitBuffers += buffers; },
+    writeBuffer(bytes) { s.writeBuffers += 1; s.writeBufferBytes += bytes; if (bytes > 65536) s.writeBufferOver64k += 1; },
+    writeTexture(bytes) { s.writeTextures += 1; s.writeTextureBytes += bytes; if (bytes > 262144) s.writeTextureOver256k += 1; },
+    mapAsync() { s.mapAsyncs += 1; },
     snapshot() {
       return { ...s, periodMs: gaps.length >= 4 ? Math.min(...gaps) : null };
     },

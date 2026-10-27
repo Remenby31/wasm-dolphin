@@ -2099,7 +2099,7 @@ async function handleMessage(type, payload) {
     case "validationReadWorkerFrames":
       // Harness only (src/wgpu-frame-telemetry.js): the presenter rAF's
       // lateness and skipped BeginFrames, the ring drains' time and submit part.
-      return { enabled: harnessEnabled, ...wgpuFrameTelemetry.snapshot() };
+      return { enabled: harnessEnabled, ...wgpuFrameTelemetry.snapshot(), uploadProbe: wgpuUploadProbeExecutor ? 1 : 0, uploadTransportMapped: wgpuUploadTransport === "mapped" ? 1 : 0 };
     case "validationReadPresentVsync":
       // ?presentvsync=1: the rAF presenter's counters (shown, dropped, caught
       // up, presented by the timer for want of a BeginFrame) and the visual
@@ -13011,6 +13011,35 @@ const WGPU_VSYNC_FALLBACK_MS = 50;
 // Harness only (validationReadWorkerFrames): the presenter rAF and the ring
 // drains, timed only while harnessEnabled (no cost in normal use).
 const wgpuFrameTelemetry = createFrameTelemetry();
+// Harness only: every submit, writeBuffer, writeTexture of the replay's
+// queue and every mapAsync in this worker, counted with their size, to find
+// what holds the GPU back (a blank WebGPU page on the Spark's 120 Hz screen
+// had 2.5-4.5 ms of GPU lag and no BeginFrame holes, the emulator ~11 ms and
+// 2.5 holes a second). The device's queue methods are wrapped once per
+// device, after harness enable; nothing is wrapped in normal use.
+const wgpuInstrumentedQueues = new WeakSet();
+let wgpuMapAsyncInstrumented = false;
+function instrumentQueueForHarness(device) {
+  const q = device?.queue;
+  if (!q || wgpuInstrumentedQueues.has(q)) return;
+  wgpuInstrumentedQueues.add(q);
+  const { submit, writeBuffer, writeTexture } = q;
+  q.submit = function (buffers) { wgpuFrameTelemetry.submit(buffers?.length ?? 0); return submit.call(this, buffers); };
+  q.writeBuffer = function (buffer, offset, data, dataOffset = 0, size) {
+    const unit = data?.BYTES_PER_ELEMENT ?? 1;
+    wgpuFrameTelemetry.writeBuffer(size !== undefined ? size * unit : Math.max(0, (data?.byteLength ?? 0) - dataOffset * unit));
+    return writeBuffer.apply(this, arguments);
+  };
+  q.writeTexture = function (destination, data) {
+    wgpuFrameTelemetry.writeTexture(data?.byteLength ?? 0);
+    return writeTexture.apply(this, arguments);
+  };
+  if (!wgpuMapAsyncInstrumented && typeof self.GPUBuffer === "function") {
+    wgpuMapAsyncInstrumented = true;
+    const mapAsync = self.GPUBuffer.prototype.mapAsync;
+    self.GPUBuffer.prototype.mapAsync = function () { wgpuFrameTelemetry.mapAsync(); return mapAsync.apply(this, arguments); };
+  }
+}
 // A frame queued while the presenter's rAF is late (the worker busy in a
 // long task, as compiles at boot) is shown at once instead of waiting for a
 // BeginFrame the busy worker cannot run: held there it stayed 3 vsyncs or
@@ -13296,6 +13325,7 @@ function drainWebGpuCmdRing(source = "presentation") {
   // harness only: this drain's time and its finish() + submit() part
   const telemetryStartedAt = harnessEnabled ? performance.now() : 0;
   let telemetrySubmitMs = 0;
+  if (telemetryStartedAt) instrumentQueueForHarness(renderGpu.device);
   const budgetDeadlineMs = wgpuReplayBudgetMs > 0
     ? budgetStartedAt + wgpuReplayBudgetMs
     : Number.POSITIVE_INFINITY;

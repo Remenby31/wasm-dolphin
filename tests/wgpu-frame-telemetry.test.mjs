@@ -42,6 +42,13 @@ test("frame telemetry: callback lateness in buckets, BeginFrames gone by unseen,
   const k = t.snapshot();
   assert.deepEqual([k.pipelines, k.pipelineOver4, k.holePipelines, k.holePipelineMs, k.gpuDoneOver8, k.gpuDoneOver16, k.gpuDoneOver33, k.holesGpuDoneOver16], [1, 1, 1, 40, 1, 1, 0, 1]);
   assert.equal(Object.keys(k).some((key) => /Longest|Max/.test(key)), false, "no maxima: race-perf takes deltas");
+  t.submit(3);
+  t.writeBuffer(100);
+  t.writeBuffer(70000);
+  t.writeTexture(300000);
+  t.mapAsync();
+  const q = t.snapshot();
+  assert.deepEqual([q.submits, q.submitBuffers, q.writeBuffers, q.writeBufferBytes, q.writeBufferOver64k, q.writeTextures, q.writeTextureOver256k, q.mapAsyncs], [1, 3, 2, 70100, 1, 1, 1, 1]);
   t.reset();
   assert.equal(t.snapshot().ticks, 0);
 });
@@ -51,7 +58,7 @@ test("frame telemetry: harness only, no timing at all in normal use", async () =
   assert.match(worker, /const tick = \(frameTime\) => \{\n {6}if \(harnessEnabled\) wgpuFrameTelemetry\.tick\(frameTime, performance\.now\(\)\);/);
   assert.match(worker, /const telemetryStartedAt = harnessEnabled \? performance\.now\(\) : 0;/);
   assert.match(worker, /const submitStartedAt = telemetryStartedAt \? performance\.now\(\) : 0;/);
-  const calls = worker.match(/wgpuFrameTelemetry\.(tick|drain|present|pipeline|gpuDone)\(/g) ?? [];
+  const calls = worker.match(/wgpuFrameTelemetry\.(tick|drain|present|pipeline|gpuDone)\((?!buffers)/g) ?? [];
   assert.equal(calls.length, 6, "one tick, one present, two drain ends, one pipeline, one GPU done");
   assert.match(worker, /const telemetryCreatedAt = harnessEnabled && !prewarmed \? performance\.now\(\) : 0;/);
   assert.match(worker, /if \(telemetryCreatedAt\) wgpuFrameTelemetry\.pipeline\(/);
@@ -59,5 +66,8 @@ test("frame telemetry: harness only, no timing at all in normal use", async () =
   assert.match(worker, /const presentStartedAt = harnessEnabled \? performance\.now\(\) : 0;/);
   assert.match(worker, /if \(presentStartedAt\) wgpuFrameTelemetry\.present\(/);
   assert.equal((worker.match(/if \(telemetryStartedAt\) wgpuFrameTelemetry\.drain\(/g) ?? []).length, 2, "every drain end gated");
-  assert.match(worker, /case "validationReadWorkerFrames":\n(?:\s+\/\/[^\n]*\n)+\s+return \{ enabled: harnessEnabled, \.\.\.wgpuFrameTelemetry\.snapshot\(\) \};/);
+  assert.match(worker, /case "validationReadWorkerFrames":\n(?:\s+\/\/[^\n]*\n)+\s+return \{ enabled: harnessEnabled, \.\.\.wgpuFrameTelemetry\.snapshot\(\), uploadProbe: /);
+  // the queue wrapper: installed only from a harness-timed drain
+  assert.match(worker, /if \(telemetryStartedAt\) instrumentQueueForHarness\(renderGpu\.device\);/);
+  assert.equal((worker.match(/instrumentQueueForHarness\(/g) ?? []).length, 2, "defined once, called once");
 });
