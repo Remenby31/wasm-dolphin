@@ -8,6 +8,7 @@
 
 import assert from "node:assert/strict";
 import { createHash } from "node:crypto";
+import { readFileSync } from "node:fs";
 import { readFile } from "node:fs/promises";
 import test from "node:test";
 import { fileURLToPath } from "node:url";
@@ -2355,15 +2356,31 @@ test("function cap: none leaves the formation as before; one cuts every fragment
 // and when an invalidation keeps a region unverified. Against the interpreter,
 // with the cache filled first, then after each of those changes.
 const CHAIN_CACHE = 1 << 18;
+// main calls G n times (bl); G calls H through bctrl, H returns into G: chains
+// across one region per function at every call and return.
+const BNE = (from, to) => asm.bc(4, 2, from, to); // bne cr0
+const ELSE_TEXT = 0x8001a100;
+const elseProgram = (n) => assemble(ELSE_TEXT, [
+  "main", asm.mflr(0), asm.stwu(1, 1, -16), stw(0, 1, 20), asm.lis(30, n >>> 16), asm.ori(30, 30, n & 0xffff),
+  "loop", (pc, l) => asm.bl(pc, l.G), asm.addi(30, 30, -1), asm.cmplwi(30, 0), (pc, l) => BNE(pc, l.loop),
+  lwz(0, 1, 20), asm.addi(1, 1, 16), mtlr(0), asm.blr(),
+  "G", asm.mflr(0), asm.stwu(1, 1, -16), stw(0, 1, 20), (pc, l) => asm.lis(5, l.H >>> 16), (pc, l) => asm.ori(5, 5, l.H & 0xffff),
+  asm.mtctr(5), asm.bctrl(),
+  "X", asm.addi(4, 4, 1), lwz(0, 1, 20), asm.addi(1, 1, 16), mtlr(0), asm.blr(),
+  "H", asm.addi(6, 6, 1), asm.blr()
+]);
 const chainCacheSkip = callSkip || (() => {
   const lock = JSON.parse(readFileSync(new URL("../provenance/dolphin-source.lock.json", import.meta.url), "utf8"));
   const built = JSON.parse(readFileSync(new URL("../cores/dolphin/dolphin-core-upstream.build.json", import.meta.url), "utf8"));
   return built.source?.patchSeriesSha256 === lock.patchSeriesSha256 && lock.patches.some((p) => p.path.includes("/0187-"))
     ? false : "core built from a patch series without 0187";
 })();
+// The CPU thread's mask (the chaining reads it); the test core starts at 0.
 function withChainCache(fn) {
-  const saved = core.module._DolphinWeb_SetCachedInterpreterDisableMask(PRODUCTION_DISABLE_MASK | CHAIN_CACHE);
-  try { return fn(); } finally { core.module._DolphinWeb_SetCachedInterpreterDisableMask(saved); }
+  const m = core.module;
+  const saved = typeof m._GetCachedInterpreterDisableMask === "function" ? m._GetCachedInterpreterDisableMask() >>> 0 : 0;
+  m._SetCachedInterpreterDisableMask(PRODUCTION_DISABLE_MASK | CHAIN_CACHE);
+  try { return fn(); } finally { m._SetCachedInterpreterDisableMask(saved); }
 }
 
 test("0187: chaining through the cache runs like the interpreter, across modules, and hits it", { skip: chainCacheSkip }, () => {
