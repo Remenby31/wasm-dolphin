@@ -169,7 +169,7 @@ test("the page always hears of the loss, even when the capture throws", async ()
 test("the worker pauses the core at the loss, before it posts, and the adapter passes the pause on", async () => {
   const { readFile } = await import("node:fs/promises");
   const worker = await readFile(new URL("../src/upstream-discio-worker.js", import.meta.url), "utf8");
-  assert.match(worker, /const pause = wgpuSessionRecoverEnabled \? await pauseCoreAfterDeviceLoss\(\) : null;\s*self\.postMessage\(\{\s*type: "wgpu-device-lost"[\s\S]*?\.\.\.\(pause \? \{ pause \} : \{\}\)/);
+  assert.match(worker, /const pause = wgpuSessionRecoverEnabled \? await pauseCoreAfterDeviceLoss\(\) : null;\s*wgpuFatalReporter\.report\(\{[\s\S]*?\.\.\.\(pause \? \{ pause \} : \{\}\)/);
   assert.match(worker, /async function pauseCoreAfterDeviceLoss\(\) \{\s*try \{\s*const \{ state, changed \} = await coreLifecycle\.pause\(\);/);
   // The switch reaches the worker (the adapter rebuilds the load message field by field).
   assert.match(worker, /wgpuSessionRecover: payload\.wgpuSessionRecover,/);
