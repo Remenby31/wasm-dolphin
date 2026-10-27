@@ -1,6 +1,6 @@
+import { DEFAULT_UPSTREAM_CORE_SHA256 } from "./default-core.js";
 import { widenU32Counter } from "./u32-counter.js";
 import {
-  DEFAULT_UPSTREAM_CORE_SHA256,
   DEFAULT_UPSTREAM_CORE_URL,
   isOneWayWorkerRequestType,
   verifyUpstreamCoreWasm
@@ -110,11 +110,14 @@ export class UpstreamWorkerAdapter {
     sleepK = 750,
     sleepSpinUs = 150,
     presentVsync = true,
+    presentGamePace = false,
+    presentPaceStats = false,
     coreLog = false,
     memcardSlotB = false,
     internalResolution = 1,
     maxAnisotropy = -1,
     efbAccess = false,
+    xfbNoDecode = false,
     fifoLog = false,
     efbCopyRam = false,
     efbNoDefer = false,
@@ -245,11 +248,14 @@ export class UpstreamWorkerAdapter {
     this.sleepK = Number.isInteger(sleepK) && sleepK >= 0 && sleepK <= 950 ? (sleepK === 0 ? 0 : Math.max(500, sleepK)) : 750;
     this.sleepSpinUs = Number.isInteger(sleepSpinUs) && sleepSpinUs >= 50 && sleepSpinUs <= 2000 ? sleepSpinUs : 150;
     this.presentVsync = presentVsync !== false;
+    this.presentGamePace = presentGamePace === true;
+    this.presentPaceStats = presentPaceStats === true;
     this.coreLog = Boolean(coreLog);
     this.memcardSlotB = Boolean(memcardSlotB);
     this.internalResolution = Number(internalResolution) || 1;
     this.maxAnisotropy = Number.isInteger(maxAnisotropy) ? maxAnisotropy : -1;
     this.efbAccess = Boolean(efbAccess);
+    this.xfbNoDecode = Boolean(xfbNoDecode);
     this.fifoLog = Boolean(fifoLog);
     this.efbCopyRam = Boolean(efbCopyRam);
     this.efbNoDefer = Boolean(efbNoDefer);
@@ -501,11 +507,14 @@ export class UpstreamWorkerAdapter {
       sleepK: this.sleepK,
       sleepSpinUs: this.sleepSpinUs,
       presentVsync: this.presentVsync,
+      presentGamePace: this.presentGamePace,
+      presentPaceStats: this.presentPaceStats,
       coreLog: this.coreLog,
       memcardSlotB: this.memcardSlotB,
       internalResolution: this.internalResolution,
       maxAnisotropy: this.maxAnisotropy,
       efbAccess: this.efbAccess,
+      xfbNoDecode: this.xfbNoDecode,
       fifoLog: this.fifoLog,
       efbCopyRam: this.efbCopyRam,
       efbNoDefer: this.efbNoDefer,

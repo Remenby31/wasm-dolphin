@@ -46,6 +46,7 @@ import { randomBytes } from "node:crypto";
 import { existsSync, mkdirSync, readdirSync, readFileSync, renameSync, rmdirSync, rmSync, statSync, unlinkSync, writeFileSync } from "node:fs";
 import os from "node:os";
 import path from "node:path";
+import { powerSnapshot } from "./system.mjs";
 
 export const DEFAULT_PERF_LOCK = path.join(os.homedir(), "projects", "gc-web-emu", ".perf-lock");
 // A lock directory with no owner file is one whose holder died between mkdir
@@ -261,23 +262,50 @@ function sweepLeftovers(dir) {
 
 // Resolves to release() once the lock is held. Waits (polling every
 // `pollSec`) up to `waitSec` while someone else holds it, then throws.
+// requireMains (a measure, not an e2e or a build): on a laptop, waits for
+// mains power before taking a ticket (a measure on battery is another
+// machine; 2026-10-26/27 several ran unnoticed on battery), and gives its
+// turn back if the power went to battery meanwhile. The release() it
+// returns then says whether the power changed since (powerChanged()).
+export const ON_BATTERY = Symbol("on battery");
 export async function acquirePerfLock({
   dir = process.env.HARNESS_PERF_LOCK || DEFAULT_PERF_LOCK, name, waitSec = 1800, pollSec = 60, orphanSec = ORPHAN_SEC,
+  requireMains = false, power = powerSnapshot,
+  // false: the caller handles SIGINT/SIGTERM/SIGHUP itself (lock-run.mjs
+  // reaps its command's processes first); the lock still goes on exit
+  handleSignals = true,
   log = () => {}, sleep = (ms) => new Promise((r) => setTimeout(r, ms))
 } = {}) {
   if (path.basename(dir) !== ".perf-lock") throw new Error(`perf lock must be a directory named .perf-lock, not ${dir}`);
   for (const [k, v] of Object.entries({ waitSec, pollSec, orphanSec })) if (!Number.isFinite(v) || v < 0) throw new Error(`perf lock: ${k} must be a number ≥ 0, not ${v}`);
   const end = Date.now() + waitSec * 1000;
-  sweepLeftovers(dir);
-  const ticket = enqueue(dir, name);
-  try {
-    return await contend({ dir, name, waitSec, pollSec, orphanSec, log, sleep, end, ticket });
-  } finally {
-    dequeue(dir, ticket);
+  const onBattery = () => requireMains && power()?.source === "battery";
+  for (;;) {
+    // Outside the queue: a measure waiting for mains blocks nobody behind it.
+    while (onBattery()) {
+      if (Date.now() >= end) throw new Error(`perf lock ${dir}: still on battery after ${waitSec} s; a measure needs mains power, nothing measured`);
+      log(`perf lock: on battery, waiting for mains power before taking a ticket; retrying in ${pollSec} s`);
+      await sleep(pollSec * 1000);
+    }
+    sweepLeftovers(dir);
+    const ticket = enqueue(dir, name);
+    let held;
+    try {
+      held = await contend({ dir, name, waitSec, pollSec, orphanSec, log, sleep, end, ticket, onBattery, handleSignals });
+    } finally {
+      dequeue(dir, ticket);
+    }
+    if (held === ON_BATTERY) continue;
+    held.requireMains = requireMains;
+    held.powerSource = requireMains ? power()?.source ?? null : null;
+    // Taken off battery: whether it is on battery now. A reading that fails
+    // (null, pmset busy) or AC <-> UPS is no change.
+    held.powerChanged = () => requireMains && power()?.source === "battery";
+    return held;
   }
 }
 
-async function contend({ dir, name, waitSec, pollSec, orphanSec, log, sleep, end, ticket }) {
+async function contend({ dir, name, waitSec, pollSec, orphanSec, log, sleep, end, ticket, onBattery = () => false, handleSignals = true }) {
   const ours = new Map(); // nonce → owner, of every attempt
   for (;;) {
     const ahead = ticketsAhead(dir, ticket);
@@ -287,15 +315,20 @@ async function contend({ dir, name, waitSec, pollSec, orphanSec, log, sleep, end
       await sleep(pollSec * 1000);
       continue;
     }
+    // Our turn, but unplugged meanwhile: the ticket goes, the next one plays.
+    if (onBattery()) {
+      log("perf lock: on battery at our turn; ticket given back until mains power");
+      return ON_BATTERY;
+    }
     const owner = newOwner(name);
     ours.set(owner.nonce, owner);
     const got = claim(dir, owner);
-    if (got === "held") return release(dir, owner);
+    if (got === "held") return release(dir, owner, { handleSignals });
     if (got === "lost") continue; // our directory was moved away before it was ours: try again
     const holder = readLockOwner(dir);
     // An earlier attempt of ours that an older harness put back after we
     // gave it up: it is ours, never wait on ourselves.
-    if (holder && ours.has(holder.nonce)) return release(dir, ours.get(holder.nonce));
+    if (holder && ours.has(holder.nonce)) return release(dir, ours.get(holder.nonce), { handleSignals });
     const stale = staleReason(dir, holder, orphanSec);
     if (stale) {
       log(`perf lock is stale (${stale}): taking it over`);
@@ -331,7 +364,7 @@ export function lockIntegrity(dir, owner) {
   return { ok: true };
 }
 
-function release(dir, owner) {
+function release(dir, owner, { handleSignals = true } = {}) {
   let done = false;
   const free = () => {
     if (done) return;
@@ -346,9 +379,11 @@ function release(dir, owner) {
   // SIGHUP: the SSH session that started the run closed.
   const onSignal = (sig) => { free(); process.exit({ SIGINT: 130, SIGTERM: 143, SIGHUP: 129 }[sig] ?? 1); };
   process.once("exit", free);
-  process.once("SIGINT", onSignal);
-  process.once("SIGTERM", onSignal);
-  process.once("SIGHUP", onSignal);
+  if (handleSignals) {
+    process.once("SIGINT", onSignal);
+    process.once("SIGTERM", onSignal);
+    process.once("SIGHUP", onSignal);
+  }
   const releaseFn = () => {
     free();
     process.off("exit", free);

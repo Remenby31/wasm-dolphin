@@ -302,7 +302,9 @@ Commands (`tools/core-artifacts.mjs`):
 
 The hash of the core the browser accepts by default is data:
 `cores/dolphin/core.lock.json` (`{"schemaVersion":1,"sha256":"…"}`), which
-`src/upstream-worker-protocol.js` imports as a JSON module. Only
+`src/default-core.js` imports as a JSON module, in page modules only: WebKit
+cannot load a JSON module in a module worker, so the discio worker gets the
+hash in its load request (`tests/worker-module-graph.test.mjs`). Only
 `update:core-abi` writes it (`tools/core-lock.mjs`), and no tool parses or
 evaluates JavaScript to find it.
 

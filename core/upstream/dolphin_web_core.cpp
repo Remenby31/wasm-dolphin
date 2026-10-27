@@ -840,7 +840,14 @@ void EnsureRuntime()
   // layer: only the base layer is set here.
   const bool hardware_xfb = s_video_backend == "OGL" || s_video_backend == "WebGPU";
   Config::SetBase(Config::GFX_HACK_SKIP_XFB_COPY_TO_RAM, hardware_xfb);
-  s_skip_xfb_decode = s_video_backend == "WebGPU";
+  // ?xfbdecode=0 (Module['dolphinXfbNoDecode']), benches only: under the
+  // null backend the decode is the only CPU-thread cost WebGPU does not pay
+  // (6.9 % of the CPU thread on the heavy scene, Spark, 2026-10-27).
+  // Ignored by every other backend, whose XFB is their only image.
+  const bool xfb_no_decode = EM_ASM_INT({ return (typeof Module !== 'undefined' &&
+                                                  Module['dolphinXfbNoDecode']) ? 1 : 0; }) != 0;
+  s_skip_xfb_decode =
+      s_video_backend == "WebGPU" || (s_video_backend == "Null" && xfb_no_decode);
   // Without the RAM copy, an XFB texture keeps its id until the game copies a
   // new one, so Dolphin's duplicate check starts skipping the presents of
   // fields that repeat a frame (with the RAM copy every field reloaded a new

@@ -311,7 +311,7 @@ async function main() {
   };
   const port = num(values, "port", { min: 1, int: true });
   const releases = [];
-  for (const dir of values.lock) releases.push(await acquirePerfLock({ dir, name: `race-multi (${REPO_ROOT})`, waitSec: num(values, "lock-wait", { min: 0 }), log: (m) => console.log(`[race-multi] ${m}`) }));
+  for (const dir of values.lock) releases.push(await acquirePerfLock({ requireMains: true, dir, name: `race-multi (${REPO_ROOT})`, waitSec: num(values, "lock-wait", { min: 0 }), log: (m) => console.log(`[race-multi] ${m}`) }));
   const outDir = path.resolve(values.out ?? path.join(REPO_ROOT, "..", "measures", "harness", `race-multi-${Date.now()}-${randomBytes(3).toString("hex")}`));
   mkdirSync(outDir, { recursive: true });
   // --counter-events frontend|e1,e2: more PMU events on the same thread and window.

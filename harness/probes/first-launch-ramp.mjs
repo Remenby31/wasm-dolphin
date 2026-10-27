@@ -300,7 +300,7 @@ async function main() {
   // --no-lock: a plumbing check; kpi-report ignores it (locked: false).
   const lock = await calmLock({
     maxLoad: o.maxLoad, calmWait, log: (m) => log(`before the lock: ${m}`),
-    acquire: values["no-lock"] ? null : () => acquirePerfLock({ name: `harness first-launch-ramp (${REPO_ROOT})`, waitSec: lockWait, log })
+    acquire: values["no-lock"] ? null : () => acquirePerfLock({ requireMains: true, name: `harness first-launch-ramp (${REPO_ROOT})`, waitSec: lockWait, log })
   });
   const outDir = probeOutDir("first-launch-ramp", iso, values.out);
   const server = await ensureServer({ port: o.port, root: REPO_ROOT });
