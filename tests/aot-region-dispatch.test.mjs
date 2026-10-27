@@ -1478,6 +1478,61 @@ test("0174 source: the start from small installs, used at every bound; the margi
   assert.match(patch, /\+ {8}\/\/ Patch 0174: the margin's spin is bounded the same way/);
 });
 
+// Patch 0176: past its 3 s, the load window stays open while a module that
+// was waiting or queued when it opened is not installed (and 1 s after the
+// last of them became ready), never past 6 s. A load at the start of the
+// region service opened it before the modules were ready and closed it
+// before most were installed (heavy, 1 run in 8, diagnosis 0175).
+const followSkip = startSkip || (typeof core?.module._DolphinWeb_AotSetLoadWindowCapForTest !== "function" && "core without the window that follows the load's modules (0176)");
+function withFollowingWindow(fn, { minMs = 30, capMs = 60000, lingerMs = 1000 } = {}) {
+  core.module._DolphinWeb_AotSetLoadWindowForTest(minMs);
+  core.module._DolphinWeb_AotSetLoadWindowCapForTest(capMs, lingerMs);
+  try {
+    return fn();
+  } finally {
+    core.module._DolphinWeb_AotSetLoadWindowCapForTest(6000, 1000);
+    core.module._DolphinWeb_AotSetLoadWindowForTest(3000);
+  }
+}
+for (const [what, capMs, forcedAfter] of [["stays open while modules of the load are not installed", 60000, true], ["closes at its cap even with modules of the load pending", 50, false]]) {
+  test(`0176: the load window ${what}`, { skip: followSkip }, () => {
+    withOffThreadCompile((requests) => {
+      const plan = setup();
+      core.setRegionsEnabled(true);
+      withModuleCost(plan, 0.4, () => {
+        withFollowingWindow(() => {
+          core.module._DolphinWeb_AotSetLoadWindowForTest(30);
+          const before = core.regionCount();
+          const entries = queueAll(plan); // queued before the load: modules of the load
+          core.module._DolphinWeb_JitOnStateLoaded();
+          core.serviceRegions(); // opens the window (30 ms), marks and posts them
+          spin(70); // past the 30 ms (and the 50 ms cap), the modules not ready yet
+          for (const r of requests()) Atomics.store(core.module.HEAPU8, r.readyPtr + r.readySlot, 1);
+          core.serviceRegions(); // installable from now
+          spin(50); // a behind window with no sleep
+          for (let slice = 0; slice < 20 && core.regionCount() < before + entries; slice++) core.serviceRegions();
+          if (forcedAfter) {
+            assert.ok(forcedCounters()[0] >= 1, "forced: the window followed the load's modules");
+            assert.equal(core.regionCount(), before + entries);
+          } else {
+            assert.equal(forcedCounters()[0], 0, "past the cap: the sleep wait as on main");
+            assert.equal(core.regionCount(), before);
+          }
+        }, { capMs });
+      }, { atMost: true, loaded: false });
+    });
+  });
+}
+
+test("0176 source: the window follows the load's modules, 6 s cap, 1 s linger", async () => {
+  const patch = await readFile(new URL("../patches/dolphin-wasm/snapshot/0176-region-load-window-follows-modules.patch", import.meta.url), "utf8");
+  assert.match(patch, /\+std::chrono::milliseconds s_region_load_window_cap\{6000\};/);
+  assert.match(patch, /\+std::chrono::milliseconds s_region_load_linger\{1000\};/);
+  assert.match(patch, /\+ {4}for \(auto& waiting : s_region_waiting\)\n\+ {6}waiting\.from_load = true;/, "the waiting modules are marked at the stamp");
+  assert.match(patch, /\+ {4}for \(auto& queued : s_region_queue\)\n\+ {6}queued\.from_load = true;/, "and the queued ones");
+  assert.match(patch, /\+ {6}in_load_window = load_pending \|\| \(s_region_load_last_ready &&/);
+});
+
 // Continuation fragments (2026-10-23): a function of more blocks than one
 // fragment holds (the 64-block cap) left the rest to the dispatcher and the
 // block JIT at every pass (2.2 M exits per 4 s in a CPU-bound intro scene).

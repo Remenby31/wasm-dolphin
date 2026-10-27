@@ -1,0 +1,130 @@
+diff --git a/Source/Core/Core/PowerPC/CachedInterpreter/CachedInterpreter.cpp b/Source/Core/Core/PowerPC/CachedInterpreter/CachedInterpreter.cpp
+index 6a2e767..58cb5c7 100644
+--- a/Source/Core/Core/PowerPC/CachedInterpreter/CachedInterpreter.cpp
++++ b/Source/Core/Core/PowerPC/CachedInterpreter/CachedInterpreter.cpp
+@@ -10589,6 +10589,8 @@ struct PendingRegion
+   // Patch 0171: behind, but its estimate times the overrun passed the forced
+   // slice bound (counted once).
+   bool bound_refused = false;
++  // Patch 0176: waiting or queued when the load window opened.
++  bool from_load = false;
+ };
+ std::mutex s_region_queue_mutex;
+ std::vector<PendingRegion> s_region_queue;
+@@ -10665,11 +10667,22 @@ u32 s_region_sleep_wait_expired = 0;
+ // already behind. Outside the window nothing changes (#277 forced installs
+ // at any time and brought a slow mode back on the heavy scene).
+ std::chrono::milliseconds s_region_load_window{3000};  // tests change it
+-// steady_clock ticks at which the window closes (0: closed). The state load
+-// (JitInterface::DoState) only marks it pending: its time starts at the CPU
+-// thread's next slice boundary, so a load in a pause does not spend it.
++// The state load (JitInterface::DoState) only marks the window pending: it
++// opens at the CPU thread's next slice boundary, so a load in a pause does
++// not spend it.
+ std::atomic<bool> s_region_load_window_pending{false};
+-std::chrono::steady_clock::rep s_region_load_window_end = 0;
++std::optional<std::chrono::steady_clock::time_point> s_region_load_window_start;
++// Patch 0176: the window follows the modules of the load, not the clock. A
++// load at the start of the region service opened it before they were ready,
++// and it closed before most were installed: their large ones then waited
++// for sleeps a thread behind does not get (heavy, 1 run in 8, diagnosis
++// 0175). Past s_region_load_window it stays open while a module that was
++// waiting or queued when it opened is not installed, and for
++// s_region_load_linger after the last of them became ready; never past
++// s_region_load_window_cap.
++std::chrono::milliseconds s_region_load_window_cap{6000};  // tests change it
++std::chrono::milliseconds s_region_load_linger{1000};      // tests change it
++std::optional<std::chrono::steady_clock::time_point> s_region_load_last_ready;
+ std::chrono::milliseconds s_region_behind_window{150};  // tests change it
+ // The last sleep windows (when, how long), whether or not they installed:
+ // ~4 per 50 ms at 60 fields, so these cover the behind window.
+@@ -10983,7 +10996,8 @@ void ForgetAllRegions()
+   s_region_small_took_ms = 0;
+   s_region_small_cost_ms = 0;
+   s_region_load_window_pending.store(false, std::memory_order_relaxed);
+-  s_region_load_window_end = 0;
++  s_region_load_window_start.reset();
++  s_region_load_last_ready.reset();
+   s_region_sleeps = {};
+   s_region_sleeps_next = 0;
+   s_region_forced_debt_at.reset();
+@@ -11230,12 +11244,15 @@ void ServiceRegionInstalls(std::optional<std::chrono::steady_clock::time_point>
+   }
+   else if (s_region_load_window_pending.exchange(false, std::memory_order_acq_rel))
+   {
+-    // Patch 0171: the window after a state load starts at this slice.
+-    s_region_load_window_end =
+-        (std::chrono::steady_clock::now() +
+-         std::chrono::duration_cast<std::chrono::steady_clock::duration>(s_region_load_window))
+-            .time_since_epoch()
+-            .count();
++    // Patch 0171: the window after a state load starts at this slice; the
++    // modules of the load are marked (0176).
++    s_region_load_window_start = std::chrono::steady_clock::now();
++    s_region_load_last_ready.reset();
++    for (auto& waiting : s_region_waiting)
++      waiting.from_load = true;
++    std::lock_guard lock(s_region_queue_mutex);
++    for (auto& queued : s_region_queue)
++      queued.from_load = true;
+   }
+   if (s_region_waiting.empty() && !s_region_queue_nonempty.load(std::memory_order_acquire))
+     return;
+@@ -11265,8 +11282,28 @@ void ServiceRegionInstalls(std::optional<std::chrono::steady_clock::time_point>
+     }
+     return false;
+   };
+-  const bool in_load_window =
+-      s_region_load_window_end != 0 && now.time_since_epoch().count() < s_region_load_window_end;
++  bool in_load_window = false;
++  if (s_region_load_window_start)
++  {
++    const auto age = now - *s_region_load_window_start;
++    if (age < s_region_load_window)
++    {
++      in_load_window = true;
++    }
++    else if (age < s_region_load_window_cap)
++    {
++      bool load_pending = std::any_of(s_region_waiting.begin(), s_region_waiting.end(),
++                                      [](const PendingRegion& p) { return p.from_load; });
++      if (!load_pending && s_region_queue_nonempty.load(std::memory_order_acquire))
++      {
++        std::lock_guard lock(s_region_queue_mutex);
++        load_pending = std::any_of(s_region_queue.begin(), s_region_queue.end(),
++                                   [](const PendingRegion& p) { return p.from_load; });
++      }
++      in_load_window = load_pending || (s_region_load_last_ready &&
++                                        now - *s_region_load_last_ready < s_region_load_linger);
++    }
++  }
+   if (in_load_window)
+   {
+     // the forced debt drains at REGION_FORCED_RATE_MS per period
+@@ -11283,7 +11320,11 @@ void ServiceRegionInstalls(std::optional<std::chrono::steady_clock::time_point>
+     if (deadline)
+       return false;
+     if (!pending.installable_since)
++    {
+       pending.installable_since = now;
++      if (pending.from_load)
++        s_region_load_last_ready = now;  // patch 0176
++    }
+     forcing = false;
+     if (now - *pending.installable_since < s_region_sleep_wait)
+     {
+@@ -11996,6 +12037,14 @@ extern "C" EMSCRIPTEN_KEEPALIVE void DolphinWeb_AotSetForcedPeriodForTest(double
+   s_region_forced_period_ms = ms;
+ }
+ 
++// Tests (patch 0176): the load window's hard cap and its linger after the
++// last module of the load became ready (ms).
++extern "C" EMSCRIPTEN_KEEPALIVE void DolphinWeb_AotSetLoadWindowCapForTest(int cap_ms, int linger_ms)
++{
++  s_region_load_window_cap = std::chrono::milliseconds(cap_ms);
++  s_region_load_linger = std::chrono::milliseconds(linger_ms);
++}
++
+ // Tests (patch 0174): an install of estimate `cost` that took `took` (ms),
+ // as the install loop records it; returns the overrun in use after it.
+ extern "C" EMSCRIPTEN_KEEPALIVE double DolphinWeb_AotRecordInstallForTest(double cost, double took)
