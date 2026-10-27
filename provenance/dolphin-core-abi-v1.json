@@ -1,19 +1,19 @@
 {
   "schemaVersion": 1,
   "abiVersion": 1,
-  "coreId": "sha256:4e2d81981a2e646b30f68942c5c69214e00f5e655ec6e10a783c06d1296bd35f",
+  "coreId": "sha256:eb6b7b7ef6219941325dc410d6b988c0599275fd44976cb73a78c0ad5d45e7bf",
   "upstreamCommit": "e22551eae1c84a7e4d0b6a5c519ef4ed4ef69df1",
   "artifacts": [
     {
       "path": "cores/dolphin/dolphin-core-upstream.js",
       "hashMode": "lf-normalized",
-      "size": 286429,
-      "sha256": "9ef8888c187aa9d0aab9fe50ec0ffcdc4dd17877c9a92706a1006e912f1dcd91"
+      "size": 287420,
+      "sha256": "9e8b1da6d69c29bc4c1d4f434d53fe5ac8c7b7a98dfbf93d503517fc2413e8fc"
     },
     {
       "path": "cores/dolphin/dolphin-core-upstream.wasm",
-      "size": 13215571,
-      "sha256": "4e2d81981a2e646b30f68942c5c69214e00f5e655ec6e10a783c06d1296bd35f"
+      "size": 13220373,
+      "sha256": "eb6b7b7ef6219941325dc410d6b988c0599275fd44976cb73a78c0ad5d45e7bf"
     }
   ],
   "contractSources": [
@@ -382,6 +382,7 @@
     "_DolphinWeb_AotPublishStatsForTest",
     "_DolphinWeb_AotQueueRegion",
     "_DolphinWeb_AotRamReady",
+    "_DolphinWeb_AotRegionForcedInstalls",
     "_DolphinWeb_AotRegionHeapBases",
     "_DolphinWeb_AotRegionRechecks",
     "_DolphinWeb_AotRegionSleepInstalls",
@@ -389,7 +390,13 @@
     "_DolphinWeb_AotRegionsSkippedMmu",
     "_DolphinWeb_AotRunRegionForTest",
     "_DolphinWeb_AotServiceRegionsForTest",
+    "_DolphinWeb_AotSetBehindWindowForTest",
+    "_DolphinWeb_AotSetForcedPeriodForTest",
     "_DolphinWeb_AotSetInstallCostForTest",
+    "_DolphinWeb_AotSetInstallDelayForTest",
+    "_DolphinWeb_AotSetLargeBehindWaitForTest",
+    "_DolphinWeb_AotSetLargeOverrunForTest",
+    "_DolphinWeb_AotSetLoadWindowForTest",
     "_DolphinWeb_AotSetReadyWaitForTest",
     "_DolphinWeb_AotSetSleepWaitForTest",
     "_DolphinWeb_AotTestInterpretOne",
