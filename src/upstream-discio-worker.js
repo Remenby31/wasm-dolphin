@@ -15,7 +15,7 @@ import { parseDolHeader } from "./dol.js";
 import { probeRelaxedMadd } from "./relaxed-madd-probe.js";
 import { probeWasmFeatures } from "./wasm-feature-probe.js";
 import { decodeWgpuSamplerState } from "./wgpu-sampler-state.js";
-import { bootBackbufferResize, enhancementCoreArgs, normalizeInternalResolution, resizeCanvasBackbuffer } from "./wgpu-enhancements.js";
+import { bootBackbufferResize, clampInternalResolution, enhancementCoreArgs, internalResolutionCeiling, resizeCanvasBackbuffer } from "./wgpu-enhancements.js";
 import { gxClearDepthToStored, gxDepthState } from "./wgpu-depth-state.js";
 import { clampSourceRect, createWgpuExactCapture, packReadbackRows } from "./wgpu-exact-capture.js";
 import { createUniqueFrameCounter, hashRows, sampleRowOffsets } from "./harness-unique-frames.js";
@@ -489,12 +489,29 @@ function harnessRegionCallStats() {
 function harnessRegionSleepStats() {
   const m = moduleInstance;
   if (!m?._DolphinWeb_AotRegionSleepInstalls || !m._malloc) return null;
-  const p = m._malloc(16);
+  const p = m._malloc(24);
   try {
-    new Uint32Array(m.HEAPU8.buffer, p, 4).fill(0);
+    new Uint32Array(m.HEAPU8.buffer, p, 6).fill(0);
     m._DolphinWeb_AotRegionSleepInstalls(p);
     const w = new Uint32Array(m.HEAPU8.buffer, p, 4);
-    return { installs: w[0], ms: w[1] / 100, overshootMaxMs: w[2] / 100, waitExpired: w[3] };
+    const stats = { installs: w[0], ms: w[1] / 100, overshootMaxMs: w[2] / 100, waitExpired: w[3] };
+    // Patch 0171: installs done at a slice boundary in the window after a
+    // state load while the thread was behind (no sleep window long enough),
+    // the worst slice that did one, those over the slice target (one per
+    // slice and per behind window), the measured install time over the
+    // estimate of large modules, the large modules the 6 ms bound kept
+    // waiting and the largest estimate x overrun it refused.
+    if (m._DolphinWeb_AotRegionForcedInstalls) {
+      const f = new Uint32Array(m.HEAPU8.buffer, p, 6).fill(0);
+      m._DolphinWeb_AotRegionForcedInstalls(p);
+      stats.forcedInstalls = f[0];
+      stats.forcedMaxSliceMs = f[1] / 100;
+      stats.forcedLargeInstalls = f[2];
+      stats.largeOverrun = f[3] / 100;
+      stats.boundRefused = f[4];
+      stats.boundRefusedMaxMs = f[5] / 100;
+    }
+    return stats;
   } finally {
     m._free?.(p);
   }
@@ -775,6 +792,16 @@ let wgpuReplayPumpTimer = null;
 let wgpuReplayBudgetMs = 0;
 let wgpuPowerPreference = "high-performance";
 let wgpuReplayFatal = null;
+// Patch 0168 follow-ups: the highest internal resolution the adapter is
+// trusted with (internalResolutionCeiling, set when the presenter takes its
+// adapter), 1 for the rest of this worker once a device was lost above 1x,
+// and the scale in effect (boot value, then each setEnhancements).
+let wgpuScaleAdapterCeiling = 4;
+let wgpuScaleLostCeiling = 4;
+let wgpuInternalResolution = 1;
+function wgpuScaleCeiling() {
+  return Math.min(wgpuScaleAdapterCeiling, wgpuScaleLostCeiling);
+}
 let wgpuReplayYieldPending = false;
 let wgpuReplayPumpScheduledAt = 0;
 let wgpuReplayPumpDueAt = 0;
@@ -1963,6 +1990,25 @@ async function handleMessage(type, payload) {
       return harnessUniqueFramesRequest(payload);
     case "validationPcSampler":
       return harnessPcSampler(payload);
+    case "validationHeapStats": {
+      // Diagnostics (harness hooks on): malloc's use of the wasm heap
+      // (DolphinWeb_HeapStats). headroom: what is left above the arena
+      // plus the free bytes inside it. Never called by the product.
+      if (!harnessEnabled) return { error: "harness hooks are off" };
+      const m = moduleInstance;
+      if (typeof m?._DolphinWeb_HeapStats !== "function" || typeof m._malloc !== "function") {
+        return { supported: false };
+      }
+      const p = m._malloc(4 * 4);
+      try {
+        if (m._DolphinWeb_HeapStats(p, 4) !== 3) return { supported: false };
+        const [inUse, free, top] = new Uint32Array(m.HEAPU8.buffer, p, 3);
+        const heapBytes = m.HEAPU8.buffer.byteLength;
+        return { supported: true, inUse, free, top, heapBytes, headroom: heapBytes - top + free };
+      } finally {
+        m._free(p);
+      }
+    }
     case "validationReadDiscReads":
       return harnessDiscReads(payload);
     case "validationDropSampler":
@@ -1979,6 +2025,15 @@ async function handleMessage(type, payload) {
       const after = Number(payload?.restoreAfterMs);
       if (Number.isFinite(after) && after >= 0) setTimeout(() => lose.restoreContext(), after);
       return { lost: true };
+    }
+    case "validationLoseWebGpuDevice": {
+      // Harness: lose the WebGPU device as an out-of-memory or a GPU process
+      // reset would (destroy() resolves device.lost; patch 0168 follow-up).
+      if (!harnessEnabled) return { error: "harness hooks are off" };
+      if (!renderGpu?.device) return { error: `no WebGPU device (${renderBackend})` };
+      const internalResolution = wgpuInternalResolution;
+      renderGpu.device.destroy();
+      return { lost: true, internalResolution };
     }
     case "validationReadDstAlphaPasses": {
       // Patch 0149: the dst-alpha second pass (0136), cumulative.
@@ -2347,6 +2402,7 @@ async function handleMessage(type, payload) {
       }
       const path = "/savestate_out.sav";
       try { moduleInstance.FS.unlink(path); } catch (e) {}
+      const saveStartedAt = performance.now();
       const rc = api.saveStateFile(path) | 0;
       let prev = -1, stable = 0, size = 0;
       // up to ~8 s real time (40 × 200 ms); a Melee state is ~tens of
@@ -2372,9 +2428,14 @@ async function handleMessage(type, payload) {
       const ab = bytes ? bytes.buffer.slice(bytes.byteOffset,
                                             bytes.byteOffset + bytes.byteLength)
                        : null;
+      // Until the file stopped growing (200 ms polls: a coarse time), and
+      // the wasm heap after it (states grow with the internal resolution,
+      // patch 0168; the heap tops out at 1.5 GiB).
+      const elapsedMs = Math.round(performance.now() - saveStartedAt);
+      const heapBytes = moduleInstance.HEAPU8?.buffer?.byteLength ?? null;
       return ab
-        ? { saved: true, rc, size, bytes: ab, transfer: [ab] }
-        : { saved: false, rc, size, error: "empty/no state file" };
+        ? { saved: true, rc, size, elapsedMs, heapBytes, bytes: ab, transfer: [ab] }
+        : { saved: false, rc, size, elapsedMs, heapBytes, error: "empty/no state file" };
     }
     case "mixAudio": {
       const mixStartedAt = causalMetricsEnabled ? performance.now() : 0;
@@ -2415,9 +2476,11 @@ async function handleMessage(type, payload) {
       const set = moduleInstance?._DolphinWeb_SetEnhancements;
       if (typeof set !== "function") return { applied: false, reason: "core-without-0168" };
       // 0: the core's runtime is not up yet (the boot reads the init values).
-      const internalResolution = set(...enhancementCoreArgs(payload));
+      // Held to the adapter's ceiling: the answer says the scale in effect.
+      const internalResolution = set(...enhancementCoreArgs(payload, wgpuScaleCeiling()));
+      if (internalResolution > 0) wgpuInternalResolution = internalResolution;
       return internalResolution > 0
-        ? { applied: true, internalResolution }
+        ? { applied: true, internalResolution, ceiling: wgpuScaleCeiling() }
         : { applied: false, reason: "core-not-running" };
     }
     case "setAudioMuted":
@@ -3004,9 +3067,10 @@ async function loadCore({
     dolphinSmoothEarly: smoothEarly !== false,
     dolphinCoreLog: Boolean(coreLog),
     dolphinMemcardSlotB: Boolean(memcardSlotB),
-    // Patch 0168: internal resolution (1-4) and anisotropy (log2, -1 = the
-    // game's). The core keeps 1 off the WebGPU path.
-    dolphinEfbScale: normalizeInternalResolution(internalResolution),
+    // Patch 0168: internal resolution (1-4, held to the adapter's ceiling)
+    // and anisotropy (log2, -1 = the game's). The core keeps 1 off the
+    // WebGPU path.
+    dolphinEfbScale: (wgpuInternalResolution = clampInternalResolution(internalResolution, wgpuScaleCeiling())),
     dolphinMaxAnisotropy: Number.isInteger(maxAnisotropy) ? maxAnisotropy : -1,
     dolphinEfbAccess: Boolean(efbAccess),
     dolphinEfbCopyRam: Boolean(efbCopyRam),
@@ -6610,6 +6674,14 @@ async function createWebGpuPresenter(canvas) {
   if (!adapterInfo && typeof adapter.requestAdapterInfo === "function") {
     try { adapterInfo = await adapter.requestAdapterInfo(); } catch {}
   }
+  const scaleCeiling = internalResolutionCeiling(
+    { info: adapterInfo, limits: adapter.limits, isFallbackAdapter: adapter.isFallbackAdapter },
+    { deviceMemory: self.navigator?.deviceMemory });
+  wgpuScaleAdapterCeiling = scaleCeiling.ceiling;
+  rendererDiagnostics.internalResolutionCeiling = { ...scaleCeiling, lost: wgpuScaleLostCeiling < 4 };
+  // The page holds its scales to this adapter's ceiling (core-host), not to
+  // its own guess from another adapter.
+  self.postMessage({ type: "wgpu-scale-ceiling", ceiling: scaleCeiling.ceiling, reason: scaleCeiling.reason });
   rendererDiagnostics.adapter = {
     selected: true,
     vendor: adapterInfo?.vendor || null,
@@ -6782,7 +6854,7 @@ fn fs(input: VertexOutput) -> @location(0) vec4f {
   wgpuReplayFatal = null;
 
   device.lost.then((info) => {
-    handleWgpuDeviceLoss({
+    const loss = handleWgpuDeviceLoss({
       activeDevice: renderGpu?.device,
       lostDevice: device,
       info,
@@ -6798,6 +6870,15 @@ fn fs(input: VertexOutput) -> @location(0) vec4f {
       setBackend: (backend) => { renderBackend = backend; },
       postStatus,
     });
+    if (!loss.handled) return;
+    // Lost above 1x (out of memory, GPU process reset): never again at that
+    // scale in this worker, and the page restarts at 1x (core-host).
+    const internalResolution = wgpuInternalResolution;
+    if (internalResolution > 1) wgpuScaleLostCeiling = 1;
+    rendererDiagnostics.internalResolutionCeiling = {
+      ...rendererDiagnostics.internalResolutionCeiling, lost: wgpuScaleLostCeiling < 4
+    };
+    self.postMessage({ type: "wgpu-device-lost", internalResolution, reason: String(info?.reason ?? "unknown"), detail: loss.detail });
   });
 
   return state;
@@ -12966,7 +13047,7 @@ let wgpuVsyncFrameTime = null;
 let wgpuVsyncFallback = null;
 // The device the display canvas was configured on with COPY_DST (null: not yet).
 let wgpuVsyncCanvasDevice = null;
-const wgpuPresentVsyncStats = { byTimer: 0, byLate: 0, byLateHidden: 0, streamed: 0 };
+const wgpuPresentVsyncStats = { byTimer: 0, byLate: 0, byNoBeginFrame: 0, streamed: 0 };
 // v3: the stream's own canvas, sized like the frames and configured on the
 // current device (made again when either changes).
 let wgpuVsyncStreamCanvas = null;
@@ -13057,7 +13138,7 @@ function queueWgpuVsyncFrame(coreFrame, shownVi, stream) {
       // No BeginFrame for 50 ms or more (a hidden tab, a rAF silent for
       // seconds): no local copy per frame, the stream has it already (v3);
       // the fallback timer shows the newest one every 50 ms.
-      wgpuPresentVsyncStats.byLateHidden += 1;
+      wgpuPresentVsyncStats.byNoBeginFrame += 1;
     } else if (sinceTick > wgpuVsyncLateMs()) {
       // The rAF is late (busy worker): no BeginFrame to wait for, the
       // newest frame now.

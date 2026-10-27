@@ -56,9 +56,61 @@ with `scaleResolutionDownBy` there.
   scaled EFB copy. At 4x the EFB alone is 2560x2112 (about 43 MB for colour
   and depth), and a game with many render-to-texture copies holds several
   hundred MB more than at 1x. Savestates hold the EFB too, so they grow
-  with N² inside the 1.5 GiB heap. To do: a ceiling per adapter class and
-  a fallback to 1x on device loss. Until then, Auto on the site goes no
-  higher than 2x.
+  with N² inside the 1.5 GiB heap.
+- **Ceiling per adapter.** `internalResolutionCeiling(adapter, { deviceMemory })`
+  (`src/wgpu-enhancements.js`) gives the highest scale a machine is trusted
+  with, by adapter class since WebGPU says nothing about GPU memory: 1 for
+  no adapter or a CPU one; 2 for `navigator.deviceMemory` ≤ 4 GB (1 at
+  ≤ 2), an adapter offering buffers under 1 GiB, a mobile GPU vendor
+  (Chrome's names: qualcomm, arm, img-tec, huawei, verisilicon…), an
+  integrated Intel GPU (Dawn's `gen-*` but `gen-12hp`, or any `lp`:
+  `gen-12lp`, `xe-lpg`, `xe-2lpg`, `xe-3lpg`…; Arc `gen-12hp`/`xe-2hpg` or
+  unnamed keeps 4) or an Apple GPU without `deviceMemory` (Safari and
+  Firefox, a Mac included: an iPhone or iPad cannot be told from it there);
+  the texture limit / 640; else 4
+  (M4 Pro in Chrome: 4). The worker holds the boot scale and every
+  `setEnhancements` to its adapter's ceiling, answers the scale in effect
+  and posts its ceiling (`wgpu-scale-ceiling`);
+  `host.internalResolutionCeiling()` gives `{ ceiling, reason }`: the
+  worker's once known, before that the same rule on an adapter the page
+  asks with the worker's power preference. `host.setEnhancements` clamps to
+  it too.
+- **Device loss.** A lost `GPUDevice` stops the game (no rendering without
+  it). Lost above 1x, the worker posts `wgpu-device-lost` with the scale;
+  the host's ceiling drops to 1 for the rest of the page (next boot and
+  every `setEnhancements` at 1x) and `onGpuDeviceLost({ internalResolution,
+  fallback: 1, reason, detail })` tells the page, which restarts the game at
+  1x instead of at the same scale. Lost at 1x: `fallback` is null.
+- **Measured costs** (2026-10-26/27, M4 Pro, Chrome headless, mains power,
+  local commercial disc, race, 3 runs per scale, perf lock):
+
+  | Scale | Stream capture ms/frame, mean (max) | Sizes sent | Savestate | Save | Load |
+  | --- | --- | --- | --- | --- | --- |
+  | 1x | 0.027 (0.23) | 640x480 only | 28 MB | 0.8-1.0 s | 1.21 s |
+  | 2x | 0.053 (0.46) | 640x480 only | 35 MB | 0.8-1.0 s | 1.22 s |
+  | 4x | 0.054 (0.39) | 640x480 only | 56-61 MB | 0.8-1.0 s | 1.22 s |
+
+  `harness/probes/stream-capture-cost.mjs` and `savestate-scale.mjs`; save
+  times have the 200 ms granularity of `saveStateFile`'s polls. The capture
+  costs nothing that matters at 4x; a savestate at 4x is about twice the 1x
+  one. The heap is reserved at 1.5 GiB from the start, so its size says
+  nothing about the headroom; malloc's own figures do (`DolphinWeb_HeapStats`,
+  harness request `validationHeapStats`, #290). 2-player split screen,
+  2 runs, CI core 4e2d8198:
+
+  | Scale | malloc in use | Headroom before a save | Lowest headroom seen |
+  | --- | --- | --- | --- |
+  | 1x | ~446 MB | ~995 MB | 992 MB |
+  | 2x | ~483 MB | ~958 MB | 952 MB |
+  | 4x | ~649 MB | ~791 MB | 604 MB (after a load) |
+
+  A save grows malloc's arena by about 100 MB at 1x and 245 MB at 4x
+  (freed after it). 4x keeps more than 600 MB of the heap free: no ceiling
+  by heap memory (judge's bar: 200 MB).
+- `streamCaptureStats` counts every size it sent over the capture
+  (`minWidth`/`maxWidth`, `sizes`: frames per `source:WxH` with the last
+  core frame, `inputMaxWidth`): a stray size, as the 320x240 seen once at
+  4x (2026-10-26, not reproduced in 9 runs since), shows with its count.
 - The semantic capture (`?wgpusemanticruntime`, diagnostics) does not know
   opcode 29: a scale change invalidates that capture, as any opcode above
   24 does. At 1x nothing changes for it.

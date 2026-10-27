@@ -1,8 +1,8 @@
 diff --git a/Source/Core/Core/PowerPC/CachedInterpreter/CachedInterpreter.cpp b/Source/Core/Core/PowerPC/CachedInterpreter/CachedInterpreter.cpp
-index 655482f..13a09d2 100644
+index 1cbc6a5..def1420 100644
 --- a/Source/Core/Core/PowerPC/CachedInterpreter/CachedInterpreter.cpp
 +++ b/Source/Core/Core/PowerPC/CachedInterpreter/CachedInterpreter.cpp
-@@ -15590,6 +15590,13 @@ std::atomic<bool> s_wasm_arm_from_boot{false};
+@@ -15869,6 +15869,13 @@ std::atomic<bool> s_wasm_arm_from_boot{false};
  u64 s_wasm_arm_start_frame = 0;
  bool s_wasm_arm_started = false;
  std::atomic<u64> s_wasm_engaged_frame{UINT64_MAX};
@@ -16,7 +16,7 @@ index 655482f..13a09d2 100644
  }  // namespace
  
  // Runs on the CPU thread before ApplyRequestedWasmPolicy: turns an armed
-@@ -15655,6 +15662,14 @@ extern "C" EMSCRIPTEN_KEEPALIVE double DolphinWeb_JitArmedStepForTest(double fra
+@@ -15934,6 +15941,14 @@ extern "C" EMSCRIPTEN_KEEPALIVE double DolphinWeb_JitArmedStepForTest(double fra
    return engaged == UINT64_MAX ? -1.0 : static_cast<double>(engaged);
  }
  
@@ -31,8 +31,8 @@ index 655482f..13a09d2 100644
  // Arms the JIT to engage `fields` emulated fields from now (or from the next
  // state load), decided on the CPU thread. policy: 1 guarded, 2 mixed; 0
  // disarms and turns the JIT off.
-@@ -15692,8 +15707,10 @@ extern "C" EMSCRIPTEN_KEEPALIVE void DolphinWeb_JitOnStateLoaded()
- {
+@@ -15972,8 +15987,10 @@ extern "C" EMSCRIPTEN_KEEPALIVE void DolphinWeb_JitOnStateLoaded()
+   OpenRegionLoadWindow();  // patch 0171
    if (s_wasm_armed_policy.load(std::memory_order_acquire) < 0)
      return;
 -  // A state loaded before the first slice still counts from the loaded field.

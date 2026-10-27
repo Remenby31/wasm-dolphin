@@ -232,6 +232,77 @@ test("no verdict when a side has too few usable runs or the sides were sampled d
   assert.equal(noVerdictReasons({ analyses: [a("baseline"), a("baseline"), a("baseline"), a("candidate"), a("candidate"), a("candidate")], visits: 1, verdicts }), null);
   assert.match(noVerdictReasons({ analyses: [a("baseline"), a("baseline"), a("baseline", true), a("candidate"), a("candidate"), a("candidate")], visits: 1, verdicts })[0], /2 usable baseline/);
   assert.match(noVerdictReasons({ analyses: [a("baseline", false, false), a("baseline", false, false), a("baseline", false, false), a("candidate"), a("candidate"), a("candidate")], visits: 1, verdicts }).join(), /sampled alike/);
+  // unplugged mid-batch: runs on mains and on battery give no verdict; one source (or unknown) is fine
+  const p = (side, power) => ({ side, visit: 1, analysis: { overloaded: false, sampled: true, power } });
+  assert.match(noVerdictReasons({ analyses: [p("baseline", "ac"), p("candidate", "ac"), p("baseline", "battery"), p("candidate", "battery"), p("baseline", "battery"), p("candidate", "battery")], visits: 1, verdicts }).join(), /power source changed/);
+  assert.equal(noVerdictReasons({ analyses: [p("baseline", "battery"), p("candidate", "battery"), p("baseline", "battery"), p("candidate", "battery"), p("baseline", null), p("candidate", "battery")], visits: 1, verdicts }), null);
+});
+
+// pmset -g batt, and --noise refusing an A/A taken on the other power source.
+test("power source: parsed from pmset, recorded, and checked by --noise", async (t) => {
+  const { parsePmsetBatt } = await import("../harness/lib/system.mjs");
+  assert.deepEqual(parsePmsetBatt("Now drawing from 'Battery Power'\n -InternalBattery-0 (id=1)\t76%; discharging; 7:29 remaining present: true"), { source: "battery", percent: 76 });
+  assert.deepEqual(parsePmsetBatt("Now drawing from 'AC Power'\n -InternalBattery-0 (id=1)\t100%; charged; 0:00 remaining present: true"), { source: "ac", percent: 100 });
+  assert.equal(parsePmsetBatt(""), null);
+  const { mkdtempSync, writeFileSync, rmSync } = await import("node:fs");
+  const os = await import("node:os");
+  const path = await import("node:path");
+  const root = mkdtempSync(path.join(os.tmpdir(), "drops-power-"));
+  t.after(() => rmSync(root, { recursive: true, force: true }));
+  const base = { probe: "drop-meter", probeVersion: 2, scenario: "s.json", state: null, query: "q", sampleMs: 50, display: true, visitSummary: [{ visit: 1, noise: {}, phases: {} }] };
+  const expect = { probeVersion: 2, scenario: "s.json", state: null, query: "q", sampleMs: 50, display: true };
+  writeFileSync(path.join(root, "ac.json"), JSON.stringify({ ...base, machine: { power: { source: "ac", percent: 100 } } }));
+  writeFileSync(path.join(root, "old.json"), JSON.stringify(base));
+  assert.ok(readNoise(path.join(root, "ac.json"), { ...expect, powerSource: "ac" })[1]);
+  assert.throws(() => readNoise(path.join(root, "ac.json"), { ...expect, powerSource: "battery" }), /power ac vs battery/);
+  assert.ok(readNoise(path.join(root, "old.json"), { ...expect, powerSource: "battery" })[1], "an A/A from before the field: not refused on it");
+});
+
+// review of #272: the screen-unmeasured intervals are out of the images per
+// guest second, from the count (the image closing each) and from the guest time.
+test("displayedPerGuestSec leaves the screen-unmeasured intervals out", async () => {
+  const { displayedPerGuestSecOf } = await import("../harness/lib/drops.mjs");
+  const vi = [{ t: 0, ticks: 0 }, { t: 10000, ticks: 10 * TPS }];
+  // 10 s of guest time, 541 distinct images, one 4 s unmeasured span closed by one image
+  const display = { distinct: 541, unmeasuredSpans: [[2000, 6000]] };
+  assert.equal(displayedPerGuestSecOf(display, 10, vi, TPS), 90);
+  assert.equal(displayedPerGuestSecOf({ distinct: 600 }, 10, vi, TPS), 60, "none unmeasured: as before");
+  assert.equal(displayedPerGuestSecOf(null, 10, vi, TPS), null);
+  // review of #286: a span running past the last VI output is bounded to it
+  // (its time taken out with its image), one wholly outside takes nothing
+  assert.equal(displayedPerGuestSecOf({ distinct: 541, unmeasuredSpans: [[6000, 14000]] }, 10, vi, TPS), 90);
+  assert.equal(displayedPerGuestSecOf({ distinct: 600, unmeasuredSpans: [[11000, 12000]] }, 10, vi, TPS), 60);
+  // too little left measured (0.1 s, or under half the phase): no rate, not a fall
+  assert.equal(displayedPerGuestSecOf({ distinct: 10, unmeasuredSpans: [[0, 9900]] }, 10, vi, TPS), null);
+  assert.equal(displayedPerGuestSecOf({ distinct: 300, unmeasuredSpans: [[0, 6000]] }, 10, vi, TPS), null);
+});
+
+// review of #286: the power source at the end of a visit too ("mixed" when it
+// changed), the batch's sources in every summary, refused by --noise when mixed.
+test("power: a visit unplugged midway is mixed; an A/A with mixed sources is no noise", async (t) => {
+  const { powerOfVisit, powerSourcesOf } = await import("../harness/probes/drop-meter.mjs");
+  assert.equal(powerOfVisit({ power: { source: "ac" }, powerEnd: { source: "ac" } }), "ac");
+  assert.equal(powerOfVisit({ power: { source: "ac" }, powerEnd: { source: "battery" } }), "mixed");
+  assert.equal(powerOfVisit({ power: { source: "battery" } }), "battery");
+  assert.equal(powerOfVisit({}), null);
+  const r = (power, error) => ({ analysis: { power, ...(error ? { error } : {}) } });
+  assert.deepEqual(powerSourcesOf([r("ac"), r("ac"), r(null), r("battery", "x")]), ["ac"]);
+  assert.deepEqual(powerSourcesOf([r("ac"), r("mixed")]), ["ac", "mixed"]);
+  const p = (side, power) => ({ side, visit: 1, analysis: { overloaded: false, sampled: true, power } });
+  const verdicts = { 1: { inconclusive: false } };
+  assert.match(noVerdictReasons({ analyses: [p("baseline", "ac"), p("candidate", "ac"), p("baseline", "ac"), p("candidate", "mixed"), p("baseline", "ac"), p("candidate", "ac")], visits: 1, verdicts }).join(), /power source changed/);
+  const { mkdtempSync, writeFileSync, rmSync } = await import("node:fs");
+  const os = await import("node:os");
+  const path = await import("node:path");
+  const root = mkdtempSync(path.join(os.tmpdir(), "drops-power-mixed-"));
+  t.after(() => rmSync(root, { recursive: true, force: true }));
+  const base = { probe: "drop-meter", probeVersion: 3, scenario: "s.json", state: null, query: "q", sampleMs: 50, display: true, visitSummary: [{ visit: 1, noise: {}, phases: {} }] };
+  const expect = { probeVersion: 3, scenario: "s.json", state: null, query: "q", sampleMs: 50, display: true };
+  writeFileSync(path.join(root, "mixed.json"), JSON.stringify({ ...base, powerSources: ["ac", "battery"] }));
+  writeFileSync(path.join(root, "ac.json"), JSON.stringify({ ...base, powerSources: ["ac"] }));
+  assert.throws(() => readNoise(path.join(root, "mixed.json"), { ...expect, powerSource: "ac" }), /power ac\+battery/);
+  assert.ok(readNoise(path.join(root, "ac.json"), { ...expect, powerSource: "ac" })[1]);
+  assert.throws(() => readNoise(path.join(root, "ac.json"), { ...expect, powerSource: "battery" }), /power ac vs battery/);
 });
 
 // Review of #261 (P1-4, then P1-b): a 50 ms stall the throttle then makes
@@ -614,6 +685,17 @@ test("0167 times the CPU thread's block compiles behind a flag the sampler sets"
   assert.match(w, /if \(payload\.action === "start"\) \{\n\s*moduleInstance\?\._DolphinWeb_SetJitTimeStatsEnabled\?\.\(1\);/);
   // The wgpu timers cost nothing unless the sampler runs.
   assert.match(w, /const createdAt = dropSampler\?\.running && !prewarmed \? performance\.now\(\) : 0;/);
+});
+
+// --baseline-query: one tree, a switch on the candidate side only (as
+// race-perf's); the noise is the A/A of the baseline's query.
+test("--baseline-query: the baseline side boots with it, the noise is checked against it, a baseline is needed", async () => {
+  const src = await readFile(new URL("../harness/probes/drop-meter.mjs", import.meta.url), "utf8");
+  assert.match(src, /"baseline-query": \{ type: "string" \}/);
+  assert.match(src, /playVisit\(name === "baseline" && o\.baselineQuery \? \{ \.\.\.o, query: o\.baselineQuery \} : o,/);
+  assert.match(src, /readNoise\(values\.noise, \{[^}]*query: o\.baselineQuery \?\? o\.query,/);
+  assert.match(src, /if \(baselineQuery && !values\.baseline\) throw new Error\("--baseline-query needs --baseline"\);/);
+  assert.match(src, /baselineQuery\?\.set\("metrics", "1"\);/, "metrics on both sides");
 });
 
 // --state-delay-ms: when the savestate loads after launch is part of the

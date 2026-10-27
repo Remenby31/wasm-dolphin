@@ -25,7 +25,7 @@
       "commit": "01e0577914a75a2569c846778c2f93aa8e6feddd"
     }
   },
-  "patchSeriesSha256": "b91423b0b6f1a6182a4de85b157c126ec4ef00f039f540f13dc466d19d5225cd",
+  "patchSeriesSha256": "1bded1ba48570733f5d4269ffe28e5c199f317fe0d34136eb1208a683ef757f7",
   "patches": [
     {
       "order": 1,
@@ -1039,12 +1039,20 @@
       "order": 127,
       "cwd": ".",
       "hashMode": "lf-normalized",
-      "path": "patches/dolphin-wasm/snapshot/0172-jit-warmup-from-boot-on-load.patch",
-      "size": 2481,
-      "sha256": "b058ec2c1ed6bf5b2de4fb757dc6f4a7767192b936d48759273bd3e9cbcf921d"
+      "path": "patches/dolphin-wasm/snapshot/0171-region-installs-after-state-load.patch",
+      "size": 19006,
+      "sha256": "8e02e8f75385d44b75f423962a3105dfc4235ec9fae4de82971ec0c689a3559c"
     },
     {
       "order": 128,
+      "cwd": ".",
+      "hashMode": "lf-normalized",
+      "path": "patches/dolphin-wasm/snapshot/0172-jit-warmup-from-boot-on-load.patch",
+      "size": 2520,
+      "sha256": "c8ad42063b76c61ff08bba4e05aec08044d6b4c815f19980ef55f607de805ff2"
+    },
+    {
+      "order": 129,
       "cwd": "Externals/SFML/SFML",
       "hashMode": "lf-normalized",
       "path": "patches/dolphin-wasm/submodules/0001-sfml-emscripten-config.patch",
@@ -1052,7 +1060,7 @@
       "sha256": "f82197a21fe982ad83f6ee7bbf5a03839b1cebd4d64da3eab11263842bf61d89"
     },
     {
-      "order": 129,
+      "order": 130,
       "cwd": "Externals/xxhash/xxHash",
       "hashMode": "lf-normalized",
       "path": "patches/dolphin-wasm/submodules/0002-xxhash-wasm-simd-scalar.patch",
