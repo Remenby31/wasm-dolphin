@@ -44,7 +44,11 @@ watchdog.unref();
 
 const [vw, vh] = o.viewport.split("x").map(Number);
 const server = await ensureServer({ port: o.port });
-const query = (c) => `${PRESETS.wgpu}${o.query ? `&${o.query}` : ""}&${c}`;
+// "pageaspect=16:9" in a case is the probe's, not the engine's: the engine
+// page's aspect selector, set after the boot (a box that differs from the
+// backbuffer's aspect).
+const engineCase = (c) => c.split("&").filter((kv) => !kv.startsWith("pageaspect=")).join("&");
+const query = (c) => `${PRESETS.wgpu}${o.query ? `&${o.query}` : ""}&${engineCase(c)}`;
 
 async function boot(c) {
   const session = await openSession({ base: server.base, server, query: query(c), iso: o.iso, routes: o.state ? { [STATE_ROUTE]: o.state } : {} });
@@ -53,6 +57,8 @@ async function boot(c) {
     const loaded = await loadHarnessState(session.page, session.url);
     if (!loaded?.loaded) throw new Error(`savestate load failed: ${JSON.stringify(loaded)}`);
   }
+  const aspect = /(?:^|&)pageaspect=([0-9:]+)/.exec(c)?.[1];
+  if (aspect) await session.page.selectOption("#aspectSelect", aspect);
   if (o.hold) await session.page.keyboard.down(o.hold);
   return session;
 }
@@ -66,6 +72,20 @@ async function inspect(page) {
   const want = f?.active ? displayFilterOutputSize({ width: bw, height: bh }, f.box) : { width: bw, height: bh };
   const sizeOk = Boolean(f?.canvas) && f.canvas[0] === want.width && f.canvas[1] === want.height;
   return { filter: f, expectedCanvas: [want.width, want.height], sizeOk, shown: pv?.shown ?? null, errors: diag?.lastErrors ?? null };
+}
+
+// Mean luma of the leftmost and rightmost 2 % of columns.
+function edgeLuma(f) {
+  const n = Math.max(1, Math.round(f.width * 0.02));
+  const mean = (x0) => {
+    let s = 0;
+    for (let y = 0; y < f.height; y++) for (let x = x0; x < x0 + n; x++) {
+      const i = (y * f.width + x) * 4;
+      s += 0.299 * f.data[i] + 0.587 * f.data[i + 1] + 0.114 * f.data[i + 2];
+    }
+    return Math.round(s / (n * f.height));
+  };
+  return { left: mean(0), right: mean(f.width - n) };
 }
 
 const slug = (c) => c.replace(/[^a-z0-9]+/gi, "-");
@@ -82,13 +102,17 @@ for (const c of o.cases.split(",")) {
     rec.filterFramesPerSec = after - before;
     const shown = await grabFrame(session.page);
     rec.grabbed = shown.error ?? [shown.width, shown.height];
+    // The picture fills the canvas: neither side's 2 % of columns is black
+    // (a pillarboxed 16:9 had ~4.5 % per side).
+    if (!shown.error) rec.edges = edgeLuma(shown);
     if (o.out && !shown.error) savePng(shown, path.join(o.out, `${slug(c)}.png`));
     const wantsFilter = /fsr=(light|strong|1|2)|displayfit=1/.test(c);
     // ?widescreen=1 (patch 0178): a 16:9 backbuffer, 480N lines.
     const ir = Number(/(?:^|&)ir=(\d)/.exec(c)?.[1] ?? 1);
     const [bw, bh] = rec.filter?.backbuffer ?? [0, 0];
+    rec.edgesOk = !rec.edges || (rec.edges.left > 4 && rec.edges.right > 4);
     rec.backbufferOk = /widescreen=1/.test(c) ? bh === 480 * ir && bw === (Math.floor((2560 * ir + 2) / 3) & ~1) : bh === 480 * ir && bw === 640 * ir;
-    rec.ok = rec.sizeOk && rec.backbufferOk && Boolean(rec.filter) && rec.filter.active === wantsFilter &&
+    rec.ok = rec.sizeOk && rec.backbufferOk && rec.edgesOk && Boolean(rec.filter) && rec.filter.active === wantsFilter &&
       (!wantsFilter || rec.filterFramesPerSec > 0) && !(Array.isArray(rec.errors) && rec.errors.length);
     if (!rec.ok) failed = true;
     results.cases.push(rec);
