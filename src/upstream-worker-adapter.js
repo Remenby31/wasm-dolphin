@@ -113,6 +113,7 @@ export class UpstreamWorkerAdapter {
     memcardSlotB = false,
     internalResolution = 1,
     maxAnisotropy = -1,
+    displayFilter = null,
     efbAccess = false,
     fifoLog = false,
     efbCopyRam = false,
@@ -247,6 +248,7 @@ export class UpstreamWorkerAdapter {
     this.memcardSlotB = Boolean(memcardSlotB);
     this.internalResolution = Number(internalResolution) || 1;
     this.maxAnisotropy = Number.isInteger(maxAnisotropy) ? maxAnisotropy : -1;
+    this.displayFilter = displayFilter && typeof displayFilter === "object" ? { ...displayFilter } : null;
     this.efbAccess = Boolean(efbAccess);
     this.fifoLog = Boolean(fifoLog);
     this.efbCopyRam = Boolean(efbCopyRam);
@@ -502,6 +504,7 @@ export class UpstreamWorkerAdapter {
       memcardSlotB: this.memcardSlotB,
       internalResolution: this.internalResolution,
       maxAnisotropy: this.maxAnisotropy,
+      displayFilter: this.displayFilter,
       efbAccess: this.efbAccess,
       fifoLog: this.fifoLog,
       efbCopyRam: this.efbCopyRam,
@@ -619,6 +622,8 @@ export class UpstreamWorkerAdapter {
     }
     this.applyMetadata(response);
     this.loaded = true;
+    // A display box measured while the load ran (sent with the load before).
+    if (this.displayFilter) this.request("setDisplayFilter", this.displayFilter).catch(() => {});
     this.userData = response.userData ?? null;
     const saveWarning = describeUserDataStatus(this.userData);
     if (saveWarning) this.onStatus(saveWarning);
@@ -907,6 +912,14 @@ export class UpstreamWorkerAdapter {
       internalResolution: this.internalResolution,
       maxAnisotropy: this.maxAnisotropy
     });
+  }
+
+  // Display filter (src/wgpu-display-filter.js): sharpness, fit, display
+  // box; merged into what the next boot gets, and sent to a running worker.
+  async setDisplayFilter(filter = {}) {
+    this.displayFilter = { ...(this.displayFilter ?? {}), ...filter };
+    if (!this.loaded) return { applied: false, reason: "core-not-loaded" };
+    return this.request("setDisplayFilter", this.displayFilter);
   }
 
   setAudioMuted(muted) {

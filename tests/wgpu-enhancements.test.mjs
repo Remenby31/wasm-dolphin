@@ -63,7 +63,7 @@ test("the worker resizes the canvas on the core's BackbufferSize command (0168)"
   const worker = await read("../src/upstream-discio-worker.js");
   assert.match(worker, /const WGPU_CMD_OP_BACKBUFFER_SIZE = 29;/);
   assert.match(worker, /case WGPU_CMD_OP_BACKBUFFER_SIZE:\n[^]*?resizeWgpuBackbuffer\(u32\[recWord \+ 1\], u32\[recWord \+ 2\]\);/);
-  assert.match(worker, /if \(!resizeCanvasBackbuffer\(renderCanvas, renderGpu, width, height, usage\)\) return;/);
+  assert.match(worker, /if \(!resizeCanvasBackbuffer\(renderCanvas, renderGpu, size\.width, size\.height, usage\)\) return;/);
   assert.match(worker, /case "setEnhancements": \{[^]*?_DolphinWeb_SetEnhancements/);
   const patch = await read("../patches/dolphin-wasm/snapshot/0168-webgpu-internal-resolution.patch");
   assert.match(patch, /\+  BackbufferSize = 29,/);

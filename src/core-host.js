@@ -2,6 +2,7 @@ import { aotCompilerRequested, jitOffThreadRequested } from "./aot-compiler-work
 import { aotSamplePeriodRequested } from "./aot-hot-sampler.js";
 import { wasmEngine } from "./wasm-engine.js";
 import { anisotropyToCore, clampInternalResolution, internalResolutionCeiling, requestedEnhancements } from "./wgpu-enhancements.js";
+import { displayFilterFits, normalizeDisplayFilter, requestedDisplayFilter } from "./wgpu-display-filter.js";
 import { parseCustomRtc } from "./custom-rtc.js";
 import { DolphinCoreAdapter, dolphinBundleAvailable } from "./dolphin-adapter.js";
 import { buttonMaskFromPressed, isPadPort } from "./input.js";
@@ -120,6 +121,12 @@ export class EmulatorHost {
     // ?ir=1-4 and ?aniso=1|2|4|8|16 (patch 0168, WebGPU path); setEnhancements
     // changes them while a game runs.
     this.enhancements = requestedEnhancements(window.location.search);
+    // ?fsr=off|light|strong, ?displayfit=1 (WebGPU path with presentvsync):
+    // the canvas at the display's pixels, scaled and sharpened at the
+    // present; setDisplayFilter changes it while a game runs.
+    this.displayFilter = requestedDisplayFilter(window.location.search);
+    this.displayBoxObserver = null;
+    if (displayFilterFits(this.displayFilter)) this.watchDisplayBox();
     // 1 once a device was lost above 1x (internalResolutionCeiling()).
     this.scaleLostCeiling = 4;
     this.scaleCeilingPromise = null;
@@ -491,6 +498,7 @@ export class EmulatorHost {
             memcardSlotB: this.memcardSlotB,
             internalResolution: this.enhancements.internalResolution,
             maxAnisotropy: this.enhancements.maxAnisotropy,
+            displayFilter: this.displayFilter,
             efbAccess: this.efbAccess,
             fifoLog: this.fifoLog,
             efbCopyRam: this.efbCopyRam,
@@ -953,6 +961,44 @@ export class EmulatorHost {
       return { applied: false, reason: "core-not-loaded" };
     }
     return this.adapter.setEnhancements(this.enhancements);
+  }
+
+  // Display filter: sharpness "off" | "light" | "strong" (FSR1 RCAS after an
+  // EASU upscale to the display), fit true to size the canvas to the display
+  // without sharpening (an internal resolution above the display is then
+  // area-filtered down: supersampling). Kept for the next boot. Resolves the
+  // worker's answer ({ applied, active, sharpness, fit, box }).
+  async setDisplayFilter({ sharpness, fit } = {}) {
+    this.displayFilter = normalizeDisplayFilter({
+      ...this.displayFilter,
+      ...(sharpness !== undefined ? { sharpness } : {}),
+      ...(fit !== undefined ? { fit } : {})
+    });
+    if (displayFilterFits(this.displayFilter)) this.watchDisplayBox();
+    if (typeof this.adapter?.setDisplayFilter !== "function") return { applied: false, reason: "core-not-loaded" };
+    return this.adapter.setDisplayFilter(this.displayFilter);
+  }
+
+  // The canvas element's size in device pixels, for the display filter's
+  // canvas (devicePixelContentBoxSize: exact, follows zoom and moves between
+  // screens).
+  watchDisplayBox() {
+    if (this.displayBoxObserver || typeof ResizeObserver !== "function" || !this.canvas) return;
+    this.displayBoxObserver = new ResizeObserver((entries) => {
+      const entry = entries.at(-1);
+      const device = entry?.devicePixelContentBoxSize?.[0];
+      const ratio = globalThis.devicePixelRatio || 1;
+      const box = device
+        ? { width: device.inlineSize, height: device.blockSize }
+        : { width: Math.round(entry.contentRect.width * ratio), height: Math.round(entry.contentRect.height * ratio) };
+      this.displayFilter = normalizeDisplayFilter({ ...this.displayFilter, box });
+      if (displayFilterFits(this.displayFilter)) this.adapter?.setDisplayFilter?.({ box: this.displayFilter.box })?.catch?.(() => {});
+    });
+    try {
+      this.displayBoxObserver.observe(this.canvas, { box: "device-pixel-content-box" });
+    } catch {
+      this.displayBoxObserver.observe(this.canvas);
+    }
   }
 
   // The highest internal resolution this machine is trusted with:
