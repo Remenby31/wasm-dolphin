@@ -5,6 +5,24 @@
 import { execFileSync } from "node:child_process";
 import os from "node:os";
 
+// The power source (macOS `pmset -g batt`): a laptop on battery runs slower
+// and differently from on mains, so a measure says which it ran on.
+// { source: "ac" | "battery", percent } or null (another OS, no battery).
+export function parsePmsetBatt(text) {
+  const m = /Now drawing from '([^']+)'/.exec(text ?? "");
+  if (!m) return null;
+  const pct = /(\d+)%/.exec(text);
+  return { source: /battery/i.test(m[1]) ? "battery" : /ac/i.test(m[1]) ? "ac" : m[1], percent: pct ? Number(pct[1]) : null };
+}
+export function powerSnapshot() {
+  if (os.platform() !== "darwin") return null;
+  try {
+    return parsePmsetBatt(execFileSync("pmset", ["-g", "batt"], { encoding: "utf8" }));
+  } catch {
+    return null;
+  }
+}
+
 export function machineSnapshot() {
   let uptime = "";
   try {
@@ -18,6 +36,7 @@ export function machineSnapshot() {
     cpuModel: os.cpus()[0]?.model ?? "",
     totalMemGiB: Math.round(os.totalmem() / 2 ** 30),
     platform: `${os.platform()} ${os.release()}`,
+    power: powerSnapshot(),
     uptime
   };
 }

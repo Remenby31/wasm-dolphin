@@ -149,3 +149,24 @@ test("a canvas wider than the stream is scaled down to 640 wide before the frame
   assert.equal(created.length, 1, "one scaler canvas, reused across scales");
   assert.deepEqual([capture.stats.width, capture.stats.height], [640, 480]);
 });
+
+// Follow-up of 0168, point 5: one capture at 4x ended at 320x240. The size
+// really sent is counted over the whole capture, per source and size.
+test("the capture counts every size it sent (min/max, per source:WxH) and the widest canvas offered", () => {
+  const writer = { desiredSize: 1, write: async () => {}, close: async () => {}, closed: new Promise(() => {}) };
+  const createCanvas = (width, height) => ({ width, height, getContext: () => ({ drawImage: () => {} }) });
+  let t = 0;
+  const capture = new StreamCapture({ now: () => (t += 1), VideoFrameImpl: FakeFrame, createCanvas });
+  capture.attach({ getWriter: () => writer });
+  capture.offerCanvas({ width: 2560, height: 1920 }, 5);
+  capture.offerCanvas({ width: 320, height: 240 }, 6);
+  capture.offerBytes(new Uint8Array(640 * 480 * 4), 640, 480, 7);
+  capture.offerCanvas({ width: 2560, height: 1920 }, 8);
+  const s = capture.stats;
+  assert.deepEqual([s.minWidth, s.maxWidth, s.minHeight, s.maxHeight, s.inputMaxWidth], [320, 640, 240, 480, 2560]);
+  assert.deepEqual(Object.fromEntries(Object.entries(s.sizes).map(([k, v]) => [k, [v.frames, v.lastCoreFrame]])),
+    { "canvas:640x480": [2, 8], "canvas:320x240": [1, 6], "bytes:640x480": [1, 7] });
+  for (let i = 1; i <= 10; i += 1) capture.offerCanvas({ width: 10 * i, height: 10 }, 9);
+  assert.equal(Object.keys(capture.stats.sizes).length, 9, "8 sizes, then 'other'");
+  assert.equal(capture.stats.sizes.other.frames, 5);
+});

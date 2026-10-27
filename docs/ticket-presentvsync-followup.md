@@ -30,3 +30,6 @@ time (v3). Left for later:
 8. **Default switch criterion** (judge, 2026-10-26): p99 between presents and
    BeginFrames with 2+ pictures over ≥ 6 runs, with the fixed display counter;
    check beginFb0 == presents in the measurement.
+9. **Done.** The fallback counter `byLateHidden` is `byNoBeginFrame` (no
+   BeginFrame for 50 ms: a hidden tab or a visible stall), as
+   `droppedNoBeginFrame` (#282).

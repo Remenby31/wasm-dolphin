@@ -12,7 +12,11 @@
 // (setEnhancements) and checks the canvas and the frame follow.
 //
 //   node harness/probes/upscale-check.mjs --iso disc.iso --port N [--state s.sav --hold KeyX]
-//     [--scales 1,2,4] [--query "efbcopyram=1"] [--vi 240] [--switch 2,4,1] [--out dir]
+//     [--scales 1,2,4] [--query "efbcopyram=1"] [--vi 240] [--switch 2,4,1] [--lose-at 2] [--out dir]
+//
+// --lose-at N boots at N, loses the WebGPU device (harness hook) and checks
+// the host falls back to 1x: ceiling 1, next boot's scale 1, a later
+// setEnhancements(4) held to 1.
 //
 // Correctness only, never a speed or GPU-time measurement (no perf lock).
 // Captures of a commercial disc go to --out, which must be outside the repo.
@@ -32,7 +36,7 @@ const { values: o } = parseArgs({
     scales: { type: "string", default: "1,2,4" }, query: { type: "string", default: "" },
     vi: { type: "string", default: "240" }, switch: { type: "string", default: "" },
     "switch-wait": { type: "string", default: "3" }, out: { type: "string" },
-    "max-diff": { type: "string", default: "6" },
+    "max-diff": { type: "string", default: "6" }, "lose-at": { type: "string", default: "" },
   },
 });
 if (!o.iso || !o.port) throw new Error("usage: upscale-check.mjs --iso disc.iso --port N [...]");
@@ -136,6 +140,31 @@ if (o.switch) {
       results.switch.push(rec);
     }
     results.switchDiagnostics = await rendererErrors(session.page);
+  } finally {
+    await session.close();
+  }
+}
+
+if (o["lose-at"]) {
+  const ir = Number(o["lose-at"]);
+  const session = await boot(ir);
+  try {
+    await captureAtVi(session.page, { index: 60, timeoutMs: 120000 });
+    const before = await session.page.evaluate(() => window.__host.internalResolutionCeiling());
+    const lose = await workerRequest(session.page, "validationLoseWebGpuDevice", {}, 10000);
+    await session.page.waitForTimeout(1000);
+    const after = await session.page.evaluate(async () => ({
+      ceiling: await window.__host.internalResolutionCeiling(),
+      nextBoot: window.__host.enhancements.internalResolution,
+      set4: await window.__host.setEnhancements({ internalResolution: 4 }),
+      kept: window.__host.enhancements.internalResolution,
+    }));
+    const worker = await workerRequest(session.page, "rendererDiagnostics", {}, 10000).catch(() => null);
+    results.lose = { ir, before, lose, after, workerCeiling: worker?.internalResolutionCeiling ?? null };
+    const expectFallback = ir > 1;
+    if (!lose?.lost || lose.internalResolution !== ir) failed = true;
+    if (expectFallback && (after.ceiling.ceiling !== 1 || after.nextBoot !== 1 || after.kept !== 1)) failed = true;
+    if (!expectFallback && after.ceiling.reason === "device-lost") failed = true;
   } finally {
     await session.close();
   }

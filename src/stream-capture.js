@@ -21,6 +21,7 @@
 // so the encoder always gets 640x480, whatever the scale.
 
 export const STREAM_WIDTH = 640;
+const MAX_SIZES = 8;
 
 export class StreamCapture {
   // VideoFrameImpl: injectable for tests (node has no VideoFrame).
@@ -52,7 +53,18 @@ export class StreamCapture {
       captureMsTotal: 0,
       captureMsMax: 0,
       lastCaptureAt: 0,
-      lastCoreFrame: 0
+      lastCoreFrame: 0,
+      // The size really sent, over the whole capture (width/height are the
+      // last frame's only), and the widest canvas offered before scaling.
+      // sizes: frames per "source:WxH", at most MAX_SIZES keys (others go
+      // to "other"): a stray size (a 320x240 canvas at 4x, ticket 0168
+      // point 5) shows with its count and its last core frame.
+      minWidth: 0,
+      maxWidth: 0,
+      minHeight: 0,
+      maxHeight: 0,
+      inputMaxWidth: 0,
+      sizes: {}
     };
   }
 
@@ -103,6 +115,7 @@ export class StreamCapture {
       this.stats.errors += 1;
       return;
     }
+    this.stats.inputMaxWidth = Math.max(this.stats.inputMaxWidth, width);
     this.push(frame, "bytes", width, height, coreFrame, startedAt);
   }
 
@@ -119,6 +132,7 @@ export class StreamCapture {
       this.stats.errors += 1;
       return;
     }
+    this.stats.inputMaxWidth = Math.max(this.stats.inputMaxWidth, canvas.width);
     this.push(frame, "canvas", source.width, source.height, coreFrame, startedAt);
   }
 
@@ -147,6 +161,23 @@ export class StreamCapture {
     s.captureMsMax = Math.max(s.captureMsMax, ms);
     s.lastCaptureAt = startedAt;
     s.lastCoreFrame = coreFrame;
+    s.minWidth = s.minWidth ? Math.min(s.minWidth, width) : width;
+    s.maxWidth = Math.max(s.maxWidth, width);
+    s.minHeight = s.minHeight ? Math.min(s.minHeight, height) : height;
+    s.maxHeight = Math.max(s.maxHeight, height);
+    // The size's entry, looked up again only when the size or source
+    // changes (no string per frame).
+    const last = this.lastSize;
+    let size = last && last.sizes === s.sizes && last.source === source && last.width === width && last.height === height ? last.entry : null;
+    if (!size) {
+      let key = `${source}:${width}x${height}`;
+      if (!(key in s.sizes) && Object.keys(s.sizes).length >= MAX_SIZES) key = "other";
+      size = (s.sizes[key] ??= { frames: 0, lastCoreFrame: 0, lastAt: 0 });
+      this.lastSize = { sizes: s.sizes, source, width, height, entry: size };
+    }
+    size.frames += 1;
+    size.lastCoreFrame = coreFrame;
+    size.lastAt = startedAt;
     // write() takes ownership: the track closes the frame once consumed.
     const writer = this.writer;
     writer.write(frame).catch(() => {
