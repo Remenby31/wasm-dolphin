@@ -515,7 +515,8 @@ export function regionRecord(reply) {
     ...(reply.regionCalls ? { regionCalls: reply.regionCalls } : {}), // 0142
     // 0156: the 64 block-start PCs with the most guest cycles outside the
     // regions in this window (pc, cycles, why)
-    ...(Array.isArray(reply.missTop) && reply.missTop.length ? { missTop: reply.missTop } : {})
+    ...(Array.isArray(reply.missTop) && reply.missTop.length ? { missTop: reply.missTop } : {}),
+    ...(Array.isArray(reply.diagMissTime) ? { diagMissTime: reply.diagMissTime } : {}) // 0182 (diagnostic)
   };
   return p4.error ? { p4: null, p4Why: p4.error, ...samples } : { p4, p4Raw: stats, ...samples };
 }

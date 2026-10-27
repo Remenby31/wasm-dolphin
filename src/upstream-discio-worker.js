@@ -426,6 +426,26 @@ function harnessPacingConfig() {
 // plan, or not held by any fragment). Null with a core before 0156; torn
 // copies (the CPU thread publishing meanwhile) are read again.
 const REGION_MISS_TOP = 64;
+// Patch 0182 (diagnostic, never merged): per block-start PC outside the
+// regions, host time, its exception part, cycles and calls (64 longest).
+function harnessDiagMissTime(heap, m = moduleInstance) {
+  const at = typeof m?._DolphinWeb_DiagMissTime === "function" ? m._DolphinWeb_DiagMissTime() >>> 0 : 0;
+  const size = 8 + 40 * 64 + 8;
+  if (!at || at + size > heap.length) return null;
+  const words = new Int32Array(heap.buffer);
+  const load = (i) => (typeof SharedArrayBuffer !== "undefined" && heap.buffer instanceof SharedArrayBuffer ? Atomics.load(words, i) : words[i]) >>> 0;
+  for (let tries = 0; tries < 3; tries += 1) {
+    const ended = load((at + 8 + 40 * 64) >>> 2);
+    const view = new DataView(heap.slice(at, at + size).buffer);
+    if (load(at >>> 2) !== ended) continue;
+    const count = Math.min(view.getUint32(4, true), 64);
+    return Array.from({ length: count }, (_, i) => {
+      const o = 8 + 40 * i;
+      return { pc: view.getUint32(o + 24, true), timeMs: view.getFloat64(o, true), excMs: view.getFloat64(o + 8, true), cycles: view.getFloat64(o + 16, true), calls: view.getUint32(o + 28, true), sliceFirst: view.getUint32(o + 32, true), pred: view.getUint32(o + 36, true) };
+    });
+  }
+  return null;
+}
 function harnessRegionMissTop(heap, m = moduleInstance) {
   const at = typeof m?._DolphinWeb_JitRegionMissTop === "function" ? m._DolphinWeb_JitRegionMissTop() >>> 0 : 0;
   const size = 8 + 16 * REGION_MISS_TOP + 8;
@@ -476,7 +496,7 @@ function harnessJitRegionStats({ sampleEvery, pcs } = {}) {
   return { bytes: copy(), again: copy(), installSamples: harnessRegionInstallSamples(heap), layoutRefused, layoutHash, layout: harnessHeapLayout(moduleInstance),
     heapPatched: aotHeapPatched, heapPatchedBytes: aotHeapPatchedBytes, heapPatchFailed: aotHeapPatchFailed,
     regionChain: harnessRegionChainStats(heap), regionSleep: harnessRegionSleepStats(), ledger: harnessRegionLedger(pcs),
-    regionCalls: harnessRegionCallStats(), missTop: harnessRegionMissTop(heap) };
+    regionCalls: harnessRegionCallStats(), missTop: harnessRegionMissTop(heap), diagMissTime: harnessDiagMissTime(heap) };
 }
 // Guest calls made by region code as wasm calls (patch 0142): calls, returns
 // elsewhere than the continuation, codes passed up, calls past the depth

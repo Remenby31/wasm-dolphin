@@ -25,7 +25,7 @@
       "commit": "01e0577914a75a2569c846778c2f93aa8e6feddd"
     }
   },
-  "patchSeriesSha256": "3d01b01ab3c32943f1934a4ad8b03553563b0018340387eb1db48353c6740fd4",
+  "patchSeriesSha256": "45a9cb37776d8fa9c43bb222f0366a7752822a35269c1e25c77ab8bd834538c5",
   "patches": [
     {
       "order": 1,
@@ -1055,12 +1055,20 @@
       "order": 129,
       "cwd": ".",
       "hashMode": "lf-normalized",
+      "path": "patches/dolphin-wasm/snapshot/0182-diag-miss-time.patch",
+      "size": 8384,
+      "sha256": "2cbfd573550615ecd9d3e30fbdbb7ecd5ae5de5b110661ae866af4e334c347a7"
+    },
+    {
+      "order": 130,
+      "cwd": ".",
+      "hashMode": "lf-normalized",
       "path": "patches/dolphin-wasm/snapshot/0183-region-mtmsr-ee.patch",
       "size": 7238,
       "sha256": "d6dc528631dad90bf7ac00c50cd8f09b696a88c97b427a5c805dffd470929c71"
     },
     {
-      "order": 130,
+      "order": 131,
       "cwd": "Externals/SFML/SFML",
       "hashMode": "lf-normalized",
       "path": "patches/dolphin-wasm/submodules/0001-sfml-emscripten-config.patch",
@@ -1068,7 +1076,7 @@
       "sha256": "f82197a21fe982ad83f6ee7bbf5a03839b1cebd4d64da3eab11263842bf61d89"
     },
     {
-      "order": 131,
+      "order": 132,
       "cwd": "Externals/xxhash/xxHash",
       "hashMode": "lf-normalized",
       "path": "patches/dolphin-wasm/submodules/0002-xxhash-wasm-simd-scalar.patch",
