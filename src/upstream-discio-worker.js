@@ -13064,7 +13064,7 @@ function refreshHelperField() {
 }
 // A frame went up since the presenter's last BeginFrame (shown at a
 // BeginFrame, by the late path or the fallback timer).
-let wgpuVsyncShownSinceTick = false;
+let wgpuVsyncShownSinceTick = 0;
 // Pool and queue, one texture per frame (src/wgpu-vsync-queue.js).
 const wgpuVsync = createVsyncQueue({
   queueSize: 2,
@@ -13183,9 +13183,9 @@ function queueWgpuVsyncFrame(coreFrame, shownVi, stream) {
       // The game frame now on screen and how many refreshes it covers.
       if (tracking) {
         const gameMs = wgpuGamePacer.period;
-        wgpuRefreshHistogram.tick(wgpuVsyncShownSinceTick ? (refreshMs && gameMs ? gameMs / refreshMs : 1) : null, now);
+        wgpuRefreshHistogram.tick(wgpuVsyncShownSinceTick ? (refreshMs && gameMs ? gameMs / refreshMs : 1) : null, now, wgpuVsyncShownSinceTick);
       }
-      wgpuVsyncShownSinceTick = false;
+      wgpuVsyncShownSinceTick = 0;
       wgpuVsyncIdleTicks = shown ? 0 : wgpuVsyncIdleTicks + 1;
       if (wgpuVsyncIdleTicks >= WGPU_VSYNC_IDLE_TICKS && !wgpuVsync.waiting) {
         wgpuVsyncLoop = false;  // the next queued frame starts it again
@@ -13249,7 +13249,7 @@ function presentWgpuVsyncFrame({ newest = false, hidden = false, t = null, refre
     return false;
   }
   if (pace) wgpuGamePacer.shown(f, t, refreshMs);
-  wgpuVsyncShownSinceTick = true;
+  wgpuVsyncShownSinceTick += 1;
   const dev = renderGpu.device;
   if (wgpuVsyncCanvasDevice !== dev) {
     wgpuVsyncCanvasDevice = dev;
