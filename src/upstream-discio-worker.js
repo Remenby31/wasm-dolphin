@@ -2061,6 +2061,25 @@ async function handleMessage(type, payload) {
       return harnessPacingConfig();
     case "validationReadJitRegionStats":
       return harnessJitRegionStats(payload);
+    // Patch 0175 (diagnosis, not for merge): why ready region modules waited
+    // and when each was installed.
+    case "validationRegionDiag": {
+      const m = moduleInstance;
+      if (!m?._DolphinWeb_RegionDiag || !m._malloc) return { supported: false };
+      const REASONS = ["outsideWindow", "longSleepSeen", "largeNotFirst", "largeYoung", "largeCooldown", "largeStillSleeping", "bound", "debt", "forced", "expired", "room", "notReady"];
+      const cap = 256;
+      const c = m._malloc(4 * (REASONS.length + 2)), l = m._malloc(32 * cap);
+      try {
+        const n = m._DolphinWeb_RegionDiag(c, l, cap) >>> 0;
+        const counts = Array.from(new Uint32Array(m.HEAPU8.buffer, c, REASONS.length + 2));
+        const f = new Float32Array(m.HEAPU8.buffer, l, 8 * n);
+        const installs = Array.from({ length: n }, (_, k) => ({ tMs: f[8 * k], path: ["sleep", "forced", "expired", "slice"][f[8 * k + 1]], costMs: f[8 * k + 2], tookMs: f[8 * k + 3], readyMs: f[8 * k + 4], waitedMs: f[8 * k + 5], inWindow: f[8 * k + 6] === 1, large: f[8 * k + 7] === 1 }));
+        return { supported: true, reasons: Object.fromEntries(REASONS.map((r, i) => [r, counts[i]])), logged: counts[REASONS.length], windowStartMs: counts[REASONS.length + 1] / 100, installs };
+      } finally {
+        m._free?.(c);
+        m._free?.(l);
+      }
+    }
     case "validationReadRegionLedgerStale":
       return harnessRegionLedgerStale();
     case "validationReadAxHleStats":
