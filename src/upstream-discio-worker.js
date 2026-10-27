@@ -1742,6 +1742,7 @@ async function handleMessage(type, payload) {
         internalResolution: payload.internalResolution,
         maxAnisotropy: payload.maxAnisotropy,
         efbAccess: payload.efbAccess,
+        xfbNoDecode: payload.xfbNoDecode,
         fifoLog: payload.fifoLog,
         efbCopyRam: payload.efbCopyRam,
         efbNoDefer: payload.efbNoDefer,
@@ -2547,6 +2548,7 @@ async function loadCore({
   internalResolution = 1,
   maxAnisotropy = -1,
   efbAccess = false,
+  xfbNoDecode = false,
   fifoLog = false,
   efbCopyRam = false,
   efbNoDefer = false,
@@ -3082,6 +3084,7 @@ async function loadCore({
     dolphinEfbScale: (wgpuInternalResolution = clampInternalResolution(internalResolution, wgpuScaleCeiling())),
     dolphinMaxAnisotropy: Number.isInteger(maxAnisotropy) ? maxAnisotropy : -1,
     dolphinEfbAccess: Boolean(efbAccess),
+    dolphinXfbNoDecode: Boolean(xfbNoDecode),
     dolphinEfbCopyRam: Boolean(efbCopyRam),
     dolphinEfbNoDefer: Boolean(efbNoDefer),
     // Ranks the instructions that block JIT compilation (?jitverbose=1).

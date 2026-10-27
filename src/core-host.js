@@ -127,6 +127,9 @@ export class EmulatorHost {
     this.workerScaleCeiling = null;
     // CPU reads of the EFB (peeks), off by default as in Dolphin (EFBAccessEnable).
     this.efbAccess = new URLSearchParams(window.location.search).get("efbaccess") === "1";
+    // Bench: ?xfbdecode=0 skips the XFB's YUV->RGBA decode on the CPU thread,
+    // honoured by the core under video=null only (WebGPU never decodes).
+    this.xfbNoDecode = new URLSearchParams(window.location.search).get("xfbdecode") === "0";
     // Harness: FIFO logs (.dff) may boot. Off for the app (FifoPlayer trusts the log).
     this.fifoLog = new URLSearchParams(window.location.search).get("fifolog") === "1";
     // EFB copies written to guest RAM too (Dolphin's EFBToTextureEnable=False).
@@ -492,6 +495,7 @@ export class EmulatorHost {
             internalResolution: this.enhancements.internalResolution,
             maxAnisotropy: this.enhancements.maxAnisotropy,
             efbAccess: this.efbAccess,
+            xfbNoDecode: this.xfbNoDecode,
             fifoLog: this.fifoLog,
             efbCopyRam: this.efbCopyRam,
             efbNoDefer: this.efbNoDefer,
