@@ -54,15 +54,18 @@ export function wgpuFatalPageReason(scope) {
 
 // One `wgpu-device-lost` message per renderer session (per device), the
 // first cause wins: a device lost after a replay error, or the reverse,
-// does not restart the page twice.
+// does not restart the page twice. cause: "device-lost" (the GPU went: the
+// page restarts lower, memory may be why) or "renderer-error" (a replay
+// error on a live device: the page restarts at the same scale, the scale
+// is not why).
 export function createWgpuFatalReporter(post = noop) {
   let reported = null;
   return {
     get reported() { return reported; },
     reset() { reported = null; },
-    report({ internalResolution = 1, reason = "unknown", detail = "" } = {}) {
+    report({ internalResolution = 1, reason = "unknown", detail = "", cause = "device-lost" } = {}) {
       if (reported) return false;
-      reported = { internalResolution, reason: String(reason), detail: String(detail ?? "") };
+      reported = { internalResolution, reason: String(reason), detail: String(detail ?? ""), cause: cause === "renderer-error" ? cause : "device-lost" };
       post({ type: "wgpu-device-lost", ...reported });
       return true;
     },

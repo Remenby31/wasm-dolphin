@@ -81,6 +81,13 @@ with `scaleResolutionDownBy` there.
   every `setEnhancements` at 1x) and `onGpuDeviceLost({ internalResolution,
   fallback: 1, reason, detail })` tells the page, which restarts the game at
   1x instead of at the same scale. Lost at 1x: `fallback` is null.
+  `cause` is `"device-lost"` there. A fatal error of the renderer on a live
+  device (a failed submit, a staging buffer full or lost, the command ring
+  not attached…: the ring stops for good, the picture would freeze) comes
+  the same way, once per device, with `cause: "renderer-error"` and its own
+  `reason` (`submit-error`, `staging-capacity`, `ring-attach`…): the scale is
+  not why, so `fallback` is null and the page restarts at the same scale,
+  with its own guard against a loop.
 - **Measured costs** (2026-10-26/27, M4 Pro, Chrome headless, mains power,
   local commercial disc, race, 3 runs per scale, perf lock):
 

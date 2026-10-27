@@ -1291,7 +1291,8 @@ export class UpstreamWorkerAdapter {
         this.onGpuDeviceLost({
           internalResolution: Number(message.internalResolution) || 1,
           reason: String(message.reason ?? "unknown"),
-          detail: String(message.detail ?? "")
+          detail: String(message.detail ?? ""),
+          cause: message.cause === "renderer-error" ? "renderer-error" : "device-lost"
         });
       } catch (error) {
         this.onStatus(`Device loss handler failed: ${error instanceof Error ? error.message : error}`);

@@ -106,7 +106,7 @@ test("every scope the worker fails the ring with has a page reason", async () =>
 
 test("the worker tells the page from markWgpuReplayFatal, the device loss from its handler", async () => {
   const worker = await workerSource();
-  assert.match(worker, /function markWgpuReplayFatal\(scope, detail\) \{[\s\S]*?wgpuRendererRuntime\.emergencyFail\(errorCode\);[\s\S]*?if \(scope !== "device-lost"\) \{\s*wgpuFatalReporter\.report\(\{\s*internalResolution: wgpuInternalResolution,\s*reason: wgpuFatalPageReason\(scope\),\s*detail: wgpuReplayFatal\.detail,/);
+  assert.match(worker, /function markWgpuReplayFatal\(scope, detail\) \{[\s\S]*?wgpuRendererRuntime\.emergencyFail\(errorCode\);[\s\S]*?if \(scope !== "device-lost"\) \{\s*wgpuFatalReporter\.report\(\{\s*internalResolution: wgpuInternalResolution,\s*reason: wgpuFatalPageReason\(scope\),\s*detail: wgpuReplayFatal\.detail,\s*cause: "renderer-error",/);
   assert.doesNotMatch(worker, /self\.postMessage\(\{ type: "wgpu-device-lost"/);
   // A new device is a new renderer session.
   assert.match(worker, /wgpuReplayFatal = null;\n  wgpuFatalReporter\.reset\(\);/);
@@ -127,32 +127,29 @@ async function pageSees(message) {
   return { lost, host };
 }
 
-const PAGE_REASONS = {
-  "submit-error": "submit-error",
-  "staging-seal": "staging-seal",
-  "staging-capacity": "staging-capacity",
-  "staging-copy": "staging-copy",
-  "staging-remap": "staging-remap",
-  "destroy-order": "destroy-order",
-  "semantic-capture-ack": "semantic-capture-ack",
-  "webgpu-command-ring-ownership": "ring-ownership",
-  "webgpu-command-ring-attach": "ring-attach",
-};
-for (const [scope, reason] of Object.entries(PAGE_REASONS)) {
-  test(`fatal ${scope}: the page gets wgpu-device-lost, reason ${reason}, and steps down like a lost device`, async () => {
+// One test over every cause (the list must match the worker's, test above):
+// the page hears a renderer error at the same scale, a lost device lower.
+test("every fatal replay error reaches the page as a renderer error, at the same scale; a lost device steps down", async () => {
+  for (const [scope, reason] of Object.entries(WGPU_FATAL_PAGE_REASONS)) {
     assert.equal(wgpuFatalPageReason(scope), reason);
     const posted = [];
-    const reporter = createWgpuFatalReporter((m) => posted.push(m));
-    assert.equal(reporter.report({ internalResolution: 2, reason: wgpuFatalPageReason(scope), detail: `${scope} detail` }), true);
-    assert.deepEqual(posted, [{ type: "wgpu-device-lost", internalResolution: 2, reason, detail: `${scope} detail` }]);
+    createWgpuFatalReporter((m) => posted.push(m)).report({ internalResolution: 2, reason, detail: `${scope} detail`, cause: "renderer-error" });
+    assert.deepEqual(posted, [{ type: "wgpu-device-lost", internalResolution: 2, reason, detail: `${scope} detail`, cause: "renderer-error" }], scope);
     const { lost, host } = await pageSees(posted[0]);
-    assert.deepEqual(lost, [{ internalResolution: 2, fallback: 1, reason, detail: `${scope} detail` }]);
-    assert.equal(host.scaleLostCeiling, 1);
-    // At 1x, as a lost device: no lower scale to offer.
-    const at1 = await pageSees({ type: "wgpu-device-lost", internalResolution: 1, reason, detail: "" });
-    assert.equal(at1.lost[0].fallback, null);
-  });
-}
+    assert.deepEqual(lost, [{ internalResolution: 2, fallback: null, reason, detail: `${scope} detail`, cause: "renderer-error" }], scope);
+    assert.equal(host.scaleLostCeiling, 4, scope);
+  }
+  assert.deepEqual(Object.values(WGPU_FATAL_PAGE_REASONS).filter((r) => r.startsWith("ring-")), ["ring-ownership", "ring-attach"]);
+  // A lost device (cause absent from an older worker too): 1x above 1x, null at 1x.
+  const posted = [];
+  createWgpuFatalReporter((m) => posted.push(m)).report({ internalResolution: 2, reason: "unknown", detail: "gone" });
+  assert.equal(posted[0].cause, "device-lost");
+  const lostAt2 = await pageSees(posted[0]);
+  assert.deepEqual(lostAt2.lost, [{ internalResolution: 2, fallback: 1, reason: "unknown", detail: "gone", cause: "device-lost" }]);
+  assert.equal(lostAt2.host.scaleLostCeiling, 1);
+  const older = await pageSees({ type: "wgpu-device-lost", internalResolution: 1, reason: "destroyed", detail: "" });
+  assert.deepEqual(older.lost, [{ internalResolution: 1, fallback: null, reason: "destroyed", detail: "", cause: "device-lost" }]);
+});
 
 test("one message per renderer session: the first cause wins, a new device starts again", () => {
   const posted = [];
@@ -161,7 +158,7 @@ test("one message per renderer session: the first cause wins, a new device start
   assert.equal(reporter.report({ internalResolution: 3, reason: "destroyed", detail: "lost after" }), false);
   assert.equal(reporter.report({ internalResolution: 3, reason: "submit-error", detail: "again" }), false);
   assert.deepEqual(posted.map((m) => m.reason), ["staging-capacity"]);
-  assert.deepEqual(reporter.reported, { internalResolution: 3, reason: "staging-capacity", detail: "full" });
+  assert.deepEqual(reporter.reported, { internalResolution: 3, reason: "staging-capacity", detail: "full", cause: "device-lost" });
   reporter.reset();
   assert.equal(reporter.report({ internalResolution: 1, reason: "destroyed", detail: "" }), true);
   assert.equal(posted.length, 2);

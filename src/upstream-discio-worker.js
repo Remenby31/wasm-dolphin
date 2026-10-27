@@ -10769,6 +10769,7 @@ function markWgpuReplayFatal(scope, detail) {
       internalResolution: wgpuInternalResolution,
       reason: wgpuFatalPageReason(scope),
       detail: wgpuReplayFatal.detail,
+      cause: "renderer-error",
     });
   }
   return true;
