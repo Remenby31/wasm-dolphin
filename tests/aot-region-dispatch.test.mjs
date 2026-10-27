@@ -2347,3 +2347,64 @@ test("function cap: none leaves the formation as before; one cuts every fragment
   const tiny = await translateWithContinuations(core.module, { entry: LONG, ranges, hash: null }, { ...options, functionCap: 16 });
   assert.deepEqual([tiny.fragment?.entries.length, tiny.fragment?.code.length > 16], [1, true]);
 });
+
+// 0187 (?regionchaincache=1, enable bit 18): region chaining looks the next
+// region up in a cache of {pc, handle, epoch}. It must never chain into a
+// region that is no longer live, mapped or verified: the epoch moves at every
+// install and drop (s_region_at), at a cache clear (every region unverified)
+// and when an invalidation keeps a region unverified. Against the interpreter,
+// with the cache filled first, then after each of those changes.
+const CHAIN_CACHE = 1 << 18;
+const chainCacheSkip = callSkip || (() => {
+  const lock = JSON.parse(readFileSync(new URL("../provenance/dolphin-source.lock.json", import.meta.url), "utf8"));
+  const built = JSON.parse(readFileSync(new URL("../cores/dolphin/dolphin-core-upstream.build.json", import.meta.url), "utf8"));
+  return built.source?.patchSeriesSha256 === lock.patchSeriesSha256 && lock.patches.some((p) => p.path.includes("/0187-"))
+    ? false : "core built from a patch series without 0187";
+})();
+function withChainCache(fn) {
+  const saved = core.module._DolphinWeb_SetCachedInterpreterDisableMask(PRODUCTION_DISABLE_MASK | CHAIN_CACHE);
+  try { return fn(); } finally { core.module._DolphinWeb_SetCachedInterpreterDisableMask(saved); }
+}
+
+test("0187: chaining through the cache runs like the interpreter, across modules, and hits it", { skip: chainCacheSkip }, () => {
+  withChainCache(() => {
+    installCalls(1);
+    const reference = runCall(CALLS.labels.main, { regions: false });
+    for (let round = 0; round < 3; round++) { // the first fills the cache, the others hit it
+      const got = runCall(CALLS.labels.main, { regions: true });
+      assert.deepEqual(got.state, reference.state, `round ${round}`);
+      assert.equal(got.downcount, reference.downcount, `round ${round}`);
+    }
+  });
+});
+
+test("0187: a region dropped, invalidated or unverified after the cache was filled is never chained into from it", { skip: chainCacheSkip }, () => {
+  withChainCache(() => {
+    const program = elseProgram(20);
+    const reference = () => runCall(program.labels.main, { regions: false });
+    // (1) Code rewritten and invalidated (the region over it dropped or kept
+    // unverified): the cache filled before must not chain into it.
+    installCalls(1, program, ELSE_TEXT);
+    runCall(program.labels.main, { regions: true }); // fills the cache
+    const at = program.labels.H;
+    const word = asm.addi(6, 6, 5); // H: r6 += 5 instead of 1
+    core.load(at, Uint8Array.of(word >>> 24, (word >>> 16) & 0xff, (word >>> 8) & 0xff, word & 0xff));
+    core.invalidate(at, 4);
+    const rewritten = reference();
+    assert.deepEqual(runCall(program.labels.main, { regions: true }).state, rewritten.state, "after an invalidation");
+    // (2) Every region unverified (a cache clear): the cache must not chain
+    // before each one is verified again.
+    installCalls(1, program, ELSE_TEXT);
+    runCall(program.labels.main, { regions: true });
+    core.load(at, Uint8Array.of(word >>> 24, (word >>> 16) & 0xff, (word >>> 8) & 0xff, word & 0xff));
+    core.module._DolphinWeb_AotClearCacheForTest();
+    assert.deepEqual(runCall(program.labels.main, { regions: true }).state, reference().state, "after a cache clear");
+    // (3) Every region forgotten: nothing left to chain into.
+    installCalls(1, program, ELSE_TEXT);
+    runCall(program.labels.main, { regions: true });
+    core.module._DolphinWeb_AotForgetRegionsForTest();
+    const forgotten = runCall(program.labels.main, { regions: true });
+    assert.equal(forgotten.ran, 0, "no region runs once all are forgotten");
+    assert.deepEqual(forgotten.state, reference().state);
+  });
+});

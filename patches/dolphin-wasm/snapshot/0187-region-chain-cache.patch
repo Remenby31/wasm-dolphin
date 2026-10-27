@@ -1,0 +1,93 @@
+diff --git a/Source/Core/Core/PowerPC/CachedInterpreter/CachedInterpreter.cpp b/Source/Core/Core/PowerPC/CachedInterpreter/CachedInterpreter.cpp
+--- a/Source/Core/Core/PowerPC/CachedInterpreter/CachedInterpreter.cpp
++++ b/Source/Core/Core/PowerPC/CachedInterpreter/CachedInterpreter.cpp
+@@ -382,6 +382,11 @@
+ // eager prologue of every used GPR spilled them (research/deep-x64-region-shape).
+ // Off: blocks and regions are emitted byte for byte as before.
+ constexpr u32 DOLPHIN_WEB_ENABLE_REGSHAPE_X64 = 1u << 28;
++// 0187: ENABLE polarity (default-off; ?regionchaincache=1). Region chaining
++// (RegionChainNext) looks the next region up in one cache line: entry pc,
++// the region's handle, and the epoch it was filled in. No code changes:
++// regions are emitted byte for byte the same with it on or off.
++constexpr u32 DOLPHIN_WEB_ENABLE_REGION_CHAIN_CACHE = 1u << 18;
+ constexpr u32 REGSHAPE_X64_GPR_CAP = 4;
+ // §28ce burst smearing: when ENABLED (gate bit CLEARED), TryWriteWasmBlock
+ // returns false (falls to interpret) once this many compiles OR this much
+@@ -10582,8 +10587,25 @@
+   u32 index_plus_one = 0;
+ };
+ std::array<RegionLookupSlot, 8192> s_region_lookup{};
++// 0187: the chaining cache. A slot holds an entry pc and the handle of a
++// region that was live, verified and mapped at that pc when the slot was
++// filled, valid while s_chain_cache_epoch has not moved since. The epoch moves
++// whenever that could stop being true: s_region_at changes (installs, drops,
++// a shutdown: ClearRegionLookup), a region is no longer verified (an
++// invalidation it survives, a cache clear: UnverifyAllRegions). A region
++// verified again needs nothing: a slot is only ever filled from a verified one.
++struct ChainCacheSlot
++{
++  u32 pc = 0;
++  int handle = 0;
++  u32 epoch = 0;
++  u32 pad = 0;
++};
++std::array<ChainCacheSlot, 16384> s_chain_cache{};
++u32 s_chain_cache_epoch = 1;  // slots start at 0: never valid
+ inline void ClearRegionLookup()
+ {
++  ++s_chain_cache_epoch;
+   s_region_lookup.fill({});
+ }
+ constexpr u32 NO_REGION = 0xffffffffu;
+@@ -10995,6 +11017,7 @@
+ {
+   for (InstalledRegion& region : s_regions)
+     region.verified = false;
++  ++s_chain_cache_epoch;  // 0187
+ }
+ 
+ // On the CPU thread at a slice boundary: compile and map queued regions. A
+@@ -11753,6 +11776,26 @@
+     stats.out_of_time += 1;
+     return 0;
+   }
++  // 0187: one cache line for the next region. The mode is the CPU's, tested
++  // on every chain as below; the region's own state (live, verified, mapped
++  // at pc) is the slot's, valid while the epoch holds.
++  const bool chain_cache =
++      (s_dolphin_web_disable_mask.load(std::memory_order_relaxed) &
++       DOLPHIN_WEB_ENABLE_REGION_CHAIN_CACHE) != 0;
++  ChainCacheSlot* const cached =
++      chain_cache ? &s_chain_cache[(ppc_state.pc >> 2) & (s_chain_cache.size() - 1)] : nullptr;
++  if (cached && cached->pc == ppc_state.pc && cached->epoch == s_chain_cache_epoch)
++  {
++    if (!s_regions_enabled.load(std::memory_order_relaxed) || !ppc_state.msr.IR ||
++        !ppc_state.msr.DR || !RegionGuardsHold(ppc_state) ||
++        (ppc_state.feature_flags & FEATURE_FLAG_PERFMON) != 0 || (ppc_state.xer_so_ov & 2) != 0)
++    {
++      stats.refused += 1;
++      return 0;
++    }
++    stats.chained += 1;
++    return cached->handle;
++  }
+   const u32 index = RegionFilterHas(ppc_state.pc) ? FindRegionIndex(ppc_state.pc) : NO_REGION;
+   if (index == NO_REGION)
+   {
+@@ -11770,6 +11813,8 @@
+     stats.refused += 1;
+     return 0;
+   }
++  if (cached)
++    *cached = {ppc_state.pc, region.handle, s_chain_cache_epoch, 0};
+   stats.chained += 1;
+   return region.handle;
+ }
+@@ -11876,6 +11921,7 @@
+       else
+       {
+         s_regions[index].verified = false;
++        ++s_chain_cache_epoch;  // 0187
+         s_region_invalidated_kept += 1;
+       }
+       break;
