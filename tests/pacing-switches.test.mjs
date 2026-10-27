@@ -18,7 +18,7 @@ const SWITCHES = [
 test("pacing switches: URL parsing, shipped defaults, each switch only its own", async () => {
   const { requestedPacing } = await import("../src/core-host.js");
   // Rush off by default (upstream's default): ?rush=1 turns it back on.
-  assert.deepEqual(requestedPacing(""), { rushPresentation: false, syncOnSkipIdle: false, dupXfbRearmsThrottle: false, smoothEarly: true, sleepMarginUs: 0, sleepStepUs: 0, sleepK: 750, sleepSpinUs: 150, presentVsync: true });
+  assert.deepEqual(requestedPacing(""), { rushPresentation: false, syncOnSkipIdle: false, dupXfbRearmsThrottle: false, smoothEarly: true, sleepMarginUs: 0, sleepStepUs: 0, sleepK: 750, sleepSpinUs: 150, presentVsync: true, presentGamePace: false, presentPaceStats: false });
   for (const s of SWITCHES) {
     const p = requestedPacing(`?${s.param}`);
     assert.equal(p[s.option], s.on, s.param);
@@ -134,6 +134,61 @@ test("presentvsync: URL → host → adapter → worker, on by default, ?present
   assert.match(worker, /wgpuPresentVsync = presentVsync !== false && typeof self\.requestAnimationFrame === "function" && !wgpuDetachedPresenter;/, "only with a worker rAF, never with the detached presenter (stale bitmap)");
 });
 
+// ?presentpace=game (src/wgpu-game-pacer.js): frames at the game's own pace
+// on a screen faster than the game. Off by default.
+test("presentpace=game: URL → host → adapter → worker → the presenter, off by default", async (t) => {
+  const { requestedPacing } = await import("../src/core-host.js");
+  assert.equal(requestedPacing("").presentGamePace, false);
+  assert.equal(requestedPacing("?presentpace=game").presentGamePace, true);
+  assert.equal(requestedPacing("?presentpace=GAME").presentGamePace, true);
+  assert.equal(requestedPacing("?presentpace=1").presentGamePace, false, "only the word game");
+  // observe: the histogram and the period kept, no pacing; game: both
+  assert.deepEqual([requestedPacing("?presentpace=observe").presentGamePace, requestedPacing("?presentpace=observe").presentPaceStats], [false, true]);
+  assert.equal(requestedPacing("?presentpace=game").presentPaceStats, true);
+  assert.equal(requestedPacing("").presentPaceStats, false);
+  assert.equal(requestedPacing("?presentpace=game").presentVsync, true, "only its own switch");
+  const { UpstreamWorkerAdapter } = await import("../src/upstream-worker-adapter.js");
+  assert.equal(new UpstreamWorkerAdapter({}).presentGamePace, false);
+  const adapter = new UpstreamWorkerAdapter(requestedPacing("?presentpace=game"));
+  let posted = null;
+  adapter.worker = {
+    postMessage(message) {
+      posted = message;
+      queueMicrotask(() => adapter.handleMessage({ id: message.id, ok: true }));
+    }
+  };
+  const originalWindow = globalThis.window;
+  globalThis.window = { location: { href: "http://127.0.0.1:8080/?presentpace=game", search: "?presentpace=game" } };
+  t.after(() => {
+    if (originalWindow === undefined) delete globalThis.window;
+    else globalThis.window = originalWindow;
+  });
+  await adapter.load();
+  assert.equal(posted.payload.presentGamePace, true, "presentGamePace in the init payload");
+  const host = await readFile(new URL("../src/core-host.js", import.meta.url), "utf8");
+  const worker = await readFile(new URL("../src/upstream-discio-worker.js", import.meta.url), "utf8");
+  assert.match(host, /\n {12}presentGamePace: this\.pacing\.presentGamePace,\n/);
+  assert.match(worker, /\n {8}presentGamePace: payload\.presentGamePace,\n/);
+  assert.match(worker, /\n  presentGamePace = false,\n/);
+  assert.match(worker, /\n  wgpuPresentGamePace = presentGamePace === true;\n  wgpuPresentPaceStats = presentPaceStats === true \|\| wgpuPresentGamePace;\n/);
+  assert.match(worker, /\n {8}presentPaceStats: payload\.presentPaceStats,\n/);
+  assert.match(host, /\n {12}presentPaceStats: this\.pacing\.presentPaceStats,\n/);
+  // every queued frame stamped (the HUD reads the same with the switch off);
+  // the pace only at a BeginFrame, with the switch on
+  // by default no extra work: stamping, the refresh period and the histogram
+  // only with ?presentpace=game|observe or the harness
+  assert.match(worker, /const wgpuVsyncTracking = \(\) => wgpuPresentPaceStats \|\| harnessEnabled;/);
+  assert.match(worker, /\n  if \(wgpuVsyncTracking\(\)\) wgpuGamePacer\.stamp\(at\);\n/);
+  assert.match(worker, /const refreshMs = tracking \? wgpuVsyncRefreshMs\(\) : null;/);
+  assert.match(worker, /if \(tracking\) \{\n\s+const gameMs = wgpuGamePacer\.period;\n\s+wgpuRefreshHistogram\.tick\(/);
+  assert.match(worker, /\(wgpuPresentVsync && wgpuVsyncTracking\(\) \? refreshHelperField\(\) : ""\)/);
+  assert.equal((worker.match(/wgpuGamePacer\.stamp\(|wgpuRefreshHistogram\.tick\(/g) ?? []).length, 2, "one stamp, one histogram tick, both gated");
+  assert.match(worker, /const pace = wgpuPresentGamePace && t !== null && !newest \? \(frame\) => wgpuGamePacer\.due\(frame, t, refreshMs\) : null;/);
+  assert.match(worker, /wgpuVsync\.takeForDisplay\(wgpuVsyncTick, pace\)/);
+  assert.match(worker, /if \(pace\) wgpuGamePacer\.shown\(f, t, refreshMs\);/);
+  assert.match(worker, / refresh:\$\{h\.counts\.join\("\/"\)\}/, "the HUD's refresh field (the last 10 s)");
+});
+
 test("presentvsync: the backbuffer pass renders into a pooled texture, shown at the worker's rAF, the drain never held", async () => {
   const worker = await readFile(new URL("../src/upstream-discio-worker.js", import.meta.url), "utf8");
   // fb#0's BEGIN_PASS: the pool's texture in place of the canvas's
@@ -144,7 +199,7 @@ test("presentvsync: the backbuffer pass renders into a pooled texture, shown at 
   assert.match(worker, /if \(wgpuPresentVsync\) \{\n(?:\s+\/\/[^\n]*\n)+\s+queueWgpuVsyncFrame\(api\?\.getFrame/);
   assert.doesNotMatch(worker, /queueWgpuVsyncFrame\(lastBackbufferTexture/);
   const present = worker.slice(worker.indexOf("function presentWgpuVsyncFrame("), worker.indexOf("function wgpuCanvasUsage("));
-  assert.match(present, /const f = newest \? wgpuVsync\.takeNewest\(\{ hidden \}\) : wgpuVsync\.takeForDisplay\(wgpuVsyncTick\);/, "the oldest queued frame, after the catch-up");
+  assert.match(present, /const f = newest \? wgpuVsync\.takeNewest\(\{ hidden \}\) : wgpuVsync\.takeForDisplay\(wgpuVsyncTick, pace\);/, "the oldest queued frame, after the catch-up (or the game pace)");
   assert.match(present, /copyTextureToTexture\(/);
   // v3: the stream no longer follows the display: nothing captured at the rAF
   assert.doesNotMatch(present, /streamCapture\.offerCanvas\(/);
@@ -161,8 +216,8 @@ test("presentvsync catch-up: a frame that already waited a BeginFrame gives way 
   const worker = await readFile(new URL("../src/upstream-discio-worker.js", import.meta.url), "utf8");
   const present = worker.slice(worker.indexOf("function presentWgpuVsyncFrame("), worker.indexOf("function wgpuCanvasUsage("));
   // the behaviour is tested on the module (tests/wgpu-vsync-queue.test.mjs)
-  assert.match(present, /wgpuVsync\.takeForDisplay\(wgpuVsyncTick\)/);
-  assert.match(worker, /wgpuVsync\.queueFrame\(\{ coreFrame, shownVi, stream, tick: wgpuVsyncTick \}, \{ hidden \}\)/);
+  assert.match(present, /wgpuVsync\.takeForDisplay\(wgpuVsyncTick, pace\)/);
+  assert.match(worker, /wgpuVsync\.queueFrame\(\{ coreFrame, shownVi, stream, tick: wgpuVsyncTick, at \}, \{ hidden \}\)/);
   assert.match(worker, /case "validationReadPresentVsync":/);
 });
 
@@ -258,7 +313,7 @@ test("presentvsync: a frame queued while the rAF is late is shown at once", asyn
   assert.match(worker, /wgpuVsyncFrameGaps\[wgpuVsyncFrameGapCount\+\+ % wgpuVsyncFrameGaps\.length\] = frameTime - wgpuVsyncLastFrameTime;/);
   // back after a gap of 50 ms or more: the newest frame first
   assert.match(worker, /const afterGap = now - wgpuVsyncLastTickAt >= WGPU_VSYNC_FALLBACK_MS;/);
-  assert.match(worker, /shown = presentWgpuVsyncFrame\(\{ newest: afterGap \}\);/);
+  assert.match(worker, /shown = presentWgpuVsyncFrame\(\{ newest: afterGap, t: frameTime, refreshMs \}\);/);
   assert.match(worker, /\} else if \(sinceTick > wgpuVsyncLateMs\(\)\) \{\n(?: {6}\/\/[^\n]*\n)+ {6}wgpuPresentVsyncStats\.byLate \+= 1;\n {6}presentWgpuVsyncFrame\(\{ newest: true \}\);/);
   // no BeginFrame for 50 ms (hidden tab): no local copy, the timer shows the newest
   assert.match(worker, /if \(sinceTick >= WGPU_VSYNC_FALLBACK_MS\) \{\n(?: {6}\/\/[^\n]*\n)+ {6}wgpuPresentVsyncStats\.byNoBeginFrame \+= 1;\n {4}\}/);

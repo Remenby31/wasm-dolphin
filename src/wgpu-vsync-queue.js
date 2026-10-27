@@ -106,7 +106,18 @@ export function createVsyncQueue({ queueSize = 2, poolSize = queueSize + 1, crea
     // At a BeginFrame `tick`: the frame to show, the oldest, after the
     // catch-up (a frame queued before the previous BeginFrame gives way to a
     // newer one). The caller copies it, then calls shown(frame).
-    takeForDisplay(tick) {
+    // `pace` (?presentpace=game, src/wgpu-game-pacer.js): the oldest frame's
+    // state at this BeginFrame. Paced, it is shown in order with no catch-up
+    // (the pacer shortens a stay when the display falls behind), and held
+    // while early: null, the picture on screen stays, unless the queue is
+    // full (pacing never makes the queue drop a frame). An unpaced frame
+    // takes the order above.
+    takeForDisplay(tick, pace = null) {
+      const state = pace && queue.length ? pace(queue[0]) : "unpaced";
+      if (state !== "unpaced") {
+        if (state === "early" && queue.length < queueSize) return null;
+        return queue.shift();
+      }
       while (queue.length > 1 && queue[0].tick < tick - 1) {
         giveBack(queue.shift().tex);
         stats.dropped += 1;

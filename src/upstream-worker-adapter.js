@@ -89,6 +89,7 @@ export class UpstreamWorkerAdapter {
     codeSpaceMiB = null,
     cpuOverclock = 1,
     emulationSpeed = 1,
+    audioBufferMs = 0,
     presentationScale = 1,
     presentationQueueSize = 2,
     presenterBackend = "webgl",
@@ -109,6 +110,8 @@ export class UpstreamWorkerAdapter {
     sleepK = 750,
     sleepSpinUs = 150,
     presentVsync = true,
+    presentGamePace = false,
+    presentPaceStats = false,
     coreLog = false,
     memcardSlotB = false,
     internalResolution = 1,
@@ -224,6 +227,7 @@ export class UpstreamWorkerAdapter {
     this.codeSpaceMiB = Number.isInteger(codeSpaceMiB) ? codeSpaceMiB : null;
     this.cpuOverclock = cpuOverclock;
     this.emulationSpeed = emulationSpeed;
+    this.audioBufferMs = Number.isInteger(audioBufferMs) ? audioBufferMs : 0;
     this.presentationScale = presentationScale;
     this.presentationQueueSize = presentationQueueSize;
     this.presenterBackend = presenterBackend;
@@ -244,6 +248,8 @@ export class UpstreamWorkerAdapter {
     this.sleepK = Number.isInteger(sleepK) && sleepK >= 0 && sleepK <= 950 ? (sleepK === 0 ? 0 : Math.max(500, sleepK)) : 750;
     this.sleepSpinUs = Number.isInteger(sleepSpinUs) && sleepSpinUs >= 50 && sleepSpinUs <= 2000 ? sleepSpinUs : 150;
     this.presentVsync = presentVsync !== false;
+    this.presentGamePace = presentGamePace === true;
+    this.presentPaceStats = presentPaceStats === true;
     this.coreLog = Boolean(coreLog);
     this.memcardSlotB = Boolean(memcardSlotB);
     this.internalResolution = Number(internalResolution) || 1;
@@ -480,6 +486,7 @@ export class UpstreamWorkerAdapter {
       codeSpaceMiB: this.codeSpaceMiB,
       cpuOverclock: this.cpuOverclock,
       emulationSpeed: this.emulationSpeed,
+      audioBufferMs: this.audioBufferMs,
       presentationScale: this.presentationScale,
       presentationQueueSize: this.presentationQueueSize,
       presenterBackend: this.presenterBackend,
@@ -500,6 +507,8 @@ export class UpstreamWorkerAdapter {
       sleepK: this.sleepK,
       sleepSpinUs: this.sleepSpinUs,
       presentVsync: this.presentVsync,
+      presentGamePace: this.presentGamePace,
+      presentPaceStats: this.presentPaceStats,
       coreLog: this.coreLog,
       memcardSlotB: this.memcardSlotB,
       internalResolution: this.internalResolution,
@@ -920,12 +929,13 @@ export class UpstreamWorkerAdapter {
     this.post("setAudioMuted", { muted: Boolean(muted) });
   }
 
-  async configureAudioWorklet({ enabled, muted, sab }) {
+  async configureAudioWorklet({ enabled, muted, sab, targetFrames }) {
     if (!this.loaded) return { active: false, reason: "core-not-loaded" };
     const response = await this.request("configureAudioWorklet", {
       enabled: Boolean(enabled),
       muted: Boolean(muted),
       sab: sab ?? null,
+      targetFrames: Number(targetFrames) || 0,
     });
     if (enabled && !response.active) {
       this.onStatus(`AudioWorklet producer unavailable; using legacy audio: ${response.reason || "unknown"}`);

@@ -724,3 +724,13 @@ test("--noise must have loaded the savestate at the same delay; an older summary
   assert.ok(readNoise(path.join(root, "late.json"), { ...expect, stateDelayMs: 3300 })[1]);
   assert.throws(() => readNoise(path.join(root, "late.json"), { ...expect, stateDelayMs: 0 }), /stateDelayMs 3300 vs 0/);
 });
+
+// The audio latency the page reported: median and p95 over the windows' span.
+test("audioLatencyOf: median and p95 of the page's samples in the span", async () => {
+  const { audioLatencyOf } = await import("../harness/lib/drops.mjs");
+  const page = [0, 50, 100, 150, 200, 250, 300, 350, 400, 450].map((t, i) => ({ t, audioMs: 50 + i }));
+  page.push({ t: 2000, audioMs: 999 }); // after the span
+  const windows = [{ t0: 0 }, { t0: 100 }, { t0: 200 }, { t0: 300 }, { t0: 400 }];
+  assert.deepEqual(audioLatencyOf(page, windows), { audioLatencyMs: 55, audioLatencyP95Ms: 59 });
+  assert.deepEqual(audioLatencyOf([{ t: 0, audioMs: null }], windows), { audioLatencyMs: null, audioLatencyP95Ms: null });
+});

@@ -530,6 +530,15 @@ export function displayedPerGuestSecOf(display, guestSec, vi, tps) {
   return round(Math.max(0, display.distinct - images) / sec, 2);
 }
 
+// The audio latency the page reported over these windows' span: median
+// and p95 of its samples, ms (unmuted audio only; null without samples).
+export function audioLatencyOf(page, windows) {
+  if (!page?.length || !windows?.length) return { audioLatencyMs: null, audioLatencyP95Ms: null };
+  const t0 = windows[0].t0, t1 = windows.at(-1).t0 + STEP_MS;
+  const v = page.filter((r) => r.t >= t0 && r.t <= t1 && Number.isFinite(r.audioMs) && r.audioMs > 0).map((r) => r.audioMs).sort((a, b) => a - b);
+  return v.length ? { audioLatencyMs: v[v.length >> 1], audioLatencyP95Ms: v[Math.min(v.length - 1, Math.floor(v.length * 0.95))] } : { audioLatencyMs: null, audioLatencyP95Ms: null };
+}
+
 export function dropSummary({ windows, presents = [], vi = [], tps = null, rows = [], displayed = null, page = null }) {
   const guestSec = tps > 0 && vi.length > 1 ? (vi.at(-1).ticks - vi[0].ticks) / tps : null;
   // The worker alive over [t0, t1]: no sampler tick late by STALL_MIN_MS or
@@ -570,7 +579,9 @@ export function dropSummary({ windows, presents = [], vi = [], tps = null, rows 
     viGaps50: vg.filter((g) => g > HITCH_MS[0]).length, viGaps100: vg.filter((g) => g > HITCH_MS[1]).length,
     presentP99: round(percentile(pg, 99), 1), presentMax: pg.length ? round(Math.max(...pg), 1) : null,
     gameFps: host > 0 ? round((xfb * 1000) / host, 1) : null,
-    underruns: windows.reduce((a, w) => a + (w.underruns ?? 0), 0)
+    underruns: windows.reduce((a, w) => a + (w.underruns ?? 0), 0),
+    // audio queued after the mixer (page sampler; null before the audio runs)
+    ...audioLatencyOf(page, windows)
   };
 }
 

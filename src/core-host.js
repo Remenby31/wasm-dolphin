@@ -103,6 +103,7 @@ export class EmulatorHost {
     this.gpuSpinMicros = requestedGpuSpinMicros();
     this.cpuOverclock = requestedCpuOverclock();
     this.emulationSpeed = requestedEmulationSpeed();
+    this.audioBufferMs = requestedAudioBufferMs();
     this.presentationScale = requestedPresentationScale();
     this.presentationQueueSize = requestedPresentationQueueSize();
     this.presenterBackend = requestedPresenterBackend();
@@ -414,6 +415,7 @@ export class EmulatorHost {
             codeSpaceMiB: this.codeSpaceMiB,
             cpuOverclock: this.cpuOverclock,
             emulationSpeed: this.emulationSpeed,
+            audioBufferMs: this.audioBufferMs,
             presentationScale: this.presentationScale,
             oglTestClear: this.oglTestClear,
             fastSoftwareRaster: this.fastSoftwareRaster,
@@ -470,6 +472,7 @@ export class EmulatorHost {
             codeSpaceMiB: this.codeSpaceMiB,
             cpuOverclock: this.cpuOverclock,
             emulationSpeed: this.emulationSpeed,
+            audioBufferMs: this.audioBufferMs,
             presentationScale: this.presentationScale,
             presentationQueueSize: this.presentationQueueSize,
             presenterBackend: this.presenterBackend,
@@ -490,6 +493,8 @@ export class EmulatorHost {
             sleepK: this.pacing.sleepK,
             sleepSpinUs: this.pacing.sleepSpinUs,
             presentVsync: this.pacing.presentVsync,
+            presentGamePace: this.pacing.presentGamePace,
+            presentPaceStats: this.pacing.presentPaceStats,
             coreLog: this.coreLog,
             memcardSlotB: this.memcardSlotB,
             internalResolution: this.enhancements.internalResolution,
@@ -1574,6 +1579,13 @@ function requestedCpuOverclock() {
   return 1;
 }
 
+// ?audiobuffer=N (ms, 16-200): the core mixer's queue (Dolphin's
+// AudioBufferSize, 80 ms when not given), part of the audio latency.
+export function requestedAudioBufferMs(search = window.location.search) {
+  const n = Number.parseInt(new URLSearchParams(search).get("audiobuffer") || "", 10);
+  return Number.isInteger(n) && n >= 16 && n <= 200 ? n : 0;
+}
+
 function requestedEmulationSpeed() {
   const params = new URLSearchParams(window.location.search);
   const raw = params.get("speed");
@@ -1737,7 +1749,14 @@ export function requestedPacing(search = window.location.search) {
     // default since 2026-10-26: ~58 distinct pictures shown a second instead
     // of ~56 and half the on-screen repeats on the race (12 pairs, --display).
     // ?presentvsync=0 (or false, off, no) presents as the ring drains.
-    presentVsync: !["0", "false", "off", "no"].includes((params.get("presentvsync") ?? "").toLowerCase())
+    presentVsync: !["0", "false", "off", "no"].includes((params.get("presentvsync") ?? "").toLowerCase()),
+    // ?presentpace=game: the vsync presenter shows frames at the game's own
+    // pace on a screen faster than the game (src/wgpu-game-pacer.js). Off by default.
+    presentGamePace: (params.get("presentpace") ?? "").toLowerCase() === "game",
+    // ?presentpace=game or =observe: the refresh histogram (HUD) and the
+    // game's period are kept; observe keeps them without pacing. Off: none
+    // of it runs, the presenter does no extra work.
+    presentPaceStats: ["game", "observe"].includes((params.get("presentpace") ?? "").toLowerCase())
   };
 }
 
@@ -1774,6 +1793,7 @@ const CACHED_INTERPRETER_DISABLE_BITS = {
   fastmemhoist:    1 << 23, // §28cz per-block fastmem bounds-check hoist (ENABLE polarity; default-off; ?fastmemhoist=1)
   inlinefma:       1 << 26, // inline exact FMA; set: the FMA family calls the interpreter's NI_madd_msub
   regionmtmsr:     1 << 27, // 0183 regions go on past a mtmsr that changes only EE (ENABLE polarity; default-off; ?regionmtmsr=1)
+  regshape:        1 << 28, // 0184 x64 register shape: at most 4 GPRs per block in locals (ENABLE polarity; default-off; ?regshape=x64)
   // Aliases the plan / TL;DR uses interchangeably:
   fastinputpoll: 1 << 1, // legacy synonym for meleecall (input-poll lives there)
   fastmem:       1 << 7, // legacy synonym for fastsystem (load/store-ish helpers)
@@ -1819,9 +1839,10 @@ function requestedCachedInterpreterDisableMask() {
         }
       }
     }
-    // 0183's bit is an ENABLE bit: a raw ?disable= mask (or the name) must not
-    // turn it on by accident; only ?regionmtmsr=1 does.
-    mask &= ~CACHED_INTERPRETER_DISABLE_BITS.regionmtmsr;
+    // 0183's and 0184's bits are ENABLE bits: a raw ?disable= mask (or the
+    // name) must not turn them on by accident; only ?regionmtmsr=1 and
+    // ?regshape=x64 do.
+    mask &= ~(CACHED_INTERPRETER_DISABLE_BITS.regionmtmsr | CACHED_INTERPRETER_DISABLE_BITS.regshape);
   }
   // §28bt block re-dispatch: DEFAULT-ON. Rigorously verified +11% warm
   // (4-run non-overlapping same-binary A/B, correctness-clean on battle);
@@ -1879,6 +1900,11 @@ function requestedCachedInterpreterDisableMask() {
   // goes on past a mtmsr that only turns interrupts off or on.
   if (params.get("regionmtmsr") === "1") {
     mask |= CACHED_INTERPRETER_DISABLE_BITS.regionmtmsr;
+  }
+  // 0184: the x64 register shape, default-off until the CI bench and a real
+  // PC decide (?regshape=x64; automatic detection comes after).
+  if (params.get("regshape") === "x64") {
+    mask |= CACHED_INTERPRETER_DISABLE_BITS.regshape;
   }
   if (params.get("fastmemhoist") === "1") {
     mask |= CACHED_INTERPRETER_DISABLE_BITS.fastmemhoist;
