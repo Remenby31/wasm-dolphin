@@ -13,19 +13,20 @@ diff --git a/Source/Core/Core/PowerPC/CachedInterpreter/CachedInterpreter.cpp b/
  constexpr u32 REGSHAPE_X64_GPR_CAP = 4;
  // §28ce burst smearing: when ENABLED (gate bit CLEARED), TryWriteWasmBlock
  // returns false (falls to interpret) once this many compiles OR this much
-@@ -2478,6 +2483,20 @@
+@@ -2478,6 +2483,21 @@
    const UGeckoInstruction inst{inst_hex};
    Interpreter::fctiwzx(Core::System::GetInstance().GetInterpreter(), inst);
    return DolphinWeb_CachedInterpreterCheckProgramOrDsi(ppc_state, current_pc, downcount) ? 1 : 0;
 +}
 +
 +// 0188 tests: the gather pipe's pending bytes (copied to `out`, at most
-+// `capacity`) and their count; `reset` empties it first (GPFifo's reset).
++// `capacity`) and their count; `reset` sets it up empty first (GPFifo::Init:
++// the test CPU set-up does not run the hardware's init).
 +extern "C" EMSCRIPTEN_KEEPALIVE u32 DolphinWeb_GatherPipeForTest(int reset, u8* out, u32 capacity)
 +{
 +  auto& system = Core::System::GetInstance();
 +  if (reset)
-+    system.GetGPFifo().ResetGatherPipe();
++    system.GetGPFifo().Init();
 +  const auto& ppc = system.GetPPCState();
 +  const u32 count = static_cast<u32>(ppc.gather_pipe_ptr - ppc.gather_pipe_base_ptr);
 +  if (out)
@@ -34,12 +35,10 @@ diff --git a/Source/Core/Core/PowerPC/CachedInterpreter/CachedInterpreter.cpp b/
  }
  
  extern "C" void DolphinWeb_CachedInterpreterFastCheckGatherPipe(int state_ptr, u32 unused_a,
-@@ -4954,6 +4973,72 @@
- {
-   EmitReadU16MaybeDirect(body, layout);
+@@ -4956,6 +4976,72 @@
    EmitSignExtendI16(body);
-+}
-+
+ }
+ 
 +bool RegionGuardsActive();  // 0188: t_region_guards, defined further down
 +
 +// 0188: the slow arm of an integer store (value in local 2, EA in local 1):
@@ -104,10 +103,12 @@ diff --git a/Source/Core/Core/PowerPC/CachedInterpreter/CachedInterpreter.cpp b/
 +  body.push_back(0x05);  // else
 +  call();
 +  body.push_back(0x0b);  // end
- }
- 
++}
++
  void EmitWriteU32MaybeDirect(std::vector<u8>& body, const WasmStateLayout& layout)
-@@ -4977,10 +5062,7 @@
+ {
+   EmitLocalGet(body, 1);
+@@ -4977,10 +5063,7 @@
    body.push_back(0x00);
    EmitU32Leb(body, 0);
    body.push_back(0x05);
@@ -119,7 +120,7 @@ diff --git a/Source/Core/Core/PowerPC/CachedInterpreter/CachedInterpreter.cpp b/
    body.push_back(0x0b);
  }
  
-@@ -5003,10 +5085,7 @@
+@@ -5003,10 +5086,7 @@
    body.push_back(0x00);
    EmitU32Leb(body, 0);
    body.push_back(0x05);
@@ -131,7 +132,7 @@ diff --git a/Source/Core/Core/PowerPC/CachedInterpreter/CachedInterpreter.cpp b/
    body.push_back(0x0b);
  }
  
-@@ -5031,10 +5110,7 @@
+@@ -5031,10 +5111,7 @@
    body.push_back(0x00);
    EmitU32Leb(body, 0);
    body.push_back(0x05);
@@ -143,7 +144,7 @@ diff --git a/Source/Core/Core/PowerPC/CachedInterpreter/CachedInterpreter.cpp b/
    body.push_back(0x0b);
  }
  
-@@ -5341,6 +5417,10 @@
+@@ -5341,6 +5418,10 @@
  // its ops take them for granted instead of testing them one by one. GQRs
  // (mtspr GQR is direct) are still tested per op.
  thread_local bool t_region_guards = false;
