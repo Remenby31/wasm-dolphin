@@ -1220,14 +1220,28 @@ test("after a state load, behind: a large ready module installs at a slice only 
     core.setRegionsEnabled(true);
     withModuleCost(plan, 3, (modules) => {
       const before = core.regionCount();
+      // Still sleeping (short), within the large wait: it waits. The behind
+      // window and the large wait are made long for this phase only, so that
+      // a host stall (a loaded machine preempting this test past 40 or
+      // 100 ms) cannot turn "still sleeping" into "behind": the decision is
+      // the core's, the time it is taken at is not the test's to rely on.
+      core.module._DolphinWeb_AotSetBehindWindowForTest(60000);
+      core.module._DolphinWeb_AotSetLargeBehindWaitForTest(60000);
       const entries = readyAll(requests, plan);
       spin(50);
       core.module._DolphinWeb_AotRegionSleepWindowForTest(2); // too short for it, but a sleep
       for (let slice = 0; slice < 20; slice++) core.serviceRegions();
       assert.equal(core.regionCount(), before, "the throttle still sleeps: a large one waits on");
-      spin(60); // past the large wait (100 ms here), still sleeping short
+      // Past the large wait (100 ms here; at least 110 ms have gone by), still
+      // sleeping short: one large module is forced. A stall that also lets the
+      // sleep fall out of the 40 ms behind window forces it too (no sleep at
+      // all), so the slices stop at the first forced install: "one per behind
+      // window" is checked without a later window opening meanwhile.
+      core.module._DolphinWeb_AotSetBehindWindowForTest(40);
+      core.module._DolphinWeb_AotSetLargeBehindWaitForTest(100);
+      spin(60);
       core.module._DolphinWeb_AotRegionSleepWindowForTest(2);
-      for (let slice = 0; slice < 20; slice++) core.serviceRegions();
+      for (let slice = 0; slice < 20 && forcedCounters()[0] === 0; slice++) core.serviceRegions();
       const [forced, maxSlice, large] = forcedCounters();
       assert.equal(forced, 1, "one module, not every ready one");
       assert.equal(large, 1);
