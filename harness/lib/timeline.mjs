@@ -66,6 +66,8 @@ export function displayStats(timeline) {
   return {
     supported: true,
     vsyncMs: Math.round(vsyncMs * 100) / 100,
+    // the BeginFrame cadence's spread (a real screen's rAF, spark-run --headed)
+    vsyncP05: Math.round(percentile(begin, 5) * 100) / 100, vsyncP95: Math.round(percentile(begin, 95) * 100) / 100,
     beginFrames: frames.length,
     displayedPerSecond: spanS > 0 ? Math.round((shown.length / spanS) * 10) / 10 : null,
     submittedPerSecond: spanS > 0 ? Math.round((submitted / spanS) * 10) / 10 : null,

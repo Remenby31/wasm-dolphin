@@ -63,7 +63,23 @@ export async function ensureServer({ port, root = REPO_ROOT, patches = [], coreC
 // open -j -g: shown when Chrome opens it), so none is offered. As a guard,
 // after launch and after boot no window of our Chrome may be on screen;
 // otherwise it is closed and the run fails.
-export const DISPLAYS = Object.freeze(["headless"]);
+//
+// x11, Linux only: Chrome shown on an X server with no screen attached, the
+// Spark bench's bare Xorg (salon-xorg.service, DISPLAY=:2) driving a fake
+// 1920x1080 panel at 120.00 Hz (EDID SALON120): a real BeginFrame source at
+// the screen's rate, which headless (60 Hz, synthetic) is not, for the
+// display probes at 120 Hz. No window manager: the window is placed full
+// screen at 0,0 by its own flags. WebGPU on the NVIDIA GPU needs Vulkan
+// (without these flags the rAF ran at 1 Hz or WebGPU fell to SwiftShader).
+// Refused on macOS whatever the environment: headless stays the only mode
+// on the user's Mac. Chosen by HARNESS_DISPLAY=x11 (spark-run --headed).
+export const DISPLAYS = Object.freeze(["headless", "x11"]);
+const X11_ARGS = ["--enable-features=Vulkan", "--use-angle=vulkan", "--disable-vulkan-surface", "--window-position=0,0", "--window-size=1920,1080"];
+
+// The display mode when the caller names none: HARNESS_DISPLAY, else headless.
+export function defaultDisplay(env = process.env) {
+  return env.HARNESS_DISPLAY || "headless";
+}
 
 const ARGS = [
   "--no-first-run",
@@ -82,14 +98,20 @@ const ARGS = [
   "--disable-background-timer-throttling"
 ];
 
-export function chromeLaunchOptions(display = "headless", { unsafeWebgpu = true } = {}) {
+export function chromeLaunchOptions(display = defaultDisplay(), { unsafeWebgpu = true, platform = process.platform, env = process.env } = {}) {
   if (!DISPLAYS.includes(display)) throw new Error(`--display ${display}: the harness only runs headless (no window may appear on this Mac)`);
   // unsafeWebgpu: false launches Chrome as a player has it (no
   // --enable-unsafe-webgpu), e.g. to see the adapter a GPU-less PC gets.
-  return { headless: true, args: unsafeWebgpu ? ARGS : ARGS.filter((a) => a !== "--enable-unsafe-webgpu") };
+  const args = unsafeWebgpu ? ARGS : ARGS.filter((a) => a !== "--enable-unsafe-webgpu");
+  if (display === "x11") {
+    if (platform !== "linux") throw new Error(`--display x11: Linux only (the Spark's bare Xorg); on ${platform} the harness only runs headless`);
+    if (!env.DISPLAY) throw new Error("--display x11: DISPLAY is not set (the Spark's bare Xorg is :2, spark-run --headed)");
+    return { headless: false, viewport: null, args: [...args, ...X11_ARGS] };
+  }
+  return { headless: true, viewport: { width: 1280, height: 800 }, args };
 }
 
-export async function launchChrome({ profileDir, display = "headless", args = [], unsafeWebgpu = true }) {
+export async function launchChrome({ profileDir, display = defaultDisplay(), args = [], unsafeWebgpu = true }) {
   const opts = chromeLaunchOptions(display, { unsafeWebgpu });
   const { chromium } = await importPlaywright();
   // HARNESS_CHROME_PATH: run this executable instead of Chrome stable, e.g. a
@@ -98,7 +120,8 @@ export async function launchChrome({ profileDir, display = "headless", args = []
   const context = await chromium.launchPersistentContext(profileDir, {
     ...(executablePath ? { executablePath } : { channel: "chrome" }),
     headless: opts.headless,
-    viewport: { width: 1280, height: 800 },
+    // x11: the window's own size (no viewport emulation on a real screen)
+    viewport: opts.viewport,
     // Chrome's log and crash dumps stay in the profile; a session whose
     // renderer crashed copies them out as evidence (session.mjs).
     // HARNESS_CHROME_ARGS: extra flags for one machine (e.g. Linux WebGPU:
@@ -165,6 +188,8 @@ function profilePids(profileDir) {
   return out.split("\n").filter((l) => l.includes(profileDir)).map((l) => Number(l.trim().split(/\s+/)[0])).filter(Boolean);
 }
 
+// macOS only (the user's screen): the Spark's x11 mode shows Chrome on an X
+// server nobody looks at, and Linux has no on-screen window list here.
 async function assertNoWindow(profileDir, when, close) {
   if (process.platform !== "darwin") return;
   const visible = onScreenWindows(profilePids(profileDir));
