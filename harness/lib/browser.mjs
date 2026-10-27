@@ -70,11 +70,38 @@ export async function ensureServer({ port, root = REPO_ROOT, patches = [], coreC
 // the screen's rate, which headless (60 Hz, synthetic) is not, for the
 // display probes at 120 Hz. No window manager: the window is placed full
 // screen at 0,0 by its own flags. WebGPU on the NVIDIA GPU needs Vulkan
-// (without these flags the rAF ran at 1 Hz or WebGPU fell to SwiftShader).
+// (without it the rAF ran at 1 Hz or WebGPU fell to SwiftShader), with a
+// real Vulkan surface: --disable-vulkan-surface put Chrome on a synthetic
+// 60 Hz BeginFrame source (16.67 ms, 21-37 BeginFrames a second under the
+// emulator). ThrottleRepeatedNoDamageFrames halves the cadence while nothing
+// changes (120 -> 60 -> 30 Hz): off, for clean display measures. Blank page
+// on :2 with these flags: rAF 8.3 ms median (p5 8.2, p95 8.4), WebGPU canvas
+// at 120.01 fps on the NVIDIA adapter, chrome://gpu refresh 120.0032 Hz.
 // Refused on macOS whatever the environment: headless stays the only mode
 // on the user's Mac. Chosen by HARNESS_DISPLAY=x11 (spark-run --headed).
 export const DISPLAYS = Object.freeze(["headless", "x11"]);
-const X11_ARGS = ["--enable-features=Vulkan", "--use-angle=vulkan", "--disable-vulkan-surface", "--window-position=0,0", "--window-size=1920,1080"];
+const X11_ARGS = ["--enable-features=Vulkan", "--use-angle=vulkan", "--disable-features=ThrottleRepeatedNoDamageFrames", "--window-position=0,0", "--window-size=1920,1080"];
+
+// Chrome keeps only the last --enable-features and the last
+// --disable-features: every one of each becomes a single flag carrying all
+// their values, at the first one's place.
+export function mergeFeatureFlags(args) {
+  const lists = new Map();
+  const out = [];
+  for (const a of args) {
+    const m = /^(--(?:enable|disable)-features)=(.*)$/.exec(a);
+    if (!m) {
+      out.push(a);
+      continue;
+    }
+    if (!lists.has(m[1])) {
+      lists.set(m[1], []);
+      out.push(m[1]);
+    }
+    for (const v of m[2].split(",").filter(Boolean)) if (!lists.get(m[1]).includes(v)) lists.get(m[1]).push(v);
+  }
+  return out.map((a) => (lists.has(a) ? `${a}=${lists.get(a).join(",")}` : a));
+}
 
 // The display mode when the caller names none: HARNESS_DISPLAY, else headless.
 export function defaultDisplay(env = process.env) {
@@ -126,7 +153,7 @@ export async function launchChrome({ profileDir, display = defaultDisplay(), arg
     // renderer crashed copies them out as evidence (session.mjs).
     // HARNESS_CHROME_ARGS: extra flags for one machine (e.g. Linux WebGPU:
     // "--enable-features=Vulkan --use-angle=vulkan"), space-separated.
-    args: [...opts.args, ...(process.env.HARNESS_CHROME_ARGS ?? "").split(/\s+/).filter(Boolean), "--enable-logging", "--v=0", `--log-file=${path.join(profileDir, "chrome.log")}`, `--crash-dumps-dir=${path.join(profileDir, "crash-dumps")}`, ...args]
+    args: mergeFeatureFlags([...opts.args, ...(process.env.HARNESS_CHROME_ARGS ?? "").split(/\s+/).filter(Boolean), "--enable-logging", "--v=0", `--log-file=${path.join(profileDir, "chrome.log")}`, `--crash-dumps-dir=${path.join(profileDir, "crash-dumps")}`, ...args])
   });
   context.assertInvisible = (when) => assertNoWindow(profileDir, when, () => context.close());
   context.pipeFault = null;

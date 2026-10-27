@@ -89,6 +89,15 @@ test("the harness only launches headless Chrome, never full screen or in front",
   assert.ok(o.args.includes("--password-store=basic"));
 });
 
+test("feature flags: every --enable-features / --disable-features merged into one (Chrome keeps only the last)", async () => {
+  const { mergeFeatureFlags } = await import("../harness/lib/browser.mjs");
+  assert.deepEqual(
+    mergeFeatureFlags(["--a", "--enable-features=Vulkan", "--disable-features=X", "--b", "--enable-features=Foo,Vulkan", "--disable-features=Y"]),
+    ["--a", "--enable-features=Vulkan,Foo", "--disable-features=X,Y", "--b"]
+  );
+  assert.deepEqual(mergeFeatureFlags(["--no-first-run"]), ["--no-first-run"]);
+});
+
 // The Spark's bare Xorg (spark-run --headed): shown, but never on a Mac.
 test("x11 display mode: Linux with DISPLAY only, refused on macOS whatever the environment; headless by default", async () => {
   const { chromeLaunchOptions, defaultDisplay } = await import("../harness/lib/browser.mjs");
@@ -101,7 +110,9 @@ test("x11 display mode: Linux with DISPLAY only, refused on macOS whatever the e
   const x = chromeLaunchOptions("x11", { platform: "linux", env });
   assert.equal(x.headless, false);
   assert.equal(x.viewport, null, "the window's own size on a real screen");
-  for (const a of ["--enable-features=Vulkan", "--use-angle=vulkan", "--disable-vulkan-surface", "--window-position=0,0", "--window-size=1920,1080"]) assert.ok(x.args.includes(a), a);
+  for (const a of ["--enable-features=Vulkan", "--use-angle=vulkan", "--disable-features=ThrottleRepeatedNoDamageFrames", "--window-position=0,0", "--window-size=1920,1080"]) assert.ok(x.args.includes(a), a);
+  // a synthetic 60 Hz BeginFrame source with it, not the panel's 120 Hz
+  assert.ok(!x.args.includes("--disable-vulkan-surface"));
   // the headless options are untouched by the mode
   const h = chromeLaunchOptions("headless", { platform: "linux", env });
   assert.equal(h.headless, true);
