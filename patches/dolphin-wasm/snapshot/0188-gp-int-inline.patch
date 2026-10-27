@@ -13,29 +13,33 @@ diff --git a/Source/Core/Core/PowerPC/CachedInterpreter/CachedInterpreter.cpp b/
  constexpr u32 REGSHAPE_X64_GPR_CAP = 4;
  // §28ce burst smearing: when ENABLED (gate bit CLEARED), TryWriteWasmBlock
  // returns false (falls to interpret) once this many compiles OR this much
-@@ -2478,6 +2483,21 @@
-   const UGeckoInstruction inst{inst_hex};
-   Interpreter::fctiwzx(Core::System::GetInstance().GetInterpreter(), inst);
+@@ -2480,6 +2485,25 @@
    return DolphinWeb_CachedInterpreterCheckProgramOrDsi(ppc_state, current_pc, downcount) ? 1 : 0;
-+}
-+
+ }
+ 
 +// 0188 tests: the gather pipe's pending bytes (copied to `out`, at most
-+// `capacity`) and their count; `reset` sets it up empty first (GPFifo::Init:
-+// the test CPU set-up does not run the hardware's init).
++// `capacity`) and their count; `reset` 1 sets it up empty first (GPFifo::Init:
++// the test CPU set-up does not run the hardware's init), 2 flushes its whole
++// 32-byte bursts first (GPFifo::FastCheckGatherPipe: the JIT flushes late,
++// the interpreter at every burst; the bytes are the same).
 +extern "C" EMSCRIPTEN_KEEPALIVE u32 DolphinWeb_GatherPipeForTest(int reset, u8* out, u32 capacity)
 +{
 +  auto& system = Core::System::GetInstance();
-+  if (reset)
++  if (reset == 1)
 +    system.GetGPFifo().Init();
++  else if (reset == 2)
++    system.GetGPFifo().FastCheckGatherPipe();
 +  const auto& ppc = system.GetPPCState();
 +  const u32 count = static_cast<u32>(ppc.gather_pipe_ptr - ppc.gather_pipe_base_ptr);
 +  if (out)
 +    std::memcpy(out, ppc.gather_pipe_base_ptr, std::min(count, capacity));
 +  return count;
- }
- 
++}
++
  extern "C" void DolphinWeb_CachedInterpreterFastCheckGatherPipe(int state_ptr, u32 unused_a,
-@@ -4956,6 +4976,72 @@
+                                                                  u32 unused_b)
+ {
+@@ -4956,6 +4980,72 @@
    EmitSignExtendI16(body);
  }
  
@@ -108,7 +112,7 @@ diff --git a/Source/Core/Core/PowerPC/CachedInterpreter/CachedInterpreter.cpp b/
  void EmitWriteU32MaybeDirect(std::vector<u8>& body, const WasmStateLayout& layout)
  {
    EmitLocalGet(body, 1);
-@@ -4977,10 +5063,7 @@
+@@ -4977,10 +5067,7 @@
    body.push_back(0x00);
    EmitU32Leb(body, 0);
    body.push_back(0x05);
@@ -120,7 +124,7 @@ diff --git a/Source/Core/Core/PowerPC/CachedInterpreter/CachedInterpreter.cpp b/
    body.push_back(0x0b);
  }
  
-@@ -5003,10 +5086,7 @@
+@@ -5003,10 +5090,7 @@
    body.push_back(0x00);
    EmitU32Leb(body, 0);
    body.push_back(0x05);
@@ -132,7 +136,7 @@ diff --git a/Source/Core/Core/PowerPC/CachedInterpreter/CachedInterpreter.cpp b/
    body.push_back(0x0b);
  }
  
-@@ -5031,10 +5111,7 @@
+@@ -5031,10 +5115,7 @@
    body.push_back(0x00);
    EmitU32Leb(body, 0);
    body.push_back(0x05);
@@ -144,7 +148,7 @@ diff --git a/Source/Core/Core/PowerPC/CachedInterpreter/CachedInterpreter.cpp b/
    body.push_back(0x0b);
  }
  
-@@ -5341,6 +5418,10 @@
+@@ -5341,6 +5422,10 @@
  // its ops take them for granted instead of testing them one by one. GQRs
  // (mtspr GQR is direct) are still tested per op.
  thread_local bool t_region_guards = false;

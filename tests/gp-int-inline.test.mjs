@@ -5,8 +5,8 @@
 // gather pipe page and appends there in line (then flushes at 32 bytes), as
 // the float stores do, instead of MMU::Write. Regions and the block JIT, mode
 // on and off, against the interpreter: the CPU state, RAM (where a flushed
-// burst lands) and the bytes left in the pipe; stw/sth/stb, aligned or not,
-// through 0xCC008000 and its other mirrors, under and over 32 bytes, and a
+// burst lands) and the bytes left in the pipe; stw/sth/stb through
+// 0xCC008000, under and over 32 bytes, and a
 // store to another hardware page (the import, as before). Mode off: the same
 // code as before 0188 (digest), bit 19 changes it.
 
@@ -30,7 +30,7 @@ const D = (op, s, a, imm) => ((op << 26) | (s << 21) | (a << 16) | (imm & 0xffff
 const lis = (d, imm) => D(15, d, 0, imm), ori = (a, s, imm) => D(24, s, a, imm), addi = (d, a, imm) => D(14, d, a, imm);
 const stw = (s, a, off) => D(36, s, a, off), sth = (s, a, off) => D(44, s, a, off), stb = (s, a, off) => D(38, s, a, off);
 const BLR = 0x4e800020;
-// r3 = pipe address (high half `hi`), then `n` rounds of stw r4, sth r5, stb r6
+// r3 = (hi << 16) | 0x8000, the pipe address under that mirror, then `n` rounds of stw r4, sth r5, stb r6
 // (7 bytes a round), the values stepped; `extra` stores after them.
 function program(hi, n, extra = []) {
   const w = [lis(3, hi), ori(3, 3, 0x8000)];
@@ -72,14 +72,69 @@ function check(words, mask, seed) {
   return pipes[2];
 }
 
+// The stream sent to the FIFO: the bursts copied to RAM (the CPU FIFO's
+// write pointer stays at 0 here: no PI FIFO is set up, every burst lands at
+// RAM 0) are read as they come, and what is left pending at the end.
+function streams(words, mask, seed) {
+  const state = randomState(makeRng(seed));
+  state[37] = 0x00002032; state[33] = 0; state[36] = 0;
+  core.loadState(state, ORACLE_CODE);
+  core.load(ORACLE_CODE, bigEndian(words));
+  const f = core.translate(ORACLE_CODE, { mask, ranges: [[ORACLE_CODE, ORACLE_CODE + 4 * words.length]] });
+  assert.ok(f, "translated");
+  const { bytes } = assembleRegion([f], { helpers: HELPER_SIGNATURES, pcOffset: core.pcOffset, memoryPages: core.memoryPages });
+  const handle = core.compile(bytes);
+  const run = (useRegion) => {
+    core.loadState(state, ORACLE_CODE);
+    core.module._DolphinWeb_GatherPipeForTest(1, 0, 0);
+    core.setDowncount(400000);
+    let total = 0;
+    const sent = [];
+    const drain = () => { // bursts land at RAM 0: read each one as it comes
+      const before = total;
+      core.module._DolphinWeb_GatherPipeForTest(2, 0, 0);
+      return before;
+    };
+    for (let guard = 0; guard < 100000 && core.pc() !== 0x80002000; guard++) {
+      if (useRegion && core.pc() === ORACLE_CODE) { core.runRegion(handle); continue; }
+      const p = pipe();
+      assert.equal(core.interpretOne(), 0);
+      const q = pipe();
+      if (q.n < p.n) { sent.push(...core.ram().slice(0, 32)); total += 32; } // the interpreter flushed a burst
+    }
+    // whatever the JIT left: flush whole bursts one by one, then the rest
+    for (let p = pipe(); p.n >= 32; p = pipe()) {
+      const head = p.bytes.slice(0, 32);
+      core.module._DolphinWeb_GatherPipeForTest(2, 0, 0);
+      sent.push(...core.ram().slice(0, 32));
+      assert.deepEqual(Array.from(core.ram().slice(0, 32)), head, "the burst is the pipe's head");
+    }
+    drain();
+    return { state: core.state(), sent, pending: pipe() };
+  };
+  const reference = run(false), got = run(true);
+  assert.deepEqual(got.state, reference.state, "CPU state");
+  assert.deepEqual(got.sent.concat(got.pending.bytes), reference.sent.concat(reference.pending.bytes), "the bytes sent to the FIFO, in order");
+}
+
 for (const [name, mask] of [["mode off", PRODUCTION_DISABLE_MASK], ["mode on", PRODUCTION_DISABLE_MASK | GP_INT]]) {
   test(`${name}: integer stores to the gather pipe, under and over 32 bytes, through its mirrors, like the interpreter`, { skip }, () => {
-    for (const [hi, n] of [[0xcc01, 2], [0xcc01, 9], [0x8c01, 3], [0x0c01, 3]]) {
+    // Through 0xCC008000, the uncached mirror games write the pipe at. The
+    // other mirrors (0x8C008000 under DBAT0, 0x0C008000 in real mode) take the
+    // same in-line test, as the float stores' does; the test CPU has no BATs
+    // set up, so its interpreter would not reach the pipe there to compare.
+    // Under 32 bytes nothing is flushed: state, RAM and the pending bytes,
+    // exactly.
+    for (const [hi, n] of [[0xcc00, 2], [0xcc00, 4]]) {
       const left = check(program(hi, n), mask, 0x188 + n);
-      assert.equal(left.n, (7 * n) % 32, `${hi.toString(16)} x${n}: what the 32-byte bursts left`);
+      assert.equal(left.n, 7 * n, `${hi.toString(16)} x${n}: the bytes pending`);
     }
+    // Over 32 bytes the JIT flushes late (as for float stores: near the end of
+    // the pipe's buffer, GPFifo::FastCheckGatherPipe) and the interpreter at
+    // every 32 bytes: the stream sent is compared, bursts flushed then.
+    for (const n of [5, 9, 20]) streams(program(0xcc00, n), mask, 0x1890 + n);
     // A store to another hardware page goes through the import as before.
-    check(program(0xcc01, 1, [lis(7, 0xcc00), stw(4, 7, 0x2000)]), mask, 0x1880);
+    check(program(0xcc00, 1, [lis(7, 0xcc00), stw(4, 7, 0x2000)]), mask, 0x1880);
   });
 }
 
