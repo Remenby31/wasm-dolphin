@@ -9,7 +9,20 @@ diff --git a/Source/Core/Core/PowerPC/PowerPC.cpp b/Source/Core/Core/PowerPC/Pow
  #include "Core/PowerPC/PowerPC.h"
  
  #include <algorithm>
-@@ -472,9 +473,35 @@
+@@ -29,6 +30,12 @@
+ #include "Core/PowerPC/MMU.h"
+ #include "Core/PowerPC/PPCSymbolDB.h"
+ #include "Core/System.h"
++
++#ifdef __EMSCRIPTEN__
++// Patch 0182 (diagnostic): defined in CachedInterpreter.cpp, global scope.
++extern bool g_dolphinweb_diag_exc_on;
++extern double g_dolphinweb_diag_exc_ms;
++#endif
+ 
+ namespace PowerPC
+ {
+@@ -472,9 +479,33 @@
      ppc_state.Exceptions |= EXCEPTION_PERFORMANCE_MONITOR;
    }
  }
@@ -17,8 +30,6 @@ diff --git a/Source/Core/Core/PowerPC/PowerPC.cpp b/Source/Core/Core/PowerPC/Pow
 +#ifdef __EMSCRIPTEN__
 +// Patch 0182 (diagnostic, never merged): host time in exception checks and
 +// delivery while the region stats time blocks (CachedInterpreter.cpp).
-+extern bool g_dolphinweb_diag_exc_on;
-+extern double g_dolphinweb_diag_exc_ms;
 +namespace
 +{
 +struct DiagExcTimer
@@ -45,7 +56,7 @@ diff --git a/Source/Core/Core/PowerPC/PowerPC.cpp b/Source/Core/Core/PowerPC/Pow
    u32 exceptions = m_ppc_state.Exceptions;
  
    // Example procedure:
-@@ -586,6 +613,9 @@
+@@ -586,6 +617,9 @@
  
  void PowerPCManager::CheckExternalExceptions()
  {
