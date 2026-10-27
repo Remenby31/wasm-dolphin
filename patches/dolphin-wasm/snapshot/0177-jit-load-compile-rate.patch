@@ -1,5 +1,5 @@
 diff --git a/Source/Core/Core/PowerPC/CachedInterpreter/CachedInterpreter.cpp b/Source/Core/Core/PowerPC/CachedInterpreter/CachedInterpreter.cpp
-index def1420..0783535 100644
+index def1420..a4138b6 100644
 --- a/Source/Core/Core/PowerPC/CachedInterpreter/CachedInterpreter.cpp
 +++ b/Source/Core/Core/PowerPC/CachedInterpreter/CachedInterpreter.cpp
 @@ -377,6 +377,27 @@ constexpr u32 DOLPHIN_WEB_DISABLE_NATIVE_PS = 1u << 29;
@@ -39,28 +39,39 @@ index def1420..0783535 100644
  }
  extern "C" void DolphinWeb_RecordInstanceUs(int dt_us)
  {
-@@ -1054,6 +1077,20 @@ void RetryDeferredWasmBlocks(CachedInterpreter& cpu)
+@@ -1050,6 +1073,23 @@ void RetryOffThreadWasmBlocks(CachedInterpreter& cpu)
+   }
+ }
+ 
++// Patch 0177: the load's window is over: its held blocks join the deferred
++// queue, drained at the usual per-slice rate.
++void HandOverLoadHeldBlocks(CachedInterpreter& cpu)
++{
++  if (!s_wasm_load_rate_start ||
++      std::chrono::steady_clock::now() - *s_wasm_load_rate_start < s_wasm_load_rate_window)
++    return;
++  s_wasm_load_rate_start.reset();
++  if (s_wasm_jit_enabled)
++  {
++    auto& queue = s_deferred_wasm_queues[&cpu];
++    for (const LoadHeldBlock& held : s_wasm_load_held)
++      queue.Defer(held.address, held.features, held.normal_entry);
++  }
++  s_wasm_load_held.clear();
++}
++
+ void RetryDeferredWasmBlocks(CachedInterpreter& cpu)
  {
    if (s_wasm_off_thread_compile.load(std::memory_order_relaxed))
-     RetryOffThreadWasmBlocks(cpu);
-+  // Patch 0177: the load's window is over: its held blocks join the deferred
-+  // queue, drained at the usual per-slice rate.
-+  if (s_wasm_load_rate_start &&
-+      std::chrono::steady_clock::now() - *s_wasm_load_rate_start >= s_wasm_load_rate_window)
-+  {
-+    s_wasm_load_rate_start.reset();
-+    if (s_wasm_jit_enabled)
-+    {
-+      auto& queue = s_deferred_wasm_queues[&cpu];
-+      for (const LoadHeldBlock& held : s_wasm_load_held)
-+        queue.Defer(held.address, held.features, held.normal_entry);
-+    }
-+    s_wasm_load_held.clear();
-+  }
-   if (!s_wasm_jit_enabled)
-   {
-     s_deferred_wasm_queues.erase(&cpu);
-@@ -15162,6 +15199,31 @@ bool CachedInterpreter::TryWriteWasmBlock(u32 nextPC)
+@@ -12471,6 +12511,7 @@ void CachedInterpreter::Run()
+       s_wasm_compile_us_this_slice = 0;
+     }
+     // The compile budget has been replenished and no cached callback is active.
++    HandOverLoadHeldBlocks(*this);
+     RetryDeferredWasmBlocks(*this);
+     ServiceRegionInstalls();
+     ApplyRegionStatsRequest();
+@@ -15162,6 +15203,31 @@ bool CachedInterpreter::TryWriteWasmBlock(u32 nextPC)
    // we've already burned this slice's compile budget. Falls to Interpret;
    // next slice will re-attempt this block (one extra Interpret cost per
    // deferred compile is far cheaper than a multi-hundred-ms freeze).
@@ -70,7 +81,7 @@ index def1420..0783535 100644
 +    const auto now = std::chrono::steady_clock::now();
 +    if (now - *s_wasm_load_rate_start >= s_wasm_load_rate_window)
 +    {
-+      // the window is over: RetryDeferredWasmBlocks hands the held blocks on
++      // the window is over: HandOverLoadHeldBlocks hands the held blocks on
 +    }
 +    else
 +    {
@@ -92,7 +103,7 @@ index def1420..0783535 100644
    if (!DolphinWebHelperDisabled(DOLPHIN_WEB_DISABLE_COMPILE_THROTTLE))
    {
      if (s_wasm_compiles_this_slice >= COMPILE_THROTTLE_MAX_PER_SLICE ||
-@@ -15941,6 +16003,15 @@ extern "C" EMSCRIPTEN_KEEPALIVE double DolphinWeb_JitArmedStepForTest(double fra
+@@ -15941,6 +16007,15 @@ extern "C" EMSCRIPTEN_KEEPALIVE double DolphinWeb_JitArmedStepForTest(double fra
    return engaged == UINT64_MAX ? -1.0 : static_cast<double>(engaged);
  }
  
@@ -108,7 +119,7 @@ index def1420..0783535 100644
  // Patch 0172: 1 counts the armed warmup from field 0 after a state load (the
  // JIT engages at max(fields, loaded field)), 0 restarts it from the loaded
  // field (the default).
-@@ -15985,6 +16056,12 @@ extern "C" EMSCRIPTEN_KEEPALIVE double GetPpcWasmJitEngagedFrame()
+@@ -15985,6 +16060,12 @@ extern "C" EMSCRIPTEN_KEEPALIVE double GetPpcWasmJitEngagedFrame()
  extern "C" EMSCRIPTEN_KEEPALIVE void DolphinWeb_JitOnStateLoaded()
  {
    OpenRegionLoadWindow();  // patch 0171

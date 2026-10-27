@@ -142,6 +142,7 @@ test("?jitloadrate=N reaches the core (patch 0177): host, adapter, worker, the b
   assert.match(patch, /\+std::atomic<u32> s_wasm_load_rate\{0\};\n\+std::chrono::milliseconds s_wasm_load_rate_window\{3000\};/, "off by default, 3 s");
   assert.match(patch, /\+ {6}s_wasm_load_tokens = std::min\(rate, s_wasm_load_tokens \+ frames \* rate\);/, "refilled per 16.7 ms, at most one frame's worth");
   assert.match(patch, /\+ {6}if \(s_wasm_load_tokens < 1\)\n\+ {6}\{\n\+ {8}s_wasm_load_rate_rejects \+= 1;\n\+ {8}s_wasm_load_held\.push_back\(/, "held, interpreted, not erased (the deferred queue erases and recompiles at once: a loop)");
-  assert.match(patch, /\+ {6}for \(const LoadHeldBlock& held : s_wasm_load_held\)\n\+ {8}queue\.Defer\(held\.address, held\.features, held\.normal_entry\);/, "handed to the deferred queue when the window ends");
+  assert.match(patch, /\+ {4}for \(const LoadHeldBlock& held : s_wasm_load_held\)\n\+ {6}queue\.Defer\(held\.address, held\.features, held\.normal_entry\);/, "handed to the deferred queue when the window ends");
+  assert.match(patch, /\+ {4}HandOverLoadHeldBlocks\(\*this\);\n {5}RetryDeferredWasmBlocks\(\*this\);/, "outside RetryDeferredWasmBlocks, which the source contracts compile alone");
   assert.match(patch, /\+ {4}s_wasm_load_tokens -= 1;  \/\/ patch 0177/, "a compile that happened takes a token");
 });
