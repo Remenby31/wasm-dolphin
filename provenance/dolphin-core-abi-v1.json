@@ -1,19 +1,19 @@
 {
   "schemaVersion": 1,
   "abiVersion": 1,
-  "coreId": "sha256:ac8bd5f8e64a9a83d2f1e0ec001136d0de434704d190fe8c0d98821e0bd37c23",
+  "coreId": "sha256:abd5c62ba9508b5aee6b9733b70f82aafc0a05b9c7ab7d900e1daf128c785ec3",
   "upstreamCommit": "e22551eae1c84a7e4d0b6a5c519ef4ed4ef69df1",
   "artifacts": [
     {
       "path": "cores/dolphin/dolphin-core-upstream.js",
       "hashMode": "lf-normalized",
-      "size": 288553,
-      "sha256": "069440ad8daafe4b98043cb73fc1e121fad1ed72365564a9d2572758e44a9316"
+      "size": 288627,
+      "sha256": "b10d9feacd4ebc282704e90f0497651d7e1232f8d9230768ca7246d4ed89180e"
     },
     {
       "path": "cores/dolphin/dolphin-core-upstream.wasm",
-      "size": 13222150,
-      "sha256": "ac8bd5f8e64a9a83d2f1e0ec001136d0de434704d190fe8c0d98821e0bd37c23"
+      "size": 13223209,
+      "sha256": "abd5c62ba9508b5aee6b9733b70f82aafc0a05b9c7ab7d900e1daf128c785ec3"
     }
   ],
   "contractSources": [
@@ -44,8 +44,8 @@
     {
       "path": "core/upstream/dolphin_web_core.cpp",
       "hashMode": "lf-normalized",
-      "size": 64180,
-      "sha256": "247d81b2a92f52acf67facf9a06c4aa9db1e3d37e6093e159fede84aa9ffcd4b"
+      "size": 64704,
+      "sha256": "1a7fceb40859323eb5029fba2bab9eabb1c302f1493d59ab5c0fbe2aba8630bc"
     },
     {
       "path": "src/app.js",
@@ -86,8 +86,8 @@
     {
       "path": "src/core-host.js",
       "hashMode": "lf-normalized",
-      "size": 86373,
-      "sha256": "a7ec86dbb505f862e30d846adeafd0289ab2e1414eae8b867439501a1e8ae6f5"
+      "size": 87265,
+      "sha256": "695ea61f653826c324e880e7adc1f771cc749d6297ba708a1253c68a817a9eb2"
     },
     {
       "path": "src/diagnostic-log-filter.js",
@@ -140,8 +140,8 @@
     {
       "path": "src/upstream-discio-worker.js",
       "hashMode": "lf-normalized",
-      "size": 796255,
-      "sha256": "2a0c98e323e6cb7421d16c73627454531192cddbb23ffc09ee526a4a93e9ad97"
+      "size": 796345,
+      "sha256": "1f845589aeb5191d7069b016ef4844312d5ad52f8f1ed52eecc2031fa169142a"
     },
     {
       "path": "src/wgpu-renderer-worker-probe.js",
@@ -158,20 +158,20 @@
     {
       "path": "src/upstream-main-thread-adapter.js",
       "hashMode": "lf-normalized",
-      "size": 22584,
-      "sha256": "a5c3586d826400c06ef200002fe810997ae1f886003982c17e20b667d1de7dff"
+      "size": 22618,
+      "sha256": "d5caddff2ab25a450f0c4a08b9adeb4c89cb63b110017539a088d300a24b0ccc"
     },
     {
       "path": "src/upstream-worker-adapter.js",
       "hashMode": "lf-normalized",
-      "size": 58623,
-      "sha256": "9e736cacafcdaa43723879d5bde484eca836354cf3f4532ea92bbbea3a82fca0"
+      "size": 58764,
+      "sha256": "549f3d435a56464c6e104350ece097dc2f4630e6a03e8d323ed53a4eb99de754"
     },
     {
       "path": "src/upstream-worker-protocol.js",
       "hashMode": "lf-normalized",
-      "size": 5226,
-      "sha256": "78bd3c731113df4da93fcb066d2283358a7f8112236e2bc3e330e049135662bf"
+      "size": 4372,
+      "sha256": "be7658e2128513d0cbb9f8e67f285b21d076c1144af3d6b3d018490952293b8f"
     },
     {
       "path": "src/wgpu-pass-state-cache.js",

@@ -1,6 +1,6 @@
+import { DEFAULT_UPSTREAM_CORE_SHA256 } from "./default-core.js";
 import { widenU32Counter } from "./u32-counter.js";
 import {
-  DEFAULT_UPSTREAM_CORE_SHA256,
   DEFAULT_UPSTREAM_CORE_URL,
   isOneWayWorkerRequestType,
   verifyUpstreamCoreWasm
@@ -115,6 +115,7 @@ export class UpstreamWorkerAdapter {
     internalResolution = 1,
     maxAnisotropy = -1,
     efbAccess = false,
+    xfbNoDecode = false,
     fifoLog = false,
     efbCopyRam = false,
     efbNoDefer = false,
@@ -250,6 +251,7 @@ export class UpstreamWorkerAdapter {
     this.internalResolution = Number(internalResolution) || 1;
     this.maxAnisotropy = Number.isInteger(maxAnisotropy) ? maxAnisotropy : -1;
     this.efbAccess = Boolean(efbAccess);
+    this.xfbNoDecode = Boolean(xfbNoDecode);
     this.fifoLog = Boolean(fifoLog);
     this.efbCopyRam = Boolean(efbCopyRam);
     this.efbNoDefer = Boolean(efbNoDefer);
@@ -506,6 +508,7 @@ export class UpstreamWorkerAdapter {
       internalResolution: this.internalResolution,
       maxAnisotropy: this.maxAnisotropy,
       efbAccess: this.efbAccess,
+      xfbNoDecode: this.xfbNoDecode,
       fifoLog: this.fifoLog,
       efbCopyRam: this.efbCopyRam,
       efbNoDefer: this.efbNoDefer,

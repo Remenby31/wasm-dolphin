@@ -2,7 +2,6 @@ import { readViRing } from "./harness-vi-ring.js";
 import { startPcSampler } from "./harness-pc-sampler.js";
 import { createDropSampler, histogramSum } from "./harness-drop-sampler.js";
 import {
-  DEFAULT_UPSTREAM_CORE_SHA256,
   DEFAULT_UPSTREAM_CORE_URL,
   WORKERFS_MOUNT_DIR,
   buildWorkerErrorReply,
@@ -1744,6 +1743,7 @@ async function handleMessage(type, payload) {
         internalResolution: payload.internalResolution,
         maxAnisotropy: payload.maxAnisotropy,
         efbAccess: payload.efbAccess,
+        xfbNoDecode: payload.xfbNoDecode,
         fifoLog: payload.fifoLog,
         efbCopyRam: payload.efbCopyRam,
         efbNoDefer: payload.efbNoDefer,
@@ -2509,7 +2509,8 @@ async function handleMessage(type, payload) {
 
 async function loadCore({
   coreUrl: nextCoreUrl = DEFAULT_UPSTREAM_CORE_URL,
-  expectedCoreSha256 = DEFAULT_UPSTREAM_CORE_SHA256,
+  // Always sent by the page (src/default-core.js): no JSON module here.
+  expectedCoreSha256,
   canvas = null,
   videoBackend = "Software Renderer",
   cpuThread = false,
@@ -2550,6 +2551,7 @@ async function loadCore({
   internalResolution = 1,
   maxAnisotropy = -1,
   efbAccess = false,
+  xfbNoDecode = false,
   fifoLog = false,
   efbCopyRam = false,
   efbNoDefer = false,
@@ -3088,6 +3090,7 @@ async function loadCore({
     dolphinEfbScale: (wgpuInternalResolution = clampInternalResolution(internalResolution, wgpuScaleCeiling())),
     dolphinMaxAnisotropy: Number.isInteger(maxAnisotropy) ? maxAnisotropy : -1,
     dolphinEfbAccess: Boolean(efbAccess),
+    dolphinXfbNoDecode: Boolean(xfbNoDecode),
     dolphinEfbCopyRam: Boolean(efbCopyRam),
     dolphinEfbNoDefer: Boolean(efbNoDefer),
     // Ranks the instructions that block JIT compilation (?jitverbose=1).
@@ -7777,7 +7780,7 @@ async function writeDolphinJitEntryToIdb(hash, bytes) {
     }
   }
 }
-async function fetchWasmAndFingerprint(coreUrlValue, expectedSha256 = DEFAULT_UPSTREAM_CORE_SHA256) {
+async function fetchWasmAndFingerprint(coreUrlValue, expectedSha256) {
   // coreUrlValue points at the JS shim (dolphin-core-upstream.js). The
   // wasm sits beside it under the conventional name.
   const wasmUrl = new URL("dolphin-core-upstream.wasm", coreUrlValue).href;

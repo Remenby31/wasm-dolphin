@@ -13,7 +13,7 @@ import {
 } from "../tools/core-artifacts.mjs";
 import { CORE_LOCK_PATH, formatCoreLock } from "../tools/core-lock.mjs";
 import { coreSourceRecord } from "../tools/core-build-info.mjs";
-import { DEFAULT_UPSTREAM_CORE_SHA256 } from "../src/upstream-worker-protocol.js";
+import { DEFAULT_UPSTREAM_CORE_SHA256 } from "../src/default-core.js";
 
 const PROTOCOL_PATH = "src/upstream-worker-protocol.js";
 

@@ -48,11 +48,9 @@ export function powerSource() {
 }
 
 const power = powerSource();
-if (power === "battery" && !o["allow-battery"]) {
-  console.error("on battery: decisions are measured on mains power (--allow-battery to override)");
-  process.exit(3);
-}
-const release = await acquirePerfLock({ name: "Salon · rendu: stream-capture-cost", waitSec: 1800, log: (m) => console.log(`[capture-cost] ${m}`) });
+// On battery: the lock waits for mains (requireMains), unless --allow-battery.
+if (power === "battery" && o["allow-battery"]) console.warn("on battery (--allow-battery): not a decision measure");
+const release = await acquirePerfLock({ requireMains: !o["allow-battery"], name: "Salon · rendu: stream-capture-cost", waitSec: 1800, log: (m) => console.log(`[capture-cost] ${m}`) });
 // Never hold the lock for ever (a hung browser): counted from the lock, not
 // from the wait for it.
 const watchdog = setTimeout(() => { console.error("watchdog: 20 min under the lock"); release(); process.exit(2); }, 20 * 60 * 1000);

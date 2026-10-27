@@ -58,6 +58,16 @@ export async function calmThenLock({ maxLoad, calmWait, acquire, log = () => {},
 // the lock now held (null: never calm, given up, no lock held), the gate,
 // and whether the lock was let go meanwhile (the run is then played again).
 export async function calmUnderLock({ lock, maxLoad, waitSec, acquire, log = () => {}, load = () => os.loadavg()[0], wait = waitForLoad }) {
+  // A measure's lock (requireMains) on battery now: given back, and taken
+  // again in turn once on mains (acquire waits for it); the run is played
+  // again (relocked), never measured on battery.
+  if (lock?.powerChanged?.()) {
+    log("on battery: perf lock released until mains power");
+    lock();
+    // taken again on mains (acquire waits for it), then the load gate as usual
+    const again = await calmUnderLock({ lock: await acquire(), maxLoad, waitSec, acquire, log, load, wait });
+    return { ...again, relocked: true };
+  }
   const limit = loadLimit(maxLoad);
   const now = load();
   const gate = { load: Math.round(now * 100) / 100, limit, ok: true };
