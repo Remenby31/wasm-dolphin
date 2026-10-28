@@ -389,3 +389,25 @@ test("spark-run: drop-meter gets --max-load 8 on the bench unless the caller set
   assert.deepEqual(benchProbeDefaults("race-perf", ["--display"]), ["--display"], "race-perf unchanged");
   assert.deepEqual(benchProbeDefaults("replay-gates", ["--query", "q"]), ["--query", "q"], "replay-gates has no load guard");
 });
+
+test("spark queue: a lane b job backfills past an older whole-bench job that cannot start before it ends", () => {
+  // 2026-10-28: a multi waiting ~37 min for lane a held two lane b screens
+  // (and lane b) idle behind it
+  const now = Date.parse("2026-10-28T15:00:00Z");
+  const t = (id, kind, lanes, extra = {}) => ({ id: `${id}`, kind, lanes, lane: null, name: `${kind}${id}`, ...extra });
+  const running = t(1, "pair", "a", { lane: "a", estMin: 20, grantedAt: new Date(now - 5 * 60000).toISOString() });
+  const pairA = t(2, "pair", "a", { estMin: 10 });
+  const multi = t(3, "multi", "auto", { estMin: 13 });
+  const busy = (l) => l === "a";
+  // the multi starts once lane a is through (~15 + 10 = 25 min): a 12 min
+  // screen on lane b ends before, a 40 min one would not
+  const short = t(4, "pair", "b", { estMin: 12 }), long = t(5, "pair", "b", { estMin: 40 });
+  assert.deepEqual(nextStep(short, [running, pairA, multi, short], busy, now), { go: ["b"] });
+  assert.match(nextStep(long, [running, pairA, multi, long], busy, now).wait, /multi multi3 arrived first/);
+  // no estimate: no backfill
+  assert.match(nextStep(t(6, "pair", "b"), [running, pairA, multi, t(6, "pair", "b")], busy, now).wait, /multi3 arrived first/);
+  // a younger pair that wants lane a still waits for the older pair on a (plain FIFO)
+  assert.match(nextStep(t(7, "pair", "a", { estMin: 1 }), [running, pairA, multi, t(7, "pair", "a", { estMin: 1 })], busy, now).wait, /pair2 arrived first/);
+  // a whole-bench job never backfills past another
+  assert.match(nextStep(t(8, "build", "auto", { estMin: 1 }), [running, pairA, multi, t(8, "build", "auto", { estMin: 1 })], busy, now).wait, /arrived first/);
+});

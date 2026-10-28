@@ -61,7 +61,19 @@ export function nextStep(me, tickets, busy, now = Date.now()) {
   if (held(me, now)) return { wait: "the lane's cores are busy" };
   const older = tickets.filter((t) => t.id < me.id);
   const mine = wants(me);
-  const ahead = older.find((t) => !t.lane && !held(t, now) && wants(t).some((l) => mine.includes(l)));
+  // Backfill: an older whole-bench job (a build, a multi) waiting for a lane
+  // still in use does not hold back a younger job on another, free lane
+  // that is estimated to end before that job can start (2026-10-28: a multi
+  // waiting ~37 min for lane a kept two lane b screens and lane b idle). The
+  // estimates are eta()'s; a job without one is not backfilled.
+  let starts = null;
+  const backfills = (t) => {
+    if (!WHOLE_BENCH.includes(t.kind) || WHOLE_BENCH.includes(me.kind) || me.estMin == null) return false;
+    starts ??= new Map(eta(tickets, now).map((x) => [x.id, x.startsIn]));
+    const start = starts.get(t.id);
+    return start != null && me.estMin <= start;
+  };
+  const ahead = older.find((t) => !t.lane && !held(t, now) && wants(t).some((l) => mine.includes(l)) && !backfills(t));
   if (ahead) return { wait: `${ahead.kind} ${ahead.name} arrived first` };
   const taken = (l) => busy(l) || tickets.some((t) => t.id !== me.id && t.lane?.split(" ").includes(l));
   if (WHOLE_BENCH.includes(me.kind)) return mine.some(taken) ? { wait: "a lane is in use" } : { go: mine };
