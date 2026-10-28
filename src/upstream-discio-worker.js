@@ -15,6 +15,7 @@ import { probeRelaxedMadd } from "./relaxed-madd-probe.js";
 import { probeWasmFeatures } from "./wasm-feature-probe.js";
 import { decodeWgpuSamplerState } from "./wgpu-sampler-state.js";
 import { bootBackbufferResize, clampInternalResolution, enhancementCoreArgs, internalResolutionCeiling, resizeCanvasBackbuffer } from "./wgpu-enhancements.js";
+import { createDisplayFilter, displayFilterFits, displayFilterOutputSize, normalizeDisplayFilter } from "./wgpu-display-filter.js";
 import { gxClearDepthToStored, gxDepthState } from "./wgpu-depth-state.js";
 import { clampSourceRect, createWgpuExactCapture, packReadbackRows } from "./wgpu-exact-capture.js";
 import { createUniqueFrameCounter, hashRows, sampleRowOffsets } from "./harness-unique-frames.js";
@@ -121,7 +122,7 @@ import {
   captureInitialWgpuConsumerResetAttestation,
 } from "./wgpu-consumer-reset-attestation.js";
 import { createWgpuSemanticRuntime } from "./wgpu-semantic-runtime.js";
-import { handleWgpuDeviceLoss } from "./wgpu-device-lifecycle.js";
+import { createWgpuFatalReporter, handleWgpuDeviceLoss, wgpuFatalPageReason } from "./wgpu-device-lifecycle.js";
 import {
   attemptRetainedWgpuUpload,
   createWgpuMappedStagingPool
@@ -221,6 +222,15 @@ let renderCanvas = null;
 const WGPU_BACKBUFFER_W = 640;
 const WGPU_BACKBUFFER_H = 480;
 let wgpuBackbufferSized = false;
+// The core's backbuffer size (the pooled frame textures), once known; the
+// canvas is that size unless the display filter sizes it to the display.
+let wgpuBackbufferW = 0;
+let wgpuBackbufferH = 0;
+// Display filter (src/wgpu-display-filter.js, presentvsync only): sharpness,
+// fit (canvas at the page's display pixels) and the display box.
+let wgpuDisplayFilter = normalizeDisplayFilter();
+let wgpuDisplayFilterGpu = null;
+let wgpuDisplayFilterDevice = null;
 let renderContext = null;
 let renderImageData = null;
 let renderGpu = null;
@@ -700,6 +710,9 @@ const WGPU_FAST_STAGE_ACCEPTED = Object.freeze({ ok: true, reason: null });
 let wgpuMappedDrainCoalescingEnabled = false;
 let wgpuRendererWorkerProbe = "off";
 let wgpuVisualCadenceEnabled = false;
+// ?wgpurecover=1 (docs/wgpu-session-fallback.md): a lost device pauses the
+// core here, before the page hears of it.
+let wgpuSessionRecoverEnabled = false;
 // Mirrors the loaded core's videoBackend for code outside loadCore's scope.
 let hardwareVideoBackend = false;
 // Staging-texture readbacks of the hardware renderer, per device and per
@@ -803,6 +816,9 @@ let wgpuReplayFatal = null;
 // and the scale in effect (boot value, then each setEnhancements).
 let wgpuScaleAdapterCeiling = 4;
 let wgpuScaleLostCeiling = 4;
+// The page hears once per device that the renderer failed (lost device or a
+// fatal replay error): `wgpu-device-lost`, core-host handleGpuDeviceLost.
+const wgpuFatalReporter = createWgpuFatalReporter((message) => self.postMessage(message));
 let wgpuInternalResolution = 1;
 function wgpuScaleCeiling() {
   return Math.min(wgpuScaleAdapterCeiling, wgpuScaleLostCeiling);
@@ -835,6 +851,7 @@ const workletAudioProducer = new AudioPcmProducer({
     audioBufferFrames: api?.audioBufferFrames,
     audioChannels: api?.audioChannels,
     audioSampleRate: api?.audioSampleRate,
+    audioQueuedMs: api?.audioQueuedMs,
     heapU8: moduleInstance?.HEAPU8,
   }),
   recordMix: (requested, returned, durationMs) =>
@@ -1717,6 +1734,7 @@ async function handleMessage(type, payload) {
         codeSpaceMiB: payload.codeSpaceMiB,
         cpuOverclock: payload.cpuOverclock,
         emulationSpeed: payload.emulationSpeed,
+        audioBufferMs: payload.audioBufferMs,
         presentationScale: payload.presentationScale,
         presentationQueueSize: payload.presentationQueueSize,
         presentationPacing: payload.presentationPacing,
@@ -1743,6 +1761,8 @@ async function handleMessage(type, payload) {
         memcardSlotB: payload.memcardSlotB,
         internalResolution: payload.internalResolution,
         maxAnisotropy: payload.maxAnisotropy,
+        widescreen: payload.widescreen,
+        displayFilter: payload.displayFilter,
         efbAccess: payload.efbAccess,
         xfbNoDecode: payload.xfbNoDecode,
         fifoLog: payload.fifoLog,
@@ -1797,6 +1817,7 @@ async function handleMessage(type, payload) {
         wgpuMappedDrainCoalescing: payload.wgpuMappedDrainCoalescing,
         wgpuRendererWorkerProbe: payload.wgpuRendererWorkerProbe,
         wgpuVisualCadence: payload.wgpuVisualCadence,
+        wgpuSessionRecover: payload.wgpuSessionRecover,
         wgpuPipelinePrewarm: payload.wgpuPipelinePrewarm,
         wgpuPassPackageProjection: payload.wgpuPassPackageProjection,
         wgpuUploadRunProjection: payload.wgpuUploadRunProjection,
@@ -2104,6 +2125,9 @@ async function handleMessage(type, payload) {
       // cadence telemetry it feeds.
       return {
         enabled: wgpuPresentVsync,
+        displayFilter: { active: wgpuDisplayFilterActive(), ...wgpuDisplayFilter,
+          canvas: renderCanvas ? [renderCanvas.width, renderCanvas.height] : null,
+          backbuffer: wgpuBackbufferSize(), ...(wgpuDisplayFilterGpu?.stats ?? {}) },
         ...wgpuPresentVsyncStats,
         ...wgpuVsync.stats,
         // frames waiting now (the `queued` counter is the total queued)
@@ -2484,10 +2508,19 @@ async function handleMessage(type, payload) {
       // Held to the adapter's ceiling: the answer says the scale in effect.
       const internalResolution = set(...enhancementCoreArgs(payload, wgpuScaleCeiling()));
       if (internalResolution > 0) wgpuInternalResolution = internalResolution;
+      // Patch 0178: 16:9 (absent from an older core: widescreen null).
+      const setWide = moduleInstance?._DolphinWeb_SetWidescreen;
+      const widescreen = typeof setWide === "function" && typeof payload.widescreen === "boolean"
+        ? setWide(payload.widescreen ? 1 : 0) === 1 : null;
       return internalResolution > 0
-        ? { applied: true, internalResolution, ceiling: wgpuScaleCeiling() }
+        ? { applied: true, internalResolution, widescreen, ceiling: wgpuScaleCeiling() }
         : { applied: false, reason: "core-not-running" };
     }
+    case "setDisplayFilter":
+      // Sharpness, fit and display box; the canvas follows at once, the
+      // filter from the next frame shown.
+      setWgpuDisplayFilter(payload);
+      return { applied: wgpuPresentVsync, active: wgpuDisplayFilterActive(), ...wgpuDisplayFilter };
     case "setAudioMuted":
       api?.setAudioMuted?.(payload.muted ? 1 : 0);
       workletAudioProducer.setMuted(Boolean(payload.muted));
@@ -2499,6 +2532,7 @@ async function handleMessage(type, payload) {
       }
       const result = workletAudioProducer.install(payload.sab, {
         muted: Boolean(payload.muted),
+        targetFrames: Number(payload.targetFrames) || undefined,
       });
       if (result.active) api?.setAudioMuted?.(payload.muted ? 1 : 0);
       return result;
@@ -2526,6 +2560,7 @@ async function loadCore({
   codeSpaceMiB = null,
   cpuOverclock = 1,
   emulationSpeed = 1,
+  audioBufferMs = 0,
   presentationScale = 1,
   presentationQueueSize = DEFAULT_PRESENTATION_QUEUE,
   presentationPacing = "smooth",
@@ -2552,6 +2587,8 @@ async function loadCore({
   memcardSlotB = false,
   internalResolution = 1,
   maxAnisotropy = -1,
+  widescreen = false,
+  displayFilter = null,
   efbAccess = false,
   xfbNoDecode = false,
   fifoLog = false,
@@ -2607,6 +2644,7 @@ async function loadCore({
   wgpuMappedDrainCoalescing: requestedWgpuMappedDrainCoalescing = false,
   wgpuRendererWorkerProbe: requestedWgpuRendererWorkerProbe = "off",
   wgpuVisualCadence: requestedWgpuVisualCadence = false,
+  wgpuSessionRecover: requestedWgpuSessionRecover = false,
   wgpuPipelinePrewarm: requestedWgpuPipelinePrewarm = true,
   wgpuPassPackageProjection: requestedWgpuPassPackageProjection = false,
   wgpuUploadRunProjection: requestedWgpuUploadRunProjection = false,
@@ -2788,6 +2826,7 @@ async function loadCore({
   pipelinePrewarm?.stop();
   pipelinePrewarm = null;
   wgpuVisualCadenceEnabled = Boolean(requestedWgpuVisualCadence);
+  wgpuSessionRecoverEnabled = Boolean(requestedWgpuSessionRecover);
   wgpuVisualCadenceTelemetry = createWgpuVisualCadenceTelemetry(
     wgpuVisualCadenceEnabled
   );
@@ -3053,6 +3092,7 @@ async function loadCore({
   // Not with the detached presenter: it shows a bitmap of the canvas, which
   // the vsync presenter fills only at its rAF (a stale picture).
   wgpuPresentVsync = presentVsync !== false && typeof self.requestAnimationFrame === "function" && !wgpuDetachedPresenter;
+  setWgpuDisplayFilter(displayFilter ?? {});
   wgpuPresentGamePace = presentGamePace === true;
   wgpuPresentPaceStats = presentPaceStats === true || wgpuPresentGamePace;
   wgpuGamePacer.reset({ arrival: true });
@@ -3092,6 +3132,8 @@ async function loadCore({
     // WebGPU path.
     dolphinEfbScale: (wgpuInternalResolution = clampInternalResolution(internalResolution, wgpuScaleCeiling())),
     dolphinMaxAnisotropy: Number.isInteger(maxAnisotropy) ? maxAnisotropy : -1,
+    // Patch 0178: Dolphin's generic widescreen hack, 16:9 backbuffer.
+    dolphinWidescreen: widescreen === true,
     dolphinEfbAccess: Boolean(efbAccess),
     dolphinXfbNoDecode: Boolean(xfbNoDecode),
     dolphinEfbCopyRam: Boolean(efbCopyRam),
@@ -3319,6 +3361,9 @@ async function loadCore({
   api.setWebGpuGeometryRangeEnabled?.(wgpuGeometryRangeEnabled ? 1 : 0);
   api.setCpuOverclock?.(Number(cpuOverclock));
   api.setEmulationSpeed?.(Number(emulationSpeed));
+  // ?audiobuffer: the mixer's queue (0: Dolphin's default, 80 ms); a core
+  // without the setter keeps its default
+  if (Number(audioBufferMs) > 0) api.setAudioBufferMs?.(Number(audioBufferMs));
   api.setPresentationScale?.(Number(presentationScale));
   api.setFastSoftwareRaster?.(Math.min(3, Math.max(0, Number(fastSoftwareRaster) || 0)));
   api.setSoftwareTevHotCaseMode?.(softwareTevHotCaseMode);
@@ -3751,6 +3796,15 @@ function bindApi(module) {
     setEmulationSpeed:
       typeof module._SetEmulationSpeed === "function"
         ? (factor) => ccall("SetEmulationSpeed", "number", ["number"], [Number(factor)])
+        : null,
+    setAudioBufferMs:
+      typeof module._DolphinWeb_SetAudioBufferMs === "function"
+        ? (ms) => module._DolphinWeb_SetAudioBufferMs(Number(ms) | 0)
+        : null,
+    // 0186: the mixer's queue in ms (-1 unknown); absent on an older core
+    audioQueuedMs:
+      typeof module._DolphinWeb_AudioQueuedMs === "function"
+        ? () => module._DolphinWeb_AudioQueuedMs()
         : null,
     setPresentationScale:
       typeof module._SetPresentationScale === "function"
@@ -6734,6 +6788,9 @@ async function createWebGpuPresenter(canvas) {
   console.log("[wgpu-features] got=" + (haveFeatures.join(",") || "none") +
               " missing=" + (wantFeatures.filter((f) => !haveFeatures.includes(f)).join(",") || "none") +
               " masked=" + ([...wgpuMaskedFeatures].join(",") || "none"));
+  // timestamp-query: the display filter's GPU timing, metrics on only
+  // (drop-meter); the player's device is created as before.
+  if (collectMetrics && adapter.features?.has("timestamp-query") && !wgpuMaskedFeatures.has("timestamp-query")) haveFeatures.push("timestamp-query");
   const device = await adapter.requestDevice(
     haveFeatures.length ? { requiredFeatures: haveFeatures } : undefined);
   rendererDiagnostics.device = {
@@ -6876,8 +6933,9 @@ fn fs(input: VertexOutput) -> @location(0) vec4f {
   }
 
   wgpuReplayFatal = null;
+  wgpuFatalReporter.reset();
 
-  device.lost.then((info) => {
+  device.lost.then(async (info) => {
     const loss = handleWgpuDeviceLoss({
       activeDevice: renderGpu?.device,
       lostDevice: device,
@@ -6902,10 +6960,24 @@ fn fs(input: VertexOutput) -> @location(0) vec4f {
     rendererDiagnostics.internalResolutionCeiling = {
       ...rendererDiagnostics.internalResolutionCeiling, lost: wgpuScaleLostCeiling < 4
     };
-    self.postMessage({ type: "wgpu-device-lost", internalResolution, reason: String(info?.reason ?? "unknown"), detail: loss.detail });
+    // ?wgpurecover=1: stop the game here, not a round trip to the page
+    // later (it ran ~0.45 s blind then); the page then saves the state.
+    const pause = wgpuSessionRecoverEnabled ? await pauseCoreAfterDeviceLoss() : null;
+    wgpuFatalReporter.report({ internalResolution, reason: String(info?.reason ?? "unknown"), detail: loss.detail, ...(pause ? { pause } : {}) });
   });
 
   return state;
+}
+
+// { state, changed } once paused (changed false: the player had paused it),
+// or { error }. Never throws: the page must hear of the loss either way.
+async function pauseCoreAfterDeviceLoss() {
+  try {
+    const { state, changed } = await coreLifecycle.pause();
+    return { state, changed };
+  } catch (error) {
+    return { error: String(error?.message || error) };
+  }
 }
 
 function ensureWgpuVisualCadenceResources(gpu = renderGpu) {
@@ -10747,6 +10819,18 @@ function markWgpuReplayFatal(scope, detail) {
       ? WGPU_CONSUMER_ERROR_SUBMIT
       : WGPU_CONSUMER_ERROR_UNKNOWN;
   wgpuRendererRuntime.emergencyFail(errorCode);
+  // The ring stays FAILED: tell the page on the device-loss path (a lost
+  // device posts from its own handler, with the browser's reason), as a
+  // renderer error, so it restarts at the same scale instead of showing a
+  // frozen picture.
+  if (scope !== "device-lost") {
+    wgpuFatalReporter.report({
+      internalResolution: wgpuInternalResolution,
+      reason: wgpuFatalPageReason(scope),
+      detail: wgpuReplayFatal.detail,
+      cause: "renderer-error",
+    });
+  }
   return true;
 }
 
@@ -13263,11 +13347,21 @@ function presentWgpuVsyncFrame({ newest = false, hidden = false, t = null, refre
   }
   const dst = renderGpu.context.getCurrentTexture();
   const enc = dev.createCommandEncoder({ label: "wgpu-vsync-present" });
-  enc.copyTextureToTexture(
-    { texture: f.tex },
-    { texture: dst },
-    [Math.min(f.tex.width, dst.width), Math.min(f.tex.height, dst.height), 1]
-  );
+  if (wgpuDisplayFilterActive()) {
+    // Scale to the display (EASU up, area down) and sharpen (RCAS).
+    if (wgpuDisplayFilterDevice !== dev) {
+      wgpuDisplayFilterGpu?.destroy();
+      wgpuDisplayFilterGpu = createDisplayFilter(dev, renderGpu.format, { timing: collectMetrics });
+      wgpuDisplayFilterDevice = dev;
+    }
+    wgpuDisplayFilterGpu.encode(enc, f.tex, dst, wgpuDisplayFilter.sharpness);
+  } else {
+    enc.copyTextureToTexture(
+      { texture: f.tex },
+      { texture: dst },
+      [Math.min(f.tex.width, dst.width), Math.min(f.tex.height, dst.height), 1]
+    );
+  }
   dev.queue.submit([enc.finish()]);
   // Same queue: the copy runs before any later pass renders into f.tex.
   wgpuVsync.shown(f);
@@ -13292,14 +13386,58 @@ function wgpuCanvasUsage(u) {
 // core lays the presenter out on reaches here.
 function resizeWgpuBackbuffer(width, height) {
   wgpuBackbufferSized = true;
+  wgpuBackbufferW = width;
+  wgpuBackbufferH = height;
+  applyWgpuCanvasSize();
+}
+
+// The core's backbuffer size: the frames' (presentvsync pool). Before any
+// announce, the canvas's when it is the backbuffer, else Dolphin's 640x480.
+function wgpuBackbufferSize() {
+  if (wgpuBackbufferW > 0 && wgpuBackbufferH > 0) return [wgpuBackbufferW, wgpuBackbufferH];
+  return [renderCanvas?.width || WGPU_BACKBUFFER_W, renderCanvas?.height || WGPU_BACKBUFFER_H];
+}
+
+// The display filter draws the frames at rAF: only with presentvsync, on a
+// hardware path, and only when it has something to do.
+function wgpuDisplayFilterActive() {
+  return wgpuPresentVsync && hardwareVideoBackend && displayFilterFits(wgpuDisplayFilter);
+}
+
+function setWgpuDisplayFilter(payload = {}) {
+  const wasActive = wgpuDisplayFilterActive();
+  const before = wgpuDisplayFilter;
+  wgpuDisplayFilter = normalizeDisplayFilter({ ...before, ...payload });
+  // Turning it on before the core announced a size: freeze the backbuffer
+  // the canvas has now, the canvas is about to change.
+  if (!wasActive && wgpuDisplayFilterActive() && !(wgpuBackbufferW > 0)) {
+    [wgpuBackbufferW, wgpuBackbufferH] = wgpuBackbufferSize();
+  }
+  if (renderGpu && renderCanvas && (wasActive || wgpuDisplayFilterActive())) applyWgpuCanvasSize();
+  // Off: its textures, buffers and timing reads go (made again when on).
+  if (wasActive && !wgpuDisplayFilterActive()) {
+    wgpuDisplayFilterGpu?.destroy();
+    wgpuDisplayFilterGpu = null;
+    wgpuDisplayFilterDevice = null;
+  }
+}
+
+// Size the canvas: the backbuffer, or with the display filter the display
+// box at the backbuffer's aspect.
+function applyWgpuCanvasSize() {
   try {
+    const [bw, bh] = wgpuBackbufferSize();
+    const size = wgpuDisplayFilterActive()
+      ? displayFilterOutputSize({ width: bw, height: bh }, wgpuDisplayFilter.box,
+        { maxSide: Math.min(5120, renderGpu?.device?.limits?.maxTextureDimension2D || 8192) })
+      : { width: bw, height: bh };
     const usage = self.GPUTextureUsage.RENDER_ATTACHMENT |
       ((wgpuReplayClassifier || inputReadbackDiagnostics) ? self.GPUTextureUsage.COPY_SRC : 0) |
       (wgpuVisualCadenceEnabled ? self.GPUTextureUsage.TEXTURE_BINDING : 0) |
       (wgpuPresentVsync ? self.GPUTextureUsage.COPY_DST : 0);
-    if (!resizeCanvasBackbuffer(renderCanvas, renderGpu, width, height, usage)) return;
-    console.log(`[bbresize] backbuffer ${width}x${height}`);
-    postStatus(`wgpu backbuffer resized to ${width}x${height}`);
+    if (!resizeCanvasBackbuffer(renderCanvas, renderGpu, size.width, size.height, usage)) return;
+    console.log(`[bbresize] backbuffer ${bw}x${bh} canvas ${size.width}x${size.height}`);
+    postStatus(`wgpu backbuffer resized to ${bw}x${bh}`);
   } catch (e) {
     recordRendererError("validation", `backbuffer resize: ${e?.message || e}`);
   }
@@ -13311,7 +13449,9 @@ function resizeWgpuBackbuffer(width, height) {
 // in its top-left corner. Bring it back, and re-arm the one-shot growth.
 function resetWgpuBackbufferForBoot() {
   const size = renderGpu ? bootBackbufferResize(renderCanvas) : null;
-  if (size) resizeWgpuBackbuffer(...size);
+  const stale = renderGpu && wgpuBackbufferW > 0 &&
+    (wgpuBackbufferW !== WGPU_BACKBUFFER_W || wgpuBackbufferH !== WGPU_BACKBUFFER_H);
+  if (size || stale) resizeWgpuBackbuffer(WGPU_BACKBUFFER_W, WGPU_BACKBUFFER_H);
   wgpuBackbufferSized = false;
 }
 
@@ -14861,10 +15001,16 @@ function drainWebGpuCmdRing(source = "presentation") {
             // resizing the swapchain repeatedly blanked the output entirely
             // (0.0 visual fps). The size must be stable, so take the page
             // canvas's intended size once and leave it alone.
-            if (!wgpuBackbufferSized && renderCanvas &&
-                (renderCanvas.width < WGPU_BACKBUFFER_W ||
-                 renderCanvas.height < WGPU_BACKBUFFER_H)) {
-              resizeWgpuBackbuffer(WGPU_BACKBUFFER_W, WGPU_BACKBUFFER_H);
+            // The canvas is what the demo scene shrank (the backbuffer
+            // only with the display filter, which sizes the canvas itself).
+            if (!wgpuBackbufferSized && renderCanvas) {
+              const [bbW, bbH] = wgpuDisplayFilterActive()
+                ? wgpuBackbufferSize() : [renderCanvas.width, renderCanvas.height];
+              if (bbW < WGPU_BACKBUFFER_W || bbH < WGPU_BACKBUFFER_H) {
+                resizeWgpuBackbuffer(WGPU_BACKBUFFER_W, WGPU_BACKBUFFER_H);
+              } else if (wgpuDisplayFilterActive()) {
+                applyWgpuCanvasSize();
+              }
             }
             // Content check on the texture actually about to be presented,
             // read adjacent to the EFB in the command stream. Triple buffering
@@ -14892,7 +15038,7 @@ function drainWebGpuCmdRing(source = "presentation") {
               while (performance.now() < until) { /* harness perturbation: a blocking present */ }
             }
             const cur = wgpuPresentVsync
-              ? acquireWgpuVsyncTexture(renderCanvas?.width || WGPU_BACKBUFFER_W, renderCanvas?.height || WGPU_BACKBUFFER_H)
+              ? acquireWgpuVsyncTexture(...wgpuBackbufferSize())
               : renderGpu.context.getCurrentTexture();
             lastBackbufferTexture = cur;
             currentBackbufferSourceTextureId = 0;

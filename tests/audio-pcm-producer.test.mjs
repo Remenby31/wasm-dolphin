@@ -6,6 +6,9 @@ import {
   AUDIO_PCM_STATE_RUNNING,
   createAudioPcmRing,
   consumeAudioPcm,
+  mixerQueueMicroseconds,
+  snapshotAudioPcmRing,
+  writeAudioPcm,
 } from "../src/audio-pcm-ring.js";
 import {
   AUDIO_PCM_TARGET_FRAMES,
@@ -68,4 +71,108 @@ test("producer rejects malformed header metadata and non-48k core", () => {
   const valid = createAudioPcmRing();
   f.core.audioSampleRate = () => 44100;
   assert.equal(f.producer.install(valid.sab).reason, "core-sample-rate");
+});
+
+// A lower ring target (?audiolead on the AudioWorklet path) is a floor: the
+// ring starts at 120 ms (a cold boot keeps the producer's worker busy: a
+// 40 ms ring underran ~100 times in its first 6 s), comes down 10 ms a
+// second once calm for 5 s, and goes up 20 ms at each underrun.
+test("adaptive ring: starts at 120 ms, comes down to the page's floor when calm, back up on an underrun", async () => {
+  const { ADAPT_CALM_MS } = await import("../src/audio-pcm-producer.js");
+  const ring = createAudioPcmRing();
+  const f = fixture();
+  assert.equal(f.producer.install(ring.sab, { muted: false, targetFrames: 1920 }).active, true);
+  assert.equal(f.producer.telemetry().targetFrames, AUDIO_PCM_TARGET_FRAMES);
+  assert.equal(f.producer.telemetry().floorFrames, 1920);
+  consumeAudioPcm(ring, new Float32Array(1), new Float32Array(1));
+  assert.equal(f.producer.refill(), AUDIO_PCM_TARGET_FRAMES, "120 ms at first");
+  assert.equal(Atomics.load(ring.header, AUDIO_PCM_HEADER.STATE), AUDIO_PCM_STATE_RUNNING, "playback from half the floor");
+  // calm: 0.5 % of the time (240 frames a second) after 5 s, down to the floor
+  let t = 1000;
+  f.producer.adapt(t);
+  t += ADAPT_CALM_MS;
+  f.producer.adapt(t);
+  assert.equal(f.producer.telemetry().targetFrames, AUDIO_PCM_TARGET_FRAMES, "not before 5 s of calm");
+  t += 1000;
+  f.producer.adapt(t);
+  assert.equal(f.producer.telemetry().targetFrames, AUDIO_PCM_TARGET_FRAMES - 240);
+  for (let i = 0; i < 30; i++) { t += 1000; f.producer.adapt(t); }
+  assert.equal(f.producer.telemetry().targetFrames, 1920, "never under the floor");
+  // an underrun: +20 ms, and the calm starts over
+  Atomics.add(ring.header, AUDIO_PCM_HEADER.UNDERRUN_EVENTS, 1);
+  f.producer.adapt(t += 10);
+  assert.equal(f.producer.telemetry().targetFrames, 1920 + 960);
+  f.producer.adapt(t += 1000);
+  assert.equal(f.producer.telemetry().targetFrames, 1920 + 960, "no step down before 5 s of calm");
+  // a late timer (over half the target) restarts the calm without raising
+  f.producer.adapt(t += ADAPT_CALM_MS - 1000, 100);
+  assert.equal(f.producer.telemetry().targetFrames, 1920 + 960);
+  // the page asks 120 ms (or nothing): no adaptation
+  const f2 = fixture(), r2 = createAudioPcmRing();
+  f2.producer.install(r2.sab, { muted: false });
+  f2.producer.adapt(1); f2.producer.adapt(1 + 10 * ADAPT_CALM_MS);
+  assert.equal(f2.producer.telemetry().targetFrames, AUDIO_PCM_TARGET_FRAMES);
+  // bounds of the floor
+  const f3 = fixture(), r3 = createAudioPcmRing();
+  f3.producer.install(r3.sab, { muted: false, targetFrames: 10 });
+  assert.equal(f3.producer.telemetry().floorFrames, 480);
+});
+
+// 0186: the producer publishes the core mixer's queue in the ring's header,
+// in µs; -1 while unknown (a core without the export, or before the boot).
+test("the mixer's queue reaches the ring header; unknown is -1 (null in the snapshot)", () => {
+  const ring = createAudioPcmRing();
+  assert.equal(snapshotAudioPcmRing(ring).mixerQueueMs, null, "unknown before any refill");
+  const f = fixture();
+  f.producer.install(ring.sab, { muted: false });
+  consumeAudioPcm(ring, new Float32Array(128), new Float32Array(128));
+  f.producer.refill();
+  assert.equal(snapshotAudioPcmRing(ring).mixerQueueMs, null, "a core without audioQueuedMs");
+  f.core.audioQueuedMs = () => 42.667;
+  f.producer.refill();
+  assert.equal(Atomics.load(ring.header, AUDIO_PCM_HEADER.MIXER_QUEUE_US), 42667);
+  assert.equal(snapshotAudioPcmRing(ring).mixerQueueMs, 42.667);
+  f.core.audioQueuedMs = () => -1; // before the boot
+  f.producer.refill();
+  assert.equal(snapshotAudioPcmRing(ring).mixerQueueMs, null);
+});
+
+// Review of #316: muted, or a transition not yet acknowledged, the producer
+// does not pull: the mixer's queue is unknown, not the last value read.
+test("refill's early exits mark the mixer's queue unknown", () => {
+  const ring = createAudioPcmRing();
+  const f = fixture();
+  f.core.audioQueuedMs = () => 80;
+  f.producer.install(ring.sab, { muted: false });
+  consumeAudioPcm(ring, new Float32Array(128), new Float32Array(128));
+  f.producer.refill();
+  assert.equal(snapshotAudioPcmRing(ring).mixerQueueMs, 80);
+  f.producer.setMuted(true);
+  f.producer.refill();
+  assert.equal(snapshotAudioPcmRing(ring).mixerQueueMs, null, "muted");
+  f.producer.setMuted(false);
+  consumeAudioPcm(ring, new Float32Array(128), new Float32Array(128));
+  f.producer.refill();
+  assert.equal(snapshotAudioPcmRing(ring).mixerQueueMs, 80);
+  f.producer.transition(); // a state load: epoch not acknowledged yet
+  f.producer.refill();
+  assert.equal(snapshotAudioPcmRing(ring).mixerQueueMs, null, "epoch not acknowledged");
+});
+
+// Review of #316: 0186's arithmetic, the same expression as the patch.
+test("0186's queue time: 4,000 µs a granule for the 32 kHz DMA FIFO, 2,666 at 48 kHz", async () => {
+  const dividend = 108000000; // Mixer::FIXED_SAMPLE_RATE_DIVIDEND
+  assert.equal(mixerQueueMicroseconds(1, dividend / 32000, dividend), 4000);
+  assert.equal(mixerQueueMicroseconds(20, dividend / 32000, dividend), 80000, "AudioBufferSize 80 ms: 20 granules");
+  assert.equal(mixerQueueMicroseconds(1, dividend / 48000, dividend), 2666);
+  assert.equal(mixerQueueMicroseconds(255, dividend / 32000, dividend), 1020000, "the queue's mask, no overflow");
+  assert.equal(mixerQueueMicroseconds(5, 3375, 0), 0, "no dividend: 0");
+  const { readFile } = await import("node:fs/promises");
+  const patch = await readFile(new URL("../patches/dolphin-wasm/snapshot/0186-mixer-queue-depth.patch", import.meta.url), "utf8");
+  assert.match(patch, /granules \* \(GRANULE_SIZE \/ 2\) \* divisor \* 1000000 \/ m_input_sample_rate_dividend/);
+  assert.match(patch, /\(head - tail\) & GRANULE_QUEUE_MASK/);
+  // without a mixer (or before the boot) the export says -1
+  const core = await readFile(new URL("../core/upstream/dolphin_web_core.cpp", import.meta.url), "utf8");
+  const fn = core.slice(core.indexOf("double DolphinWeb_AudioQueuedMs()"));
+  assert.match(fn.slice(0, fn.indexOf("\n}\n")), /if \(!s_runtime_initialized\)\n\s*return -1;[\s\S]*: -1;/);
 });

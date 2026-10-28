@@ -25,7 +25,7 @@
       "commit": "01e0577914a75a2569c846778c2f93aa8e6feddd"
     }
   },
-  "patchSeriesSha256": "3d01b01ab3c32943f1934a4ad8b03553563b0018340387eb1db48353c6740fd4",
+  "patchSeriesSha256": "77b1c48cb0379478e6c4f3e7eeb284f54cf8b6ffed8bfc089f15291b11b60d6d",
   "patches": [
     {
       "order": 1,
@@ -1055,12 +1055,36 @@
       "order": 129,
       "cwd": ".",
       "hashMode": "lf-normalized",
+      "path": "patches/dolphin-wasm/snapshot/0178-webgpu-widescreen-backbuffer.patch",
+      "size": 1695,
+      "sha256": "9fedd039af13d2cce21522f060a514ecea2d5c777713c8498a4da67e156b3177"
+    },
+    {
+      "order": 130,
+      "cwd": ".",
+      "hashMode": "lf-normalized",
       "path": "patches/dolphin-wasm/snapshot/0183-region-mtmsr-ee.patch",
       "size": 7238,
       "sha256": "d6dc528631dad90bf7ac00c50cd8f09b696a88c97b427a5c805dffd470929c71"
     },
     {
-      "order": 130,
+      "order": 131,
+      "cwd": ".",
+      "hashMode": "lf-normalized",
+      "path": "patches/dolphin-wasm/snapshot/0184-regshape-x64.patch",
+      "size": 2585,
+      "sha256": "41b766d75eb8f5043dbbadcda019a4d13a898d6c2ff5a0a44f5681a746dc78fb"
+    },
+    {
+      "order": 132,
+      "cwd": ".",
+      "hashMode": "lf-normalized",
+      "path": "patches/dolphin-wasm/snapshot/0186-mixer-queue-depth.patch",
+      "size": 1936,
+      "sha256": "d939f383ed563a14a2214cb26f1fdf920ca3b043c20650931e9a6064883469a7"
+    },
+    {
+      "order": 133,
       "cwd": "Externals/SFML/SFML",
       "hashMode": "lf-normalized",
       "path": "patches/dolphin-wasm/submodules/0001-sfml-emscripten-config.patch",
@@ -1068,7 +1092,7 @@
       "sha256": "f82197a21fe982ad83f6ee7bbf5a03839b1cebd4d64da3eab11263842bf61d89"
     },
     {
-      "order": 131,
+      "order": 134,
       "cwd": "Externals/xxhash/xxHash",
       "hashMode": "lf-normalized",
       "path": "patches/dolphin-wasm/submodules/0002-xxhash-wasm-simd-scalar.patch",

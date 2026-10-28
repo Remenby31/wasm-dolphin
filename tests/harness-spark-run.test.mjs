@@ -10,7 +10,7 @@ import test from "node:test";
 
 import { kpiTable } from "../harness/lib/kpi.mjs";
 import { estimateMin, eta, isBuildProcess, MAX_BUILDS_PER_OWNER, move, movedId, nextStep, ownerBuilds, readTickets, waitTurn } from "../harness/remote/spark-queue.mjs";
-import { benchQuery, benchRaceArgs, builtOnBenchTest, launchCommand, RACE_QUERY, runId, sh, stampSummary } from "../harness/remote/spark-run.mjs";
+import { BENCH_XAUTHORITY, benchQuery, benchRaceArgs, builtOnBenchTest, headedEnv, launchCommand, RACE_QUERY, runId, sh, stampSummary } from "../harness/remote/spark-run.mjs";
 
 const race = (extra = {}) => ({
   kind: "race-perf", file: "race",
@@ -34,6 +34,21 @@ test("spark-run: run names are path-safe and dated", () => {
   const now = new Date("2026-10-21T19:05:00Z");
   assert.deepEqual(runId({ name: "a/a ../x", now }), { date: "20261021", name: "a-a-..-x" });
   assert.deepEqual(runId({ candidate: "/w/wt-jit", baseline: "origin/main", now }), { date: "20261021", name: "wt-jit-vs-main-1905" });
+});
+
+test("spark-run --headed: the pair runs in the x11 display mode on the bench's bare Xorg, the display checked", () => {
+  assert.deepEqual(headedEnv(null), [], "headless unless asked");
+  assert.deepEqual(headedEnv(":2"), ["HARNESS_DISPLAY=x11", "DISPLAY=':2'", `XAUTHORITY='${BENCH_XAUTHORITY}'`]);
+  assert.equal(BENCH_XAUTHORITY, "/run/salon-xorg/xauth");
+  for (const bad of ["2", ":2; rm", "localhost:2", ""]) assert.throws(() => headedEnv(bad), /an X display as :N/);
+  // --headless: headless whatever HARNESS_DISPLAY the bench holds; not with --headed.
+  assert.deepEqual(headedEnv(null, BENCH_XAUTHORITY, { headless: true }), ["HARNESS_DISPLAY=headless"]);
+  assert.throws(() => headedEnv(":2", BENCH_XAUTHORITY, { headless: true }), /one or the other/);
+  assert.match(launchCommand({ harnessDir: "/h/k", outDir: "/h/r/d/n", raceArgs: [], headless: true }), /\{ HARNESS_DISPLAY=headless setsid nohup sh /);
+  const cmd = launchCommand({ harnessDir: "/h/k", outDir: "/h/r/d/n", lane: "a", raceArgs: ["--display"], headed: ":2" });
+  assert.match(cmd, /\{ HARNESS_DISPLAY=x11 DISPLAY=':2' XAUTHORITY='\/run\/salon-xorg\/xauth' setsid nohup sh harness\/remote\/spark-race\.sh /);
+  execFileSync("bash", ["-n", "-c", cmd]);
+  assert.doesNotMatch(launchCommand({ harnessDir: "/h/k", outDir: "/h/r/d/n", raceArgs: [] }), /DISPLAY/);
 });
 
 test("spark-run: the launch command quotes every argument for the remote shell", () => {

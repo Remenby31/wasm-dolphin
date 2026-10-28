@@ -25,6 +25,9 @@ export const AUDIO_PCM_HEADER = Object.freeze({
   PRODUCER_EMPTY_MIXES: 13,
   PRODUCER_TIMER_GAP_MAX_US: 14,
   PRODUCER_FILL_HIGH_WATER: 15,
+  // What the core's mixer holds ahead of the ring, in µs (patch 0186); -1
+  // while unknown (a core without it, or before the boot).
+  MIXER_QUEUE_US: 16,
 });
 
 const HEADER_WORDS = AUDIO_PCM_HEADER_BYTES / Int32Array.BYTES_PER_ELEMENT;
@@ -43,6 +46,7 @@ export function createAudioPcmRing(capacityFrames = AUDIO_PCM_CAPACITY_FRAMES) {
   Atomics.store(ring.header, AUDIO_PCM_HEADER.CHANNELS, AUDIO_PCM_CHANNELS);
   Atomics.store(ring.header, AUDIO_PCM_HEADER.SAMPLE_RATE, AUDIO_PCM_SAMPLE_RATE);
   Atomics.store(ring.header, AUDIO_PCM_HEADER.STATE, AUDIO_PCM_STATE_MUTED);
+  Atomics.store(ring.header, AUDIO_PCM_HEADER.MIXER_QUEUE_US, -1);
   return ring;
 }
 
@@ -169,6 +173,19 @@ export function consumeAudioPcm(
   return result;
 }
 
+// 0186's arithmetic (Mixer::MixerFifo::QueuedMicroseconds), for its tests:
+// each queued granule is GRANULE_SIZE / 2 = 128 input samples (granules
+// overlap by half), at the input rate dividend / divisor; integer µs.
+export function mixerQueueMicroseconds(granules, divisor, dividend) {
+  if (!dividend) return 0;
+  return Number((BigInt(granules) * 128n * BigInt(divisor) * 1000000n) / BigInt(dividend));
+}
+
+function mixerQueueMsOf(header) {
+  const us = Atomics.load(header, AUDIO_PCM_HEADER.MIXER_QUEUE_US) | 0;
+  return us >= 0 ? us / 1000 : null;
+}
+
 export function snapshotAudioPcmRing(ring) {
   const { header } = ring;
   const read = Atomics.load(header, AUDIO_PCM_HEADER.READ_INDEX) >>> 0;
@@ -189,5 +206,6 @@ export function snapshotAudioPcmRing(ring) {
     producerTimerGapMaxMs:
       (Atomics.load(header, AUDIO_PCM_HEADER.PRODUCER_TIMER_GAP_MAX_US) >>> 0) / 1000,
     producerFillHighWater: Atomics.load(header, AUDIO_PCM_HEADER.PRODUCER_FILL_HIGH_WATER) >>> 0,
+    mixerQueueMs: mixerQueueMsOf(header),
   };
 }

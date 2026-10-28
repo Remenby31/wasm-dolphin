@@ -692,7 +692,14 @@ function wireAspectSelect() {
   let saved = null;
   try { saved = localStorage.getItem("wasmDolphinAspect"); } catch {}
   if (saved && [...select.options].some((o) => o.value === saved)) select.value = saved;
+  // Widescreen (patch 0178) draws 16:9: the screen follows the picture,
+  // at boot and when it is switched (core-host's "wgpuaspect").
+  if (host.enhancements?.widescreen) select.value = "16:9";
   apply(select.value);
+  window.addEventListener("wgpuaspect", (event) => {
+    select.value = `${event.detail.w}:${event.detail.h}`;
+    apply(select.value);
+  });
   select.addEventListener("change", () => {
     apply(select.value);
     try { localStorage.setItem("wasmDolphinAspect", select.value); } catch {}
@@ -890,6 +897,8 @@ async function mountFile(file) {
   try {
     await applyGameProfile(file);
     const game = await host.mountFile(file);
+    // sound turned on before this disc fell back to legacy (no core yet)
+    await audio.retryWorkletTransport();
     // Auto-unmute on disc boot. AudioController defaults to muted because
     // the AudioContext can only be created after a user gesture; the disc
     // mount click is the user gesture, so unmute here so audio actually

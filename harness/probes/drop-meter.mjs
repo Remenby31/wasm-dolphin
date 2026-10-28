@@ -109,7 +109,10 @@ function installPageSampler(everyMs) {
   const tick = () => {
     const now = performance.now();
     const a = window.__audio?.causalTelemetry?.();
-    rows.push([performance.timeOrigin + now, Math.max(0, now - due), a ? Number(a.underrunCount ?? 0) : null, rafs]);
+    // the audio queued between the game and the speaker, ms: the mixer's
+    // queue (a core with 0186, worklet path), the ring or schedule, the
+    // output; then the mixer's part alone
+    rows.push([performance.timeOrigin + now, Math.max(0, now - due), a ? Number(a.underrunCount ?? 0) : null, rafs, Number.isFinite(a?.latencyMs) ? a.latencyMs : null, Number.isFinite(a?.mixerQueueMs) ? a.mixerQueueMs : null]);
     due = Math.max(due + everyMs, now);
     setTimeout(tick, Math.max(0, due - performance.now()));
   };
@@ -227,6 +230,9 @@ async function playVisit(o, server, profileDir, shotDir, visit) {
     raw.tps = (await guestSec(page))?.tps ?? null;
     // The JIT cache and the off-thread compiler at the end (cheap, read only).
     raw.jitCache = await workerRequest(page, "validationReadJitCacheReadiness", {}, 5000);
+    // The display filter (?fsr=, ?displayfit=): frames it drew and their GPU
+    // time (timestamp queries, metrics on), canvas and backbuffer sizes.
+    raw.displayFilter = (await workerRequest(page, "validationReadPresentVsync", {}, 5000))?.displayFilter ?? null;
     if (sampling) {
       const r = await workerRequest(page, "validationDropSampler", { action: "stop" }, 5000);
       if (r?.rows) raw.rows.push(r);
@@ -265,7 +271,7 @@ export function analyzeVisit(raw, { native = null } = {}) {
   if (!timeline.complete) return { error: `timeline incomplete (lost presents ${timeline.lost.presents}, VI ${timeline.lost.vi}, failed reads ${timeline.failedReads})` };
   const rows = rowsOf(raw.rows);
   raw = { ...raw, ...markersOnVi(raw, timeline.vi) };
-  const page = raw.page.map(([t, lagMs, underruns, rafs]) => ({ t, lagMs, underruns, rafs: rafs ?? null }));
+  const page = raw.page.map(([t, lagMs, underruns, rafs, audioMs, mixerMs]) => ({ t, lagMs, underruns, rafs: rafs ?? null, audioMs: audioMs ?? null, mixerMs: mixerMs ?? null }));
   const from = raw.markers[0]?.t ?? null;
   const windows = windowsOf({ vi: timeline.vi, presents: timeline.presents, rows, page, markers: raw.markers, tps: raw.tps, from, to: raw.endT });
   const span = (e) => e.t >= (from ?? -Infinity) && e.t <= (raw.endT ?? Infinity);
@@ -288,6 +294,7 @@ export function analyzeVisit(raw, { native = null } = {}) {
   const rss = (raw.rss ?? []).map((x) => x[1]);
   return {
     timelineComplete: timeline.complete, sampled: rows.length > 0, power: powerOfVisit(raw), browser: raw.browser ?? null, bootMs: raw.bootMs, pc: raw.pc ?? null,
+    displayFilter: displayFilterCost(raw.displayFilter),
     load1: { median: round(median(loadAvg), 2), max: round(Math.max(...loadAvg), 2) },
     regionsDone, rssPeakMB: rss.length ? Math.max(...rss) : null,
     summary: { ...dropSummary({ windows, presents, vi, tps: raw.tps, rows: rows.filter(span), displayed, page: page.filter(span) }), loads: loads.length, loadExcessMs: loads.reduce((a, l) => a + l.excessMs, 0), rssPeakMB: rss.length ? Math.max(...rss) : null, regionsDoneMs: regionsDone?.hostMsFromLaunch ?? null },
@@ -337,9 +344,33 @@ export function humanSummary(summary) {
       lines.push(`   verdict: ${v.verdict.inconclusive ? "NO VERDICT (see noVerdict)" : v.verdict.regression ? `REGRESSION ${bad.join(", ")}` : "no regression beyond the noise"}${v.verdict.improvement ? " (some improvement)" : ""}`);
     }
   }
+  for (const [k, c] of Object.entries(summary.displayFilterCost ?? {})) lines.push(`display filter ${k}: GPU ${c.gpuMsMedian} ms/frame (max ${c.gpuMsMax}), ${c.backbuffer?.join("x")} → ${c.canvas?.join("x")}`);
   if (summary.noVerdict) lines.push(`NO VERDICT: ${summary.noVerdict.join("; ")}`);
   if (summary.confirmation) lines.push(`confirmation batch: ${summary.confirmation.confirmed ? `REGRESSION REPRODUCED (${summary.confirmation.metrics.join(", ")})` : `not reproduced (${summary.confirmation.metrics.join(", ") || "none"} on the 2nd batch)`}`);
   return lines;
+}
+
+// The display filter's cost in a visit (pure): null when it was off.
+export function displayFilterCost(f) {
+  if (!f?.active) return null;
+  return {
+    sharpness: f.sharpness ?? null, canvas: f.canvas ?? null, backbuffer: f.backbuffer ?? null,
+    frames: f.frames ?? 0, gpuTimed: f.gpuTimed ?? 0,
+    gpuMsMean: f.gpuTimed ? round(f.gpuMsTotal / f.gpuTimed, 3) : null,
+    gpuMsMax: f.gpuTimed ? round(f.gpuMsMax, 3) : null,
+    encodeMsMean: f.frames ? round(f.encodeMsTotal / f.frames, 3) : null
+  };
+}
+
+// Per side and visit, the median of the runs' mean GPU ms per filtered
+// frame and the largest frame (null when the filter was off everywhere).
+export function displayFilterCostSummary(analyses, visits) {
+  const out = {};
+  for (const side of ["candidate", "baseline"]) for (let v = 1; v <= visits; v += 1) {
+    const costs = analyses.filter((a) => a.side === side && a.visit === v).map((a) => a.analysis?.displayFilter).filter((c) => c?.gpuMsMean != null);
+    if (costs.length) out[`${side}-v${v}`] = { runs: costs.length, gpuMsMedian: round(median(costs.map((c) => c.gpuMsMean)), 3), gpuMsMax: round(Math.max(...costs.map((c) => c.gpuMsMax)), 3), canvas: costs[0].canvas, backbuffer: costs[0].backbuffer };
+  }
+  return Object.keys(out).length ? out : null;
 }
 
 // Why a comparison gives no verdict (exit code 3), or null (pure).
@@ -416,6 +447,7 @@ function writeSummary(outDir, meta, analyses, visits, { noise = null, confirm = 
   }
   // every batch, an A/A included: what --noise checks
   summary.powerSources = powerSourcesOf(analyses);
+  summary.displayFilterCost = displayFilterCostSummary(analyses, visits);
   if (analyses.some((a) => a.side === "baseline")) {
     summary.noVerdict = noVerdictReasons({ analyses, visits, gaveUp: meta.gaveUp, verdicts });
     if (meta.staleNoise) summary.noVerdict = [meta.staleNoise, ...(summary.noVerdict ?? [])];
@@ -496,7 +528,7 @@ export function readNoise(file, expect = null) {
 function logRun(log, tag, a) {
   if (a.error) return log(`${tag}: ${a.error}`);
   const s = a.summary;
-  log(`${tag}: lost ${s.lostMs} ms, <95 % ${s.pctBelow95} %, <90 % ${s.pctBelow90} %, worst 1 s ${s.worstSecond} %, hitches >50 ${s.hitches50} >100 ${s.hitches100}, p99 ${s.presentP99} ms, ${s.loads} loads +${s.loadExcessMs} ms, underruns ${s.underruns}, load1 ${a.load1.median}${a.overloaded ? " OVERLOADED" : ""}`);
+  log(`${tag}: lost ${s.lostMs} ms, <95 % ${s.pctBelow95} %, <90 % ${s.pctBelow90} %, worst 1 s ${s.worstSecond} %, hitches >50 ${s.hitches50} >100 ${s.hitches100}, p99 ${s.presentP99} ms, ${s.loads} loads +${s.loadExcessMs} ms, underruns ${s.underruns}, audio ${s.audioLatencyMs ?? "–"} ms (mixer ${s.audioMixerMs ?? "–"}), load1 ${a.load1.median}${a.overloaded ? " OVERLOADED" : ""}`);
   for (const d of a.worst.slice(0, 3)) log(`   drop ${d.label} @${round(d.guestStart, 1)} gs: ${d.durationMs} ms, lost ${d.lostMs} ms, min ${d.minSpeed} %, cause ${d.cause}, ${d.jitBlocks} new blocks (${d.defers} deferred), causes ${JSON.stringify(d.causesMs)}`);
 }
 

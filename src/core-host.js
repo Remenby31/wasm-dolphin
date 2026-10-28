@@ -2,6 +2,7 @@ import { aotCompilerRequested, jitOffThreadRequested } from "./aot-compiler-work
 import { aotSamplePeriodRequested } from "./aot-hot-sampler.js";
 import { wasmEngine } from "./wasm-engine.js";
 import { anisotropyToCore, clampInternalResolution, internalResolutionCeiling, requestedEnhancements } from "./wgpu-enhancements.js";
+import { displayFilterFits, normalizeDisplayFilter, requestedDisplayFilter } from "./wgpu-display-filter.js";
 import { parseCustomRtc } from "./custom-rtc.js";
 import { DolphinCoreAdapter, dolphinBundleAvailable } from "./dolphin-adapter.js";
 import { buttonMaskFromPressed, isPadPort } from "./input.js";
@@ -62,6 +63,7 @@ import { requestedInputPhotonMarkerConfig } from "./input-visual-marker.js";
 import { requestedWgpuVisualCadence } from "./wgpu-visual-cadence.js";
 import { requestedWgpuPipelinePrewarm } from "./wgpu-pipeline-prewarm.js";
 import { requestedWgpuSparseUbo } from "./wgpu-sparse-ubo-copy-forward.js";
+import { captureSessionAfterDeviceLoss, requestedWgpuSessionRecover } from "./wgpu-session-recovery.js";
 
 const DEMO_WIDTH = 320;
 const DEMO_HEIGHT = 240;
@@ -73,15 +75,22 @@ const SAFE_JIT_WARMUP_FRAMES = 5000;
 const DEFAULT_JIT_WARMUP_FRAMES = 60;
 
 export class EmulatorHost {
-  constructor({ canvas, onFrame = () => {}, onStatus = () => {}, onMode = () => {}, onGpuDeviceLost = () => {} }) {
+  constructor({ canvas, onFrame = () => {}, onStatus = () => {}, onMode = () => {}, onGpuDeviceLost = () => {}, onGpuRecovering = () => {} }) {
     this.canvas = canvas;
     this.onFrame = onFrame;
     this.onStatus = onStatus;
     this.onMode = onMode;
-    // { internalResolution, fallback, reason, detail }: the WebGPU device was
-    // lost (the game stops). fallback 1: it was above 1x, the next boot of
-    // this host and every setEnhancements stay at 1x.
+    // { internalResolution, fallback, reason, detail, cause }: the WebGPU
+    // renderer stopped (the picture would freeze): cause "device-lost"
+    // (fallback 1 when it was above 1x: the next boot of this host and every
+    // setEnhancements stay at 1x) or "renderer-error" (fallback null, restart
+    // at the same scale). With ?wgpurecover=1 it comes once the core is
+    // paused and saved, with { paused, pauseChanged, state, stateGameId,
+    // stateError }, after onGpuRecovering({ internalResolution, fallback,
+    // reason }) at the start of the save (docs/wgpu-session-fallback.md).
     this.onGpuDeviceLost = onGpuDeviceLost;
+    this.onGpuRecovering = onGpuRecovering;
+    this.wgpuSessionRecover = requestedWgpuSessionRecover(window.location.search);
 
     this.demo = null;
     this.coreKind = requestedCoreKind();
@@ -103,6 +112,7 @@ export class EmulatorHost {
     this.gpuSpinMicros = requestedGpuSpinMicros();
     this.cpuOverclock = requestedCpuOverclock();
     this.emulationSpeed = requestedEmulationSpeed();
+    this.audioBufferMs = requestedAudioBufferMs();
     this.presentationScale = requestedPresentationScale();
     this.presentationQueueSize = requestedPresentationQueueSize();
     this.presenterBackend = requestedPresenterBackend();
@@ -120,6 +130,13 @@ export class EmulatorHost {
     // ?ir=1-4 and ?aniso=1|2|4|8|16 (patch 0168, WebGPU path); setEnhancements
     // changes them while a game runs.
     this.enhancements = requestedEnhancements(window.location.search);
+    // ?fsr=off|light|strong, ?displayfit=1 (WebGPU path with presentvsync):
+    // the canvas at the display's pixels, scaled and sharpened at the
+    // present; setDisplayFilter changes it while a game runs.
+    this.displayFilter = requestedDisplayFilter(window.location.search);
+    this.displayBoxObserver = null;
+    this.displayBoxObserved = null;
+    if (displayFilterFits(this.displayFilter)) this.watchDisplayBox();
     // 1 once a device was lost above 1x (internalResolutionCeiling()).
     this.scaleLostCeiling = 4;
     this.scaleCeilingPromise = null;
@@ -368,6 +385,8 @@ export class EmulatorHost {
       // Re-point the host's reference and the elements registry.
       canvas = replacement;
       this.canvas = replacement;
+      // The display filter's box is the new element's.
+      this.observeDisplayCanvas();
       const off = replacement.transferControlToOffscreen();
       off.id = "canvas";
       return off;
@@ -414,6 +433,7 @@ export class EmulatorHost {
             codeSpaceMiB: this.codeSpaceMiB,
             cpuOverclock: this.cpuOverclock,
             emulationSpeed: this.emulationSpeed,
+            audioBufferMs: this.audioBufferMs,
             presentationScale: this.presentationScale,
             oglTestClear: this.oglTestClear,
             fastSoftwareRaster: this.fastSoftwareRaster,
@@ -470,6 +490,7 @@ export class EmulatorHost {
             codeSpaceMiB: this.codeSpaceMiB,
             cpuOverclock: this.cpuOverclock,
             emulationSpeed: this.emulationSpeed,
+            audioBufferMs: this.audioBufferMs,
             presentationScale: this.presentationScale,
             presentationQueueSize: this.presentationQueueSize,
             presenterBackend: this.presenterBackend,
@@ -496,6 +517,8 @@ export class EmulatorHost {
             memcardSlotB: this.memcardSlotB,
             internalResolution: this.enhancements.internalResolution,
             maxAnisotropy: this.enhancements.maxAnisotropy,
+            widescreen: this.enhancements.widescreen,
+            displayFilter: this.displayFilter,
             efbAccess: this.efbAccess,
             xfbNoDecode: this.xfbNoDecode,
             fifoLog: this.fifoLog,
@@ -553,6 +576,7 @@ export class EmulatorHost {
             wgpuMappedDrainCoalescing: this.wgpuMappedDrainCoalescing,
             wgpuRendererWorkerProbe: this.wgpuRendererWorkerProbe,
             wgpuVisualCadence: this.wgpuVisualCadence,
+            wgpuSessionRecover: this.wgpuSessionRecover,
             wgpuPipelinePrewarm: this.wgpuPipelinePrewarm,
             gpuCompletionDiagnostics: this.gpuCompletionDiagnostics,
             wgpuDirtyRangeProjection: this.wgpuDirtyRangeProjection,
@@ -949,16 +973,81 @@ export class EmulatorHost {
   // frame. Resolves { applied, internalResolution } (applied false before the
   // core runs, or with a core without patch 0168); the values are kept for
   // the next boot.
-  async setEnhancements({ internalResolution, anisotropy } = {}) {
+  // widescreen: true for 16:9 (patch 0178, Dolphin's generic widescreen
+  // hack: the 3D view widened; 2D elements stretched, some objects cut at the
+  // edges), false for 4:3. The canvas follows the core's backbuffer.
+  async setEnhancements({ internalResolution, anisotropy, widescreen } = {}) {
     if (internalResolution !== undefined) {
       const { ceiling } = await this.internalResolutionCeiling();
       this.enhancements.internalResolution = clampInternalResolution(internalResolution, ceiling);
     }
     if (anisotropy !== undefined) this.enhancements.maxAnisotropy = anisotropyToCore(anisotropy);
+    if (widescreen !== undefined) {
+      this.enhancements.widescreen = widescreen === true;
+      this.announceAspect();
+    }
     if (this.mode !== "dolphin" || typeof this.adapter?.setEnhancements !== "function") {
       return { applied: false, reason: "core-not-loaded" };
     }
     return this.adapter.setEnhancements(this.enhancements);
+  }
+
+  // The picture's aspect, for the page's layout (app.js follows it): 16:9
+  // with widescreen (patch 0178), else 4:3. A "wgpuaspect" event on window.
+  announceAspect() {
+    const [w, h] = this.enhancements.widescreen ? [16, 9] : [4, 3];
+    globalThis.dispatchEvent?.(new CustomEvent("wgpuaspect", { detail: { w, h } }));
+  }
+
+  // Display filter: sharpness "off" | "light" | "strong" (FSR1 RCAS after an
+  // EASU upscale to the display), fit true to size the canvas to the display
+  // without sharpening (an internal resolution above the display is then
+  // area-filtered down: supersampling). Kept for the next boot. Resolves the
+  // worker's answer ({ applied, active, sharpness, fit, box }).
+  async setDisplayFilter({ sharpness, fit } = {}) {
+    this.displayFilter = normalizeDisplayFilter({
+      ...this.displayFilter,
+      ...(sharpness !== undefined ? { sharpness } : {}),
+      ...(fit !== undefined ? { fit } : {})
+    });
+    if (displayFilterFits(this.displayFilter)) this.watchDisplayBox();
+    if (typeof this.adapter?.setDisplayFilter !== "function") return { applied: false, reason: "core-not-loaded" };
+    return this.adapter.setDisplayFilter(this.displayFilter);
+  }
+
+  // The canvas element's size in device pixels, for the display filter's
+  // canvas (devicePixelContentBoxSize: exact, follows zoom and moves between
+  // screens).
+  // contain: the element is laid out with object-fit: contain (the picture
+  // keeps its aspect inside the box), else the canvas is stretched to it.
+  watchDisplayBox() {
+    if (this.displayBoxObserver || typeof ResizeObserver !== "function" || !this.canvas) return;
+    this.displayBoxObserver = new ResizeObserver((entries) => {
+      const entry = entries.at(-1);
+      const device = entry?.devicePixelContentBoxSize?.[0];
+      const ratio = globalThis.devicePixelRatio || 1;
+      const contain = globalThis.getComputedStyle?.(entry.target)?.objectFit === "contain";
+      const box = device
+        ? { width: device.inlineSize, height: device.blockSize, contain }
+        : { width: Math.round(entry.contentRect.width * ratio), height: Math.round(entry.contentRect.height * ratio), contain };
+      this.displayFilter = normalizeDisplayFilter({ ...this.displayFilter, box });
+      if (displayFilterFits(this.displayFilter)) this.adapter?.setDisplayFilter?.({ box: this.displayFilter.box })?.catch?.(() => {});
+    });
+    this.observeDisplayCanvas();
+  }
+
+  // (Re)observe this.canvas: after replaceCanvasForWorker the old element is
+  // gone from the page.
+  observeDisplayCanvas() {
+    const observer = this.displayBoxObserver;
+    if (!observer || !this.canvas || this.displayBoxObserved === this.canvas) return;
+    if (this.displayBoxObserved) observer.unobserve(this.displayBoxObserved);
+    this.displayBoxObserved = this.canvas;
+    try {
+      observer.observe(this.canvas, { box: "device-pixel-content-box" });
+    } catch {
+      observer.observe(this.canvas);
+    }
   }
 
   // The highest internal resolution this machine is trusted with:
@@ -984,14 +1073,54 @@ export class EmulatorHost {
       : adapter;
   }
 
-  handleGpuDeviceLost({ internalResolution = 1, reason = "unknown", detail = "" } = {}) {
-    const fallback = internalResolution > 1 ? 1 : null;
+  // cause "device-lost": the GPU went (memory may be why), the scale falls
+  // to 1x. "renderer-error": a fatal replay error on a live device (the
+  // scale is not why): the page restarts at the same scale, fallback null.
+  handleGpuDeviceLost({ internalResolution = 1, reason = "unknown", detail = "", cause = "device-lost", pause = null } = {}) {
+    const deviceLost = cause !== "renderer-error";
+    const fallback = deviceLost && internalResolution > 1 ? 1 : null;
     if (fallback) {
       this.scaleLostCeiling = fallback;
       this.enhancements.internalResolution = fallback;
     }
-    this.onStatus(`WebGPU device lost at ${internalResolution}x (${reason})${fallback ? "; internal resolution back to 1x" : ""}`);
-    this.onGpuDeviceLost({ internalResolution, fallback, reason, detail });
+    this.onStatus(deviceLost
+      ? `WebGPU device lost at ${internalResolution}x (${reason})${fallback ? "; internal resolution back to 1x" : ""}`
+      : `WebGPU renderer failed at ${internalResolution}x (${reason}); restart at the same scale`);
+    const event = { internalResolution, fallback, reason, detail, cause: deviceLost ? "device-lost" : "renderer-error" };
+    if (!this.wgpuSessionRecover || this.mode !== "dolphin") {
+      this.onGpuDeviceLost(event);
+      return null;
+    }
+    return this.recoverSessionAfterDeviceLoss(event, pause);
+  }
+
+  // ?wgpurecover=1: tell the page a recovery runs, keep the paused session,
+  // then always hand the loss to the page, whatever failed on the way.
+  async recoverSessionAfterDeviceLoss(event, workerPause) {
+    const describe = (error) => (error instanceof Error ? error.message : String(error));
+    this.onStatus("WebGPU device lost: keeping the session (pause, save state)");
+    try {
+      this.onGpuRecovering({ internalResolution: event.internalResolution, fallback: event.fallback, reason: event.reason });
+    } catch (error) {
+      this.onStatus(`Device loss recovery handler failed: ${describe(error)}`);
+    }
+    let session = { paused: false, pauseChanged: false, state: null, stateGameId: "", stateError: "" };
+    try {
+      session = await captureSessionAfterDeviceLoss(this.adapter, { workerPause });
+      this.onStatus(session.state
+        ? `Session kept after the device loss (${session.state.byteLength} bytes)`
+        : `Session not kept after the device loss: ${session.stateError}`);
+    } catch (error) {
+      session = { ...session, stateError: describe(error) };
+      this.onStatus(`Session not kept after the device loss: ${session.stateError}`);
+    } finally {
+      try {
+        this.onGpuDeviceLost({ ...event, ...session });
+      } catch (error) {
+        this.onStatus(`Device loss handler failed: ${describe(error)}`);
+      }
+    }
+    return session;
   }
 
   setAudioMuted(muted) {
@@ -1576,6 +1705,13 @@ function requestedCpuOverclock() {
   return 1;
 }
 
+// ?audiobuffer=N (ms, 16-200): the core mixer's queue (Dolphin's
+// AudioBufferSize, 80 ms when not given), part of the audio latency.
+export function requestedAudioBufferMs(search = window.location.search) {
+  const n = Number.parseInt(new URLSearchParams(search).get("audiobuffer") || "", 10);
+  return Number.isInteger(n) && n >= 16 && n <= 200 ? n : 0;
+}
+
 function requestedEmulationSpeed() {
   const params = new URLSearchParams(window.location.search);
   const raw = params.get("speed");
@@ -1783,6 +1919,7 @@ const CACHED_INTERPRETER_DISABLE_BITS = {
   fastmemhoist:    1 << 23, // §28cz per-block fastmem bounds-check hoist (ENABLE polarity; default-off; ?fastmemhoist=1)
   inlinefma:       1 << 26, // inline exact FMA; set: the FMA family calls the interpreter's NI_madd_msub
   regionmtmsr:     1 << 27, // 0183 regions go on past a mtmsr that changes only EE (ENABLE polarity; default-off; ?regionmtmsr=1)
+  regshape:        1 << 28, // 0184 x64 register shape: at most 4 GPRs per block in locals (ENABLE polarity; default-off; ?regshape=x64)
   // Aliases the plan / TL;DR uses interchangeably:
   fastinputpoll: 1 << 1, // legacy synonym for meleecall (input-poll lives there)
   fastmem:       1 << 7, // legacy synonym for fastsystem (load/store-ish helpers)
@@ -1828,9 +1965,10 @@ function requestedCachedInterpreterDisableMask() {
         }
       }
     }
-    // 0183's bit is an ENABLE bit: a raw ?disable= mask (or the name) must not
-    // turn it on by accident; only ?regionmtmsr=1 does.
-    mask &= ~CACHED_INTERPRETER_DISABLE_BITS.regionmtmsr;
+    // 0183's and 0184's bits are ENABLE bits: a raw ?disable= mask (or the
+    // name) must not turn them on by accident; only ?regionmtmsr=1 and
+    // ?regshape=x64 do.
+    mask &= ~(CACHED_INTERPRETER_DISABLE_BITS.regionmtmsr | CACHED_INTERPRETER_DISABLE_BITS.regshape);
   }
   // §28bt block re-dispatch: DEFAULT-ON. Rigorously verified +11% warm
   // (4-run non-overlapping same-binary A/B, correctness-clean on battle);
@@ -1888,6 +2026,11 @@ function requestedCachedInterpreterDisableMask() {
   // goes on past a mtmsr that only turns interrupts off or on.
   if (params.get("regionmtmsr") === "1") {
     mask |= CACHED_INTERPRETER_DISABLE_BITS.regionmtmsr;
+  }
+  // 0184: the x64 register shape, default-off until the CI bench and a real
+  // PC decide (?regshape=x64; automatic detection comes after).
+  if (params.get("regshape") === "x64") {
+    mask |= CACHED_INTERPRETER_DISABLE_BITS.regshape;
   }
   if (params.get("fastmemhoist") === "1") {
     mask |= CACHED_INTERPRETER_DISABLE_BITS.fastmemhoist;

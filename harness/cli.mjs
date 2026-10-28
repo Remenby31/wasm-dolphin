@@ -8,7 +8,7 @@ import os from "node:os";
 import path from "node:path";
 import { pathToFileURL } from "node:url";
 import { parseArgs } from "node:util";
-import { ensureServer, loadHarnessState, pageCall, readCoreProgress, readFrameInfo, REPO_ROOT, workerRequest } from "./lib/browser.mjs";
+import { defaultDisplay, ensureServer, loadHarnessState, pageCall, readCoreProgress, readFrameInfo, REPO_ROOT, workerRequest } from "./lib/browser.mjs";
 import { analyzeDifferential, INTERP_QUERY, JIT_QUERY } from "./lib/fuzz.mjs";
 import { releaseAll, setPad } from "./lib/gamepad-mock.mjs";
 import { compareFrames, diffImage, identical } from "./lib/image-diff.mjs";
@@ -47,7 +47,7 @@ const COMMON = {
 // Never a visible window unless asked: headless by default for every
 // command (PROGRAM.md).
 function displayOf(values) {
-  return values.display ?? "headless";
+  return values.display ?? defaultDisplay();
 }
 
 function parse(argv, options) {
