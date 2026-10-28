@@ -1872,6 +1872,13 @@ function requestedEfbDiag() {
 // default 750, 0: the plain sleep), until ?sleepspin=<us> (50..2000, default
 // 150) is left, then a spin.
 // Absent: the shipped pacing.
+// ?presentpace=game (the default), observe or off (0, false, no).
+function presentPaceMode(params) {
+  const v = (params.get("presentpace") ?? "").toLowerCase();
+  if (["off", "0", "false", "no"].includes(v)) return "off";
+  return v === "observe" ? "observe" : "game";
+}
+
 export function requestedPacing(search = window.location.search) {
   const params = new URLSearchParams(search);
   return {
@@ -1890,13 +1897,17 @@ export function requestedPacing(search = window.location.search) {
     // of ~56 and half the on-screen repeats on the race (12 pairs, --display).
     // ?presentvsync=0 (or false, off, no) presents as the ring drains.
     presentVsync: !["0", "false", "off", "no"].includes((params.get("presentvsync") ?? "").toLowerCase()),
-    // ?presentpace=game: the vsync presenter shows frames at the game's own
-    // pace on a screen faster than the game (src/wgpu-game-pacer.js). Off by default.
-    presentGamePace: (params.get("presentpace") ?? "").toLowerCase() === "game",
-    // ?presentpace=game or =observe: the refresh histogram (HUD) and the
-    // game's period are kept; observe keeps them without pacing. Off: none
-    // of it runs, the presenter does no extra work.
-    presentPaceStats: ["game", "observe"].includes((params.get("presentpace") ?? "").toLowerCase())
+    // The vsync presenter shows frames at the game's own pace on a screen
+    // faster than the game (src/wgpu-game-pacer.js), on by default since
+    // 2026-10-28: 60 fps on a 120 Hz screen judders 36.7 -> 21.0 % (Spark,
+    // 6/6), 30 fps on 60 Hz 13.8 -> 2.0 % of frames off cadence (Mac), no
+    // cost at 1:1. The price: under arrival jitter, a median wait 1-3 ms
+    // longer and a p99 up to a refresh longer on screens faster than the game.
+    // ?presentpace=off (or 0, false, no) shows the oldest frame at every
+    // BeginFrame as before; =observe keeps the refresh histogram (HUD) and
+    // the game's period without pacing. Off: none of it runs.
+    presentGamePace: presentPaceMode(params) === "game",
+    presentPaceStats: presentPaceMode(params) !== "off"
   };
 }
 
