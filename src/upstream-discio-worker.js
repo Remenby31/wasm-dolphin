@@ -159,7 +159,7 @@ import {
   createWgpuVisualCadenceTelemetry,
   hashWgpuVisualSample
 } from "./wgpu-visual-cadence.js";
-import { createCoreLifecycle } from "./core-lifecycle.js";
+import { createCoreLifecycle, waitCoreReadyForState } from "./core-lifecycle.js";
 import { WgpuReadback, unwrapSeq } from "./wgpu-readback.js";
 import { createDisplayCounter, startDisplayLoop } from "./wgpu-display-counter.js";
 import { PipelinePrewarm, wgslHash } from "./wgpu-pipeline-prewarm.js";
@@ -2282,6 +2282,13 @@ async function handleMessage(type, payload) {
     case "rendererDiagnostics":
       return rendererDiagnosticsPayload();
     case "loadStateFile": {
+      // Asked right after the boot, a load used to come back rc 0 (the core
+      // still Starting or Uninitialized) and every caller retried: wait here
+      // for a core that takes it, 15 s at most, then refuse in words.
+      if (api?.loadStateFile && !(await waitCoreReadyForState(() => api?.getCoreStateName?.() ?? ""))) {
+        const coreState = api?.getCoreStateName?.() ?? "";
+        return { loaded: false, rc: 0, beforeState: coreState, error: `core not running (${coreState || "unknown"}) after 15 s` };
+      }
       forceWgpuMappedDrainLifecycle(WGPU_MAPPED_DRAIN_FORCE_REASONS.LOAD);
       wgpuSparseUbo?.reset("save-state-load");
       if (wgpuUboComputeProjectionActive) {

@@ -1,5 +1,6 @@
 import assert from "node:assert/strict";
 import test from "node:test";
+import { readFile } from "node:fs/promises";
 
 import { CORE_STATES, createCoreLifecycle } from "../src/core-lifecycle.js";
 
@@ -113,4 +114,33 @@ test("a full quota while saving never keeps the core from stopping", async () =>
   assert.equal(result.state, "Uninitialized");
   assert.match(result.persistError, /quota exceeded; .*quota exceeded/);
   assert.deepEqual(core.calls, [["stopCore"]]);
+});
+
+// A save state loads only once Core's s_state is Running (the shim's
+// LoadStateFile answers 0 before): the worker waits for it instead of every
+// caller retrying.
+test("waitCoreReadyForState: Running or Paused loads; Uninitialized/Starting wait; Stopping or the limit refuse", async () => {
+  const { coreReadyForState, waitCoreReadyForState } = await import("../src/core-lifecycle.js");
+  assert.deepEqual(["Running", "Paused", "Starting", "Uninitialized", "Stopping", ""].map(coreReadyForState), [true, true, false, false, false, false]);
+  let t = 0;
+  const clock = { now: () => t, sleep: async (ms) => { t += ms; } };
+  const seq = ["Uninitialized", "Uninitialized", "Starting", "Running"];
+  let i = 0;
+  assert.equal(await waitCoreReadyForState(() => seq[Math.min(i++, seq.length - 1)], { ...clock, pollMs: 20 }), true);
+  assert.equal(t, 60);
+  t = 0;
+  assert.equal(await waitCoreReadyForState(() => "Starting", { ...clock, timeoutMs: 15_000, pollMs: 20 }), false);
+  assert.ok(t >= 15_000 && t < 15_100);
+  t = 0;
+  assert.equal(await waitCoreReadyForState(() => "Stopping", clock), false);
+  assert.equal(t, 0);
+});
+
+test("the worker waits for a core that takes the state before loading it, and refuses in words", async () => {
+  const worker = await readFile(new URL("../src/upstream-discio-worker.js", import.meta.url), "utf8");
+  const load = worker.slice(worker.indexOf('case "loadStateFile": {'), worker.indexOf('case "saveStateFile"'));
+  assert.ok(load.indexOf("await waitCoreReadyForState(") >= 0 && load.indexOf("await waitCoreReadyForState(") < load.indexOf("api.loadStateFile(path)"));
+  assert.match(load, /error: `core not running \(\$\{coreState \|\| "unknown"\}\) after 15 s`/);
+  const browser = await readFile(new URL("../harness/lib/browser.mjs", import.meta.url), "utf8");
+  assert.doesNotMatch(browser, /retrySec/);
 });
