@@ -1706,17 +1706,24 @@ function requestedCpuOverclock() {
 }
 
 // ?audiobuffer=N (ms, 16-200): the core mixer's queue (Dolphin's
-// AudioBufferSize), part of the audio latency. 40 ms by default with
-// the AudioWorklet (pairs on mains 2026-10-28, mixer queue counted: total
-// latency 118-124 -> 80-85 ms from the title on, 0 underruns, no drop
-// regression); with ?audiotransport=legacy, 0 (the core's 80 ms), never
-// measured lower. A value in range overrides either.
+// AudioBufferSize), part of the audio latency; the core takes it before the
+// boot only. 40 ms by default when the AudioWorklet can run (pairs on mains
+// 2026-10-28, mixer queue counted: total latency 118-124 -> 80-85 ms from
+// the title on, 0 underruns, no drop regression); otherwise 0, the core's
+// 80 ms: ?audiotransport=legacy, or a page without cross-origin isolation,
+// SharedArrayBuffer or AudioWorkletNode, which falls back to legacy anyway.
+// A fallback decided after the boot (worklet init or stall) keeps 40 ms.
+// A value in range overrides all of it.
 export const DEFAULT_WORKLET_AUDIO_BUFFER_MS = 40;
-export function requestedAudioBufferMs(search = window.location.search) {
+export function workletPossibleBeforeBoot(g = globalThis) {
+  return g.crossOriginIsolated === true && typeof g.SharedArrayBuffer === "function" && typeof g.AudioWorkletNode === "function";
+}
+export function requestedAudioBufferMs(search = window.location.search, g = globalThis) {
   const params = new URLSearchParams(search);
   const n = Number.parseInt(params.get("audiobuffer") || "", 10);
   if (Number.isInteger(n) && n >= 16 && n <= 200) return n;
-  return params.get("audiotransport") === "legacy" ? 0 : DEFAULT_WORKLET_AUDIO_BUFFER_MS;
+  if (params.get("audiotransport") === "legacy" || !workletPossibleBeforeBoot(g)) return 0;
+  return DEFAULT_WORKLET_AUDIO_BUFFER_MS;
 }
 
 function requestedEmulationSpeed() {

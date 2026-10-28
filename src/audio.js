@@ -482,6 +482,8 @@ export class AudioController {
       requestedTransport: this.requestedTransport,
       activeTransport: this.activeTransport,
       transportFallbackReason: this.transportFallbackReason,
+      // the core mixer's queue it was booted with (ms; null: not told)
+      mixerBufferMs: this.mixerBufferMs ?? null,
       workletRing,
       pumpCount: p.pumpCount,
       pumpPendingSkipCount: p.pumpPendingSkipCount,

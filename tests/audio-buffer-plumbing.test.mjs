@@ -7,17 +7,25 @@ import test from "node:test";
 // ?audiobuffer=N: the core mixer's queue (Dolphin's AudioBufferSize), from the
 // page's URL to the core's config. Options the adapter forgot to carry were
 // silently dropped before (?aotsample, ?wasmengine): every hop is checked.
-test("?audiobuffer: 40 ms by default with the worklet, the core's 80 ms with legacy, a value in range overrides", async () => {
+test("?audiobuffer: 40 ms by default when the worklet can run, the core's 80 ms otherwise, a value in range overrides", async () => {
   const { requestedAudioBufferMs } = await import("../src/core-host.js");
+  const able = { crossOriginIsolated: true, SharedArrayBuffer, AudioWorkletNode: function () {} };
+  const q = (search, g = able) => requestedAudioBufferMs(search, g);
   // 40 ms by default with the worklet (the 2026-10-28 pairs); the core's
   // 80 ms with ?audiotransport=legacy; an out-of-range value is ignored
-  assert.equal(requestedAudioBufferMs(""), 40);
-  assert.equal(requestedAudioBufferMs("?audiotransport=legacy"), 0);
-  assert.equal(requestedAudioBufferMs("?audiobuffer=80"), 80);
-  assert.equal(requestedAudioBufferMs("?audiobuffer=40&audiotransport=legacy"), 40);
-  assert.equal(requestedAudioBufferMs("?audiobuffer=8"), 40, "under the mixer's 4 granules: the default");
-  assert.equal(requestedAudioBufferMs("?audiobuffer=500&audiotransport=legacy"), 0);
-  assert.equal(requestedAudioBufferMs("?audiobuffer=x"), 40);
+  assert.equal(q(""), 40);
+  assert.equal(q("?audiotransport=legacy"), 0);
+  assert.equal(q("?audiobuffer=80"), 80);
+  assert.equal(q("?audiobuffer=40&audiotransport=legacy"), 40);
+  assert.equal(q("?audiobuffer=8"), 40, "under the mixer's 4 granules: the default");
+  assert.equal(q("?audiobuffer=500&audiotransport=legacy"), 0);
+  assert.equal(q("?audiobuffer=x"), 40);
+  // Review of #327: the core takes the queue before the boot, the transport
+  // is chosen after: a page that will fall back to legacy keeps 80 ms
+  assert.equal(q("", { ...able, crossOriginIsolated: false }), 0, "no isolation");
+  assert.equal(q("", { ...able, SharedArrayBuffer: undefined }), 0, "no SharedArrayBuffer");
+  assert.equal(q("", { ...able, AudioWorkletNode: undefined }), 0, "no AudioWorkletNode");
+  assert.equal(q("?audiobuffer=40", { crossOriginIsolated: false }), 40, "an explicit value still wins");
 });
 
 test("?audiobuffer reaches the worker's init message through the adapter", async (t) => {
