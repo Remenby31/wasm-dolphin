@@ -160,7 +160,7 @@ import {
   createWgpuVisualCadenceTelemetry,
   hashWgpuVisualSample
 } from "./wgpu-visual-cadence.js";
-import { createCoreLifecycle } from "./core-lifecycle.js";
+import { createCoreLifecycle, createSerial, waitCoreReadyForState } from "./core-lifecycle.js";
 import { WgpuReadback, unwrapSeq } from "./wgpu-readback.js";
 import { createDisplayCounter, startDisplayLoop } from "./wgpu-display-counter.js";
 import { PipelinePrewarm, wgslHash } from "./wgpu-pipeline-prewarm.js";
@@ -947,6 +947,10 @@ let queuedFreshFrameCount = 0;
 let tickRepaintCount = 0;
 let frameReuseTelemetry = createFrameReuseTelemetry();
 let lastCapturedCoreFrame = -1;
+// Bumped by every boot and every stop: a state load waiting for the core
+// gives up when it changes (the state belongs to the session it was asked
+// for).
+let coreBootGeneration = 0;
 let coreBoot = {
   attempted: false,
   accepted: false,
@@ -1610,6 +1614,166 @@ async function harnessUniqueFramesRequest({ action } = {}) {
   if (action === "stop") return { ...(await harnessUniqueFrames.stop()), readbacksTotal: harnessUniqueReadbacks };
   if (action === "status") return { active: harnessUniqueFrames.active, readbacksTotal: harnessUniqueReadbacks };
   return { error: `unique frames: action ${action}` };
+}
+
+// loadStateFile, one at a time: two loads at once would both write the
+// state file in the FS and the core load whichever was there.
+const stateLoadSerial = createSerial();
+const loadStateFileRequest = (payload) => stateLoadSerial(() => loadStateFileNow(payload));
+
+async function loadStateFileNow(payload) {
+  // Asked right after the boot, a load used to come back rc 0 (the core
+  // still Starting or Uninitialized) and every caller retried: wait here
+  // for a core that takes it, 15 s at most. No game booted, a core
+  // stopping, or another boot meanwhile: refused at once (the state
+  // must not reach another session).
+  if (api?.loadStateFile) {
+    const generation = coreBootGeneration;
+    const gone = () => (!coreBoot.accepted ? "no game booted" : coreStopping ? "core stopping"
+      : coreBootGeneration !== generation ? "another boot meanwhile" : null);
+    const wait = await waitCoreReadyForState(() => api?.getCoreStateName?.() ?? "", { abort: gone });
+    if (!wait.ready) {
+      const coreState = api?.getCoreStateName?.() ?? "";
+      return { loaded: false, rc: 0, beforeState: coreState, refused: wait.reason,
+        error: wait.reason === "expired" ? `core not running (${coreState || "unknown"}) after 15 s`
+          : `load refused: ${wait.detail || coreState || wait.reason}` };
+    }
+  }
+  forceWgpuMappedDrainLifecycle(WGPU_MAPPED_DRAIN_FORCE_REASONS.LOAD);
+  wgpuSparseUbo?.reset("save-state-load");
+  if (wgpuUboComputeProjectionActive) {
+    wgpuUboComputeProjection.reset("save-state-load");
+  }
+  wgpuUboComputeReconstruction?.reset("save-state-load");
+  workletAudioProducer.transition();
+  // Write the .sav bytes into the Emscripten FS, then ask the core
+  // to State::LoadAs it. Dolphin save states are build/version
+  // locked — a state from a different Dolphin will be rejected by
+  // LoadAs's version check (logged, not a crash). We pump a few
+  // frames so the loaded state actually renders.
+  if (!api?.loadStateFile || !moduleInstance?.FS) {
+    return { loaded: false, error: "no loadStateFile/FS" };
+  }
+  // payload.fsPath: load an existing FS file in place (e.g. the
+  // one SaveStateFile just wrote) — proves a version-matched
+  // round-trip with zero serving. Else write payload.bytes first.
+  const path = payload.fsPath || "/savestate.sav";
+  if (!payload.fsPath) {
+    try {
+      const bytes = payload.bytes instanceof Uint8Array
+        ? payload.bytes
+        : new Uint8Array(payload.bytes);
+      moduleInstance.FS.writeFile(path, bytes);
+    } catch (e) {
+      return { loaded: false, error: `FS.writeFile: ${e?.message || e}` };
+    }
+  }
+  collectWebGpuProducerStateStats();
+  const uploadTimeoutCountBeforeLoad = webGpuCausalStats.uploadTimeoutCount;
+  const loadRingBoundary = (wgpuReplayClassifier || wgpuLoadEpochFence)
+    ? summarizeCurrentWgpuRing({ maxRecords: webGpuCmdRing?.capacity ?? 4096 })
+    : null;
+  const hasHeldReplay = webGpuCmdRing?.heldReplayStart != null ||
+    (webGpuCmdRing?.stagedUploads?.size ?? 0) > 0;
+  if (wgpuReplayClassifier) {
+    wgpuReplayClassifierGeneration += 1;
+    wgpuReplayClassifier = createWgpuReplayClassifier({
+      scope: "load-state-file",
+      generation: wgpuReplayClassifierGeneration
+    });
+    wgpuPresentCompletionProbeStarted = false;
+    wgpuClassifierEfbReadbackPending = false;
+    wgpuClassifierBackbufferReadbackPending = false;
+    wgpuClassifierXfbReadbackPending = false;
+    wgpuInputBackbufferReadbackPending = false;
+    wgpuInputVisualBaselineReady = false;
+    wgpuLastBackbufferSourceTextureId = 0;
+    wgpuReplayClassifier.recordLoadBoundary(loadRingBoundary);
+    wgpuLoadFenceActive = wgpuLoadEpochFence &&
+      (loadRingBoundary.summary.openPassDepth > 0 || hasHeldReplay);
+    wgpuReplayClassifier.recordLoadFence({ armed: wgpuLoadFenceActive });
+  } else {
+    wgpuLoadFenceActive = wgpuLoadEpochFence &&
+      (loadRingBoundary?.summary?.openPassDepth > 0 || hasHeldReplay);
+  }
+  const beforeState = api?.getCoreStateName?.() ?? "";
+  api?.setWebGpuUploadArenaMiB?.(wgpuUploadArenaMiB, collectMetrics ? 1 : 0);
+  api?.setWebGpuProducerProfileEnabled?.(wgpuProducerProfileRequested ? 1 : 0);
+  api?.setWebGpuDrawProfileEnabled?.(wgpuDrawProfileRequested ? 1 : 0);
+  applyWgpuTailGate("save-state pre-load");
+  api?.setWebGpuUboCacheEnabled?.(webGpuUboCacheMode());
+  api?.setWebGpuUboPackEnabled?.(webGpuUboPackMode());
+  api?.setWebGpuGeometryPackEnabled?.(wgpuGeometryPackEnabled ? 1 : 0);
+  api?.setWebGpuGeometryRangeEnabled?.(wgpuGeometryRangeEnabled ? 1 : 0);
+  wgpuExactCapture.onLoad();
+  let rc = 0;
+  ppcWasmJitTimingSuspensions += 1;
+  try {
+    rc = api.loadStateFile(path) | 0;
+    if (rc === 1) void prioritizeAotAfterStateLoad();
+    // LoadAs runs on the autonomous CPU pthread (RunFrame doesn't
+    // step the core) — wait real wall-clock time so the restore
+    // actually takes effect before we sample/screenshot.
+    await new Promise((r) => setTimeout(r, 1200));
+  } finally {
+    resetPpcWasmJitTiming(rc === 1);
+    ppcWasmJitTimingSuspensions -= 1;
+  }
+  api?.setWebGpuUploadArenaMiB?.(wgpuUploadArenaMiB, collectMetrics ? 1 : 0);
+  api?.setWebGpuProducerProfileEnabled?.(wgpuProducerProfileRequested ? 1 : 0);
+  api?.setWebGpuDrawProfileEnabled?.(wgpuDrawProfileRequested ? 1 : 0);
+  applyWgpuTailGate("save-state reload");
+  api?.setWebGpuUboCacheEnabled?.(webGpuUboCacheMode());
+  api?.setWebGpuUboPackEnabled?.(webGpuUboPackMode());
+  api?.setWebGpuGeometryPackEnabled?.(wgpuGeometryPackEnabled ? 1 : 0);
+  api?.setWebGpuGeometryRangeEnabled?.(wgpuGeometryRangeEnabled ? 1 : 0);
+  api?.setSoftwareTevHotCaseMode?.(softwareTevHotCaseMode);
+  if (wgpuProducerProfileRequested || wgpuDrawProfileRequested) {
+    verifyWgpuProducerProfileActivation("save-state reload");
+  }
+  collectWebGpuProducerStateStats();
+  const uploadTimeoutCountImmediatelyAfterLoad = webGpuCausalStats.uploadTimeoutCount;
+  const uploadTimeoutBoundaryVerified = rc === 1 && collectMetrics;
+  if (uploadTimeoutBoundaryVerified) {
+    webGpuCausalStats.uploadTimeoutBoundaryVerified = true;
+    webGpuCausalStats.uploadTimeoutCountAtVerifiedLoad = uploadTimeoutCountBeforeLoad;
+    webGpuCausalStats.uploadTimeoutCountBeforeVerifiedLoad = uploadTimeoutCountBeforeLoad;
+    webGpuCausalStats.uploadTimeoutCountAfterVerifiedLoad = Math.max(
+      0,
+      uploadTimeoutCountImmediatelyAfterLoad - uploadTimeoutCountBeforeLoad
+    );
+  }
+  // The fixed battle state is the measurement boundary. Clear boot/menu
+  // tuples after the core's existing post-load settle, then let the
+  // harness's later first sample act as the battle-settle baseline.
+  if (rc === 1 && collectMetrics &&
+      rendererDiagnostics.configuredVideoBackend === "Software Renderer") {
+    api?.setSoftwareRasterProfileEnabled?.(0);
+    api?.setSoftwareRasterProfileEnabled?.(1);
+  }
+  const afterState = api?.getCoreStateName?.() ?? "";
+  // §27 diagnostic (JS-only, served live, no rebuild): open a
+  // post-load watchdog window so drainWebGpuCmdRing logs whether
+  // the producer ring keeps advancing (producer alive) vs the
+  // consumer going stale, to localize the savestate-load desync.
+  self._postLoadProbeT0 = Date.now();
+  self._postLoadProbeUntil = self._postLoadProbeT0 + 35000;
+  self._postLoadProbeLast = 0;
+  console.log(`[loadStateFile] path=${path} rc=${rc} ` +
+    `before='${beforeState}' after='${afterState}' ` +
+    `frame=${api?.getFrame?.() ?? -1}`);
+  return { loaded: rc === 1, rc, beforeState, afterState,
+           wgpuUploadTimeoutBoundary: {
+             enabled: collectMetrics,
+             verified: uploadTimeoutBoundaryVerified,
+             beforeLoad: uploadTimeoutCountBeforeLoad,
+             immediatelyAfterLoad: uploadTimeoutCountImmediatelyAfterLoad,
+             afterLoadDelta: Math.max(
+               0,
+               uploadTimeoutCountImmediatelyAfterLoad - uploadTimeoutCountBeforeLoad
+             ),
+           },
+           ...framePayload() };
 }
 
 async function handleMessage(type, payload) {
@@ -2282,143 +2446,8 @@ async function handleMessage(type, payload) {
     }
     case "rendererDiagnostics":
       return rendererDiagnosticsPayload();
-    case "loadStateFile": {
-      forceWgpuMappedDrainLifecycle(WGPU_MAPPED_DRAIN_FORCE_REASONS.LOAD);
-      wgpuSparseUbo?.reset("save-state-load");
-      if (wgpuUboComputeProjectionActive) {
-        wgpuUboComputeProjection.reset("save-state-load");
-      }
-      wgpuUboComputeReconstruction?.reset("save-state-load");
-      workletAudioProducer.transition();
-      // Write the .sav bytes into the Emscripten FS, then ask the core
-      // to State::LoadAs it. Dolphin save states are build/version
-      // locked — a state from a different Dolphin will be rejected by
-      // LoadAs's version check (logged, not a crash). We pump a few
-      // frames so the loaded state actually renders.
-      if (!api?.loadStateFile || !moduleInstance?.FS) {
-        return { loaded: false, error: "no loadStateFile/FS" };
-      }
-      // payload.fsPath: load an existing FS file in place (e.g. the
-      // one SaveStateFile just wrote) — proves a version-matched
-      // round-trip with zero serving. Else write payload.bytes first.
-      const path = payload.fsPath || "/savestate.sav";
-      if (!payload.fsPath) {
-        try {
-          const bytes = payload.bytes instanceof Uint8Array
-            ? payload.bytes
-            : new Uint8Array(payload.bytes);
-          moduleInstance.FS.writeFile(path, bytes);
-        } catch (e) {
-          return { loaded: false, error: `FS.writeFile: ${e?.message || e}` };
-        }
-      }
-      collectWebGpuProducerStateStats();
-      const uploadTimeoutCountBeforeLoad = webGpuCausalStats.uploadTimeoutCount;
-      const loadRingBoundary = (wgpuReplayClassifier || wgpuLoadEpochFence)
-        ? summarizeCurrentWgpuRing({ maxRecords: webGpuCmdRing?.capacity ?? 4096 })
-        : null;
-      const hasHeldReplay = webGpuCmdRing?.heldReplayStart != null ||
-        (webGpuCmdRing?.stagedUploads?.size ?? 0) > 0;
-      if (wgpuReplayClassifier) {
-        wgpuReplayClassifierGeneration += 1;
-        wgpuReplayClassifier = createWgpuReplayClassifier({
-          scope: "load-state-file",
-          generation: wgpuReplayClassifierGeneration
-        });
-        wgpuPresentCompletionProbeStarted = false;
-        wgpuClassifierEfbReadbackPending = false;
-        wgpuClassifierBackbufferReadbackPending = false;
-        wgpuClassifierXfbReadbackPending = false;
-        wgpuInputBackbufferReadbackPending = false;
-        wgpuInputVisualBaselineReady = false;
-        wgpuLastBackbufferSourceTextureId = 0;
-        wgpuReplayClassifier.recordLoadBoundary(loadRingBoundary);
-        wgpuLoadFenceActive = wgpuLoadEpochFence &&
-          (loadRingBoundary.summary.openPassDepth > 0 || hasHeldReplay);
-        wgpuReplayClassifier.recordLoadFence({ armed: wgpuLoadFenceActive });
-      } else {
-        wgpuLoadFenceActive = wgpuLoadEpochFence &&
-          (loadRingBoundary?.summary?.openPassDepth > 0 || hasHeldReplay);
-      }
-      const beforeState = api?.getCoreStateName?.() ?? "";
-      api?.setWebGpuUploadArenaMiB?.(wgpuUploadArenaMiB, collectMetrics ? 1 : 0);
-      api?.setWebGpuProducerProfileEnabled?.(wgpuProducerProfileRequested ? 1 : 0);
-      api?.setWebGpuDrawProfileEnabled?.(wgpuDrawProfileRequested ? 1 : 0);
-      applyWgpuTailGate("save-state pre-load");
-      api?.setWebGpuUboCacheEnabled?.(webGpuUboCacheMode());
-      api?.setWebGpuUboPackEnabled?.(webGpuUboPackMode());
-      api?.setWebGpuGeometryPackEnabled?.(wgpuGeometryPackEnabled ? 1 : 0);
-      api?.setWebGpuGeometryRangeEnabled?.(wgpuGeometryRangeEnabled ? 1 : 0);
-      wgpuExactCapture.onLoad();
-      let rc = 0;
-      ppcWasmJitTimingSuspensions += 1;
-      try {
-        rc = api.loadStateFile(path) | 0;
-        if (rc === 1) void prioritizeAotAfterStateLoad();
-        // LoadAs runs on the autonomous CPU pthread (RunFrame doesn't
-        // step the core) — wait real wall-clock time so the restore
-        // actually takes effect before we sample/screenshot.
-        await new Promise((r) => setTimeout(r, 1200));
-      } finally {
-        resetPpcWasmJitTiming(rc === 1);
-        ppcWasmJitTimingSuspensions -= 1;
-      }
-      api?.setWebGpuUploadArenaMiB?.(wgpuUploadArenaMiB, collectMetrics ? 1 : 0);
-      api?.setWebGpuProducerProfileEnabled?.(wgpuProducerProfileRequested ? 1 : 0);
-      api?.setWebGpuDrawProfileEnabled?.(wgpuDrawProfileRequested ? 1 : 0);
-      applyWgpuTailGate("save-state reload");
-      api?.setWebGpuUboCacheEnabled?.(webGpuUboCacheMode());
-      api?.setWebGpuUboPackEnabled?.(webGpuUboPackMode());
-      api?.setWebGpuGeometryPackEnabled?.(wgpuGeometryPackEnabled ? 1 : 0);
-      api?.setWebGpuGeometryRangeEnabled?.(wgpuGeometryRangeEnabled ? 1 : 0);
-      api?.setSoftwareTevHotCaseMode?.(softwareTevHotCaseMode);
-      if (wgpuProducerProfileRequested || wgpuDrawProfileRequested) {
-        verifyWgpuProducerProfileActivation("save-state reload");
-      }
-      collectWebGpuProducerStateStats();
-      const uploadTimeoutCountImmediatelyAfterLoad = webGpuCausalStats.uploadTimeoutCount;
-      const uploadTimeoutBoundaryVerified = rc === 1 && collectMetrics;
-      if (uploadTimeoutBoundaryVerified) {
-        webGpuCausalStats.uploadTimeoutBoundaryVerified = true;
-        webGpuCausalStats.uploadTimeoutCountAtVerifiedLoad = uploadTimeoutCountBeforeLoad;
-        webGpuCausalStats.uploadTimeoutCountBeforeVerifiedLoad = uploadTimeoutCountBeforeLoad;
-        webGpuCausalStats.uploadTimeoutCountAfterVerifiedLoad = Math.max(
-          0,
-          uploadTimeoutCountImmediatelyAfterLoad - uploadTimeoutCountBeforeLoad
-        );
-      }
-      // The fixed battle state is the measurement boundary. Clear boot/menu
-      // tuples after the core's existing post-load settle, then let the
-      // harness's later first sample act as the battle-settle baseline.
-      if (rc === 1 && collectMetrics &&
-          rendererDiagnostics.configuredVideoBackend === "Software Renderer") {
-        api?.setSoftwareRasterProfileEnabled?.(0);
-        api?.setSoftwareRasterProfileEnabled?.(1);
-      }
-      const afterState = api?.getCoreStateName?.() ?? "";
-      // §27 diagnostic (JS-only, served live, no rebuild): open a
-      // post-load watchdog window so drainWebGpuCmdRing logs whether
-      // the producer ring keeps advancing (producer alive) vs the
-      // consumer going stale, to localize the savestate-load desync.
-      self._postLoadProbeT0 = Date.now();
-      self._postLoadProbeUntil = self._postLoadProbeT0 + 35000;
-      self._postLoadProbeLast = 0;
-      console.log(`[loadStateFile] path=${path} rc=${rc} ` +
-        `before='${beforeState}' after='${afterState}' ` +
-        `frame=${api?.getFrame?.() ?? -1}`);
-      return { loaded: rc === 1, rc, beforeState, afterState,
-               wgpuUploadTimeoutBoundary: {
-                 enabled: collectMetrics,
-                 verified: uploadTimeoutBoundaryVerified,
-                 beforeLoad: uploadTimeoutCountBeforeLoad,
-                 immediatelyAfterLoad: uploadTimeoutCountImmediatelyAfterLoad,
-                 afterLoadDelta: Math.max(
-                   0,
-                   uploadTimeoutCountImmediatelyAfterLoad - uploadTimeoutCountBeforeLoad
-                 ),
-               },
-               ...framePayload() };
-    }
+    case "loadStateFile":
+      return loadStateFileRequest(payload);
     case "saveStateFile": {
       // SaveStateFile queues SaveToFileSync onto the autonomous Dolphin
       // CPU pthread (the discio worker's RunFrame does NOT step the
@@ -4037,6 +4066,7 @@ const coreLifecycle = createCoreLifecycle({
   },
   afterStop: async () => {
     coreBoot = { ...coreBoot, accepted: false };
+    coreBootGeneration += 1;
     // Shutting the memory card down flushes its GCI files; keep them.
     try {
       await flushUserData();
@@ -4628,6 +4658,7 @@ async function mountFile(file) {
     path,
     skippedReason: ""
   };
+  coreBootGeneration += 1;
   frameQueue = [];
   resetPresentationBuffer();
   lastCapturedCoreFrame = -1;

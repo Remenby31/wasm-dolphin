@@ -363,20 +363,12 @@ export async function waitRunning(page, timeoutMs = 60000) {
   throw new Error("core never reached Running");
 }
 
-// Load the savestate the session routes at /__harness_state.sav. VI outputs
-// start before the core leaves "Starting", and a load sent then is refused:
-// retry for up to `retrySec` while the core says Starting, or Uninitialized
-// (between the end of booting and the hardware's init, a load is refused too:
-// race-perf 2026-10-20 14:00 r5, "loaded":false at frame 82).
-export async function loadHarnessState(page, url, { retrySec = 60 } = {}) {
+// Load the savestate the session routes at /__harness_state.sav, once the
+// core booted. The worker itself waits for a core that takes a state
+// (Running or Paused, up to 15 s): no retry here.
+export async function loadHarnessState(page, url) {
   await waitRunning(page);
-  let loaded;
-  for (let tries = 0; tries < retrySec; tries += 1) {
-    loaded = await pageCall(page, "__loadStateFile", new URL("__harness_state.sav", url).href, 120000);
-    if (loaded?.loaded || !["Starting", "Uninitialized"].includes(loaded?.beforeState)) break;
-    await page.waitForTimeout(1000);
-  }
-  return loaded;
+  return pageCall(page, "__loadStateFile", new URL("__harness_state.sav", url).href, 120000);
 }
 
 // The XFB the core scanned out at VI output `index` (since boot, or since
