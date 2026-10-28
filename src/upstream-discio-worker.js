@@ -951,6 +951,10 @@ let lastCapturedCoreFrame = -1;
 // gives up when it changes (the state belongs to the session it was asked
 // for).
 let coreBootGeneration = 0;
+// Mounts (and boots) under way: from the request to the boot's answer,
+// across mountFile's awaits (user data, the first-launch plan). A state load
+// meanwhile waits for that boot instead of finding "no game booted".
+let coreBootInFlight = 0;
 let coreBoot = {
   attempted: false,
   accepted: false,
@@ -1628,9 +1632,18 @@ async function loadStateFileNow(payload) {
   // stopping, or another boot meanwhile: refused at once (the state
   // must not reach another session).
   if (api?.loadStateFile) {
-    const generation = coreBootGeneration;
-    const gone = () => (!coreBoot.accepted ? "no game booted" : coreStopping ? "core stopping"
-      : coreBootGeneration !== generation ? "another boot meanwhile" : null);
+    // The session the state is for: the game booted now, or, with none yet,
+    // the boot in flight (mountFile still running: waited for like
+    // Starting). Another boot starting while a booted game waits, a stop,
+    // or no boot at all: refused at once.
+    let generation = coreBoot.accepted && !coreBootInFlight ? coreBootGeneration : null;
+    const gone = () => {
+      if (coreStopping) return "core stopping";
+      if (coreBootInFlight) return generation === null ? null : "another boot meanwhile";
+      if (!coreBoot.accepted) return "no game booted";
+      generation ??= coreBootGeneration;
+      return coreBootGeneration !== generation ? "another boot meanwhile" : null;
+    };
     const wait = await waitCoreReadyForState(() => api?.getCoreStateName?.() ?? "", { abort: gone });
     if (!wait.ready) {
       const coreState = api?.getCoreStateName?.() ?? "";
@@ -1995,7 +2008,7 @@ async function handleMessage(type, payload) {
       // Before any boot: Dolphin opens the GCI folder when the card goes in.
       return { ...metadataPayload(), userData: await startUserDataPersistence(payload.savesMode) };
     case "mountFile":
-      return mountFile(payload.file);
+      return mountFileTracked(payload.file);
     case "flushUserData":
     case "listUserData":
     case "exportMemcard":
@@ -4554,6 +4567,15 @@ function mountedDiscNeeds() {
     return { boundingBox: false, known: false };
   }
   return { boundingBox: value === 1 };
+}
+
+async function mountFileTracked(file) {
+  coreBootInFlight += 1;
+  try {
+    return await mountFile(file);
+  } finally {
+    coreBootInFlight -= 1;
+  }
 }
 
 async function mountFile(file) {
