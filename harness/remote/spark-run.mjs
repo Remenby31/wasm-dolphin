@@ -442,7 +442,7 @@ export function queueRows(tickets, now = Date.now()) {
     const waited = Math.round((now - Date.parse(t.at)) / 60000);
     const state = t.lane && t.lane !== "none" ? `running in ${t.lane}` : t.holdUntil && Date.parse(t.holdUntil) > now ? "held (cores busy)" : "waiting";
     const starved = !t.lane && waited >= QUEUE_STARVED_MIN;
-    return `${starved ? "STARVED " : ""}${t.kind} ${t.name}${t.owner ? ` (${t.owner})` : ""} ${state}, ${waited} min since queued` + (t.lane ? `, ends in ~${t.endsIn} min` : `, starts in ~${t.startsIn} min`);
+    return `${starved ? "STARVED " : ""}${t.kind} ${t.name}${t.owner ? ` (${t.owner})` : ""} [wants ${t.lanes ?? "?"}] ${state}, ${waited} min since queued` + (t.lane ? `, ends in ~${t.endsIn} min` : `, starts in ~${t.startsIn} min`);
   });
 }
 

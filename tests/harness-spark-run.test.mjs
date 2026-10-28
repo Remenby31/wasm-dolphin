@@ -341,8 +341,8 @@ test("spark-run --queue: each ticket's wait and estimate, a waiting ticket past 
     { kind: "pair", name: "held", at: "2026-10-28T11:55:00Z", lane: null, holdUntil: "2026-10-28T12:01:00Z", startsIn: 20 }
   ], now);
   assert.deepEqual(rows, [
-    "pair x11-a (wt-x) running in a, 10 min since queued, ends in ~7 min",
-    "STARVED pair late (wt-y) waiting, 90 min since queued, starts in ~7 min",
-    "pair held held (cores busy), 5 min since queued, starts in ~20 min"
+    "pair x11-a (wt-x) [wants ?] running in a, 10 min since queued, ends in ~7 min",
+    "STARVED pair late (wt-y) [wants ?] waiting, 90 min since queued, starts in ~7 min",
+    "pair held [wants ?] held (cores busy), 5 min since queued, starts in ~20 min"
   ]);
 });
