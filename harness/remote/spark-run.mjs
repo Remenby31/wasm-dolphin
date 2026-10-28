@@ -10,7 +10,8 @@
 //   node harness/remote/spark-run.mjs --candidate <ref|dir> [--baseline <ref|dir>]
 //     --state <local .sav> [--name n] [--runs 6] [--lane auto|a|b] [--host spark] [--detach]
 //     [--keep-video] [--headed :2 [--xauth /run/salon-xorg/xauth] | --headless]
-//     [--probe race-perf | drop-meter | replay-gates]
+//     [--probe race-perf | drop-meter | replay-gates] [--noise <date>/<drop-meter A/A on the bench>]
+//     [--lane b --screen: a screening run beside lane a's pair, never a conclusion]
 //     [-- <the probe's options: --query, --warmup, --secs, --max-load, …>]
 //   node harness/remote/spark-run.mjs --multi --baseline <ref|dir> --candidate <ref|dir> [--candidate <ref|dir>]
 //     --state <local .sav> [--name n] [--runs 6] [--detach] [-- <race-multi options>]
@@ -222,6 +223,25 @@ export function headedEnv(display, xauth = BENCH_XAUTHORITY, { headless = false 
   if (display == null) return [];
   if (!/^:\d+$/.test(display)) throw new Error(`--headed ${display}: an X display as :N (the bench's bare Xorg is :2)`);
   return ["HARNESS_DISPLAY=x11", `DISPLAY=${sh(display)}`, `XAUTHORITY=${sh(xauth)}`];
+}
+
+// Lane b only for screening (--screen, 2026-10-28: the bench must never sit
+// idle): two pairs at once disturb each other (A/A of 2026-10-21: σ 1.86 pt),
+// so a lane b result is stamped as screening and never decides anything;
+// the decisive pairs stay one at a time in lane a.
+export function checkLane(lane, { screen = false } = {}) {
+  if (lane === "b" && !screen) throw new Error("--lane b: two pairs at once disturb each other on the Spark (A/A of 2026-10-21: σ 1.86 pt), pairs run one at a time in lane a (--screen for a screening run in lane b, never a conclusion)");
+  if (!["auto", "a", "b"].includes(lane)) throw new Error(`--lane ${lane}: a or auto (b with --screen)`);
+}
+export const SCREEN_NOTE = "screening in lane b, beside another pair: never a conclusion";
+
+// --noise <date>/<name>: drop-meter's A/A already on the bench, as that run's
+// summary there (a Mac path after -- would not exist on the bench).
+export function benchNoiseArgs(noise, resultsDir) {
+  if (noise == null) return [];
+  const [date, name, ...rest] = String(noise).split("/");
+  if (!/^\d{8}$/.test(date ?? "") || !name || rest.length) throw new Error(`--noise ${noise}: a bench run as <yyyymmdd>/<name>`);
+  return ["--noise", `${resultsDir}/${date}/${safeName(name)}/summary.json`];
 }
 
 // The Spark command that starts the pair detached and returns at once.
@@ -440,6 +460,7 @@ function fetchResult(host, { date, name, meta, exit }) {
     const summary = stampSummary(JSON.parse(readFileSync(summaryFile, "utf8")), bench);
     writeFileSync(summaryFile, JSON.stringify(summary, null, 1) + "\n");
     const c = summary.change;
+    if (bench.screen) console.log(`[spark-run] ${bench.screen}`);
     if (summary.probe === "race-multi") {
       const show = (e) => (e ? e.arms.map((x) => `arm ${x.arm} ${x.laneCorrected} %`).join(", ") : `withheld (${summary.withheld})`);
       console.log(`[spark-run] host instructions per guest cycle vs arm 0 (lower is better): ${show(summary.counterEffects)}; residual ${summary.counterEffects?.residualSd ?? "-"} %${summary.discarded?.length ? `; ${summary.discarded.length} run(s) discarded` : ""} -> ${local}`);
@@ -467,7 +488,7 @@ async function main() {
       "chrome-cpus": { type: "string" }, "node-cpus": { type: "string" }, "keep-video": { type: "boolean", default: false },
       headed: { type: "string" }, headless: { type: "boolean", default: false }, xauth: { type: "string", default: BENCH_XAUTHORITY },
       detach: { type: "boolean", default: false }, fetch: { type: "string" }, build: { type: "string" },
-      probe: { type: "string", default: "race-perf" }
+      probe: { type: "string", default: "race-perf" }, noise: { type: "string" }, screen: { type: "boolean", default: false }
     },
     allowPositionals: true
   });
@@ -491,13 +512,13 @@ async function main() {
   values.candidate = values.candidate[0];
   // drop-meter runs its full scenario from the boot without a savestate
   if (!values.candidate || (!values.state && values.probe !== "drop-meter")) throw new Error("usage: spark-run.mjs --candidate <ref|dir> [--baseline <ref|dir>] --state <local .sav> [--name n] [--runs 6] [--detach] [--probe race-perf|drop-meter|replay-gates] [-- probe options]");
-  for (const f of ["--iso", "--state", "--out", "--port", "--runs", "--candidate", "--baseline", "--core-candidate"]) {
+  for (const f of ["--iso", "--state", "--out", "--port", "--runs", "--candidate", "--baseline", "--core-candidate", "--noise"]) {
     if (positionals.includes(f)) throw new Error(`${f} is set by spark-run, not after --`);
   }
+  if (values.noise && values.probe !== "drop-meter") throw new Error("--noise: drop-meter's A/A, --probe drop-meter only");
   // the bench's lock is what keeps two pairs off one lane
   if (positionals.includes("--no-lock")) throw new Error("--no-lock: never on the bench (its perf lock keeps pairs apart)");
-  if (values.lane === "b") throw new Error("--lane b: two pairs at once disturb each other on the Spark (A/A of 2026-10-21: σ 1.86 pt), pairs run one at a time in lane a");
-  if (!["auto", "a"].includes(values.lane)) throw new Error(`--lane ${values.lane}: a or auto`);
+  checkLane(values.lane, { screen: values.screen });
   const { date, name } = runId(values);
   if (existsSync(path.join(MEASURES, date, name))) throw new Error(`${path.join(MEASURES, date, name)} exists: pick another --name`);
 
@@ -519,7 +540,7 @@ async function main() {
   const raceArgs = [
     "--iso", abs(iso), ...(state ? ["--state", abs(state)] : []), "--runs", values.runs,
     "--candidate", abs(candidate.dest), ...(baseline ? ["--baseline", abs(baseline.dest)] : []),
-    ...bench.args
+    ...benchNoiseArgs(values.noise, abs(`${BENCH}/results`)), ...bench.args
   ];
   const outDir = abs(`${BENCH}/results/${date}/${name}`);
   const meta = {
@@ -529,7 +550,7 @@ async function main() {
     harness: { from: REPO_ROOT, key: path.basename(harness.dest) },
     sides: { candidate, ...(baseline ? { baseline } : {}) },
     querySwaps: bench.swaps,
-    probe: values.probe,
+    probe: values.probe, ...(values.screen ? { screen: SCREEN_NOTE } : {}),
     headed: values.headed ?? null, headless: values.headless,
     raceArgs
   };
