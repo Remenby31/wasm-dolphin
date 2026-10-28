@@ -170,3 +170,71 @@ test("the worker's real path: the dol key read from the mounted file, kind \"dol
   assert.ok(translations >= 3, `the plan worker's plan reached the translator (${translations})`);
   worker.setAotFirstLaunchEnabledForTest(false);
 });
+
+// Review of #323: a remote disc (src/remote-disc.js) reaches the plan worker
+// as its descriptor. The fake worker clones what it is posted, as a real
+// one does: a Blob-like with functions would throw DataCloneError there.
+test("a remote .dol: the descriptor clones to the plan worker, which reads its ranges", async (t) => {
+  const workerUrl = new URL("../src/upstream-discio-worker.js", import.meta.url);
+  const originalSelf = globalThis.self;
+  const originalXhr = globalThis.XMLHttpRequest;
+  globalThis.self = { location: { href: "http://127.0.0.1:8080/" }, addEventListener() {}, postMessage() {} };
+  const { dol } = program();
+  const url = "http://127.0.0.1:8303/disc/p.dol";
+  let ranges = 0;
+  globalThis.XMLHttpRequest = class {
+    open(method, u) { assert.equal(u, url); }
+    setRequestHeader(k, v) { this.range = v; }
+    getResponseHeader(k) { return k === "Content-Range" ? this.contentRange : null; }
+    send() {
+      const [, a, b] = /bytes=(\d+)-(\d+)/.exec(this.range).map(Number);
+      ranges++;
+      this.status = 206;
+      this.contentRange = `bytes ${a}-${b}/${dol.length}`;
+      this.response = dol.slice(a, b + 1).buffer;
+    }
+  };
+  t.after(() => {
+    if (originalSelf === undefined) delete globalThis.self; else globalThis.self = originalSelf;
+    if (originalXhr === undefined) delete globalThis.XMLHttpRequest; else globalThis.XMLHttpRequest = originalXhr;
+  });
+  const worker = await import(`${workerUrl.href}?aot-remote-dol=${Date.now()}`);
+  const { installAotPlannerWorker } = await import("../src/aot-plan-worker.js");
+  const received = [];
+  const createWorker = () => {
+    const w = { onmessage: null, onerror: null, terminate() {} };
+    const scope = { onmessage: null, postMessage: (data) => queueMicrotask(() => w.onmessage?.({ data })) };
+    installAotPlannerWorker(scope);
+    w.postMessage = (data) => { const copy = structuredClone(data); received.push(copy); queueMicrotask(() => scope.onmessage({ data: copy })); };
+    return w;
+  };
+  const heap = new Uint8Array(1 << 16);
+  let top = 1024, translations = 0;
+  const names = new Map();
+  const str = (text) => {
+    if (!names.has(text)) { heap.set(new TextEncoder().encode(`${text}\0`), top); names.set(text, top); top += (text.length + 8) & ~7; }
+    return names.get(text);
+  };
+  const core = {
+    HEAPU8: heap,
+    _malloc: (n) => { const p = top; top += (n + 7) & ~7; return p; },
+    _free: () => {},
+    UTF8ToString: (p) => new TextDecoder().decode(heap.subarray(p, heap.indexOf(0, p))),
+    _DolphinWeb_AotKeyParts: (p) => new Uint32Array(heap.buffer, p, 2).set([7, 0]),
+    _DolphinWeb_JitHelperName: (i) => (i === 0 ? str("read_u32") : 0),
+    _DolphinWeb_JitHelperSignature: (i) => (i === 0 ? str("i32,i32>i32") : 0),
+    _DolphinWeb_JitStateLayout: (p) => new Uint32Array(heap.buffer, p, 4).set([0, 4, 8, 1]),
+    _DolphinWeb_AotTranslate() { translations++; return 0; }
+  };
+  const desc = { remoteDisc: url, name: "p.dol", size: dol.length };
+  worker.setAotFirstLaunchEnabledForTest(true);
+  worker.setAotPlannerWorkerForTest(createWorker);
+  t.after(() => { worker.setAotPlannerWorkerForTest(null); worker.setAotFirstLaunchEnabledForTest(false); });
+  worker.setAotMountedFileForTest(desc, "dol");
+  await worker.prepareAotFirstLaunch(desc, { kind: "dol", module: core, coreHash: CORE, cacheStorage: fakeCacheStorage(), storageRoot: () => null });
+  assert.equal((await worker.handleAotMessage("validationReadAotProgress")).disc, await canonicalDolKey(dol), "the key read by ranges");
+  await worker.startAotFirstLaunchAfterBoot();
+  assert.equal(received.length, 1);
+  assert.deepEqual(received[0].file, desc, "the plan worker got the descriptor");
+  assert.ok(ranges > 0 && translations >= 3, `${ranges} ranges read, ${translations} translations`);
+});

@@ -311,3 +311,19 @@ test("the worklet latency adds the mixer's queue when the core reports it", asyn
   assert.equal(audio.causalTelemetry().mixerQueueMs, 80);
   assert.equal(audio.causalTelemetry().latencyMs, 133, "80 ms mixer + 40 ms ring + 13 ms output");
 });
+
+// Review of #327: the mixer's queue the core booted with is reported next to
+// the transport and its fallback reason.
+test("telemetry reports the mixer queue next to the fallback reason", async () => {
+  installBrowser({ isolated: false });
+  const { AudioController } = await import(`../src/audio.js?mixerbuf=${Date.now()}`);
+  const audio = new AudioController();
+  assert.equal(audio.causalTelemetry().mixerBufferMs, null, "not told");
+  audio.setTransportBridge(async () => true);
+  audio.mixerBufferMs = 80;
+  await audio.ensureContext();
+  const t = audio.causalTelemetry();
+  assert.equal(t.activeTransport, "legacy");
+  assert.equal(t.transportFallbackReason, "cross-origin-isolation-required");
+  assert.equal(t.mixerBufferMs, 80);
+});
