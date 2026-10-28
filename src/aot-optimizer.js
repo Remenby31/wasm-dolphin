@@ -103,6 +103,9 @@ export class AotOptimizer extends EventTarget {
     this.cursor = 0;
     this.priority = null; // { score: Map<unit, hits> } a run not yet started applies
     this.finished = false; // the last run went through its work (hasWork)
+    // diagnostics: the run's translation waiting on the previous module's
+    // finishing (compile, cache write), and those steps' own times
+    this.pipelineStats = { finishWaitMs: 0, compileMs: 0, compiles: 0, putMs: 0 };
   }
 
   // A save state just loaded: the guest now runs code the plan's order may
@@ -501,7 +504,10 @@ export class AotOptimizer extends EventTarget {
           if (bytes && this.compile) {
             let out;
             try {
+              const c0 = performance.now();
               out = await this.compile(unit.key, bytes);
+              this.pipelineStats.compileMs += performance.now() - c0;
+              this.pipelineStats.compiles++;
             } catch (error) {
               out = { reason: String(error?.message || error) };
             }
@@ -526,7 +532,9 @@ export class AotOptimizer extends EventTarget {
             // Installed as soon as it compiled, before the cache write: the
             // session runs it even if the write then fails (quota).
             this.install?.(region);
+            const p0 = performance.now();
             const stored = await session.put([{ key: unit.key, bytes, meta: { members: unit.members.length, translated: result.fragments.length, entries, ranges } }]);
+            this.pipelineStats.putMs += performance.now() - p0;
             if (this.cancelled) return; // the cache refused the write as cancelled: no verdict
             const reason = stored.failed?.[0]?.reason ?? null;
             if (reason === "quota") wait = "quota";
@@ -567,7 +575,9 @@ export class AotOptimizer extends EventTarget {
           this.cursor = n + 1;
           this.stale.delete(unit.key);
           const result = await this.translateUnit(unit);
+          const w0 = performance.now();
           await finishing;
+          this.pipelineStats.finishWaitMs += performance.now() - w0;
           if (!result || this.cancelled) break;
           if (result.notReady) {
             this.emit("optimization-error", { message: "the core is not ready to translate; resumed at the next launch", fatal: false });

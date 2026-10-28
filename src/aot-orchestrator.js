@@ -287,7 +287,7 @@ export function createAotFirstLaunch({
       const out = { schema: AOT_PROGRESS_SCHEMA, state: running ? "running" : lastState, disc: discKey, run, events: events.slice(),
         // diagnostics: the translator's time, and the share of the PCs
         // sampled since a state load that no planned region covers
-        translator: translator?.stats?.() ?? null, coverage: optimizer?.priorityCoverage ?? null };
+        translator: translator?.stats?.() ?? null, coverage: optimizer?.priorityCoverage ?? null, pipeline: optimizer?.pipelineStats ?? null };
       if (drain) events = [];
       return out;
     },
