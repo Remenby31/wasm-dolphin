@@ -65,8 +65,8 @@ test("remote disc: only this machine's server, unless the harness hooks are on",
 
 test("remote disc: the worker mounts with the harness's host rule and hands the plan worker the descriptor, not its Blob-like", () => {
   const worker = readFileSync(new URL("../src/upstream-discio-worker.js", import.meta.url), "utf8");
-  assert.match(worker, /const file = asDiscBlob\(mounted_, \{ anyHost: harnessEnabled \}\);/);
-  assert.match(worker, /await prepareAotFirstLaunch\(mounted_, \{ kind: aotKind \}\);/);
+  assert.match(worker, /const mountedDescriptor = file;\n  file = asDiscBlob\(file, \{ anyHost: harnessEnabled \}\);/);
+  assert.match(worker, /await prepareAotFirstLaunch\(mountedDescriptor, \{ kind: aotKind \}\);/);
   // The Blob-like does not clone: posting it to the plan worker would fail.
   assert.throws(() => structuredClone(asDiscBlob(desc, { request: rangeServer().request })), /DataCloneError|could not be cloned/);
   assert.deepEqual(structuredClone(desc), desc);
