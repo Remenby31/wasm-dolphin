@@ -31,16 +31,30 @@ export function coreReadyForState(name) {
   return name === CORE_STATES.running || name === CORE_STATES.paused;
 }
 
-// Wait, without blocking the worker, until coreReadyForState (true), the
-// core stops ("Stopping": false at once) or timeoutMs passes (false).
-export async function waitCoreReadyForState(stateName, { timeoutMs = 15_000, pollMs = 20, sleep = defaultSleep, now = () => performance.now() } = {}) {
+// Wait, without blocking the worker, until coreReadyForState. Resolves
+// { ready: true, reason: "ready" }, or { ready: false } with reason
+// "refused" at once (the core "Stopping", or abort() giving a reason, then
+// in detail), or "expired" after timeoutMs.
+export async function waitCoreReadyForState(stateName, { timeoutMs = 15_000, pollMs = 20, abort = () => null, sleep = defaultSleep, now = () => performance.now() } = {}) {
   const end = now() + timeoutMs;
   for (;;) {
     const name = stateName();
-    if (coreReadyForState(name)) return true;
-    if (name === CORE_STATES.stopping || now() >= end) return false;
+    const gone = abort() || (name === CORE_STATES.stopping ? "core stopping" : null);
+    if (gone) return { ready: false, reason: "refused", detail: gone };
+    if (coreReadyForState(name)) return { ready: true, reason: "ready" };
+    if (now() >= end) return { ready: false, reason: "expired" };
     await sleep(pollMs);
   }
+}
+
+// One job at a time, in order; a failed job does not stop the next.
+export function createSerial() {
+  let chain = Promise.resolve();
+  return (job) => {
+    const run = chain.then(job);
+    chain = run.catch(() => {});
+    return run;
+  };
 }
 
 export function createCoreLifecycle({

@@ -119,28 +119,56 @@ test("a full quota while saving never keeps the core from stopping", async () =>
 // A save state loads only once Core's s_state is Running (the shim's
 // LoadStateFile answers 0 before): the worker waits for it instead of every
 // caller retrying.
-test("waitCoreReadyForState: Running or Paused loads; Uninitialized/Starting wait; Stopping or the limit refuse", async () => {
+test("waitCoreReadyForState: Running or Paused loads; Uninitialized/Starting wait; Stopping or an abort refuse at once; the limit expires", async () => {
   const { coreReadyForState, waitCoreReadyForState } = await import("../src/core-lifecycle.js");
   assert.deepEqual(["Running", "Paused", "Starting", "Uninitialized", "Stopping", ""].map(coreReadyForState), [true, true, false, false, false, false]);
   let t = 0;
   const clock = { now: () => t, sleep: async (ms) => { t += ms; } };
   const seq = ["Uninitialized", "Uninitialized", "Starting", "Running"];
   let i = 0;
-  assert.equal(await waitCoreReadyForState(() => seq[Math.min(i++, seq.length - 1)], { ...clock, pollMs: 20 }), true);
+  assert.deepEqual(await waitCoreReadyForState(() => seq[Math.min(i++, seq.length - 1)], { ...clock, pollMs: 20 }), { ready: true, reason: "ready" });
   assert.equal(t, 60);
   t = 0;
-  assert.equal(await waitCoreReadyForState(() => "Starting", { ...clock, timeoutMs: 15_000, pollMs: 20 }), false);
+  assert.deepEqual(await waitCoreReadyForState(() => "Starting", { ...clock, timeoutMs: 15_000, pollMs: 20 }), { ready: false, reason: "expired" });
   assert.ok(t >= 15_000 && t < 15_100);
   t = 0;
-  assert.equal(await waitCoreReadyForState(() => "Stopping", clock), false);
+  assert.deepEqual(await waitCoreReadyForState(() => "Stopping", clock), { ready: false, reason: "refused", detail: "core stopping" });
   assert.equal(t, 0);
+  // No game booted, or another boot meanwhile: refused at once, even with a
+  // core that would say Running.
+  assert.deepEqual(await waitCoreReadyForState(() => "Uninitialized", { ...clock, abort: () => "no game booted" }), { ready: false, reason: "refused", detail: "no game booted" });
+  let generation = 1;
+  const waited = waitCoreReadyForState(() => "Starting", { ...clock, abort: () => (generation !== 1 ? "another boot meanwhile" : null) });
+  generation = 2;
+  assert.deepEqual(await waited, { ready: false, reason: "refused", detail: "another boot meanwhile" });
+  assert.equal(t, 20, "gave up at the next poll");
+});
+
+// Two loads at once would both write the state file: one at a time.
+test("createSerial runs its jobs one at a time, in order, a failure not blocking the next", async () => {
+  const { createSerial } = await import("../src/core-lifecycle.js");
+  const serial = createSerial();
+  const log = [];
+  let release;
+  const first = serial(async () => { log.push("first start"); await new Promise((r) => { release = r; }); log.push("first end"); return 1; });
+  const second = serial(async () => { log.push("second start"); throw new Error("x"); });
+  const third = serial(async () => { log.push("third"); return 3; });
+  await new Promise((r) => setTimeout(r, 5));
+  assert.deepEqual(log, ["first start"]);
+  release();
+  assert.equal(await first, 1);
+  await assert.rejects(second, /x/);
+  assert.equal(await third, 3);
+  assert.deepEqual(log, ["first start", "first end", "second start", "third"]);
 });
 
 test("the worker waits for a core that takes the state before loading it, and refuses in words", async () => {
   const worker = await readFile(new URL("../src/upstream-discio-worker.js", import.meta.url), "utf8");
-  const load = worker.slice(worker.indexOf('case "loadStateFile": {'), worker.indexOf('case "saveStateFile"'));
+  const load = worker.slice(worker.indexOf("async function loadStateFileNow("), worker.indexOf("async function handleMessage("));
   assert.ok(load.indexOf("await waitCoreReadyForState(") >= 0 && load.indexOf("await waitCoreReadyForState(") < load.indexOf("api.loadStateFile(path)"));
-  assert.match(load, /error: `core not running \(\$\{coreState \|\| "unknown"\}\) after 15 s`/);
+  assert.match(load, /error: wait\.reason === "expired" \? `core not running \(\$\{coreState \|\| "unknown"\}\) after 15 s`/);
+  assert.match(load, /const gone = \(\) => \(!coreBoot\.accepted \? "no game booted" : coreStopping \? "core stopping"/);
+  assert.match(worker, /case "loadStateFile":\n\s+return loadStateFileRequest\(payload\);/);
   const browser = await readFile(new URL("../harness/lib/browser.mjs", import.meta.url), "utf8");
   assert.doesNotMatch(browser, /retrySec/);
 });
