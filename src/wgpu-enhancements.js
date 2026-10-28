@@ -89,13 +89,14 @@ export function anisotropyFromCore(mode) {
   return Number.isInteger(mode) && mode >= 0 && mode <= 4 ? ANISOTROPY_LEVELS[mode] : 0;
 }
 
-// ?ir=2&aniso=16. A missing or invalid value keeps the default (native, the
-// game's anisotropy).
+// ?ir=2&aniso=16&widescreen=1. A missing or invalid value keeps the default
+// (native, the game's anisotropy, 4:3).
 export function requestedEnhancements(search) {
   const params = new URLSearchParams(search || "");
   return {
     internalResolution: normalizeInternalResolution(params.get("ir") ?? 1),
     maxAnisotropy: anisotropyToCore(params.get("aniso")),
+    widescreen: params.get("widescreen") === "1",
   };
 }
 

@@ -1,19 +1,19 @@
 {
   "schemaVersion": 1,
   "abiVersion": 1,
-  "coreId": "sha256:6ee9954e7e019cd632b762cc65bf860fab4ba3eb94ce89820696f84fef6883c1",
+  "coreId": "sha256:d04124707e3fc66db06ffb19e5e374e4b82f9c0bc95228fa0da54ea65088f921",
   "upstreamCommit": "e22551eae1c84a7e4d0b6a5c519ef4ed4ef69df1",
   "artifacts": [
     {
       "path": "cores/dolphin/dolphin-core-upstream.js",
       "hashMode": "lf-normalized",
-      "size": 288627,
-      "sha256": "b10d9feacd4ebc282704e90f0497651d7e1232f8d9230768ca7246d4ed89180e"
+      "size": 288742,
+      "sha256": "f30eed3cc7c37b4c3d26746eab3409692030e491a475b5121dbbe4df3f39c23b"
     },
     {
       "path": "cores/dolphin/dolphin-core-upstream.wasm",
-      "size": 13227582,
-      "sha256": "6ee9954e7e019cd632b762cc65bf860fab4ba3eb94ce89820696f84fef6883c1"
+      "size": 13228014,
+      "sha256": "d04124707e3fc66db06ffb19e5e374e4b82f9c0bc95228fa0da54ea65088f921"
     }
   ],
   "contractSources": [
@@ -44,14 +44,14 @@
     {
       "path": "core/upstream/dolphin_web_core.cpp",
       "hashMode": "lf-normalized",
-      "size": 65912,
-      "sha256": "954f0a84b1dadec378216d671e29b4d0251d1f73780b6d03fa94e5d4bf2b8c8d"
+      "size": 67201,
+      "sha256": "78fda932cb108dc3ff0ed1be94922d36ff419275248986a177b6ae880d56a4b9"
     },
     {
       "path": "src/app.js",
       "hashMode": "lf-normalized",
-      "size": 50973,
-      "sha256": "c66b7a3e5da52c234396200460b2fc1d935f00d41b426ffc026e18d3d1f4da0e"
+      "size": 51313,
+      "sha256": "3fb89354ebfeb8af402d76f4f48fc721824d9cd3142eb9ee04735e25627b4563"
     },
     {
       "path": "src/audio.js",
@@ -86,8 +86,8 @@
     {
       "path": "src/core-host.js",
       "hashMode": "lf-normalized",
-      "size": 88595,
-      "sha256": "669c9b1dbd85ac2bbfc092b59f608cc59c7a7f7ad75b7563ff1e3c1cfad6a886"
+      "size": 95436,
+      "sha256": "14ef8e8bc20457aa058762fe5f315610b5ea60dd0762eb51e148301fc047c4bc"
     },
     {
       "path": "src/diagnostic-log-filter.js",
@@ -140,8 +140,8 @@
     {
       "path": "src/upstream-discio-worker.js",
       "hashMode": "lf-normalized",
-      "size": 797848,
-      "sha256": "a1a37b2bf855f10ce2b8fb52983f04dd8cf2217e5190795de863ef11eae80bb3"
+      "size": 804532,
+      "sha256": "01f20a1f99502fd54663dc9440b8457f84753031d86db0c326d2d3b77e7c226e"
     },
     {
       "path": "src/wgpu-renderer-worker-probe.js",
@@ -164,8 +164,8 @@
     {
       "path": "src/upstream-worker-adapter.js",
       "hashMode": "lf-normalized",
-      "size": 59099,
-      "sha256": "894c66cd7cc6f7c198dc37889181f761474fa8235b79622cfe7dd1cce3ca54e2"
+      "size": 60534,
+      "sha256": "05fe64917993eb237ddb42f54d8bdac27aa15852313cb8e8107cdbfa965728ba"
     },
     {
       "path": "src/upstream-worker-protocol.js",
@@ -493,6 +493,7 @@
     "_DolphinWeb_RegionCallStats",
     "_DolphinWeb_RegionChainHelper",
     "_DolphinWeb_RegionGuardRefusals",
+    "_DolphinWeb_SetAudioBufferMs",
     "_DolphinWeb_SetCodeSpaceMiB",
     "_DolphinWeb_SetDiscReadStatsEnabled",
     "_DolphinWeb_SetDstAlphaTwoPass",
@@ -694,6 +695,7 @@
       "saveState",
       "saveStateFile",
       "setAudioMuted",
+      "setDisplayFilter",
       "setEnhancements",
       "setInputMask",
       "setInputState",
