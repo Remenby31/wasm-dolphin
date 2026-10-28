@@ -685,6 +685,21 @@ static int ApplyEnhancements(int efb_scale, int anisotropy)
   return scale;
 }
 
+// Patch 0178. Widescreen: Dolphin's generic widescreen hack (the 3D
+// projection widened to the backbuffer's aspect, no per-game code);
+// WebGPUGfx makes the backbuffer 16:9 and tells the page. The aspect stays
+// Stretch: the picture fills the backbuffer, and the hack widens the view to
+// it. ForceWide would draw the analog 16:9 width (~38 px of black on each
+// side of 854). WebGPU only (the software renderer ignores the hack's
+// projection). Base layer, applied by the video thread at its next frame.
+// Returns 1 when on.
+static int ApplyWidescreen(int on)
+{
+  const bool wide = s_video_backend == "WebGPU" && on == 1;
+  Config::SetBase(Config::GFX_WIDESCREEN_HACK, wide);
+  return wide ? 1 : 0;
+}
+
 void EnsureRuntime()
 {
   if (s_runtime_initialized)
@@ -888,6 +903,9 @@ void EnsureRuntime()
   // default analog aspect pillarboxes a 640-wide XFB to ~583 pixels, so the
   // hardware path showed every game narrower than the software one.
   Config::SetBase(Config::GFX_ASPECT_RATIO, AspectMode::Stretch);
+  // ?widescreen=1 (Module['dolphinWidescreen'], patch 0178): 16:9 instead.
+  ApplyWidescreen(EM_ASM_INT({ return (typeof Module !== 'undefined' &&
+                                       Module['dolphinWidescreen']) ? 1 : 0; }));
   // §28cx: ubershaders DISCRIMINATOR (May-30). The UBO const-index fix made the
   // uber pixel shaders translate (fail 27->0) and 7195 draws execute, but the EFB
   // is still all-zero (nz=0/max=0) => draws write nothing. Flip WebGPU back to
@@ -1300,6 +1318,21 @@ int DolphinWeb_SetAudioBufferMs(int ms)
   return 1;
 }
 
+// 0186: what the mixer holds ahead of MixAudio, in ms (the longer of its DMA
+// and streaming granule queues); -1 before the boot or without a mixer.
+// Read-only: the page adds it to the audio latency it reports.
+#ifdef __EMSCRIPTEN__
+EMSCRIPTEN_KEEPALIVE
+#endif
+double DolphinWeb_AudioQueuedMs()
+{
+  if (!s_runtime_initialized)
+    return -1;
+  const SoundStream* sound_stream = Core::System::GetInstance().GetSoundStream();
+  const Mixer* mixer = sound_stream ? sound_stream->GetMixer() : nullptr;
+  return mixer ? static_cast<double>(mixer->GetQueuedMicroseconds()) / 1000.0 : -1;
+}
+
 int SetFastSoftwareRaster(int mode)
 {
   DolphinWeb_SetFastSoftwareRaster(mode < 0 ? 0 : mode > 3 ? 3 : mode);
@@ -1418,6 +1451,19 @@ int DolphinWeb_SetEnhancements(int efb_scale, int anisotropy)
   if (!s_runtime_initialized)
     return 0;
   return ApplyEnhancements(efb_scale, anisotropy);
+}
+
+// Widescreen on (1) or off (0) while a game runs (patch 0178). Returns 1
+// when on, 0 when off, -1 before the runtime exists (nothing applied: the
+// boot reads Module's field).
+#ifdef __EMSCRIPTEN__
+EMSCRIPTEN_KEEPALIVE
+#endif
+int DolphinWeb_SetWidescreen(int on)
+{
+  if (!s_runtime_initialized)
+    return -1;
+  return ApplyWidescreen(on);
 }
 
 // Heap use, for diagnostics only (the headroom at 4x, follow-up of 0168):

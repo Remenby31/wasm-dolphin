@@ -2,14 +2,14 @@
 // SPDX-License-Identifier: MIT
 
 import assert from "node:assert/strict";
-import { spawnSync } from "node:child_process";
+import { execFileSync, spawnSync } from "node:child_process";
 import { copyFileSync, mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import os from "node:os";
 import path from "node:path";
 import test from "node:test";
 
 import { claim, deletable, OWNER_FILE, release } from "../harness/lib/ownership.mjs";
-import { ensureServer, snapshotTree } from "../harness/lib/server.mjs";
+import { ensureServer, portListeners, snapshotTree } from "../harness/lib/server.mjs";
 
 const REPO = path.resolve(import.meta.dirname, "..");
 
@@ -40,7 +40,7 @@ test("round 3: the server serves its start snapshot, whatever happens to the fil
   assert.equal(body, "export const v = 1;\n");
   assert.notEqual((await snapshotTree(root)).hash, server.identity.snapshot);
   assert.equal((await fetch(`${server.base}tools/serve.mjs`)).status, 404); // allowlist kept
-  await assert.rejects(() => ensureServer({ port, root }), /busy; the harness never shares/);
+  await assert.rejects(() => ensureServer({ port, root }), /busy: .*; the harness never shares/);
 });
 
 // Review round 3: an ignored file (prebuilt-jit-cache.bin) was outside the
@@ -87,4 +87,94 @@ test("the harness only launches headless Chrome, never full screen or in front",
   // No keychain dialog (Chrome for Testing shows one even headless without these).
   assert.ok(o.args.includes("--use-mock-keychain"));
   assert.ok(o.args.includes("--password-store=basic"));
+});
+
+test("HARNESS_VIEWPORT: a larger page for the display filter's upscale, else 1280x800", async () => {
+  const { harnessViewport } = await import("../harness/lib/browser.mjs");
+  assert.deepEqual(harnessViewport(undefined), { width: 1280, height: 800 });
+  assert.deepEqual(harnessViewport("2560x1600"), { width: 2560, height: 1600 });
+  assert.deepEqual(harnessViewport("99999x10"), { width: 1280, height: 800 });
+  assert.deepEqual(harnessViewport("big"), { width: 1280, height: 800 });
+});
+
+test("feature flags: every --enable-features / --disable-features merged into one (Chrome keeps only the last)", async () => {
+  const { mergeFeatureFlags } = await import("../harness/lib/browser.mjs");
+  assert.deepEqual(
+    mergeFeatureFlags(["--a", "--enable-features=Vulkan", "--disable-features=X", "--b", "--enable-features=Foo,Vulkan", "--disable-features=Y"]),
+    ["--a", "--enable-features=Vulkan,Foo", "--disable-features=X,Y", "--b"]
+  );
+  assert.deepEqual(mergeFeatureFlags(["--no-first-run"]), ["--no-first-run"]);
+});
+
+test("feature flags: Playwright's own lists are kept, merged into ours, its flags ignored", async () => {
+  const { playwrightFeatureArgs, withPlaywrightFeatures, X11_ARGS } = await import("../harness/lib/browser.mjs");
+  const defaults = ["--disable-features=PaintHolding,ThirdPartyStoragePartitioning,PlzDedicatedWorker", "--enable-features=CDPScreenshotNewSurface"];
+  const x = withPlaywrightFeatures(["--no-first-run", ...X11_ARGS, "--enable-features=Foo"], defaults);
+  assert.deepEqual(x.ignoreDefaultArgs, defaults);
+  assert.equal(x.args.filter((a) => a.startsWith("--disable-features=")).length, 1);
+  assert.ok(x.args.includes("--disable-features=PaintHolding,ThirdPartyStoragePartitioning,PlzDedicatedWorker,ThrottleRepeatedNoDamageFrames"), x.args.join(" "));
+  assert.ok(x.args.includes("--enable-features=CDPScreenshotNewSurface,Vulkan,Foo"), x.args.join(" "));
+  // No feature flag of ours: Playwright's go as they are.
+  assert.deepEqual(withPlaywrightFeatures(["--no-first-run"], defaults), { args: ["--no-first-run"], ignoreDefaultArgs: undefined });
+  // Unreadable (Windows): ours, merged among themselves.
+  assert.deepEqual(withPlaywrightFeatures(["--enable-features=A", "--enable-features=B"], null).args, ["--enable-features=A,B"]);
+  // Read from a stand-in executable: what Playwright would pass, nothing started.
+  const launches = [];
+  const chromium = { launch: async (o) => { launches.push(o); execFileSync(o.executablePath, ["--no-sandbox", ...defaults, "--user-data-dir=/x"]); throw new Error("closed"); } };
+  if (process.platform !== "win32") {
+    assert.deepEqual(await playwrightFeatureArgs(chromium, { headless: true }), defaults);
+    assert.deepEqual(await playwrightFeatureArgs(chromium, { headless: true }), defaults, "once per mode");
+    assert.equal(launches.length, 1);
+    assert.equal(launches[0].headless, true);
+  }
+  assert.equal(await playwrightFeatureArgs(chromium, { headless: false, platform: "win32" }), null);
+});
+
+// The Spark's bare Xorg (spark-run --headed): shown, but never on a Mac.
+test("x11 display mode: Linux with DISPLAY only, refused on macOS whatever the environment; headless by default", async () => {
+  const { chromeLaunchOptions, defaultDisplay } = await import("../harness/lib/browser.mjs");
+  assert.equal(defaultDisplay({}), "headless");
+  assert.equal(defaultDisplay({ HARNESS_DISPLAY: "x11" }), "x11");
+  const env = { DISPLAY: ":2" };
+  assert.throws(() => chromeLaunchOptions("x11", { platform: "darwin", env }), /Linux only/);
+  assert.throws(() => chromeLaunchOptions("x11", { platform: "win32", env }), /Linux only/);
+  assert.throws(() => chromeLaunchOptions("x11", { platform: "linux", env: {} }), /DISPLAY is not set/);
+  const x = chromeLaunchOptions("x11", { platform: "linux", env });
+  assert.equal(x.headless, false);
+  assert.equal(x.viewport, null, "the window's own size on a real screen");
+  for (const a of ["--enable-features=Vulkan", "--use-angle=vulkan", "--disable-features=ThrottleRepeatedNoDamageFrames", "--window-position=0,0", "--window-size=1920,1080"]) assert.ok(x.args.includes(a), a);
+  // a synthetic 60 Hz BeginFrame source with it, not the panel's 120 Hz
+  assert.ok(!x.args.includes("--disable-vulkan-surface"));
+  // the headless options are untouched by the mode
+  const h = chromeLaunchOptions("headless", { platform: "linux", env });
+  assert.equal(h.headless, true);
+  assert.deepEqual(h.viewport, { width: 1280, height: 800 });
+  assert.equal(h.args.some((a) => /vulkan|window-/i.test(a)), false);
+});
+
+// 2026-10-28: two agents' servers on one port. Binding 127.0.0.1 missed a
+// server on the wildcard address; lsof is asked first, and the error names
+// the holder.
+test("a port held on any address is refused before listening, the holder named", async (t) => {
+  const root = tree(t);
+  const fake = () => [{ pid: 4242, command: "node", name: "*:18999" }];
+  await assert.rejects(() => ensureServer({ port: 18999, root, listeners: fake }), /port 18999 is busy: node \(pid 4242\) on \*:18999; the harness never shares/);
+  // lsof's -F output, parsed; nothing listening is [], lsof absent is null
+  const out = "p123\ncvite\nf20\nn[::1]:5173\np456\ncnode\nf21\nn*:5173\n";
+  assert.deepEqual(portListeners(5173, () => out), [{ pid: 123, command: "vite", name: "[::1]:5173" }, { pid: 456, command: "node", name: "*:5173" }]);
+  assert.deepEqual(portListeners(5173, () => { const e = new Error("none"); e.status = 1; throw e; }), []);
+  assert.equal(portListeners(5173, () => { const e = new Error("spawn lsof ENOENT"); e.code = "ENOENT"; throw e; }), null);
+});
+
+test("a real server on the wildcard address blocks the harness's 127.0.0.1 server", async (t) => {
+  if (portListeners(1) === null) return t.skip("lsof unavailable");
+  const root = tree(t);
+  const port = 19000 + (process.pid % 1000);
+  const { createServer } = await import("node:http");
+  const other = createServer((_, res) => res.end("other"));
+  await new Promise((resolve) => other.listen(port, "0.0.0.0", resolve));
+  t.after(() => other.close());
+  // the holder is this process: its pid (lsof's command name is the
+  // thread's on Linux, "MainThread", and "node" on macOS)
+  await assert.rejects(() => ensureServer({ port, root }), new RegExp(`port ${port} is busy: \\S+ \\(pid ${process.pid}\\) on \\*:${port};`));
 });

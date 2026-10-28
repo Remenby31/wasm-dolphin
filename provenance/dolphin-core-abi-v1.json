@@ -1,19 +1,19 @@
 {
   "schemaVersion": 1,
   "abiVersion": 1,
-  "coreId": "sha256:6ee9954e7e019cd632b762cc65bf860fab4ba3eb94ce89820696f84fef6883c1",
+  "coreId": "sha256:d04124707e3fc66db06ffb19e5e374e4b82f9c0bc95228fa0da54ea65088f921",
   "upstreamCommit": "e22551eae1c84a7e4d0b6a5c519ef4ed4ef69df1",
   "artifacts": [
     {
       "path": "cores/dolphin/dolphin-core-upstream.js",
       "hashMode": "lf-normalized",
-      "size": 288627,
-      "sha256": "b10d9feacd4ebc282704e90f0497651d7e1232f8d9230768ca7246d4ed89180e"
+      "size": 288742,
+      "sha256": "f30eed3cc7c37b4c3d26746eab3409692030e491a475b5121dbbe4df3f39c23b"
     },
     {
       "path": "cores/dolphin/dolphin-core-upstream.wasm",
-      "size": 13227582,
-      "sha256": "6ee9954e7e019cd632b762cc65bf860fab4ba3eb94ce89820696f84fef6883c1"
+      "size": 13228014,
+      "sha256": "d04124707e3fc66db06ffb19e5e374e4b82f9c0bc95228fa0da54ea65088f921"
     }
   ],
   "contractSources": [
@@ -44,32 +44,32 @@
     {
       "path": "core/upstream/dolphin_web_core.cpp",
       "hashMode": "lf-normalized",
-      "size": 65323,
-      "sha256": "31bccd965ad6b1f5c66b4133d3dd63df45c4bb9721f4c0639a2d594996c3c355"
+      "size": 67201,
+      "sha256": "78fda932cb108dc3ff0ed1be94922d36ff419275248986a177b6ae880d56a4b9"
     },
     {
       "path": "src/app.js",
       "hashMode": "lf-normalized",
-      "size": 50973,
-      "sha256": "c66b7a3e5da52c234396200460b2fc1d935f00d41b426ffc026e18d3d1f4da0e"
+      "size": 51313,
+      "sha256": "3fb89354ebfeb8af402d76f4f48fc721824d9cd3142eb9ee04735e25627b4563"
     },
     {
       "path": "src/audio.js",
       "hashMode": "lf-normalized",
-      "size": 19355,
-      "sha256": "b94bfbe836722ee1562fad07172ec2c4c2e635448a457eb8de269f18db41db3e"
+      "size": 19607,
+      "sha256": "bee128b8aacb3feaf952433297a2baac4e678e307e87eb7739b3208696d6f75b"
     },
     {
       "path": "src/audio-pcm-ring.js",
       "hashMode": "lf-normalized",
-      "size": 7901,
-      "sha256": "470a22753ad5b0563ab68f18c72a044aa700d6e51b780a1861c2a9faf4710dbc"
+      "size": 8727,
+      "sha256": "d3e6115b0eb8693265b92e6b965e2af1ee1f07c0caa88d7bc9a7bdf886bcfd6f"
     },
     {
       "path": "src/audio-pcm-producer.js",
       "hashMode": "lf-normalized",
-      "size": 8211,
-      "sha256": "83f8dbbf5cc8184a17493b7dfea1c408b1effe8708db250fee9613d5825ede2e"
+      "size": 8735,
+      "sha256": "327b19af563461353d5ed7a0e871c3f09af3ba497d1f247416348de5f72e2cf5"
     },
     {
       "path": "src/audio-worklet-processor.js",
@@ -86,8 +86,8 @@
     {
       "path": "src/core-host.js",
       "hashMode": "lf-normalized",
-      "size": 88759,
-      "sha256": "d22b2b0d4abb2b691189cc2ba471d5d4f4363347ab5b7de589340dd8913e4ea3"
+      "size": 95600,
+      "sha256": "538ee5d92a8128700bd5d7e00a402d48733fc76d20443a6bbd44dee3f0117228"
     },
     {
       "path": "src/diagnostic-log-filter.js",
@@ -140,8 +140,8 @@
     {
       "path": "src/upstream-discio-worker.js",
       "hashMode": "lf-normalized",
-      "size": 797587,
-      "sha256": "5aa4a2648ef0025f8ba643e469e5124309e49317665349842afad3f83947fcd8"
+      "size": 804532,
+      "sha256": "01f20a1f99502fd54663dc9440b8457f84753031d86db0c326d2d3b77e7c226e"
     },
     {
       "path": "src/wgpu-renderer-worker-probe.js",
@@ -164,8 +164,8 @@
     {
       "path": "src/upstream-worker-adapter.js",
       "hashMode": "lf-normalized",
-      "size": 59099,
-      "sha256": "894c66cd7cc6f7c198dc37889181f761474fa8235b79622cfe7dd1cce3ca54e2"
+      "size": 60534,
+      "sha256": "05fe64917993eb237ddb42f54d8bdac27aa15852313cb8e8107cdbfa965728ba"
     },
     {
       "path": "src/upstream-worker-protocol.js",
@@ -493,6 +493,7 @@
     "_DolphinWeb_RegionCallStats",
     "_DolphinWeb_RegionChainHelper",
     "_DolphinWeb_RegionGuardRefusals",
+    "_DolphinWeb_SetAudioBufferMs",
     "_DolphinWeb_SetCodeSpaceMiB",
     "_DolphinWeb_SetDiscReadStatsEnabled",
     "_DolphinWeb_SetDstAlphaTwoPass",
@@ -694,6 +695,7 @@
       "saveState",
       "saveStateFile",
       "setAudioMuted",
+      "setDisplayFilter",
       "setEnhancements",
       "setInputMask",
       "setInputState",

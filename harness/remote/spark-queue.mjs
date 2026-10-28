@@ -12,8 +12,16 @@
 // its lane into its ticket and takes the lock as before; the ticket goes
 // when the job ends, or when its process is gone.
 //
+// A pair may also ask that its lane's cores be free of other people's work
+// (--cores, spark-cores.mjs) before its grant: while they are busy, its
+// ticket steps aside for a minute (holdUntil: younger jobs may go) and asks
+// again, 30 min at most, then gives up (exit 3). Checked after the grant,
+// the wait held the bench for 30 min with every build behind it.
+//
 //   node harness/remote/spark-queue.mjs wait --pid <job pid> --kind pair|build|multi --lanes auto|a|b --name <label>
-//     prints the lane granted (a, b, or "a b" for a build or a multi)
+//       [--cores a=15-19,10-14 --cores b=5-9,0-4 --cores-out <file>]
+//     prints the lane granted (a, b, or "a b" for a build or a multi) and
+//     exits 0; 3: the lane's cores stayed busy; 2: an error
 //   node harness/remote/spark-queue.mjs done --pid <job pid>
 //   node harness/remote/spark-queue.mjs list [--eta]
 //   node harness/remote/spark-queue.mjs move <name> --after <name|head> --as-judge
@@ -44,12 +52,16 @@ export const WHOLE_BENCH = ["build", "multi"];
 // The lanes a job could take.
 export const wants = (t) => (WHOLE_BENCH.includes(t.kind) ? LANES : t.lanes === "auto" ? PAIR_LANES : [t.lanes]);
 
+// A waiting ticket stepped aside while its lane's cores are busy.
+export const held = (t, now = Date.now()) => Boolean(t.holdUntil) && Date.parse(t.holdUntil) > now;
+
 // What `me` may do now: { go: lanes } or { wait: why }. `tickets` are the
 // live ones, `busy(lane)` says whether a lane's lock is held.
-export function nextStep(me, tickets, busy) {
+export function nextStep(me, tickets, busy, now = Date.now()) {
+  if (held(me, now)) return { wait: "the lane's cores are busy" };
   const older = tickets.filter((t) => t.id < me.id);
   const mine = wants(me);
-  const ahead = older.find((t) => !t.lane && wants(t).some((l) => mine.includes(l)));
+  const ahead = older.find((t) => !t.lane && !held(t, now) && wants(t).some((l) => mine.includes(l)));
   if (ahead) return { wait: `${ahead.kind} ${ahead.name} arrived first` };
   const taken = (l) => busy(l) || tickets.some((t) => t.id !== me.id && t.lane?.split(" ").includes(l));
   if (WHOLE_BENCH.includes(me.kind)) return mine.some(taken) ? { wait: "a lane is in use" } : { go: mine };
@@ -190,13 +202,16 @@ export function laneBusy(lane, { bench = BENCH_DIR, tickets = [] } = {}) {
   return lane !== "a" && untrackedBuilds(tickets).length > 0;
 }
 
-export async function waitTurn({ pid, kind, lanes = "auto", name, estMin = null, owner = null, bench = BENCH_DIR, pollSec = 15, log = () => {} }) {
+// ready(lanes) -> { ok }: asked before a grant (a pair's free cores); not
+// ok, the ticket is held `holdSec` and asked again, `giveUpSec` at most,
+// then waitTurn returns null with its ticket gone. Its errors are thrown.
+export async function waitTurn({ pid, kind, lanes = "auto", name, estMin = null, owner = null, bench = BENCH_DIR, pollSec = 15, ready = null, holdSec = 60, giveUpSec = 1800, log = () => {} }) {
   if (!["pair", ...WHOLE_BENCH].includes(kind)) throw new Error(`--kind ${kind}: pair, build or multi`);
   if (!["auto", ...LANES].includes(lanes)) throw new Error(`--lanes ${lanes}: auto, ${LANES.join(", ")}`);
   mkdirSync(queueDir(bench), { recursive: true });
   const me = { id: `${String(Date.now()).padStart(15, "0")}-${pid}.json`, pid, host: os.hostname(), kind, lanes, name, estMin, owner, at: new Date().toISOString(), lane: null };
   writeTicket(bench, me);
-  let said = null;
+  let said = null, busySince = null;
   for (;;) {
     const tickets = readTickets(bench);
     // Our ticket as it is now: its name changes when the judge moves it.
@@ -204,6 +219,23 @@ export async function waitTurn({ pid, kind, lanes = "auto", name, estMin = null,
     if (mine) me.id = mine.id;
     else writeTicket(bench, me); // removed by hand: back in at its old place
     const step = nextStep(me, mine ? tickets : readTickets(bench), (l) => laneBusy(l, { bench, tickets }));
+    if (step.go && ready) {
+      const r = await ready(step.go);
+      if (!r.ok) {
+        busySince ??= Date.now();
+        if (Date.now() - busySince >= giveUpSec * 1000) {
+          done(pid, bench);
+          return null;
+        }
+        me.holdUntil = new Date(Date.now() + holdSec * 1000).toISOString();
+        writeTicket(bench, me);
+        if (said !== "cores") log(`queued: lane ${step.go.join(" ")}'s cores are busy, asking again every ${holdSec} s`);
+        said = "cores";
+        await new Promise((r) => setTimeout(r, pollSec * 1000));
+        continue;
+      }
+      delete me.holdUntil;
+    }
     if (step.go) {
       me.lane = step.go.join(" ");
       me.grantedAt = new Date().toISOString();
@@ -230,7 +262,8 @@ async function main() {
   const [cmd, ...rest] = process.argv.slice(2);
   const { values, positionals } = parseArgs({ args: rest, allowPositionals: true, options: {
     pid: { type: "string" }, kind: { type: "string" }, lanes: { type: "string", default: "auto" }, name: { type: "string", default: "" },
-    eta: { type: "boolean", default: false }, json: { type: "boolean", default: false }, after: { type: "string" }, "as-judge": { type: "boolean", default: false }
+    eta: { type: "boolean", default: false }, json: { type: "boolean", default: false }, after: { type: "string" }, "as-judge": { type: "boolean", default: false },
+    cores: { type: "string", multiple: true, default: [] }, "cores-out": { type: "string" }
   } });
   if (cmd === "list") {
     // A running ticket of an older harness has no grantedAt: its lane lock's
@@ -255,7 +288,39 @@ async function main() {
   // Progress on stderr, the lane alone on stdout. After the options, a
   // pair's race-perf options (for its estimated duration).
   const estMin = estimateMin(values.kind, positionals);
-  console.log(await waitTurn({ pid, kind: values.kind, lanes: values.lanes, name: values.name, estMin, log: (m) => console.error(`[spark-queue] ${m}`) }));
+  const ready = values.cores.length ? coresReady(lanesCpus(values.cores), { exclude: pid, out: values["cores-out"] }) : null;
+  const lane = await waitTurn({ pid, kind: values.kind, lanes: values.lanes, name: values.name, estMin, ready, log: (m) => console.error(`[spark-queue] ${m}`) });
+  if (lane === null) {
+    console.error("[spark-queue] the lane's cores stayed busy for 30 min: no turn");
+    process.exitCode = 3;
+    return;
+  }
+  console.log(lane);
+}
+
+// --cores a=15-19,10-14 (repeated): lane -> its cores (Chromium's, node's).
+export function lanesCpus(specs) {
+  const out = {};
+  for (const spec of specs) {
+    const m = /^([a-z])=(.+)$/.exec(spec);
+    if (!m || !LANES.includes(m[1])) throw new Error(`--cores ${spec}: expected <lane>=<cpus>, lanes ${LANES.join(", ")}`);
+    out[m[1]] = m[2];
+  }
+  return out;
+}
+
+// A ready() for waitTurn: the granted lane's cores free (spark-cores.mjs,
+// read only), the last check written to `out` (kept with the run).
+function coresReady(cpus, { exclude, out }) {
+  return async (lanes) => {
+    const spec = lanes.map((l) => cpus[l]).filter(Boolean).join(",");
+    if (!spec) return { ok: true };
+    const { checkCores } = await import("./spark-cores.mjs");
+    const r = await checkCores({ cpus: spec, exclude });
+    if (out) writeFileSync(out, `${JSON.stringify(r)}\n`);
+    if (!r.ok) console.error(`[spark-queue] lane ${lanes.join(" ")}'s cores are busy: ${JSON.stringify(r.busy)}`);
+    return r;
+  };
 }
 
 if (import.meta.url === pathToFileURL(process.argv[1] ?? "").href) {
