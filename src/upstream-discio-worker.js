@@ -1,3 +1,4 @@
+import { asDiscBlob } from "./remote-disc.js";
 import { readViRing } from "./harness-vi-ring.js";
 import { startPcSampler } from "./harness-pc-sampler.js";
 import { createDropSampler, histogramSum } from "./harness-drop-sampler.js";
@@ -4556,6 +4557,11 @@ function mountedDiscNeeds() {
 }
 
 async function mountFile(file) {
+  // A disc served over HTTP ranges (measurements, src/remote-disc.js) reads
+  // through a Blob-like; the descriptor itself goes on to the plan worker.
+  // Only from this machine, unless the harness hooks are on (remoteDiscAllowed).
+  const mountedDescriptor = file;
+  file = asDiscBlob(file, { anyHost: harnessEnabled });
   if (!moduleInstance) {
     throw new Error("Upstream core must be loaded before mounting a disc");
   }
@@ -4618,7 +4624,7 @@ async function mountFile(file) {
   aotHeapPatchFailed = 0;
   aotDiscKey = null;
   aotDiscKeyPromise = null;
-  aotDiscFile = file;
+  aotDiscFile = mountedDescriptor;
   aotDiscKind = "disc";
   console.log(`[boot-phase] fs.mount(WORKERFS) took ${(performance.now() - _t_workerfs).toFixed(1)}ms (${(file.size / 1048576).toFixed(1)}MiB image)`);
 
@@ -4667,7 +4673,8 @@ async function mountFile(file) {
   const aotKind = aotBootKind(bootKind, file.size);
   if (aotFirstLaunchEnabled && aotKind && api.bootDisc) {
     aotDiscKind = aotKind;
-    await prepareAotFirstLaunch(file, { kind: aotKind });
+    // The descriptor of a remote disc, not its Blob-like (functions do not clone to the plan worker).
+    await prepareAotFirstLaunch(mountedDescriptor, { kind: aotKind });
   }
   if (aotTestHeapShiftBytes && !aotTestHeapPad && moduleInstance?._malloc) {
     aotTestHeapPad = moduleInstance._malloc(aotTestHeapShiftBytes); // kept for the session
@@ -8147,7 +8154,7 @@ export function aotBootKind(bootKind, size) {
 function readMountedDiscKey() {
   if (!aotDiscKeyPromise) {
     const generation = aotDiscGeneration;
-    aotDiscKeyPromise = (aotDiscKind === "dol" ? readDolKeyFromFile : readDiscKeyFromFile)(aotDiscFile).then(
+    aotDiscKeyPromise = (aotDiscKind === "dol" ? readDolKeyFromFile : readDiscKeyFromFile)(asDiscBlob(aotDiscFile, { anyHost: harnessEnabled })).then(
       (key) => (generation === aotDiscGeneration ? (aotDiscKey = key) : null),
       () => null
     );
