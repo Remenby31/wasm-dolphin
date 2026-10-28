@@ -2,6 +2,7 @@ import { asDiscBlob } from "./remote-disc.js";
 import { readViRing } from "./harness-vi-ring.js";
 import { startPcSampler } from "./harness-pc-sampler.js";
 import { createDropSampler, histogramSum } from "./harness-drop-sampler.js";
+import { createLoopProfile } from "./loop-profile.js";
 import {
   DEFAULT_UPSTREAM_CORE_URL,
   WORKERFS_MOUNT_DIR,
@@ -1331,7 +1332,10 @@ function wgpuVisualCadenceSnapshot() {
   };
 }
 
-self.addEventListener("message", async (event) => {
+// Diagnostics (validationLoopProfile): who holds this worker's event loop.
+const loopProfile = createLoopProfile();
+loopProfile.patchTimers(globalThis);
+self.addEventListener("message", loopProfile.wrap(([event]) => `message:${event?.data?.type ?? "?"}`, async (event) => {
   const data = event.data ?? {};
   // Forward detachedOglFrame messages from Dolphin's GPU pthread to main.
   // The C++ Swap path posts the bitmap from whichever pthread owns the
@@ -1380,7 +1384,7 @@ self.addEventListener("message", async (event) => {
       )
     );
   }
-});
+}));
 
 // Patch 0164: the video thread's blocking EFB copies to RAM (harness hooks
 // on): per kind, how long it waited and whether FIFO work was waiting behind.
@@ -2373,6 +2377,12 @@ async function handleMessage(type, payload) {
     }
     case "validationAotCacheProbe":
       return runAotCacheProbe(payload);
+    // Diagnostics: {action: "start" | "read" | "stop"} -> the labels holding
+    // this worker's loop since "start" (loop-profile.js).
+    case "validationLoopProfile":
+      if (payload?.action === "start") loopProfile.start();
+      if (payload?.action === "stop") loopProfile.stop();
+      return loopProfile.read();
     // P7 (?aot=1): the site's controls and the KPI probe's read.
     case "aotStatus":
     case "aotOptimize":
@@ -5428,7 +5438,7 @@ function startPresentationLoop() {
   configureFrameSignalWait();
   if (!frameSignalHeap && typeof MessageChannel === "function") {
     presentationChannel = new MessageChannel();
-    presentationChannel.port1.onmessage = () => runPresentationLoop();
+    presentationChannel.port1.onmessage = loopProfile.wrap("port:presentation", () => runPresentationLoop());
   }
   schedulePresentationLoop();
   // §28cl tick mode: in addition to the new-frame-driven present loop,

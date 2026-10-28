@@ -140,8 +140,8 @@
     {
       "path": "src/upstream-discio-worker.js",
       "hashMode": "lf-normalized",
-      "size": 809864,
-      "sha256": "f55526cc3dd1b1fb9eaf8c535ea7ff17e6398f32eb23e8b348d0d57492f9d5c3"
+      "size": 810504,
+      "sha256": "cbf9e4cdaaeb3818bc2fea00bdf67693ace395db5e1823ad30765adde19a582a"
     },
     {
       "path": "src/wgpu-renderer-worker-probe.js",
@@ -717,6 +717,7 @@
       "validationFinalizeWgpuRendererProbe",
       "validationFinalizeWgpuReplay",
       "validationHeapStats",
+      "validationLoopProfile",
       "validationLoseWebGlContext",
       "validationLoseWebGpuDevice",
       "validationPcSampler",
