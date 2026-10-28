@@ -1,19 +1,19 @@
 {
   "schemaVersion": 1,
   "abiVersion": 1,
-  "coreId": "sha256:d04124707e3fc66db06ffb19e5e374e4b82f9c0bc95228fa0da54ea65088f921",
+  "coreId": "sha256:8b81950a5939b0b053ee8315c11f0ee82f6fa644074c764c8e5795f289dae0ed",
   "upstreamCommit": "e22551eae1c84a7e4d0b6a5c519ef4ed4ef69df1",
   "artifacts": [
     {
       "path": "cores/dolphin/dolphin-core-upstream.js",
       "hashMode": "lf-normalized",
-      "size": 288742,
-      "sha256": "f30eed3cc7c37b4c3d26746eab3409692030e491a475b5121dbbe4df3f39c23b"
+      "size": 289027,
+      "sha256": "1923658417b8b114c00e9a5b0fadff4fab56e9bc350739c0a7329968fa9e509e"
     },
     {
       "path": "cores/dolphin/dolphin-core-upstream.wasm",
-      "size": 13228014,
-      "sha256": "d04124707e3fc66db06ffb19e5e374e4b82f9c0bc95228fa0da54ea65088f921"
+      "size": 13228711,
+      "sha256": "8b81950a5939b0b053ee8315c11f0ee82f6fa644074c764c8e5795f289dae0ed"
     }
   ],
   "contractSources": [
@@ -50,14 +50,14 @@
     {
       "path": "src/app.js",
       "hashMode": "lf-normalized",
-      "size": 51313,
-      "sha256": "3fb89354ebfeb8af402d76f4f48fc721824d9cd3142eb9ee04735e25627b4563"
+      "size": 51436,
+      "sha256": "24dca2094c3328c7d97d4c1da45a7cbb706c09d16271d6e1e3c476da66b6a492"
     },
     {
       "path": "src/audio.js",
       "hashMode": "lf-normalized",
-      "size": 19607,
-      "sha256": "bee128b8aacb3feaf952433297a2baac4e678e307e87eb7739b3208696d6f75b"
+      "size": 19728,
+      "sha256": "8f2c191a68903d5ce77f8ad5f212d8de6f5012b61a5bf3d48ddd216bcafeb0f4"
     },
     {
       "path": "src/audio-pcm-ring.js",
@@ -86,8 +86,8 @@
     {
       "path": "src/core-host.js",
       "hashMode": "lf-normalized",
-      "size": 95436,
-      "sha256": "14ef8e8bc20457aa058762fe5f315610b5ea60dd0762eb51e148301fc047c4bc"
+      "size": 96519,
+      "sha256": "e02d59fb2bcc3285c6690db362a77356d277a11fee08c2d2a901e8f8d605b09d"
     },
     {
       "path": "src/diagnostic-log-filter.js",
@@ -140,8 +140,8 @@
     {
       "path": "src/upstream-discio-worker.js",
       "hashMode": "lf-normalized",
-      "size": 804844,
-      "sha256": "9abd2f52b222eb8900cfbdc5ff0fd7f60df83bb074011a54292daba5653da79f"
+      "size": 806491,
+      "sha256": "b9191ed589068ec13f763b36df18bba5cf3d8ffb2b6307eb21be9ecb0122bd45"
     },
     {
       "path": "src/wgpu-renderer-worker-probe.js",
@@ -410,6 +410,7 @@
     "_DolphinWeb_AotTranslate",
     "_DolphinWeb_AotTranslateForTest",
     "_DolphinWeb_AotUnverifyForTest",
+    "_DolphinWeb_AudioQueuedMs",
     "_DolphinWeb_AxHleStats",
     "_DolphinWeb_DirectPadBlock",
     "_DolphinWeb_DirectPadLayout",
@@ -507,6 +508,7 @@
     "_DolphinWeb_SetThrottleSleepCascade",
     "_DolphinWeb_SetThrottleSleepMarginUs",
     "_DolphinWeb_SetThrottleSleepStepUs",
+    "_DolphinWeb_SetWidescreen",
     "_DolphinWeb_ThrottleSleepCascade",
     "_DolphinWeb_ThrottleSleepStepUs",
     "_DolphinWeb_UnverifyRegions",

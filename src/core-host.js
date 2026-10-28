@@ -1706,10 +1706,24 @@ function requestedCpuOverclock() {
 }
 
 // ?audiobuffer=N (ms, 16-200): the core mixer's queue (Dolphin's
-// AudioBufferSize, 80 ms when not given), part of the audio latency.
-export function requestedAudioBufferMs(search = window.location.search) {
-  const n = Number.parseInt(new URLSearchParams(search).get("audiobuffer") || "", 10);
-  return Number.isInteger(n) && n >= 16 && n <= 200 ? n : 0;
+// AudioBufferSize), part of the audio latency; the core takes it before the
+// boot only. 40 ms by default when the AudioWorklet can run (pairs on mains
+// 2026-10-28, mixer queue counted: total latency 118-124 -> 80-85 ms from
+// the title on, 0 underruns, no drop regression); otherwise 0, the core's
+// 80 ms: ?audiotransport=legacy, or a page without cross-origin isolation,
+// SharedArrayBuffer or AudioWorkletNode, which falls back to legacy anyway.
+// A fallback decided after the boot (worklet init or stall) keeps 40 ms.
+// A value in range overrides all of it.
+export const DEFAULT_WORKLET_AUDIO_BUFFER_MS = 40;
+export function workletPossibleBeforeBoot(g = globalThis) {
+  return g.crossOriginIsolated === true && typeof g.SharedArrayBuffer === "function" && typeof g.AudioWorkletNode === "function";
+}
+export function requestedAudioBufferMs(search = window.location.search, g = globalThis) {
+  const params = new URLSearchParams(search);
+  const n = Number.parseInt(params.get("audiobuffer") || "", 10);
+  if (Number.isInteger(n) && n >= 16 && n <= 200) return n;
+  if (params.get("audiotransport") === "legacy" || !workletPossibleBeforeBoot(g)) return 0;
+  return DEFAULT_WORKLET_AUDIO_BUFFER_MS;
 }
 
 function requestedEmulationSpeed() {
@@ -1918,7 +1932,7 @@ const CACHED_INTERPRETER_DISABLE_BITS = {
   smearcompile:    1 << 22, // §28ce cap JIT compiles/slice (default-off; ?smearcompile=1 to enable)
   fastmemhoist:    1 << 23, // §28cz per-block fastmem bounds-check hoist (ENABLE polarity; default-off; ?fastmemhoist=1)
   inlinefma:       1 << 26, // inline exact FMA; set: the FMA family calls the interpreter's NI_madd_msub
-  regionmtmsr:     1 << 27, // 0183 regions go on past a mtmsr that changes only EE (ENABLE polarity; default-off; ?regionmtmsr=1)
+  regionmtmsr:     1 << 27, // 0183 regions go on past a mtmsr that changes only EE (ENABLE polarity; default-on; ?regionmtmsr=0 turns it off)
   regshape:        1 << 28, // 0184 x64 register shape: at most 4 GPRs per block in locals (ENABLE polarity; default-off; ?regshape=x64)
   // Aliases the plan / TL;DR uses interchangeably:
   fastinputpoll: 1 << 1, // legacy synonym for meleecall (input-poll lives there)
@@ -2022,9 +2036,11 @@ function requestedCachedInterpreterDisableMask() {
   // with ?fastmemhoist=1; any other state leaves the bit clear so codegen is
   // byte-identical to today. Correctness-critical (a wrong hoisted check = an
   // unchecked OOB WASM load) — kept off until A/B + correctness verified.
-  // 0183: ENABLE polarity too, default-off while it is measured: a region
-  // goes on past a mtmsr that only turns interrupts off or on.
-  if (params.get("regionmtmsr") === "1") {
+  // 0183: ENABLE polarity too, default-on since its measures (Mac race
+  // +1.55 % warm / +1.85 % cold over 8 pairs; drop-meter guard clean): a
+  // region goes on past a mtmsr that only turns interrupts off or on.
+  // ?regionmtmsr=0 turns it off (its regions have their own cache keys).
+  if (params.get("regionmtmsr") !== "0") {
     mask |= CACHED_INTERPRETER_DISABLE_BITS.regionmtmsr;
   }
   // 0184: the x64 register shape, default-off until the CI bench and a real

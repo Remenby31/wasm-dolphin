@@ -166,6 +166,8 @@ const host = new EmulatorHost({
 });
 audio.setSource((frames) => host.mixAudio(frames));
 audio.setTransportBridge((config) => host.configureAudioWorklet(config));
+// for the telemetry: the mixer's queue the core boots with (0: its 80 ms)
+audio.mixerBufferMs = host.audioBufferMs || 80;
 // §28cx: expose the host so the main-thread profiler can read the existing
 // >20ms stall counters (rAF loop vs worker→main message handler). LoAF's
 // 50ms floor is blind to the 33-50ms band that actually starves the audio

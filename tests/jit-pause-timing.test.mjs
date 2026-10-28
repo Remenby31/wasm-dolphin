@@ -3,6 +3,8 @@ import { readFile } from "node:fs/promises";
 import test from "node:test";
 import vm from "node:vm";
 
+import { createSerial, waitCoreReadyForState } from "../src/core-lifecycle.js";
+
 const source = await readFile(new URL("../src/upstream-discio-worker.js", import.meta.url), "utf8");
 function extractFunction(name, optional = false) {
   const match = new RegExp(`^(?:async )?function ${name}\\(`, "m").exec(source);
@@ -81,17 +83,27 @@ function createHarness() {
     prioritizeAotAfterStateLoad: noop,
     webGpuUboCacheMode: () => 0,
     webGpuUboPackMode: () => 0,
+    // loadStateFile (#325): a booted core, and the production wait.
+    coreBoot: { accepted: true },
+    coreStopping: false,
+    coreBootGeneration: 0,
+    waitCoreReadyForState,
   });
+  const serial = createSerial();
+  context.loadStateFileRequest = (payload) => serial(() => context.loadStateFileNow(payload));
   context.framePayload = () => {
     context.maybeEnablePpcWasmJit();
     return { frame };
   };
-  vm.runInContext(`${thresholds}\n${jitSource}\n${extractFunction("handleMessage")}`, context);
+  vm.runInContext(`${thresholds}\n${jitSource}\n${extractFunction("loadStateFileNow")}\n${extractFunction("handleMessage")}`, context);
   return {
     context, api, modes, statuses,
     advance: (ms, frames = 0) => { now += ms; frame += frames; },
     tick: () => context.maybeEnablePpcWasmJit(),
     request: (type, payload = {}) => context.handleMessage(type, payload),
+    // A state load suspends the gate once the core takes it (after the
+    // wait for a ready core, #325): a few turns of the event loop.
+    settle: () => new Promise((r) => setImmediate(r)),
     finishTimer: async (request) => {
       assert.equal(timers.length, 1, "one asynchronous operation should be pending");
       timers.shift()();
@@ -162,6 +174,7 @@ for (const accepted of [true, false]) {
     h.context.ppcWasmJitActive = false;
     h.api.loadStateFile = () => accepted ? 1 : 0;
     const load = h.request("loadStateFile", { fsPath: "/test.sav" });
+    await h.settle();
     h.advance(6000);
     h.context.presentationMaxIntervalMs = 6000;
     h.tick();
@@ -187,7 +200,9 @@ test("load cleanup preserves an enclosing native pause", async () => {
   const h = createHarness();
   h.context.ppcWasmJitActive = false;
   await h.finishTimer(h.request("validationSetCorePaused", { paused: true }));
-  await h.finishTimer(h.request("loadStateFile", { fsPath: "/test.sav" }));
+  const load = h.request("loadStateFile", { fsPath: "/test.sav" });
+  await h.settle();
+  await h.finishTimer(load);
   h.advance(6000);
   h.tick();
   assert.deepEqual(h.modes, []);
@@ -224,4 +239,16 @@ test("failed pause requests preserve the gate", async () => {
     assert.equal(h.context.ppcWasmJitCorePaused, false);
     assertGateOperational(h);
   }
+});
+
+// Refused before the core takes it (no game booted, #325): the gate was
+// never suspended, nothing to release.
+test("a state load refused at once never suspends the JIT gate", async () => {
+  const h = createHarness();
+  h.context.ppcWasmJitActive = false;
+  h.context.coreBoot = { accepted: false };
+  const result = await h.request("loadStateFile", { fsPath: "/test.sav" });
+  assert.deepEqual([result.loaded, result.refused], [false, "refused"]);
+  assert.match(result.error, /no game booted/);
+  assertGateOperational(h);
 });

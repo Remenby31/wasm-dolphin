@@ -272,8 +272,8 @@ sourceContractTest("save-state loads force dense UBO classes to republish before
   assert.match(slotLoad, /setWebGpuUboPackEnabled\?\.\(webGpuUboPackMode\(\)\)[\s\S]*?loadState/);
   assert.match(slotLoad, /loadState[\s\S]*?setWebGpuUboPackEnabled\?\.\(webGpuUboPackMode\(\)\)/);
 
-  const fileLoadStart = worker.indexOf('case "loadStateFile"');
-  const fileLoad = worker.slice(fileLoadStart, worker.indexOf('case "saveStateFile"', fileLoadStart));
+  const fileLoadStart = worker.indexOf("async function loadStateFileNow(");
+  const fileLoad = worker.slice(fileLoadStart, worker.indexOf("async function handleMessage(", fileLoadStart));
   assert.match(fileLoad, /setWebGpuUboPackEnabled\?\.\(webGpuUboPackMode\(\)\)[\s\S]*?loadStateFile/);
   assert.match(fileLoad, /loadStateFile[\s\S]*?setWebGpuUboPackEnabled\?\.\(webGpuUboPackMode\(\)\)/);
 

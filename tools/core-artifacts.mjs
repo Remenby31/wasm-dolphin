@@ -152,14 +152,19 @@ export async function stagedCoreArtifactChanges({ cwd = root } = {}) {
 // Also usable in the middle of `git merge <base>`: the ABI manifest is then
 // read from the branch's side of the conflict (index stage 2), and the one
 // conflict this scheme itself creates in src/upstream-worker-protocol.js --
-// the branch's old hash declaration against base's core.lock.json import --
+// a branch's old hash declaration (from before the pin became data, 18/10)
+// against base's side, which now points to src/default-core.js (the page
+// module that imports core.lock.json; earlier, the protocol imported it) --
 // is resolved to base's side. Any other conflict there is left to the user.
 export const PROTOCOL_PATH = "src/upstream-worker-protocol.js";
 const OLD_PIN = /^export const DEFAULT_UPSTREAM_CORE_SHA256 = "[0-9a-f]{64}";\n$/;
+// What base's side of that hunk holds: the import of the data pin (main
+// from 18/10 to #303), or the pointer to the module that now holds it.
+const NEW_PIN_SIDE = /"\.\.\/cores\/dolphin\/core\.lock\.json"|\bsrc\/default-core\.js\b/;
 
 export function resolvePinConflict(text) {
   return text.replace(/^<<<<<<< [^\n]*\n([\s\S]*?)^=======\n([\s\S]*?)^>>>>>>> [^\n]*\n/gm, (hunk, ours, theirs) =>
-    OLD_PIN.test(ours) && theirs.includes('"../cores/dolphin/core.lock.json"')
+    OLD_PIN.test(ours) && NEW_PIN_SIDE.test(theirs)
       ? theirs
       : hunk);
 }
