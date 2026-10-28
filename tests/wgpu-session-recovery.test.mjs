@@ -191,3 +191,16 @@ test("the worker pauses the core at the loss, before it posts, and the adapter p
     { internalResolution: 2, reason: "unknown", detail: "", cause: "device-lost" }
   ]);
 });
+
+// A renderer error (a live device, #319) with the switch: the session is kept
+// and the scale too; only a lost device lowers it.
+test("with the switch, a renderer error keeps the scale: fallback null, ceiling and scale unchanged", async () => {
+  const bytes = new Uint8Array([7]).buffer;
+  const adapter = fakeAdapter({ save: async () => ({ gameId: "GABCDE", bytes }) });
+  const { host, lost, recovering } = fakeHost({ recover: true, adapter });
+  await lose(host, { internalResolution: 2, reason: "submit-error", detail: "x", cause: "renderer-error" });
+  assert.deepEqual(recovering, [{ internalResolution: 2, fallback: null, reason: "submit-error" }]);
+  assert.equal(lost.length, 1);
+  assert.deepEqual([lost[0].fallback, lost[0].cause, lost[0].state], [null, "renderer-error", bytes]);
+  assert.deepEqual([host.scaleLostCeiling, host.enhancements.internalResolution], [4, 2]);
+});
