@@ -165,3 +165,13 @@ test("spark-cores topology: one line per run of cpus of the same kind, read from
     assert.match(sh, /node harness\/remote\/spark-cores\.mjs topology/, `${f} logs the cores' kinds`);
   }
 });
+
+// 2026-10-28: the multi A/A ran with evals on lane b's cores; a multi now
+// waits for both lanes' cores to be free, as a pair waits for its own.
+test("spark-multi asks the queue for both lanes' cores free, and gives up after 30 min busy", async () => {
+  const sh = await readFile(new URL("../harness/remote/spark-multi.sh", import.meta.url), "utf8");
+  assert.match(sh, /wait --pid \$\$ --kind multi --name "\$\(basename "\$out"\)" \\\n    --cores "a=15-19,10-14" --cores "b=5-9,0-4" --cores-out "\$out\.cores"/);
+  assert.match(sh, /3\) echo "\[spark-multi\] the lanes' cores stayed busy for 30 min: no run"; echo 4 > "\$out\.exit"; exit 4 ;;/);
+  assert.ok(sh.indexOf("trap 'node harness/remote/spark-queue.mjs done") < sh.indexOf("--kind multi"), "the ticket goes even when the wait gives up");
+});
+

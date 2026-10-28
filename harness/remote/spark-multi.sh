@@ -16,8 +16,19 @@ B="$HOME/salon-bench"
 export PATH="$B/node/bin:$PATH"
 mkdir -p "$B/lanes/b"
 {
-  lane=$(node harness/remote/spark-queue.mjs wait --pid $$ --kind multi --name "$(basename "$out")" -- "$@")
   trap 'node harness/remote/spark-queue.mjs done --pid $$' EXIT
+  # Both lanes' cores free of other people's processes before the grant, as
+  # for a pair (spark-race.sh): the multi A/A of 2026-10-28 ran with evals
+  # on lane b's cores (5, 6, 8, 9), which measured 7 % slower where the
+  # cores' capacities differ by 2-3 %. Busy for 30 min: no run (exit 4).
+  lane=$(node harness/remote/spark-queue.mjs wait --pid $$ --kind multi --name "$(basename "$out")" \
+    --cores "a=15-19,10-14" --cores "b=5-9,0-4" --cores-out "$out.cores" -- "$@")
+  code=$?
+  case $code in
+    0) ;;
+    3) echo "[spark-multi] the lanes' cores stayed busy for 30 min: no run"; echo 4 > "$out.exit"; exit 4 ;;
+    *) echo "[spark-multi] the queue failed (exit $code)"; echo 2 > "$out.exit"; exit 2 ;;
+  esac
   echo "$lane" > "$out.lane"
   export PLAYWRIGHT_MODULE="$B/pw/node_modules/playwright/index.mjs"
   export HARNESS_PRIVATE_OUT="$B/results"
