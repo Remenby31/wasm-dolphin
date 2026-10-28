@@ -310,3 +310,20 @@ test("spark-run --multi: a KPI scene is measured with its pinned protocol (heavy
   assert.equal(sceneName("/home/admin/salon-bench/roms/heavy-intro-13s-f3ea52d2e166.sav"), "heavy-intro-13s.sav");
   assert.equal(sceneName("race-after.sav"), "race-after.sav");
 });
+
+// --probe (2026-10-28): drop-meter and replay-gates run on the bench like
+// race-perf (same lane, lock, cores, display); the Spark side picks the
+// script from SPARK_PROBE, refusing any other name.
+test("spark-run --probe: the probe goes in SPARK_PROBE, race-perf stays the default, other names refused", async () => {
+  const { SPARK_PROBES } = await import("../harness/remote/spark-run.mjs");
+  assert.deepEqual(SPARK_PROBES, ["race-perf", "drop-meter", "replay-gates"]);
+  assert.doesNotMatch(launchCommand({ harnessDir: "/h/k", outDir: "/h/r/d/n", raceArgs: [] }), /SPARK_PROBE/);
+  const cmd = launchCommand({ harnessDir: "/h/k", outDir: "/h/r/d/n", raceArgs: ["--display"], headed: ":2", probe: "drop-meter" });
+  assert.match(cmd, /\{ SPARK_PROBE='drop-meter' HARNESS_DISPLAY=x11 DISPLAY=':2' /);
+  assert.throws(() => launchCommand({ harnessDir: "/h/k", outDir: "/h/r/d/n", raceArgs: [], probe: "../../evil" }), /one of race-perf, drop-meter, replay-gates/);
+  const { readFile } = await import("node:fs/promises");
+  const race = await readFile(new URL("../harness/remote/spark-race.sh", import.meta.url), "utf8");
+  assert.match(race, /case \$probe in\n\s+race-perf\|drop-meter\|replay-gates\) ;;/);
+  assert.match(race, /node "harness\/probes\/\$probe\.mjs" "\$@" --port "\$port" --out "\$out"/);
+  for (const p of SPARK_PROBES) assert.ok((await readFile(new URL(`../harness/probes/${p}.mjs`, import.meta.url), "utf8")).length > 0, `${p}.mjs exists`);
+});
