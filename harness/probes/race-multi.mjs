@@ -145,9 +145,12 @@ export async function waitRegionsQuiescent(read, { everyMs = 1000, stableReads =
     stable = p.pending === 0 && last && p.installed === last.installed ? stable + 1 : 0;
     // With a target (the seed's count), a stable count below it is not done:
     // the regions may still come (or never will: the timeout says so).
-    const reached = target == null || p.installed >= target;
+    // Dropped regions count as arrived: the guest overwrote their code
+    // (multi2-aa-5x5, 2026-10-28: 141 installed + 2 dropped of 143 on every
+    // arm since the state loads early, #325), not a refusal.
+    const reached = target == null || p.installed + (p.dropped ?? 0) >= target;
     if (stable >= stableReads - 1 && p.pending === 0 && reached) return { quiescent: true, ...p, ms: Date.now() - t0 };
-    if (Date.now() - t0 > timeoutMs) return { quiescent: false, why: p.pending ? `still ${p.pending} pending after ${timeoutMs} ms` : `${p.installed} installed, ${target} expected, after ${timeoutMs} ms`, ...p, ms: Date.now() - t0 };
+    if (Date.now() - t0 > timeoutMs) return { quiescent: false, why: p.pending ? `still ${p.pending} pending after ${timeoutMs} ms` : `${p.installed} installed + ${p.dropped ?? 0} dropped, ${target} expected, after ${timeoutMs} ms`, ...p, ms: Date.now() - t0 };
     last = p;
     await sleep(everyMs);
   }
@@ -210,7 +213,9 @@ export const bootFailureStep = (n, max) => (n <= max ? "replay" : "fail");
 // Why a run must be discarded under --aot-seed (null: keep it): an arm
 // without all its seeded regions measures another codegen, and the barrier
 // it held up shifted the other arms too (multi-aba-emu-0087b, 2026-10-22).
-export function discardReason(arms, targets) {
+// sameTree: each arm's tree (arms with the same tree and the one query run
+// the same code); null skips the equality check.
+export function discardReason(arms, targets, sameTree = null) {
   const bad = arms.map((x, a) => {
     const g = x.regionGate;
     if (!g) return `no region gate on arm ${a}`;
@@ -218,11 +223,29 @@ export function discardReason(arms, targets) {
     const want = targets[a];
     // More than the seed is fine: a module the seed's first launch was still
     // finishing when it reported "done" (regions-0118, 2026-10-23: 143 of 142).
-    if (Number.isInteger(want) && !(g.installed >= want)) return `arm ${a} installed ${g.installed ?? "?"} of ${want} regions`;
+    // A dropped region arrived and the guest overwrote its code: not missing.
+    if (Number.isInteger(want) && !(g.installed + (g.dropped ?? 0) >= want)) return `arm ${a} installed ${g.installed ?? "?"} (+ ${g.dropped ?? 0} dropped) of ${want} regions`;
     if (!g.quiescent) return `arm ${a}: ${g.why ?? "regions not quiescent"}`;
     return null;
   }).filter(Boolean);
+  // Arms of one tree must install the same regions, drops included: unequal
+  // counts there are two codegens of one build (multi2-aa-5x5 run 1, attempt
+  // 3: 140 / 141). Arms of different trees may differ (a candidate that
+  // changes the regions): regionCountsDiffer says so, the run is kept.
+  if (!bad.length && sameTree) {
+    const counts = arms.map((x) => x.regionGate?.installed);
+    for (let a = 1; a < arms.length; a += 1) {
+      const b = sameTree.indexOf(sameTree[a]);
+      if (b < a && Number.isInteger(counts[a]) && Number.isInteger(counts[b]) && counts[a] !== counts[b]) bad.push(`installed regions differ between arms ${b} and ${a} of one tree (${counts[b]} / ${counts[a]})`);
+    }
+  }
   return bad.length ? bad.join("; ") : null;
+}
+
+// Installed counts that differ between arms of different trees (kept runs).
+export function regionCountsDiffer(arms, sameTree) {
+  const counts = arms.map((x) => x.regionGate?.installed);
+  return counts.some((c, a) => counts.some((d, b) => sameTree[a] !== sameTree[b] && Number.isInteger(c) && Number.isInteger(d) && c !== d));
 }
 
 // The scene a savestate is, without the content hash spark-run adds to the
@@ -504,10 +527,11 @@ async function main() {
       if (values["aot-seed"]) {
         const counts = record.arms.map((x) => x.regionGate?.installed);
         record.regionCountsEqual = counts.every((c) => Number.isInteger(c) && c === counts[0]);
-        console.log(`[race-multi] run ${r} regions installed per arm: ${counts.join(" / ")}${record.regionCountsEqual ? "" : " (NOT EQUAL)"}; layoutRefused ${record.arms.map((x) => x.regionGate?.layoutRefused ?? "-").join(" / ")}; heapPatched ${record.arms.map((x) => x.regionGate?.heapPatched ?? "-").join(" / ")}; boot rank ${record.arms.map((x) => x.bootRank).join(" / ")}; quiescent ${record.arms.map((x) => (x.regionGate?.quiescent ? `${x.regionGate.ms} ms` : x.regionGate?.why ?? "?")).join(" / ")}`);
+        record.regionCountsDiffer = regionCountsDiffer(record.arms, arms);
+        console.log(`[race-multi] run ${r} regions installed per arm: ${counts.join(" / ")}${record.regionCountsEqual ? "" : " (NOT EQUAL)"}; dropped ${record.arms.map((x) => x.regionGate?.dropped ?? "-").join(" / ")}; refused ${record.arms.map((x) => x.regionGate?.refused ?? "-").join(" / ")}; layoutRefused ${record.arms.map((x) => x.regionGate?.layoutRefused ?? "-").join(" / ")}; heapPatched ${record.arms.map((x) => x.regionGate?.heapPatched ?? "-").join(" / ")}; boot rank ${record.arms.map((x) => x.bootRank).join(" / ")}; quiescent ${record.arms.map((x) => (x.regionGate?.quiescent ? `${x.regionGate.ms} ms` : x.regionGate?.why ?? "?")).join(" / ")}`);
       }
       console.log(`[race-multi] run ${r}: ${record.arms.map((x) => `arm${x.arm}@lane${x.lane} ${x.error ?? `${x.cold.speed} %${x.cold.instructionsPerGuestCycle ? ` ${round(x.cold.instructionsPerGuestCycle, 3)} insn/guest cycle` : ""}${x.cold.overloaded ? " OVERLOADED" : ""}`}`).join(" | ")}`);
-      const why = values["aot-seed"] ? discardReason(record.arms, record.arms.map((_, a) => seedRegions.get(a) ?? null)) : null;
+      const why = values["aot-seed"] ? discardReason(record.arms, record.arms.map((_, a) => seedRegions.get(a) ?? null), arms) : null;
       if (why) {
         record.discarded = why;
         discarded.push({ run: r, attempt: record.attempt, why });
@@ -570,6 +594,8 @@ async function main() {
     // --aot-seed: installed regions per run and arm, and whether every run had them equal.
     regionCounts: values["aot-seed"] ? records.map((r) => r.arms.map((x) => x.regionGate?.installed ?? null)) : null,
     regionCountsEqual: values["aot-seed"] ? records.every((r) => r.regionCountsEqual) : null,
+    // Arms of different trees with different installed counts (runs kept).
+    regionCountsDiffer: values["aot-seed"] ? records.some((r) => r.regionCountsDiffer) : null,
     // Runs discarded (and played again) for an arm without all its regions.
     discarded,
     effects, counterEffects, cycleEffects, eventStats, withheld: full ? null : records.length < runs ? `${runs - records.length} run(s) missing after ${discarded.length} discarded: the Latin square is incomplete` : `${records.length - good.length} run(s) with a failed or overloaded arm: the Latin square is incomplete`

@@ -310,3 +310,116 @@ test("spark-run --multi: a KPI scene is measured with its pinned protocol (heavy
   assert.equal(sceneName("/home/admin/salon-bench/roms/heavy-intro-13s-f3ea52d2e166.sav"), "heavy-intro-13s.sav");
   assert.equal(sceneName("race-after.sav"), "race-after.sav");
 });
+
+// --probe (2026-10-28): drop-meter and replay-gates run on the bench like
+// race-perf (same lane, lock, cores, display); the Spark side picks the
+// script from SPARK_PROBE, refusing any other name.
+test("spark-run --probe: the probe goes in SPARK_PROBE, race-perf stays the default, other names refused", async () => {
+  const { SPARK_PROBES } = await import("../harness/remote/spark-run.mjs");
+  assert.deepEqual(SPARK_PROBES, ["race-perf", "drop-meter", "replay-gates"]);
+  assert.doesNotMatch(launchCommand({ harnessDir: "/h/k", outDir: "/h/r/d/n", raceArgs: [] }), /SPARK_PROBE/);
+  const cmd = launchCommand({ harnessDir: "/h/k", outDir: "/h/r/d/n", raceArgs: ["--display"], headed: ":2", probe: "drop-meter" });
+  assert.match(cmd, /\{ SPARK_PROBE='drop-meter' HARNESS_DISPLAY=x11 DISPLAY=':2' /);
+  assert.throws(() => launchCommand({ harnessDir: "/h/k", outDir: "/h/r/d/n", raceArgs: [], probe: "../../evil" }), /one of race-perf, drop-meter, replay-gates/);
+  const { readFile } = await import("node:fs/promises");
+  const race = await readFile(new URL("../harness/remote/spark-race.sh", import.meta.url), "utf8");
+  assert.match(race, /case \$probe in\n\s+race-perf\|drop-meter\|replay-gates\) ;;/);
+  assert.match(race, /node "harness\/probes\/\$probe\.mjs" "\$@" --port "\$port" --out "\$out"/);
+  for (const p of SPARK_PROBES) assert.ok((await readFile(new URL(`../harness/probes/${p}.mjs`, import.meta.url), "utf8")).length > 0, `${p}.mjs exists`);
+});
+
+// Review of #335: a presentation gate that would pass without exercising the
+// presentation, or without a reading, is refused.
+test("spark-run --probe drop-meter|replay-gates: --headed, an explicit wgpu --query, --extra never touches video", async () => {
+  const { checkPresentationProbe } = await import("../harness/remote/spark-run.mjs");
+  const q = "core=upstream&video=wgpu&presenter=webgpu&jitwarmup=700";
+  const args = (raw, headed = ":2") => benchRaceArgs(raw, { keepVideo: Boolean(headed) }).args;
+  assert.throws(() => checkPresentationProbe("replay-gates", ["--query", q], args(["--query", q], null), null), /needs --headed/);
+  assert.throws(() => checkPresentationProbe("drop-meter", ["--display"], args(["--display"]), ":2"), /explicit --query/);
+  assert.throws(() => checkPresentationProbe("drop-meter", ["--query", "video=software"], args(["--query", "video=software"]), ":2"), /video=wgpu needed/);
+  assert.throws(() => checkPresentationProbe("drop-meter", ["--query", q, "--baseline-query", "video=null"], args(["--query", q, "--baseline-query", "video=null"]), ":2"), /--baseline-query video=null: video=wgpu needed/);
+  assert.throws(() => checkPresentationProbe("replay-gates", ["--query", q, "--extra", "&video=null"], args(["--query", q, "--extra", "&video=null"]), ":2"), /--extra must not change video=/);
+  assert.doesNotThrow(() => checkPresentationProbe("replay-gates", ["--query", q, "--extra", "&wgpureplayms=4"], args(["--query", q, "--extra", "&wgpureplayms=4"]), ":2"));
+  const { readFile } = await import("node:fs/promises");
+  const run = await readFile(new URL("../harness/remote/spark-run.mjs", import.meta.url), "utf8");
+  assert.match(run, /positionals\.includes\("--no-lock"\)\) throw/);
+  const gates = await readFile(new URL("../harness/probes/replay-gates.mjs", import.meta.url), "utf8");
+  assert.doesNotMatch(gates, /baseline-query|baseline: \{/, "both sides from one tree: no --baseline");
+  assert.match(gates, /process\.exit\(failed\.length \|\| empty\.length \? 1 : 0\)/);
+  // review of 768b7be1: a reading needs the tracker on and presses seen
+  assert.match(gates, /!v\.input\?\.enabled \|\| !v\.input\.visibleCount/);
+  assert.match(gates, /!summary\.input\[side\]\.presses/);
+  assert.match(run, /probe === "replay-gates" && \(values\.baseline \|\| splitEquals\(positionals\)\.includes\("--baseline-query"\)\)\) throw/);
+  assert.match(run, /if \(summary\.probe === "replay-gates" \|\| summary\.probe === "drop-meter"\) \{/, "race-perf keeps its paired-change lines");
+});
+
+test("spark-queue estimates: replay-gates and drop-meter by their own shape", async () => {
+  const { estimateMin } = await import("../harness/remote/spark-queue.mjs");
+  assert.equal(estimateMin("pair", ["--runs", "4", "--extra", "&wgpureplayms=4"]), 10);
+  assert.equal(estimateMin("pair", ["--runs", "4", "--visits", "2", "--baseline", "/b"]), 24);
+  assert.equal(estimateMin("pair", ["--runs", "4", "--visits", "2"]), 12);
+  assert.equal(estimateMin("pair", ["--runs", "6", "--warmup", "20", "--secs", "10"]), 5, "race-perf as before (6 × (20 + 10 + 20) s)");
+});
+
+test("spark-run --screen: lane b only for screening, stamped in the summary as never a conclusion", async () => {
+  const { checkLane, SCREEN_NOTE } = await import("../harness/remote/spark-run.mjs");
+  assert.throws(() => checkLane("b"), /--screen/);
+  assert.doesNotThrow(() => checkLane("b", { screen: true }));
+  for (const lane of ["a", "auto"]) assert.doesNotThrow(() => checkLane(lane));
+  assert.throws(() => checkLane("c", { screen: true }), /--lane c/);
+  assert.match(stampSummary({ change: null }, { host: "spark", screen: SCREEN_NOTE }).bench.screen, /never a conclusion/);
+});
+
+test("spark-run --noise: drop-meter's A/A named as a bench run, its summary there", async () => {
+  const { benchNoiseArgs } = await import("../harness/remote/spark-run.mjs");
+  assert.deepEqual(benchNoiseArgs("20261028/jit-0189c-drops-aa", "/h/salon-bench/results"), ["--noise", "/h/salon-bench/results/20261028/jit-0189c-drops-aa/summary.json"]);
+  assert.deepEqual(benchNoiseArgs(undefined, "/r"), []);
+  assert.throws(() => benchNoiseArgs("jit-0189c-drops-aa", "/r"), /<yyyymmdd>\/<name>/);
+  assert.throws(() => benchNoiseArgs("20261028/../x/y", "/r"), /<yyyymmdd>\/<name>/);
+});
+
+// 2026-10-28: drop-meter's default load guard (cpus/4 = 5 on the Spark) sat at
+// the bench's background load and kept no run; on the bench it defaults to 8.
+test("spark-run: drop-meter gets --max-load 8 on the bench unless the caller sets it", async () => {
+  const { benchProbeDefaults, BENCH_DROP_MAX_LOAD } = await import("../harness/remote/spark-run.mjs");
+  assert.equal(BENCH_DROP_MAX_LOAD, 8);
+  assert.deepEqual(benchProbeDefaults("drop-meter", ["--display"]), ["--display", "--max-load", "8"]);
+  assert.deepEqual(benchProbeDefaults("drop-meter", ["--max-load", "6"]), ["--max-load", "6"], "the caller's value wins");
+  assert.deepEqual(benchProbeDefaults("drop-meter", ["--max-load=6"]), ["--max-load=6"]);
+  assert.deepEqual(benchProbeDefaults("race-perf", ["--display"]), ["--display"], "race-perf unchanged");
+  assert.deepEqual(benchProbeDefaults("replay-gates", ["--query", "q"]), ["--query", "q"], "replay-gates has no load guard");
+});
+
+test("spark queue: a lane b job backfills past an older whole-bench job that cannot start before it ends", () => {
+  // 2026-10-28: a multi waiting ~37 min for lane a held two lane b screens
+  // (and lane b) idle behind it
+  const now = Date.parse("2026-10-28T15:00:00Z");
+  const t = (id, kind, lanes, extra = {}) => ({ id: `${id}`, kind, lanes, lane: null, name: `${kind}${id}`, ...extra });
+  const running = t(1, "pair", "a", { lane: "a", estMin: 20, grantedAt: new Date(now - 5 * 60000).toISOString() });
+  const pairA = t(2, "pair", "a", { estMin: 10 });
+  const multi = t(3, "multi", "auto", { estMin: 13 });
+  const busy = (l) => l === "a";
+  // the multi starts once lane a is through (~15 + 10 = 25 min): a 12 min
+  // screen on lane b ends before, a 40 min one would not
+  const short = t(4, "pair", "b", { estMin: 12 }), long = t(5, "pair", "b", { estMin: 40 });
+  assert.deepEqual(nextStep(short, [running, pairA, multi, short], busy, now), { go: ["b"] });
+  assert.match(nextStep(long, [running, pairA, multi, long], busy, now).wait, /multi multi3 arrived first/);
+  // no estimate: no backfill
+  assert.match(nextStep(t(6, "pair", "b"), [running, pairA, multi, t(6, "pair", "b")], busy, now).wait, /multi3 arrived first/);
+  // a younger pair that wants lane a still waits for the older pair on a (plain FIFO)
+  assert.match(nextStep(t(7, "pair", "a", { estMin: 1 }), [running, pairA, multi, t(7, "pair", "a", { estMin: 1 })], busy, now).wait, /pair2 arrived first/);
+  // a whole-bench job never backfills past another
+  assert.match(nextStep(t(8, "build", "auto", { estMin: 1 }), [running, pairA, multi, t(8, "build", "auto", { estMin: 1 })], busy, now).wait, /arrived first/);
+  // review of #338: an older ticket stepped aside (held) does not count in the multi's start
+  const heldPair = t(2.5, "pair", "a", { estMin: 30, holdUntil: new Date(now + 60000).toISOString() });
+  const mid = t(9, "pair", "b", { estMin: 30 }); // 30 min: ends after the multi's ~25 min start without the held pair (55 with it)
+  assert.match(nextStep(mid, [running, pairA, heldPair, multi, mid], busy, now).wait, /multi3 arrived first/);
+  assert.deepEqual(nextStep(short, [running, pairA, heldPair, multi, short], busy, now), { go: ["b"] });
+  // a job of 0 min never backfills, nor before a start of 0
+  assert.match(nextStep(t(4.5, "pair", "b", { estMin: 0 }), [running, pairA, multi, t(4.5, "pair", "b", { estMin: 0 })], busy, now).wait, /multi3 arrived first/);
+  const multiNow = t(3, "multi", "auto", { estMin: 13 });
+  assert.match(nextStep(short, [multiNow, short], () => false, now).wait, /multi3 arrived first/, "the multi can start at once: nothing passes it");
+  // a running ticket without grantedAt (an older harness): no backfill
+  const oldRunning = t(1, "pair", "a", { lane: "a", estMin: 20 });
+  assert.match(nextStep(short, [oldRunning, pairA, multi, short], busy, now).wait, /multi3 arrived first/);
+});
