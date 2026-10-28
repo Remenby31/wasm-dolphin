@@ -114,7 +114,7 @@ import { claim, release } from "../lib/ownership.mjs";
 import { acquirePerfLock } from "../lib/perf-lock.mjs";
 import { powerSnapshot } from "../lib/system.mjs";
 import { openSession, rebootSession } from "../lib/session.mjs";
-import { calmThenLock, calmUnderLock, loadGaveUp } from "../lib/env.mjs";
+import { calmThenLock, calmUnderLock, defaultMaxLoad, loadGaveUp } from "../lib/env.mjs";
 import { describe, median, percentile, round } from "../lib/stats.mjs";
 import { coreStats, displayStats, hitchList, mergeTimeline, presentationStats } from "../lib/timeline.mjs";
 import { consistentRead, decodeRegionStats, poolStats, regionShares, topMisses } from "../lib/jit-region-stats.mjs";
@@ -698,6 +698,9 @@ export function withRunTimeout(p, ms, what) {
 
 async function measureSide(side, o, loadGate) {
   const server = await ensureServer({ port: o.port, root: side.root, coreCandidates: o.coreCandidates });
+  // the side is judged against its gate's limit (on the bench, computed per
+  // gate by lib/bench-load.mjs), recorded with it in loadGate
+  if (loadGate?.limit != null) o = { ...o, maxLoad: loadGate.limit };
   try {
     const bootStart = performance.now();
     const session = await openSession({ base: server.base, server, query: side.query ?? o.query, iso: o.iso, display: o.browserDisplay, routes: o.state ? { [STATE_ROUTE]: o.state } : {}, chromeArgs: side.chromeArgs ?? [], harness: o.display ? { displayed: true } : {} });
@@ -846,7 +849,7 @@ async function main() {
       emulatedPollMs: num(values, "emulated-poll-ms", { min: 10, int: true })
     } : {}),
     hold: values.hold || null, warm: values.warm,
-    maxLoad: values["max-load"] ? num(values, "max-load", { min: 0.1 }) : Math.max(2, os.cpus().length / 4),
+    maxLoad: values["max-load"] ? num(values, "max-load", { min: 0.1 }) : defaultMaxLoad(),
     loadWait: num(values, "load-wait", { min: 0 }),
     pcsample: values.pcsample ? num(values, "pcsample", { min: 0.05 }) : null,
     pcRaw: values["pc-raw"],
