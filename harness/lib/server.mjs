@@ -158,7 +158,35 @@ export function snapshotHandler(snapshot, { onServe = null } = {}) {
   };
 }
 
-export async function ensureServer({ port, root, patches = [], coreCandidates = [] }) {
+// The processes listening on TCP `port`, on any address, from lsof:
+// [{ pid, command, name }]; [] for none; null when lsof cannot tell (absent).
+// Binding 127.0.0.1 alone misses a server on * or ::1 (macOS lets both
+// bind): two agents once served the same port (PORTS.md).
+export function portListeners(port, run = (args) => execFileSync("lsof", args, { encoding: "utf8", stdio: ["ignore", "pipe", "ignore"] })) {
+  let out;
+  try {
+    out = run(["-nP", `-iTCP:${port}`, "-sTCP:LISTEN", "-Fpcn"]);
+  } catch (e) {
+    return e?.status === 1 ? [] : null; // lsof exits 1 when nothing matches
+  }
+  const rows = [];
+  let cur = null;
+  for (const line of String(out).split("\n")) {
+    const v = line.slice(1);
+    if (line[0] === "p") rows.push(cur = { pid: Number(v), command: null, name: null });
+    else if (line[0] === "c" && cur) cur.command = v;
+    else if (line[0] === "n" && cur) cur.name ??= v;
+  }
+  return rows;
+}
+
+export async function ensureServer({ port, root, patches = [], coreCandidates = [], listeners = portListeners }) {
+  // checked before anything else: a busy port says who holds it
+  const busy = listeners(port);
+  if (busy?.length) {
+    const who = busy.map((l) => `${l.command ?? "?"} (pid ${l.pid}) on ${l.name ?? "?"}`).join("; ");
+    throw new Error(`port ${port} is busy: ${who}; the harness never shares a server, stop the other one or pick another --port (PORTS.md: one range per agent)`);
+  }
   const snapshot = await snapshotTree(root, { patches, coreCandidates });
   const cores = coreHashes(snapshot.files);
   // Every core wasm this server handed out, in order (what was really loaded).
