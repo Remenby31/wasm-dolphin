@@ -955,6 +955,10 @@ let coreBootGeneration = 0;
 // across mountFile's awaits (user data, the first-launch plan). A state load
 // meanwhile waits for that boot instead of finding "no game booted".
 let coreBootInFlight = 0;
+// The latest mount asked for and the latest one answered: a load that
+// joins a mount in flight takes that mount's boot, no other.
+let mountSeq = 0;
+let lastMountDone = 0;
 let coreBoot = {
   attempted: false,
   accepted: false,
@@ -1637,14 +1641,20 @@ async function loadStateFileNow(payload) {
     // Starting). Another boot starting while a booted game waits, a stop,
     // or no boot at all: refused at once.
     let generation = coreBoot.accepted && !coreBootInFlight ? coreBootGeneration : null;
+    const joined = coreBootInFlight ? mountSeq : null;
     const gone = () => {
       if (coreStopping) return "core stopping";
-      if (coreBootInFlight) return generation === null ? null : "another boot meanwhile";
+      if (coreBootInFlight) return generation === null && mountSeq === joined ? null : "another boot meanwhile";
       if (!coreBoot.accepted) return "no game booted";
+      if (generation === null && lastMountDone !== joined) return "another boot meanwhile";
       generation ??= coreBootGeneration;
       return coreBootGeneration !== generation ? "another boot meanwhile" : null;
     };
-    const wait = await waitCoreReadyForState(() => api?.getCoreStateName?.() ?? "", { abort: gone });
+    // During a mount the core's state is still the previous game's (BootDisc
+    // stops it only at the boot): read as Starting until the mount answers,
+    // so no state goes into the game being replaced.
+    const wait = await waitCoreReadyForState(
+      () => (coreBootInFlight && generation === null ? "Starting" : api?.getCoreStateName?.() ?? ""), { abort: gone });
     if (!wait.ready) {
       const coreState = api?.getCoreStateName?.() ?? "";
       return { loaded: false, rc: 0, beforeState: coreState, refused: wait.reason,
@@ -4570,11 +4580,13 @@ function mountedDiscNeeds() {
 }
 
 async function mountFileTracked(file) {
+  const id = ++mountSeq;
   coreBootInFlight += 1;
   try {
     return await mountFile(file);
   } finally {
     coreBootInFlight -= 1;
+    lastMountDone = Math.max(lastMountDone, id);
   }
 }
 

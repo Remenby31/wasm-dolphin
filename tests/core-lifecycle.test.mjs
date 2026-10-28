@@ -168,7 +168,8 @@ test("the worker waits for a core that takes the state before loading it, and re
   assert.ok(load.indexOf("await waitCoreReadyForState(") >= 0 && load.indexOf("await waitCoreReadyForState(") < load.indexOf("api.loadStateFile(path)"));
   assert.match(load, /error: wait\.reason === "expired" \? `core not running \(\$\{coreState \|\| "unknown"\}\) after 15 s`/);
   // Behaviour (boot in flight, another boot, no boot): jit-pause-timing.test.mjs.
-  assert.match(load, /if \(coreBootInFlight\) return generation === null \? null : "another boot meanwhile";/);
+  assert.match(load, /if \(coreBootInFlight\) return generation === null && mountSeq === joined \? null : "another boot meanwhile";/);
+  assert.match(load, /\(\) => \(coreBootInFlight && generation === null \? "Starting" : api\?\.getCoreStateName\?\.\(\) \?\? ""\)/);
   assert.match(worker, /case "mountFile":\n\s+return mountFileTracked\(payload\.file\);/);
   assert.match(worker, /case "loadStateFile":\n\s+return loadStateFileRequest\(payload\);/);
   const browser = await readFile(new URL("../harness/lib/browser.mjs", import.meta.url), "utf8");
