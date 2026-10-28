@@ -145,9 +145,12 @@ export async function waitRegionsQuiescent(read, { everyMs = 1000, stableReads =
     stable = p.pending === 0 && last && p.installed === last.installed ? stable + 1 : 0;
     // With a target (the seed's count), a stable count below it is not done:
     // the regions may still come (or never will: the timeout says so).
-    const reached = target == null || p.installed >= target;
+    // Dropped regions count as arrived: the guest overwrote their code
+    // (multi2-aa-5x5, 2026-10-28: 141 installed + 2 dropped of 143 on every
+    // arm since the state loads early, #325), not a refusal.
+    const reached = target == null || p.installed + (p.dropped ?? 0) >= target;
     if (stable >= stableReads - 1 && p.pending === 0 && reached) return { quiescent: true, ...p, ms: Date.now() - t0 };
-    if (Date.now() - t0 > timeoutMs) return { quiescent: false, why: p.pending ? `still ${p.pending} pending after ${timeoutMs} ms` : `${p.installed} installed, ${target} expected, after ${timeoutMs} ms`, ...p, ms: Date.now() - t0 };
+    if (Date.now() - t0 > timeoutMs) return { quiescent: false, why: p.pending ? `still ${p.pending} pending after ${timeoutMs} ms` : `${p.installed} installed + ${p.dropped ?? 0} dropped, ${target} expected, after ${timeoutMs} ms`, ...p, ms: Date.now() - t0 };
     last = p;
     await sleep(everyMs);
   }
@@ -218,10 +221,15 @@ export function discardReason(arms, targets) {
     const want = targets[a];
     // More than the seed is fine: a module the seed's first launch was still
     // finishing when it reported "done" (regions-0118, 2026-10-23: 143 of 142).
-    if (Number.isInteger(want) && !(g.installed >= want)) return `arm ${a} installed ${g.installed ?? "?"} of ${want} regions`;
+    // A dropped region arrived and the guest overwrote its code: not missing.
+    if (Number.isInteger(want) && !(g.installed + (g.dropped ?? 0) >= want)) return `arm ${a} installed ${g.installed ?? "?"} (+ ${g.dropped ?? 0} dropped) of ${want} regions`;
     if (!g.quiescent) return `arm ${a}: ${g.why ?? "regions not quiescent"}`;
     return null;
   }).filter(Boolean);
+  // Arms with drops must still run the same regions: unequal installed
+  // counts measure two codegens (multi2-aa-5x5 run 1, attempt 3: 140 / 141).
+  const counts = arms.map((x) => x.regionGate?.installed);
+  if (!bad.length && counts.every(Number.isInteger) && counts.some((c) => c !== counts[0])) bad.push(`installed regions differ between arms (${counts.join(" / ")})`);
   return bad.length ? bad.join("; ") : null;
 }
 
@@ -504,7 +512,7 @@ async function main() {
       if (values["aot-seed"]) {
         const counts = record.arms.map((x) => x.regionGate?.installed);
         record.regionCountsEqual = counts.every((c) => Number.isInteger(c) && c === counts[0]);
-        console.log(`[race-multi] run ${r} regions installed per arm: ${counts.join(" / ")}${record.regionCountsEqual ? "" : " (NOT EQUAL)"}; layoutRefused ${record.arms.map((x) => x.regionGate?.layoutRefused ?? "-").join(" / ")}; heapPatched ${record.arms.map((x) => x.regionGate?.heapPatched ?? "-").join(" / ")}; boot rank ${record.arms.map((x) => x.bootRank).join(" / ")}; quiescent ${record.arms.map((x) => (x.regionGate?.quiescent ? `${x.regionGate.ms} ms` : x.regionGate?.why ?? "?")).join(" / ")}`);
+        console.log(`[race-multi] run ${r} regions installed per arm: ${counts.join(" / ")}${record.regionCountsEqual ? "" : " (NOT EQUAL)"}; dropped ${record.arms.map((x) => x.regionGate?.dropped ?? "-").join(" / ")}; refused ${record.arms.map((x) => x.regionGate?.refused ?? "-").join(" / ")}; layoutRefused ${record.arms.map((x) => x.regionGate?.layoutRefused ?? "-").join(" / ")}; heapPatched ${record.arms.map((x) => x.regionGate?.heapPatched ?? "-").join(" / ")}; boot rank ${record.arms.map((x) => x.bootRank).join(" / ")}; quiescent ${record.arms.map((x) => (x.regionGate?.quiescent ? `${x.regionGate.ms} ms` : x.regionGate?.why ?? "?")).join(" / ")}`);
       }
       console.log(`[race-multi] run ${r}: ${record.arms.map((x) => `arm${x.arm}@lane${x.lane} ${x.error ?? `${x.cold.speed} %${x.cold.instructionsPerGuestCycle ? ` ${round(x.cold.instructionsPerGuestCycle, 3)} insn/guest cycle` : ""}${x.cold.overloaded ? " OVERLOADED" : ""}`}`).join(" | ")}`);
       const why = values["aot-seed"] ? discardReason(record.arms, record.arms.map((_, a) => seedRegions.get(a) ?? null)) : null;
