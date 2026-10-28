@@ -9,7 +9,7 @@ import path from "node:path";
 import test from "node:test";
 
 import { claim, deletable, OWNER_FILE, release } from "../harness/lib/ownership.mjs";
-import { ensureServer, snapshotTree } from "../harness/lib/server.mjs";
+import { ensureServer, portListeners, snapshotTree } from "../harness/lib/server.mjs";
 
 const REPO = path.resolve(import.meta.dirname, "..");
 
@@ -40,7 +40,7 @@ test("round 3: the server serves its start snapshot, whatever happens to the fil
   assert.equal(body, "export const v = 1;\n");
   assert.notEqual((await snapshotTree(root)).hash, server.identity.snapshot);
   assert.equal((await fetch(`${server.base}tools/serve.mjs`)).status, 404); // allowlist kept
-  await assert.rejects(() => ensureServer({ port, root }), /busy; the harness never shares/);
+  await assert.rejects(() => ensureServer({ port, root }), /busy: .*; the harness never shares/);
 });
 
 // Review round 3: an ignored file (prebuilt-jit-cache.bin) was outside the
@@ -150,4 +150,31 @@ test("x11 display mode: Linux with DISPLAY only, refused on macOS whatever the e
   assert.equal(h.headless, true);
   assert.deepEqual(h.viewport, { width: 1280, height: 800 });
   assert.equal(h.args.some((a) => /vulkan|window-/i.test(a)), false);
+});
+
+// 2026-10-28: two agents' servers on one port. Binding 127.0.0.1 missed a
+// server on the wildcard address; lsof is asked first, and the error names
+// the holder.
+test("a port held on any address is refused before listening, the holder named", async (t) => {
+  const root = tree(t);
+  const fake = () => [{ pid: 4242, command: "node", name: "*:18999" }];
+  await assert.rejects(() => ensureServer({ port: 18999, root, listeners: fake }), /port 18999 is busy: node \(pid 4242\) on \*:18999; the harness never shares/);
+  // lsof's -F output, parsed; nothing listening is [], lsof absent is null
+  const out = "p123\ncvite\nf20\nn[::1]:5173\np456\ncnode\nf21\nn*:5173\n";
+  assert.deepEqual(portListeners(5173, () => out), [{ pid: 123, command: "vite", name: "[::1]:5173" }, { pid: 456, command: "node", name: "*:5173" }]);
+  assert.deepEqual(portListeners(5173, () => { const e = new Error("none"); e.status = 1; throw e; }), []);
+  assert.equal(portListeners(5173, () => { const e = new Error("spawn lsof ENOENT"); e.code = "ENOENT"; throw e; }), null);
+});
+
+test("a real server on the wildcard address blocks the harness's 127.0.0.1 server", async (t) => {
+  if (portListeners(1) === null) return t.skip("lsof unavailable");
+  const root = tree(t);
+  const port = 19000 + (process.pid % 1000);
+  const { createServer } = await import("node:http");
+  const other = createServer((_, res) => res.end("other"));
+  await new Promise((resolve) => other.listen(port, "0.0.0.0", resolve));
+  t.after(() => other.close());
+  // the holder is this process: its pid (lsof's command name is the
+  // thread's on Linux, "MainThread", and "node" on macOS)
+  await assert.rejects(() => ensureServer({ port, root }), new RegExp(`port ${port} is busy: \\S+ \\(pid ${process.pid}\\) on \\*:${port};`));
 });
