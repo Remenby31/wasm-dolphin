@@ -53,7 +53,8 @@ import {
   findPublishedAtomicPassEnd,
   isIntentionalBlankWgpuProbe,
   selectAtomicReplayLimit,
-  summarizeWgpuReplayRange
+  summarizeWgpuReplayRange,
+  wgpuMappedStagingSlotCountOf
 } from "./wgpu-replay-diagnostics.js";
 import {
   WgpuRendererRuntime,
@@ -2862,9 +2863,7 @@ async function loadCore({
     wgpuGeometryPackEnabled && Boolean(requestedWgpuGeometryRange);
   wgpuUploadArenaMiB = Number(requestedWgpuUploadArenaMiB) === 64 ? 64 : 32;
   wgpuUploadTransport = requestedWgpuUploadTransport === "mapped" ? "mapped" : "queue";
-  wgpuMappedStagingSlotCount = Number(requestedWgpuMappedStagingSlotCount) === 4
-    ? 4
-    : WGPU_MAPPED_STAGING_SLOT_COUNT;
+  wgpuMappedStagingSlotCount = wgpuMappedStagingSlotCountOf(requestedWgpuMappedStagingSlotCount);
   if (requestedWgpuSparseUbo && wgpuUploadTransport !== "mapped") {
     throw new Error("wgpuubosparse=1 requires wgpuuploadtransport=mapped");
   }

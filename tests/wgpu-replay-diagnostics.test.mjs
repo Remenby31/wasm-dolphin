@@ -34,16 +34,24 @@ import {
   requestedWgpuUboMetrics,
   requestedWgpuUniformFast,
   selectAtomicReplayLimit,
-  summarizeWgpuReplayRange
+  summarizeWgpuReplayRange,
+  wgpuMappedStagingSlotCountOf
 } from "../src/wgpu-replay-diagnostics.js";
 
-test("mapped staging slot count is strict and defaults to three", () => {
+test("mapped staging slot count is strict, 3 to 8, and defaults to three", () => {
   assert.equal(requestedWgpuMappedStagingSlotCount(""), 3);
   assert.equal(requestedWgpuMappedStagingSlotCount("?wgpustagingslots=3"), 3);
   assert.equal(requestedWgpuMappedStagingSlotCount("?wgpustagingslots=4"), 4);
+  assert.equal(requestedWgpuMappedStagingSlotCount("?wgpustagingslots=6"), 6);
+  assert.equal(requestedWgpuMappedStagingSlotCount("?wgpustagingslots=8"), 8);
+  assert.equal(requestedWgpuMappedStagingSlotCount("?wgpustagingslots=9"), 3);
+  assert.equal(requestedWgpuMappedStagingSlotCount("?wgpustagingslots=2"), 3);
   assert.equal(requestedWgpuMappedStagingSlotCount("?wgpustagingslots=04"), 3);
-  assert.equal(requestedWgpuMappedStagingSlotCount("?wgpustagingslots=6"), 3);
+  assert.equal(requestedWgpuMappedStagingSlotCount("?wgpustagingslots=4.5"), 3);
   assert.equal(requestedWgpuMappedStagingSlotCount("?wgpustagingslots=garbage"), 3);
+  // The adapter and the worker get a number: the same rule.
+  for (const n of [3, 4, 5, 6, 7, 8]) assert.equal(wgpuMappedStagingSlotCountOf(n), n);
+  for (const v of [undefined, null, 0, 2, 9, 4.5, NaN, "x"]) assert.equal(wgpuMappedStagingSlotCountOf(v), 3);
 });
 
 test("mapped staging timing stride is strict and preserves exact timing by default", () => {

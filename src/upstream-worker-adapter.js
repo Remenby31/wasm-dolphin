@@ -1,5 +1,6 @@
 import { DEFAULT_UPSTREAM_CORE_SHA256 } from "./default-core.js";
 import { widenU32Counter } from "./u32-counter.js";
+import { wgpuMappedStagingSlotCountOf } from "./wgpu-replay-diagnostics.js";
 import {
   DEFAULT_UPSTREAM_CORE_URL,
   isOneWayWorkerRequestType,
@@ -325,7 +326,7 @@ export class UpstreamWorkerAdapter {
     this.wgpuGeometryRange = this.wgpuGeometryPack && Boolean(wgpuGeometryRange);
     this.wgpuUploadArenaMiB = Number(wgpuUploadArenaMiB) === 64 ? 64 : 32;
     this.wgpuUploadTransport = wgpuUploadTransport === "mapped" ? "mapped" : "queue";
-    this.wgpuMappedStagingSlotCount = Number(wgpuMappedStagingSlotCount) === 4 ? 4 : 3;
+    this.wgpuMappedStagingSlotCount = wgpuMappedStagingSlotCountOf(wgpuMappedStagingSlotCount);
     this.wgpuMappedStageFast = Boolean(wgpuMappedStageFast);
     this.wgpuMappedStageTimingStride = Number(wgpuMappedStageTimingStride) === 64 ? 64 : 1;
     this.wgpuMappedDrainCoalescing = Boolean(wgpuMappedDrainCoalescing);
