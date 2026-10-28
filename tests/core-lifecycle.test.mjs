@@ -167,7 +167,10 @@ test("the worker waits for a core that takes the state before loading it, and re
   const load = worker.slice(worker.indexOf("async function loadStateFileNow("), worker.indexOf("async function handleMessage("));
   assert.ok(load.indexOf("await waitCoreReadyForState(") >= 0 && load.indexOf("await waitCoreReadyForState(") < load.indexOf("api.loadStateFile(path)"));
   assert.match(load, /error: wait\.reason === "expired" \? `core not running \(\$\{coreState \|\| "unknown"\}\) after 15 s`/);
-  assert.match(load, /const gone = \(\) => \(!coreBoot\.accepted \? "no game booted" : coreStopping \? "core stopping"/);
+  // Behaviour (boot in flight, another boot, no boot): jit-pause-timing.test.mjs.
+  assert.match(load, /if \(coreBootInFlight\) return generation === null && mountSeq === joined \? null : "another boot meanwhile";/);
+  assert.match(load, /\(\) => \(coreBootInFlight && generation === null \? "Starting" : api\?\.getCoreStateName\?\.\(\) \?\? ""\)/);
+  assert.match(worker, /case "mountFile":\n\s+return mountFileTracked\(payload\.file\);/);
   assert.match(worker, /case "loadStateFile":\n\s+return loadStateFileRequest\(payload\);/);
   const browser = await readFile(new URL("../harness/lib/browser.mjs", import.meta.url), "utf8");
   assert.doesNotMatch(browser, /retrySec/);
