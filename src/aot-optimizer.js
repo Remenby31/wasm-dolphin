@@ -143,11 +143,16 @@ export class AotOptimizer extends EventTarget {
       return null;
     };
     const score = new Map();
+    let samples = 0, outside = 0;
     for (const [pc, n] of p.hits) {
       const u = unitAt(pc >>> 0);
+      samples += n || 1;
       if (u) score.set(u, (score.get(u) ?? 0) + (n || 1));
+      else outside += n || 1;
     }
     p.score = score;
+    // samples since the load outside every planned region (the probe's read)
+    this.priorityCoverage = { samples, outside, pcs: p.hits.length };
     return score;
   }
 

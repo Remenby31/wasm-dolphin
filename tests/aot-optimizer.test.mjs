@@ -397,6 +397,17 @@ test("aot optimizer: prioritize() moves the modules covering sampled PCs ahead, 
   assert.deepEqual(translated.slice(2), units.slice(0, -2), "the others keep their order");
 });
 
+// Diagnostics: the share of the samples since a load that no planned region
+// covers (would a block JIT limited to them compete with the regions?).
+test("aot optimizer: priorityCoverage counts the samples outside every planned region", async () => {
+  const { o } = optimizer();
+  await o.status();
+  const pc = o.regions.at(-1).members[0].ranges[0][0];
+  o.prioritize([[pc, 5], [pc + 4, 1], [0x81700000, 9]]);
+  o.priorityScore();
+  assert.deepEqual(o.priorityCoverage, { samples: 15, outside: 9, pcs: 3 });
+});
+
 test("aot optimizer: prioritize() during a run reorders only what is left", async () => {
   const translated = [];
   const { o } = optimizer();

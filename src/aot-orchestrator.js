@@ -284,7 +284,10 @@ export function createAotFirstLaunch({
 
     // The probe's read: events since the boot, or since the last drain.
     progress({ drain = false } = {}) {
-      const out = { schema: AOT_PROGRESS_SCHEMA, state: running ? "running" : lastState, disc: discKey, run, events: events.slice() };
+      const out = { schema: AOT_PROGRESS_SCHEMA, state: running ? "running" : lastState, disc: discKey, run, events: events.slice(),
+        // diagnostics: the translator's time, and the share of the PCs
+        // sampled since a state load that no planned region covers
+        translator: translator?.stats?.() ?? null, coverage: optimizer?.priorityCoverage ?? null };
       if (drain) events = [];
       return out;
     },
@@ -478,17 +481,30 @@ export function coreRegionTranslator(m, { mask, helperNames, maxBlocks = 64, max
   yieldNow = yieldToEventLoop, functionCap = 0 } = {}) {
   if (typeof m?._DolphinWeb_AotTranslate !== "function") return null;
   const names = helperNames ?? coreAssembleOptions(m)?.helperNames ?? [];
+  // Where the translator's time goes (the probe's read, through the flow's
+  // progress): translating, and yielded back to the worker (the event loop,
+  // and the disc-quiet waits of discAwareYield).
+  const stats = { calls: 0, busyMs: 0, yieldedMs: 0, yields: 0 };
+  const yielded = async () => {
+    const y0 = now();
+    await yieldNow();
+    stats.yieldedMs += now() - y0;
+    stats.yields++;
+  };
   return {
     unitContinuationBytes: REGION_UNIT_CONTINUATION_MAX_BYTES,
+    stats: () => ({ ...stats, discWaitMs: yieldNow.waitedMs ?? null }),
     async translate(batch) {
-      await yieldNow();
+      stats.calls++;
+      await yielded();
       let t0 = now();
       const out = [];
       // The continuations of a function also yield to the worker once the
       // slice is spent (review of #138): it serves the core's disc reads.
       const slice = async () => {
         if (now() - t0 < sliceMs) return;
-        await yieldNow();
+        stats.busyMs += now() - t0;
+        await yielded();
         t0 = now();
       };
       // Continuation bytes left for this module (a unit; review of #138):
@@ -507,6 +523,7 @@ export function coreRegionTranslator(m, { mask, helperNames, maxBlocks = 64, max
         out.push(r);
         if (r.reason === "budget" || r.reason === "not-ready") break;
       }
+      stats.busyMs += now() - t0;
       return out;
     }
   };
