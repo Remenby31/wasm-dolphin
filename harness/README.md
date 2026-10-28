@@ -144,6 +144,17 @@ node harness/probes/race-perf.mjs --iso ../roms/<disc>.iso --state ../measures/h
   not the dominant number of vsyncs: a steady 30 fps is not judder),
   `offOneVsyncPct`, `noUpdatePct`. Per side: `cold.displayedPerSecond`,
   `displayedP95`, `droppedPerMin`, `judderPct`, `offOneVsyncPct`.
+- `--phase steady|postload`: which part of the scene the window sees. The
+  first ~15-20 s after a state load are a transient (regions installing,
+  pipelines and GPU caches cold, the replay pump busy). On the Spark at 120 Hz
+  a window 5 s after the load gave 23-38 pictures a second, ~200 ms display
+  holes and 11-21 ms of GPU per present; 20 s after it, 60, none and 3 ms
+  (2026-10-28, `20261028/x11-bis-oldnew-w20`). The "Spark display holes" of
+  2026-10-27/28 were this transient, and a state load 2.5 s earlier (#325)
+  then looked like a 37 -> 24 regression. `steady` refuses a warmup under
+  20 s; `postload` measures the transient on purpose (warmup 0, window 15 s by
+  default). Without `--phase`, the summary's `phase` follows the warmup, and
+  `--display` under 20 s is warned about.
 - `--unique-frames secs`: unique images, in a window of its own after the
   speed window (its GPU readbacks never weigh on the speed). At each WebGPU
   present the worker reads back 8 full rows of the presented rectangle,
