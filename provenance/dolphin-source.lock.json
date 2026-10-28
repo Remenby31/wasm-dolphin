@@ -25,7 +25,7 @@
       "commit": "01e0577914a75a2569c846778c2f93aa8e6feddd"
     }
   },
-  "patchSeriesSha256": "2284a020798f689cf92aab637f2731b4bce47aaa63c952d2554443ba1f89fdf2",
+  "patchSeriesSha256": "bf0a88347e6a99e62014b937dc3dda5766a14ffefd05fc209bb2c587c99fc674",
   "patches": [
     {
       "order": 1,
@@ -1072,8 +1072,8 @@
       "cwd": ".",
       "hashMode": "lf-normalized",
       "path": "patches/dolphin-wasm/snapshot/0188-gp-int-inline.patch",
-      "size": 6699,
-      "sha256": "47af15494940ea57e32d22bd5ca62aba4704f090b93c1486b83515a901ae521e"
+      "size": 7504,
+      "sha256": "1bae04d056f584dff2a4d51cb150e4065d1b5b345d1babbccf00160c5e399839"
     },
     {
       "order": 132,

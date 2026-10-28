@@ -116,15 +116,13 @@ for (const [name, mask] of [["mode off", PRODUCTION_DISABLE_MASK], ["mode on", P
     // other mirrors (0x8C008000 under DBAT0, 0x0C008000 in real mode) take the
     // same in-line test, as the float stores' does; the test CPU has no BATs
     // set up, so its interpreter would not reach the pipe there to compare.
-    // Under 32 bytes nothing is flushed: state, RAM and the pending bytes,
-    // exactly.
-    for (const [hi, n] of [[0xcc00, 2], [0xcc00, 4]]) {
-      const left = check(program(hi, n), mask, 0x188 + n);
-      assert.equal(left.n, 7 * n, `${hi.toString(16)} x${n}: the bytes pending`);
+    // Flushed at every 32-byte burst as the interpreter does: state, RAM
+    // (the bursts) and the pending bytes, exactly, under and over 32 bytes.
+    for (const n of [2, 4, 5, 9, 20]) {
+      const left = check(program(0xcc00, n), mask, 0x188 + n);
+      assert.equal(left.n, (7 * n) % 32, `x${n}: what the 32-byte bursts left`);
     }
-    // Over 32 bytes the JIT flushes late (as for float stores: near the end of
-    // the pipe's buffer, GPFifo::FastCheckGatherPipe) and the interpreter at
-    // every 32 bytes: the stream sent is compared, bursts flushed then.
+    // And the stream at the CPU FIFO (bursts kept in order at RAM 1 MiB).
     for (const n of [5, 9, 20]) streams(program(0xcc00, n), mask, 0x1890 + n);
     // A store to another hardware page goes through the import as before.
     check(program(0xcc00, 1, [lis(7, 0xcc00), stw(4, 7, 0x2000)]), mask, 0x1880);

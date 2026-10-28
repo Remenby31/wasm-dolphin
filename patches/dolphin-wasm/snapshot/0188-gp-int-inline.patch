@@ -16,7 +16,7 @@ diff --git a/Source/Core/Core/PowerPC/CachedInterpreter/CachedInterpreter.cpp b/
 +// 0188: ENABLE polarity (default-off; ?gpint=1). An integer store (stw, sth,
 +// stb and their forms) outside RAM tests the gather pipe address before the
 +// write_u32/u16/u8 import, as the float stores do, and appends to the pipe in
-+// line there (then the "pipe full" check), instead of MMU::Write.
++// line there (then a flush at every 32-byte burst), instead of MMU::Write.
 +constexpr u32 DOLPHIN_WEB_ENABLE_GP_INT_INLINE = 1u << 19;
  constexpr u32 REGSHAPE_X64_GPR_CAP = 4;
  // §28ce burst smearing: when ENABLED (gate bit CLEARED), TryWriteWasmBlock
@@ -60,10 +60,12 @@ diff --git a/Source/Core/Core/PowerPC/CachedInterpreter/CachedInterpreter.cpp b/
  extern "C" void DolphinWeb_CachedInterpreterFastCheckGatherPipe(int state_ptr, u32 unused_a,
                                                                   u32 unused_b)
  {
-@@ -4956,6 +4994,72 @@
+@@ -4954,6 +4992,87 @@
+ {
+   EmitReadU16MaybeDirect(body, layout);
    EmitSignExtendI16(body);
- }
- 
++}
++
 +bool RegionGuardsActive();  // 0188: t_region_guards, defined further down
 +
 +// 0188: the slow arm of an integer store (value in local 2, EA in local 1):
@@ -71,8 +73,8 @@ diff --git a/Source/Core/Core/PowerPC/CachedInterpreter/CachedInterpreter.cpp b/
 +// stores' test, EmitGatherPipeFloatStoreCondition, without MSR.FP: the
 +// physical page 0x0C008000 under the standard BATs or in real mode, LE off),
 +// else the write import. MMU::Write takes the same page to GPFifo::Write*
-+// whatever the alignment; the pipe is flushed at 32 bytes as after a float
-+// store (FastCheckGatherPipe: GPFifo::CheckGatherPipe without the JIT's
++// whatever the alignment; the pipe is flushed at every 32 bytes as
++// GPFifo::Write* does (FastCheckGatherPipe: CheckGatherPipe without the JIT's
 +// recompile hint).
 +void EmitWriteSlowArm(std::vector<u8>& body, const WasmStateLayout& layout, u32 size,
 +                      u32 import_index)
@@ -124,16 +126,29 @@ diff --git a/Source/Core/Core/PowerPC/CachedInterpreter/CachedInterpreter.cpp b/
 +    body.push_back(0x6a);
 +    EmitStateStoreU32Suffix(body, layout.gather_pipe_ptr_offset);
 +  }
-+  EmitFastCheckGatherPipeIfFull(body, layout);
++  // Flushed at every 32-byte burst, as GPFifo::Write* does (CheckGatherPipe),
++  // not near the end of the pipe's buffer as after a float store: games write
++  // their sync commands (tokens, draw done) with integer stores and then wait
++  // for the GPU, which must have received them (measured: with the late
++  // flush no game frame came, rendering frozen).
++  EmitStateLoadU32(body, layout.gather_pipe_ptr_offset);
++  EmitStateLoadU32(body, layout.gather_pipe_base_ptr_offset);
++  body.push_back(0x6b);  // i32.sub
++  EmitI32Const(body, GPFifo::GATHER_PIPE_SIZE);
++  body.push_back(0x4f);  // i32.ge_u
++  body.insert(body.end(), {0x04, 0x40});  // if
++  EmitLocalGet(body, 0);
++  EmitI32Const(body, 0);
++  EmitI32Const(body, 0);
++  EmitCallImport(body, WASM_IMPORT_FASTCHECK_GPFIFO_INDEX);
++  body.push_back(0x0b);  // end
 +  body.push_back(0x05);  // else
 +  call();
 +  body.push_back(0x0b);  // end
-+}
-+
+ }
+ 
  void EmitWriteU32MaybeDirect(std::vector<u8>& body, const WasmStateLayout& layout)
- {
-   EmitLocalGet(body, 1);
-@@ -4977,10 +5081,7 @@
+@@ -4977,10 +5096,7 @@
    body.push_back(0x00);
    EmitU32Leb(body, 0);
    body.push_back(0x05);
@@ -145,7 +160,7 @@ diff --git a/Source/Core/Core/PowerPC/CachedInterpreter/CachedInterpreter.cpp b/
    body.push_back(0x0b);
  }
  
-@@ -5003,10 +5104,7 @@
+@@ -5003,10 +5119,7 @@
    body.push_back(0x00);
    EmitU32Leb(body, 0);
    body.push_back(0x05);
@@ -157,7 +172,7 @@ diff --git a/Source/Core/Core/PowerPC/CachedInterpreter/CachedInterpreter.cpp b/
    body.push_back(0x0b);
  }
  
-@@ -5031,10 +5129,7 @@
+@@ -5031,10 +5144,7 @@
    body.push_back(0x00);
    EmitU32Leb(body, 0);
    body.push_back(0x05);
@@ -169,7 +184,7 @@ diff --git a/Source/Core/Core/PowerPC/CachedInterpreter/CachedInterpreter.cpp b/
    body.push_back(0x0b);
  }
  
-@@ -5341,6 +5436,10 @@
+@@ -5341,6 +5451,10 @@
  // its ops take them for granted instead of testing them one by one. GQRs
  // (mtspr GQR is direct) are still tested per op.
  thread_local bool t_region_guards = false;
