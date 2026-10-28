@@ -11,9 +11,10 @@ import {
 const read = (path) => readFile(new URL(path, import.meta.url), "utf8");
 
 test("?ir= and ?aniso= parse to the core's scale and log2 anisotropy, defaults native and the game's", () => {
-  assert.deepEqual(requestedEnhancements(""), { internalResolution: 1, maxAnisotropy: -1 });
-  assert.deepEqual(requestedEnhancements("?ir=3&aniso=16"), { internalResolution: 3, maxAnisotropy: 4 });
-  assert.deepEqual(requestedEnhancements("?ir=4&aniso=1"), { internalResolution: 4, maxAnisotropy: 0 });
+  assert.deepEqual(requestedEnhancements(""), { internalResolution: 1, maxAnisotropy: -1, widescreen: false });
+  assert.deepEqual(requestedEnhancements("?ir=3&aniso=16"), { internalResolution: 3, maxAnisotropy: 4, widescreen: false });
+  assert.deepEqual(requestedEnhancements("?ir=4&aniso=1&widescreen=1"), { internalResolution: 4, maxAnisotropy: 0, widescreen: true });
+  assert.equal(requestedEnhancements("?widescreen=yes").widescreen, false);
   for (const bad of ["0", "5", "2.5", "x", "-1"]) assert.equal(normalizeInternalResolution(bad), 1, bad);
   for (const bad of [0, 3, 32, "x", null]) assert.equal(anisotropyToCore(bad), -1, String(bad));
   assert.deepEqual([1, 2, 4, 8, 16].map(anisotropyToCore), [0, 1, 2, 3, 4]);
@@ -53,7 +54,9 @@ test("setEnhancements asks the worker while a game runs and keeps the values for
   adapter.loaded = true;
   adapter.request = async (type, payload) => { sent.push([type, payload]); return { applied: true, internalResolution: 4 }; };
   assert.deepEqual(await adapter.setEnhancements({ internalResolution: 4 }), { applied: true, internalResolution: 4 });
-  assert.deepEqual(sent, [["setEnhancements", { internalResolution: 4, maxAnisotropy: -1 }]]);
+  assert.deepEqual(sent, [["setEnhancements", { internalResolution: 4, maxAnisotropy: -1, widescreen: false }]]);
+  await adapter.setEnhancements({ internalResolution: 1, widescreen: true });
+  assert.deepEqual(sent[1], ["setEnhancements", { internalResolution: 1, maxAnisotropy: -1, widescreen: true }]);
 });
 
 // The canvas follows the backbuffer the core lays the presenter out on: the
@@ -63,7 +66,7 @@ test("the worker resizes the canvas on the core's BackbufferSize command (0168)"
   const worker = await read("../src/upstream-discio-worker.js");
   assert.match(worker, /const WGPU_CMD_OP_BACKBUFFER_SIZE = 29;/);
   assert.match(worker, /case WGPU_CMD_OP_BACKBUFFER_SIZE:\n[^]*?resizeWgpuBackbuffer\(u32\[recWord \+ 1\], u32\[recWord \+ 2\]\);/);
-  assert.match(worker, /if \(!resizeCanvasBackbuffer\(renderCanvas, renderGpu, width, height, usage\)\) return;/);
+  assert.match(worker, /if \(!resizeCanvasBackbuffer\(renderCanvas, renderGpu, size\.width, size\.height, usage\)\) return;/);
   assert.match(worker, /case "setEnhancements": \{[^]*?_DolphinWeb_SetEnhancements/);
   const patch = await read("../patches/dolphin-wasm/snapshot/0168-webgpu-internal-resolution.patch");
   assert.match(patch, /\+  BackbufferSize = 29,/);
@@ -103,7 +106,7 @@ test("the worker hands the core a normalized scale and log2 anisotropy, whatever
 // the core log2: one conversion, in core-host.
 test("core-host's setEnhancements takes the anisotropy as a multiplier, like ?aniso=", async () => {
   const host = await read("../src/core-host.js");
-  assert.match(host, /async setEnhancements\(\{ internalResolution, anisotropy \} = \{\}\)/);
+  assert.match(host, /async setEnhancements\(\{ internalResolution, anisotropy, widescreen \} = \{\}\)/);
   assert.match(host, /this\.enhancements\.maxAnisotropy = anisotropyToCore\(anisotropy\);/);
   const worker = await read("../src/upstream-discio-worker.js");
   assert.match(worker, /const internalResolution = set\(\.\.\.enhancementCoreArgs\(payload, wgpuScaleCeiling\(\)\)\);/);
@@ -230,4 +233,36 @@ test("the core reports malloc's use of the heap, read by a harness-only request"
   const worker = await read("../src/upstream-discio-worker.js");
   assert.match(worker, /case "validationHeapStats": \{\n(?: {6}\/\/[^\n]*\n)+ {6}if \(!harnessEnabled\) return \{ error: "harness hooks are off" \};/);
   assert.match(worker, /headroom: heapBytes - top \+ free/);
+});
+
+// Widescreen (0178): Dolphin's generic hack with the presenter at 16:9, and
+// a 16:9 backbuffer the page is told about like any other size. Off is the
+// stretch-to-4:3 the hardware path always had.
+test("widescreen reaches the core at boot and while a game runs; the backbuffer is 16:9 with the hack (0178)", async () => {
+  const { UpstreamWorkerAdapter } = await import("../src/upstream-worker-adapter.js");
+  assert.equal(new UpstreamWorkerAdapter({ widescreen: true }).widescreen, true);
+  assert.equal(new UpstreamWorkerAdapter().widescreen, false);
+  const host = await read("../src/core-host.js");
+  assert.match(host, /\n {12}widescreen: this\.enhancements\.widescreen,\n/);
+  const adapterSource = await read("../src/upstream-worker-adapter.js");
+  assert.match(adapterSource, /\n {6}widescreen: this\.widescreen,\n/);
+  const worker = await read("../src/upstream-discio-worker.js");
+  assert.match(worker, /\n {8}widescreen: payload\.widescreen,\n/);
+  assert.match(worker, /dolphinWidescreen: widescreen === true,/);
+  assert.match(worker, /setWide\(payload\.widescreen \? 1 : 0\) === 1/);
+  const core = await read("../core/upstream/dolphin_web_core.cpp");
+  assert.match(core, /Module\['dolphinWidescreen'\]/);
+  assert.match(core, /int DolphinWeb_SetWidescreen\(int on\)/);
+  // Stretch stays: ForceWide pillarboxed the 16:9 picture (review of #300).
+  assert.match(core, /Config::SetBase\(Config::GFX_WIDESCREEN_HACK, wide\);\n {2}return wide \? 1 : 0;/);
+  assert.doesNotMatch(core, /AspectMode::ForceWide/);
+  // The engine page's screen follows the picture's aspect.
+  const app = await read("../src/app.js");
+  assert.match(app, /if \(host\.enhancements\?\.widescreen\) select\.value = "16:9";/);
+  assert.match(app, /window\.addEventListener\("wgpuaspect"/);
+  const patch = await read("../patches/dolphin-wasm/snapshot/0178-webgpu-widescreen-backbuffer.patch");
+  assert.match(patch, /\+  const u32 width = g_ActiveConfig\.bWidescreenHack \? \(\(2560 \* scale \+ 2\) \/ 3\) & ~1u : 640 \* scale;/);
+  assert.match(patch, /CONFIG_CHANGE_BIT_TARGET_SIZE \| CONFIG_CHANGE_BIT_ASPECT_RATIO/);
+  // The widths the formula gives: 16:9 at 480N lines, even.
+  assert.deepEqual([1, 2, 3, 4].map((n) => Math.floor((2560 * n + 2) / 3) & ~1), [854, 1706, 2560, 3414]);
 });

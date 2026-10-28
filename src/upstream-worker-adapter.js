@@ -116,6 +116,8 @@ export class UpstreamWorkerAdapter {
     memcardSlotB = false,
     internalResolution = 1,
     maxAnisotropy = -1,
+    widescreen = false,
+    displayFilter = null,
     efbAccess = false,
     xfbNoDecode = false,
     fifoLog = false,
@@ -255,6 +257,8 @@ export class UpstreamWorkerAdapter {
     this.memcardSlotB = Boolean(memcardSlotB);
     this.internalResolution = Number(internalResolution) || 1;
     this.maxAnisotropy = Number.isInteger(maxAnisotropy) ? maxAnisotropy : -1;
+    this.widescreen = widescreen === true;
+    this.displayFilter = displayFilter && typeof displayFilter === "object" ? { ...displayFilter } : null;
     this.efbAccess = Boolean(efbAccess);
     this.xfbNoDecode = Boolean(xfbNoDecode);
     this.fifoLog = Boolean(fifoLog);
@@ -516,6 +520,8 @@ export class UpstreamWorkerAdapter {
       memcardSlotB: this.memcardSlotB,
       internalResolution: this.internalResolution,
       maxAnisotropy: this.maxAnisotropy,
+      widescreen: this.widescreen,
+      displayFilter: this.displayFilter,
       efbAccess: this.efbAccess,
       xfbNoDecode: this.xfbNoDecode,
       fifoLog: this.fifoLog,
@@ -635,6 +641,8 @@ export class UpstreamWorkerAdapter {
     }
     this.applyMetadata(response);
     this.loaded = true;
+    // A display box measured while the load ran (sent with the load before).
+    if (this.displayFilter) this.request("setDisplayFilter", this.displayFilter).catch(() => {});
     this.userData = response.userData ?? null;
     const saveWarning = describeUserDataStatus(this.userData);
     if (saveWarning) this.onStatus(saveWarning);
@@ -915,14 +923,25 @@ export class UpstreamWorkerAdapter {
   }
 
   // Patch 0168: internal resolution and anisotropy while a game runs.
-  async setEnhancements({ internalResolution = 1, maxAnisotropy = -1 } = {}) {
+  // Patch 0178: widescreen too.
+  async setEnhancements({ internalResolution = 1, maxAnisotropy = -1, widescreen = this.widescreen } = {}) {
     this.internalResolution = Number(internalResolution) || 1;
     this.maxAnisotropy = Number.isInteger(maxAnisotropy) ? maxAnisotropy : -1;
+    this.widescreen = widescreen === true;
     if (!this.loaded) return { applied: false, reason: "core-not-loaded" };
     return this.request("setEnhancements", {
       internalResolution: this.internalResolution,
-      maxAnisotropy: this.maxAnisotropy
+      maxAnisotropy: this.maxAnisotropy,
+      widescreen: this.widescreen
     });
+  }
+
+  // Display filter (src/wgpu-display-filter.js): sharpness, fit, display
+  // box; merged into what the next boot gets, and sent to a running worker.
+  async setDisplayFilter(filter = {}) {
+    this.displayFilter = { ...(this.displayFilter ?? {}), ...filter };
+    if (!this.loaded) return { applied: false, reason: "core-not-loaded" };
+    return this.request("setDisplayFilter", this.displayFilter);
   }
 
   setAudioMuted(muted) {
