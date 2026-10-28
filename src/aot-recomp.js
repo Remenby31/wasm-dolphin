@@ -1,6 +1,7 @@
 // Ahead-of-time discovery for one disc, from the browser: read the DOL and
 // RELs from the user's disc, merge the profile of earlier sessions and an
 // optional hint sheet, and return the compilation plan (docs/aot-plan.md).
+import { asDiscBlob } from "./remote-disc.js";
 import { readDiscExecutables } from "./aot-disc.js";
 import { GuestImage, imageFromDol } from "./aot-image.js";
 import { discover } from "./aot-discovery.js";
@@ -72,5 +73,7 @@ export function planApploader({ address, entry, bytes }, options = {}) {
 
 // Disc read from a File/Blob in the browser.
 export function fileReader(file) {
-  return async (offset, length) => new Uint8Array(await file.slice(offset, offset + length).arrayBuffer());
+  // A remote disc's descriptor (measurements): read by ranges, loopback only.
+  const blob = asDiscBlob(file);
+  return async (offset, length) => new Uint8Array(await blob.slice(offset, offset + length).arrayBuffer());
 }
