@@ -91,8 +91,14 @@ export const MULTI_ARGS = ["--counters", "--aot-seed", "--gate-sec", "60", "--is
 export const LAYOUT_FIX = "109a4ce61a9599460761f7412440bf889ff00a54";
 
 // The arms of a multi: three, one per lane.
-export function multiArms(baseline, candidates) {
+// Two lanes (--multi-lanes with two core sets): baseline and candidate at
+// once, the lanes swapped every run.
+export function multiArms(baseline, candidates, { lanes = 3 } = {}) {
   if (!baseline) throw new Error("--multi needs --baseline");
+  if (lanes === 2) {
+    if (candidates.length !== 1) throw new Error(`--multi on two lanes: one --candidate (got ${candidates.length})`);
+    return [baseline, candidates[0]];
+  }
   if (candidates.length === 1) return [baseline, candidates[0], baseline];
   if (candidates.length === 2) return [baseline, ...candidates];
   throw new Error(`--multi: one or two --candidate (got ${candidates.length})`);
@@ -576,7 +582,7 @@ async function multi(host, values, rawPositionals) {
   for (const f of ["--iso", "--state", "--out", "--port", "--runs", "--arm", "--lanes", "--lock"]) {
     if (positionals.includes(f)) throw new Error(`${f} is set by spark-run --multi, not after --`);
   }
-  const specs = multiArms(values.baseline, values.candidate);
+  const specs = multiArms(values.baseline, values.candidate, { lanes: values["multi-lanes"] == null ? 3 : String(values["multi-lanes"]).split(";").length });
   const lanes = multiLanes(values["multi-lanes"], specs.length); // refused before anything is pushed
   const { date, name } = runId({ name: values.name, candidate: values.candidate.join("+"), baseline: values.baseline });
   if (existsSync(path.join(MEASURES, date, name))) throw new Error(`${path.join(MEASURES, date, name)} exists: pick another --name`);

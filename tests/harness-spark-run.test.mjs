@@ -312,7 +312,11 @@ test("spark-run --multi: a KPI scene is measured with its pinned protocol (heavy
 });
 
 test("spark-run --multi-lanes: one lane per arm, disjoint, off node's cores; the three-lane default needs three arms", async () => {
-  const { multiLanes, MULTI_LANES, multiRaceArgs } = await import("../harness/remote/spark-run.mjs");
+  const { multiArms, multiLanes, MULTI_LANES, multiRaceArgs } = await import("../harness/remote/spark-run.mjs");
+  // two lanes: baseline and candidate, no third arm
+  assert.deepEqual(multiArms("base", ["cand"], { lanes: 2 }), ["base", "cand"]);
+  assert.deepEqual(multiArms("base", ["cand"]), ["base", "cand", "base"]);
+  assert.throws(() => multiArms("base", ["c1", "c2"], { lanes: 2 }), /two lanes: one --candidate/);
   assert.equal(multiLanes(null, 3), MULTI_LANES);
   assert.throws(() => multiLanes(null, 2), /--multi with 2 arms: --multi-lanes/);
   // the two pair lanes' big cores, one arm each (simultaneous A/B, lanes swapped by race-multi)
