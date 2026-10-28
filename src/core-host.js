@@ -78,9 +78,11 @@ export class EmulatorHost {
     this.onFrame = onFrame;
     this.onStatus = onStatus;
     this.onMode = onMode;
-    // { internalResolution, fallback, reason, detail }: the WebGPU device was
-    // lost (the game stops). fallback 1: it was above 1x, the next boot of
-    // this host and every setEnhancements stay at 1x.
+    // { internalResolution, fallback, reason, detail, cause }: the WebGPU
+    // renderer stopped (the picture would freeze): cause "device-lost"
+    // (fallback 1 when it was above 1x: the next boot of this host and every
+    // setEnhancements stay at 1x) or "renderer-error" (fallback null, restart
+    // at the same scale).
     this.onGpuDeviceLost = onGpuDeviceLost;
 
     this.demo = null;
@@ -987,14 +989,20 @@ export class EmulatorHost {
       : adapter;
   }
 
-  handleGpuDeviceLost({ internalResolution = 1, reason = "unknown", detail = "" } = {}) {
-    const fallback = internalResolution > 1 ? 1 : null;
+  // cause "device-lost": the GPU went (memory may be why), the scale falls
+  // to 1x. "renderer-error": a fatal replay error on a live device (the
+  // scale is not why): the page restarts at the same scale, fallback null.
+  handleGpuDeviceLost({ internalResolution = 1, reason = "unknown", detail = "", cause = "device-lost" } = {}) {
+    const deviceLost = cause !== "renderer-error";
+    const fallback = deviceLost && internalResolution > 1 ? 1 : null;
     if (fallback) {
       this.scaleLostCeiling = fallback;
       this.enhancements.internalResolution = fallback;
     }
-    this.onStatus(`WebGPU device lost at ${internalResolution}x (${reason})${fallback ? "; internal resolution back to 1x" : ""}`);
-    this.onGpuDeviceLost({ internalResolution, fallback, reason, detail });
+    this.onStatus(deviceLost
+      ? `WebGPU device lost at ${internalResolution}x (${reason})${fallback ? "; internal resolution back to 1x" : ""}`
+      : `WebGPU renderer failed at ${internalResolution}x (${reason}); restart at the same scale`);
+    this.onGpuDeviceLost({ internalResolution, fallback, reason, detail, cause: deviceLost ? "device-lost" : "renderer-error" });
   }
 
   setAudioMuted(muted) {

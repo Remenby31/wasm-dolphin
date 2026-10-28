@@ -186,7 +186,7 @@ test("a device lost above 1x brings the host back to 1x for its next boot and ev
   const seen = [];
   const adapter = new UpstreamWorkerAdapter({ onGpuDeviceLost: (e) => seen.push(e) });
   adapter.handleMessage({ type: "wgpu-device-lost", internalResolution: 4, reason: "unknown", detail: "oom" });
-  assert.deepEqual(seen, [{ internalResolution: 4, reason: "unknown", detail: "oom" }]);
+  assert.deepEqual(seen, [{ internalResolution: 4, reason: "unknown", detail: "oom", cause: "device-lost" }]);
 
   const { EmulatorHost } = await import("../src/core-host.js");
   const lost = [];
@@ -210,7 +210,7 @@ test("a device lost above 1x brings the host back to 1x for its next boot and ev
   assert.deepEqual(seenCeiling, [{ ceiling: 2, reason: "integrated-gpu" }]);
   host.workerScaleCeiling = null;
   call("handleGpuDeviceLost", { internalResolution: 4, reason: "unknown", detail: "oom" });
-  assert.deepEqual(lost, [{ internalResolution: 4, fallback: 1, reason: "unknown", detail: "oom" }]);
+  assert.deepEqual(lost, [{ internalResolution: 4, fallback: 1, reason: "unknown", detail: "oom", cause: "device-lost" }]);
   assert.equal(host.enhancements.internalResolution, 1);
   assert.deepEqual(await call("internalResolutionCeiling"), { ceiling: 1, reason: "device-lost" });
   assert.deepEqual(await call("setEnhancements", { internalResolution: 3 }), { applied: true, internalResolution: 1 });

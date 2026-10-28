@@ -10761,14 +10761,16 @@ function markWgpuReplayFatal(scope, detail) {
       ? WGPU_CONSUMER_ERROR_SUBMIT
       : WGPU_CONSUMER_ERROR_UNKNOWN;
   wgpuRendererRuntime.emergencyFail(errorCode);
-  // The ring stays FAILED: tell the page as for a lost device (which posts
-  // from its own handler, with the browser's reason), so it restarts
-  // instead of showing a frozen picture.
+  // The ring stays FAILED: tell the page on the device-loss path (a lost
+  // device posts from its own handler, with the browser's reason), as a
+  // renderer error, so it restarts at the same scale instead of showing a
+  // frozen picture.
   if (scope !== "device-lost") {
     wgpuFatalReporter.report({
       internalResolution: wgpuInternalResolution,
       reason: wgpuFatalPageReason(scope),
       detail: wgpuReplayFatal.detail,
+      cause: "renderer-error",
     });
   }
   return true;
