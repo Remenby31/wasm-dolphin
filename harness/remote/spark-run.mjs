@@ -92,7 +92,7 @@ export const BENCH_LOCK_WAIT = 4 * 3600;
 // load only has to catch a real spike.
 export const BENCH_DROP_MAX_LOAD = 8;
 export function benchProbeDefaults(probe, args) {
-  if (probe !== "drop-meter" || splitEquals(args).includes("--max-load")) return args;
+  if (probe !== "drop-meter" || args.some((a) => a === "--max-load" || a.startsWith("--max-load="))) return args;
   return [...args, "--max-load", String(BENCH_DROP_MAX_LOAD)];
 }
 
