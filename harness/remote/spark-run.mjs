@@ -12,8 +12,9 @@
 //     [--keep-video] [--headed :2 [--xauth /run/salon-xorg/xauth] | --headless]
 //     [-- <race-perf options: --query, --warmup, --secs, --max-load, …>]
 //   node harness/remote/spark-run.mjs --multi --baseline <ref|dir> --candidate <ref|dir> [--candidate <ref|dir>]
-//     --state <local .sav> [--name n] [--runs 6] [--detach] [-- <race-multi options>]
+//     --state <local .sav> [--name n] [--runs 6] [--multi-lanes "15-19;5-9"] [--detach] [-- <race-multi options>]
 //   node harness/remote/spark-run.mjs --fetch <date>/<name>   (a detached run)
+//   node harness/remote/spark-run.mjs --queue                  (the bench's queue, waits and ETAs; exit 3 if a ticket starves)
 //   node harness/remote/spark-run.mjs --build <ref>            (core built on the bench)
 //
 // - Relative only: Playwright's Chromium on Linux arm64 (no Google Chrome
@@ -98,9 +99,34 @@ export function multiArms(baseline, candidates) {
 }
 
 // race-multi's arguments; options after -- come last and win.
-export function multiRaceArgs({ iso, state, runs, armDirs, extra = [] }) {
+export function multiRaceArgs({ iso, state, runs, armDirs, lanes = MULTI_LANES, extra = [] }) {
   if (Number(runs) % armDirs.length) throw new Error(`--runs ${runs}: a multiple of ${armDirs.length} with --multi (each arm visits each lane equally)`);
-  return ["--iso", iso, "--state", state, "--runs", String(runs), ...armDirs.flatMap((d) => ["--arm", d]), "--lanes", MULTI_LANES, ...MULTI_ARGS, "--query", MULTI_QUERY, ...extra];
+  return ["--iso", iso, "--state", state, "--runs", String(runs), ...armDirs.flatMap((d) => ["--arm", d]), "--lanes", lanes, ...MULTI_ARGS, "--query", MULTI_QUERY, ...extra];
+}
+
+// --multi-lanes "15,16,17,18,19;5,6,7,8,9": one Chromium core set per arm
+// (race-multi wants as many lanes as arms; MULTI_LANES has three), each
+// "n" or "n-m" items, disjoint, on the bench's 20 cores and off node's
+// 10-14 (spark-multi.sh). The default: MULTI_LANES for three arms.
+export const MULTI_NODE_CPUS = [10, 11, 12, 13, 14];
+export function multiLanes(spec, arms) {
+  if (spec == null) {
+    if (arms !== MULTI_LANES.split(";").length) throw new Error(`--multi with ${arms} arms: --multi-lanes "<cpus>;<cpus>…" (one lane per arm; the default has ${MULTI_LANES.split(";").length})`);
+    return MULTI_LANES;
+  }
+  const lanes = String(spec).split(";").map((lane) => lane.split(",").flatMap((item) => {
+    const m = /^(\d+)(?:-(\d+))?$/.exec(item.trim());
+    if (!m) throw new Error(`--multi-lanes ${spec}: cpus as n or n-m, comma-separated, lanes separated by ;`);
+    const a = Number(m[1]), b = m[2] === undefined ? a : Number(m[2]);
+    return Array.from({ length: Math.abs(b - a) + 1 }, (_, i) => Math.min(a, b) + i);
+  }));
+  if (lanes.length !== arms) throw new Error(`--multi-lanes: ${lanes.length} lanes for ${arms} arms (one each)`);
+  const all = lanes.flat();
+  if (all.some((c) => c < 0 || c > 19)) throw new Error(`--multi-lanes ${spec}: the bench has cpus 0-19`);
+  if (new Set(all).size !== all.length) throw new Error(`--multi-lanes ${spec}: the lanes share cpus`);
+  if (all.some((c) => MULTI_NODE_CPUS.includes(c))) throw new Error(`--multi-lanes ${spec}: cpus 10-14 run node (spark-multi.sh)`);
+  if (new Set(lanes.map((l) => l.length)).size !== 1) throw new Error(`--multi-lanes ${spec}: lanes of different sizes`);
+  return lanes.map((l) => l.join(",")).join(";");
 }
 
 // A KPI scene's pinned protocol (matrix.mjs SCENE_PROTOCOLS) as race-multi
@@ -401,6 +427,28 @@ async function build(host, ref) {
   return exit;
 }
 
+// --queue: the bench's tickets, oldest first, with the time each has waited
+// and its estimated start (spark-queue.mjs list --eta), read only. A ticket
+// waiting past QUEUE_STARVED_MIN is flagged: the judge reorders (move).
+export const QUEUE_STARVED_MIN = 60;
+export function queueRows(tickets, now = Date.now()) {
+  return tickets.map((t) => {
+    const waited = Math.round((now - Date.parse(t.at)) / 60000);
+    const state = t.lane && t.lane !== "none" ? `running in ${t.lane}` : t.holdUntil && Date.parse(t.holdUntil) > now ? "held (cores busy)" : "waiting";
+    const starved = !t.lane && waited >= QUEUE_STARVED_MIN;
+    return `${starved ? "STARVED " : ""}${t.kind} ${t.name}${t.owner ? ` (${t.owner})` : ""} ${state}, ${waited} min since queued` + (t.lane ? `, ends in ~${t.endsIn} min` : `, starts in ~${t.startsIn} min`);
+  });
+}
+
+function queueView(host) {
+  const harnessFiles = listFiles(REPO_ROOT, HARNESS_ROOTS, HARNESS_SKIP);
+  const harness = pushTree(host, { root: REPO_ROOT, files: harnessFiles, kind: "harness", key: contentKey(REPO_ROOT, harnessFiles) });
+  const tickets = JSON.parse(ssh(host, `cd ${harness.dest} && PATH="$HOME/${BENCH}/node/bin:$PATH" node harness/remote/spark-queue.mjs list --eta --json`).out || "[]");
+  const rows = queueRows(tickets);
+  console.log(rows.length ? rows.join("\n") : "the queue is empty");
+  return rows.some((r) => r.startsWith("STARVED")) ? 3 : 0;
+}
+
 function fetchResult(host, { date, name, meta, exit }) {
   const local = path.join(MEASURES, date, name);
   mkdirSync(local, { recursive: true });
@@ -443,11 +491,16 @@ async function main() {
       host: { type: "string", default: process.env.SPARK_HOST || "spark" },
       "chrome-cpus": { type: "string" }, "node-cpus": { type: "string" }, "keep-video": { type: "boolean", default: false },
       headed: { type: "string" }, headless: { type: "boolean", default: false }, xauth: { type: "string", default: BENCH_XAUTHORITY },
-      detach: { type: "boolean", default: false }, fetch: { type: "string" }, build: { type: "string" }
+      detach: { type: "boolean", default: false }, fetch: { type: "string" }, build: { type: "string" },
+      "multi-lanes": { type: "string" }, queue: { type: "boolean", default: false }
     },
     allowPositionals: true
   });
   const host = values.host;
+  if (values.queue) {
+    process.exitCode = queueView(host);
+    return;
+  }
   if (values.build) {
     process.exitCode = await build(host, values.build);
     return;
@@ -524,6 +577,7 @@ async function multi(host, values, rawPositionals) {
     if (positionals.includes(f)) throw new Error(`${f} is set by spark-run --multi, not after --`);
   }
   const specs = multiArms(values.baseline, values.candidate);
+  const lanes = multiLanes(values["multi-lanes"], specs.length); // refused before anything is pushed
   const { date, name } = runId({ name: values.name, candidate: values.candidate.join("+"), baseline: values.baseline });
   if (existsSync(path.join(MEASURES, date, name))) throw new Error(`${path.join(MEASURES, date, name)} exists: pick another --name`);
   const harnessFiles = listFiles(REPO_ROOT, HARNESS_ROOTS, HARNESS_SKIP);
@@ -539,7 +593,7 @@ async function multi(host, values, rawPositionals) {
   const home = ssh(host, "printf %s \"$HOME\"").out;
   const abs = (p) => `${home}/${p}`;
   const scene = path.basename(values.state);
-  const raceArgs = multiRaceArgs({ iso: abs(iso), state: abs(state), runs: values.runs, armDirs: specs.map((s) => abs(pushed.get(s).dest)), extra: [...sceneMultiArgs(scene), ...positionals] });
+  const raceArgs = multiRaceArgs({ iso: abs(iso), state: abs(state), runs: values.runs, armDirs: specs.map((s) => abs(pushed.get(s).dest)), lanes, extra: [...sceneMultiArgs(scene), ...positionals] });
   requireXfbSwitch(host, raceArgs, [...pushed.values()]);
   const sceneCheck = multiSceneCheck(scene, raceArgs);
   if (sceneCheck.errors.length) throw new Error(`scene protocol: ${sceneCheck.errors.join("; ")}`);
