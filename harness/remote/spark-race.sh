@@ -60,6 +60,10 @@ mkdir -p "$B/lanes/b"
   # The busiest threads and the CPU each last ran on, before and after, to
   # tell a pair's load from someone else's on its cores (read only; per
   # thread: a process's psr is its main thread's alone).
+  # Read only: whether a cpuset cgroup per lane could replace taskset without
+  # a system change (systemd user delegation of the cpuset controller).
+  cg=$(sed -n 's/^0:://p' /proc/self/cgroup 2>/dev/null)
+  echo "[spark-race] cgroup ${cg:-?}: controllers $(cat "/sys/fs/cgroup${cg}/cgroup.controllers" 2>/dev/null || echo ?); parent delegates $(cat "/sys/fs/cgroup$(dirname "${cg:-/}")/cgroup.subtree_control" 2>/dev/null || echo ?)"
   echo "[spark-race] busiest before:"; ps -eLo pid,tid,psr,pcpu,user,comm --sort=-pcpu | head -8
   taskset -c "${SPARK_NODE_CPUS:-$ncpus}" node harness/probes/race-perf.mjs "$@" --port "$port" --out "$out"
   code=$?
