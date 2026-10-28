@@ -122,7 +122,7 @@ test("without the switch the page hears of the loss at once, as before", () => {
   const { host, lost, recovering } = fakeHost({ recover: false, adapter: fakeAdapter({ save: async () => { throw new Error("unused"); } }) });
   const result = lose(host, { internalResolution: 2, reason: "unknown", detail: "oom" });
   assert.equal(result, null);
-  assert.deepEqual(lost, [{ internalResolution: 2, fallback: 1, reason: "unknown", detail: "oom" }]);
+  assert.deepEqual(lost, [{ internalResolution: 2, fallback: 1, reason: "unknown", detail: "oom", cause: "device-lost" }]);
   assert.deepEqual(recovering, []);
 });
 
@@ -136,7 +136,7 @@ test("with the switch: recovering at once, then the loss once, with the paused s
   await pending;
   assert.deepEqual(adapter.calls, [["export", { slot: 0 }]], "the worker already paused");
   assert.deepEqual(lost, [{
-    internalResolution: 2, fallback: 1, reason: "unknown", detail: "oom",
+    internalResolution: 2, fallback: 1, reason: "unknown", detail: "oom", cause: "device-lost",
     paused: true, pauseChanged: true, state: bytes, stateGameId: "GABCDE", stateError: ""
   }]);
   assert.equal(host.enhancements.internalResolution, 1);
@@ -187,7 +187,7 @@ test("the worker pauses the core at the loss, before it posts, and the adapter p
   adapter.handleMessage({ type: "wgpu-device-lost", internalResolution: 2, reason: "unknown", detail: "", pause: { state: "Paused", changed: false } });
   adapter.handleMessage({ type: "wgpu-device-lost", internalResolution: 2, reason: "unknown", detail: "" });
   assert.deepEqual(seen, [
-    { internalResolution: 2, reason: "unknown", detail: "", pause: { state: "Paused", changed: false } },
-    { internalResolution: 2, reason: "unknown", detail: "" }
+    { internalResolution: 2, reason: "unknown", detail: "", cause: "device-lost", pause: { state: "Paused", changed: false } },
+    { internalResolution: 2, reason: "unknown", detail: "", cause: "device-lost" }
   ]);
 });

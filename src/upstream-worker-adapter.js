@@ -1296,6 +1296,7 @@ export class UpstreamWorkerAdapter {
           internalResolution: Number(message.internalResolution) || 1,
           reason: String(message.reason ?? "unknown"),
           detail: String(message.detail ?? ""),
+          cause: message.cause === "renderer-error" ? "renderer-error" : "device-lost",
           // ?wgpurecover=1: the worker's pause at the loss.
           ...(message.pause ? { pause: message.pause } : {})
         });

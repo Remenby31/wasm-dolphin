@@ -79,13 +79,14 @@ export class EmulatorHost {
     this.onFrame = onFrame;
     this.onStatus = onStatus;
     this.onMode = onMode;
-    // { internalResolution, fallback, reason, detail }: the WebGPU device was
-    // lost (the game stops). fallback 1: it was above 1x, the next boot of
-    // this host and every setEnhancements stay at 1x. With ?wgpurecover=1
-    // it comes once the core is paused and saved, with { paused,
-    // pauseChanged, state, stateGameId, stateError }, after
-    // onGpuRecovering({ internalResolution, fallback, reason }) at the start
-    // of the save (docs/wgpu-session-fallback.md).
+    // { internalResolution, fallback, reason, detail, cause }: the WebGPU
+    // renderer stopped (the picture would freeze): cause "device-lost"
+    // (fallback 1 when it was above 1x: the next boot of this host and every
+    // setEnhancements stay at 1x) or "renderer-error" (fallback null, restart
+    // at the same scale). With ?wgpurecover=1 it comes once the core is
+    // paused and saved, with { paused, pauseChanged, state, stateGameId,
+    // stateError }, after onGpuRecovering({ internalResolution, fallback,
+    // reason }) at the start of the save (docs/wgpu-session-fallback.md).
     this.onGpuDeviceLost = onGpuDeviceLost;
     this.onGpuRecovering = onGpuRecovering;
     this.wgpuSessionRecover = requestedWgpuSessionRecover(window.location.search);
@@ -995,14 +996,20 @@ export class EmulatorHost {
       : adapter;
   }
 
-  handleGpuDeviceLost({ internalResolution = 1, reason = "unknown", detail = "", pause = null } = {}) {
-    const fallback = internalResolution > 1 ? 1 : null;
+  // cause "device-lost": the GPU went (memory may be why), the scale falls
+  // to 1x. "renderer-error": a fatal replay error on a live device (the
+  // scale is not why): the page restarts at the same scale, fallback null.
+  handleGpuDeviceLost({ internalResolution = 1, reason = "unknown", detail = "", cause = "device-lost", pause = null } = {}) {
+    const deviceLost = cause !== "renderer-error";
+    const fallback = deviceLost && internalResolution > 1 ? 1 : null;
     if (fallback) {
       this.scaleLostCeiling = fallback;
       this.enhancements.internalResolution = fallback;
     }
-    this.onStatus(`WebGPU device lost at ${internalResolution}x (${reason})${fallback ? "; internal resolution back to 1x" : ""}`);
-    const event = { internalResolution, fallback, reason, detail };
+    this.onStatus(deviceLost
+      ? `WebGPU device lost at ${internalResolution}x (${reason})${fallback ? "; internal resolution back to 1x" : ""}`
+      : `WebGPU renderer failed at ${internalResolution}x (${reason}); restart at the same scale`);
+    const event = { internalResolution, fallback, reason, detail, cause: deviceLost ? "device-lost" : "renderer-error" };
     if (!this.wgpuSessionRecover || this.mode !== "dolphin") {
       this.onGpuDeviceLost(event);
       return null;
