@@ -4,7 +4,7 @@
 import { execFileSync } from "node:child_process";
 import { createHash } from "node:crypto";
 import os from "node:os";
-import { existsSync, readdirSync, readFileSync } from "node:fs";
+import { existsSync, mkdtempSync, readdirSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import path from "node:path";
 import { fileURLToPath, pathToFileURL } from "node:url";
 import { clockCheck, FRAME_FIELDS, withDeterministicClock } from "./matrix.mjs";
@@ -63,7 +63,87 @@ export async function ensureServer({ port, root = REPO_ROOT, patches = [], coreC
 // open -j -g: shown when Chrome opens it), so none is offered. As a guard,
 // after launch and after boot no window of our Chrome may be on screen;
 // otherwise it is closed and the run fails.
-export const DISPLAYS = Object.freeze(["headless"]);
+//
+// x11, Linux only: Chrome shown on an X server with no screen attached, the
+// Spark bench's bare Xorg (salon-xorg.service, DISPLAY=:2) driving a fake
+// 1920x1080 panel at 120.00 Hz (EDID SALON120): a real BeginFrame source at
+// the screen's rate, which headless (60 Hz, synthetic) is not, for the
+// display probes at 120 Hz. No window manager: the window is placed full
+// screen at 0,0 by its own flags. WebGPU on the NVIDIA GPU needs Vulkan
+// (without it the rAF ran at 1 Hz or WebGPU fell to SwiftShader), with a
+// real Vulkan surface: --disable-vulkan-surface put Chrome on a synthetic
+// 60 Hz BeginFrame source (16.67 ms, 21-37 BeginFrames a second under the
+// emulator). ThrottleRepeatedNoDamageFrames halves the cadence while nothing
+// changes (120 -> 60 -> 30 Hz): off, for clean display measures. Blank page
+// on :2 with these flags: rAF 8.3 ms median (p5 8.2, p95 8.4), WebGPU canvas
+// at 120.01 fps on the NVIDIA adapter, chrome://gpu refresh 120.0032 Hz.
+// Refused on macOS whatever the environment: headless stays the only mode
+// on the user's Mac. Chosen by HARNESS_DISPLAY=x11 (spark-run --headed).
+export const DISPLAYS = Object.freeze(["headless", "x11"]);
+export const X11_ARGS = Object.freeze(["--enable-features=Vulkan", "--use-angle=vulkan", "--disable-features=ThrottleRepeatedNoDamageFrames", "--window-position=0,0", "--window-size=1920,1080"]);
+
+// Chrome keeps only the last --enable-features and the last
+// --disable-features: every one of each becomes a single flag carrying all
+// their values, at the first one's place.
+export function mergeFeatureFlags(args) {
+  const lists = new Map();
+  const out = [];
+  for (const a of args) {
+    const m = /^(--(?:enable|disable)-features)=(.*)$/.exec(a);
+    if (!m) {
+      out.push(a);
+      continue;
+    }
+    if (!lists.has(m[1])) {
+      lists.set(m[1], []);
+      out.push(m[1]);
+    }
+    for (const v of m[2].split(",").filter(Boolean)) if (!lists.get(m[1]).includes(v)) lists.get(m[1]).push(v);
+  }
+  return out.map((a) => (lists.has(a) ? `${a}=${lists.get(a).join(",")}` : a));
+}
+
+const FEATURE_FLAG = /^--(?:enable|disable)-features=/;
+
+// Playwright passes its own --disable-features (PaintHolding,
+// ThirdPartyStoragePartitioning…, a list that changes with its version) and
+// --enable-features before ours: Chrome keeping only the last of each, a
+// feature flag of ours dropped Playwright's. So when we pass one, Playwright's
+// are taken out (ignoreDefaultArgs) and merged back into ours.
+export function withPlaywrightFeatures(args, defaults) {
+  if (!args.some((a) => FEATURE_FLAG.test(a)) || !defaults?.length) return { args: mergeFeatureFlags(args), ignoreDefaultArgs: undefined };
+  return { args: mergeFeatureFlags([...defaults, ...args]), ignoreDefaultArgs: defaults };
+}
+
+// Playwright's feature flags for a launch, as it passes them: read from a
+// stand-in executable that writes its arguments down and exits (~0.2 s, once
+// per process and mode; no Chrome starts). null where a shell script cannot
+// stand in (Windows).
+const playwrightFeatures = new Map();
+export function playwrightFeatureArgs(chromium, { headless, platform = process.platform } = {}) {
+  if (platform === "win32") return Promise.resolve(null);
+  if (!playwrightFeatures.has(headless)) {
+    playwrightFeatures.set(headless, (async () => {
+      const dir = mkdtempSync(path.join(os.tmpdir(), "gc-harness-argv-"));
+      const stub = path.join(dir, "chrome");
+      try {
+        writeFileSync(stub, `#!/bin/sh\nprintf '%s\\n' "$@" > "$0.args"\nexit 1\n`, { mode: 0o755 });
+        await chromium.launch({ executablePath: stub, headless, timeout: 15000 }).then((b) => b.close(), () => {});
+        return readFileSync(`${stub}.args`, "utf8").split("\n").filter((a) => FEATURE_FLAG.test(a));
+      } catch {
+        return null;
+      } finally {
+        rmSync(dir, { recursive: true, force: true });
+      }
+    })());
+  }
+  return playwrightFeatures.get(headless);
+}
+
+// The display mode when the caller names none: HARNESS_DISPLAY, else headless.
+export function defaultDisplay(env = process.env) {
+  return env.HARNESS_DISPLAY || "headless";
+}
 
 const ARGS = [
   "--no-first-run",
@@ -82,11 +162,17 @@ const ARGS = [
   "--disable-background-timer-throttling"
 ];
 
-export function chromeLaunchOptions(display = "headless", { unsafeWebgpu = true } = {}) {
+export function chromeLaunchOptions(display = defaultDisplay(), { unsafeWebgpu = true, platform = process.platform, env = process.env } = {}) {
   if (!DISPLAYS.includes(display)) throw new Error(`--display ${display}: the harness only runs headless (no window may appear on this Mac)`);
   // unsafeWebgpu: false launches Chrome as a player has it (no
   // --enable-unsafe-webgpu), e.g. to see the adapter a GPU-less PC gets.
-  return { headless: true, args: unsafeWebgpu ? ARGS : ARGS.filter((a) => a !== "--enable-unsafe-webgpu") };
+  const args = unsafeWebgpu ? ARGS : ARGS.filter((a) => a !== "--enable-unsafe-webgpu");
+  if (display === "x11") {
+    if (platform !== "linux") throw new Error(`--display x11: Linux only (the Spark's bare Xorg); on ${platform} the harness only runs headless`);
+    if (!env.DISPLAY) throw new Error("--display x11: DISPLAY is not set (the Spark's bare Xorg is :2, spark-run --headed)");
+    return { headless: false, viewport: null, args: [...args, ...X11_ARGS] };
+  }
+  return { headless: true, viewport: { width: 1280, height: 800 }, args };
 }
 
 // "WxH" (both 320-7680) or the default 1280x800.
@@ -96,23 +182,29 @@ export function harnessViewport(spec) {
   return w >= 320 && w <= 7680 && h >= 240 && h <= 4320 ? { width: w, height: h } : { width: 1280, height: 800 };
 }
 
-export async function launchChrome({ profileDir, display = "headless", args = [], unsafeWebgpu = true }) {
+export async function launchChrome({ profileDir, display = defaultDisplay(), args = [], unsafeWebgpu = true }) {
   const opts = chromeLaunchOptions(display, { unsafeWebgpu });
   const { chromium } = await importPlaywright();
   // HARNESS_CHROME_PATH: run this executable instead of Chrome stable, e.g. a
   // wrapper that confines Chrome to the efficiency cores (docs/consumer-perf-extrapolation.md).
   const executablePath = process.env.HARNESS_CHROME_PATH || undefined;
+  // HARNESS_CHROME_ARGS: extra flags for one machine (e.g. Linux WebGPU:
+  // "--enable-features=Vulkan --use-angle=vulkan"), space-separated.
+  const own = [...opts.args, ...(process.env.HARNESS_CHROME_ARGS ?? "").split(/\s+/).filter(Boolean), "--enable-logging", "--v=0", `--log-file=${path.join(profileDir, "chrome.log")}`, `--crash-dumps-dir=${path.join(profileDir, "crash-dumps")}`, ...args];
+  const defaults = own.some((a) => FEATURE_FLAG.test(a)) ? await playwrightFeatureArgs(chromium, { headless: opts.headless }) : null;
+  if (own.some((a) => FEATURE_FLAG.test(a)) && !defaults) console.warn("[harness] Playwright's own feature flags could not be read: ours replace them");
+  const flags = withPlaywrightFeatures(own, defaults);
   const context = await chromium.launchPersistentContext(profileDir, {
     ...(executablePath ? { executablePath } : { channel: "chrome" }),
     headless: opts.headless,
-    // HARNESS_VIEWPORT=WxH: a larger page, e.g. a display box above the
-    // 640x480 backbuffer for the display filter's upscale (EASU).
-    viewport: harnessViewport(process.env.HARNESS_VIEWPORT),
+    // x11: the window's own size (no viewport emulation on a real screen).
+    // Headless: HARNESS_VIEWPORT=WxH for a larger page, e.g. a display box
+    // above the 640x480 backbuffer for the display filter's upscale (EASU).
+    viewport: opts.viewport === null ? null : harnessViewport(process.env.HARNESS_VIEWPORT),
     // Chrome's log and crash dumps stay in the profile; a session whose
     // renderer crashed copies them out as evidence (session.mjs).
-    // HARNESS_CHROME_ARGS: extra flags for one machine (e.g. Linux WebGPU:
-    // "--enable-features=Vulkan --use-angle=vulkan"), space-separated.
-    args: [...opts.args, ...(process.env.HARNESS_CHROME_ARGS ?? "").split(/\s+/).filter(Boolean), "--enable-logging", "--v=0", `--log-file=${path.join(profileDir, "chrome.log")}`, `--crash-dumps-dir=${path.join(profileDir, "crash-dumps")}`, ...args]
+    args: flags.args,
+    ...(flags.ignoreDefaultArgs ? { ignoreDefaultArgs: flags.ignoreDefaultArgs } : {})
   });
   context.assertInvisible = (when) => assertNoWindow(profileDir, when, () => context.close());
   context.pipeFault = null;
@@ -174,6 +266,8 @@ function profilePids(profileDir) {
   return out.split("\n").filter((l) => l.includes(profileDir)).map((l) => Number(l.trim().split(/\s+/)[0])).filter(Boolean);
 }
 
+// macOS only (the user's screen): the Spark's x11 mode shows Chrome on an X
+// server nobody looks at, and Linux has no on-screen window list here.
 async function assertNoWindow(profileDir, when, close) {
   if (process.platform !== "darwin") return;
   const visible = onScreenWindows(profilePids(profileDir));
