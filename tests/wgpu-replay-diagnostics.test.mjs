@@ -24,6 +24,7 @@ import {
   requestedWgpuGeometryPack,
   requestedWgpuGeometryRange,
   requestedWgpuMappedStagingSlotCount,
+  defaultWgpuMappedStagingSlotCount,
   requestedWgpuUploadArenaMiB,
   defaultWgpuUploadTransport,
   requestedWgpuUploadTransport,
@@ -38,6 +39,16 @@ import {
   summarizeWgpuReplayRange,
   wgpuMappedStagingSlotCountOf
 } from "../src/wgpu-replay-diagnostics.js";
+
+test("mapped staging slots: 4 by default under JavaScriptCore, 3 elsewhere; the parameter wins", () => {
+  assert.equal(defaultWgpuMappedStagingSlotCount("jsc"), 4);
+  assert.equal(defaultWgpuMappedStagingSlotCount("v8"), 3);
+  assert.equal(defaultWgpuMappedStagingSlotCount(undefined), 3);
+  assert.equal(requestedWgpuMappedStagingSlotCount("", 4), 4);
+  assert.equal(requestedWgpuMappedStagingSlotCount("?wgpustagingslots=3", 4), 3);
+  assert.equal(requestedWgpuMappedStagingSlotCount("?wgpustagingslots=6", 4), 6);
+  assert.equal(requestedWgpuMappedStagingSlotCount("?wgpustagingslots=junk", 4), 3);
+});
 
 test("mapped staging slot count is strict, 3 to 8, and defaults to three", () => {
   assert.equal(requestedWgpuMappedStagingSlotCount(""), 3);
