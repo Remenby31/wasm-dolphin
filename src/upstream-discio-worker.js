@@ -13432,7 +13432,7 @@ function presentWgpuVsyncFrame({ newest = false, hidden = false, t = null, refre
     // Scale to the display (EASU up, area down) and sharpen (RCAS).
     if (wgpuDisplayFilterDevice !== dev) {
       wgpuDisplayFilterGpu?.destroy();
-      wgpuDisplayFilterGpu = createDisplayFilter(dev, renderGpu.format, { timing: collectMetrics });
+      wgpuDisplayFilterGpu = createDisplayFilter(dev, renderGpu.format, { timing: collectMetrics && wgpuDisplayFilter.timing });
       wgpuDisplayFilterDevice = dev;
     }
     wgpuDisplayFilterGpu.encode(enc, f.tex, dst, wgpuDisplayFilter.sharpness);
