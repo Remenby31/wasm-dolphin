@@ -1782,11 +1782,17 @@ test("continuations: code past an mtmsr is held even when the first fragment is 
     "loop", asm.addi(4, 4, 1), asm.cmplwi(4, 40), (pc, l) => asm.bc(4, 2, pc, l.loop),
     "out", asm.blr()
   ]);
-  const r = await continuationsOf(t);
+  // With 0183 off: the mtmsr ends its block, the case continuations exist for
+  // (a mtmsr that changes more than EE still does).
+  const r = await continuationsOf(t, { mask: PRODUCTION_DISABLE_MASK & ~(1 << 27) });
   assert.ok(r.fragment.entries.length < 64 && !r.fragment.entries.includes(t.labels.loop), "the first fragment stops short of the loop");
   const held = new Set([r.fragment, ...(r.continuations ?? [])].flatMap((x) => x.entries));
   assert.ok(held.has(t.labels.loop), "the loop is held by a continuation");
   assert.equal(r.budgetCharged ?? 0, 0, "within the old single fragment's free blocks");
+  // Production (0183 on, #322): the region goes on past the mtmsr, the loop
+  // is in the first fragment.
+  const on = await continuationsOf(t);
+  assert.ok(on.fragment.entries.includes(t.labels.loop), "0183 on: the loop is in the first fragment");
 });
 test("continuations: a straight tail past an mtmsr is left to the block path, the first fragment not full", { skip: contSkip }, async () => {
   // An OS routine's shape: mtmsr, then a few blocks without a loop, run
@@ -1801,9 +1807,14 @@ test("continuations: a straight tail past an mtmsr is left to the block path, th
     "tail", asm.addi(6, 6, 1),
     "out", asm.blr()
   ]);
-  const r = await continuationsOf(t);
+  // With 0183 off (the mtmsr ends its block), as above.
+  const r = await continuationsOf(t, { mask: PRODUCTION_DISABLE_MASK & ~(1 << 27) });
   assert.ok(r.fragment.entries.length < 64 && !r.fragment.entries.includes(t.labels.tail), "the first fragment stops at the mtmsr");
   assert.equal(r.continuations, undefined, "no continuation: nothing past the mtmsr loops");
+  // Production (0183 on): the tail is in the first fragment, no extra entry.
+  const on = await continuationsOf(t);
+  assert.ok(on.fragment.entries.includes(t.labels.tail), "0183 on: the tail is in the first fragment");
+  assert.equal(on.continuations, undefined);
 });
 test("continuations: an extra entry of the plan that no direct branch reaches is held, and runs like the interpreter", { skip: contSkip }, async () => {
   const t = assemble(LONG, [
