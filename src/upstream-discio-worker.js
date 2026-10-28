@@ -132,6 +132,7 @@ import { createWgpuSparseUboCopyForward } from "./wgpu-sparse-ubo-copy-forward.j
 import { createBindGroupCache } from "./wgpu-bind-group-cache.js";
 import { createVsyncQueue, vsyncLateMs } from "./wgpu-vsync-queue.js";
 import { createGamePacer, createRefreshHistogram, refreshOf } from "./wgpu-game-pacer.js";
+import { createFrameTelemetry } from "./wgpu-frame-telemetry.js";
 import {
   WGPU_MAPPED_DRAIN_FORCE_REASONS,
   createWgpuMappedDrainCoalescer
@@ -2310,6 +2311,10 @@ async function handleMessage(type, payload) {
       return readDetTrace(payload);
     case "validationReadWgpuReplayState":
       return readWgpuReplayState();
+    case "validationReadWorkerFrames":
+      // Harness only (src/wgpu-frame-telemetry.js): the presenter rAF's
+      // lateness and skipped BeginFrames, the ring drains' time and submit part.
+      return { enabled: harnessEnabled, ...wgpuFrameTelemetry.snapshot(), uploadProbe: wgpuUploadProbeExecutor ? 1 : 0, uploadTransportMapped: wgpuUploadTransport === "mapped" ? 1 : 0 };
     case "validationReadPresentVsync":
       // ?presentvsync=1: the rAF presenter's counters (shown, dropped, caught
       // up, presented by the timer for want of a BeginFrame) and the visual
@@ -13193,6 +13198,38 @@ function recordBoundedHistogram(values, bounds, value) {
 // free of the local display's BeginFrames, catch-up drops and timer fallback.
 let wgpuPresentVsync = false;
 const WGPU_VSYNC_FALLBACK_MS = 50;
+// Harness only (validationReadWorkerFrames): the presenter rAF and the ring
+// drains, timed only while harnessEnabled (no cost in normal use).
+const wgpuFrameTelemetry = createFrameTelemetry();
+// Harness only: every submit, writeBuffer, writeTexture of the replay's
+// queue and every mapAsync in this worker, counted with their size, to find
+// what holds the GPU back (a blank WebGPU page on the Spark's 120 Hz screen
+// had 2.5-4.5 ms of GPU lag and no BeginFrame holes, the emulator ~11 ms and
+// 2.5 holes a second). The device's queue methods are wrapped once per
+// device, after harness enable; nothing is wrapped in normal use.
+const wgpuInstrumentedQueues = new WeakSet();
+let wgpuMapAsyncInstrumented = false;
+function instrumentQueueForHarness(device) {
+  const q = device?.queue;
+  if (!q || wgpuInstrumentedQueues.has(q)) return;
+  wgpuInstrumentedQueues.add(q);
+  const { submit, writeBuffer, writeTexture } = q;
+  q.submit = function (buffers) { wgpuFrameTelemetry.submit(buffers?.length ?? 0); return submit.call(this, buffers); };
+  q.writeBuffer = function (buffer, offset, data, dataOffset = 0, size) {
+    const unit = data?.BYTES_PER_ELEMENT ?? 1;
+    wgpuFrameTelemetry.writeBuffer(size !== undefined ? size * unit : Math.max(0, (data?.byteLength ?? 0) - dataOffset * unit));
+    return writeBuffer.apply(this, arguments);
+  };
+  q.writeTexture = function (destination, data) {
+    wgpuFrameTelemetry.writeTexture(data?.byteLength ?? 0);
+    return writeTexture.apply(this, arguments);
+  };
+  if (!wgpuMapAsyncInstrumented && typeof self.GPUBuffer === "function") {
+    wgpuMapAsyncInstrumented = true;
+    const mapAsync = self.GPUBuffer.prototype.mapAsync;
+    self.GPUBuffer.prototype.mapAsync = function () { wgpuFrameTelemetry.mapAsync(); return mapAsync.apply(this, arguments); };
+  }
+}
 // A frame queued while the presenter's rAF is late (the worker busy in a
 // long task, as compiles at boot) is shown at once instead of waiting for a
 // BeginFrame the busy worker cannot run: held there it stayed 3 vsyncs or
@@ -13335,6 +13372,7 @@ function queueWgpuVsyncFrame(coreFrame, shownVi, stream) {
     wgpuVsyncLoop = true;
     wgpuVsyncLastTickAt = performance.now();
     const tick = (frameTime) => {
+      if (harnessEnabled) wgpuFrameTelemetry.tick(frameTime, performance.now());
       const now = performance.now();
       if (wgpuVsyncLastFrameTime !== null && frameTime > wgpuVsyncLastFrameTime) {
         wgpuVsyncFrameGaps[wgpuVsyncFrameGapCount++ % wgpuVsyncFrameGaps.length] = frameTime - wgpuVsyncLastFrameTime;
@@ -13349,6 +13387,7 @@ function queueWgpuVsyncFrame(coreFrame, shownVi, stream) {
       let shown = false;
       const tracking = wgpuVsyncTracking();
       const refreshMs = tracking ? wgpuVsyncRefreshMs() : null;
+      const presentStartedAt = harnessEnabled ? performance.now() : 0;
       try {
         shown = presentWgpuVsyncFrame({ newest: afterGap, t: frameTime, refreshMs });
       } finally {
@@ -13363,6 +13402,7 @@ function queueWgpuVsyncFrame(coreFrame, shownVi, stream) {
         wgpuRefreshHistogram.tick(shownCount ? (refreshMs && gameMs ? gameMs / refreshMs : 1) : null, now, shownCount);
       }
       wgpuVsyncShownSinceTick = 0;
+      if (presentStartedAt) wgpuFrameTelemetry.present(performance.now() - presentStartedAt);
       wgpuVsyncIdleTicks = shown ? 0 : wgpuVsyncIdleTicks + 1;
       if (wgpuVsyncIdleTicks >= WGPU_VSYNC_IDLE_TICKS && !wgpuVsync.waiting) {
         wgpuVsyncLoop = false;  // the next queued frame starts it again
@@ -13456,6 +13496,11 @@ function presentWgpuVsyncFrame({ newest = false, hidden = false, t = null, refre
     );
   }
   dev.queue.submit([enc.finish()]);
+  if (harnessEnabled) {
+    // how far behind the GPU runs: this present's work done after its submit
+    const submittedAt = performance.now();
+    dev.queue.onSubmittedWorkDone().then(() => wgpuFrameTelemetry.gpuDone(performance.now() - submittedAt), () => {});
+  }
   // Same queue: the copy runs before any later pass renders into f.tex.
   wgpuVsync.shown(f);
   // v3: streamed at queue time (streamWgpuVsyncFrame), not here.
@@ -13575,6 +13620,10 @@ function drainWebGpuCmdRing(source = "presentation") {
     : null;
   const budgetStartedAt = budgetGate?.beginDrain() ?? 0;
   const drainStartedAt = budgetStartedAt || (causalMetricsEnabled ? performance.now() : 0);
+  // harness only: this drain's time and its finish() + submit() part
+  const telemetryStartedAt = harnessEnabled ? performance.now() : 0;
+  let telemetrySubmitMs = 0;
+  if (telemetryStartedAt) instrumentQueueForHarness(renderGpu.device);
   const budgetDeadlineMs = wgpuReplayBudgetMs > 0
     ? budgetStartedAt + wgpuReplayBudgetMs
     : Number.POSITIVE_INFINITY;
@@ -13693,6 +13742,7 @@ function drainWebGpuCmdRing(source = "presentation") {
     });
     if (collectReplayMetrics) updateWgpuBacklogState(0, performance.now());
     finishWebGpuDrain(drainStartedAt, processed);
+    if (telemetryStartedAt) wgpuFrameTelemetry.drain(performance.now() - telemetryStartedAt, telemetrySubmitMs);
     return;
   }
 
@@ -14001,12 +14051,14 @@ function drainWebGpuCmdRing(source = "presentation") {
     }
     let submitted = false;
     try {
+      const submitStartedAt = telemetryStartedAt ? performance.now() : 0;
       const renderCommandBuffer = enc.finish();
       q.submit([
         ...(mappedBatch?.ordinary ? [mappedBatch.ordinary.commandBuffer] : []),
         ...(mappedBatch?.compute ? [mappedBatch.compute.commandBuffer] : []),
         renderCommandBuffer,
       ]);
+      if (submitStartedAt) telemetrySubmitMs += performance.now() - submitStartedAt;
       gpuCompletionTracker.recordSubmittedWork(q, "hardware-replay");
       acceptMappedBatch(mappedBatch);
       submitted = true;
@@ -16991,6 +17043,7 @@ function drainWebGpuCmdRing(source = "presentation") {
     wgpuReplayYieldPending = true;
   }
   finishWebGpuDrain(drainStartedAt, processed);
+  if (telemetryStartedAt) wgpuFrameTelemetry.drain(performance.now() - telemetryStartedAt, telemetrySubmitMs);
   // Once the cmd-ring executor has presented a real frame, IT owns the
   // canvas (renderGpu.context). The legacy runPresentationLoop blit of
   // the CPU framebuffer (presentFrame → drawFrameBytesToWebGpu) must
@@ -17436,9 +17489,11 @@ function resolvePipeline(pipelineId, colorFmt, depthFmt, dbg, revZ, samplingKey 
   const prewarmed = prewarmEntry ? pipelinePrewarm.take(prewarmEntry.key) : null;
   try {
     renderGpu.device.pushErrorScope("validation");
+    const telemetryCreatedAt = harnessEnabled && !prewarmed ? performance.now() : 0;
     const createdAt = dropSampler?.running && !prewarmed ? performance.now() : 0;
     pipe = prewarmed ?? renderGpu.device.createRenderPipeline(d);
     if (createdAt) { dropWgpu.pipelines += 1; dropWgpu.pipelineMs += performance.now() - createdAt; }
+    if (telemetryCreatedAt) wgpuFrameTelemetry.pipeline(performance.now() - telemetryCreatedAt);
     if (pipe && d.depthStencil) {
       vpDiagPipeFinalDs.set(pipe, { cmp: d.depthStencil.depthCompare,
                                     write: !!d.depthStencil.depthWriteEnabled });
