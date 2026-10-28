@@ -15,7 +15,7 @@ import { parseDolHeader } from "./dol.js";
 import { probeRelaxedMadd } from "./relaxed-madd-probe.js";
 import { probeWasmFeatures } from "./wasm-feature-probe.js";
 import { decodeWgpuSamplerState } from "./wgpu-sampler-state.js";
-import { bootBackbufferResize, clampInternalResolution, enhancementCoreArgs, internalResolutionCeiling, resizeCanvasBackbuffer } from "./wgpu-enhancements.js";
+import { bootBackbufferResize, clampInternalResolution, cpuFrameYieldsToHardware, enhancementCoreArgs, internalResolutionCeiling, resizeCanvasBackbuffer } from "./wgpu-enhancements.js";
 import { createDisplayFilter, displayFilterFits, displayFilterOutputSize, normalizeDisplayFilter } from "./wgpu-display-filter.js";
 import { gxClearDepthToStored, gxDepthState } from "./wgpu-depth-state.js";
 import { clampSourceRect, createWgpuExactCapture, packReadbackRows } from "./wgpu-exact-capture.js";
@@ -7361,6 +7361,11 @@ function drawFrameToWebGpu(width, height, pointer, length) {
 
 function drawFrameBytesToWebGpu(width, height, frameView) {
   if (!renderCanvas || !renderGpu || width <= 0 || height <= 0 || !frameView?.byteLength) {
+    return;
+  }
+  // The hardware path sized the backbuffer: a CPU frame (the demo scene's
+  // 320x240) would shrink the canvas for good (wgpu-enhancements.js).
+  if (cpuFrameYieldsToHardware({ hardware: hardwareVideoBackend, backbufferSized: wgpuBackbufferSized, ringOwnsCanvas: cmdRingOwnsCanvas })) {
     return;
   }
 

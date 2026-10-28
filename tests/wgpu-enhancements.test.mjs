@@ -266,3 +266,36 @@ test("widescreen reaches the core at boot and while a game runs; the backbuffer 
   // The widths the formula gives: 16:9 at 480N lines, even.
   assert.deepEqual([1, 2, 3, 4].map((n) => Math.floor((2560 * n + 2) / 3) & ~1), [854, 1706, 2560, 3414]);
 });
+
+// 2026-10-28, salon at ir=3: a demo-scene frame (320x240, drawn from bytes)
+// after the backbuffer grew to 1920x1440 shrank the canvas for good; the host
+// played and streamed the whole session at 320x240 (2 of 26 sessions).
+test("on the hardware path a CPU frame after the backbuffer was sized never shrinks the canvas", async () => {
+  const { cpuFrameYieldsToHardware, resizeCanvasBackbuffer } = await import("../src/wgpu-enhancements.js");
+  // the worker's drawFrameBytesToWebGpu, its sizing only
+  const canvas = { width: 640, height: 480 };
+  const gpu = { context: { configure() {} }, device: "dev", format: "bgra8unorm", canvasWidth: 640, canvasHeight: 480 };
+  const state = { hardware: true, backbufferSized: false, ringOwnsCanvas: false };
+  const drawBytes = (w, h) => {
+    if (cpuFrameYieldsToHardware(state)) return false;
+    canvas.width = w;
+    canvas.height = h;
+    return true;
+  };
+  // before the boot: the demo scene sizes the canvas (nothing sized it yet)
+  assert.equal(drawBytes(320, 240), true);
+  // the core announces 1920x1440 (ir=3): resizeWgpuBackbuffer
+  assert.equal(resizeCanvasBackbuffer(canvas, gpu, 1920, 1440, 16), true);
+  state.backbufferSized = true;
+  // a late demo frame, before the command ring's first present
+  assert.equal(drawBytes(320, 240), false);
+  assert.deepEqual([canvas.width, canvas.height], [1920, 1440]);
+  // after the first present as well
+  state.ringOwnsCanvas = true;
+  assert.equal(drawBytes(320, 240), false);
+  // the software path keeps sizing the canvas to its frames
+  assert.equal(cpuFrameYieldsToHardware({ hardware: false, backbufferSized: true, ringOwnsCanvas: true }), false);
+  assert.equal(cpuFrameYieldsToHardware({ hardware: true, backbufferSized: false, ringOwnsCanvas: false }), false);
+  const worker = await read("../src/upstream-discio-worker.js");
+  assert.match(worker, /function drawFrameBytesToWebGpu\(width, height, frameView\) \{[^]*?if \(cpuFrameYieldsToHardware\(\{ hardware: hardwareVideoBackend, backbufferSized: wgpuBackbufferSized, ringOwnsCanvas: cmdRingOwnsCanvas \}\)\) \{\n    return;\n  \}[^]*?renderCanvas\.width = width;/, "the guard comes before the resize");
+});
