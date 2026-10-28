@@ -156,8 +156,10 @@ export function eta(tickets, now = Date.now()) {
   return out;
 }
 
-// The ticket name that puts `name` just after `after` ("head": before every
-// waiting ticket): a time between its new neighbours.
+// The ticket name that puts `name` just after `after` ("head": just after
+// the last running ticket, by position: a waiting ticket older than a
+// running one sorts before it, so counting the running ones fell before a
+// running job, 2026-10-28): a time between its new neighbours.
 export function movedId(tickets, name, after) {
   const me = tickets.find((t) => t.name === name);
   if (!me) throw new Error(`no ticket named ${name}`);
@@ -167,7 +169,7 @@ export function movedId(tickets, name, after) {
   // p87-native-ps-aot idled the bench). Its owner requeues it with main.
   if (!("estMin" in me)) throw new Error(`${name} waits with a harness from before \`move\`: it would wait for itself; its owner must requeue it after merging main`);
   const others = tickets.filter((t) => t !== me);
-  const at = after === "head" ? others.filter((t) => t.lane).length : others.findIndex((t) => t.name === after) + 1;
+  const at = after === "head" ? others.reduce((k, t, i) => (t.lane ? i + 1 : k), 0) : others.findIndex((t) => t.name === after) + 1;
   if (after !== "head" && at === 0) throw new Error(`no ticket named ${after}`);
   if (others.slice(at).some((t) => t.lane)) throw new Error(`cannot move ${name} before a running job`);
   const ms = (t) => Number(t.id.split("-")[0]);

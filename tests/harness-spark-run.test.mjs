@@ -165,6 +165,12 @@ test("spark queue: move refuses what would break the order, a duplicate keeps th
   assert.equal(movedId(q, "b1", "b3"), "000000000010001-5000.json"); // to the end
   assert.throws(() => movedId(q, "b1", "b2"), /no room between b2 and b3/); // 9000 and 9001
   assert.throws(() => movedId(q, "run", "head"), /already running/);
+  // 2026-10-28: a waiting ticket older than the running one (img-gpu-ir2-light
+  // before img-gpu-ir1-light, running): "head" goes just after the running
+  // ticket by position, not at the count of running tickets
+  const q2 = [t(1000, "older-waiting"), t(2000, "running", "a"), t(5000, "w1"), t(9000, "smoke")];
+  assert.equal(movedId(q2, "smoke", "head"), "000000000003500-9000.json"); // between running and w1
+  assert.equal(movedId([t(1000, "w0"), t(5000, "w1")], "w1", "head"), "000000000000000-5000.json", "nothing running: before every waiting ticket");
   // An old waiter (no estMin) cannot follow a rename: refused.
   const { estMin, ...old } = q[1];
   assert.throws(() => movedId([q[0], old, q[2]], "b1", "head"), /would wait for itself/);
