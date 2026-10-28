@@ -48,12 +48,16 @@ export function normalizeDisplaySharpness(value) {
 // any sharpness implies it (displayFilterFits). box: the canvas element's
 // size in device pixels and whether it is laid out with object-fit: contain,
 // or null before the page measured it.
-export function normalizeDisplayFilter({ sharpness, fit, box } = {}) {
+// timing: read each filtered frame's GPU time back (timestamp queries, with
+// metrics on): measurements only, off by default, since a readback per frame
+// is work of its own (?displayfiltertiming=1).
+export function normalizeDisplayFilter({ sharpness, fit, box, timing } = {}) {
   const w = Math.round(Number(box?.width)), h = Math.round(Number(box?.height));
   return {
     sharpness: normalizeDisplaySharpness(sharpness),
     fit: fit === true,
-    box: w > 0 && h > 0 ? { width: w, height: h, contain: box.contain === true } : null
+    box: w > 0 && h > 0 ? { width: w, height: h, contain: box.contain === true } : null,
+    timing: timing === true
   };
 }
 
@@ -67,7 +71,8 @@ export function requestedDisplayFilter(search) {
   const params = new URLSearchParams(search || "");
   return normalizeDisplayFilter({
     sharpness: params.get("fsr"),
-    fit: params.get("displayfit") === "1"
+    fit: params.get("displayfit") === "1",
+    timing: params.get("displayfiltertiming") === "1"
   });
 }
 
