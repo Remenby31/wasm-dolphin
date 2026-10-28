@@ -725,12 +725,27 @@ test("--noise must have loaded the savestate at the same delay; an older summary
   assert.throws(() => readNoise(path.join(root, "late.json"), { ...expect, stateDelayMs: 0 }), /stateDelayMs 3300 vs 0/);
 });
 
+test("drop-meter: the display filter's GPU cost per visit and per side (off: none)", async () => {
+  const { displayFilterCost, displayFilterCostSummary } = await import("../harness/probes/drop-meter.mjs");
+  assert.equal(displayFilterCost(null), null);
+  assert.equal(displayFilterCost({ active: false, frames: 10 }), null);
+  const on = displayFilterCost({ active: true, sharpness: "light", canvas: [1100, 824], backbuffer: [640, 480], frames: 4, gpuTimed: 4, gpuMsTotal: 2, gpuMsMax: 0.9, encodeMsTotal: 0.4 });
+  assert.deepEqual(on, { sharpness: "light", canvas: [1100, 824], backbuffer: [640, 480], frames: 4, gpuTimed: 4, gpuMsMean: 0.5, gpuMsMax: 0.9, encodeMsMean: 0.1 });
+  const a = (side, visit, mean, max) => ({ side, visit, analysis: { displayFilter: { ...on, gpuMsMean: mean, gpuMsMax: max } } });
+  const s = displayFilterCostSummary([a("candidate", 1, 0.5, 0.9), a("candidate", 1, 0.7, 1.2), a("candidate", 1, 0.6, 1), { side: "baseline", visit: 1, analysis: { displayFilter: null } }], 2);
+  assert.deepEqual(s, { "candidate-v1": { runs: 3, gpuMsMedian: 0.6, gpuMsMax: 1.2, canvas: [1100, 824], backbuffer: [640, 480] } });
+  assert.equal(displayFilterCostSummary([{ side: "candidate", visit: 1, analysis: {} }], 1), null);
+});
+
 // The audio latency the page reported: median and p95 over the windows' span.
 test("audioLatencyOf: median and p95 of the page's samples in the span", async () => {
   const { audioLatencyOf } = await import("../harness/lib/drops.mjs");
   const page = [0, 50, 100, 150, 200, 250, 300, 350, 400, 450].map((t, i) => ({ t, audioMs: 50 + i }));
   page.push({ t: 2000, audioMs: 999 }); // after the span
   const windows = [{ t0: 0 }, { t0: 100 }, { t0: 200 }, { t0: 300 }, { t0: 400 }];
-  assert.deepEqual(audioLatencyOf(page, windows), { audioLatencyMs: 55, audioLatencyP95Ms: 59 });
-  assert.deepEqual(audioLatencyOf([{ t: 0, audioMs: null }], windows), { audioLatencyMs: null, audioLatencyP95Ms: null });
+  assert.deepEqual(audioLatencyOf(page, windows), { audioLatencyMs: 55, audioLatencyP95Ms: 59, audioMixerMs: null });
+  assert.deepEqual(audioLatencyOf([{ t: 0, audioMs: null }], windows), { audioLatencyMs: null, audioLatencyP95Ms: null, audioMixerMs: null });
+  // 0186: the mixer's part, its own median
+  const mixed = page.map((r, i) => ({ ...r, mixerMs: 40 + i }));
+  assert.equal(audioLatencyOf(mixed, windows).audioMixerMs, 45);
 });

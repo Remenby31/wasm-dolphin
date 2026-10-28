@@ -291,3 +291,23 @@ test("a legacy pump in flight stops scheduling once the worklet is active", asyn
   await audio.pump();
   assert.equal(pulled, 0, "createBuffer would throw: nothing scheduled");
 });
+
+// 0186: on the worklet path the latency counts the core mixer's queue too.
+test("the worklet latency adds the mixer's queue when the core reports it", async () => {
+  installBrowser();
+  const { AudioController } = await import(`../src/audio.js?mixerq=${Date.now()}`);
+  const { writeAudioPcm, AUDIO_PCM_HEADER } = await import("../src/audio-pcm-ring.js");
+  const audio = new AudioController();
+  audio.setTransportBridge(async () => true);
+  audio.muted = false;
+  await audio.ensureContext();
+  audio.stopWorkletWatchdog();
+  audio.context.outputLatency = 0.010;
+  audio.context.baseLatency = 0.003;
+  writeAudioPcm(audio.workletRing, new Int16Array(1920 * 2), 1920, 2);
+  assert.equal(audio.causalTelemetry().latencyMs, 53, "unknown mixer queue: left out");
+  assert.equal(audio.causalTelemetry().mixerQueueMs, null);
+  Atomics.store(audio.workletRing.header, AUDIO_PCM_HEADER.MIXER_QUEUE_US, 80000);
+  assert.equal(audio.causalTelemetry().mixerQueueMs, 80);
+  assert.equal(audio.causalTelemetry().latencyMs, 133, "80 ms mixer + 40 ms ring + 13 ms output");
+});

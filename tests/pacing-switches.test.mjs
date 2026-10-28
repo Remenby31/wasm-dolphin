@@ -192,7 +192,7 @@ test("presentpace=game: URL → host → adapter → worker → the presenter, o
 test("presentvsync: the backbuffer pass renders into a pooled texture, shown at the worker's rAF, the drain never held", async () => {
   const worker = await readFile(new URL("../src/upstream-discio-worker.js", import.meta.url), "utf8");
   // fb#0's BEGIN_PASS: the pool's texture in place of the canvas's
-  assert.match(worker, /const cur = wgpuPresentVsync\n\s+\? acquireWgpuVsyncTexture\([^)]*\)\n\s+: renderGpu\.context\.getCurrentTexture\(\);/);
+  assert.match(worker, /const cur = wgpuPresentVsync\n\s+\? acquireWgpuVsyncTexture\(\.\.\.wgpuBackbufferSize\(\)\)\n\s+: renderGpu\.context\.getCurrentTexture\(\);/);
   // the present queues the frame; the present count follows the display
   // the frame's texture is kept across drains (wgpu-vsync-queue.js): the present
   // queues it whatever this drain saw, never a drain-local texture
