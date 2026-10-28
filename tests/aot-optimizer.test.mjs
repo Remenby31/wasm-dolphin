@@ -469,3 +469,37 @@ test("aot optimizer: prioritize() finds a PC in a long range many starts back; h
   o.markStale(units[2].key);
   assert.equal(o.hasWork(), true, "a stale module is work again");
 });
+
+// ?aotpipeline=k: up to k modules compile at once while the next ones
+// translate (the translator spent most of a load's 5 s waiting on the
+// previous module's compile); installs and progress keep the module order.
+test("aot optimizer: a k-deep pipeline overlaps compiles, installs in order", async () => {
+  const run = async (pipelineDepth) => {
+    let active = 0, peak = 0, n = 0;
+    const installed = [];
+    const { o, events } = optimizer({
+      pipelineDepth,
+      // every other module compiles slower: a later one finishes first
+      compile: async (key) => {
+        active++; peak = Math.max(peak, active);
+        await new Promise((r) => setTimeout(r, n++ % 2 ? 1 : 15));
+        active--;
+        return { module: {} };
+      },
+      install: (region) => installed.push(region.key)
+    });
+    await o.status();
+    const order = o.regions.map((u) => u.key);
+    await o.start();
+    const fractions = events.filter(([t]) => t === "optimization-progress").map(([, d]) => d.fraction);
+    return { peak, installed, order, fractions };
+  };
+  const one = await run(1);
+  assert.equal(one.peak, 1, "one compile at a time, as before");
+  assert.deepEqual(one.installed, one.order);
+  const three = await run(3);
+  assert.ok(three.peak >= 2, `compiles overlap (peak ${three.peak})`);
+  assert.ok(three.peak <= 3, "never more than k");
+  assert.deepEqual(three.installed, three.order, "installed in module order");
+  assert.ok(three.fractions.every((f, i) => !i || f >= three.fractions[i - 1]) && three.fractions.at(-1) === 1, "progress in order, to 100 %");
+});

@@ -200,6 +200,10 @@ export class EmulatorHost {
     // default the worker takes it from the engine (JSC only).
     const regionCap = new URLSearchParams(window.location.search).get("regioncap");
     this.regionCap = regionCap !== null && /^\d+$/.test(regionCap) ? Number(regionCap) : null;
+    // ?aotpipeline=k (1-4): first-launch modules compiling at once while the
+    // next ones translate (installs stay in order); 1, the default, as before.
+    const aotPipeline = Number(new URLSearchParams(window.location.search).get("aotpipeline"));
+    this.aotPipeline = Number.isInteger(aotPipeline) && aotPipeline >= 1 && aotPipeline <= 4 ? aotPipeline : 1;
     // With aot=1, regions tail-call the next region (patch 0102); ?regionchain=0 turns it off.
     this.regionChain = new URLSearchParams(window.location.search).get("regionchain") !== "0";
     // Where relaxed_madd is fused the JIT's FMA uses it (patch 0129); ?fusedmadd=0
@@ -545,6 +549,7 @@ export class EmulatorHost {
             aotSampleMs: this.aotSampleMs,
             wasmEngine: this.wasmEngine,
             regionCap: this.regionCap,
+            aotPipeline: this.aotPipeline,
             regionChain: this.regionChain,
             fusedMadd: this.fusedMadd,
             collectMetrics: this.collectMetrics,

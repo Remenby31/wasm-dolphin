@@ -1976,6 +1976,7 @@ async function handleMessage(type, payload) {
         aotSampleMs: payload.aotSampleMs,
         wasmEngine: payload.wasmEngine,
         regionCap: payload.regionCap,
+        aotPipeline: payload.aotPipeline,
         regionChain: payload.regionChain,
         fusedMadd: payload.fusedMadd,
         reportedCoreSelection: payload.coreSelection,
@@ -2673,6 +2674,7 @@ async function loadCore({
   aotSampleMs = AOT_PROFILE_SAMPLE_MS,
   wasmEngine: requestedWasmEngine = null,
   regionCap = null,
+  aotPipeline = 1,
   regionChain = true,
   fusedMadd = true,
   reportedCoreSelection = null,
@@ -3119,6 +3121,7 @@ async function loadCore({
   aotProfileSampleMs = Number.isInteger(aotSampleMs) && aotSampleMs >= 0 ? aotSampleMs : AOT_PROFILE_SAMPLE_MS;
   wasmEngineName = resolveWasmEngineName(requestedWasmEngine);
   aotRegionCapRequested = Number.isInteger(regionCap) && regionCap >= 0 ? regionCap : null;
+  aotPipelineDepth = Number.isInteger(aotPipeline) && aotPipeline >= 1 && aotPipeline <= 4 ? aotPipeline : 1;
   dolphinJitBootLoadComplete = false;
   dolphinJitBootLoadedEntries = 0;
   coreBuildFingerprint = String(buildFingerprint ?? "");
@@ -8378,6 +8381,7 @@ export async function prepareAotFirstLaunch(file, {
     : null;
   const opfs = translator ? await Promise.resolve(storageRoot()).catch(() => null) : null;
   const flow = createAotFirstLaunch({
+    tuning: { pipelineDepth: aotPipelineDepth },
     discKey,
     coreHash,
     keyParts,
@@ -8639,6 +8643,7 @@ export function setAotCoreBootedForTest(on) {
 }
 // ?regioncap=N|0 (core-host): the region function cap forced, else null (by engine).
 let aotRegionCapRequested = null;
+let aotPipelineDepth = 1; // ?aotpipeline=k
 export function regionFunctionCap(jscCap) {
   return aotRegionCapRequested ?? (wasmEngineName === "jsc" ? jscCap : 0);
 }

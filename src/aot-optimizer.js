@@ -54,8 +54,12 @@ export class AotOptimizer extends EventTarget {
   // keyParts: { compilerVersion, codegenMask } (the core's _DolphinWeb_AotKeyParts)
   constructor({ discKey, buildPlan, translator, openCache, cacheIdentity = {}, keyParts = { compilerVersion: 0, codegenMask: 0 },
     assemble = null, assembleOptions = null, compile = null, install = null, maxFunctions = 100, planStore = null, batchSize = BATCH,
-    notReadyDelayMs = 1000, maxNotReadyWaits = 300, maxAttempts = 3, sleep = (ms) => new Promise((r) => setTimeout(r, ms)), now = () => performance.now() }) {
+    notReadyDelayMs = 1000, maxNotReadyWaits = 300, maxAttempts = 3, sleep = (ms) => new Promise((r) => setTimeout(r, ms)), now = () => performance.now(),
+    pipelineDepth = 1 }) {
     super();
+    // Modules compiling at once while the next ones translate (?aotpipeline):
+    // they still install, go to the cache and count in order.
+    this.pipelineDepth = Math.max(1, Math.min(4, pipelineDepth | 0 || 1));
     this.discKey = discKey;
     this.buildPlan = buildPlan;
     this.translator = translator;
@@ -481,8 +485,8 @@ export class AotOptimizer extends EventTarget {
       // module: what compiled still installs (the worker drops it if the
       // disc changed), but nothing is stored, deferred or blacklisted, so
       // the next launch translates it again (review of #144).
-      const finish = async (unit, result) => {
-        if (this.cancelled) return;
+      const finish = async (unit, result, prev = Promise.resolve()) => {
+        if (this.cancelled) return prev;
         for (const x of result.refused) {
           this.emit("optimization-error", { message: `function ${x.entry.toString(16)}: ${x.reason}`, fatal: false });
         }
@@ -511,6 +515,8 @@ export class AotOptimizer extends EventTarget {
             } catch (error) {
               out = { reason: String(error?.message || error) };
             }
+            // from here on in order: the module before installs and counts first
+            await prev;
             if (this.cancelled) {
               if (out?.module) this.install?.({ key: unit.key, bytes, entries: fragments.flatMap((fr) => fr.entries), layout: fragments[0]?.layout ?? 0, members: unit.members.map((f) => ({ ranges: f.ranges, hash: f.hash })) });
               return;
@@ -545,6 +551,7 @@ export class AotOptimizer extends EventTarget {
             }
           }
         }
+        await prev; // a module that compiled nothing still counts in order
         if (wait) {
           if (await this.defer(session, unit, wait)) refused.add(unit.key);
           else deferred++;
@@ -561,9 +568,11 @@ export class AotOptimizer extends EventTarget {
       // A finishing step that throws (a failed blacklist or attempts write)
       // is reported, never left as an unhandled rejection, and every way out
       // of the loop waits for the last one.
-      const schedule = (unit, result) => finish(unit, result).catch((error) => {
+      const schedule = (unit, result, prev) => finish(unit, result, prev).catch((error) => {
         this.emit("optimization-error", { message: `module ${unit.key}: ${error?.message || error}`, fatal: false });
       });
+      // the finishing steps in flight, oldest first (at most pipelineDepth)
+      const inFlight = [];
       try {
         for (let n = 0; ; n++) {
           if (n >= todo.length) {
@@ -576,14 +585,16 @@ export class AotOptimizer extends EventTarget {
           this.stale.delete(unit.key);
           const result = await this.translateUnit(unit);
           const w0 = performance.now();
-          await finishing;
+          while (inFlight.length >= this.pipelineDepth) await inFlight.shift();
           this.pipelineStats.finishWaitMs += performance.now() - w0;
           if (!result || this.cancelled) break;
           if (result.notReady) {
+            await finishing;
             this.emit("optimization-error", { message: "the core is not ready to translate; resumed at the next launch", fatal: false });
             return;
           }
-          finishing = schedule(unit, result);
+          finishing = schedule(unit, result, finishing);
+          inFlight.push(finishing);
         }
       } finally {
         await finishing;
