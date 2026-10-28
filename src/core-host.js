@@ -108,6 +108,7 @@ export class EmulatorHost {
     this.ppcWasmJitTier = requestedPpcWasmJitTier();
     this.ppcWasmJitForce = requestedPpcWasmJitForce();
     this.ppcWasmJitWarmupFrames = requestedPpcWasmJitWarmupFrames(this.videoBackend);
+    this.ppcWasmJitWarmupOnLoad = requestedPpcWasmJitWarmupOnLoad();
     this.ppcProfile = requestedPpcProfile();
     this.gpuSpinMicros = requestedGpuSpinMicros();
     this.cpuOverclock = requestedCpuOverclock();
@@ -428,6 +429,7 @@ export class EmulatorHost {
             ppcWasmJitTier: this.ppcWasmJitTier,
             ppcWasmJitForce: this.ppcWasmJitForce,
             ppcWasmJitWarmupFrames: this.ppcWasmJitWarmupFrames,
+            ppcWasmJitWarmupOnLoad: this.ppcWasmJitWarmupOnLoad,
             ppcProfile: this.ppcProfile,
             gpuSpinMicros: this.gpuSpinMicros,
             codeSpaceMiB: this.codeSpaceMiB,
@@ -485,6 +487,7 @@ export class EmulatorHost {
             ppcWasmJitTier: this.ppcWasmJitTier,
             ppcWasmJitForce: this.ppcWasmJitForce,
             ppcWasmJitWarmupFrames: this.ppcWasmJitWarmupFrames,
+            ppcWasmJitWarmupOnLoad: this.ppcWasmJitWarmupOnLoad,
             ppcProfile: this.ppcProfile,
             gpuSpinMicros: this.gpuSpinMicros,
             codeSpaceMiB: this.codeSpaceMiB,
@@ -1657,6 +1660,13 @@ function requestedPpcWasmJitWarmupFrames(videoBackend) {
     effective = Math.max(minimumWarmup, DEFAULT_JIT_WARMUP_FRAMES);
   }
   return effective;
+}
+
+// ?jitwarmupload=boot (patch 0187): after a state load the JIT's warmup
+// counts from boot, so it engages at once for a state saved past it; the
+// default restarts it from the loaded field.
+function requestedPpcWasmJitWarmupOnLoad() {
+  return new URLSearchParams(window.location.search).get("jitwarmupload") === "boot" ? "boot" : "restart";
 }
 
 function requestedPpcProfile() {

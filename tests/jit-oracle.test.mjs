@@ -199,6 +199,38 @@ test("armed warmup engages at the same field: late first step, state loaded befo
   assert.equal(engageField(m, range(500, 700)), 560);
 });
 
+// Patch 0187 (?jitwarmupload=boot): after a state load the warmup counts from
+// field 0, so the JIT engages at max(warmup, loaded field): at once for a
+// state saved past the warmup, still a function of emulated fields only.
+test("0187: with the warmup counted from boot, a load engages at max(warmup, loaded field)", { skip }, async (t) => {
+  const { default: createDolphinCore } = await import(new URL("../cores/dolphin/dolphin-core-upstream.js", import.meta.url));
+  const { readFileSync } = await import("node:fs");
+  const fresh = async () => createDolphinCore({ wasmBinary: readFileSync(coreWasm), noInitialRun: true, printErr: () => {} });
+  const engageField = (m, fields) => { for (const f of fields) { const e = m._DolphinWeb_JitArmedStepForTest(f); if (e >= 0) return e; } return -1; };
+  const range = (a, b) => Array.from({ length: b - a }, (_, k) => a + k);
+  if (typeof (await fresh())._DolphinWeb_SetJitWarmupOnLoad !== "function") return t.skip("core without patch 0187");
+  for (const [loaded, engaged] of [[0, 60], [30, 60], [349, 349], [1000, 1000]]) {
+    const m = await fresh();
+    m._SetPpcWasmJitWarmup(1, 60);
+    m._DolphinWeb_SetJitWarmupOnLoad(1);
+    m._DolphinWeb_JitOnStateLoaded();
+    assert.equal(engageField(m, range(loaded, loaded + 200)), engaged, `loaded at ${loaded}`);
+  }
+  // after engage: a later save engages at once, an earlier one waits for the warmup
+  const m = await fresh();
+  m._SetPpcWasmJitWarmup(1, 60);
+  m._DolphinWeb_SetJitWarmupOnLoad(1);
+  assert.equal(engageField(m, range(0, 100)), 60);
+  m._DolphinWeb_JitOnStateLoaded();
+  assert.equal(engageField(m, range(500, 700)), 500);
+  m._DolphinWeb_JitOnStateLoaded();
+  assert.equal(engageField(m, range(20, 200)), 60);
+  // and 0 restarts from the loaded field again
+  m._DolphinWeb_SetJitWarmupOnLoad(0);
+  m._DolphinWeb_JitOnStateLoaded();
+  assert.equal(engageField(m, range(500, 700)), 560);
+});
+
 test("FP program exceptions (FE0/FE1, enabled invalid or zero-divide) end in the same state", { skip }, () => {
   // Compared at the 0x700 vector: SRR0, SRR1, MSR, FPSCR and the FPRs.
   const r = makeRng(0xe1);

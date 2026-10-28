@@ -111,3 +111,20 @@ test("the worker arms the core-side warmup in loadCore, before bootDisc", () => 
   assert.ok(arm > 0 && boot > 0 && arm < boot, "armed before the disc boots");
   assert.match(worker.slice(arm - 400, arm), /if \(ppcWasmJitRequested && api\.setPpcWasmJitWarmup\)/);
 });
+
+test("?jitwarmupload=boot reaches the core: host, adapter, worker message and loadCore (patch 0187)", async () => {
+  assert.match(host, /get\("jitwarmupload"\) === "boot" \? "boot" : "restart"/);
+  assert.equal(host.match(/ppcWasmJitWarmupOnLoad: this\.ppcWasmJitWarmupOnLoad,/g)?.length, 2, "both init messages");
+  assert.match(adapter, /ppcWasmJitWarmupOnLoad = "restart",/);
+  assert.match(adapter, /this\.ppcWasmJitWarmupOnLoad = ppcWasmJitWarmupOnLoad === "boot" \? "boot" : "restart";/);
+  assert.match(adapter, /ppcWasmJitWarmupOnLoad: this\.ppcWasmJitWarmupOnLoad,/, "rebuilt field by field: carried");
+  assert.match(worker, /ppcWasmJitWarmupOnLoad: payload\.ppcWasmJitWarmupOnLoad,/);
+  assert.match(worker, /setJitWarmupOnLoad: optionalCwrap\("DolphinWeb_SetJitWarmupOnLoad", null, \["number"\]\)/);
+  const set = worker.indexOf("api.setJitWarmupOnLoad?.(ppcWasmJitWarmupOnLoadMode");
+  assert.match(worker, /jitArmStartField: [^\n]*\n {8}jitWarmupOnLoad: ppcWasmJitWarmupOnLoadMode,/, "reported next to the arm's start field");
+  assert.ok(set > 0 && set < worker.indexOf("api.bootDisc(path)"), "set before the disc boots");
+  const patch = await readFile(new URL("../patches/dolphin-wasm/snapshot/0187-jit-warmup-from-boot-on-load.patch", import.meta.url), "utf8");
+  assert.match(patch, /\+std::atomic<bool> s_wasm_warmup_from_boot_on_load\{false\};/, "off by default");
+  assert.match(patch, /\+ {2}s_wasm_arm_from_boot\.store\(s_wasm_warmup_from_boot_on_load\.load\(std::memory_order_relaxed\),/);
+  assert.match(patch, /\+extern "C" EMSCRIPTEN_KEEPALIVE void DolphinWeb_SetJitWarmupOnLoad\(int from_boot\)/);
+});

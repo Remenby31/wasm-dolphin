@@ -25,7 +25,7 @@
       "commit": "01e0577914a75a2569c846778c2f93aa8e6feddd"
     }
   },
-  "patchSeriesSha256": "77b1c48cb0379478e6c4f3e7eeb284f54cf8b6ffed8bfc089f15291b11b60d6d",
+  "patchSeriesSha256": "eb39c8a8fadddec0dc45ec6d8275a3409b4217e5996e4f71ee1841bf54e8ef6e",
   "patches": [
     {
       "order": 1,
@@ -1085,6 +1085,14 @@
     },
     {
       "order": 133,
+      "cwd": ".",
+      "hashMode": "lf-normalized",
+      "path": "patches/dolphin-wasm/snapshot/0187-jit-warmup-from-boot-on-load.patch",
+      "size": 2295,
+      "sha256": "000c79122c42cf1e071c803bad55d2449d22b97a4ba6ce600c0b85d465af74fa"
+    },
+    {
+      "order": 134,
       "cwd": "Externals/SFML/SFML",
       "hashMode": "lf-normalized",
       "path": "patches/dolphin-wasm/submodules/0001-sfml-emscripten-config.patch",
@@ -1092,7 +1100,7 @@
       "sha256": "f82197a21fe982ad83f6ee7bbf5a03839b1cebd4d64da3eab11263842bf61d89"
     },
     {
-      "order": 134,
+      "order": 135,
       "cwd": "Externals/xxhash/xxHash",
       "hashMode": "lf-normalized",
       "path": "patches/dolphin-wasm/submodules/0002-xxhash-wasm-simd-scalar.patch",

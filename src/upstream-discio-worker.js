@@ -890,6 +890,9 @@ let ppcWasmJitCorePaused = false;
 let ppcWasmJitTimingSuspensions = 0;
 let ppcWasmJitTier = "guarded";
 let ppcWasmJitWarmupFrames = 0; // set by every load (normalizePpcWasmJitWarmupFrames)
+// After a state load the warmup restarts from the loaded field, or counts
+// from boot ("boot", patch 0187); set by every load.
+let ppcWasmJitWarmupOnLoadMode = "restart";
 let pacedPresentationActive = false;
 let nextPacedPresentationTime = 0;
 let pacedPresentationTimer = 0;
@@ -1729,6 +1732,7 @@ async function handleMessage(type, payload) {
         ppcWasmJitForce: payload.ppcWasmJitForce,
         ppcWasmJitTier: payload.ppcWasmJitTier,
         ppcWasmJitWarmupFrames: payload.ppcWasmJitWarmupFrames,
+        ppcWasmJitWarmupOnLoad: payload.ppcWasmJitWarmupOnLoad,
         ppcProfile: payload.ppcProfile,
         gpuSpinMicros: payload.gpuSpinMicros,
         codeSpaceMiB: payload.codeSpaceMiB,
@@ -2170,7 +2174,10 @@ async function handleMessage(type, payload) {
         loadedCheckpointPpcPc: loadedCheckpoint.ppcPc,
         // Emulated field at which the core engaged the JIT (-1: not yet).
         jitEngagedField: api?.getPpcWasmJitEngagedFrame?.() ?? null,
+        // 0 after a load with jitWarmupOnLoad "boot" (patch 0187): the
+        // warmup counts from boot, not from the loaded field.
         jitArmStartField: api?.getPpcWasmJitArmStartFrame?.() ?? null,
+        jitWarmupOnLoad: ppcWasmJitWarmupOnLoadMode,
         observedAtMs: performance.now(),
       };
     }
@@ -2555,6 +2562,7 @@ async function loadCore({
   ppcWasmJitForce: requestedPpcWasmJitForce = false,
   ppcWasmJitTier: requestedPpcWasmJitTier = "guarded",
   ppcWasmJitWarmupFrames: requestedPpcWasmJitWarmupFrames = DEFAULT_WASM_JIT_WARMUP_XFB_FRAMES,
+  ppcWasmJitWarmupOnLoad = "restart",
   ppcProfile = false,
   gpuSpinMicros = -1,
   codeSpaceMiB = null,
@@ -3336,6 +3344,10 @@ async function loadCore({
     // boot whatever the worker's timing (a late first poll, a state loaded
     // before the first frame).
     api.setPpcWasmJitWarmup(ppcWasmJitTier === "mixed" ? 2 : 1, ppcWasmJitWarmupFrames);
+    // Patch 0187: after a state load, the warmup counts from boot
+    // (?jitwarmupload=boot) or restarts from the loaded field.
+    ppcWasmJitWarmupOnLoadMode = ppcWasmJitWarmupOnLoad === "boot" ? "boot" : "restart";
+    api.setJitWarmupOnLoad?.(ppcWasmJitWarmupOnLoadMode === "boot" ? 1 : 0);
     ppcWasmJitArmed = true;
   } else {
     api.setPpcWasmJitEnabled?.(0);
@@ -3690,6 +3702,7 @@ function bindApi(module) {
         ? (core) => ccall("SetCpuCore", "number", ["string"], [core])
         : null,
     setPpcWasmJitWarmup: optionalCwrap("SetPpcWasmJitWarmup", null, ["number", "number"]),
+    setJitWarmupOnLoad: optionalCwrap("DolphinWeb_SetJitWarmupOnLoad", null, ["number"]),
     setPpcWasmJitOffThread: optionalCwrap("SetPpcWasmJitOffThread", null, ["number"]),
     setJitRegionsEnabled: optionalCwrap("DolphinWeb_JitSetRegionsEnabled", null, ["number"]),
     setJitRegionChaining: optionalCwrap("DolphinWeb_JitSetRegionChaining", null, ["number"]),
