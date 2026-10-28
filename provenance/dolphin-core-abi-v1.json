@@ -50,14 +50,14 @@
     {
       "path": "src/app.js",
       "hashMode": "lf-normalized",
-      "size": 51313,
-      "sha256": "3fb89354ebfeb8af402d76f4f48fc721824d9cd3142eb9ee04735e25627b4563"
+      "size": 51436,
+      "sha256": "24dca2094c3328c7d97d4c1da45a7cbb706c09d16271d6e1e3c476da66b6a492"
     },
     {
       "path": "src/audio.js",
       "hashMode": "lf-normalized",
-      "size": 19607,
-      "sha256": "bee128b8aacb3feaf952433297a2baac4e678e307e87eb7739b3208696d6f75b"
+      "size": 19728,
+      "sha256": "8f2c191a68903d5ce77f8ad5f212d8de6f5012b61a5bf3d48ddd216bcafeb0f4"
     },
     {
       "path": "src/audio-pcm-ring.js",
@@ -86,8 +86,8 @@
     {
       "path": "src/core-host.js",
       "hashMode": "lf-normalized",
-      "size": 95600,
-      "sha256": "538ee5d92a8128700bd5d7e00a402d48733fc76d20443a6bbd44dee3f0117228"
+      "size": 96519,
+      "sha256": "e02d59fb2bcc3285c6690db362a77356d277a11fee08c2d2a901e8f8d605b09d"
     },
     {
       "path": "src/diagnostic-log-filter.js",
