@@ -410,4 +410,16 @@ test("spark queue: a lane b job backfills past an older whole-bench job that can
   assert.match(nextStep(t(7, "pair", "a", { estMin: 1 }), [running, pairA, multi, t(7, "pair", "a", { estMin: 1 })], busy, now).wait, /pair2 arrived first/);
   // a whole-bench job never backfills past another
   assert.match(nextStep(t(8, "build", "auto", { estMin: 1 }), [running, pairA, multi, t(8, "build", "auto", { estMin: 1 })], busy, now).wait, /arrived first/);
+  // review of #338: an older ticket stepped aside (held) does not count in the multi's start
+  const heldPair = t(2.5, "pair", "a", { estMin: 30, holdUntil: new Date(now + 60000).toISOString() });
+  const mid = t(9, "pair", "b", { estMin: 30 }); // 30 min: ends after the multi's ~25 min start without the held pair (55 with it)
+  assert.match(nextStep(mid, [running, pairA, heldPair, multi, mid], busy, now).wait, /multi3 arrived first/);
+  assert.deepEqual(nextStep(short, [running, pairA, heldPair, multi, short], busy, now), { go: ["b"] });
+  // a job of 0 min never backfills, nor before a start of 0
+  assert.match(nextStep(t(4.5, "pair", "b", { estMin: 0 }), [running, pairA, multi, t(4.5, "pair", "b", { estMin: 0 })], busy, now).wait, /multi3 arrived first/);
+  const multiNow = t(3, "multi", "auto", { estMin: 13 });
+  assert.match(nextStep(short, [multiNow, short], () => false, now).wait, /multi3 arrived first/, "the multi can start at once: nothing passes it");
+  // a running ticket without grantedAt (an older harness): no backfill
+  const oldRunning = t(1, "pair", "a", { lane: "a", estMin: 20 });
+  assert.match(nextStep(short, [oldRunning, pairA, multi, short], busy, now).wait, /multi3 arrived first/);
 });

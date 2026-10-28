@@ -65,13 +65,18 @@ export function nextStep(me, tickets, busy, now = Date.now()) {
   // still in use does not hold back a younger job on another, free lane
   // that is estimated to end before that job can start (2026-10-28: a multi
   // waiting ~37 min for lane a kept two lane b screens and lane b idle). The
-  // estimates are eta()'s; a job without one is not backfilled.
+  // estimates are eta()'s, without the tickets stepped aside (held: the
+  // whole-bench job passes them anyway). No backfill for a job without an
+  // estimate or of 0 min, before a start of 0 (a run of such jobs would
+  // starve it), or while a running ticket has no grantedAt (an older
+  // harness: its estimate would count in full).
   let starts = null;
   const backfills = (t) => {
-    if (!WHOLE_BENCH.includes(t.kind) || WHOLE_BENCH.includes(me.kind) || me.estMin == null) return false;
-    starts ??= new Map(eta(tickets, now).map((x) => [x.id, x.startsIn]));
+    if (!WHOLE_BENCH.includes(t.kind) || WHOLE_BENCH.includes(me.kind) || !(me.estMin > 0)) return false;
+    if (tickets.some((x) => x.lane && x.lane !== "none" && !x.grantedAt)) return false;
+    starts ??= new Map(eta(tickets.filter((x) => x === me || !held(x, now)), now).map((x) => [x.id, x.startsIn]));
     const start = starts.get(t.id);
-    return start != null && me.estMin <= start;
+    return start > 0 && me.estMin <= start;
   };
   const ahead = older.find((t) => !t.lane && !held(t, now) && wants(t).some((l) => mine.includes(l)) && !backfills(t));
   if (ahead) return { wait: `${ahead.kind} ${ahead.name} arrived first` };
