@@ -118,7 +118,7 @@ test("race-multi --aot-seed: a stable count below the seed's is not done", async
   assert.equal((await waitRegionsQuiescent(seq([p(0)]), fast)).quiescent, true);
   const ko = await waitRegionsQuiescent(seq([p(0)]), { ...fast, target: 143, timeoutMs: -1 });
   assert.equal(ko.quiescent, false);
-  assert.match(ko.why, /0 installed, 143 expected/);
+  assert.match(ko.why, /0 installed \+ 0 dropped, 143 expected/);
   assert.equal((await waitRegionsQuiescent(seq([p(100), p(143), p(143), p(143)]), { ...fast, target: 143 })).installed, 143);
 });
 
@@ -159,11 +159,34 @@ test("race-multi: a run where an arm lacks some of its seeded regions is discard
   assert.equal(discardReason([{ regionGate: ok }, { regionGate: ok }], [143, 143]), null);
   assert.equal(discardReason([{ regionGate: ok }, { regionGate: { installed: 0, layoutRefused: 143, quiescent: false, why: "0 installed, 143 expected" } }], [143, 143]),
     "layoutRefused on arm 1 (143)");
-  assert.match(discardReason([{ regionGate: { ...ok, installed: 140 } }, { regionGate: ok }], [143, 143]), /arm 0 installed 140 of 143/);
+  assert.match(discardReason([{ regionGate: { ...ok, installed: 140 } }, { regionGate: ok }], [143, 143]), /arm 0 installed 140 \(\+ 0 dropped\) of 143/);
   assert.equal(discardReason([{ regionGate: ok }, { regionGate: ok }], [142, 143]), null, "more regions than the seed reached: kept");
-  assert.match(discardReason([{ regionGate: { ...ok, installed: undefined } }], [142]), /arm 0 installed \? of 142/);
+  assert.match(discardReason([{ regionGate: { ...ok, installed: undefined } }], [142]), /arm 0 installed \? \(\+ 0 dropped\) of 142/);
   assert.match(discardReason([{ regionGate: null }, { regionGate: ok }], [143, 143]), /no region gate on arm 0/);
   assert.match(discardReason([{ regionGate: { ...ok, quiescent: false, why: "still compiling" } }], [null]), /arm 0: still compiling/);
+});
+
+test("race-multi --aot-seed: regions the guest overwrote (dropped) count as arrived; arms of one tree must install the same count, other trees may differ", async () => {
+  const { discardReason, regionCountsDiffer } = await import("../harness/probes/race-multi.mjs");
+  // multi2-aa-5x5 (2026-10-28): every arm 141 installed + 2 dropped of the seed's 143.
+  const g = (installed, dropped) => ({ regionGate: { installed, dropped, refused: 0, layoutRefused: 0, quiescent: true } });
+  assert.equal(discardReason([g(141, 2), g(141, 2)], [143, 143]), null);
+  // A/A (one tree): unequal counts discarded; arms 0 and 2 of a multi with the same base too.
+  assert.equal(discardReason([g(140, 3), g(141, 2)], [143, 143], ["/t/base", "/t/base"]), "installed regions differ between arms 0 and 1 of one tree (140 / 141)");
+  assert.equal(discardReason([g(141, 2), g(150, 0), g(140, 3)], [143, 150, 143], ["/t/base", "/t/cand", "/t/base"]), "installed regions differ between arms 0 and 2 of one tree (141 / 140)");
+  // A/B (two trees): a candidate with other regions is kept, flagged by regionCountsDiffer.
+  assert.equal(discardReason([g(141, 2), g(150, 0)], [143, 150], ["/t/base", "/t/cand"]), null);
+  assert.equal(regionCountsDiffer([g(141, 2), g(150, 0)], ["/t/base", "/t/cand"]), true);
+  assert.equal(regionCountsDiffer([g(141, 2), g(141, 2)], ["/t/base", "/t/cand"]), false);
+  assert.equal(regionCountsDiffer([g(140, 3), g(141, 2)], ["/t/base", "/t/base"]), false, "one tree: a discard, not a difference");
+  assert.match(discardReason([g(140, 2), g(140, 2)], [143, 143]), /arm 0 installed 140 \(\+ 2 dropped\) of 143/);
+  const seq = (states) => { let i = 0; return async () => states[Math.min(i++, states.length - 1)]; };
+  const p = (installed, dropped) => ({ queued: 0, installed, refused: 0, dropped, pending: 0 });
+  const fast = { everyMs: 0, sleep: async () => {} };
+  const ok = await waitRegionsQuiescent(seq([p(141, 2)]), { ...fast, target: 143 });
+  assert.equal(ok.quiescent, true);
+  const short = await waitRegionsQuiescent(seq([p(140, 2)]), { ...fast, target: 143, timeoutMs: -1 });
+  assert.equal(short.why, "140 installed + 2 dropped, 143 expected, after -1 ms");
 });
 
 test("counters: cycles per guest cycle, extra PMU events per arm, and perf's multiplexing kept", async () => {

@@ -7,6 +7,7 @@ import path from "node:path";
 import { JIT_CACHE_ENTRY_KEY_SCHEMA, canonicalCoreFingerprint } from
   "../src/jit-cache-identity.js";
 import { CAUSAL_TELEMETRY_SCHEMA_VERSION } from "../src/causal-telemetry.js";
+import { wgpuMappedStagingSlotCountOf } from "../src/wgpu-replay-diagnostics.js";
 import { WGPU_UBO_COMPUTE_PROJECTION_SCHEMA } from
   "../src/wgpu-ubo-compute-projection.js";
 import { REQUIRED_WGPU_OWNERSHIP_TRACE_EXPORTS } from "./dolphin-provenance.mjs";
@@ -53,7 +54,7 @@ export function evaluateWgpuRuntimeConfigEvidence({
   const expectedUniformFast = requestedFlag("wgpuuniformfast");
   const expectedUboPack = requestedFlag("wgpuubopack") && !expectedUboCache;
   const expectedStageFast = expectedUploadTransport === "mapped" && requestedFlag("wgpustagefast");
-  const expectedSlots = String(params?.wgpustagingslots) === "4" ? 4 : 3;
+  const expectedSlots = wgpuMappedStagingSlotCountOf(String(params?.wgpustagingslots ?? ""));
   const expectedTimingStride = String(params?.wgpumappedtiming) === "64" ? 64 : 1;
   const expectedGeometryPack = requestedFlag("wgpugeompack");
   const expectedGeometryRange = expectedGeometryPack && requestedFlag("wgpugeomrange");
