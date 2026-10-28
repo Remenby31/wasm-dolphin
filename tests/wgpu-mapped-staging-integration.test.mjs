@@ -17,7 +17,9 @@ test("mapped staging slot count is explicit and flows through validation", async
   ]);
   assert.match(host, /requestedWgpuMappedStagingSlotCount\(\s*window\.location\.search\s*\)/);
   assert.match(host, /wgpuMappedStagingSlotCount: this\.wgpuMappedStagingSlotCount/);
-  assert.match(adapter, /this\.wgpuMappedStagingSlotCount = Number\(wgpuMappedStagingSlotCount\) === 4 \? 4 : 3/);
+  assert.match(adapter, /this\.wgpuMappedStagingSlotCount = wgpuMappedStagingSlotCountOf\(wgpuMappedStagingSlotCount\)/);
+  assert.match(worker, /wgpuMappedStagingSlotCount = wgpuMappedStagingSlotCountOf\(requestedWgpuMappedStagingSlotCount\)/);
+  assert.match(gate, /wgpuMappedStagingSlotCountOf\(String\(requestedMappedStagingSlots\)\)/);
   assert.match(adapter, /wgpuMappedStagingSlotCount: this\.wgpuMappedStagingSlotCount/);
   assert.match(worker, /wgpuMappedStagingSlotCount: payload\.wgpuMappedStagingSlotCount/);
   assert.match(worker, /slotCount: wgpuMappedStagingSlotCount/);
@@ -174,4 +176,27 @@ test("performance validation fails closed when the mapped arm executes queue tra
   assert.match(gate, /WGPU upload transport mismatch: requested=/);
   assert.match(gate, /observedWgpu\?\.uploadTransport/);
   assert.match(gate, /evaluateWgpuRuntimeConfigEvidence/);
+});
+
+// A count the page accepts must reach the worker's load payload unchanged:
+// before, the adapter dropped every value but 4 back to 3.
+test("?wgpustagingslots=6 reaches the worker's load payload through the adapter", async (t) => {
+  const { UpstreamWorkerAdapter } = await import("../src/upstream-worker-adapter.js");
+  const { requestedWgpuMappedStagingSlotCount } = await import("../src/wgpu-replay-diagnostics.js");
+  const adapter = new UpstreamWorkerAdapter({ wgpuMappedStagingSlotCount: requestedWgpuMappedStagingSlotCount("?wgpustagingslots=6") });
+  let posted = null;
+  adapter.worker = {
+    postMessage(message) {
+      posted = message;
+      queueMicrotask(() => adapter.handleMessage({ id: message.id, ok: true }));
+    }
+  };
+  const originalWindow = globalThis.window;
+  globalThis.window = { location: { href: "http://127.0.0.1:8080/?wgpustagingslots=6", search: "?wgpustagingslots=6" } };
+  t.after(() => {
+    if (originalWindow === undefined) delete globalThis.window;
+    else globalThis.window = originalWindow;
+  });
+  await adapter.load();
+  assert.equal(posted.payload.wgpuMappedStagingSlotCount, 6);
 });

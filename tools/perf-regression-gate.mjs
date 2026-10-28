@@ -75,6 +75,7 @@ import {
   parseWindowsCpuAffinityMask,
 } from "./windows-process-affinity.mjs";
 import { describePrebuiltJitCache } from "./prebuilt-jit-cache-provenance.mjs";
+import { wgpuMappedStagingSlotCountOf } from "../src/wgpu-replay-diagnostics.js";
 
 const root = process.cwd();
 const cli = parseArgs(process.argv.slice(2));
@@ -1404,7 +1405,7 @@ function summarizeScenario(
   const requestedMappedStageTiming = scenario.params?.wgpumappedtiming;
   const requestedMappedStagingSlots = scenario.params?.wgpustagingslots;
   if (requestedMappedStagingSlots != null) {
-    const expectedMappedStagingSlots = String(requestedMappedStagingSlots) === "4" ? 4 : 3;
+    const expectedMappedStagingSlots = wgpuMappedStagingSlotCountOf(String(requestedMappedStagingSlots));
     const activeMappedStagingSlots = observedWgpu?.mappedStaging?.slotCount;
     if (activeMappedStagingSlots !== expectedMappedStagingSlots) {
       failures.push(

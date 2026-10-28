@@ -370,10 +370,20 @@ export function requestedWgpuUploadArenaMiB(
   return new URLSearchParams(search).get("wgpuuploadmb") === "64" ? 64 : 32;
 }
 
+// Mapped staging slots (16 MiB each): 3 by default, 4 to 8 when asked for.
+// The page, the adapter and the worker all read the count through this one
+// function, so a value one layer accepts is never dropped back to 3 by
+// another.
+export const WGPU_MAPPED_STAGING_SLOT_COUNT_MAX = 8;
+export function wgpuMappedStagingSlotCountOf(value) {
+  const n = typeof value === "string" ? (/^[3-9]$/.test(value) ? Number(value) : 0) : Number(value);
+  return Number.isInteger(n) && n >= 3 && n <= WGPU_MAPPED_STAGING_SLOT_COUNT_MAX ? n : 3;
+}
+
 export function requestedWgpuMappedStagingSlotCount(
   search = globalThis.location?.search ?? ""
 ) {
-  return new URLSearchParams(search).get("wgpustagingslots") === "4" ? 4 : 3;
+  return wgpuMappedStagingSlotCountOf(new URLSearchParams(search).get("wgpustagingslots") ?? "");
 }
 
 export function requestedWgpuMappedStageTimingStride(
