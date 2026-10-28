@@ -1318,6 +1318,21 @@ int DolphinWeb_SetAudioBufferMs(int ms)
   return 1;
 }
 
+// 0186: what the mixer holds ahead of MixAudio, in ms (the longer of its DMA
+// and streaming granule queues); -1 before the boot or without a mixer.
+// Read-only: the page adds it to the audio latency it reports.
+#ifdef __EMSCRIPTEN__
+EMSCRIPTEN_KEEPALIVE
+#endif
+double DolphinWeb_AudioQueuedMs()
+{
+  if (!s_runtime_initialized)
+    return -1;
+  const SoundStream* sound_stream = Core::System::GetInstance().GetSoundStream();
+  const Mixer* mixer = sound_stream ? sound_stream->GetMixer() : nullptr;
+  return mixer ? static_cast<double>(mixer->GetQueuedMicroseconds()) / 1000.0 : -1;
+}
+
 int SetFastSoftwareRaster(int mode)
 {
   DolphinWeb_SetFastSoftwareRaster(mode < 0 ? 0 : mode > 3 ? 3 : mode);

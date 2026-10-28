@@ -531,12 +531,16 @@ export function displayedPerGuestSecOf(display, guestSec, vi, tps) {
 }
 
 // The audio latency the page reported over these windows' span: median
-// and p95 of its samples, ms (unmuted audio only; null without samples).
+// and p95 of its samples, ms (unmuted audio only; null without samples);
+// audioMixerMs: the median of the mixer's part (a core with 0186).
 export function audioLatencyOf(page, windows) {
-  if (!page?.length || !windows?.length) return { audioLatencyMs: null, audioLatencyP95Ms: null };
+  const none = { audioLatencyMs: null, audioLatencyP95Ms: null, audioMixerMs: null };
+  if (!page?.length || !windows?.length) return none;
   const t0 = windows[0].t0, t1 = windows.at(-1).t0 + STEP_MS;
-  const v = page.filter((r) => r.t >= t0 && r.t <= t1 && Number.isFinite(r.audioMs) && r.audioMs > 0).map((r) => r.audioMs).sort((a, b) => a - b);
-  return v.length ? { audioLatencyMs: v[v.length >> 1], audioLatencyP95Ms: v[Math.min(v.length - 1, Math.floor(v.length * 0.95))] } : { audioLatencyMs: null, audioLatencyP95Ms: null };
+  const span = page.filter((r) => r.t >= t0 && r.t <= t1 && Number.isFinite(r.audioMs) && r.audioMs > 0);
+  const v = span.map((r) => r.audioMs).sort((a, b) => a - b);
+  const m = span.filter((r) => Number.isFinite(r.mixerMs)).map((r) => r.mixerMs).sort((a, b) => a - b);
+  return v.length ? { audioLatencyMs: v[v.length >> 1], audioLatencyP95Ms: v[Math.min(v.length - 1, Math.floor(v.length * 0.95))], audioMixerMs: m.length ? m[m.length >> 1] : null } : none;
 }
 
 export function dropSummary({ windows, presents = [], vi = [], tps = null, rows = [], displayed = null, page = null }) {

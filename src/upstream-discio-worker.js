@@ -851,6 +851,7 @@ const workletAudioProducer = new AudioPcmProducer({
     audioBufferFrames: api?.audioBufferFrames,
     audioChannels: api?.audioChannels,
     audioSampleRate: api?.audioSampleRate,
+    audioQueuedMs: api?.audioQueuedMs,
     heapU8: moduleInstance?.HEAPU8,
   }),
   recordMix: (requested, returned, durationMs) =>
@@ -3799,6 +3800,11 @@ function bindApi(module) {
     setAudioBufferMs:
       typeof module._DolphinWeb_SetAudioBufferMs === "function"
         ? (ms) => module._DolphinWeb_SetAudioBufferMs(Number(ms) | 0)
+        : null,
+    // 0186: the mixer's queue in ms (-1 unknown); absent on an older core
+    audioQueuedMs:
+      typeof module._DolphinWeb_AudioQueuedMs === "function"
+        ? () => module._DolphinWeb_AudioQueuedMs()
         : null,
     setPresentationScale:
       typeof module._SetPresentationScale === "function"

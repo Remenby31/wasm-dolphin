@@ -96,13 +96,15 @@ export class AudioController {
     return Math.round(this.workletLeadSeconds * 48000);
   }
 
-  // What is queued between the mixer and the speaker, in ms: the worklet
-  // ring's fill (or the legacy schedule's lead) plus the output's own
-  // latency. The mixer's granule queue (AudioBufferSize) comes on top.
+  // What is queued between the game and the speaker, in ms: on the worklet
+  // path the mixer's granule queue (AudioBufferSize; a core with 0186
+  // reports it, else it is left out), the ring's fill and the output's own
+  // latency; on the legacy path the schedule's lead and the output (the
+  // mixer's queue is not known there).
   latencyMs(workletRing) {
     const out = ((this.context?.outputLatency || 0) + (this.context?.baseLatency || 0)) * 1000;
     if (this.activeTransport === "worklet" && workletRing) {
-      return Math.round(workletRing.fillFrames / 48 + out);
+      return Math.round(workletRing.fillFrames / 48 + (workletRing.mixerQueueMs ?? 0) + out);
     }
     return this.context ? Math.round(this.profile.scheduleLeadSeconds * 1000 + out) : null;
   }
@@ -496,6 +498,7 @@ export class AudioController {
       scheduleLeadSeconds: p.scheduleLeadSeconds,
       scheduleDriftSeconds: p.scheduleDriftSeconds,
       latencyMs: this.latencyMs(workletRing),
+      mixerQueueMs: this.activeTransport === "worklet" ? workletRing?.mixerQueueMs ?? null : null,
       outputLatencyMs: this.context ? Math.round(((this.context.outputLatency || 0) + (this.context.baseLatency || 0)) * 1000) : null
     };
   }

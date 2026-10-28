@@ -743,6 +743,9 @@ test("audioLatencyOf: median and p95 of the page's samples in the span", async (
   const page = [0, 50, 100, 150, 200, 250, 300, 350, 400, 450].map((t, i) => ({ t, audioMs: 50 + i }));
   page.push({ t: 2000, audioMs: 999 }); // after the span
   const windows = [{ t0: 0 }, { t0: 100 }, { t0: 200 }, { t0: 300 }, { t0: 400 }];
-  assert.deepEqual(audioLatencyOf(page, windows), { audioLatencyMs: 55, audioLatencyP95Ms: 59 });
-  assert.deepEqual(audioLatencyOf([{ t: 0, audioMs: null }], windows), { audioLatencyMs: null, audioLatencyP95Ms: null });
+  assert.deepEqual(audioLatencyOf(page, windows), { audioLatencyMs: 55, audioLatencyP95Ms: 59, audioMixerMs: null });
+  assert.deepEqual(audioLatencyOf([{ t: 0, audioMs: null }], windows), { audioLatencyMs: null, audioLatencyP95Ms: null, audioMixerMs: null });
+  // 0186: the mixer's part, its own median
+  const mixed = page.map((r, i) => ({ ...r, mixerMs: 40 + i }));
+  assert.equal(audioLatencyOf(mixed, windows).audioMixerMs, 45);
 });
