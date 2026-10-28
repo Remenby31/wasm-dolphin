@@ -166,12 +166,19 @@ test("race-multi: a run where an arm lacks some of its seeded regions is discard
   assert.match(discardReason([{ regionGate: { ...ok, quiescent: false, why: "still compiling" } }], [null]), /arm 0: still compiling/);
 });
 
-test("race-multi --aot-seed: regions the guest overwrote (dropped) count as arrived, arms must still install the same count", async () => {
-  const { discardReason } = await import("../harness/probes/race-multi.mjs");
+test("race-multi --aot-seed: regions the guest overwrote (dropped) count as arrived; arms of one tree must install the same count, other trees may differ", async () => {
+  const { discardReason, regionCountsDiffer } = await import("../harness/probes/race-multi.mjs");
   // multi2-aa-5x5 (2026-10-28): every arm 141 installed + 2 dropped of the seed's 143.
   const g = (installed, dropped) => ({ regionGate: { installed, dropped, refused: 0, layoutRefused: 0, quiescent: true } });
   assert.equal(discardReason([g(141, 2), g(141, 2)], [143, 143]), null);
-  assert.equal(discardReason([g(140, 3), g(141, 2)], [143, 143]), "installed regions differ between arms (140 / 141)");
+  // A/A (one tree): unequal counts discarded; arms 0 and 2 of a multi with the same base too.
+  assert.equal(discardReason([g(140, 3), g(141, 2)], [143, 143], ["/t/base", "/t/base"]), "installed regions differ between arms 0 and 1 of one tree (140 / 141)");
+  assert.equal(discardReason([g(141, 2), g(150, 0), g(140, 3)], [143, 150, 143], ["/t/base", "/t/cand", "/t/base"]), "installed regions differ between arms 0 and 2 of one tree (141 / 140)");
+  // A/B (two trees): a candidate with other regions is kept, flagged by regionCountsDiffer.
+  assert.equal(discardReason([g(141, 2), g(150, 0)], [143, 150], ["/t/base", "/t/cand"]), null);
+  assert.equal(regionCountsDiffer([g(141, 2), g(150, 0)], ["/t/base", "/t/cand"]), true);
+  assert.equal(regionCountsDiffer([g(141, 2), g(141, 2)], ["/t/base", "/t/cand"]), false);
+  assert.equal(regionCountsDiffer([g(140, 3), g(141, 2)], ["/t/base", "/t/base"]), false, "one tree: a discard, not a difference");
   assert.match(discardReason([g(140, 2), g(140, 2)], [143, 143]), /arm 0 installed 140 \(\+ 2 dropped\) of 143/);
   const seq = (states) => { let i = 0; return async () => states[Math.min(i++, states.length - 1)]; };
   const p = (installed, dropped) => ({ queued: 0, installed, refused: 0, dropped, pending: 0 });
