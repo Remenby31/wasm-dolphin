@@ -9,11 +9,15 @@
 // 3: judder, where every frame should stay 2.
 //
 // The game's frame period P is the mean of the gaps between queued frames
-// within half and twice their median (a stall or a burst's sliver left out,
-// both sides alike: a late frame's long gap kept and its bunched successor's
-// short one dropped made P 17.15 ms, a third refresh every 9 frames;
-// alternating jitter averages out, which a trimmed mean does not: 23/43 ms
-// gaps gave 34.3 for 33.4; the emulation speed is in it). Each frame
+// within a third and three times their centre, the mean of their middle 80 %
+// (a stall or a burst's sliver left out, both sides alike: a late frame's
+// long gap kept and its bunched successor's short one dropped made P 17.15
+// ms, a third refresh every 9 frames; alternating jitter averages out, which
+// a trimmed mean alone does not: 23/43 ms gaps gave 34.3 for 33.4; the
+// emulation speed is in it). Not the median: a game alternating 1 and 2
+// fields (40 fps) has its median on either kind of gap, and half or twice it
+// cut the other kind in or out with the jitter (P swung, 221 restarts in
+// 4,000 frames at ±2 ms). Each frame
 // then stays on screen a whole number of refreshes, P / refresh on average:
 // an accumulator carries the fraction (2.002 at 59.94 fps on 120 Hz: 2, and
 // 3 once in ~500 frames), so the cadence lives in BeginFrames, not in a time
@@ -50,27 +54,56 @@ const PACE_OFF_DRAIN = 2;
 // of frames off cadence at 0.9 R and 1/8, 6.5 % here, 40 % today).
 const PHASE_SMOOTHING = 1 / 16;
 const PHASE_BEHIND = 1.0;
+// A stay is the carry's extra refresh when it exceeds the whole refreshes in
+// P / refresh + EXTRA_MARGIN; that refresh never holds back a queued frame.
+// With no margin, a P measured at 1.99 refreshes (60 fps on 120 Hz) made
+// every 2-refresh stay an extra one, cut short by the jitter (15 % of frames
+// off cadence at ±4 ms); held while a frame waited less than 0.9 refresh
+// instead, the extras of a non-integer ratio stayed in the wrong phase
+// (25 fps on 60 Hz waited 14.5 ms median, 7.8 today; 40 fps 12.6, 8.3).
+const EXTRA_MARGIN = 0.25;
 // P is measured over the last PERIOD_GAPS gaps, once there are PERIOD_MIN. A
-// speed change is followed at once: when the last PERIOD_RECENT gaps give a
-// period more than PERIOD_JUMP away from P, the window restarts from them (64
-// gaps alone took 0.5 to 1 s to follow a change of speed).
+// speed change is followed within a few frames: when the last PERIOD_RECENT
+// gaps give a period more than PERIOD_JUMP away from P, on the same side, at
+// PERIOD_PERSIST arrivals in a row (two windows: a late frame's gap leaves
+// the window within PERIOD_RECENT), the window restarts from them (64 gaps
+// alone took 0.5 to 1 s to follow a change of speed; a restart at the first
+// such window followed the jitter of irregular cadences: 221 restarts in
+// 4,000 frames of 40 fps at ±2 ms).
 const PERIOD_GAPS = 64;
 const PERIOD_MIN = 16;
 const PERIOD_RECENT = 8;
 const PERIOD_JUMP = 0.15;
+const PERIOD_PERSIST = 2 * PERIOD_RECENT;
 
-// The mean of `gaps` within half and twice their median.
-function periodOf(gaps) {
+// The mean of `gaps` within a third and three times their centre (the mean
+// of the middle 80 %).
+export function periodOf(gaps) {
   const sorted = [...gaps].sort((a, b) => a - b);
-  const median = sorted[sorted.length >> 1];
+  const cut = Math.floor(sorted.length / 10);
+  const middle = sorted.slice(cut, sorted.length - cut);
+  const centre = middle.reduce((a, b) => a + b, 0) / middle.length;
   let sum = 0, n = 0;
   for (const g of gaps) {
-    if (g >= median / 2 && g <= 2 * median) {
+    if (g >= centre / 3 && g <= 3 * centre) {
       sum += g;
       n += 1;
     }
   }
   return sum / n;
+}
+
+// The screen's refresh period from the last BeginFrame gaps: the mean of the
+// gaps up to 1.5 times the shortest (a skipped BeginFrame left out). Not the
+// shortest alone: rounded timestamps (16/17 ms for 16.67) or the rAF's
+// jitter made it short, P / R high, and every frame stayed a refresh too
+// long (30 fps on 60 Hz waited 20 ms median, 8 today). null under 4 gaps.
+export function refreshOf(gaps) {
+  const valid = gaps.filter((g) => g > 0);
+  if (valid.length < 4) return null;
+  const min = Math.min(...valid);
+  const near = valid.filter((g) => g <= 1.5 * min);
+  return near.reduce((a, b) => a + b, 0) / near.length;
 }
 
 export function createGamePacer() {
@@ -90,6 +123,9 @@ export function createGamePacer() {
   let lastAt = null;
   const gaps = [];
   let period = null;
+  // arrivals in a row whose recent period was PERIOD_JUMP above (+) or below
+  // (-) P
+  let drift = 0;
   const stats = { paced: 0, held: 0, late: 0, shortened: 0, extraSkipped: 0, switches: 0, periodJumps: 0 };
   // pacing on (hysteresis), and BeginFrames left to drain after it went off
   let active = false;
@@ -120,8 +156,11 @@ export function createGamePacer() {
         if (gaps.length > PERIOD_GAPS) gaps.shift();
         if (gaps.length >= PERIOD_MIN) {
           const recent = periodOf(gaps.slice(-PERIOD_RECENT));
-          if (period !== null && Math.abs(recent - period) > PERIOD_JUMP * period) {
+          const side = period === null || Math.abs(recent - period) <= PERIOD_JUMP * period ? 0 : Math.sign(recent - period);
+          drift = side !== 0 && Math.sign(drift) === side ? drift + side : side;
+          if (Math.abs(drift) >= PERIOD_PERSIST) {
             gaps.splice(0, gaps.length - PERIOD_RECENT);
+            drift = 0;
             stats.periodJumps += 1;
           }
           period = periodOf(gaps);
@@ -148,10 +187,10 @@ export function createGamePacer() {
       const elapsed = t - shownAt;
       // half a refresh of slack for the rAF's own jitter
       if (elapsed >= (stay - 0.5) * refreshMs) return "due";
-      // closed loop: the carry's extra refresh does not hold back a frame
-      // that was already waiting at the previous BeginFrame (the carry alone
-      // kept every frame a refresh late: 30 fps on 60 Hz waited 16 ms, not 8)
-      if (extra && elapsed >= (stay - 1.5) * refreshMs && Number.isFinite(frame.at) && frame.at <= t - 0.9 * refreshMs) return "due";
+      // the carry's extra refresh does not hold back a queued frame (the
+      // carry alone kept every frame a refresh late: 30 fps on 60 Hz waited
+      // 16 ms, not 8)
+      if (extra && elapsed >= (stay - 1.5) * refreshMs) return "due";
       return "early";
     },
 
@@ -180,7 +219,7 @@ export function createGamePacer() {
       const exact = carry + period / refreshMs;
       stay = Math.max(1, Math.floor(exact + 0.5));
       carry = exact - stay;
-      extra = stay > Math.max(1, Math.floor(period / refreshMs + 1e-9));
+      extra = stay > Math.max(1, Math.floor(period / refreshMs + EXTRA_MARGIN));
       // waited over a period in the queue: the display is behind the game
       // (at once), or the frames have waited a refresh on average (the phase)
       const waited = Number.isFinite(frame?.at) ? Math.max(0, t - frame.at) : 0;
@@ -207,12 +246,13 @@ export function createGamePacer() {
       carry = 0;
       extra = false;
       waitEma = 0;
+      draining = 0;
       if (!arrival) return;
       active = false;
-      draining = 0;
       lastAt = null;
       gaps.length = 0;
       period = null;
+      drift = 0;
     }
   };
 }

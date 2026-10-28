@@ -129,7 +129,7 @@ import {
 } from "./wgpu-mapped-staging-pool.js";
 import { createWgpuSparseUboCopyForward } from "./wgpu-sparse-ubo-copy-forward.js";
 import { createVsyncQueue, vsyncLateMs } from "./wgpu-vsync-queue.js";
-import { createGamePacer, createRefreshHistogram } from "./wgpu-game-pacer.js";
+import { createGamePacer, createRefreshHistogram, refreshOf } from "./wgpu-game-pacer.js";
 import {
   WGPU_MAPPED_DRAIN_FORCE_REASONS,
   createWgpuMappedDrainCoalescer
@@ -13121,12 +13121,13 @@ function wgpuVsyncLateMs() {
   const n = Math.min(wgpuVsyncFrameGapCount, wgpuVsyncFrameGaps.length);
   return vsyncLateMs(Array.from(wgpuVsyncFrameGaps.subarray(0, n)), { floor: WGPU_VSYNC_LATE_FLOOR_MS });
 }
-// The screen's refresh period: the smallest of the last 16 rAF frame-time
-// deltas (see above); null before there are 4.
+// The screen's refresh period from the last 16 rAF frame-time deltas
+// (refreshOf: the mean of those near the shortest, a missed refresh left
+// out; the shortest alone ran short with rounded or jittery frame times);
+// null before there are 4.
 function wgpuVsyncRefreshMs() {
   const n = Math.min(wgpuVsyncFrameGapCount, wgpuVsyncFrameGaps.length);
-  const valid = Array.from(wgpuVsyncFrameGaps.subarray(0, n)).filter((d) => d > 0);
-  return valid.length < 4 ? null : Math.min(...valid);
+  return refreshOf(Array.from(wgpuVsyncFrameGaps.subarray(0, n)));
 }
 // ?presentpace=game (src/wgpu-game-pacer.js): frames shown at the game's own
 // pace on a screen faster than the game (60 fps on 120 Hz, 30 fps on 60 Hz).
@@ -13264,10 +13265,13 @@ function queueWgpuVsyncFrame(coreFrame, shownVi, stream) {
       } finally {
         wgpuVsyncFrameTime = null;
       }
-      // The game frame now on screen and how many refreshes it covers.
+      // The game frame now on screen and how many refreshes it covers. After
+      // a gap (a hidden tab: the fallback timer put up a frame every 50 ms,
+      // ~1,200 a minute), the frames shown meanwhile are not unseen ones.
       if (tracking) {
         const gameMs = wgpuGamePacer.period;
-        wgpuRefreshHistogram.tick(wgpuVsyncShownSinceTick ? (refreshMs && gameMs ? gameMs / refreshMs : 1) : null, now, wgpuVsyncShownSinceTick);
+        const shownCount = afterGap ? Math.min(1, wgpuVsyncShownSinceTick) : wgpuVsyncShownSinceTick;
+        wgpuRefreshHistogram.tick(shownCount ? (refreshMs && gameMs ? gameMs / refreshMs : 1) : null, now, shownCount);
       }
       wgpuVsyncShownSinceTick = 0;
       wgpuVsyncIdleTicks = shown ? 0 : wgpuVsyncIdleTicks + 1;

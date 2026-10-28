@@ -180,7 +180,12 @@ test("presentpace=game: URL → host → adapter → worker → the presenter, o
   assert.match(worker, /const wgpuVsyncTracking = \(\) => wgpuPresentPaceStats \|\| harnessEnabled;/);
   assert.match(worker, /\n  if \(wgpuVsyncTracking\(\)\) wgpuGamePacer\.stamp\(at\);\n/);
   assert.match(worker, /const refreshMs = tracking \? wgpuVsyncRefreshMs\(\) : null;/);
-  assert.match(worker, /if \(tracking\) \{\n\s+const gameMs = wgpuGamePacer\.period;\n\s+wgpuRefreshHistogram\.tick\(/);
+  assert.match(worker, /if \(tracking\) \{\n\s+const gameMs = wgpuGamePacer\.period;\n\s+const shownCount = afterGap \? Math\.min\(1, wgpuVsyncShownSinceTick\) : wgpuVsyncShownSinceTick;\n\s+wgpuRefreshHistogram\.tick\(shownCount \? \(refreshMs && gameMs \? gameMs \/ refreshMs : 1\) : null, now, shownCount\);/,
+    "back from a gap (a hidden tab), the frames the fallback timer put up are not counted unseen");
+  // the afterGap the histogram reads is the tick's own, set before it
+  const tickBody = worker.slice(worker.indexOf("const tick = (frameTime) => {"), worker.indexOf("self.requestAnimationFrame(tick);"));
+  assert.ok(tickBody.indexOf("const afterGap = ") >= 0 && tickBody.indexOf("const afterGap = ") < tickBody.indexOf("const shownCount = "));
+  assert.match(worker, /return refreshOf\(Array\.from\(wgpuVsyncFrameGaps\.subarray\(0, n\)\)\);/, "the refresh period near the shortest gap, not the shortest");
   assert.match(worker, /\(wgpuPresentVsync && wgpuVsyncTracking\(\) \? refreshHelperField\(\) : ""\)/);
   assert.equal((worker.match(/wgpuGamePacer\.stamp\(|wgpuRefreshHistogram\.tick\(/g) ?? []).length, 2, "one stamp, one histogram tick, both gated");
   assert.match(worker, /const pace = wgpuPresentGamePace && t !== null && !newest \? \(frame\) => wgpuGamePacer\.due\(frame, t, refreshMs\) : null;/);
