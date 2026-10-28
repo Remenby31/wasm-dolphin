@@ -503,3 +503,23 @@ test("aot optimizer: a k-deep pipeline overlaps compiles, installs in order", as
   assert.deepEqual(three.installed, three.order, "installed in module order");
   assert.ok(three.fractions.every((f, i) => !i || f >= three.fractions[i - 1]) && three.fractions.at(-1) === 1, "progress in order, to 100 %");
 });
+
+// The cache write (~12 ms a module, as long as the compile) no longer holds
+// up the next install: only installs are ordered against the module before.
+test("aot optimizer: a slow cache write does not delay the next install, progress keeps the order", async () => {
+  const base = fakeCache();
+  const log = [];
+  const slowCache = async (...a) => {
+    const session = await base(...a);
+    return { ...session, put: async (entries) => { log.push(`put-start ${entries[0].key}`); await new Promise((r) => setTimeout(r, 20)); log.push(`put-end ${entries[0].key}`); return session.put(entries); } };
+  };
+  const { o, events } = optimizer({ cache: slowCache, pipelineDepth: 3, compile: async () => ({ module: {} }), install: (region) => log.push(`install ${region.key}`) });
+  await o.status();
+  const [a, b] = o.regions.map((u) => u.key);
+  await o.start();
+  assert.ok(log.indexOf(`install ${b}`) < log.indexOf(`put-end ${a}`), "the 2nd module installed while the 1st was still being written");
+  const installs = log.filter((x) => x.startsWith("install ")).map((x) => x.slice(8));
+  assert.deepEqual(installs, o.regions.map((u) => u.key), "installs in module order");
+  const fractions = events.filter(([t]) => t === "optimization-progress").map(([, d]) => d.fraction);
+  assert.ok(fractions.every((f, i) => !i || f >= fractions[i - 1]) && fractions.at(-1) === 1);
+});

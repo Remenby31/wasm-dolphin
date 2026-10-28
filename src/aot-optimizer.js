@@ -480,13 +480,17 @@ export class AotOptimizer extends EventTarget {
       // compiles (another worker), installs and goes to the cache: the
       // finishing steps are chained, so modules install in order, but the
       // translation no longer waits for them (research deep-first-minute §1.3).
-      let finishing = Promise.resolve();
+      let finishing = { installed: Promise.resolve(), done: Promise.resolve() };
       // A cancel (tab closing, another disc, aotCancel) is no verdict on a
       // module: what compiled still installs (the worker drops it if the
       // disc changed), but nothing is stored, deferred or blacklisted, so
       // the next launch translates it again (review of #144).
-      const finish = async (unit, result, prev = Promise.resolve()) => {
-        if (this.cancelled) return prev;
+      // `prev`: { installed, done } of the module before. Only installs are
+      // ordered against it once this one compiled; the cache write (as long
+      // as the compile, ~12 ms a module) no longer holds up the next
+      // install. Progress and verdicts keep the module order (prev.done).
+      const finish = async (unit, result, prev = { installed: Promise.resolve(), done: Promise.resolve() }, installed = () => {}) => {
+        if (this.cancelled) { installed(); return prev.done; }
         for (const x of result.refused) {
           this.emit("optimization-error", { message: `function ${x.entry.toString(16)}: ${x.reason}`, fatal: false });
         }
@@ -515,10 +519,11 @@ export class AotOptimizer extends EventTarget {
             } catch (error) {
               out = { reason: String(error?.message || error) };
             }
-            // from here on in order: the module before installs and counts first
-            await prev;
+            // the module before installs first
+            await prev.installed;
             if (this.cancelled) {
               if (out?.module) this.install?.({ key: unit.key, bytes, entries: fragments.flatMap((fr) => fr.entries), layout: fragments[0]?.layout ?? 0, members: unit.members.map((f) => ({ ranges: f.ranges, hash: f.hash })) });
+              installed();
               return;
             }
             if (!out?.module) {
@@ -538,6 +543,7 @@ export class AotOptimizer extends EventTarget {
             // Installed as soon as it compiled, before the cache write: the
             // session runs it even if the write then fails (quota).
             this.install?.(region);
+            installed();
             const p0 = performance.now();
             const stored = await session.put([{ key: unit.key, bytes, meta: { members: unit.members.length, translated: result.fragments.length, entries, ranges } }]);
             this.pipelineStats.putMs += performance.now() - p0;
@@ -551,7 +557,8 @@ export class AotOptimizer extends EventTarget {
             }
           }
         }
-        await prev; // a module that compiled nothing still counts in order
+        installed(); // nothing installed (refused, deferred): the next one may
+        await prev.done; // and it still counts in order
         if (wait) {
           if (await this.defer(session, unit, wait)) refused.add(unit.key);
           else deferred++;
@@ -568,15 +575,20 @@ export class AotOptimizer extends EventTarget {
       // A finishing step that throws (a failed blacklist or attempts write)
       // is reported, never left as an unhandled rejection, and every way out
       // of the loop waits for the last one.
-      const schedule = (unit, result, prev) => finish(unit, result, prev).catch((error) => {
-        this.emit("optimization-error", { message: `module ${unit.key}: ${error?.message || error}`, fatal: false });
-      });
+      const schedule = (unit, result, prev) => {
+        let installed;
+        const installedP = new Promise((r) => { installed = r; });
+        const done = finish(unit, result, prev, installed).catch((error) => {
+          this.emit("optimization-error", { message: `module ${unit.key}: ${error?.message || error}`, fatal: false });
+        }).finally(() => installed());
+        return { installed: installedP, done };
+      };
       // the finishing steps in flight, oldest first (at most pipelineDepth)
       const inFlight = [];
       try {
         for (let n = 0; ; n++) {
           if (n >= todo.length) {
-            await finishing; // its stale marks are appended below
+            await finishing.done; // its stale marks are appended below
             for (const u of this.regions) if (this.stale.has(u.key) && !queued.has(u.key)) { queued.add(u.key); todo.push(u); }
           }
           if (n >= todo.length || this.cancelled) break;
@@ -589,15 +601,15 @@ export class AotOptimizer extends EventTarget {
           this.pipelineStats.finishWaitMs += performance.now() - w0;
           if (!result || this.cancelled) break;
           if (result.notReady) {
-            await finishing;
+            await finishing.done;
             this.emit("optimization-error", { message: "the core is not ready to translate; resumed at the next launch", fatal: false });
             return;
           }
           finishing = schedule(unit, result, finishing);
-          inFlight.push(finishing);
+          inFlight.push(finishing.done);
         }
       } finally {
-        await finishing;
+        await finishing.done;
         this.todo = null;
       }
       if (!this.cancelled) {
