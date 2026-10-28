@@ -110,3 +110,12 @@ test("worker: frames at the backbuffer size, the canvas at the display size only
   assert.match(worker, /if \(wgpuDisplayFilterActive\(\)\) \{[\s\S]{0,400}wgpuDisplayFilterGpu\.encode\(enc, f\.tex, dst, wgpuDisplayFilter\.sharpness\);\n {2}\} else \{\n {4}enc\.copyTextureToTexture\(/);
   assert.match(worker, /const size = wgpuDisplayFilterActive\(\)\n {6}\? displayFilterOutputSize\(/);
 });
+
+// The filter's GPU timing reads one frame in TIMING_EVERY back, not each one
+// (a readback per frame is work of its own, beside the drops it measures).
+test("the display filter times one filtered frame in TIMING_EVERY", async () => {
+  const { TIMING_EVERY } = await import("../src/wgpu-display-filter.js");
+  assert.equal(TIMING_EVERY, 8);
+  const source = await read("../src/wgpu-display-filter.js");
+  assert.match(source, /frameTimes = freeSlots\.length && stats\.frames % TIMING_EVERY === 0 \? \{ started: false \} : null;/);
+});

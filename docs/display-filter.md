@@ -32,7 +32,7 @@ becomes:
 
 Turned off, its textures and buffers are destroyed. With metrics on
 (drop-meter) and `?displayfiltertiming=1`, the device asks for
-`timestamp-query` and the filter times each frame on the GPU
+`timestamp-query` and the filter times one frame in 8 on the GPU
 (`validationReadPresentVsync.displayFilter.gpuMs*`; drop-meter prints it
 per visit and side). Off by default: the readback each frame is work of its
 own, and a pair measuring the filter's cost on drops runs without it.
