@@ -161,10 +161,10 @@ test("random MSR, downcount and pending exceptions, with and without the mode: t
   assert.equal(ran, 192);
 });
 
-test("?regionmtmsr=1 sets the enable bit 27 of the codegen mask; off by default", async () => {
+test("the enable bit 27 of the codegen mask is on by default; ?regionmtmsr=0 turns it off", async () => {
   const host = readFileSync(new URL("../src/core-host.js", import.meta.url), "utf8");
   assert.match(host, /regionmtmsr: {5}1 << 27,/);
-  assert.match(host, /if \(params\.get\("regionmtmsr"\) === "1"\) \{\n\s*mask \|= CACHED_INTERPRETER_DISABLE_BITS\.regionmtmsr;/);
+  assert.match(host, /if \(params\.get\("regionmtmsr"\) !== "0"\) \{\n\s*mask \|= CACHED_INTERPRETER_DISABLE_BITS\.regionmtmsr;/);
   const patch = readFileSync(new URL("../patches/dolphin-wasm/snapshot/0183-region-mtmsr-ee.patch", import.meta.url), "utf8");
   assert.match(patch, /\+constexpr u32 DOLPHIN_WEB_ENABLE_REGION_MTMSR_EE = 1u << 27;/);
   // A raw ?disable= mask never turns the enable bit on.
