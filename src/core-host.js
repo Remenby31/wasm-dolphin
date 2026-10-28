@@ -1,3 +1,4 @@
+import { requestedWgpuBindGroupCache } from "./wgpu-bind-group-cache.js";
 import { aotCompilerRequested, jitOffThreadRequested } from "./aot-compiler-worker.js";
 import { aotSamplePeriodRequested } from "./aot-hot-sampler.js";
 import { wasmEngine } from "./wasm-engine.js";
@@ -234,6 +235,7 @@ export class EmulatorHost {
     this.wgpuVpDiag = requestedWgpuVpDiag(window.location.search);
     this.wgpuUniformFast = requestedWgpuUniformFast(window.location.search);
     this.wgpuUboPack = requestedWgpuUboPack(window.location.search);
+    this.wgpuBindGroupCache = requestedWgpuBindGroupCache(window.location.search);
     this.wgpuSparseUbo = requestedWgpuSparseUbo(window.location.search);
     this.wgpuGeometryPack = requestedWgpuGeometryPack(window.location.search);
     this.wgpuGeometryRange =
@@ -565,6 +567,7 @@ export class EmulatorHost {
             wgpuVpDiag: this.wgpuVpDiag,
             wgpuUniformFast: this.wgpuUniformFast,
             wgpuUboPack: this.wgpuUboPack,
+            wgpuBindGroupCache: this.wgpuBindGroupCache,
             wgpuSparseUbo: this.wgpuSparseUbo,
             wgpuGeometryPack: this.wgpuGeometryPack,
             wgpuGeometryRange: this.wgpuGeometryRange,

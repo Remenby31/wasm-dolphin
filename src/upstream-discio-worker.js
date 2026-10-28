@@ -129,6 +129,7 @@ import {
   createWgpuMappedStagingPool
 } from "./wgpu-mapped-staging-pool.js";
 import { createWgpuSparseUboCopyForward } from "./wgpu-sparse-ubo-copy-forward.js";
+import { createBindGroupCache } from "./wgpu-bind-group-cache.js";
 import { createVsyncQueue, vsyncLateMs } from "./wgpu-vsync-queue.js";
 import { createGamePacer, createRefreshHistogram, refreshOf } from "./wgpu-game-pacer.js";
 import {
@@ -1192,6 +1193,7 @@ function readWgpuReplayState() {
     mappedCapacityBlocked: wgpuMappedCapacityBlocked,
     mappedRemapPending: wgpuMappedRemapPromises.size,
     uploadTransport: wgpuUploadTransport,
+    bindGroupCache: webGpuObjects.bindGroupCache?.stats() ?? null,
     loadFenceActive: wgpuLoadFenceActive,
     replayYieldPending: wgpuReplayYieldPending,
     presentationLoopActive,
@@ -1995,6 +1997,7 @@ async function handleMessage(type, payload) {
         wgpuVpDiag: payload.wgpuVpDiag,
         wgpuUniformFast: payload.wgpuUniformFast,
         wgpuUboPack: payload.wgpuUboPack,
+        wgpuBindGroupCache: payload.wgpuBindGroupCache,
         wgpuSparseUbo: payload.wgpuSparseUbo,
         wgpuGeometryPack: payload.wgpuGeometryPack,
         wgpuGeometryRange: payload.wgpuGeometryRange,
@@ -2691,6 +2694,7 @@ async function loadCore({
   wgpuVpDiag: requestedWgpuVpDiag = false,
   wgpuUniformFast: requestedWgpuUniformFast = false,
   wgpuUboPack: requestedWgpuUboPack = false,
+  wgpuBindGroupCache: requestedWgpuBindGroupCache = false,
   wgpuSparseUbo: requestedWgpuSparseUbo = false,
   wgpuGeometryPack: requestedWgpuGeometryPack = false,
   wgpuGeometryRange: requestedWgpuGeometryRange = false,
@@ -2849,6 +2853,7 @@ async function loadCore({
   }
   wgpuUniformFastEnabled = Boolean(requestedWgpuUniformFast);
   wgpuUboPackEnabled = Boolean(requestedWgpuUboPack);
+  webGpuObjects.bindGroupCache = requestedWgpuBindGroupCache === true ? createBindGroupCache() : null;
   if (requestedWgpuSparseUbo && videoBackend !== "WebGPU-Real") {
     throw new Error("wgpuubosparse=1 requires video=wgpu");
   }
@@ -9570,6 +9575,10 @@ const webGpuObjects = {
   samplerDescriptors: new Map(),
   nearestSamplers: new Map(),
   bindGroups: new Map(),
+  // ?wgpubgcache=1 (src/wgpu-bind-group-cache.js): identical bind groups
+  // reused; null when off. Kept here, not in a global, so the binding
+  // functions that source-contract tests run on their own still work.
+  bindGroupCache: null,
   bindGroupSamplingMasks: new Map(),
   pipeTpl: new Map(),  // id → {desc, target, depthBase} template
   pipeVar: new Map(),  // pipeline/attachment/depth/sampling-layout key → pipeline|null
@@ -10060,6 +10069,7 @@ function cancelWgpuReplayPump() {
 
 function clearWgpuReplayStateAfterDeviceLoss() {
   wgpuMappedStagingGeneration += 1;
+  webGpuObjects.bindGroupCache?.clear();
   resetWgpuMappedDrainCoalescing(WGPU_MAPPED_DRAIN_FORCE_REASONS.DEVICE_LOSS);
   wgpuUploadAttribution.cancelCapacityWait();
   destroyWgpuVisualCadenceResources();
@@ -11273,8 +11283,10 @@ function replayCreateBindGroup(id, blobPtr, blobLen) {
     }
   }
   try {
-    webGpuObjects.bindGroups.set(id,
-      renderGpu.device.createBindGroup({ layout, entries }));
+    const bindGroupCache = webGpuObjects.bindGroupCache;
+    webGpuObjects.bindGroups.set(id, bindGroupCache
+      ? bindGroupCache.get(renderGpu.device, layout, entries)
+      : renderGpu.device.createBindGroup({ layout, entries }));
     if (group === 1) webGpuObjects.bindGroupSamplingMasks.set(id, samplingKey);
   } catch (e) {
     if (!self._webGpuBgErr) {
@@ -16698,6 +16710,12 @@ function drainWebGpuCmdRing(source = "presentation") {
             const resource = m.get(id);
             if (resource && wgpuConsumerStateCacheEnabled) {
               wgpuPassStateCache.invalidateDestroyedResource(tag, resource);
+            }
+            // ?wgpubgcache=1: the cached groups binding it go with it (a
+            // buffer is bound as itself, a texture through its array view).
+            if (resource && webGpuObjects.bindGroupCache) {
+              if (tag === 1) webGpuObjects.bindGroupCache.forget(resource);
+              else if (tag === 2 && resource.view2dArray) webGpuObjects.bindGroupCache.forget(resource.view2dArray);
             }
             m.delete(id);
             if (tag === 3) webGpuObjects.bindGroupSamplingMasks.delete(id);
