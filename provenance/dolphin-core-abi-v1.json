@@ -50,14 +50,14 @@
     {
       "path": "src/app.js",
       "hashMode": "lf-normalized",
-      "size": 51313,
-      "sha256": "3fb89354ebfeb8af402d76f4f48fc721824d9cd3142eb9ee04735e25627b4563"
+      "size": 51436,
+      "sha256": "24dca2094c3328c7d97d4c1da45a7cbb706c09d16271d6e1e3c476da66b6a492"
     },
     {
       "path": "src/audio.js",
       "hashMode": "lf-normalized",
-      "size": 19607,
-      "sha256": "bee128b8aacb3feaf952433297a2baac4e678e307e87eb7739b3208696d6f75b"
+      "size": 19728,
+      "sha256": "8f2c191a68903d5ce77f8ad5f212d8de6f5012b61a5bf3d48ddd216bcafeb0f4"
     },
     {
       "path": "src/audio-pcm-ring.js",
@@ -86,8 +86,8 @@
     {
       "path": "src/core-host.js",
       "hashMode": "lf-normalized",
-      "size": 96343,
-      "sha256": "c368ac2471d37c073619e83524e7445d47331112be31e0b14522da08dfbb54da"
+      "size": 97262,
+      "sha256": "ce2b47eb1622257c33205ea28063bf539822356a0b35a0c46719157474edd95c"
     },
     {
       "path": "src/diagnostic-log-filter.js",
@@ -140,8 +140,8 @@
     {
       "path": "src/upstream-discio-worker.js",
       "hashMode": "lf-normalized",
-      "size": 804756,
-      "sha256": "057f48c79c6c48dc59a097424b923f3cd750d3e38a77d808d9fa3cae7b56ca03"
+      "size": 806715,
+      "sha256": "700218aa15dcc34c746a595ccff1e14cca5b223133c79590a53cc67d923390e4"
     },
     {
       "path": "src/wgpu-renderer-worker-probe.js",
