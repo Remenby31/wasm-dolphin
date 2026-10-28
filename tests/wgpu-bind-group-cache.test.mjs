@@ -20,7 +20,7 @@ test("bind group cache: the same layout and resource objects give the same group
   const b = cache.get(dev, layout, entries());
   assert.equal(a, b);
   assert.equal(dev.created.length, 1);
-  assert.deepEqual(cache.stats(), { hits: 1, misses: 1, evictions: 0, size: 1, capacity: 4096 });
+  assert.deepEqual(cache.stats(), { hits: 1, misses: 1, evictions: 0, forgotten: 0, size: 1, objects: 4, capacity: 4096 });
 });
 
 test("bind group cache: another layout, view, sampler, buffer, offset, size or binding is another group", () => {
@@ -83,4 +83,36 @@ test("bind group cache: ?wgpubgcache=1 only, off by default, reaches the worker'
   assert.match(worker, /\n {8}wgpuBindGroupCache: payload\.wgpuBindGroupCache,\n/);
   assert.match(worker, /webGpuObjects\.bindGroupCache = requestedWgpuBindGroupCache === true \? createBindGroupCache\(\) : null;/);
   assert.match(worker, /const bindGroupCache = webGpuObjects\.bindGroupCache;\n\s+webGpuObjects\.bindGroups\.set\(id, bindGroupCache\n\s+\? bindGroupCache\.get\(renderGpu\.device, layout, entries\)\n\s+: renderGpu\.device\.createBindGroup\(\{ layout, entries \}\)\);/);
+});
+
+test("bind group cache: a destroyed texture or buffer takes its cached groups with it; a lost device empties the cache", async () => {
+  const dev = device(), cache = createBindGroupCache();
+  const layout = {}, textures = [{}, {}], sampler = {}, buffer = {};
+  const withTexture = (t) => cache.get(dev, layout, [{ binding: 0, resource: t }, { binding: 8, resource: sampler }]);
+  const withBuffer = (o) => cache.get(dev, layout, [{ binding: 0, resource: { buffer, offset: o, size: 64 } }]);
+  const a = withTexture(textures[0]); withTexture(textures[1]); withBuffer(0); withBuffer(256);
+  assert.equal(cache.stats().size, 4);
+  // The core destroys texture 0: its group goes, texture 1's stays.
+  assert.equal(cache.forget(textures[0]), 1);
+  assert.equal(cache.stats().size, 3);
+  assert.notEqual(withTexture(textures[0]), a, "recreated, not the destroyed one's group");
+  assert.equal(cache.forget(textures[0]), 1);
+  // The buffer: both of its windows go; nothing else keeps it.
+  assert.equal(cache.forget(buffer), 2);
+  assert.equal(cache.stats().size, 1);
+  assert.equal(cache.forget({}), 0);
+  // Eviction also unlinks the index (no object kept by a dropped entry).
+  const small = createBindGroupCache({ capacity: 1 });
+  small.get(dev, layout, [{ binding: 0, resource: textures[0] }]);
+  small.get(dev, layout, [{ binding: 0, resource: textures[1] }]);
+  assert.equal(small.forget(textures[0]), 0, "evicted entry no longer indexed");
+  assert.equal(small.stats().objects, 2, "layout + texture 1");
+  cache.clear();
+  assert.equal(cache.stats().size, 0);
+  assert.equal(cache.stats().objects, 0);
+  // The worker: DESTROY forgets the buffer (tag 1) or the texture's array view
+  // (tag 2), and a lost device clears the cache.
+  const worker = await readFile(new URL("../src/upstream-discio-worker.js", import.meta.url), "utf8");
+  assert.match(worker, /if \(tag === 1\) webGpuObjects\.bindGroupCache\.forget\(resource\);\n\s+else if \(tag === 2 && resource\.view2dArray\) webGpuObjects\.bindGroupCache\.forget\(resource\.view2dArray\);/);
+  assert.match(worker, /function clearWgpuReplayStateAfterDeviceLoss\(\) \{\n  wgpuMappedStagingGeneration \+= 1;\n  webGpuObjects\.bindGroupCache\?\.clear\(\);/);
 });

@@ -10069,6 +10069,7 @@ function cancelWgpuReplayPump() {
 
 function clearWgpuReplayStateAfterDeviceLoss() {
   wgpuMappedStagingGeneration += 1;
+  webGpuObjects.bindGroupCache?.clear();
   resetWgpuMappedDrainCoalescing(WGPU_MAPPED_DRAIN_FORCE_REASONS.DEVICE_LOSS);
   wgpuUploadAttribution.cancelCapacityWait();
   destroyWgpuVisualCadenceResources();
@@ -16709,6 +16710,12 @@ function drainWebGpuCmdRing(source = "presentation") {
             const resource = m.get(id);
             if (resource && wgpuConsumerStateCacheEnabled) {
               wgpuPassStateCache.invalidateDestroyedResource(tag, resource);
+            }
+            // ?wgpubgcache=1: the cached groups binding it go with it (a
+            // buffer is bound as itself, a texture through its array view).
+            if (resource && webGpuObjects.bindGroupCache) {
+              if (tag === 1) webGpuObjects.bindGroupCache.forget(resource);
+              else if (tag === 2 && resource.view2dArray) webGpuObjects.bindGroupCache.forget(resource.view2dArray);
             }
             m.delete(id);
             if (tag === 3) webGpuObjects.bindGroupSamplingMasks.delete(id);

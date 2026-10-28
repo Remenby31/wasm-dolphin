@@ -13,6 +13,9 @@
 // recreated under the same id is a new object, hence a new key. A new device
 // has new layouts, hence new keys. The cache is bounded (least recently used
 // first out); an evicted group stays valid for the records that hold it.
+// A destroyed resource (forget) drops every cached group that binds it, so
+// the cache never keeps a texture or buffer alive after the core freed it;
+// a lost device empties it (clear).
 
 export const BIND_GROUP_CACHE_CAPACITY = 4096;
 
@@ -29,45 +32,80 @@ export function createBindGroupCache({ capacity = BIND_GROUP_CACHE_CAPACITY } = 
     }
     return id;
   };
+  // key -> { group, objects }; object -> keys of the groups that bind it.
   const groups = new Map();
-  const stats = { hits: 0, misses: 0, evictions: 0 };
+  const keysByObject = new Map();
+  const stats = { hits: 0, misses: 0, evictions: 0, forgotten: 0 };
 
-  function keyOf(layout, entries) {
+  function keyOf(layout, entries, objects) {
     let key = String(idOf(layout));
+    objects.push(layout);
     for (const entry of entries) {
       const resource = entry.resource;
       key += `|${entry.binding}:`;
       if (resource && typeof resource === "object" && "buffer" in resource && !("dimension" in resource)) {
         key += `b${idOf(resource.buffer)}@${resource.offset ?? 0}+${resource.size ?? "*"}`;
+        objects.push(resource.buffer);
       } else {
         key += idOf(resource);
+        if (resource && typeof resource === "object") objects.push(resource);
       }
     }
     return key;
   }
 
+  function drop(key) {
+    const entry = groups.get(key);
+    if (!entry) return;
+    groups.delete(key);
+    for (const object of entry.objects) {
+      const keys = keysByObject.get(object);
+      if (!keys) continue;
+      keys.delete(key);
+      if (keys.size === 0) keysByObject.delete(object);
+    }
+  }
+
   return {
     // The group for (layout, entries): an earlier identical one, else a new one.
     get(device, layout, entries) {
-      const key = keyOf(layout, entries);
+      const objects = [];
+      const key = keyOf(layout, entries, objects);
       const cached = groups.get(key);
       if (cached) {
         stats.hits += 1;
         groups.delete(key);
         groups.set(key, cached);
-        return cached;
+        return cached.group;
       }
       const group = device.createBindGroup({ layout, entries });
       stats.misses += 1;
-      groups.set(key, group);
+      groups.set(key, { group, objects });
+      for (const object of objects) {
+        let keys = keysByObject.get(object);
+        if (!keys) keysByObject.set(object, (keys = new Set()));
+        keys.add(key);
+      }
       if (groups.size > capacity) {
-        groups.delete(groups.keys().next().value);
+        drop(groups.keys().next().value);
         stats.evictions += 1;
       }
       return group;
     },
-    clear() { groups.clear(); },
-    stats: () => ({ ...stats, size: groups.size, capacity }),
+    // A resource the core destroyed: every cached group binding it goes.
+    forget(object) {
+      const keys = keysByObject.get(object);
+      if (!keys) return 0;
+      const count = keys.size;
+      for (const key of [...keys]) drop(key);
+      stats.forgotten += count;
+      return count;
+    },
+    clear() {
+      groups.clear();
+      keysByObject.clear();
+    },
+    stats: () => ({ ...stats, size: groups.size, objects: keysByObject.size, capacity }),
   };
 }
 
