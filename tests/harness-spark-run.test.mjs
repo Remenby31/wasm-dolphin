@@ -360,3 +360,20 @@ test("spark-queue estimates: replay-gates and drop-meter by their own shape", as
   assert.equal(estimateMin("pair", ["--runs", "4", "--visits", "2"]), 12);
   assert.equal(estimateMin("pair", ["--runs", "6", "--warmup", "20", "--secs", "10"]), 5, "race-perf as before (6 × (20 + 10 + 20) s)");
 });
+
+test("spark-run --screen: lane b only for screening, stamped in the summary as never a conclusion", async () => {
+  const { checkLane, SCREEN_NOTE } = await import("../harness/remote/spark-run.mjs");
+  assert.throws(() => checkLane("b"), /--screen/);
+  assert.doesNotThrow(() => checkLane("b", { screen: true }));
+  for (const lane of ["a", "auto"]) assert.doesNotThrow(() => checkLane(lane));
+  assert.throws(() => checkLane("c", { screen: true }), /--lane c/);
+  assert.match(stampSummary({ change: null }, { host: "spark", screen: SCREEN_NOTE }).bench.screen, /never a conclusion/);
+});
+
+test("spark-run --noise: drop-meter's A/A named as a bench run, its summary there", async () => {
+  const { benchNoiseArgs } = await import("../harness/remote/spark-run.mjs");
+  assert.deepEqual(benchNoiseArgs("20261028/jit-0189c-drops-aa", "/h/salon-bench/results"), ["--noise", "/h/salon-bench/results/20261028/jit-0189c-drops-aa/summary.json"]);
+  assert.deepEqual(benchNoiseArgs(undefined, "/r"), []);
+  assert.throws(() => benchNoiseArgs("jit-0189c-drops-aa", "/r"), /<yyyymmdd>\/<name>/);
+  assert.throws(() => benchNoiseArgs("20261028/../x/y", "/r"), /<yyyymmdd>\/<name>/);
+});
