@@ -13,7 +13,7 @@ diff --git a/Source/Core/Core/PowerPC/CachedInterpreter/CachedInterpreter.cpp b/
  constexpr u32 REGSHAPE_X64_GPR_CAP = 4;
  // §28ce burst smearing: when ENABLED (gate bit CLEARED), TryWriteWasmBlock
  // returns false (falls to interpret) once this many compiles OR this much
-@@ -10582,8 +10587,25 @@
+@@ -10582,8 +10587,27 @@
    u32 index_plus_one = 0;
  };
  std::array<RegionLookupSlot, 8192> s_region_lookup{};
@@ -31,7 +31,9 @@ diff --git a/Source/Core/Core/PowerPC/CachedInterpreter/CachedInterpreter.cpp b/
 +  u32 epoch = 0;
 +  u32 pad = 0;
 +};
-+std::array<ChainCacheSlot, 16384> s_chain_cache{};
++constexpr u32 CHAIN_CACHE_SLOTS = 16384;
++// Sized at the first chain with the bit on: off, it costs no memory.
++std::vector<ChainCacheSlot> s_chain_cache;
 +u32 s_chain_cache_epoch = 1;  // slots start at 0: never valid
  inline void ClearRegionLookup()
  {
@@ -39,7 +41,7 @@ diff --git a/Source/Core/Core/PowerPC/CachedInterpreter/CachedInterpreter.cpp b/
    s_region_lookup.fill({});
  }
  constexpr u32 NO_REGION = 0xffffffffu;
-@@ -10995,6 +11017,7 @@
+@@ -10995,6 +11019,7 @@
  {
    for (InstalledRegion& region : s_regions)
      region.verified = false;
@@ -47,18 +49,23 @@ diff --git a/Source/Core/Core/PowerPC/CachedInterpreter/CachedInterpreter.cpp b/
  }
  
  // On the CPU thread at a slice boundary: compile and map queued regions. A
-@@ -11753,6 +11776,26 @@
+@@ -11752,7 +11777,31 @@
+   {
      stats.out_of_time += 1;
      return 0;
-   }
++  }
 +  // 0187: one cache line for the next region. The mode is the CPU's, tested
 +  // on every chain as below; the region's own state (live, verified, mapped
 +  // at pc) is the slot's, valid while the epoch holds.
-+  const bool chain_cache =
-+      (s_dolphin_web_disable_mask.load(std::memory_order_relaxed) &
-+       DOLPHIN_WEB_ENABLE_REGION_CHAIN_CACHE) != 0;
-+  ChainCacheSlot* const cached =
-+      chain_cache ? &s_chain_cache[(ppc_state.pc >> 2) & (s_chain_cache.size() - 1)] : nullptr;
++  // The mask read once per chain, for every switch below.
++  const u32 chain_mask = s_dolphin_web_disable_mask.load(std::memory_order_relaxed);
++  ChainCacheSlot* cached = nullptr;
++  if ((chain_mask & DOLPHIN_WEB_ENABLE_REGION_CHAIN_CACHE) != 0)
++  {
++    if (s_chain_cache.empty())
++      s_chain_cache.resize(CHAIN_CACHE_SLOTS);
++    cached = &s_chain_cache[(ppc_state.pc >> 2) & (CHAIN_CACHE_SLOTS - 1)];
+   }
 +  if (cached && cached->pc == ppc_state.pc && cached->epoch == s_chain_cache_epoch)
 +  {
 +    if (!s_regions_enabled.load(std::memory_order_relaxed) || !ppc_state.msr.IR ||
@@ -74,7 +81,7 @@ diff --git a/Source/Core/Core/PowerPC/CachedInterpreter/CachedInterpreter.cpp b/
    const u32 index = RegionFilterHas(ppc_state.pc) ? FindRegionIndex(ppc_state.pc) : NO_REGION;
    if (index == NO_REGION)
    {
-@@ -11770,6 +11813,8 @@
+@@ -11770,6 +11819,8 @@
      stats.refused += 1;
      return 0;
    }
@@ -83,7 +90,7 @@ diff --git a/Source/Core/Core/PowerPC/CachedInterpreter/CachedInterpreter.cpp b/
    stats.chained += 1;
    return region.handle;
  }
-@@ -11876,6 +11921,7 @@
+@@ -11876,6 +11927,7 @@
        else
        {
          s_regions[index].verified = false;

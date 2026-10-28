@@ -30,10 +30,13 @@ diff --git a/Source/Core/Core/PowerPC/CachedInterpreter/CachedInterpreter.cpp b/
    return index | 0;
    } catch (e) {
      if (cacheKey && Module._dolphinJitCache) Module._dolphinJitCache.delete(cacheKey);
-@@ -291,6 +295,54 @@
-   }
- });
- 
+@@ -288,9 +292,57 @@
+                    ", interpreting it: " + String((e && e.message) || e));
+     }
+     return permanent ? 0 : -1;
++  }
++});
++
 +// 0189: the fragments of the region module installed at `handle` (kept by
 +// DolphinWeb_CachedInterpreterCompileWasmBlock), each put in a slot of the
 +// core's table (a released slot first). Writes (entry pc, fragment slot) pairs
@@ -63,15 +66,15 @@ diff --git a/Source/Core/Core/PowerPC/CachedInterpreter/CachedInterpreter.cpp b/
 +    }
 +    wasmTable.set(slot, e.table.get(i));
 +    slots.push(slot);
-+  }
+   }
 +  const view = new DataView(HEAPU8.buffer);
 +  for (let i = 0; i < pcs.length; i++) {
 +    view.setUint32(out + 8 * i, pcs[i], true);
 +    view.setUint32(out + 8 * i + 4, slots[of[i]] ?? 0, true);
 +  }
 +  return pcs.length;
-+});
-+
+ });
+ 
 +// 0189: slots of the core's table no region uses any more, for the next ones.
 +EM_JS(void, DolphinWeb_ReleaseTableSlots, (const int* slots, int count), {
 +  const free = (globalThis._dolphinFreeTableSlots ??= []);
@@ -134,7 +137,7 @@ diff --git a/Source/Core/Core/PowerPC/CachedInterpreter/CachedInterpreter.cpp b/
  // Physical 4 KiB pages of MEM1 some live region covers (count per page): an
  // invalidation outside them costs one lookup.
  std::vector<u16> s_region_pages(0x01800000 >> 12);
-@@ -10967,8 +11038,12 @@
+@@ -10969,8 +11040,12 @@
    {
      const auto it = s_region_at.find(pc);
      if (it != s_region_at.end() && it->second == index)
@@ -147,7 +150,7 @@ diff --git a/Source/Core/Core/PowerPC/CachedInterpreter/CachedInterpreter.cpp b/
    ForEachRegionPage(region, -1);
    ClearRegionLookup();
    s_region_filter.fill(0);
-@@ -10981,6 +11056,9 @@
+@@ -10983,6 +11058,9 @@
  // session's RAM address; the next session allocates its own.
  void ForgetAllRegions()
  {
@@ -157,7 +160,7 @@ diff --git a/Source/Core/Core/PowerPC/CachedInterpreter/CachedInterpreter.cpp b/
    s_regions.clear();
    s_region_at.clear();
    ClearRegionLookup();
-@@ -11080,6 +11158,28 @@
+@@ -11082,6 +11160,28 @@
    {
      s_region_at.emplace(pc, index);  // an entry already mapped keeps its region
      RegionFilterAdd(pc);
@@ -186,7 +189,7 @@ diff --git a/Source/Core/Core/PowerPC/CachedInterpreter/CachedInterpreter.cpp b/
    }
    ClearRegionLookup();
    ForEachRegionPage(s_regions.back(), +1);
-@@ -11813,10 +11913,20 @@
+@@ -11819,10 +11919,19 @@
      stats.refused += 1;
      return 0;
    }
@@ -195,8 +198,7 @@ diff --git a/Source/Core/Core/PowerPC/CachedInterpreter/CachedInterpreter.cpp b/
 +  // 0189: straight into the fragment holding pc, past the module's
 +  // dispatcher (the same function it would tail-call).
 +  int target = region.handle;
-+  if ((s_dolphin_web_disable_mask.load(std::memory_order_relaxed) &
-+       DOLPHIN_WEB_ENABLE_REGION_FRAGMENT_HANDLES) != 0)
++  if ((chain_mask & DOLPHIN_WEB_ENABLE_REGION_FRAGMENT_HANDLES) != 0)
 +  {
 +    const auto fragment = s_region_fragment_at.find(ppc_state.pc);
 +    if (fragment != s_region_fragment_at.end())

@@ -25,7 +25,7 @@
       "commit": "01e0577914a75a2569c846778c2f93aa8e6feddd"
     }
   },
-  "patchSeriesSha256": "4c3d447b61d433ff73da9e5c1b2aa6a8c5f1979e9672c8e8869246aeaae12401",
+  "patchSeriesSha256": "133efd94db4eeec3fdcf367c4af2a1750660b679e27c1676c5a8f57add3b7d9e",
   "patches": [
     {
       "order": 1,
@@ -1088,16 +1088,16 @@
       "cwd": ".",
       "hashMode": "lf-normalized",
       "path": "patches/dolphin-wasm/snapshot/0187-region-chain-cache.patch",
-      "size": 3831,
-      "sha256": "6064ebc69f9afb1ee66a49b588cdea3bcbfb38d7f3ebbc7d4a65c36587c821a7"
+      "size": 4076,
+      "sha256": "15044a7c8dca71ce4df826635de511effb7ba9c443a33d83d893da1c871a4f40"
     },
     {
       "order": 134,
       "cwd": ".",
       "hashMode": "lf-normalized",
       "path": "patches/dolphin-wasm/snapshot/0189-region-fragment-handles.patch",
-      "size": 8909,
-      "sha256": "30c1631b1e81937dc6afd7952490457184c1035ddf2df950bde8c41b1f29f60c"
+      "size": 8968,
+      "sha256": "7bbfa45f79416e43f9792b59e8f8164264f892a69901cebe7f7253bfa956e126"
     },
     {
       "order": 135,
