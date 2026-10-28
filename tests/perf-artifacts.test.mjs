@@ -510,6 +510,18 @@ test("metrics-off WGPU evidence requires a matching static runtime config", () =
       runtimeConfig: { ...runtimeConfig, [field]: value },
     }).failures.join("\n"), pattern);
   }
+  // Every slot count the engine accepts (3 to 8) is accepted here too.
+  const sixSlots = { ...runtimeConfig, mappedStaging: { ...runtimeConfig.mappedStaging, slotCount: 6 } };
+  assert.deepEqual(evaluateWgpuRuntimeConfigEvidence({
+    required: true,
+    params: { ...params, wgpustagingslots: "6" },
+    runtimeConfig: sixSlots,
+  }).failures, []);
+  assert.match(evaluateWgpuRuntimeConfigEvidence({
+    required: true,
+    params: { ...params, wgpustagingslots: "6" },
+    runtimeConfig,
+  }).failures.join("\n"), /slot/i);
 });
 
 test("WGPU semantic qualification requires complete post-load evidence", () => {

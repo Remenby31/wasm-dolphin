@@ -142,7 +142,10 @@ export function estimateMin(kind, args = []) {
 export function eta(tickets, now = Date.now()) {
   let t0 = 0;
   const out = [];
-  for (const t of tickets.filter((x) => x.lane !== "none")) {
+  // the running jobs first, whatever their ids (a ticket moved to the head
+  // sorts before a running one): every waiting job starts after them
+  const live = tickets.filter((x) => x.lane !== "none");
+  for (const t of [...live.filter((x) => x.lane), ...live.filter((x) => !x.lane)]) {
     const est = t.estMin ?? (t.kind === "build" ? BUILD_MIN : t.kind === "multi" ? estimateMin("multi") : 13);
     if (t.lane) {
       const left = Math.max(1, est - (t.grantedAt ? (now - Date.parse(t.grantedAt)) / 60000 : 0));
@@ -156,8 +159,11 @@ export function eta(tickets, now = Date.now()) {
   return out;
 }
 
-// The ticket name that puts `name` just after `after` ("head": before every
-// waiting ticket): a time between its new neighbours.
+// The ticket name that puts `name` just after `after`, or ("head") just
+// before the first waiting ticket, possibly before a running one: a waiting
+// ticket older than the running job sorts before it (2026-10-28), and a
+// running ticket's id decides nothing any more (nextStep skips granted
+// tickets; eta() counts them first). A time between its new neighbours.
 export function movedId(tickets, name, after) {
   const me = tickets.find((t) => t.name === name);
   if (!me) throw new Error(`no ticket named ${name}`);
@@ -167,9 +173,10 @@ export function movedId(tickets, name, after) {
   // p87-native-ps-aot idled the bench). Its owner requeues it with main.
   if (!("estMin" in me)) throw new Error(`${name} waits with a harness from before \`move\`: it would wait for itself; its owner must requeue it after merging main`);
   const others = tickets.filter((t) => t !== me);
-  const at = after === "head" ? others.filter((t) => t.lane).length : others.findIndex((t) => t.name === after) + 1;
+  const firstWaiting = others.findIndex((t) => !t.lane);
+  const at = after === "head" ? (firstWaiting < 0 ? others.length : firstWaiting) : others.findIndex((t) => t.name === after) + 1;
   if (after !== "head" && at === 0) throw new Error(`no ticket named ${after}`);
-  if (others.slice(at).some((t) => t.lane)) throw new Error(`cannot move ${name} before a running job`);
+  if (after !== "head" && others.slice(at).some((t) => t.lane)) throw new Error(`cannot move ${name} before a running job`);
   const ms = (t) => Number(t.id.split("-")[0]);
   const lo = at > 0 ? ms(others[at - 1]) : ms(others[0] ?? me) - 2000, hi = at < others.length ? ms(others[at]) : ms(others.at(-1)) + 2000;
   if (hi - lo < 2) throw new Error(`no room between ${others[at - 1]?.name} and ${others[at]?.name} (same millisecond)`);

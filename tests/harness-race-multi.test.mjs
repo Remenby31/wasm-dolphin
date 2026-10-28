@@ -171,9 +171,18 @@ test("race-multi --aot-seed: regions the guest overwrote (dropped) count as arri
   // multi2-aa-5x5 (2026-10-28): every arm 141 installed + 2 dropped of the seed's 143.
   const g = (installed, dropped) => ({ regionGate: { installed, dropped, refused: 0, layoutRefused: 0, quiescent: true } });
   assert.equal(discardReason([g(141, 2), g(141, 2)], [143, 143]), null);
-  // A/A (one tree): unequal counts discarded; arms 0 and 2 of a multi with the same base too.
-  assert.equal(discardReason([g(140, 3), g(141, 2)], [143, 143], ["/t/base", "/t/base"]), "installed regions differ between arms 0 and 1 of one tree (140 / 141)");
-  assert.equal(discardReason([g(141, 2), g(150, 0), g(140, 3)], [143, 150, 143], ["/t/base", "/t/cand", "/t/base"]), "installed regions differ between arms 0 and 2 of one tree (141 / 140)");
+  // A/A (one tree): drops vary with timing; a gap up to 3 % of the seed (4 of 143) kept, beyond discarded.
+  const { sameTreeTolerance, installedDelta } = await import("../harness/probes/race-multi.mjs");
+  assert.equal(sameTreeTolerance(143), 4);
+  assert.equal(sameTreeTolerance(20), 2);
+  assert.equal(discardReason([g(140, 3), g(141, 2)], [143, 143], ["/t/base", "/t/base"]), null);
+  // multi2-aa-5x5-b, installed + dropped 143 on every arm: 139/141 and 137/136 kept, 137/132 and 138/128 discarded.
+  assert.equal(discardReason([g(139, 4), g(141, 2)], [143, 143], ["/t/base", "/t/base"]), null);
+  assert.equal(discardReason([g(137, 6), g(132, 11)], [143, 143], ["/t/base", "/t/base"]), "installed regions differ between arms 0 and 1 of one tree beyond 4 (137 / 132)");
+  assert.equal(discardReason([g(138, 5), g(128, 15)], [143, 143], ["/t/base", "/t/base"]), "installed regions differ between arms 0 and 1 of one tree beyond 4 (138 / 128)");
+  assert.equal(discardReason([g(141, 2), g(150, 0), g(130, 13)], [143, 150, 143], ["/t/base", "/t/cand", "/t/base"]), "installed regions differ between arms 0 and 2 of one tree beyond 4 (141 / 130)");
+  assert.equal(installedDelta([g(141, 2), g(150, 0), g(138, 5)], ["/t/base", "/t/cand", "/t/base"]), 3);
+  assert.equal(installedDelta([g(141, 2), g(150, 0)], ["/t/base", "/t/cand"]), null, "one arm per tree: no gap");
   // A/B (two trees): a candidate with other regions is kept, flagged by regionCountsDiffer.
   assert.equal(discardReason([g(141, 2), g(150, 0)], [143, 150], ["/t/base", "/t/cand"]), null);
   assert.equal(regionCountsDiffer([g(141, 2), g(150, 0)], ["/t/base", "/t/cand"]), true);

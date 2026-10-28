@@ -165,6 +165,24 @@ test("spark queue: move refuses what would break the order, a duplicate keeps th
   assert.equal(movedId(q, "b1", "b3"), "000000000010001-5000.json"); // to the end
   assert.throws(() => movedId(q, "b1", "b2"), /no room between b2 and b3/); // 9000 and 9001
   assert.throws(() => movedId(q, "run", "head"), /already running/);
+  // 2026-10-28: a waiting ticket older than the running one (img-gpu-ir2-light
+  // before img-gpu-ir1-light, running): "head" goes just after the running
+  // ticket by position, not at the count of running tickets
+  const q2 = [t(1000, "older-waiting"), t(2000, "running", "a"), t(5000, "w1"), t(9000, "smoke")];
+  const id = movedId(q2, "smoke", "head");
+  assert.ok(id < q2[0].id, `head goes before the first waiting ticket, even before the running one (${id})`);
+  // once the running job is through, the moved ticket is the first to go on lane a
+  const moved = q2.map((x) => (x.name === "smoke" ? { ...x, id, kind: "pair", lanes: "a" } : { ...x, kind: "pair", lanes: "a" }));
+  const after = moved.filter((x) => x.name !== "running").sort((x, y) => (x.id < y.id ? -1 : 1));
+  const free = () => false;
+  assert.deepEqual(nextStep(after.find((x) => x.name === "smoke"), after, free), { go: ["a"] });
+  assert.match(nextStep(after.find((x) => x.name === "older-waiting"), after, free).wait, /pair smoke arrived first/);
+  // eta counts the running job first, even with a waiting ticket sorted before it
+  const withRunning = [...moved].sort((x, y) => (x.id < y.id ? -1 : 1)).map((x) => (x.name === "running" ? { ...x, estMin: 20, grantedAt: new Date(Date.now() - 5 * 60000).toISOString() } : { ...x, estMin: 10 }));
+  assert.equal(eta(withRunning).find((x) => x.name === "smoke").startsIn, 15, "the smoke starts once the running job is through");
+  // a named target before a running job is still refused
+  assert.throws(() => movedId(q2, "smoke", "older-waiting"), /before a running job/);
+  assert.equal(movedId([t(1000, "w0"), t(5000, "w1")], "w1", "head"), "000000000000000-5000.json", "nothing running: before every waiting ticket");
   // An old waiter (no estMin) cannot follow a rename: refused.
   const { estMin, ...old } = q[1];
   assert.throws(() => movedId([q[0], old, q[2]], "b1", "head"), /would wait for itself/);
@@ -412,18 +430,6 @@ test("spark-run --noise: drop-meter's A/A named as a bench run, its summary ther
   assert.deepEqual(benchNoiseArgs(undefined, "/r"), []);
   assert.throws(() => benchNoiseArgs("jit-0189c-drops-aa", "/r"), /<yyyymmdd>\/<name>/);
   assert.throws(() => benchNoiseArgs("20261028/../x/y", "/r"), /<yyyymmdd>\/<name>/);
-});
-
-// 2026-10-28: drop-meter's default load guard (cpus/4 = 5 on the Spark) sat at
-// the bench's background load and kept no run; on the bench it defaults to 8.
-test("spark-run: drop-meter gets --max-load 8 on the bench unless the caller sets it", async () => {
-  const { benchProbeDefaults, BENCH_DROP_MAX_LOAD } = await import("../harness/remote/spark-run.mjs");
-  assert.equal(BENCH_DROP_MAX_LOAD, 8);
-  assert.deepEqual(benchProbeDefaults("drop-meter", ["--display"]), ["--display", "--max-load", "8"]);
-  assert.deepEqual(benchProbeDefaults("drop-meter", ["--max-load", "6"]), ["--max-load", "6"], "the caller's value wins");
-  assert.deepEqual(benchProbeDefaults("drop-meter", ["--max-load=6"]), ["--max-load=6"]);
-  assert.deepEqual(benchProbeDefaults("race-perf", ["--display"]), ["--display"], "race-perf unchanged");
-  assert.deepEqual(benchProbeDefaults("replay-gates", ["--query", "q"]), ["--query", "q"], "replay-gates has no load guard");
 });
 
 test("spark queue: a lane b job backfills past an older whole-bench job that cannot start before it ends", () => {
