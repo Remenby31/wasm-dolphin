@@ -62,6 +62,7 @@ import { requestedInputPhotonMarkerConfig } from "./input-visual-marker.js";
 import { requestedWgpuVisualCadence } from "./wgpu-visual-cadence.js";
 import { requestedWgpuPipelinePrewarm } from "./wgpu-pipeline-prewarm.js";
 import { requestedWgpuSparseUbo } from "./wgpu-sparse-ubo-copy-forward.js";
+import { captureSessionAfterDeviceLoss, requestedWgpuSessionRecover } from "./wgpu-session-recovery.js";
 
 const DEMO_WIDTH = 320;
 const DEMO_HEIGHT = 240;
@@ -73,7 +74,7 @@ const SAFE_JIT_WARMUP_FRAMES = 5000;
 const DEFAULT_JIT_WARMUP_FRAMES = 60;
 
 export class EmulatorHost {
-  constructor({ canvas, onFrame = () => {}, onStatus = () => {}, onMode = () => {}, onGpuDeviceLost = () => {} }) {
+  constructor({ canvas, onFrame = () => {}, onStatus = () => {}, onMode = () => {}, onGpuDeviceLost = () => {}, onGpuRecovering = () => {} }) {
     this.canvas = canvas;
     this.onFrame = onFrame;
     this.onStatus = onStatus;
@@ -82,8 +83,13 @@ export class EmulatorHost {
     // renderer stopped (the picture would freeze): cause "device-lost"
     // (fallback 1 when it was above 1x: the next boot of this host and every
     // setEnhancements stay at 1x) or "renderer-error" (fallback null, restart
-    // at the same scale).
+    // at the same scale). With ?wgpurecover=1 it comes once the core is
+    // paused and saved, with { paused, pauseChanged, state, stateGameId,
+    // stateError }, after onGpuRecovering({ internalResolution, fallback,
+    // reason }) at the start of the save (docs/wgpu-session-fallback.md).
     this.onGpuDeviceLost = onGpuDeviceLost;
+    this.onGpuRecovering = onGpuRecovering;
+    this.wgpuSessionRecover = requestedWgpuSessionRecover(window.location.search);
 
     this.demo = null;
     this.coreKind = requestedCoreKind();
@@ -558,6 +564,7 @@ export class EmulatorHost {
             wgpuMappedDrainCoalescing: this.wgpuMappedDrainCoalescing,
             wgpuRendererWorkerProbe: this.wgpuRendererWorkerProbe,
             wgpuVisualCadence: this.wgpuVisualCadence,
+            wgpuSessionRecover: this.wgpuSessionRecover,
             wgpuPipelinePrewarm: this.wgpuPipelinePrewarm,
             gpuCompletionDiagnostics: this.gpuCompletionDiagnostics,
             wgpuDirtyRangeProjection: this.wgpuDirtyRangeProjection,
@@ -992,7 +999,7 @@ export class EmulatorHost {
   // cause "device-lost": the GPU went (memory may be why), the scale falls
   // to 1x. "renderer-error": a fatal replay error on a live device (the
   // scale is not why): the page restarts at the same scale, fallback null.
-  handleGpuDeviceLost({ internalResolution = 1, reason = "unknown", detail = "", cause = "device-lost" } = {}) {
+  handleGpuDeviceLost({ internalResolution = 1, reason = "unknown", detail = "", cause = "device-lost", pause = null } = {}) {
     const deviceLost = cause !== "renderer-error";
     const fallback = deviceLost && internalResolution > 1 ? 1 : null;
     if (fallback) {
@@ -1002,7 +1009,41 @@ export class EmulatorHost {
     this.onStatus(deviceLost
       ? `WebGPU device lost at ${internalResolution}x (${reason})${fallback ? "; internal resolution back to 1x" : ""}`
       : `WebGPU renderer failed at ${internalResolution}x (${reason}); restart at the same scale`);
-    this.onGpuDeviceLost({ internalResolution, fallback, reason, detail, cause: deviceLost ? "device-lost" : "renderer-error" });
+    const event = { internalResolution, fallback, reason, detail, cause: deviceLost ? "device-lost" : "renderer-error" };
+    if (!this.wgpuSessionRecover || this.mode !== "dolphin") {
+      this.onGpuDeviceLost(event);
+      return null;
+    }
+    return this.recoverSessionAfterDeviceLoss(event, pause);
+  }
+
+  // ?wgpurecover=1: tell the page a recovery runs, keep the paused session,
+  // then always hand the loss to the page, whatever failed on the way.
+  async recoverSessionAfterDeviceLoss(event, workerPause) {
+    const describe = (error) => (error instanceof Error ? error.message : String(error));
+    this.onStatus("WebGPU device lost: keeping the session (pause, save state)");
+    try {
+      this.onGpuRecovering({ internalResolution: event.internalResolution, fallback: event.fallback, reason: event.reason });
+    } catch (error) {
+      this.onStatus(`Device loss recovery handler failed: ${describe(error)}`);
+    }
+    let session = { paused: false, pauseChanged: false, state: null, stateGameId: "", stateError: "" };
+    try {
+      session = await captureSessionAfterDeviceLoss(this.adapter, { workerPause });
+      this.onStatus(session.state
+        ? `Session kept after the device loss (${session.state.byteLength} bytes)`
+        : `Session not kept after the device loss: ${session.stateError}`);
+    } catch (error) {
+      session = { ...session, stateError: describe(error) };
+      this.onStatus(`Session not kept after the device loss: ${session.stateError}`);
+    } finally {
+      try {
+        this.onGpuDeviceLost({ ...event, ...session });
+      } catch (error) {
+        this.onStatus(`Device loss handler failed: ${describe(error)}`);
+      }
+    }
+    return session;
   }
 
   setAudioMuted(muted) {

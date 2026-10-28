@@ -64,10 +64,12 @@ export function createWgpuFatalReporter(post = noop) {
   return {
     get reported() { return reported; },
     reset() { reported = null; },
-    report({ internalResolution = 1, reason = "unknown", detail = "", cause = "device-lost" } = {}) {
+    // extra: fields the message carries as well (the worker's pause under
+    // ?wgpurecover=1).
+    report({ internalResolution = 1, reason = "unknown", detail = "", cause = "device-lost", ...extra } = {}) {
       if (reported) return false;
       reported = { internalResolution, reason: String(reason), detail: String(detail ?? ""), cause: cause === "renderer-error" ? cause : "device-lost" };
-      post({ type: "wgpu-device-lost", ...reported });
+      post({ type: "wgpu-device-lost", ...reported, ...extra });
       return true;
     },
   };

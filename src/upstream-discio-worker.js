@@ -700,6 +700,9 @@ const WGPU_FAST_STAGE_ACCEPTED = Object.freeze({ ok: true, reason: null });
 let wgpuMappedDrainCoalescingEnabled = false;
 let wgpuRendererWorkerProbe = "off";
 let wgpuVisualCadenceEnabled = false;
+// ?wgpurecover=1 (docs/wgpu-session-fallback.md): a lost device pauses the
+// core here, before the page hears of it.
+let wgpuSessionRecoverEnabled = false;
 // Mirrors the loaded core's videoBackend for code outside loadCore's scope.
 let hardwareVideoBackend = false;
 // Staging-texture readbacks of the hardware renderer, per device and per
@@ -1801,6 +1804,7 @@ async function handleMessage(type, payload) {
         wgpuMappedDrainCoalescing: payload.wgpuMappedDrainCoalescing,
         wgpuRendererWorkerProbe: payload.wgpuRendererWorkerProbe,
         wgpuVisualCadence: payload.wgpuVisualCadence,
+        wgpuSessionRecover: payload.wgpuSessionRecover,
         wgpuPipelinePrewarm: payload.wgpuPipelinePrewarm,
         wgpuPassPackageProjection: payload.wgpuPassPackageProjection,
         wgpuUploadRunProjection: payload.wgpuUploadRunProjection,
@@ -2613,6 +2617,7 @@ async function loadCore({
   wgpuMappedDrainCoalescing: requestedWgpuMappedDrainCoalescing = false,
   wgpuRendererWorkerProbe: requestedWgpuRendererWorkerProbe = "off",
   wgpuVisualCadence: requestedWgpuVisualCadence = false,
+  wgpuSessionRecover: requestedWgpuSessionRecover = false,
   wgpuPipelinePrewarm: requestedWgpuPipelinePrewarm = true,
   wgpuPassPackageProjection: requestedWgpuPassPackageProjection = false,
   wgpuUploadRunProjection: requestedWgpuUploadRunProjection = false,
@@ -2794,6 +2799,7 @@ async function loadCore({
   pipelinePrewarm?.stop();
   pipelinePrewarm = null;
   wgpuVisualCadenceEnabled = Boolean(requestedWgpuVisualCadence);
+  wgpuSessionRecoverEnabled = Boolean(requestedWgpuSessionRecover);
   wgpuVisualCadenceTelemetry = createWgpuVisualCadenceTelemetry(
     wgpuVisualCadenceEnabled
   );
@@ -6891,7 +6897,7 @@ fn fs(input: VertexOutput) -> @location(0) vec4f {
   wgpuReplayFatal = null;
   wgpuFatalReporter.reset();
 
-  device.lost.then((info) => {
+  device.lost.then(async (info) => {
     const loss = handleWgpuDeviceLoss({
       activeDevice: renderGpu?.device,
       lostDevice: device,
@@ -6916,10 +6922,24 @@ fn fs(input: VertexOutput) -> @location(0) vec4f {
     rendererDiagnostics.internalResolutionCeiling = {
       ...rendererDiagnostics.internalResolutionCeiling, lost: wgpuScaleLostCeiling < 4
     };
-    wgpuFatalReporter.report({ internalResolution, reason: String(info?.reason ?? "unknown"), detail: loss.detail });
+    // ?wgpurecover=1: stop the game here, not a round trip to the page
+    // later (it ran ~0.45 s blind then); the page then saves the state.
+    const pause = wgpuSessionRecoverEnabled ? await pauseCoreAfterDeviceLoss() : null;
+    wgpuFatalReporter.report({ internalResolution, reason: String(info?.reason ?? "unknown"), detail: loss.detail, ...(pause ? { pause } : {}) });
   });
 
   return state;
+}
+
+// { state, changed } once paused (changed false: the player had paused it),
+// or { error }. Never throws: the page must hear of the loss either way.
+async function pauseCoreAfterDeviceLoss() {
+  try {
+    const { state, changed } = await coreLifecycle.pause();
+    return { state, changed };
+  } catch (error) {
+    return { error: String(error?.message || error) };
+  }
 }
 
 function ensureWgpuVisualCadenceResources(gpu = renderGpu) {

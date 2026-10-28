@@ -90,6 +90,8 @@ with `scaleResolutionDownBy` there.
   restart at the same scale with its own guard against a loop (the site
   does it from its `fix/renderer-error-restart` change; until then it reads
   a null `fallback` above 1x as the error screen).
+  `?wgpurecover=1` pauses the core and hands the page a save state with
+  the event, to resume after the restart (docs/wgpu-session-fallback.md).
 - **Measured costs** (2026-10-26/27, M4 Pro, Chrome headless, mains power,
   local commercial disc, race, 3 runs per scale, perf lock):
 

@@ -76,7 +76,7 @@ test("worker loss integration stops replay and reapplies the geometry epoch", as
     new URL("../src/upstream-discio-worker.js", import.meta.url),
     "utf8"
   );
-  assert.match(worker, /device\.lost\.then\(\(info\) => \{[\s\S]*?handleWgpuDeviceLoss\(\{/);
+  assert.match(worker, /device\.lost\.then\(async \(info\) => \{[\s\S]*?handleWgpuDeviceLoss\(\{/);
   assert.match(worker, /cancelReplay: cancelWgpuReplayPump/);
   assert.match(worker, /clearReplayState: clearWgpuReplayStateAfterDeviceLoss/);
   assert.match(
@@ -177,6 +177,14 @@ test("one message per renderer session: the first cause wins, a new device start
   assert.equal(posted.length, 2);
   assert.equal(wgpuFatalPageReason("something-new"), "something-new");
   assert.equal(wgpuFatalPageReason(""), "unknown");
+});
+
+test("the reporter carries extra fields (the worker's pause under ?wgpurecover=1), still once", () => {
+  const posted = [];
+  const reporter = createWgpuFatalReporter((m) => posted.push(m));
+  reporter.report({ internalResolution: 2, reason: "unknown", detail: "", pause: { state: "Paused", changed: true } });
+  reporter.report({ internalResolution: 2, reason: "submit-error", detail: "" });
+  assert.deepEqual(posted, [{ type: "wgpu-device-lost", internalResolution: 2, reason: "unknown", detail: "", cause: "device-lost", pause: { state: "Paused", changed: true } }]);
 });
 
 // core-host: only "renderer-error" keeps the scale; a cause absent (an older
