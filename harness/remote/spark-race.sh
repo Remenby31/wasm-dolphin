@@ -1,9 +1,10 @@
 #!/bin/sh
 # Copyright 2026 wasm-dolphin contributors
 # SPDX-License-Identifier: MIT
-# Spark side of spark-run.mjs: one race-perf, detached from the ssh session
-# that started it. Run from a pushed harness tree under ~/salon-bench/harness.
-#   spark-race.sh <out dir> <lane: a | b | auto> -- <race-perf args…>
+# Spark side of spark-run.mjs: one race-perf (or SPARK_PROBE: drop-meter,
+# replay-gates), detached from the ssh session that started it. Run from a
+# pushed harness tree under ~/salon-bench/harness.
+#   spark-race.sh <out dir> <lane: a | b | auto> -- <probe args…>
 # Writes <out dir>.log (all output), <out dir>.lane and <out dir>.exit
 # (race-perf's code).
 #
@@ -16,6 +17,11 @@
 out=$1
 want=$2
 shift 3
+probe=${SPARK_PROBE:-race-perf}
+case $probe in
+  race-perf|drop-meter|replay-gates) ;;
+  *) echo "[spark-race] unknown probe $probe" >> "$out.log"; echo 2 > "$out.exit"; exit 2 ;;
+esac
 B="$HOME/salon-bench"
 export PATH="$B/node/bin:$PATH"
 mkdir -p "$B/lanes/b"
@@ -65,7 +71,8 @@ mkdir -p "$B/lanes/b"
   cg=$(sed -n 's/^0:://p' /proc/self/cgroup 2>/dev/null)
   echo "[spark-race] cgroup ${cg:-?}: controllers $(cat "/sys/fs/cgroup${cg}/cgroup.controllers" 2>/dev/null || echo ?); parent delegates $(cat "/sys/fs/cgroup$(dirname "${cg:-/}")/cgroup.subtree_control" 2>/dev/null || echo ?)"
   echo "[spark-race] busiest before:"; ps -eLo pid,tid,psr,pcpu,user,comm --sort=-pcpu | head -8
-  taskset -c "${SPARK_NODE_CPUS:-$ncpus}" node harness/probes/race-perf.mjs "$@" --port "$port" --out "$out"
+  echo "[spark-race] probe $probe"
+  taskset -c "${SPARK_NODE_CPUS:-$ncpus}" node "harness/probes/$probe.mjs" "$@" --port "$port" --out "$out"
   code=$?
   echo "[spark-race] busiest after:"; ps -eLo pid,tid,psr,pcpu,user,comm --sort=-pcpu | head -8
   echo "[spark-race] exit $code at $(date -Is)"

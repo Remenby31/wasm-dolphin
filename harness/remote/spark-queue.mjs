@@ -61,7 +61,24 @@ export function nextStep(me, tickets, busy, now = Date.now()) {
   if (held(me, now)) return { wait: "the lane's cores are busy" };
   const older = tickets.filter((t) => t.id < me.id);
   const mine = wants(me);
-  const ahead = older.find((t) => !t.lane && !held(t, now) && wants(t).some((l) => mine.includes(l)));
+  // Backfill: an older whole-bench job (a build, a multi) waiting for a lane
+  // still in use does not hold back a younger job on another, free lane
+  // that is estimated to end before that job can start (2026-10-28: a multi
+  // waiting ~37 min for lane a kept two lane b screens and lane b idle). The
+  // estimates are eta()'s, without the tickets stepped aside (held: the
+  // whole-bench job passes them anyway). No backfill for a job without an
+  // estimate or of 0 min, before a start of 0 (a run of such jobs would
+  // starve it), or while a running ticket has no grantedAt (an older
+  // harness: its estimate would count in full).
+  let starts = null;
+  const backfills = (t) => {
+    if (!WHOLE_BENCH.includes(t.kind) || WHOLE_BENCH.includes(me.kind) || !(me.estMin > 0)) return false;
+    if (tickets.some((x) => x.lane && x.lane !== "none" && !x.grantedAt)) return false;
+    starts ??= new Map(eta(tickets.filter((x) => x === me || !held(x, now)), now).map((x) => [x.id, x.startsIn]));
+    const start = starts.get(t.id);
+    return start > 0 && me.estMin <= start;
+  };
+  const ahead = older.find((t) => !t.lane && !held(t, now) && wants(t).some((l) => mine.includes(l)) && !backfills(t));
   if (ahead) return { wait: `${ahead.kind} ${ahead.name} arrived first` };
   const taken = (l) => busy(l) || tickets.some((t) => t.id !== me.id && t.lane?.split(" ").includes(l));
   if (WHOLE_BENCH.includes(me.kind)) return mine.some(taken) ? { wait: "a lane is in use" } : { go: mine };
@@ -112,6 +129,10 @@ export function estimateMin(kind, args = []) {
   if (kind === "multi") return Math.round(MULTI_SEED_MIN + optOf(args, "runs", 6) * MULTI_RUN_MIN);
   const opt = (name, def) => optOf(args, name, def);
   const sides = args.includes("--baseline") ? 2 : 1;
+  // replay-gates (--extra): ~1.3 min a visit, --runs visits a side
+  if (args.includes("--extra")) return Math.round(opt("runs", 4) * 2 * 1.3);
+  // drop-meter (--visits): ~1.5 min a visit (boot, scenario or state, cold and warm)
+  if (args.includes("--visits")) return Math.round(opt("runs", 4) * sides * opt("visits", 2) * 1.5);
   return Math.round((opt("runs", 4) * sides * (opt("warmup", 25) + opt("secs", 20) + 20)) / 60);
 }
 
