@@ -397,6 +397,17 @@ test("aot optimizer: prioritize() moves the modules covering sampled PCs ahead, 
   assert.deepEqual(translated.slice(2), units.slice(0, -2), "the others keep their order");
 });
 
+// Diagnostics: the share of the samples since a load that no planned region
+// covers (would a block JIT limited to them compete with the regions?).
+test("aot optimizer: priorityCoverage counts the samples outside every planned region", async () => {
+  const { o } = optimizer();
+  await o.status();
+  const pc = o.regions.at(-1).members[0].ranges[0][0];
+  o.prioritize([[pc, 5], [pc + 4, 1], [0x81700000, 9]]);
+  o.priorityScore();
+  assert.deepEqual(o.priorityCoverage, { samples: 15, outside: 9, pcs: 3 });
+});
+
 test("aot optimizer: prioritize() during a run reorders only what is left", async () => {
   const translated = [];
   const { o } = optimizer();
@@ -457,4 +468,58 @@ test("aot optimizer: prioritize() finds a PC in a long range many starts back; h
   assert.equal(o.priority, null);
   o.markStale(units[2].key);
   assert.equal(o.hasWork(), true, "a stale module is work again");
+});
+
+// ?aotpipeline=k: up to k modules compile at once while the next ones
+// translate (the translator spent most of a load's 5 s waiting on the
+// previous module's compile); installs and progress keep the module order.
+test("aot optimizer: a k-deep pipeline overlaps compiles, installs in order", async () => {
+  const run = async (pipelineDepth) => {
+    let active = 0, peak = 0, n = 0;
+    const installed = [];
+    const { o, events } = optimizer({
+      pipelineDepth,
+      // every other module compiles slower: a later one finishes first
+      compile: async (key) => {
+        active++; peak = Math.max(peak, active);
+        await new Promise((r) => setTimeout(r, n++ % 2 ? 1 : 15));
+        active--;
+        return { module: {} };
+      },
+      install: (region) => installed.push(region.key)
+    });
+    await o.status();
+    const order = o.regions.map((u) => u.key);
+    await o.start();
+    const fractions = events.filter(([t]) => t === "optimization-progress").map(([, d]) => d.fraction);
+    return { peak, installed, order, fractions };
+  };
+  const one = await run(1);
+  assert.equal(one.peak, 1, "one compile at a time, as before");
+  assert.deepEqual(one.installed, one.order);
+  const three = await run(3);
+  assert.ok(three.peak >= 2, `compiles overlap (peak ${three.peak})`);
+  assert.ok(three.peak <= 3, "never more than k");
+  assert.deepEqual(three.installed, three.order, "installed in module order");
+  assert.ok(three.fractions.every((f, i) => !i || f >= three.fractions[i - 1]) && three.fractions.at(-1) === 1, "progress in order, to 100 %");
+});
+
+// The cache write (~12 ms a module, as long as the compile) no longer holds
+// up the next install: only installs are ordered against the module before.
+test("aot optimizer: a slow cache write does not delay the next install, progress keeps the order", async () => {
+  const base = fakeCache();
+  const log = [];
+  const slowCache = async (...a) => {
+    const session = await base(...a);
+    return { ...session, put: async (entries) => { log.push(`put-start ${entries[0].key}`); await new Promise((r) => setTimeout(r, 20)); log.push(`put-end ${entries[0].key}`); return session.put(entries); } };
+  };
+  const { o, events } = optimizer({ cache: slowCache, pipelineDepth: 3, compile: async () => ({ module: {} }), install: (region) => log.push(`install ${region.key}`) });
+  await o.status();
+  const [a, b] = o.regions.map((u) => u.key);
+  await o.start();
+  assert.ok(log.indexOf(`install ${b}`) < log.indexOf(`put-end ${a}`), "the 2nd module installed while the 1st was still being written");
+  const installs = log.filter((x) => x.startsWith("install ")).map((x) => x.slice(8));
+  assert.deepEqual(installs, o.regions.map((u) => u.key), "installs in module order");
+  const fractions = events.filter(([t]) => t === "optimization-progress").map(([, d]) => d.fraction);
+  assert.ok(fractions.every((f, i) => !i || f >= fractions[i - 1]) && fractions.at(-1) === 1);
 });

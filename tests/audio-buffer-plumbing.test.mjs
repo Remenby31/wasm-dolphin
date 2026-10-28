@@ -73,3 +73,23 @@ test("0186: the core exports the mixer's queue, the worker hands it to the produ
   assert.match(worker, /audioQueuedMs:\s*\n?\s*typeof module\._DolphinWeb_AudioQueuedMs === "function"/);
   assert.match(worker, /audioQueuedMs: api\?\.audioQueuedMs/);
 });
+
+// ?aotpipeline=k reaches the worker (options the adapter forgot were dropped
+// silently before): the init message carries it, the worker hands it to the
+// first-launch flow.
+test("?aotpipeline reaches the worker's init message and the first-launch flow", async (t) => {
+  const { UpstreamWorkerAdapter } = await import("../src/upstream-worker-adapter.js");
+  const adapter = new UpstreamWorkerAdapter({ aotPipeline: 3 });
+  let posted = null;
+  adapter.worker = { postMessage(message) { posted = message; queueMicrotask(() => adapter.handleMessage({ id: message.id, ok: true })); } };
+  const originalWindow = globalThis.window;
+  globalThis.window = { location: { href: "http://127.0.0.1:8080/?aotpipeline=3", search: "?aotpipeline=3" } };
+  t.after(() => { if (originalWindow === undefined) delete globalThis.window; else globalThis.window = originalWindow; });
+  await adapter.load();
+  assert.equal(posted.payload.aotPipeline, 3);
+  const host = await readFile(new URL("../src/core-host.js", import.meta.url), "utf8");
+  const worker = await readFile(new URL("../src/upstream-discio-worker.js", import.meta.url), "utf8");
+  assert.match(host, /aotPipeline: this\.aotPipeline/);
+  assert.match(worker, /aotPipeline: payload\.aotPipeline/);
+  assert.match(worker, /tuning: \{ pipelineDepth: aotPipelineDepth \}/);
+});

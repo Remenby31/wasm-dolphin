@@ -144,6 +144,7 @@ export class UpstreamWorkerAdapter {
     aotSampleMs = undefined,
     wasmEngine = undefined,
     regionCap = null,
+    aotPipeline = 1,
     onAotProgress = () => {},
     onGpuDeviceLost = () => {},
     onScaleCeiling = () => {},
@@ -289,6 +290,7 @@ export class UpstreamWorkerAdapter {
     this.aotSampleMs = aotSampleMs;
     this.wasmEngine = wasmEngine;
     this.regionCap = regionCap; // ?regioncap=N|0 (#215), null: by engine
+    this.aotPipeline = aotPipeline; // ?aotpipeline=k, modules compiling at once
     this.onAotProgress = onAotProgress;
     // { internalResolution, reason, detail }: the worker's WebGPU device was
     // lost at that scale (patch 0168 follow-up, core-host falls back to 1x).
@@ -550,6 +552,7 @@ export class UpstreamWorkerAdapter {
       aotSampleMs: this.aotSampleMs,
       wasmEngine: this.wasmEngine,
       regionCap: this.regionCap,
+      aotPipeline: this.aotPipeline,
       collectMetrics: this.collectMetrics,
       legacyOneWayAck: this.legacyOneWayAck,
       coreSelection: this.coreSelectionTelemetry(window.location.href),

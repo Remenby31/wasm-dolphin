@@ -2,6 +2,7 @@ import { asDiscBlob } from "./remote-disc.js";
 import { readViRing } from "./harness-vi-ring.js";
 import { startPcSampler } from "./harness-pc-sampler.js";
 import { createDropSampler, histogramSum } from "./harness-drop-sampler.js";
+import { createLoopProfile } from "./loop-profile.js";
 import {
   DEFAULT_UPSTREAM_CORE_URL,
   WORKERFS_MOUNT_DIR,
@@ -1332,7 +1333,10 @@ function wgpuVisualCadenceSnapshot() {
   };
 }
 
-self.addEventListener("message", async (event) => {
+// Diagnostics (validationLoopProfile): who holds this worker's event loop.
+const loopProfile = createLoopProfile();
+loopProfile.patchTimers(globalThis);
+self.addEventListener("message", loopProfile.wrap(([event]) => `message:${event?.data?.type ?? "?"}`, async (event) => {
   const data = event.data ?? {};
   // Forward detachedOglFrame messages from Dolphin's GPU pthread to main.
   // The C++ Swap path posts the bitmap from whichever pthread owns the
@@ -1381,7 +1385,7 @@ self.addEventListener("message", async (event) => {
       )
     );
   }
-});
+}));
 
 // Patch 0164: the video thread's blocking EFB copies to RAM (harness hooks
 // on): per kind, how long it waited and whether FIFO work was waiting behind.
@@ -1977,6 +1981,7 @@ async function handleMessage(type, payload) {
         aotSampleMs: payload.aotSampleMs,
         wasmEngine: payload.wasmEngine,
         regionCap: payload.regionCap,
+        aotPipeline: payload.aotPipeline,
         regionChain: payload.regionChain,
         fusedMadd: payload.fusedMadd,
         reportedCoreSelection: payload.coreSelection,
@@ -2377,6 +2382,12 @@ async function handleMessage(type, payload) {
     }
     case "validationAotCacheProbe":
       return runAotCacheProbe(payload);
+    // Diagnostics: {action: "start" | "read" | "stop"} -> the labels holding
+    // this worker's loop since "start" (loop-profile.js).
+    case "validationLoopProfile":
+      if (payload?.action === "start") loopProfile.start();
+      if (payload?.action === "stop") loopProfile.stop();
+      return loopProfile.read();
     // P7 (?aot=1): the site's controls and the KPI probe's read.
     case "aotStatus":
     case "aotOptimize":
@@ -2678,6 +2689,7 @@ async function loadCore({
   aotSampleMs = AOT_PROFILE_SAMPLE_MS,
   wasmEngine: requestedWasmEngine = null,
   regionCap = null,
+  aotPipeline = 1,
   regionChain = true,
   fusedMadd = true,
   reportedCoreSelection = null,
@@ -3124,6 +3136,7 @@ async function loadCore({
   aotProfileSampleMs = Number.isInteger(aotSampleMs) && aotSampleMs >= 0 ? aotSampleMs : AOT_PROFILE_SAMPLE_MS;
   wasmEngineName = resolveWasmEngineName(requestedWasmEngine);
   aotRegionCapRequested = Number.isInteger(regionCap) && regionCap >= 0 ? regionCap : null;
+  aotPipelineDepth = Number.isInteger(aotPipeline) && aotPipeline >= 1 && aotPipeline <= 4 ? aotPipeline : 1;
   dolphinJitBootLoadComplete = false;
   dolphinJitBootLoadedEntries = 0;
   coreBuildFingerprint = String(buildFingerprint ?? "");
@@ -5430,7 +5443,7 @@ function startPresentationLoop() {
   configureFrameSignalWait();
   if (!frameSignalHeap && typeof MessageChannel === "function") {
     presentationChannel = new MessageChannel();
-    presentationChannel.port1.onmessage = () => runPresentationLoop();
+    presentationChannel.port1.onmessage = loopProfile.wrap("port:presentation", () => runPresentationLoop());
   }
   schedulePresentationLoop();
   // §28cl tick mode: in addition to the new-frame-driven present loop,
@@ -8383,6 +8396,7 @@ export async function prepareAotFirstLaunch(file, {
     : null;
   const opfs = translator ? await Promise.resolve(storageRoot()).catch(() => null) : null;
   const flow = createAotFirstLaunch({
+    tuning: { pipelineDepth: aotPipelineDepth },
     discKey,
     coreHash,
     keyParts,
@@ -8644,6 +8658,7 @@ export function setAotCoreBootedForTest(on) {
 }
 // ?regioncap=N|0 (core-host): the region function cap forced, else null (by engine).
 let aotRegionCapRequested = null;
+let aotPipelineDepth = 1; // ?aotpipeline=k
 export function regionFunctionCap(jscCap) {
   return aotRegionCapRequested ?? (wasmEngineName === "jsc" ? jscCap : 0);
 }

@@ -54,8 +54,12 @@ export class AotOptimizer extends EventTarget {
   // keyParts: { compilerVersion, codegenMask } (the core's _DolphinWeb_AotKeyParts)
   constructor({ discKey, buildPlan, translator, openCache, cacheIdentity = {}, keyParts = { compilerVersion: 0, codegenMask: 0 },
     assemble = null, assembleOptions = null, compile = null, install = null, maxFunctions = 100, planStore = null, batchSize = BATCH,
-    notReadyDelayMs = 1000, maxNotReadyWaits = 300, maxAttempts = 3, sleep = (ms) => new Promise((r) => setTimeout(r, ms)), now = () => performance.now() }) {
+    notReadyDelayMs = 1000, maxNotReadyWaits = 300, maxAttempts = 3, sleep = (ms) => new Promise((r) => setTimeout(r, ms)), now = () => performance.now(),
+    pipelineDepth = 1 }) {
     super();
+    // Modules compiling at once while the next ones translate (?aotpipeline):
+    // they still install, go to the cache and count in order.
+    this.pipelineDepth = Math.max(1, Math.min(4, pipelineDepth | 0 || 1));
     this.discKey = discKey;
     this.buildPlan = buildPlan;
     this.translator = translator;
@@ -103,6 +107,9 @@ export class AotOptimizer extends EventTarget {
     this.cursor = 0;
     this.priority = null; // { score: Map<unit, hits> } a run not yet started applies
     this.finished = false; // the last run went through its work (hasWork)
+    // diagnostics: the run's translation waiting on the previous module's
+    // finishing (compile, cache write), and those steps' own times
+    this.pipelineStats = { finishWaitMs: 0, compileMs: 0, compiles: 0, putMs: 0 };
   }
 
   // A save state just loaded: the guest now runs code the plan's order may
@@ -143,11 +150,16 @@ export class AotOptimizer extends EventTarget {
       return null;
     };
     const score = new Map();
+    let samples = 0, outside = 0;
     for (const [pc, n] of p.hits) {
       const u = unitAt(pc >>> 0);
+      samples += n || 1;
       if (u) score.set(u, (score.get(u) ?? 0) + (n || 1));
+      else outside += n || 1;
     }
     p.score = score;
+    // samples since the load outside every planned region (the probe's read)
+    this.priorityCoverage = { samples, outside, pcs: p.hits.length };
     return score;
   }
 
@@ -468,13 +480,17 @@ export class AotOptimizer extends EventTarget {
       // compiles (another worker), installs and goes to the cache: the
       // finishing steps are chained, so modules install in order, but the
       // translation no longer waits for them (research deep-first-minute §1.3).
-      let finishing = Promise.resolve();
+      let finishing = { installed: Promise.resolve(), done: Promise.resolve() };
       // A cancel (tab closing, another disc, aotCancel) is no verdict on a
       // module: what compiled still installs (the worker drops it if the
       // disc changed), but nothing is stored, deferred or blacklisted, so
       // the next launch translates it again (review of #144).
-      const finish = async (unit, result) => {
-        if (this.cancelled) return;
+      // `prev`: { installed, done } of the module before. Only installs are
+      // ordered against it once this one compiled; the cache write (as long
+      // as the compile, ~12 ms a module) no longer holds up the next
+      // install. Progress and verdicts keep the module order (prev.done).
+      const finish = async (unit, result, prev = { installed: Promise.resolve(), done: Promise.resolve() }, installed = () => {}) => {
+        if (this.cancelled) { installed(); return prev.done; }
         for (const x of result.refused) {
           this.emit("optimization-error", { message: `function ${x.entry.toString(16)}: ${x.reason}`, fatal: false });
         }
@@ -496,12 +512,18 @@ export class AotOptimizer extends EventTarget {
           if (bytes && this.compile) {
             let out;
             try {
+              const c0 = performance.now();
               out = await this.compile(unit.key, bytes);
+              this.pipelineStats.compileMs += performance.now() - c0;
+              this.pipelineStats.compiles++;
             } catch (error) {
               out = { reason: String(error?.message || error) };
             }
+            // the module before installs first
+            await prev.installed;
             if (this.cancelled) {
               if (out?.module) this.install?.({ key: unit.key, bytes, entries: fragments.flatMap((fr) => fr.entries), layout: fragments[0]?.layout ?? 0, members: unit.members.map((f) => ({ ranges: f.ranges, hash: f.hash })) });
+              installed();
               return;
             }
             if (!out?.module) {
@@ -521,7 +543,10 @@ export class AotOptimizer extends EventTarget {
             // Installed as soon as it compiled, before the cache write: the
             // session runs it even if the write then fails (quota).
             this.install?.(region);
+            installed();
+            const p0 = performance.now();
             const stored = await session.put([{ key: unit.key, bytes, meta: { members: unit.members.length, translated: result.fragments.length, entries, ranges } }]);
+            this.pipelineStats.putMs += performance.now() - p0;
             if (this.cancelled) return; // the cache refused the write as cancelled: no verdict
             const reason = stored.failed?.[0]?.reason ?? null;
             if (reason === "quota") wait = "quota";
@@ -532,6 +557,8 @@ export class AotOptimizer extends EventTarget {
             }
           }
         }
+        installed(); // nothing installed (refused, deferred): the next one may
+        await prev.done; // and it still counts in order
         if (wait) {
           if (await this.defer(session, unit, wait)) refused.add(unit.key);
           else deferred++;
@@ -548,13 +575,20 @@ export class AotOptimizer extends EventTarget {
       // A finishing step that throws (a failed blacklist or attempts write)
       // is reported, never left as an unhandled rejection, and every way out
       // of the loop waits for the last one.
-      const schedule = (unit, result) => finish(unit, result).catch((error) => {
-        this.emit("optimization-error", { message: `module ${unit.key}: ${error?.message || error}`, fatal: false });
-      });
+      const schedule = (unit, result, prev) => {
+        let installed;
+        const installedP = new Promise((r) => { installed = r; });
+        const done = finish(unit, result, prev, installed).catch((error) => {
+          this.emit("optimization-error", { message: `module ${unit.key}: ${error?.message || error}`, fatal: false });
+        }).finally(() => installed());
+        return { installed: installedP, done };
+      };
+      // the finishing steps in flight, oldest first (at most pipelineDepth)
+      const inFlight = [];
       try {
         for (let n = 0; ; n++) {
           if (n >= todo.length) {
-            await finishing; // its stale marks are appended below
+            await finishing.done; // its stale marks are appended below
             for (const u of this.regions) if (this.stale.has(u.key) && !queued.has(u.key)) { queued.add(u.key); todo.push(u); }
           }
           if (n >= todo.length || this.cancelled) break;
@@ -562,16 +596,20 @@ export class AotOptimizer extends EventTarget {
           this.cursor = n + 1;
           this.stale.delete(unit.key);
           const result = await this.translateUnit(unit);
-          await finishing;
+          const w0 = performance.now();
+          while (inFlight.length >= this.pipelineDepth) await inFlight.shift();
+          this.pipelineStats.finishWaitMs += performance.now() - w0;
           if (!result || this.cancelled) break;
           if (result.notReady) {
+            await finishing.done;
             this.emit("optimization-error", { message: "the core is not ready to translate; resumed at the next launch", fatal: false });
             return;
           }
-          finishing = schedule(unit, result);
+          finishing = schedule(unit, result, finishing);
+          inFlight.push(finishing.done);
         }
       } finally {
-        await finishing;
+        await finishing.done;
         this.todo = null;
       }
       if (!this.cancelled) {
