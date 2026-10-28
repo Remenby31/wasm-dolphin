@@ -2488,6 +2488,38 @@ test("0189: chaining into fragments runs like the interpreter across modules, an
   });
 });
 
+test("0189 without 0187's cache: chaining into fragments still runs like the interpreter", { skip: fragmentsSkip }, () => {
+  withMask(PRODUCTION_DISABLE_MASK | FRAGMENTS, () => {
+    for (const [program, text] of [[CALLS, CALL_TEXT], [elseProgram(30), ELSE_TEXT]]) {
+      installFragments(program, text);
+      const reference = runCall(program.labels.main, { regions: false });
+      const got = runCall(program.labels.main, { regions: true });
+      assert.ok(got.ran > 0, "regions ran");
+      assert.deepEqual(got.state, reference.state);
+      assert.equal(got.downcount, reference.downcount);
+    }
+  });
+});
+
+test("0189: slots released by dropped regions and reused by others are never chained into from the cache", { skip: fragmentsSkip }, () => {
+  withMask(PRODUCTION_DISABLE_MASK | CHAIN_CACHE | FRAGMENTS, () => {
+    const other = elseProgram(30);
+    installFragments(CALLS, CALL_TEXT);
+    const callsReference = runCall(CALLS.labels.main, { regions: false });
+    runCall(CALLS.labels.main, { regions: true }); // fills the cache with CALLS's slots
+    const free = () => globalThis._dolphinFreeTableSlots?.length ?? 0;
+    core.module._DolphinWeb_AotForgetRegionsForTest(); // CALLS's slots released
+    const released = free();
+    installFragments(other, ELSE_TEXT); // the other program's fragments take them
+    assert.ok(free() < released, `released slots reused (${released} -> ${free()})`);
+    const calls = runCall(CALLS.labels.main, { regions: true });
+    assert.equal(calls.ran, 0, "no region left for CALLS");
+    assert.deepEqual(calls.state, callsReference.state, "CALLS never enters the other program's fragments");
+    const reference = runCall(other.labels.main, { regions: false });
+    assert.deepEqual(runCall(other.labels.main, { regions: true }).state, reference.state);
+  });
+});
+
 test("0189 off: modules carry no entry -> fragment section", () => {
   const f = { entry: 0x80003000, entries: [0x80003000], code: Uint8Array.of(0x00, 0x41, 0x00, 0x0b), relocs: [] };
   const off = assembleRegion([f], { helpers: HELPER_SIGNATURES, pcOffset: 0, memoryPages: 1 });
