@@ -10,7 +10,7 @@
 //
 //   node harness/probes/race-perf.mjs --iso disc.iso --state scene.sav --port N
 //     [--baseline <git ref | dir>] [--candidate <git ref | dir>]   (default: this tree)
-//     [--config wgpu | --query "..."] [--warmup 25] [--secs 20]
+//     [--config wgpu | --query "..."] [--phase steady|postload] [--warmup 25] [--secs 20]
 //     [--runs 4 (even with --baseline)] [--min-pairs 4] [--hold KeyX] [--warm]
 //     [--max-load L] [--load-wait 300] [--lock-wait 1800]
 //     [--counters [--counter-events frontend|e1,e2 | macOS: delivery|discarded|discarded_indirect|bottlenecks]] [--pcsample [periodMs] [--pc-raw]] [--symbols functions.json] [--out dir]
@@ -475,6 +475,25 @@ export async function measure(session, o) {
 
 // Headroom counters (0113) and the core ticks, read together; reset >= 0
 // zeroes and turns the counters on.
+// The window's phase after the state load. On the DGX Spark the first
+// ~15-20 s after a load are a transient (regions installing, pipelines and
+// GPU caches cold, the replay pump busy): 5 s after the load it gave 23-38
+// pictures a second, ~200 ms holes and 11-21 ms of GPU per present, 20 s
+// after it 60, none and 3 ms (2026-10-28, x11-bis-oldnew-w20); a state load
+// 2.5 s earlier (#325) then looked like a 37 -> 24 regression. steady: the
+// window from STEADY_MIN_WARMUP s on (default warmup 25, window 20); postload:
+// the transient itself (default warmup 0, window 15). Without --phase, the
+// warmup says which (and --display under STEADY_MIN_WARMUP is warned about).
+export const STEADY_MIN_WARMUP = 20;
+export function windowPhase({ phase = null, warmup = null, secs = null, display = false, warn = () => {} } = {}) {
+  if (phase != null && !["steady", "postload"].includes(phase)) throw new Error(`--phase ${phase}: steady or postload`);
+  if (phase === "postload") return { phase, warmup: warmup ?? 0, secs: secs ?? 15 };
+  const w = warmup ?? 25;
+  if (phase === "steady" && w < STEADY_MIN_WARMUP) throw new Error(`--phase steady --warmup ${w}: the first ${STEADY_MIN_WARMUP} s after the load are the post-load transient (--phase postload measures it)`);
+  if (phase == null && w < STEADY_MIN_WARMUP && display) warn(`--warmup ${w} with --display: the window is in the post-load transient (the first ~${STEADY_MIN_WARMUP} s); --phase postload to measure it on purpose, --warmup ${STEADY_MIN_WARMUP}+ for the steady state`);
+  return { phase: w < STEADY_MIN_WARMUP ? "postload" : "steady", warmup: w, secs: secs ?? 20 };
+}
+
 // --worker-set / --baseline-worker-set: 'validationSetX={json};validationSetY={json}'.
 export function workerSetsOf(spec, flag) {
   if (spec == null || spec === "") return [];
@@ -761,7 +780,7 @@ async function main() {
       iso: { type: "string" }, state: { type: "string" },
       baseline: { type: "string" }, candidate: { type: "string" },
       config: { type: "string", default: "wgpu" }, query: { type: "string" },
-      runs: { type: "string", default: "4" }, "min-pairs": { type: "string" }, "load-wait": { type: "string", default: "300" }, "calm-wait": { type: "string" }, warmup: { type: "string", default: "25" }, secs: { type: "string", default: "20" },
+      runs: { type: "string", default: "4" }, "min-pairs": { type: "string" }, "load-wait": { type: "string", default: "300" }, "calm-wait": { type: "string" }, warmup: { type: "string" }, secs: { type: "string" }, phase: { type: "string" },
       "emulated-window": { type: "string" }, "emulated-warmup": { type: "string" }, "emulated-poll-ms": { type: "string", default: "100" },
       hold: { type: "string", default: "KeyX" }, warm: { type: "boolean", default: false },
       "max-load": { type: "string" }, "lock-wait": { type: "string", default: "1800" },
@@ -773,7 +792,7 @@ async function main() {
   });
   // A homebrew boots into its workload: no savestate needed (CI bench).
   if (!values.iso || !values.port || (!values.state && !isHomebrew(path.resolve(values.iso)))) {
-    throw new Error("usage: race-perf.mjs --iso disc.iso --state scene.sav --port N (or HARNESS_PORT) [--baseline ref|dir] [--candidate ref|dir] [--runs 4] [--warmup 25] [--secs 20] [--warm] [--max-load L] [--pcsample 0.25]");
+    throw new Error("usage: race-perf.mjs --iso disc.iso --state scene.sav --port N (or HARNESS_PORT) [--baseline ref|dir] [--candidate ref|dir] [--runs 4] [--phase steady|postload] [--warmup 25] [--secs 20] [--warm] [--max-load L] [--pcsample 0.25]");
   }
   const iso = path.resolve(values.iso), state = values.state ? path.resolve(values.state) : null;
   for (const f of [iso, state].filter(Boolean)) if (!existsSync(f)) throw new Error(`not found: ${f}`);
@@ -818,12 +837,12 @@ async function main() {
     // (the cost of the CPU<->GPU coupling); an upper bound, never a KPI.
     decoupledUnlimited: values["decoupled-unlimited"] === true,
     minPairs: values["min-pairs"] ? num(values, "min-pairs", { min: 2, int: true }) : Math.min(runs, 4),
-    warmup: num(values, "warmup", { min: 0 }), secs: num(values, "secs", { min: 2, int: true }),
+    ...windowPhase({ phase: values.phase, warmup: values.warmup == null ? null : num(values, "warmup", { min: 0 }), secs: values.secs == null ? null : num(values, "secs", { min: 2, int: true }), display: values.display, warn: (m) => console.warn(`[race-perf] ${m}`) }),
     // --emulated-window S: S guest seconds after --emulated-warmup W guest
     // seconds (default: --warmup), ticks polled every --emulated-poll-ms.
     ...(values["emulated-window"] ? {
       emulatedWindow: num(values, "emulated-window", { min: 1 }),
-      emulatedWarmup: values["emulated-warmup"] == null ? num(values, "warmup", { min: 0 }) : num(values, "emulated-warmup", { min: 0 }),
+      emulatedWarmup: values["emulated-warmup"] == null ? (values.warmup == null ? 25 : num(values, "warmup", { min: 0 })) : num(values, "emulated-warmup", { min: 0 }),
       emulatedPollMs: num(values, "emulated-poll-ms", { min: 10, int: true })
     } : {}),
     hold: values.hold || null, warm: values.warm,
@@ -1047,7 +1066,7 @@ async function main() {
     // refuses such a result: an upper bound, not a KPI).
     ...(o.decoupledUnlimited ? { decoupledUnlimited: Object.keys(sides).filter((n) => pacingExpectation(sides[n].query ?? o.query, { decoupledUnlimited: true }) === "decoupled") } : {}),
     chrome,
-    iso: path.basename(iso), state: steps ? null : state && path.basename(state), steps: steps ? path.basename(values.steps) : null, query: o.query, baselineQuery: sides.baseline?.query ?? null, warmupSec: o.warmup, secs: o.secs,
+    iso: path.basename(iso), state: steps ? null : state && path.basename(state), steps: steps ? path.basename(values.steps) : null, query: o.query, baselineQuery: sides.baseline?.query ?? null, phase: o.phase, warmupSec: o.warmup, secs: o.secs,
     // Window in guest seconds (null: host seconds, --secs).
     emulatedWindow: o.emulatedWindow ? { secs: o.emulatedWindow, warmup: o.emulatedWarmup, pollMs: o.emulatedPollMs } : null, hold: o.hold, maxLoad: o.maxLoad,
     sides: Object.fromEntries(Object.entries(sides).map(([n, s]) => [n, s.label])),
