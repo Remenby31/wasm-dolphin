@@ -73,6 +73,7 @@ export function planApploader({ address, entry, bytes }, options = {}) {
 
 // Disc read from a File/Blob in the browser.
 export function fileReader(file) {
+  // A remote disc's descriptor (measurements): read by ranges, loopback only.
   const blob = asDiscBlob(file);
   return async (offset, length) => new Uint8Array(await blob.slice(offset, offset + length).arrayBuffer());
 }
