@@ -97,6 +97,9 @@ function streams(words, mask, seed) {
       if (useRegion && core.pc() === ORACLE_CODE) { core.runRegion(handle); continue; }
       assert.equal(core.interpretOne(), 0);
     }
+    // Every whole burst out (the JIT left them pending): both sides then
+    // hold the same < 32 bytes, so the pipe's pointers in the state agree.
+    core.module._DolphinWeb_GatherPipeForTest(2, 0, 0);
     const end = core.module._DolphinWeb_GatherPipeFifoForTest() >>> 0;
     const sent = Array.from(core.ram().slice(FIFO_BASE, end));
     return { state: core.state(), stream: sent.concat(pipe().bytes), bursts: sent.length / 32 };
