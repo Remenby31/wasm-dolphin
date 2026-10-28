@@ -122,6 +122,10 @@ export function multiRaceArgs({ iso, state, runs, armDirs, lanes = MULTI_LANES, 
 // "n" or "n-m" items, disjoint, on the bench's 20 cores and off node's
 // 10-14 (spark-multi.sh). The default: MULTI_LANES for three arms.
 export const MULTI_NODE_CPUS = [10, 11, 12, 13, 14];
+// The GB10's Cortex-X925 (3.9 GHz): 5-9 and 15-19; 0-4 and 10-14 are
+// Cortex-A725 (2.8 GHz, sysfs read on 2026-10-28). Every lane on X925 cores:
+// a lane on A725 against one on X925 measures the cores, not the arms.
+export const MULTI_BIG_CPUS = [5, 6, 7, 8, 9, 15, 16, 17, 18, 19];
 export function multiLanes(spec, arms) {
   if (spec == null) {
     if (arms !== MULTI_LANES.split(";").length) throw new Error(`--multi with ${arms} arms: --multi-lanes "<cpus>;<cpus>…" (one lane per arm; the default has ${MULTI_LANES.split(";").length})`);
@@ -138,6 +142,7 @@ export function multiLanes(spec, arms) {
   if (all.some((c) => c < 0 || c > 19)) throw new Error(`--multi-lanes ${spec}: the bench has cpus 0-19`);
   if (new Set(all).size !== all.length) throw new Error(`--multi-lanes ${spec}: the lanes share cpus`);
   if (all.some((c) => MULTI_NODE_CPUS.includes(c))) throw new Error(`--multi-lanes ${spec}: cpus 10-14 run node (spark-multi.sh)`);
+  if (all.some((c) => !MULTI_BIG_CPUS.includes(c))) throw new Error(`--multi-lanes ${spec}: cpus 0-4 are Cortex-A725 (2.8 GHz); every lane on the X925 cores 5-9 and 15-19`);
   if (new Set(lanes.map((l) => l.length)).size !== 1) throw new Error(`--multi-lanes ${spec}: lanes of different sizes`);
   return lanes.map((l) => l.join(",")).join(";");
 }
@@ -242,7 +247,7 @@ export function benchRaceArgs(rawArgs, { keepVideo = false } = {}) {
 // The summary as the Mac keeps it: marked as measured on the bench, never
 // on this Mac's stock Chrome (lib/kpi.mjs leaves it out of trunk's rows).
 export function stampSummary(summary, bench) {
-  return { ...summary, host: bench.host, chromium: "playwright", bench };
+  return { ...summary, host: bench.host, chromium: "playwright", bench, ...(bench.screen ? { screen: bench.screen } : {}) };
 }
 
 // --headed :N: Chrome shown on the Spark's bare Xorg (salon-xorg.service, a
@@ -271,6 +276,11 @@ export function checkLane(lane, { screen = false } = {}) {
   if (!["auto", "a", "b"].includes(lane)) throw new Error(`--lane ${lane}: a or auto (b with --screen)`);
 }
 export const SCREEN_NOTE = "screening in lane b, beside another pair: never a conclusion";
+// A multi on two lanes (--multi-lanes with two core sets): screening too
+// (residual sigma 1.05 %, an effect of ~2 % in 6 runs; decisive pairs are
+// sequential in lane a).
+export const MULTI_SCREEN_NOTE = "screening: a multi on two lanes (residual sigma ~1 %, effects of ~2 %), never a conclusion; decisive pairs run sequentially in lane a";
+export const multiScreen = (lanes) => (String(lanes).split(";").length === 2 ? MULTI_SCREEN_NOTE : null);
 
 // --noise <date>/<name>: drop-meter's A/A already on the bench, as that run's
 // summary there (a Mac path after -- would not exist on the bench).
@@ -478,14 +488,18 @@ async function build(host, ref) {
 }
 
 // --queue: the bench's tickets, oldest first, with the time each has waited
-// and its estimated start (spark-queue.mjs list --eta), read only. A ticket
-// waiting past QUEUE_STARVED_MIN is flagged: the judge reorders (move).
+// and its estimated start (spark-queue.mjs list --eta). It changes no
+// ticket's place, but it pushes this harness tree to the bench and the
+// listing drops dead tickets as any queue read does. A ticket waiting past
+// QUEUE_STARVED_MIN is flagged: the judge reorders (move); a held one (its
+// lane's cores busy, stepped aside on its own) is not.
 export const QUEUE_STARVED_MIN = 60;
 export function queueRows(tickets, now = Date.now()) {
   return tickets.map((t) => {
     const waited = Math.round((now - Date.parse(t.at)) / 60000);
-    const state = t.lane && t.lane !== "none" ? `running in ${t.lane}` : t.holdUntil && Date.parse(t.holdUntil) > now ? "held (cores busy)" : "waiting";
-    const starved = !t.lane && waited >= QUEUE_STARVED_MIN;
+    const isHeld = !t.lane && t.holdUntil && Date.parse(t.holdUntil) > now;
+    const state = t.lane && t.lane !== "none" ? `running in ${t.lane}` : isHeld ? "held (cores busy)" : "waiting";
+    const starved = !t.lane && !isHeld && waited >= QUEUE_STARVED_MIN;
     return `${starved ? "STARVED " : ""}${t.kind} ${t.name}${t.owner ? ` (${t.owner})` : ""} [wants ${t.lanes ?? "?"}] ${state}, ${waited} min since queued` + (t.lane ? `, ends in ~${t.endsIn} min` : `, starts in ~${t.startsIn} min`);
   });
 }
@@ -669,13 +683,14 @@ async function multi(host, values, rawPositionals) {
     host: "spark", mode: "multi", hostname: ssh(host, "hostname").out.trim(), at: new Date().toISOString(),
     harness: { from: REPO_ROOT, key: path.basename(harness.dest) },
     arms: specs.map((s) => ({ spec: s, dest: pushed.get(s).dest, source: pushed.get(s).source ?? null })),
-    raceArgs,
+    raceArgs, ...(multiScreen(lanes) ? { screen: multiScreen(lanes) } : {}),
     sceneProtocol: sceneCheck.protocol ? { scene, ...sceneCheck.protocol, warnings: sceneCheck.warnings } : null
   };
   ssh(host, multiLaunchCommand({ harnessDir: abs(harness.dest), outDir, raceArgs }));
   mkdirSync(path.join(MEASURES, date, name), { recursive: true });
   writeFileSync(path.join(MEASURES, date, name, "spark.json"), JSON.stringify(meta, null, 1) + "\n");
   console.log(`[spark-run] multi started on ${host}: ${date}/${name}, arms ${specs.map((s, i) => `${i}=${s}`).join(" ")} (waits for the whole bench in the queue)`);
+  if (meta.screen) console.log(`[spark-run] ${meta.screen}`);
   if (values.detach) {
     console.log(`[spark-run] detached; bring it back with: node harness/remote/spark-run.mjs --fetch ${date}/${name}`);
     return 0;

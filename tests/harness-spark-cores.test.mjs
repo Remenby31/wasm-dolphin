@@ -152,12 +152,14 @@ test("spark-cores topology: one line per run of cpus of the same kind, read from
     sys[`${b}/regs/identification/midr_el1`] = cpu < 2 ? "0x411fd850" : "0x411fd870";
     sys[`${b}/topology/cluster_id`] = cpu < 2 ? "1" : "0";
   }
-  const cpus = cpuTopology((p) => sys[p] ?? null);
-  assert.equal(cpus.length, 4, "stops at the first cpu sysfs does not have");
+  // cpu 4 listed but offline (no sysfs files): a line of "?", the list goes on
+  const cpus = cpuTopology((p) => sys[p] ?? null, () => [3, 2, 1, 0, 4]);
+  assert.equal(cpus.length, 5, "every cpu sysfs lists, an unreadable one included");
   assert.deepEqual(cpus[0], { cpu: 0, midr: "0x411fd850", capacity: 1024, maxMhz: 3900, cluster: "1" });
   assert.deepEqual(topologyLines(cpus), [
     "0-1: midr 0x411fd850 capacity 1024 max 3900 MHz cluster 1",
-    "2-3: midr 0x411fd870 capacity 780 max 2800 MHz cluster 0"
+    "2-3: midr 0x411fd870 capacity 780 max 2800 MHz cluster 0",
+    "4: midr ? capacity ? max ? MHz cluster ?"
   ]);
   assert.deepEqual(topologyLines([{ cpu: 5, midr: null, capacity: null, maxMhz: null, cluster: null }]), ["5: midr ? capacity ? max ? MHz cluster ?"]);
   for (const f of ["spark-race.sh", "spark-multi.sh"]) {

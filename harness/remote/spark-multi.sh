@@ -2,8 +2,9 @@
 # Copyright 2026 wasm-dolphin contributors
 # SPDX-License-Identifier: MIT
 # Spark side of spark-run.mjs --multi: one race-multi (every arm at once,
-# one lane of 3 big cores each), detached from the ssh session that started
-# it. Run from a pushed harness tree under ~/salon-bench/harness.
+# one lane of X925 cores each: three of 3 cores by default, or two of 5 with
+# --multi-lanes "15-19;5-9"), node on 10-14, detached from the ssh session
+# that started it. Run from a pushed harness tree under ~/salon-bench/harness.
 #   spark-multi.sh <out dir> -- <race-multi args…>
 # Writes <out dir>.log (all output), <out dir>.lane and <out dir>.exit
 # (race-multi's code).

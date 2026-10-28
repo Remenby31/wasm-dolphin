@@ -343,6 +343,9 @@ test("spark-run --multi-lanes: one lane per arm, disjoint, off node's cores; the
   assert.throws(() => multiLanes("15-19;17-21", 2), /cpus 0-19/);
   assert.throws(() => multiLanes("15-19;5-9,15", 2), /share cpus|different sizes/);
   assert.throws(() => multiLanes("10-14;5-9", 2), /cpus 10-14 run node/);
+  // review of #345: an A725 lane (0-4, 2.8 GHz) against an X925 one measures the cores
+  assert.throws(() => multiLanes("15-19;0-4", 2), /cpus 0-4 are Cortex-A725/);
+  assert.throws(() => multiLanes("5,6,7;15,16,17;2,3,4", 3), /Cortex-A725/);
   assert.throws(() => multiLanes("15-19;5-8", 2), /different sizes/);
   assert.throws(() => multiLanes("a;b", 2), /cpus as n or n-m/);
   const args = multiRaceArgs({ iso: "/d.iso", state: "/s.sav", runs: 6, armDirs: ["/a", "/b"], lanes: "15,16,17,18,19;5,6,7,8,9" });
@@ -363,6 +366,9 @@ test("spark-run --queue: each ticket's wait and estimate, a waiting ticket past 
     "STARVED pair late (wt-y) [wants ?] waiting, 90 min since queued, starts in ~7 min",
     "pair held [wants ?] held (cores busy), 5 min since queued, starts in ~20 min"
   ]);
+  // review of #345: a ticket that stepped aside on its own (cores busy) is not starved
+  const [heldLong] = queueRows([{ kind: "multi", name: "aa", at: "2026-10-28T10:00:00Z", lane: null, holdUntil: "2026-10-28T12:01:00Z", startsIn: 30 }], now);
+  assert.equal(heldLong, "multi aa [wants ?] held (cores busy), 120 min since queued, starts in ~30 min");
 });
 
 // --probe (2026-10-28): drop-meter and replay-gates run on the bench like
@@ -465,3 +471,19 @@ test("spark queue: a lane b job backfills past an older whole-bench job that can
   const oldRunning = t(1, "pair", "a", { lane: "a", estMin: 20 });
   assert.match(nextStep(short, [oldRunning, pairA, multi, short], busy, now).wait, /multi3 arrived first/);
 });
+
+// Review of #345: a multi on two lanes (residual sigma 1.05 %, A/A
+// multi2-aa-5x5-c) is stamped as screening in spark.json and the summary.
+test("spark-run --multi on two lanes: stamped as screening, three lanes not", async () => {
+  const { multiScreen, MULTI_SCREEN_NOTE, stampSummary } = await import("../harness/remote/spark-run.mjs");
+  assert.equal(multiScreen("15,16,17,18,19;5,6,7,8,9"), MULTI_SCREEN_NOTE);
+  assert.equal(multiScreen("5,6,7;15,16,17;8,9,19"), null);
+  assert.match(MULTI_SCREEN_NOTE, /^screening: .*never a conclusion/);
+  const s = stampSummary({ probe: "race-multi" }, { host: "spark", screen: MULTI_SCREEN_NOTE });
+  assert.equal(s.screen, MULTI_SCREEN_NOTE);
+  assert.equal("screen" in stampSummary({ probe: "race-multi" }, { host: "spark" }), false);
+  const src = readFileSync(new URL("../harness/remote/spark-run.mjs", import.meta.url), "utf8");
+  assert.match(src, /raceArgs, \.\.\.\(multiScreen\(lanes\) \? \{ screen: multiScreen\(lanes\) \} : \{\}\),/, "spark.json carries it");
+  assert.match(src, /if \(meta\.screen\) console\.log\(`\[spark-run\] \$\{meta\.screen\}`\);/, "said at the launch");
+});
+
