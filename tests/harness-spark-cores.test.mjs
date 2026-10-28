@@ -152,12 +152,14 @@ test("spark-cores topology: one line per run of cpus of the same kind, read from
     sys[`${b}/regs/identification/midr_el1`] = cpu < 2 ? "0x411fd850" : "0x411fd870";
     sys[`${b}/topology/cluster_id`] = cpu < 2 ? "1" : "0";
   }
-  const cpus = cpuTopology((p) => sys[p] ?? null);
-  assert.equal(cpus.length, 4, "stops at the first cpu sysfs does not have");
+  // cpu 4 listed but offline (no sysfs files): a line of "?", the list goes on
+  const cpus = cpuTopology((p) => sys[p] ?? null, () => [3, 2, 1, 0, 4]);
+  assert.equal(cpus.length, 5, "every cpu sysfs lists, an unreadable one included");
   assert.deepEqual(cpus[0], { cpu: 0, midr: "0x411fd850", capacity: 1024, maxMhz: 3900, cluster: "1" });
   assert.deepEqual(topologyLines(cpus), [
     "0-1: midr 0x411fd850 capacity 1024 max 3900 MHz cluster 1",
-    "2-3: midr 0x411fd870 capacity 780 max 2800 MHz cluster 0"
+    "2-3: midr 0x411fd870 capacity 780 max 2800 MHz cluster 0",
+    "4: midr ? capacity ? max ? MHz cluster ?"
   ]);
   assert.deepEqual(topologyLines([{ cpu: 5, midr: null, capacity: null, maxMhz: null, cluster: null }]), ["5: midr ? capacity ? max ? MHz cluster ?"]);
   for (const f of ["spark-race.sh", "spark-multi.sh"]) {
@@ -165,3 +167,13 @@ test("spark-cores topology: one line per run of cpus of the same kind, read from
     assert.match(sh, /node harness\/remote\/spark-cores\.mjs topology/, `${f} logs the cores' kinds`);
   }
 });
+
+// 2026-10-28: the multi A/A ran with evals on lane b's cores; a multi now
+// waits for both lanes' cores to be free, as a pair waits for its own.
+test("spark-multi asks the queue for both lanes' cores free, and gives up after 30 min busy", async () => {
+  const sh = await readFile(new URL("../harness/remote/spark-multi.sh", import.meta.url), "utf8");
+  assert.match(sh, /wait --pid \$\$ --kind multi --name "\$\(basename "\$out"\)" \\\n    --cores "a=15-19,10-14" --cores "b=5-9,0-4" --cores-out "\$out\.cores"/);
+  assert.match(sh, /3\) echo "\[spark-multi\] the lanes' cores stayed busy for 30 min: no run"; echo 4 > "\$out\.exit"; exit 4 ;;/);
+  assert.ok(sh.indexOf("trap 'node harness/remote/spark-queue.mjs done") < sh.indexOf("--kind multi"), "the ticket goes even when the wait gives up");
+});
+

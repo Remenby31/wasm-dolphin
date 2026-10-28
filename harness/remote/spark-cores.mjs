@@ -110,19 +110,18 @@ export async function checkCores({ cpus, exclude = null, threshold = 50, ms = 10
 // (2026-10-28): the bench logs this with each run so a lane is never
 // compared to a slower kind of core unknowingly.
 const sysRead = (path) => { try { return readFileSync(path, "utf8").trim(); } catch { return null; } };
-export function cpuTopology(read = sysRead) {
-  const out = [];
-  for (let cpu = 0; ; cpu++) {
+// The cpus sysfs lists (cpuN directories), each read whatever the others
+// give: an offline or partial one is a line of "?", never the end of the list.
+const sysCpus = () => { try { return readdirSync("/sys/devices/system/cpu").map((d) => /^cpu(\d+)$/.exec(d)?.[1]).filter(Boolean).map(Number); } catch { return []; } };
+export function cpuTopology(read = sysRead, list = sysCpus) {
+  return list().sort((a, b) => a - b).map((cpu) => {
     const base = `/sys/devices/system/cpu/cpu${cpu}`;
-    const present = read(`${base}/topology/core_id`) ?? read(`${base}/cpu_capacity`);
-    if (present === null) break;
     const maxKhz = Number(read(`${base}/cpufreq/cpuinfo_max_freq`));
-    out.push({
+    return {
       cpu, midr: read(`${base}/regs/identification/midr_el1`), capacity: Number(read(`${base}/cpu_capacity`)) || null,
       maxMhz: maxKhz > 0 ? Math.round(maxKhz / 1000) : null, cluster: read(`${base}/topology/cluster_id`) ?? read(`${base}/topology/physical_package_id`)
-    });
-  }
-  return out;
+    };
+  });
 }
 
 // Consecutive cpus of the same kind as "a-b: …" lines.
