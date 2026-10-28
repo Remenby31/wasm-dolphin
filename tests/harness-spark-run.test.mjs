@@ -346,6 +346,11 @@ test("spark-run --probe drop-meter|replay-gates: --headed, an explicit wgpu --qu
   const gates = await readFile(new URL("../harness/probes/replay-gates.mjs", import.meta.url), "utf8");
   assert.doesNotMatch(gates, /baseline-query|baseline: \{/, "both sides from one tree: no --baseline");
   assert.match(gates, /process\.exit\(failed\.length \|\| empty\.length \? 1 : 0\)/);
+  // review of 768b7be1: a reading needs the tracker on and presses seen
+  assert.match(gates, /!v\.input\?\.enabled \|\| !v\.input\.visibleCount/);
+  assert.match(gates, /!summary\.input\[side\]\.presses/);
+  assert.match(run, /probe === "replay-gates" && \(values\.baseline \|\| splitEquals\(positionals\)\.includes\("--baseline-query"\)\)\) throw/);
+  assert.match(run, /if \(summary\.probe === "replay-gates" \|\| summary\.probe === "drop-meter"\) \{/, "race-perf keeps its paired-change lines");
 });
 
 test("spark-queue estimates: replay-gates and drop-meter by their own shape", async () => {

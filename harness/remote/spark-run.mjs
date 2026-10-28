@@ -447,7 +447,7 @@ function fetchResult(host, { date, name, meta, exit }) {
       if (summary.cycleEffects) console.log(`[spark-run] host CYCLES per guest cycle vs arm 0 (lower is better, decides when it parts from the instructions): ${show(summary.cycleEffects)}; residual ${summary.cycleEffects.residualSd} %`);
       return exit;
     }
-    if (summary.probe === "replay-gates" || summary.probe === "drop-meter" || !summary.candidate?.cold?.speed) {
+    if (summary.probe === "replay-gates" || summary.probe === "drop-meter") {
       console.log(`[spark-run] ${summary.probe ?? "summary"} -> ${local}`);
       return exit;
     }
@@ -512,6 +512,8 @@ async function main() {
   headedEnv(values.headed, values.xauth, { headless: values.headless }); // refuses a bad display before anything is pushed
   const bench = benchRaceArgs(positionals, { keepVideo: values["keep-video"] || Boolean(values.headed) });
   if (values.probe !== "race-perf") checkPresentationProbe(values.probe, positionals, bench.args, values.headed);
+  // replay-gates serves both sides from --candidate: refused here, not after the queue
+  if (values.probe === "replay-gates" && (values.baseline || splitEquals(positionals).includes("--baseline-query"))) throw new Error("--probe replay-gates: one tree (--candidate) serves both sides, --extra makes the candidate; no --baseline or --baseline-query");
   for (const s of bench.swaps) console.log(`[spark-run] ${s.option} on the bench: ${s.to} (was ${s.from})`);
   requireXfbSwitch(host, bench.args, [candidate, ...(baseline ? [baseline] : [])]);
   const raceArgs = [

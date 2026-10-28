@@ -116,7 +116,9 @@ mkdirSync(o.out, { recursive: true });
 writeFileSync(path.join(o.out, "summary.json"), JSON.stringify(summary, null, 1) + "\n");
 writeFileSync(path.join(o.out, "visits.json"), JSON.stringify(visits.map(({ frames, ...v }) => v), null, 1) + "\n");
 // a gate that measured nothing never passes
-const failed = visits.filter((v) => v.error || !v.input || VIS.some((i) => !v.frames[i]?.b64));
-const empty = ["base", "candidate"].filter((side) => !summary.input[side].visits || VIS.some((i) => !summary.picture[i][side === "base" ? "baseVsBase" : "candidateVsBase"].length));
+// __causalTelemetry.input.visible is never null (without the tracker it is
+// {enabled: false, visibleCount: 0}): a visit counts only with presses seen
+const failed = visits.filter((v) => v.error || !v.input?.enabled || !v.input.visibleCount || VIS.some((i) => !v.frames[i]?.b64));
+const empty = ["base", "candidate"].filter((side) => !summary.input[side].visits || !summary.input[side].presses || VIS.some((i) => !summary.picture[i][side === "base" ? "baseVsBase" : "candidateVsBase"].length));
 if (failed.length || empty.length) log(`FAILED: ${failed.length} visit(s) without a full reading${empty.length ? `, no data for ${empty.join(" and ")}` : ""}`);
 process.exit(failed.length || empty.length ? 1 : 0);
