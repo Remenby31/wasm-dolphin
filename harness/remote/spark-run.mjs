@@ -112,6 +112,11 @@ export function multiRaceArgs({ iso, state, runs, armDirs, lanes = MULTI_LANES, 
   return ["--iso", iso, "--state", state, "--runs", String(runs), ...armDirs.flatMap((d) => ["--arm", d]), "--lanes", lanes, ...MULTI_ARGS, "--query", MULTI_QUERY, ...extra];
 }
 
+// Two lanes are for screening, not for a decision (A/A multi2-aa-5x5-c,
+// 2026-10-28): the lane 5-9 ran 7 % slower than 15-19 in both arms, and
+// after the lane correction the residual sigma was 1.05 % (sequential pairs
+// on lane a: 0.7-0.85 %), enough for an effect of ~2 % in 6 runs. The bench
+// log gives each cpu's kind ("cpus" lines, spark-cores.mjs topology).
 // --multi-lanes "15,16,17,18,19;5,6,7,8,9": one Chromium core set per arm
 // (race-multi wants as many lanes as arms; MULTI_LANES has three), each
 // "n" or "n-m" items, disjoint, on the bench's 20 cores and off node's
