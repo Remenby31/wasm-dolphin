@@ -166,5 +166,7 @@ test("a real server on the wildcard address blocks the harness's 127.0.0.1 serve
   const other = createServer((_, res) => res.end("other"));
   await new Promise((resolve) => other.listen(port, "0.0.0.0", resolve));
   t.after(() => other.close());
-  await assert.rejects(() => ensureServer({ port, root }), new RegExp(`port ${port} is busy: node \\(pid ${process.pid}\\)`));
+  // the holder is this process: its pid (lsof's command name is the
+  // thread's on Linux, "MainThread", and "node" on macOS)
+  await assert.rejects(() => ensureServer({ port, root }), new RegExp(`port ${port} is busy: \\S+ \\(pid ${process.pid}\\) on \\*:${port};`));
 });
