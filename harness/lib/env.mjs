@@ -23,6 +23,13 @@ export async function browserInfo(page) {
   });
 }
 
+// A probe's --max-load when none is given: a quarter of the cores (at least
+// 2), or none on the bench, where the gate computes its own (bench-load.mjs)
+// and an explicit --max-load only caps it.
+export function defaultMaxLoad(env = process.env) {
+  return env.SPARK_LANE_CPUS ? null : Math.max(2, os.cpus().length / 4);
+}
+
 export function loadLimit(maxLoad) {
   return Number.isFinite(maxLoad) && maxLoad > 0 ? maxLoad : os.cpus().length;
 }
@@ -30,11 +37,13 @@ export function loadLimit(maxLoad) {
 // The gate's reading: { load, limit, ok }. Off the bench, the 1-minute load
 // average against --max-load. On the DGX Spark bench (spark-race.sh exports
 // SPARK_LANE_CPUS), the lane's own cores free of other people's threads and
-// the machine under its background plus 5 per granted lane
-// (lib/bench-load.mjs): two lanes at once made a fixed --max-load wrong.
+// the machine under fixed bounds (lib/bench-load.mjs: a reference background
+// plus 5 per granted lane, an explicit --max-load only capping it): two lanes
+// at once made a fixed --max-load wrong.
 export function gateReader({ maxLoad, load = null, env = process.env } = {}) {
   if (!load && env.SPARK_LANE_CPUS) {
-    return async () => (await import("./bench-load.mjs")).benchRead();
+    // an explicit --max-load caps the computed limit (defaultMaxLoad: null on the bench)
+    return async () => (await import("./bench-load.mjs")).benchRead({ cap: maxLoad });
   }
   const limit = loadLimit(maxLoad);
   const read = load ?? (() => os.loadavg()[0]);
@@ -44,7 +53,7 @@ export function gateReader({ maxLoad, load = null, env = process.env } = {}) {
   };
 }
 
-const why = (g) => `load ${g.load} > ${g.limit}${g.laneBusy?.length ? `, lane ${g.lane} cores busy (${g.laneBusy.map((b) => `${b.comm} ${b.pct} % on ${b.cpu}`).join(", ")})` : ""}`;
+const why = (g) => `${g.over?.length ? g.over.join(", ") : `load ${g.load} > ${g.limit}`}${g.laneBusy?.length ? `, lane ${g.lane} cores busy (${g.laneBusy.map((b) => `${b.comm} ${b.pct} % on ${b.cpu}`).join(", ")})` : ""}`;
 
 // Wait (bounded) for the gate to open: the load under the limit (and, on the
 // bench, the lane's cores free).

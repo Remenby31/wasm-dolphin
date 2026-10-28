@@ -11,7 +11,7 @@
 //     --state <local .sav> [--name n] [--runs 6] [--lane auto|a|b] [--host spark] [--detach]
 //     [--keep-video] [--headed :2 [--xauth /run/salon-xorg/xauth] | --headless]
 //     [--probe race-perf | drop-meter | replay-gates]
-//     (drop-meter: --max-load 8 by default on the bench, see BENCH_DROP_MAX_LOAD) [--noise <date>/<drop-meter A/A on the bench>]
+//     (the load gate: lib/bench-load.mjs; a --max-load given only caps it) [--noise <date>/<drop-meter A/A on the bench>]
 //     [--lane b --screen: a screening run beside lane a's pair, never a conclusion]
 //     [-- <the probe's options: --query, --warmup, --secs, --max-load, …>]
 //   node harness/remote/spark-run.mjs --multi --baseline <ref|dir> --candidate <ref|dir> [--candidate <ref|dir>]
@@ -84,18 +84,6 @@ export function runId({ name, candidate, baseline, now = new Date() }) {
 // (PROGRAM.md: video=null is no faster there): so every query's wgpu
 // becomes null, its WebGPU presenter 2d; the rest of the query is kept.
 export const BENCH_LOCK_WAIT = 4 * 3600;
-// drop-meter's machine-load guard on the bench, unless the caller sets one:
-// its default (a quarter of the cores, 5 on the Spark) sits at the bench's
-// background load (kubelet, apiserver, weed: load1 5-6, 2026-10-28) and left
-// a drop-meter A/A without a single usable run (exit 3). The pair's own
-// cores are checked by spark-cores before the lane is granted, so the global
-// load only has to catch a real spike.
-export const BENCH_DROP_MAX_LOAD = 8;
-export function benchProbeDefaults(probe, args) {
-  if (probe !== "drop-meter" || args.some((a) => a === "--max-load" || a.startsWith("--max-load="))) return args;
-  return [...args, "--max-load", String(BENCH_DROP_MAX_LOAD)];
-}
-
 // --multi (validated on multi-aba-emu-0087b: A/A +0.04 %, residual 0.03 %).
 export const MULTI_LANES = "5,6,7;15,16,17;8,9,19";
 export const MULTI_QUERY = "core=upstream&video=null&presenter=2d&cpu=single&speed=1&wasmjit=1&jitwarmup=60&oc=1&aot=1";
@@ -552,7 +540,7 @@ async function main() {
   const raceArgs = [
     "--iso", abs(iso), ...(state ? ["--state", abs(state)] : []), "--runs", values.runs,
     "--candidate", abs(candidate.dest), ...(baseline ? ["--baseline", abs(baseline.dest)] : []),
-    ...benchNoiseArgs(values.noise, abs(`${BENCH}/results`)), ...benchProbeDefaults(values.probe, bench.args)
+    ...benchNoiseArgs(values.noise, abs(`${BENCH}/results`)), ...bench.args
   ];
   const outDir = abs(`${BENCH}/results/${date}/${name}`);
   const meta = {

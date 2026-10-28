@@ -8,9 +8,15 @@
 // Chromium and gave every run up (2026-10-28, seq-aa-lane-a). So:
 // - the lane's own cores: no thread of a process outside this job's tree
 //   above LANE_FOREIGN_PCT % of one of them (spark-cores busyOn, per thread);
-// - the whole machine, against a real spike only: load1 at most the
-//   background (runnable threads outside every granted job's tree) plus
-//   PER_LANE_LOAD per lane granted in the queue.
+// - the whole machine, against fixed bounds (never raised by what it should
+//   catch: a background counted into the limit let 40 unpinned foreign
+//   threads through, review of #342): load1 at most REFERENCE_BACKGROUND
+//   plus PER_LANE_LOAD per lane granted in the queue, never above the cores
+//   nor an explicit --max-load; the runnable threads outside every granted
+//   job's tree at most REFERENCE_BACKGROUND + BACKGROUND_MARGIN; all runnable
+//   threads at most the cores. load1 is a minute's average, the thread
+//   counts an instant (5 samples over a second): a spike shows in the latter
+//   before the former.
 // Off the bench (no SPARK_LANE_CPUS): null, the caller keeps its --max-load.
 import { readdirSync, readFileSync } from "node:fs";
 import os from "node:os";
@@ -19,21 +25,29 @@ import { readTickets } from "../remote/spark-queue.mjs";
 
 export const LANE_FOREIGN_PCT = 50;
 export const PER_LANE_LOAD = 5;
+// The Spark's own background with no job on it (kubelet, apiserver, weed):
+// load1 5-6, 2026-10-28.
+export const REFERENCE_BACKGROUND = 6;
+export const BACKGROUND_MARGIN = 6;
 
 export function benchLane(env = process.env) {
   if (!env.SPARK_LANE_CPUS) return null;
   return { lane: env.SPARK_LANE ?? null, cpus: env.SPARK_LANE_CPUS, list: parseCpuList(env.SPARK_LANE_CPUS) };
 }
 
+// Granted on this host (the queue's tickets carry their host).
+const granted = (tickets, host) => tickets.filter((t) => t.lane && t.lane !== "none" && t.host === host);
+
 // Lanes granted in the queue (a build or a multi holds both).
-export function grantedLanes(tickets) {
-  return new Set(tickets.filter((t) => t.lane && t.lane !== "none").flatMap((t) => t.lane.split(" "))).size;
+export function grantedLanes(tickets, host = os.hostname()) {
+  return new Set(granted(tickets, host).flatMap((t) => t.lane.split(" "))).size;
 }
 
-// The global limit: the background plus PER_LANE_LOAD per granted lane (at
-// least this job's own).
-export function benchLimit({ background, granted }) {
-  return Math.round((background + PER_LANE_LOAD * Math.max(1, granted)) * 10) / 10;
+// The load1 limit: REFERENCE_BACKGROUND plus PER_LANE_LOAD per granted lane
+// (at least this job's own), at most the cores and an explicit --max-load (cap).
+export function benchLimit({ granted, cores = os.cpus().length, cap = null }) {
+  const limit = Math.min(cores, REFERENCE_BACKGROUND + PER_LANE_LOAD * Math.max(1, granted), Number.isFinite(cap) && cap > 0 ? cap : Infinity);
+  return Math.round(limit * 10) / 10;
 }
 
 // Runnable (R) or uninterruptible (D) threads, each with its process: what
@@ -56,30 +70,45 @@ function runnable() {
   return { pids: out, parents };
 }
 
-// The background: runnable threads of processes outside every granted job's
-// tree (the jobs' shells are their tickets' pids), averaged over `samples`.
+// Runnable threads now, averaged over `samples`: all of them (total) and
+// those of processes outside every granted job's tree (background; the jobs'
+// shells are their tickets' pids).
 export async function measureBackground(tickets, { samples = 5, everyMs = 200 } = {}) {
-  let sum = 0;
+  let foreign = 0, all = 0;
   for (let i = 0; i < samples; i++) {
     const { pids, parents } = runnable();
     const ours = new Set();
-    for (const t of tickets.filter((x) => x.lane && x.lane !== "none" && x.host === os.hostname())) for (const p of treeOf(t.pid, parents)) ours.add(p);
-    sum += pids.filter((p) => !ours.has(p)).length;
+    for (const t of granted(tickets, os.hostname())) for (const p of treeOf(t.pid, parents)) ours.add(p);
+    foreign += pids.filter((p) => !ours.has(p)).length;
+    all += pids.length;
     if (i < samples - 1) await new Promise((r) => setTimeout(r, everyMs));
   }
-  return Math.round((sum / samples) * 10) / 10;
+  const avg = (n) => Math.round((n / samples) * 10) / 10;
+  return { background: avg(foreign), total: avg(all) };
 }
 
-// The gate's reading on the bench: { load, limit, ok, lane, background,
-// granted, laneBusy }. `exclude`: this job's root pid (its tree is ours).
-export async function benchRead({ lane = benchLane(), exclude = process.pid, load = () => os.loadavg()[0], tickets = readTickets(), ms = 1000 } = {}) {
+// The machine-wide verdict from the readings (pure: tested).
+export function benchJudge({ load, background, total, granted, cores = os.cpus().length, cap = null }) {
+  const limit = benchLimit({ granted, cores, cap });
+  const backgroundLimit = REFERENCE_BACKGROUND + BACKGROUND_MARGIN;
+  const over = [];
+  if (load > limit) over.push(`load ${load} > ${limit}`);
+  if (background > backgroundLimit) over.push(`background ${background} > ${backgroundLimit} runnable threads`);
+  if (total > cores) over.push(`${total} runnable threads > ${cores} cores`);
+  return { limit, backgroundLimit, ok: over.length === 0, over };
+}
+
+// The gate's reading on the bench: { load, limit, ok, over, lane,
+// background, total, granted, laneBusy }. `exclude`: this job's root pid
+// (its tree is ours); `cap`: an explicit --max-load.
+export async function benchRead({ lane = benchLane(), exclude = process.pid, load = () => os.loadavg()[0], tickets = readTickets(), ms = 1000, cap = null } = {}) {
   const granted = grantedLanes(tickets);
-  const background = await measureBackground(tickets);
-  const limit = benchLimit({ background, granted });
+  const { background, total } = await measureBackground(tickets);
   const cores = await checkCores({ cpus: lane.cpus, exclude, threshold: LANE_FOREIGN_PCT, ms });
-  const now = load();
+  const now = Math.round(load() * 100) / 100;
+  const j = benchJudge({ load: now, background, total, granted, cap });
   return {
-    load: Math.round(now * 100) / 100, limit, ok: now <= limit && cores.ok,
-    lane: lane.lane, background, granted, laneBusy: cores.busy
+    load: now, limit: j.limit, ok: j.ok && cores.ok, over: j.over,
+    lane: lane.lane, background, backgroundLimit: j.backgroundLimit, total, granted, laneBusy: cores.busy
   };
 }

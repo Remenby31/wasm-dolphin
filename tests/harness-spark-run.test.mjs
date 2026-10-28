@@ -378,18 +378,6 @@ test("spark-run --noise: drop-meter's A/A named as a bench run, its summary ther
   assert.throws(() => benchNoiseArgs("20261028/../x/y", "/r"), /<yyyymmdd>\/<name>/);
 });
 
-// 2026-10-28: drop-meter's default load guard (cpus/4 = 5 on the Spark) sat at
-// the bench's background load and kept no run; on the bench it defaults to 8.
-test("spark-run: drop-meter gets --max-load 8 on the bench unless the caller sets it", async () => {
-  const { benchProbeDefaults, BENCH_DROP_MAX_LOAD } = await import("../harness/remote/spark-run.mjs");
-  assert.equal(BENCH_DROP_MAX_LOAD, 8);
-  assert.deepEqual(benchProbeDefaults("drop-meter", ["--display"]), ["--display", "--max-load", "8"]);
-  assert.deepEqual(benchProbeDefaults("drop-meter", ["--max-load", "6"]), ["--max-load", "6"], "the caller's value wins");
-  assert.deepEqual(benchProbeDefaults("drop-meter", ["--max-load=6"]), ["--max-load=6"]);
-  assert.deepEqual(benchProbeDefaults("race-perf", ["--display"]), ["--display"], "race-perf unchanged");
-  assert.deepEqual(benchProbeDefaults("replay-gates", ["--query", "q"]), ["--query", "q"], "replay-gates has no load guard");
-});
-
 test("spark queue: a lane b job backfills past an older whole-bench job that cannot start before it ends", () => {
   // 2026-10-28: a multi waiting ~37 min for lane a held two lane b screens
   // (and lane b) idle behind it
