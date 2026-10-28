@@ -91,10 +91,12 @@ function runBoth(words, state, mask, { downcount = 400000 } = {}) {
   assert.ok(!result.error && !result.trap, JSON.stringify(result));
   return { fragment, result };
 }
+// Production has the bit on since #322: the mode off is that mask without it.
+const OFF = PRODUCTION_DISABLE_MASK & ~REGION_MTMSR_EE;
 const ON = PRODUCTION_DISABLE_MASK | REGION_MTMSR_EE;
 
 test("mode off: the fragment still stops at the mtmsr (the code is as before)", { skip }, () => {
-  const { fragment, result } = runBoth(EE_OFF_ON, stateWith(0x183), PRODUCTION_DISABLE_MASK);
+  const { fragment, result } = runBoth(EE_OFF_ON, stateWith(0x183), OFF);
   assert.ok(!fragment.entries.includes(MTMSR_AT[0] + 4), "no block past the first mtmsr");
   assert.ok(result.equal, JSON.stringify(result.difference));
 });
@@ -134,7 +136,7 @@ for (const [name, exceptions] of [["an external interrupt", EXCEPTION_EXTERNAL_I
 test("downcount running out on each instruction, the mtmsr blocks included: same exit point and state", { skip }, () => {
   for (const [words, msr, exceptions] of [[EE_OFF_ON, 0x0000a032, 0], [EE_ON, 0x00002032, 0], [EE_ON, 0x00002032, EXCEPTION_EXTERNAL_INT]]) {
     for (let downcount = 1; downcount <= 2 * words.length + 2; downcount += 1) {
-      for (const mask of [PRODUCTION_DISABLE_MASK, ON]) {
+      for (const mask of [OFF, ON]) {
         const { result } = runBoth(words, stateWith(0x188, { msr, exceptions }), mask, { downcount });
         assert.ok(result.equal, `downcount ${downcount} mask ${mask.toString(16)}: ${JSON.stringify(result.difference)}`);
       }
@@ -152,7 +154,7 @@ test("random MSR, downcount and pending exceptions, with and without the mode: t
     const msr = (0x00002032 | (rng.chance(0.5) ? 0x8000 : 0) | (rng.chance(0.1) ? 0x400 : 0) | (rng.chance(0.1) ? 0x900 : 0)) >>> 0;
     const downcount = rng.chance(0.5) ? 1 + rng.below(24) : 400000;
     const words = rng.pick(programs);
-    for (const mask of [PRODUCTION_DISABLE_MASK, ON]) {
+    for (const mask of [OFF, ON]) {
       const { result } = runBoth(words, stateWith(0x1830000 + i, { msr, exceptions }), mask, { downcount });
       assert.ok(result.equal, `${i} msr ${msr.toString(16)} dc ${downcount} exc ${exceptions} mask ${mask.toString(16)} ${JSON.stringify(result.difference)}`);
       ran += 1;

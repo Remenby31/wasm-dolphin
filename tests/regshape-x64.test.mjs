@@ -53,6 +53,9 @@ test("regions, oracle programs with the x64 shape: interpreter and regions agree
 // fragments, this digest. With bit 28 every one of them changes on 0184's
 // core (none on the core before it): a bit that does not reach the
 // prologue would leave this test red.
+// The mask the digest was measured with: production before #322 turned
+// 0183's bit 27 on (the sample's code with it on is another code).
+const MASK_BEFORE_0183 = PRODUCTION_DISABLE_MASK & ~(1 << 27);
 const MODE_OFF_DIGEST = "c005124cb13006a19f1368be55d65c801157e247d7906ed25f6fa3f92e6e4f46";
 test("mode off translates byte for byte as before 0184; bit 28 changes the code", { skip }, () => {
   const r = makeRng(0x1840ff);
@@ -64,11 +67,11 @@ test("mode off translates byte for byte as before 0184; bit 28 changes the code"
     aot.loadState(state, ORACLE_CODE);
     aot.load(ORACLE_CODE, bigEndian(program));
     const ranges = [[ORACLE_CODE, ORACLE_CODE + 4 * program.length]];
-    const off = aot.translate(ORACLE_CODE, { mask: PRODUCTION_DISABLE_MASK, ranges });
+    const off = aot.translate(ORACLE_CODE, { mask: MASK_BEFORE_0183, ranges });
     if (!off) continue;
     translated += 1;
     h.update(JSON.stringify(off.entries)); h.update(off.code); h.update(JSON.stringify(off.relocs));
-    const on = aot.translate(ORACLE_CODE, { mask: PRODUCTION_DISABLE_MASK | REGSHAPE_X64, ranges });
+    const on = aot.translate(ORACLE_CODE, { mask: MASK_BEFORE_0183 | REGSHAPE_X64, ranges });
     if (on && Buffer.compare(Buffer.from(off.code), Buffer.from(on.code)) !== 0) differ += 1;
   }
   assert.equal(translated, 282);
