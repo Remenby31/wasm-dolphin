@@ -1706,10 +1706,17 @@ function requestedCpuOverclock() {
 }
 
 // ?audiobuffer=N (ms, 16-200): the core mixer's queue (Dolphin's
-// AudioBufferSize, 80 ms when not given), part of the audio latency.
+// AudioBufferSize), part of the audio latency. 40 ms by default with
+// the AudioWorklet (pairs on mains 2026-10-28, mixer queue counted: total
+// latency 118-124 -> 80-85 ms from the title on, 0 underruns, no drop
+// regression); with ?audiotransport=legacy, 0 (the core's 80 ms), never
+// measured lower. A value in range overrides either.
+export const DEFAULT_WORKLET_AUDIO_BUFFER_MS = 40;
 export function requestedAudioBufferMs(search = window.location.search) {
-  const n = Number.parseInt(new URLSearchParams(search).get("audiobuffer") || "", 10);
-  return Number.isInteger(n) && n >= 16 && n <= 200 ? n : 0;
+  const params = new URLSearchParams(search);
+  const n = Number.parseInt(params.get("audiobuffer") || "", 10);
+  if (Number.isInteger(n) && n >= 16 && n <= 200) return n;
+  return params.get("audiotransport") === "legacy" ? 0 : DEFAULT_WORKLET_AUDIO_BUFFER_MS;
 }
 
 function requestedEmulationSpeed() {

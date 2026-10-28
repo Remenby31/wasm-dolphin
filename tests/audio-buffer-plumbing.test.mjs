@@ -7,13 +7,17 @@ import test from "node:test";
 // ?audiobuffer=N: the core mixer's queue (Dolphin's AudioBufferSize), from the
 // page's URL to the core's config. Options the adapter forgot to carry were
 // silently dropped before (?aotsample, ?wasmengine): every hop is checked.
-test("?audiobuffer: parsed in range only, 0 (the core's 80 ms) otherwise", async () => {
+test("?audiobuffer: 40 ms by default with the worklet, the core's 80 ms with legacy, a value in range overrides", async () => {
   const { requestedAudioBufferMs } = await import("../src/core-host.js");
-  assert.equal(requestedAudioBufferMs(""), 0);
-  assert.equal(requestedAudioBufferMs("?audiobuffer=40"), 40);
-  assert.equal(requestedAudioBufferMs("?audiobuffer=8"), 0, "under the mixer's 4 granules");
-  assert.equal(requestedAudioBufferMs("?audiobuffer=500"), 0);
-  assert.equal(requestedAudioBufferMs("?audiobuffer=x"), 0);
+  // 40 ms by default with the worklet (the 2026-10-28 pairs); the core's
+  // 80 ms with ?audiotransport=legacy; an out-of-range value is ignored
+  assert.equal(requestedAudioBufferMs(""), 40);
+  assert.equal(requestedAudioBufferMs("?audiotransport=legacy"), 0);
+  assert.equal(requestedAudioBufferMs("?audiobuffer=80"), 80);
+  assert.equal(requestedAudioBufferMs("?audiobuffer=40&audiotransport=legacy"), 40);
+  assert.equal(requestedAudioBufferMs("?audiobuffer=8"), 40, "under the mixer's 4 granules: the default");
+  assert.equal(requestedAudioBufferMs("?audiobuffer=500&audiotransport=legacy"), 0);
+  assert.equal(requestedAudioBufferMs("?audiobuffer=x"), 40);
 });
 
 test("?audiobuffer reaches the worker's init message through the adapter", async (t) => {
