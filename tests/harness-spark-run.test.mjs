@@ -169,7 +169,19 @@ test("spark queue: move refuses what would break the order, a duplicate keeps th
   // before img-gpu-ir1-light, running): "head" goes just after the running
   // ticket by position, not at the count of running tickets
   const q2 = [t(1000, "older-waiting"), t(2000, "running", "a"), t(5000, "w1"), t(9000, "smoke")];
-  assert.equal(movedId(q2, "smoke", "head"), "000000000003500-9000.json"); // between running and w1
+  const id = movedId(q2, "smoke", "head");
+  assert.ok(id < q2[0].id, `head goes before the first waiting ticket, even before the running one (${id})`);
+  // once the running job is through, the moved ticket is the first to go on lane a
+  const moved = q2.map((x) => (x.name === "smoke" ? { ...x, id, kind: "pair", lanes: "a" } : { ...x, kind: "pair", lanes: "a" }));
+  const after = moved.filter((x) => x.name !== "running").sort((x, y) => (x.id < y.id ? -1 : 1));
+  const free = () => false;
+  assert.deepEqual(nextStep(after.find((x) => x.name === "smoke"), after, free), { go: ["a"] });
+  assert.match(nextStep(after.find((x) => x.name === "older-waiting"), after, free).wait, /pair smoke arrived first/);
+  // eta counts the running job first, even with a waiting ticket sorted before it
+  const withRunning = [...moved].sort((x, y) => (x.id < y.id ? -1 : 1)).map((x) => (x.name === "running" ? { ...x, estMin: 20, grantedAt: new Date(Date.now() - 5 * 60000).toISOString() } : { ...x, estMin: 10 }));
+  assert.equal(eta(withRunning).find((x) => x.name === "smoke").startsIn, 15, "the smoke starts once the running job is through");
+  // a named target before a running job is still refused
+  assert.throws(() => movedId(q2, "smoke", "older-waiting"), /before a running job/);
   assert.equal(movedId([t(1000, "w0"), t(5000, "w1")], "w1", "head"), "000000000000000-5000.json", "nothing running: before every waiting ticket");
   // An old waiter (no estMin) cannot follow a rename: refused.
   const { estMin, ...old } = q[1];
