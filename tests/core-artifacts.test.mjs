@@ -170,6 +170,41 @@ test("a branch from before core.lock.json migrates in one merge with core:restor
   }
 });
 
+test("a branch from before core.lock.json merges today's main (pin in src/default-core.js) with core:restore", async () => {
+  const f = fixture();
+  try {
+    // Today's protocol, as main has it; before 18/10 the same place held the
+    // pin as a JavaScript declaration.
+    const today = readFileSync(path.join(repoRoot, PROTOCOL_PATH), "utf8");
+    const pointer = today.split("\n").find((line) => line.includes("src/default-core.js"));
+    assert.ok(pointer, "the protocol points to src/default-core.js");
+    const oldPin = (hash) => today.replace(pointer, `export const DEFAULT_UPSTREAM_CORE_SHA256 = "${hash}";`);
+    f.installCore("core-A", ["_Boot"]);
+    f.write(PROTOCOL_PATH, oldPin(sha256("core-A")));
+    f.commit("old main");
+    f.git("checkout", "-q", "-b", "feature");
+    f.installCore("core-B", ["_Boot", "_New"]);
+    f.write(PROTOCOL_PATH, oldPin(sha256("core-B")));
+    f.commit("feature with its own core");
+    f.git("checkout", "-q", "main");
+    const mainHash = f.installCore("core-C", ["_Boot"]);
+    f.write(PROTOCOL_PATH, today);
+    f.commit("main: pin in src/default-core.js");
+
+    f.git("checkout", "-q", "feature");
+    spawnSync("git", ["merge", "-q", "main"], { cwd: f.dir });  // conflicts expected
+    assert.match(readFileSync(path.join(f.dir, PROTOCOL_PATH), "utf8"), /^<<<<<<< /m, "the pin hunk conflicts");
+    await restoreCoreFromBase({ base: "main", cwd: f.dir });
+    assert.equal(f.git("diff", "--name-only", "--diff-filter=U"), "", "every conflict is resolved");
+    assert.equal(readFileSync(path.join(f.dir, PROTOCOL_PATH), "utf8"), today);
+    f.git("commit", "-q", "--no-edit");
+    assert.deepEqual(await coreArtifactChanges({ base: "main", cwd: f.dir }), []);
+    assert.equal(JSON.parse(readFileSync(path.join(f.dir, ABI_PATH), "utf8")).coreId, `sha256:${mainHash}`);
+  } finally {
+    rmSync(f.dir, { recursive: true, force: true });
+  }
+});
+
 test("only the pin hunk is resolved; any other protocol conflict is left to the user", () => {
   const pin = `export const DEFAULT_UPSTREAM_CORE_SHA256 = "${"a".repeat(64)}";\n`;
   const lock = 'import coreLock from "../cores/dolphin/core.lock.json" with { type: "json" };\n';

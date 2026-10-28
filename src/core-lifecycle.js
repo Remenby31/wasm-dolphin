@@ -20,6 +20,43 @@ export const LIFECYCLE_REQUEST_TYPES = Object.freeze(["start", "pause", "resume"
 
 const defaultSleep = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
 
+// A save state can be loaded only once the core runs: the C-ABI shim's
+// LoadStateFile answers 0 unless its runtime is up and Core::IsRunning,
+// i.e. Core's s_state is Running, which the CPU thread sets when it enters
+// its run loop (Core.cpp). Before that GetCoreStateName says
+// "Uninitialized" (the shim's runtime not up yet, or the core between the
+// end of the boot and the hardware's init) or "Starting". A Dolphin pause
+// keeps s_state Running (the CPU stepping): "Paused" loads too.
+export function coreReadyForState(name) {
+  return name === CORE_STATES.running || name === CORE_STATES.paused;
+}
+
+// Wait, without blocking the worker, until coreReadyForState. Resolves
+// { ready: true, reason: "ready" }, or { ready: false } with reason
+// "refused" at once (the core "Stopping", or abort() giving a reason, then
+// in detail), or "expired" after timeoutMs.
+export async function waitCoreReadyForState(stateName, { timeoutMs = 15_000, pollMs = 20, abort = () => null, sleep = defaultSleep, now = () => performance.now() } = {}) {
+  const end = now() + timeoutMs;
+  for (;;) {
+    const name = stateName();
+    const gone = abort() || (name === CORE_STATES.stopping ? "core stopping" : null);
+    if (gone) return { ready: false, reason: "refused", detail: gone };
+    if (coreReadyForState(name)) return { ready: true, reason: "ready" };
+    if (now() >= end) return { ready: false, reason: "expired" };
+    await sleep(pollMs);
+  }
+}
+
+// One job at a time, in order; a failed job does not stop the next.
+export function createSerial() {
+  let chain = Promise.resolve();
+  return (job) => {
+    const run = chain.then(job);
+    chain = run.catch(() => {});
+    return run;
+  };
+}
+
 export function createCoreLifecycle({
   api,
   isBooted,
