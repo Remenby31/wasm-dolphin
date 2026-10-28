@@ -15,6 +15,7 @@ import { probeRelaxedMadd } from "./relaxed-madd-probe.js";
 import { probeWasmFeatures } from "./wasm-feature-probe.js";
 import { decodeWgpuSamplerState } from "./wgpu-sampler-state.js";
 import { bootBackbufferResize, clampInternalResolution, enhancementCoreArgs, internalResolutionCeiling, resizeCanvasBackbuffer } from "./wgpu-enhancements.js";
+import { createDisplayFilter, displayFilterFits, displayFilterOutputSize, normalizeDisplayFilter } from "./wgpu-display-filter.js";
 import { gxClearDepthToStored, gxDepthState } from "./wgpu-depth-state.js";
 import { clampSourceRect, createWgpuExactCapture, packReadbackRows } from "./wgpu-exact-capture.js";
 import { createUniqueFrameCounter, hashRows, sampleRowOffsets } from "./harness-unique-frames.js";
@@ -221,6 +222,15 @@ let renderCanvas = null;
 const WGPU_BACKBUFFER_W = 640;
 const WGPU_BACKBUFFER_H = 480;
 let wgpuBackbufferSized = false;
+// The core's backbuffer size (the pooled frame textures), once known; the
+// canvas is that size unless the display filter sizes it to the display.
+let wgpuBackbufferW = 0;
+let wgpuBackbufferH = 0;
+// Display filter (src/wgpu-display-filter.js, presentvsync only): sharpness,
+// fit (canvas at the page's display pixels) and the display box.
+let wgpuDisplayFilter = normalizeDisplayFilter();
+let wgpuDisplayFilterGpu = null;
+let wgpuDisplayFilterDevice = null;
 let renderContext = null;
 let renderImageData = null;
 let renderGpu = null;
@@ -1750,6 +1760,8 @@ async function handleMessage(type, payload) {
         memcardSlotB: payload.memcardSlotB,
         internalResolution: payload.internalResolution,
         maxAnisotropy: payload.maxAnisotropy,
+        widescreen: payload.widescreen,
+        displayFilter: payload.displayFilter,
         efbAccess: payload.efbAccess,
         xfbNoDecode: payload.xfbNoDecode,
         fifoLog: payload.fifoLog,
@@ -2112,6 +2124,9 @@ async function handleMessage(type, payload) {
       // cadence telemetry it feeds.
       return {
         enabled: wgpuPresentVsync,
+        displayFilter: { active: wgpuDisplayFilterActive(), ...wgpuDisplayFilter,
+          canvas: renderCanvas ? [renderCanvas.width, renderCanvas.height] : null,
+          backbuffer: wgpuBackbufferSize(), ...(wgpuDisplayFilterGpu?.stats ?? {}) },
         ...wgpuPresentVsyncStats,
         ...wgpuVsync.stats,
         // frames waiting now (the `queued` counter is the total queued)
@@ -2492,10 +2507,19 @@ async function handleMessage(type, payload) {
       // Held to the adapter's ceiling: the answer says the scale in effect.
       const internalResolution = set(...enhancementCoreArgs(payload, wgpuScaleCeiling()));
       if (internalResolution > 0) wgpuInternalResolution = internalResolution;
+      // Patch 0178: 16:9 (absent from an older core: widescreen null).
+      const setWide = moduleInstance?._DolphinWeb_SetWidescreen;
+      const widescreen = typeof setWide === "function" && typeof payload.widescreen === "boolean"
+        ? setWide(payload.widescreen ? 1 : 0) === 1 : null;
       return internalResolution > 0
-        ? { applied: true, internalResolution, ceiling: wgpuScaleCeiling() }
+        ? { applied: true, internalResolution, widescreen, ceiling: wgpuScaleCeiling() }
         : { applied: false, reason: "core-not-running" };
     }
+    case "setDisplayFilter":
+      // Sharpness, fit and display box; the canvas follows at once, the
+      // filter from the next frame shown.
+      setWgpuDisplayFilter(payload);
+      return { applied: wgpuPresentVsync, active: wgpuDisplayFilterActive(), ...wgpuDisplayFilter };
     case "setAudioMuted":
       api?.setAudioMuted?.(payload.muted ? 1 : 0);
       workletAudioProducer.setMuted(Boolean(payload.muted));
@@ -2562,6 +2586,8 @@ async function loadCore({
   memcardSlotB = false,
   internalResolution = 1,
   maxAnisotropy = -1,
+  widescreen = false,
+  displayFilter = null,
   efbAccess = false,
   xfbNoDecode = false,
   fifoLog = false,
@@ -3065,6 +3091,7 @@ async function loadCore({
   // Not with the detached presenter: it shows a bitmap of the canvas, which
   // the vsync presenter fills only at its rAF (a stale picture).
   wgpuPresentVsync = presentVsync !== false && typeof self.requestAnimationFrame === "function" && !wgpuDetachedPresenter;
+  setWgpuDisplayFilter(displayFilter ?? {});
   wgpuPresentGamePace = presentGamePace === true;
   wgpuPresentPaceStats = presentPaceStats === true || wgpuPresentGamePace;
   wgpuGamePacer.reset({ arrival: true });
@@ -3104,6 +3131,8 @@ async function loadCore({
     // WebGPU path.
     dolphinEfbScale: (wgpuInternalResolution = clampInternalResolution(internalResolution, wgpuScaleCeiling())),
     dolphinMaxAnisotropy: Number.isInteger(maxAnisotropy) ? maxAnisotropy : -1,
+    // Patch 0178: Dolphin's generic widescreen hack, 16:9 backbuffer.
+    dolphinWidescreen: widescreen === true,
     dolphinEfbAccess: Boolean(efbAccess),
     dolphinXfbNoDecode: Boolean(xfbNoDecode),
     dolphinEfbCopyRam: Boolean(efbCopyRam),
@@ -6753,6 +6782,9 @@ async function createWebGpuPresenter(canvas) {
   console.log("[wgpu-features] got=" + (haveFeatures.join(",") || "none") +
               " missing=" + (wantFeatures.filter((f) => !haveFeatures.includes(f)).join(",") || "none") +
               " masked=" + ([...wgpuMaskedFeatures].join(",") || "none"));
+  // timestamp-query: the display filter's GPU timing, metrics on only
+  // (drop-meter); the player's device is created as before.
+  if (collectMetrics && adapter.features?.has("timestamp-query") && !wgpuMaskedFeatures.has("timestamp-query")) haveFeatures.push("timestamp-query");
   const device = await adapter.requestDevice(
     haveFeatures.length ? { requiredFeatures: haveFeatures } : undefined);
   rendererDiagnostics.device = {
@@ -13309,11 +13341,21 @@ function presentWgpuVsyncFrame({ newest = false, hidden = false, t = null, refre
   }
   const dst = renderGpu.context.getCurrentTexture();
   const enc = dev.createCommandEncoder({ label: "wgpu-vsync-present" });
-  enc.copyTextureToTexture(
-    { texture: f.tex },
-    { texture: dst },
-    [Math.min(f.tex.width, dst.width), Math.min(f.tex.height, dst.height), 1]
-  );
+  if (wgpuDisplayFilterActive()) {
+    // Scale to the display (EASU up, area down) and sharpen (RCAS).
+    if (wgpuDisplayFilterDevice !== dev) {
+      wgpuDisplayFilterGpu?.destroy();
+      wgpuDisplayFilterGpu = createDisplayFilter(dev, renderGpu.format, { timing: collectMetrics });
+      wgpuDisplayFilterDevice = dev;
+    }
+    wgpuDisplayFilterGpu.encode(enc, f.tex, dst, wgpuDisplayFilter.sharpness);
+  } else {
+    enc.copyTextureToTexture(
+      { texture: f.tex },
+      { texture: dst },
+      [Math.min(f.tex.width, dst.width), Math.min(f.tex.height, dst.height), 1]
+    );
+  }
   dev.queue.submit([enc.finish()]);
   // Same queue: the copy runs before any later pass renders into f.tex.
   wgpuVsync.shown(f);
@@ -13338,14 +13380,58 @@ function wgpuCanvasUsage(u) {
 // core lays the presenter out on reaches here.
 function resizeWgpuBackbuffer(width, height) {
   wgpuBackbufferSized = true;
+  wgpuBackbufferW = width;
+  wgpuBackbufferH = height;
+  applyWgpuCanvasSize();
+}
+
+// The core's backbuffer size: the frames' (presentvsync pool). Before any
+// announce, the canvas's when it is the backbuffer, else Dolphin's 640x480.
+function wgpuBackbufferSize() {
+  if (wgpuBackbufferW > 0 && wgpuBackbufferH > 0) return [wgpuBackbufferW, wgpuBackbufferH];
+  return [renderCanvas?.width || WGPU_BACKBUFFER_W, renderCanvas?.height || WGPU_BACKBUFFER_H];
+}
+
+// The display filter draws the frames at rAF: only with presentvsync, on a
+// hardware path, and only when it has something to do.
+function wgpuDisplayFilterActive() {
+  return wgpuPresentVsync && hardwareVideoBackend && displayFilterFits(wgpuDisplayFilter);
+}
+
+function setWgpuDisplayFilter(payload = {}) {
+  const wasActive = wgpuDisplayFilterActive();
+  const before = wgpuDisplayFilter;
+  wgpuDisplayFilter = normalizeDisplayFilter({ ...before, ...payload });
+  // Turning it on before the core announced a size: freeze the backbuffer
+  // the canvas has now, the canvas is about to change.
+  if (!wasActive && wgpuDisplayFilterActive() && !(wgpuBackbufferW > 0)) {
+    [wgpuBackbufferW, wgpuBackbufferH] = wgpuBackbufferSize();
+  }
+  if (renderGpu && renderCanvas && (wasActive || wgpuDisplayFilterActive())) applyWgpuCanvasSize();
+  // Off: its textures, buffers and timing reads go (made again when on).
+  if (wasActive && !wgpuDisplayFilterActive()) {
+    wgpuDisplayFilterGpu?.destroy();
+    wgpuDisplayFilterGpu = null;
+    wgpuDisplayFilterDevice = null;
+  }
+}
+
+// Size the canvas: the backbuffer, or with the display filter the display
+// box at the backbuffer's aspect.
+function applyWgpuCanvasSize() {
   try {
+    const [bw, bh] = wgpuBackbufferSize();
+    const size = wgpuDisplayFilterActive()
+      ? displayFilterOutputSize({ width: bw, height: bh }, wgpuDisplayFilter.box,
+        { maxSide: Math.min(5120, renderGpu?.device?.limits?.maxTextureDimension2D || 8192) })
+      : { width: bw, height: bh };
     const usage = self.GPUTextureUsage.RENDER_ATTACHMENT |
       ((wgpuReplayClassifier || inputReadbackDiagnostics) ? self.GPUTextureUsage.COPY_SRC : 0) |
       (wgpuVisualCadenceEnabled ? self.GPUTextureUsage.TEXTURE_BINDING : 0) |
       (wgpuPresentVsync ? self.GPUTextureUsage.COPY_DST : 0);
-    if (!resizeCanvasBackbuffer(renderCanvas, renderGpu, width, height, usage)) return;
-    console.log(`[bbresize] backbuffer ${width}x${height}`);
-    postStatus(`wgpu backbuffer resized to ${width}x${height}`);
+    if (!resizeCanvasBackbuffer(renderCanvas, renderGpu, size.width, size.height, usage)) return;
+    console.log(`[bbresize] backbuffer ${bw}x${bh} canvas ${size.width}x${size.height}`);
+    postStatus(`wgpu backbuffer resized to ${bw}x${bh}`);
   } catch (e) {
     recordRendererError("validation", `backbuffer resize: ${e?.message || e}`);
   }
@@ -13357,7 +13443,9 @@ function resizeWgpuBackbuffer(width, height) {
 // in its top-left corner. Bring it back, and re-arm the one-shot growth.
 function resetWgpuBackbufferForBoot() {
   const size = renderGpu ? bootBackbufferResize(renderCanvas) : null;
-  if (size) resizeWgpuBackbuffer(...size);
+  const stale = renderGpu && wgpuBackbufferW > 0 &&
+    (wgpuBackbufferW !== WGPU_BACKBUFFER_W || wgpuBackbufferH !== WGPU_BACKBUFFER_H);
+  if (size || stale) resizeWgpuBackbuffer(WGPU_BACKBUFFER_W, WGPU_BACKBUFFER_H);
   wgpuBackbufferSized = false;
 }
 
@@ -14907,10 +14995,16 @@ function drainWebGpuCmdRing(source = "presentation") {
             // resizing the swapchain repeatedly blanked the output entirely
             // (0.0 visual fps). The size must be stable, so take the page
             // canvas's intended size once and leave it alone.
-            if (!wgpuBackbufferSized && renderCanvas &&
-                (renderCanvas.width < WGPU_BACKBUFFER_W ||
-                 renderCanvas.height < WGPU_BACKBUFFER_H)) {
-              resizeWgpuBackbuffer(WGPU_BACKBUFFER_W, WGPU_BACKBUFFER_H);
+            // The canvas is what the demo scene shrank (the backbuffer
+            // only with the display filter, which sizes the canvas itself).
+            if (!wgpuBackbufferSized && renderCanvas) {
+              const [bbW, bbH] = wgpuDisplayFilterActive()
+                ? wgpuBackbufferSize() : [renderCanvas.width, renderCanvas.height];
+              if (bbW < WGPU_BACKBUFFER_W || bbH < WGPU_BACKBUFFER_H) {
+                resizeWgpuBackbuffer(WGPU_BACKBUFFER_W, WGPU_BACKBUFFER_H);
+              } else if (wgpuDisplayFilterActive()) {
+                applyWgpuCanvasSize();
+              }
             }
             // Content check on the texture actually about to be presented,
             // read adjacent to the EFB in the command stream. Triple buffering
@@ -14938,7 +15032,7 @@ function drainWebGpuCmdRing(source = "presentation") {
               while (performance.now() < until) { /* harness perturbation: a blocking present */ }
             }
             const cur = wgpuPresentVsync
-              ? acquireWgpuVsyncTexture(renderCanvas?.width || WGPU_BACKBUFFER_W, renderCanvas?.height || WGPU_BACKBUFFER_H)
+              ? acquireWgpuVsyncTexture(...wgpuBackbufferSize())
               : renderGpu.context.getCurrentTexture();
             lastBackbufferTexture = cur;
             currentBackbufferSourceTextureId = 0;

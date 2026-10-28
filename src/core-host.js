@@ -2,6 +2,7 @@ import { aotCompilerRequested, jitOffThreadRequested } from "./aot-compiler-work
 import { aotSamplePeriodRequested } from "./aot-hot-sampler.js";
 import { wasmEngine } from "./wasm-engine.js";
 import { anisotropyToCore, clampInternalResolution, internalResolutionCeiling, requestedEnhancements } from "./wgpu-enhancements.js";
+import { displayFilterFits, normalizeDisplayFilter, requestedDisplayFilter } from "./wgpu-display-filter.js";
 import { parseCustomRtc } from "./custom-rtc.js";
 import { DolphinCoreAdapter, dolphinBundleAvailable } from "./dolphin-adapter.js";
 import { buttonMaskFromPressed, isPadPort } from "./input.js";
@@ -129,6 +130,13 @@ export class EmulatorHost {
     // ?ir=1-4 and ?aniso=1|2|4|8|16 (patch 0168, WebGPU path); setEnhancements
     // changes them while a game runs.
     this.enhancements = requestedEnhancements(window.location.search);
+    // ?fsr=off|light|strong, ?displayfit=1 (WebGPU path with presentvsync):
+    // the canvas at the display's pixels, scaled and sharpened at the
+    // present; setDisplayFilter changes it while a game runs.
+    this.displayFilter = requestedDisplayFilter(window.location.search);
+    this.displayBoxObserver = null;
+    this.displayBoxObserved = null;
+    if (displayFilterFits(this.displayFilter)) this.watchDisplayBox();
     // 1 once a device was lost above 1x (internalResolutionCeiling()).
     this.scaleLostCeiling = 4;
     this.scaleCeilingPromise = null;
@@ -377,6 +385,8 @@ export class EmulatorHost {
       // Re-point the host's reference and the elements registry.
       canvas = replacement;
       this.canvas = replacement;
+      // The display filter's box is the new element's.
+      this.observeDisplayCanvas();
       const off = replacement.transferControlToOffscreen();
       off.id = "canvas";
       return off;
@@ -507,6 +517,8 @@ export class EmulatorHost {
             memcardSlotB: this.memcardSlotB,
             internalResolution: this.enhancements.internalResolution,
             maxAnisotropy: this.enhancements.maxAnisotropy,
+            widescreen: this.enhancements.widescreen,
+            displayFilter: this.displayFilter,
             efbAccess: this.efbAccess,
             xfbNoDecode: this.xfbNoDecode,
             fifoLog: this.fifoLog,
@@ -961,16 +973,81 @@ export class EmulatorHost {
   // frame. Resolves { applied, internalResolution } (applied false before the
   // core runs, or with a core without patch 0168); the values are kept for
   // the next boot.
-  async setEnhancements({ internalResolution, anisotropy } = {}) {
+  // widescreen: true for 16:9 (patch 0178, Dolphin's generic widescreen
+  // hack: the 3D view widened; 2D elements stretched, some objects cut at the
+  // edges), false for 4:3. The canvas follows the core's backbuffer.
+  async setEnhancements({ internalResolution, anisotropy, widescreen } = {}) {
     if (internalResolution !== undefined) {
       const { ceiling } = await this.internalResolutionCeiling();
       this.enhancements.internalResolution = clampInternalResolution(internalResolution, ceiling);
     }
     if (anisotropy !== undefined) this.enhancements.maxAnisotropy = anisotropyToCore(anisotropy);
+    if (widescreen !== undefined) {
+      this.enhancements.widescreen = widescreen === true;
+      this.announceAspect();
+    }
     if (this.mode !== "dolphin" || typeof this.adapter?.setEnhancements !== "function") {
       return { applied: false, reason: "core-not-loaded" };
     }
     return this.adapter.setEnhancements(this.enhancements);
+  }
+
+  // The picture's aspect, for the page's layout (app.js follows it): 16:9
+  // with widescreen (patch 0178), else 4:3. A "wgpuaspect" event on window.
+  announceAspect() {
+    const [w, h] = this.enhancements.widescreen ? [16, 9] : [4, 3];
+    globalThis.dispatchEvent?.(new CustomEvent("wgpuaspect", { detail: { w, h } }));
+  }
+
+  // Display filter: sharpness "off" | "light" | "strong" (FSR1 RCAS after an
+  // EASU upscale to the display), fit true to size the canvas to the display
+  // without sharpening (an internal resolution above the display is then
+  // area-filtered down: supersampling). Kept for the next boot. Resolves the
+  // worker's answer ({ applied, active, sharpness, fit, box }).
+  async setDisplayFilter({ sharpness, fit } = {}) {
+    this.displayFilter = normalizeDisplayFilter({
+      ...this.displayFilter,
+      ...(sharpness !== undefined ? { sharpness } : {}),
+      ...(fit !== undefined ? { fit } : {})
+    });
+    if (displayFilterFits(this.displayFilter)) this.watchDisplayBox();
+    if (typeof this.adapter?.setDisplayFilter !== "function") return { applied: false, reason: "core-not-loaded" };
+    return this.adapter.setDisplayFilter(this.displayFilter);
+  }
+
+  // The canvas element's size in device pixels, for the display filter's
+  // canvas (devicePixelContentBoxSize: exact, follows zoom and moves between
+  // screens).
+  // contain: the element is laid out with object-fit: contain (the picture
+  // keeps its aspect inside the box), else the canvas is stretched to it.
+  watchDisplayBox() {
+    if (this.displayBoxObserver || typeof ResizeObserver !== "function" || !this.canvas) return;
+    this.displayBoxObserver = new ResizeObserver((entries) => {
+      const entry = entries.at(-1);
+      const device = entry?.devicePixelContentBoxSize?.[0];
+      const ratio = globalThis.devicePixelRatio || 1;
+      const contain = globalThis.getComputedStyle?.(entry.target)?.objectFit === "contain";
+      const box = device
+        ? { width: device.inlineSize, height: device.blockSize, contain }
+        : { width: Math.round(entry.contentRect.width * ratio), height: Math.round(entry.contentRect.height * ratio), contain };
+      this.displayFilter = normalizeDisplayFilter({ ...this.displayFilter, box });
+      if (displayFilterFits(this.displayFilter)) this.adapter?.setDisplayFilter?.({ box: this.displayFilter.box })?.catch?.(() => {});
+    });
+    this.observeDisplayCanvas();
+  }
+
+  // (Re)observe this.canvas: after replaceCanvasForWorker the old element is
+  // gone from the page.
+  observeDisplayCanvas() {
+    const observer = this.displayBoxObserver;
+    if (!observer || !this.canvas || this.displayBoxObserved === this.canvas) return;
+    if (this.displayBoxObserved) observer.unobserve(this.displayBoxObserved);
+    this.displayBoxObserved = this.canvas;
+    try {
+      observer.observe(this.canvas, { box: "device-pixel-content-box" });
+    } catch {
+      observer.observe(this.canvas);
+    }
   }
 
   // The highest internal resolution this machine is trusted with:

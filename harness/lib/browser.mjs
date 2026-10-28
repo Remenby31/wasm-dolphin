@@ -175,6 +175,13 @@ export function chromeLaunchOptions(display = defaultDisplay(), { unsafeWebgpu =
   return { headless: true, viewport: { width: 1280, height: 800 }, args };
 }
 
+// "WxH" (both 320-7680) or the default 1280x800.
+export function harnessViewport(spec) {
+  const m = /^(\d+)x(\d+)$/.exec(String(spec ?? ""));
+  const [w, h] = m ? [Number(m[1]), Number(m[2])] : [0, 0];
+  return w >= 320 && w <= 7680 && h >= 240 && h <= 4320 ? { width: w, height: h } : { width: 1280, height: 800 };
+}
+
 export async function launchChrome({ profileDir, display = defaultDisplay(), args = [], unsafeWebgpu = true }) {
   const opts = chromeLaunchOptions(display, { unsafeWebgpu });
   const { chromium } = await importPlaywright();
@@ -190,8 +197,10 @@ export async function launchChrome({ profileDir, display = defaultDisplay(), arg
   const context = await chromium.launchPersistentContext(profileDir, {
     ...(executablePath ? { executablePath } : { channel: "chrome" }),
     headless: opts.headless,
-    // x11: the window's own size (no viewport emulation on a real screen)
-    viewport: opts.viewport,
+    // x11: the window's own size (no viewport emulation on a real screen).
+    // Headless: HARNESS_VIEWPORT=WxH for a larger page, e.g. a display box
+    // above the 640x480 backbuffer for the display filter's upscale (EASU).
+    viewport: opts.viewport === null ? null : harnessViewport(process.env.HARNESS_VIEWPORT),
     // Chrome's log and crash dumps stay in the profile; a session whose
     // renderer crashed copies them out as evidence (session.mjs).
     args: flags.args,

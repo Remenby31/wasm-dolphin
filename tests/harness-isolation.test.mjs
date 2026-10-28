@@ -89,6 +89,14 @@ test("the harness only launches headless Chrome, never full screen or in front",
   assert.ok(o.args.includes("--password-store=basic"));
 });
 
+test("HARNESS_VIEWPORT: a larger page for the display filter's upscale, else 1280x800", async () => {
+  const { harnessViewport } = await import("../harness/lib/browser.mjs");
+  assert.deepEqual(harnessViewport(undefined), { width: 1280, height: 800 });
+  assert.deepEqual(harnessViewport("2560x1600"), { width: 2560, height: 1600 });
+  assert.deepEqual(harnessViewport("99999x10"), { width: 1280, height: 800 });
+  assert.deepEqual(harnessViewport("big"), { width: 1280, height: 800 });
+});
+
 test("feature flags: every --enable-features / --disable-features merged into one (Chrome keeps only the last)", async () => {
   const { mergeFeatureFlags } = await import("../harness/lib/browser.mjs");
   assert.deepEqual(
