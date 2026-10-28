@@ -83,7 +83,7 @@ test("?regshape=x64 sets the enable bit 28; a raw ?disable= never does", () => {
   const host = readFileSync(new URL("../src/core-host.js", import.meta.url), "utf8");
   assert.match(host, /regshape: {8}1 << 28,/);
   assert.match(host, /if \(params\.get\("regshape"\) === "x64"\) \{\n\s*mask \|= CACHED_INTERPRETER_DISABLE_BITS\.regshape;/);
-  assert.match(host, /mask &= ~\(CACHED_INTERPRETER_DISABLE_BITS\.regionmtmsr \| CACHED_INTERPRETER_DISABLE_BITS\.regshape \|\n\s*CACHED_INTERPRETER_DISABLE_BITS\.regionchaincache\);/);
+  assert.match(host, /mask &= ~\(CACHED_INTERPRETER_DISABLE_BITS\.regionmtmsr \| CACHED_INTERPRETER_DISABLE_BITS\.regshape \|\n\s*CACHED_INTERPRETER_DISABLE_BITS\.regionchaincache \| CACHED_INTERPRETER_DISABLE_BITS\.regionfragments\);/);
   const patch = readFileSync(new URL("../patches/dolphin-wasm/snapshot/0184-regshape-x64.patch", import.meta.url), "utf8");
   assert.match(patch, /\+constexpr u32 DOLPHIN_WEB_ENABLE_REGSHAPE_X64 = 1u << 28;/);
   assert.match(patch, /\+constexpr u32 REGSHAPE_X64_GPR_CAP = 4;/);

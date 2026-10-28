@@ -25,7 +25,7 @@
       "commit": "01e0577914a75a2569c846778c2f93aa8e6feddd"
     }
   },
-  "patchSeriesSha256": "199048b034eaf5384d2e92c108dd79118145fdd3c40345070ea631d0998df19c",
+  "patchSeriesSha256": "4c3d447b61d433ff73da9e5c1b2aa6a8c5f1979e9672c8e8869246aeaae12401",
   "patches": [
     {
       "order": 1,
@@ -1093,6 +1093,14 @@
     },
     {
       "order": 134,
+      "cwd": ".",
+      "hashMode": "lf-normalized",
+      "path": "patches/dolphin-wasm/snapshot/0189-region-fragment-handles.patch",
+      "size": 8909,
+      "sha256": "30c1631b1e81937dc6afd7952490457184c1035ddf2df950bde8c41b1f29f60c"
+    },
+    {
+      "order": 135,
       "cwd": "Externals/SFML/SFML",
       "hashMode": "lf-normalized",
       "path": "patches/dolphin-wasm/submodules/0001-sfml-emscripten-config.patch",
@@ -1100,7 +1108,7 @@
       "sha256": "f82197a21fe982ad83f6ee7bbf5a03839b1cebd4d64da3eab11263842bf61d89"
     },
     {
-      "order": 135,
+      "order": 136,
       "cwd": "Externals/xxhash/xxHash",
       "hashMode": "lf-normalized",
       "path": "patches/dolphin-wasm/submodules/0002-xxhash-wasm-simd-scalar.patch",

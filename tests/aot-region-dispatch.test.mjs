@@ -50,11 +50,11 @@ function setup() {
 }
 
 // Every region of the plan, queued as P7 would (members with the plan's hashes).
-function queueAll(plan, maxFunctions = 100, chain = false) {
+function queueAll(plan, maxFunctions = 100, chain = false, mask = undefined, fragmentEntries = false) {
   let entries = 0;
   for (const group of regionGroups(plan, maxFunctions)) {
-    const fragments = group.flatMap(functionFragments(core));
-    const { bytes, entries: mapped } = assembleRegion(fragments, { helpers: HELPER_SIGNATURES, pcOffset: core.pcOffset, memoryPages: core.memoryPages, chain });
+    const fragments = group.flatMap(functionFragments(core, mask === undefined ? {} : { mask }));
+    const { bytes, entries: mapped } = assembleRegion(fragments, { helpers: HELPER_SIGNATURES, pcOffset: core.pcOffset, memoryPages: core.memoryPages, chain, fragmentEntries });
     core.queueRegion(bytes, mapped.map(([pc]) => pc), group.map((f) => ({ ranges: f.ranges, hash: f.hash })));
     entries += mapped.length;
   }
@@ -2435,4 +2435,64 @@ test("0187: a region dropped, invalidated or unverified after the cache was fill
     assert.equal(forgotten.ran, 0, "no region runs once all are forgotten");
     assert.deepEqual(forgotten.state, reference().state);
   });
+});
+
+// 0189 (?regionfragments=1, enable bit 16): region chaining enters the
+// fragment holding the next pc (a slot of the core's table per fragment, from
+// the module's "region-entry-fragments" section), not the module's
+// dispatcher. With 0187's cache (the pair's both sides), across modules, like
+// the interpreter; the slots are released when the regions go; modules
+// assembled without the option carry no such section (mode off: as before).
+const FRAGMENTS = 1 << 16;
+const fragmentsSkip = chainCacheSkip || (() => {
+  const lock = JSON.parse(readFileSync(new URL("../provenance/dolphin-source.lock.json", import.meta.url), "utf8"));
+  return lock.patches.some((p) => p.path.includes("/0189-")) ? false : "patch series without 0189";
+})();
+function withMask(mask, fn) {
+  const m = core.module;
+  const saved = typeof m._GetCachedInterpreterDisableMask === "function" ? m._GetCachedInterpreterDisableMask() >>> 0 : 0;
+  m._SetCachedInterpreterDisableMask(mask);
+  try { return fn(); } finally { m._SetCachedInterpreterDisableMask(saved); }
+}
+function installFragments(program, text) {
+  const dol = buildDol({ textAddr: text, text: program.words, entry: program.labels.main });
+  const { image, entryPoint } = imageFromDol(dol);
+  const plan = planDol({ image, entryPoint, gameId: "TEST01", dolBytes: dol, options: { gapFill: false } });
+  for (const s of image.segments) core.load(s.start, s.bytes);
+  core.invalidate(text, 4 * program.words.length);
+  core.module._DolphinWeb_AotForgetRegionsForTest?.();
+  core.setRegionsEnabled(true);
+  core.setRegionChaining(true);
+  queueAll(plan, 1, true, PRODUCTION_DISABLE_MASK, true);
+  serviceAll();
+}
+
+test("0189: chaining into fragments runs like the interpreter across modules, and gives the slots back", { skip: fragmentsSkip }, () => {
+  withMask(PRODUCTION_DISABLE_MASK | CHAIN_CACHE | FRAGMENTS, () => {
+    for (const [program, text] of [[CALLS, CALL_TEXT], [elseProgram(30), ELSE_TEXT]]) {
+      installFragments(program, text);
+      const reference = runCall(program.labels.main, { regions: false });
+      for (let round = 0; round < 2; round++) {
+        const got = runCall(program.labels.main, { regions: true });
+        assert.deepEqual(got.state, reference.state, `round ${round}`);
+        assert.equal(got.downcount, reference.downcount, `round ${round}`);
+      }
+    }
+    const free = () => globalThis._dolphinFreeTableSlots?.length ?? 0;
+    const before = free();
+    core.module._DolphinWeb_AotForgetRegionsForTest();
+    assert.ok(free() > before, `slots released when the regions go (${before} -> ${free()})`);
+    const released = free();
+    installFragments(CALLS, CALL_TEXT); // reuses them
+    assert.ok(free() < released, "released slots reused before the table grows");
+  });
+});
+
+test("0189 off: modules carry no entry -> fragment section", () => {
+  const f = { entry: 0x80003000, entries: [0x80003000], code: Uint8Array.of(0x00, 0x41, 0x00, 0x0b), relocs: [] };
+  const off = assembleRegion([f], { helpers: HELPER_SIGNATURES, pcOffset: 0, memoryPages: 1 });
+  const on = assembleRegion([f], { helpers: HELPER_SIGNATURES, pcOffset: 0, memoryPages: 1, fragmentEntries: true });
+  const has = (bytes) => Buffer.from(bytes).includes(Buffer.from("region-entry-fragments"));
+  assert.equal(has(off.bytes), false);
+  assert.equal(has(on.bytes), true);
 });

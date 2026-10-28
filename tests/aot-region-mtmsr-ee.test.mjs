@@ -170,5 +170,5 @@ test("the enable bit 27 of the codegen mask is on by default; ?regionmtmsr=0 tur
   const patch = readFileSync(new URL("../patches/dolphin-wasm/snapshot/0183-region-mtmsr-ee.patch", import.meta.url), "utf8");
   assert.match(patch, /\+constexpr u32 DOLPHIN_WEB_ENABLE_REGION_MTMSR_EE = 1u << 27;/);
   // A raw ?disable= mask never turns the enable bit on.
-  assert.match(host, /mask &= ~\(CACHED_INTERPRETER_DISABLE_BITS\.regionmtmsr \| CACHED_INTERPRETER_DISABLE_BITS\.regshape \|\n\s*CACHED_INTERPRETER_DISABLE_BITS\.regionchaincache\);/);
+  assert.match(host, /mask &= ~\(CACHED_INTERPRETER_DISABLE_BITS\.regionmtmsr \| CACHED_INTERPRETER_DISABLE_BITS\.regshape \|\n\s*CACHED_INTERPRETER_DISABLE_BITS\.regionchaincache \| CACHED_INTERPRETER_DISABLE_BITS\.regionfragments\);/);
 });
