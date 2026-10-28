@@ -833,7 +833,8 @@ function updateScreenHud(info) {
 
   // ?presentvsync: refreshes each game frame stayed on screen, as shares of
   // the frames (1/2/3/4+ refreshes), the refreshes beyond each frame's share
-  // (a repeat), the screen's rate and whether ?presentpace=game is on.
+  // (a repeat), the screen's rate and whether the game pace is on (the
+  // default; ?presentpace=off or =observe turn it off).
   if (elements.hudRefresh) elements.hudRefresh.textContent = formatRefreshHistogram(helper);
 
   // §28cn per-slice CPU pthread profiler: avg/max/runOnlyMax wall time per

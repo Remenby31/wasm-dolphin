@@ -129,6 +129,7 @@ import {
   createWgpuMappedStagingPool
 } from "./wgpu-mapped-staging-pool.js";
 import { createWgpuSparseUboCopyForward } from "./wgpu-sparse-ubo-copy-forward.js";
+import { createBindGroupCache } from "./wgpu-bind-group-cache.js";
 import { createVsyncQueue, vsyncLateMs } from "./wgpu-vsync-queue.js";
 import { createGamePacer, createRefreshHistogram, refreshOf } from "./wgpu-game-pacer.js";
 import {
@@ -951,6 +952,14 @@ let lastCapturedCoreFrame = -1;
 // gives up when it changes (the state belongs to the session it was asked
 // for).
 let coreBootGeneration = 0;
+// Mounts (and boots) under way: from the request to the boot's answer,
+// across mountFile's awaits (user data, the first-launch plan). A state load
+// meanwhile waits for that boot instead of finding "no game booted".
+let coreBootInFlight = 0;
+// The latest mount asked for and the latest one answered: a load that
+// joins a mount in flight takes that mount's boot, no other.
+let mountSeq = 0;
+let lastMountDone = 0;
 let coreBoot = {
   attempted: false,
   accepted: false,
@@ -1184,6 +1193,7 @@ function readWgpuReplayState() {
     mappedCapacityBlocked: wgpuMappedCapacityBlocked,
     mappedRemapPending: wgpuMappedRemapPromises.size,
     uploadTransport: wgpuUploadTransport,
+    bindGroupCache: webGpuObjects.bindGroupCache?.stats() ?? null,
     loadFenceActive: wgpuLoadFenceActive,
     replayYieldPending: wgpuReplayYieldPending,
     presentationLoopActive,
@@ -1628,10 +1638,25 @@ async function loadStateFileNow(payload) {
   // stopping, or another boot meanwhile: refused at once (the state
   // must not reach another session).
   if (api?.loadStateFile) {
-    const generation = coreBootGeneration;
-    const gone = () => (!coreBoot.accepted ? "no game booted" : coreStopping ? "core stopping"
-      : coreBootGeneration !== generation ? "another boot meanwhile" : null);
-    const wait = await waitCoreReadyForState(() => api?.getCoreStateName?.() ?? "", { abort: gone });
+    // The session the state is for: the game booted now, or, with none yet,
+    // the boot in flight (mountFile still running: waited for like
+    // Starting). Another boot starting while a booted game waits, a stop,
+    // or no boot at all: refused at once.
+    let generation = coreBoot.accepted && !coreBootInFlight ? coreBootGeneration : null;
+    const joined = coreBootInFlight ? mountSeq : null;
+    const gone = () => {
+      if (coreStopping) return "core stopping";
+      if (coreBootInFlight) return generation === null && mountSeq === joined ? null : "another boot meanwhile";
+      if (!coreBoot.accepted) return "no game booted";
+      if (generation === null && lastMountDone !== joined) return "another boot meanwhile";
+      generation ??= coreBootGeneration;
+      return coreBootGeneration !== generation ? "another boot meanwhile" : null;
+    };
+    // During a mount the core's state is still the previous game's (BootDisc
+    // stops it only at the boot): read as Starting until the mount answers,
+    // so no state goes into the game being replaced.
+    const wait = await waitCoreReadyForState(
+      () => (coreBootInFlight && generation === null ? "Starting" : api?.getCoreStateName?.() ?? ""), { abort: gone });
     if (!wait.ready) {
       const coreState = api?.getCoreStateName?.() ?? "";
       return { loaded: false, rc: 0, beforeState: coreState, refused: wait.reason,
@@ -1972,6 +1997,7 @@ async function handleMessage(type, payload) {
         wgpuVpDiag: payload.wgpuVpDiag,
         wgpuUniformFast: payload.wgpuUniformFast,
         wgpuUboPack: payload.wgpuUboPack,
+        wgpuBindGroupCache: payload.wgpuBindGroupCache,
         wgpuSparseUbo: payload.wgpuSparseUbo,
         wgpuGeometryPack: payload.wgpuGeometryPack,
         wgpuGeometryRange: payload.wgpuGeometryRange,
@@ -1995,7 +2021,7 @@ async function handleMessage(type, payload) {
       // Before any boot: Dolphin opens the GCI folder when the card goes in.
       return { ...metadataPayload(), userData: await startUserDataPersistence(payload.savesMode) };
     case "mountFile":
-      return mountFile(payload.file);
+      return mountFileTracked(payload.file);
     case "flushUserData":
     case "listUserData":
     case "exportMemcard":
@@ -2322,7 +2348,12 @@ async function handleMessage(type, payload) {
     case "validationReadCoreProgress": {
       const loadedCheckpoint = readLastLoadedCheckpoint();
       return {
+        // frame counts runFrame calls, which run before a boot too (the
+        // page's loop while no game is booted): booted says the disc's
+        // boot was accepted, coreState what the core is doing now.
         frame: api?.getFrame?.() ?? 0,
+        booted: coreBoot.accepted === true,
+        coreState: api?.getCoreStateName?.() ?? null,
         coreTicks: readCoreTicks(),
         coreTicksPerSecond: readCoreTicksPerSecond(),
         ppcPc: api?.getPpcPc?.() ?? 0,
@@ -2663,6 +2694,7 @@ async function loadCore({
   wgpuVpDiag: requestedWgpuVpDiag = false,
   wgpuUniformFast: requestedWgpuUniformFast = false,
   wgpuUboPack: requestedWgpuUboPack = false,
+  wgpuBindGroupCache: requestedWgpuBindGroupCache = false,
   wgpuSparseUbo: requestedWgpuSparseUbo = false,
   wgpuGeometryPack: requestedWgpuGeometryPack = false,
   wgpuGeometryRange: requestedWgpuGeometryRange = false,
@@ -2821,6 +2853,7 @@ async function loadCore({
   }
   wgpuUniformFastEnabled = Boolean(requestedWgpuUniformFast);
   wgpuUboPackEnabled = Boolean(requestedWgpuUboPack);
+  webGpuObjects.bindGroupCache = requestedWgpuBindGroupCache === true ? createBindGroupCache() : null;
   if (requestedWgpuSparseUbo && videoBackend !== "WebGPU-Real") {
     throw new Error("wgpuubosparse=1 requires video=wgpu");
   }
@@ -4554,6 +4587,17 @@ function mountedDiscNeeds() {
     return { boundingBox: false, known: false };
   }
   return { boundingBox: value === 1 };
+}
+
+async function mountFileTracked(file) {
+  const id = ++mountSeq;
+  coreBootInFlight += 1;
+  try {
+    return await mountFile(file);
+  } finally {
+    coreBootInFlight -= 1;
+    lastMountDone = Math.max(lastMountDone, id);
+  }
 }
 
 async function mountFile(file) {
@@ -9533,6 +9577,10 @@ const webGpuObjects = {
   samplerDescriptors: new Map(),
   nearestSamplers: new Map(),
   bindGroups: new Map(),
+  // ?wgpubgcache=1 (src/wgpu-bind-group-cache.js): identical bind groups
+  // reused; null when off. Kept here, not in a global, so the binding
+  // functions that source-contract tests run on their own still work.
+  bindGroupCache: null,
   bindGroupSamplingMasks: new Map(),
   pipeTpl: new Map(),  // id → {desc, target, depthBase} template
   pipeVar: new Map(),  // pipeline/attachment/depth/sampling-layout key → pipeline|null
@@ -10023,6 +10071,7 @@ function cancelWgpuReplayPump() {
 
 function clearWgpuReplayStateAfterDeviceLoss() {
   wgpuMappedStagingGeneration += 1;
+  webGpuObjects.bindGroupCache?.clear();
   resetWgpuMappedDrainCoalescing(WGPU_MAPPED_DRAIN_FORCE_REASONS.DEVICE_LOSS);
   wgpuUploadAttribution.cancelCapacityWait();
   destroyWgpuVisualCadenceResources();
@@ -11236,8 +11285,10 @@ function replayCreateBindGroup(id, blobPtr, blobLen) {
     }
   }
   try {
-    webGpuObjects.bindGroups.set(id,
-      renderGpu.device.createBindGroup({ layout, entries }));
+    const bindGroupCache = webGpuObjects.bindGroupCache;
+    webGpuObjects.bindGroups.set(id, bindGroupCache
+      ? bindGroupCache.get(renderGpu.device, layout, entries)
+      : renderGpu.device.createBindGroup({ layout, entries }));
     if (group === 1) webGpuObjects.bindGroupSamplingMasks.set(id, samplingKey);
   } catch (e) {
     if (!self._webGpuBgErr) {
@@ -13395,7 +13446,7 @@ function presentWgpuVsyncFrame({ newest = false, hidden = false, t = null, refre
     // Scale to the display (EASU up, area down) and sharpen (RCAS).
     if (wgpuDisplayFilterDevice !== dev) {
       wgpuDisplayFilterGpu?.destroy();
-      wgpuDisplayFilterGpu = createDisplayFilter(dev, renderGpu.format, { timing: collectMetrics });
+      wgpuDisplayFilterGpu = createDisplayFilter(dev, renderGpu.format, { timing: collectMetrics && wgpuDisplayFilter.timing });
       wgpuDisplayFilterDevice = dev;
     }
     wgpuDisplayFilterGpu.encode(enc, f.tex, dst, wgpuDisplayFilter.sharpness);
@@ -16661,6 +16712,12 @@ function drainWebGpuCmdRing(source = "presentation") {
             const resource = m.get(id);
             if (resource && wgpuConsumerStateCacheEnabled) {
               wgpuPassStateCache.invalidateDestroyedResource(tag, resource);
+            }
+            // ?wgpubgcache=1: the cached groups binding it go with it (a
+            // buffer is bound as itself, a texture through its array view).
+            if (resource && webGpuObjects.bindGroupCache) {
+              if (tag === 1) webGpuObjects.bindGroupCache.forget(resource);
+              else if (tag === 2 && resource.view2dArray) webGpuObjects.bindGroupCache.forget(resource.view2dArray);
             }
             m.delete(id);
             if (tag === 3) webGpuObjects.bindGroupSamplingMasks.delete(id);

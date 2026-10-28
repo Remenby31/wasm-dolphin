@@ -31,9 +31,11 @@ becomes:
    the min/max), denominators held off zero.
 
 Turned off, its textures and buffers are destroyed. With metrics on
-(drop-meter), the device asks for `timestamp-query` and the filter times
-each frame on the GPU (`validationReadPresentVsync.displayFilter.gpuMs*`;
-drop-meter prints it per visit and side).
+(drop-meter) and `?displayfiltertiming=1`, the device asks for
+`timestamp-query` and the filter times one frame in 8 on the GPU
+(`validationReadPresentVsync.displayFilter.gpuMs*`; drop-meter prints it
+per visit and side). Off by default: the readback each frame is work of its
+own, and a pair measuring the filter's cost on drops runs without it.
 
 EASU and RCAS are a WGSL port of AMD's `ffx_fsr1.h` (MIT, notice in the
 file). Without the filter the canvas is the backbuffer and the browser

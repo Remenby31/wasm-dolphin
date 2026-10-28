@@ -14,18 +14,21 @@ import {
 const read = (path) => readFile(new URL(path, import.meta.url), "utf8");
 
 test("?fsr= and ?displayfit= parse to the filter's state; any sharpness fits the canvas to the display", () => {
-  assert.deepEqual(requestedDisplayFilter(""), { sharpness: "off", fit: false, box: null });
-  assert.deepEqual(requestedDisplayFilter("?fsr=light"), { sharpness: "light", fit: false, box: null });
-  assert.deepEqual(requestedDisplayFilter("?fsr=2"), { sharpness: "strong", fit: false, box: null });
+  assert.deepEqual(requestedDisplayFilter(""), { sharpness: "off", fit: false, box: null, timing: false });
+  assert.deepEqual(requestedDisplayFilter("?fsr=light"), { sharpness: "light", fit: false, box: null, timing: false });
+  assert.deepEqual(requestedDisplayFilter("?fsr=2"), { sharpness: "strong", fit: false, box: null, timing: false });
   // Sharpness implies the fit; turned off again, the fit goes with it.
   assert.equal(displayFilterFits({ sharpness: "light", fit: false }), true);
   assert.equal(displayFilterFits({ sharpness: "off", fit: false }), false);
   assert.equal(displayFilterFits({ sharpness: "off", fit: true }), true);
-  assert.deepEqual(requestedDisplayFilter("?displayfit=1"), { sharpness: "off", fit: true, box: null });
-  assert.deepEqual(requestedDisplayFilter("?fsr=max&displayfit=yes"), { sharpness: "off", fit: false, box: null });
+  assert.deepEqual(requestedDisplayFilter("?displayfit=1"), { sharpness: "off", fit: true, box: null, timing: false });
+  assert.deepEqual(requestedDisplayFilter("?fsr=max&displayfit=yes"), { sharpness: "off", fit: false, box: null, timing: false });
   assert.deepEqual(normalizeDisplayFilter({ sharpness: "off", fit: true, box: { width: 1600.4, height: 1200 } }),
-    { sharpness: "off", fit: true, box: { width: 1600, height: 1200, contain: false } });
+    { sharpness: "off", fit: true, box: { width: 1600, height: 1200, contain: false }, timing: false });
   assert.equal(normalizeDisplayFilter({ box: { width: 0, height: 10 } }).box, null);
+  // The filter's GPU timing (a readback per frame): only asked for.
+  assert.equal(requestedDisplayFilter("?fsr=strong&displayfiltertiming=1").timing, true);
+  assert.equal(normalizeDisplayFilter({ timing: "yes" }).timing, false);
   assert.deepEqual(["off", "light", "strong"].map(rcasSharpnessStops), [null, 1, 0.2]);
 });
 
@@ -106,4 +109,13 @@ test("worker: frames at the backbuffer size, the canvas at the display size only
   assert.match(worker, /return wgpuPresentVsync && hardwareVideoBackend && displayFilterFits\(wgpuDisplayFilter\);/);
   assert.match(worker, /if \(wgpuDisplayFilterActive\(\)\) \{[\s\S]{0,400}wgpuDisplayFilterGpu\.encode\(enc, f\.tex, dst, wgpuDisplayFilter\.sharpness\);\n {2}\} else \{\n {4}enc\.copyTextureToTexture\(/);
   assert.match(worker, /const size = wgpuDisplayFilterActive\(\)\n {6}\? displayFilterOutputSize\(/);
+});
+
+// The filter's GPU timing reads one frame in TIMING_EVERY back, not each one
+// (a readback per frame is work of its own, beside the drops it measures).
+test("the display filter times one filtered frame in TIMING_EVERY", async () => {
+  const { TIMING_EVERY } = await import("../src/wgpu-display-filter.js");
+  assert.equal(TIMING_EVERY, 8);
+  const source = await read("../src/wgpu-display-filter.js");
+  assert.match(source, /frameTimes = freeSlots\.length && stats\.frames % TIMING_EVERY === 0 \? \{ started: false \} : null;/);
 });
