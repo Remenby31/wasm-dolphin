@@ -17,8 +17,8 @@ const SWITCHES = [
 
 test("pacing switches: URL parsing, shipped defaults, each switch only its own", async () => {
   const { requestedPacing } = await import("../src/core-host.js");
-  // Rush off by default (upstream's default): ?rush=1 turns it back on.
-  assert.deepEqual(requestedPacing(""), { rushPresentation: false, syncOnSkipIdle: false, dupXfbRearmsThrottle: false, smoothEarly: true, sleepMarginUs: 0, sleepStepUs: 0, sleepK: 750, sleepSpinUs: 150, presentVsync: true, presentGamePace: false, presentPaceStats: false });
+  // Rush off by default (upstream's default): ?rush=1 turns it back on. Game pacing on (?presentpace=off).
+  assert.deepEqual(requestedPacing(""), { rushPresentation: false, syncOnSkipIdle: false, dupXfbRearmsThrottle: false, smoothEarly: true, sleepMarginUs: 0, sleepStepUs: 0, sleepK: 750, sleepSpinUs: 150, presentVsync: true, presentGamePace: true, presentPaceStats: true });
   for (const s of SWITCHES) {
     const p = requestedPacing(`?${s.param}`);
     assert.equal(p[s.option], s.on, s.param);
@@ -134,20 +134,22 @@ test("presentvsync: URL → host → adapter → worker, on by default, ?present
   assert.match(worker, /wgpuPresentVsync = presentVsync !== false && typeof self\.requestAnimationFrame === "function" && !wgpuDetachedPresenter;/, "only with a worker rAF, never with the detached presenter (stale bitmap)");
 });
 
-// ?presentpace=game (src/wgpu-game-pacer.js): frames at the game's own pace
-// on a screen faster than the game. Off by default.
-test("presentpace=game: URL → host → adapter → worker → the presenter, off by default", async (t) => {
+// ?presentpace (src/wgpu-game-pacer.js): frames at the game's own pace on a
+// screen faster than the game. On by default since 2026-10-28; =off turns it
+// off, =observe keeps the histogram without pacing.
+test("presentpace: URL → host → adapter → worker → the presenter, game by default, off and observe by the URL", async (t) => {
   const { requestedPacing } = await import("../src/core-host.js");
-  assert.equal(requestedPacing("").presentGamePace, false);
-  assert.equal(requestedPacing("?presentpace=game").presentGamePace, true);
-  assert.equal(requestedPacing("?presentpace=GAME").presentGamePace, true);
-  assert.equal(requestedPacing("?presentpace=1").presentGamePace, false, "only the word game");
-  // observe: the histogram and the period kept, no pacing; game: both
+  for (const q of ["", "?presentpace=game", "?presentpace=GAME", "?presentpace=1", "?presentpace=bogus"]) {
+    assert.deepEqual([requestedPacing(q).presentGamePace, requestedPacing(q).presentPaceStats], [true, true], `game: ${q || "no option"}`);
+  }
+  for (const q of ["?presentpace=off", "?presentpace=OFF", "?presentpace=0", "?presentpace=false", "?presentpace=no"]) {
+    assert.deepEqual([requestedPacing(q).presentGamePace, requestedPacing(q).presentPaceStats], [false, false], `off: ${q}`);
+  }
+  // observe: the histogram and the period kept, no pacing
   assert.deepEqual([requestedPacing("?presentpace=observe").presentGamePace, requestedPacing("?presentpace=observe").presentPaceStats], [false, true]);
-  assert.equal(requestedPacing("?presentpace=game").presentPaceStats, true);
-  assert.equal(requestedPacing("").presentPaceStats, false);
   assert.equal(requestedPacing("?presentpace=game").presentVsync, true, "only its own switch");
   const { UpstreamWorkerAdapter } = await import("../src/upstream-worker-adapter.js");
+  // the adapter and the worker take what the host passes (nothing: off)
   assert.equal(new UpstreamWorkerAdapter({}).presentGamePace, false);
   const adapter = new UpstreamWorkerAdapter(requestedPacing("?presentpace=game"));
   let posted = null;
@@ -175,8 +177,8 @@ test("presentpace=game: URL → host → adapter → worker → the presenter, o
   assert.match(host, /\n {12}presentPaceStats: this\.pacing\.presentPaceStats,\n/);
   // every queued frame stamped (the HUD reads the same with the switch off);
   // the pace only at a BeginFrame, with the switch on
-  // by default no extra work: stamping, the refresh period and the histogram
-  // only with ?presentpace=game|observe or the harness
+  // with ?presentpace=off no extra work: stamping, the refresh period and
+  // the histogram only with game (the default), observe or the harness
   assert.match(worker, /const wgpuVsyncTracking = \(\) => wgpuPresentPaceStats \|\| harnessEnabled;/);
   assert.match(worker, /\n  if \(wgpuVsyncTracking\(\)\) wgpuGamePacer\.stamp\(at\);\n/);
   assert.match(worker, /const refreshMs = tracking \? wgpuVsyncRefreshMs\(\) : null;/);

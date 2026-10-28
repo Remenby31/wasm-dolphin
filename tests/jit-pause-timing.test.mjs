@@ -87,6 +87,9 @@ function createHarness() {
     coreBoot: { accepted: true },
     coreStopping: false,
     coreBootGeneration: 0,
+    coreBootInFlight: 0,
+    mountSeq: 0,
+    lastMountDone: 0,
     waitCoreReadyForState,
   });
   const serial = createSerial();
@@ -251,4 +254,74 @@ test("a state load refused at once never suspends the JIT gate", async () => {
   assert.deepEqual([result.loaded, result.refused], [false, "refused"]);
   assert.match(result.error, /no game booted/);
   assertGateOperational(h);
+});
+
+// Signalled by the drop-meter A/A (#325 follow-up): a load handled while the
+// boot is still in flight (mountFile awaiting, the core "Uninitialized", no
+// game accepted yet) waits for that boot instead of "no game booted".
+test("a state load received before the boot is acknowledged waits for that boot, then loads", async () => {
+  const h = createHarness();
+  let name = "Uninitialized";
+  h.api.getCoreStateName = () => name;
+  h.context.coreBoot = { accepted: false };
+  h.context.coreBootInFlight = 1;
+  h.context.mountSeq = 1;
+  const load = h.request("loadStateFile", { fsPath: "/test.sav" });
+  await new Promise((r) => setTimeout(r, 60));
+  assert.equal(h.context.ppcWasmJitTimingSuspensions, 0, "not loading yet: the boot is in flight");
+  // The boot answers: a new generation, accepted, the core running.
+  h.context.coreBootGeneration += 1;
+  h.context.coreBoot = { accepted: true };
+  h.context.coreBootInFlight = 0;
+  h.context.lastMountDone = 1;
+  name = "Running";
+  await new Promise((r) => setTimeout(r, 60));
+  const result = await h.finishTimer(load);
+  assert.equal(result.loaded, true);
+  assert.equal(h.context.ppcWasmJitTimingSuspensions, 0);
+});
+
+test("a booted game's load gives up when another boot starts while it waits", async () => {
+  const h = createHarness();
+  let name = "Starting";
+  h.api.getCoreStateName = () => name;
+  const load = h.request("loadStateFile", { fsPath: "/test.sav" });
+  await new Promise((r) => setTimeout(r, 30));
+  h.context.coreBootInFlight = 1;
+  const result = await load;
+  assert.deepEqual([result.loaded, result.refused], [false, "refused"]);
+  assert.match(result.error, /another boot meanwhile/);
+});
+
+// Review of #328: during a mount the core still runs the previous game
+// (BootDisc stops it only at the boot): a load meanwhile must not go into it.
+test("the previous game still Running during a mount takes no state until the new boot answers", async () => {
+  const h = createHarness();
+  let loads = 0;
+  h.api.loadStateFile = () => { loads += 1; return 1; };
+  h.context.coreBoot = { accepted: true };
+  h.context.coreBootInFlight = 1;
+  h.context.mountSeq = 1;
+  const load = h.request("loadStateFile", { fsPath: "/test.sav" });
+  await new Promise((r) => setTimeout(r, 60));
+  assert.equal(loads, 0, "game A is Running but being replaced: no load");
+  h.context.coreBootGeneration += 1;
+  h.context.coreBootInFlight = 0;
+  h.context.lastMountDone = 1;
+  await new Promise((r) => setTimeout(r, 60));
+  const result = await h.finishTimer(load);
+  assert.deepEqual([result.loaded, loads], [true, 1]);
+});
+
+test("a load that joined one mount gives up when another mount answered instead", async () => {
+  const h = createHarness();
+  h.context.coreBoot = { accepted: false };
+  h.context.coreBootInFlight = 1;
+  h.context.mountSeq = 1;
+  const load = h.request("loadStateFile", { fsPath: "/test.sav" });
+  await new Promise((r) => setTimeout(r, 30));
+  h.context.mountSeq = 2;
+  const result = await load;
+  assert.deepEqual([result.loaded, result.refused], [false, "refused"]);
+  assert.match(result.error, /another boot meanwhile/);
 });
