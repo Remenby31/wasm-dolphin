@@ -1,19 +1,19 @@
 {
   "schemaVersion": 1,
   "abiVersion": 1,
-  "coreId": "sha256:d04124707e3fc66db06ffb19e5e374e4b82f9c0bc95228fa0da54ea65088f921",
+  "coreId": "sha256:8b81950a5939b0b053ee8315c11f0ee82f6fa644074c764c8e5795f289dae0ed",
   "upstreamCommit": "e22551eae1c84a7e4d0b6a5c519ef4ed4ef69df1",
   "artifacts": [
     {
       "path": "cores/dolphin/dolphin-core-upstream.js",
       "hashMode": "lf-normalized",
-      "size": 288742,
-      "sha256": "f30eed3cc7c37b4c3d26746eab3409692030e491a475b5121dbbe4df3f39c23b"
+      "size": 289027,
+      "sha256": "1923658417b8b114c00e9a5b0fadff4fab56e9bc350739c0a7329968fa9e509e"
     },
     {
       "path": "cores/dolphin/dolphin-core-upstream.wasm",
-      "size": 13228014,
-      "sha256": "d04124707e3fc66db06ffb19e5e374e4b82f9c0bc95228fa0da54ea65088f921"
+      "size": 13228711,
+      "sha256": "8b81950a5939b0b053ee8315c11f0ee82f6fa644074c764c8e5795f289dae0ed"
     }
   ],
   "contractSources": [
@@ -86,8 +86,8 @@
     {
       "path": "src/core-host.js",
       "hashMode": "lf-normalized",
-      "size": 95436,
-      "sha256": "14ef8e8bc20457aa058762fe5f315610b5ea60dd0762eb51e148301fc047c4bc"
+      "size": 95600,
+      "sha256": "538ee5d92a8128700bd5d7e00a402d48733fc76d20443a6bbd44dee3f0117228"
     },
     {
       "path": "src/diagnostic-log-filter.js",
@@ -410,6 +410,7 @@
     "_DolphinWeb_AotTranslate",
     "_DolphinWeb_AotTranslateForTest",
     "_DolphinWeb_AotUnverifyForTest",
+    "_DolphinWeb_AudioQueuedMs",
     "_DolphinWeb_AxHleStats",
     "_DolphinWeb_DirectPadBlock",
     "_DolphinWeb_DirectPadLayout",
@@ -507,6 +508,7 @@
     "_DolphinWeb_SetThrottleSleepCascade",
     "_DolphinWeb_SetThrottleSleepMarginUs",
     "_DolphinWeb_SetThrottleSleepStepUs",
+    "_DolphinWeb_SetWidescreen",
     "_DolphinWeb_ThrottleSleepCascade",
     "_DolphinWeb_ThrottleSleepStepUs",
     "_DolphinWeb_UnverifyRegions",
