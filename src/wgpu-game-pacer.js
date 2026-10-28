@@ -1,8 +1,9 @@
 // Copyright 2026 wasm-dolphin contributors
 // SPDX-License-Identifier: GPL-2.0-or-later
 
-// ?presentpace=game: the vsync presenter's frames shown at the game's own
-// pace, not at the first BeginFrame after they are queued. On a screen faster
+// ?presentpace=game (the default; =off turns it off): the vsync presenter's
+// frames shown at the game's own pace, not at the first BeginFrame after
+// they are queued. On a screen faster
 // than the game (60 fps on 120 Hz ProMotion, 30 fps on 60 Hz) showing the
 // oldest frame at every BeginFrame puts a frame that lands just after one
 // BeginFrame and the next just before another on screen for 1 refresh, then
