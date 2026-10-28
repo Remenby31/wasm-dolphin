@@ -353,14 +353,21 @@ export async function workerRequest(page, type, payload = {}, timeoutMs = 10000)
 
 export const readCoreProgress = (page) => workerRequest(page, "validationReadCoreProgress");
 
-export async function waitRunning(page, timeoutMs = 60000) {
-  const end = Date.now() + timeoutMs;
-  while (Date.now() < end) {
-    const p = await readCoreProgress(page);
-    if ((p?.frame ?? 0) > 0) return; // frames only advance once Running
+// The disc's boot accepted and frames running. Frames alone are not enough:
+// the core counts every runFrame, and the page runs them before a boot too
+// (2026-10-28: on a warm second visit the boot waited longer for its AOT
+// regions, frames were already counted, and the state load came back
+// "load refused: no game booted", three runs in one pair). A worker without
+// the booted field: frames only, as before.
+export async function waitRunning(page, timeoutMs = 60000, { read = readCoreProgress, now = Date.now } = {}) {
+  const end = now() + timeoutMs;
+  let p = null;
+  while (now() < end) {
+    p = await read(page);
+    if ((p?.frame ?? 0) > 0 && p?.booted !== false) return p;
     await page.waitForTimeout(100);
   }
-  throw new Error("core never reached Running");
+  throw new Error(`core never reached Running (frame ${p?.frame ?? "?"}, booted ${p?.booted ?? "?"}, state ${p?.coreState ?? "?"})`);
 }
 
 // Load the savestate the session routes at /__harness_state.sav, once the

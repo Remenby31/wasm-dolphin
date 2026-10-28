@@ -2322,7 +2322,12 @@ async function handleMessage(type, payload) {
     case "validationReadCoreProgress": {
       const loadedCheckpoint = readLastLoadedCheckpoint();
       return {
+        // frame counts runFrame calls, which run before a boot too (the
+        // page's loop while no game is booted): booted says the disc's
+        // boot was accepted, coreState what the core is doing now.
         frame: api?.getFrame?.() ?? 0,
+        booted: coreBoot.accepted === true,
+        coreState: api?.getCoreStateName?.() ?? null,
         coreTicks: readCoreTicks(),
         coreTicksPerSecond: readCoreTicksPerSecond(),
         ppcPc: api?.getPpcPc?.() ?? 0,
