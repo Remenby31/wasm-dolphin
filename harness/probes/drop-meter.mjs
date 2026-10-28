@@ -704,6 +704,8 @@ async function main() {
       gaveUp = await runSides(sideOrder(run).filter((n) => sides[n]), {
         gate: async () => {
           const gate = await lock.waitCalmUnlocked({ waitSec: o.loadWait, log });
+          // the bench (lib/bench-load.mjs): visits judged against the gate's limit
+          if (gate?.background !== undefined) o.maxLoad = gate.limit;
           return { gate, gaveUp: loadGaveUp(gate) };
         },
         play: async (name, gate) => {

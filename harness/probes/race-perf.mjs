@@ -941,6 +941,9 @@ async function main() {
         // run is played again once it is taken back, both sides together.
         const g = await calmUnderLock({ lock: releaseLock, maxLoad: o.maxLoad, waitSec: o.loadWait, acquire, log: (m) => console.log(`[race-perf] run ${run} ${name}: ${m}`) });
         releaseLock = g.lock;
+        // the bench (lib/bench-load.mjs): the run is judged against the limit
+        // the gate computed (background + 5 per granted lane), not --max-load
+        if (g.gate?.background !== undefined) o.maxLoad = g.gate.limit;
         gaveUp = loadGaveUp(g.gate);
         if (gaveUp) { console.warn(`[race-perf] run ${run} ${name}: ${gaveUp}`); break; }
         if (g.relocked) {

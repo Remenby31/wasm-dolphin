@@ -60,6 +60,10 @@ mkdir -p "$B/lanes/b"
   export HARNESS_CHROME_ARGS="${HARNESS_CHROME_ARGS:+$HARNESS_CHROME_ARGS }--js-flags=--wasm-partial-oob-writes-are-noops"
   export SPARK_CHROMIUM="$(ls -d "$B"/ms-playwright/chromium-*/chrome-linux*/chrome | sort -V | tail -1)"
   export SPARK_CHROME_CPUS="${SPARK_CHROME_CPUS:-$cpus}"
+  # The probes' load gate on the bench (harness/lib/bench-load.mjs): this
+  # lane's cores free of other people's threads, the machine under its
+  # background plus 5 per granted lane, instead of a fixed --max-load.
+  export SPARK_LANE="$lane" SPARK_LANE_CPUS="$SPARK_CHROME_CPUS,${SPARK_NODE_CPUS:-$ncpus}"
   echo "[spark-race] $(date -Is) $(hostname) lane $lane uptime:$(uptime)"
   echo "[spark-race] chromium: $("$SPARK_CHROMIUM" --version) on cpus $SPARK_CHROME_CPUS, node on ${SPARK_NODE_CPUS:-$ncpus}, port $port"
   echo "[spark-race] the lane's cores are free: $(cat "$out.cores")"
