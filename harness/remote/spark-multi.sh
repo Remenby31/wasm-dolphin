@@ -29,6 +29,8 @@ mkdir -p "$B/lanes/b"
   export HARNESS_CHROME_ARGS="${HARNESS_CHROME_ARGS:+$HARNESS_CHROME_ARGS }--js-flags=--wasm-partial-oob-writes-are-noops"
   export SPARK_CHROMIUM="$(ls -d "$B"/ms-playwright/chromium-*/chrome-linux*/chrome | sort -V | tail -1)"
   echo "[spark-multi] $(date -Is) $(hostname) lanes $lane uptime:$(uptime)"
+  # the cores' kinds (the two lanes ran 7 % apart in a multi A/A, 2026-10-28)
+  node harness/remote/spark-cores.mjs topology 2>/dev/null | sed "s/^/[spark-multi] cpus /"
   echo "[spark-multi] chromium: $("$SPARK_CHROMIUM" --version), node on 10-14, perf_event_paranoid=$(cat /proc/sys/kernel/perf_event_paranoid)"
   taskset -c 10-14 node harness/probes/race-multi.mjs "$@" --port 8095 --lock "$B/.perf-lock" --lock "$B/lanes/b/.perf-lock" --out "$out"
   code=$?

@@ -65,11 +65,17 @@ mkdir -p "$B/lanes/b"
   # background plus 5 per granted lane, instead of a fixed --max-load.
   export SPARK_LANE="$lane" SPARK_LANE_CPUS="$SPARK_CHROME_CPUS,${SPARK_NODE_CPUS:-$ncpus}"
   echo "[spark-race] $(date -Is) $(hostname) lane $lane uptime:$(uptime)"
+  # the cores' kinds (the two lanes ran 7 % apart in a multi A/A, 2026-10-28)
+  node harness/remote/spark-cores.mjs topology 2>/dev/null | sed "s/^/[spark-race] cpus /"
   echo "[spark-race] chromium: $("$SPARK_CHROMIUM" --version) on cpus $SPARK_CHROME_CPUS, node on ${SPARK_NODE_CPUS:-$ncpus}, port $port"
   echo "[spark-race] the lane's cores are free: $(cat "$out.cores")"
   # The busiest threads and the CPU each last ran on, before and after, to
   # tell a pair's load from someone else's on its cores (read only; per
   # thread: a process's psr is its main thread's alone).
+  # Read only: whether a cpuset cgroup per lane could replace taskset without
+  # a system change (systemd user delegation of the cpuset controller).
+  cg=$(sed -n 's/^0:://p' /proc/self/cgroup 2>/dev/null)
+  echo "[spark-race] cgroup ${cg:-?}: controllers $(cat "/sys/fs/cgroup${cg}/cgroup.controllers" 2>/dev/null || echo ?); parent delegates $(cat "/sys/fs/cgroup$(dirname "${cg:-/}")/cgroup.subtree_control" 2>/dev/null || echo ?)"
   echo "[spark-race] busiest before:"; ps -eLo pid,tid,psr,pcpu,user,comm --sort=-pcpu | head -8
   echo "[spark-race] probe $probe"
   taskset -c "${SPARK_NODE_CPUS:-$ncpus}" node "harness/probes/$probe.mjs" "$@" --port "$port" --out "$out"

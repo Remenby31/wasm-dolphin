@@ -329,6 +329,42 @@ test("spark-run --multi: a KPI scene is measured with its pinned protocol (heavy
   assert.equal(sceneName("race-after.sav"), "race-after.sav");
 });
 
+test("spark-run --multi-lanes: one lane per arm, disjoint, off node's cores; the three-lane default needs three arms", async () => {
+  const { multiArms, multiLanes, MULTI_LANES, multiRaceArgs } = await import("../harness/remote/spark-run.mjs");
+  // two lanes: baseline and candidate, no third arm
+  assert.deepEqual(multiArms("base", ["cand"], { lanes: 2 }), ["base", "cand"]);
+  assert.deepEqual(multiArms("base", ["cand"]), ["base", "cand", "base"]);
+  assert.throws(() => multiArms("base", ["c1", "c2"], { lanes: 2 }), /two lanes: one --candidate/);
+  assert.equal(multiLanes(null, 3), MULTI_LANES);
+  assert.throws(() => multiLanes(null, 2), /--multi with 2 arms: --multi-lanes/);
+  // the two pair lanes' big cores, one arm each (simultaneous A/B, lanes swapped by race-multi)
+  assert.equal(multiLanes("15-19;5-9", 2), "15,16,17,18,19;5,6,7,8,9");
+  assert.throws(() => multiLanes("15-19", 2), /1 lanes for 2 arms/);
+  assert.throws(() => multiLanes("15-19;17-21", 2), /cpus 0-19/);
+  assert.throws(() => multiLanes("15-19;5-9,15", 2), /share cpus|different sizes/);
+  assert.throws(() => multiLanes("10-14;5-9", 2), /cpus 10-14 run node/);
+  assert.throws(() => multiLanes("15-19;5-8", 2), /different sizes/);
+  assert.throws(() => multiLanes("a;b", 2), /cpus as n or n-m/);
+  const args = multiRaceArgs({ iso: "/d.iso", state: "/s.sav", runs: 6, armDirs: ["/a", "/b"], lanes: "15,16,17,18,19;5,6,7,8,9" });
+  assert.equal(args[args.indexOf("--lanes") + 1], "15,16,17,18,19;5,6,7,8,9");
+});
+
+test("spark-run --queue: each ticket's wait and estimate, a waiting ticket past an hour flagged", async () => {
+  const { queueRows, QUEUE_STARVED_MIN } = await import("../harness/remote/spark-run.mjs");
+  assert.equal(QUEUE_STARVED_MIN, 60);
+  const now = Date.parse("2026-10-28T12:00:00Z");
+  const rows = queueRows([
+    { kind: "pair", name: "x11-a", owner: "wt-x", at: "2026-10-28T11:50:00Z", lane: "a", endsIn: 7 },
+    { kind: "pair", name: "late", owner: "wt-y", at: "2026-10-28T10:30:00Z", lane: null, startsIn: 7 },
+    { kind: "pair", name: "held", at: "2026-10-28T11:55:00Z", lane: null, holdUntil: "2026-10-28T12:01:00Z", startsIn: 20 }
+  ], now);
+  assert.deepEqual(rows, [
+    "pair x11-a (wt-x) [wants ?] running in a, 10 min since queued, ends in ~7 min",
+    "STARVED pair late (wt-y) [wants ?] waiting, 90 min since queued, starts in ~7 min",
+    "pair held [wants ?] held (cores busy), 5 min since queued, starts in ~20 min"
+  ]);
+});
+
 // --probe (2026-10-28): drop-meter and replay-gates run on the bench like
 // race-perf (same lane, lock, cores, display); the Spark side picks the
 // script from SPARK_PROBE, refusing any other name.

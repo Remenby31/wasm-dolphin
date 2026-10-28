@@ -8,7 +8,7 @@ import os from "node:os";
 import path from "node:path";
 import test from "node:test";
 import { fileURLToPath } from "node:url";
-import { busyOn, checkCores, parseCpuList, parseStat, treeOf } from "../harness/remote/spark-cores.mjs";
+import { busyOn, checkCores, cpuTopology, parseCpuList, parseStat, topologyLines, treeOf } from "../harness/remote/spark-cores.mjs";
 import { held, lanesCpus, nextStep, readTickets, waitTurn } from "../harness/remote/spark-queue.mjs";
 
 const ROOT = fileURLToPath(new URL("..", import.meta.url));
@@ -138,4 +138,30 @@ test("spark-cores: a real check on Linux (CI) reads every thread", { skip: proce
   const r = await checkCores({ cpus: "0", ms: 50, threshold: 1000 });
   assert.equal(r.ok, true, "nothing is over 1000 % of a core");
   assert.equal(r.cpus, "0");
+});
+
+// 2026-10-28: the two lanes' Chromium cores ran 7 % apart in a multi A/A;
+// the bench logs each cpu's kind so that a lane's cores are known.
+test("spark-cores topology: one line per run of cpus of the same kind, read from sysfs", async () => {
+  const sys = {};
+  for (let cpu = 0; cpu < 4; cpu++) {
+    const b = `/sys/devices/system/cpu/cpu${cpu}`;
+    sys[`${b}/topology/core_id`] = String(cpu);
+    sys[`${b}/cpu_capacity`] = cpu < 2 ? "1024" : "780";
+    sys[`${b}/cpufreq/cpuinfo_max_freq`] = cpu < 2 ? "3900000" : "2800000";
+    sys[`${b}/regs/identification/midr_el1`] = cpu < 2 ? "0x411fd850" : "0x411fd870";
+    sys[`${b}/topology/cluster_id`] = cpu < 2 ? "1" : "0";
+  }
+  const cpus = cpuTopology((p) => sys[p] ?? null);
+  assert.equal(cpus.length, 4, "stops at the first cpu sysfs does not have");
+  assert.deepEqual(cpus[0], { cpu: 0, midr: "0x411fd850", capacity: 1024, maxMhz: 3900, cluster: "1" });
+  assert.deepEqual(topologyLines(cpus), [
+    "0-1: midr 0x411fd850 capacity 1024 max 3900 MHz cluster 1",
+    "2-3: midr 0x411fd870 capacity 780 max 2800 MHz cluster 0"
+  ]);
+  assert.deepEqual(topologyLines([{ cpu: 5, midr: null, capacity: null, maxMhz: null, cluster: null }]), ["5: midr ? capacity ? max ? MHz cluster ?"]);
+  for (const f of ["spark-race.sh", "spark-multi.sh"]) {
+    const sh = await readFile(new URL(`../harness/remote/${f}`, import.meta.url), "utf8");
+    assert.match(sh, /node harness\/remote\/spark-cores\.mjs topology/, `${f} logs the cores' kinds`);
+  }
 });
