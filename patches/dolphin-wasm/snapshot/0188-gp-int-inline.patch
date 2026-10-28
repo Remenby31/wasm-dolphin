@@ -1,7 +1,15 @@
 diff --git a/Source/Core/Core/PowerPC/CachedInterpreter/CachedInterpreter.cpp b/Source/Core/Core/PowerPC/CachedInterpreter/CachedInterpreter.cpp
 --- a/Source/Core/Core/PowerPC/CachedInterpreter/CachedInterpreter.cpp
 +++ b/Source/Core/Core/PowerPC/CachedInterpreter/CachedInterpreter.cpp
-@@ -382,6 +382,11 @@
+@@ -42,6 +42,7 @@
+ #include "Core/HLE/HLE.h"
+ #include "Core/HW/CPU.h"
+ #include "Core/HW/GPFifo.h"
++#include "Core/HW/ProcessorInterface.h"
+ #include "Core/HW/Memmap.h"
+ #include "Core/HW/SystemTimers.h"
+ #include "Core/Movie.h"
+@@ -382,6 +383,11 @@
  // eager prologue of every used GPR spilled them (research/deep-x64-region-shape).
  // Off: blocks and regions are emitted byte for byte as before.
  constexpr u32 DOLPHIN_WEB_ENABLE_REGSHAPE_X64 = 1u << 28;
@@ -13,10 +21,16 @@ diff --git a/Source/Core/Core/PowerPC/CachedInterpreter/CachedInterpreter.cpp b/
  constexpr u32 REGSHAPE_X64_GPR_CAP = 4;
  // §28ce burst smearing: when ENABLED (gate bit CLEARED), TryWriteWasmBlock
  // returns false (falls to interpret) once this many compiles OR this much
-@@ -2480,6 +2485,25 @@
+@@ -2480,6 +2486,38 @@
    return DolphinWeb_CachedInterpreterCheckProgramOrDsi(ppc_state, current_pc, downcount) ? 1 : 0;
  }
  
++// 0188 tests: where the next burst goes (the CPU FIFO's write pointer).
++extern "C" EMSCRIPTEN_KEEPALIVE u32 DolphinWeb_GatherPipeFifoForTest()
++{
++  return Core::System::GetInstance().GetProcessorInterface().m_fifo_cpu_write_pointer;
++}
++
 +// 0188 tests: the gather pipe's pending bytes (copied to `out`, at most
 +// `capacity`) and their count; `reset` 1 sets it up empty first (GPFifo::Init:
 +// the test CPU set-up does not run the hardware's init), 2 flushes its whole
@@ -26,7 +40,14 @@ diff --git a/Source/Core/Core/PowerPC/CachedInterpreter/CachedInterpreter.cpp b/
 +{
 +  auto& system = Core::System::GetInstance();
 +  if (reset == 1)
++  {
 +    system.GetGPFifo().Init();
++    // The CPU FIFO the bursts go to: 64 KiB at RAM 1 MiB, written in order.
++    auto& pi = system.GetProcessorInterface();
++    pi.m_fifo_cpu_base = 0x00100000;
++    pi.m_fifo_cpu_end = 0x0010ffe0;
++    pi.m_fifo_cpu_write_pointer = pi.m_fifo_cpu_base;
++  }
 +  else if (reset == 2)
 +    system.GetGPFifo().FastCheckGatherPipe();
 +  const auto& ppc = system.GetPPCState();
@@ -39,7 +60,7 @@ diff --git a/Source/Core/Core/PowerPC/CachedInterpreter/CachedInterpreter.cpp b/
  extern "C" void DolphinWeb_CachedInterpreterFastCheckGatherPipe(int state_ptr, u32 unused_a,
                                                                   u32 unused_b)
  {
-@@ -4956,6 +4980,72 @@
+@@ -4956,6 +4994,72 @@
    EmitSignExtendI16(body);
  }
  
@@ -112,7 +133,7 @@ diff --git a/Source/Core/Core/PowerPC/CachedInterpreter/CachedInterpreter.cpp b/
  void EmitWriteU32MaybeDirect(std::vector<u8>& body, const WasmStateLayout& layout)
  {
    EmitLocalGet(body, 1);
-@@ -4977,10 +5067,7 @@
+@@ -4977,10 +5081,7 @@
    body.push_back(0x00);
    EmitU32Leb(body, 0);
    body.push_back(0x05);
@@ -124,7 +145,7 @@ diff --git a/Source/Core/Core/PowerPC/CachedInterpreter/CachedInterpreter.cpp b/
    body.push_back(0x0b);
  }
  
-@@ -5003,10 +5090,7 @@
+@@ -5003,10 +5104,7 @@
    body.push_back(0x00);
    EmitU32Leb(body, 0);
    body.push_back(0x05);
@@ -136,7 +157,7 @@ diff --git a/Source/Core/Core/PowerPC/CachedInterpreter/CachedInterpreter.cpp b/
    body.push_back(0x0b);
  }
  
-@@ -5031,10 +5115,7 @@
+@@ -5031,10 +5129,7 @@
    body.push_back(0x00);
    EmitU32Leb(body, 0);
    body.push_back(0x05);
@@ -148,7 +169,7 @@ diff --git a/Source/Core/Core/PowerPC/CachedInterpreter/CachedInterpreter.cpp b/
    body.push_back(0x0b);
  }
  
-@@ -5341,6 +5422,10 @@
+@@ -5341,6 +5436,10 @@
  // its ops take them for granted instead of testing them one by one. GQRs
  // (mtspr GQR is direct) are still tested per op.
  thread_local bool t_region_guards = false;

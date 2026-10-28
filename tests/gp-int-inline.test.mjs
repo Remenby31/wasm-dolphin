@@ -38,10 +38,10 @@ function program(hi, n, extra = []) {
   return [...w, ...extra, BLR];
 }
 const pipe = () => {
-  const p = core.module._malloc(64);
+  const p = core.module._malloc(512);
   try {
-    const n = core.module._DolphinWeb_GatherPipeForTest(0, p, 64);
-    return { n, bytes: Array.from(core.module.HEAPU8.slice(p, p + Math.min(n, 64))) };
+    const n = core.module._DolphinWeb_GatherPipeForTest(0, p, 512);
+    return { n, bytes: Array.from(core.module.HEAPU8.slice(p, p + Math.min(n, 512))) };
   } finally { core.module._free(p); }
 };
 function check(words, mask, seed) {
@@ -72,9 +72,12 @@ function check(words, mask, seed) {
   return pipes[2];
 }
 
-// The stream sent to the FIFO: the bursts copied to RAM (the CPU FIFO's
-// write pointer stays at 0 here: no PI FIFO is set up, every burst lands at
-// RAM 0) are read as they come, and what is left pending at the end.
+// The stream sent to the FIFO: the test export puts the CPU FIFO at RAM
+// 1 MiB, so every burst lands after the previous one; the stream is that
+// range up to the write pointer, then the bytes still pending. The JIT flushes
+// late (as for float stores) and the interpreter at every 32 bytes: the
+// stream, not the moment of each burst, is what must match.
+const FIFO_BASE = 0x00100000;
 function streams(words, mask, seed) {
   const state = randomState(makeRng(seed));
   state[37] = 0x00002032; state[33] = 0; state[36] = 0;
@@ -84,37 +87,24 @@ function streams(words, mask, seed) {
   assert.ok(f, "translated");
   const { bytes } = assembleRegion([f], { helpers: HELPER_SIGNATURES, pcOffset: core.pcOffset, memoryPages: core.memoryPages });
   const handle = core.compile(bytes);
+  const baseline = core.ram().slice();
   const run = (useRegion) => {
+    core.ram().set(baseline);
     core.loadState(state, ORACLE_CODE);
     core.module._DolphinWeb_GatherPipeForTest(1, 0, 0);
     core.setDowncount(400000);
-    let total = 0;
-    const sent = [];
-    const drain = () => { // bursts land at RAM 0: read each one as it comes
-      const before = total;
-      core.module._DolphinWeb_GatherPipeForTest(2, 0, 0);
-      return before;
-    };
     for (let guard = 0; guard < 100000 && core.pc() !== 0x80002000; guard++) {
       if (useRegion && core.pc() === ORACLE_CODE) { core.runRegion(handle); continue; }
-      const p = pipe();
       assert.equal(core.interpretOne(), 0);
-      const q = pipe();
-      if (q.n < p.n) { sent.push(...core.ram().slice(0, 32)); total += 32; } // the interpreter flushed a burst
     }
-    // whatever the JIT left: flush whole bursts one by one, then the rest
-    for (let p = pipe(); p.n >= 32; p = pipe()) {
-      const head = p.bytes.slice(0, 32);
-      core.module._DolphinWeb_GatherPipeForTest(2, 0, 0);
-      sent.push(...core.ram().slice(0, 32));
-      assert.deepEqual(Array.from(core.ram().slice(0, 32)), head, "the burst is the pipe's head");
-    }
-    drain();
-    return { state: core.state(), sent, pending: pipe() };
+    const end = core.module._DolphinWeb_GatherPipeFifoForTest() >>> 0;
+    const sent = Array.from(core.ram().slice(FIFO_BASE, end));
+    return { state: core.state(), stream: sent.concat(pipe().bytes), bursts: sent.length / 32 };
   };
   const reference = run(false), got = run(true);
   assert.deepEqual(got.state, reference.state, "CPU state");
-  assert.deepEqual(got.sent.concat(got.pending.bytes), reference.sent.concat(reference.pending.bytes), "the bytes sent to the FIFO, in order");
+  assert.equal(reference.stream.length, 7 * ((words.length - 3) / 6), "the interpreter sent every byte");
+  assert.deepEqual(got.stream, reference.stream, "the bytes sent to the FIFO, in order");
 }
 
 for (const [name, mask] of [["mode off", PRODUCTION_DISABLE_MASK], ["mode on", PRODUCTION_DISABLE_MASK | GP_INT]]) {
