@@ -15,6 +15,8 @@
 //   node harness/probes/replay-gates.mjs --iso disc.iso --state scene.sav --port N --out dir
 //     --query "<base query>" --extra "&wgpureplayms=4" [--runs 4 (visits per side, even)] [--vi 240,600]
 //     [--candidate <dir to serve>] [--lock-wait 14400]
+// One tree serves both sides (only --extra differs): no --baseline.
+// Exit 1 when a visit failed or a side has no picture or no input reading.
 // Holds the perf lock (HARNESS_PERF_LOCK); a watchdog after it; always exits.
 import { mkdirSync, writeFileSync, existsSync } from "node:fs";
 import path from "node:path";
@@ -27,7 +29,7 @@ import { acquirePerfLock } from "../lib/perf-lock.mjs";
 const { values: o } = parseArgs({ options: {
   iso: { type: "string" }, state: { type: "string" }, port: { type: "string" }, out: { type: "string" },
   query: { type: "string" }, extra: { type: "string" }, runs: { type: "string", default: "4" }, vi: { type: "string", default: "240,600" },
-  candidate: { type: "string" }, baseline: { type: "string" }, "baseline-query": { type: "string" }, "lock-wait": { type: "string", default: "14400" }
+  candidate: { type: "string" }, "lock-wait": { type: "string", default: "14400" }
 }, strict: true });
 for (const k of ["iso", "state", "port", "out", "query", "extra"]) if (!o[k]) throw new Error(`--${k} is required`);
 if (existsSync(o.out)) throw new Error(`${o.out} exists`);
@@ -113,4 +115,8 @@ for (const side of ["base", "candidate"]) {
 mkdirSync(o.out, { recursive: true });
 writeFileSync(path.join(o.out, "summary.json"), JSON.stringify(summary, null, 1) + "\n");
 writeFileSync(path.join(o.out, "visits.json"), JSON.stringify(visits.map(({ frames, ...v }) => v), null, 1) + "\n");
-process.exit(0);
+// a gate that measured nothing never passes
+const failed = visits.filter((v) => v.error || !v.input || VIS.some((i) => !v.frames[i]?.b64));
+const empty = ["base", "candidate"].filter((side) => !summary.input[side].visits || VIS.some((i) => !summary.picture[i][side === "base" ? "baseVsBase" : "candidateVsBase"].length));
+if (failed.length || empty.length) log(`FAILED: ${failed.length} visit(s) without a full reading${empty.length ? `, no data for ${empty.join(" and ")}` : ""}`);
+process.exit(failed.length || empty.length ? 1 : 0);

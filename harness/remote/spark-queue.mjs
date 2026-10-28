@@ -112,6 +112,10 @@ export function estimateMin(kind, args = []) {
   if (kind === "multi") return Math.round(MULTI_SEED_MIN + optOf(args, "runs", 6) * MULTI_RUN_MIN);
   const opt = (name, def) => optOf(args, name, def);
   const sides = args.includes("--baseline") ? 2 : 1;
+  // replay-gates (--extra): ~1.3 min a visit, --runs visits a side
+  if (args.includes("--extra")) return Math.round(opt("runs", 4) * 2 * 1.3);
+  // drop-meter (--visits): ~1.5 min a visit (boot, scenario or state, cold and warm)
+  if (args.includes("--visits")) return Math.round(opt("runs", 4) * sides * opt("visits", 2) * 1.5);
   return Math.round((opt("runs", 4) * sides * (opt("warmup", 25) + opt("secs", 20) + 20)) / 60);
 }
 

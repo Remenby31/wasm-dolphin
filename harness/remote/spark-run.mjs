@@ -226,6 +226,22 @@ export function headedEnv(display, xauth = BENCH_XAUTHORITY, { headless = false 
 
 // The Spark command that starts the pair detached and returns at once.
 export const SPARK_PROBES = ["race-perf", "drop-meter", "replay-gates"];
+// drop-meter and replay-gates judge the presentation (?wgpureplayms is read
+// by the wgpu path only): headless, the bench turns video=wgpu into
+// video=null (benchQuery) and such a gate would pass without exercising
+// anything. They need --headed, an explicit --query (no default: race-perf's
+// is not the product's), and every final query, --extra's additions
+// included, on video=wgpu.
+export function checkPresentationProbe(probe, rawArgs, benchArgs, headed) {
+  if (!headed) throw new Error(`--probe ${probe} needs --headed :N: headless, the bench renders video=null and the presentation is not exercised`);
+  const raw = splitEquals(rawArgs);
+  if (!raw.includes("--query")) throw new Error(`--probe ${probe} needs an explicit --query (the product's, e.g. drop-meter's PRODUCT_QUERY)`);
+  for (let i = 0; i < benchArgs.length - 1; i += 1) {
+    if (["--query", "--baseline-query"].includes(benchArgs[i]) && new URLSearchParams(benchArgs[i + 1]).get("video") !== "wgpu") throw new Error(`${benchArgs[i]} ${benchArgs[i + 1]}: video=wgpu needed for --probe ${probe}`);
+  }
+  const extra = raw.indexOf("--extra");
+  if (extra >= 0 && new URLSearchParams(raw[extra + 1] ?? "").has("video")) throw new Error("--extra must not change video= (it escapes the bench's query check)");
+}
 export function launchCommand({ harnessDir, outDir, lane = "auto", raceArgs, chromeCpus, nodeCpus, headed = null, headless = false, xauth = BENCH_XAUTHORITY, probe = "race-perf" }) {
   if (!SPARK_PROBES.includes(probe)) throw new Error(`probe ${probe}: one of ${SPARK_PROBES.join(", ")}`);
   const env = [chromeCpus && `SPARK_CHROME_CPUS=${sh(chromeCpus)}`, nodeCpus && `SPARK_NODE_CPUS=${sh(nodeCpus)}`, probe !== "race-perf" && `SPARK_PROBE=${sh(probe)}`, ...headedEnv(headed, xauth, { headless })].filter(Boolean).join(" ");
@@ -431,6 +447,10 @@ function fetchResult(host, { date, name, meta, exit }) {
       if (summary.cycleEffects) console.log(`[spark-run] host CYCLES per guest cycle vs arm 0 (lower is better, decides when it parts from the instructions): ${show(summary.cycleEffects)}; residual ${summary.cycleEffects.residualSd} %`);
       return exit;
     }
+    if (summary.probe === "replay-gates" || summary.probe === "drop-meter" || !summary.candidate?.cold?.speed) {
+      console.log(`[spark-run] ${summary.probe ?? "summary"} -> ${local}`);
+      return exit;
+    }
     for (const [k, label] of [["counterChange", "host instructions per guest cycle"], ["cycleChange", "host cycles per guest cycle"]]) if (summary[k]) console.log(`[spark-run] ${label}: paired change ${summary[k].median ?? `withheld (${summary[k].withheld})`}${summary[k].median != null ? " %" : ""}`);
     if (summary.warmChange) console.log(`[spark-run] warm: ${Object.entries(summary.warmChange).map(([m, x]) => `${m} ${x.median ?? "withheld"}${x.median != null ? " %" : ""}`).join(", ")}`);
     console.log(`[spark-run] ${c ? `paired change ${c.median ?? `withheld (${c.withheld})`}${c.median != null ? " %" : ""}, per run ${c.perRun.join(" ")}` : `speed ${summary.candidate?.cold?.speed?.median} %`} -> ${local}`);
@@ -474,6 +494,8 @@ async function main() {
   for (const f of ["--iso", "--state", "--out", "--port", "--runs", "--candidate", "--baseline", "--core-candidate"]) {
     if (positionals.includes(f)) throw new Error(`${f} is set by spark-run, not after --`);
   }
+  // the bench's lock is what keeps two pairs off one lane
+  if (positionals.includes("--no-lock")) throw new Error("--no-lock: never on the bench (its perf lock keeps pairs apart)");
   if (values.lane === "b") throw new Error("--lane b: two pairs at once disturb each other on the Spark (A/A of 2026-10-21: σ 1.86 pt), pairs run one at a time in lane a");
   if (!["auto", "a"].includes(values.lane)) throw new Error(`--lane ${values.lane}: a or auto`);
   const { date, name } = runId(values);
@@ -489,6 +511,7 @@ async function main() {
   const abs = (p) => `${home}/${p}`;
   headedEnv(values.headed, values.xauth, { headless: values.headless }); // refuses a bad display before anything is pushed
   const bench = benchRaceArgs(positionals, { keepVideo: values["keep-video"] || Boolean(values.headed) });
+  if (values.probe !== "race-perf") checkPresentationProbe(values.probe, positionals, bench.args, values.headed);
   for (const s of bench.swaps) console.log(`[spark-run] ${s.option} on the bench: ${s.to} (was ${s.from})`);
   requireXfbSwitch(host, bench.args, [candidate, ...(baseline ? [baseline] : [])]);
   const raceArgs = [
@@ -542,7 +565,7 @@ async function multi(host, values, rawPositionals) {
     checkLayoutFix(spec, side.source?.commit, gitIsAncestor);
     pushed.set(spec, side);
   }
-  const state = values.state ? pushState(host, path.resolve(values.state)) : null;
+  const state = pushState(host, path.resolve(values.state));
   const iso = benchDisc(host, values.iso);
   const home = ssh(host, "printf %s \"$HOME\"").out;
   const abs = (p) => `${home}/${p}`;

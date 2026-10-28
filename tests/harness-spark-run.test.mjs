@@ -327,3 +327,31 @@ test("spark-run --probe: the probe goes in SPARK_PROBE, race-perf stays the defa
   assert.match(race, /node "harness\/probes\/\$probe\.mjs" "\$@" --port "\$port" --out "\$out"/);
   for (const p of SPARK_PROBES) assert.ok((await readFile(new URL(`../harness/probes/${p}.mjs`, import.meta.url), "utf8")).length > 0, `${p}.mjs exists`);
 });
+
+// Review of #335: a presentation gate that would pass without exercising the
+// presentation, or without a reading, is refused.
+test("spark-run --probe drop-meter|replay-gates: --headed, an explicit wgpu --query, --extra never touches video", async () => {
+  const { checkPresentationProbe } = await import("../harness/remote/spark-run.mjs");
+  const q = "core=upstream&video=wgpu&presenter=webgpu&jitwarmup=700";
+  const args = (raw, headed = ":2") => benchRaceArgs(raw, { keepVideo: Boolean(headed) }).args;
+  assert.throws(() => checkPresentationProbe("replay-gates", ["--query", q], args(["--query", q], null), null), /needs --headed/);
+  assert.throws(() => checkPresentationProbe("drop-meter", ["--display"], args(["--display"]), ":2"), /explicit --query/);
+  assert.throws(() => checkPresentationProbe("drop-meter", ["--query", "video=software"], args(["--query", "video=software"]), ":2"), /video=wgpu needed/);
+  assert.throws(() => checkPresentationProbe("drop-meter", ["--query", q, "--baseline-query", "video=null"], args(["--query", q, "--baseline-query", "video=null"]), ":2"), /--baseline-query video=null: video=wgpu needed/);
+  assert.throws(() => checkPresentationProbe("replay-gates", ["--query", q, "--extra", "&video=null"], args(["--query", q, "--extra", "&video=null"]), ":2"), /--extra must not change video=/);
+  assert.doesNotThrow(() => checkPresentationProbe("replay-gates", ["--query", q, "--extra", "&wgpureplayms=4"], args(["--query", q, "--extra", "&wgpureplayms=4"]), ":2"));
+  const { readFile } = await import("node:fs/promises");
+  const run = await readFile(new URL("../harness/remote/spark-run.mjs", import.meta.url), "utf8");
+  assert.match(run, /positionals\.includes\("--no-lock"\)\) throw/);
+  const gates = await readFile(new URL("../harness/probes/replay-gates.mjs", import.meta.url), "utf8");
+  assert.doesNotMatch(gates, /baseline-query|baseline: \{/, "both sides from one tree: no --baseline");
+  assert.match(gates, /process\.exit\(failed\.length \|\| empty\.length \? 1 : 0\)/);
+});
+
+test("spark-queue estimates: replay-gates and drop-meter by their own shape", async () => {
+  const { estimateMin } = await import("../harness/remote/spark-queue.mjs");
+  assert.equal(estimateMin("pair", ["--runs", "4", "--extra", "&wgpureplayms=4"]), 10);
+  assert.equal(estimateMin("pair", ["--runs", "4", "--visits", "2", "--baseline", "/b"]), 24);
+  assert.equal(estimateMin("pair", ["--runs", "4", "--visits", "2"]), 12);
+  assert.equal(estimateMin("pair", ["--runs", "6", "--warmup", "20", "--secs", "10"]), 5, "race-perf as before (6 × (20 + 10 + 20) s)");
+});
