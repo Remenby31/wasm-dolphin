@@ -891,7 +891,7 @@ let ppcWasmJitTimingSuspensions = 0;
 let ppcWasmJitTier = "guarded";
 let ppcWasmJitWarmupFrames = 0; // set by every load (normalizePpcWasmJitWarmupFrames)
 // After a state load the warmup restarts from the loaded field, or counts
-// from boot ("boot", patch 0187); set by every load.
+// from boot ("boot", patch 0190); set by every load.
 let ppcWasmJitWarmupOnLoadMode = "restart";
 let pacedPresentationActive = false;
 let nextPacedPresentationTime = 0;
@@ -2174,7 +2174,7 @@ async function handleMessage(type, payload) {
         loadedCheckpointPpcPc: loadedCheckpoint.ppcPc,
         // Emulated field at which the core engaged the JIT (-1: not yet).
         jitEngagedField: api?.getPpcWasmJitEngagedFrame?.() ?? null,
-        // 0 after a load with jitWarmupOnLoad "boot" (patch 0187): the
+        // 0 after a load with jitWarmupOnLoad "boot" (patch 0190): the
         // warmup counts from boot, not from the loaded field.
         jitArmStartField: api?.getPpcWasmJitArmStartFrame?.() ?? null,
         jitWarmupOnLoad: ppcWasmJitWarmupOnLoadMode,
@@ -3344,7 +3344,7 @@ async function loadCore({
     // boot whatever the worker's timing (a late first poll, a state loaded
     // before the first frame).
     api.setPpcWasmJitWarmup(ppcWasmJitTier === "mixed" ? 2 : 1, ppcWasmJitWarmupFrames);
-    // Patch 0187: after a state load, the warmup counts from boot
+    // Patch 0190: after a state load, the warmup counts from boot
     // (?jitwarmupload=boot) or restarts from the loaded field.
     ppcWasmJitWarmupOnLoadMode = ppcWasmJitWarmupOnLoad === "boot" ? "boot" : "restart";
     api.setJitWarmupOnLoad?.(ppcWasmJitWarmupOnLoadMode === "boot" ? 1 : 0);

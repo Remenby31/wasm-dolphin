@@ -1662,7 +1662,7 @@ function requestedPpcWasmJitWarmupFrames(videoBackend) {
   return effective;
 }
 
-// ?jitwarmupload=boot (patch 0187): after a state load the JIT's warmup
+// ?jitwarmupload=boot (patch 0190): after a state load the JIT's warmup
 // counts from boot, so it engages at once for a state saved past it; the
 // default restarts it from the loaded field.
 function requestedPpcWasmJitWarmupOnLoad() {

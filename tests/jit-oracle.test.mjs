@@ -199,16 +199,16 @@ test("armed warmup engages at the same field: late first step, state loaded befo
   assert.equal(engageField(m, range(500, 700)), 560);
 });
 
-// Patch 0187 (?jitwarmupload=boot): after a state load the warmup counts from
+// Patch 0190 (?jitwarmupload=boot): after a state load the warmup counts from
 // field 0, so the JIT engages at max(warmup, loaded field): at once for a
 // state saved past the warmup, still a function of emulated fields only.
-test("0187: with the warmup counted from boot, a load engages at max(warmup, loaded field)", { skip }, async (t) => {
+test("0190: with the warmup counted from boot, a load engages at max(warmup, loaded field)", { skip }, async (t) => {
   const { default: createDolphinCore } = await import(new URL("../cores/dolphin/dolphin-core-upstream.js", import.meta.url));
   const { readFileSync } = await import("node:fs");
   const fresh = async () => createDolphinCore({ wasmBinary: readFileSync(coreWasm), noInitialRun: true, printErr: () => {} });
   const engageField = (m, fields) => { for (const f of fields) { const e = m._DolphinWeb_JitArmedStepForTest(f); if (e >= 0) return e; } return -1; };
   const range = (a, b) => Array.from({ length: b - a }, (_, k) => a + k);
-  if (typeof (await fresh())._DolphinWeb_SetJitWarmupOnLoad !== "function") return t.skip("core without patch 0187");
+  if (typeof (await fresh())._DolphinWeb_SetJitWarmupOnLoad !== "function") return t.skip("core without patch 0190");
   for (const [loaded, engaged] of [[0, 60], [30, 60], [349, 349], [1000, 1000]]) {
     const m = await fresh();
     m._SetPpcWasmJitWarmup(1, 60);

@@ -25,7 +25,7 @@
       "commit": "01e0577914a75a2569c846778c2f93aa8e6feddd"
     }
   },
-  "patchSeriesSha256": "eb39c8a8fadddec0dc45ec6d8275a3409b4217e5996e4f71ee1841bf54e8ef6e",
+  "patchSeriesSha256": "b8f7b5e5ae4b67d7d6890de242671c88948b77be9f54dfffa93cdf1e38200202",
   "patches": [
     {
       "order": 1,
@@ -1087,9 +1087,9 @@
       "order": 133,
       "cwd": ".",
       "hashMode": "lf-normalized",
-      "path": "patches/dolphin-wasm/snapshot/0187-jit-warmup-from-boot-on-load.patch",
+      "path": "patches/dolphin-wasm/snapshot/0190-jit-warmup-from-boot-on-load.patch",
       "size": 2295,
-      "sha256": "000c79122c42cf1e071c803bad55d2449d22b97a4ba6ce600c0b85d465af74fa"
+      "sha256": "cb4dc7fbf985f6a3a41944e8532396606b4192651cea8e434d574a0172f0e5b5"
     },
     {
       "order": 134,
