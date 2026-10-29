@@ -290,7 +290,14 @@ node harness/remote/spark-run.mjs --build <ref>           # its core built on th
   default query: speed 73-74 %; no side bias, pairs −1.1 to +0.4 %). A
   conclusion at ±0.5 % needs at least 6 valid pairs balanced in order (3
   trunk first, 3 head first: a standard error of ~0.22 %); 4 pairs are not
-  enough. The load gate (`lib/bench-load.mjs`) counts only cpus 10-19.
+  enough. The load gate (`lib/bench-load.mjs`) counts only cpus 10-19: a
+  window is overloaded when the median of its foreign runnable threads
+  there, or two samples in a row, exceed 2; each window's load1 and counts
+  are in the summary (`windowLoads`). When Excalibur's evals load cpus 0-9
+  hard, the cold baseline still varies by ~5 % between runs (memory
+  bandwidth is shared; pair #361, load1 15-40): on such days 6 pairs may not
+  be enough for ±0.5 %. Look at `windowLoads` and the cold spread before
+  concluding, and prefer a quieter hour or more runs.
 - **First come, first served** (`spark-queue.mjs`). The locks are polled, so
   a burst of builds once retook lane a for half an hour while a pair queued
   before them timed out. Every job now drops a ticket in
