@@ -53,12 +53,16 @@ function runnable() {
   for (const name of readdirSync("/proc")) {
     if (!/^\d+$/.test(name)) continue;
     try {
-      parents.set(Number(name), parseStat(readFileSync(`/proc/${name}/stat`, "utf8")).ppid);
+      const ppid = parseStat(readFileSync(`/proc/${name}/stat`, "utf8")).ppid;
+      parents.set(Number(name), ppid);
+      // a kernel thread (kthreadd, pid 2, and its children: kworker,
+      // ksoftirqd, migration) is the machine's, not another user's work
+      const kernel = Number(name) === 2 || ppid === 2;
       for (const tid of readdirSync(`/proc/${name}/task`)) {
         try {
           const line = readFileSync(`/proc/${name}/task/${tid}/stat`, "utf8");
           const state = line.slice(line.lastIndexOf(")") + 2, line.lastIndexOf(")") + 3);
-          if (state === "R" || state === "D") out.push({ pid: Number(name), cpu: parseStat(line).cpu });
+          if (state === "R" || state === "D") out.push({ pid: Number(name), cpu: parseStat(line).cpu, kernel });
         } catch {} // gone meanwhile
       }
     } catch {} // gone meanwhile
@@ -67,9 +71,12 @@ function runnable() {
 }
 
 // Runnable threads on Salon's cpus outside every granted job's tree (the
-// jobs' shells are their tickets' pids): one sample (pure, tested).
+// jobs' shells are their tickets' pids), kernel threads left out (per-cpu
+// kworker, ksoftirqd and migration are runnable on 10-19 now and then: with
+// a bound of 2 they would leave no margin, review of #355): one sample
+// (pure, tested).
 export function salonForeign(threads, ours, cpus = SALON_CPUS) {
-  return threads.filter((t) => cpus.includes(t.cpu) && !ours.has(t.pid)).length;
+  return threads.filter((t) => cpus.includes(t.cpu) && !ours.has(t.pid) && !t.kernel).length;
 }
 
 function oursOf(tickets, parents) {
