@@ -855,6 +855,10 @@ test("worker holds the budget between a canvas backbuffer pass and its PRESENT",
   );
   assert.match(worker, /lastBackbufferTexture = cur;\n\s+backbufferPresentPending = !wgpuPresentVsync;/);
   assert.match(worker, /case WGPU_CMD_OP_SUBMIT_PRESENT:\n\s+backbufferPresentPending = false;/);
+  assert.match(worker, /protocolPassDepth === 0 && !backbufferPresentPending &&\n\s+processedBeforeRecord >= WGPU_REPLAY_WINDOW_RECORDS/,
+    "the record window does not cut before the PRESENT either");
+  assert.match(worker, /\} else \{\n\s+backbufferPresentPending = false;\n\s+webGpuExecStats\.beginFbN\+\+;/,
+    "a lost PRESENT ends the hold at the next non-backbuffer pass");
 });
 
 test("published atomic pass lookup rejects every incomplete pass suffix", () => {
