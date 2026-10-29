@@ -46,7 +46,7 @@ import { randomBytes } from "node:crypto";
 import { existsSync, mkdirSync, readdirSync, readFileSync, renameSync, rmdirSync, rmSync, statSync, unlinkSync, writeFileSync } from "node:fs";
 import os from "node:os";
 import path from "node:path";
-import { powerSnapshot } from "./system.mjs";
+import { MIN_BATTERY_PERCENT, powerSnapshot } from "./system.mjs";
 
 export const DEFAULT_PERF_LOCK = path.join(os.homedir(), "projects", "gc-web-emu", ".perf-lock");
 // A lock directory with no owner file is one whose holder died between mkdir
@@ -279,12 +279,18 @@ export async function acquirePerfLock({
   if (path.basename(dir) !== ".perf-lock") throw new Error(`perf lock must be a directory named .perf-lock, not ${dir}`);
   for (const [k, v] of Object.entries({ waitSec, pollSec, orphanSec })) if (!Number.isFinite(v) || v < 0) throw new Error(`perf lock: ${k} must be a number ≥ 0, not ${v}`);
   const end = Date.now() + waitSec * 1000;
-  const onBattery = () => requireMains && power()?.source === "battery";
+  // battery, or on mains with the charge under MIN_BATTERY_PERCENT (the
+  // charger not keeping up): not a machine to measure on yet
+  const onBattery = () => {
+    if (!requireMains) return false;
+    const p = power();
+    return p?.source === "battery" || (Number.isFinite(p?.percent) && p.percent < MIN_BATTERY_PERCENT);
+  };
   for (;;) {
     // Outside the queue: a measure waiting for mains blocks nobody behind it.
     while (onBattery()) {
       if (Date.now() >= end) throw new Error(`perf lock ${dir}: still on battery after ${waitSec} s; a measure needs mains power, nothing measured`);
-      log(`perf lock: on battery, waiting for mains power before taking a ticket; retrying in ${pollSec} s`);
+      log(`perf lock: on battery or under ${MIN_BATTERY_PERCENT} % charge, waiting for mains power and charge before taking a ticket; retrying in ${pollSec} s`);
       await sleep(pollSec * 1000);
     }
     sweepLeftovers(dir);
