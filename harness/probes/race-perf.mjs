@@ -342,10 +342,23 @@ export async function measure(session, o) {
     // The window: node timers only. The rings (VI 8192, presents 16384)
     // hold far more than a window, so nothing is read until it ends.
     const loads = [], threads = [], gpuThreads = [];
+    // On the bench, the foreign runnable threads on Salon's cpus 10-19 with
+    // each load sample (lib/bench-load.mjs): the window is judged on them,
+    // load1 counting Excalibur's busy cpus 0-9 too.
+    // At most once a second: a /proc scan, and the emulated window polls
+    // every --emulated-poll-ms.
+    const salon = [];
+    let salonAt = -Infinity;
+    const sampleLoad = () => {
+      loads.push(os.loadavg()[0]);
+      if (!o.benchSalon || performance.now() - salonAt < 1000) return;
+      salonAt = performance.now();
+      salon.push(o.benchSalon());
+    };
     // Emulated: node polls the guest ticks (one worker call per poll).
     const emulated = emu && await emu.window(o.emulatedWindow, {
       poll: (t, fraction) => {
-        loads.push(os.loadavg()[0]);
+        sampleLoad();
         if (fraction >= 0.5 && threads.length === 0) {
           threads.push(rendererThreads(session.profileDir));
           gpuThreads.push(gpuProcessThreads(session.profileDir));
@@ -354,7 +367,7 @@ export async function measure(session, o) {
     });
     for (let s = 0; !emu && s < o.secs; s += 1) {
       await new Promise((r) => setTimeout(r, 1000));
-      loads.push(os.loadavg()[0]);
+      sampleLoad();
       if (s === Math.floor(o.secs / 2)) {
         threads.push(rendererThreads(session.profileDir));
         gpuThreads.push(gpuProcessThreads(session.profileDir));
@@ -435,7 +448,8 @@ export async function measure(session, o) {
       // the reads bracket the window, so a few host ms more than windowMs.
       guestCovered: guestCovered(ticksBefore, ticksAfter, progress?.coreTicksPerSecond),
       load1: { min: round(Math.min(...loads), 2), median: round(medianLoad, 2), max: round(Math.max(...loads), 2), limit: o.maxLoad },
-      overloaded: medianLoad > o.maxLoad,
+      ...(salon.length ? { salonForeign: { median: median(salon), max: Math.max(...salon), limit: o.benchSalonMax } } : {}),
+      overloaded: medianLoad > o.maxLoad || (salon.length > 0 && median(salon) > o.benchSalonMax),
       complete: timeline.complete,
       timelineLost: timeline.lost,
       ...(o.headroom ? { headroom: hrStart?.error ? { error: hrStart.error } : hrEnd?.error ? { error: hrEnd.error } : headroomOf(hrEnd.stats, { guestSeconds: (hrEnd.ticks - hrStart.ticks) / (hrEnd.tps || 1), ticksPerSecond: hrEnd.tps, viOutputs: timeline.vi.length }) } : {}),
@@ -701,6 +715,11 @@ async function measureSide(side, o, loadGate) {
   // the side is judged against its gate's limit (on the bench, computed per
   // gate by lib/bench-load.mjs), recorded with it in loadGate
   if (loadGate?.limit != null) o = { ...o, maxLoad: loadGate.limit };
+  // the bench (its gate read Salon's cpus): the window samples them too
+  if (loadGate?.salonForeignMax != null) {
+    const { salonForeignNow } = await import("../lib/bench-load.mjs");
+    o = { ...o, benchSalon: () => salonForeignNow(), benchSalonMax: loadGate.salonForeignMax };
+  }
   try {
     const bootStart = performance.now();
     const session = await openSession({ base: server.base, server, query: side.query ?? o.query, iso: o.iso, display: o.browserDisplay, routes: o.state ? { [STATE_ROUTE]: o.state } : {}, chromeArgs: side.chromeArgs ?? [], harness: o.display ? { displayed: true } : {} });
