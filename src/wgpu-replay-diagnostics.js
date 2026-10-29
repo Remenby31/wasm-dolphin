@@ -401,8 +401,10 @@ export function requestedWgpuMappedStagingSlotCount(
   search = globalThis.location?.search ?? "",
   fallback = 3
 ) {
+  // A value outside 3..8 falls back to the engine's default, as
+  // ?wgpuuploadtransport does (it gave 3 before, even where the default is 4).
   const value = new URLSearchParams(search).get("wgpustagingslots");
-  return wgpuMappedStagingSlotCountOf(value === null ? fallback : value);
+  return value !== null && /^[3-8]$/.test(value) ? Number(value) : wgpuMappedStagingSlotCountOf(fallback);
 }
 
 export function requestedWgpuMappedStageTimingStride(

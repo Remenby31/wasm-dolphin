@@ -510,6 +510,17 @@ test("metrics-off WGPU evidence requires a matching static runtime config", () =
       runtimeConfig: { ...runtimeConfig, [field]: value },
     }).failures.join("\n"), pattern);
   }
+  // Unforced, the engine's defaults are expected: under JavaScriptCore,
+  // mapped staging and 4 slots; an artifact without the engine reads as V8.
+  const { wgpuuploadtransport: _t, wgpustagingslots: _s, ...unforced } = params;
+  const jsc = { ...runtimeConfig, wasmEngine: "jsc", uploadTransport: "mapped", mappedStaging: { ...runtimeConfig.mappedStaging, slotCount: 4 } };
+  assert.deepEqual(evaluateWgpuRuntimeConfigEvidence({ required: true, params: unforced, runtimeConfig: jsc }).failures, []);
+  assert.match(evaluateWgpuRuntimeConfigEvidence({
+    required: true, params: unforced, runtimeConfig: { ...jsc, wasmEngine: "v8" },
+  }).failures.join("\n"), /upload transport mismatch/);
+  assert.match(evaluateWgpuRuntimeConfigEvidence({
+    required: true, params: unforced, runtimeConfig: { ...jsc, wasmEngine: undefined },
+  }).failures.join("\n"), /upload transport mismatch/);
   // Every slot count the engine accepts (3 to 8) is accepted here too.
   const sixSlots = { ...runtimeConfig, mappedStaging: { ...runtimeConfig.mappedStaging, slotCount: 6 } };
   assert.deepEqual(evaluateWgpuRuntimeConfigEvidence({
@@ -2586,3 +2597,10 @@ function makeRuns(config, valuesByBlock) {
     }));
   });
 }
+
+test("the worker's WGPU runtime config names the engine whose defaults applied", async () => {
+  const { readFile } = await import("node:fs/promises");
+  const worker = await readFile(new URL("../src/upstream-discio-worker.js", import.meta.url), "utf8");
+  const payload = worker.slice(worker.indexOf("function wgpuRuntimeConfigPayload()"));
+  assert.match(payload.slice(0, 800), /schema: "wasm-dolphin\.wgpu-runtime-config\.v1",[\s\S]*?wasmEngine: wasmEngineName,/);
+});
