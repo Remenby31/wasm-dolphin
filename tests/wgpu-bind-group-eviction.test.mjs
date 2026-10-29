@@ -15,14 +15,17 @@ import { sourceContractTest } from "./helpers/source-contract.mjs";
 const read = (path) => readFile(new URL(path, import.meta.url), "utf8");
 const PATCH = "../patches/dolphin-wasm/snapshot/0201-webgpu-destroy-evicted-bind-groups.patch";
 
-function checkGfx(gfx, header) {
+function checkGfx(gfx, header, { wholeFile = false } = {}) {
   // The evicted id is retired, not destroyed in place (the pass may still bind it).
-  assert.match(gfx, /if \(slot->id != 0 && slot->id != id\)\n\s+m_retired_bind_groups\.push_back\(slot->id\);\n\s+slot->id = id;/);
+  assert.match(gfx, /if \(slot->id != 0\)\n\s+m_retired_bind_groups\.push_back\(slot->id\);\n\s+slot->id = id;/);
   // Destroyed only between passes, with the consumer's bind group tag.
   assert.match(gfx, /static constexpr u32 kDestroyTagBindGroup = 3;/);
   assert.match(gfx, /void WebGPUGfx::DestroyRetiredBindGroups\(\)\n\{[\s\S]*?if \(m_pass_open \|\| m_retired_bind_groups\.empty\(\)\)\n\s+return;\n\s+for \(const u32 id : m_retired_bind_groups\)\n\s+m_cmd_stream\.PushDestroy\(kDestroyTagBindGroup, id\);\n\s+m_retired_bind_groups\.clear\(\);/);
   // Right after the pass end (committed or aborted), once the pass is closed.
   assert.match(gfx, /const bool committed = m_cmd_stream\.PushEndPass\(\);\n\s+m_pass_open = false;\n\s+ResetRecordedPassState\(\);\n\s+DestroyRetiredBindGroups\(\);/);
+  // An aborted pass (EndPassIfOpen's failed geometry flush included) empties the list too.
+  // (the patch's hunks do not carry that function's head: whole file only)
+  if (wholeFile) assert.match(gfx, /void WebGPUGfx::AbortRecordedPass\(\)\n\{[\s\S]*?m_pass_open = false;[\s\S]*?DestroyRetiredBindGroups\(\);\n\}/);
   assert.match(header, /std::vector<u32> m_retired_bind_groups;/);
   assert.match(header, /void DestroyRetiredBindGroups\(\);/);
 }
@@ -36,7 +39,7 @@ test("0201: the patch retires evicted bind groups and destroys them at the pass 
 
 sourceContractTest("0201: the patched vendor tree retires evicted bind groups and destroys them at the pass end", async () => {
   const root = "../vendor/dolphin/Source/Core/VideoBackends/WebGPU/";
-  checkGfx(await read(`${root}WebGPUGfx.cpp`), await read(`${root}WebGPUGfx.h`));
+  checkGfx(await read(`${root}WebGPUGfx.cpp`), await read(`${root}WebGPUGfx.h`), { wholeFile: true });
 });
 
 test("0201: the worker drops a destroyed bind group and reports how many are alive", async () => {

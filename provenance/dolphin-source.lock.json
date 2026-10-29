@@ -25,7 +25,7 @@
       "commit": "01e0577914a75a2569c846778c2f93aa8e6feddd"
     }
   },
-  "patchSeriesSha256": "2fa14f4e81be645fd89cec7010f738facf1d173f853b15a12dda34ec64c6e45e",
+  "patchSeriesSha256": "240ffa76c961d6dcd7eaf45d78c916a9b72f709c2e34a638740ddc2d82b49b5f",
   "patches": [
     {
       "order": 1,
@@ -1088,8 +1088,8 @@
       "cwd": ".",
       "hashMode": "lf-normalized",
       "path": "patches/dolphin-wasm/snapshot/0201-webgpu-destroy-evicted-bind-groups.patch",
-      "size": 2794,
-      "sha256": "229ff5c83e201b3e77ee4cad36acfdfd8acb81736121b987562a704ae60e0cfb"
+      "size": 3127,
+      "sha256": "e377cd746a4518e18be8aca99af824f6afa7c64a7e0e2c083907bf37915d43fe"
     },
     {
       "order": 134,

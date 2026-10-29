@@ -25,15 +25,24 @@ diff --git a/Source/Core/VideoBackends/WebGPU/WebGPUGfx.h b/Source/Core/VideoBac
 diff --git a/Source/Core/VideoBackends/WebGPU/WebGPUGfx.cpp b/Source/Core/VideoBackends/WebGPU/WebGPUGfx.cpp
 --- a/Source/Core/VideoBackends/WebGPU/WebGPUGfx.cpp
 +++ b/Source/Core/VideoBackends/WebGPU/WebGPUGfx.cpp
-@@ -1600,6 +1600,20 @@
-     AbortRecordedPass();
+@@ -1587,6 +1587,9 @@
+   if (m_ubo_cache_active)
+     InvalidateUboSlices();
+   ResetRecordedPassState();
++  // An aborted pass is a pass end too (EndPassIfOpen's failed geometry flush
++  // comes here): the retired groups go now, not at the next committed pass.
++  DestroyRetiredBindGroups();
+ }
+ 
+ void WebGPUGfx::DiscardOrAbortPendingGeometryRange()
+@@ -1601,7 +1604,21 @@
    else
      manager->DiscardPendingGeometryRange();
-+}
+ }
 +
 +// 0201: the consumer's OP_DESTROY tags: 1 buffer, 2 texture, 3 bind group.
 +static constexpr u32 kDestroyTagBindGroup = 3;
-+
+ 
 +void WebGPUGfx::DestroyRetiredBindGroups()
 +{
 +  // Only between passes: a destroy inside a staged pass poisons it, and the
@@ -43,10 +52,12 @@ diff --git a/Source/Core/VideoBackends/WebGPU/WebGPUGfx.cpp b/Source/Core/VideoB
 +  for (const u32 id : m_retired_bind_groups)
 +    m_cmd_stream.PushDestroy(kDestroyTagBindGroup, id);
 +  m_retired_bind_groups.clear();
- }
- 
++}
++
  bool WebGPUGfx::EndPassIfOpen()
-@@ -1619,6 +1633,7 @@
+ {
+   if (!m_pass_open)
+@@ -1619,6 +1636,7 @@
    const bool committed = m_cmd_stream.PushEndPass();
    m_pass_open = false;
    ResetRecordedPassState();
@@ -54,7 +65,7 @@ diff --git a/Source/Core/VideoBackends/WebGPU/WebGPUGfx.cpp b/Source/Core/VideoB
    if (committed)
    {
      m_pending_clear = false;
-@@ -2252,7 +2267,12 @@
+@@ -2252,7 +2270,12 @@
      const u32 id = m_cmd_stream.PushCreateBindGroup(b.data(), b.size(), 1);
      if (id)
      {
@@ -62,7 +73,7 @@ diff --git a/Source/Core/VideoBackends/WebGPU/WebGPUGfx.cpp b/Source/Core/VideoB
 +      // A colliding entry is evicted (a harmless rebuild later). Its group
 +      // may still be bound by this pass's earlier draws: it is destroyed at
 +      // the pass end (0201), never here, inside the pass.
-+      if (slot->id != 0 && slot->id != id)
++      if (slot->id != 0)
 +        m_retired_bind_groups.push_back(slot->id);
 +      slot->id = id;
        slot->sig = sig;
