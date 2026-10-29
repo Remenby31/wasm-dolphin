@@ -448,8 +448,8 @@ export async function measure(session, o) {
       // the reads bracket the window, so a few host ms more than windowMs.
       guestCovered: guestCovered(ticksBefore, ticksAfter, progress?.coreTicksPerSecond),
       load1: { min: round(Math.min(...loads), 2), median: round(medianLoad, 2), max: round(Math.max(...loads), 2), limit: o.maxLoad },
-      ...(salon.length ? { salonForeign: { median: median(salon), max: Math.max(...salon), limit: o.benchSalonMax } } : {}),
-      overloaded: medianLoad > o.maxLoad || (salon.length > 0 && median(salon) > o.benchSalonMax),
+      ...(salon.length ? { salonForeign: { median: median(salon), max: Math.max(...salon), limit: o.benchSalonMax, samples: salon } } : {}),
+      overloaded: medianLoad > o.maxLoad || (salon.length > 0 && o.benchSalonOverloaded(salon)),
       complete: timeline.complete,
       timelineLost: timeline.lost,
       ...(o.headroom ? { headroom: hrStart?.error ? { error: hrStart.error } : hrEnd?.error ? { error: hrEnd.error } : headroomOf(hrEnd.stats, { guestSeconds: (hrEnd.ticks - hrStart.ticks) / (hrEnd.tps || 1), ticksPerSecond: hrEnd.tps, viOutputs: timeline.vi.length }) } : {}),
@@ -718,7 +718,8 @@ async function measureSide(side, o, loadGate) {
   // the bench (its gate read Salon's cpus): the window samples them too
   if (loadGate?.salonForeignMax != null) {
     const { salonForeignNow } = await import("../lib/bench-load.mjs");
-    o = { ...o, benchSalon: () => salonForeignNow(), benchSalonMax: loadGate.salonForeignMax };
+    const { salonOverloaded } = await import("../lib/bench-load.mjs");
+    o = { ...o, benchSalon: () => salonForeignNow(), benchSalonMax: loadGate.salonForeignMax, benchSalonOverloaded: salonOverloaded };
   }
   try {
     const bootStart = performance.now();
@@ -1105,6 +1106,12 @@ async function main() {
     ...(xctraceCleanup ? { xctraceCleanup } : {}),
     // Runs played again after the lock went back for the load: { run: times }.
     loadRetries: Object.fromEntries(runsDone.filter((r) => r.loadRetries).map((r) => [r.run, r.loadRetries])),
+    // Every window's load, failed ones included, for the reading (the Spark:
+    // load1 counts Excalibur's cpus 0-9, salonForeign Salon's 10-19).
+    windowLoads: runsDone.flatMap((r) => Object.keys(sides).flatMap((name) => ["cold", "warm"].map((phase) => {
+      const w = r[name]?.[phase];
+      return w ? { run: r.run, side: name, phase, speed: w.speed ?? null, load1: w.load1?.median ?? null, ...(w.salonForeign ? { salonForeign: w.salonForeign } : {}), overloaded: Boolean(w.overloaded) } : null;
+    }))).filter(Boolean),
     candidate: { cold: summarize("candidate", "cold"), warm: summarize("candidate", "warm") },
     baseline: sides.baseline ? { cold: summarize("baseline", "cold"), warm: summarize("baseline", "warm") } : null,
     change: sides.baseline ? withheldOnOverlap(pairedSpeedChange(runsDone.filter((r) => good(r.baseline) && good(r.candidate)), { minPairs: o.minPairs }), lockOverlap) : null,

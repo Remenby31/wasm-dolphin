@@ -1,8 +1,8 @@
 // Copyright 2026 wasm-dolphin contributors
 // SPDX-License-Identifier: GPL-2.0-or-later
 //
-// Bind groups reused across the core's create-bind-group records (opt-in,
-// ?wgpubgcache=1). The core asks for ~2,000 new bind groups a second during
+// Bind groups reused across the core's create-bind-group records (on by
+// default under JavaScriptCore, ?wgpubgcache=1|0 forces it). The core asks for ~2,000 new bind groups a second during
 // a race, most of them identical to an earlier one. Under WebKit each one
 // costs memory in the page's process until a garbage collection
 // (research/deep-ios-host.md §B.4). A record whose layout and resources are
@@ -109,7 +109,21 @@ export function createBindGroupCache({ capacity = BIND_GROUP_CACHE_CAPACITY } = 
   };
 }
 
-// ?wgpubgcache=1: reuse identical bind groups; anything else: off.
-export function requestedWgpuBindGroupCache(search = globalThis.location?.search ?? "") {
-  return new URLSearchParams(search).get("wgpubgcache") === "1";
+// The engine's own default: on under JavaScriptCore. Each new GPUBindGroup
+// costs Safari's page memory until a garbage collection; with the cache, the
+// mapped transport and 4 slots, a race held 100-102 % over 180 s where the
+// default path fell to 30-38 % past ~60 s (research/deep-ios-host.md).
+export function defaultWgpuBindGroupCache(engine) {
+  return engine === "jsc";
+}
+
+// ?wgpubgcache=1|0 forces it on or off, else the engine's default.
+export function requestedWgpuBindGroupCache(
+  search = globalThis.location?.search ?? "",
+  fallback = false
+) {
+  const value = new URLSearchParams(search).get("wgpubgcache");
+  if (value === "1") return true;
+  if (value === "0") return false;
+  return fallback === true;
 }

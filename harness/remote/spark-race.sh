@@ -77,11 +77,12 @@ export PATH="$B/node/bin:$PATH"
   # a system change (systemd user delegation of the cpuset controller).
   cg=$(sed -n 's/^0:://p' /proc/self/cgroup 2>/dev/null)
   echo "[spark-race] cgroup ${cg:-?}: controllers $(cat "/sys/fs/cgroup${cg}/cgroup.controllers" 2>/dev/null || echo ?); parent delegates $(cat "/sys/fs/cgroup$(dirname "${cg:-/}")/cgroup.subtree_control" 2>/dev/null || echo ?)"
-  echo "[spark-race] busiest before:"; ps -eLo pid,tid,psr,pcpu,user,comm --sort=-pcpu | head -8
+  # on node's cpus, and without itself (a ps just started shows 100-200 %)
+  echo "[spark-race] busiest before:"; taskset -c 10-14 ps -eLo pid,tid,psr,pcpu,user,comm --sort=-pcpu | awk '$6 != "ps"' | head -8
   echo "[spark-race] probe $probe"
   taskset -c "${SPARK_NODE_CPUS:-$ncpus}" node "harness/probes/$probe.mjs" "$@" --port "$port" --out "$out"
   code=$?
-  echo "[spark-race] busiest after:"; ps -eLo pid,tid,psr,pcpu,user,comm --sort=-pcpu | head -8
+  echo "[spark-race] busiest after:"; taskset -c 10-14 ps -eLo pid,tid,psr,pcpu,user,comm --sort=-pcpu | awk '$6 != "ps"' | head -8
   echo "[spark-race] exit $code at $(date -Is)"
   echo "$code" > "$out.exit"
 } >> "$out.log" 2>&1

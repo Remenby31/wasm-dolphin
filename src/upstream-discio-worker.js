@@ -1255,6 +1255,9 @@ function wgpuOutputContractPayload() {
 function wgpuRuntimeConfigPayload() {
   return {
     schema: "wasm-dolphin.wgpu-runtime-config.v1",
+    // The engine whose defaults applied (mapped staging, 4 slots and the bind
+    // group cache under JavaScriptCore): what tools/perf-artifacts.mjs expects.
+    wasmEngine: wasmEngineName,
     metricsEnabled: causalMetricsEnabled,
     uploadTransport: wgpuUploadTransport,
     stateCacheEnabled: wgpuStateCacheEnabled,
@@ -9589,8 +9592,8 @@ const webGpuObjects = {
   samplerDescriptors: new Map(),
   nearestSamplers: new Map(),
   bindGroups: new Map(),
-  // ?wgpubgcache=1 (src/wgpu-bind-group-cache.js): identical bind groups
-  // reused; null when off. Kept here, not in a global, so the binding
+  // The bind group cache (src/wgpu-bind-group-cache.js; on by default under
+  // JavaScriptCore, ?wgpubgcache=1|0): identical bind groups reused; null when off. Kept here, not in a global, so the binding
   // functions that source-contract tests run on their own still work.
   bindGroupCache: null,
   bindGroupSamplingMasks: new Map(),
@@ -16739,7 +16742,7 @@ function drainWebGpuCmdRing(source = "presentation") {
             if (resource && wgpuConsumerStateCacheEnabled) {
               wgpuPassStateCache.invalidateDestroyedResource(tag, resource);
             }
-            // ?wgpubgcache=1: the cached groups binding it go with it (a
+            // With the bind group cache, the cached groups binding it go with it (a
             // buffer is bound as itself, a texture through its array view).
             if (resource && webGpuObjects.bindGroupCache) {
               if (tag === 1) webGpuObjects.bindGroupCache.forget(resource);

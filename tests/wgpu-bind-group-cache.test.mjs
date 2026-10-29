@@ -4,7 +4,7 @@ import assert from "node:assert/strict";
 import { readFile } from "node:fs/promises";
 import test from "node:test";
 
-import { createBindGroupCache, requestedWgpuBindGroupCache } from "../src/wgpu-bind-group-cache.js";
+import { createBindGroupCache, defaultWgpuBindGroupCache, requestedWgpuBindGroupCache } from "../src/wgpu-bind-group-cache.js";
 
 // A device double: every createBindGroup returns a new object and is counted.
 function device() {
@@ -61,10 +61,16 @@ test("bind group cache: bounded, least recently used first out", () => {
   assert.throws(() => createBindGroupCache({ capacity: 0 }), RangeError);
 });
 
-test("bind group cache: ?wgpubgcache=1 only, off by default, reaches the worker's replay", async (t) => {
+test("bind group cache: on by default under JavaScriptCore only, ?wgpubgcache=1|0 forces it, reaches the worker's replay", async (t) => {
+  assert.equal(defaultWgpuBindGroupCache("jsc"), true);
+  assert.equal(defaultWgpuBindGroupCache("v8"), false);
+  assert.equal(defaultWgpuBindGroupCache(undefined), false);
   assert.equal(requestedWgpuBindGroupCache(""), false);
+  assert.equal(requestedWgpuBindGroupCache("", true), true);
+  assert.equal(requestedWgpuBindGroupCache("?wgpubgcache=0", true), false);
   assert.equal(requestedWgpuBindGroupCache("?wgpubgcache=1"), true);
   assert.equal(requestedWgpuBindGroupCache("?wgpubgcache=true"), false);
+  assert.equal(requestedWgpuBindGroupCache("?wgpubgcache=true", true), true);
   const { UpstreamWorkerAdapter } = await import("../src/upstream-worker-adapter.js");
   for (const value of [true, false]) {
     const adapter = new UpstreamWorkerAdapter({ wgpuBindGroupCache: value });
@@ -78,7 +84,7 @@ test("bind group cache: ?wgpubgcache=1 only, off by default, reaches the worker'
   }
   const host = await readFile(new URL("../src/core-host.js", import.meta.url), "utf8");
   const worker = await readFile(new URL("../src/upstream-discio-worker.js", import.meta.url), "utf8");
-  assert.match(host, /this\.wgpuBindGroupCache = requestedWgpuBindGroupCache\(window\.location\.search\);/);
+  assert.match(host, /this\.wgpuBindGroupCache = requestedWgpuBindGroupCache\(\s*window\.location\.search,\s*defaultWgpuBindGroupCache\(this\.wasmEngine\)\s*\);/);
   assert.match(host, /\n {12}wgpuBindGroupCache: this\.wgpuBindGroupCache,\n/);
   assert.match(worker, /\n {8}wgpuBindGroupCache: payload\.wgpuBindGroupCache,\n/);
   assert.match(worker, /webGpuObjects\.bindGroupCache = requestedWgpuBindGroupCache === true \? createBindGroupCache\(\) : null;/);

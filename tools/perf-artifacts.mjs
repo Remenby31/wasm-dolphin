@@ -7,7 +7,7 @@ import path from "node:path";
 import { JIT_CACHE_ENTRY_KEY_SCHEMA, canonicalCoreFingerprint } from
   "../src/jit-cache-identity.js";
 import { CAUSAL_TELEMETRY_SCHEMA_VERSION } from "../src/causal-telemetry.js";
-import { wgpuMappedStagingSlotCountOf } from "../src/wgpu-replay-diagnostics.js";
+import { defaultWgpuMappedStagingSlotCount, defaultWgpuUploadTransport, wgpuMappedStagingSlotCountOf } from "../src/wgpu-replay-diagnostics.js";
 import { WGPU_UBO_COMPUTE_PROJECTION_SCHEMA } from
   "../src/wgpu-ubo-compute-projection.js";
 import { REQUIRED_WGPU_OWNERSHIP_TRACE_EXPORTS } from "./dolphin-provenance.mjs";
@@ -48,13 +48,20 @@ export function evaluateWgpuRuntimeConfigEvidence({
   }
   const requestedFlag = (name) => String(params?.[name] ?? "0") === "1";
   const expectedMetricsEnabled = String(params?.metrics) === "1";
-  const expectedUploadTransport = params?.wgpuuploadtransport === "mapped" ? "mapped" : "queue";
+  // Unforced, the engine's own defaults apply (mapped staging and 4 slots under
+  // JavaScriptCore); an artifact without the engine is read as V8's.
+  const engine = runtimeConfig?.wasmEngine ?? "v8";
+  const requestedTransport = params?.wgpuuploadtransport;
+  const expectedUploadTransport = requestedTransport === "mapped" || requestedTransport === "queue"
+    ? requestedTransport : defaultWgpuUploadTransport(engine);
   const expectedUboCache = requestedFlag("wgpuubocache");
   const expectedUboMetrics = expectedMetricsEnabled && requestedFlag("wgpuubometrics");
   const expectedUniformFast = requestedFlag("wgpuuniformfast");
   const expectedUboPack = requestedFlag("wgpuubopack") && !expectedUboCache;
   const expectedStageFast = expectedUploadTransport === "mapped" && requestedFlag("wgpustagefast");
-  const expectedSlots = wgpuMappedStagingSlotCountOf(String(params?.wgpustagingslots ?? ""));
+  const requestedSlots = String(params?.wgpustagingslots ?? "");
+  const expectedSlots = /^[3-8]$/.test(requestedSlots)
+    ? wgpuMappedStagingSlotCountOf(requestedSlots) : defaultWgpuMappedStagingSlotCount(engine);
   const expectedTimingStride = String(params?.wgpumappedtiming) === "64" ? 64 : 1;
   const expectedGeometryPack = requestedFlag("wgpugeompack");
   const expectedGeometryRange = expectedGeometryPack && requestedFlag("wgpugeomrange");
