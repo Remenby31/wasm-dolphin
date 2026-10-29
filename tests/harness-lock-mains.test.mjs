@@ -195,3 +195,18 @@ test("drop meter: a visit whose charge fell on mains, or ended under 30 %, is a 
   const reasons = noVerdictReasons({ analyses, visits: 1, verdicts: { 1: {} } });
   assert.ok(reasons.some((r) => /visit 1: 1 usable baseline run\(s\) \(errors, overloaded and power-draining runs left out\)/.test(r)), reasons.join("; "));
 });
+
+// race-perf decides speed: a side whose charge fell on mains (or ended under
+// 30 %) is marked POWER and left out of every paired change, as an
+// overloaded side is.
+test("race-perf: a power-draining side is marked, logged POWER and left out of the paired changes", async () => {
+  const { readFile } = await import("node:fs/promises");
+  const src = await readFile(new URL("../harness/probes/race-perf.mjs", import.meta.url), "utf8");
+  assert.match(src, /if \(r && powerDrained\(powerStart, powerEnd\)\) \{\n\s+r\.powerDrained = \{ start: powerStart\?\.percent \?\? null, end: powerEnd\?\.percent \?\? null \};/);
+  assert.match(src, /: POWER, charge /);
+  assert.match(src, /const good = \(r\) => r && !r\.error && !r\.fatal\?\.length && !r\.powerDrained && /);
+  // every paired change takes good() runs only
+  const changes = src.match(/pairedSpeedChange\(runsDone\.filter\(\(r\) => good\(r\.baseline\) && good\(r\.candidate\)\)/g) ?? [];
+  assert.ok(changes.length >= 3, `${changes.length} changes on good() runs`);
+  assert.match(src, /r\[n\]\?\.powerDrained \? `power: charge /);
+});
