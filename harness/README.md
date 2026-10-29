@@ -284,6 +284,13 @@ node harness/remote/spark-run.mjs --build <ref>           # its core built on th
   10-19 with 10 jobs. Lane `b`'s lock stays, taken by builds. The Mac's lock
   and MESURE slots do not apply. `--chrome-cpus` / `--node-cpus` override the
   pinning.
+- **Noise and the rule for a fine pair.** With Salon alone on 10-19
+  (`excalibur.slice` held to 0-9 since 2026-10-29), a race-perf A/A in lane
+  `a` gives σ 0.55 % per pair (`seq-aa-lane-a-5` and `-6`, race savestate,
+  default query: speed 73-74 %; no side bias, pairs −1.1 to +0.4 %). A
+  conclusion at ±0.5 % needs at least 6 valid pairs balanced in order (3
+  trunk first, 3 head first: a standard error of ~0.22 %); 4 pairs are not
+  enough. The load gate (`lib/bench-load.mjs`) counts only cpus 10-19.
 - **First come, first served** (`spark-queue.mjs`). The locks are polled, so
   a burst of builds once retook lane a for half an hour while a pair queued
   before them timed out. Every job now drops a ticket in
