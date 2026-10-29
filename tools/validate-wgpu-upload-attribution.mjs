@@ -358,7 +358,12 @@ function validateBackend(manifest, summary, addIssue, runId) {
         `handoff=${webgpu.uploadArenaRingHandoffBytes}`,
       addIssue, runId);
   }
-  if (replayBudgetParam != null) {
+  // ?wgpureplayms=0: the unbudgeted replay asked for explicitly (the budget
+  // is on by default since 2026-10-29)
+  if (replayBudgetParam === "0") {
+    check(webgpu.replayBudgetEnabled !== true, "REPLAY_BUDGET_IDENTITY",
+      `wgpureplayms=0 but enabled=${webgpu.replayBudgetEnabled}`, addIssue, runId);
+  } else if (replayBudgetParam != null) {
     check(expectedReplayBudgetMs > 0 && webgpu.replayBudgetEnabled === true &&
         safeCounter(webgpu.replayBudgetMs) === expectedReplayBudgetMs,
       "REPLAY_BUDGET_IDENTITY",
