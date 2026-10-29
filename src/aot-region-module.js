@@ -203,11 +203,12 @@ function dispatcherBody(entries, pcOffset, missing) {
 //               on Windows counts against the commit charge; decision of #30)
 // Returns { bytes, entries: [[pc, fragmentIndex]] sorted, helpers: [name] }.
 export const REGION_ENTRIES_SECTION = "region-entries";
-// 0189 (?regionfragments=1): with `fragmentEntries`, a custom section
-// "region-entry-fragments" gives each entry of "region-entries" (same order)
-// the index of its fragment in the module's "fragments" table, so the core can
-// enter a fragment straight from region chaining. Only in that mode: the
-// modules of the others are byte for byte as before.
+// 0189 (on by default since #361; ?regionfragments=0 turns it off): with
+// `fragmentEntries`, a custom section "region-entry-fragments" gives each
+// entry of "region-entries" (same order) the index of its fragment in the
+// module's "fragments" table, so the core can enter a fragment straight from
+// region chaining. Only in that mode: with it off, modules are byte for byte
+// as before 0189.
 export const REGION_ENTRY_FRAGMENTS_SECTION = "region-entry-fragments";
 // Custom section "region-layout": the u32 hash of the core's heap layout the
 // fragments were translated for (WasmLayoutHash: offsets in the CPU state and
