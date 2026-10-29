@@ -112,7 +112,7 @@ import { defaultDisplay, ensureServer, loadHarnessState, readCoreProgress, readF
 import { PRESETS, SCENE_PROTOCOLS, sceneProtocolCheck, visualProbeCheck, xfbDecodeOff } from "../lib/matrix.mjs";
 import { claim, release } from "../lib/ownership.mjs";
 import { acquirePerfLock } from "../lib/perf-lock.mjs";
-import { powerSnapshot } from "../lib/system.mjs";
+import { MIN_BATTERY_PERCENT, powerDrained, powerSnapshot } from "../lib/system.mjs";
 import { openSession, rebootSession } from "../lib/session.mjs";
 import { calmThenLock, calmUnderLock, defaultMaxLoad, loadGaveUp } from "../lib/env.mjs";
 import { describe, median, percentile, round } from "../lib/stats.mjs";
@@ -956,9 +956,18 @@ async function main() {
           break;
         }
         powerCounted = false; // back on mains without a relock: nothing left to discount
-        const powerAtStart = powerSnapshot()?.source ?? null;
+        const powerStart = powerSnapshot();
+        const powerAtStart = powerStart?.source ?? null;
         record[name] = await measureSide(sides[name], o, g.gate);
         const r = record[name];
+        // On mains but the charge fell during the side, or ended under
+        // MIN_BATTERY_PERCENT (the charger not keeping up, 2026-10-29): kept
+        // in the record, left out of the speeds like an overloaded run.
+        const powerEnd = powerSnapshot();
+        if (r && powerDrained(powerStart, powerEnd)) {
+          r.powerDrained = { start: powerStart?.percent ?? null, end: powerEnd?.percent ?? null };
+          console.log(`[race-perf] run ${run} ${name}: POWER, charge ${powerStart?.percent ?? "?"} -> ${powerEnd?.percent ?? "?"} % (fell or under ${MIN_BATTERY_PERCENT} %): not counted`);
+        }
         // Unplugged during the side: played again, both sides, once on mains
         // (the next gate gives the lock back while on battery). A failed
         // reading (null) or AC <-> UPS is no change.
@@ -1005,7 +1014,7 @@ async function main() {
     const why = invalidReasons(c, { target: querySpeed(sides[n].query ?? o.query) === "unlimited" ? null : querySpeed(sides[n].query ?? o.query), framesPerViRef: o.framesPerViRef, pacing: pacingExpectation(sides[n].query ?? o.query, { decoupledUnlimited: o.decoupledUnlimited }) });
     if (why.length) c.invalid = why;
   }
-  const good = (r) => r && !r.error && !r.fatal?.length && !r.cold?.overloaded && !r.warm?.overloaded && !r.cold?.invalid?.length;
+  const good = (r) => r && !r.error && !r.fatal?.length && !r.powerDrained && !r.cold?.overloaded && !r.warm?.overloaded && !r.cold?.invalid?.length;
   const summarize = (name, phase) => {
     const m = runsDone.map((r) => r[name]).filter(good).map((r) => r[phase]).filter(Boolean);
     if (!m.length) return null;
@@ -1054,7 +1063,7 @@ async function main() {
   const pcSides = o.pcsample ? Object.keys(sides).filter((n) => runsDone.some((r) => r[n]?.cold?.pc?.samples)) : [];
   const pcNote = o.pcsample && pcSides.length < Object.keys(sides).length ? `guest PC sampled on ${pcSides.join(", ") || "no side"} only` : null;
   if (pcNote) console.warn(`[race-perf] warning: ${pcNote}`);
-  const failed = Object.keys(sides).flatMap((n) => runsDone.filter((r) => !good(r[n])).map((r) => ({ run: r.run, side: n, why: r[n]?.infraCrash ? "infra" : r[n]?.error ?? (r[n]?.fatal?.length ? "crash" : r[n]?.cold?.invalid?.length ? `invalid: ${r[n].cold.invalid.join("; ")}` : "overloaded") })));
+  const failed = Object.keys(sides).flatMap((n) => runsDone.filter((r) => !good(r[n])).map((r) => ({ run: r.run, side: n, why: r[n]?.infraCrash ? "infra" : r[n]?.error ?? (r[n]?.fatal?.length ? "crash" : r[n]?.powerDrained ? `power: charge ${r[n].powerDrained.start ?? "?"} -> ${r[n].powerDrained.end ?? "?"} %` : r[n]?.cold?.invalid?.length ? `invalid: ${r[n].cold.invalid.join("; ")}` : "overloaded") })));
   // Which Chrome ran: a wrapper (HARNESS_CHROME_PATH, e.g. the E-core one) or
   // extra flags left exported would otherwise pass for a regression.
   const sideArgs = Object.fromEntries(Object.entries(sides).filter(([, s]) => s.chromeArgs?.length).map(([n, s]) => [n, s.chromeArgs.join(" ")]));
