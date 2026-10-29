@@ -14269,14 +14269,18 @@ function drainWebGpuCmdRing(source = "presentation") {
   let protocolPassDepth = 0;
   // Without the vsync presenter the PRESENT reads the canvas texture this
   // drain's backbuffer pass rendered into, and that texture expires once the
-  // task ends: the budget never yields between that pass and its PRESENT (as
-  // inside a pass), else the input marker, the cadence sample and the
-  // readbacks would skip the frame.
+  // task ends: neither the time budget nor the record window cuts between
+  // that pass and its PRESENT (as inside a pass), else the input marker, the
+  // cadence sample and the readbacks would skip the frame. Not covered: a
+  // drain that reaches the published end between them (the producer stores
+  // END_PASS and SUBMIT_PRESENT separately), as before the budget. A lost
+  // PRESENT (a Push timeout drops it) ends the hold at the next
+  // non-backbuffer pass.
   let backbufferPresentPending = false;
   let budgetStopReason = null;
   while (read !== replayLimit) {
     const processedBeforeRecord = (read - initialRead) >>> 0;
-    if (wgpuReplayBudgetMs > 0 && protocolPassDepth === 0 &&
+    if (wgpuReplayBudgetMs > 0 && protocolPassDepth === 0 && !backbufferPresentPending &&
         processedBeforeRecord >= WGPU_REPLAY_WINDOW_RECORDS) {
       budgetStopReason = "record-window";
       break;
@@ -15151,6 +15155,7 @@ function drainWebGpuCmdRing(source = "presentation") {
             passColorFmt = renderGpu.format;
             if (frameCapActive()) frameCapPush(`BEGINPASS fb#0 BACKBUFFER ${passW}x${passH}`);
           } else {
+            backbufferPresentPending = false;
             webGpuExecStats.beginFbN++;
             const ct = webGpuObjects.textures.get(fbId);
             if (!ct) {
