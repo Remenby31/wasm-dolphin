@@ -14255,7 +14255,8 @@ function drainWebGpuCmdRing(source = "presentation") {
   const heapCopy = (off, len) => heap.slice(off, off + len);
   // Atomic replay normally stops before an incomplete BEGIN_PASS and leaves
   // it in the ring until END_PASS is visible. The guard below is retained for
-  // the explicit legacy rollback mode (`?wgpuatomic=0`).
+  // the explicit legacy rollback mode (`?wgpuatomic=0&wgpureplayms=0`: the
+  // budgeted drain, on by default, always replays whole passes).
   // §28ao flicker fix: when BEGIN_PASS is reached but its back-to-back
   // SET_VIEWPORT isn't visible in the ring yet (consumer drained
   // between the producer's two separate atomic Push() stores), the
@@ -14266,6 +14267,12 @@ function drainWebGpuCmdRing(source = "presentation") {
   // wedge the ring forever.
   let deferBeginPass = false;
   let protocolPassDepth = 0;
+  // Without the vsync presenter the PRESENT reads the canvas texture this
+  // drain's backbuffer pass rendered into, and that texture expires once the
+  // task ends: the budget never yields between that pass and its PRESENT (as
+  // inside a pass), else the input marker, the cadence sample and the
+  // readbacks would skip the frame.
+  let backbufferPresentPending = false;
   let budgetStopReason = null;
   while (read !== replayLimit) {
     const processedBeforeRecord = (read - initialRead) >>> 0;
@@ -14279,7 +14286,7 @@ function drainWebGpuCmdRing(source = "presentation") {
     if (budgetGate) {
       const beforeRecordBudget = budgetGate.check({
         processed: processedBeforeRecord,
-        passDepth: protocolPassDepth,
+        passDepth: protocolPassDepth + (backbufferPresentPending ? 1 : 0),
         force: op === WGPU_CMD_OP_BEGIN_PASS && protocolPassDepth === 0,
       });
       if (beforeRecordBudget.shouldYield) {
@@ -15136,6 +15143,7 @@ function drainWebGpuCmdRing(source = "presentation") {
               ? acquireWgpuVsyncTexture(...wgpuBackbufferSize())
               : renderGpu.context.getCurrentTexture();
             lastBackbufferTexture = cur;
+            backbufferPresentPending = !wgpuPresentVsync;
             currentBackbufferSourceTextureId = 0;
             colorView = cur.createView();
             passW = cur.width;
@@ -16227,6 +16235,7 @@ function drainWebGpuCmdRing(source = "presentation") {
           endPass("explicit", read);
           break;
         case WGPU_CMD_OP_SUBMIT_PRESENT:
+          backbufferPresentPending = false;
           frameCapPush("PRESENT");
           vpDiagPresent();
           if ((self._wgPresentCount || 0) % 600 === 0) {
@@ -16887,7 +16896,7 @@ function drainWebGpuCmdRing(source = "presentation") {
       if (op === WGPU_CMD_OP_END_PASS) protocolPassDepth = Math.max(0, protocolPassDepth - 1);
       const afterRecordBudget = budgetGate.check({
         processed: (read - initialRead) >>> 0,
-        passDepth: protocolPassDepth,
+        passDepth: protocolPassDepth + (backbufferPresentPending ? 1 : 0),
         force: op === WGPU_CMD_OP_END_PASS,
       });
       if (afterRecordBudget.shouldYield) {

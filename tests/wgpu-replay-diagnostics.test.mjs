@@ -834,6 +834,29 @@ test("budget gate checks a pass boundary before starting a new atomic pass", () 
   assert.equal(gate.snapshot().atomicOverrunCompleted, false);
 });
 
+test("budget gate never yields before the drain moved the ring", () => {
+  let now = 100;
+  const gate = createWgpuReplayBudgetGate({ budgetMs: 4, now: () => now });
+  gate.beginDrain();
+  now = 110;
+  assert.equal(gate.check({ processed: 0, passDepth: 0, force: true }).shouldYield, false);
+  assert.equal(gate.check({ processed: 1, passDepth: 0, force: true }).shouldYield, true);
+});
+
+test("worker holds the budget between a canvas backbuffer pass and its PRESENT", async () => {
+  const worker = await readFile(
+    new URL("../src/upstream-discio-worker.js", import.meta.url),
+    "utf8"
+  );
+  assert.equal(
+    worker.match(/passDepth: protocolPassDepth \+ \(backbufferPresentPending \? 1 : 0\)/g)?.length,
+    2,
+    "both budget checks count the pending PRESENT as an open pass"
+  );
+  assert.match(worker, /lastBackbufferTexture = cur;\n\s+backbufferPresentPending = !wgpuPresentVsync;/);
+  assert.match(worker, /case WGPU_CMD_OP_SUBMIT_PRESENT:\n\s+backbufferPresentPending = false;/);
+});
+
 test("published atomic pass lookup rejects every incomplete pass suffix", () => {
   const complete = [12, 16, 20, 21, 22];
   const incomplete = [12, 16, 20];
