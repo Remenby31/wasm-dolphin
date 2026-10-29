@@ -809,11 +809,13 @@ test("renderer worker probes are explicit diagnostic modes", () => {
 });
 
 test("WGPU replay budget accepts only literal 4 ms and 6 ms screening arms", () => {
-  assert.equal(requestedWgpuReplayBudgetMs(""), 0);
+  // 4 ms by default since 2026-10-29; ?wgpureplayms=0 is the unbudgeted replay
+  assert.equal(requestedWgpuReplayBudgetMs(""), 4);
+  assert.equal(requestedWgpuReplayBudgetMs("?wgpureplayms=0"), 0);
   assert.equal(requestedWgpuReplayBudgetMs("?wgpureplayms=4"), 4);
   assert.equal(requestedWgpuReplayBudgetMs("?wgpureplayms=6"), 6);
-  assert.equal(requestedWgpuReplayBudgetMs("?wgpureplayms=04"), 0);
-  assert.equal(requestedWgpuReplayBudgetMs("?wgpureplayms=8"), 0);
+  assert.equal(requestedWgpuReplayBudgetMs("?wgpureplayms=04"), 4, "not an exact value: the default");
+  assert.equal(requestedWgpuReplayBudgetMs("?wgpureplayms=8"), 4);
 });
 
 test("WGPU power preference is high-performance unless low is explicit", () => {
@@ -848,6 +850,33 @@ test("budget gate checks a pass boundary before starting a new atomic pass", () 
   assert.equal(beforeBegin.shouldYield, true);
   assert.equal(beforeBegin.reason, "time-budget");
   assert.equal(gate.snapshot().atomicOverrunCompleted, false);
+});
+
+test("budget gate never yields before the drain moved the ring", () => {
+  let now = 100;
+  const gate = createWgpuReplayBudgetGate({ budgetMs: 4, now: () => now });
+  gate.beginDrain();
+  now = 110;
+  assert.equal(gate.check({ processed: 0, passDepth: 0, force: true }).shouldYield, false);
+  assert.equal(gate.check({ processed: 1, passDepth: 0, force: true }).shouldYield, true);
+});
+
+test("worker holds the budget between a canvas backbuffer pass and its PRESENT", async () => {
+  const worker = await readFile(
+    new URL("../src/upstream-discio-worker.js", import.meta.url),
+    "utf8"
+  );
+  assert.equal(
+    worker.match(/passDepth: protocolPassDepth \+ \(backbufferPresentPending \? 1 : 0\)/g)?.length,
+    2,
+    "both budget checks count the pending PRESENT as an open pass"
+  );
+  assert.match(worker, /lastBackbufferTexture = cur;\n\s+backbufferPresentPending = !wgpuPresentVsync;/);
+  assert.match(worker, /case WGPU_CMD_OP_SUBMIT_PRESENT:\n\s+backbufferPresentPending = false;/);
+  assert.match(worker, /protocolPassDepth === 0 && !backbufferPresentPending &&\n\s+processedBeforeRecord >= WGPU_REPLAY_WINDOW_RECORDS/,
+    "the record window does not cut before the PRESENT either");
+  assert.match(worker, /\} else \{\n\s+backbufferPresentPending = false;\n\s+webGpuExecStats\.beginFbN\+\+;/,
+    "a lost PRESENT ends the hold at the next non-backbuffer pass");
 });
 
 test("published atomic pass lookup rejects every incomplete pass suffix", () => {

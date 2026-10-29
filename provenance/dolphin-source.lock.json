@@ -25,7 +25,7 @@
       "commit": "01e0577914a75a2569c846778c2f93aa8e6feddd"
     }
   },
-  "patchSeriesSha256": "77b1c48cb0379478e6c4f3e7eeb284f54cf8b6ffed8bfc089f15291b11b60d6d",
+  "patchSeriesSha256": "f12d84f75950781da4b96a48f9dad674f4f2a20bcf9663442432bd90f64bc893",
   "patches": [
     {
       "order": 1,
@@ -1085,6 +1085,38 @@
     },
     {
       "order": 133,
+      "cwd": ".",
+      "hashMode": "lf-normalized",
+      "path": "patches/dolphin-wasm/snapshot/0187-region-chain-cache.patch",
+      "size": 4076,
+      "sha256": "15044a7c8dca71ce4df826635de511effb7ba9c443a33d83d893da1c871a4f40"
+    },
+    {
+      "order": 134,
+      "cwd": ".",
+      "hashMode": "lf-normalized",
+      "path": "patches/dolphin-wasm/snapshot/0189-region-fragment-handles.patch",
+      "size": 8968,
+      "sha256": "7bbfa45f79416e43f9792b59e8f8164264f892a69901cebe7f7253bfa956e126"
+    },
+    {
+      "order": 135,
+      "cwd": ".",
+      "hashMode": "lf-normalized",
+      "path": "patches/dolphin-wasm/snapshot/0201-webgpu-destroy-evicted-bind-groups.patch",
+      "size": 3127,
+      "sha256": "e377cd746a4518e18be8aca99af824f6afa7c64a7e0e2c083907bf37915d43fe"
+    },
+    {
+      "order": 136,
+      "cwd": ".",
+      "hashMode": "lf-normalized",
+      "path": "patches/dolphin-wasm/snapshot/0202-webgpu-destroy-freed-textures.patch",
+      "size": 4228,
+      "sha256": "db2b4aef881a895ba63e88ef71f22e4c582ac14c41ea6b935bc56ee81913c936"
+    },
+    {
+      "order": 137,
       "cwd": "Externals/SFML/SFML",
       "hashMode": "lf-normalized",
       "path": "patches/dolphin-wasm/submodules/0001-sfml-emscripten-config.patch",
@@ -1092,7 +1124,7 @@
       "sha256": "f82197a21fe982ad83f6ee7bbf5a03839b1cebd4d64da3eab11263842bf61d89"
     },
     {
-      "order": 134,
+      "order": 138,
       "cwd": "Externals/xxhash/xxHash",
       "hashMode": "lf-normalized",
       "path": "patches/dolphin-wasm/submodules/0002-xxhash-wasm-simd-scalar.patch",

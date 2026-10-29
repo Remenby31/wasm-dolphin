@@ -203,6 +203,12 @@ function dispatcherBody(entries, pcOffset, missing) {
 //               on Windows counts against the commit charge; decision of #30)
 // Returns { bytes, entries: [[pc, fragmentIndex]] sorted, helpers: [name] }.
 export const REGION_ENTRIES_SECTION = "region-entries";
+// 0189 (?regionfragments=1): with `fragmentEntries`, a custom section
+// "region-entry-fragments" gives each entry of "region-entries" (same order)
+// the index of its fragment in the module's "fragments" table, so the core can
+// enter a fragment straight from region chaining. Only in that mode: the
+// modules of the others are byte for byte as before.
+export const REGION_ENTRY_FRAGMENTS_SECTION = "region-entry-fragments";
 // Custom section "region-layout": the u32 hash of the core's heap layout the
 // fragments were translated for (WasmLayoutHash: offsets in the CPU state and
 // sizes their code embeds; the RAM and L1 addresses are heap sites, out of
@@ -335,7 +341,7 @@ export function regionModuleEntries(module) {
 
 //   chain       the exit stub chains to the next region (env.region_chain,
 //               env.table): only for a core that exports them (patch 0102)
-export function assembleRegion(fragments, { helpers, pcOffset, memoryPages, memoryMinPages = 1, sharedMemory = true, heapBases = null, names = true, chain = false }) {
+export function assembleRegion(fragments, { helpers, pcOffset, memoryPages, memoryMinPages = 1, sharedMemory = true, heapBases = null, names = true, chain = false, fragmentEntries = false }) {
   if (!Array.isArray(fragments) || !fragments.length) throw new Error("region: no fragments");
   if (!Number.isInteger(pcOffset) || pcOffset < 0) throw new Error("region: pcOffset required");
   if (!Number.isInteger(memoryPages) || memoryPages < 1) throw new Error("region: memoryPages (the core's maximum) required");
@@ -545,6 +551,15 @@ export function assembleRegion(fragments, { helpers, pcOffset, memoryPages, memo
   name(custom, REGION_ENTRIES_SECTION);
   for (const [pc] of sortedEntries) custom.push(pc & 0xff, (pc >>> 8) & 0xff, (pc >>> 16) & 0xff, (pc >>> 24) & 0xff);
   section(out, 0, custom);
+  if (fragmentEntries) {
+    const owners = [];
+    name(owners, REGION_ENTRY_FRAGMENTS_SECTION);
+    for (const [, fn] of sortedEntries) {
+      const i = fn - FIRST;
+      owners.push(i & 0xff, (i >>> 8) & 0xff, (i >>> 16) & 0xff, (i >>> 24) & 0xff);
+    }
+    section(out, 0, owners);
+  }
   // Written whenever the bases are known, sites or not: a module of this
   // translator without the section is never installed (discio queues it
   // with no bases, which the core refuses).

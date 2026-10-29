@@ -13,6 +13,11 @@
 # by spark-queue.mjs, kind multi): its arms run on both clusters.
 out=$1
 shift 2
+# Gone since 2026-10-29: cpus 0-9 are Excalibur's evals (the user's
+# decision), and a multi's arms run on 5-9; spark-run refuses --multi.
+echo "[spark-multi] cpus 0-9 are Excalibur's since 2026-10-29: no multi on the bench" >> "$out.log"
+echo 2 > "$out.exit"
+exit 2
 B="$HOME/salon-bench"
 export PATH="$B/node/bin:$PATH"
 mkdir -p "$B/lanes/b"

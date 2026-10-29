@@ -2,7 +2,8 @@
 // SPDX-License-Identifier: MIT
 //
 // Input and picture gates of a presentation change (first: ?wgpureplayms=4
-// by default, 2026-10-28), base and candidate interleaved in ABBA blocks,
+// by default, 2026-10-29; since then the old replay is --extra
+// "&wgpureplayms=0"), base and candidate interleaved in ABBA blocks,
 // each visit a fresh profile, a savestate loaded as soon as the core takes it.
 //  - picture: the core's own XFB at VI outputs --vi (default 240,600) after
 //    the load (captureAtVi: a fixed emulated frame, never a fixed time); the
@@ -13,7 +14,7 @@
 //    presses seen, p95 and max per visit, then per side.
 //
 //   node harness/probes/replay-gates.mjs --iso disc.iso --state scene.sav --port N --out dir
-//     --query "<base query>" --extra "&wgpureplayms=4" [--runs 4 (visits per side, even)] [--vi 240,600]
+//     --query "<base query>" --extra "&wgpureplayms=0" [--runs 4 (visits per side, even)] [--vi 240,600]
 //     [--candidate <dir to serve>] [--lock-wait 14400]
 // One tree serves both sides (only --extra differs): no --baseline.
 // Exit 1 when a visit failed or a side has no picture or no input reading.

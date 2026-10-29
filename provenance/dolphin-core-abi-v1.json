@@ -1,19 +1,19 @@
 {
   "schemaVersion": 1,
   "abiVersion": 1,
-  "coreId": "sha256:8b81950a5939b0b053ee8315c11f0ee82f6fa644074c764c8e5795f289dae0ed",
+  "coreId": "sha256:080da515baa8e3ee301eaa3f54203d50fc58913b83321a3049c54fffe73e677d",
   "upstreamCommit": "e22551eae1c84a7e4d0b6a5c519ef4ed4ef69df1",
   "artifacts": [
     {
       "path": "cores/dolphin/dolphin-core-upstream.js",
       "hashMode": "lf-normalized",
-      "size": 289027,
-      "sha256": "1923658417b8b114c00e9a5b0fadff4fab56e9bc350739c0a7329968fa9e509e"
+      "size": 290457,
+      "sha256": "d02e8ac86fb6f8c39626b41ef8571f1f740738540f458563617c67a1c11a5d66"
     },
     {
       "path": "cores/dolphin/dolphin-core-upstream.wasm",
-      "size": 13228711,
-      "sha256": "8b81950a5939b0b053ee8315c11f0ee82f6fa644074c764c8e5795f289dae0ed"
+      "size": 13225636,
+      "sha256": "080da515baa8e3ee301eaa3f54203d50fc58913b83321a3049c54fffe73e677d"
     }
   ],
   "contractSources": [
@@ -86,8 +86,8 @@
     {
       "path": "src/core-host.js",
       "hashMode": "lf-normalized",
-      "size": 97427,
-      "sha256": "9a1eba9e5a657fe55cf0ee9e87753a8b63130ab25f364331da3a04bbf0709065"
+      "size": 98303,
+      "sha256": "9e03a422b55854af8af315c276b55163dafab68ab0848983f1bb24c391f6c44e"
     },
     {
       "path": "src/diagnostic-log-filter.js",
@@ -140,8 +140,8 @@
     {
       "path": "src/upstream-discio-worker.js",
       "hashMode": "lf-normalized",
-      "size": 809603,
-      "sha256": "1314e280f8ad3cbabd183f837e250c0ba02aa2a88a12dcfe0b2025645163d9ae"
+      "size": 811850,
+      "sha256": "79e9ec73073c6abdf8e0ca04269889bfba84735c12b537af975e1f6553f3152b"
     },
     {
       "path": "src/wgpu-renderer-worker-probe.js",
@@ -188,8 +188,8 @@
     {
       "path": "src/wgpu-replay-diagnostics.js",
       "hashMode": "lf-normalized",
-      "size": 40953,
-      "sha256": "89bdbd94a98d06d634f81ad326322566fa9676a0ffd68eaf1ac2bac5c9383773"
+      "size": 41619,
+      "sha256": "710a01ed539a4586c0bb0e792505f685c584769fc0bf4d34a9da69e2a531aed9"
     },
     {
       "path": "src/wgpu-replay-quiescence.js",

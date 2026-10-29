@@ -116,7 +116,9 @@ test("spark-race: exit codes: the queue's 3 (cores busy for 30 min) is 4, any ot
   for (const code of [2, 1]) assert.deepEqual((({ status, exit, waits, raced }) => [status, exit, waits, raced])(run(code)), [2, "2", 1, false], `queue exit ${code}`);
   const ok = run(0);
   assert.deepEqual([ok.exit, ok.waits, ok.raced], ["0", 1, true]);
-  assert.match(ok.calls, /--cores a=15-19,10-14 --cores b=15-19,0-4 --cores-out /);
+  // lane a only since 2026-10-29 (cpus 0-9 Excalibur's): no lane b cores asked
+  assert.match(ok.calls, /--cores a=15-19,10-14 --cores-out /);
+  assert.doesNotMatch(ok.calls, /--cores b=/);
 });
 
 test("spark-cores: usage errors exit 2", () => {

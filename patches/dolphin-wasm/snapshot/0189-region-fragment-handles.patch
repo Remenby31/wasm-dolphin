@@ -1,0 +1,214 @@
+diff --git a/Source/Core/Core/PowerPC/CachedInterpreter/CachedInterpreter.cpp b/Source/Core/Core/PowerPC/CachedInterpreter/CachedInterpreter.cpp
+--- a/Source/Core/Core/PowerPC/CachedInterpreter/CachedInterpreter.cpp
++++ b/Source/Core/Core/PowerPC/CachedInterpreter/CachedInterpreter.cpp
+@@ -228,7 +228,7 @@
+     _DolphinWeb_RecordCacheHit();
+   }
+   const inst_t0 = (typeof performance !== "undefined" && performance.now) ? performance.now() : 0;
+-  const fn =
++  const instance =
+       new WebAssembly.Instance(mod, {
+         env: {
+           memory: wasmMemory,
+@@ -257,7 +257,8 @@
+           region_chain: wasmTable.get(_DolphinWeb_RegionChainHelper()),
+           table: wasmTable
+         }
+-      }).exports.f;
++      });
++  const fn = instance.exports.f;
+   const inst_t1 = (typeof performance !== "undefined" && performance.now) ? performance.now() : 0;
+   const inst_us = Math.floor((inst_t1 - inst_t0) * 1000);
+   _DolphinWeb_RecordInstanceUs(inst_us);
+@@ -274,6 +275,9 @@
+     return -2;
+   }
+   wasmTable.set(index, fn);
++  // 0189: the module's fragments, for DolphinWeb_RegionFragmentHandles.
++  if (region_request === 2 && instance.exports.fragments)
++    (globalThis._dolphinRegionFragments ??= new Map()).set(index, { mod, table: instance.exports.fragments });
+   return index | 0;
+   } catch (e) {
+     if (cacheKey && Module._dolphinJitCache) Module._dolphinJitCache.delete(cacheKey);
+@@ -288,9 +292,57 @@
+                    ", interpreting it: " + String((e && e.message) || e));
+     }
+     return permanent ? 0 : -1;
++  }
++});
++
++// 0189: the fragments of the region module installed at `handle` (kept by
++// DolphinWeb_CachedInterpreterCompileWasmBlock), each put in a slot of the
++// core's table (a released slot first). Writes (entry pc, fragment slot) pairs
++// for the module's "region-entries", in that order, at most `capacity`; 0 when
++// the module has no entry -> fragment section or the table is full.
++EM_JS(int, DolphinWeb_RegionFragmentHandles, (int handle, unsigned int* out, int capacity), {
++  const kept = globalThis._dolphinRegionFragments;
++  const e = kept && kept.get(handle);
++  if (!e) return 0;
++  kept.delete(handle);
++  const [entries] = WebAssembly.Module.customSections(e.mod, "region-entries");
++  const [owners] = WebAssembly.Module.customSections(e.mod, "region-entry-fragments");
++  if (!entries || !owners || entries.byteLength !== owners.byteLength) return 0;
++  const pcs = new Uint32Array(entries.slice(0));
++  const of = new Uint32Array(owners.slice(0));
++  if (pcs.length > capacity) return 0;
++  const free = (globalThis._dolphinFreeTableSlots ??= []);
++  const slots = [];
++  for (let i = 0; i < e.table.length; i++) {
++    let slot = free.pop();
++    if (slot === undefined) {
++      slot = wasmTable.length;
++      try { wasmTable.grow(1); } catch (err) {
++        for (const s of slots) { wasmTable.set(s, null); free.push(s); }
++        return 0;
++      }
++    }
++    wasmTable.set(slot, e.table.get(i));
++    slots.push(slot);
+   }
++  const view = new DataView(HEAPU8.buffer);
++  for (let i = 0; i < pcs.length; i++) {
++    view.setUint32(out + 8 * i, pcs[i], true);
++    view.setUint32(out + 8 * i + 4, slots[of[i]] ?? 0, true);
++  }
++  return pcs.length;
+ });
+ 
++// 0189: slots of the core's table no region uses any more, for the next ones.
++EM_JS(void, DolphinWeb_ReleaseTableSlots, (const int* slots, int count), {
++  const free = (globalThis._dolphinFreeTableSlots ??= []);
++  for (let i = 0; i < count; i++) {
++    const s = HEAP32[(slots >> 2) + i];
++    wasmTable.set(s, null);
++    free.push(s);
++  }
++});
++
+ static std::array<char, 86> DolphinWeb_MakeWasmBlockCacheKey(std::span<const u8> bytes)
+ {
+   static constexpr std::string_view prefix = "wasm-block-sha256-v1:";
+@@ -387,6 +439,13 @@
+ // the region's handle, and the epoch it was filled in. No code changes:
+ // regions are emitted byte for byte the same with it on or off.
+ constexpr u32 DOLPHIN_WEB_ENABLE_REGION_CHAIN_CACHE = 1u << 18;
++// 0189: ENABLE polarity (default-off; ?regionfragments=1). Region chaining
++// enters the fragment holding the entry, not the module's dispatcher (a hashed
++// br_table, then a tail call to that same fragment): each fragment of a
++// region module gets a slot of the core's function table at install, released
++// when the region is dropped. Its modules carry the entry -> fragment section
++// (src/aot-region-module.js), so they have their own cache keys.
++constexpr u32 DOLPHIN_WEB_ENABLE_REGION_FRAGMENT_HANDLES = 1u << 16;
+ constexpr u32 REGSHAPE_X64_GPR_CAP = 4;
+ // §28ce burst smearing: when ENABLED (gate bit CLEARED), TryWriteWasmBlock
+ // returns false (falls to interpret) once this many compiles OR this much
+@@ -10197,7 +10256,8 @@
+       fastcheck_gpfifo_index, fast_os_interrupt_call_index, fast_melee_input_status_call_index,
+       fast_melee_status_call_index, fast_melee_service_poll_call_index,
+       static_cast<int>(reinterpret_cast<std::uintptr_t>(&DolphinWeb_CachedInterpreterFma)),
+-      ready_bits_ptr, region ? 1 : 0);
++      ready_bits_ptr,
++      region ? ((DolphinWebDisableMask() & DOLPHIN_WEB_ENABLE_REGION_FRAGMENT_HANDLES) != 0 ? 2 : 1) : 0);
+ }
+ 
+ int CompileWasmCachedInterpreterBlockForTest(const std::vector<u8>& bytes, bool in_place = false)
+@@ -10420,6 +10480,8 @@
+   u32 l1_base = 0;
+   // Its code's memory instructions and instructions per cycle (patch 0117).
+   double accesses_per_cycle = 0, instructions_per_cycle = 0;
++  // 0189: its fragments' slots in the core's table, released when dropped.
++  std::vector<int> fragment_slots;
+ };
+ 
+ // The RAM and L1 host addresses of this session (tests: the RAM shifted by
+@@ -10556,6 +10618,15 @@
+ 
+ std::vector<InstalledRegion> s_regions;
+ std::unordered_map<u32, u32> s_region_at;  // entry pc -> index in s_regions
++// 0189: entry pc -> the slot of the fragment holding it (its region's own
++// entries only, while that region is live).
++std::unordered_map<u32, int> s_region_fragment_at;
++void ReleaseFragmentSlots(std::vector<int>& slots)
++{
++  if (!slots.empty())
++    DolphinWeb_ReleaseTableSlots(slots.data(), static_cast<int>(slots.size()));
++  slots.clear();
++}
+ // Physical 4 KiB pages of MEM1 some live region covers (count per page): an
+ // invalidation outside them costs one lookup.
+ std::vector<u16> s_region_pages(0x01800000 >> 12);
+@@ -10969,8 +11040,12 @@
+   {
+     const auto it = s_region_at.find(pc);
+     if (it != s_region_at.end() && it->second == index)
++    {
+       s_region_at.erase(it);
++      s_region_fragment_at.erase(pc);  // 0189
++    }
+   }
++  ReleaseFragmentSlots(region.fragment_slots);  // 0189
+   ForEachRegionPage(region, -1);
+   ClearRegionLookup();
+   s_region_filter.fill(0);
+@@ -10983,6 +11058,9 @@
+ // session's RAM address; the next session allocates its own.
+ void ForgetAllRegions()
+ {
++  for (InstalledRegion& region : s_regions)  // 0189
++    ReleaseFragmentSlots(region.fragment_slots);
++  s_region_fragment_at.clear();
+   s_regions.clear();
+   s_region_at.clear();
+   ClearRegionLookup();
+@@ -11082,6 +11160,28 @@
+   {
+     s_region_at.emplace(pc, index);  // an entry already mapped keeps its region
+     RegionFilterAdd(pc);
++  }
++  // 0189: a slot of the core's table per fragment, each entry this region
++  // maps to its fragment's (every fragment holds an entry of the module).
++  if ((DolphinWebDisableMask() & DOLPHIN_WEB_ENABLE_REGION_FRAGMENT_HANDLES) != 0)
++  {
++    InstalledRegion& region = s_regions.back();
++    std::vector<u32> pairs(2 * (region.entries.size() + 256));
++    const int n = DolphinWeb_RegionFragmentHandles(handle, pairs.data(),
++                                                   static_cast<int>(pairs.size() / 2));
++    for (int i = 0; i < n; ++i)
++    {
++      const u32 pc = pairs[2 * i];
++      const int slot = static_cast<int>(pairs[2 * i + 1]);
++      if (slot <= 0)
++        continue;
++      if (std::find(region.fragment_slots.begin(), region.fragment_slots.end(), slot) ==
++          region.fragment_slots.end())
++        region.fragment_slots.push_back(slot);
++      const auto it = s_region_at.find(pc);
++      if (it != s_region_at.end() && it->second == index)
++        s_region_fragment_at[pc] = slot;
++    }
+   }
+   ClearRegionLookup();
+   ForEachRegionPage(s_regions.back(), +1);
+@@ -11819,10 +11919,19 @@
+     stats.refused += 1;
+     return 0;
+   }
+-  if (cached)
+-    *cached = {ppc_state.pc, region.handle, s_chain_cache_epoch, 0};
++  // 0189: straight into the fragment holding pc, past the module's
++  // dispatcher (the same function it would tail-call).
++  int target = region.handle;
++  if ((chain_mask & DOLPHIN_WEB_ENABLE_REGION_FRAGMENT_HANDLES) != 0)
++  {
++    const auto fragment = s_region_fragment_at.find(ppc_state.pc);
++    if (fragment != s_region_fragment_at.end())
++      target = fragment->second;
++  }
++  if (cached)
++    *cached = {ppc_state.pc, target, s_chain_cache_epoch, 0};
+   stats.chained += 1;
+-  return region.handle;
++  return target;
+ }
+ }  // namespace
+ 

@@ -43,6 +43,9 @@ export const LANES = ["a", "b"];
 // other. So one pair at a time, in lane a; lane b stays defined for builds'
 // locks and a later attempt.
 export const PAIR_LANES = ["a"];
+// What a new job may ask for since 2026-10-29 (cpus 0-9 Excalibur's): a pair
+// in lane a, or a build (pinned to 10-19, spark-build.mjs).
+export const acceptsWait = ({ kind, lanes = "auto" }) => (kind === "pair" && ["auto", "a"].includes(lanes)) || kind === "build";
 export const laneLock = (lane, bench = BENCH_DIR) => (lane === "a" ? path.join(bench, ".perf-lock") : path.join(bench, "lanes", lane, ".perf-lock"));
 const queueDir = (bench) => path.join(bench, "queue");
 
@@ -313,6 +316,11 @@ async function main() {
   if (!Number.isInteger(pid) || pid <= 0) throw new Error("--pid <job pid> is required");
   if (cmd === "done") return done(pid);
   if (cmd !== "wait") throw new Error("usage: spark-queue.mjs wait|done|list …");
+  // Lane b (5-9, 0-4) and the multi (arms on 5-9) went with cpus 0-9 to
+  // Excalibur's evals on 2026-10-29 (the user's decision): pairs and builds
+  // only, a pair in lane a. The queue's lanes stay two for the locks an
+  // older harness may still hold.
+  if (!acceptsWait({ kind: values.kind, lanes: values.lanes })) throw new Error(`wait --kind ${values.kind} --lanes ${values.lanes}: cpus 0-9 are Excalibur's since 2026-10-29, lane b and the multi are gone`);
   // Progress on stderr, the lane alone on stdout. After the options, a
   // pair's race-perf options (for its estimated duration).
   const estMin = estimateMin(values.kind, positionals);

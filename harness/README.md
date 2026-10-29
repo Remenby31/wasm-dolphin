@@ -277,9 +277,27 @@ node harness/remote/spark-run.mjs --build <ref>           # its core built on th
   `~/salon-bench/.perf-lock`. A second lane (Chromium on 5-9, the other
   cluster) was tried and failed its A/A next to a pair in lane `a`
   (2026-10-21: σ 1.86 pt, one pair at +4.8 %, both pairs 1-7 % slower and
-  over the load limit), so pairs only run in lane `a`; `--lane b` is
-  refused. Lane `b`'s lock stays, taken by builds. The Mac's lock and MESURE
-  slots do not apply. `--chrome-cpus` / `--node-cpus` override the pinning.
+  over the load limit), so pairs only run in lane `a`. Since 2026-10-29 (the
+  user's decision) the Spark is shared: cpus 0-9 are Excalibur's evals, 10-19
+  Salon's. `--lane b`, `--screen` and `--multi` are refused, the queue's
+  `wait` takes only a pair in lane `a` or a build, and a build compiles on
+  10-19 with 10 jobs. Lane `b`'s lock stays, taken by builds. The Mac's lock
+  and MESURE slots do not apply. `--chrome-cpus` / `--node-cpus` override the
+  pinning.
+- **Noise and the rule for a fine pair.** With Salon alone on 10-19
+  (`excalibur.slice` held to 0-9 since 2026-10-29), a race-perf A/A in lane
+  `a` gives σ 0.55 % per pair (`seq-aa-lane-a-5` and `-6`, race savestate,
+  default query: speed 73-74 %; no side bias, pairs −1.1 to +0.4 %). A
+  conclusion at ±0.5 % needs at least 6 valid pairs balanced in order (3
+  trunk first, 3 head first: a standard error of ~0.22 %); 4 pairs are not
+  enough. The load gate (`lib/bench-load.mjs`) counts only cpus 10-19: a
+  window is overloaded when the median of its foreign runnable threads
+  there, or two samples in a row, exceed 2; each window's load1 and counts
+  are in the summary (`windowLoads`). When Excalibur's evals load cpus 0-9
+  hard, the cold baseline still varies by ~5 % between runs (memory
+  bandwidth is shared; pair #361, load1 15-40): on such days 6 pairs may not
+  be enough for ±0.5 %. Look at `windowLoads` and the cold spread before
+  concluding, and prefer a quieter hour or more runs.
 - **First come, first served** (`spark-queue.mjs`). The locks are polled, so
   a burst of builds once retook lane a for half an hour while a pair queued
   before them timed out. Every job now drops a ticket in

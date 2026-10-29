@@ -2,33 +2,31 @@
 // SPDX-License-Identifier: MIT
 //
 // The load gate on the DGX Spark bench (spark-race.sh exports SPARK_LANE and
-// SPARK_LANE_CPUS), in place of a fixed --max-load on the whole machine. Two
-// lanes now run at once (lane b screens next to lane a pairs, spark-queue
-// backfill): a lane a pair at --max-load 5 saw load 6-9 from the other lane's
-// Chromium and gave every run up (2026-10-28, seq-aa-lane-a). So:
+// SPARK_LANE_CPUS), in place of a fixed --max-load on the whole machine.
+// Since 2026-10-29 the Spark is shared (the user's decision): cpus 0-9 are
+// Excalibur's evals, busy all the time, and 10-19 Salon's (lane a: Chromium
+// 15-19, node 10-14). load1 counts the whole machine: with the evals it sat
+// at 9-17 and refused or failed 3 runs in 4 of an A/A (seq-aa-lane-a-3)
+// whose own cores were free. So the gate looks at Salon's cpus only:
 // - the lane's own cores: no thread of a process outside this job's tree
 //   above LANE_FOREIGN_PCT % of one of them (spark-cores busyOn, per thread);
-// - the whole machine, against fixed bounds (never raised by what it should
-//   catch: a background counted into the limit let 40 unpinned foreign
-//   threads through, review of #342): load1 at most REFERENCE_BACKGROUND
-//   plus PER_LANE_LOAD per lane granted in the queue, never above the cores
-//   nor an explicit --max-load; the runnable threads outside every granted
-//   job's tree at most REFERENCE_BACKGROUND + BACKGROUND_MARGIN; all runnable
-//   threads at most the cores. load1 is a minute's average, the thread
-//   counts an instant (5 samples over a second): a spike shows in the latter
-//   before the former.
-// Off the bench (no SPARK_LANE_CPUS): null, the caller keeps its --max-load.
+// - Salon's cpus (10-19): at most SALON_FOREIGN_MAX runnable threads, last
+//   run on one of them, outside every granted job's tree (5 samples over a
+//   second; another user's unpinned process, apt, a stray eval);
+// - the whole machine only against a collapse (memory bandwidth is shared):
+//   load1 at most MACHINE_LOAD_MAX, or an explicit --max-load if lower.
+// A window is judged on the median of the same count during it
+// (salonForeignNow, race-perf). Off the bench (no SPARK_LANE_CPUS): null,
+// the caller keeps its --max-load.
 import { readdirSync, readFileSync } from "node:fs";
 import os from "node:os";
 import { checkCores, parseCpuList, parseStat, treeOf } from "../remote/spark-cores.mjs";
 import { readTickets } from "../remote/spark-queue.mjs";
 
 export const LANE_FOREIGN_PCT = 50;
-export const PER_LANE_LOAD = 5;
-// The Spark's own background with no job on it (kubelet, apiserver, weed):
-// load1 5-6, 2026-10-28.
-export const REFERENCE_BACKGROUND = 6;
-export const BACKGROUND_MARGIN = 6;
+export const SALON_CPUS = parseCpuList("10-19");
+export const SALON_FOREIGN_MAX = 2;
+export const MACHINE_LOAD_MAX = 40;
 
 export function benchLane(env = process.env) {
   if (!env.SPARK_LANE_CPUS) return null;
@@ -38,77 +36,103 @@ export function benchLane(env = process.env) {
 // Granted on this host (the queue's tickets carry their host).
 const granted = (tickets, host) => tickets.filter((t) => t.lane && t.lane !== "none" && t.host === host);
 
-// Lanes granted in the queue (a build or a multi holds both).
+// Lanes granted in the queue (a build holds every lane).
 export function grantedLanes(tickets, host = os.hostname()) {
   return new Set(granted(tickets, host).flatMap((t) => t.lane.split(" "))).size;
 }
 
-// The load1 limit: REFERENCE_BACKGROUND plus PER_LANE_LOAD per granted lane
-// (at least this job's own), at most the cores and an explicit --max-load (cap).
-export function benchLimit({ granted, cores = os.cpus().length, cap = null }) {
-  const limit = Math.min(cores, REFERENCE_BACKGROUND + PER_LANE_LOAD * Math.max(1, granted), Number.isFinite(cap) && cap > 0 ? cap : Infinity);
-  return Math.round(limit * 10) / 10;
+// The load1 limit: MACHINE_LOAD_MAX, or an explicit --max-load (cap) below it.
+export function benchLimit({ cap = null } = {}) {
+  return Math.min(MACHINE_LOAD_MAX, Number.isFinite(cap) && cap > 0 ? cap : Infinity);
 }
 
-// Runnable (R) or uninterruptible (D) threads, each with its process: what
-// load1 counts, sampled.
+// Runnable (R) or uninterruptible (D) threads with their process and the cpu
+// each last ran on: what load1 counts, sampled.
 function runnable() {
   const out = [], parents = new Map();
   for (const name of readdirSync("/proc")) {
     if (!/^\d+$/.test(name)) continue;
     try {
-      parents.set(Number(name), parseStat(readFileSync(`/proc/${name}/stat`, "utf8")).ppid);
+      const ppid = parseStat(readFileSync(`/proc/${name}/stat`, "utf8")).ppid;
+      parents.set(Number(name), ppid);
+      // a kernel thread (kthreadd, pid 2, and its children: kworker,
+      // ksoftirqd, migration) is the machine's, not another user's work
+      const kernel = Number(name) === 2 || ppid === 2;
       for (const tid of readdirSync(`/proc/${name}/task`)) {
         try {
           const line = readFileSync(`/proc/${name}/task/${tid}/stat`, "utf8");
           const state = line.slice(line.lastIndexOf(")") + 2, line.lastIndexOf(")") + 3);
-          if (state === "R" || state === "D") out.push(Number(name));
+          if (state === "R" || state === "D") out.push({ pid: Number(name), cpu: parseStat(line).cpu, kernel });
         } catch {} // gone meanwhile
       }
     } catch {} // gone meanwhile
   }
-  return { pids: out, parents };
+  return { threads: out, parents };
 }
 
-// Runnable threads now, averaged over `samples`: all of them (total) and
-// those of processes outside every granted job's tree (background; the jobs'
-// shells are their tickets' pids).
+// Runnable threads on Salon's cpus outside every granted job's tree (the
+// jobs' shells are their tickets' pids), kernel threads left out (per-cpu
+// kworker, ksoftirqd and migration are runnable on 10-19 now and then: with
+// a bound of 2 they would leave no margin, review of #355): one sample
+// (pure, tested).
+export function salonForeign(threads, ours, cpus = SALON_CPUS) {
+  return threads.filter((t) => cpus.includes(t.cpu) && !ours.has(t.pid) && !t.kernel).length;
+}
+
+function oursOf(tickets, parents) {
+  const ours = new Set();
+  for (const t of granted(tickets, os.hostname())) for (const p of treeOf(t.pid, parents)) ours.add(p);
+  return ours;
+}
+
+// One sample now, for a window's samples (race-perf, once a second).
+export function salonForeignNow(tickets = readTickets()) {
+  const { threads, parents } = runnable();
+  return salonForeign(threads, oursOf(tickets, parents));
+}
+
+// The foreign count on Salon's cpus, averaged over `samples`.
 export async function measureBackground(tickets, { samples = 5, everyMs = 200 } = {}) {
-  let foreign = 0, all = 0;
+  let sum = 0;
   for (let i = 0; i < samples; i++) {
-    const { pids, parents } = runnable();
-    const ours = new Set();
-    for (const t of granted(tickets, os.hostname())) for (const p of treeOf(t.pid, parents)) ours.add(p);
-    foreign += pids.filter((p) => !ours.has(p)).length;
-    all += pids.length;
+    const { threads, parents } = runnable();
+    sum += salonForeign(threads, oursOf(tickets, parents));
     if (i < samples - 1) await new Promise((r) => setTimeout(r, everyMs));
   }
-  const avg = (n) => Math.round((n / samples) * 10) / 10;
-  return { background: avg(foreign), total: avg(all) };
+  return Math.round((sum / samples) * 10) / 10;
 }
 
-// The machine-wide verdict from the readings (pure: tested).
-export function benchJudge({ load, background, total, granted, cores = os.cpus().length, cap = null }) {
-  const limit = benchLimit({ granted, cores, cap });
-  const backgroundLimit = REFERENCE_BACKGROUND + BACKGROUND_MARGIN;
+// The verdict from the readings (pure: tested).
+export function benchJudge({ load, background, cap = null }) {
+  const limit = benchLimit({ cap });
   const over = [];
   if (load > limit) over.push(`load ${load} > ${limit}`);
-  if (background > backgroundLimit) over.push(`background ${background} > ${backgroundLimit} runnable threads`);
-  if (total > cores) over.push(`${total} runnable threads > ${cores} cores`);
-  return { limit, backgroundLimit, ok: over.length === 0, over };
+  if (background > SALON_FOREIGN_MAX) over.push(`${background} foreign runnable threads on cpus 10-19 > ${SALON_FOREIGN_MAX}`);
+  return { limit, ok: over.length === 0, over };
+}
+
+// A window on the bench is overloaded when the median of its foreign counts
+// on Salon's cpus is over SALON_FOREIGN_MAX, or when at least two samples in
+// a row are (a burst of seconds; a single one may be a scan's own instant).
+// Pair #361 (2026-10-29) let windows through at a median of 0-1 with peaks
+// of 6-8 and scattered -10 to +21 % (pure: tested).
+export function salonOverloaded(samples) {
+  const finite = samples.filter(Number.isFinite);
+  const v = [...finite].sort((a, b) => a - b);
+  if (v.length > 0 && v[v.length >> 1] > SALON_FOREIGN_MAX) return true;
+  return finite.some((x, i) => i > 0 && x > SALON_FOREIGN_MAX && finite[i - 1] > SALON_FOREIGN_MAX);
 }
 
 // The gate's reading on the bench: { load, limit, ok, over, lane,
-// background, total, granted, laneBusy }. `exclude`: this job's root pid
-// (its tree is ours); `cap`: an explicit --max-load.
+// background, granted, laneBusy }. `exclude`: this job's root pid (its tree
+// is ours); `cap`: an explicit --max-load.
 export async function benchRead({ lane = benchLane(), exclude = process.pid, load = () => os.loadavg()[0], tickets = readTickets(), ms = 1000, cap = null } = {}) {
-  const granted = grantedLanes(tickets);
-  const { background, total } = await measureBackground(tickets);
+  const background = await measureBackground(tickets);
   const cores = await checkCores({ cpus: lane.cpus, exclude, threshold: LANE_FOREIGN_PCT, ms });
   const now = Math.round(load() * 100) / 100;
-  const j = benchJudge({ load: now, background, total, granted, cap });
+  const j = benchJudge({ load: now, background, cap });
   return {
     load: now, limit: j.limit, ok: j.ok && cores.ok, over: j.over,
-    lane: lane.lane, background, backgroundLimit: j.backgroundLimit, total, granted, laneBusy: cores.busy
+    lane: lane.lane, background, salonForeignMax: SALON_FOREIGN_MAX, granted: grantedLanes(tickets), laneBusy: cores.busy
   };
 }
