@@ -112,10 +112,15 @@ export function benchJudge({ load, background, cap = null }) {
 }
 
 // A window on the bench is overloaded when the median of its foreign counts
-// on Salon's cpus is over SALON_FOREIGN_MAX (pure: tested).
+// on Salon's cpus is over SALON_FOREIGN_MAX, or when at least two samples in
+// a row are (a burst of seconds; a single one may be a scan's own instant).
+// Pair #361 (2026-10-29) let windows through at a median of 0-1 with peaks
+// of 6-8 and scattered -10 to +21 % (pure: tested).
 export function salonOverloaded(samples) {
-  const v = samples.filter(Number.isFinite).sort((a, b) => a - b);
-  return v.length > 0 && v[v.length >> 1] > SALON_FOREIGN_MAX;
+  const finite = samples.filter(Number.isFinite);
+  const v = [...finite].sort((a, b) => a - b);
+  if (v.length > 0 && v[v.length >> 1] > SALON_FOREIGN_MAX) return true;
+  return finite.some((x, i) => i > 0 && x > SALON_FOREIGN_MAX && finite[i - 1] > SALON_FOREIGN_MAX);
 }
 
 // The gate's reading on the bench: { load, limit, ok, over, lane,

@@ -35,6 +35,9 @@ test("bench load gate: Salon's cpus 10-19 only; the whole machine only against a
   assert.equal(salonOverloaded([0, 1, 0, 3, 0]), false);
   assert.equal(salonOverloaded([3, 4, 0, 3, 5]), true);
   assert.equal(salonOverloaded([]), false);
+  // pair #361: a median of 0-1 with peaks of 6-8 went through; two in a row now count
+  assert.equal(salonOverloaded([0, 0, 6, 7, 0, 1, 0]), true, "two samples in a row over the limit");
+  assert.equal(salonOverloaded([0, 6, 0, 8, 0, 1, 0]), false, "isolated peaks: a scan's own instant");
   const h = "spark";
   assert.equal(grantedLanes([{ lane: "a", host: h }, { lane: null, host: h }, { lane: "none", host: h }], h), 1);
   assert.equal(grantedLanes([{ lane: "a", host: h }, { lane: "b", host: "mac" }], h), 1, "another host's ticket is not this machine's lane");
@@ -71,7 +74,9 @@ test("the bench's own tree: spark-race exports the lane; race-perf and drop-mete
   assert.doesNotMatch(perf, /o\.maxLoad = /, "o.maxLoad stays the option, never the last side's limit");
   // the window judged on the foreign count on Salon's cpus too, sampled at most once a second
   assert.match(perf, /if \(loadGate\?\.salonForeignMax != null\) \{[^]*?benchSalon: \(\) => salonForeignNow\(\), benchSalonMax: loadGate\.salonForeignMax/);
-  assert.match(perf, /overloaded: medianLoad > o\.maxLoad \|\| \(salon\.length > 0 && median\(salon\) > o\.benchSalonMax\),/);
+  assert.match(perf, /overloaded: medianLoad > o\.maxLoad \|\| \(salon\.length > 0 && o\.benchSalonOverloaded\(salon\)\),/);
+  assert.match(perf, /benchSalonOverloaded: salonOverloaded \};/, "the window rule is bench-load's");
+  assert.match(perf, /windowLoads: runsDone\.flatMap\(/, "every window's load1 and salonForeign in the summary");
   assert.match(perf, /if \(!o\.benchSalon \|\| performance\.now\(\) - salonAt < 1000\) return;/);
   const drop = await readFile(new URL("../harness/probes/drop-meter.mjs", import.meta.url), "utf8");
   assert.doesNotMatch(drop, /o\.maxLoad = /);
