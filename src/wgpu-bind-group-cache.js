@@ -109,7 +109,21 @@ export function createBindGroupCache({ capacity = BIND_GROUP_CACHE_CAPACITY } = 
   };
 }
 
-// ?wgpubgcache=1: reuse identical bind groups; anything else: off.
-export function requestedWgpuBindGroupCache(search = globalThis.location?.search ?? "") {
-  return new URLSearchParams(search).get("wgpubgcache") === "1";
+// The engine's own default: on under JavaScriptCore. Each new GPUBindGroup
+// costs Safari's page memory until a garbage collection; with the cache, the
+// mapped transport and 4 slots, a race held 100-102 % over 180 s where the
+// default path fell to 30-38 % past ~60 s (research/deep-ios-host.md).
+export function defaultWgpuBindGroupCache(engine) {
+  return engine === "jsc";
+}
+
+// ?wgpubgcache=1|0 forces it on or off, else the engine's default.
+export function requestedWgpuBindGroupCache(
+  search = globalThis.location?.search ?? "",
+  fallback = false
+) {
+  const value = new URLSearchParams(search).get("wgpubgcache");
+  if (value === "1") return true;
+  if (value === "0") return false;
+  return fallback === true;
 }
