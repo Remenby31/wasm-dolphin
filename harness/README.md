@@ -277,9 +277,13 @@ node harness/remote/spark-run.mjs --build <ref>           # its core built on th
   `~/salon-bench/.perf-lock`. A second lane (Chromium on 5-9, the other
   cluster) was tried and failed its A/A next to a pair in lane `a`
   (2026-10-21: σ 1.86 pt, one pair at +4.8 %, both pairs 1-7 % slower and
-  over the load limit), so pairs only run in lane `a`; `--lane b` is
-  refused. Lane `b`'s lock stays, taken by builds. The Mac's lock and MESURE
-  slots do not apply. `--chrome-cpus` / `--node-cpus` override the pinning.
+  over the load limit), so pairs only run in lane `a`. Since 2026-10-29 (the
+  user's decision) the Spark is shared: cpus 0-9 are Excalibur's evals, 10-19
+  Salon's. `--lane b`, `--screen` and `--multi` are refused, the queue's
+  `wait` takes only a pair in lane `a` or a build, and a build compiles on
+  10-19 with 10 jobs. Lane `b`'s lock stays, taken by builds. The Mac's lock
+  and MESURE slots do not apply. `--chrome-cpus` / `--node-cpus` override the
+  pinning.
 - **First come, first served** (`spark-queue.mjs`). The locks are polled, so
   a burst of builds once retook lane a for half an hour while a pair queued
   before them timed out. Every job now drops a ticket in
