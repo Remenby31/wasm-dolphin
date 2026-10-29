@@ -15,7 +15,9 @@ in the raw summary/metadata bundle. Without the query flag that field is
 
 Atomic pass replay is enabled by default. `wgpuatomic=0` restores the legacy
 snapshot behavior for a controlled A/B or immediate rollback; it is not the
-recommended path.
+recommended path. Since the 4 ms replay budget became the default
+(2026-10-29), the budgeted drain always replays whole passes and ignores
+`wgpuatomic`: the legacy snapshot needs `wgpuatomic=0&wgpureplayms=0`.
 
 ## What it classifies
 
@@ -136,7 +138,10 @@ pump-on was exactly 16,384. Submitted presentation cadence rose from 19.68 to
 29.94 FPS and p95 interval fell from 50.20 to 32.85 ms, while mean game speed
 changed from 67.12% to 68.205%. The real WGPU backend now enables the bounded
 pump by default; `wgpupump=0` is the rollback. This reduces replay age, not the
-underlying replay cost, and does not make the renderer full speed.
+underlying replay cost, and does not make the renderer full speed. Since
+2026-10-29 `wgpupump=0` alone only stops the polling: the drains stay cut in
+4 ms budgets. The old pump-off replay (one unbounded 16,384-record window per
+drain) needs `wgpupump=0&wgpureplayms=0`.
 
 Exact producer-side state suppression is separately available with
 `wgpustatecache=1`. It suppresses only successfully published exact repeats of
@@ -169,9 +174,10 @@ not current status.
 | --- | --- | --- |
 | `wgpuclassify=1` | Enable bounded v2 replay/load/presentation classification | Off |
 | `wgpudeepdiag=1` | Restore historical high-volume shader and draw probes | Off |
-| `wgpuatomic=0` | Roll back atomic-pass replay for controlled comparison | Atomic replay is on |
+| `wgpuatomic=0` | Roll back atomic-pass replay for controlled comparison; ignored by the budgeted drain, add `wgpureplayms=0` | Atomic replay is on |
 | `wgpuloadfence=1` | Discard a pre-load incomplete pass through its first end marker | Off |
-| `wgpupump=0` | Disable frequent replay polling and the 16,384-record credit window | On for `video=wgpu` |
+| `wgpupump=0` | Disable frequent replay polling; the 16,384-record unbudgeted window needs `wgpureplayms=0` too | On for `video=wgpu` |
+| `wgpureplayms=0` | Drain the replay without a time budget (`=6`: 6 ms budgets) | 4 ms budgets, whole passes |
 | `wgpustatecache=1` | Suppress exact successfully-published stable state records | Off |
 | `wgpuubocache=1` | Reuse exact live producer UBO slices | Off |
 | `wgpuubometrics=1` | Enable detailed per-draw UBO clocks and atomic histograms; requires `metrics=1` | Off |

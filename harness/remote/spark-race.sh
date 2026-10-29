@@ -8,9 +8,10 @@
 # Writes <out dir>.log (all output), <out dir>.lane and <out dir>.exit
 # (race-perf's code).
 #
-# Lanes: two pairs run at once, one per CPU cluster (each cluster has its
-# own L3): Chromium on its 5 big cores, node on its 5 little ones, its own
-# port and its own perf lock, granted in order of arrival by spark-queue.mjs.
+# Lane a only since 2026-10-29 (the user's decision: cpus 0-9 are
+# Excalibur's evals, 10-19 Salon's): Chromium on 15-19 (X925), node on
+# 10-14 (A725), port 8090, its perf lock, granted in order of arrival by
+# spark-queue.mjs. Lane b (5-9, 0-4) is gone.
 # A pair stays in one lane, both sides. Lane a's
 # lock is the bench's first one (~/salon-bench/.perf-lock), so pairs from
 # a harness before lanes (Chromium on 15-19) still exclude lane a.
@@ -24,7 +25,7 @@ case $probe in
 esac
 B="$HOME/salon-bench"
 export PATH="$B/node/bin:$PATH"
-mkdir -p "$B/lanes/b"
+
 {
   trap 'node harness/remote/spark-queue.mjs done --pid $$' EXIT
   # Its turn, first come first served (spark-queue.mjs): the lane granted,
@@ -36,7 +37,7 @@ mkdir -p "$B/lanes/b"
   # failure is an error (2), never retried. The last check is kept as
   # <out>.cores.
   lane=$(node harness/remote/spark-queue.mjs wait --pid $$ --kind pair --lanes "$want" --name "$(basename "$out")" \
-    --cores "a=${SPARK_CHROME_CPUS:-15-19},${SPARK_NODE_CPUS:-10-14}" --cores "b=${SPARK_CHROME_CPUS:-5-9},${SPARK_NODE_CPUS:-0-4}" --cores-out "$out.cores" -- "$@")
+    --cores "a=${SPARK_CHROME_CPUS:-15-19},${SPARK_NODE_CPUS:-10-14}" --cores-out "$out.cores" -- "$@")
   code=$?
   case $code in
     0) ;;
@@ -45,7 +46,7 @@ mkdir -p "$B/lanes/b"
   esac
   case $lane in
     a) cpus=15-19 ncpus=10-14 port=8090 ;;
-    b) cpus=5-9 ncpus=0-4 port=8091 ;;
+    # lane b (5-9, 0-4) went with cpus 0-9 to Excalibur's evals (2026-10-29)
     *) echo "[spark-race] unknown lane $lane"; echo 2 > "$out.exit"; exit 2 ;;
   esac
   echo "$lane" > "$out.lane"
@@ -65,11 +66,17 @@ mkdir -p "$B/lanes/b"
   # background plus 5 per granted lane, instead of a fixed --max-load.
   export SPARK_LANE="$lane" SPARK_LANE_CPUS="$SPARK_CHROME_CPUS,${SPARK_NODE_CPUS:-$ncpus}"
   echo "[spark-race] $(date -Is) $(hostname) lane $lane uptime:$(uptime)"
+  # the cores' kinds (the two lanes ran 7 % apart in a multi A/A, 2026-10-28)
+  node harness/remote/spark-cores.mjs topology 2>/dev/null | sed "s/^/[spark-race] cpus /"
   echo "[spark-race] chromium: $("$SPARK_CHROMIUM" --version) on cpus $SPARK_CHROME_CPUS, node on ${SPARK_NODE_CPUS:-$ncpus}, port $port"
   echo "[spark-race] the lane's cores are free: $(cat "$out.cores")"
   # The busiest threads and the CPU each last ran on, before and after, to
   # tell a pair's load from someone else's on its cores (read only; per
   # thread: a process's psr is its main thread's alone).
+  # Read only: whether a cpuset cgroup per lane could replace taskset without
+  # a system change (systemd user delegation of the cpuset controller).
+  cg=$(sed -n 's/^0:://p' /proc/self/cgroup 2>/dev/null)
+  echo "[spark-race] cgroup ${cg:-?}: controllers $(cat "/sys/fs/cgroup${cg}/cgroup.controllers" 2>/dev/null || echo ?); parent delegates $(cat "/sys/fs/cgroup$(dirname "${cg:-/}")/cgroup.subtree_control" 2>/dev/null || echo ?)"
   echo "[spark-race] busiest before:"; ps -eLo pid,tid,psr,pcpu,user,comm --sort=-pcpu | head -8
   echo "[spark-race] probe $probe"
   taskset -c "${SPARK_NODE_CPUS:-$ncpus}" node "harness/probes/$probe.mjs" "$@" --port "$port" --out "$out"

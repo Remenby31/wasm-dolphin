@@ -11,6 +11,7 @@
 // than --threshold % of a core it last ran on among the lane's.
 //
 //   node spark-cores.mjs check --cpus 15-19,10-14 --exclude-tree <pid> [--threshold 50] [--ms 1000]
+//   node spark-cores.mjs topology
 //
 // Prints one JSON line ({ ok, cpus, busy: [{ pid, tid, user, comm, cpu, pct }] })
 // and exits 0 when free, 3 when busy, 2 on an error. CPU shares come from two
@@ -103,11 +104,47 @@ export async function checkCores({ cpus, exclude = null, threshold = 50, ms = 10
   return { ok: busy.length === 0, at: new Date().toISOString(), cpus, threshold, busy };
 }
 
+// Each cpu's kind as sysfs gives it (topology: one line per kind of core,
+// e.g. "5-9: midr 0x411fd850 capacity 1024 max 3900 MHz cluster 1"). The two
+// lanes' Chromium cores (15-19, 5-9) ran 7 % apart in a multi A/A
+// (2026-10-28): the bench logs this with each run so a lane is never
+// compared to a slower kind of core unknowingly.
+const sysRead = (path) => { try { return readFileSync(path, "utf8").trim(); } catch { return null; } };
+// The cpus sysfs lists (cpuN directories), each read whatever the others
+// give: an offline or partial one is a line of "?", never the end of the list.
+const sysCpus = () => { try { return readdirSync("/sys/devices/system/cpu").map((d) => /^cpu(\d+)$/.exec(d)?.[1]).filter(Boolean).map(Number); } catch { return []; } };
+export function cpuTopology(read = sysRead, list = sysCpus) {
+  return list().sort((a, b) => a - b).map((cpu) => {
+    const base = `/sys/devices/system/cpu/cpu${cpu}`;
+    const maxKhz = Number(read(`${base}/cpufreq/cpuinfo_max_freq`));
+    return {
+      cpu, midr: read(`${base}/regs/identification/midr_el1`), capacity: Number(read(`${base}/cpu_capacity`)) || null,
+      maxMhz: maxKhz > 0 ? Math.round(maxKhz / 1000) : null, cluster: read(`${base}/topology/cluster_id`) ?? read(`${base}/topology/physical_package_id`)
+    };
+  });
+}
+
+// Consecutive cpus of the same kind as "a-b: …" lines.
+export function topologyLines(cpus) {
+  const key = (c) => `midr ${c.midr ?? "?"} capacity ${c.capacity ?? "?"} max ${c.maxMhz ?? "?"} MHz cluster ${c.cluster ?? "?"}`;
+  const lines = [];
+  for (const c of cpus) {
+    const last = lines.at(-1);
+    if (last && last.key === key(c) && last.to === c.cpu - 1) last.to = c.cpu;
+    else lines.push({ from: c.cpu, to: c.cpu, key: key(c) });
+  }
+  return lines.map((l) => `${l.from === l.to ? l.from : `${l.from}-${l.to}`}: ${l.key}`);
+}
+
 async function main() {
   const { values, positionals } = parseArgs({
     options: { cpus: { type: "string" }, "exclude-tree": { type: "string" }, threshold: { type: "string", default: "50" }, ms: { type: "string", default: "1000" } },
     allowPositionals: true
   });
+  if (positionals[0] === "topology") {
+    for (const line of topologyLines(cpuTopology())) console.log(line);
+    return;
+  }
   if (positionals[0] !== "check" || !values.cpus) throw new Error("usage: spark-cores.mjs check --cpus 15-19,10-14 --exclude-tree <pid> [--threshold 50] [--ms 1000]");
   const result = await checkCores({ cpus: values.cpus, exclude: values["exclude-tree"], threshold: Number(values.threshold), ms: Number(values.ms) });
   console.log(JSON.stringify(result));

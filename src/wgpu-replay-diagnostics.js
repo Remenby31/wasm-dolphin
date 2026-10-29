@@ -240,11 +240,18 @@ export function requestedWgpuUniformFast(search = globalThis.location?.search ??
   return new URLSearchParams(search).get("wgpuuniformfast") === "1";
 }
 
+// The WebGPU replay drained in budgets of this many ms (whole render passes,
+// never split): 4 by default since 2026-10-29. After an early state load it
+// keeps the long drains off the worker that also runs the presenter and the
+// region translator: Spark 120 Hz 18 -> 36 images/s, Mac cold post-load visits
+// 8/8 better (lost 1.4-2.4 s -> 0.3-1.2 s), 0 underruns against 26; picture
+// byte-identical in cpu=single. ?wgpureplayms=0: the unbudgeted 16K replay.
+export const DEFAULT_WGPU_REPLAY_BUDGET_MS = 4;
 export function requestedWgpuReplayBudgetMs(
   search = globalThis.location?.search ?? ""
 ) {
   const value = new URLSearchParams(search).get("wgpureplayms");
-  return value === "4" ? 4 : value === "6" ? 6 : 0;
+  return value === "0" ? 0 : value === "4" ? 4 : value === "6" ? 6 : DEFAULT_WGPU_REPLAY_BUDGET_MS;
 }
 
 export function requestedWgpuPowerPreference(
@@ -284,7 +291,9 @@ export function createWgpuReplayBudgetGate({
   }
 
   function check({ processed = 0, passDepth = 0, force = false } = {}) {
-    if (budget === 0 || (!force && (processed <= 0 || processed < nextCheck))) {
+    // processed 0 never yields, forced or not: every drain moves the ring by
+    // at least one record.
+    if (budget === 0 || processed <= 0 || (!force && processed < nextCheck)) {
       return { checked: false, shouldYield: false, reason: null, elapsedMs: 0 };
     }
     while (nextCheck <= processed) nextCheck += interval;
