@@ -62,7 +62,7 @@ import { acquirePerfLock } from "../lib/perf-lock.mjs";
 import { chromeInfo, isLocalOnly, probeOutDir } from "../lib/probe-out.mjs";
 import { savePng } from "../lib/session.mjs";
 import { median, round } from "../lib/stats.mjs";
-import { machineSnapshot, powerSnapshot, sampleChromeRss } from "../lib/system.mjs";
+import { machineSnapshot, powerDrained, powerSnapshot, sampleChromeRss, MIN_BATTERY_PERCENT } from "../lib/system.mjs";
 import { mergeTimeline } from "../lib/timeline.mjs";
 import { num, sideOrder, STATE_ROUTE } from "./race-perf.mjs";
 import { visualProbeCheck } from "../lib/matrix.mjs";
@@ -381,6 +381,12 @@ export function powerOfVisit(raw) {
   // on battery at one end only; a failed reading (null) or AC <-> UPS is none
   return (a === "battery") !== (b === "battery") && a != null && b != null ? "mixed" : a ?? b;
 }
+// On mains but the charge fell during the visit, or ended under
+// MIN_BATTERY_PERCENT (the charger not keeping up, 2026-10-29): left out of
+// verdicts and noise like an overloaded run, logged as POWER.
+export function visitPowerDrained(raw) {
+  return powerDrained(raw.power, raw.powerEnd);
+}
 // The sources of a batch's runs (known ones), sorted.
 export function powerSourcesOf(analyses) {
   return [...new Set(analyses.filter((a) => !a.analysis?.error && a.analysis?.power).map((a) => a.analysis.power))].sort();
@@ -423,8 +429,8 @@ export function noVerdictReasons({ analyses, visits, gaveUp = null, verdicts }) 
     const vv = verdicts[v];
     if (!vv) continue;
     for (const side of ["baseline", "candidate"]) {
-      const usable = analyses.filter((a) => a.visit === v && a.side === side && !a.analysis.error && !a.analysis.overloaded).length;
-      if (usable < VERDICT_MIN_RUNS) reasons.push(`visit ${v}: ${usable} usable ${side} run(s) (errors and overloaded runs left out), ${VERDICT_MIN_RUNS} needed`);
+      const usable = analyses.filter((a) => a.visit === v && a.side === side && !a.analysis.error && !a.analysis.overloaded && !a.analysis.powerDrained).length;
+      if (usable < VERDICT_MIN_RUNS) reasons.push(`visit ${v}: ${usable} usable ${side} run(s) (errors, overloaded and power-draining runs left out), ${VERDICT_MIN_RUNS} needed`);
     }
     if (vv.inconclusive) reasons.push(`visit ${v}: a metric or a phase has no verdict`);
   }
@@ -440,7 +446,7 @@ function writeSummary(outDir, meta, analyses, visits, { noise = null, confirm = 
     const entry = { visit: v, candidate };
     if (analyses.some((a) => a.side === "baseline")) {
       entry.baseline = summarizeVisits(of("baseline"));
-      const ok = (xs) => xs.filter((a) => !a.error && !a.overloaded);
+      const ok = (xs) => xs.filter((a) => !a.error && !a.overloaded && !a.powerDrained);
       entry.verdict = verdicts[v] = visitVerdict(ok(of("baseline")), ok(of("candidate")), noise?.[v] ?? null, { display: Boolean(meta.display) });
     }
     summary.visitSummary.push(entry);
@@ -528,7 +534,7 @@ export function readNoise(file, expect = null) {
 function logRun(log, tag, a) {
   if (a.error) return log(`${tag}: ${a.error}`);
   const s = a.summary;
-  log(`${tag}: lost ${s.lostMs} ms, <95 % ${s.pctBelow95} %, <90 % ${s.pctBelow90} %, worst 1 s ${s.worstSecond} %, hitches >50 ${s.hitches50} >100 ${s.hitches100}, p99 ${s.presentP99} ms, ${s.loads} loads +${s.loadExcessMs} ms, underruns ${s.underruns}, audio ${s.audioLatencyMs ?? "–"} ms (mixer ${s.audioMixerMs ?? "–"}), load1 ${a.load1.median}${a.overloaded ? " OVERLOADED" : ""}`);
+  log(`${tag}: lost ${s.lostMs} ms, <95 % ${s.pctBelow95} %, <90 % ${s.pctBelow90} %, worst 1 s ${s.worstSecond} %, hitches >50 ${s.hitches50} >100 ${s.hitches100}, p99 ${s.presentP99} ms, ${s.loads} loads +${s.loadExcessMs} ms, underruns ${s.underruns}, audio ${s.audioLatencyMs ?? "–"} ms (mixer ${s.audioMixerMs ?? "–"}), load1 ${a.load1.median}${a.overloaded ? " OVERLOADED" : ""}${a.powerDrained ? ` POWER (charge fell or under ${MIN_BATTERY_PERCENT} %)` : ""}`);
   for (const d of a.worst.slice(0, 3)) log(`   drop ${d.label} @${round(d.guestStart, 1)} gs: ${d.durationMs} ms, lost ${d.lostMs} ms, min ${d.minSpeed} %, cause ${d.cause}, ${d.jitBlocks} new blocks (${d.defers} deferred), causes ${JSON.stringify(d.causesMs)}`);
 }
 
@@ -545,6 +551,7 @@ async function analyzeDir(dir, native, log, noiseFile = null) {
     const raw = JSON.parse(gunzipSync(readFileSync(path.join(dir, f))));
     const analysis = analyzeVisit(raw, { native });
     analysis.overloaded = analysis.load1?.median > visitLimit(raw, meta.maxLoad);
+    analysis.powerDrained = visitPowerDrained(raw);
     analyses.push({ side, run: Number(run), visit: Number(visit), analysis });
     writeFileSync(path.join(dir, f.replace(/^raw-/, "").replace(/\.json\.gz$/, ".json")), JSON.stringify(analysis) + "\n");
     logRun(log, f, analysis);
@@ -598,7 +605,7 @@ async function falsePositives(sources, { noiseFile, draws, log }) {
       const [, s, run, visit] = f.match(/^(\w+)-(\d+)-v(\d+)/);
       if (side && s !== side) continue;
       const analysis = JSON.parse(readFileSync(path.join(dir, f), "utf8"));
-      if (analysis.error || analysis.overloaded || !analysis.phases?.[0] || analysis.summary?.dropLostMs === undefined) continue;
+      if (analysis.error || analysis.overloaded || analysis.powerDrained || !analysis.phases?.[0] || analysis.summary?.dropLostMs === undefined) continue;
       pool.push({ id: `${dir}:${s}:${run}`, visit: Number(visit), analysis });
     }
   }
@@ -733,6 +740,7 @@ async function main() {
                 writeFileSync(path.join(outDir, `raw-${tag}.json.gz`), gzipSync(JSON.stringify(raw)));
                 const analysis = analyzeVisit(raw, { native });
                 analysis.overloaded = analysis.load1?.median > visitLimit(raw, o.maxLoad);
+                analysis.powerDrained = visitPowerDrained(raw);
                 analysis.batch = batch;
                 // unplugged (or plugged in) during the visit: not a measure, the run is played again
                 if (analysis.power === "mixed" && !analysis.error) analysis.error = "the power source changed during the visit (mains/battery)";

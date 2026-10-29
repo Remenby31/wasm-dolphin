@@ -14,6 +14,17 @@ export function parsePmsetBatt(text) {
   const pct = /(\d+)%/.exec(text);
   return { source: /battery/i.test(m[1]) ? "battery" : /ac/i.test(m[1]) ? "ac" : m[1], percent: pct ? Number(pct[1]) : null };
 }
+// On mains but not keeping up (2026-10-29: "AC attached", 72 -> 54 % over a
+// night of measures): the battery feeds the machine, which may then run as
+// on battery. A measure needs the charge not falling, and above this.
+export const MIN_BATTERY_PERCENT = 30;
+// A stretch from `start` to `end` (powerSnapshot readings) whose charge fell,
+// or ended under MIN_BATTERY_PERCENT: true. Unknown percentages: false.
+export function powerDrained(start, end, minPercent = MIN_BATTERY_PERCENT) {
+  const a = start?.percent, b = end?.percent ?? a;
+  if (!Number.isFinite(b)) return false;
+  return (Number.isFinite(a) && b < a) || b < minPercent;
+}
 export function powerSnapshot() {
   if (os.platform() !== "darwin") return null;
   try {
