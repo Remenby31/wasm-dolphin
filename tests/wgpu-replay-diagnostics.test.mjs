@@ -24,7 +24,9 @@ import {
   requestedWgpuGeometryPack,
   requestedWgpuGeometryRange,
   requestedWgpuMappedStagingSlotCount,
+  defaultWgpuMappedStagingSlotCount,
   requestedWgpuUploadArenaMiB,
+  defaultWgpuUploadTransport,
   requestedWgpuUploadTransport,
   requestedWgpuMappedStageFast,
   requestedWgpuMappedStageTimingStride,
@@ -37,6 +39,16 @@ import {
   summarizeWgpuReplayRange,
   wgpuMappedStagingSlotCountOf
 } from "../src/wgpu-replay-diagnostics.js";
+
+test("mapped staging slots: 4 by default under JavaScriptCore, 3 elsewhere; the parameter wins", () => {
+  assert.equal(defaultWgpuMappedStagingSlotCount("jsc"), 4);
+  assert.equal(defaultWgpuMappedStagingSlotCount("v8"), 3);
+  assert.equal(defaultWgpuMappedStagingSlotCount(undefined), 3);
+  assert.equal(requestedWgpuMappedStagingSlotCount("", 4), 4);
+  assert.equal(requestedWgpuMappedStagingSlotCount("?wgpustagingslots=3", 4), 3);
+  assert.equal(requestedWgpuMappedStagingSlotCount("?wgpustagingslots=6", 4), 6);
+  assert.equal(requestedWgpuMappedStagingSlotCount("?wgpustagingslots=junk", 4), 3);
+});
 
 test("mapped staging slot count is strict, 3 to 8, and defaults to three", () => {
   assert.equal(requestedWgpuMappedStagingSlotCount(""), 3);
@@ -749,7 +761,13 @@ test("WGPU upload arena accepts only the independent 64 MiB screening arm", () =
   assert.equal(requestedWgpuUploadArenaMiB("?wgpuuploadmb=128"), 32);
 });
 
-test("mapped upload transport is opt-in and queue remains the reference", () => {
+test("upload transport: mapped by default under JSC only, ?wgpuuploadtransport forces either", () => {
+  assert.equal(defaultWgpuUploadTransport("jsc"), "mapped");
+  for (const engine of ["v8", "spidermonkey", "unknown", undefined]) assert.equal(defaultWgpuUploadTransport(engine), "queue", String(engine));
+  assert.equal(requestedWgpuUploadTransport("", "mapped"), "mapped");
+  assert.equal(requestedWgpuUploadTransport("?wgpuuploadtransport=queue", "mapped"), "queue");
+  assert.equal(requestedWgpuUploadTransport("?wgpuuploadtransport=bogus", "mapped"), "mapped");
+  assert.equal(requestedWgpuUploadTransport("?wgpuuploadtransport=mapped", "queue"), "mapped");
   assert.equal(requestedWgpuUploadTransport(""), "queue");
   assert.equal(requestedWgpuUploadTransport("?wgpuuploadtransport=queue"), "queue");
   assert.equal(requestedWgpuUploadTransport("?wgpuuploadtransport=mapped"), "mapped");

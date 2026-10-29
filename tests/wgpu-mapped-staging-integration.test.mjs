@@ -15,7 +15,7 @@ test("mapped staging slot count is explicit and flows through validation", async
     readSource("../tools/perf-regression-gate.mjs"),
     readSource("../tools/menu-progress-validate.mjs"),
   ]);
-  assert.match(host, /requestedWgpuMappedStagingSlotCount\(\s*window\.location\.search\s*\)/);
+  assert.match(host, /requestedWgpuMappedStagingSlotCount\(\s*window\.location\.search,\s*defaultWgpuMappedStagingSlotCount\(this\.wasmEngine\)\s*\)/);
   assert.match(host, /wgpuMappedStagingSlotCount: this\.wgpuMappedStagingSlotCount/);
   assert.match(adapter, /this\.wgpuMappedStagingSlotCount = wgpuMappedStagingSlotCountOf\(wgpuMappedStagingSlotCount\)/);
   assert.match(worker, /wgpuMappedStagingSlotCount = wgpuMappedStagingSlotCountOf\(requestedWgpuMappedStagingSlotCount\)/);
@@ -57,7 +57,7 @@ test("upload transport flows from URL parsing through the worker load payload", 
     readSource("../src/upstream-worker-adapter.js"),
     readSource("../src/upstream-discio-worker.js"),
   ]);
-  assert.match(host, /requestedWgpuUploadTransport\(window\.location\.search\)/);
+  assert.match(host, /requestedWgpuUploadTransport\(\s*window\.location\.search,\s*defaultWgpuUploadTransport\(this\.wasmEngine\)\s*\)/);
   assert.match(host, /wgpuUploadTransport: this\.wgpuUploadTransport/);
   assert.match(adapter, /wgpuUploadTransport === "mapped" \? "mapped" : "queue"/);
   assert.match(adapter, /wgpuUploadTransport: this\.wgpuUploadTransport/);

@@ -389,10 +389,20 @@ export function wgpuMappedStagingSlotCountOf(value) {
   return Number.isInteger(n) && n >= 3 && n <= WGPU_MAPPED_STAGING_SLOT_COUNT_MAX ? n : 3;
 }
 
+// The engine's own default: 4 slots under JavaScriptCore (+16 MiB mapped).
+// With 3, Safari's mapped transport waited for a free slot 610-870 times per
+// 55 s of race (4.2-8.3 s in all); with 4, 330-390 times (3.0-3.4 s).
+export function defaultWgpuMappedStagingSlotCount(engine) {
+  return engine === "jsc" ? 4 : 3;
+}
+
+// ?wgpustagingslots=3..8 forces it, else the engine's default.
 export function requestedWgpuMappedStagingSlotCount(
-  search = globalThis.location?.search ?? ""
+  search = globalThis.location?.search ?? "",
+  fallback = 3
 ) {
-  return wgpuMappedStagingSlotCountOf(new URLSearchParams(search).get("wgpustagingslots") ?? "");
+  const value = new URLSearchParams(search).get("wgpustagingslots");
+  return wgpuMappedStagingSlotCountOf(value === null ? fallback : value);
 }
 
 export function requestedWgpuMappedStageTimingStride(
@@ -411,12 +421,24 @@ export function requestedWgpuUboPack(
   return Boolean(enabledByDefault);
 }
 
+// The engine's own default: mapped staging under JavaScriptCore. Safari's
+// GPUQueue.writeBuffer copies every write into the page's process and gives
+// it back only at a garbage collection: the command ring's 50-75 k writes a
+// second (130-170 MiB/s) grew Safari's WebContent by ~140 MiB/s, to 7-8 GiB
+// within a minute (an iPhone kills the tab at 1.5-2 GiB). Mapped staging
+// reuses a few mapped buffers and copies on the GPU (research/deep-ios-host.md).
+export function defaultWgpuUploadTransport(engine) {
+  return engine === "jsc" ? "mapped" : "queue";
+}
+
+// ?wgpuuploadtransport=mapped|queue forces it, else the engine's default.
 export function requestedWgpuUploadTransport(
-  search = globalThis.location?.search ?? ""
+  search = globalThis.location?.search ?? "",
+  fallback = "queue"
 ) {
-  return new URLSearchParams(search).get("wgpuuploadtransport") === "mapped"
-    ? "mapped"
-    : "queue";
+  const value = new URLSearchParams(search).get("wgpuuploadtransport");
+  if (value === "mapped" || value === "queue") return value;
+  return fallback === "mapped" ? "mapped" : "queue";
 }
 
 export function requestedWgpuMappedStageFast(
