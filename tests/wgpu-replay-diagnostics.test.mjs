@@ -791,11 +791,13 @@ test("renderer worker probes are explicit diagnostic modes", () => {
 });
 
 test("WGPU replay budget accepts only literal 4 ms and 6 ms screening arms", () => {
-  assert.equal(requestedWgpuReplayBudgetMs(""), 0);
+  // 4 ms by default since 2026-10-29; ?wgpureplayms=0 is the unbudgeted replay
+  assert.equal(requestedWgpuReplayBudgetMs(""), 4);
+  assert.equal(requestedWgpuReplayBudgetMs("?wgpureplayms=0"), 0);
   assert.equal(requestedWgpuReplayBudgetMs("?wgpureplayms=4"), 4);
   assert.equal(requestedWgpuReplayBudgetMs("?wgpureplayms=6"), 6);
-  assert.equal(requestedWgpuReplayBudgetMs("?wgpureplayms=04"), 0);
-  assert.equal(requestedWgpuReplayBudgetMs("?wgpureplayms=8"), 0);
+  assert.equal(requestedWgpuReplayBudgetMs("?wgpureplayms=04"), 4, "not an exact value: the default");
+  assert.equal(requestedWgpuReplayBudgetMs("?wgpureplayms=8"), 4);
 });
 
 test("WGPU power preference is high-performance unless low is explicit", () => {

@@ -2,7 +2,8 @@
 // SPDX-License-Identifier: MIT
 //
 // Input and picture gates of a presentation change (first: ?wgpureplayms=4
-// by default, 2026-10-28), base and candidate interleaved in ABBA blocks,
+// by default, 2026-10-29; since then the old replay is --extra
+// "&wgpureplayms=0"), base and candidate interleaved in ABBA blocks,
 // each visit a fresh profile, a savestate loaded as soon as the core takes it.
 //  - picture: the core's own XFB at VI outputs --vi (default 240,600) after
 //    the load (captureAtVi: a fixed emulated frame, never a fixed time); the
