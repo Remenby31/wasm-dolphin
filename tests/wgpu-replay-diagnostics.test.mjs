@@ -647,7 +647,9 @@ test("host-to-worker plumbing keeps the classifier query-gated and reportable", 
   assert.match(host, /requestedWgpuProducerProfile\(window\.location\.search\)/);
   assert.match(host, /requestedWgpuStateCache\(window\.location\.search\)/);
   assert.match(host, /requestedWgpuUboCache\(window\.location\.search\)/);
-  assert.match(host, /requestedWgpuGeometryPack\(window\.location\.search\)/);
+  // on by default since 2026-10-29 (=0 turns each off)
+  assert.match(host, /requestedWgpuGeometryPack\(window\.location\.search, true\)/);
+  assert.match(host, /requestedWgpuGeometryRange\(window\.location\.search, true\)/);
   assert.match(host, /requestedWgpuReplayBudgetMs\(window\.location\.search\)/);
   assert.match(host, /requestedWgpuPowerPreference\(window\.location\.search\)/);
   assert.match(adapter, /wgpuReplayDiagnostics: this\.wgpuReplayDiagnostics/);

@@ -521,6 +521,20 @@ test("metrics-off WGPU evidence requires a matching static runtime config", () =
   assert.match(evaluateWgpuRuntimeConfigEvidence({
     required: true, params: unforced, runtimeConfig: { ...jsc, wasmEngine: undefined },
   }).failures.join("\n"), /upload transport mismatch/);
+  // Geometry merging is on by default since 2026-10-29: without the
+  // parameters both are expected on; =0 turns each off.
+  const { wgpugeompack: _pack, wgpugeomrange: _range, ...noGeometryParams } = params;
+  const geometryOn = { ...runtimeConfig, geometryPackEnabled: true, geometryRangeEnabled: true };
+  assert.deepEqual(evaluateWgpuRuntimeConfigEvidence({
+    required: true, params: noGeometryParams, runtimeConfig: geometryOn,
+  }).failures, []);
+  assert.match(evaluateWgpuRuntimeConfigEvidence({
+    required: true, params: noGeometryParams, runtimeConfig,
+  }).failures.join("\n"), /geometry pack mismatch/);
+  assert.deepEqual(evaluateWgpuRuntimeConfigEvidence({
+    required: true, params: { ...noGeometryParams, wgpugeomrange: "0" },
+    runtimeConfig: { ...geometryOn, geometryRangeEnabled: false },
+  }).failures, []);
   // Every slot count the engine accepts (3 to 8) is accepted here too.
   const sixSlots = { ...runtimeConfig, mappedStaging: { ...runtimeConfig.mappedStaging, slotCount: 6 } };
   assert.deepEqual(evaluateWgpuRuntimeConfigEvidence({

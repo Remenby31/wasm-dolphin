@@ -63,8 +63,10 @@ export function evaluateWgpuRuntimeConfigEvidence({
   const expectedSlots = /^[3-8]$/.test(requestedSlots)
     ? wgpuMappedStagingSlotCountOf(requestedSlots) : defaultWgpuMappedStagingSlotCount(engine);
   const expectedTimingStride = String(params?.wgpumappedtiming) === "64" ? 64 : 1;
-  const expectedGeometryPack = requestedFlag("wgpugeompack");
-  const expectedGeometryRange = expectedGeometryPack && requestedFlag("wgpugeomrange");
+  // on by default since 2026-10-29 (src/core-host.js): off only when =0
+  const defaultOnFlag = (name) => String(params?.[name] ?? "1") !== "0";
+  const expectedGeometryPack = defaultOnFlag("wgpugeompack");
+  const expectedGeometryRange = expectedGeometryPack && defaultOnFlag("wgpugeomrange");
   const expectedTailGate = requestedFlag("wgputailgate");
   const expect = (label, actual, expected) => {
     if (actual !== expected) {
