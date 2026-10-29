@@ -16,9 +16,9 @@
 
 import { readFileSync } from "node:fs";
 
-// blockmerge, shortprefix off; 0183's enable bit 27 on, as core-host sets it
-// by default since #322 (?regionmtmsr=0 is the exception now).
-export const PRODUCTION_DISABLE_MASK = (1 << 17) | (1 << 21) | (1 << 27);
+// blockmerge, shortprefix off; the enable bits 27 (0183), 16 (0189) and 18 (0187) on, as core-host sets them
+// by default (since #322 for 27; ?regionmtmsr=0, ?regionfragments=0 and ?regionchaincache=0 are the exceptions).
+export const PRODUCTION_DISABLE_MASK = (1 << 16) | (1 << 17) | (1 << 18) | (1 << 21) | (1 << 27);
 export const SHORT_PREFIX_MASK = 1 << 17; // lets a 2-op block (inst + blr) compile
 export const REGALLOC_OFF = 1 << 20;
 

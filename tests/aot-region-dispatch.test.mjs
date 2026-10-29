@@ -2520,6 +2520,15 @@ test("0189: slots released by dropped regions and reused by others are never cha
   });
 });
 
+test("0187 and 0189 are on by default; ?regionchaincache=0 and ?regionfragments=0 turn each off", () => {
+  const host = readFileSync(new URL("../src/core-host.js", import.meta.url), "utf8");
+  assert.match(host, /regionfragments: 1 << 16,/);
+  assert.match(host, /regionchaincache: 1 << 18,/);
+  assert.match(host, /if \(params\.get\("regionfragments"\) !== "0"\) \{\n\s*mask \|= CACHED_INTERPRETER_DISABLE_BITS\.regionfragments;/);
+  assert.match(host, /if \(params\.get\("regionchaincache"\) !== "0"\) \{\n\s*mask \|= CACHED_INTERPRETER_DISABLE_BITS\.regionchaincache;/);
+  assert.equal(PRODUCTION_DISABLE_MASK & (FRAGMENTS | CHAIN_CACHE), FRAGMENTS | CHAIN_CACHE, "the oracle's production mask has both");
+});
+
 test("0189 off: modules carry no entry -> fragment section", () => {
   const f = { entry: 0x80003000, entries: [0x80003000], code: Uint8Array.of(0x00, 0x41, 0x00, 0x0b), relocs: [] };
   const off = assembleRegion([f], { helpers: HELPER_SIGNATURES, pcOffset: 0, memoryPages: 1 });

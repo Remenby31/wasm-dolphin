@@ -1949,8 +1949,8 @@ const CACHED_INTERPRETER_DISABLE_BITS = {
   fastmemhoist:    1 << 23, // §28cz per-block fastmem bounds-check hoist (ENABLE polarity; default-off; ?fastmemhoist=1)
   inlinefma:       1 << 26, // inline exact FMA; set: the FMA family calls the interpreter's NI_madd_msub
   regionmtmsr:     1 << 27, // 0183 regions go on past a mtmsr that changes only EE (ENABLE polarity; default-on; ?regionmtmsr=0 turns it off)
-  regionfragments: 1 << 16, // 0189 region chaining enters the fragment, not the module's dispatcher (ENABLE polarity; default-off; ?regionfragments=1)
-  regionchaincache: 1 << 18, // 0187 region chaining looks the next region up in one cache line (ENABLE polarity; default-off; ?regionchaincache=1)
+  regionfragments: 1 << 16, // 0189 region chaining enters the fragment, not the module's dispatcher (ENABLE polarity; default-on; ?regionfragments=0 turns it off)
+  regionchaincache: 1 << 18, // 0187 region chaining looks the next region up in one cache line (ENABLE polarity; default-on; ?regionchaincache=0 turns it off)
   regshape:        1 << 28, // 0184 x64 register shape: at most 4 GPRs per block in locals (ENABLE polarity; default-off; ?regshape=x64)
   // Aliases the plan / TL;DR uses interchangeably:
   fastinputpoll: 1 << 1, // legacy synonym for meleecall (input-poll lives there)
@@ -2062,12 +2062,15 @@ function requestedCachedInterpreterDisableMask() {
   if (params.get("regionmtmsr") !== "0") {
     mask |= CACHED_INTERPRETER_DISABLE_BITS.regionmtmsr;
   }
-  // 0187: default-off while it is measured (no codegen change).
-  // 0189: default-off while it is measured.
-  if (params.get("regionfragments") === "1") {
+  // 0187 + 0189: default-on since their measures (#340: Mac race both bits
+  // vs none +8.0 % cold / +8.5 % warm over 9 pairs; off vs main no cost;
+  // drop-meter guard clean). Region chaining enters the next fragment through
+  // a cached table slot instead of the module's dispatcher.
+  // ?regionfragments=0 and ?regionchaincache=0 turn each off.
+  if (params.get("regionfragments") !== "0") {
     mask |= CACHED_INTERPRETER_DISABLE_BITS.regionfragments;
   }
-  if (params.get("regionchaincache") === "1") {
+  if (params.get("regionchaincache") !== "0") {
     mask |= CACHED_INTERPRETER_DISABLE_BITS.regionchaincache;
   }
   // 0184: the x64 register shape, default-off until the CI bench and a real
