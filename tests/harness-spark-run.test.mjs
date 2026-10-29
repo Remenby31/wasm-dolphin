@@ -165,6 +165,24 @@ test("spark queue: move refuses what would break the order, a duplicate keeps th
   assert.equal(movedId(q, "b1", "b3"), "000000000010001-5000.json"); // to the end
   assert.throws(() => movedId(q, "b1", "b2"), /no room between b2 and b3/); // 9000 and 9001
   assert.throws(() => movedId(q, "run", "head"), /already running/);
+  // 2026-10-28: a waiting ticket older than the running one (img-gpu-ir2-light
+  // before img-gpu-ir1-light, running): "head" goes just after the running
+  // ticket by position, not at the count of running tickets
+  const q2 = [t(1000, "older-waiting"), t(2000, "running", "a"), t(5000, "w1"), t(9000, "smoke")];
+  const id = movedId(q2, "smoke", "head");
+  assert.ok(id < q2[0].id, `head goes before the first waiting ticket, even before the running one (${id})`);
+  // once the running job is through, the moved ticket is the first to go on lane a
+  const moved = q2.map((x) => (x.name === "smoke" ? { ...x, id, kind: "pair", lanes: "a" } : { ...x, kind: "pair", lanes: "a" }));
+  const after = moved.filter((x) => x.name !== "running").sort((x, y) => (x.id < y.id ? -1 : 1));
+  const free = () => false;
+  assert.deepEqual(nextStep(after.find((x) => x.name === "smoke"), after, free), { go: ["a"] });
+  assert.match(nextStep(after.find((x) => x.name === "older-waiting"), after, free).wait, /pair smoke arrived first/);
+  // eta counts the running job first, even with a waiting ticket sorted before it
+  const withRunning = [...moved].sort((x, y) => (x.id < y.id ? -1 : 1)).map((x) => (x.name === "running" ? { ...x, estMin: 20, grantedAt: new Date(Date.now() - 5 * 60000).toISOString() } : { ...x, estMin: 10 }));
+  assert.equal(eta(withRunning).find((x) => x.name === "smoke").startsIn, 15, "the smoke starts once the running job is through");
+  // a named target before a running job is still refused
+  assert.throws(() => movedId(q2, "smoke", "older-waiting"), /before a running job/);
+  assert.equal(movedId([t(1000, "w0"), t(5000, "w1")], "w1", "head"), "000000000000000-5000.json", "nothing running: before every waiting ticket");
   // An old waiter (no estMin) cannot follow a rename: refused.
   const { estMin, ...old } = q[1];
   assert.throws(() => movedId([q[0], old, q[2]], "b1", "head"), /would wait for itself/);
@@ -311,6 +329,48 @@ test("spark-run --multi: a KPI scene is measured with its pinned protocol (heavy
   assert.equal(sceneName("race-after.sav"), "race-after.sav");
 });
 
+test("spark-run --multi-lanes: one lane per arm, disjoint, off node's cores; the three-lane default needs three arms", async () => {
+  const { multiArms, multiLanes, MULTI_LANES, multiRaceArgs } = await import("../harness/remote/spark-run.mjs");
+  // two lanes: baseline and candidate, no third arm
+  assert.deepEqual(multiArms("base", ["cand"], { lanes: 2 }), ["base", "cand"]);
+  assert.deepEqual(multiArms("base", ["cand"]), ["base", "cand", "base"]);
+  assert.throws(() => multiArms("base", ["c1", "c2"], { lanes: 2 }), /two lanes: one --candidate/);
+  assert.equal(multiLanes(null, 3), MULTI_LANES);
+  assert.throws(() => multiLanes(null, 2), /--multi with 2 arms: --multi-lanes/);
+  // the two pair lanes' big cores, one arm each (simultaneous A/B, lanes swapped by race-multi)
+  assert.equal(multiLanes("15-19;5-9", 2), "15,16,17,18,19;5,6,7,8,9");
+  assert.throws(() => multiLanes("15-19", 2), /1 lanes for 2 arms/);
+  assert.throws(() => multiLanes("15-19;17-21", 2), /cpus 0-19/);
+  assert.throws(() => multiLanes("15-19;5-9,15", 2), /share cpus|different sizes/);
+  assert.throws(() => multiLanes("10-14;5-9", 2), /cpus 10-14 run node/);
+  // review of #345: an A725 lane (0-4, 2.8 GHz) against an X925 one measures the cores
+  assert.throws(() => multiLanes("15-19;0-4", 2), /cpus 0-4 are Cortex-A725/);
+  assert.throws(() => multiLanes("5,6,7;15,16,17;2,3,4", 3), /Cortex-A725/);
+  assert.throws(() => multiLanes("15-19;5-8", 2), /different sizes/);
+  assert.throws(() => multiLanes("a;b", 2), /cpus as n or n-m/);
+  const args = multiRaceArgs({ iso: "/d.iso", state: "/s.sav", runs: 6, armDirs: ["/a", "/b"], lanes: "15,16,17,18,19;5,6,7,8,9" });
+  assert.equal(args[args.indexOf("--lanes") + 1], "15,16,17,18,19;5,6,7,8,9");
+});
+
+test("spark-run --queue: each ticket's wait and estimate, a waiting ticket past an hour flagged", async () => {
+  const { queueRows, QUEUE_STARVED_MIN } = await import("../harness/remote/spark-run.mjs");
+  assert.equal(QUEUE_STARVED_MIN, 60);
+  const now = Date.parse("2026-10-28T12:00:00Z");
+  const rows = queueRows([
+    { kind: "pair", name: "x11-a", owner: "wt-x", at: "2026-10-28T11:50:00Z", lane: "a", endsIn: 7 },
+    { kind: "pair", name: "late", owner: "wt-y", at: "2026-10-28T10:30:00Z", lane: null, startsIn: 7 },
+    { kind: "pair", name: "held", at: "2026-10-28T11:55:00Z", lane: null, holdUntil: "2026-10-28T12:01:00Z", startsIn: 20 }
+  ], now);
+  assert.deepEqual(rows, [
+    "pair x11-a (wt-x) [wants ?] running in a, 10 min since queued, ends in ~7 min",
+    "STARVED pair late (wt-y) [wants ?] waiting, 90 min since queued, starts in ~7 min",
+    "pair held [wants ?] held (cores busy), 5 min since queued, starts in ~20 min"
+  ]);
+  // review of #345: a ticket that stepped aside on its own (cores busy) is not starved
+  const [heldLong] = queueRows([{ kind: "multi", name: "aa", at: "2026-10-28T10:00:00Z", lane: null, holdUntil: "2026-10-28T12:01:00Z", startsIn: 30 }], now);
+  assert.equal(heldLong, "multi aa [wants ?] held (cores busy), 120 min since queued, starts in ~30 min");
+});
+
 // --probe (2026-10-28): drop-meter and replay-gates run on the bench like
 // race-perf (same lane, lock, cores, display); the Spark side picks the
 // script from SPARK_PROBE, refusing any other name.
@@ -361,13 +421,37 @@ test("spark-queue estimates: replay-gates and drop-meter by their own shape", as
   assert.equal(estimateMin("pair", ["--runs", "6", "--warmup", "20", "--secs", "10"]), 5, "race-perf as before (6 × (20 + 10 + 20) s)");
 });
 
-test("spark-run --screen: lane b only for screening, stamped in the summary as never a conclusion", async () => {
-  const { checkLane, SCREEN_NOTE } = await import("../harness/remote/spark-run.mjs");
-  assert.throws(() => checkLane("b"), /--screen/);
-  assert.doesNotThrow(() => checkLane("b", { screen: true }));
+// 2026-10-29, the user's decision: the Spark is shared, cpus 0-9 are
+// Excalibur's evals, 10-19 Salon's. Lane b (5-9, 0-4), its screening runs
+// and the multi (arms on 5-9) are gone; one pair at a time in lane a.
+test("spark bench on cpus 10-19 only: lane b, --screen and --multi refused; a pair in lane a and builds still queue", async () => {
+  const { checkLane, LANE_B_GONE, SALON_CPUS, SCREEN_NOTE } = await import("../harness/remote/spark-run.mjs");
+  assert.equal(SALON_CPUS, "10-19");
+  assert.throws(() => checkLane("b"), /Excalibur's since 2026-10-29/);
+  assert.throws(() => checkLane("b", { screen: true }), /lane b, --screen and --multi are gone/);
+  assert.throws(() => checkLane("a", { screen: true }), /--screen/);
   for (const lane of ["a", "auto"]) assert.doesNotThrow(() => checkLane(lane));
-  assert.throws(() => checkLane("c", { screen: true }), /--lane c/);
+  assert.throws(() => checkLane("c"), /--lane c: a or auto/);
+  // an older screening run keeps its stamp when fetched
   assert.match(stampSummary({ change: null }, { host: "spark", screen: SCREEN_NOTE }).bench.screen, /never a conclusion/);
+  const src = readFileSync(new URL("../harness/remote/spark-run.mjs", import.meta.url), "utf8");
+  assert.match(src, /if \(values\.multi\) throw new Error\(`--multi: \$\{LANE_B_GONE\}`\);/);
+  assert.ok(src.indexOf("if (values.fetch)") < src.indexOf("if (values.multi) throw"), "an older multi still comes back with --fetch");
+  assert.match(LANE_B_GONE, /cpus 0-9 are Excalibur's/);
+  const { acceptsWait } = await import("../harness/remote/spark-queue.mjs");
+  assert.equal(acceptsWait({ kind: "pair", lanes: "auto" }), true);
+  assert.equal(acceptsWait({ kind: "pair", lanes: "a" }), true);
+  assert.equal(acceptsWait({ kind: "build" }), true);
+  assert.equal(acceptsWait({ kind: "pair", lanes: "b" }), false);
+  assert.equal(acceptsWait({ kind: "multi" }), false);
+  const queue = readFileSync(new URL("../harness/remote/spark-queue.mjs", import.meta.url), "utf8");
+  assert.match(queue, /if \(!acceptsWait\(\{ kind: values\.kind, lanes: values\.lanes \}\)\) throw/);
+  const race = readFileSync(new URL("../harness/remote/spark-race.sh", import.meta.url), "utf8");
+  assert.doesNotMatch(race, /^\s+b\) cpus=5-9/m, "spark-race has no lane b");
+  const multi = readFileSync(new URL("../harness/remote/spark-multi.sh", import.meta.url), "utf8");
+  assert.match(multi, /no multi on the bench"[^]*echo 2 > "\$out\.exit"\nexit 2/);
+  const build = readFileSync(new URL("../harness/remote/spark-build.mjs", import.meta.url), "utf8");
+  assert.match(build, /run\("taskset", \["-c", "10-19", "nice"[^]*"--jobs", "10"\]/, "a build on Salon's cpus only");
 });
 
 test("spark-run --noise: drop-meter's A/A named as a bench run, its summary there", async () => {
@@ -376,18 +460,6 @@ test("spark-run --noise: drop-meter's A/A named as a bench run, its summary ther
   assert.deepEqual(benchNoiseArgs(undefined, "/r"), []);
   assert.throws(() => benchNoiseArgs("jit-0189c-drops-aa", "/r"), /<yyyymmdd>\/<name>/);
   assert.throws(() => benchNoiseArgs("20261028/../x/y", "/r"), /<yyyymmdd>\/<name>/);
-});
-
-// 2026-10-28: drop-meter's default load guard (cpus/4 = 5 on the Spark) sat at
-// the bench's background load and kept no run; on the bench it defaults to 8.
-test("spark-run: drop-meter gets --max-load 8 on the bench unless the caller sets it", async () => {
-  const { benchProbeDefaults, BENCH_DROP_MAX_LOAD } = await import("../harness/remote/spark-run.mjs");
-  assert.equal(BENCH_DROP_MAX_LOAD, 8);
-  assert.deepEqual(benchProbeDefaults("drop-meter", ["--display"]), ["--display", "--max-load", "8"]);
-  assert.deepEqual(benchProbeDefaults("drop-meter", ["--max-load", "6"]), ["--max-load", "6"], "the caller's value wins");
-  assert.deepEqual(benchProbeDefaults("drop-meter", ["--max-load=6"]), ["--max-load=6"]);
-  assert.deepEqual(benchProbeDefaults("race-perf", ["--display"]), ["--display"], "race-perf unchanged");
-  assert.deepEqual(benchProbeDefaults("replay-gates", ["--query", "q"]), ["--query", "q"], "replay-gates has no load guard");
 });
 
 test("spark queue: a lane b job backfills past an older whole-bench job that cannot start before it ends", () => {
@@ -423,3 +495,19 @@ test("spark queue: a lane b job backfills past an older whole-bench job that can
   const oldRunning = t(1, "pair", "a", { lane: "a", estMin: 20 });
   assert.match(nextStep(short, [oldRunning, pairA, multi, short], busy, now).wait, /multi3 arrived first/);
 });
+
+// Review of #345: a multi on two lanes (residual sigma 1.05 %, A/A
+// multi2-aa-5x5-c) is stamped as screening in spark.json and the summary.
+test("spark-run --multi on two lanes: stamped as screening, three lanes not", async () => {
+  const { multiScreen, MULTI_SCREEN_NOTE, stampSummary } = await import("../harness/remote/spark-run.mjs");
+  assert.equal(multiScreen("15,16,17,18,19;5,6,7,8,9"), MULTI_SCREEN_NOTE);
+  assert.equal(multiScreen("5,6,7;15,16,17;8,9,19"), null);
+  assert.match(MULTI_SCREEN_NOTE, /^screening: .*never a conclusion/);
+  const s = stampSummary({ probe: "race-multi" }, { host: "spark", screen: MULTI_SCREEN_NOTE });
+  assert.equal(s.screen, MULTI_SCREEN_NOTE);
+  assert.equal("screen" in stampSummary({ probe: "race-multi" }, { host: "spark" }), false);
+  const src = readFileSync(new URL("../harness/remote/spark-run.mjs", import.meta.url), "utf8");
+  assert.match(src, /raceArgs, \.\.\.\(multiScreen\(lanes\) \? \{ screen: multiScreen\(lanes\) \} : \{\}\),/, "spark.json carries it");
+  assert.match(src, /if \(meta\.screen\) console\.log\(`\[spark-run\] \$\{meta\.screen\}`\);/, "said at the launch");
+});
+

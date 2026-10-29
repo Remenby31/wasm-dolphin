@@ -215,6 +215,8 @@ export class EmulatorHost {
     // window.  Repeated fixed-battle A/B runs showed substantially lower
     // replay age and higher presentation cadence for the real WGPU backend.
     // `wgpupump=0` remains the explicit rollback; other backends stay off.
+    // With the default 4 ms replay budget it only stops the polling: the old
+    // pump-off replay is `wgpupump=0&wgpureplayms=0`.
     this.wgpuReplayPump = requestedWgpuReplayPump(
       window.location.search,
       this.videoBackend === "WebGPU-Real"

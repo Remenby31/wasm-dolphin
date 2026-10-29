@@ -43,6 +43,9 @@ export const LANES = ["a", "b"];
 // other. So one pair at a time, in lane a; lane b stays defined for builds'
 // locks and a later attempt.
 export const PAIR_LANES = ["a"];
+// What a new job may ask for since 2026-10-29 (cpus 0-9 Excalibur's): a pair
+// in lane a, or a build (pinned to 10-19, spark-build.mjs).
+export const acceptsWait = ({ kind, lanes = "auto" }) => (kind === "pair" && ["auto", "a"].includes(lanes)) || kind === "build";
 export const laneLock = (lane, bench = BENCH_DIR) => (lane === "a" ? path.join(bench, ".perf-lock") : path.join(bench, "lanes", lane, ".perf-lock"));
 const queueDir = (bench) => path.join(bench, "queue");
 
@@ -142,7 +145,10 @@ export function estimateMin(kind, args = []) {
 export function eta(tickets, now = Date.now()) {
   let t0 = 0;
   const out = [];
-  for (const t of tickets.filter((x) => x.lane !== "none")) {
+  // the running jobs first, whatever their ids (a ticket moved to the head
+  // sorts before a running one): every waiting job starts after them
+  const live = tickets.filter((x) => x.lane !== "none");
+  for (const t of [...live.filter((x) => x.lane), ...live.filter((x) => !x.lane)]) {
     const est = t.estMin ?? (t.kind === "build" ? BUILD_MIN : t.kind === "multi" ? estimateMin("multi") : 13);
     if (t.lane) {
       const left = Math.max(1, est - (t.grantedAt ? (now - Date.parse(t.grantedAt)) / 60000 : 0));
@@ -156,8 +162,11 @@ export function eta(tickets, now = Date.now()) {
   return out;
 }
 
-// The ticket name that puts `name` just after `after` ("head": before every
-// waiting ticket): a time between its new neighbours.
+// The ticket name that puts `name` just after `after`, or ("head") just
+// before the first waiting ticket, possibly before a running one: a waiting
+// ticket older than the running job sorts before it (2026-10-28), and a
+// running ticket's id decides nothing any more (nextStep skips granted
+// tickets; eta() counts them first). A time between its new neighbours.
 export function movedId(tickets, name, after) {
   const me = tickets.find((t) => t.name === name);
   if (!me) throw new Error(`no ticket named ${name}`);
@@ -167,9 +176,10 @@ export function movedId(tickets, name, after) {
   // p87-native-ps-aot idled the bench). Its owner requeues it with main.
   if (!("estMin" in me)) throw new Error(`${name} waits with a harness from before \`move\`: it would wait for itself; its owner must requeue it after merging main`);
   const others = tickets.filter((t) => t !== me);
-  const at = after === "head" ? others.filter((t) => t.lane).length : others.findIndex((t) => t.name === after) + 1;
+  const firstWaiting = others.findIndex((t) => !t.lane);
+  const at = after === "head" ? (firstWaiting < 0 ? others.length : firstWaiting) : others.findIndex((t) => t.name === after) + 1;
   if (after !== "head" && at === 0) throw new Error(`no ticket named ${after}`);
-  if (others.slice(at).some((t) => t.lane)) throw new Error(`cannot move ${name} before a running job`);
+  if (after !== "head" && others.slice(at).some((t) => t.lane)) throw new Error(`cannot move ${name} before a running job`);
   const ms = (t) => Number(t.id.split("-")[0]);
   const lo = at > 0 ? ms(others[at - 1]) : ms(others[0] ?? me) - 2000, hi = at < others.length ? ms(others[at]) : ms(others.at(-1)) + 2000;
   if (hi - lo < 2) throw new Error(`no room between ${others[at - 1]?.name} and ${others[at]?.name} (same millisecond)`);
@@ -306,6 +316,11 @@ async function main() {
   if (!Number.isInteger(pid) || pid <= 0) throw new Error("--pid <job pid> is required");
   if (cmd === "done") return done(pid);
   if (cmd !== "wait") throw new Error("usage: spark-queue.mjs wait|done|list …");
+  // Lane b (5-9, 0-4) and the multi (arms on 5-9) went with cpus 0-9 to
+  // Excalibur's evals on 2026-10-29 (the user's decision): pairs and builds
+  // only, a pair in lane a. The queue's lanes stay two for the locks an
+  // older harness may still hold.
+  if (!acceptsWait({ kind: values.kind, lanes: values.lanes })) throw new Error(`wait --kind ${values.kind} --lanes ${values.lanes}: cpus 0-9 are Excalibur's since 2026-10-29, lane b and the multi are gone`);
   // Progress on stderr, the lane alone on stdout. After the options, a
   // pair's race-perf options (for its estimated duration).
   const estMin = estimateMin(values.kind, positionals);

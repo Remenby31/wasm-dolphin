@@ -5,6 +5,7 @@ import { createHash } from "node:crypto";
 import { readFile, stat } from "node:fs/promises";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
+import { requestedWgpuReplayBudgetMs } from "../src/wgpu-replay-diagnostics.js";
 
 const ATTRIBUTION_SCHEMAS = Object.freeze({
   "wasm-dolphin.wgpu-upload-attribution.v1": Object.freeze([
@@ -325,11 +326,8 @@ function validateBackend(manifest, summary, addIssue, runId) {
   const webgpu = summary.final?.causalTelemetry?.webgpu || {};
   const params = new URL(manifest.benchmark?.url || "http://invalid/").searchParams;
   const replayBudgetParam = params.get("wgpureplayms");
-  const expectedReplayBudgetMs = replayBudgetParam === "4"
-    ? 4
-    : replayBudgetParam === "6"
-      ? 6
-      : 0;
+  // The product's own reading: 4 ms without the parameter since 2026-10-29
+  const expectedReplayBudgetMs = requestedWgpuReplayBudgetMs(params.toString());
   check(webgpu.registered === true && summary.final?.causalTelemetry?.presentation?.backend === "webgpu",
     "BACKEND_TELEMETRY", "Final telemetry does not identify registered real WebGPU", addIssue, runId);
   for (const field of ["uploadTimeoutCountBeforeVerifiedLoad", "uploadTimeoutCountAfterVerifiedLoad",
@@ -358,11 +356,16 @@ function validateBackend(manifest, summary, addIssue, runId) {
         `handoff=${webgpu.uploadArenaRingHandoffBytes}`,
       addIssue, runId);
   }
-  if (replayBudgetParam != null) {
-    check(expectedReplayBudgetMs > 0 && webgpu.replayBudgetEnabled === true &&
+  // ?wgpureplayms=0: the unbudgeted replay asked for explicitly; without the
+  // parameter (the product's default) the 4 ms budget and its hard cap
+  if (expectedReplayBudgetMs === 0) {
+    check(webgpu.replayBudgetEnabled !== true, "REPLAY_BUDGET_IDENTITY",
+      `wgpureplayms=0 but enabled=${webgpu.replayBudgetEnabled}`, addIssue, runId);
+  } else {
+    check(webgpu.replayBudgetEnabled === true &&
         safeCounter(webgpu.replayBudgetMs) === expectedReplayBudgetMs,
       "REPLAY_BUDGET_IDENTITY",
-      `wgpureplayms=${replayBudgetParam} enabled=${webgpu.replayBudgetEnabled} ` +
+      `wgpureplayms=${replayBudgetParam ?? "(default)"} expected=${expectedReplayBudgetMs} enabled=${webgpu.replayBudgetEnabled} ` +
         `telemetryMs=${webgpu.replayBudgetMs}`,
       addIssue, runId);
     check(safeCounter(webgpu.replayBudgetStopReasons?.["record-window"]) === 0,

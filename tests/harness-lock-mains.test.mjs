@@ -160,3 +160,53 @@ test("race-perf: a side measured partly on battery is dropped; an unplug counts 
   assert.match(src, /if \(powerCounted\) powerCounted = false;\n\s+else relocks \+= 1;/);
   assert.match(src, /unplugged or loaded \$\{relocks\} times \(the lock let go for power or load\)/);
 });
+
+// 2026-10-29: "AC attached" all night while the charge fell 72 -> 54 % (the
+// charger not keeping up). A measure needs the charge not falling and above
+// MIN_BATTERY_PERCENT; a visit where it fell is left out like an overloaded one.
+test("requireMains: on mains under 30 % charge waits like battery; at 30 % and up it takes the lock", async (t) => {
+  const dir = lockDir(t);
+  let percent = 22, sleeps = 0;
+  const release = await acquirePerfLock({
+    dir, name: "measure", requireMains: true, power: () => ({ source: "ac", percent }), waitSec: 600, pollSec: 1,
+    sleep: async () => { sleeps += 1; if (sleeps === 2) percent = 30; }
+  });
+  assert.equal(sleeps, 2);
+  release();
+  // without requireMains (an e2e, a build) the charge changes nothing
+  const r2 = await acquirePerfLock({ dir, name: "e2e", power: () => ({ source: "ac", percent: 5 }), waitSec: 0, sleep: async () => { throw new Error("waited"); } });
+  r2();
+});
+
+test("drop meter: a visit whose charge fell on mains, or ended under 30 %, is a power-draining one", async () => {
+  const { powerDrained, MIN_BATTERY_PERCENT } = await import("../harness/lib/system.mjs");
+  const { visitPowerDrained, noVerdictReasons } = await import("../harness/probes/drop-meter.mjs");
+  assert.equal(MIN_BATTERY_PERCENT, 30);
+  assert.equal(powerDrained({ source: "ac", percent: 72 }, { source: "ac", percent: 71 }), true, "fell by 1 %");
+  assert.equal(powerDrained({ source: "ac", percent: 72 }, { source: "ac", percent: 72 }), false);
+  assert.equal(powerDrained({ source: "ac", percent: 60 }, { source: "ac", percent: 61 }), false, "charging");
+  assert.equal(powerDrained({ source: "ac", percent: 29 }, { source: "ac", percent: 29 }), true, "under 30 %");
+  assert.equal(powerDrained({ source: "ac", percent: null }, null), false, "unknown: not drained");
+  assert.equal(powerDrained(null, null), false, "a desktop");
+  assert.equal(visitPowerDrained({ power: { source: "ac", percent: 54 }, powerEnd: { source: "ac", percent: 53 } }), true);
+  // left out of the usable runs, as overloaded ones are
+  const run = (side, n, drained) => ({ side, run: n, visit: 1, analysis: { sampled: true, power: "ac", powerDrained: drained } });
+  const analyses = [run("baseline", 1, false), run("baseline", 2, true), run("baseline", 3, true), run("candidate", 1, false), run("candidate", 2, false), run("candidate", 3, false)];
+  const reasons = noVerdictReasons({ analyses, visits: 1, verdicts: { 1: {} } });
+  assert.ok(reasons.some((r) => /visit 1: 1 usable baseline run\(s\) \(errors, overloaded and power-draining runs left out\)/.test(r)), reasons.join("; "));
+});
+
+// race-perf decides speed: a side whose charge fell on mains (or ended under
+// 30 %) is marked POWER and left out of every paired change, as an
+// overloaded side is.
+test("race-perf: a power-draining side is marked, logged POWER and left out of the paired changes", async () => {
+  const { readFile } = await import("node:fs/promises");
+  const src = await readFile(new URL("../harness/probes/race-perf.mjs", import.meta.url), "utf8");
+  assert.match(src, /if \(r && powerDrained\(powerStart, powerEnd\)\) \{\n\s+r\.powerDrained = \{ start: powerStart\?\.percent \?\? null, end: powerEnd\?\.percent \?\? null \};/);
+  assert.match(src, /: POWER, charge /);
+  assert.match(src, /const good = \(r\) => r && !r\.error && !r\.fatal\?\.length && !r\.powerDrained && /);
+  // every paired change takes good() runs only
+  const changes = src.match(/pairedSpeedChange\(runsDone\.filter\(\(r\) => good\(r\.baseline\) && good\(r\.candidate\)\)/g) ?? [];
+  assert.ok(changes.length >= 3, `${changes.length} changes on good() runs`);
+  assert.match(src, /r\[n\]\?\.powerDrained \? `power: charge /);
+});
