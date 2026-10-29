@@ -146,8 +146,8 @@ export function bootBackbufferResize(canvas) {
 // the hardware path that frame is the demo scene's 320x240 (or the cached
 // copy the tick repaint draws again), and once the backbuffer was sized (the
 // core's announce, or the one-shot growth at the first fb0 pass) nothing
-// sizes it back: the session played and streamed at 320x240 (2026-10-28, 2 of
-// 26 salon sessions at ir=3, the frame arriving between the 1920x1440 resize
+// sizes it back: the session played and streamed at 320x240 (2026-10-28, 5 of
+// 51 salon sessions at ir=3, the frame arriving between the 1920x1440 resize
 // and the command ring's first present). Such a frame is dropped.
 export function cpuFrameYieldsToHardware({ hardware, backbufferSized, ringOwnsCanvas }) {
   return Boolean(hardware && (backbufferSized || ringOwnsCanvas));

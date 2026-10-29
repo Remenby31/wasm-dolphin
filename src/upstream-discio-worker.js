@@ -5477,8 +5477,8 @@ function startTickRepaintLoop() {
     const displayBytes = markerApplied ? marked.bytes : tickBytes;
     let markerOutputIssued = false;
     if (renderGpu) {
-      drawFrameBytesToWebGpu(_lastFrameWidth, _lastFrameHeight, displayBytes);
-      markerOutputIssued = markerApplied;
+      // not issued when the frame was dropped (cpuFrameYieldsToHardware)
+      markerOutputIssued = drawFrameBytesToWebGpu(_lastFrameWidth, _lastFrameHeight, displayBytes) && markerApplied;
     } else if (renderGl) {
       drawFrameBytesToWebGl(_lastFrameWidth, _lastFrameHeight, displayBytes);
       markerOutputIssued = markerApplied;
@@ -6099,9 +6099,8 @@ function presentFrame(width, height, pointer, length, coreFrame = api?.getFrame?
   const drawStartedAt = startProfileSample();
   let markerOutputIssued = false;
   if (renderGpu) {
-    if (markerApplied) drawFrameBytesToWebGpu(width, height, displayFrameView);
-    else drawFrameToWebGpu(width, height, pointer, length);
-    markerOutputIssued = markerApplied;
+    const drawn = markerApplied ? drawFrameBytesToWebGpu(width, height, displayFrameView) : drawFrameToWebGpu(width, height, pointer, length);
+    markerOutputIssued = markerApplied && drawn;
   } else if (renderGl) {
     if (markerApplied) drawFrameBytesToWebGl(width, height, displayFrameView);
     else drawFrameToWebGl(width, height, pointer, length);
@@ -6229,8 +6228,7 @@ function presentFrameBytes(width, height, bytes, coreFrame) {
   const drawStartedAt = startProfileSample();
   let markerOutputIssued = false;
   if (renderGpu) {
-    drawFrameBytesToWebGpu(width, height, displayBytes);
-    markerOutputIssued = markerApplied;
+    markerOutputIssued = drawFrameBytesToWebGpu(width, height, displayBytes) && markerApplied;
   } else if (renderGl) {
     drawFrameBytesToWebGl(width, height, displayBytes);
     markerOutputIssued = markerApplied;
@@ -7359,23 +7357,26 @@ function drawFrameToWebGpu(width, height, pointer, length) {
     return;
   }
 
-  drawFrameBytesToWebGpu(width, height, new Uint8Array(moduleInstance.HEAPU8.buffer, pointer, length));
+  return drawFrameBytesToWebGpu(width, height, new Uint8Array(moduleInstance.HEAPU8.buffer, pointer, length));
 }
 
+// Whether the frame was drawn: false when skipped (nothing to draw on, or a
+// CPU frame the hardware path's canvas does not take), so that a frame's
+// input marker is not counted as shown.
 function drawFrameBytesToWebGpu(width, height, frameView) {
   if (!renderCanvas || !renderGpu || width <= 0 || height <= 0 || !frameView?.byteLength) {
-    return;
+    return false;
   }
   // The hardware path sized the backbuffer: a CPU frame (the demo scene's
   // 320x240) would shrink the canvas for good (wgpu-enhancements.js).
   if (cpuFrameYieldsToHardware({ hardware: hardwareVideoBackend, backbufferSized: wgpuBackbufferSized, ringOwnsCanvas: cmdRingOwnsCanvas })) {
-    return;
+    return false;
   }
 
   const gpu = renderGpu;
   const textureUsage = self.GPUTextureUsage;
   if (!textureUsage) {
-    return;
+    return false;
   }
 
   if (renderCanvas.width !== width || renderCanvas.height !== height) {
@@ -7446,6 +7447,7 @@ function drawFrameBytesToWebGpu(width, height, frameView) {
   pass.end();
   gpu.device.queue.submit([encoder.finish()]);
   gpuCompletionTracker.recordSubmittedWork(gpu.device.queue, "software-present");
+  return true;
 }
 
 function webGpuUploadSource(gpu, frameView, rowBytes, bytesPerRow, height) {
