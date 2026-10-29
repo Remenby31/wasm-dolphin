@@ -269,7 +269,8 @@ test("widescreen reaches the core at boot and while a game runs; the backbuffer 
 
 // 2026-10-28, salon at ir=3: a demo-scene frame (320x240, drawn from bytes)
 // after the backbuffer grew to 1920x1440 shrank the canvas for good; the host
-// played and streamed the whole session at 320x240 (2 of 26 sessions).
+// played and streamed the whole session at 320x240 (5 of 51 sessions; 0 of
+// 41 with the fix; the e2e render-quality spec 5 of 23, then 0 of 24).
 test("on the hardware path a CPU frame after the backbuffer was sized never shrinks the canvas", async () => {
   const { cpuFrameYieldsToHardware, resizeCanvasBackbuffer } = await import("../src/wgpu-enhancements.js");
   // the worker's drawFrameBytesToWebGpu, its sizing only
@@ -297,5 +298,11 @@ test("on the hardware path a CPU frame after the backbuffer was sized never shri
   assert.equal(cpuFrameYieldsToHardware({ hardware: false, backbufferSized: true, ringOwnsCanvas: true }), false);
   assert.equal(cpuFrameYieldsToHardware({ hardware: true, backbufferSized: false, ringOwnsCanvas: false }), false);
   const worker = await read("../src/upstream-discio-worker.js");
-  assert.match(worker, /function drawFrameBytesToWebGpu\(width, height, frameView\) \{[^]*?if \(cpuFrameYieldsToHardware\(\{ hardware: hardwareVideoBackend, backbufferSized: wgpuBackbufferSized, ringOwnsCanvas: cmdRingOwnsCanvas \}\)\) \{\n    return;\n  \}[^]*?renderCanvas\.width = width;/, "the guard comes before the resize");
+  assert.match(worker, /function drawFrameBytesToWebGpu\(width, height, frameView\) \{[^]*?if \(cpuFrameYieldsToHardware\(\{ hardware: hardwareVideoBackend, backbufferSized: wgpuBackbufferSized, ringOwnsCanvas: cmdRingOwnsCanvas \}\)\) \{\n    return false;\n  \}[^]*?renderCanvas\.width = width;/, "the guard comes before the resize");
+  // review of #356: a dropped frame's input marker is not counted as shown
+  assert.match(worker, /recordSubmittedWork\(gpu\.device\.queue, "software-present"\);\n  return true;\n\}/, "drawn: true only once submitted");
+  assert.match(worker, /markerOutputIssued = drawFrameBytesToWebGpu\(_lastFrameWidth, _lastFrameHeight, displayBytes\) && markerApplied;/, "tick repaint");
+  assert.match(worker, /const drawn = markerApplied \? drawFrameBytesToWebGpu\(width, height, displayFrameView\) : drawFrameToWebGpu\(width, height, pointer, length\);\n    markerOutputIssued = markerApplied && drawn;/, "presentFrame");
+  assert.match(worker, /markerOutputIssued = drawFrameBytesToWebGpu\(width, height, displayBytes\) && markerApplied;/, "presentFrameBytes");
+  assert.doesNotMatch(worker, /drawFrameBytesToWebGpu\([^)]*\);\n\s*markerOutputIssued = markerApplied;/, "no marker counted after a draw that may be dropped");
 });
