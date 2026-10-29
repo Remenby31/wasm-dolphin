@@ -1,6 +1,7 @@
 // Copyright 2026 wasm-dolphin contributors
 // SPDX-License-Identifier: MIT
 import assert from "node:assert/strict";
+import { readFileSync } from "node:fs";
 import { readFile } from "node:fs/promises";
 import test from "node:test";
 import { benchJudge, benchLane, benchLimit, benchRead, grantedLanes, LANE_FOREIGN_PCT, MACHINE_LOAD_MAX, SALON_CPUS, SALON_FOREIGN_MAX, salonForeign, salonOverloaded } from "../harness/lib/bench-load.mjs";
@@ -22,6 +23,10 @@ test("bench load gate: Salon's cpus 10-19 only; the whole machine only against a
     { pid: 903, cpu: 16 }, { pid: 904, cpu: 11 } // a stray python on 16, an unpinned Chromium on 11
   ];
   assert.equal(salonForeign(threads, ours), 2);
+  // review of #355: kernel threads on 10-19 (kworker, ksoftirqd) are not another user's work
+  assert.equal(salonForeign([...threads, { pid: 77, cpu: 15, kernel: true }, { pid: 2, cpu: 18, kernel: true }], ours), 2);
+  const src = readFileSync(new URL("../harness/lib/bench-load.mjs", import.meta.url), "utf8");
+  assert.match(src, /const kernel = Number\(name\) === 2 \|\| ppid === 2;/, "kthreadd and its children");
   // seq-aa-lane-a-3's readings: load1 13, its cores free: now let through
   assert.deepEqual(benchJudge({ load: 13.33, background: 0.4 }), { limit: 40, ok: true, over: [] });
   assert.deepEqual(benchJudge({ load: 9, background: 3.2 }).over, ["3.2 foreign runnable threads on cpus 10-19 > 2"]);
