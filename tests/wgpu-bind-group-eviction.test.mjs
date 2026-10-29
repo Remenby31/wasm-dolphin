@@ -25,7 +25,7 @@ function checkGfx(gfx, header, { wholeFile = false } = {}) {
   assert.match(gfx, /const bool committed = m_cmd_stream\.PushEndPass\(\);\n\s+m_pass_open = false;\n\s+ResetRecordedPassState\(\);\n\s+DestroyRetiredBindGroups\(\);/);
   // An aborted pass (EndPassIfOpen's failed geometry flush included) empties the list too.
   // (the patch's hunks do not carry that function's head: whole file only)
-  if (wholeFile) assert.match(gfx, /void WebGPUGfx::AbortRecordedPass\(\)\n\{[\s\S]*?m_pass_open = false;[\s\S]*?DestroyRetiredBindGroups\(\);\n\}/);
+  if (wholeFile) assert.match(gfx, /void WebGPUGfx::AbortRecordedPass\(\)\n\{[\s\S]*?m_pass_open = false;[\s\S]*?DestroyRetiredBindGroups\(\);\n(?:\s+DestroyRetiredTextures\(\);\n)?\}/);
   assert.match(header, /std::vector<u32> m_retired_bind_groups;/);
   assert.match(header, /void DestroyRetiredBindGroups\(\);/);
 }

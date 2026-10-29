@@ -1198,6 +1198,9 @@ function readWgpuReplayState() {
     // Live bind groups: bounded by the core's bind group caches since 0201
     // (it destroys the ones it evicts); it grew ~2,000 a second before.
     bindGroups: webGpuObjects.bindGroups.size,
+    // Live textures: bounded by the core's texture cache since 0202 (a
+    // destroyed WebGPUTexture sends OP_DESTROY); it only grew before.
+    textures: webGpuObjects.textures.size,
     loadFenceActive: wgpuLoadFenceActive,
     replayYieldPending: wgpuReplayYieldPending,
     presentationLoopActive,

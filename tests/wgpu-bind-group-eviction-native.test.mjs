@@ -41,7 +41,7 @@ sourceContractTest("0201: evicted bind groups are destroyed once, outside passes
   const setter = between(gfx, "void WebGPUGfx::SetSamplerState", "u32 WebGPUGfx::RefreshUboControlMode");
   const writeWord = between(gfx, "static void PutBgU32", "bool WebGPUGfx::PrepareDrawResources");
   const bindingCode = between(gfx, "  auto resolve_tex =", "  // Bind group 2 — bbox SSBO");
-  const destroyRetired = between(gfx, "static constexpr u32 kDestroyTagBindGroup", "bool WebGPUGfx::EndPassIfOpen()");
+  const destroyRetired = between(gfx, "static constexpr u32 kDestroyTagBindGroup", "// 0202: the consumer's OP_DESTROY tag for a texture.");
   const stateFields = between(header, "  u32 m_tex_id[8]", "  u32 m_ssbo_bbox");
   const cacheFields = between(header, "  static constexpr u32 kBg1CacheSize", "\n};");
   const directory = mkdtempSync(join(tmpdir(), "wgpu-bg-eviction-"));
