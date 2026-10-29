@@ -8,6 +8,7 @@
 
 import assert from "node:assert/strict";
 import { createHash } from "node:crypto";
+import { readFileSync } from "node:fs";
 import { readFile } from "node:fs/promises";
 import test from "node:test";
 import { fileURLToPath } from "node:url";
@@ -49,11 +50,11 @@ function setup() {
 }
 
 // Every region of the plan, queued as P7 would (members with the plan's hashes).
-function queueAll(plan, maxFunctions = 100, chain = false) {
+function queueAll(plan, maxFunctions = 100, chain = false, mask = undefined, fragmentEntries = false) {
   let entries = 0;
   for (const group of regionGroups(plan, maxFunctions)) {
-    const fragments = group.flatMap(functionFragments(core));
-    const { bytes, entries: mapped } = assembleRegion(fragments, { helpers: HELPER_SIGNATURES, pcOffset: core.pcOffset, memoryPages: core.memoryPages, chain });
+    const fragments = group.flatMap(functionFragments(core, mask === undefined ? {} : { mask }));
+    const { bytes, entries: mapped } = assembleRegion(fragments, { helpers: HELPER_SIGNATURES, pcOffset: core.pcOffset, memoryPages: core.memoryPages, chain, fragmentEntries });
     core.queueRegion(bytes, mapped.map(([pc]) => pc), group.map((f) => ({ ranges: f.ranges, hash: f.hash })));
     entries += mapped.length;
   }
@@ -2357,4 +2358,173 @@ test("function cap: none leaves the formation as before; one cuts every fragment
   // A single block over the cap: kept as the first fragment (the entry).
   const tiny = await translateWithContinuations(core.module, { entry: LONG, ranges, hash: null }, { ...options, functionCap: 16 });
   assert.deepEqual([tiny.fragment?.entries.length, tiny.fragment?.code.length > 16], [1, true]);
+});
+
+// 0187 (?regionchaincache=1, enable bit 18): region chaining looks the next
+// region up in a cache of {pc, handle, epoch}. It must never chain into a
+// region that is no longer live, mapped or verified: the epoch moves at every
+// install and drop (s_region_at), at a cache clear (every region unverified)
+// and when an invalidation keeps a region unverified. Against the interpreter,
+// with the cache filled first, then after each of those changes.
+const CHAIN_CACHE = 1 << 18;
+// main calls G n times (bl); G calls H through bctrl, H returns into G: chains
+// across one region per function at every call and return.
+const BNE = (from, to) => asm.bc(4, 2, from, to); // bne cr0
+const ELSE_TEXT = 0x8001a100;
+const elseProgram = (n) => assemble(ELSE_TEXT, [
+  "main", asm.mflr(0), asm.stwu(1, 1, -16), stw(0, 1, 20), asm.lis(30, n >>> 16), asm.ori(30, 30, n & 0xffff),
+  "loop", (pc, l) => asm.bl(pc, l.G), asm.addi(30, 30, -1), asm.cmplwi(30, 0), (pc, l) => BNE(pc, l.loop),
+  lwz(0, 1, 20), asm.addi(1, 1, 16), mtlr(0), asm.blr(),
+  "G", asm.mflr(0), asm.stwu(1, 1, -16), stw(0, 1, 20), (pc, l) => asm.lis(5, l.H >>> 16), (pc, l) => asm.ori(5, 5, l.H & 0xffff),
+  asm.mtctr(5), asm.bctrl(),
+  "X", asm.addi(4, 4, 1), lwz(0, 1, 20), asm.addi(1, 1, 16), mtlr(0), asm.blr(),
+  "H", asm.addi(6, 6, 1), asm.blr()
+]);
+const chainCacheSkip = callSkip || (() => {
+  const lock = JSON.parse(readFileSync(new URL("../provenance/dolphin-source.lock.json", import.meta.url), "utf8"));
+  const built = JSON.parse(readFileSync(new URL("../cores/dolphin/dolphin-core-upstream.build.json", import.meta.url), "utf8"));
+  return built.source?.patchSeriesSha256 === lock.patchSeriesSha256 && lock.patches.some((p) => p.path.includes("/0187-"))
+    ? false : "core built from a patch series without 0187";
+})();
+// The CPU thread's mask (the chaining reads it); the test core starts at 0.
+function withChainCache(fn) {
+  const m = core.module;
+  const saved = typeof m._GetCachedInterpreterDisableMask === "function" ? m._GetCachedInterpreterDisableMask() >>> 0 : 0;
+  m._SetCachedInterpreterDisableMask(PRODUCTION_DISABLE_MASK | CHAIN_CACHE);
+  try { return fn(); } finally { m._SetCachedInterpreterDisableMask(saved); }
+}
+
+test("0187: chaining through the cache runs like the interpreter, across modules, and hits it", { skip: chainCacheSkip }, () => {
+  withChainCache(() => {
+    installCalls(1);
+    const reference = runCall(CALLS.labels.main, { regions: false });
+    for (let round = 0; round < 3; round++) { // the first fills the cache, the others hit it
+      const got = runCall(CALLS.labels.main, { regions: true });
+      assert.deepEqual(got.state, reference.state, `round ${round}`);
+      assert.equal(got.downcount, reference.downcount, `round ${round}`);
+    }
+  });
+});
+
+test("0187: a region dropped, invalidated or unverified after the cache was filled is never chained into from it", { skip: chainCacheSkip }, () => {
+  withChainCache(() => {
+    const program = elseProgram(20);
+    const reference = () => runCall(program.labels.main, { regions: false });
+    // (1) Code rewritten and invalidated (the region over it dropped or kept
+    // unverified): the cache filled before must not chain into it.
+    installCalls(1, program, ELSE_TEXT);
+    runCall(program.labels.main, { regions: true }); // fills the cache
+    const at = program.labels.H;
+    const word = asm.addi(6, 6, 5); // H: r6 += 5 instead of 1
+    core.load(at, Uint8Array.of(word >>> 24, (word >>> 16) & 0xff, (word >>> 8) & 0xff, word & 0xff));
+    core.invalidate(at, 4);
+    const rewritten = reference();
+    assert.deepEqual(runCall(program.labels.main, { regions: true }).state, rewritten.state, "after an invalidation");
+    // (2) Every region unverified (a cache clear): the cache must not chain
+    // before each one is verified again.
+    installCalls(1, program, ELSE_TEXT);
+    runCall(program.labels.main, { regions: true });
+    core.load(at, Uint8Array.of(word >>> 24, (word >>> 16) & 0xff, (word >>> 8) & 0xff, word & 0xff));
+    core.module._DolphinWeb_AotClearCacheForTest();
+    assert.deepEqual(runCall(program.labels.main, { regions: true }).state, reference().state, "after a cache clear");
+    // (3) Every region forgotten: nothing left to chain into.
+    installCalls(1, program, ELSE_TEXT);
+    runCall(program.labels.main, { regions: true });
+    core.module._DolphinWeb_AotForgetRegionsForTest();
+    const forgotten = runCall(program.labels.main, { regions: true });
+    assert.equal(forgotten.ran, 0, "no region runs once all are forgotten");
+    assert.deepEqual(forgotten.state, reference().state);
+  });
+});
+
+// 0189 (?regionfragments=1, enable bit 16): region chaining enters the
+// fragment holding the next pc (a slot of the core's table per fragment, from
+// the module's "region-entry-fragments" section), not the module's
+// dispatcher. With 0187's cache (the pair's both sides), across modules, like
+// the interpreter; the slots are released when the regions go; modules
+// assembled without the option carry no such section (mode off: as before).
+const FRAGMENTS = 1 << 16;
+const fragmentsSkip = chainCacheSkip || (() => {
+  const lock = JSON.parse(readFileSync(new URL("../provenance/dolphin-source.lock.json", import.meta.url), "utf8"));
+  return lock.patches.some((p) => p.path.includes("/0189-")) ? false : "patch series without 0189";
+})();
+function withMask(mask, fn) {
+  const m = core.module;
+  const saved = typeof m._GetCachedInterpreterDisableMask === "function" ? m._GetCachedInterpreterDisableMask() >>> 0 : 0;
+  m._SetCachedInterpreterDisableMask(mask);
+  try { return fn(); } finally { m._SetCachedInterpreterDisableMask(saved); }
+}
+function installFragments(program, text) {
+  const dol = buildDol({ textAddr: text, text: program.words, entry: program.labels.main });
+  const { image, entryPoint } = imageFromDol(dol);
+  const plan = planDol({ image, entryPoint, gameId: "TEST01", dolBytes: dol, options: { gapFill: false } });
+  for (const s of image.segments) core.load(s.start, s.bytes);
+  core.invalidate(text, 4 * program.words.length);
+  core.module._DolphinWeb_AotForgetRegionsForTest?.();
+  core.setRegionsEnabled(true);
+  core.setRegionChaining(true);
+  queueAll(plan, 1, true, PRODUCTION_DISABLE_MASK, true);
+  serviceAll();
+}
+
+test("0189: chaining into fragments runs like the interpreter across modules, and gives the slots back", { skip: fragmentsSkip }, () => {
+  withMask(PRODUCTION_DISABLE_MASK | CHAIN_CACHE | FRAGMENTS, () => {
+    for (const [program, text] of [[CALLS, CALL_TEXT], [elseProgram(30), ELSE_TEXT]]) {
+      installFragments(program, text);
+      const reference = runCall(program.labels.main, { regions: false });
+      for (let round = 0; round < 2; round++) {
+        const got = runCall(program.labels.main, { regions: true });
+        assert.deepEqual(got.state, reference.state, `round ${round}`);
+        assert.equal(got.downcount, reference.downcount, `round ${round}`);
+      }
+    }
+    const free = () => globalThis._dolphinFreeTableSlots?.length ?? 0;
+    const before = free();
+    core.module._DolphinWeb_AotForgetRegionsForTest();
+    assert.ok(free() > before, `slots released when the regions go (${before} -> ${free()})`);
+    const released = free();
+    installFragments(CALLS, CALL_TEXT); // reuses them
+    assert.ok(free() < released, "released slots reused before the table grows");
+  });
+});
+
+test("0189 without 0187's cache: chaining into fragments still runs like the interpreter", { skip: fragmentsSkip }, () => {
+  withMask(PRODUCTION_DISABLE_MASK | FRAGMENTS, () => {
+    for (const [program, text] of [[CALLS, CALL_TEXT], [elseProgram(30), ELSE_TEXT]]) {
+      installFragments(program, text);
+      const reference = runCall(program.labels.main, { regions: false });
+      const got = runCall(program.labels.main, { regions: true });
+      assert.ok(got.ran > 0, "regions ran");
+      assert.deepEqual(got.state, reference.state);
+      assert.equal(got.downcount, reference.downcount);
+    }
+  });
+});
+
+test("0189: slots released by dropped regions and reused by others are never chained into from the cache", { skip: fragmentsSkip }, () => {
+  withMask(PRODUCTION_DISABLE_MASK | CHAIN_CACHE | FRAGMENTS, () => {
+    const other = elseProgram(30);
+    installFragments(CALLS, CALL_TEXT);
+    const callsReference = runCall(CALLS.labels.main, { regions: false });
+    runCall(CALLS.labels.main, { regions: true }); // fills the cache with CALLS's slots
+    const free = () => globalThis._dolphinFreeTableSlots?.length ?? 0;
+    core.module._DolphinWeb_AotForgetRegionsForTest(); // CALLS's slots released
+    const released = free();
+    installFragments(other, ELSE_TEXT); // the other program's fragments take them
+    assert.ok(free() < released, `released slots reused (${released} -> ${free()})`);
+    const calls = runCall(CALLS.labels.main, { regions: true });
+    assert.equal(calls.ran, 0, "no region left for CALLS");
+    assert.deepEqual(calls.state, callsReference.state, "CALLS never enters the other program's fragments");
+    const reference = runCall(other.labels.main, { regions: false });
+    assert.deepEqual(runCall(other.labels.main, { regions: true }).state, reference.state);
+  });
+});
+
+test("0189 off: modules carry no entry -> fragment section", () => {
+  const f = { entry: 0x80003000, entries: [0x80003000], code: Uint8Array.of(0x00, 0x41, 0x00, 0x0b), relocs: [] };
+  const off = assembleRegion([f], { helpers: HELPER_SIGNATURES, pcOffset: 0, memoryPages: 1 });
+  const on = assembleRegion([f], { helpers: HELPER_SIGNATURES, pcOffset: 0, memoryPages: 1, fragmentEntries: true });
+  const has = (bytes) => Buffer.from(bytes).includes(Buffer.from("region-entry-fragments"));
+  assert.equal(has(off.bytes), false);
+  assert.equal(has(on.bytes), true);
 });

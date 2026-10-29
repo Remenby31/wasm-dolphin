@@ -8394,7 +8394,9 @@ export async function prepareAotFirstLaunch(file, {
     coreHash,
     keyParts,
     translator,
-    assembleOptions: core?.assemble,
+    // 0189: the entry -> fragment section only in its mode (bit 16 of the
+    // codegen mask, so its modules have their own keys).
+    assembleOptions: core?.assemble && { ...core.assemble, fragmentEntries: ((keyParts?.codegenMask ?? 0) & (1 << 16)) !== 0 },
     // Regions loaded back from the cache go through the compiler worker as
     // those of a first launch do (precompileAotRegion): handed over at once,
     // then every function called once in the background, so V8's lazy
