@@ -119,3 +119,9 @@ int main() {
     rmSync(directory, { recursive: true, force: true });
   }
 });
+
+test("0202: the worker reports how many textures are alive", async () => {
+  const worker = await read("../src/upstream-discio-worker.js");
+  assert.match(worker, /tag === 2 \? webGpuObjects\.textures/);
+  assert.match(worker, /textures: webGpuObjects\.textures\.size,/);
+});
