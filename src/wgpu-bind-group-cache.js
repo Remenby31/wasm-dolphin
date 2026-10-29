@@ -1,8 +1,8 @@
 // Copyright 2026 wasm-dolphin contributors
 // SPDX-License-Identifier: GPL-2.0-or-later
 //
-// Bind groups reused across the core's create-bind-group records (opt-in,
-// ?wgpubgcache=1). The core asks for ~2,000 new bind groups a second during
+// Bind groups reused across the core's create-bind-group records (on by
+// default under JavaScriptCore, ?wgpubgcache=1|0 forces it). The core asks for ~2,000 new bind groups a second during
 // a race, most of them identical to an earlier one. Under WebKit each one
 // costs memory in the page's process until a garbage collection
 // (research/deep-ios-host.md §B.4). A record whose layout and resources are
