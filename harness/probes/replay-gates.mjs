@@ -14,7 +14,7 @@
 //    presses seen, p95 and max per visit, then per side.
 //
 //   node harness/probes/replay-gates.mjs --iso disc.iso --state scene.sav --port N --out dir
-//     --query "<base query>" --extra "&wgpureplayms=4" [--runs 4 (visits per side, even)] [--vi 240,600]
+//     --query "<base query>" --extra "&wgpureplayms=0" [--runs 4 (visits per side, even)] [--vi 240,600]
 //     [--candidate <dir to serve>] [--lock-wait 14400]
 // One tree serves both sides (only --extra differs): no --baseline.
 // Exit 1 when a visit failed or a side has no picture or no input reading.

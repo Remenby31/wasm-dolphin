@@ -291,7 +291,9 @@ export function createWgpuReplayBudgetGate({
   }
 
   function check({ processed = 0, passDepth = 0, force = false } = {}) {
-    if (budget === 0 || (!force && (processed <= 0 || processed < nextCheck))) {
+    // processed 0 never yields, forced or not: every drain moves the ring by
+    // at least one record.
+    if (budget === 0 || processed <= 0 || (!force && processed < nextCheck)) {
       return { checked: false, shouldYield: false, reason: null, elapsedMs: 0 };
     }
     while (nextCheck <= processed) nextCheck += interval;

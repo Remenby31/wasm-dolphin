@@ -145,6 +145,25 @@ test("attribution validator enforces replay-budget identity and a zero hard-cap 
   assert.ok(result.issues.some((issue) => issue.code === "REPLAY_BUDGET_HARD_CAP"));
 });
 
+test("attribution validator checks the default 4 ms budget and the explicit unbudgeted replay", async (t) => {
+  const fixture = await makeFixture(t);
+  await mutateFinalAndLastSample(fixture, (webgpu) => {
+    webgpu.replayBudgetEnabled = false;
+    webgpu.replayBudgetMs = 0;
+  });
+  const noParam = await validateWgpuUploadAttribution({ outDir: fixture.root });
+  assert.ok(noParam.issues.some((issue) => issue.code === "REPLAY_BUDGET_IDENTITY"),
+    "no parameter: the 4 ms budget is expected");
+
+  const manifestPath = path.join(fixture.runDir, "manifest.json");
+  const manifest = JSON.parse(await readFile(manifestPath, "utf8"));
+  manifest.benchmark.url = "http://127.0.0.1/?video=wgpu&wgpureplayms=0";
+  await writeFile(manifestPath, JSON.stringify(manifest));
+  const explicitOff = await validateWgpuUploadAttribution({ outDir: fixture.root });
+  assert.ok(!explicitOff.issues.some((issue) => issue.code.startsWith("REPLAY_BUDGET")),
+    JSON.stringify(explicitOff.issues));
+});
+
 test("attribution validator rejects a missing raw artifact", async (t) => {
   const fixture = await makeFixture(t);
   await unlink(path.join(fixture.runDir, "events.jsonl"));
@@ -266,6 +285,10 @@ function makeWebgpuSnapshot({ multiplier }) {
   }
   return {
     registered: true,
+    // the product's default replay budget (no ?wgpureplayms)
+    replayBudgetEnabled: true,
+    replayBudgetMs: 4,
+    replayBudgetStopReasons: { "record-window": 0 },
     batchAbortCount: 0,
     batchOversizeCount: 0,
     commandDroppedCount: 0,
