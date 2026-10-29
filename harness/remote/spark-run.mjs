@@ -12,10 +12,9 @@
 //     [--keep-video] [--headed :2 [--xauth /run/salon-xorg/xauth] | --headless]
 //     [--probe race-perf | drop-meter | replay-gates]
 //     (the load gate: lib/bench-load.mjs; a --max-load given only caps it) [--noise <date>/<drop-meter A/A on the bench>]
-//     [--lane b --screen: a screening run beside lane a's pair, never a conclusion]
+//     (lane a only, cpus 10-19: since 2026-10-29 cpus 0-9 are Excalibur's, no --lane b, --screen or --multi)
 //     [-- <the probe's options: --query, --warmup, --secs, --max-load, …>]
-//   node harness/remote/spark-run.mjs --multi --baseline <ref|dir> --candidate <ref|dir> [--candidate <ref|dir>]
-//     --state <local .sav> [--name n] [--runs 6] [--multi-lanes "15-19;5-9"] [--detach] [-- <race-multi options>]
+//   (--multi: refused since 2026-10-29, its arms ran on 5-9; an older one still comes back with --fetch)
 //   node harness/remote/spark-run.mjs --fetch <date>/<name>   (a detached run)
 //   node harness/remote/spark-run.mjs --queue                  (the bench's queue, waits and ETAs; exit 3 if a ticket starves)
 //   node harness/remote/spark-run.mjs --build <ref>            (core built on the bench)
@@ -271,9 +270,16 @@ export function headedEnv(display, xauth = BENCH_XAUTHORITY, { headless = false 
 // idle): two pairs at once disturb each other (A/A of 2026-10-21: σ 1.86 pt),
 // so a lane b result is stamped as screening and never decides anything;
 // the decisive pairs stay one at a time in lane a.
+//
+// Since 2026-10-29 (the user's decision) the Spark is shared: cpus 0-9 are
+// Excalibur's evals, 10-19 Salon's. Lane b (Chromium 5-9, node 0-4), its
+// screening runs and the multi (arms on 5-9) are gone: one pair at a time
+// in lane a (Chromium 15-19, node 10-14), nothing else in parallel.
+export const SALON_CPUS = "10-19";
+export const LANE_B_GONE = "cpus 0-9 are Excalibur's since 2026-10-29 (Salon has 10-19): lane b, --screen and --multi are gone, pairs run one at a time in lane a";
 export function checkLane(lane, { screen = false } = {}) {
-  if (lane === "b" && !screen) throw new Error("--lane b: two pairs at once disturb each other on the Spark (A/A of 2026-10-21: σ 1.86 pt), pairs run one at a time in lane a (--screen for a screening run in lane b, never a conclusion)");
-  if (!["auto", "a", "b"].includes(lane)) throw new Error(`--lane ${lane}: a or auto (b with --screen)`);
+  if (lane === "b" || screen) throw new Error(`--lane b / --screen: ${LANE_B_GONE}`);
+  if (!["auto", "a"].includes(lane)) throw new Error(`--lane ${lane}: a or auto`);
 }
 export const SCREEN_NOTE = "screening in lane b, beside another pair: never a conclusion";
 // A multi on two lanes (--multi-lanes with two core sets): screening too
@@ -580,10 +586,9 @@ async function main() {
     process.exitCode = await follow(host, { date, name: safeName(name) });
     return;
   }
-  if (values.multi) {
-    process.exitCode = await multi(host, values, positionals);
-    return;
-  }
+  // --multi: its arms run on 5-9 (MULTI_LANES, --multi-lanes), Excalibur's
+  // cores now; an older multi's results still come back with --fetch.
+  if (values.multi) throw new Error(`--multi: ${LANE_B_GONE}`);
   if (values.candidate.length > 1) throw new Error("several --candidate: only with --multi");
   // --probe: the probe the pair runs (same lane, lock, cores and options as race-perf's)
   if (!SPARK_PROBES.includes(values.probe)) throw new Error(`--probe ${values.probe}: one of ${SPARK_PROBES.join(", ")}`);
