@@ -25,7 +25,7 @@
       "commit": "01e0577914a75a2569c846778c2f93aa8e6feddd"
     }
   },
-  "patchSeriesSha256": "77b1c48cb0379478e6c4f3e7eeb284f54cf8b6ffed8bfc089f15291b11b60d6d",
+  "patchSeriesSha256": "2fa14f4e81be645fd89cec7010f738facf1d173f853b15a12dda34ec64c6e45e",
   "patches": [
     {
       "order": 1,
@@ -1085,6 +1085,14 @@
     },
     {
       "order": 133,
+      "cwd": ".",
+      "hashMode": "lf-normalized",
+      "path": "patches/dolphin-wasm/snapshot/0201-webgpu-destroy-evicted-bind-groups.patch",
+      "size": 2794,
+      "sha256": "229ff5c83e201b3e77ee4cad36acfdfd8acb81736121b987562a704ae60e0cfb"
+    },
+    {
+      "order": 134,
       "cwd": "Externals/SFML/SFML",
       "hashMode": "lf-normalized",
       "path": "patches/dolphin-wasm/submodules/0001-sfml-emscripten-config.patch",
@@ -1092,7 +1100,7 @@
       "sha256": "f82197a21fe982ad83f6ee7bbf5a03839b1cebd4d64da3eab11263842bf61d89"
     },
     {
-      "order": 134,
+      "order": 135,
       "cwd": "Externals/xxhash/xxHash",
       "hashMode": "lf-normalized",
       "path": "patches/dolphin-wasm/submodules/0002-xxhash-wasm-simd-scalar.patch",

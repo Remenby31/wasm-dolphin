@@ -1195,6 +1195,9 @@ function readWgpuReplayState() {
     mappedRemapPending: wgpuMappedRemapPromises.size,
     uploadTransport: wgpuUploadTransport,
     bindGroupCache: webGpuObjects.bindGroupCache?.stats() ?? null,
+    // Live bind groups: bounded by the core's bind group caches since 0201
+    // (it destroys the ones it evicts); it grew ~2,000 a second before.
+    bindGroups: webGpuObjects.bindGroups.size,
     loadFenceActive: wgpuLoadFenceActive,
     replayYieldPending: wgpuReplayYieldPending,
     presentationLoopActive,
