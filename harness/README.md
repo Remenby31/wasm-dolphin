@@ -300,7 +300,9 @@ node harness/remote/spark-run.mjs --build <ref>           # its core built on th
   concluding, and prefer a quieter hour or more runs. The GPU is shared too
   (and on the GB10 its memory is the machine's): another user's process
   above 20 % of its SMs at a window's start or end makes the window invalid
-  and the gate wait (`gpuNow`, `nvidia-smi pmon`; the bench's Xorg counts
+  and the gate wait, for a run on the GPU only (headed, or `video=wgpu` on
+  a side; a headless `video=null` pair keeps the reading, and the memory
+  gate covers the unified memory) (`gpuNow`, `nvidia-smi pmon`; the bench's Xorg counts
   as ours); each window keeps `gpu` and `windowLoads` its `gpuForeignSm`
   and `memAvailMB`. Memory too (`memNow`, no root): a window is invalid when
   MemAvailable is under 8 GB or falls by more than 4 GB during it, or when

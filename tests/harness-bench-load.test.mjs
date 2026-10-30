@@ -4,7 +4,7 @@ import assert from "node:assert/strict";
 import { readFileSync } from "node:fs";
 import { readFile } from "node:fs/promises";
 import test from "node:test";
-import { benchJudge, GPU_FOREIGN_MAX, gpuNow, MEM_DROP_MB, MEM_FLOOR_MB, MEM_PSI_MAX, memNow, memOver, parsePmon, benchLane, benchLimit, benchRead, grantedLanes, LANE_FOREIGN_PCT, MACHINE_LOAD_MAX, SALON_CPUS, SALON_FOREIGN_MAX, salonForeign, salonOverloaded } from "../harness/lib/bench-load.mjs";
+import { benchJudge, GPU_FOREIGN_MAX, gpuGateApplies, gpuNow, MEM_DROP_MB, MEM_FLOOR_MB, MEM_PSI_MAX, memNow, memOver, parsePmon, benchLane, benchLimit, benchRead, grantedLanes, LANE_FOREIGN_PCT, MACHINE_LOAD_MAX, SALON_CPUS, SALON_FOREIGN_MAX, salonForeign, salonOverloaded } from "../harness/lib/bench-load.mjs";
 import { defaultMaxLoad, gateReader, loadGaveUp, waitForLoad } from "../harness/lib/env.mjs";
 import { visitLimit } from "../harness/probes/drop-meter.mjs";
 
@@ -75,7 +75,7 @@ test("the bench's own tree: spark-race exports the lane; race-perf and drop-mete
   // the window judged on the foreign count on Salon's cpus too, sampled at most once a second
   assert.match(perf, /if \(loadGate\?\.salonForeignMax != null\) \{[^]*?benchSalon: \(\) => salonForeignNow\(\), benchSalonMax: loadGate\.salonForeignMax/);
   assert.match(perf, /overloaded: medianLoad > o\.maxLoad \|\| \(salon\.length > 0 && o\.benchSalonOverloaded\(salon\)\) \|\|/);
-  assert.match(perf, /benchSalonOverloaded: salonOverloaded, benchGpu: \(\) => gpuNow\(\), benchGpuMax: GPU_FOREIGN_MAX, benchMem: \(\) => memNow\(\), benchMemOver: memOver \};/, "the window rules are bench-load's");
+  assert.match(perf, /benchSalonOverloaded: salonOverloaded, benchGpu: \(\) => gpuNow\(\), benchGpuMax: GPU_FOREIGN_MAX, benchGpuGate: gpuGateApplies\(\{ display: o\.browserDisplay, queries: \[o\.query, side\.query\] \}\), benchMem: \(\) => memNow\(\), benchMemOver: memOver \};/, "the window rules are bench-load's");
   assert.match(perf, /windowLoads: runsDone\.flatMap\(/, "every window's load1 and salonForeign in the summary");
   assert.match(perf, /if \(!o\.benchSalon \|\| performance\.now\(\) - salonAt < 1000\) return;/);
   const drop = await readFile(new URL("../harness/probes/drop-meter.mjs", import.meta.url), "utf8");
@@ -145,5 +145,22 @@ test("bench gate: memory available under 8 GB, a fall of 4 GB in a window, or pr
   const perf = readFileSync(new URL("../harness/probes/race-perf.mjs", import.meta.url), "utf8");
   assert.match(perf, /\|\| memWhy\.length > 0,/, "a window with a memory reason is invalid");
   assert.match(perf, /majFaults: memDelta\(pressStart\?\.majFaults, pressEnd\?\.majFaults\)/);
+});
+
+// 2026-10-30: the GPU gate gave up JIT's headless video=null pairs behind a
+// 60 min RL training at 86 % of the SMs; those pairs never touch the GPU.
+test("bench gate: the GPU gate only for a run on the GPU (headed or video=wgpu); headless runs keep the reading", () => {
+  const nullQ = "core=upstream&video=null&presenter=2d&cpu=dual&metrics=1";
+  const wgpuQ = "core=upstream&video=wgpu&presenter=webgpu&metrics=1";
+  assert.equal(gpuGateApplies({ display: "headless", queries: [nullQ, null] }), false);
+  assert.equal(gpuGateApplies({ display: "headless", queries: [nullQ, wgpuQ] }), true, "a side on the GPU");
+  assert.equal(gpuGateApplies({ display: "x11", queries: [nullQ] }), true, "headed: Chromium draws on the bench's Xorg");
+  assert.equal(gpuGateApplies({ display: "headless", queries: ["video=wgpuX"] }), false, "a whole parameter, not a prefix");
+  const bench = readFileSync(new URL("../harness/lib/bench-load.mjs", import.meta.url), "utf8");
+  assert.match(bench, /gpuGate = process\.env\.SPARK_GPU_GATE !== "0"/);
+  assert.match(bench, /benchJudge\(\{ load: now, background, cap, gpu: gpuGate \? gpu : null, mem \}\)/, "the reading kept, the verdict only with the gate");
+  const perf = readFileSync(new URL("../harness/probes/race-perf.mjs", import.meta.url), "utf8");
+  assert.match(perf, /if \(benchLane\(\) && !gpuGateApplies\(\{ display: o\.browserDisplay, queries: \[o\.query, baselineQuery\] \}\)\) process\.env\.SPARK_GPU_GATE = "0";/);
+  assert.match(perf, /\(o\.benchGpuGate && \[gpuStart, gpuEnd\]\.some/, "a headless window keeps gpu but is not judged on it");
 });
 
