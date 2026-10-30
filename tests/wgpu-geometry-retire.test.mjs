@@ -29,6 +29,8 @@ test("0203: a skipped draw returns without aborting the pass", () => {
 });
 
 test("0203: the lifecycle smoke bounds live geometry buffers over 20 save loads", () => {
-  for (const code of [510, 511, 512, 513]) assert.match(patch, new RegExp(`FailVertexManagerSmoke\\(${code},`));
+  for (const code of [510, 511, 512, 513, 514]) assert.match(patch, new RegExp(`FailVertexManagerSmoke\\(${code},`));
   assert.match(patch, /for \(int load = 0; load < 19; \+\+load\)/);
+  // a fresh ring before the destroys: no consumer drains the fixture
+  assert.match(patch, /s_vertex_manager_smoke_fixture\.Reset\(\)\)\n\+\s+return FailVertexManagerSmoke\(514,[^\n]*\n\+\s+manager\.DestroyRetiredGeometryBuffers\(\);/);
 });

@@ -164,7 +164,7 @@ diff --git a/Source/Core/VideoBackends/WebGPU/WebGPUVertexManager.cpp b/Source/C
  
    const u32 capped_id = VertexManagerTestPeer::VertexId(repeated_wrap_manager);
    const u32 capped_offset = VertexManagerTestPeer::GeometryOffset(repeated_wrap_manager);
-@@ -725,6 +759,24 @@ extern "C" EMSCRIPTEN_KEEPALIVE int RunWebGpuVertexManagerGeometryLifecycleSmoke
+@@ -725,6 +759,28 @@ extern "C" EMSCRIPTEN_KEEPALIVE int RunWebGpuVertexManagerGeometryLifecycleSmoke
    if (invalidated_id == 0 || invalidated_id == pre_load_id || base_vertex != 0)
      return FailVertexManagerSmoke(508, "save-load epoch reused an old packed destination");
  
@@ -182,6 +182,10 @@ diff --git a/Source/Core/VideoBackends/WebGPU/WebGPUVertexManager.cpp b/Source/C
 +  }
 +  if (VertexManagerTestPeer::RetiredGeometryBuffers(manager) != 20)
 +    return FailVertexManagerSmoke(512, "repeated save loads did not retire each buffer");
++  // A fresh ring: no consumer drains this fixture, and the 20 loads filled it
++  // (a full ring keeps the ids for the next pass end, as in the product).
++  if (!s_vertex_manager_smoke_fixture.Reset())
++    return FailVertexManagerSmoke(514, "retire fixture reset failed");
 +  manager.DestroyRetiredGeometryBuffers();
 +  if (VertexManagerTestPeer::RetiredGeometryBuffers(manager) != 0)
 +    return FailVertexManagerSmoke(513, "retired geometry buffers were not destroyed");
