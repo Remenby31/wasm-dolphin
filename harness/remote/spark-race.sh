@@ -79,10 +79,14 @@ export PATH="$B/node/bin:$PATH"
   echo "[spark-race] cgroup ${cg:-?}: controllers $(cat "/sys/fs/cgroup${cg}/cgroup.controllers" 2>/dev/null || echo ?); parent delegates $(cat "/sys/fs/cgroup$(dirname "${cg:-/}")/cgroup.subtree_control" 2>/dev/null || echo ?)"
   # on node's cpus, and without itself (a ps just started shows 100-200 %)
   echo "[spark-race] busiest before:"; taskset -c 10-14 ps -eLo pid,tid,psr,pcpu,user,comm --sort=-pcpu | awk '$6 != "ps"' | head -8
+  # the GPU (shared; its memory is the machine's): use, then who is on it
+  echo "[spark-race] gpu before: $(timeout 5 nvidia-smi --query-gpu=utilization.gpu --format=csv,noheader 2>/dev/null) used, $(awk '/MemAvailable/ {print int($2/1024)}' /proc/meminfo 2>/dev/null) MB available"; timeout 5 nvidia-smi pmon -c 1 -s um 2>/dev/null | head -8
   echo "[spark-race] probe $probe"
   taskset -c "${SPARK_NODE_CPUS:-$ncpus}" node "harness/probes/$probe.mjs" "$@" --port "$port" --out "$out"
   code=$?
   echo "[spark-race] busiest after:"; taskset -c 10-14 ps -eLo pid,tid,psr,pcpu,user,comm --sort=-pcpu | awk '$6 != "ps"' | head -8
+  # the GPU (shared; its memory is the machine's): use, then who is on it
+  echo "[spark-race] gpu after: $(timeout 5 nvidia-smi --query-gpu=utilization.gpu --format=csv,noheader 2>/dev/null) used, $(awk '/MemAvailable/ {print int($2/1024)}' /proc/meminfo 2>/dev/null) MB available"; timeout 5 nvidia-smi pmon -c 1 -s um 2>/dev/null | head -8
   echo "[spark-race] exit $code at $(date -Is)"
   echo "$code" > "$out.exit"
 } >> "$out.log" 2>&1

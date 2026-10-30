@@ -4,7 +4,7 @@ import assert from "node:assert/strict";
 import { readFileSync } from "node:fs";
 import { readFile } from "node:fs/promises";
 import test from "node:test";
-import { benchJudge, benchLane, benchLimit, benchRead, grantedLanes, LANE_FOREIGN_PCT, MACHINE_LOAD_MAX, SALON_CPUS, SALON_FOREIGN_MAX, salonForeign, salonOverloaded } from "../harness/lib/bench-load.mjs";
+import { benchJudge, GPU_FOREIGN_MAX, gpuNow, parsePmon, benchLane, benchLimit, benchRead, grantedLanes, LANE_FOREIGN_PCT, MACHINE_LOAD_MAX, SALON_CPUS, SALON_FOREIGN_MAX, salonForeign, salonOverloaded } from "../harness/lib/bench-load.mjs";
 import { defaultMaxLoad, gateReader, loadGaveUp, waitForLoad } from "../harness/lib/env.mjs";
 import { visitLimit } from "../harness/probes/drop-meter.mjs";
 
@@ -74,8 +74,8 @@ test("the bench's own tree: spark-race exports the lane; race-perf and drop-mete
   assert.doesNotMatch(perf, /o\.maxLoad = /, "o.maxLoad stays the option, never the last side's limit");
   // the window judged on the foreign count on Salon's cpus too, sampled at most once a second
   assert.match(perf, /if \(loadGate\?\.salonForeignMax != null\) \{[^]*?benchSalon: \(\) => salonForeignNow\(\), benchSalonMax: loadGate\.salonForeignMax/);
-  assert.match(perf, /overloaded: medianLoad > o\.maxLoad \|\| \(salon\.length > 0 && o\.benchSalonOverloaded\(salon\)\),/);
-  assert.match(perf, /benchSalonOverloaded: salonOverloaded \};/, "the window rule is bench-load's");
+  assert.match(perf, /overloaded: medianLoad > o\.maxLoad \|\| \(salon\.length > 0 && o\.benchSalonOverloaded\(salon\)\) \|\|/);
+  assert.match(perf, /benchSalonOverloaded: salonOverloaded, benchGpu: \(\) => gpuNow\(\), benchGpuMax: GPU_FOREIGN_MAX \};/, "the window rules are bench-load's");
   assert.match(perf, /windowLoads: runsDone\.flatMap\(/, "every window's load1 and salonForeign in the summary");
   assert.match(perf, /if \(!o\.benchSalon \|\| performance\.now\(\) - salonAt < 1000\) return;/);
   const drop = await readFile(new URL("../harness/probes/drop-meter.mjs", import.meta.url), "utf8");
@@ -94,3 +94,33 @@ test("bench read on Linux (CI): the lane's cores and Salon's foreign runnable th
   assert.equal(g.salonForeignMax, 2);
   assert.ok(Array.isArray(g.laneBusy));
 });
+
+// 2026-10-30 01:10-01:50: every lane a run of a JIT pair fell to ~20 %,
+// load1 and the cpus normal; nothing read the GPU, shared (and its memory
+// with it on the GB10).
+test("bench gate: another user's process on the GPU above 20 % refuses the gate; the bench's Xorg is ours", () => {
+  assert.equal(GPU_FOREIGN_MAX, 20);
+  const pmon = `# gpu         pid   type     sm    mem    enc    dec    jpg    ofa    command
+# Idx           #    C/G      %      %      %      %      %      %    name
+    0     900001     C     85     40      -      -      -      -    python
+    0     900002     G      3      1      -      -      -      -    Xorg
+    0     100        G     12      5      -      -      -      -    chrome
+    0     900003     C      -      -      -      -      -      -    vllm
+`;
+  assert.deepEqual(parsePmon(pmon).map((p) => [p.pid, p.sm, p.command]), [[900001, 85, "python"], [900002, 3, "Xorg"], [100, 12, "chrome"], [900003, 0, "vllm"]]);
+  const run = (args) => (args[0] === "pmon" ? pmon : "91\n");
+  const g = gpuNow([], { run, ours: new Set([100]) });
+  assert.equal(g.util, 91);
+  assert.equal(g.foreignSm, 85);
+  assert.deepEqual(g.foreign.map((p) => p.command), ["python", "vllm"], "our Chromium and the bench's Xorg left out");
+  assert.deepEqual(benchJudge({ load: 9, background: 0, gpu: g }).over, ["GPU: python (pid 900001) at 85 % > 20"]);
+  assert.equal(benchJudge({ load: 9, background: 0, gpu: { ...g, foreignSm: 15 } }).ok, true);
+  assert.equal(benchJudge({ load: 9, background: 0, gpu: null }).ok, true, "no nvidia-smi: no GPU gate");
+  assert.equal(gpuNow([], { run: () => { throw new Error("no nvidia-smi"); } }), null);
+  const perf = readFileSync(new URL("../harness/probes/race-perf.mjs", import.meta.url), "utf8");
+  assert.match(perf, /\[gpuStart, gpuEnd\]\.some\(\(g\) => g && g\.foreignSm > o\.benchGpuMax\)/, "a window is invalid when another user held the GPU at its start or end");
+  const race = readFileSync(new URL("../harness/remote/spark-race.sh", import.meta.url), "utf8");
+  assert.match(race, /gpu before: [^\n]*nvidia-smi pmon -c 1 -s um/);
+  assert.match(race, /gpu after: [^\n]*nvidia-smi pmon -c 1 -s um/);
+});
+

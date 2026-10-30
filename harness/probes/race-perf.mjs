@@ -349,6 +349,8 @@ export async function measure(session, o) {
     // every --emulated-poll-ms.
     const salon = [];
     let salonAt = -Infinity;
+    // and the GPU (shared, its memory the machine's) at the window's start
+    const gpuStart = o.benchGpu ? o.benchGpu() : null;
     const sampleLoad = () => {
       loads.push(os.loadavg()[0]);
       if (!o.benchSalon || performance.now() - salonAt < 1000) return;
@@ -397,6 +399,8 @@ export async function measure(session, o) {
     const helperStats = info?.ppcWasmHelperStats ?? await page.evaluate(() => window.__lastFrameInfo?.ppcWasmHelperStats ?? null).catch(() => null);
     const code = /codeclears:(\d+) codefull:(\d+) codehighkib:(\d+) codesizemib:(\d+)/.exec(String(helperStats ?? ""));
     const medianLoad = median(loads);
+    // the GPU at the window's end (bench only)
+    const gpuEnd = o.benchGpu ? o.benchGpu() : null;
     // Unique images (--unique-frames): a window of its own after the speed
     // window (its GPU readbacks never weigh on the speed), before the stats.
     let uniqueFrames = null;
@@ -449,7 +453,9 @@ export async function measure(session, o) {
       guestCovered: guestCovered(ticksBefore, ticksAfter, progress?.coreTicksPerSecond),
       load1: { min: round(Math.min(...loads), 2), median: round(medianLoad, 2), max: round(Math.max(...loads), 2), limit: o.maxLoad },
       ...(salon.length ? { salonForeign: { median: median(salon), max: Math.max(...salon), limit: o.benchSalonMax, samples: salon } } : {}),
-      overloaded: medianLoad > o.maxLoad || (salon.length > 0 && o.benchSalonOverloaded(salon)),
+      ...(o.benchGpu ? { gpu: { start: gpuStart, end: gpuEnd, limit: o.benchGpuMax } } : {}),
+      overloaded: medianLoad > o.maxLoad || (salon.length > 0 && o.benchSalonOverloaded(salon)) ||
+        [gpuStart, gpuEnd].some((g) => g && g.foreignSm > o.benchGpuMax),
       complete: timeline.complete,
       timelineLost: timeline.lost,
       ...(o.headroom ? { headroom: hrStart?.error ? { error: hrStart.error } : hrEnd?.error ? { error: hrEnd.error } : headroomOf(hrEnd.stats, { guestSeconds: (hrEnd.ticks - hrStart.ticks) / (hrEnd.tps || 1), ticksPerSecond: hrEnd.tps, viOutputs: timeline.vi.length }) } : {}),
@@ -718,8 +724,8 @@ async function measureSide(side, o, loadGate) {
   // the bench (its gate read Salon's cpus): the window samples them too
   if (loadGate?.salonForeignMax != null) {
     const { salonForeignNow } = await import("../lib/bench-load.mjs");
-    const { salonOverloaded } = await import("../lib/bench-load.mjs");
-    o = { ...o, benchSalon: () => salonForeignNow(), benchSalonMax: loadGate.salonForeignMax, benchSalonOverloaded: salonOverloaded };
+    const { GPU_FOREIGN_MAX, gpuNow, salonOverloaded } = await import("../lib/bench-load.mjs");
+    o = { ...o, benchSalon: () => salonForeignNow(), benchSalonMax: loadGate.salonForeignMax, benchSalonOverloaded: salonOverloaded, benchGpu: () => gpuNow(), benchGpuMax: GPU_FOREIGN_MAX };
   }
   try {
     const bootStart = performance.now();
@@ -1110,7 +1116,7 @@ async function main() {
     // load1 counts Excalibur's cpus 0-9, salonForeign Salon's 10-19).
     windowLoads: runsDone.flatMap((r) => Object.keys(sides).flatMap((name) => ["cold", "warm"].map((phase) => {
       const w = r[name]?.[phase];
-      return w ? { run: r.run, side: name, phase, speed: w.speed ?? null, load1: w.load1?.median ?? null, ...(w.salonForeign ? { salonForeign: w.salonForeign } : {}), overloaded: Boolean(w.overloaded) } : null;
+      return w ? { run: r.run, side: name, phase, speed: w.speed ?? null, load1: w.load1?.median ?? null, ...(w.salonForeign ? { salonForeign: w.salonForeign } : {}), ...(w.gpu ? { gpuForeignSm: Math.max(w.gpu.start?.foreignSm ?? 0, w.gpu.end?.foreignSm ?? 0), memAvailMB: w.gpu.end?.memAvailMB ?? null } : {}), overloaded: Boolean(w.overloaded) } : null;
     }))).filter(Boolean),
     candidate: { cold: summarize("candidate", "cold"), warm: summarize("candidate", "warm") },
     baseline: sides.baseline ? { cold: summarize("baseline", "cold"), warm: summarize("baseline", "warm") } : null,
