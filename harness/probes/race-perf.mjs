@@ -351,6 +351,8 @@ export async function measure(session, o) {
     let salonAt = -Infinity;
     // and the GPU (shared, its memory the machine's) at the window's start
     const gpuStart = o.benchGpu ? o.benchGpu() : null;
+    // and the memory (available, pressure, major faults, swap-ins)
+    const pressStart = o.benchMem ? o.benchMem() : null;
     const sampleLoad = () => {
       loads.push(os.loadavg()[0]);
       if (!o.benchSalon || performance.now() - salonAt < 1000) return;
@@ -401,6 +403,9 @@ export async function measure(session, o) {
     const medianLoad = median(loads);
     // the GPU at the window's end (bench only)
     const gpuEnd = o.benchGpu ? o.benchGpu() : null;
+    const pressEnd = o.benchMem ? o.benchMem() : null;
+    const memWhy = o.benchMem ? o.benchMemOver(pressStart, pressEnd) : [];
+    const memDelta = (a, b) => (Number.isFinite(a) && Number.isFinite(b) ? b - a : null);
     // Unique images (--unique-frames): a window of its own after the speed
     // window (its GPU readbacks never weigh on the speed), before the stats.
     let uniqueFrames = null;
@@ -454,8 +459,9 @@ export async function measure(session, o) {
       load1: { min: round(Math.min(...loads), 2), median: round(medianLoad, 2), max: round(Math.max(...loads), 2), limit: o.maxLoad },
       ...(salon.length ? { salonForeign: { median: median(salon), max: Math.max(...salon), limit: o.benchSalonMax, samples: salon } } : {}),
       ...(o.benchGpu ? { gpu: { start: gpuStart, end: gpuEnd, limit: o.benchGpuMax } } : {}),
+      ...(o.benchMem ? { mem: { start: pressStart, end: pressEnd, majFaults: memDelta(pressStart?.majFaults, pressEnd?.majFaults), swapIns: memDelta(pressStart?.swapIns, pressEnd?.swapIns), over: memWhy } } : {}),
       overloaded: medianLoad > o.maxLoad || (salon.length > 0 && o.benchSalonOverloaded(salon)) ||
-        [gpuStart, gpuEnd].some((g) => g && g.foreignSm > o.benchGpuMax),
+        [gpuStart, gpuEnd].some((g) => g && g.foreignSm > o.benchGpuMax) || memWhy.length > 0,
       complete: timeline.complete,
       timelineLost: timeline.lost,
       ...(o.headroom ? { headroom: hrStart?.error ? { error: hrStart.error } : hrEnd?.error ? { error: hrEnd.error } : headroomOf(hrEnd.stats, { guestSeconds: (hrEnd.ticks - hrStart.ticks) / (hrEnd.tps || 1), ticksPerSecond: hrEnd.tps, viOutputs: timeline.vi.length }) } : {}),
@@ -724,8 +730,8 @@ async function measureSide(side, o, loadGate) {
   // the bench (its gate read Salon's cpus): the window samples them too
   if (loadGate?.salonForeignMax != null) {
     const { salonForeignNow } = await import("../lib/bench-load.mjs");
-    const { GPU_FOREIGN_MAX, gpuNow, salonOverloaded } = await import("../lib/bench-load.mjs");
-    o = { ...o, benchSalon: () => salonForeignNow(), benchSalonMax: loadGate.salonForeignMax, benchSalonOverloaded: salonOverloaded, benchGpu: () => gpuNow(), benchGpuMax: GPU_FOREIGN_MAX };
+    const { GPU_FOREIGN_MAX, gpuNow, memNow, memOver, salonOverloaded } = await import("../lib/bench-load.mjs");
+    o = { ...o, benchSalon: () => salonForeignNow(), benchSalonMax: loadGate.salonForeignMax, benchSalonOverloaded: salonOverloaded, benchGpu: () => gpuNow(), benchGpuMax: GPU_FOREIGN_MAX, benchMem: () => memNow(), benchMemOver: memOver };
   }
   try {
     const bootStart = performance.now();
@@ -1116,7 +1122,7 @@ async function main() {
     // load1 counts Excalibur's cpus 0-9, salonForeign Salon's 10-19).
     windowLoads: runsDone.flatMap((r) => Object.keys(sides).flatMap((name) => ["cold", "warm"].map((phase) => {
       const w = r[name]?.[phase];
-      return w ? { run: r.run, side: name, phase, speed: w.speed ?? null, load1: w.load1?.median ?? null, ...(w.salonForeign ? { salonForeign: w.salonForeign } : {}), ...(w.gpu ? { gpuForeignSm: Math.max(w.gpu.start?.foreignSm ?? 0, w.gpu.end?.foreignSm ?? 0), memAvailMB: w.gpu.end?.memAvailMB ?? null } : {}), overloaded: Boolean(w.overloaded) } : null;
+      return w ? { run: r.run, side: name, phase, speed: w.speed ?? null, load1: w.load1?.median ?? null, ...(w.salonForeign ? { salonForeign: w.salonForeign } : {}), ...(w.gpu ? { gpuForeignSm: Math.max(w.gpu.start?.foreignSm ?? 0, w.gpu.end?.foreignSm ?? 0), memAvailMB: w.gpu.end?.memAvailMB ?? null } : {}), ...(w.mem ? { memPressure: w.mem.end?.psiSome10 ?? null, majFaults: w.mem.majFaults, swapIns: w.mem.swapIns, memOver: w.mem.over } : {}), overloaded: Boolean(w.overloaded) } : null;
     }))).filter(Boolean),
     candidate: { cold: summarize("candidate", "cold"), warm: summarize("candidate", "warm") },
     baseline: sides.baseline ? { cold: summarize("baseline", "cold"), warm: summarize("baseline", "warm") } : null,

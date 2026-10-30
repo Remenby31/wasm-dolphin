@@ -34,6 +34,17 @@ export const MACHINE_LOAD_MAX = 40;
 // headless with video=null (our Chromium off the GPU), load1 and the cpus
 // normal: nothing read the GPU then.
 export const GPU_FOREIGN_MAX = 20;
+// Memory (the GB10's is the GPU's too): a window is invalid when the memory
+// available falls under MEM_FLOOR_MB or by more than MEM_DROP_MB during it,
+// or when tasks stalled on memory (PSI "some", 10 s average) more than
+// MEM_PSI_MAX % of the time at its end. The runs that fell to ~20 % on
+// 2026-10-30 had their busiest thread at 32-40 %: waiting, not computing,
+// which a memory bandwidth limit would not give, and memory pressure would.
+// The memory controller's bandwidth is not readable here (system-wide
+// counters need perf_event_paranoid <= 0; the bench has 2).
+export const MEM_FLOOR_MB = 8192;
+export const MEM_DROP_MB = 4096;
+export const MEM_PSI_MAX = 10;
 
 export function benchLane(env = process.env) {
   if (!env.SPARK_LANE_CPUS) return null;
@@ -141,11 +152,37 @@ export function gpuNow(tickets = readTickets(), { run = (args) => execFileSync("
   return { util: Number.isFinite(util) ? util : null, foreignSm: foreign[0]?.sm ?? 0, foreign: foreign.slice(0, 3), memAvailMB };
 }
 
+// Memory now (no root): MemAvailable, PSI "some"/"full" 10 s averages, and
+// the cumulative major faults and swap-ins (/proc/vmstat). Null fields where
+// a file is missing (an older kernel without PSI).
+export function memNow(read = (f) => readFileSync(f, "utf8")) {
+  const get = (f) => { try { return read(f); } catch { return ""; } };
+  const meminfo = get("/proc/meminfo"), psi = get("/proc/pressure/memory"), vmstat = get("/proc/vmstat");
+  const num = (re, text) => { const m = re.exec(text); return m ? Number(m[1]) : null; };
+  return {
+    memAvailMB: ((kb) => (kb === null ? null : Math.round(kb / 1024)))(num(/MemAvailable:\s+(\d+)/, meminfo)),
+    psiSome10: num(/^some avg10=([\d.]+)/m, psi), psiFull10: num(/^full avg10=([\d.]+)/m, psi),
+    majFaults: num(/^pgmajfault (\d+)/m, vmstat), swapIns: num(/^pswpin (\d+)/m, vmstat)
+  };
+}
+
+// Why a window's memory makes it invalid, from its start and end readings
+// (pure, tested): [] when it is fine or unread.
+export function memOver(start, end) {
+  const over = [];
+  const avail = [start?.memAvailMB, end?.memAvailMB].filter(Number.isFinite);
+  if (avail.length && Math.min(...avail) < MEM_FLOOR_MB) over.push(`memory available ${Math.min(...avail)} MB < ${MEM_FLOOR_MB}`);
+  if (Number.isFinite(start?.memAvailMB) && Number.isFinite(end?.memAvailMB) && start.memAvailMB - end.memAvailMB > MEM_DROP_MB) over.push(`memory available fell ${start.memAvailMB - end.memAvailMB} MB > ${MEM_DROP_MB} in the window`);
+  if (Number.isFinite(end?.psiSome10) && end.psiSome10 > MEM_PSI_MAX) over.push(`memory pressure ${end.psiSome10} % > ${MEM_PSI_MAX}`);
+  return over;
+}
+
 // The verdict from the readings (pure: tested).
-export function benchJudge({ load, background, cap = null, gpu = null }) {
+export function benchJudge({ load, background, cap = null, gpu = null, mem = null }) {
   const limit = benchLimit({ cap });
   const over = [];
   if (load > limit) over.push(`load ${load} > ${limit}`);
+  if (mem) over.push(...memOver(mem, mem));
   if (gpu && gpu.foreignSm > GPU_FOREIGN_MAX) over.push(`GPU: ${gpu.foreign[0].command} (pid ${gpu.foreign[0].pid}) at ${gpu.foreignSm} % > ${GPU_FOREIGN_MAX}`);
   if (background > SALON_FOREIGN_MAX) over.push(`${background} foreign runnable threads on cpus 10-19 > ${SALON_FOREIGN_MAX}`);
   return { limit, ok: over.length === 0, over };
@@ -171,9 +208,10 @@ export async function benchRead({ lane = benchLane(), exclude = process.pid, loa
   const cores = await checkCores({ cpus: lane.cpus, exclude, threshold: LANE_FOREIGN_PCT, ms });
   const now = Math.round(load() * 100) / 100;
   const gpu = gpuNow(tickets);
-  const j = benchJudge({ load: now, background, cap, gpu });
+  const mem = memNow();
+  const j = benchJudge({ load: now, background, cap, gpu, mem });
   return {
-    load: now, limit: j.limit, ok: j.ok && cores.ok, over: j.over, gpu,
+    load: now, limit: j.limit, ok: j.ok && cores.ok, over: j.over, gpu, mem,
     lane: lane.lane, background, salonForeignMax: SALON_FOREIGN_MAX, granted: grantedLanes(tickets), laneBusy: cores.busy
   };
 }

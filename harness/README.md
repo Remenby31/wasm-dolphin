@@ -302,7 +302,12 @@ node harness/remote/spark-run.mjs --build <ref>           # its core built on th
   above 20 % of its SMs at a window's start or end makes the window invalid
   and the gate wait (`gpuNow`, `nvidia-smi pmon`; the bench's Xorg counts
   as ours); each window keeps `gpu` and `windowLoads` its `gpuForeignSm`
-  and `memAvailMB`.
+  and `memAvailMB`. Memory too (`memNow`, no root): a window is invalid when
+  MemAvailable is under 8 GB or falls by more than 4 GB during it, or when
+  the memory pressure (PSI "some", 10 s) is above 10 % at its end; its
+  major faults and swap-ins are kept. The memory controller's bandwidth is
+  not readable (system-wide counters need perf_event_paranoid <= 0; the
+  bench has 2).
 - **First come, first served** (`spark-queue.mjs`). The locks are polled, so
   a burst of builds once retook lane a for half an hour while a pair queued
   before them timed out. Every job now drops a ticket in
