@@ -2042,9 +2042,13 @@ export function evaluateCandidateCoreBundle({ manifest, expectedSha256, files } 
   return { verified: failures.length === 0, failures };
 }
 
-export function evaluateWgpuGeometryRangeEvidence({ requested, telemetry } = {}) {
+export function evaluateWgpuGeometryRangeEvidence({ requested, packRequested, telemetry } = {}) {
   if (requested == null) return { required: false, failures: [] };
-  const expectedActive = String(requested) === "1";
+  // As the product reads them (src/wgpu-replay-diagnostics.js, on by default
+  // since 2026-10-29): "1" on, "0" off, anything else the default; the range
+  // only with the pack.
+  const on = (value) => value == null || String(value) !== "0";
+  const expectedActive = on(requested) && on(packRequested);
   const enabled = telemetry?.geometryRangeEnabled;
   const available = telemetry?.producerGeometryRangeAvailable;
   const failures = [];

@@ -602,17 +602,17 @@ sourceContractTest("opt-in geometry packing uses one transactional upload and a 
   assert.match(vertexSource, /m_geometry_offset = packet_offset \+ packet_bytes/);
   assert.match(vertexSource, /EnsureLegacyBuffers\(\)/);
   assert.match(gfxSource, /EMSCRIPTEN_KEEPALIVE void SetWebGpuGeometryPackEnabled\(int enabled\)/);
+  // 0203: a skipped draw (no pipeline, no indices, no pass) is skipped alone;
+  // its bytes stay in the pending range, read by no draw. It no longer aborts
+  // the pass and every draw already recorded in it.
+  assert.doesNotMatch(gfxSource, /DiscardOrAbortPendingGeometryRange/);
   assert.match(
     gfxSource,
-    /DiscardOrAbortPendingGeometryRange\(\)[\s\S]*?if \(m_pass_open\)[\s\S]*?AbortRecordedPass\(\);[\s\S]*?else[\s\S]*?DiscardPendingGeometryRange\(\)/
+    /if \(m_cur_pipeline_id == 0\)\n\s+\{\n\s+\/\/ 0203: only this draw is skipped[\s\S]*?\n\s+return;\n\s+\}/
   );
   assert.match(
     gfxSource,
-    /if \(m_cur_pipeline_id == 0\)[\s\S]*?DiscardOrAbortPendingGeometryRange\(\)/
-  );
-  assert.match(
-    gfxSource,
-    /if \(m_cur_pipeline_id == 0 \|\| num_indices == 0\)[\s\S]*?DiscardOrAbortPendingGeometryRange\(\)/
+    /if \(m_cur_pipeline_id == 0 \|\| num_indices == 0\)\n\s+\{\n\s+\/\/ 0203: only this draw is skipped[\s\S]*?\n\s+return;\n\s+\}/
   );
   assert.match(gfxSource, /void InvalidateGeometryUploadPack\(\)/);
   assert.match(
