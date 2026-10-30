@@ -1,5 +1,5 @@
 import { defaultWgpuBindGroupCache, requestedWgpuBindGroupCache } from "./wgpu-bind-group-cache.js";
-import { aotCompilerRequested, jitOffThreadRequested } from "./aot-compiler-worker.js";
+import { aotCompilerRequested, aotWarmRequested, jitOffThreadRequested } from "./aot-compiler-worker.js";
 import { aotSamplePeriodRequested } from "./aot-hot-sampler.js";
 import { wasmEngine } from "./wasm-engine.js";
 import { anisotropyToCore, clampInternalResolution, internalResolutionCeiling, requestedEnhancements } from "./wgpu-enhancements.js";
@@ -190,6 +190,8 @@ export class EmulatorHost {
     // On by default, ?aotcompiler=0 turns it off: compile cached/requested JIT
     // modules in the compiler worker.
     this.aotCompiler = aotCompilerRequested(window.location.search);
+    // On by default, ?aotwarm=0 keeps the worker without its warm-up.
+    this.aotWarm = aotWarmRequested(window.location.search);
     // ?aot=1: first-launch optimisation of the disc (P7), off by default.
     this.aotFirstLaunch = new URLSearchParams(window.location.search).get("aot") === "1";
     // With aot=1, the local profile's guest-PC sampler: ?aotsample=N ms, 0 off.
@@ -552,6 +554,7 @@ export class EmulatorHost {
             noJitCache: this.noJitCache,
             jitOffThread: this.jitOffThread,
             aotCompiler: this.aotCompiler,
+            aotWarm: this.aotWarm,
             aotFirstLaunch: this.aotFirstLaunch,
             aotSampleMs: this.aotSampleMs,
             wasmEngine: this.wasmEngine,

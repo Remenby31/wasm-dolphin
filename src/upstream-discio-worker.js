@@ -1982,6 +1982,7 @@ async function handleMessage(type, payload) {
         noJitCache: payload.noJitCache,
         jitOffThread: payload.jitOffThread,
         aotCompiler: payload.aotCompiler,
+        aotWarm: payload.aotWarm,
         aotFirstLaunch: payload.aotFirstLaunch,
         aotSampleMs: payload.aotSampleMs,
         wasmEngine: payload.wasmEngine,
@@ -2679,6 +2680,7 @@ async function loadCore({
   noJitCache = false,
   jitOffThread = true,
   aotCompiler = true,
+  aotWarm = true,
   aotFirstLaunch = false,
   aotSampleMs = AOT_PROFILE_SAMPLE_MS,
   wasmEngine: requestedWasmEngine = null,
@@ -3113,6 +3115,7 @@ async function loadCore({
   const _t_idb = performance.now();
   dolphinJitCachePersistenceEnabled = !noJitCache;
   dolphinAotCompilerEnabled = aotCompiler !== false;
+  dolphinAotWarmEnabled = aotWarm !== false;
   // Regions are return_call chains: without wasm tail calls every region
   // module would fail to compile. They stay off and the CPU runs on blocks,
   // with a status line and aotStatus saying why (never a silent loss).
@@ -8851,7 +8854,7 @@ export async function precompileAotRegion(key, bytes) {
   let module;
   try {
     module = dolphinAotCompilerEnabled
-      ? (await getDolphinAotCompiler().compile(bytes, { deliver: DELIVER_BEFORE_WARM })).module
+      ? (await getDolphinAotCompiler().compile(bytes, { deliver: DELIVER_BEFORE_WARM, warm: dolphinAotWarmEnabled })).module
       : await WebAssembly.compile(bytes);
   } catch (err) {
     return { reason: compileFailureReason(err) };
@@ -8896,8 +8899,11 @@ function getDolphinAotCompiler() {
 // On by default, set by loadCore (?aotcompiler=0 turns it off): without it,
 // cached and requested modules compile in place on this worker.
 let dolphinAotCompilerEnabled = false;
-export function setDolphinAotCompilerForTest({ enabled, createWorker } = {}) {
+// ?aotwarm=0: the compiler worker compiles and delivers, without its warm-up.
+let dolphinAotWarmEnabled = true;
+export function setDolphinAotCompilerForTest({ enabled, createWorker, warm = true } = {}) {
   dolphinAotCompilerEnabled = enabled === true;
+  dolphinAotWarmEnabled = warm !== false;
   dolphinAotCompiler?.terminate();
   dolphinAotCompiler = null;
   dolphinAotCompilerWorkerFactoryForTest = createWorker ?? null;
@@ -8914,7 +8920,7 @@ export function takeDolphinJitWarmSlot() {
 }
 function compileDolphinJitModuleOffThread(bytes, deliver, warm) {
   if (!dolphinAotCompilerEnabled || !warm) return WebAssembly.compile(bytes);
-  return getDolphinAotCompiler().compile(bytes, { deliver }).then((result) => result.module);
+  return getDolphinAotCompiler().compile(bytes, { deliver, warm: dolphinAotWarmEnabled }).then((result) => result.module);
 }
 // How a Module reaches the CPU thread. That pthread never returns to its
 // event loop while it emulates, so a message to it lands only before boot

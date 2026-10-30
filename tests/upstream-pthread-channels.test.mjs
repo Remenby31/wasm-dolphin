@@ -512,3 +512,42 @@ test("cached regions go to the compiler worker as before-warm jobs, only where m
   setDolphinAotCompilerForTest({});
   assert.deepEqual(aotCacheCompileOptions(), {}, "no compiler worker: in place");
 });
+
+test("?aotwarm=0 keeps the compiler worker and drops its warm-up: through the host, the adapter and the worker's init", async (t) => {
+  const { aotWarmRequested } = await import("../src/aot-compiler-worker.js");
+  assert.equal(aotWarmRequested(""), true);
+  assert.equal(aotWarmRequested("?aotwarm=1"), true);
+  assert.equal(aotWarmRequested("?x=1&aotwarm=0"), false);
+  const { UpstreamWorkerAdapter } = await import("../src/upstream-worker-adapter.js");
+  assert.equal(new UpstreamWorkerAdapter().aotWarm, true);
+  assert.equal(new UpstreamWorkerAdapter({ aotWarm: false }).aotWarm, false);
+  const host = await readFile(new URL("../src/core-host.js", import.meta.url), "utf8");
+  assert.match(host, /this\.aotWarm = aotWarmRequested\(window\.location\.search\);/);
+  assert.match(host, /\n {12}aotWarm: this\.aotWarm,\n/);
+  const adapterSource = await readFile(new URL("../src/upstream-worker-adapter.js", import.meta.url), "utf8");
+  assert.match(adapterSource, /\n {6}aotWarm: this\.aotWarm,\n/);
+  const source = await readFile(workerUrl, "utf8");
+  assert.match(source, /\n {8}aotWarm: payload\.aotWarm,\n/);
+  assert.match(source, /\n  aotWarm = true,\n/);
+  assert.match(source, /dolphinAotWarmEnabled = aotWarm !== false;/);
+  // The jobs the worker receives: compiled and delivered, not warmed.
+  const originalSelf = globalThis.self;
+  globalThis.self = { location: { href: "http://127.0.0.1:8080/" }, addEventListener() {}, postMessage() {} };
+  t.after(() => {
+    if (originalSelf === undefined) delete globalThis.self;
+    else globalThis.self = originalSelf;
+  });
+  const { precompileAotRegion, setDolphinAotCompilerForTest } = await import(`${workerUrl.href}?aotwarm-test=${Date.now()}`);
+  const posted = [];
+  setDolphinAotCompilerForTest({
+    enabled: true,
+    warm: false,
+    createWorker: () => ({ addEventListener() {}, postMessage: (m) => posted.push(m), terminate() {} })
+  });
+  t.after(() => setDolphinAotCompilerForTest({}));
+  precompileAotRegion("k", Uint8Array.of(0x00, 0x61, 0x73, 0x6d, 0x01, 0x00, 0x00, 0x00));
+  await new Promise((r) => setTimeout(r, 20));
+  const jobs = posted.filter((m) => m.type === "aot-compile").flatMap((m) => m.jobs);
+  assert.equal(jobs.length, 1, "the region went to the compiler worker");
+  assert.equal(jobs[0].warm, false, "without its warm-up");
+});

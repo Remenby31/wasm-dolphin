@@ -139,6 +139,7 @@ export class UpstreamWorkerAdapter {
     noJitCache = false,
     jitOffThread = true,
     aotCompiler = true,
+    aotWarm = true,
     aotFirstLaunch = false,
     regionChain = true,
     fusedMadd = true,
@@ -282,6 +283,7 @@ export class UpstreamWorkerAdapter {
     this.noJitCache = Boolean(noJitCache);
     this.jitOffThread = jitOffThread !== false;
     this.aotCompiler = aotCompiler !== false;
+    this.aotWarm = aotWarm !== false;
     this.aotFirstLaunch = aotFirstLaunch === true;
     this.regionChain = regionChain !== false;
     this.fusedMadd = fusedMadd !== false;
@@ -545,6 +547,7 @@ export class UpstreamWorkerAdapter {
       noJitCache: this.noJitCache,
       jitOffThread: this.jitOffThread,
       aotCompiler: this.aotCompiler,
+      aotWarm: this.aotWarm,
       aotFirstLaunch: this.aotFirstLaunch,
       regionChain: this.regionChain,
       fusedMadd: this.fusedMadd,

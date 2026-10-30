@@ -27,6 +27,14 @@ export function aotCompilerRequested(search = "") {
 export function jitOffThreadRequested(search = "") {
   return new URLSearchParams(search).get("jitoffthread") !== "0";
 }
+// The compiler worker's warm-up (every entry point called once on scratch
+// memory) is on by default; ?aotwarm=0 keeps the worker and only drops the
+// warm-up. On 2 cores the warm-up of a first launch takes a core from the CPU
+// thread: race cold headroom 0.97 -> 1.21 without the worker (Spark lane a,
+// jit-2c-aotcompiler-2), research/jit-contention-2cores.md.
+export function aotWarmRequested(search = "") {
+  return new URLSearchParams(search).get("aotwarm") !== "0";
+}
 export const AOT_COMPILER_PROTOCOL = 1;
 
 // Where the warm-up call points its state argument in scratch memory, and how
