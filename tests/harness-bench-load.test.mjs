@@ -4,7 +4,7 @@ import assert from "node:assert/strict";
 import { readFileSync } from "node:fs";
 import { readFile } from "node:fs/promises";
 import test from "node:test";
-import { benchJudge, GPU_FOREIGN_MAX, gpuNow, parsePmon, benchLane, benchLimit, benchRead, grantedLanes, LANE_FOREIGN_PCT, MACHINE_LOAD_MAX, SALON_CPUS, SALON_FOREIGN_MAX, salonForeign, salonOverloaded } from "../harness/lib/bench-load.mjs";
+import { benchJudge, GPU_FOREIGN_MAX, gpuNow, MEM_DROP_MB, MEM_FLOOR_MB, MEM_PSI_MAX, memNow, memOver, parsePmon, benchLane, benchLimit, benchRead, grantedLanes, LANE_FOREIGN_PCT, MACHINE_LOAD_MAX, SALON_CPUS, SALON_FOREIGN_MAX, salonForeign, salonOverloaded } from "../harness/lib/bench-load.mjs";
 import { defaultMaxLoad, gateReader, loadGaveUp, waitForLoad } from "../harness/lib/env.mjs";
 import { visitLimit } from "../harness/probes/drop-meter.mjs";
 
@@ -75,7 +75,7 @@ test("the bench's own tree: spark-race exports the lane; race-perf and drop-mete
   // the window judged on the foreign count on Salon's cpus too, sampled at most once a second
   assert.match(perf, /if \(loadGate\?\.salonForeignMax != null\) \{[^]*?benchSalon: \(\) => salonForeignNow\(\), benchSalonMax: loadGate\.salonForeignMax/);
   assert.match(perf, /overloaded: medianLoad > o\.maxLoad \|\| \(salon\.length > 0 && o\.benchSalonOverloaded\(salon\)\) \|\|/);
-  assert.match(perf, /benchSalonOverloaded: salonOverloaded, benchGpu: \(\) => gpuNow\(\), benchGpuMax: GPU_FOREIGN_MAX \};/, "the window rules are bench-load's");
+  assert.match(perf, /benchSalonOverloaded: salonOverloaded, benchGpu: \(\) => gpuNow\(\), benchGpuMax: GPU_FOREIGN_MAX, benchMem: \(\) => memNow\(\), benchMemOver: memOver \};/, "the window rules are bench-load's");
   assert.match(perf, /windowLoads: runsDone\.flatMap\(/, "every window's load1 and salonForeign in the summary");
   assert.match(perf, /if \(!o\.benchSalon \|\| performance\.now\(\) - salonAt < 1000\) return;/);
   const drop = await readFile(new URL("../harness/probes/drop-meter.mjs", import.meta.url), "utf8");
@@ -122,5 +122,28 @@ test("bench gate: another user's process on the GPU above 20 % refuses the gate;
   const race = readFileSync(new URL("../harness/remote/spark-race.sh", import.meta.url), "utf8");
   assert.match(race, /gpu before: [^\n]*nvidia-smi pmon -c 1 -s um/);
   assert.match(race, /gpu after: [^\n]*nvidia-smi pmon -c 1 -s um/);
+});
+
+// The runs that fell to ~20 % (2026-10-30, headless: not our GPU) had their
+// busiest thread at 32-40 %: waiting. Memory pressure, read without root.
+test("bench gate: memory available under 8 GB, a fall of 4 GB in a window, or pressure above 10 % make the window invalid", () => {
+  assert.deepEqual([MEM_FLOOR_MB, MEM_DROP_MB, MEM_PSI_MAX], [8192, 4096, 10]);
+  const files = {
+    "/proc/meminfo": "MemTotal:       128000000 kB\nMemFree:  1000 kB\nMemAvailable:   20971520 kB\n",
+    "/proc/pressure/memory": "some avg10=1.50 avg60=0.80 avg300=0.20 total=12345\nfull avg10=0.40 avg60=0.10 avg300=0.00 total=2345\n",
+    "/proc/vmstat": "nr_free_pages 1\npgmajfault 777\npswpin 12\n"
+  };
+  const m = memNow((f) => { if (!(f in files)) throw new Error("ENOENT"); return files[f]; });
+  assert.deepEqual(m, { memAvailMB: 20480, psiSome10: 1.5, psiFull10: 0.4, majFaults: 777, swapIns: 12 });
+  assert.deepEqual(memNow(() => { throw new Error("ENOENT"); }), { memAvailMB: null, psiSome10: null, psiFull10: null, majFaults: null, swapIns: null }, "no file: nothing judged");
+  assert.deepEqual(memOver(m, m), []);
+  assert.deepEqual(memOver(m, { ...m, memAvailMB: 6000 }), ["memory available 6000 MB < 8192", "memory available fell 14480 MB > 4096 in the window"]);
+  assert.deepEqual(memOver({ ...m, memAvailMB: 30000 }, { ...m, memAvailMB: 25000 }), ["memory available fell 5000 MB > 4096 in the window"]);
+  assert.deepEqual(memOver(m, { ...m, psiSome10: 23.4 }), ["memory pressure 23.4 % > 10"]);
+  assert.deepEqual(memOver(null, null), []);
+  assert.deepEqual(benchJudge({ load: 9, background: 0, mem: { ...m, psiSome10: 30 } }).over, ["memory pressure 30 % > 10"]);
+  const perf = readFileSync(new URL("../harness/probes/race-perf.mjs", import.meta.url), "utf8");
+  assert.match(perf, /\|\| memWhy\.length > 0,/, "a window with a memory reason is invalid");
+  assert.match(perf, /majFaults: memDelta\(pressStart\?\.majFaults, pressEnd\?\.majFaults\)/);
 });
 
