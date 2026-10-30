@@ -1,19 +1,19 @@
 {
   "schemaVersion": 1,
   "abiVersion": 1,
-  "coreId": "sha256:080da515baa8e3ee301eaa3f54203d50fc58913b83321a3049c54fffe73e677d",
+  "coreId": "sha256:97464089e30217320d047ae2aa54b43c45fca7a32a7e72db715e14eb908271fe",
   "upstreamCommit": "e22551eae1c84a7e4d0b6a5c519ef4ed4ef69df1",
   "artifacts": [
     {
       "path": "cores/dolphin/dolphin-core-upstream.js",
       "hashMode": "lf-normalized",
       "size": 290457,
-      "sha256": "d02e8ac86fb6f8c39626b41ef8571f1f740738540f458563617c67a1c11a5d66"
+      "sha256": "2e899250ebe764f786fd54b51723353185ca89df4dc7c709083beae5d1f0175b"
     },
     {
       "path": "cores/dolphin/dolphin-core-upstream.wasm",
-      "size": 13225636,
-      "sha256": "080da515baa8e3ee301eaa3f54203d50fc58913b83321a3049c54fffe73e677d"
+      "size": 13226686,
+      "sha256": "97464089e30217320d047ae2aa54b43c45fca7a32a7e72db715e14eb908271fe"
     }
   ],
   "contractSources": [
