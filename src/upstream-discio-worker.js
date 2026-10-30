@@ -464,6 +464,27 @@ function harnessRegionMissTop(heap, m = moduleInstance) {
   return { torn: true };
 }
 
+// 0204: what the geometry content cache did (hits, bytes, insertions,
+// misses, blocked, cap skips, failures, buffer switches, comparisons,
+// collisions, resets), cumulative.
+const GEOMETRY_CACHE_FIELDS = ["hits", "hitBytes", "inserts", "insertBytes", "misses", "missBytes",
+  "blocked", "capSkips", "failed", "switches", "compares", "collisions", "resets"];
+function harnessGeometryCacheStats() {
+  if (!harnessEnabled) return { error: "harness hooks are off" };
+  const m = moduleInstance;
+  if (typeof m?._DolphinWeb_GeometryCacheStats !== "function" || typeof m._malloc !== "function") {
+    return { supported: false, mode: wgpuGeometryCacheMode };
+  }
+  const p = m._malloc(8 * GEOMETRY_CACHE_FIELDS.length);
+  try {
+    const n = m._DolphinWeb_GeometryCacheStats(p) | 0;
+    const values = new Float64Array(m.HEAPU8.buffer, p, Math.min(n, GEOMETRY_CACHE_FIELDS.length));
+    return { supported: true, mode: wgpuGeometryCacheMode,
+      ...Object.fromEntries(GEOMETRY_CACHE_FIELDS.slice(0, values.length).map((name, k) => [name, values[k]])) };
+  } finally {
+    m._free(p);
+  }
+}
 function harnessJitRegionStats({ sampleEvery, pcs } = {}) {
   if (!harnessEnabled) return { error: "harness hooks are off" };
   const stats = moduleInstance?._DolphinWeb_JitRegionStats;
@@ -703,6 +724,10 @@ let wgpuSparseUboEnabled = false;
 let wgpuSparseUbo = null;
 let wgpuGeometryPackEnabled = false;
 let wgpuGeometryRangeEnabled = false;
+// 0204: the geometry content cache's mode (bit 0 on, bit 1 the sampled
+// comparison). Set at boot and after a device loss only, never around a save
+// load: the cache's content stays valid there.
+let wgpuGeometryCacheMode = 0;
 let wgpuUploadArenaMiB = 32;
 let wgpuUploadTransport = "queue";
 const WGPU_MAPPED_STAGING_SLOT_COUNT = 3;
@@ -2011,6 +2036,7 @@ async function handleMessage(type, payload) {
         wgpuSparseUbo: payload.wgpuSparseUbo,
         wgpuGeometryPack: payload.wgpuGeometryPack,
         wgpuGeometryRange: payload.wgpuGeometryRange,
+        wgpuGeometryCacheMode: payload.wgpuGeometryCacheMode,
         wgpuUploadArenaMiB: payload.wgpuUploadArenaMiB,
         wgpuUploadTransport: payload.wgpuUploadTransport,
         wgpuMappedStagingSlotCount: payload.wgpuMappedStagingSlotCount,
@@ -2284,6 +2310,8 @@ async function handleMessage(type, payload) {
       return { mode: relaxedMadd, coreFused: moduleInstance?._DolphinWeb_FusedMadd ? moduleInstance._DolphinWeb_FusedMadd() === 1 : null };
     case "validationReadPacingConfig":
       return harnessPacingConfig();
+    case "validationReadGeometryCache":
+      return harnessGeometryCacheStats();
     case "validationReadJitRegionStats":
       return harnessJitRegionStats(payload);
     case "validationReadRegionLedgerStale":
@@ -2708,6 +2736,7 @@ async function loadCore({
   wgpuSparseUbo: requestedWgpuSparseUbo = false,
   wgpuGeometryPack: requestedWgpuGeometryPack = false,
   wgpuGeometryRange: requestedWgpuGeometryRange = false,
+  wgpuGeometryCacheMode: requestedWgpuGeometryCacheMode = 0,
   wgpuUploadArenaMiB: requestedWgpuUploadArenaMiB = 32,
   wgpuUploadTransport: requestedWgpuUploadTransport = "queue",
   wgpuMappedStagingSlotCount: requestedWgpuMappedStagingSlotCount =
@@ -2870,6 +2899,7 @@ async function loadCore({
   wgpuGeometryPackEnabled = Boolean(requestedWgpuGeometryPack);
   wgpuGeometryRangeEnabled =
     wgpuGeometryPackEnabled && Boolean(requestedWgpuGeometryRange);
+  wgpuGeometryCacheMode = wgpuGeometryPackEnabled ? Number(requestedWgpuGeometryCacheMode) & 3 : 0;
   wgpuUploadArenaMiB = Number(requestedWgpuUploadArenaMiB) === 64 ? 64 : 32;
   wgpuUploadTransport = requestedWgpuUploadTransport === "mapped" ? "mapped" : "queue";
   wgpuMappedStagingSlotCount = wgpuMappedStagingSlotCountOf(requestedWgpuMappedStagingSlotCount);
@@ -3430,6 +3460,7 @@ async function loadCore({
   api.setWebGpuUboPackEnabled?.(webGpuUboPackMode());
   api.setWebGpuGeometryPackEnabled?.(wgpuGeometryPackEnabled ? 1 : 0);
   api.setWebGpuGeometryRangeEnabled?.(wgpuGeometryRangeEnabled ? 1 : 0);
+  api.setWebGpuGeometryCacheEnabled?.(wgpuGeometryCacheMode);
   api.setCpuOverclock?.(Number(cpuOverclock));
   api.setEmulationSpeed?.(Number(emulationSpeed));
   // ?audiobuffer: the mixer's queue (0: Dolphin's default, 80 ms); a core
@@ -3849,6 +3880,10 @@ function bindApi(module) {
     setWebGpuGeometryRangeEnabled:
       typeof module._SetWebGpuGeometryRangeEnabled === "function"
         ? (enabled) => ccall("SetWebGpuGeometryRangeEnabled", null, ["number"], [enabled ? 1 : 0])
+        : null,
+    setWebGpuGeometryCacheEnabled:
+      typeof module._SetWebGpuGeometryCacheEnabled === "function"
+        ? (mode) => ccall("SetWebGpuGeometryCacheEnabled", null, ["number"], [Number(mode) & 3])
         : null,
     setWebGpuUploadArenaMiB:
       typeof module._SetWebGpuUploadArenaMiB === "function"
@@ -7035,6 +7070,7 @@ fn fs(input: VertexOutput) -> @location(0) vec4f {
       invalidateGeometry: () => {
         api?.setWebGpuGeometryPackEnabled?.(wgpuGeometryPackEnabled ? 1 : 0);
         api?.setWebGpuGeometryRangeEnabled?.(wgpuGeometryRangeEnabled ? 1 : 0);
+        api?.setWebGpuGeometryCacheEnabled?.(wgpuGeometryCacheMode);
       },
       clearActiveDevice: () => { renderGpu = null; },
       setBackend: (backend) => { renderBackend = backend; },

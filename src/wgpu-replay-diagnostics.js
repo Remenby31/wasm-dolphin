@@ -373,6 +373,16 @@ export function requestedWgpuGeometryRange(
   return Boolean(enabledByDefault);
 }
 
+// ?wgpugeomcache=1: the geometry content cache (patch 0204), off by default;
+// =2 adds the sampled byte comparison of hits (diagnostics). The core's mode:
+// bit 0 on, bit 1 the comparison.
+export function requestedWgpuGeometryCacheMode(
+  search = globalThis.location?.search ?? ""
+) {
+  const value = new URLSearchParams(search).get("wgpugeomcache");
+  return value === "1" ? 1 : value === "2" ? 3 : 0;
+}
+
 export function requestedWgpuUploadArenaMiB(
   search = globalThis.location?.search ?? ""
 ) {
