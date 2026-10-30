@@ -79,11 +79,11 @@ test("a function becomes one fragment of its blocks, calls leave through jump re
   assert.ok(main.entries.length >= 4, "the return points after each bl are blocks of main");
 });
 
-test("every function of a call graph, over 3 slices: regions end like the interpreter", { skip }, () => {
+for (const trampoline of [null, "indirect", "direct"]) test(`every function of a call graph, over 3 slices: regions end like the interpreter${trampoline ? `, trampoline ${trampoline}` : ""}`, { skip }, () => {
   const s = setup(program());
   let checked = 0, translated = 0;
   for (let k = 0; k < 3; k++) {
-    const report = checkCoreSlice({ core, ...s, slice: k, slices: 3, maxFunctions: 2 });
+    const report = checkCoreSlice({ core, ...s, slice: k, slices: 3, maxFunctions: 2, trampoline });
     assert.deepEqual(report.mismatches, [], `slice ${k}`);
     assert.equal(report.equal, report.checked);
     checked += report.checked;
@@ -114,13 +114,13 @@ test("a planted translator bug is caught", { skip }, () => {
 // (harness/homebrew/fixtures, rebuilt identically by rebuild-fixtures.sh), so
 // CI runs it on the core it builds.
 const CPUFUZZ = new URL("../harness/homebrew/fixtures/cpufuzz.dol", import.meta.url);
-test("cpufuzz over 4 slices: regions end like the interpreter", {
+for (const trampoline of [null, "indirect", "direct"]) test(`cpufuzz over 4 slices: regions end like the interpreter${trampoline ? `, trampoline ${trampoline}` : ""}`, {
   skip: skip || (!existsSync(CPUFUZZ) && "harness/homebrew/fixtures/cpufuzz.dol missing"), timeout: 600000
 }, (t) => {
   const s = setup(readFileSync(CPUFUZZ));
   const total = { functions: 0, translated: 0, checked: 0, equal: 0, regionRuns: 0, regionCycles: 0, interpCycles: 0, ends: {}, mismatches: [], skipped: {} };
   for (let k = 0; k < 4; k++) {
-    const r = checkCoreSlice({ core, ...s, slice: k, slices: 4, maxFunctions: 40 });
+    const r = checkCoreSlice({ core, ...s, slice: k, slices: 4, maxFunctions: 40, trampoline });
     for (const key of ["functions", "translated", "checked", "equal", "regionRuns", "regionCycles", "interpCycles"]) total[key] += r[key];
     total.mismatches.push(...r.mismatches);
     for (const [why, n] of Object.entries(r.skipped)) total.skipped[why] = (total.skipped[why] ?? 0) + n;

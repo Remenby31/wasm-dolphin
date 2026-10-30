@@ -17,9 +17,12 @@ import { PRODUCTION_DISABLE_MASK, SHORT_PREFIX_MASK, makeRng, randomState } from
 
 const core = await loadAotCore();
 const skip = !core?.has("DolphinWeb_AotTestLoadState") && "core without the region test exports (patch 0075)";
-for (const [name, mask] of [["production mask", PRODUCTION_DISABLE_MASK], ["short prefixes", SHORT_PREFIX_MASK]]) {
+// ?regiontramp= (bit 19): the same programs with the region's jumps as
+// returned codes and a wrapper loop, both forms, on every engine.
+for (const [name, mask, trampoline] of [["production mask", PRODUCTION_DISABLE_MASK, null], ["short prefixes", SHORT_PREFIX_MASK, null],
+  ["production mask, trampoline indirect", PRODUCTION_DISABLE_MASK, "indirect"], ["production mask, trampoline direct", PRODUCTION_DISABLE_MASK, "direct"]]) {
   test(`oracle programs as regions, ${name}: interpreter and regions agree, mid-region exits included`, { skip, timeout: 600000 }, (t) => {
-    const tally = runOracleProgramsAsRegions(core, { seed: 0x4e9 ^ mask, count: 400, length: 24, mask });
+    const tally = runOracleProgramsAsRegions(core, { seed: 0x4e9 ^ mask, count: 400, length: 24, mask, trampoline });
     t.diagnostic(JSON.stringify({ ...tally, mismatches: tally.mismatches.slice(0, 4), mismatchCount: tally.mismatches.length }));
     assert.deepEqual(tally.mismatches.slice(0, 4), []);
     assert.equal(tally.hintsDropped, 0, "every branch hint of the core lands on an `if` (0131)");

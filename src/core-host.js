@@ -191,6 +191,8 @@ export class EmulatorHost {
     // On by default, ?aotcompiler=0 turns it off: compile cached/requested JIT
     // modules in the compiler worker.
     this.aotCompiler = aotCompilerRequested(window.location.search);
+    // ?regiontramp=: the region trampoline's form (with bit 19 of the mask).
+    this.regionTrampoline = requestedRegionTrampoline(window.location.search);
     // ?aot=1: first-launch optimisation of the disc (P7), off by default.
     this.aotFirstLaunch = new URLSearchParams(window.location.search).get("aot") === "1";
     // With aot=1, the local profile's guest-PC sampler: ?aotsample=N ms, 0 off.
@@ -562,6 +564,7 @@ export class EmulatorHost {
             noJitCache: this.noJitCache,
             jitOffThread: this.jitOffThread,
             aotCompiler: this.aotCompiler,
+            regionTrampoline: this.regionTrampoline,
             aotFirstLaunch: this.aotFirstLaunch,
             aotSampleMs: this.aotSampleMs,
             wasmEngine: this.wasmEngine,
@@ -1970,6 +1973,7 @@ const CACHED_INTERPRETER_DISABLE_BITS = {
   inlinefma:       1 << 26, // inline exact FMA; set: the FMA family calls the interpreter's NI_madd_msub
   regionmtmsr:     1 << 27, // 0183 regions go on past a mtmsr that changes only EE (ENABLE polarity; default-on; ?regionmtmsr=0 turns it off)
   regionfragments: 1 << 16, // 0189 region chaining enters the fragment, not the module's dispatcher (ENABLE polarity; default-on; ?regionfragments=0 turns it off)
+  regiontramp:     1 << 19, // region jumps as returned codes and a wrapper loop, no tail calls (ENABLE polarity; default-off; ?regiontramp=1|indirect|direct)
   regionchaincache: 1 << 18, // 0187 region chaining looks the next region up in one cache line (ENABLE polarity; default-on; ?regionchaincache=0 turns it off)
   regshape:        1 << 28, // 0184 x64 register shape: at most 4 GPRs per block in locals (ENABLE polarity; default-off; ?regshape=x64)
   // Aliases the plan / TL;DR uses interchangeably:
@@ -1996,6 +2000,11 @@ function requestedWgpuScissoredClearRect(disableMask) {
   return ((disableMask >>> 0) & LEGACY_DISABLE_BIT_CLEARRECT_OFF) === 0;
 }
 
+// ?regiontramp=1 or indirect: "indirect"; direct: "direct"; else null.
+export function requestedRegionTrampoline(search = "") {
+  const v = new URLSearchParams(search).get("regiontramp");
+  return v === "1" || v === "indirect" ? "indirect" : v === "direct" ? "direct" : null;
+}
 function requestedCachedInterpreterDisableMask() {
   const params = new URLSearchParams(window.location.search);
   const raw = (params.get("disable") || "").trim();
@@ -2022,6 +2031,7 @@ function requestedCachedInterpreterDisableMask() {
     // ?regshape=x64 do.
     mask &= ~(CACHED_INTERPRETER_DISABLE_BITS.regionmtmsr | CACHED_INTERPRETER_DISABLE_BITS.regshape |
       CACHED_INTERPRETER_DISABLE_BITS.regionchaincache | CACHED_INTERPRETER_DISABLE_BITS.regionfragments);
+    mask &= ~CACHED_INTERPRETER_DISABLE_BITS.regiontramp;
   }
   // §28bt block re-dispatch: DEFAULT-ON. Rigorously verified +11% warm
   // (4-run non-overlapping same-binary A/B, correctness-clean on battle);
@@ -2087,6 +2097,11 @@ function requestedCachedInterpreterDisableMask() {
   // drop-meter guard clean). Region chaining enters the next fragment through
   // a cached table slot instead of the module's dispatcher.
   // ?regionfragments=0 and ?regionchaincache=0 turn each off.
+  // The trampoline (?regiontramp=1|indirect|direct, default-off while it is
+  // measured): JavaScriptCore runs a tail call ~14x slower than V8.
+  if (requestedRegionTrampoline(window.location.search)) {
+    mask |= CACHED_INTERPRETER_DISABLE_BITS.regiontramp;
+  }
   if (params.get("regionfragments") !== "0") {
     mask |= CACHED_INTERPRETER_DISABLE_BITS.regionfragments;
   }

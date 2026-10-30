@@ -43,7 +43,7 @@
 export const REGION_HEAP_NAMES = Object.freeze(["ram_base", "l1_base"]);
 
 const TYPE_STATE = 0; // (i32) -> i32: dispatcher, stub, fragments
-const OP = { localGet: 0x20, localSet: 0x21, localTee: 0x22, call: 0x10, i32Load: 0x28, i32Const: 0x41, i32Eq: 0x46, i32LtU: 0x49, i32And: 0x71, i32Mul: 0x6c, i32ShrU: 0x76, block: 0x02, if: 0x04, brIf: 0x0d, brTable: 0x0e, end: 0x0b, return: 0x0f, returnCall: 0x12, returnCallIndirect: 0x13 };
+const OP = { unreachable: 0x00, loop: 0x03, br: 0x0c, localGet: 0x20, localSet: 0x21, localTee: 0x22, call: 0x10, callIndirect: 0x11, i32Load: 0x28, i32Const: 0x41, i32Eq: 0x46, i32LtU: 0x49, i32Sub: 0x6b, i32And: 0x71, i32Mul: 0x6c, i32ShrU: 0x76, block: 0x02, if: 0x04, brIf: 0x0d, brTable: 0x0e, end: 0x0b, return: 0x0f, returnCall: 0x12, returnCallIndirect: 0x13 };
 const VAL = { i32: 0x7f, i64: 0x7e, f32: 0x7d, f64: 0x7c };
 
 function uleb(out, v) {
@@ -135,9 +135,13 @@ export function chooseDispatchHash(pcs) {
 // `dispatch` relocs reach (code already ran and wrote state.pc) leaves
 // through the exit stub (`missing` = { stub }). Only a declared entry is ever
 // tail-called: every slot compares the full pc.
-function dispatcherBody(entries, pcOffset, missing) {
+// `codes` (the trampoline, ?regiontramp=): an entry's second element is the
+// code to return (TRAMP_BASE + the callee's index in the raw table) instead
+// of a function to tail-call; `missing` { code } returns that code.
+function dispatcherBody(entries, pcOffset, missing, { codes = false } = {}) {
   const miss = (out) => {
-    if (typeof missing === "object") { out.push(OP.localGet, 0, OP.returnCall); uleb(out, missing.stub); }
+    if (typeof missing === "object" && "code" in missing) { out.push(OP.i32Const); sleb(out, missing.code); out.push(OP.return); }
+    else if (typeof missing === "object") { out.push(OP.localGet, 0, OP.returnCall); uleb(out, missing.stub); }
     else out.push(OP.i32Const, missing, OP.return);
   };
   const body = [0x01, 0x01, VAL.i32]; // one i32 local: pc
@@ -148,6 +152,7 @@ function dispatcherBody(entries, pcOffset, missing) {
     for (const [pc, fn] of list) {
       body.push(OP.localGet, 1, OP.i32Const);
       sleb(body, pc);
+      if (codes) { body.push(OP.i32Eq, OP.if, 0x40, OP.i32Const); sleb(body, fn); body.push(OP.return, OP.end); continue; }
       body.push(OP.i32Eq, OP.if, 0x40, OP.localGet, 0, OP.returnCall);
       uleb(body, fn);
       body.push(OP.end);
@@ -342,7 +347,28 @@ export function regionModuleEntries(module) {
 
 //   chain       the exit stub chains to the next region (env.region_chain,
 //               env.table): only for a core that exports them (patch 0102)
-export function assembleRegion(fragments, { helpers, pcOffset, memoryPages, memoryMinPages = 1, sharedMemory = true, heapBases = null, names = true, chain = false, fragmentEntries = false }) {
+// ?regiontramp= (bit 19 of the codegen mask, default off): jumps between the
+// fragments of a region and returns to its dispatcher are `return_call`s,
+// and a tail call costs 3.7 ns under JavaScriptCore against 0.27 ns under V8
+// (research/jit-contention-2cores.md). In trampoline mode a fragment returns
+// TRAMP_BASE + the index of its callee in a raw table instead, and a small
+// wrapper loops: call the raw function, return a code below TRAMP_BASE, go
+// on with the next index otherwise. "indirect" calls through the raw table
+// (call_indirect), "direct" through one br_table switch of direct calls.
+// Every entry point (the export `f`, the "fragments" table, guest calls)
+// is a wrapper, so the core and other modules only ever see codes below
+// TRAMP_BASE. Off: modules are byte for byte as before.
+export const TRAMP_BASE = 1 << 20;
+export const TRAMPOLINE_MODES = Object.freeze(["indirect", "direct"]);
+// i32.const of a code then return, in the 6 bytes of a `return_call` site
+// (its opcode and the 5-byte padded index): a 4-byte padded signed LEB.
+function trampolineSite(code) {
+  if (!(code >= 0 && code < 1 << 27)) throw new Error(`region: trampoline code ${code} out of range`);
+  return [OP.i32Const, (code & 0x7f) | 0x80, ((code >>> 7) & 0x7f) | 0x80, ((code >>> 14) & 0x7f) | 0x80, (code >>> 21) & 0x3f, OP.return];
+}
+
+export function assembleRegion(fragments, { helpers, pcOffset, memoryPages, memoryMinPages = 1, sharedMemory = true, heapBases = null, names = true, chain = false, fragmentEntries = false, trampoline = null }) {
+  if (trampoline != null && !TRAMPOLINE_MODES.includes(trampoline)) throw new Error(`region: trampoline ${trampoline}: one of ${TRAMPOLINE_MODES.join(", ")}`);
   if (!Array.isArray(fragments) || !fragments.length) throw new Error("region: no fragments");
   if (!Number.isInteger(pcOffset) || pcOffset < 0) throw new Error("region: pcOffset required");
   if (!Number.isInteger(memoryPages) || memoryPages < 1) throw new Error("region: memoryPages (the core's maximum) required");
@@ -357,8 +383,19 @@ export function assembleRegion(fragments, { helpers, pcOffset, memoryPages, memo
   // Functions: helpers (imports), region_chain (import, with `chain`), the
   // exported dispatcher, the internal one (`dispatch` relocs), the exit stub,
   // then the fragments.
-  const CHAIN = helperNames.length, DISPATCHER = CHAIN + (chain ? 1 : 0), INNER = DISPATCHER + 1, STUB = INNER + 1, FIRST = STUB + 1;
-  const LOCAL_FUNCTIONS = 3 + fragments.length;
+  const CHAIN = helperNames.length, DISPATCHER = CHAIN + (chain ? 1 : 0), INNER = DISPATCHER + 1;
+  // Trampoline: the export's own lookup (a code, or 1 when pc is not an
+  // entry) between the inner one and the stub; the wrappers (one per
+  // fragment, then the stub's) and the direct switch after the fragments.
+  const EXPLOOKUP = trampoline ? INNER + 1 : -1, STUB = trampoline ? EXPLOOKUP + 1 : INNER + 1, FIRST = STUB + 1;
+  const n = fragments.length;
+  const WRAP0 = FIRST + n, SWITCH = WRAP0 + n + 1;
+  const LOCAL_FUNCTIONS = trampoline ? 4 + 2 * n + 1 + (trampoline === "direct" ? 1 : 0) : 3 + n;
+  // The raw table: fragments 0..n-1, then the inner lookup, the export's
+  // lookup and the stub.
+  const RAW_INNER = n, RAW_EXPLOOKUP = n + 1, RAW_STUB = n + 2;
+  const rawFunction = (r) => (r < n ? FIRST + r : r === RAW_INNER ? INNER : r === RAW_EXPLOOKUP ? EXPLOOKUP : STUB);
+  const rawOf = (fn) => (fn === STUB ? RAW_STUB : fn - FIRST);
 
   // Entries -> fragment function index.
   const entryOwner = new Map();
@@ -409,6 +446,16 @@ export function assembleRegion(fragments, { helpers, pcOffset, memoryPages, memo
       if (((r.kind === "import" || r.kind === "call") && opcode !== OP.call) || ((r.kind === "jump" || r.kind === "dispatch") && opcode !== OP.returnCall)) {
         throw new Error(`region: ${r.kind} reloc at ${r.offset} after opcode 0x${opcode.toString(16)}`);
       }
+      if (trampoline && (r.kind === "jump" || r.kind === "dispatch")) {
+        const raw = r.kind === "dispatch" ? RAW_INNER : rawOf(entryOwner.get(r.targetPc >>> 0) ?? STUB);
+        code.set(trampolineSite(TRAMP_BASE + raw), r.offset - 1);
+        continue;
+      }
+      if (trampoline && r.kind === "call") {
+        const target = entryOwner.get(r.targetPc >>> 0);
+        code.set(paddedUleb(target === undefined ? WRAP0 + n : WRAP0 + (target - FIRST)), r.offset);
+        continue;
+      }
       let index;
       if (r.kind === "import") index = helperIndex.get(r.name);
       else if (r.kind === "jump") index = entryOwner.get(r.targetPc >>> 0) ?? STUB;
@@ -433,6 +480,8 @@ export function assembleRegion(fragments, { helpers, pcOffset, memoryPages, memo
     if (!sigIndex.has(key)) { sigIndex.set(key, sigs.length); sigs.push(s); }
     return sigIndex.get(key);
   });
+  const SWITCH_TYPE = sigs.length;
+  if (trampoline === "direct") sigs.push(signature({ params: ["i32", "i32"], results: ["i32"] }));
   const types = [];
   uleb(types, sigs.length);
   for (const s of sigs) types.push(...s);
@@ -454,7 +503,7 @@ export function assembleRegion(fragments, { helpers, pcOffset, memoryPages, memo
 
   const funcs = [];
   uleb(funcs, LOCAL_FUNCTIONS);
-  for (let i = 0; i < LOCAL_FUNCTIONS; i++) uleb(funcs, TYPE_STATE);
+  for (let i = 0; i < LOCAL_FUNCTIONS; i++) uleb(funcs, trampoline === "direct" && i === SWITCH - DISPATCHER ? SWITCH_TYPE : TYPE_STATE);
   section(out, 3, funcs);
 
   // A funcref table of the fragments (table 1 after the core's with `chain`),
@@ -462,8 +511,11 @@ export function assembleRegion(fragments, { helpers, pcOffset, memoryPages, memo
   // compiles a function lazily, at its first call); the core only ever calls
   // `f`.
   const FRAGMENTS_TABLE = chain ? 1 : 0;
-  const table = [0x01, 0x70, 0x00];
+  // Trampoline "indirect": the raw table after it.
+  const RAW_TABLE = FRAGMENTS_TABLE + 1;
+  const table = [trampoline === "indirect" ? 0x02 : 0x01, 0x70, 0x00];
   uleb(table, fragments.length);
+  if (trampoline === "indirect") { table.push(0x70, 0x00); uleb(table, n + 3); }
   section(out, 4, table);
 
   const exports = [];
@@ -473,18 +525,43 @@ export function assembleRegion(fragments, { helpers, pcOffset, memoryPages, memo
   section(out, 7, exports);
 
   const elem = chain
-    ? [0x01, 0x02, 0x01, OP.i32Const, 0x00, OP.end, 0x00] // active, table 1, funcref indexes
-    : [0x01, 0x00, OP.i32Const, 0x00, OP.end];
+    ? [trampoline === "indirect" ? 0x02 : 0x01, 0x02, 0x01, OP.i32Const, 0x00, OP.end, 0x00] // active, table 1, funcref indexes
+    : [trampoline === "indirect" ? 0x02 : 0x01, 0x00, OP.i32Const, 0x00, OP.end];
   uleb(elem, fragments.length);
-  for (let i = 0; i < fragments.length; i++) uleb(elem, FIRST + i);
+  // The "fragments" table holds what may be entered: the wrappers in trampoline mode.
+  for (let i = 0; i < fragments.length; i++) uleb(elem, trampoline ? WRAP0 + i : FIRST + i);
+  if (trampoline === "indirect") {
+    elem.push(0x02); uleb(elem, RAW_TABLE); elem.push(OP.i32Const, 0x00, OP.end, 0x00);
+    uleb(elem, n + 3);
+    for (let r = 0; r < n + 3; r++) uleb(elem, rawFunction(r));
+  }
   section(out, 9, elem);
 
   const code = [];
   uleb(code, LOCAL_FUNCTIONS);
   const append = (bytes) => { for (const x of bytes) code.push(x); }; // no spread: large bodies
-  for (const missing of [1, chain ? { stub: STUB } : 0]) {
-    const dispatcher = dispatcherBody(sortedEntries, pcOffset, missing);
-    uleb(code, dispatcher.length); append(dispatcher);
+  // A wrapper starting at raw index `start` (trampoline mode).
+  const wrapper = (start) => {
+    const b = [0x01, 0x02, VAL.i32, OP.i32Const];
+    sleb(b, start);
+    b.push(OP.localSet, 1, OP.loop, 0x40, OP.localGet, 0, OP.localGet, 1);
+    if (trampoline === "indirect") { b.push(OP.callIndirect, TYPE_STATE); uleb(b, RAW_TABLE); }
+    else { b.push(OP.call); uleb(b, SWITCH); }
+    b.push(OP.localTee, 2, OP.i32Const); sleb(b, TRAMP_BASE);
+    b.push(OP.i32LtU, OP.if, 0x40, OP.localGet, 2, OP.return, OP.end, OP.localGet, 2, OP.i32Const); sleb(b, TRAMP_BASE);
+    b.push(OP.i32Sub, OP.localSet, 1, OP.br, 0x00, OP.end, OP.unreachable, OP.end);
+    return b;
+  };
+  if (trampoline) {
+    const codes = sortedEntries.map(([pc, fn]) => [pc, TRAMP_BASE + (fn - FIRST)]);
+    for (const body of [wrapper(RAW_EXPLOOKUP), dispatcherBody(codes, pcOffset, { code: TRAMP_BASE + RAW_STUB }, { codes: true }), dispatcherBody(codes, pcOffset, 1, { codes: true })]) {
+      uleb(code, body.length); append(body);
+    }
+  } else {
+    for (const missing of [1, chain ? { stub: STUB } : 0]) {
+      const dispatcher = dispatcherBody(sortedEntries, pcOffset, missing);
+      uleb(code, dispatcher.length); append(dispatcher);
+    }
   }
   // State written: the next region, or 0 (continue at state.pc).
   const stub = chain ? [0x01, 0x01, VAL.i32, OP.localGet, 0, OP.call] : [0x00, OP.i32Const, 0x00, OP.end];
@@ -495,6 +572,21 @@ export function assembleRegion(fragments, { helpers, pcOffset, memoryPages, memo
   uleb(code, stub.length); append(stub);
   const bodyAt = [];
   for (const b of bodies) { uleb(code, b.length); bodyAt.push(code.length); append(b); }
+  if (trampoline) {
+    for (let r = 0; r < n; r++) { const w = wrapper(r); uleb(code, w.length); append(w); }
+    const w = wrapper(RAW_STUB); uleb(code, w.length); append(w);
+    if (trampoline === "direct") {
+      // (state, raw index): a br_table of direct calls.
+      const k = n + 3, b = [0x00];
+      for (let j = 0; j < k; j++) b.push(OP.block, 0x40);
+      b.push(OP.localGet, 1, OP.brTable); uleb(b, k);
+      for (let j = 0; j < k; j++) uleb(b, j);
+      uleb(b, k - 1);
+      for (let j = 0; j < k; j++) { b.push(OP.end, OP.localGet, 0, OP.call); uleb(b, rawFunction(j)); b.push(OP.return); }
+      b.push(OP.end);
+      uleb(code, b.length); append(b);
+    }
+  }
   // Custom section "metadata.code.branch_hint" (wasm branch hinting, before
   // the code section): per fragment, the `if` opcodes the core marked and
   // whether their true arm is likely (a fast path) or not (a halt, the
@@ -593,8 +685,10 @@ export function assembleRegion(fragments, { helpers, pcOffset, memoryPages, memo
   if (names) {
     const hex = (pc) => (pc >>> 0).toString(16).padStart(8, "0");
     const rid = `r${hex(sortedEntries[0][0])}`;
-    const fnNames = [[DISPATCHER, `${rid}_dispatch`], [INNER, `${rid}_inner`], [STUB, `${rid}_exit`],
-      ...fragments.map((f, i) => [FIRST + i, `${rid}_f${hex(f.entry)}`])];
+    const fnNames = [[DISPATCHER, `${rid}_dispatch`], [INNER, `${rid}_inner`], ...(trampoline ? [[EXPLOOKUP, `${rid}_lookup`]] : []), [STUB, `${rid}_exit`],
+      ...fragments.map((f, i) => [FIRST + i, `${rid}_f${hex(f.entry)}`]),
+      ...(trampoline ? [...fragments.map((f, i) => [WRAP0 + i, `${rid}_w${hex(f.entry)}`]), [WRAP0 + n, `${rid}_wexit`]] : []),
+      ...(trampoline === "direct" ? [[SWITCH, `${rid}_switch`]] : [])];
     const sub = (id, body) => { const o = [id]; uleb(o, body.length); for (const b of body) o.push(b); return o; };
     const modName = []; name(modName, rid);
     const fnMap = []; uleb(fnMap, fnNames.length);

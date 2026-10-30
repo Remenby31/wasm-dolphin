@@ -2007,6 +2007,7 @@ async function handleMessage(type, payload) {
         noJitCache: payload.noJitCache,
         jitOffThread: payload.jitOffThread,
         aotCompiler: payload.aotCompiler,
+        regionTrampoline: payload.regionTrampoline,
         aotFirstLaunch: payload.aotFirstLaunch,
         aotSampleMs: payload.aotSampleMs,
         wasmEngine: payload.wasmEngine,
@@ -2707,6 +2708,7 @@ async function loadCore({
   noJitCache = false,
   jitOffThread = true,
   aotCompiler = true,
+  regionTrampoline = null,
   aotFirstLaunch = false,
   aotSampleMs = AOT_PROFILE_SAMPLE_MS,
   wasmEngine: requestedWasmEngine = null,
@@ -3146,6 +3148,7 @@ async function loadCore({
   const _t_idb = performance.now();
   dolphinJitCachePersistenceEnabled = !noJitCache;
   dolphinAotCompilerEnabled = aotCompiler !== false;
+  aotRegionTrampoline = regionTrampoline === "direct" ? "direct" : "indirect";
   // Regions are return_call chains: without wasm tail calls every region
   // module would fail to compile. They stay off and the CPU runs on blocks,
   // with a status line and aotStatus saying why (never a silent loss).
@@ -8438,7 +8441,10 @@ export async function prepareAotFirstLaunch(file, {
     translator,
     // 0189 (on by default): the entry -> fragment section only in its mode
     // (bit 16 of the codegen mask, so its modules have their own keys).
-    assembleOptions: core?.assemble && { ...core.assemble, fragmentEntries: ((keyParts?.codegenMask ?? 0) & (1 << 16)) !== 0 },
+    // The trampoline with bit 19 (its modules have their own keys), in the
+    // form the page asked for.
+    assembleOptions: core?.assemble && { ...core.assemble, fragmentEntries: ((keyParts?.codegenMask ?? 0) & (1 << 16)) !== 0,
+      trampoline: ((keyParts?.codegenMask ?? 0) & (1 << 19)) !== 0 ? aotRegionTrampoline : null },
     // Regions loaded back from the cache go through the compiler worker as
     // those of a first launch do (precompileAotRegion): handed over at once,
     // then every function called once in the background, so V8's lazy
@@ -8935,6 +8941,8 @@ function getDolphinAotCompiler() {
 // On by default, set by loadCore (?aotcompiler=0 turns it off): without it,
 // cached and requested modules compile in place on this worker.
 let dolphinAotCompilerEnabled = false;
+// ?regiontramp=: the trampoline's form when bit 19 of the codegen mask is set.
+let aotRegionTrampoline = "indirect";
 export function setDolphinAotCompilerForTest({ enabled, createWorker } = {}) {
   dolphinAotCompilerEnabled = enabled === true;
   dolphinAotCompiler?.terminate();

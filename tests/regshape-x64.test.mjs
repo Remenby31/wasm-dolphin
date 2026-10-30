@@ -39,8 +39,8 @@ test("block JIT, random blocks with branches and CTR loops, x64 shape on and off
   assert.ok(compiled > 300, `too few compiled blocks (${compiled})`);
 });
 
-test("regions, oracle programs with the x64 shape: interpreter and regions agree, mid-region exits included", { skip, timeout: 600000 }, (t) => {
-  const tally = runOracleProgramsAsRegions(aot, { seed: 0x184184, count: 300, length: 24, mask: PRODUCTION_DISABLE_MASK | REGSHAPE_X64 });
+for (const trampoline of [null, "indirect"]) test(`regions, oracle programs with the x64 shape: interpreter and regions agree, mid-region exits included${trampoline ? `, trampoline ${trampoline}` : ""}`, { skip, timeout: 600000 }, (t) => {
+  const tally = runOracleProgramsAsRegions(aot, { seed: 0x184184, count: 300, length: 24, mask: PRODUCTION_DISABLE_MASK | REGSHAPE_X64, trampoline });
   t.diagnostic(JSON.stringify({ ...tally, mismatches: tally.mismatches.slice(0, 4), mismatchCount: tally.mismatches.length }));
   assert.deepEqual(tally.mismatches.slice(0, 4), []);
   assert.ok(tally.translated >= 0.7 * tally.programs, `${tally.translated} of ${tally.programs} translated`);

@@ -358,7 +358,7 @@ export function compareCall(core, regionAt, start, { strictCycles = false } = {}
 }
 
 export function checkCoreSlice({ core, plan, image, slice, slices, maxFunctions = 100, budget = 400000, seed = 1,
-  mask = PRODUCTION_DISABLE_MASK, maxBlocks = 64, fragmentsOf = functionFragments(core, { mask, maxBlocks }) }) {
+  mask = PRODUCTION_DISABLE_MASK, maxBlocks = 64, fragmentsOf = functionFragments(core, { mask, maxBlocks }), trampoline = null }) {
   for (const s of image.segments) core.load(s.start, s.bytes);
   const baseline = core.ram().slice();
   const groups = regionGroups(plan, maxFunctions);
@@ -369,7 +369,7 @@ export function checkCoreSlice({ core, plan, image, slice, slices, maxFunctions 
   for (const group of groups) {
     const fragments = claimEntries(group.flatMap(fragmentsOf));
     if (!fragments.length) continue;
-    const { bytes } = assembleRegion(fragments, { helpers: HELPER_SIGNATURES, pcOffset: core.pcOffset, memoryPages: core.memoryPages });
+    const { bytes } = assembleRegion(fragments, { helpers: HELPER_SIGNATURES, pcOffset: core.pcOffset, memoryPages: core.memoryPages, trampoline });
     const handle = core.compile(bytes);
     if (handle <= 0) throw new Error(`core rejected a region module (${handle}), group of ${group[0].entry.toString(16)}`);
     report.regions += 1;
@@ -414,12 +414,12 @@ export function bigEndian(words) {
 // One program at ORACLE_CODE, translated as a region while `translateState`
 // is loaded (its MSR decides which FPU ops the translator takes), then run
 // from `state` by the interpreter alone and by the region (compareCall).
-export function compareRegionProgram(core, words, state, { translateState = state, mask = PRODUCTION_DISABLE_MASK, budget = 400000, ranges = [[ORACLE_CODE, ORACLE_CODE + 4 * words.length]] } = {}) {
+export function compareRegionProgram(core, words, state, { translateState = state, mask = PRODUCTION_DISABLE_MASK, budget = 400000, ranges = [[ORACLE_CODE, ORACLE_CODE + 4 * words.length]], trampoline = null } = {}) {
   core.load(ORACLE_CODE, bigEndian(words));
   core.loadState(translateState, ORACLE_CODE);
   const fragment = core.translate(ORACLE_CODE, { mask, ranges });
   if (!fragment) return { translated: false };
-  const { bytes } = assembleRegion([fragment], { helpers: HELPER_SIGNATURES, pcOffset: core.pcOffset, memoryPages: core.memoryPages });
+  const { bytes } = assembleRegion([fragment], { helpers: HELPER_SIGNATURES, pcOffset: core.pcOffset, memoryPages: core.memoryPages, trampoline });
   const handle = core.compile(bytes);
   if (handle <= 0) throw new Error(`core rejected a region module (${handle})`);
   const regionAt = new Map(fragment.entries.map((pc) => [pc >>> 0, handle]));
@@ -432,7 +432,7 @@ export function compareRegionProgram(core, words, state, { translateState = stat
   return { translated: true, fragment, ...result };
 }
 
-export function runOracleProgramsAsRegions(core, { seed, count, length, mask, names = null }) {
+export function runOracleProgramsAsRegions(core, { seed, count, length, mask, names = null, trampoline = null }) {
   const r = makeRng(seed);
   const tally = { programs: 0, translated: 0, compared: 0, equal: 0, trap: 0, ends: {}, regionRuns: 0, hintsDropped: 0, hintsChecked: 0, hintSectionErrors: [], mismatches: [] };
   for (let n = 0; n < count; n++) {
@@ -444,7 +444,7 @@ export function runOracleProgramsAsRegions(core, { seed, count, length, mask, na
     const fragment = core.translate(ORACLE_CODE, { mask, ranges: [[ORACLE_CODE, ORACLE_CODE + 4 * words.length]] });
     if (!fragment) continue;
     tally.translated += 1;
-    const { bytes, hintsDropped } = assembleRegion([fragment], { helpers: HELPER_SIGNATURES, pcOffset: core.pcOffset, memoryPages: core.memoryPages });
+    const { bytes, hintsDropped } = assembleRegion([fragment], { helpers: HELPER_SIGNATURES, pcOffset: core.pcOffset, memoryPages: core.memoryPages, trampoline });
     tally.hintsDropped += hintsDropped ?? 0; // 0131: a core hint off an `if`
     // The branch_hint section as V8 reads it: any broken rule drops it all.
     const hintCheck = checkBranchHintSection(bytes);
