@@ -34,6 +34,14 @@ export const MACHINE_LOAD_MAX = 40;
 // headless with video=null (our Chromium off the GPU), load1 and the cpus
 // normal: nothing read the GPU then.
 export const GPU_FOREIGN_MAX = 20;
+// The GPU gate only for a run on the GPU: headed (the bench's Xorg) or
+// video=wgpu on either side. A headless video=null pair does not touch it;
+// it gave up JIT's pairs behind a 60 min RL training at 86 % of the SMs
+// (2026-10-30). Such a run keeps the reading, and the memory gate covers
+// the unified memory. race-perf says which through SPARK_GPU_GATE=0.
+export function gpuGateApplies({ display, queries }) {
+  return display !== "headless" || queries.some((q) => q && new URLSearchParams(q).get("video") === "wgpu");
+}
 // Memory (the GB10's is the GPU's too): a window is invalid when the memory
 // available falls under MEM_FLOOR_MB or by more than MEM_DROP_MB during it,
 // or when tasks stalled on memory (PSI "some", 10 s average) more than
@@ -203,15 +211,15 @@ export function salonOverloaded(samples) {
 // The gate's reading on the bench: { load, limit, ok, over, lane,
 // background, granted, laneBusy }. `exclude`: this job's root pid (its tree
 // is ours); `cap`: an explicit --max-load.
-export async function benchRead({ lane = benchLane(), exclude = process.pid, load = () => os.loadavg()[0], tickets = readTickets(), ms = 1000, cap = null } = {}) {
+export async function benchRead({ lane = benchLane(), exclude = process.pid, load = () => os.loadavg()[0], tickets = readTickets(), ms = 1000, cap = null, gpuGate = process.env.SPARK_GPU_GATE !== "0" } = {}) {
   const background = await measureBackground(tickets);
   const cores = await checkCores({ cpus: lane.cpus, exclude, threshold: LANE_FOREIGN_PCT, ms });
   const now = Math.round(load() * 100) / 100;
   const gpu = gpuNow(tickets);
   const mem = memNow();
-  const j = benchJudge({ load: now, background, cap, gpu, mem });
+  const j = benchJudge({ load: now, background, cap, gpu: gpuGate ? gpu : null, mem });
   return {
-    load: now, limit: j.limit, ok: j.ok && cores.ok, over: j.over, gpu, mem,
+    load: now, limit: j.limit, ok: j.ok && cores.ok, over: j.over, gpu, gpuGate, mem,
     lane: lane.lane, background, salonForeignMax: SALON_FOREIGN_MAX, granted: grantedLanes(tickets), laneBusy: cores.busy
   };
 }

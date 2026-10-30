@@ -115,6 +115,7 @@ import { acquirePerfLock } from "../lib/perf-lock.mjs";
 import { MIN_BATTERY_PERCENT, powerDrained, powerSnapshot } from "../lib/system.mjs";
 import { openSession, rebootSession } from "../lib/session.mjs";
 import { calmThenLock, calmUnderLock, defaultMaxLoad, loadGaveUp } from "../lib/env.mjs";
+import { benchLane, gpuGateApplies } from "../lib/bench-load.mjs";
 import { describe, median, percentile, round } from "../lib/stats.mjs";
 import { coreStats, displayStats, hitchList, mergeTimeline, presentationStats } from "../lib/timeline.mjs";
 import { consistentRead, decodeRegionStats, poolStats, regionShares, topMisses } from "../lib/jit-region-stats.mjs";
@@ -461,7 +462,7 @@ export async function measure(session, o) {
       ...(o.benchGpu ? { gpu: { start: gpuStart, end: gpuEnd, limit: o.benchGpuMax } } : {}),
       ...(o.benchMem ? { mem: { start: pressStart, end: pressEnd, majFaults: memDelta(pressStart?.majFaults, pressEnd?.majFaults), swapIns: memDelta(pressStart?.swapIns, pressEnd?.swapIns), over: memWhy } } : {}),
       overloaded: medianLoad > o.maxLoad || (salon.length > 0 && o.benchSalonOverloaded(salon)) ||
-        [gpuStart, gpuEnd].some((g) => g && g.foreignSm > o.benchGpuMax) || memWhy.length > 0,
+        (o.benchGpuGate && [gpuStart, gpuEnd].some((g) => g && g.foreignSm > o.benchGpuMax)) || memWhy.length > 0,
       complete: timeline.complete,
       timelineLost: timeline.lost,
       ...(o.headroom ? { headroom: hrStart?.error ? { error: hrStart.error } : hrEnd?.error ? { error: hrEnd.error } : headroomOf(hrEnd.stats, { guestSeconds: (hrEnd.ticks - hrStart.ticks) / (hrEnd.tps || 1), ticksPerSecond: hrEnd.tps, viOutputs: timeline.vi.length }) } : {}),
@@ -730,8 +731,8 @@ async function measureSide(side, o, loadGate) {
   // the bench (its gate read Salon's cpus): the window samples them too
   if (loadGate?.salonForeignMax != null) {
     const { salonForeignNow } = await import("../lib/bench-load.mjs");
-    const { GPU_FOREIGN_MAX, gpuNow, memNow, memOver, salonOverloaded } = await import("../lib/bench-load.mjs");
-    o = { ...o, benchSalon: () => salonForeignNow(), benchSalonMax: loadGate.salonForeignMax, benchSalonOverloaded: salonOverloaded, benchGpu: () => gpuNow(), benchGpuMax: GPU_FOREIGN_MAX, benchMem: () => memNow(), benchMemOver: memOver };
+    const { GPU_FOREIGN_MAX, gpuGateApplies, gpuNow, memNow, memOver, salonOverloaded } = await import("../lib/bench-load.mjs");
+    o = { ...o, benchSalon: () => salonForeignNow(), benchSalonMax: loadGate.salonForeignMax, benchSalonOverloaded: salonOverloaded, benchGpu: () => gpuNow(), benchGpuMax: GPU_FOREIGN_MAX, benchGpuGate: gpuGateApplies({ display: o.browserDisplay, queries: [o.query, side.query] }), benchMem: () => memNow(), benchMemOver: memOver };
   }
   try {
     const bootStart = performance.now();
@@ -916,6 +917,9 @@ async function main() {
     functions: values.symbols ? JSON.parse(readFileSync(values.symbols, "utf8")).sort((a, b) => a[0] - b[0]) : null,
     coreCandidates: values["core-candidate"]
   };
+  // The bench's GPU gate (lib/bench-load.mjs) only when a side is on the GPU:
+  // headed, or video=wgpu. The gate reads it from the environment.
+  if (benchLane() && !gpuGateApplies({ display: o.browserDisplay, queries: [o.query, baselineQuery] })) process.env.SPARK_GPU_GATE = "0";
   const sceneCheck = sceneProtocolCheck(state ? path.basename(state) : null, {
     warmup: o.emulatedWindow ? o.emulatedWarmup : o.warmup, window: o.emulatedWindow ?? o.secs, emulated: Boolean(o.emulatedWindow),
     hold: o.hold, regionSample: o.regionSample, regionStatsInWindow: o.regionInWindow
