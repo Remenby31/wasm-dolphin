@@ -67,7 +67,12 @@ diff --git a/Source/Core/VideoBackends/WebGPU/WebGPUGfx.cpp b/Source/Core/VideoB
 diff --git a/Source/Core/VideoBackends/WebGPU/WebGPUVertexManager.cpp b/Source/Core/VideoBackends/WebGPU/WebGPUVertexManager.cpp
 --- a/Source/Core/VideoBackends/WebGPU/WebGPUVertexManager.cpp
 +++ b/Source/Core/VideoBackends/WebGPU/WebGPUVertexManager.cpp
-@@ -9,6 +9,9 @@
+@@ -5,10 +5,14 @@
+ 
+ #include <algorithm>
+ #include <cstring>
++#include <optional>
+ #include <iterator>
  #include <limits>
  
  #include <emscripten/emscripten.h>
@@ -77,7 +82,7 @@ diff --git a/Source/Core/VideoBackends/WebGPU/WebGPUVertexManager.cpp b/Source/C
  
  #include "VideoBackends/WebGPU/WebGPUCommandStream.h"
  #include "VideoBackends/WebGPU/WebGPUGfx.h"
-@@ -21,6 +24,7 @@ namespace WebGPU
+@@ -21,6 +25,7 @@ namespace WebGPU
  {
  extern "C" void SetWebGpuGeometryPackEnabled(int enabled);
  extern "C" void SetWebGpuGeometryRangeEnabled(int enabled);
@@ -85,7 +90,7 @@ diff --git a/Source/Core/VideoBackends/WebGPU/WebGPUVertexManager.cpp b/Source/C
  
  // GPUBufferUsage numeric flags (DESIGN doc): VERTEX 0x20, INDEX 0x10,
  // COPY_DST 0x8.
-@@ -28,6 +32,31 @@ static constexpr u32 kUsageVertex = 0x20 | 0x8;
+@@ -28,6 +33,31 @@ static constexpr u32 kUsageVertex = 0x20 | 0x8;
  static constexpr u32 kUsageIndex = 0x10 | 0x8;
  static constexpr u32 kUsageGeometry = 0x20 | 0x10 | 0x8;
  static constexpr u32 kGeometryRangeMaxGap = 64;
@@ -117,7 +122,7 @@ diff --git a/Source/Core/VideoBackends/WebGPU/WebGPUVertexManager.cpp b/Source/C
  // 0203: the consumer's OP_DESTROY tag for a buffer (0201: 1 buffer, 2 texture,
  // 3 bind group).
  static constexpr u32 kDestroyTagGeometryBuffer = 1;
-@@ -59,6 +88,205 @@ void VertexManager::EnsureLegacyBuffers()
+@@ -59,6 +89,199 @@ void VertexManager::EnsureLegacyBuffers()
      m_index_buffer_id = cs.PushCreateBuffer(kIndexBufferSize, kUsageIndex);
  }
  
@@ -135,6 +140,46 @@ diff --git a/Source/Core/VideoBackends/WebGPU/WebGPUVertexManager.cpp b/Source/C
 +  m_cache_seen_previous.clear();
 +  m_cache_seen_current.clear();
 +  s_geometry_cache_stats.resets += 1;
++}
++
++// Room in the ring for packet_bytes at vertex_stride (base_vertex needs the
++// offset aligned to it), wrapping to 0; the entries in the way are evicted,
++// oldest first, unless the current submit uses one (then nothing is evicted
++// further and the packet is not cached: nullopt). The ring holds the current
++// lap below m_cache_write and the previous lap's leftovers at or past it, the
++// oldest first in m_cache_order. In the way (#370 review, twice):
++//  - at a wrap: every leftover, then this lap's entries under the new slot;
++//  - otherwise: every leftover that starts before the slot's end, including
++//    one inside the alignment gap [m_cache_write, slot), which overlaps
++//    nothing but stands before the entries the slot does overlap.
++std::optional<u32> VertexManager::ReserveGeometryCacheSlot(u32 packet_bytes, u32 vertex_stride,
++                                                          u64 submit_serial)
++{
++  const u64 aligned_64 =
++      (static_cast<u64>(m_cache_write) + vertex_stride - 1) / vertex_stride * vertex_stride;
++  const bool wraps = aligned_64 + packet_bytes > m_cache_size;
++  const u32 offset = wraps ? 0 : static_cast<u32>(aligned_64);
++  while (!m_cache_order.empty())
++  {
++    const auto oldest = m_cache_entries.find(m_cache_order.front());
++    if (oldest == m_cache_entries.end())
++    {
++      m_cache_order.pop_front();
++      continue;
++    }
++    const GeometryCacheEntry& entry = oldest->second;
++    const bool leftover = entry.offset >= m_cache_write;
++    const bool in_the_way =
++        wraps ? (leftover || entry.offset < offset + packet_bytes) :
++                (leftover && entry.offset < offset + packet_bytes);
++    if (!in_the_way)
++      break;
++    if (entry.used_submit == submit_serial)
++      return std::nullopt;
++    m_cache_entries.erase(oldest);
++    m_cache_order.pop_front();
++  }
++  return offset;
 +}
 +
 +VertexManager::GeometryCacheResult
@@ -217,59 +262,13 @@ diff --git a/Source/Core/VideoBackends/WebGPU/WebGPUVertexManager.cpp b/Source/C
 +    return miss();
 +  }
 +
-+  // Room in the ring: aligned to the stride (base_vertex), wrapping to 0;
-+  // the oldest entries in the way go, unless the current submit uses one.
-+  const u64 aligned_64 =
-+      (static_cast<u64>(m_cache_write) + vertex_stride - 1) / vertex_stride * vertex_stride;
-+  const bool wraps = aligned_64 + packet_bytes > m_cache_size;
-+  u32 offset = wraps ? 0 : static_cast<u32>(aligned_64);
-+  // Wrapping: the oldest entries are the previous lap's leftovers past the
-+  // write position, which this lap now skips. They go first, so the entries
-+  // of the current lap (from 0) are the oldest and the overlap test below
-+  // meets them in order; stopping at a leftover that does not overlap would
-+  // overwrite this lap's entries without evicting them (#370 review).
-+  if (wraps)
++  const std::optional<u32> slot = ReserveGeometryCacheSlot(packet_bytes, vertex_stride, submit_serial);
++  if (!slot)
 +  {
-+    while (!m_cache_order.empty())
-+    {
-+      const auto oldest = m_cache_entries.find(m_cache_order.front());
-+      if (oldest == m_cache_entries.end())
-+      {
-+        m_cache_order.pop_front();
-+        continue;
-+      }
-+      if (oldest->second.offset < m_cache_write)
-+        break;
-+      if (oldest->second.used_submit == submit_serial)
-+      {
-+        s_geometry_cache_stats.blocked += 1;
-+        return miss();
-+      }
-+      m_cache_entries.erase(oldest);
-+      m_cache_order.pop_front();
-+    }
++    s_geometry_cache_stats.blocked += 1;
++    return miss();
 +  }
-+  while (!m_cache_order.empty())
-+  {
-+    const auto oldest = m_cache_entries.find(m_cache_order.front());
-+    if (oldest == m_cache_entries.end())
-+    {
-+      m_cache_order.pop_front();
-+      continue;
-+    }
-+    const GeometryCacheEntry& entry = oldest->second;
-+    const bool overlaps =
-+        entry.offset < offset + packet_bytes && offset < entry.offset + entry.packet_bytes;
-+    if (!overlaps)
-+      break;
-+    if (entry.used_submit == submit_serial)
-+    {
-+      s_geometry_cache_stats.blocked += 1;
-+      return miss();
-+    }
-+    m_cache_entries.erase(oldest);
-+    m_cache_order.pop_front();
-+  }
++  const u32 offset = *slot;
 +
 +  if (m_cache_buffer_id == 0)
 +  {
@@ -323,7 +322,7 @@ diff --git a/Source/Core/VideoBackends/WebGPU/WebGPUVertexManager.cpp b/Source/C
  void VertexManager::DestroyRetiredGeometryBuffers()
  {
    // Called between passes only (WebGPUGfx): the OP_DESTROY lands after the
-@@ -262,6 +490,23 @@ void VertexManager::CommitBuffer(u32 num_vertices, u32 vertex_stride, u32 num_in
+@@ -262,6 +485,23 @@ void VertexManager::CommitBuffer(u32 num_vertices, u32 vertex_stride, u32 num_in
        return;
      }
  
@@ -347,7 +346,7 @@ diff --git a/Source/Core/VideoBackends/WebGPU/WebGPUVertexManager.cpp b/Source/C
      const u64 submit_serial = cs.GetSubmitSerial();
      // 0203: a buffer created below and never published (a failed upload or
      // range append after its create, with the range on or off) is retired
-@@ -362,6 +607,11 @@ void VertexManager::CommitBuffer(u32 num_vertices, u32 vertex_stride, u32 num_in
+@@ -362,6 +602,11 @@ void VertexManager::CommitBuffer(u32 num_vertices, u32 vertex_stride, u32 num_in
        m_retired_geometry_buffers.push_back(m_geometry_buffer_id);
      created.kept = candidate_buffer_id;
      m_geometry_buffer_id = candidate_buffer_id;
@@ -359,17 +358,59 @@ diff --git a/Source/Core/VideoBackends/WebGPU/WebGPUVertexManager.cpp b/Source/C
      m_geometry_offset = packet_offset + packet_bytes;
      m_geometry_generations_since_submit = candidate_generations;
      m_geometry_submit_serial = submit_serial;
-@@ -566,6 +816,9 @@ struct VertexManagerTestPeer
+@@ -566,6 +811,51 @@ struct VertexManagerTestPeer
    {
      return static_cast<u32>(manager.m_retired_geometry_buffers.size());
    }
 +  static u32 CacheBufferId(const VertexManager& manager) { return manager.m_cache_buffer_id; }
 +  static bool DrawFromCache(const VertexManager& manager) { return manager.m_draw_from_cache; }
 +  static void SetCacheSize(VertexManager& manager, u32 bytes) { manager.m_cache_size = bytes; }
++  // The ring alone (no upload), for the randomized check.
++  static std::optional<u32> Reserve(VertexManager& manager, u32 bytes, u32 stride, u64 submit)
++  {
++    return manager.ReserveGeometryCacheSlot(bytes, stride, submit);
++  }
++  static void Place(VertexManager& manager, u64 id, u32 offset, u32 bytes, u64 submit)
++  {
++    const VertexManager::GeometryCacheKey key{id, 0, bytes, 0};
++    VertexManager::GeometryCacheEntry entry;
++    entry.offset = offset;
++    entry.packet_bytes = bytes;
++    entry.used_submit = submit;
++    manager.m_cache_entries.emplace(key, std::move(entry));
++    manager.m_cache_order.push_back(key);
++    manager.m_cache_write = offset + bytes;
++  }
++  static bool Use(VertexManager& manager, u64 id, u32 bytes, u64 submit)
++  {
++    const auto it = manager.m_cache_entries.find(VertexManager::GeometryCacheKey{id, 0, bytes, 0});
++    if (it == manager.m_cache_entries.end())
++      return false;
++    it->second.used_submit = submit;
++    return true;
++  }
++  // Every live entry inside the ring, no two overlapping.
++  static bool LiveEntriesDisjoint(const VertexManager& manager)
++  {
++    std::vector<std::pair<u32, u32>> ranges;
++    for (const auto& [key, entry] : manager.m_cache_entries)
++    {
++      if (entry.offset + entry.packet_bytes > manager.m_cache_size)
++        return false;
++      ranges.emplace_back(entry.offset, entry.offset + entry.packet_bytes);
++    }
++    std::sort(ranges.begin(), ranges.end());
++    for (size_t k = 1; k < ranges.size(); ++k)
++    {
++      if (ranges[k].first < ranges[k - 1].second)
++        return false;
++    }
++    return true;
++  }
  };
  
  extern "C" EMSCRIPTEN_KEEPALIVE int RunWebGpuVertexManagerGeometryParitySmoke(int indexed,
-@@ -820,6 +1073,180 @@ extern "C" EMSCRIPTEN_KEEPALIVE int RunWebGpuVertexManagerGeometryLifecycleSmoke
+@@ -820,6 +1110,271 @@ extern "C" EMSCRIPTEN_KEEPALIVE int RunWebGpuVertexManagerGeometryLifecycleSmoke
          VertexManagerTestPeer::RetiredGeometryBuffers(oversized_manager) != 1)
        return FailVertexManagerSmoke(516, "an unpublished candidate buffer was not retired");
    }
@@ -546,6 +587,97 @@ diff --git a/Source/Core/VideoBackends/WebGPU/WebGPUVertexManager.cpp b/Source/C
 +        VertexManagerTestPeer::RetiredGeometryBuffers(lap_manager) != retired_before_off + 1)
 +      return FailVertexManagerSmoke(538, "turning the cache off did not retire its buffer");
 +  }
++  // #370 review, second: a stride change leaves an alignment gap
++  // [write, aligned) where a small leftover can stand. 256-byte ring: A[0,40)
++  // B[40,60) C[60,200) D[200,240) (stride 4), E (36 B) wraps to [0,36), F
++  // (stride 64, 72 B) goes to [64,136): B, in the gap, and C, under the slot,
++  // must both go. The loop used to stop at B and overwrite C.
++  if (!s_vertex_manager_smoke_fixture.Reset())
++    return FailVertexManagerSmoke(539, "stride-change fixture reset failed");
++  SetWebGpuGeometryPackEnabled(1);
++  SetWebGpuGeometryRangeEnabled(0);
++  SetWebGpuGeometryCacheEnabled(1);
++  {
++    struct Packet { u32 vertex_bytes; u32 stride; };
++    constexpr Packet packets[6] = {{32, 4}, {12, 4}, {132, 4}, {32, 4}, {28, 4}, {64, 64}};
++    std::vector<u8> data(256);
++    VertexManager gap_manager;
++    VertexManagerTestPeer::SetCacheSize(gap_manager, 256);
++    const auto commit = [&](u32 p) {
++      for (u32 b = 0; b < data.size(); ++b)
++        data[b] = static_cast<u8>(p * 37 + b + 3);
++      VertexManagerTestPeer::Seed(gap_manager, data.data(), packets[p].vertex_bytes, indices,
++                                  static_cast<u32>(std::size(indices)), packets[p].stride);
++      VertexManagerTestPeer::Commit(gap_manager, packets[p].vertex_bytes / packets[p].stride,
++                                    packets[p].stride, static_cast<u32>(std::size(indices)),
++                                    &base_vertex, &base_index);
++    };
++    for (u32 p = 0; p < 6; ++p)
++      commit(p);  // frame 1: all seen
++    if (!stream.PushSubmitPresent())
++      return FailVertexManagerSmoke(540, "stride-change fixture could not end frame 1");
++    for (u32 p = 0; p < 6; ++p)
++      commit(p);  // frame 2: A-D inserted at 0/40/60/200; E, F blocked by A, seen again
++    if (!stream.PushSubmitPresent())
++      return FailVertexManagerSmoke(541, "stride-change fixture could not end frame 2");
++    double g0[13] = {};
++    double g1[13] = {};
++    DolphinWeb_GeometryCacheStats(g0);
++    commit(4);  // frame 3: E wraps to 0 (A evicted)
++    commit(5);  // frame 3: F at 64: B (gap) and C (under the slot) evicted
++    if (!VertexManagerTestPeer::DrawFromCache(gap_manager) || base_vertex != 1)
++      return FailVertexManagerSmoke(542, "the stride-64 packet was not placed at 64");
++    commit(2);  // C was overwritten by F: it must not hit
++    DolphinWeb_GeometryCacheStats(g1);
++    if (g1[0] - g0[0] != 0 || !VertexManagerTestPeer::LiveEntriesDisjoint(gap_manager))
++      return FailVertexManagerSmoke(543, "a stride change overwrote a live entry");
++  }
++  SetWebGpuGeometryCacheEnabled(0);
++  // The ring alone, randomized: mixed strides and sizes, submits ending every
++  // few packets, some entries used in the current submit. After each
++  // reservation no two live entries overlap, and none used in the current
++  // submit was evicted.
++  {
++    VertexManager ring_manager;
++    VertexManagerTestPeer::SetCacheSize(ring_manager, 1024);
++    u32 rng = 0x12345678u;
++    const auto next = [&rng] {
++      rng = rng * 1664525u + 1013904223u;
++      return rng >> 8;
++    };
++    u64 submit = 1;
++    std::vector<std::pair<u64, u32>> used_now;  // (id, bytes) used in this submit
++    u32 placed = 0;
++    for (u64 id = 1; id <= 20000; ++id)
++    {
++      if (next() % 6 == 0)
++      {
++        ++submit;
++        used_now.clear();
++      }
++      const u32 stride = 4u * (1u + next() % 16u);
++      const u32 bytes = 4u * (1u + next() % 48u);
++      const std::optional<u32> slot =
++          VertexManagerTestPeer::Reserve(ring_manager, bytes, stride, submit);
++      for (const auto& [used_id, used_bytes] : used_now)
++      {
++        if (!VertexManagerTestPeer::Use(ring_manager, used_id, used_bytes, submit))
++          return FailVertexManagerSmoke(544, "an entry used in this submit was evicted");
++      }
++      if (!slot)
++        continue;
++      if (*slot % stride != 0)
++        return FailVertexManagerSmoke(545, "a slot is not aligned to its stride");
++      VertexManagerTestPeer::Place(ring_manager, id, *slot, bytes, submit);
++      ++placed;
++      if (next() % 3 == 0)
++        used_now.emplace_back(id, bytes);
++      if (!VertexManagerTestPeer::LiveEntriesDisjoint(ring_manager))
++        return FailVertexManagerSmoke(546, "the ring overwrote a live entry");
++    }
++    if (placed < 10000)
++      return FailVertexManagerSmoke(547, "the randomized ring placed too few packets");
++  }
 +  SetWebGpuGeometryCacheEnabled(0);
    SetWebGpuGeometryRangeEnabled(0);
  
@@ -553,17 +685,18 @@ diff --git a/Source/Core/VideoBackends/WebGPU/WebGPUVertexManager.cpp b/Source/C
 diff --git a/Source/Core/VideoBackends/WebGPU/WebGPUVertexManager.h b/Source/Core/VideoBackends/WebGPU/WebGPUVertexManager.h
 --- a/Source/Core/VideoBackends/WebGPU/WebGPUVertexManager.h
 +++ b/Source/Core/VideoBackends/WebGPU/WebGPUVertexManager.h
-@@ -3,6 +3,9 @@
+@@ -3,6 +3,10 @@
  
  #pragma once
  
 +#include <deque>
++#include <optional>
 +#include <unordered_map>
 +#include <unordered_set>
  #include <vector>
  
  #include "Common/CommonTypes.h"
-@@ -16,6 +19,11 @@ void InvalidateGeometryUploadPack();
+@@ -16,6 +20,11 @@ void InvalidateGeometryUploadPack();
  bool IsGeometryUploadRangeEnabled();
  u64 GetGeometryUploadRangeEpoch();
  void InvalidateGeometryUploadRange();
@@ -575,7 +708,7 @@ diff --git a/Source/Core/VideoBackends/WebGPU/WebGPUVertexManager.h b/Source/Cor
  
  // Day-33 A3: a real VertexManagerBase for the remote WebGPU backend.
  //
-@@ -48,13 +56,19 @@ public:
+@@ -48,13 +57,19 @@ public:
    // also owns pipeline/framebuffer/texture/UBO state). Draw recording
    // therefore goes through the base DrawCurrentBatch → g_gfx->
    // DrawIndexed path rather than being overridden here.
@@ -597,7 +730,7 @@ diff --git a/Source/Core/VideoBackends/WebGPU/WebGPUVertexManager.h b/Source/Cor
    }
  
    // The range path keeps geometry bytes private until the owning render pass
-@@ -121,6 +135,66 @@ private:
+@@ -121,6 +136,68 @@ private:
    bool m_geometry_pack_active = false;
    PendingGeometryRange m_pending_geometry_range;
    std::vector<u32> m_retired_geometry_buffers;
@@ -646,6 +779,8 @@ diff --git a/Source/Core/VideoBackends/WebGPU/WebGPUVertexManager.h b/Source/Cor
 +                                       u32 vertex_stride, u32* out_base_vertex,
 +                                       u32* out_base_index);
 +  void ResetGeometryCache();
++  std::optional<u32> ReserveGeometryCacheSlot(u32 packet_bytes, u32 vertex_stride,
++                                              u64 submit_serial);
 +  static constexpr u32 kGeometryCacheSize = 32u * 1024u * 1024u;
 +  static constexpr u32 kGeometryCacheInsertCapPerFrame = 1024u * 1024u;
 +  u32 m_cache_size = kGeometryCacheSize;  // smaller in the smoke

@@ -44,6 +44,7 @@ test("the worker sets the cache at boot and after a device loss only, never arou
   assert.match(worker, /api\.setWebGpuGeometryRangeEnabled\?\.\(wgpuGeometryRangeEnabled \? 1 : 0\);\n\s+api\.setWebGpuGeometryCacheEnabled\?\.\(wgpuGeometryCacheMode\);\n\s+api\.setCpuOverclock/);
   assert.match(worker, /invalidateGeometry: \(\) => \{[\s\S]{0,300}setWebGpuGeometryCacheEnabled\?\.\(wgpuGeometryCacheMode\);\n\s+\},/);
   assert.match(worker, /case "validationReadGeometryCache":\n\s+return harnessGeometryCacheStats\(\);/);
+  assert.match(worker, /wgpuLoadEpochFence = Boolean\(requestedWgpuLoadEpochFence\);\n[^\n]*\n[^\n]*\n\s+if \(wgpuLoadEpochFence\) wgpuGeometryCacheMode = 0;/);
 });
 
 test("0204 keys packets by XXH3-128 over the uploaded bytes, before the stream path and its range", () => {
@@ -54,7 +55,8 @@ test("0204 keys packets by XXH3-128 over the uploaded bytes, before the stream p
 });
 
 test("0204 never overwrites an entry used in the current submit, and caps insertions per frame", () => {
-  assert.match(patch, /\+\s+if \(entry\.used_submit == submit_serial\)\n\+\s+\{\n\+\s+s_geometry_cache_stats\.blocked \+= 1;/);
+  assert.match(patch, /\+\s+if \(entry\.used_submit == submit_serial\)\n\+\s+return std::nullopt;/);
+  assert.match(patch, /\+\s+if \(!slot\)\n\+\s+\{\n\+\s+s_geometry_cache_stats\.blocked \+= 1;\n\+\s+return miss\(\);/);
   assert.match(patch, /\+\s+static constexpr u32 kGeometryCacheInsertCapPerFrame = 1024u \* 1024u;/);
   assert.match(patch, /\+\s+static constexpr u32 kGeometryCacheSize = 32u \* 1024u \* 1024u;/);
 });
@@ -63,13 +65,20 @@ test("0204: placement epochs keep the cache; its own setter retires its buffer",
   assert.match(patch, /\+\s+if \(m_cache_buffer_id != 0\)\n\+\s+m_retired_geometry_buffers\.push_back\(m_cache_buffer_id\);/);
   assert.match(patch, /FailVertexManagerSmoke\(529, "a placement epoch emptied the content cache"\)/);
   for (const code of [517, 518, 519, 520, 521, 522, 523, 524, 525, 526, 527, 528, 529, 530, 531,
-    532, 533, 534, 535, 536, 537, 538]) {
+    532, 533, 534, 535, 536, 537, 538, 539, 540, 541, 542, 543, 544, 545, 546, 547]) {
     assert.match(patch, new RegExp(`FailVertexManagerSmoke\\(${code},`));
   }
 });
 
 test("0204: a wrap first evicts the previous lap's leftovers past the write position (#370 review)", () => {
-  assert.match(patch, /\+\s+if \(wraps\)\n\+\s+\{\n\+\s+while \(!m_cache_order\.empty\(\)\)/);
-  assert.match(patch, /\+\s+if \(oldest->second\.offset < m_cache_write\)\n\+\s+break;/);
+  // at a wrap: every leftover (at or past the write position), then the
+  // entries under the new slot
+  assert.match(patch, /\+\s+wraps \? \(leftover \|\| entry\.offset < offset \+ packet_bytes\) :/);
   assert.match(patch, /FailVertexManagerSmoke\(537, "a wrap overwrote an entry without evicting it"\)/);
+});
+
+test("0204: outside a wrap, every leftover before the slot's end goes, the alignment gap's included (#370 review)", () => {
+  assert.match(patch, /\+\s+const bool leftover = entry\.offset >= m_cache_write;/);
+  assert.match(patch, /\+\s+wraps \? \(leftover \|\| entry\.offset < offset \+ packet_bytes\) :\n\+\s+\(leftover && entry\.offset < offset \+ packet_bytes\);/);
+  assert.match(patch, /FailVertexManagerSmoke\(546, "the ring overwrote a live entry"\)/);
 });

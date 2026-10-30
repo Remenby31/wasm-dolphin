@@ -2951,6 +2951,9 @@ async function loadCore({
   wgpuDetachedPresenter = Boolean(requestedWgpuDetachedPresenter);
   wgpuDetachedBitmapPending = false;
   wgpuLoadEpochFence = Boolean(requestedWgpuLoadEpochFence);
+  // 0204: never with the load fence (it drops published uploads, the cache's
+  // too); core-host refuses the pair already, the worker does as well.
+  if (wgpuLoadEpochFence) wgpuGeometryCacheMode = 0;
   wgpuLoadFenceActive = false;
   wgpuReplayPumpEnabled = Boolean(requestedWgpuReplayPump);
   wgpuReplayBudgetMs = [4, 6].includes(Number(requestedWgpuReplayBudgetMs))
