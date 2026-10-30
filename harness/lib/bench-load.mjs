@@ -18,6 +18,7 @@
 // A window is judged on the median of the same count during it
 // (salonForeignNow, race-perf). Off the bench (no SPARK_LANE_CPUS): null,
 // the caller keeps its --max-load.
+import { execFileSync } from "node:child_process";
 import { readdirSync, readFileSync } from "node:fs";
 import os from "node:os";
 import { checkCores, parseCpuList, parseStat, treeOf } from "../remote/spark-cores.mjs";
@@ -27,6 +28,12 @@ export const LANE_FOREIGN_PCT = 50;
 export const SALON_CPUS = parseCpuList("10-19");
 export const SALON_FOREIGN_MAX = 2;
 export const MACHINE_LOAD_MAX = 40;
+// The GPU is shared and the GB10's memory with it (unified): another user's
+// process above GPU_FOREIGN_MAX % of the GPU's SMs makes a window invalid.
+// 2026-10-30 01:10-01:50, every lane a run of a JIT pair fell to ~20 % speed,
+// headless with video=null (our Chromium off the GPU), load1 and the cpus
+// normal: nothing read the GPU then.
+export const GPU_FOREIGN_MAX = 20;
 
 export function benchLane(env = process.env) {
   if (!env.SPARK_LANE_CPUS) return null;
@@ -102,11 +109,44 @@ export async function measureBackground(tickets, { samples = 5, everyMs = 200 } 
   return Math.round((sum / samples) * 10) / 10;
 }
 
+// `nvidia-smi pmon -c 1 -s um` -> [{ pid, sm, mem, command }] (pure,
+// tested; "-" for a process with nothing to show is 0).
+export function parsePmon(text) {
+  const num = (v) => (v === "-" || v === undefined ? 0 : Number(v));
+  return String(text).split("\n").filter((l) => l.trim() && !l.trimStart().startsWith("#")).map((l) => {
+    const f = l.trim().split(/\s+/);
+    return { pid: Number(f[1]), sm: num(f[3]), mem: num(f[4]), command: f.at(-1) };
+  }).filter((p) => Number.isInteger(p.pid) && p.pid > 0);
+}
+
+// The GPU now: its use, the processes on it outside every granted job's
+// tree with their share of the SMs, and the memory the machine has left
+// (MemAvailable: the GPU's memory is the machine's). Null where nvidia-smi
+// is missing or hangs (5 s).
+export function gpuNow(tickets = readTickets(), { run = (args) => execFileSync("nvidia-smi", args, { encoding: "utf8", timeout: 5000 }), ours = null } = {}) {
+  let util = null, procs = [];
+  try {
+    util = Number(run(["--query-gpu=utilization.gpu", "--format=csv,noheader,nounits"]).trim().split("\n")[0]);
+    procs = parsePmon(run(["pmon", "-c", "1", "-s", "um"]));
+  } catch {
+    return null;
+  }
+  if (!ours) {
+    try { ours = oursOf(tickets, runnable().parents); } catch { ours = new Set(); }
+  }
+  // the bench's own Xorg (salon-xorg.service, outside every job's tree)
+  // draws a headed Chromium: ours
+  const foreign = procs.filter((p) => !ours.has(p.pid) && p.command !== "Xorg").sort((a, b) => b.sm - a.sm);
+  const memAvailMB = (() => { try { return Math.round(Number(/MemAvailable:\s+(\d+)/.exec(readFileSync("/proc/meminfo", "utf8"))[1]) / 1024); } catch { return null; } })();
+  return { util: Number.isFinite(util) ? util : null, foreignSm: foreign[0]?.sm ?? 0, foreign: foreign.slice(0, 3), memAvailMB };
+}
+
 // The verdict from the readings (pure: tested).
-export function benchJudge({ load, background, cap = null }) {
+export function benchJudge({ load, background, cap = null, gpu = null }) {
   const limit = benchLimit({ cap });
   const over = [];
   if (load > limit) over.push(`load ${load} > ${limit}`);
+  if (gpu && gpu.foreignSm > GPU_FOREIGN_MAX) over.push(`GPU: ${gpu.foreign[0].command} (pid ${gpu.foreign[0].pid}) at ${gpu.foreignSm} % > ${GPU_FOREIGN_MAX}`);
   if (background > SALON_FOREIGN_MAX) over.push(`${background} foreign runnable threads on cpus 10-19 > ${SALON_FOREIGN_MAX}`);
   return { limit, ok: over.length === 0, over };
 }
@@ -130,9 +170,10 @@ export async function benchRead({ lane = benchLane(), exclude = process.pid, loa
   const background = await measureBackground(tickets);
   const cores = await checkCores({ cpus: lane.cpus, exclude, threshold: LANE_FOREIGN_PCT, ms });
   const now = Math.round(load() * 100) / 100;
-  const j = benchJudge({ load: now, background, cap });
+  const gpu = gpuNow(tickets);
+  const j = benchJudge({ load: now, background, cap, gpu });
   return {
-    load: now, limit: j.limit, ok: j.ok && cores.ok, over: j.over,
+    load: now, limit: j.limit, ok: j.ok && cores.ok, over: j.over, gpu,
     lane: lane.lane, background, salonForeignMax: SALON_FOREIGN_MAX, granted: grantedLanes(tickets), laneBusy: cores.busy
   };
 }

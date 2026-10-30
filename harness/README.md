@@ -297,7 +297,12 @@ node harness/remote/spark-run.mjs --build <ref>           # its core built on th
   hard, the cold baseline still varies by ~5 % between runs (memory
   bandwidth is shared; pair #361, load1 15-40): on such days 6 pairs may not
   be enough for ±0.5 %. Look at `windowLoads` and the cold spread before
-  concluding, and prefer a quieter hour or more runs.
+  concluding, and prefer a quieter hour or more runs. The GPU is shared too
+  (and on the GB10 its memory is the machine's): another user's process
+  above 20 % of its SMs at a window's start or end makes the window invalid
+  and the gate wait (`gpuNow`, `nvidia-smi pmon`; the bench's Xorg counts
+  as ours); each window keeps `gpu` and `windowLoads` its `gpuForeignSm`
+  and `memAvailMB`.
 - **First come, first served** (`spark-queue.mjs`). The locks are polled, so
   a burst of builds once retook lane a for half an hour while a pair queued
   before them timed out. Every job now drops a ticket in
