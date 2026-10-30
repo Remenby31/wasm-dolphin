@@ -117,7 +117,7 @@ diff --git a/Source/Core/VideoBackends/WebGPU/WebGPUVertexManager.cpp b/Source/C
  // 0203: the consumer's OP_DESTROY tag for a buffer (0201: 1 buffer, 2 texture,
  // 3 bind group).
  static constexpr u32 kDestroyTagGeometryBuffer = 1;
-@@ -59,6 +88,178 @@ void VertexManager::EnsureLegacyBuffers()
+@@ -59,6 +88,205 @@ void VertexManager::EnsureLegacyBuffers()
      m_index_buffer_id = cs.PushCreateBuffer(kIndexBufferSize, kUsageIndex);
  }
  
@@ -221,7 +221,34 @@ diff --git a/Source/Core/VideoBackends/WebGPU/WebGPUVertexManager.cpp b/Source/C
 +  // the oldest entries in the way go, unless the current submit uses one.
 +  const u64 aligned_64 =
 +      (static_cast<u64>(m_cache_write) + vertex_stride - 1) / vertex_stride * vertex_stride;
-+  u32 offset = aligned_64 + packet_bytes <= m_cache_size ? static_cast<u32>(aligned_64) : 0;
++  const bool wraps = aligned_64 + packet_bytes > m_cache_size;
++  u32 offset = wraps ? 0 : static_cast<u32>(aligned_64);
++  // Wrapping: the oldest entries are the previous lap's leftovers past the
++  // write position, which this lap now skips. They go first, so the entries
++  // of the current lap (from 0) are the oldest and the overlap test below
++  // meets them in order; stopping at a leftover that does not overlap would
++  // overwrite this lap's entries without evicting them (#370 review).
++  if (wraps)
++  {
++    while (!m_cache_order.empty())
++    {
++      const auto oldest = m_cache_entries.find(m_cache_order.front());
++      if (oldest == m_cache_entries.end())
++      {
++        m_cache_order.pop_front();
++        continue;
++      }
++      if (oldest->second.offset < m_cache_write)
++        break;
++      if (oldest->second.used_submit == submit_serial)
++      {
++        s_geometry_cache_stats.blocked += 1;
++        return miss();
++      }
++      m_cache_entries.erase(oldest);
++      m_cache_order.pop_front();
++    }
++  }
 +  while (!m_cache_order.empty())
 +  {
 +    const auto oldest = m_cache_entries.find(m_cache_order.front());
@@ -296,12 +323,18 @@ diff --git a/Source/Core/VideoBackends/WebGPU/WebGPUVertexManager.cpp b/Source/C
  void VertexManager::DestroyRetiredGeometryBuffers()
  {
    // Called between passes only (WebGPUGfx): the OP_DESTROY lands after the
-@@ -262,6 +463,17 @@ void VertexManager::CommitBuffer(u32 num_vertices, u32 vertex_stride, u32 num_in
+@@ -262,6 +490,23 @@ void VertexManager::CommitBuffer(u32 num_vertices, u32 vertex_stride, u32 num_in
        return;
      }
  
 +    // 0204: the content cache first; a hit or an insertion uploads nothing to
 +    // the stream buffer (and never enters the pending range).
++    if (!IsGeometryCacheEnabled() && m_cache_epoch != GetGeometryCacheEpoch())
++    {
++      // Turned off (or never on): an existing cache buffer is retired.
++      ResetGeometryCache();
++      m_cache_epoch = GetGeometryCacheEpoch();
++    }
 +    if (IsGeometryCacheEnabled())
 +    {
 +      const GeometryCacheResult cached = TryGeometryCache(
@@ -314,7 +347,7 @@ diff --git a/Source/Core/VideoBackends/WebGPU/WebGPUVertexManager.cpp b/Source/C
      const u64 submit_serial = cs.GetSubmitSerial();
      // 0203: a buffer created below and never published (a failed upload or
      // range append after its create, with the range on or off) is retired
-@@ -362,6 +574,11 @@ void VertexManager::CommitBuffer(u32 num_vertices, u32 vertex_stride, u32 num_in
+@@ -362,6 +607,11 @@ void VertexManager::CommitBuffer(u32 num_vertices, u32 vertex_stride, u32 num_in
        m_retired_geometry_buffers.push_back(m_geometry_buffer_id);
      created.kept = candidate_buffer_id;
      m_geometry_buffer_id = candidate_buffer_id;
@@ -326,7 +359,7 @@ diff --git a/Source/Core/VideoBackends/WebGPU/WebGPUVertexManager.cpp b/Source/C
      m_geometry_offset = packet_offset + packet_bytes;
      m_geometry_generations_since_submit = candidate_generations;
      m_geometry_submit_serial = submit_serial;
-@@ -566,6 +783,9 @@ struct VertexManagerTestPeer
+@@ -566,6 +816,9 @@ struct VertexManagerTestPeer
    {
      return static_cast<u32>(manager.m_retired_geometry_buffers.size());
    }
@@ -336,7 +369,7 @@ diff --git a/Source/Core/VideoBackends/WebGPU/WebGPUVertexManager.cpp b/Source/C
  };
  
  extern "C" EMSCRIPTEN_KEEPALIVE int RunWebGpuVertexManagerGeometryParitySmoke(int indexed,
-@@ -820,6 +1040,120 @@ extern "C" EMSCRIPTEN_KEEPALIVE int RunWebGpuVertexManagerGeometryLifecycleSmoke
+@@ -820,6 +1073,180 @@ extern "C" EMSCRIPTEN_KEEPALIVE int RunWebGpuVertexManagerGeometryLifecycleSmoke
          VertexManagerTestPeer::RetiredGeometryBuffers(oversized_manager) != 1)
        return FailVertexManagerSmoke(516, "an unpublished candidate buffer was not retired");
    }
@@ -452,6 +485,66 @@ diff --git a/Source/Core/VideoBackends/WebGPU/WebGPUVertexManager.cpp b/Source/C
 +    if (VertexManagerTestPeer::DrawFromCache(cache_manager) ||
 +        VertexManagerTestPeer::RetiredGeometryBuffers(cache_manager) != retired_before + 1)
 +      return FailVertexManagerSmoke(531, "the cache setter did not retire the cache");
++  }
++  // #370 review: two laps, the second wrapping earlier than the first ended.
++  // 160-byte ring, stride 16: P1-P3 (40 B) at 0/48/96 (lap 1 ends at 136);
++  // P4, P5 at 0/48 (lap 2, write at 88); P6 (72 B) wraps: the leftover P3 at
++  // 96 must go first, then P4 and P5 (they overlap [0, 72)), once no longer
++  // used in the submit. Before the fix the loop stopped at P3 (no overlap)
++  // and P6 overwrote P4/P5, still in the table: P6 then hit stale bytes.
++  if (!s_vertex_manager_smoke_fixture.Reset())
++    return FailVertexManagerSmoke(532, "two-lap fixture reset failed");
++  SetWebGpuGeometryPackEnabled(1);
++  SetWebGpuGeometryRangeEnabled(0);
++  SetWebGpuGeometryCacheEnabled(1);
++  {
++    u8 packets[6][64] = {};
++    for (u32 p = 0; p < 6; ++p)
++    {
++      for (u32 b = 0; b < 64; ++b)
++        packets[p][b] = static_cast<u8>(p * 31 + b + 1);
++    }
++    VertexManager lap_manager;
++    VertexManagerTestPeer::SetCacheSize(lap_manager, 160);
++    const auto commit = [&](u32 p) {
++      const u32 bytes = p == 5 ? 64 : 32;  // P6: 64 + 6 index bytes = 72
++      VertexManagerTestPeer::Seed(lap_manager, packets[p], bytes, indices,
++                                  static_cast<u32>(std::size(indices)), stride);
++      VertexManagerTestPeer::Commit(lap_manager, bytes / stride, stride,
++                                    static_cast<u32>(std::size(indices)), &base_vertex,
++                                    &base_index);
++    };
++    double s0[13] = {};
++    double s1[13] = {};
++    for (u32 p = 0; p < 6; ++p)
++      commit(p);  // frame 1: all seen
++    if (!stream.PushSubmitPresent())
++      return FailVertexManagerSmoke(533, "two-lap fixture could not end frame 1");
++    for (u32 p = 0; p < 6; ++p)
++      commit(p);  // frame 2: P1-P3 inserted (lap 1); P4-P6 blocked by P1, seen again
++    if (!stream.PushSubmitPresent())
++      return FailVertexManagerSmoke(534, "two-lap fixture could not end frame 2");
++    commit(3);  // frame 3: P4 at 0 (wraps; P1 evicted)
++    commit(4);  // frame 3: P5 at 48 (P2 evicted)
++    commit(5);  // frame 3: P6 wraps, P3 (leftover) evicted, then blocked by P4 (used now)
++    if (!stream.PushSubmitPresent())
++      return FailVertexManagerSmoke(535, "two-lap fixture could not end frame 3");
++    DolphinWeb_GeometryCacheStats(s0);
++    commit(5);  // frame 4: P6 wraps; P4 and P5 (no longer used) evicted
++    if (!VertexManagerTestPeer::DrawFromCache(lap_manager) || base_vertex != 0)
++      return FailVertexManagerSmoke(536, "the second lap's wrap did not insert at 0");
++    commit(4);  // P5 was overwritten: it must not hit, it is inserted again
++    DolphinWeb_GeometryCacheStats(s1);
++    if (s1[0] - s0[0] != 0 || s1[2] - s0[2] != 2)
++      return FailVertexManagerSmoke(537, "a wrap overwrote an entry without evicting it");
++    // the setter at 0 retires the cache buffer at the next commit
++    const u32 retired_before_off = VertexManagerTestPeer::RetiredGeometryBuffers(lap_manager);
++    SetWebGpuGeometryCacheEnabled(0);
++    commit(0);
++    if (VertexManagerTestPeer::CacheBufferId(lap_manager) != 0 ||
++        VertexManagerTestPeer::DrawFromCache(lap_manager) ||
++        VertexManagerTestPeer::RetiredGeometryBuffers(lap_manager) != retired_before_off + 1)
++      return FailVertexManagerSmoke(538, "turning the cache off did not retire its buffer");
 +  }
 +  SetWebGpuGeometryCacheEnabled(0);
    SetWebGpuGeometryRangeEnabled(0);

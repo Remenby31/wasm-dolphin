@@ -25,7 +25,7 @@
       "commit": "01e0577914a75a2569c846778c2f93aa8e6feddd"
     }
   },
-  "patchSeriesSha256": "bd1cb6d696194c8b73f8f27d1b6e89a344e0baa2e577a6099136a745b8cdbbe6",
+  "patchSeriesSha256": "cf3289e68952b3970caa85df1d342fb75e672671c670262cbd85036630b54ff8",
   "patches": [
     {
       "order": 1,
@@ -1128,8 +1128,8 @@
       "cwd": ".",
       "hashMode": "lf-normalized",
       "path": "patches/dolphin-wasm/snapshot/0204-webgpu-geometry-content-cache.patch",
-      "size": 25829,
-      "sha256": "63b7084db49acbb75acf725c27926ae3db3858aa48e61d5e3b1d6d00b2a36283"
+      "size": 30378,
+      "sha256": "0a1b5681d0a68794e11ac9928b12c3f530e649ef0edaf192f46c6fcf8252aa6f"
     },
     {
       "order": 139,

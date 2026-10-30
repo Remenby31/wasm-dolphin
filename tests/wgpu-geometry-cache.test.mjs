@@ -32,6 +32,9 @@ test("the cache mode reaches the worker's init message (needs the pack)", async 
   assert.equal(new UpstreamWorkerAdapter({ wgpuGeometryCacheMode: 1 }).wgpuGeometryCacheMode, 0, "no pack, no cache");
   const host = await readFile(new URL("../src/core-host.js", import.meta.url), "utf8");
   assert.match(host, /wgpuGeometryCacheMode: this\.wgpuGeometryCacheMode/);
+  // never with the load fence (it drops published uploads, the cache's too)
+  assert.match(host, /this\.wgpuGeometryCacheMode = this\.wgpuGeometryPack && !this\.wgpuLoadEpochFence\n/);
+  assert.ok(host.indexOf("this.wgpuLoadEpochFence =") < host.indexOf("this.wgpuGeometryCacheMode ="), "the fence is read first");
   assert.match(worker, /wgpuGeometryCacheMode: payload\.wgpuGeometryCacheMode/);
 });
 
@@ -59,7 +62,14 @@ test("0204 never overwrites an entry used in the current submit, and caps insert
 test("0204: placement epochs keep the cache; its own setter retires its buffer", () => {
   assert.match(patch, /\+\s+if \(m_cache_buffer_id != 0\)\n\+\s+m_retired_geometry_buffers\.push_back\(m_cache_buffer_id\);/);
   assert.match(patch, /FailVertexManagerSmoke\(529, "a placement epoch emptied the content cache"\)/);
-  for (const code of [517, 518, 519, 520, 521, 522, 523, 524, 525, 526, 527, 528, 529, 530, 531]) {
+  for (const code of [517, 518, 519, 520, 521, 522, 523, 524, 525, 526, 527, 528, 529, 530, 531,
+    532, 533, 534, 535, 536, 537, 538]) {
     assert.match(patch, new RegExp(`FailVertexManagerSmoke\\(${code},`));
   }
+});
+
+test("0204: a wrap first evicts the previous lap's leftovers past the write position (#370 review)", () => {
+  assert.match(patch, /\+\s+if \(wraps\)\n\+\s+\{\n\+\s+while \(!m_cache_order\.empty\(\)\)/);
+  assert.match(patch, /\+\s+if \(oldest->second\.offset < m_cache_write\)\n\+\s+break;/);
+  assert.match(patch, /FailVertexManagerSmoke\(537, "a wrap overwrote an entry without evicting it"\)/);
 });
