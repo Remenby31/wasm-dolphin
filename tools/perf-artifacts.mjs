@@ -63,8 +63,10 @@ export function evaluateWgpuRuntimeConfigEvidence({
   const expectedSlots = /^[3-8]$/.test(requestedSlots)
     ? wgpuMappedStagingSlotCountOf(requestedSlots) : defaultWgpuMappedStagingSlotCount(engine);
   const expectedTimingStride = String(params?.wgpumappedtiming) === "64" ? 64 : 1;
-  const expectedGeometryPack = requestedFlag("wgpugeompack");
-  const expectedGeometryRange = expectedGeometryPack && requestedFlag("wgpugeomrange");
+  // on by default since 2026-10-29 (src/core-host.js): off only when =0
+  const defaultOnFlag = (name) => String(params?.[name] ?? "1") !== "0";
+  const expectedGeometryPack = defaultOnFlag("wgpugeompack");
+  const expectedGeometryRange = expectedGeometryPack && defaultOnFlag("wgpugeomrange");
   const expectedTailGate = requestedFlag("wgputailgate");
   const expect = (label, actual, expected) => {
     if (actual !== expected) {
@@ -2040,9 +2042,13 @@ export function evaluateCandidateCoreBundle({ manifest, expectedSha256, files } 
   return { verified: failures.length === 0, failures };
 }
 
-export function evaluateWgpuGeometryRangeEvidence({ requested, telemetry } = {}) {
+export function evaluateWgpuGeometryRangeEvidence({ requested, packRequested, telemetry } = {}) {
   if (requested == null) return { required: false, failures: [] };
-  const expectedActive = String(requested) === "1";
+  // As the product reads them (src/wgpu-replay-diagnostics.js, on by default
+  // since 2026-10-29): "1" on, "0" off, anything else the default; the range
+  // only with the pack.
+  const on = (value) => value == null || String(value) !== "0";
+  const expectedActive = on(requested) && on(packRequested);
   const enabled = telemetry?.geometryRangeEnabled;
   const available = telemetry?.producerGeometryRangeAvailable;
   const failures = [];

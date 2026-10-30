@@ -40,6 +40,13 @@ function functionBody(text, signature) {
 function previousSource(current) {
   // Reconstruct the real pre-fix functions from the checked-in patch. The
   // negative control uses those functions, not an imitation of their policy.
+  // 0203 (later) rewrote the skipped-draw returns this patch's hunks carry as
+  // context: put them back as they were first.
+  current = current.replaceAll(
+    "    // 0203: only this draw is skipped. Its bytes stay in the pending\n" +
+    "    // geometry range, read by no draw (as with the range off); aborting the\n" +
+    "    // pass here dropped every draw already recorded in it.\n    return;",
+    "    DiscardOrAbortPendingGeometryRange();\n    return;");
   const section = patch.split("diff --git a/Source/Core/VideoBackends/WebGPU/WebGPUGfx.h")[0];
   for (const hunk of section.split(/^@@[^\n]*\n/m).slice(1)) {
     const lines = hunk.split("\n");

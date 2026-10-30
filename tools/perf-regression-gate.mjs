@@ -1597,6 +1597,7 @@ function summarizeScenario(
   }
   failures.push(...evaluateWgpuGeometryRangeEvidence({
     requested: scenario.params?.wgpugeomrange,
+    packRequested: scenario.params?.wgpugeompack,
     telemetry: observedWgpu,
   }).failures);
   failures.push(...evaluateWgpuSemanticQualificationEvidence({

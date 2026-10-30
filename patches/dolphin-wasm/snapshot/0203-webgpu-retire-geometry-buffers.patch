@@ -1,0 +1,219 @@
+diff --git a/Source/Core/VideoBackends/WebGPU/WebGPUGfx.cpp b/Source/Core/VideoBackends/WebGPU/WebGPUGfx.cpp
+--- a/Source/Core/VideoBackends/WebGPU/WebGPUGfx.cpp
++++ b/Source/Core/VideoBackends/WebGPU/WebGPUGfx.cpp
+@@ -1591,19 +1591,15 @@ void WebGPUGfx::AbortRecordedPass()
+   // comes here): the retired groups go now, not at the next committed pass.
+   DestroyRetiredBindGroups();
+   DestroyRetiredTextures();
++  DestroyRetiredGeometryBuffers();
+ }
+ 
+-void WebGPUGfx::DiscardOrAbortPendingGeometryRange()
++void WebGPUGfx::DestroyRetiredGeometryBuffers()
+ {
+-  if (!g_vertex_manager)
+-    return;
+-  auto* const manager = static_cast<VertexManager*>(g_vertex_manager.get());
+-  if (!manager->HasPendingGeometryRange())
++  // Between passes only, as DestroyRetiredBindGroups.
++  if (m_pass_open || !g_vertex_manager)
+     return;
+-  if (m_pass_open)
+-    AbortRecordedPass();
+-  else
+-    manager->DiscardPendingGeometryRange();
++  static_cast<VertexManager*>(g_vertex_manager.get())->DestroyRetiredGeometryBuffers();
+ }
+ 
+ // 0201: the consumer's OP_DESTROY tags: 1 buffer, 2 texture, 3 bind group.
+@@ -1666,6 +1662,7 @@ bool WebGPUGfx::EndPassIfOpen()
+   ResetRecordedPassState();
+   DestroyRetiredBindGroups();
+   DestroyRetiredTextures();
++  DestroyRetiredGeometryBuffers();
+   if (committed)
+   {
+     m_pending_clear = false;
+@@ -2647,12 +2644,16 @@ void WebGPUGfx::Draw(u32 base_vertex, u32 num_vertices)
+ {
+   if (m_cur_pipeline_id == 0)
+   {
+-    DiscardOrAbortPendingGeometryRange();
++    // 0203: only this draw is skipped. Its bytes stay in the pending
++    // geometry range, read by no draw (as with the range off); aborting the
++    // pass here dropped every draw already recorded in it.
+     return;
+   }
+   if (!BeginPassIfNeeded())
+   {
+-    DiscardOrAbortPendingGeometryRange();
++    // 0203: only this draw is skipped. Its bytes stay in the pending
++    // geometry range, read by no draw (as with the range off); aborting the
++    // pass here dropped every draw already recorded in it.
+     return;
+   }
+   if (m_last_set_pipeline_id != m_cur_pipeline_id)
+@@ -2686,12 +2687,16 @@ void WebGPUGfx::DrawIndexed(u32 base_index, u32 num_indices, u32 base_vertex)
+ {
+   if (m_cur_pipeline_id == 0 || num_indices == 0)
+   {
+-    DiscardOrAbortPendingGeometryRange();
++    // 0203: only this draw is skipped. Its bytes stay in the pending
++    // geometry range, read by no draw (as with the range off); aborting the
++    // pass here dropped every draw already recorded in it.
+     return;
+   }
+   if (!BeginPassIfNeeded())
+   {
+-    DiscardOrAbortPendingGeometryRange();
++    // 0203: only this draw is skipped. Its bytes stay in the pending
++    // geometry range, read by no draw (as with the range off); aborting the
++    // pass here dropped every draw already recorded in it.
+     return;
+   }
+   if (m_last_set_pipeline_id != m_cur_pipeline_id)
+diff --git a/Source/Core/VideoBackends/WebGPU/WebGPUGfx.h b/Source/Core/VideoBackends/WebGPU/WebGPUGfx.h
+--- a/Source/Core/VideoBackends/WebGPU/WebGPUGfx.h
++++ b/Source/Core/VideoBackends/WebGPU/WebGPUGfx.h
+@@ -182,7 +182,8 @@ private:
+   // 0202: destroys the textures retired by RetireTexture (outside a pass).
+   void DestroyRetiredTextures();
+   void AbortRecordedPass();
+-  void DiscardOrAbortPendingGeometryRange();
++  // 0203: the vertex manager's retired geometry buffers (outside a pass).
++  void DestroyRetiredGeometryBuffers();
+   void ResetRecordedPassState();
+   bool SetRecordedPipeline(u32 pipeline_id);
+   bool SetRecordedBindGroup(u32 slot, u32 bind_group_id, const u32* dynamic_offsets = nullptr,
+diff --git a/Source/Core/VideoBackends/WebGPU/WebGPUVertexManager.cpp b/Source/Core/VideoBackends/WebGPU/WebGPUVertexManager.cpp
+--- a/Source/Core/VideoBackends/WebGPU/WebGPUVertexManager.cpp
++++ b/Source/Core/VideoBackends/WebGPU/WebGPUVertexManager.cpp
+@@ -28,6 +28,9 @@ static constexpr u32 kUsageVertex = 0x20 | 0x8;
+ static constexpr u32 kUsageIndex = 0x10 | 0x8;
+ static constexpr u32 kUsageGeometry = 0x20 | 0x10 | 0x8;
+ static constexpr u32 kGeometryRangeMaxGap = 64;
++// 0203: the consumer's OP_DESTROY tag for a buffer (0201: 1 buffer, 2 texture,
++// 3 bind group).
++static constexpr u32 kDestroyTagGeometryBuffer = 1;
+ static constexpr u32 kGeometryRangeMaxBytes = 256u * 1024u;
+ static constexpr u32 kGeometryRangeHardBytes = 16u * 1024u * 1024u;
+ 
+@@ -56,6 +59,22 @@ void VertexManager::EnsureLegacyBuffers()
+     m_index_buffer_id = cs.PushCreateBuffer(kIndexBufferSize, kUsageIndex);
+ }
+ 
++void VertexManager::DestroyRetiredGeometryBuffers()
++{
++  // Called between passes only (WebGPUGfx): the OP_DESTROY lands after the
++  // END_PASS of every pass that drew from these buffers, and the consumer
++  // only drops its reference (encoded passes keep the GPUBuffer alive). One
++  // the ring refused stays for the next pass end.
++  WebGPUCommandStream& cs = GetCommandStream();
++  auto kept = m_retired_geometry_buffers.begin();
++  for (const u32 id : m_retired_geometry_buffers)
++  {
++    if (!cs.PushDestroy(kDestroyTagGeometryBuffer, id))
++      *kept++ = id;
++  }
++  m_retired_geometry_buffers.erase(kept, m_retired_geometry_buffers.end());
++}
++
+ void VertexManager::DiscardPendingGeometryRange()
+ {
+   m_pending_geometry_range.bytes.clear();
+@@ -197,6 +216,9 @@ void VertexManager::CommitBuffer(u32 num_vertices, u32 vertex_stride, u32 num_in
+     {
+       // A reset/save-load/toggle is not a submit barrier. Start with a new
+       // resource id so an old queued suffix cannot observe recycled bytes.
++      // 0203: the old one is retired, destroyed at the next pass end.
++      if (m_geometry_buffer_id != 0)
++        m_retired_geometry_buffers.push_back(m_geometry_buffer_id);
+       m_geometry_buffer_id = 0;
+       m_geometry_offset = 0;
+       m_geometry_generations_since_submit = 0;
+@@ -315,6 +337,10 @@ void VertexManager::CommitBuffer(u32 num_vertices, u32 vertex_stride, u32 num_in
+     // Publish all producer-local placement state only after the arena copy and
+     // its single upload record are visible. A failed candidate buffer create
+     // may leak an unused resource id, but no draw can reference it.
++    // 0203: a generation rotated out (full) is retired once its successor is
++    // published; no later draw names it.
++    if (m_geometry_buffer_id != 0 && m_geometry_buffer_id != candidate_buffer_id)
++      m_retired_geometry_buffers.push_back(m_geometry_buffer_id);
+     m_geometry_buffer_id = candidate_buffer_id;
+     m_geometry_offset = packet_offset + packet_bytes;
+     m_geometry_generations_since_submit = candidate_generations;
+@@ -516,6 +542,10 @@ struct VertexManagerTestPeer
+   {
+     return static_cast<u32>(manager.m_pending_geometry_range.bytes.size());
+   }
++  static u32 RetiredGeometryBuffers(const VertexManager& manager)
++  {
++    return static_cast<u32>(manager.m_retired_geometry_buffers.size());
++  }
+ };
+ 
+ extern "C" EMSCRIPTEN_KEEPALIVE int RunWebGpuVertexManagerGeometryParitySmoke(int indexed,
+@@ -663,6 +693,10 @@ extern "C" EMSCRIPTEN_KEEPALIVE int RunWebGpuVertexManagerGeometryLifecycleSmoke
+     previous_id = rotated_id;
+     VertexManagerTestPeer::ForcePackedWrap(repeated_wrap_manager);
+   }
++  // 0203: every generation rotated out is retired (91, then each but the last)
++  if (VertexManagerTestPeer::RetiredGeometryBuffers(repeated_wrap_manager) !=
++      VertexManagerTestPeer::MaxGeometryGenerations() - 1)
++    return FailVertexManagerSmoke(510, "a rotated-out generation was not retired");
+ 
+   const u32 capped_id = VertexManagerTestPeer::VertexId(repeated_wrap_manager);
+   const u32 capped_offset = VertexManagerTestPeer::GeometryOffset(repeated_wrap_manager);
+@@ -725,6 +759,28 @@ extern "C" EMSCRIPTEN_KEEPALIVE int RunWebGpuVertexManagerGeometryLifecycleSmoke
+   if (invalidated_id == 0 || invalidated_id == pre_load_id || base_vertex != 0)
+     return FailVertexManagerSmoke(508, "save-load epoch reused an old packed destination");
+ 
++  // 0203: 20 save loads leave 20 buffers to destroy, then none: the consumer
++  // keeps one live geometry buffer, not one per load.
++  if (VertexManagerTestPeer::RetiredGeometryBuffers(manager) != 1)
++    return FailVertexManagerSmoke(511, "save-load epoch did not retire the old buffer");
++  for (int load = 0; load < 19; ++load)
++  {
++    SetWebGpuGeometryPackEnabled(1);
++    VertexManagerTestPeer::Seed(manager, vertices, sizeof(vertices), indices,
++                                static_cast<u32>(std::size(indices)), stride);
++    VertexManagerTestPeer::Commit(manager, 2, stride, static_cast<u32>(std::size(indices)),
++                                  &base_vertex, &base_index);
++  }
++  if (VertexManagerTestPeer::RetiredGeometryBuffers(manager) != 20)
++    return FailVertexManagerSmoke(512, "repeated save loads did not retire each buffer");
++  // A fresh ring: no consumer drains this fixture, and the 20 loads filled it
++  // (a full ring keeps the ids for the next pass end, as in the product).
++  if (!s_vertex_manager_smoke_fixture.Reset())
++    return FailVertexManagerSmoke(514, "retire fixture reset failed");
++  manager.DestroyRetiredGeometryBuffers();
++  if (VertexManagerTestPeer::RetiredGeometryBuffers(manager) != 0)
++    return FailVertexManagerSmoke(513, "retired geometry buffers were not destroyed");
++
+   SetWebGpuGeometryPackEnabled(0);
+   VertexManagerTestPeer::SeedLegacyWrap(manager);
+   VertexManagerTestPeer::Seed(manager, vertices, sizeof(vertices), indices,
+diff --git a/Source/Core/VideoBackends/WebGPU/WebGPUVertexManager.h b/Source/Core/VideoBackends/WebGPU/WebGPUVertexManager.h
+--- a/Source/Core/VideoBackends/WebGPU/WebGPUVertexManager.h
++++ b/Source/Core/VideoBackends/WebGPU/WebGPUVertexManager.h
+@@ -63,6 +63,12 @@ public:
+   bool FlushPendingGeometryRange();
+   void DiscardPendingGeometryRange();
+   bool HasPendingGeometryRange() const { return !m_pending_geometry_range.bytes.empty(); }
++  // 0203: the geometry buffers no draw will name again (left by a placement
++  // epoch: a save load, a reset, an aborted pass; or rotated out when full),
++  // destroyed by WebGPUGfx at the next pass end (OP_DESTROY tag 1). Without
++  // it each epoch kept a 32 MiB buffer in the consumer for the session.
++  void DestroyRetiredGeometryBuffers();
++  size_t RetiredGeometryBufferCount() const { return m_retired_geometry_buffers.size(); }
+ 
+ protected:
+   void CommitBuffer(u32 num_vertices, u32 vertex_stride, u32 num_indices, u32* out_base_vertex,
+@@ -114,6 +120,7 @@ private:
+   u64 m_geometry_pack_epoch = 0;
+   bool m_geometry_pack_active = false;
+   PendingGeometryRange m_pending_geometry_range;
++  std::vector<u32> m_retired_geometry_buffers;
+ };
+ 
+ // Native wasm regression seams that exercise VertexManager::CommitBuffer

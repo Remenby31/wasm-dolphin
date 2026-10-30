@@ -56,7 +56,15 @@ test("regions, oracle programs with the x64 shape: interpreter and regions agree
 // The mask the digest was measured with: production before #322 turned
 // 0183's bit 27 on (the sample's code with it on is another code).
 const MASK_BEFORE_0183 = PRODUCTION_DISABLE_MASK & ~(1 << 27);
-const MODE_OFF_DIGEST = "c005124cb13006a19f1368be55d65c801157e247d7906ed25f6fa3f92e6e4f46";
+// The digest also moves with the core's static data: translated code embeds
+// the absolute address of a static global (an i32.const the heap relocs do
+// not cover), so a patch that adds data ahead of it shifts it. 0203 (#365)
+// added strings: 64 of 282 fragments differ in that constant only (+192
+// bytes on its first version), relocs and entries identical, codegen
+// unchanged. Measured on
+// the 0203 core (CI and the Spark agree). The JIT agent makes the hash
+// independent of that placement in a follow-up.
+const MODE_OFF_DIGEST = "b0a9f1d20d538b3a942228e50a6c91e5afa9574a6888b748ec64b089a45dbf37";
 test("mode off translates byte for byte as before 0184; bit 28 changes the code", { skip }, () => {
   const r = makeRng(0x1840ff);
   const h = createHash("sha256");

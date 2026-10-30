@@ -244,9 +244,13 @@ export class EmulatorHost {
       defaultWgpuBindGroupCache(this.wasmEngine)
     );
     this.wgpuSparseUbo = requestedWgpuSparseUbo(window.location.search);
-    this.wgpuGeometryPack = requestedWgpuGeometryPack(window.location.search);
+    // Geometry merged into ranges (one VERTEX|INDEX buffer, a pass's batches
+    // published as uploads of up to 256 KiB) by default since 2026-10-29:
+    // vertex+index uploads 882 -> 12 per race frame, replay worker 405 -> 288
+    // ms/s (Chrome); ?wgpugeompack=0 / ?wgpugeomrange=0 turn them off.
+    this.wgpuGeometryPack = requestedWgpuGeometryPack(window.location.search, true);
     this.wgpuGeometryRange =
-      this.wgpuGeometryPack && requestedWgpuGeometryRange(window.location.search);
+      this.wgpuGeometryPack && requestedWgpuGeometryRange(window.location.search, true);
     this.wgpuUploadArenaMiB = requestedWgpuUploadArenaMiB(window.location.search);
     this.wgpuUploadTransport = requestedWgpuUploadTransport(
       window.location.search,
