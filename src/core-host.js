@@ -190,7 +190,8 @@ export class EmulatorHost {
     // On by default, ?aotcompiler=0 turns it off: compile cached/requested JIT
     // modules in the compiler worker.
     this.aotCompiler = aotCompilerRequested(window.location.search);
-    // On by default, ?aotwarm=0 keeps the worker without its warm-up.
+    // "all" by default; ?aotwarm=blocks skips the region modules' warm-up,
+    // ?aotwarm=0 every warm-up (the worker stays).
     this.aotWarm = aotWarmRequested(window.location.search);
     // ?aot=1: first-launch optimisation of the disc (P7), off by default.
     this.aotFirstLaunch = new URLSearchParams(window.location.search).get("aot") === "1";
