@@ -64,7 +64,9 @@ const MASK_BEFORE_0183 = PRODUCTION_DISABLE_MASK & ~(1 << 27);
 // unchanged. Measured on
 // the 0203 core (CI and the Spark agree). The JIT agent makes the hash
 // independent of that placement in a follow-up.
-const MODE_OFF_DIGEST = "b0a9f1d20d538b3a942228e50a6c91e5afa9574a6888b748ec64b089a45dbf37";
+// Moved again with the 0203 follow-up (#365 review: the unpublished-buffer
+// guard and smoke strings), same cause.
+const MODE_OFF_DIGEST = "ce8ff6caed1f6ec38f081f866191789b4cccb8a5dacbf80b747c66f8bc431356";
 test("mode off translates byte for byte as before 0184; bit 28 changes the code", { skip }, () => {
   const r = makeRng(0x1840ff);
   const h = createHash("sha256");
