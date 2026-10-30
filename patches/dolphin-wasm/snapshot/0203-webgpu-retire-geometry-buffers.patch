@@ -131,7 +131,47 @@ diff --git a/Source/Core/VideoBackends/WebGPU/WebGPUVertexManager.cpp b/Source/C
        m_geometry_buffer_id = 0;
        m_geometry_offset = 0;
        m_geometry_generations_since_submit = 0;
-@@ -315,6 +337,10 @@ void VertexManager::CommitBuffer(u32 num_vertices, u32 vertex_stride, u32 num_in
+@@ -241,6 +263,23 @@ void VertexManager::CommitBuffer(u32 num_vertices, u32 vertex_stride, u32 num_in
+     }
+ 
+     const u64 submit_serial = cs.GetSubmitSerial();
++    // 0203: a buffer created below and never published (a failed upload or
++    // range append after its create, with the range on or off) is retired
++    // too: no draw names it, but the consumer holds it for the session.
++    struct CreatedGeometryBuffers
++    {
++      std::vector<u32>& retired;
++      u32 ids[2] = {};
++      u32 kept = 0;
++      ~CreatedGeometryBuffers()
++      {
++        for (const u32 id : ids)
++        {
++          if (id != 0 && id != kept)
++            retired.push_back(id);
++        }
++      }
++    } created{m_retired_geometry_buffers};
+     u32 candidate_buffer_id = m_geometry_buffer_id;
+     u32 candidate_offset = m_geometry_offset;
+     u32 candidate_generations = m_geometry_generations_since_submit;
+@@ -257,6 +296,7 @@ void VertexManager::CommitBuffer(u32 num_vertices, u32 vertex_stride, u32 num_in
+       candidate_buffer_id = cs.PushCreateBuffer(kGeometryBufferSize, kUsageGeometry);
+       if (candidate_buffer_id == 0)
+         return;
++      created.ids[0] = candidate_buffer_id;
+       candidate_offset = 0;
+       candidate_generations = 1;
+     }
+@@ -278,6 +318,7 @@ void VertexManager::CommitBuffer(u32 num_vertices, u32 vertex_stride, u32 num_in
+       const u32 new_buffer_id = cs.PushCreateBuffer(kGeometryBufferSize, kUsageGeometry);
+       if (new_buffer_id == 0)
+         return;
++      created.ids[1] = new_buffer_id;
+       candidate_buffer_id = new_buffer_id;
+       candidate_offset = 0;
+       packet_offset = 0;
+@@ -315,6 +356,11 @@ void VertexManager::CommitBuffer(u32 num_vertices, u32 vertex_stride, u32 num_in
      // Publish all producer-local placement state only after the arena copy and
      // its single upload record are visible. A failed candidate buffer create
      // may leak an unused resource id, but no draw can reference it.
@@ -139,10 +179,11 @@ diff --git a/Source/Core/VideoBackends/WebGPU/WebGPUVertexManager.cpp b/Source/C
 +    // published; no later draw names it.
 +    if (m_geometry_buffer_id != 0 && m_geometry_buffer_id != candidate_buffer_id)
 +      m_retired_geometry_buffers.push_back(m_geometry_buffer_id);
++    created.kept = candidate_buffer_id;
      m_geometry_buffer_id = candidate_buffer_id;
      m_geometry_offset = packet_offset + packet_bytes;
      m_geometry_generations_since_submit = candidate_generations;
-@@ -516,6 +542,10 @@ struct VertexManagerTestPeer
+@@ -516,6 +562,10 @@ struct VertexManagerTestPeer
    {
      return static_cast<u32>(manager.m_pending_geometry_range.bytes.size());
    }
@@ -153,7 +194,7 @@ diff --git a/Source/Core/VideoBackends/WebGPU/WebGPUVertexManager.cpp b/Source/C
  };
  
  extern "C" EMSCRIPTEN_KEEPALIVE int RunWebGpuVertexManagerGeometryParitySmoke(int indexed,
-@@ -663,6 +693,10 @@ extern "C" EMSCRIPTEN_KEEPALIVE int RunWebGpuVertexManagerGeometryLifecycleSmoke
+@@ -663,6 +713,10 @@ extern "C" EMSCRIPTEN_KEEPALIVE int RunWebGpuVertexManagerGeometryLifecycleSmoke
      previous_id = rotated_id;
      VertexManagerTestPeer::ForcePackedWrap(repeated_wrap_manager);
    }
@@ -164,7 +205,7 @@ diff --git a/Source/Core/VideoBackends/WebGPU/WebGPUVertexManager.cpp b/Source/C
  
    const u32 capped_id = VertexManagerTestPeer::VertexId(repeated_wrap_manager);
    const u32 capped_offset = VertexManagerTestPeer::GeometryOffset(repeated_wrap_manager);
-@@ -725,6 +759,28 @@ extern "C" EMSCRIPTEN_KEEPALIVE int RunWebGpuVertexManagerGeometryLifecycleSmoke
+@@ -725,6 +779,49 @@ extern "C" EMSCRIPTEN_KEEPALIVE int RunWebGpuVertexManagerGeometryLifecycleSmoke
    if (invalidated_id == 0 || invalidated_id == pre_load_id || base_vertex != 0)
      return FailVertexManagerSmoke(508, "save-load epoch reused an old packed destination");
  
@@ -190,9 +231,68 @@ diff --git a/Source/Core/VideoBackends/WebGPU/WebGPUVertexManager.cpp b/Source/C
 +  if (VertexManagerTestPeer::RetiredGeometryBuffers(manager) != 0)
 +    return FailVertexManagerSmoke(513, "retired geometry buffers were not destroyed");
 +
++  // A buffer created for a batch that then fails (here a range packet over
++  // its 256 KiB cap) is never published, and retired.
++  if (!s_vertex_manager_smoke_fixture.Reset())
++    return FailVertexManagerSmoke(515, "unpublished-candidate fixture reset failed");
++  SetWebGpuGeometryPackEnabled(1);
++  SetWebGpuGeometryRangeEnabled(1);
++  {
++    VertexManager oversized_manager;
++    const std::vector<u8> oversized(260u * 1024u, 0);
++    VertexManagerTestPeer::Seed(oversized_manager, oversized.data(),
++                                static_cast<u32>(oversized.size()), indices,
++                                static_cast<u32>(std::size(indices)), stride);
++    VertexManagerTestPeer::Commit(oversized_manager, static_cast<u32>(oversized.size()) / stride,
++                                  stride, static_cast<u32>(std::size(indices)), &base_vertex,
++                                  &base_index);
++    if (VertexManagerTestPeer::VertexId(oversized_manager) != 0 ||
++        VertexManagerTestPeer::RetiredGeometryBuffers(oversized_manager) != 1)
++      return FailVertexManagerSmoke(516, "an unpublished candidate buffer was not retired");
++  }
++  SetWebGpuGeometryRangeEnabled(0);
++
    SetWebGpuGeometryPackEnabled(0);
    VertexManagerTestPeer::SeedLegacyWrap(manager);
    VertexManagerTestPeer::Seed(manager, vertices, sizeof(vertices), indices,
+@@ -811,10 +908,11 @@ extern "C" EMSCRIPTEN_KEEPALIVE int RunWebGpuVertexManagerGeometryRangeSmoke()
+       s_vertex_manager_smoke_fixture.slots[2].op != static_cast<u32>(CmdOp::BeginPass))
+     return FailVertexManagerSmoke(608, "coarse upload did not precede atomic pass publication");
+ 
+-  // Model the WebGPUGfx skip path: draw A is already private, commit B has
+-  // extended the same pending upload, then draw B is rejected before it can
+-  // be staged. The only safe action is to abort the whole pass; discarding B
+-  // alone would publish draw A without either packet's upload.
++  // Model the WebGPUGfx skip path (0203): draw A is already private, commit B
++  // has extended the same pending upload, then draw B is rejected before it
++  // can be staged. Only draw B is skipped: the range keeps A's packet (and
++  // B's, read by no draw) and is published at the pass end, ahead of the
++  // atomic pass, so draw A never goes out without its upload.
+   if (!s_vertex_manager_smoke_fixture.Reset())
+     return FailVertexManagerSmoke(609, "skipped-draw fixture reset failed");
+   SetWebGpuGeometryPackEnabled(1);
+@@ -834,13 +932,15 @@ extern "C" EMSCRIPTEN_KEEPALIVE int RunWebGpuVertexManagerGeometryRangeSmoke()
+   VertexManagerTestPeer::Commit(skipped_manager, 3, stride,
+                                 static_cast<u32>(std::size(indices)), &second_base_vertex,
+                                 &second_base_index);
+-  if (!skipped_manager.HasPendingGeometryRange())
++  if (!skipped_manager.HasPendingGeometryRange() ||
++      VertexManagerTestPeer::PendingRangeSize(skipped_manager) != 456)
+     return FailVertexManagerSmoke(611, "commit B did not retain the owning range");
+-  stream.AbortPass();
+-  skipped_manager.DiscardPendingGeometryRange();
+-  if (stream.PushEndPass() || skipped_manager.HasPendingGeometryRange() ||
+-      s_vertex_manager_smoke_fixture.header.write.load(std::memory_order_acquire) != 1)
+-    return FailVertexManagerSmoke(612, "skipped draw published draw A without its upload");
++  // draw B skipped: nothing recorded, nothing discarded; then the pass end
++  if (!skipped_manager.FlushPendingGeometryRange() || !stream.PushEndPass() ||
++      s_vertex_manager_smoke_fixture.slots[1].op != static_cast<u32>(CmdOp::UploadBuffer) ||
++      s_vertex_manager_smoke_fixture.slots[1].arg.u[3] != 456 ||
++      s_vertex_manager_smoke_fixture.slots[2].op != static_cast<u32>(CmdOp::BeginPass))
++    return FailVertexManagerSmoke(612, "skipped draw B dropped draw A or its upload");
+ 
+   // With no pass open, a missing first draw has no older draw to protect.
+   // Discarding only the private range avoids invalidating and rotating the
 diff --git a/Source/Core/VideoBackends/WebGPU/WebGPUVertexManager.h b/Source/Core/VideoBackends/WebGPU/WebGPUVertexManager.h
 --- a/Source/Core/VideoBackends/WebGPU/WebGPUVertexManager.h
 +++ b/Source/Core/VideoBackends/WebGPU/WebGPUVertexManager.h

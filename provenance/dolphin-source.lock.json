@@ -25,7 +25,7 @@
       "commit": "01e0577914a75a2569c846778c2f93aa8e6feddd"
     }
   },
-  "patchSeriesSha256": "ccbc0774a040648f057e23a6805117652a86896b1b18096f5646e28b4333d440",
+  "patchSeriesSha256": "5209bb986acebf82cb17faa0768dcb8be927f98c1d33c92cb3424387bd17a7d0",
   "patches": [
     {
       "order": 1,
@@ -1120,8 +1120,8 @@
       "cwd": ".",
       "hashMode": "lf-normalized",
       "path": "patches/dolphin-wasm/snapshot/0203-webgpu-retire-geometry-buffers.patch",
-      "size": 10694,
-      "sha256": "fcc263dcabd1ef3603136dc62694cbac8a346e0d261239272ea76d6a0380c8a4"
+      "size": 16247,
+      "sha256": "e383e68a278cd19303de20204d764a1a307e05c5531f224fcc99a0f7e445c878"
     },
     {
       "order": 138,
