@@ -67,15 +67,17 @@ diff --git a/Source/Core/VideoBackends/WebGPU/WebGPUGfx.cpp b/Source/Core/VideoB
 diff --git a/Source/Core/VideoBackends/WebGPU/WebGPUVertexManager.cpp b/Source/Core/VideoBackends/WebGPU/WebGPUVertexManager.cpp
 --- a/Source/Core/VideoBackends/WebGPU/WebGPUVertexManager.cpp
 +++ b/Source/Core/VideoBackends/WebGPU/WebGPUVertexManager.cpp
-@@ -9,6 +9,7 @@
+@@ -9,6 +9,9 @@
  #include <limits>
  
  #include <emscripten/emscripten.h>
++// 0204: XXH3_state_t is defined only for static linking.
++#define XXH_STATIC_LINKING_ONLY
 +#include <xxhash.h>
  
  #include "VideoBackends/WebGPU/WebGPUCommandStream.h"
  #include "VideoBackends/WebGPU/WebGPUGfx.h"
-@@ -21,6 +22,7 @@ namespace WebGPU
+@@ -21,6 +24,7 @@ namespace WebGPU
  {
  extern "C" void SetWebGpuGeometryPackEnabled(int enabled);
  extern "C" void SetWebGpuGeometryRangeEnabled(int enabled);
@@ -83,7 +85,7 @@ diff --git a/Source/Core/VideoBackends/WebGPU/WebGPUVertexManager.cpp b/Source/C
  
  // GPUBufferUsage numeric flags (DESIGN doc): VERTEX 0x20, INDEX 0x10,
  // COPY_DST 0x8.
-@@ -28,6 +30,31 @@ static constexpr u32 kUsageVertex = 0x20 | 0x8;
+@@ -28,6 +32,31 @@ static constexpr u32 kUsageVertex = 0x20 | 0x8;
  static constexpr u32 kUsageIndex = 0x10 | 0x8;
  static constexpr u32 kUsageGeometry = 0x20 | 0x10 | 0x8;
  static constexpr u32 kGeometryRangeMaxGap = 64;
@@ -98,7 +100,7 @@ diff --git a/Source/Core/VideoBackends/WebGPU/WebGPUVertexManager.cpp b/Source/C
 +  double blocked = 0, cap_skips = 0, failed = 0, switches = 0, compares = 0, collisions = 0;
 +  double resets = 0;
 +};
-+GeometryCacheStats s_geometry_cache_stats;
++static GeometryCacheStats s_geometry_cache_stats;
 +
 +// [hits, hit bytes, inserts, inserted bytes, misses, missed bytes, blocked,
 +// insert-cap skips, failed inserts, buffer switches, sampled comparisons,
@@ -115,7 +117,7 @@ diff --git a/Source/Core/VideoBackends/WebGPU/WebGPUVertexManager.cpp b/Source/C
  // 0203: the consumer's OP_DESTROY tag for a buffer (0201: 1 buffer, 2 texture,
  // 3 bind group).
  static constexpr u32 kDestroyTagGeometryBuffer = 1;
-@@ -59,6 +86,178 @@ void VertexManager::EnsureLegacyBuffers()
+@@ -59,6 +88,178 @@ void VertexManager::EnsureLegacyBuffers()
      m_index_buffer_id = cs.PushCreateBuffer(kIndexBufferSize, kUsageIndex);
  }
  
@@ -294,7 +296,7 @@ diff --git a/Source/Core/VideoBackends/WebGPU/WebGPUVertexManager.cpp b/Source/C
  void VertexManager::DestroyRetiredGeometryBuffers()
  {
    // Called between passes only (WebGPUGfx): the OP_DESTROY lands after the
-@@ -262,6 +461,17 @@ void VertexManager::CommitBuffer(u32 num_vertices, u32 vertex_stride, u32 num_in
+@@ -262,6 +463,17 @@ void VertexManager::CommitBuffer(u32 num_vertices, u32 vertex_stride, u32 num_in
        return;
      }
  
@@ -312,7 +314,7 @@ diff --git a/Source/Core/VideoBackends/WebGPU/WebGPUVertexManager.cpp b/Source/C
      const u64 submit_serial = cs.GetSubmitSerial();
      // 0203: a buffer created below and never published (a failed upload or
      // range append after its create, with the range on or off) is retired
-@@ -362,6 +572,11 @@ void VertexManager::CommitBuffer(u32 num_vertices, u32 vertex_stride, u32 num_in
+@@ -362,6 +574,11 @@ void VertexManager::CommitBuffer(u32 num_vertices, u32 vertex_stride, u32 num_in
        m_retired_geometry_buffers.push_back(m_geometry_buffer_id);
      created.kept = candidate_buffer_id;
      m_geometry_buffer_id = candidate_buffer_id;
@@ -324,7 +326,7 @@ diff --git a/Source/Core/VideoBackends/WebGPU/WebGPUVertexManager.cpp b/Source/C
      m_geometry_offset = packet_offset + packet_bytes;
      m_geometry_generations_since_submit = candidate_generations;
      m_geometry_submit_serial = submit_serial;
-@@ -566,6 +781,9 @@ struct VertexManagerTestPeer
+@@ -566,6 +783,9 @@ struct VertexManagerTestPeer
    {
      return static_cast<u32>(manager.m_retired_geometry_buffers.size());
    }
@@ -334,7 +336,7 @@ diff --git a/Source/Core/VideoBackends/WebGPU/WebGPUVertexManager.cpp b/Source/C
  };
  
  extern "C" EMSCRIPTEN_KEEPALIVE int RunWebGpuVertexManagerGeometryParitySmoke(int indexed,
-@@ -820,6 +1038,120 @@ extern "C" EMSCRIPTEN_KEEPALIVE int RunWebGpuVertexManagerGeometryLifecycleSmoke
+@@ -820,6 +1040,120 @@ extern "C" EMSCRIPTEN_KEEPALIVE int RunWebGpuVertexManagerGeometryLifecycleSmoke
          VertexManagerTestPeer::RetiredGeometryBuffers(oversized_manager) != 1)
        return FailVertexManagerSmoke(516, "an unpublished candidate buffer was not retired");
    }
