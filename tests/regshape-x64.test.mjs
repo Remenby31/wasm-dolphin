@@ -56,21 +56,49 @@ test("regions, oracle programs with the x64 shape: interpreter and regions agree
 // The mask the digest was measured with: production before #322 turned
 // 0183's bit 27 on (the sample's code with it on is another code).
 const MASK_BEFORE_0183 = PRODUCTION_DISABLE_MASK & ~(1 << 27);
-// The digest also moves with the core's static data: translated code embeds
-// the absolute address of a static global (an i32.const the heap relocs do
-// not cover), so a patch that adds data ahead of it shifts it. 0203 (#365)
-// added strings: 64 of 282 fragments differ in that constant only (+192
-// bytes on its first version), relocs and entries identical, codegen
-// unchanged. Measured on
-// the 0203 core (CI and the Spark agree). The JIT agent makes the hash
-// independent of that placement in a follow-up.
-// Moved again with the 0203 follow-up (#365 review: the unpublished-buffer
-// guard and smoke strings), same cause.
-const MODE_OFF_DIGEST = "ce8ff6caed1f6ec38f081f866191789b4cccb8a5dacbf80b747c66f8bc431356";
+// Translated code embeds the absolute address of static globals of the core
+// (i32.const the heap relocs do not cover: 1,339,340 and 1,339,596 on main
+// de9e2d4a), so any patch that adds static data ahead of them shifted the
+// digest with no codegen change (0203 and its follow-ups moved it 3 times in
+// a week). The digest hashes each such constant as its distance to the
+// lowest one of the sample: a uniform shift of the static data leaves it as
+// it is. A static address: a constant between 64 KiB and the RAM base (the
+// heap bases have their relocs) that an i32.add or a load or store uses next.
+// Masks in that range (0x1c0000, 0x1ffe00...) go to an i32.and: kept as they
+// are.
+// Every i32.const of the code: [start, end, value, next opcode] (an 0x41 byte that is part
+// of another immediate decodes the same way on every core, so the scan stays
+// deterministic).
+function* i32Consts(code) {
+  for (let i = 0; i < code.length; i += 1) {
+    if (code[i] !== 0x41) continue;
+    let v = 0, shift = 0, j = i + 1, byte = 0;
+    do { byte = code[j++]; v |= (byte & 0x7f) << shift; shift += 7; } while (byte & 0x80 && shift < 35 && j < code.length);
+    if (shift < 32 && (byte & 0x40)) v |= -1 << shift;
+    yield [i, j, v, code[j]];
+  }
+}
+const isStatic = (v, next, { low, high }) => v >= low && v < high && (next === 0x6a || (next >= 0x28 && next <= 0x3e));
+export const staticConstants = (code, range) => [...i32Consts(code)].filter(([, , v, next]) => isStatic(v, next, range)).map(([, , v]) => v);
+export function staticNormalizedCode(code, { low, high, base }) {
+  const out = [];
+  let at = 0;
+  for (const [i, j, v, next] of i32Consts(code)) {
+    if (i < at || !isStatic(v, next, { low, high })) continue;
+    out.push(...code.subarray(at, i), 0x41, ...Buffer.from(`static+${v - base};`));
+    at = j;
+  }
+  out.push(...code.subarray(at));
+  return Uint8Array.from(out);
+}
+// Same digest on the core before 0203 (080da515) and on main de9e2d4a
+// (raw digests c005124c and ce8ff6ca).
+const MODE_OFF_DIGEST = "db66f5e64305dedd62bbb9d885fd2698a15162d4cb8c930f64b83c387774a071";
 test("mode off translates byte for byte as before 0184; bit 28 changes the code", { skip }, () => {
   const r = makeRng(0x1840ff);
   const h = createHash("sha256");
-  let translated = 0, differ = 0;
+  let differ = 0;
+  const fragments = [];
   for (let i = 0; i < 300; i += 1) {
     const program = randomProgram(r, 24);
     const state = randomState(r);
@@ -79,14 +107,21 @@ test("mode off translates byte for byte as before 0184; bit 28 changes the code"
     const ranges = [[ORACLE_CODE, ORACLE_CODE + 4 * program.length]];
     const off = aot.translate(ORACLE_CODE, { mask: MASK_BEFORE_0183, ranges });
     if (!off) continue;
-    translated += 1;
-    h.update(JSON.stringify(off.entries)); h.update(off.code); h.update(JSON.stringify(off.relocs));
+    fragments.push(off);
     const on = aot.translate(ORACLE_CODE, { mask: MASK_BEFORE_0183 | REGSHAPE_X64, ranges });
     if (on && Buffer.compare(Buffer.from(off.code), Buffer.from(on.code)) !== 0) differ += 1;
   }
-  assert.equal(translated, 282);
+  assert.equal(fragments.length, 282);
+  const ramBase = Math.min(...(fragments[0].heapBases ?? [0x1000000]));
+  const range = { low: 0x10000, high: ramBase };
+  const statics = fragments.flatMap((f) => staticConstants(f.code, range));
+  assert.ok(statics.length > 0, "the sample holds static addresses (else the normalization proves nothing)");
+  const base = Math.min(...statics);
+  for (const f of fragments) {
+    h.update(JSON.stringify(f.entries)); h.update(staticNormalizedCode(f.code, { ...range, base })); h.update(JSON.stringify(f.relocs));
+  }
   assert.equal(h.digest("hex"), MODE_OFF_DIGEST, "mode off: the code before 0184");
-  assert.ok(differ >= 250, `bit 28 changed ${differ} of ${translated} fragments`);
+  assert.ok(differ >= 250, `bit 28 changed ${differ} of ${fragments.length} fragments`);
 });
 
 test("?regshape=x64 sets the enable bit 28; a raw ?disable= never does", () => {
