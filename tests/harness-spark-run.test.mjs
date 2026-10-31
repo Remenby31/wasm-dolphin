@@ -70,15 +70,17 @@ test("spark-run: the launch command quotes every argument for the remote shell",
 });
 
 test("spark-run: wgpu runs as video=null on the bench, the rest of the query kept", () => {
-  assert.equal(benchQuery("core=upstream&video=wgpu&presenter=webgpu&cpu=dual&jitwarmup=60&aot=1"), "core=upstream&video=null&presenter=2d&cpu=dual&jitwarmup=60&aot=1");
-  assert.equal(benchQuery("wgpu"), "core=upstream&video=null&presenter=2d&cpu=dual&speed=1&wasmjit=1&jitwarmup=700&oc=1");
+  assert.equal(benchQuery("core=upstream&video=wgpu&presenter=webgpu&cpu=dual&jitwarmup=60&aot=1"), "core=upstream&video=null&presenter=2d&cpu=dual&jitwarmup=60&aot=1&xfbdecode=0");
+  assert.equal(benchQuery("wgpu"), "core=upstream&video=null&presenter=2d&cpu=dual&speed=1&wasmjit=1&jitwarmup=700&oc=1&xfbdecode=0");
+  // The XFB decode the product never pays is off on the bench unless asked (2026-10-31).
+  assert.equal(benchQuery("video=wgpu&xfbdecode=1"), "video=null&xfbdecode=1&presenter=2d");
   assert.equal(benchQuery("video=software&presenter=webgpu"), "video=software&presenter=webgpu");
   // No query: the race's own, swapped; --config becomes a --query; --baseline-query too.
   const none = benchRaceArgs(["--warmup", "25"]);
   assert.deepEqual(none.args, ["--warmup", "25", "--lock-wait", "14400", "--query", benchQuery(RACE_QUERY)]);
   assert.equal(none.swaps.length, 1);
   const both = benchRaceArgs(["--config", "wgpu", "--baseline-query", "video=wgpu&aot=1"]);
-  assert.deepEqual(both.args, ["--query", benchQuery("wgpu"), "--baseline-query", "video=null&aot=1&presenter=2d", "--lock-wait", "14400"]);
+  assert.deepEqual(both.args, ["--query", benchQuery("wgpu"), "--baseline-query", "video=null&aot=1&presenter=2d&xfbdecode=0", "--lock-wait", "14400"]);
   // An explicit --lock-wait is kept.
   assert.deepEqual(benchRaceArgs(["--query", "video=wgpu", "--lock-wait", "60"], { keepVideo: true }).args, ["--query", "video=wgpu", "--lock-wait", "60"]);
 });

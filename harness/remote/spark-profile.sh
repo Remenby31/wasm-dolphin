@@ -40,7 +40,7 @@ mkdir -p "$out"
   export HARNESS_CHROME_ARGS="${HARNESS_CHROME_ARGS:+$HARNESS_CHROME_ARGS }--js-flags=--wasm-partial-oob-writes-are-noops"
   echo "[spark-profile] $(date -Is) $("$SPARK_CHROMIUM" --version) perf=$PERF paranoid=$(cat /proc/sys/kernel/perf_event_paranoid)"
   taskset -c 10-14 node harness/probes/profile.mjs --tree "$PWD" --iso "$iso" --out "$out" --port 8090 ${SERVE:+--serve "$SERVE"} ${STATE:+--state "$STATE"} \
-    --query "${QUERY:-core=upstream&video=null&presenter=2d&cpu=dual&speed=1&wasmjit=1&jitwarmup=60&oc=1&aot=1}" \
+    --query "${QUERY:-core=upstream&video=null&presenter=2d&cpu=dual&speed=1&wasmjit=1&jitwarmup=60&oc=1&aot=1&xfbdecode=0}" \
     --perf "$PERF" --freq 4999 --warmup "${WARMUP:-45}" --secs "${SECS:-20}" ${EVENT:+--event "$EVENT"} \
     ${EMU:+--emulated-window "${EMU% *}" --emulated-warmup "${EMU#* }"} ${HOLD:+--hold "$HOLD"}
   echo "[spark-profile] run exit $?"
