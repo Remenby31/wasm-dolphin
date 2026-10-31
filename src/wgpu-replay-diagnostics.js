@@ -375,9 +375,12 @@ export function requestedWgpuGeometryRange(
 
 // The geometry content cache (patch 0204) by default: on under V8 since
 // 2026-10-31 (Spark drop-meter, 6 pairs: no regression, the race's display
-// excess 2,042 -> 1,626 ms); off elsewhere until JSC has its own pair.
+// excess 2,042 -> 1,626 ms) and under JavaScriptCore (Safari on the Mac, a
+// race driven live: speed 101-102 % as without it, 81-91 % of the geometry
+// bytes hit, a third fewer bytes staged per frame); off under SpiderMonkey,
+// which has no pair yet.
 export function defaultWgpuGeometryCacheMode(engine) {
-  return engine === "v8" ? 1 : 0;
+  return engine === "v8" || engine === "jsc" ? 1 : 0;
 }
 
 // ?wgpugeomcache=1 forces the cache on, =0 off, =2 on with the sampled byte
