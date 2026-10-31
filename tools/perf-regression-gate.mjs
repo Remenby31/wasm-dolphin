@@ -11,7 +11,7 @@ import {
 
 import {
   FIXED_BATTLE_FIXTURE,
-  requireReferenceIsoSha256,
+  requireReferenceSha256,
   PERF_EVENT_SCHEMA_VERSION,
   assertBattleCheckpoint,
   assertRunProvenance,
@@ -139,11 +139,11 @@ async function main() {
   const [romFixture, saveFixture, coreArtifact] = await Promise.all([
     verifyFileFixture(romPath, {
       label: "disc image",
-      expectedSha256: requireReferenceIsoSha256(),
+      expectedSha256: requireReferenceSha256("iso"),
     }),
     verifyFileFixture(saveStatePath, {
       label: "reference-battle save state",
-      expectedSha256: FIXED_BATTLE_FIXTURE.saveStateSha256,
+      expectedSha256: requireReferenceSha256("state"),
     }),
     describeFile(corePath, { hash: true }),
   ]);
@@ -589,7 +589,7 @@ async function runScenario(scenario, context) {
       saveStateLoaded: false,
       battleCheckpoint: { verified: false },
       expectedIsoSha256: context.romFixture.sha256,
-      expectedSaveStateSha256: FIXED_BATTLE_FIXTURE.saveStateSha256,
+      expectedSaveStateSha256: context.saveFixture.sha256,
     };
     await writeFile(path.join(scenarioDir, "manifest.json"), JSON.stringify(manifest, null, 2));
 

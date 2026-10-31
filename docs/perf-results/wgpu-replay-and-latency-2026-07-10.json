@@ -18,7 +18,7 @@
     "coreSha256": "4fddc41daffec45a4d4cd0936e5eb0ed99200123e3e76a25f762ddac75b8ea85",
     "coreBytes": 12813188,
     "romSha256": "<reference disc SHA-256, not tracked>",
-    "saveStateSha256": "620879e2ed3c35248deba9fb2f7b2a39f91f5374d2f6a98d2a2455cb55e156d1",
+    "saveStateSha256": "<reference savestate SHA-256, not tracked>",
     "scene": "direct-loaded reference battle"
   },
   "firstCompletedEfbPass": {

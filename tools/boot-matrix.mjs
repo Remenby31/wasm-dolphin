@@ -231,7 +231,7 @@ function classify(result, samples) {
   // thread has died (moving picture, dead core), and a game parked on a
   // memory-card dialog or a "press start" screen holds one frame while running
   // perfectly (static picture, healthy core). Judging on pixels first
-  // mislabels the second case as a freeze — which it did to Animal Crossing at
+  // mislabels the second case as a freeze — which it did to a life sim at
   // 58 core fps / 97% speed.
   if (result.medianCoreFps < 1) return "stalled";
   // Boot animations legitimately hold a still frame for a few seconds, so this

@@ -67,7 +67,7 @@ runs rather than treating one counter as ground truth.
 | Core artifact | 12,800,707 bytes, SHA-256 `03df79d2eb4be6c1e05d58d79ad4ab9590a9407c19fa5ae70e088401f424af3f` |
 | Game | Reference fighting game, NTSC-U Rev 2 NKit ISO, SHA-256 `<reference disc SHA-256, not tracked>` |
 | Scene | Direct load into visually confirmed reference battle |
-| Save state | 21,170,115 bytes, SHA-256 `620879e2ed3c35248deba9fb2f7b2a39f91f5374d2f6a98d2a2455cb55e156d1` |
+| Save state | 21,170,115 bytes, SHA-256 `<reference savestate SHA-256, not tracked>` |
 | Input | None after load; SHA-256 of script is the empty-input hash `e3b0c442…b855` |
 | Screenshots during timed runs | Disabled |
 | Timed windows | 45 s for JIT-on raster runs; 30 s for no-JIT and presenter controls |

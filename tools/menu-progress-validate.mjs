@@ -5,7 +5,7 @@
 //
 //   node tools/menu-progress-validate.mjs --duration 360
 //
-// Env: ROM (default smash melee path), BASE_URL, OGL_PROXY_MODE, HEADED=1.
+// Env: ROM (required: the disc image), BASE_URL, OGL_PROXY_MODE, HEADED=1.
 
 import { mkdir, readFile, stat, writeFile } from "node:fs/promises";
 import { createWriteStream, existsSync } from "node:fs";

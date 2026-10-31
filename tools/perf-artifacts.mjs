@@ -129,12 +129,20 @@ export function evaluateWgpuRuntimeConfigEvidence({
   return { required: true, runtimeConfig: runtimeConfig ?? null, failures };
 }
 
-// The reference disc's SHA-256 is not in the tree: a commercial disc's hash
-// identifies it. It comes from REFERENCE_ISO_SHA256, or from the isoSha256
-// field of the JSON file named by REFERENCE_FIXTURE (an untracked local
-// config, e.g. ~/salon-bench/ref.json). Null when neither is set.
-export function referenceIsoSha256(env = process.env, read = (file) => readFileSync(file, "utf8")) {
-  const direct = String(env.REFERENCE_ISO_SHA256 ?? "").trim().toLowerCase();
+// The reference disc's and savestate's SHA-256 are not in the tree: a
+// commercial disc's hash identifies it (and the state is that game's RAM).
+// Each comes from its variable (REFERENCE_ISO_SHA256, REFERENCE_STATE_SHA256)
+// or from its field (isoSha256, stateSha256) of the JSON file named by
+// REFERENCE_FIXTURE (an untracked local config, e.g. ~/salon-bench/ref.json).
+// Null when neither is set.
+const REFERENCE_HASHES = Object.freeze({
+  iso: { variable: "REFERENCE_ISO_SHA256", field: "isoSha256", label: "reference disc" },
+  state: { variable: "REFERENCE_STATE_SHA256", field: "stateSha256", label: "reference savestate" },
+});
+export function referenceSha256(kind, env = process.env, read = (file) => readFileSync(file, "utf8")) {
+  const spec = REFERENCE_HASHES[kind];
+  if (!spec) throw new Error(`unknown reference hash ${kind}`);
+  const direct = String(env[spec.variable] ?? "").trim().toLowerCase();
   if (/^[0-9a-f]{64}$/.test(direct)) return direct;
   if (!env.REFERENCE_FIXTURE) return null;
   let config;
@@ -143,24 +151,26 @@ export function referenceIsoSha256(env = process.env, read = (file) => readFileS
   } catch (error) {
     throw new Error(`REFERENCE_FIXTURE ${env.REFERENCE_FIXTURE}: ${error.message}`);
   }
-  const hash = String(config?.isoSha256 ?? "").trim().toLowerCase();
-  if (!/^[0-9a-f]{64}$/.test(hash)) throw new Error(`REFERENCE_FIXTURE ${env.REFERENCE_FIXTURE}: no isoSha256 (64 hex digits)`);
+  const hash = String(config?.[spec.field] ?? "").trim().toLowerCase();
+  if (!/^[0-9a-f]{64}$/.test(hash)) throw new Error(`REFERENCE_FIXTURE ${env.REFERENCE_FIXTURE}: no ${spec.field} (64 hex digits)`);
   return hash;
 }
+export const referenceIsoSha256 = (env, read) => referenceSha256("iso", env, read);
 
-// The same, required: a run that verifies the reference disc stops here,
+// The same, required: a run that verifies the reference fixture stops here,
 // before any browser, when the expected hash is not configured.
-export function requireReferenceIsoSha256(env = process.env, read) {
-  const hash = referenceIsoSha256(env, read);
+export function requireReferenceSha256(kind, env = process.env, read) {
+  const hash = referenceSha256(kind, env, read);
   if (!hash) {
-    throw new Error("reference disc SHA-256 not configured: set REFERENCE_ISO_SHA256, or REFERENCE_FIXTURE to a JSON file with isoSha256");
+    const spec = REFERENCE_HASHES[kind];
+    throw new Error(`${spec.label} SHA-256 not configured: set ${spec.variable}, or REFERENCE_FIXTURE to a JSON file with ${spec.field}`);
   }
   return hash;
 }
+export const requireReferenceIsoSha256 = (env, read) => requireReferenceSha256("iso", env, read);
 
 export const FIXED_BATTLE_FIXTURE = Object.freeze({
   sceneLabel: "fixed reference battle",
-  saveStateSha256: "620879e2ed3c35248deba9fb2f7b2a39f91f5374d2f6a98d2a2455cb55e156d1",
 });
 
 export const FIXED_BATTLE_CHECKPOINT = Object.freeze({

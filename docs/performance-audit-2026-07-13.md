@@ -32,7 +32,7 @@ No default rendering or JIT flag changed. Automated comparisons used
 - Scene: direct-loaded `__battle.sav`, the reference battle. The harness pauses,
   applies the save, and resumes without driving menus or character select.
 - ROM SHA-256: `<reference disc SHA-256, not tracked>`.
-- Save SHA-256: `620879e2ed3c35248deba9fb2f7b2a39f91f5374d2f6a98d2a2455cb55e156d1`.
+- Save SHA-256: `<reference savestate SHA-256, not tracked>`.
 - Machine: Windows 11 Pro build 26200; Ryzen 9 9950X3D, 32 logical CPUs,
   125.6 GiB reported RAM; Radeon RX 9070 XT, driver `32.0.31021.5001`.
 - Browser: Chrome `143.0.7499.4`; WebGPU adapter reports AMD/RDNA 4.

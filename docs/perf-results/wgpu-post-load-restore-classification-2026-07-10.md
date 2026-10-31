@@ -18,7 +18,7 @@ clean-tree performance qualification.
 | Branch/commit | `perf/final-optimization` at `d851b336ca1c9de7da036b73145d3116aef6ec59`, dirty |
 | ROM | Reference game, Rev 2 NKit, 1,430,679,552 bytes; SHA-256 `<reference disc SHA-256, not tracked>` |
 | Core | `dolphin-core-upstream.wasm`, 12,873,138 bytes; SHA-256 `eaec73b4900d14635ddc2b5d3f825a5279ab6c222ae2890790586193328d3b09` |
-| Compressed save | `__battle.sav`, 21,170,115 bytes; SHA-256 `620879e2ed3c35248deba9fb2f7b2a39f91f5374d2f6a98d2a2455cb55e156d1` |
+| Compressed save | `__battle.sav`, 21,170,115 bytes; SHA-256 `<reference savestate SHA-256, not tracked>` |
 | Decoded save stream | 92,835,136 bytes; SHA-256 `89ef3abb5fc9f1e6a76cb8bf305e9a9e9faca916c6702f552ff92800ba510bce` |
 | Cache-off raw output | `.omx/final-opt/wgpu-ubo-health-cache0`, 20-second run |
 | Cache-on raw output | `.omx/final-opt/wgpu-ubo-health-cache1`, 15-second run |

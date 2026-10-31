@@ -10,7 +10,7 @@ reference battle save; none stopped at character select.
 | Browser | Headed Chrome `143.0.7499.4` |
 | Branch/commit | `perf/next-program` / `c175006b…625f8`, dirty diagnostic tree |
 | Core | 12,813,188 bytes; SHA-256 `4fddc41d…ea85` |
-| ROM/save | SHA-256 `1018b65a…7c67` / `620879e2…56d1` |
+| ROM/save | SHA-256 not tracked (local reference config) |
 | Mode | `video=wgpu`, `presenter=webgpu`, `wasmjit=0`, fixed battle |
 
 The matching machine-readable record is

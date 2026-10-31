@@ -10,7 +10,7 @@
 //
 //   1. this file      -- the gate is wired to a capability that defaults on,
 //                        and producer and consumer agree on the opcode;
-//   2. runtime count  -- a default MKWii launch reports a non-zero
+//   2. runtime count  -- a default Wii racing-game launch reports a non-zero
 //                        `[clearrect] executed=N`, and `?wgpuclearrect=0`
 //                        reports none (recorded in the PR description);
 //   3. visual A/B     -- the same pair renders the world vs. the pre-fix

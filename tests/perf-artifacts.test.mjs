@@ -1364,7 +1364,7 @@ test("post-load input metadata hashes the canonical script before provenance che
     artifactDescriptions: {
       rom: { sha256: "2".repeat(64) },
       core: { sha256: "1".repeat(64) },
-      saveState: { sha256: FIXED_BATTLE_FIXTURE.saveStateSha256 },
+      saveState: { sha256: "3".repeat(64) },
     },
   });
   assert.equal(
@@ -2542,7 +2542,7 @@ function validManifest() {
     artifacts: {
       rom: { sha256: "2".repeat(64) },
       core: { sha256: "1".repeat(64) },
-      saveState: { sha256: FIXED_BATTLE_FIXTURE.saveStateSha256 },
+      saveState: { sha256: "3".repeat(64) },
     },
     fixture: {
       isoVerified: true,
@@ -2634,5 +2634,10 @@ test("the reference disc hash comes from the environment or an untracked config,
   assert.equal(referenceIsoSha256({ REFERENCE_FIXTURE: "/x/ref.json" }, () => JSON.stringify({ isoSha256: h })), h);
   assert.throws(() => referenceIsoSha256({ REFERENCE_FIXTURE: "/x/ref.json" }, () => "{}"), /no isoSha256/);
   assert.throws(() => referenceIsoSha256({ REFERENCE_FIXTURE: "/x/missing.json" }, () => { throw new Error("ENOENT"); }), /ENOENT/);
-  assert.throws(() => requireReferenceIsoSha256({}), /not configured/);
+  assert.throws(() => requireReferenceIsoSha256({}), /reference disc SHA-256 not configured/);
+  const { referenceSha256, requireReferenceSha256 } = await import("../tools/perf-artifacts.mjs");
+  assert.equal(referenceSha256("state", { REFERENCE_STATE_SHA256: h }), h);
+  assert.equal(referenceSha256("state", { REFERENCE_FIXTURE: "/x/ref.json" }, () => JSON.stringify({ isoSha256: "b".repeat(64), stateSha256: h })), h);
+  assert.equal(referenceSha256("state", { REFERENCE_ISO_SHA256: h }), null);
+  assert.throws(() => requireReferenceSha256("state", {}), /reference savestate SHA-256 not configured: set REFERENCE_STATE_SHA256/);
 });

@@ -72,7 +72,7 @@ remain default-off.
 | Final clean branch | `perf/final-optimization` |
 | Upstream Dolphin | `e22551eae1c84a7e4d0b6a5c519ef4ed4ef69df1` |
 | Scene | Direct-loaded fixed reference battle; no menu or character-select driving |
-| ROM/save | SHA-256 `1018b65a…7c67` / `620879e2…56d1` |
+| ROM/save | SHA-256 not tracked (local reference config) |
 
 Historical hardware evidence is in
 [the WGPU replay and latency package](perf-results/wgpu-replay-and-latency-2026-07-10.md).
