@@ -6540,8 +6540,24 @@ function updatePresentationFps() {
 // once per core while it runs, unless already on (a harness window, never
 // reset under it); then read only (-1). Their cost is one timing per
 // throttle on the CPU thread and per pass with work on the GPU thread
-// (WasmHeadroom.h). Drain time: collected with the replay budget (default)
-// or causal metrics.
+// (WasmHeadroom.h). Replay time: the drains, collected with the replay
+// budget (default) or causal metrics, plus the mapped staging pool's remap
+// callbacks (getMappedRange runs outside any drain; ~47 % of the worker on an
+// iPhone).
+// The pool's remap callback time, cumulated across pools (a pool replaced
+// after a device loss or an invalidation keeps counting from the last total).
+let occupancyRemapPool = null;
+let occupancyRemapBaseMs = 0;
+function occupancyRemapMs() {
+  const pool = wgpuMappedStagingPool;
+  if (!pool?.remapCallbackTotalMs) return occupancyRemapBaseMs;
+  if (pool !== occupancyRemapPool) {
+    occupancyRemapBaseMs += occupancyRemapPool?.remapCallbackTotalMs?.() ?? 0;
+    occupancyRemapPool = pool;
+  }
+  return occupancyRemapBaseMs + pool.remapCallbackTotalMs();
+}
+
 function readOccupancyCounters() {
   const m = moduleInstance;
   const stats = m?._DolphinWeb_HeadroomStats;
@@ -6554,7 +6570,7 @@ function readOccupancyCounters() {
     }
   }
   const drainMs = webGpuCmdRing && renderGpu && !wgpuReplayFatal && (causalMetricsEnabled || wgpuReplayBudgetMs > 0)
-    ? webGpuCausalStats.drainTotalMs
+    ? webGpuCausalStats.drainTotalMs + occupancyRemapMs()
     : null;
   return { cpu, drainMs };
 }

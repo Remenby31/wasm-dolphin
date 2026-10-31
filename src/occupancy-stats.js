@@ -7,8 +7,10 @@
 //   the headroom counters (patch 0113, DolphinWeb_HeadroomStats, layout v1).
 //   Same definition as harness/lib/headroom.mjs: busy = window - throttle
 //   sleep - FlushGpu wait, over the window (host time of the CPU thread).
-// - replayBusy: share of host time this worker spent draining the WebGPU
-//   command ring (webGpuCausalStats.drainTotalMs over the host window).
+// - replayBusy: share of host time this worker spent replaying: draining
+//   the WebGPU command ring (webGpuCausalStats.drainTotalMs) plus the mapped
+//   staging pool's remap callbacks (getMappedRange, outside any drain), over
+//   the host window.
 //
 // Deltas against the previous read, never a reset: the harness resets the
 // headroom counters per measurement window (n >= 0). A reset between two

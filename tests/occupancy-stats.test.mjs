@@ -115,7 +115,11 @@ test("the worker reads the counters once per window, turns the headroom counters
   // product path: no harness gate
   assert.doesNotMatch(read, /harnessEnabled/);
   // the replay's drain time only while collected
-  assert.match(read, /\(causalMetricsEnabled \|\| wgpuReplayBudgetMs > 0\)\n\s+\? webGpuCausalStats\.drainTotalMs\n\s+: null;/);
+  assert.match(read, /\(causalMetricsEnabled \|\| wgpuReplayBudgetMs > 0\)\n\s+\? webGpuCausalStats\.drainTotalMs \+ occupancyRemapMs\(\)\n\s+: null;/);
+  // The pool's remap callbacks (getMappedRange) run outside any drain: counted, across pools.
+  const remap = worker.slice(worker.indexOf("function occupancyRemapMs()"), worker.indexOf("function readOccupancyCounters()"));
+  assert.match(remap, /occupancyRemapBaseMs \+= occupancyRemapPool\?\.remapCallbackTotalMs\?\.\(\) \?\? 0;/);
+  assert.match(remap, /return occupancyRemapBaseMs \+ pool\.remapCallbackTotalMs\(\);/);
   // collected by finishWebGpuDrain under the same condition
   const finish = worker.slice(worker.indexOf("function finishWebGpuDrain("), worker.indexOf("async function startPipelinePrewarm("));
   assert.match(finish, /const collectReplayMetrics = causalMetricsEnabled \|\| wgpuReplayBudgetMs > 0;/);

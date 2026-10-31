@@ -277,6 +277,7 @@ test("reports bounded capacity misses without allocating or dropping prior uploa
     remapFailures: 0,
     remapLatencyTotalMs: 0,
     remapLatencyMaxMs: 0,
+    remapCallbackTotalMs: 0,
     remapLatencyHistogram: [0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0],
     invalidations: 0,
   });
@@ -737,4 +738,25 @@ test("retained ring bytes survive a capacity miss and retry byte-identically", (
   assert.equal(second.accepted, true);
   assert.equal(stagedUploads.has(41), false);
   assert.deepEqual(seen, [[9, 7, 5, 3], [9, 7, 5, 3]]);
+});
+
+test("times the remap callback itself (getMappedRange), apart from the remap latency", async () => {
+  const fake = createFakeDevice();
+  let clock = 10;
+  const pool = createPool(fake, { slotCount: 1, slotSize: 32, now: () => clock });
+  pool.stageBuffer({ data: new Uint8Array(8), destination: {} });
+  const batch = pool.seal();
+  const remapped = submitWgpuUploadBeforeRender({ queue: { submit() {} }, pool, batch });
+  const buffer = fake.buffers[0];
+  const getMappedRange = buffer.getMappedRange.bind(buffer);
+  buffer.getMappedRange = (...args) => {
+    clock += 3;
+    return getMappedRange(...args);
+  };
+  clock = 29;
+  buffer.maps[0].operation.resolve();
+  assert.equal(await remapped, true);
+  assert.equal(pool.remapCallbackTotalMs(), 3);
+  assert.equal(pool.snapshot().remapCallbackTotalMs, 3);
+  assert.equal(pool.snapshot().remapLatencyTotalMs, 22);
 });
