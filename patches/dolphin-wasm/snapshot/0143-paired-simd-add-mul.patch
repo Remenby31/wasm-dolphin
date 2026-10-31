@@ -1,7 +1,7 @@
 diff --git a/Source/Core/Core/PowerPC/CachedInterpreter/CachedInterpreter.cpp b/Source/Core/Core/PowerPC/CachedInterpreter/CachedInterpreter.cpp
 --- a/Source/Core/Core/PowerPC/CachedInterpreter/CachedInterpreter.cpp
 +++ b/Source/Core/Core/PowerPC/CachedInterpreter/CachedInterpreter.cpp
-@@ -6147,6 +6147,119 @@ void EmitPairedFusedMulAddSub(std::vector<u8>& body, const WasmStateLayout& layo
+@@ -6147,6 +6147,118 @@ void EmitPairedFusedMulAddSub(std::vector<u8>& body, const WasmStateLayout& layo
    body.push_back(0x0b);
  }
  
@@ -100,8 +100,7 @@ diff --git a/Source/Core/Core/PowerPC/CachedInterpreter/CachedInterpreter.cpp b/
 +  body.push_back(0x40);
 +  EmitLocalGet(body, 0);
 +  get(vr);
-+  simd(DEMOTE);
-+  simd(PROMOTE);
++  // DIAG ps-nofcvt: round to single skipped (wrong results, speed only).
 +  body.push_back(0x22);  // local.tee
 +  EmitU32Leb(body, vr);
 +  simd(STORE);

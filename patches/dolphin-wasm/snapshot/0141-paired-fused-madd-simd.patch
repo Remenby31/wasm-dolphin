@@ -17,7 +17,7 @@ diff --git a/Source/Core/Core/PowerPC/CachedInterpreter/CachedInterpreter.cpp b/
  void EmitI64Const(std::vector<u8>& body, u64 value)
  {
    body.push_back(0x42);
-@@ -5993,6 +6002,146 @@ void EmitStoreFprLaneFromLocal(std::vector<u8>& body, const WasmStateLayout& lay
+@@ -5993,6 +6002,145 @@ void EmitStoreFprLaneFromLocal(std::vector<u8>& body, const WasmStateLayout& lay
    EmitStateStoreF64Suffix(body, PsOffset(layout, fd, lane));
  }
  
@@ -141,8 +141,7 @@ diff --git a/Source/Core/Core/PowerPC/CachedInterpreter/CachedInterpreter.cpp b/
 +  // ForceSingle both lanes, then nmadd/nmsub negate the rounded result.
 +  EmitLocalGet(body, 0);
 +  get(vr);
-+  simd(DEMOTE);
-+  simd(PROMOTE);
++  // DIAG ps-nofcvt: round to single skipped (wrong results, speed only).
 +  if (negate)
 +    simd(NEG);
 +  body.push_back(0x22);  // local.tee
