@@ -1,35 +1,54 @@
 // Copyright 2026 wasm-dolphin contributors
 // SPDX-License-Identifier: GPL-2.0-or-later
 //
-// Integrity counters of the WebGPU replay, always on and cheap (a few integer
-// increments on paths that are already exceptional). They count what makes a
-// picture wrong without failing anything: a draw skipped for want of its
-// pipeline, bind group or buffers (the element vanishes for a frame), command
-// records the core dropped, passes it aborted or poisoned (an upload that
-// waited too long for arena space), uncaptured WebGPU errors, device losses,
-// a fatal replay, mapped staging refused. validationReadIntegrity returns them flat
-// and cumulative; the probes take the delta over a window and fail the run on
-// a fatal counter (INTEGRITY_FATAL).
-//
-// pipelinePending (a draw skipped because its pipeline is not ready: async
-// compilation) is not fatal by itself: the probes judge its rate per second
-// after the warm-up (a pipeline evicted and rebuilt in a loop would make an
-// element blink on a slow device).
+// Integrity counters of the WebGPU replay, always on and cheap (an integer
+// increment on paths that are already exceptional, no allocation). They count
+// what makes a picture wrong without failing anything:
+// - a draw skipped: its pipeline failed (resolvePipeline is synchronous: no
+//   template, createRenderPipeline threw, or a validation error cached as
+//   null, so skipped for good), a bind group or a buffer missing, or no pass
+//   open (BEGIN_PASS without its color target): the element vanishes;
+// - a resource a record names that the replay does not have (upload
+//   destination, pass target, bind group entry, blit, readback);
+// - the core's own: command records dropped, batches aborted or oversized,
+//   uploads that timed out waiting for arena space (each loses a whole pass);
+// - uncaptured WebGPU errors, device losses, a fatal replay, mapped staging
+//   refused, geometry cache collisions and failures.
+// validationReadIntegrity returns them flat and cumulative; the probes take
+// the delta over a window and fail the run on any of INTEGRITY_FATAL.
 
-export const SKIP_CAUSES = Object.freeze(["pipelinePending", "bindGroup", "vertexBuffer", "indexBuffer"]);
+// Why a draw was skipped, in the order the replay checks (positional, no
+// object per draw).
+export const SKIP = Object.freeze({ PIPELINE: 0, BIND_GROUP: 1, VERTEX_BUFFER: 2, INDEX_BUFFER: 3, NO_PASS: 4 });
+const SKIP_KEYS = ["skipPipelineFailed", "skipBindGroup", "skipVertexBuffer", "skipIndexBuffer", "skipNoPass"];
+
+// The replay's missing-resource kinds (recordMissingResource) and their counter.
+export const MISSING_KEYS = Object.freeze({
+  "color-texture": "missingColorTarget",
+  "depth-texture": "missingDepthTarget",
+  "upload-buffer": "missingUploadBuffer",
+  "upload-texture": "missingUploadTexture",
+  pipeline: "missingPipeline",
+  "bind-group": "missingBindGroup",
+  "bind-group-blob": "missingBindGroupBlob",
+  texture: "missingBindGroupResource",
+  sampler: "missingBindGroupResource",
+  buffer: "missingBindGroupResource",
+  "vertex-buffer": "missingVertexBuffer",
+  "index-buffer": "missingIndexBuffer",
+  "blit-source": "missingBlit",
+  "blit-destination": "missingBlit",
+  "readback-source": "missingReadback"
+});
+
+export const CORE_KEYS = Object.freeze(["droppedRecords", "batchAborts", "batchOversize", "uploadTimeouts"]);
 
 // Fatal: any non-zero delta over a measured window fails the run.
-// The core's own (its state stats line): records dropped, batches aborted or
-// oversized, uploads that timed out waiting for arena space; the last two
-// poison a whole pass, every element drawn in it gone for a frame.
 export const INTEGRITY_FATAL = Object.freeze([
-  "skipBindGroup",
-  "skipVertexBuffer",
-  "skipIndexBuffer",
-  "droppedRecords",
-  "batchAborts",
-  "batchOversize",
-  "uploadTimeouts",
+  ...SKIP_KEYS,
+  ...new Set(Object.values(MISSING_KEYS)),
+  ...CORE_KEYS,
+  "missingOther",
   "uncapturedErrors",
   "deviceLosses",
   "replayFatal",
@@ -38,49 +57,50 @@ export const INTEGRITY_FATAL = Object.freeze([
   "geometryCacheFailed"
 ]);
 
-// The first missing resource of a skipped draw, in the order the replay checks
-// them: pipeline, bind groups, vertex buffer, index buffer.
-export function skippedDrawCause({ hasPipeline, bindGroupsValid, needsVertexBuffer, vertexBufferValid, indexed = false, indexBufferValid = true }) {
-  if (!hasPipeline) return "pipelinePending";
-  if (!bindGroupsValid) return "bindGroup";
-  if (needsVertexBuffer && !vertexBufferValid) return "vertexBuffer";
-  if (indexed && !indexBufferValid) return "indexBuffer";
-  return null;
+// The first missing resource of a skipped draw (SKIP), or -1 when it has all.
+export function skippedDrawCause(hasPass, hasPipeline, bindGroupsValid, needsVertexBuffer, vertexBufferValid, indexed, indexBufferValid) {
+  if (!hasPass) return SKIP.NO_PASS;
+  if (!hasPipeline) return SKIP.PIPELINE;
+  if (!bindGroupsValid) return SKIP.BIND_GROUP;
+  if (needsVertexBuffer && !vertexBufferValid) return SKIP.VERTEX_BUFFER;
+  if (indexed && !indexBufferValid) return SKIP.INDEX_BUFFER;
+  return -1;
 }
 
-// The core's counters from its state stats (parseWgpuProducerStateStats):
-// null fields when the core predates them.
-export function coreIntegrityOf(parsed) {
+// The core's counters from its state stats line: null for a field the core
+// does not print (an older core), never a 0 it did not report.
+export function coreIntegrityOf(text) {
+  const s = String(text ?? "");
+  const drop = /\bwgdrop:(\d+)/.exec(s);
+  const batch = /\bwgbabort:(\d+)\s+wgboversize:(\d+)\s+wguploadto:(\d+)/.exec(s);
   return {
-    droppedRecords: parsed?.commandDroppedCount ?? null,
-    batchAborts: parsed?.batchAbortCount ?? null,
-    batchOversize: parsed?.batchOversizeCount ?? null,
-    uploadTimeouts: parsed?.uploadTimeoutCount ?? null
+    droppedRecords: drop ? Number(drop[1]) : null,
+    batchAborts: batch ? Number(batch[1]) : null,
+    batchOversize: batch ? Number(batch[2]) : null,
+    uploadTimeouts: batch ? Number(batch[3]) : null
   };
 }
 
 export function createWgpuIntegrity() {
-  const counts = {
-    skipPipelinePending: 0,
-    skipBindGroup: 0,
-    skipVertexBuffer: 0,
-    skipIndexBuffer: 0,
-    uncapturedErrors: 0,
-    deviceLosses: 0,
-    replayFatal: 0
-  };
+  const skips = new Float64Array(SKIP_KEYS.length);
+  const counts = { missingOther: 0, uncapturedErrors: 0, deviceLosses: 0, replayFatal: 0 };
+  for (const k of new Set(Object.values(MISSING_KEYS))) counts[k] = 0;
   return {
     skip(cause) {
-      const key = cause ? `skip${cause[0].toUpperCase()}${cause.slice(1)}` : null;
-      if (key && key in counts) counts[key] += 1;
+      if (cause >= 0 && cause < skips.length) skips[cause] += 1;
+    },
+    missing(kind) {
+      counts[MISSING_KEYS[kind] ?? "missingOther"] += 1;
     },
     note(name) {
       if (name in counts) counts[name] += 1;
     },
-    // extra: counters owned elsewhere (the core's dropped records, the staging
-    // pool, the geometry cache), read at the same moment
+    // extra: counters owned elsewhere (the core, the staging pool, the
+    // geometry cache), read at the same moment
     snapshot(extra = {}) {
-      return { ...counts, ...extra };
+      const out = {};
+      SKIP_KEYS.forEach((k, i) => { out[k] = skips[i]; });
+      return { ...out, ...counts, ...extra };
     }
   };
 }
