@@ -184,6 +184,13 @@ async function playVisit(o, server, profileDir, shotDir, visit) {
     let draining = true;
     const drainOnce = async () => {
       raw.chunks.push(await readTimeline(page).catch((e) => ({ error: String(e.message || e) })));
+      // The new-frame counter is null until the first tagged present after
+      // the boot (a visit from the boot reads it too early): the visit's
+      // start is then its first reading.
+      if (raw.newFramesStart?.newShown == null) {
+        const f = await readFrameInfo(page).catch(() => null);
+        if (f?.newShown != null) raw.newFramesStart = { ...f, late: true };
+      }
       const d = sampling ? await workerRequest(page, "validationDropSampler", { action: "drain" }, 10000) : null;
       if (d?.rows) raw.rows.push(d);
       const p = await page.evaluate(() => window.__dropPage?.drain() ?? []).catch(() => []);
