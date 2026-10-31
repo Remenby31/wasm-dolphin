@@ -25,7 +25,7 @@
       "commit": "01e0577914a75a2569c846778c2f93aa8e6feddd"
     }
   },
-  "patchSeriesSha256": "d09fe7dcf619005a9dd2d2fc63aa9f14f75a0b99be70b3e9b231f3ba7662979a",
+  "patchSeriesSha256": "a72967cf446f8a88f7918aa28d1dbb79b3d316f1512175abc7b7689355530b4c",
   "patches": [
     {
       "order": 1,
@@ -888,8 +888,8 @@
       "cwd": ".",
       "hashMode": "lf-normalized",
       "path": "patches/dolphin-wasm/snapshot/0141-paired-fused-madd-simd.patch",
-      "size": 11072,
-      "sha256": "b2f9328325b951d01ef61ddd8b046dbf2d0811f58bedc3c1677096cf8a693419"
+      "size": 11112,
+      "sha256": "02750194b8d184ec375d20a1da954520e97938c65b9b4fc12a6bbb80716d2480"
     },
     {
       "order": 109,
@@ -904,8 +904,8 @@
       "cwd": ".",
       "hashMode": "lf-normalized",
       "path": "patches/dolphin-wasm/snapshot/0143-paired-simd-add-mul.patch",
-      "size": 6203,
-      "sha256": "848a4196392c0fe8f37f2588701970395ddfb850b30184a984eb8e274036d55d"
+      "size": 6243,
+      "sha256": "e1dda032e70271b85a3b8ad357c49a41e380c712a508b4e834b86e55550224ba"
     },
     {
       "order": 111,
