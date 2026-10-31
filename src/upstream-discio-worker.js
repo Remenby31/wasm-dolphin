@@ -125,6 +125,7 @@ import {
 } from "./wgpu-consumer-reset-attestation.js";
 import { createWgpuSemanticRuntime } from "./wgpu-semantic-runtime.js";
 import { createWgpuFatalReporter, handleWgpuDeviceLoss, wgpuFatalPageReason } from "./wgpu-device-lifecycle.js";
+import { coreIntegrityOf, createWgpuIntegrity, SKIP, skippedDrawCause } from "./wgpu-integrity.js";
 import {
   attemptRetainedWgpuUpload,
   createWgpuMappedStagingPool
@@ -469,6 +470,42 @@ function harnessRegionMissTop(heap, m = moduleInstance) {
 // collisions, resets), cumulative.
 const GEOMETRY_CACHE_FIELDS = ["hits", "hitBytes", "inserts", "insertBytes", "misses", "missBytes",
   "blocked", "capSkips", "failed", "switches", "compares", "collisions", "resets"];
+// A resource a record names that the replay does not have: counted (always,
+// src/wgpu-integrity.js), then told to the replay classifier when it runs.
+function noteMissingResource(kind, id) {
+  wgpuIntegrity.missing(kind);
+  wgpuReplayClassifier?.recordMissingResource({ kind, id });
+}
+
+// validationReadIntegrity: the replay's integrity counters, cumulative and
+// flat (fatal ones: INTEGRITY_FATAL), plus non-fatal context (staging waits,
+// presents rejected, presents).
+function readWgpuIntegrity() {
+  const m = moduleInstance;
+  let geometryCacheCollisions = 0, geometryCacheFailed = 0;
+  if (typeof m?._DolphinWeb_GeometryCacheStats === "function" && typeof m._malloc === "function") {
+    const p = m._malloc(8 * GEOMETRY_CACHE_FIELDS.length);
+    try {
+      const n = m._DolphinWeb_GeometryCacheStats(p) | 0;
+      const values = new Float64Array(m.HEAPU8.buffer, p, Math.min(n, GEOMETRY_CACHE_FIELDS.length));
+      const at = (name) => { const k = GEOMETRY_CACHE_FIELDS.indexOf(name); return k >= 0 && k < values.length ? values[k] : 0; };
+      geometryCacheCollisions = at("collisions");
+      geometryCacheFailed = at("failed");
+    } finally {
+      m._free(p);
+    }
+  }
+  return wgpuIntegrity.snapshot({
+    ...coreIntegrityOf(api?.getWebGpuStateCacheStats?.()),
+    stagingUnsafe: webGpuCausalStats.mappedStagingUnsafeCapacityCount || 0,
+    stagingCapacityWaits: webGpuCausalStats.mappedStagingCapacityWaitCount || 0,
+    presentRejected: self._wgPresentRejectedLogCount || 0,
+    geometryCacheCollisions,
+    geometryCacheFailed,
+    presents: webGpuExecStats.present
+  });
+}
+
 function harnessGeometryCacheStats() {
   if (!harnessEnabled) return { error: "harness hooks are off" };
   const m = moduleInstance;
@@ -2310,6 +2347,8 @@ async function handleMessage(type, payload) {
       return { mode: relaxedMadd, coreFused: moduleInstance?._DolphinWeb_FusedMadd ? moduleInstance._DolphinWeb_FusedMadd() === 1 : null };
     case "validationReadPacingConfig":
       return harnessPacingConfig();
+    case "validationReadIntegrity":
+      return readWgpuIntegrity();
     case "validationReadGeometryCache":
       return harnessGeometryCacheStats();
     case "validationReadJitRegionStats":
@@ -6930,6 +6969,7 @@ async function createWebGpuPresenter(canvas) {
     },
   };
   device.addEventListener?.("uncapturederror", (event) => {
+    wgpuIntegrity.note("uncapturedErrors");
     recordRendererError("uncaptured-error", event?.error?.message || event?.message || "unknown");
   });
   const format = typeof gpu.getPreferredCanvasFormat === "function" ? gpu.getPreferredCanvasFormat() : "bgra8unorm";
@@ -7080,6 +7120,7 @@ fn fs(input: VertexOutput) -> @location(0) vec4f {
       postStatus,
     });
     if (!loss.handled) return;
+    wgpuIntegrity.note("deviceLosses");
     // Lost above 1x (out of memory, GPU process reset): never again at that
     // scale in this worker, and the page restarts at 1x (core-host).
     const internalResolution = wgpuInternalResolution;
@@ -10946,6 +10987,7 @@ function markWgpuMappedCapacityWait(uploadRole = WGPU_UPLOAD_ROLE.UNKNOWN) {
 function markWgpuReplayFatal(scope, detail) {
   if (wgpuReplayFatal) return false;
   wgpuReplayFatal = { scope: String(scope), detail: String(detail || "unknown") };
+  wgpuIntegrity.note("replayFatal");
   resetWgpuMappedDrainCoalescing(WGPU_MAPPED_DRAIN_FORCE_REASONS.FATAL);
   wgpuSparseUbo?.reset(`fatal-${scope}`);
   if (wgpuUboComputeProjectionActive) {
@@ -11163,12 +11205,12 @@ function getNonFilteringSampler(id) {
 function replayCreateBindGroup(id, blobPtr, blobLen) {
   if (!renderGpu || webGpuObjects.bindGroups.has(id)) return;
   if (!blobPtr) {
-    wgpuReplayClassifier?.recordMissingResource({ kind: "bind-group-blob", id });
+    noteMissingResource("bind-group-blob", id);
     return;
   }
   const u = new Uint32Array(moduleInstance.HEAPU8.buffer, blobPtr, blobLen >>> 2);
   if (u[0] !== 0x57424731) {
-    wgpuReplayClassifier?.recordMissingResource({ kind: "bind-group-blob", id });
+    noteMissingResource("bind-group-blob", id);
     return;
   }
   const group = u[1], count = u[2];
@@ -11218,7 +11260,7 @@ function replayCreateBindGroup(id, blobPtr, blobLen) {
       if (binding === 0 && srcTexId < 0) srcTexId = resId;
       const t = webGpuObjects.textures.get(resId);
       if (!t) {
-        wgpuReplayClassifier?.recordMissingResource({ kind: "texture", id: resId });
+        noteMissingResource("texture", resId);
         // §28 diag: which texture ids are missing (→ whole draw
         // skipped → screen-specific black, e.g. difficulty-select
         // background)? Rate-limited tally of the missing resId.
@@ -11262,7 +11304,7 @@ function replayCreateBindGroup(id, blobPtr, blobLen) {
     } else if (kind === 2) {
       const s = webGpuObjects.samplers.get(resId);
       if (!s) {
-        wgpuReplayClassifier?.recordMissingResource({ kind: "sampler", id: resId });
+        noteMissingResource("sampler", resId);
         // §28cx FORCE-VALID: missing sampler → dummy, don't drop the group.
         entries.push({ binding, resource: getFixedLayouts().dummySampler });
         continue;
@@ -11273,7 +11315,7 @@ function replayCreateBindGroup(id, blobPtr, blobLen) {
     } else {
       const b = webGpuObjects.buffers.get(resId);
       if (!b) {
-        wgpuReplayClassifier?.recordMissingResource({ kind: "buffer", id: resId });
+        noteMissingResource("buffer", resId);
         return;
       }
       // §16: group-0 UBO entries carry a class-size window (blob size
@@ -12942,6 +12984,8 @@ function getConstFsModule(dev) {
 // presented a frame; suppresses the legacy CPU-framebuffer canvas blit
 // in runPresentationLoop so the two don't fight over renderGpu.context.
 let cmdRingOwnsCanvas = false;
+// Always on (src/wgpu-integrity.js): what makes a picture wrong silently.
+const wgpuIntegrity = createWgpuIntegrity();
 const webGpuExecStats = {
   beginFb0: 0, beginFbN: 0, draw: 0, drawIdx: 0, setPipe: 0,
   setBg: 0, present: 0, missPipe: 0, missBg: 0, skipDraw: 0, lastLog: 0
@@ -14489,7 +14533,7 @@ function drainWebGpuCmdRing(source = "presentation") {
           let mappedStageAccepted = false;
           try {
             if (!buf) {
-              wgpuReplayClassifier?.recordMissingResource({ kind: "upload-buffer", id: bufferId });
+              noteMissingResource("upload-buffer", bufferId);
             }
             if (buf) {
               // writeBuffer requires offset & size multiples of 4
@@ -14901,7 +14945,7 @@ function drainWebGpuCmdRing(source = "presentation") {
           let mappedStageAccepted = false;
           try {
             if (!t) {
-              wgpuReplayClassifier?.recordMissingResource({ kind: "upload-texture", id: textureId });
+              noteMissingResource("upload-texture", textureId);
             }
             if (!vpDiagDone) {
               vpDiagNoteTexUpload(textureId, uploadSource, uploadBytes);
@@ -15213,7 +15257,7 @@ function drainWebGpuCmdRing(source = "presentation") {
             webGpuExecStats.beginFbN++;
             const ct = webGpuObjects.textures.get(fbId);
             if (!ct) {
-              wgpuReplayClassifier?.recordMissingResource({ kind: "color-texture", id: fbId });
+              noteMissingResource("color-texture", fbId);
               break;
             }
             colorView = ct.tex.createView({ dimension: "2d", mipLevelCount: 1,
@@ -15263,7 +15307,7 @@ function drainWebGpuCmdRing(source = "presentation") {
           };
           const dt = depthId ? webGpuObjects.textures.get(depthId) : null;
           if (depthId && !dt) {
-            wgpuReplayClassifier?.recordMissingResource({ kind: "depth-texture", id: depthId });
+            noteMissingResource("depth-texture", depthId);
           }
           if (dt) {
             const ds = {
@@ -15392,7 +15436,7 @@ function drainWebGpuCmdRing(source = "presentation") {
           } else {
             webGpuExecStats.missPipe++; pd.pipeMiss++;
             if (pass && !p) {
-              wgpuReplayClassifier?.recordMissingResource({ kind: "pipeline", id: pid });
+              noteMissingResource("pipeline", pid);
             }
           }
           break;
@@ -15405,7 +15449,7 @@ function drainWebGpuCmdRing(source = "presentation") {
             wgpuReplayClassifier?.recordStateOutsidePass({ op: "set-bind-group", recordIndex: read });
           }
           if (!bg) {
-            wgpuReplayClassifier?.recordMissingResource({ kind: "bind-group", id: bgId });
+            noteMissingResource("bind-group", bgId);
           }
           if (bgSlot === 1 && pass) {
             const samplingKey = webGpuObjects.bindGroupSamplingMasks.get(bgId) || "0/0";
@@ -15527,7 +15571,7 @@ function drainWebGpuCmdRing(source = "presentation") {
           if (!pass) {
             wgpuReplayClassifier?.recordStateOutsidePass({ op: "set-vertex-buffer", recordIndex: read });
           }
-          if (!b) wgpuReplayClassifier?.recordMissingResource({ kind: "vertex-buffer", id: bufferId });
+          if (!b) noteMissingResource("vertex-buffer", bufferId);
           if (pass && b) {
             const offset = u32[recWord + 3];
             dtLastVb = { slot, b, offset };
@@ -15558,7 +15602,7 @@ function drainWebGpuCmdRing(source = "presentation") {
           if (!pass) {
             wgpuReplayClassifier?.recordStateOutsidePass({ op: "set-index-buffer", recordIndex: read });
           }
-          if (!b) wgpuReplayClassifier?.recordMissingResource({ kind: "index-buffer", id: bufferId });
+          if (!b) noteMissingResource("index-buffer", bufferId);
           if (pass && b) {
             const format = u32[recWord + 2] === 1 ? "uint32" : "uint16";
             const offset = u32[recWord + 3];
@@ -15804,6 +15848,7 @@ function drainWebGpuCmdRing(source = "presentation") {
           // skipping prevents an invalid draw poisoning the whole
           // frame submit (→ black frame).
           if (!pass) {
+            wgpuIntegrity.skip(SKIP.NO_PASS);
             wgpuReplayClassifier?.recordStateOutsidePass({ op: "draw", recordIndex: read });
           }
           if (pass && passHasPipe && bgValid[0] && bgValid[1] && bgValid[2] &&
@@ -15844,15 +15889,20 @@ function drainWebGpuCmdRing(source = "presentation") {
           }
           else if (pass) {
             webGpuExecStats.skipDraw = (webGpuExecStats.skipDraw || 0) + 1;
+            wgpuIntegrity.skip(skippedDrawCause(true, passHasPipe, bgValid[0] && bgValid[1] && bgValid[2],
+              passNeedsVertexBuffer, vertexBufferValid, false, true));
           }
           break;
         case WGPU_CMD_OP_DRAW_INDEXED:
           if (!pass) {
+            wgpuIntegrity.skip(SKIP.NO_PASS);
             wgpuReplayClassifier?.recordStateOutsidePass({ op: "draw-indexed", recordIndex: read });
           }
           if (pass && !(passHasPipe && bgValid[0] && bgValid[1] && bgValid[2] &&
               (!passNeedsVertexBuffer || vertexBufferValid) && indexBufferValid)) {
             webGpuExecStats.skipDraw = (webGpuExecStats.skipDraw || 0) + 1;
+            wgpuIntegrity.skip(skippedDrawCause(true, passHasPipe, bgValid[0] && bgValid[1] && bgValid[2],
+              passNeedsVertexBuffer, vertexBufferValid, true, indexBufferValid));
           } else if (pass) {
             diagTallyDrawTarget(passFbId, currentBackbufferSourceTextureId);
             vpDiagNoteDraw(passFbId, self._wgCurPipe);
@@ -16797,8 +16847,8 @@ function drainWebGpuCmdRing(source = "presentation") {
           const destinationId = u32[recWord + 2];
           const s = webGpuObjects.textures.get(sourceId);
           const d = webGpuObjects.textures.get(destinationId);
-          if (!s) wgpuReplayClassifier?.recordMissingResource({ kind: "blit-source", id: sourceId });
-          if (!d) wgpuReplayClassifier?.recordMissingResource({ kind: "blit-destination", id: destinationId });
+          if (!s) noteMissingResource("blit-source", sourceId);
+          if (!d) noteMissingResource("blit-destination", destinationId);
           if (s && d) {
             if (!vpDiagDone) {
               vpDiagBlitDst.set(destinationId, (vpDiagBlitDst.get(destinationId) || 0) + 1);
@@ -16831,7 +16881,7 @@ function drainWebGpuCmdRing(source = "presentation") {
             heapPtr: u32[recWord + 5], dstStride: u32[recWord + 6]
           };
           if (!source) {
-            wgpuReplayClassifier?.recordMissingResource({ kind: "readback-source", id: u32[recWord + 1] });
+            noteMissingResource("readback-source", u32[recWord + 1]);
             rb.lose(copy);
             break;
           }
