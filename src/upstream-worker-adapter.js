@@ -395,6 +395,11 @@ export class UpstreamWorkerAdapter {
     this.presentationIntervalHistogramBuckets = null;
     this.presentationFrameLag = 0;
     this.presentationQueueAgeMs = 0;
+    // Patch 0208: null without frame tags (an older core or worker, software).
+    this.newFramesPerSec = null;
+    this.newFramesProducedPerSec = null;
+    this.newFramesShown = null;
+    this.framesOutOfOrder = null;
     this.visualChangeFps = 0;
     this.visualFrameHash = 0;
     this.visualSampleSource = "none";
@@ -1490,6 +1495,10 @@ export class UpstreamWorkerAdapter {
     }
     if (Number.isFinite(response.presentationQueueAgeMs)) {
       this.presentationQueueAgeMs = response.presentationQueueAgeMs;
+    }
+    // null is a value here (no frame tags), not a missing field.
+    for (const key of ["newFramesPerSec", "newFramesProducedPerSec", "newFramesShown", "framesOutOfOrder"]) {
+      if (key in response) this[key] = Number.isFinite(response[key]) ? response[key] : null;
     }
     if (Number.isFinite(response.visualChangeFps)) {
       this.visualChangeFps = response.visualChangeFps;

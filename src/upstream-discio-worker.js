@@ -126,6 +126,7 @@ import {
 import { createWgpuSemanticRuntime } from "./wgpu-semantic-runtime.js";
 import { createWgpuFatalReporter, handleWgpuDeviceLoss, wgpuFatalPageReason } from "./wgpu-device-lifecycle.js";
 import { coreIntegrityOf, createWgpuIntegrity, SKIP, skippedDrawCause } from "./wgpu-integrity.js";
+import { createNewFrameCounter } from "./wgpu-new-frames.js";
 import {
   attemptRetainedWgpuUpload,
   createWgpuMappedStagingPool
@@ -500,6 +501,7 @@ function readWgpuIntegrity() {
     stagingUnsafe: webGpuCausalStats.mappedStagingUnsafeCapacityCount || 0,
     stagingCapacityWaits: webGpuCausalStats.mappedStagingCapacityWaitCount || 0,
     presentRejected: self._wgPresentRejectedLogCount || 0,
+    framesOutOfOrder: wgpuNewFrames.outOfOrder,
     geometryCacheCollisions,
     geometryCacheFailed,
     presents: webGpuExecStats.present
@@ -719,6 +721,11 @@ const presentationIntervalHistogram = new Uint32Array(
   PRESENTATION_HISTOGRAM_BUCKETS_MS.length + 1
 );
 let visualChangeFps = 0;
+// Patch 0208 (src/wgpu-new-frames.js): new XFBs shown and queued per second,
+// per window; null without frame tags (an older core, the software renderer).
+const wgpuNewFrames = createNewFrameCounter();
+let newFramesPerSec = null;
+let newFramesProducedPerSec = null;
 let visualFrameHash = 0;
 let lastVisualFrameHash = 0;
 let lastOglSwapCount = 0;
@@ -4869,6 +4876,9 @@ function resetPresentationBuffer() {
   presentationMaxIntervalMs = 0;
   presentationLongFrameCount = 0;
   visualChangeFps = 0;
+  wgpuNewFrames.reset();
+  newFramesPerSec = null;
+  newFramesProducedPerSec = null;
   visualFrameHash = 0;
   lastVisualFrameHash = 0;
   lastOglSwapCount = 0;
@@ -5343,6 +5353,14 @@ function framePayload({ forceCausalTelemetry = false } = {}) {
     presentationIntervalHistogramBuckets: PRESENTATION_HISTOGRAM_BUCKETS_MS,
     presentationFrameLag,
     presentationQueueAgeMs,
+    // Patch 0208: the reference smoothness rate (new XFBs on the canvas),
+    // the new XFBs queued, those shown since boot (a mean over any span), and
+    // the older pictures shown after newer ones (lifetime); null without
+    // frame tags.
+    newFramesPerSec,
+    newFramesProducedPerSec,
+    newFramesShown: wgpuNewFrames.shownTotal,
+    framesOutOfOrder: wgpuNewFrames.outOfOrder,
     visualChangeFps,
     visualFrameHash,
     visualSampleSource,
@@ -6466,6 +6484,7 @@ function updatePresentationFps() {
     presentationWindowUnderrunCount = presentationUnderrunsSinceFps;
     presentationWindowDropCount = presentationDropsSinceFps;
     visualChangeFps = Math.round((visualChangesSincePresentationFps * 1000) / profileElapsedMs);
+    ({ newFramesPerSec, newFramesProducedPerSec } = wgpuNewFrames.window(profileElapsedMs));
     if (collectMetrics) {
       frameProfileStats = formatProfileWindow(profileElapsedMs);
       lastStructuredProfileWindow = stageWindowFromProfile(profileWindow, profileElapsedMs);
@@ -13420,15 +13439,16 @@ function acquireWgpuVsyncTexture(width, height) {
 // The frame's present: its texture queued for the rAF (and streamed now,
 // v3). False when the frame had no backbuffer pass: nothing new to show,
 // nothing queued, streamed or counted as presented.
-function queueWgpuVsyncFrame(coreFrame, shownVi, stream) {
+function queueWgpuVsyncFrame(coreFrame, shownVi, stream, tag = 0, tagEpoch = 0) {
   const before = wgpuVsync.stats.dropped;
   // No BeginFrame lately (hidden tab): an overflow is not a drop.
   const hidden = wgpuVsyncLoop && performance.now() - wgpuVsyncLastTickAt >= WGPU_VSYNC_FALLBACK_MS;
   const at = performance.now();
-  const frame = wgpuVsync.queueFrame({ coreFrame, shownVi, stream, tick: wgpuVsyncTick, at }, { hidden });
+  const frame = wgpuVsync.queueFrame({ coreFrame, shownVi, stream, tick: wgpuVsyncTick, at, tag, tagEpoch }, { hidden });
   wgpuVsyncCountDrops(before);
   if (!frame) return false;
   if (stream && streamCapture.active) streamWgpuVsyncFrame(frame.tex, coreFrame);
+  wgpuNewFrames.queued(tag, tagEpoch);
   if (wgpuVsyncTracking()) wgpuGamePacer.stamp(at);
   wgpuVsyncIdleTicks = 0;
   if (!wgpuVsyncLoop) {
@@ -13558,6 +13578,7 @@ function presentWgpuVsyncFrame({ newest = false, hidden = false, t = null, refre
   dev.queue.submit([enc.finish()]);
   // Same queue: the copy runs before any later pass renders into f.tex.
   wgpuVsync.shown(f);
+  wgpuNewFrames.shown(f.tag, f.tagEpoch);
   // v3: streamed at queue time (streamWgpuVsyncFrame), not here.
   recordPresentedFrame(f.coreFrame, f.shownVi);
   return true;
@@ -16345,6 +16366,10 @@ function drainWebGpuCmdRing(source = "presentation") {
           break;
         case WGPU_CMD_OP_SUBMIT_PRESENT:
           backbufferPresentPending = false;
+          // Patch 0208: the frame this present shows (u0, 0 = unknown) and
+          // its tag epoch (u1).
+          const presentFrameTag = u32[recWord + 1];
+          const presentFrameTagEpoch = u32[recWord + 2];
           frameCapPush("PRESENT");
           vpDiagPresent();
           if ((self._wgPresentCount || 0) % 600 === 0) {
@@ -16771,9 +16796,13 @@ function drainWebGpuCmdRing(source = "presentation") {
             // The frame's texture (kept across drains) queued; streamed now
             // (v3); shown and counted at the next rAF. A present with no
             // backbuffer pass since the previous one queues nothing.
-            queueWgpuVsyncFrame(api?.getFrame?.() ?? 0, wgpuExactCapture.currentBoot(), !hardwareInputMarkerApplied);
+            queueWgpuVsyncFrame(api?.getFrame?.() ?? 0, wgpuExactCapture.currentBoot(), !hardwareInputMarkerApplied,
+              presentFrameTag, presentFrameTagEpoch);
           } else {
             if (streamCapture.active && !hardwareInputMarkerApplied) streamCapture.offerCanvas(renderCanvas, api?.getFrame?.() ?? 0);
+            // Shown at the submit: queued and shown at once.
+            wgpuNewFrames.queued(presentFrameTag, presentFrameTagEpoch);
+            wgpuNewFrames.shown(presentFrameTag, presentFrameTagEpoch);
             recordPresentedFrame(api?.getFrame?.() ?? 0, wgpuExactCapture.currentBoot());
           }
           wgpuPresentedSource = {

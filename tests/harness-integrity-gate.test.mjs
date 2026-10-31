@@ -81,6 +81,16 @@ test("an older worker or core is reported, never failed", () => {
   assert.deepEqual(i.fatal, []);
 });
 
+test("an older picture shown after a newer one (patch 0208) fails the window; untagged, it is null", () => {
+  assert.deepEqual(integrityOf({ ...clean, framesOutOfOrder: 0 }, { ...clean, framesOutOfOrder: 2 }).fatal, ["framesOutOfOrder 2"]);
+  // a state load is no exception: the core's tag epoch already keeps it out
+  assert.deepEqual(integrityOf({ ...clean, framesOutOfOrder: 0 }, { ...clean, framesOutOfOrder: 1 }, { postload: true }).fatal, ["framesOutOfOrder 1"]);
+  // an older core (no frame tags) reports null: no delta, never fatal
+  const untagged = integrityOf({ ...clean, framesOutOfOrder: null }, { ...clean, framesOutOfOrder: null });
+  assert.ok(!("framesOutOfOrder" in untagged.delta));
+  assert.deepEqual(untagged.fatal, []);
+});
+
 test("--integrity-allow takes fatal counters only", () => {
   assert.deepEqual(parseIntegrityAllow("deviceLosses, uncapturedErrors"), ["deviceLosses", "uncapturedErrors"]);
   assert.deepEqual(parseIntegrityAllow(undefined), []);
@@ -133,8 +143,10 @@ test("liveness: at speed >= 95 %, a picture changing under the floor is FROZEN (
 
 test("race-perf reads liveness around the window and invalidates a frozen steady run", async () => {
   const race = await readFile(new URL("../harness/probes/race-perf.mjs", import.meta.url), "utf8");
-  assert.match(race, /const visualFps = \[\(await readFrameInfo\(page\)\.catch\(\(\) => null\)\)\?\.vis \?\? null\];/);
-  assert.match(race, /visualFps\.push\(\(await readFrameInfo\(page\)\.catch\(\(\) => null\)\)\?\.vis \?\? null\);/);
+  assert.match(race, /const infoStart = await readFrameInfo\(page\)\.catch\(\(\) => null\);\n\s+const visualFps = \[infoStart\?\.vis \?\? null\];/);
+  assert.match(race, /const mid = await readFrameInfo\(page\)\.catch\(\(\) => null\);\n\s+visualFps\.push\(mid\?\.vis \?\? null\);/);
   assert.match(race, /visualFps\.push\(info\?\.vis \?\? null\);/);
+  // the same readings give the new frames shown (patch 0208), the reference
+  assert.match(race, /newFramesPerSec: \{ mean: newFramesRate\(infoStart, info\), /);
   assert.match(race, /const frozen = o\.phase === "steady" \? frozenReason\(c, \{ minFps: o\.frozenFps \}\) : null;\n\s+if \(frozen\) why\.push\(frozen\);/);
 });

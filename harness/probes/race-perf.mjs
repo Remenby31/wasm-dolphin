@@ -120,7 +120,7 @@ import { parseArgs } from "node:util";
 
 import { exportRef } from "../cli.mjs";
 import { defaultDisplay, ensureServer, loadHarnessState, readCoreProgress, readFrameInfo, readTimeline, REPO_ROOT, workerRequest, X11_ARGS } from "../lib/browser.mjs";
-import { PRESETS, SCENE_PROTOCOLS, sceneProtocolCheck, visualProbeCheck, xfbDecodeOff } from "../lib/matrix.mjs";
+import { newFramesRate, PRESETS, SCENE_PROTOCOLS, sceneProtocolCheck, visualProbeCheck, xfbDecodeOff } from "../lib/matrix.mjs";
 import { claim, release } from "../lib/ownership.mjs";
 import { acquirePerfLock } from "../lib/perf-lock.mjs";
 import { MIN_BATTERY_PERCENT, powerDrained, powerSnapshot } from "../lib/system.mjs";
@@ -353,8 +353,12 @@ export async function measure(session, o) {
     // after, outside the window.
     const ticksBefore = (await readCoreProgress(page).catch(() => null))?.coreTicks ?? null;
     // Liveness: the picture's change rate (visualChangeFps) at the start, the
-    // middle and the end of the window (lib/headroom.mjs frozenReason).
-    const visualFps = [(await readFrameInfo(page).catch(() => null))?.vis ?? null];
+    // middle and the end of the window (lib/headroom.mjs frozenReason). The
+    // same readings carry the new frames shown (patch 0208): their mean over
+    // the window, and the worker's 500 ms rate at each reading.
+    const infoStart = await readFrameInfo(page).catch(() => null);
+    const visualFps = [infoStart?.vis ?? null];
+    const newFps = [infoStart?.newFps ?? null];
     const t0 = await page.evaluate(() => performance.timeOrigin + performance.now());
     // The window: node timers only. The rings (VI 8192, presents 16384)
     // hold far more than a window, so nothing is read until it ends.
@@ -393,11 +397,14 @@ export async function measure(session, o) {
       if (s === Math.floor(o.secs / 2)) {
         threads.push(rendererThreads(session.profileDir));
         gpuThreads.push(gpuProcessThreads(session.profileDir));
-        visualFps.push((await readFrameInfo(page).catch(() => null))?.vis ?? null);
+        const mid = await readFrameInfo(page).catch(() => null);
+        visualFps.push(mid?.vis ?? null);
+        newFps.push(mid?.newFps ?? null);
       }
     }
     const info = await readFrameInfo(page);
     visualFps.push(info?.vis ?? null);
+    newFps.push(info?.newFps ?? null);
     const hrEnd = hrStart && !hrStart.error ? await headroomRead(page) : null;
     const readsEnd = await workerReads(page, o.workerRead);
     const integrityEnd = await readIntegrity(page, { expected: o.integrityExpected });
@@ -494,6 +501,10 @@ export async function measure(session, o) {
       speedP5: round(core.speedP5), speedMin: round(core.speedMin),
       gameFps: info?.vis ?? null,
       visualFps: visualFps.map((v) => (v == null ? null : round(v, 1))),
+      // The smoothness reference: new XFBs on the canvas per second (patch
+      // 0208; null without frame tags), its mean over the window and the
+      // median of the readings.
+      newFramesPerSec: { mean: newFramesRate(infoStart, info), median: newFps.some((v) => v != null) ? round(median(newFps.filter((v) => v != null)), 1) : null, readings: newFps },
       presents: pres.presents, viOutputs: timeline.vi.length,
       // --display: what the screen showed (one worker rAF per BeginFrame).
       ...(o.display ? { display: displayStats(timeline) } : {}),
@@ -833,7 +844,7 @@ function resolveSide(name, spec) {
   return { name, label: spec, root: exportRef(spec), temp: true };
 }
 
-const brief = (m) => m && `speed ${m.speed} % (p5 ${m.speedP5}) game ${m.gameFps} fps vi p99 ${m.viIntervalMs.p99} ms hitches ${m.hitchesPerMin}/min busiest thread ${m.rendererThreads.at(-1)?.busiest} % load ${m.load1.median}${m.overloaded ? " OVERLOADED" : ""}${m.pc?.samples ? ` pc ${m.pc.samples} samples` : ""}${m.layoutRefused > 0 ? ` REGIONS REFUSED FOR THE HEAP LAYOUT ${m.layoutRefused}` : ""}${m.heapPatched > 0 ? ` heap-patched ${m.heapPatched}` : ""}${integrityBrief(m.integrity)}`;
+const brief = (m) => m && `speed ${m.speed} % (p5 ${m.speedP5}) game ${m.gameFps} fps new ${m.newFramesPerSec?.mean ?? "–"}/s vi p99 ${m.viIntervalMs.p99} ms hitches ${m.hitchesPerMin}/min busiest thread ${m.rendererThreads.at(-1)?.busiest} % load ${m.load1.median}${m.overloaded ? " OVERLOADED" : ""}${m.pc?.samples ? ` pc ${m.pc.samples} samples` : ""}${m.layoutRefused > 0 ? ` REGIONS REFUSED FOR THE HEAP LAYOUT ${m.layoutRefused}` : ""}${m.heapPatched > 0 ? ` heap-patched ${m.heapPatched}` : ""}${integrityBrief(m.integrity)}`;
 
 async function main() {
   const { values } = parseArgs({
@@ -1089,6 +1100,7 @@ async function main() {
       viP99Ms: describe(m.map((x) => x.viIntervalMs.p99)), presentP99Ms: describe(m.map((x) => x.presentIntervalMs.p99)),
       hitchesPerMin: describe(m.map((x) => x.hitchesPerMin)), busiestThread: describe(m.map((x) => x.rendererThreads.at(-1)?.busiest)),
       presentsPerSecond: describe(m.map((x) => x.presentsPerSecond)),
+      newFramesPerSec: describe(m.map((x) => x.newFramesPerSec?.mean)),
       // --counters with xctrace: per 1000 guest cycles, and the fractions.
       ...(m.some((x) => x.perKiloGuestCycles) ? {
         perKiloGuestCycles: Object.fromEntries(Object.keys(m.find((x) => x.perKiloGuestCycles).perKiloGuestCycles).map((k) => [k, describe(m.map((x) => x.perKiloGuestCycles?.[k]), 3)])),
@@ -1197,7 +1209,8 @@ async function main() {
   };
   writeFileSync(path.join(outDir, "summary.json"), JSON.stringify(summary, null, 1) + "\n");
   const med = (n) => summary[n]?.cold?.speed?.median ?? "-";
-  console.log(`[race-perf] ${sides.baseline ? `baseline ${med("baseline")} % → candidate ${med("candidate")} %, paired change ${summary.change.median ?? `withheld (${summary.change.withheld})`}${summary.change.median != null ? ` % over ${summary.change.pairs} pairs` : ""}` : `speed median ${med("candidate")} %`}${failed.length ? `; ${failed.length} failed run(s): ${failed.map((f) => `r${f.run} ${f.side} ${f.why}`).join(", ")}` : ""} -> ${outDir}`);
+  const newMed = (n) => summary[n]?.cold?.newFramesPerSec?.median ?? "-";
+  console.log(`[race-perf] ${sides.baseline ? `baseline ${med("baseline")} % → candidate ${med("candidate")} %, paired change ${summary.change.median ?? `withheld (${summary.change.withheld})`}${summary.change.median != null ? ` % over ${summary.change.pairs} pairs` : ""}` : `speed median ${med("candidate")} %`}; new frames ${sides.baseline ? `${newMed("baseline")} → ${newMed("candidate")}` : newMed("candidate")}/s${failed.length ? `; ${failed.length} failed run(s): ${failed.map((f) => `r${f.run} ${f.side} ${f.why}`).join(", ")}` : ""} -> ${outDir}`);
   process.exitCode = failed.length || summary.change?.withheld || lockOverlap.length ? 1 : 0;
 }
 

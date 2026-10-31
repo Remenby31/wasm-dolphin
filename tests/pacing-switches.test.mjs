@@ -224,7 +224,8 @@ test("presentvsync catch-up: a frame that already waited a BeginFrame gives way 
   const present = worker.slice(worker.indexOf("function presentWgpuVsyncFrame("), worker.indexOf("function wgpuCanvasUsage("));
   // the behaviour is tested on the module (tests/wgpu-vsync-queue.test.mjs)
   assert.match(present, /wgpuVsync\.takeForDisplay\(wgpuVsyncTick, pace\)/);
-  assert.match(worker, /wgpuVsync\.queueFrame\(\{ coreFrame, shownVi, stream, tick: wgpuVsyncTick, at \}, \{ hidden \}\)/);
+  // (the frame carries its 0208 tag too: tests/wgpu-new-frames.test.mjs)
+  assert.match(worker, /wgpuVsync\.queueFrame\(\{ coreFrame, shownVi, stream, tick: wgpuVsyncTick, at, tag, tagEpoch \}, \{ hidden \}\)/);
   assert.match(worker, /case "validationReadPresentVsync":/);
 });
 
