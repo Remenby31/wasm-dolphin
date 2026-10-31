@@ -5,23 +5,23 @@ import test from "node:test";
 import { wasmEngine } from "../src/wasm-engine.js";
 import { defaultWgpuGeometryCacheMode, requestedWgpuGeometryCacheMode, wgpuGeometryCacheModeFor } from "../src/wgpu-replay-diagnostics.js";
 
-// 0204: the geometry content cache (on by default under V8, ?wgpugeomcache=0|1|2).
+// 0204: the geometry content cache (on by default under V8 and JSC, ?wgpugeomcache=0|1|2).
 const patch = await readFile(
   new URL("../patches/dolphin-wasm/snapshot/0204-webgpu-geometry-content-cache.patch", import.meta.url),
   "utf8"
 );
 const worker = await readFile(new URL("../src/upstream-discio-worker.js", import.meta.url), "utf8");
 
-test("geometry cache default: on under V8 only", () => {
-  assert.equal(defaultWgpuGeometryCacheMode("v8"), 1);
-  for (const engine of ["jsc", "spidermonkey", "unknown"]) assert.equal(defaultWgpuGeometryCacheMode(engine), 0, engine);
+test("geometry cache default: on under V8 and JSC", () => {
+  for (const engine of ["v8", "jsc"]) assert.equal(defaultWgpuGeometryCacheMode(engine), 1, engine);
+  for (const engine of ["spidermonkey", "unknown"]) assert.equal(defaultWgpuGeometryCacheMode(engine), 0, engine);
   assert.equal(requestedWgpuGeometryCacheMode("", 1), 1, "the engine's default");
   assert.equal(requestedWgpuGeometryCacheMode("?wgpugeomcache=0", 1), 0, "=0 turns the default off");
   assert.equal(requestedWgpuGeometryCacheMode("?wgpugeomcache=1", 0), 1, "=1 turns it on elsewhere");
   assert.equal(requestedWgpuGeometryCacheMode("?wgpugeomcache=yes", 1), 1, "a non-canonical value keeps the default");
 });
 
-test("the page's mode, from the user agent: on in Chrome, off in Safari and every iOS browser", () => {
+test("the page's mode, from the user agent: on in Chrome, Safari and every iOS browser, off in Firefox", () => {
   const UA = {
     chromeMac: "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/130.0.0.0 Safari/537.36",
     safariMac: "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/18.0 Safari/605.1.15",
@@ -35,15 +35,17 @@ test("the page's mode, from the user agent: on in Chrome, off in Safari and ever
   const mode = (userAgent, probe, search = "", { pack = true, loadFence = false } = {}) =>
     wgpuGeometryCacheModeFor({ search, engine: wasmEngine({ search, userAgent, probe }), pack, loadFence });
   assert.equal(mode(UA.chromeMac, V8), 1);
-  assert.equal(mode(UA.safariMac, JSC), 0);
-  assert.equal(mode(UA.safariIos, JSC), 0);
-  assert.equal(mode(UA.chromeIos, JSC), 0, "Chrome on iOS runs JavaScriptCore");
-  assert.equal(mode(UA.chromeIos, V8), 0, "an iOS user agent is never V8");
+  assert.equal(mode(UA.safariMac, JSC), 1);
+  assert.equal(mode(UA.safariIos, JSC), 1);
+  assert.equal(mode(UA.chromeIos, JSC), 1, "Chrome on iOS runs JavaScriptCore");
+  assert.equal(mode(UA.chromeIos, V8), 0, "an iOS user agent is never V8 (unknown engine: off)");
   assert.equal(mode(UA.firefox, SM), 0);
-  assert.equal(mode(UA.safariMac, JSC, "?wgpugeomcache=1"), 1, "=1 turns it on under JSC");
+  assert.equal(mode(UA.firefox, SM, "?wgpugeomcache=1"), 1, "=1 turns it on under SpiderMonkey");
+  assert.equal(mode(UA.safariMac, JSC, "?wgpugeomcache=0"), 0, "=0 turns it off under JSC");
   assert.equal(mode(UA.chromeMac, V8, "?wgpugeomcache=0"), 0);
   assert.equal(mode(UA.chromeMac, V8, "?wgpugeomcache="), 1, "an empty value keeps the default");
-  assert.equal(mode(UA.safariMac, JSC, "?wgpugeomcache="), 0, "an empty value keeps the default");
+  assert.equal(mode(UA.safariMac, JSC, "?wgpugeomcache="), 1, "an empty value keeps the default");
+  assert.equal(mode(UA.firefox, SM, "?wgpugeomcache="), 0, "an empty value keeps the default");
   assert.equal(mode(UA.chromeMac, V8, "?wgpugeomcache=2"), 3);
   assert.equal(mode(UA.chromeMac, V8, "", { pack: false }), 0, "no pack, no cache");
   assert.equal(mode(UA.chromeMac, V8, "?wgpugeomcache=1", { loadFence: true }), 0, "never with the load fence");
