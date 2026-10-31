@@ -17,12 +17,14 @@
 //     --query "<base query>" --extra "&wgpureplayms=0" [--runs 4 (visits per side, even)] [--vi 240,600]
 //     [--candidate <dir to serve>] [--lock-wait 14400]
 // One tree serves both sides (only --extra differs): no --baseline.
-// Exit 1 when a visit failed or a side has no picture or no input reading.
+// Exit 1 when a visit failed, a side has no picture or no input reading, or
+// a visit's replay integrity broke (glitch-meter G2, lib/integrity.mjs).
 // Holds the perf lock (HARNESS_PERF_LOCK); a watchdog after it; always exits.
 import { mkdirSync, writeFileSync, existsSync } from "node:fs";
 import path from "node:path";
 import { parseArgs } from "node:util";
 import { ensureServer, loadHarnessState, captureAtVi } from "../lib/browser.mjs";
+import { integrityBrief, integrityOf, readIntegrity, treeHasIntegrity } from "../lib/integrity.mjs";
 import { openSession } from "../lib/session.mjs";
 import { setPad } from "../lib/gamepad-mock.mjs";
 import { acquirePerfLock } from "../lib/perf-lock.mjs";
@@ -36,6 +38,8 @@ for (const k of ["iso", "state", "port", "out", "query", "extra"]) if (!o[k]) th
 if (existsSync(o.out)) throw new Error(`${o.out} exists`);
 const root = path.resolve(o.candidate ?? path.join(import.meta.dirname, "..", ".."));
 const perSide = Math.max(2, Number(o.runs) + (Number(o.runs) % 2));
+// one tree serves both sides: with the counters, its worker must answer
+const integrityExpected = treeHasIntegrity(root);
 const VIS = o.vi.split(",").map(Number).filter((n) => n > 0);
 const log = (m) => console.log(`[gates] ${m}`);
 const order = [];
@@ -53,6 +57,8 @@ try {
     try {
       const loaded = await loadHarnessState(session.page, session.url);
       if (!loaded?.loaded) throw new Error(`savestate not loaded: ${JSON.stringify(loaded)}`);
+      // glitch-meter G2: the replay's integrity from the load to the visit's end
+      const integrityStart = await readIntegrity(session.page, { expected: integrityExpected });
       for (const index of VIS) {
         const f = await captureAtVi(session.page, { index, fromLoad: true, timeoutMs: 60000 });
         v.frames[index] = f.error ? { error: f.error } : { width: f.width, height: f.height, b64: Buffer.from(f.data).toString("base64") };
@@ -66,13 +72,14 @@ try {
       }
       await sleep(1000);
       v.input = await session.page.evaluate(() => window.__causalTelemetry?.input?.visible ?? null);
+      v.integrity = integrityOf(integrityStart, await readIntegrity(session.page, { expected: integrityExpected }), { postload: true });
     } catch (e) {
       v.error = String(e?.message || e);
     } finally {
       await session.close();
     }
     const i = v.input;
-    log(`visit ${n} ${side}: ${v.error ?? `frames ${VIS.map((x) => (v.frames[x]?.error ? "err" : "ok")).join("/")}, input ${i ? `${i.visibleCount} seen, p95 ${Math.round(i.visibleAgeP95Ms)} ms, max ${Math.round(i.visibleAgeMaxMs)} ms` : "none"}`}`);
+    log(`visit ${n} ${side}: ${v.error ?? `frames ${VIS.map((x) => (v.frames[x]?.error ? "err" : "ok")).join("/")}, input ${i ? `${i.visibleCount} seen, p95 ${Math.round(i.visibleAgeP95Ms)} ms, max ${Math.round(i.visibleAgeMaxMs)} ms` : "none"}${integrityBrief(v.integrity)}`}`);
     visits.push(v);
   }
 } finally {
@@ -95,7 +102,9 @@ function frameDiff(a, b) {
 }
 const frameOf = (x) => ({ width: x.width, height: x.height, data: Buffer.from(x.b64, "base64") });
 const median = (a) => { const s = [...a].sort((x, y) => x - y); return s.length ? s[s.length >> 1] : null; };
-const summary = { probe: "replay-gates", extra: o.extra, order, picture: {}, input: {} };
+const summary = { probe: "replay-gates", extra: o.extra, order, picture: {}, input: {},
+  integrity: visits.filter((v) => v.integrity?.fatal?.length).map((v) => ({ visit: v.n, side: v.side, fatal: v.integrity.fatal })) };
+for (const f of summary.integrity) log(`INTEGRITY visit ${f.visit} ${f.side}: ${f.fatal.join(", ")}`);
 for (const index of VIS) {
   const of = (side) => visits.filter((v) => v.side === side && v.frames[index]?.b64).map((v) => frameOf(v.frames[index]));
   const B = of("base"), C = of("candidate"), bb = [], cb = [];
@@ -122,4 +131,5 @@ writeFileSync(path.join(o.out, "visits.json"), JSON.stringify(visits.map(({ fram
 const failed = visits.filter((v) => v.error || !v.input?.enabled || !v.input.visibleCount || VIS.some((i) => !v.frames[i]?.b64));
 const empty = ["base", "candidate"].filter((side) => !summary.input[side].visits || !summary.input[side].presses || VIS.some((i) => !summary.picture[i][side === "base" ? "baseVsBase" : "candidateVsBase"].length));
 if (failed.length || empty.length) log(`FAILED: ${failed.length} visit(s) without a full reading${empty.length ? `, no data for ${empty.join(" and ")}` : ""}`);
-process.exit(failed.length || empty.length ? 1 : 0);
+// a picture known wrong (an integrity counter moved) fails the gate too
+process.exit(failed.length || empty.length || summary.integrity.length ? 1 : 0);
