@@ -1,12 +1,14 @@
 Patch 0196: remove the per-game fast paths.
 
-The cached interpreter carried fast paths written for one commercial game at
-fixed guest addresses, on by default: an idle poll loop and a title loop
-rewritten as host loops, five call-branch helpers, three wasm-JIT imports
-(and the inline wasm calls to them), their verify/read helpers, counters,
-stats-line segments and disassembler printers. All of it goes; a bl to those
-addresses is now an ordinary call. Disable bits 0 and 1 are left unused.
-AOT_COMPILER_VERSION 37: block and region modules lose three imports.
+The core carried fast paths written for one commercial game's code layout,
+at fixed guest addresses, on by default: an idle poll loop and a title loop
+rewritten as host loops, five call-branch helpers, the OS interrupt routines
+(OSDisable/Enable/RestoreInterrupts) matched at the address one game links
+them, four wasm-JIT imports and the inline wasm calls to them, their
+verify/read helpers, counters, stats-line segments and disassembler
+printers, and a CoreTiming probe for one wedge address. All of it goes; a bl
+to those addresses is now an ordinary call. Disable bits 0, 1 and 2 are left
+unused. AOT_COMPILER_VERSION 37: block and region modules lose four imports.
 Comments that named games now name the genre.
 
 diff --git a/Source/Core/Common/GL/GLInterface/Emscripten.cpp b/Source/Core/Common/GL/GLInterface/Emscripten.cpp
@@ -46,6 +48,75 @@ diff --git a/Source/Core/Core/CMakeLists.txt b/Source/Core/Core/CMakeLists.txt
      # the System Menu would normally have created are already present, and
      # fail with "Could not write to/read from Wii system memory" when they are
      # not. The copy reads File::GetSysDirectory(), which this build fixes at
+diff --git a/Source/Core/Core/CoreTiming.cpp b/Source/Core/Core/CoreTiming.cpp
+--- a/Source/Core/Core/CoreTiming.cpp
++++ b/Source/Core/Core/CoreTiming.cpp
+@@ -529,7 +529,7 @@ void CoreTimingManager::Advance()
+     const u32 n = ++s_ct;
+     if ((n & 0x3FFF) == 0)
+     {
+-      // §27g: when the PowerPC is wedged at 0x80335E98 post-load, what
++      // §27g: when the PowerPC is wedged post-load, what
+       // interrupt is the game waiting on? Dump PI cause/mask (the
+       // master agg of DI/SI/EXI/AI/DSP/VI/PE/CP) alongside pc.
+       auto& pi = m_system.GetProcessorInterface();
+@@ -542,56 +542,6 @@ void CoreTimingManager::Advance()
+              static_cast<u32>(ppc_state.pc),
+              pi.GetCause(), pi.GetMask());
+     }
+-    // §28n: decisively identify WHAT 0x80335E98 polls. When wedged
+-    // there, dump MSR[EE], the 6 instruction words at pc (decode the
+-    // poll's lwz base/offset by hand), the polled memory word, and the
+-    // GPRs the loop uses. Fire the first 6 times only (one-shot-ish).
+-    if (ppc_state.pc == 0x80335E98u)
+-    {
+-      static std::atomic<u32> s_w{0};
+-      if (++s_w <= 6)
+-      {
+-        auto& mem = m_system.GetMemory();
+-        const u32 i0 = mem.Read_U32(0x80335E98u);
+-        const u32 i1 = mem.Read_U32(0x80335E9Cu);
+-        const u32 i2 = mem.Read_U32(0x80335EA0u);
+-        const u32 i3 = mem.Read_U32(0x80335EA4u);
+-        const u32 i4 = mem.Read_U32(0x80335E90u);  // 2 before
+-        const u32 i5 = mem.Read_U32(0x80335E94u);  // 1 before
+-        // Decode the instr at pc: if lwz (opcode 32) rD,d(rA), the
+-        // polled address = gpr[rA] + sign_extend(d).
+-        const u32 op = (i0 >> 26) & 0x3F;
+-        const u32 rA = (i0 >> 16) & 0x1F;
+-        const s32 d = static_cast<s16>(i0 & 0xFFFF);
+-        const u32 polled =
+-            (op == 32u) ? (ppc_state.gpr[rA] + static_cast<u32>(d)) : 0u;
+-        const u32 pval = polled ? mem.Read_U32(polled) : 0u;
+-        EM_ASM({ console.log('[s28n-wedge] eeBit=' + $0 +
+-            ' i@-8..+12=' + ($1>>>0).toString(16) + ',' +
+-            ($2>>>0).toString(16) + ',I0=' + ($3>>>0).toString(16) +
+-            ',' + ($4>>>0).toString(16) + ',' + ($5>>>0).toString(16) +
+-            ',' + ($6>>>0).toString(16) +
+-            ' op=' + $7 + ' rA=' + $8 + ' d=' + $9 +
+-            ' polledAddr=0x' + ($10>>>0).toString(16) +
+-            ' polledVal=0x' + ($11>>>0).toString(16)); },
+-            static_cast<int>(ppc_state.msr.EE),
+-            i4, i5, i0, i1, i2, i3,
+-            static_cast<int>(op), static_cast<int>(rA),
+-            static_cast<int>(d), polled, pval);
+-        EM_ASM({ console.log('[s28n-gpr] r0-7=' +
+-            ($0>>>0).toString(16)+','+($1>>>0).toString(16)+','+
+-            ($2>>>0).toString(16)+','+($3>>>0).toString(16)+','+
+-            ($4>>>0).toString(16)+','+($5>>>0).toString(16)+','+
+-            ($6>>>0).toString(16)+','+($7>>>0).toString(16)+
+-            ' r28-31=' + ($8>>>0).toString(16)+','+
+-            ($9>>>0).toString(16)+','+($10>>>0).toString(16)+','+
+-            ($11>>>0).toString(16)); },
+-            ppc_state.gpr[0], ppc_state.gpr[1], ppc_state.gpr[2],
+-            ppc_state.gpr[3], ppc_state.gpr[4], ppc_state.gpr[5],
+-            ppc_state.gpr[6], ppc_state.gpr[7], ppc_state.gpr[28],
+-            ppc_state.gpr[29], ppc_state.gpr[30], ppc_state.gpr[31]);
+-      }
+-    }
+   }
+ #endif
+   m_last_oc_factor = m_config_oc_factor;
 diff --git a/Source/Core/Core/HW/DVD/FileMonitor.cpp b/Source/Core/Core/HW/DVD/FileMonitor.cpp
 --- a/Source/Core/Core/HW/DVD/FileMonitor.cpp
 +++ b/Source/Core/Core/HW/DVD/FileMonitor.cpp
@@ -67,31 +138,33 @@ diff --git a/Source/Core/Core/PowerPC/CachedInterpreter/CachedInterpreter.cpp b/
         int fp_index, int fctiwz_index, int interpret_index, int fastcheck_gpfifo_index,
 -       int fast_os_interrupt_call_index, int fast_melee_input_status_call_index,
 -       int fast_melee_status_call_index, int fast_melee_service_poll_call_index, int fma_index,
-+       int fast_os_interrupt_call_index, int fma_index,
++       int fma_index,
         int ready_bits_ptr, int region_request), {
    // Day-7 Phase B: cache lookup before WebAssembly.Module compilation.
    // Module._dolphinJitCache is populated on each pthread by the pre-js
-@@ -248,9 +247,6 @@ EM_JS(int, DolphinWeb_CachedInterpreterCompileWasmBlock,
+@@ -247,10 +246,6 @@ EM_JS(int, DolphinWeb_CachedInterpreterCompileWasmBlock,
+           fctiwz: wasmTable.get(fctiwz_index),
            interpret: wasmTable.get(interpret_index),
            fastcheck_gpfifo: wasmTable.get(fastcheck_gpfifo_index),
-           fast_os_interrupt_call: wasmTable.get(fast_os_interrupt_call_index),
+-          fast_os_interrupt_call: wasmTable.get(fast_os_interrupt_call_index),
 -          fast_melee_input_status_call: wasmTable.get(fast_melee_input_status_call_index),
 -          fast_melee_status_call: wasmTable.get(fast_melee_status_call_index),
 -          fast_melee_service_poll_call: wasmTable.get(fast_melee_service_poll_call_index),
            fma: wasmTable.get(fma_index),
            // Region chaining (patch 0102): a region's exit stub asks the core
            // for the next region and tail-calls it through the core's table.
-@@ -391,8 +387,7 @@ std::atomic<u32> s_dolphin_web_disable_mask{0};
+@@ -391,9 +386,7 @@ std::atomic<u32> s_dolphin_web_disable_mask{0};
  // (and wherever relaxed SIMD is missing or unfused): the plain-f64 path.
  std::atomic<bool> s_fused_madd{false};
  
 -constexpr u32 DOLPHIN_WEB_DISABLE_MELEELOOP   = 1u << 0;  // MeleeIdlePollLoop + MeleeTitleLoop
 -constexpr u32 DOLPHIN_WEB_DISABLE_MELEECALL   = 1u << 1;  // 5 Melee fast call-branch helpers
-+// Bits 0 and 1 are unused (patch 0196 removed the helpers they gated).
- constexpr u32 DOLPHIN_WEB_DISABLE_OSINTERRUPT = 1u << 2;  // OsInterruptFunction + call-branch
+-constexpr u32 DOLPHIN_WEB_DISABLE_OSINTERRUPT = 1u << 2;  // OsInterruptFunction + call-branch
++// Bits 0, 1 and 2 are unused (patch 0196 removed the helpers they gated).
  constexpr u32 DOLPHIN_WEB_DISABLE_DCBXLOOP    = 1u << 3;  // DcbxLoop
  constexpr u32 DOLPHIN_WEB_DISABLE_FASTBRANCH  = 1u << 4;  // FastBranch + FastBranchBdnz
-@@ -1154,7 +1149,7 @@ void RetryDeferredWasmBlocks(CachedInterpreter& cpu)
+ constexpr u32 DOLPHIN_WEB_DISABLE_FASTFP      = 1u << 5;  // FastFloat emit path
+@@ -1154,7 +1147,7 @@ void RetryDeferredWasmBlocks(CachedInterpreter& cpu)
  
  bool s_wasm_jit_direct_only = true;
  u32 s_wasm_direct_tier_reject_count = 0;
@@ -100,7 +173,7 @@ diff --git a/Source/Core/Core/PowerPC/CachedInterpreter/CachedInterpreter.cpp b/
  // the mixed tier compiled only 2048 then stopped while the rest
  // still fell to the slow interpreter (measured: mixed:2048/2048,
  // short:2247, battle ~30%). Mixed keeps blocks alive with
-@@ -1236,25 +1231,6 @@ u32 s_fast_byte_mem_store_ops = 0;
+@@ -1236,180 +1229,16 @@ u32 s_fast_byte_mem_store_ops = 0;
  u32 s_fast_half_mem_load_ops = 0;
  u32 s_fast_half_mem_store_ops = 0;
  u32 s_fast_multiword_mem_ops = 0;
@@ -123,13 +196,17 @@ diff --git a/Source/Core/Core/PowerPC/CachedInterpreter/CachedInterpreter.cpp b/
 -u32 s_fast_melee_title_loop_blocks = 0;
 -u32 s_fast_melee_title_loop_iterations = 0;
 -u32 s_fast_melee_title_loop_rejects = 0;
- u32 s_fast_os_interrupt_compile_attempts = 0;
- u32 s_fast_os_interrupt_compile_rejects = 0;
- u32 s_fast_os_interrupt_mismatch_address = 0xffffffff;
-@@ -1266,39 +1242,6 @@ u32 s_fast_os_interrupt_restore_ops = 0;
- u32 s_fast_os_interrupt_inline_ops = 0;
- u32 s_fast_os_interrupt_inline_fallbacks = 0;
- u32 s_fast_os_interrupt_verified_modes = 0;
+-u32 s_fast_os_interrupt_compile_attempts = 0;
+-u32 s_fast_os_interrupt_compile_rejects = 0;
+-u32 s_fast_os_interrupt_mismatch_address = 0xffffffff;
+-u32 s_fast_os_interrupt_mismatch_expected = 0;
+-u32 s_fast_os_interrupt_mismatch_actual = 0;
+-u32 s_fast_os_interrupt_disable_ops = 0;
+-u32 s_fast_os_interrupt_enable_ops = 0;
+-u32 s_fast_os_interrupt_restore_ops = 0;
+-u32 s_fast_os_interrupt_inline_ops = 0;
+-u32 s_fast_os_interrupt_inline_fallbacks = 0;
+-u32 s_fast_os_interrupt_verified_modes = 0;
 -u32 s_fast_melee_input_status_verify_attempts = 0;
 -u32 s_fast_melee_input_status_verify_rejects = 0;
 -u32 s_fast_melee_input_status_inline_ops = 0;
@@ -166,10 +243,15 @@ diff --git a/Source/Core/Core/PowerPC/CachedInterpreter/CachedInterpreter.cpp b/
  u32 s_fast_branch_ops = 0;
  u32 s_fast_branch_bcx_ops = 0;
  u32 s_fast_branch_bx_ops = 0;
-@@ -1311,21 +1254,6 @@ constexpr u32 OS_INTERRUPT_RESTORE = 2;
- constexpr u32 OS_INTERRUPT_DISABLE_PC = 0x80347364;
- constexpr u32 OS_INTERRUPT_ENABLE_PC = 0x80347378;
- constexpr u32 OS_INTERRUPT_RESTORE_PC = 0x8034738c;
+ u32 s_fast_branch_bclrx_ops = 0;
+ u32 s_fast_branch_bcctrx_ops = 0;
+ u32 s_fast_branch_bdnz_ops = 0;
+-constexpr u32 OS_INTERRUPT_DISABLE = 0;
+-constexpr u32 OS_INTERRUPT_ENABLE = 1;
+-constexpr u32 OS_INTERRUPT_RESTORE = 2;
+-constexpr u32 OS_INTERRUPT_DISABLE_PC = 0x80347364;
+-constexpr u32 OS_INTERRUPT_ENABLE_PC = 0x80347378;
+-constexpr u32 OS_INTERRUPT_RESTORE_PC = 0x8034738c;
 -constexpr u32 MELEE_INPUT_STATUS_PC = 0x8037699c;
 -constexpr u32 MELEE_INPUT_STATUS_BYTE_ADDRESS = 0x804c1f7b;
 -constexpr u32 MELEE_STATUS_FN_PC = 0x80339b4c;
@@ -185,13 +267,79 @@ diff --git a/Source/Core/Core/PowerPC/CachedInterpreter/CachedInterpreter.cpp b/
 -constexpr u32 MELEE_IDLE_POLL_LOOP_MAX_BATCH = 256;
 -constexpr u32 MELEE_IDLE_POLL_LOOP_NO_EXIT_THROTTLE_BLOCKS = 8192;
 -constexpr u32 MELEE_STATUS_COMMON_CYCLES = 28;
- constexpr u32 OS_INTERRUPT_DISABLE_CYCLES = 5;
- constexpr u32 OS_INTERRUPT_ENABLE_CYCLES = 5;
- constexpr u32 OS_INTERRUPT_RESTORE_ENABLE_CYCLES = 8;
-@@ -1399,17 +1327,6 @@ std::optional<OsInterruptInlineTarget> GetDirectBranchOsInterruptTarget(UGeckoIn
-   return GetOsInterruptInlineTarget(destination);
- }
+-constexpr u32 OS_INTERRUPT_DISABLE_CYCLES = 5;
+-constexpr u32 OS_INTERRUPT_ENABLE_CYCLES = 5;
+-constexpr u32 OS_INTERRUPT_RESTORE_ENABLE_CYCLES = 8;
+-constexpr u32 OS_INTERRUPT_RESTORE_DISABLE_CYCLES = 7;
+-constexpr u32 MSR_EE_MASK = 0x8000;
+ constexpr u32 DCBX_LOOP_CTR = 0;
+ constexpr u32 DCBX_LOOP_COUNT_GPR = 1;
+ constexpr u32 LARGE_DCBX_DATA_FLUSH_SKIP_LINES = 64;
  
+-struct OsInterruptInlineTarget
+-{
+-  u32 mode;
+-  u32 cycles_primary;
+-  u32 cycles_secondary;
+-};
+-
+-std::optional<OsInterruptInlineTarget> GetOsInterruptInlineTarget(u32 destination)
+-{
+-  switch (destination)
+-  {
+-  case OS_INTERRUPT_DISABLE_PC:
+-    return OsInterruptInlineTarget{OS_INTERRUPT_DISABLE, OS_INTERRUPT_DISABLE_CYCLES,
+-                                   OS_INTERRUPT_DISABLE_CYCLES};
+-  case OS_INTERRUPT_ENABLE_PC:
+-    return OsInterruptInlineTarget{OS_INTERRUPT_ENABLE, OS_INTERRUPT_ENABLE_CYCLES,
+-                                   OS_INTERRUPT_ENABLE_CYCLES};
+-  case OS_INTERRUPT_RESTORE_PC:
+-    return OsInterruptInlineTarget{OS_INTERRUPT_RESTORE, OS_INTERRUPT_RESTORE_ENABLE_CYCLES,
+-                                   OS_INTERRUPT_RESTORE_DISABLE_CYCLES};
+-  default:
+-    return std::nullopt;
+-  }
+-}
+-
+-u32 GetOsInterruptTargetPc(u32 mode)
+-{
+-  switch (mode)
+-  {
+-  case OS_INTERRUPT_DISABLE:
+-    return OS_INTERRUPT_DISABLE_PC;
+-  case OS_INTERRUPT_ENABLE:
+-    return OS_INTERRUPT_ENABLE_PC;
+-  case OS_INTERRUPT_RESTORE:
+-    return OS_INTERRUPT_RESTORE_PC;
+-  default:
+-    return 0;
+-  }
+-}
+-
+-void MarkOsInterruptModeVerified(u32 mode)
+-{
+-  if (mode <= OS_INTERRUPT_RESTORE)
+-    s_fast_os_interrupt_verified_modes |= 1u << mode;
+-}
+-
+-bool IsOsInterruptModeVerified(u32 mode)
+-{
+-  return mode <= OS_INTERRUPT_RESTORE &&
+-         (s_fast_os_interrupt_verified_modes & (1u << mode)) != 0;
+-}
+-
+-std::optional<OsInterruptInlineTarget> GetDirectBranchOsInterruptTarget(UGeckoInstruction inst,
+-                                                                       u32 current_pc)
+-{
+-  if (inst.OPCD != 18 || !inst.LK)
+-    return std::nullopt;
+-
+-  u32 destination = u32(SignExt26(inst.LI << 2));
+-  if (!inst.AA)
+-    destination += current_pc;
+-  return GetOsInterruptInlineTarget(destination);
+-}
+-
 -bool IsDirectBranchLinkTo(UGeckoInstruction inst, u32 current_pc, u32 target)
 -{
 -  if (inst.OPCD != 18 || !inst.LK)
@@ -206,10 +354,81 @@ diff --git a/Source/Core/Core/PowerPC/CachedInterpreter/CachedInterpreter.cpp b/
  struct PpcBlockProfileEntry
  {
    u32 pc = 0;
-@@ -1536,713 +1453,12 @@ bool ExecuteFastOsInterruptInline(PowerPC::PowerPCState& ppc_state,
-   return true;
- }
- 
+@@ -1465,782 +1294,12 @@ void UpdatePerformanceMonitorIfNeeded(u32 cycles, u32 num_load_stores, u32 num_f
+ {
+   if ((ppc_state.feature_flags & FEATURE_FLAG_PERFMON) != 0)
+     PowerPC::UpdatePerformanceMonitor(cycles, num_load_stores, num_fp_inst, ppc_state);
+-}
+-
+-bool ExecuteFastOsInterruptInline(PowerPC::PowerPCState& ppc_state,
+-                                  PowerPC::PowerPCManager& power_pc, u32 function_pc,
+-                                  u32 return_pc, u32 mode, u32 cycles_primary,
+-                                  u32 cycles_secondary)
+-{
+-  if (!IsOsInterruptModeVerified(mode))
+-    return false;
+-  // The function's mtmsr takes exceptions held pending and an FP exception
+-  // FE0/FE1 enable, with SRR0 at that instruction: those calls run the code
+-  // itself (the caller branches to the function).
+-  if (ppc_state.Exceptions != 0 ||
+-      (ppc_state.fpscr.FEX && (ppc_state.msr.FE0 || ppc_state.msr.FE1)))
+-    return false;
+-
+-  ppc_state.pc = function_pc;
+-  ppc_state.npc = return_pc;
+-
+-  if (ppc_state.msr.PR)
+-  {
+-    GenerateProgramException(ppc_state, ProgramExceptionCause::PrivilegedInstruction);
+-    power_pc.CheckExceptions();
+-    return true;
+-  }
+-
+-  const u32 old_msr = ppc_state.msr.Hex;
+-  u32 new_msr = old_msr;
+-  u32 cycles = cycles_primary;
+-
+-  switch (mode)
+-  {
+-  case OS_INTERRUPT_DISABLE:
+-    new_msr = old_msr & ~MSR_EE_MASK;
+-    ppc_state.gpr[3] = (old_msr & MSR_EE_MASK) ? 1 : 0;
+-    ppc_state.gpr[4] = new_msr;
+-    ++s_fast_os_interrupt_disable_ops;
+-    break;
+-  case OS_INTERRUPT_ENABLE:
+-    new_msr = old_msr | MSR_EE_MASK;
+-    ppc_state.gpr[3] = (old_msr & MSR_EE_MASK) ? 1 : 0;
+-    ppc_state.gpr[4] = new_msr;
+-    ++s_fast_os_interrupt_enable_ops;
+-    break;
+-  case OS_INTERRUPT_RESTORE:
+-    if (ppc_state.gpr[3] != 0)
+-    {
+-      new_msr = old_msr | MSR_EE_MASK;
+-    }
+-    else
+-    {
+-      new_msr = old_msr & ~MSR_EE_MASK;
+-      cycles = cycles_secondary;
+-    }
+-    ppc_state.gpr[4] = (old_msr & MSR_EE_MASK) ? 1 : 0;
+-    ppc_state.gpr[5] = new_msr;
+-    ++s_fast_os_interrupt_restore_ops;
+-    break;
+-  default:
+-    return false;
+-  }
+-
+-  ppc_state.msr.Hex = new_msr;  // nothing pending (checked above)
+-
+-  ppc_state.pc = ppc_state.npc;
+-  ppc_state.downcount -= static_cast<int>(cycles);
+-  UpdatePerformanceMonitorIfNeeded(cycles, 0, 0, ppc_state);
+-  ++s_fast_os_interrupt_inline_ops;
+-  return true;
+-}
+-
 -bool VerifyMeleeInputStatusFunction()
 -{
 -  if (s_fast_melee_input_status_verified)
@@ -395,12 +614,12 @@ diff --git a/Source/Core/Core/PowerPC/CachedInterpreter/CachedInterpreter.cpp b/
 -  return true;
 -}
 -
- // Same mapping as EmitMem1ViewOffset: only the 0x8 and 0xC views are RAM.
- static u32 Mem1ViewOffset(u32 address)
- {
-   return (address ^ 0x80000000u) & 0xbfffffffu;
- }
- 
+-// Same mapping as EmitMem1ViewOffset: only the 0x8 and 0xC views are RAM.
+-static u32 Mem1ViewOffset(u32 address)
+-{
+-  return (address ^ 0x80000000u) & 0xbfffffffu;
+-}
+-
 -bool TryReadFastRamU32Address(u32 address, u32* value)
 -{
 -  auto& memory = Core::System::GetInstance().GetMemory();
@@ -902,7 +1121,8 @@ diff --git a/Source/Core/Core/PowerPC/CachedInterpreter/CachedInterpreter.cpp b/
 -    ++s_fast_melee_input_poll_inline_fallbacks;
 -    return false;
 -  }
--
++}
+ 
 -  const u32 restore_cycles =
 -      (ppc_state.msr.Hex & MSR_EE_MASK) != 0 ? OS_INTERRUPT_RESTORE_ENABLE_CYCLES :
 -                                               OS_INTERRUPT_RESTORE_DISABLE_CYCLES;
@@ -915,15 +1135,38 @@ diff --git a/Source/Core/Core/PowerPC/CachedInterpreter/CachedInterpreter.cpp b/
 -  UpdatePerformanceMonitorIfNeeded(cycles, s_fast_melee_input_poll_loadstores, 0, ppc_state);
 -  ++s_fast_melee_input_poll_inline_ops;
 -  return true;
--}
--
- s32 DecodeConditionalBranchDisplacement(UGeckoInstruction inst)
- {
-   return static_cast<s32>(static_cast<s16>(inst.BD << 2));
-@@ -2575,47 +1791,6 @@ extern "C" int DolphinWeb_CachedInterpreterFastOsInterruptCall(int state_ptr, u3
-   return 0;
++// Same mapping as EmitMem1ViewOffset: only the 0x8 and 0xC views are RAM.
++static u32 Mem1ViewOffset(u32 address)
++{
++  return (address ^ 0x80000000u) & 0xbfffffffu;
  }
  
+ s32 DecodeConditionalBranchDisplacement(UGeckoInstruction inst)
+@@ -2554,68 +1613,6 @@ extern "C" void DolphinWeb_CachedInterpreterFastCheckGatherPipe(int state_ptr, u
+   Core::System::GetInstance().GetGPFifo().FastCheckGatherPipe();
+ }
+ 
+-extern "C" int DolphinWeb_CachedInterpreterFastOsInterruptCall(int state_ptr, u32 current_pc,
+-                                                               u32 mode, u32 cycles_primary,
+-                                                               u32 cycles_secondary)
+-{
+-  auto& system = Core::System::GetInstance();
+-  auto& ppc_state = *reinterpret_cast<PowerPC::PowerPCState*>(
+-      static_cast<std::uintptr_t>(state_ptr));
+-  const u32 function_pc = GetOsInterruptTargetPc(mode);
+-  const u32 return_pc = current_pc + sizeof(u32);
+-
+-  LR(ppc_state) = return_pc;
+-  if (function_pc == 0 ||
+-      !ExecuteFastOsInterruptInline(ppc_state, system.GetPowerPC(), function_pc, return_pc, mode,
+-                                    cycles_primary, cycles_secondary))
+-  {
+-    ppc_state.npc = function_pc;
+-    ++s_fast_os_interrupt_inline_fallbacks;
+-  }
+-  return 0;
+-}
+-
 -extern "C" int DolphinWeb_CachedInterpreterFastMeleeInputStatusCall(int state_ptr, u32 current_pc)
 -{
 -  auto& system = Core::System::GetInstance();
@@ -968,40 +1211,43 @@ diff --git a/Source/Core/Core/PowerPC/CachedInterpreter/CachedInterpreter.cpp b/
  u16 ReadRamU16BE(const u8* ram, u32 offset)
  {
    return static_cast<u16>((u16{ram[offset]} << 8) | ram[offset + 1]);
-@@ -3254,19 +2429,15 @@ struct WasmStateLayout
+@@ -3253,20 +2250,14 @@ struct WasmStateLayout
+ 
  constexpr u32 WASM_IMPORT_FASTCHECK_GPFIFO_INDEX = 14;
  constexpr u32 WASM_IMPORT_INTERPRET_INDEX = 13;
- constexpr u32 WASM_IMPORT_FAST_OS_INTERRUPT_CALL_INDEX = 15;
+-constexpr u32 WASM_IMPORT_FAST_OS_INTERRUPT_CALL_INDEX = 15;
 -constexpr u32 WASM_IMPORT_FAST_MELEE_INPUT_STATUS_CALL_INDEX = 16;
 -constexpr u32 WASM_IMPORT_FAST_MELEE_STATUS_CALL_INDEX = 17;
 -constexpr u32 WASM_IMPORT_FAST_MELEE_SERVICE_POLL_CALL_INDEX = 18;
 -constexpr u32 WASM_IMPORT_FMA_INDEX = 19;
-+constexpr u32 WASM_IMPORT_FMA_INDEX = 16;
++constexpr u32 WASM_IMPORT_FMA_INDEX = 15;
  constexpr u32 WASM_GATHER_PIPE_FLUSH_THRESHOLD =
      GPFifo::GATHER_PIPE_EXTRA_SIZE - GPFifo::GATHER_PIPE_SIZE;
  
  // Helper imports in index order (the block module's import section).
 -constexpr std::array<const char*, 20> WASM_IMPORT_NAMES = {
-+constexpr std::array<const char*, 17> WASM_IMPORT_NAMES = {
++constexpr std::array<const char*, 16> WASM_IMPORT_NAMES = {
      "read_u32", "write_u32", "read_u8", "write_u8", "read_u16", "write_u16", "lfs",
-     "stfs", "lfd", "fmr", "system", "fp", "fctiwz", "interpret", "fastcheck_gpfifo",
+-    "stfs", "lfd", "fmr", "system", "fp", "fctiwz", "interpret", "fastcheck_gpfifo",
 -    "fast_os_interrupt_call", "fast_melee_input_status_call", "fast_melee_status_call",
 -    "fast_melee_service_poll_call", "fma"};
-+    "fast_os_interrupt_call", "fma"};
++    "stfs", "lfd", "fmr", "system", "fp", "fctiwz", "interpret", "fastcheck_gpfifo", "fma"};
  
  // Region fragments (P4): while a collector is installed, helper calls are
  // emitted with a 5-byte padded LEB index and recorded, so the region
-@@ -4297,9 +3468,6 @@ void EmitMcrf(std::vector<u8>& body, const WasmStateLayout& layout, UGeckoInstru
+@@ -4295,11 +3286,6 @@ void EmitMcrf(std::vector<u8>& body, const WasmStateLayout& layout, UGeckoInstru
+ }
+ 
  void EmitSystemCall(std::vector<u8>& body, const PPCAnalyst::CodeOp& op, u32 downcount);
- void EmitFastOsInterruptCall(std::vector<u8>& body, u32 current_pc,
-                              const OsInterruptInlineTarget& target);
+-void EmitFastOsInterruptCall(std::vector<u8>& body, u32 current_pc,
+-                             const OsInterruptInlineTarget& target);
 -void EmitFastMeleeInputStatusCall(std::vector<u8>& body, u32 current_pc);
 -void EmitFastMeleeStatusCall(std::vector<u8>& body, u32 current_pc, u32 downcount);
 -void EmitFastMeleeServicePollCall(std::vector<u8>& body, u32 current_pc, u32 downcount);
  
  void EmitMfmsr(std::vector<u8>& body, const WasmStateLayout& layout, const PPCAnalyst::CodeOp& op,
                 u32 downcount)
-@@ -4563,7 +3731,7 @@ void EmitBranchToRegister(std::vector<u8>& body, const WasmStateLayout& layout,
+@@ -4563,30 +3549,9 @@ void EmitBranchToRegister(std::vector<u8>& body, const WasmStateLayout& layout,
  }
  
  void EmitUnconditionalBranch(std::vector<u8>& body, const WasmStateLayout& layout,
@@ -1009,11 +1255,11 @@ diff --git a/Source/Core/Core/PowerPC/CachedInterpreter/CachedInterpreter.cpp b/
 +                             const PPCAnalyst::CodeOp& op)
  {
    const UGeckoInstruction inst = op.inst;
-   if (const auto os_interrupt_target = GetDirectBranchOsInterruptTarget(inst, op.address))
-@@ -4571,21 +3739,6 @@ void EmitUnconditionalBranch(std::vector<u8>& body, const WasmStateLayout& layou
-     EmitFastOsInterruptCall(body, op.address, *os_interrupt_target);
-     return;
-   }
+-  if (const auto os_interrupt_target = GetDirectBranchOsInterruptTarget(inst, op.address))
+-  {
+-    EmitFastOsInterruptCall(body, op.address, *os_interrupt_target);
+-    return;
+-  }
 -  if (IsDirectBranchLinkTo(inst, op.address, MELEE_INPUT_STATUS_PC))
 -  {
 -    EmitFastMeleeInputStatusCall(body, op.address);
@@ -1029,13 +1275,25 @@ diff --git a/Source/Core/Core/PowerPC/CachedInterpreter/CachedInterpreter.cpp b/
 -    EmitFastMeleeServicePollCall(body, op.address, downcount);
 -    return;
 -  }
- 
+-
    if (inst.LK)
      EmitStoreStateU32Const(body, SprOffset(layout, SPR_LR), op.address + 4);
-@@ -5244,43 +4397,7 @@ void EmitFastOsInterruptCall(std::vector<u8>& body, u32 current_pc,
-   EmitI32Const(body, target.cycles_secondary);
-   EmitCallImport(body, WASM_IMPORT_FAST_OS_INTERRUPT_CALL_INDEX);
-   EmitImportedHaltCheck(body);
+ 
+@@ -5233,56 +4198,6 @@ void EmitInterpretCall(std::vector<u8>& body, const PPCAnalyst::CodeOp& op, u32
+   EmitRegCacheReloadAll(body);  // interpret may have written arbitrary GPRs
+ }
+ 
+-void EmitFastOsInterruptCall(std::vector<u8>& body, u32 current_pc,
+-                             const OsInterruptInlineTarget& target)
+-{
+-  EmitRegCacheFlushDirty(body);  // §28cx C1
+-  EmitLocalGet(body, 0);
+-  EmitI32Const(body, current_pc);
+-  EmitI32Const(body, target.mode);
+-  EmitI32Const(body, target.cycles_primary);
+-  EmitI32Const(body, target.cycles_secondary);
+-  EmitCallImport(body, WASM_IMPORT_FAST_OS_INTERRUPT_CALL_INDEX);
+-  EmitImportedHaltCheck(body);
 -  EmitRegCacheReloadAll(body);  // interrupt handler may write arbitrary GPRs
 -}
 -
@@ -1073,11 +1331,12 @@ diff --git a/Source/Core/Core/PowerPC/CachedInterpreter/CachedInterpreter.cpp b/
 -  EmitCallImport(body, WASM_IMPORT_FAST_MELEE_SERVICE_POLL_CALL_INDEX);
 -  EmitImportedHaltCheck(body);
 -  EmitRegCacheReloadAll(body);  // HLE call may write arbitrary GPRs
-+  EmitRegCacheReloadAll(body);  // interrupt handler may write arbitrary GPRs
- }
- 
+-}
+-
  void EmitFpCall(std::vector<u8>& body, const PPCAnalyst::CodeOp& op, u32 downcount)
-@@ -5294,7 +4411,7 @@ void EmitFpCall(std::vector<u8>& body, const PPCAnalyst::CodeOp& op, u32 downcou
+ {
+   EmitRegCacheFlushDirty(body);  // §28cx C1
+@@ -5294,7 +4209,7 @@ void EmitFpCall(std::vector<u8>& body, const PPCAnalyst::CodeOp& op, u32 downcou
    EmitCallImport(body, 11);
    EmitImportedHaltCheck(body);
    // FP ops write FPRs (+CR/FPSCR), not GPRs — reload only the op's GPR outputs
@@ -1086,7 +1345,7 @@ diff --git a/Source/Core/Core/PowerPC/CachedInterpreter/CachedInterpreter.cpp b/
    EmitRegCacheReloadMask(body, op.regsOut);
  }
  
-@@ -8408,7 +7525,7 @@ bool EmitWasmSupportedIntegerInstruction(std::vector<u8>& body, const WasmStateL
+@@ -8408,7 +7323,7 @@ bool EmitWasmSupportedIntegerInstruction(std::vector<u8>& body, const WasmStateL
      return true;
  
    case 18:  // bx
@@ -1095,7 +1354,7 @@ diff --git a/Source/Core/Core/PowerPC/CachedInterpreter/CachedInterpreter.cpp b/
      return true;
  
    case 19:  // bclrx/bcctrx
-@@ -9085,7 +8202,7 @@ bool EmitWasmSupportedIntegerInstruction(std::vector<u8>& body, const WasmStateL
+@@ -9085,7 +8000,7 @@ bool EmitWasmSupportedIntegerInstruction(std::vector<u8>& body, const WasmStateL
  
        // Compute new XER.CA using ORIGINAL RA/RB from memory and store it FIRST.
        // We must not store the result to GprOffset(RD) before this read pair —
@@ -1104,7 +1363,7 @@ diff --git a/Source/Core/Core/PowerPC/CachedInterpreter/CachedInterpreter.cpp b/
        // the rD store would otherwise clobber the value we re-read here, giving
        // a carry computed from (result, RB) instead of (RA, RB). The corrupted
        // CA then propagates through subsequent adde/subfe and breaks 3D
-@@ -9635,7 +8752,7 @@ bool IsPpcWasmDirectInstructionCandidate(const PPCAnalyst::CodeOp& op)
+@@ -9635,7 +8550,7 @@ bool IsPpcWasmDirectInstructionCandidate(const PPCAnalyst::CodeOp& op)
    }
  
    // Direct-tier JIT admits FPU only when this file has a specialized emitter or a known hot helper
@@ -1113,29 +1372,32 @@ diff --git a/Source/Core/Core/PowerPC/CachedInterpreter/CachedInterpreter.cpp b/
    if ((op.opinfo->flags & FL_USE_FPU) != 0)
      return IsPpcWasmSpecializedFpuInstruction(inst) || IsPpcWasmDirectHelperFpuInstruction(inst);
  
-@@ -10011,7 +9128,7 @@ std::vector<u8> BuildWasmCachedInterpreterBlock(std::span<const PPCAnalyst::Code
+@@ -10011,7 +8926,7 @@ std::vector<u8> BuildWasmCachedInterpreterBlock(std::span<const PPCAnalyst::Code
    EmitSection(bytes, 1, types);
  
    std::vector<u8> imports;
 -  imports.push_back(0x15);
-+  imports.push_back(0x12);
++  imports.push_back(0x11);
    EmitEnvFunctionImport(imports, "read_u32", 1);
    EmitEnvFunctionImport(imports, "write_u32", 2);
    EmitEnvFunctionImport(imports, "read_u8", 1);
-@@ -10028,9 +9145,6 @@ std::vector<u8> BuildWasmCachedInterpreterBlock(std::span<const PPCAnalyst::Code
+@@ -10027,10 +8942,6 @@ std::vector<u8> BuildWasmCachedInterpreterBlock(std::span<const PPCAnalyst::Code
+   EmitEnvFunctionImport(imports, "fctiwz", 3);
    EmitEnvFunctionImport(imports, "interpret", 3);
    EmitEnvFunctionImport(imports, "fastcheck_gpfifo", 2);
-   EmitEnvFunctionImport(imports, "fast_os_interrupt_call", 3);
+-  EmitEnvFunctionImport(imports, "fast_os_interrupt_call", 3);
 -  EmitEnvFunctionImport(imports, "fast_melee_input_status_call", 1);
 -  EmitEnvFunctionImport(imports, "fast_melee_status_call", 3);
 -  EmitEnvFunctionImport(imports, "fast_melee_service_poll_call", 3);
    EmitEnvFunctionImport(imports, "fma", 4);
    EmitName(imports, "env");
    EmitName(imports, "memory");
-@@ -10243,18 +9357,11 @@ int CompileWasmModuleWithKey(const std::vector<u8>& bytes, const std::array<char
+@@ -10241,20 +9152,11 @@ int CompileWasmModuleWithKey(const std::vector<u8>& bytes, const std::array<char
+       reinterpret_cast<std::uintptr_t>(&DolphinWeb_CachedInterpreterInterpret));
+   const auto fastcheck_gpfifo_index = static_cast<int>(
        reinterpret_cast<std::uintptr_t>(&DolphinWeb_CachedInterpreterFastCheckGatherPipe));
-   const auto fast_os_interrupt_call_index = static_cast<int>(
-       reinterpret_cast<std::uintptr_t>(&DolphinWeb_CachedInterpreterFastOsInterruptCall));
+-  const auto fast_os_interrupt_call_index = static_cast<int>(
+-      reinterpret_cast<std::uintptr_t>(&DolphinWeb_CachedInterpreterFastOsInterruptCall));
 -  const auto fast_melee_input_status_call_index = static_cast<int>(
 -      reinterpret_cast<std::uintptr_t>(&DolphinWeb_CachedInterpreterFastMeleeInputStatusCall));
 -  const auto fast_melee_status_call_index = static_cast<int>(
@@ -1148,11 +1410,11 @@ diff --git a/Source/Core/Core/PowerPC/CachedInterpreter/CachedInterpreter.cpp b/
        stfs_index, lfd_index, fmr_index, system_index, fp_index, fctiwz_index, interpret_index,
 -      fastcheck_gpfifo_index, fast_os_interrupt_call_index, fast_melee_input_status_call_index,
 -      fast_melee_status_call_index, fast_melee_service_poll_call_index,
-+      fastcheck_gpfifo_index, fast_os_interrupt_call_index,
++      fastcheck_gpfifo_index,
        static_cast<int>(reinterpret_cast<std::uintptr_t>(&DolphinWeb_CachedInterpreterFma)),
        ready_bits_ptr,
        region ? ((DolphinWebDisableMask() & DOLPHIN_WEB_ENABLE_REGION_FRAGMENT_HANDLES) != 0 ? 2 : 1) : 0);
-@@ -12514,22 +11621,6 @@ void CachedInterpreter::ExecuteOneBlock([[maybe_unused]] bool allow_redispatch)
+@@ -12514,62 +11416,6 @@ void CachedInterpreter::ExecuteOneBlock([[maybe_unused]] bool allow_redispatch)
      }
      // DOLPHIN_WEB_LEGACY_DISPATCH_ORDER_END
  #endif
@@ -1172,13 +1434,22 @@ diff --git a/Source/Core/Core/PowerPC/CachedInterpreter/CachedInterpreter.cpp b/
 -      else
 -        break;
 -    }
-     else if (callback == AnyCallbackCast(FastOsInterruptFunction))
-     {
-       if (FastOsInterruptFunction(ppc_state,
-@@ -12546,30 +11637,6 @@ void CachedInterpreter::ExecuteOneBlock([[maybe_unused]] bool allow_redispatch)
-       else
-         break;
-     }
+-    else if (callback == AnyCallbackCast(FastOsInterruptFunction))
+-    {
+-      if (FastOsInterruptFunction(ppc_state,
+-                                  *reinterpret_cast<const OsInterruptFunctionOperands*>(payload)))
+-        normal_entry = payload + sizeof(OsInterruptFunctionOperands);
+-      else
+-        break;
+-    }
+-    else if (callback == AnyCallbackCast(FastOsInterruptCallBranch))
+-    {
+-      if (FastOsInterruptCallBranch(
+-              ppc_state, *reinterpret_cast<const OsInterruptFunctionOperands*>(payload)))
+-        normal_entry = payload + sizeof(OsInterruptFunctionOperands);
+-      else
+-        break;
+-    }
 -    else if (callback == AnyCallbackCast(FastMeleeInputStatusCallBranch))
 -    {
 -      FastMeleeInputStatusCallBranch(
@@ -1206,10 +1477,63 @@ diff --git a/Source/Core/Core/PowerPC/CachedInterpreter/CachedInterpreter.cpp b/
      else if (callback == AnyCallbackCast(FastDcbx))
      {
        FastDcbx(ppc_state, *reinterpret_cast<const FastInstructionOperands*>(payload));
-@@ -13133,159 +12200,6 @@ static bool IsFastFloatInstruction(UGeckoInstruction inst)
-   return false;
- }
- 
+@@ -13080,329 +11926,57 @@ static bool IsFastPureIntegerInstruction(UGeckoInstruction inst)
+     case 151:  // stwx
+     case 183:  // stwux
+     case 266:  // addx
+-    case 316:  // xorx
+-    case 444:  // orx
+-      return !inst.OE;
+-    default:
+-      return false;
+-    }
+-  default:
+-    return false;
+-  }
+-}
+-
+-static bool IsFastBranchInstruction(UGeckoInstruction inst)
+-{
+-  if (inst.OPCD == 16 || inst.OPCD == 18)
+-    return true;
+-  return inst.OPCD == 19 && (inst.SUBOP10 == 16 || inst.SUBOP10 == 528);
+-}
+-
+-static bool IsFastFloatInstruction(UGeckoInstruction inst)
+-{
+-  switch (inst.OPCD)
+-  {
+-  case 48:  // lfs
+-  case 50:  // lfd
+-  case 52:  // stfs
+-    return true;
+-  case 31:
+-    if (inst.Rc)
+-      return false;
+-    return inst.SUBOP10 == 535 || inst.SUBOP10 == 663 || inst.SUBOP10 == 983;  // lfsx, stfsx, stfiwx
+-  default:
+-    break;
+-  }
+-
+-  if (inst.OPCD == 59)
+-  {
+-    if (inst.Rc)
+-      return false;
+-    return inst.SUBOP5 == 20 || inst.SUBOP5 == 21 || inst.SUBOP5 == 25 ||
+-           inst.SUBOP5 == 29 || inst.SUBOP5 == 30;  // fsubs, fadds, fmuls, fmadds, fnmsubs
+-  }
+-
+-  if (inst.OPCD == 63)
+-  {
+-    if (inst.Rc)
+-      return false;
+-    return inst.SUBOP10 == 15 || inst.SUBOP10 == 40 || inst.SUBOP10 == 72 ||
+-           inst.SUBOP10 == 136 || inst.SUBOP10 == 264;  // fctiwzx, fnegx, fmrx, fnabsx, fabsx
+-  }
+-
+-  return false;
+-}
+-
 -bool CachedInterpreter::TryWriteMeleeIdlePollLoop(u32 index, PowerPC::PowerPCManager& power_pc)
 -{
 -  if (DolphinWebHelperDisabled(DOLPHIN_WEB_DISABLE_MELEELOOP))
@@ -1363,13 +1687,177 @@ diff --git a/Source/Core/Core/PowerPC/CachedInterpreter/CachedInterpreter.cpp b/
 -  return true;
 -}
 -
- bool CachedInterpreter::TryWriteOsInterruptFunction(u32 index, PowerPC::PowerPCManager& power_pc)
- {
-   if (DolphinWebHelperDisabled(DOLPHIN_WEB_DISABLE_OSINTERRUPT))
-@@ -13487,40 +12401,11 @@ bool CachedInterpreter::TryWriteFastInstruction(const PPCAnalyst::CodeOp& op,
-       }
-       // Fall through to FastBranch if osinterrupt is disabled and that path isn't disabled too.
+-bool CachedInterpreter::TryWriteOsInterruptFunction(u32 index, PowerPC::PowerPCManager& power_pc)
+-{
+-  if (DolphinWebHelperDisabled(DOLPHIN_WEB_DISABLE_OSINTERRUPT))
+-    return false;
+-  if (IsDebuggingEnabled() || IsBranchWatchEnabled() || jo.memcheck)
+-    return false;
+-
+-  const u32 start = m_code_buffer[index].address;
+-  if (start != OS_INTERRUPT_DISABLE_PC && start != OS_INTERRUPT_ENABLE_PC &&
+-      start != OS_INTERRUPT_RESTORE_PC)
+-    return false;
+-
+-  ++s_fast_os_interrupt_compile_attempts;
+-
+-  const auto read_instruction = [&](u32 address) -> std::optional<UGeckoInstruction> {
+-    const auto result = m_system.GetMMU().TryReadInstruction(address);
+-    if (!result.valid)
+-      return std::nullopt;
+-    return UGeckoInstruction{result.hex};
+-  };
+-  const auto matches = [&](u32 address, u32 expected) {
+-    const auto inst = read_instruction(address);
+-    if (inst && inst->hex == expected)
+-      return true;
+-    s_fast_os_interrupt_mismatch_address = address;
+-    s_fast_os_interrupt_mismatch_expected = expected;
+-    s_fast_os_interrupt_mismatch_actual = inst ? inst->hex : 0xffffffff;
+-    return false;
+-  };
+-  const auto cycles_for = [&](std::initializer_list<u32> addresses) {
+-    u32 cycles = 0;
+-    for (const u32 address : addresses)
+-    {
+-      const auto inst = read_instruction(address);
+-      if (!inst)
+-        return 0u;
+-      cycles += PPCTables::GetOpInfo(*inst, address)->num_cycles;
+-    }
+-    return cycles;
+-  };
+-
+-  if (start == OS_INTERRUPT_DISABLE_PC)
+-  {
+-    if (!matches(0x80347364, 0x7c6000a6) ||  // mfmsr r3
+-        !matches(0x80347368, 0x5464045e) ||  // rlwinm r4, r3, 0, 17, 15
+-        !matches(0x8034736c, 0x7c800124) ||  // mtmsr r4
+-        !matches(0x80347370, 0x54638ffe) ||  // rlwinm r3, r3, 17, 31, 31
+-        !matches(0x80347374, 0x4e800020))    // blr
+-    {
+-      ++s_fast_os_interrupt_compile_rejects;
++    case 316:  // xorx
++    case 444:  // orx
++      return !inst.OE;
++    default:
+       return false;
      }
++  default:
++    return false;
++  }
++}
+ 
+-    const u32 cycles =
+-        cycles_for({0x80347364, 0x80347368, 0x8034736c, 0x80347370, 0x80347374});
+-    if (cycles == 0)
+-    {
+-      ++s_fast_os_interrupt_compile_rejects;
+-      return false;
+-    }
+-    MarkOsInterruptModeVerified(OS_INTERRUPT_DISABLE);
+-    Write(FastOsInterruptFunction, {power_pc, start, OS_INTERRUPT_DISABLE, cycles, cycles});
++static bool IsFastBranchInstruction(UGeckoInstruction inst)
++{
++  if (inst.OPCD == 16 || inst.OPCD == 18)
+     return true;
+-  }
++  return inst.OPCD == 19 && (inst.SUBOP10 == 16 || inst.SUBOP10 == 528);
++}
+ 
+-  if (start == OS_INTERRUPT_ENABLE_PC)
++static bool IsFastFloatInstruction(UGeckoInstruction inst)
++{
++  switch (inst.OPCD)
+   {
+-    if (!matches(0x80347378, 0x7c6000a6) ||  // mfmsr r3
+-        !matches(0x8034737c, 0x60648000) ||  // ori r4, r3, 0x8000
+-        !matches(0x80347380, 0x7c800124) ||  // mtmsr r4
+-        !matches(0x80347384, 0x54638ffe) ||  // rlwinm r3, r3, 17, 31, 31
+-        !matches(0x80347388, 0x4e800020))    // blr
+-    {
+-      ++s_fast_os_interrupt_compile_rejects;
+-      return false;
+-    }
+-
+-    const u32 cycles =
+-        cycles_for({0x80347378, 0x8034737c, 0x80347380, 0x80347384, 0x80347388});
+-    if (cycles == 0)
+-    {
+-      ++s_fast_os_interrupt_compile_rejects;
+-      return false;
+-    }
+-    MarkOsInterruptModeVerified(OS_INTERRUPT_ENABLE);
+-    Write(FastOsInterruptFunction, {power_pc, start, OS_INTERRUPT_ENABLE, cycles, cycles});
++  case 48:  // lfs
++  case 50:  // lfd
++  case 52:  // stfs
+     return true;
++  case 31:
++    if (inst.Rc)
++      return false;
++    return inst.SUBOP10 == 535 || inst.SUBOP10 == 663 || inst.SUBOP10 == 983;  // lfsx, stfsx, stfiwx
++  default:
++    break;
+   }
+ 
+-  if (!matches(0x8034738c, 0x2c030000) ||  // cmpwi r3, 0
+-      !matches(0x80347390, 0x7c8000a6) ||  // mfmsr r4
+-      !matches(0x80347394, 0x4182000c) ||  // beq -> clear EE
+-      !matches(0x80347398, 0x60858000) ||  // ori r5, r4, 0x8000
+-      !matches(0x8034739c, 0x48000008) ||  // b -> mtmsr
+-      !matches(0x803473a0, 0x5485045e) ||  // rlwinm r5, r4, 0, 17, 15
+-      !matches(0x803473a4, 0x7ca00124) ||  // mtmsr r5
+-      !matches(0x803473a8, 0x54848ffe) ||  // rlwinm r4, r4, 17, 31, 31
+-      !matches(0x803473ac, 0x4e800020))    // blr
++  if (inst.OPCD == 59)
+   {
+-    ++s_fast_os_interrupt_compile_rejects;
+-    return false;
++    if (inst.Rc)
++      return false;
++    return inst.SUBOP5 == 20 || inst.SUBOP5 == 21 || inst.SUBOP5 == 25 ||
++           inst.SUBOP5 == 29 || inst.SUBOP5 == 30;  // fsubs, fadds, fmuls, fmadds, fnmsubs
+   }
+ 
+-  const u32 enable_cycles = cycles_for({0x8034738c, 0x80347390, 0x80347394, 0x80347398,
+-                                        0x8034739c, 0x803473a4, 0x803473a8, 0x803473ac});
+-  const u32 disable_cycles = cycles_for({0x8034738c, 0x80347390, 0x80347394, 0x803473a0,
+-                                         0x803473a4, 0x803473a8, 0x803473ac});
+-  if (enable_cycles == 0 || disable_cycles == 0)
++  if (inst.OPCD == 63)
+   {
+-    ++s_fast_os_interrupt_compile_rejects;
+-    return false;
++    if (inst.Rc)
++      return false;
++    return inst.SUBOP10 == 15 || inst.SUBOP10 == 40 || inst.SUBOP10 == 72 ||
++           inst.SUBOP10 == 136 || inst.SUBOP10 == 264;  // fctiwzx, fnegx, fmrx, fnabsx, fabsx
+   }
+ 
+-  MarkOsInterruptModeVerified(OS_INTERRUPT_RESTORE);
+-  Write(FastOsInterruptFunction,
+-        {power_pc, start, OS_INTERRUPT_RESTORE, enable_cycles, disable_cycles});
+-  return true;
++  return false;
+ }
+ 
+ bool CachedInterpreter::TryWriteDcbxLoop(u32 index, PowerPC::PowerPCManager& power_pc)
+@@ -13476,51 +12050,11 @@ bool CachedInterpreter::TryWriteFastInstruction(const PPCAnalyst::CodeOp& op,
+ 
+   if (!IsBranchWatchEnabled() && IsFastBranchInstruction(op.inst))
+   {
+-    if (const auto os_interrupt_target = GetDirectBranchOsInterruptTarget(op.inst, op.address))
+-    {
+-      if ((disable_mask & DOLPHIN_WEB_DISABLE_OSINTERRUPT) == 0)
+-      {
+-        Write(FastOsInterruptCallBranch,
+-              {power_pc, op.address, os_interrupt_target->mode,
+-               os_interrupt_target->cycles_primary, os_interrupt_target->cycles_secondary});
+-        return true;
+-      }
+-      // Fall through to FastBranch if osinterrupt is disabled and that path isn't disabled too.
+-    }
 -    if ((disable_mask & DOLPHIN_WEB_DISABLE_MELEECALL) == 0)
 -    {
 -      if (IsDirectBranchLinkTo(op.inst, op.address, MELEE_INPUT_STATUS_PC))
@@ -1408,7 +1896,7 @@ diff --git a/Source/Core/Core/PowerPC/CachedInterpreter/CachedInterpreter.cpp b/
      // untouched. BI is irrelevant when BO bit 4 is set, but we constrain BI==0 to match the
      // canonical assembler form and avoid surprise. The branch target is statically known
      // (PPCAnalyst already populates op.branchTo), so we precompute it here and skip the BO
-@@ -14542,528 +13427,6 @@ s32 CachedInterpreter::FastFloat(PowerPC::PowerPCState& ppc_state,
+@@ -14542,677 +13076,6 @@ s32 CachedInterpreter::FastFloat(PowerPC::PowerPCState& ppc_state,
    return sizeof(AnyCallback) + sizeof(operands);
  }
  
@@ -1934,13 +2422,106 @@ diff --git a/Source/Core/Core/PowerPC/CachedInterpreter/CachedInterpreter.cpp b/
 -  return 0;
 -}
 -
- s32 CachedInterpreter::FastOsInterruptFunction(PowerPC::PowerPCState& ppc_state,
-                                                const OsInterruptFunctionOperands& operands)
- {
-@@ -15164,55 +13527,6 @@ s32 CachedInterpreter::FastOsInterruptCallBranch(PowerPC::PowerPCState& ppc_stat
-   return sizeof(AnyCallback) + sizeof(operands);
- }
- 
+-s32 CachedInterpreter::FastOsInterruptFunction(PowerPC::PowerPCState& ppc_state,
+-                                               const OsInterruptFunctionOperands& operands)
+-{
+-  const auto& [power_pc, current_pc, mode, cycles_primary, cycles_secondary] = operands;
+-  ppc_state.pc = current_pc;
+-  ppc_state.npc = LR(ppc_state) & ~3u;
+-
+-  // The function's mtmsr takes exceptions held pending and an FP exception
+-  // FE0/FE1 enable, with SRR0 at that instruction: then its few instructions
+-  // run in the interpreter, up to its return or the exception vector.
+-  if (ppc_state.Exceptions != 0 ||
+-      (ppc_state.fpscr.FEX && (ppc_state.msr.FE0 || ppc_state.msr.FE1)))
+-  {
+-    auto& interpreter = Core::System::GetInstance().GetInterpreter();
+-    const u32 return_pc = ppc_state.npc;
+-    for (u32 i = 0; i < 16 && ppc_state.pc != return_pc && ppc_state.pc - current_pc < 0x40; ++i)
+-    {
+-      const u32 pc = ppc_state.pc;
+-      ppc_state.downcount -= interpreter.SingleStepInner();
+-      if (ppc_state.Exceptions & EXCEPTION_PROGRAM)
+-      {
+-        ppc_state.pc = pc;
+-        power_pc.CheckExceptions();
+-      }
+-    }
+-    ++s_fast_os_interrupt_inline_fallbacks;
+-    return 0;
+-  }
+-
+-  if (ppc_state.msr.PR)
+-  {
+-    GenerateProgramException(ppc_state, ProgramExceptionCause::PrivilegedInstruction);
+-    power_pc.CheckExceptions();
+-    return 0;
+-  }
+-
+-  const u32 old_msr = ppc_state.msr.Hex;
+-  u32 new_msr = old_msr;
+-  u32 cycles = cycles_primary;
+-
+-  switch (mode)
+-  {
+-  case OS_INTERRUPT_DISABLE:
+-    new_msr = old_msr & ~MSR_EE_MASK;
+-    ppc_state.gpr[3] = (old_msr & MSR_EE_MASK) ? 1 : 0;
+-    ppc_state.gpr[4] = new_msr;
+-    ++s_fast_os_interrupt_disable_ops;
+-    break;
+-  case OS_INTERRUPT_ENABLE:
+-    new_msr = old_msr | MSR_EE_MASK;
+-    ppc_state.gpr[3] = (old_msr & MSR_EE_MASK) ? 1 : 0;
+-    ppc_state.gpr[4] = new_msr;
+-    ++s_fast_os_interrupt_enable_ops;
+-    break;
+-  case OS_INTERRUPT_RESTORE:
+-    if (ppc_state.gpr[3] != 0)
+-    {
+-      new_msr = old_msr | MSR_EE_MASK;
+-    }
+-    else
+-    {
+-      new_msr = old_msr & ~MSR_EE_MASK;
+-      cycles = cycles_secondary;
+-    }
+-    ppc_state.gpr[4] = (old_msr & MSR_EE_MASK) ? 1 : 0;
+-    ppc_state.gpr[5] = new_msr;
+-    ++s_fast_os_interrupt_restore_ops;
+-    break;
+-  default:
+-    return 0;
+-  }
+-
+-  ppc_state.msr.Hex = new_msr;  // nothing pending (checked above)
+-
+-  ppc_state.pc = ppc_state.npc;
+-  ppc_state.downcount -= static_cast<int>(cycles);
+-  UpdatePerformanceMonitorIfNeeded(cycles, 0, 0, ppc_state);
+-  return 0;
+-}
+-
+-s32 CachedInterpreter::FastOsInterruptCallBranch(PowerPC::PowerPCState& ppc_state,
+-                                                 const OsInterruptFunctionOperands& operands)
+-{
+-  const auto& [power_pc, current_pc, mode, cycles_primary, cycles_secondary] = operands;
+-  const u32 function_pc = GetOsInterruptTargetPc(mode);
+-  const u32 return_pc = current_pc + sizeof(u32);
+-
+-  LR(ppc_state) = return_pc;
+-  if (function_pc == 0 ||
+-      !ExecuteFastOsInterruptInline(ppc_state, power_pc, function_pc, return_pc, mode,
+-                                    cycles_primary, cycles_secondary))
+-  {
+-    ppc_state.pc = current_pc;
+-    ppc_state.npc = function_pc;
+-    ++s_fast_os_interrupt_inline_fallbacks;
+-  }
+-
+-  return sizeof(AnyCallback) + sizeof(operands);
+-}
+-
 -s32 CachedInterpreter::FastMeleeInputStatusCallBranch(PowerPC::PowerPCState& ppc_state,
 -                                                      const FastInstructionOperands& operands)
 -{
@@ -1993,7 +2574,7 @@ diff --git a/Source/Core/Core/PowerPC/CachedInterpreter/CachedInterpreter.cpp b/
  static void ExecuteDcbxCacheOperation(Core::System& system, PowerPC::PowerPCState& ppc_state,
                                        UGeckoInstruction inst, u32 address)
  {
-@@ -15406,21 +13720,6 @@ bool CachedInterpreter::TryWriteWasmBlock(u32 nextPC)
+@@ -15406,21 +13269,6 @@ bool CachedInterpreter::TryWriteWasmBlock(u32 nextPC)
      LogWasmBlockReject("empty", nullptr, 0, js.blockStart, code_block.m_num_instructions);
      return false;
    }
@@ -2015,10 +2596,12 @@ diff --git a/Source/Core/Core/PowerPC/CachedInterpreter/CachedInterpreter.cpp b/
  
    ++s_wasm_block_attempt_count;
    if (!s_wasm_jit_direct_only && s_wasm_block_mixed_compile_count >= MAX_WASM_MIXED_COMPILED_BLOCKS)
-@@ -15768,12 +14067,6 @@ bool CachedInterpreter::TryWriteWasmBlock(u32 nextPC)
+@@ -15766,14 +13614,6 @@ bool CachedInterpreter::TryWriteWasmBlock(u32 nextPC)
+       reinterpret_cast<std::uintptr_t>(&DolphinWeb_CachedInterpreterInterpret));
+   const auto fastcheck_gpfifo_index = static_cast<int>(
        reinterpret_cast<std::uintptr_t>(&DolphinWeb_CachedInterpreterFastCheckGatherPipe));
-   const auto fast_os_interrupt_call_index = static_cast<int>(
-       reinterpret_cast<std::uintptr_t>(&DolphinWeb_CachedInterpreterFastOsInterruptCall));
+-  const auto fast_os_interrupt_call_index = static_cast<int>(
+-      reinterpret_cast<std::uintptr_t>(&DolphinWeb_CachedInterpreterFastOsInterruptCall));
 -  const auto fast_melee_input_status_call_index = static_cast<int>(
 -      reinterpret_cast<std::uintptr_t>(&DolphinWeb_CachedInterpreterFastMeleeInputStatusCall));
 -  const auto fast_melee_status_call_index = static_cast<int>(
@@ -2028,29 +2611,31 @@ diff --git a/Source/Core/Core/PowerPC/CachedInterpreter/CachedInterpreter.cpp b/
    const auto cache_key = DolphinWeb_MakeWasmBlockCacheKey(bytes);
    if (s_wasm_rejected_block_keys.contains(cache_key.data()))
    {
-@@ -15791,8 +14084,7 @@ bool CachedInterpreter::TryWriteWasmBlock(u32 nextPC)
+@@ -15791,8 +13631,7 @@ bool CachedInterpreter::TryWriteWasmBlock(u32 nextPC)
        bytes.data(), static_cast<int>(bytes.size()), cache_key.data(), read_u32_index,
        write_u32_index, read_u8_index, write_u8_index, read_u16_index, write_u16_index, lfs_index,
        stfs_index, lfd_index, fmr_index, system_index, fp_index, fctiwz_index, interpret_index,
 -      fastcheck_gpfifo_index, fast_os_interrupt_call_index, fast_melee_input_status_call_index,
 -      fast_melee_status_call_index, fast_melee_service_poll_call_index,
-+      fastcheck_gpfifo_index, fast_os_interrupt_call_index,
++      fastcheck_gpfifo_index,
        static_cast<int>(reinterpret_cast<std::uintptr_t>(&DolphinWeb_CachedInterpreterFma)),
        off_thread ? static_cast<int>(DolphinWeb_JitReadyBitsPtr()) : 0, 0);
    if (handle == -3 || handle == -4)
-@@ -15956,8 +14248,6 @@ bool CachedInterpreter::TryWriteWasmBlock(u32 nextPC)
+@@ -15956,9 +13795,6 @@ bool CachedInterpreter::TryWriteWasmBlock(u32 nextPC)
        }
        else
        {
 -        TryWriteMeleeIdlePollLoop(i, power_pc);
 -        TryWriteMeleeTitleLoop(i, power_pc);
-         TryWriteOsInterruptFunction(i, power_pc);
+-        TryWriteOsInterruptFunction(i, power_pc);
          if (!TryWriteDcbxLoop(i, power_pc) && !TryWriteFastInstruction(op, power_pc))
          {
-@@ -16021,19 +14311,6 @@ void ApplyRequestedWasmPolicy(CachedInterpreter& cpu)
+           s_mem_block_counts.Interpreted(op);
+@@ -16020,20 +13856,6 @@ void ApplyRequestedWasmPolicy(CachedInterpreter& cpu)
+   const bool next_enabled = requested != 0;
    if (next_enabled && (!s_wasm_jit_enabled || s_wasm_policy_owner != &cpu))
    {
-     s_fast_os_interrupt_verified_modes = 0;
+-    s_fast_os_interrupt_verified_modes = 0;
 -    s_fast_melee_input_status_verified = false;
 -    s_fast_melee_input_status_cycles = 0;
 -    s_fast_melee_input_status_loadstores = 0;
@@ -2067,7 +2652,7 @@ diff --git a/Source/Core/Core/PowerPC/CachedInterpreter/CachedInterpreter.cpp b/
    }
    s_wasm_jit_enabled = next_enabled;
    s_wasm_jit_direct_only = requested < 2;
-@@ -16263,7 +14540,6 @@ extern "C" const char* GetPpcWasmHelperStats()
+@@ -16263,7 +14085,6 @@ extern "C" const char* GetPpcWasmHelperStats()
    static u32 last_refresh_direct_tier_reject_count = 0;
    static u32 last_refresh_too_short_count = 0;
    static u32 last_refresh_dcbx_loop_blocks = 0;
@@ -2075,7 +2660,7 @@ diff --git a/Source/Core/Core/PowerPC/CachedInterpreter/CachedInterpreter.cpp b/
    static u64 last_refresh_fallback_dispatch_total = 0;
    constexpr u32 STATS_REFRESH_BLOCK_RUNS = 1000;
    const JitFallbackDispatchStats fallback_dispatch = GetJitFallbackDispatchStats();
-@@ -16278,7 +14554,6 @@ extern "C" const char* GetPpcWasmHelperStats()
+@@ -16278,7 +14099,6 @@ extern "C" const char* GetPpcWasmHelperStats()
        s_wasm_direct_tier_reject_count == last_refresh_direct_tier_reject_count &&
        s_wasm_block_too_short_count == last_refresh_too_short_count &&
        s_fast_dcbx_loop_blocks == last_refresh_dcbx_loop_blocks &&
@@ -2083,7 +2668,7 @@ diff --git a/Source/Core/Core/PowerPC/CachedInterpreter/CachedInterpreter.cpp b/
        fallback_dispatch_total == last_refresh_fallback_dispatch_total &&
        static_link_snapshot.sequence == static_link_last_sequence)
  #else
-@@ -16290,7 +14565,6 @@ extern "C" const char* GetPpcWasmHelperStats()
+@@ -16290,7 +14110,6 @@ extern "C" const char* GetPpcWasmHelperStats()
        s_wasm_direct_tier_reject_count == last_refresh_direct_tier_reject_count &&
        s_wasm_block_too_short_count == last_refresh_too_short_count &&
        s_fast_dcbx_loop_blocks == last_refresh_dcbx_loop_blocks &&
@@ -2091,7 +2676,7 @@ diff --git a/Source/Core/Core/PowerPC/CachedInterpreter/CachedInterpreter.cpp b/
        fallback_dispatch_total == last_refresh_fallback_dispatch_total)
  #endif
  #line 11305
-@@ -16304,7 +14578,6 @@ extern "C" const char* GetPpcWasmHelperStats()
+@@ -16304,7 +14123,6 @@ extern "C" const char* GetPpcWasmHelperStats()
    last_refresh_direct_tier_reject_count = s_wasm_direct_tier_reject_count;
    last_refresh_too_short_count = s_wasm_block_too_short_count;
    last_refresh_dcbx_loop_blocks = s_fast_dcbx_loop_blocks;
@@ -2099,7 +2684,7 @@ diff --git a/Source/Core/Core/PowerPC/CachedInterpreter/CachedInterpreter.cpp b/
    last_refresh_fallback_dispatch_total = fallback_dispatch_total;
  #if DOLPHIN_WEB_STATIC_EXIT_LINKS && DOLPHIN_WEB_STATIC_EXIT_LINK_STATS
    static_link_last_sequence = static_link_snapshot.sequence;
-@@ -16528,36 +14801,6 @@ extern "C" const char* GetPpcWasmHelperStats()
+@@ -16528,92 +14346,6 @@ extern "C" const char* GetPpcWasmHelperStats()
          << " lh:" << s_fast_half_mem_load_ops << " sth:" << s_fast_half_mem_store_ops
          << " mw:" << s_fast_multiword_mem_ops;
    }
@@ -2133,13 +2718,20 @@ diff --git a/Source/Core/Core/PowerPC/CachedInterpreter/CachedInterpreter.cpp b/
 -        << " fallback:" << s_fast_melee_idle_poll_loop_fallbacks
 -        << " throttle:" << s_fast_melee_idle_poll_loop_throttles;
 -  }
-   if (s_fast_os_interrupt_compile_attempts != 0 || s_fast_os_interrupt_disable_ops != 0 ||
-       s_fast_os_interrupt_enable_ops != 0 || s_fast_os_interrupt_restore_ops != 0 ||
-       s_fast_os_interrupt_inline_ops != 0 || s_fast_os_interrupt_inline_fallbacks != 0)
-@@ -16572,48 +14815,6 @@ extern "C" const char* GetPpcWasmHelperStats()
-         << " inline:" << s_fast_os_interrupt_inline_ops
-         << " fallback:" << s_fast_os_interrupt_inline_fallbacks;
-   }
+-  if (s_fast_os_interrupt_compile_attempts != 0 || s_fast_os_interrupt_disable_ops != 0 ||
+-      s_fast_os_interrupt_enable_ops != 0 || s_fast_os_interrupt_restore_ops != 0 ||
+-      s_fast_os_interrupt_inline_ops != 0 || s_fast_os_interrupt_inline_fallbacks != 0)
+-  {
+-    out << " | fastintr attempts:" << s_fast_os_interrupt_compile_attempts
+-        << " crej:" << s_fast_os_interrupt_compile_rejects
+-        << " mm:" << std::hex << s_fast_os_interrupt_mismatch_address << ":"
+-        << s_fast_os_interrupt_mismatch_expected << "/" << s_fast_os_interrupt_mismatch_actual
+-        << std::dec << " dis:" << s_fast_os_interrupt_disable_ops
+-        << " en:" << s_fast_os_interrupt_enable_ops
+-        << " res:" << s_fast_os_interrupt_restore_ops
+-        << " inline:" << s_fast_os_interrupt_inline_ops
+-        << " fallback:" << s_fast_os_interrupt_inline_fallbacks;
+-  }
 -  if (s_fast_melee_input_status_verify_attempts != 0 ||
 -      s_fast_melee_input_status_inline_ops != 0 ||
 -      s_fast_melee_input_status_inline_fallbacks != 0)
@@ -2185,49 +2777,52 @@ diff --git a/Source/Core/Core/PowerPC/CachedInterpreter/CachedInterpreter.cpp b/
    if (s_fast_branch_ops != 0)
    {
      out << " | fastbranch ops:" << s_fast_branch_ops << " bcx:" << s_fast_branch_bcx_ops
-@@ -18478,8 +16679,9 @@ namespace
+@@ -18478,8 +16210,9 @@ namespace
  // 34 (0146): the 0141/0143 paths in fewer bytes (splatted constants, one
  // helper call per op); 33 is retired (0144, closed). 35 (0147): psq_l and
  // psq_st float pairs in v128. 36 (0157): regions run with MSR.FP clear,
 -// blocks with FPU ops checked at the head.
 -constexpr u32 AOT_COMPILER_VERSION = 36;
-+// blocks with FPU ops checked at the head. 37 (0196): the three per-game
++// blocks with FPU ops checked at the head. 37 (0196): the four per-game
 +// call imports are gone (a bl to those addresses is an ordinary call).
 +constexpr u32 AOT_COMPILER_VERSION = 37;
  constexpr u32 AOT_MAX_FRAGMENT_BYTES = 1u << 20;
  thread_local std::vector<u32> t_aot_out;
  u8* s_aot_ram = nullptr;
-@@ -19247,8 +17449,6 @@ bool CachedInterpreter::DoJit(u32 em_address, JitBlock* b, u32 nextPC)
+@@ -19247,9 +16980,6 @@ bool CachedInterpreter::DoJit(u32 em_address, JitBlock* b, u32 nextPC)
        }
        else
        {
 -        TryWriteMeleeIdlePollLoop(i, power_pc);
 -        TryWriteMeleeTitleLoop(i, power_pc);
-         TryWriteOsInterruptFunction(i, power_pc);
+-        TryWriteOsInterruptFunction(i, power_pc);
          if (!TryWriteDcbxLoop(i, power_pc) && !TryWriteFastInstruction(op, power_pc))
          {
+           s_mem_block_counts.Interpreted(op);
 diff --git a/Source/Core/Core/PowerPC/CachedInterpreter/CachedInterpreter.h b/Source/Core/Core/PowerPC/CachedInterpreter/CachedInterpreter.h
 --- a/Source/Core/Core/PowerPC/CachedInterpreter/CachedInterpreter.h
 +++ b/Source/Core/Core/PowerPC/CachedInterpreter/CachedInterpreter.h
-@@ -82,8 +82,6 @@ private:
+@@ -82,9 +82,6 @@ private:
    void LogGeneratedCode() const;
    bool TryWriteFastInstruction(const PPCAnalyst::CodeOp& op,
                                 PowerPC::PowerPCManager& power_pc);
 -  bool TryWriteMeleeIdlePollLoop(u32 index, PowerPC::PowerPCManager& power_pc);
 -  bool TryWriteMeleeTitleLoop(u32 index, PowerPC::PowerPCManager& power_pc);
-   bool TryWriteOsInterruptFunction(u32 index, PowerPC::PowerPCManager& power_pc);
+-  bool TryWriteOsInterruptFunction(u32 index, PowerPC::PowerPCManager& power_pc);
    bool TryWriteDcbxLoop(u32 index, PowerPC::PowerPCManager& power_pc);
  
-@@ -98,8 +96,6 @@ private:
+ #ifdef __EMSCRIPTEN__
+@@ -98,9 +95,6 @@ private:
    struct InterpretAndCheckExceptionsOperands;
    struct FastInstructionOperands;
    struct FastBranchBdnzOperands;
 -  struct MeleeIdlePollLoopOperands;
 -  struct MeleeTitleLoopOperands;
-   struct OsInterruptFunctionOperands;
+-  struct OsInterruptFunctionOperands;
    struct DcbxLoopOperands;
    struct HLEFunctionOperands;
-@@ -155,13 +151,6 @@ private:
+   struct WriteBrokenBlockNPCOperands;
+@@ -155,41 +149,6 @@ private:
    static s32 FastFloat(PowerPC::PowerPCState& ppc_state,
                         const FastInstructionOperands& operands);
    static s32 FastFloat(std::ostream& stream, const FastInstructionOperands& operands);
@@ -2238,13 +2833,14 @@ diff --git a/Source/Core/Core/PowerPC/CachedInterpreter/CachedInterpreter.h b/So
 -  static s32 FastMeleeTitleLoop(PowerPC::PowerPCState& ppc_state,
 -                                const MeleeTitleLoopOperands& operands);
 -  static s32 FastMeleeTitleLoop(std::ostream& stream, const MeleeTitleLoopOperands& operands);
-   static s32 FastOsInterruptFunction(PowerPC::PowerPCState& ppc_state,
-                                      const OsInterruptFunctionOperands& operands);
-   static s32 FastOsInterruptFunction(std::ostream& stream,
-@@ -170,26 +159,6 @@ private:
-                                        const OsInterruptFunctionOperands& operands);
-   static s32 FastOsInterruptCallBranch(std::ostream& stream,
-                                        const OsInterruptFunctionOperands& operands);
+-  static s32 FastOsInterruptFunction(PowerPC::PowerPCState& ppc_state,
+-                                     const OsInterruptFunctionOperands& operands);
+-  static s32 FastOsInterruptFunction(std::ostream& stream,
+-                                     const OsInterruptFunctionOperands& operands);
+-  static s32 FastOsInterruptCallBranch(PowerPC::PowerPCState& ppc_state,
+-                                       const OsInterruptFunctionOperands& operands);
+-  static s32 FastOsInterruptCallBranch(std::ostream& stream,
+-                                       const OsInterruptFunctionOperands& operands);
 -  static s32 FastMeleeInputStatusCallBranch(PowerPC::PowerPCState& ppc_state,
 -                                            const FastInstructionOperands& operands);
 -  static s32 FastMeleeInputStatusCallBranch(std::ostream& stream,
@@ -2268,7 +2864,7 @@ diff --git a/Source/Core/Core/PowerPC/CachedInterpreter/CachedInterpreter.h b/So
    static s32 FastDcbx(PowerPC::PowerPCState& ppc_state,
                        const FastInstructionOperands& operands);
    static s32 FastDcbx(std::ostream& stream, const FastInstructionOperands& operands);
-@@ -270,33 +239,6 @@ struct CachedInterpreter::FastBranchBdnzOperands
+@@ -270,42 +229,6 @@ struct CachedInterpreter::FastBranchBdnzOperands
    u32 target_pc;
  };
  
@@ -2299,13 +2895,22 @@ diff --git a/Source/Core/Core/PowerPC/CachedInterpreter/CachedInterpreter.h b/So
 -#line 277
 -};
 -
- struct CachedInterpreter::OsInterruptFunctionOperands
+-struct CachedInterpreter::OsInterruptFunctionOperands
+-{
+-  PowerPC::PowerPCManager& power_pc;
+-  u32 current_pc;
+-  u32 mode;
+-  u32 cycles_primary;
+-  u32 cycles_secondary;
+-};
+-
+ struct CachedInterpreter::DcbxLoopOperands
  {
    PowerPC::PowerPCManager& power_pc;
 diff --git a/Source/Core/Core/PowerPC/CachedInterpreter/CachedInterpreter_Disassembler.cpp b/Source/Core/Core/PowerPC/CachedInterpreter/CachedInterpreter_Disassembler.cpp
 --- a/Source/Core/Core/PowerPC/CachedInterpreter/CachedInterpreter_Disassembler.cpp
 +++ b/Source/Core/Core/PowerPC/CachedInterpreter/CachedInterpreter_Disassembler.cpp
-@@ -182,54 +182,6 @@ s32 CachedInterpreter::FastFloat(std::ostream& stream, const FastInstructionOper
+@@ -182,122 +182,6 @@ s32 CachedInterpreter::FastFloat(std::ostream& stream, const FastInstructionOper
    return sizeof(AnyCallback) + sizeof(operands);
  }
  
@@ -2357,13 +2962,28 @@ diff --git a/Source/Core/Core/PowerPC/CachedInterpreter/CachedInterpreter_Disass
 -  return sizeof(AnyCallback) + sizeof(operands);
 -}
 -
- s32 CachedInterpreter::FastOsInterruptFunction(std::ostream& stream,
-                                                const OsInterruptFunctionOperands& operands)
- {
-@@ -252,52 +204,6 @@ s32 CachedInterpreter::FastOsInterruptCallBranch(std::ostream& stream,
-   return sizeof(AnyCallback) + sizeof(operands);
- }
- 
+-s32 CachedInterpreter::FastOsInterruptFunction(std::ostream& stream,
+-                                               const OsInterruptFunctionOperands& operands)
+-{
+-  const auto& [power_pc, current_pc, mode, cycles_primary, cycles_secondary] = operands;
+-  fmt::println(stream,
+-               "FastOsInterruptFunction(current_pc=0x{:08x}, mode={}, cycles_primary={}, "
+-               "cycles_secondary={})",
+-               current_pc, mode, cycles_primary, cycles_secondary);
+-  return sizeof(AnyCallback) + sizeof(operands);
+-}
+-
+-s32 CachedInterpreter::FastOsInterruptCallBranch(std::ostream& stream,
+-                                                 const OsInterruptFunctionOperands& operands)
+-{
+-  const auto& [power_pc, current_pc, mode, cycles_primary, cycles_secondary] = operands;
+-  fmt::println(stream,
+-               "FastOsInterruptCallBranch(current_pc=0x{:08x}, mode={}, cycles_primary={}, "
+-               "cycles_secondary={})",
+-               current_pc, mode, cycles_primary, cycles_secondary);
+-  return sizeof(AnyCallback) + sizeof(operands);
+-}
+-
 -s32 CachedInterpreter::FastMeleeInputStatusCallBranch(std::ostream& stream,
 -                                                      const FastInstructionOperands& operands)
 -{
@@ -2413,14 +3033,14 @@ diff --git a/Source/Core/Core/PowerPC/CachedInterpreter/CachedInterpreter_Disass
  s32 CachedInterpreter::FastDcbx(std::ostream& stream, const FastInstructionOperands& operands)
  {
    const auto& [power_pc, current_pc, inst] = operands;
-@@ -363,15 +269,8 @@ std::size_t CachedInterpreter::Disassemble(const JitBlock& block, std::ostream&
+@@ -363,15 +247,6 @@ std::size_t CachedInterpreter::Disassemble(const JitBlock& block, std::ostream&
        LOOKUP_KV(CachedInterpreter::FastBranch),
        LOOKUP_KV(CachedInterpreter::FastBranchBdnz),
        LOOKUP_KV(CachedInterpreter::FastFloat),
 -      LOOKUP_KV(CachedInterpreter::FastMeleeIdlePollLoop),
 -      LOOKUP_KV(CachedInterpreter::FastMeleeTitleLoop),
-       LOOKUP_KV(CachedInterpreter::FastOsInterruptFunction),
-       LOOKUP_KV(CachedInterpreter::FastOsInterruptCallBranch),
+-      LOOKUP_KV(CachedInterpreter::FastOsInterruptFunction),
+-      LOOKUP_KV(CachedInterpreter::FastOsInterruptCallBranch),
 -      LOOKUP_KV(CachedInterpreter::FastMeleeInputStatusCallBranch),
 -      LOOKUP_KV(CachedInterpreter::FastMeleeStatusFunctionCallBranch),
 -      LOOKUP_KV(CachedInterpreter::FastMeleeServicePollCallBranch),
