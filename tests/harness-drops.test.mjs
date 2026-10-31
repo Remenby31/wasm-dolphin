@@ -749,3 +749,12 @@ test("audioLatencyOf: median and p95 of the page's samples in the span", async (
   const mixed = page.map((r, i) => ({ ...r, mixerMs: 40 + i }));
   assert.equal(audioLatencyOf(mixed, windows).audioMixerMs, 45);
 });
+
+test("drop-meter: a visit from the boot takes its new-frame start at the first tagged reading", async () => {
+  const src = await readFile(new URL("../harness/probes/drop-meter.mjs", import.meta.url), "utf8");
+  const drain = src.slice(src.indexOf("const drainOnce = async () => {"), src.indexOf("const drain = (async () =>"));
+  assert.match(drain, /if \(raw\.newFramesStart\?\.newShown == null\) \{\n\s+const f = await readFrameInfo\(page\)\.catch\(\(\) => null\);\n\s+if \(f\?\.newShown != null\) raw\.newFramesStart = \{ \.\.\.f, late: true \};/);
+  const { newFramesRate } = await import("../harness/lib/matrix.mjs");
+  assert.equal(newFramesRate({ t: 1000, newShown: null }, { t: 11000, newShown: 600 }), null);
+  assert.equal(newFramesRate({ t: 2000, newShown: 30, late: true }, { t: 12000, newShown: 630 }), 60);
+});
