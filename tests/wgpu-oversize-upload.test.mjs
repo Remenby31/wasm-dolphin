@@ -6,7 +6,8 @@ import test from "node:test";
 
 import {
   createWgpuMappedStagingPool,
-  writeOversizeWgpuUpload,
+  queueWgpuUploadReason,
+  writeWgpuUploadThroughQueue,
 } from "../src/wgpu-mapped-staging-pool.js";
 
 // A device whose queue keeps the queue timeline: submit runs the copies of its
@@ -76,8 +77,7 @@ test("an oversize upload is written after the batch staged before it, and before
   const big = new Uint8Array(128).fill(2);
   const refused = pool.stageBuffer({ data: big, destination });
   assert.equal(refused.reason, "payload-too-large");
-  assert.equal(writeOversizeWgpuUpload({
-    inPass: false,
+  assert.equal(writeWgpuUploadThroughQueue({
     submitPending: tl.submitPending,
     write: () => queue.writeBuffer(destination, 0, big),
   }), true);
@@ -101,20 +101,36 @@ test("without the submit first, the queue write would land under the earlier sta
   assert.deepEqual([...tl.memory.subarray(0, 4)], [1, 1, 1, 1]);
 });
 
-test("inside a render pass the oversize upload is refused and nothing is submitted", () => {
-  let calls = 0;
-  assert.equal(writeOversizeWgpuUpload({
-    inPass: true,
-    submitPending: () => { calls += 1; return true; },
-    write: () => { calls += 10; },
-  }), false);
-  assert.equal(calls, 0);
+test("inside a pass, an upload with no free slot is written after the batch staged before it", () => {
+  // Both slots full: a pass cannot wait for a remap.
+  const tl = createTimeline();
+  const { pool, destination, queue } = tl;
+  assert.equal(pool.stageBuffer({ data: new Uint8Array(64).fill(1), destination }).ok, true);
+  assert.equal(pool.stageBuffer({ data: new Uint8Array(64).fill(4), destination, destinationOffset: 64 }).ok, true);
+  const late = new Uint8Array(8).fill(5);
+  const refused = pool.stageBuffer({ data: late, destination, destinationOffset: 60 });
+  assert.equal(refused.reason, "no-capacity");
+  assert.equal(queueWgpuUploadReason(refused.reason, true), "pass-capacity");
+  assert.equal(writeWgpuUploadThroughQueue({
+    submitPending: tl.submitPending,
+    write: () => queue.writeBuffer(destination, 60, late),
+  }), true);
+  assert.deepEqual(tl.log, ["copy@0+64", "copy@64+64", "write@60+8"]);
+  assert.deepEqual([...tl.memory.subarray(58, 70)], [1, 1, 5, 5, 5, 5, 5, 5, 5, 5, 4, 4]);
+});
+
+test("the queue takes oversize uploads anywhere and full slots only inside a pass", () => {
+  assert.equal(queueWgpuUploadReason("payload-too-large", false), "oversize");
+  assert.equal(queueWgpuUploadReason("payload-too-large", true), "oversize");
+  assert.equal(queueWgpuUploadReason("no-capacity", true), "pass-capacity");
+  assert.equal(queueWgpuUploadReason("no-capacity", false), null);
+  assert.equal(queueWgpuUploadReason("pool-failed", true), null);
+  assert.equal(queueWgpuUploadReason(null, true), null);
 });
 
 test("a failed submission writes nothing", () => {
   let writes = 0;
-  assert.equal(writeOversizeWgpuUpload({
-    inPass: false,
+  assert.equal(writeWgpuUploadThroughQueue({
     submitPending: () => false,
     write: () => { writes += 1; },
   }), false);
