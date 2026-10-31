@@ -698,7 +698,7 @@ test("0167 times the CPU thread's block compiles behind a flag the sampler sets"
 test("--baseline-query: the baseline side boots with it, the noise is checked against it, a baseline is needed", async () => {
   const src = await readFile(new URL("../harness/probes/drop-meter.mjs", import.meta.url), "utf8");
   assert.match(src, /"baseline-query": \{ type: "string" \}/);
-  assert.match(src, /playVisit\(name === "baseline" && o\.baselineQuery \? \{ \.\.\.o, query: o\.baselineQuery \} : o,/);
+  assert.match(src, /playVisit\(\{ \.\.\.\(name === "baseline" && o\.baselineQuery \? \{ \.\.\.o, query: o\.baselineQuery \} : o\), integrityExpected: treeHasIntegrity\(sides\[name\]\.root\) \},/);
   assert.match(src, /const noiseExpect = \{[^}]*query: o\.baselineQuery \?\? o\.query,/);
   assert.match(src, /readNoise\(values\.noise, noiseExpect\)/);
   assert.match(src, /if \(baselineQuery && !values\.baseline\) throw new Error\("--baseline-query needs --baseline"\);/);

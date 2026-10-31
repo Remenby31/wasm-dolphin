@@ -122,6 +122,18 @@ export function invalidReasons(rec, { target = null, framesPerViRef = null, paci
   return why;
 }
 
+// Liveness (judge, 2026-10-31: a run at speed 100 % showed 4 picture
+// changes a second): at speed >= 95 %, a window whose picture changes fewer
+// than minFps times a second (the median of its visualChangeFps readings,
+// start, middle, end) is FROZEN. Reasons: null when alive or unread.
+export const FROZEN_FPS = 10;
+export function frozenReason(rec, { minFps = FROZEN_FPS, minSpeed = 95 } = {}) {
+  const fps = (rec?.visualFps ?? []).filter((v) => typeof v === "number").sort((a, b) => a - b);
+  if (!fps.length || !(rec.speed >= minSpeed)) return null;
+  const mid = fps[fps.length >> 1];
+  return mid < minFps ? `FROZEN: the picture changes ${mid} times a second (< ${minFps}) at speed ${rec.speed} % (readings ${rec.visualFps.join("/")})` : null;
+}
+
 // The speed a query asks for: a number, "unlimited", or null (default 1).
 // unlimited is a speed only with SyncOnSkipIdle on (?synconidle=1): with it
 // off (the product today), emulated time runs ahead of the rendering. The
