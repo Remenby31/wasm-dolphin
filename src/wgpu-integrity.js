@@ -13,7 +13,9 @@
 // - the core's own: command records dropped, batches aborted or oversized,
 //   uploads that timed out waiting for arena space (each loses a whole pass);
 // - uncaptured WebGPU errors, device losses, a fatal replay, mapped staging
-//   refused, geometry cache collisions and failures.
+//   refused, geometry cache collisions and failures;
+// - frames shown out of order: an older XFB put on the canvas after a newer
+//   one (patch 0208 frame tags, src/wgpu-new-frames.js; null without tags).
 // validationReadIntegrity returns them flat and cumulative; the probes take
 // the delta over a window and fail the run on any of INTEGRITY_FATAL.
 
@@ -54,7 +56,8 @@ export const INTEGRITY_FATAL = Object.freeze([
   "replayFatal",
   "stagingUnsafe",
   "geometryCacheCollisions",
-  "geometryCacheFailed"
+  "geometryCacheFailed",
+  "framesOutOfOrder"
 ]);
 
 // The first missing resource of a skipped draw (SKIP), or -1 when it has all.

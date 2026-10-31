@@ -1411,6 +1411,12 @@ export class EmulatorHost {
         this.mode === "dolphin" ? this.adapter.presentationIntervalHistogramBuckets : null,
       presentationFrameLag: this.mode === "dolphin" ? this.adapter.presentationFrameLag : 0,
       presentationQueueAgeMs: this.mode === "dolphin" ? this.adapter.presentationQueueAgeMs : 0,
+      // Patch 0208: new XFBs shown / queued per second, shown since boot,
+      // older pictures shown after newer ones (lifetime); null without tags.
+      newFramesPerSec: this.mode === "dolphin" ? this.adapter.newFramesPerSec ?? null : null,
+      newFramesProducedPerSec: this.mode === "dolphin" ? this.adapter.newFramesProducedPerSec ?? null : null,
+      newFramesShown: this.mode === "dolphin" ? this.adapter.newFramesShown ?? null : null,
+      framesOutOfOrder: this.mode === "dolphin" ? this.adapter.framesOutOfOrder ?? null : null,
       visualChangeFps:
         this.mode === "dolphin"
           ? this.visibleSamplerEnabled &&

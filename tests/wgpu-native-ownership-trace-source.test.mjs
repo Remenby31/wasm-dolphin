@@ -39,7 +39,7 @@ sourceContractTest("native ownership trace keeps a separate fixed ABI and explic
   assert.match(source, /m_trace_header->epoch\.store\(m_trace_epoch/);
   assert.match(
     source,
-    /PushSubmitPresent\(\)[\s\S]*?if \(!Push\(rec\)\)[\s\S]*?m_trace_active_transaction = 0;[\s\S]*?FinishOwnershipTraceCapture\(\)/
+    /PushSubmitPresent\(u32 frame_tag, u32 tag_epoch\)[\s\S]*?if \(!Push\(rec\)\)[\s\S]*?m_trace_active_transaction = 0;[\s\S]*?FinishOwnershipTraceCapture\(\)/
   );
   assert.match(
     source,

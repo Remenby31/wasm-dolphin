@@ -57,7 +57,7 @@ import { pathToFileURL } from "node:url";
 import { parseArgs } from "node:util";
 import { gunzipSync, gzipSync } from "node:zlib";
 
-import { bootIso, ensureServer, grabFrame, launchChrome, loadHarnessState, readTimeline, REPO_ROOT, workerRequest } from "../lib/browser.mjs";
+import { bootIso, ensureServer, grabFrame, launchChrome, loadHarnessState, readFrameInfo, readTimeline, REPO_ROOT, workerRequest } from "../lib/browser.mjs";
 import { dropEvents, dropSummary, loadSegments, nativeFps, noiseOf, phaseSummaries, rowsOf, trendLine, trendTable, VERDICT_MIN_RUNS, visitVerdict, windowsOf, worstDrops } from "../lib/drops.mjs";
 import { exportRef } from "../cli.mjs";
 import { calmLock, defaultMaxLoad, loadGaveUp, loadLimit } from "../lib/env.mjs";
@@ -69,7 +69,7 @@ import { median, round } from "../lib/stats.mjs";
 import { machineSnapshot, powerDrained, powerSnapshot, sampleChromeRss, MIN_BATTERY_PERCENT } from "../lib/system.mjs";
 import { mergeTimeline } from "../lib/timeline.mjs";
 import { num, sideOrder, STATE_ROUTE } from "./race-perf.mjs";
-import { visualProbeCheck } from "../lib/matrix.mjs";
+import { newFramesRate, visualProbeCheck } from "../lib/matrix.mjs";
 import { integrityBrief, integrityOf, parseIntegrityAllow, readIntegrity, treeHasIntegrity } from "../lib/integrity.mjs";
 
 // What this probe runs in the page and the worker (samplers, counters): an
@@ -172,6 +172,9 @@ async function playVisit(o, server, profileDir, shotDir, visit) {
     raw.integrityStart = await readIntegrity(page, { expected: o.integrityExpected });
     raw.integrityAllow = o.integrityAllow;
     raw.integrityPostload = Boolean(o.state);
+    // The new frames shown since boot (patch 0208), read with the integrity:
+    // their rate over the visit is the smoothness reference.
+    raw.newFramesStart = await readFrameInfo(page).catch(() => null);
     raw.sampler = await workerRequest(page, "validationDropSampler", { action: "start", everyMs: o.sampleMs }, 5000);
     // An older tree (a baseline before the sampler) still gives the
     // timeline: speeds, presents, drops, without their causes.
@@ -238,6 +241,7 @@ async function playVisit(o, server, profileDir, shotDir, visit) {
     await drainOnce();
     raw.tps = (await guestSec(page))?.tps ?? null;
     raw.integrityEnd = await readIntegrity(page, { expected: o.integrityExpected });
+    raw.newFramesEnd = await readFrameInfo(page).catch(() => null);
     // The JIT cache and the off-thread compiler at the end (cheap, read only).
     raw.jitCache = await workerRequest(page, "validationReadJitCacheReadiness", {}, 5000);
     // The display filter (?fsr=, ?displayfit=): frames it drew and their GPU
@@ -309,7 +313,7 @@ export function analyzeVisit(raw, { native = null } = {}) {
     displayFilter: displayFilterCost(raw.displayFilter),
     load1: { median: round(median(loadAvg), 2), max: round(Math.max(...loadAvg), 2) },
     regionsDone, rssPeakMB: rss.length ? Math.max(...rss) : null,
-    summary: { ...dropSummary({ windows, presents, vi, tps: raw.tps, rows: rows.filter(span), displayed, page: page.filter(span) }), loads: loads.length, loadExcessMs: loads.reduce((a, l) => a + l.excessMs, 0), rssPeakMB: rss.length ? Math.max(...rss) : null, regionsDoneMs: regionsDone?.hostMsFromLaunch ?? null },
+    summary: { ...dropSummary({ windows, presents, vi, tps: raw.tps, rows: rows.filter(span), displayed, page: page.filter(span) }), newFramesPerSec: newFramesRate(raw.newFramesStart, raw.newFramesEnd), loads: loads.length, loadExcessMs: loads.reduce((a, l) => a + l.excessMs, 0), rssPeakMB: rss.length ? Math.max(...rss) : null, regionsDoneMs: regionsDone?.hostMsFromLaunch ?? null },
     phases, loads, worst: worstDrops(events), drops: events.length,
     // the 100 ms timeline, compact: [ms from start, speed %, VI/s, presents, max present gap, lost ms, top cause]
     timeline: windows.map((w) => {
@@ -351,7 +355,7 @@ export function humanSummary(summary) {
   for (const f of summary.integrity ?? []) lines.push(`INTEGRITY ${f.side} run ${f.run} visit ${f.visit}: ${f.fatal.join(", ")}`);
   for (const v of summary.visitSummary) {
     const n = v.candidate.noise, top = v.candidate.worst[0];
-    lines.push(`${v.visit === 1 ? "cold" : "warm"} (${v.candidate.runs} runs): lost ${n.lostMs?.median ?? "–"} ms, <95 % ${n.pctBelow95?.median ?? "–"} % of the time, worst 1 s ${n.worstSecond?.median ?? "–"} %, hitches >100 ms ${n.hitches100?.median ?? "–"}, load excess ${n.loadExcessMs?.median ?? "–"} ms; worst drop ${top ? `${top.label} ${Math.round(top.lostMs)} ms (${top.cause})` : "none"}`);
+    lines.push(`${v.visit === 1 ? "cold" : "warm"} (${v.candidate.runs} runs): lost ${n.lostMs?.median ?? "–"} ms, <95 % ${n.pctBelow95?.median ?? "–"} % of the time, worst 1 s ${n.worstSecond?.median ?? "–"} %, hitches >100 ms ${n.hitches100?.median ?? "–"}, new frames ${n.newFramesPerSec?.median ?? "–"}/s, load excess ${n.loadExcessMs?.median ?? "–"} ms; worst drop ${top ? `${top.label} ${Math.round(top.lostMs)} ms (${top.cause})` : "none"}`);
     if (v.verdict) {
       const bad = v.verdict.regressions.map((r) => `${r.where} ${r.metric} ${r.baseline} → ${r.candidate} (> ${r.threshold})`);
       lines.push(`   verdict: ${v.verdict.inconclusive ? "NO VERDICT (see noVerdict)" : v.verdict.regression ? `REGRESSION ${bad.join(", ")}` : "no regression beyond the noise"}${v.verdict.improvement ? " (some improvement)" : ""}`);
@@ -557,7 +561,7 @@ export function readNoise(file, expect = null) {
 function logRun(log, tag, a) {
   if (a.error) return log(`${tag}: ${a.error}`);
   const s = a.summary;
-  log(`${tag}: lost ${s.lostMs} ms, <95 % ${s.pctBelow95} %, <90 % ${s.pctBelow90} %, worst 1 s ${s.worstSecond} %, hitches >50 ${s.hitches50} >100 ${s.hitches100}, p99 ${s.presentP99} ms, ${s.loads} loads +${s.loadExcessMs} ms, underruns ${s.underruns}, audio ${s.audioLatencyMs ?? "–"} ms (mixer ${s.audioMixerMs ?? "–"}), load1 ${a.load1.median}${a.overloaded ? " OVERLOADED" : ""}${a.powerDrained ? ` POWER (charge fell or under ${MIN_BATTERY_PERCENT} %)` : ""}${integrityBrief(a.integrity)}`);
+  log(`${tag}: lost ${s.lostMs} ms, <95 % ${s.pctBelow95} %, <90 % ${s.pctBelow90} %, worst 1 s ${s.worstSecond} %, hitches >50 ${s.hitches50} >100 ${s.hitches100}, p99 ${s.presentP99} ms, new frames ${s.newFramesPerSec ?? "–"}/s, ${s.loads} loads +${s.loadExcessMs} ms, underruns ${s.underruns}, audio ${s.audioLatencyMs ?? "–"} ms (mixer ${s.audioMixerMs ?? "–"}), load1 ${a.load1.median}${a.overloaded ? " OVERLOADED" : ""}${a.powerDrained ? ` POWER (charge fell or under ${MIN_BATTERY_PERCENT} %)` : ""}${integrityBrief(a.integrity)}`);
   for (const d of a.worst.slice(0, 3)) log(`   drop ${d.label} @${round(d.guestStart, 1)} gs: ${d.durationMs} ms, lost ${d.lostMs} ms, min ${d.minSpeed} %, cause ${d.cause}, ${d.jitBlocks} new blocks (${d.defers} deferred), causes ${JSON.stringify(d.causesMs)}`);
 }
 

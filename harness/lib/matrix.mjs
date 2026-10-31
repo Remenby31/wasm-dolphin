@@ -30,8 +30,23 @@ export const FRAME_FIELDS = Object.freeze({
   p95: "presentationP95IntervalMs",
   max: "presentationMaxIntervalMs",
   pc: "ppcPc",
-  audioUnderruns: "causalTelemetry.audio.underrunCount"
+  audioUnderruns: "causalTelemetry.audio.underrunCount",
+  // Patch 0208: new XFBs on the canvas, per second (the worker's 500 ms
+  // window) and since boot; null without frame tags (an older core).
+  newFps: "newFramesPerSec",
+  newShown: "newFramesShown"
 });
+
+// New frames shown per second between two readFrameInfo readings: the
+// smoothness reference (a duplicate VI swap is not a new picture, unlike a
+// present; visualChangeFps stays the diagnostic). null when either reading
+// has no frame tags or a boot came between them.
+export function newFramesRate(start, end) {
+  const n = end?.newShown - start?.newShown;
+  const secs = (end?.t - start?.t) / 1000;
+  if (start?.newShown == null || end?.newShown == null || !(n >= 0) || !(secs > 0)) return null;
+  return Math.round((n / secs) * 10) / 10;
+}
 
 export const SUMMARY_FIELDS = Object.freeze([
   "speed", "speedP5", "speedMin", "vis", "pres", "frameP50", "frameP95", "frameP99", "frameMax",
