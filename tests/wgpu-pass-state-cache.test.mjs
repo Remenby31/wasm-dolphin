@@ -527,7 +527,7 @@ sourceContractTest("opt-in UBO cache is exact, two-entry MRU, serial-bounded, an
   assert.doesNotMatch(gfxSource.slice(passResetStart, passResetEnd), /ResetUboSliceCache/,
     "successful pass boundaries must retain serial-live cross-pass entries");
   assert.match(gfxSource,
-    /void WebGPUGfx::AbortRecordedPass\(\)[\s\S]*?InvalidateUboSlices\(\)/);
+    /void WebGPUGfx::AbortRecordedPass\((?:GfxAbortSite site)?\)[\s\S]*?InvalidateUboSlices\(\)/);
   assert.match(gfxSource,
     /s_ubo_cache_epoch\.fetch_add\(1, std::memory_order_release\)/);
   const utilityStart = gfxSource.indexOf("void WebGPUGfx::UploadUtilityUniforms");
@@ -608,16 +608,16 @@ sourceContractTest("opt-in geometry packing uses one transactional upload and a 
   assert.doesNotMatch(gfxSource, /DiscardOrAbortPendingGeometryRange/);
   assert.match(
     gfxSource,
-    /if \(m_cur_pipeline_id == 0\)\n\s+\{\n\s+\/\/ 0203: only this draw is skipped[\s\S]*?\n\s+return;\n\s+\}/
+    /if \(m_cur_pipeline_id == 0\)\n\s+\{\n(?:\s+s_draw_skipped_no_pipeline\.fetch_add\(1, std::memory_order_relaxed\);\n)?\s+\/\/ 0203: only this draw is skipped[\s\S]*?\n\s+return;\n\s+\}/
   );
   assert.match(
     gfxSource,
-    /if \(m_cur_pipeline_id == 0 \|\| num_indices == 0\)\n\s+\{\n\s+\/\/ 0203: only this draw is skipped[\s\S]*?\n\s+return;\n\s+\}/
+    /if \(m_cur_pipeline_id == 0 \|\| num_indices == 0\)\n\s+\{\n(?:\s+if \(m_cur_pipeline_id == 0\)\n\s+s_draw_skipped_no_pipeline\.fetch_add\(1, std::memory_order_relaxed\);\n)?\s+\/\/ 0203: only this draw is skipped[\s\S]*?\n\s+return;\n\s+\}/
   );
   assert.match(gfxSource, /void InvalidateGeometryUploadPack\(\)/);
   assert.match(
     gfxSource,
-    /void WebGPUGfx::AbortRecordedPass\(\)[\s\S]*?m_cmd_stream\.AbortPass\(\);[\s\S]*?InvalidateGeometryUploadPack\(\)/
+    /void WebGPUGfx::AbortRecordedPass\((?:GfxAbortSite site)?\)[\s\S]*?m_cmd_stream\.AbortPass\(\);[\s\S]*?InvalidateGeometryUploadPack\(\)/
   );
   assert.match(
     gfxSource,
