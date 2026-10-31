@@ -51,6 +51,10 @@ export function describeUserDataStatus(status) {
 }
 
 // "Saved" only when the slot holds the new state and OPFS holds it too.
+// A slot save or load the player waits on: answered within this, or an
+// error message (above the worker's 60 s limit, src/core-control.js).
+export const SLOT_REQUEST_TIMEOUT_MS = 70000;
+
 export function describeSlotSave(slot, response) {
   if (!response?.saved) return `Save slot ${slot} failed`;
   if (response.persisted?.persistent) return `Saved slot ${slot}`;
@@ -1076,11 +1080,24 @@ export class UpstreamWorkerAdapter {
       .catch((error) => this.onStatus(error.message));
   }
 
+  // A request the player waits on: past `ms` it fails with a message
+  // instead of leaving them without an answer (the worker's own limit is
+  // 60 s, src/core-control.js).
+  requestWithin(type, payload, ms, what) {
+    let timer = null;
+    const timeout = new Promise((_, reject) => {
+      timer = setTimeout(() => reject(new Error(
+        `${what}: the emulator did not answer within ${Math.round(ms / 1000)} s. The game keeps running; try again.`
+      )), ms);
+    });
+    return Promise.race([this.request(type, payload), timeout]).finally(() => clearTimeout(timer));
+  }
+
   saveState(slot) {
     if (!this.loaded) {
       return;
     }
-    this.request("saveState", { slot })
+    this.requestWithin("saveState", { slot }, SLOT_REQUEST_TIMEOUT_MS, `Save slot ${slot}`)
       .then((response) => this.onStatus(describeSlotSave(slot, response)))
       .catch((error) => this.onStatus(error.message));
   }
@@ -1089,10 +1106,13 @@ export class UpstreamWorkerAdapter {
     if (!this.loaded) {
       return;
     }
-    this.request("loadState", { slot })
+    this.requestWithin("loadState", { slot }, SLOT_REQUEST_TIMEOUT_MS, `Load slot ${slot}`)
       .then((response) => {
         this.applyFrame(response);
-        this.onStatus(`Loaded slot ${slot}`);
+        // a load the core could not apply says so, never "Loaded"
+        this.onStatus(response?.loaded === false
+          ? `Load slot ${slot} failed: ${response.error || "the emulator could not apply it"}`
+          : `Loaded slot ${slot}`);
       })
       .catch((error) => this.onStatus(error.message));
   }

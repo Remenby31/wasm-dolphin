@@ -127,6 +127,7 @@ import {
 import { createWgpuSemanticRuntime } from "./wgpu-semantic-runtime.js";
 import { createWgpuFatalReporter, handleWgpuDeviceLoss, wgpuFatalPageReason } from "./wgpu-device-lifecycle.js";
 import { coreIntegrityOf, createWgpuIntegrity, SKIP, skippedDrawCause } from "./wgpu-integrity.js";
+import { CORE_CONTROL_OPS, runCoreControl } from "./core-control.js";
 import { createNewFrameCounter } from "./wgpu-new-frames.js";
 import { createBusyClock, createOccupancyMeter, readHeadroomStats } from "./occupancy-stats.js";
 import {
@@ -1837,20 +1838,32 @@ async function loadStateFileNow(payload) {
   api?.setWebGpuGeometryPackEnabled?.(wgpuGeometryPackEnabled ? 1 : 0);
   api?.setWebGpuGeometryRangeEnabled?.(wgpuGeometryRangeEnabled ? 1 : 0);
   wgpuExactCapture.onLoad();
-  wgpuIntegrity.stateLoad();
   let rc = 0;
+  let loadError = null;
   ppcWasmJitTimingSuspensions += 1;
   try {
-    rc = api.loadStateFile(path) | 0;
+    if (api.coreControl) {
+      // 0209: on the core's control pthread, done when the core applied the
+      // state; everything below runs after that, not after a guess.
+      try {
+        await api.coreControl(CORE_CONTROL_OPS.loadFile, path, "Load state");
+        rc = 1;
+      } catch (error) {
+        loadError = String(error?.message || error);
+      }
+    } else {
+      rc = api.loadStateFile(path) | 0;
+      // A core without the control thread: LoadAs runs on the CPU pthread
+      // later; wait wall-clock time so the restore takes effect.
+      await new Promise((r) => setTimeout(r, 1200));
+    }
     if (rc === 1) void prioritizeAotAfterStateLoad();
-    // LoadAs runs on the autonomous CPU pthread (RunFrame doesn't
-    // step the core) — wait real wall-clock time so the restore
-    // actually takes effect before we sample/screenshot.
-    await new Promise((r) => setTimeout(r, 1200));
   } finally {
     resetPpcWasmJitTiming(rc === 1);
     ppcWasmJitTimingSuspensions -= 1;
   }
+  // counted once the load ended (the integrity gate excuses its epoch loss)
+  wgpuIntegrity.stateLoad();
   api?.setWebGpuUploadArenaMiB?.(wgpuUploadArenaMiB, collectMetrics ? 1 : 0);
   api?.setWebGpuProducerProfileEnabled?.(wgpuProducerProfileRequested ? 1 : 0);
   api?.setWebGpuDrawProfileEnabled?.(wgpuDrawProfileRequested ? 1 : 0);
@@ -1901,7 +1914,7 @@ async function loadStateFileNow(payload) {
   console.log(`[loadStateFile] path=${path} rc=${rc} ` +
     `before='${beforeState}' after='${afterState}' ` +
     `frame=${api?.getFrame?.() ?? -1}`);
-  return { loaded: rc === 1, rc, beforeState, afterState,
+  return { loaded: rc === 1, rc, beforeState, afterState, ...(loadError ? { error: loadError } : {}),
            wgpuUploadTimeoutBoundary: {
              enabled: collectMetrics,
              verified: uploadTimeoutBoundaryVerified,
@@ -2246,16 +2259,20 @@ async function handleMessage(type, payload) {
       api?.setWebGpuGeometryPackEnabled?.(wgpuGeometryPackEnabled ? 1 : 0);
       api?.setWebGpuGeometryRangeEnabled?.(wgpuGeometryRangeEnabled ? 1 : 0);
       let loaded = false;
+      let loadError = null;
       wgpuExactCapture.onLoad();
-      wgpuIntegrity.stateLoad();
       ppcWasmJitTimingSuspensions += 1;
       try {
-        loaded = Boolean(api?.loadState(payload.slot | 0));
+        // 0209: awaited until the core applied the state (control pthread)
+        loaded = Boolean(await api?.loadState(payload.slot | 0));
         if (loaded) void prioritizeAotAfterStateLoad();
+      } catch (error) {
+        loadError = String(error?.message || error);
       } finally {
         resetPpcWasmJitTiming(loaded);
         ppcWasmJitTimingSuspensions -= 1;
       }
+      wgpuIntegrity.stateLoad();
       api?.setWebGpuUploadArenaMiB?.(wgpuUploadArenaMiB, collectMetrics ? 1 : 0);
       api?.setWebGpuProducerProfileEnabled?.(wgpuProducerProfileRequested ? 1 : 0);
       api?.setWebGpuDrawProfileEnabled?.(wgpuDrawProfileRequested ? 1 : 0);
@@ -2268,7 +2285,7 @@ async function handleMessage(type, payload) {
       if (wgpuProducerProfileRequested || wgpuDrawProfileRequested) {
         verifyWgpuProducerProfileActivation("slot state reload");
       }
-      return { loaded, ...framePayload() };
+      return { loaded, ...(loadError ? { error: loadError } : {}), ...framePayload() };
     }
     case "validationSetCorePaused": {
       // Harness-only checkpoint barrier. The app never sends this message;
@@ -2281,7 +2298,7 @@ async function handleMessage(type, payload) {
       ppcWasmJitTimingSuspensions += 1;
       resetPpcWasmJitTiming();
       try {
-        if (api.setCorePaused(paused ? 1 : 0)) {
+        if (await api.setCorePaused(paused ? 1 : 0)) {
           ppcWasmJitCorePaused = paused;
         }
         if (paused) await new Promise((resolve) => setTimeout(resolve, 100));
@@ -2608,13 +2625,24 @@ async function handleMessage(type, payload) {
       // file; pumping runFrame did nothing and returned in <10 ms
       // (§24 size=0). handleMessage is async → await real timeouts so
       // the CPU/dump pthreads get scheduled.
-      if (!api?.saveStateFile || !moduleInstance?.FS) {
+      if ((!api?.saveStateFile && !api?.coreControl) || !moduleInstance?.FS) {
         return { saved: false, error: "no saveStateFile/FS" };
       }
       const path = "/savestate_out.sav";
       try { moduleInstance.FS.unlink(path); } catch (e) {}
       const saveStartedAt = performance.now();
-      const rc = api.saveStateFile(path) | 0;
+      let rc = 0;
+      if (api.coreControl) {
+        // 0209: the core's control pthread; the polling below finds it whole
+        try {
+          await api.coreControl(CORE_CONTROL_OPS.saveFile, path, "Save state");
+          rc = 1;
+        } catch (error) {
+          return { saved: false, rc, error: String(error?.message || error) };
+        }
+      } else {
+        rc = api.saveStateFile(path) | 0;
+      }
       let prev = -1, stable = 0, size = 0;
       // up to ~8 s real time (40 × 200 ms); a game state is ~tens of
       // MB so allow generous time for DoState + zstd on the pthread.
@@ -3862,6 +3890,13 @@ function bindApi(module) {
   const ccall = module.ccall.bind(module);
   const optionalCwrap = (name, returnType, argTypes = []) =>
     typeof module[`_${name}`] === "function" ? cwrap(name, returnType, argTypes) : null;
+  // 0209: a request run on the core's control pthread, awaited from the
+  // event loop (the worker keeps draining the ring meanwhile).
+  const requestCoreControl = optionalCwrap("RequestCoreControl", "number", ["number", "string"]);
+  const coreControlResult = optionalCwrap("CoreControlResult", "number", ["number"]);
+  const coreControl = requestCoreControl && coreControlResult
+    ? (op, path, what) => runCoreControl({ request: requestCoreControl, result: coreControlResult, op, path, what })
+    : null;
 
   return {
     mountDisc: (path) => ccall("MountDisc", "number", ["string"], [path]),
@@ -4060,9 +4095,18 @@ function bindApi(module) {
       typeof module._BootDisc === "function"
         ? (path) => ccall("BootDisc", "number", ["string"], [path])
         : null,
-    stopCore: optionalCwrap("StopCore", null, []),
+    // 0209: pause, resume and stop on the core's control pthread (they wait
+    // for the GPU thread, which waits for this worker to drain the ring);
+    // the synchronous exports only for a core without it.
+    stopCore: coreControl
+      ? () => coreControl(CORE_CONTROL_OPS.stop, "", "stop")
+      : optionalCwrap("StopCore", null, []),
     resetCore: optionalCwrap("ResetCore", "number", []),
-    setCorePaused: optionalCwrap("SetCorePaused", "number", ["number"]),
+    setCorePaused: coreControl
+      ? (paused) => coreControl(paused ? CORE_CONTROL_OPS.pause : CORE_CONTROL_OPS.resume, "",
+        paused ? "pause" : "resume").then(() => 1)
+      : optionalCwrap("SetCorePaused", "number", ["number"]),
+    coreControl,
     pumpHostJobs: optionalCwrap("PumpHostJobs", null, []),
     getCoreState: optionalCwrap("GetCoreState", "number", []),
     getCoreStateName: optionalCwrap("GetCoreStateName", "string", []),
@@ -4426,10 +4470,15 @@ function stageBytes(name, bytes) {
 }
 
 // Legacy slot API (api.loadState) used by the JIT timing paths.
-function loadStateSlot(slot) {
-  if (!api?.loadStateFile) throw new Error("This core build cannot load save states");
+async function loadStateSlot(slot) {
+  if (!api?.loadStateFile && !api?.coreControl) throw new Error("This core build cannot load save states");
   const path = stateSlotPath(saveIdentity(), slot);
   if (!fsExists(path)) throw new Error(`Save state slot ${slot} is empty`);
+  // 0209: done when the core applied it, on its control pthread
+  if (api.coreControl) {
+    await api.coreControl(CORE_CONTROL_OPS.loadFile, path, `Load slot ${slot}`);
+    return 1;
+  }
   return api.loadStateFile(path);
 }
 
@@ -4437,11 +4486,19 @@ function loadStateSlot(slot) {
 // waits for it. Dolphin writes a temporary file and renames it, so the file
 // appears whole; it is then checked like an imported one.
 async function writeSaveState(path) {
-  if (!api?.saveStateFile) throw new Error("This core build cannot write save states");
+  if (!api?.saveStateFile && !api?.coreControl) throw new Error("This core build cannot write save states");
   if (!coreBoot.accepted) throw new Error("No game is booted");
   const fs = moduleInstance.FS;
   mkdirTreeFs(path.slice(0, path.lastIndexOf("/")) || "/");
   fsRemove(path);
+  if (api.coreControl) {
+    // 0209: on the core's control pthread, done when the CPU thread wrote
+    // the file whole (a failure or a time limit comes back as an error).
+    await api.coreControl(CORE_CONTROL_OPS.saveFile, path, "Save state");
+    const bytes = fs.readFile(path);
+    validateSaveStateData(bytes);
+    return bytes;
+  }
   if (!api.saveStateFile(path)) {
     throw new Error(`SaveStateFile refused (core ${api.getCoreStateName?.() || "unknown"})`);
   }
@@ -4858,6 +4915,13 @@ async function mountFile(file) {
     postStatus(`harness: ${aotTestHeapShiftBytes >> 20} MiB taken from the core's heap before the boot (heap shift test)`);
   }
   if (api.bootDisc && (executable || file.size >= MIN_FULL_BOOT_BYTES)) {
+    // 0209: BootDisc stops a running game first, and that stop waits for the
+    // CPU thread (behind the GPU thread, behind this worker): stop it on the
+    // control pthread before.
+    const running = api.getCoreStateName?.() ?? "";
+    if (api.coreControl && running && running !== "Uninitialized") {
+      await api.coreControl(CORE_CONTROL_OPS.stop, "", "Stop the previous game");
+    }
     coreBoot.attempted = true;
     const _t_boot = performance.now();
     coreBoot.accepted = Boolean(api.bootDisc(path));

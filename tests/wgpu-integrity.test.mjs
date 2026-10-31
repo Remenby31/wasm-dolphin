@@ -112,8 +112,8 @@ test("the worker counts every branch that abandons a draw or misses a resource",
   assert.match(worker, /if \(!loss\.handled\) return;\n\s+wgpuIntegrity\.note\("deviceLosses"\);/);
   assert.match(worker, /wgpuReplayFatal = \{ scope: String\(scope\), detail: String\(detail \|\| "unknown"\) \};\n\s+wgpuIntegrity\.note\("replayFatal"\);/);
   assert.match(worker, /case "validationReadIntegrity":\n\s+return readWgpuIntegrity\(\);/);
-  // both state-load paths count the load
-  assert.equal([...worker.matchAll(/wgpuExactCapture\.onLoad\(\);\n\s+wgpuIntegrity\.stateLoad\(\);/g)].length, 2);
+  // both state-load paths count the load once it ended (0209: awaited)
+  assert.equal([...worker.matchAll(/ppcWasmJitTimingSuspensions -= 1;\n\s+\}\n(?:\s+\/\/[^\n]*\n)?\s+wgpuIntegrity\.stateLoad\(\);/g)].length, 2);
   // always on: neither metrics=1 nor the harness hooks gate it
   const read = worker.slice(worker.indexOf("function readWgpuIntegrity()"), worker.indexOf("function harnessGeometryCacheStats()"));
   assert.ok(read.length > 0 && !/harnessEnabled|causalMetricsEnabled/.test(read));

@@ -12,6 +12,10 @@
 #include <cstring>
 #include <mutex>
 #include <chrono>
+#include <condition_variable>
+#include <deque>
+#include <thread>
+#include <unordered_map>
 #include <functional>
 #include <memory>
 #include <span>
@@ -1596,6 +1600,207 @@ void PumpHostJobs()
 {
   if (s_runtime_initialized)
     Core::HostDispatchJobs(Core::System::GetInstance());
+}
+
+// ---- 0209: requests that pause the CPU thread, off the caller's thread ----
+// Saving, loading, pausing and stopping all pause the CPU thread
+// (RunOnCPUThread / SetStepping / Stop wait for it to leave its loop, and
+// PauseAndLock then waits for the GPU thread to go idle). The caller here is
+// the worker, which is also the WebGPU replay consumer: while it waits inside
+// such a call nothing drains the command ring or the upload arena, the GPU
+// thread waits for room forever, and the game freezes for good (Spark: 3 slot
+// saves in 20 never answered). These requests therefore run on one control
+// pthread, in order, one at a time; the worker keeps draining meanwhile and
+// polls CoreControlResult(id).
+//
+// Results: 0 pending, 1 done, -1 failed or refused. Past its time a request
+// reads -2 (still running): the thread stays on it until it really ends,
+// then it reads 2 (done late) or -3 (failed late); the next request waits
+// behind it. A load is done when the core applied it (the after-load
+// callback bumped the checkpoint generation), a save when the CPU thread
+// wrote the file, a pause or stop when the core reached that state.
+namespace
+{
+enum class CoreControlOp : int
+{
+  SaveFile = 1,
+  LoadFile = 2,
+  Pause = 3,
+  Resume = 4,
+  Stop = 5,
+};
+
+struct CoreControlJob
+{
+  int id;
+  CoreControlOp op;
+  std::string path;
+};
+
+// A request's outcome so far, and when it is late (from when it was asked:
+// one queued behind a stuck request is late too).
+struct CoreControlState
+{
+  int rc;
+  std::chrono::steady_clock::time_point deadline;
+};
+
+std::mutex s_control_mutex;
+std::condition_variable s_control_cv;
+std::deque<CoreControlJob> s_control_queue;
+std::unordered_map<int, CoreControlState> s_control_results;
+int s_control_next_id = 1;
+bool s_control_started = false;
+
+int CoreControlTimeoutMs(CoreControlOp op)
+{
+  switch (op)
+  {
+  case CoreControlOp::SaveFile:
+    return 30000;
+  case CoreControlOp::LoadFile:
+    return 20000;
+  case CoreControlOp::Stop:
+    return 15000;
+  default:
+    return 10000;
+  }
+}
+
+// Runs one request on the control thread; true when it did what it asked.
+bool RunCoreControl(const CoreControlJob& job)
+{
+  auto& system = Core::System::GetInstance();
+  if (!s_runtime_initialized)
+    return false;
+  // Polls a condition the CPU thread or the core will make true. No limit:
+  // a late request reads -2 meanwhile, and this thread stays on it.
+  const auto wait_until = [](const auto& done) {
+    while (!done())
+      std::this_thread::sleep_for(std::chrono::milliseconds(5));
+  };
+  switch (job.op)
+  {
+  case CoreControlOp::SaveFile:
+  {
+    if (!Core::IsRunning(system))
+      return false;
+    auto written = std::make_shared<std::atomic<bool>>(false);
+    // On the CPU thread, SaveToFileSync runs inline: the file is whole when
+    // the job returns.
+    Core::RunOnCPUThread(system, [&system, path = job.path, written] {
+      State::SaveToFileSync(system, path);
+      written->store(true, std::memory_order_release);
+    });
+    wait_until([&] { return written->load(std::memory_order_acquire); });
+    return File::GetSize(job.path) > 0;
+  }
+  case CoreControlOp::LoadFile:
+  {
+    if (!Core::IsRunning(system))
+      return false;
+    const std::uint32_t before =
+        s_last_loaded_checkpoint_generation.load(std::memory_order_acquire);
+    auto ran = std::make_shared<std::atomic<bool>>(false);
+    // On the CPU thread, LoadAs runs LoadAsFromCore inline; the after-load
+    // callback (generation +1) runs at its end when the state was applied.
+    Core::RunOnCPUThread(system, [&system, path = job.path, ran] {
+      State::LoadAs(system, path);
+      ran->store(true, std::memory_order_release);
+    });
+    wait_until([&] { return ran->load(std::memory_order_acquire); });
+    return s_last_loaded_checkpoint_generation.load(std::memory_order_acquire) != before;
+  }
+  case CoreControlOp::Pause:
+  case CoreControlOp::Resume:
+  {
+    const bool pause = job.op == CoreControlOp::Pause;
+    const Core::State wanted = pause ? Core::State::Paused : Core::State::Running;
+    const Core::State state = Core::GetState(system);
+    if (state == wanted)
+      return true;
+    if (state != Core::State::Running && state != Core::State::Paused)
+      return false;
+    // SetStepping waits here (not on the worker) for the CPU thread to stop.
+    Core::SetState(system, wanted);
+    return Core::GetState(system) == wanted;
+  }
+  case CoreControlOp::Stop:
+  {
+    if (Core::GetState(system) == Core::State::Uninitialized)
+      return true;
+    Core::Stop(system);
+    wait_until([&] { return Core::GetState(system) == Core::State::Uninitialized; });
+    return true;
+  }
+  }
+  return false;
+}
+
+void CoreControlThread()
+{
+  for (;;)
+  {
+    CoreControlJob job;
+    {
+      std::unique_lock lock(s_control_mutex);
+      s_control_cv.wait(lock, [] { return !s_control_queue.empty(); });
+      job = std::move(s_control_queue.front());
+      s_control_queue.pop_front();
+    }
+    const bool ok = RunCoreControl(job);
+    std::lock_guard lock(s_control_mutex);
+    auto& state = s_control_results[job.id];
+    const bool late = std::chrono::steady_clock::now() >= state.deadline;
+    state.rc = late ? (ok ? 2 : -3) : (ok ? 1 : -1);
+  }
+}
+}  // namespace
+
+// Queues a request (op: 1 save to `path`, 2 load from `path`, 3 pause,
+// 4 resume, 5 stop) and returns its id at once, or 0 when refused (no
+// runtime, unknown op, no path for a save or load).
+#ifdef __EMSCRIPTEN__
+EMSCRIPTEN_KEEPALIVE
+#endif
+int RequestCoreControl(int op, const char* path)
+{
+  if (!s_runtime_initialized || op < 1 || op > 5)
+    return 0;
+  const auto control_op = static_cast<CoreControlOp>(op);
+  const bool needs_path = control_op == CoreControlOp::SaveFile || control_op == CoreControlOp::LoadFile;
+  if (needs_path && (path == nullptr || *path == '\0'))
+    return 0;
+  std::lock_guard lock(s_control_mutex);
+  if (!s_control_started)
+  {
+    std::thread(CoreControlThread).detach();
+    s_control_started = true;
+  }
+  const int id = s_control_next_id++;
+  s_control_results[id] = {0, std::chrono::steady_clock::now() +
+                                  std::chrono::milliseconds(CoreControlTimeoutMs(control_op))};
+  s_control_queue.push_back({id, control_op, needs_path ? std::string(path) : std::string()});
+  s_control_cv.notify_one();
+  return id;
+}
+
+// A request's state (see above); an unknown id reads -1. A final result is
+// forgotten once read.
+#ifdef __EMSCRIPTEN__
+EMSCRIPTEN_KEEPALIVE
+#endif
+int CoreControlResult(int id)
+{
+  std::lock_guard lock(s_control_mutex);
+  const auto it = s_control_results.find(id);
+  if (it == s_control_results.end())
+    return -1;
+  const int rc = it->second.rc;
+  if (rc == 0)
+    return std::chrono::steady_clock::now() >= it->second.deadline ? -2 : 0;
+  s_control_results.erase(it);
+  return rc;
 }
 
 int GetCoreState()

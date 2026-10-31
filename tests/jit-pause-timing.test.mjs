@@ -108,6 +108,9 @@ function createHarness() {
     // wait for a ready core, #325): a few turns of the event loop.
     settle: () => new Promise((r) => setImmediate(r)),
     finishTimer: async (request) => {
+      // the pause is awaited (0209: it may run on the core's control
+      // pthread): its timer is set a turn of the event loop later
+      await new Promise((r) => setImmediate(r));
       assert.equal(timers.length, 1, "one asynchronous operation should be pending");
       timers.shift()();
       return await request;
